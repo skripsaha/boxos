@@ -157,9 +157,7 @@ static bool system_deck_check_permission(process_t* proc, uint8_t opcode, uint32
                    snapshot_has_tag(tags_snapshot, "system");
 
         case SYSTEM_OP_PROC_KILL:
-            return snapshot_has_tag(tags_snapshot, "proc_kill") ||
-                   snapshot_has_tag(tags_snapshot, "utility") ||
-                   snapshot_has_tag(tags_snapshot, "system");
+            return true;
 
         case SYSTEM_OP_PROC_INFO:
             return true;

@@ -18,6 +18,7 @@
 
 // Flags
 #define NOTIFY_FLAG_CHECK_STATUS  0x01    // Userspace must check status field
+#define NOTIFY_FLAG_YIELD         0x80    // Cooperative yield: no event, just reschedule
 
 typedef struct __packed {
     uint32_t magic;                          // 0x4E4F5449 "NOTI"

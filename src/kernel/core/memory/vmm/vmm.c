@@ -1724,8 +1724,21 @@ int vmm_map_code_region(vmm_context_t* ctx, uintptr_t code_phys, uint64_t size) 
 
     if (ehdr->e_ident[0] != 0x7F || ehdr->e_ident[1] != 'E' ||
         ehdr->e_ident[2] != 'L' || ehdr->e_ident[3] != 'F') {
-        debug_printf("[VMM] ERROR: Invalid ELF magic\n");
-        return -1;
+        // Raw flat binary — map directly at VMM_CABIN_CODE_START
+        debug_printf("[VMM] No ELF magic, loading as raw flat binary at 0x%llx\n",
+                     (uint64_t)VMM_CABIN_CODE_START);
+        uint64_t pages = (size + VMM_PAGE_SIZE - 1) / VMM_PAGE_SIZE;
+        if (pages < 1) pages = 1;
+        vmm_map_result_t raw_result = vmm_map_pages(ctx, VMM_CABIN_CODE_START,
+                                                    code_phys, (size_t)pages,
+                                                    VMM_FLAG_PRESENT | VMM_FLAG_USER | VMM_FLAG_WRITABLE);
+        if (!raw_result.success) {
+            debug_printf("[VMM] ERROR: Failed to map raw binary: %s\n", raw_result.error_msg);
+            return -1;
+        }
+        debug_printf("[VMM] Raw binary mapped: %llu pages at virt=0x%llx phys=0x%lx\n",
+                     pages, (uint64_t)VMM_CABIN_CODE_START, code_phys);
+        return 0;
     }
 
     if (ehdr->e_phoff == 0 || ehdr->e_phnum == 0) {

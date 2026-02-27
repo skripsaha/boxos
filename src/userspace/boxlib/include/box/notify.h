@@ -3,6 +3,9 @@
 
 #include "types.h"
 
+// Notify flags
+#define BOX_NOTIFY_FLAG_YIELD  0x80
+
 // Notify Page structure (MUST match kernel!)
 typedef struct BOX_PACKED {
     uint32_t magic;

@@ -89,6 +89,11 @@ SHELL_BIN = $(SHELL_DIR)/shell.bin
 SHELL_ELF = $(SHELL_DIR)/shell.elf
 SHELL_EMBED = $(BUILDDIR)/shell_embed.o
 
+# App ELF binaries (proca, procb)
+APPS_DIR  = $(USERSPACE_DIR)/apps
+PROCA_BIN = $(APPS_DIR)/proca.elf
+PROCB_BIN = $(APPS_DIR)/procb.elf
+
 # ==== FINAL BINARIES ====
 KERNEL_BIN   = $(BUILDDIR)/kernel.bin
 KERNEL_ELF   = $(BUILDDIR)/kernel.elf
@@ -154,6 +159,8 @@ $(KERNEL_ENTRY_OBJ): $(KERNEL_ENTRY_SRC) | $(BUILDDIR)
 
 # ==== USERSPACE BUILD RULES ====
 # Build boxlib (must be built before shell)
+# PHONY so make always delegates to boxlib's own Makefile for dependency checking
+.PHONY: $(USERSPACE_DIR)/boxlib/libbox.a
 $(USERSPACE_DIR)/boxlib/libbox.a:
 	@echo "Building boxlib..."
 	@cd $(USERSPACE_DIR)/boxlib && $(MAKE)
@@ -163,6 +170,13 @@ $(SHELL_BIN): $(USERSPACE_DIR)/boxlib/libbox.a
 	@echo "Building shell process..."
 	@cd $(SHELL_DIR) && $(MAKE)
 	@echo "Shell binary: $@ ($$(stat -f%z $@ 2>/dev/null || stat -c%s $@ 2>/dev/null) bytes)"
+
+# Build apps (proca, procb)
+$(PROCA_BIN) $(PROCB_BIN): $(USERSPACE_DIR)/boxlib/libbox.a
+	@echo "Building apps (proca, procb)..."
+	@cd $(APPS_DIR) && $(MAKE)
+	@echo "proca.elf: $$(stat -f%z $(PROCA_BIN) 2>/dev/null || stat -c%s $(PROCA_BIN) 2>/dev/null) bytes"
+	@echo "procb.elf: $$(stat -f%z $(PROCB_BIN) 2>/dev/null || stat -c%s $(PROCB_BIN) 2>/dev/null) bytes"
 
 $(SHELL_ELF): $(SHELL_BIN)
 	@echo "Shell ELF: $@ ($$(stat -f%z $@ 2>/dev/null || stat -c%s $@ 2>/dev/null) bytes)"
@@ -211,7 +225,7 @@ $(KERNEL_ELF): $(KERNEL_ENTRY_OBJ) $(C_OBJS) $(ASM_OBJS) $(SHELL_EMBED)
 
 
 # ==== DISK IMAGES ====
-$(IMAGE): $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(SHELL_BIN) $(TAGFS_TOOL)
+$(IMAGE): $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(SHELL_BIN) $(PROCA_BIN) $(PROCB_BIN) $(TAGFS_TOOL)
 	@echo "Creating disk image (10MB)..."
 	@dd if=/dev/zero of=$@ bs=512 count=20480 status=none
 	@echo "  Writing Stage1 (sector 0, 512 bytes)..."
@@ -221,7 +235,11 @@ $(IMAGE): $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(SHELL_BIN) $(TAGFS_TOOL)
 	@echo "  Writing Kernel (sector $(KERNEL_START_SECTOR)+, $(KERNEL_SECTORS) sectors)..."
 	@dd if=$(KERNEL_BIN) of=$@ bs=512 seek=$(KERNEL_START_SECTOR) conv=notrunc status=none
 	@echo "  Creating TagFS (superblock=1034, metadata=1035, data=3086)..."
-	@$(TAGFS_TOOL) $@ 1034 1035 3086 $(KERNEL_BIN) "type:kernel,system,boot:true" $(SHELL_BIN) "utility,system"
+	@$(TAGFS_TOOL) $@ 1034 1035 3086 \
+		$(KERNEL_BIN) "type:kernel,system,boot:true" \
+		$(SHELL_BIN)  "utility,system" \
+		$(PROCA_BIN)  "app" \
+		$(PROCB_BIN)  "app"
 	@echo "Disk image created: $(IMAGE)"
 
 $(FLOPPY_IMG): $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN)
@@ -294,6 +312,8 @@ clean:
 	@rm -rf $(BUILDDIR)
 	@cd $(USERSPACE_DIR) && $(MAKE) clean
 	@cd $(SHELL_DIR) && $(MAKE) clean
+	@cd $(APPS_DIR) && $(MAKE) clean
+	@cd $(USERSPACE_DIR)/boxlib && $(MAKE) clean
 
 install-deps:
 	@echo "Installing dependencies..."

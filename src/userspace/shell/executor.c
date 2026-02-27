@@ -24,6 +24,7 @@ static const shell_command_t g_commands[] = {
     { "bye", cmd_bye, "bye", "Shutdown system" },
     { "defrag", cmd_defrag, "defrag <file>", "Defragment file" },
     { "fsck", cmd_fsck, "fsck", "Check fragmentation" },
+    { "ipc-test", cmd_ipc_test, "ipc-test", "IPC + multitasking demo" },
     { NULL, NULL, NULL, NULL }
 };
 

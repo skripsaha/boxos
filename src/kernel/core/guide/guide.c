@@ -288,8 +288,8 @@ void guide_run(void)
             {
                 boxos_error_t sec_err = BOXOS_ERR_ACCESS_DENIED;
                 event_set_error(&event, sec_err, event.current_prefix_idx);
-                debug_printf("[GUIDE] Security gate failed for PID %u: %s\n",
-                           event.pid, boxos_error_string(sec_err));
+                debug_printf("[GUIDE] Security gate failed for PID %u deck=0x%02x op=0x%02x prefix=0x%04x: %s\n",
+                           event.pid, deck_id, opcode, prefix, boxos_error_string(sec_err));
                 event.state = EVENT_STATE_ACCESS_DENIED;
                 execution_deck_handler(&event);
                 need_execution_deck = false;
