@@ -3,6 +3,13 @@
 
 #include "box/defs.h"
 
+// I/O Mode
+#define IO_MODE_VGA 0
+#define IO_MODE_IPC 1
+
+void io_set_mode(uint8_t mode);
+uint8_t io_get_mode(void);
+
 // ============================================================================
 // OUTPUT
 // ============================================================================

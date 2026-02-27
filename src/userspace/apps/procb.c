@@ -1,17 +1,15 @@
 /*
  * procb - BoxOS IPC Demo: Process B
  *
- * Sends the letter 'B' to the shell process via IPC broadcast,
- * 5 times, yielding between each send to allow interleaving.
+ * Sends the letter 'B' via IPC-based print(),
+ * 5 times, yielding between each send.
  */
-#include "box/ipc.h"
+#include "box/io.h"
 #include "box/system.h"
 
 int main(void) {
-    const char msg[1] = {'B'};
-
     for (int i = 0; i < 5; i++) {
-        broadcast("shell", msg, 1);
+        print("B");
         yield();
     }
 

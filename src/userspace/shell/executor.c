@@ -2,6 +2,9 @@
 #include "commands/commands.h"
 #include "box/string.h"
 #include "box/system.h"
+#include "box/ipc.h"
+#include "box/result.h"
+#include "box/io.h"
 
 static char g_error_message[128];
 
@@ -47,6 +50,22 @@ int executor_run(parsed_command_t* cmd) {
     // Try to launch as executable from TagFS
     int pid = proc_exec(command_name);
     if (pid > 0) {
+        // Wait for child process output via IPC
+        result_entry_t entry;
+        int idle_count = 0;
+        while (idle_count < 15) {
+            if (receive_wait(&entry, 200)) {
+                char buf[245];
+                uint16_t len = entry.size;
+                if (len > 244) len = 244;
+                memcpy(buf, entry.payload, len);
+                buf[len] = '\0';
+                print(buf);
+                idle_count = 0;
+            } else {
+                idle_count++;
+            }
+        }
         return 0;
     }
 
