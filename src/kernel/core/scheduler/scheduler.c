@@ -310,6 +310,14 @@ void scheduler_yield_from_interrupt(void* frame_ptr) {
         should_run_guide = true;
     }
 
+    // 4. Run if kernel event ring has pending events
+    // Without this, yield loops in userspace can spin through hundreds of
+    // iterations between timer ticks, missing events that sit unprocessed
+    // in the kernel ring (e.g., IPC clones from ROUTE_TAG).
+    if (!event_ring_is_empty(kernel_event_ring)) {
+        should_run_guide = true;
+    }
+
     if (should_run_guide) {
         guide_run();
         guide_last_run = current_tick;
