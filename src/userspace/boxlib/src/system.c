@@ -282,3 +282,44 @@ int proc_tag_check(const char* tag, bool* has_tag) {
 
     return BOX_OK;
 }
+
+int proc_exec(const char* filename) {
+    if (!filename || filename[0] == '\0') {
+        return -1;
+    }
+
+    size_t name_len = strlen(filename);
+    if (name_len >= 32) {
+        return -1;
+    }
+
+    box_notify_prepare();
+    box_notify_add_prefix(BOX_SYSTEM_DECK_ID, BOX_SYSTEM_PROC_EXEC);
+
+    uint8_t data[192];
+    memset(data, 0, 192);
+    memcpy(data, filename, name_len);
+
+    box_notify_write_data(data, 192);
+    box_event_id_t event_id = box_notify_execute();
+    if (event_id == 0) {
+        return -1;
+    }
+
+    box_result_entry_t result;
+    if (!box_result_wait(&result, 5000)) {
+        return -1;
+    }
+
+    if (result.error_code != BOX_OK) {
+        return -1;
+    }
+
+    if (result.size < 4) {
+        return -1;
+    }
+
+    uint32_t new_pid = 0;
+    memcpy(&new_pid, result.payload, 4);
+    return (int)new_pid;
+}
