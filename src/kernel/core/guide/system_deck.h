@@ -1,0 +1,51 @@
+#ifndef SYSTEM_DECK_H
+#define SYSTEM_DECK_H
+
+#include "events.h"
+#include "boxos_decks.h"
+
+#define SYSTEM_DECK_ID           DECK_SYSTEM
+
+// Process Management
+#define SYSTEM_OP_PROC_SPAWN     0x01
+#define SYSTEM_OP_PROC_KILL      0x02
+#define SYSTEM_OP_PROC_INFO      0x03
+
+// Security (Legacy)
+#define SYSTEM_OP_CTX_USE        0x04
+#define SYSTEM_OP_BYPASS         0x05
+
+// Memory Management
+#define SYSTEM_OP_BUF_ALLOC      0x10
+#define SYSTEM_OP_BUF_FREE       0x11
+#define SYSTEM_OP_BUF_RESIZE     0x12
+
+// Tag Management
+#define SYSTEM_OP_TAG_ADD        0x20
+#define SYSTEM_OP_TAG_REMOVE     0x21
+#define SYSTEM_OP_TAG_CHECK      0x22
+
+// Filesystem Defragmentation
+#define SYSTEM_OP_DEFRAG_FILE           0x18
+#define SYSTEM_OP_FRAGMENTATION_SCORE   0x19
+
+// Overflow Status
+#define SYSTEM_OP_OVERFLOW_STATUS       0xE0
+
+// Routing/IPC
+#define SYSTEM_OP_ROUTE          0x40
+#define SYSTEM_OP_ROUTE_TAG      0x41
+#define SYSTEM_OP_LISTEN         0x42
+
+// Scheduler Cooperation
+#define SYSTEM_OP_YIELD                 0xFE
+
+typedef struct __packed {
+    uint32_t file_id;
+    uint32_t target_block;
+} defrag_request_t;
+
+int system_deck_handler(Event* event);
+bool system_security_gate(uint32_t pid, uint8_t deck_id, uint8_t opcode);
+
+#endif // SYSTEM_DECK_H

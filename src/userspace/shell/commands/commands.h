@@ -1,0 +1,35 @@
+#ifndef COMMANDS_H
+#define COMMANDS_H
+
+// Command handler functions
+// Returns: 0 on success, non-zero on error
+
+// Basic commands (implemented in this stage)
+int cmd_help(int argc, char* argv[]);
+int cmd_exit(int argc, char* argv[]);
+
+// File commands (next stage)
+int cmd_create(int argc, char* argv[]);
+int cmd_show(int argc, char* argv[]);
+int cmd_files(int argc, char* argv[]);
+int cmd_tag(int argc, char* argv[]);
+int cmd_untag(int argc, char* argv[]);
+int cmd_name(int argc, char* argv[]);
+int cmd_trash(int argc, char* argv[]);
+int cmd_erase(int argc, char* argv[]);
+
+// Context commands (next stage)
+int cmd_use(int argc, char* argv[]);
+
+// System commands (next stage)
+int cmd_me(int argc, char* argv[]);
+int cmd_info(int argc, char* argv[]);
+int cmd_say(int argc, char* argv[]);
+int cmd_reboot(int argc, char* argv[]);
+int cmd_bye(int argc, char* argv[]);
+
+// Defragmentation commands
+int cmd_defrag(int argc, char* argv[]);
+int cmd_fsck(int argc, char* argv[]);
+
+#endif // COMMANDS_H
