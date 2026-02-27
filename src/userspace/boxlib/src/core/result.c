@@ -83,3 +83,56 @@ uint32_t get_overflow_count(bool reset) {
     uint32_t count = *((uint32_t*)result.payload);
     return count;
 }
+
+// --- IPC result stash ---
+// When VGA result_wait pops IPC results from the ring, they are stashed here
+// so receive_wait can retrieve them later.
+#define IPC_STASH_SIZE 16
+static result_entry_t ipc_stash_buf[IPC_STASH_SIZE];
+static uint32_t ipc_stash_cnt = 0;
+
+static void ipc_stash_push(result_entry_t* entry) {
+    if (ipc_stash_cnt < IPC_STASH_SIZE) {
+        ipc_stash_buf[ipc_stash_cnt++] = *entry;
+    }
+}
+
+static bool ipc_stash_shift(result_entry_t* out) {
+    if (ipc_stash_cnt == 0) return false;
+    *out = ipc_stash_buf[0];
+    for (uint32_t i = 1; i < ipc_stash_cnt; i++) {
+        ipc_stash_buf[i - 1] = ipc_stash_buf[i];
+    }
+    ipc_stash_cnt--;
+    return true;
+}
+
+bool result_pop_non_ipc(result_entry_t* out_entry) {
+    result_entry_t entry;
+    while (result_pop(&entry)) {
+        if (entry.source == 0x01) {  // ROUTE_SOURCE_PROCESS
+            ipc_stash_push(&entry);
+            continue;
+        }
+        *out_entry = entry;
+        return true;
+    }
+    return false;
+}
+
+bool result_pop_ipc(result_entry_t* out_entry) {
+    if (ipc_stash_shift(out_entry)) return true;
+
+    result_entry_t entry;
+    while (result_pop(&entry)) {
+        if (entry.source == 0x01) {
+            *out_entry = entry;
+            return true;
+        }
+    }
+    return false;
+}
+
+uint32_t result_ipc_stash_count(void) {
+    return ipc_stash_cnt;
+}

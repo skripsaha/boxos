@@ -2,6 +2,7 @@
 #include "box/notify.h"
 #include "box/result.h"
 #include "box/string.h"
+#include "box/system.h"
 
 int send(uint32_t target_pid, const void* data, uint16_t size) {
     if (target_pid == 0) return -BOX_ERR_INVALID_ARGUMENT;
@@ -93,10 +94,35 @@ int listen(uint8_t source_type, uint8_t flags) {
 
 bool receive(result_entry_t* out_entry) {
     if (!out_entry) return false;
-    return result_pop(out_entry);
+    return result_pop_ipc(out_entry);
 }
 
 bool receive_wait(result_entry_t* out_entry, uint32_t timeout_ms) {
     if (!out_entry) return false;
-    return result_wait(out_entry, timeout_ms);
+
+    // Check IPC stash first (populated by VGA result_wait)
+    if (result_pop_ipc(out_entry)) return true;
+
+    // Wait for IPC results
+    result_page_t* rp = result_page();
+    uint32_t iterations = 0;
+    uint32_t max_iterations = timeout_ms / 10;
+
+    while (1) {
+        __sync_synchronize();
+
+        if (rp->notification_flag != 0 || result_available() || result_ipc_stash_count() > 0) {
+            if (result_pop_ipc(out_entry)) {
+                rp->notification_flag = 0;
+                return true;
+            }
+            rp->notification_flag = 0;
+        }
+
+        if (timeout_ms > 0 && iterations++ >= max_iterations) {
+            return false;
+        }
+
+        yield();
+    }
 }

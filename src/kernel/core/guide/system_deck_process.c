@@ -289,29 +289,39 @@ int system_deck_proc_exec(Event* event) {
     uint32_t found_id = 0;
     const char* found_tag = NULL;
 
+    /* Search by tags, not by filename.
+     * A file is executable if it has ALL of:
+     *   1. A label tag whose key matches the requested name
+     *      (create_tagfs auto-adds key=<stem> for every file)
+     *   2. An "app" or "utility" tag (marks it as runnable)
+     */
     for (int i = 0; i < file_count; i++) {
         TagFSMetadata* meta = tagfs_get_metadata(file_ids[i]);
         if (!meta || !(meta->flags & TAGFS_FILE_ACTIVE)) {
             continue;
         }
-        if (strcmp(meta->filename, exec_event.filename) != 0) {
-            continue;
-        }
+
+        bool has_name  = false;
+        const char* exec_tag = NULL;
+
         for (uint8_t t = 0; t < meta->tag_count; t++) {
-            if (meta->tags[t].type == TAGFS_TAG_SYSTEM) {
-                if (strcmp(meta->tags[t].key, "app") == 0) {
-                    found_id  = file_ids[i];
-                    found_tag = "app";
-                    break;
-                }
-                if (strcmp(meta->tags[t].key, "utility") == 0) {
-                    found_id  = file_ids[i];
-                    found_tag = "utility";
-                    break;
-                }
+            if (meta->tags[t].type != TAGFS_TAG_SYSTEM) {
+                continue;
+            }
+            const char* key = meta->tags[t].key;
+            if (strcmp(key, exec_event.filename) == 0) {
+                has_name = true;
+            }
+            if (strcmp(key, "app") == 0) {
+                exec_tag = "app";
+            } else if (strcmp(key, "utility") == 0 && exec_tag == NULL) {
+                exec_tag = "utility";
             }
         }
-        if (found_id != 0) {
+
+        if (has_name && exec_tag != NULL) {
+            found_id  = file_ids[i];
+            found_tag = exec_tag;
             break;
         }
     }
@@ -354,7 +364,8 @@ int system_deck_proc_exec(Event* event) {
     int read_result = tagfs_read(fh, virt_buf, file_size);
     tagfs_close(fh);
 
-    if (read_result != 0) {
+    /* tagfs_read returns bytes_read on success, negative on error */
+    if (read_result < 0) {
         debug_printf("[SYSTEM_DECK] PROC_EXEC: tagfs_read failed (%d)\n",
                 read_result);
         pmm_free(phys_buf, pages_needed);

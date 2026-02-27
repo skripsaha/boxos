@@ -285,6 +285,18 @@ void syscall_handler(interrupt_frame_t* frame) {
         return;
     }
 
+    if (notify_virt->flags & NOTIFY_FLAG_YIELD) {
+        notify_virt->status = NOTIFY_STATUS_OK;
+        frame->rax = 0;
+
+        context_save_from_frame(proc, frame);
+        process_set_state(proc, PROC_READY);
+        process_ref_dec(proc);
+
+        scheduler_yield_from_interrupt(frame);
+        return;
+    }
+
     uint8_t prefix_count = notify_virt->prefix_count;
     if (prefix_count > NOTIFY_MAX_PREFIXES) {
         process_ref_dec(proc);

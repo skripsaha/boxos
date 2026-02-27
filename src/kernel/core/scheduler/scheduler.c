@@ -361,7 +361,9 @@ void scheduler_yield_from_interrupt(void* frame_ptr) {
 
     context_restore_to_frame(next, frame);
 
-    __asm__ volatile("sti");
+    // NOTE: Do NOT sti here! iretq will atomically restore RFLAGS (with IF=1)
+    // from the user context. Doing sti before iretq creates a race window where
+    // a timer can fire while still in kernel mode, corrupting the process context.
 }
 
 void scheduler_tick(void) {

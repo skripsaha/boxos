@@ -357,7 +357,7 @@ int process_load_binary(process_t* proc, const void* binary_data, size_t size) {
     void* code_virt = vmm_phys_to_virt((uintptr_t)code_phys);
     memcpy(code_virt, binary_data, size);
 
-    int result = vmm_map_code_region(proc->cabin, (uintptr_t)code_phys, size);
+    int result = vmm_map_code_region(proc->cabin, (uintptr_t)code_phys, page_count * VMM_PAGE_SIZE);
     if (result != 0) {
         debug_printf("[PROCESS] ERROR: Failed to map code region\n");
         debug_printf("[PROCESS] Physical address: 0x%lx, Size: %zu bytes\n",
