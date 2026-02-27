@@ -1,0 +1,23 @@
+# Build artifacts
+build/
+
+# macOS metadata
+.DS_Store
+**/.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# macOS disk images
+*.dmg
+*.sparseimage
+
+# Editor files
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# Debug
+*.log

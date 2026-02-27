@@ -1,0 +1,178 @@
+#include "acpi_internal.h"
+#include "klib.h"
+
+extern uint32_t decode_pkg_length(uint8_t* aml, uint32_t* bytes_consumed);
+extern uint32_t extract_integer_value(uint8_t* aml, uint32_t* bytes_consumed);
+
+static int test_checksum(void) {
+    debug_printf("[ACPI_TEST] Testing checksum validation...\n");
+
+    uint8_t test_data[] = {0x52, 0x53, 0x44, 0x20, 0x50, 0x54, 0x52, 0x20};
+    uint8_t checksum = acpi_checksum(test_data, sizeof(test_data));
+
+    if (checksum == 0) {
+        debug_printf("[ACPI_TEST] ERROR: Checksum should not be zero for this data\n");
+        return -1;
+    }
+
+    uint8_t valid_rsdp[20] = {
+        'R', 'S', 'D', ' ', 'P', 'T', 'R', ' ',
+        0x00,
+        'B', 'O', 'X', 'O', 'S', ' ',
+        0x00,
+        0x00, 0x00, 0x00, 0x00
+    };
+
+    uint8_t sum = 0;
+    for (int i = 0; i < 19; i++) {
+        sum += valid_rsdp[i];
+    }
+    valid_rsdp[8] = (uint8_t)(256 - sum);
+
+    checksum = acpi_checksum(valid_rsdp, 20);
+
+    if (checksum != 0) {
+        debug_printf("[ACPI_TEST] ERROR: Valid RSDP failed checksum (sum=%u)\n", checksum);
+        return -1;
+    }
+
+    debug_printf("[ACPI_TEST] Checksum test PASSED\n");
+    return 0;
+}
+
+static int test_pkg_decode(void) {
+    debug_printf("[ACPI_TEST] Testing package length decoding...\n");
+
+    uint8_t test1[] = {0x0C};
+    uint32_t bytes;
+    uint32_t len = decode_pkg_length(test1, &bytes);
+
+    if (len != 12 || bytes != 1) {
+        debug_printf("[ACPI_TEST] ERROR: Short form failed (len=%u, bytes=%u)\n", len, bytes);
+        return -1;
+    }
+
+    uint8_t test2[] = {0x4F, 0x12};
+    len = decode_pkg_length(test2, &bytes);
+
+    if (len != 0x12F || bytes != 2) {
+        debug_printf("[ACPI_TEST] ERROR: 2-byte form failed (len=%u, bytes=%u)\n", len, bytes);
+        return -1;
+    }
+
+    debug_printf("[ACPI_TEST] Package decode test PASSED\n");
+    return 0;
+}
+
+static int test_integer_extract(void) {
+    debug_printf("[ACPI_TEST] Testing integer extraction...\n");
+
+    uint8_t test_byte[] = {0x0A, 0x05};
+    uint32_t bytes;
+    uint32_t val = extract_integer_value(test_byte, &bytes);
+
+    if (val != 5 || bytes != 2) {
+        debug_printf("[ACPI_TEST] ERROR: Byte extract failed (val=%u, bytes=%u)\n", val, bytes);
+        return -1;
+    }
+
+    uint8_t test_word[] = {0x0B, 0x34, 0x12};
+    val = extract_integer_value(test_word, &bytes);
+
+    if (val != 0x1234 || bytes != 3) {
+        debug_printf("[ACPI_TEST] ERROR: Word extract failed (val=0x%x, bytes=%u)\n", val, bytes);
+        return -1;
+    }
+
+    uint8_t test_dword[] = {0x0C, 0x78, 0x56, 0x34, 0x12};
+    val = extract_integer_value(test_dword, &bytes);
+
+    if (val != 0x12345678 || bytes != 5) {
+        debug_printf("[ACPI_TEST] ERROR: DWord extract failed (val=0x%x, bytes=%u)\n", val, bytes);
+        return -1;
+    }
+
+    debug_printf("[ACPI_TEST] Integer extract test PASSED\n");
+    return 0;
+}
+
+static int test_rsdp_discovery(void) {
+    debug_printf("[ACPI_TEST] Testing RSDP discovery...\n");
+
+    acpi_rsdp_t* rsdp = acpi_find_rsdp();
+
+    if (!rsdp) {
+        debug_printf("[ACPI_TEST] WARNING: RSDP not found (may be expected on some systems)\n");
+        return 0;
+    }
+
+    if (memcmp(rsdp->signature, "RSD PTR ", 8) != 0) {
+        debug_printf("[ACPI_TEST] ERROR: Invalid RSDP signature\n");
+        return -1;
+    }
+
+    if (rsdp->rsdt_address == 0) {
+        debug_printf("[ACPI_TEST] ERROR: RSDT address is NULL\n");
+        return -1;
+    }
+
+    debug_printf("[ACPI_TEST] RSDP discovery test PASSED\n");
+    debug_printf("[ACPI_TEST]   OEM ID: %.6s\n", rsdp->oem_id);
+    debug_printf("[ACPI_TEST]   Revision: %u\n", rsdp->revision);
+    debug_printf("[ACPI_TEST]   RSDT: 0x%x\n", rsdp->rsdt_address);
+
+    return 0;
+}
+
+static int test_full_init(void) {
+    debug_printf("[ACPI_TEST] Testing full ACPI initialization...\n");
+
+    memset(&g_acpi, 0, sizeof(acpi_state_t));
+
+    acpi_error_t err = acpi_init();
+
+    if (err == ACPI_ERR_RSDP_NOT_FOUND) {
+        debug_printf("[ACPI_TEST] INFO: RSDP not found (VM may not support ACPI)\n");
+        return 0;
+    }
+
+    if (err != ACPI_OK) {
+        debug_printf("[ACPI_TEST] ERROR: ACPI init failed with error %d\n", err);
+        return -1;
+    }
+
+    if (!g_acpi.initialized) {
+        debug_printf("[ACPI_TEST] ERROR: ACPI not marked as initialized\n");
+        return -1;
+    }
+
+    debug_printf("[ACPI_TEST] Full init test PASSED\n");
+
+    acpi_print_info();
+
+    return 0;
+}
+
+void run_acpi_tests(void) {
+    debug_printf("\n");
+    debug_printf("========================================\n");
+    debug_printf("ACPI DRIVER TEST SUITE\n");
+    debug_printf("========================================\n");
+
+    int failures = 0;
+
+    if (test_checksum() != 0) failures++;
+    if (test_pkg_decode() != 0) failures++;
+    if (test_integer_extract() != 0) failures++;
+    if (test_rsdp_discovery() != 0) failures++;
+    if (test_full_init() != 0) failures++;
+
+    debug_printf("========================================\n");
+    if (failures == 0) {
+        debug_printf("ALL ACPI TESTS PASSED\n");
+    } else {
+        debug_printf("ACPI TESTS FAILED: %d failures\n", failures);
+    }
+    debug_printf("========================================\n");
+    debug_printf("\n");
+}
