@@ -1,17 +1,15 @@
 /*
  * proca - BoxOS IPC Demo: Process A
  *
- * Sends the letter 'A' to the shell process via IPC broadcast,
- * 5 times, yielding between each send to allow interleaving.
+ * Sends the letter 'A' via IPC-based print(),
+ * 5 times, yielding between each send.
  */
-#include "box/ipc.h"
+#include "box/io.h"
 #include "box/system.h"
 
 int main(void) {
-    const char msg[1] = {'A'};
-
     for (int i = 0; i < 5; i++) {
-        broadcast("shell", msg, 1);
+        print("A");
         yield();
     }
 

@@ -2,6 +2,7 @@
 #include "box/io/vga.h"
 #include "box/io/keyboard.h"
 #include "box/string.h"
+#include "box/ipc.h"
 
 // ============================================================================
 // OUTPUT
@@ -34,10 +35,26 @@ static void print_raw(const char* str) {
 }
 
 void print(const char* str) {
+    if (io_get_mode() == IO_MODE_IPC) {
+        if (!str) return;
+        size_t len = strlen(str);
+        while (len > 0) {
+            uint16_t chunk = len > 200 ? 200 : (uint16_t)len;
+            broadcast("shell", str, chunk);
+            str += chunk;
+            len -= chunk;
+        }
+        return;
+    }
     print_raw(str);
 }
 
 void println(const char* str) {
+    if (io_get_mode() == IO_MODE_IPC) {
+        if (str) print(str);
+        broadcast("shell", "\n", 1);
+        return;
+    }
     if (str) print_raw(str);
     vga_newline();
 }

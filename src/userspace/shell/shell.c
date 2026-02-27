@@ -8,6 +8,7 @@ static shell_state_t g_shell_state;
 
 void shell_init(void)
 {
+    io_set_mode(IO_MODE_VGA);
     memset(&g_shell_state, 0, sizeof(shell_state_t));
     g_shell_state.running = true;
     memcpy(g_shell_state.prompt, "~ ", 3);
