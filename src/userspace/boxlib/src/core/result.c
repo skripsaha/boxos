@@ -2,8 +2,8 @@
 #include "box/notify.h"
 #include "box/system.h"
 
-bool box_result_available(void) {
-    box_result_page_t* rp = box_result_page();
+bool result_available(void) {
+    result_page_t* rp = result_page();
     // CRITICAL FIX: Memory barrier to ensure fresh read of tail
     // Kernel updates tail with barriers (execution_deck.c:124-129)
     // Without barrier, userspace may see stale cached value -> miss new results
@@ -11,8 +11,8 @@ bool box_result_available(void) {
     return rp->ring.head != rp->ring.tail;
 }
 
-uint32_t box_result_count(void) {
-    box_result_page_t* rp = box_result_page();
+uint32_t result_count(void) {
+    result_page_t* rp = result_page();
     // CRITICAL FIX: Memory barrier to ensure fresh read of tail
     __sync_synchronize();
     uint32_t head = rp->ring.head;
@@ -25,10 +25,10 @@ uint32_t box_result_count(void) {
     }
 }
 
-bool box_result_pop(box_result_entry_t* out_entry) {
-    box_result_page_t* rp = box_result_page();
+bool result_pop(result_entry_t* out_entry) {
+    result_page_t* rp = result_page();
 
-    if (!box_result_available()) {
+    if (!result_available()) {
         return false;
     }
 
@@ -48,31 +48,19 @@ bool box_result_pop(box_result_entry_t* out_entry) {
     return true;
 }
 
-bool box_result_wait(box_result_entry_t* out_entry, uint32_t timeout) {
-    uint32_t iterations = 0;
 
-    while (!box_result_available()) {
-        if (timeout > 0 && iterations++ >= timeout) {
-            return false;
-        }
-        __asm__ volatile("pause");
-    }
-
-    return box_result_pop(out_entry);
-}
-
-bool box_result_page_full(void) {
-    box_notify_page_t* np = box_notify_page();
+bool result_page_full(void) {
+    notify_page_t* np = notify_page();
     return np->result_page_full != 0;
 }
 
-bool box_event_ring_full(void) {
-    box_notify_page_t* np = box_notify_page();
+bool event_ring_full(void) {
+    notify_page_t* np = notify_page();
     return np->event_ring_full != 0;
 }
 
-uint32_t box_get_overflow_count(bool reset) {
-    box_notify_page_t* np = box_notify_page();
+uint32_t get_overflow_count(bool reset) {
+    notify_page_t* np = notify_page();
 
     // Prepare notify page
     np->magic = BOX_NOTIFY_MAGIC;
@@ -86,8 +74,8 @@ uint32_t box_get_overflow_count(bool reset) {
     __asm__ volatile("int $0x80");
 
     // Wait for result
-    box_result_entry_t result;
-    if (!box_result_wait(&result, 100000)) {
+    result_entry_t result;
+    if (!result_wait(&result, 100000)) {
         return 0xFFFFFFFF;  // Timeout
     }
 

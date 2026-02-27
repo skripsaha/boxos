@@ -1,14 +1,14 @@
 #include "box/notify.h"
 #include "box/string.h"
 
-void box_notify_prepare(void) {
-    box_notify_page_t* np = box_notify_page();
-    memset(np, 0, sizeof(box_notify_page_t));
+void notify_prepare(void) {
+    notify_page_t* np = notify_page();
+    memset(np, 0, sizeof(notify_page_t));
     np->magic = BOX_NOTIFY_MAGIC;
 }
 
-bool box_notify_add_prefix(uint8_t deck_id, uint8_t opcode) {
-    box_notify_page_t* np = box_notify_page();
+bool notify_add_prefix(uint8_t deck_id, uint8_t opcode) {
+    notify_page_t* np = notify_page();
     if (np->prefix_count >= BOX_MAX_PREFIXES) {
         return false;
     }
@@ -16,8 +16,8 @@ bool box_notify_add_prefix(uint8_t deck_id, uint8_t opcode) {
     return true;
 }
 
-size_t box_notify_write_data(const void* data, size_t size) {
-    box_notify_page_t* np = box_notify_page();
+size_t notify_write_data(const void* data, size_t size) {
+    notify_page_t* np = notify_page();
 
     // Kernel copies only BOX_INLINE_DATA_SIZE (256) bytes
     size_t to_write = (size > BOX_INLINE_DATA_SIZE)
@@ -28,7 +28,7 @@ size_t box_notify_write_data(const void* data, size_t size) {
     return to_write;
 }
 
-box_event_id_t box_notify_execute(void) {
+event_id_t notify_execute(void) {
     uint64_t result;
     __asm__ volatile(
         "int $0x80"
@@ -36,27 +36,27 @@ box_event_id_t box_notify_execute(void) {
         :
         : "memory"
     );
-    return (box_event_id_t)result;
+    return (event_id_t)result;
 }
 
-box_event_id_t box_notify(uint8_t deck_id, uint8_t opcode,
-                          const void* data, size_t data_size) {
-    box_notify_prepare();
-    box_notify_add_prefix(deck_id, opcode);
-    box_notify_write_data(data, data_size);
-    return box_notify_execute();
+event_id_t notify(uint8_t deck_id, uint8_t opcode,
+                      const void* data, size_t data_size) {
+    notify_prepare();
+    notify_add_prefix(deck_id, opcode);
+    notify_write_data(data, data_size);
+    return notify_execute();
 }
 
-int box_notify_checked(uint8_t deck_id, uint8_t opcode,
-                       const void* data, size_t data_size,
-                       box_event_id_t* out_event_id) {
-    box_notify_page_t* np = box_notify_page();
+int notify_checked(uint8_t deck_id, uint8_t opcode,
+                   const void* data, size_t data_size,
+                   event_id_t* out_event_id) {
+    notify_page_t* np = notify_page();
 
-    box_notify_prepare();
-    box_notify_add_prefix(deck_id, opcode);
-    box_notify_write_data(data, data_size);
+    notify_prepare();
+    notify_add_prefix(deck_id, opcode);
+    notify_write_data(data, data_size);
 
-    box_event_id_t event_id = box_notify_execute();
+    event_id_t event_id = notify_execute();
 
     // Check if kernel set error flag
     if (np->flags & BOX_NOTIFY_FLAG_CHECK_STATUS) {
@@ -72,21 +72,21 @@ int box_notify_checked(uint8_t deck_id, uint8_t opcode,
     return BOX_NOTIFY_STATUS_OK;
 }
 
-box_event_id_t box_notify_with_retry(uint8_t deck_id, uint8_t opcode,
-                                     const void* data, size_t data_size,
-                                     uint32_t max_retries) {
-    box_event_id_t event_id;
+event_id_t notify_with_retry(uint8_t deck_id, uint8_t opcode,
+                                 const void* data, size_t data_size,
+                                 uint32_t max_retries) {
+    event_id_t event_id;
     uint32_t backoff = 1;
 
     for (uint32_t attempt = 0; attempt <= max_retries; attempt++) {
-        int status = box_notify_checked(deck_id, opcode, data, data_size, &event_id);
+        int status = notify_checked(deck_id, opcode, data, data_size, &event_id);
 
         if (status == BOX_NOTIFY_STATUS_OK) {
             return event_id;
         }
 
         if (status != BOX_NOTIFY_STATUS_RING_FULL) {
-            return (box_event_id_t)-1;
+            return (event_id_t)-1;
         }
 
         // Exponential backoff: wait 2^attempt iterations
@@ -99,5 +99,5 @@ box_event_id_t box_notify_with_retry(uint8_t deck_id, uint8_t opcode,
         }
     }
 
-    return (box_event_id_t)-1;
+    return (event_id_t)-1;
 }

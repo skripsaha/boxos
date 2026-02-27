@@ -12,17 +12,17 @@ int proc_info(uint16_t pid, proc_info_t* info) {
         return BOX_ERR_INVALID_ARGS;
     }
 
-    box_notify_prepare();
-    box_notify_add_prefix(BOX_SYSTEM_DECK_ID, BOX_SYSTEM_PROC_INFO);
+    notify_prepare();
+    notify_add_prefix(BOX_SYSTEM_DECK_ID, BOX_SYSTEM_PROC_INFO);
 
-    box_notify_write_data(&pid, sizeof(pid));
-    box_event_id_t event_id = box_notify_execute();
+    notify_write_data(&pid, sizeof(pid));
+    event_id_t event_id = notify_execute();
     if (event_id == 0) {
         return BOX_ERR_EVENT_FAILED;
     }
 
-    box_result_entry_t result;
-    if (!box_result_wait(&result, 5000)) {
+    result_entry_t result;
+    if (!result_wait(&result, 5000)) {
         return BOX_ERR_TIMEOUT;
     }
 
@@ -46,12 +46,12 @@ int proc_info(uint16_t pid, proc_info_t* info) {
 void exit(uint32_t exit_code) {
     (void)exit_code;
 
-    box_notify_prepare();
-    box_notify_add_prefix(BOX_SYSTEM_DECK_ID, 0x02);
+    notify_prepare();
+    notify_add_prefix(BOX_SYSTEM_DECK_ID, 0x02);
 
     uint16_t self_pid = 0;
-    box_notify_write_data(&self_pid, sizeof(self_pid));
-    box_notify_execute();
+    notify_write_data(&self_pid, sizeof(self_pid));
+    notify_execute();
 
     // Should not return, but if it does, loop forever
     while (1) {
@@ -72,17 +72,17 @@ int buffer_alloc(uint8_t size_class, uint16_t* out_buffer_id, uint32_t* out_addr
         return BOX_ERR_INVALID_ARGS;
     }
 
-    box_notify_prepare();
-    box_notify_add_prefix(BOX_SYSTEM_DECK_ID, BOX_SYSTEM_BUFFER_ALLOC);
+    notify_prepare();
+    notify_add_prefix(BOX_SYSTEM_DECK_ID, BOX_SYSTEM_BUFFER_ALLOC);
 
-    box_notify_write_data(&size_class, sizeof(size_class));
-    box_event_id_t event_id = box_notify_execute();
+    notify_write_data(&size_class, sizeof(size_class));
+    event_id_t event_id = notify_execute();
     if (event_id == 0) {
         return BOX_ERR_EVENT_FAILED;
     }
 
-    box_result_entry_t result;
-    if (!box_result_wait(&result, 5000)) {
+    result_entry_t result;
+    if (!result_wait(&result, 5000)) {
         return BOX_ERR_TIMEOUT;
     }
 
@@ -107,17 +107,17 @@ int buffer_alloc(uint8_t size_class, uint16_t* out_buffer_id, uint32_t* out_addr
 }
 
 int buffer_free(uint16_t buffer_id) {
-    box_notify_prepare();
-    box_notify_add_prefix(BOX_SYSTEM_DECK_ID, BOX_SYSTEM_BUFFER_FREE);
+    notify_prepare();
+    notify_add_prefix(BOX_SYSTEM_DECK_ID, BOX_SYSTEM_BUFFER_FREE);
 
-    box_notify_write_data(&buffer_id, sizeof(buffer_id));
-    box_event_id_t event_id = box_notify_execute();
+    notify_write_data(&buffer_id, sizeof(buffer_id));
+    event_id_t event_id = notify_execute();
     if (event_id == 0) {
         return BOX_ERR_EVENT_FAILED;
     }
 
-    box_result_entry_t result;
-    if (!box_result_wait(&result, 5000)) {
+    result_entry_t result;
+    if (!result_wait(&result, 5000)) {
         return BOX_ERR_TIMEOUT;
     }
 
@@ -149,8 +149,8 @@ int proc_tag_add(const char* tag) {
         return result;
     }
 
-    box_notify_prepare();
-    box_notify_add_prefix(BOX_SYSTEM_DECK_ID, BOX_SYSTEM_TAG_ADD);
+    notify_prepare();
+    notify_add_prefix(BOX_SYSTEM_DECK_ID, BOX_SYSTEM_TAG_ADD);
 
     struct __attribute__((packed)) {
         uint16_t pid;
@@ -161,14 +161,14 @@ int proc_tag_add(const char* tag) {
     memset(request.tag, 0, sizeof(request.tag));
     strcpy(request.tag, tag);
 
-    box_notify_write_data(&request, sizeof(request));
-    box_event_id_t event_id = box_notify_execute();
+    notify_write_data(&request, sizeof(request));
+    event_id_t event_id = notify_execute();
     if (event_id == 0) {
         return BOX_ERR_EVENT_FAILED;
     }
 
-    box_result_entry_t res;
-    if (!box_result_wait(&res, 5000)) {
+    result_entry_t res;
+    if (!result_wait(&res, 5000)) {
         return BOX_ERR_TIMEOUT;
     }
 
@@ -196,8 +196,8 @@ int proc_tag_remove(const char* tag) {
         return result;
     }
 
-    box_notify_prepare();
-    box_notify_add_prefix(BOX_SYSTEM_DECK_ID, BOX_SYSTEM_TAG_REMOVE);
+    notify_prepare();
+    notify_add_prefix(BOX_SYSTEM_DECK_ID, BOX_SYSTEM_TAG_REMOVE);
 
     struct __attribute__((packed)) {
         uint16_t pid;
@@ -208,14 +208,14 @@ int proc_tag_remove(const char* tag) {
     memset(request.tag, 0, sizeof(request.tag));
     strcpy(request.tag, tag);
 
-    box_notify_write_data(&request, sizeof(request));
-    box_event_id_t event_id = box_notify_execute();
+    notify_write_data(&request, sizeof(request));
+    event_id_t event_id = notify_execute();
     if (event_id == 0) {
         return BOX_ERR_EVENT_FAILED;
     }
 
-    box_result_entry_t res;
-    if (!box_result_wait(&res, 5000)) {
+    result_entry_t res;
+    if (!result_wait(&res, 5000)) {
         return BOX_ERR_TIMEOUT;
     }
 
@@ -243,8 +243,8 @@ int proc_tag_check(const char* tag, bool* has_tag) {
         return result;
     }
 
-    box_notify_prepare();
-    box_notify_add_prefix(BOX_SYSTEM_DECK_ID, BOX_SYSTEM_TAG_CHECK);
+    notify_prepare();
+    notify_add_prefix(BOX_SYSTEM_DECK_ID, BOX_SYSTEM_TAG_CHECK);
 
     struct __attribute__((packed)) {
         uint16_t pid;
@@ -255,14 +255,14 @@ int proc_tag_check(const char* tag, bool* has_tag) {
     memset(request.tag, 0, sizeof(request.tag));
     strcpy(request.tag, tag);
 
-    box_notify_write_data(&request, sizeof(request));
-    box_event_id_t event_id = box_notify_execute();
+    notify_write_data(&request, sizeof(request));
+    event_id_t event_id = notify_execute();
     if (event_id == 0) {
         return BOX_ERR_EVENT_FAILED;
     }
 
-    box_result_entry_t res;
-    if (!box_result_wait(&res, 5000)) {
+    result_entry_t res;
+    if (!result_wait(&res, 5000)) {
         return BOX_ERR_TIMEOUT;
     }
 
@@ -293,21 +293,21 @@ int proc_exec(const char* filename) {
         return -1;
     }
 
-    box_notify_prepare();
-    box_notify_add_prefix(BOX_SYSTEM_DECK_ID, BOX_SYSTEM_PROC_EXEC);
+    notify_prepare();
+    notify_add_prefix(BOX_SYSTEM_DECK_ID, BOX_SYSTEM_PROC_EXEC);
 
     uint8_t data[192];
     memset(data, 0, 192);
     memcpy(data, filename, name_len);
 
-    box_notify_write_data(data, 192);
-    box_event_id_t event_id = box_notify_execute();
+    notify_write_data(data, 192);
+    event_id_t event_id = notify_execute();
     if (event_id == 0) {
         return -1;
     }
 
-    box_result_entry_t result;
-    if (!box_result_wait(&result, 5000)) {
+    result_entry_t result;
+    if (!result_wait(&result, 5000)) {
         return -1;
     }
 

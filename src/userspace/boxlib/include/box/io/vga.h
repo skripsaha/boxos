@@ -58,13 +58,13 @@
 typedef struct {
     uint8_t row;
     uint8_t col;
-} box_vga_pos_t;
+} vga_pos_t;
 
 // Dimensions structure
 typedef struct {
     uint8_t rows;
     uint8_t cols;
-} box_vga_dimensions_t;
+} vga_dimensions_t;
 
 // Core Character Output
 int vga_putchar(char c);
@@ -78,7 +78,7 @@ int vga_scroll_up(uint8_t lines, uint8_t fill_color);
 int vga_newline(void);
 
 // Cursor Management
-int vga_getcursor(box_vga_pos_t* pos);
+int vga_getcursor(vga_pos_t* pos);
 int vga_setcursor(uint8_t row, uint8_t col);
 
 // Color Management
@@ -86,7 +86,7 @@ int vga_getcolor(void);
 int vga_setcolor(uint8_t color);
 
 // Screen Info
-int vga_getdimensions(box_vga_dimensions_t* dims);
+int vga_getdimensions(vga_dimensions_t* dims);
 
 // Helper: Map kernel error codes to BoxLib error codes
 BOX_INLINE int vga_map_error(int32_t kernel_error) {

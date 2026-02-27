@@ -21,22 +21,22 @@ typedef struct {
     uint8_t scancode;
     uint8_t flags;
     uint8_t reserved;
-} box_kb_char_t;
+} kb_char_t;
 
 // Keyboard buffer status
 typedef struct {
     uint32_t available;
     uint32_t buffer_size;
-} box_kb_status_t;
+} kb_status_t;
 
 // Core API Functions
 int kb_getchar(void);
 int kb_readline(char* buffer, size_t size, bool echo);
-int kb_status(box_kb_status_t* status);
+int kb_status(kb_status_t* status);
 
 // Extended API Functions
 int kb_getchar_timeout(uint32_t timeout_ms);
-int kb_getchar_ex(box_kb_char_t* out_char);
+int kb_getchar_ex(kb_char_t* out_char);
 int kb_readline_async(char* buffer, size_t size, bool echo);
 
 // Helper: Map kernel error codes to BoxLib error codes

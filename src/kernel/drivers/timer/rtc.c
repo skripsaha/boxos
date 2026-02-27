@@ -153,7 +153,7 @@ void rtc_init(void) {
                  rtc_state.base_seconds);
 }
 
-void rtc_get_boxtime(box_time_t* out) {
+void rtc_get_boxtime(time_t* out) {
     uint64_t elapsed_ticks = pit_get_ticks() - rtc_state.base_pit_ticks;
     uint32_t freq = pit_get_frequency();
 

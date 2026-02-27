@@ -35,8 +35,8 @@ int create(const char *filename, const char *tags)
         return -1;
     }
 
-    box_notify_prepare();
-    box_notify_add_prefix(STORAGE_DECK_ID, STORAGE_OBJ_CREATE);
+    notify_prepare();
+    notify_add_prefix(STORAGE_DECK_ID, STORAGE_OBJ_CREATE);
 
     struct __attribute__((packed))
     {
@@ -56,15 +56,15 @@ int create(const char *filename, const char *tags)
         }
     }
 
-    box_notify_write_data(&request, sizeof(request));
-    box_event_id_t event_id = box_notify_execute();
+    notify_write_data(&request, sizeof(request));
+    event_id_t event_id = notify_execute();
     if (event_id == 0)
     {
         return -1;
     }
 
-    box_result_entry_t result;
-    if (!box_result_wait(&result, 5000))
+    result_entry_t result;
+    if (!result_wait(&result, 5000))
     {
         return -1;
     }
@@ -98,8 +98,8 @@ int query(const char *tags, uint32_t *file_ids, size_t max_files)
         return -1;
     }
 
-    box_notify_prepare();
-    box_notify_add_prefix(STORAGE_DECK_ID, STORAGE_TAG_QUERY);
+    notify_prepare();
+    notify_add_prefix(STORAGE_DECK_ID, STORAGE_TAG_QUERY);
 
     char tag_buffer[192];
     memset(tag_buffer, 0, 192);
@@ -113,15 +113,15 @@ int query(const char *tags, uint32_t *file_ids, size_t max_files)
         }
     }
 
-    box_notify_write_data(tag_buffer, 192);
-    box_event_id_t event_id = box_notify_execute();
+    notify_write_data(tag_buffer, 192);
+    event_id_t event_id = notify_execute();
     if (event_id == 0)
     {
         return -1;
     }
 
-    box_result_entry_t result;
-    if (!box_result_wait(&result, 5000))
+    result_entry_t result;
+    if (!result_wait(&result, 5000))
     {
         return -1;
     }
@@ -165,8 +165,8 @@ int file_info(uint32_t file_id, file_info_t *info)
         return -1;
     }
 
-    box_notify_prepare();
-    box_notify_add_prefix(STORAGE_DECK_ID, STORAGE_OBJ_GET_INFO);
+    notify_prepare();
+    notify_add_prefix(STORAGE_DECK_ID, STORAGE_OBJ_GET_INFO);
 
     struct __attribute__((packed))
     {
@@ -177,15 +177,15 @@ int file_info(uint32_t file_id, file_info_t *info)
     memset(&request, 0, sizeof(request));
     request.file_id = file_id;
 
-    box_notify_write_data(&request, sizeof(request));
-    box_event_id_t event_id = box_notify_execute();
+    notify_write_data(&request, sizeof(request));
+    event_id_t event_id = notify_execute();
     if (event_id == 0)
     {
         return -1;
     }
 
-    box_result_entry_t result;
-    if (!box_result_wait(&result, 5000))
+    result_entry_t result;
+    if (!result_wait(&result, 5000))
     {
         return -1;
     }
@@ -241,8 +241,8 @@ int fread(uint32_t file_id, uint64_t offset, void *buffer, size_t size)
         size = 176;
     }
 
-    box_notify_prepare();
-    box_notify_add_prefix(STORAGE_DECK_ID, STORAGE_OBJ_READ);
+    notify_prepare();
+    notify_add_prefix(STORAGE_DECK_ID, STORAGE_OBJ_READ);
 
     struct __attribute__((packed))
     {
@@ -257,15 +257,15 @@ int fread(uint32_t file_id, uint64_t offset, void *buffer, size_t size)
     request.offset = offset;
     request.length = (uint32_t)size;
 
-    box_notify_write_data(&request, sizeof(request));
-    box_event_id_t event_id = box_notify_execute();
+    notify_write_data(&request, sizeof(request));
+    event_id_t event_id = notify_execute();
     if (event_id == 0)
     {
         return -1;
     }
 
-    box_result_entry_t result;
-    if (!box_result_wait(&result, 5000))
+    result_entry_t result;
+    if (!result_wait(&result, 5000))
     {
         return -1;
     }
@@ -320,8 +320,8 @@ int fwrite(uint32_t file_id, uint64_t offset, const void *buffer, size_t size)
         size = 168;
     }
 
-    box_notify_prepare();
-    box_notify_add_prefix(STORAGE_DECK_ID, STORAGE_OBJ_WRITE);
+    notify_prepare();
+    notify_add_prefix(STORAGE_DECK_ID, STORAGE_OBJ_WRITE);
 
     struct __attribute__((packed))
     {
@@ -340,15 +340,15 @@ int fwrite(uint32_t file_id, uint64_t offset, const void *buffer, size_t size)
     request.flags = 0;
     memcpy(request.data, buffer, size);
 
-    box_notify_write_data(&request, sizeof(request));
-    box_event_id_t event_id = box_notify_execute();
+    notify_write_data(&request, sizeof(request));
+    event_id_t event_id = notify_execute();
     if (event_id == 0)
     {
         return -1;
     }
 
-    box_result_entry_t result;
-    if (!box_result_wait(&result, 5000))
+    result_entry_t result;
+    if (!result_wait(&result, 5000))
     {
         return -1;
     }
@@ -389,8 +389,8 @@ int file_rename(uint32_t file_id, const char *new_filename)
         return -1;
     }
 
-    box_notify_prepare();
-    box_notify_add_prefix(STORAGE_DECK_ID, STORAGE_OBJ_RENAME);
+    notify_prepare();
+    notify_add_prefix(STORAGE_DECK_ID, STORAGE_OBJ_RENAME);
 
     struct __attribute__((packed))
     {
@@ -403,15 +403,15 @@ int file_rename(uint32_t file_id, const char *new_filename)
     request.file_id = file_id;
     strcpy(request.new_filename, new_filename);
 
-    box_notify_write_data(&request, sizeof(request));
-    box_event_id_t event_id = box_notify_execute();
+    notify_write_data(&request, sizeof(request));
+    event_id_t event_id = notify_execute();
     if (event_id == 0)
     {
         return -1;
     }
 
-    box_result_entry_t result;
-    if (!box_result_wait(&result, 5000))
+    result_entry_t result;
+    if (!result_wait(&result, 5000))
     {
         return -1;
     }
@@ -434,8 +434,8 @@ int file_rename(uint32_t file_id, const char *new_filename)
 
 int delete(uint32_t file_id)
 {
-    box_notify_prepare();
-    box_notify_add_prefix(STORAGE_DECK_ID, STORAGE_OBJ_DELETE);
+    notify_prepare();
+    notify_add_prefix(STORAGE_DECK_ID, STORAGE_OBJ_DELETE);
 
     struct __attribute__((packed))
     {
@@ -446,15 +446,15 @@ int delete(uint32_t file_id)
     memset(&request, 0, sizeof(request));
     request.file_id = file_id;
 
-    box_notify_write_data(&request, sizeof(request));
-    box_event_id_t event_id = box_notify_execute();
+    notify_write_data(&request, sizeof(request));
+    event_id_t event_id = notify_execute();
     if (event_id == 0)
     {
         return -1;
     }
 
-    box_result_entry_t result;
-    if (!box_result_wait(&result, 5000))
+    result_entry_t result;
+    if (!result_wait(&result, 5000))
     {
         return -1;
     }
@@ -492,8 +492,8 @@ int tag_add(uint32_t file_id, const char *tag)
         return -1;
     }
 
-    box_notify_prepare();
-    box_notify_add_prefix(STORAGE_DECK_ID, STORAGE_TAG_SET);
+    notify_prepare();
+    notify_add_prefix(STORAGE_DECK_ID, STORAGE_TAG_SET);
 
     struct __attribute__((packed))
     {
@@ -506,15 +506,15 @@ int tag_add(uint32_t file_id, const char *tag)
     request.file_id = file_id;
     strcpy(request.tag, tag);
 
-    box_notify_write_data(&request, sizeof(request));
-    box_event_id_t event_id = box_notify_execute();
+    notify_write_data(&request, sizeof(request));
+    event_id_t event_id = notify_execute();
     if (event_id == 0)
     {
         return -1;
     }
 
-    box_result_entry_t result;
-    if (!box_result_wait(&result, 5000))
+    result_entry_t result;
+    if (!result_wait(&result, 5000))
     {
         return -1;
     }
@@ -540,8 +540,8 @@ int tag_remove(uint32_t file_id, const char *key)
         return -1;
     }
 
-    box_notify_prepare();
-    box_notify_add_prefix(STORAGE_DECK_ID, STORAGE_TAG_UNSET);
+    notify_prepare();
+    notify_add_prefix(STORAGE_DECK_ID, STORAGE_TAG_UNSET);
 
     struct __attribute__((packed))
     {
@@ -554,15 +554,15 @@ int tag_remove(uint32_t file_id, const char *key)
     request.file_id = file_id;
     strcpy(request.tag, key);
 
-    box_notify_write_data(&request, sizeof(request));
-    box_event_id_t event_id = box_notify_execute();
+    notify_write_data(&request, sizeof(request));
+    event_id_t event_id = notify_execute();
     if (event_id == 0)
     {
         return -1;
     }
 
-    box_result_entry_t result;
-    if (!box_result_wait(&result, 5000))
+    result_entry_t result;
+    if (!result_wait(&result, 5000))
     {
         return -1;
     }
@@ -592,22 +592,22 @@ int context_set(const char *tag)
         return -1;
     }
 
-    box_notify_prepare();
-    box_notify_add_prefix(STORAGE_DECK_ID, STORAGE_CONTEXT_SET);
+    notify_prepare();
+    notify_add_prefix(STORAGE_DECK_ID, STORAGE_CONTEXT_SET);
 
     char tag_buffer[192];
     memset(tag_buffer, 0, 192);
     strcpy(tag_buffer, tag);
 
-    box_notify_write_data(tag_buffer, 192);
-    box_event_id_t event_id = box_notify_execute();
+    notify_write_data(tag_buffer, 192);
+    event_id_t event_id = notify_execute();
     if (event_id == 0)
     {
         return -1;
     }
 
-    box_result_entry_t result;
-    if (!box_result_wait(&result, 5000))
+    result_entry_t result;
+    if (!result_wait(&result, 5000))
     {
         return -1;
     }
@@ -622,21 +622,21 @@ int context_set(const char *tag)
 
 int context_clear(void)
 {
-    box_notify_prepare();
-    box_notify_add_prefix(STORAGE_DECK_ID, STORAGE_CONTEXT_CLEAR);
+    notify_prepare();
+    notify_add_prefix(STORAGE_DECK_ID, STORAGE_CONTEXT_CLEAR);
 
     uint8_t dummy[192];
     memset(dummy, 0, 192);
 
-    box_notify_write_data(dummy, 192);
-    box_event_id_t event_id = box_notify_execute();
+    notify_write_data(dummy, 192);
+    event_id_t event_id = notify_execute();
     if (event_id == 0)
     {
         return -1;
     }
 
-    box_result_entry_t result;
-    if (!box_result_wait(&result, 5000))
+    result_entry_t result;
+    if (!result_wait(&result, 5000))
     {
         return -1;
     }

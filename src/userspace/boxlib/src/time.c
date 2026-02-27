@@ -23,16 +23,16 @@ static uint16_t read_u16_be(const uint8_t* p) {
     return (uint16_t)(((uint16_t)p[0] << 8) | p[1]);
 }
 
-int time_get(box_time_t* out) {
+int time_get(time_t* out) {
     if (!out) return BOX_ERR_NULL_POINTER;
 
-    box_notify_prepare();
-    box_notify_add_prefix(BOX_DECK_HARDWARE, OPCODE_RTC_GET_TIME);
-    box_event_id_t eid = box_notify_execute();
+    notify_prepare();
+    notify_add_prefix(BOX_DECK_HARDWARE, OPCODE_RTC_GET_TIME);
+    event_id_t eid = notify_execute();
     if (eid == 0) return BOX_ERR_UNKNOWN;
 
-    box_result_entry_t result;
-    if (!box_result_wait(&result, 50000)) return BOX_ERR_TIMEOUT;
+    result_entry_t result;
+    if (!result_wait(&result, 50000)) return BOX_ERR_TIMEOUT;
     if (result.error_code != BOX_OK) return (int)result.error_code;
 
     const uint8_t* p = result.payload;
@@ -51,13 +51,13 @@ int time_get(box_time_t* out) {
 int time_get_secs(uint64_t* out_seconds) {
     if (!out_seconds) return BOX_ERR_NULL_POINTER;
 
-    box_notify_prepare();
-    box_notify_add_prefix(BOX_DECK_HARDWARE, OPCODE_RTC_GET_UNIX64);
-    box_event_id_t eid = box_notify_execute();
+    notify_prepare();
+    notify_add_prefix(BOX_DECK_HARDWARE, OPCODE_RTC_GET_UNIX64);
+    event_id_t eid = notify_execute();
     if (eid == 0) return BOX_ERR_UNKNOWN;
 
-    box_result_entry_t result;
-    if (!box_result_wait(&result, 50000)) return BOX_ERR_TIMEOUT;
+    result_entry_t result;
+    if (!result_wait(&result, 50000)) return BOX_ERR_TIMEOUT;
     if (result.error_code != BOX_OK) return (int)result.error_code;
 
     *out_seconds = read_u64_be(result.payload);
@@ -67,13 +67,13 @@ int time_get_secs(uint64_t* out_seconds) {
 int time_uptime_ms(uint64_t* out_ms) {
     if (!out_ms) return BOX_ERR_NULL_POINTER;
 
-    box_notify_prepare();
-    box_notify_add_prefix(BOX_DECK_HARDWARE, OPCODE_TIMER_GET_MS);
-    box_event_id_t eid = box_notify_execute();
+    notify_prepare();
+    notify_add_prefix(BOX_DECK_HARDWARE, OPCODE_TIMER_GET_MS);
+    event_id_t eid = notify_execute();
     if (eid == 0) return BOX_ERR_UNKNOWN;
 
-    box_result_entry_t result;
-    if (!box_result_wait(&result, 50000)) return BOX_ERR_TIMEOUT;
+    result_entry_t result;
+    if (!result_wait(&result, 50000)) return BOX_ERR_TIMEOUT;
     if (result.error_code != BOX_OK) return (int)result.error_code;
 
     *out_ms = read_u64_be(result.payload);
@@ -83,13 +83,13 @@ int time_uptime_ms(uint64_t* out_ms) {
 int time_uptime_ns(uint64_t* out_ns) {
     if (!out_ns) return BOX_ERR_NULL_POINTER;
 
-    box_notify_prepare();
-    box_notify_add_prefix(BOX_DECK_HARDWARE, OPCODE_RTC_GET_UPTIME);
-    box_event_id_t eid = box_notify_execute();
+    notify_prepare();
+    notify_add_prefix(BOX_DECK_HARDWARE, OPCODE_RTC_GET_UPTIME);
+    event_id_t eid = notify_execute();
     if (eid == 0) return BOX_ERR_UNKNOWN;
 
-    box_result_entry_t result;
-    if (!box_result_wait(&result, 50000)) return BOX_ERR_TIMEOUT;
+    result_entry_t result;
+    if (!result_wait(&result, 50000)) return BOX_ERR_TIMEOUT;
     if (result.error_code != BOX_OK) return (int)result.error_code;
 
     *out_ns = read_u64_be(result.payload);
@@ -108,7 +108,7 @@ static void write4(char* buf, uint16_t v) {
     buf[3] = (char)('0' + v % 10);
 }
 
-int time_format(const box_time_t* t, char* buf, size_t buf_size) {
+int time_format(const time_t* t, char* buf, size_t buf_size) {
     if (!t || !buf) return BOX_ERR_NULL_POINTER;
     if (buf_size < 20) return BOX_ERR_BUFFER_TOO_SMALL;
 
@@ -127,12 +127,12 @@ int time_format(const box_time_t* t, char* buf, size_t buf_size) {
     return BOX_OK;
 }
 
-int64_t time_diff(const box_time_t* a, const box_time_t* b) {
+int64_t time_diff(const time_t* a, const time_t* b) {
     return (int64_t)a->seconds - (int64_t)b->seconds;
 }
 
-void time_add_ms(const box_time_t* t, int64_t ms, box_time_t* out) {
-    box_time_t tmp = *t;
+void time_add_ms(const time_t* t, int64_t ms, time_t* out) {
+    time_t tmp = *t;
 
     int64_t extra_ns = (ms % 1000) * 1000000LL;
     int64_t new_ns = (int64_t)tmp.nanosec + extra_ns;
