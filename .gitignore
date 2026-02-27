@@ -21,6 +21,8 @@ build/
 
 # Debug
 *.log
+
+
 *.o
 *.bin
 *.elf

@@ -9,8 +9,8 @@ static inline uint64_t rdtsc(void) {
     return ((uint64_t)hi << 32) | lo;
 }
 
-bool box_result_wait_umwait(box_result_entry_t* out_entry, uint32_t timeout_ms) {
-    box_result_page_t* rp = box_result_page();
+bool result_wait_umwait(result_entry_t* out_entry, uint32_t timeout_ms) {
+    result_page_t* rp = result_page();
     volatile uint8_t* flag_addr = &rp->notification_flag;
 
     while (1) {
@@ -18,7 +18,7 @@ bool box_result_wait_umwait(box_result_entry_t* out_entry, uint32_t timeout_ms) 
 
         __sync_synchronize();
 
-        if (*flag_addr != 0 || box_result_available()) {
+        if (*flag_addr != 0 || result_available()) {
             break;
         }
 
@@ -35,13 +35,13 @@ bool box_result_wait_umwait(box_result_entry_t* out_entry, uint32_t timeout_ms) 
 
         if (wake_reason == 1 && timeout_ms > 0) {
             __sync_synchronize();
-            if (*flag_addr == 0 && !box_result_available()) {
+            if (*flag_addr == 0 && !result_available()) {
                 return false;
             }
         }
     }
 
-    bool success = box_result_pop(out_entry);
+    bool success = result_pop(out_entry);
 
     if (success) {
         rp->notification_flag = 0;

@@ -17,12 +17,12 @@ static uint32_t kb_decode_u32(const uint8_t* payload, size_t offset) {
 }
 
 int kb_getchar(void) {
-    box_notify_prepare();
-    box_notify_add_prefix(BOX_DECK_HARDWARE, KB_OP_GETCHAR);
-    box_notify_execute();
+    notify_prepare();
+    notify_add_prefix(BOX_DECK_HARDWARE, KB_OP_GETCHAR);
+    notify_execute();
 
-    box_result_entry_t result;
-    if (!box_result_wait_smart(&result, 1000)) {
+    result_entry_t result;
+    if (!result_wait(&result, 1000)) {
         return -BOX_ERR_TIMEOUT;
     }
 
@@ -34,12 +34,12 @@ int kb_getchar(void) {
 }
 
 int kb_getchar_timeout(uint32_t timeout_ms) {
-    box_notify_prepare();
-    box_notify_add_prefix(BOX_DECK_HARDWARE, KB_OP_GETCHAR);
-    box_notify_execute();
+    notify_prepare();
+    notify_add_prefix(BOX_DECK_HARDWARE, KB_OP_GETCHAR);
+    notify_execute();
 
-    box_result_entry_t result;
-    if (!box_result_wait_smart(&result, timeout_ms)) {
+    result_entry_t result;
+    if (!result_wait(&result, timeout_ms)) {
         return -BOX_ERR_TIMEOUT;
     }
 
@@ -50,17 +50,17 @@ int kb_getchar_timeout(uint32_t timeout_ms) {
     return (int)(uint8_t)result.payload[0];
 }
 
-int kb_getchar_ex(box_kb_char_t* out_char) {
+int kb_getchar_ex(kb_char_t* out_char) {
     if (!out_char) {
         return -BOX_ERR_INVALID_ARGS;
     }
 
-    box_notify_prepare();
-    box_notify_add_prefix(BOX_DECK_HARDWARE, KB_OP_GETCHAR);
-    box_notify_execute();
+    notify_prepare();
+    notify_add_prefix(BOX_DECK_HARDWARE, KB_OP_GETCHAR);
+    notify_execute();
 
-    box_result_entry_t result;
-    if (!box_result_wait_smart(&result, 1000)) {
+    result_entry_t result;
+    if (!result_wait(&result, 1000)) {
         return -BOX_ERR_TIMEOUT;
     }
 
@@ -85,8 +85,8 @@ int kb_readline(char* buffer, size_t size, bool echo) {
     uint32_t retry_count = 0;
 
     while (retry_count < max_retries) {
-        box_notify_prepare();
-        box_notify_add_prefix(BOX_DECK_HARDWARE, KB_OP_READLINE);
+        notify_prepare();
+        notify_add_prefix(BOX_DECK_HARDWARE, KB_OP_READLINE);
 
         uint8_t data[4];
         data[0] = (uint8_t)size;
@@ -94,11 +94,11 @@ int kb_readline(char* buffer, size_t size, bool echo) {
         data[2] = 0;
         data[3] = 0;
 
-        box_notify_write_data(data, 4);
-        box_notify_execute();
+        notify_write_data(data, 4);
+        notify_execute();
 
-        box_result_entry_t result;
-        if (!box_result_wait_smart(&result, 60000)) {
+        result_entry_t result;
+        if (!result_wait(&result, 60000)) {
             return -BOX_ERR_TIMEOUT;
         }
 
@@ -141,8 +141,8 @@ int kb_readline_async(char* buffer, size_t size, bool echo) {
         return -BOX_ERR_INVALID_ARGS;
     }
 
-    box_notify_prepare();
-    box_notify_add_prefix(BOX_DECK_HARDWARE, KB_OP_READLINE);
+    notify_prepare();
+    notify_add_prefix(BOX_DECK_HARDWARE, KB_OP_READLINE);
 
     uint8_t data[4];
     data[0] = (uint8_t)(size >> 8);
@@ -150,23 +150,23 @@ int kb_readline_async(char* buffer, size_t size, bool echo) {
     data[2] = echo ? 1 : 0;
     data[3] = 0;
 
-    box_notify_write_data(data, 4);
-    box_event_id_t event_id = box_notify_execute();
+    notify_write_data(data, 4);
+    event_id_t event_id = notify_execute();
 
     return (int)event_id;
 }
 
-int kb_status(box_kb_status_t* status) {
+int kb_status(kb_status_t* status) {
     if (!status) {
         return -BOX_ERR_INVALID_ARGS;
     }
 
-    box_notify_prepare();
-    box_notify_add_prefix(BOX_DECK_HARDWARE, KB_OP_STATUS);
-    box_notify_execute();
+    notify_prepare();
+    notify_add_prefix(BOX_DECK_HARDWARE, KB_OP_STATUS);
+    notify_execute();
 
-    box_result_entry_t result;
-    if (!box_result_wait_smart(&result, 1000)) {
+    result_entry_t result;
+    if (!result_wait(&result, 1000)) {
         return -BOX_ERR_TIMEOUT;
     }
 

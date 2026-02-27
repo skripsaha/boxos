@@ -2,7 +2,7 @@
 #include "box/system.h"
 
 void yield(void) {
-    box_notify_page_t* np = box_notify_page();
+    notify_page_t* np = notify_page();
 
     np->magic = BOX_NOTIFY_MAGIC;
     np->prefix_count = 2;

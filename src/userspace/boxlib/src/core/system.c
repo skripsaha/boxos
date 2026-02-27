@@ -11,34 +11,34 @@
 #define SYSTEM_DECK_ID       0xFF
 
 int reboot(void) {
-    box_notify_prepare();
-    box_notify_add_prefix(HARDWARE_DECK_ID, HW_SYSTEM_REBOOT);
+    notify_prepare();
+    notify_add_prefix(HARDWARE_DECK_ID, HW_SYSTEM_REBOOT);
 
     uint8_t data[192];
     memset(data, 0, 192);
 
-    box_notify_write_data(data, 192);
-    box_event_id_t event_id = box_notify_execute();
+    notify_write_data(data, 192);
+    event_id_t event_id = notify_execute();
     if (event_id == 0) return -1;
 
-    box_result_entry_t result;
-    box_result_wait(&result, 5000);
+    result_entry_t result;
+    result_wait(&result, 5000);
     return -1;
 }
 
 int shutdown(void) {
-    box_notify_prepare();
-    box_notify_add_prefix(HARDWARE_DECK_ID, HW_SYSTEM_SHUTDOWN);
+    notify_prepare();
+    notify_add_prefix(HARDWARE_DECK_ID, HW_SYSTEM_SHUTDOWN);
 
     uint8_t data[192];
     memset(data, 0, 192);
 
-    box_notify_write_data(data, 192);
-    box_event_id_t event_id = box_notify_execute();
+    notify_write_data(data, 192);
+    event_id_t event_id = notify_execute();
     if (event_id == 0) return -1;
 
-    box_result_entry_t result;
-    box_result_wait(&result, 5000);
+    result_entry_t result;
+    result_wait(&result, 5000);
     return -1;
 }
 
@@ -55,20 +55,20 @@ int sysinfo(system_info_t* info) {
 }
 
 int defrag(uint32_t file_id, uint32_t target_block) {
-    box_notify_prepare();
-    box_notify_add_prefix(SYSTEM_DECK_ID, 0x18);
+    notify_prepare();
+    notify_add_prefix(SYSTEM_DECK_ID, 0x18);
 
     uint8_t data[192];
     memset(data, 0, 192);
     memcpy(data, &file_id, 4);
     memcpy(data + 4, &target_block, 4);
 
-    box_notify_write_data(data, 192);
-    box_event_id_t event_id = box_notify_execute();
+    notify_write_data(data, 192);
+    event_id_t event_id = notify_execute();
     if (event_id == 0) return -1;
 
-    box_result_entry_t result;
-    if (!box_result_wait(&result, 5000)) return -1;
+    result_entry_t result;
+    if (!result_wait(&result, 5000)) return -1;
     if (result.error_code != BOX_OK) return -1;
     if (result.size < 8) return -1;
 
@@ -80,18 +80,18 @@ int defrag(uint32_t file_id, uint32_t target_block) {
 }
 
 int fragmentation(void) {
-    box_notify_prepare();
-    box_notify_add_prefix(SYSTEM_DECK_ID, 0x19);
+    notify_prepare();
+    notify_add_prefix(SYSTEM_DECK_ID, 0x19);
 
     uint8_t data[192];
     memset(data, 0, 192);
 
-    box_notify_write_data(data, 192);
-    box_event_id_t event_id = box_notify_execute();
+    notify_write_data(data, 192);
+    event_id_t event_id = notify_execute();
     if (event_id == 0) return -1;
 
-    box_result_entry_t result;
-    if (!box_result_wait(&result, 5000)) return -1;
+    result_entry_t result;
+    if (!result_wait(&result, 5000)) return -1;
     if (result.error_code != BOX_OK) return -1;
     if (result.size < 4) return -1;
 

@@ -12,8 +12,8 @@ CFLAGS = -nostdlib -fno-builtin -ffreestanding -mno-red-zone \
 
 SRCS = src/core/notify.c src/core/result.c src/core/string.c \
        src/core/io.c src/core/file.c src/core/system.c \
-       src/core/yield.c src/core/result_wait_yield.c \
-       src/core/result_wait_umwait.c src/core/result_wait_smart.c \
+       src/core/yield.c src/core/result_wait.c \
+       src/core/result_wait_yield.c src/core/result_wait_umwait.c \
        src/core/ipc.c src/core/format.c src/core/convert.c \
        src/system.c src/proc.c \
        src/io/keyboard.c src/io/vga.c

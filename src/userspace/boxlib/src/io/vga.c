@@ -9,7 +9,7 @@ static uint16_t vga_decode_u16(const uint8_t* payload, size_t offset) {
 }
 
 int vga_putchar(char c) {
-    box_vga_pos_t pos = {0, 0};
+    vga_pos_t pos = {0, 0};
     vga_getcursor(&pos);
 
     int color = vga_getcolor();
@@ -17,8 +17,8 @@ int vga_putchar(char c) {
         color = VGA_SCHEME_DEFAULT;
     }
 
-    box_notify_prepare();
-    box_notify_add_prefix(BOX_DECK_HARDWARE, VGA_OP_PUTCHAR);
+    notify_prepare();
+    notify_add_prefix(BOX_DECK_HARDWARE, VGA_OP_PUTCHAR);
 
     uint8_t data[4];
     data[0] = pos.row;
@@ -26,11 +26,11 @@ int vga_putchar(char c) {
     data[2] = (uint8_t)c;
     data[3] = (uint8_t)color;
 
-    box_notify_write_data(data, 4);
-    box_notify_execute();
+    notify_write_data(data, 4);
+    notify_execute();
 
-    box_result_entry_t result;
-    if (!box_result_wait(&result, 100000)) {
+    result_entry_t result;
+    if (!result_wait(&result, 100000)) {
         return -BOX_ERR_TIMEOUT;
     }
 
@@ -61,8 +61,8 @@ int vga_puts(const char* str) {
             color = VGA_SCHEME_DEFAULT;
         }
 
-        box_notify_prepare();
-        box_notify_add_prefix(BOX_DECK_HARDWARE, VGA_OP_PUTSTRING);
+        notify_prepare();
+        notify_add_prefix(BOX_DECK_HARDWARE, VGA_OP_PUTSTRING);
 
         uint8_t data[192];
         memset(data, 0, 192);
@@ -74,11 +74,11 @@ int vga_puts(const char* str) {
 
         memcpy(data + 4, str + offset, chunk_size);
 
-        box_notify_write_data(data, chunk_size + 4);
-        box_notify_execute();
+        notify_write_data(data, chunk_size + 4);
+        notify_execute();
 
-        box_result_entry_t result;
-        if (!box_result_wait(&result, 100000)) {
+        result_entry_t result;
+        if (!result_wait(&result, 100000)) {
             return -BOX_ERR_TIMEOUT;
         }
 
@@ -95,17 +95,17 @@ int vga_puts(const char* str) {
 }
 
 int vga_clear(uint8_t color) {
-    box_notify_prepare();
-    box_notify_add_prefix(BOX_DECK_HARDWARE, VGA_OP_CLEAR_SCREEN);
+    notify_prepare();
+    notify_add_prefix(BOX_DECK_HARDWARE, VGA_OP_CLEAR_SCREEN);
 
     uint8_t data[1];
     data[0] = color;
 
-    box_notify_write_data(data, 1);
-    box_notify_execute();
+    notify_write_data(data, 1);
+    notify_execute();
 
-    box_result_entry_t result;
-    if (!box_result_wait(&result, 100000)) {
+    result_entry_t result;
+    if (!result_wait(&result, 100000)) {
         return -BOX_ERR_TIMEOUT;
     }
 
@@ -117,18 +117,18 @@ int vga_clear(uint8_t color) {
 }
 
 int vga_clear_line(uint8_t row, uint8_t color) {
-    box_notify_prepare();
-    box_notify_add_prefix(BOX_DECK_HARDWARE, VGA_OP_CLEAR_LINE);
+    notify_prepare();
+    notify_add_prefix(BOX_DECK_HARDWARE, VGA_OP_CLEAR_LINE);
 
     uint8_t data[2];
     data[0] = row;
     data[1] = color;
 
-    box_notify_write_data(data, 2);
-    box_notify_execute();
+    notify_write_data(data, 2);
+    notify_execute();
 
-    box_result_entry_t result;
-    if (!box_result_wait(&result, 100000)) {
+    result_entry_t result;
+    if (!result_wait(&result, 100000)) {
         return -BOX_ERR_TIMEOUT;
     }
 
@@ -140,17 +140,17 @@ int vga_clear_line(uint8_t row, uint8_t color) {
 }
 
 int vga_clear_to_eol(uint8_t color) {
-    box_notify_prepare();
-    box_notify_add_prefix(BOX_DECK_HARDWARE, VGA_OP_CLEAR_TO_EOL);
+    notify_prepare();
+    notify_add_prefix(BOX_DECK_HARDWARE, VGA_OP_CLEAR_TO_EOL);
 
     uint8_t data[1];
     data[0] = color;
 
-    box_notify_write_data(data, 1);
-    box_notify_execute();
+    notify_write_data(data, 1);
+    notify_execute();
 
-    box_result_entry_t result;
-    if (!box_result_wait(&result, 100000)) {
+    result_entry_t result;
+    if (!result_wait(&result, 100000)) {
         return -BOX_ERR_TIMEOUT;
     }
 
@@ -162,18 +162,18 @@ int vga_clear_to_eol(uint8_t color) {
 }
 
 int vga_scroll_up(uint8_t lines, uint8_t fill_color) {
-    box_notify_prepare();
-    box_notify_add_prefix(BOX_DECK_HARDWARE, VGA_OP_SCROLL_UP);
+    notify_prepare();
+    notify_add_prefix(BOX_DECK_HARDWARE, VGA_OP_SCROLL_UP);
 
     uint8_t data[2];
     data[0] = lines;
     data[1] = fill_color;
 
-    box_notify_write_data(data, 2);
-    box_notify_execute();
+    notify_write_data(data, 2);
+    notify_execute();
 
-    box_result_entry_t result;
-    if (!box_result_wait(&result, 100000)) {
+    result_entry_t result;
+    if (!result_wait(&result, 100000)) {
         return -BOX_ERR_TIMEOUT;
     }
 
@@ -185,12 +185,12 @@ int vga_scroll_up(uint8_t lines, uint8_t fill_color) {
 }
 
 int vga_newline(void) {
-    box_notify_prepare();
-    box_notify_add_prefix(BOX_DECK_HARDWARE, VGA_OP_NEWLINE);
-    box_notify_execute();
+    notify_prepare();
+    notify_add_prefix(BOX_DECK_HARDWARE, VGA_OP_NEWLINE);
+    notify_execute();
 
-    box_result_entry_t result;
-    if (!box_result_wait(&result, 100000)) {
+    result_entry_t result;
+    if (!result_wait(&result, 100000)) {
         return -BOX_ERR_TIMEOUT;
     }
 
@@ -201,17 +201,17 @@ int vga_newline(void) {
     return 0;
 }
 
-int vga_getcursor(box_vga_pos_t* pos) {
+int vga_getcursor(vga_pos_t* pos) {
     if (!pos) {
         return -BOX_ERR_INVALID_ARGS;
     }
 
-    box_notify_prepare();
-    box_notify_add_prefix(BOX_DECK_HARDWARE, VGA_OP_GET_CURSOR);
-    box_notify_execute();
+    notify_prepare();
+    notify_add_prefix(BOX_DECK_HARDWARE, VGA_OP_GET_CURSOR);
+    notify_execute();
 
-    box_result_entry_t result;
-    if (!box_result_wait(&result, 100000)) {
+    result_entry_t result;
+    if (!result_wait(&result, 100000)) {
         return -BOX_ERR_TIMEOUT;
     }
 
@@ -226,18 +226,18 @@ int vga_getcursor(box_vga_pos_t* pos) {
 }
 
 int vga_setcursor(uint8_t row, uint8_t col) {
-    box_notify_prepare();
-    box_notify_add_prefix(BOX_DECK_HARDWARE, VGA_OP_SET_CURSOR);
+    notify_prepare();
+    notify_add_prefix(BOX_DECK_HARDWARE, VGA_OP_SET_CURSOR);
 
     uint8_t data[2];
     data[0] = row;
     data[1] = col;
 
-    box_notify_write_data(data, 2);
-    box_notify_execute();
+    notify_write_data(data, 2);
+    notify_execute();
 
-    box_result_entry_t result;
-    if (!box_result_wait(&result, 100000)) {
+    result_entry_t result;
+    if (!result_wait(&result, 100000)) {
         return -BOX_ERR_TIMEOUT;
     }
 
@@ -249,12 +249,12 @@ int vga_setcursor(uint8_t row, uint8_t col) {
 }
 
 int vga_getcolor(void) {
-    box_notify_prepare();
-    box_notify_add_prefix(BOX_DECK_HARDWARE, VGA_OP_GET_COLOR);
-    box_notify_execute();
+    notify_prepare();
+    notify_add_prefix(BOX_DECK_HARDWARE, VGA_OP_GET_COLOR);
+    notify_execute();
 
-    box_result_entry_t result;
-    if (!box_result_wait(&result, 100000)) {
+    result_entry_t result;
+    if (!result_wait(&result, 100000)) {
         return -BOX_ERR_TIMEOUT;
     }
 
@@ -266,17 +266,17 @@ int vga_getcolor(void) {
 }
 
 int vga_setcolor(uint8_t color) {
-    box_notify_prepare();
-    box_notify_add_prefix(BOX_DECK_HARDWARE, VGA_OP_SET_COLOR);
+    notify_prepare();
+    notify_add_prefix(BOX_DECK_HARDWARE, VGA_OP_SET_COLOR);
 
     uint8_t data[1];
     data[0] = color;
 
-    box_notify_write_data(data, 1);
-    box_notify_execute();
+    notify_write_data(data, 1);
+    notify_execute();
 
-    box_result_entry_t result;
-    if (!box_result_wait(&result, 100000)) {
+    result_entry_t result;
+    if (!result_wait(&result, 100000)) {
         return -BOX_ERR_TIMEOUT;
     }
 
@@ -287,17 +287,17 @@ int vga_setcolor(uint8_t color) {
     return 0;
 }
 
-int vga_getdimensions(box_vga_dimensions_t* dims) {
+int vga_getdimensions(vga_dimensions_t* dims) {
     if (!dims) {
         return -BOX_ERR_INVALID_ARGS;
     }
 
-    box_notify_prepare();
-    box_notify_add_prefix(BOX_DECK_HARDWARE, VGA_OP_GET_DIMENSIONS);
-    box_notify_execute();
+    notify_prepare();
+    notify_add_prefix(BOX_DECK_HARDWARE, VGA_OP_GET_DIMENSIONS);
+    notify_execute();
 
-    box_result_entry_t result;
-    if (!box_result_wait(&result, 100000)) {
+    result_entry_t result;
+    if (!result_wait(&result, 100000)) {
         return -BOX_ERR_TIMEOUT;
     }
 

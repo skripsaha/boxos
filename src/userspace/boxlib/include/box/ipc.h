@@ -27,7 +27,7 @@
 int send(uint32_t target_pid, const void* data, uint16_t size);
 int broadcast(const char* tag, const void* data, uint16_t size);
 int listen(uint8_t source_type, uint8_t flags);
-bool receive(box_result_entry_t* out_entry);
-bool receive_wait(box_result_entry_t* out_entry, uint32_t timeout_ms);
+bool receive(result_entry_t* out_entry);
+bool receive_wait(result_entry_t* out_entry, uint32_t timeout_ms);
 
 #endif // BOX_IPC_H

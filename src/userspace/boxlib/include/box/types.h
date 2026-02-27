@@ -46,7 +46,7 @@ typedef enum {
     BOX_EVENT_ACCESS_DENIED = 4,
     BOX_EVENT_CRITICAL_ERROR = 5,
     BOX_EVENT_RETRY = 6
-} box_event_state_t;
+} event_state_t;
 
 // Prefix helpers
 #define BOX_PREFIX(deck_id, opcode) \
@@ -68,7 +68,7 @@ typedef enum {
 #define BOX_OFFSETOF(type, member) __builtin_offsetof(type, member)
 
 // Types
-typedef uint32_t box_event_id_t;
-typedef uint32_t box_file_id_t;
+typedef uint32_t event_id_t;
+typedef uint32_t file_id_t;
 
 #endif // BOX_TYPES_H

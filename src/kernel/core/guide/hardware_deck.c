@@ -235,7 +235,7 @@ int hardware_deck_handler(Event* event) {
         }
 
         case HW_RTC_GET_TIME: {
-            box_time_t t;
+            time_t t;
             rtc_get_boxtime(&t);
             write_u64(event->data + 0, t.seconds);
             write_u32(event->data + 8, t.nanosec);

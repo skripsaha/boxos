@@ -5,7 +5,7 @@
 
 // BoxLib Error Code System
 // Mirrors kernel boxos_error_t for userspace applications
-typedef uint32_t box_error_t;
+typedef uint32_t error_t;
 
 // Success
 #define BOX_OK                      0
