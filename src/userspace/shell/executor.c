@@ -1,6 +1,7 @@
 #include "executor.h"
 #include "commands/commands.h"
 #include "box/string.h"
+#include "box/system.h"
 
 static char g_error_message[128];
 
@@ -40,6 +41,12 @@ int executor_run(parsed_command_t* cmd) {
         if (strcmp(command_name, g_commands[i].name) == 0) {
             return g_commands[i].handler(cmd->argc, cmd->argv);
         }
+    }
+
+    // Try to launch as executable from TagFS
+    int pid = proc_exec(command_name);
+    if (pid > 0) {
+        return 0;
     }
 
     memcpy(g_error_message, "Unknown command: ", 17);

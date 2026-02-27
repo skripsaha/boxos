@@ -19,6 +19,8 @@
 #define SYSTEM_ERR_TAG_NOT_FOUND     0x000B
 #define SYSTEM_ERR_TAG_FULL          0x000C
 #define SYSTEM_ERR_NOT_IMPLEMENTED   0x00FF
+#define SYSTEM_ERR_NOT_EXECUTABLE    0x000D
+#define SYSTEM_ERR_EXEC_NOT_FOUND    0x000E
 
 #define PROC_SPAWN_MAX_BINARY_SIZE   CONFIG_PROC_MAX_BINARY_SIZE
 #define PROC_INFO_TAGS_SIZE          64
@@ -68,6 +70,17 @@ typedef struct __packed {
     uint8_t reserved2[7];
     char tags[PROC_INFO_TAGS_SIZE];
 } proc_info_response_t;
+
+typedef struct __packed {
+    char     filename[32];
+    uint8_t  reserved[160];
+} proc_exec_event_t;
+
+typedef struct __packed {
+    uint32_t new_pid;
+    uint32_t reserved;
+    uint8_t  reserved2[184];
+} proc_exec_response_t;
 
 typedef struct __packed {
     uint64_t size;
@@ -134,6 +147,7 @@ typedef struct __packed {
 int system_deck_proc_spawn(Event* event);
 int system_deck_proc_kill(Event* event);
 int system_deck_proc_info(Event* event);
+int system_deck_proc_exec(Event* event);
 
 int system_deck_buf_alloc(Event* event);
 int system_deck_buf_free(Event* event);

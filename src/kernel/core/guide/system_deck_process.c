@@ -4,6 +4,7 @@
 #include "vmm.h"
 #include "pmm.h"
 #include "atomics.h"
+#include "tagfs.h"
 
 typedef struct {
     uint64_t handle;
@@ -244,6 +245,149 @@ int system_deck_proc_info(Event* event) {
     response.tags[PROC_INFO_TAGS_SIZE - 1] = '\0';
 
     debug_printf("[SYSTEM_DECK] PROC_INFO: SUCCESS - returned info for PID %u\n", proc->pid);
+    deliver_response(event, SYSTEM_ERR_SUCCESS, &response, sizeof(response));
+    return 0;
+}
+
+int system_deck_proc_exec(Event* event) {
+    if (!event) {
+        debug_printf("[SYSTEM_DECK] PROC_EXEC: NULL event\n");
+        return -1;
+    }
+
+    proc_exec_event_t exec_event;
+    memset(&exec_event, 0, sizeof(exec_event));
+    memcpy(&exec_event, event->data, sizeof(proc_exec_event_t));
+
+    if (strnlen(exec_event.filename, sizeof(exec_event.filename))
+            == sizeof(exec_event.filename)) {
+        debug_printf("[SYSTEM_DECK] PROC_EXEC: filename not null-terminated\n");
+        deliver_response(event, SYSTEM_ERR_INVALID_ARGS, NULL, 0);
+        return -1;
+    }
+
+    exec_event.filename[sizeof(exec_event.filename) - 1] = '\0';
+
+    if (exec_event.filename[0] == '\0') {
+        debug_printf("[SYSTEM_DECK] PROC_EXEC: empty filename\n");
+        deliver_response(event, SYSTEM_ERR_INVALID_ARGS, NULL, 0);
+        return -1;
+    }
+
+    debug_printf("[SYSTEM_DECK] PROC_EXEC: looking for '%s'\n",
+            exec_event.filename);
+
+    if (process_get_count() >= PROCESS_MAX_COUNT) {
+        debug_printf("[SYSTEM_DECK] PROC_EXEC: process limit reached\n");
+        deliver_response(event, SYSTEM_ERR_PROCESS_LIMIT, NULL, 0);
+        return -1;
+    }
+
+    uint32_t file_ids[TAGFS_MAX_FILES];
+    int file_count = tagfs_list_all_files(file_ids, TAGFS_MAX_FILES);
+
+    uint32_t found_id = 0;
+    const char* found_tag = NULL;
+
+    for (int i = 0; i < file_count; i++) {
+        TagFSMetadata* meta = tagfs_get_metadata(file_ids[i]);
+        if (!meta || !(meta->flags & TAGFS_FILE_ACTIVE)) {
+            continue;
+        }
+        if (strcmp(meta->filename, exec_event.filename) != 0) {
+            continue;
+        }
+        for (uint8_t t = 0; t < meta->tag_count; t++) {
+            if (meta->tags[t].type == TAGFS_TAG_SYSTEM) {
+                if (strcmp(meta->tags[t].key, "app") == 0) {
+                    found_id  = file_ids[i];
+                    found_tag = "app";
+                    break;
+                }
+                if (strcmp(meta->tags[t].key, "utility") == 0) {
+                    found_id  = file_ids[i];
+                    found_tag = "utility";
+                    break;
+                }
+            }
+        }
+        if (found_id != 0) {
+            break;
+        }
+    }
+
+    if (found_id == 0) {
+        debug_printf("[SYSTEM_DECK] PROC_EXEC: '%s' not found as executable\n",
+                exec_event.filename);
+        deliver_response(event, SYSTEM_ERR_EXEC_NOT_FOUND, NULL, 0);
+        return -1;
+    }
+
+    TagFSMetadata* meta = tagfs_get_metadata(found_id);
+    uint64_t file_size = meta->size;
+
+    if (file_size == 0 || file_size > PROC_SPAWN_MAX_BINARY_SIZE) {
+        debug_printf("[SYSTEM_DECK] PROC_EXEC: invalid file size %lu\n",
+                file_size);
+        deliver_response(event, SYSTEM_ERR_SIZE_LIMIT, NULL, 0);
+        return -1;
+    }
+
+    size_t pages_needed = (file_size + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE;
+    void* phys_buf = pmm_alloc_zero(pages_needed);
+    if (!phys_buf) {
+        debug_printf("[SYSTEM_DECK] PROC_EXEC: pmm_alloc_zero failed\n");
+        deliver_response(event, SYSTEM_ERR_NO_MEMORY, NULL, 0);
+        return -1;
+    }
+
+    void* virt_buf = vmm_phys_to_virt((uintptr_t)phys_buf);
+
+    TagFSFileHandle* fh = tagfs_open(found_id, TAGFS_HANDLE_READ);
+    if (!fh) {
+        debug_printf("[SYSTEM_DECK] PROC_EXEC: tagfs_open failed\n");
+        pmm_free(phys_buf, pages_needed);
+        deliver_response(event, SYSTEM_ERR_LOAD_FAILED, NULL, 0);
+        return -1;
+    }
+
+    int read_result = tagfs_read(fh, virt_buf, file_size);
+    tagfs_close(fh);
+
+    if (read_result != 0) {
+        debug_printf("[SYSTEM_DECK] PROC_EXEC: tagfs_read failed (%d)\n",
+                read_result);
+        pmm_free(phys_buf, pages_needed);
+        deliver_response(event, SYSTEM_ERR_LOAD_FAILED, NULL, 0);
+        return -1;
+    }
+
+    process_t* proc = process_create(found_tag);
+    if (!proc) {
+        debug_printf("[SYSTEM_DECK] PROC_EXEC: process_create failed\n");
+        pmm_free(phys_buf, pages_needed);
+        deliver_response(event, SYSTEM_ERR_CABIN_FAILED, NULL, 0);
+        return -1;
+    }
+
+    int load_result = process_load_binary(proc, virt_buf, (size_t)file_size);
+    pmm_free(phys_buf, pages_needed);
+
+    if (load_result != 0) {
+        debug_printf("[SYSTEM_DECK] PROC_EXEC: process_load_binary failed\n");
+        process_destroy(proc);
+        deliver_response(event, SYSTEM_ERR_LOAD_FAILED, NULL, 0);
+        return -1;
+    }
+
+    process_set_state(proc, PROC_READY);
+
+    proc_exec_response_t response;
+    memset(&response, 0, sizeof(response));
+    response.new_pid = proc->pid;
+
+    debug_printf("[SYSTEM_DECK] PROC_EXEC: SUCCESS - '%s' -> PID %u\n",
+            exec_event.filename, proc->pid);
     deliver_response(event, SYSTEM_ERR_SUCCESS, &response, sizeof(response));
     return 0;
 }

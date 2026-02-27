@@ -153,8 +153,13 @@ $(KERNEL_ENTRY_OBJ): $(KERNEL_ENTRY_SRC) | $(BUILDDIR)
 	@$(ASM) $(ASMFLAGS_ELF) $< -o $@
 
 # ==== USERSPACE BUILD RULES ====
+# Build boxlib (must be built before shell)
+$(USERSPACE_DIR)/boxlib/libbox.a:
+	@echo "Building boxlib..."
+	@cd $(USERSPACE_DIR)/boxlib && $(MAKE)
+
 # Build shell
-$(SHELL_BIN):
+$(SHELL_BIN): $(USERSPACE_DIR)/boxlib/libbox.a
 	@echo "Building shell process..."
 	@cd $(SHELL_DIR) && $(MAKE)
 	@echo "Shell binary: $@ ($$(stat -f%z $@ 2>/dev/null || stat -c%s $@ 2>/dev/null) bytes)"

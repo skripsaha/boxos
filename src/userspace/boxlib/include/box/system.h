@@ -7,6 +7,7 @@
 #define BOX_SYSTEM_DECK_ID          BOX_DECK_SYSTEM
 
 #define BOX_SYSTEM_PROC_INFO        0x03
+#define BOX_SYSTEM_PROC_EXEC        0x06
 #define BOX_SYSTEM_EXIT             0x02
 #define BOX_SYSTEM_BUFFER_ALLOC     0x10
 #define BOX_SYSTEM_BUFFER_FREE      0x11
@@ -45,6 +46,7 @@ typedef struct {
 // Process
 int proc_info(uint16_t pid, proc_info_t* info);
 void exit(uint32_t exit_code);
+int proc_exec(const char* filename);
 
 // Buffers
 int buffer_alloc(uint8_t size_class, uint16_t* out_buffer_id, uint32_t* out_address);

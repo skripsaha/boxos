@@ -75,6 +75,9 @@ int system_deck_handler(Event* event) {
         case SYSTEM_OP_PROC_INFO:
             return system_deck_proc_info(event);
 
+        case SYSTEM_OP_PROC_EXEC:
+            return system_deck_proc_exec(event);
+
         case SYSTEM_OP_CTX_USE:
             return system_deck_ctx_use(event);
 
@@ -144,6 +147,11 @@ static bool system_deck_check_permission(process_t* proc, uint8_t opcode, uint32
     // Now all checks use snapshot, not live proc->tags
     switch (opcode) {
         case SYSTEM_OP_PROC_SPAWN:
+            return snapshot_has_tag(tags_snapshot, "proc_spawn") ||
+                   snapshot_has_tag(tags_snapshot, "utility") ||
+                   snapshot_has_tag(tags_snapshot, "system");
+
+        case SYSTEM_OP_PROC_EXEC:
             return snapshot_has_tag(tags_snapshot, "proc_spawn") ||
                    snapshot_has_tag(tags_snapshot, "utility") ||
                    snapshot_has_tag(tags_snapshot, "system");

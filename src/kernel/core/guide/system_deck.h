@@ -10,6 +10,7 @@
 #define SYSTEM_OP_PROC_SPAWN     0x01
 #define SYSTEM_OP_PROC_KILL      0x02
 #define SYSTEM_OP_PROC_INFO      0x03
+#define SYSTEM_OP_PROC_EXEC      0x06
 
 // Security (Legacy)
 #define SYSTEM_OP_CTX_USE        0x04
