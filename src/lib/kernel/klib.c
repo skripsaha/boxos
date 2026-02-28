@@ -6,7 +6,6 @@
 
 // NO STDLIB DEPENDENCIES - all types from ktypes.h and kstdarg.h
 
-// ========== Heap Canary Protection ==========
 #define HEAP_CANARY_MAGIC 0xDEADBEEFCAFEBABEULL
 #define HEAP_GUARD_ENABLED 1  // Set to 0 to disable
 
@@ -17,7 +16,6 @@ typedef struct {
     size_t canary_end_offset;  // Location of end canary
 } heap_guard_t;
 
-// ========== Internal variables ==========
 static uint8_t *memory_pool = NULL; // Allocated dynamically from PMM
 static size_t memory_pool_size = 0; // Actual heap size (calculated dynamically)
 static mem_block_t *free_list = NULL;
@@ -28,7 +26,6 @@ static uint8_t current_attr = TEXT_ATTR_DEFAULT;
 // Digits for number conversion
 static const char digits[] = "0123456789abcdefghijklmnopqrstuvwxyz";
 
-// ========== Memory initialization ==========
 void mem_init(void)
 {
     // Get total available RAM from PMM
@@ -88,7 +85,6 @@ void mem_init(void)
     debug_printf("[KLIB] Free list initialized\n");
 }
 
-// ========== Memory allocation ==========
 static void *kmalloc_internal(size_t size)
 {
     if (size == 0)
@@ -205,7 +201,6 @@ void* kmalloc(size_t size) {
 #endif
 }
 
-// ========== Memory deallocation ==========
 static void kfree_internal(void *ptr)
 {
     if (!ptr)
@@ -306,7 +301,6 @@ void kfree(void* ptr) {
 #endif
 }
 
-// ========== Memory statistics ==========
 void mem_stats(void)
 {
     spin_lock(&heap_lock);
@@ -339,7 +333,6 @@ void mem_stats(void)
     spin_unlock(&heap_lock);
 }
 
-// ========== Debug functions ==========
 __attribute__((noreturn)) void panic(const char *message, ...)
 {
     va_list args;
@@ -367,7 +360,6 @@ __attribute__((noreturn)) void panic(const char *message, ...)
     }
 }
 
-// ========== Unicode support ==========
 int utf8_encode(uint32_t codepoint, char out[4])
 {
     if (codepoint <= 0x7F)
@@ -438,7 +430,6 @@ int utf8_decode(const char *utf8, uint32_t *codepoint)
     return 0;
 }
 
-// ========== Helper functions for kprintf ==========
 int toupper(int c)
 {
     if (c >= 'a' && c <= 'z')
@@ -481,7 +472,6 @@ int kputnl(void)
     return 1;
 }
 
-// ========== Formatted output ==========
 void kputchar(char c)
 {
     // Output to serial port (for debugging with -serial stdio)
@@ -1029,7 +1019,6 @@ int ksnprintf(char *buf, size_t size, const char *fmt, ...)
     return (int)pos;
 }
 
-// ========== Spinlocks ==========
 void spinlock_init(spinlock_t *lock)
 {
     lock->locked = 0;
@@ -1081,7 +1070,6 @@ bool spin_trylock(spinlock_t *lock)
     }
 }
 
-// ========== List implementation ==========
 void list_init(list_t *list)
 {
     if (!list)
@@ -1334,7 +1322,6 @@ void list_for_each(list_t *list, void (*func)(void *))
     spin_unlock(&list->lock);
 }
 
-// ========== String functions ==========
 size_t strlen(const char *s)
 {
     size_t len = 0;
@@ -1519,7 +1506,6 @@ char *strpbrk(const char *s, const char *accept)
     return NULL;
 }
 
-// ========== Memory operations ==========
 void *memset(void *s, int c, size_t n)
 {
     unsigned char *p = (unsigned char *)s;
@@ -1634,7 +1620,6 @@ void *memchr(const void *s, int c, size_t n)
     return NULL;
 }
 
-// ========== Number conversions ==========
 char *reverse_str(char *str)
 {
     if (!str)
@@ -1922,7 +1907,6 @@ void ftoa(double num, char *buf, int precision)
     buf[i] = '\0';
 }
 
-// ========== Utilities ==========
 int atoi(const char *str)
 {
     int result = 0;

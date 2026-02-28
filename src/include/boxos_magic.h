@@ -1,10 +1,7 @@
 #ifndef BOXOS_MAGIC_H
 #define BOXOS_MAGIC_H
 
-// ============================================================================
-// BOXOS MAGIC NUMBERS
-// ============================================================================
-// Shared between kernel and userspace for validation
+// Magic numbers shared between kernel and userspace for validation
 
 // Page magics
 #define BOXOS_NOTIFY_MAGIC       0x4E4F5449  // "NOTI" (little-endian)

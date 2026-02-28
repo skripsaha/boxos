@@ -2,20 +2,12 @@
 #include "box/notify.h"
 #include "box/string.h"
 
-// ============================================================================
-// Auto-prepare: lazily initializes the notify page on first chain call
-// ============================================================================
-
 static void ensure_ready(void) {
     notify_page_t* np = notify_page();
     if (np->magic != BOX_NOTIFY_MAGIC) {
         notify_prepare();
     }
 }
-
-// ============================================================================
-// IPC / Routing (System Deck 0xFF)
-// ============================================================================
 
 void route(uint32_t target_pid) {
     ensure_ready();
@@ -26,6 +18,7 @@ void route(uint32_t target_pid) {
 }
 
 void route_tag(const char* tag) {
+    if (!tag) return;
     ensure_ready();
     notify_page_t* np = notify_page();
     np->route_target = 0;
@@ -46,10 +39,6 @@ void hw_listen(uint8_t source_type, uint8_t flags) {
     notify_add_prefix(DECK_SYSTEM, 0x42);
 }
 
-// ============================================================================
-// Process Management (System Deck 0xFF)
-// ============================================================================
-
 void proc_kill(uint16_t pid) {
     ensure_ready();
     notify_write_data(&pid, sizeof(pid));
@@ -63,6 +52,7 @@ void proc_query(uint16_t pid) {
 }
 
 void proc_spawn(const char* filename) {
+    if (!filename) return;
     ensure_ready();
     uint8_t data[192];
     memset(data, 0, 192);
@@ -72,10 +62,6 @@ void proc_spawn(const char* filename) {
     notify_write_data(data, 192);
     notify_add_prefix(DECK_SYSTEM, 0x06);
 }
-
-// ============================================================================
-// Buffers (System Deck 0xFF)
-// ============================================================================
 
 void buf_alloc(uint8_t size_class) {
     ensure_ready();
@@ -88,10 +74,6 @@ void buf_release(uint16_t buffer_id) {
     notify_write_data(&buffer_id, sizeof(buffer_id));
     notify_add_prefix(DECK_SYSTEM, 0x11);
 }
-
-// ============================================================================
-// Process Tags (System Deck 0xFF)
-// ============================================================================
 
 static void ptag_common(uint16_t pid, const char* tag, uint8_t opcode) {
     ensure_ready();
@@ -120,10 +102,6 @@ void ptag_check(uint16_t pid, const char* tag) {
     ptag_common(pid, tag, 0x22);
 }
 
-// ============================================================================
-// Storage Defrag (System Deck 0xFF)
-// ============================================================================
-
 void fs_defrag(uint32_t file_id, uint32_t target_block) {
     ensure_ready();
     uint8_t data[192];
@@ -142,11 +120,8 @@ void fs_fraginfo(void) {
     notify_add_prefix(DECK_SYSTEM, 0x19);
 }
 
-// ============================================================================
-// Storage / Files (Storage Deck 0x02)
-// ============================================================================
-
 void obj_create(const char* filename, const char* tags) {
+    if (!filename) return;
     ensure_ready();
     struct __attribute__((packed)) {
         char filename[32];
@@ -218,6 +193,7 @@ void obj_delete(uint32_t file_id) {
 }
 
 void obj_rename(uint32_t file_id, const char* new_name) {
+    if (!new_name) return;
     ensure_ready();
     struct __attribute__((packed)) {
         uint32_t file_id;
@@ -260,6 +236,7 @@ void obj_query(const char* tags) {
 }
 
 void obj_tag_set(uint32_t file_id, const char* tag) {
+    if (!tag) return;
     ensure_ready();
     struct __attribute__((packed)) {
         uint32_t file_id;
@@ -276,6 +253,7 @@ void obj_tag_set(uint32_t file_id, const char* tag) {
 }
 
 void obj_tag_unset(uint32_t file_id, const char* key) {
+    if (!key) return;
     ensure_ready();
     struct __attribute__((packed)) {
         uint32_t file_id;
@@ -292,6 +270,7 @@ void obj_tag_unset(uint32_t file_id, const char* key) {
 }
 
 void ctx_set(const char* tag) {
+    if (!tag) return;
     ensure_ready();
     char tag_buffer[192];
     memset(tag_buffer, 0, 192);
@@ -311,10 +290,6 @@ void ctx_clear(void) {
     notify_add_prefix(DECK_STORAGE, 0x11);
 }
 
-// ============================================================================
-// Hardware / VGA (Hardware Deck 0x03)
-// ============================================================================
-
 void hw_vga_putchar(uint8_t row, uint8_t col, char c, uint8_t color) {
     ensure_ready();
     uint8_t data[4];
@@ -327,6 +302,7 @@ void hw_vga_putchar(uint8_t row, uint8_t col, char c, uint8_t color) {
 }
 
 void hw_vga_putstring(const char* str, uint8_t len, uint8_t color) {
+    if (len > 188) len = 188;
     ensure_ready();
     uint8_t data[192];
     memset(data, 0, 192);
@@ -404,10 +380,6 @@ void hw_vga_getdimensions(void) {
     notify_add_prefix(DECK_HARDWARE, 0x7B);
 }
 
-// ============================================================================
-// Hardware / Keyboard (Hardware Deck 0x03)
-// ============================================================================
-
 void hw_kb_getchar(void) {
     ensure_ready();
     notify_add_prefix(DECK_HARDWARE, 0x60);
@@ -429,10 +401,6 @@ void hw_kb_status(void) {
     notify_add_prefix(DECK_HARDWARE, 0x62);
 }
 
-// ============================================================================
-// Hardware / Timer & RTC (Hardware Deck 0x03)
-// ============================================================================
-
 void hw_timer_ms(void) {
     ensure_ready();
     notify_add_prefix(DECK_HARDWARE, 0x11);
@@ -452,10 +420,6 @@ void hw_rtc_uptime(void) {
     ensure_ready();
     notify_add_prefix(DECK_HARDWARE, 0x17);
 }
-
-// ============================================================================
-// Hardware / Power (Hardware Deck 0x03)
-// ============================================================================
 
 void hw_reboot(void) {
     ensure_ready();

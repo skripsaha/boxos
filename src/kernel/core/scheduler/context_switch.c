@@ -9,6 +9,9 @@ void context_save(process_t* proc, ProcessContext* ctx) {
     if (!proc || !ctx) {
         return;
     }
+    if (!proc->cabin) {
+        return;
+    }
 
     ctx->cr3 = proc->cabin->pml4_phys;
 }
@@ -26,12 +29,12 @@ void context_restore(process_t* proc, ProcessContext* ctx) {
 void context_switch(process_t* from, process_t* to) {
     if (from) {
         context_save(from, &from->context);
-        from->state = PROC_READY;
+        process_set_state(from, PROC_READY);
     }
 
     if (to) {
         context_restore(to, &to->context);
-        to->state = PROC_RUNNING;
+        process_set_state(to, PROC_RUNNING);
         to->last_run_time = scheduler_get_state()->total_ticks;
         scheduler_state_t* sched = scheduler_get_state();
         spin_lock(&sched->scheduler_lock);
@@ -69,6 +72,9 @@ void context_save_from_frame(process_t* proc, interrupt_frame_t* frame) {
     ctx->ss = (uint16_t)frame->ss;
     ctx->rflags = frame->rflags;
 
+    if (!proc->cabin) {
+        return;
+    }
     ctx->cr3 = proc->cabin->pml4_phys;
 
     proc->started = true;

@@ -24,6 +24,7 @@ int ahci_read_sectors_sync(uint8_t port, uint32_t lba,
 
         port_state->stats.cmd_count++;
 
+        /* NOTE: assumes identity-mapped kernel addresses (virt == phys) */
         uintptr_t buffer_phys = (uintptr_t)buffer;
         boxos_error_t err = ahci_build_ncq_read(port, slot, lba, sector_count, (void*)buffer_phys);
         if (err != BOXOS_OK) {
@@ -95,6 +96,7 @@ int ahci_write_sectors_sync(uint8_t port, uint32_t lba,
 
         port_state->stats.cmd_count++;
 
+        /* NOTE: assumes identity-mapped kernel addresses (virt == phys) */
         uintptr_t buffer_phys = (uintptr_t)buffer;
         boxos_error_t err = ahci_build_ncq_write(port, slot, lba, sector_count, (void*)buffer_phys);
         if (err != BOXOS_OK) {

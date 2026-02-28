@@ -3,7 +3,6 @@
 
 #include "ktypes.h"
 
-// Структура информации о CPU
 typedef struct {
     char vendor[13];
     char brand[49];
@@ -16,13 +15,11 @@ typedef struct {
     uint32_t extended_features_ecx;
 } cpu_info_t;
 
-// Функции
 void detect_cpu_info(char* cpu_vendor, char* cpu_brand);
 void cpu_detect_topology(cpu_info_t* info);
 uint8_t cpu_get_core_count(void);
 void cpu_print_detailed_info(void);
 
-// Вспомогательные
 static inline uint64_t __read_cr2(void) {
     uint64_t value;
     __asm__ volatile ("mov %%cr2, %0" : "=r"(value));

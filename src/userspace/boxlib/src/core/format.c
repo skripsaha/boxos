@@ -1,35 +1,11 @@
 #include "box/io.h"
 #include "box/string.h"
+#include "box/convert.h"
 
-static void fmt_itoa(int value, char* buf) {
+static void fmt_htoa64(unsigned long value, char* buf) {
+    const char* digits = "0123456789abcdef";
     if (value == 0) { buf[0] = '0'; buf[1] = '\0'; return; }
-    char tmp[12];
-    int i = 0;
-    int neg = 0;
-    unsigned int uval;
-    if (value < 0) { neg = 1; uval = (unsigned int)(-(value + 1)) + 1; }
-    else { uval = (unsigned int)value; }
-    while (uval > 0) { tmp[i++] = '0' + (uval % 10); uval /= 10; }
-    int j = 0;
-    if (neg) buf[j++] = '-';
-    while (i > 0) buf[j++] = tmp[--i];
-    buf[j] = '\0';
-}
-
-static void fmt_utoa(unsigned int value, char* buf) {
-    if (value == 0) { buf[0] = '0'; buf[1] = '\0'; return; }
-    char tmp[11];
-    int i = 0;
-    while (value > 0) { tmp[i++] = '0' + (value % 10); value /= 10; }
-    int j = 0;
-    while (i > 0) buf[j++] = tmp[--i];
-    buf[j] = '\0';
-}
-
-static void fmt_htoa(unsigned int value, char* buf, int upper) {
-    const char* digits = upper ? "0123456789ABCDEF" : "0123456789abcdef";
-    if (value == 0) { buf[0] = '0'; buf[1] = '\0'; return; }
-    char tmp[9];
+    char tmp[17];
     int i = 0;
     while (value > 0) { tmp[i++] = digits[value & 0xF]; value >>= 4; }
     int j = 0;
@@ -45,7 +21,7 @@ int printf(const char* fmt, ...) {
 
     char out[512];
     int pos = 0;
-    char numbuf[16];
+    char numbuf[20];
 
     while (*fmt && pos < 510) {
         if (*fmt != '%') {
@@ -62,25 +38,25 @@ int printf(const char* fmt, ...) {
         }
         case 'd': {
             int v = va_arg(args, int);
-            fmt_itoa(v, numbuf);
+            to_str(v, numbuf, sizeof(numbuf));
             for (int i = 0; numbuf[i] && pos < 510; i++) out[pos++] = numbuf[i];
             break;
         }
         case 'u': {
             unsigned int v = va_arg(args, unsigned int);
-            fmt_utoa(v, numbuf);
+            uint_to_str(v, numbuf, sizeof(numbuf));
             for (int i = 0; numbuf[i] && pos < 510; i++) out[pos++] = numbuf[i];
             break;
         }
         case 'x': {
             unsigned int v = va_arg(args, unsigned int);
-            fmt_htoa(v, numbuf, 0);
+            to_hex(v, numbuf, sizeof(numbuf));
             for (int i = 0; numbuf[i] && pos < 510; i++) out[pos++] = numbuf[i];
             break;
         }
         case 'X': {
             unsigned int v = va_arg(args, unsigned int);
-            fmt_htoa(v, numbuf, 1);
+            to_hex(v, numbuf, sizeof(numbuf));
             for (int i = 0; numbuf[i] && pos < 510; i++) out[pos++] = numbuf[i];
             break;
         }
@@ -90,9 +66,9 @@ int printf(const char* fmt, ...) {
             break;
         }
         case 'p': {
-            unsigned int v = va_arg(args, unsigned int);
+            unsigned long v = va_arg(args, unsigned long);
             if (pos < 508) { out[pos++] = '0'; out[pos++] = 'x'; }
-            fmt_htoa(v, numbuf, 0);
+            fmt_htoa64(v, numbuf);
             for (int i = 0; numbuf[i] && pos < 510; i++) out[pos++] = numbuf[i];
             break;
         }

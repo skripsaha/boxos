@@ -16,7 +16,6 @@ unsigned int last_loc = 0;
 unsigned int current_line = 0;
 unsigned int line_size = VGA_WIDTH * BYTES_FOR_EACH_ELEMENT;
 
-// Color management functions
 void vga_set_color(uint8_t color) {
     vga_current_color = color;
 }
@@ -35,8 +34,6 @@ void vga_init(void){
 }
 
 void vga_print_char(char ch, const unsigned char attr) {
-
-    // Fixed: Check for buffer overflow before writing (need space for char + attr)
     if(current_loc >= VGA_SIZE - 2) vga_scroll_up();
 
     vga[current_loc] = ch;
@@ -176,11 +173,9 @@ void vga_scroll_up(void){
 
 void vga_change_background(unsigned char new_bg_color) {
     new_bg_color &= 0xF0;
-    
+
     for(unsigned int i = 1; i < VGA_SIZE; i += 2) {
-        // Get current attribute
         unsigned char current_attr = vga[i];
-        
         vga[i] = (current_attr & 0x0F) | new_bg_color;
 
         vga_attr_backup[i / 2] = vga[i];

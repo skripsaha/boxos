@@ -53,10 +53,6 @@ STATIC_ASSERT(sizeof(result_page_t) == 4096, "Result page must be exactly 4096 b
 STATIC_ASSERT(offsetof(result_page_t, notification_flag) == 8, "notification_flag must be at offset 8");
 STATIC_ASSERT((offsetof(result_page_t, notification_flag) % 64) == 8, "notification_flag in first cache line (offset % 64 == 8)");
 
-// Compile-time size checks
-_Static_assert(sizeof(result_page_t) == 4096, "Result page must be exactly one page (4096 bytes)");
-_Static_assert(sizeof(result_page_t) % 4096 == 0, "Result page must be page-aligned");
-_Static_assert(sizeof(result_entry_t) == 256, "Result entry must be 256 bytes");
 
 // Ring buffer helpers
 static inline int result_ring_is_full(const result_ring_t* ring) {

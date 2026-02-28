@@ -4,8 +4,6 @@
 #include "box/string.h"
 #include "box/system.h"
 
-extern int find_file_by_name(const char* filename, uint32_t* file_ids,
-                             file_info_t* out_infos, size_t max);
 
 int cmd_info(int argc, char* argv[]) {
     if (argc < 2) {

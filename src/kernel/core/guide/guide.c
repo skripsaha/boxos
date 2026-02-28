@@ -415,16 +415,11 @@ void guide_run(void)
 
 uint32_t guide_alloc_event_id(void)
 {
-    // BUG #10 FIX: Skip 0 and handle wraparound
-    // Event ID 0 could be confused with uninitialized/invalid
-    // After 4 billion events, wrap back to 1 (not 0)
-    uint32_t id = atomic_fetch_add_u32(&next_event_id, 1);
-    if (id == 0)
-    {
-        // Wraparound detected, skip 0 and start at 1
-        atomic_store_u32(&next_event_id, 1);
-        return 1;
-    }
+    uint32_t id;
+    do {
+        id = atomic_load_u32(&next_event_id);
+        if (id == 0) id = 1;
+    } while (!atomic_cas_u32(&next_event_id, id, id + 1));
     return id;
 }
 

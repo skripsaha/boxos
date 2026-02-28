@@ -77,11 +77,11 @@ static inline uint32_t atomic_fetch_add_u32(volatile uint32_t* ptr, uint32_t val
 }
 
 static inline uint32_t atomic_fetch_sub_u32(volatile uint32_t* ptr, uint32_t val) {
-    return atomic_fetch_add_u32(ptr, (uint32_t)(-(int32_t)val));
+    return atomic_fetch_add_u32(ptr, ~val + 1);
 }
 
 static inline uint64_t atomic_fetch_sub_u64(volatile uint64_t* ptr, uint64_t val) {
-    return atomic_fetch_add_u64(ptr, (uint64_t)(-(int64_t)val));
+    return atomic_fetch_add_u64(ptr, ~val + 1);
 }
 
 static inline uint8_t atomic_fetch_add_u8(volatile uint8_t* ptr, uint8_t val) {
@@ -96,7 +96,7 @@ static inline uint8_t atomic_fetch_add_u8(volatile uint8_t* ptr, uint8_t val) {
 }
 
 static inline uint8_t atomic_fetch_sub_u8(volatile uint8_t* ptr, uint8_t val) {
-    return atomic_fetch_add_u8(ptr, (uint8_t)(-(int8_t)val));
+    return atomic_fetch_add_u8(ptr, (uint8_t)(~val + 1));
 }
 
 static inline void cpu_pause(void) {

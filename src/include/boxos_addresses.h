@@ -1,10 +1,7 @@
 #ifndef BOXOS_ADDRESSES_H
 #define BOXOS_ADDRESSES_H
 
-// ============================================================================
-// BOXOS FIXED USERSPACE PAGE ADDRESSES
-// ============================================================================
-// Centralized address definitions for special pages mapped in userspace
+// Centralized address definitions for special pages mapped in userspace.
 // See: docs/core/memory_cabin.md
 
 #include "cabin_layout.h"

@@ -7,9 +7,6 @@
 // Overflow marker in result payload
 #define BOX_RESULT_OVERFLOW_MARKER 0xDEADBEEF
 
-// Payload size reduced to accommodate error_code field
-#define BOX_RESULT_PAYLOAD_SIZE 244
-
 // Result Entry (from kernel result_page.h)
 // MUST match kernel result_entry_t layout exactly
 typedef struct BOX_PACKED

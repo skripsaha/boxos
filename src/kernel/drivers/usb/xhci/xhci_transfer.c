@@ -10,10 +10,6 @@
 #include "atomics.h"
 #include "cpu_calibrate.h"
 
-extern struct xhci_pending_cmd pending_cmds[];
-extern spinlock_t pending_cmds_lock;
-extern uint32_t cmd_sequence;
-
 static struct xhci_pending_cmd *find_free_pending_cmd(void)
 {
     spin_lock(&pending_cmds_lock);

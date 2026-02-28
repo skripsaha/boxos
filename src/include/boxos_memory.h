@@ -3,10 +3,6 @@
 
 #include "ktypes.h"
 
-// ============================================================================
-// BOXOS MEMORY BOUNDARIES AND CONSTANTS
-// ============================================================================
-
 // Important memory boundaries
 #define BOXOS_LOW_MEMORY_END       0x100000ULL     // 1MB - End of real mode region
 #define BOXOS_CRITICAL_MEMORY_END  0x1000000ULL    // 16MB - Critical kernel region

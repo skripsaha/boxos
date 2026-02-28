@@ -4,6 +4,7 @@
 #include "ktypes.h"
 #include "boxos_magic.h"
 #include "boxos_limits.h"
+#include "boxos_sizes.h"
 
 // TagFS Magic Number and Version
 #define TAGFS_MAGIC             BOXOS_TAGFS_MAGIC        // "TAGF"

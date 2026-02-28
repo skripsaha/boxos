@@ -1,10 +1,6 @@
 #ifndef BOXOS_LIMITS_H
 #define BOXOS_LIMITS_H
 
-// ============================================================================
-// BOXOS SYSTEM LIMITS
-// ============================================================================
-
 // Process limits
 #define BOXOS_MAX_PROCESSES      256
 #define BOXOS_MAX_OPEN_FILES     256
@@ -16,7 +12,6 @@
 // Hardware limits
 #define BOXOS_IDT_ENTRIES        256
 #define BOXOS_ATA_SECTOR_SIZE    512
-#define BOXOS_PAGE_SIZE          4096
 
 // TagFS limits
 #define BOXOS_TAGFS_MAX_FILES    1024  // Phase 1 limit

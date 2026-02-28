@@ -17,7 +17,7 @@ int tag_bitmap_rebuild(TagBitmapIndex* index, TagFSMetadata* metadata_cache,
                        uint32_t total_files);
 bool tag_bitmap_has_tag(TagBitmapIndex* index, const char* tag_string, uint32_t file_id);
 
-// Hash function for tag strings (shared with tag_index.c)
+// Hash function for tag strings
 uint32_t tag_hash(const char* tag_string);
 
 #endif // TAG_BITMAP_H

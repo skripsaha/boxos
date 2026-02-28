@@ -3,11 +3,7 @@
 
 #include "klib.h"
 
-// ============================================================================
-// BOXOS DEBUG MACROS
-// ============================================================================
 // Standardized debug output format: [SUBSYSTEM] message
-// Subsystem tags should be 3-8 characters for alignment consistency
 
 // Debug levels
 #define DEBUG_LEVEL_INFO  0

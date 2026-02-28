@@ -1,10 +1,7 @@
 #ifndef BOXOS_SIZES_H
 #define BOXOS_SIZES_H
 
-// ============================================================================
-// BOXOS SIZE CONSTANTS
-// ============================================================================
-// Shared size definitions for event/notify/result structures
+// Shared size definitions for event/notify/result structures.
 
 // Page sizes
 #define BOXOS_PAGE_SIZE          4096

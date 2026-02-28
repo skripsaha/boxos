@@ -176,6 +176,7 @@ void exception_handler(interrupt_frame_t* frame) {
 // IRQ handler (called from isr.asm)
 void irq_handler(interrupt_frame_t* frame) {
     uint8_t irq = frame->vector - 32;
+    if (irq >= 16) return;
     irq_count[irq]++;
 
     if (irq_callbacks[irq] != NULL) {
@@ -229,7 +230,6 @@ void irq_handler(interrupt_frame_t* frame) {
 }
 
 void syscall_handler(interrupt_frame_t* frame) {
-    // STEP 1: Атомарно получить current_process под lock + increment ref
     scheduler_state_t* sched_state = scheduler_get_state();
 
     spin_lock(&sched_state->scheduler_lock);
@@ -244,7 +244,6 @@ void syscall_handler(interrupt_frame_t* frame) {
     // CRITICAL: Increment ref_count BEFORE releasing lock
     process_ref_inc(proc);
 
-    // STEP 2: Проверка magic (защита от poisoned process)
     if (proc->magic != PROCESS_MAGIC) {
         process_ref_dec(proc);
         spin_unlock(&sched_state->scheduler_lock);
@@ -253,9 +252,7 @@ void syscall_handler(interrupt_frame_t* frame) {
     }
 
     spin_unlock(&sched_state->scheduler_lock);
-    // ← Lock released: АСИНХРОННОСТЬ СОХРАНЕНА
 
-    // STEP 3: Проверка состояния
     process_state_t state = process_get_state(proc);
     if (state != PROC_RUNNING && state != PROC_BLOCKED) {
         process_ref_dec(proc);
@@ -263,7 +260,6 @@ void syscall_handler(interrupt_frame_t* frame) {
         return;
     }
 
-    // STEP 4: Безопасный доступ к notify_page
     uint64_t notify_phys = proc->notify_page_phys;
     if (!notify_phys) {
         process_ref_dec(proc);
@@ -372,7 +368,7 @@ void syscall_handler(interrupt_frame_t* frame) {
     context_save_from_frame(proc, frame);
     process_set_state(proc, PROC_BLOCKED);
 
-    // STEP 7: CRITICAL - decrement ПЕРЕД scheduler_yield
+    // CRITICAL: decrement before scheduler_yield
     process_ref_dec(proc);
 
     scheduler_yield_from_interrupt(frame);

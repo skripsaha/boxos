@@ -142,7 +142,7 @@ char* uint_to_str(unsigned int value, char* buf, size_t buf_size) {
 }
 
 char* to_hex(uint32_t value, char* buf, size_t buf_size) {
-    if (!buf || buf_size < 3) return buf;
+    if (!buf || buf_size < 4) return buf;
 
     const char digits[] = "0123456789abcdef";
 

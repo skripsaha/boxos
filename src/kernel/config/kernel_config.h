@@ -84,18 +84,6 @@
 // Timeout for blocked processes (milliseconds)
 #define CONFIG_EVENTRING_BLOCK_TIMEOUT_MS 500
 
-// ============================================================================
-// DEPRECATED / RESERVED FOR FUTURE
-// ============================================================================
-#if 0 // Workflow Engine and Routing (NOT IMPLEMENTED)
-#define CONFIG_MAX_ROUTING_STEPS 8
-#define CONFIG_ROUTING_TABLE_SIZE 64
-#define CONFIG_DECK_QUEUE_SIZE 128
-#define CONFIG_WORKFLOW_MAX_EVENTS 16
-#define CONFIG_WORKFLOW_NAME_MAX 32
-#define CONFIG_WORKFLOW_MAX_DEPENDENCIES 8
-#endif
-
 // Event sizes (authoritative definitions in events.h)
 // CONFIG_EVENT_DATA_SIZE = 256 bytes
 // CONFIG_RESPONSE_DATA_SIZE = 4064 bytes

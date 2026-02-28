@@ -576,10 +576,10 @@ void scheduler_audit_fairness(void) {
                     found_starved = true;
                 }
 
-                debug_printf("[SCHEDULER]   PID %u: starved for %lu ticks (%.1f ms), consecutive_runs=%u\n",
+                debug_printf("[SCHEDULER]   PID %u: starved for %lu ticks (%lu ms), consecutive_runs=%u\n",
                              proc->pid,
                              ticks_since_run,
-                             (float)ticks_since_run * 10.0f,
+                             ticks_since_run * 10,
                              proc->consecutive_runs);
             }
         }

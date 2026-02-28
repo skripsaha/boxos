@@ -10,7 +10,8 @@ endif
 
 CFLAGS = -nostdlib -ffreestanding -fno-builtin -mno-red-zone -fno-stack-protector \
          -fno-pic -static -Wall -Wextra -g \
-         -I../boxlib/include
+         -I../boxlib/include \
+         -I../../include
 
 BOXLIB_DIR = ../boxlib
 LDFLAGS    = -nostdlib -static -T $(BOXLIB_DIR)/user.ld

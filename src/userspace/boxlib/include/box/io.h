@@ -3,16 +3,11 @@
 
 #include "box/defs.h"
 
-// I/O Mode
 #define IO_MODE_VGA 0
 #define IO_MODE_IPC 1
 
 void io_set_mode(uint8_t mode);
 uint8_t io_get_mode(void);
-
-// ============================================================================
-// OUTPUT
-// ============================================================================
 
 void print(const char* str);
 void println(const char* str);
@@ -20,25 +15,14 @@ int printf(const char* fmt, ...);
 void clear(void);
 void color(uint8_t c);
 
-// ============================================================================
-// INPUT
-// ============================================================================
-
 int readline(char* buffer, size_t max_len);
 int getchar(void);
 int input(const char* prompt, char* buffer, size_t max_len);
 
-// ============================================================================
-// HELPERS
-// ============================================================================
-
 void print_int(int num);
 void print_hex(uint32_t num);
 
-// ============================================================================
-// VGA COLORS
-// ============================================================================
-
+// VGA color constants
 #define COLOR_BLACK         0x00
 #define COLOR_BLUE          0x01
 #define COLOR_GREEN         0x02

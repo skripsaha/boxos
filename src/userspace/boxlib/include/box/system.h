@@ -43,32 +43,24 @@ typedef struct {
     uint32_t used_memory;
 } system_info_t;
 
-// Process
 int proc_info(uint16_t pid, proc_info_t* info);
 void exit(uint32_t exit_code);
 int proc_exec(const char* filename);
 
-// Buffers
 int buffer_alloc(uint8_t size_class, uint16_t* out_buffer_id, uint32_t* out_address);
 int buffer_free(uint16_t buffer_id);
 
-// Process Tags
 int proc_tag_add(const char* tag);
 int proc_tag_remove(const char* tag);
 int proc_tag_check(const char* tag, bool* has_tag);
 
-// Power
 int reboot(void);
 int shutdown(void);
-
-// Info
 int sysinfo(system_info_t* info);
 
-// Filesystem
 int defrag(uint32_t file_id, uint32_t target_block);
 int fragmentation(void);
 
-// Scheduling
 void yield(void);
 
 #endif // BOX_SYSTEM_H

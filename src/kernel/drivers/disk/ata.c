@@ -8,16 +8,8 @@
 #include "ahci.h"
 #include "ahci_sync.h"
 
-// ============================================================================
-// GLOBAL DEVICES
-// ============================================================================
-
 ATADevice ata_primary_master;
 ATADevice ata_primary_slave;
-
-// ============================================================================
-// HELPER FUNCTIONS
-// ============================================================================
 
 static inline void ata_delay_400ns(void) {
     // Read status register 4 times (each read = ~100ns)
@@ -71,9 +63,6 @@ int ata_wait_drq(void) {
     return -1;  // Timeout
 }
 
-// ============================================================================
-// STRING UTILITIES (для IDENTIFY)
-// ============================================================================
 
 static void ata_string_fixup(char* str, int len) {
     // ATA strings are byte-swapped pairs
@@ -94,9 +83,6 @@ static void ata_string_fixup(char* str, int len) {
     str[len] = '\0';
 }
 
-// ============================================================================
-// IDENTIFY DEVICE
-// ============================================================================
 
 int ata_identify(uint8_t is_master, ATADevice* device) {
     uint16_t identify_data[256];
@@ -183,9 +169,6 @@ int ata_identify(uint8_t is_master, ATADevice* device) {
     return 0;
 }
 
-// ============================================================================
-// READ SECTORS
-// ============================================================================
 
 int ata_read_sectors(uint8_t is_master, uint32_t lba, uint8_t count, uint8_t* buffer) {
     if (!buffer || count == 0) {
@@ -255,9 +238,6 @@ int ata_read_sectors(uint8_t is_master, uint32_t lba, uint8_t count, uint8_t* bu
     return 0;  // Success
 }
 
-// ============================================================================
-// WRITE SECTORS
-// ============================================================================
 
 int ata_write_sectors(uint8_t is_master, uint32_t lba, uint8_t count, const uint8_t* buffer) {
     if (!buffer || count == 0) {
@@ -338,9 +318,6 @@ int ata_write_sectors(uint8_t is_master, uint32_t lba, uint8_t count, const uint
     return 0;  // Success
 }
 
-// ============================================================================
-// CACHE FLUSH
-// ============================================================================
 
 int ata_flush_cache(uint8_t is_master) {
     if (ahci_is_initialized()) {
@@ -365,16 +342,10 @@ int ata_flush_cache(uint8_t is_master) {
     return -1;
 }
 
-// ============================================================================
-// ERROR HANDLING & RETRY
-// ============================================================================
-
-// Читать ERROR register для детальной диагностики
 static uint8_t ata_read_error(void) {
     return inb(ATA_PRIMARY_ERROR);
 }
 
-// Декодировать ошибку
 static const char* ata_decode_error(uint8_t error) {
     if (error & 0x01) return "Address mark not found";
     if (error & 0x02) return "Track 0 not found";
@@ -387,7 +358,6 @@ static const char* ata_decode_error(uint8_t error) {
     return "Unknown error";
 }
 
-// Read с retry логикой
 int ata_read_sectors_retry(uint8_t is_master, uint32_t lba, uint8_t count, uint8_t* buffer) {
     const int MAX_RETRIES = 3;
 
@@ -398,14 +368,12 @@ int ata_read_sectors_retry(uint8_t is_master, uint32_t lba, uint8_t count, uint8
             return 0;  // Success
         }
 
-        // Читаем ERROR register
         uint8_t error = ata_read_error();
         if (error != 0) {
             debug_printf("[ATA] Read error (retry %d/%d): %s (0x%02x)\n",
                     retry + 1, MAX_RETRIES, ata_decode_error(error), error);
         }
 
-        // Небольшая задержка перед retry
         for (volatile int i = 0; i < 10000; i++) { }
     }
 
@@ -413,7 +381,6 @@ int ata_read_sectors_retry(uint8_t is_master, uint32_t lba, uint8_t count, uint8
     return -1;
 }
 
-// Write с retry логикой
 int ata_write_sectors_retry(uint8_t is_master, uint32_t lba, uint8_t count, const uint8_t* buffer) {
     const int MAX_RETRIES = 3;
 
@@ -424,14 +391,12 @@ int ata_write_sectors_retry(uint8_t is_master, uint32_t lba, uint8_t count, cons
             return 0;  // Success
         }
 
-        // Читаем ERROR register
         uint8_t error = ata_read_error();
         if (error != 0) {
             debug_printf("[ATA] Write error (retry %d/%d): %s (0x%02x)\n",
                     retry + 1, MAX_RETRIES, ata_decode_error(error), error);
         }
 
-        // Небольшая задержка перед retry
         for (volatile int i = 0; i < 10000; i++) { }
     }
 
@@ -439,19 +404,9 @@ int ata_write_sectors_retry(uint8_t is_master, uint32_t lba, uint8_t count, cons
     return -1;
 }
 
-// ============================================================================
-// HIGH-LEVEL DISK I/O для TagFS
-// ============================================================================
-
-// CRITICAL: Filesystem offset to skip bootloader
-// Bootloader occupies sectors 0-9 (Stage1 + Stage2)
-// Reserve sectors 0-15 (2 blocks) for safety
-// Filesystem starts at sector 16
+// CRITICAL: Reserve sectors 0-15 for bootloader (Stage1 + Stage2 occupy 0-9)
 #define FILESYSTEM_START_SECTOR 16
 
-// Читать блок (4KB) для TagFS
-// block_num - номер блока TagFS (4KB)
-// buffer - буфер для данных (должен быть 4096 байт)
 int ata_read_block(uint32_t block_num, uint8_t* buffer) {
     if (!buffer) return ATA_ERR_INVALID_ARGS;
     if (!ata_primary_master.exists) return ATA_ERR_NO_DEVICE;
@@ -461,7 +416,6 @@ int ata_read_block(uint32_t block_num, uint8_t* buffer) {
     return ata_read_sectors_retry(1, lba, 8, buffer);
 }
 
-// Записать блок (4KB) для TagFS
 int ata_write_block(uint32_t block_num, const uint8_t* buffer) {
     if (!buffer) return ATA_ERR_INVALID_ARGS;
     if (!ata_primary_master.exists) return ATA_ERR_NO_DEVICE;
@@ -471,7 +425,6 @@ int ata_write_block(uint32_t block_num, const uint8_t* buffer) {
     return ata_write_sectors_retry(1, lba, 8, buffer);
 }
 
-// Читать несколько блоков подряд
 int ata_read_blocks(uint32_t start_block, uint32_t count, uint8_t* buffer) {
     for (uint32_t i = 0; i < count; i++) {
         if (ata_read_block(start_block + i, buffer + i * 4096) != 0) {
@@ -481,7 +434,6 @@ int ata_read_blocks(uint32_t start_block, uint32_t count, uint8_t* buffer) {
     return 0;
 }
 
-// Записать несколько блоков подряд
 int ata_write_blocks(uint32_t start_block, uint32_t count, const uint8_t* buffer) {
     for (uint32_t i = 0; i < count; i++) {
         if (ata_write_block(start_block + i, buffer + i * 4096) != 0) {
@@ -491,37 +443,27 @@ int ata_write_blocks(uint32_t start_block, uint32_t count, const uint8_t* buffer
     return 0;
 }
 
-// ============================================================================
-// INITIALIZATION
-// ============================================================================
-
-// ATA Software Reset - критически важно для инициализации!
 static void ata_soft_reset(void) {
     debug_printf("[ATA] Performing software reset...\n");
 
-    // Soft reset: установить бит SRST (Software Reset) в Device Control Register
-    outb(ATA_PRIMARY_CONTROL, 0x04);  // nIEN=0, SRST=1
+    outb(ATA_PRIMARY_CONTROL, 0x04);  // SRST=1
     ata_delay_400ns();
-    ata_delay_400ns();  // Дополнительная задержка (800ns минимум)
+    ata_delay_400ns();  // Minimum 800ns
 
-    // Сбросить SRST
-    outb(ATA_PRIMARY_CONTROL, 0x00);  // nIEN=0, SRST=0
+    outb(ATA_PRIMARY_CONTROL, 0x00);  // SRST=0
     ata_delay_400ns();
 
-    // Ждем пока BSY очистится после reset (может занять до 31 секунд по спецификации!)
-    // PRODUCTION FIX: Use TSC-based timeout (10 seconds is reasonable)
-    uint64_t timeout_tsc = rdtsc() + cpu_ms_to_tsc(10000);  // 10 second timeout for reset
+    // BSY can take up to 31 seconds to clear per spec; 10s is reasonable
+    uint64_t timeout_tsc = rdtsc() + cpu_ms_to_tsc(10000);
 
     while (rdtsc() < timeout_tsc) {
         uint8_t status = ata_read_status();
 
-        // Если статус 0 или 0xFF - диск отсутствует
         if (status == 0 || status == 0xFF) {
             debug_printf("[ATA] No drive detected after reset (status=0x%x)\n", status);
             return;
         }
 
-        // Ждем пока BSY очистится
         if (!(status & ATA_SR_BSY)) {
             debug_printf("[ATA] Reset complete, drive ready\n");
             return;
@@ -566,10 +508,6 @@ void ata_init(void) {
     debug_printf("[ATA] Initialization complete (master=%d, slave=%d)\n",
             ata_primary_master.exists, ata_primary_slave.exists);
 }
-
-// ============================================================================
-// UTILITY
-// ============================================================================
 
 void ata_print_device_info(const ATADevice* device) {
     if (!device->exists) {

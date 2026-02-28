@@ -3,8 +3,6 @@
 #include "box/file.h"
 #include "box/string.h"
 
-extern int find_file_by_name(const char* filename, uint32_t* file_ids,
-                             file_info_t* out_infos, size_t max);
 
 int cmd_erase(int argc, char* argv[]) {
     if (argc < 2) {
