@@ -44,7 +44,6 @@ typedef struct {
 void tss_init(void);
 void tss_set_rsp0(uint64_t rsp0);
 void tss_load(void);
-void tss_test(void);
 uint64_t tss_get_ist_stack(int ist_num);
 
 #endif // TSS_H

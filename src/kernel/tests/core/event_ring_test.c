@@ -1,5 +1,5 @@
 #include "event_ring_test.h"
-#include "event_ring_dynamic.h"
+#include "event_ring.h"
 #include "events.h"
 #include "klib.h"
 #include "error.h"

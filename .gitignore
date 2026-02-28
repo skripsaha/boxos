@@ -27,3 +27,4 @@ build/
 *.a
 *.bin
 *.elf
+*.backup

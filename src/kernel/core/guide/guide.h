@@ -3,7 +3,7 @@
 
 #include "ktypes.h"
 #include "events.h"
-#include "event_ring_dynamic.h"
+#include "event_ring.h"
 #include "klib.h"
 
 extern EventRingBuffer* kernel_event_ring;

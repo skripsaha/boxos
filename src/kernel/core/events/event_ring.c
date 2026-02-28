@@ -1,4 +1,4 @@
-#include "event_ring_dynamic.h"
+#include "event_ring.h"
 
 EventRingBuffer* event_ring_create(size_t initial_capacity) {
     if (initial_capacity != EVENT_RING_MIN_CAPACITY &&

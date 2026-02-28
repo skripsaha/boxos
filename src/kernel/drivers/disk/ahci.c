@@ -9,7 +9,7 @@
 #include "events.h"
 #include "error.h"
 #include "pic.h"
-#include "event_ring_dynamic.h"
+#include "event_ring.h"
 #include "process.h"
 #include "cpu_calibrate.h"
 #include "boxos_memory.h"
