@@ -1,5 +1,5 @@
-#ifndef EVENT_RING_DYNAMIC_H
-#define EVENT_RING_DYNAMIC_H
+#ifndef EVENT_RING_H
+#define EVENT_RING_H
 
 #include "events.h"
 #include "error.h"

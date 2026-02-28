@@ -27,7 +27,7 @@
 #include "journal_test.h"
 #include "route_test.h"
 #include "kernel_config.h"
-#include "event_ring_dynamic.h"
+#include "event_ring.h"
 #include "xhci.h"
 #include "acpi.h"
 #include "ahci.h"

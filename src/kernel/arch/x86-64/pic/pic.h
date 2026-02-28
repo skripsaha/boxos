@@ -33,6 +33,5 @@ void pic_send_eoi(uint8_t irq);
 void pic_set_mask(uint8_t mask1, uint8_t mask2);
 uint16_t pic_get_irr(void);
 uint16_t pic_get_isr(void);
-void pic_test(void);
 
 #endif // PIC_H

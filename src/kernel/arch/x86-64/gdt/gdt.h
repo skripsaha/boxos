@@ -29,6 +29,5 @@ void gdt_init(void);
 void gdt_set_entry(int index, uint64_t base, uint64_t limit, uint8_t access, uint8_t flags);
 void gdt_set_tss_entry(int index, uint64_t base, uint64_t limit);
 void gdt_load(void);
-void gdt_test(void);
 
 #endif // GDT_H

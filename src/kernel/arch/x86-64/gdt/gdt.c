@@ -85,34 +85,3 @@ void gdt_load(void) {
     debug_printf("[GDT] Loading GDT at 0x%p (limit: %d)...\n", (void*)gdt_desc.base, gdt_desc.limit);
     gdt_load_asm((uint64_t)&gdt_desc);
 }
-
-void gdt_test(void) {
-    debug_printf("[GDT] %[H]Testing GDT...%[D]\n");
-
-    uint16_t cs, ds;
-    asm volatile("mov %%cs, %0" : "=r"(cs));
-    asm volatile("mov %%ds, %0" : "=r"(ds));
-
-    debug_printf("[GDT] Current CS: 0x%04X (expected: 0x%04X)\n", cs, GDT_KERNEL_CODE);
-    debug_printf("[GDT] Current DS: 0x%04X (expected: 0x%04X)\n", ds, GDT_KERNEL_DATA);
-
-    if (cs == GDT_KERNEL_CODE && ds == GDT_KERNEL_DATA) {
-        debug_printf("[GDT] %[S]GDT test PASSED!%[D]\n");
-    } else {
-        debug_printf("[GDT] %[E]GDT test FAILED!%[D]\n");
-        panic("GDT verification failed");
-    }
-
-    debug_printf("[GDT] Testing segment access...\n");
-
-    volatile uint32_t test_value = 0x12345678;
-    uint32_t read_value = test_value;
-
-    if (read_value == 0x12345678) {
-        debug_printf("[GDT] %[S]Memory access through DS: OK%[D]\n");
-    } else {
-        debug_printf("[GDT] %[E]Memory access through DS: FAILED%[D]\n");
-    }
-
-    debug_printf("[GDT] %[S]All GDT tests completed!%[D]\n");
-}
