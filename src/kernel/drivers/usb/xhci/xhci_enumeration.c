@@ -9,8 +9,6 @@
 #include "vmm.h"
 #include "atomics.h"
 
-#define HID_REQ_SET_IDLE        0x0A
-#define HID_REQ_SET_PROTOCOL    0x0B
 #define HID_PROTOCOL_BOOT       0
 #define HID_PROTOCOL_REPORT     1
 #define HID_BMREQUEST_TYPE_OUT  0x21

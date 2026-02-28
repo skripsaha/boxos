@@ -9,6 +9,9 @@
 #include "result_page.h"
 #include "vmm.h"
 #include "../listen_table.h"
+#include "kernel_config.h"
+
+#if CONFIG_RUN_STARTUP_TESTS
 
 void test_listen_table(void) {
     kprintf("\n====================================\n");
@@ -529,7 +532,6 @@ void test_route_security(void) {
         return;
     }
 
-    // --- ROUTE permission tests ---
     total++;
     kprintf("\n[TEST %d] ROUTE: 'app' process can route\n", total);
     if (system_security_gate(app_proc->pid, SYSTEM_DECK_ID, SYSTEM_OP_ROUTE)) {
@@ -566,7 +568,6 @@ void test_route_security(void) {
         debug_printf("[TEST %d] FAIL: bare should be denied ROUTE\n", total);
     }
 
-    // --- ROUTE_TAG permission tests ---
     total++;
     kprintf("\n[TEST %d] ROUTE_TAG: 'app' process can route_tag\n", total);
     if (system_security_gate(app_proc->pid, SYSTEM_DECK_ID, SYSTEM_OP_ROUTE_TAG)) {
@@ -585,7 +586,6 @@ void test_route_security(void) {
         debug_printf("[TEST %d] FAIL: bare should be denied ROUTE_TAG\n", total);
     }
 
-    // --- LISTEN permission tests ---
     total++;
     kprintf("\n[TEST %d] LISTEN: 'app' process can listen\n", total);
     if (system_security_gate(app_proc->pid, SYSTEM_DECK_ID, SYSTEM_OP_LISTEN)) {
@@ -642,3 +642,13 @@ void test_route_security(void) {
     kprintf("Results: %d/%d tests passed\n", passed, total);
     kprintf("====================================\n\n");
 }
+
+#else
+
+void test_listen_table(void) { (void)0; }
+void test_route_direct(void) { (void)0; }
+void test_route_tag(void) { (void)0; }
+void test_listen_via_system_deck(void) { (void)0; }
+void test_route_security(void) { (void)0; }
+
+#endif

@@ -207,6 +207,4 @@ int tagfs_defrag_file(uint32_t file_id, uint32_t target_block);
 // Get filesystem fragmentation score (0-100)
 uint32_t tagfs_get_fragmentation_score(void);
 
-void tagfs_run_defrag_tests(void);
-
 #endif // TAGFS_H

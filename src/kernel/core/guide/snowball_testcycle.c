@@ -6,6 +6,9 @@
 #include "klib.h"
 #include "atomics.h"
 #include "error.h"
+#include "kernel_config.h"
+
+#if CONFIG_RUN_STARTUP_TESTS
 
 void test_full_cycle(void)
 {
@@ -42,11 +45,9 @@ void test_full_cycle(void)
     notify->prefixes[0] = 0x0102;
     notify->prefixes[1] = 0x0000;
 
-    // BUF_FILL: offset(4BE) + length(4BE) + pattern(1)
-    // Fill 8 bytes at offset 0 with pattern 0x42
-    notify->data[0] = 0x00; notify->data[1] = 0x00; notify->data[2] = 0x00; notify->data[3] = 0x00; // offset = 0
-    notify->data[4] = 0x00; notify->data[5] = 0x00; notify->data[6] = 0x00; notify->data[7] = 0x08; // length = 8
-    notify->data[8] = 0x42; // pattern byte
+    notify->data[0] = 0x00; notify->data[1] = 0x00; notify->data[2] = 0x00; notify->data[3] = 0x00;
+    notify->data[4] = 0x00; notify->data[5] = 0x00; notify->data[6] = 0x00; notify->data[7] = 0x08;
+    notify->data[8] = 0x42;
 
     debug_printf("[TEST]   Magic: 0x%08x\n", notify->magic);
     debug_printf("[TEST]   Prefix count: %u\n", notify->prefix_count);
@@ -93,7 +94,7 @@ void test_full_cycle(void)
     guide_run();
 
     debug_printf("[TEST] Step 6: Wait for result...\n");
-    for (volatile int i = 0; i < 1000000; i++);  // Simple delay
+    for (volatile int i = 0; i < 1000000; i++);
 
     debug_printf("[TEST] Step 7: Check Result Page (ResultRing)\n");
     result_page_t* result_page = (result_page_t*)vmm_phys_to_virt(result_phys);
@@ -111,26 +112,26 @@ void test_full_cycle(void)
         goto cleanup;
     }
 
-    // Read first result from ring
-    result_entry_t* result = &result_page->ring.entries[result_page->ring.head];
+    {
+        result_entry_t* result = &result_page->ring.entries[result_page->ring.head];
 
-    if (result->error_code != BOXOS_OK) {
-        debug_printf("[TEST] FAIL: Event status error (%u)\n", result->error_code);
-        goto cleanup;
+        if (result->error_code != BOXOS_OK) {
+            debug_printf("[TEST] FAIL: Event status error (%u)\n", result->error_code);
+            goto cleanup;
+        }
+
+        debug_printf("[TEST] Result received: error_code=%u, size=%u\n",
+                result->error_code, result->size);
+
+        if (result->size > 0) {
+            debug_printf("[TEST] Data: '%s'\n", (char *)result->payload);
+            debug_printf("[TEST] Data verification: PASS\n");
+        } else {
+            debug_printf("[TEST] WARN: No data in result\n");
+        }
+
+        debug_printf("[TEST] SUCCESS: Full cycle completed!\n");
     }
-
-    debug_printf("[TEST] Result received: error_code=%u, size=%u\n",
-            result->error_code, result->size);
-
-    // Verify data (should contain test string)
-    if (result->size > 0) {
-        debug_printf("[TEST] Data: '%s'\n", (char *)result->payload);
-        debug_printf("[TEST] Data verification: PASS\n");
-    } else {
-        debug_printf("[TEST] WARN: No data in result\n");
-    }
-
-    debug_printf("[TEST] SUCCESS: Full cycle completed!\n");
 
 cleanup:
     debug_printf("[TEST] Step 8: Check process state\n");
@@ -151,3 +152,9 @@ cleanup:
     kprintf("====================================================================\n");
     kprintf("\n");
 }
+
+#else
+
+void test_full_cycle(void) { (void)0; }
+
+#endif

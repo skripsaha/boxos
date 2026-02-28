@@ -7,6 +7,9 @@
 #include "guide.h"
 #include "klib.h"
 #include "pmm.h"
+#include "kernel_config.h"
+
+#if CONFIG_RUN_STARTUP_TESTS
 
 void test_system_deck_security(void) {
     kprintf("\n====================================\n");
@@ -787,3 +790,13 @@ void test_system_deck_ctx_use(void) {
     kprintf("Results: %d/%d tests passed\n", passed, total);
     kprintf("====================================\n\n");
 }
+
+#else
+
+void test_system_deck_security(void) { (void)0; }
+void test_system_deck_process_management(void) { (void)0; }
+void test_system_deck_tag_management(void) { (void)0; }
+void test_system_deck_buffer_management(void) { (void)0; }
+void test_system_deck_ctx_use(void) { (void)0; }
+
+#endif

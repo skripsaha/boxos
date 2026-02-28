@@ -2,6 +2,9 @@
 #include "tagfs.h"
 #include "klib.h"
 #include "../drivers/disk/ata.h"
+#include "kernel_config.h"
+
+#if CONFIG_RUN_STARTUP_TESTS
 
 static int test_journal_init(void) {
     debug_printf("[JournalTest] Testing journal_init...\n");
@@ -471,37 +474,14 @@ int run_journal_tests(void) {
 
     int failed = 0;
 
-    if (test_journal_init() != 0) {
-        failed++;
-    }
-
-    if (test_journal_metadata_write() != 0) {
-        failed++;
-    }
-
-    if (test_journal_superblock_write() != 0) {
-        failed++;
-    }
-
-    if (test_journal_replay() != 0) {
-        failed++;
-    }
-
-    if (test_journal_abort() != 0) {
-        failed++;
-    }
-
-    if (test_journal_validate_and_replay() != 0) {
-        failed++;
-    }
-
-    if (test_journal_corrupted_magic() != 0) {
-        failed++;
-    }
-
-    if (test_journal_superblock_corruption() != 0) {
-        failed++;
-    }
+    if (test_journal_init() != 0) failed++;
+    if (test_journal_metadata_write() != 0) failed++;
+    if (test_journal_superblock_write() != 0) failed++;
+    if (test_journal_replay() != 0) failed++;
+    if (test_journal_abort() != 0) failed++;
+    if (test_journal_validate_and_replay() != 0) failed++;
+    if (test_journal_corrupted_magic() != 0) failed++;
+    if (test_journal_superblock_corruption() != 0) failed++;
 
     if (failed == 0) {
         debug_printf("[JournalTest] All tests passed\n");
@@ -511,3 +491,9 @@ int run_journal_tests(void) {
         return -1;
     }
 }
+
+#else
+
+int run_journal_tests(void) { (void)0; return 0; }
+
+#endif
