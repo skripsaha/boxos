@@ -1,7 +1,8 @@
 #include "commands.h"
 #include "box/io.h"
 
-int cmd_help(int argc, char* argv[]) {
+int cmd_help(int argc, char *argv[])
+{
     (void)argc;
     (void)argv;
 
@@ -28,6 +29,7 @@ int cmd_help(int argc, char* argv[]) {
     println("  bye                      Shutdown system");
     println("");
     println("General:");
+    println("  clear                    Clear the screen");
     println("  help                     Show this help");
     println("  exit                     Exit shell");
 
