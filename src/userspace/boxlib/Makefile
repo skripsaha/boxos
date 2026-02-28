@@ -10,7 +10,7 @@ endif
 CFLAGS = -nostdlib -fno-builtin -ffreestanding -mno-red-zone \
          -Iinclude -Wall -Wextra -O2 -fno-stack-protector -Wno-unused-parameter
 
-SRCS = src/core/notify.c src/core/result.c src/core/string.c \
+SRCS = src/core/notify.c src/core/chain.c src/core/result.c src/core/string.c \
        src/core/io.c src/core/file.c src/core/system.c \
        src/core/yield.c src/core/result_wait.c \
        src/core/result_wait_yield.c src/core/result_wait_umwait.c \

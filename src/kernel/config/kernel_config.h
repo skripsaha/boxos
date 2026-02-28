@@ -184,7 +184,7 @@
 
 // Master debug switch: Set to 0 to disable ALL debug output
 #ifndef CONFIG_DEBUG_ENABLED
-#define CONFIG_DEBUG_ENABLED 1
+#define CONFIG_DEBUG_ENABLED 0
 #endif
 
 // Set to 1 to enable debug output

@@ -1,4 +1,5 @@
 #include "box/io/keyboard.h"
+#include "box/chain.h"
 #include "box/notify.h"
 #include "box/result.h"
 #include "box/string.h"
@@ -17,9 +18,8 @@ static uint32_t kb_decode_u32(const uint8_t* payload, size_t offset) {
 }
 
 int kb_getchar(void) {
-    notify_prepare();
-    notify_add_prefix(BOX_DECK_HARDWARE, KB_OP_GETCHAR);
-    notify_execute();
+    hw_kb_getchar();
+    notify();
 
     result_entry_t result;
     if (!result_wait(&result, 1000)) {
@@ -34,9 +34,8 @@ int kb_getchar(void) {
 }
 
 int kb_getchar_timeout(uint32_t timeout_ms) {
-    notify_prepare();
-    notify_add_prefix(BOX_DECK_HARDWARE, KB_OP_GETCHAR);
-    notify_execute();
+    hw_kb_getchar();
+    notify();
 
     result_entry_t result;
     if (!result_wait(&result, timeout_ms)) {
@@ -55,9 +54,8 @@ int kb_getchar_ex(kb_char_t* out_char) {
         return -BOX_ERR_INVALID_ARGS;
     }
 
-    notify_prepare();
-    notify_add_prefix(BOX_DECK_HARDWARE, KB_OP_GETCHAR);
-    notify_execute();
+    hw_kb_getchar();
+    notify();
 
     result_entry_t result;
     if (!result_wait(&result, 1000)) {
@@ -85,17 +83,8 @@ int kb_readline(char* buffer, size_t size, bool echo) {
     uint32_t retry_count = 0;
 
     while (retry_count < max_retries) {
-        notify_prepare();
-        notify_add_prefix(BOX_DECK_HARDWARE, KB_OP_READLINE);
-
-        uint8_t data[4];
-        data[0] = (uint8_t)size;
-        data[1] = echo ? 1 : 0;
-        data[2] = 0;
-        data[3] = 0;
-
-        notify_write_data(data, 4);
-        notify_execute();
+        hw_kb_readline((uint8_t)size, echo);
+        notify();
 
         result_entry_t result;
         if (!result_wait(&result, 60000)) {
@@ -141,8 +130,11 @@ int kb_readline_async(char* buffer, size_t size, bool echo) {
         return -BOX_ERR_INVALID_ARGS;
     }
 
-    notify_prepare();
-    notify_add_prefix(BOX_DECK_HARDWARE, KB_OP_READLINE);
+    // Non-standard data encoding (16-bit size split), use raw notify helpers
+    notify_page_t* np = notify_page();
+    if (np->magic != BOX_NOTIFY_MAGIC) {
+        notify_prepare();
+    }
 
     uint8_t data[4];
     data[0] = (uint8_t)(size >> 8);
@@ -151,7 +143,8 @@ int kb_readline_async(char* buffer, size_t size, bool echo) {
     data[3] = 0;
 
     notify_write_data(data, 4);
-    event_id_t event_id = notify_execute();
+    notify_add_prefix(BOX_DECK_HARDWARE, KB_OP_READLINE);
+    event_id_t event_id = notify();
 
     return (int)event_id;
 }
@@ -161,9 +154,8 @@ int kb_status(kb_status_t* status) {
         return -BOX_ERR_INVALID_ARGS;
     }
 
-    notify_prepare();
-    notify_add_prefix(BOX_DECK_HARDWARE, KB_OP_STATUS);
-    notify_execute();
+    hw_kb_status();
+    notify();
 
     result_entry_t result;
     if (!result_wait(&result, 1000)) {

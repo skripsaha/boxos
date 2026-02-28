@@ -1,25 +1,13 @@
+#include "box/chain.h"
 #include "box/notify.h"
 #include "box/result.h"
 #include "box/error.h"
 #include "box/string.h"
-#include "box/types.h"
 #include "box/system.h"
 
-#define HARDWARE_DECK_ID     0x03
-#define HW_SYSTEM_REBOOT     0x80
-#define HW_SYSTEM_SHUTDOWN   0x81
-#define SYSTEM_DECK_ID       0xFF
-
 int reboot(void) {
-    notify_prepare();
-    notify_add_prefix(HARDWARE_DECK_ID, HW_SYSTEM_REBOOT);
-
-    uint8_t data[192];
-    memset(data, 0, 192);
-
-    notify_write_data(data, 192);
-    event_id_t event_id = notify_execute();
-    if (event_id == 0) return -1;
+    hw_reboot();
+    notify();
 
     result_entry_t result;
     result_wait(&result, 5000);
@@ -27,15 +15,8 @@ int reboot(void) {
 }
 
 int shutdown(void) {
-    notify_prepare();
-    notify_add_prefix(HARDWARE_DECK_ID, HW_SYSTEM_SHUTDOWN);
-
-    uint8_t data[192];
-    memset(data, 0, 192);
-
-    notify_write_data(data, 192);
-    event_id_t event_id = notify_execute();
-    if (event_id == 0) return -1;
+    hw_shutdown();
+    notify();
 
     result_entry_t result;
     result_wait(&result, 5000);
@@ -55,17 +36,8 @@ int sysinfo(system_info_t* info) {
 }
 
 int defrag(uint32_t file_id, uint32_t target_block) {
-    notify_prepare();
-    notify_add_prefix(SYSTEM_DECK_ID, 0x18);
-
-    uint8_t data[192];
-    memset(data, 0, 192);
-    memcpy(data, &file_id, 4);
-    memcpy(data + 4, &target_block, 4);
-
-    notify_write_data(data, 192);
-    event_id_t event_id = notify_execute();
-    if (event_id == 0) return -1;
+    fs_defrag(file_id, target_block);
+    notify();
 
     result_entry_t result;
     if (!result_wait(&result, 5000)) return -1;
@@ -80,15 +52,8 @@ int defrag(uint32_t file_id, uint32_t target_block) {
 }
 
 int fragmentation(void) {
-    notify_prepare();
-    notify_add_prefix(SYSTEM_DECK_ID, 0x19);
-
-    uint8_t data[192];
-    memset(data, 0, 192);
-
-    notify_write_data(data, 192);
-    event_id_t event_id = notify_execute();
-    if (event_id == 0) return -1;
+    fs_fraginfo();
+    notify();
 
     result_entry_t result;
     if (!result_wait(&result, 5000)) return -1;
