@@ -6,6 +6,9 @@
 #include "result_page.h"
 #include "vmm.h"
 #include "rtc.h"
+#include "kernel_config.h"
+
+#if CONFIG_RUN_STARTUP_TESTS
 
 void test_hardware_deck(void) {
     kprintf("\n====================================\n");
@@ -28,7 +31,7 @@ void test_hardware_deck(void) {
     int passed = 0;
     int total = 0;
 
-    // Test 1: TIMER_GET_TICKS (READ - no tags required)
+    // Test 1: TIMER_GET_TICKS
     {
         total++;
         kprintf("\n[TEST %d] TIMER_GET_TICKS: Read current ticks (no tags)\n", total);
@@ -75,7 +78,7 @@ void test_hardware_deck(void) {
         process_ref_dec(proc_no_tags);
     }
 
-    // Test 2: TIMER_GET_MS (READ - no tags required)
+    // Test 2: TIMER_GET_MS
     {
         total++;
         kprintf("\n[TEST %d] TIMER_GET_MS: Read milliseconds (no tags)\n", total);
@@ -122,7 +125,6 @@ void test_hardware_deck(void) {
         process_ref_dec(proc_no_tags);
     }
 
-    // Create process with hardware tag for privileged operations
     process_t* proc_hw = process_create("test:hardware:privileged");
     if (!proc_hw) {
         debug_printf("[TEST] ERROR: Cannot create process with hardware tag\n");
@@ -139,7 +141,7 @@ void test_hardware_deck(void) {
         return;
     }
 
-    // Test 3: PORT_INB (allowed port 0x80, requires hardware tag)
+    // Test 3: PORT_INB allowed
     {
         total++;
         kprintf("\n[TEST %d] PORT_INB: Read from POST code port (0x80) with hardware tag\n", total);
@@ -181,7 +183,7 @@ void test_hardware_deck(void) {
         process_ref_dec(proc_hw);
     }
 
-    // Test 4: PORT_INB (denied port 0x20 - PIC, even with hardware tag)
+    // Test 4: PORT_INB denied
     {
         total++;
         kprintf("\n[TEST %d] PORT_INB: Read from PIC port (0x20) - should be DENIED\n", total);
@@ -222,7 +224,7 @@ void test_hardware_deck(void) {
         process_ref_dec(proc_hw);
     }
 
-    // Test 5: IRQ_ENABLE (valid IRQ, requires hardware tag)
+    // Test 5: IRQ_ENABLE
     {
         total++;
         kprintf("\n[TEST %d] IRQ_ENABLE: Enable IRQ 3 (COM2) with hardware tag\n", total);
@@ -262,7 +264,7 @@ void test_hardware_deck(void) {
         process_ref_dec(proc_hw);
     }
 
-    // Test 6: RTC_GET_TIME (opcode 0x15, no tags required)
+    // Test 6: RTC_GET_TIME
     {
         total++;
         kprintf("\n[TEST %d] RTC_GET_TIME: Read current RTC time (no tags)\n", total);
@@ -321,7 +323,7 @@ void test_hardware_deck(void) {
         process_ref_dec(proc_no_tags);
     }
 
-    // Test 7: RTC_GET_UNIX64 (opcode 0x16, no tags required)
+    // Test 7: RTC_GET_UNIX64
     {
         total++;
         kprintf("\n[TEST %d] RTC_GET_UNIX64: Read seconds since epoch (no tags)\n", total);
@@ -367,7 +369,7 @@ void test_hardware_deck(void) {
         process_ref_dec(proc_no_tags);
     }
 
-    // Test 8: RTC_GET_UPTIME (opcode 0x17, no tags required)
+    // Test 8: RTC_GET_UPTIME
     {
         total++;
         kprintf("\n[TEST %d] RTC_GET_UPTIME: Read system uptime in nanoseconds (no tags)\n", total);
@@ -422,3 +424,9 @@ void test_hardware_deck(void) {
     kprintf("Results: %d/%d tests passed\n", passed, total);
     kprintf("====================================\n\n");
 }
+
+#else
+
+void test_hardware_deck(void) { (void)0; }
+
+#endif

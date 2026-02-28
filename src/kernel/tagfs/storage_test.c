@@ -5,6 +5,9 @@
 #include "process.h"
 #include "guide.h"
 #include "events.h"
+#include "kernel_config.h"
+
+#if CONFIG_RUN_STARTUP_TESTS
 
 static void test_tag_query(void) {
     kprintf("\n[TEST 1] TAG_QUERY for kernel file\n");
@@ -97,7 +100,6 @@ static void test_file_growth(void) {
 
     debug_printf("[TEST 5] About to create file...\n");
     uint32_t file_id;
-    // Create file with no tags to avoid potential tag parsing issues
     debug_printf("[TEST 5] Calling tagfs_create_file...\n");
     if (tagfs_create_file("growth_test.txt", NULL, 0, &file_id) != 0) {
         debug_printf("[TEST 5] FAIL: Could not create file\n");
@@ -264,7 +266,7 @@ static void test_obj_write_append(void) {
     event.prefix_count = 1;
     event.current_prefix_idx = 0;
 
-    obj_write_event_t*     write_req = (obj_write_event_t*)event.data;
+    obj_write_event_t* write_req = (obj_write_event_t*)event.data;
     write_req->file_id = file_id;
     write_req->offset = 0;
     write_req->length = 5;
@@ -362,3 +364,9 @@ void test_storage_deck(void) {
     kprintf("STORAGE DECK TEST COMPLETE\n");
     kprintf("====================================\n");
 }
+
+#else
+
+void test_storage_deck(void) { (void)0; }
+
+#endif

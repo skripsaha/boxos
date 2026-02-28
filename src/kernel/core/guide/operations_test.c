@@ -6,6 +6,9 @@
 #include "klib.h"
 #include "result_page.h"
 #include "vmm.h"
+#include "kernel_config.h"
+
+#if CONFIG_RUN_STARTUP_TESTS
 
 static void write_u32(uint8_t *data, size_t offset, uint32_t value)
 {
@@ -76,10 +79,9 @@ void test_operations_deck(void)
         Event event;
         event_init(&event, proc->pid, guide_alloc_event_id());
         event.prefix_count = 2;
-        event.prefixes[0] = 0x0102; // Operations Deck (0x01), BUF_FILL (0x02)
-        event.prefixes[1] = 0x0000; // Terminator
+        event.prefixes[0] = 0x0102;
+        event.prefixes[1] = 0x0000;
 
-        // Arguments: offset=20, len=10, byte=0xAA
         write_u32(event.data, 0, 20);
         write_u32(event.data, 4, 10);
         write_u32(event.data, 8, 0xAA);
@@ -129,16 +131,14 @@ void test_operations_deck(void)
         Event event;
         event_init(&event, proc->pid, guide_alloc_event_id());
         event.prefix_count = 2;
-        event.prefixes[0] = 0x0103; // Operations Deck (0x01), BUF_XOR (0x03)
+        event.prefixes[0] = 0x0103;
         event.prefixes[1] = 0x0000;
 
-        // First fill bytes 50-59 with 0xFF
         for (int i = 50; i < 60; i++)
         {
             event.data[i] = 0xFF;
         }
 
-        // Arguments: offset=50, len=10, mask=0x55
         write_u32(event.data, 0, 50);
         write_u32(event.data, 4, 10);
         write_u32(event.data, 8, 0x55);
@@ -158,7 +158,7 @@ void test_operations_deck(void)
             for (int i = 50; i < 60; i++)
             {
                 if (result->payload[i] != 0xAA)
-                { // 0xFF XOR 0x55 = 0xAA
+                {
                     pass = false;
                     break;
                 }
@@ -188,16 +188,14 @@ void test_operations_deck(void)
         Event event;
         event_init(&event, proc->pid, guide_alloc_event_id());
         event.prefix_count = 2;
-        event.prefixes[0] = 0x0104; // Operations Deck (0x01), BUF_HASH (0x04)
+        event.prefixes[0] = 0x0104;
         event.prefixes[1] = 0x0000;
 
-        // Fill test pattern at offset 100
         for (int i = 0; i < 16; i++)
         {
             event.data[100 + i] = (uint8_t)i;
         }
 
-        // Arguments: offset=100, len=16, target_off=120 (within bounds)
         write_u32(event.data, 0, 100);
         write_u32(event.data, 4, 16);
         write_u32(event.data, 8, 120);
@@ -239,17 +237,15 @@ void test_operations_deck(void)
         Event event;
         event_init(&event, proc->pid, guide_alloc_event_id());
         event.prefix_count = 2;
-        event.prefixes[0] = 0x0105; // Operations Deck (0x01), BUF_CMP (0x05)
+        event.prefixes[0] = 0x0105;
         event.prefixes[1] = 0x0000;
 
-        // Fill two identical regions
         for (int i = 0; i < 8; i++)
         {
             event.data[40 + i] = 0xBB;
             event.data[60 + i] = 0xBB;
         }
 
-        // Arguments: off1=40, off2=60, len=8
         write_u32(event.data, 0, 40);
         write_u32(event.data, 4, 60);
         write_u32(event.data, 8, 8);
@@ -291,13 +287,11 @@ void test_operations_deck(void)
         Event event;
         event_init(&event, proc->pid, guide_alloc_event_id());
         event.prefix_count = 2;
-        event.prefixes[0] = 0x010A; // Operations Deck (0x01), VAL_MOD (0x0A)
+        event.prefixes[0] = 0x010A;
         event.prefixes[1] = 0x0000;
 
-        // Write value 100 at offset 80 (4 bytes)
         write_u32(event.data, 80, 100);
 
-        // Arguments: offset=80, type_size=4, delta=42
         write_u32(event.data, 0, 80);
         write_u32(event.data, 4, 4);
         write_u32(event.data, 8, 42);
@@ -331,7 +325,7 @@ void test_operations_deck(void)
         process_ref_dec(proc);
     }
 
-    // Test 6: Integer overflow protection (BUF_FILL with malicious args)
+    // Test 6: Integer overflow protection
     {
         total_tests++;
         kprintf("\n[TEST 6] Integer Overflow Protection: BUF_FILL with UINT32_MAX offset\n");
@@ -339,10 +333,9 @@ void test_operations_deck(void)
         Event event;
         event_init(&event, proc->pid, guide_alloc_event_id());
         event.prefix_count = 2;
-        event.prefixes[0] = 0x0102; // Operations Deck (0x01), BUF_FILL (0x02)
+        event.prefixes[0] = 0x0102;
         event.prefixes[1] = 0x0000;
 
-        // Attack: offset=UINT32_MAX, len=10
         write_u32(event.data, 0, 0xFFFFFFFF);
         write_u32(event.data, 4, 10);
         write_u32(event.data, 8, 0xCC);
@@ -368,7 +361,7 @@ void test_operations_deck(void)
         process_ref_dec(proc);
     }
 
-    // Test 7: BUF_MOVE (overlapping regions)
+    // Test 7: BUF_MOVE
     {
         total_tests++;
         kprintf("\n[TEST 7] BUF_MOVE: Move overlapping regions\n");
@@ -376,16 +369,13 @@ void test_operations_deck(void)
         Event event;
         event_init(&event, proc->pid, guide_alloc_event_id());
         event.prefix_count = 2;
-        event.prefixes[0] = 0x0101; // Operations Deck (0x01), BUF_MOVE (0x01)
+        event.prefixes[0] = 0x0101;
         event.prefixes[1] = 0x0000;
 
-        // Arguments go in first 12 bytes, so use data after that
-        // Arguments: from_off=20, to_off=40, len=8 (non-overlapping)
         write_u32(event.data, 0, 20);
         write_u32(event.data, 4, 40);
         write_u32(event.data, 8, 8);
 
-        // Fill source region with pattern (after arguments)
         for (int i = 0; i < 8; i++)
         {
             event.data[20 + i] = 0x10 + i;
@@ -435,3 +425,9 @@ void test_operations_deck(void)
     kprintf("Results: %d/%d tests passed\n", passed_tests, total_tests);
     kprintf("====================================\n\n");
 }
+
+#else
+
+void test_operations_deck(void) { (void)0; }
+
+#endif

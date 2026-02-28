@@ -260,6 +260,9 @@ void kernel_main(void)
     debug_printf("[INIT] Running Route Security test...\n");
     test_route_security();
     kprintf("\n");
+    debug_printf("[INIT] Running PMM tests...\n");
+    pmm_run_tests();
+    kprintf("\n");
     debug_printf("[INIT] Running Journal tests...\n");
     run_journal_tests();
     kprintf("\n");

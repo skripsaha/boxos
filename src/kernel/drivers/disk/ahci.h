@@ -152,7 +152,6 @@
 // ATA Commands (non-NCQ)
 #define ATA_CMD_READ_DMA_EXT    0x25    // READ DMA EXT (48-bit LBA)
 #define ATA_CMD_WRITE_DMA_EXT   0x35    // WRITE DMA EXT (48-bit LBA)
-#define ATA_CMD_IDENTIFY        0xEC    // IDENTIFY DEVICE
 
 // Command Header Flags
 #define AHCI_CMDHDR_WRITE       (1U << 6)   // Write (H2D) direction

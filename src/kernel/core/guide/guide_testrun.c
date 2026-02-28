@@ -2,6 +2,9 @@
 #include "process.h"
 #include "klib.h"
 #include "error.h"
+#include "kernel_config.h"
+
+#if CONFIG_RUN_STARTUP_TESTS
 
 void guide_testrun(void) {
     kprintf("\n");
@@ -71,3 +74,9 @@ void guide_testrun(void) {
     kprintf("====================================\n");
     kprintf("\n");
 }
+
+#else
+
+void guide_testrun(void) { (void)0; }
+
+#endif
