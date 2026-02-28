@@ -9,5 +9,6 @@ int main(void)
         yield();
     }
 
+    println("");
     exit(0);
 }
