@@ -366,7 +366,7 @@ static void vmm_free_user_space_tables(vmm_context_t* ctx) {
 
     uint8_t* freed_bitmap = kmalloc(BITMAP_SIZE);
     if (!freed_bitmap) {
-        debug_printf("[VMM] ERROR: Failed to allocate freed page bitmap, skipping cleanup\n");
+        kprintf("[VMM] ERROR: kmalloc(%d) failed for freed page bitmap, user space tables NOT cleaned up\n", BITMAP_SIZE);
         return;
     }
     memset(freed_bitmap, 0, BITMAP_SIZE);
@@ -1752,6 +1752,10 @@ int vmm_map_code_region(vmm_context_t* ctx, uintptr_t code_phys, uint64_t size) 
     Elf64_Phdr* phdr_base = (Elf64_Phdr*)((uint8_t*)elf_virt + ehdr->e_phoff);
     size_t total_mapped_pages = 0;
 
+    #define MAX_LOAD_SEGMENTS 32
+    struct { uintptr_t phys; size_t pages; } mapped_segs[MAX_LOAD_SEGMENTS];
+    int mapped_seg_count = 0;
+
     for (uint16_t i = 0; i < ehdr->e_phnum; i++) {
         Elf64_Phdr* phdr = &phdr_base[i];
 
@@ -1776,12 +1780,18 @@ int vmm_map_code_region(vmm_context_t* ctx, uintptr_t code_phys, uint64_t size) 
 
         if (vaddr_aligned < 0x3000) {
             debug_printf("[VMM] ERROR: Invalid ELF segment vaddr 0x%llx (below 0x3000)\n", vaddr_aligned);
+            for (int k = 0; k < mapped_seg_count; k++) {
+                pmm_free((void*)mapped_segs[k].phys, mapped_segs[k].pages);
+            }
             return -BOXOS_ERR_INVALID_ARGUMENT;
         }
 
         void* segment_phys_ptr = pmm_alloc(page_count);
         if (!segment_phys_ptr) {
             debug_printf("[VMM] ERROR: Failed to allocate %zu pages for segment %u\n", page_count, i);
+            for (int k = 0; k < mapped_seg_count; k++) {
+                pmm_free((void*)mapped_segs[k].phys, mapped_segs[k].pages);
+            }
             return -1;
         }
         uintptr_t segment_phys = (uintptr_t)segment_phys_ptr;
@@ -1809,7 +1819,16 @@ int vmm_map_code_region(vmm_context_t* ctx, uintptr_t code_phys, uint64_t size) 
         if (!result.success) {
             debug_printf("[VMM] ERROR: Failed to map segment %u: %s\n", i, result.error_msg);
             pmm_free((void*)segment_phys, page_count);
+            for (int k = 0; k < mapped_seg_count; k++) {
+                pmm_free((void*)mapped_segs[k].phys, mapped_segs[k].pages);
+            }
             return -1;
+        }
+
+        if (mapped_seg_count < MAX_LOAD_SEGMENTS) {
+            mapped_segs[mapped_seg_count].phys = segment_phys;
+            mapped_segs[mapped_seg_count].pages = page_count;
+            mapped_seg_count++;
         }
 
         const char* perm_str = "";

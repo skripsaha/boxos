@@ -2,10 +2,6 @@
 #include "klib.h"
 #include "../arch/x86-64/io/io.h"
 
-// ============================================================================
-// KEYBOARD RING BUFFER (raw characters)
-// ============================================================================
-
 #define KEYBOARD_BUFFER_SIZE 256
 
 static char keyboard_buffer[KEYBOARD_BUFFER_SIZE];
@@ -15,20 +11,13 @@ static spinlock_t kb_lock = {0};      // Spinlock
 
 static keyboard_state_t kb_state = {0};
 
-// ============================================================================
-// LINE EDITING STATE (for shell)
-// ============================================================================
-
 static keyboard_line_state_t line_state = {0};
 static spinlock_t line_lock = {0};
 
 // Static buffer for readline return
 static char readline_result[KEYBOARD_LINE_BUFFER_SIZE];
 
-// ============================================================================
-// SCANCODE TO ASCII TABLE (US layout)
-// ============================================================================
-
+// US keyboard scancode to ASCII tables
 static const char scancode_to_ascii[] = {
     0,
     27,
@@ -153,11 +142,7 @@ static const char scancode_to_ascii_shifted[] = {
     0,   // Caps Lock
 };
 
-// ============================================================================
-// KEYBOARD INITIALIZATION
-// ============================================================================
-
-// Helper: Wait for 8042 input buffer to be empty (ready to accept command)
+// Wait for 8042 input buffer to be empty (ready to accept command)
 static void kb_wait_input_buffer(void)
 {
     uint32_t timeout = 100000;
@@ -166,7 +151,7 @@ static void kb_wait_input_buffer(void)
     }
 }
 
-// Helper: Wait for 8042 output buffer to have data (ready to read)
+// Wait for 8042 output buffer to have data (ready to read)
 static bool kb_wait_output_buffer(void)
 {
     uint32_t timeout = 100000;
@@ -176,7 +161,7 @@ static bool kb_wait_output_buffer(void)
     return (inb(KEYBOARD_STATUS_PORT) & 0x01) != 0;
 }
 
-// Helper: Flush output buffer (discard any pending data)
+// Flush output buffer (discard any pending data)
 static void kb_flush_output(void)
 {
     uint32_t timeout = 16;
@@ -261,10 +246,6 @@ void keyboard_init(void)
     debug_printf("[KEYBOARD] 8042 initialization complete\n");
 }
 
-// ============================================================================
-// SCANCODE PROCESSING (called from IRQ handler)
-// ============================================================================
-
 void keyboard_handle_scancode(uint8_t scancode)
 {
     // Filter out keyboard controller response codes (not actual scancodes)
@@ -344,10 +325,6 @@ void keyboard_handle_scancode(uint8_t scancode)
     }
 }
 
-// ============================================================================
-// KEYBOARD INPUT API
-// ============================================================================
-
 int keyboard_has_input(void)
 {
     return kb_head != kb_tail;
@@ -396,10 +373,6 @@ void keyboard_flush(void)
     kb_head = kb_tail = 0;
     spin_unlock(&kb_lock);
 }
-
-// ============================================================================
-// LINE EDITING API (for BoxOS Shell)
-// ============================================================================
 
 void keyboard_line_init(void)
 {

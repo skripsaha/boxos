@@ -1,6 +1,9 @@
 #ifndef COMMANDS_H
 #define COMMANDS_H
 
+#include "box/defs.h"
+#include "box/file.h"
+
 // Command handler functions
 // Returns: 0 on success, non-zero on error
 
@@ -34,5 +37,8 @@ int cmd_fsck(int argc, char* argv[]);
 
 // IPC + multitasking demo
 int cmd_ipc_test(int argc, char* argv[]);
+
+// File lookup helper (implemented in cmd_files.c)
+int find_file_by_name(const char* filename, uint32_t* file_ids, file_info_t* out_infos, size_t max);
 
 #endif // COMMANDS_H

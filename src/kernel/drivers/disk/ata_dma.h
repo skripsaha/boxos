@@ -6,27 +6,11 @@
 #include "async_io.h"
 #include "kernel_config.h"
 
-/**
- * ATA DMA Driver - Queue Depth Limitation
- *
- * ВАЖНО: Этот драйвер поддерживает ТОЛЬКО ОДНУ активную DMA передачу (queue depth = 1).
- *
- * Причина: Intel PIIX4 IDE Controller (эмулируемый QEMU и распространенный на реальном
- * железе 1996-2000) не поддерживает Native Command Queuing (NCQ). Оборудование имеет:
- *   - 1 Bus Master Command Register (BMCR)
- *   - 1 Bus Master Status Register (BMSR)
- *   - 1 PRD Table Pointer Register (BMIDTP)
- *
- * Одновременная отправка двух DMA команд приведет к:
- *   - Перезаписи PRD table pointer
- *   - Race condition в BMCR (start bit)
- *   - Undefined behavior (потеря данных, kernel panic)
- *
- * Поведение драйвера:
- *   - Если DMA занята → автоматический fallback на PIO
- *   - Async операции сериализуются через polling active_request_idx
- *   - NCQ доступен только на AHCI (>=2004), не реализован в BoxOS
- */
+// ATA DMA Driver - Queue depth = 1 only.
+// Intel PIIX4 IDE (emulated by QEMU) does not support NCQ: it has a single BMCR,
+// BMSR, and PRD table pointer. Submitting two DMA commands simultaneously causes
+// undefined behavior (data loss, kernel panic). If DMA is busy, fallback to PIO.
+// NCQ is available only on AHCI (>=2004), not implemented in BoxOS.
 
 #define ATA_DMA_MAX_REQUESTS    16
 #define ATA_DMA_PRD_MAX_ENTRIES 8

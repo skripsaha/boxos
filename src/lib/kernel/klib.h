@@ -1,25 +1,19 @@
 #ifndef KLIB_H
 #define KLIB_H
 
-// ============================================================================
-// BOXOS KERNEL LIBRARY - 100% INDEPENDENT, NO STDLIB!
-// ============================================================================
-
 #include "ktypes.h"   // Replaces stdint.h, stddef.h, stdbool.h
 #include "kstdarg.h"  // Replaces stdarg.h
 #include "../../kernel/config/kernel_config.h"
 
-// Объявления для линкера
 extern uintptr_t _kernel_end;
 extern uintptr_t _kernel_start;
 
-// ========== Min/Max ==========
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
+#define CLAMP(val, min, max) (MAX(MIN((val), (max)), (min)))
 #define ALIGN_UP(addr, align) (((addr) + (align) - 1) & ~((align) - 1))
 #define ALIGN_DOWN(addr, align) ((addr) & ~((align) - 1))
 
-// ========== Конфигурация ==========
 // Kernel heap size: DYNAMIC (calculated at runtime based on available RAM)
 // Formula: 3% of total RAM, clamped to [2MB, 16MB]
 #define KLIB_HEAP_MIN_SIZE    (2 * 1024 * 1024)   // 2MB minimum
@@ -34,7 +28,6 @@ extern uintptr_t _kernel_start;
 #define KLIB_BLOCK_ALIGNMENT  32
 #define KLIB_MAGIC_NUMBER     0xDEADBEEF
 
-// ========== Структуры данных ==========
 typedef struct mem_block {
     size_t size;
     struct mem_block *next;
@@ -46,22 +39,19 @@ typedef struct {
     uint64_t saved_flags;  // Saved RFLAGS (for IRQ state)
 } spinlock_t;
 
-// Узел списка
 typedef struct list_node {
     void* data;
     struct list_node* next;
     struct list_node* prev;
 } list_node_t;
 
-// Структура списка
 typedef struct {
     list_node_t* head;
     list_node_t* tail;
     size_t size;
-    spinlock_t lock;  // Для потокобезопасности
+    spinlock_t lock;
 } list_t;
 
-// ========== Функции списка ==========
 void list_init(list_t* list);
 void list_destroy(list_t* list);
 void list_push_back(list_t* list, void* data);
@@ -75,13 +65,11 @@ size_t list_size(list_t* list);
 void list_remove(list_t* list, void* data, bool (*cmp)(void*, void*));
 void list_for_each(list_t* list, void (*func)(void*));
 
-// ========== Управление памятью ==========
 void mem_init(void);
 void* kmalloc(size_t size);
 void kfree(void* ptr);
 void mem_stats(void);
 
-// ========== Отладка и вывод ==========
 __attribute__((noreturn)) void panic(const char* message, ...);
 int kprintf(const char* format, ...);
 int ksnprintf(char* buf, size_t size, const char* fmt, ...);
@@ -92,16 +80,14 @@ int kputnl(void);
 #if CONFIG_DEBUG_ENABLED
     #define debug_printf(...) kprintf(__VA_ARGS__)
 #else
-    #define debug_printf(...) ((void)0)
+    #define debug_printf(...) do { if (0) kprintf(__VA_ARGS__); } while(0)
 #endif
 
-// ========== Блокировки ==========
 void spinlock_init(spinlock_t* lock);
 void spin_lock(spinlock_t* lock);
 void spin_unlock(spinlock_t* lock);
 bool spin_trylock(spinlock_t* lock);
 
-// ========== Строковые функции ==========
 size_t strlen(const char* s);
 size_t strnlen(const char* s, size_t maxlen);
 char* strcpy(char* dest, const char* src);
@@ -114,7 +100,6 @@ char* strstr(const char* haystack, const char* needle);
 char* strcat(char* dest, const char* src);
 char* strncat(char* dest, const char* src, size_t n);
 
-// ========== Работа с памятью ==========
 void* memset(void* s, int c, size_t n);
 void* memcpy(void* dest, const void* src, size_t n);
 void* memmem(const void* haystack, size_t haystacklen, const void* needle, size_t needlelen);
@@ -122,30 +107,26 @@ void* memmove(void* dest, const void* src, size_t n);
 int memcmp(const void* s1, const void* s2, size_t n);
 void* memchr(const void* s, int c, size_t n);
 
-// ========== Преобразования чисел ==========
 char* itoa(int value, char* str, int base);
 char* utoa(unsigned int value, char* str, int base);
 char* itoa64(int64_t value, char* str, int base);
 char* utoa64(uint64_t value, char* str, int base);
-char* reverse_str(char* str);               // Для строк
-char* reverse_range(char* start, char* end); // Для диапазонов
+char* reverse_str(char* str);
+char* reverse_range(char* start, char* end);
 char* ltoa(long value, char* str, int base);
 char* ultoa(unsigned long value, char* str, int base);
 char* lltoa(long long value, char* str, int base);
 char* ulltoa(unsigned long long value, char* str, int base);
 
-// Безопасные версии с проверкой размера буфера
 int itoa_s(int value, char* str, size_t size, int base);
 int itoa64_s(int64_t value, char* str, size_t size, int base);
 int utoa64_s(uint64_t value, char* str, size_t size, int base);
 
-// ========== Утилиты ==========
 int atoi(const char* str);
 long atol(const char* str);
 long long atoll(const char* str);
 void delay(uint32_t milliseconds);
 
-// ========== Вспомогательные функции для форматирования ==========
 void ftoa(double num, char* buf, int precision);
 int toupper(int c);
 int tolower(int c);
@@ -154,11 +135,9 @@ bool isalpha(int c);
 bool isalnum(int c);
 bool isspace(int c);
 
-// ========== Unicode поддержка ==========
 int utf8_encode(uint32_t codepoint, char out[4]);
 int utf8_decode(const char* utf8, uint32_t* codepoint);
 
-// ========== Дополнительные строковые функции ==========
 char* strtok(char* str, const char* delim);
 char* strtok_r(char* str, const char* delim, char** saveptr);
 size_t strspn(const char* s, const char* accept);

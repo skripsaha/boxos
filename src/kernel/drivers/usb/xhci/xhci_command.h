@@ -3,6 +3,7 @@
 
 #include "xhci.h"
 #include "xhci_trb.h"
+#include "spinlock.h"
 
 typedef enum {
     CMD_STATE_IDLE = 0,
@@ -24,6 +25,10 @@ struct xhci_pending_cmd {
 
 #define XHCI_MAX_PENDING_CMDS 16
 #define XHCI_CMD_TIMEOUT_MS 5000
+
+extern struct xhci_pending_cmd pending_cmds[XHCI_MAX_PENDING_CMDS];
+extern spinlock_t pending_cmds_lock;
+extern uint32_t cmd_sequence;
 
 void xhci_command_init(void);
 

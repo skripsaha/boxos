@@ -2,6 +2,7 @@
 #define USB_DESCRIPTORS_H
 
 #include "ktypes.h"
+#include "../usb_common.h"
 
 typedef struct {
     uint8_t bLength;
@@ -20,21 +21,9 @@ typedef struct {
     uint8_t bNumConfigurations;
 } __attribute__((packed)) usb_device_desc_t;
 
-typedef struct {
-    uint8_t bmRequestType;
-    uint8_t bRequest;
-    uint16_t wValue;
-    uint16_t wIndex;
-    uint16_t wLength;
-} __attribute__((packed)) usb_setup_packet_t;
-
-#define USB_REQ_GET_DESCRIPTOR 0x06
 #define USB_DESC_DEVICE        0x01
 #define USB_DESC_CONFIG        0x02
 #define USB_DESC_STRING        0x03
-
-#define USB_DIR_OUT            0x00
-#define USB_DIR_IN             0x80
 
 #define USB_RT_DEVICE          0x00
 #define USB_RT_INTERFACE       0x01

@@ -76,27 +76,17 @@ uint32_t pit_get_frequency(void) {
     return pit_frequency;
 }
 
-// ============================================================================
-// BUSY-WAIT DELAY (WORKS WITHOUT INTERRUPTS!)
-// ============================================================================
-
-// This function provides accurate delays WITHOUT requiring interrupts
-// Perfect for CPU calibration before interrupt enabling
+// Busy-wait delay using I/O port reads (~1us each). Works without interrupts.
+// Used for TSC calibration before interrupt enabling.
 void pit_delay_busy(uint32_t milliseconds) {
     if (pit_frequency == 0) {
         debug_printf("[PIT] ERROR: PIT not initialized!\n");
         return;
     }
 
-    // We'll use a simple busy loop based on I/O port delays
-    // Each inb() takes ~1μs on typical hardware
-    // So for 1ms we need ~1000 iterations
-    // This is approximate but good enough for calibration
-
-    uint32_t iterations = milliseconds * 1000;  // ~1μs per iteration
+    // Port 0x80 is the POST code port and creates ~1us delay per access
+    uint32_t iterations = milliseconds * 1000;
     for (uint32_t i = 0; i < iterations; i++) {
-        // Read from an unused port to create delay
-        // Port 0x80 is typically used for POST codes and creates ~1μs delay
         asm volatile("outb %%al, $0x80" : : "a"(0));
     }
 }

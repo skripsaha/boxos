@@ -30,8 +30,6 @@
 #define RESPONSE_DATA_SIZE     4064
 #define RESPONSE_TOTAL_SIZE    4096
 
-// Legacy EventStatus - DEPRECATED: Use boxos_error_t instead
-// Kept for backward compatibility during migration
 typedef enum {
     EVENT_STATE_NEW = 0,
     EVENT_STATE_PROCESSING,
@@ -40,7 +38,7 @@ typedef enum {
     EVENT_STATE_ACCESS_DENIED,
     EVENT_STATE_CRITICAL_ERROR,
     EVENT_STATE_RETRY
-} EventStatus __attribute__((deprecated("Use boxos_error_t instead")));
+} EventStatus;
 
 typedef struct __packed {
     uint32_t magic;
@@ -82,7 +80,7 @@ static inline void event_init(Event* event, uint32_t pid, uint32_t event_id) {
     event->magic = EVENT_MAGIC;
     event->pid = pid;
     event->event_id = event_id;
-    event->state = EVENT_STATE_NEW;  // Legacy field
+    event->state = EVENT_STATE_NEW;
     event->current_prefix_idx = 0;
     event->prefix_count = 0;
 

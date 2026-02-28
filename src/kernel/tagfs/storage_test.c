@@ -1,7 +1,6 @@
 #include "storage_test.h"
 #include "storage_deck.h"
 #include "tagfs.h"
-#include "tag_index.h"
 #include "klib.h"
 #include "process.h"
 #include "guide.h"

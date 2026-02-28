@@ -2,7 +2,19 @@
 #include "klib.h"
 
 extern void tagfs_format_tag(char* dest, const char* key, const char* value);
-extern uint32_t tag_hash(const char* tag_string);
+
+uint32_t tag_hash(const char* tag_string) {
+    if (!tag_string) {
+        return 0;
+    }
+
+    uint32_t hash = 5381;
+    while (*tag_string) {
+        hash = ((hash << 5) + hash) + (uint8_t)(*tag_string);
+        tag_string++;
+    }
+    return hash % 256;
+}
 
 TagBitmapIndex* tag_bitmap_create(void) {
     TagBitmapIndex* index = kmalloc(sizeof(TagBitmapIndex));

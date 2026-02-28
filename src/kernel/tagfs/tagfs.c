@@ -185,12 +185,12 @@ static int tagfs_write_metadata_raw(uint32_t file_id, const TagFSMetadata* metad
         return -1;
     }
 
-    // Ensure magic is set (in case caller forgot)
-    TagFSMetadata* mutable_meta = (TagFSMetadata*)metadata;
-    mutable_meta->magic = TAGFS_METADATA_MAGIC;
+    // Ensure magic is set (in case caller forgot); work on a local copy to preserve const
+    TagFSMetadata meta_copy = *metadata;
+    meta_copy.magic = TAGFS_METADATA_MAGIC;
 
     memset(sector_buffer, 0, ATA_SECTOR_SIZE);
-    memcpy(sector_buffer, metadata, sizeof(TagFSMetadata));
+    memcpy(sector_buffer, &meta_copy, sizeof(TagFSMetadata));
 
     int result = ata_write_sectors(1, sector, 1, sector_buffer);
     kfree(sector_buffer);

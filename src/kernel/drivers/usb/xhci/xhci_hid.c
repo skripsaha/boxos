@@ -91,7 +91,6 @@ void xhci_process_keyboard_report(usb_boot_keyboard_report_t* report) {
 
     keyboard_state_t* kb = keyboard_get_state();
 
-    uint8_t old_mods __unused = prev_report.modifiers;
     uint8_t new_mods = report->modifiers;
 
     kb->shift_pressed = (new_mods & 0x22) ? 1 : 0;

@@ -3,6 +3,7 @@
 #include "box/io/keyboard.h"
 #include "box/string.h"
 #include "box/ipc.h"
+#include "box/convert.h"
 
 // ============================================================================
 // OUTPUT
@@ -60,7 +61,7 @@ void println(const char* str) {
 }
 
 void clear(void) {
-    vga_clear(VGA_COLOR(COLOR_LIGHT_GRAY, COLOR_BLACK));
+    vga_clear(VGA_COLOR(VGA_LIGHT_GRAY, VGA_BLACK));
 }
 
 void color(uint8_t c) {
@@ -97,18 +98,7 @@ int input(const char* prompt, char* buffer, size_t max_len) {
 
 void print_int(int num) {
     char buf[12];
-    if (num == 0) { print("0"); return; }
-    char tmp[12];
-    int i = 0;
-    int neg = 0;
-    unsigned int uval;
-    if (num < 0) { neg = 1; uval = (unsigned int)(-(num + 1)) + 1; }
-    else { uval = (unsigned int)num; }
-    while (uval > 0) { tmp[i++] = '0' + (uval % 10); uval /= 10; }
-    int j = 0;
-    if (neg) buf[j++] = '-';
-    while (i > 0) buf[j++] = tmp[--i];
-    buf[j] = '\0';
+    to_str(num, buf, sizeof(buf));
     print(buf);
 }
 

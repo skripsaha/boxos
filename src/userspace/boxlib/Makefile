@@ -8,7 +8,7 @@ else
 endif
 
 CFLAGS = -nostdlib -fno-builtin -ffreestanding -mno-red-zone \
-         -Iinclude -Wall -Wextra -O2 -fno-stack-protector -Wno-unused-parameter
+         -Iinclude -I../../include -Wall -Wextra -O2 -fno-stack-protector -Wno-unused-parameter
 
 SRCS = src/core/notify.c src/core/chain.c src/core/result.c src/core/string.c \
        src/core/io.c src/core/file.c src/core/system.c \
@@ -16,7 +16,7 @@ SRCS = src/core/notify.c src/core/chain.c src/core/result.c src/core/string.c \
        src/core/result_wait_yield.c src/core/result_wait_umwait.c \
        src/core/ipc.c src/core/format.c src/core/convert.c \
        src/core/io_mode.c \
-       src/system.c src/proc.c \
+       src/system.c \
        src/io/keyboard.c src/io/vga.c
 OBJS = $(SRCS:.c=.o)
 

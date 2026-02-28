@@ -1,10 +1,7 @@
 #ifndef CABIN_LAYOUT_H
 #define CABIN_LAYOUT_H
 
-// ============================================================================
-// BOXOS CABIN MEMORY LAYOUT
-// ============================================================================
-// Fixed virtual address layout for every process (Snowball Architecture)
+// Fixed virtual address layout for every process (Snowball Architecture).
 // See: docs/core/memory_cabin.md
 
 // Cabin zones

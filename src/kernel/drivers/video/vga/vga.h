@@ -15,11 +15,7 @@ extern unsigned char *vga;
 #define BYTES_FOR_EACH_ELEMENT 2
 #define VGA_SIZE (VGA_WIDTH * VGA_HEIGHT * BYTES_FOR_EACH_ELEMENT)
 
-// ============================================================================
-// BOXOS VGA COLOR SYSTEM
-// ============================================================================
-// Format: FOREGROUND_ON_BACKGROUND (0xBF where B=background, F=foreground)
-//
+// Color attribute format: (background << 4) | foreground
 // Colors: BLACK=0, BLUE=1, GREEN=2, CYAN=3, RED=4, MAGENTA=5, BROWN=6,
 //         LIGHT_GRAY=7, DARK_GRAY=8, LIGHT_BLUE=9, LIGHT_GREEN=A,
 //         LIGHT_CYAN=B, LIGHT_RED=C, LIGHT_MAGENTA=D, YELLOW=E, WHITE=F
@@ -45,11 +41,7 @@ extern unsigned char *vga;
 // Macro to build color attribute: VGA_COLOR(foreground, background)
 #define VGA_COLOR(fg, bg) (((bg) << 4) | (fg))
 
-// ============================================================================
-// PRESET COLOR SCHEMES (BoxOS Style)
-// ============================================================================
-
-// Standard text (light gray on black)
+// Preset color schemes
 #define GRAY_ON_BLACK       VGA_COLOR(VGA_LIGHT_GRAY, VGA_BLACK)    // 0x07
 #define WHITE_ON_BLACK      VGA_COLOR(VGA_WHITE, VGA_BLACK)         // 0x0F
 #define BLACK_ON_WHITE      VGA_COLOR(VGA_BLACK, VGA_WHITE)         // 0xF0

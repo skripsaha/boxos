@@ -2,10 +2,10 @@
 #define BOX_TYPES_H
 
 #include "box/defs.h"
-#include "../cabin_layout.h"
-#include "../boxos_magic.h"
-#include "../boxos_sizes.h"
-#include "../boxos_decks.h"
+#include "cabin_layout.h"
+#include "boxos_magic.h"
+#include "boxos_sizes.h"
+#include "boxos_decks.h"
 
 // Memory Cabin addresses
 #define BOX_NOTIFY_PAGE_ADDR   CABIN_NOTIFY_PAGE_ADDR
@@ -16,11 +16,10 @@
 #define BOX_NOTIFY_MAGIC       BOXOS_NOTIFY_MAGIC  // "NOTI"
 #define BOX_RESULT_MAGIC       BOXOS_RESULT_MAGIC  // "RESU"
 
-// Size limits (CRITICAL!)
-#define BOX_MAX_PREFIXES       BOXOS_EVENT_MAX_PREFIXES   // EVENT_MAX_PREFIXES from kernel
-#define BOX_INLINE_DATA_SIZE   BOXOS_EVENT_DATA_SIZE      // Event.data size (updated from 192)
-#define BOX_RESULT_PAYLOAD     BOXOS_RESULT_PAYLOAD_SIZE  // ResultEntry.payload (reduced for error_code)
-#define BOX_RESULT_RING_SIZE   BOXOS_RESULT_RING_SIZE     // Max pending results
+#define BOX_MAX_PREFIXES       BOXOS_EVENT_MAX_PREFIXES
+#define BOX_INLINE_DATA_SIZE   BOXOS_EVENT_DATA_SIZE
+#define BOX_RESULT_PAYLOAD_SIZE BOXOS_RESULT_PAYLOAD_SIZE
+#define BOX_RESULT_RING_SIZE   BOXOS_RESULT_RING_SIZE
 
 // Notify status codes
 #define BOX_NOTIFY_STATUS_OK          0
@@ -30,7 +29,6 @@
 // Notify flags
 #define BOX_NOTIFY_FLAG_CHECK_STATUS  0x01
 
-// Deck IDs (backward compatibility aliases)
 #define BOX_DECK_OPERATIONS    DECK_OPERATIONS
 #define BOX_DECK_STORAGE       DECK_STORAGE
 #define BOX_DECK_HARDWARE      DECK_HARDWARE
@@ -60,8 +58,7 @@ typedef enum {
 #define BOX_INLINE static inline __attribute__((always_inline))
 
 // Compile-time assertions
-// NOTE: BOX_STATIC_ASSERT is a backward compatibility wrapper (deprecated).
-// New code should use _Static_assert directly (C11 standard).
+// BOX_STATIC_ASSERT is a legacy alias for _Static_assert
 #define BOX_STATIC_ASSERT(expr, msg) _Static_assert(expr, msg)
 
 // Offset calculation for struct members

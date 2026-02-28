@@ -17,6 +17,7 @@ endif
 CFLAGS = -nostdlib -ffreestanding -fno-builtin -mno-red-zone -fno-stack-protector \
          -fno-pic -static -Wall -Wextra -g \
          -I../boxlib/include \
+         -I../../include \
          -I.
 
 # Linker flags
