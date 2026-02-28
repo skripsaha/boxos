@@ -6,9 +6,9 @@
 #include "tss.h"
 #include "atomics.h"
 #include "idle.h"
-#include "guide/pending_results.h"
-#include "guide/guide.h"
-#include "../../drivers/usb/xhci/xhci_interrupt.h"
+#include "pending_results.h"
+#include "guide.h"
+#include "xhci_interrupt.h"
 
 static scheduler_state_t sched;
 

@@ -3,7 +3,7 @@
 
 #include "ktypes.h"   // Replaces stdint.h, stddef.h, stdbool.h
 #include "kstdarg.h"  // Replaces stdarg.h
-#include "../../kernel/config/kernel_config.h"
+#include "kernel_config.h"
 
 extern uintptr_t _kernel_end;
 extern uintptr_t _kernel_start;

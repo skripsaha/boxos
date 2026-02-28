@@ -3,8 +3,8 @@
 
 #include "events.h"
 #include "error.h"
-#include "../../lib/kernel/ktypes.h"
-#include "../../lib/kernel/klib.h"
+#include "ktypes.h"
+#include "klib.h"
 
 #define EVENT_RING_MIN_CAPACITY 512
 #define EVENT_RING_MAX_CAPACITY 4096

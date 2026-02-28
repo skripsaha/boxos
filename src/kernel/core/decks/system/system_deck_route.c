@@ -5,7 +5,7 @@
 #include "vmm.h"
 #include "result_page.h"
 #include "error.h"
-#include "../listen_table.h"
+#include "listen_table.h"
 
 static bool tag_matches_process(process_t* proc, const char* route_tag) {
     if (!proc || !route_tag || route_tag[0] == '\0') {

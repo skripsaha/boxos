@@ -4,7 +4,7 @@
 #include "io.h"
 #include "atomics.h"
 #include "error.h"
-#include "../../arch/x86-64/cpu/cpuid.h"
+#include "cpuid.h"
 #include "process.h"
 #include "cpu_caps_page.h"
 #include "boxos_addresses.h"

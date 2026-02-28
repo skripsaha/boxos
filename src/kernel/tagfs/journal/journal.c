@@ -1,6 +1,6 @@
 #include "journal.h"
 #include "klib.h"
-#include "../drivers/disk/ata.h"
+#include "ata.h"
 
 static JournalSuperblock g_journal_sb;
 static bool g_journal_initialized = false;

@@ -1,6 +1,6 @@
 #include "keyboard.h"
 #include "klib.h"
-#include "../arch/x86-64/io/io.h"
+#include "io.h"
 
 #define KEYBOARD_BUFFER_SIZE 256
 

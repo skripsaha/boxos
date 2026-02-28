@@ -2,7 +2,7 @@
 #define USB_DESCRIPTORS_H
 
 #include "ktypes.h"
-#include "../usb_common.h"
+#include "usb_common.h"
 
 typedef struct {
     uint8_t bLength;

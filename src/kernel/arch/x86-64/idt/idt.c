@@ -12,9 +12,8 @@
 #include "atomics.h"
 #include "scheduler.h"
 #include "context_switch.h"
-#include "../../drivers/keyboard/keyboard.h"
-#include "../../drivers/disk/ata_dma.h"
-#include "../../core/guide/guide.h"
+#include "keyboard.h"
+#include "ata_dma.h"
 
 // IDT table and descriptor
 static idt_entry_t idt[IDT_ENTRIES];

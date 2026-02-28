@@ -1,7 +1,7 @@
-#include "test_event_ring_dynamic.h"
+#include "event_ring_test.h"
 #include "event_ring_dynamic.h"
 #include "events.h"
-#include "../../lib/kernel/klib.h"
+#include "klib.h"
 #include "error.h"
 
 static int tests_passed = 0;
