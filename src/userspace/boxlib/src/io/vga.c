@@ -1,9 +1,9 @@
 #include "box/io/vga.h"
+#include "box/chain.h"
 #include "box/notify.h"
 #include "box/result.h"
 #include "box/string.h"
 
-// Helper: Decode big-endian uint16_t from payload
 static uint16_t vga_decode_u16(const uint8_t* payload, size_t offset) {
     return ((uint16_t)payload[offset] << 8) | ((uint16_t)payload[offset + 1]);
 }
@@ -17,17 +17,8 @@ int vga_putchar(char c) {
         color = VGA_SCHEME_DEFAULT;
     }
 
-    notify_prepare();
-    notify_add_prefix(BOX_DECK_HARDWARE, VGA_OP_PUTCHAR);
-
-    uint8_t data[4];
-    data[0] = pos.row;
-    data[1] = pos.col;
-    data[2] = (uint8_t)c;
-    data[3] = (uint8_t)color;
-
-    notify_write_data(data, 4);
-    notify_execute();
+    hw_vga_putchar(pos.row, pos.col, c, (uint8_t)color);
+    notify();
 
     result_entry_t result;
     if (!result_wait(&result, 100000)) {
@@ -61,21 +52,8 @@ int vga_puts(const char* str) {
             color = VGA_SCHEME_DEFAULT;
         }
 
-        notify_prepare();
-        notify_add_prefix(BOX_DECK_HARDWARE, VGA_OP_PUTSTRING);
-
-        uint8_t data[192];
-        memset(data, 0, 192);
-
-        data[0] = (uint8_t)chunk_size;  // length (single byte)
-        data[1] = (uint8_t)color;       // color (single byte)
-        data[2] = 0;                    // flags
-        data[3] = 0;                    // reserved
-
-        memcpy(data + 4, str + offset, chunk_size);
-
-        notify_write_data(data, chunk_size + 4);
-        notify_execute();
+        hw_vga_putstring(str + offset, (uint8_t)chunk_size, (uint8_t)color);
+        notify();
 
         result_entry_t result;
         if (!result_wait(&result, 100000)) {
@@ -95,14 +73,8 @@ int vga_puts(const char* str) {
 }
 
 int vga_clear(uint8_t color) {
-    notify_prepare();
-    notify_add_prefix(BOX_DECK_HARDWARE, VGA_OP_CLEAR_SCREEN);
-
-    uint8_t data[1];
-    data[0] = color;
-
-    notify_write_data(data, 1);
-    notify_execute();
+    hw_vga_clear(color);
+    notify();
 
     result_entry_t result;
     if (!result_wait(&result, 100000)) {
@@ -117,15 +89,8 @@ int vga_clear(uint8_t color) {
 }
 
 int vga_clear_line(uint8_t row, uint8_t color) {
-    notify_prepare();
-    notify_add_prefix(BOX_DECK_HARDWARE, VGA_OP_CLEAR_LINE);
-
-    uint8_t data[2];
-    data[0] = row;
-    data[1] = color;
-
-    notify_write_data(data, 2);
-    notify_execute();
+    hw_vga_clear_line(row, color);
+    notify();
 
     result_entry_t result;
     if (!result_wait(&result, 100000)) {
@@ -140,14 +105,8 @@ int vga_clear_line(uint8_t row, uint8_t color) {
 }
 
 int vga_clear_to_eol(uint8_t color) {
-    notify_prepare();
-    notify_add_prefix(BOX_DECK_HARDWARE, VGA_OP_CLEAR_TO_EOL);
-
-    uint8_t data[1];
-    data[0] = color;
-
-    notify_write_data(data, 1);
-    notify_execute();
+    hw_vga_clear_to_eol(color);
+    notify();
 
     result_entry_t result;
     if (!result_wait(&result, 100000)) {
@@ -162,15 +121,8 @@ int vga_clear_to_eol(uint8_t color) {
 }
 
 int vga_scroll_up(uint8_t lines, uint8_t fill_color) {
-    notify_prepare();
-    notify_add_prefix(BOX_DECK_HARDWARE, VGA_OP_SCROLL_UP);
-
-    uint8_t data[2];
-    data[0] = lines;
-    data[1] = fill_color;
-
-    notify_write_data(data, 2);
-    notify_execute();
+    hw_vga_scroll(lines, fill_color);
+    notify();
 
     result_entry_t result;
     if (!result_wait(&result, 100000)) {
@@ -185,9 +137,8 @@ int vga_scroll_up(uint8_t lines, uint8_t fill_color) {
 }
 
 int vga_newline(void) {
-    notify_prepare();
-    notify_add_prefix(BOX_DECK_HARDWARE, VGA_OP_NEWLINE);
-    notify_execute();
+    hw_vga_newline();
+    notify();
 
     result_entry_t result;
     if (!result_wait(&result, 100000)) {
@@ -206,9 +157,8 @@ int vga_getcursor(vga_pos_t* pos) {
         return -BOX_ERR_INVALID_ARGS;
     }
 
-    notify_prepare();
-    notify_add_prefix(BOX_DECK_HARDWARE, VGA_OP_GET_CURSOR);
-    notify_execute();
+    hw_vga_getcursor();
+    notify();
 
     result_entry_t result;
     if (!result_wait(&result, 100000)) {
@@ -226,15 +176,8 @@ int vga_getcursor(vga_pos_t* pos) {
 }
 
 int vga_setcursor(uint8_t row, uint8_t col) {
-    notify_prepare();
-    notify_add_prefix(BOX_DECK_HARDWARE, VGA_OP_SET_CURSOR);
-
-    uint8_t data[2];
-    data[0] = row;
-    data[1] = col;
-
-    notify_write_data(data, 2);
-    notify_execute();
+    hw_vga_setcursor(row, col);
+    notify();
 
     result_entry_t result;
     if (!result_wait(&result, 100000)) {
@@ -249,9 +192,8 @@ int vga_setcursor(uint8_t row, uint8_t col) {
 }
 
 int vga_getcolor(void) {
-    notify_prepare();
-    notify_add_prefix(BOX_DECK_HARDWARE, VGA_OP_GET_COLOR);
-    notify_execute();
+    hw_vga_getcolor();
+    notify();
 
     result_entry_t result;
     if (!result_wait(&result, 100000)) {
@@ -266,14 +208,8 @@ int vga_getcolor(void) {
 }
 
 int vga_setcolor(uint8_t color) {
-    notify_prepare();
-    notify_add_prefix(BOX_DECK_HARDWARE, VGA_OP_SET_COLOR);
-
-    uint8_t data[1];
-    data[0] = color;
-
-    notify_write_data(data, 1);
-    notify_execute();
+    hw_vga_setcolor(color);
+    notify();
 
     result_entry_t result;
     if (!result_wait(&result, 100000)) {
@@ -292,9 +228,8 @@ int vga_getdimensions(vga_dimensions_t* dims) {
         return -BOX_ERR_INVALID_ARGS;
     }
 
-    notify_prepare();
-    notify_add_prefix(BOX_DECK_HARDWARE, VGA_OP_GET_DIMENSIONS);
-    notify_execute();
+    hw_vga_getdimensions();
+    notify();
 
     result_entry_t result;
     if (!result_wait(&result, 100000)) {

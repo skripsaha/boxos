@@ -1,22 +1,16 @@
 #include "box/system.h"
 #include "box/notify.h"
+#include "box/chain.h"
 #include "box/result.h"
 #include "box/string.h"
-
-//==============================================================================
-// Process Operations
-//==============================================================================
 
 int proc_info(uint16_t pid, proc_info_t* info) {
     if (!info) {
         return BOX_ERR_INVALID_ARGS;
     }
 
-    notify_prepare();
-    notify_add_prefix(BOX_SYSTEM_DECK_ID, BOX_SYSTEM_PROC_INFO);
-
-    notify_write_data(&pid, sizeof(pid));
-    event_id_t event_id = notify_execute();
+    proc_query(pid);
+    event_id_t event_id = notify();
     if (event_id == 0) {
         return BOX_ERR_EVENT_FAILED;
     }
@@ -26,7 +20,6 @@ int proc_info(uint16_t pid, proc_info_t* info) {
         return BOX_ERR_TIMEOUT;
     }
 
-    // Check error_code field (new ABI)
     if (result.error_code != BOX_OK) {
         return result.error_code;
     }
@@ -46,22 +39,13 @@ int proc_info(uint16_t pid, proc_info_t* info) {
 void exit(uint32_t exit_code) {
     (void)exit_code;
 
-    notify_prepare();
-    notify_add_prefix(BOX_SYSTEM_DECK_ID, 0x02);
+    proc_kill(0);
+    notify();
 
-    uint16_t self_pid = 0;
-    notify_write_data(&self_pid, sizeof(self_pid));
-    notify_execute();
-
-    // Should not return, but if it does, loop forever
     while (1) {
         __asm__ volatile("pause");
     }
 }
-
-//==============================================================================
-// Buffer Management
-//==============================================================================
 
 int buffer_alloc(uint8_t size_class, uint16_t* out_buffer_id, uint32_t* out_address) {
     if (!out_buffer_id || !out_address) {
@@ -72,11 +56,8 @@ int buffer_alloc(uint8_t size_class, uint16_t* out_buffer_id, uint32_t* out_addr
         return BOX_ERR_INVALID_ARGS;
     }
 
-    notify_prepare();
-    notify_add_prefix(BOX_SYSTEM_DECK_ID, BOX_SYSTEM_BUFFER_ALLOC);
-
-    notify_write_data(&size_class, sizeof(size_class));
-    event_id_t event_id = notify_execute();
+    buf_alloc(size_class);
+    event_id_t event_id = notify();
     if (event_id == 0) {
         return BOX_ERR_EVENT_FAILED;
     }
@@ -86,7 +67,6 @@ int buffer_alloc(uint8_t size_class, uint16_t* out_buffer_id, uint32_t* out_addr
         return BOX_ERR_TIMEOUT;
     }
 
-    // Check error_code field (new ABI)
     if (result.error_code != BOX_OK) {
         return result.error_code;
     }
@@ -107,11 +87,8 @@ int buffer_alloc(uint8_t size_class, uint16_t* out_buffer_id, uint32_t* out_addr
 }
 
 int buffer_free(uint16_t buffer_id) {
-    notify_prepare();
-    notify_add_prefix(BOX_SYSTEM_DECK_ID, BOX_SYSTEM_BUFFER_FREE);
-
-    notify_write_data(&buffer_id, sizeof(buffer_id));
-    event_id_t event_id = notify_execute();
+    buf_release(buffer_id);
+    event_id_t event_id = notify();
     if (event_id == 0) {
         return BOX_ERR_EVENT_FAILED;
     }
@@ -121,17 +98,12 @@ int buffer_free(uint16_t buffer_id) {
         return BOX_ERR_TIMEOUT;
     }
 
-    // Check error_code field (new ABI)
     if (result.error_code != BOX_OK) {
         return result.error_code;
     }
 
     return BOX_OK;
 }
-
-//==============================================================================
-// Process Tag Operations
-//==============================================================================
 
 int proc_tag_add(const char* tag) {
     if (!tag) {
@@ -144,25 +116,13 @@ int proc_tag_add(const char* tag) {
     }
 
     proc_info_t info;
-    int result = proc_info(0, &info);
-    if (result != BOX_OK) {
-        return result;
+    int rc = proc_info(0, &info);
+    if (rc != BOX_OK) {
+        return rc;
     }
 
-    notify_prepare();
-    notify_add_prefix(BOX_SYSTEM_DECK_ID, BOX_SYSTEM_TAG_ADD);
-
-    struct __attribute__((packed)) {
-        uint16_t pid;
-        char tag[32];
-    } request;
-
-    request.pid = info.pid;
-    memset(request.tag, 0, sizeof(request.tag));
-    strcpy(request.tag, tag);
-
-    notify_write_data(&request, sizeof(request));
-    event_id_t event_id = notify_execute();
+    ptag_add(info.pid, tag);
+    event_id_t event_id = notify();
     if (event_id == 0) {
         return BOX_ERR_EVENT_FAILED;
     }
@@ -172,7 +132,6 @@ int proc_tag_add(const char* tag) {
         return BOX_ERR_TIMEOUT;
     }
 
-    // Check error_code field (new ABI)
     if (res.error_code != BOX_OK) {
         return res.error_code;
     }
@@ -191,25 +150,13 @@ int proc_tag_remove(const char* tag) {
     }
 
     proc_info_t info;
-    int result = proc_info(0, &info);
-    if (result != BOX_OK) {
-        return result;
+    int rc = proc_info(0, &info);
+    if (rc != BOX_OK) {
+        return rc;
     }
 
-    notify_prepare();
-    notify_add_prefix(BOX_SYSTEM_DECK_ID, BOX_SYSTEM_TAG_REMOVE);
-
-    struct __attribute__((packed)) {
-        uint16_t pid;
-        char tag[32];
-    } request;
-
-    request.pid = info.pid;
-    memset(request.tag, 0, sizeof(request.tag));
-    strcpy(request.tag, tag);
-
-    notify_write_data(&request, sizeof(request));
-    event_id_t event_id = notify_execute();
+    ptag_remove(info.pid, tag);
+    event_id_t event_id = notify();
     if (event_id == 0) {
         return BOX_ERR_EVENT_FAILED;
     }
@@ -219,7 +166,6 @@ int proc_tag_remove(const char* tag) {
         return BOX_ERR_TIMEOUT;
     }
 
-    // Check error_code field (new ABI)
     if (res.error_code != BOX_OK) {
         return res.error_code;
     }
@@ -238,25 +184,13 @@ int proc_tag_check(const char* tag, bool* has_tag) {
     }
 
     proc_info_t info;
-    int result = proc_info(0, &info);
-    if (result != BOX_OK) {
-        return result;
+    int rc = proc_info(0, &info);
+    if (rc != BOX_OK) {
+        return rc;
     }
 
-    notify_prepare();
-    notify_add_prefix(BOX_SYSTEM_DECK_ID, BOX_SYSTEM_TAG_CHECK);
-
-    struct __attribute__((packed)) {
-        uint16_t pid;
-        char tag[32];
-    } request;
-
-    request.pid = info.pid;
-    memset(request.tag, 0, sizeof(request.tag));
-    strcpy(request.tag, tag);
-
-    notify_write_data(&request, sizeof(request));
-    event_id_t event_id = notify_execute();
+    ptag_check(info.pid, tag);
+    event_id_t event_id = notify();
     if (event_id == 0) {
         return BOX_ERR_EVENT_FAILED;
     }
@@ -266,7 +200,6 @@ int proc_tag_check(const char* tag, bool* has_tag) {
         return BOX_ERR_TIMEOUT;
     }
 
-    // Check error_code field (new ABI)
     if (res.error_code != BOX_OK) {
         return res.error_code;
     }
@@ -293,15 +226,8 @@ int proc_exec(const char* filename) {
         return -1;
     }
 
-    notify_prepare();
-    notify_add_prefix(BOX_SYSTEM_DECK_ID, BOX_SYSTEM_PROC_EXEC);
-
-    uint8_t data[192];
-    memset(data, 0, 192);
-    memcpy(data, filename, name_len);
-
-    notify_write_data(data, 192);
-    event_id_t event_id = notify_execute();
+    proc_spawn(filename);
+    event_id_t event_id = notify();
     if (event_id == 0) {
         return -1;
     }

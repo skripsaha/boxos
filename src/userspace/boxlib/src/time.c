@@ -1,11 +1,7 @@
 #include "box/time.h"
+#include "box/chain.h"
 #include "box/notify.h"
 #include "box/result.h"
-
-#define OPCODE_RTC_GET_TIME   0x15
-#define OPCODE_RTC_GET_UNIX64 0x16
-#define OPCODE_RTC_GET_UPTIME 0x17
-#define OPCODE_TIMER_GET_MS   0x11
 
 static uint64_t read_u64_be(const uint8_t* p) {
     return ((uint64_t)p[0] << 56) | ((uint64_t)p[1] << 48) |
@@ -26,10 +22,8 @@ static uint16_t read_u16_be(const uint8_t* p) {
 int time_get(time_t* out) {
     if (!out) return BOX_ERR_NULL_POINTER;
 
-    notify_prepare();
-    notify_add_prefix(BOX_DECK_HARDWARE, OPCODE_RTC_GET_TIME);
-    event_id_t eid = notify_execute();
-    if (eid == 0) return BOX_ERR_UNKNOWN;
+    hw_rtc_time();
+    notify();
 
     result_entry_t result;
     if (!result_wait(&result, 50000)) return BOX_ERR_TIMEOUT;
@@ -51,10 +45,8 @@ int time_get(time_t* out) {
 int time_get_secs(uint64_t* out_seconds) {
     if (!out_seconds) return BOX_ERR_NULL_POINTER;
 
-    notify_prepare();
-    notify_add_prefix(BOX_DECK_HARDWARE, OPCODE_RTC_GET_UNIX64);
-    event_id_t eid = notify_execute();
-    if (eid == 0) return BOX_ERR_UNKNOWN;
+    hw_rtc_unix64();
+    notify();
 
     result_entry_t result;
     if (!result_wait(&result, 50000)) return BOX_ERR_TIMEOUT;
@@ -67,10 +59,8 @@ int time_get_secs(uint64_t* out_seconds) {
 int time_uptime_ms(uint64_t* out_ms) {
     if (!out_ms) return BOX_ERR_NULL_POINTER;
 
-    notify_prepare();
-    notify_add_prefix(BOX_DECK_HARDWARE, OPCODE_TIMER_GET_MS);
-    event_id_t eid = notify_execute();
-    if (eid == 0) return BOX_ERR_UNKNOWN;
+    hw_timer_ms();
+    notify();
 
     result_entry_t result;
     if (!result_wait(&result, 50000)) return BOX_ERR_TIMEOUT;
@@ -83,10 +73,8 @@ int time_uptime_ms(uint64_t* out_ms) {
 int time_uptime_ns(uint64_t* out_ns) {
     if (!out_ns) return BOX_ERR_NULL_POINTER;
 
-    notify_prepare();
-    notify_add_prefix(BOX_DECK_HARDWARE, OPCODE_RTC_GET_UPTIME);
-    event_id_t eid = notify_execute();
-    if (eid == 0) return BOX_ERR_UNKNOWN;
+    hw_rtc_uptime();
+    notify();
 
     result_entry_t result;
     if (!result_wait(&result, 50000)) return BOX_ERR_TIMEOUT;

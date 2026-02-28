@@ -28,7 +28,7 @@ size_t notify_write_data(const void* data, size_t size) {
     return to_write;
 }
 
-event_id_t notify_execute(void) {
+event_id_t notify(void) {
     uint64_t result;
     __asm__ volatile(
         "int $0x80"
@@ -36,68 +36,15 @@ event_id_t notify_execute(void) {
         :
         : "memory"
     );
+    // Invalidate page so next chain builder triggers auto-prepare
+    notify_page()->magic = 0;
     return (event_id_t)result;
 }
 
-event_id_t notify(uint8_t deck_id, uint8_t opcode,
-                      const void* data, size_t data_size) {
-    notify_prepare();
-    notify_add_prefix(deck_id, opcode);
-    notify_write_data(data, data_size);
-    return notify_execute();
-}
-
-int notify_checked(uint8_t deck_id, uint8_t opcode,
-                   const void* data, size_t data_size,
-                   event_id_t* out_event_id) {
+void notify_data(const void* data, size_t size) {
     notify_page_t* np = notify_page();
-
-    notify_prepare();
-    notify_add_prefix(deck_id, opcode);
-    notify_write_data(data, data_size);
-
-    event_id_t event_id = notify_execute();
-
-    // Check if kernel set error flag
-    if (np->flags & BOX_NOTIFY_FLAG_CHECK_STATUS) {
-        if (out_event_id) {
-            *out_event_id = 0;
-        }
-        return np->status;
+    if (np->magic != BOX_NOTIFY_MAGIC) {
+        notify_prepare();
     }
-
-    if (out_event_id) {
-        *out_event_id = event_id;
-    }
-    return BOX_NOTIFY_STATUS_OK;
-}
-
-event_id_t notify_with_retry(uint8_t deck_id, uint8_t opcode,
-                                 const void* data, size_t data_size,
-                                 uint32_t max_retries) {
-    event_id_t event_id;
-    uint32_t backoff = 1;
-
-    for (uint32_t attempt = 0; attempt <= max_retries; attempt++) {
-        int status = notify_checked(deck_id, opcode, data, data_size, &event_id);
-
-        if (status == BOX_NOTIFY_STATUS_OK) {
-            return event_id;
-        }
-
-        if (status != BOX_NOTIFY_STATUS_RING_FULL) {
-            return (event_id_t)-1;
-        }
-
-        // Exponential backoff: wait 2^attempt iterations
-        for (uint32_t i = 0; i < backoff; i++) {
-            __asm__ volatile("pause");
-        }
-        backoff *= 2;
-        if (backoff > 1024) {
-            backoff = 1024;
-        }
-    }
-
-    return (event_id_t)-1;
+    notify_write_data(data, size);
 }

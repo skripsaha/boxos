@@ -27,24 +27,15 @@ BOX_INLINE notify_page_t* notify_page(void) {
     return (notify_page_t*)BOX_NOTIFY_PAGE_ADDR;
 }
 
-// API functions
+// === Core: always last in chain, sends + resets ===
+event_id_t notify(void);
+
+// === Raw data writer for advanced chains ===
+void notify_data(const void* data, size_t size);
+
+// === Internal helpers (used by chain builders) ===
 void notify_prepare(void);
 bool notify_add_prefix(uint8_t deck_id, uint8_t opcode);
 size_t notify_write_data(const void* data, size_t size);
-event_id_t notify_execute(void);
-
-// High-level wrapper
-event_id_t notify(uint8_t deck_id, uint8_t opcode,
-                  const void* data, size_t data_size);
-
-// Checked version: returns status code
-int notify_checked(uint8_t deck_id, uint8_t opcode,
-                   const void* data, size_t data_size,
-                   event_id_t* out_event_id);
-
-// Retry version: automatically retries with exponential backoff
-event_id_t notify_with_retry(uint8_t deck_id, uint8_t opcode,
-                              const void* data, size_t data_size,
-                              uint32_t max_retries);
 
 #endif // BOX_NOTIFY_H
