@@ -1,7 +1,7 @@
 #include "journal.h"
 #include "tagfs.h"
 #include "klib.h"
-#include "../drivers/disk/ata.h"
+#include "ata.h"
 #include "kernel_config.h"
 
 #if CONFIG_RUN_STARTUP_TESTS

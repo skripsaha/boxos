@@ -16,6 +16,7 @@ SRCS = src/core/notify.c src/core/chain.c src/core/result.c src/core/string.c \
        src/core/result_wait_yield.c src/core/result_wait_umwait.c \
        src/core/ipc.c src/core/format.c src/core/convert.c \
        src/core/io_mode.c \
+       src/time.c \
        src/system.c \
        src/io/keyboard.c src/io/vga.c
 OBJS = $(SRCS:.c=.o)

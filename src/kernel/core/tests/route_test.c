@@ -8,7 +8,7 @@
 #include "events.h"
 #include "result_page.h"
 #include "vmm.h"
-#include "../listen_table.h"
+#include "listen_table.h"
 #include "kernel_config.h"
 
 #if CONFIG_RUN_STARTUP_TESTS

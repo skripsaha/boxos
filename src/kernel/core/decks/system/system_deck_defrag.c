@@ -1,7 +1,7 @@
 #include "system_deck_defrag.h"
 #include "system_deck_process.h"
 #include "klib.h"
-#include "../../tagfs/tagfs.h"
+#include "tagfs.h"
 
 int system_deck_defrag_file(Event* event) {
     if (!event) {

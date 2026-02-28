@@ -1,5 +1,5 @@
-#ifndef TEST_EVENT_RING_DYNAMIC_H
-#define TEST_EVENT_RING_DYNAMIC_H
+#ifndef EVENT_RING_TEST_H
+#define EVENT_RING_TEST_H
 
 int test_event_ring_dynamic_all(void);
 

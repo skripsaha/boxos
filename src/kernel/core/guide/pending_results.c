@@ -3,7 +3,7 @@
 #include "vmm.h"
 #include "process.h"
 #include "atomics.h"
-#include "../scheduler/scheduler.h"
+#include "scheduler.h"
 
 // Statistics for monitoring
 typedef struct {

@@ -2,7 +2,7 @@
 #include "tag_bitmap.h"
 #include "journal.h"
 #include "klib.h"
-#include "../drivers/disk/ata.h"
+#include "ata.h"
 
 // Verify data start doesn't overlap with journal entries
 STATIC_ASSERT(TAGFS_DATA_START > (JOURNAL_ENTRIES_START + JOURNAL_ENTRY_COUNT * JOURNAL_ENTRY_SECTORS),

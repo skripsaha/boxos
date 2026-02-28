@@ -6,7 +6,7 @@
 #include "tss.h"
 #include "userspace.h"
 #include "atomics.h"
-#include "../../drivers/disk/async_io.h"
+#include "async_io.h"
 #include "pid_allocator.h"
 #include "cpu_caps_page.h"
 

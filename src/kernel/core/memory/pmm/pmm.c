@@ -2,7 +2,7 @@
 #include "e820.h"
 #include "klib.h"
 #include "boxos_memory.h"
-#include "../../arch/x86-64/cpu/cpuid.h"
+#include "cpuid.h"
 
 typedef struct {
     uintptr_t base;
