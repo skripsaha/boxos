@@ -10,4 +10,8 @@ void yield(void) {
     np->status = 0;
 
     __asm__ volatile("int $0x80");
+
+    // Invalidate so next chain builder triggers fresh notify_prepare()
+    // (clears flags, prefix_count, etc.)
+    np->magic = 0;
 }
