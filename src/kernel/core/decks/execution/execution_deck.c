@@ -92,7 +92,7 @@ int execution_deck_handler(Event* event) {
 
         process_set_state(proc, PROC_BLOCKED);
 
-        // Best-effort overflow notification (may fail too)
+        // Best-effort overflow notification
         result_entry_t overflow_entry;
         overflow_entry.source = ROUTE_SOURCE_KERNEL;
         overflow_entry._reserved1 = 0;
@@ -102,7 +102,10 @@ int execution_deck_handler(Event* event) {
         *((uint32_t*)overflow_entry.payload) = RESULT_OVERFLOW_MARKER;
         *((uint32_t*)(overflow_entry.payload + 4)) = proc->result_overflow_count;
 
-        pending_results_enqueue(proc->pid, &overflow_entry);
+        if (pending_results_enqueue(proc->pid, &overflow_entry) != 0) {
+            debug_printf("[EXECUTION] WARNING: PID %u overflow notification lost (pending queue full)\n",
+                       proc->pid);
+        }
 
         process_ref_dec(proc);
         return -1;  // Event blocked

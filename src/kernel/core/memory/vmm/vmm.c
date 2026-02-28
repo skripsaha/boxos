@@ -1716,6 +1716,15 @@ typedef struct {
 #define PF_W       2
 #define PF_R       4
 
+// ELF identification constants
+#define ELFCLASS64   2
+#define ELFDATA2LSB  1
+#define ET_EXEC      2
+#define EM_X86_64    62
+
+// Max code region size: cabin code area (0x3000 .. stack base)
+#define VMM_CABIN_MAX_CODE_SIZE (VMM_USER_STACK_TOP - VMM_CABIN_CODE_START - (64 * 1024))
+
 int vmm_map_code_region(vmm_context_t* ctx, uintptr_t code_phys, uint64_t size) {
     if (!ctx || !code_phys || size == 0) return -1;
 
@@ -1724,11 +1733,24 @@ int vmm_map_code_region(vmm_context_t* ctx, uintptr_t code_phys, uint64_t size) 
 
     if (ehdr->e_ident[0] != 0x7F || ehdr->e_ident[1] != 'E' ||
         ehdr->e_ident[2] != 'L' || ehdr->e_ident[3] != 'F') {
-        // Raw flat binary — map directly at VMM_CABIN_CODE_START
-        debug_printf("[VMM] No ELF magic, loading as raw flat binary at 0x%llx\n",
-                     (uint64_t)VMM_CABIN_CODE_START);
+        // Raw flat binary — validate size before mapping
+        if (size > VMM_CABIN_MAX_CODE_SIZE) {
+            debug_printf("[VMM] ERROR: Flat binary too large (%llu bytes, max %llu)\n",
+                         size, (uint64_t)VMM_CABIN_MAX_CODE_SIZE);
+            return -1;
+        }
+
         uint64_t pages = (size + VMM_PAGE_SIZE - 1) / VMM_PAGE_SIZE;
         if (pages < 1) pages = 1;
+
+        // Guard against integer overflow in page calculation
+        if (pages > VMM_CABIN_MAX_CODE_SIZE / VMM_PAGE_SIZE) {
+            debug_printf("[VMM] ERROR: Page count overflow in flat binary loader\n");
+            return -1;
+        }
+
+        debug_printf("[VMM] Loading raw flat binary at 0x%llx (%llu pages)\n",
+                     (uint64_t)VMM_CABIN_CODE_START, pages);
         vmm_map_result_t raw_result = vmm_map_pages(ctx, VMM_CABIN_CODE_START,
                                                     code_phys, (size_t)pages,
                                                     VMM_FLAG_PRESENT | VMM_FLAG_USER | VMM_FLAG_WRITABLE);
@@ -1736,9 +1758,34 @@ int vmm_map_code_region(vmm_context_t* ctx, uintptr_t code_phys, uint64_t size) 
             debug_printf("[VMM] ERROR: Failed to map raw binary: %s\n", raw_result.error_msg);
             return -1;
         }
-        debug_printf("[VMM] Raw binary mapped: %llu pages at virt=0x%llx phys=0x%lx\n",
-                     pages, (uint64_t)VMM_CABIN_CODE_START, code_phys);
         return 0;
+    }
+
+    // ELF validation: class (64-bit only)
+    if (ehdr->e_ident[4] != ELFCLASS64) {
+        debug_printf("[VMM] ERROR: ELF is not 64-bit (class=%u, expected %u)\n",
+                     ehdr->e_ident[4], ELFCLASS64);
+        return -1;
+    }
+
+    // ELF validation: little-endian
+    if (ehdr->e_ident[5] != ELFDATA2LSB) {
+        debug_printf("[VMM] ERROR: ELF is not little-endian (data=%u)\n", ehdr->e_ident[5]);
+        return -1;
+    }
+
+    // ELF validation: executable type
+    if (ehdr->e_type != ET_EXEC) {
+        debug_printf("[VMM] ERROR: ELF is not executable (type=%u, expected %u)\n",
+                     ehdr->e_type, ET_EXEC);
+        return -1;
+    }
+
+    // ELF validation: x86_64 architecture
+    if (ehdr->e_machine != EM_X86_64) {
+        debug_printf("[VMM] ERROR: ELF is not x86_64 (machine=%u, expected %u)\n",
+                     ehdr->e_machine, EM_X86_64);
+        return -1;
     }
 
     if (ehdr->e_phoff == 0 || ehdr->e_phnum == 0) {

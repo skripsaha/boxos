@@ -668,6 +668,11 @@ static uint64_t generate_random_handle(void) {
     return result ? result : 1;
 }
 
+// TODO: BUF_ALLOC allocates physical memory but does NOT map it into the
+// process cabin page tables. The process receives a handle + physical address
+// but cannot access the buffer directly. To enable process-accessible buffers,
+// add vmm_map_pages() call to map the buffer into cabin address space after
+// allocation (e.g., at CABIN_CODE_START + code_size, growing upward).
 int system_deck_buf_alloc(Event* event) {
     if (!event) {
         debug_printf("[SYSTEM_DECK] BUF_ALLOC: NULL event\n");

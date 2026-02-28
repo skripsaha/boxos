@@ -99,7 +99,8 @@ static inline void event_init(Event* event, uint32_t pid, uint32_t event_id) {
 static inline bool event_validate(const Event* event) {
     return event &&
            event->magic == EVENT_MAGIC &&
-           event->current_prefix_idx < EVENT_MAX_PREFIXES;
+           event->current_prefix_idx < EVENT_MAX_PREFIXES &&
+           event->prefix_count <= EVENT_MAX_PREFIXES;
 }
 
 static inline uint8_t event_get_deck_id(const Event* event, uint8_t idx) {
