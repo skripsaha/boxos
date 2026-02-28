@@ -56,21 +56,9 @@ boxos_error_t event_ring_push(EventRingBuffer* ring, Event* event) {
         return BOXOS_ERR_INVALID_ARGUMENT;
     }
 
-    // Validate Event magic number for corruption detection
     if (event->magic != EVENT_MAGIC) {
         return BOXOS_ERR_INVALID_ARGUMENT;
     }
-
-    // TEMPORARY (Phase 1.3): Current Event structure does not have extended storage.
-    // Phase 2 will add extended_prefixes/extended_data pointers with EVENT_FLAG_* flags.
-    // This check is a placeholder to document the limitation - any Event with extended
-    // storage will be rejected until Phase 2 implements proper deep copy semantics.
-    // TODO(Phase 2): When Event structure gains flags field, uncomment this check:
-    // #define EVENT_FLAG_EXTENDED_PREFIXES (1 << 0)
-    // #define EVENT_FLAG_EXTENDED_DATA     (1 << 1)
-    // if (event->flags & (EVENT_FLAG_EXTENDED_PREFIXES | EVENT_FLAG_EXTENDED_DATA)) {
-    //     return BOXOS_ERR_NOT_IMPLEMENTED;
-    // }
 
     spin_lock(&ring->lock);
 
@@ -80,25 +68,21 @@ boxos_error_t event_ring_push(EventRingBuffer* ring, Event* event) {
     }
 
     size_t write_pos = ring->tail % ring->capacity;
-
     memcpy(&ring->entries[write_pos], event, sizeof(Event));
-
-    // NOTE: On single-core (v1.0), spinlock disables interrupts, making these
-    //       sequential updates atomic. Multi-core will require CAS operations.
     ring->tail++;
     ring->user_count++;
 
-    // Auto-grow: Check if utilization exceeds 80% threshold
-    if (event_ring_should_grow(ring)) {
-        spin_unlock(&ring->lock);
+    bool needs_grow = event_ring_should_grow(ring);
+
+    spin_unlock(&ring->lock);
+
+    // Auto-grow outside lock (grow re-checks under its own lock)
+    if (needs_grow) {
         boxos_error_t grow_err = event_ring_grow(ring);
         if (BOXOS_IS_ERROR(grow_err)) {
             debug_printf("[EVENTRING] Auto-grow failed: %s\n", boxos_error_string(grow_err));
         }
-        return BOXOS_OK;
     }
-
-    spin_unlock(&ring->lock);
 
     return BOXOS_OK;
 }
@@ -119,11 +103,7 @@ boxos_error_t event_ring_pop(EventRingBuffer* ring, Event* out_event) {
 
     memcpy(out_event, &ring->entries[read_pos], sizeof(Event));
 
-    // Clear ring entry for security and hygiene
     memset(&ring->entries[read_pos], 0, sizeof(Event));
-
-    // NOTE: On single-core (v1.0), spinlock disables interrupts, making these
-    //       sequential updates atomic. Multi-core will require CAS operations.
     ring->head++;
     ring->user_count--;
 
@@ -148,12 +128,27 @@ boxos_error_t event_ring_grow(EventRingBuffer* ring) {
         return BOXOS_ERR_NO_MEMORY;
     }
 
+    // Allocate outside lock (kmalloc may be expensive)
     Event* new_entries = kmalloc(new_capacity * sizeof(Event));
     if (!new_entries) {
         return BOXOS_ERR_NO_MEMORY;
     }
 
     spin_lock(&ring->lock);
+
+    // Re-check under lock: another context may have already grown the ring
+    if (!event_ring_should_grow(ring) || ring->capacity >= EVENT_RING_MAX_CAPACITY) {
+        spin_unlock(&ring->lock);
+        kfree(new_entries);
+        return BOXOS_OK;
+    }
+
+    // Verify new_capacity still valid after potential concurrent growth
+    if (new_capacity <= ring->capacity) {
+        spin_unlock(&ring->lock);
+        kfree(new_entries);
+        return BOXOS_OK;
+    }
 
     size_t count = ring->user_count;
     uint64_t read_pos = ring->head;
@@ -233,9 +228,8 @@ event_push_result_t event_ring_push_priority(
     size_t current_count = ring->user_count;
     size_t capacity = ring->capacity;
 
-    // SYSTEM PRIORITY: Always succeeds (critical path for I/O completion)
+    // SYSTEM PRIORITY: Uses full capacity (critical path for I/O completion)
     if (priority == EVENT_PRIORITY_SYSTEM) {
-        // System events can use full capacity (no user quota enforcement)
         if (current_count >= capacity) {
             spin_unlock(&ring->lock);
             debug_printf("[EVENTRING] CRITICAL: Ring overflow even for system event\n");
@@ -247,18 +241,16 @@ event_push_result_t event_ring_push_priority(
         ring->tail++;
         ring->user_count++;
 
-        // Auto-grow after system event push
-        if (event_ring_should_grow(ring)) {
-            spin_unlock(&ring->lock);
+        bool needs_grow = event_ring_should_grow(ring);
+        spin_unlock(&ring->lock);
+
+        if (needs_grow) {
             boxos_error_t grow_err = event_ring_grow(ring);
             if (BOXOS_IS_ERROR(grow_err)) {
                 debug_printf("[EVENTRING] Auto-grow failed after system push: %s\n",
                            boxos_error_string(grow_err));
             }
-            return EVENT_PUSH_SYSTEM_OK;
         }
-
-        spin_unlock(&ring->lock);
         return EVENT_PUSH_SYSTEM_OK;
     }
 
@@ -273,17 +265,15 @@ event_push_result_t event_ring_push_priority(
     ring->tail++;
     ring->user_count++;
 
-    // Auto-grow after user event push
-    if (event_ring_should_grow(ring)) {
-        spin_unlock(&ring->lock);
+    bool needs_grow = event_ring_should_grow(ring);
+    spin_unlock(&ring->lock);
+
+    if (needs_grow) {
         boxos_error_t grow_err = event_ring_grow(ring);
         if (BOXOS_IS_ERROR(grow_err)) {
             debug_printf("[EVENTRING] Auto-grow failed after user push: %s\n",
                        boxos_error_string(grow_err));
         }
-        return EVENT_PUSH_OK;
     }
-
-    spin_unlock(&ring->lock);
     return EVENT_PUSH_OK;
 }

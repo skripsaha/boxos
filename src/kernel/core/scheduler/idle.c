@@ -22,8 +22,8 @@ void idle_process_init(void) {
     g_idle_process.result_there = false;
     g_idle_process.score = -1000;  // Lowest priority
 
-    // Set tags
-    strcpy(g_idle_process.tags, "idle");
+    strncpy(g_idle_process.tags, "idle", PROCESS_TAG_SIZE - 1);
+    g_idle_process.tags[PROCESS_TAG_SIZE - 1] = '\0';
 
     // Initialize spinlock
     spinlock_init(&g_idle_process.state_lock);

@@ -26,14 +26,15 @@ void detect_cpu_info(char* cpu_vendor, char* cpu_brand) {
             *((uint32_t*)(cpu_brand + i * 16 + 12)) = edx;
         }
         cpu_brand[48] = '\0';
-        // Strip leading spaces
+        // Strip leading spaces (memmove: src/dst may overlap)
         char* start = cpu_brand;
         while (*start == ' ') start++;
         if (start != cpu_brand) {
-            strcpy(cpu_brand, start);
+            memmove(cpu_brand, start, strlen(start) + 1);
         }
     } else {
-        strcpy(cpu_brand, "Unknown CPU");
+        strncpy(cpu_brand, "Unknown CPU", 48);
+        cpu_brand[47] = '\0';
     }
 }
 

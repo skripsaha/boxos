@@ -63,14 +63,27 @@ int32_t scheduler_calculate_score(process_t* proc) {
 
     int32_t score = 0;
 
-    // Hot Result bonus (decays with consecutive runs)
+    // Hot Result bonus (decays with consecutive runs AND time)
     if (proc->result_there) {
         int32_t result_bonus = SCHEDULER_BOOST_HOT_RESULT;
+
+        // Decay by consecutive runs (-5 per run)
         if (proc->consecutive_runs > 0) {
             result_bonus -= (proc->consecutive_runs * 5);
-            if (result_bonus < SCHEDULER_BOOST_STARVATION) {
-                result_bonus = SCHEDULER_BOOST_STARVATION;
-            }
+        }
+
+        // Time-based decay: if process already ran since result arrived,
+        // bonus decays over time to prevent permanent +50 advantage
+        uint64_t ticks_since_run = 0;
+        if (sched.total_ticks >= proc->last_run_time && proc->last_run_time > 0) {
+            ticks_since_run = sched.total_ticks - proc->last_run_time;
+        }
+        if (ticks_since_run > SCHEDULER_MILD_STARVATION_TICKS) {
+            result_bonus -= (int32_t)(ticks_since_run / 5);
+        }
+
+        if (result_bonus < 0) {
+            result_bonus = 0;
         }
         score += result_bonus;
     }
@@ -185,6 +198,9 @@ void scheduler_yield(void) {
 
     if (current && process_get_state(current) == PROC_RUNNING) {
         process_set_state(current, PROC_READY);
+        if (!process_is_idle(current) && current->result_there) {
+            atomic_store_u8((volatile uint8_t*)&current->result_there, 0);
+        }
     }
 
     process_t* next = scheduler_select_next();
@@ -207,6 +223,9 @@ void scheduler_yield_cooperative(void) {
 
     if (current && process_get_state(current) == PROC_RUNNING) {
         process_set_state(current, PROC_READY);
+        if (!process_is_idle(current) && current->result_there) {
+            atomic_store_u8((volatile uint8_t*)&current->result_there, 0);
+        }
 
         process_t* next = scheduler_select_next();
 

@@ -123,7 +123,7 @@ int tagfs_context_remove_tag(uint32_t pid, const char* tag_string) {
     for (uint32_t i = 0; i < ctx->tag_count; i++) {
         if (strcmp(ctx->active_tags[i], tag_string) == 0) {
             for (uint32_t j = i; j < ctx->tag_count - 1; j++) {
-                strcpy(ctx->active_tags[j], ctx->active_tags[j + 1]);
+                memcpy(ctx->active_tags[j], ctx->active_tags[j + 1], 64);
             }
             ctx->tag_count--;
             spin_unlock(&g_context_table.lock);
