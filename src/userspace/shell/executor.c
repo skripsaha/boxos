@@ -66,15 +66,24 @@ int executor_run(parsed_command_t *cmd)
         send((uint32_t)pid, buf, (uint16_t)pos);
 
         result_entry_t entry;
-        int timeout_count = 0;
-        while (timeout_count < 50) {
+        int idle_ticks = 0;
+        while (1) {
             if (receive_wait(&entry, 100)) {
                 if (entry.size >= 1 && entry.payload[0] == 0xFE) {
                     break;
                 }
-                timeout_count = 0;
+                idle_ticks = 0;
             } else {
-                timeout_count++;
+                idle_ticks++;
+                // Every ~3 seconds of silence, check if child is still alive
+                if (idle_ticks >= 30) {
+                    idle_ticks = 0;
+                    proc_info_t info;
+                    if (proc_info((uint16_t)pid, &info) != OK ||
+                        info.state >= PROC_STATE_TERMINATED) {
+                        break;
+                    }
+                }
             }
         }
         return 0;
