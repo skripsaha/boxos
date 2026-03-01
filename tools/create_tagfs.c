@@ -167,12 +167,24 @@ int add_file_to_fs(FILE* disk, TagFSSuperblock* sb, const char* filepath, const 
         stem[stem_len] = '\0';
 
         if (stem_len > 0 && meta.tag_count < 16) {
-            /* Label: kernel expects key=label, value="" (format_tag shows key when value empty) */
-            meta.tags[meta.tag_count].type = 1;
-            strncpy(meta.tags[meta.tag_count].key, stem, sizeof(meta.tags[0].key) - 1);
-            meta.tags[meta.tag_count].key[sizeof(meta.tags[0].key) - 1] = '\0';
-            meta.tags[meta.tag_count].value[0] = '\0';
-            meta.tag_count++;
+            /* Only add stem tag if it doesn't already exist */
+            int duplicate = 0;
+            for (uint8_t d = 0; d < meta.tag_count; d++) {
+                if (meta.tags[d].type == 1 &&
+                    strcmp(meta.tags[d].key, stem) == 0 &&
+                    meta.tags[d].value[0] == '\0') {
+                    duplicate = 1;
+                    break;
+                }
+            }
+            if (!duplicate) {
+                /* Label: kernel expects key=label, value="" (format_tag shows key when value empty) */
+                meta.tags[meta.tag_count].type = 1;
+                strncpy(meta.tags[meta.tag_count].key, stem, sizeof(meta.tags[0].key) - 1);
+                meta.tags[meta.tag_count].key[sizeof(meta.tags[0].key) - 1] = '\0';
+                meta.tags[meta.tag_count].value[0] = '\0';
+                meta.tag_count++;
+            }
         }
     }
 

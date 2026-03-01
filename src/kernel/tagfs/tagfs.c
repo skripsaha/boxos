@@ -310,6 +310,36 @@ int tagfs_init(void) {
         uint32_t metadata_index = i;
         if (tagfs_read_metadata(file_id, &tfs.metadata_cache[metadata_index]) != 0) {
             debug_printf("[TagFS] Warning: Failed to read metadata for file %u\n", file_id);
+            continue;
+        }
+
+        // Deduplicate tags: remove entries with same type+key+value
+        TagFSMetadata* meta = &tfs.metadata_cache[metadata_index];
+        if (meta->file_id == 0 || !(meta->flags & TAGFS_FILE_ACTIVE))
+            continue;
+
+        bool had_duplicates = false;
+        for (uint8_t t = 0; t < meta->tag_count; t++) {
+            for (uint8_t u = t + 1; u < meta->tag_count; ) {
+                if (meta->tags[u].type == meta->tags[t].type &&
+                    strcmp(meta->tags[u].key, meta->tags[t].key) == 0 &&
+                    strcmp(meta->tags[u].value, meta->tags[t].value) == 0) {
+                    // Shift remaining tags down
+                    for (uint8_t s = u; s + 1 < meta->tag_count; s++) {
+                        meta->tags[s] = meta->tags[s + 1];
+                    }
+                    meta->tag_count--;
+                    had_duplicates = true;
+                } else {
+                    u++;
+                }
+            }
+        }
+
+        if (had_duplicates) {
+            debug_printf("[TagFS] Dedup: removed duplicate tags from file %u '%s'\n",
+                         file_id, meta->filename);
+            tagfs_write_metadata_raw(file_id, meta);
         }
     }
 
@@ -715,11 +745,23 @@ int tagfs_create_file(const char* filename, const char* tags[], uint32_t tag_cou
     meta->filename[TAGFS_MAX_FILENAME - 1] = '\0';
 
     if (tags != NULL) {
-        for (uint32_t i = 0; i < tag_count && i < TAGFS_MAX_TAGS_PER_FILE; i++) {
+        for (uint32_t i = 0; i < tag_count && meta->tag_count < TAGFS_MAX_TAGS_PER_FILE; i++) {
             char key[12];
             char value[13];
             uint8_t tag_type;
             if (tagfs_parse_tag(tags[i], key, value, &tag_type) == 0) {
+                // Skip duplicate tags
+                bool duplicate = false;
+                for (uint8_t d = 0; d < meta->tag_count; d++) {
+                    if (meta->tags[d].type == tag_type &&
+                        strcmp(meta->tags[d].key, key) == 0 &&
+                        strcmp(meta->tags[d].value, value) == 0) {
+                        duplicate = true;
+                        break;
+                    }
+                }
+                if (duplicate) continue;
+
                 memset(&meta->tags[meta->tag_count], 0, sizeof(TagFSTag));
 
                 meta->tags[meta->tag_count].type = tag_type;
@@ -801,6 +843,15 @@ int tagfs_add_tag(uint32_t file_id, const char* key, const char* value, uint8_t 
     TagFSMetadata* meta = &tfs.metadata_cache[metadata_index];
     if (!(meta->flags & TAGFS_FILE_ACTIVE)) {
         return -1;
+    }
+
+    // Check for duplicate: same key, value, and type
+    for (uint8_t i = 0; i < meta->tag_count; i++) {
+        if (meta->tags[i].type == type &&
+            strcmp(meta->tags[i].key, key) == 0 &&
+            strcmp(meta->tags[i].value, value) == 0) {
+            return 0;  // Already exists, not an error
+        }
     }
 
     if (meta->tag_count >= TAGFS_MAX_TAGS_PER_FILE) {
