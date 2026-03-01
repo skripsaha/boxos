@@ -9,6 +9,7 @@
 #include "async_io.h"
 #include "pid_allocator.h"
 #include "cpu_caps_page.h"
+#include "fpu.h"
 
 static process_t* process_list_head = NULL;
 static uint32_t process_count = 0;
@@ -157,6 +158,10 @@ process_t* process_create(const char* tags) {
     proc->context.fs = GDT_USER_DATA;
     proc->context.gs = GDT_USER_DATA;
     proc->context.ss = GDT_USER_DATA;
+
+    // Initialize clean FPU/SSE state (default FCW=0x037F, MXCSR=0x1F80)
+    fpu_init_state(proc->context.fpu_state);
+    proc->context.fpu_initialized = true;
 
     spin_lock(&process_lock);
 

@@ -143,8 +143,8 @@ int xhci_init(void) {
     // Validate MMIO mapping with test read
     uint8_t caplength = ctrl->cap_regs->caplength;
 
-    if (caplength < 0x20 || caplength > 0x44) {
-        debug_printf("[xHCI] ERROR: Invalid caplength 0x%02x (expected 0x20-0x44)\n", caplength);
+    if (caplength < 0x20) {
+        debug_printf("[xHCI] ERROR: Invalid caplength 0x%02x (minimum 0x20)\n", caplength);
         debug_printf("[xHCI] MMIO mapping may have failed - check physical address\n");
         vmm_unmap_mmio(mmio_virt, ctrl->mmio_size);
         return -1;
