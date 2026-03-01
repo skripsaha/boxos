@@ -71,14 +71,29 @@ bool receive(result_entry_t* out_entry) {
     return result_pop_ipc(out_entry);
 }
 
+// Wall-clock timeout via rdtsc (not iteration counting).
+// Iteration counting breaks with multiple yielding processes: voluntary yields
+// bypass the timer, so N processes cycling through yields burn iterations in
+// microseconds instead of the assumed 10ms each — making timeouts 100-1000x
+// shorter than intended.
+static inline uint64_t ipc_rdtsc(void) {
+    uint32_t lo, hi;
+    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+    return ((uint64_t)hi << 32) | lo;
+}
+
+#define IPC_TSC_FREQ_MHZ 1000
+
 bool receive_wait(result_entry_t* out_entry, uint32_t timeout_ms) {
     if (!out_entry) return false;
 
     if (result_pop_ipc(out_entry)) return true;
 
     result_page_t* rp = result_page();
-    uint32_t iterations = 0;
-    uint32_t max_iterations = timeout_ms / 10;
+    uint64_t deadline = 0;
+    if (timeout_ms > 0) {
+        deadline = ipc_rdtsc() + (uint64_t)timeout_ms * IPC_TSC_FREQ_MHZ * 1000;
+    }
 
     while (1) {
         __sync_synchronize();
@@ -91,7 +106,7 @@ bool receive_wait(result_entry_t* out_entry, uint32_t timeout_ms) {
             rp->notification_flag = 0;
         }
 
-        if (timeout_ms > 0 && iterations++ >= max_iterations) {
+        if (timeout_ms > 0 && ipc_rdtsc() >= deadline) {
             return false;
         }
 
