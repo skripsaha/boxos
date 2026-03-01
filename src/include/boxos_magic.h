@@ -12,6 +12,9 @@
 
 #define PROCESS_MAGIC      0x50524F43  // "PROC"
 
+#define KERNEL_HEADER_MAGIC    0x4E52454B  // "KERN" (first 4 bytes of "KERNEL", little-endian)
+#define KERNEL_HEADER_MAGIC_HI 0x4C45      // "EL" (next 2 bytes, little-endian)
+
 #define MAGIC_VALID(val, expected) ((val) == (expected))
 
 #endif // BOXOS_MAGIC_H
