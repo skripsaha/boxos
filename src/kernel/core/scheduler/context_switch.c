@@ -4,11 +4,17 @@
 #include "klib.h"
 #include "tss.h"
 #include "idt.h"
+#include "fpu.h"
 
 void context_save(process_t* proc, ProcessContext* ctx) {
     if (!proc || !ctx) {
         return;
     }
+
+    // Save FPU/SSE state
+    fpu_save(ctx->fpu_state);
+    ctx->fpu_initialized = true;
+
     if (!proc->cabin) {
         return;
     }
@@ -22,6 +28,11 @@ void context_restore(process_t* proc, ProcessContext* ctx) {
     }
 
     __asm__ volatile("mov %0, %%cr3" : : "r"(ctx->cr3) : "memory");
+
+    // Restore FPU/SSE state
+    if (ctx->fpu_initialized) {
+        fpu_restore(ctx->fpu_state);
+    }
 
     tss_set_rsp0((uint64_t)proc->kernel_stack_top);
 }
@@ -49,6 +60,10 @@ void context_save_from_frame(process_t* proc, interrupt_frame_t* frame) {
     }
 
     ProcessContext* ctx = &proc->context;
+
+    // Save FPU/SSE state before anything else can clobber it
+    fpu_save(ctx->fpu_state);
+    ctx->fpu_initialized = true;
 
     ctx->rax = frame->rax;
     ctx->rbx = frame->rbx;
@@ -110,4 +125,9 @@ void context_restore_to_frame(process_t* proc, interrupt_frame_t* frame) {
     frame->cs = ctx->cs;
     frame->ss = ctx->ss;
     frame->rflags = ctx->rflags;
+
+    // Restore FPU/SSE state for the incoming process
+    if (ctx->fpu_initialized) {
+        fpu_restore(ctx->fpu_state);
+    }
 }

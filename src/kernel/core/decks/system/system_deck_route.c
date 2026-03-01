@@ -169,6 +169,7 @@ int system_deck_route_tag(Event* event) {
 
     extern EventRingBuffer* kernel_event_ring;
 
+    uint32_t delivered = 0;
     for (uint32_t i = 0; i < target_count; i++) {
         Event clone;
         memcpy(&clone, event, sizeof(Event));
@@ -182,11 +183,29 @@ int system_deck_route_tag(Event* event) {
         clone.prefix_count = 1;
         clone.state = EVENT_STATE_PROCESSING;
 
-        event_ring_push(kernel_event_ring, &clone);
+        boxos_error_t push_err = event_ring_push(kernel_event_ring, &clone);
+        if (BOXOS_IS_ERROR(push_err)) {
+            event_ring_grow(kernel_event_ring);
+            push_err = event_ring_push(kernel_event_ring, &clone);
+            if (BOXOS_IS_ERROR(push_err)) {
+                debug_printf("[ROUTE_TAG] WARNING: Failed to deliver to PID %u: ring full\n",
+                             targets[i]);
+                continue;
+            }
+        }
+        delivered++;
     }
 
-    debug_printf("[ROUTE_TAG] PID %u -> %u targets matching '%s'\n",
-                 original_sender, target_count, event->route_tag);
+    if (delivered == 0) {
+        debug_printf("[ROUTE_TAG] ERROR: All %u deliveries failed for '%s'\n",
+                     target_count, event->route_tag);
+        event_set_error(event, BOXOS_ERR_EVENT_RING_FULL, event->current_prefix_idx);
+        event->state = EVENT_STATE_ERROR;
+        return -1;
+    }
+
+    debug_printf("[ROUTE_TAG] PID %u -> %u/%u targets matching '%s'\n",
+                 original_sender, delivered, target_count, event->route_tag);
 
     event->state = EVENT_STATE_PROCESSING;
     return 0;

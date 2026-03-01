@@ -60,7 +60,7 @@ task_save_context:
     mov ax, ss
     mov [rdi + 154], ax
 
-    ; FPU/SSE state is saved separately by caller if needed
+    ; FPU/SSE state is saved by C context_switch functions (fxsave/fxrstor)
     ret
 
 ; ============================================================================

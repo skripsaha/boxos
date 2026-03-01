@@ -41,7 +41,7 @@ typedef enum {
 } process_block_reason_t;
 
 // Deferred cleanup queue for process destruction
-#define PROCESS_CLEANUP_QUEUE_SIZE 64
+#define PROCESS_CLEANUP_QUEUE_SIZE 256
 
 typedef struct {
     struct process_t* queue[PROCESS_CLEANUP_QUEUE_SIZE];
@@ -72,6 +72,12 @@ typedef struct {
     uint64_t rflags;
 
     uint64_t cr3;
+
+    // FPU/SSE state saved by fxsave (512 bytes + 16 for runtime alignment).
+    // kmalloc does not guarantee 16-byte alignment, so fpu_save/fpu_restore
+    // compute the aligned pointer at runtime via fpu_align().
+    uint8_t fpu_state[512 + 16];
+    bool fpu_initialized;
 } ProcessContext;
 
 typedef struct process_t {
@@ -120,7 +126,7 @@ typedef struct process_t {
 } process_t;
 
 // Compile-time checks
-_Static_assert(sizeof(process_t) < 4096, "Process structure should fit in one page");
+_Static_assert(sizeof(process_t) < 4096, "Process structure must fit in one page");
 
 void process_init(void);
 
