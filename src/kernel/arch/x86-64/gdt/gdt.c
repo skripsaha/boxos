@@ -37,7 +37,7 @@ void gdt_set_entry(int index, uint64_t base, uint64_t limit, uint8_t access, uin
 
 void gdt_init(void) {
     debug_printf("[GDT] Initializing Global Descriptor Table...\n");
-    
+
     memset(gdt, 0, sizeof(gdt));
 
     gdt_set_entry(0, 0, 0, 0, 0);
@@ -49,16 +49,16 @@ void gdt_init(void) {
     // Indices 5 and 6 reserved for TSS (16 bytes in x86-64)
     gdt_desc.limit = sizeof(gdt) - 1;
     gdt_desc.base = (uint64_t)gdt;
-    
+
     debug_printf("[GDT] GDT entries configured:\n");
     kprintf("  - Kernel Code: 0x%02X\n", GDT_KERNEL_CODE);
     kprintf("  - Kernel Data: 0x%02X\n", GDT_KERNEL_DATA);
     kprintf("  - User Code: 0x%02X\n", GDT_USER_CODE);
     kprintf("  - User Data: 0x%02X\n", GDT_USER_DATA);
     kprintf("  - TSS: 0x%02X (will be set by tss_init)\n", GDT_TSS);
-    
+
     gdt_load();
-    
+
     debug_printf("[GDT] %[S]GDT loaded successfully!%[D]\n");
 }
 
@@ -74,8 +74,8 @@ void gdt_set_tss_entry(int index, uint64_t base, uint64_t limit) {
     // Second entry holds upper 32 bits of base address
     uint64_t* second_entry = (uint64_t*)&gdt[index + 1];
     *second_entry = (base >> 32);
-    
-    debug_printf("[GDT] TSS entry set: index=%d-%d, base=0x%p, limit=0x%llx\n", 
+
+    debug_printf("[GDT] TSS entry set: index=%d-%d, base=0x%p, limit=0x%llx\n",
            index, index + 1, (void*)base, limit);
     debug_printf("[GDT] First entry:  0x%016llx\n", *(uint64_t*)&gdt[index]);
     debug_printf("[GDT] Second entry: 0x%016llx\n", *second_entry);

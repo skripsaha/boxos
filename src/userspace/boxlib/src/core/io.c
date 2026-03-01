@@ -6,10 +6,6 @@
 #include "box/convert.h"
 #include "box/notify.h"
 
-// ============================================================================
-// OUTPUT
-// ============================================================================
-
 static void print_raw(const char* str) {
     if (!str) return;
 
@@ -80,10 +76,6 @@ void clear(void) {
 void color(uint8_t c) {
     vga_setcolor(c);
 }
-
-// ============================================================================
-// INPUT
-// ============================================================================
 
 int readline(char* buffer, size_t max_len) {
     if (!buffer || max_len < 2) {

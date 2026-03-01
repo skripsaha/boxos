@@ -247,10 +247,10 @@ Routes event to a specific process by PID. Changes `event->pid` to `event->route
 **Security**: Requires `app`, `utility`, or `system` tag
 
 **Error Codes**:
-- `BOXOS_ERR_INVALID_ARGUMENT` - route_target is 0
-- `BOXOS_ERR_ROUTE_SELF` - route_target equals sender
-- `BOXOS_ERR_PROCESS_NOT_FOUND` - target does not exist or terminated
-- `BOXOS_ERR_ROUTE_TARGET_FULL` - target ResultPage is full
+- `ERR_INVALID_ARGUMENT` - route_target is 0
+- `ERR_ROUTE_SELF` - route_target equals sender
+- `ERR_PROCESS_NOT_FOUND` - target does not exist or terminated
+- `ERR_ROUTE_TARGET_FULL` - target ResultPage is full
 
 #### 0x41 - ROUTE_TAG
 Routes event to all processes matching a tag. Clones the event for each target.
@@ -266,8 +266,8 @@ Routes event to all processes matching a tag. Clones the event for each target.
 **Security**: Requires `app`, `utility`, or `system` tag
 
 **Error Codes**:
-- `BOXOS_ERR_INVALID_ARGUMENT` - route_tag is empty
-- `BOXOS_ERR_ROUTE_NO_SUBSCRIBERS` - no processes match tag
+- `ERR_INVALID_ARGUMENT` - route_tag is empty
+- `ERR_ROUTE_NO_SUBSCRIBERS` - no processes match tag
 
 #### 0x42 - LISTEN
 Registers process as receiver of hardware IRQ data (keyboard, mouse, etc).
@@ -279,8 +279,8 @@ Registers process as receiver of hardware IRQ data (keyboard, mouse, etc).
 **Security**: Requires `app`, `display`, or `system` tag
 
 **Error Codes**:
-- `BOXOS_ERR_LISTEN_TABLE_FULL` - listen table full (max 64 entries)
-- `BOXOS_ERR_LISTEN_ALREADY` - already listening on this source
+- `ERR_LISTEN_TABLE_FULL` - listen table full (max 64 entries)
+- `ERR_LISTEN_ALREADY` - already listening on this source
 
 ### Context Management (Future)
 

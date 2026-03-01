@@ -1,14 +1,3 @@
-/*
- * cmd_ipc_test - BoxOS IPC + Multitasking Demo
- *
- * Launches proca and procb via proc_exec(), then collects
- * their IPC messages through the result ring.
- *
- * Flow:
- *   1. proc_exec("proca")  -> proca broadcasts 'A' x5 to tag "shell"
- *   2. proc_exec("procb")  -> procb broadcasts 'B' x5 to tag "shell"
- *   3. receive_wait() loop -> display each arriving message
- */
 #include "commands.h"
 #include "box/io.h"
 #include "box/system.h"
@@ -53,10 +42,10 @@ int cmd_ipc_test(int argc, char* argv[]) {
         }
 
         /* Null-terminate and print the payload */
-        char buf[BOX_RESULT_PAYLOAD_SIZE + 1];
+        char buf[RESULT_PAYLOAD_SIZE + 1];
         uint16_t len = entry.size;
-        if (len > BOX_RESULT_PAYLOAD_SIZE) {
-            len = BOX_RESULT_PAYLOAD_SIZE;
+        if (len > RESULT_PAYLOAD_SIZE) {
+            len = RESULT_PAYLOAD_SIZE;
         }
         memcpy(buf, entry.payload, len);
         buf[len] = '\0';

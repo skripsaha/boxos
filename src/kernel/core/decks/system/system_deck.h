@@ -6,39 +6,31 @@
 
 #define SYSTEM_DECK_ID           DECK_SYSTEM
 
-// Process Management
 #define SYSTEM_OP_PROC_SPAWN     0x01
 #define SYSTEM_OP_PROC_KILL      0x02
 #define SYSTEM_OP_PROC_INFO      0x03
 #define SYSTEM_OP_PROC_EXEC      0x06
 
-// Security (Legacy)
 #define SYSTEM_OP_CTX_USE        0x04
 #define SYSTEM_OP_BYPASS         0x05
 
-// Memory Management
 #define SYSTEM_OP_BUF_ALLOC      0x10
 #define SYSTEM_OP_BUF_FREE       0x11
 #define SYSTEM_OP_BUF_RESIZE     0x12
 
-// Tag Management
 #define SYSTEM_OP_TAG_ADD        0x20
 #define SYSTEM_OP_TAG_REMOVE     0x21
 #define SYSTEM_OP_TAG_CHECK      0x22
 
-// Filesystem Defragmentation
 #define SYSTEM_OP_DEFRAG_FILE           0x18
 #define SYSTEM_OP_FRAGMENTATION_SCORE   0x19
 
-// Overflow Status
 #define SYSTEM_OP_OVERFLOW_STATUS       0xE0
 
-// Routing/IPC
 #define SYSTEM_OP_ROUTE          0x40
 #define SYSTEM_OP_ROUTE_TAG      0x41
 #define SYSTEM_OP_LISTEN         0x42
 
-// Scheduler Cooperation
 #define SYSTEM_OP_YIELD                 0xFE
 
 typedef struct __packed {
@@ -46,7 +38,6 @@ typedef struct __packed {
     uint32_t target_block;
 } defrag_request_t;
 
-// Defragmentation structures
 typedef struct __packed {
     uint32_t file_id;
     uint32_t target_block;

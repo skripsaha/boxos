@@ -63,17 +63,14 @@ int32_t scheduler_calculate_score(process_t* proc) {
 
     int32_t score = 0;
 
-    // Hot Result bonus (decays with consecutive runs AND time)
+    // hot result bonus decays with consecutive runs and elapsed time
     if (proc->result_there) {
         int32_t result_bonus = SCHEDULER_BOOST_HOT_RESULT;
 
-        // Decay by consecutive runs (-5 per run)
         if (proc->consecutive_runs > 0) {
             result_bonus -= (proc->consecutive_runs * 5);
         }
 
-        // Time-based decay: if process already ran since result arrived,
-        // bonus decays over time to prevent permanent +50 advantage
         uint64_t ticks_since_run = 0;
         if (sched.total_ticks >= proc->last_run_time && proc->last_run_time > 0) {
             ticks_since_run = sched.total_ticks - proc->last_run_time;
@@ -88,35 +85,30 @@ int32_t scheduler_calculate_score(process_t* proc) {
         score += result_bonus;
     }
 
-    // CRITICAL priority for processes blocked on overflow
     if (proc->block_reason == PROC_BLOCK_RESULT_OVERFLOW) {
-        score += 200;  // Highest priority to recover
+        score += 200;  // highest priority to recover from overflow
     }
 
-    // Use context match
     if (scheduler_matches_use_context(proc)) {
         score += SCHEDULER_BOOST_CONTEXT_MATCH;
     }
 
-    // Enhanced starvation protection (wraparound-safe)
     uint64_t ticks_since_run = 0;
     if (sched.total_ticks >= proc->last_run_time) {
         ticks_since_run = sched.total_ticks - proc->last_run_time;
     }
     if (ticks_since_run >= SCHEDULER_CRITICAL_STARVATION_TICKS) {
-        score += SCHEDULER_BOOST_CRITICAL_STARVATION;  // 1000ms = critical starvation
+        score += SCHEDULER_BOOST_CRITICAL_STARVATION;
     } else if (ticks_since_run >= SCHEDULER_SEVERE_STARVATION_TICKS) {
-        score += SCHEDULER_BOOST_SEVERE_STARVATION;   // 500ms = severe starvation
+        score += SCHEDULER_BOOST_SEVERE_STARVATION;
     } else if (ticks_since_run >= SCHEDULER_MILD_STARVATION_TICKS) {
-        score += SCHEDULER_BOOST_STARVATION;   // 100ms = mild starvation
+        score += SCHEDULER_BOOST_STARVATION;
     }
 
-    // Consecutive run penalty
     if (proc->consecutive_runs >= SCHEDULER_MAX_CONSECUTIVE_RUNS) {
         score -= SCHEDULER_BOOST_CRITICAL_STARVATION;
     }
 
-    // Utility/system bonus
     if (process_has_tag(proc, "utility") || process_has_tag(proc, "system")) {
         score += 5;
     }
@@ -131,12 +123,11 @@ int32_t scheduler_calculate_score(process_t* proc) {
 void scheduler_reap_zombies(void) {
     process_t* proc = process_get_first();
 
-    // read current_process under short lock, not held during entire loop
+    // read current_process under short lock, not held during the full loop
     spin_lock(&sched.scheduler_lock);
     process_t* current = sched.current_process;
     spin_unlock(&sched.scheduler_lock);
-
-    // Now scheduler_lock is FREE - process_destroy() can safely acquire it
+    // scheduler_lock is now FREE — process_destroy() can safely acquire it
 
     while (proc) {
         process_t* next = proc->next;
@@ -150,7 +141,6 @@ void scheduler_reap_zombies(void) {
         proc = next;
     }
 
-    // Run deferred cleanup after reaping
     process_cleanup_deferred();
 }
 
@@ -160,7 +150,7 @@ process_t* scheduler_select_next(void) {
 
     process_t* proc = process_get_first();
     while (proc) {
-        // validate magic before accessing process
+        // validate magic before accessing any other fields
         if (proc->magic != PROCESS_MAGIC) {
             proc = proc->next;
             continue;
@@ -246,14 +236,12 @@ void scheduler_yield_from_interrupt(void* frame_ptr) {
 
     __asm__ volatile("cli");
 
-    // read current_process under lock
     spin_lock(&sched.scheduler_lock);
     process_t* current = sched.current_process;
     spin_unlock(&sched.scheduler_lock);
 
     if (current && process_get_state(current) == PROC_RUNNING) {
-        // don't preempt if only runnable process
-        // Quick scan: are there other READY processes?
+        // skip preemption if no other READY process exists
         bool other_ready = false;
         process_t* scan = process_get_first();
         while (scan) {
@@ -264,10 +252,9 @@ void scheduler_yield_from_interrupt(void* frame_ptr) {
             scan = scan->next;
         }
 
-        // Only context switch if competition exists
         if (!other_ready && !process_is_idle(current)) {
             sched.total_ticks++;
-            return;  // Continue running current process
+            return;
         }
 
         context_save_from_frame(current, frame);
@@ -298,7 +285,7 @@ void scheduler_yield_from_interrupt(void* frame_ptr) {
         }
     }
 
-    // Audit zombies every 100 ticks (1 second @ 100Hz)
+    // audit zombies every 100 ticks (~1 second at 100 Hz)
     static uint64_t tick_count = 0;
     tick_count++;
     if ((tick_count % SCHEDULER_CRITICAL_STARVATION_TICKS) == 0) {
@@ -307,32 +294,29 @@ void scheduler_yield_from_interrupt(void* frame_ptr) {
 
     process_t* next = scheduler_select_next();
 
-    // Phase 2: Periodic Guide run to prevent deadlock
     static uint64_t guide_last_run = 0;
     uint64_t current_tick = sched.total_ticks;
 
     bool should_run_guide = false;
 
-    // 1. Transition to idle (existing behavior)
+    // run guide on idle transition
     if (process_is_idle(next) && !process_is_idle(current)) {
         should_run_guide = true;
     }
 
-    // 2. Periodic run every 5 ticks (50ms) for guaranteed processing
+    // periodic run every 5 ticks (50 ms) for guaranteed event processing
     if ((current_tick - guide_last_run) >= 5) {
         should_run_guide = true;
     }
 
-    // 3. Priority run if processes waiting on EventRing
+    // run if processes are waiting on EventRing
     extern event_ring_wait_queue_t event_ring_waiters;
     if (event_ring_waiters.count > 0) {
         should_run_guide = true;
     }
 
-    // 4. Run if kernel event ring has pending events
-    // Without this, yield loops in userspace can spin through hundreds of
-    // iterations between timer ticks, missing events that sit unprocessed
-    // in the kernel ring (e.g., IPC clones from ROUTE_TAG).
+    // run if kernel event ring has pending events; without this, ROUTE_TAG clones
+    // can sit unprocessed between timer ticks while userspace yield-loops spin
     if (!event_ring_is_empty(kernel_event_ring)) {
         should_run_guide = true;
     }
@@ -343,17 +327,14 @@ void scheduler_yield_from_interrupt(void* frame_ptr) {
 
         xhci_poll_events();
 
-        // deferred cleanup on idle transition
         process_cleanup_deferred();
 
-        // Re-select next process (may have unblocked processes)
         process_t* maybe_user = scheduler_select_next();
         if (maybe_user && !process_is_idle(maybe_user)) {
             next = maybe_user;
         }
     }
 
-    // Update TSS RSP0 for userspace processes (not needed for idle)
     if (!process_is_idle(next) && next->kernel_stack_top) {
         tss_set_rsp0((uint64_t)next->kernel_stack_top);
     }
@@ -364,23 +345,18 @@ void scheduler_yield_from_interrupt(void* frame_ptr) {
     process_set_state(next, PROC_RUNNING);
     next->last_run_time = sched.total_ticks;
 
-    // Update consecutive run counters
     if (current && current != next) {
-        // Process switched: reset current's counter
         current->consecutive_runs = 0;
         next->consecutive_runs = 1;
     } else if (next) {
-        // Same process continues: increment counter
         next->consecutive_runs++;
     }
 
-    // Fairness audit every 100 ticks
     if ((sched.total_ticks - sched.last_audit_tick) >= SCHEDULER_CRITICAL_STARVATION_TICKS) {
         scheduler_audit_fairness();
         sched.last_audit_tick = sched.total_ticks;
     }
 
-    // Periodic cleanup (every 10 ticks = 100ms)
     if ((sched.total_ticks % 10) == 0) {
         pending_results_flush_all();
         process_cleanup_deferred();
@@ -388,9 +364,9 @@ void scheduler_yield_from_interrupt(void* frame_ptr) {
 
     context_restore_to_frame(next, frame);
 
-    // NOTE: Do NOT sti here! iretq will atomically restore RFLAGS (with IF=1)
-    // from the user context. Doing sti before iretq creates a race window where
-    // a timer can fire while still in kernel mode, corrupting the process context.
+    // do NOT sti here — iretq restores RFLAGS atomically including IF=1;
+    // an sti before iretq creates a window where a timer fires in kernel mode
+    // and corrupts the process context being restored
 }
 
 void scheduler_tick(void) {
@@ -415,13 +391,11 @@ void scheduler_tick(void) {
         }
     }
 
-    // Check for timeout blocked processes on ResultRing and EventRing
     extern uint64_t cpu_get_tsc_freq_khz(void);
     process_t* proc = process_get_first();
     while (proc) {
         process_t* next = proc->next;
 
-        // Check EventRing block timeout
         if (proc->block_reason == PROC_BLOCK_EVENT_RING_FULL &&
             proc->block_start_time != 0) {
 
@@ -463,9 +437,8 @@ void scheduler_tick(void) {
 
             uint64_t tsc_khz = cpu_get_tsc_freq_khz();
             if (tsc_khz == 0) {
-                // TSC not calibrated - use tick-based timeout (50 ticks ~= 500ms at 100Hz)
+                // TSC not calibrated — tick-based fallback (~50 ticks = 500 ms at 100 Hz)
                 if (proc->last_run_time == 0) {
-                    // Process just blocked, set baseline
                     proc->last_run_time = sched.total_ticks;
                     proc = next;
                     continue;
@@ -473,7 +446,6 @@ void scheduler_tick(void) {
 
                 uint64_t blocked_ticks = sched.total_ticks - proc->last_run_time;
                 if (blocked_ticks > SCHEDULER_SEVERE_STARVATION_TICKS) {
-                    // rate-limited logging (max once per 50 ticks)
                     static uint64_t last_timeout_log_tick = 0;
                     uint64_t current_tick = sched.total_ticks;
 
@@ -492,7 +464,7 @@ void scheduler_tick(void) {
 
             uint64_t now = rdtsc();
             if (now < proc->block_start_time) {
-                // rate-limited logging (max once per 100 ticks)
+                // TSC wrap-around — reset baseline and log once per interval
                 static uint64_t last_tsc_overflow_log = 0;
                 uint64_t current_tick = sched.total_ticks;
 
@@ -511,7 +483,6 @@ void scheduler_tick(void) {
             uint64_t elapsed_ms = elapsed_tsc / tsc_khz;
 
             if (elapsed_ms > 500) {
-                // rate-limited logging (max once per 50 ticks)
                 static uint64_t last_timeout_log_tsc = 0;
                 uint64_t current_tick = sched.total_ticks;
 
@@ -528,7 +499,6 @@ void scheduler_tick(void) {
         proc = next;
     }
 
-    // read current_process under lock
     spin_lock(&sched.scheduler_lock);
     process_t* current = sched.current_process;
     spin_unlock(&sched.scheduler_lock);

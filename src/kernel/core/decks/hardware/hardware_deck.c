@@ -156,7 +156,6 @@ static int do_reboot(Event* event) {
     // Keyboard controller reset method (triple fault)
     outb(0x64, 0xFE);
 
-    // Should never reach here
     while (1) {
         asm volatile("cli; hlt");
     }
@@ -524,7 +523,6 @@ int hardware_deck_handler(Event* event) {
             uint8_t is_master = event->data[0];
             ATADevice* device = is_master ? &ata_primary_master : &ata_primary_slave;
 
-            // Pack device info into event.data
             event->data[0] = device->exists;
             memcpy(&event->data[1], device->model, 40);
             memcpy(&event->data[41], device->serial, 20);
@@ -638,7 +636,7 @@ int hardware_deck_handler(Event* event) {
                 event->data[2] = 0;
                 event->data[3] = 0;
                 event->data[EVENT_DATA_SIZE - 1] = HW_KB_WOULD_BLOCK;
-                event->first_error = BOXOS_ERR_WOULD_BLOCK;
+                event->first_error = ERR_WOULD_BLOCK;
                 event->state = EVENT_STATE_RETRY;
 
                 return 0;

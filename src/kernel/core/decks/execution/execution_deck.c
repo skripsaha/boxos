@@ -39,10 +39,10 @@ int execution_deck_handler(Event* event) {
         result_page->magic = RESULT_PAGE_MAGIC;
         result_page->ring.head = 0;
         result_page->ring.tail = 0;
-        result_page->notification_flag = 0;  // Initialize notification flag
+        result_page->notification_flag = 0;
     }
 
-    // CRITICAL FIX: Use memcpy to read head from packed struct (avoid alignment issues)
+    // Use memcpy to read head from packed struct (avoid alignment issues)
     uint32_t head;
     memcpy(&head, (const void*)&result_page->ring.head, sizeof(uint32_t));
     __sync_synchronize();  // acquire: ensure we see userspace's head update and associated data
@@ -57,7 +57,6 @@ int execution_deck_handler(Event* event) {
             }
         }
 
-        // Defer to Pending Queue
         if (event->state == EVENT_STATE_PROCESSING || event->state == EVENT_STATE_NEW) {
             event->state = EVENT_STATE_COMPLETED;
         }
@@ -80,24 +79,21 @@ int execution_deck_handler(Event* event) {
             return 0;
         }
 
-        // Pending Queue full: BLOCK PROCESS instead of silent drop
+        // Pending Queue also full: block process
         debug_printf("[EXECUTION] CRITICAL: PID %u ResultRing full, blocking process\n", proc->pid);
 
-        // Set overflow flag
         atomic_store_u8(&proc->result_overflow_flag, 1);
         atomic_fetch_add_u32(&proc->result_overflow_count, 1);
 
-        // Block process - will be woken up by scheduler or result read
         proc->block_reason = PROC_BLOCK_RESULT_OVERFLOW;
         proc->block_start_time = rdtsc();
 
         process_set_state(proc, PROC_BLOCKED);
 
-        // Best-effort overflow notification
         result_entry_t overflow_entry;
         overflow_entry.source = ROUTE_SOURCE_KERNEL;
         overflow_entry._reserved1 = 0;
-        overflow_entry.error_code = BOXOS_ERR_RESULT_RING_FULL;
+        overflow_entry.error_code = ERR_RESULT_RING_FULL;
         overflow_entry.sender_pid = 0;
         overflow_entry.size = 8;
         *((uint32_t*)overflow_entry.payload) = RESULT_OVERFLOW_MARKER;
@@ -139,20 +135,16 @@ int execution_deck_handler(Event* event) {
     entry->size = (uint16_t)copy_size;
     memcpy(entry->payload, event->data, copy_size);
 
-    // Memory barrier: ensure data written before tail update
-    __sync_synchronize();
+    __sync_synchronize();  // ensure data written before tail update
 
-    // Atomic update of tail pointer
     uint32_t new_tail = (tail_idx + 1) % RESULT_RING_SIZE;
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Waddress-of-packed-member"
     atomic_store_u32(&result_page->ring.tail, new_tail);
 #pragma GCC diagnostic pop
 
-    // Memory barrier: ensure tail written before notification_flag
-    __sync_synchronize();
+    __sync_synchronize();  // ensure tail written before notification_flag
 
-    // Set notification flag (wake waiting userspace)
     atomic_store_u8(&result_page->notification_flag, 1);
 
     process_state_t state = process_get_state(proc);

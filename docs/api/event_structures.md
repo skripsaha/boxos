@@ -34,8 +34,8 @@ typedef struct __packed {
     uint8_t  state;                        // 1 byte
     uint8_t  error_deck_idx;               // 1 byte
     uint64_t timestamp;                    // 8 bytes
-    boxos_error_t error_code;              // 4 bytes
-    boxos_error_t first_error;             // 4 bytes
+    error_t error_code;              // 4 bytes
+    error_t first_error;             // 4 bytes
     // Routing header (IPC)
     uint32_t route_target;                 // 4 bytes: target PID (0 = self)
     uint32_t sender_pid;                   // 4 bytes: original sender (0 = kernel)
@@ -91,7 +91,7 @@ typedef struct __packed {
     uint8_t  source;        // 1 byte: ROUTE_SOURCE_KERNEL/ROUTE/HARDWARE
     uint8_t  _reserved1;    // 1 byte
     uint16_t size;          // 2 bytes
-    boxos_error_t error_code; // 4 bytes
+    error_t error_code; // 4 bytes
     uint32_t sender_pid;    // 4 bytes: PID of sender (IPC)
     uint8_t  payload[244];  // 244 bytes
 } result_entry_t;           // TOTAL: 256 bytes

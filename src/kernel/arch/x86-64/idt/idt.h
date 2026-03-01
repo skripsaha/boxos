@@ -6,7 +6,6 @@
 #include "tss.h"
 #include "boxos_limits.h"
 
-#define IDT_ENTRIES BOXOS_IDT_ENTRIES
 
 #define IDT_TYPE_INTERRUPT_GATE 0x8E  // Present, Ring 0, Interrupt Gate
 #define IDT_TYPE_TRAP_GATE      0x8F  // Present, Ring 0, Trap Gate
@@ -15,7 +14,6 @@
 // System call vector (Snowball architecture: notify() syscall)
 #define SYSCALL_VECTOR          CONFIG_SYSCALL_VECTOR
 
-// CPU Exceptions (0-31)
 #define EXCEPTION_DIVIDE_ERROR      0
 #define EXCEPTION_DEBUG             1
 #define EXCEPTION_NMI               2
@@ -35,7 +33,6 @@
 #define EXCEPTION_MACHINE_CHECK     18
 #define EXCEPTION_SIMD_EXCEPTION    19
 
-// Hardware IRQs (32-47)
 #define IRQ_TIMER       32  // IRQ 0 -> INT 0x20
 #define IRQ_KEYBOARD    33  // IRQ 1 -> INT 0x21
 #define IRQ_CASCADE     34  // IRQ 2 (internal cascade)
@@ -53,7 +50,6 @@
 #define IRQ_ATA_PRIMARY 46  // IRQ 14
 #define IRQ_ATA_SECONDARY 47 // IRQ 15
 
-// IDT entry (64-bit)
 typedef struct {
     uint16_t offset_low;    // Offset bits 0-15
     uint16_t selector;      // Code segment selector

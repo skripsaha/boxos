@@ -3,8 +3,6 @@
 
 #include "ktypes.h"
 
-// ========== Port I/O ==========
-
 static inline uint8_t inb(uint16_t port) {
     uint8_t ret;
     __asm__ volatile ("inb %1, %0" : "=a"(ret) : "Nd"(port));
@@ -35,8 +33,6 @@ static inline void outl(uint16_t port, uint32_t val) {
     __asm__ volatile ("outl %0, %1" : : "a"(val), "Nd"(port));
 }
 
-// ========== MMIO ==========
-
 static inline uint32_t mmio_read32(uintptr_t addr) {
     return *((volatile uint32_t*)addr);
 }
@@ -53,8 +49,6 @@ static inline void mmio_write64(uintptr_t addr, uint64_t value) {
     *((volatile uint64_t*)addr) = value;
 }
 
-// ========== Interrupt Control ==========
-
 static inline void cli(void) {
     __asm__ volatile ("cli");
 }
@@ -70,8 +64,6 @@ static inline void hlt(void) {
 static inline void pause(void) {
     __asm__ volatile ("pause");
 }
-
-// ========== Flags / Barriers ==========
 
 static inline uint32_t cpu_get_flags(void) {
     uint32_t flags;

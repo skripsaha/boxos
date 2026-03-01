@@ -1,33 +1,33 @@
-#ifndef BOX_SYSTEM_H
-#define BOX_SYSTEM_H
+#ifndef SYSTEM_H
+#define SYSTEM_H
 
 #include "types.h"
 #include "error.h"
 
-#define BOX_SYSTEM_DECK_ID          BOX_DECK_SYSTEM
+#define SYSTEM_DECK_ID          DECK_SYSTEM
 
-#define BOX_SYSTEM_PROC_INFO        0x03
-#define BOX_SYSTEM_PROC_EXEC        0x06
-#define BOX_SYSTEM_EXIT             0x02
-#define BOX_SYSTEM_BUFFER_ALLOC     0x10
-#define BOX_SYSTEM_BUFFER_FREE      0x11
-#define BOX_SYSTEM_DEFRAG_FILE      0x18
-#define BOX_SYSTEM_FRAG_SCORE       0x19
-#define BOX_SYSTEM_TAG_ADD          0x20
-#define BOX_SYSTEM_TAG_REMOVE       0x21
-#define BOX_SYSTEM_TAG_CHECK        0x22
+#define SYSTEM_PROC_INFO        0x03
+#define SYSTEM_PROC_EXEC        0x06
+#define SYSTEM_EXIT             0x02
+#define SYSTEM_BUFFER_ALLOC     0x10
+#define SYSTEM_BUFFER_FREE      0x11
+#define SYSTEM_DEFRAG_FILE      0x18
+#define SYSTEM_FRAG_SCORE       0x19
+#define SYSTEM_TAG_ADD          0x20
+#define SYSTEM_TAG_REMOVE       0x21
+#define SYSTEM_TAG_CHECK        0x22
 
-#define BOX_BUFFER_SIZE_256         0
-#define BOX_BUFFER_SIZE_512         1
-#define BOX_BUFFER_SIZE_1K          2
-#define BOX_BUFFER_SIZE_2K          3
-#define BOX_BUFFER_SIZE_4K          4
+#define BUFFER_SIZE_256         0
+#define BUFFER_SIZE_512         1
+#define BUFFER_SIZE_1K          2
+#define BUFFER_SIZE_2K          3
+#define BUFFER_SIZE_4K          4
 
-#define BOX_PROC_STATE_CREATED      0
-#define BOX_PROC_STATE_READY        1
-#define BOX_PROC_STATE_RUNNING      2
-#define BOX_PROC_STATE_WAITING      3
-#define BOX_PROC_STATE_TERMINATED   4
+#define PROC_STATE_CREATED      0
+#define PROC_STATE_READY        1
+#define PROC_STATE_RUNNING      2
+#define PROC_STATE_WAITING      3
+#define PROC_STATE_TERMINATED   4
 
 typedef struct {
     uint16_t pid;
@@ -63,4 +63,4 @@ int fragmentation(void);
 
 void yield(void);
 
-#endif // BOX_SYSTEM_H
+#endif // SYSTEM_H

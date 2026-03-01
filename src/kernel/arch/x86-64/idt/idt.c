@@ -15,18 +15,14 @@
 #include "keyboard.h"
 #include "ata_dma.h"
 
-// IDT table and descriptor
 static idt_entry_t idt[IDT_ENTRIES];
 static idt_descriptor_t idt_desc;
 
-// IRQ callback table
 static irq_callback_t irq_callbacks[16] = {NULL};
 
-// Statistics
 static uint64_t exception_count = 0;
 static uint64_t irq_count[16] = {0};
 
-// Load IDT register
 static void idt_load_asm(uint64_t idt_desc_addr) {
     asm volatile("lidt (%0)" : : "r" (idt_desc_addr) : "memory");
 }
@@ -44,16 +40,13 @@ void idt_set_entry(int index, uint64_t handler, uint16_t selector, uint8_t type_
 void idt_init(void) {
     debug_printf("[IDT] Initializing Interrupt Descriptor Table (minimal)...\n");
 
-    // Clear IDT
     memset(idt, 0, sizeof(idt));
 
-    // Setup descriptor
     idt_desc.limit = sizeof(idt) - 1;
     idt_desc.base = (uint64_t)idt;
 
     debug_printf("[IDT] Setting up exception handlers (0-31)...\n");
 
-    // Setup exception handlers (0-31)
     for (int i = 0; i < 32; i++) {
         uint8_t ist = 0;  // No IST by default
 
@@ -75,7 +68,6 @@ void idt_init(void) {
 
     debug_printf("[IDT] Setting up IRQ handlers (32-47)...\n");
 
-    // Setup IRQ handlers (32-47)
     for (int i = 32; i < 48; i++) {
         idt_set_entry(i, (uint64_t)isr_table[i], GDT_KERNEL_CODE, IDT_TYPE_INTERRUPT_GATE, 0);
     }
@@ -85,7 +77,6 @@ void idt_init(void) {
     // Syscall handler at 0x80 (Ring 3 accessible)
     idt_set_entry(SYSCALL_VECTOR, (uint64_t)isr_table[SYSCALL_VECTOR], GDT_KERNEL_CODE, IDT_TYPE_USER_INTERRUPT, 0);
 
-    // Load IDT
     idt_load_asm((uint64_t)&idt_desc);
 
     debug_printf("[IDT] IDT loaded successfully at 0x%lx (limit=%d)\n", idt_desc.base, idt_desc.limit);
@@ -115,7 +106,6 @@ void irq_unregister_handler(uint8_t irq) {
     debug_printf("[IDT] Unregistered callback for IRQ %u\n", irq);
 }
 
-// Exception handler (called from isr.asm)
 void exception_handler(interrupt_frame_t* frame) {
     exception_count++;
 
@@ -172,7 +162,6 @@ void exception_handler(interrupt_frame_t* frame) {
     }
 }
 
-// IRQ handler (called from isr.asm)
 void irq_handler(interrupt_frame_t* frame) {
     uint8_t irq = frame->vector - 32;
     if (irq >= 16) return;
@@ -240,7 +229,7 @@ void syscall_handler(interrupt_frame_t* frame) {
         return;
     }
 
-    // CRITICAL: Increment ref_count BEFORE releasing lock
+    // Increment ref_count before releasing lock to prevent proc from being destroyed
     process_ref_inc(proc);
 
     if (proc->magic != PROCESS_MAGIC) {
@@ -300,7 +289,7 @@ void syscall_handler(interrupt_frame_t* frame) {
     }
 
     // Clamp prefix_count to EVENT_MAX_PREFIXES (truncation is intentional)
-    // Note: If notify_virt has more prefixes than EVENT_MAX_PREFIXES, extras are silently dropped
+    // If notify_virt has more prefixes than EVENT_MAX_PREFIXES, extras are silently dropped
     if (prefix_count > EVENT_MAX_PREFIXES) {
         prefix_count = EVENT_MAX_PREFIXES;
     }
@@ -337,7 +326,6 @@ void syscall_handler(interrupt_frame_t* frame) {
     );
 
     if (result == EVENT_PUSH_FULL_BLOCKED) {
-        // Block process in wait queue
         notify_virt->status = NOTIFY_STATUS_RING_FULL;
         notify_virt->flags |= NOTIFY_FLAG_CHECK_STATUS;
         __sync_synchronize();
@@ -345,7 +333,7 @@ void syscall_handler(interrupt_frame_t* frame) {
         context_save_from_frame(proc, frame);
 
         proc->block_reason = PROC_BLOCK_EVENT_RING_FULL;
-        proc->block_start_time = rdtsc();  // Record time for timeout
+        proc->block_start_time = rdtsc();
 
         guide_block_on_event_ring(proc);
 
@@ -367,9 +355,8 @@ void syscall_handler(interrupt_frame_t* frame) {
     context_save_from_frame(proc, frame);
     process_set_state(proc, PROC_BLOCKED);
 
-    // CRITICAL: decrement before scheduler_yield
+    // Decrement before scheduler_yield to avoid ref leak if process is destroyed
     process_ref_dec(proc);
 
     scheduler_yield_from_interrupt(frame);
 }
-

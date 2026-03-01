@@ -3,7 +3,6 @@
 
 #include "ktypes.h"
 
-// CPU Capabilities Structure
 typedef struct {
     bool has_waitpkg;           // UMONITOR/UMWAIT support (CPUID.7.0:ECX[5])
     bool has_invariant_tsc;     // Invariant TSC
@@ -12,15 +11,12 @@ typedef struct {
     uint32_t max_extended_leaf; // Maximum CPUID extended leaf
 } cpu_capabilities_t;
 
-// Global CPU capabilities (initialized at boot)
 extern cpu_capabilities_t g_cpu_caps;
 
-// Functions
 void cpuid(uint32_t leaf, uint32_t* eax, uint32_t* ebx, uint32_t* ecx, uint32_t* edx);
 void cpuid_count(uint32_t leaf, uint32_t subleaf, uint32_t* eax, uint32_t* ebx, uint32_t* ecx, uint32_t* edx);
 void cpu_detect_features(void);
 
-// Get MAXPHYADDR (maximum physical address bits)
 static inline uint8_t cpuid_get_maxphyaddr(void) {
     uint32_t eax, ebx, ecx, edx;
 
@@ -40,7 +36,6 @@ static inline uint8_t cpuid_get_maxphyaddr(void) {
     return phys_bits;
 }
 
-// Get MAXVIRTADDR (maximum virtual address bits)
 static inline uint8_t cpuid_get_maxvirtaddr(void) {
     uint32_t eax, ebx, ecx, edx;
 

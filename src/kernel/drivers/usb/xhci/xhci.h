@@ -8,7 +8,6 @@
 #include "pci.h"
 #include "boxos_limits.h"
 
-#define XHCI_MAX_SLOTS       BOXOS_XHCI_MAX_SLOTS
 #define XHCI_MAX_PORTS       127
 
 typedef struct xhci_device_slot xhci_device_slot_t;

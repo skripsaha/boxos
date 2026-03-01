@@ -8,10 +8,8 @@
 
 extern EventRingBuffer* kernel_event_ring;
 
-// Forward declaration
 typedef struct process_t process_t;
 
-// EventRing wait queue for blocked processes
 typedef struct {
     process_t* head;
     process_t* tail;
@@ -19,10 +17,8 @@ typedef struct {
     volatile uint32_t count;
 } event_ring_wait_queue_t;
 
-// Global wait queue
 extern event_ring_wait_queue_t event_ring_waiters;
 
-// Wait queue API
 void guide_init_wait_queue(void);
 void guide_block_on_event_ring(process_t* proc);
 void guide_wakeup_waiters(void);

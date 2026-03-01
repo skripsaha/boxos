@@ -20,14 +20,14 @@ static uint16_t read_u16_be(const uint8_t* p) {
 }
 
 int time_get(time_t* out) {
-    if (!out) return BOX_ERR_NULL_POINTER;
+    if (!out) return ERR_NULL_POINTER;
 
     hw_rtc_time();
     notify();
 
     result_entry_t result;
-    if (!result_wait(&result, 50000)) return BOX_ERR_TIMEOUT;
-    if (result.error_code != BOX_OK) return (int)result.error_code;
+    if (!result_wait(&result, 50000)) return ERR_TIMEOUT;
+    if (result.error_code != OK) return (int)result.error_code;
 
     const uint8_t* p = result.payload;
     out->seconds = read_u64_be(p + 0);
@@ -39,49 +39,49 @@ int time_get(time_t* out) {
     out->minute  = p[17];
     out->second  = p[18];
     out->weekday = p[19];
-    return BOX_OK;
+    return OK;
 }
 
 int time_get_secs(uint64_t* out_seconds) {
-    if (!out_seconds) return BOX_ERR_NULL_POINTER;
+    if (!out_seconds) return ERR_NULL_POINTER;
 
     hw_rtc_unix64();
     notify();
 
     result_entry_t result;
-    if (!result_wait(&result, 50000)) return BOX_ERR_TIMEOUT;
-    if (result.error_code != BOX_OK) return (int)result.error_code;
+    if (!result_wait(&result, 50000)) return ERR_TIMEOUT;
+    if (result.error_code != OK) return (int)result.error_code;
 
     *out_seconds = read_u64_be(result.payload);
-    return BOX_OK;
+    return OK;
 }
 
 int time_uptime_ms(uint64_t* out_ms) {
-    if (!out_ms) return BOX_ERR_NULL_POINTER;
+    if (!out_ms) return ERR_NULL_POINTER;
 
     hw_timer_ms();
     notify();
 
     result_entry_t result;
-    if (!result_wait(&result, 50000)) return BOX_ERR_TIMEOUT;
-    if (result.error_code != BOX_OK) return (int)result.error_code;
+    if (!result_wait(&result, 50000)) return ERR_TIMEOUT;
+    if (result.error_code != OK) return (int)result.error_code;
 
     *out_ms = read_u64_be(result.payload);
-    return BOX_OK;
+    return OK;
 }
 
 int time_uptime_ns(uint64_t* out_ns) {
-    if (!out_ns) return BOX_ERR_NULL_POINTER;
+    if (!out_ns) return ERR_NULL_POINTER;
 
     hw_rtc_uptime();
     notify();
 
     result_entry_t result;
-    if (!result_wait(&result, 50000)) return BOX_ERR_TIMEOUT;
-    if (result.error_code != BOX_OK) return (int)result.error_code;
+    if (!result_wait(&result, 50000)) return ERR_TIMEOUT;
+    if (result.error_code != OK) return (int)result.error_code;
 
     *out_ns = read_u64_be(result.payload);
-    return BOX_OK;
+    return OK;
 }
 
 static void write2(char* buf, uint8_t v) {
@@ -97,8 +97,8 @@ static void write4(char* buf, uint16_t v) {
 }
 
 int time_format(const time_t* t, char* buf, size_t buf_size) {
-    if (!t || !buf) return BOX_ERR_NULL_POINTER;
-    if (buf_size < 20) return BOX_ERR_BUFFER_TOO_SMALL;
+    if (!t || !buf) return ERR_NULL_POINTER;
+    if (buf_size < 20) return ERR_BUFFER_TOO_SMALL;
 
     write4(buf, t->year);
     buf[4] = '-';
@@ -112,7 +112,7 @@ int time_format(const time_t* t, char* buf, size_t buf_size) {
     buf[16] = ':';
     write2(buf + 17, t->second);
     buf[19] = '\0';
-    return BOX_OK;
+    return OK;
 }
 
 int64_t time_diff(const time_t* a, const time_t* b) {

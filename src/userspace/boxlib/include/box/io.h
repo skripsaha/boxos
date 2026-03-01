@@ -22,7 +22,6 @@ int input(const char* prompt, char* buffer, size_t max_len);
 void print_int(int num);
 void print_hex(uint32_t num);
 
-// VGA color constants
 #define COLOR_BLACK         0x00
 #define COLOR_BLUE          0x01
 #define COLOR_GREEN         0x02

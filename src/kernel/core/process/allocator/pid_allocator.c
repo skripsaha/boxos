@@ -2,17 +2,15 @@
 #include "klib.h"
 #include "io.h"
 
-// Internal allocator state
 typedef struct {
     uint8_t bitmap[PID_BITMAP_SIZE];        // 32 bytes: allocation bitmap
     uint32_t generation[PID_MAX_COUNT];     // 1 KB: generation counters
-    uint32_t allocated_count;               // Current allocated PIDs
-    spinlock_t lock;                        // Allocation lock
+    uint32_t allocated_count;
+    spinlock_t lock;
 } pid_allocator_t;
 
 static pid_allocator_t g_allocator;
 
-// Bitmap helpers (inline for performance)
 static inline void bitmap_set(uint8_t* bitmap, uint32_t index) {
     bitmap[index / 8] |= (1 << (index % 8));
 }
@@ -25,20 +23,19 @@ static inline bool bitmap_test(const uint8_t* bitmap, uint32_t index) {
     return (bitmap[index / 8] & (1 << (index % 8))) != 0;
 }
 
-// Find first free bit (linear scan, O(256))
 static uint32_t bitmap_find_free(const uint8_t* bitmap, uint32_t max_bits) {
     for (uint32_t i = 0; i < max_bits; i++) {
         if (!bitmap_test(bitmap, i)) {
             return i;
         }
     }
-    return max_bits;  // Not found
+    return max_bits;  // not found
 }
 
 void pid_allocator_init(void) {
     memset(&g_allocator, 0, sizeof(pid_allocator_t));
 
-    // Initialize all generations to 1 (0 reserved for PID_INVALID)
+    // generation 0 is reserved for PID_INVALID; start at 1
     for (uint32_t i = 0; i < PID_MAX_COUNT; i++) {
         g_allocator.generation[i] = 1;
     }
@@ -54,26 +51,20 @@ void pid_allocator_init(void) {
 uint32_t pid_alloc(void) {
     spin_lock(&g_allocator.lock);
 
-    // Find first free slot
     uint32_t index = bitmap_find_free(g_allocator.bitmap, PID_MAX_COUNT);
 
     if (index >= PID_MAX_COUNT) {
-        // Exhausted
         spin_unlock(&g_allocator.lock);
         debug_printf("[PID] ERROR: PID exhaustion (allocated=%u/%u)\n",
                      g_allocator.allocated_count, PID_MAX_COUNT);
         return PID_INVALID;
     }
 
-    // Mark as allocated
     bitmap_set(g_allocator.bitmap, index);
-
-    // Increment generation for this slot
     g_allocator.generation[index]++;
 
-    // CRITICAL: Detect generation overflow (2^24 allocations on this slot)
     if (g_allocator.generation[index] == 0) {
-        // Cannot guarantee PID uniqueness after wraparound - HALT system
+        // generation wrapped: uniqueness of PIDs can no longer be guaranteed
         debug_printf("[PID] CRITICAL: Generation overflow on index %u (2^24 allocations)\n", index);
         debug_printf("[PID] System has exhausted generation counter for slot %u\n", index);
         debug_printf("[PID] Cannot guarantee PID uniqueness - HALTING\n");
@@ -81,9 +72,7 @@ uint32_t pid_alloc(void) {
         while (1) { asm volatile("cli; hlt"); }
     }
 
-    // Build composite PID
     uint32_t pid = PID_BUILD(g_allocator.generation[index], index);
-
     g_allocator.allocated_count++;
 
     spin_unlock(&g_allocator.lock);
@@ -103,7 +92,6 @@ void pid_free(uint32_t pid) {
     uint32_t index = PID_TO_INDEX(pid);
     uint32_t gen = PID_TO_GEN(pid);
 
-    // Validate index
     if (index >= PID_MAX_COUNT) {
         debug_printf("[PID] ERROR: Invalid PID 0x%08x (index=%u out of range)\n",
                      pid, index);
@@ -112,7 +100,6 @@ void pid_free(uint32_t pid) {
 
     spin_lock(&g_allocator.lock);
 
-    // Detect double-free
     if (!bitmap_test(g_allocator.bitmap, index)) {
         debug_printf("[PID] WARNING: Double-free detected for PID 0x%08x (index=%u)\n",
                      pid, index);
@@ -120,7 +107,7 @@ void pid_free(uint32_t pid) {
         return;
     }
 
-    // CRITICAL FIX: Validate generation match (prevents freeing stale PIDs)
+    // reject stale PIDs whose generation no longer matches the slot
     if (g_allocator.generation[index] != gen) {
         debug_printf("[PID] WARNING: Freeing stale PID 0x%08x (gen=%u, current gen=%u)\n",
                      pid, gen, g_allocator.generation[index]);
@@ -128,7 +115,6 @@ void pid_free(uint32_t pid) {
         return;
     }
 
-    // Clear bit
     bitmap_clear(g_allocator.bitmap, index);
     g_allocator.allocated_count--;
 
@@ -147,17 +133,13 @@ bool pid_validate(uint32_t pid) {
     uint32_t index = PID_TO_INDEX(pid);
     uint32_t gen = PID_TO_GEN(pid);
 
-    // Validate index
     if (index >= PID_MAX_COUNT) {
         return false;
     }
 
     spin_lock(&g_allocator.lock);
 
-    // Check if allocated
     bool allocated = bitmap_test(g_allocator.bitmap, index);
-
-    // Check if generation matches
     bool gen_match = (g_allocator.generation[index] == gen);
 
     spin_unlock(&g_allocator.lock);

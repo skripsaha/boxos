@@ -21,10 +21,10 @@ static int journal_write_superblock(void) {
 
     if (ata_write_sectors(1, JOURNAL_SUPERBLOCK_BACKUP, 1, buffer) != 0) {
         debug_printf("[Journal] Warning: Backup superblock write failed\n");
-        // Continue - primary is written, backup failure is not critical
+        // primary is written, backup failure is not critical
     }
 
-    // Critical: ensure superblock reaches disk before returning success
+    // ensure superblock reaches disk before returning success
     if (ata_flush_cache(1) != 0) {
         debug_printf("[Journal] ERROR: Cache flush failed after superblock write\n");
         kfree(buffer);
@@ -67,7 +67,6 @@ static int journal_read_superblock(void) {
         if (ata_write_sectors(1, JOURNAL_SUPERBLOCK_SECTOR, 1, buffer) != 0) {
             debug_printf("[Journal] Warning: Primary restore failed\n");
         } else {
-            // Ensure restored superblock reaches disk
             if (ata_flush_cache(1) != 0) {
                 debug_printf("[Journal] Warning: Flush after restore failed\n");
             }
@@ -179,7 +178,6 @@ static int journal_mark_replayed(uint32_t index) {
 }
 
 int journal_reload(void) {
-    // Force reload superblock from disk (used by tests)
     g_journal_initialized = false;
     return journal_init();
 }

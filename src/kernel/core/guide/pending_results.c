@@ -5,7 +5,6 @@
 #include "atomics.h"
 #include "scheduler.h"
 
-// Statistics for monitoring
 typedef struct {
     volatile uint32_t total_enqueued;
     volatile uint32_t total_delivered;
@@ -37,7 +36,6 @@ int pending_results_enqueue(uint32_t pid, const result_entry_t* entry) {
     uint32_t head = pending_q.head;
     uint32_t tail = pending_q.tail;
 
-    // Track watermark
     uint32_t count = (head >= tail) ? (head - tail) : (PENDING_QUEUE_SIZE - tail + head);
     uint32_t current_watermark = atomic_load_u32(&stats.max_watermark);
     if (count > current_watermark) {
@@ -91,15 +89,14 @@ int pending_results_try_deliver(uint32_t pid) {
                 continue;
             }
 
-            // Defensive check: verify process magic before use
+            // validate magic before use to catch corrupted process structs
             if (proc->magic != PROCESS_MAGIC) {
                 debug_printf("[PENDING_RESULTS] WARNING: Corrupted process PID %u (bad magic), skipping\n", pid);
-                pending->pid = 0;  // clear corrupt entry
+                pending->pid = 0;
                 scan = (scan + 1) % PENDING_QUEUE_SIZE;
                 continue;
             }
 
-            // hold ref during delivery
             process_ref_inc(proc);
 
             uint64_t result_phys = proc->result_page_phys;
@@ -133,14 +130,12 @@ int pending_results_try_deliver(uint32_t pid) {
                 atomic_store_u8((volatile uint8_t*)&proc->result_there, 1);
                 __sync_synchronize();
 
-                // wakeup under scheduler lock with correct state order
+                // set state before clearing block_reason to avoid ordering hazards
                 if (proc->block_reason == PROC_BLOCK_RESULT_OVERFLOW) {
                     scheduler_state_t* sched_state = scheduler_get_state();
                     spin_lock(&sched_state->scheduler_lock);
 
-                    // Double-check under lock (process might have been unblocked)
                     if (proc->block_reason == PROC_BLOCK_RESULT_OVERFLOW) {
-                        // CORRECT ORDER: state first, then block_reason
                         process_set_state(proc, PROC_READY);
                         __sync_synchronize();
                         proc->block_start_time = 0;
@@ -154,7 +149,6 @@ int pending_results_try_deliver(uint32_t pid) {
                 delivered++;
             }
 
-            // Release reference before moving to next entry
             process_ref_dec(proc);
         }
 

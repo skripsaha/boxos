@@ -1,6 +1,3 @@
-// system — unified userspace system API
-// Process management, buffers, tags, power control, filesystem operations
-
 #include "box/system.h"
 #include "box/notify.h"
 #include "box/chain.h"
@@ -8,30 +5,28 @@
 #include "box/string.h"
 #include "box/error.h"
 
-// --- Process management ---
-
 int proc_info(uint16_t pid, proc_info_t* info) {
     if (!info) {
-        return BOX_ERR_INVALID_ARGS;
+        return ERR_INVALID_ARGS;
     }
 
     proc_query(pid);
     event_id_t event_id = notify();
     if (event_id == 0) {
-        return BOX_ERR_EVENT_FAILED;
+        return ERR_EVENT_FAILED;
     }
 
     result_entry_t result;
     if (!result_wait(&result, 5000)) {
-        return BOX_ERR_TIMEOUT;
+        return ERR_TIMEOUT;
     }
 
-    if (result.error_code != BOX_OK) {
+    if (result.error_code != OK) {
         return result.error_code;
     }
 
     if (result.size < 8) {
-        return BOX_ERR_RESULT_INVALID;
+        return ERR_RESULT_INVALID;
     }
 
     memcpy(&info->pid, result.payload, 2);
@@ -39,7 +34,7 @@ int proc_info(uint16_t pid, proc_info_t* info) {
     memcpy(&info->priority, result.payload + 3, 1);
     memcpy(&info->memory_usage, result.payload + 4, 4);
 
-    return BOX_OK;
+    return OK;
 }
 
 void exit(uint32_t exit_code) {
@@ -74,7 +69,7 @@ int proc_exec(const char* filename) {
         return -1;
     }
 
-    if (result.error_code != BOX_OK) {
+    if (result.error_code != OK) {
         return -1;
     }
 
@@ -87,34 +82,32 @@ int proc_exec(const char* filename) {
     return (int)new_pid;
 }
 
-// --- Buffer management ---
-
 int buffer_alloc(uint8_t size_class, uint16_t* out_buffer_id, uint32_t* out_address) {
     if (!out_buffer_id || !out_address) {
-        return BOX_ERR_INVALID_ARGS;
+        return ERR_INVALID_ARGS;
     }
 
-    if (size_class > BOX_BUFFER_SIZE_4K) {
-        return BOX_ERR_INVALID_ARGS;
+    if (size_class > BUFFER_SIZE_4K) {
+        return ERR_INVALID_ARGS;
     }
 
     buf_alloc(size_class);
     event_id_t event_id = notify();
     if (event_id == 0) {
-        return BOX_ERR_EVENT_FAILED;
+        return ERR_EVENT_FAILED;
     }
 
     result_entry_t result;
     if (!result_wait(&result, 5000)) {
-        return BOX_ERR_TIMEOUT;
+        return ERR_TIMEOUT;
     }
 
-    if (result.error_code != BOX_OK) {
+    if (result.error_code != OK) {
         return result.error_code;
     }
 
     if (result.size < 6) {
-        return BOX_ERR_RESULT_INVALID;
+        return ERR_RESULT_INVALID;
     }
 
     uint16_t buffer_id;
@@ -125,131 +118,129 @@ int buffer_alloc(uint8_t size_class, uint16_t* out_buffer_id, uint32_t* out_addr
     *out_buffer_id = buffer_id;
     *out_address = address;
 
-    return BOX_OK;
+    return OK;
 }
 
 int buffer_free(uint16_t buffer_id) {
     buf_release(buffer_id);
     event_id_t event_id = notify();
     if (event_id == 0) {
-        return BOX_ERR_EVENT_FAILED;
+        return ERR_EVENT_FAILED;
     }
 
     result_entry_t result;
     if (!result_wait(&result, 5000)) {
-        return BOX_ERR_TIMEOUT;
+        return ERR_TIMEOUT;
     }
 
-    if (result.error_code != BOX_OK) {
+    if (result.error_code != OK) {
         return result.error_code;
     }
 
-    return BOX_OK;
+    return OK;
 }
-
-// --- Process tags ---
 
 int proc_tag_add(const char* tag) {
     if (!tag) {
-        return BOX_ERR_INVALID_ARGS;
+        return ERR_INVALID_ARGS;
     }
 
     size_t tag_len = strlen(tag);
     if (tag_len == 0 || tag_len >= 32) {
-        return BOX_ERR_INVALID_ARGS;
+        return ERR_INVALID_ARGS;
     }
 
     proc_info_t info;
     int rc = proc_info(0, &info);
-    if (rc != BOX_OK) {
+    if (rc != OK) {
         return rc;
     }
 
     ptag_add(info.pid, tag);
     event_id_t event_id = notify();
     if (event_id == 0) {
-        return BOX_ERR_EVENT_FAILED;
+        return ERR_EVENT_FAILED;
     }
 
     result_entry_t res;
     if (!result_wait(&res, 5000)) {
-        return BOX_ERR_TIMEOUT;
+        return ERR_TIMEOUT;
     }
 
-    if (res.error_code != BOX_OK) {
+    if (res.error_code != OK) {
         return res.error_code;
     }
 
-    return BOX_OK;
+    return OK;
 }
 
 int proc_tag_remove(const char* tag) {
     if (!tag) {
-        return BOX_ERR_INVALID_ARGS;
+        return ERR_INVALID_ARGS;
     }
 
     size_t tag_len = strlen(tag);
     if (tag_len == 0 || tag_len >= 32) {
-        return BOX_ERR_INVALID_ARGS;
+        return ERR_INVALID_ARGS;
     }
 
     proc_info_t info;
     int rc = proc_info(0, &info);
-    if (rc != BOX_OK) {
+    if (rc != OK) {
         return rc;
     }
 
     ptag_remove(info.pid, tag);
     event_id_t event_id = notify();
     if (event_id == 0) {
-        return BOX_ERR_EVENT_FAILED;
+        return ERR_EVENT_FAILED;
     }
 
     result_entry_t res;
     if (!result_wait(&res, 5000)) {
-        return BOX_ERR_TIMEOUT;
+        return ERR_TIMEOUT;
     }
 
-    if (res.error_code != BOX_OK) {
+    if (res.error_code != OK) {
         return res.error_code;
     }
 
-    return BOX_OK;
+    return OK;
 }
 
 int proc_tag_check(const char* tag, bool* has_tag) {
     if (!tag || !has_tag) {
-        return BOX_ERR_INVALID_ARGS;
+        return ERR_INVALID_ARGS;
     }
 
     size_t tag_len = strlen(tag);
     if (tag_len == 0 || tag_len >= 32) {
-        return BOX_ERR_INVALID_ARGS;
+        return ERR_INVALID_ARGS;
     }
 
     proc_info_t info;
     int rc = proc_info(0, &info);
-    if (rc != BOX_OK) {
+    if (rc != OK) {
         return rc;
     }
 
     ptag_check(info.pid, tag);
     event_id_t event_id = notify();
     if (event_id == 0) {
-        return BOX_ERR_EVENT_FAILED;
+        return ERR_EVENT_FAILED;
     }
 
     result_entry_t res;
     if (!result_wait(&res, 5000)) {
-        return BOX_ERR_TIMEOUT;
+        return ERR_TIMEOUT;
     }
 
-    if (res.error_code != BOX_OK) {
+    if (res.error_code != OK) {
         return res.error_code;
     }
 
     if (res.size < 1) {
-        return BOX_ERR_RESULT_INVALID;
+        return ERR_RESULT_INVALID;
     }
 
     uint8_t tag_present;
@@ -257,10 +248,8 @@ int proc_tag_check(const char* tag, bool* has_tag) {
 
     *has_tag = (tag_present != 0);
 
-    return BOX_OK;
+    return OK;
 }
-
-// --- Power and system control ---
 
 int reboot(void) {
     hw_reboot();
@@ -292,15 +281,13 @@ int sysinfo(system_info_t* info) {
     return 0;
 }
 
-// --- Filesystem operations ---
-
 int defrag(uint32_t file_id, uint32_t target_block) {
     fs_defrag(file_id, target_block);
     notify();
 
     result_entry_t result;
     if (!result_wait(&result, 5000)) return -1;
-    if (result.error_code != BOX_OK) return -1;
+    if (result.error_code != OK) return -1;
     if (result.size < 8) return -1;
 
     uint32_t error_code, frag_score;
@@ -316,7 +303,7 @@ int fragmentation(void) {
 
     result_entry_t result;
     if (!result_wait(&result, 5000)) return -1;
-    if (result.error_code != BOX_OK) return -1;
+    if (result.error_code != OK) return -1;
     if (result.size < 4) return -1;
 
     uint32_t score;

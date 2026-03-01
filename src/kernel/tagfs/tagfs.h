@@ -7,40 +7,27 @@
 #include "boxos_sizes.h"
 #include "klib.h"
 
-// TagFS Magic Number and Version
-#define TAGFS_MAGIC             BOXOS_TAGFS_MAGIC        // "TAGF"
-#define TAGFS_METADATA_MAGIC    BOXOS_TAGFS_META_MAGIC   // "TMET" in little-endian
+#define TAGFS_METADATA_MAGIC    TAGFS_META_MAGIC
 #define TAGFS_VERSION           2
-#define TAGFS_BLOCK_SIZE        BOXOS_PAGE_SIZE
-#define TAGFS_MAX_FILES         BOXOS_TAGFS_MAX_FILES
+#define TAGFS_BLOCK_SIZE        PAGE_SIZE
 #define TAGFS_MAX_TAGS_PER_FILE 16
 #define TAGFS_MAX_FILENAME      32
 
-// Disk layout constants
 #define TAGFS_SUPERBLOCK_SECTOR 1034  // After kernel (sectors 10-1033)
 #define TAGFS_METADATA_START    1035  // 1034 + 1
 #define TAGFS_SUPERBLOCK_BACKUP 2058  // Last metadata sector (1034 + 1024)
 // Journal: 2059-3085 (superblock + backup + 512 entries * 2 sectors each)
 #define TAGFS_DATA_START        3086  // After journal (2061 + 512*2)
 
-// Compile-time verification that data start doesn't overlap with journal
-// Note: JOURNAL_ENTRIES_START and related macros are defined in journal.h
-// This assertion will be checked when both headers are included together
-
-// Tag types
 #define TAGFS_TAG_USER          0
 #define TAGFS_TAG_SYSTEM        1
 
-// File flags
 #define TAGFS_FILE_ACTIVE       (1 << 0)
 #define TAGFS_FILE_TRASHED      (1 << 1)
 #define TAGFS_FILE_HIDDEN       (1 << 2)
 
-// File handle flags
 #define TAGFS_HANDLE_READ       (1 << 0)
 #define TAGFS_HANDLE_WRITE      (1 << 1)
-
-// ON-DISK STRUCTURES
 
 typedef struct __packed {
     uint8_t type;           // 0=user, 1=system
@@ -87,8 +74,6 @@ typedef struct __packed {
 
 STATIC_ASSERT(sizeof(TagFSMetadata) == 512, "TagFSMetadata must be 512 bytes");
 
-// IN-MEMORY STRUCTURES
-
 typedef struct TagIndexEntry {
     char tag_string[64];                // "key:value"
     uint32_t file_count;
@@ -119,7 +104,6 @@ typedef struct {
     uint32_t total_blocks;  // Total data blocks
 } BlockBitmap;
 
-// Bitmap index structures
 #define TAGFS_BITMAP_SIZE 128  // 1024 bits / 8 = 128 bytes
 
 typedef struct TagBitmapEntry {
@@ -149,8 +133,6 @@ typedef struct {
     spinlock_t lock;
 } TagFSState;
 
-// CORE API
-
 int tagfs_init(void);
 void tagfs_shutdown(void);
 void tagfs_sync(void);
@@ -159,20 +141,15 @@ int tagfs_write_superblock(const TagFSSuperblock* sb);
 int tagfs_read_metadata(uint32_t file_id, TagFSMetadata* metadata);
 int tagfs_write_metadata(uint32_t file_id, const TagFSMetadata* metadata);
 
-// Journaled write operations
 int tagfs_write_metadata_journaled(uint32_t file_id, const TagFSMetadata* metadata);
 int tagfs_write_superblock_journaled(const TagFSSuperblock* sb);
 
 int tagfs_alloc_blocks(uint32_t count, uint32_t* start_block);
 int tagfs_free_blocks(uint32_t start_block, uint32_t count);
 
-// FILE OPERATIONS API
-
-// Query files by tags (returns array of file_ids)
 int tagfs_query_files(const char* query_tags[], uint32_t tag_count,
                       uint32_t* file_ids, uint32_t max_files);
 
-// Get all active files (no filtering)
 int tagfs_list_all_files(uint32_t* file_ids, uint32_t max_files);
 
 TagFSFileHandle* tagfs_open(uint32_t file_id, uint32_t flags);
@@ -183,30 +160,20 @@ int tagfs_create_file(const char* filename, const char* tags[], uint32_t tag_cou
 int tagfs_delete_file(uint32_t file_id);
 int tagfs_rename_file(uint32_t file_id, const char* new_filename);
 
-// TAG OPERATIONS API
-
 int tagfs_add_tag(uint32_t file_id, const char* key, const char* value, uint8_t type);
 int tagfs_remove_tag(uint32_t file_id, const char* key);
 bool tagfs_has_tag(uint32_t file_id, const char* key, const char* value);
 int tagfs_get_tags(uint32_t file_id, TagFSTag* tags, uint32_t max_tags);
 
-// UTILITY FUNCTIONS
-
 TagFSMetadata* tagfs_get_metadata(uint32_t file_id);
 TagFSState* tagfs_get_state(void);
 
-// Format tag string as "key:value"
 void tagfs_format_tag(char* dest, const char* key, const char* value);
 
-// Parse "key:value" or single-word system tag
 int tagfs_parse_tag(const char* tag_string, char* key, char* value, uint8_t* type);
 
-// DEFRAGMENTATION API
-
-// Defragment file by moving to contiguous blocks
 int tagfs_defrag_file(uint32_t file_id, uint32_t target_block);
 
-// Get filesystem fragmentation score (0-100)
 uint32_t tagfs_get_fragmentation_score(void);
 
 #endif // TAGFS_H

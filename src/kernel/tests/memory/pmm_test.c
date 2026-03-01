@@ -33,7 +33,7 @@ static void test_free_all(void) {
 }
 
 static int pmm_test_basic_alloc_free(void) {
-    kprintf("\n[PMM_TEST] === Test 1: Basic Allocation/Free ===\n");
+    kprintf("\n[PMM_TEST] Basic Allocation/Free\n");
 
     size_t initial_free = pmm_free_pages();
     debug_printf("[PMM_TEST] Initial free pages: %lu\n", initial_free);
@@ -67,7 +67,7 @@ static int pmm_test_basic_alloc_free(void) {
 }
 
 static int pmm_test_multiple_allocs(void) {
-    kprintf("\n[PMM_TEST] === Test 2: Multiple Allocations ===\n");
+    kprintf("\n[PMM_TEST] Multiple Allocations\n");
 
     test_reset_allocs();
     size_t initial_free = pmm_free_pages();
@@ -106,7 +106,7 @@ static int pmm_test_multiple_allocs(void) {
 }
 
 static int pmm_test_large_allocs(void) {
-    kprintf("\n[PMM_TEST] === Test 3: Large Allocations ===\n");
+    kprintf("\n[PMM_TEST] Large Allocations\n");
 
     test_reset_allocs();
     size_t initial_free = pmm_free_pages();
@@ -140,7 +140,7 @@ static int pmm_test_large_allocs(void) {
 }
 
 static int pmm_test_fragmentation(void) {
-    kprintf("\n[PMM_TEST] === Test 4: Fragmentation Handling ===\n");
+    kprintf("\n[PMM_TEST] Fragmentation Handling\n");
 
     test_reset_allocs();
     size_t initial_free = pmm_free_pages();
@@ -193,7 +193,7 @@ static int pmm_test_fragmentation(void) {
 }
 
 static int pmm_test_stress(void) {
-    kprintf("\n[PMM_TEST] === Test 5: Stress Test (500 alloc/free cycles) ===\n");
+    kprintf("\n[PMM_TEST] Stress Test (500 alloc/free cycles)\n");
 
     test_reset_allocs();
     size_t initial_free = pmm_free_pages();
@@ -249,7 +249,7 @@ static int pmm_test_stress(void) {
 }
 
 static int pmm_test_zero_alloc(void) {
-    kprintf("\n[PMM_TEST] === Test 6: Zero-Page Allocation ===\n");
+    kprintf("\n[PMM_TEST] Zero-Page Allocation\n");
 
     void* page = pmm_alloc_zero(1);
     if (!page) {
@@ -273,7 +273,7 @@ static int pmm_test_zero_alloc(void) {
 }
 
 static int pmm_test_oom(void) {
-    kprintf("\n[PMM_TEST] === Test 7: Out-of-Memory Handling ===\n");
+    kprintf("\n[PMM_TEST] Out-of-Memory Handling\n");
 
     size_t free_pages = pmm_free_pages();
     debug_printf("[PMM_TEST] Available pages: %lu\n", free_pages);
@@ -293,9 +293,7 @@ static int pmm_test_oom(void) {
 
 void pmm_run_tests(void) {
     kprintf("\n");
-    kprintf("============================================================\n");
-    kprintf("           PMM COMPREHENSIVE TEST SUITE                     \n");
-    kprintf("============================================================\n");
+    kprintf("PMM COMPREHENSIVE TEST SUITE\n");
 
     int passed = 0;
     int total = 0;
@@ -312,21 +310,11 @@ void pmm_run_tests(void) {
     total++; if (pmm_test_oom()) passed++;
 
     kprintf("\n");
-    kprintf("============================================================\n");
-    kprintf("                 TEST RESULTS                               \n");
-    kprintf("============================================================\n");
-    kprintf("Tests Passed: %d / %d\n", passed, total);
-
-    if (passed == total) {
-        kprintf("✅ ALL TESTS PASSED - PMM is stable!\n");
-    } else {
-        kprintf("❌ SOME TESTS FAILED - PMM has issues!\n");
-    }
+    kprintf("PMM TEST RESULTS: %d / %d\n", passed, total);
 
     kprintf("\n[PMM_TEST] Final Memory State:\n");
     pmm_dump_stats();
-
-    kprintf("============================================================\n\n");
+    kprintf("\n");
 }
 
 #else

@@ -4,10 +4,8 @@
 #include "events.h"
 #include "boxos_decks.h"
 
-// Operations Deck ID
 #define OPERATIONS_DECK_ID DECK_OPERATIONS
 
-// Opcodes (from docs/decks/01_operations.md)
 #define OP_BUF_MOVE     0x01  // Move block of bytes
 #define OP_BUF_FILL     0x02  // Fill memory with byte (memset)
 #define OP_BUF_XOR      0x03  // XOR operation
@@ -19,7 +17,6 @@
 #define OP_BIT_SWAP     0x09  // Endianness swap
 #define OP_VAL_ADD      0x0A  // Increment/decrement value
 
-// Main handler function (called by Guide)
 int operations_deck_handler(Event* event);
 
 #endif // OPERATIONS_DECK_H

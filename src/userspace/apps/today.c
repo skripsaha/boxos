@@ -1,9 +1,3 @@
-/*
- * today - BoxOS Date & Time Display
- *
- * Displays current date, time, and day of the week.
- * Usage: exec today
- */
 #include "box/io.h"
 #include "box/time.h"
 #include "box/system.h"

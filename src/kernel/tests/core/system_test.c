@@ -12,9 +12,8 @@
 #if CONFIG_RUN_STARTUP_TESTS
 
 void test_system_deck_security(void) {
-    kprintf("\n====================================\n");
+    kprintf("\n");
     kprintf("SYSTEM DECK SECURITY TEST\n");
-    kprintf("====================================\n");
 
     int passed = 0;
     int total = 0;
@@ -108,16 +107,14 @@ void test_system_deck_security(void) {
     process_destroy(hw_proc);
     process_destroy(system_proc);
 
-    kprintf("\n====================================\n");
+    kprintf("\n");
     kprintf("SYSTEM DECK SECURITY TEST COMPLETE\n");
     kprintf("Results: %d/%d tests passed\n", passed, total);
-    kprintf("====================================\n\n");
 }
 
 void test_system_deck_process_management(void) {
-    kprintf("\n====================================\n");
+    kprintf("\n");
     kprintf("SYSTEM DECK PROCESS MANAGEMENT TEST\n");
-    kprintf("====================================\n");
 
     int passed = 0;
     int total = 0;
@@ -220,16 +217,14 @@ void test_system_deck_process_management(void) {
 
     pmm_free(binary_phys_page, 1);
 
-    kprintf("\n====================================\n");
+    kprintf("\n");
     kprintf("PROCESS MANAGEMENT TEST COMPLETE\n");
     kprintf("Results: %d/%d tests passed\n", passed, total);
-    kprintf("====================================\n\n");
 }
 
 void test_system_deck_tag_management(void) {
-    kprintf("\n====================================\n");
+    kprintf("\n");
     kprintf("SYSTEM DECK TAG MANAGEMENT TEST\n");
-    kprintf("====================================\n");
 
     int passed = 0;
     int total = 0;
@@ -425,16 +420,14 @@ void test_system_deck_tag_management(void) {
     process_destroy(target_proc);
     process_destroy(system_proc);
 
-    kprintf("\n====================================\n");
+    kprintf("\n");
     kprintf("TAG MANAGEMENT TEST COMPLETE\n");
     kprintf("Results: %d/%d tests passed\n", passed, total);
-    kprintf("====================================\n\n");
 }
 
 void test_system_deck_buffer_management(void) {
-    kprintf("\n====================================\n");
+    kprintf("\n");
     kprintf("SYSTEM DECK BUFFER MANAGEMENT TEST\n");
-    kprintf("====================================\n");
 
     int passed = 0;
     int total = 0;
@@ -633,16 +626,14 @@ void test_system_deck_buffer_management(void) {
 
     process_destroy(test_proc);
 
-    kprintf("\n====================================\n");
+    kprintf("\n");
     kprintf("BUFFER MANAGEMENT TEST COMPLETE\n");
     kprintf("Results: %d/%d tests passed\n", passed, total);
-    kprintf("====================================\n\n");
 }
 
 void test_system_deck_ctx_use(void) {
-    kprintf("\n====================================\n");
+    kprintf("\n");
     kprintf("SYSTEM DECK CTX_USE TEST\n");
-    kprintf("====================================\n");
 
     int passed = 0;
     int total = 0;
@@ -785,10 +776,9 @@ void test_system_deck_ctx_use(void) {
     process_destroy(test_proc);
     process_destroy(other_proc);
 
-    kprintf("\n====================================\n");
+    kprintf("\n");
     kprintf("CTX_USE TEST COMPLETE\n");
     kprintf("Results: %d/%d tests passed\n", passed, total);
-    kprintf("====================================\n\n");
 }
 
 #else

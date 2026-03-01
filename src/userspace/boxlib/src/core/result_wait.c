@@ -1,6 +1,3 @@
-// result_wait — unified wait strategy with automatic hardware detection
-// Uses UMONITOR/UMWAIT on CPUs with WAITPKG, falls back to cooperative yield
-
 #include "box/result.h"
 #include "box/cpu.h"
 #include "box/system.h"

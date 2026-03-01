@@ -16,25 +16,25 @@ void async_io_init(void) {
     debug_printf("[AsyncIO] Initialized (queue size: %d)\n", ASYNC_IO_QUEUE_SIZE);
 }
 
-boxos_error_t async_io_submit(async_io_request_t* req) {
+error_t async_io_submit(async_io_request_t* req) {
     if (req == NULL) {
         debug_printf("[AsyncIO] ERROR: NULL request pointer\n");
-        return BOXOS_ERR_NULL_POINTER;
+        return ERR_NULL_POINTER;
     }
 
     if (req->sector_count == 0) {
         debug_printf("[AsyncIO] ERROR: Invalid sector_count=0\n");
-        return BOXOS_ERR_INVALID_ARGUMENT;
+        return ERR_INVALID_ARGUMENT;
     }
 
     if (req->buffer_virt == NULL) {
         debug_printf("[AsyncIO] ERROR: NULL buffer pointer\n");
-        return BOXOS_ERR_NULL_POINTER;
+        return ERR_NULL_POINTER;
     }
 
     if (req->op != ASYNC_IO_OP_READ && req->op != ASYNC_IO_OP_WRITE) {
         debug_printf("[AsyncIO] ERROR: Invalid operation=%u\n", req->op);
-        return BOXOS_ERR_INVALID_ARGUMENT;
+        return ERR_INVALID_ARGUMENT;
     }
 
     req->submit_time = rdtsc();
@@ -42,7 +42,7 @@ boxos_error_t async_io_submit(async_io_request_t* req) {
     if (atomic_load_u8(&g_async_queue.count) >= ASYNC_IO_QUEUE_SIZE) {
         atomic_fetch_add_u32(&g_async_queue.queue_full_count, 1);
         debug_printf("[AsyncIO] Queue FULL (pid=%u, lba=%u)\n", req->pid, req->lba);
-        return BOXOS_ERR_IO_QUEUE_FULL;
+        return ERR_IO_QUEUE_FULL;
     }
 
     spin_lock(&g_async_queue.lock);
@@ -51,7 +51,7 @@ boxos_error_t async_io_submit(async_io_request_t* req) {
         spin_unlock(&g_async_queue.lock);
         atomic_fetch_add_u32(&g_async_queue.queue_full_count, 1);
         debug_printf("[AsyncIO] Queue FULL (pid=%u, lba=%u)\n", req->pid, req->lba);
-        return BOXOS_ERR_IO_QUEUE_FULL;
+        return ERR_IO_QUEUE_FULL;
     }
 
     g_async_queue.queue[g_async_queue.tail] = *req;
@@ -70,7 +70,7 @@ boxos_error_t async_io_submit(async_io_request_t* req) {
                  atomic_load_u8(&g_async_queue.count),
                  ASYNC_IO_QUEUE_SIZE);
 
-    return BOXOS_OK;
+    return OK;
 }
 
 bool async_io_dequeue(async_io_request_t* req) {

@@ -17,13 +17,13 @@ int listen_table_add(uint32_t pid, uint8_t source_type, uint8_t flags) {
         if (g_listen_table.entries[i].pid == pid &&
             g_listen_table.entries[i].source_type == source_type) {
             spin_unlock(&g_listen_table.lock);
-            return -BOXOS_ERR_LISTEN_ALREADY;
+            return -ERR_LISTEN_ALREADY;
         }
     }
 
     if (g_listen_table.count >= MAX_LISTENERS) {
         spin_unlock(&g_listen_table.lock);
-        return -BOXOS_ERR_LISTEN_TABLE_FULL;
+        return -ERR_LISTEN_TABLE_FULL;
     }
 
     listen_entry_t* entry = &g_listen_table.entries[g_listen_table.count];

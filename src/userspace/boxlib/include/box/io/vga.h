@@ -4,7 +4,6 @@
 #include "../types.h"
 #include "../error.h"
 
-// Hardware Deck VGA Opcodes (0x70-0x7B)
 #define VGA_OP_PUTCHAR         0x70
 #define VGA_OP_PUTSTRING       0x71
 #define VGA_OP_CLEAR_SCREEN    0x72
@@ -18,7 +17,6 @@
 #define VGA_OP_NEWLINE         0x7A
 #define VGA_OP_GET_DIMENSIONS  0x7B
 
-// VGA Color Definitions
 #define VGA_BLACK           0x00
 #define VGA_BLUE            0x01
 #define VGA_GREEN           0x02
@@ -36,68 +34,57 @@
 #define VGA_YELLOW          0x0E
 #define VGA_WHITE           0x0F
 
-// Color Scheme Helpers
 #define VGA_COLOR(fg, bg)   (((bg) << 4) | (fg))
 #define VGA_FG(color)       ((color) & 0x0F)
 #define VGA_BG(color)       (((color) >> 4) & 0x0F)
 
-// Predefined Color Schemes
 #define VGA_SCHEME_DEFAULT       VGA_COLOR(VGA_LIGHT_GRAY, VGA_BLACK)
 #define VGA_SCHEME_GRAY_ON_BLACK VGA_COLOR(VGA_LIGHT_GRAY, VGA_BLACK)
 #define VGA_SCHEME_WHITE_ON_BLUE VGA_COLOR(VGA_WHITE, VGA_BLUE)
 #define VGA_SCHEME_BLACK_ON_GRAY VGA_COLOR(VGA_BLACK, VGA_LIGHT_GRAY)
 #define VGA_SCHEME_GREEN_ON_BLACK VGA_COLOR(VGA_LIGHT_GREEN, VGA_BLACK)
 
-// Error codes
-#define VGA_ERR_OUT_OF_BOUNDS    BOX_ERR_VGA_ERROR
-#define VGA_ERR_INVALID_CURSOR   BOX_ERR_VGA_ERROR
-#define VGA_ERR_ACCESS_DENIED    BOX_ERR_ACCESS_DENIED
-#define VGA_ERR_STRING_TOO_LONG  BOX_ERR_BUFFER_TOO_SMALL
+#define VGA_ERR_OUT_OF_BOUNDS    ERR_VGA_ERROR
+#define VGA_ERR_INVALID_CURSOR   ERR_VGA_ERROR
+#define VGA_ERR_ACCESS_DENIED    ERR_ACCESS_DENIED
+#define VGA_ERR_STRING_TOO_LONG  ERR_BUFFER_TOO_SMALL
 
-// Position structure
 typedef struct {
     uint8_t row;
     uint8_t col;
 } vga_pos_t;
 
-// Dimensions structure
 typedef struct {
     uint8_t rows;
     uint8_t cols;
 } vga_dimensions_t;
 
-// Core Character Output
 int vga_putchar(char c);
 int vga_puts(const char* str);
 
-// Screen Management
 int vga_clear(uint8_t color);
 int vga_clear_line(uint8_t row, uint8_t color);
 int vga_clear_to_eol(uint8_t color);
 int vga_scroll_up(uint8_t lines, uint8_t fill_color);
 int vga_newline(void);
 
-// Cursor Management
 int vga_getcursor(vga_pos_t* pos);
 int vga_setcursor(uint8_t row, uint8_t col);
 
-// Color Management
 int vga_getcolor(void);
 int vga_setcolor(uint8_t color);
 
-// Screen Info
 int vga_getdimensions(vga_dimensions_t* dims);
 
-// Helper: Map kernel error codes to BoxLib error codes
-BOX_INLINE int vga_map_error(int32_t kernel_error) {
+INLINE int vga_map_error(int32_t kernel_error) {
     switch (kernel_error) {
         case 0:  return 0;
-        case -1: return -BOX_ERR_INVALID_ARGUMENT;
-        case -2: return -BOX_ERR_VGA_ERROR;
-        case -3: return -BOX_ERR_VGA_ERROR;
-        case -4: return -BOX_ERR_ACCESS_DENIED;
-        case -5: return -BOX_ERR_BUFFER_TOO_SMALL;
-        default: return -BOX_ERR_INTERNAL;
+        case -1: return -ERR_INVALID_ARGUMENT;
+        case -2: return -ERR_VGA_ERROR;
+        case -3: return -ERR_VGA_ERROR;
+        case -4: return -ERR_ACCESS_DENIED;
+        case -5: return -ERR_BUFFER_TOO_SMALL;
+        default: return -ERR_INTERNAL;
     }
 }
 

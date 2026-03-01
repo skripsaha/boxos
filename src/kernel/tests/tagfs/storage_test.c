@@ -96,7 +96,7 @@ static void test_tag_index_stats(void) {
 }
 
 static void test_file_growth(void) {
-    kprintf("\n[TEST 5] File growth (CRITICAL FIX TEST)\n");
+    kprintf("\n[TEST 5] File growth\n");
 
     debug_printf("[TEST 5] About to create file...\n");
     uint32_t file_id;
@@ -340,9 +340,8 @@ static void test_obj_error_handling(void) {
 }
 
 void test_storage_deck(void) {
-    kprintf("\n====================================\n");
+    kprintf("\n");
     kprintf("STORAGE DECK & TAGFS TEST\n");
-    kprintf("====================================\n");
 
     TagFSState* state = tagfs_get_state();
     if (!state || !state->initialized) {
@@ -360,9 +359,8 @@ void test_storage_deck(void) {
     test_obj_write_append();
     test_obj_error_handling();
 
-    kprintf("\n====================================\n");
+    kprintf("\n");
     kprintf("STORAGE DECK TEST COMPLETE\n");
-    kprintf("====================================\n");
 }
 
 #else

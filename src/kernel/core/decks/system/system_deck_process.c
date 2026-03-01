@@ -27,7 +27,6 @@ static void deliver_response(Event* event, uint16_t error_code, const void* resp
     memset(event->data, 0, EVENT_DATA_SIZE);
 
     if (response_data && response_size > 0) {
-        // validate response size to prevent buffer overflow
         if (response_size > EVENT_DATA_SIZE) {
             debug_printf("[SYSTEM_DECK] ERROR: response_size (%zu) exceeds EVENT_DATA_SIZE (%u)\n",
                     response_size, EVENT_DATA_SIZE);
@@ -63,7 +62,6 @@ int system_deck_proc_spawn(Event* event) {
         return -1;
     }
 
-    // THEN force null termination for safety
     spawn_event.tags[sizeof(spawn_event.tags) - 1] = '\0';
 
     // check for empty tags (strnlen already prevents embedded nulls)
@@ -202,7 +200,6 @@ int system_deck_proc_kill(Event* event) {
 
     __sync_synchronize();
 
-    // Cleanup process buffers
     system_deck_cleanup_process_buffers(target_pid);
 
     proc_kill_response_t response;
@@ -335,7 +332,6 @@ int system_deck_proc_exec(Event* event) {
         if (has_name && has_exec_tag) {
             found_id = file_ids[i];
 
-            // Build comma-separated tag string from ALL system tags
             size_t pos = 0;
             for (uint8_t t = 0; t < meta->tag_count; t++) {
                 if (meta->tags[t].type != TAGFS_TAG_SYSTEM) {
@@ -460,7 +456,6 @@ int system_deck_tag_add(Event* event) {
         return -1;
     }
 
-    // THEN force null termination for safety
     tag_event.tag[sizeof(tag_event.tag) - 1] = '\0';
 
     // check for empty tag (strnlen already prevents embedded nulls)
@@ -534,7 +529,6 @@ int system_deck_tag_remove(Event* event) {
         return -1;
     }
 
-    // THEN force null termination for safety
     tag_event.tag[sizeof(tag_event.tag) - 1] = '\0';
 
     // check for empty tag (strnlen already prevents embedded nulls)
@@ -604,7 +598,6 @@ int system_deck_tag_check(Event* event) {
         return -1;
     }
 
-    // THEN force null termination for safety
     tag_event.tag[sizeof(tag_event.tag) - 1] = '\0';
 
     // check for empty tag (strnlen already prevents embedded nulls)
@@ -669,7 +662,6 @@ static uint32_t count_process_buffers(uint32_t pid) {
     return count;
 }
 
-// buffer cleanup on process destruction
 void system_deck_cleanup_process_buffers(uint32_t pid) {
     spin_lock(&buffer_table_lock);
 
@@ -739,7 +731,6 @@ int system_deck_buf_alloc(Event* event) {
         return -1;
     }
 
-    // check for overflow before page size addition
     if (alloc_event.size > UINT64_MAX - PMM_PAGE_SIZE) {
         debug_printf("[SYSTEM_DECK] BUF_ALLOC: Size would cause overflow in page calculation\n");
         deliver_response(event, SYSTEM_ERR_SIZE_LIMIT, NULL, 0);
@@ -764,7 +755,6 @@ int system_deck_buf_alloc(Event* event) {
         return -1;
     }
 
-    // Generate random handle for security
     uint64_t handle = generate_random_handle();
 
     // Check for handle collision (rare with random generation)

@@ -17,7 +17,7 @@ int create(const char *filename, const char *tags)
 
     result_entry_t result;
     if (!result_wait(&result, 5000)) return -1;
-    if (result.error_code != BOX_OK) return -1;
+    if (result.error_code != OK) return -1;
     if (result.size < 8) return -1;
 
     uint32_t file_id, error_code;
@@ -37,7 +37,7 @@ int query(const char *tags, uint32_t *file_ids, size_t max_files)
 
     result_entry_t result;
     if (!result_wait(&result, 5000)) return -1;
-    if (result.error_code != BOX_OK) return -1;
+    if (result.error_code != OK) return -1;
     if (result.size < 4) return -1;
 
     uint32_t count;
@@ -62,7 +62,7 @@ int file_info(uint32_t file_id, file_info_t *info)
 
     result_entry_t result;
     if (!result_wait(&result, 5000)) return -1;
-    if (result.error_code != BOX_OK) return -1;
+    if (result.error_code != OK) return -1;
     if (result.size < 192) return -1;
 
     int32_t error_code;
@@ -96,7 +96,7 @@ int fread(uint32_t file_id, uint64_t offset, void *buffer, size_t size)
 
     result_entry_t result;
     if (!result_wait(&result, 5000)) return -1;
-    if (result.error_code != BOX_OK) return -1;
+    if (result.error_code != OK) return -1;
     if (result.size < 16) return -1;
 
     uint64_t bytes_read;
@@ -124,7 +124,7 @@ int fwrite(uint32_t file_id, uint64_t offset, const void *buffer, size_t size)
 
     result_entry_t result;
     if (!result_wait(&result, 5000)) return -1;
-    if (result.error_code != BOX_OK) return -1;
+    if (result.error_code != OK) return -1;
     if (result.size < 20) return -1;
 
     uint64_t bytes_written;
@@ -147,7 +147,7 @@ int file_rename(uint32_t file_id, const char *new_filename)
 
     result_entry_t result;
     if (!result_wait(&result, 5000)) return -1;
-    if (result.error_code != BOX_OK) return -1;
+    if (result.error_code != OK) return -1;
     if (result.size < 4) return -1;
 
     int32_t error_code;
@@ -163,7 +163,7 @@ int delete(uint32_t file_id)
 
     result_entry_t result;
     if (!result_wait(&result, 5000)) return -1;
-    if (result.error_code != BOX_OK) return -1;
+    if (result.error_code != OK) return -1;
     if (result.size < 4) return -1;
 
     int32_t error_code;
@@ -183,7 +183,7 @@ int tag_add(uint32_t file_id, const char *tag)
 
     result_entry_t result;
     if (!result_wait(&result, 5000)) return -1;
-    if (result.error_code != BOX_OK) return -1;
+    if (result.error_code != OK) return -1;
     return 0;
 }
 
@@ -199,7 +199,7 @@ int tag_remove(uint32_t file_id, const char *key)
 
     result_entry_t result;
     if (!result_wait(&result, 5000)) return -1;
-    if (result.error_code != BOX_OK) return -1;
+    if (result.error_code != OK) return -1;
     return 0;
 }
 
@@ -215,7 +215,7 @@ int context_set(const char *tag)
 
     result_entry_t result;
     if (!result_wait(&result, 5000)) return -1;
-    if (result.error_code != BOX_OK) return -1;
+    if (result.error_code != OK) return -1;
     return 0;
 }
 
@@ -227,7 +227,7 @@ int context_clear(void)
 
     result_entry_t result;
     if (!result_wait(&result, 5000)) return -1;
-    if (result.error_code != BOX_OK) return -1;
+    if (result.error_code != OK) return -1;
     return 0;
 }
 

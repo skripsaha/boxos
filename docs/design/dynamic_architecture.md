@@ -48,8 +48,8 @@ typedef struct Event {
     uint8_t state;
     uint8_t flags;
     uint64_t timestamp;
-    boxos_error_t error_code;
-    boxos_error_t first_error;
+    error_t error_code;
+    error_t first_error;
     uint8_t error_deck_idx;
 
     uint16_t prefixes[16];  // FIXED - max 16 prefixes
@@ -108,8 +108,8 @@ typedef struct Event {
     uint8_t state;
     uint8_t flags;              // EVENT_FLAG_*
     uint64_t timestamp;
-    boxos_error_t error_code;
-    boxos_error_t first_error;
+    error_t error_code;
+    error_t first_error;
     uint8_t error_deck_idx;
     uint8_t _reserved[3];
 
@@ -134,16 +134,16 @@ typedef struct Event {
 
 ```c
 // Initialize event with dynamic capacity
-boxos_error_t event_init(Event* event, uint32_t pid, uint8_t initial_prefix_capacity);
+error_t event_init(Event* event, uint32_t pid, uint8_t initial_prefix_capacity);
 
 // Add prefix (auto-expands if needed)
-boxos_error_t event_add_prefix(Event* event, uint16_t prefix);
+error_t event_add_prefix(Event* event, uint16_t prefix);
 
 // Set data (auto-expands if needed)
-boxos_error_t event_set_data(Event* event, const void* data, size_t size);
+error_t event_set_data(Event* event, const void* data, size_t size);
 
 // Attach DMA region for zero-copy
-boxos_error_t event_attach_dma_region(Event* event, uint32_t dma_handle);
+error_t event_attach_dma_region(Event* event, uint32_t dma_handle);
 
 // Get prefix by index (handles both inline and extended)
 uint16_t event_get_prefix(const Event* event, uint8_t index);
@@ -159,18 +159,18 @@ void event_cleanup(Event* event);
 
 **Prefix Expansion:**
 ```c
-boxos_error_t event_add_prefix(Event* event, uint16_t prefix) {
+error_t event_add_prefix(Event* event, uint16_t prefix) {
     // Fast path: inline storage
     if (event->prefix_count < EVENT_INLINE_PREFIXES) {
         event->inline_prefixes[event->prefix_count++] = prefix;
-        return BOXOS_SUCCESS;
+        return OK;
     }
 
     // Slow path: allocate extended storage
     if (!(event->flags & EVENT_FLAG_EXTENDED_PREFIXES)) {
         size_t new_capacity = EVENT_INLINE_PREFIXES * 2;
         uint16_t* extended = kmalloc(new_capacity * sizeof(uint16_t));
-        if (!extended) return BOXOS_ERROR_NOMEM;
+        if (!extended) return ERR_NOMEM;
 
         // Copy inline prefixes to extended
         memcpy(extended, event->inline_prefixes, EVENT_INLINE_PREFIXES * sizeof(uint16_t));
@@ -187,14 +187,14 @@ boxos_error_t event_add_prefix(Event* event, uint16_t prefix) {
         size_t new_capacity = current_capacity * 2;
         uint16_t* new_extended = krealloc(event->extended_prefixes,
                                           new_capacity * sizeof(uint16_t));
-        if (!new_extended) return BOXOS_ERROR_NOMEM;
+        if (!new_extended) return ERR_NOMEM;
 
         event->extended_prefixes = new_extended;
         event->quota_charge += (new_capacity - current_capacity) * sizeof(uint16_t);
     }
 
     event->extended_prefixes[event->prefix_count++] = prefix;
-    return BOXOS_SUCCESS;
+    return OK;
 }
 ```
 
@@ -247,13 +247,13 @@ EventRingBuffer* event_ring_create_dynamic(size_t initial_capacity);
 void event_ring_destroy(EventRingBuffer* ring);
 
 // Push event (auto-grows if needed)
-boxos_error_t event_ring_push(EventRingBuffer* ring, Event* event);
+error_t event_ring_push(EventRingBuffer* ring, Event* event);
 
 // Pop event
-boxos_error_t event_ring_pop(EventRingBuffer* ring, Event* out_event);
+error_t event_ring_pop(EventRingBuffer* ring, Event* out_event);
 
 // Grow ring capacity (double-buffering)
-boxos_error_t event_ring_grow(EventRingBuffer* ring);
+error_t event_ring_grow(EventRingBuffer* ring);
 
 // Check if growth needed
 bool event_ring_should_grow(const EventRingBuffer* ring);
@@ -264,9 +264,9 @@ bool event_ring_should_grow(const EventRingBuffer* ring);
 **Double-buffering approach:**
 
 ```c
-boxos_error_t event_ring_grow(EventRingBuffer* ring) {
+error_t event_ring_grow(EventRingBuffer* ring) {
     if (ring->capacity >= 4096) {
-        return BOXOS_ERROR_LIMIT;  // Max capacity reached
+        return ERR_LIMIT;  // Max capacity reached
     }
 
     size_t new_capacity = ring->capacity * 2;
@@ -274,7 +274,7 @@ boxos_error_t event_ring_grow(EventRingBuffer* ring) {
     // Step 1: Allocate new array
     Event* new_entries = kmalloc(new_capacity * sizeof(Event));
     if (!new_entries) {
-        return BOXOS_ERROR_NOMEM;
+        return ERR_NOMEM;
     }
 
     // Step 2: Copy active events to new array
@@ -302,7 +302,7 @@ boxos_error_t event_ring_grow(EventRingBuffer* ring) {
     // Step 4: Free old array
     kfree(old_entries);
 
-    return BOXOS_SUCCESS;
+    return OK;
 }
 ```
 
@@ -365,13 +365,13 @@ typedef struct {
 uint32_t dma_region_alloc(size_t size, uint8_t flags);
 
 // Pin region pages (prepare for DMA)
-boxos_error_t dma_region_pin(uint32_t handle);
+error_t dma_region_pin(uint32_t handle);
 
 // Map region into kernel address space
-boxos_error_t dma_region_map_kernel(uint32_t handle);
+error_t dma_region_map_kernel(uint32_t handle);
 
 // Attach region to event
-boxos_error_t event_attach_dma_region(Event* event, uint32_t dma_handle);
+error_t event_attach_dma_region(Event* event, uint32_t dma_handle);
 
 // Detach and decrement refcount
 void event_detach_dma_region(Event* event);
@@ -639,7 +639,7 @@ void event_ring_adaptive_resize(EventRingBuffer* ring) {
 
 ```c
 // Track allocations per process
-boxos_error_t quota_charge(uint32_t pid, size_t bytes) {
+error_t quota_charge(uint32_t pid, size_t bytes) {
     process_quota_t* quota = get_process_quota(pid);
 
     // Check soft limit
@@ -656,7 +656,7 @@ boxos_error_t quota_charge(uint32_t pid, size_t bytes) {
         quota->peak_usage = quota->total_allocated;
     }
 
-    return BOXOS_SUCCESS;
+    return OK;
 }
 
 void quota_release(uint32_t pid, size_t bytes) {
@@ -1006,11 +1006,11 @@ EventRingBuffer* event_ring_create_dynamic(size_t initial_capacity);
 void event_ring_destroy(EventRingBuffer* ring);
 
 // Operations
-boxos_error_t event_ring_push(EventRingBuffer* ring, Event* event);
-boxos_error_t event_ring_pop(EventRingBuffer* ring, Event* out_event);
+error_t event_ring_push(EventRingBuffer* ring, Event* event);
+error_t event_ring_pop(EventRingBuffer* ring, Event* out_event);
 
 // Capacity management
-boxos_error_t event_ring_grow(EventRingBuffer* ring);
+error_t event_ring_grow(EventRingBuffer* ring);
 bool event_ring_should_grow(const EventRingBuffer* ring);
 
 // Statistics
@@ -1023,20 +1023,20 @@ uint8_t event_ring_get_generation(const EventRingBuffer* ring);
 
 ```c
 // Initialization
-boxos_error_t event_init(Event* event, uint32_t pid, uint8_t initial_prefix_capacity);
+error_t event_init(Event* event, uint32_t pid, uint8_t initial_prefix_capacity);
 void event_cleanup(Event* event);
 
 // Prefix operations
-boxos_error_t event_add_prefix(Event* event, uint16_t prefix);
+error_t event_add_prefix(Event* event, uint16_t prefix);
 uint16_t event_get_prefix(const Event* event, uint8_t index);
 uint8_t event_get_prefix_count(const Event* event);
 
 // Data operations
-boxos_error_t event_set_data(Event* event, const void* data, size_t size);
+error_t event_set_data(Event* event, const void* data, size_t size);
 const void* event_get_data(const Event* event, size_t* out_size);
 
 // DMA regions
-boxos_error_t event_attach_dma_region(Event* event, uint32_t dma_handle);
+error_t event_attach_dma_region(Event* event, uint32_t dma_handle);
 void event_detach_dma_region(Event* event);
 
 // Quota
@@ -1051,9 +1051,9 @@ uint32_t dma_region_alloc(size_t size, uint8_t flags);
 void dma_region_free(uint32_t handle);
 
 // Pinning and mapping
-boxos_error_t dma_region_pin(uint32_t handle);
-boxos_error_t dma_region_unpin(uint32_t handle);
-boxos_error_t dma_region_map_kernel(uint32_t handle);
+error_t dma_region_pin(uint32_t handle);
+error_t dma_region_unpin(uint32_t handle);
+error_t dma_region_map_kernel(uint32_t handle);
 void dma_region_unmap_kernel(uint32_t handle);
 
 // Access
@@ -1069,11 +1069,11 @@ bool dma_region_validate_handle(uint32_t handle, uint32_t pid);
 
 ```c
 // Quota management
-boxos_error_t quota_init(uint32_t pid, size_t limit);
+error_t quota_init(uint32_t pid, size_t limit);
 void quota_destroy(uint32_t pid);
 
 // Accounting
-boxos_error_t quota_charge(uint32_t pid, size_t bytes);
+error_t quota_charge(uint32_t pid, size_t bytes);
 void quota_release(uint32_t pid, size_t bytes);
 
 // Query
@@ -1093,30 +1093,30 @@ bool check_global_watermark(void);
 ```c
 // Dynamic architecture error codes
 typedef enum {
-    BOXOS_SUCCESS = 0,
+    OK = 0,
 
     // Memory errors
-    BOXOS_ERROR_NOMEM = 1,          // Out of memory
-    BOXOS_ERROR_QUOTA_EXCEEDED = 2, // Process quota exceeded
-    BOXOS_ERROR_WATERMARK = 3,      // Global watermark hit
+    ERR_NOMEM = 1,          // Out of memory
+    ERR_QUOTA_EXCEEDED = 2, // Process quota exceeded
+    ERR_WATERMARK = 3,      // Global watermark hit
 
     // Ring buffer errors
-    BOXOS_ERROR_RING_FULL = 10,     // Ring buffer full
-    BOXOS_ERROR_RING_EMPTY = 11,    // Ring buffer empty
-    BOXOS_ERROR_LIMIT = 12,         // Max capacity reached
+    ERR_RING_FULL = 10,     // Ring buffer full
+    ERR_RING_EMPTY = 11,    // Ring buffer empty
+    ERR_LIMIT = 12,         // Max capacity reached
 
     // Event errors
-    BOXOS_ERROR_INVALID_EVENT = 20, // Invalid event structure
-    BOXOS_ERROR_PREFIX_INDEX = 21,  // Prefix index out of bounds
-    BOXOS_ERROR_DATA_SIZE = 22,     // Data size invalid
+    ERR_INVALID_EVENT = 20, // Invalid event structure
+    ERR_PREFIX_INDEX = 21,  // Prefix index out of bounds
+    ERR_DATA_SIZE = 22,     // Data size invalid
 
     // DMA errors
-    BOXOS_ERROR_INVALID_HANDLE = 30,  // Invalid DMA handle
-    BOXOS_ERROR_NOT_OWNER = 31,       // Not owner of DMA region
-    BOXOS_ERROR_ALREADY_PINNED = 32,  // Region already pinned
-    BOXOS_ERROR_NOT_PINNED = 33,      // Region not pinned
+    ERR_INVALID_HANDLE = 30,  // Invalid DMA handle
+    ERR_NOT_OWNER = 31,       // Not owner of DMA region
+    ERR_ALREADY_PINNED = 32,  // Region already pinned
+    ERR_NOT_PINNED = 33,      // Region not pinned
 
-} boxos_error_t;
+} error_t;
 ```
 
 ---

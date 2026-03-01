@@ -229,8 +229,6 @@ void xhci_check_command_timeouts(xhci_controller_t* ctrl) {
                 debug_printf("[xHCI CMD] Command timeout: TRB=0x%llx slot=%u\n",
                              pending_cmds[i].trb_phys, pending_cmds[i].slot_id);
 
-                // Always call cleanup on timeout - even if slot lookup fails
-                // This ensures Device Context is freed in all cases
                 uint8_t slot_id = pending_cmds[i].slot_id;
                 if (slot_id > 0 && slot_id <= ctrl->max_slots) {
                     spin_unlock(&pending_cmds_lock);

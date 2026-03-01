@@ -8,7 +8,6 @@
 #include "async_io.h"
 #include "kernel_config.h"
 
-// Forward declarations
 static int parse_tag_list(const char *tag_string, const char *tags[], uint32_t max_tags, char buffer[16][32]);
 int handle_obj_read(Event *event);
 int handle_obj_write(Event *event);
@@ -234,7 +233,6 @@ static int handle_obj_read_async(Event *event)
     uint64_t offset = req->offset;
     uint32_t length = req->length;
 
-    // Open file for metadata
     TagFSFileHandle *handle = tagfs_open(file_id, TAGFS_HANDLE_READ);
     if (!handle)
     {
@@ -243,11 +241,9 @@ static int handle_obj_read_async(Event *event)
         return -1;
     }
 
-    // Calculate LBA from metadata
     uint32_t start_block = handle->metadata->start_block;
     tagfs_close(handle);
 
-    // Calculate sector offset
     uint32_t lba = start_block * 8 + (offset / 512);
     uint16_t sector_count = (length + 511) / 512;
 
@@ -261,24 +257,21 @@ static int handle_obj_read_async(Event *event)
     io_req.buffer_virt = NULL;
     io_req.submit_time = rdtsc();
 
-    boxos_error_t rc = async_io_submit(&io_req);
+    error_t rc = async_io_submit(&io_req);
 
-    if (rc == BOXOS_OK)
+    if (rc == OK)
     {
-        // Request queued successfully - mark as pending
-        event->error_code = BOXOS_ERR_IO_PENDING;
+        event->error_code = ERR_IO_PENDING;
         event->state = EVENT_STATE_PROCESSING;
         return 0;
     }
-    else if (rc == BOXOS_ERR_IO_QUEUE_FULL)
+    else if (rc == ERR_IO_QUEUE_FULL)
     {
-        // Queue full - fallback to sync
         debug_printf("[Storage Deck] Async queue full, falling back to sync OBJ_READ\n");
         return handle_obj_read(event);
     }
     else
     {
-        // Other error - fail immediately
         resp->error_code = STORAGE_ERR_IO;
         event->state = EVENT_STATE_ERROR;
         event->error_code = rc;
@@ -291,7 +284,6 @@ static int handle_obj_write_async(Event *event)
     obj_write_event_t *req = (obj_write_event_t *)event->data;
     obj_write_response_t *resp = (obj_write_response_t *)event->data;
 
-    // Validate length before submitting
     if (req->length > 168)
     {
         resp->error_code = STORAGE_ERR_INVALID;
@@ -304,7 +296,6 @@ static int handle_obj_write_async(Event *event)
     uint32_t length = req->length;
     uint32_t flags = req->flags;
 
-    // Open file for metadata
     TagFSFileHandle *handle = tagfs_open(file_id, TAGFS_HANDLE_WRITE);
     if (!handle)
     {
@@ -313,11 +304,9 @@ static int handle_obj_write_async(Event *event)
         return -1;
     }
 
-    // Get file metadata for LBA calculation and size tracking
     uint32_t start_block = handle->metadata->start_block;
     uint64_t original_file_size = handle->metadata->size;
 
-    // Calculate write offset (handle APPEND flag)
     uint64_t write_offset;
     if (flags & OBJ_WRITE_APPEND)
     {
@@ -330,11 +319,9 @@ static int handle_obj_write_async(Event *event)
 
     tagfs_close(handle);
 
-    // Calculate LBA (same as READ)
     uint32_t lba = start_block * 8 + (write_offset / 512);
     uint16_t sector_count = (length + 511) / 512;
 
-    // Prepare async I/O request
     async_io_request_t areq;
     areq.event_id = event->event_id;
     areq.pid = event->pid;
@@ -342,33 +329,28 @@ static int handle_obj_write_async(Event *event)
     areq.sector_count = sector_count;
     areq.is_master = 1;
     areq.op = ASYNC_IO_OP_WRITE;
-    areq.buffer_virt = req->data; // 168-byte write buffer from Event.data
+    areq.buffer_virt = req->data;
     areq.submit_time = rdtsc();
 
-    // Write-specific metadata for completion event
     areq.file_id = file_id;
     areq.write_offset = write_offset;
     areq.original_file_size = original_file_size;
 
-    // Submit to async I/O queue
-    boxos_error_t rc = async_io_submit(&areq);
+    error_t rc = async_io_submit(&areq);
 
-    if (rc == BOXOS_OK)
+    if (rc == OK)
     {
-        // Request queued successfully - mark as pending
-        event->error_code = BOXOS_ERR_IO_PENDING;
+        event->error_code = ERR_IO_PENDING;
         event->state = EVENT_STATE_PROCESSING;
         return 0;
     }
-    else if (rc == BOXOS_ERR_IO_QUEUE_FULL)
+    else if (rc == ERR_IO_QUEUE_FULL)
     {
-        // Queue full - fallback to sync
         debug_printf("[Storage Deck] Async queue full, falling back to sync OBJ_WRITE\n");
         return handle_obj_write(event);
     }
     else
     {
-        // Other error - fail immediately
         resp->error_code = STORAGE_ERR_IO;
         event->state = EVENT_STATE_ERROR;
         event->error_code = rc;
@@ -431,7 +413,6 @@ int handle_obj_write(Event *event)
     obj_write_event_t *req = (obj_write_event_t *)event->data;
     obj_write_response_t *resp = (obj_write_response_t *)event->data;
 
-    // BOUNDS CHECK: Validate length fits in buffer and event data
     if (req->length > 168)
     {
         resp->error_code = STORAGE_ERR_INVALID;
@@ -444,7 +425,6 @@ int handle_obj_write(Event *event)
     uint32_t length = req->length;
     uint32_t flags = req->flags;
 
-    // Additional validation: ensure we don't read past end of req->data array
     size_t max_data_size = EVENT_DATA_SIZE - offsetof(obj_write_event_t, data);
     if (length > max_data_size)
     {
@@ -617,10 +597,8 @@ static int handle_obj_delete(Event *event)
         }
     }
 
-    // Delete file
     int result = tagfs_delete_file(file_id);
 
-    // Write response - CRITICAL!
     obj_delete_response_t *resp = (obj_delete_response_t *)event->data;
     memset(resp, 0, sizeof(obj_delete_response_t));
 
@@ -647,7 +625,6 @@ static int handle_obj_rename(Event *event)
     debug_printf("[Storage] OBJ_RENAME: file_id=%u, new_name='%s'\n",
                  req->file_id, req->new_filename);
 
-    // Validate filename
     if (req->new_filename[0] == '\0')
     {
         debug_printf("[Storage] ERROR: Empty filename\n");
@@ -657,10 +634,8 @@ static int handle_obj_rename(Event *event)
         return -1;
     }
 
-    // Call TagFS rename
     int result = tagfs_rename_file(req->file_id, req->new_filename);
 
-    // Write response
     obj_rename_response_t *resp = (obj_rename_response_t *)event->data;
     if (result == 0)
     {
@@ -694,7 +669,6 @@ static int handle_obj_get_info(Event *event)
         return -1;
     }
 
-    // Build response
     obj_get_info_response_t *resp = (obj_get_info_response_t *)event->data;
     memset(resp, 0, sizeof(obj_get_info_response_t));
 
@@ -707,7 +681,6 @@ static int handle_obj_get_info(Event *event)
     strncpy(resp->filename, metadata->filename, 31);
     resp->filename[31] = '\0';
 
-    // Copy first 5 tags
     for (uint8_t i = 0; i < resp->tag_count; i++)
     {
         resp->tags[i].type = metadata->tags[i].type;

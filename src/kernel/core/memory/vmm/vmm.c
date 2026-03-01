@@ -9,8 +9,6 @@
 #include "cpu_caps_page.h"
 #include "boxos_addresses.h"
 
-
-// ========== GLOBAL VARIABLES ==========
 static vmm_context_t* kernel_context = NULL;
 static vmm_context_t* current_context = NULL;
 static bool vmm_initialized = false;
@@ -18,19 +16,15 @@ static char last_error[256] = {0};
 static vmm_stats_t global_stats = {0};
 static spinlock_t vmm_global_lock = {0};
 
-// MAXPHYADDR detection (initialized in vmm_init)
 uint8_t vmm_maxphyaddr = 36;
 uint64_t vmm_pte_addr_mask = 0x0000000FFFFFF000ULL;
 
-// Kernel heap tracking
 static uintptr_t kernel_heap_current = VMM_KERNEL_HEAP_BASE;
 static spinlock_t kernel_heap_lock = {0};
 
-// Kernel MMIO region tracking
 static uintptr_t kernel_mmio_current = VMM_KERNEL_MMIO_BASE;
 static spinlock_t kernel_mmio_lock = {0};
 
-// vmalloc tracking (simple linked list)
 typedef struct vmalloc_entry {
     void* virt_base;
     size_t pages;
@@ -40,7 +34,6 @@ typedef struct vmalloc_entry {
 static vmalloc_entry_t* vmalloc_list = NULL;
 static spinlock_t vmalloc_lock = {0};
 
-// ========== ERROR HANDLING ==========
 void vmm_set_error(const char* error) {
     if (error) {
         strncpy(last_error, error, sizeof(last_error) - 1);
@@ -54,9 +47,8 @@ const char* vmm_get_last_error(void) {
     return last_error;
 }
 
-// ========== PHYSICAL MEMORY INTEGRATION ==========
 uintptr_t vmm_alloc_page_table(void) {
-    void* page = pmm_alloc_zero(1);  // One page, zero-initialized (returns phys pointer)
+    void* page = pmm_alloc_zero(1);
     if (!page) {
         vmm_set_error("Failed to allocate page table from PMM");
         return 0;
@@ -75,7 +67,6 @@ void vmm_free_page_table(uintptr_t phys_addr) {
     spin_unlock(&vmm_global_lock);
 }
 
-// ========== TLB MANAGEMENT ==========
 void vmm_flush_tlb(void) {
     uintptr_t cr3;
     asm volatile("mov %%cr3, %0" : "=r"(cr3));
@@ -86,11 +77,8 @@ void vmm_flush_tlb(void) {
 }
 
 void vmm_flush_tlb_page(uintptr_t virt_addr) {
-    // BUG #11 DOCUMENTED LIMITATION: TLB shootdown not implemented
-    // This only flushes TLB on the current core. On multi-core systems,
-    // other cores may have stale TLB entries for this page.
-    // TODO: Implement IPI-based TLB shootdown for proper multi-core support
-    // For now, BoxOS assumes single-core or careful memory isolation
+    // only flushes TLB on current core; IPI-based shootdown not yet implemented
+    // TODO: implement IPI-based TLB shootdown for multi-core support
     asm volatile("invlpg (%0)" : : "r"(virt_addr) : "memory");
     spin_lock(&vmm_global_lock);
     global_stats.tlb_flushes++;
@@ -101,10 +89,6 @@ void vmm_invalidate_page(uintptr_t virt_addr) {
     vmm_flush_tlb_page(virt_addr);
 }
 
-// ========== PAGE TABLE MANIPULATION (helpers) ==========
-
-// Internal: walk and create intermediate tables up to `level` (1..3). Return pointer to that table (virtual).
-// level==1 -> return PDPT, level==2 -> return PD, level==3 -> return PT.
 page_table_t* vmm_get_or_create_table(vmm_context_t* ctx, uintptr_t virt_addr, int level) {
     if (!ctx || !ctx->pml4) return NULL;
 
@@ -116,40 +100,29 @@ page_table_t* vmm_get_or_create_table(vmm_context_t* ctx, uintptr_t virt_addr, i
         VMM_PT_INDEX(virt_addr)
     };
 
-    // Walk down to the requested level
     for (int i = 0; i < level; i++) {
         pte_t* entry = &current_table->entries[indices[i]];
 
         if (!(*entry & VMM_FLAG_PRESENT)) {
-            // Need to create new table
             uintptr_t new_table_phys = vmm_alloc_page_table();
             if (!new_table_phys) {
                 vmm_set_error("Failed to allocate page table");
                 return NULL;
             }
 
-            // Map it with kernel + user flags (intermediate tables need USER bit!)
-            // CRITICAL: All levels of page tables must have USER bit for Ring 3 access
+            // intermediate tables need USER bit for Ring 3 access at all levels
             *entry = vmm_make_pte(new_table_phys, VMM_FLAGS_KERNEL_RW | VMM_FLAG_USER);
         } else {
-            // Entry exists - check if it's a large page that needs splitting
-            // At i=2, current_table is PD, entry is PD[indices[2]]
-            // If this entry has LARGE_PAGE bit, it's a 2MB page that must be split
             if (i == 2 && (*entry & VMM_FLAG_LARGE_PAGE)) {
-                // BUG #7 FIX: Race condition on multi-core during large page split
-                // Two cores could both see LARGE_PAGE bit and allocate duplicate PTs
-                // Read entry atomically before split
+                // split 2MB large page into 512 4KB pages
                 pte_t old_entry = *entry;
                 if (!(old_entry & VMM_FLAG_LARGE_PAGE)) {
-                    // Already split by another core, continue normally
                     goto entry_ready;
                 }
 
-                // This is a PD entry with a 2MB large page that needs splitting into 512 4KB pages
                 uintptr_t large_page_base = vmm_pte_to_phys(old_entry);
                 uint64_t large_page_flags = vmm_pte_to_flags(old_entry) & ~VMM_FLAG_LARGE_PAGE;
 
-                // Allocate new PT for 512 4KB pages
                 uintptr_t new_pt_phys = vmm_alloc_page_table();
                 if (!new_pt_phys) {
                     vmm_set_error("Failed to allocate PT for large page split");
@@ -158,28 +131,20 @@ page_table_t* vmm_get_or_create_table(vmm_context_t* ctx, uintptr_t virt_addr, i
 
                 page_table_t* new_pt = (page_table_t*)vmm_phys_to_virt(new_pt_phys);
 
-                // Fill PT with 512 4KB mappings covering the same 2MB range
                 for (int j = 0; j < 512; j++) {
                     uintptr_t page_phys = large_page_base + (j * VMM_PAGE_SIZE);
                     new_pt->entries[j] = vmm_make_pte(page_phys, large_page_flags);
                 }
 
-                // Atomically replace large page entry with PT pointer
-                // Use CAS to detect if another core already split this page
                 pte_t new_entry = vmm_make_pte(new_pt_phys, VMM_FLAGS_KERNEL_RW | VMM_FLAG_USER);
                 if (!atomic_cas_u64((volatile uint64_t*)entry, old_entry, new_entry)) {
-                    // Another core beat us to it, free our PT and retry
                     vmm_free_page_table(new_pt_phys);
-                    // Entry was modified by another core, re-read it
                 }
             }
 entry_ready:
-            ;  // Empty statement for label
+            ;
         }
 
-        // Move to next level (phys -> virtual pointer)
-        // CRITICAL: Using vmm_phys_to_virt() to convert physical to virtual
-        // Currently relies on identity mapping (0-2GB), future: proper higher-half mapping
         uintptr_t next_table_phys = vmm_pte_to_phys(*entry);
         current_table = (page_table_t*)vmm_phys_to_virt(next_table_phys);
     }
@@ -187,13 +152,7 @@ entry_ready:
     return current_table;
 }
 
-// Internal: get existing (no allocation) PTE. Returns NULL if PT or parent tables not present.
-// BUG #16 DOCUMENTED RACE: Page table walk not atomic against concurrent modifications
-// If another core modifies page tables during this walk, we may read inconsistent state.
-// This is acceptable for current single-core focus. For multi-core, would need:
-// - RCU (Read-Copy-Update) for safe concurrent page table reads
-// - Per-context locks held during entire walk
-// - Sequence numbers to detect modifications during walk
+// does not allocate; returns NULL if any intermediate table is missing
 static pte_t* vmm_get_pte_noalloc(vmm_context_t* ctx, uintptr_t virt_addr) {
     if (!ctx || !ctx->pml4) return NULL;
 
@@ -210,9 +169,7 @@ static pte_t* vmm_get_pte_noalloc(vmm_context_t* ctx, uintptr_t virt_addr) {
     pte_t pdpt_entry = pdpt->entries[pdpt_idx];
     if (!(pdpt_entry & VMM_FLAG_PRESENT)) return NULL;
 
-    // If PDPT entry is large page (1GB), then there's no lower PT
     if (pdpt_entry & VMM_FLAG_LARGE_PAGE) {
-        // No PT; represent as PTE not present here
         return NULL;
     }
 
@@ -220,7 +177,6 @@ static pte_t* vmm_get_pte_noalloc(vmm_context_t* ctx, uintptr_t virt_addr) {
     pte_t pd_entry = pd->entries[pd_idx];
     if (!(pd_entry & VMM_FLAG_PRESENT)) return NULL;
 
-    // If PD entry is large page (2MB), there's no PT
     if (pd_entry & VMM_FLAG_LARGE_PAGE) {
         return NULL;
     }
@@ -229,22 +185,16 @@ static pte_t* vmm_get_pte_noalloc(vmm_context_t* ctx, uintptr_t virt_addr) {
     return &pt->entries[pt_idx];
 }
 
-// Get PTE and create page tables if necessary
 pte_t* vmm_get_or_create_pte(vmm_context_t* ctx, uintptr_t virt_addr) {
     page_table_t* pt = vmm_get_or_create_table(ctx, virt_addr, 3);
     if (!pt) return NULL;
     return &pt->entries[VMM_PT_INDEX(virt_addr)];
 }
 
-// Public wrappers (as declared in header).
-// vmm_get_pte -> does NOT create tables (safe for translations)
 pte_t* vmm_get_pte(vmm_context_t* ctx, uintptr_t virt_addr) {
     return vmm_get_pte_noalloc(ctx, virt_addr);
 }
 
-
-
-// ========== CONTEXT MANAGEMENT ==========
 vmm_context_t* vmm_create_context(void) {
     vmm_context_t* ctx = kmalloc(sizeof(vmm_context_t));
     if (!ctx) {
@@ -254,7 +204,6 @@ vmm_context_t* vmm_create_context(void) {
 
     memset(ctx, 0, sizeof(vmm_context_t));
 
-    // Allocate PML4 table
     uintptr_t pml4_phys = vmm_alloc_page_table();
     if (!pml4_phys) {
         kfree(ctx);
@@ -270,17 +219,11 @@ vmm_context_t* vmm_create_context(void) {
 
     spinlock_init(&ctx->lock);
 
-    // Copy kernel mappings from kernel_context if we have one
     if (kernel_context && kernel_context->pml4) {
-
-        // CRITICAL FIX: Don't share PDPT for PML4[0]!
-        // Problem: User space (0x20000000 = 512MB) is in PML4[0] range (0-512GB)
-        // If we copy PML4[0] entry directly, all processes share the same PDPT,
-        // causing Process 1's mappings to contaminate Process 2's address space.
-        //
-        // Solution: Create a NEW PDPT for this context and copy only the
-        // identity-mapped large pages (0-256MB) from kernel's PDPT.
-        // Allocate new PDPT for this context
+        // PML4[0] is NOT shared: user space (0-512GB) is in that range, so sharing
+        // it would let one process's mappings pollute another's address space.
+        // Instead: allocate a fresh PDPT/PD per context and copy only the
+        // identity-mapped large pages (0-256MB).
         uintptr_t new_pdpt_phys = vmm_alloc_page_table();
         if (!new_pdpt_phys) {
             vmm_free_page_table(pml4_phys);
@@ -290,23 +233,14 @@ vmm_context_t* vmm_create_context(void) {
         }
 
         page_table_t* new_pdpt = (page_table_t*)vmm_phys_to_virt(new_pdpt_phys);
-        // Get kernel's PDPT for PML4[0]
 
         pte_t kernel_pml4_entry = kernel_context->pml4->entries[0];
         if (kernel_pml4_entry & VMM_FLAG_PRESENT) {
             page_table_t* kernel_pdpt = (page_table_t*)vmm_phys_to_virt(vmm_pte_to_phys(kernel_pml4_entry));
 
-            // Copy only the large page entries (identity mapping 0-256MB)
-            // PDPT entry 0 covers 0-1GB, and within the corresponding PD,
-            // entries 0-127 are 2MB large pages covering 0-256MB
-            // We need to copy PDPT[0] which points to the PD with large pages
-
             pte_t kernel_pdpt_entry = kernel_pdpt->entries[0];
             if (kernel_pdpt_entry & VMM_FLAG_PRESENT) {
-                // Check if it points to a PD (not a 1GB large page)
                 if (!(kernel_pdpt_entry & VMM_FLAG_LARGE_PAGE)) {
-                    // Allocate new PD for this context
-
                     uintptr_t new_pd_phys = vmm_alloc_page_table();
                     if (!new_pd_phys) {
                         vmm_free_page_table(new_pdpt_phys);
@@ -319,27 +253,19 @@ vmm_context_t* vmm_create_context(void) {
                     page_table_t* new_pd = (page_table_t*)vmm_phys_to_virt(new_pd_phys);
                     page_table_t* kernel_pd = (page_table_t*)vmm_phys_to_virt(vmm_pte_to_phys(kernel_pdpt_entry));
 
-                    // Copy large page entries (0-127 = 0-256MB)
-
+                    // copy identity-mapped 2MB large pages for 0-256MB (entries 0-127)
                     for (int i = 0; i < 128; i++) {
-
                         new_pd->entries[i] = kernel_pd->entries[i];
-
                     }
 
-                    // Entries 128-511 (256MB-2GB) remain zero (unmapped in new context)
-
-                    // Set new PD in new PDPT
                     new_pdpt->entries[0] = vmm_make_pte(new_pd_phys, VMM_FLAGS_KERNEL_RW | VMM_FLAG_USER);
                 }
             }
         }
 
-        // Set new PDPT in PML4[0]
         ctx->pml4->entries[0] = vmm_make_pte(new_pdpt_phys, VMM_FLAGS_KERNEL_RW | VMM_FLAG_USER);
 
-
-        // Copy upper half (kernel space indexes 256..511) - these are safe to share
+        // upper half (256..511) is kernel space — safe to share directly
         for (int i = 256; i < 512; i++) {
             ctx->pml4->entries[i] = kernel_context->pml4->entries[i];
         }
@@ -352,15 +278,12 @@ vmm_context_t* vmm_create_context(void) {
     return ctx;
 }
 
-// Helper: free user-space page tables & mapped pages for a context
 static void vmm_free_user_space_tables(vmm_context_t* ctx) {
     if (!ctx || !ctx->pml4) return;
 
     debug_printf("[VMM] Freeing user space tables for context CR3=0x%lx\n", ctx->pml4_phys);
 
-    // CRITICAL FIX (2026-01-31): Track freed pages to prevent double-free
-    // Allocate a bitmap to track which physical pages we've already freed
-    // Assuming max 128MB of user pages (32768 pages = 4096 bytes bitmap)
+    // bitmap to detect duplicate PT entries pointing to the same physical page
     #define MAX_USER_PAGES 32768
     #define BITMAP_SIZE (MAX_USER_PAGES / 8)
 
@@ -371,46 +294,33 @@ static void vmm_free_user_space_tables(vmm_context_t* ctx) {
     }
     memset(freed_bitmap, 0, BITMAP_SIZE);
 
-    // Only iterate low half (user space): PML4 indices 0..255
-        // NOTE: After the fix, PML4[0] has its own PDPT/PD per context (not shared)
-
-    // We still skip freeing kernel identity-mapped large pages (0-256MB)
-
     for (int p4 = 0; p4 < 256; p4++) {
-
         pte_t pml4_entry = ctx->pml4->entries[p4];
         if (!(pml4_entry & VMM_FLAG_PRESENT)) continue;
 
         uintptr_t pdpt_phys = vmm_pte_to_phys(pml4_entry);
         page_table_t* pdpt = (page_table_t*)vmm_phys_to_virt(pdpt_phys);
 
-        // Each context has its own PDPT and PD for PML4[0]
-        // However, PT structures may be shared if created by splitting large pages
-        // We should free PDPT and PD (they're per-context), but NOT the PT (it may be shared)
         bool is_identity_pml4_entry = (p4 == 0);
         int skip_pt_free = is_identity_pml4_entry ? 1 : 0;
 
-        // iterate PDPT entries
         for (int p3 = 0; p3 < 512; p3++) {
             pte_t pdpt_entry = pdpt->entries[p3];
             if (!(pdpt_entry & VMM_FLAG_PRESENT)) continue;
 
-            // SKIP 1GB large pages - these are kernel mappings
             if (pdpt_entry & VMM_FLAG_LARGE_PAGE) {
-                continue;  // Skip kernel large pages
+                continue;
             }
 
             uintptr_t pd_phys = vmm_pte_to_phys(pdpt_entry);
             page_table_t* pd = (page_table_t*)vmm_phys_to_virt(pd_phys);
 
-            // iterate PD entries
             for (int p2 = 0; p2 < 512; p2++) {
                 pte_t pd_entry = pd->entries[p2];
                 if (!(pd_entry & VMM_FLAG_PRESENT)) continue;
 
-                // SKIP 2MB large pages - these are kernel identity mappings
                 if (pd_entry & VMM_FLAG_LARGE_PAGE) {
-                    continue;  // Skip kernel large pages
+                    continue;
                 }
 
                 if (is_identity_pml4_entry) {
@@ -425,7 +335,7 @@ static void vmm_free_user_space_tables(vmm_context_t* ctx) {
                                 pte_t kern_pd_entry = kern_pd->entries[p2];
                                 if ((kern_pd_entry & VMM_FLAG_PRESENT) &&
                                     vmm_pte_to_phys(pd_entry) == vmm_pte_to_phys(kern_pd_entry)) {
-                                    continue;  // Shared kernel PT — do NOT touch
+                                    continue;
                                 }
                             }
                         }
@@ -435,7 +345,6 @@ static void vmm_free_user_space_tables(vmm_context_t* ctx) {
                 uintptr_t pt_phys = vmm_pte_to_phys(pd_entry);
                 page_table_t* pt = (page_table_t*)vmm_phys_to_virt(pt_phys);
 
-                // iterate PT entries (leaf pages) - FREE DATA PAGES
                 int freed_pages = 0;
                 for (int p1 = 0; p1 < 512; p1++) {
                     pte_t pt_entry = pt->entries[p1];
@@ -443,7 +352,6 @@ static void vmm_free_user_space_tables(vmm_context_t* ctx) {
 
                     uintptr_t phys = vmm_pte_to_phys(pt_entry);
 
-                    // Calculate virtual address for identity mapping check
                     uintptr_t virt = (p4 * 512ULL * 1024 * 1024 * 1024) +
                                      (p3 * 1024 * 1024 * 1024) +
                                      (p2 * 2 * 1024 * 1024) +
@@ -458,16 +366,13 @@ static void vmm_free_user_space_tables(vmm_context_t* ctx) {
                         continue;
                     }
 
-                    // CRITICAL FIX: Check if we've already freed this page
                     if (!is_identity_mapped && phys >= 0x100000 && phys < 0x20000000) {
-                        // Calculate bitmap index (page number relative to 1MB)
                         size_t page_idx = (phys - 0x100000) / VMM_PAGE_SIZE;
 
                         if (page_idx < MAX_USER_PAGES) {
                             size_t byte_idx = page_idx / 8;
                             size_t bit_idx = page_idx % 8;
 
-                            // Check if already freed
                             if (freed_bitmap[byte_idx] & (1 << bit_idx)) {
                                 debug_printf("[VMM]   SKIP: Page 0x%lx already freed (duplicate PT entry at virt=0x%lx)\n", phys, virt);
                             } else {
@@ -490,25 +395,16 @@ static void vmm_free_user_space_tables(vmm_context_t* ctx) {
                     debug_printf("[VMM]   Freed %d data pages from PT\n", freed_pages);
                 }
 
-                // Free PT table itself ONLY if not shared with kernel identity mapping
-                // For PML4[0], PTs may have been created by splitting large pages
-                // These are shared across all contexts and must NOT be freed
-                // Note: PTs are NOT shared in current implementation
-                // Each process has its own PT copies
-                // skip_pt_free flag only applies to identity-mapped kernel regions
                 if (!skip_pt_free) {
                     vmm_free_page_table(pt_phys);
                 }
-                // Always zero the PD entry to unlink the PT
                 pd->entries[p2] = 0;
             }
 
-            // Free PD table (it's per-context, not shared)
             vmm_free_page_table(pd_phys);
             pdpt->entries[p3] = 0;
         }
 
-        // Free PDPT table (it's per-context, not shared)
         vmm_free_page_table(pdpt_phys);
         ctx->pml4->entries[p4] = 0;
     }
@@ -528,10 +424,9 @@ void vmm_destroy_context(vmm_context_t* ctx) {
     uintptr_t saved_cr3;
     asm volatile("mov %%cr3, %0" : "=r"(saved_cr3));
 
-    // ALWAYS switch to kernel CR3 before walking/freeing page tables.
-    // User contexts have split PD entries (2MB large pages broken into 4KB PTs)
-    // which may not identity-map all physical addresses used by other contexts'
-    // page table structures. The kernel context has pristine 2MB identity mapping.
+    // switch to kernel CR3 before walking page tables: user contexts have split PD
+    // entries that may not identity-map all physical addresses used by other contexts'
+    // page table structures; kernel context has pristine 2MB identity mapping
     uintptr_t destroyed_pml4 = ctx->pml4_phys;
     if (saved_cr3 != kernel_context->pml4_phys) {
         asm volatile("mov %0, %%cr3" :: "r"(kernel_context->pml4_phys) : "memory");
@@ -549,7 +444,6 @@ void vmm_destroy_context(vmm_context_t* ctx) {
 
     kfree(ctx);
 
-    // Restore original CR3 unless it was the context we just destroyed
     if (saved_cr3 != destroyed_pml4 && saved_cr3 != kernel_context->pml4_phys) {
         asm volatile("mov %0, %%cr3" :: "r"(saved_cr3) : "memory");
     }
@@ -575,7 +469,6 @@ void vmm_switch_context(vmm_context_t* ctx) {
     vmm_flush_tlb();
 }
 
-// ========== MEMORY MAPPING ==========
 vmm_map_result_t vmm_map_page(vmm_context_t* ctx, uintptr_t virt_addr,
                               uintptr_t phys_addr, uint64_t flags) {
     vmm_map_result_t result = {0};
@@ -592,7 +485,6 @@ vmm_map_result_t vmm_map_page(vmm_context_t* ctx, uintptr_t virt_addr,
 
     spin_lock(&ctx->lock);
 
-    // We need to create page table for mapping
     pte_t* pte = vmm_get_or_create_pte(ctx, virt_addr);
     if (!pte) {
         spin_unlock(&ctx->lock);
@@ -600,12 +492,10 @@ vmm_map_result_t vmm_map_page(vmm_context_t* ctx, uintptr_t virt_addr,
         return result;
     }
 
-    // Check if page is already mapped
     if (*pte & VMM_FLAG_PRESENT) {
         uintptr_t existing_phys = vmm_pte_to_phys(*pte);
         uint64_t existing_flags = vmm_pte_to_flags(*pte);
 
-        // If exact same mapping, success
         if (existing_phys == phys_addr && existing_flags == flags) {
             spin_unlock(&ctx->lock);
             result.success = true;
@@ -615,16 +505,11 @@ vmm_map_result_t vmm_map_page(vmm_context_t* ctx, uintptr_t virt_addr,
             return result;
         }
 
-        // Allow remapping if it's an identity mapping from large page split
-        // Identity mapping: phys == virt and kernel-only flags
+        // allow remapping if it's an identity-mapped kernel page (replacing with user mapping)
         bool is_identity_map = (existing_phys == virt_addr) &&
                               !(existing_flags & VMM_FLAG_USER);
 
-        if (is_identity_map) {
-            // Remap is allowed - this is replacing identity mapping with user mapping
-            // Fall through to remap
-        } else {
-            // Not identity mapping - conflict!
+        if (!is_identity_map) {
             spin_unlock(&ctx->lock);
             char error_buf[256];
             ksnprintf(error_buf, sizeof(error_buf),
@@ -637,10 +522,8 @@ vmm_map_result_t vmm_map_page(vmm_context_t* ctx, uintptr_t virt_addr,
         }
     }
 
-    // Map the page
     *pte = vmm_make_pte(phys_addr, flags);
 
-    // Update statistics
     ctx->mapped_pages++;
     if (flags & VMM_FLAG_USER) {
         ctx->user_pages++;
@@ -658,7 +541,6 @@ vmm_map_result_t vmm_map_page(vmm_context_t* ctx, uintptr_t virt_addr,
 
     spin_unlock(&ctx->lock);
 
-    // Invalidate TLB for this page
     vmm_flush_tlb_page(virt_addr);
 
     result.success = true;
@@ -682,7 +564,6 @@ vmm_map_result_t vmm_map_pages(vmm_context_t* ctx, uintptr_t virt_addr,
             flags);
 
         if (!single_result.success) {
-            // Rollback previous mappings
             for (size_t j = 0; j < i; j++) {
                 vmm_unmap_page(ctx, virt_addr + j * VMM_PAGE_SIZE);
             }
@@ -702,13 +583,12 @@ bool vmm_unmap_page(vmm_context_t* ctx, uintptr_t virt_addr) {
 
     spin_lock(&ctx->lock);
 
-    pte_t* pte = vmm_get_pte(ctx, virt_addr); // noalloc
+    pte_t* pte = vmm_get_pte(ctx, virt_addr);
     if (!pte || !(*pte & VMM_FLAG_PRESENT)) {
         spin_unlock(&ctx->lock);
         return false;
     }
 
-    // Update statistics (only counts, do not free physical pages here)
     uint64_t flags = vmm_pte_to_flags(*pte);
     if (flags & VMM_FLAG_USER) {
         if (ctx->user_pages > 0) ctx->user_pages--;
@@ -726,12 +606,10 @@ bool vmm_unmap_page(vmm_context_t* ctx, uintptr_t virt_addr) {
 
     if (ctx->mapped_pages > 0) ctx->mapped_pages--;
 
-    // Clear the PTE
     *pte = 0;
 
     spin_unlock(&ctx->lock);
 
-    // Invalidate TLB
     vmm_flush_tlb_page(virt_addr);
 
     return true;
@@ -749,16 +627,13 @@ bool vmm_unmap_pages(vmm_context_t* ctx, uintptr_t virt_addr, size_t page_count)
     return success;
 }
 
-// ========== MMIO MAPPING ==========
 volatile void* vmm_map_mmio(uintptr_t phys_addr, size_t size, uint64_t flags) {
     if (size == 0) {
         vmm_set_error("vmm_map_mmio: size is zero");
         return NULL;
     }
 
-    // Check if physical address range overlaps USABLE RAM from E820 map
-    // This correctly allows MMIO regions (EBDA, BIOS ROM, PCI MMIO) while
-    // blocking accidental mapping of managed RAM
+    // block mapping if range overlaps E820 USABLE RAM to prevent accidental MMIO over managed RAM
     if (pmm_is_usable_ram(phys_addr, size)) {
         vmm_set_error("vmm_map_mmio: physical address overlaps USABLE RAM");
         debug_printf("[VMM] ERROR: vmm_map_mmio phys=0x%llx size=0x%llx overlaps USABLE RAM from E820\n",
@@ -767,18 +642,15 @@ volatile void* vmm_map_mmio(uintptr_t phys_addr, size_t size, uint64_t flags) {
         return NULL;
     }
 
-    // Align to page boundaries
     uintptr_t phys_aligned = vmm_page_align_down(phys_addr);
     size_t offset = phys_addr - phys_aligned;
     size_t size_aligned = vmm_page_align_up(size + offset);
     size_t page_count = size_aligned / VMM_PAGE_SIZE;
 
-    // Allocate virtual address space from kernel MMIO region
     spin_lock(&kernel_mmio_lock);
 
     uintptr_t virt_base = kernel_mmio_current;
 
-    // Check if we have enough space
     if (virt_base + size_aligned > VMM_KERNEL_MMIO_BASE + VMM_KERNEL_MMIO_SIZE) {
         spin_unlock(&kernel_mmio_lock);
         vmm_set_error("vmm_map_mmio: kernel MMIO region exhausted");
@@ -789,17 +661,14 @@ volatile void* vmm_map_mmio(uintptr_t phys_addr, size_t size, uint64_t flags) {
     kernel_mmio_current += size_aligned;
     spin_unlock(&kernel_mmio_lock);
 
-    // Ensure cache-disable and write-through for MMIO
     uint64_t mmio_flags = flags | VMM_FLAG_CACHE_DISABLE | VMM_FLAG_WRITE_THROUGH;
 
-    // Map pages
     vmm_context_t* ctx = vmm_get_kernel_context();
     vmm_map_result_t result = vmm_map_pages(ctx, virt_base, phys_aligned,
                                             page_count, mmio_flags);
 
     if (!result.success) {
         debug_printf("[VMM] ERROR: vmm_map_mmio: failed to map pages: %s\n", result.error_msg);
-        // Roll back virtual address allocation
         spin_lock(&kernel_mmio_lock);
         if (kernel_mmio_current == virt_base + size_aligned) {
             kernel_mmio_current = virt_base;
@@ -808,9 +677,7 @@ volatile void* vmm_map_mmio(uintptr_t phys_addr, size_t size, uint64_t flags) {
         return NULL;
     }
 
-    volatile void* virt_addr = (volatile void*)(virt_base + offset);
-
-    return virt_addr;
+    return (volatile void*)(virt_base + offset);
 }
 
 void vmm_unmap_mmio(volatile void* virt_addr, size_t size) {
@@ -827,11 +694,9 @@ void vmm_unmap_mmio(volatile void* virt_addr, size_t size) {
     vmm_context_t* ctx = vmm_get_kernel_context();
     vmm_unmap_pages(ctx, virt_base, page_count);
 
-    // NOTE: We don't reclaim virtual address space (simple bump allocator)
-    // For production, implement proper virtual address allocator with free list
+    // virtual address space is not reclaimed (bump allocator); needs a free list for production
 }
 
-// ========== HIGH-LEVEL ALLOCATION ==========
 void* vmm_alloc_pages(vmm_context_t* ctx, size_t page_count, uint64_t flags) {
     if (!ctx || page_count == 0) {
         debug_printf("[VMM] vmm_alloc_pages: invalid parameters (ctx=%p, count=%zu)\n", ctx, page_count);
@@ -840,7 +705,6 @@ void* vmm_alloc_pages(vmm_context_t* ctx, size_t page_count, uint64_t flags) {
 
     debug_printf("[VMM] vmm_alloc_pages: requesting %zu pages with flags 0x%llx\n", page_count, (unsigned long long)flags);
 
-    // Allocate physical pages first (returns pointer to physical memory)
     void* phys_pages = pmm_alloc(page_count);
     if (!phys_pages) {
         vmm_set_error("Failed to allocate physical pages");
@@ -853,7 +717,6 @@ void* vmm_alloc_pages(vmm_context_t* ctx, size_t page_count, uint64_t flags) {
     uintptr_t phys_base = (uintptr_t)phys_pages;
     uintptr_t virt_base;
 
-    // Find virtual address space
     if (flags & VMM_FLAG_USER) {
         virt_base = vmm_find_free_region(ctx, vmm_pages_to_size(page_count),
                                          VMM_USER_BASE, VMM_USER_STACK_TOP);
@@ -865,7 +728,6 @@ void* vmm_alloc_pages(vmm_context_t* ctx, size_t page_count, uint64_t flags) {
         }
         debug_printf("[VMM] Found user virtual space at 0x%p\n", (void*)virt_base);
     } else {
-        // Kernel allocation - use simple sequential allocation
         spin_lock(&kernel_heap_lock);
         virt_base = kernel_heap_current;
 
@@ -873,7 +735,6 @@ void* vmm_alloc_pages(vmm_context_t* ctx, size_t page_count, uint64_t flags) {
         debug_printf("[VMM] Kernel heap base: 0x%p\n", (void*)VMM_KERNEL_HEAP_BASE);
         debug_printf("[VMM] Kernel heap size: 0x%llx\n", (unsigned long long)VMM_KERNEL_HEAP_SIZE);
 
-        // Check if we have enough space (basic check)
         if (virt_base + vmm_pages_to_size(page_count) > VMM_KERNEL_HEAP_BASE + VMM_KERNEL_HEAP_SIZE) {
             spin_unlock(&kernel_heap_lock);
             pmm_free(phys_pages, page_count);
@@ -891,7 +752,6 @@ void* vmm_alloc_pages(vmm_context_t* ctx, size_t page_count, uint64_t flags) {
                (void*)virt_base, (void*)phys_base, page_count);
     }
 
-    // Map the pages individually for better error handling
     for (size_t i = 0; i < page_count; i++) {
         uintptr_t virt_addr = virt_base + i * VMM_PAGE_SIZE;
         uintptr_t phys_addr = phys_base + i * VMM_PAGE_SIZE;
@@ -906,7 +766,6 @@ void* vmm_alloc_pages(vmm_context_t* ctx, size_t page_count, uint64_t flags) {
                    i + 1, page_count, (void*)virt_addr, (void*)phys_addr,
                    result.error_msg ? result.error_msg : "unknown error");
 
-            // Rollback previous mappings
             for (size_t j = 0; j < i; j++) {
                 vmm_unmap_page(ctx, virt_base + j * VMM_PAGE_SIZE);
             }
@@ -926,7 +785,6 @@ void vmm_free_pages(vmm_context_t* ctx, void* virt_addr, size_t page_count) {
 
     uintptr_t virt_base = (uintptr_t)virt_addr;
 
-    // Collect physical addresses
     uintptr_t* phys_addrs = kmalloc(page_count * sizeof(uintptr_t));
     if (phys_addrs) {
         for (size_t i = 0; i < page_count; i++) {
@@ -934,10 +792,8 @@ void vmm_free_pages(vmm_context_t* ctx, void* virt_addr, size_t page_count) {
         }
     }
 
-    // Unmap virtual pages (does not free physical)
     vmm_unmap_pages(ctx, virt_base, page_count);
 
-    // Free physical pages
     if (phys_addrs) {
         for (size_t i = 0; i < page_count; i++) {
             if (phys_addrs[i]) {
@@ -948,7 +804,6 @@ void vmm_free_pages(vmm_context_t* ctx, void* virt_addr, size_t page_count) {
     }
 }
 
-// ========== KERNEL HEAP (vmalloc) ==========
 void* vmalloc(size_t size) {
     if (size == 0) {
         debug_printf("[VMM] vmalloc: size is 0\n");
@@ -979,7 +834,6 @@ void* vmalloc(size_t size) {
     debug_printf("[VMM] vmalloc: allocated virt=%p phys=%p pages=%zu\n",
             virt, (void*)phys_first, page_count);
 
-    // Register allocation for vfree
     vmalloc_entry_t* ent = kmalloc(sizeof(vmalloc_entry_t));
     if (ent) {
         ent->virt_base = virt;
@@ -996,7 +850,6 @@ void* vmalloc(size_t size) {
     debug_printf("[VMM] vmalloc SUCCESS: %p (%zu pages)\n", virt, page_count);
     return virt;
 }
-
 
 void* vzalloc(size_t size) {
     void* addr = vmalloc(size);
@@ -1018,7 +871,6 @@ void vfree(void* addr) {
 
     while (cur) {
         if (cur->virt_base == addr) {
-            // Found allocation
             if (prev) prev->next = cur->next;
             else vmalloc_list = cur->next;
             spin_unlock(&vmalloc_lock);
@@ -1038,7 +890,6 @@ void vfree(void* addr) {
 
     spin_unlock(&vmalloc_lock);
 
-    // Not found — fallback mode
     debug_printf("[VMM] vfree: allocation not found in list, fallback free at %p\n", addr);
 
     uintptr_t phys = vmm_virt_to_phys(vmm_get_current_context(), (uintptr_t)addr);
@@ -1051,14 +902,12 @@ void vfree(void* addr) {
     }
 }
 
-
-// ========== ADDRESS TRANSLATION ==========
 uintptr_t vmm_virt_to_phys(vmm_context_t* ctx, uintptr_t virt_addr) {
     if (!ctx) return 0;
 
     spin_lock(&ctx->lock);
 
-    pte_t* pte = vmm_get_pte(ctx, virt_addr); // noalloc
+    pte_t* pte = vmm_get_pte(ctx, virt_addr);
     if (!pte || !(*pte & VMM_FLAG_PRESENT)) {
         spin_unlock(&ctx->lock);
         return 0;
@@ -1081,7 +930,7 @@ uint64_t vmm_get_page_flags(vmm_context_t* ctx, uintptr_t virt_addr) {
 
     spin_lock(&ctx->lock);
 
-    pte_t* pte = vmm_get_pte(ctx, virt_addr); // noalloc
+    pte_t* pte = vmm_get_pte(ctx, virt_addr);
     if (!pte || !(*pte & VMM_FLAG_PRESENT)) {
         spin_unlock(&ctx->lock);
         return 0;
@@ -1093,7 +942,6 @@ uint64_t vmm_get_page_flags(vmm_context_t* ctx, uintptr_t virt_addr) {
     return flags;
 }
 
-// ========== UTILITIES ==========
 uintptr_t vmm_find_free_region(vmm_context_t* ctx, size_t size, uintptr_t start, uintptr_t end) {
     if (!ctx || size == 0 || start >= end) return 0;
 
@@ -1103,16 +951,13 @@ uintptr_t vmm_find_free_region(vmm_context_t* ctx, size_t size, uintptr_t start,
     while (current + vmm_pages_to_size(pages_needed) <= end) {
         bool region_free = true;
 
-        // Check pages
         for (size_t i = 0; i < pages_needed; i++) {
             if (vmm_is_mapped(ctx, current + i * VMM_PAGE_SIZE)) {
                 region_free = false;
-                // skip past this mapped page
                 uintptr_t next = current + (i + 1) * VMM_PAGE_SIZE;
 
-                // Check for overflow and ensure we're making progress
                 if (next <= current || next >= end) {
-                    return 0;  // No free region found (overflow or out of bounds)
+                    return 0;
                 }
 
                 current = vmm_page_align_up(next);
@@ -1149,15 +994,13 @@ bool vmm_protect(vmm_context_t* ctx, uintptr_t virt_addr, size_t size, uint64_t 
     spin_lock(&ctx->lock);
 
     for (size_t i = 0; i < page_count; i++) {
-        pte_t* pte = vmm_get_pte(ctx, current_addr); // noalloc
+        pte_t* pte = vmm_get_pte(ctx, current_addr);
         if (!pte || !(*pte & VMM_FLAG_PRESENT)) {
             spin_unlock(&ctx->lock);
             return false;
         }
 
-        // Update flags while preserving physical address
         uintptr_t phys_addr = vmm_pte_to_phys(*pte);
-        // Ensure present bit remains set unless new_flags explicitly clears it
         uint64_t flags_to_set = (new_flags & VMM_PTE_FLAGS_MASK);
         if (!(flags_to_set & VMM_FLAG_PRESENT)) flags_to_set |= VMM_FLAG_PRESENT;
         *pte = vmm_make_pte(phys_addr, flags_to_set);
@@ -1176,11 +1019,9 @@ bool vmm_reserve_region(vmm_context_t* ctx, uintptr_t start, size_t size, uint64
     size_t page_count = vmm_size_to_pages(size);
     uintptr_t virt_base = vmm_page_align_down(start);
 
-    // Allocate physical pages
     void* phys_pages = pmm_alloc(page_count);
     if (!phys_pages) return false;
 
-    // Map the region
     vmm_map_result_t result = vmm_map_pages(ctx, virt_base, (uintptr_t)phys_pages,
                                            page_count, flags);
 
@@ -1192,13 +1033,9 @@ bool vmm_reserve_region(vmm_context_t* ctx, uintptr_t start, size_t size, uint64
     return true;
 }
 
-// ========== INITIALIZATION ==========
-
-// Initialize MAXPHYADDR detection
 static void vmm_init_maxphyaddr(void) {
     vmm_maxphyaddr = cpuid_get_maxphyaddr();
 
-    // Calculate address mask based on MAXPHYADDR
     if (vmm_maxphyaddr >= 52) {
         vmm_pte_addr_mask = 0x000FFFFFFFFFF000ULL;
     } else {
@@ -1227,7 +1064,7 @@ void vmm_init(void) {
 
     debug_printf("[VMM] Initializing Virtual Memory Manager...\n");
 
-    // CRITICAL: Detect MAXPHYADDR BEFORE creating any page tables
+    // detect MAXPHYADDR before creating any page tables to build the correct PTE mask
     vmm_init_maxphyaddr();
 
     spinlock_init(&vmm_global_lock);
@@ -1235,7 +1072,6 @@ void vmm_init(void) {
     spinlock_init(&vmalloc_lock);
     spinlock_init(&kernel_mmio_lock);
 
-    // Create kernel context
     kernel_context = vmm_create_context();
     if (!kernel_context) {
         panic("Failed to create kernel VMM context");
@@ -1244,43 +1080,29 @@ void vmm_init(void) {
     debug_printf("[VMM] Kernel context created at %p\n", kernel_context);
     debug_printf("[VMM] PML4 physical address: 0x%p\n", (void*)kernel_context->pml4_phys);
 
-    // Set up identity mapping for ALL usable RAM from E820
-    // CRITICAL: VMM relies on physical = virtual for page table access!
-    // CRITICAL FIX: Previously limited to 256MB, but PMM can allocate pages beyond
-    // this limit if system has >256MB RAM, causing page faults and crashes.
-    //
-    // OPTIMIZATION: Use 2MB large pages for identity mapping
-    // This reduces mappings dramatically, speeding up initialization
-
-    // Get total usable memory from PMM
+    // identity-map all usable RAM using 2MB large pages so PMM-allocated physical
+    // addresses equal virtual addresses (PMM can allocate beyond 256MB on large systems)
     uint64_t total_mem = pmm_get_total_memory();
-
-    // Round up to next 2MB boundary
     uintptr_t identity_map_end = ALIGN_UP(total_mem, 2 * 1024 * 1024);
 
     debug_printf("[VMM] Setting up identity mapping for 0x0 - 0x%llx (%llu MB) using 2MB large pages...\n",
             identity_map_end, identity_map_end / (1024*1024));
 
-    // Map using 2MB large pages for speed
-    #define LARGE_PAGE_SIZE (2 * 1024 * 1024)  // 2MB
+    #define LARGE_PAGE_SIZE (2 * 1024 * 1024)
     size_t large_pages_mapped = 0;
 
     for (uintptr_t addr = 0; addr < identity_map_end; addr += LARGE_PAGE_SIZE) {
-        // Get or create page directory (PD) entry
         page_table_t* pd = vmm_get_or_create_table(kernel_context, addr, 2);
         if (!pd) {
-            if (addr < 0x1000000) { // First 16MB is critical
+            if (addr < 0x1000000) {
                 panic("Failed to create page directory for identity mapping");
             }
             continue;
         }
 
-        // Calculate PD index
         uint32_t pd_idx = VMM_PD_INDEX(addr);
         pte_t* pd_entry = &pd->entries[pd_idx];
 
-        // Create 2MB large page entry (skip Page Table level)
-        // Set LARGE_PAGE bit (bit 7) to indicate 2MB page
         *pd_entry = vmm_make_pte(addr, VMM_FLAGS_KERNEL_RW | VMM_FLAG_LARGE_PAGE);
         large_pages_mapped++;
     }
@@ -1295,27 +1117,24 @@ void vmm_init(void) {
                  (void*)VMM_KERNEL_MMIO_BASE,
                  (void*)(VMM_KERNEL_MMIO_BASE + VMM_KERNEL_MMIO_SIZE));
 
-    // Test identity mapping by writing & reading known physical address (1MB mark)
     debug_printf("[VMM] Testing identity mapping...\n");
-    volatile uint32_t* test_ptr = (volatile uint32_t*)0x100000; // 1MB
+    volatile uint32_t* test_ptr = (volatile uint32_t*)0x100000;
     uint32_t old_value = *test_ptr;
     *test_ptr = 0xDEADBEEF;
     if (*test_ptr != 0xDEADBEEF) {
         panic("Identity mapping test failed");
     }
-    *test_ptr = old_value; // Restore
+    *test_ptr = old_value;
     debug_printf("[VMM] Identity mapping test: PASSED\n");
 
-    // Switch to our new page tables
     current_context = kernel_context;
     vmm_switch_context(kernel_context);
 
-    // Test that we can still access memory after switch
     *test_ptr = 0xCAFEBABE;
     if (*test_ptr != 0xCAFEBABE) {
         panic("Page table switch broke memory access");
     }
-    *test_ptr = old_value; // Restore
+    *test_ptr = old_value;
 
     vmm_initialized = true;
 
@@ -1331,7 +1150,6 @@ void vmm_init(void) {
     debug_printf("[VMM] %[S]Virtual Memory Manager initialized successfully!%[D]\n");
 }
 
-// ========== DEBUGGING & STATISTICS ==========
 void vmm_dump_page_tables(vmm_context_t* ctx, uintptr_t virt_addr) {
     if (!ctx) return;
 
@@ -1379,7 +1197,6 @@ void vmm_dump_page_tables(vmm_context_t* ctx, uintptr_t virt_addr) {
         return;
     }
 
-    // If PD entry is large page, no PT
     if (pd_entry & VMM_FLAG_LARGE_PAGE) {
         debug_printf("[VMM]   PD entry is a large page (2MB). Physical: 0x%p\n", (void*)vmm_pte_to_phys(pd_entry));
         spin_unlock(&ctx->lock);
@@ -1451,11 +1268,9 @@ void vmm_print_stats(void) {
     debug_printf("[VMM]   TLB flushes:           %zu\n", stats.tlb_flushes);
 }
 
-// ========== BASIC TESTING ==========
 void vmm_test_basic(void) {
     debug_printf("[VMM] %[H]Running basic VMM tests...%[D]\n");
 
-    // Test 1: Create and destroy contexts
     debug_printf("[VMM] Test 1: Context creation/destruction...\n");
     vmm_context_t* test_ctx = vmm_create_context();
     if (!test_ctx) {
@@ -1464,7 +1279,6 @@ void vmm_test_basic(void) {
     }
     debug_printf("[VMM] %[S]PASSED: Context created successfully%[D]\n");
 
-    // Test 2: Map a page
     debug_printf("[VMM] Test 2: Page mapping...\n");
     void* phys_page = pmm_alloc(1);
     if (!phys_page) {
@@ -1473,7 +1287,7 @@ void vmm_test_basic(void) {
         return;
     }
 
-    uintptr_t test_virt = 0x1000000; // 16MB
+    uintptr_t test_virt = 0x1000000;
     vmm_map_result_t result = vmm_map_page(test_ctx, test_virt, (uintptr_t)phys_page,
                                           VMM_FLAGS_KERNEL_RW);
     if (!result.success) {
@@ -1484,7 +1298,6 @@ void vmm_test_basic(void) {
     }
     debug_printf("[VMM] %[S]PASSED: Page mapped successfully%[D]\n");
 
-    // Test 3: Address translation
     debug_printf("[VMM] Test 3: Address translation...\n");
     uintptr_t translated = vmm_virt_to_phys(test_ctx, test_virt);
     if (translated != (uintptr_t)phys_page) {
@@ -1497,7 +1310,6 @@ void vmm_test_basic(void) {
     }
     debug_printf("[VMM] %[S]PASSED: Address translation correct%[D]\n");
 
-    // Test 4: Unmap page
     debug_printf("[VMM] Test 4: Page unmapping...\n");
     if (!vmm_unmap_page(test_ctx, test_virt)) {
         debug_printf("[VMM] %[E]FAILED: Could not unmap page%[D]\n");
@@ -1506,7 +1318,6 @@ void vmm_test_basic(void) {
         return;
     }
 
-    // Verify it's unmapped
     if (vmm_is_mapped(test_ctx, test_virt)) {
         debug_printf("[VMM] %[E]FAILED: Page still mapped after unmap%[D]\n");
         pmm_free(phys_page, 1);
@@ -1515,21 +1326,18 @@ void vmm_test_basic(void) {
     }
     debug_printf("[VMM] %[S]PASSED: Page unmapped successfully%[D]\n");
 
-    // Cleanup
     pmm_free(phys_page, 1);
     vmm_destroy_context(test_ctx);
 
-    // Test 5: Kernel heap allocation
     debug_printf("[VMM] Test 5: Kernel heap allocation...\n");
 
-    void* heap_ptr = vmalloc(8192); // 2 pages
-    
+    void* heap_ptr = vmalloc(8192);
+
     if (!heap_ptr) {
         debug_printf("[VMM] %[E]FAILED: vmalloc failed%[D]\n");
         return;
     }
 
-    // Try to write to it
     memset(heap_ptr, 0xAA, 8192);
     if (((uint8_t*)heap_ptr)[0] != 0xAA || ((uint8_t*)heap_ptr)[8191] != 0xAA) {
         debug_printf("[VMM] %[E]FAILED: Could not write to allocated memory%[D]\n");
@@ -1543,22 +1351,9 @@ void vmm_test_basic(void) {
 
     debug_printf("[VMM] %[S]All basic tests PASSED!%[D]\n");
 
-    // Print statistics
     vmm_print_stats();
     vmm_dump_context_stats(kernel_context);
 }
-// ============================================================================
-// PAGE FAULT HANDLING
-// ============================================================================
-
-// ============================================================================
-// CABIN MEMORY MODEL SUPPORT
-// ============================================================================
-// Cabin: Isolated virtual address space with fixed layout
-// 0x0000-0x0FFF: NULL trap (unmapped)
-// 0x1000: Notify Page (User write, Kernel read)
-// 0x2000: Result Page (User read, Kernel write)
-// 0x3000+: Code/Data/Heap/Stack
 
 vmm_context_t* vmm_create_cabin(uint64_t* notify_page_phys, uint64_t* result_page_phys) {
     if (!notify_page_phys || !result_page_phys) {
@@ -1566,14 +1361,12 @@ vmm_context_t* vmm_create_cabin(uint64_t* notify_page_phys, uint64_t* result_pag
         return NULL;
     }
 
-    // Create new context (address space)
     vmm_context_t* cabin_ctx = vmm_create_context();
     if (!cabin_ctx) {
         vmm_set_error("Failed to create Cabin context");
         return NULL;
     }
 
-    // Allocate physical pages for Notify and Result
     void* notify_phys = pmm_alloc(1);
     if (!notify_phys) {
         vmm_destroy_context(cabin_ctx);
@@ -1589,11 +1382,9 @@ vmm_context_t* vmm_create_cabin(uint64_t* notify_page_phys, uint64_t* result_pag
         return NULL;
     }
 
-    // Zero the allocated pages to ensure clean state
     memset(vmm_phys_to_virt((uintptr_t)notify_phys), 0, 4096);
     memset(vmm_phys_to_virt((uintptr_t)result_phys), 0, 4096);
 
-    // Setup NULL trap (0x0000-0x0FFF unmapped)
     if (vmm_setup_null_trap(cabin_ctx) != 0) {
         pmm_free(result_phys, 1);
         pmm_free(notify_phys, 1);
@@ -1602,7 +1393,6 @@ vmm_context_t* vmm_create_cabin(uint64_t* notify_page_phys, uint64_t* result_pag
         return NULL;
     }
 
-    // Map Notify Page at 0x1000
     if (vmm_map_notify_page(cabin_ctx, (uintptr_t)notify_phys) != 0) {
         pmm_free(result_phys, 1);
         pmm_free(notify_phys, 1);
@@ -1611,7 +1401,6 @@ vmm_context_t* vmm_create_cabin(uint64_t* notify_page_phys, uint64_t* result_pag
         return NULL;
     }
 
-    // Map Result Page at 0x2000
     if (vmm_map_result_page(cabin_ctx, (uintptr_t)result_phys) != 0) {
         pmm_free(result_phys, 1);
         pmm_free(notify_phys, 1);
@@ -1620,30 +1409,24 @@ vmm_context_t* vmm_create_cabin(uint64_t* notify_page_phys, uint64_t* result_pag
         return NULL;
     }
 
-    // Map CPU capabilities page at 0x7FFFF000 (read-only, before stack)
     if (g_cpu_caps_page_phys != 0) {
-        uint64_t flags = VMM_FLAG_PRESENT | VMM_FLAG_USER;  // Read-only for userspace
-        vmm_map_result_t result = vmm_map_page(cabin_ctx, BOX_CPU_CAPS_PAGE_ADDR, g_cpu_caps_page_phys, flags);
-        if (!result.success) {
+        uint64_t flags = VMM_FLAG_PRESENT | VMM_FLAG_USER;
+        vmm_map_result_t map_result = vmm_map_page(cabin_ctx, CPU_CAPS_PAGE_ADDR, g_cpu_caps_page_phys, flags);
+        if (!map_result.success) {
             debug_printf("[VMM] WARNING: Failed to map CPU caps page at 0x%lx: %s\n",
-                         BOX_CPU_CAPS_PAGE_ADDR, result.error_msg);
-            // Non-fatal error - continue without CPU caps page
+                         CPU_CAPS_PAGE_ADDR, map_result.error_msg);
         }
     }
 
-    // Output physical addresses for kernel access
     *notify_page_phys = (uint64_t)notify_phys;
     *result_page_phys = (uint64_t)result_phys;
 
-    // Return context (caller can get PML4 phys via cabin_ctx->pml4_phys for CR3)
     return cabin_ctx;
 }
 
 int vmm_map_notify_page(vmm_context_t* ctx, uintptr_t phys_page) {
     if (!ctx) return -1;
 
-    // Notify Page: User write, Kernel read
-    // User can write to notify kernel, kernel can read notifications
     uint64_t flags = VMM_FLAG_PRESENT | VMM_FLAG_WRITABLE | VMM_FLAG_USER;
 
     vmm_map_result_t result = vmm_map_page(ctx, VMM_CABIN_NOTIFY_PAGE, phys_page, flags);
@@ -1658,9 +1441,7 @@ int vmm_map_notify_page(vmm_context_t* ctx, uintptr_t phys_page) {
 int vmm_map_result_page(vmm_context_t* ctx, uintptr_t phys_page) {
     if (!ctx) return -1;
 
-    // Result Page: User read-write, Kernel read-write
-    // User needs to update head index in ResultRing after reading results
-    // Kernel writes results, user reads and updates head pointer
+    // user needs write access to update head index after reading results
     uint64_t flags = VMM_FLAG_PRESENT | VMM_FLAG_WRITABLE | VMM_FLAG_USER;
 
     vmm_map_result_t result = vmm_map_page(ctx, VMM_CABIN_RESULT_PAGE, phys_page, flags);
@@ -1674,13 +1455,8 @@ int vmm_map_result_page(vmm_context_t* ctx, uintptr_t phys_page) {
 
 int vmm_setup_null_trap(vmm_context_t* ctx) {
     if (!ctx) return -1;
-
-    // NULL trap zone (0x0000-0x0FFF) is left unmapped
-    // Any access will trigger page fault
-    // We don't need to explicitly map it - just ensure it's NOT mapped
-    // This is already the default state after vmm_create_context()
-
-    return 0;  // Success (nothing to do, already unmapped)
+    // 0x0000-0x0FFF is intentionally left unmapped; any access raises a page fault
+    return 0;
 }
 
 typedef struct {
@@ -1716,13 +1492,11 @@ typedef struct {
 #define PF_W       2
 #define PF_R       4
 
-// ELF identification constants
 #define ELFCLASS64   2
 #define ELFDATA2LSB  1
 #define ET_EXEC      2
 #define EM_X86_64    62
 
-// Max code region size: cabin code area (0x3000 .. stack base)
 #define VMM_CABIN_MAX_CODE_SIZE (VMM_USER_STACK_TOP - VMM_CABIN_CODE_START - (64 * 1024))
 
 int vmm_map_code_region(vmm_context_t* ctx, uintptr_t code_phys, uint64_t size) {
@@ -1733,7 +1507,6 @@ int vmm_map_code_region(vmm_context_t* ctx, uintptr_t code_phys, uint64_t size) 
 
     if (ehdr->e_ident[0] != 0x7F || ehdr->e_ident[1] != 'E' ||
         ehdr->e_ident[2] != 'L' || ehdr->e_ident[3] != 'F') {
-        // Raw flat binary — validate size before mapping
         if (size > VMM_CABIN_MAX_CODE_SIZE) {
             debug_printf("[VMM] ERROR: Flat binary too large (%llu bytes, max %llu)\n",
                          size, (uint64_t)VMM_CABIN_MAX_CODE_SIZE);
@@ -1743,7 +1516,6 @@ int vmm_map_code_region(vmm_context_t* ctx, uintptr_t code_phys, uint64_t size) 
         uint64_t pages = (size + VMM_PAGE_SIZE - 1) / VMM_PAGE_SIZE;
         if (pages < 1) pages = 1;
 
-        // Guard against integer overflow in page calculation
         if (pages > VMM_CABIN_MAX_CODE_SIZE / VMM_PAGE_SIZE) {
             debug_printf("[VMM] ERROR: Page count overflow in flat binary loader\n");
             return -1;
@@ -1761,27 +1533,23 @@ int vmm_map_code_region(vmm_context_t* ctx, uintptr_t code_phys, uint64_t size) 
         return 0;
     }
 
-    // ELF validation: class (64-bit only)
     if (ehdr->e_ident[4] != ELFCLASS64) {
         debug_printf("[VMM] ERROR: ELF is not 64-bit (class=%u, expected %u)\n",
                      ehdr->e_ident[4], ELFCLASS64);
         return -1;
     }
 
-    // ELF validation: little-endian
     if (ehdr->e_ident[5] != ELFDATA2LSB) {
         debug_printf("[VMM] ERROR: ELF is not little-endian (data=%u)\n", ehdr->e_ident[5]);
         return -1;
     }
 
-    // ELF validation: executable type
     if (ehdr->e_type != ET_EXEC) {
         debug_printf("[VMM] ERROR: ELF is not executable (type=%u, expected %u)\n",
                      ehdr->e_type, ET_EXEC);
         return -1;
     }
 
-    // ELF validation: x86_64 architecture
     if (ehdr->e_machine != EM_X86_64) {
         debug_printf("[VMM] ERROR: ELF is not x86_64 (machine=%u, expected %u)\n",
                      ehdr->e_machine, EM_X86_64);
@@ -1830,7 +1598,7 @@ int vmm_map_code_region(vmm_context_t* ctx, uintptr_t code_phys, uint64_t size) 
             for (int k = 0; k < mapped_seg_count; k++) {
                 pmm_free((void*)mapped_segs[k].phys, mapped_segs[k].pages);
             }
-            return -BOXOS_ERR_INVALID_ARGUMENT;
+            return -ERR_INVALID_ARGUMENT;
         }
 
         void* segment_phys_ptr = pmm_alloc(page_count);
@@ -1901,19 +1669,14 @@ int vmm_map_code_region(vmm_context_t* ctx, uintptr_t code_phys, uint64_t size) 
     return 0;
 }
 
-// ============================================================================
-// PAGE FAULT HANDLING
-// ============================================================================
-
-// Page fault error code bits
-#define PF_PRESENT   (1 << 0)  // 0 = not present, 1 = protection fault
-#define PF_WRITE     (1 << 1)  // 0 = read, 1 = write
-#define PF_USER      (1 << 2)  // 0 = kernel, 1 = user mode
-#define PF_RESERVED  (1 << 3)  // 1 = reserved bit set in page table
-#define PF_INSTR     (1 << 4)  // 1 = instruction fetch
+// page fault error code bits (Intel SDM Vol. 3A, Table 6-3)
+#define PF_PRESENT   (1 << 0)
+#define PF_WRITE     (1 << 1)
+#define PF_USER      (1 << 2)
+#define PF_RESERVED  (1 << 3)  // reserved bit set in page table entry
+#define PF_INSTR     (1 << 4)  // instruction fetch
 
 int vmm_handle_page_fault(uintptr_t fault_addr, uint64_t error_code) {
-    // Analyze fault
     bool present = error_code & PF_PRESENT;
     bool write = error_code & PF_WRITE;
     bool user = error_code & PF_USER;
@@ -1924,13 +1687,11 @@ int vmm_handle_page_fault(uintptr_t fault_addr, uint64_t error_code) {
     debug_printf("[VMM]   present=%d write=%d user=%d reserved=%d instr=%d\n",
             present, write, user, reserved, instr_fetch);
 
-    // Reserved bit violations are always fatal
     if (reserved) {
         debug_printf("[VMM] ERROR: Reserved bit violation - cannot handle\n");
         return -1;
     }
 
-    // Check for kernel stack overflow (guard page access)
     process_t* current = process_get_current();
     if (current && current->kernel_stack_guard_base) {
         uintptr_t guard_start = (uintptr_t)current->kernel_stack_guard_base;
@@ -1953,51 +1714,42 @@ int vmm_handle_page_fault(uintptr_t fault_addr, uint64_t error_code) {
         }
     }
 
-    // Check if fault is in user stack guard page range
     vmm_context_t* ctx = vmm_get_current_context();
     if (ctx && user) {
-        // Calculate guard page range for current process
         uint64_t stack_top = VMM_USER_STACK_TOP;
         uint64_t guard_base = stack_top - (CONFIG_USER_STACK_TOTAL_PAGES * VMM_PAGE_SIZE);
         uint64_t guard_end = guard_base + (CONFIG_USER_STACK_GUARD_PAGES * VMM_PAGE_SIZE);
 
         if (fault_addr >= guard_base && fault_addr < guard_end) {
             debug_printf("[VMM] ERROR: Stack overflow detected (guard page access at 0x%llx)\n", fault_addr);
-            return -1;  // Signal unrecoverable error -> kill process
+            return -1;
         }
     }
 
-    // If page is present, it's a protection fault
     if (present) {
         debug_printf("[VMM] ERROR: Protection fault - access denied\n");
         return -1;
     }
 
-    // Page not present - demand paging
     debug_printf("[VMM] Page not present - attempting demand paging\n");
 
-    // Reuse ctx from guard page check above (or get current context)
     if (!ctx) {
         ctx = kernel_context;
     }
 
-    // Align fault address to page boundary
     uintptr_t page_addr = fault_addr & ~(VMM_PAGE_SIZE - 1);
 
-    // Check if this is in kernel heap range (higher half)
     if (page_addr >= VMM_KERNEL_HEAP_BASE &&
         page_addr < VMM_KERNEL_HEAP_BASE + VMM_KERNEL_HEAP_SIZE) {
 
         debug_printf("[VMM] Demand paging: mapping kernel heap page at 0x%llx\n", page_addr);
 
-        // Allocate physical page
         void* phys_page = pmm_alloc(1);
         if (!phys_page) {
             debug_printf("[VMM] ERROR: Failed to allocate physical page\n");
             return -1;
         }
 
-        // Map the page
         uint64_t flags = VMM_FLAG_PRESENT | VMM_FLAG_WRITABLE;
         if (user) {
             flags |= VMM_FLAG_USER;
@@ -2011,10 +1763,10 @@ int vmm_handle_page_fault(uintptr_t fault_addr, uint64_t error_code) {
         }
 
         debug_printf("[VMM] SUCCESS: Demand paging successful\n");
-        return 0;  // Handled successfully
+        return 0;
     }
 
-    // Check if this is in low memory (0-256MB) — restore identity mapping
+    // restore identity mapping for low-memory faults caused by large page splitting
     if (page_addr < (256ULL * 1024 * 1024)) {
         debug_printf("[VMM] WARNING: Restoring identity mapping for 0x%llx\n", page_addr);
         uint64_t flags = VMM_FLAG_PRESENT | VMM_FLAG_WRITABLE;
@@ -2026,7 +1778,6 @@ int vmm_handle_page_fault(uintptr_t fault_addr, uint64_t error_code) {
         return 0;
     }
 
-    // Not in a valid range
     debug_printf("[VMM] ERROR: Fault address not in valid range (0x%llx)\n", fault_addr);
-    return -1;  // Cannot handle
+    return -1;
 }

@@ -139,7 +139,7 @@ int ata_dma_init(void) {
     debug_printf("[ATA DMA] PRD Table: virt=0x%p phys=0x%lx\n",
                  dma_state.prd_table_virt, dma_state.prd_table_phys);
 
-    if (!BOXOS_IS_32BIT_SAFE(dma_state.prd_table_phys)) {
+    if (!IS_32BIT_SAFE(dma_state.prd_table_phys)) {
         debug_printf("[ATA DMA] ERROR: PRD table above 4GB boundary\n");
         return -1;
     }
@@ -155,13 +155,11 @@ int ata_dma_init(void) {
 
     memset(dma_state.prd_table_virt, 0, 4096);
 
-    // Initialize single active request slot
     memset(&dma_state.active_request, 0, sizeof(ata_dma_request_t));
     dma_state.active_request.status = ATA_DMA_STATUS_FREE;
 
     dma_state.active_request_idx = 0xFF;
 
-    // Initialize atomic counters
     atomic_init_u32(&dma_state.total_requests, 0);
     atomic_init_u32(&dma_state.completed_requests, 0);
     atomic_init_u32(&dma_state.failed_requests, 0);
@@ -358,41 +356,33 @@ void ata_dma_irq_handler(void) {
     } else {
         req->status = ATA_DMA_STATUS_COMPLETED;
         atomic_fetch_add_u32(&dma_state.completed_requests, 1);
-
-        // Mark async_io request as completed with latency tracking
         async_io_mark_completed_with_latency(req->event_id, req->start_time);
 
         ATA_DMA_DEBUG("[ATA DMA] IRQ: Transfer completed for event_id=%u\n", req->event_id);
     }
 
-    // Create completion event
     Event completion_event;
     event_init(&completion_event, req->pid, req->event_id);
     completion_event.state = transfer_success ? EVENT_STATE_COMPLETED : EVENT_STATE_ERROR;
 
-    // Format response based on operation type
     if (transfer_success) {
         if (!req->is_write) {
-            // READ: copy data from DMA buffer to Event.data
             size_t copy_size = req->buffer_size;
             if (copy_size > EVENT_DATA_SIZE) {
                 copy_size = EVENT_DATA_SIZE;
             }
             memcpy(completion_event.data, (void*)req->buffer_phys, copy_size);
         } else {
-            // WRITE: format obj_write_response_t
             obj_write_response_t* resp = (obj_write_response_t*)completion_event.data;
             memset(resp, 0, sizeof(obj_write_response_t));
             resp->bytes_written = req->buffer_size;
 
-            // Calculate new file size
             uint64_t write_end = req->write_offset + req->buffer_size;
             resp->new_file_size = (write_end > req->original_file_size)
                                   ? write_end
                                   : req->original_file_size;
-            resp->error_code = BOXOS_OK;
+            resp->error_code = OK;
 
-            // Update TagFS metadata with new file size
             TagFSMetadata* meta = tagfs_get_metadata(req->file_id);
             if (meta && (meta->flags & TAGFS_FILE_ACTIVE)) {
                 if (resp->new_file_size > meta->size) {
@@ -404,18 +394,13 @@ void ata_dma_irq_handler(void) {
         }
     }
 
-    // Push completion event to EventRing
     if (!event_ring_push(kernel_event_ring, &completion_event)) {
         debug_printf("[ATA DMA] CRITICAL: EventRing full (system overload), marking failed immediately\n");
         atomic_fetch_add_u32(&dma_state.failed_requests, 1);
         async_io_mark_failed(req->event_id);
-
-        // CRITICAL FIX: Mark request as completed to prevent timeout check from re-processing
-        // We already freed the buffer below (line 387), so timeout MUST skip this request
         req->status = ATA_DMA_STATUS_ERROR_DMA;
     }
 
-    // CRITICAL: Free DMA buffer in ALL paths
     pmm_free((void*)req->buffer_phys, 1);
     req->status = ATA_DMA_STATUS_FREE;
     dma_state.active_request_idx = 0xFF;
@@ -456,7 +441,6 @@ void ata_dma_check_timeouts(void) {
         atomic_fetch_add_u32(&dma_state.timeout_count, 1);
         atomic_fetch_add_u32(&dma_state.failed_requests, 1);
 
-        // Mark async_io request as failed
         async_io_mark_failed(req->event_id);
 
         Event timeout_event;
@@ -467,7 +451,6 @@ void ata_dma_check_timeouts(void) {
             debug_printf("[ATA DMA] CRITICAL: EventRing full during timeout handling\n");
         }
 
-        // CRITICAL: Free DMA buffer
         pmm_free((void*)req->buffer_phys, 1);
         req->status = ATA_DMA_STATUS_FREE;
         dma_state.active_request_idx = 0xFF;
@@ -480,7 +463,7 @@ void ata_dma_check_timeouts(void) {
 
 int ata_read_sectors_dma(uint8_t is_master, uint32_t lba, uint8_t count, uint8_t* buffer) {
     if (!dma_state.available || dma_state.active_request_idx != 0xFF) {
-        // DMA unavailable or queue full → fallback to PIO
+        // DMA unavailable or queue full - fallback to PIO
         ATA_DMA_DEBUG("[ATA DMA] Falling back to PIO\n");
         return ata_read_sectors(is_master, lba, count, buffer);
     }
@@ -729,7 +712,7 @@ void ata_dma_print_stats(void) {
     ata_dma_stats_t stats;
     ata_dma_get_stats(&stats);
 
-    debug_printf("\n=== ATA DMA Statistics ===\n");
+    debug_printf("ATA DMA Statistics:\n");
     debug_printf("DMA Available:       %s\n", stats.dma_available ? "YES" : "NO");
     debug_printf("Bus Master Base:     0x%04X\n", stats.bus_master_base);
     debug_printf("Total Requests:      %u\n", stats.total_requests);
@@ -742,13 +725,11 @@ void ata_dma_print_stats(void) {
         uint32_t success_rate = (stats.completed_requests * 100) / stats.total_requests;
         debug_printf("Success Rate:        %u%%\n", success_rate);
     }
-    debug_printf("==========================\n\n");
 }
 
 bool ata_dma_is_idle(void) {
-    // Compiler barrier BEFORE read to force fresh load from memory
-    // Prevents compiler from caching active_request_idx in register across calls
-    asm volatile("" ::: "memory");  // Compiler barrier (no hardware cost)
+    // Compiler barrier to prevent caching active_request_idx in a register across calls
+    asm volatile("" ::: "memory");
     uint8_t idx = dma_state.active_request_idx;
     return idx == 0xFF;
 }
@@ -770,14 +751,13 @@ int ata_dma_start_async_transfer(async_io_request_t* req) {
 
     spin_lock(&dma_state.lock);
 
-    // Check queue depth (PIIX4 limitation: only 1 active transfer)
+    // PIIX4 limitation: only 1 active transfer at a time
     if (dma_state.active_request_idx != 0xFF) {
         spin_unlock(&dma_state.lock);
         ATA_DMA_DEBUG("[ATA DMA ASYNC] Queue full (PIIX4 limitation)\n");
         return -1;
     }
 
-    // Allocate DMA buffer
     void* dma_buffer = pmm_alloc(1);
     if (!dma_buffer) {
         spin_unlock(&dma_state.lock);
@@ -785,7 +765,6 @@ int ata_dma_start_async_transfer(async_io_request_t* req) {
         return -1;
     }
 
-    // For WRITE: copy data to DMA buffer
     if (req->op == ASYNC_IO_OP_WRITE && req->buffer_virt) {
         size_t copy_size = req->sector_count * ATA_SECTOR_SIZE;
         if (copy_size > 168) {
@@ -800,7 +779,6 @@ int ata_dma_start_async_transfer(async_io_request_t* req) {
         mfence();
     }
 
-    // Fill active_request (single slot)
     ata_dma_request_t* dma_req = &dma_state.active_request;
     memset(dma_req, 0, sizeof(ata_dma_request_t));
 
@@ -810,26 +788,24 @@ int ata_dma_start_async_transfer(async_io_request_t* req) {
     dma_req->sector_count = req->sector_count;
     dma_req->is_master = req->is_master;
     dma_req->is_write = (req->op == ASYNC_IO_OP_WRITE) ? 1 : 0;
-    dma_req->buffer_virt = NULL;  // Data goes to Event.data, not user buffer
+    dma_req->buffer_virt = NULL;
     dma_req->buffer_phys = (uintptr_t)dma_buffer;
     dma_req->buffer_size = req->sector_count * ATA_SECTOR_SIZE;
     dma_req->status = ATA_DMA_STATUS_PENDING;
     dma_req->retry_count = 0;
 
-    // Copy write-specific metadata for IRQ handler
     dma_req->file_id = req->file_id;
     dma_req->write_offset = req->write_offset;
     dma_req->original_file_size = req->original_file_size;
 
-    // Latency tracking: For WRITE, measure from DMA start (after memcpy).
-    // For READ, measure from original submit (full async latency).
+    // For WRITE: measure DMA transfer time only (memcpy already done above).
+    // For READ: measure full async latency from original submit.
     if (req->op == ASYNC_IO_OP_WRITE) {
-        dma_req->start_time = rdtsc();  // Measure DMA transfer time only
+        dma_req->start_time = rdtsc();
     } else {
-        dma_req->start_time = req->submit_time;  // Measure full async latency
+        dma_req->start_time = req->submit_time;
     }
 
-    // Setup PRD table
     if (ata_dma_setup_prd(dma_req) != 0) {
         pmm_free(dma_buffer, 1);
         dma_req->status = ATA_DMA_STATUS_FREE;
@@ -838,7 +814,6 @@ int ata_dma_start_async_transfer(async_io_request_t* req) {
         return -1;
     }
 
-    // Send DMA command
     if (ata_dma_send_command(dma_req) != 0) {
         pmm_free(dma_buffer, 1);
         dma_req->status = ATA_DMA_STATUS_FREE;
@@ -847,9 +822,8 @@ int ata_dma_start_async_transfer(async_io_request_t* req) {
         return -1;
     }
 
-    // Mark as active
     dma_req->status = ATA_DMA_STATUS_IN_PROGRESS;
-    dma_state.active_request_idx = 0;  // Mark slot 0 as active
+    dma_state.active_request_idx = 0;
     atomic_fetch_add_u32(&dma_state.total_requests, 1);
 
     spin_unlock(&dma_state.lock);

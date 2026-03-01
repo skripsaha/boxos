@@ -1,15 +1,11 @@
 #ifndef KTYPES_H
 #define KTYPES_H
 
-// Replaces stdint.h, stddef.h, stdbool.h — no stdlib dependencies.
-
 #ifndef NULL
 #define NULL ((void*)0)
 #endif
 
-// C23 and later have bool as a keyword, older C standards need typedef
 #ifndef __cplusplus
-    // Check if bool is already defined (C23+)
     #if !defined(bool) && (!defined(__STDC_VERSION__) || __STDC_VERSION__ < 202300L)
         typedef _Bool bool;
     #endif
@@ -22,7 +18,6 @@
         #define false 0
     #endif
 #else
-    // C++ has built-in bool
     #ifndef true
         #define true  true
     #endif
@@ -37,23 +32,18 @@ typedef unsigned long size_t;
 typedef long          ptrdiff_t;
 typedef long          ssize_t;
 
-// For compatibility
 typedef unsigned long uintptr_t;
 typedef long          intptr_t;
 
-// 8-bit types
 typedef signed char        int8_t;
 typedef unsigned char      uint8_t;
 
-// 16-bit types
 typedef signed short       int16_t;
 typedef unsigned short     uint16_t;
 
-// 32-bit types
 typedef signed int         int32_t;
 typedef unsigned int       uint32_t;
 
-// 64-bit types
 typedef signed long long   int64_t;
 typedef unsigned long long uint64_t;
 
@@ -78,22 +68,18 @@ typedef uint64_t  uint_fast64_t;
 typedef int64_t   intmax_t;
 typedef uint64_t  uintmax_t;
 
-// 8-bit limits
 #define INT8_MIN   (-128)
 #define INT8_MAX   (127)
 #define UINT8_MAX  (255U)
 
-// 16-bit limits
 #define INT16_MIN  (-32768)
 #define INT16_MAX  (32767)
 #define UINT16_MAX (65535U)
 
-// 32-bit limits
 #define INT32_MIN  (-2147483647 - 1)
 #define INT32_MAX  (2147483647)
 #define UINT32_MAX (4294967295U)
 
-// 64-bit limits
 #define INT64_MIN  (-9223372036854775807LL - 1)
 #define INT64_MAX  (9223372036854775807LL)
 #define UINT64_MAX (18446744073709551615ULL)
@@ -128,12 +114,11 @@ typedef uint64_t  uintmax_t;
 
 #define __LITTLE_ENDIAN 1234
 #define __BIG_ENDIAN    4321
-#define __BYTE_ORDER    __LITTLE_ENDIAN  // x86-64 is little-endian
+#define __BYTE_ORDER    __LITTLE_ENDIAN
 
-typedef uint64_t physaddr_t;  // Physical address
-typedef uint64_t virtaddr_t;  // Virtual address
+typedef uint64_t physaddr_t;
+typedef uint64_t virtaddr_t;
 
-// For register access
 typedef volatile uint8_t  vu8;
 typedef volatile uint16_t vu16;
 typedef volatile uint32_t vu32;
@@ -143,14 +128,12 @@ typedef volatile uint64_t vu64;
 
 #define ARRAY_SIZE(arr) (sizeof(arr) / sizeof((arr)[0]))
 
-// Bit manipulation
 #define BIT(n)                (1ULL << (n))
 #define BIT_SET(val, bit)     ((val) |= BIT(bit))
 #define BIT_CLEAR(val, bit)   ((val) &= ~BIT(bit))
 #define BIT_TOGGLE(val, bit)  ((val) ^= BIT(bit))
 #define BIT_CHECK(val, bit)   (((val) >> (bit)) & 1)
 
-// STATIC_ASSERT is a legacy alias for _Static_assert
 #define STATIC_ASSERT(expr, msg) _Static_assert(expr, msg)
 
 #endif // KTYPES_H
