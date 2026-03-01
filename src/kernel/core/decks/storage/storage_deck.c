@@ -538,6 +538,19 @@ static int handle_obj_create(Event *event)
         tag_count += parse_tag_list(req->tags, tag_ptrs + tag_count, 16 - tag_count, tag_buffer + tag_count);
     }
 
+    const char *ctx_tags[TAGFS_MAX_CONTEXT_TAGS];
+    int ctx_count = tagfs_context_get_tags(event->pid, ctx_tags, TAGFS_MAX_CONTEXT_TAGS);
+    for (int i = 0; i < ctx_count && tag_count < 16; i++)
+    {
+        size_t clen = strlen(ctx_tags[i]);
+        if (clen > 31)
+            clen = 31;
+        memcpy(tag_buffer[tag_count], ctx_tags[i], clen);
+        tag_buffer[tag_count][clen] = '\0';
+        tag_ptrs[tag_count] = tag_buffer[tag_count];
+        tag_count++;
+    }
+
     uint32_t file_id;
     int result = tagfs_create_file(req->filename, tag_count > 0 ? tag_ptrs : NULL, tag_count, &file_id);
 
