@@ -40,6 +40,9 @@ TAGFS_FILE_ACTIVE       equ 1
 TAGFS_SUPERBLOCK_ADDR   equ 0x9100
 TAGFS_METADATA_ADDR     equ 0x9300
 
+KERNEL_HDR_MAGIC        equ 0x4E52454B  ; "KERN" little-endian
+KERNEL_HDR_MAGIC_HI     equ 0x4C45      ; "EL" little-endian
+
 dw STAGE2_SIGNATURE
 
 start_stage2:
@@ -371,12 +374,26 @@ load_kernel_tagfs:
     jc .tagfs_error
 
     call tagfs_find_kernel
-    jc .kernel_not_found
+    jc .try_header_fallback
 
     call tagfs_load_kernel_file
     jc .load_error
 
     mov si, msg_kernel_loaded_tagfs
+    call print_string_16
+    ret
+
+.try_header_fallback:
+    mov si, msg_kernel_tag_not_found
+    call print_string_16
+
+    call tagfs_find_kernel_by_header
+    jc .kernel_not_found
+
+    call tagfs_load_kernel_file
+    jc .load_error
+
+    mov si, msg_kernel_loaded_header
     call print_string_16
     ret
 
@@ -666,6 +683,129 @@ tagfs_load_kernel_file:
     ret
 
 .load_error:
+    pop si
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    stc
+    ret
+
+; Fallback: find kernel by scanning file data for KERNEL header magic
+; Iterates metadata entries, reads first data sector of each active file,
+; checks for "KERNEL" magic at offset 2.
+; Returns: CF=0 on success (kernel_start_block, kernel_block_count, tagfs_data_start set), CF=1 on error
+tagfs_find_kernel_by_header:
+    push ax
+    push bx
+    push cx
+    push dx
+    push si
+    push di
+    push es
+
+    ; Get data_start_sector from superblock (already at 0x9100)
+    mov ax, 0x910
+    mov es, ax
+    xor bx, bx
+    mov eax, [es:bx + 32]          ; data_start_sector
+    mov [tagfs_data_start], eax
+    xor ax, ax
+    mov es, ax
+
+    mov cx, 64                      ; scan up to 64 metadata entries
+
+.hdr_scan_loop:
+    push cx
+
+    ; Calculate metadata sector number
+    mov ax, 64
+    sub ax, cx
+    add ax, TAGFS_METADATA_START
+    mov [dap_tagfs_metadata + 8], ax
+    mov dword [dap_tagfs_metadata + 10], 0
+
+    ; Read metadata sector
+    mov si, dap_tagfs_metadata
+    mov ah, 0x42
+    mov dl, BOOT_DISK
+    int 0x13
+    jc .hdr_scan_next
+
+    ; Check metadata magic
+    mov ax, 0x930
+    mov es, ax
+    xor bx, bx
+    mov eax, [es:bx]
+    cmp eax, TAGFS_METADATA_MAGIC
+    jne .hdr_scan_next_clean
+
+    ; Check file is active
+    mov al, [es:bx + 8]
+    test al, TAGFS_FILE_ACTIVE
+    jz .hdr_scan_next_clean
+
+    ; Save start_block and block_count from metadata
+    mov eax, [es:bx + 20]
+    mov [kernel_start_block], eax
+    mov eax, [es:bx + 24]
+    mov [kernel_block_count], eax
+
+    ; Calculate data sector: data_start + start_block * 8
+    mov eax, [kernel_start_block]
+    shl eax, 3
+    add eax, [tagfs_data_start]
+
+    ; Restore ES before disk read
+    xor bx, bx
+    mov es, bx
+
+    ; Read first sector of this file's data into 0x9300 buffer
+    mov [dap_tagfs_metadata + 8], eax
+    mov dword [dap_tagfs_metadata + 10], 0
+    mov si, dap_tagfs_metadata
+    mov ah, 0x42
+    mov dl, BOOT_DISK
+    int 0x13
+    jc .hdr_scan_next
+
+    ; Check for KERNEL magic at offset 2
+    mov ax, 0x930
+    mov es, ax
+    xor bx, bx
+    cmp dword [es:bx + 2], KERNEL_HDR_MAGIC
+    jne .hdr_scan_next_clean
+    cmp word [es:bx + 6], KERNEL_HDR_MAGIC_HI
+    jne .hdr_scan_next_clean
+
+    ; Found kernel by header!
+    xor ax, ax
+    mov es, ax
+
+    pop cx
+    pop es
+    pop di
+    pop si
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    clc
+    ret
+
+.hdr_scan_next_clean:
+    xor ax, ax
+    mov es, ax
+
+.hdr_scan_next:
+    pop cx
+    dec cx
+    jnz .hdr_scan_loop
+
+    xor ax, ax
+    mov es, ax
+    pop es
+    pop di
     pop si
     pop dx
     pop cx
@@ -1346,3 +1486,5 @@ msg_no_long_mode      db '[ERROR] 64-bit mode not supported!', 13, 10, 0
 msg_entering_protected db 'Entering protected mode...', 13, 10, 0
 msg_page_table_safe   db '[OK] Page table location validated (0x820000)', 13, 10, 0
 msg_page_table_unsafe db '[ERROR] Page tables at 0x820000 in unusable memory! Need 8MB+ RAM', 13, 10, 0
+msg_kernel_tag_not_found  db '[WARN] Kernel tag not found, searching by header...', 13, 10, 0
+msg_kernel_loaded_header  db '[OK] Kernel loaded via header scan', 13, 10, 0

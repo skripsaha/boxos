@@ -14,6 +14,11 @@ global clear_screen_vga
 global hide_cursor
 
 _start:
+    jmp short .past_header          ; 2 bytes — skip header
+    db 'KERNEL'                     ; 6 bytes — magic identifier
+    dd 1                            ; 4 bytes — header version
+    times 20 db 0                   ; 20 bytes — reserved
+.past_header:
     mov al, 'K'
     mov dx, 0x3f8
     out dx, al
