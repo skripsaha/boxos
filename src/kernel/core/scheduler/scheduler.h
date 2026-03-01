@@ -43,7 +43,7 @@ typedef struct {
 
 void scheduler_init(void);
 
-void scheduler_reap_zombies(void);
+void scheduler_cleanup_finished(void);
 
 process_t* scheduler_select_next(void);
 
@@ -58,7 +58,7 @@ void scheduler_clear_use_context(void);
 bool scheduler_matches_use_context(process_t* proc);
 int32_t scheduler_calculate_score(process_t* proc);
 void scheduler_audit_fairness(void);
-void scheduler_audit_zombies(void);
+void scheduler_audit_finished(void);
 
 scheduler_state_t* scheduler_get_state(void);
 

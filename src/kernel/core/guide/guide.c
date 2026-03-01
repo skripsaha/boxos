@@ -51,7 +51,7 @@ void guide_init_wait_queue(void)
     debug_printf("[GUIDE] EventRing wait queue initialized\n");
 }
 
-void guide_block_on_event_ring(process_t *proc)
+void guide_wait_on_event_ring(process_t *proc)
 {
     if (!proc)
         return;
@@ -61,11 +61,11 @@ void guide_block_on_event_ring(process_t *proc)
 
     spin_lock(&event_ring_waiters.lock);
 
-    proc->next_blocked = NULL;
+    proc->next_waiting = NULL;
 
     if (event_ring_waiters.tail)
     {
-        event_ring_waiters.tail->next_blocked = proc;
+        event_ring_waiters.tail->next_waiting = proc;
         event_ring_waiters.tail = proc;
     }
     else
@@ -96,16 +96,16 @@ void guide_wakeup_waiters(void)
     {
         process_t *proc = *current_ptr;
 
-        if (process_get_state(proc) == PROC_BLOCKED &&
-            proc->block_reason == PROC_BLOCK_EVENT_RING_FULL)
+        if (process_get_state(proc) == PROC_WAITING &&
+            proc->wait_reason == WAIT_RING_FULL)
         {
             if (available > 0)
             {
-                proc->block_reason = PROC_BLOCK_NONE;
-                process_set_state(proc, PROC_READY);
+                proc->wait_reason = WAIT_NONE;
+                process_set_state(proc, PROC_WORKING);
 
-                *current_ptr = proc->next_blocked;
-                proc->next_blocked = NULL;
+                *current_ptr = proc->next_waiting;
+                proc->next_waiting = NULL;
 
                 event_ring_waiters.count--;
                 available--;
@@ -115,14 +115,14 @@ void guide_wakeup_waiters(void)
             }
             else
             {
-                current_ptr = &proc->next_blocked;
+                current_ptr = &proc->next_waiting;
             }
         }
         else
         {
             // process terminated or otherwise invalid: remove and drop orphaned ref
-            *current_ptr = proc->next_blocked;
-            proc->next_blocked = NULL;
+            *current_ptr = proc->next_waiting;
+            proc->next_waiting = NULL;
             event_ring_waiters.count--;
             cleanup_count++;
 

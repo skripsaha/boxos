@@ -85,10 +85,10 @@ int execution_deck_handler(Event* event) {
         atomic_store_u8(&proc->result_overflow_flag, 1);
         atomic_fetch_add_u32(&proc->result_overflow_count, 1);
 
-        proc->block_reason = PROC_BLOCK_RESULT_OVERFLOW;
-        proc->block_start_time = rdtsc();
+        proc->wait_reason = WAIT_OVERFLOW;
+        proc->wait_start_time = rdtsc();
 
-        process_set_state(proc, PROC_BLOCKED);
+        process_set_state(proc, PROC_WAITING);
 
         result_entry_t overflow_entry;
         overflow_entry.source = ROUTE_SOURCE_KERNEL;
@@ -148,11 +148,11 @@ int execution_deck_handler(Event* event) {
     atomic_store_u8(&result_page->notification_flag, 1);
 
     process_state_t state = process_get_state(proc);
-    if (state == PROC_READY || state == PROC_RUNNING || state == PROC_BLOCKED) {
+    if (state == PROC_WORKING || state == PROC_WAITING) {
         atomic_store_u8((volatile uint8_t*)&proc->result_there, 1);
         __sync_synchronize();
-        if (state != PROC_RUNNING) {
-            process_set_state(proc, PROC_READY);
+        if (state != PROC_WORKING) {
+            process_set_state(proc, PROC_WORKING);
         }
     }
 

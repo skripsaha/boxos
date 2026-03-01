@@ -14,7 +14,7 @@
  *   4. process_t->state_lock         — per-process state
  *
  * process_destroy() releases scheduler_lock before any resource cleanup.
- * scheduler_reap_zombies() releases scheduler_lock before calling process_destroy().
+ * scheduler_cleanup_finished() releases scheduler_lock before calling process_destroy().
  * process_cleanup_deferred() runs without scheduler_lock or process_lock.
  */
 
@@ -25,12 +25,12 @@
 struct process_t;
 
 typedef enum {
-    PROC_BLOCK_NONE = 0,
-    PROC_BLOCK_WAITING_RESULT,
-    PROC_BLOCK_EVENT_RING_FULL,
-    PROC_BLOCK_IO,
-    PROC_BLOCK_RESULT_OVERFLOW
-} process_block_reason_t;
+    WAIT_NONE = 0,
+    WAIT_RESULT,
+    WAIT_RING_FULL,
+    WAIT_IO,
+    WAIT_OVERFLOW
+} wait_reason_t;
 
 #define PROCESS_CLEANUP_QUEUE_SIZE 256
 
@@ -43,12 +43,12 @@ typedef struct {
 } process_cleanup_queue_t;
 
 typedef enum {
-    PROC_NEW = 0,
-    PROC_READY,
-    PROC_RUNNING,
-    PROC_BLOCKED,
-    PROC_ZOMBIE,
-    PROC_TERMINATED
+    PROC_CREATED = 0,
+    PROC_WORKING,
+    PROC_WAITING,
+    PROC_STOPPED,
+    PROC_DONE,
+    PROC_CRASHED
 } process_state_t;
 
 typedef struct {
@@ -101,9 +101,9 @@ typedef struct process_t {
     uint32_t parent_pid;
     uint64_t buf_heap_next;  // next free virtual address for buffer mapping
 
-    volatile process_block_reason_t block_reason;
-    struct process_t* next_blocked;   // wait queue linkage (EventRing overflow)
-    uint64_t block_start_time;        // TSC timestamp when blocked (0 = not blocked)
+    volatile wait_reason_t wait_reason;
+    struct process_t* next_waiting;   // wait queue linkage (EventRing overflow)
+    uint64_t wait_start_time;         // TSC timestamp when waiting (0 = not waiting)
 
     struct process_t* next;
 } process_t;

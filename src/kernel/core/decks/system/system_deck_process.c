@@ -203,11 +203,11 @@ int system_deck_proc_kill(Event* event) {
     // For self-exit, use ZOMBIE state (allows in-flight events to complete)
     // For kill, use TERMINATED (forceful termination)
     if (is_self_exit) {
-        process_set_state(proc, PROC_ZOMBIE);
-        debug_printf("[SYSTEM_DECK] PROC_KILL: Marked PID %u as ZOMBIE (graceful exit)\n", target_pid);
+        process_set_state(proc, PROC_DONE);
+        debug_printf("[SYSTEM_DECK] PROC_KILL: Marked PID %u as DONE (graceful exit)\n", target_pid);
     } else {
-        process_set_state(proc, PROC_TERMINATED);
-        debug_printf("[SYSTEM_DECK] PROC_KILL: Marked PID %u as TERMINATED (forced kill)\n", target_pid);
+        process_set_state(proc, PROC_CRASHED);
+        debug_printf("[SYSTEM_DECK] PROC_KILL: Marked PID %u as CRASHED (forced kill)\n", target_pid);
     }
 
     __sync_synchronize();
@@ -440,7 +440,7 @@ int system_deck_proc_exec(Event* event) {
     }
     __sync_synchronize();
 
-    process_set_state(proc, PROC_READY);
+    process_set_state(proc, PROC_WORKING);
 
     proc_exec_response_t response;
     memset(&response, 0, sizeof(response));
@@ -514,6 +514,14 @@ int system_deck_tag_add(Event* event) {
         return -1;
     }
 
+    // Tag "stopped" freezes the process
+    if (strcmp(tag_event.tag, "stopped") == 0) {
+        process_state_t state = process_get_state(proc);
+        if (state == PROC_WORKING || state == PROC_CREATED) {
+            process_set_state(proc, PROC_STOPPED);
+        }
+    }
+
     tag_modify_response_t response;
     memset(&response, 0, sizeof(response));
     response.error_code = SYSTEM_ERR_SUCCESS;
@@ -581,6 +589,14 @@ int system_deck_tag_remove(Event* event) {
         debug_printf("[SYSTEM_DECK] TAG_REMOVE: Failed to remove tag\n");
         deliver_response(event, SYSTEM_ERR_INVALID_ARGS, NULL, 0);
         return -1;
+    }
+
+    // Removing "stopped" tag unfreezes the process
+    if (strcmp(tag_event.tag, "stopped") == 0) {
+        process_state_t state = process_get_state(proc);
+        if (state == PROC_STOPPED) {
+            process_set_state(proc, PROC_WORKING);
+        }
     }
 
     tag_modify_response_t response;

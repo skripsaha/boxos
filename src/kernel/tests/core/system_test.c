@@ -782,8 +782,8 @@ void test_system_deck_ctx_use(void) {
 
     result = system_deck_ctx_use(&bonus_event);
     if (result == 0) {
-        test_proc->state = PROC_READY;
-        other_proc->state = PROC_READY;
+        test_proc->state = PROC_WORKING;
+        other_proc->state = PROC_WORKING;
 
         extern int32_t scheduler_calculate_score(process_t* proc);
         int32_t score_match = scheduler_calculate_score(test_proc);

@@ -183,13 +183,13 @@ void irq_handler(interrupt_frame_t* frame) {
 
             process_t* current = sched->current_process;
 
-            if (current && process_get_state(current) == PROC_RUNNING) {
+            if (current && process_get_state(current) == PROC_WORKING) {
                 scheduler_yield_from_interrupt(frame);
-            } else if (!current || process_get_state(current) != PROC_RUNNING) {
+            } else if (!current || process_get_state(current) != PROC_WORKING) {
                 process_t* next = scheduler_select_next();
                 if (next) {
                     sched->current_process = next;
-                    process_set_state(next, PROC_RUNNING);
+                    if (process_get_state(next) == PROC_CREATED) process_set_state(next, PROC_WORKING);
                     next->last_run_time = sched->total_ticks;
 
                     tss_set_rsp0((uint64_t)next->kernel_stack_top);
@@ -242,7 +242,7 @@ void syscall_handler(interrupt_frame_t* frame) {
     spin_unlock(&sched_state->scheduler_lock);
 
     process_state_t state = process_get_state(proc);
-    if (state != PROC_RUNNING && state != PROC_BLOCKED) {
+    if (state != PROC_WORKING && state != PROC_WAITING) {
         process_ref_dec(proc);
         frame->rax = (uint64_t)-1;
         return;
@@ -274,7 +274,6 @@ void syscall_handler(interrupt_frame_t* frame) {
         frame->rax = 0;
 
         context_save_from_frame(proc, frame);
-        process_set_state(proc, PROC_READY);
         process_ref_dec(proc);
 
         scheduler_yield_from_interrupt(frame);
@@ -332,12 +331,12 @@ void syscall_handler(interrupt_frame_t* frame) {
 
         context_save_from_frame(proc, frame);
 
-        proc->block_reason = PROC_BLOCK_EVENT_RING_FULL;
-        proc->block_start_time = rdtsc();
+        proc->wait_reason = WAIT_RING_FULL;
+        proc->wait_start_time = rdtsc();
 
-        guide_block_on_event_ring(proc);
+        guide_wait_on_event_ring(proc);
 
-        process_set_state(proc, PROC_BLOCKED);
+        process_set_state(proc, PROC_WAITING);
         process_ref_dec(proc);
 
         scheduler_yield_from_interrupt(frame);
@@ -353,7 +352,7 @@ void syscall_handler(interrupt_frame_t* frame) {
     frame->rax = event.event_id;
 
     context_save_from_frame(proc, frame);
-    process_set_state(proc, PROC_BLOCKED);
+    process_set_state(proc, PROC_WAITING);
 
     // Decrement before scheduler_yield to avoid ref leak if process is destroyed
     process_ref_dec(proc);

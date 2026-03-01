@@ -43,7 +43,7 @@ static int system_deck_yield(Event* event) {
     process_ref_inc(proc);
 
     process_state_t state = process_get_state(proc);
-    if (state != PROC_RUNNING) {
+    if (state != PROC_WORKING) {
         process_ref_dec(proc);
         return -1;
     }

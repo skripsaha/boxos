@@ -85,7 +85,7 @@ int32_t scheduler_calculate_score(process_t* proc) {
         score += result_bonus;
     }
 
-    if (proc->block_reason == PROC_BLOCK_RESULT_OVERFLOW) {
+    if (proc->wait_reason == WAIT_OVERFLOW) {
         score += 200;  // highest priority to recover from overflow
     }
 
@@ -120,21 +120,19 @@ int32_t scheduler_calculate_score(process_t* proc) {
     return score;
 }
 
-void scheduler_reap_zombies(void) {
+void scheduler_cleanup_finished(void) {
     process_t* proc = process_get_first();
 
-    // read current_process under short lock, not held during the full loop
     spin_lock(&sched.scheduler_lock);
     process_t* current = sched.current_process;
     spin_unlock(&sched.scheduler_lock);
-    // scheduler_lock is now FREE — process_destroy() can safely acquire it
 
     while (proc) {
         process_t* next = proc->next;
         process_state_t state = process_get_state(proc);
         uint32_t refs = process_ref_count(proc);
 
-        if (state == PROC_ZOMBIE && refs == 0 && proc != current) {
+        if (state == PROC_DONE && refs == 0 && proc != current) {
             process_destroy_safe(proc);
         }
 
@@ -158,12 +156,12 @@ process_t* scheduler_select_next(void) {
 
         process_state_t state = process_get_state(proc);
 
-        if (state == PROC_TERMINATED || state == PROC_ZOMBIE) {
+        if (state == PROC_CRASHED || state == PROC_DONE) {
             proc = proc->next;
             continue;
         }
 
-        if (state == PROC_READY) {
+        if (state == PROC_WORKING || state == PROC_CREATED) {
             int32_t score = scheduler_calculate_score(proc);
             if (score > best_score) {
                 best_score = score;
@@ -181,13 +179,12 @@ process_t* scheduler_select_next(void) {
 }
 
 void scheduler_yield(void) {
-    scheduler_reap_zombies();
+    scheduler_cleanup_finished();
 
     spin_lock(&sched.scheduler_lock);
     process_t* current = sched.current_process;
 
-    if (current && process_get_state(current) == PROC_RUNNING) {
-        process_set_state(current, PROC_READY);
+    if (current && process_get_state(current) == PROC_WORKING) {
         if (!process_is_idle(current) && current->result_there) {
             atomic_store_u8((volatile uint8_t*)&current->result_there, 0);
         }
@@ -197,7 +194,6 @@ void scheduler_yield(void) {
 
     if (next) {
         sched.current_process = next;
-        process_set_state(next, PROC_RUNNING);
         next->last_run_time = sched.total_ticks;
     } else {
         sched.current_process = NULL;
@@ -211,8 +207,7 @@ void scheduler_yield_cooperative(void) {
 
     process_t* current = sched.current_process;
 
-    if (current && process_get_state(current) == PROC_RUNNING) {
-        process_set_state(current, PROC_READY);
+    if (current && process_get_state(current) == PROC_WORKING) {
         if (!process_is_idle(current) && current->result_there) {
             atomic_store_u8((volatile uint8_t*)&current->result_there, 0);
         }
@@ -221,10 +216,7 @@ void scheduler_yield_cooperative(void) {
 
         if (next) {
             sched.current_process = next;
-            process_set_state(next, PROC_RUNNING);
             next->last_run_time = sched.total_ticks;
-        } else {
-            process_set_state(current, PROC_RUNNING);
         }
     }
 
@@ -240,12 +232,11 @@ void scheduler_yield_from_interrupt(void* frame_ptr) {
     process_t* current = sched.current_process;
     spin_unlock(&sched.scheduler_lock);
 
-    if (current && process_get_state(current) == PROC_RUNNING) {
-        // skip preemption if no other READY process exists
+    if (current && process_get_state(current) == PROC_WORKING) {
         bool other_ready = false;
         process_t* scan = process_get_first();
         while (scan) {
-            if (scan != current && process_get_state(scan) == PROC_READY) {
+            if (scan != current && process_get_state(scan) == PROC_WORKING) {
                 other_ready = true;
                 break;
             }
@@ -258,7 +249,6 @@ void scheduler_yield_from_interrupt(void* frame_ptr) {
         }
 
         context_save_from_frame(current, frame);
-        process_set_state(current, PROC_READY);
 
         if (!process_is_idle(current) && current->result_there) {
             __sync_synchronize();
@@ -274,10 +264,10 @@ void scheduler_yield_from_interrupt(void* frame_ptr) {
             process_state_t state = process_get_state(proc);
             uint32_t refs = process_ref_count(proc);
 
-            if (state == PROC_TERMINATED && refs == 0) {
+            if (state == PROC_CRASHED && refs == 0) {
                 process_destroy_safe(proc);
-            } else if (state == PROC_ZOMBIE && refs == 0) {
-                process_set_state(proc, PROC_TERMINATED);
+            } else if (state == PROC_DONE && refs == 0) {
+                process_set_state(proc, PROC_CRASHED);
                 process_destroy_safe(proc);
             }
 
@@ -285,11 +275,11 @@ void scheduler_yield_from_interrupt(void* frame_ptr) {
         }
     }
 
-    // audit zombies every 100 ticks (~1 second at 100 Hz)
+    // audit finished processes every 100 ticks (~1 second at 100 Hz)
     static uint64_t tick_count = 0;
     tick_count++;
     if ((tick_count % SCHEDULER_CRITICAL_STARVATION_TICKS) == 0) {
-        scheduler_audit_zombies();
+        scheduler_audit_finished();
     }
 
     process_t* next = scheduler_select_next();
@@ -342,7 +332,9 @@ void scheduler_yield_from_interrupt(void* frame_ptr) {
     spin_lock(&sched.scheduler_lock);
     sched.current_process = next;
     spin_unlock(&sched.scheduler_lock);
-    process_set_state(next, PROC_RUNNING);
+    if (process_get_state(next) == PROC_CREATED) {
+        process_set_state(next, PROC_WORKING);
+    }
     next->last_run_time = sched.total_ticks;
 
     if (current && current != next) {
@@ -380,10 +372,10 @@ void scheduler_tick(void) {
             process_state_t state = process_get_state(proc);
             uint32_t refs = process_ref_count(proc);
 
-            if (state == PROC_TERMINATED && refs == 0) {
+            if (state == PROC_CRASHED && refs == 0) {
                 process_destroy_safe(proc);
-            } else if (state == PROC_ZOMBIE && refs == 0) {
-                process_set_state(proc, PROC_TERMINATED);
+            } else if (state == PROC_DONE && refs == 0) {
+                process_set_state(proc, PROC_CRASHED);
                 process_destroy_safe(proc);
             }
 
@@ -396,8 +388,8 @@ void scheduler_tick(void) {
     while (proc) {
         process_t* next = proc->next;
 
-        if (proc->block_reason == PROC_BLOCK_EVENT_RING_FULL &&
-            proc->block_start_time != 0) {
+        if (proc->wait_reason == WAIT_RING_FULL &&
+            proc->wait_start_time != 0) {
 
             uint64_t tsc_khz = cpu_get_tsc_freq_khz();
             if (tsc_khz == 0) {
@@ -406,13 +398,13 @@ void scheduler_tick(void) {
             }
 
             uint64_t now = rdtsc();
-            if (now < proc->block_start_time) {
-                proc->block_start_time = now;
+            if (now < proc->wait_start_time) {
+                proc->wait_start_time = now;
                 proc = next;
                 continue;
             }
 
-            uint64_t elapsed_tsc = now - proc->block_start_time;
+            uint64_t elapsed_tsc = now - proc->wait_start_time;
             uint64_t elapsed_ms = elapsed_tsc / tsc_khz;
 
             if (elapsed_ms > CONFIG_EVENTRING_BLOCK_TIMEOUT_MS) {
@@ -432,12 +424,11 @@ void scheduler_tick(void) {
             continue;
         }
 
-        if (proc->block_reason == PROC_BLOCK_RESULT_OVERFLOW &&
-            proc->block_start_time != 0) {
+        if (proc->wait_reason == WAIT_OVERFLOW &&
+            proc->wait_start_time != 0) {
 
             uint64_t tsc_khz = cpu_get_tsc_freq_khz();
             if (tsc_khz == 0) {
-                // TSC not calibrated — tick-based fallback (~50 ticks = 500 ms at 100 Hz)
                 if (proc->last_run_time == 0) {
                     proc->last_run_time = sched.total_ticks;
                     proc = next;
@@ -463,23 +454,22 @@ void scheduler_tick(void) {
             }
 
             uint64_t now = rdtsc();
-            if (now < proc->block_start_time) {
-                // TSC wrap-around — reset baseline and log once per interval
+            if (now < proc->wait_start_time) {
                 static uint64_t last_tsc_overflow_log = 0;
                 uint64_t current_tick = sched.total_ticks;
 
                 if ((current_tick - last_tsc_overflow_log) > SCHEDULER_CRITICAL_STARVATION_TICKS) {
                     debug_printf("[SCHEDULER] ANOMALY: TSC wrap-around detected for PID %u (now=%llu, start=%llu)\n",
-                                 proc->pid, now, proc->block_start_time);
+                                 proc->pid, now, proc->wait_start_time);
                     last_tsc_overflow_log = current_tick;
                 }
 
-                proc->block_start_time = now;
+                proc->wait_start_time = now;
                 proc = next;
                 continue;
             }
 
-            uint64_t elapsed_tsc = now - proc->block_start_time;
+            uint64_t elapsed_tsc = now - proc->wait_start_time;
             uint64_t elapsed_ms = elapsed_tsc / tsc_khz;
 
             if (elapsed_ms > 500) {
@@ -503,7 +493,7 @@ void scheduler_tick(void) {
     process_t* current = sched.current_process;
     spin_unlock(&sched.scheduler_lock);
 
-    if (current && process_get_state(current) == PROC_RUNNING) {
+    if (current && process_get_state(current) == PROC_WORKING) {
         scheduler_yield();
     }
 }
@@ -555,7 +545,7 @@ void scheduler_audit_fairness(void) {
     while (proc) {
         process_state_t state = process_get_state(proc);
 
-        if (state == PROC_READY || state == PROC_RUNNING) {
+        if (state == PROC_WORKING) {
             uint64_t ticks_since_run = sched.total_ticks - proc->last_run_time;
 
             if (ticks_since_run > SCHEDULER_SEVERE_STARVATION_TICKS) {
@@ -577,9 +567,9 @@ void scheduler_audit_fairness(void) {
     }
 }
 
-void scheduler_audit_zombies(void) {
+void scheduler_audit_finished(void) {
     static uint32_t warn_count = 0;
-    const uint32_t MAX_ZOMBIE_WARNINGS = 5;
+    const uint32_t MAX_DONE_WARNINGS = 5;
 
     process_t* proc = process_get_first();
 
@@ -587,13 +577,13 @@ void scheduler_audit_zombies(void) {
         process_state_t state = process_get_state(proc);
         uint32_t refs = process_ref_count(proc);
 
-        if (state == PROC_ZOMBIE && refs > 0) {
-            if (warn_count < MAX_ZOMBIE_WARNINGS) {
-                debug_printf("[SCHEDULER] WARNING: PID %u stuck in ZOMBIE with ref_count=%u\n",
+        if (state == PROC_DONE && refs > 0) {
+            if (warn_count < MAX_DONE_WARNINGS) {
+                debug_printf("[SCHEDULER] WARNING: PID %u stuck in DONE with ref_count=%u\n",
                              proc->pid, refs);
                 warn_count++;
-                if (warn_count == MAX_ZOMBIE_WARNINGS) {
-                    debug_printf("[SCHEDULER] Suppressing further zombie warnings\n");
+                if (warn_count == MAX_DONE_WARNINGS) {
+                    debug_printf("[SCHEDULER] Suppressing further warnings\n");
                 }
             }
         }
