@@ -12,12 +12,12 @@
 static void test_tag_query(void) {
     kprintf("\n[TEST 1] TAG_QUERY for kernel file\n");
 
-    const char* query_tags[] = {"type:kernel"};
+    const char* query_tags[] = {"kernel"};
     uint32_t file_ids[100];
 
     int count = tagfs_query_files(query_tags, 1, file_ids, 100);
     if (count >= 0) {
-        debug_printf("[TEST 1] PASS: Found %d file(s) with tag 'type:kernel'\n", count);
+        debug_printf("[TEST 1] PASS: Found %d file(s) with tag 'kernel'\n", count);
         if (count > 0) {
             debug_printf("[TEST 1]   File ID: %u\n", file_ids[0]);
         }

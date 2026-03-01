@@ -313,7 +313,7 @@ void print_usage(const char* prog) {
     fprintf(stderr, "  tags         - Tag string: \"key1:value1,key2:value2\"\n");
     fprintf(stderr, "\n");
     fprintf(stderr, "Example:\n");
-    fprintf(stderr, "  %s disk.img 400 401 1425 kernel.bin \"type:kernel,boot:true\"\n", prog);
+    fprintf(stderr, "  %s disk.img 400 401 1425 kernel.bin \"system\"\n", prog);
     fprintf(stderr, "\n");
 }
 
