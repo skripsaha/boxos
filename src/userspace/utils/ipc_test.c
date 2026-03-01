@@ -11,6 +11,7 @@ int main(void) {
 
     println("=== BoxOS IPC + Multitasking Demo ===");
     println("Launching proca and procb...");
+    io_flush();
 
     int pid_a = proc_exec("proca");
     if (pid_a < 0) {
@@ -30,14 +31,23 @@ int main(void) {
     printf("procb -> PID %d\n", pid_b);
     println("Receiving IPC messages:");
     println("------------------------");
+    io_flush();
 
     int received = 0;
+    int exits = 0;
 
     while (received < 20) {
         result_entry_t entry;
         bool got = receive_wait(&entry, 500);
         if (!got) {
             break;
+        }
+
+        // Skip exit notifications from child processes
+        if (entry.size >= 1 && entry.payload[0] == 0xFE) {
+            exits++;
+            if (exits >= 2) break;
+            continue;
         }
 
         char buf[RESULT_PAYLOAD_SIZE + 1];

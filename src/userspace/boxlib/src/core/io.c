@@ -88,6 +88,7 @@ void println(const char* str) {
             io_buf_append(str, len);
         }
         io_buf_putc('\n');
+        io_flush();
         return;
     }
     if (str) print_raw(str);
