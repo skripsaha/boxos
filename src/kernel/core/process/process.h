@@ -112,6 +112,7 @@ typedef struct process_t {
     void* kernel_stack_guard_base;
 
     bool started;
+    uint32_t parent_pid;
 
     // Blocking state
     volatile process_block_reason_t block_reason;
