@@ -503,40 +503,14 @@ tagfs_find_kernel:
     cmp ax, 512
     jae .next_tag
 
-    lea si, [di + 1]        ; tag.key
-
-    mov ax, di
-    add ax, 5
-    cmp ax, 512
-    jae .next_tag
+    ; tag.key starts at offset di+1
+    lea si, [di + 1]
 
     mov ax, es
     push ds
     mov ds, ax
 
-    mov al, [si]
-    cmp al, 't'
-    jne .next_tag_pop
-    mov al, [si+1]
-    cmp al, 'y'
-    jne .next_tag_pop
-    mov al, [si+2]
-    cmp al, 'p'
-    jne .next_tag_pop
-    mov al, [si+3]
-    cmp al, 'e'
-    jne .next_tag_pop
-    mov al, [si+4]
-    test al, al
-    jnz .next_tag_pop
-
-    lea si, [di + 12]
-
-    mov ax, di
-    add ax, 19
-    cmp ax, 512
-    jae .next_tag_pop
-
+    ; Match key = "kernel" (system tag, no value check needed)
     mov al, [si]
     cmp al, 'k'
     jne .next_tag_pop

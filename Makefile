@@ -238,7 +238,7 @@ $(IMAGE): $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(SHELL_BIN) $(PROCA_BIN) $(
 	@dd if=$(KERNEL_BIN) of=$@ bs=512 seek=$(KERNEL_START_SECTOR) conv=notrunc status=none
 	@echo "  Creating TagFS (superblock=1034, metadata=1035, data=3086)..."
 	@$(TAGFS_TOOL) $@ 1034 1035 3086 \
-		$(KERNEL_BIN) "type:kernel,system,boot:true" \
+		$(KERNEL_BIN) "system" \
 		$(SHELL_BIN)  "utility,system" \
 		$(PROCA_BIN)  "app" \
 		$(PROCB_BIN)  "app" \
