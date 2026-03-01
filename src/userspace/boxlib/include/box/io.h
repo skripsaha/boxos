@@ -14,6 +14,7 @@ void println(const char* str);
 int printf(const char* fmt, ...);
 void clear(void);
 void color(uint8_t c);
+void io_flush(void);
 
 int readline(char* buffer, size_t max_len);
 int getchar(void);

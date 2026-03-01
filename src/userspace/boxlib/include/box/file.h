@@ -39,4 +39,6 @@ int context_clear(void);
 int fwrite_all(uint32_t file_id, const void* buffer, size_t total_size);
 int fread_all(uint32_t file_id, void* buffer, size_t max_size, size_t* bytes_read);
 
+int find_file_by_name(const char* filename, uint32_t* file_ids, file_info_t* out_infos, size_t max);
+
 #endif // BOX_FILE_H

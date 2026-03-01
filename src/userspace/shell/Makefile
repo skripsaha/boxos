@@ -32,14 +32,7 @@ BOXLIB_START = ../build/boxlib_start.o
 
 # Source files
 CORE_SRCS = shell.c parser.c executor.c
-CMD_SRCS = commands/cmd_help.c commands/cmd_exit.c commands/cmd_clear.c \
-           commands/cmd_create.c commands/cmd_show.c commands/cmd_files.c \
-           commands/cmd_tag.c commands/cmd_untag.c commands/cmd_name.c \
-           commands/cmd_trash.c commands/cmd_erase.c commands/cmd_use.c \
-           commands/cmd_me.c commands/cmd_info.c commands/cmd_say.c \
-           commands/cmd_reboot.c commands/cmd_bye.c \
-           commands/cmd_defrag.c commands/cmd_fsck.c \
-           commands/cmd_ipc_test.c
+CMD_SRCS = commands/cmd_use.c commands/cmd_exit.c commands/cmd_clear.c
 
 SRCS = $(CORE_SRCS) $(CMD_SRCS)
 OBJS = $(SRCS:.c=.o)

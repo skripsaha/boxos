@@ -1,20 +1,25 @@
-#include "commands.h"
 #include "box/io.h"
+#include "box/ipc.h"
 #include "box/file.h"
 #include "box/string.h"
+#include "box/system.h"
 
+int main(void) {
+    int argc;
+    char argv[16][64];
+    receive_args(&argc, argv, 16);
 
-int cmd_erase(int argc, char* argv[]) {
     if (argc < 2) {
         println("Usage: erase <filename|trashed>");
-        return -1;
+        exit(1);
+        return 1;
     }
 
     if (strcmp(argv[1], "trashed") == 0) {
         uint32_t all_files[256];
         int total = query(NULL, all_files, 256);
 
-        if (total < 0) { println("Error: Failed to query files"); return -1; }
+        if (total < 0) { println("Error: Failed to query files"); exit(1); return 1; }
 
         int deleted = 0;
         for (int i = 0; i < total; i++) {
@@ -27,6 +32,7 @@ int cmd_erase(int argc, char* argv[]) {
         }
 
         printf("Deleted %d trashed files\n", deleted);
+        exit(0);
         return 0;
     }
 
@@ -34,8 +40,8 @@ int cmd_erase(int argc, char* argv[]) {
     file_info_t infos[4];
     int count = find_file_by_name(argv[1], matches, infos, 4);
 
-    if (count <= 0) { println("Error: File not found"); return -1; }
-    if (count > 1) { println("Error: Ambiguous filename"); return -1; }
+    if (count <= 0) { println("Error: File not found"); exit(1); return 1; }
+    if (count > 1) { println("Error: Ambiguous filename"); exit(1); return 1; }
 
     int has_trashed_tag = 0;
     for (uint8_t i = 0; i < infos[0].tag_count; i++) {
@@ -47,14 +53,17 @@ int cmd_erase(int argc, char* argv[]) {
 
     if (!has_trashed_tag) {
         println("Error: File must be trashed first (use 'trash' command)");
-        return -1;
+        exit(1);
+        return 1;
     }
 
     if (delete(matches[0]) != 0) {
         println("Error: Failed to delete file");
-        return -1;
+        exit(1);
+        return 1;
     }
 
     println("File deleted");
+    exit(0);
     return 0;
 }

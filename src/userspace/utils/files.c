@@ -1,10 +1,14 @@
-#include "commands.h"
-#include "../shell.h"
 #include "box/io.h"
+#include "box/ipc.h"
 #include "box/file.h"
 #include "box/string.h"
+#include "box/system.h"
 
-int cmd_files(int argc, char* argv[]) {
+int main(void) {
+    int argc;
+    char argv[16][64];
+    receive_args(&argc, argv, 16);
+
     char query_tags[256];
     query_tags[0] = '\0';
 
@@ -24,9 +28,9 @@ int cmd_files(int argc, char* argv[]) {
     uint32_t file_ids[256];
     int count = query((argc > 1) ? query_tags : NULL, file_ids, 256);
 
-    if (count < 0) { println("Error: Failed to query files"); return -1; }
+    if (count < 0) { println("Error: Failed to query files"); exit(1); return 1; }
     if (count > 256) { println("Warning: Too many files, showing first 256"); count = 256; }
-    if (count == 0) { println("No files found"); return 0; }
+    if (count == 0) { println("No files found"); exit(0); return 0; }
 
     println("Files:");
 
@@ -80,5 +84,6 @@ int cmd_files(int argc, char* argv[]) {
         println("]");
     }
 
+    exit(0);
     return 0;
 }

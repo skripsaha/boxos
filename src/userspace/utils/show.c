@@ -1,20 +1,25 @@
-#include "commands.h"
 #include "box/io.h"
+#include "box/ipc.h"
 #include "box/file.h"
 #include "box/string.h"
+#include "box/system.h"
 
+int main(void) {
+    int argc;
+    char argv[16][64];
+    receive_args(&argc, argv, 16);
 
-int cmd_show(int argc, char* argv[]) {
     if (argc < 2) {
         println("Usage: show <filename>");
-        return -1;
+        exit(1);
+        return 1;
     }
 
     uint32_t matches[16];
     int count = find_file_by_name(argv[1], matches, NULL, 16);
 
-    if (count < 0) { println("Error: Failed to query files"); return -1; }
-    if (count == 0) { println("Error: File not found"); return -1; }
+    if (count < 0) { println("Error: Failed to query files"); exit(1); return 1; }
+    if (count == 0) { println("Error: File not found"); exit(1); return 1; }
 
     if (count > 1) {
         println("Multiple files found:");
@@ -25,11 +30,13 @@ int cmd_show(int argc, char* argv[]) {
             }
         }
         println("Error: Ambiguous name (use file_id)");
-        return -1;
+        exit(1);
+        return 1;
     }
 
     printf("Content of %s:\n", argv[1]);
     println("(File content display not yet implemented)");
 
+    exit(0);
     return 0;
 }

@@ -3,6 +3,9 @@
 #include "executor.h"
 #include "box/io.h"
 #include "box/string.h"
+#include "box/ipc.h"
+#include "box/result.h"
+#include "box/system.h"
 
 static shell_state_t g_shell_state;
 
@@ -12,6 +15,14 @@ void shell_init(void)
     memset(&g_shell_state, 0, sizeof(shell_state_t));
     g_shell_state.running = true;
     memcpy(g_shell_state.prompt, "~ ", 3);
+
+    int display_pid = proc_exec("display");
+    if (display_pid > 0) {
+        result_entry_t entry;
+        if (receive_wait(&entry, 2000)) {
+            io_set_mode(IO_MODE_IPC);
+        }
+    }
 
     clear();
     println("BoxOS Shell v1.0");

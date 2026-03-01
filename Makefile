@@ -95,6 +95,16 @@ PROCA_BIN = $(APPS_DIR)/proca.elf
 PROCB_BIN = $(APPS_DIR)/procb.elf
 TODAY_BIN = $(APPS_DIR)/today.elf
 
+# Display server ELF
+DISPLAY_DIR = $(USERSPACE_DIR)/display
+DISPLAY_BIN = $(DISPLAY_DIR)/display.elf
+
+# Utility ELF binaries
+UTILS_DIR = $(USERSPACE_DIR)/utils
+UTIL_NAMES = help create show files tag untag name trash erase \
+             me info say reboot bye defrag fsck ipc_test
+UTIL_ELFS = $(addprefix $(UTILS_DIR)/,$(addsuffix .elf,$(UTIL_NAMES)))
+
 # ==== FINAL BINARIES ====
 KERNEL_BIN   = $(BUILDDIR)/kernel.bin
 KERNEL_ELF   = $(BUILDDIR)/kernel.elf
@@ -180,6 +190,17 @@ $(PROCA_BIN) $(PROCB_BIN) $(TODAY_BIN): $(USERSPACE_DIR)/boxlib/libbox.a
 	@echo "procb.elf: $$(stat -f%z $(PROCB_BIN) 2>/dev/null || stat -c%s $(PROCB_BIN) 2>/dev/null) bytes"
 	@echo "today.elf: $$(stat -f%z $(TODAY_BIN) 2>/dev/null || stat -c%s $(TODAY_BIN) 2>/dev/null) bytes"
 
+# Build display server
+$(DISPLAY_BIN): $(USERSPACE_DIR)/boxlib/libbox.a
+	@echo "Building display server..."
+	@cd $(DISPLAY_DIR) && $(MAKE)
+	@echo "display.elf: $$(stat -f%z $(DISPLAY_BIN) 2>/dev/null || stat -c%s $(DISPLAY_BIN) 2>/dev/null) bytes"
+
+# Build utilities
+$(UTIL_ELFS): $(USERSPACE_DIR)/boxlib/libbox.a
+	@echo "Building utilities..."
+	@cd $(UTILS_DIR) && $(MAKE)
+
 $(SHELL_ELF): $(SHELL_BIN)
 	@echo "Shell ELF: $@ ($$(stat -f%z $@ 2>/dev/null || stat -c%s $@ 2>/dev/null) bytes)"
 
@@ -227,7 +248,7 @@ $(KERNEL_ELF): $(KERNEL_ENTRY_OBJ) $(C_OBJS) $(ASM_OBJS) $(SHELL_EMBED)
 
 
 # ==== DISK IMAGES ====
-$(IMAGE): $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(SHELL_BIN) $(PROCA_BIN) $(PROCB_BIN) $(TODAY_BIN) $(TAGFS_TOOL)
+$(IMAGE): $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(SHELL_BIN) $(PROCA_BIN) $(PROCB_BIN) $(TODAY_BIN) $(DISPLAY_BIN) $(UTIL_ELFS) $(TAGFS_TOOL)
 	@echo "Creating disk image (10MB)..."
 	@dd if=/dev/zero of=$@ bs=512 count=20480 status=none
 	@echo "  Writing Stage1 (sector 0, 512 bytes)..."
@@ -238,11 +259,29 @@ $(IMAGE): $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(SHELL_BIN) $(PROCA_BIN) $(
 	@dd if=$(KERNEL_BIN) of=$@ bs=512 seek=$(KERNEL_START_SECTOR) conv=notrunc status=none
 	@echo "  Creating TagFS (superblock=1034, metadata=1035, data=3086)..."
 	@$(TAGFS_TOOL) $@ 1034 1035 3086 \
-		$(KERNEL_BIN) "system" \
-		$(SHELL_BIN)  "utility,system" \
-		$(PROCA_BIN)  "app" \
-		$(PROCB_BIN)  "app" \
-		$(TODAY_BIN)  "app,utility"
+		$(KERNEL_BIN)   "system" \
+		$(SHELL_BIN)    "utility,system" \
+		$(PROCA_BIN)    "app" \
+		$(PROCB_BIN)    "app" \
+		$(TODAY_BIN)    "app,utility" \
+		$(DISPLAY_BIN)  "display,system,utility" \
+		$(UTILS_DIR)/help.elf    "utility" \
+		$(UTILS_DIR)/create.elf  "utility,storage" \
+		$(UTILS_DIR)/show.elf    "utility,storage" \
+		$(UTILS_DIR)/files.elf   "utility,storage" \
+		$(UTILS_DIR)/tag.elf     "utility,storage" \
+		$(UTILS_DIR)/untag.elf   "utility,storage" \
+		$(UTILS_DIR)/name.elf    "utility,storage" \
+		$(UTILS_DIR)/trash.elf   "utility,storage" \
+		$(UTILS_DIR)/erase.elf   "utility,storage" \
+		$(UTILS_DIR)/me.elf      "utility" \
+		$(UTILS_DIR)/info.elf    "utility,storage" \
+		$(UTILS_DIR)/say.elf     "utility" \
+		$(UTILS_DIR)/reboot.elf  "utility,system" \
+		$(UTILS_DIR)/bye.elf     "utility,system" \
+		$(UTILS_DIR)/defrag.elf  "utility,storage" \
+		$(UTILS_DIR)/fsck.elf    "utility,storage" \
+		$(UTILS_DIR)/ipc_test.elf "utility"
 	@echo "Disk image created: $(IMAGE)"
 
 $(FLOPPY_IMG): $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN)
@@ -316,6 +355,8 @@ clean:
 	@cd $(USERSPACE_DIR) && $(MAKE) clean
 	@cd $(SHELL_DIR) && $(MAKE) clean
 	@cd $(APPS_DIR) && $(MAKE) clean
+	@cd $(DISPLAY_DIR) && $(MAKE) clean
+	@cd $(UTILS_DIR) && $(MAKE) clean
 	@cd $(USERSPACE_DIR)/boxlib && $(MAKE) clean
 
 install-deps:
