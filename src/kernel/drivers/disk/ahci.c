@@ -775,9 +775,11 @@ int ahci_init(void) {
 
     ahci_ctrl.hba_phys = bar5 & 0xFFFFFFF0;
 
-    if (!IS_32BIT_SAFE(ahci_ctrl.hba_phys)) {
-        debug_printf("[AHCI] BAR5 above 4GB (0x%lx) - not supported\n", ahci_ctrl.hba_phys);
-        return -1;
+    // 64-bit BAR: bits[2:1]=10 means 64-bit, high 32 bits in BAR6
+    if ((bar5 & 0x6) == 0x4) {
+        uint32_t bar5_hi = pci_read_bar(&ahci_ctrl.pci_dev, 5 + 1);
+        ahci_ctrl.hba_phys |= ((uint64_t)bar5_hi << 32);
+        debug_printf("[AHCI] 64-bit BAR5: 0x%lx\n", ahci_ctrl.hba_phys);
     }
 
     ahci_ctrl.hba_mem = (ahci_hba_mem_t*)vmm_map_mmio(ahci_ctrl.hba_phys,
@@ -793,9 +795,9 @@ int ahci_init(void) {
 
     ahci_ctrl.cap = ahci_ctrl.hba_mem->cap;
 
-    if (ahci_ctrl.cap & AHCI_CAP_S64A) {
-        debug_printf("[AHCI] WARNING: Controller supports 64-bit DMA (not implemented yet)\n");
-        ahci_ctrl.s64a_support = true;
+    ahci_ctrl.s64a_support = (ahci_ctrl.cap & AHCI_CAP_S64A) != 0;
+    if (ahci_ctrl.s64a_support) {
+        debug_printf("[AHCI] 64-bit DMA addressing enabled\n");
     }
 
     ahci_ctrl.ncq_support = (ahci_ctrl.cap & AHCI_CAP_SNCQ) != 0;
@@ -875,8 +877,9 @@ void ahci_test_read(void) {
 
     uintptr_t dma_phys = (uintptr_t)dma_buffer;
     if (!ahci_ctrl.s64a_support && !IS_32BIT_SAFE(dma_phys)) {
-        debug_printf("[AHCI] Test READ: DMA buffer above 4GB (0x%lx) but controller lacks 64-bit support\n", dma_phys);
+        debug_printf("[AHCI] Test READ: DMA buffer above 4GB (0x%lx), allocating below 4GB\n", dma_phys);
         pmm_free(dma_buffer, 1);
+        // Controller lacks 64-bit support; cannot use this buffer
         return;
     }
 

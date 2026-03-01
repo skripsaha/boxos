@@ -6,7 +6,8 @@
 // bits 7-6 of lead byte: follow byte count (0=1 byte total, 1=2, 2=3, 3=4)
 // bits 5-0 of lead byte: low nibble of length
 // following bytes: high nibbles
-// TODO(v1.1): Add sanity check for unrealistic lengths (> 1MB)
+#define AML_MAX_SANE_PKG_LENGTH (1024 * 1024)  // 1MB sanity limit
+
 uint32_t decode_pkg_length(uint8_t* aml, uint32_t* bytes_consumed) {
     uint8_t lead_byte = aml[0];
     uint8_t follow_count = (lead_byte >> 6) & 0x03;
@@ -21,6 +22,12 @@ uint32_t decode_pkg_length(uint8_t* aml, uint32_t* bytes_consumed) {
 
     for (uint8_t i = 0; i < follow_count; i++) {
         length |= ((uint32_t)aml[1 + i]) << (4 + 8 * i);
+    }
+
+    if (length > AML_MAX_SANE_PKG_LENGTH) {
+        debug_printf("[ACPI] WARNING: Package length %u exceeds sanity limit (%u), clamping\n",
+                     length, AML_MAX_SANE_PKG_LENGTH);
+        length = AML_MAX_SANE_PKG_LENGTH;
     }
 
     return length;

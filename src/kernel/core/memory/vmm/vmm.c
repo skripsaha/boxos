@@ -634,7 +634,9 @@ volatile void* vmm_map_mmio(uintptr_t phys_addr, size_t size, uint64_t flags) {
     }
 
     // block mapping if range overlaps E820 USABLE RAM to prevent accidental MMIO over managed RAM
-    if (pmm_is_usable_ram(phys_addr, size)) {
+    // Exception: legacy BIOS area (<1MB) contains ACPI tables, EBDA, BIOS ROM that need mapping
+    bool is_legacy_bios = (phys_addr + size <= 0x100000);
+    if (!is_legacy_bios && pmm_is_usable_ram(phys_addr, size)) {
         vmm_set_error("vmm_map_mmio: physical address overlaps USABLE RAM");
         debug_printf("[VMM] ERROR: vmm_map_mmio phys=0x%llx size=0x%llx overlaps USABLE RAM from E820\n",
                      phys_addr, (uint64_t)size);

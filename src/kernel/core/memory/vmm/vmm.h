@@ -187,8 +187,8 @@ static inline pte_t vmm_make_pte(uintptr_t phys_addr, uint64_t flags) {
     uint64_t max_phys = (1ULL << vmm_maxphyaddr);
 
     if (phys_addr >= max_phys) {
-        // programming error — caller should validate; mask and continue
-        // TODO: panic() in debug builds
+        debug_printf("[VMM] ERROR: phys_addr 0x%lx exceeds MAXPHYADDR (%u bits, max 0x%lx)\n",
+                     phys_addr, vmm_maxphyaddr, max_phys);
     }
 
     uintptr_t masked_phys = phys_addr & vmm_get_addr_mask();
