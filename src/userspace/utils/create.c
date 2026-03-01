@@ -1,13 +1,18 @@
-#include "commands.h"
-#include "../shell.h"
 #include "box/io.h"
+#include "box/ipc.h"
 #include "box/file.h"
 #include "box/string.h"
+#include "box/system.h"
 
-int cmd_create(int argc, char* argv[]) {
+int main(void) {
+    int argc;
+    char argv[16][64];
+    receive_args(&argc, argv, 16);
+
     if (argc < 2) {
         println("Usage: create <filename> [tags...]");
-        return -1;
+        exit(1);
+        return 1;
     }
 
     char tags_buf[256];
@@ -28,9 +33,11 @@ int cmd_create(int argc, char* argv[]) {
 
     if (file_id < 0) {
         println("Error: Failed to create file");
-        return -1;
+        exit(1);
+        return 1;
     }
 
     printf("Created file: %s\n", argv[1]);
+    exit(0);
     return 0;
 }

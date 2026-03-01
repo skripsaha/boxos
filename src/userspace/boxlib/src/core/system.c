@@ -1,5 +1,7 @@
 #include "box/system.h"
 #include "box/notify.h"
+#include "box/ipc.h"
+#include "box/io.h"
 #include "box/chain.h"
 #include "box/result.h"
 #include "box/string.h"
@@ -38,7 +40,13 @@ int proc_info(uint16_t pid, proc_info_t* info) {
 }
 
 void exit(uint32_t exit_code) {
-    (void)exit_code;
+    io_flush();
+
+    notify_page_t* np = notify_page();
+    if (np->parent_pid != 0) {
+        uint8_t msg[2] = {0xFE, (uint8_t)(exit_code & 0xFF)};
+        send(np->parent_pid, msg, 2);
+    }
 
     proc_kill(0);
     notify();

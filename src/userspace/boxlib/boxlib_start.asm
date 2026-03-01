@@ -11,6 +11,7 @@
 section .text
 
 extern main
+extern exit
 
 global _start
 
@@ -24,11 +25,9 @@ _start:
 
     call main
 
-    ; exit with return code (NOTIFY_EXIT = 0x10)
-    mov rdi, rax
-    mov rsi, rax
-    mov rdi, 0x10
-    int 0x80
+    ; exit with return code via C exit() — sends parent notification
+    mov edi, eax
+    call exit
 
 .halt:
     hlt

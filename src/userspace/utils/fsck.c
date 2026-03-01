@@ -1,16 +1,18 @@
-#include "commands.h"
 #include "box/io.h"
+#include "box/ipc.h"
 #include "box/system.h"
 
-int cmd_fsck(int argc, char* argv[]) {
-    (void)argc;
-    (void)argv;
+int main(void) {
+    int argc;
+    char argv[16][64];
+    receive_args(&argc, argv, 16);
 
     int score = fragmentation();
 
     if (score < 0) {
         println("Error: Failed to get fragmentation score");
-        return -1;
+        exit(1);
+        return 1;
     }
 
     println("Filesystem Health Check:");
@@ -22,5 +24,6 @@ int cmd_fsck(int argc, char* argv[]) {
     else if (score < 60) println("  Status: Fair (consider defragmentation)");
     else println("  Status: Poor (defragmentation recommended)");
 
+    exit(0);
     return 0;
 }

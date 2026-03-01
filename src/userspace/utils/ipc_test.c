@@ -1,13 +1,13 @@
-#include "commands.h"
 #include "box/io.h"
-#include "box/system.h"
 #include "box/ipc.h"
 #include "box/result.h"
 #include "box/string.h"
+#include "box/system.h"
 
-int cmd_ipc_test(int argc, char* argv[]) {
-    (void)argc;
-    (void)argv;
+int main(void) {
+    int argc;
+    char argv[16][64];
+    receive_args(&argc, argv, 16);
 
     println("=== BoxOS IPC + Multitasking Demo ===");
     println("Launching proca and procb...");
@@ -15,13 +15,15 @@ int cmd_ipc_test(int argc, char* argv[]) {
     int pid_a = proc_exec("proca");
     if (pid_a < 0) {
         println("Error: could not launch proca (not in TagFS?)");
-        return -1;
+        exit(1);
+        return 1;
     }
 
     int pid_b = proc_exec("procb");
     if (pid_b < 0) {
         println("Error: could not launch procb");
-        return -1;
+        exit(1);
+        return 1;
     }
 
     printf("proca -> PID %d\n", pid_a);
@@ -31,17 +33,13 @@ int cmd_ipc_test(int argc, char* argv[]) {
 
     int received = 0;
 
-    /* Each process sends 5 messages -> expect up to 10 total.
-     * receive_wait(500) times out after ~500 ms of silence,
-     * which means both processes have finished sending.            */
     while (received < 20) {
         result_entry_t entry;
         bool got = receive_wait(&entry, 500);
         if (!got) {
-            break;  /* timeout: no more messages */
+            break;
         }
 
-        /* Null-terminate and print the payload */
         char buf[RESULT_PAYLOAD_SIZE + 1];
         uint16_t len = entry.size;
         if (len > RESULT_PAYLOAD_SIZE) {
@@ -57,5 +55,6 @@ int cmd_ipc_test(int argc, char* argv[]) {
     println("------------------------");
     printf("Total received: %d messages\n", received);
     println("=== Demo complete ===");
+    exit(0);
     return 0;
 }

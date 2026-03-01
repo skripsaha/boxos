@@ -265,3 +265,23 @@ int fread_all(uint32_t file_id, void *buffer, size_t max_size, size_t *bytes_rea
     if (bytes_read) *bytes_read = total_read;
     return 0;
 }
+
+int find_file_by_name(const char* filename, uint32_t* file_ids,
+                      file_info_t* out_infos, size_t max)
+{
+    uint32_t all_files[256];
+    int total = query(NULL, all_files, 256);
+    if (total < 0) return -1;
+    int match_count = 0;
+    for (int i = 0; i < total && (size_t)match_count < max; i++) {
+        file_info_t info;
+        if (file_info(all_files[i], &info) == 0) {
+            if (strcmp(info.filename, filename) == 0) {
+                file_ids[match_count] = all_files[i];
+                if (out_infos) out_infos[match_count] = info;
+                match_count++;
+            }
+        }
+    }
+    return match_count;
+}

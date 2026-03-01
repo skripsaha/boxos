@@ -1,16 +1,20 @@
-#include "commands.h"
 #include "box/io.h"
+#include "box/ipc.h"
 #include "box/file.h"
 #include "box/string.h"
 #include "box/system.h"
 
+int main(void) {
+    int argc;
+    char argv[16][64];
+    receive_args(&argc, argv, 16);
 
-int cmd_info(int argc, char* argv[]) {
     if (argc < 2) {
         system_info_t sys;
         if (sysinfo(&sys) != 0) {
             println("Error: Failed to get system info");
-            return -1;
+            exit(1);
+            return 1;
         }
 
         println("BoxOS System Info:");
@@ -19,6 +23,7 @@ int cmd_info(int argc, char* argv[]) {
         printf("  Memory Total: %u bytes\n", sys.total_memory);
         printf("  Memory Used: %u bytes\n", sys.used_memory);
 
+        exit(0);
         return 0;
     }
 
@@ -26,8 +31,8 @@ int cmd_info(int argc, char* argv[]) {
     file_info_t infos[4];
     int count = find_file_by_name(argv[1], matches, infos, 4);
 
-    if (count <= 0) { println("Error: File not found"); return -1; }
-    if (count > 1) { println("Error: Ambiguous filename"); return -1; }
+    if (count <= 0) { println("Error: File not found"); exit(1); return 1; }
+    if (count > 1) { println("Error: Ambiguous filename"); exit(1); return 1; }
 
     file_info_t info = infos[0];
 
@@ -42,5 +47,6 @@ int cmd_info(int argc, char* argv[]) {
         printf("    %s:%s (type=%u)\n", info.tags[i].key, info.tags[i].value, info.tags[i].type);
     }
 
+    exit(0);
     return 0;
 }

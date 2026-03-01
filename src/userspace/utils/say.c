@@ -1,10 +1,16 @@
-#include "commands.h"
 #include "box/io.h"
+#include "box/ipc.h"
+#include "box/system.h"
 
-int cmd_say(int argc, char* argv[]) {
+int main(void) {
+    int argc;
+    char argv[16][64];
+    receive_args(&argc, argv, 16);
+
     if (argc < 2) {
         println("Usage: say <text...>");
-        return -1;
+        exit(1);
+        return 1;
     }
 
     for (int i = 1; i < argc; i++) {
@@ -13,5 +19,6 @@ int cmd_say(int argc, char* argv[]) {
     }
     println("");
 
+    exit(0);
     return 0;
 }

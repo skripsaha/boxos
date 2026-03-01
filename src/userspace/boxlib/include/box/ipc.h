@@ -30,4 +30,7 @@ int listen(uint8_t source_type, uint8_t flags);
 bool receive(result_entry_t* out_entry);
 bool receive_wait(result_entry_t* out_entry, uint32_t timeout_ms);
 
+int send_args(uint32_t target_pid, int argc, char** argv);
+int receive_args(int* argc, char argv[][64], int max_args);
+
 #endif // IPC_H
