@@ -136,6 +136,17 @@ int system_deck_proc_spawn(Event* event) {
     }
 
     void* binary_virt = vmm_phys_to_virt(spawn_event.binary_phys_addr);
+
+    const uint8_t* elf_hdr = (const uint8_t*)binary_virt;
+    if (spawn_event.binary_size < 16 ||
+        elf_hdr[0] != 0x7F || elf_hdr[1] != 'E' ||
+        elf_hdr[2] != 'L' || elf_hdr[3] != 'F') {
+        debug_printf("[SYSTEM_DECK] PROC_SPAWN: Invalid ELF magic\n");
+        process_destroy(proc);
+        deliver_response(event, SYSTEM_ERR_LOAD_FAILED, NULL, 0);
+        return -1;
+    }
+
     int load_result = process_load_binary(proc, binary_virt, spawn_event.binary_size);
     if (load_result != 0) {
         debug_printf("[SYSTEM_DECK] PROC_SPAWN: Failed to load binary\n");

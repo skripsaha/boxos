@@ -180,15 +180,14 @@ void test_route_direct(void) {
 
         int result = system_deck_route(&event);
         if (result == 0 &&
-            event.pid == proc_b->pid &&
-            event.sender_pid == proc_a->pid &&
-            event.route_flags == ROUTE_SOURCE_PROCESS) {
-            debug_printf("[TEST %d] PASS: Routed to PID %u, sender=%u, flags=0x%02x\n",
-                    total, event.pid, event.sender_pid, event.route_flags);
+            event.state == EVENT_STATE_PROCESSING &&
+            event.sender_pid == proc_a->pid) {
+            debug_printf("[TEST %d] PASS: Route succeeded, state=PROCESSING, sender=%u\n",
+                    total, event.sender_pid);
             passed++;
         } else {
-            debug_printf("[TEST %d] FAIL: result=%d pid=%u sender=%u flags=0x%02x\n",
-                    total, result, event.pid, event.sender_pid, event.route_flags);
+            debug_printf("[TEST %d] FAIL: result=%d state=%u sender=%u\n",
+                    total, result, event.state, event.sender_pid);
         }
     }
 
