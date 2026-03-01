@@ -3,6 +3,7 @@
 #include "journal.h"
 #include "klib.h"
 #include "ata.h"
+#include "rtc.h"
 
 // Verify data start doesn't overlap with journal entries
 STATIC_ASSERT(TAGFS_DATA_START > (JOURNAL_ENTRIES_START + JOURNAL_ENTRY_COUNT * JOURNAL_ENTRY_SECTORS),
@@ -673,7 +674,7 @@ int tagfs_write(TagFSFileHandle* handle, const void* buffer, uint64_t size) {
 
     if (handle->offset > meta->size) {
         meta->size = handle->offset;
-        meta->modified_time++;
+        meta->modified_time = rtc_get_unix64();
         tagfs_write_metadata(meta->file_id, meta);
     }
 
@@ -705,8 +706,9 @@ int tagfs_create_file(const char* filename, const char* tags[], uint32_t tag_cou
     meta->size = 0;
     meta->start_block = 0;
     meta->block_count = 0;
-    meta->created_time = 0;
-    meta->modified_time = 0;
+    uint64_t now = rtc_get_unix64();
+    meta->created_time = now;
+    meta->modified_time = now;
     meta->tag_count = 0;
 
     strncpy(meta->filename, filename, TAGFS_MAX_FILENAME - 1);
@@ -947,7 +949,7 @@ int tagfs_rename_file(uint32_t file_id, const char* new_filename) {
     strncpy(metadata->filename, new_filename, len);
     metadata->filename[len] = '\0';
 
-    metadata->modified_time = 0;  // TODO: Add timestamp when time support added
+    metadata->modified_time = rtc_get_unix64();
 
     int result = tagfs_write_metadata(file_id, metadata);
     if (result != 0) {

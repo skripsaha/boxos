@@ -99,6 +99,7 @@ typedef struct process_t {
 
     bool started;
     uint32_t parent_pid;
+    uint64_t buf_heap_next;  // next free virtual address for buffer mapping
 
     volatile process_block_reason_t block_reason;
     struct process_t* next_blocked;   // wait queue linkage (EventRing overflow)

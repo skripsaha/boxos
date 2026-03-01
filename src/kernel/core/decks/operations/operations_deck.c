@@ -7,6 +7,8 @@ static int op_buf_xor(Event* event);
 static int op_buf_hash(Event* event);
 static int op_buf_cmp(Event* event);
 static int op_buf_find(Event* event);
+static int op_buf_pack(Event* event);
+static int op_buf_unpack(Event* event);
 static int op_bit_swap(Event* event);
 static int op_val_add(Event* event);
 
@@ -51,10 +53,10 @@ int operations_deck_handler(Event* event) {
         return op_buf_find(event);
 
     case OP_BUF_PACK:
+        return op_buf_pack(event);
+
     case OP_BUF_UNPACK:
-        debug_printf("[OPS_DECK] Compression not yet implemented (opcode 0x%02x)\n", opcode);
-        event->state = EVENT_STATE_ERROR;
-        return -1;
+        return op_buf_unpack(event);
 
     case OP_BIT_SWAP:
         return op_bit_swap(event);
@@ -181,6 +183,90 @@ static int op_buf_find(Event* event) {
     }
 
     write_u32(event->data, 0, found_offset);
+    return 0;
+}
+
+// RLE compress: data[0..3]=src_offset, data[4..7]=src_len, data[8..11]=dst_offset
+// Output at dst_offset: [count][byte] pairs. count=0 marks end.
+// Result: data[0..3] = compressed size (0 on failure)
+static int op_buf_pack(Event* event) {
+    uint32_t src_off = read_u32(event->data, 0);
+    uint32_t src_len = read_u32(event->data, 4);
+    uint32_t dst_off = read_u32(event->data, 8);
+
+    if (src_len == 0 || src_off > EVENT_DATA_SIZE - src_len ||
+        dst_off >= EVENT_DATA_SIZE || src_off == dst_off) {
+        event->state = EVENT_STATE_ERROR;
+        return -1;
+    }
+
+    // Work on a temporary buffer to avoid src/dst overlap issues
+    uint8_t tmp[EVENT_DATA_SIZE];
+    uint32_t out = 0;
+    uint32_t max_out = EVENT_DATA_SIZE - dst_off;
+
+    uint32_t i = 0;
+    while (i < src_len) {
+        uint8_t byte = event->data[src_off + i];
+        uint8_t count = 1;
+
+        while (i + count < src_len && count < 255 &&
+               event->data[src_off + i + count] == byte) {
+            count++;
+        }
+
+        if (out + 2 > max_out) {
+            // Not enough space for compressed output
+            write_u32(event->data, 0, 0);
+            event->state = EVENT_STATE_ERROR;
+            return -1;
+        }
+
+        tmp[out++] = count;
+        tmp[out++] = byte;
+        i += count;
+    }
+
+    memcpy(&event->data[dst_off], tmp, out);
+    write_u32(event->data, 0, out);
+    return 0;
+}
+
+// RLE decompress: data[0..3]=src_offset, data[4..7]=src_len, data[8..11]=dst_offset
+// Input at src_offset: [count][byte] pairs
+// Result: data[0..3] = decompressed size (0 on failure)
+static int op_buf_unpack(Event* event) {
+    uint32_t src_off = read_u32(event->data, 0);
+    uint32_t src_len = read_u32(event->data, 4);
+    uint32_t dst_off = read_u32(event->data, 8);
+
+    if (src_len == 0 || src_len % 2 != 0 ||
+        src_off > EVENT_DATA_SIZE - src_len ||
+        dst_off >= EVENT_DATA_SIZE || src_off == dst_off) {
+        event->state = EVENT_STATE_ERROR;
+        return -1;
+    }
+
+    uint8_t tmp[EVENT_DATA_SIZE];
+    uint32_t out = 0;
+    uint32_t max_out = EVENT_DATA_SIZE - dst_off;
+
+    for (uint32_t i = 0; i + 1 < src_len; i += 2) {
+        uint8_t count = event->data[src_off + i];
+        uint8_t byte = event->data[src_off + i + 1];
+
+        if (out + count > max_out) {
+            write_u32(event->data, 0, 0);
+            event->state = EVENT_STATE_ERROR;
+            return -1;
+        }
+
+        memset(&tmp[out], byte, count);
+        out += count;
+    }
+
+    memcpy(&event->data[dst_off], tmp, out);
+    write_u32(event->data, 0, out);
     return 0;
 }
 

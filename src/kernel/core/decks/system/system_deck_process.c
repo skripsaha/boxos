@@ -10,6 +10,7 @@
 typedef struct {
     uint64_t handle;
     uint64_t phys_addr;
+    uint64_t virt_addr;  // mapped virtual address in owner's cabin
     uint64_t size;
     uint32_t owner_pid;
     bool in_use;
@@ -663,15 +664,22 @@ static uint32_t count_process_buffers(uint32_t pid) {
 }
 
 void system_deck_cleanup_process_buffers(uint32_t pid) {
+    process_t* proc = process_find(pid);
+
     spin_lock(&buffer_table_lock);
 
     for (int i = 0; i < BUF_MAX_COUNT; i++) {
         if (buffer_table[i].in_use && buffer_table[i].owner_pid == pid) {
             void* phys_addr = (void*)buffer_table[i].phys_addr;
+            uint64_t virt_addr = buffer_table[i].virt_addr;
             size_t pages = buffer_table[i].size / PMM_PAGE_SIZE;
 
             debug_printf("[SYSTEM_DECK] Cleaning up buffer handle=%lu for PID %u\n",
                     buffer_table[i].handle, pid);
+
+            if (virt_addr != 0 && proc && proc->cabin) {
+                vmm_unmap_pages(proc->cabin, virt_addr, pages);
+            }
 
             pmm_free(phys_addr, pages);
 
@@ -680,6 +688,7 @@ void system_deck_cleanup_process_buffers(uint32_t pid) {
             buffer_table[i].in_use = false;
             buffer_table[i].handle = 0;
             buffer_table[i].phys_addr = 0;
+            buffer_table[i].virt_addr = 0;
             buffer_table[i].size = 0;
             buffer_table[i].owner_pid = 0;
         }
@@ -701,11 +710,6 @@ static uint64_t generate_random_handle(void) {
     return result ? result : 1;
 }
 
-// TODO: BUF_ALLOC allocates physical memory but does NOT map it into the
-// process cabin page tables. The process receives a handle + physical address
-// but cannot access the buffer directly. To enable process-accessible buffers,
-// add vmm_map_pages() call to map the buffer into cabin address space after
-// allocation (e.g., at CABIN_CODE_START + code_size, growing upward).
 int system_deck_buf_alloc(Event* event) {
     if (!event) {
         debug_printf("[SYSTEM_DECK] BUF_ALLOC: NULL event\n");
@@ -801,19 +805,39 @@ int system_deck_buf_alloc(Event* event) {
     buffer_table[slot].phys_addr = (uint64_t)phys_addr;
     buffer_table[slot].size = pages_needed * PMM_PAGE_SIZE;
     buffer_table[slot].owner_pid = event->pid;
+    buffer_table[slot].virt_addr = 0;
     buffer_table[slot].in_use = true;
 
     spin_unlock(&buffer_table_lock);
+
+    // Map buffer into process cabin so userspace can access it directly
+    uint64_t virt_addr = 0;
+    process_t* proc = process_find(event->pid);
+    if (proc && proc->cabin) {
+        virt_addr = proc->buf_heap_next;
+        vmm_map_result_t map_result = vmm_map_pages(proc->cabin, virt_addr,
+                (uintptr_t)phys_addr, pages_needed, VMM_FLAGS_USER_RW);
+        if (map_result.success) {
+            proc->buf_heap_next += pages_needed * PMM_PAGE_SIZE;
+            spin_lock(&buffer_table_lock);
+            buffer_table[slot].virt_addr = virt_addr;
+            spin_unlock(&buffer_table_lock);
+        } else {
+            debug_printf("[SYSTEM_DECK] BUF_ALLOC: Warning - failed to map into cabin\n");
+            virt_addr = 0;
+        }
+    }
 
     buf_alloc_response_t response;
     memset(&response, 0, sizeof(response));
     response.buffer_handle = handle;
     response.phys_addr = (uint64_t)phys_addr;
     response.actual_size = pages_needed * PMM_PAGE_SIZE;
+    response.virt_addr = virt_addr;
     response.error_code = SYSTEM_ERR_SUCCESS;
 
-    debug_printf("[SYSTEM_DECK] BUF_ALLOC: SUCCESS - handle=%lu phys=0x%lx size=%lu\n",
-            handle, response.phys_addr, response.actual_size);
+    debug_printf("[SYSTEM_DECK] BUF_ALLOC: SUCCESS - handle=%lu phys=0x%lx virt=0x%lx size=%lu\n",
+            handle, response.phys_addr, virt_addr, response.actual_size);
     deliver_response(event, SYSTEM_ERR_SUCCESS, &response, sizeof(response));
     return 0;
 }
@@ -853,16 +877,27 @@ int system_deck_buf_free(Event* event) {
     }
 
     void* phys_addr = (void*)buffer_table[slot].phys_addr;
+    uint64_t virt_addr = buffer_table[slot].virt_addr;
     size_t pages = buffer_table[slot].size / PMM_PAGE_SIZE;
+    uint32_t owner_pid = buffer_table[slot].owner_pid;
 
     // Clear entry before releasing lock
     buffer_table[slot].in_use = false;
     buffer_table[slot].handle = 0;
     buffer_table[slot].phys_addr = 0;
+    buffer_table[slot].virt_addr = 0;
     buffer_table[slot].size = 0;
     buffer_table[slot].owner_pid = 0;
 
     spin_unlock(&buffer_table_lock);
+
+    // Unmap from cabin if it was mapped
+    if (virt_addr != 0) {
+        process_t* proc = process_find(owner_pid);
+        if (proc && proc->cabin) {
+            vmm_unmap_pages(proc->cabin, virt_addr, pages);
+        }
+    }
 
     // Free physical memory outside the lock
     pmm_free(phys_addr, pages);
@@ -890,11 +925,136 @@ int system_deck_buf_resize(Event* event) {
     debug_printf("[SYSTEM_DECK] BUF_RESIZE: handle=%lu new_size=%lu\n",
             resize_event.buffer_handle, resize_event.new_size);
 
+    if (resize_event.buffer_handle == 0) {
+        debug_printf("[SYSTEM_DECK] BUF_RESIZE: Invalid handle (zero)\n");
+        deliver_response(event, SYSTEM_ERR_INVALID_ARGS, NULL, 0);
+        return -1;
+    }
+
+    if (resize_event.new_size == 0) {
+        debug_printf("[SYSTEM_DECK] BUF_RESIZE: Invalid new_size (zero)\n");
+        deliver_response(event, SYSTEM_ERR_INVALID_ARGS, NULL, 0);
+        return -1;
+    }
+
+    if (resize_event.new_size > BUF_MAX_SIZE) {
+        debug_printf("[SYSTEM_DECK] BUF_RESIZE: Size exceeds limit (%lu > %u)\n",
+                resize_event.new_size, BUF_MAX_SIZE);
+        deliver_response(event, SYSTEM_ERR_SIZE_LIMIT, NULL, 0);
+        return -1;
+    }
+
+    spin_lock(&buffer_table_lock);
+
+    int slot = find_buffer_by_handle(resize_event.buffer_handle);
+    if (slot < 0) {
+        spin_unlock(&buffer_table_lock);
+        debug_printf("[SYSTEM_DECK] BUF_RESIZE: Buffer not found\n");
+        deliver_response(event, SYSTEM_ERR_BUFFER_NOT_FOUND, NULL, 0);
+        return -1;
+    }
+
+    if (buffer_table[slot].owner_pid != event->pid) {
+        spin_unlock(&buffer_table_lock);
+        debug_printf("[SYSTEM_DECK] BUF_RESIZE: Permission denied (not owner)\n");
+        deliver_response(event, SYSTEM_ERR_INVALID_ARGS, NULL, 0);
+        return -1;
+    }
+
+    uint64_t old_phys = buffer_table[slot].phys_addr;
+    uint64_t old_virt_addr = buffer_table[slot].virt_addr;
+    uint64_t old_size = buffer_table[slot].size;
+    size_t old_pages = old_size / PMM_PAGE_SIZE;
+
+    size_t new_pages = (resize_event.new_size + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE;
+    uint64_t new_actual_size = new_pages * PMM_PAGE_SIZE;
+
+    // If page count is the same, no reallocation needed
+    if (new_pages == old_pages) {
+        spin_unlock(&buffer_table_lock);
+
+        buf_resize_response_t response;
+        memset(&response, 0, sizeof(response));
+        response.buffer_handle = resize_event.buffer_handle;
+        response.actual_size = new_actual_size;
+        response.error_code = SYSTEM_ERR_SUCCESS;
+
+        deliver_response(event, SYSTEM_ERR_SUCCESS, &response, sizeof(response));
+        return 0;
+    }
+
+    spin_unlock(&buffer_table_lock);
+
+    // Allocate new buffer
+    void* new_phys = pmm_alloc_zero(new_pages);
+    if (!new_phys) {
+        debug_printf("[SYSTEM_DECK] BUF_RESIZE: PMM allocation failed\n");
+        deliver_response(event, SYSTEM_ERR_NO_MEMORY, NULL, 0);
+        return -1;
+    }
+
+    // Copy data (min of old and new size)
+    void* old_virt = vmm_phys_to_virt(old_phys);
+    void* new_virt = vmm_phys_to_virt((uintptr_t)new_phys);
+    size_t copy_size = old_size < new_actual_size ? old_size : new_actual_size;
+    memcpy(new_virt, old_virt, copy_size);
+
+    __sync_synchronize();
+
+    // Remap in cabin: unmap old, map new at same virtual address
+    process_t* proc = process_find(event->pid);
+    uint64_t new_virt_addr = old_virt_addr;
+
+    if (old_virt_addr != 0 && proc && proc->cabin) {
+        vmm_unmap_pages(proc->cabin, old_virt_addr, old_pages);
+
+        if (new_pages <= old_pages) {
+            // Shrink: remap at same address
+            vmm_map_pages(proc->cabin, old_virt_addr,
+                    (uintptr_t)new_phys, new_pages, VMM_FLAGS_USER_RW);
+        } else {
+            // Grow: allocate new region from buf_heap
+            new_virt_addr = proc->buf_heap_next;
+            vmm_map_result_t map_result = vmm_map_pages(proc->cabin, new_virt_addr,
+                    (uintptr_t)new_phys, new_pages, VMM_FLAGS_USER_RW);
+            if (map_result.success) {
+                proc->buf_heap_next += new_pages * PMM_PAGE_SIZE;
+            } else {
+                new_virt_addr = 0;
+            }
+        }
+    }
+
+    // Update table atomically
+    spin_lock(&buffer_table_lock);
+
+    // Re-verify slot is still valid
+    if (!buffer_table[slot].in_use ||
+        buffer_table[slot].handle != resize_event.buffer_handle) {
+        spin_unlock(&buffer_table_lock);
+        pmm_free(new_phys, new_pages);
+        debug_printf("[SYSTEM_DECK] BUF_RESIZE: Buffer state changed during resize\n");
+        deliver_response(event, SYSTEM_ERR_BUFFER_NOT_FOUND, NULL, 0);
+        return -1;
+    }
+
+    buffer_table[slot].phys_addr = (uint64_t)new_phys;
+    buffer_table[slot].virt_addr = new_virt_addr;
+    buffer_table[slot].size = new_actual_size;
+
+    spin_unlock(&buffer_table_lock);
+
+    // Free old buffer
+    pmm_free((void*)old_phys, old_pages);
+
     buf_resize_response_t response;
     memset(&response, 0, sizeof(response));
-    response.error_code = SYSTEM_ERR_NOT_IMPLEMENTED;
+    response.buffer_handle = resize_event.buffer_handle;
+    response.actual_size = new_actual_size;
+    response.error_code = SYSTEM_ERR_SUCCESS;
 
-    debug_printf("[SYSTEM_DECK] BUF_RESIZE: Not implemented (stub)\n");
-    deliver_response(event, SYSTEM_ERR_NOT_IMPLEMENTED, &response, sizeof(response));
-    return -1;
+    debug_printf("[SYSTEM_DECK] BUF_RESIZE: SUCCESS - handle=%lu old=%lu new=%lu\n",
+            resize_event.buffer_handle, old_size, new_actual_size);
+    deliver_response(event, SYSTEM_ERR_SUCCESS, &response, sizeof(response));
+    return 0;
 }

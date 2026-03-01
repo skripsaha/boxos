@@ -90,6 +90,7 @@ process_t* process_create(const char* tags) {
     proc->code_start = VMM_CABIN_CODE_START;
     proc->code_size = 0;
     proc->started = false;
+    proc->buf_heap_next = CABIN_BUF_HEAP_START;
     proc->next = NULL;
 
     if (tags) {

@@ -80,9 +80,6 @@ uint8_t acpi_checksum(void* data, size_t length) {
 
 // ACPI mappings are intentionally never unmapped - RSDP, RSDT, FADT, DSDT
 // are persistent kernel data needed for shutdown.
-// TODO(v1.1): Fix VMM to allow mapping legacy low memory regions (< 1MB)
-// vmm_map_mmio() rejects EBDA (0x40E) and BIOS ROM (0xE0000-0xFFFFF)
-// due to overlap check; fallback works in QEMU.
 volatile void* acpi_map_physical(uintptr_t phys_addr, size_t size) {
     return vmm_map_mmio(phys_addr, size, VMM_FLAGS_KERNEL_RW);
 }

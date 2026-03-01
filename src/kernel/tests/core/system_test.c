@@ -560,27 +560,56 @@ void test_system_deck_buffer_management(void) {
     }
 
     total++;
-    kprintf("\n[TEST %d] BUF_RESIZE (stub - should return not implemented)\n", total);
-    Event resize_event;
-    event_init(&resize_event, test_proc->pid, 7);
-    resize_event.prefixes[0] = 0xFF12;
-    resize_event.prefix_count = 1;
+    kprintf("\n[TEST %d] BUF_RESIZE (grow buffer)\n", total);
+    {
+        // First allocate a buffer to resize
+        Event alloc_ev;
+        event_init(&alloc_ev, test_proc->pid, 7);
+        alloc_ev.prefixes[0] = 0xFF10;
+        alloc_ev.prefix_count = 1;
+        buf_alloc_event_t* alloc_d = (buf_alloc_event_t*)alloc_ev.data;
+        alloc_d->size = 4096;
+        alloc_d->flags = 0;
+        result = system_deck_buf_alloc(&alloc_ev);
 
-    buf_resize_event_t* resize_data = (buf_resize_event_t*)resize_event.data;
-    resize_data->buffer_handle = 1;
-    resize_data->new_size = 16384;
+        if (result == 0) {
+            buf_alloc_response_t* alloc_r = (buf_alloc_response_t*)alloc_ev.data;
+            uint64_t resize_handle = alloc_r->buffer_handle;
 
-    result = system_deck_buf_resize(&resize_event);
-    if (result != 0 && resize_event.state == EVENT_STATE_ERROR) {
-        buf_resize_response_t* resize_response = (buf_resize_response_t*)resize_event.data;
-        if (resize_response->error_code == SYSTEM_ERR_NOT_IMPLEMENTED) {
-            debug_printf("[TEST %d] PASS: BUF_RESIZE correctly returns not implemented\n", total);
-            passed++;
+            Event resize_event;
+            event_init(&resize_event, test_proc->pid, 8);
+            resize_event.prefixes[0] = 0xFF12;
+            resize_event.prefix_count = 1;
+            buf_resize_event_t* resize_data = (buf_resize_event_t*)resize_event.data;
+            resize_data->buffer_handle = resize_handle;
+            resize_data->new_size = 16384;
+
+            result = system_deck_buf_resize(&resize_event);
+            if (result == 0 && resize_event.state == EVENT_STATE_COMPLETED) {
+                buf_resize_response_t* resize_response = (buf_resize_response_t*)resize_event.data;
+                if (resize_response->actual_size >= 16384 &&
+                    resize_response->error_code == SYSTEM_ERR_SUCCESS) {
+                    debug_printf("[TEST %d] PASS: BUF_RESIZE grew to %lu bytes\n",
+                            total, resize_response->actual_size);
+                    passed++;
+                } else {
+                    debug_printf("[TEST %d] FAIL: Wrong response values\n", total);
+                }
+            } else {
+                debug_printf("[TEST %d] FAIL: BUF_RESIZE returned error\n", total);
+            }
+
+            // Clean up
+            Event free_ev;
+            event_init(&free_ev, test_proc->pid, 9);
+            free_ev.prefixes[0] = 0xFF11;
+            free_ev.prefix_count = 1;
+            buf_free_event_t* free_d = (buf_free_event_t*)free_ev.data;
+            free_d->buffer_handle = resize_handle;
+            system_deck_buf_free(&free_ev);
         } else {
-            debug_printf("[TEST %d] FAIL: Wrong error code\n", total);
+            debug_printf("[TEST %d] FAIL: Could not allocate buffer for resize test\n", total);
         }
-    } else {
-        debug_printf("[TEST %d] FAIL: BUF_RESIZE should return error\n", total);
     }
 
     total++;

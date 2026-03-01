@@ -91,8 +91,9 @@ typedef struct __packed {
     uint64_t buffer_handle;
     uint64_t phys_addr;
     uint64_t actual_size;
+    uint64_t virt_addr;
     uint32_t error_code;
-    uint8_t reserved[164];
+    uint8_t reserved[156];
 } buf_alloc_response_t;
 
 typedef struct __packed {

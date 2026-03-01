@@ -12,8 +12,8 @@
 #define OP_BUF_HASH     0x04  // Compute ROL5 hash
 #define OP_BUF_CMP      0x05  // Compare two regions
 #define OP_BUF_FIND     0x06  // Find pattern
-#define OP_BUF_PACK     0x07  // Compress (stub)
-#define OP_BUF_UNPACK   0x08  // Decompress (stub)
+#define OP_BUF_PACK     0x07  // RLE compress
+#define OP_BUF_UNPACK   0x08  // RLE decompress
 #define OP_BIT_SWAP     0x09  // Endianness swap
 #define OP_VAL_ADD      0x0A  // Increment/decrement value
 
