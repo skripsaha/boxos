@@ -30,7 +30,7 @@ typedef struct __packed {
     volatile uint8_t result_page_full;       // backpressure: Result Page full
     uint32_t route_target;
     char     route_tag[32];
-    uint32_t parent_pid;
+    uint32_t spawner_pid;
     uint8_t  _reserved[3758];                // pad to 4096 bytes
 } notify_page_t;
 
