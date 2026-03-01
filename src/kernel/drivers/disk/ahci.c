@@ -120,7 +120,7 @@ void ahci_irq_handler(void) {
         return;
     }
 
-    ahci_ctrl.total_interrupts++;
+    __sync_fetch_and_add(&ahci_ctrl.total_interrupts, 1);
 
     if (is & (1 << 0)) {
         ahci_port_t* state = &ahci_ctrl.port0;
@@ -134,12 +134,12 @@ void ahci_irq_handler(void) {
 
         if (completed) {
             __sync_fetch_and_or(&state->completed_slots, completed);
-            state->ci_snapshot = port->ci;
+            __atomic_store_n(&state->ci_snapshot, port->ci, __ATOMIC_RELEASE);
         }
 
         // Check error conditions
         if (port_is & (1 << 30)) {
-            state->ncq_errors++;
+            __sync_fetch_and_add(&state->ncq_errors, 1);
         }
 
         port->is = port_is;
@@ -403,7 +403,7 @@ boxos_error_t ahci_start_async_transfer(struct async_io_request* req_raw) {
 
     port->sact |= (1U << slot);
     port->ci |= (1U << slot);
-    state->ci_snapshot |= (1U << slot);
+    __sync_fetch_and_or(&state->ci_snapshot, (1U << slot));
 
     return BOXOS_OK;
 }
@@ -415,9 +415,10 @@ void ahci_check_timeouts(void) {
 
     ahci_port_t* state = &ahci_ctrl.port0;
     uint64_t now = rdtsc();
+    uint32_t snapshot = __atomic_load_n(&state->ci_snapshot, __ATOMIC_ACQUIRE);
 
     for (uint8_t slot = 0; slot < AHCI_MAX_SLOTS; slot++) {
-        if (!(state->ci_snapshot & (1U << slot))) {
+        if (!(snapshot & (1U << slot))) {
             continue;
         }
 
@@ -434,8 +435,8 @@ void ahci_check_timeouts(void) {
         event_ring_push(kernel_event_ring, &err);
 
         ahci_free_slot(0, slot);
-        state->ci_snapshot &= ~(1U << slot);
-        state->ncq_timeouts++;
+        __sync_fetch_and_and(&state->ci_snapshot, ~(1U << slot));
+        __sync_fetch_and_add(&state->ncq_timeouts, 1);
 
         debug_printf("[AHCI] Timeout on slot %u (event_id=%u)\n", slot, state->event_id[slot]);
     }

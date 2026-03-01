@@ -295,6 +295,7 @@ int tagfs_init(void) {
     }
 
     memset(&tfs, 0, sizeof(TagFSState));
+    spinlock_init(&tfs.lock);
 
     if (tagfs_read_superblock(&tfs.superblock) != 0) {
         debug_printf("[TagFS] Failed to read superblock\n");
