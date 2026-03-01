@@ -1,10 +1,6 @@
 #include "box/convert.h"
 #include "box/string.h"
 
-// ============================================================================
-// STRING → NUMBER
-// ============================================================================
-
 int to_int(const char* str) {
     if (!str) return 0;
     while (is_space(*str)) str++;
@@ -83,10 +79,6 @@ uint32_t hex_to_int(const char* str) {
     }
     return result;
 }
-
-// ============================================================================
-// NUMBER → STRING
-// ============================================================================
 
 char* to_str(int value, char* buf, size_t buf_size) {
     if (!buf || buf_size < 2) return buf;
@@ -187,10 +179,6 @@ char* to_bin(uint32_t value, char* buf, size_t buf_size) {
     return buf;
 }
 
-// ============================================================================
-// TYPE CHECKS
-// ============================================================================
-
 bool is_digit(char c) { return c >= '0' && c <= '9'; }
 bool is_alpha(char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'); }
 bool is_alnum(char c) { return is_digit(c) || is_alpha(c); }
@@ -213,10 +201,6 @@ bool is_hex_string(const char* str) {
     while (*str) { if (hex_digit(*str) < 0) return false; str++; }
     return true;
 }
-
-// ============================================================================
-// CHARACTER CONVERSION
-// ============================================================================
 
 char to_upper(char c) { return is_lower(c) ? (char)(c - 32) : c; }
 char to_lower(char c) { return is_upper(c) ? (char)(c + 32) : c; }

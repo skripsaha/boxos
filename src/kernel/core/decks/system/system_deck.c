@@ -8,7 +8,6 @@
 #include "tagfs.h"
 #include "atomics.h"
 
-// Helper: Check if tag exists in snapshot buffer
 static bool snapshot_has_tag(const char* snapshot, const char* tag) {
     if (!snapshot || !tag || tag[0] == '\0') {
         return false;
@@ -56,8 +55,6 @@ static int system_deck_yield(Event* event) {
     process_ref_dec(proc);
     return 0;
 }
-
-// --- Defragmentation ---
 
 static int system_deck_defrag_file(Event* event) {
     if (!event) {
@@ -118,8 +115,6 @@ static int system_deck_fragmentation_score(Event* event) {
     return 0;
 }
 
-// --- Overflow status ---
-
 static int system_deck_get_overflow_status(Event* event) {
     if (!event) {
         return -1;
@@ -150,8 +145,6 @@ static int system_deck_get_overflow_status(Event* event) {
     event->state = EVENT_STATE_COMPLETED;
     return 0;
 }
-
-// --- Main handler ---
 
 int system_deck_handler(Event* event) {
     if (!event) {

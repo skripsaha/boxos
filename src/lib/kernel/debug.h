@@ -3,26 +3,19 @@
 
 #include "klib.h"
 
-// Standardized debug output format: [SUBSYSTEM] message
-
-// Debug levels
 #define DEBUG_LEVEL_INFO  0
 #define DEBUG_LEVEL_WARN  1
 #define DEBUG_LEVEL_ERROR 2
 
-// Standard debug output (INFO level)
 #define debug_info(tag, fmt, ...) \
     debug_printf("[" tag "] " fmt "\n", ##__VA_ARGS__)
 
-// Warning output
 #define debug_warn(tag, fmt, ...) \
     debug_printf("[" tag ":WARN] " fmt "\n", ##__VA_ARGS__)
 
-// Error output
 #define debug_error(tag, fmt, ...) \
     debug_printf("[" tag ":ERROR] " fmt "\n", ##__VA_ARGS__)
 
-// Subsystem tags (for consistency)
 #define DEBUG_TAG_PMM      "PMM"
 #define DEBUG_TAG_VMM      "VMM"
 #define DEBUG_TAG_PROCESS  "PROCESS"

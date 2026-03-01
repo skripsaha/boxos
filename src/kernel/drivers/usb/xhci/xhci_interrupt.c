@@ -47,18 +47,6 @@ void xhci_process_events(void) {
             if (events_processed == 0) {
                 debug_printf("[xHCI EVENT] No events (idx=%u cycle_want=%u trb_cycle=%u ctrl=0x%08x)\n",
                              event_ring->dequeue_idx, event_ring->cycle_state, trb_cycle, trb->control);
-
-                // DIAGNOSTIC: Force-read next 4 TRBs to check if events exist elsewhere
-                for (uint32_t i = 1; i <= 4; i++) {
-                    uint32_t test_idx = (event_ring->dequeue_idx + i) % event_ring->num_trbs;
-                    xhci_trb_t *test_trb = &event_ring->trbs[test_idx];
-                    uint32_t test_ctrl = test_trb->control;
-                    uint8_t test_cycle = test_ctrl & 0x1;
-                    uint8_t test_type = (test_ctrl >> 10) & 0x3F;
-
-                    debug_printf("[xHCI EVENT] TRB[+%u]: cycle=%u type=%u ctrl=0x%08x\n",
-                                 i, test_cycle, test_type, test_ctrl);
-                }
             }
             break;
         }

@@ -22,10 +22,10 @@ int vga_putchar(char c) {
 
     result_entry_t result;
     if (!result_wait(&result, 100000)) {
-        return -BOX_ERR_TIMEOUT;
+        return -ERR_TIMEOUT;
     }
 
-    if (result.error_code != BOX_OK) {
+    if (result.error_code != OK) {
         return -(int)result.error_code;
     }
 
@@ -34,7 +34,7 @@ int vga_putchar(char c) {
 
 int vga_puts(const char* str) {
     if (!str) {
-        return -BOX_ERR_INVALID_ARGS;
+        return -ERR_INVALID_ARGS;
     }
 
     size_t total_len = strlen(str);
@@ -57,10 +57,10 @@ int vga_puts(const char* str) {
 
         result_entry_t result;
         if (!result_wait(&result, 100000)) {
-            return -BOX_ERR_TIMEOUT;
+            return -ERR_TIMEOUT;
         }
 
-        if (result.error_code != BOX_OK) {
+        if (result.error_code != OK) {
             return -(int)result.error_code;
         }
 
@@ -78,10 +78,10 @@ int vga_clear(uint8_t color) {
 
     result_entry_t result;
     if (!result_wait(&result, 100000)) {
-        return -BOX_ERR_TIMEOUT;
+        return -ERR_TIMEOUT;
     }
 
-    if (result.error_code != BOX_OK) {
+    if (result.error_code != OK) {
         return -(int)result.error_code;
     }
 
@@ -94,10 +94,10 @@ int vga_clear_line(uint8_t row, uint8_t color) {
 
     result_entry_t result;
     if (!result_wait(&result, 100000)) {
-        return -BOX_ERR_TIMEOUT;
+        return -ERR_TIMEOUT;
     }
 
-    if (result.error_code != BOX_OK) {
+    if (result.error_code != OK) {
         return -(int)result.error_code;
     }
 
@@ -110,10 +110,10 @@ int vga_clear_to_eol(uint8_t color) {
 
     result_entry_t result;
     if (!result_wait(&result, 100000)) {
-        return -BOX_ERR_TIMEOUT;
+        return -ERR_TIMEOUT;
     }
 
-    if (result.error_code != BOX_OK) {
+    if (result.error_code != OK) {
         return -(int)result.error_code;
     }
 
@@ -126,10 +126,10 @@ int vga_scroll_up(uint8_t lines, uint8_t fill_color) {
 
     result_entry_t result;
     if (!result_wait(&result, 100000)) {
-        return -BOX_ERR_TIMEOUT;
+        return -ERR_TIMEOUT;
     }
 
-    if (result.error_code != BOX_OK) {
+    if (result.error_code != OK) {
         return -(int)result.error_code;
     }
 
@@ -142,10 +142,10 @@ int vga_newline(void) {
 
     result_entry_t result;
     if (!result_wait(&result, 100000)) {
-        return -BOX_ERR_TIMEOUT;
+        return -ERR_TIMEOUT;
     }
 
-    if (result.error_code != BOX_OK) {
+    if (result.error_code != OK) {
         return -(int)result.error_code;
     }
 
@@ -154,7 +154,7 @@ int vga_newline(void) {
 
 int vga_getcursor(vga_pos_t* pos) {
     if (!pos) {
-        return -BOX_ERR_INVALID_ARGS;
+        return -ERR_INVALID_ARGS;
     }
 
     hw_vga_getcursor();
@@ -162,10 +162,10 @@ int vga_getcursor(vga_pos_t* pos) {
 
     result_entry_t result;
     if (!result_wait(&result, 100000)) {
-        return -BOX_ERR_TIMEOUT;
+        return -ERR_TIMEOUT;
     }
 
-    if (result.error_code != BOX_OK) {
+    if (result.error_code != OK) {
         return -(int)result.error_code;
     }
 
@@ -181,10 +181,10 @@ int vga_setcursor(uint8_t row, uint8_t col) {
 
     result_entry_t result;
     if (!result_wait(&result, 100000)) {
-        return -BOX_ERR_TIMEOUT;
+        return -ERR_TIMEOUT;
     }
 
-    if (result.error_code != BOX_OK) {
+    if (result.error_code != OK) {
         return -(int)result.error_code;
     }
 
@@ -197,10 +197,10 @@ int vga_getcolor(void) {
 
     result_entry_t result;
     if (!result_wait(&result, 100000)) {
-        return -BOX_ERR_TIMEOUT;
+        return -ERR_TIMEOUT;
     }
 
-    if (result.error_code != BOX_OK) {
+    if (result.error_code != OK) {
         return -(int)result.error_code;
     }
 
@@ -213,10 +213,10 @@ int vga_setcolor(uint8_t color) {
 
     result_entry_t result;
     if (!result_wait(&result, 100000)) {
-        return -BOX_ERR_TIMEOUT;
+        return -ERR_TIMEOUT;
     }
 
-    if (result.error_code != BOX_OK) {
+    if (result.error_code != OK) {
         return -(int)result.error_code;
     }
 
@@ -225,7 +225,7 @@ int vga_setcolor(uint8_t color) {
 
 int vga_getdimensions(vga_dimensions_t* dims) {
     if (!dims) {
-        return -BOX_ERR_INVALID_ARGS;
+        return -ERR_INVALID_ARGS;
     }
 
     hw_vga_getdimensions();
@@ -233,10 +233,10 @@ int vga_getdimensions(vga_dimensions_t* dims) {
 
     result_entry_t result;
     if (!result_wait(&result, 100000)) {
-        return -BOX_ERR_TIMEOUT;
+        return -ERR_TIMEOUT;
     }
 
-    if (result.error_code != BOX_OK) {
+    if (result.error_code != OK) {
         return -(int)result.error_code;
     }
 

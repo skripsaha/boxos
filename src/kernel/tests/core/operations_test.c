@@ -56,9 +56,8 @@ static result_entry_t *wait_for_result(process_t *proc, uint32_t *head)
 
 void test_operations_deck(void)
 {
-    kprintf("\n====================================\n");
+    kprintf("\n");
     kprintf("OPERATIONS DECK TEST\n");
-    kprintf("====================================\n");
 
     process_t *proc = process_create("test:operations");
     if (!proc)
@@ -71,7 +70,6 @@ void test_operations_deck(void)
     int total_tests = 0;
     int passed_tests = 0;
 
-    // Test 1: BUF_FILL
     {
         total_tests++;
         kprintf("\n[TEST 1] BUF_FILL: Fill buffer with pattern\n");
@@ -95,7 +93,7 @@ void test_operations_deck(void)
         test_delay();
 
         result_entry_t *result = wait_for_result(proc, &result_head);
-        if (result && result->error_code == BOXOS_OK)
+        if (result && result->error_code == OK)
         {
             bool pass = true;
             for (int i = 20; i < 30; i++)
@@ -123,7 +121,6 @@ void test_operations_deck(void)
         process_ref_dec(proc);
     }
 
-    // Test 2: BUF_XOR
     {
         total_tests++;
         kprintf("\n[TEST 2] BUF_XOR: XOR buffer with mask\n");
@@ -152,7 +149,7 @@ void test_operations_deck(void)
         test_delay();
 
         result_entry_t *result = wait_for_result(proc, &result_head);
-        if (result && result->error_code == BOXOS_OK)
+        if (result && result->error_code == OK)
         {
             bool pass = true;
             for (int i = 50; i < 60; i++)
@@ -180,7 +177,6 @@ void test_operations_deck(void)
         process_ref_dec(proc);
     }
 
-    // Test 3: BUF_HASH
     {
         total_tests++;
         kprintf("\n[TEST 3] BUF_HASH: Compute hash of buffer\n");
@@ -209,7 +205,7 @@ void test_operations_deck(void)
         test_delay();
 
         result_entry_t *result = wait_for_result(proc, &result_head);
-        if (result && result->error_code == BOXOS_OK)
+        if (result && result->error_code == OK)
         {
             uint32_t hash = read_u32(result->payload, 120);
             if (hash != 0)
@@ -229,7 +225,6 @@ void test_operations_deck(void)
         process_ref_dec(proc);
     }
 
-    // Test 4: BUF_CMP
     {
         total_tests++;
         kprintf("\n[TEST 4] BUF_CMP: Compare two buffer regions\n");
@@ -259,7 +254,7 @@ void test_operations_deck(void)
         test_delay();
 
         result_entry_t *result = wait_for_result(proc, &result_head);
-        if (result && result->error_code == BOXOS_OK)
+        if (result && result->error_code == OK)
         {
             uint32_t cmp_result = read_u32(result->payload, 0);
             if (cmp_result == 0)
@@ -279,7 +274,6 @@ void test_operations_deck(void)
         process_ref_dec(proc);
     }
 
-    // Test 5: VAL_MOD
     {
         total_tests++;
         kprintf("\n[TEST 5] VAL_MOD: Modify integer value\n");
@@ -305,7 +299,7 @@ void test_operations_deck(void)
         test_delay();
 
         result_entry_t *result = wait_for_result(proc, &result_head);
-        if (result && result->error_code == BOXOS_OK)
+        if (result && result->error_code == OK)
         {
             uint32_t value = read_u32(result->payload, 80);
             if (value == 142)
@@ -325,7 +319,6 @@ void test_operations_deck(void)
         process_ref_dec(proc);
     }
 
-    // Test 6: Integer overflow protection
     {
         total_tests++;
         kprintf("\n[TEST 6] Integer Overflow Protection: BUF_FILL with UINT32_MAX offset\n");
@@ -349,7 +342,7 @@ void test_operations_deck(void)
         test_delay();
 
         result_entry_t *result = wait_for_result(proc, &result_head);
-        if (result && BOXOS_IS_ERROR(result->error_code))
+        if (result && IS_ERROR(result->error_code))
         {
             debug_printf("[TEST 6] PASS: Overflow attack correctly rejected\n");
             passed_tests++;
@@ -361,7 +354,6 @@ void test_operations_deck(void)
         process_ref_dec(proc);
     }
 
-    // Test 7: BUF_MOVE
     {
         total_tests++;
         kprintf("\n[TEST 7] BUF_MOVE: Move overlapping regions\n");
@@ -390,7 +382,7 @@ void test_operations_deck(void)
         test_delay();
 
         result_entry_t *result = wait_for_result(proc, &result_head);
-        if (result && result->error_code == BOXOS_OK)
+        if (result && result->error_code == OK)
         {
             bool pass = true;
             for (int i = 0; i < 8; i++)
@@ -420,10 +412,9 @@ void test_operations_deck(void)
 
     process_destroy(proc);
 
-    kprintf("\n====================================\n");
+    kprintf("\n");
     kprintf("OPERATIONS DECK TEST COMPLETE\n");
     kprintf("Results: %d/%d tests passed\n", passed_tests, total_tests);
-    kprintf("====================================\n\n");
 }
 
 #else

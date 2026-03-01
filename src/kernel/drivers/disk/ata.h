@@ -4,43 +4,36 @@
 #include "ktypes.h"
 #include "boxos_limits.h"
 
-// ATA I/O Ports (Primary Bus)
 #define ATA_PRIMARY_DATA        0x1F0   // Data register (16-bit)
 #define ATA_PRIMARY_ERROR       0x1F1   // Error register (read)
 #define ATA_PRIMARY_FEATURES    0x1F1   // Features register (write)
-#define ATA_PRIMARY_SECCOUNT    0x1F2   // Sector count
-#define ATA_PRIMARY_LBA_LO      0x1F3   // LBA low byte
-#define ATA_PRIMARY_LBA_MID     0x1F4   // LBA mid byte
-#define ATA_PRIMARY_LBA_HI      0x1F5   // LBA high byte
+#define ATA_PRIMARY_SECCOUNT    0x1F2
+#define ATA_PRIMARY_LBA_LO      0x1F3
+#define ATA_PRIMARY_LBA_MID     0x1F4
+#define ATA_PRIMARY_LBA_HI      0x1F5
 #define ATA_PRIMARY_DRIVE       0x1F6   // Drive/Head register
 #define ATA_PRIMARY_STATUS      0x1F7   // Status register (read)
 #define ATA_PRIMARY_COMMAND     0x1F7   // Command register (write)
-#define ATA_PRIMARY_CONTROL     0x3F6   // Device control register
-#define ATA_PRIMARY_ALTSTATUS   0x3F6   // Alternate status (read)
+#define ATA_PRIMARY_CONTROL     0x3F6
+#define ATA_PRIMARY_ALTSTATUS   0x3F6   // Alternate status (read, no interrupt clear)
 
-// ATA Commands
-#define ATA_CMD_READ_SECTORS    0x20    // Read sectors with retry
-#define ATA_CMD_WRITE_SECTORS   0x30    // Write sectors with retry
-#define ATA_CMD_IDENTIFY        0xEC    // Identify drive
-#define ATA_CMD_CACHE_FLUSH     0xE7    // Flush write cache
+#define ATA_CMD_READ_SECTORS    0x20
+#define ATA_CMD_WRITE_SECTORS   0x30
+#define ATA_CMD_IDENTIFY        0xEC
+#define ATA_CMD_CACHE_FLUSH     0xE7
 
-// Status Register Bits
-#define ATA_SR_BSY              0x80    // Busy
-#define ATA_SR_DRDY             0x40    // Drive ready
-#define ATA_SR_DF               0x20    // Drive write fault
-#define ATA_SR_DSC              0x10    // Drive seek complete
-#define ATA_SR_DRQ              0x08    // Data request ready
-#define ATA_SR_CORR             0x04    // Corrected data
-#define ATA_SR_IDX              0x02    // Index
-#define ATA_SR_ERR              0x01    // Error
+#define ATA_SR_BSY              0x80
+#define ATA_SR_DRDY             0x40
+#define ATA_SR_DF               0x20
+#define ATA_SR_DSC              0x10
+#define ATA_SR_DRQ              0x08
+#define ATA_SR_CORR             0x04
+#define ATA_SR_IDX              0x02
+#define ATA_SR_ERR              0x01
 
-// Drive Selection
-#define ATA_DRIVE_MASTER        0xA0    // Select master drive
-#define ATA_DRIVE_SLAVE         0xB0    // Select slave drive
+#define ATA_DRIVE_MASTER        0xA0
+#define ATA_DRIVE_SLAVE         0xB0
 
-#define ATA_SECTOR_SIZE         BOXOS_ATA_SECTOR_SIZE
-
-// Return Codes
 #define ATA_SUCCESS                 0
 #define ATA_ERR_INVALID_ARGS       -1
 #define ATA_ERR_NO_DEVICE          -2

@@ -3,19 +3,16 @@
 
 #include "ktypes.h"
 
-// Atomic type aliases for clearer semantics
 typedef volatile uint32_t atomic_u32_t;
 typedef volatile uint64_t atomic_u64_t;
 typedef volatile uint8_t atomic_u8_t;
 
-// Initialization helpers
 #define atomic_init_u32(ptr, val) atomic_store_u32(ptr, val)
 #define atomic_init_u64(ptr, val) atomic_store_u64(ptr, val)
 #define atomic_init_u8(ptr, val) atomic_store_u8(ptr, val)
 
 #define COMPILER_BARRIER() __asm__ __volatile__("" ::: "memory")
 
-// CRITICAL FIX: Use GCC atomic builtins for true atomic 64-bit operations
 static inline uint64_t atomic_load_u64(const volatile uint64_t* ptr) {
     return __atomic_load_n((uint64_t*)ptr, __ATOMIC_SEQ_CST);
 }
@@ -121,7 +118,6 @@ static inline uint64_t rdtsc(void) {
     return ((uint64_t)high << 32) | low;
 }
 
-// CRITICAL FIX: Use GCC atomic builtins for true atomic 8-bit operations
 static inline void atomic_store_u8(volatile uint8_t* ptr, uint8_t val) {
     __atomic_store_n((uint8_t*)ptr, val, __ATOMIC_SEQ_CST);
 }

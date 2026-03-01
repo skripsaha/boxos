@@ -6,14 +6,11 @@
 #include "boxos_magic.h"
 #include "boxos_limits.h"
 
-#define JOURNAL_MAGIC          BOXOS_JOURNAL_MAGIC        // "JOUR"
-#define JOURNAL_ENTRY_MAGIC    BOXOS_JOURNAL_ENTRY_MAGIC  // "JENT"
 #define JOURNAL_VERSION        1
 
-#define JOURNAL_SUPERBLOCK_SECTOR      2059  // After TagFS metadata
-#define JOURNAL_SUPERBLOCK_BACKUP      2060  // 2059 + 1
-#define JOURNAL_ENTRIES_START          2061  // 2060 + 1
-#define JOURNAL_ENTRY_COUNT            BOXOS_JOURNAL_ENTRY_COUNT
+#define JOURNAL_SUPERBLOCK_SECTOR      2059
+#define JOURNAL_SUPERBLOCK_BACKUP      2060
+#define JOURNAL_ENTRIES_START          2061
 #define JOURNAL_ENTRY_SECTORS          2     // Each entry is 1024 bytes (2 sectors)
 #define JOURNAL_ENTRIES_END            (JOURNAL_ENTRIES_START + (JOURNAL_ENTRY_COUNT * JOURNAL_ENTRY_SECTORS))
 
@@ -48,7 +45,7 @@ typedef struct __packed {
 STATIC_ASSERT(sizeof(JournalEntry) == 1024, "JournalEntry must be 1024 bytes (2 sectors)");
 
 int journal_init(void);
-int journal_reload(void);  // Force reload superblock from disk (for testing)
+int journal_reload(void);
 int journal_replay(void);
 int journal_validate_and_replay(void);
 int journal_begin(uint32_t* txn_id);

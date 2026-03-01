@@ -8,11 +8,8 @@
 #include "boxos_magic.h"
 #include "boxos_sizes.h"
 
-#define EVENT_MAGIC            BOXOS_EVENT_MAGIC  // "EVT!"
 #define RESPONSE_MAGIC         0x52455350  // "RESP"
-#define EVENT_MAX_PREFIXES     BOXOS_EVENT_MAX_PREFIXES
 #define EVENT_METADATA_SIZE    32
-#define EVENT_DATA_SIZE        BOXOS_EVENT_DATA_SIZE
 #define EVENT_TOTAL_SIZE       384
 
 // Routing constants (IPC)
@@ -49,8 +46,8 @@ typedef struct __packed {
     uint8_t  state;
     uint8_t  error_deck_idx;
     uint64_t timestamp;
-    boxos_error_t error_code;
-    boxos_error_t first_error;
+    error_t error_code;
+    error_t first_error;
     // Routing header
     uint32_t route_target;
     uint32_t sender_pid;
@@ -67,11 +64,8 @@ STATIC_ASSERT(EVENT_MAX_PREFIXES == 16, "Prefix count must be 16 - see docs/api/
 STATIC_ASSERT(EVENT_DATA_SIZE == 256, "Data size must be 256 bytes - see docs/api/event_structures.md");
 STATIC_ASSERT(sizeof(Event) == EVENT_TOTAL_SIZE, "Event must be exactly 384 bytes - see docs/api/event_structures.md");
 
-// Compile-time alignment checks
 _Static_assert(sizeof(Event) % 64 == 0, "Event should be cache-line aligned (64 bytes)");
 _Static_assert(sizeof(Event) == 384, "Event size should be 384 bytes");
-
-// NOTE: Response structure removed - BoxOS uses result_page.h instead
 
 static inline void event_init(Event* event, uint32_t pid, uint32_t event_id) {
     if (!event) return;
@@ -84,12 +78,10 @@ static inline void event_init(Event* event, uint32_t pid, uint32_t event_id) {
     event->current_prefix_idx = 0;
     event->prefix_count = 0;
 
-    // Initialize error tracking
-    event->error_code = BOXOS_OK;
-    event->first_error = BOXOS_OK;
+    event->error_code = OK;
+    event->first_error = OK;
     event->error_deck_idx = 0xFF;
 
-    // Initialize routing fields
     event->route_target = 0;
     event->sender_pid = 0;
     event->route_flags = ROUTE_SOURCE_KERNEL;
@@ -124,26 +116,25 @@ static inline void event_advance(Event* event) {
     }
 }
 
-// Error tracking helpers
 static inline bool event_is_pending(const Event* evt) {
-    return evt && evt->error_code == BOXOS_OK && evt->first_error == BOXOS_OK;
+    return evt && evt->error_code == OK && evt->first_error == OK;
 }
 
 static inline bool event_is_success(const Event* evt) {
-    return evt && evt->first_error == BOXOS_OK;
+    return evt && evt->first_error == OK;
 }
 
 static inline bool event_is_failed(const Event* evt) {
-    return evt && evt->first_error != BOXOS_OK;
+    return evt && evt->first_error != OK;
 }
 
-static inline void event_set_error(Event* evt, boxos_error_t err, uint8_t deck_idx) {
+static inline void event_set_error(Event* evt, error_t err, uint8_t deck_idx) {
     if (!evt) return;
 
     evt->error_code = err;
 
-    // Capture first error only (root cause tracking)
-    if (evt->first_error == BOXOS_OK && err != BOXOS_OK) {
+    // capture first error only for root cause tracking
+    if (evt->first_error == OK && err != OK) {
         evt->first_error = err;
         evt->error_deck_idx = deck_idx;
     }

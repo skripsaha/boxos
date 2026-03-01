@@ -7,7 +7,6 @@ unsigned char *vga = (unsigned char*)VGA;
 
 uint8_t vga_attr_backup[VGA_WIDTH * VGA_HEIGHT];
 
-// Current text color - used by all print functions
 uint8_t vga_current_color = TEXT_ATTR_DEFAULT;
 
 unsigned int current_loc = 0;
@@ -45,8 +44,6 @@ void vga_print_char(char ch, const unsigned char attr) {
     vga_update_cursor();
 }
 
-
-
 void vga_print(const char *str){
     while(*str){
         if(*str == '\n'){
@@ -70,7 +67,6 @@ void vga_print_newline(void){
         current_loc = (y + 1) * line_size;
     }
 }
-
 
 void vga_clear_screen(void){
     for(int i= 0; i < VGA_SIZE; i += 2){
@@ -107,10 +103,6 @@ void vga_clear_to_eol(void) {
     }
 }
 
-
-
-
-
 void vga_print_error(const char *str){
     while(*str){
         if(*str == '\n'){
@@ -121,8 +113,9 @@ void vga_print_error(const char *str){
         vga_print_char(*str, TEXT_ATTR_ERROR);
         str++;
     }
-    vga_update_cursor(); 
+    vga_update_cursor();
 }
+
 void vga_print_success(const char *str){
     while(*str){
         if(*str == '\n'){
@@ -133,7 +126,7 @@ void vga_print_success(const char *str){
         vga_print_char(*str, TEXT_ATTR_SUCCESS);
         str++;
     }
-    vga_update_cursor(); 
+    vga_update_cursor();
 }
 
 void vga_print_hint(const char *str){
@@ -197,7 +190,6 @@ void vga_update_cursor(void){
     outb(0x3D4, 0x0E);
     outb(0x3D5, (uint8_t)((pos >> 8) & 0xFF));
 }
-
 
 void vga_set_cursor_position(int x, int y){
     if (x < 0) x = 0;

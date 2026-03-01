@@ -28,7 +28,6 @@
 #define BUF_MAX_SIZE                 CONFIG_PROC_MAX_BUFFER_SIZE
 #define BUF_MAX_COUNT                64
 
-// Process spawn limits
 #define PROC_SPAWN_MAX_PHYS_ADDR     0x100000000ULL  // 4GB physical address limit for 32-bit compatibility
 
 typedef struct __packed {
@@ -157,10 +156,7 @@ int system_deck_tag_add(Event* event);
 int system_deck_tag_remove(Event* event);
 int system_deck_tag_check(Event* event);
 
-// CRITICAL-3: Buffer cleanup for process destruction
-// Call this when a process is destroyed to free all its buffers
-// This prevents memory leaks when processes terminate
-// NOTE: Process management code should call this during process_destroy()
+// Call on process destruction to free all buffers owned by pid
 void system_deck_cleanup_process_buffers(uint32_t pid);
 
 #endif // SYSTEM_DECK_PROCESS_H

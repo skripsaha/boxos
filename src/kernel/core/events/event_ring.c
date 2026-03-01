@@ -51,20 +51,20 @@ void event_ring_destroy(EventRingBuffer* ring) {
     kfree(ring);
 }
 
-boxos_error_t event_ring_push(EventRingBuffer* ring, Event* event) {
+error_t event_ring_push(EventRingBuffer* ring, Event* event) {
     if (!ring || !event) {
-        return BOXOS_ERR_INVALID_ARGUMENT;
+        return ERR_INVALID_ARGUMENT;
     }
 
     if (event->magic != EVENT_MAGIC) {
-        return BOXOS_ERR_INVALID_ARGUMENT;
+        return ERR_INVALID_ARGUMENT;
     }
 
     spin_lock(&ring->lock);
 
     if (ring->user_count >= ring->capacity) {
         spin_unlock(&ring->lock);
-        return BOXOS_ERR_EVENT_RING_FULL;
+        return ERR_EVENT_RING_FULL;
     }
 
     size_t write_pos = ring->tail % ring->capacity;
@@ -76,27 +76,27 @@ boxos_error_t event_ring_push(EventRingBuffer* ring, Event* event) {
 
     spin_unlock(&ring->lock);
 
-    // Auto-grow outside lock (grow re-checks under its own lock)
+    // auto-grow outside lock so kmalloc doesn't run under spinlock
     if (needs_grow) {
-        boxos_error_t grow_err = event_ring_grow(ring);
-        if (BOXOS_IS_ERROR(grow_err)) {
-            debug_printf("[EVENTRING] Auto-grow failed: %s\n", boxos_error_string(grow_err));
+        error_t grow_err = event_ring_grow(ring);
+        if (IS_ERROR(grow_err)) {
+            debug_printf("[EVENTRING] Auto-grow failed: %s\n", error_string(grow_err));
         }
     }
 
-    return BOXOS_OK;
+    return OK;
 }
 
-boxos_error_t event_ring_pop(EventRingBuffer* ring, Event* out_event) {
+error_t event_ring_pop(EventRingBuffer* ring, Event* out_event) {
     if (!ring || !out_event) {
-        return BOXOS_ERR_INVALID_ARGUMENT;
+        return ERR_INVALID_ARGUMENT;
     }
 
     spin_lock(&ring->lock);
 
     if (ring->user_count == 0) {
         spin_unlock(&ring->lock);
-        return BOXOS_ERR_WOULD_BLOCK;
+        return ERR_WOULD_BLOCK;
     }
 
     size_t read_pos = ring->head % ring->capacity;
@@ -109,45 +109,44 @@ boxos_error_t event_ring_pop(EventRingBuffer* ring, Event* out_event) {
 
     spin_unlock(&ring->lock);
 
-    return BOXOS_OK;
+    return OK;
 }
 
-boxos_error_t event_ring_grow(EventRingBuffer* ring) {
+error_t event_ring_grow(EventRingBuffer* ring) {
     if (!ring) {
-        return BOXOS_ERR_INVALID_ARGUMENT;
+        return ERR_INVALID_ARGUMENT;
     }
 
     if (ring->capacity >= EVENT_RING_MAX_CAPACITY) {
-        return BOXOS_ERR_BUFFER_LIMIT_EXCEEDED;
+        return ERR_BUFFER_LIMIT_EXCEEDED;
     }
 
     size_t new_capacity = ring->capacity * 2;
 
     size_t max_capacity = ((size_t)-1) / sizeof(Event);
     if (new_capacity > max_capacity) {
-        return BOXOS_ERR_NO_MEMORY;
+        return ERR_NO_MEMORY;
     }
 
-    // Allocate outside lock (kmalloc may be expensive)
+    // allocate outside lock; kmalloc may block or be slow
     Event* new_entries = kmalloc(new_capacity * sizeof(Event));
     if (!new_entries) {
-        return BOXOS_ERR_NO_MEMORY;
+        return ERR_NO_MEMORY;
     }
 
     spin_lock(&ring->lock);
 
-    // Re-check under lock: another context may have already grown the ring
+    // re-check under lock: another caller may have already grown
     if (!event_ring_should_grow(ring) || ring->capacity >= EVENT_RING_MAX_CAPACITY) {
         spin_unlock(&ring->lock);
         kfree(new_entries);
-        return BOXOS_OK;
+        return OK;
     }
 
-    // Verify new_capacity still valid after potential concurrent growth
     if (new_capacity <= ring->capacity) {
         spin_unlock(&ring->lock);
         kfree(new_entries);
-        return BOXOS_OK;
+        return OK;
     }
 
     size_t count = ring->user_count;
@@ -171,7 +170,7 @@ boxos_error_t event_ring_grow(EventRingBuffer* ring) {
 
     kfree(old_entries);
 
-    return BOXOS_OK;
+    return OK;
 }
 
 bool event_ring_should_grow(const EventRingBuffer* ring) {
@@ -218,7 +217,6 @@ event_push_result_t event_ring_push_priority(
         return EVENT_PUSH_FULL_BLOCKED;
     }
 
-    // Validate Event magic number
     if (event->magic != EVENT_MAGIC) {
         return EVENT_PUSH_FULL_BLOCKED;
     }
@@ -228,7 +226,7 @@ event_push_result_t event_ring_push_priority(
     size_t current_count = ring->user_count;
     size_t capacity = ring->capacity;
 
-    // SYSTEM PRIORITY: Uses full capacity (critical path for I/O completion)
+    // SYSTEM priority uses full capacity; USER priority is subject to limits
     if (priority == EVENT_PRIORITY_SYSTEM) {
         if (current_count >= capacity) {
             spin_unlock(&ring->lock);
@@ -245,16 +243,15 @@ event_push_result_t event_ring_push_priority(
         spin_unlock(&ring->lock);
 
         if (needs_grow) {
-            boxos_error_t grow_err = event_ring_grow(ring);
-            if (BOXOS_IS_ERROR(grow_err)) {
+            error_t grow_err = event_ring_grow(ring);
+            if (IS_ERROR(grow_err)) {
                 debug_printf("[EVENTRING] Auto-grow failed after system push: %s\n",
-                           boxos_error_string(grow_err));
+                           error_string(grow_err));
             }
         }
         return EVENT_PUSH_SYSTEM_OK;
     }
 
-    // USER PRIORITY: Subject to capacity limits
     if (current_count >= capacity) {
         spin_unlock(&ring->lock);
         return EVENT_PUSH_FULL_BLOCKED;
@@ -269,10 +266,10 @@ event_push_result_t event_ring_push_priority(
     spin_unlock(&ring->lock);
 
     if (needs_grow) {
-        boxos_error_t grow_err = event_ring_grow(ring);
-        if (BOXOS_IS_ERROR(grow_err)) {
+        error_t grow_err = event_ring_grow(ring);
+        if (IS_ERROR(grow_err)) {
             debug_printf("[EVENTRING] Auto-grow failed after user push: %s\n",
-                       boxos_error_string(grow_err));
+                       error_string(grow_err));
         }
     }
     return EVENT_PUSH_OK;

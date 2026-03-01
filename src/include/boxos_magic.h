@@ -1,23 +1,17 @@
 #ifndef BOXOS_MAGIC_H
 #define BOXOS_MAGIC_H
 
-// Magic numbers shared between kernel and userspace for validation
+#define NOTIFY_MAGIC       0x4E4F5449  // "NOTI"
+#define RESULT_MAGIC       0x52455355  // "RESU"
+#define EVENT_MAGIC        0x45565421  // "EVT!"
 
-// Page magics
-#define BOXOS_NOTIFY_MAGIC       0x4E4F5449  // "NOTI" (little-endian)
-#define BOXOS_RESULT_MAGIC       0x52455355  // "RESU" (little-endian)
-#define BOXOS_EVENT_MAGIC        0x45565421  // "EVT!" (little-endian)
+#define TAGFS_MAGIC        0x54414746  // "TAGF"
+#define TAGFS_META_MAGIC   0x544D4554  // "TMET"
+#define JOURNAL_MAGIC      0x4A4F5552  // "JOUR"
+#define JOURNAL_ENTRY_MAGIC 0x4A454E54 // "JENT"
 
-// TagFS magics
-#define BOXOS_TAGFS_MAGIC        0x54414746  // "TAGF"
-#define BOXOS_TAGFS_META_MAGIC   0x544D4554  // "TMET"
-#define BOXOS_JOURNAL_MAGIC      0x4A4F5552  // "JOUR"
-#define BOXOS_JOURNAL_ENTRY_MAGIC 0x4A454E54 // "JENT"
+#define PROCESS_MAGIC      0x50524F43  // "PROC"
 
-// Process magic
-#define BOXOS_PROCESS_MAGIC      0x50524F43  // "PROC"
-
-// Validation helper
-#define BOXOS_MAGIC_VALID(val, expected) ((val) == (expected))
+#define MAGIC_VALID(val, expected) ((val) == (expected))
 
 #endif // BOXOS_MAGIC_H

@@ -6,10 +6,8 @@
 #include "vmm.h"
 #include "ktypes.h"
 
-// Idle process structure (minimal, not in process list)
 static process_t g_idle_process;
 
-// External assembly function
 extern void idle_loop(void);
 
 void idle_process_init(void) {
@@ -20,42 +18,36 @@ void idle_process_init(void) {
     g_idle_process.state = PROC_READY;
     g_idle_process.ref_count = 0;
     g_idle_process.result_there = false;
-    g_idle_process.score = -1000;  // Lowest priority
+    g_idle_process.score = -1000;  // lowest priority
 
     strncpy(g_idle_process.tags, "idle", PROCESS_TAG_SIZE - 1);
     g_idle_process.tags[PROCESS_TAG_SIZE - 1] = '\0';
 
-    // Initialize spinlock
     spinlock_init(&g_idle_process.state_lock);
 
-    // BUG #18 FIX: Use PMM for page-aligned stack (consistent with process.c)
-    void* stack_phys = pmm_alloc(1);  // 1 page = 4KB
+    void* stack_phys = pmm_alloc(1);
     if (!stack_phys) {
         debug_printf("[IDLE] CRITICAL: Failed to allocate idle stack\n");
-        while (1) { asm volatile("cli; hlt"); }  // Halt system
+        while (1) { asm volatile("cli; hlt"); }
     }
-    void* stack_virt = (void*)stack_phys;  // Identity mapped in kernel space
+    void* stack_virt = (void*)stack_phys;  // identity mapped in kernel space
 
-    // Set up context to run idle_loop in kernel mode
     g_idle_process.context.rip = (uint64_t)idle_loop;
-    g_idle_process.context.rsp = (uint64_t)stack_virt + 4096;  // Stack grows down
+    g_idle_process.context.rsp = (uint64_t)stack_virt + 4096;  // stack grows down
     g_idle_process.context.rbp = g_idle_process.context.rsp;
-    g_idle_process.context.rflags = 0x202;  // IF=1 (interrupts enabled)
+    g_idle_process.context.rflags = 0x202;  // IF=1
     g_idle_process.context.cs = GDT_KERNEL_CODE;
     g_idle_process.context.ss = GDT_KERNEL_DATA;
     g_idle_process.context.ds = GDT_KERNEL_DATA;
     g_idle_process.context.es = GDT_KERNEL_DATA;
 
-    // Use kernel CR3 (no page table switch needed)
     __asm__ volatile("mov %%cr3, %0" : "=r"(g_idle_process.context.cr3));
 
-    // No Cabin, no Notify/Result pages (kernel mode only)
     g_idle_process.cabin = NULL;
     g_idle_process.notify_page_phys = 0;
     g_idle_process.result_page_phys = 0;
     g_idle_process.kernel_stack_top = (void*)((uint64_t)stack_virt + 4096);
 
-    // Not part of process list (don't set ->next)
     g_idle_process.next = NULL;
 
     debug_printf("[IDLE] Idle process initialized (PID 0)\n");

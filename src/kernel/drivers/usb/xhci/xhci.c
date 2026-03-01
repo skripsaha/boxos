@@ -126,7 +126,6 @@ int xhci_init(void) {
     debug_printf("[xHCI] MMIO base: 0x%llx (size: 0x%llx)\n",
                  ctrl->mmio_base_phys, ctrl->mmio_size);
 
-    // Map MMIO into kernel virtual address space
     volatile void* mmio_virt = vmm_map_mmio(ctrl->mmio_base_phys, ctrl->mmio_size,
                                            VMM_FLAG_PRESENT | VMM_FLAG_WRITABLE);
     if (!mmio_virt) {
@@ -137,10 +136,8 @@ int xhci_init(void) {
     debug_printf("[xHCI] MMIO mapped: phys=0x%llx -> virt=%p\n",
                  ctrl->mmio_base_phys, mmio_virt);
 
-    // Use virtual address for register access
     ctrl->cap_regs = (xhci_cap_regs_t*)mmio_virt;
 
-    // Validate MMIO mapping with test read
     uint8_t caplength = ctrl->cap_regs->caplength;
 
     if (caplength < 0x20) {
@@ -155,14 +152,14 @@ int xhci_init(void) {
     debug_printf("[xHCI] MMIO diagnostic: cap_regs=%p hciversion_offset=%lu raw_value=0x%04x\n",
                  ctrl->cap_regs, __builtin_offsetof(xhci_cap_regs_t, hciversion), hciversion);
 
-    // 0xFFFF = bus error (MMIO failed)
+    // 0xFFFF indicates a bus error (MMIO read failure)
     if (hciversion == 0xFFFF) {
         debug_printf("[xHCI] ERROR: Invalid HCI version 0x%04x (MMIO read failure)\n", hciversion);
         vmm_unmap_mmio(mmio_virt, ctrl->mmio_size);
         return -1;
     }
 
-    // 0x0000 may be valid for some controllers (e.g., QEMU qemu-xhci pre-1.0)
+    // 0x0000 may be valid for QEMU qemu-xhci pre-1.0
     if (hciversion == 0x0000) {
         debug_printf("[xHCI] WARNING: HCI version 0x0000 (pre-1.0 controller or MMIO issue)\n");
     }
@@ -300,7 +297,6 @@ int xhci_init(void) {
     return 0;
 
 cleanup_resources:
-    // Unmap MMIO
     if (ctrl->cap_regs) {
         vmm_unmap_mmio(ctrl->cap_regs, ctrl->mmio_size);
         ctrl->cap_regs = NULL;
@@ -310,7 +306,6 @@ cleanup_resources:
         ctrl->ports = NULL;
     }
 
-    // Free allocated resources
     if (ctrl->dcbaa_phys) {
         pmm_free((void*)ctrl->dcbaa_phys, 1);
         ctrl->dcbaa_phys = 0;

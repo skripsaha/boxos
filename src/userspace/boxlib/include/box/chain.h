@@ -3,46 +3,27 @@
 
 #include "types.h"
 
-// ============================================================================
-// CHAIN BUILDERS — Tier 1 API
-//
-// Each function adds ONE prefix to the notify chain + writes data.
-// Always call notify() as the LAST step to send the chain.
-//
-// Example:
-//   proc_kill(0);       // adds FF:02
-//   notify();           // sends, resets
-//
-// Example (multi-step):
-//   obj_read(fid, 0, 256);
-//   route(target_pid);
-//   notify();
-// ============================================================================
+// Chain builders: each function adds one prefix + data; call notify() last to send.
+// Example: obj_read(fid, 0, 256); route(target_pid); notify();
 
-// --- IPC / Routing ---
 void route(uint32_t target_pid);
 void route_tag(const char* tag);
 void hw_listen(uint8_t source_type, uint8_t flags);
 
-// --- Process Management ---
 void proc_kill(uint16_t pid);
 void proc_query(uint16_t pid);
 void proc_spawn(const char* filename);
 
-// --- Buffers ---
 void buf_alloc(uint8_t size_class);
 void buf_release(uint16_t buffer_id);
 
-// --- Process Tags ---
 void ptag_add(uint16_t pid, const char* tag);
 void ptag_remove(uint16_t pid, const char* tag);
 void ptag_check(uint16_t pid, const char* tag);
 
-// --- Storage Defrag ---
 void fs_defrag(uint32_t file_id, uint32_t target_block);
 void fs_fraginfo(void);
 
-// --- Storage / Files (Deck 0x02) ---
 void obj_create(const char* filename, const char* tags);
 void obj_read(uint32_t file_id, uint64_t offset, uint32_t length);
 void obj_write(uint32_t file_id, uint64_t offset, const void* buf, uint32_t length);
@@ -55,7 +36,6 @@ void obj_tag_unset(uint32_t file_id, const char* key);
 void ctx_set(const char* tag);
 void ctx_clear(void);
 
-// --- Hardware / VGA (Deck 0x03) ---
 void hw_vga_putchar(uint8_t row, uint8_t col, char c, uint8_t color);
 void hw_vga_putstring(const char* str, uint8_t len, uint8_t color);
 void hw_vga_clear(uint8_t color);
@@ -69,18 +49,15 @@ void hw_vga_getcolor(void);
 void hw_vga_setcolor(uint8_t color);
 void hw_vga_getdimensions(void);
 
-// --- Hardware / Keyboard ---
 void hw_kb_getchar(void);
 void hw_kb_readline(uint8_t max_size, bool echo);
 void hw_kb_status(void);
 
-// --- Hardware / Timer & RTC ---
 void hw_timer_ms(void);
 void hw_rtc_time(void);
 void hw_rtc_unix64(void);
 void hw_rtc_uptime(void);
 
-// --- Hardware / Power ---
 void hw_reboot(void);
 void hw_shutdown(void);
 

@@ -4,7 +4,7 @@
 #include "box/types.h"
 #include "box/error.h"
 
-typedef struct BOX_PACKED {
+typedef struct PACKED {
     uint64_t seconds;
     uint32_t nanosec;
     uint16_t year;
@@ -16,7 +16,7 @@ typedef struct BOX_PACKED {
     uint8_t  weekday;
 } time_t;
 
-BOX_STATIC_ASSERT(sizeof(time_t) == 20, "time_t must be 20 bytes");
+STATIC_ASSERT(sizeof(time_t) == 20, "time_t must be 20 bytes");
 
 int time_get(time_t* out);
 int time_get_secs(uint64_t* out_seconds);

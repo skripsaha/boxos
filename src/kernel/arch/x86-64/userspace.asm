@@ -1,5 +1,4 @@
 ; userspace.asm - Ring 0 to Ring 3 transition
-; BoxOS Snowball Architecture
 
 [BITS 64]
 
@@ -14,7 +13,7 @@ jump_to_userspace:
 
     mov rcx, rdi
     mov r11, rdx
-    sub rsi, 8          ; CRITICAL: Pre-align stack for ABI compliance
+    sub rsi, 8          ; Pre-align stack for ABI compliance
     mov rsp, rsi
 
     mov ax, 0x23

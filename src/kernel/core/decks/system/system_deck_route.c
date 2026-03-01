@@ -83,27 +83,27 @@ int system_deck_route(Event* event) {
     if (!event) return -1;
 
     if (event->route_target == 0) {
-        event_set_error(event, BOXOS_ERR_INVALID_ARGUMENT, event->current_prefix_idx);
+        event_set_error(event, ERR_INVALID_ARGUMENT, event->current_prefix_idx);
         event->state = EVENT_STATE_ERROR;
         return -1;
     }
 
     if (event->route_target == event->pid) {
-        event_set_error(event, BOXOS_ERR_ROUTE_SELF, event->current_prefix_idx);
+        event_set_error(event, ERR_ROUTE_SELF, event->current_prefix_idx);
         event->state = EVENT_STATE_ERROR;
         return -1;
     }
 
     process_t* target = process_find(event->route_target);
     if (!target) {
-        event_set_error(event, BOXOS_ERR_PROCESS_NOT_FOUND, event->current_prefix_idx);
+        event_set_error(event, ERR_PROCESS_NOT_FOUND, event->current_prefix_idx);
         event->state = EVENT_STATE_ERROR;
         return -1;
     }
 
     process_state_t target_state = process_get_state(target);
     if (target_state == PROC_TERMINATED || target_state == PROC_ZOMBIE) {
-        event_set_error(event, BOXOS_ERR_PROCESS_NOT_FOUND, event->current_prefix_idx);
+        event_set_error(event, ERR_PROCESS_NOT_FOUND, event->current_prefix_idx);
         event->state = EVENT_STATE_ERROR;
         return -1;
     }
@@ -116,7 +116,7 @@ int system_deck_route(Event* event) {
             memcpy(&head, (const void*)&rp->ring.head, sizeof(uint32_t));
             uint32_t tail = rp->ring.tail;
             if (((tail + 1) % RESULT_RING_SIZE) == head) {
-                event_set_error(event, BOXOS_ERR_ROUTE_TARGET_FULL, event->current_prefix_idx);
+                event_set_error(event, ERR_ROUTE_TARGET_FULL, event->current_prefix_idx);
                 event->state = EVENT_STATE_ERROR;
                 return -1;
             }
@@ -137,12 +137,12 @@ int system_deck_route(Event* event) {
     clone.prefix_count = 1;
     clone.state = EVENT_STATE_PROCESSING;
 
-    boxos_error_t push_err = event_ring_push(kernel_event_ring, &clone);
-    if (BOXOS_IS_ERROR(push_err)) {
+    error_t push_err = event_ring_push(kernel_event_ring, &clone);
+    if (IS_ERROR(push_err)) {
         event_ring_grow(kernel_event_ring);
         push_err = event_ring_push(kernel_event_ring, &clone);
-        if (BOXOS_IS_ERROR(push_err)) {
-            event_set_error(event, BOXOS_ERR_EVENT_RING_FULL, event->current_prefix_idx);
+        if (IS_ERROR(push_err)) {
+            event_set_error(event, ERR_EVENT_RING_FULL, event->current_prefix_idx);
             event->state = EVENT_STATE_ERROR;
             return -1;
         }
@@ -160,7 +160,7 @@ int system_deck_route_tag(Event* event) {
     if (!event) return -1;
 
     if (event->route_tag[0] == '\0') {
-        event_set_error(event, BOXOS_ERR_INVALID_ARGUMENT, event->current_prefix_idx);
+        event_set_error(event, ERR_INVALID_ARGUMENT, event->current_prefix_idx);
         event->state = EVENT_STATE_ERROR;
         return -1;
     }
@@ -182,7 +182,7 @@ int system_deck_route_tag(Event* event) {
     }
 
     if (target_count == 0) {
-        event_set_error(event, BOXOS_ERR_ROUTE_NO_SUBSCRIBERS, event->current_prefix_idx);
+        event_set_error(event, ERR_ROUTE_NO_SUBSCRIBERS, event->current_prefix_idx);
         event->state = EVENT_STATE_ERROR;
         return -1;
     }
@@ -205,11 +205,11 @@ int system_deck_route_tag(Event* event) {
         clone.prefix_count = 1;
         clone.state = EVENT_STATE_PROCESSING;
 
-        boxos_error_t push_err = event_ring_push(kernel_event_ring, &clone);
-        if (BOXOS_IS_ERROR(push_err)) {
+        error_t push_err = event_ring_push(kernel_event_ring, &clone);
+        if (IS_ERROR(push_err)) {
             event_ring_grow(kernel_event_ring);
             push_err = event_ring_push(kernel_event_ring, &clone);
-            if (BOXOS_IS_ERROR(push_err)) {
+            if (IS_ERROR(push_err)) {
                 debug_printf("[ROUTE_TAG] WARNING: Failed to deliver to PID %u: ring full\n",
                              targets[i]);
                 continue;
@@ -221,7 +221,7 @@ int system_deck_route_tag(Event* event) {
     if (delivered == 0) {
         debug_printf("[ROUTE_TAG] ERROR: All %u deliveries failed for '%s'\n",
                      target_count, event->route_tag);
-        event_set_error(event, BOXOS_ERR_EVENT_RING_FULL, event->current_prefix_idx);
+        event_set_error(event, ERR_EVENT_RING_FULL, event->current_prefix_idx);
         event->state = EVENT_STATE_ERROR;
         return -1;
     }
@@ -242,13 +242,13 @@ int system_deck_listen(Event* event) {
     int result = listen_table_add(event->pid, source_type, flags);
 
     if (result < 0) {
-        boxos_error_t err;
-        if (result == -BOXOS_ERR_LISTEN_ALREADY) {
-            err = BOXOS_ERR_LISTEN_ALREADY;
-        } else if (result == -BOXOS_ERR_LISTEN_TABLE_FULL) {
-            err = BOXOS_ERR_LISTEN_TABLE_FULL;
+        error_t err;
+        if (result == -ERR_LISTEN_ALREADY) {
+            err = ERR_LISTEN_ALREADY;
+        } else if (result == -ERR_LISTEN_TABLE_FULL) {
+            err = ERR_LISTEN_TABLE_FULL;
         } else {
-            err = BOXOS_ERR_INTERNAL;
+            err = ERR_INTERNAL;
         }
         event_set_error(event, err, event->current_prefix_idx);
         event->state = EVENT_STATE_ERROR;

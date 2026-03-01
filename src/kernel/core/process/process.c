@@ -16,7 +16,6 @@ static volatile uint32_t process_count = 0;
 static spinlock_t process_lock;
 static process_cleanup_queue_t g_cleanup_queue;
 
-// Forward declarations for cleanup helpers
 static bool cleanup_queue_enqueue(process_t* proc);
 static process_t* cleanup_queue_dequeue(void);
 static void process_cleanup_immediate(process_t* proc);
@@ -28,7 +27,6 @@ void process_init(void) {
     process_count = 0;
     spinlock_init(&process_lock);
 
-    // Initialize cleanup queue
     g_cleanup_queue.head = 0;
     g_cleanup_queue.tail = 0;
     g_cleanup_queue.count = 0;
@@ -67,7 +65,6 @@ process_t* process_create(const char* tags) {
         return NULL;
     }
 
-    // Allocate composite PID (generation + index)
     proc->pid = pid_alloc();
     if (proc->pid == PID_INVALID) {
         debug_printf("[PROCESS] ERROR: PID allocation failed (exhaustion at %u/%u)\n",
@@ -102,13 +99,11 @@ process_t* process_create(const char* tags) {
         proc->tags[0] = '\0';
     }
 
-    // Initialize blocking state
     proc->block_reason = PROC_BLOCK_NONE;
     proc->next_blocked = NULL;
     proc->block_start_time = 0;
 
-    // Allocate kernel stack with guard page protection
-    // Layout: [Guard (unmapped)] [Data pages]
+    // kernel stack layout: [guard page (unmapped)] [data pages]
     size_t kernel_stack_size = CONFIG_KERNEL_STACK_PAGES * VMM_PAGE_SIZE;
     size_t total_pages = CONFIG_KERNEL_STACK_TOTAL_PAGES;
 
@@ -124,8 +119,7 @@ process_t* process_create(const char* tags) {
 
     vmm_context_t* kernel_ctx = vmm_get_kernel_context();
 
-    // Guard page must be unmapped to trigger page fault on overflow
-    // First ensure PT exists (may need to split large page), then clear PTE
+    // guard page must be unmapped so a stack overflow raises a page fault
     pte_t* guard_pte = vmm_get_or_create_pte(kernel_ctx, (uintptr_t)stack_virt_base);
     if (!guard_pte) {
         debug_printf("[PROCESS] FATAL: Cannot create guard page PTE for PID %u\n", proc->pid);
@@ -136,7 +130,7 @@ process_t* process_create(const char* tags) {
         return NULL;
     }
 
-    *guard_pte = 0;  // Unmap guard page
+    *guard_pte = 0;
     vmm_flush_tlb_page((uintptr_t)stack_virt_base);
 
     proc->kernel_stack_guard_base = stack_virt_base;
@@ -159,16 +153,13 @@ process_t* process_create(const char* tags) {
     proc->context.gs = GDT_USER_DATA;
     proc->context.ss = GDT_USER_DATA;
 
-    // Initialize clean FPU/SSE state (default FCW=0x037F, MXCSR=0x1F80)
     fpu_init_state(proc->context.fpu_state);
     proc->context.fpu_initialized = true;
 
     spin_lock(&process_lock);
-
     proc->next = process_list_head;
     process_list_head = proc;
     process_count++;
-
     spin_unlock(&process_lock);
 
     return proc;
@@ -182,10 +173,9 @@ void process_ref_inc(process_t* proc) {
     uint32_t old = atomic_fetch_add_u32(&proc->ref_count, 1);
 
     #ifdef DEBUG_REFCOUNT
-    debug_printf("[REFCOUNT] PID %u: %u → %u (INC)\n", proc->pid, old, old + 1);
+    debug_printf("[REFCOUNT] PID %u: %u -> %u (INC)\n", proc->pid, old, old + 1);
     #endif
 
-    // SAFETY: Detect overflow (very unlikely, but possible with DoS)
     if (old > UINT32_MAX - 100) {
         debug_printf("[PROCESS] PANIC: ref_count overflow for PID %u (old=%u)\n",
                      proc->pid, old);
@@ -196,7 +186,6 @@ void process_ref_inc(process_t* proc) {
 void process_ref_dec(process_t* proc) {
     if (!proc) return;
 
-    // Atomic decrement with underflow check
     // fetch_sub returns OLD value (before subtraction)
     uint32_t old = atomic_fetch_sub_u32(&proc->ref_count, 1);
 
@@ -207,7 +196,7 @@ void process_ref_dec(process_t* proc) {
     }
 
     #ifdef DEBUG_REFCOUNT
-    debug_printf("[REFCOUNT] PID %u: %u → %u (DEC)\n", proc->pid, old, old - 1);
+    debug_printf("[REFCOUNT] PID %u: %u -> %u (DEC)\n", proc->pid, old, old - 1);
     #endif
 }
 
@@ -218,7 +207,6 @@ uint32_t process_ref_count(process_t* proc) {
 
 void process_set_state(process_t* proc, process_state_t new_state) {
     if (!proc) return;
-
     spin_lock(&proc->state_lock);
     proc->state = new_state;
     spin_unlock(&proc->state_lock);
@@ -226,11 +214,9 @@ void process_set_state(process_t* proc, process_state_t new_state) {
 
 process_state_t process_get_state(process_t* proc) {
     if (!proc) return PROC_TERMINATED;
-
     spin_lock(&proc->state_lock);
     process_state_t state = proc->state;
     spin_unlock(&proc->state_lock);
-
     return state;
 }
 
@@ -239,7 +225,6 @@ int process_destroy_safe(process_t* proc) {
         return -1;
     }
 
-    // accept both TERMINATED and ZOMBIE states
     process_state_t state = process_get_state(proc);
     if (state != PROC_TERMINATED && state != PROC_ZOMBIE) {
         debug_printf("[PROCESS] ERROR: Cannot destroy PID %u in state %d\n",
@@ -247,7 +232,6 @@ int process_destroy_safe(process_t* proc) {
         return -1;
     }
 
-    // ZOMBIE processes can be destroyed immediately if ref_count == 0
     uint32_t refs = process_ref_count(proc);
     if (refs > 0) {
         debug_printf("[PROCESS] ERROR: Cannot destroy PID %u with ref_count=%u\n",
@@ -262,7 +246,6 @@ int process_destroy_safe(process_t* proc) {
 void process_destroy(process_t* proc) {
     if (!proc) return;
 
-    // Validate magic
     if (proc->magic != PROCESS_MAGIC) {
         debug_printf("[PROCESS] CORRUPTION: Invalid magic 0x%x for PID %u\n",
                      proc->magic, proc->pid);
@@ -279,9 +262,8 @@ void process_destroy(process_t* proc) {
         return;
     }
     spin_unlock(&sched->scheduler_lock);
-    // scheduler_lock is now FREE - no deadlock possible
+    // scheduler_lock is now FREE — no deadlock possible below
 
-    // Check ref_count and remove from list ATOMICALLY
     spin_lock(&process_lock);
 
     uint32_t refs = process_ref_count(proc);
@@ -293,10 +275,9 @@ void process_destroy(process_t* proc) {
         return;
     }
 
-    // Poison magic BEFORE removing from list
+    // poison magic before removing from list to catch use-after-remove
     proc->magic = 0xDEADDEAD;
 
-    // Remove from process list
     if (process_list_head == proc) {
         process_list_head = proc->next;
     } else {
@@ -315,21 +296,19 @@ void process_destroy(process_t* proc) {
 
     process_set_state(proc, PROC_TERMINATED);
 
-    // Cancel pending async I/O
     uint32_t cancelled = async_io_cancel_by_pid(proc->pid);
     if (cancelled > 0) {
         debug_printf("[PROCESS] Cancelled %u pending async I/O for PID %u\n",
                      cancelled, proc->pid);
     }
 
-    // Enqueue for deferred cleanup
     if (!cleanup_queue_enqueue(proc)) {
-        // Queue full - fallback to immediate cleanup
+        // queue full — fall back to immediate cleanup
         debug_printf("[PROCESS] WARNING: Cleanup queue full, immediate cleanup for PID %u\n",
                      proc->pid);
         process_cleanup_immediate(proc);
     }
-    // NOTE: Resources (PMM/VMM) NOT freed here - deferred to process_cleanup_deferred()
+    // resources (PMM/VMM) are NOT freed here; deferred to process_cleanup_deferred()
 }
 
 int process_load_binary(process_t* proc, const void* binary_data, size_t size) {
@@ -343,15 +322,12 @@ int process_load_binary(process_t* proc, const void* binary_data, size_t size) {
         return -1;
     }
 
-    // round up binary size to page boundary
     size_t page_count = (size + VMM_PAGE_SIZE - 1) / VMM_PAGE_SIZE;
 
-    // Ensure minimum size for cabin layout (5 pages = 20KB)
-    // .text: 3 pages, .rodata: 1 page, .data: 1 page
+    // minimum 5 pages for cabin layout (.text: 3, .rodata: 1, .data: 1)
     if (page_count < 5) {
         page_count = 5;
     }
-
 
     void* code_phys = pmm_alloc(page_count);
     if (!code_phys) {
@@ -367,7 +343,6 @@ int process_load_binary(process_t* proc, const void* binary_data, size_t size) {
         debug_printf("[PROCESS] ERROR: Failed to map code region\n");
         debug_printf("[PROCESS] Physical address: 0x%lx, Size: %zu bytes\n",
                      (uintptr_t)code_phys, size);
-
         pmm_free(code_phys, page_count);
         return -1;
     }
@@ -379,16 +354,16 @@ int process_load_binary(process_t* proc, const void* binary_data, size_t size) {
         return -1;
     }
 
-    // Stack layout: [guard page][...data pages...]
-    // Only map data pages, leave guard page unmapped for overflow detection
+    // stack layout: [guard page][...data pages...]
+    // only map data pages; guard page is left unmapped for overflow detection
     uint64_t guard_page_base = VMM_USER_STACK_TOP - (CONFIG_USER_STACK_TOTAL_PAGES * VMM_PAGE_SIZE);
     uint64_t stack_data_base = guard_page_base + (CONFIG_USER_STACK_GUARD_PAGES * VMM_PAGE_SIZE);
 
     vmm_map_result_t map_result = vmm_map_pages(
         proc->cabin,
-        stack_data_base,  // Start AFTER guard page
-        (uintptr_t)user_stack_phys + (CONFIG_USER_STACK_GUARD_PAGES * VMM_PAGE_SIZE), // Physical offset
-        CONFIG_USER_STACK_PAGES,  // Only map data pages, NOT guard
+        stack_data_base,
+        (uintptr_t)user_stack_phys + (CONFIG_USER_STACK_GUARD_PAGES * VMM_PAGE_SIZE),
+        CONFIG_USER_STACK_PAGES,
         VMM_FLAG_PRESENT | VMM_FLAG_WRITABLE | VMM_FLAG_USER
     );
 
@@ -419,7 +394,6 @@ void process_list_validate(const char* caller) {
     }
 
     while (curr && count < PROCESS_MAX_COUNT) {
-        // Check for cycles (process appears twice in list)
         for (uint32_t i = 0; i < count; i++) {
             if (seen[i] == curr) {
                 debug_printf("[PROCESS] CORRUPTION: Cycle detected at %p (caller: %s)\n",
@@ -430,7 +404,6 @@ void process_list_validate(const char* caller) {
             }
         }
 
-        // Validate magic number
         if (curr->magic != PROCESS_MAGIC) {
             debug_printf("[PROCESS] CORRUPTION: Invalid magic 0x%x at %p (caller: %s)\n",
                          curr->magic, (void*)curr, caller);
@@ -587,25 +560,23 @@ int process_add_tag(process_t* proc, const char* tag) {
         return -1;
     }
 
-    // Validate tag format
     size_t tag_len = strlen(tag);
     if (tag_len >= PROCESS_TAG_SIZE) {
         return -1;
     }
 
-    // CRITICAL: Use process_lock for tag modifications
     spin_lock(&process_lock);
 
     if (process_has_tag(proc, tag)) {
         spin_unlock(&process_lock);
-        return 0;  // Already exists
+        return 0;
     }
 
     size_t current_len = strlen(proc->tags);
 
     if (current_len + tag_len + 2 > PROCESS_TAG_SIZE) {
         spin_unlock(&process_lock);
-        return -1;  // No space
+        return -1;
     }
 
     if (current_len > 0) {
@@ -623,7 +594,6 @@ int process_remove_tag(process_t* proc, const char* tag) {
         return -1;
     }
 
-    // CRITICAL: Use process_lock for tag modifications
     spin_lock(&process_lock);
 
     if (!process_has_tag(proc, tag)) {
@@ -726,7 +696,6 @@ size_t process_snapshot_tags(process_t* proc, char* buffer, size_t buffer_size) 
         return 0;
     }
 
-    // CRITICAL: Take snapshot under process_lock for tag consistency
     spin_lock(&process_lock);
 
     size_t len = strlen(proc->tags);
@@ -740,10 +709,6 @@ size_t process_snapshot_tags(process_t* proc, char* buffer, size_t buffer_size) 
     return copy_len;
 }
 
-// ============================================================================
-// Deferred Cleanup Queue Implementation
-// ============================================================================
-
 static bool cleanup_queue_enqueue(process_t* proc) {
     if (!proc) return false;
 
@@ -751,7 +716,7 @@ static bool cleanup_queue_enqueue(process_t* proc) {
 
     if (g_cleanup_queue.count >= PROCESS_CLEANUP_QUEUE_SIZE) {
         spin_unlock(&g_cleanup_queue.lock);
-        return false;  // Queue full
+        return false;
     }
 
     g_cleanup_queue.queue[g_cleanup_queue.tail] = proc;
@@ -781,7 +746,6 @@ static process_t* cleanup_queue_dequeue(void) {
 static void process_cleanup_immediate(process_t* proc) {
     if (!proc) return;
 
-    // Free kernel stack (guard + data pages)
     if (proc->kernel_stack_guard_base) {
         uintptr_t guard_virt = (uintptr_t)proc->kernel_stack_guard_base;
 
@@ -802,23 +766,20 @@ static void process_cleanup_immediate(process_t* proc) {
         proc->kernel_stack = NULL;
     }
 
-    // Free cabin context (VMM + page tables)
     if (proc->cabin) {
         vmm_destroy_context(proc->cabin);
         proc->cabin = NULL;
     }
 
-    // Free PID back to allocator
     pid_free(proc->pid);
     proc->pid = PID_INVALID;
 
-    // Free process structure
     kfree(proc);
 }
 
 void process_cleanup_deferred(void) {
     uint32_t cleaned = 0;
-    const uint32_t MAX_PER_CALL = 8;  // Throttling
+    const uint32_t MAX_PER_CALL = 8;  // throttle to avoid long latency spikes
 
     while (cleaned < MAX_PER_CALL) {
         process_t* proc = cleanup_queue_dequeue();
@@ -846,7 +807,6 @@ void process_cleanup_queue_flush(void) {
 
     uint32_t total_cleaned = 0;
 
-    // Drain entire queue (no throttling on shutdown)
     while (g_cleanup_queue.count > 0) {
         process_t* proc = cleanup_queue_dequeue();
         if (!proc) break;

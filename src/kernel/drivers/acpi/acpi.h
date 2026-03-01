@@ -3,7 +3,6 @@
 
 #include "ktypes.h"
 
-// ACPI Error Codes
 typedef enum {
     ACPI_OK = 0,
     ACPI_ERR_RSDP_NOT_FOUND = 1,
@@ -17,7 +16,6 @@ typedef enum {
     ACPI_ERR_NO_PM1A = 9
 } acpi_error_t;
 
-// RSDP (Root System Description Pointer)
 typedef struct {
     char signature[8];
     uint8_t checksum;
@@ -30,7 +28,6 @@ typedef struct {
     uint8_t reserved[3];
 } __attribute__((packed)) acpi_rsdp_t;
 
-// SDT Header (common for all ACPI tables)
 typedef struct {
     char signature[4];
     uint32_t length;
@@ -43,19 +40,16 @@ typedef struct {
     uint32_t creator_revision;
 } __attribute__((packed)) acpi_sdt_header_t;
 
-// RSDT (Root System Description Table)
 typedef struct {
     acpi_sdt_header_t header;
     uint32_t entries[];
 } __attribute__((packed)) acpi_rsdt_t;
 
-// XSDT (Extended System Description Table)
 typedef struct {
     acpi_sdt_header_t header;
     uint64_t entries[];
 } __attribute__((packed)) acpi_xsdt_t;
 
-// Generic Address Structure
 typedef struct {
     uint8_t address_space;
     uint8_t bit_width;
@@ -64,7 +58,6 @@ typedef struct {
     uint64_t address;
 } __attribute__((packed)) acpi_gas_t;
 
-// FADT (Fixed ACPI Description Table)
 typedef struct {
     acpi_sdt_header_t header;
     uint32_t firmware_ctrl;
@@ -120,7 +113,7 @@ typedef struct {
     acpi_gas_t x_gpe1_block;
 } __attribute__((packed)) acpi_fadt_t;
 
-// AML Opcodes (minimal set for _S5 parsing)
+// AML opcodes - minimal set for _S5 parsing
 #define AML_SCOPE_OP        0x10
 #define AML_NAME_OP         0x08
 #define AML_PACKAGE_OP      0x12
@@ -128,7 +121,6 @@ typedef struct {
 #define AML_WORD_PREFIX     0x0B
 #define AML_DWORD_PREFIX    0x0C
 
-// Public API
 acpi_error_t acpi_init(void);
 void acpi_shutdown(void) __attribute__((noreturn));
 void acpi_print_info(void);

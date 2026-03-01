@@ -1,7 +1,6 @@
 #include "operations_deck.h"
 #include "klib.h"
 
-// Forward declarations
 static int op_buf_move(Event* event);
 static int op_buf_fill(Event* event);
 static int op_buf_xor(Event* event);
@@ -120,18 +119,8 @@ static int op_buf_xor(Event* event) {
     return 0;
 }
 
-// BUF_HASH: Compute simple hash of buffer region
-//
-// Input layout (event->data):
-//   [0-3]:  offset     - Start offset of buffer to hash
-//   [4-7]:  len        - Length of buffer to hash (bytes)
-//   [8-11]: target_off - Offset where to write 32-bit hash result
-//
-// Algorithm: ROL5 additive hash (NOT CRC32)
-//   - For each byte: hash += byte; hash = ROL(hash, 5)
-//   - Fast, suitable for simple checksums (not cryptographic)
-//
-// Returns: 0 on success, -1 on bounds error
+// ROL5 additive hash (NOT CRC32): for each byte, hash += byte; hash = ROL(hash, 5)
+// Input: [0-3] offset, [4-7] len, [8-11] target_off for 32-bit result
 static int op_buf_hash(Event* event) {
     uint32_t offset = read_u32(event->data, 0);
     uint32_t len = read_u32(event->data, 4);
@@ -144,11 +133,10 @@ static int op_buf_hash(Event* event) {
         return -1;
     }
 
-    // ROL5 additive hash
     uint32_t hash = 0;
     for (uint32_t i = 0; i < len; i++) {
         hash += event->data[offset + i];
-        hash = (hash << 5) | (hash >> 27);  // Rotate left 5 bits
+        hash = (hash << 5) | (hash >> 27);  // rotate left 5 bits
     }
 
     write_u32(event->data, target_off, hash);

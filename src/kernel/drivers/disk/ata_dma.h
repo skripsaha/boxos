@@ -6,11 +6,8 @@
 #include "async_io.h"
 #include "kernel_config.h"
 
-// ATA DMA Driver - Queue depth = 1 only.
-// Intel PIIX4 IDE (emulated by QEMU) does not support NCQ: it has a single BMCR,
-// BMSR, and PRD table pointer. Submitting two DMA commands simultaneously causes
-// undefined behavior (data loss, kernel panic). If DMA is busy, fallback to PIO.
-// NCQ is available only on AHCI (>=2004), not implemented in BoxOS.
+// PIIX4 IDE (emulated by QEMU) does not support NCQ: single BMCR, BMSR, and PRD table pointer.
+// Submitting two DMA commands simultaneously causes data loss. If DMA is busy, fallback to PIO.
 
 #define ATA_DMA_MAX_REQUESTS    16
 #define ATA_DMA_PRD_MAX_ENTRIES 8
@@ -64,7 +61,6 @@ typedef struct {
     uint8_t retry_count;
     uint8_t reserved[3];
 
-    // Write-specific metadata for async WRITE completion
     uint32_t file_id;
     uint64_t write_offset;
     uint64_t original_file_size;
@@ -76,11 +72,10 @@ typedef struct {
     uint8_t* prd_table_virt;
     uintptr_t prd_table_phys;
 
-    // SIMPLIFIED: Only 1 active request (PIIX4 limitation)
-    ata_dma_request_t active_request;  // Single slot instead of array[16]
-    uint8_t active_request_idx;        // 0 = active, 0xFF = idle
+    // PIIX4 limitation: only 1 active request at a time
+    ata_dma_request_t active_request;
+    uint8_t active_request_idx;  // 0 = active, 0xFF = idle
 
-    // Statistics (atomic)
     atomic_u32_t total_requests;
     atomic_u32_t completed_requests;
     atomic_u32_t failed_requests;

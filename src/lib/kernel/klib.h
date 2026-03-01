@@ -1,8 +1,8 @@
 #ifndef KLIB_H
 #define KLIB_H
 
-#include "ktypes.h"   // Replaces stdint.h, stddef.h, stdbool.h
-#include "kstdarg.h"  // Replaces stdarg.h
+#include "ktypes.h"
+#include "kstdarg.h"
 #include "kernel_config.h"
 
 extern uintptr_t _kernel_end;
@@ -14,17 +14,12 @@ extern uintptr_t _kernel_start;
 #define ALIGN_UP(addr, align) (((addr) + (align) - 1) & ~((align) - 1))
 #define ALIGN_DOWN(addr, align) ((addr) & ~((align) - 1))
 
-// Kernel heap size: DYNAMIC (calculated at runtime based on available RAM)
-// Formula: 3% of total RAM, clamped to [2MB, 16MB]
-#define KLIB_HEAP_MIN_SIZE    (2 * 1024 * 1024)   // 2MB minimum
-#define KLIB_HEAP_MAX_SIZE    (16 * 1024 * 1024)  // 16MB maximum
-#define KLIB_HEAP_RAM_PERCENT 3  // Use 3% of total RAM for kernel heap
+// 3% of total RAM, clamped to [2MB, 16MB]
+#define KLIB_HEAP_MIN_SIZE    (2 * 1024 * 1024)
+#define KLIB_HEAP_MAX_SIZE    (16 * 1024 * 1024)
+#define KLIB_HEAP_RAM_PERCENT 3
 
-// ALIGNMENT FIX: Must be 32 bytes for correct operation
-// Reason: mem_block_t is 20 bytes (size_t=8 + ptr=8 + uint32_t=4)
-// With 16-byte alignment, block splitting in kmalloc creates misaligned
-// new_block pointers, causing page faults when accessing block->magic.
-// 32-byte alignment ensures all block headers are properly aligned.
+// 32 bytes: mem_block_t is 20 bytes; 16-byte alignment causes misaligned new_block pointers in kmalloc split
 #define KLIB_BLOCK_ALIGNMENT  32
 #define KLIB_MAGIC_NUMBER     0xDEADBEEF
 
@@ -36,7 +31,7 @@ typedef struct mem_block {
 
 typedef struct {
     uint32_t locked;
-    uint64_t saved_flags;  // Saved RFLAGS (for IRQ state)
+    uint64_t saved_flags;
 } spinlock_t;
 
 typedef struct list_node {
@@ -76,7 +71,6 @@ int ksnprintf(char* buf, size_t size, const char* fmt, ...);
 void kputchar(char c);
 int kputnl(void);
 
-// Debug output macro - controlled by CONFIG_DEBUG_ENABLED
 #if CONFIG_DEBUG_ENABLED
     #define debug_printf(...) kprintf(__VA_ARGS__)
 #else

@@ -4,7 +4,7 @@
 
 static void ensure_ready(void) {
     notify_page_t* np = notify_page();
-    if (np->magic != BOX_NOTIFY_MAGIC) {
+    if (np->magic != NOTIFY_MAGIC) {
         notify_prepare();
     }
 }
@@ -77,7 +77,7 @@ void buf_release(uint16_t buffer_id) {
 
 static void ptag_common(uint16_t pid, const char* tag, uint8_t opcode) {
     ensure_ready();
-    struct __attribute__((packed)) {
+    struct PACKED {
         uint16_t pid;
         char tag[32];
     } request;
@@ -123,7 +123,7 @@ void fs_fraginfo(void) {
 void obj_create(const char* filename, const char* tags) {
     if (!filename) return;
     ensure_ready();
-    struct __attribute__((packed)) {
+    struct PACKED {
         char filename[32];
         char tags[160];
     } request;
@@ -143,7 +143,7 @@ void obj_create(const char* filename, const char* tags) {
 
 void obj_read(uint32_t file_id, uint64_t offset, uint32_t length) {
     ensure_ready();
-    struct __attribute__((packed)) {
+    struct PACKED {
         uint32_t file_id;
         uint64_t offset;
         uint32_t length;
@@ -159,7 +159,7 @@ void obj_read(uint32_t file_id, uint64_t offset, uint32_t length) {
 
 void obj_write(uint32_t file_id, uint64_t offset, const void* buf, uint32_t length) {
     ensure_ready();
-    struct __attribute__((packed)) {
+    struct PACKED {
         uint32_t file_id;
         uint64_t offset;
         uint32_t length;
@@ -182,7 +182,7 @@ void obj_write(uint32_t file_id, uint64_t offset, const void* buf, uint32_t leng
 
 void obj_delete(uint32_t file_id) {
     ensure_ready();
-    struct __attribute__((packed)) {
+    struct PACKED {
         uint32_t file_id;
         uint8_t reserved[188];
     } request;
@@ -195,7 +195,7 @@ void obj_delete(uint32_t file_id) {
 void obj_rename(uint32_t file_id, const char* new_name) {
     if (!new_name) return;
     ensure_ready();
-    struct __attribute__((packed)) {
+    struct PACKED {
         uint32_t file_id;
         char new_filename[32];
         uint8_t reserved[156];
@@ -211,7 +211,7 @@ void obj_rename(uint32_t file_id, const char* new_name) {
 
 void obj_info(uint32_t file_id) {
     ensure_ready();
-    struct __attribute__((packed)) {
+    struct PACKED {
         uint32_t file_id;
         uint8_t reserved[188];
     } request;
@@ -238,7 +238,7 @@ void obj_query(const char* tags) {
 void obj_tag_set(uint32_t file_id, const char* tag) {
     if (!tag) return;
     ensure_ready();
-    struct __attribute__((packed)) {
+    struct PACKED {
         uint32_t file_id;
         char tag[32];
         uint8_t reserved[156];
@@ -255,7 +255,7 @@ void obj_tag_set(uint32_t file_id, const char* tag) {
 void obj_tag_unset(uint32_t file_id, const char* key) {
     if (!key) return;
     ensure_ready();
-    struct __attribute__((packed)) {
+    struct PACKED {
         uint32_t file_id;
         char tag[32];
         uint8_t reserved[156];

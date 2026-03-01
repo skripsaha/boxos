@@ -11,9 +11,8 @@
 #if CONFIG_RUN_STARTUP_TESTS
 
 void test_hardware_deck(void) {
-    kprintf("\n====================================\n");
+    kprintf("\n");
     kprintf("HARDWARE DECK TEST\n");
-    kprintf("====================================\n");
 
     process_t* proc_no_tags = process_create("test:hardware:notags");
     if (!proc_no_tags) {
@@ -31,7 +30,6 @@ void test_hardware_deck(void) {
     int passed = 0;
     int total = 0;
 
-    // Test 1: TIMER_GET_TICKS
     {
         total++;
         kprintf("\n[TEST %d] TIMER_GET_TICKS: Read current ticks (no tags)\n", total);
@@ -55,7 +53,7 @@ void test_hardware_deck(void) {
         if (head != tail) {
             result_entry_t* entry = &result_page->ring.entries[head % RESULT_RING_SIZE];
 
-            if (entry->error_code == BOXOS_OK) {
+            if (entry->error_code == OK) {
                 uint64_t ticks = ((uint64_t)entry->payload[0] << 56) |
                                  ((uint64_t)entry->payload[1] << 48) |
                                  ((uint64_t)entry->payload[2] << 40) |
@@ -78,7 +76,6 @@ void test_hardware_deck(void) {
         process_ref_dec(proc_no_tags);
     }
 
-    // Test 2: TIMER_GET_MS
     {
         total++;
         kprintf("\n[TEST %d] TIMER_GET_MS: Read milliseconds (no tags)\n", total);
@@ -102,7 +99,7 @@ void test_hardware_deck(void) {
         if (head != tail) {
             result_entry_t* entry = &result_page->ring.entries[head % RESULT_RING_SIZE];
 
-            if (entry->error_code == BOXOS_OK) {
+            if (entry->error_code == OK) {
                 uint64_t ms = ((uint64_t)entry->payload[0] << 56) |
                               ((uint64_t)entry->payload[1] << 48) |
                               ((uint64_t)entry->payload[2] << 40) |
@@ -141,7 +138,6 @@ void test_hardware_deck(void) {
         return;
     }
 
-    // Test 3: PORT_INB allowed
     {
         total++;
         kprintf("\n[TEST %d] PORT_INB: Read from POST code port (0x80) with hardware tag\n", total);
@@ -168,7 +164,7 @@ void test_hardware_deck(void) {
         if (head != tail) {
             result_entry_t* entry = &result_page_hw->ring.entries[head % RESULT_RING_SIZE];
 
-            if (entry->error_code == BOXOS_OK) {
+            if (entry->error_code == OK) {
                 uint8_t value = entry->payload[0];
                 debug_printf("[TEST %d] PASS: Read value 0x%02x from port 0x80\n", total, value);
                 passed++;
@@ -183,7 +179,6 @@ void test_hardware_deck(void) {
         process_ref_dec(proc_hw);
     }
 
-    // Test 4: PORT_INB denied
     {
         total++;
         kprintf("\n[TEST %d] PORT_INB: Read from PIC port (0x20) - should be DENIED\n", total);
@@ -210,7 +205,7 @@ void test_hardware_deck(void) {
         if (head != tail) {
             result_entry_t* entry = &result_page_hw->ring.entries[head % RESULT_RING_SIZE];
 
-            if (entry->error_code == BOXOS_ERR_ACCESS_DENIED) {
+            if (entry->error_code == ERR_ACCESS_DENIED) {
                 debug_printf("[TEST %d] PASS: Port access correctly denied\n", total);
                 passed++;
             } else {
@@ -224,7 +219,6 @@ void test_hardware_deck(void) {
         process_ref_dec(proc_hw);
     }
 
-    // Test 5: IRQ_ENABLE
     {
         total++;
         kprintf("\n[TEST %d] IRQ_ENABLE: Enable IRQ 3 (COM2) with hardware tag\n", total);
@@ -250,7 +244,7 @@ void test_hardware_deck(void) {
         if (head != tail) {
             result_entry_t* entry = &result_page_hw->ring.entries[head % RESULT_RING_SIZE];
 
-            if (entry->error_code == BOXOS_OK && entry->payload[0] == 0) {
+            if (entry->error_code == OK && entry->payload[0] == 0) {
                 debug_printf("[TEST %d] PASS: IRQ 3 enabled\n", total);
                 passed++;
             } else {
@@ -264,7 +258,6 @@ void test_hardware_deck(void) {
         process_ref_dec(proc_hw);
     }
 
-    // Test 6: RTC_GET_TIME
     {
         total++;
         kprintf("\n[TEST %d] RTC_GET_TIME: Read current RTC time (no tags)\n", total);
@@ -288,7 +281,7 @@ void test_hardware_deck(void) {
         if (head != tail) {
             result_entry_t* entry = &result_page->ring.entries[head % RESULT_RING_SIZE];
 
-            if (entry->error_code == BOXOS_OK) {
+            if (entry->error_code == OK) {
                 uint64_t seconds = ((uint64_t)entry->payload[0] << 56) |
                                    ((uint64_t)entry->payload[1] << 48) |
                                    ((uint64_t)entry->payload[2] << 40) |
@@ -323,7 +316,6 @@ void test_hardware_deck(void) {
         process_ref_dec(proc_no_tags);
     }
 
-    // Test 7: RTC_GET_UNIX64
     {
         total++;
         kprintf("\n[TEST %d] RTC_GET_UNIX64: Read seconds since epoch (no tags)\n", total);
@@ -347,7 +339,7 @@ void test_hardware_deck(void) {
         if (head != tail) {
             result_entry_t* entry = &result_page->ring.entries[head % RESULT_RING_SIZE];
 
-            if (entry->error_code == BOXOS_OK) {
+            if (entry->error_code == OK) {
                 uint64_t epoch_secs = ((uint64_t)entry->payload[0] << 56) |
                                      ((uint64_t)entry->payload[1] << 48) |
                                      ((uint64_t)entry->payload[2] << 40) |
@@ -369,7 +361,6 @@ void test_hardware_deck(void) {
         process_ref_dec(proc_no_tags);
     }
 
-    // Test 8: RTC_GET_UPTIME
     {
         total++;
         kprintf("\n[TEST %d] RTC_GET_UPTIME: Read system uptime in nanoseconds (no tags)\n", total);
@@ -393,7 +384,7 @@ void test_hardware_deck(void) {
         if (head != tail) {
             result_entry_t* entry = &result_page->ring.entries[head % RESULT_RING_SIZE];
 
-            if (entry->error_code == BOXOS_OK) {
+            if (entry->error_code == OK) {
                 uint64_t uptime_ns = ((uint64_t)entry->payload[0] << 56) |
                                     ((uint64_t)entry->payload[1] << 48) |
                                     ((uint64_t)entry->payload[2] << 40) |
@@ -419,10 +410,9 @@ void test_hardware_deck(void) {
     process_destroy(proc_no_tags);
     process_destroy(proc_hw);
 
-    kprintf("\n====================================\n");
+    kprintf("\n");
     kprintf("HARDWARE DECK TEST COMPLETE\n");
     kprintf("Results: %d/%d tests passed\n", passed, total);
-    kprintf("====================================\n\n");
 }
 
 #else

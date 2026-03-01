@@ -1,7 +1,6 @@
 #include "parser.h"
 #include "box/string.h"
 
-// Simple tokenizer (splits by spaces)
 static char* tokenize(char* str, char** saveptr) {
     if (!str && !*saveptr) {
         return NULL;
@@ -9,7 +8,6 @@ static char* tokenize(char* str, char** saveptr) {
 
     char* start = str ? str : *saveptr;
 
-    // Skip leading spaces
     while (*start == ' ' || *start == '\t') {
         start++;
     }
@@ -19,7 +17,6 @@ static char* tokenize(char* str, char** saveptr) {
         return NULL;
     }
 
-    // Find end of token
     char* end = start;
     while (*end != '\0' && *end != ' ' && *end != '\t') {
         end++;
@@ -50,7 +47,6 @@ int parser_parse(const char* input, parsed_command_t* cmd) {
     memcpy(cmd->arg_storage, input, input_len);
     cmd->arg_storage[input_len] = '\0';
 
-    // Tokenize
     char* saveptr = NULL;
     char* token = tokenize(cmd->arg_storage, &saveptr);
 

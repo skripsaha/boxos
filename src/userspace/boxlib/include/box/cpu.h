@@ -3,25 +3,25 @@
 
 #include "types.h"
 
-#define BOX_CPU_CAPS_PAGE_ADDR  0x7FFFF000UL
+#define CPU_CAPS_PAGE_ADDR  0x7FFFF000UL
 
-#define BOX_CPU_CAPS_MAGIC  0x43505543
+#define CPU_CAPS_MAGIC  0x43505543
 
-typedef struct BOX_PACKED {
+typedef struct PACKED {
     uint32_t magic;
     bool has_waitpkg;
     bool has_invariant_tsc;
     uint8_t _reserved[4090];
 } cpu_caps_page_t;
 
-BOX_STATIC_ASSERT(sizeof(cpu_caps_page_t) == 4096, "CPU caps page must be 4096 bytes");
+STATIC_ASSERT(sizeof(cpu_caps_page_t) == 4096, "CPU caps page must be 4096 bytes");
 
-#define BOX_CPU_CAPS ((volatile cpu_caps_page_t*)BOX_CPU_CAPS_PAGE_ADDR)
+#define CPU_CAPS ((volatile cpu_caps_page_t*)CPU_CAPS_PAGE_ADDR)
 
-BOX_INLINE bool cpu_has_waitpkg(void) {
-    volatile cpu_caps_page_t* caps = BOX_CPU_CAPS;
+INLINE bool cpu_has_waitpkg(void) {
+    volatile cpu_caps_page_t* caps = CPU_CAPS;
 
-    if (caps->magic != BOX_CPU_CAPS_MAGIC) {
+    if (caps->magic != CPU_CAPS_MAGIC) {
         return false;
     }
 

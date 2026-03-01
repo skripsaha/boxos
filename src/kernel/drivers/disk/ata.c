@@ -32,35 +32,32 @@ uint8_t ata_read_status(void) {
 }
 
 int ata_wait_ready(void) {
-    // PRODUCTION FIX: Use TSC-based timeout (portable across CPUs)
     uint64_t timeout_tsc = rdtsc() + cpu_ms_to_tsc(CONFIG_ATA_TIMEOUT_MS);
 
     while (rdtsc() < timeout_tsc) {
         uint8_t status = ata_read_status();
         if (!(status & ATA_SR_BSY) && (status & ATA_SR_DRDY)) {
-            return 0;  // Success
+            return 0;
         }
     }
 
-    // Don't print error - this is normal if no drive exists
-    return -1;  // Timeout
+    return -1;
 }
 
 int ata_wait_drq(void) {
-    // PRODUCTION FIX: Use TSC-based timeout (portable across CPUs)
     uint64_t timeout_tsc = rdtsc() + cpu_ms_to_tsc(CONFIG_ATA_TIMEOUT_MS);
 
     while (rdtsc() < timeout_tsc) {
         uint8_t status = ata_read_status();
         if (!(status & ATA_SR_BSY) && (status & ATA_SR_DRQ)) {
-            return 0;  // Success
+            return 0;
         }
         if (status & ATA_SR_ERR) {
-            return -1;  // Error - don't print, this is expected
+            return -1;
         }
     }
 
-    return -1;  // Timeout
+    return -1;
 }
 
 
@@ -72,7 +69,6 @@ static void ata_string_fixup(char* str, int len) {
         str[i + 1] = tmp;
     }
 
-    // Remove trailing spaces
     for (int i = len - 1; i >= 0; i--) {
         if (str[i] == ' ') {
             str[i] = '\0';
@@ -90,29 +86,22 @@ int ata_identify(uint8_t is_master, ATADevice* device) {
     memset(device, 0, sizeof(ATADevice));
     device->is_master = is_master;
 
-    // Select drive
     ata_select_drive(is_master);
 
-    // Set sector count and LBA to 0
     outb(ATA_PRIMARY_SECCOUNT, 0);
     outb(ATA_PRIMARY_LBA_LO, 0);
     outb(ATA_PRIMARY_LBA_MID, 0);
     outb(ATA_PRIMARY_LBA_HI, 0);
 
-    // Send IDENTIFY command
     outb(ATA_PRIMARY_COMMAND, ATA_CMD_IDENTIFY);
     ata_delay_400ns();
 
-    // Check if drive exists
     uint8_t status = ata_read_status();
     if (status == 0 || status == 0xFF) {
-        // No drive (floating bus or disconnected)
         return -1;
     }
 
-    // Wait for BSY to clear with shorter timeout (IDENTIFY is fast)
-    // PRODUCTION FIX: Use TSC-based timeout
-    uint64_t timeout_tsc = rdtsc() + cpu_ms_to_tsc(1000);  // 1 second for IDENTIFY
+    uint64_t timeout_tsc = rdtsc() + cpu_ms_to_tsc(1000);
 
     while (rdtsc() < timeout_tsc) {
         status = ata_read_status();
@@ -120,11 +109,10 @@ int ata_identify(uint8_t is_master, ATADevice* device) {
     }
 
     if (rdtsc() >= timeout_tsc) {
-        // Timeout - no drive
         return -1;
     }
 
-    // Check for ATAPI (we don't support it)
+    // Non-zero means ATAPI (CD-ROM etc.), not ATA
     uint8_t mid = inb(ATA_PRIMARY_LBA_MID);
     uint8_t hi = inb(ATA_PRIMARY_LBA_HI);
     if (mid != 0 || hi != 0) {
@@ -132,31 +120,26 @@ int ata_identify(uint8_t is_master, ATADevice* device) {
         return -1;
     }
 
-    // Wait for DRQ
     if (ata_wait_drq() != 0) {
         debug_printf("[ATA] IDENTIFY command failed\n");
         return -1;
     }
 
-    // Read 256 words of identify data
     for (int i = 0; i < 256; i++) {
         identify_data[i] = inw(ATA_PRIMARY_DATA);
     }
 
-    // Parse identify data
     device->exists = 1;
 
-    // Total sectors (LBA28) - use temp variable + memcpy to avoid strict-aliasing violation
+    // Use memcpy to avoid strict-aliasing violation
     uint32_t total_sectors_tmp;
     memcpy(&total_sectors_tmp, &identify_data[60], sizeof(uint32_t));
     device->total_sectors = total_sectors_tmp;
-    device->size_mb = (device->total_sectors / 2048);  // sectors * 512 / (1024*1024)
+    device->size_mb = (device->total_sectors / 2048);
 
-    // Model string (words 27-46)
     memcpy(device->model, &identify_data[27], 40);
     ata_string_fixup(device->model, 40);
 
-    // Serial number (words 10-19)
     memcpy(device->serial, &identify_data[10], 20);
     ata_string_fixup(device->serial, 20);
 
@@ -177,7 +160,6 @@ int ata_read_sectors(uint8_t is_master, uint32_t lba, uint8_t count, uint8_t* bu
     }
 
     if (ahci_is_initialized()) {
-        // Phase 3: AHCI only supports port 0
         if (!is_master) {
             debug_printf("[ATA] ERROR: AHCI slave not supported (port 0 only)\n");
             return ATA_ERR_NO_DEVICE;
@@ -191,51 +173,40 @@ int ata_read_sectors(uint8_t is_master, uint32_t lba, uint8_t count, uint8_t* bu
         return ATA_ERR_NO_DEVICE;
     }
 
-    // Validate LBA is within bounds
     if (lba >= device->total_sectors) {
         debug_printf("[ATA] ERROR: LBA %u out of bounds (max %u)\n", lba, device->total_sectors);
         return -1;
     }
 
-    // NOTE: DMA is available but NOT used automatically in sync mode
-    // DMA will be used for async operations (ata_dma_read_async)
-    // Using PIO for all synchronous reads
-    // Wait for drive to be ready
     if (ata_wait_ready() != 0) {
         return -1;
     }
 
-    // Select drive and set LBA mode
     uint8_t drive_bits = is_master ? 0xE0 : 0xF0;  // LBA mode + master/slave
-    drive_bits |= (lba >> 24) & 0x0F;  // High 4 bits of LBA
+    drive_bits |= (lba >> 24) & 0x0F;
     outb(ATA_PRIMARY_DRIVE, drive_bits);
     ata_delay_400ns();
 
-    // Set parameters
     outb(ATA_PRIMARY_SECCOUNT, count);
     outb(ATA_PRIMARY_LBA_LO, lba & 0xFF);
     outb(ATA_PRIMARY_LBA_MID, (lba >> 8) & 0xFF);
     outb(ATA_PRIMARY_LBA_HI, (lba >> 16) & 0xFF);
 
-    // Send read command
     outb(ATA_PRIMARY_COMMAND, ATA_CMD_READ_SECTORS);
 
-    // Read sectors
     for (int sector = 0; sector < count; sector++) {
-        // Wait for DRQ
         if (ata_wait_drq() != 0) {
             debug_printf("[ATA] ERROR: Read failed at sector %d\n", sector);
             return -1;
         }
 
-        // Read 256 words (512 bytes)
         uint16_t* buf16 = (uint16_t*)(buffer + sector * ATA_SECTOR_SIZE);
         for (int i = 0; i < 256; i++) {
             buf16[i] = inw(ATA_PRIMARY_DATA);
         }
     }
 
-    return 0;  // Success
+    return 0;
 }
 
 
@@ -245,7 +216,6 @@ int ata_write_sectors(uint8_t is_master, uint32_t lba, uint8_t count, const uint
     }
 
     if (ahci_is_initialized()) {
-        // Phase 3: AHCI only supports port 0
         if (!is_master) {
             debug_printf("[ATA] ERROR: AHCI slave not supported (port 0 only)\n");
             return ATA_ERR_NO_DEVICE;
@@ -258,7 +228,6 @@ int ata_write_sectors(uint8_t is_master, uint32_t lba, uint8_t count, const uint
         return ATA_ERR_NO_DEVICE;
     }
 
-    // CRITICAL: Protect bootloader + kernel sectors (0-399)
     #define BOOTLOADER_PROTECTED_SECTORS 400
 
     if (lba < BOOTLOADER_PROTECTED_SECTORS) {
@@ -266,62 +235,49 @@ int ata_write_sectors(uint8_t is_master, uint32_t lba, uint8_t count, const uint
         return ATA_ERR_PROTECTED_SECTOR;
     }
 
-    // Validate LBA is within bounds
     if (lba >= device->total_sectors) {
         debug_printf("[ATA] ERROR: LBA %u out of bounds (max %u)\n", lba, device->total_sectors);
         return -1;
     }
 
-    // PRODUCTION: Log disk writes for verification
     debug_printf("[ATA] WRITE: LBA %u, sectors %u (%u bytes)\n", lba, count, count * 512);
 
-    // NOTE: DMA is available but NOT used automatically in sync mode
-    // Using PIO for all synchronous writes
-    // Wait for drive to be ready
     if (ata_wait_ready() != 0) {
         return -1;
     }
 
-    // Select drive and set LBA mode
     uint8_t drive_bits = is_master ? 0xE0 : 0xF0;  // LBA mode + master/slave
-    drive_bits |= (lba >> 24) & 0x0F;  // High 4 bits of LBA
+    drive_bits |= (lba >> 24) & 0x0F;
     outb(ATA_PRIMARY_DRIVE, drive_bits);
     ata_delay_400ns();
 
-    // Set parameters
     outb(ATA_PRIMARY_SECCOUNT, count);
     outb(ATA_PRIMARY_LBA_LO, lba & 0xFF);
     outb(ATA_PRIMARY_LBA_MID, (lba >> 8) & 0xFF);
     outb(ATA_PRIMARY_LBA_HI, (lba >> 16) & 0xFF);
 
-    // Send write command
     outb(ATA_PRIMARY_COMMAND, ATA_CMD_WRITE_SECTORS);
 
-    // Write sectors
     for (int sector = 0; sector < count; sector++) {
-        // Wait for DRQ
         if (ata_wait_drq() != 0) {
             debug_printf("[ATA] ERROR: Write failed at sector %d\n", sector);
             return -1;
         }
 
-        // Write 256 words (512 bytes)
         const uint16_t* buf16 = (const uint16_t*)(buffer + sector * ATA_SECTOR_SIZE);
         for (int i = 0; i < 256; i++) {
             outw(ATA_PRIMARY_DATA, buf16[i]);
         }
     }
 
-    // PRODUCTION: Confirm successful write
     debug_printf("[ATA] WRITE COMPLETE: LBA %u (%u bytes written to disk)\n", lba, count * 512);
 
-    return 0;  // Success
+    return 0;
 }
 
 
 int ata_flush_cache(uint8_t is_master) {
     if (ahci_is_initialized()) {
-        // Phase 3: AHCI only supports port 0
         if (!is_master) {
             debug_printf("[ATA] ERROR: AHCI slave not supported (port 0 only)\n");
             return -1;
@@ -365,7 +321,7 @@ int ata_read_sectors_retry(uint8_t is_master, uint32_t lba, uint8_t count, uint8
         int result = ata_read_sectors(is_master, lba, count, buffer);
 
         if (result == 0) {
-            return 0;  // Success
+            return 0;
         }
 
         uint8_t error = ata_read_error();
@@ -388,7 +344,7 @@ int ata_write_sectors_retry(uint8_t is_master, uint32_t lba, uint8_t count, cons
         int result = ata_write_sectors(is_master, lba, count, buffer);
 
         if (result == 0) {
-            return 0;  // Success
+            return 0;
         }
 
         uint8_t error = ata_read_error();
@@ -404,7 +360,7 @@ int ata_write_sectors_retry(uint8_t is_master, uint32_t lba, uint8_t count, cons
     return -1;
 }
 
-// CRITICAL: Reserve sectors 0-15 for bootloader (Stage1 + Stage2 occupy 0-9)
+// Sectors 0-15 reserved for bootloader (Stage1 + Stage2 occupy 0-9)
 #define FILESYSTEM_START_SECTOR 16
 
 int ata_read_block(uint32_t block_num, uint8_t* buffer) {

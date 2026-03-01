@@ -1,7 +1,6 @@
 #include "cpuid.h"
 #include "klib.h"
 
-// Global CPU capabilities
 cpu_capabilities_t g_cpu_caps;
 
 void cpuid(uint32_t leaf, uint32_t* eax, uint32_t* ebx, uint32_t* ecx, uint32_t* edx) {
@@ -23,10 +22,8 @@ void cpuid_count(uint32_t leaf, uint32_t subleaf, uint32_t* eax, uint32_t* ebx, 
 void cpu_detect_features(void) {
     uint32_t eax, ebx, ecx, edx;
 
-    // Initialize structure
     memset(&g_cpu_caps, 0, sizeof(g_cpu_caps));
 
-    // Get vendor string (CPUID.0)
     cpuid(0, &eax, &ebx, &ecx, &edx);
     g_cpu_caps.max_basic_leaf = eax;
     *((uint32_t*)&g_cpu_caps.vendor_string[0]) = ebx;

@@ -5,7 +5,7 @@
 #include "box/system.h"
 
 int send(uint32_t target_pid, const void* data, uint16_t size) {
-    if (target_pid == 0) return -BOX_ERR_INVALID_ARGUMENT;
+    if (target_pid == 0) return -ERR_INVALID_ARGUMENT;
 
     route(target_pid);
 
@@ -17,18 +17,18 @@ int send(uint32_t target_pid, const void* data, uint16_t size) {
 
     result_entry_t result;
     if (!result_wait(&result, 500000)) {
-        return -BOX_ERR_TIMEOUT;
+        return -ERR_TIMEOUT;
     }
 
-    if (result.error_code != BOX_OK) {
+    if (result.error_code != OK) {
         return -(int)result.error_code;
     }
 
-    return BOX_OK;
+    return OK;
 }
 
 int broadcast(const char* tag, const void* data, uint16_t size) {
-    if (!tag || tag[0] == '\0') return -BOX_ERR_INVALID_ARGUMENT;
+    if (!tag || tag[0] == '\0') return -ERR_INVALID_ARGUMENT;
 
     route_tag(tag);
 
@@ -40,14 +40,14 @@ int broadcast(const char* tag, const void* data, uint16_t size) {
 
     result_entry_t result;
     if (!result_wait(&result, 500000)) {
-        return -BOX_ERR_TIMEOUT;
+        return -ERR_TIMEOUT;
     }
 
-    if (result.error_code != BOX_OK) {
+    if (result.error_code != OK) {
         return -(int)result.error_code;
     }
 
-    return BOX_OK;
+    return OK;
 }
 
 int listen(uint8_t source_type, uint8_t flags) {
@@ -56,14 +56,14 @@ int listen(uint8_t source_type, uint8_t flags) {
 
     result_entry_t result;
     if (!result_wait(&result, 500000)) {
-        return -BOX_ERR_TIMEOUT;
+        return -ERR_TIMEOUT;
     }
 
-    if (result.error_code != BOX_OK) {
+    if (result.error_code != OK) {
         return -(int)result.error_code;
     }
 
-    return BOX_OK;
+    return OK;
 }
 
 bool receive(result_entry_t* out_entry) {

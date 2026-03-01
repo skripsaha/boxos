@@ -16,7 +16,7 @@
 
 static ahci_controller_t ahci_ctrl;
 
-// Timeout in TSC cycles (2 seconds at typical CPU frequency)
+// 2 seconds at typical CPU frequency
 #define AHCI_TIMEOUT_TSC (2ULL * 1000 * 1000 * 1000)
 
 extern EventRingBuffer* kernel_event_ring;
@@ -137,7 +137,6 @@ void ahci_irq_handler(void) {
             __atomic_store_n(&state->ci_snapshot, port->ci, __ATOMIC_RELEASE);
         }
 
-        // Check error conditions
         if (port_is & (1 << 30)) {
             __sync_fetch_and_add(&state->ncq_errors, 1);
         }
@@ -237,15 +236,15 @@ bool ahci_can_submit_port(uint8_t port_num) {
     return port->slot_bitmap != 0;
 }
 
-boxos_error_t ahci_build_ncq_read(uint8_t port_num, uint8_t slot, uint64_t lba,
+error_t ahci_build_ncq_read(uint8_t port_num, uint8_t slot, uint64_t lba,
                                    uint16_t sector_count, void* buffer_phys) {
     if (port_num != 0 || slot >= AHCI_MAX_SLOTS) {
-        return BOXOS_ERR_INVALID_ARGUMENT;
+        return ERR_INVALID_ARGUMENT;
     }
 
     ahci_port_t* port = &ahci_ctrl.port0;
     if (!port->active) {
-        return BOXOS_ERR_DEVICE_NOT_READY;
+        return ERR_DEVICE_NOT_READY;
     }
 
     ahci_cmd_header_t* cmdheader = (ahci_cmd_header_t*)port->clb_virt;
@@ -281,21 +280,21 @@ boxos_error_t ahci_build_ncq_read(uint8_t port_num, uint8_t slot, uint64_t lba,
     cmdfis->featurel = sector_count & 0xFF;
     cmdfis->featureh = (sector_count >> 8) & 0xFF;
 
-    cmdfis->countl = (slot << 3);
+    cmdfis->countl = (slot << 3);  // NCQ tag in bits [7:3]
     cmdfis->counth = 0;
 
-    return BOXOS_OK;
+    return OK;
 }
 
-boxos_error_t ahci_build_ncq_write(uint8_t port_num, uint8_t slot, uint64_t lba,
+error_t ahci_build_ncq_write(uint8_t port_num, uint8_t slot, uint64_t lba,
                                     uint16_t sector_count, void* buffer_phys) {
     if (port_num != 0 || slot >= AHCI_MAX_SLOTS) {
-        return BOXOS_ERR_INVALID_ARGUMENT;
+        return ERR_INVALID_ARGUMENT;
     }
 
     ahci_port_t* port = &ahci_ctrl.port0;
     if (!port->active) {
-        return BOXOS_ERR_DEVICE_NOT_READY;
+        return ERR_DEVICE_NOT_READY;
     }
 
     ahci_cmd_header_t* cmdheader = (ahci_cmd_header_t*)port->clb_virt;
@@ -331,21 +330,21 @@ boxos_error_t ahci_build_ncq_write(uint8_t port_num, uint8_t slot, uint64_t lba,
     cmdfis->featurel = sector_count & 0xFF;
     cmdfis->featureh = (sector_count >> 8) & 0xFF;
 
-    cmdfis->countl = (slot << 3);
+    cmdfis->countl = (slot << 3);  // NCQ tag in bits [7:3]
     cmdfis->counth = 0;
 
-    return BOXOS_OK;
+    return OK;
 }
 
-boxos_error_t ahci_start_async_transfer(struct async_io_request* req_raw) {
+error_t ahci_start_async_transfer(struct async_io_request* req_raw) {
     async_io_request_t* req = (async_io_request_t*)req_raw;
 
     if (!req || !ahci_ctrl.initialized) {
-        return BOXOS_ERR_NULL_POINTER;
+        return ERR_NULL_POINTER;
     }
 
     if (req->sector_count == 0 || req->sector_count > 8) {
-        return BOXOS_ERR_INVALID_ARGUMENT;
+        return ERR_INVALID_ARGUMENT;
     }
 
     ahci_port_t* state = &ahci_ctrl.port0;
@@ -353,7 +352,7 @@ boxos_error_t ahci_start_async_transfer(struct async_io_request* req_raw) {
 
     int slot = ahci_alloc_slot(0);
     if (slot < 0) {
-        return BOXOS_ERR_IO_QUEUE_FULL;
+        return ERR_IO_QUEUE_FULL;
     }
 
     state->event_id[slot] = req->event_id;
@@ -365,37 +364,37 @@ boxos_error_t ahci_start_async_transfer(struct async_io_request* req_raw) {
     if (req->op == ASYNC_IO_OP_WRITE) {
         if (!req->buffer_virt) {
             ahci_free_slot(0, slot);
-            return BOXOS_ERR_NULL_POINTER;
+            return ERR_NULL_POINTER;
         }
 
         memcpy(state->staging_virt[slot], req->buffer_virt, req->sector_count * 512);
         target_phys = state->staging_phys[slot];
         state->ncq_writes++;
 
-        if (ahci_build_ncq_write(0, slot, req->lba, req->sector_count, target_phys) != BOXOS_OK) {
+        if (ahci_build_ncq_write(0, slot, req->lba, req->sector_count, target_phys) != OK) {
             ahci_free_slot(0, slot);
-            return BOXOS_ERR_IO;
+            return ERR_IO;
         }
     } else {
-        // READ: Translate user virtual -> physical for DMA
+        // READ: translate user virtual -> physical for DMA
         process_t* proc = process_find(req->pid);
         if (!proc || !proc->cabin) {
             ahci_free_slot(0, slot);
-            return BOXOS_ERR_INVALID_ARGUMENT;
+            return ERR_INVALID_ARGUMENT;
         }
 
         uintptr_t target_phys_addr = vmm_virt_to_phys(proc->cabin, (uintptr_t)req->buffer_virt);
         if (target_phys_addr == 0) {
             ahci_free_slot(0, slot);
-            return BOXOS_ERR_INVALID_ADDRESS;
+            return ERR_INVALID_ADDRESS;
         }
 
         target_phys = (void*)target_phys_addr;
         state->ncq_reads++;
 
-        if (ahci_build_ncq_read(0, slot, req->lba, req->sector_count, target_phys) != BOXOS_OK) {
+        if (ahci_build_ncq_read(0, slot, req->lba, req->sector_count, target_phys) != OK) {
             ahci_free_slot(0, slot);
-            return BOXOS_ERR_IO;
+            return ERR_IO;
         }
     }
 
@@ -405,7 +404,7 @@ boxos_error_t ahci_start_async_transfer(struct async_io_request* req_raw) {
     port->ci |= (1U << slot);
     __sync_fetch_and_or(&state->ci_snapshot, (1U << slot));
 
-    return BOXOS_OK;
+    return OK;
 }
 
 void ahci_check_timeouts(void) {
@@ -430,7 +429,7 @@ void ahci_check_timeouts(void) {
 
         Event err;
         event_init(&err, state->pid[slot], state->event_id[slot]);
-        err.error_code = BOXOS_ERR_TIMEOUT;
+        err.error_code = ERR_TIMEOUT;
         err.state = EVENT_STATE_ERROR;
         event_ring_push(kernel_event_ring, &err);
 
@@ -501,7 +500,6 @@ static int ahci_port_init(uint8_t port_num) {
     port->regs->is = 0xFFFFFFFF;
     port->regs->serr = 0xFFFFFFFF;
 
-    // Allocate 32x4KB staging buffers for WRITE operations
     for (int i = 0; i < AHCI_MAX_SLOTS; i++) {
         void* staging_phys = pmm_alloc(1);
         if (!staging_phys) {
@@ -516,7 +514,6 @@ static int ahci_port_init(uint8_t port_num) {
             return -1;
         }
 
-        // Translate physical -> virtual for kernel access
         void* staging_virt = vmm_phys_to_virt((uintptr_t)staging_phys);
         memset(staging_virt, 0, 4096);
 
@@ -524,7 +521,6 @@ static int ahci_port_init(uint8_t port_num) {
         port->staging_virt[i] = staging_virt;
     }
 
-    // Initialize NCQ tracking
     port->ci_snapshot = 0;
     port->completed_slots = 0;
     memset(port->event_id, 0, sizeof(port->event_id));
@@ -539,13 +535,8 @@ static int ahci_port_init(uint8_t port_num) {
     port->slot_bitmap = 0xFFFFFFFF;
     port->active = 1;
 
-    // Initialize spinlock
     spinlock_init(&port->lock);
-
-    // Initialize statistics
     memset(&port->stats, 0, sizeof(ahci_port_stats_t));
-
-    // Set port status
     port->status = AHCI_PORT_ACTIVE;
 
     if (ahci_port_start(port) != 0) {
@@ -564,8 +555,7 @@ static int ahci_port_init(uint8_t port_num) {
     return 0;
 }
 
-// Phase 3: Single-port initialization (port 0 only)
-// Multi-port enumeration deferred to Phase 4 pending async I/O framework redesign
+// Multi-port enumeration deferred pending async I/O framework redesign
 static int ahci_init_port0(void) {
     if (!ahci_ctrl.initialized) {
         return -1;
@@ -597,9 +587,9 @@ static int ahci_init_port0(void) {
     return 0;
 }
 
-boxos_error_t ahci_port_comreset(ahci_port_t* port) {
+error_t ahci_port_comreset(ahci_port_t* port) {
     if (!port || !port->regs) {
-        return BOXOS_ERR_NULL_POINTER;
+        return ERR_NULL_POINTER;
     }
 
     volatile ahci_port_regs_t* regs = port->regs;
@@ -608,33 +598,27 @@ boxos_error_t ahci_port_comreset(ahci_port_t* port) {
 
     port->stats.comreset_count++;
 
-    // Step 1: Stop command engine
     if (ahci_port_stop(port) != 0) {
         debug_printf("[AHCI] Port %u: Failed to stop engine for COMRESET\n", port->port_num);
         port->stats.comreset_fail_count++;
-        return BOXOS_ERR_IO;
+        return ERR_IO;
     }
 
-    // Step 2: Clear PxSERR
     regs->serr = 0xFFFFFFFF;
 
-    // Step 3: Set PxSCTL.DET = 1 (perform interface reset)
     uint32_t sctl = regs->sctl;
     sctl = (sctl & ~0xF) | 0x1;
     regs->sctl = sctl;
 
-    // Step 4: Wait 1ms
     uint64_t timeout_tsc = rdtsc() + cpu_ms_to_tsc(AHCI_TIMEOUT_COMRESET_WAIT);
     while (rdtsc() < timeout_tsc) {
         cpu_pause();
     }
 
-    // Step 5: Clear PxSCTL.DET = 0 (no device detection restriction)
     sctl = regs->sctl;
     sctl = (sctl & ~0xF);
     regs->sctl = sctl;
 
-    // Step 6: Wait for device to re-establish link
     timeout_tsc = rdtsc() + cpu_ms_to_tsc(AHCI_TIMEOUT_COMRESET_WAIT);
     while (rdtsc() < timeout_tsc) {
         uint32_t ssts = regs->ssts;
@@ -644,7 +628,7 @@ boxos_error_t ahci_port_comreset(ahci_port_t* port) {
             regs->serr = 0xFFFFFFFF;
             regs->is = 0xFFFFFFFF;
             if (ahci_port_start(port) == 0) {
-                return BOXOS_OK;
+                return OK;
             }
             break;
         }
@@ -653,26 +637,25 @@ boxos_error_t ahci_port_comreset(ahci_port_t* port) {
 
     debug_printf("[AHCI] Port %u: COMRESET failed (timeout)\n", port->port_num);
     port->stats.comreset_fail_count++;
-    return BOXOS_ERR_TIMEOUT;
+    return ERR_TIMEOUT;
 }
 
-boxos_error_t ahci_port_recover(ahci_port_t* port) {
+error_t ahci_port_recover(ahci_port_t* port) {
     if (!port || !port->regs) {
-        return BOXOS_ERR_NULL_POINTER;
+        return ERR_NULL_POINTER;
     }
 
     debug_printf("[AHCI] Port %u: Starting error recovery...\n", port->port_num);
 
     port->stats.error_count++;
 
-    // Attempt COMRESET up to AHCI_MAX_COMRESET_ATTEMPTS times
     for (int attempt = 0; attempt < AHCI_MAX_COMRESET_ATTEMPTS; attempt++) {
-        boxos_error_t result = ahci_port_comreset(port);
-        if (result == BOXOS_OK) {
+        error_t result = ahci_port_comreset(port);
+        if (result == OK) {
             debug_printf("[AHCI] Port %u: Recovery successful (attempt %d/%d)\n",
                          port->port_num, attempt + 1, AHCI_MAX_COMRESET_ATTEMPTS);
             port->status = AHCI_PORT_ACTIVE;
-            return BOXOS_OK;
+            return OK;
         }
 
         debug_printf("[AHCI] Port %u: COMRESET attempt %d/%d failed\n",
@@ -682,7 +665,7 @@ boxos_error_t ahci_port_recover(ahci_port_t* port) {
     debug_printf("[AHCI] Port %u: Recovery failed after %d attempts\n",
                  port->port_num, AHCI_MAX_COMRESET_ATTEMPTS);
     port->status = AHCI_PORT_ERROR;
-    return BOXOS_ERR_IO;
+    return ERR_IO;
 }
 
 const char* ahci_decode_serr(uint32_t serr) {
@@ -752,7 +735,7 @@ int ahci_init(void) {
                  ahci_ctrl.pci_dev.device,
                  ahci_ctrl.pci_dev.function);
 
-    // Read IRQ vector from PCI config offset 0x3C
+    // IRQ line is at PCI config offset 0x3C
     uint8_t irq_line = pci_config_read_byte(ahci_ctrl.pci_dev.bus,
                                              ahci_ctrl.pci_dev.device,
                                              ahci_ctrl.pci_dev.function,
@@ -792,7 +775,7 @@ int ahci_init(void) {
 
     ahci_ctrl.hba_phys = bar5 & 0xFFFFFFF0;
 
-    if (!BOXOS_IS_32BIT_SAFE(ahci_ctrl.hba_phys)) {
+    if (!IS_32BIT_SAFE(ahci_ctrl.hba_phys)) {
         debug_printf("[AHCI] BAR5 above 4GB (0x%lx) - not supported\n", ahci_ctrl.hba_phys);
         return -1;
     }
@@ -891,7 +874,7 @@ void ahci_test_read(void) {
     memset(dma_buffer, 0, 4096);
 
     uintptr_t dma_phys = (uintptr_t)dma_buffer;
-    if (!ahci_ctrl.s64a_support && !BOXOS_IS_32BIT_SAFE(dma_phys)) {
+    if (!ahci_ctrl.s64a_support && !IS_32BIT_SAFE(dma_phys)) {
         debug_printf("[AHCI] Test READ: DMA buffer above 4GB (0x%lx) but controller lacks 64-bit support\n", dma_phys);
         pmm_free(dma_buffer, 1);
         return;
@@ -911,7 +894,7 @@ void ahci_test_read(void) {
 
     cmdtbl->prdt[0].dba = (uint32_t)(uintptr_t)dma_buffer;
     cmdtbl->prdt[0].dbau = (uint32_t)((uintptr_t)dma_buffer >> 32);
-    cmdtbl->prdt[0].dbc = 511;
+    cmdtbl->prdt[0].dbc = 511;  // 512 - 1 (0-based byte count)
     cmdtbl->prdt[0].i = 1;
 
     fis_reg_h2d_t* cmdfis = (fis_reg_h2d_t*)&cmdtbl->cfis[0];
@@ -928,7 +911,7 @@ void ahci_test_read(void) {
     cmdfis->lba4 = 0;
     cmdfis->lba5 = 0;
 
-    cmdfis->device = 1 << 6;
+    cmdfis->device = 1 << 6;  // LBA mode
 
     cmdfis->countl = 1;
     cmdfis->counth = 0;

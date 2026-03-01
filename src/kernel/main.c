@@ -106,11 +106,9 @@ void kernel_main(void)
     debug_printf("[INIT] VMM...\n");
     vmm_init();
 
-    // Detect CPU features
     debug_printf("[INIT] CPU Feature Detection...\n");
     cpu_detect_features();
 
-    // Initialize CPU capabilities page
     debug_printf("[INIT] CPU Capabilities Page...\n");
     cpu_caps_page_init();
 
@@ -138,7 +136,6 @@ void kernel_main(void)
     debug_printf("[INIT] Guide Dispatcher...\n");
     guide_init();
 
-    // Run Dynamic EventRing unit tests
     kprintf("\n");
     kprintf("========================================================================\n");
     kprintf("RUNNING UNIT TESTS: Dynamic EventRing\n");

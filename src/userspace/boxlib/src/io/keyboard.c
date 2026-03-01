@@ -23,10 +23,10 @@ int kb_getchar(void) {
 
     result_entry_t result;
     if (!result_wait(&result, 1000)) {
-        return -BOX_ERR_TIMEOUT;
+        return -ERR_TIMEOUT;
     }
 
-    if (result.error_code != BOX_OK) {
+    if (result.error_code != OK) {
         return -(int)result.error_code;
     }
 
@@ -39,10 +39,10 @@ int kb_getchar_timeout(uint32_t timeout_ms) {
 
     result_entry_t result;
     if (!result_wait(&result, timeout_ms)) {
-        return -BOX_ERR_TIMEOUT;
+        return -ERR_TIMEOUT;
     }
 
-    if (result.error_code != BOX_OK) {
+    if (result.error_code != OK) {
         return -(int)result.error_code;
     }
 
@@ -51,7 +51,7 @@ int kb_getchar_timeout(uint32_t timeout_ms) {
 
 int kb_getchar_ex(kb_char_t* out_char) {
     if (!out_char) {
-        return -BOX_ERR_INVALID_ARGS;
+        return -ERR_INVALID_ARGS;
     }
 
     hw_kb_getchar();
@@ -59,10 +59,10 @@ int kb_getchar_ex(kb_char_t* out_char) {
 
     result_entry_t result;
     if (!result_wait(&result, 1000)) {
-        return -BOX_ERR_TIMEOUT;
+        return -ERR_TIMEOUT;
     }
 
-    if (result.error_code != BOX_OK) {
+    if (result.error_code != OK) {
         return -(int)result.error_code;
     }
 
@@ -76,7 +76,7 @@ int kb_getchar_ex(kb_char_t* out_char) {
 
 int kb_readline(char* buffer, size_t size, bool echo) {
     if (!buffer || size == 0 || size > 256) {
-        return -BOX_ERR_INVALID_ARGS;
+        return -ERR_INVALID_ARGS;
     }
 
     const uint32_t max_retries = 10000;
@@ -88,10 +88,10 @@ int kb_readline(char* buffer, size_t size, bool echo) {
 
         result_entry_t result;
         if (!result_wait(&result, 60000)) {
-            return -BOX_ERR_TIMEOUT;
+            return -ERR_TIMEOUT;
         }
 
-        if (result.error_code == BOX_OK) {
+        if (result.error_code == OK) {
             uint32_t length = kb_decode_u32(result.payload, 0);
 
             if (length == 0) {
@@ -108,13 +108,13 @@ int kb_readline(char* buffer, size_t size, bool echo) {
             buffer[length] = '\0';
 
             return (int)length;
-        } else if (result.error_code == BOX_ERR_WOULD_BLOCK ||
-                   result.error_code == BOX_ERR_BUSY) {
+        } else if (result.error_code == ERR_WOULD_BLOCK ||
+                   result.error_code == ERR_BUSY) {
             retry_count++;
             kb_sleep(50000);
             continue;
-        } else if (result.error_code == BOX_ERR_ACCESS_DENIED) {
-            return -BOX_ERR_ACCESS_DENIED;
+        } else if (result.error_code == ERR_ACCESS_DENIED) {
+            return -ERR_ACCESS_DENIED;
         } else {
             retry_count++;
             kb_sleep(50000);
@@ -122,17 +122,16 @@ int kb_readline(char* buffer, size_t size, bool echo) {
         }
     }
 
-    return -BOX_ERR_TIMEOUT;
+    return -ERR_TIMEOUT;
 }
 
 int kb_readline_async(char* buffer, size_t size, bool echo) {
     if (!buffer || size == 0 || size > 256) {
-        return -BOX_ERR_INVALID_ARGS;
+        return -ERR_INVALID_ARGS;
     }
 
-    // Non-standard data encoding (16-bit size split), use raw notify helpers
     notify_page_t* np = notify_page();
-    if (np->magic != BOX_NOTIFY_MAGIC) {
+    if (np->magic != NOTIFY_MAGIC) {
         notify_prepare();
     }
 
@@ -143,7 +142,7 @@ int kb_readline_async(char* buffer, size_t size, bool echo) {
     data[3] = 0;
 
     notify_write_data(data, 4);
-    notify_add_prefix(BOX_DECK_HARDWARE, KB_OP_READLINE);
+    notify_add_prefix(DECK_HARDWARE, KB_OP_READLINE);
     event_id_t event_id = notify();
 
     return (int)event_id;
@@ -151,7 +150,7 @@ int kb_readline_async(char* buffer, size_t size, bool echo) {
 
 int kb_status(kb_status_t* status) {
     if (!status) {
-        return -BOX_ERR_INVALID_ARGS;
+        return -ERR_INVALID_ARGS;
     }
 
     hw_kb_status();
@@ -159,10 +158,10 @@ int kb_status(kb_status_t* status) {
 
     result_entry_t result;
     if (!result_wait(&result, 1000)) {
-        return -BOX_ERR_TIMEOUT;
+        return -ERR_TIMEOUT;
     }
 
-    if (result.error_code != BOX_OK) {
+    if (result.error_code != OK) {
         return -(int)result.error_code;
     }
 

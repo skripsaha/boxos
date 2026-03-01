@@ -59,8 +59,6 @@ static void attempt_acpi_pm1(uint32_t pm_ctrl, uint16_t slp_typ) {
 }
 
 void acpi_shutdown(void) {
-    debug_printf("\n[ACPI] ========== SHUTDOWN SEQUENCE ==========\n");
-
     cli();
 
     if (g_acpi.initialized) {
@@ -100,8 +98,6 @@ void acpi_print_info(void) {
         return;
     }
 
-    debug_printf("\n[ACPI] ========== ACPI INFO ==========\n");
-
     if (g_acpi.rsdp) {
         debug_printf("RSDP:\n");
         debug_printf("  Signature: %.8s\n", g_acpi.rsdp->signature);
@@ -124,6 +120,4 @@ void acpi_print_info(void) {
     debug_printf("  Found: %s\n", g_acpi.s5_found ? "Yes" : "No (using fallback)");
     debug_printf("  SLP_TYPa: 0x%x\n", g_acpi.slp_typa);
     debug_printf("  SLP_TYPb: 0x%x\n", g_acpi.slp_typb);
-
-    debug_printf("[ACPI] ====================================\n\n");
 }

@@ -7,7 +7,6 @@ extern irq_handler
 
 global isr_table
 
-; Макрос для исключений БЕЗ error code
 %macro ISR_NOERROR 1
 isr%1:
     push 0          ; Dummy error code
@@ -15,7 +14,6 @@ isr%1:
     jmp isr_common
 %endmacro
 
-; Макрос для исключений С error code
 %macro ISR_ERROR 1
 isr%1:
     ; Error code already pushed by CPU, just add vector
@@ -27,7 +25,6 @@ isr%1:
     jmp isr_common
 %endmacro
 
-; Макрос для IRQ
 %macro IRQ 2
 irq%1:
     push 0          ; Dummy error code
@@ -35,7 +32,6 @@ irq%1:
     jmp isr_common
 %endmacro
 
-; Исключения (0-31)
 ISR_NOERROR 0   ; Divide by zero
 ISR_NOERROR 1   ; Debug
 ISR_NOERROR 2   ; NMI
@@ -93,9 +89,13 @@ ISR_NOERROR 128  ; kernel_notify syscall
 ; Completion IRQ (INT 0x81)
 ISR_NOERROR 129  ; workflow completion notification
 
-; Общий обработчик прерываний
+; Common ISR entry point
+; Stack layout on entry (top to bottom):
+;   r15, r14, r13, r12, r11, r10, r9, r8
+;   rbp, rdi, rsi, rdx, rcx, rbx, rax
+;   vector, error_code
+;   rip, cs, rflags, rsp, ss  (saved by CPU)
 isr_common:
-    ; Сохраняем все регистры в том же порядке что и в struct
     push rax
     push rbx
     push rcx
@@ -111,25 +111,16 @@ isr_common:
     push r13
     push r14
     push r15
-    
-    ; Теперь стек выглядит так (сверху вниз):
-    ; r15, r14, r13, r12, r11, r10, r9, r8
-    ; rbp, rdi, rsi, rdx, rcx, rbx, rax
-    ; vector, error_code  
-    ; rip, cs, rflags, rsp, ss (от CPU)
-    
-    ; rdi = указатель на interrupt_frame_t
-    mov rdi, rsp
-    
-    ; Выравниваем стек для System V ABI
+
+    mov rdi, rsp    ; rdi = pointer to interrupt_frame_t
+
+    ; Align stack to 16 bytes for System V ABI
     mov rax, rsp
     and rax, 15
-    sub rsp, rax        ; Выравниваем на 16 байт
-    push rax            ; Сохраняем смещение
-    
-    ; Получаем vector из правильного места в новой структуре
-    ; vector находится на смещении: 15*8 (r15-rax) + 0*8 = 120 байт от rsp
-    mov rax, [rdi + 15*8]   ; ИСПРАВЛЕНО: правильное смещение для vector
+    sub rsp, rax
+    push rax        ; Save alignment offset
+
+    mov rax, [rdi + 15*8]   ; vector field offset
 
     ; Check for syscall (vector 128 = 0x80)
     cmp rax, 128
@@ -138,26 +129,21 @@ isr_common:
     cmp rax, 32
     jl .exception
 
-    ; Это IRQ
     call irq_handler
     jmp .done
 
 .exception:
-    ; Это исключение
     call exception_handler
     jmp .done
 
 .syscall:
-    ; Это системный вызов
     extern syscall_handler
     call syscall_handler
 
 .done:
-    ; Восстанавливаем выравнивание стека
     pop rax
-    add rsp, rax
-    
-    ; Восстанавливаем регистры в обратном порядке
+    add rsp, rax    ; Restore stack alignment
+
     pop r15
     pop r14
     pop r13
@@ -173,14 +159,11 @@ isr_common:
     pop rcx
     pop rbx
     pop rax
-    
-    ; Убираем vector и error_code из стека
-    add rsp, 16
-    
-    ; Возвращаемся из прерывания
+
+    add rsp, 16     ; Remove vector and error_code
+
     iretq
 
-; Таблица указателей на ISR (256 элементов)
 section .data
 isr_table:
     ; Exceptions (0-31)

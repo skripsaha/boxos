@@ -2,9 +2,7 @@
 #include "vga.h"
 #include "io.h"
 #include "serial.h"
-#include "pmm.h" // For physical memory allocation
-
-// NO STDLIB DEPENDENCIES - all types from ktypes.h and kstdarg.h
+#include "pmm.h"
 
 #define HEAP_CANARY_MAGIC 0xDEADBEEFCAFEBABEULL
 #define HEAP_GUARD_ENABLED 1  // Set to 0 to disable
@@ -16,24 +14,21 @@ typedef struct {
     size_t canary_end_offset;  // Location of end canary
 } heap_guard_t;
 
-static uint8_t *memory_pool = NULL; // Allocated dynamically from PMM
-static size_t memory_pool_size = 0; // Actual heap size (calculated dynamically)
+static uint8_t *memory_pool = NULL;
+static size_t memory_pool_size = 0;
 static mem_block_t *free_list = NULL;
 static spinlock_t heap_lock = {0};
 
 static uint8_t current_attr = TEXT_ATTR_DEFAULT;
 
-// Digits for number conversion
 static const char digits[] = "0123456789abcdefghijklmnopqrstuvwxyz";
 
 void mem_init(void)
 {
-    // Get total available RAM from PMM
     extern size_t pmm_total_pages(void);
     size_t total_pages = pmm_total_pages();
-    size_t total_ram = total_pages * 4096; // 4KB per page
+    size_t total_ram = total_pages * 4096;
 
-    // Calculate heap size: KLIB_HEAP_RAM_PERCENT% of RAM, clamped to [MIN, MAX]
     size_t heap_size = (total_ram * KLIB_HEAP_RAM_PERCENT) / 100;
 
     if (heap_size < KLIB_HEAP_MIN_SIZE)
@@ -45,11 +40,8 @@ void mem_init(void)
         heap_size = KLIB_HEAP_MAX_SIZE;
     }
 
-// TEMPORARY: Until VMM initializes and maps all 510MB, bootloader only maps 128MB
-// Cap heap to 2MB initially for fast boot, VMM will expand later via vmalloc
-// VMM initialization needs ~1MB for initial page tables + metadata
-// After VMM init, kernel can use kmalloc/kfree from the 2MB pool + vmalloc for larger allocations
-#define BOOTLOADER_SAFE_HEAP_SIZE (2 * 1024 * 1024) // 2MB max before VMM
+// bootloader only maps 128MB; cap heap until VMM expands mapping
+#define BOOTLOADER_SAFE_HEAP_SIZE (2 * 1024 * 1024)
     if (heap_size > BOOTLOADER_SAFE_HEAP_SIZE)
     {
         debug_printf("[KLIB] Heap size capped at 2MB (bootloader mapping limit), will be %zu MB after VMM init\n",
@@ -57,18 +49,15 @@ void mem_init(void)
         heap_size = BOOTLOADER_SAFE_HEAP_SIZE;
     }
 
-    // Round up to page boundary
     heap_size = ALIGN_UP(heap_size, 4096);
     memory_pool_size = heap_size;
 
-    // Calculate number of pages needed
     size_t pages_needed = heap_size / 4096;
 
     debug_printf("[KLIB] Total RAM: %zu MB, Kernel heap: %zu MB (%zu pages)\n",
             total_ram / (1024 * 1024), heap_size / (1024 * 1024), pages_needed);
 
     debug_printf("[KLIB] Allocating memory pool from PMM...\n");
-    // Allocate memory pool from PMM (already zeroed)
     memory_pool = (uint8_t *)pmm_alloc_zero(pages_needed);
     if (!memory_pool)
     {
@@ -76,7 +65,6 @@ void mem_init(void)
     }
     debug_printf("[KLIB] Memory pool allocated at %p\n", memory_pool);
 
-    // Initialize free list
     debug_printf("[KLIB] Initializing free list...\n");
     free_list = (mem_block_t *)memory_pool;
     free_list->size = heap_size - sizeof(mem_block_t);
@@ -90,7 +78,6 @@ static void *kmalloc_internal(size_t size)
     if (size == 0)
         return NULL;
 
-    // Align size
     size = (size + KLIB_BLOCK_ALIGNMENT - 1) & ~(KLIB_BLOCK_ALIGNMENT - 1);
 
     spin_lock(&heap_lock);
@@ -105,7 +92,6 @@ static void *kmalloc_internal(size_t size)
             panic("Memory corruption detected in kmalloc!");
         }
 
-        // Validate curr pointer itself is within heap bounds
         if ((uintptr_t)curr < (uintptr_t)memory_pool ||
             (uintptr_t)curr >= (uintptr_t)memory_pool + memory_pool_size)
         {
@@ -115,7 +101,6 @@ static void *kmalloc_internal(size_t size)
 
         if (curr->size >= size)
         {
-            // Enough space to split block
             if (curr->size > size + sizeof(mem_block_t) + KLIB_BLOCK_ALIGNMENT)
             {
                 mem_block_t *new_block = (mem_block_t *)((char *)curr + sizeof(mem_block_t) + size);
@@ -126,7 +111,6 @@ static void *kmalloc_internal(size_t size)
                 curr->next = new_block;
             }
 
-            // Remove block from free list
             if (prev)
             {
                 prev->next = curr->next;
@@ -139,7 +123,6 @@ static void *kmalloc_internal(size_t size)
             curr->magic = KLIB_MAGIC_NUMBER;
             result = (void *)((char *)curr + sizeof(mem_block_t));
 
-            // Validate returned pointer is within heap bounds
             if ((uintptr_t)result < (uintptr_t)memory_pool ||
                 (uintptr_t)result >= (uintptr_t)memory_pool + memory_pool_size)
             {
@@ -152,7 +135,6 @@ static void *kmalloc_internal(size_t size)
 
         prev = curr;
 
-        // Validate next pointer before traversing
         if (curr->next != NULL)
         {
             if ((uintptr_t)curr->next < (uintptr_t)memory_pool ||
@@ -179,7 +161,6 @@ void* kmalloc(size_t size) {
     if (size == 0) return NULL;
 
 #if HEAP_GUARD_ENABLED
-    // Allocate extra space for guard structure and end canary
     size_t total_size = sizeof(heap_guard_t) + size + sizeof(uint64_t);
     heap_guard_t* guard = (heap_guard_t*)kmalloc_internal(total_size);
 
@@ -190,11 +171,9 @@ void* kmalloc(size_t size) {
     guard->caller = "kmalloc";
     guard->canary_end_offset = sizeof(heap_guard_t) + size;
 
-    // Set end canary
     uint64_t* end_canary = (uint64_t*)((uint8_t*)guard + guard->canary_end_offset);
     *end_canary = HEAP_CANARY_MAGIC;
 
-    // Return pointer after guard structure
     return (void*)((uint8_t*)guard + sizeof(heap_guard_t));
 #else
     return kmalloc_internal(size);
@@ -208,7 +187,6 @@ static void kfree_internal(void *ptr)
 
     mem_block_t *block = (mem_block_t *)((char *)ptr - sizeof(mem_block_t));
 
-    // Correctness checks (fixed to eliminate warnings)
     if ((uintptr_t)block < (uintptr_t)memory_pool ||
         (uintptr_t)block >= (uintptr_t)memory_pool + memory_pool_size)
     {
@@ -222,7 +200,6 @@ static void kfree_internal(void *ptr)
 
     spin_lock(&heap_lock);
 
-    // Check for double free
     for (mem_block_t *curr = free_list; curr; curr = curr->next)
     {
         if (curr == block)
@@ -231,7 +208,6 @@ static void kfree_internal(void *ptr)
         }
     }
 
-    // Find insertion point
     mem_block_t *curr = free_list, *prev = NULL;
     while (curr && curr < block)
     {
@@ -239,7 +215,6 @@ static void kfree_internal(void *ptr)
         curr = curr->next;
     }
 
-    // Try to merge with previous block
     if (prev && (char *)prev + sizeof(mem_block_t) + prev->size == (char *)block)
     {
         prev->size += sizeof(mem_block_t) + block->size;
@@ -258,7 +233,6 @@ static void kfree_internal(void *ptr)
         }
     }
 
-    // Try to merge with next block
     if (block->next && (char *)block + sizeof(mem_block_t) + block->size == (char *)block->next)
     {
         block->size += sizeof(mem_block_t) + block->next->size;
@@ -272,10 +246,8 @@ void kfree(void* ptr) {
     if (!ptr) return;
 
 #if HEAP_GUARD_ENABLED
-    // Get guard structure
     heap_guard_t* guard = (heap_guard_t*)((uint8_t*)ptr - sizeof(heap_guard_t));
 
-    // Check start canary
     if (guard->canary_start != HEAP_CANARY_MAGIC) {
         debug_printf("[HEAP] CORRUPTION: Start canary destroyed at %p\n", ptr);
         debug_printf("[HEAP]   Expected: 0x%llx, Got: 0x%llx\n",
@@ -283,7 +255,6 @@ void kfree(void* ptr) {
         while (1) { asm volatile("cli; hlt"); }
     }
 
-    // Check end canary
     uint64_t* end_canary = (uint64_t*)((uint8_t*)guard + guard->canary_end_offset);
     if (*end_canary != HEAP_CANARY_MAGIC) {
         debug_printf("[HEAP] CORRUPTION: End canary destroyed at %p (size=%zu)\n",
@@ -294,7 +265,6 @@ void kfree(void* ptr) {
         while (1) { asm volatile("cli; hlt"); }
     }
 
-    // Free the guard structure (not the returned pointer)
     kfree_internal(guard);
 #else
     kfree_internal(ptr);
@@ -340,19 +310,16 @@ __attribute__((noreturn)) void panic(const char *message, ...)
 
     kprintf("\n%[E]KERNEL PANIC:%[D] ");
 
-    // Create temporary buffer for formatted message
     char temp_buf[512];
     ksnprintf(temp_buf, sizeof(temp_buf), message, args);
     kprintf("%s", temp_buf);
 
-    // Add useful debug info
     kprintf("\n\nDebug info:");
     kprintf("\n- Stack pointer: %p", __builtin_frame_address(0));
     kprintf("\n- Instruction pointer: %p", __builtin_return_address(0));
 
     va_end(args);
 
-    // Disable interrupts and halt
     asm volatile("cli");
     while (1)
     {
@@ -474,7 +441,6 @@ int kputnl(void)
 
 void kputchar(char c)
 {
-    // Output to serial port (for debugging with -serial stdio)
     if (c == '\n')
     {
         serial_putchar('\r');
@@ -485,7 +451,6 @@ void kputchar(char c)
         serial_putchar(c);
     }
 
-    // Output to VGA
     if (c == '\n')
     {
         kputnl();
@@ -522,7 +487,6 @@ int kprintf(const char *format, ...)
         {
             ++format;
 
-            // Color codes and special codes
             if (*format == '[')
             {
                 format++;
@@ -573,7 +537,6 @@ int kprintf(const char *format, ...)
                 continue;
             }
 
-            // --- Parse flags: '-' (left-align), '0' (zero-pad) ---
             int left_align = 0, pad_zero = 0, pad_width = 0;
             if (*format == '-')
             {
@@ -591,10 +554,8 @@ int kprintf(const char *format, ...)
                 ++format;
             }
 
-            // --- Parse long/longlong/size_t ---
             int longflag = 0, longlongflag = 0, sizeflag = 0;
 
-            // Handle 'z' for size_t
             if (*format == 'z')
             {
                 sizeflag = 1;
@@ -617,7 +578,6 @@ int kprintf(const char *format, ...)
                 }
             }
 
-            // --- Format specifiers ---
             switch (*format)
             {
             case 'd':
@@ -628,7 +588,6 @@ int kprintf(const char *format, ...)
                 int len;
                 if (sizeflag)
                 {
-                    // size_t - use as signed long long for %zd
                     long long num = (long long)va_arg(args, size_t);
                     if (num < 0)
                     {
@@ -670,7 +629,6 @@ int kprintf(const char *format, ...)
                 len = strlen(buf);
                 int total = len + negative;
 
-                // Print with alignment
                 if (left_align)
                 {
                     if (negative)
@@ -715,7 +673,6 @@ int kprintf(const char *format, ...)
                 int len;
                 if (sizeflag)
                 {
-                    // %zu - size_t as unsigned
                     size_t num = va_arg(args, size_t);
                     utoa64((uint64_t)num, buf, 10);
                 }
@@ -736,7 +693,6 @@ int kprintf(const char *format, ...)
                 }
                 len = strlen(buf);
 
-                // Print with alignment
                 if (left_align)
                 {
                     for (char *p = buf; *p; ++p)
@@ -772,7 +728,6 @@ int kprintf(const char *format, ...)
                 int len;
                 if (sizeflag)
                 {
-                    // %zx - size_t as hex
                     size_t num = va_arg(args, size_t);
                     utoa64((uint64_t)num, buf, 16);
                 }
@@ -793,7 +748,6 @@ int kprintf(const char *format, ...)
                 }
                 len = strlen(buf);
 
-                // Print with alignment
                 if (left_align)
                 {
                     for (char *p = buf; *p; ++p)
@@ -831,7 +785,7 @@ int kprintf(const char *format, ...)
                 kputchar('x');
                 count += 2;
                 int len = strlen(buf);
-                int addr_width = 16; // For 64-bit pointers
+                int addr_width = 16;
                 for (int i = len; i < addr_width; ++i)
                 {
                     kputchar('0');
@@ -851,7 +805,6 @@ int kprintf(const char *format, ...)
                     str = "(null)";
                 int len = strlen(str);
 
-                // Print with alignment
                 if (left_align)
                 {
                     while (*str)
@@ -957,7 +910,6 @@ int ksnprintf(char *buf, size_t size, const char *fmt, ...)
         {
             p++;
 
-            // Simple support for basic formats in ksnprintf
             if (*p == 'd' || *p == 'i')
             {
                 int val = va_arg(args, int);
@@ -1001,7 +953,6 @@ int ksnprintf(char *buf, size_t size, const char *fmt, ...)
             }
             else
             {
-                // Unknown, print as is
                 if (pos + 1 < size)
                     buf[pos++] = '%';
                 if (pos + 1 < size)
@@ -1027,44 +978,36 @@ void spinlock_init(spinlock_t *lock)
 
 void spin_lock(spinlock_t *lock)
 {
-    // CRITICAL FIX: Save IRQ state and disable interrupts FIRST!
-    // This prevents deadlock if IRQ handler tries to acquire same lock
+    // save IRQ state and disable interrupts before acquiring to prevent deadlock with IRQ handlers
     uint64_t flags;
     asm volatile("pushfq; pop %0; cli" : "=r"(flags)::"memory");
     lock->saved_flags = flags;
 
-    // Now acquire the lock (busy-wait with pause)
     while (__sync_lock_test_and_set(&lock->locked, 1))
     {
-        asm volatile("pause"); // CPU-friendly spin
+        asm volatile("pause");
     }
 }
 
 void spin_unlock(spinlock_t *lock)
 {
-    // Release the lock first
     __sync_lock_release(&lock->locked);
-
-    // CRITICAL FIX: Restore IRQ state (may re-enable interrupts)
     uint64_t flags = lock->saved_flags;
     asm volatile("push %0; popfq" ::"r"(flags) : "memory", "cc");
 }
 
 bool spin_trylock(spinlock_t *lock)
 {
-    // For trylock, we also need to disable IRQs if successful
     uint64_t flags;
     asm volatile("pushfq; pop %0; cli" : "=r"(flags)::"memory");
 
     if (!__sync_lock_test_and_set(&lock->locked, 1))
     {
-        // Acquired lock successfully
         lock->saved_flags = flags;
         return true;
     }
     else
     {
-        // Failed to acquire - restore IRQ state
         asm volatile("push %0; popfq" ::"r"(flags) : "memory", "cc");
         return false;
     }

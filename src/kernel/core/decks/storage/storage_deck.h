@@ -5,10 +5,8 @@
 #include "events.h"
 #include "boxos_decks.h"
 
-// Storage Deck ID
 #define STORAGE_DECK_ID DECK_STORAGE
 
-// Storage Deck opcodes
 #define STORAGE_TAG_QUERY 0x01
 #define STORAGE_TAG_SET 0x02
 #define STORAGE_TAG_UNSET 0x03
@@ -24,7 +22,6 @@
 // Storage Deck error codes are defined in error.h
 // (STORAGE_OK, STORAGE_ERR_INVALID, STORAGE_ERR_NOT_FOUND, etc.)
 
-// OBJ_CREATE structures
 typedef struct __packed
 {
     char filename[32];
@@ -38,7 +35,6 @@ typedef struct __packed
     uint8_t reserved[184];
 } obj_create_response_t;
 
-// OBJ_WRITE structures (inline mode)
 typedef struct __packed
 {
     uint32_t file_id;
@@ -57,7 +53,6 @@ typedef struct __packed
     uint8_t reserved[172];
 } obj_write_response_t;
 
-// OBJ_READ structures (inline mode)
 typedef struct __packed
 {
     uint32_t file_id;
@@ -74,10 +69,8 @@ typedef struct __packed
     uint8_t data[176];
 } obj_read_response_t;
 
-// Write flags
 #define OBJ_WRITE_APPEND (1 << 0)
 
-// OBJ_RENAME structures
 typedef struct __packed
 {
     uint32_t file_id;
@@ -94,7 +87,6 @@ typedef struct __packed
 STATIC_ASSERT(sizeof(obj_rename_request_t) == 192, "obj_rename_request_t must be 192 bytes");
 STATIC_ASSERT(sizeof(obj_rename_response_t) == 192, "obj_rename_response_t must be 192 bytes");
 
-// OBJ_DELETE structures
 typedef struct __packed
 {
     uint32_t file_id;
@@ -110,7 +102,6 @@ typedef struct __packed
 STATIC_ASSERT(sizeof(obj_delete_request_t) == 192, "obj_delete_request_t must be 192 bytes");
 STATIC_ASSERT(sizeof(obj_delete_response_t) == 192, "obj_delete_response_t must be 192 bytes");
 
-// OBJ_GET_INFO structures
 typedef struct __packed
 {
     uint32_t file_id;
@@ -140,13 +131,10 @@ typedef struct __packed
 STATIC_ASSERT(sizeof(obj_get_info_request_t) == 192, "obj_get_info_request_t must be 192 bytes");
 STATIC_ASSERT(sizeof(obj_get_info_response_t) == 192, "obj_get_info_response_t must be 192 bytes");
 
-// Initialize Storage Deck
 void storage_deck_init(void);
-
-// Main Storage Deck handler
 int storage_deck_handler(Event *event);
 
-// Synchronous I/O handlers (bypasses async path)
+// Synchronous I/O handlers (bypass async path)
 int handle_obj_read(Event *event);
 int handle_obj_write(Event *event);
 

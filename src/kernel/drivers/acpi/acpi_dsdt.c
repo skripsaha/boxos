@@ -2,20 +2,11 @@
 #include "klib.h"
 #include "vmm.h"
 
-/**
- * decode_pkg_length - Decode AML package length field
- * @aml: Pointer to package length bytes
- * @bytes_consumed: Output - number of bytes consumed (1-4)
- *
- * AML package length encoding (ACPI spec 20.2.4):
- * - Bits 7-6: byte count (0=1 byte, 1=2 bytes, 2=3 bytes, 3=4 bytes)
- * - Bits 5-0 (lead byte): low nibble of length
- * - Following bytes: high nibbles of length
- *
- * Returns: Decoded package length (0 to 2^28-1)
- *
- * TODO(v1.1): Add sanity check for unrealistic lengths (> 1MB)
- */
+// AML package length encoding (ACPI spec 20.2.4):
+// bits 7-6 of lead byte: follow byte count (0=1 byte total, 1=2, 2=3, 3=4)
+// bits 5-0 of lead byte: low nibble of length
+// following bytes: high nibbles
+// TODO(v1.1): Add sanity check for unrealistic lengths (> 1MB)
 uint32_t decode_pkg_length(uint8_t* aml, uint32_t* bytes_consumed) {
     uint8_t lead_byte = aml[0];
     uint8_t follow_count = (lead_byte >> 6) & 0x03;
@@ -35,19 +26,11 @@ uint32_t decode_pkg_length(uint8_t* aml, uint32_t* bytes_consumed) {
     return length;
 }
 
-/**
- * extract_integer_value - Extract AML integer from bytecode
- * @aml: Pointer to AML integer encoding
- * @bytes_consumed: Output - number of bytes consumed (1-5)
- *
- * AML integer encoding (ACPI spec 20.2.3):
- * - 0x00-0x01: ZeroOp/OneOp (1 byte)
- * - 0x0A: BytePrefix + data (2 bytes)
- * - 0x0B: WordPrefix + data (3 bytes, little-endian)
- * - 0x0C: DWordPrefix + data (5 bytes, little-endian)
- *
- * Returns: Integer value (0 to 2^32-1)
- */
+// AML integer encoding (ACPI spec 20.2.3):
+// 0x00-0x01: ZeroOp/OneOp (1 byte)
+// 0x0A: BytePrefix + data (2 bytes)
+// 0x0B: WordPrefix + data (3 bytes, little-endian)
+// 0x0C: DWordPrefix + data (5 bytes, little-endian)
 uint32_t extract_integer_value(uint8_t* aml, uint32_t* bytes_consumed) {
     uint8_t prefix = aml[0];
 
@@ -116,7 +99,6 @@ acpi_error_t acpi_extract_s5(uint32_t dsdt_addr, uint32_t dsdt_len) {
 
             pos++;
 
-            // SECURITY: Bounds check before parsing package contents
             // Worst case: decode_pkg_length(4) + num_elements(1) + 2*extract_integer(5*2) = 15 bytes
             if (pos + 15 >= aml_len) {
                 debug_printf("[ACPI] WARNING: _S5_ package truncated (insufficient buffer space)\n");

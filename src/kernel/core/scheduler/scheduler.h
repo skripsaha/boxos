@@ -6,10 +6,8 @@
 #include "klib.h"
 
 /*
- * LOCK ORDERING HIERARCHY:
- * See /Volumes/BOX/main/boxos/src/kernel/core/process/process.h
- *
- * scheduler_lock must be acquired BEFORE process_lock to avoid deadlock.
+ * Lock ordering: scheduler_lock must be acquired BEFORE process_lock.
+ * See process/process.h for the full hierarchy.
  */
 
 #define MAX_USE_CONTEXT_TAGS 16
@@ -18,17 +16,15 @@
 #define SCHEDULER_MAX_CONSECUTIVE_RUNS 5
 #define SCHEDULER_PENALTY_DURATION_TICKS 3
 
-// Scheduler priority boost values
-#define SCHEDULER_BOOST_HOT_RESULT    50  // Boost for hot result (immediate response)
-#define SCHEDULER_BOOST_CONTEXT_MATCH 20  // Boost for context match
-#define SCHEDULER_BOOST_STARVATION    10  // Boost to prevent starvation
-#define SCHEDULER_BOOST_CRITICAL_STARVATION  100  // Process hasn't run in very long time
-#define SCHEDULER_BOOST_SEVERE_STARVATION     30  // Process hasn't run recently
+#define SCHEDULER_BOOST_HOT_RESULT           50
+#define SCHEDULER_BOOST_CONTEXT_MATCH        20
+#define SCHEDULER_BOOST_STARVATION           10
+#define SCHEDULER_BOOST_CRITICAL_STARVATION 100
+#define SCHEDULER_BOOST_SEVERE_STARVATION    30
 
-// Scheduler timing thresholds (in ticks)
-#define SCHEDULER_CRITICAL_STARVATION_TICKS  100  // Critical starvation threshold
-#define SCHEDULER_SEVERE_STARVATION_TICKS     50  // Severe starvation threshold
-#define SCHEDULER_MILD_STARVATION_TICKS       10  // Mild starvation threshold
+#define SCHEDULER_CRITICAL_STARVATION_TICKS 100
+#define SCHEDULER_SEVERE_STARVATION_TICKS    50
+#define SCHEDULER_MILD_STARVATION_TICKS      10
 
 typedef struct {
     char active_tags[MAX_USE_CONTEXT_TAGS][TAG_LENGTH];
@@ -38,11 +34,11 @@ typedef struct {
 
 typedef struct {
     process_t* current_process;
-    spinlock_t scheduler_lock;     // Protects current_process
+    spinlock_t scheduler_lock;   // protects current_process
     use_context_t use_context;
     spinlock_t context_lock;
     uint64_t total_ticks;
-    uint64_t last_audit_tick;  // Last fairness audit
+    uint64_t last_audit_tick;
 } scheduler_state_t;
 
 void scheduler_init(void);

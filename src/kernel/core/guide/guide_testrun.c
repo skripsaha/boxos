@@ -28,7 +28,7 @@ void guide_testrun(void) {
 
     debug_printf("[TEST] Pushing event to EventRing...\n");
     process_ref_inc(proc);
-    if (event_ring_push(kernel_event_ring, &event) != BOXOS_OK) {
+    if (event_ring_push(kernel_event_ring, &event) != OK) {
         debug_printf("[TEST] FAILED: EventRing full\n");
         process_ref_dec(proc);
         process_destroy(proc);

@@ -18,8 +18,8 @@ void tss_init(void) {
     kernel_tss.rsp0 = (uint64_t)kernel_stack + sizeof(kernel_stack) - 16;
     kernel_tss.rsp1 = 0;
     kernel_tss.rsp2 = 0;
-    
-    // Настройка IST стеков (IST1-4 only, IST5-7 unused)
+
+    // IST1-4 only, IST5-7 unused
     for (int i = 0; i < 4; i++) {
         uint64_t stack_top = (uint64_t)ist_stacks[i] + IST_STACK_SIZE - 16;
 
@@ -42,19 +42,19 @@ void tss_init(void) {
                 break;
         }
     }
-    
+
     kernel_tss.iomap_base = sizeof(tss_t);  // No I/O bitmap
-    
+
     debug_printf("[TSS] RSP0 (Ring 0 stack): 0x%p\n", (void*)kernel_tss.rsp0);
     debug_printf("[TSS] IOMAP base: 0x%04x\n", kernel_tss.iomap_base);
-    
+
     gdt_set_tss_entry(5, (uint64_t)&kernel_tss, sizeof(tss_t) - 1);
-    
-    debug_printf("[TSS] TSS configured at 0x%p (size: %d bytes)\n", 
+
+    debug_printf("[TSS] TSS configured at 0x%p (size: %d bytes)\n",
            (void*)&kernel_tss, sizeof(tss_t));
-    
+
     tss_load();
-    
+
     debug_printf("[TSS] %[S]TSS loaded successfully!%[D]\n");
 }
 
@@ -64,7 +64,7 @@ void tss_set_rsp0(uint64_t rsp0) {
 
 void tss_load(void) {
     debug_printf("[TSS] Loading TSS (selector 0x%02x)...\n", GDT_TSS);
-    
+
     asm volatile("ltr %0" : : "r" ((uint16_t)GDT_TSS));
 }
 
@@ -72,6 +72,6 @@ uint64_t tss_get_ist_stack(int ist_num) {
     if (ist_num < 1 || ist_num > 7) {
         return 0;
     }
-    
+
     return *(&kernel_tss.ist1 + ist_num - 1);
 }

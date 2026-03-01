@@ -78,7 +78,7 @@ void test_full_cycle(void)
 
     debug_printf("[TEST] Step 3: Increment ref_count and push Event to EventRing\n");
     process_ref_inc(test_proc);
-    if (event_ring_push(kernel_event_ring, &event) != BOXOS_OK)
+    if (event_ring_push(kernel_event_ring, &event) != OK)
     {
         debug_printf("[TEST] ERROR: Cannot push to EventRing\n");
         process_ref_dec(test_proc);
@@ -115,7 +115,7 @@ void test_full_cycle(void)
     {
         result_entry_t* result = &result_page->ring.entries[result_page->ring.head];
 
-        if (result->error_code != BOXOS_OK) {
+        if (result->error_code != OK) {
             debug_printf("[TEST] FAIL: Event status error (%u)\n", result->error_code);
             goto cleanup;
         }

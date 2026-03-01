@@ -3,7 +3,6 @@
 
 #include "ktypes.h"
 
-// IST indices for critical exceptions
 #define IST_DOUBLE_FAULT    1
 #define IST_NMI            2
 #define IST_MACHINE_CHECK  3
