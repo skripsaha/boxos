@@ -98,7 +98,7 @@ typedef struct process_t {
     void* kernel_stack_guard_base;
 
     bool started;
-    uint32_t parent_pid;
+    uint32_t spawner_pid;
     uint64_t buf_heap_next;  // next free virtual address for buffer mapping
 
     volatile wait_reason_t wait_reason;

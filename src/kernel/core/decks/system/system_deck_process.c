@@ -128,11 +128,11 @@ int system_deck_proc_spawn(Event* event) {
         return -1;
     }
 
-    proc->parent_pid = event->pid;
+    proc->spawner_pid = event->pid;
     notify_page_t* spawn_np = (notify_page_t*)vmm_phys_to_virt(proc->notify_page_phys);
     if (spawn_np) {
         spawn_np->magic = NOTIFY_PAGE_MAGIC;
-        spawn_np->parent_pid = event->pid;
+        spawn_np->spawner_pid = event->pid;
     }
 
     void* binary_virt = vmm_phys_to_virt(spawn_event.binary_phys_addr);
@@ -431,12 +431,12 @@ int system_deck_proc_exec(Event* event) {
     }
 
     // Set parent PID BEFORE marking process as READY to prevent race condition:
-    // scheduler could run the process before parent_pid is initialized
-    proc->parent_pid = event->pid;
+    // scheduler could run the process before spawner_pid is initialized
+    proc->spawner_pid = event->pid;
     notify_page_t* exec_np = (notify_page_t*)vmm_phys_to_virt(proc->notify_page_phys);
     if (exec_np) {
         exec_np->magic = NOTIFY_PAGE_MAGIC;
-        exec_np->parent_pid = event->pid;
+        exec_np->spawner_pid = event->pid;
     }
     __sync_synchronize();
 

@@ -576,14 +576,14 @@ void keyboard_irq_handler(uint8_t scancode) {
 ```c
 // Начальные данные, помещённые родителем в Cabin
 typedef struct {
-    uint32_t parent_pid;       // PID родителя
+    uint32_t spawner_pid;       // PID родителя
     uint32_t display_pid;      // PID display-процесса
     char     context_tags[64]; // Унаследованные теги контекста
 } boxlib_init_t;
 
 // Глобальные переменные boxlib (заполняются при старте)
 static uint32_t _self_pid;
-static uint32_t _parent_pid;
+static uint32_t _spawner_pid;
 static uint32_t _display_pid;
 ```
 

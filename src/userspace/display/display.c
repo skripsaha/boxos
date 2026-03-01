@@ -51,9 +51,9 @@ int main(void) {
     io_set_mode(IO_MODE_VGA);
 
     notify_page_t* np = notify_page();
-    if (np->parent_pid != 0) {
+    if (np->spawner_pid != 0) {
         uint8_t ready = 0xFF;
-        send(np->parent_pid, &ready, 1);
+        send(np->spawner_pid, &ready, 1);
     }
 
     while (1) {
