@@ -20,7 +20,7 @@ typedef struct {
 extern event_ring_wait_queue_t event_ring_waiters;
 
 void guide_init_wait_queue(void);
-void guide_block_on_event_ring(process_t* proc);
+void guide_wait_on_event_ring(process_t* proc);
 void guide_wakeup_waiters(void);
 
 void guide_init(void);

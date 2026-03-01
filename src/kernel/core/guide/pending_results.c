@@ -130,16 +130,16 @@ int pending_results_try_deliver(uint32_t pid) {
                 atomic_store_u8((volatile uint8_t*)&proc->result_there, 1);
                 __sync_synchronize();
 
-                // set state before clearing block_reason to avoid ordering hazards
-                if (proc->block_reason == PROC_BLOCK_RESULT_OVERFLOW) {
+                // set state before clearing wait_reason to avoid ordering hazards
+                if (proc->wait_reason == WAIT_OVERFLOW) {
                     scheduler_state_t* sched_state = scheduler_get_state();
                     spin_lock(&sched_state->scheduler_lock);
 
-                    if (proc->block_reason == PROC_BLOCK_RESULT_OVERFLOW) {
-                        process_set_state(proc, PROC_READY);
+                    if (proc->wait_reason == WAIT_OVERFLOW) {
+                        process_set_state(proc, PROC_WORKING);
                         __sync_synchronize();
-                        proc->block_start_time = 0;
-                        proc->block_reason = PROC_BLOCK_NONE;
+                        proc->wait_start_time = 0;
+                        proc->wait_reason = WAIT_NONE;
                     }
 
                     spin_unlock(&sched_state->scheduler_lock);

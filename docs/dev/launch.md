@@ -23,7 +23,7 @@
        Шелл не находит "snake" в своей таблице.
        Шелл вызывает proc_exec("snake").
        Ядро находит файл с filename="snake" и системным тегом key="app".
-       Ядро создаёт процесс, загружает бинарь, переводит в READY.
+       Ядро создаёт процесс, загружает бинарь, переводит в WORKING.
        Шелл получает PID и печатает: Running snake (pid 7)
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -166,7 +166,7 @@
               process_load_binary(proc, virt_buf, file_size);
       13. Освобождает буфер: pmm_free(buf, pages_needed).
       14. Переводит процесс в готовность:
-              process_set_state(proc, PROC_READY);
+              process_set_state(proc, PROC_WORKING);
       15. Возвращает PID: deliver_response(SYSTEM_ERR_SUCCESS, &response).
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -397,7 +397,7 @@
                return -1;
            }
 
-           process_set_state(proc, PROC_READY);
+           process_set_state(proc, PROC_WORKING);
 
            proc_exec_response_t response;
            memset(&response, 0, sizeof(response));
@@ -561,7 +561,7 @@
          |-- process_create("app")
          |-- process_load_binary()
          |-- pmm_free()
-         |-- process_set_state(PROC_READY)
+         |-- process_set_state(PROC_WORKING)
          |-- deliver_response(SUCCESS, new_pid=7)
          |
          v

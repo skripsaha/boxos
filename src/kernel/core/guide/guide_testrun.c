@@ -37,18 +37,18 @@ void guide_testrun(void) {
 
     debug_printf("[TEST] Event queued (event_id=%u, PID=%u)\n", event.event_id, proc->pid);
 
-    process_set_state(proc, PROC_BLOCKED);
-    debug_printf("[TEST] Process state set to BLOCKED\n");
+    process_set_state(proc, PROC_WAITING);
+    debug_printf("[TEST] Process state set to WAITING\n");
 
     debug_printf("[TEST] Running Guide dispatcher...\n");
     guide_run();
 
     debug_printf("[TEST] Checking process state after Guide run...\n");
     process_state_t state = process_get_state(proc);
-    if (state == PROC_READY) {
-        debug_printf("[TEST] SUCCESS: Process state = READY\n");
+    if (state == PROC_WORKING) {
+        debug_printf("[TEST] SUCCESS: Process state = WORKING\n");
     } else {
-        debug_printf("[TEST] FAILED: Process state = %u (expected READY)\n", state);
+        debug_printf("[TEST] FAILED: Process state = %u (expected WORKING)\n", state);
     }
 
     if (proc->result_there) {
@@ -64,7 +64,7 @@ void guide_testrun(void) {
     }
 
     debug_printf("[TEST] Cleaning up...\n");
-    process_set_state(proc, PROC_TERMINATED);
+    process_set_state(proc, PROC_CRASHED);
     while (process_ref_count(proc) > 0) {
         process_ref_dec(proc);
     }

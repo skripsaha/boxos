@@ -38,12 +38,13 @@ void context_restore(process_t* proc, ProcessContext* ctx) {
 void context_switch(process_t* from, process_t* to) {
     if (from) {
         context_save(from, &from->context);
-        process_set_state(from, PROC_READY);
     }
 
     if (to) {
         context_restore(to, &to->context);
-        process_set_state(to, PROC_RUNNING);
+        if (process_get_state(to) == PROC_CREATED) {
+            process_set_state(to, PROC_WORKING);
+        }
         to->last_run_time = scheduler_get_state()->total_ticks;
         scheduler_state_t* sched = scheduler_get_state();
         spin_lock(&sched->scheduler_lock);

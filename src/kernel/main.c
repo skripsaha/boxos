@@ -385,7 +385,7 @@ void kernel_main(void)
             continue;
         }
 
-        proc->state = PROC_READY;
+        proc->state = PROC_WORKING;
         autostart_count++;
 
         kprintf("[AUTOSTART] Started '%s' (PID %u, tags: %s)\n",
@@ -425,7 +425,7 @@ void kernel_main(void)
             panic("Failed to load embedded shell binary");
         }
 
-        shell_proc->state = PROC_READY;
+        shell_proc->state = PROC_WORKING;
         initial_proc = shell_proc;
         kprintf("[AUTOSTART] Fallback shell ready (PID %u)\n", shell_proc->pid);
     }

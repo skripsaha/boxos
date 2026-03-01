@@ -102,7 +102,7 @@ int system_deck_route(Event* event) {
     }
 
     process_state_t target_state = process_get_state(target);
-    if (target_state == PROC_TERMINATED || target_state == PROC_ZOMBIE) {
+    if (target_state == PROC_CRASHED || target_state == PROC_DONE) {
         event_set_error(event, ERR_PROCESS_NOT_FOUND, event->current_prefix_idx);
         event->state = EVENT_STATE_ERROR;
         return -1;
@@ -172,7 +172,7 @@ int system_deck_route_tag(Event* event) {
     process_t* proc = process_get_first();
     while (proc && target_count < MAX_ROUTE_TAG_TARGETS) {
         process_state_t pstate = process_get_state(proc);
-        if ((pstate == PROC_READY || pstate == PROC_RUNNING || pstate == PROC_BLOCKED) &&
+        if ((pstate == PROC_WORKING || pstate == PROC_WAITING) &&
             proc->pid != event->pid) {
             if (tag_matches_process(proc, event->route_tag)) {
                 targets[target_count++] = proc->pid;

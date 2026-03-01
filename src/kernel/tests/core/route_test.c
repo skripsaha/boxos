@@ -281,9 +281,9 @@ void test_route_tag(void) {
     debug_printf("[TEST] proc_a PID=%u, proc_b PID=%u, proc_c PID=%u\n",
             proc_a->pid, proc_b->pid, proc_c->pid);
 
-    process_set_state(proc_a, PROC_READY);
-    process_set_state(proc_b, PROC_READY);
-    process_set_state(proc_c, PROC_READY);
+    process_set_state(proc_a, PROC_WORKING);
+    process_set_state(proc_b, PROC_WORKING);
+    process_set_state(proc_c, PROC_WORKING);
 
     total++;
     kprintf("\n[TEST %d] Route by tag 'type:editor' (exact match)\n", total);

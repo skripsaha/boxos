@@ -84,7 +84,7 @@ process_t* process_create(const char* tags) {
     proc->total_cpu_time = 0;
     proc->result_overflow_count = 0;
     proc->result_overflow_flag = 0;
-    proc->state = PROC_NEW;
+    proc->state = PROC_CREATED;
     spinlock_init(&proc->state_lock);
     proc->ref_count = 0;
     proc->code_start = VMM_CABIN_CODE_START;
@@ -100,9 +100,9 @@ process_t* process_create(const char* tags) {
         proc->tags[0] = '\0';
     }
 
-    proc->block_reason = PROC_BLOCK_NONE;
-    proc->next_blocked = NULL;
-    proc->block_start_time = 0;
+    proc->wait_reason = WAIT_NONE;
+    proc->next_waiting = NULL;
+    proc->wait_start_time = 0;
 
     // kernel stack layout: [guard page (unmapped)] [data pages]
     size_t kernel_stack_size = CONFIG_KERNEL_STACK_PAGES * VMM_PAGE_SIZE;
@@ -214,7 +214,7 @@ void process_set_state(process_t* proc, process_state_t new_state) {
 }
 
 process_state_t process_get_state(process_t* proc) {
-    if (!proc) return PROC_TERMINATED;
+    if (!proc) return PROC_CRASHED;
     spin_lock(&proc->state_lock);
     process_state_t state = proc->state;
     spin_unlock(&proc->state_lock);
@@ -227,7 +227,7 @@ int process_destroy_safe(process_t* proc) {
     }
 
     process_state_t state = process_get_state(proc);
-    if (state != PROC_TERMINATED && state != PROC_ZOMBIE) {
+    if (state != PROC_CRASHED && state != PROC_DONE) {
         debug_printf("[PROCESS] ERROR: Cannot destroy PID %u in state %d\n",
                      proc->pid, state);
         return -1;
@@ -270,9 +270,9 @@ void process_destroy(process_t* proc) {
     uint32_t refs = process_ref_count(proc);
     if (refs > 0) {
         spin_unlock(&process_lock);
-        debug_printf("[PROCESS] PID %u has ref_count=%u, transitioning to ZOMBIE\n",
+        debug_printf("[PROCESS] PID %u has ref_count=%u, transitioning to DONE\n",
                      proc->pid, refs);
-        process_set_state(proc, PROC_ZOMBIE);
+        process_set_state(proc, PROC_DONE);
         return;
     }
 
@@ -295,7 +295,7 @@ void process_destroy(process_t* proc) {
 
     spin_unlock(&process_lock);
 
-    process_set_state(proc, PROC_TERMINATED);
+    process_set_state(proc, PROC_CRASHED);
 
     uint32_t cancelled = async_io_cancel_by_pid(proc->pid);
     if (cancelled > 0) {
@@ -483,7 +483,7 @@ void process_test(void) {
 
     debug_printf("[TEST] SUCCESS: Process created\n");
     debug_printf("[TEST]   PID: %u\n", proc->pid);
-    debug_printf("[TEST]   State: %s\n", proc->state == PROC_NEW ? "NEW" : "UNKNOWN");
+    debug_printf("[TEST]   State: %s\n", proc->state == PROC_CREATED ? "CREATED" : "UNKNOWN");
     debug_printf("[TEST]   Cabin: %p\n", proc->cabin);
     debug_printf("[TEST]   Notify page (phys): 0x%lx\n", proc->notify_page_phys);
     debug_printf("[TEST]   Result page (phys): 0x%lx\n", proc->result_page_phys);
@@ -505,7 +505,7 @@ void process_test(void) {
     }
 
     debug_printf("[TEST] SUCCESS: Binary loaded\n");
-    debug_printf("[TEST]   State: %s\n", proc->state == PROC_READY ? "READY" : "UNKNOWN");
+    debug_printf("[TEST]   State: %s\n", proc->state == PROC_WORKING ? "WORKING" : "UNKNOWN");
     debug_printf("[TEST]   Code size: %zu bytes\n", proc->code_size);
 
     debug_printf("[TEST] Verifying process lookup...\n");
@@ -652,10 +652,10 @@ void process_start_initial(process_t* proc) {
         while (1) { asm volatile("cli; hlt"); }
     }
 
-    if (proc->state != PROC_READY) {
-        debug_printf("[PROCESS] PANIC: process_start_initial called with process not in READY state\n");
-        debug_printf("[PROCESS]   PID %u is in state %d (expected PROC_READY=%d)\n",
-                proc->pid, proc->state, PROC_READY);
+    if (proc->state != PROC_WORKING) {
+        debug_printf("[PROCESS] PANIC: process_start_initial called with process not in WORKING state\n");
+        debug_printf("[PROCESS]   PID %u is in state %d (expected PROC_WORKING=%d)\n",
+                proc->pid, proc->state, PROC_WORKING);
         while (1) { asm volatile("cli; hlt"); }
     }
 
@@ -665,7 +665,7 @@ void process_start_initial(process_t* proc) {
         while (1) { asm volatile("cli; hlt"); }
     }
 
-    process_set_state(proc, PROC_RUNNING);
+    process_set_state(proc, PROC_WORKING);
 
     scheduler_state_t* sched = scheduler_get_state();
     spin_lock(&sched->scheduler_lock);

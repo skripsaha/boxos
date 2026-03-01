@@ -141,7 +141,7 @@ cleanup:
     debug_printf("[TEST]   Ref count: %u\n", process_ref_count(test_proc));
 
     debug_printf("[TEST] Cleanup\n");
-    process_set_state(test_proc, PROC_TERMINATED);
+    process_set_state(test_proc, PROC_CRASHED);
     while (process_ref_count(test_proc) > 0) {
         process_ref_dec(test_proc);
     }
