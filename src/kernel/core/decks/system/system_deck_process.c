@@ -5,6 +5,7 @@
 #include "pmm.h"
 #include "atomics.h"
 #include "tagfs.h"
+#include "notify_page.h"
 
 typedef struct {
     uint64_t handle;
@@ -124,6 +125,13 @@ int system_deck_proc_spawn(Event* event) {
         debug_printf("[SYSTEM_DECK] PROC_SPAWN: Failed to create process\n");
         deliver_response(event, SYSTEM_ERR_CABIN_FAILED, NULL, 0);
         return -1;
+    }
+
+    proc->parent_pid = event->pid;
+    notify_page_t* spawn_np = (notify_page_t*)vmm_phys_to_virt(proc->notify_page_phys);
+    if (spawn_np) {
+        spawn_np->magic = NOTIFY_PAGE_MAGIC;
+        spawn_np->parent_pid = event->pid;
     }
 
     void* binary_virt = vmm_phys_to_virt(spawn_event.binary_phys_addr);
@@ -287,13 +295,18 @@ int system_deck_proc_exec(Event* event) {
     int file_count = tagfs_list_all_files(file_ids, TAGFS_MAX_FILES);
 
     uint32_t found_id = 0;
-    const char* found_tag = NULL;
+    char found_tags[PROCESS_TAG_SIZE];
+    found_tags[0] = '\0';
 
     /* Search by tags, not by filename.
      * A file is executable if it has ALL of:
      *   1. A label tag whose key matches the requested name
      *      (create_tagfs auto-adds key=<stem> for every file)
      *   2. An "app" or "utility" tag (marks it as runnable)
+     *
+     * When found, ALL system tags are copied to the process so it
+     * inherits the file's full permission set (e.g. "system" tag
+     * grants VGA/keyboard access).
      */
     for (int i = 0; i < file_count; i++) {
         TagFSMetadata* meta = tagfs_get_metadata(file_ids[i]);
@@ -302,7 +315,7 @@ int system_deck_proc_exec(Event* event) {
         }
 
         bool has_name  = false;
-        const char* exec_tag = NULL;
+        bool has_exec_tag = false;
 
         for (uint8_t t = 0; t < meta->tag_count; t++) {
             if (meta->tags[t].type != TAGFS_TAG_SYSTEM) {
@@ -312,16 +325,32 @@ int system_deck_proc_exec(Event* event) {
             if (strcmp(key, exec_event.filename) == 0) {
                 has_name = true;
             }
-            if (strcmp(key, "app") == 0) {
-                exec_tag = "app";
-            } else if (strcmp(key, "utility") == 0 && exec_tag == NULL) {
-                exec_tag = "utility";
+            if (strcmp(key, "app") == 0 || strcmp(key, "utility") == 0) {
+                has_exec_tag = true;
             }
         }
 
-        if (has_name && exec_tag != NULL) {
-            found_id  = file_ids[i];
-            found_tag = exec_tag;
+        if (has_name && has_exec_tag) {
+            found_id = file_ids[i];
+
+            // Build comma-separated tag string from ALL system tags
+            size_t pos = 0;
+            for (uint8_t t = 0; t < meta->tag_count; t++) {
+                if (meta->tags[t].type != TAGFS_TAG_SYSTEM) {
+                    continue;
+                }
+                const char* key = meta->tags[t].key;
+                size_t klen = strlen(key);
+                if (pos + klen + 2 > PROCESS_TAG_SIZE) {
+                    break;  // No room
+                }
+                if (pos > 0) {
+                    found_tags[pos++] = ',';
+                }
+                memcpy(found_tags + pos, key, klen);
+                pos += klen;
+            }
+            found_tags[pos] = '\0';
             break;
         }
     }
@@ -373,7 +402,7 @@ int system_deck_proc_exec(Event* event) {
         return -1;
     }
 
-    process_t* proc = process_create(found_tag);
+    process_t* proc = process_create(found_tags);
     if (!proc) {
         debug_printf("[SYSTEM_DECK] PROC_EXEC: process_create failed\n");
         pmm_free(phys_buf, pages_needed);
@@ -390,6 +419,16 @@ int system_deck_proc_exec(Event* event) {
         deliver_response(event, SYSTEM_ERR_LOAD_FAILED, NULL, 0);
         return -1;
     }
+
+    // Set parent PID BEFORE marking process as READY to prevent race condition:
+    // scheduler could run the process before parent_pid is initialized
+    proc->parent_pid = event->pid;
+    notify_page_t* exec_np = (notify_page_t*)vmm_phys_to_virt(proc->notify_page_phys);
+    if (exec_np) {
+        exec_np->magic = NOTIFY_PAGE_MAGIC;
+        exec_np->parent_pid = event->pid;
+    }
+    __sync_synchronize();
 
     process_set_state(proc, PROC_READY);
 

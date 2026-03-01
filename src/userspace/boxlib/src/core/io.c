@@ -4,6 +4,7 @@
 #include "box/string.h"
 #include "box/ipc.h"
 #include "box/convert.h"
+#include "box/notify.h"
 
 // ============================================================================
 // OUTPUT
@@ -38,10 +39,16 @@ static void print_raw(const char* str) {
 void print(const char* str) {
     if (io_get_mode() == IO_MODE_IPC) {
         if (!str) return;
+        notify_page_t* np = notify_page();
+        uint32_t parent = np->parent_pid;
         size_t len = strlen(str);
         while (len > 0) {
             uint16_t chunk = len > 200 ? 200 : (uint16_t)len;
-            broadcast("shell", str, chunk);
+            if (parent != 0) {
+                send(parent, str, chunk);
+            } else {
+                broadcast("shell", str, chunk);
+            }
             str += chunk;
             len -= chunk;
         }
@@ -53,7 +60,13 @@ void print(const char* str) {
 void println(const char* str) {
     if (io_get_mode() == IO_MODE_IPC) {
         if (str) print(str);
-        broadcast("shell", "\n", 1);
+        notify_page_t* np = notify_page();
+        uint32_t parent = np->parent_pid;
+        if (parent != 0) {
+            send(parent, "\n", 1);
+        } else {
+            broadcast("shell", "\n", 1);
+        }
         return;
     }
     if (str) print_raw(str);

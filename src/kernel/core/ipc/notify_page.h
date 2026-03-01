@@ -32,7 +32,8 @@ typedef struct __packed {
     volatile uint8_t result_page_full;       // Backpressure: Result Page full
     uint32_t route_target;
     char     route_tag[32];
-    uint8_t  _reserved[3762];                // Pad to 4096 bytes
+    uint32_t parent_pid;
+    uint8_t  _reserved[3758];                // Pad to 4096 bytes
 } notify_page_t;
 
 STATIC_ASSERT(NOTIFY_MAX_PREFIXES == EVENT_MAX_PREFIXES, "Prefix count must match Event structure - see docs/api/event_structures.md");

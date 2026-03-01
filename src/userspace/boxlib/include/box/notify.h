@@ -19,7 +19,8 @@ typedef struct BOX_PACKED {
     volatile uint8_t result_page_full;   // Backpressure: Result Page full
     uint32_t route_target;
     char     route_tag[32];
-    uint8_t  _reserved[3762];
+    uint32_t parent_pid;
+    uint8_t  _reserved[3758];
 } notify_page_t;
 
 // Get Notify Page pointer

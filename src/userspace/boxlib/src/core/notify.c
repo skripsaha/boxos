@@ -3,8 +3,10 @@
 
 void notify_prepare(void) {
     notify_page_t* np = notify_page();
+    uint32_t saved_parent = np->parent_pid;
     memset(np, 0, sizeof(notify_page_t));
     np->magic = BOX_NOTIFY_MAGIC;
+    np->parent_pid = saved_parent;
 }
 
 bool notify_add_prefix(uint8_t deck_id, uint8_t opcode) {

@@ -124,11 +124,33 @@ int system_deck_route(Event* event) {
     }
 
     uint32_t original_sender = event->pid;
-    event->sender_pid = original_sender;
-    event->route_flags = ROUTE_SOURCE_PROCESS;
-    event->pid = event->route_target;
 
-    debug_printf("[ROUTE] PID %u -> PID %u (direct)\n", original_sender, event->route_target);
+    extern EventRingBuffer* kernel_event_ring;
+    Event clone;
+    memcpy(&clone, event, sizeof(Event));
+    clone.pid = event->route_target;
+    clone.sender_pid = original_sender;
+    clone.route_flags = ROUTE_SOURCE_PROCESS;
+    clone.event_id = guide_alloc_event_id();
+    clone.prefixes[0] = 0x0000;
+    clone.current_prefix_idx = 0;
+    clone.prefix_count = 1;
+    clone.state = EVENT_STATE_PROCESSING;
+
+    boxos_error_t push_err = event_ring_push(kernel_event_ring, &clone);
+    if (BOXOS_IS_ERROR(push_err)) {
+        event_ring_grow(kernel_event_ring);
+        push_err = event_ring_push(kernel_event_ring, &clone);
+        if (BOXOS_IS_ERROR(push_err)) {
+            event_set_error(event, BOXOS_ERR_EVENT_RING_FULL, event->current_prefix_idx);
+            event->state = EVENT_STATE_ERROR;
+            return -1;
+        }
+    }
+
+    event->sender_pid = original_sender;
+
+    debug_printf("[ROUTE] PID %u -> PID %u (direct, clone-based)\n", original_sender, event->route_target);
 
     event->state = EVENT_STATE_PROCESSING;
     return 0;
