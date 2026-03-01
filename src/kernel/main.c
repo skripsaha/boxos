@@ -33,6 +33,7 @@
 #include "ahci.h"
 #include "cabin_layout.h"
 #include "event_ring_test.h"
+#include "tagfs.h"
 #include "cpuid.h"
 #include "cpu_caps_page.h"
 
@@ -277,65 +278,163 @@ void kernel_main(void)
     kprintf("====================================\n");
     kprintf("\n");
 
-    debug_printf("[USERSPACE] Creating shell process...\n");
-    process_t *shell_proc = process_create("shell");
-    if (!shell_proc)
-    {
-        debug_printf("[USERSPACE] PANIC: Failed to create shell process\n");
-        while (1)
-        {
-            asm volatile("cli; hlt");
+    // ============================================================
+    // AUTOSTART: Query TagFS for files tagged "autostart" and
+    // spawn them automatically, as specified in the BoxOS tag spec.
+    // ============================================================
+    debug_printf("[AUTOSTART] Scanning TagFS for autostart files...\n");
+
+    uint32_t file_ids[TAGFS_MAX_FILES];
+    int file_count = tagfs_list_all_files(file_ids, TAGFS_MAX_FILES);
+    process_t *initial_proc = NULL;
+    int autostart_count = 0;
+
+    for (int i = 0; i < file_count; i++) {
+        TagFSMetadata *meta = tagfs_get_metadata(file_ids[i]);
+        if (!meta || !(meta->flags & TAGFS_FILE_ACTIVE))
+            continue;
+
+        bool has_autostart = false;
+        bool has_exec_tag = false;
+
+        for (uint8_t t = 0; t < meta->tag_count; t++) {
+            if (meta->tags[t].type != TAGFS_TAG_SYSTEM)
+                continue;
+            const char *key = meta->tags[t].key;
+            if (strcmp(key, "autostart") == 0)
+                has_autostart = true;
+            if (strcmp(key, "app") == 0 || strcmp(key, "utility") == 0)
+                has_exec_tag = true;
         }
+
+        if (!has_autostart || !has_exec_tag)
+            continue;
+
+        debug_printf("[AUTOSTART] Found: '%s' (file_id=%u)\n",
+                     meta->filename, file_ids[i]);
+
+        // Collect all system tags for the new process
+        char found_tags[PROCESS_TAG_SIZE];
+        size_t pos = 0;
+        for (uint8_t t = 0; t < meta->tag_count; t++) {
+            if (meta->tags[t].type != TAGFS_TAG_SYSTEM)
+                continue;
+            const char *key = meta->tags[t].key;
+            size_t klen = strlen(key);
+            if (pos + klen + 2 > PROCESS_TAG_SIZE)
+                break;
+            if (pos > 0)
+                found_tags[pos++] = ',';
+            memcpy(found_tags + pos, key, klen);
+            pos += klen;
+        }
+        found_tags[pos] = '\0';
+
+        // Load binary from TagFS
+        uint64_t file_size = meta->size;
+        if (file_size == 0 || file_size > CONFIG_PROC_MAX_BINARY_SIZE) {
+            debug_printf("[AUTOSTART] Skip '%s': invalid size %lu\n",
+                         meta->filename, file_size);
+            continue;
+        }
+
+        size_t pages_needed = (file_size + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE;
+        void *phys_buf = pmm_alloc_zero(pages_needed);
+        if (!phys_buf) {
+            debug_printf("[AUTOSTART] Skip '%s': memory allocation failed\n",
+                         meta->filename);
+            continue;
+        }
+
+        void *virt_buf = vmm_phys_to_virt((uintptr_t)phys_buf);
+
+        TagFSFileHandle *fh = tagfs_open(file_ids[i], TAGFS_HANDLE_READ);
+        if (!fh) {
+            pmm_free(phys_buf, pages_needed);
+            debug_printf("[AUTOSTART] Skip '%s': tagfs_open failed\n",
+                         meta->filename);
+            continue;
+        }
+
+        int read_result = tagfs_read(fh, virt_buf, file_size);
+        tagfs_close(fh);
+
+        if (read_result < 0) {
+            pmm_free(phys_buf, pages_needed);
+            debug_printf("[AUTOSTART] Skip '%s': tagfs_read failed (%d)\n",
+                         meta->filename, read_result);
+            continue;
+        }
+
+        // Create process with all file tags
+        process_t *proc = process_create(found_tags);
+        if (!proc) {
+            pmm_free(phys_buf, pages_needed);
+            debug_printf("[AUTOSTART] Skip '%s': process_create failed\n",
+                         meta->filename);
+            continue;
+        }
+
+        int load_result = process_load_binary(proc, virt_buf, (size_t)file_size);
+        pmm_free(phys_buf, pages_needed);
+
+        if (load_result != 0) {
+            process_destroy(proc);
+            debug_printf("[AUTOSTART] Skip '%s': load_binary failed (%d)\n",
+                         meta->filename, load_result);
+            continue;
+        }
+
+        proc->state = PROC_READY;
+        autostart_count++;
+
+        kprintf("[AUTOSTART] Started '%s' (PID %u, tags: %s)\n",
+                meta->filename, proc->pid, found_tags);
+
+        // First autostart process becomes the initial process
+        if (!initial_proc)
+            initial_proc = proc;
     }
 
-    process_add_tag(shell_proc, "system");
-    process_add_tag(shell_proc, "utility");
-    process_add_tag(shell_proc, "app");
-    process_add_tag(shell_proc, "shell");
-    process_add_tag(shell_proc, "hw_vga");
-    process_add_tag(shell_proc, "hw_keyboard");
-    process_add_tag(shell_proc, "storage");
+    // Fallback: if no autostart files found, use embedded shell binary
+    if (!initial_proc) {
+        kprintf("[AUTOSTART] No autostart files found, falling back to embedded shell\n");
 
-    debug_printf("[USERSPACE] Loading shell binary...\n");
-
-    extern uint8_t _binary_shell_stripped_elf_start[];
-    extern uint8_t _binary_shell_stripped_elf_end[];
-    size_t shell_size = (size_t)(_binary_shell_stripped_elf_end - _binary_shell_stripped_elf_start);
-
-    debug_printf("[USERSPACE] Shell binary: %zu bytes (embedded at %p)\n",
-                 shell_size, _binary_shell_stripped_elf_start);
-
-    if (shell_size == 0 || shell_size > 53248)  // 52 KB = 0x10000 - 0x3000
-    {
-        debug_printf("[USERSPACE] PANIC: Invalid shell binary size\n");
-        while (1)
-        {
-            asm volatile("cli; hlt");
+        process_t *shell_proc = process_create("shell");
+        if (!shell_proc) {
+            panic("Failed to create fallback shell process");
         }
+
+        process_add_tag(shell_proc, "system");
+        process_add_tag(shell_proc, "utility");
+        process_add_tag(shell_proc, "app");
+        process_add_tag(shell_proc, "hw_vga");
+        process_add_tag(shell_proc, "hw_keyboard");
+        process_add_tag(shell_proc, "storage");
+
+        extern uint8_t _binary_shell_stripped_elf_start[];
+        extern uint8_t _binary_shell_stripped_elf_end[];
+        size_t shell_size = (size_t)(_binary_shell_stripped_elf_end - _binary_shell_stripped_elf_start);
+
+        if (shell_size == 0 || shell_size > CONFIG_PROC_MAX_BINARY_SIZE) {
+            panic("Invalid embedded shell binary size");
+        }
+
+        int load_result = process_load_binary(shell_proc, _binary_shell_stripped_elf_start, shell_size);
+        if (load_result != 0) {
+            panic("Failed to load embedded shell binary");
+        }
+
+        shell_proc->state = PROC_READY;
+        initial_proc = shell_proc;
+        kprintf("[AUTOSTART] Fallback shell ready (PID %u)\n", shell_proc->pid);
     }
 
-    int load_result = process_load_binary(shell_proc, _binary_shell_stripped_elf_start, shell_size);
-    if (load_result != 0)
-    {
-        debug_printf("[USERSPACE] PANIC: Failed to load shell binary (error %d)\n", load_result);
-        while (1)
-        {
-            asm volatile("cli; hlt");
-        }
-    }
+    kprintf("[AUTOSTART] %d process(es) launched\n", autostart_count);
+    debug_printf("[KERNEL] Starting initial process (PID %u) - jumping to Ring 3...\n",
+                 initial_proc->pid);
 
-    debug_printf("[USERSPACE] Binary loaded successfully\n");
-    debug_printf("[USERSPACE]   Code start: 0x%lx\n", shell_proc->code_start);
-    debug_printf("[USERSPACE]   Entry RIP: 0x%lx\n", shell_proc->context.rip);
-    debug_printf("[USERSPACE]   Stack RSP: 0x%lx\n", shell_proc->context.rsp);
-    debug_printf("[USERSPACE]   CR3: 0x%lx\n", shell_proc->context.cr3);
-
-    shell_proc->state = PROC_READY;
-
-    debug_printf("[USERSPACE] Shell process ready (PID %u)\n", shell_proc->pid);
-    debug_printf("[KERNEL] Starting shell process - jumping to Ring 3...\n");
-
-    process_start_initial(shell_proc);
+    process_start_initial(initial_proc);
 
     // Should NEVER return from above call
     debug_printf("[KERNEL] ERROR: Returned from userspace! This should never happen!\n");
