@@ -5,6 +5,7 @@
 #include "boxos_magic.h"
 #include "boxos_limits.h"
 #include "boxos_sizes.h"
+#include "klib.h"
 
 // TagFS Magic Number and Version
 #define TAGFS_MAGIC             BOXOS_TAGFS_MAGIC        // "TAGF"
@@ -145,6 +146,7 @@ typedef struct {
     TagFSMetadata* metadata_cache;         // Array of max_files entries
     BlockBitmap block_bitmap;
     bool initialized;
+    spinlock_t lock;
 } TagFSState;
 
 // CORE API

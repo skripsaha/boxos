@@ -117,6 +117,7 @@ int pending_results_try_deliver(uint32_t pid) {
             }
 
             uint32_t rhead = result_page->ring.head;
+            __sync_synchronize();
             uint32_t rtail = result_page->ring.tail;
 
             if (((rtail + 1) % RESULT_RING_SIZE) != rhead) {

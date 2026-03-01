@@ -61,6 +61,8 @@ static int handle_tag_query(Event *event)
         return STORAGE_ERR_INVALID;
     }
 
+    spin_lock(&state->lock);
+
     const char *tag_string = (const char *)event->data;
     uint32_t pid = event->pid;
 
@@ -69,6 +71,7 @@ static int handle_tag_query(Event *event)
     if (!file_ids)
     {
         write_u32(event->data, 0, 0);
+        spin_unlock(&state->lock);
         return STORAGE_OK;
     }
 
@@ -115,6 +118,7 @@ static int handle_tag_query(Event *event)
     memcpy(event->data + sizeof(uint32_t), file_ids, count * sizeof(uint32_t));
     kfree(file_ids);
 
+    spin_unlock(&state->lock);
     return STORAGE_OK;
 }
 
@@ -126,6 +130,8 @@ static int handle_tag_set(Event *event)
         return STORAGE_ERR_INVALID;
     }
 
+    spin_lock(&state->lock);
+
     uint32_t file_id = read_u32(event->data, 0);
     const char *tag_string = (const char *)(event->data + sizeof(uint32_t));
 
@@ -135,14 +141,17 @@ static int handle_tag_set(Event *event)
 
     if (tagfs_parse_tag(tag_string, key, value, &tag_type) != 0)
     {
+        spin_unlock(&state->lock);
         return STORAGE_ERR_INVALID;
     }
 
     if (tagfs_add_tag(file_id, key, value, tag_type) != 0)
     {
+        spin_unlock(&state->lock);
         return STORAGE_ERR_INVALID;
     }
 
+    spin_unlock(&state->lock);
     return STORAGE_OK;
 }
 
@@ -154,14 +163,18 @@ static int handle_tag_unset(Event *event)
         return STORAGE_ERR_INVALID;
     }
 
+    spin_lock(&state->lock);
+
     uint32_t file_id = read_u32(event->data, 0);
     const char *key = (const char *)(event->data + sizeof(uint32_t));
 
     if (tagfs_remove_tag(file_id, key) != 0)
     {
+        spin_unlock(&state->lock);
         return STORAGE_ERR_INVALID;
     }
 
+    spin_unlock(&state->lock);
     return STORAGE_OK;
 }
 

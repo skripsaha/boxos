@@ -37,6 +37,8 @@ static void deliver_response(Event* event, uint16_t error_code, const void* resp
         memcpy(event->data, response_data, copy_size);
     }
 
+    __sync_synchronize();
+
     if (error_code == SYSTEM_ERR_SUCCESS) {
         event->state = EVENT_STATE_COMPLETED;
     } else {

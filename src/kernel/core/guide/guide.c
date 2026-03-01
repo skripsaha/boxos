@@ -26,7 +26,7 @@ static void guide_process_ahci_completions(void);
 // EventRing wait queue
 event_ring_wait_queue_t event_ring_waiters;
 
-static bool guide_idle = true;
+static volatile uint8_t guide_idle = 1;
 static volatile uint32_t next_event_id = 1;
 
 static DeckEntry deck_table[] = {
@@ -178,7 +178,7 @@ void guide_init(void)
             event_ring_capacity(kernel_event_ring),
             (size_t)EVENT_RING_MAX_CAPACITY);
 
-    guide_idle = true;
+    atomic_store_u8(&guide_idle, 1);
     next_event_id = 1;
 
     guide_init_wait_queue();
@@ -204,12 +204,12 @@ deck_handler_t guide_get_deck_handler(uint8_t deck_id)
 
 void guide_wake(void)
 {
-    guide_idle = false;
+    atomic_store_u8(&guide_idle, 0);
 }
 
 bool guide_is_idle(void)
 {
-    return guide_idle;
+    return atomic_load_u8(&guide_idle) != 0;
 }
 
 void guide_run(void)
@@ -387,7 +387,7 @@ void guide_run(void)
 
     if (event_ring_is_empty(kernel_event_ring))
     {
-        guide_idle = true;
+        atomic_store_u8(&guide_idle, 1);
     }
 
     // Update EventRing backpressure signals in all Notify Pages

@@ -12,7 +12,7 @@
 #include "fpu.h"
 
 static process_t* process_list_head = NULL;
-static uint32_t process_count = 0;
+static volatile uint32_t process_count = 0;
 static spinlock_t process_lock;
 static process_cleanup_queue_t g_cleanup_queue;
 
@@ -490,7 +490,7 @@ process_t* process_get_current(void) {
 }
 
 uint32_t process_get_count(void) {
-    return process_count;
+    return atomic_load_u32(&process_count);
 }
 
 void process_test(void) {

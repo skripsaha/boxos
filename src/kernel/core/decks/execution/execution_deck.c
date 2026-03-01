@@ -45,6 +45,7 @@ int execution_deck_handler(Event* event) {
     // CRITICAL FIX: Use memcpy to read head from packed struct (avoid alignment issues)
     uint32_t head;
     memcpy(&head, (const void*)&result_page->ring.head, sizeof(uint32_t));
+    __sync_synchronize();  // acquire: ensure we see userspace's head update and associated data
     uint32_t tail = result_page->ring.tail;
     if (((tail + 1) % RESULT_RING_SIZE) == head) {
         // Result Ring full: set backpressure signal
