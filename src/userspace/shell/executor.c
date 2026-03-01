@@ -35,6 +35,15 @@ int executor_run(parsed_command_t *cmd)
 {
     g_error_message[0] = '\0';
 
+    // Drain stale IPC from previous commands BEFORE launching anything.
+    // Must be here (not after proc_exec) because proc_exec may schedule
+    // the child first — its IPC messages get stashed by result_pop_non_ipc
+    // during proc_exec's result_wait, and a post-exec drain would discard them.
+    {
+        result_entry_t stale;
+        while (receive(&stale)) { /* discard */ }
+    }
+
     if (!cmd || cmd->argc == 0)
     {
         memcpy(g_error_message, "No command", 11);
@@ -55,12 +64,18 @@ int executor_run(parsed_command_t *cmd)
     int pid = proc_exec(command_name);
     if (pid > 0)
     {
-        // Wait for child process output via IPC
+        // No drain here! Messages stashed during proc_exec are valid current output.
+        // receive_wait → result_pop_ipc checks the stash first.
         result_entry_t entry;
         int idle_count = 0;
-        while (idle_count < 15)
+        int got_output = 0;
+        while (idle_count < (got_output ? 3 : 2))
         {
-            if (receive_wait(&entry, 200))
+            // After first output: short timeout — messages arrive fast from
+            // stash/ring, we just detect "no more" quickly (3×30ms = 90ms).
+            // Before first output: longer timeout — give child time to start
+            // and send first message (2×100ms = 200ms).
+            if (receive_wait(&entry, got_output ? 30 : 100))
             {
                 char buf[245];
                 uint16_t len = entry.size;
@@ -69,6 +84,7 @@ int executor_run(parsed_command_t *cmd)
                 memcpy(buf, entry.payload, len);
                 buf[len] = '\0';
                 print(buf);
+                got_output = 1;
                 idle_count = 0;
             }
             else
