@@ -338,6 +338,42 @@ void test_tag_wildcard(void) {
     if (tag_match("type:editor", "type:editor")) { passed++; debug_printf("[TEST %d] PASS\n", total); }
     else { debug_printf("[TEST %d] FAIL\n", total); }
 
+    // Prefix wildcard tests
+    total++;
+    kprintf("\n[TEST %d] tag_match: 'util...' vs 'utility' = true (prefix)\n", total);
+    if (tag_match("util...", "utility")) { passed++; debug_printf("[TEST %d] PASS\n", total); }
+    else { debug_printf("[TEST %d] FAIL\n", total); }
+
+    total++;
+    kprintf("\n[TEST %d] tag_match: 'util...' vs 'system' = false\n", total);
+    if (!tag_match("util...", "system")) { passed++; debug_printf("[TEST %d] PASS\n", total); }
+    else { debug_printf("[TEST %d] FAIL\n", total); }
+
+    total++;
+    kprintf("\n[TEST %d] tag_match: 'type:ed...' vs 'type:editor' = true\n", total);
+    if (tag_match("type:ed...", "type:editor")) { passed++; debug_printf("[TEST %d] PASS\n", total); }
+    else { debug_printf("[TEST %d] FAIL\n", total); }
+
+    total++;
+    kprintf("\n[TEST %d] tag_match: 'type:ed...' vs 'type:viewer' = false\n", total);
+    if (!tag_match("type:ed...", "type:viewer")) { passed++; debug_printf("[TEST %d] PASS\n", total); }
+    else { debug_printf("[TEST %d] FAIL\n", total); }
+
+    total++;
+    kprintf("\n[TEST %d] tag_match: 'ty...:...' vs 'type:editor' = true\n", total);
+    if (tag_match("ty...:...", "type:editor")) { passed++; debug_printf("[TEST %d] PASS\n", total); }
+    else { debug_printf("[TEST %d] FAIL\n", total); }
+
+    total++;
+    kprintf("\n[TEST %d] tag_match: '...' vs 'utility' = true (match any simple)\n", total);
+    if (tag_match("...", "utility")) { passed++; debug_printf("[TEST %d] PASS\n", total); }
+    else { debug_printf("[TEST %d] FAIL\n", total); }
+
+    total++;
+    kprintf("\n[TEST %d] tag_match: '...' vs 'type:editor' = false (no colon match)\n", total);
+    if (!tag_match("...", "type:editor")) { passed++; debug_printf("[TEST %d] PASS\n", total); }
+    else { debug_printf("[TEST %d] FAIL\n", total); }
+
     // process_has_tag wildcard tests
     process_t* proc = process_create("app,type:editor,lang:c");
     if (proc) {
@@ -359,6 +395,16 @@ void test_tag_wildcard(void) {
         total++;
         kprintf("\n[TEST %d] process_has_tag: '...:python' (no match)\n", total);
         if (!process_has_tag(proc, "...:python")) { passed++; debug_printf("[TEST %d] PASS\n", total); }
+        else { debug_printf("[TEST %d] FAIL\n", total); }
+
+        total++;
+        kprintf("\n[TEST %d] process_has_tag: 'ap...' prefix on 'app,type:editor,lang:c'\n", total);
+        if (process_has_tag(proc, "ap...")) { passed++; debug_printf("[TEST %d] PASS\n", total); }
+        else { debug_printf("[TEST %d] FAIL\n", total); }
+
+        total++;
+        kprintf("\n[TEST %d] process_has_tag: 'lang:...' on 'app,type:editor,lang:c'\n", total);
+        if (process_has_tag(proc, "lang:...")) { passed++; debug_printf("[TEST %d] PASS\n", total); }
         else { debug_printf("[TEST %d] FAIL\n", total); }
 
         process_destroy(proc);

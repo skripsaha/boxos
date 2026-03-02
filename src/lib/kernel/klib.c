@@ -1946,12 +1946,27 @@ void delay(uint32_t milliseconds)
 bool tag_is_wildcard(const char* tag)
 {
     if (!tag) return false;
-    size_t len = strlen(tag);
-    // "key:..." — value wildcard
-    if (len > 4 && strcmp(tag + len - 4, ":...") == 0) return true;
-    // "...:value" or "...:..." — key wildcard
-    if (len > 4 && strncmp(tag, "...:", 4) == 0) return true;
-    return false;
+    return strstr(tag, "...") != NULL;
+}
+
+// Match a single part (key or value) with "..." as glob wildcard
+static bool tag_match_part(const char* pattern, const char* text)
+{
+    const char* wild = strstr(pattern, "...");
+    if (!wild) {
+        return strcmp(pattern, text) == 0;
+    }
+
+    size_t prefix_len = wild - pattern;
+    const char* suffix = wild + 3;
+    size_t suffix_len = strlen(suffix);
+    size_t text_len = strlen(text);
+
+    if (text_len < prefix_len + suffix_len) return false;
+    if (prefix_len > 0 && strncmp(pattern, text, prefix_len) != 0) return false;
+    if (suffix_len > 0 && strcmp(text + text_len - suffix_len, suffix) != 0) return false;
+
+    return true;
 }
 
 bool tag_match(const char* pattern, const char* tag)
@@ -1961,23 +1976,27 @@ bool tag_match(const char* pattern, const char* tag)
         return strcmp(pattern, tag) == 0;
     }
 
-    // Pattern has wildcard — split both into key:value
     const char* p_colon = strchr(pattern, ':');
     const char* t_colon = strchr(tag, ':');
 
-    // Wildcard patterns require colon in tag too
-    if (!p_colon || !t_colon) return false;
+    if (p_colon && t_colon) {
+        // Both have colon: match key and value parts separately
+        char p_key[64], t_key[64];
+        size_t p_key_len = p_colon - pattern;
+        size_t t_key_len = t_colon - tag;
+        if (p_key_len >= 64) p_key_len = 63;
+        if (t_key_len >= 64) t_key_len = 63;
+        memcpy(p_key, pattern, p_key_len); p_key[p_key_len] = '\0';
+        memcpy(t_key, tag, t_key_len); t_key[t_key_len] = '\0';
 
-    size_t p_key_len = p_colon - pattern;
-    size_t t_key_len = t_colon - tag;
-    const char* p_value = p_colon + 1;
-    const char* t_value = t_colon + 1;
+        return tag_match_part(p_key, t_key) && tag_match_part(p_colon + 1, t_colon + 1);
+    }
 
-    bool key_wild = (p_key_len == 3 && strncmp(pattern, "...", 3) == 0);
-    bool val_wild = (strcmp(p_value, "...") == 0);
+    if (!p_colon && !t_colon) {
+        // Neither has colon: simple tag match with wildcard
+        return tag_match_part(pattern, tag);
+    }
 
-    bool key_ok = key_wild || (p_key_len == t_key_len && strncmp(pattern, tag, p_key_len) == 0);
-    bool val_ok = val_wild || strcmp(p_value, t_value) == 0;
-
-    return key_ok && val_ok;
+    // One has colon, other doesn't — no match
+    return false;
 }
