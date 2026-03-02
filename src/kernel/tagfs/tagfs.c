@@ -940,11 +940,14 @@ bool tagfs_has_tag(uint32_t file_id, const char* key, const char* value) {
         return false;
     }
 
+    bool key_wildcard = (strcmp(key, "...") == 0);
+    bool value_wildcard = (value && strcmp(value, "...") == 0);
+
     for (uint32_t i = 0; i < meta->tag_count; i++) {
-        if (strcmp(meta->tags[i].key, key) == 0) {
-            if (!value || strcmp(meta->tags[i].value, value) == 0) {
-                return true;
-            }
+        bool key_ok = key_wildcard || strcmp(meta->tags[i].key, key) == 0;
+        bool val_ok = !value || value_wildcard || strcmp(meta->tags[i].value, value) == 0;
+        if (key_ok && val_ok) {
+            return true;
         }
     }
 

@@ -166,23 +166,14 @@ bool tagfs_context_matches(uint32_t pid, uint32_t file_id) {
         bool found = false;
 
         const char* ctx_tag = ctx->active_tags[ctx_idx];
-        size_t ctx_len = strlen(ctx_tag);
-        bool is_wildcard = (ctx_len > 4 && strcmp(ctx_tag + ctx_len - 4, ":...") == 0);
 
         for (uint32_t tag_idx = 0; tag_idx < meta->tag_count; tag_idx++) {
             char tag_string[64];
             tagfs_format_tag(tag_string, meta->tags[tag_idx].key, meta->tags[tag_idx].value);
 
-            if (is_wildcard) {
-                if (strncmp(ctx_tag, tag_string, ctx_len - 3) == 0) {
-                    found = true;
-                    break;
-                }
-            } else {
-                if (strcmp(ctx_tag, tag_string) == 0) {
-                    found = true;
-                    break;
-                }
+            if (tag_match(ctx_tag, tag_string)) {
+                found = true;
+                break;
             }
         }
 

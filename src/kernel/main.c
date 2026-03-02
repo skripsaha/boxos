@@ -249,6 +249,9 @@ void kernel_main(void)
     debug_printf("[INIT] Running Route Direct test...\n");
     test_route_direct();
     kprintf("\n");
+    debug_printf("[INIT] Running Tag Wildcard test...\n");
+    test_tag_wildcard();
+    kprintf("\n");
     debug_printf("[INIT] Running Route Tag test...\n");
     test_route_tag();
     kprintf("\n");

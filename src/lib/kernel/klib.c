@@ -1942,3 +1942,42 @@ void delay(uint32_t milliseconds)
         asm volatile("pause");
     }
 }
+
+bool tag_is_wildcard(const char* tag)
+{
+    if (!tag) return false;
+    size_t len = strlen(tag);
+    // "key:..." — value wildcard
+    if (len > 4 && strcmp(tag + len - 4, ":...") == 0) return true;
+    // "...:value" or "...:..." — key wildcard
+    if (len > 4 && strncmp(tag, "...:", 4) == 0) return true;
+    return false;
+}
+
+bool tag_match(const char* pattern, const char* tag)
+{
+    if (!pattern || !tag) return false;
+    if (!tag_is_wildcard(pattern)) {
+        return strcmp(pattern, tag) == 0;
+    }
+
+    // Pattern has wildcard — split both into key:value
+    const char* p_colon = strchr(pattern, ':');
+    const char* t_colon = strchr(tag, ':');
+
+    // Wildcard patterns require colon in tag too
+    if (!p_colon || !t_colon) return false;
+
+    size_t p_key_len = p_colon - pattern;
+    size_t t_key_len = t_colon - tag;
+    const char* p_value = p_colon + 1;
+    const char* t_value = t_colon + 1;
+
+    bool key_wild = (p_key_len == 3 && strncmp(pattern, "...", 3) == 0);
+    bool val_wild = (strcmp(p_value, "...") == 0);
+
+    bool key_ok = key_wild || (p_key_len == t_key_len && strncmp(pattern, tag, p_key_len) == 0);
+    bool val_ok = val_wild || strcmp(p_value, t_value) == 0;
+
+    return key_ok && val_ok;
+}
