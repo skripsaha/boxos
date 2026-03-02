@@ -1120,7 +1120,7 @@ void vmm_init(void) {
                  (void*)(VMM_KERNEL_MMIO_BASE + VMM_KERNEL_MMIO_SIZE));
 
     debug_printf("[VMM] Testing identity mapping...\n");
-    volatile uint32_t* test_ptr = (volatile uint32_t*)0x100000;
+    volatile uint32_t* test_ptr = (volatile uint32_t*)0x200000;
     uint32_t old_value = *test_ptr;
     *test_ptr = 0xDEADBEEF;
     if (*test_ptr != 0xDEADBEEF) {
@@ -1369,45 +1369,45 @@ vmm_context_t* vmm_create_cabin(uint64_t* notify_page_phys, uint64_t* result_pag
         return NULL;
     }
 
-    void* notify_phys = pmm_alloc(1);
+    void* notify_phys = pmm_alloc(CABIN_NOTIFY_PAGE_PAGES);
     if (!notify_phys) {
         vmm_destroy_context(cabin_ctx);
-        vmm_set_error("Failed to allocate Notify page");
+        vmm_set_error("Failed to allocate Notify region");
         return NULL;
     }
 
-    void* result_phys = pmm_alloc(1);
+    void* result_phys = pmm_alloc(CABIN_RESULT_PAGE_PAGES);
     if (!result_phys) {
-        pmm_free(notify_phys, 1);
+        pmm_free(notify_phys, CABIN_NOTIFY_PAGE_PAGES);
         vmm_destroy_context(cabin_ctx);
-        vmm_set_error("Failed to allocate Result page");
+        vmm_set_error("Failed to allocate Result region");
         return NULL;
     }
 
-    memset(vmm_phys_to_virt((uintptr_t)notify_phys), 0, 4096);
-    memset(vmm_phys_to_virt((uintptr_t)result_phys), 0, 4096);
+    memset(vmm_phys_to_virt((uintptr_t)notify_phys), 0, CABIN_NOTIFY_PAGE_SIZE);
+    memset(vmm_phys_to_virt((uintptr_t)result_phys), 0, CABIN_RESULT_PAGE_SIZE);
 
     if (vmm_setup_null_trap(cabin_ctx) != 0) {
-        pmm_free(result_phys, 1);
-        pmm_free(notify_phys, 1);
+        pmm_free(result_phys, CABIN_RESULT_PAGE_PAGES);
+        pmm_free(notify_phys, CABIN_NOTIFY_PAGE_PAGES);
         vmm_destroy_context(cabin_ctx);
         vmm_set_error("Failed to setup NULL trap");
         return NULL;
     }
 
     if (vmm_map_notify_page(cabin_ctx, (uintptr_t)notify_phys) != 0) {
-        pmm_free(result_phys, 1);
-        pmm_free(notify_phys, 1);
+        pmm_free(result_phys, CABIN_RESULT_PAGE_PAGES);
+        pmm_free(notify_phys, CABIN_NOTIFY_PAGE_PAGES);
         vmm_destroy_context(cabin_ctx);
-        vmm_set_error("Failed to map Notify page");
+        vmm_set_error("Failed to map Notify region");
         return NULL;
     }
 
     if (vmm_map_result_page(cabin_ctx, (uintptr_t)result_phys) != 0) {
-        pmm_free(result_phys, 1);
-        pmm_free(notify_phys, 1);
+        pmm_free(result_phys, CABIN_RESULT_PAGE_PAGES);
+        pmm_free(notify_phys, CABIN_NOTIFY_PAGE_PAGES);
         vmm_destroy_context(cabin_ctx);
-        vmm_set_error("Failed to map Result page");
+        vmm_set_error("Failed to map Result region");
         return NULL;
     }
 
@@ -1431,9 +1431,10 @@ int vmm_map_notify_page(vmm_context_t* ctx, uintptr_t phys_page) {
 
     uint64_t flags = VMM_FLAG_PRESENT | VMM_FLAG_WRITABLE | VMM_FLAG_USER;
 
-    vmm_map_result_t result = vmm_map_page(ctx, VMM_CABIN_NOTIFY_PAGE, phys_page, flags);
+    vmm_map_result_t result = vmm_map_pages(ctx, VMM_CABIN_NOTIFY_PAGE, phys_page,
+                                             CABIN_NOTIFY_PAGE_PAGES, flags);
     if (!result.success) {
-        debug_printf("[VMM] Failed to map Notify Page: %s\n", result.error_msg);
+        debug_printf("[VMM] Failed to map Notify Region: %s\n", result.error_msg);
         return -1;
     }
 
@@ -1446,9 +1447,10 @@ int vmm_map_result_page(vmm_context_t* ctx, uintptr_t phys_page) {
     // user needs write access to update head index after reading results
     uint64_t flags = VMM_FLAG_PRESENT | VMM_FLAG_WRITABLE | VMM_FLAG_USER;
 
-    vmm_map_result_t result = vmm_map_page(ctx, VMM_CABIN_RESULT_PAGE, phys_page, flags);
+    vmm_map_result_t result = vmm_map_pages(ctx, VMM_CABIN_RESULT_PAGE, phys_page,
+                                             CABIN_RESULT_PAGE_PAGES, flags);
     if (!result.success) {
-        debug_printf("[VMM] Failed to map Result Page: %s\n", result.error_msg);
+        debug_printf("[VMM] Failed to map Result Region: %s\n", result.error_msg);
         return -1;
     }
 

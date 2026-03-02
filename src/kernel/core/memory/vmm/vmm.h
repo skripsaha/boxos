@@ -18,9 +18,9 @@
 // CABIN MEMORY MODEL (Snowball Architecture - Flat Binary, NO ELF)
 // Each process lives in isolated Cabin with fixed virtual layout:
 #define VMM_CABIN_NULL_TRAP     CABIN_NULL_TRAP_START  // 0x0000-0x0FFF: NULL trap zone (unmapped)
-#define VMM_CABIN_NOTIFY_PAGE   CABIN_NOTIFY_PAGE_ADDR // 0x1000: Notify Page (User->Kernel)
-#define VMM_CABIN_RESULT_PAGE   CABIN_RESULT_PAGE_ADDR // 0x2000: Result Page (Kernel->User)
-#define VMM_CABIN_CODE_START    CABIN_CODE_START_ADDR  // 0x3000+: Code, data, heap, stack (ENTRY POINT)
+#define VMM_CABIN_NOTIFY_PAGE   CABIN_NOTIFY_PAGE_ADDR // 0x1000-0x2FFF: Notify Region (User->Kernel, 8KB)
+#define VMM_CABIN_RESULT_PAGE   CABIN_RESULT_PAGE_ADDR // 0x3000-0x9FFF: Result Region (Kernel->User, 28KB)
+#define VMM_CABIN_CODE_START    CABIN_CODE_START_ADDR  // 0xA000+: Code, data, heap, stack (ENTRY POINT)
 
 #define VMM_USER_BASE           VMM_CABIN_CODE_START   // flat binary entry point (NOT ELF!)
 #define VMM_USER_STACK_TOP      0x00007FFFFFFFE000ULL  // ~128TB user space top
@@ -213,7 +213,7 @@ static inline uintptr_t vmm_virt_to_phys_direct(void* virt_addr) {
 int vmm_handle_page_fault(uintptr_t fault_addr, uint64_t error_code);
 
 // Cabin: isolated virtual address space for user processes.
-// Layout: 0x0000-0x0FFF (NULL trap), 0x1000 (Notify), 0x2000 (Result), 0x3000+ (Code/Data/Heap/Stack)
+// Layout: 0x0000-0x0FFF (NULL trap), 0x1000-0x2FFF (Notify 8KB), 0x3000-0x9FFF (Result 28KB), 0xA000+ (Code/Data/Heap/Stack)
 vmm_context_t* vmm_create_cabin(uint64_t* notify_page_phys, uint64_t* result_page_phys);
 int vmm_map_notify_page(vmm_context_t* ctx, uintptr_t phys_page);
 int vmm_map_result_page(vmm_context_t* ctx, uintptr_t phys_page);

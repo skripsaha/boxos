@@ -38,10 +38,10 @@ typedef struct PACKED
     uint8_t _pad_notify[63];            // Offset 9-71
 
     result_ring_t ring;    // Offset 72
-    uint8_t _reserved[56]; // Offset 4040-4095
+    uint8_t _reserved[56]; // Offset 28616-28671
 } result_page_t;
 
-STATIC_ASSERT(sizeof(result_page_t) == 4096, "Result page must be exactly 4096 bytes");
+STATIC_ASSERT(sizeof(result_page_t) == CABIN_RESULT_PAGE_SIZE, "Result page must be exactly CABIN_RESULT_PAGE_SIZE (28KB)");
 STATIC_ASSERT(OFFSETOF(result_page_t, notification_flag) == 8, "notification_flag must be at offset 8");
 STATIC_ASSERT(OFFSETOF(result_page_t, ring) == 72, "ring must be at offset 72 to match kernel");
 

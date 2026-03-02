@@ -18,7 +18,7 @@ typedef struct PACKED {
     uint32_t route_target;
     char     route_tag[32];
     uint32_t spawner_pid;
-    uint8_t  _reserved[3758];
+    uint8_t  _reserved[7854];            // pad to CABIN_NOTIFY_PAGE_SIZE (8KB)
 } notify_page_t;
 
 INLINE notify_page_t* notify_page(void) {

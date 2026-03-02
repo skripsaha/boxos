@@ -5,9 +5,10 @@
 #include "events.h"
 #include "boxos_magic.h"
 #include "boxos_sizes.h"
+#include "cabin_layout.h"
 
 #define NOTIFY_PAGE_MAGIC     NOTIFY_MAGIC
-#define NOTIFY_PAGE_SIZE      PAGE_SIZE
+#define NOTIFY_PAGE_SIZE      CABIN_NOTIFY_PAGE_SIZE
 #define NOTIFY_MAX_PREFIXES   EVENT_MAX_PREFIXES
 #define NOTIFY_DATA_SIZE      EVENT_DATA_SIZE
 
@@ -31,14 +32,14 @@ typedef struct __packed {
     uint32_t route_target;
     char     route_tag[32];
     uint32_t spawner_pid;
-    uint8_t  _reserved[3758];                // pad to 4096 bytes
+    uint8_t  _reserved[7854];                // pad to 8192 bytes (CABIN_NOTIFY_PAGE_SIZE)
 } notify_page_t;
 
 STATIC_ASSERT(NOTIFY_MAX_PREFIXES == EVENT_MAX_PREFIXES, "Prefix count must match Event structure - see docs/api/event_structures.md");
 STATIC_ASSERT(NOTIFY_DATA_SIZE == EVENT_DATA_SIZE, "Data size must match Event structure - see docs/api/event_structures.md");
-STATIC_ASSERT(sizeof(notify_page_t) == NOTIFY_PAGE_SIZE, "Notify page must be exactly 4096 bytes - see docs/api/event_structures.md");
+STATIC_ASSERT(sizeof(notify_page_t) == NOTIFY_PAGE_SIZE, "Notify page must be exactly CABIN_NOTIFY_PAGE_SIZE bytes");
 
-_Static_assert(sizeof(notify_page_t) == 4096, "Notify page must be exactly one page (4096 bytes)");
+_Static_assert(sizeof(notify_page_t) == CABIN_NOTIFY_PAGE_SIZE, "Notify page must match CABIN_NOTIFY_PAGE_SIZE (8KB)");
 _Static_assert(sizeof(notify_page_t) % 4096 == 0, "Notify page must be page-aligned");
 
 #endif // NOTIFY_PAGE_H

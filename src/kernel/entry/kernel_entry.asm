@@ -30,7 +30,7 @@ _start:
     mov gs, ax
 
     ; Stack must be AFTER BSS to avoid corruption!
-    ; BSS ends at ~0x810000, stack at 0x900000 = 9MB
+    ; Kernel at 0x100000, BSS ends at ~0x15D000, stack at 0x900000 = 9MB
     mov rsp, 0x900000
     mov rbp, rsp
 
