@@ -1,92 +1,120 @@
-Название: The Guide (Диспетчер маршрутизации) Статус: Core Component (Сердце системы) Входные данные: EventRing (Kernel Space) Выходные данные: Вызов функций конкретных Деков или Execution Deck.
+Название: The Guide (Диспетчер маршрутизации) Статус: Core Component (Сердце системы) Входные данные: EventRing (Kernel Space) Выходные данные: Вызов функций конкретных Деков и доставка результатов через Execution Deck.
 
 1. Назначение
-   Guide — это центральный бесконечный цикл ядра, который обеспечивает работу архитектуры «Снежного кома». Он не выполняет полезную работу сам, а управляет потоком данных (Event), передавая его между функциональными модулями (Decks) на основе массива префиксов, сформированного пользователем.
+   Guide — это центральный batch-обработчик ядра, который обеспечивает работу архитектуры «Снежного кома». Он не выполняет полезную работу сам, а управляет потоком данных (Event), передавая его между функциональными модулями (Decks) на основе массива префиксов, сформированного пользователем.
 
-2. Алгоритм работы (The Core Loop)
-   Guide работает по принципу Sequential Dispatch (Последовательная диспетчеризация):
+   Важно: Guide не является отдельным потоком или бесконечным циклом. Это функция guide_run(), вызываемая из планировщика (scheduler_yield_from_interrupt) при определённых условиях.
 
-Idle State: Если EventRing пуст, Guide переходит в режим ожидания (halt/sleep), минимизируя потребление ресурсов.
+2. Когда вызывается Guide
+   guide_run() запускается из scheduler при:
+   - Переходе в idle (текущий процесс → idle process)
+   - Периодически каждые 5 тиков (50мс) для гарантированной обработки событий
+   - Наличии процессов в wait queue на EventRing
+   - Непустом EventRing (есть необработанные события)
 
-Wake Up: При вызове notify() и появлении нового Event, Guide извлекает его из головы кольцевого буфера.
+3. Алгоритм работы (Batch Processing)
+   guide_run() обрабатывает все доступные события в EventRing за один вызов:
 
-Prefix Fetch: Читает текущую инструкцию из event->prefixes[event->current_prefix_idx].
+```c
+void guide_run(void) {
+    while (!event_ring_is_empty(kernel_event_ring)) {
+        Event event;
+        event_ring_pop(kernel_event_ring, &event);
 
-Validation:
+        if (!event_validate(&event)) continue;
 
-Если префикс == 0x0000 — цепочка завершена успешно. Переход к Execution Deck (вызов напрямую, не через deck_table).
+        event.state = EVENT_STATE_PROCESSING;
 
-Если префикс некорректен или current_prefix_idx вышел за пределы — переход к Execution Deck со статусом CRITICAL_ERROR.
+        while (event.current_prefix_idx < event.prefix_count) {
+            uint16_t prefix = event_current_prefix(&event);
 
-JIT Security (System Check):
+            // 1. Конец маршрута (терминатор)
+            if (prefix == 0x0000) {
+                execution_deck_handler(&event);
+                break;
+            }
 
-Guide передает pid, Deck_ID и Opcode в System Deck (0xFF).
+            uint8_t deck_id = event_get_deck_id(&event, idx);
+            uint8_t opcode  = event_get_opcode(&event, idx);
 
-Если проверка прав провалена — мгновенная остановка цепочки, статус ACCESS_DENIED.
+            // 2. Проверка прав (Security Gate)
+            if (!system_security_gate(event.pid, deck_id, opcode)) {
+                event.state = EVENT_STATE_ACCESS_DENIED;
+                execution_deck_handler(&event);
+                break;
+            }
 
-Dispatch:
+            // 3. Диспетчеризация в Deck
+            deck_handler_t handler = guide_get_deck_handler(deck_id);
+            error_t err = handler(&event);
 
-Guide находит нужный Дек по ID.
+            // 4. Ошибка → прекращаем цепочку
+            if (IS_ERROR(err)) {
+                event.state = EVENT_STATE_ERROR;
+                execution_deck_handler(&event);
+                break;
+            }
 
-Вызывает обработчик Дека, передавая ему указатель на event->data.
+            event_advance(&event);  // Следующий префикс
+        }
 
-Increment: После возврата управления от Дека, Guide инкрементирует current_prefix_idx и возвращается к пункту 3.
+        // Если цепочка завершена без ошибок и без терминатора
+        if (need_execution_deck) {
+            event.state = EVENT_STATE_COMPLETED;
+            execution_deck_handler(&event);
+        }
+    }
 
-3. Обработка ошибок в цепочке
+    // Пробуждение процессов из wait queue
+    if (processed_count > 0 && event_ring_waiters.count > 0) {
+        guide_wakeup_waiters();
+    }
+
+    // Обработка AHCI I/O completions
+    guide_process_ahci_completions();
+
+    // Backpressure: обновить event_ring_full флаг во всех Notify Pages
+    update_backpressure_flags();
+}
+```
+
+4. Deck Table (Зарегистрированные обработчики)
+
+| Deck ID | Название | Обработчик |
+|---------|----------|------------|
+| 0xFF | System Deck | system_deck_handler — процессы, теги, маршрутизация, буферы |
+| 0x01 | Operations Deck | operations_deck_handler — трансформация данных |
+| 0x02 | Storage Deck | storage_deck_handler — TagFS операции |
+| 0x03 | Hardware Deck | hardware_deck_handler — прямой доступ к оборудованию |
+| 0x00 | Execution Deck | execution_deck_handler — финализатор (вызывается напрямую, не через deck_table) |
+
+5. Обработка ошибок в цепочке
    В BoxOS ошибка в одном звене «Снежного кома» останавливает всё движение:
 
-Если любой Дек возвращает флаг ошибки, Guide прекращает дальнейшую маршрутизацию.
-
-Он игнорирует оставшиеся в массиве префиксы и сразу передает событие в Execution Deck.
+- Если любой Дек возвращает ошибку, Guide прекращает дальнейшую маршрутизацию
+- Игнорирует оставшиеся в массиве префиксы
+- Передает событие в Execution Deck с первой зафиксированной ошибкой (first_error)
+- Execution Deck доставляет результат (с ошибкой) в Result Page процесса
 
 Это гарантирует, что битые или неполные данные никогда не попадут в сеть или на диск.
 
-4.  Псевдокод (Архитектурная логика)
-    C
-    void guide_loop() {
-    while(true) {
-    // Ожидание события
-    while(EventRing.is_empty()) cpu_relax();
+6. Error Tracking
+   Event имеет двухуровневую систему ошибок:
+   - `error_code` — текущая ошибка (может перезаписываться)
+   - `first_error` — первая ошибка в цепочке (записывается один раз)
+   - `error_deck_idx` — индекс дека, вызвавшего первую ошибку
 
-            Event* ev = EventRing.pop();
+7. Wait Queue и Backpressure
+   Если EventRing был полон во время notify():
+   - Процесс помещается в event_ring_waiters (linked list)
+   - guide_wakeup_waiters() пробуждает процессы когда появляются свободные слоты
+   - Backpressure флаг (event_ring_full) обновляется во всех Notify Pages при >90% заполненности
 
-            while(ev->state == STATE_PROCESSING) {
-                uint16_t prefix = ev->prefixes[ev->current_prefix_idx];
+8. Почему это эффективно?
+   Конвейерность: Guide не делает лишних копирований. Event обрабатывается in-place.
 
-                // 1. Конец маршрута
-                if (prefix == 0x0000) {
-                    dispatch_to_deck(DECK_EXECUTION, ev);
-                    break;
-                }
+Низкий оверхед: Между операциями «Прочитать» и «Записать» нет переключения контекста Ring 3 ↔ Ring 0. Всё происходит внутри одного вызова guide_run().
 
-                uint8_t d_id = (prefix >> 8);
-                uint8_t op   = (prefix & 0xFF);
+Batch Processing: Все накопившиеся события обрабатываются за один вызов, минимизируя overhead входа/выхода.
 
-                // 2. Проверка прав (System Deck)
-                if (!system_security_gate(ev->pid, d_id, op)) {
-                    ev->state = STATE_ACCESS_DENIED;
-                    dispatch_to_deck(DECK_EXECUTION, ev);
-                    break;
-                }
-
-                // 3. Выполнение
-                bool success = dispatch_to_deck(d_id, ev, op);
-
-                if (!success) {
-                    ev->state = STATE_ERROR;
-                    dispatch_to_deck(DECK_EXECUTION, ev);
-                    break;
-                }
-
-                ev->current_prefix_idx++;
-            }
-        }
-
-    }
-
-5.  Почему это эффективно?
-    Конвейерность: Guide не делает лишних копирований. Он передает только указатель на структуру события.
-
-Низкий оверхед: Между операциями «Прочитать» и «Сжать» нет переключения контекста Ring 3 <-> Ring 0. Всё происходит внутри одного прохода Guide.
-
-Предсказуемость: Весь путь данных (Pipeline) определен заранее. Процессор может эффективно использовать предсказание переходов.
+Предсказуемость: Весь путь данных (Pipeline) определен массивом префиксов заранее.
