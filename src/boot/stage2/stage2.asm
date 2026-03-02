@@ -9,16 +9,19 @@ DEFAULT ABS
 ; 0x9000      - Boot info for kernel
 ; 0x9100      - TagFS superblock buffer (512 bytes)
 ; 0x9300      - TagFS metadata buffer (512 bytes)
-; 0x10000     - Kernel load address (512KB)
-; 0x90000     - Kernel end
+; 0x10000     - Kernel temporary load address (real mode, 512KB)
+; 0x90000     - Kernel temp end
+; 0x100000    - Kernel run address (1MB, linked address)
+; 0x180000    - Kernel run end
 ; 0x820000    - Page tables (16KB: PML4, PDPT, PD) - E820 validated
 ; 0x900000    - Stack (grows downward)
 
-KERNEL_LOAD_ADDR      equ 0x10000
+KERNEL_LOAD_ADDR      equ 0x10000      ; real mode load (below 1MB)
+KERNEL_RUN_ADDR       equ 0x100000     ; linked run address (1MB)
 KERNEL_SECTOR_START   equ 17
 KERNEL_SECTOR_COUNT   equ 1024         ; 512KB
 KERNEL_SIZE_BYTES     equ 524288       ; 1024 * 512
-KERNEL_END_ADDR       equ 0x90000
+KERNEL_END_ADDR       equ 0x180000     ; KERNEL_RUN_ADDR + KERNEL_SIZE_BYTES
 
 ; 0x820000: well above kernel end (0x90000), 7.5MB gap, E820-validated, page-aligned, 16KB contiguous
 PAGE_TABLE_BASE       equ 0x820000
@@ -136,10 +139,16 @@ long_mode_start:
     test rax, rax
     jz .kernel_not_loaded
 
+    ; Copy kernel from temp load address (0x10000) to linked run address (0x100000)
+    mov rsi, KERNEL_LOAD_ADDR
+    mov rdi, KERNEL_RUN_ADDR
+    mov rcx, KERNEL_SIZE_BYTES / 8
+    rep movsq
+
     mov [BOOT_INFO_ADDR], dword E820_MAP_ADDR
     mov ax, [E820_COUNT_ADDR]
     mov [BOOT_INFO_ADDR+4], ax
-    mov [BOOT_INFO_ADDR+8], dword KERNEL_LOAD_ADDR
+    mov [BOOT_INFO_ADDR+8], dword KERNEL_RUN_ADDR
     mov [BOOT_INFO_ADDR+12], dword KERNEL_END_ADDR
 
     ; Zero region after kernel end before jumping (BSS pre-clear)
@@ -148,7 +157,7 @@ long_mode_start:
     xor rax, rax
     rep stosb
 
-    jmp KERNEL_LOAD_ADDR
+    jmp KERNEL_RUN_ADDR
 
 .kernel_not_loaded:
     mov rdi, 0xB8000

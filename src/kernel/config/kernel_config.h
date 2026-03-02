@@ -3,7 +3,7 @@
 
 #include "boxos_limits.h"
 
-#define CONFIG_KERNEL_LOAD_ADDR 0x10000ULL   // 64KB - kernel load address
+#define CONFIG_KERNEL_LOAD_ADDR 0x100000ULL  // 1MB - kernel run address
 #define CONFIG_PAGE_TABLE_BASE 0x820000ULL   // 8MB - page tables
 #define CONFIG_KERNEL_STACK_BASE 0x900000ULL // 9MB - kernel stack
 
