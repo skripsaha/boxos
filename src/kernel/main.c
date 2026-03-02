@@ -56,7 +56,7 @@ void kernel_main(void)
     kprintf("BoxOS - Clean Foundation\n");
     kprintf("====================================\n");
     kprintf("Architecture: x86-64 (64-bit)\n");
-    kprintf("Model: Event-driven workflow (BoxOS)\n");
+    kprintf("Model: Snowball command pipeline (BoxOS)\n");
     kprintf("Syscall: kernel_notify (INT 0x80)\n");
     kprintf("Memory Model: Cabin (0x%lx Notify, 0x%lx Result, 0x%lx Code)\n",
             CABIN_NOTIFY_PAGE_ADDR, CABIN_RESULT_PAGE_ADDR, CABIN_CODE_START_ADDR);

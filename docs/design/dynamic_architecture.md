@@ -9,11 +9,11 @@
 
 ## Executive Summary
 
-This document specifies the complete redesign of BoxOS core structures to eliminate all hard limits and achieve fully dynamic resource allocation while preserving the asynchronous, event-driven architecture.
+This document specifies the complete redesign of BoxOS core structures to eliminate all hard limits and achieve fully dynamic resource allocation while preserving the Snowball command pipeline architecture.
 
 **Goals:**
 - Remove ALL hard limits: EventRing size, ResultRing size, Event structure size, prefix arrays
-- Maintain BoxOS philosophy: async, event-driven, single `notify()` syscall
+- Maintain BoxOS philosophy: Snowball command pipeline, single `notify()` syscall
 - Preserve current architecture semantics
 - Maximum flexibility without over-complication
 - DoS protection through quotas and backpressure
@@ -982,7 +982,7 @@ void quota_release(uint32_t pid, size_t bytes) {
 ## 13. Conclusion
 
 This design achieves **unlimited flexibility** while maintaining BoxOS's core philosophy:
-- ✅ Asynchronous, event-driven architecture preserved
+- ✅ Snowball command pipeline architecture preserved
 - ✅ Single `notify()` syscall model unchanged
 - ✅ No hard limits on any structure
 - ✅ DoS protection via quotas and backpressure

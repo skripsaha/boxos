@@ -27,67 +27,61 @@ BoxLib implements 3-layer architecture for BoxOS user space programs:
 
 User programs interact with kernel through fixed memory pages:
 
-- `0x1000` - Notify Page (requests to kernel)
-- `0x2000` - Result Page (responses from kernel)
-- `0x3000` - Code Start Address
+- `0x1000 - 0x2FFF` - Notify Page (8KB, requests to kernel)
+- `0x3000 - 0x9FFF` - Result Page (28KB, responses from kernel)
+- `0xA000` - Code Start Address (entry point)
 
 ## Critical Constraints
 
 **ENFORCED BY KERNEL:**
-- Max prefixes in chain: 16 (not 64!)
-- Event inline data: 192 bytes (not 3960!)
-- Result ring buffer: 15 slots
-- Result payload: 252 bytes per entry
+- Max prefixes in chain: 16
+- Event inline data: 256 bytes
+- Result ring buffer: 111 slots
+- Result payload: 244 bytes per entry
 
 ## API Overview
 
 ### Notify API (`box/notify.h`)
 
-Single-call wrapper:
-```c
-box_event_id_t box_notify(uint8_t deck_id, uint8_t opcode,
-                          const void* data, size_t data_size);
-```
-
 Low-level control:
 ```c
-box_notify_prepare();
-box_notify_add_prefix(BOX_DECK_OPERATIONS, 0x01);
-box_notify_write_data(&request, sizeof(request));
-box_event_id_t event_id = box_notify_execute();
+notify_prepare();
+notify_add_prefix(0x01, 0x01);  // deck_id, opcode
+notify_write_data(&request, sizeof(request));
+event_id_t event_id = notify();
 ```
 
 ### Result API (`box/result.h`)
 
 ```c
-box_result_entry_t result;
+result_entry_t result;
 
-// Non-blocking
-if (box_result_available()) {
-    box_result_pop(&result);
+// Non-blocking check
+if (result_available()) {
+    result_pop(&result);
 }
 
-// Blocking (with timeout)
-if (box_result_wait(&result, 10000)) {
-    // Process result.payload
+// Blocking (with timeout via RDTSC)
+if (result_wait(&result, 10000)) {
+    // Process result.payload (244 bytes)
 }
 ```
 
 ### String/Memory Utilities (`box/string.h`)
 
 ```c
-box_strlen(str);
-box_strcpy(dest, src);
-box_strcmp(s1, s2);
-box_memcpy(dest, src, n);
-box_memset(ptr, value, n);
-box_memcmp(s1, s2, n);
+strlen(str);
+strcpy(dest, src);
+strcmp(s1, s2);
+memcpy(dest, src, n);
+memset(ptr, value, n);
+memcmp(s1, s2, n);
 ```
 
 ## Build System
 
 ```bash
-cd /Volumes/BOX/main/boxos/src/userspace/boxlib
+cd src/userspace/boxlib
 make              # Build libbox.a
 make clean        # Remove artifacts
 ```
@@ -105,29 +99,19 @@ Cross-platform support:
 int main(void) {
     // Send request
     uint32_t value = 42;
-    box_event_id_t event = box_notify(
-        BOX_DECK_OPERATIONS,
-        0x01,
-        &value,
-        sizeof(value)
-    );
+    notify_prepare();
+    notify_add_prefix(DECK_OPERATIONS, 0x01);
+    notify_write_data(&value, sizeof(value));
+    event_id_t event = notify();
 
     // Wait for response
-    box_result_entry_t result;
-    if (box_result_wait(&result, 5000)) {
-        // Handle result
+    result_entry_t result;
+    if (result_wait(&result, 5000)) {
+        // Handle result.payload
     }
 
     return 0;
 }
-```
-
-Compile:
-```bash
-x86_64-elf-gcc -nostdlib -ffreestanding -mno-red-zone \
-    -I/Volumes/BOX/main/boxos/src/userspace/boxlib/include \
-    -o program program.c \
-    /Volumes/BOX/main/boxos/src/userspace/boxlib/libbox.a
 ```
 
 ## File Structure
@@ -135,13 +119,17 @@ x86_64-elf-gcc -nostdlib -ffreestanding -mno-red-zone \
 ```
 boxlib/
 ├── include/box/
+│   ├── defs.h       # Platform definitions
 │   ├── types.h      # Core types and constants
 │   ├── notify.h     # Notify Page API
 │   ├── result.h     # Result Page API
+│   ├── ipc.h        # IPC API (send, broadcast, listen, receive)
 │   └── string.h     # Utility functions
 ├── src/core/
-│   ├── notify.c     # Notify implementation
+│   ├── notify.c     # Notify implementation (INT 0x80)
 │   ├── result.c     # Result ring buffer
+│   ├── ipc.c        # IPC implementation
+│   ├── yield.c      # Cooperative yield
 │   └── string.c     # String/memory functions
 ├── Makefile
 ├── README.md
@@ -156,9 +144,9 @@ boxlib/
 ## Compatibility
 
 Library structures match kernel definitions:
-- `NotifyPage` layout (4KB page)
-- `ResultRing` buffer (cache-line aligned)
-- `ResultEntry` format (256 bytes aligned)
+- `notify_page_t` layout (8KB, 2 pages)
+- `result_ring_t` buffer (cache-line aligned head/tail)
+- `result_entry_t` format (256 bytes: source + error_code + sender_pid + 244 bytes payload)
 
 ## Notes
 
