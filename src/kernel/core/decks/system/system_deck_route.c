@@ -15,65 +15,22 @@ static bool tag_matches_process(process_t* proc, const char* route_tag) {
     char tags_snapshot[PROCESS_TAG_SIZE];
     process_snapshot_tags(proc, tags_snapshot, sizeof(tags_snapshot));
 
-    const char* colon = strchr(route_tag, ':');
+    const char* pos = tags_snapshot;
+    while (*pos) {
+        const char* comma = strchr(pos, ',');
+        size_t tag_len = comma ? (size_t)(comma - pos) : strlen(pos);
 
-    if (colon) {
-        const char* value_part = colon + 1;
-        size_t key_len = colon - route_tag;
+        char current_tag[PROCESS_TAG_SIZE];
+        size_t copy_len = tag_len < PROCESS_TAG_SIZE - 1 ? tag_len : PROCESS_TAG_SIZE - 1;
+        memcpy(current_tag, pos, copy_len);
+        current_tag[copy_len] = '\0';
 
-        if (key_len >= 32) return false;
-
-        char key[32];
-        memcpy(key, route_tag, key_len);
-        key[key_len] = '\0';
-
-        bool is_wildcard = (strcmp(value_part, "...") == 0);
-
-        const char* pos = tags_snapshot;
-        while (*pos) {
-            const char* comma = strchr(pos, ',');
-            size_t tag_len = comma ? (size_t)(comma - pos) : strlen(pos);
-
-            const char* tag_colon = NULL;
-            for (size_t i = 0; i < tag_len; i++) {
-                if (pos[i] == ':') {
-                    tag_colon = &pos[i];
-                    break;
-                }
-            }
-
-            if (tag_colon) {
-                size_t tag_key_len = tag_colon - pos;
-                if (tag_key_len == key_len && strncmp(pos, key, key_len) == 0) {
-                    if (is_wildcard) {
-                        return true;
-                    }
-                    size_t val_len = tag_len - tag_key_len - 1;
-                    size_t query_val_len = strlen(value_part);
-                    if (val_len == query_val_len &&
-                        strncmp(tag_colon + 1, value_part, val_len) == 0) {
-                        return true;
-                    }
-                }
-            }
-
-            if (!comma) break;
-            pos = comma + 1;
+        if (tag_match(route_tag, current_tag)) {
+            return true;
         }
-    } else {
-        const char* pos = tags_snapshot;
-        while (*pos) {
-            const char* comma = strchr(pos, ',');
-            size_t tag_len = comma ? (size_t)(comma - pos) : strlen(pos);
 
-            size_t query_len = strlen(route_tag);
-            if (tag_len == query_len && strncmp(pos, route_tag, tag_len) == 0) {
-                return true;
-            }
-
-            if (!comma) break;
-            pos = comma + 1;
-        }
+        if (!comma) break;
+        pos = comma + 1;
     }
 
     return false;

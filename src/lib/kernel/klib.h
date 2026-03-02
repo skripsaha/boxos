@@ -138,4 +138,8 @@ size_t strspn(const char* s, const char* accept);
 size_t strcspn(const char* s, const char* reject);
 char* strpbrk(const char* s, const char* accept);
 
+// Tag wildcard matching: "key:..." matches any "key:<value>"
+bool tag_is_wildcard(const char* tag);
+bool tag_match(const char* pattern, const char* tag);
+
 #endif // KLIB_H

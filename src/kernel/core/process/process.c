@@ -535,15 +535,18 @@ bool process_has_tag(process_t* proc, const char* tag) {
         return false;
     }
 
-    size_t tag_len = strlen(tag);
-    const char* tags = proc->tags;
-    const char* pos = tags;
+    const char* pos = proc->tags;
 
     while (*pos) {
         const char* comma = strchr(pos, ',');
         size_t current_len = comma ? (size_t)(comma - pos) : strlen(pos);
 
-        if (current_len == tag_len && strncmp(pos, tag, tag_len) == 0) {
+        char current_tag[PROCESS_TAG_SIZE];
+        size_t copy_len = current_len < PROCESS_TAG_SIZE - 1 ? current_len : PROCESS_TAG_SIZE - 1;
+        memcpy(current_tag, pos, copy_len);
+        current_tag[copy_len] = '\0';
+
+        if (tag_match(tag, current_tag)) {
             return true;
         }
 

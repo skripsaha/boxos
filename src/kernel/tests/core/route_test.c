@@ -259,6 +259,116 @@ void test_route_direct(void) {
     kprintf("Results: %d/%d tests passed\n", passed, total);
 }
 
+void test_tag_wildcard(void) {
+    kprintf("\n");
+    kprintf("TAG WILDCARD UNIT TEST\n");
+
+    int passed = 0;
+    int total = 0;
+
+    // tag_is_wildcard tests
+    total++;
+    kprintf("\n[TEST %d] tag_is_wildcard: 'type:...' = true\n", total);
+    if (tag_is_wildcard("type:...")) { passed++; debug_printf("[TEST %d] PASS\n", total); }
+    else { debug_printf("[TEST %d] FAIL\n", total); }
+
+    total++;
+    kprintf("\n[TEST %d] tag_is_wildcard: '...:note' = true\n", total);
+    if (tag_is_wildcard("...:note")) { passed++; debug_printf("[TEST %d] PASS\n", total); }
+    else { debug_printf("[TEST %d] FAIL\n", total); }
+
+    total++;
+    kprintf("\n[TEST %d] tag_is_wildcard: '...:...' = true\n", total);
+    if (tag_is_wildcard("...:...")) { passed++; debug_printf("[TEST %d] PASS\n", total); }
+    else { debug_printf("[TEST %d] FAIL\n", total); }
+
+    total++;
+    kprintf("\n[TEST %d] tag_is_wildcard: 'type:editor' = false\n", total);
+    if (!tag_is_wildcard("type:editor")) { passed++; debug_printf("[TEST %d] PASS\n", total); }
+    else { debug_printf("[TEST %d] FAIL\n", total); }
+
+    total++;
+    kprintf("\n[TEST %d] tag_is_wildcard: 'app' = false\n", total);
+    if (!tag_is_wildcard("app")) { passed++; debug_printf("[TEST %d] PASS\n", total); }
+    else { debug_printf("[TEST %d] FAIL\n", total); }
+
+    // tag_match tests
+    total++;
+    kprintf("\n[TEST %d] tag_match: 'type:...' vs 'type:editor' = true\n", total);
+    if (tag_match("type:...", "type:editor")) { passed++; debug_printf("[TEST %d] PASS\n", total); }
+    else { debug_printf("[TEST %d] FAIL\n", total); }
+
+    total++;
+    kprintf("\n[TEST %d] tag_match: 'type:...' vs 'type:viewer' = true\n", total);
+    if (tag_match("type:...", "type:viewer")) { passed++; debug_printf("[TEST %d] PASS\n", total); }
+    else { debug_printf("[TEST %d] FAIL\n", total); }
+
+    total++;
+    kprintf("\n[TEST %d] tag_match: 'type:...' vs 'lang:c' = false\n", total);
+    if (!tag_match("type:...", "lang:c")) { passed++; debug_printf("[TEST %d] PASS\n", total); }
+    else { debug_printf("[TEST %d] FAIL\n", total); }
+
+    total++;
+    kprintf("\n[TEST %d] tag_match: '...:editor' vs 'type:editor' = true\n", total);
+    if (tag_match("...:editor", "type:editor")) { passed++; debug_printf("[TEST %d] PASS\n", total); }
+    else { debug_printf("[TEST %d] FAIL\n", total); }
+
+    total++;
+    kprintf("\n[TEST %d] tag_match: '...:editor' vs 'type:viewer' = false\n", total);
+    if (!tag_match("...:editor", "type:viewer")) { passed++; debug_printf("[TEST %d] PASS\n", total); }
+    else { debug_printf("[TEST %d] FAIL\n", total); }
+
+    total++;
+    kprintf("\n[TEST %d] tag_match: '...:...' vs 'type:editor' = true\n", total);
+    if (tag_match("...:...", "type:editor")) { passed++; debug_printf("[TEST %d] PASS\n", total); }
+    else { debug_printf("[TEST %d] FAIL\n", total); }
+
+    total++;
+    kprintf("\n[TEST %d] tag_match: '...:...' vs 'app' = false (no colon)\n", total);
+    if (!tag_match("...:...", "app")) { passed++; debug_printf("[TEST %d] PASS\n", total); }
+    else { debug_printf("[TEST %d] FAIL\n", total); }
+
+    total++;
+    kprintf("\n[TEST %d] tag_match: 'app' vs 'app' = true (exact)\n", total);
+    if (tag_match("app", "app")) { passed++; debug_printf("[TEST %d] PASS\n", total); }
+    else { debug_printf("[TEST %d] FAIL\n", total); }
+
+    total++;
+    kprintf("\n[TEST %d] tag_match: 'type:editor' vs 'type:editor' = true (exact)\n", total);
+    if (tag_match("type:editor", "type:editor")) { passed++; debug_printf("[TEST %d] PASS\n", total); }
+    else { debug_printf("[TEST %d] FAIL\n", total); }
+
+    // process_has_tag wildcard tests
+    process_t* proc = process_create("app,type:editor,lang:c");
+    if (proc) {
+        total++;
+        kprintf("\n[TEST %d] process_has_tag: 'type:...' on 'app,type:editor,lang:c'\n", total);
+        if (process_has_tag(proc, "type:...")) { passed++; debug_printf("[TEST %d] PASS\n", total); }
+        else { debug_printf("[TEST %d] FAIL\n", total); }
+
+        total++;
+        kprintf("\n[TEST %d] process_has_tag: '...:editor' on 'app,type:editor,lang:c'\n", total);
+        if (process_has_tag(proc, "...:editor")) { passed++; debug_printf("[TEST %d] PASS\n", total); }
+        else { debug_printf("[TEST %d] FAIL\n", total); }
+
+        total++;
+        kprintf("\n[TEST %d] process_has_tag: '...:...' on 'app,type:editor,lang:c'\n", total);
+        if (process_has_tag(proc, "...:...")) { passed++; debug_printf("[TEST %d] PASS\n", total); }
+        else { debug_printf("[TEST %d] FAIL\n", total); }
+
+        total++;
+        kprintf("\n[TEST %d] process_has_tag: '...:python' (no match)\n", total);
+        if (!process_has_tag(proc, "...:python")) { passed++; debug_printf("[TEST %d] PASS\n", total); }
+        else { debug_printf("[TEST %d] FAIL\n", total); }
+
+        process_destroy(proc);
+    }
+
+    kprintf("\n");
+    kprintf("TAG WILDCARD TEST COMPLETE\n");
+    kprintf("Results: %d/%d tests passed\n", passed, total);
+}
+
 void test_route_tag(void) {
     kprintf("\n");
     kprintf("ROUTE TAG (MULTICAST) TEST\n");
@@ -321,6 +431,46 @@ void test_route_tag(void) {
             passed++;
         } else {
             debug_printf("[TEST %d] FAIL: Wildcard tag route failed, result=%d err=%u\n",
+                    total, result, event.error_code);
+        }
+    }
+
+    total++;
+    kprintf("\n[TEST %d] Route by tag '...:editor' (key wildcard)\n", total);
+    {
+        Event event;
+        event_init(&event, proc_a->pid, 204);
+        event.prefixes[0] = 0xFF41;
+        event.prefix_count = 1;
+        event.current_prefix_idx = 0;
+        strncpy(event.route_tag, "...:editor", sizeof(event.route_tag) - 1);
+
+        int result = system_deck_route_tag(&event);
+        if (result == 0 && event.state != EVENT_STATE_ERROR) {
+            debug_printf("[TEST %d] PASS: Key wildcard route succeeded\n", total);
+            passed++;
+        } else {
+            debug_printf("[TEST %d] FAIL: Key wildcard route failed, result=%d err=%u\n",
+                    total, result, event.error_code);
+        }
+    }
+
+    total++;
+    kprintf("\n[TEST %d] Route by tag '...:...' (full wildcard)\n", total);
+    {
+        Event event;
+        event_init(&event, proc_a->pid, 205);
+        event.prefixes[0] = 0xFF41;
+        event.prefix_count = 1;
+        event.current_prefix_idx = 0;
+        strncpy(event.route_tag, "...:...", sizeof(event.route_tag) - 1);
+
+        int result = system_deck_route_tag(&event);
+        if (result == 0 && event.state != EVENT_STATE_ERROR) {
+            debug_printf("[TEST %d] PASS: Full wildcard route succeeded\n", total);
+            passed++;
+        } else {
+            debug_printf("[TEST %d] FAIL: Full wildcard route failed, result=%d err=%u\n",
                     total, result, event.error_code);
         }
     }
@@ -616,6 +766,7 @@ void test_route_security(void) {
 
 void test_listen_table(void) { (void)0; }
 void test_route_direct(void) { (void)0; }
+void test_tag_wildcard(void) { (void)0; }
 void test_route_tag(void) { (void)0; }
 void test_listen_via_system_deck(void) { (void)0; }
 void test_route_security(void) { (void)0; }

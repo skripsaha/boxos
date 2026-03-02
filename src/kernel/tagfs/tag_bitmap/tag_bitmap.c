@@ -188,14 +188,11 @@ int tag_bitmap_query(TagBitmapIndex* index, const char* query_tags[],
     bool first_tag = true;
 
     for (uint32_t tag_idx = 0; tag_idx < tag_count; tag_idx++) {
-        size_t qlen = strlen(query_tags[tag_idx]);
-        bool is_wildcard = (qlen > 4 &&
-            strcmp(query_tags[tag_idx] + qlen - 4, ":...") == 0);
+        bool is_wildcard = tag_is_wildcard(query_tags[tag_idx]);
 
         bool found = false;
 
         if (is_wildcard) {
-            size_t prefix_len = qlen - 3;
             uint8_t wildcard_bitmap[TAGFS_BITMAP_SIZE];
             memset(wildcard_bitmap, 0, TAGFS_BITMAP_SIZE);
             bool any_match = false;
@@ -203,7 +200,7 @@ int tag_bitmap_query(TagBitmapIndex* index, const char* query_tags[],
             for (uint32_t b = 0; b < 256; b++) {
                 TagBitmapEntry* e = index->buckets[b];
                 while (e) {
-                    if (strncmp(e->tag_string, query_tags[tag_idx], prefix_len) == 0) {
+                    if (tag_match(query_tags[tag_idx], e->tag_string)) {
                         for (uint32_t i = 0; i < TAGFS_BITMAP_SIZE; i++) {
                             wildcard_bitmap[i] |= e->bitmap[i];
                         }
