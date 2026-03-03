@@ -69,9 +69,15 @@ void tss_load(void) {
 }
 
 uint64_t tss_get_ist_stack(int ist_num) {
-    if (ist_num < 1 || ist_num > 7) {
-        return 0;
+    // access IST entries by index without pointer arithmetic on struct members
+    switch (ist_num) {
+        case 1: return kernel_tss.ist1;
+        case 2: return kernel_tss.ist2;
+        case 3: return kernel_tss.ist3;
+        case 4: return kernel_tss.ist4;
+        case 5: return kernel_tss.ist5;
+        case 6: return kernel_tss.ist6;
+        case 7: return kernel_tss.ist7;
+        default: return 0;
     }
-
-    return *(&kernel_tss.ist1 + ist_num - 1);
 }

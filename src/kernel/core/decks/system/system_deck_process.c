@@ -302,8 +302,15 @@ int system_deck_proc_exec(Event* event) {
         return -1;
     }
 
-    uint32_t file_ids[TAGFS_MAX_FILES];
-    int file_count = tagfs_list_all_files(file_ids, TAGFS_MAX_FILES);
+    // heap-allocate file_ids to avoid 4KB+ stack usage on 16KB kernel stack
+    #define PROC_EXEC_MAX_SCAN 256
+    uint32_t *file_ids = kmalloc(PROC_EXEC_MAX_SCAN * sizeof(uint32_t));
+    if (!file_ids) {
+        debug_printf("[SYSTEM_DECK] PROC_EXEC: kmalloc for file scan failed\n");
+        deliver_response(event, SYSTEM_ERR_NO_MEMORY, NULL, 0);
+        return -1;
+    }
+    int file_count = tagfs_list_all_files(file_ids, PROC_EXEC_MAX_SCAN);
 
     uint32_t found_id = 0;
     char found_tags[PROCESS_TAG_SIZE];
@@ -364,6 +371,10 @@ int system_deck_proc_exec(Event* event) {
             break;
         }
     }
+
+    // file_ids no longer needed after the search loop
+    kfree(file_ids);
+    file_ids = NULL;
 
     if (found_id == 0) {
         debug_printf("[SYSTEM_DECK] PROC_EXEC: '%s' not found as executable\n",

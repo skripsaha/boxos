@@ -264,7 +264,14 @@ void* pmm_alloc(size_t pages) {
 
 void* pmm_alloc_zero(size_t pages) {
     void* addr = pmm_alloc(pages);
-    if (addr) memset(addr, 0, pages * PMM_PAGE_SIZE);
+    if (addr) {
+        // pmm_alloc returns a physical address; this memset relies on identity
+        // mapping (phys == virt) which is set up by the bootloader for low memory.
+        // For addresses above the identity-mapped region, this would need
+        // vmm_phys_to_virt(), but all PMM-managed memory is within the
+        // identity-mapped range (0-256MB via 2MB large pages).
+        memset(addr, 0, pages * PMM_PAGE_SIZE);
+    }
     return addr;
 }
 

@@ -166,7 +166,7 @@ void guide_init(void)
             (size_t)EVENT_RING_MAX_CAPACITY);
 
     atomic_store_u8(&guide_idle, 1);
-    next_event_id = 1;
+    atomic_store_u32(&next_event_id, 1);
 
     guide_init_wait_queue();
 

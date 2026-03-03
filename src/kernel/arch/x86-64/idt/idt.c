@@ -119,6 +119,40 @@ void exception_handler(interrupt_frame_t* frame) {
         }
     }
 
+    // User-mode exception: kill the faulting process, don't crash the kernel
+    if ((frame->cs & 3) == 3) {
+        process_t* proc = process_get_current();
+        if (proc) {
+            kprintf("\n");
+            kprintf("[EXCEPTION] User-mode exception #%u in PID %u\n",
+                    frame->vector, proc->pid);
+            kprintf("[EXCEPTION] RIP=0x%lx RSP=0x%lx Error=0x%lx\n",
+                    frame->rip, frame->rsp, frame->error_code);
+            kprintf("[EXCEPTION] Tags: %s\n", proc->tags);
+
+            if (frame->vector == 14) {
+                uint64_t fault_addr;
+                __asm__ volatile("mov %%cr2, %0" : "=r"(fault_addr));
+                kprintf("[EXCEPTION] Page Fault at 0x%lx (P=%d W=%d U=%d R=%d)\n",
+                        fault_addr,
+                        (int)(frame->error_code & 0x1),
+                        (int)((frame->error_code >> 1) & 0x1),
+                        (int)((frame->error_code >> 2) & 0x1),
+                        (int)((frame->error_code >> 3) & 0x1));
+            }
+
+            kprintf("[EXCEPTION] Killing PID %u and scheduling next process\n", proc->pid);
+
+            // Mark process as crashed so scheduler won't pick it again
+            process_set_state(proc, PROC_CRASHED);
+
+            // Let the timer IRQ do cleanup; force a reschedule via the frame
+            scheduler_yield_from_interrupt(frame);
+            return;
+        }
+    }
+
+    // Kernel-mode exception: this is a real kernel panic
     kprintf("\n");
     kprintf("====================================================================\n");
     kprintf("KERNEL PANIC: Exception #%u\n", frame->vector);
@@ -140,17 +174,6 @@ void exception_handler(interrupt_frame_t* frame) {
         kprintf("  User: %s\n", (frame->error_code & 0x4) ? "YES" : "NO");
         kprintf("  Reserved: %s\n", (frame->error_code & 0x8) ? "YES" : "NO");
         kprintf("  Instruction Fetch: %s\n", (frame->error_code & 0x10) ? "YES" : "NO");
-    }
-
-    if ((frame->cs & 3) == 3) {
-        process_t* proc = process_get_current();
-        if (proc) {
-            kprintf("\n");
-            kprintf("Faulting Process:\n");
-            kprintf("  PID: %u\n", proc->pid);
-            kprintf("  State: %d\n", proc->state);
-            kprintf("  Tags: %s\n", proc->tags);
-        }
     }
 
     kprintf("\n");
@@ -181,14 +204,20 @@ void irq_handler(interrupt_frame_t* frame) {
             extern void xhci_process_events(void);
             xhci_process_events();
 
+            // read current_process under lock to prevent race with syscall handler
+            spin_lock(&sched->scheduler_lock);
             process_t* current = sched->current_process;
+            spin_unlock(&sched->scheduler_lock);
 
             if (current && process_get_state(current) == PROC_WORKING) {
                 scheduler_yield_from_interrupt(frame);
             } else if (!current || process_get_state(current) != PROC_WORKING) {
                 process_t* next = scheduler_select_next();
                 if (next) {
+                    spin_lock(&sched->scheduler_lock);
                     sched->current_process = next;
+                    spin_unlock(&sched->scheduler_lock);
+
                     if (process_get_state(next) == PROC_CREATED) process_set_state(next, PROC_WORKING);
                     next->last_run_time = sched->total_ticks;
 
