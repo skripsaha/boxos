@@ -394,7 +394,7 @@ int process_load_binary(process_t* proc, const void* binary_data, size_t size) {
     }
 
     // === Heap initialization ===
-    uintptr_t heap_start = CABIN_CODE_START_ADDR + (page_count * VMM_PAGE_SIZE);
+    uintptr_t heap_start = CABIN_HEAP_BASE;
     void* heap_phys = pmm_alloc_zero(CONFIG_USER_HEAP_INITIAL_PAGES);
     if (!heap_phys) {
         debug_printf("[PROCESS] ERROR: Failed to allocate initial heap pages\n");

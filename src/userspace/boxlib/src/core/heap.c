@@ -15,8 +15,6 @@ typedef struct block {
 
 #define BLOCK_HDR_SIZE  ((sizeof(block_t) + (HEAP_ALIGN - 1)) & ~(HEAP_ALIGN - 1))
 
-extern char __program_end;
-
 static block_t*  free_list    = NULL;
 static uintptr_t heap_base    = 0;
 static uintptr_t heap_current = 0;
@@ -24,7 +22,7 @@ static uintptr_t heap_max     = 0;
 static int       initialized  = 0;
 
 static void heap_init(void) {
-    heap_base    = ((uintptr_t)&__program_end + 4095) & ~4095ULL;
+    heap_base    = CABIN_HEAP_BASE;
     heap_current = heap_base;
     heap_max     = heap_base + CABIN_HEAP_MAX_SIZE;
     free_list    = NULL;

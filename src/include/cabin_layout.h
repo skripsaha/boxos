@@ -19,6 +19,7 @@
 #define CABIN_NOTIFY_PAGE_PAGES  (CABIN_NOTIFY_PAGE_SIZE / 4096)  // 2
 #define CABIN_RESULT_PAGE_PAGES  (CABIN_RESULT_PAGE_SIZE / 4096)  // 7
 
+#define CABIN_HEAP_BASE          0x0000000010000000ULL  // 256MB: heap start (above identity-mapped region)
 #define CABIN_BUF_HEAP_START     0x0000000040000000ULL  // 1GB: buffer alloc region
 
 #define NOTIFY_PAGE_VADDR        CABIN_NOTIFY_PAGE_ADDR

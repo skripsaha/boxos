@@ -24,7 +24,7 @@
 
 #define VMM_USER_BASE           VMM_CABIN_CODE_START   // flat binary entry point (NOT ELF!)
 #define VMM_USER_STACK_TOP      0x00007FFFFFFFE000ULL  // ~128TB user space top
-#define VMM_USER_HEAP_BASE      0x0000000000020000ULL  // heap starts after code
+#define VMM_USER_HEAP_BASE      CABIN_HEAP_BASE        // 256MB: fixed heap base (above identity map)
 
 #define VMM_FLAG_PRESENT        (1ULL << 0)
 #define VMM_FLAG_WRITABLE       (1ULL << 1)
