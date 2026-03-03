@@ -17,28 +17,53 @@
 0x9000         ~16B      BOOT_INFO структура для ядра
 0x9100         512B      TagFS superblock buffer
 0x9300         512B      TagFS metadata buffer
-0x10000-0x8FFFF 512KB    Kernel ВРЕМЕННАЯ загрузка (real mode)
-0x100000       512KB     Kernel РАБОЧИЙ адрес (1MB, linked)
-0x180000       -         Конец загруженного ядра (max)
+0x10000-0x17FFF 32KB     Bounce buffer (Unreal Mode, чанки INT 13h)
+0x100000       до 7MB    Kernel РАБОЧИЙ адрес (1MB, linked, Unreal Mode)
+динамический   -         Конец загруженного ядра (KERNEL_RUN_ADDR + kernel_loaded_bytes)
 0x15D000       -         Фактический конец BSS ядра (~)
+0x800000       -         Максимальный адрес конца ядра (KERNEL_MAX_ADDR)
 0x820000       16KB      Boot page tables (PML4 + PDPT + PD)
 0x900000       -         Стек ядра (растёт вниз)
 ```
 
-### КРИТИЧНОЕ ПРАВИЛО: Двухэтапная загрузка ядра
+### КРИТИЧНОЕ ПРАВИЛО: Загрузка ядра через Unreal Mode
 
-Ядро **линкуется** на адрес `0x100000` (1MB), но **загружается** BIOS INT 13h
-в `0x10000` (64KB), потому что real mode не может адресовать выше 1MB через
-segment:offset. После перехода в long mode, stage2 **копирует** ядро:
+Ядро **линкуется** на адрес `0x100000` (1MB). Stage2 использует **Unreal Mode**
+(Big Real Mode) для загрузки ядра напрямую на финальный адрес без промежуточного
+копирования.
+
+**Как работает Unreal Mode:**
+
+1. Stage2 входит в Protected Mode, загружает DS/ES селектором с 4GB лимитом,
+   возвращается в Real Mode. Descriptor cache сохраняет 4GB лимит.
+2. BIOS INT 13h читает чанки по 32KB (64 секторов) в bounce buffer (0x10000).
+3. Каждый чанк копируется `a32 rep movsd` напрямую на 0x100000+ через Unreal Mode.
+4. При переходе в Long Mode ядро уже на месте — копирование не нужно.
 
 ```nasm
+; stage2.asm — tagfs_load_kernel_file:
+mov edi, KERNEL_RUN_ADDR       ; 0x100000 — финальный адрес
+.load_loop:
+    ; INT 13h → bounce buffer (0x10000, 32KB)
+    mov esi, KERNEL_BOUNCE_ADDR
+    mov ecx, bytes_read / 4
+    a32 rep movsd               ; Unreal Mode: 32-bit addressing в Real Mode
+    cmp edi, KERNEL_MAX_ADDR    ; не выйти за 0x800000
+    jae .size_error
+    ; ... loop ...
+mov [kernel_loaded_bytes], eax  ; фактический размер
+
 ; stage2.asm — long_mode_start:
-mov rsi, 0x10000       ; источник (временный)
-mov rdi, 0x100000      ; назначение (linked)
-mov rcx, 524288 / 8    ; 512KB qwords
-rep movsq
-jmp 0x100000           ; прыжок на _start ядра
+; Ядро УЖЕ на 0x100000 — копирование не нужно!
+; boot_info.kernel_end = KERNEL_RUN_ADDR + kernel_loaded_bytes (выровненный на 4KB)
+jmp 0x100000                    ; прыжок на _start ядра
 ```
+
+**Преимущества Unreal Mode:**
+- Нет потолка 512KB — ядро может расти до ~7MB (ограничено KERNEL_MAX_ADDR = 0x800000)
+- Размер определяется динамически из TagFS метаданных файла
+- Нет дублирования памяти (ядро грузится сразу на целевой адрес)
+- BIOS прерывания (INT 0x13, 0x15, 0x10) продолжают работать
 
 **Опасность**: Если изменить linker.ld (`. = 0x100000`) без обновления stage2.asm
 (KERNEL_RUN_ADDR), ядро будет выполняться с неправильных адресов → garbage code → crash.
@@ -49,9 +74,10 @@ jmp 0x100000           ; прыжок на _start ядра
 |------|-----------|-----------------|
 | `src/kernel/entry/linker.ld` | `. = ...` | `0x100000` |
 | `src/boot/stage2/stage2.asm` | `KERNEL_RUN_ADDR` | `0x100000` |
-| `src/boot/stage2/stage2.asm` | `KERNEL_LOAD_ADDR` | `0x10000` (НЕ МЕНЯТЬ — real mode) |
-| `src/boot/stage2/stage2.asm` | `KERNEL_END_ADDR` | `0x180000` (RUN_ADDR + 512KB) |
+| `src/boot/stage2/stage2.asm` | `KERNEL_BOUNCE_ADDR` | `0x10000` (bounce buffer, 32KB) |
+| `src/boot/stage2/stage2.asm` | `KERNEL_MAX_ADDR` | `0x800000` (макс. конец ядра, до page tables) |
 | `src/kernel/config/kernel_config.h` | `CONFIG_KERNEL_LOAD_ADDR` | `0x100000ULL` |
+| `Makefile` | `KERNEL_MAX_BYTES` | `7340032` (7MB) |
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -113,7 +139,7 @@ jmp 0x100000           ; прыжок на _start ядра
 
 ```
 User code:    0xA000 → 0xA000 + binary_size
-Kernel code:  0x100000 → ~0x15D000
+Kernel code:  0x100000 → ~0x15D000 (растёт с ростом ядра, до 0x800000 max)
 
 Зазор:        0xA000 .. 0x100000 = 0xF6000 = 984KB
 ```
@@ -121,6 +147,9 @@ Kernel code:  0x100000 → ~0x15D000
 **Максимальный безопасный размер user binary: ~984KB**
 
 При бинарнике > 984KB user code дойдёт до 0x100000 и затрёт ядро.
+
+Примечание: С Unreal Mode ядро может занимать до 7MB (0x100000-0x800000).
+Это не влияет на зазор user↔kernel, т.к. зазор определяется _началом_ ядра (0x100000).
 
 ### Что проверять
 
@@ -155,7 +184,7 @@ RIP = адрес внутри kernel range (0x100000-0x15D000)
 ```
 Адрес:    0x900000 (STACK_BASE в stage2.asm)
 Размер:   Ограничен снизу адресом 0x820000 (page tables)
-Когда:    Real mode → Protected mode → Long mode (до прыжка в kernel)
+Когда:    Unreal mode → Protected mode → Long mode (до прыжка в kernel)
 Файл:     src/boot/stage2/stage2.asm строки 94, 120
 ```
 
@@ -377,8 +406,8 @@ _Static_assert(sizeof(result_page_t) <= CABIN_RESULT_PAGE_SIZE)
 
 - [ ] `linker.ld` — `. = NEW_ADDR`
 - [ ] `stage2.asm` — `KERNEL_RUN_ADDR equ NEW_ADDR`
-- [ ] `stage2.asm` — `KERNEL_END_ADDR equ NEW_ADDR + KERNEL_SIZE_BYTES`
-- [ ] `stage2.asm` — `rep movsq` копирует из KERNEL_LOAD_ADDR в KERNEL_RUN_ADDR
+- [ ] `stage2.asm` — `KERNEL_MAX_ADDR` всё ещё выше реального конца ядра
+- [ ] `stage2.asm` — bounce buffer (KERNEL_BOUNCE_ADDR) не перекрывает Stage2 или BOOT_INFO
 - [ ] `kernel_config.h` — `CONFIG_KERNEL_LOAD_ADDR = NEW_ADDR`
 - [ ] `kernel_entry.asm` — стек (0x900000) всё ещё ВЫШЕ `__bss_end`
 - [ ] `vmm.c` — identity mapping тест НЕ пишет в kernel range
@@ -390,7 +419,7 @@ _Static_assert(sizeof(result_page_t) <= CABIN_RESULT_PAGE_SIZE)
 - [ ] Проверить BSS: `x86_64-elf-objdump -h build/kernel.elf | grep bss`
 - [ ] BSS end (VMA + Size) < 0x900000 (kernel stack)
 - [ ] BSS end < 0x820000 (boot page tables) — нужен только при холодном старте
-- [ ] kernel.bin size < 524288 (512KB, KERNEL_SIZE_BYTES в stage2)
+- [ ] kernel.bin size < 7340032 (7MB, KERNEL_MAX_BYTES в Makefile; Unreal Mode загрузка)
 
 ### При отладке page fault loop
 
@@ -409,8 +438,9 @@ _Static_assert(sizeof(result_page_t) <= CABIN_RESULT_PAGE_SIZE)
 | Что | Адрес / Значение | Файл |
 |-----|-----------------|------|
 | Kernel linked address | `0x100000` | linker.ld |
-| Kernel temp load (real mode) | `0x10000` | stage2.asm |
-| Kernel max binary size | 512KB (524288) | stage2.asm |
+| Bounce buffer (Unreal Mode) | `0x10000` (32KB) | stage2.asm |
+| Kernel max binary size | 7MB (7340032) | Makefile, stage2.asm |
+| Kernel max end address | `0x800000` (KERNEL_MAX_ADDR) | stage2.asm |
 | Kernel BSS end (приблизительно) | `~0x15D000` | objdump kernel.elf |
 | Kernel initial stack | `0x900000` | kernel_entry.asm |
 | Boot page tables | `0x820000` | stage2.asm |
