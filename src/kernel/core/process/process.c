@@ -393,6 +393,35 @@ int process_load_binary(process_t* proc, const void* binary_data, size_t size) {
         return -1;
     }
 
+    // === Heap initialization ===
+    uintptr_t heap_start = CABIN_CODE_START_ADDR + (page_count * VMM_PAGE_SIZE);
+    void* heap_phys = pmm_alloc_zero(CONFIG_USER_HEAP_INITIAL_PAGES);
+    if (!heap_phys) {
+        debug_printf("[PROCESS] ERROR: Failed to allocate initial heap pages\n");
+        pmm_free(user_stack_phys, CONFIG_USER_STACK_TOTAL_PAGES);
+        pmm_free(code_phys, page_count);
+        return -1;
+    }
+
+    vmm_map_result_t heap_map = vmm_map_pages(
+        proc->cabin,
+        heap_start,
+        (uintptr_t)heap_phys,
+        CONFIG_USER_HEAP_INITIAL_PAGES,
+        VMM_FLAG_PRESENT | VMM_FLAG_WRITABLE | VMM_FLAG_USER | VMM_FLAG_NO_EXECUTE
+    );
+
+    if (!heap_map.success) {
+        debug_printf("[PROCESS] ERROR: Failed to map user heap: %s\n", heap_map.error_msg);
+        pmm_free(heap_phys, CONFIG_USER_HEAP_INITIAL_PAGES);
+        pmm_free(user_stack_phys, CONFIG_USER_STACK_TOTAL_PAGES);
+        pmm_free(code_phys, page_count);
+        return -1;
+    }
+
+    proc->cabin->heap_start = heap_start;
+    proc->cabin->heap_end = heap_start + CONFIG_USER_HEAP_INITIAL_SIZE;
+
     proc->code_size = size;
     proc->context.rip = VMM_CABIN_CODE_START;
     proc->context.rsp = VMM_USER_STACK_TOP;

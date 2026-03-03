@@ -1730,6 +1730,39 @@ int vmm_handle_page_fault(uintptr_t fault_addr, uint64_t error_code) {
         }
     }
 
+    // User heap demand paging
+    if (ctx && user && !present) {
+        uintptr_t heap_max = ctx->heap_start + CONFIG_USER_HEAP_MAX_SIZE;
+        if (fault_addr >= ctx->heap_start && fault_addr < heap_max) {
+            uintptr_t page_addr = fault_addr & ~(VMM_PAGE_SIZE - 1);
+
+            if (vmm_is_mapped(ctx, page_addr)) {
+                return 0;
+            }
+
+            void* phys = pmm_alloc_zero(1);
+            if (!phys) {
+                debug_printf("[VMM] ERROR: Failed to allocate heap page for user process\n");
+                return -1;
+            }
+
+            uint64_t flags = VMM_FLAG_PRESENT | VMM_FLAG_WRITABLE | VMM_FLAG_USER | VMM_FLAG_NO_EXECUTE;
+            vmm_map_result_t result = vmm_map_page(ctx, page_addr, (uintptr_t)phys, flags);
+            if (!result.success) {
+                debug_printf("[VMM] ERROR: Failed to map user heap page at 0x%lx\n", page_addr);
+                pmm_free(phys, 1);
+                return -1;
+            }
+
+            if (page_addr + VMM_PAGE_SIZE > ctx->heap_end) {
+                ctx->heap_end = page_addr + VMM_PAGE_SIZE;
+            }
+
+            debug_printf("[VMM] Demand paging: mapped user heap page at 0x%lx\n", page_addr);
+            return 0;
+        }
+    }
+
     if (present) {
         debug_printf("[VMM] ERROR: Protection fault - access denied\n");
         return -1;

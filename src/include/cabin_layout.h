@@ -25,4 +25,6 @@
 #define RESULT_PAGE_VADDR        CABIN_RESULT_PAGE_ADDR
 #define USER_CODE_ENTRY_POINT    CABIN_CODE_START_ADDR
 
+#define CABIN_HEAP_MAX_SIZE      (16 * 1024 * 1024)  // 16MB max heap per process
+
 #endif // CABIN_LAYOUT_H
