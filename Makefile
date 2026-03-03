@@ -32,15 +32,14 @@ TAGFS_TOOL = tools/create_tagfs
 # Bootloader layout (LBA addressing):
 #   Sector 0        : Stage1 (512 bytes, MBR)
 #   Sectors 1-16    : Stage2 (16 sectors = 8192 bytes)
-#   Sectors 17-1040 : Kernel (1024 sectors = 524288 bytes = 512KB)
+#   Sectors 17+     : Kernel (dynamic size, loaded via TagFS + Unreal Mode)
 #   Sector 1034     : TagFS Superblock
 #   Sectors 1035-2058 : TagFS Metadata (1024 entries)
 #   Sectors 2059-2060 : Journal Superblock (primary + backup)
 #   Sectors 2061-3085 : Journal Entries (512 entries * 2 sectors)
 #   Sector 3086+    : TagFS Data
 STAGE2_SECTORS      = 16
-KERNEL_SECTORS      = 1024
-KERNEL_MAX_BYTES    = 524288    # 1024 * 512
+KERNEL_MAX_BYTES    = 7340032   # 7MB (must fit below PAGE_TABLE_BASE at 0x820000)
 KERNEL_START_SECTOR = 17
 
 ASMFLAGS       =  -g -f bin
@@ -232,9 +231,9 @@ $(KERNEL_BIN): $(KERNEL_ENTRY_OBJ) $(C_OBJS) $(ASM_OBJS) $(SHELL_EMBED)
 	@KERNEL_SIZE=$$(stat -f%z $@ 2>/dev/null || stat -c%s $@ 2>/dev/null); \
 	MAX_SIZE=$(KERNEL_MAX_BYTES); \
 	echo "  Kernel size: $$KERNEL_SIZE bytes"; \
-	echo "  Max allowed: $$MAX_SIZE bytes ($(KERNEL_SECTORS) sectors)"; \
+	echo "  Max allowed: $$MAX_SIZE bytes (7MB, Unreal Mode)"; \
 	if [ $$KERNEL_SIZE -gt $$MAX_SIZE ]; then \
-		echo "ERROR: Kernel binary exceeds bootloader capacity!"; \
+		echo "ERROR: Kernel binary exceeds 7MB limit (page tables at 0x820000)!"; \
 		echo "  Overflow: $$((KERNEL_SIZE - MAX_SIZE)) bytes"; \
 		exit 1; \
 	else \
@@ -255,7 +254,7 @@ $(IMAGE): $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(SHELL_BIN) $(PROCA_BIN) $(
 	@dd if=$(STAGE1_BIN) of=$@ bs=512 conv=notrunc status=none
 	@echo "  Writing Stage2 (sectors 1-9, $(STAGE2_SECTORS) sectors)..."
 	@dd if=$(STAGE2_BIN) of=$@ bs=512 seek=1 conv=notrunc status=none
-	@echo "  Writing Kernel (sector $(KERNEL_START_SECTOR)+, $(KERNEL_SECTORS) sectors)..."
+	@echo "  Writing Kernel (sector $(KERNEL_START_SECTOR)+, dynamic size via TagFS)..."
 	@dd if=$(KERNEL_BIN) of=$@ bs=512 seek=$(KERNEL_START_SECTOR) conv=notrunc status=none
 	@echo "  Creating TagFS (superblock=1034, metadata=1035, data=3086)..."
 	@$(TAGFS_TOOL) $@ 1034 1035 3086 \
