@@ -9,21 +9,17 @@ DEFAULT ABS
 ; 0x9000      - Boot info for kernel
 ; 0x9100      - TagFS superblock buffer (512 bytes)
 ; 0x9300      - TagFS metadata buffer (512 bytes)
-; 0x10000     - Kernel temporary load address (real mode, 512KB)
-; 0x90000     - Kernel temp end
-; 0x100000    - Kernel run address (1MB, linked address)
-; 0x180000    - Kernel run end
+; 0x10000     - Bounce buffer for INT 13h reads (32KB)
+; 0x100000    - Kernel run address (1MB, linked address, loaded via Unreal Mode)
 ; 0x820000    - Page tables (16KB: PML4, PDPT, PD) - E820 validated
 ; 0x900000    - Stack (grows downward)
 
-KERNEL_LOAD_ADDR      equ 0x10000      ; real mode load (below 1MB)
+KERNEL_BOUNCE_ADDR    equ 0x10000      ; bounce buffer for INT 13h disk reads
+KERNEL_BOUNCE_SEG     equ 0x1000       ; segment value for bounce buffer (0x1000 * 16 = 0x10000)
 KERNEL_RUN_ADDR       equ 0x100000     ; linked run address (1MB)
-KERNEL_SECTOR_START   equ 17
-KERNEL_SECTOR_COUNT   equ 1024         ; 512KB
-KERNEL_SIZE_BYTES     equ 524288       ; 1024 * 512
-KERNEL_END_ADDR       equ 0x180000     ; KERNEL_RUN_ADDR + KERNEL_SIZE_BYTES
+KERNEL_MAX_ADDR       equ 0x800000     ; max kernel end (must stay below page tables)
 
-; 0x820000: well above kernel end (0x90000), 7.5MB gap, E820-validated, page-aligned, 16KB contiguous
+; 0x820000: well above kernel max (0x800000), E820-validated, page-aligned, 16KB contiguous
 PAGE_TABLE_BASE       equ 0x820000
 E820_MAP_ADDR         equ 0x500
 E820_COUNT_ADDR       equ 0x4FE
@@ -67,6 +63,7 @@ start_stage2:
     call print_string_16
 
     call enable_a20_enhanced
+    call enter_unreal_mode
     call detect_memory_e820
     call validate_page_table_location
     call load_kernel_tagfs
@@ -132,27 +129,26 @@ long_mode_start:
     mov al, 'M'
     mov [rdi+6], ax
 
-    mov rdi, E820_MAP_ADDR
-    movzx rsi, word [E820_COUNT_ADDR]
-
-    mov rax, [KERNEL_LOAD_ADDR]
+    ; Kernel was loaded directly to KERNEL_RUN_ADDR by Unreal Mode loader
+    mov rax, [KERNEL_RUN_ADDR]
     test rax, rax
     jz .kernel_not_loaded
 
-    ; Copy kernel from temp load address (0x10000) to linked run address (0x100000)
-    mov rsi, KERNEL_LOAD_ADDR
-    mov rdi, KERNEL_RUN_ADDR
-    mov rcx, KERNEL_SIZE_BYTES / 8
-    rep movsq
-
+    ; Write boot_info with dynamic kernel_end
     mov [BOOT_INFO_ADDR], dword E820_MAP_ADDR
     mov ax, [E820_COUNT_ADDR]
     mov [BOOT_INFO_ADDR+4], ax
     mov [BOOT_INFO_ADDR+8], dword KERNEL_RUN_ADDR
-    mov [BOOT_INFO_ADDR+12], dword KERNEL_END_ADDR
 
-    ; Zero region after kernel end before jumping (BSS pre-clear)
-    mov rdi, KERNEL_END_ADDR
+    ; kernel_end = KERNEL_RUN_ADDR + kernel_loaded_bytes, aligned to 4KB
+    mov eax, [kernel_loaded_bytes]
+    add eax, KERNEL_RUN_ADDR
+    add eax, 0xFFF
+    and eax, 0xFFFFF000
+    mov [BOOT_INFO_ADDR+12], eax
+
+    ; Zero BSS region after actual kernel end (1MB worth)
+    movzx rdi, eax
     mov rcx, 0x100000
     xor rax, rax
     rep stosb
@@ -375,6 +371,46 @@ a20_wait2:
     jz a20_wait2
     ret
 
+; =============================================================
+; Enter Unreal Mode (Big Real Mode)
+; Sets DS and ES descriptor cache to 4GB limit while remaining
+; in Real Mode. Allows 32-bit address overrides (a32 prefix) to
+; access memory above 1MB. BIOS interrupts continue to work.
+; Requires: A20 line enabled
+; =============================================================
+enter_unreal_mode:
+    cli
+
+    lgdt [unreal_gdt_descriptor]
+
+    ; Enter Protected Mode briefly
+    mov eax, cr0
+    or eax, 1
+    mov cr0, eax
+
+    ; Load DS and ES with flat 4GB data segment (selector 0x10)
+    mov ax, 0x10
+    mov ds, ax
+    mov es, ax
+
+    ; Return to Real Mode — descriptor caches keep 4GB limit
+    mov eax, cr0
+    and eax, 0xFFFFFFFE
+    mov cr0, eax
+
+    jmp 0x0000:.unreal_flush
+.unreal_flush:
+    ; Restore segment bases to 0, but caches retain 4GB limit
+    xor ax, ax
+    mov ds, ax
+    mov es, ax
+
+    sti
+
+    mov si, msg_unreal_mode
+    call print_string_16
+    ret
+
 load_kernel_tagfs:
     mov si, msg_loading_tagfs
     call print_string_16
@@ -547,6 +583,9 @@ tagfs_find_kernel:
     mov eax, [es:bx + 4]
     mov [kernel_file_id], ax
 
+    mov eax, [es:bx + 12]           ; file size (low 32 bits, offset 12)
+    mov [kernel_size_bytes], eax
+
     mov eax, [es:bx + 20]
     mov [kernel_start_block], eax
 
@@ -600,13 +639,18 @@ tagfs_find_kernel:
     stc
     ret
 
-; Returns: CF=0 on success, CF=1 on error
+; Load kernel file via bounce buffer + Unreal Mode copy to above 1MB.
+; Reads sectors to bounce buffer (0x10000), copies each chunk to
+; KERNEL_RUN_ADDR+ using 32-bit Unreal Mode addressing.
+; Requires: Unreal Mode active, kernel_start_block/block_count/tagfs_data_start set
+; Returns: CF=0 on success (kernel_loaded_bytes set), CF=1 on error
 tagfs_load_kernel_file:
-    push ax
-    push bx
-    push cx
-    push dx
-    push si
+    push eax
+    push ebx
+    push ecx
+    push edx
+    push esi
+    push edi
 
     ; sector = tagfs_data_start + (start_block * 8)
     mov eax, [kernel_start_block]
@@ -614,27 +658,29 @@ tagfs_load_kernel_file:
     add eax, [tagfs_data_start]
     mov [kernel_load_sector], eax
 
+    ; total sectors = block_count * 8
     mov eax, [kernel_block_count]
     shl eax, 3
     mov [kernel_load_sectors], ax
 
     mov cx, [kernel_load_sectors]
     mov ebx, [kernel_load_sector]
-    mov di, 0x1000
+    mov edi, KERNEL_RUN_ADDR          ; destination above 1MB (Unreal Mode)
 
 .load_loop:
     mov ax, 64
     cmp cx, 64
-    jae .load_chunk
+    jae .do_read
     mov ax, cx
 
-.load_chunk:
+.do_read:
     push cx
     push ax
 
+    ; Read chunk to bounce buffer via BIOS INT 13h
     mov [dap_kernel_chunk + 2], ax
-    mov [dap_kernel_chunk + 4], word 0x0000
-    mov [dap_kernel_chunk + 6], di
+    mov word [dap_kernel_chunk + 4], 0x0000
+    mov word [dap_kernel_chunk + 6], KERNEL_BOUNCE_SEG
     mov [dap_kernel_chunk + 8], ebx
 
     mov si, dap_kernel_chunk
@@ -644,33 +690,56 @@ tagfs_load_kernel_file:
 
     pop ax
     pop cx
-
     jc .load_error
 
+    ; Copy chunk from bounce buffer to destination via Unreal Mode
+    push cx
+    movzx ecx, ax
+    shl ecx, 7              ; ecx = dwords to copy (sectors * 512 / 4)
+    mov esi, KERNEL_BOUNCE_ADDR
+
+    cld
+    a32 rep movsd            ; DS:ESI -> ES:EDI with 32-bit addressing
+
+    pop cx
+
+    ; Advance LBA, decrement remaining
     movzx eax, ax
     add ebx, eax
     sub cx, ax
 
-    shl ax, 5               ; sectors * 32 = segment increment
-    add di, ax
+    ; Safety: kernel must not overrun page table area
+    cmp edi, KERNEL_MAX_ADDR
+    jae .size_error
 
     test cx, cx
     jnz .load_loop
 
-    pop si
-    pop dx
-    pop cx
-    pop bx
-    pop ax
+    ; Store actual loaded byte count
+    mov eax, edi
+    sub eax, KERNEL_RUN_ADDR
+    mov [kernel_loaded_bytes], eax
+
+    pop edi
+    pop esi
+    pop edx
+    pop ecx
+    pop ebx
+    pop eax
     clc
     ret
 
+.size_error:
+    mov si, msg_kernel_too_large
+    call print_string_16
+
 .load_error:
-    pop si
-    pop dx
-    pop cx
-    pop bx
-    pop ax
+    pop edi
+    pop esi
+    pop edx
+    pop ecx
+    pop ebx
+    pop eax
     stc
     ret
 
@@ -728,7 +797,9 @@ tagfs_find_kernel_by_header:
     test al, TAGFS_FILE_ACTIVE
     jz .hdr_scan_next_clean
 
-    ; Save start_block and block_count from metadata
+    ; Save size, start_block and block_count from metadata
+    mov eax, [es:bx + 12]           ; file size (low 32 bits)
+    mov [kernel_size_bytes], eax
     mov eax, [es:bx + 20]
     mov [kernel_start_block], eax
     mov eax, [es:bx + 24]
@@ -796,142 +867,6 @@ tagfs_find_kernel_by_header:
     pop ax
     stc
     ret
-
-; Fallback loader (kept for reference, not called in normal boot)
-load_kernel_simple_old:
-    mov si, msg_loading_kernel
-    call print_string_16
-
-    mov ah, 0x41
-    mov bx, 0x55AA
-    mov dl, 0x80
-    int 0x13
-    jc .disk_error
-
-    mov si, dap1
-    mov ah, 0x42
-    mov dl, 0x80
-    int 0x13
-    jc .disk_error
-
-    mov si, dap2
-    mov ah, 0x42
-    mov dl, 0x80
-    int 0x13
-    jc .disk_error
-
-    mov si, dap3
-    mov ah, 0x42
-    mov dl, 0x80
-    int 0x13
-    jc .disk_error
-
-    mov si, dap4
-    mov ah, 0x42
-    mov dl, 0x80
-    int 0x13
-    jc .disk_error
-
-    mov si, dap5
-    mov ah, 0x42
-    mov dl, 0x80
-    int 0x13
-    jc .disk_error
-
-    mov si, dap6
-    mov ah, 0x42
-    mov dl, 0x80
-    int 0x13
-    jc .disk_error
-
-    mov si, dap7
-    mov ah, 0x42
-    mov dl, 0x80
-    int 0x13
-    jc .disk_error
-
-    mov si, dap8
-    mov ah, 0x42
-    mov dl, 0x80
-    int 0x13
-    jc .disk_error
-
-    mov si, dap9
-    mov ah, 0x42
-    mov dl, 0x80
-    int 0x13
-    jc .disk_error
-
-    mov si, dap10
-    mov ah, 0x42
-    mov dl, 0x80
-    int 0x13
-    jc .disk_error
-
-    mov si, dap11
-    mov ah, 0x42
-    mov dl, 0x80
-    int 0x13
-    jc .disk_error
-
-    mov si, dap12
-    mov ah, 0x42
-    mov dl, 0x80
-    int 0x13
-    jc .disk_error
-
-    mov si, dap13
-    mov ah, 0x42
-    mov dl, 0x80
-    int 0x13
-    jc .disk_error
-
-    mov si, dap14
-    mov ah, 0x42
-    mov dl, 0x80
-    int 0x13
-    jc .disk_error
-
-    mov si, dap15
-    mov ah, 0x42
-    mov dl, 0x80
-    int 0x13
-    jc .disk_error
-
-    mov si, dap16
-    mov ah, 0x42
-    mov dl, 0x80
-    int 0x13
-    jc .disk_error
-
-.check_kernel:
-    mov ax, 0x1000
-    mov es, ax
-    mov bx, 0x0000
-    mov eax, [es:bx]
-    test eax, eax
-    jz .empty_kernel
-
-    xor ax, ax
-    mov es, ax
-
-    mov si, msg_kernel_loaded
-    call print_string_16
-    ret
-
-.empty_kernel:
-    xor ax, ax
-    mov es, ax
-    mov si, msg_kernel_empty
-    call print_string_16
-    ret
-
-.disk_error:
-    mov si, msg_disk_error
-    call print_string_16
-    call wait_key
-    cli
-    hlt
 
 detect_memory_e820:
     mov si, msg_detecting_memory
@@ -1286,134 +1221,33 @@ gdt_descriptor:
     dw gdt_end - gdt_start - 1
     dd gdt_start
 
-; 16 DAP chunks, 64 sectors each = 1024 sectors = 512KB
-align 4
-dap1:
-    db 0x10, 0
-    dw 64
+; Unreal Mode GDT: flat 4GB data segment for 32-bit addressing in Real Mode
+align 8
+unreal_gdt_start:
+    dq 0x0000000000000000           ; Null descriptor
+
+    ; 0x08: 16-bit Code (for return to Real Mode)
+    dw 0xFFFF
     dw 0x0000
-    dw 0x1000           ; 0x10000 physical
-    dq 17
+    db 0x00
+    db 0x9A         ; Present, Ring 0, Code, Executable, Readable
+    db 0x00         ; 16-bit, byte granularity
+    db 0x00
+
+    ; 0x10: 32-bit Data with 4GB limit (the Unreal Mode key segment)
+    dw 0xFFFF
+    dw 0x0000
+    db 0x00
+    db 0x92         ; Present, Ring 0, Data, Writable
+    db 0xCF         ; 4KB granularity, 32-bit, limit = 4GB
+    db 0x00
+
+unreal_gdt_end:
 
 align 4
-dap2:
-    db 0x10, 0
-    dw 64
-    dw 0x0000
-    dw 0x1800           ; 0x18000
-    dq 81
-
-align 4
-dap3:
-    db 0x10, 0
-    dw 64
-    dw 0x0000
-    dw 0x2000
-    dq 145
-
-align 4
-dap4:
-    db 0x10, 0
-    dw 64
-    dw 0x0000
-    dw 0x2800
-    dq 209
-
-align 4
-dap5:
-    db 0x10, 0
-    dw 64
-    dw 0x0000
-    dw 0x3000
-    dq 273
-
-align 4
-dap6:
-    db 0x10, 0
-    dw 64
-    dw 0x0000
-    dw 0x3800
-    dq 337
-
-align 4
-dap7:
-    db 0x10, 0
-    dw 64
-    dw 0x0000
-    dw 0x4000
-    dq 401
-
-align 4
-dap8:
-    db 0x10, 0
-    dw 64
-    dw 0x0000
-    dw 0x4800
-    dq 465
-
-align 4
-dap9:
-    db 0x10, 0
-    dw 64
-    dw 0x0000
-    dw 0x5000
-    dq 529
-
-align 4
-dap10:
-    db 0x10, 0
-    dw 64
-    dw 0x0000
-    dw 0x5800
-    dq 593
-
-align 4
-dap11:
-    db 0x10, 0
-    dw 64
-    dw 0x0000
-    dw 0x6000
-    dq 657
-
-align 4
-dap12:
-    db 0x10, 0
-    dw 64
-    dw 0x0000
-    dw 0x6800
-    dq 721
-
-align 4
-dap13:
-    db 0x10, 0
-    dw 64
-    dw 0x0000
-    dw 0x7000
-    dq 785
-
-align 4
-dap14:
-    db 0x10, 0
-    dw 64
-    dw 0x0000
-    dw 0x7800
-    dq 849
-
-align 4
-dap15:
-    db 0x10, 0
-    dw 64
-    dw 0x0000
-    dw 0x8000
-    dq 913
-
-align 4
-dap16:
-    db 0x10, 0
-    dw 64
-    dw 0x0000
-    dw 0x8800
-    dq 977
+unreal_gdt_descriptor:
+    dw unreal_gdt_end - unreal_gdt_start - 1
+    dd unreal_gdt_start
 
 align 4
 dap_tagfs_superblock:
@@ -1446,6 +1280,8 @@ kernel_block_count:     dd 0
 tagfs_data_start:       dd 0
 kernel_load_sector:     dd 0
 kernel_load_sectors:    dw 0
+kernel_size_bytes:      dd 0            ; actual file size from TagFS metadata
+kernel_loaded_bytes:    dd 0            ; total bytes loaded (sectors * 512)
 
 msg_stage2_start      db 'BoxKernel Stage2 Started', 13, 10, 0
 msg_a20_enabled       db '[OK] A20 line enabled', 13, 10, 0
@@ -1454,15 +1290,13 @@ msg_e820_success      db '[OK] E820 memory map created', 13, 10, 0
 msg_e820_fail         db '[WARN] E820 failed, using fallback', 13, 10, 0
 msg_memory_fallback   db '[OK] Fallback memory detection', 13, 10, 0
 msg_memory_error      db '[ERROR] Memory detection failed!', 13, 10, 0
-msg_loading_kernel    db 'Loading kernel (1024 sectors = 512KB)...', 13, 10, 0
-msg_kernel_loaded     db '[OK] Kernel loaded (512KB)', 13, 10, 0
-msg_loading_tagfs     db 'Loading kernel via TagFS...', 13, 10, 0
-msg_kernel_loaded_tagfs db '[OK] Kernel loaded via TagFS', 13, 10, 0
+msg_unreal_mode       db '[OK] Unreal Mode (4GB addressing) active', 13, 10, 0
+msg_kernel_too_large  db '[ERROR] Kernel exceeds 7MB limit!', 13, 10, 0
+msg_loading_tagfs     db 'Loading kernel via TagFS (Unreal Mode)...', 13, 10, 0
+msg_kernel_loaded_tagfs db '[OK] Kernel loaded to 0x100000 via Unreal Mode', 13, 10, 0
 msg_tagfs_error       db '[ERROR] TagFS superblock read failed!', 13, 10, 0
 msg_kernel_not_found  db '[ERROR] Kernel not found in TagFS!', 13, 10, 0
 msg_kernel_load_error db '[ERROR] Kernel file load failed!', 13, 10, 0
-msg_kernel_empty      db '[WARN] Kernel appears empty', 13, 10, 0
-msg_disk_error        db '[ERROR] Disk read failed!', 13, 10, 0
 msg_long_mode_ok      db '[OK] CPU supports 64-bit mode', 13, 10, 0
 msg_no_cpuid          db '[ERROR] CPUID not supported!', 13, 10, 0
 msg_no_long_mode      db '[ERROR] 64-bit mode not supported!', 13, 10, 0
