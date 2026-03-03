@@ -42,7 +42,9 @@ void process_init(void) {
 }
 
 process_t* process_create(const char* tags) {
-    if (process_count >= PROCESS_MAX_COUNT) {
+    // use atomic load for the early check; the authoritative check happens
+    // under process_lock when we actually insert into the list
+    if (atomic_load_u32(&process_count) >= PROCESS_MAX_COUNT) {
         debug_printf("[PROCESS] ERROR: Process limit reached (%u)\n", PROCESS_MAX_COUNT);
         return NULL;
     }
@@ -158,6 +160,22 @@ process_t* process_create(const char* tags) {
     proc->context.fpu_initialized = true;
 
     spin_lock(&process_lock);
+
+    // authoritative check under lock to prevent race between early check and insert
+    if (process_count >= PROCESS_MAX_COUNT) {
+        spin_unlock(&process_lock);
+        // undo all allocations
+        if (proc->kernel_stack_guard_base) {
+            uintptr_t stack_phys = vmm_virt_to_phys_direct(proc->kernel_stack_guard_base);
+            pmm_free((void*)stack_phys, CONFIG_KERNEL_STACK_TOTAL_PAGES);
+        }
+        vmm_destroy_context(cabin);
+        pid_free(proc->pid);
+        kfree(proc);
+        debug_printf("[PROCESS] ERROR: Process limit reached under lock (%u)\n", PROCESS_MAX_COUNT);
+        return NULL;
+    }
+
     proc->next = process_list_head;
     process_list_head = proc;
     process_count++;
@@ -383,16 +401,17 @@ int process_load_binary(process_t* proc, const void* binary_data, size_t size) {
 }
 
 void process_list_validate(const char* caller) {
+    // allocate BEFORE taking the lock to avoid kmalloc under spinlock
+    process_t** seen = (process_t**)kmalloc(PROCESS_MAX_COUNT * sizeof(process_t*));
+    if (!seen) {
+        debug_printf("[PROCESS] WARNING: kmalloc failed in process_list_validate\n");
+        return;
+    }
+
     spin_lock(&process_lock);
 
     uint32_t count = 0;
     process_t* curr = process_list_head;
-    process_t** seen = (process_t**)kmalloc(PROCESS_MAX_COUNT * sizeof(process_t*));
-    if (!seen) {
-        debug_printf("[PROCESS] WARNING: kmalloc failed in process_list_validate\n");
-        spin_unlock(&process_lock);
-        return;
-    }
 
     while (curr && count < PROCESS_MAX_COUNT) {
         for (uint32_t i = 0; i < count; i++) {
@@ -437,8 +456,11 @@ process_t* process_find(uint32_t pid) {
 
     process_t* curr = process_list_head;
     while (curr) {
-        if (curr->pid == pid) {
+        if (curr->pid == pid && curr->magic == PROCESS_MAGIC) {
             spin_unlock(&process_lock);
+            // WARNING: returned pointer is not reference-counted.
+            // Callers that store this pointer across blocking operations
+            // must use process_ref_inc/dec to prevent use-after-free.
             return curr;
         }
         curr = curr->next;
@@ -449,6 +471,11 @@ process_t* process_find(uint32_t pid) {
 }
 
 process_t* process_get_first(void) {
+    // NOTE: caller must tolerate the list changing between calls;
+    // this is safe because process nodes are freed only via deferred cleanup
+    // which runs in non-IRQ context, and the list head is updated atomically
+    // under process_lock.  For IRQ-context callers this is the best we can do
+    // without introducing lock ordering issues.
     return process_list_head;
 }
 
@@ -584,9 +611,11 @@ int process_add_tag(process_t* proc, const char* tag) {
     }
 
     if (current_len > 0) {
-        strcat(proc->tags, ",");
+        proc->tags[current_len] = ',';
+        current_len++;
     }
-    strcat(proc->tags, tag);
+    memcpy(proc->tags + current_len, tag, tag_len);
+    proc->tags[current_len + tag_len] = '\0';
 
     spin_unlock(&process_lock);
 

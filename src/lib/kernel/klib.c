@@ -981,18 +981,24 @@ void spin_lock(spinlock_t *lock)
     // save IRQ state and disable interrupts before acquiring to prevent deadlock with IRQ handlers
     uint64_t flags;
     asm volatile("pushfq; pop %0; cli" : "=r"(flags)::"memory");
-    lock->saved_flags = flags;
 
+    // acquire the lock FIRST, then store saved_flags
+    // storing saved_flags before acquiring would let another CPU overwrite it
     while (__sync_lock_test_and_set(&lock->locked, 1))
     {
         asm volatile("pause");
     }
+
+    // now we own the lock — safe to write saved_flags
+    lock->saved_flags = flags;
 }
 
 void spin_unlock(spinlock_t *lock)
 {
-    __sync_lock_release(&lock->locked);
+    // read saved_flags BEFORE releasing the lock
+    // otherwise another CPU could acquire and overwrite saved_flags
     uint64_t flags = lock->saved_flags;
+    __sync_lock_release(&lock->locked);
     asm volatile("push %0; popfq" ::"r"(flags) : "memory", "cc");
 }
 

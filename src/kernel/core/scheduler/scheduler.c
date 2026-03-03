@@ -244,7 +244,8 @@ void scheduler_yield_from_interrupt(void* frame_ptr) {
         }
 
         if (!other_ready && !process_is_idle(current)) {
-            sched.total_ticks++;
+            // no other process ready — keep running current process
+            // do NOT increment total_ticks here; the timer IRQ handler already did it
             return;
         }
 
