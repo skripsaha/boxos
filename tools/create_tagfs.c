@@ -12,13 +12,9 @@
 #define TAGFS_MAX_FILES         1024
 #define TAGFS_FILE_ACTIVE       (1 << 0)
 
-// Journal constants (must match kernel journal.h)
-#define JOURNAL_MAGIC               0x4A4F5552  // "JOUR"
-#define JOURNAL_VERSION             1
-#define JOURNAL_SUPERBLOCK_SECTOR   2059
-#define JOURNAL_SUPERBLOCK_BACKUP   2060
-#define JOURNAL_ENTRIES_START       2061
-#define JOURNAL_ENTRY_COUNT         512
+#define JOURNAL_MAGIC           0x4A4F5552
+#define JOURNAL_VERSION         1
+#define JOURNAL_ENTRY_COUNT     512
 
 typedef struct __attribute__((packed)) {
     uint8_t type;
@@ -40,7 +36,10 @@ typedef struct __attribute__((packed)) {
     uint64_t fs_created_time;
     uint64_t fs_modified_time;
     uint8_t  fs_uuid[16];
-    uint8_t  reserved[440];
+    uint32_t backup_superblock_sector;
+    uint32_t journal_superblock_sector;
+    uint32_t journal_entry_count;
+    uint8_t  reserved[428];
 } TagFSSuperblock;
 
 typedef struct __attribute__((packed)) {
@@ -53,10 +52,12 @@ typedef struct __attribute__((packed)) {
     uint64_t created_time;
     uint64_t modified_time;
     uint8_t  tag_count;
-    uint8_t  reserved1[3];
-    char filename[32];
+    uint8_t  ext_tag_count;
+    uint8_t  reserved1[2];
+    char     filename[32];
     TagFSTag tags[16];
-    uint8_t  reserved2[48];
+    uint32_t extended_block;
+    uint8_t  reserved2[44];
 } TagFSMetadata;
 
 typedef struct __attribute__((packed)) {
@@ -167,7 +168,6 @@ int add_file_to_fs(FILE* disk, TagFSSuperblock* sb, const char* filepath, const 
         stem[stem_len] = '\0';
 
         if (stem_len > 0 && meta.tag_count < 16) {
-            /* Only add stem tag if it doesn't already exist */
             int duplicate = 0;
             for (uint8_t d = 0; d < meta.tag_count; d++) {
                 if (meta.tags[d].type == 1 &&
@@ -178,7 +178,6 @@ int add_file_to_fs(FILE* disk, TagFSSuperblock* sb, const char* filepath, const 
                 }
             }
             if (!duplicate) {
-                /* Label: kernel expects key=label, value="" (format_tag shows key when value empty) */
                 meta.tags[meta.tag_count].type = 1;
                 strncpy(meta.tags[meta.tag_count].key, stem, sizeof(meta.tags[0].key) - 1);
                 meta.tags[meta.tag_count].key[sizeof(meta.tags[0].key) - 1] = '\0';
@@ -240,7 +239,8 @@ int add_file_to_fs(FILE* disk, TagFSSuperblock* sb, const char* filepath, const 
     return 0;
 }
 
-int create_empty_journal(FILE* disk) {
+int create_empty_journal(FILE* disk, uint32_t journal_sb_sector, uint32_t journal_backup_sector,
+                         uint32_t journal_entries_start, uint32_t entry_count) {
     printf("[create_tagfs] Initializing empty journal...\n");
 
     uint8_t* buffer = malloc(512);
@@ -253,8 +253,8 @@ int create_empty_journal(FILE* disk) {
     memset(&sb, 0, sizeof(sb));
     sb.magic = JOURNAL_MAGIC;
     sb.version = JOURNAL_VERSION;
-    sb.start_sector = JOURNAL_ENTRIES_START;
-    sb.entry_count = JOURNAL_ENTRY_COUNT;
+    sb.start_sector = journal_entries_start;
+    sb.entry_count = entry_count;
     sb.head = 0;
     sb.tail = 0;
     sb.commit_seq = 1;
@@ -262,7 +262,7 @@ int create_empty_journal(FILE* disk) {
     memset(buffer, 0, 512);
     memcpy(buffer, &sb, sizeof(sb));
 
-    if (fseek(disk, JOURNAL_SUPERBLOCK_SECTOR * 512, SEEK_SET) != 0) {
+    if (fseek(disk, journal_sb_sector * 512, SEEK_SET) != 0) {
         fprintf(stderr, "Failed to seek to journal superblock sector\n");
         free(buffer);
         return -1;
@@ -274,7 +274,7 @@ int create_empty_journal(FILE* disk) {
         return -1;
     }
 
-    if (fseek(disk, JOURNAL_SUPERBLOCK_BACKUP * 512, SEEK_SET) != 0) {
+    if (fseek(disk, journal_backup_sector * 512, SEEK_SET) != 0) {
         fprintf(stderr, "Failed to seek to journal backup sector\n");
         free(buffer);
         return -1;
@@ -288,8 +288,8 @@ int create_empty_journal(FILE* disk) {
 
     memset(buffer, 0, 512);
 
-    for (uint32_t i = 0; i < JOURNAL_ENTRY_COUNT * 2; i++) {
-        uint32_t sector = JOURNAL_ENTRIES_START + i;
+    for (uint32_t i = 0; i < entry_count * 2; i++) {
+        uint32_t sector = journal_entries_start + i;
         if (fseek(disk, sector * 512, SEEK_SET) != 0) {
             fprintf(stderr, "Failed to seek to journal entry sector %u\n", i);
             free(buffer);
@@ -304,9 +304,9 @@ int create_empty_journal(FILE* disk) {
     }
 
     free(buffer);
-    printf("  Journal initialized (sectors %u-%u)\n",
-           JOURNAL_SUPERBLOCK_SECTOR,
-           JOURNAL_ENTRIES_START + (JOURNAL_ENTRY_COUNT * 2) - 1);
+    printf("  Journal initialized (sb=%u, backup=%u, entries=%u-%u)\n",
+           journal_sb_sector, journal_backup_sector,
+           journal_entries_start, journal_entries_start + (entry_count * 2) - 1);
 
     return 0;
 }
@@ -318,14 +318,17 @@ void print_usage(const char* prog) {
     fprintf(stderr, "\n");
     fprintf(stderr, "Arguments:\n");
     fprintf(stderr, "  img          - Disk image path\n");
-    fprintf(stderr, "  sb_sector    - Superblock sector (e.g., 400)\n");
-    fprintf(stderr, "  meta_sector  - Metadata table sector (e.g., 401)\n");
-    fprintf(stderr, "  data_sector  - Data start sector (e.g., 1425)\n");
+    fprintf(stderr, "  sb_sector    - Superblock sector (e.g., 1034)\n");
+    fprintf(stderr, "  meta_sector  - Metadata table sector (e.g., 1035)\n");
+    fprintf(stderr, "  data_sector  - Data start sector (e.g., 3086)\n");
     fprintf(stderr, "  file         - File to add\n");
     fprintf(stderr, "  tags         - Tag string: \"key1:value1,key2:value2\"\n");
     fprintf(stderr, "\n");
-    fprintf(stderr, "Example:\n");
-    fprintf(stderr, "  %s disk.img 400 401 1425 kernel.bin \"system\"\n", prog);
+    fprintf(stderr, "Layout is computed automatically from arguments:\n");
+    fprintf(stderr, "  backup_sb    = meta_sector + max_files\n");
+    fprintf(stderr, "  journal_sb   = backup_sb + 1\n");
+    fprintf(stderr, "  journal_bak  = journal_sb + 1\n");
+    fprintf(stderr, "  journal_ents = journal_bak + 1\n");
     fprintf(stderr, "\n");
 }
 
@@ -336,14 +339,32 @@ int main(int argc, char* argv[]) {
     }
 
     const char* disk_path = argv[1];
-    uint32_t sb_sector = atoi(argv[2]);
-    uint32_t meta_sector = atoi(argv[3]);
-    uint32_t data_sector = atoi(argv[4]);
+    uint32_t sb_sector   = (uint32_t)atoi(argv[2]);
+    uint32_t meta_sector = (uint32_t)atoi(argv[3]);
+    uint32_t data_sector = (uint32_t)atoi(argv[4]);
+
+    // Compute layout dynamically from arguments
+    uint32_t backup_sb_sector      = meta_sector + TAGFS_MAX_FILES;
+    uint32_t journal_sb_sector     = backup_sb_sector + 1;
+    uint32_t journal_backup_sector = journal_sb_sector + 1;
+    uint32_t journal_entries_start = journal_backup_sector + 1;
+    uint32_t journal_entries_end   = journal_entries_start + (JOURNAL_ENTRY_COUNT * 2);
 
     printf("[create_tagfs] Formatting TagFS on %s...\n", disk_path);
-    printf("  Superblock sector: %u\n", sb_sector);
-    printf("  Metadata sector: %u\n", meta_sector);
-    printf("  Data start sector: %u\n", data_sector);
+    printf("  Superblock sector:       %u\n", sb_sector);
+    printf("  Metadata sector:         %u\n", meta_sector);
+    printf("  Backup superblock:       %u\n", backup_sb_sector);
+    printf("  Journal superblock:      %u\n", journal_sb_sector);
+    printf("  Journal backup:          %u\n", journal_backup_sector);
+    printf("  Journal entries:         %u-%u\n", journal_entries_start, journal_entries_end - 1);
+    printf("  Data start sector:       %u\n", data_sector);
+
+    if (journal_entries_end > data_sector) {
+        fprintf(stderr, "ERROR: Journal entries end (%u) would overlap data start (%u)\n",
+                journal_entries_end, data_sector);
+        fprintf(stderr, "  Increase data_sector to at least %u\n", journal_entries_end);
+        return 1;
+    }
 
     FILE* disk = fopen(disk_path, "r+b");
     if (!disk) {
@@ -355,32 +376,35 @@ int main(int argc, char* argv[]) {
     long disk_size = ftell(disk);
     fseek(disk, 0, SEEK_SET);
 
-    if (disk_size < (data_sector * 512)) {
+    if (disk_size < (long)(data_sector * 512)) {
         fprintf(stderr, "Disk image too small (need at least %u bytes)\n", data_sector * 512);
         fclose(disk);
         return 1;
     }
 
     uint32_t total_sectors = disk_size / 512;
-    uint32_t data_sectors = total_sectors - data_sector;
-    uint32_t total_blocks = data_sectors / 8;
+    uint32_t data_sectors  = total_sectors - data_sector;
+    uint32_t total_blocks  = data_sectors / 8;
 
     TagFSSuperblock sb;
     memset(&sb, 0, sizeof(sb));
-    sb.magic = TAGFS_MAGIC;
-    sb.version = TAGFS_VERSION;
-    sb.block_size = TAGFS_BLOCK_SIZE;
-    sb.total_blocks = total_blocks;
-    sb.free_blocks = total_blocks;
-    sb.total_files = 0;
-    sb.max_files = TAGFS_MAX_FILES;
-    sb.metadata_start_sector = meta_sector;
-    sb.data_start_sector = data_sector;
-    sb.tag_index_block = 0;
-    sb.fs_created_time = (uint64_t)time(NULL);
-    sb.fs_modified_time = sb.fs_created_time;
+    sb.magic                   = TAGFS_MAGIC;
+    sb.version                 = TAGFS_VERSION;
+    sb.block_size              = TAGFS_BLOCK_SIZE;
+    sb.total_blocks            = total_blocks;
+    sb.free_blocks             = total_blocks;
+    sb.total_files             = 0;
+    sb.max_files               = TAGFS_MAX_FILES;
+    sb.metadata_start_sector   = meta_sector;
+    sb.data_start_sector       = data_sector;
+    sb.tag_index_block         = 0;
+    sb.backup_superblock_sector   = backup_sb_sector;
+    sb.journal_superblock_sector  = journal_sb_sector;
+    sb.journal_entry_count        = JOURNAL_ENTRY_COUNT;
+    sb.fs_created_time         = (uint64_t)time(NULL);
+    sb.fs_modified_time        = sb.fs_created_time;
 
-    srand(sb.fs_created_time);
+    srand((unsigned int)sb.fs_created_time);
     generate_uuid(sb.fs_uuid);
 
     printf("\n[create_tagfs] Filesystem parameters:\n");
@@ -407,7 +431,7 @@ int main(int argc, char* argv[]) {
     printf("\n[create_tagfs] Adding files...\n");
     for (int i = 5; i < argc; i += 2) {
         const char* filepath = argv[i];
-        const char* tags = argv[i + 1];
+        const char* tags     = argv[i + 1];
 
         if (add_file_to_fs(disk, &sb, filepath, tags) != 0) {
             fprintf(stderr, "Failed to add file: %s\n", filepath);
@@ -428,8 +452,21 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    // Initialize empty journal
-    if (create_empty_journal(disk) != 0) {
+    // Write backup superblock
+    if (fseek(disk, backup_sb_sector * 512, SEEK_SET) != 0) {
+        perror("Failed to seek to backup superblock");
+        fclose(disk);
+        return 1;
+    }
+
+    if (fwrite(&sb, sizeof(sb), 1, disk) != 1) {
+        perror("Failed to write backup superblock");
+        fclose(disk);
+        return 1;
+    }
+
+    if (create_empty_journal(disk, journal_sb_sector, journal_backup_sector,
+                             journal_entries_start, JOURNAL_ENTRY_COUNT) != 0) {
         fprintf(stderr, "Failed to initialize journal\n");
         fclose(disk);
         return 1;

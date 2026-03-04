@@ -5,6 +5,9 @@
 static JournalSuperblock g_journal_sb;
 static bool g_journal_initialized = false;
 
+static uint32_t g_journal_sector;   // Primary journal superblock sector
+static uint32_t g_journal_backup;   // Backup journal superblock sector
+
 static int journal_write_superblock(void) {
     uint8_t* buffer = kmalloc(ATA_SECTOR_SIZE);
     if (!buffer) {
@@ -14,21 +17,19 @@ static int journal_write_superblock(void) {
     memset(buffer, 0, ATA_SECTOR_SIZE);
     memcpy(buffer, &g_journal_sb, sizeof(JournalSuperblock));
 
-    if (ata_write_sectors(1, JOURNAL_SUPERBLOCK_SECTOR, 1, buffer) != 0) {
+    if (ata_write_sectors(1, g_journal_sector, 1, buffer) != 0) {
         kfree(buffer);
         return -1;
     }
 
-    if (ata_write_sectors(1, JOURNAL_SUPERBLOCK_BACKUP, 1, buffer) != 0) {
+    if (ata_write_sectors(1, g_journal_backup, 1, buffer) != 0) {
         debug_printf("[Journal] Warning: Backup superblock write failed\n");
-        // primary is written, backup failure is not critical
     }
 
-    // ensure superblock reaches disk before returning success
     if (ata_flush_cache(1) != 0) {
         debug_printf("[Journal] ERROR: Cache flush failed after superblock write\n");
         kfree(buffer);
-        return -1;  // Superblock write not durable, cannot guarantee consistency
+        return -1;
     }
 
     kfree(buffer);
@@ -41,7 +42,7 @@ static int journal_read_superblock(void) {
         return -1;
     }
 
-    if (ata_read_sectors(1, JOURNAL_SUPERBLOCK_SECTOR, 1, buffer) != 0) {
+    if (ata_read_sectors(1, g_journal_sector, 1, buffer) != 0) {
         kfree(buffer);
         return -1;
     }
@@ -51,7 +52,7 @@ static int journal_read_superblock(void) {
     if (g_journal_sb.magic != JOURNAL_MAGIC) {
         debug_printf("[Journal] Primary corrupted, trying backup...\n");
 
-        if (ata_read_sectors(1, JOURNAL_SUPERBLOCK_BACKUP, 1, buffer) != 0) {
+        if (ata_read_sectors(1, g_journal_backup, 1, buffer) != 0) {
             kfree(buffer);
             return -1;
         }
@@ -64,7 +65,7 @@ static int journal_read_superblock(void) {
             return -1;
         }
 
-        if (ata_write_sectors(1, JOURNAL_SUPERBLOCK_SECTOR, 1, buffer) != 0) {
+        if (ata_write_sectors(1, g_journal_sector, 1, buffer) != 0) {
             debug_printf("[Journal] Warning: Primary restore failed\n");
         } else {
             if (ata_flush_cache(1) != 0) {
@@ -78,11 +79,11 @@ static int journal_read_superblock(void) {
 }
 
 static int journal_read_entry(uint32_t index, JournalEntry* entry) {
-    if (index >= JOURNAL_ENTRY_COUNT || !entry) {
+    if (index >= g_journal_sb.entry_count || !entry) {
         return -1;
     }
 
-    uint32_t sector = JOURNAL_ENTRIES_START + (index * JOURNAL_ENTRY_SECTORS);
+    uint32_t sector = g_journal_sb.start_sector + (index * JOURNAL_ENTRY_SECTORS);
     uint8_t* buffer = kmalloc(sizeof(JournalEntry));
     if (!buffer) {
         return -1;
@@ -99,11 +100,11 @@ static int journal_read_entry(uint32_t index, JournalEntry* entry) {
 }
 
 static int journal_write_entry(uint32_t index, const JournalEntry* entry) {
-    if (index >= JOURNAL_ENTRY_COUNT || !entry) {
+    if (index >= g_journal_sb.entry_count || !entry) {
         return -1;
     }
 
-    uint32_t sector = JOURNAL_ENTRIES_START + (index * JOURNAL_ENTRY_SECTORS);
+    uint32_t sector = g_journal_sb.start_sector + (index * JOURNAL_ENTRY_SECTORS);
     uint8_t* buffer = kmalloc(sizeof(JournalEntry));
     if (!buffer) {
         return -1;
@@ -118,11 +119,11 @@ static int journal_write_entry(uint32_t index, const JournalEntry* entry) {
 }
 
 static int journal_commit_entry(uint32_t index) {
-    if (index >= JOURNAL_ENTRY_COUNT) {
+    if (index >= g_journal_sb.entry_count) {
         return -1;
     }
 
-    uint32_t sector = JOURNAL_ENTRIES_START + (index * JOURNAL_ENTRY_SECTORS);
+    uint32_t sector = g_journal_sb.start_sector + (index * JOURNAL_ENTRY_SECTORS);
     uint32_t committed_offset = offsetof(JournalEntry, committed);
 
     uint8_t* buffer = kmalloc(sizeof(JournalEntry));
@@ -148,11 +149,11 @@ static int journal_commit_entry(uint32_t index) {
 }
 
 static int journal_mark_replayed(uint32_t index) {
-    if (index >= JOURNAL_ENTRY_COUNT) {
+    if (index >= g_journal_sb.entry_count) {
         return -1;
     }
 
-    uint32_t sector = JOURNAL_ENTRIES_START + (index * JOURNAL_ENTRY_SECTORS);
+    uint32_t sector = g_journal_sb.start_sector + (index * JOURNAL_ENTRY_SECTORS);
     uint32_t replayed_offset = offsetof(JournalEntry, replayed);
 
     uint8_t* buffer = kmalloc(sizeof(JournalEntry));
@@ -170,23 +171,23 @@ static int journal_mark_replayed(uint32_t index) {
     int result = ata_write_sectors(1, sector, JOURNAL_ENTRY_SECTORS, buffer);
     kfree(buffer);
 
-    // No flush here — caller is responsible for flushing when needed.
-    // This allows batching multiple mark_replayed calls with a single flush.
-
     return result;
 }
 
 int journal_reload(void) {
     g_journal_initialized = false;
-    return journal_init();
+    return journal_init(g_journal_sector);
 }
 
-int journal_init(void) {
+int journal_init(uint32_t superblock_sector) {
     if (g_journal_initialized) {
         return 0;
     }
 
-    debug_printf("[Journal] Initializing...\n");
+    g_journal_sector = superblock_sector;
+    g_journal_backup = superblock_sector + 1;
+
+    debug_printf("[Journal] Initializing (sb_sector=%u)...\n", g_journal_sector);
 
     if (journal_read_superblock() != 0) {
         debug_printf("[Journal] Creating new journal...\n");
@@ -194,7 +195,7 @@ int journal_init(void) {
         memset(&g_journal_sb, 0, sizeof(JournalSuperblock));
         g_journal_sb.magic = JOURNAL_MAGIC;
         g_journal_sb.version = JOURNAL_VERSION;
-        g_journal_sb.start_sector = JOURNAL_ENTRIES_START;
+        g_journal_sb.start_sector = g_journal_backup + 1;
         g_journal_sb.entry_count = JOURNAL_ENTRY_COUNT;
         g_journal_sb.head = 0;
         g_journal_sb.tail = 0;
@@ -206,8 +207,9 @@ int journal_init(void) {
         }
     }
 
-    debug_printf("[Journal] Initialized (head=%u, tail=%u, seq=%u)\n",
-                 g_journal_sb.head, g_journal_sb.tail, g_journal_sb.commit_seq);
+    debug_printf("[Journal] Initialized (head=%u, tail=%u, seq=%u, entries_start=%u)\n",
+                 g_journal_sb.head, g_journal_sb.tail, g_journal_sb.commit_seq,
+                 g_journal_sb.start_sector);
 
     g_journal_initialized = true;
     return 0;
@@ -260,15 +262,12 @@ int journal_replay(void) {
             replayed++;
         }
 
-        index = (index + 1) % JOURNAL_ENTRY_COUNT;
+        index = (index + 1) % g_journal_sb.entry_count;
     }
 
     if (replayed > 0) {
         debug_printf("[Journal] Replayed %u transactions\n", replayed);
 
-        // Single flush for all data writes and replayed marks.
-        // Must flush BEFORE updating superblock tail, so that if we crash
-        // after superblock update, all data is guaranteed on disk.
         if (ata_flush_cache(1) != 0) {
             debug_printf("[Journal] WARNING: Flush failed after replay\n");
             return -1;
@@ -293,9 +292,10 @@ int journal_validate_and_replay(void) {
 
     debug_printf("[Journal] Validating journal structure...\n");
 
-    if (g_journal_sb.head >= JOURNAL_ENTRY_COUNT || g_journal_sb.tail >= JOURNAL_ENTRY_COUNT) {
+    if (g_journal_sb.head >= g_journal_sb.entry_count ||
+        g_journal_sb.tail >= g_journal_sb.entry_count) {
         debug_printf("[Journal] ERROR: Corrupted superblock (head=%u, tail=%u, max=%u)\n",
-                     g_journal_sb.head, g_journal_sb.tail, JOURNAL_ENTRY_COUNT);
+                     g_journal_sb.head, g_journal_sb.tail, g_journal_sb.entry_count);
         debug_printf("[Journal] Resetting journal to empty state\n");
 
         g_journal_sb.head = 0;
@@ -334,21 +334,21 @@ int journal_validate_and_replay(void) {
             debug_printf("[Journal] WARNING: Corrupted entry at %u (bad magic: 0x%08x)\n",
                          index, entry.magic);
             skipped_count++;
-            index = (index + 1) % JOURNAL_ENTRY_COUNT;
+            index = (index + 1) % g_journal_sb.entry_count;
             continue;
         }
 
         if (entry.committed != 1) {
             debug_printf("[Journal] INFO: Uncommitted entry at %u, skipping\n", index);
             skipped_count++;
-            index = (index + 1) % JOURNAL_ENTRY_COUNT;
+            index = (index + 1) % g_journal_sb.entry_count;
             continue;
         }
 
         if (entry.replayed == 1) {
             debug_printf("[Journal] INFO: Entry %u already replayed, skipping\n", index);
             skipped_count++;
-            index = (index + 1) % JOURNAL_ENTRY_COUNT;
+            index = (index + 1) % g_journal_sb.entry_count;
             continue;
         }
 
@@ -369,7 +369,7 @@ int journal_validate_and_replay(void) {
                          entry.type, index);
             kfree(buffer);
             skipped_count++;
-            index = (index + 1) % JOURNAL_ENTRY_COUNT;
+            index = (index + 1) % g_journal_sb.entry_count;
             continue;
         }
 
@@ -382,23 +382,18 @@ int journal_validate_and_replay(void) {
 
         kfree(buffer);
 
-        // No per-entry flush — batched flush after the loop for performance.
-        // Crash safety: if we crash mid-replay, entries stay committed+not-replayed
-        // and will be re-replayed on next boot (idempotent).
-
         if (journal_mark_replayed(index) != 0) {
             debug_printf("[Journal] ERROR: Failed to mark entry %u as replayed\n", index);
             return -1;
         }
 
         replayed_count++;
-        index = (index + 1) % JOURNAL_ENTRY_COUNT;
+        index = (index + 1) % g_journal_sb.entry_count;
     }
 
     debug_printf("[Journal] Replay complete: %u applied, %u skipped\n",
                  replayed_count, skipped_count);
 
-    // Single flush for all replayed data — must complete before superblock update
     if (replayed_count > 0) {
         if (ata_flush_cache(1) != 0) {
             debug_printf("[Journal] ERROR: Batch flush failed after replay\n");
@@ -422,7 +417,7 @@ int journal_begin(uint32_t* txn_id) {
         return -1;
     }
 
-    uint32_t next_head = (g_journal_sb.head + 1) % JOURNAL_ENTRY_COUNT;
+    uint32_t next_head = (g_journal_sb.head + 1) % g_journal_sb.entry_count;
     if (next_head == g_journal_sb.tail) {
         bool all_replayed = true;
         uint32_t idx = g_journal_sb.tail;
@@ -437,7 +432,7 @@ int journal_begin(uint32_t* txn_id) {
                 all_replayed = false;
                 break;
             }
-            idx = (idx + 1) % JOURNAL_ENTRY_COUNT;
+            idx = (idx + 1) % g_journal_sb.entry_count;
         }
 
         if (all_replayed) {
@@ -450,13 +445,11 @@ int journal_begin(uint32_t* txn_id) {
             }
             next_head = 1;
         } else {
-            // journal full with unreplayed entries — force replay to free space
             debug_printf("[Journal] Journal full, forcing replay of pending entries...\n");
             if (journal_replay() != 0) {
                 debug_printf("[Journal] ERROR: Forced replay failed, journal still full\n");
                 return -1;
             }
-            // replay succeeded — compact now
             g_journal_sb.head = 0;
             g_journal_sb.tail = 0;
             if (journal_write_superblock() != 0) {
@@ -485,8 +478,9 @@ int journal_begin(uint32_t* txn_id) {
     return 0;
 }
 
-int journal_log_metadata(uint32_t txn_id, uint32_t file_id, const TagFSMetadata* meta) {
-    if (!g_journal_initialized || !meta || txn_id >= JOURNAL_ENTRY_COUNT) {
+int journal_log_metadata(uint32_t txn_id, uint32_t file_id, uint32_t target_sector,
+                         const TagFSMetadata* meta) {
+    if (!g_journal_initialized || !meta || txn_id >= g_journal_sb.entry_count) {
         return -1;
     }
 
@@ -501,14 +495,14 @@ int journal_log_metadata(uint32_t txn_id, uint32_t file_id, const TagFSMetadata*
 
     entry.type = JTYPE_METADATA;
     entry.file_id = file_id;
-    entry.sector = TAGFS_METADATA_START + (file_id - 1);
+    entry.sector = target_sector;
     memcpy(entry.data, meta, sizeof(TagFSMetadata));
 
     return journal_write_entry(txn_id, &entry);
 }
 
-int journal_log_superblock(uint32_t txn_id, const TagFSSuperblock* sb) {
-    if (!g_journal_initialized || !sb || txn_id >= JOURNAL_ENTRY_COUNT) {
+int journal_log_superblock(uint32_t txn_id, uint32_t target_sector, const TagFSSuperblock* sb) {
+    if (!g_journal_initialized || !sb || txn_id >= g_journal_sb.entry_count) {
         return -1;
     }
 
@@ -523,14 +517,14 @@ int journal_log_superblock(uint32_t txn_id, const TagFSSuperblock* sb) {
 
     entry.type = JTYPE_SUPERBLOCK;
     entry.file_id = 0;
-    entry.sector = TAGFS_SUPERBLOCK_SECTOR;
+    entry.sector = target_sector;
     memcpy(entry.data, sb, sizeof(TagFSSuperblock));
 
     return journal_write_entry(txn_id, &entry);
 }
 
 int journal_commit(uint32_t txn_id) {
-    if (!g_journal_initialized || txn_id >= JOURNAL_ENTRY_COUNT) {
+    if (!g_journal_initialized || txn_id >= g_journal_sb.entry_count) {
         return -1;
     }
 
@@ -567,24 +561,19 @@ int journal_commit(uint32_t txn_id) {
         return -1;
     }
 
-    // No explicit flush here — journal_write_superblock() at the end will flush
-    // all pending writes (data + replayed mark + superblock) in one operation.
-    // Crash safety: committed=1 is already flushed (in journal_commit_entry),
-    // so if we crash before the final flush, replay will redo this entry.
-
     if (journal_mark_replayed(txn_id) != 0) {
         debug_printf("[Journal] Failed to mark entry as replayed\n");
         return -1;
     }
 
-    g_journal_sb.tail = (txn_id + 1) % JOURNAL_ENTRY_COUNT;
+    g_journal_sb.tail = (txn_id + 1) % g_journal_sb.entry_count;
     g_journal_sb.commit_seq++;
 
     return journal_write_superblock();
 }
 
 void journal_abort(uint32_t txn_id) {
-    if (!g_journal_initialized || txn_id >= JOURNAL_ENTRY_COUNT) {
+    if (!g_journal_initialized || txn_id >= g_journal_sb.entry_count) {
         return;
     }
 

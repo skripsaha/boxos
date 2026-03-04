@@ -8,11 +8,11 @@
 
 #define JOURNAL_VERSION        1
 
-#define JOURNAL_SUPERBLOCK_SECTOR      2059
-#define JOURNAL_SUPERBLOCK_BACKUP      2060
-#define JOURNAL_ENTRIES_START          2061
-#define JOURNAL_ENTRY_SECTORS          2     // Each entry is 1024 bytes (2 sectors)
-#define JOURNAL_ENTRIES_END            (JOURNAL_ENTRIES_START + (JOURNAL_ENTRY_COUNT * JOURNAL_ENTRY_SECTORS))
+// Compile-time defaults — runtime values come from journal superblock / tagfs superblock
+#define JOURNAL_SUPERBLOCK_SECTOR_DEFAULT  2060  // 2059(backup SB) + 1
+#define JOURNAL_SUPERBLOCK_BACKUP_DEFAULT  2061  // journal SB + 1
+#define JOURNAL_ENTRIES_START_DEFAULT      2062  // journal backup + 1
+#define JOURNAL_ENTRY_SECTORS              2     // Structural constant: sizeof(JournalEntry)/512
 
 #define JTYPE_METADATA        1
 #define JTYPE_SUPERBLOCK      2
@@ -44,13 +44,13 @@ typedef struct __packed {
 
 STATIC_ASSERT(sizeof(JournalEntry) == 1024, "JournalEntry must be 1024 bytes (2 sectors)");
 
-int journal_init(void);
+int journal_init(uint32_t superblock_sector);
 int journal_reload(void);
 int journal_replay(void);
 int journal_validate_and_replay(void);
 int journal_begin(uint32_t* txn_id);
-int journal_log_metadata(uint32_t txn_id, uint32_t file_id, const TagFSMetadata* meta);
-int journal_log_superblock(uint32_t txn_id, const TagFSSuperblock* sb);
+int journal_log_metadata(uint32_t txn_id, uint32_t file_id, uint32_t target_sector, const TagFSMetadata* meta);
+int journal_log_superblock(uint32_t txn_id, uint32_t target_sector, const TagFSSuperblock* sb);
 int journal_commit(uint32_t txn_id);
 void journal_abort(uint32_t txn_id);
 

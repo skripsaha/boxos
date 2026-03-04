@@ -13,11 +13,12 @@
 #define TAGFS_MAX_TAGS_PER_FILE 16
 #define TAGFS_MAX_FILENAME      32
 
-#define TAGFS_SUPERBLOCK_SECTOR 1034  // After kernel (sectors 10-1033)
-#define TAGFS_METADATA_START    1035  // 1034 + 1
-#define TAGFS_SUPERBLOCK_BACKUP 2058  // Last metadata sector (1034 + 1024)
-// Journal: 2059-3085 (superblock + backup + 512 entries * 2 sectors each)
-#define TAGFS_DATA_START        3086  // After journal (2061 + 512*2)
+#define TAGFS_SUPERBLOCK_SECTOR         1034  // Fixed anchor — only constant that MUST be hardcoded
+
+// Compile-time defaults — runtime values come from superblock fields
+#define TAGFS_METADATA_START_DEFAULT    1035  // 1034 + 1
+#define TAGFS_SUPERBLOCK_BACKUP_DEFAULT 2059  // 1035 + 1024 (no collision with metadata)
+#define TAGFS_DATA_START_DEFAULT        3086  // After journal
 
 #define TAGFS_TAG_USER          0
 #define TAGFS_TAG_SYSTEM        1
@@ -51,7 +52,10 @@ typedef struct __packed {
     uint64_t fs_created_time;
     uint64_t fs_modified_time;
     uint8_t  fs_uuid[16];
-    uint8_t  reserved[440];
+    uint32_t backup_superblock_sector;  // Where backup SB lives
+    uint32_t journal_superblock_sector; // Where journal SB is
+    uint32_t journal_entry_count;       // Number of journal entries
+    uint8_t  reserved[428];
 } TagFSSuperblock;
 
 STATIC_ASSERT(sizeof(TagFSSuperblock) == 512, "TagFSSuperblock must be 512 bytes");
