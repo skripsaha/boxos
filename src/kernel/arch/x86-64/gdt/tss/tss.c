@@ -5,7 +5,7 @@
 #include "vmm.h"
 
 static tss_t kernel_tss;
-static uint8_t ist_stacks[4][IST_STACK_SIZE] __attribute__((aligned(16)));
+static uint8_t ist_stacks[5][IST_STACK_SIZE] __attribute__((aligned(16)));
 static uint8_t kernel_stack[32768] __attribute__((aligned(16)));
 
 extern void gdt_set_tss_entry(int index, uint64_t base, uint64_t limit);
@@ -19,8 +19,8 @@ void tss_init(void) {
     kernel_tss.rsp1 = 0;
     kernel_tss.rsp2 = 0;
 
-    // IST1-4 only, IST5-7 unused
-    for (int i = 0; i < 4; i++) {
+    // IST1-5 only, IST6-7 unused
+    for (int i = 0; i < 5; i++) {
         uint64_t stack_top = (uint64_t)ist_stacks[i] + IST_STACK_SIZE - 16;
 
         switch(i + 1) {
@@ -39,6 +39,10 @@ void tss_init(void) {
             case IST_DEBUG:
                 kernel_tss.ist4 = stack_top;
                 debug_printf("[TSS] IST4 (Debug): 0x%p\n", (void*)stack_top);
+                break;
+            case IST_STACK_FAULT:
+                kernel_tss.ist5 = stack_top;
+                debug_printf("[TSS] IST5 (Stack Fault): 0x%p\n", (void*)stack_top);
                 break;
         }
     }
