@@ -209,9 +209,12 @@ void process_ref_dec(process_t* proc) {
     uint32_t old = atomic_fetch_sub_u32(&proc->ref_count, 1);
 
     if (old == 0) {
-        debug_printf("[PROCESS] PANIC: ref_count underflow for PID %u (old=0)\n",
-                     proc->pid);
-        while (1) { asm volatile("cli; hlt"); }
+        // underflow detected — restore to 1 to prevent further damage
+        // the process will leak but the system survives
+        atomic_store_u32(&proc->ref_count, 1);
+        kprintf("[PROCESS] ERROR: ref_count underflow for PID %u — recovered (process leaked)\n",
+                proc->pid);
+        return;
     }
 
     #ifdef DEBUG_REFCOUNT
@@ -487,9 +490,27 @@ process_t* process_find(uint32_t pid) {
     while (curr) {
         if (curr->pid == pid && curr->magic == PROCESS_MAGIC) {
             spin_unlock(&process_lock);
-            // WARNING: returned pointer is not reference-counted.
-            // Callers that store this pointer across blocking operations
-            // must use process_ref_inc/dec to prevent use-after-free.
+            return curr;
+        }
+        curr = curr->next;
+    }
+
+    spin_unlock(&process_lock);
+    return NULL;
+}
+
+process_t* process_find_ref(uint32_t pid) {
+    if (pid == PROCESS_INVALID_PID) {
+        return NULL;
+    }
+
+    spin_lock(&process_lock);
+
+    process_t* curr = process_list_head;
+    while (curr) {
+        if (curr->pid == pid && curr->magic == PROCESS_MAGIC) {
+            process_ref_inc(curr);
+            spin_unlock(&process_lock);
             return curr;
         }
         curr = curr->next;
