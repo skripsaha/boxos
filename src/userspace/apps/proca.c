@@ -5,18 +5,24 @@
 
 int main(void)
 {
-    notify_page_t* np = notify_page();
-    uint32_t parent = np->spawner_pid;
+    notify_page_t *np = notify_page();
+    uint64_t spawner = np->spawner_pid;
+    // printf("Spawner PID: %d\n", spawner);
 
     for (int i = 0; i < 5; i++)
     {
+        // Simple output to display
         print("A");
-        if (parent != 0) {
-            send(parent, "A", 1);
+
+        // Case with the spawner PID. When ipc_test utility need this for example.
+        if (spawner)
+        {
+            send(spawner, "A", 1);
         }
+
         yield();
     }
+    print("\n");
 
-    println("");
     exit(0);
 }
