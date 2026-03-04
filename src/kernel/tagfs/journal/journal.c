@@ -170,9 +170,8 @@ static int journal_mark_replayed(uint32_t index) {
     int result = ata_write_sectors(1, sector, JOURNAL_ENTRY_SECTORS, buffer);
     kfree(buffer);
 
-    if (result == 0) {
-        ata_flush_cache(1);
-    }
+    // No flush here — caller is responsible for flushing when needed.
+    // This allows batching multiple mark_replayed calls with a single flush.
 
     return result;
 }
@@ -266,6 +265,14 @@ int journal_replay(void) {
 
     if (replayed > 0) {
         debug_printf("[Journal] Replayed %u transactions\n", replayed);
+
+        // Single flush for all data writes and replayed marks.
+        // Must flush BEFORE updating superblock tail, so that if we crash
+        // after superblock update, all data is guaranteed on disk.
+        if (ata_flush_cache(1) != 0) {
+            debug_printf("[Journal] WARNING: Flush failed after replay\n");
+            return -1;
+        }
 
         g_journal_sb.tail = g_journal_sb.head;
         if (journal_write_superblock() != 0) {
@@ -375,10 +382,9 @@ int journal_validate_and_replay(void) {
 
         kfree(buffer);
 
-        if (ata_flush_cache(1) != 0) {
-            debug_printf("[Journal] ERROR: Cache flush failed for entry %u - cannot guarantee durability\n", index);
-            return -1;  // CRITICAL: Abort replay to prevent data loss
-        }
+        // No per-entry flush — batched flush after the loop for performance.
+        // Crash safety: if we crash mid-replay, entries stay committed+not-replayed
+        // and will be re-replayed on next boot (idempotent).
 
         if (journal_mark_replayed(index) != 0) {
             debug_printf("[Journal] ERROR: Failed to mark entry %u as replayed\n", index);
@@ -391,6 +397,14 @@ int journal_validate_and_replay(void) {
 
     debug_printf("[Journal] Replay complete: %u applied, %u skipped\n",
                  replayed_count, skipped_count);
+
+    // Single flush for all replayed data — must complete before superblock update
+    if (replayed_count > 0) {
+        if (ata_flush_cache(1) != 0) {
+            debug_printf("[Journal] ERROR: Batch flush failed after replay\n");
+            return -1;
+        }
+    }
 
     g_journal_sb.tail = g_journal_sb.head;
 
@@ -553,10 +567,10 @@ int journal_commit(uint32_t txn_id) {
         return -1;
     }
 
-    if (ata_flush_cache(1) != 0) {
-        debug_printf("[Journal] WARNING: Cache flush timeout after data write\n");
-        return -1;
-    }
+    // No explicit flush here — journal_write_superblock() at the end will flush
+    // all pending writes (data + replayed mark + superblock) in one operation.
+    // Crash safety: committed=1 is already flushed (in journal_commit_entry),
+    // so if we crash before the final flush, replay will redo this entry.
 
     if (journal_mark_replayed(txn_id) != 0) {
         debug_printf("[Journal] Failed to mark entry as replayed\n");
