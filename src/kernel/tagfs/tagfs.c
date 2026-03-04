@@ -24,6 +24,134 @@ static inline bool bitmap_test(uint8_t* bitmap, uint32_t bit) {
     return (bitmap[bit / 8] & (1 << (bit % 8))) != 0;
 }
 
+// --- Free extent list helpers ---
+
+// Build sorted free extent list from bitmap (called once at init)
+static void free_list_build(void) {
+    uint32_t total = tfs.block_bitmap.total_blocks;
+    uint8_t* bitmap = tfs.block_bitmap.bitmap;
+    FreeExtent** tail = &tfs.block_bitmap.free_list;
+    tfs.block_bitmap.free_list = NULL;
+    tfs.block_bitmap.extent_count = 0;
+
+    uint32_t i = 0;
+    while (i < total) {
+        // Skip occupied blocks — byte-level fast skip
+        while (i < total) {
+            if ((i & 7) == 0 && i + 8 <= total && bitmap[i / 8] == 0xFF) {
+                i += 8;
+                continue;
+            }
+            if (bitmap_test(bitmap, i)) {
+                i++;
+                continue;
+            }
+            break;
+        }
+        if (i >= total) break;
+
+        // Found start of free region — scan to end
+        uint32_t start = i;
+        while (i < total) {
+            if ((i & 7) == 0 && i + 8 <= total && bitmap[i / 8] == 0x00) {
+                i += 8;
+                continue;
+            }
+            if (!bitmap_test(bitmap, i)) {
+                i++;
+                continue;
+            }
+            break;
+        }
+
+        // Create extent [start, i)
+        FreeExtent* ext = kmalloc(sizeof(FreeExtent));
+        if (!ext) {
+            debug_printf("[TagFS] WARNING: Failed to allocate free extent node\n");
+            break;
+        }
+        ext->start = start;
+        ext->count = i - start;
+        ext->next = NULL;
+        *tail = ext;
+        tail = &ext->next;
+        tfs.block_bitmap.extent_count++;
+    }
+}
+
+// Destroy free extent list (called at shutdown)
+static void free_list_destroy(void) {
+    FreeExtent* cur = tfs.block_bitmap.free_list;
+    while (cur) {
+        FreeExtent* next = cur->next;
+        kfree(cur);
+        cur = next;
+    }
+    tfs.block_bitmap.free_list = NULL;
+    tfs.block_bitmap.extent_count = 0;
+}
+
+// Remove 'count' blocks from free list at 'start_block'
+// Used by defrag when it directly manipulates bitmap
+static void free_list_remove_range(uint32_t start_block, uint32_t count) {
+    uint32_t end = start_block + count;
+    FreeExtent* prev = NULL;
+    FreeExtent* cur = tfs.block_bitmap.free_list;
+
+    while (cur) {
+        uint32_t cur_end = cur->start + cur->count;
+
+        // No overlap — extent is entirely before the range
+        if (cur_end <= start_block) {
+            prev = cur;
+            cur = cur->next;
+            continue;
+        }
+
+        // No overlap — extent is entirely after the range
+        if (cur->start >= end) break;
+
+        // Overlap exists — handle 4 cases
+        FreeExtent* next = cur->next;
+
+        if (cur->start >= start_block && cur_end <= end) {
+            // Case 1: extent fully consumed
+            if (prev) prev->next = next;
+            else tfs.block_bitmap.free_list = next;
+            kfree(cur);
+            tfs.block_bitmap.extent_count--;
+        } else if (cur->start < start_block && cur_end > end) {
+            // Case 2: range punches a hole — split extent
+            FreeExtent* right = kmalloc(sizeof(FreeExtent));
+            if (right) {
+                right->start = end;
+                right->count = cur_end - end;
+                right->next = next;
+                cur->count = start_block - cur->start;
+                cur->next = right;
+                tfs.block_bitmap.extent_count++;
+            } else {
+                // Fallback: just shrink left part
+                cur->count = start_block - cur->start;
+            }
+            prev = cur;
+        } else if (cur->start < start_block) {
+            // Case 3: trim right side of extent
+            cur->count = start_block - cur->start;
+            prev = cur;
+        } else {
+            // Case 4: trim left side of extent
+            cur->start = end;
+            cur->count = cur_end - end;
+            prev = cur;
+        }
+
+        cur = (prev) ? prev->next : tfs.block_bitmap.free_list;
+        // Re-check from current position since we may have modified the list
+        if (cur && cur->start >= end) break;
+    }
+}
+
 // Update compact summary from metadata
 static void summary_update(uint32_t file_id, const TagFSMetadata* meta) {
     if (!tfs.file_summaries || file_id == 0 || file_id > TAGFS_MAX_FILES) return;
@@ -433,6 +561,11 @@ int tagfs_init(void) {
     debug_printf("[TagFS] Block bitmap initialized: %u/%u blocks used\n",
             total_blocks - tfs.superblock.free_blocks, total_blocks);
 
+    // Build free extent list from bitmap for O(k) allocation
+    free_list_build();
+    debug_printf("[TagFS] Free extent list built: %u extents\n",
+            tfs.block_bitmap.extent_count);
+
     debug_printf("[TagFS] Tag index built: %u unique tags\n",
             tfs.tag_index->total_tags);
 
@@ -456,6 +589,8 @@ void tagfs_shutdown(void) {
         tag_bitmap_destroy(tfs.tag_index);
         tfs.tag_index = NULL;
     }
+
+    free_list_destroy();
 
     if (tfs.block_bitmap.bitmap) {
         kfree(tfs.block_bitmap.bitmap);
@@ -488,26 +623,32 @@ int tagfs_alloc_blocks(uint32_t count, uint32_t* start_block) {
         return -1;
     }
 
-    uint32_t total = tfs.block_bitmap.total_blocks;
-    uint8_t* bitmap = tfs.block_bitmap.bitmap;
+    // First-fit search through free extent list — O(k) where k = number of extents
+    FreeExtent* prev = NULL;
+    FreeExtent* cur = tfs.block_bitmap.free_list;
 
-    for (uint32_t i = 0; i <= total - count; i++) {
-        bool found = true;
+    while (cur) {
+        if (cur->count >= count) {
+            *start_block = cur->start;
 
-        for (uint32_t j = 0; j < count; j++) {
-            if (bitmap_test(bitmap, i + j)) {
-                found = false;
-                i += j;  // skip to next potential start
-                break;
-            }
-        }
-
-        if (found) {
+            // Mark blocks in bitmap
+            uint8_t* bitmap = tfs.block_bitmap.bitmap;
             for (uint32_t j = 0; j < count; j++) {
-                bitmap_set(bitmap, i + j);
+                bitmap_set(bitmap, cur->start + j);
             }
 
-            *start_block = i;
+            if (cur->count == count) {
+                // Exact fit — remove extent node
+                if (prev) prev->next = cur->next;
+                else tfs.block_bitmap.free_list = cur->next;
+                kfree(cur);
+                tfs.block_bitmap.extent_count--;
+            } else {
+                // Partial use — shrink extent from the left
+                cur->start += count;
+                cur->count -= count;
+            }
+
             tfs.superblock.free_blocks -= count;
             tfs.superblock.fs_modified_time++;
 
@@ -518,6 +659,8 @@ int tagfs_alloc_blocks(uint32_t count, uint32_t* start_block) {
 
             return 0;
         }
+        prev = cur;
+        cur = cur->next;
     }
 
     debug_printf("[TagFS] Fragmentation: no contiguous space for %u blocks\n", count);
@@ -529,10 +672,56 @@ int tagfs_free_blocks(uint32_t start_block, uint32_t count) {
         return -1;
     }
 
+    // Clear bitmap
     uint8_t* bitmap = tfs.block_bitmap.bitmap;
-
     for (uint32_t i = 0; i < count; i++) {
         bitmap_clear(bitmap, start_block + i);
+    }
+
+    // Insert into free list maintaining sorted order, merge with neighbors
+    uint32_t end = start_block + count;
+    FreeExtent* prev = NULL;
+    FreeExtent* cur = tfs.block_bitmap.free_list;
+
+    // Find insertion point (list sorted by start address)
+    while (cur && cur->start + cur->count <= start_block) {
+        prev = cur;
+        cur = cur->next;
+    }
+
+    // Try merge with previous extent
+    bool merged_prev = false;
+    if (prev && prev->start + prev->count == start_block) {
+        prev->count += count;
+        merged_prev = true;
+    }
+
+    // Try merge with next extent
+    if (cur && end == cur->start) {
+        if (merged_prev) {
+            // Three-way merge: prev absorbs freed range + cur
+            prev->count += cur->count;
+            prev->next = cur->next;
+            kfree(cur);
+            tfs.block_bitmap.extent_count--;
+        } else {
+            // Merge with next only — extend cur backward
+            cur->start = start_block;
+            cur->count += count;
+        }
+    } else if (!merged_prev) {
+        // No merge possible — create new extent node
+        FreeExtent* ext = kmalloc(sizeof(FreeExtent));
+        if (ext) {
+            ext->start = start_block;
+            ext->count = count;
+            ext->next = cur;
+            if (prev) prev->next = ext;
+            else tfs.block_bitmap.free_list = ext;
+            tfs.block_bitmap.extent_count++;
+        } else {
+            debug_printf("[TagFS] WARNING: Failed to allocate free extent node\n");
+        }
     }
 
     tfs.superblock.free_blocks += count;
@@ -1171,6 +1360,8 @@ int tagfs_defrag_file(uint32_t file_id, uint32_t target_block) {
         for (uint32_t i = 0; i < meta->block_count; i++) {
             bitmap_set(tfs.block_bitmap.bitmap, new_start + i);
         }
+        // Update free extent list to reflect direct bitmap allocation
+        free_list_remove_range(new_start, meta->block_count);
         tfs.superblock.free_blocks -= meta->block_count;
     } else {
         if (tagfs_alloc_blocks(meta->block_count, &new_start) != 0) {
