@@ -54,6 +54,7 @@ uint32_t async_io_cancel_by_pid(uint32_t pid);
 void async_io_mark_completed(uint32_t event_id);
 void async_io_mark_completed_with_latency(uint32_t event_id, uint64_t submit_time);
 void async_io_mark_failed(uint32_t event_id);
+uint32_t async_io_expire_stale(uint64_t timeout_tsc);
 void async_io_get_stats(uint32_t* submitted, uint32_t* completed,
                         uint32_t* failed, uint32_t* queue_full,
                         uint64_t* avg_latency_cycles);

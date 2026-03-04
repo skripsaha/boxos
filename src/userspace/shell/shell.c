@@ -95,22 +95,26 @@ void shell_main_loop(void)
         memset(g_shell_state.input_buffer, 0, SHELL_MAX_INPUT);
 
         int len = readline(g_shell_state.input_buffer, SHELL_MAX_INPUT);
-        if (len < 0)
+        if (len < 0) {
+            shell_print_prompt();
             continue;
-        if (len == 0)
+        }
+        if (len == 0) {
+            shell_print_prompt();
             continue;
+        }
 
         parsed_command_t cmd;
         if (parser_parse(g_shell_state.input_buffer, &cmd) != 0)
         {
             println("Error: Failed to parse command");
-            print(g_shell_state.prompt);
+            shell_print_prompt();
             continue;
         }
 
         if (cmd.argc == 0)
         {
-            print(g_shell_state.prompt);
+            shell_print_prompt();
             continue;
         }
 
@@ -124,7 +128,7 @@ void shell_main_loop(void)
             }
         }
 
-        print(g_shell_state.prompt);
+        shell_print_prompt();
     }
 }
 
