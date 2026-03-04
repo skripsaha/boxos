@@ -2,6 +2,34 @@
 
 section .text
 
+;--------------------------------------------------------------
+; Offsets into ProcessContext (must match C struct in process.h)
+;
+; GPRs:              0..127  (16 x uint64_t)
+; rip:               128     (uint64_t)
+; cs,ds,es,fs,gs,ss: 136..147  (6 x uint16_t)
+; [4-byte padding]:  148..151  (alignment for uint64_t)
+; rflags:            152     (uint64_t)
+; cr3:               160     (uint64_t)
+; fpu_state:         168     (528 bytes = 512 + 16 for alignment)
+; fpu_initialized:   696     (bool, 1 byte)
+;--------------------------------------------------------------
+
+%define CTX_RIP      128
+%define CTX_CS       136
+%define CTX_DS       138
+%define CTX_ES       140
+%define CTX_FS       142
+%define CTX_GS       144
+%define CTX_SS       146
+%define CTX_RFLAGS   152
+%define CTX_FPU      168
+%define CTX_FPU_INIT 696
+
+;--------------------------------------------------------------
+; task_save_context(ProcessContext* ctx)
+;   rdi = pointer to ProcessContext
+;--------------------------------------------------------------
 global task_save_context
 task_save_context:
     mov [rdi + 0],  rax
@@ -23,42 +51,61 @@ task_save_context:
 
     ; Save RIP from return address on stack
     mov rax, [rsp]
-    mov [rdi + 128], rax
+    mov [rdi + CTX_RIP], rax
 
     pushfq
     pop rax
-    mov [rdi + 136], rax
+    mov [rdi + CTX_RFLAGS], rax
 
     mov ax, cs
-    mov [rdi + 144], ax
+    mov [rdi + CTX_CS], ax
     mov ax, ds
-    mov [rdi + 146], ax
+    mov [rdi + CTX_DS], ax
     mov ax, es
-    mov [rdi + 148], ax
+    mov [rdi + CTX_ES], ax
     mov ax, fs
-    mov [rdi + 150], ax
+    mov [rdi + CTX_FS], ax
     mov ax, gs
-    mov [rdi + 152], ax
+    mov [rdi + CTX_GS], ax
     mov ax, ss
-    mov [rdi + 154], ax
+    mov [rdi + CTX_SS], ax
 
-    ; FPU/SSE state saved by C caller via fxsave/fxrstor
+    ; Save FPU/SSE state (fxsave requires 16-byte aligned pointer)
+    lea rax, [rdi + CTX_FPU]
+    add rax, 15
+    and rax, -16
+    fxsave [rax]
+    mov byte [rdi + CTX_FPU_INIT], 1
+
     ret
 
+;--------------------------------------------------------------
+; task_restore_context(ProcessContext* ctx)
+;   rdi = pointer to ProcessContext
+;--------------------------------------------------------------
 global task_restore_context
 task_restore_context:
-    mov ax, [rdi + 146]
+    ; Restore FPU/SSE state first (uses rax as scratch)
+    cmp byte [rdi + CTX_FPU_INIT], 0
+    je .skip_fpu_restore
+    lea rax, [rdi + CTX_FPU]
+    add rax, 15
+    and rax, -16
+    fxrstor [rax]
+.skip_fpu_restore:
+
+    mov ax, [rdi + CTX_DS]
     mov ds, ax
-    mov ax, [rdi + 148]
+    mov ax, [rdi + CTX_ES]
     mov es, ax
-    mov ax, [rdi + 150]
+    mov ax, [rdi + CTX_FS]
     mov fs, ax
-    mov ax, [rdi + 152]
+    mov ax, [rdi + CTX_GS]
     mov gs, ax
-    mov ax, [rdi + 154]
+    mov ax, [rdi + CTX_SS]
     mov ss, ax
 
-    mov rax, [rdi + 136]
+    mov rax, [rdi + CTX_RFLAGS]
     push rax
     popfq
 
@@ -78,7 +125,7 @@ task_restore_context:
     mov r14, [rdi + 112]
     mov r15, [rdi + 120]
 
-    mov rax, [rdi + 128]
+    mov rax, [rdi + CTX_RIP]
     push rax
 
     ; Restore rax and rdi last
@@ -87,8 +134,13 @@ task_restore_context:
 
     ret
 
+;--------------------------------------------------------------
+; task_switch_to(ProcessContext* old, ProcessContext* new)
+;   rdi = old context, rsi = new context
+;--------------------------------------------------------------
 global task_switch_to
 task_switch_to:
+    ; --- Save old context ---
     mov [rdi + 0],  rax
     mov [rdi + 8],  rbx
     mov [rdi + 16], rcx
@@ -107,37 +159,54 @@ task_switch_to:
     mov [rdi + 120], r15
 
     mov rax, [rsp]
-    mov [rdi + 128], rax
+    mov [rdi + CTX_RIP], rax
 
     pushfq
     pop rax
-    mov [rdi + 136], rax
+    mov [rdi + CTX_RFLAGS], rax
 
     mov ax, cs
-    mov [rdi + 144], ax
+    mov [rdi + CTX_CS], ax
     mov ax, ds
-    mov [rdi + 146], ax
+    mov [rdi + CTX_DS], ax
     mov ax, es
-    mov [rdi + 148], ax
+    mov [rdi + CTX_ES], ax
     mov ax, fs
-    mov [rdi + 150], ax
+    mov [rdi + CTX_FS], ax
     mov ax, gs
-    mov [rdi + 152], ax
+    mov [rdi + CTX_GS], ax
     mov ax, ss
-    mov [rdi + 154], ax
+    mov [rdi + CTX_SS], ax
 
-    mov ax, [rsi + 146]
+    ; Save old FPU/SSE state
+    lea rax, [rdi + CTX_FPU]
+    add rax, 15
+    and rax, -16
+    fxsave [rax]
+    mov byte [rdi + CTX_FPU_INIT], 1
+
+    ; --- Restore new context ---
+    ; Restore FPU/SSE state first
+    cmp byte [rsi + CTX_FPU_INIT], 0
+    je .switch_skip_fpu
+    lea rax, [rsi + CTX_FPU]
+    add rax, 15
+    and rax, -16
+    fxrstor [rax]
+.switch_skip_fpu:
+
+    mov ax, [rsi + CTX_DS]
     mov ds, ax
-    mov ax, [rsi + 148]
+    mov ax, [rsi + CTX_ES]
     mov es, ax
-    mov ax, [rsi + 150]
+    mov ax, [rsi + CTX_FS]
     mov fs, ax
-    mov ax, [rsi + 152]
+    mov ax, [rsi + CTX_GS]
     mov gs, ax
-    mov ax, [rsi + 154]
+    mov ax, [rsi + CTX_SS]
     mov ss, ax
 
-    mov rax, [rsi + 136]
+    mov rax, [rsi + CTX_RFLAGS]
     push rax
     popfq
 
@@ -156,7 +225,7 @@ task_switch_to:
     mov r14, [rsi + 112]
     mov r15, [rsi + 120]
 
-    mov rax, [rsi + 128]
+    mov rax, [rsi + CTX_RIP]
     push rax
 
     ; Restore rax, rsi, rdi last
@@ -166,6 +235,10 @@ task_switch_to:
 
     ret
 
+;--------------------------------------------------------------
+; task_init_context(ProcessContext* ctx, void* entry, void* stack, void* arg)
+;   rdi = context, rsi = entry point, rdx = stack pointer, rcx = argument
+;--------------------------------------------------------------
 global task_init_context
 task_init_context:
     xor rax, rax
@@ -186,18 +259,21 @@ task_init_context:
     mov [rdi + 112], rax
     mov [rdi + 120], rax
 
-    mov [rdi + 128], rsi   ; RIP = entry point
+    mov [rdi + CTX_RIP], rsi   ; RIP = entry point
 
-    mov rax, 0x202         ; IF flag
-    mov [rdi + 136], rax
+    mov rax, 0x202             ; IF flag set
+    mov [rdi + CTX_RFLAGS], rax
 
-    mov ax, 0x08           ; Kernel code segment
-    mov [rdi + 144], ax
-    mov ax, 0x10           ; Kernel data segment
-    mov [rdi + 146], ax
-    mov [rdi + 148], ax
-    mov [rdi + 150], ax
-    mov [rdi + 152], ax
-    mov [rdi + 154], ax
+    mov ax, 0x08               ; Kernel code segment
+    mov [rdi + CTX_CS], ax
+    mov ax, 0x10               ; Kernel data segment
+    mov [rdi + CTX_DS], ax
+    mov [rdi + CTX_ES], ax
+    mov [rdi + CTX_FS], ax
+    mov [rdi + CTX_GS], ax
+    mov [rdi + CTX_SS], ax
+
+    ; FPU not initialized — caller should use fpu_init_state() from C
+    mov byte [rdi + CTX_FPU_INIT], 0
 
     ret

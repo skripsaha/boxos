@@ -66,6 +66,14 @@ typedef struct {
     bool fpu_initialized;
 } ProcessContext;
 
+// These offsets must match context_switch.asm — if the struct layout changes,
+// update the %define constants in context_switch.asm to match.
+_Static_assert(offsetof(ProcessContext, rip) == 128, "ProcessContext.rip offset mismatch with asm");
+_Static_assert(offsetof(ProcessContext, cs) == 136, "ProcessContext.cs offset mismatch with asm");
+_Static_assert(offsetof(ProcessContext, rflags) == 152, "ProcessContext.rflags offset mismatch with asm");
+_Static_assert(offsetof(ProcessContext, fpu_state) == 168, "ProcessContext.fpu_state offset mismatch with asm");
+_Static_assert(offsetof(ProcessContext, fpu_initialized) == 696, "ProcessContext.fpu_initialized offset mismatch with asm");
+
 typedef struct process_t {
     uint32_t magic;
     uint32_t pid;
