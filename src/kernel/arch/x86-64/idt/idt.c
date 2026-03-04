@@ -210,10 +210,15 @@ void exception_handler(interrupt_frame_t* frame) {
 
             process_set_state(overflow_proc, PROC_CRASHED);
 
+            // If the faulting code held the scheduler lock, force-release it
+            // so scheduler_yield_from_interrupt can acquire it without deadlock.
+            // We use spin_force_release (NOT spin_unlock) because we're on an
+            // IST stack — the original holder's saved_flags are meaningless here.
             scheduler_state_t* sched = scheduler_get_state();
             if (sched->scheduler_lock.locked) {
-                spin_unlock(&sched->scheduler_lock);
+                spin_force_release(&sched->scheduler_lock);
             }
+            __asm__ volatile("cli");
 
             scheduler_yield_from_interrupt(frame);
             return;

@@ -81,6 +81,7 @@ void spinlock_init(spinlock_t* lock);
 void spin_lock(spinlock_t* lock);
 void spin_unlock(spinlock_t* lock);
 bool spin_trylock(spinlock_t* lock);
+void spin_force_release(spinlock_t* lock);
 
 size_t strlen(const char* s);
 size_t strnlen(const char* s, size_t maxlen);

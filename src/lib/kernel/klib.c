@@ -1019,6 +1019,14 @@ bool spin_trylock(spinlock_t *lock)
     }
 }
 
+void spin_force_release(spinlock_t *lock)
+{
+    // Force-release a spinlock WITHOUT restoring saved_flags.
+    // Use ONLY in fatal recovery paths (IST exception handlers)
+    // where the original lock holder's context is lost.
+    __sync_lock_release(&lock->locked);
+}
+
 void list_init(list_t *list)
 {
     if (!list)
