@@ -5,7 +5,6 @@
 
 #define PMM_PAGE_SIZE       4096
 #define PMM_BITMAP_ALIGN    8
-#define PMM_MAX_MEMORY      (128ULL * 1024 * 1024 * 1024) // 128GB
 
 typedef enum {
     PMM_FRAME_FREE = 0,
