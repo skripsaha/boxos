@@ -170,6 +170,47 @@ void async_io_mark_failed(uint32_t event_id) {
                  event_id, atomic_load_u32(&g_async_queue.total_failed));
 }
 
+uint32_t async_io_expire_stale(uint64_t timeout_tsc) {
+    if (atomic_load_u8(&g_async_queue.count) == 0) {
+        return 0;
+    }
+
+    spin_lock(&g_async_queue.lock);
+
+    uint32_t expired = 0;
+    uint64_t now = rdtsc();
+    uint8_t current_count = atomic_load_u8(&g_async_queue.count);
+
+    async_io_request_t kept[ASYNC_IO_QUEUE_SIZE];
+    uint8_t kept_count = 0;
+
+    for (uint8_t i = 0; i < current_count; i++) {
+        uint8_t idx = (g_async_queue.head + i) & ASYNC_IO_QUEUE_MASK;
+        async_io_request_t* req = &g_async_queue.queue[idx];
+
+        if (req->submit_time > 0 && (now - req->submit_time) > timeout_tsc) {
+            async_io_mark_failed(req->event_id);
+            debug_printf("[AsyncIO] Expired stale request: event_id=%u pid=%u lba=%u\n",
+                         req->event_id, req->pid, req->lba);
+            expired++;
+        } else {
+            kept[kept_count++] = *req;
+        }
+    }
+
+    if (expired > 0) {
+        g_async_queue.head = 0;
+        for (uint8_t i = 0; i < kept_count; i++) {
+            g_async_queue.queue[i] = kept[i];
+        }
+        g_async_queue.tail = kept_count;
+        atomic_store_u8(&g_async_queue.count, kept_count);
+    }
+
+    spin_unlock(&g_async_queue.lock);
+    return expired;
+}
+
 void async_io_get_stats(uint32_t* submitted, uint32_t* completed,
                         uint32_t* failed, uint32_t* queue_full,
                         uint64_t* avg_latency_cycles) {

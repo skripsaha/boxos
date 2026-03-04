@@ -180,7 +180,15 @@ void exception_handler(interrupt_frame_t* frame) {
         if (!overflow_proc) {
             overflow_proc = process_get_current();
             if (overflow_proc && process_is_idle(overflow_proc)) {
+                // idle process stack overflow is fatal — it cannot be killed
+                kprintf("\n");
+                kprintf("================================================================\n");
+                kprintf("FATAL: Idle process (PID 0) kernel stack overflow\n");
+                kprintf("  Exception #%u  RSP: 0x%lx  RIP: 0x%lx\n",
+                        frame->vector, frame->rsp, frame->rip);
+                kprintf("================================================================\n");
                 overflow_proc = NULL;
+                // fall through to kernel panic
             }
         }
 

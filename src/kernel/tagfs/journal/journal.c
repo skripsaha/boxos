@@ -436,8 +436,21 @@ int journal_begin(uint32_t* txn_id) {
             }
             next_head = 1;
         } else {
-            debug_printf("[Journal] Journal full (unreplayed entries remain)\n");
-            return -1;
+            // journal full with unreplayed entries — force replay to free space
+            debug_printf("[Journal] Journal full, forcing replay of pending entries...\n");
+            if (journal_replay() != 0) {
+                debug_printf("[Journal] ERROR: Forced replay failed, journal still full\n");
+                return -1;
+            }
+            // replay succeeded — compact now
+            g_journal_sb.head = 0;
+            g_journal_sb.tail = 0;
+            if (journal_write_superblock() != 0) {
+                debug_printf("[Journal] ERROR: Failed to write superblock after forced replay\n");
+                return -1;
+            }
+            next_head = 1;
+            debug_printf("[Journal] Forced replay + compaction succeeded\n");
         }
     }
 

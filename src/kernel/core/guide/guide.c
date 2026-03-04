@@ -357,6 +357,7 @@ void guide_run(void)
 
     if ((now - last_timeout_check) > cpu_ms_to_tsc(CONFIG_DMA_TIMEOUT_CHECK_INTERVAL_MS)) {
         ahci_check_timeouts();
+        async_io_expire_stale(cpu_ms_to_tsc(CONFIG_ASYNC_IO_QUEUE_TIMEOUT_MS));
         last_timeout_check = now;
     }
 

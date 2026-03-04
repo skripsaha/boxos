@@ -95,9 +95,8 @@ int kb_readline(char* buffer, size_t size, bool echo) {
             uint32_t length = kb_decode_u32(result.payload, 0);
 
             if (length == 0) {
-                retry_count++;
-                kb_sleep(5000);
-                continue;
+                buffer[0] = '\0';
+                return 0;
             }
 
             if (length >= size) {
