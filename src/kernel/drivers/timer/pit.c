@@ -63,15 +63,46 @@ uint32_t pit_get_frequency(void) {
     return pit_frequency;
 }
 
-// Busy-wait using port 0x80 (~1us per access). Works without interrupts, used for TSC calibration.
+// Read PIT channel 0 current counter value via latch command.
+// Channel 0 is in mode 2 (rate generator): counts from divisor down to 1, then reloads.
+static uint16_t pit_read_count(void) {
+    // Latch channel 0 counter (command byte: channel=0, access=latch, mode/bcd ignored)
+    outb(PIT_COMMAND, 0x00);
+    uint8_t lo = inb(PIT_CHANNEL0);
+    uint8_t hi = inb(PIT_CHANNEL0);
+    return ((uint16_t)hi << 8) | lo;
+}
+
+// Hardware-accurate busy-wait using PIT counter readback.
+// PIT crystal runs at exactly 1,193,182 Hz on all x86 hardware and is faithfully
+// emulated by QEMU/VirtualBox/Bochs. No dependency on CPU frequency.
 void pit_delay_busy(uint32_t milliseconds) {
     if (pit_frequency == 0) {
         debug_printf("[PIT] ERROR: PIT not initialized!\n");
         return;
     }
 
-    uint32_t iterations = milliseconds * 1000;
-    for (uint32_t i = 0; i < iterations; i++) {
-        asm volatile("outb %%al, $0x80" : : "a"(0));
+    // How many PIT ticks we need to wait
+    // PIT_FREQUENCY = 1,193,182, so 1ms = 1193 ticks
+    uint32_t target_ticks = (uint32_t)(((uint64_t)milliseconds * PIT_FREQUENCY) / 1000);
+
+    // Divisor = how many ticks per full counter cycle (reload value)
+    uint32_t divisor = PIT_FREQUENCY / pit_frequency;
+
+    uint32_t elapsed = 0;
+    uint16_t last_count = pit_read_count();
+
+    while (elapsed < target_ticks) {
+        uint16_t current = pit_read_count();
+
+        if (current <= last_count) {
+            // Normal countdown: elapsed ticks = last - current
+            elapsed += (last_count - current);
+        } else {
+            // Counter wrapped past reload point: last -> 0 -> divisor -> current
+            elapsed += (last_count + (divisor - current));
+        }
+
+        last_count = current;
     }
 }
