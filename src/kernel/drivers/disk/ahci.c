@@ -16,8 +16,8 @@
 
 static ahci_controller_t ahci_ctrl;
 
-// 2 seconds at typical CPU frequency
-#define AHCI_TIMEOUT_TSC (2ULL * 1000 * 1000 * 1000)
+// 2 seconds timeout in TSC cycles (calibrated at boot)
+#define AHCI_TIMEOUT_MS 2000
 
 extern EventRingBuffer* kernel_event_ring;
 
@@ -402,7 +402,7 @@ void ahci_check_timeouts(void) {
                 continue;
             }
 
-            if ((now - state->submit_tsc[slot]) < AHCI_TIMEOUT_TSC) {
+            if ((now - state->submit_tsc[slot]) < cpu_ms_to_tsc(AHCI_TIMEOUT_MS)) {
                 continue;
             }
 
@@ -794,8 +794,9 @@ int ahci_init(void) {
     debug_printf("[AHCI] Performing HBA reset...\n");
     ahci_ctrl.hba_mem->ghc |= AHCI_GHC_HR;
 
-    uint32_t timeout = 1000000;
-    while (timeout--) {
+    // AHCI spec: controller must complete reset within 1 second
+    uint64_t reset_deadline = rdtsc() + cpu_ms_to_tsc(1000);
+    while (rdtsc() < reset_deadline) {
         if ((ahci_ctrl.hba_mem->ghc & AHCI_GHC_HR) == 0) {
             break;
         }

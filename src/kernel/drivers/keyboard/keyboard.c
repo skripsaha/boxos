@@ -1,6 +1,8 @@
 #include "keyboard.h"
 #include "klib.h"
 #include "io.h"
+#include "atomics.h"
+#include "cpu_calibrate.h"
 
 #define KEYBOARD_BUFFER_SIZE 256
 
@@ -141,19 +143,21 @@ static const char scancode_to_ascii_shifted[] = {
 };
 
 // Wait for 8042 input buffer to be empty (ready to accept command)
+// Timeout: ~50ms (PS/2 spec allows up to 20ms for command processing)
 static void kb_wait_input_buffer(void)
 {
-    uint32_t timeout = 100000;
-    while ((inb(KEYBOARD_STATUS_PORT) & 0x02) && timeout--) {
+    uint64_t deadline = rdtsc() + cpu_ms_to_tsc(50);
+    while ((inb(KEYBOARD_STATUS_PORT) & 0x02) && rdtsc() < deadline) {
         __asm__ volatile("pause");
     }
 }
 
 // Wait for 8042 output buffer to have data (ready to read)
+// Timeout: ~50ms
 static bool kb_wait_output_buffer(void)
 {
-    uint32_t timeout = 100000;
-    while (!(inb(KEYBOARD_STATUS_PORT) & 0x01) && timeout--) {
+    uint64_t deadline = rdtsc() + cpu_ms_to_tsc(50);
+    while (!(inb(KEYBOARD_STATUS_PORT) & 0x01) && rdtsc() < deadline) {
         __asm__ volatile("pause");
     }
     return (inb(KEYBOARD_STATUS_PORT) & 0x01) != 0;
@@ -219,9 +223,12 @@ void keyboard_init(void)
     kb_wait_input_buffer();
     outb(KEYBOARD_DATA_PORT, 0xFF);     // Reset command
 
-    // Wait for ACK (0xFA) and self-test result (0xAA) to arrive via IRQ1
-    for (volatile int i = 0; i < 100000; i++) {
-        __asm__ volatile("pause");
+    // Wait ~50ms for ACK (0xFA) and self-test result (0xAA) to arrive via IRQ1
+    {
+        uint64_t deadline = rdtsc() + cpu_ms_to_tsc(50);
+        while (rdtsc() < deadline) {
+            __asm__ volatile("pause");
+        }
     }
 
     debug_printf("[KEYBOARD] 8042 initialization complete\n");
