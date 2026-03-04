@@ -284,18 +284,18 @@ static void vmm_free_user_space_tables(vmm_context_t* ctx) {
     debug_printf("[VMM] Freeing user space tables for context CR3=0x%lx\n", ctx->pml4_phys);
 
     // bitmap to detect duplicate PT entries pointing to the same physical page
-    // covers 1GB of physical pages from 0x100000 (262144 pages * 4KB = 1GB, bitmap = 32KB)
-    #define MAX_USER_PAGES 262144
-    #define BITMAP_SIZE (MAX_USER_PAGES / 8)
-    #define USER_PAGES_PHYS_BASE 0x100000
-    #define USER_PAGES_PHYS_END  (USER_PAGES_PHYS_BASE + (uint64_t)MAX_USER_PAGES * VMM_PAGE_SIZE)
+    // sized dynamically from pmm_get_mem_end() so all physical RAM is covered
+    uint64_t dedup_mem_end = pmm_get_mem_end();
+    size_t dedup_total_pages = dedup_mem_end / VMM_PAGE_SIZE;
+    size_t dedup_bitmap_size = (dedup_total_pages + 7) / 8;
 
-    uint8_t* freed_bitmap = kmalloc(BITMAP_SIZE);
-    if (!freed_bitmap) {
-        kprintf("[VMM] ERROR: kmalloc(%d) failed for freed page bitmap, user space tables NOT cleaned up\n", BITMAP_SIZE);
-        return;
+    uint8_t* freed_bitmap = kmalloc(dedup_bitmap_size);
+    bool has_dedup = (freed_bitmap != NULL);
+    if (!has_dedup) {
+        debug_printf("[VMM] WARNING: kmalloc(%zu) failed for dedup bitmap, freeing without duplicate detection\n", dedup_bitmap_size);
+    } else {
+        memset(freed_bitmap, 0, dedup_bitmap_size);
     }
-    memset(freed_bitmap, 0, BITMAP_SIZE);
 
     for (int p4 = 0; p4 < 256; p4++) {
         pte_t pml4_entry = ctx->pml4->entries[p4];
@@ -369,24 +369,24 @@ static void vmm_free_user_space_tables(vmm_context_t* ctx) {
                         continue;
                     }
 
-                    if (!is_identity_mapped && phys >= USER_PAGES_PHYS_BASE) {
-                        size_t page_idx = (phys - USER_PAGES_PHYS_BASE) / VMM_PAGE_SIZE;
+                    if (!is_identity_mapped) {
+                        size_t page_idx = phys / VMM_PAGE_SIZE;
+                        bool should_free = true;
 
-                        if (page_idx < MAX_USER_PAGES) {
+                        if (has_dedup && page_idx < dedup_total_pages) {
                             size_t byte_idx = page_idx / 8;
                             size_t bit_idx = page_idx % 8;
 
                             if (freed_bitmap[byte_idx] & (1 << bit_idx)) {
                                 debug_printf("[VMM]   SKIP: Page 0x%lx already freed (duplicate PT entry at virt=0x%lx)\n", phys, virt);
+                                should_free = false;
                             } else {
                                 freed_bitmap[byte_idx] |= (1 << bit_idx);
-                                debug_printf("[VMM]   FREE: Page 0x%lx (virt=0x%lx, PT entry %d)\n", phys, virt, p1);
-                                pmm_free((void*)phys, 1);
-                                freed_pages++;
                             }
-                        } else {
-                            // page above bitmap range — free without dedup (better than leaking)
-                            debug_printf("[VMM]   FREE (no dedup): Page 0x%lx (virt=0x%lx)\n", phys, virt);
+                        }
+
+                        if (should_free) {
+                            debug_printf("[VMM]   FREE: Page 0x%lx (virt=0x%lx, PT entry %d)\n", phys, virt, p1);
                             pmm_free((void*)phys, 1);
                             freed_pages++;
                         }
@@ -415,13 +415,10 @@ static void vmm_free_user_space_tables(vmm_context_t* ctx) {
         ctx->pml4->entries[p4] = 0;
     }
 
-    kfree(freed_bitmap);
+    if (freed_bitmap) {
+        kfree(freed_bitmap);
+    }
     asm volatile("mov %%cr3, %%rax; mov %%rax, %%cr3" ::: "rax", "memory");
-
-    #undef MAX_USER_PAGES
-    #undef BITMAP_SIZE
-    #undef USER_PAGES_PHYS_BASE
-    #undef USER_PAGES_PHYS_END
 
     debug_printf("[VMM] User space tables freed\n");
 }
