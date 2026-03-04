@@ -14,7 +14,7 @@ else
 endif
 
 # Compiler flags
-CFLAGS = -nostdlib -ffreestanding -fno-builtin -mno-red-zone -fno-stack-protector \
+CFLAGS = -nostdlib -ffreestanding -fno-builtin -mno-red-zone -fstack-protector-strong \
          -fno-pic -static -Wall -Wextra -g \
          -I../boxlib/include \
          -I../../include \

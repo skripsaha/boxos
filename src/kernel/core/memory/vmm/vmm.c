@@ -1703,7 +1703,7 @@ int vmm_handle_page_fault(uintptr_t fault_addr, uint64_t error_code) {
 
         if (fault_addr >= guard_start && fault_addr < guard_end) {
             debug_printf("[VMM] ========================================\n");
-            debug_printf("[VMM] FATAL: Kernel stack overflow detected!\n");
+            debug_printf("[VMM] WARNING: Kernel stack overflow detected (page fault path)!\n");
             debug_printf("[VMM] ========================================\n");
             debug_printf("[VMM]   Process PID: %u\n", current->pid);
             debug_printf("[VMM]   Fault address: 0x%016lx\n", fault_addr);
@@ -1713,7 +1713,7 @@ int vmm_handle_page_fault(uintptr_t fault_addr, uint64_t error_code) {
                          (uintptr_t)current->kernel_stack_top);
             debug_printf("[VMM]   Error code: 0x%llx\n", error_code);
             debug_printf("[VMM] ========================================\n");
-            debug_printf("[VMM] System will halt to prevent corruption\n");
+            debug_printf("[VMM] Primary recovery via double fault handler (IST)\n");
             return -1;
         }
     }

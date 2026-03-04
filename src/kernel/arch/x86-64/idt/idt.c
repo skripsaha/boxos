@@ -14,6 +14,7 @@
 #include "context_switch.h"
 #include "keyboard.h"
 #include "ata_dma.h"
+#include "idle.h"
 
 static idt_entry_t idt[IDT_ENTRIES];
 static idt_descriptor_t idt_desc;
@@ -52,11 +53,17 @@ void idt_init(void) {
 
         // Critical exceptions use IST
         switch(i) {
+            case 1:   // Debug
+                ist = IST_DEBUG;
+                break;
             case 2:   // NMI
                 ist = IST_NMI;
                 break;
             case 8:   // Double Fault
                 ist = IST_DOUBLE_FAULT;
+                break;
+            case 12:  // Stack Fault
+                ist = IST_STACK_FAULT;
                 break;
             case 18:  // Machine Check
                 ist = IST_MACHINE_CHECK;
@@ -106,6 +113,21 @@ void irq_unregister_handler(uint8_t irq) {
     debug_printf("[IDT] Unregistered callback for IRQ %u\n", irq);
 }
 
+static process_t* find_process_by_kernel_stack_overflow(uint64_t rsp) {
+    process_t* proc = process_get_first();
+    while (proc) {
+        if (proc->magic == PROCESS_MAGIC && proc->kernel_stack_guard_base) {
+            uintptr_t guard_start = (uintptr_t)proc->kernel_stack_guard_base;
+            uintptr_t guard_end = guard_start + (CONFIG_KERNEL_STACK_GUARD_PAGES * CONFIG_PAGE_SIZE);
+            if (rsp >= guard_start && rsp < guard_end) {
+                return proc;
+            }
+        }
+        proc = proc->next;
+    }
+    return NULL;
+}
+
 void exception_handler(interrupt_frame_t* frame) {
     exception_count++;
 
@@ -147,6 +169,44 @@ void exception_handler(interrupt_frame_t* frame) {
             process_set_state(proc, PROC_CRASHED);
 
             // Let the timer IRQ do cleanup; force a reschedule via the frame
+            scheduler_yield_from_interrupt(frame);
+            return;
+        }
+    }
+
+    // Kernel stack overflow recovery via double fault / stack fault
+    if (frame->vector == 8 || frame->vector == 12) {
+        process_t* overflow_proc = find_process_by_kernel_stack_overflow(frame->rsp);
+        if (!overflow_proc) {
+            overflow_proc = process_get_current();
+            if (overflow_proc && process_is_idle(overflow_proc)) {
+                overflow_proc = NULL;
+            }
+        }
+
+        if (overflow_proc) {
+            kprintf("\n");
+            kprintf("================================================================\n");
+            kprintf("KERNEL STACK OVERFLOW: Exception #%u recovered\n", frame->vector);
+            kprintf("================================================================\n");
+            kprintf("  PID: %u  Tags: %s\n", overflow_proc->pid, overflow_proc->tags);
+            kprintf("  RSP: 0x%lx  RIP: 0x%lx\n", frame->rsp, frame->rip);
+            if (overflow_proc->kernel_stack_guard_base) {
+                kprintf("  Guard: 0x%lx  Stack: 0x%lx-0x%lx\n",
+                        (uintptr_t)overflow_proc->kernel_stack_guard_base,
+                        (uintptr_t)overflow_proc->kernel_stack,
+                        (uintptr_t)overflow_proc->kernel_stack_top);
+            }
+            kprintf("  Killing PID %u, system continues.\n", overflow_proc->pid);
+            kprintf("================================================================\n");
+
+            process_set_state(overflow_proc, PROC_CRASHED);
+
+            scheduler_state_t* sched = scheduler_get_state();
+            if (sched->scheduler_lock.locked) {
+                spin_unlock(&sched->scheduler_lock);
+            }
+
             scheduler_yield_from_interrupt(frame);
             return;
         }

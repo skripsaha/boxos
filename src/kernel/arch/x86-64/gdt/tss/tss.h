@@ -7,8 +7,9 @@
 #define IST_NMI            2
 #define IST_MACHINE_CHECK  3
 #define IST_DEBUG          4
+#define IST_STACK_FAULT    5
 
-#define IST_STACK_SIZE     4096  // 4KB per IST stack
+#define IST_STACK_SIZE     16384  // 16KB per IST stack
 
 typedef struct {
     uint32_t reserved1;
