@@ -3,6 +3,9 @@
 #include "io.h"
 #include "serial.h"
 #include "pmm.h"
+#include "atomics.h"
+#include "cpu_calibrate.h"
+#include "pit.h"
 
 #define HEAP_CANARY_MAGIC 0xDEADBEEFCAFEBABEULL
 #define HEAP_GUARD_ENABLED 1  // Set to 0 to disable
@@ -1947,13 +1950,14 @@ long long atoll(const char *str)
 
 void delay(uint32_t milliseconds)
 {
-    // Improved delay implementation using CPU cycles
-    // Note: This is still approximate and depends on CPU speed
-    // For accurate timing, use PIT or HPET timer
-    for (volatile uint32_t i = 0; i < milliseconds * 100000; i++)
-    {
-        // Add pause instruction to be more CPU-friendly
-        asm volatile("pause");
+    if (cpu_tsc_is_calibrated()) {
+        uint64_t deadline = rdtsc() + cpu_ms_to_tsc(milliseconds);
+        while (rdtsc() < deadline) {
+            asm volatile("pause");
+        }
+    } else {
+        // Pre-calibration fallback: use PIT busy-wait (port 0x80, ~1us per I/O)
+        pit_delay_busy(milliseconds);
     }
 }
 
