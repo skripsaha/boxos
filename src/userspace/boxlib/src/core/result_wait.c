@@ -3,8 +3,6 @@
 #include "box/system.h"
 #include "../arch/x86_64/cpu_wait.h"
 
-#define TSC_FREQ_MHZ  1000
-
 static inline uint64_t rdtsc(void) {
     uint32_t lo, hi;
     __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
@@ -35,7 +33,7 @@ static bool result_wait_umwait(result_entry_t* out_entry, uint32_t timeout_ms) {
                 deadline_tsc = 0xFFFFFFFFFFFFFFFFULL;
             } else {
                 uint64_t tsc_now = rdtsc();
-                uint64_t tsc_delta = (uint64_t)timeout_ms * TSC_FREQ_MHZ * 1000;
+                uint64_t tsc_delta = cpu_ms_to_tsc(timeout_ms);
                 deadline_tsc = tsc_now + tsc_delta;
             }
 
@@ -59,7 +57,7 @@ static bool result_wait_yield(result_entry_t* out_entry, uint32_t timeout_ms) {
     // (not the assumed 10ms), making iteration-based timeouts 100-1000x too short.
     uint64_t deadline = 0;
     if (timeout_ms > 0) {
-        deadline = rdtsc() + (uint64_t)timeout_ms * TSC_FREQ_MHZ * 1000;
+        deadline = rdtsc() + cpu_ms_to_tsc(timeout_ms);
     }
 
     while (1) {

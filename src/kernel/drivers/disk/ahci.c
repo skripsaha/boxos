@@ -52,8 +52,9 @@ static int ahci_port_stop(ahci_port_t* port) {
 
     regs->cmd &= ~AHCI_PCMD_ST;
 
-    uint32_t timeout = 5000000;
-    while (timeout--) {
+    // AHCI spec: 500ms for CR to clear after ST cleared
+    uint64_t deadline = rdtsc() + cpu_ms_to_tsc(500);
+    while (rdtsc() < deadline) {
         if ((regs->cmd & AHCI_PCMD_CR) == 0) {
             break;
         }
@@ -67,8 +68,9 @@ static int ahci_port_stop(ahci_port_t* port) {
 
     regs->cmd &= ~AHCI_PCMD_FRE;
 
-    timeout = 5000000;
-    while (timeout--) {
+    // AHCI spec: 500ms for FR to clear after FRE cleared
+    deadline = rdtsc() + cpu_ms_to_tsc(500);
+    while (rdtsc() < deadline) {
         if ((regs->cmd & AHCI_PCMD_FR) == 0) {
             break;
         }
@@ -90,8 +92,9 @@ static int ahci_port_start(ahci_port_t* port) {
 
     ahci_port_regs_t* regs = port->regs;
 
-    uint32_t timeout = 500000;
-    while (timeout--) {
+    // Wait up to 500ms for CR to clear before starting
+    uint64_t start_deadline = rdtsc() + cpu_ms_to_tsc(500);
+    while (rdtsc() < start_deadline) {
         if ((regs->cmd & AHCI_PCMD_CR) == 0) {
             break;
         }
@@ -907,8 +910,9 @@ void ahci_test_read(void) {
 
     port->regs->ci = 1 << slot;
 
-    uint32_t timeout = 5000000;
-    while (timeout--) {
+    // Wait up to 5 seconds for IDENTIFY command to complete
+    uint64_t id_deadline = rdtsc() + cpu_ms_to_tsc(5000);
+    while (rdtsc() < id_deadline) {
         if ((port->regs->ci & (1 << slot)) == 0) {
             break;
         }
