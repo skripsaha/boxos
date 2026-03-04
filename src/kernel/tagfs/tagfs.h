@@ -58,21 +58,44 @@ STATIC_ASSERT(sizeof(TagFSSuperblock) == 512, "TagFSSuperblock must be 512 bytes
 
 typedef struct __packed {
     uint32_t magic;                 // Offset 0: TAGFS_METADATA_MAGIC
-    uint32_t file_id;               // Offset 4: (shifted from 0)
-    uint32_t flags;                 // Offset 8: (shifted from 4)
-    uint64_t size;                  // Offset 12: (shifted from 8)
-    uint32_t start_block;           // Offset 20: (shifted from 16)
-    uint32_t block_count;           // Offset 24: (shifted from 20)
-    uint64_t created_time;          // Offset 28: (shifted from 24)
-    uint64_t modified_time;         // Offset 36: (shifted from 32)
-    uint8_t  tag_count;             // Offset 44: (shifted from 40)
-    uint8_t  reserved1[3];          // Offset 45: (shifted from 41)
-    char filename[32];              // Offset 48: (shifted from 44)
-    TagFSTag tags[16];              // Offset 80: (shifted from 76)
-    uint8_t  reserved2[48];         // Offset 464: (adjusted size - was 52)
+    uint32_t file_id;               // Offset 4
+    uint32_t flags;                 // Offset 8
+    uint64_t size;                  // Offset 12
+    uint32_t start_block;           // Offset 20
+    uint32_t block_count;           // Offset 24
+    uint64_t created_time;          // Offset 28
+    uint64_t modified_time;         // Offset 36
+    uint8_t  tag_count;             // Offset 44: total tags (inline only for v2)
+    uint8_t  ext_tag_count;         // Offset 45: tags in extended block (0 for v2)
+    uint8_t  reserved1[2];          // Offset 46
+    char filename[32];              // Offset 48
+    TagFSTag tags[16];              // Offset 80: inline tags (v2 compatible)
+    uint32_t extended_block;        // Offset 464: block# for overflow tags (0=none, v2 compat)
+    uint8_t  reserved2[44];         // Offset 468: padding
 } TagFSMetadata;
 
 STATIC_ASSERT(sizeof(TagFSMetadata) == 512, "TagFSMetadata must be 512 bytes");
+
+// Extended metadata block — lives in data region, 4096 bytes (1 block)
+// Stores overflow tags with variable-length keys and values.
+// Backward compatible: v2 files have extended_block=0 (no overflow).
+#define TAGFS_EXT_MAGIC     0x54455854  // "TEXT"
+#define TAGFS_EXT_DATA_SIZE 4080
+
+typedef struct __packed {
+    uint32_t magic;             // TAGFS_EXT_MAGIC
+    uint32_t file_id;           // Cross-reference
+    uint16_t tag_count;         // Tags in this block
+    uint16_t used_bytes;        // Bytes used in data[]
+    uint32_t next_block;        // Chain to next extended block (0=end)
+    uint8_t  data[TAGFS_EXT_DATA_SIZE];  // Variable-length tag entries
+} TagFSExtendedMeta;
+
+STATIC_ASSERT(sizeof(TagFSExtendedMeta) == 4096, "TagFSExtendedMeta must be 4096 bytes");
+
+// Variable-length tag entry format in extended block data[]:
+// [1 byte type] [1 byte key_len] [2 bytes value_len] [key_len bytes key] [value_len bytes value]
+// Key: up to 255 chars, Value: up to 65535 chars
 
 typedef struct TagIndexEntry {
     char tag_string[64];                // "key:value"
@@ -95,8 +118,9 @@ typedef struct {
 
 typedef struct {
     uint32_t pid;
-    char active_tags[16][64];
+    char** active_tags;                     // Dynamically allocated array of tag strings
     uint32_t tag_count;
+    uint32_t tag_capacity;                  // Current capacity (grows x2)
 } TagFSContext;
 
 // Free extent node — sorted linked list by start address
@@ -114,7 +138,9 @@ typedef struct {
     uint32_t extent_count;    // Number of free extents (for diagnostics)
 } BlockBitmap;
 
-#define TAGFS_BITMAP_SIZE 128  // 1024 bits / 8 = 128 bytes
+// TAGFS_BITMAP_SIZE is now computed dynamically from max_files:
+// bitmap_size = (max_files + 7) / 8
+// The old fixed value of 128 (1024 bits) is no longer used.
 
 // Compact per-file summary — always in RAM for fast iteration
 typedef struct {
@@ -129,28 +155,33 @@ struct MetadataLRU;
 
 typedef struct TagBitmapEntry {
     char tag_string[64];
-    uint8_t bitmap[TAGFS_BITMAP_SIZE];
+    uint8_t* bitmap;                        // Dynamically allocated: (max_files + 7) / 8 bytes
+    uint32_t bitmap_size;                   // Size in bytes
     uint32_t file_count;
     struct TagBitmapEntry* next;
 } TagBitmapEntry;
 
+typedef struct {
+    char** tag_strings;
+    uint32_t count;
+} TagFileTagList;
+
 typedef struct TagBitmapIndex {
     TagBitmapEntry* buckets[256];
     uint32_t total_tags;
+    uint32_t max_files;                     // Dynamic limit from superblock
 
-    // Reverse index: file_id → tags
-    struct {
-        char** tag_strings;
-        uint32_t count;
-    } file_tags[TAGFS_MAX_FILES];
+    // Reverse index: file_id → tags (dynamically allocated array)
+    TagFileTagList* file_tags;
 } TagBitmapIndex;
 
 typedef struct {
     TagFSSuperblock superblock;
     TagBitmapIndex* tag_index;
-    struct MetadataLRU* mcache;            // LRU cache for full metadata (128 entries)
+    struct MetadataLRU* mcache;            // LRU cache for full metadata
     TagFSFileSummary* file_summaries;      // Compact summary for all files (16 bytes each)
     BlockBitmap block_bitmap;
+    uint32_t max_files;                    // Dynamic limit from superblock
     bool initialized;
     spinlock_t lock;
 } TagFSState;
@@ -186,6 +217,10 @@ int tagfs_add_tag(uint32_t file_id, const char* key, const char* value, uint8_t 
 int tagfs_remove_tag(uint32_t file_id, const char* key);
 bool tagfs_has_tag(uint32_t file_id, const char* key, const char* value);
 int tagfs_get_tags(uint32_t file_id, TagFSTag* tags, uint32_t max_tags);
+
+// Extended metadata: overflow tags beyond inline 16
+int tagfs_add_tag_extended(uint32_t file_id, const char* key, const char* value, uint8_t type);
+int tagfs_read_extended_tags(uint32_t file_id, TagFSExtendedMeta* ext);
 
 TagFSMetadata* tagfs_get_metadata(uint32_t file_id);
 TagFSState* tagfs_get_state(void);

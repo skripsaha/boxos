@@ -154,7 +154,7 @@ static void free_list_remove_range(uint32_t start_block, uint32_t count) {
 
 // Update compact summary from metadata
 static void summary_update(uint32_t file_id, const TagFSMetadata* meta) {
-    if (!tfs.file_summaries || file_id == 0 || file_id > TAGFS_MAX_FILES) return;
+    if (!tfs.file_summaries || file_id == 0 || file_id > tfs.max_files) return;
     uint32_t idx = file_id - 1;
     tfs.file_summaries[idx].file_id = meta->file_id;
     tfs.file_summaries[idx].flags = meta->flags;
@@ -266,7 +266,7 @@ int tagfs_write_superblock(const TagFSSuperblock* sb) {
 }
 
 int tagfs_read_metadata(uint32_t file_id, TagFSMetadata* metadata) {
-    if (!metadata || file_id == 0 || file_id > TAGFS_MAX_FILES) {
+    if (!metadata || file_id == 0 || file_id > tfs.max_files) {
         return -1;
     }
 
@@ -304,7 +304,7 @@ int tagfs_read_metadata(uint32_t file_id, TagFSMetadata* metadata) {
 }
 
 static int tagfs_write_metadata_raw(uint32_t file_id, const TagFSMetadata* metadata) {
-    if (!metadata || file_id == 0 || file_id > TAGFS_MAX_FILES) {
+    if (!metadata || file_id == 0 || file_id > tfs.max_files) {
         return -1;
     }
 
@@ -354,7 +354,7 @@ int tagfs_write_metadata(uint32_t file_id, const TagFSMetadata* metadata) {
 
 // LRU-cached metadata access: O(1) hit, disk load on miss
 TagFSMetadata* tagfs_get_metadata(uint32_t file_id) {
-    if (!tfs.initialized || file_id == 0 || file_id > TAGFS_MAX_FILES) {
+    if (!tfs.initialized || file_id == 0 || file_id > tfs.max_files) {
         return NULL;
     }
     return mcache_get(tfs.mcache, file_id);
@@ -439,18 +439,25 @@ int tagfs_init(void) {
         return -1;
     }
 
-    debug_printf("[TagFS] Superblock loaded: version=%u, total_files=%u, free_blocks=%u\n",
+    // Set dynamic max_files from superblock (no more hardcoded limit)
+    tfs.max_files = tfs.superblock.max_files;
+    if (tfs.max_files == 0) {
+        tfs.max_files = TAGFS_MAX_FILES;  // Fallback to default
+    }
+
+    debug_printf("[TagFS] Superblock loaded: version=%u, total_files=%u, max_files=%u, free_blocks=%u\n",
             tfs.superblock.version,
             tfs.superblock.total_files,
+            tfs.max_files,
             tfs.superblock.free_blocks);
 
     // Allocate compact file summaries (16 bytes per file vs 512 bytes for full metadata)
-    tfs.file_summaries = kmalloc(sizeof(TagFSFileSummary) * TAGFS_MAX_FILES);
+    tfs.file_summaries = kmalloc(sizeof(TagFSFileSummary) * tfs.max_files);
     if (!tfs.file_summaries) {
         debug_printf("[TagFS] Failed to allocate file summaries\n");
         return -1;
     }
-    memset(tfs.file_summaries, 0, sizeof(TagFSFileSummary) * TAGFS_MAX_FILES);
+    memset(tfs.file_summaries, 0, sizeof(TagFSFileSummary) * tfs.max_files);
 
     // Initialize LRU metadata cache (128 entries, ~67 KB)
     tfs.mcache = kmalloc(sizeof(MetadataLRU));
@@ -467,7 +474,7 @@ int tagfs_init(void) {
     }
 
     // Create tag index before scanning files
-    tfs.tag_index = tag_bitmap_create();
+    tfs.tag_index = tag_bitmap_create(tfs.max_files);
     if (!tfs.tag_index) {
         debug_printf("[TagFS] ERROR: Failed to create tag index\n");
         mcache_destroy(tfs.mcache);
@@ -477,7 +484,7 @@ int tagfs_init(void) {
     }
 
     // Scan metadata from disk: build summaries + tag index without keeping all in RAM
-    // Uses a single temp buffer instead of a TAGFS_MAX_FILES-sized array
+    // Uses a single temp buffer instead of a max_files-sized array
     TagFSMetadata temp_meta;
 
     for (uint32_t i = 0; i < tfs.superblock.total_files; i++) {
@@ -531,7 +538,7 @@ int tagfs_init(void) {
 
     debug_printf("[TagFS] File summaries built: %u files scanned (16 bytes/file = %u KB)\n",
             tfs.superblock.total_files,
-            (uint32_t)(sizeof(TagFSFileSummary) * TAGFS_MAX_FILES / 1024));
+            (uint32_t)(sizeof(TagFSFileSummary) * tfs.max_files / 1024));
 
     // Build block bitmap from compact summaries (no full metadata needed)
     uint32_t total_blocks = tfs.superblock.total_blocks;
@@ -570,8 +577,8 @@ int tagfs_init(void) {
             tfs.tag_index->total_tags);
 
     debug_printf("[TagFS] LRU metadata cache: %u slots (%u KB)\n",
-            MCACHE_CAPACITY,
-            (uint32_t)(sizeof(MCacheNode) * MCACHE_CAPACITY / 1024));
+            tfs.mcache->capacity,
+            (uint32_t)(sizeof(MCacheNode) * tfs.mcache->capacity / 1024));
 
     tfs.initialized = true;
     debug_printf("[TagFS] Initialization complete\n");
@@ -745,7 +752,7 @@ int tagfs_query_files(const char* query_tags[], uint32_t tag_count,
 }
 
 TagFSFileHandle* tagfs_open(uint32_t file_id, uint32_t flags) {
-    if (!tfs.initialized || file_id == 0 || file_id > TAGFS_MAX_FILES) {
+    if (!tfs.initialized || file_id == 0 || file_id > tfs.max_files) {
         return NULL;
     }
 
@@ -966,7 +973,7 @@ int tagfs_create_file(const char* filename, const char* tags[], uint32_t tag_cou
         return -1;
     }
 
-    if (tfs.superblock.total_files >= TAGFS_MAX_FILES) {
+    if (tfs.superblock.total_files >= tfs.max_files) {
         return -1;
     }
 
@@ -1057,7 +1064,7 @@ int tagfs_create_file(const char* filename, const char* tags[], uint32_t tag_cou
 }
 
 int tagfs_delete_file(uint32_t file_id) {
-    if (!tfs.initialized || file_id == 0 || file_id > TAGFS_MAX_FILES) {
+    if (!tfs.initialized || file_id == 0 || file_id > tfs.max_files) {
         return -1;
     }
 
@@ -1101,7 +1108,7 @@ int tagfs_delete_file(uint32_t file_id) {
 }
 
 int tagfs_add_tag(uint32_t file_id, const char* key, const char* value, uint8_t type) {
-    if (!tfs.initialized || file_id == 0 || file_id > TAGFS_MAX_FILES || !key || !value) {
+    if (!tfs.initialized || file_id == 0 || file_id > tfs.max_files || !key || !value) {
         return -1;
     }
 
@@ -1120,7 +1127,8 @@ int tagfs_add_tag(uint32_t file_id, const char* key, const char* value, uint8_t 
     }
 
     if (meta->tag_count >= TAGFS_MAX_TAGS_PER_FILE) {
-        return -1;
+        // Inline slots full — overflow to extended block
+        return tagfs_add_tag_extended(file_id, key, value, type);
     }
 
     memset(&meta->tags[meta->tag_count], 0, sizeof(TagFSTag));
@@ -1151,7 +1159,7 @@ int tagfs_add_tag(uint32_t file_id, const char* key, const char* value, uint8_t 
 }
 
 int tagfs_remove_tag(uint32_t file_id, const char* key) {
-    if (!tfs.initialized || file_id == 0 || file_id > TAGFS_MAX_FILES || !key) {
+    if (!tfs.initialized || file_id == 0 || file_id > tfs.max_files || !key) {
         return -1;
     }
 
@@ -1194,7 +1202,7 @@ int tagfs_remove_tag(uint32_t file_id, const char* key) {
 }
 
 bool tagfs_has_tag(uint32_t file_id, const char* key, const char* value) {
-    if (!tfs.initialized || file_id == 0 || file_id > TAGFS_MAX_FILES || !key) {
+    if (!tfs.initialized || file_id == 0 || file_id > tfs.max_files || !key) {
         return false;
     }
 
@@ -1218,7 +1226,7 @@ bool tagfs_has_tag(uint32_t file_id, const char* key, const char* value) {
 }
 
 int tagfs_get_tags(uint32_t file_id, TagFSTag* tags, uint32_t max_tags) {
-    if (!tfs.initialized || file_id == 0 || file_id > TAGFS_MAX_FILES || !tags) {
+    if (!tfs.initialized || file_id == 0 || file_id > tfs.max_files || !tags) {
         return 0;
     }
 
@@ -1239,7 +1247,7 @@ int tagfs_rename_file(uint32_t file_id, const char* new_filename) {
         return -1;
     }
 
-    if (file_id == 0 || file_id > TAGFS_MAX_FILES) {
+    if (file_id == 0 || file_id > tfs.max_files) {
         debug_printf("[TagFS] ERROR: Invalid file_id %u\n", file_id);
         return -1;
     }
@@ -1276,7 +1284,7 @@ int tagfs_rename_file(uint32_t file_id, const char* new_filename) {
 }
 
 int tagfs_write_metadata_journaled(uint32_t file_id, const TagFSMetadata* metadata) {
-    if (!metadata || file_id == 0 || file_id > TAGFS_MAX_FILES) {
+    if (!metadata || file_id == 0 || file_id > tfs.max_files) {
         return -1;
     }
 
@@ -1432,7 +1440,7 @@ uint32_t tagfs_get_fragmentation_score(void) {
     uint32_t total_gaps = 0;
     uint32_t total_files = 0;
 
-    for (uint32_t i = 0; i < TAGFS_MAX_FILES; i++) {
+    for (uint32_t i = 0; i < tfs.max_files; i++) {
         TagFSFileSummary* sum = &tfs.file_summaries[i];
         if (!(sum->flags & TAGFS_FILE_ACTIVE) || sum->block_count == 0) {
             continue;
@@ -1477,7 +1485,7 @@ int tagfs_list_all_files(uint32_t* file_ids, uint32_t max_files) {
 
     uint32_t count = 0;
 
-    for (uint32_t i = 0; i < TAGFS_MAX_FILES && count < max_files; i++) {
+    for (uint32_t i = 0; i < tfs.max_files && count < max_files; i++) {
         TagFSFileSummary* sum = &tfs.file_summaries[i];
 
         if (sum->file_id != 0 &&
@@ -1502,4 +1510,170 @@ void tagfs_sync(void) {
     }
 
     debug_printf("[TagFS] Sync complete\n");
+}
+
+// --- Extended metadata (overflow tags) ---
+
+// Read extended metadata block from data region
+int tagfs_read_extended_tags(uint32_t file_id, TagFSExtendedMeta* ext) {
+    if (!ext || !tfs.initialized) {
+        return -1;
+    }
+
+    TagFSMetadata* meta = mcache_get(tfs.mcache, file_id);
+    if (!meta || meta->extended_block == 0) {
+        return -1;
+    }
+
+    uint32_t sector = tfs.superblock.data_start_sector + (meta->extended_block * (TAGFS_BLOCK_SIZE / ATA_SECTOR_SIZE));
+    uint32_t sectors_per_block = TAGFS_BLOCK_SIZE / ATA_SECTOR_SIZE;
+
+    uint8_t* buf = kmalloc(TAGFS_BLOCK_SIZE);
+    if (!buf) {
+        return -1;
+    }
+
+    if (ata_read_sectors(1, sector, sectors_per_block, buf) != 0) {
+        kfree(buf);
+        return -1;
+    }
+
+    memcpy(ext, buf, sizeof(TagFSExtendedMeta));
+    kfree(buf);
+
+    if (ext->magic != TAGFS_EXT_MAGIC || ext->file_id != file_id) {
+        debug_printf("[TagFS] Extended block corrupt for file %u (magic=0x%08x)\n",
+                     file_id, ext->magic);
+        return -1;
+    }
+
+    return 0;
+}
+
+// Write extended metadata block to data region
+static int tagfs_write_extended_block(uint32_t block_num, const TagFSExtendedMeta* ext) {
+    uint32_t sector = tfs.superblock.data_start_sector + (block_num * (TAGFS_BLOCK_SIZE / ATA_SECTOR_SIZE));
+    uint32_t sectors_per_block = TAGFS_BLOCK_SIZE / ATA_SECTOR_SIZE;
+
+    uint8_t* buf = kmalloc(TAGFS_BLOCK_SIZE);
+    if (!buf) {
+        return -1;
+    }
+
+    memcpy(buf, ext, sizeof(TagFSExtendedMeta));
+
+    int result = ata_write_sectors(1, sector, sectors_per_block, buf);
+    kfree(buf);
+    return result;
+}
+
+// Add a tag to the extended block (overflow from inline tags)
+int tagfs_add_tag_extended(uint32_t file_id, const char* key, const char* value, uint8_t type) {
+    if (!tfs.initialized || !key || !value) {
+        return -1;
+    }
+
+    TagFSMetadata* meta = mcache_get(tfs.mcache, file_id);
+    if (!meta || !(meta->flags & TAGFS_FILE_ACTIVE)) {
+        return -1;
+    }
+
+    size_t key_len = strlen(key);
+    size_t value_len = strlen(value);
+    if (key_len > 255) key_len = 255;
+    if (value_len > 65535) value_len = 65535;
+
+    // Entry size: 1 (type) + 1 (key_len) + 2 (value_len) + key_len + value_len
+    uint32_t entry_size = 4 + key_len + value_len;
+
+    TagFSExtendedMeta* ext = kmalloc(sizeof(TagFSExtendedMeta));
+    if (!ext) {
+        return -1;
+    }
+
+    uint32_t block_num = meta->extended_block;
+
+    if (block_num == 0) {
+        // Allocate new extended block
+        uint32_t new_block;
+        if (tagfs_alloc_blocks(1, &new_block) != 0) {
+            kfree(ext);
+            debug_printf("[TagFS] Failed to allocate extended block for file %u\n", file_id);
+            return -1;
+        }
+
+        memset(ext, 0, sizeof(TagFSExtendedMeta));
+        ext->magic = TAGFS_EXT_MAGIC;
+        ext->file_id = file_id;
+        ext->tag_count = 0;
+        ext->used_bytes = 0;
+        ext->next_block = 0;
+        block_num = new_block;
+
+        // Update inode to point to extended block
+        meta->extended_block = new_block;
+    } else {
+        // Read existing extended block
+        if (tagfs_read_extended_tags(file_id, ext) != 0) {
+            kfree(ext);
+            return -1;
+        }
+    }
+
+    // Check if there's room in current block
+    if (ext->used_bytes + entry_size > TAGFS_EXT_DATA_SIZE) {
+        // TODO: chain to next extended block
+        debug_printf("[TagFS] Extended block full for file %u (need chaining)\n", file_id);
+        kfree(ext);
+        return -1;
+    }
+
+    // Check for duplicate in extended block
+    uint32_t offset = 0;
+    for (uint16_t i = 0; i < ext->tag_count && offset < ext->used_bytes; i++) {
+        uint8_t e_type = ext->data[offset];
+        uint8_t e_key_len = ext->data[offset + 1];
+        uint16_t e_val_len = ext->data[offset + 2] | (ext->data[offset + 3] << 8);
+
+        if (e_type == type && e_key_len == key_len &&
+            memcmp(&ext->data[offset + 4], key, key_len) == 0) {
+            if (e_val_len == value_len &&
+                memcmp(&ext->data[offset + 4 + e_key_len], value, value_len) == 0) {
+                kfree(ext);
+                return 0;  // Already exists
+            }
+        }
+
+        offset += 4 + e_key_len + e_val_len;
+    }
+
+    // Write new entry
+    uint32_t pos = ext->used_bytes;
+    ext->data[pos] = type;
+    ext->data[pos + 1] = (uint8_t)key_len;
+    ext->data[pos + 2] = (uint8_t)(value_len & 0xFF);
+    ext->data[pos + 3] = (uint8_t)((value_len >> 8) & 0xFF);
+    memcpy(&ext->data[pos + 4], key, key_len);
+    memcpy(&ext->data[pos + 4 + key_len], value, value_len);
+
+    ext->used_bytes += entry_size;
+    ext->tag_count++;
+
+    // Write extended block to disk
+    if (tagfs_write_extended_block(block_num, ext) != 0) {
+        kfree(ext);
+        return -1;
+    }
+
+    // Update inode ext_tag_count and write
+    meta->ext_tag_count = ext->tag_count;
+    int result = tagfs_write_metadata(file_id, meta);
+
+    // Update tag index
+    char tag_string[64];
+    tagfs_format_tag(tag_string, key, value);
+    tag_bitmap_add_file(tfs.tag_index, tag_string, file_id);
+
+    kfree(ext);
+    return result;
 }

@@ -4,7 +4,7 @@
 #include "ktypes.h"
 #include "tagfs.h"
 
-TagBitmapIndex* tag_bitmap_create(void);
+TagBitmapIndex* tag_bitmap_create(uint32_t max_files);
 void tag_bitmap_destroy(TagBitmapIndex* index);
 void tag_bitmap_clear(TagBitmapIndex* index);
 

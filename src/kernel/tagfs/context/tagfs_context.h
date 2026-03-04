@@ -3,7 +3,7 @@
 
 #include "ktypes.h"
 
-#define TAGFS_MAX_CONTEXT_TAGS 16
+#define TAGFS_CONTEXT_INITIAL_CAPACITY 4
 
 void tagfs_context_init(void);
 

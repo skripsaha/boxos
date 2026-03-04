@@ -98,7 +98,7 @@ static int system_deck_fragmentation_score(Event* event) {
     uint32_t total_gaps = 0;
 
     if (state && state->initialized) {
-        for (uint32_t i = 0; i < TAGFS_MAX_FILES; i++) {
+        for (uint32_t i = 0; i < state->max_files; i++) {
             TagFSMetadata* meta = tagfs_get_metadata(i + 1);
             if (meta && (meta->flags & TAGFS_FILE_ACTIVE) && meta->block_count > 0) {
                 total_files++;

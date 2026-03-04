@@ -16,13 +16,23 @@ uint32_t tag_hash(const char* tag_string) {
     return hash % 256;
 }
 
-TagBitmapIndex* tag_bitmap_create(void) {
+TagBitmapIndex* tag_bitmap_create(uint32_t max_files) {
     TagBitmapIndex* index = kmalloc(sizeof(TagBitmapIndex));
     if (!index) {
         return NULL;
     }
 
     memset(index, 0, sizeof(TagBitmapIndex));
+    index->max_files = max_files;
+
+    // Dynamically allocate the reverse index array
+    index->file_tags = kmalloc(sizeof(TagFileTagList) * max_files);
+    if (!index->file_tags) {
+        kfree(index);
+        return NULL;
+    }
+    memset(index->file_tags, 0, sizeof(TagFileTagList) * max_files);
+
     return index;
 }
 
@@ -32,6 +42,11 @@ void tag_bitmap_destroy(TagBitmapIndex* index) {
     }
 
     tag_bitmap_clear(index);
+
+    if (index->file_tags) {
+        kfree(index->file_tags);
+    }
+
     kfree(index);
 }
 
@@ -44,23 +59,28 @@ void tag_bitmap_clear(TagBitmapIndex* index) {
         TagBitmapEntry* entry = index->buckets[i];
         while (entry) {
             TagBitmapEntry* next = entry->next;
+            if (entry->bitmap) {
+                kfree(entry->bitmap);
+            }
             kfree(entry);
             entry = next;
         }
         index->buckets[i] = NULL;
     }
 
-    for (uint32_t file_id = 0; file_id < TAGFS_MAX_FILES; file_id++) {
-        if (index->file_tags[file_id].tag_strings) {
-            for (uint32_t i = 0; i < index->file_tags[file_id].count; i++) {
-                if (index->file_tags[file_id].tag_strings[i]) {
-                    kfree(index->file_tags[file_id].tag_strings[i]);
+    if (index->file_tags) {
+        for (uint32_t file_id = 0; file_id < index->max_files; file_id++) {
+            if (index->file_tags[file_id].tag_strings) {
+                for (uint32_t i = 0; i < index->file_tags[file_id].count; i++) {
+                    if (index->file_tags[file_id].tag_strings[i]) {
+                        kfree(index->file_tags[file_id].tag_strings[i]);
+                    }
                 }
+                kfree(index->file_tags[file_id].tag_strings);
+                index->file_tags[file_id].tag_strings = NULL;
             }
-            kfree(index->file_tags[file_id].tag_strings);
-            index->file_tags[file_id].tag_strings = NULL;
+            index->file_tags[file_id].count = 0;
         }
-        index->file_tags[file_id].count = 0;
     }
 
     index->total_tags = 0;
@@ -85,6 +105,16 @@ static TagBitmapEntry* find_or_create_entry(TagBitmapIndex* index, const char* t
     memset(new_entry, 0, sizeof(TagBitmapEntry));
     strncpy(new_entry->tag_string, tag_string, 63);
     new_entry->tag_string[63] = '\0';
+
+    // Dynamically allocate bitmap based on max_files
+    new_entry->bitmap_size = (index->max_files + 7) / 8;
+    new_entry->bitmap = kmalloc(new_entry->bitmap_size);
+    if (!new_entry->bitmap) {
+        kfree(new_entry);
+        return NULL;
+    }
+    memset(new_entry->bitmap, 0, new_entry->bitmap_size);
+
     new_entry->next = index->buckets[hash];
     index->buckets[hash] = new_entry;
     index->total_tags++;
@@ -93,7 +123,7 @@ static TagBitmapEntry* find_or_create_entry(TagBitmapIndex* index, const char* t
 }
 
 int tag_bitmap_add_file(TagBitmapIndex* index, const char* tag_string, uint32_t file_id) {
-    if (!index || !tag_string || file_id >= TAGFS_MAX_FILES) {
+    if (!index || !tag_string || file_id >= index->max_files) {
         return -1;
     }
 
@@ -141,7 +171,7 @@ int tag_bitmap_add_file(TagBitmapIndex* index, const char* tag_string, uint32_t 
 }
 
 int tag_bitmap_remove_file(TagBitmapIndex* index, uint32_t file_id) {
-    if (!index || file_id >= TAGFS_MAX_FILES) {
+    if (!index || file_id >= index->max_files) {
         return -1;
     }
 
@@ -184,7 +214,13 @@ int tag_bitmap_query(TagBitmapIndex* index, const char* query_tags[],
         return -1;
     }
 
-    uint8_t result_bitmap[TAGFS_BITMAP_SIZE];
+    uint32_t bitmap_size = (index->max_files + 7) / 8;
+
+    uint8_t* result_bitmap = kmalloc(bitmap_size);
+    if (!result_bitmap) {
+        return -1;
+    }
+
     bool first_tag = true;
 
     for (uint32_t tag_idx = 0; tag_idx < tag_count; tag_idx++) {
@@ -193,15 +229,19 @@ int tag_bitmap_query(TagBitmapIndex* index, const char* query_tags[],
         bool found = false;
 
         if (is_wildcard) {
-            uint8_t wildcard_bitmap[TAGFS_BITMAP_SIZE];
-            memset(wildcard_bitmap, 0, TAGFS_BITMAP_SIZE);
+            uint8_t* wildcard_bitmap = kmalloc(bitmap_size);
+            if (!wildcard_bitmap) {
+                kfree(result_bitmap);
+                return -1;
+            }
+            memset(wildcard_bitmap, 0, bitmap_size);
             bool any_match = false;
 
             for (uint32_t b = 0; b < 256; b++) {
                 TagBitmapEntry* e = index->buckets[b];
                 while (e) {
                     if (tag_match(query_tags[tag_idx], e->tag_string)) {
-                        for (uint32_t i = 0; i < TAGFS_BITMAP_SIZE; i++) {
+                        for (uint32_t i = 0; i < bitmap_size; i++) {
                             wildcard_bitmap[i] |= e->bitmap[i];
                         }
                         any_match = true;
@@ -212,15 +252,16 @@ int tag_bitmap_query(TagBitmapIndex* index, const char* query_tags[],
 
             if (any_match) {
                 if (first_tag) {
-                    memcpy(result_bitmap, wildcard_bitmap, TAGFS_BITMAP_SIZE);
+                    memcpy(result_bitmap, wildcard_bitmap, bitmap_size);
                     first_tag = false;
                 } else {
-                    for (uint32_t i = 0; i < TAGFS_BITMAP_SIZE; i++) {
+                    for (uint32_t i = 0; i < bitmap_size; i++) {
                         result_bitmap[i] &= wildcard_bitmap[i];
                     }
                 }
                 found = true;
             }
+            kfree(wildcard_bitmap);
         } else {
             uint32_t hash = tag_hash(query_tags[tag_idx]);
             TagBitmapEntry* entry = index->buckets[hash];
@@ -228,10 +269,10 @@ int tag_bitmap_query(TagBitmapIndex* index, const char* query_tags[],
             while (entry) {
                 if (strcmp(entry->tag_string, query_tags[tag_idx]) == 0) {
                     if (first_tag) {
-                        memcpy(result_bitmap, entry->bitmap, TAGFS_BITMAP_SIZE);
+                        memcpy(result_bitmap, entry->bitmap, bitmap_size);
                         first_tag = false;
                     } else {
-                        for (uint32_t i = 0; i < TAGFS_BITMAP_SIZE; i++) {
+                        for (uint32_t i = 0; i < bitmap_size; i++) {
                             result_bitmap[i] &= entry->bitmap[i];
                         }
                     }
@@ -243,16 +284,18 @@ int tag_bitmap_query(TagBitmapIndex* index, const char* query_tags[],
         }
 
         if (!found) {
+            kfree(result_bitmap);
             return 0;
         }
     }
 
     if (first_tag) {
+        kfree(result_bitmap);
         return 0;
     }
 
     uint32_t result_count = 0;
-    for (uint32_t file_id = 1; file_id < TAGFS_MAX_FILES && result_count < max_files; file_id++) {
+    for (uint32_t file_id = 1; file_id < index->max_files && result_count < max_files; file_id++) {
         uint32_t byte_idx = file_id / 8;
         uint32_t bit_idx = file_id % 8;
 
@@ -261,11 +304,12 @@ int tag_bitmap_query(TagBitmapIndex* index, const char* query_tags[],
         }
     }
 
+    kfree(result_bitmap);
     return result_count;
 }
 
 bool tag_bitmap_has_tag(TagBitmapIndex* index, const char* tag_string, uint32_t file_id) {
-    if (!index || !tag_string || file_id >= TAGFS_MAX_FILES) {
+    if (!index || !tag_string || file_id >= index->max_files) {
         return false;
     }
 

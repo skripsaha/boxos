@@ -63,13 +63,35 @@ static TagFSContext* get_or_create_context(uint32_t pid) {
     new_node->pid = pid;
     new_node->context.pid = pid;
     new_node->context.tag_count = 0;
-    memset(new_node->context.active_tags, 0, sizeof(new_node->context.active_tags));
+    new_node->context.tag_capacity = TAGFS_CONTEXT_INITIAL_CAPACITY;
+    new_node->context.active_tags = kmalloc(sizeof(char*) * TAGFS_CONTEXT_INITIAL_CAPACITY);
+    if (!new_node->context.active_tags) {
+        kfree(new_node);
+        return NULL;
+    }
+    memset(new_node->context.active_tags, 0, sizeof(char*) * TAGFS_CONTEXT_INITIAL_CAPACITY);
 
     new_node->next = g_context_table.buckets[bucket_idx];
     g_context_table.buckets[bucket_idx] = new_node;
     g_context_table.entry_count++;
 
     return &new_node->context;
+}
+
+// Grow the active_tags array by 2x
+static int context_grow_tags(TagFSContext* ctx) {
+    uint32_t new_capacity = ctx->tag_capacity * 2;
+    char** new_tags = kmalloc(sizeof(char*) * new_capacity);
+    if (!new_tags) {
+        return -1;
+    }
+
+    memcpy(new_tags, ctx->active_tags, sizeof(char*) * ctx->tag_count);
+    memset(new_tags + ctx->tag_count, 0, sizeof(char*) * (new_capacity - ctx->tag_count));
+    kfree(ctx->active_tags);
+    ctx->active_tags = new_tags;
+    ctx->tag_capacity = new_capacity;
+    return 0;
 }
 
 int tagfs_context_add_tag(uint32_t pid, const char* tag_string) {
@@ -86,11 +108,7 @@ int tagfs_context_add_tag(uint32_t pid, const char* tag_string) {
         return -1;
     }
 
-    if (ctx->tag_count >= TAGFS_MAX_CONTEXT_TAGS) {
-        spin_unlock(&g_context_table.lock);
-        return -1;
-    }
-
+    // Check for duplicate
     for (uint32_t i = 0; i < ctx->tag_count; i++) {
         if (strcmp(ctx->active_tags[i], tag_string) == 0) {
             spin_unlock(&g_context_table.lock);
@@ -98,8 +116,23 @@ int tagfs_context_add_tag(uint32_t pid, const char* tag_string) {
         }
     }
 
-    strncpy(ctx->active_tags[ctx->tag_count], tag_string, 63);
-    ctx->active_tags[ctx->tag_count][63] = '\0';
+    // Grow if needed (no fixed limit)
+    if (ctx->tag_count >= ctx->tag_capacity) {
+        if (context_grow_tags(ctx) != 0) {
+            spin_unlock(&g_context_table.lock);
+            return -1;
+        }
+    }
+
+    // Allocate and copy the tag string
+    size_t len = strlen(tag_string);
+    ctx->active_tags[ctx->tag_count] = kmalloc(len + 1);
+    if (!ctx->active_tags[ctx->tag_count]) {
+        spin_unlock(&g_context_table.lock);
+        return -1;
+    }
+    memcpy(ctx->active_tags[ctx->tag_count], tag_string, len);
+    ctx->active_tags[ctx->tag_count][len] = '\0';
     ctx->tag_count++;
 
     spin_unlock(&g_context_table.lock);
@@ -122,9 +155,12 @@ int tagfs_context_remove_tag(uint32_t pid, const char* tag_string) {
 
     for (uint32_t i = 0; i < ctx->tag_count; i++) {
         if (strcmp(ctx->active_tags[i], tag_string) == 0) {
+            kfree(ctx->active_tags[i]);
+            // Shift remaining tags
             for (uint32_t j = i; j < ctx->tag_count - 1; j++) {
-                memcpy(ctx->active_tags[j], ctx->active_tags[j + 1], 64);
+                ctx->active_tags[j] = ctx->active_tags[j + 1];
             }
+            ctx->active_tags[ctx->tag_count - 1] = NULL;
             ctx->tag_count--;
             spin_unlock(&g_context_table.lock);
             return 0;
@@ -140,8 +176,13 @@ void tagfs_context_clear(uint32_t pid) {
 
     TagFSContext* ctx = get_or_create_context(pid);
     if (ctx) {
+        for (uint32_t i = 0; i < ctx->tag_count; i++) {
+            if (ctx->active_tags[i]) {
+                kfree(ctx->active_tags[i]);
+                ctx->active_tags[i] = NULL;
+            }
+        }
         ctx->tag_count = 0;
-        memset(ctx->active_tags, 0, sizeof(ctx->active_tags));
     }
 
     spin_unlock(&g_context_table.lock);
@@ -220,6 +261,15 @@ void tagfs_context_destroy(uint32_t pid) {
     while (node) {
         if (node->pid == pid) {
             *node_ptr = node->next;
+            // Free all tag strings
+            for (uint32_t i = 0; i < node->context.tag_count; i++) {
+                if (node->context.active_tags[i]) {
+                    kfree(node->context.active_tags[i]);
+                }
+            }
+            if (node->context.active_tags) {
+                kfree(node->context.active_tags);
+            }
             kfree(node);
             g_context_table.entry_count--;
             spin_unlock(&g_context_table.lock);

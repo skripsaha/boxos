@@ -63,8 +63,8 @@ static int handle_tag_query(Event *event)
 
     int count = 0;
 
-    const char *ctx_tags[TAGFS_MAX_CONTEXT_TAGS];
-    int context_count = tagfs_context_get_tags(pid, ctx_tags, TAGFS_MAX_CONTEXT_TAGS);
+    const char *ctx_tags[64];
+    int context_count = tagfs_context_get_tags(pid, ctx_tags, 64);
 
     const char *all_tags[32];
     int total_tag_count = 0;
@@ -525,8 +525,8 @@ static int handle_obj_create(Event *event)
         tag_count += parse_tag_list(req->tags, tag_ptrs + tag_count, 16 - tag_count, tag_buffer + tag_count);
     }
 
-    const char *ctx_tags[TAGFS_MAX_CONTEXT_TAGS];
-    int ctx_count = tagfs_context_get_tags(event->pid, ctx_tags, TAGFS_MAX_CONTEXT_TAGS);
+    const char *ctx_tags[64];
+    int ctx_count = tagfs_context_get_tags(event->pid, ctx_tags, 64);
     for (int i = 0; i < ctx_count && tag_count < 16; i++)
     {
         size_t clen = strlen(ctx_tags[i]);

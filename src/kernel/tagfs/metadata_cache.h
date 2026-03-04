@@ -3,8 +3,8 @@
 
 #include "tagfs.h"
 
-#define MCACHE_CAPACITY    128
-#define MCACHE_HASH_SIZE   64
+#define MCACHE_DEFAULT_CAPACITY    128
+#define MCACHE_DEFAULT_HASH_SIZE   64
 
 typedef struct MCacheNode {
     TagFSMetadata metadata;
@@ -16,14 +16,16 @@ typedef struct MCacheNode {
 
 typedef struct MetadataLRU {
     MCacheNode* nodes;                    // Pre-allocated pool
-    MCacheNode* hash[MCACHE_HASH_SIZE];   // Hash buckets
+    MCacheNode** hash;                    // Hash buckets (dynamically allocated)
     MCacheNode* lru_head;                 // Most recently used
     MCacheNode* lru_tail;                 // Least recently used
     MCacheNode* free_list;                // Unused nodes
     uint32_t count;
+    uint32_t capacity;                    // Node pool size
+    uint32_t hash_size;                   // Hash bucket count (power of 2)
 } MetadataLRU;
 
-// Initialize cache (allocates node pool)
+// Initialize cache with configurable capacity and hash size
 int mcache_init(MetadataLRU* cache);
 
 // Get metadata for file_id. Loads from disk on cache miss, evicts LRU if full.

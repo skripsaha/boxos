@@ -293,8 +293,14 @@ void kernel_main(void)
     // ============================================================
     debug_printf("[AUTOSTART] Scanning TagFS for autostart files...\n");
 
-    uint32_t file_ids[TAGFS_MAX_FILES];
-    int file_count = tagfs_list_all_files(file_ids, TAGFS_MAX_FILES);
+    TagFSState* tfs_state = tagfs_get_state();
+    uint32_t autostart_max = tfs_state ? tfs_state->max_files : TAGFS_MAX_FILES;
+    uint32_t* file_ids = kmalloc(sizeof(uint32_t) * autostart_max);
+    if (!file_ids) {
+        debug_printf("[AUTOSTART] Failed to allocate file_ids buffer\n");
+        autostart_max = 0;
+    }
+    int file_count = file_ids ? tagfs_list_all_files(file_ids, autostart_max) : 0;
     process_t *initial_proc = NULL;
     int autostart_count = 0;
 
@@ -403,6 +409,10 @@ void kernel_main(void)
         // First autostart process becomes the initial process
         if (!initial_proc)
             initial_proc = proc;
+    }
+
+    if (file_ids) {
+        kfree(file_ids);
     }
 
     // Fallback: if no autostart files found, use embedded shell binary
