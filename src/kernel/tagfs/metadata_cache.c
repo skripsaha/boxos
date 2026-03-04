@@ -4,18 +4,27 @@
 // Defined in tagfs.c
 extern int tagfs_read_metadata(uint32_t file_id, TagFSMetadata* metadata);
 
-static inline uint32_t mcache_hash(uint32_t file_id) {
-    return file_id & (MCACHE_HASH_SIZE - 1);
+static inline uint32_t mcache_hash(MetadataLRU* cache, uint32_t file_id) {
+    return file_id & (cache->hash_size - 1);
 }
 
 int mcache_init(MetadataLRU* cache) {
     if (!cache) return -1;
 
-    cache->nodes = kmalloc(sizeof(MCacheNode) * MCACHE_CAPACITY);
+    cache->capacity = MCACHE_DEFAULT_CAPACITY;
+    cache->hash_size = MCACHE_DEFAULT_HASH_SIZE;
+
+    cache->nodes = kmalloc(sizeof(MCacheNode) * cache->capacity);
     if (!cache->nodes) return -1;
 
-    memset(cache->nodes, 0, sizeof(MCacheNode) * MCACHE_CAPACITY);
-    memset(cache->hash, 0, sizeof(cache->hash));
+    cache->hash = kmalloc(sizeof(MCacheNode*) * cache->hash_size);
+    if (!cache->hash) {
+        kfree(cache->nodes);
+        return -1;
+    }
+
+    memset(cache->nodes, 0, sizeof(MCacheNode) * cache->capacity);
+    memset(cache->hash, 0, sizeof(MCacheNode*) * cache->hash_size);
 
     cache->lru_head = NULL;
     cache->lru_tail = NULL;
@@ -23,10 +32,10 @@ int mcache_init(MetadataLRU* cache) {
 
     // Build free list (reuse lru_next for chaining)
     cache->free_list = &cache->nodes[0];
-    for (uint32_t i = 0; i < MCACHE_CAPACITY - 1; i++) {
+    for (uint32_t i = 0; i < cache->capacity - 1; i++) {
         cache->nodes[i].lru_next = &cache->nodes[i + 1];
     }
-    cache->nodes[MCACHE_CAPACITY - 1].lru_next = NULL;
+    cache->nodes[cache->capacity - 1].lru_next = NULL;
 
     return 0;
 }
@@ -69,7 +78,7 @@ static void lru_promote(MetadataLRU* cache, MCacheNode* node) {
 
 // Find node in hash table by file_id
 static MCacheNode* hash_find(MetadataLRU* cache, uint32_t file_id) {
-    uint32_t h = mcache_hash(file_id);
+    uint32_t h = mcache_hash(cache, file_id);
     MCacheNode* node = cache->hash[h];
     while (node) {
         if (node->file_id == file_id) return node;
@@ -80,7 +89,7 @@ static MCacheNode* hash_find(MetadataLRU* cache, uint32_t file_id) {
 
 // Remove node from its hash chain
 static void hash_remove(MetadataLRU* cache, MCacheNode* node) {
-    uint32_t h = mcache_hash(node->file_id);
+    uint32_t h = mcache_hash(cache, node->file_id);
     MCacheNode** pp = &cache->hash[h];
     while (*pp) {
         if (*pp == node) {
@@ -94,7 +103,7 @@ static void hash_remove(MetadataLRU* cache, MCacheNode* node) {
 
 // Insert node into hash table
 static void hash_insert(MetadataLRU* cache, MCacheNode* node) {
-    uint32_t h = mcache_hash(node->file_id);
+    uint32_t h = mcache_hash(cache, node->file_id);
     node->hash_next = cache->hash[h];
     cache->hash[h] = node;
 }
@@ -201,7 +210,10 @@ void mcache_destroy(MetadataLRU* cache) {
         kfree(cache->nodes);
         cache->nodes = NULL;
     }
-    memset(cache->hash, 0, sizeof(cache->hash));
+    if (cache->hash) {
+        kfree(cache->hash);
+        cache->hash = NULL;
+    }
     cache->lru_head = NULL;
     cache->lru_tail = NULL;
     cache->free_list = NULL;
