@@ -48,7 +48,9 @@ void* malloc(size_t size) {
     if (size == 0) return NULL;
     if (!initialized) heap_init();
 
+    size_t orig_size = size;
     size = align_up(size, HEAP_ALIGN);
+    if (size < orig_size) return NULL;  // overflow in align_up
 
     block_t* curr = free_list;
     block_t* prev = NULL;
@@ -72,6 +74,7 @@ void* malloc(size_t size) {
     }
 
     size_t total = BLOCK_HDR_SIZE + size;
+    if (total < size) return NULL;  // overflow in header + size
     void* mem = sbrk(total);
     if (!mem) return NULL;
 

@@ -284,8 +284,11 @@ static void vmm_free_user_space_tables(vmm_context_t* ctx) {
     debug_printf("[VMM] Freeing user space tables for context CR3=0x%lx\n", ctx->pml4_phys);
 
     // bitmap to detect duplicate PT entries pointing to the same physical page
-    #define MAX_USER_PAGES 32768
+    // covers 1GB of physical pages from 0x100000 (262144 pages * 4KB = 1GB, bitmap = 32KB)
+    #define MAX_USER_PAGES 262144
     #define BITMAP_SIZE (MAX_USER_PAGES / 8)
+    #define USER_PAGES_PHYS_BASE 0x100000
+    #define USER_PAGES_PHYS_END  (USER_PAGES_PHYS_BASE + (uint64_t)MAX_USER_PAGES * VMM_PAGE_SIZE)
 
     uint8_t* freed_bitmap = kmalloc(BITMAP_SIZE);
     if (!freed_bitmap) {
@@ -366,8 +369,8 @@ static void vmm_free_user_space_tables(vmm_context_t* ctx) {
                         continue;
                     }
 
-                    if (!is_identity_mapped && phys >= 0x100000 && phys < 0x20000000) {
-                        size_t page_idx = (phys - 0x100000) / VMM_PAGE_SIZE;
+                    if (!is_identity_mapped && phys >= USER_PAGES_PHYS_BASE) {
+                        size_t page_idx = (phys - USER_PAGES_PHYS_BASE) / VMM_PAGE_SIZE;
 
                         if (page_idx < MAX_USER_PAGES) {
                             size_t byte_idx = page_idx / 8;
@@ -382,7 +385,10 @@ static void vmm_free_user_space_tables(vmm_context_t* ctx) {
                                 freed_pages++;
                             }
                         } else {
-                            debug_printf("[VMM]   WARNING: Page 0x%lx outside bitmap range\n", phys);
+                            // page above bitmap range — free without dedup (better than leaking)
+                            debug_printf("[VMM]   FREE (no dedup): Page 0x%lx (virt=0x%lx)\n", phys, virt);
+                            pmm_free((void*)phys, 1);
+                            freed_pages++;
                         }
                     }
 
@@ -414,6 +420,8 @@ static void vmm_free_user_space_tables(vmm_context_t* ctx) {
 
     #undef MAX_USER_PAGES
     #undef BITMAP_SIZE
+    #undef USER_PAGES_PHYS_BASE
+    #undef USER_PAGES_PHYS_END
 
     debug_printf("[VMM] User space tables freed\n");
 }
@@ -1506,10 +1514,17 @@ typedef struct {
 int vmm_map_code_region(vmm_context_t* ctx, uintptr_t code_phys, uint64_t size) {
     if (!ctx || !code_phys || size == 0) return -1;
 
+    // binary must be at least large enough to read ELF header
+    if (size < sizeof(Elf64_Ehdr)) {
+        debug_printf("[VMM] Binary too small for ELF header (%llu bytes), loading as flat binary\n", (uint64_t)size);
+        // fall through to flat binary path below
+    }
+
     void* elf_virt = vmm_phys_to_virt(code_phys);
     Elf64_Ehdr* ehdr = (Elf64_Ehdr*)elf_virt;
 
-    if (ehdr->e_ident[0] != 0x7F || ehdr->e_ident[1] != 'E' ||
+    if (size < sizeof(Elf64_Ehdr) ||
+        ehdr->e_ident[0] != 0x7F || ehdr->e_ident[1] != 'E' ||
         ehdr->e_ident[2] != 'L' || ehdr->e_ident[3] != 'F') {
         if (size > VMM_CABIN_MAX_CODE_SIZE) {
             debug_printf("[VMM] ERROR: Flat binary too large (%llu bytes, max %llu)\n",
@@ -1565,13 +1580,28 @@ int vmm_map_code_region(vmm_context_t* ctx, uintptr_t code_phys, uint64_t size) 
         return -1;
     }
 
+    // validate program headers fit within the binary
+    #define MAX_LOAD_SEGMENTS 32
+
+    uint64_t phdr_end = (uint64_t)ehdr->e_phoff + (uint64_t)ehdr->e_phnum * sizeof(Elf64_Phdr);
+    if (phdr_end > size) {
+        debug_printf("[VMM] ERROR: Program headers extend beyond binary (phdr_end=0x%llx, size=0x%llx)\n",
+                     phdr_end, (uint64_t)size);
+        return -1;
+    }
+
+    if (ehdr->e_phnum > MAX_LOAD_SEGMENTS) {
+        debug_printf("[VMM] ERROR: Too many program headers (%u, max %d)\n",
+                     ehdr->e_phnum, MAX_LOAD_SEGMENTS);
+        return -1;
+    }
+
     debug_printf("[VMM] Parsing ELF: %u program headers at offset 0x%llx\n",
                  ehdr->e_phnum, ehdr->e_phoff);
 
     Elf64_Phdr* phdr_base = (Elf64_Phdr*)((uint8_t*)elf_virt + ehdr->e_phoff);
     size_t total_mapped_pages = 0;
 
-    #define MAX_LOAD_SEGMENTS 32
     struct { uintptr_t phys; size_t pages; } mapped_segs[MAX_LOAD_SEGMENTS];
     int mapped_seg_count = 0;
 
@@ -1590,6 +1620,25 @@ int vmm_map_code_region(vmm_context_t* ctx, uintptr_t code_phys, uint64_t size) 
 
         if (memsz == 0) {
             continue;
+        }
+
+        // validate segment data fits within the binary
+        if (filesz > 0 && (file_offset + filesz > size)) {
+            debug_printf("[VMM] ERROR: ELF segment %u data extends beyond binary (offset=0x%llx, filesz=0x%llx, binary_size=0x%llx)\n",
+                         i, file_offset, filesz, (uint64_t)size);
+            for (int k = 0; k < mapped_seg_count; k++) {
+                pmm_free((void*)mapped_segs[k].phys, mapped_segs[k].pages);
+            }
+            return -ERR_INVALID_ARGUMENT;
+        }
+
+        if (filesz > memsz) {
+            debug_printf("[VMM] ERROR: ELF segment %u filesz (0x%llx) > memsz (0x%llx)\n",
+                         i, filesz, memsz);
+            for (int k = 0; k < mapped_seg_count; k++) {
+                pmm_free((void*)mapped_segs[k].phys, mapped_segs[k].pages);
+            }
+            return -ERR_INVALID_ARGUMENT;
         }
 
         uint64_t vaddr_aligned = vaddr & VMM_PAGE_MASK;

@@ -36,11 +36,10 @@ static int system_deck_yield(Event* event) {
         return -1;
     }
 
-    process_t* proc = process_find(event->pid);
+    process_t* proc = process_find_ref(event->pid);
     if (!proc) {
         return -1;
     }
-    process_ref_inc(proc);
 
     process_state_t state = process_get_state(proc);
     if (state != PROC_WORKING) {
