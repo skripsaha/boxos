@@ -4,6 +4,7 @@
 #include "klib.h"
 #include "atomics.h"  // For rdtsc()
 #include "cpuid.h"
+#include "cpu_caps_page.h"
 
 // TSC frequency (cycles per millisecond). Must be calibrated before timers are used.
 static volatile uint64_t tsc_freq_khz = 0;
@@ -125,6 +126,9 @@ void cpu_calibrate_tsc(void) {
     }
 
     calibrated = 1;
+
+    // Publish to userspace via CPU capabilities page
+    cpu_caps_page_set_tsc_freq(tsc_freq_khz);
 
     debug_printf("[CPU] Calibration complete:\n");
     debug_printf("[CPU]   TSC frequency: %lu kHz\n", tsc_freq_khz);

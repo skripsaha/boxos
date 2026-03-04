@@ -1,12 +1,13 @@
 #include "acpi_internal.h"
 #include "io.h"
 #include "klib.h"
+#include "atomics.h"
+#include "cpu_calibrate.h"
 
 static void delay_ms(uint32_t ms) {
-    for (uint32_t i = 0; i < ms; i++) {
-        for (volatile uint32_t j = 0; j < 10000; j++) {
-            __asm__ volatile ("pause");
-        }
+    uint64_t deadline = rdtsc() + cpu_ms_to_tsc(ms);
+    while (rdtsc() < deadline) {
+        __asm__ volatile("pause");
     }
 }
 

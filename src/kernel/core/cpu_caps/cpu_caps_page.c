@@ -18,4 +18,12 @@ void cpu_caps_page_init(void) {
     caps_page->magic = CPU_CAPS_PAGE_MAGIC;
     caps_page->has_waitpkg = g_cpu_caps.has_waitpkg;
     caps_page->has_invariant_tsc = g_cpu_caps.has_invariant_tsc;
+    caps_page->tsc_freq_khz = 0;  // Will be filled after TSC calibration
+}
+
+void cpu_caps_page_set_tsc_freq(uint64_t freq_khz) {
+    if (g_cpu_caps_page_phys == 0) return;
+
+    cpu_caps_page_t* caps_page = (cpu_caps_page_t*)vmm_phys_to_virt(g_cpu_caps_page_phys);
+    caps_page->tsc_freq_khz = freq_khz;
 }

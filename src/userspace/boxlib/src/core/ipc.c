@@ -5,6 +5,7 @@
 #include "box/system.h"
 #include "box/string.h"
 #include "box/file.h"
+#include "box/cpu.h"
 
 int send(uint32_t target_pid, const void* data, uint16_t size) {
     if (target_pid == 0) return -ERR_INVALID_ARGUMENT;
@@ -84,8 +85,6 @@ static inline uint64_t ipc_rdtsc(void) {
     return ((uint64_t)hi << 32) | lo;
 }
 
-#define IPC_TSC_FREQ_MHZ 1000
-
 bool receive_wait(result_entry_t* out_entry, uint32_t timeout_ms) {
     if (!out_entry) return false;
 
@@ -94,7 +93,7 @@ bool receive_wait(result_entry_t* out_entry, uint32_t timeout_ms) {
     result_page_t* rp = result_page();
     uint64_t deadline = 0;
     if (timeout_ms > 0) {
-        deadline = ipc_rdtsc() + (uint64_t)timeout_ms * IPC_TSC_FREQ_MHZ * 1000;
+        deadline = ipc_rdtsc() + cpu_ms_to_tsc(timeout_ms);
     }
 
     while (1) {
