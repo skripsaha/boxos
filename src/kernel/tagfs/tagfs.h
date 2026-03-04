@@ -99,9 +99,19 @@ typedef struct {
     uint32_t tag_count;
 } TagFSContext;
 
+// Free extent node — sorted linked list by start address
+// Used for O(k) block allocation instead of O(n) bitmap scan
+typedef struct FreeExtent {
+    uint32_t start;           // Starting block number
+    uint32_t count;           // Number of contiguous free blocks
+    struct FreeExtent* next;  // Next extent (higher address)
+} FreeExtent;
+
 typedef struct {
-    uint8_t* bitmap;        // Bitmap of block usage (1 bit per block)
-    uint32_t total_blocks;  // Total data blocks
+    uint8_t* bitmap;          // Bitmap of block usage (1 bit per block)
+    uint32_t total_blocks;    // Total data blocks
+    FreeExtent* free_list;    // Sorted free extent list for O(k) allocation
+    uint32_t extent_count;    // Number of free extents (for diagnostics)
 } BlockBitmap;
 
 #define TAGFS_BITMAP_SIZE 128  // 1024 bits / 8 = 128 bytes
