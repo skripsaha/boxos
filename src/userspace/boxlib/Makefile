@@ -28,7 +28,7 @@ libbox.a: $(OBJS)
 ../build/boxlib_start.o: boxlib_start.asm
 	@echo "Building entry point..."
 	@mkdir -p ../build
-	nasm -f elf64 $< -o $@
+	nasm -f elf64 -I include/ $< -o $@
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@

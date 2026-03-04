@@ -8,6 +8,8 @@
 
 [BITS 64]
 
+%include "notify.inc"
+
 section .text
 
 extern main
@@ -35,9 +37,12 @@ _start:
 
 global exit_asm
 exit_asm:
-    mov rsi, rdi
-    mov rdi, 0x10
-    int 0x80
+    ; rdi = exit_code
+    notify_prepare
+    mov eax, NOTIFY_PAGE
+    mov word [rax + NP_DATA], di
+    notify_prefix DECK_SYSTEM, 0x02
+    notify_send
 .halt:
     hlt
     jmp .halt
