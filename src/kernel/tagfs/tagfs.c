@@ -6,10 +6,6 @@
 #include "ata.h"
 #include "rtc.h"
 
-// Verify data start doesn't overlap with journal entries
-STATIC_ASSERT(TAGFS_DATA_START > (JOURNAL_ENTRIES_START + JOURNAL_ENTRY_COUNT * JOURNAL_ENTRY_SECTORS),
-             "TAGFS data must start after journal entries");
-
 static TagFSState tfs;
 
 static inline void bitmap_set(uint8_t* bitmap, uint32_t bit) {
@@ -187,9 +183,9 @@ int tagfs_read_superblock(TagFSSuperblock* sb) {
     if (sb->magic != TAGFS_MAGIC) {
         debug_printf("[TagFS] Primary superblock corrupted (bad magic: 0x%08x)\n", sb->magic);
         debug_printf("[TagFS] Attempting to read backup superblock from sector %u...\n",
-                TAGFS_SUPERBLOCK_BACKUP);
+                TAGFS_SUPERBLOCK_BACKUP_DEFAULT);
 
-        if (ata_read_sectors(1, TAGFS_SUPERBLOCK_BACKUP, 1, sector_buffer) != 0) {
+        if (ata_read_sectors(1, TAGFS_SUPERBLOCK_BACKUP_DEFAULT, 1, sector_buffer) != 0) {
             debug_printf("[TagFS] Backup superblock read failed\n");
             kfree(sector_buffer);
             return -1;
@@ -248,8 +244,10 @@ static int tagfs_write_superblock_raw(const TagFSSuperblock* sb) {
         return -1;
     }
 
-    debug_printf("[TagFS] Writing backup superblock to sector %u\n", TAGFS_SUPERBLOCK_BACKUP);
-    if (ata_write_sectors(1, TAGFS_SUPERBLOCK_BACKUP, 1, sector_buffer) != 0) {
+    uint32_t backup_sector = sb->backup_superblock_sector;
+    if (backup_sector == 0) backup_sector = TAGFS_SUPERBLOCK_BACKUP_DEFAULT;
+    debug_printf("[TagFS] Writing backup superblock to sector %u\n", backup_sector);
+    if (ata_write_sectors(1, backup_sector, 1, sector_buffer) != 0) {
         debug_printf("[TagFS] Warning: Failed to write backup superblock (primary is still valid)\n");
     }
 
@@ -271,7 +269,7 @@ int tagfs_read_metadata(uint32_t file_id, TagFSMetadata* metadata) {
     }
 
     uint32_t metadata_index = file_id - 1;
-    uint32_t sector = TAGFS_METADATA_START + metadata_index;
+    uint32_t sector = tfs.superblock.metadata_start_sector + metadata_index;
 
     uint8_t* sector_buffer = kmalloc(ATA_SECTOR_SIZE);
     if (!sector_buffer) {
@@ -309,7 +307,7 @@ static int tagfs_write_metadata_raw(uint32_t file_id, const TagFSMetadata* metad
     }
 
     uint32_t metadata_index = file_id - 1;
-    uint32_t sector = TAGFS_METADATA_START + metadata_index;
+    uint32_t sector = tfs.superblock.metadata_start_sector + metadata_index;
 
     uint8_t* sector_buffer = kmalloc(ATA_SECTOR_SIZE);
     if (!sector_buffer) {
@@ -421,7 +419,21 @@ int tagfs_init(void) {
         return 0;
     }
 
-    if (journal_init() != 0) {
+    // Pre-read the superblock to find the journal location before initializing it.
+    // We need journal_superblock_sector from the on-disk superblock.
+    uint32_t journal_sector = JOURNAL_SUPERBLOCK_SECTOR_DEFAULT;
+    uint8_t* pre_buf = kmalloc(ATA_SECTOR_SIZE);
+    if (pre_buf) {
+        if (ata_read_sectors(1, TAGFS_SUPERBLOCK_SECTOR, 1, pre_buf) == 0) {
+            TagFSSuperblock* pre_sb = (TagFSSuperblock*)pre_buf;
+            if (pre_sb->magic == TAGFS_MAGIC && pre_sb->journal_superblock_sector != 0) {
+                journal_sector = pre_sb->journal_superblock_sector;
+            }
+        }
+        kfree(pre_buf);
+    }
+
+    if (journal_init(journal_sector) != 0) {
         debug_printf("[TagFS] Journal initialization failed\n");
         return -1;
     }
@@ -439,10 +451,22 @@ int tagfs_init(void) {
         return -1;
     }
 
+    // Apply defaults for zero fields (backward compat with old disks)
+    if (tfs.superblock.metadata_start_sector == 0)
+        tfs.superblock.metadata_start_sector = TAGFS_METADATA_START_DEFAULT;
+    if (tfs.superblock.data_start_sector == 0)
+        tfs.superblock.data_start_sector = TAGFS_DATA_START_DEFAULT;
+    if (tfs.superblock.backup_superblock_sector == 0)
+        tfs.superblock.backup_superblock_sector = TAGFS_SUPERBLOCK_BACKUP_DEFAULT;
+    if (tfs.superblock.journal_superblock_sector == 0)
+        tfs.superblock.journal_superblock_sector = JOURNAL_SUPERBLOCK_SECTOR_DEFAULT;
+    if (tfs.superblock.journal_entry_count == 0)
+        tfs.superblock.journal_entry_count = JOURNAL_ENTRY_COUNT;
+
     // Set dynamic max_files from superblock (no more hardcoded limit)
     tfs.max_files = tfs.superblock.max_files;
     if (tfs.max_files == 0) {
-        tfs.max_files = TAGFS_MAX_FILES;  // Fallback to default
+        tfs.max_files = TAGFS_MAX_FILES;
     }
 
     debug_printf("[TagFS] Superblock loaded: version=%u, total_files=%u, max_files=%u, free_blocks=%u\n",
@@ -1294,7 +1318,8 @@ int tagfs_write_metadata_journaled(uint32_t file_id, const TagFSMetadata* metada
         return tagfs_write_metadata_raw(file_id, metadata);
     }
 
-    if (journal_log_metadata(txn_id, file_id, metadata) != 0) {
+    uint32_t target_sector = tfs.superblock.metadata_start_sector + (file_id - 1);
+    if (journal_log_metadata(txn_id, file_id, target_sector, metadata) != 0) {
         debug_printf("[TagFS] Journal log metadata failed\n");
         journal_abort(txn_id);
         return tagfs_write_metadata_raw(file_id, metadata);
@@ -1324,7 +1349,7 @@ int tagfs_write_superblock_journaled(const TagFSSuperblock* sb) {
         return tagfs_write_superblock_raw(sb);
     }
 
-    if (journal_log_superblock(txn_id, sb) != 0) {
+    if (journal_log_superblock(txn_id, TAGFS_SUPERBLOCK_SECTOR, sb) != 0) {
         debug_printf("[TagFS] Journal log superblock failed\n");
         journal_abort(txn_id);
         return tagfs_write_superblock_raw(sb);

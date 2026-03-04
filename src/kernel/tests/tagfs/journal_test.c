@@ -9,8 +9,9 @@
 static int test_journal_init(void) {
     debug_printf("[JournalTest] Testing journal_init...\n");
 
-    if (journal_init() != 0) {
-        debug_printf("[JournalTest] FAIL: journal_init failed\n");
+    // Journal is already initialized by tagfs_init — reload to exercise the path
+    if (journal_reload() != 0) {
+        debug_printf("[JournalTest] FAIL: journal_reload failed\n");
         return -1;
     }
 
@@ -115,7 +116,9 @@ static int test_journal_replay(void) {
     meta.size = 2048;
     strncpy(meta.filename, "replay.txt", TAGFS_MAX_FILENAME);
 
-    if (journal_log_metadata(txn_id, 2, &meta) != 0) {
+    TagFSState* state = tagfs_get_state();
+    uint32_t meta2_sector = state->superblock.metadata_start_sector + (2 - 1);
+    if (journal_log_metadata(txn_id, 2, meta2_sector, &meta) != 0) {
         debug_printf("[JournalTest] FAIL: journal_log_metadata failed\n");
         journal_abort(txn_id);
         return -1;
@@ -175,7 +178,9 @@ static int test_journal_abort(void) {
     meta.size = 99999;
     strncpy(meta.filename, "aborted.txt", TAGFS_MAX_FILENAME);
 
-    if (journal_log_metadata(txn_id, 3, &meta) != 0) {
+    TagFSState* state = tagfs_get_state();
+    uint32_t meta3_sector = state->superblock.metadata_start_sector + (3 - 1);
+    if (journal_log_metadata(txn_id, 3, meta3_sector, &meta) != 0) {
         debug_printf("[JournalTest] FAIL: journal_log_metadata failed\n");
         journal_abort(txn_id);
         return -1;
@@ -224,7 +229,9 @@ static int test_journal_validate_and_replay(void) {
     meta.size = 4096;
     strncpy(meta.filename, "validated.txt", TAGFS_MAX_FILENAME);
 
-    if (journal_log_metadata(txn_id, 5, &meta) != 0) {
+    TagFSState* state56 = tagfs_get_state();
+    uint32_t meta5_sector = state56->superblock.metadata_start_sector + (5 - 1);
+    if (journal_log_metadata(txn_id, 5, meta5_sector, &meta) != 0) {
         debug_printf("[JournalTest] FAIL: journal_log_metadata failed\n");
         journal_abort(txn_id);
         if (had_saved_5) tagfs_write_metadata_journaled(5, &saved_meta_5);
@@ -256,7 +263,8 @@ static int test_journal_validate_and_replay(void) {
     uncommitted_meta.size = 8192;
     strncpy(uncommitted_meta.filename, "crash.txt", TAGFS_MAX_FILENAME);
 
-    if (journal_log_metadata(uncommitted_txn, 6, &uncommitted_meta) != 0) {
+    uint32_t meta6_sector = state56->superblock.metadata_start_sector + (6 - 1);
+    if (journal_log_metadata(uncommitted_txn, 6, meta6_sector, &uncommitted_meta) != 0) {
         debug_printf("[JournalTest] FAIL: journal_log_metadata for uncommitted failed\n");
         journal_abort(uncommitted_txn);
         if (had_saved_5) tagfs_write_metadata_journaled(5, &saved_meta_5);
@@ -312,6 +320,12 @@ static int test_journal_validate_and_replay(void) {
 static int test_journal_corrupted_magic(void) {
     debug_printf("[JournalTest] Testing corrupted magic number...\n");
 
+    // Read journal sector from live superblock
+    TagFSState* state = tagfs_get_state();
+    uint32_t jsb_sector    = state->superblock.journal_superblock_sector;
+    uint32_t jbak_sector   = jsb_sector + 1;
+    uint32_t jents_sector  = jbak_sector + 1;
+
     uint8_t* buffer = kmalloc(512);
     if (!buffer) {
         debug_printf("[JournalTest] FAIL: Memory allocation failed\n");
@@ -321,7 +335,7 @@ static int test_journal_corrupted_magic(void) {
     debug_printf("[JournalTest] Phase 1: Corrupt primary superblock magic\n");
     memset(buffer, 0xFF, 512);
 
-    if (ata_write_sectors(1, JOURNAL_SUPERBLOCK_SECTOR, 1, buffer) != 0) {
+    if (ata_write_sectors(1, jsb_sector, 1, buffer) != 0) {
         debug_printf("[JournalTest] FAIL: Failed to write corrupted primary superblock\n");
         kfree(buffer);
         return -1;
@@ -337,7 +351,7 @@ static int test_journal_corrupted_magic(void) {
     memset(&sb_backup, 0, sizeof(sb_backup));
     sb_backup.magic = JOURNAL_MAGIC;
     sb_backup.version = JOURNAL_VERSION;
-    sb_backup.start_sector = JOURNAL_ENTRIES_START;
+    sb_backup.start_sector = jents_sector;
     sb_backup.entry_count = JOURNAL_ENTRY_COUNT;
     sb_backup.head = 0;
     sb_backup.tail = 0;
@@ -346,7 +360,7 @@ static int test_journal_corrupted_magic(void) {
     memset(buffer, 0, 512);
     memcpy(buffer, &sb_backup, sizeof(sb_backup));
 
-    if (ata_write_sectors(1, JOURNAL_SUPERBLOCK_BACKUP, 1, buffer) != 0) {
+    if (ata_write_sectors(1, jbak_sector, 1, buffer) != 0) {
         debug_printf("[JournalTest] FAIL: Failed to write valid backup superblock\n");
         kfree(buffer);
         return -1;
@@ -364,7 +378,7 @@ static int test_journal_corrupted_magic(void) {
 
     debug_printf("[JournalTest] Phase 3: Verify recovery from backup\n");
 
-    if (ata_read_sectors(1, JOURNAL_SUPERBLOCK_SECTOR, 1, buffer) != 0) {
+    if (ata_read_sectors(1, jsb_sector, 1, buffer) != 0) {
         debug_printf("[JournalTest] FAIL: Failed to read restored primary\n");
         kfree(buffer);
         return -1;
@@ -387,6 +401,11 @@ static int test_journal_corrupted_magic(void) {
 static int test_journal_superblock_corruption(void) {
     debug_printf("[JournalTest] Testing superblock head/tail corruption...\n");
 
+    TagFSState* state = tagfs_get_state();
+    uint32_t jsb_sector   = state->superblock.journal_superblock_sector;
+    uint32_t jbak_sector  = jsb_sector + 1;
+    uint32_t jents_sector = jbak_sector + 1;
+
     uint8_t* buffer = kmalloc(512);
     if (!buffer) {
         debug_printf("[JournalTest] FAIL: Memory allocation failed\n");
@@ -399,7 +418,7 @@ static int test_journal_superblock_corruption(void) {
     memset(&corrupt_sb, 0, sizeof(corrupt_sb));
     corrupt_sb.magic = JOURNAL_MAGIC;
     corrupt_sb.version = JOURNAL_VERSION;
-    corrupt_sb.start_sector = JOURNAL_ENTRIES_START;
+    corrupt_sb.start_sector = jents_sector;
     corrupt_sb.entry_count = JOURNAL_ENTRY_COUNT;
     corrupt_sb.head = 9999;
     corrupt_sb.tail = 8888;
@@ -408,13 +427,13 @@ static int test_journal_superblock_corruption(void) {
     memset(buffer, 0, 512);
     memcpy(buffer, &corrupt_sb, sizeof(corrupt_sb));
 
-    if (ata_write_sectors(1, JOURNAL_SUPERBLOCK_SECTOR, 1, buffer) != 0) {
+    if (ata_write_sectors(1, jsb_sector, 1, buffer) != 0) {
         debug_printf("[JournalTest] FAIL: Failed to write corrupted superblock\n");
         kfree(buffer);
         return -1;
     }
 
-    if (ata_write_sectors(1, JOURNAL_SUPERBLOCK_BACKUP, 1, buffer) != 0) {
+    if (ata_write_sectors(1, jbak_sector, 1, buffer) != 0) {
         debug_printf("[JournalTest] FAIL: Failed to write corrupted backup\n");
         kfree(buffer);
         return -1;
@@ -442,7 +461,7 @@ static int test_journal_superblock_corruption(void) {
 
     debug_printf("[JournalTest] Phase 4: Verify journal was reset to empty state\n");
 
-    if (ata_read_sectors(1, JOURNAL_SUPERBLOCK_SECTOR, 1, buffer) != 0) {
+    if (ata_read_sectors(1, jsb_sector, 1, buffer) != 0) {
         debug_printf("[JournalTest] FAIL: Failed to read superblock\n");
         kfree(buffer);
         return -1;
