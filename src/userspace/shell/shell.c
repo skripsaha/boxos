@@ -17,18 +17,23 @@ void shell_init(void)
     g_shell_state.running = true;
     memcpy(g_shell_state.prompt, "~ ", 3);
 
-    notify_page_t* np = notify_page();
+    notify_page_t *np = notify_page();
 
-    if (np->spawner_pid == 0) {
+    if (np->spawner_pid == 0)
+    {
         // Root shell (autostart): create display process
         int display_pid = proc_exec("display");
-        if (display_pid > 0) {
+        if (display_pid > 0)
+        {
             result_entry_t entry;
-            if (receive_wait(&entry, 2000)) {
+            if (receive_wait(&entry, 2000))
+            {
                 io_set_mode(IO_MODE_IPC);
             }
         }
-    } else {
+    }
+    else
+    {
         // Nested shell: display already exists, reuse it via IPC
         io_set_mode(IO_MODE_IPC);
     }
@@ -75,9 +80,15 @@ void shell_update_prompt(void)
     }
 }
 
-void shell_main_loop(void)
+void shell_print_prompt()
 {
     print(g_shell_state.prompt);
+    io_flush();
+}
+
+void shell_main_loop(void)
+{
+    shell_print_prompt();
 
     while (g_shell_state.running)
     {
