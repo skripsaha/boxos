@@ -34,20 +34,7 @@ void storage_deck_init(void)
         return;
     }
 
-    TagFSState *state = tagfs_get_state();
-    state->tag_index = tag_bitmap_create();
-    if (!state->tag_index)
-    {
-        debug_printf("[Storage Deck] ERROR: Failed to create tag index\n");
-        return;
-    }
-
-    if (tag_bitmap_rebuild(state->tag_index, state->metadata_cache, state->superblock.total_files) != 0)
-    {
-        debug_printf("[Storage Deck] ERROR: Failed to rebuild tag index\n");
-        return;
-    }
-
+    // Tag index is already built by tagfs_init() — no duplicate rebuild needed
     tagfs_context_init();
     debug_printf("[Storage Deck] Initialization complete\n");
 }
@@ -241,7 +228,7 @@ static int handle_obj_read_async(Event *event)
         return -1;
     }
 
-    uint32_t start_block = handle->metadata->start_block;
+    uint32_t start_block = handle->metadata.start_block;
     tagfs_close(handle);
 
     uint32_t lba = start_block * 8 + (offset / 512);
@@ -304,8 +291,8 @@ static int handle_obj_write_async(Event *event)
         return -1;
     }
 
-    uint32_t start_block = handle->metadata->start_block;
-    uint64_t original_file_size = handle->metadata->size;
+    uint32_t start_block = handle->metadata.start_block;
+    uint64_t original_file_size = handle->metadata.size;
 
     uint64_t write_offset;
     if (flags & OBJ_WRITE_APPEND)
@@ -448,7 +435,7 @@ int handle_obj_write(Event *event)
 
     if (flags & OBJ_WRITE_APPEND)
     {
-        handle->offset = handle->metadata->size;
+        handle->offset = handle->metadata.size;
     }
     else
     {
@@ -457,7 +444,7 @@ int handle_obj_write(Event *event)
 
     int written = tagfs_write(handle, write_buffer, length);
 
-    uint64_t final_size = handle->metadata->size;
+    uint64_t final_size = handle->metadata.size;
 
     tagfs_close(handle);
 

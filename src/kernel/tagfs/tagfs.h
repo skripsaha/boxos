@@ -90,7 +90,7 @@ typedef struct {
     uint32_t file_id;
     uint32_t flags;
     uint64_t offset;
-    TagFSMetadata* metadata;
+    TagFSMetadata metadata;                // Copy of metadata (not pointer — safe from LRU eviction)
 } TagFSFileHandle;
 
 typedef struct {
@@ -105,6 +105,17 @@ typedef struct {
 } BlockBitmap;
 
 #define TAGFS_BITMAP_SIZE 128  // 1024 bits / 8 = 128 bytes
+
+// Compact per-file summary — always in RAM for fast iteration
+typedef struct {
+    uint32_t file_id;
+    uint32_t flags;
+    uint32_t start_block;
+    uint32_t block_count;
+} TagFSFileSummary;  // 16 bytes per file
+
+// Forward declaration for LRU metadata cache
+struct MetadataLRU;
 
 typedef struct TagBitmapEntry {
     char tag_string[64];
@@ -127,7 +138,8 @@ typedef struct TagBitmapIndex {
 typedef struct {
     TagFSSuperblock superblock;
     TagBitmapIndex* tag_index;
-    TagFSMetadata* metadata_cache;         // Array of max_files entries
+    struct MetadataLRU* mcache;            // LRU cache for full metadata (128 entries)
+    TagFSFileSummary* file_summaries;      // Compact summary for all files (16 bytes each)
     BlockBitmap block_bitmap;
     bool initialized;
     spinlock_t lock;

@@ -26,18 +26,21 @@ static inline ahci_port_regs_t* ahci_get_port_regs(uint8_t port_num) {
     return (ahci_port_regs_t*)port_base;
 }
 
-ahci_port_t* ahci_get_port_state(uint8_t port_num) {
-    if (port_num != 0 || !ahci_ctrl.initialized) {
+static ahci_port_t* ahci_get_port(uint8_t port_num) {
+    if (port_num >= AHCI_MAX_PORTS || !ahci_ctrl.initialized)
         return NULL;
-    }
-    return ahci_ctrl.port0.active ? &ahci_ctrl.port0 : NULL;
+    ahci_port_t* p = &ahci_ctrl.ports[port_num];
+    return p->active ? p : NULL;
+}
+
+ahci_port_t* ahci_get_port_state(uint8_t port_num) {
+    return ahci_get_port(port_num);
 }
 
 volatile ahci_port_regs_t* ahci_get_port_regs_pub(uint8_t port_num) {
-    if (port_num != 0 || !ahci_ctrl.initialized) {
-        return NULL;
-    }
-    return ahci_get_port_regs(0);
+    ahci_port_t* port = ahci_get_port(port_num);
+    if (!port) return NULL;
+    return ahci_get_port_regs(port_num);
 }
 
 static int ahci_port_stop(ahci_port_t* port) {
@@ -122,13 +125,17 @@ void ahci_irq_handler(void) {
 
     __sync_fetch_and_add(&ahci_ctrl.total_interrupts, 1);
 
-    if (is & (1 << 0)) {
-        ahci_port_t* state = &ahci_ctrl.port0;
-        volatile ahci_port_regs_t* port = ahci_get_port_regs(0);
+    uint32_t ports_pending = is & ahci_ctrl.port_implemented;
+    for (uint8_t i = 0; i < AHCI_MAX_PORTS && ports_pending; i++) {
+        if (!(ports_pending & (1U << i))) continue;
+        ports_pending &= ~(1U << i);
 
+        ahci_port_t* state = &ahci_ctrl.ports[i];
+        if (!state->active) continue;
+
+        volatile ahci_port_regs_t* port = ahci_get_port_regs(i);
         uint32_t port_is = port->is;
 
-        // Detect completed commands (CI bits cleared since last snapshot)
         uint32_t completed = state->ci_snapshot ^ port->ci;
         completed &= state->ci_snapshot;
 
@@ -150,14 +157,8 @@ void ahci_irq_handler(void) {
 }
 
 void ahci_port_enable_irq(uint8_t port_num) {
-    if (port_num != 0 || !ahci_ctrl.initialized) {
-        return;
-    }
-
-    ahci_port_t* port = &ahci_ctrl.port0;
-    if (!port->active) {
-        return;
-    }
+    ahci_port_t* port = ahci_get_port(port_num);
+    if (!port) return;
 
     volatile ahci_port_regs_t* regs = port->regs;
 
@@ -187,14 +188,8 @@ void ahci_init_irq(void) {
 }
 
 int ahci_alloc_slot(uint8_t port_num) {
-    if (port_num != 0) {
-        return -1;
-    }
-
-    ahci_port_t* port = &ahci_ctrl.port0;
-    if (!port->active) {
-        return -1;
-    }
+    ahci_port_t* port = ahci_get_port(port_num);
+    if (!port) return -1;
 
     spin_lock(&port->lock);
 
@@ -212,11 +207,9 @@ int ahci_alloc_slot(uint8_t port_num) {
 }
 
 void ahci_free_slot(uint8_t port_num, uint8_t slot) {
-    if (port_num != 0 || slot >= AHCI_MAX_SLOTS) {
-        return;
-    }
-
-    ahci_port_t* port = &ahci_ctrl.port0;
+    if (slot >= AHCI_MAX_SLOTS) return;
+    ahci_port_t* port = ahci_get_port(port_num);
+    if (!port) return;
 
     spin_lock(&port->lock);
     port->slot_bitmap |= (1U << slot);
@@ -224,28 +217,16 @@ void ahci_free_slot(uint8_t port_num, uint8_t slot) {
 }
 
 bool ahci_can_submit_port(uint8_t port_num) {
-    if (port_num != 0) {
-        return false;
-    }
-
-    ahci_port_t* port = &ahci_ctrl.port0;
-    if (!port->active) {
-        return false;
-    }
-
+    ahci_port_t* port = ahci_get_port(port_num);
+    if (!port) return false;
     return port->slot_bitmap != 0;
 }
 
 error_t ahci_build_ncq_read(uint8_t port_num, uint8_t slot, uint64_t lba,
                                    uint16_t sector_count, void* buffer_phys) {
-    if (port_num != 0 || slot >= AHCI_MAX_SLOTS) {
-        return ERR_INVALID_ARGUMENT;
-    }
-
-    ahci_port_t* port = &ahci_ctrl.port0;
-    if (!port->active) {
-        return ERR_DEVICE_NOT_READY;
-    }
+    if (slot >= AHCI_MAX_SLOTS) return ERR_INVALID_ARGUMENT;
+    ahci_port_t* port = ahci_get_port(port_num);
+    if (!port) return ERR_DEVICE_NOT_READY;
 
     ahci_cmd_header_t* cmdheader = (ahci_cmd_header_t*)port->clb_virt;
     cmdheader[slot].cfl = sizeof(fis_reg_h2d_t) / sizeof(uint32_t);
@@ -288,14 +269,9 @@ error_t ahci_build_ncq_read(uint8_t port_num, uint8_t slot, uint64_t lba,
 
 error_t ahci_build_ncq_write(uint8_t port_num, uint8_t slot, uint64_t lba,
                                     uint16_t sector_count, void* buffer_phys) {
-    if (port_num != 0 || slot >= AHCI_MAX_SLOTS) {
-        return ERR_INVALID_ARGUMENT;
-    }
-
-    ahci_port_t* port = &ahci_ctrl.port0;
-    if (!port->active) {
-        return ERR_DEVICE_NOT_READY;
-    }
+    if (slot >= AHCI_MAX_SLOTS) return ERR_INVALID_ARGUMENT;
+    ahci_port_t* port = ahci_get_port(port_num);
+    if (!port) return ERR_DEVICE_NOT_READY;
 
     ahci_cmd_header_t* cmdheader = (ahci_cmd_header_t*)port->clb_virt;
     cmdheader[slot].cfl = sizeof(fis_reg_h2d_t) / sizeof(uint32_t);
@@ -347,7 +323,8 @@ error_t ahci_start_async_transfer(struct async_io_request* req_raw) {
         return ERR_INVALID_ARGUMENT;
     }
 
-    ahci_port_t* state = &ahci_ctrl.port0;
+    // TODO: async_io_request_t needs port_num field for multi-port async I/O
+    ahci_port_t* state = &ahci_ctrl.ports[0];
     volatile ahci_port_regs_t* port = state->regs;
 
     int slot = ahci_alloc_slot(0);
@@ -412,41 +389,46 @@ void ahci_check_timeouts(void) {
         return;
     }
 
-    ahci_port_t* state = &ahci_ctrl.port0;
     uint64_t now = rdtsc();
-    uint32_t snapshot = __atomic_load_n(&state->ci_snapshot, __ATOMIC_ACQUIRE);
 
-    for (uint8_t slot = 0; slot < AHCI_MAX_SLOTS; slot++) {
-        if (!(snapshot & (1U << slot))) {
-            continue;
+    for (uint8_t p = 0; p < AHCI_MAX_PORTS; p++) {
+        ahci_port_t* state = &ahci_ctrl.ports[p];
+        if (!state->active) continue;
+
+        uint32_t snapshot = __atomic_load_n(&state->ci_snapshot, __ATOMIC_ACQUIRE);
+
+        for (uint8_t slot = 0; slot < AHCI_MAX_SLOTS; slot++) {
+            if (!(snapshot & (1U << slot))) {
+                continue;
+            }
+
+            if ((now - state->submit_tsc[slot]) < AHCI_TIMEOUT_TSC) {
+                continue;
+            }
+
+            async_io_mark_failed(state->event_id[slot]);
+
+            Event err;
+            event_init(&err, state->pid[slot], state->event_id[slot]);
+            err.error_code = ERR_TIMEOUT;
+            err.state = EVENT_STATE_ERROR;
+            event_ring_push(kernel_event_ring, &err);
+
+            ahci_free_slot(p, slot);
+            __sync_fetch_and_and(&state->ci_snapshot, ~(1U << slot));
+            __sync_fetch_and_add(&state->ncq_timeouts, 1);
+
+            debug_printf("[AHCI] Port %u: Timeout on slot %u (event_id=%u)\n", p, slot, state->event_id[slot]);
         }
-
-        if ((now - state->submit_tsc[slot]) < AHCI_TIMEOUT_TSC) {
-            continue;
-        }
-
-        async_io_mark_failed(state->event_id[slot]);
-
-        Event err;
-        event_init(&err, state->pid[slot], state->event_id[slot]);
-        err.error_code = ERR_TIMEOUT;
-        err.state = EVENT_STATE_ERROR;
-        event_ring_push(kernel_event_ring, &err);
-
-        ahci_free_slot(0, slot);
-        __sync_fetch_and_and(&state->ci_snapshot, ~(1U << slot));
-        __sync_fetch_and_add(&state->ncq_timeouts, 1);
-
-        debug_printf("[AHCI] Timeout on slot %u (event_id=%u)\n", slot, state->event_id[slot]);
     }
 }
 
 static int ahci_port_init(uint8_t port_num) {
-    if (port_num != 0) {
+    if (port_num >= AHCI_MAX_PORTS) {
         return -1;
     }
 
-    ahci_port_t* port = &ahci_ctrl.port0;
+    ahci_port_t* port = &ahci_ctrl.ports[port_num];
     memset(port, 0, sizeof(ahci_port_t));
 
     port->port_num = port_num;
@@ -555,36 +537,38 @@ static int ahci_port_init(uint8_t port_num) {
     return 0;
 }
 
-// Multi-port enumeration deferred pending async I/O framework redesign
-static int ahci_init_port0(void) {
+static int ahci_init_ports(void) {
     if (!ahci_ctrl.initialized) {
         return -1;
     }
 
     uint32_t pi = ahci_ctrl.hba_mem->pi;
-    if (!(pi & (1U << 0))) {
-        debug_printf("[AHCI] Port 0 not implemented (PI=0x%08x)\n", pi);
-        return -1;
+    ahci_ctrl.port_implemented = pi;
+    debug_printf("[AHCI] Ports Implemented: 0x%08x\n", pi);
+
+    for (uint8_t i = 0; i < AHCI_MAX_PORTS; i++) {
+        if (!(pi & (1U << i))) continue;
+
+        volatile ahci_port_regs_t* regs = ahci_get_port_regs(i);
+        uint32_t ssts = regs->ssts;
+        uint8_t det = (ssts >> AHCI_SSTS_DET_SHIFT) & AHCI_SSTS_DET_MASK;
+
+        if (det != AHCI_SSTS_DET_PRESENT) {
+            debug_printf("[AHCI] Port %u: No device present (SSTS=0x%08x)\n", i, ssts);
+            continue;
+        }
+
+        debug_printf("[AHCI] Port %u: Device detected, initializing...\n", i);
+
+        if (ahci_port_init(i) == 0) {
+            ahci_ctrl.num_active_ports++;
+            debug_printf("[AHCI] Port %u: Active\n", i);
+        } else {
+            debug_printf("[AHCI] Port %u: Initialization failed\n", i);
+        }
     }
 
-    volatile ahci_port_regs_t* regs = ahci_get_port_regs(0);
-    uint32_t ssts = regs->ssts;
-    uint8_t det = (ssts >> AHCI_SSTS_DET_SHIFT) & AHCI_SSTS_DET_MASK;
-
-    if (det != AHCI_SSTS_DET_PRESENT) {
-        debug_printf("[AHCI] Port 0: No device present (SSTS=0x%08x)\n", ssts);
-        return -1;
-    }
-
-    debug_printf("[AHCI] Port 0: Device detected, initializing...\n");
-
-    if (ahci_port_init(0) != 0) {
-        debug_printf("[AHCI] Port 0: Initialization failed\n");
-        return -1;
-    }
-
-    debug_printf("[AHCI] Port 0: Active\n");
-    return 0;
+    return ahci_ctrl.num_active_ports > 0 ? 0 : -1;
 }
 
 error_t ahci_port_comreset(ahci_port_t* port) {
@@ -711,11 +695,10 @@ void ahci_log_error(ahci_port_t* port, uint32_t pxis) {
 }
 
 void ahci_get_port_stats(uint8_t port_num, ahci_port_stats_t* stats_out) {
-    if (port_num != 0 || !stats_out || !ahci_ctrl.initialized) {
-        return;
-    }
-
-    memcpy(stats_out, &ahci_ctrl.port0.stats, sizeof(ahci_port_stats_t));
+    if (!stats_out) return;
+    ahci_port_t* port = ahci_get_port(port_num);
+    if (!port) return;
+    memcpy(stats_out, &port->stats, sizeof(ahci_port_stats_t));
 }
 
 int ahci_init(void) {
@@ -839,14 +822,14 @@ int ahci_init(void) {
 
     ahci_ctrl.initialized = true;
 
-    if (ahci_init_port0() != 0) {
-        debug_printf("[AHCI] Failed to initialize port 0\n");
+    if (ahci_init_ports() != 0) {
+        debug_printf("[AHCI] No active ports found\n");
         vmm_unmap_mmio(ahci_ctrl.hba_mem, 4096);
         ahci_ctrl.initialized = false;
         return -1;
     }
 
-    debug_printf("[AHCI] Initialization complete (port 0 active)\n");
+    debug_printf("[AHCI] Initialization complete (%u active port(s))\n", ahci_ctrl.num_active_ports);
 
     ahci_test_read();
 
@@ -859,7 +842,7 @@ void ahci_test_read(void) {
         return;
     }
 
-    ahci_port_t* port = &ahci_ctrl.port0;
+    ahci_port_t* port = &ahci_ctrl.ports[0];
     if (!port->active) {
         debug_printf("[AHCI] Test READ: Port 0 not active\n");
         return;
@@ -959,6 +942,21 @@ void ahci_test_read(void) {
 
     port->slot_bitmap |= (1 << slot);
     pmm_free(dma_buffer, 1);
+}
+
+uint8_t ahci_get_active_port_count(void) {
+    return ahci_ctrl.num_active_ports;
+}
+
+uint32_t ahci_get_active_port_mask(void) {
+    if (!ahci_ctrl.initialized) return 0;
+    uint32_t mask = 0;
+    for (uint8_t i = 0; i < AHCI_MAX_PORTS; i++) {
+        if (ahci_ctrl.ports[i].active) {
+            mask |= (1U << i);
+        }
+    }
+    return mask;
 }
 
 bool ahci_is_initialized(void) {

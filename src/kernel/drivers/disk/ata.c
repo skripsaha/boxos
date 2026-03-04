@@ -160,11 +160,8 @@ int ata_read_sectors(uint8_t is_master, uint32_t lba, uint8_t count, uint8_t* bu
     }
 
     if (ahci_is_initialized()) {
-        if (!is_master) {
-            debug_printf("[ATA] ERROR: AHCI slave not supported (port 0 only)\n");
-            return ATA_ERR_NO_DEVICE;
-        }
-        return ahci_read_sectors_sync(0, lba, count, buffer);
+        // ATA block layer uses port 0 (boot disk); other ports accessible via AHCI API directly
+        return ahci_read_sectors_sync(is_master ? 0 : 1, lba, count, buffer);
     }
 
     ATADevice* device = is_master ? &ata_primary_master : &ata_primary_slave;
@@ -216,11 +213,7 @@ int ata_write_sectors(uint8_t is_master, uint32_t lba, uint8_t count, const uint
     }
 
     if (ahci_is_initialized()) {
-        if (!is_master) {
-            debug_printf("[ATA] ERROR: AHCI slave not supported (port 0 only)\n");
-            return ATA_ERR_NO_DEVICE;
-        }
-        return ahci_write_sectors_sync(0, lba, count, buffer);
+        return ahci_write_sectors_sync(is_master ? 0 : 1, lba, count, buffer);
     }
 
     ATADevice* device = is_master ? &ata_primary_master : &ata_primary_slave;
@@ -278,11 +271,7 @@ int ata_write_sectors(uint8_t is_master, uint32_t lba, uint8_t count, const uint
 
 int ata_flush_cache(uint8_t is_master) {
     if (ahci_is_initialized()) {
-        if (!is_master) {
-            debug_printf("[ATA] ERROR: AHCI slave not supported (port 0 only)\n");
-            return -1;
-        }
-        return ahci_flush_cache_sync(0);
+        return ahci_flush_cache_sync(is_master ? 0 : 1);
     }
 
     for (int retry = 0; retry < 3; retry++) {

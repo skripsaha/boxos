@@ -363,7 +363,9 @@ typedef struct {
     ahci_hba_mem_t* hba_mem;
     uintptr_t hba_phys;
 
-    ahci_port_t port0;
+    ahci_port_t ports[AHCI_MAX_PORTS];
+    uint32_t    port_implemented;   // PI register value (bitmask)
+    uint8_t     num_active_ports;
 
     uint32_t cap;
     uint8_t  num_slots;
@@ -401,6 +403,8 @@ ahci_port_t* ahci_get_port_state(uint8_t port_num);
 volatile ahci_port_regs_t* ahci_get_port_regs_pub(uint8_t port_num);
 
 bool ahci_is_initialized(void);
+uint8_t ahci_get_active_port_count(void);
+uint32_t ahci_get_active_port_mask(void);
 
 error_t ahci_port_comreset(ahci_port_t* port);
 error_t ahci_port_recover(ahci_port_t* port);

@@ -168,8 +168,14 @@ void kernel_main(void)
 
         debug_printf("[INIT] AHCI IRQ setup...\n");
         ahci_init_irq();
-        ahci_port_enable_irq(0);
-        debug_printf("[INIT] AHCI NCQ enabled\n");
+        uint32_t ahci_active = ahci_get_active_port_mask();
+        for (uint8_t p = 0; p < 32 && ahci_active; p++) {
+            if (ahci_active & (1U << p)) {
+                ahci_port_enable_irq(p);
+                ahci_active &= ~(1U << p);
+            }
+        }
+        debug_printf("[INIT] AHCI NCQ enabled (%u port(s))\n", ahci_get_active_port_count());
     } else {
         debug_printf("[INIT] AHCI not available, using legacy ATA\n");
     }
