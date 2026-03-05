@@ -105,6 +105,9 @@ void kernel_main(void)
     debug_printf("[INIT] VMM...\n");
     vmm_init();
 
+    debug_printf("[INIT] TSS Dynamic Stacks...\n");
+    tss_setup_dynamic_stacks();
+
     debug_printf("[INIT] CPU Capabilities Page...\n");
     cpu_caps_page_init();
 

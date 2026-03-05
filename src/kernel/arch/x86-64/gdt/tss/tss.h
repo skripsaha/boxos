@@ -9,7 +9,10 @@
 #define IST_DEBUG          4
 #define IST_STACK_FAULT    5
 
-#define IST_STACK_SIZE     16384  // 16KB per IST stack
+#define IST_COUNT          5      // IST entries used (1-5)
+#define IST_STACK_PAGES    4      // 4 pages = 16KB per IST stack
+#define IST_GUARD_PAGES    1      // 1 guard page per IST stack
+#define IST_STACK_SIZE     (IST_STACK_PAGES * 4096)  // 16KB per IST stack
 
 typedef struct {
     uint32_t reserved1;
@@ -42,6 +45,7 @@ typedef struct {
 } __attribute__((packed)) tss_descriptor_t;
 
 void tss_init(void);
+void tss_setup_dynamic_stacks(void);  // Phase 2: after PMM+VMM ready
 void tss_set_rsp0(uint64_t rsp0);
 void tss_load(void);
 uint64_t tss_get_ist_stack(int ist_num);
