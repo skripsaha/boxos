@@ -3,10 +3,10 @@
 
 #include "ktypes.h"
 
-int ahci_read_sectors_sync(uint8_t port, uint32_t lba,
+int ahci_read_sectors_sync(uint8_t port, uint64_t lba,
                            uint16_t sector_count, void* buffer);
 
-int ahci_write_sectors_sync(uint8_t port, uint32_t lba,
+int ahci_write_sectors_sync(uint8_t port, uint64_t lba,
                             uint16_t sector_count, const void* buffer);
 
 int ahci_flush_cache_sync(uint8_t port);

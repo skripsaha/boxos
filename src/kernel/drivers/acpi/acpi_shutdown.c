@@ -71,6 +71,7 @@ void acpi_shutdown(void) {
         debug_printf("[ACPI] ACPI not initialized, using fallback methods\n");
     }
 
+    // Method 1: Standard ACPI PM1 shutdown (works on real hardware with proper DSDT)
     if (g_acpi.initialized && g_acpi.pm1a_cnt_blk != 0) {
         attempt_acpi_pm1(g_acpi.pm1a_cnt_blk, g_acpi.slp_typa);
     }
@@ -79,12 +80,14 @@ void acpi_shutdown(void) {
         attempt_acpi_pm1(g_acpi.pm1b_cnt_blk, g_acpi.slp_typb);
     }
 
-#ifdef CONFIG_ACPI_FALLBACK_QEMU
+    // Method 2: QEMU/Bochs shutdown port (only as fallback if ACPI PM1 failed)
+    debug_printf("[ACPI] PM1 shutdown failed, trying QEMU/Bochs fallback...\n");
     attempt_qemu_shutdown();
-#endif
 
+    // Method 3: Keyboard controller reset (8042)
     attempt_keyboard_reset();
 
+    // Method 4: Triple fault forces CPU reset
     triple_fault();
 
     debug_printf("[ACPI] All shutdown methods failed, entering HLT loop\n");

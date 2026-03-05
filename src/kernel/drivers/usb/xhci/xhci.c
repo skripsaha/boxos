@@ -116,14 +116,18 @@ int xhci_init(void) {
     debug_printf("[xHCI]   Vendor: 0x%04x  Device: 0x%04x\n",
                  ctrl->pci_dev.vendor_id, ctrl->pci_dev.device_id);
 
-    uint32_t bar0 = pci_read_bar(&ctrl->pci_dev, 0);
-    if ((bar0 & 0x01) != 0) {
+    // Use 64-bit BAR read to correctly handle MMIO above 4GB
+    uint64_t bar0_full = pci_read_bar64(&ctrl->pci_dev, 0);
+    // Check raw BAR for I/O space bit
+    uint32_t bar0_raw = pci_config_read_dword(ctrl->pci_dev.bus, ctrl->pci_dev.device,
+                                               ctrl->pci_dev.function, PCI_BAR0);
+    if ((bar0_raw & 0x01) != 0) {
         debug_printf("[xHCI] ERROR: BAR0 is I/O space, expected MMIO\n");
         return -1;
     }
 
-    ctrl->mmio_base_phys = bar0 & 0xFFFFFFF0;
-    ctrl->mmio_size = 0x10000;
+    ctrl->mmio_base_phys = bar0_full;
+    ctrl->mmio_size = 0x10000;  // 64KB default; refined after reading capability registers
     debug_printf("[xHCI] MMIO base: 0x%llx (size: 0x%llx)\n",
                  ctrl->mmio_base_phys, ctrl->mmio_size);
 
