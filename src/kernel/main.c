@@ -85,13 +85,8 @@ void kernel_main(void)
     e820_entry_t *e820_map = (e820_entry_t *)(uintptr_t)bi->e820_map_addr;
     uint16_t e820_count = bi->e820_count;
 
-    #define E820_MAX_ENTRIES 128
     if (e820_count == 0) {
         kprintf("[PANIC] E820: No memory map entries\n");
-        while (1) { asm volatile("cli; hlt"); }
-    }
-    if (e820_count > E820_MAX_ENTRIES) {
-        kprintf("[PANIC] E820: Invalid count %u (max %u)\n", e820_count, E820_MAX_ENTRIES);
         while (1) { asm volatile("cli; hlt"); }
     }
 

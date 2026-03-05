@@ -3,6 +3,8 @@
 
 #include "ktypes.h"
 
+#define E820_MAX_ENTRIES  128
+
 #define E820_USABLE      1
 #define E820_RESERVED    2
 #define E820_ACPI_RECL   3
