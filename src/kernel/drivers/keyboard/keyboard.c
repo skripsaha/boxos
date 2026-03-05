@@ -216,9 +216,9 @@ void keyboard_init(void)
 
     kb_flush_output();
 
-    extern void pic_enable_irq(uint8_t irq);
-    pic_enable_irq(1);
-    debug_printf("[KEYBOARD] IRQ1 enabled in PIC\n");
+    extern void irqchip_enable_irq(uint8_t gsi);
+    irqchip_enable_irq(1);
+    debug_printf("[KEYBOARD] IRQ1 enabled\n");
 
     kb_wait_input_buffer();
     outb(KEYBOARD_DATA_PORT, 0xFF);     // Reset command

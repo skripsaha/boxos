@@ -4,6 +4,7 @@
 #include "pmm.h"
 #include "vmm.h"
 #include "io.h"
+#include "irqchip.h"
 #include "atomics.h"
 #include "async_io.h"
 #include "events.h"
@@ -155,7 +156,7 @@ void ahci_irq_handler(void) {
     }
 
     ahci_ctrl.hba_mem->is = is;
-    pic_send_eoi(ahci_ctrl.irq_vector);
+    irqchip_send_eoi(ahci_ctrl.irq_vector);
     sti();
 }
 
@@ -184,7 +185,7 @@ void ahci_init_irq(void) {
 
     extern void irq_register_handler(uint8_t irq, void (*handler)(void));
     irq_register_handler(ahci_ctrl.irq_vector, ahci_irq_handler);
-    pic_enable_irq(ahci_ctrl.irq_vector);
+    irqchip_enable_irq(ahci_ctrl.irq_vector);
 
     ahci_ctrl.irq_enabled = true;
     debug_printf("[AHCI] IRQ %u registered and enabled\n", ahci_ctrl.irq_vector);
