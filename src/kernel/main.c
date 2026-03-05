@@ -37,17 +37,9 @@
 #include "cpuid.h"
 #include "cpu_caps_page.h"
 
-extern char __bss_start[];
-extern char __bss_end[];
-
 void kernel_main(void)
 {
-    volatile uint64_t *bss_ptr = (volatile uint64_t *)__bss_start;
-    volatile uint64_t *bss_end_ptr = (volatile uint64_t *)__bss_end;
-    while (bss_ptr < bss_end_ptr)
-    {
-        *bss_ptr++ = 0;
-    }
+    // BSS is already zeroed by kernel_entry.asm (rep stosb with __bss_start/__bss_end)
 
     vga_init();
     serial_init();
