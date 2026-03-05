@@ -17,11 +17,10 @@ int execution_deck_handler(Event* event) {
     extern void process_list_validate(const char*);
     process_list_validate("exec_deck_before_find");
 
-    process_t* proc = process_find(event->pid);
+    process_t* proc = process_find_ref(event->pid);
     if (!proc) {
         return 0;
     }
-    process_ref_inc(proc);
 
     uint64_t result_phys = proc->result_page_phys;
     if (result_phys == 0) {
@@ -79,8 +78,10 @@ int execution_deck_handler(Event* event) {
             return 0;
         }
 
-        // Pending Queue also full: block process
-        debug_printf("[EXECUTION] CRITICAL: PID %u ResultRing full, blocking process\n", proc->pid);
+        // Pending Queue also full — block process and mark event for retry
+        // so the result is re-delivered once space becomes available.
+        debug_printf("[EXECUTION] CRITICAL: PID %u ResultRing+PendingQueue full, "
+                     "blocking process and retrying event\n", proc->pid);
 
         atomic_store_u8(&proc->result_overflow_flag, 1);
         atomic_fetch_add_u32(&proc->result_overflow_count, 1);
@@ -90,22 +91,12 @@ int execution_deck_handler(Event* event) {
 
         process_set_state(proc, PROC_WAITING);
 
-        result_entry_t overflow_entry;
-        overflow_entry.source = ROUTE_SOURCE_KERNEL;
-        overflow_entry._reserved1 = 0;
-        overflow_entry.error_code = ERR_RESULT_RING_FULL;
-        overflow_entry.sender_pid = 0;
-        overflow_entry.size = 8;
-        *((uint32_t*)overflow_entry.payload) = RESULT_OVERFLOW_MARKER;
-        *((uint32_t*)(overflow_entry.payload + 4)) = proc->result_overflow_count;
-
-        if (pending_results_enqueue(proc->pid, &overflow_entry) != 0) {
-            debug_printf("[EXECUTION] WARNING: PID %u overflow notification lost (pending queue full)\n",
-                       proc->pid);
-        }
+        // Mark event for retry — guide_run() will re-push it into the event ring
+        // so the result data is NOT lost.
+        event->state = EVENT_STATE_RETRY;
 
         process_ref_dec(proc);
-        return -1;  // Event blocked
+        return -1;  // Event will be retried
     }
 
     // Result Page has space: clear backpressure signal
