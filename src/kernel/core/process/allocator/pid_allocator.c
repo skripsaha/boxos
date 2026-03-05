@@ -4,7 +4,7 @@
 
 typedef struct {
     uint8_t bitmap[PID_BITMAP_SIZE];        // 32 bytes: allocation bitmap
-    uint32_t generation[PID_MAX_COUNT];     // 1 KB: generation counters
+    uint32_t generation[PID_MAX_COUNT];     // generation counters (16-bit effective)
     uint32_t allocated_count;
     spinlock_t lock;
 } pid_allocator_t;
@@ -63,13 +63,10 @@ uint32_t pid_alloc(void) {
     bitmap_set(g_allocator.bitmap, index);
     g_allocator.generation[index]++;
 
-    if (g_allocator.generation[index] == 0) {
-        // generation wrapped: uniqueness of PIDs can no longer be guaranteed
-        debug_printf("[PID] CRITICAL: Generation overflow on index %u (2^24 allocations)\n", index);
-        debug_printf("[PID] System has exhausted generation counter for slot %u\n", index);
-        debug_printf("[PID] Cannot guarantee PID uniqueness - HALTING\n");
-        spin_unlock(&g_allocator.lock);
-        while (1) { asm volatile("cli; hlt"); }
+    // Wrap generation within 16-bit range (skip 0 which is reserved for PID_INVALID)
+    if (g_allocator.generation[index] > 0xFFFF) {
+        g_allocator.generation[index] = 1;
+        debug_printf("[PID] WARNING: Generation wrapped on index %u (2^16 allocations)\n", index);
     }
 
     uint32_t pid = PID_BUILD(g_allocator.generation[index], index);

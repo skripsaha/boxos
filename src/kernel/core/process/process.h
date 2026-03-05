@@ -32,7 +32,7 @@ typedef enum {
     WAIT_OVERFLOW
 } wait_reason_t;
 
-#define PROCESS_CLEANUP_QUEUE_SIZE 256
+#define PROCESS_CLEANUP_QUEUE_SIZE 512
 
 typedef struct {
     struct process_t* queue[PROCESS_CLEANUP_QUEUE_SIZE];

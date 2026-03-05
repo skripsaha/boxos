@@ -5,7 +5,7 @@
 #include "klib.h"
 #include "result_page.h"
 
-#define PENDING_QUEUE_SIZE 256  // 4x larger than original for burst traffic
+#define PENDING_QUEUE_SIZE 512  // Scaled for 4096-process limit
 
 typedef struct {
     uint32_t pid;
