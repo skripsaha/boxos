@@ -6,29 +6,34 @@ DEFAULT ABS
 ; 0x0500      - E820 memory map
 ; 0x7C00      - Stage1 (512 bytes)
 ; 0x8000      - Stage2 (8192 bytes = 16 sectors)
-; 0x9000      - Boot info for kernel
+; 0x9000      - Boot info for kernel (structured, versioned)
 ; 0x9100      - TagFS superblock buffer (512 bytes)
 ; 0x9300      - TagFS metadata buffer (512 bytes)
 ; 0x10000     - Bounce buffer for INT 13h reads (32KB)
 ; 0x100000    - Kernel run address (1MB, linked address, loaded via Unreal Mode)
-; 0x820000    - Page tables (16KB: PML4, PDPT, PD) - E820 validated
-; 0x900000    - Stack (grows downward)
+; 0xE00000    - Page tables (32KB: PML4, PDPT, up to 4 PDs) - E820 validated
+; 0xF00000    - Stack (grows downward)
 
 KERNEL_BOUNCE_ADDR    equ 0x10000      ; bounce buffer for INT 13h disk reads
 KERNEL_BOUNCE_SEG     equ 0x1000       ; segment value for bounce buffer (0x1000 * 16 = 0x10000)
 KERNEL_RUN_ADDR       equ 0x100000     ; linked run address (1MB)
-KERNEL_MAX_ADDR       equ 0x800000     ; max kernel end (must stay below page tables)
+KERNEL_MAX_ADDR       equ 0xE00000     ; max kernel end (13MB, must stay below page tables)
 
-; 0x820000: well above kernel max (0x800000), E820-validated, page-aligned, 16KB contiguous
-PAGE_TABLE_BASE       equ 0x820000
+; Page tables at 14MB — gives kernel 13MB to grow
+; 32KB allocated: PML4(4KB) + PDPT(4KB) + up to 4 PDs(16KB) + spare
+PAGE_TABLE_BASE       equ 0xE00000
+PAGE_TABLE_SIZE       equ 0x8000       ; 32KB
 E820_MAP_ADDR         equ 0x500
 E820_COUNT_ADDR       equ 0x4FE
 E820_SIZE_ADDR        equ 0x4FC
-STACK_BASE            equ 0x900000
+STACK_BASE            equ 0xF00000     ; 15MB — above page tables
 BOOT_INFO_ADDR        equ 0x9000
 
-BOOT_DISK             equ 0x80
 STAGE2_SIGNATURE      equ 0x2907
+
+; boot_info structure constants (shared contract with kernel)
+BOOT_INFO_MAGIC       equ 0x42583031     ; "BX01" — BoxOS boot info v1
+BOOT_INFO_VERSION     equ 1
 
 TAGFS_SUPERBLOCK_SECTOR equ 1034
 TAGFS_METADATA_START    equ 1035
@@ -47,6 +52,9 @@ dw STAGE2_SIGNATURE
 start_stage2:
     cli
     cld
+
+    ; Save boot drive number passed by BIOS via stage1 (in DL)
+    mov [boot_drive_saved], dl
 
     xor ax, ax
     mov ds, ax
@@ -134,18 +142,30 @@ long_mode_start:
     test rax, rax
     jz .kernel_not_loaded
 
-    ; Write boot_info with dynamic kernel_end
-    mov [BOOT_INFO_ADDR], dword E820_MAP_ADDR
+    ; Write structured boot_info at BOOT_INFO_ADDR
+    mov dword [BOOT_INFO_ADDR],      BOOT_INFO_MAGIC    ; +0:  magic
+    mov dword [BOOT_INFO_ADDR+4],    BOOT_INFO_VERSION   ; +4:  version
+    mov dword [BOOT_INFO_ADDR+8],    E820_MAP_ADDR       ; +8:  e820_map_addr
     mov ax, [E820_COUNT_ADDR]
-    mov [BOOT_INFO_ADDR+4], ax
-    mov [BOOT_INFO_ADDR+8], dword KERNEL_RUN_ADDR
+    mov word  [BOOT_INFO_ADDR+12],   ax                  ; +12: e820_count
+    mov word  [BOOT_INFO_ADDR+14],   0                   ; +14: reserved
+    mov dword [BOOT_INFO_ADDR+16],   KERNEL_RUN_ADDR     ; +16: kernel_start
 
     ; kernel_end = KERNEL_RUN_ADDR + kernel_loaded_bytes, aligned to 4KB
     mov eax, [kernel_loaded_bytes]
     add eax, KERNEL_RUN_ADDR
     add eax, 0xFFF
     and eax, 0xFFFFF000
-    mov [BOOT_INFO_ADDR+12], eax
+    mov dword [BOOT_INFO_ADDR+20],   eax                 ; +20: kernel_end
+
+    ; boot_drive
+    movzx eax, byte [boot_drive_saved]
+    mov byte  [BOOT_INFO_ADDR+24],   al                  ; +24: boot_drive
+    mov byte  [BOOT_INFO_ADDR+25],   0                   ; +25: reserved
+    mov word  [BOOT_INFO_ADDR+26],   0                   ; +26: reserved
+
+    mov dword [BOOT_INFO_ADDR+28],   PAGE_TABLE_BASE     ; +28: page_table_base
+    mov dword [BOOT_INFO_ADDR+32],   36                  ; +32: total_size
 
     jmp KERNEL_RUN_ADDR
 
@@ -465,7 +485,7 @@ tagfs_read_superblock:
 
     mov si, dap_tagfs_superblock
     mov ah, 0x42
-    mov dl, BOOT_DISK
+    mov dl, [boot_drive_saved]
     int 0x13
     jc .error
 
@@ -516,7 +536,7 @@ tagfs_find_kernel:
 
     mov si, dap_tagfs_metadata
     mov ah, 0x42
-    mov dl, BOOT_DISK
+    mov dl, [boot_drive_saved]
     int 0x13
     jc .scan_next
 
@@ -679,7 +699,7 @@ tagfs_load_kernel_file:
 
     mov si, dap_kernel_chunk
     mov ah, 0x42
-    mov dl, BOOT_DISK
+    mov dl, [boot_drive_saved]
     int 0x13
 
     pop ax
@@ -774,7 +794,7 @@ tagfs_find_kernel_by_header:
     ; Read metadata sector
     mov si, dap_tagfs_metadata
     mov ah, 0x42
-    mov dl, BOOT_DISK
+    mov dl, [boot_drive_saved]
     int 0x13
     jc .hdr_scan_next
 
@@ -813,7 +833,7 @@ tagfs_find_kernel_by_header:
     mov dword [dap_tagfs_metadata + 10], 0
     mov si, dap_tagfs_metadata
     mov ah, 0x42
-    mov dl, BOOT_DISK
+    mov dl, [boot_drive_saved]
     int 0x13
     jc .hdr_scan_next
 
@@ -1002,14 +1022,14 @@ validate_page_table_location:
     cmp ebx, 0x00
     ja .next_entry
     jb .check_end
-    cmp eax, 0x820000
+    cmp eax, PAGE_TABLE_BASE
     ja .next_entry
 
 .check_end:
     cmp edx, 0x00
     ja .found
     jb .next_entry
-    cmp esi, 0x824000
+    cmp esi, PAGE_TABLE_BASE + PAGE_TABLE_SIZE
     jae .found
 
 .next_entry:
@@ -1047,7 +1067,7 @@ validate_page_table_location:
 
 [BITS 32]
 
-; Returns ECX = number of 2MB pages to identity-map (min 64, max 512)
+; Returns ECX = number of 2MB pages to identity-map (min 64, max 2048 = 4GB)
 calculate_identity_map_size:
     push eax
     push ebx
@@ -1101,9 +1121,10 @@ calculate_identity_map_size:
     jmp .done
 
 .check_max:
-    cmp eax, 512
+    ; Cap at 2048 pages = 4GB (fits in PML4[0] with 4 PDs)
+    cmp eax, 2048
     jbe .done
-    mov eax, 512
+    mov eax, 2048
     jmp .done
 
 .use_default:
@@ -1121,27 +1142,53 @@ calculate_identity_map_size:
 
 setup_paging_fixed:
     call calculate_identity_map_size
+    ; ECX = total 2MB pages to map (64..2048)
 
     push ecx
+    push ebx
 
+    ; Zero 32KB of page table space
     mov edi, PAGE_TABLE_BASE
-    mov ecx, 4096
+    mov ecx, 8192          ; 32KB / 4 = 8192 dwords
     xor eax, eax
     rep stosd
+
+    pop ebx                ; EBX = total 2MB pages
+    pop ecx
+    push ecx
+    mov ecx, ebx
 
     ; PML4[0] -> PDPT
     mov dword [PAGE_TABLE_BASE], PAGE_TABLE_BASE + 0x1000 + 3
     mov dword [PAGE_TABLE_BASE + 4], 0x00000000
 
-    ; PDPT[0] -> PD
-    mov dword [PAGE_TABLE_BASE + 0x1000], PAGE_TABLE_BASE + 0x2000 + 3
-    mov dword [PAGE_TABLE_BASE + 0x1004], 0x00000000
+    ; Calculate number of PDs needed: ceil(pages / 512)
+    ; Each PD covers 512 entries × 2MB = 1GB
+    mov eax, ecx
+    add eax, 511
+    shr eax, 9             ; EAX = number of PDs (1..4)
+    mov ebx, eax           ; EBX = num_pds
 
-    ; PD: identity map 2MB pages
-    mov edi, PAGE_TABLE_BASE
-    add edi, 0x2000
-    mov eax, 0x000083     ; Present, Writable, Page Size (2MB)
-    pop ecx
+    ; Set up PDPT entries -> PDs (PD0 at +0x2000, PD1 at +0x3000, ...)
+    xor edx, edx           ; PDPT entry index
+.setup_pdpt:
+    mov eax, edx
+    shl eax, 12            ; PD offset = index * 4096
+    add eax, PAGE_TABLE_BASE + 0x2000
+    or eax, 3              ; Present + Writable
+    mov edi, PAGE_TABLE_BASE + 0x1000
+    lea edi, [edi + edx*8]
+    mov [edi], eax
+    mov dword [edi+4], 0
+
+    inc edx
+    cmp edx, ebx
+    jb .setup_pdpt
+
+    ; Fill all PD entries with 2MB pages
+    mov edi, PAGE_TABLE_BASE + 0x2000
+    mov eax, 0x000083      ; Present, Writable, Page Size (2MB)
+    pop ecx                ; ECX = total 2MB pages
 
 .fill_pd:
     mov [edi], eax
@@ -1268,6 +1315,7 @@ dap_kernel_chunk:
     dq 0                ; updated dynamically
 
 align 4
+boot_drive_saved:       db 0
 kernel_file_id:         dw 0
 kernel_start_block:     dd 0
 kernel_block_count:     dd 0
@@ -1285,7 +1333,7 @@ msg_e820_fail         db '[WARN] E820 failed, using fallback', 13, 10, 0
 msg_memory_fallback   db '[OK] Fallback memory detection', 13, 10, 0
 msg_memory_error      db '[ERROR] Memory detection failed!', 13, 10, 0
 msg_unreal_mode       db '[OK] Unreal Mode (4GB addressing) active', 13, 10, 0
-msg_kernel_too_large  db '[ERROR] Kernel exceeds 7MB limit!', 13, 10, 0
+msg_kernel_too_large  db '[ERROR] Kernel exceeds 13MB limit!', 13, 10, 0
 msg_loading_tagfs     db 'Loading kernel via TagFS (Unreal Mode)...', 13, 10, 0
 msg_kernel_loaded_tagfs db '[OK] Kernel loaded to 0x100000 via Unreal Mode', 13, 10, 0
 msg_tagfs_error       db '[ERROR] TagFS superblock read failed!', 13, 10, 0
@@ -1295,7 +1343,7 @@ msg_long_mode_ok      db '[OK] CPU supports 64-bit mode', 13, 10, 0
 msg_no_cpuid          db '[ERROR] CPUID not supported!', 13, 10, 0
 msg_no_long_mode      db '[ERROR] 64-bit mode not supported!', 13, 10, 0
 msg_entering_protected db 'Entering protected mode...', 13, 10, 0
-msg_page_table_safe   db '[OK] Page table location validated (0x820000)', 13, 10, 0
-msg_page_table_unsafe db '[ERROR] Page tables at 0x820000 in unusable memory! Need 8MB+ RAM', 13, 10, 0
+msg_page_table_safe   db '[OK] Page table location validated (0xE00000)', 13, 10, 0
+msg_page_table_unsafe db '[ERROR] Page tables at 0xE00000 in unusable memory! Need 16MB+ RAM', 13, 10, 0
 msg_kernel_tag_not_found  db '[WARN] Kernel tag not found, searching by header...', 13, 10, 0
 msg_kernel_loaded_header  db '[OK] Kernel loaded via header scan', 13, 10, 0

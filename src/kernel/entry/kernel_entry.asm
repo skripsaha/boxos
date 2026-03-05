@@ -30,8 +30,8 @@ _start:
     mov gs, ax
 
     ; Stack must be AFTER BSS to avoid corruption!
-    ; Kernel at 0x100000, BSS ends at ~0x15D000, stack at 0x900000 = 9MB
-    mov rsp, 0x900000
+    ; Kernel at 0x100000, page tables at 0xE00000, stack at 0xF00000 = 15MB
+    mov rsp, 0xF00000
     mov rbp, rsp
 
     mov al, 'S'

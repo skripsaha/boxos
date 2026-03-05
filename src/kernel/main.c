@@ -36,6 +36,7 @@
 #include "tagfs.h"
 #include "cpuid.h"
 #include "cpu_caps_page.h"
+#include "boot_info.h"
 
 void kernel_main(void)
 {
@@ -69,13 +70,18 @@ void kernel_main(void)
     debug_printf("[INIT] PIC...\n");
     pic_init();
 
+    debug_printf("[INIT] Boot Info...\n");
+    boot_info_t *bi = boot_info_get();
+    if (!boot_info_valid(bi)) {
+        kprintf("[PANIC] Boot info invalid! magic=0x%x version=%u\n", bi->magic, bi->version);
+        while (1) { asm volatile("cli; hlt"); }
+    }
+    kprintf("[BOOT] Boot info v%u OK (drive=0x%x, kernel 0x%x-0x%x)\n",
+            bi->version, bi->boot_drive, bi->kernel_start, bi->kernel_end);
+
     debug_printf("[INIT] E820 Memory Map...\n");
-    e820_entry_t *e820_map = (e820_entry_t *)0x500;
-    volatile uint16_t *e820_count_ptr = (volatile uint16_t *)0x4FE;
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Warray-bounds"
-    uint16_t e820_count = *e820_count_ptr;
-#pragma GCC diagnostic pop
+    e820_entry_t *e820_map = (e820_entry_t *)(uintptr_t)bi->e820_map_addr;
+    uint16_t e820_count = bi->e820_count;
 
     #define E820_MAX_ENTRIES 128
     if (e820_count == 0) {
@@ -87,7 +93,7 @@ void kernel_main(void)
         while (1) { asm volatile("cli; hlt"); }
     }
 
-    debug_printf("[E820] Entries at 0x500, count = %u\n", e820_count);
+    debug_printf("[E820] Entries at 0x%x, count = %u\n", bi->e820_map_addr, e820_count);
     e820_set_entries(e820_map, (size_t)e820_count);
 
     debug_printf("[INIT] PMM...\n");
