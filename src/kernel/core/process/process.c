@@ -176,6 +176,20 @@ process_t *process_create(const char *tags)
     proc->context.gs = GDT_USER_DATA;
     proc->context.ss = GDT_USER_DATA;
 
+    // Allocate FPU/SSE/AVX state buffer dynamically (size depends on CPU features)
+    uint32_t fpu_buf_size = fpu_alloc_size();
+    proc->context.fpu_state = kmalloc(fpu_buf_size);
+    if (!proc->context.fpu_state) {
+        debug_printf("[PROCESS] ERROR: Failed to allocate FPU state buffer (%u bytes)\n", fpu_buf_size);
+        if (proc->kernel_stack_guard_base) {
+            uintptr_t sp = vmm_virt_to_phys_direct(proc->kernel_stack_guard_base);
+            pmm_free((void *)sp, CONFIG_KERNEL_STACK_TOTAL_PAGES);
+        }
+        vmm_destroy_context(cabin);
+        pid_free(proc->pid);
+        kfree(proc);
+        return NULL;
+    }
     fpu_init_state(proc->context.fpu_state);
     proc->context.fpu_initialized = true;
 
@@ -186,6 +200,8 @@ process_t *process_create(const char *tags)
     {
         spin_unlock(&process_lock);
         // undo all allocations
+        if (proc->context.fpu_state)
+            kfree(proc->context.fpu_state);
         if (proc->kernel_stack_guard_base)
         {
             uintptr_t stack_phys = vmm_virt_to_phys_direct(proc->kernel_stack_guard_base);
@@ -990,6 +1006,12 @@ static void process_cleanup_immediate(process_t *proc)
 {
     if (!proc)
         return;
+
+    // Free dynamically allocated FPU state buffer
+    if (proc->context.fpu_state) {
+        kfree(proc->context.fpu_state);
+        proc->context.fpu_state = NULL;
+    }
 
     if (proc->kernel_stack_guard_base)
     {

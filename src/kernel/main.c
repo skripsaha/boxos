@@ -56,7 +56,10 @@ void kernel_main(void)
             CABIN_NOTIFY_PAGE_ADDR, CABIN_RESULT_PAGE_ADDR, CABIN_CODE_START_ADDR);
     kprintf("\n");
 
-    debug_printf("[INIT] FPU/SSE...\n");
+    debug_printf("[INIT] CPU Feature Detection (early)...\n");
+    cpu_detect_features();
+
+    debug_printf("[INIT] FPU/SSE/AVX...\n");
     enable_fpu();
 
     debug_printf("[INIT] GDT...\n");
@@ -101,9 +104,6 @@ void kernel_main(void)
 
     debug_printf("[INIT] VMM...\n");
     vmm_init();
-
-    debug_printf("[INIT] CPU Feature Detection...\n");
-    cpu_detect_features();
 
     debug_printf("[INIT] CPU Capabilities Page...\n");
     cpu_caps_page_init();

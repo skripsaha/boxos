@@ -59,10 +59,10 @@ typedef struct {
     uint16_t cs, ds, es, fs, gs, ss;
     uint64_t rflags;
     uint64_t cr3;
-    // fxsave requires 16-byte alignment; kmalloc does not guarantee it.
-    // fpu_save/fpu_restore compute the aligned pointer at runtime via fpu_align().
-    // Buffer is 528 bytes (512 + 16) to allow runtime alignment adjustment.
-    uint8_t fpu_state[512 + 16];
+    // Pointer to dynamically allocated FPU/SSE/AVX state buffer.
+    // Buffer is allocated at process creation with fpu_alloc_size() bytes.
+    // fpu_save/fpu_restore align this pointer to 64 bytes at runtime via fpu_align().
+    uint8_t* fpu_state;
     bool fpu_initialized;
 } ProcessContext;
 
@@ -72,7 +72,7 @@ _Static_assert(offsetof(ProcessContext, rip) == 128, "ProcessContext.rip offset 
 _Static_assert(offsetof(ProcessContext, cs) == 136, "ProcessContext.cs offset mismatch with asm");
 _Static_assert(offsetof(ProcessContext, rflags) == 152, "ProcessContext.rflags offset mismatch with asm");
 _Static_assert(offsetof(ProcessContext, fpu_state) == 168, "ProcessContext.fpu_state offset mismatch with asm");
-_Static_assert(offsetof(ProcessContext, fpu_initialized) == 696, "ProcessContext.fpu_initialized offset mismatch with asm");
+_Static_assert(offsetof(ProcessContext, fpu_initialized) == 176, "ProcessContext.fpu_initialized offset mismatch with asm");
 
 typedef struct process_t {
     uint32_t magic;

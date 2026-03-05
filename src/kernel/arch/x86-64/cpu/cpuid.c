@@ -31,17 +31,31 @@ void cpu_detect_features(void) {
     *((uint32_t*)&g_cpu_caps.vendor_string[8]) = ecx;
     g_cpu_caps.vendor_string[12] = '\0';
 
-    // Check APIC/x2APIC support (CPUID.1:EDX[9], CPUID.1:ECX[21])
+    // Check APIC/x2APIC/XSAVE/AVX support (CPUID.1)
     if (g_cpu_caps.max_basic_leaf >= 1) {
         cpuid(1, &eax, &ebx, &ecx, &edx);
         g_cpu_caps.has_apic = (edx & (1 << 9)) != 0;
         g_cpu_caps.has_x2apic = (ecx & (1 << 21)) != 0;
+        g_cpu_caps.has_xsave = (ecx & (1 << 26)) != 0;
+        g_cpu_caps.has_avx = (ecx & (1 << 28)) != 0;
     }
 
-    // Check WAITPKG support (CPUID.7.0:ECX[5])
+    // Check WAITPKG and AVX-512 support (CPUID.7.0)
     if (g_cpu_caps.max_basic_leaf >= 7) {
         cpuid_count(7, 0, &eax, &ebx, &ecx, &edx);
         g_cpu_caps.has_waitpkg = (ecx & (1 << 5)) != 0;
+        g_cpu_caps.has_avx512 = (ebx & (1 << 16)) != 0;
+    }
+
+    // Query XSAVE area size and supported components (CPUID.0xD:0)
+    if (g_cpu_caps.has_xsave && g_cpu_caps.max_basic_leaf >= 0xD) {
+        cpuid_count(0xD, 0, &eax, &ebx, &ecx, &edx);
+        // EAX = valid bits of XCR0 (lower 32)
+        // EDX = valid bits of XCR0 (upper 32)
+        // EBX = max size for currently enabled features
+        // ECX = max size for all supported features
+        g_cpu_caps.xcr0_supported = ((uint64_t)edx << 32) | eax;
+        g_cpu_caps.xsave_area_size = ecx;
     }
 
     // Check Invariant TSC (CPUID.0x80000007:EDX[8])

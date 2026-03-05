@@ -174,6 +174,7 @@ void cpu_print_detailed_info(void) {
     if (cpu_info.features_ecx & (1 << 20)) kprintf("SSE4.2 ");
     if (cpu_info.features_ecx & (1 << 23)) kprintf("POPCNT ");
     if (cpu_info.features_ecx & (1 << 25)) kprintf("AES ");
+    if (cpu_info.features_ecx & (1 << 26)) kprintf("XSAVE ");
     if (cpu_info.features_ecx & (1 << 28)) kprintf("AVX ");
     kprintf("\n");
 
