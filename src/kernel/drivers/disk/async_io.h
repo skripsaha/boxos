@@ -23,8 +23,10 @@ typedef struct {
     async_io_operation_t op;
 
     /* For WRITE: buffer points to Event.data which is only valid until
-     * ata_dma_start_async_transfer() returns; data must be copied before returning. */
+     * ata_dma_start_async_transfer() returns; data must be copied before returning.
+     * data_length is the actual valid bytes in buffer_virt (may be < sector_count * 512). */
     void*    buffer_virt;
+    uint32_t data_length;
     uint64_t submit_time;
 
     uint32_t file_id;

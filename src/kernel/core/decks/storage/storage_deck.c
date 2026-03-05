@@ -317,6 +317,7 @@ static int handle_obj_write_async(Event *event)
     areq.is_master = 1;
     areq.op = ASYNC_IO_OP_WRITE;
     areq.buffer_virt = req->data;
+    areq.data_length = length;
     areq.submit_time = rdtsc();
 
     areq.file_id = file_id;
