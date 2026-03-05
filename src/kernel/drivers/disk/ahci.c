@@ -350,7 +350,10 @@ error_t ahci_start_async_transfer(struct async_io_request* req_raw) {
             return ERR_NULL_POINTER;
         }
 
-        memcpy(state->staging_virt[slot], req->buffer_virt, req->sector_count * 512);
+        uint32_t total_size = req->sector_count * 512;
+        uint32_t copy_size = req->data_length < total_size ? req->data_length : total_size;
+        memset(state->staging_virt[slot], 0, total_size);
+        memcpy(state->staging_virt[slot], req->buffer_virt, copy_size);
         target_phys = state->staging_phys[slot];
         state->ncq_writes++;
 

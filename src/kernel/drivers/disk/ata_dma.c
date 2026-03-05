@@ -671,6 +671,10 @@ int ata_write_sectors_dma(uint8_t is_master, uint32_t lba, uint8_t count, const 
             dma_state.active_request_idx = 0xFF;
 
             spin_unlock(&dma_state.lock);
+
+            /* Flush write cache to ensure data reaches persistent storage */
+            ata_flush_cache(is_master);
+
             return 0;
         }
 
@@ -766,16 +770,16 @@ int ata_dma_start_async_transfer(async_io_request_t* req) {
     }
 
     if (req->op == ASYNC_IO_OP_WRITE && req->buffer_virt) {
-        size_t copy_size = req->sector_count * ATA_SECTOR_SIZE;
-        if (copy_size > 168) {
-            copy_size = 168;
+        uint32_t total_size = req->sector_count * ATA_SECTOR_SIZE;
+        uint32_t copy_size = req->data_length;
+        if (copy_size > total_size) {
+            copy_size = total_size;
         }
-        memcpy(dma_buffer, req->buffer_virt, copy_size);
 
-        if (copy_size < req->sector_count * ATA_SECTOR_SIZE) {
-            memset((uint8_t*)dma_buffer + copy_size, 0,
-                   req->sector_count * ATA_SECTOR_SIZE - copy_size);
-        }
+        /* Zero entire DMA buffer first, then overlay valid data.
+         * This ensures no stale data leaks into sectors beyond data_length. */
+        memset(dma_buffer, 0, total_size);
+        memcpy(dma_buffer, req->buffer_virt, copy_size);
         mfence();
     }
 
