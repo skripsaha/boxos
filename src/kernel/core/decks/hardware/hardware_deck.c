@@ -528,21 +528,26 @@ int hardware_deck_handler(Event* event) {
             memcpy(&event->data[1], device->model, 40);
             memcpy(&event->data[41], device->serial, 20);
 
-            // Big-endian encoding for portability
-            event->data[61] = (device->total_sectors >> 24) & 0xFF;
-            event->data[62] = (device->total_sectors >> 16) & 0xFF;
-            event->data[63] = (device->total_sectors >> 8) & 0xFF;
-            event->data[64] = device->total_sectors & 0xFF;
+            // Big-endian encoding for portability (8 bytes for 48-bit LBA)
+            uint64_t sectors = device->total_sectors;
+            event->data[61] = (sectors >> 56) & 0xFF;
+            event->data[62] = (sectors >> 48) & 0xFF;
+            event->data[63] = (sectors >> 40) & 0xFF;
+            event->data[64] = (sectors >> 32) & 0xFF;
+            event->data[65] = (sectors >> 24) & 0xFF;
+            event->data[66] = (sectors >> 16) & 0xFF;
+            event->data[67] = (sectors >> 8) & 0xFF;
+            event->data[68] = sectors & 0xFF;
 
             uint64_t size_mb = device->size_mb;
-            event->data[65] = (size_mb >> 56) & 0xFF;
-            event->data[66] = (size_mb >> 48) & 0xFF;
-            event->data[67] = (size_mb >> 40) & 0xFF;
-            event->data[68] = (size_mb >> 32) & 0xFF;
-            event->data[69] = (size_mb >> 24) & 0xFF;
-            event->data[70] = (size_mb >> 16) & 0xFF;
-            event->data[71] = (size_mb >> 8) & 0xFF;
-            event->data[72] = size_mb & 0xFF;
+            event->data[69] = (size_mb >> 56) & 0xFF;
+            event->data[70] = (size_mb >> 48) & 0xFF;
+            event->data[71] = (size_mb >> 40) & 0xFF;
+            event->data[72] = (size_mb >> 32) & 0xFF;
+            event->data[73] = (size_mb >> 24) & 0xFF;
+            event->data[74] = (size_mb >> 16) & 0xFF;
+            event->data[75] = (size_mb >> 8) & 0xFF;
+            event->data[76] = size_mb & 0xFF;
 
             event->state = EVENT_STATE_COMPLETED;
             return 0;

@@ -25,6 +25,8 @@
 
 #define ATA_CMD_READ_DMA        0xC8
 #define ATA_CMD_WRITE_DMA       0xCA
+#define ATA_CMD_READ_DMA_EXT    0x25    // 48-bit LBA
+#define ATA_CMD_WRITE_DMA_EXT   0x35    // 48-bit LBA
 
 #define ATA_PRD_EOT             0x8000
 
@@ -49,7 +51,7 @@ typedef enum {
 typedef struct {
     uint32_t event_id;
     uint32_t pid;
-    uint32_t lba;
+    uint64_t lba;               // 48-bit LBA support
     uint16_t sector_count;
     uint8_t is_master;
     uint8_t is_write;

@@ -759,25 +759,22 @@ int ahci_init(void) {
         return -1;
     }
 
-    uint32_t bar5 = pci_read_bar(&ahci_ctrl.pci_dev, 5);
-    if (bar5 == 0 || bar5 == 0xFFFFFFFF) {
-        debug_printf("[AHCI] Invalid BAR5: 0x%08x\n", bar5);
+    uint64_t bar5_full = pci_read_bar64(&ahci_ctrl.pci_dev, 5);
+    if (bar5_full == 0 || bar5_full == 0xFFFFFFFF) {
+        debug_printf("[AHCI] Invalid BAR5: 0x%lx\n", (unsigned long)bar5_full);
         return -1;
     }
 
-    if (bar5 & 0x1) {
+    // Check raw BAR for I/O space bit
+    uint32_t bar5_raw = pci_config_read_dword(ahci_ctrl.pci_dev.bus, ahci_ctrl.pci_dev.device,
+                                               ahci_ctrl.pci_dev.function, PCI_BAR5);
+    if (bar5_raw & 0x1) {
         debug_printf("[AHCI] BAR5 is I/O space (not MMIO)\n");
         return -1;
     }
 
-    ahci_ctrl.hba_phys = bar5 & 0xFFFFFFF0;
-
-    // 64-bit BAR: bits[2:1]=10 means 64-bit, high 32 bits in BAR6
-    if ((bar5 & 0x6) == 0x4) {
-        uint32_t bar5_hi = pci_read_bar(&ahci_ctrl.pci_dev, 5 + 1);
-        ahci_ctrl.hba_phys |= ((uint64_t)bar5_hi << 32);
-        debug_printf("[AHCI] 64-bit BAR5: 0x%lx\n", ahci_ctrl.hba_phys);
-    }
+    ahci_ctrl.hba_phys = bar5_full;
+    debug_printf("[AHCI] BAR5: 0x%lx\n", (unsigned long)ahci_ctrl.hba_phys);
 
     ahci_ctrl.hba_mem = (ahci_hba_mem_t*)vmm_map_mmio(ahci_ctrl.hba_phys,
                                                        4096,

@@ -17,10 +17,13 @@
 #define ATA_PRIMARY_CONTROL     0x3F6
 #define ATA_PRIMARY_ALTSTATUS   0x3F6   // Alternate status (read, no interrupt clear)
 
-#define ATA_CMD_READ_SECTORS    0x20
-#define ATA_CMD_WRITE_SECTORS   0x30
-#define ATA_CMD_IDENTIFY        0xEC
-#define ATA_CMD_CACHE_FLUSH     0xE7
+#define ATA_CMD_READ_SECTORS        0x20
+#define ATA_CMD_WRITE_SECTORS       0x30
+#define ATA_CMD_READ_SECTORS_EXT    0x24    // 48-bit LBA
+#define ATA_CMD_WRITE_SECTORS_EXT   0x34    // 48-bit LBA
+#define ATA_CMD_IDENTIFY            0xEC
+#define ATA_CMD_CACHE_FLUSH         0xE7
+#define ATA_CMD_CACHE_FLUSH_EXT     0xEA    // 48-bit LBA
 
 #define ATA_SR_BSY              0x80
 #define ATA_SR_DRDY             0x40
@@ -47,7 +50,9 @@
 typedef struct {
     uint8_t exists;
     uint8_t is_master;
-    uint32_t total_sectors;
+    uint8_t lba48_supported;    // 1 if 48-bit LBA EXT commands available
+    uint8_t reserved;
+    uint64_t total_sectors;     // 48-bit sector count (up to 128 PB)
     uint64_t size_mb;
     char model[41];
     char serial[21];
@@ -56,12 +61,12 @@ typedef struct {
 void ata_init(void);
 int ata_identify(uint8_t is_master, ATADevice* device);
 
-// lba: Logical Block Address, count: sectors (1-256), buffer: must be >= count*512 bytes
-int ata_read_sectors(uint8_t is_master, uint32_t lba, uint8_t count, uint8_t* buffer);
-int ata_write_sectors(uint8_t is_master, uint32_t lba, uint8_t count, const uint8_t* buffer);
+// lba: Logical Block Address (28-bit or 48-bit), count: sectors (1-256)
+int ata_read_sectors(uint8_t is_master, uint64_t lba, uint16_t count, uint8_t* buffer);
+int ata_write_sectors(uint8_t is_master, uint64_t lba, uint16_t count, const uint8_t* buffer);
 int ata_flush_cache(uint8_t is_master);
-int ata_read_sectors_retry(uint8_t is_master, uint32_t lba, uint8_t count, uint8_t* buffer);
-int ata_write_sectors_retry(uint8_t is_master, uint32_t lba, uint8_t count, const uint8_t* buffer);
+int ata_read_sectors_retry(uint8_t is_master, uint64_t lba, uint16_t count, uint8_t* buffer);
+int ata_write_sectors_retry(uint8_t is_master, uint64_t lba, uint16_t count, const uint8_t* buffer);
 
 // High-level block I/O for TagFS (4KB blocks = 8 sectors)
 int ata_read_block(uint32_t block_num, uint8_t* buffer);

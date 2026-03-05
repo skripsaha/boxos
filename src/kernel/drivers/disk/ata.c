@@ -131,10 +131,20 @@ int ata_identify(uint8_t is_master, ATADevice* device) {
 
     device->exists = 1;
 
-    // Use memcpy to avoid strict-aliasing violation
-    uint32_t total_sectors_tmp;
-    memcpy(&total_sectors_tmp, &identify_data[60], sizeof(uint32_t));
-    device->total_sectors = total_sectors_tmp;
+    // Check LBA48 support: IDENTIFY word 83, bit 10
+    device->lba48_supported = (identify_data[83] & (1 << 10)) ? 1 : 0;
+
+    if (device->lba48_supported) {
+        // 48-bit LBA: sector count in words 100-103 (64-bit)
+        uint64_t lba48_sectors = 0;
+        memcpy(&lba48_sectors, &identify_data[100], sizeof(uint64_t));
+        device->total_sectors = lba48_sectors;
+    } else {
+        // 28-bit LBA: sector count in words 60-61 (32-bit)
+        uint32_t total_sectors_tmp;
+        memcpy(&total_sectors_tmp, &identify_data[60], sizeof(uint32_t));
+        device->total_sectors = total_sectors_tmp;
+    }
     device->size_mb = (device->total_sectors / 2048);
 
     memcpy(device->model, &identify_data[27], 40);
@@ -143,24 +153,24 @@ int ata_identify(uint8_t is_master, ATADevice* device) {
     memcpy(device->serial, &identify_data[10], 20);
     ata_string_fixup(device->serial, 20);
 
-    debug_printf("[ATA] Detected %s: %s (%lu MB, %u sectors)\n",
+    debug_printf("[ATA] Detected %s: %s (%lu MB, %lu sectors, LBA%s)\n",
             is_master ? "master" : "slave",
             device->model,
             device->size_mb,
-            device->total_sectors);
+            (unsigned long)device->total_sectors,
+            device->lba48_supported ? "48" : "28");
 
     return 0;
 }
 
 
-int ata_read_sectors(uint8_t is_master, uint32_t lba, uint8_t count, uint8_t* buffer) {
+int ata_read_sectors(uint8_t is_master, uint64_t lba, uint16_t count, uint8_t* buffer) {
     if (!buffer || count == 0) {
         debug_printf("[ATA] ERROR: Cannot read 0 sectors\n");
         return ATA_ERR_INVALID_ARGS;
     }
 
     if (ahci_is_initialized()) {
-        // ATA block layer uses port 0 (boot disk); other ports accessible via AHCI API directly
         return ahci_read_sectors_sync(is_master ? 0 : 1, lba, count, buffer);
     }
 
@@ -171,7 +181,8 @@ int ata_read_sectors(uint8_t is_master, uint32_t lba, uint8_t count, uint8_t* bu
     }
 
     if (lba >= device->total_sectors) {
-        debug_printf("[ATA] ERROR: LBA %u out of bounds (max %u)\n", lba, device->total_sectors);
+        debug_printf("[ATA] ERROR: LBA %lu out of bounds (max %lu)\n",
+                     (unsigned long)lba, (unsigned long)device->total_sectors);
         return -1;
     }
 
@@ -179,17 +190,40 @@ int ata_read_sectors(uint8_t is_master, uint32_t lba, uint8_t count, uint8_t* bu
         return -1;
     }
 
-    uint8_t drive_bits = is_master ? 0xE0 : 0xF0;  // LBA mode + master/slave
-    drive_bits |= (lba >> 24) & 0x0F;
-    outb(ATA_PRIMARY_DRIVE, drive_bits);
-    ata_delay_400ns();
+    bool use_lba48 = device->lba48_supported && (lba > 0x0FFFFFFF || count > 256);
 
-    outb(ATA_PRIMARY_SECCOUNT, count);
-    outb(ATA_PRIMARY_LBA_LO, lba & 0xFF);
-    outb(ATA_PRIMARY_LBA_MID, (lba >> 8) & 0xFF);
-    outb(ATA_PRIMARY_LBA_HI, (lba >> 16) & 0xFF);
+    if (use_lba48) {
+        // 48-bit LBA: select drive (no LBA bits in drive register)
+        outb(ATA_PRIMARY_DRIVE, is_master ? 0x40 : 0x50);
+        ata_delay_400ns();
 
-    outb(ATA_PRIMARY_COMMAND, ATA_CMD_READ_SECTORS);
+        // Write HOB (High Order Byte) registers first
+        outb(ATA_PRIMARY_SECCOUNT, (count >> 8) & 0xFF);   // sector count high
+        outb(ATA_PRIMARY_LBA_LO,   (lba >> 24) & 0xFF);    // LBA4
+        outb(ATA_PRIMARY_LBA_MID,  (lba >> 32) & 0xFF);    // LBA5
+        outb(ATA_PRIMARY_LBA_HI,   (lba >> 40) & 0xFF);    // LBA6
+
+        // Then write current (low) registers
+        outb(ATA_PRIMARY_SECCOUNT, count & 0xFF);           // sector count low
+        outb(ATA_PRIMARY_LBA_LO,   lba & 0xFF);             // LBA1
+        outb(ATA_PRIMARY_LBA_MID,  (lba >> 8) & 0xFF);      // LBA2
+        outb(ATA_PRIMARY_LBA_HI,   (lba >> 16) & 0xFF);     // LBA3
+
+        outb(ATA_PRIMARY_COMMAND, ATA_CMD_READ_SECTORS_EXT);
+    } else {
+        // 28-bit LBA
+        uint8_t drive_bits = is_master ? 0xE0 : 0xF0;
+        drive_bits |= (lba >> 24) & 0x0F;
+        outb(ATA_PRIMARY_DRIVE, drive_bits);
+        ata_delay_400ns();
+
+        outb(ATA_PRIMARY_SECCOUNT, (uint8_t)count);
+        outb(ATA_PRIMARY_LBA_LO,   lba & 0xFF);
+        outb(ATA_PRIMARY_LBA_MID,  (lba >> 8) & 0xFF);
+        outb(ATA_PRIMARY_LBA_HI,   (lba >> 16) & 0xFF);
+
+        outb(ATA_PRIMARY_COMMAND, ATA_CMD_READ_SECTORS);
+    }
 
     for (int sector = 0; sector < count; sector++) {
         if (ata_wait_drq() != 0) {
@@ -207,7 +241,7 @@ int ata_read_sectors(uint8_t is_master, uint32_t lba, uint8_t count, uint8_t* bu
 }
 
 
-int ata_write_sectors(uint8_t is_master, uint32_t lba, uint8_t count, const uint8_t* buffer) {
+int ata_write_sectors(uint8_t is_master, uint64_t lba, uint16_t count, const uint8_t* buffer) {
     if (!buffer || count == 0) {
         return ATA_ERR_INVALID_ARGS;
     }
@@ -224,32 +258,56 @@ int ata_write_sectors(uint8_t is_master, uint32_t lba, uint8_t count, const uint
     #define BOOTLOADER_PROTECTED_SECTORS 400
 
     if (lba < BOOTLOADER_PROTECTED_SECTORS) {
-        debug_printf("[ATA] SECURITY: Write to protected LBA %u blocked (bootloader area 0-399)\n", lba);
+        debug_printf("[ATA] SECURITY: Write to protected LBA %lu blocked (bootloader area 0-399)\n",
+                     (unsigned long)lba);
         return ATA_ERR_PROTECTED_SECTOR;
     }
 
     if (lba >= device->total_sectors) {
-        debug_printf("[ATA] ERROR: LBA %u out of bounds (max %u)\n", lba, device->total_sectors);
+        debug_printf("[ATA] ERROR: LBA %lu out of bounds (max %lu)\n",
+                     (unsigned long)lba, (unsigned long)device->total_sectors);
         return -1;
     }
 
-    debug_printf("[ATA] WRITE: LBA %u, sectors %u (%u bytes)\n", lba, count, count * 512);
+    debug_printf("[ATA] WRITE: LBA %lu, sectors %u (%u bytes)\n",
+                 (unsigned long)lba, count, count * 512);
 
     if (ata_wait_ready() != 0) {
         return -1;
     }
 
-    uint8_t drive_bits = is_master ? 0xE0 : 0xF0;  // LBA mode + master/slave
-    drive_bits |= (lba >> 24) & 0x0F;
-    outb(ATA_PRIMARY_DRIVE, drive_bits);
-    ata_delay_400ns();
+    bool use_lba48 = device->lba48_supported && (lba > 0x0FFFFFFF || count > 256);
 
-    outb(ATA_PRIMARY_SECCOUNT, count);
-    outb(ATA_PRIMARY_LBA_LO, lba & 0xFF);
-    outb(ATA_PRIMARY_LBA_MID, (lba >> 8) & 0xFF);
-    outb(ATA_PRIMARY_LBA_HI, (lba >> 16) & 0xFF);
+    if (use_lba48) {
+        outb(ATA_PRIMARY_DRIVE, is_master ? 0x40 : 0x50);
+        ata_delay_400ns();
 
-    outb(ATA_PRIMARY_COMMAND, ATA_CMD_WRITE_SECTORS);
+        // HOB registers first
+        outb(ATA_PRIMARY_SECCOUNT, (count >> 8) & 0xFF);
+        outb(ATA_PRIMARY_LBA_LO,   (lba >> 24) & 0xFF);
+        outb(ATA_PRIMARY_LBA_MID,  (lba >> 32) & 0xFF);
+        outb(ATA_PRIMARY_LBA_HI,   (lba >> 40) & 0xFF);
+
+        // Current registers
+        outb(ATA_PRIMARY_SECCOUNT, count & 0xFF);
+        outb(ATA_PRIMARY_LBA_LO,   lba & 0xFF);
+        outb(ATA_PRIMARY_LBA_MID,  (lba >> 8) & 0xFF);
+        outb(ATA_PRIMARY_LBA_HI,   (lba >> 16) & 0xFF);
+
+        outb(ATA_PRIMARY_COMMAND, ATA_CMD_WRITE_SECTORS_EXT);
+    } else {
+        uint8_t drive_bits = is_master ? 0xE0 : 0xF0;
+        drive_bits |= (lba >> 24) & 0x0F;
+        outb(ATA_PRIMARY_DRIVE, drive_bits);
+        ata_delay_400ns();
+
+        outb(ATA_PRIMARY_SECCOUNT, (uint8_t)count);
+        outb(ATA_PRIMARY_LBA_LO,   lba & 0xFF);
+        outb(ATA_PRIMARY_LBA_MID,  (lba >> 8) & 0xFF);
+        outb(ATA_PRIMARY_LBA_HI,   (lba >> 16) & 0xFF);
+
+        outb(ATA_PRIMARY_COMMAND, ATA_CMD_WRITE_SECTORS);
+    }
 
     for (int sector = 0; sector < count; sector++) {
         if (ata_wait_drq() != 0) {
@@ -263,7 +321,8 @@ int ata_write_sectors(uint8_t is_master, uint32_t lba, uint8_t count, const uint
         }
     }
 
-    debug_printf("[ATA] WRITE COMPLETE: LBA %u (%u bytes written to disk)\n", lba, count * 512);
+    debug_printf("[ATA] WRITE COMPLETE: LBA %lu (%u bytes written to disk)\n",
+                 (unsigned long)lba, count * 512);
 
     return 0;
 }
@@ -274,9 +333,13 @@ int ata_flush_cache(uint8_t is_master) {
         return ahci_flush_cache_sync(is_master ? 0 : 1);
     }
 
+    ATADevice* device = is_master ? &ata_primary_master : &ata_primary_slave;
+    uint8_t cmd = (device->exists && device->lba48_supported)
+                  ? ATA_CMD_CACHE_FLUSH_EXT : ATA_CMD_CACHE_FLUSH;
+
     for (int retry = 0; retry < 3; retry++) {
         ata_select_drive(is_master);
-        outb(ATA_PRIMARY_COMMAND, ATA_CMD_CACHE_FLUSH);
+        outb(ATA_PRIMARY_COMMAND, cmd);
 
         if (ata_wait_ready() == 0) {
             return 0;
@@ -303,7 +366,7 @@ static const char* ata_decode_error(uint8_t error) {
     return "Unknown error";
 }
 
-int ata_read_sectors_retry(uint8_t is_master, uint32_t lba, uint8_t count, uint8_t* buffer) {
+int ata_read_sectors_retry(uint8_t is_master, uint64_t lba, uint16_t count, uint8_t* buffer) {
     const int MAX_RETRIES = 3;
 
     for (int retry = 0; retry < MAX_RETRIES; retry++) {
@@ -324,11 +387,11 @@ int ata_read_sectors_retry(uint8_t is_master, uint32_t lba, uint8_t count, uint8
         while (rdtsc() < deadline) { cpu_pause(); }
     }
 
-    debug_printf("[ATA] Read failed after %d retries at LBA %u\n", MAX_RETRIES, lba);
+    debug_printf("[ATA] Read failed after %d retries at LBA %lu\n", MAX_RETRIES, (unsigned long)lba);
     return -1;
 }
 
-int ata_write_sectors_retry(uint8_t is_master, uint32_t lba, uint8_t count, const uint8_t* buffer) {
+int ata_write_sectors_retry(uint8_t is_master, uint64_t lba, uint16_t count, const uint8_t* buffer) {
     const int MAX_RETRIES = 3;
 
     for (int retry = 0; retry < MAX_RETRIES; retry++) {
@@ -349,7 +412,7 @@ int ata_write_sectors_retry(uint8_t is_master, uint32_t lba, uint8_t count, cons
         while (rdtsc() < deadline) { cpu_pause(); }
     }
 
-    debug_printf("[ATA] Write failed after %d retries at LBA %u\n", MAX_RETRIES, lba);
+    debug_printf("[ATA] Write failed after %d retries at LBA %lu\n", MAX_RETRIES, (unsigned long)lba);
     return -1;
 }
 
@@ -433,7 +496,8 @@ void ata_init(void) {
 
         ata_primary_master.exists = 1;
         ata_primary_master.is_master = 1;
-        ata_primary_master.total_sectors = 0xFFFFFFFF;
+        ata_primary_master.lba48_supported = 1;
+        ata_primary_master.total_sectors = 0xFFFFFFFFFFFFULL;  // AHCI supports 48-bit LBA
         strncpy(ata_primary_master.model, "AHCI SATA Drive", 40);
         ata_primary_master.model[40] = '\0';
 
@@ -467,5 +531,7 @@ void ata_print_device_info(const ATADevice* device) {
     kprintf("  Type: %s\n", device->is_master ? "Master" : "Slave");
     kprintf("  Model: %s\n", device->model);
     kprintf("  Serial: %s\n", device->serial);
-    kprintf("  Size: %lu MB (%u sectors)\n", device->size_mb, device->total_sectors);
+    kprintf("  Size: %lu MB (%lu sectors, LBA%s)\n",
+            device->size_mb, (unsigned long)device->total_sectors,
+            device->lba48_supported ? "48" : "28");
 }

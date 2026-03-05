@@ -77,25 +77,60 @@ static int ata_dma_send_command(ata_dma_request_t* req) {
 
     outb(base + 2, ATA_DMA_STATUS_IRQ | ATA_DMA_STATUS_ERROR);
 
-    uint8_t drive_select = req->is_master ? ATA_DRIVE_MASTER : ATA_DRIVE_SLAVE;
-    drive_select |= ((req->lba >> 24) & 0x0F);
-    outb(ATA_PRIMARY_DRIVE, drive_select);
+    // Check if we need 48-bit LBA addressing
+    ATADevice* device = req->is_master ? &ata_primary_master : &ata_primary_slave;
+    bool use_lba48 = device->exists && device->lba48_supported &&
+                     (req->lba > 0x0FFFFFFF || req->sector_count > 256);
 
-    for (int i = 0; i < 4; i++) {
-        inb(ATA_PRIMARY_ALTSTATUS);
-    }
+    if (use_lba48) {
+        // 48-bit LBA: no LBA bits in drive register
+        outb(ATA_PRIMARY_DRIVE, req->is_master ? 0x40 : 0x50);
 
-    outb(ATA_PRIMARY_SECCOUNT, req->sector_count);
-    outb(ATA_PRIMARY_LBA_LO, req->lba & 0xFF);
-    outb(ATA_PRIMARY_LBA_MID, (req->lba >> 8) & 0xFF);
-    outb(ATA_PRIMARY_LBA_HI, (req->lba >> 16) & 0xFF);
+        for (int i = 0; i < 4; i++) {
+            inb(ATA_PRIMARY_ALTSTATUS);
+        }
 
-    if (req->is_write) {
-        outb(ATA_PRIMARY_COMMAND, ATA_CMD_WRITE_DMA);
-        outb(base + 0, ATA_DMA_CMD_START);
+        // HOB (high order bytes) first
+        outb(ATA_PRIMARY_SECCOUNT, (req->sector_count >> 8) & 0xFF);
+        outb(ATA_PRIMARY_LBA_LO,   (req->lba >> 24) & 0xFF);
+        outb(ATA_PRIMARY_LBA_MID,  (req->lba >> 32) & 0xFF);
+        outb(ATA_PRIMARY_LBA_HI,   (req->lba >> 40) & 0xFF);
+
+        // Current (low order bytes)
+        outb(ATA_PRIMARY_SECCOUNT, req->sector_count & 0xFF);
+        outb(ATA_PRIMARY_LBA_LO,   req->lba & 0xFF);
+        outb(ATA_PRIMARY_LBA_MID,  (req->lba >> 8) & 0xFF);
+        outb(ATA_PRIMARY_LBA_HI,   (req->lba >> 16) & 0xFF);
+
+        if (req->is_write) {
+            outb(ATA_PRIMARY_COMMAND, ATA_CMD_WRITE_DMA_EXT);
+            outb(base + 0, ATA_DMA_CMD_START);
+        } else {
+            outb(ATA_PRIMARY_COMMAND, ATA_CMD_READ_DMA_EXT);
+            outb(base + 0, ATA_DMA_CMD_START | ATA_DMA_CMD_READ);
+        }
     } else {
-        outb(ATA_PRIMARY_COMMAND, ATA_CMD_READ_DMA);
-        outb(base + 0, ATA_DMA_CMD_START | ATA_DMA_CMD_READ);
+        // 28-bit LBA
+        uint8_t drive_select = req->is_master ? ATA_DRIVE_MASTER : ATA_DRIVE_SLAVE;
+        drive_select |= ((req->lba >> 24) & 0x0F);
+        outb(ATA_PRIMARY_DRIVE, drive_select);
+
+        for (int i = 0; i < 4; i++) {
+            inb(ATA_PRIMARY_ALTSTATUS);
+        }
+
+        outb(ATA_PRIMARY_SECCOUNT, (uint8_t)req->sector_count);
+        outb(ATA_PRIMARY_LBA_LO,   req->lba & 0xFF);
+        outb(ATA_PRIMARY_LBA_MID,  (req->lba >> 8) & 0xFF);
+        outb(ATA_PRIMARY_LBA_HI,   (req->lba >> 16) & 0xFF);
+
+        if (req->is_write) {
+            outb(ATA_PRIMARY_COMMAND, ATA_CMD_WRITE_DMA);
+            outb(base + 0, ATA_DMA_CMD_START);
+        } else {
+            outb(ATA_PRIMARY_COMMAND, ATA_CMD_READ_DMA);
+            outb(base + 0, ATA_DMA_CMD_START | ATA_DMA_CMD_READ);
+        }
     }
 
     return 0;

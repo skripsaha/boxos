@@ -6,7 +6,7 @@
 #include "klib.h"
 #include "atomics.h"
 
-int ahci_read_sectors_sync(uint8_t port, uint32_t lba,
+int ahci_read_sectors_sync(uint8_t port, uint64_t lba,
                            uint16_t sector_count, void* buffer) {
     if (!buffer || sector_count == 0) return -1;
 
@@ -92,7 +92,7 @@ int ahci_read_sectors_sync(uint8_t port, uint32_t lba,
     return -1;
 }
 
-int ahci_write_sectors_sync(uint8_t port, uint32_t lba,
+int ahci_write_sectors_sync(uint8_t port, uint64_t lba,
                             uint16_t sector_count, const void* buffer) {
     if (!buffer || sector_count == 0) return -1;
 
