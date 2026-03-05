@@ -39,7 +39,7 @@ TAGFS_TOOL = tools/create_tagfs
 #   Sectors 2061-3085 : Journal Entries (512 entries * 2 sectors)
 #   Sector 3086+    : TagFS Data
 STAGE2_SECTORS      = 16
-KERNEL_MAX_BYTES    = 13631488  # 13MB (must fit below PAGE_TABLE_BASE at 0xE00000)
+KERNEL_MAX_BYTES    = 33554432  # 32MB (sanity check; bootloader places page tables dynamically after kernel)
 KERNEL_START_SECTOR = 17
 
 ASMFLAGS       =  -g -f bin
@@ -233,9 +233,9 @@ $(KERNEL_BIN): $(KERNEL_ENTRY_OBJ) $(C_OBJS) $(ASM_OBJS) $(SHELL_EMBED)
 	@KERNEL_SIZE=$$(stat -f%z $@ 2>/dev/null || stat -c%s $@ 2>/dev/null); \
 	MAX_SIZE=$(KERNEL_MAX_BYTES); \
 	echo "  Kernel size: $$KERNEL_SIZE bytes"; \
-	echo "  Max allowed: $$MAX_SIZE bytes (13MB, Unreal Mode)"; \
+	echo "  Max allowed: $$MAX_SIZE bytes (32MB sanity limit)"; \
 	if [ $$KERNEL_SIZE -gt $$MAX_SIZE ]; then \
-		echo "ERROR: Kernel binary exceeds 13MB limit (page tables at 0xE00000)!"; \
+		echo "ERROR: Kernel binary exceeds 32MB sanity limit!"; \
 		echo "  Overflow: $$((KERNEL_SIZE - MAX_SIZE)) bytes"; \
 		exit 1; \
 	else \

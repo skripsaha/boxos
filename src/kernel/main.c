@@ -76,8 +76,9 @@ void kernel_main(void)
         kprintf("[PANIC] Boot info invalid! magic=0x%x version=%u\n", bi->magic, bi->version);
         while (1) { asm volatile("cli; hlt"); }
     }
-    kprintf("[BOOT] Boot info v%u OK (drive=0x%x, kernel 0x%x-0x%x)\n",
-            bi->version, bi->boot_drive, bi->kernel_start, bi->kernel_end);
+    kprintf("[BOOT] Boot info v%u OK (drive=0x%x, kernel 0x%x-0x%x, pt=0x%x, stack=0x%x)\n",
+            bi->version, bi->boot_drive, bi->kernel_start, bi->kernel_end,
+            bi->page_table_base, bi->stack_base);
 
     debug_printf("[INIT] E820 Memory Map...\n");
     e820_entry_t *e820_map = (e820_entry_t *)(uintptr_t)bi->e820_map_addr;
