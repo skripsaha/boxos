@@ -301,7 +301,7 @@ int tagfs_read_metadata(uint32_t file_id, TagFSMetadata* metadata) {
     return 0;
 }
 
-static int tagfs_write_metadata_raw(uint32_t file_id, const TagFSMetadata* metadata) {
+int tagfs_write_metadata_raw(uint32_t file_id, const TagFSMetadata* metadata) {
     if (!metadata || file_id == 0 || file_id > tfs.max_files) {
         return -1;
     }
@@ -589,8 +589,23 @@ int tagfs_init(void) {
         }
     }
 
+    // Recompute free_blocks from bitmap (authoritative after crash recovery)
+    uint32_t used_blocks = 0;
+    for (uint32_t i = 0; i < total_blocks; i++) {
+        if (bitmap_test(tfs.block_bitmap.bitmap, i)) {
+            used_blocks++;
+        }
+    }
+    uint32_t computed_free = total_blocks - used_blocks;
+    if (computed_free != tfs.superblock.free_blocks) {
+        debug_printf("[TagFS] WARNING: free_blocks mismatch (superblock=%u, computed=%u) — correcting\n",
+                tfs.superblock.free_blocks, computed_free);
+        tfs.superblock.free_blocks = computed_free;
+        tagfs_write_superblock_raw(&tfs.superblock);
+    }
+
     debug_printf("[TagFS] Block bitmap initialized: %u/%u blocks used\n",
-            total_blocks - tfs.superblock.free_blocks, total_blocks);
+            used_blocks, total_blocks);
 
     // Build free extent list from bitmap for O(k) allocation
     free_list_build();
@@ -615,6 +630,9 @@ void tagfs_shutdown(void) {
     }
 
     debug_printf("[TagFS] Shutting down filesystem...\n");
+
+    // Sync all dirty data to disk before cleanup
+    tagfs_sync();
 
     if (tfs.tag_index) {
         tag_bitmap_destroy(tfs.tag_index);
@@ -698,50 +716,35 @@ int tagfs_alloc_blocks(uint32_t count, uint32_t* start_block) {
     return -1;
 }
 
-int tagfs_free_blocks(uint32_t start_block, uint32_t count) {
-    if (!tfs.initialized || count == 0) {
-        return -1;
-    }
-
-    // Clear bitmap
-    uint8_t* bitmap = tfs.block_bitmap.bitmap;
-    for (uint32_t i = 0; i < count; i++) {
-        bitmap_clear(bitmap, start_block + i);
-    }
-
-    // Insert into free list maintaining sorted order, merge with neighbors
+// Insert a range into the free extent list (sorted, with merge).
+// Does NOT touch bitmap or superblock — caller is responsible.
+static void free_list_insert_range(uint32_t start_block, uint32_t count) {
     uint32_t end = start_block + count;
     FreeExtent* prev = NULL;
     FreeExtent* cur = tfs.block_bitmap.free_list;
 
-    // Find insertion point (list sorted by start address)
     while (cur && cur->start + cur->count <= start_block) {
         prev = cur;
         cur = cur->next;
     }
 
-    // Try merge with previous extent
     bool merged_prev = false;
     if (prev && prev->start + prev->count == start_block) {
         prev->count += count;
         merged_prev = true;
     }
 
-    // Try merge with next extent
     if (cur && end == cur->start) {
         if (merged_prev) {
-            // Three-way merge: prev absorbs freed range + cur
             prev->count += cur->count;
             prev->next = cur->next;
             kfree(cur);
             tfs.block_bitmap.extent_count--;
         } else {
-            // Merge with next only — extend cur backward
             cur->start = start_block;
             cur->count += count;
         }
     } else if (!merged_prev) {
-        // No merge possible — create new extent node
         FreeExtent* ext = kmalloc(sizeof(FreeExtent));
         if (ext) {
             ext->start = start_block;
@@ -754,6 +757,20 @@ int tagfs_free_blocks(uint32_t start_block, uint32_t count) {
             debug_printf("[TagFS] WARNING: Failed to allocate free extent node\n");
         }
     }
+}
+
+int tagfs_free_blocks(uint32_t start_block, uint32_t count) {
+    if (!tfs.initialized || count == 0) {
+        return -1;
+    }
+
+    // Clear bitmap
+    uint8_t* bitmap = tfs.block_bitmap.bitmap;
+    for (uint32_t i = 0; i < count; i++) {
+        bitmap_clear(bitmap, start_block + i);
+    }
+
+    free_list_insert_range(start_block, count);
 
     tfs.superblock.free_blocks += count;
     tfs.superblock.fs_modified_time++;
@@ -1060,10 +1077,36 @@ int tagfs_create_file(const char* filename, const char* tags[], uint32_t tag_cou
         }
     }
 
-    if (tagfs_write_metadata(*file_id, meta) != 0) {
+    // Atomic compound transaction: metadata + superblock in one txn
+    TagFSSuperblock new_sb = tfs.superblock;
+    new_sb.total_files++;
+
+    uint32_t target_sector = tfs.superblock.metadata_start_sector + metadata_index;
+
+    JournalTxn txn;
+    if (journal_begin(&txn) != 0) {
+        debug_printf("[TagFS] Journal begin failed for create_file\n");
         kfree(meta);
         return -1;
     }
+
+    if (journal_log_metadata(&txn, *file_id, target_sector, meta) != 0 ||
+        journal_log_superblock(&txn, TAGFS_SUPERBLOCK_SECTOR, &new_sb) != 0) {
+        debug_printf("[TagFS] Journal log failed for create_file\n");
+        journal_abort(&txn);
+        kfree(meta);
+        return -1;
+    }
+
+    if (journal_commit(&txn) != 0) {
+        debug_printf("[TagFS] Journal commit failed for create_file\n");
+        journal_abort(&txn);
+        kfree(meta);
+        return -1;
+    }
+
+    // Transaction committed — update in-memory state
+    tfs.superblock.total_files = new_sb.total_files;
 
     // Update summary for new file
     tfs.file_summaries[metadata_index].file_id = meta->file_id;
@@ -1073,9 +1116,6 @@ int tagfs_create_file(const char* filename, const char* tags[], uint32_t tag_cou
 
     // Insert into LRU cache
     mcache_put(tfs.mcache, *file_id, meta);
-
-    tfs.superblock.total_files++;
-    tagfs_write_superblock(&tfs.superblock);
 
     for (uint32_t i = 0; i < meta->tag_count; i++) {
         char tag_string[64];
@@ -1107,23 +1147,68 @@ int tagfs_delete_file(uint32_t file_id) {
 
     tag_bitmap_remove_file(tfs.tag_index, file_id);
 
-    if (meta->block_count > 0) {
-        tagfs_free_blocks(meta->start_block, meta->block_count);
+    // Prepare updated metadata (flags=0) and superblock atomically
+    TagFSMetadata deleted_meta = *meta;
+    deleted_meta.flags = 0;
+
+    // Free blocks in bitmap (in-memory only — will be rebuilt from metadata on crash)
+    uint32_t freed_start = meta->start_block;
+    uint32_t freed_count = meta->block_count;
+
+    TagFSSuperblock new_sb = tfs.superblock;
+    if (freed_count > 0) {
+        new_sb.free_blocks += freed_count;
     }
 
-    meta->flags = 0;
-    tagfs_write_metadata(file_id, meta);
-
-    // Trim total_files using summaries (no full metadata needed)
-    while (tfs.superblock.total_files > 0) {
-        uint32_t last_idx = tfs.superblock.total_files - 1;
+    // Trim total_files
+    // Work on a local copy to compute new total_files
+    tfs.file_summaries[metadata_index].flags = 0;  // Mark inactive for trim calculation
+    uint32_t new_total = new_sb.total_files;
+    while (new_total > 0) {
+        uint32_t last_idx = new_total - 1;
         if (!(tfs.file_summaries[last_idx].flags & TAGFS_FILE_ACTIVE)) {
-            tfs.superblock.total_files--;
+            new_total--;
         } else {
             break;
         }
     }
-    tagfs_write_superblock(&tfs.superblock);
+    new_sb.total_files = new_total;
+
+    uint32_t target_sector = tfs.superblock.metadata_start_sector + metadata_index;
+
+    // Atomic compound transaction: metadata + superblock
+    JournalTxn txn;
+    if (journal_begin(&txn) != 0) {
+        debug_printf("[TagFS] Journal begin failed for delete_file\n");
+        tfs.file_summaries[metadata_index].flags = meta->flags;  // Restore
+        return -1;
+    }
+
+    if (journal_log_metadata(&txn, file_id, target_sector, &deleted_meta) != 0 ||
+        journal_log_superblock(&txn, TAGFS_SUPERBLOCK_SECTOR, &new_sb) != 0) {
+        debug_printf("[TagFS] Journal log failed for delete_file\n");
+        journal_abort(&txn);
+        tfs.file_summaries[metadata_index].flags = meta->flags;
+        return -1;
+    }
+
+    if (journal_commit(&txn) != 0) {
+        debug_printf("[TagFS] Journal commit failed for delete_file\n");
+        journal_abort(&txn);
+        tfs.file_summaries[metadata_index].flags = meta->flags;
+        return -1;
+    }
+
+    // Transaction committed — update in-memory state
+    tfs.superblock = new_sb;
+
+    if (freed_count > 0) {
+        uint8_t* bitmap = tfs.block_bitmap.bitmap;
+        for (uint32_t i = 0; i < freed_count; i++) {
+            bitmap_clear(bitmap, freed_start + i);
+        }
+        free_list_insert_range(freed_start, freed_count);
+    }
 
     // Invalidate stale cache entry
     mcache_invalidate(tfs.mcache, file_id);
@@ -1312,22 +1397,22 @@ int tagfs_write_metadata_journaled(uint32_t file_id, const TagFSMetadata* metada
         return -1;
     }
 
-    uint32_t txn_id;
-    if (journal_begin(&txn_id) != 0) {
+    JournalTxn txn;
+    if (journal_begin(&txn) != 0) {
         debug_printf("[TagFS] Journal begin failed for metadata write\n");
         return tagfs_write_metadata_raw(file_id, metadata);
     }
 
     uint32_t target_sector = tfs.superblock.metadata_start_sector + (file_id - 1);
-    if (journal_log_metadata(txn_id, file_id, target_sector, metadata) != 0) {
+    if (journal_log_metadata(&txn, file_id, target_sector, metadata) != 0) {
         debug_printf("[TagFS] Journal log metadata failed\n");
-        journal_abort(txn_id);
+        journal_abort(&txn);
         return tagfs_write_metadata_raw(file_id, metadata);
     }
 
-    if (journal_commit(txn_id) != 0) {
+    if (journal_commit(&txn) != 0) {
         debug_printf("[TagFS] Journal commit failed for metadata\n");
-        journal_abort(txn_id);
+        journal_abort(&txn);
         return -1;
     }
 
@@ -1343,21 +1428,21 @@ int tagfs_write_superblock_journaled(const TagFSSuperblock* sb) {
         return -1;
     }
 
-    uint32_t txn_id;
-    if (journal_begin(&txn_id) != 0) {
+    JournalTxn txn;
+    if (journal_begin(&txn) != 0) {
         debug_printf("[TagFS] Journal begin failed for superblock write\n");
         return tagfs_write_superblock_raw(sb);
     }
 
-    if (journal_log_superblock(txn_id, TAGFS_SUPERBLOCK_SECTOR, sb) != 0) {
+    if (journal_log_superblock(&txn, TAGFS_SUPERBLOCK_SECTOR, sb) != 0) {
         debug_printf("[TagFS] Journal log superblock failed\n");
-        journal_abort(txn_id);
+        journal_abort(&txn);
         return tagfs_write_superblock_raw(sb);
     }
 
-    if (journal_commit(txn_id) != 0) {
+    if (journal_commit(&txn) != 0) {
         debug_printf("[TagFS] Journal commit failed for superblock\n");
-        journal_abort(txn_id);
+        journal_abort(&txn);
         return -1;
     }
 
@@ -1530,9 +1615,18 @@ void tagfs_sync(void) {
 
     debug_printf("[TagFS] Syncing filesystem to disk...\n");
 
+    // Flush dirty metadata cache entries
+    if (tfs.mcache) {
+        mcache_flush(tfs.mcache);
+    }
+
+    // Write superblock
     if (tagfs_write_superblock(&tfs.superblock) != 0) {
         debug_printf("[TagFS] WARNING: Failed to sync superblock\n");
     }
+
+    // Ensure all data is on disk
+    ata_flush_cache(1);
 
     debug_printf("[TagFS] Sync complete\n");
 }

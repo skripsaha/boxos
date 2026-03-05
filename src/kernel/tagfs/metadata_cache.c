@@ -3,6 +3,7 @@
 
 // Defined in tagfs.c
 extern int tagfs_read_metadata(uint32_t file_id, TagFSMetadata* metadata);
+extern int tagfs_write_metadata_raw(uint32_t file_id, const TagFSMetadata* metadata);
 
 static inline uint32_t mcache_hash(MetadataLRU* cache, uint32_t file_id) {
     return file_id & (cache->hash_size - 1);
@@ -29,6 +30,7 @@ int mcache_init(MetadataLRU* cache) {
     cache->lru_head = NULL;
     cache->lru_tail = NULL;
     cache->count = 0;
+    cache->dirty_count = 0;
 
     // Build free list (reuse lru_next for chaining)
     cache->free_list = &cache->nodes[0];
@@ -108,7 +110,21 @@ static void hash_insert(MetadataLRU* cache, MCacheNode* node) {
     cache->hash[h] = node;
 }
 
+// Flush a single dirty node to disk
+static int flush_node(MCacheNode* node) {
+    if (!node->dirty || node->file_id == 0) return 0;
+
+    if (tagfs_write_metadata_raw(node->file_id, &node->metadata) != 0) {
+        debug_printf("[MCache] ERROR: Failed to flush file_id=%u to disk\n", node->file_id);
+        return -1;
+    }
+
+    node->dirty = false;
+    return 0;
+}
+
 // Get a free node. Evicts LRU if no free nodes available.
+// Flushes dirty victims before eviction.
 static MCacheNode* alloc_node(MetadataLRU* cache) {
     if (cache->free_list) {
         MCacheNode* node = cache->free_list;
@@ -117,6 +133,7 @@ static MCacheNode* alloc_node(MetadataLRU* cache) {
         node->lru_prev = NULL;
         node->hash_next = NULL;
         node->file_id = 0;
+        node->dirty = false;
         return node;
     }
 
@@ -124,12 +141,22 @@ static MCacheNode* alloc_node(MetadataLRU* cache) {
     MCacheNode* victim = cache->lru_tail;
     if (!victim) return NULL;
 
+    // Flush dirty victim before eviction
+    if (victim->dirty) {
+        if (flush_node(victim) != 0) {
+            debug_printf("[MCache] WARNING: Evicting dirty node file_id=%u without flush\n",
+                         victim->file_id);
+        }
+        cache->dirty_count--;
+    }
+
     lru_remove(cache, victim);
     hash_remove(cache, victim);
     cache->count--;
 
     victim->file_id = 0;
     victim->hash_next = NULL;
+    victim->dirty = false;
     return victim;
 }
 
@@ -155,6 +182,7 @@ TagFSMetadata* mcache_get(MetadataLRU* cache, uint32_t file_id) {
     }
 
     new_node->file_id = file_id;
+    new_node->dirty = false;
     hash_insert(cache, new_node);
     lru_push_front(cache, new_node);
     cache->count++;
@@ -171,6 +199,7 @@ void mcache_put(MetadataLRU* cache, uint32_t file_id, const TagFSMetadata* meta)
         if (&node->metadata != meta) {
             memcpy(&node->metadata, meta, sizeof(TagFSMetadata));
         }
+        node->dirty = false;  // Caller is responsible for having written to disk
         lru_promote(cache, node);
         return;
     }
@@ -180,10 +209,49 @@ void mcache_put(MetadataLRU* cache, uint32_t file_id, const TagFSMetadata* meta)
     if (!node) return;
 
     node->file_id = file_id;
+    node->dirty = false;
     memcpy(&node->metadata, meta, sizeof(TagFSMetadata));
     hash_insert(cache, node);
     lru_push_front(cache, node);
     cache->count++;
+}
+
+void mcache_mark_dirty(MetadataLRU* cache, uint32_t file_id) {
+    if (!cache || file_id == 0) return;
+
+    MCacheNode* node = hash_find(cache, file_id);
+    if (node && !node->dirty) {
+        node->dirty = true;
+        cache->dirty_count++;
+    }
+}
+
+int mcache_flush(MetadataLRU* cache) {
+    if (!cache || cache->dirty_count == 0) return 0;
+
+    int errors = 0;
+    uint32_t flushed = 0;
+
+    // Walk LRU list and flush all dirty nodes
+    MCacheNode* node = cache->lru_head;
+    while (node) {
+        if (node->dirty && node->file_id != 0) {
+            if (flush_node(node) == 0) {
+                flushed++;
+            } else {
+                errors++;
+            }
+        }
+        node = node->lru_next;
+    }
+
+    cache->dirty_count = (uint32_t)errors;  // Only unflushed remain dirty
+
+    if (flushed > 0) {
+        debug_printf("[MCache] Flushed %u dirty entries\n", flushed);
+    }
+
+    return errors > 0 ? -1 : 0;
 }
 
 void mcache_invalidate(MetadataLRU* cache, uint32_t file_id) {
@@ -192,12 +260,19 @@ void mcache_invalidate(MetadataLRU* cache, uint32_t file_id) {
     MCacheNode* node = hash_find(cache, file_id);
     if (!node) return;
 
+    // Flush if dirty before invalidation
+    if (node->dirty) {
+        flush_node(node);
+        cache->dirty_count--;
+    }
+
     lru_remove(cache, node);
     hash_remove(cache, node);
     cache->count--;
 
     // Return to free list
     node->file_id = 0;
+    node->dirty = false;
     node->lru_prev = NULL;
     node->hash_next = NULL;
     node->lru_next = cache->free_list;
@@ -206,6 +281,10 @@ void mcache_invalidate(MetadataLRU* cache, uint32_t file_id) {
 
 void mcache_destroy(MetadataLRU* cache) {
     if (!cache) return;
+
+    // Flush all dirty entries before destroying
+    mcache_flush(cache);
+
     if (cache->nodes) {
         kfree(cache->nodes);
         cache->nodes = NULL;
@@ -218,4 +297,5 @@ void mcache_destroy(MetadataLRU* cache) {
     cache->lru_tail = NULL;
     cache->free_list = NULL;
     cache->count = 0;
+    cache->dirty_count = 0;
 }
