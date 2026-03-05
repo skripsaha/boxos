@@ -4,6 +4,11 @@
 #define MAX_PROCESSES      256
 #define MAX_OPEN_FILES     256
 
+// Per-process memory limits (single source of truth)
+#define BOXOS_USER_HEAP_MAX_SIZE    (256 * 1024 * 1024)   // 256MB max heap per process
+#define BOXOS_PROC_MAX_BINARY_SIZE  (64 * 1024 * 1024)    // 64MB max binary size
+#define BOXOS_PROC_MAX_BUFFER_SIZE  (64 * 1024 * 1024)    // 64MB max buffer size
+
 #define EVENT_RING_SIZE    2048  // Power of 2
 #define MAX_PENDING_RESULTS 256
 
