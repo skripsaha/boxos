@@ -51,8 +51,8 @@ void ioapic_init(uintptr_t base_addr, uint8_t gsi_base) {
         return;
     }
 
-    // Clear ISO table
-    memset(iso_table, 0, sizeof(iso_table));
+    // NOTE: Do NOT clear iso_table here — it was already populated by
+    // acpi_parse_madt() -> ioapic_register_iso() BEFORE ioapic_init() runs.
 
     // Read version register to get max entries
     uint32_t ver = ioapic_read(IOAPIC_REG_VER);
