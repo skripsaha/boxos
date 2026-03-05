@@ -9,19 +9,21 @@ static gdt_descriptor_t gdt_desc;
 static void gdt_load_asm(uint64_t gdt_desc_addr) {
     asm volatile (
         "lgdt (%0)\n\t"
-        "pushq $0x08\n\t"
+        "pushq %1\n\t"
         "leaq 1f(%%rip), %%rax\n\t"
         "pushq %%rax\n\t"
         "lretq\n\t"
         "1:\n\t"
-        "movw $0x10, %%ax\n\t"
+        "movw %w2, %%ax\n\t"
         "movw %%ax, %%ds\n\t"
         "movw %%ax, %%es\n\t"
         "movw %%ax, %%fs\n\t"
         "movw %%ax, %%gs\n\t"
         "movw %%ax, %%ss"
         :
-        : "r" (gdt_desc_addr)
+        : "r" (gdt_desc_addr),
+          "i" ((uint64_t)GDT_KERNEL_CODE),
+          "i" ((uint32_t)GDT_KERNEL_DATA)
         : "memory", "rax"
     );
 }

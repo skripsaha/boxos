@@ -1,5 +1,7 @@
 [BITS 64]
 
+%include "gdt_selectors.inc"
+
 section .text
 
 ;--------------------------------------------------------------
@@ -264,9 +266,9 @@ task_init_context:
     mov rax, 0x202             ; IF flag set
     mov [rdi + CTX_RFLAGS], rax
 
-    mov ax, 0x08               ; Kernel code segment
+    mov ax, GDT_KERNEL_CODE
     mov [rdi + CTX_CS], ax
-    mov ax, 0x10               ; Kernel data segment
+    mov ax, GDT_KERNEL_DATA
     mov [rdi + CTX_DS], ax
     mov [rdi + CTX_ES], ax
     mov [rdi + CTX_FS], ax
