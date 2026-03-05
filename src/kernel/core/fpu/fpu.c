@@ -39,7 +39,24 @@ void enable_fpu(void) {
     if (g_cpu_caps.has_xsave) {
         cr4 |= (1ULL << 18); // OSXSAVE — enable xsave/xrstor and xsetbv/xgetbv
     }
+
+    // Step 3b: Enable SMEP/SMAP if CPU supports them
+    // SMEP (bit 20): prevents kernel from executing user-mode pages
+    // SMAP (bit 21): prevents kernel from accessing user-mode pages (except via STAC/CLAC)
+    if (g_cpu_caps.has_smep) {
+        cr4 |= (1ULL << 20);
+    }
+    if (g_cpu_caps.has_smap) {
+        cr4 |= (1ULL << 21);
+    }
+
     asm volatile("mov %0, %%cr4" :: "r"(cr4));
+
+    if (g_cpu_caps.has_smep || g_cpu_caps.has_smap) {
+        debug_printf("[FPU] Memory protection: SMEP=%s SMAP=%s\n",
+                     g_cpu_caps.has_smep ? "enabled" : "not supported",
+                     g_cpu_caps.has_smap ? "enabled" : "not supported");
+    }
 
     // Step 4: Configure XCR0 if XSAVE available
     if (g_cpu_caps.has_xsave) {

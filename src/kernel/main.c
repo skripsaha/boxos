@@ -59,6 +59,10 @@ void kernel_main(void)
     debug_printf("[INIT] CPU Feature Detection (early)...\n");
     cpu_detect_features();
 
+    // Randomize stack canary ASAP after CPUID is available
+    extern void stack_canary_init(void);
+    stack_canary_init();
+
     debug_printf("[INIT] FPU/SSE/AVX...\n");
     enable_fpu();
 

@@ -155,7 +155,7 @@ static void *kmalloc_internal(size_t size)
 
     if (!result)
     {
-        panic("Out of kernel memory!");
+        debug_printf("[KLIB] WARNING: kmalloc_internal failed for %zu bytes (heap exhausted)\n", size);
     }
     return result;
 }

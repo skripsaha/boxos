@@ -11,6 +11,7 @@ typedef struct {
     uint8_t* bitmap;
     spinlock_t lock;
     size_t last_free;
+    size_t free_count;  // maintained incrementally — avoids O(n) scan in pmm_free_pages()
 } pmm_zone_t;
 
 static pmm_zone_t pmm_zone;
@@ -218,6 +219,7 @@ void pmm_init(void) {
     pmm_reserve_region((uintptr_t)pmm_zone.bitmap, (uintptr_t)pmm_zone.bitmap + bitmap_size, "Bitmap");
 
     pmm_zone.last_free = 0;
+    // free_count was maintained incrementally by pmm_set_bit during init above
 
     spinlock_init(&pmm_zone.lock);
     pmm_initialized = true;
@@ -365,13 +367,16 @@ static void pmm_reserve_region(uintptr_t base, uintptr_t end, const char* name) 
 static void pmm_set_bit(size_t bit, pmm_frame_state_t state) {
     size_t byte = bit / PMM_BITMAP_ALIGN;
     size_t offset = bit % PMM_BITMAP_ALIGN;
+    bool was_free = !(pmm_zone.bitmap[byte] & (1 << offset));
 
     switch(state) {
         case PMM_FRAME_FREE:
             pmm_zone.bitmap[byte] &= ~(1 << offset);
+            if (!was_free) pmm_zone.free_count++;
             break;
         default:
             pmm_zone.bitmap[byte] |= (1 << offset);
+            if (was_free) pmm_zone.free_count--;
             break;
     }
 }
@@ -420,11 +425,8 @@ size_t pmm_total_pages(void) {
 }
 
 size_t pmm_free_pages(void) {
-    size_t count = 0;
     spin_lock(&pmm_zone.lock);
-    for (size_t i = 0; i < pmm_zone.pages; i++) {
-        if (pmm_get_bit(i) == PMM_FRAME_FREE) count++;
-    }
+    size_t count = pmm_zone.free_count;
     spin_unlock(&pmm_zone.lock);
     return count;
 }
