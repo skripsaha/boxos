@@ -42,7 +42,8 @@ _start:
     mov dx, 0x3f8
     out dx, al
 
-    ; C standard requires uninitialized globals be zero
+    ; Zero BSS — C standard requires uninitialized globals be zero.
+    ; This is the single canonical place for BSS zeroing in BoxOS.
     extern __bss_start
     extern __bss_end
 
@@ -53,20 +54,6 @@ _start:
     rep stosb
 
     mov al, 'Z'
-    mov dx, 0x3f8
-    out dx, al
-
-    ; Parameters already set by Stage2 bootloader:
-    ; RDI = E820 map address (0x500)
-    ; RSI = E820 entry count
-    ; RDX = Available memory start (set to 1MB)
-    mov rdx, 0x100000
-
-    mov al, 'C'
-    mov dx, 0x3f8
-    out dx, al
-
-    mov al, 'J'
     mov dx, 0x3f8
     out dx, al
 

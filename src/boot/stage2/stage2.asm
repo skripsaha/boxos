@@ -147,12 +147,6 @@ long_mode_start:
     and eax, 0xFFFFF000
     mov [BOOT_INFO_ADDR+12], eax
 
-    ; Zero BSS region after actual kernel end (1MB worth)
-    movzx rdi, eax
-    mov rcx, 0x100000
-    xor rax, rax
-    rep stosb
-
     jmp KERNEL_RUN_ADDR
 
 .kernel_not_loaded:

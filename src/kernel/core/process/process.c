@@ -13,16 +13,17 @@
 #include "aslr.h"
 #include "notify_page.h"
 
-static process_t* process_list_head = NULL;
+static process_t *process_list_head = NULL;
 static volatile uint32_t process_count = 0;
 static spinlock_t process_lock;
 static process_cleanup_queue_t g_cleanup_queue;
 
-static bool cleanup_queue_enqueue(process_t* proc);
-static process_t* cleanup_queue_dequeue(void);
-static void process_cleanup_immediate(process_t* proc);
+static bool cleanup_queue_enqueue(process_t *proc);
+static process_t *cleanup_queue_dequeue(void);
+static void process_cleanup_immediate(process_t *proc);
 
-void process_init(void) {
+void process_init(void)
+{
     aslr_init();
     pid_allocator_init();
 
@@ -44,16 +45,19 @@ void process_init(void) {
                  PROCESS_CLEANUP_QUEUE_SIZE);
 }
 
-process_t* process_create(const char* tags) {
+process_t *process_create(const char *tags)
+{
     // use atomic load for the early check; the authoritative check happens
     // under process_lock when we actually insert into the list
-    if (atomic_load_u32(&process_count) >= PROCESS_MAX_COUNT) {
+    if (atomic_load_u32(&process_count) >= PROCESS_MAX_COUNT)
+    {
         debug_printf("[PROCESS] ERROR: Process limit reached (%u)\n", PROCESS_MAX_COUNT);
         return NULL;
     }
 
-    process_t* proc = kmalloc(sizeof(process_t));
-    if (!proc) {
+    process_t *proc = kmalloc(sizeof(process_t));
+    if (!proc)
+    {
         debug_printf("[PROCESS] ERROR: Failed to allocate process structure\n");
         return NULL;
     }
@@ -63,15 +67,17 @@ process_t* process_create(const char* tags) {
 
     uint64_t notify_phys = 0;
     uint64_t result_phys = 0;
-    vmm_context_t* cabin = vmm_create_cabin(&notify_phys, &result_phys);
-    if (!cabin) {
+    vmm_context_t *cabin = vmm_create_cabin(&notify_phys, &result_phys);
+    if (!cabin)
+    {
         debug_printf("[PROCESS] ERROR: Failed to create cabin\n");
         kfree(proc);
         return NULL;
     }
 
     proc->pid = pid_alloc();
-    if (proc->pid == PID_INVALID) {
+    if (proc->pid == PID_INVALID)
+    {
         debug_printf("[PROCESS] ERROR: PID allocation failed (exhaustion at %u/%u)\n",
                      pid_allocated_count(), PID_MAX_COUNT);
         vmm_destroy_context(cabin);
@@ -98,16 +104,19 @@ process_t* process_create(const char* tags) {
 
     // ASLR: generate per-process random offsets
     aslr_offsets_t aslr = aslr_generate();
-    proc->aslr_stack_top     = VMM_USER_STACK_TOP - aslr.stack_offset;
-    proc->aslr_heap_base     = CABIN_HEAP_BASE + aslr.heap_offset;
+    proc->aslr_stack_top = VMM_USER_STACK_TOP - aslr.stack_offset;
+    proc->aslr_heap_base = CABIN_HEAP_BASE + aslr.heap_offset;
     proc->aslr_buf_heap_base = CABIN_BUF_HEAP_START + aslr.buf_heap_offset;
-    proc->buf_heap_next      = proc->aslr_buf_heap_base;
+    proc->buf_heap_next = proc->aslr_buf_heap_base;
     proc->next = NULL;
 
-    if (tags) {
+    if (tags)
+    {
         strncpy(proc->tags, tags, PROCESS_TAG_SIZE - 1);
         proc->tags[PROCESS_TAG_SIZE - 1] = '\0';
-    } else {
+    }
+    else
+    {
         proc->tags[0] = '\0';
     }
 
@@ -119,21 +128,23 @@ process_t* process_create(const char* tags) {
     size_t kernel_stack_size = CONFIG_KERNEL_STACK_PAGES * VMM_PAGE_SIZE;
     size_t total_pages = CONFIG_KERNEL_STACK_TOTAL_PAGES;
 
-    void* stack_phys = pmm_alloc(total_pages);
-    if (!stack_phys) {
+    void *stack_phys = pmm_alloc(total_pages);
+    if (!stack_phys)
+    {
         vmm_destroy_context(cabin);
         pid_free(proc->pid);
         kfree(proc);
         return NULL;
     }
 
-    void* stack_virt_base = vmm_phys_to_virt((uintptr_t)stack_phys);
+    void *stack_virt_base = vmm_phys_to_virt((uintptr_t)stack_phys);
 
-    vmm_context_t* kernel_ctx = vmm_get_kernel_context();
+    vmm_context_t *kernel_ctx = vmm_get_kernel_context();
 
     // guard page must be unmapped so a stack overflow raises a page fault
-    pte_t* guard_pte = vmm_get_or_create_pte(kernel_ctx, (uintptr_t)stack_virt_base);
-    if (!guard_pte) {
+    pte_t *guard_pte = vmm_get_or_create_pte(kernel_ctx, (uintptr_t)stack_virt_base);
+    if (!guard_pte)
+    {
         debug_printf("[PROCESS] FATAL: Cannot create guard page PTE for PID %u\n", proc->pid);
         pmm_free(stack_phys, total_pages);
         vmm_destroy_context(cabin);
@@ -146,8 +157,8 @@ process_t* process_create(const char* tags) {
     vmm_flush_tlb_page((uintptr_t)stack_virt_base);
 
     proc->kernel_stack_guard_base = stack_virt_base;
-    proc->kernel_stack = (void*)((uintptr_t)stack_virt_base + VMM_PAGE_SIZE);
-    proc->kernel_stack_top = (void*)((uintptr_t)proc->kernel_stack + kernel_stack_size);
+    proc->kernel_stack = (void *)((uintptr_t)stack_virt_base + VMM_PAGE_SIZE);
+    proc->kernel_stack_top = (void *)((uintptr_t)proc->kernel_stack + kernel_stack_size);
 
     debug_printf("[PROCESS] Kernel stack allocated: guard=0x%lx, stack=0x%lx-0x%lx (PID %u)\n",
                  (uintptr_t)proc->kernel_stack_guard_base,
@@ -171,12 +182,14 @@ process_t* process_create(const char* tags) {
     spin_lock(&process_lock);
 
     // authoritative check under lock to prevent race between early check and insert
-    if (process_count >= PROCESS_MAX_COUNT) {
+    if (process_count >= PROCESS_MAX_COUNT)
+    {
         spin_unlock(&process_lock);
         // undo all allocations
-        if (proc->kernel_stack_guard_base) {
+        if (proc->kernel_stack_guard_base)
+        {
             uintptr_t stack_phys = vmm_virt_to_phys_direct(proc->kernel_stack_guard_base);
-            pmm_free((void*)stack_phys, CONFIG_KERNEL_STACK_TOTAL_PAGES);
+            pmm_free((void *)stack_phys, CONFIG_KERNEL_STACK_TOTAL_PAGES);
         }
         vmm_destroy_context(cabin);
         pid_free(proc->pid);
@@ -193,31 +206,40 @@ process_t* process_create(const char* tags) {
     return proc;
 }
 
-void process_ref_inc(process_t* proc) {
-    if (!proc) {
+void process_ref_inc(process_t *proc)
+{
+    if (!proc)
+    {
         return;
     }
 
     uint32_t old = atomic_fetch_add_u32(&proc->ref_count, 1);
 
-    #ifdef DEBUG_REFCOUNT
+#ifdef DEBUG_REFCOUNT
     debug_printf("[REFCOUNT] PID %u: %u -> %u (INC)\n", proc->pid, old, old + 1);
-    #endif
+#endif
 
-    if (old > UINT32_MAX - 100) {
+    if (old > UINT32_MAX - 100)
+    {
         debug_printf("[PROCESS] PANIC: ref_count overflow for PID %u (old=%u)\n",
                      proc->pid, old);
-        while (1) { asm volatile("cli; hlt"); }
+        while (1)
+        {
+            asm volatile("cli; hlt");
+        }
     }
 }
 
-void process_ref_dec(process_t* proc) {
-    if (!proc) return;
+void process_ref_dec(process_t *proc)
+{
+    if (!proc)
+        return;
 
     // fetch_sub returns OLD value (before subtraction)
     uint32_t old = atomic_fetch_sub_u32(&proc->ref_count, 1);
 
-    if (old == 0) {
+    if (old == 0)
+    {
         // underflow detected — restore to 1 to prevent further damage
         // the process will leak but the system survives
         atomic_store_u32(&proc->ref_count, 1);
@@ -226,45 +248,55 @@ void process_ref_dec(process_t* proc) {
         return;
     }
 
-    #ifdef DEBUG_REFCOUNT
+#ifdef DEBUG_REFCOUNT
     debug_printf("[REFCOUNT] PID %u: %u -> %u (DEC)\n", proc->pid, old, old - 1);
-    #endif
+#endif
 }
 
-uint32_t process_ref_count(process_t* proc) {
-    if (!proc) return 0;
+uint32_t process_ref_count(process_t *proc)
+{
+    if (!proc)
+        return 0;
     return atomic_load_u32(&proc->ref_count);
 }
 
-void process_set_state(process_t* proc, process_state_t new_state) {
-    if (!proc) return;
+void process_set_state(process_t *proc, process_state_t new_state)
+{
+    if (!proc)
+        return;
     spin_lock(&proc->state_lock);
     proc->state = new_state;
     spin_unlock(&proc->state_lock);
 }
 
-process_state_t process_get_state(process_t* proc) {
-    if (!proc) return PROC_CRASHED;
+process_state_t process_get_state(process_t *proc)
+{
+    if (!proc)
+        return PROC_CRASHED;
     spin_lock(&proc->state_lock);
     process_state_t state = proc->state;
     spin_unlock(&proc->state_lock);
     return state;
 }
 
-int process_destroy_safe(process_t* proc) {
-    if (!proc) {
+int process_destroy_safe(process_t *proc)
+{
+    if (!proc)
+    {
         return -1;
     }
 
     process_state_t state = process_get_state(proc);
-    if (state != PROC_CRASHED && state != PROC_DONE) {
+    if (state != PROC_CRASHED && state != PROC_DONE)
+    {
         debug_printf("[PROCESS] ERROR: Cannot destroy PID %u in state %d\n",
                      proc->pid, state);
         return -1;
     }
 
     uint32_t refs = process_ref_count(proc);
-    if (refs > 0) {
+    if (refs > 0)
+    {
         debug_printf("[PROCESS] ERROR: Cannot destroy PID %u with ref_count=%u\n",
                      proc->pid, refs);
         return -1;
@@ -274,20 +306,27 @@ int process_destroy_safe(process_t* proc) {
     return 0;
 }
 
-void process_destroy(process_t* proc) {
-    if (!proc) return;
+void process_destroy(process_t *proc)
+{
+    if (!proc)
+        return;
 
-    if (proc->magic != PROCESS_MAGIC) {
+    if (proc->magic != PROCESS_MAGIC)
+    {
         debug_printf("[PROCESS] CORRUPTION: Invalid magic 0x%x for PID %u\n",
                      proc->magic, proc->pid);
-        while (1) { asm volatile("cli; hlt"); }
+        while (1)
+        {
+            asm volatile("cli; hlt");
+        }
     }
 
-    scheduler_state_t* sched = scheduler_get_state();
+    scheduler_state_t *sched = scheduler_get_state();
 
     // check current_process under short lock
     spin_lock(&sched->scheduler_lock);
-    if (sched->current_process == proc) {
+    if (sched->current_process == proc)
+    {
         spin_unlock(&sched->scheduler_lock);
         debug_printf("[PROCESS] ERROR: Cannot destroy current process PID %u\n", proc->pid);
         return;
@@ -298,7 +337,8 @@ void process_destroy(process_t* proc) {
     spin_lock(&process_lock);
 
     uint32_t refs = process_ref_count(proc);
-    if (refs > 0) {
+    if (refs > 0)
+    {
         spin_unlock(&process_lock);
         debug_printf("[PROCESS] PID %u has ref_count=%u, transitioning to DONE\n",
                      proc->pid, refs);
@@ -309,14 +349,19 @@ void process_destroy(process_t* proc) {
     // poison magic before removing from list to catch use-after-remove
     proc->magic = 0xDEADDEAD;
 
-    if (process_list_head == proc) {
+    if (process_list_head == proc)
+    {
         process_list_head = proc->next;
-    } else {
-        process_t* curr = process_list_head;
-        while (curr && curr->next != proc) {
+    }
+    else
+    {
+        process_t *curr = process_list_head;
+        while (curr && curr->next != proc)
+        {
             curr = curr->next;
         }
-        if (curr) {
+        if (curr)
+        {
             curr->next = proc->next;
         }
     }
@@ -328,12 +373,14 @@ void process_destroy(process_t* proc) {
     process_set_state(proc, PROC_CRASHED);
 
     uint32_t cancelled = async_io_cancel_by_pid(proc->pid);
-    if (cancelled > 0) {
+    if (cancelled > 0)
+    {
         debug_printf("[PROCESS] Cancelled %u pending async I/O for PID %u\n",
                      cancelled, proc->pid);
     }
 
-    if (!cleanup_queue_enqueue(proc)) {
+    if (!cleanup_queue_enqueue(proc))
+    {
         // queue full — fall back to immediate cleanup
         debug_printf("[PROCESS] WARNING: Cleanup queue full, immediate cleanup for PID %u\n",
                      proc->pid);
@@ -342,13 +389,16 @@ void process_destroy(process_t* proc) {
     // resources (PMM/VMM) are NOT freed here; deferred to process_cleanup_deferred()
 }
 
-int process_load_binary(process_t* proc, const void* binary_data, size_t size) {
-    if (!proc || !binary_data || size == 0) {
+int process_load_binary(process_t *proc, const void *binary_data, size_t size)
+{
+    if (!proc || !binary_data || size == 0)
+    {
         debug_printf("[PROCESS] ERROR: Invalid arguments to process_load_binary\n");
         return -1;
     }
 
-    if (!proc->cabin) {
+    if (!proc->cabin)
+    {
         debug_printf("[PROCESS] ERROR: Process has no cabin\n");
         return -1;
     }
@@ -356,21 +406,24 @@ int process_load_binary(process_t* proc, const void* binary_data, size_t size) {
     size_t page_count = (size + VMM_PAGE_SIZE - 1) / VMM_PAGE_SIZE;
 
     // minimum 5 pages for cabin layout (.text: 3, .rodata: 1, .data: 1)
-    if (page_count < 5) {
+    if (page_count < 5)
+    {
         page_count = 5;
     }
 
-    void* code_phys = pmm_alloc(page_count);
-    if (!code_phys) {
+    void *code_phys = pmm_alloc_zero(page_count);
+    if (!code_phys)
+    {
         debug_printf("[PROCESS] ERROR: Failed to allocate %zu pages for binary\n", page_count);
         return -1;
     }
 
-    void* code_virt = vmm_phys_to_virt((uintptr_t)code_phys);
+    void *code_virt = vmm_phys_to_virt((uintptr_t)code_phys);
     memcpy(code_virt, binary_data, size);
 
     int result = vmm_map_code_region(proc->cabin, (uintptr_t)code_phys, page_count * VMM_PAGE_SIZE);
-    if (result != 0) {
+    if (result != 0)
+    {
         debug_printf("[PROCESS] ERROR: Failed to map code region\n");
         debug_printf("[PROCESS] Physical address: 0x%lx, Size: %zu bytes\n",
                      (uintptr_t)code_phys, size);
@@ -378,8 +431,9 @@ int process_load_binary(process_t* proc, const void* binary_data, size_t size) {
         return -1;
     }
 
-    void* user_stack_phys = pmm_alloc(CONFIG_USER_STACK_TOTAL_PAGES);
-    if (!user_stack_phys) {
+    void *user_stack_phys = pmm_alloc(CONFIG_USER_STACK_TOTAL_PAGES);
+    if (!user_stack_phys)
+    {
         debug_printf("[PROCESS] ERROR: Failed to allocate user stack\n");
         pmm_free(code_phys, page_count);
         return -1;
@@ -398,10 +452,10 @@ int process_load_binary(process_t* proc, const void* binary_data, size_t size) {
         stack_data_base,
         (uintptr_t)user_stack_phys + (CONFIG_USER_STACK_GUARD_PAGES * VMM_PAGE_SIZE),
         CONFIG_USER_STACK_PAGES,
-        VMM_FLAG_PRESENT | VMM_FLAG_WRITABLE | VMM_FLAG_USER
-    );
+        VMM_FLAG_PRESENT | VMM_FLAG_WRITABLE | VMM_FLAG_USER);
 
-    if (!map_result.success) {
+    if (!map_result.success)
+    {
         debug_printf("[PROCESS] ERROR: Failed to map user stack: %s\n", map_result.error_msg);
         pmm_free(user_stack_phys, CONFIG_USER_STACK_TOTAL_PAGES);
         pmm_free(code_phys, page_count);
@@ -410,8 +464,9 @@ int process_load_binary(process_t* proc, const void* binary_data, size_t size) {
 
     // === Heap initialization (ASLR: use randomized heap base) ===
     uintptr_t heap_start = proc->aslr_heap_base;
-    void* heap_phys = pmm_alloc_zero(CONFIG_USER_HEAP_INITIAL_PAGES);
-    if (!heap_phys) {
+    void *heap_phys = pmm_alloc_zero(CONFIG_USER_HEAP_INITIAL_PAGES);
+    if (!heap_phys)
+    {
         debug_printf("[PROCESS] ERROR: Failed to allocate initial heap pages\n");
         pmm_free(user_stack_phys, CONFIG_USER_STACK_TOTAL_PAGES);
         pmm_free(code_phys, page_count);
@@ -423,10 +478,10 @@ int process_load_binary(process_t* proc, const void* binary_data, size_t size) {
         heap_start,
         (uintptr_t)heap_phys,
         CONFIG_USER_HEAP_INITIAL_PAGES,
-        VMM_FLAG_PRESENT | VMM_FLAG_WRITABLE | VMM_FLAG_USER | VMM_FLAG_NO_EXECUTE
-    );
+        VMM_FLAG_PRESENT | VMM_FLAG_WRITABLE | VMM_FLAG_USER | VMM_FLAG_NO_EXECUTE);
 
-    if (!heap_map.success) {
+    if (!heap_map.success)
+    {
         debug_printf("[PROCESS] ERROR: Failed to map user heap: %s\n", heap_map.error_msg);
         pmm_free(heap_phys, CONFIG_USER_HEAP_INITIAL_PAGES);
         pmm_free(user_stack_phys, CONFIG_USER_STACK_TOTAL_PAGES);
@@ -439,11 +494,11 @@ int process_load_binary(process_t* proc, const void* binary_data, size_t size) {
     proc->cabin->stack_top = stack_top;
 
     // Write ASLR cabin info to notify page so userspace knows its layout
-    notify_page_t* np = (notify_page_t*)vmm_phys_to_virt(proc->notify_page_phys);
-    np->cabin_heap_base     = heap_start;
+    notify_page_t *np = (notify_page_t *)vmm_phys_to_virt(proc->notify_page_phys);
+    np->cabin_heap_base = heap_start;
     np->cabin_heap_max_size = CABIN_HEAP_MAX_SIZE;
     np->cabin_buf_heap_base = proc->aslr_buf_heap_base;
-    np->cabin_stack_top     = stack_top;
+    np->cabin_stack_top = stack_top;
 
     proc->code_size = size;
     proc->context.rip = VMM_CABIN_CODE_START;
@@ -455,10 +510,12 @@ int process_load_binary(process_t* proc, const void* binary_data, size_t size) {
     return 0;
 }
 
-void process_list_validate(const char* caller) {
+void process_list_validate(const char *caller)
+{
     // allocate BEFORE taking the lock to avoid kmalloc under spinlock
-    process_t** seen = (process_t**)kmalloc(PROCESS_MAX_COUNT * sizeof(process_t*));
-    if (!seen) {
+    process_t **seen = (process_t **)kmalloc(PROCESS_MAX_COUNT * sizeof(process_t *));
+    if (!seen)
+    {
         debug_printf("[PROCESS] WARNING: kmalloc failed in process_list_validate\n");
         return;
     }
@@ -466,52 +523,70 @@ void process_list_validate(const char* caller) {
     spin_lock(&process_lock);
 
     uint32_t count = 0;
-    process_t* curr = process_list_head;
+    process_t *curr = process_list_head;
 
-    while (curr && count < PROCESS_MAX_COUNT) {
-        for (uint32_t i = 0; i < count; i++) {
-            if (seen[i] == curr) {
+    while (curr && count < PROCESS_MAX_COUNT)
+    {
+        for (uint32_t i = 0; i < count; i++)
+        {
+            if (seen[i] == curr)
+            {
                 debug_printf("[PROCESS] CORRUPTION: Cycle detected at %p (caller: %s)\n",
-                             (void*)curr, caller);
+                             (void *)curr, caller);
                 debug_printf("[PROCESS] Process list is corrupted\n");
                 kfree(seen);
-                while (1) { asm volatile("cli; hlt"); }
+                while (1)
+                {
+                    asm volatile("cli; hlt");
+                }
             }
         }
 
-        if (curr->magic != PROCESS_MAGIC) {
+        if (curr->magic != PROCESS_MAGIC)
+        {
             debug_printf("[PROCESS] CORRUPTION: Invalid magic 0x%x at %p (caller: %s)\n",
-                         curr->magic, (void*)curr, caller);
+                         curr->magic, (void *)curr, caller);
             debug_printf("[PROCESS] PID: %u\n", curr->pid);
             kfree(seen);
-            while (1) { asm volatile("cli; hlt"); }
+            while (1)
+            {
+                asm volatile("cli; hlt");
+            }
         }
 
         seen[count++] = curr;
         curr = curr->next;
     }
 
-    if (count != process_count) {
+    if (count != process_count)
+    {
         debug_printf("[PROCESS] CORRUPTION: Count mismatch (list=%u, expected=%u, caller=%s)\n",
                      count, process_count, caller);
         kfree(seen);
-        while (1) { asm volatile("cli; hlt"); }
+        while (1)
+        {
+            asm volatile("cli; hlt");
+        }
     }
 
     kfree(seen);
     spin_unlock(&process_lock);
 }
 
-process_t* process_find(uint32_t pid) {
-    if (pid == PROCESS_INVALID_PID) {
+process_t *process_find(uint32_t pid)
+{
+    if (pid == PROCESS_INVALID_PID)
+    {
         return NULL;
     }
 
     spin_lock(&process_lock);
 
-    process_t* curr = process_list_head;
-    while (curr) {
-        if (curr->pid == pid && curr->magic == PROCESS_MAGIC) {
+    process_t *curr = process_list_head;
+    while (curr)
+    {
+        if (curr->pid == pid && curr->magic == PROCESS_MAGIC)
+        {
             spin_unlock(&process_lock);
             return curr;
         }
@@ -522,16 +597,20 @@ process_t* process_find(uint32_t pid) {
     return NULL;
 }
 
-process_t* process_find_ref(uint32_t pid) {
-    if (pid == PROCESS_INVALID_PID) {
+process_t *process_find_ref(uint32_t pid)
+{
+    if (pid == PROCESS_INVALID_PID)
+    {
         return NULL;
     }
 
     spin_lock(&process_lock);
 
-    process_t* curr = process_list_head;
-    while (curr) {
-        if (curr->pid == pid && curr->magic == PROCESS_MAGIC) {
+    process_t *curr = process_list_head;
+    while (curr)
+    {
+        if (curr->pid == pid && curr->magic == PROCESS_MAGIC)
+        {
             process_ref_inc(curr);
             spin_unlock(&process_lock);
             return curr;
@@ -543,7 +622,8 @@ process_t* process_find_ref(uint32_t pid) {
     return NULL;
 }
 
-process_t* process_get_first(void) {
+process_t *process_get_first(void)
+{
     // NOTE: caller must tolerate the list changing between calls;
     // this is safe because process nodes are freed only via deferred cleanup
     // which runs in non-IRQ context, and the list head is updated atomically
@@ -552,31 +632,36 @@ process_t* process_get_first(void) {
     return process_list_head;
 }
 
-process_t* process_get_current(void) {
-    scheduler_state_t* sched = scheduler_get_state();
-    if (!sched) return NULL;
+process_t *process_get_current(void)
+{
+    scheduler_state_t *sched = scheduler_get_state();
+    if (!sched)
+        return NULL;
 
     spin_lock(&sched->scheduler_lock);
-    process_t* current = sched->current_process;
+    process_t *current = sched->current_process;
     spin_unlock(&sched->scheduler_lock);
 
     return current;
 }
 
-uint32_t process_get_count(void) {
+uint32_t process_get_count(void)
+{
     return atomic_load_u32(&process_count);
 }
 
-void process_test(void) {
+void process_test(void)
+{
     kprintf("\n");
     kprintf("====================================\n");
     kprintf("PROCESS MANAGEMENT TEST\n");
     kprintf("====================================\n");
 
     debug_printf("[TEST] Creating test process...\n");
-    process_t* proc = process_create("app test");
+    process_t *proc = process_create("app test");
 
-    if (!proc) {
+    if (!proc)
+    {
         debug_printf("[TEST] FAILED: Could not create process\n");
         return;
     }
@@ -591,14 +676,16 @@ void process_test(void) {
     debug_printf("[TEST]   Tags: %s\n", proc->tags);
 
     uint8_t test_binary[64];
-    for (int i = 0; i < 64; i++) {
+    for (int i = 0; i < 64; i++)
+    {
         test_binary[i] = (uint8_t)i;
     }
 
     debug_printf("[TEST] Loading test binary (64 bytes)...\n");
     int result = process_load_binary(proc, test_binary, sizeof(test_binary));
 
-    if (result != 0) {
+    if (result != 0)
+    {
         debug_printf("[TEST] FAILED: Could not load binary\n");
         process_destroy(proc);
         return;
@@ -609,10 +696,13 @@ void process_test(void) {
     debug_printf("[TEST]   Code size: %zu bytes\n", proc->code_size);
 
     debug_printf("[TEST] Verifying process lookup...\n");
-    process_t* found = process_find(proc->pid);
-    if (found == proc) {
+    process_t *found = process_find(proc->pid);
+    if (found == proc)
+    {
         debug_printf("[TEST] SUCCESS: Process lookup working\n");
-    } else {
+    }
+    else
+    {
         debug_printf("[TEST] FAILED: Process lookup failed\n");
     }
 
@@ -630,15 +720,18 @@ void process_test(void) {
     kprintf("\n");
 }
 
-bool process_has_tag(process_t* proc, const char* tag) {
-    if (!proc || !tag || tag[0] == '\0') {
+bool process_has_tag(process_t *proc, const char *tag)
+{
+    if (!proc || !tag || tag[0] == '\0')
+    {
         return false;
     }
 
-    const char* pos = proc->tags;
+    const char *pos = proc->tags;
 
-    while (*pos) {
-        const char* comma = strchr(pos, ',');
+    while (*pos)
+    {
+        const char *comma = strchr(pos, ',');
         size_t current_len = comma ? (size_t)(comma - pos) : strlen(pos);
 
         char current_tag[PROCESS_TAG_SIZE];
@@ -646,11 +739,13 @@ bool process_has_tag(process_t* proc, const char* tag) {
         memcpy(current_tag, pos, copy_len);
         current_tag[copy_len] = '\0';
 
-        if (tag_match(tag, current_tag)) {
+        if (tag_match(tag, current_tag))
+        {
             return true;
         }
 
-        if (!comma) {
+        if (!comma)
+        {
             break;
         }
         pos = comma + 1;
@@ -659,31 +754,37 @@ bool process_has_tag(process_t* proc, const char* tag) {
     return false;
 }
 
-int process_add_tag(process_t* proc, const char* tag) {
-    if (!proc || !tag || tag[0] == '\0') {
+int process_add_tag(process_t *proc, const char *tag)
+{
+    if (!proc || !tag || tag[0] == '\0')
+    {
         return -1;
     }
 
     size_t tag_len = strlen(tag);
-    if (tag_len >= PROCESS_TAG_SIZE) {
+    if (tag_len >= PROCESS_TAG_SIZE)
+    {
         return -1;
     }
 
     spin_lock(&process_lock);
 
-    if (process_has_tag(proc, tag)) {
+    if (process_has_tag(proc, tag))
+    {
         spin_unlock(&process_lock);
         return 0;
     }
 
     size_t current_len = strlen(proc->tags);
 
-    if (current_len + tag_len + 2 > PROCESS_TAG_SIZE) {
+    if (current_len + tag_len + 2 > PROCESS_TAG_SIZE)
+    {
         spin_unlock(&process_lock);
         return -1;
     }
 
-    if (current_len > 0) {
+    if (current_len > 0)
+    {
         proc->tags[current_len] = ',';
         current_len++;
     }
@@ -695,14 +796,17 @@ int process_add_tag(process_t* proc, const char* tag) {
     return 0;
 }
 
-int process_remove_tag(process_t* proc, const char* tag) {
-    if (!proc || !tag || tag[0] == '\0') {
+int process_remove_tag(process_t *proc, const char *tag)
+{
+    if (!proc || !tag || tag[0] == '\0')
+    {
         return -1;
     }
 
     spin_lock(&process_lock);
 
-    if (!process_has_tag(proc, tag)) {
+    if (!process_has_tag(proc, tag))
+    {
         spin_unlock(&process_lock);
         return 0;
     }
@@ -710,17 +814,21 @@ int process_remove_tag(process_t* proc, const char* tag) {
     char new_tags[PROCESS_TAG_SIZE];
     new_tags[0] = '\0';
 
-    const char* pos = proc->tags;
+    const char *pos = proc->tags;
     bool first = true;
 
-    while (*pos) {
-        const char* comma = strchr(pos, ',');
+    while (*pos)
+    {
+        const char *comma = strchr(pos, ',');
         size_t current_len = comma ? (size_t)(comma - pos) : strlen(pos);
 
-        if (current_len != strlen(tag) || strncmp(pos, tag, current_len) != 0) {
-            if (!first) {
+        if (current_len != strlen(tag) || strncmp(pos, tag, current_len) != 0)
+        {
+            if (!first)
+            {
                 size_t remaining = PROCESS_TAG_SIZE - strlen(new_tags) - 1;
-                if (remaining < 1) {
+                if (remaining < 1)
+                {
                     debug_printf("[PROCESS] ERROR: Tag string overflow during removal (comma)\n");
                     spin_unlock(&process_lock);
                     return -1;
@@ -728,7 +836,8 @@ int process_remove_tag(process_t* proc, const char* tag) {
                 strncat(new_tags, ",", remaining);
             }
             size_t remaining = PROCESS_TAG_SIZE - strlen(new_tags) - 1;
-            if (current_len > remaining) {
+            if (current_len > remaining)
+            {
                 debug_printf("[PROCESS] ERROR: Tag string overflow during removal (tag)\n");
                 spin_unlock(&process_lock);
                 return -1;
@@ -737,7 +846,8 @@ int process_remove_tag(process_t* proc, const char* tag) {
             first = false;
         }
 
-        if (!comma) {
+        if (!comma)
+        {
             break;
         }
         pos = comma + 1;
@@ -751,28 +861,41 @@ int process_remove_tag(process_t* proc, const char* tag) {
     return 0;
 }
 
-void process_start_initial(process_t* proc) {
-    if (!proc) {
+void process_start_initial(process_t *proc)
+{
+    if (!proc)
+    {
         debug_printf("[PROCESS] PANIC: process_start_initial called with NULL process\n");
-        while (1) { asm volatile("cli; hlt"); }
+        while (1)
+        {
+            asm volatile("cli; hlt");
+        }
     }
 
-    if (proc->state != PROC_WORKING) {
+    if (proc->state != PROC_WORKING)
+    {
         debug_printf("[PROCESS] PANIC: process_start_initial called with process not in WORKING state\n");
         debug_printf("[PROCESS]   PID %u is in state %d (expected PROC_WORKING=%d)\n",
-                proc->pid, proc->state, PROC_WORKING);
-        while (1) { asm volatile("cli; hlt"); }
+                     proc->pid, proc->state, PROC_WORKING);
+        while (1)
+        {
+            asm volatile("cli; hlt");
+        }
     }
 
-    if (proc->started) {
+    if (proc->started)
+    {
         debug_printf("[PROCESS] PANIC: process_start_initial called on process that already ran\n");
         debug_printf("[PROCESS]   PID %u has started=true\n", proc->pid);
-        while (1) { asm volatile("cli; hlt"); }
+        while (1)
+        {
+            asm volatile("cli; hlt");
+        }
     }
 
     process_set_state(proc, PROC_WORKING);
 
-    scheduler_state_t* sched = scheduler_get_state();
+    scheduler_state_t *sched = scheduler_get_state();
     spin_lock(&sched->scheduler_lock);
     sched->current_process = proc;
     spin_unlock(&sched->scheduler_lock);
@@ -785,20 +908,29 @@ void process_start_initial(process_t* proc) {
 
     uint64_t verify_cr3;
     __asm__ volatile("mov %%cr3, %0" : "=r"(verify_cr3));
-    if (verify_cr3 != proc->context.cr3) {
+    if (verify_cr3 != proc->context.cr3)
+    {
         debug_printf("[PROCESS] PANIC: CR3 verification failed (wrote 0x%lx, read 0x%lx)\n",
-                proc->context.cr3, verify_cr3);
-        while (1) { asm volatile("cli; hlt"); }
+                     proc->context.cr3, verify_cr3);
+        while (1)
+        {
+            asm volatile("cli; hlt");
+        }
     }
 
     jump_to_userspace(proc->context.rip, proc->context.rsp, proc->context.rflags);
 
     debug_printf("[PROCESS] PANIC: jump_to_userspace returned (should never happen)\n");
-    while (1) { asm volatile("cli; hlt"); }
+    while (1)
+    {
+        asm volatile("cli; hlt");
+    }
 }
 
-size_t process_snapshot_tags(process_t* proc, char* buffer, size_t buffer_size) {
-    if (!proc || !buffer || buffer_size == 0) {
+size_t process_snapshot_tags(process_t *proc, char *buffer, size_t buffer_size)
+{
+    if (!proc || !buffer || buffer_size == 0)
+    {
         return 0;
     }
 
@@ -815,12 +947,15 @@ size_t process_snapshot_tags(process_t* proc, char* buffer, size_t buffer_size) 
     return copy_len;
 }
 
-static bool cleanup_queue_enqueue(process_t* proc) {
-    if (!proc) return false;
+static bool cleanup_queue_enqueue(process_t *proc)
+{
+    if (!proc)
+        return false;
 
     spin_lock(&g_cleanup_queue.lock);
 
-    if (g_cleanup_queue.count >= PROCESS_CLEANUP_QUEUE_SIZE) {
+    if (g_cleanup_queue.count >= PROCESS_CLEANUP_QUEUE_SIZE)
+    {
         spin_unlock(&g_cleanup_queue.lock);
         return false;
     }
@@ -833,15 +968,17 @@ static bool cleanup_queue_enqueue(process_t* proc) {
     return true;
 }
 
-static process_t* cleanup_queue_dequeue(void) {
+static process_t *cleanup_queue_dequeue(void)
+{
     spin_lock(&g_cleanup_queue.lock);
 
-    if (g_cleanup_queue.count == 0) {
+    if (g_cleanup_queue.count == 0)
+    {
         spin_unlock(&g_cleanup_queue.lock);
         return NULL;
     }
 
-    process_t* proc = g_cleanup_queue.queue[g_cleanup_queue.head];
+    process_t *proc = g_cleanup_queue.queue[g_cleanup_queue.head];
     g_cleanup_queue.head = (g_cleanup_queue.head + 1) % PROCESS_CLEANUP_QUEUE_SIZE;
     g_cleanup_queue.count--;
 
@@ -849,21 +986,25 @@ static process_t* cleanup_queue_dequeue(void) {
     return proc;
 }
 
-static void process_cleanup_immediate(process_t* proc) {
-    if (!proc) return;
+static void process_cleanup_immediate(process_t *proc)
+{
+    if (!proc)
+        return;
 
-    if (proc->kernel_stack_guard_base) {
+    if (proc->kernel_stack_guard_base)
+    {
         uintptr_t guard_virt = (uintptr_t)proc->kernel_stack_guard_base;
 
-        vmm_context_t* kernel_ctx = vmm_get_kernel_context();
-        pte_t* guard_pte = vmm_get_pte(kernel_ctx, guard_virt);
-        if (guard_pte) {
+        vmm_context_t *kernel_ctx = vmm_get_kernel_context();
+        pte_t *guard_pte = vmm_get_pte(kernel_ctx, guard_virt);
+        if (guard_pte)
+        {
             *guard_pte = vmm_make_pte(guard_virt, VMM_FLAG_PRESENT | VMM_FLAG_WRITABLE);
             vmm_flush_tlb_page(guard_virt);
         }
 
         uintptr_t stack_phys = vmm_virt_to_phys_direct(proc->kernel_stack_guard_base);
-        pmm_free((void*)stack_phys, CONFIG_KERNEL_STACK_TOTAL_PAGES);
+        pmm_free((void *)stack_phys, CONFIG_KERNEL_STACK_TOTAL_PAGES);
 
         debug_printf("[PROCESS] Freed kernel stack: guard=0x%lx (PID %u)\n",
                      guard_virt, proc->pid);
@@ -872,7 +1013,8 @@ static void process_cleanup_immediate(process_t* proc) {
         proc->kernel_stack = NULL;
     }
 
-    if (proc->cabin) {
+    if (proc->cabin)
+    {
         vmm_destroy_context(proc->cabin);
         proc->cabin = NULL;
     }
@@ -883,39 +1025,47 @@ static void process_cleanup_immediate(process_t* proc) {
     kfree(proc);
 }
 
-void process_cleanup_deferred(void) {
+void process_cleanup_deferred(void)
+{
     uint32_t cleaned = 0;
-    const uint32_t MAX_PER_CALL = 8;  // throttle to avoid long latency spikes
+    const uint32_t MAX_PER_CALL = 8; // throttle to avoid long latency spikes
 
-    while (cleaned < MAX_PER_CALL) {
-        process_t* proc = cleanup_queue_dequeue();
-        if (!proc) break;
+    while (cleaned < MAX_PER_CALL)
+    {
+        process_t *proc = cleanup_queue_dequeue();
+        if (!proc)
+            break;
 
         process_cleanup_immediate(proc);
         cleaned++;
     }
 
-    if (cleaned > 0) {
+    if (cleaned > 0)
+    {
         debug_printf("[PROCESS] Deferred cleanup: freed %u processes\n", cleaned);
     }
 }
 
-uint32_t process_cleanup_queue_size(void) {
+uint32_t process_cleanup_queue_size(void)
+{
     spin_lock(&g_cleanup_queue.lock);
     uint32_t size = g_cleanup_queue.count;
     spin_unlock(&g_cleanup_queue.lock);
     return size;
 }
 
-void process_cleanup_queue_flush(void) {
+void process_cleanup_queue_flush(void)
+{
     debug_printf("[PROCESS] Flushing cleanup queue (pending=%u)...\n",
                  g_cleanup_queue.count);
 
     uint32_t total_cleaned = 0;
 
-    while (g_cleanup_queue.count > 0) {
-        process_t* proc = cleanup_queue_dequeue();
-        if (!proc) break;
+    while (g_cleanup_queue.count > 0)
+    {
+        process_t *proc = cleanup_queue_dequeue();
+        if (!proc)
+            break;
 
         process_cleanup_immediate(proc);
         total_cleaned++;
