@@ -12,6 +12,8 @@
 
 static scheduler_state_t sched;
 
+static void scheduler_check_wait_timeouts(void);
+
 void scheduler_init(void) {
     debug_printf("[SCHEDULER] Initializing Smart Score Scheduler...\n");
 
@@ -121,22 +123,32 @@ int32_t scheduler_calculate_score(process_t* proc) {
 }
 
 void scheduler_cleanup_finished(void) {
-    process_t* proc = process_get_first();
-
     spin_lock(&sched.scheduler_lock);
     process_t* current = sched.current_process;
     spin_unlock(&sched.scheduler_lock);
 
-    while (proc) {
-        process_t* next = proc->next;
+    // Collect candidates under lock, then destroy after releasing
+    uint32_t to_destroy[16];
+    uint32_t count = 0;
+
+    process_list_lock();
+    process_t* proc = process_get_first();
+    while (proc && count < 16) {
         process_state_t state = process_get_state(proc);
         uint32_t refs = process_ref_count(proc);
 
         if (state == PROC_DONE && refs == 0 && proc != current) {
-            process_destroy_safe(proc);
+            to_destroy[count++] = proc->pid;
         }
+        proc = proc->next;
+    }
+    process_list_unlock();
 
-        proc = next;
+    for (uint32_t i = 0; i < count; i++) {
+        process_t* p = process_find(to_destroy[i]);
+        if (p) {
+            process_destroy_safe(p);
+        }
     }
 
     process_cleanup_deferred();
@@ -146,9 +158,9 @@ process_t* scheduler_select_next(void) {
     process_t* best = NULL;
     int32_t best_score = INT32_MIN;
 
+    process_list_lock();
     process_t* proc = process_get_first();
     while (proc) {
-        // validate magic before accessing any other fields
         if (proc->magic != PROCESS_MAGIC) {
             proc = proc->next;
             continue;
@@ -170,6 +182,7 @@ process_t* scheduler_select_next(void) {
         }
         proc = proc->next;
     }
+    process_list_unlock();
 
     if (!best) {
         best = idle_process_get();
@@ -179,8 +192,6 @@ process_t* scheduler_select_next(void) {
 }
 
 void scheduler_yield(void) {
-    scheduler_cleanup_finished();
-
     spin_lock(&sched.scheduler_lock);
     process_t* current = sched.current_process;
 
@@ -234,6 +245,7 @@ void scheduler_yield_from_interrupt(void* frame_ptr) {
 
     if (current && process_get_state(current) == PROC_WORKING) {
         bool other_ready = false;
+        process_list_lock();
         process_t* scan = process_get_first();
         while (scan) {
             if (scan != current && process_get_state(scan) == PROC_WORKING) {
@@ -242,6 +254,7 @@ void scheduler_yield_from_interrupt(void* frame_ptr) {
             }
             scan = scan->next;
         }
+        process_list_unlock();
 
         if (!other_ready && !process_is_idle(current)) {
             // no other process ready — keep running current process
@@ -258,25 +271,36 @@ void scheduler_yield_from_interrupt(void* frame_ptr) {
     }
 
     if ((sched.total_ticks % SCHEDULER_CRITICAL_STARVATION_TICKS) == 0) {
-        process_t* proc = process_get_first();
-        while (proc) {
-            process_t* next_proc = proc->next;
+        uint32_t cleanup_pids[16];
+        uint32_t cleanup_count = 0;
 
+        process_list_lock();
+        process_t* proc = process_get_first();
+        while (proc && cleanup_count < 16) {
             process_state_t state = process_get_state(proc);
             uint32_t refs = process_ref_count(proc);
 
-            if (state == PROC_CRASHED && refs == 0) {
-                process_destroy_safe(proc);
-            } else if (state == PROC_DONE && refs == 0) {
-                process_set_state(proc, PROC_CRASHED);
-                process_destroy_safe(proc);
+            if ((state == PROC_CRASHED || state == PROC_DONE) && refs == 0) {
+                cleanup_pids[cleanup_count++] = proc->pid;
             }
+            proc = proc->next;
+        }
+        process_list_unlock();
 
-            proc = next_proc;
+        for (uint32_t i = 0; i < cleanup_count; i++) {
+            process_t* p = process_find(cleanup_pids[i]);
+            if (p) {
+                if (process_get_state(p) == PROC_DONE) {
+                    process_set_state(p, PROC_CRASHED);
+                }
+                process_destroy_safe(p);
+            }
         }
     }
 
     // audit finished processes every 100 ticks (~1 second at 100 Hz)
+    // SMP: these static counters are safe on single-core (cli context),
+    // but must become per-CPU variables for multi-core support.
     static uint64_t tick_count = 0;
     tick_count++;
     if ((tick_count % SCHEDULER_CRITICAL_STARVATION_TICKS) == 0) {
@@ -353,6 +377,7 @@ void scheduler_yield_from_interrupt(void* frame_ptr) {
     if ((sched.total_ticks % 10) == 0) {
         pending_results_flush_all();
         process_cleanup_deferred();
+        scheduler_check_wait_timeouts();
     }
 
     context_restore_to_frame(next, frame);
@@ -362,29 +387,20 @@ void scheduler_yield_from_interrupt(void* frame_ptr) {
     // and corrupts the process context being restored
 }
 
-void scheduler_tick(void) {
-    sched.total_ticks++;
-
-    if ((sched.total_ticks % SCHEDULER_CRITICAL_STARVATION_TICKS) == 0) {
-        process_t* proc = process_get_first();
-        while (proc) {
-            process_t* next = proc->next;
-
-            process_state_t state = process_get_state(proc);
-            uint32_t refs = process_ref_count(proc);
-
-            if (state == PROC_CRASHED && refs == 0) {
-                process_destroy_safe(proc);
-            } else if (state == PROC_DONE && refs == 0) {
-                process_set_state(proc, PROC_CRASHED);
-                process_destroy_safe(proc);
-            }
-
-            proc = next;
-        }
-    }
-
+// Check blocked processes for timeouts (WAIT_RING_FULL, WAIT_OVERFLOW).
+// Called from scheduler_yield_from_interrupt every 10 ticks.
+// Runs with interrupts disabled (cli context).
+static void scheduler_check_wait_timeouts(void) {
     extern uint64_t cpu_get_tsc_freq_khz(void);
+    static uint64_t last_timeout_log = 0;
+    static uint64_t last_timeout_log_tick = 0;
+    static uint64_t last_tsc_overflow_log = 0;
+    static uint64_t last_timeout_log_tsc = 0;
+
+    uint32_t kill_pids[16];
+    uint32_t kill_count = 0;
+
+    process_list_lock();
     process_t* proc = process_get_first();
     while (proc) {
         process_t* next = proc->next;
@@ -409,7 +425,6 @@ void scheduler_tick(void) {
             uint64_t elapsed_ms = elapsed_tsc / tsc_khz;
 
             if (elapsed_ms > CONFIG_EVENTRING_BLOCK_TIMEOUT_MS) {
-                static uint64_t last_timeout_log = 0;
                 uint64_t current_tick = sched.total_ticks;
 
                 if ((current_tick - last_timeout_log) > SCHEDULER_SEVERE_STARVATION_TICKS) {
@@ -418,7 +433,9 @@ void scheduler_tick(void) {
                     last_timeout_log = current_tick;
                 }
 
-                process_destroy_safe(proc);
+                if (kill_count < 16) {
+                    kill_pids[kill_count++] = proc->pid;
+                }
             }
 
             proc = next;
@@ -438,7 +455,6 @@ void scheduler_tick(void) {
 
                 uint64_t blocked_ticks = sched.total_ticks - proc->last_run_time;
                 if (blocked_ticks > SCHEDULER_SEVERE_STARVATION_TICKS) {
-                    static uint64_t last_timeout_log_tick = 0;
                     uint64_t current_tick = sched.total_ticks;
 
                     if ((current_tick - last_timeout_log_tick) > SCHEDULER_SEVERE_STARVATION_TICKS) {
@@ -447,7 +463,9 @@ void scheduler_tick(void) {
                         last_timeout_log_tick = current_tick;
                     }
 
-                    process_destroy_safe(proc);
+                    if (kill_count < 16) {
+                        kill_pids[kill_count++] = proc->pid;
+                    }
                 }
 
                 proc = next;
@@ -456,7 +474,6 @@ void scheduler_tick(void) {
 
             uint64_t now = rdtsc();
             if (now < proc->wait_start_time) {
-                static uint64_t last_tsc_overflow_log = 0;
                 uint64_t current_tick = sched.total_ticks;
 
                 if ((current_tick - last_tsc_overflow_log) > SCHEDULER_CRITICAL_STARVATION_TICKS) {
@@ -474,7 +491,6 @@ void scheduler_tick(void) {
             uint64_t elapsed_ms = elapsed_tsc / tsc_khz;
 
             if (elapsed_ms > 500) {
-                static uint64_t last_timeout_log_tsc = 0;
                 uint64_t current_tick = sched.total_ticks;
 
                 if ((current_tick - last_timeout_log_tsc) > SCHEDULER_SEVERE_STARVATION_TICKS) {
@@ -483,19 +499,21 @@ void scheduler_tick(void) {
                     last_timeout_log_tsc = current_tick;
                 }
 
-                process_destroy_safe(proc);
+                if (kill_count < 16) {
+                    kill_pids[kill_count++] = proc->pid;
+                }
             }
         }
 
         proc = next;
     }
+    process_list_unlock();
 
-    spin_lock(&sched.scheduler_lock);
-    process_t* current = sched.current_process;
-    spin_unlock(&sched.scheduler_lock);
-
-    if (current && process_get_state(current) == PROC_WORKING) {
-        scheduler_yield();
+    for (uint32_t i = 0; i < kill_count; i++) {
+        process_t* p = process_find(kill_pids[i]);
+        if (p) {
+            process_destroy_safe(p);
+        }
     }
 }
 
@@ -540,9 +558,10 @@ scheduler_state_t* scheduler_get_state(void) {
 }
 
 void scheduler_audit_fairness(void) {
-    process_t* proc = process_get_first();
     bool found_starved = false;
 
+    process_list_lock();
+    process_t* proc = process_get_first();
     while (proc) {
         process_state_t state = process_get_state(proc);
 
@@ -566,14 +585,15 @@ void scheduler_audit_fairness(void) {
 
         proc = proc->next;
     }
+    process_list_unlock();
 }
 
 void scheduler_audit_finished(void) {
     static uint32_t warn_count = 0;
     const uint32_t MAX_DONE_WARNINGS = 5;
 
+    process_list_lock();
     process_t* proc = process_get_first();
-
     while (proc) {
         process_state_t state = process_get_state(proc);
         uint32_t refs = process_ref_count(proc);
@@ -591,4 +611,5 @@ void scheduler_audit_finished(void) {
 
         proc = proc->next;
     }
+    process_list_unlock();
 }

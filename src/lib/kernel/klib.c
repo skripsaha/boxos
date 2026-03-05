@@ -838,20 +838,9 @@ int kprintf(const char *format, ...)
             }
             case 'f':
             {
-                double num = va_arg(args, double);
-                char buf[64];
-                ftoa(num, buf, 6);
-                int len = strlen(buf);
-                for (int i = len; i < pad_width; ++i)
-                {
-                    kputchar(' ');
-                    ++count;
-                }
-                for (char *p = buf; *p; ++p)
-                {
-                    kputchar(*p);
-                    ++count;
-                }
+                // Floating point is not supported in kernel mode (no SSE)
+                const char *msg = "<no-float>";
+                while (*msg) { kputchar(*msg++); ++count; }
                 break;
             }
             case 'c':
@@ -1830,42 +1819,6 @@ char *ulltoa(unsigned long long value, char *str, int base)
     return utoa64((uint64_t)value, str, base);
 }
 
-// Float to string conversion
-void ftoa(double num, char *buf, int precision)
-{
-    int i = 0;
-
-    if (num < 0)
-    {
-        buf[i++] = '-';
-        num = -num;
-    }
-
-    int int_part = (int)num;
-    double fractional_part = num - (double)int_part;
-
-    char intbuf[32];
-    itoa(int_part, intbuf, 10);
-    for (char *p = intbuf; *p; ++p)
-    {
-        buf[i++] = *p;
-    }
-
-    if (precision > 0)
-    {
-        buf[i++] = '.';
-
-        for (int j = 0; j < precision; j++)
-        {
-            fractional_part *= 10.0;
-            int digit = (int)fractional_part;
-            buf[i++] = '0' + digit;
-            fractional_part -= digit;
-        }
-    }
-
-    buf[i] = '\0';
-}
 
 int atoi(const char *str)
 {

@@ -122,7 +122,6 @@ long atol(const char* str);
 long long atoll(const char* str);
 void delay(uint32_t milliseconds);
 
-void ftoa(double num, char* buf, int precision);
 int toupper(int c);
 int tolower(int c);
 bool isdigit(int c);

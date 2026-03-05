@@ -123,17 +123,26 @@ void irq_unregister_handler(uint8_t irq) {
 }
 
 static process_t* find_process_by_kernel_stack_overflow(uint64_t rsp) {
+    // Called from IST exception handlers (double fault / stack fault).
+    // process_lock may be held by the interrupted code, so use trylock
+    // to avoid deadlock. If we can't get the lock, fall back to unlocked
+    // iteration — best-effort crash recovery.
+    bool locked = spin_trylock_process_list();
+
     process_t* proc = process_get_first();
     while (proc) {
         if (proc->magic == PROCESS_MAGIC && proc->kernel_stack_guard_base) {
             uintptr_t guard_start = (uintptr_t)proc->kernel_stack_guard_base;
             uintptr_t guard_end = guard_start + (CONFIG_KERNEL_STACK_GUARD_PAGES * CONFIG_PAGE_SIZE);
             if (rsp >= guard_start && rsp < guard_end) {
+                if (locked) process_list_unlock();
                 return proc;
             }
         }
         proc = proc->next;
     }
+
+    if (locked) process_list_unlock();
     return NULL;
 }
 

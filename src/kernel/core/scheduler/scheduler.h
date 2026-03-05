@@ -51,8 +51,6 @@ void scheduler_yield(void);
 void scheduler_yield_from_interrupt(void* frame);
 void scheduler_yield_cooperative(void);
 
-void scheduler_tick(void);
-
 void scheduler_set_use_context(const char* tags[], uint32_t count);
 void scheduler_clear_use_context(void);
 bool scheduler_matches_use_context(process_t* proc);
