@@ -3,10 +3,22 @@
 
 void notify_prepare(void) {
     notify_page_t* np = notify_page();
-    uint32_t saved_parent = np->spawner_pid;
+
+    // Save fields that kernel wrote at process creation (ASLR, spawner)
+    uint32_t saved_parent        = np->spawner_pid;
+    uint64_t saved_heap_base     = np->cabin_heap_base;
+    uint64_t saved_heap_max_size = np->cabin_heap_max_size;
+    uint64_t saved_buf_heap_base = np->cabin_buf_heap_base;
+    uint64_t saved_stack_top     = np->cabin_stack_top;
+
     memset(np, 0, sizeof(notify_page_t));
-    np->magic = NOTIFY_MAGIC;
-    np->spawner_pid = saved_parent;
+
+    np->magic              = NOTIFY_MAGIC;
+    np->spawner_pid        = saved_parent;
+    np->cabin_heap_base    = saved_heap_base;
+    np->cabin_heap_max_size = saved_heap_max_size;
+    np->cabin_buf_heap_base = saved_buf_heap_base;
+    np->cabin_stack_top    = saved_stack_top;
 }
 
 bool notify_add_prefix(uint8_t deck_id, uint8_t opcode) {
