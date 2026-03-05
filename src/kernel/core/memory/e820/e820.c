@@ -1,11 +1,14 @@
 #include "e820.h"
+#include "klib.h"
 
 static e820_entry_t* e820_entries = (e820_entry_t*)0x500;
 static size_t e820_entry_count = 0;
 
 void e820_set_entries(e820_entry_t* entries, size_t count) {
-    if (count > 128) {
-        count = 128;
+    if (count > E820_MAX_ENTRIES) {
+        kprintf("[E820] WARNING: BIOS reported %zu entries, truncating to %d\n",
+                count, E820_MAX_ENTRIES);
+        count = E820_MAX_ENTRIES;
     }
     e820_entries = entries;
     e820_entry_count = count;

@@ -27,6 +27,7 @@ BOOT_STACK_SIZE       equ 0x10000      ; 64KB boot stack (stack grows downward)
 E820_MAP_ADDR         equ 0x500
 E820_COUNT_ADDR       equ 0x4FE
 E820_SIZE_ADDR        equ 0x4FC
+E820_MAX_ENTRIES      equ 128           ; must match E820_MAX_ENTRIES in e820.h
 BOOT_INFO_ADDR        equ 0x9000
 
 STAGE2_SIGNATURE      equ 0x2907
@@ -1030,9 +1031,15 @@ detect_memory_e820:
     inc bp
     add di, 24
 
+    ; overflow protection: stop if we hit the max entry limit
+    cmp bp, E820_MAX_ENTRIES
+    jae .e820_done
+
 .skip_entry:
     test ebx, ebx
     jnz .e820_loop
+
+.e820_done:
 
     xor ax, ax
     mov es, ax
