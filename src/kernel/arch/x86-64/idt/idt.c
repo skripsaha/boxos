@@ -4,6 +4,8 @@
 #include "klib.h"
 #include "io.h"
 #include "pic.h"
+#include "irqchip.h"
+#include "lapic.h"
 #include "process.h"
 #include "guide.h"
 #include "events.h"
@@ -19,10 +21,10 @@
 static idt_entry_t idt[IDT_ENTRIES];
 static idt_descriptor_t idt_desc;
 
-static irq_callback_t irq_callbacks[16] = {NULL};
+static irq_callback_t irq_callbacks[IRQ_MAX_COUNT] = {NULL};
 
 static uint64_t exception_count = 0;
-static uint64_t irq_count[16] = {0};
+static uint64_t irq_count[IRQ_MAX_COUNT] = {0};
 
 static void idt_load_asm(uint64_t idt_desc_addr) {
     asm volatile("lidt (%0)" : : "r" (idt_desc_addr) : "memory");
@@ -73,9 +75,10 @@ void idt_init(void) {
         idt_set_entry(i, (uint64_t)isr_table[i], GDT_KERNEL_CODE, IDT_TYPE_INTERRUPT_GATE, ist);
     }
 
-    debug_printf("[IDT] Setting up IRQ handlers (32-47)...\n");
+    debug_printf("[IDT] Setting up IRQ handlers (32-55)...\n");
 
-    for (int i = 32; i < 48; i++) {
+    // Vectors 32-55: Hardware IRQs (PIC IRQ 0-15 + IO-APIC GSI 16-23)
+    for (int i = 32; i < 56; i++) {
         idt_set_entry(i, (uint64_t)isr_table[i], GDT_KERNEL_CODE, IDT_TYPE_INTERRUPT_GATE, 0);
     }
 
@@ -84,14 +87,20 @@ void idt_init(void) {
     // Syscall handler at 0x80 (Ring 3 accessible)
     idt_set_entry(SYSCALL_VECTOR, (uint64_t)isr_table[SYSCALL_VECTOR], GDT_KERNEL_CODE, IDT_TYPE_USER_INTERRUPT, 0);
 
+    // LAPIC timer vector (254) and spurious vector (255)
+    idt_set_entry(LAPIC_TIMER_VECTOR, (uint64_t)isr_table[LAPIC_TIMER_VECTOR],
+                  GDT_KERNEL_CODE, IDT_TYPE_INTERRUPT_GATE, 0);
+    idt_set_entry(LAPIC_SPURIOUS_VECTOR, (uint64_t)isr_table[LAPIC_SPURIOUS_VECTOR],
+                  GDT_KERNEL_CODE, IDT_TYPE_INTERRUPT_GATE, 0);
+
     idt_load_asm((uint64_t)&idt_desc);
 
     debug_printf("[IDT] IDT loaded successfully at 0x%lx (limit=%d)\n", idt_desc.base, idt_desc.limit);
 }
 
 void irq_register_handler(uint8_t irq, irq_callback_t callback) {
-    if (irq >= 16) {
-        debug_printf("[IDT] ERROR: Invalid IRQ %u (must be 0-15)\n", irq);
+    if (irq >= IRQ_MAX_COUNT) {
+        debug_printf("[IDT] ERROR: Invalid IRQ/GSI %u (max %u)\n", irq, IRQ_MAX_COUNT - 1);
         return;
     }
 
@@ -104,8 +113,8 @@ void irq_register_handler(uint8_t irq, irq_callback_t callback) {
 }
 
 void irq_unregister_handler(uint8_t irq) {
-    if (irq >= 16) {
-        debug_printf("[IDT] ERROR: Invalid IRQ %u (must be 0-15)\n", irq);
+    if (irq >= IRQ_MAX_COUNT) {
+        debug_printf("[IDT] ERROR: Invalid IRQ/GSI %u (max %u)\n", irq, IRQ_MAX_COUNT - 1);
         return;
     }
 
@@ -259,25 +268,66 @@ void exception_handler(interrupt_frame_t* frame) {
 }
 
 void irq_handler(interrupt_frame_t* frame) {
-    uint8_t irq = frame->vector - 32;
-    if (irq >= 16) return;
+    uint8_t vector = frame->vector;
+
+    // LAPIC spurious vector: do NOT send EOI
+    if (vector == LAPIC_SPURIOUS_VECTOR) {
+        return;
+    }
+
+    // LAPIC timer vector: handle as timer tick
+    if (vector == LAPIC_TIMER_VECTOR) {
+        scheduler_state_t* sched = scheduler_get_state();
+        sched->total_ticks++;
+
+        extern void xhci_process_events(void);
+        xhci_process_events();
+
+        spin_lock(&sched->scheduler_lock);
+        process_t* current = sched->current_process;
+        spin_unlock(&sched->scheduler_lock);
+
+        if (current && process_get_state(current) == PROC_WORKING) {
+            scheduler_yield_from_interrupt(frame);
+        } else if (!current || process_get_state(current) != PROC_WORKING) {
+            process_t* next = scheduler_select_next();
+            if (next) {
+                spin_lock(&sched->scheduler_lock);
+                sched->current_process = next;
+                spin_unlock(&sched->scheduler_lock);
+
+                if (process_get_state(next) == PROC_CREATED) process_set_state(next, PROC_WORKING);
+                next->last_run_time = sched->total_ticks;
+
+                tss_set_rsp0((uint64_t)next->kernel_stack_top);
+                context_restore_to_frame(next, frame);
+            }
+        }
+
+        lapic_send_eoi();
+        return;
+    }
+
+    // Standard hardware IRQ (vectors 32-55 -> GSI 0-23)
+    uint8_t irq = irq_vector_to_gsi(vector);
+    if (irq >= IRQ_MAX_COUNT) return;
     irq_count[irq]++;
 
     if (irq_callbacks[irq] != NULL) {
         irq_callbacks[irq]();
-        pic_send_eoi(irq);
+        irqchip_send_eoi(irq);
         return;
     }
 
     switch (irq) {
         case 0: {
+            // Timer IRQ (PIT via PIC or IO-APIC GSI 0)
             scheduler_state_t* sched = scheduler_get_state();
             sched->total_ticks++;
 
             extern void xhci_process_events(void);
             xhci_process_events();
 
-            // read current_process under lock to prevent race with syscall handler
             spin_lock(&sched->scheduler_lock);
             process_t* current = sched->current_process;
             spin_unlock(&sched->scheduler_lock);
@@ -316,7 +366,7 @@ void irq_handler(interrupt_frame_t* frame) {
             break;
     }
 
-    pic_send_eoi(irq);
+    irqchip_send_eoi(irq);
 }
 
 void syscall_handler(interrupt_frame_t* frame) {

@@ -12,6 +12,7 @@
 #include "klib.h"
 #include "pit.h"
 #include "idt.h"
+#include "irqchip.h"
 #include "pic.h"
 
 static xhci_controller_t global_controller = {0};
@@ -263,13 +264,13 @@ int xhci_init(void) {
 
     debug_printf("[xHCI] IRQ line from PCI config: 0x%02x\n", ctrl->irq_line);
 
-    if (ctrl->irq_line == 0xFF || ctrl->irq_line >= 16) {
+    if (ctrl->irq_line == 0xFF || ctrl->irq_line >= IRQ_MAX_COUNT) {
         debug_printf("[xHCI] WARNING: Invalid IRQ line, using polling mode\n");
         ctrl->use_polling = true;
     } else {
         debug_printf("[xHCI] Registering IRQ handler for IRQ %u\n", ctrl->irq_line);
         irq_register_handler(ctrl->irq_line, xhci_irq_handler);
-        pic_enable_irq(ctrl->irq_line);
+        irqchip_enable_irq(ctrl->irq_line);
         ctrl->use_polling = false;
         debug_printf("[xHCI] IRQ %u registered and enabled\n", ctrl->irq_line);
     }

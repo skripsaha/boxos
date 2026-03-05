@@ -7,6 +7,7 @@
 #include "pmm.h"
 #include "vmm.h"
 #include "pic.h"
+#include "irqchip.h"
 #include "pit.h"
 #include "rtc.h"
 #include "e820.h"
@@ -67,7 +68,7 @@ void kernel_main(void)
     debug_printf("[INIT] IDT...\n");
     idt_init();
 
-    debug_printf("[INIT] PIC...\n");
+    debug_printf("[INIT] PIC (early init for boot)...\n");
     pic_init();
 
     debug_printf("[INIT] Boot Info...\n");
@@ -111,6 +112,19 @@ void kernel_main(void)
 
     debug_printf("[INIT] CPU Capabilities Page...\n");
     cpu_caps_page_init();
+
+    // ACPI must init early so irqchip_init can parse MADT for APIC detection
+    debug_printf("[INIT] ACPI Subsystem (early)...\n");
+    acpi_error_t acpi_err = acpi_init();
+    if (acpi_err == ACPI_OK) {
+        debug_printf("[INIT] ACPI initialized successfully\n");
+    } else {
+        debug_printf("[INIT] ACPI initialization failed (error %d), shutdown may use fallback methods\n", acpi_err);
+    }
+
+    // Detect and initialize interrupt controller (APIC or PIC fallback)
+    debug_printf("[INIT] Interrupt Controller...\n");
+    irqchip_init();
 
     debug_printf("[INIT] PIT...\n");
     pit_init(100);
@@ -190,7 +204,7 @@ void kernel_main(void)
     debug_printf("[INIT] ATA DMA...\n");
     if (ata_dma_init() == 0) {
         debug_printf("[INIT] ATA DMA enabled successfully\n");
-        pic_enable_irq(14);  // Enable IRQ14 (ATA Primary DMA)
+        irqchip_enable_irq(14);  // Enable IRQ14 (ATA Primary DMA)
     } else {
         debug_printf("[INIT] ATA DMA not available, using PIO mode\n");
     }
@@ -210,14 +224,6 @@ void kernel_main(void)
         debug_printf("[INIT] xHCI controller initialized successfully\n");
     } else {
         debug_printf("[INIT] xHCI controller not found or initialization failed\n");
-    }
-
-    debug_printf("[INIT] ACPI Subsystem...\n");
-    acpi_error_t acpi_err = acpi_init();
-    if (acpi_err == ACPI_OK) {
-        debug_printf("[INIT] ACPI initialized successfully\n");
-    } else {
-        debug_printf("[INIT] ACPI initialization failed (error %d), shutdown may use fallback methods\n", acpi_err);
     }
 
     kprintf("\n");

@@ -4,6 +4,7 @@
 #include "pit.h"
 #include "rtc.h"
 #include "pic.h"
+#include "irqchip.h"
 #include "process.h"
 #include "ata.h"
 #include "keyboard.h"
@@ -109,7 +110,7 @@ static bool hw_port_is_forbidden(uint16_t port) {
 }
 
 static bool hw_irq_is_valid(uint8_t irq) {
-    return (irq < 16 && irq != 0 && irq != 2);
+    return (irq < irqchip_max_irqs() && irq != 0 && irq != 2);
 }
 
 static bool check_keyboard_access(uint32_t pid) {
@@ -458,7 +459,7 @@ int hardware_deck_handler(Event* event) {
                 event->state = EVENT_STATE_ACCESS_DENIED;
                 return -5;
             }
-            pic_enable_irq(irq);
+            irqchip_enable_irq(irq);
             event->data[0] = 0;
             event->state = EVENT_STATE_COMPLETED;
             return 0;
@@ -470,22 +471,22 @@ int hardware_deck_handler(Event* event) {
                 event->state = EVENT_STATE_ACCESS_DENIED;
                 return -5;
             }
-            pic_disable_irq(irq);
+            irqchip_disable_irq(irq);
             event->data[0] = 0;
             event->state = EVENT_STATE_COMPLETED;
             return 0;
         }
 
         case HW_IRQ_GET_ISR: {
-            uint16_t isr = pic_get_isr();
-            write_u16(event->data, isr);
+            uint32_t isr = irqchip_get_isr();
+            write_u32(event->data, isr);
             event->state = EVENT_STATE_COMPLETED;
             return 0;
         }
 
         case HW_IRQ_GET_IRR: {
-            uint16_t irr = pic_get_irr();
-            write_u16(event->data, irr);
+            uint32_t irr = irqchip_get_irr();
+            write_u32(event->data, irr);
             event->state = EVENT_STATE_COMPLETED;
             return 0;
         }
@@ -506,7 +507,7 @@ int hardware_deck_handler(Event* event) {
                 event->state = EVENT_STATE_ACCESS_DENIED;
                 return -5;
             }
-            pic_send_eoi(irq);
+            irqchip_send_eoi(irq);
             event->data[0] = 0;
             event->state = EVENT_STATE_COMPLETED;
             return 0;

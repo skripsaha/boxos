@@ -4,6 +4,8 @@
 #include "ktypes.h"
 
 typedef struct {
+    bool has_apic;              // On-chip APIC (CPUID.1:EDX[9])
+    bool has_x2apic;            // x2APIC support (CPUID.1:ECX[21])
     bool has_waitpkg;           // UMONITOR/UMWAIT support (CPUID.7.0:ECX[5])
     bool has_invariant_tsc;     // Invariant TSC
     char vendor_string[13];     // CPU vendor (e.g., "GenuineIntel")

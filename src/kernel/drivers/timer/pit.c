@@ -1,7 +1,7 @@
 #include "pit.h"
 #include "io.h"
 #include "klib.h"
-#include "pic.h"
+#include "irqchip.h"
 
 static volatile uint64_t pit_ticks = 0;
 static uint32_t pit_frequency = 0;
@@ -31,7 +31,7 @@ void pit_init(uint32_t frequency_hz) {
     outb(PIT_CHANNEL0, (uint8_t)(divisor & 0xFF));
     outb(PIT_CHANNEL0, (uint8_t)((divisor >> 8) & 0xFF));
 
-    pic_enable_irq(0);
+    irqchip_enable_irq(0);
 
     debug_printf("[PIT] Timer initialized: %u Hz (%u ticks/sec)\n", pit_frequency, pit_frequency);
 }

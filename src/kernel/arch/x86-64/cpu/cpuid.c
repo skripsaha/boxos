@@ -31,6 +31,13 @@ void cpu_detect_features(void) {
     *((uint32_t*)&g_cpu_caps.vendor_string[8]) = ecx;
     g_cpu_caps.vendor_string[12] = '\0';
 
+    // Check APIC/x2APIC support (CPUID.1:EDX[9], CPUID.1:ECX[21])
+    if (g_cpu_caps.max_basic_leaf >= 1) {
+        cpuid(1, &eax, &ebx, &ecx, &edx);
+        g_cpu_caps.has_apic = (edx & (1 << 9)) != 0;
+        g_cpu_caps.has_x2apic = (ecx & (1 << 21)) != 0;
+    }
+
     // Check WAITPKG support (CPUID.7.0:ECX[5])
     if (g_cpu_caps.max_basic_leaf >= 7) {
         cpuid_count(7, 0, &eax, &ebx, &ecx, &edx);

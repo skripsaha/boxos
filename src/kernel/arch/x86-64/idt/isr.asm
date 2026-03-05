@@ -65,7 +65,7 @@ ISR_NOERROR 29  ; Reserved
 ISR_ERROR   30  ; Security exception
 ISR_NOERROR 31  ; Reserved
 
-; Hardware interrupts (IRQ 0-15 -> vectors 32-47)
+; Hardware interrupts (IRQ 0-15 -> vectors 32-47, PIC compatible)
 IRQ 0, 32       ; Timer
 IRQ 1, 33       ; Keyboard
 IRQ 2, 34       ; Cascade
@@ -83,11 +83,25 @@ IRQ 13, 45      ; FPU
 IRQ 14, 46      ; ATA Primary
 IRQ 15, 47      ; ATA Secondary
 
+; IO-APIC extra IRQs (GSI 16-23 -> vectors 48-55)
+IRQ 16, 48      ; PCI / IO-APIC pin 16
+IRQ 17, 49      ; PCI / IO-APIC pin 17
+IRQ 18, 50      ; PCI / IO-APIC pin 18
+IRQ 19, 51      ; PCI / IO-APIC pin 19
+IRQ 20, 52      ; PCI / IO-APIC pin 20
+IRQ 21, 53      ; PCI / IO-APIC pin 21
+IRQ 22, 54      ; PCI / IO-APIC pin 22
+IRQ 23, 55      ; PCI / IO-APIC pin 23
+
 ; System call (INT 0x80)
 ISR_NOERROR 128  ; kernel_notify syscall
 
 ; Completion IRQ (INT 0x81)
 ISR_NOERROR 129  ; workflow completion notification
+
+; LAPIC special vectors
+ISR_NOERROR 254  ; LAPIC timer
+ISR_NOERROR 255  ; LAPIC spurious
 
 ; Common ISR entry point
 ; Stack layout on entry (top to bottom):
@@ -171,14 +185,20 @@ isr_table:
     dq isr8, isr9, isr10, isr11, isr12, isr13, isr14, isr15
     dq isr16, isr17, isr18, isr19, isr20, isr21, isr22, isr23
     dq isr24, isr25, isr26, isr27, isr28, isr29, isr30, isr31
-    ; IRQs (32-47)
+    ; IRQs (32-47): PIC / IO-APIC ISA IRQs
     dq irq0, irq1, irq2, irq3, irq4, irq5, irq6, irq7
     dq irq8, irq9, irq10, irq11, irq12, irq13, irq14, irq15
-    ; Unimplemented (48-127) - use GPF handler
-    times 80 dq isr13
+    ; IRQs (48-55): IO-APIC extra pins (GSI 16-23)
+    dq irq16, irq17, irq18, irq19, irq20, irq21, irq22, irq23
+    ; Unimplemented (56-127) - use GPF handler
+    times 72 dq isr13
     ; Syscall (128)
     dq isr128
     ; Completion IRQ (129)
     dq isr129
-    ; Unimplemented (130-255) - use GPF handler
-    times 126 dq isr13
+    ; Unimplemented (130-253) - use GPF handler
+    times 124 dq isr13
+    ; LAPIC timer (254)
+    dq isr254
+    ; LAPIC spurious (255)
+    dq isr255
