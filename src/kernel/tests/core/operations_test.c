@@ -7,6 +7,8 @@
 #include "result_page.h"
 #include "vmm.h"
 #include "kernel_config.h"
+#include "cpu_calibrate.h"
+#include "atomics.h"
 
 #if CONFIG_RUN_STARTUP_TESTS
 
@@ -28,8 +30,8 @@ static uint32_t read_u32(const uint8_t *data, size_t offset)
 
 static void test_delay(void)
 {
-    for (volatile int i = 0; i < 100000; i++)
-        ;
+    uint64_t deadline = rdtsc() + cpu_ms_to_tsc(5);
+    while (rdtsc() < deadline) { cpu_pause(); }
 }
 
 static result_entry_t *wait_for_result(process_t *proc, uint32_t *head)

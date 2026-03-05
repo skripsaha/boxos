@@ -7,6 +7,8 @@
 #include "vmm.h"
 #include "rtc.h"
 #include "kernel_config.h"
+#include "cpu_calibrate.h"
+#include "atomics.h"
 
 #if CONFIG_RUN_STARTUP_TESTS
 
@@ -45,7 +47,7 @@ void test_hardware_deck(void) {
         guide_wake();
         guide_run();
 
-        for (volatile int i = 0; i < 1000000; i++);
+        { uint64_t dl = rdtsc() + cpu_ms_to_tsc(10); while (rdtsc() < dl) { cpu_pause(); } }
 
         uint32_t head = result_page->ring.head;
         uint32_t tail = result_page->ring.tail;
@@ -91,7 +93,7 @@ void test_hardware_deck(void) {
         guide_wake();
         guide_run();
 
-        for (volatile int i = 0; i < 1000000; i++);
+        { uint64_t dl = rdtsc() + cpu_ms_to_tsc(10); while (rdtsc() < dl) { cpu_pause(); } }
 
         uint32_t head = result_page->ring.head;
         uint32_t tail = result_page->ring.tail;
@@ -156,7 +158,7 @@ void test_hardware_deck(void) {
         guide_wake();
         guide_run();
 
-        for (volatile int i = 0; i < 1000000; i++);
+        { uint64_t dl = rdtsc() + cpu_ms_to_tsc(10); while (rdtsc() < dl) { cpu_pause(); } }
 
         uint32_t head = result_page_hw->ring.head;
         uint32_t tail = result_page_hw->ring.tail;
@@ -197,7 +199,7 @@ void test_hardware_deck(void) {
         guide_wake();
         guide_run();
 
-        for (volatile int i = 0; i < 1000000; i++);
+        { uint64_t dl = rdtsc() + cpu_ms_to_tsc(10); while (rdtsc() < dl) { cpu_pause(); } }
 
         uint32_t head = result_page_hw->ring.head;
         uint32_t tail = result_page_hw->ring.tail;
@@ -236,7 +238,7 @@ void test_hardware_deck(void) {
         guide_wake();
         guide_run();
 
-        for (volatile int i = 0; i < 1000000; i++);
+        { uint64_t dl = rdtsc() + cpu_ms_to_tsc(10); while (rdtsc() < dl) { cpu_pause(); } }
 
         uint32_t head = result_page_hw->ring.head;
         uint32_t tail = result_page_hw->ring.tail;
@@ -273,7 +275,7 @@ void test_hardware_deck(void) {
         guide_wake();
         guide_run();
 
-        for (volatile int i = 0; i < 1000000; i++);
+        { uint64_t dl = rdtsc() + cpu_ms_to_tsc(10); while (rdtsc() < dl) { cpu_pause(); } }
 
         uint32_t head = result_page->ring.head;
         uint32_t tail = result_page->ring.tail;
@@ -331,7 +333,7 @@ void test_hardware_deck(void) {
         guide_wake();
         guide_run();
 
-        for (volatile int i = 0; i < 1000000; i++);
+        { uint64_t dl = rdtsc() + cpu_ms_to_tsc(10); while (rdtsc() < dl) { cpu_pause(); } }
 
         uint32_t head = result_page->ring.head;
         uint32_t tail = result_page->ring.tail;
@@ -376,7 +378,7 @@ void test_hardware_deck(void) {
         guide_wake();
         guide_run();
 
-        for (volatile int i = 0; i < 1000000; i++);
+        { uint64_t dl = rdtsc() + cpu_ms_to_tsc(10); while (rdtsc() < dl) { cpu_pause(); } }
 
         uint32_t head = result_page->ring.head;
         uint32_t tail = result_page->ring.tail;
