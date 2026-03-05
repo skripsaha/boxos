@@ -6,11 +6,11 @@
 
 Формат: Чистый бинарный код (Flat Binary).
 
-Точка входа: Фиксированная — 0xA000 (CABIN_CODE_START_ADDR).
+Точка входа: Фиксированная — 0xC000 (CABIN_CODE_START_ADDR).
 
 Метаданные: Отсутствуют внутри файла. Вся информация о правах и типе файла вынесена в Tagfs.
 
-Линковка: User code линкуется с `USER_BASE = 0xA000` (user.ld). Адреса ниже заняты Notify Page (0x1000-0x2FFF) и Result Page (0x3000-0x9FFF).
+Линковка: User code линкуется с `USER_BASE = 0xC000` (user.ld). Адреса ниже заняты Notify Page (0x1000-0x2FFF) и Result Page (0x3000-0xBFFF).
 
 2. Системные Теги доступа
    Файл становится программой только тогда, когда система наделяет его соответствующим статусом через системные теги.
@@ -27,24 +27,24 @@
 
 Изоляция: Стены Каюты возводятся аппаратно (MMU page tables). Процесс не может заглянуть в чужую Каюту или в коридоры ядра.
 
-Фиксированный старт: Для кода внутри Каюты мир всегда начинается с адреса 0xA000.
+Фиксированный старт: Для кода внутри Каюты мир всегда начинается с адреса 0xC000.
 
-Loading: Ядро не парсит файл. Оно берет объект из Tagfs и копирует его в Cabin начиная с 0xA000.
+Loading: Ядро не парсит файл. Оно берет объект из Tagfs и копирует его в Cabin начиная с 0xC000.
 
 4. Алгоритм запуска (Spawn Flow)
    Когда поступает запрос notify() с префиксом FF:01 (PROC_SPAWN):
 
 1. Verification: System Deck проверяет ID объекта в Tagfs на наличие тега app или utility.
 
-2. Allocation: vmm_create_cabin() создаёт новый PML4, выделяет физические страницы для Notify (2 pages, 8KB) и Result (7 pages, 28KB).
+2. Allocation: vmm_create_cabin() создаёт новый PML4, выделяет физические страницы для Notify (2 pages, 8KB) и Result (9 pages, 36KB).
 
-3. Deployment: Тело объекта (flat binary) копируется в Cabin начиная с 0xA000. BSS обнуляется.
+3. Deployment: Тело объекта (flat binary) копируется в Cabin начиная с 0xC000. BSS обнуляется.
 
 4. Stack Setup: User stack (64KB + guard page) маппится на 0x7FFFFFFFE000. Kernel stack (16KB + guard page) выделяется для обработки прерываний.
 
 5. IPC Setup: Notify Page инициализируется (magic, spawner_pid). Result Page инициализируется (magic, head=0, tail=0).
 
-6. Ignition: Процесс стартует с RIP=0xA000, RSP=0x7FFFFFFFE000, CPL=3 (Ring 3).
+6. Ignition: Процесс стартует с RIP=0xC000, RSP=0x7FFFFFFFE000, CPL=3 (Ring 3).
 
 5. Почему это лучше ELF?
    Скорость: Время запуска программы = времени копирования данных. Ноль секунд на парсинг заголовков.

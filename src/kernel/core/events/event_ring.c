@@ -1,10 +1,10 @@
 #include "event_ring.h"
 
 EventRingBuffer* event_ring_create(size_t initial_capacity) {
-    if (initial_capacity != EVENT_RING_MIN_CAPACITY &&
-        initial_capacity != 1024 &&
-        initial_capacity != 2048 &&
-        initial_capacity != EVENT_RING_MAX_CAPACITY) {
+    // Must be power-of-2 in [MIN, MAX]; clamp otherwise
+    if (initial_capacity < EVENT_RING_MIN_CAPACITY ||
+        initial_capacity > EVENT_RING_MAX_CAPACITY ||
+        (initial_capacity & (initial_capacity - 1)) != 0) {
         initial_capacity = EVENT_RING_MIN_CAPACITY;
     }
 

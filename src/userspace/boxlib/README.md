@@ -28,15 +28,15 @@ BoxLib implements 3-layer architecture for BoxOS user space programs:
 User programs interact with kernel through fixed memory pages:
 
 - `0x1000 - 0x2FFF` - Notify Page (8KB, requests to kernel)
-- `0x3000 - 0x9FFF` - Result Page (28KB, responses from kernel)
-- `0xA000` - Code Start Address (entry point)
+- `0x3000 - 0xBFFF` - Result Page (36KB, responses from kernel)
+- `0xC000` - Code Start Address (entry point)
 
 ## Critical Constraints
 
 **ENFORCED BY KERNEL:**
 - Max prefixes in chain: 16
 - Event inline data: 256 bytes
-- Result ring buffer: 111 slots
+- Result ring buffer: 128 slots
 - Result payload: 244 bytes per entry
 
 ## API Overview

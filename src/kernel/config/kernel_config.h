@@ -37,13 +37,9 @@
 #define CONFIG_PROC_MAX_BINARY_SIZE BOXOS_PROC_MAX_BINARY_SIZE
 #define CONFIG_PROC_MAX_BUFFER_SIZE BOXOS_PROC_MAX_BUFFER_SIZE
 
-// Ring buffer sizes (must be power of 2)
-#define CONFIG_EVENT_RING_SIZE 2048 // 655 KB, 161 pages, 2047 usable slots
-#define CONFIG_RESULT_RING_SIZE 256
-
-#define CONFIG_EVENT_RING_SYSTEM_RESERVED 256
-#define CONFIG_EVENT_RING_USER_MAX \
-    (CONFIG_EVENT_RING_SIZE - CONFIG_EVENT_RING_SYSTEM_RESERVED) // 1792 user slots
+// Ring buffer capacities are defined at their source of truth:
+// - Event ring: event_ring.h (EVENT_RING_MIN_CAPACITY / EVENT_RING_MAX_CAPACITY)
+// - Result ring: boxos_sizes.h (RESULT_RING_SIZE)
 
 #define CONFIG_EVENTRING_BLOCK_TIMEOUT_MS 500
 
@@ -124,10 +120,6 @@
 #define CONFIG_START_USERSPACE 1
 #endif
 
-_Static_assert((CONFIG_EVENT_RING_SIZE & (CONFIG_EVENT_RING_SIZE - 1)) == 0,
-               "CONFIG_EVENT_RING_SIZE must be power of 2");
-_Static_assert((CONFIG_RESULT_RING_SIZE & (CONFIG_RESULT_RING_SIZE - 1)) == 0,
-               "CONFIG_RESULT_RING_SIZE must be power of 2");
 _Static_assert(CONFIG_TAGFS_BLOCK_SIZE == CONFIG_PAGE_SIZE,
                "CONFIG_TAGFS_BLOCK_SIZE must match CONFIG_PAGE_SIZE");
 _Static_assert((CONFIG_USER_STACK_SIZE % CONFIG_PAGE_SIZE) == 0,

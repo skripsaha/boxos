@@ -685,7 +685,7 @@ char* input(const char* prompt) {
     if (prompt) print(prompt);
     
     // 2. Ждать данные в ResultPage
-    result_page_t* rp = (result_page_t*)0x3000;  // Result Page: 0x3000-0x9FFF (28KB)
+    result_page_t* rp = (result_page_t*)0x3000;  // Result Page: 0x3000-0xBFFF (36KB)
     
     while (true) {
         // Проверить: есть ли новые записи?
