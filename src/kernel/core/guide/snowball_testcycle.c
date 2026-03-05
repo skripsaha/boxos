@@ -5,6 +5,7 @@
 #include "vmm.h"
 #include "klib.h"
 #include "atomics.h"
+#include "cpu_calibrate.h"
 #include "error.h"
 #include "kernel_config.h"
 
@@ -94,7 +95,7 @@ void test_full_cycle(void)
     guide_run();
 
     debug_printf("[TEST] Step 6: Wait for result...\n");
-    for (volatile int i = 0; i < 1000000; i++);
+    { uint64_t dl = rdtsc() + cpu_ms_to_tsc(10); while (rdtsc() < dl) { cpu_pause(); } }
 
     debug_printf("[TEST] Step 7: Check Result Page (ResultRing)\n");
     result_page_t* result_page = (result_page_t*)vmm_phys_to_virt(result_phys);

@@ -319,7 +319,9 @@ int ata_read_sectors_retry(uint8_t is_master, uint32_t lba, uint8_t count, uint8
                     retry + 1, MAX_RETRIES, ata_decode_error(error), error);
         }
 
-        for (volatile int i = 0; i < 10000; i++) { }
+        // Brief delay between retries (~1ms)
+        uint64_t deadline = rdtsc() + cpu_ms_to_tsc(1);
+        while (rdtsc() < deadline) { cpu_pause(); }
     }
 
     debug_printf("[ATA] Read failed after %d retries at LBA %u\n", MAX_RETRIES, lba);
@@ -342,7 +344,9 @@ int ata_write_sectors_retry(uint8_t is_master, uint32_t lba, uint8_t count, cons
                     retry + 1, MAX_RETRIES, ata_decode_error(error), error);
         }
 
-        for (volatile int i = 0; i < 10000; i++) { }
+        // Brief delay between retries (~1ms)
+        uint64_t deadline = rdtsc() + cpu_ms_to_tsc(1);
+        while (rdtsc() < deadline) { cpu_pause(); }
     }
 
     debug_printf("[ATA] Write failed after %d retries at LBA %u\n", MAX_RETRIES, lba);
