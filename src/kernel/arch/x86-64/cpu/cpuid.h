@@ -11,6 +11,8 @@ typedef struct {
     bool has_xsave;             // XSAVE/XRSTOR support (CPUID.1:ECX[26])
     bool has_avx;               // AVX support (CPUID.1:ECX[28])
     bool has_avx512;            // AVX-512 Foundation (CPUID.7.0:EBX[16])
+    bool has_smep;              // Supervisor Mode Execution Prevention (CPUID.7.0:EBX[7])
+    bool has_smap;              // Supervisor Mode Access Prevention (CPUID.7.0:EBX[20])
     char vendor_string[13];     // CPU vendor (e.g., "GenuineIntel")
     uint32_t max_basic_leaf;    // Maximum CPUID basic leaf
     uint32_t max_extended_leaf; // Maximum CPUID extended leaf

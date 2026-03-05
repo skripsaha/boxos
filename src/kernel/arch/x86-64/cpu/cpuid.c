@@ -45,6 +45,8 @@ void cpu_detect_features(void) {
         cpuid_count(7, 0, &eax, &ebx, &ecx, &edx);
         g_cpu_caps.has_waitpkg = (ecx & (1 << 5)) != 0;
         g_cpu_caps.has_avx512 = (ebx & (1 << 16)) != 0;
+        g_cpu_caps.has_smep = (ebx & (1 << 7)) != 0;
+        g_cpu_caps.has_smap = (ebx & (1 << 20)) != 0;
     }
 
     // Query XSAVE area size and supported components (CPUID.0xD:0)
