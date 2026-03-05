@@ -113,9 +113,10 @@ acpi_error_t acpi_parse_madt(madt_info_t* info) {
                              lapic->acpi_processor_id, lapic->apic_id,
                              enabled ? "enabled" : "disabled");
 
-                // First enabled LAPIC is BSP
-                if (enabled && info->bsp_lapic_id == 0) {
+                // First enabled LAPIC is BSP (0 is a valid APIC ID)
+                if (enabled && !info->bsp_lapic_found) {
                     info->bsp_lapic_id = lapic->apic_id;
+                    info->bsp_lapic_found = true;
                 }
                 break;
             }

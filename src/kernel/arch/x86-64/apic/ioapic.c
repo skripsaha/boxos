@@ -84,22 +84,20 @@ void ioapic_enable_irq(uint8_t gsi, uint8_t vector, uint8_t dest_lapic_id) {
     // Check for ISA override flags
     uint32_t redir_flags = IOAPIC_REDIR_DELMOD_FIXED | IOAPIC_REDIR_DESTMOD_PHYS;
 
-    // Apply Interrupt Source Override flags if present
-    if (gsi < ISO_TABLE_SIZE && iso_table[gsi].active) {
-        // Check for the original ISA IRQ that maps to this GSI
-        for (int i = 0; i < ISO_TABLE_SIZE; i++) {
-            if (iso_table[i].active && iso_table[i].gsi == gsi) {
-                uint16_t flags = iso_table[i].flags;
-                // Polarity: bits 0-1 (00=bus default, 01=active high, 11=active low)
-                if ((flags & 0x03) == 0x03) {
-                    redir_flags |= IOAPIC_REDIR_POLARITY_LOW;
-                }
-                // Trigger: bits 2-3 (00=bus default, 01=edge, 11=level)
-                if ((flags & 0x0C) == 0x0C) {
-                    redir_flags |= IOAPIC_REDIR_TRIGGER_LEVEL;
-                }
-                break;
+    // Apply Interrupt Source Override flags if this GSI has an ISO entry
+    // ISO table is indexed by ISA IRQ, so scan all entries to find one matching this GSI
+    for (int i = 0; i < ISO_TABLE_SIZE; i++) {
+        if (iso_table[i].active && iso_table[i].gsi == gsi) {
+            uint16_t flags = iso_table[i].flags;
+            // Polarity: bits 0-1 (00=bus default, 01=active high, 11=active low)
+            if ((flags & 0x03) == 0x03) {
+                redir_flags |= IOAPIC_REDIR_POLARITY_LOW;
             }
+            // Trigger: bits 2-3 (00=bus default, 01=edge, 11=level)
+            if ((flags & 0x0C) == 0x0C) {
+                redir_flags |= IOAPIC_REDIR_TRIGGER_LEVEL;
+            }
+            break;
         }
     }
 

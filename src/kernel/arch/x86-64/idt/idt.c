@@ -275,42 +275,22 @@ void irq_handler(interrupt_frame_t* frame) {
         return;
     }
 
-    // LAPIC timer vector: handle as timer tick
+    // LAPIC timer vector: reserved for future use.
+    // Currently all scheduling is driven by PIT IRQ 0 (case 0 below).
+    // If lapic_timer_init() is called, this handler must take over scheduling
+    // and PIT IRQ 0 scheduling must be disabled to prevent double-scheduling.
     if (vector == LAPIC_TIMER_VECTOR) {
-        scheduler_state_t* sched = scheduler_get_state();
-        sched->total_ticks++;
-
-        extern void xhci_process_events(void);
-        xhci_process_events();
-
-        spin_lock(&sched->scheduler_lock);
-        process_t* current = sched->current_process;
-        spin_unlock(&sched->scheduler_lock);
-
-        if (current && process_get_state(current) == PROC_WORKING) {
-            scheduler_yield_from_interrupt(frame);
-        } else if (!current || process_get_state(current) != PROC_WORKING) {
-            process_t* next = scheduler_select_next();
-            if (next) {
-                spin_lock(&sched->scheduler_lock);
-                sched->current_process = next;
-                spin_unlock(&sched->scheduler_lock);
-
-                if (process_get_state(next) == PROC_CREATED) process_set_state(next, PROC_WORKING);
-                next->last_run_time = sched->total_ticks;
-
-                tss_set_rsp0((uint64_t)next->kernel_stack_top);
-                context_restore_to_frame(next, frame);
-            }
-        }
-
         lapic_send_eoi();
         return;
     }
 
-    // Standard hardware IRQ (vectors 32-55 -> GSI 0-23)
+    // Standard hardware IRQ (vectors 32-55 -> IRQ 0-23)
     uint8_t irq = irq_vector_to_gsi(vector);
-    if (irq >= IRQ_MAX_COUNT) return;
+    if (irq >= IRQ_MAX_COUNT) {
+        // Unknown vector outside our IRQ range — send EOI to prevent stuck interrupts
+        irqchip_send_eoi(0);
+        return;
+    }
     irq_count[irq]++;
 
     if (irq_callbacks[irq] != NULL) {

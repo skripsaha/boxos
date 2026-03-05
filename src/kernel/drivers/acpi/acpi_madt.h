@@ -77,6 +77,7 @@ typedef struct {
     uint8_t   ioapic_id;            // IO-APIC ID
     uint32_t  ioapic_gsi_base;      // IO-APIC GSI base
     uint8_t   bsp_lapic_id;         // BSP Local APIC ID
+    bool      bsp_lapic_found;     // BSP LAPIC ID was set (0 is a valid ID)
     bool      has_pic;              // Dual 8259 PICs present
     bool      valid;                // MADT was found and parsed
 } madt_info_t;

@@ -114,16 +114,15 @@ static int ahci_port_start(ahci_port_t* port) {
 }
 
 void ahci_irq_handler(void) {
-    cli();
+    // Called from irq_handler with interrupts disabled (interrupt gate).
+    // Do NOT call cli/sti or send EOI here — irq_handler handles EOI after return.
 
     if (!ahci_ctrl.initialized) {
-        sti();
         return;
     }
 
     uint32_t is = ahci_ctrl.hba_mem->is;
     if (is == 0) {
-        sti();
         return;
     }
 
@@ -156,8 +155,6 @@ void ahci_irq_handler(void) {
     }
 
     ahci_ctrl.hba_mem->is = is;
-    irqchip_send_eoi(ahci_ctrl.irq_vector);
-    sti();
 }
 
 void ahci_port_enable_irq(uint8_t port_num) {
@@ -180,6 +177,11 @@ void ahci_port_enable_irq(uint8_t port_num) {
 
 void ahci_init_irq(void) {
     if (!ahci_ctrl.initialized) {
+        return;
+    }
+
+    if (ahci_ctrl.irq_vector == 0xFF || ahci_ctrl.irq_vector >= IRQ_MAX_COUNT) {
+        debug_printf("[AHCI] No valid IRQ, using polling mode\n");
         return;
     }
 
@@ -722,7 +724,7 @@ int ahci_init(void) {
                  ahci_ctrl.pci_dev.device,
                  ahci_ctrl.pci_dev.function);
 
-    // IRQ line is at PCI config offset 0x3C
+    // IRQ line is at PCI config offset 0x3C (BIOS-assigned IRQ / GSI)
     uint8_t irq_line = pci_config_read_byte(ahci_ctrl.pci_dev.bus,
                                              ahci_ctrl.pci_dev.device,
                                              ahci_ctrl.pci_dev.function,
@@ -731,7 +733,12 @@ int ahci_init(void) {
     ahci_ctrl.irq_enabled = false;
     ahci_ctrl.total_interrupts = 0;
 
-    debug_printf("[AHCI] IRQ vector: %u\n", ahci_ctrl.irq_vector);
+    if (irq_line == 0xFF || irq_line >= IRQ_MAX_COUNT) {
+        debug_printf("[AHCI] WARNING: Invalid IRQ line %u, IRQ disabled\n", irq_line);
+        ahci_ctrl.irq_vector = 0xFF;  // Mark as invalid
+    } else {
+        debug_printf("[AHCI] IRQ line: %u\n", ahci_ctrl.irq_vector);
+    }
 
     uint16_t cmd = pci_config_read_word(ahci_ctrl.pci_dev.bus,
                                         ahci_ctrl.pci_dev.device,
