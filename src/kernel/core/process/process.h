@@ -135,6 +135,13 @@ process_t* process_find_ref(uint32_t pid);  // returns ref-counted pointer, call
 process_t* process_get_first(void);
 process_t* process_get_current(void);
 
+// Lock/unlock the global process list for safe iteration.
+// Caller must hold process_list_lock while iterating via proc->next.
+// The spinlock disables IRQs, so this is safe from any context.
+void process_list_lock(void);
+void process_list_unlock(void);
+bool spin_trylock_process_list(void);
+
 uint32_t process_get_count(void);
 
 void process_test(void);

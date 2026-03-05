@@ -640,12 +640,26 @@ process_t *process_find_ref(uint32_t pid)
 
 process_t *process_get_first(void)
 {
-    // NOTE: caller must tolerate the list changing between calls;
-    // this is safe because process nodes are freed only via deferred cleanup
-    // which runs in non-IRQ context, and the list head is updated atomically
-    // under process_lock.  For IRQ-context callers this is the best we can do
-    // without introducing lock ordering issues.
+    // Returns head without acquiring lock.
+    // Caller should hold process_list_lock() for safe iteration via proc->next.
+    // In IRQ context with cli, process_lock is guaranteed free (spinlock does
+    // cli before acquire, so holder had IRQs disabled and IRQ couldn't fire).
     return process_list_head;
+}
+
+void process_list_lock(void)
+{
+    spin_lock(&process_lock);
+}
+
+void process_list_unlock(void)
+{
+    spin_unlock(&process_lock);
+}
+
+bool spin_trylock_process_list(void)
+{
+    return spin_trylock(&process_lock);
 }
 
 process_t *process_get_current(void)
