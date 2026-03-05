@@ -1,6 +1,8 @@
 #ifndef CABIN_LAYOUT_H
 #define CABIN_LAYOUT_H
 
+#include "boxos_limits.h"
+
 // Fixed virtual address layout for every process (Snowball Architecture).
 
 #define CABIN_NULL_TRAP_START    0x0000000000000000ULL
@@ -26,6 +28,6 @@
 #define RESULT_PAGE_VADDR        CABIN_RESULT_PAGE_ADDR
 #define USER_CODE_ENTRY_POINT    CABIN_CODE_START_ADDR
 
-#define CABIN_HEAP_MAX_SIZE      (16 * 1024 * 1024)  // 16MB max heap per process
+#define CABIN_HEAP_MAX_SIZE      BOXOS_USER_HEAP_MAX_SIZE
 
 #endif // CABIN_LAYOUT_H
