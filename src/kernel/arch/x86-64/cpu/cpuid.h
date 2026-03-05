@@ -8,9 +8,14 @@ typedef struct {
     bool has_x2apic;            // x2APIC support (CPUID.1:ECX[21])
     bool has_waitpkg;           // UMONITOR/UMWAIT support (CPUID.7.0:ECX[5])
     bool has_invariant_tsc;     // Invariant TSC
+    bool has_xsave;             // XSAVE/XRSTOR support (CPUID.1:ECX[26])
+    bool has_avx;               // AVX support (CPUID.1:ECX[28])
+    bool has_avx512;            // AVX-512 Foundation (CPUID.7.0:EBX[16])
     char vendor_string[13];     // CPU vendor (e.g., "GenuineIntel")
     uint32_t max_basic_leaf;    // Maximum CPUID basic leaf
     uint32_t max_extended_leaf; // Maximum CPUID extended leaf
+    uint32_t xsave_area_size;   // Total XSAVE area size from CPUID.0xD:0 (0 if no XSAVE)
+    uint64_t xcr0_supported;    // Supported XCR0 bits from CPUID.0xD:0
 } cpu_capabilities_t;
 
 extern cpu_capabilities_t g_cpu_caps;

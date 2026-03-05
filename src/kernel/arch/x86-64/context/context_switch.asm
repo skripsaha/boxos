@@ -13,8 +13,8 @@ section .text
 ; [4-byte padding]:  148..151  (alignment for uint64_t)
 ; rflags:            152     (uint64_t)
 ; cr3:               160     (uint64_t)
-; fpu_state:         168     (528 bytes = 512 + 16 for alignment)
-; fpu_initialized:   696     (bool, 1 byte)
+; fpu_state:         168     (uint8_t* pointer, 8 bytes)
+; fpu_initialized:   176     (bool, 1 byte)
 ;--------------------------------------------------------------
 
 %define CTX_RIP      128
@@ -26,7 +26,11 @@ section .text
 %define CTX_SS       146
 %define CTX_RFLAGS   152
 %define CTX_FPU      168
-%define CTX_FPU_INIT 696
+%define CTX_FPU_INIT 176
+
+; Externals from fpu.c
+extern g_use_xsave
+extern g_xsave_mask
 
 ;--------------------------------------------------------------
 ; task_save_context(ProcessContext* ctx)
@@ -72,13 +76,30 @@ task_save_context:
     mov ax, ss
     mov [rdi + CTX_SS], ax
 
-    ; Save FPU/SSE state (fxsave requires 16-byte aligned pointer)
-    lea rax, [rdi + CTX_FPU]
-    add rax, 15
-    and rax, -16
-    fxsave [rax]
+    ; Save FPU/SSE/AVX state
+    ; Load pointer to FPU buffer and align to 64 bytes
+    mov rcx, [rdi + CTX_FPU]
+    test rcx, rcx
+    jz .save_fpu_done
+    add rcx, 63
+    and rcx, -64
+
+    cmp byte [rel g_use_xsave], 0
+    je .save_fxsave
+
+    ; xsave path: EDX:EAX = component mask, [rcx] = destination
+    mov eax, dword [rel g_xsave_mask]
+    mov edx, dword [rel g_xsave_mask + 4]
+    xsave [rcx]
+    jmp .save_fpu_mark
+
+.save_fxsave:
+    fxsave [rcx]
+
+.save_fpu_mark:
     mov byte [rdi + CTX_FPU_INIT], 1
 
+.save_fpu_done:
     ret
 
 ;--------------------------------------------------------------
@@ -87,13 +108,27 @@ task_save_context:
 ;--------------------------------------------------------------
 global task_restore_context
 task_restore_context:
-    ; Restore FPU/SSE state first (uses rax as scratch)
+    ; Restore FPU/SSE/AVX state first (uses rcx, rax, rdx as scratch)
     cmp byte [rdi + CTX_FPU_INIT], 0
     je .skip_fpu_restore
-    lea rax, [rdi + CTX_FPU]
-    add rax, 15
-    and rax, -16
-    fxrstor [rax]
+
+    mov rcx, [rdi + CTX_FPU]
+    test rcx, rcx
+    jz .skip_fpu_restore
+    add rcx, 63
+    and rcx, -64
+
+    cmp byte [rel g_use_xsave], 0
+    je .restore_fxsave
+
+    mov eax, dword [rel g_xsave_mask]
+    mov edx, dword [rel g_xsave_mask + 4]
+    xrstor [rcx]
+    jmp .skip_fpu_restore
+
+.restore_fxsave:
+    fxrstor [rcx]
+
 .skip_fpu_restore:
 
     mov ax, [rdi + CTX_DS]
@@ -180,21 +215,51 @@ task_switch_to:
     mov ax, ss
     mov [rdi + CTX_SS], ax
 
-    ; Save old FPU/SSE state
-    lea rax, [rdi + CTX_FPU]
-    add rax, 15
-    and rax, -16
-    fxsave [rax]
+    ; Save old FPU/SSE/AVX state
+    mov rcx, [rdi + CTX_FPU]
+    test rcx, rcx
+    jz .switch_save_done
+    add rcx, 63
+    and rcx, -64
+
+    cmp byte [rel g_use_xsave], 0
+    je .switch_save_fxsave
+
+    mov eax, dword [rel g_xsave_mask]
+    mov edx, dword [rel g_xsave_mask + 4]
+    xsave [rcx]
+    jmp .switch_save_mark
+
+.switch_save_fxsave:
+    fxsave [rcx]
+
+.switch_save_mark:
     mov byte [rdi + CTX_FPU_INIT], 1
 
+.switch_save_done:
+
     ; --- Restore new context ---
-    ; Restore FPU/SSE state first
+    ; Restore FPU/SSE/AVX state first
     cmp byte [rsi + CTX_FPU_INIT], 0
     je .switch_skip_fpu
-    lea rax, [rsi + CTX_FPU]
-    add rax, 15
-    and rax, -16
-    fxrstor [rax]
+
+    mov rcx, [rsi + CTX_FPU]
+    test rcx, rcx
+    jz .switch_skip_fpu
+    add rcx, 63
+    and rcx, -64
+
+    cmp byte [rel g_use_xsave], 0
+    je .switch_restore_fxsave
+
+    mov eax, dword [rel g_xsave_mask]
+    mov edx, dword [rel g_xsave_mask + 4]
+    xrstor [rcx]
+    jmp .switch_skip_fpu
+
+.switch_restore_fxsave:
+    fxrstor [rcx]
+
 .switch_skip_fpu:
 
     mov ax, [rsi + CTX_DS]
