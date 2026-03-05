@@ -308,16 +308,7 @@ void guide_run(void)
 
         if (event.state == EVENT_STATE_RETRY)
         {
-            // Re-queue the event for delivery on the next guide_run() cycle.
-            // This gives the scheduler a chance to run the blocked process
-            // so it can drain its result ring / pending queue.
-            event.state = EVENT_STATE_NEW;
-            error_t retry_err = event_ring_push(kernel_event_ring, &event);
-            if (IS_ERROR(retry_err)) {
-                // Event ring itself is full — last-resort: try execution deck directly
-                event.state = EVENT_STATE_COMPLETED;
-                execution_deck_handler(&event);
-            }
+            execution_deck_handler(&event);
             need_execution_deck = false;
             continue;
         }
