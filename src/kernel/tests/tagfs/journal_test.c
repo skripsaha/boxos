@@ -102,8 +102,8 @@ static int test_journal_replay(void) {
     TagFSMetadata saved_meta_2;
     int had_saved_2 = (tagfs_read_metadata(2, &saved_meta_2) == 0);
 
-    uint32_t txn_id;
-    if (journal_begin(&txn_id) != 0) {
+    JournalTxn txn;
+    if (journal_begin(&txn) != 0) {
         debug_printf("[JournalTest] FAIL: journal_begin failed\n");
         return -1;
     }
@@ -118,20 +118,20 @@ static int test_journal_replay(void) {
 
     TagFSState* state = tagfs_get_state();
     uint32_t meta2_sector = state->superblock.metadata_start_sector + (2 - 1);
-    if (journal_log_metadata(txn_id, 2, meta2_sector, &meta) != 0) {
+    if (journal_log_metadata(&txn, 2, meta2_sector, &meta) != 0) {
         debug_printf("[JournalTest] FAIL: journal_log_metadata failed\n");
-        journal_abort(txn_id);
+        journal_abort(&txn);
         return -1;
     }
 
-    if (journal_commit(txn_id) != 0) {
+    if (journal_commit(&txn) != 0) {
         debug_printf("[JournalTest] FAIL: journal_commit failed\n");
-        journal_abort(txn_id);
+        journal_abort(&txn);
         return -1;
     }
 
-    if (journal_replay() != 0) {
-        debug_printf("[JournalTest] FAIL: journal_replay failed\n");
+    if (journal_validate_and_replay() != 0) {
+        debug_printf("[JournalTest] FAIL: journal_validate_and_replay failed\n");
         if (had_saved_2) tagfs_write_metadata_journaled(2, &saved_meta_2);
         return -1;
     }
@@ -164,8 +164,8 @@ static int test_journal_abort(void) {
         memset(&original, 0, sizeof(TagFSMetadata));
     }
 
-    uint32_t txn_id;
-    if (journal_begin(&txn_id) != 0) {
+    JournalTxn txn;
+    if (journal_begin(&txn) != 0) {
         debug_printf("[JournalTest] FAIL: journal_begin failed\n");
         return -1;
     }
@@ -180,16 +180,16 @@ static int test_journal_abort(void) {
 
     TagFSState* state = tagfs_get_state();
     uint32_t meta3_sector = state->superblock.metadata_start_sector + (3 - 1);
-    if (journal_log_metadata(txn_id, 3, meta3_sector, &meta) != 0) {
+    if (journal_log_metadata(&txn, 3, meta3_sector, &meta) != 0) {
         debug_printf("[JournalTest] FAIL: journal_log_metadata failed\n");
-        journal_abort(txn_id);
+        journal_abort(&txn);
         return -1;
     }
 
-    journal_abort(txn_id);
+    journal_abort(&txn);
 
-    if (journal_replay() != 0) {
-        debug_printf("[JournalTest] FAIL: journal_replay after abort failed\n");
+    if (journal_validate_and_replay() != 0) {
+        debug_printf("[JournalTest] FAIL: journal_validate_and_replay after abort failed\n");
         return -1;
     }
 
@@ -215,8 +215,8 @@ static int test_journal_validate_and_replay(void) {
     int had_saved_6 = (tagfs_read_metadata(6, &saved_meta_6) == 0);
 
     debug_printf("[JournalTest] Phase 1: Create committed transaction\n");
-    uint32_t txn_id;
-    if (journal_begin(&txn_id) != 0) {
+    JournalTxn txn;
+    if (journal_begin(&txn) != 0) {
         debug_printf("[JournalTest] FAIL: journal_begin failed\n");
         return -1;
     }
@@ -231,15 +231,15 @@ static int test_journal_validate_and_replay(void) {
 
     TagFSState* state56 = tagfs_get_state();
     uint32_t meta5_sector = state56->superblock.metadata_start_sector + (5 - 1);
-    if (journal_log_metadata(txn_id, 5, meta5_sector, &meta) != 0) {
+    if (journal_log_metadata(&txn, 5, meta5_sector, &meta) != 0) {
         debug_printf("[JournalTest] FAIL: journal_log_metadata failed\n");
-        journal_abort(txn_id);
+        journal_abort(&txn);
         if (had_saved_5) tagfs_write_metadata_journaled(5, &saved_meta_5);
         if (had_saved_6) tagfs_write_metadata_journaled(6, &saved_meta_6);
         return -1;
     }
 
-    if (journal_commit(txn_id) != 0) {
+    if (journal_commit(&txn) != 0) {
         debug_printf("[JournalTest] FAIL: journal_commit failed\n");
         if (had_saved_5) tagfs_write_metadata_journaled(5, &saved_meta_5);
         if (had_saved_6) tagfs_write_metadata_journaled(6, &saved_meta_6);
@@ -247,7 +247,7 @@ static int test_journal_validate_and_replay(void) {
     }
 
     debug_printf("[JournalTest] Phase 2: Create uncommitted transaction (simulates crash)\n");
-    uint32_t uncommitted_txn;
+    JournalTxn uncommitted_txn;
     if (journal_begin(&uncommitted_txn) != 0) {
         debug_printf("[JournalTest] FAIL: journal_begin for uncommitted failed\n");
         if (had_saved_5) tagfs_write_metadata_journaled(5, &saved_meta_5);
@@ -264,9 +264,9 @@ static int test_journal_validate_and_replay(void) {
     strncpy(uncommitted_meta.filename, "crash.txt", TAGFS_MAX_FILENAME);
 
     uint32_t meta6_sector = state56->superblock.metadata_start_sector + (6 - 1);
-    if (journal_log_metadata(uncommitted_txn, 6, meta6_sector, &uncommitted_meta) != 0) {
+    if (journal_log_metadata(&uncommitted_txn, 6, meta6_sector, &uncommitted_meta) != 0) {
         debug_printf("[JournalTest] FAIL: journal_log_metadata for uncommitted failed\n");
-        journal_abort(uncommitted_txn);
+        journal_abort(&uncommitted_txn);
         if (had_saved_5) tagfs_write_metadata_journaled(5, &saved_meta_5);
         if (had_saved_6) tagfs_write_metadata_journaled(6, &saved_meta_6);
         return -1;
