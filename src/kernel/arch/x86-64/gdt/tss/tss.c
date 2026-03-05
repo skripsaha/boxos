@@ -5,8 +5,13 @@
 #include "vmm.h"
 
 static tss_t kernel_tss;
-static uint8_t ist_stacks[5][IST_STACK_SIZE] __attribute__((aligned(16)));
-static uint8_t kernel_stack[32768] __attribute__((aligned(16)));
+
+// Phase 1: static stacks for early boot (before PMM/VMM)
+static uint8_t ist_stacks_boot[IST_COUNT][IST_STACK_SIZE] __attribute__((aligned(16)));
+static uint8_t kernel_stack_boot[32768] __attribute__((aligned(16)));
+
+// Phase 2: dynamic IST stacks with guard pages (set by tss_setup_dynamic_stacks)
+static void *ist_guard_bases[IST_COUNT];  // for diagnostics
 
 extern void gdt_set_tss_entry(int index, uint64_t base, uint64_t limit);
 
@@ -15,13 +20,13 @@ void tss_init(void) {
 
     memset(&kernel_tss, 0, sizeof(tss_t));
 
-    kernel_tss.rsp0 = (uint64_t)kernel_stack + sizeof(kernel_stack) - 16;
+    kernel_tss.rsp0 = (uint64_t)kernel_stack_boot + sizeof(kernel_stack_boot) - 16;
     kernel_tss.rsp1 = 0;
     kernel_tss.rsp2 = 0;
 
     // IST1-5 only, IST6-7 unused
     for (int i = 0; i < 5; i++) {
-        uint64_t stack_top = (uint64_t)ist_stacks[i] + IST_STACK_SIZE - 16;
+        uint64_t stack_top = (uint64_t)ist_stacks_boot[i] + IST_STACK_SIZE - 16;
 
         switch(i + 1) {
             case IST_DOUBLE_FAULT:
@@ -60,6 +65,46 @@ void tss_init(void) {
     tss_load();
 
     debug_printf("[TSS] %[S]TSS loaded successfully!%[D]\n");
+}
+
+void tss_setup_dynamic_stacks(void) {
+    debug_printf("[TSS] Setting up dynamic IST stacks with guard pages...\n");
+
+    vmm_context_t *kernel_ctx = vmm_get_kernel_context();
+    const char *ist_names[] = {"Double Fault", "NMI", "Machine Check", "Debug", "Stack Fault"};
+    uint64_t *ist_ptrs[] = {
+        &kernel_tss.ist1, &kernel_tss.ist2, &kernel_tss.ist3,
+        &kernel_tss.ist4, &kernel_tss.ist5
+    };
+
+    for (int i = 0; i < IST_COUNT; i++) {
+        size_t total_pages = IST_GUARD_PAGES + IST_STACK_PAGES;
+        void *phys = pmm_alloc(total_pages);
+        if (!phys) {
+            kprintf("[TSS] FATAL: Failed to allocate IST%d stack (%s)\n",
+                    i + 1, ist_names[i]);
+            while (1) { asm volatile("cli; hlt"); }
+        }
+
+        void *virt_base = vmm_phys_to_virt((uintptr_t)phys);
+        ist_guard_bases[i] = virt_base;
+
+        // Unmap guard page (first page)
+        pte_t *guard_pte = vmm_get_or_create_pte(kernel_ctx, (uintptr_t)virt_base);
+        if (guard_pte) {
+            *guard_pte = 0;
+            vmm_flush_tlb_page((uintptr_t)virt_base);
+        }
+
+        // Stack top = base + guard + data - 16 (alignment)
+        uint64_t stack_top = (uint64_t)virt_base + (total_pages * 4096) - 16;
+        *ist_ptrs[i] = stack_top;
+
+        debug_printf("[TSS] IST%d (%s): guard=0x%p stack_top=0x%p [dynamic]\n",
+                     i + 1, ist_names[i], virt_base, (void *)stack_top);
+    }
+
+    debug_printf("[TSS] %[S]Dynamic IST stacks with guard pages ready%[D]\n");
 }
 
 void tss_set_rsp0(uint64_t rsp0) {
