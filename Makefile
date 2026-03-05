@@ -42,8 +42,9 @@ STAGE2_SECTORS      = 16
 KERNEL_MAX_BYTES    = 33554432  # 32MB (sanity check; bootloader places page tables dynamically after kernel)
 KERNEL_START_SECTOR = 17
 
+ASM_INCLUDE    = -I$(SRCDIR)/kernel/arch/x86-64/gdt/
 ASMFLAGS       =  -g -f bin
-ASMFLAGS_ELF   = -g -f elf64
+ASMFLAGS_ELF   = -g -f elf64 $(ASM_INCLUDE)
 CFLAGS         = -Os -m64 -ffreestanding -nostdlib -Wall -Wextra -fstack-protector-strong
 INCLUDE_DIRS   := $(shell find src -type d)
 CFLAGS         += $(addprefix -I,$(INCLUDE_DIRS))
