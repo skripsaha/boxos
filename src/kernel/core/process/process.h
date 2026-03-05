@@ -109,6 +109,11 @@ typedef struct process_t {
     uint32_t spawner_pid;
     uint64_t buf_heap_next;  // next free virtual address for buffer mapping
 
+    // ASLR: per-process randomized addresses (set at creation time)
+    uint64_t aslr_heap_base;     // actual heap start (CABIN_HEAP_BASE + random)
+    uint64_t aslr_stack_top;     // actual stack top (USER_STACK_TOP - random)
+    uint64_t aslr_buf_heap_base; // actual buffer heap start
+
     volatile wait_reason_t wait_reason;
     struct process_t* next_waiting;   // wait queue linkage (EventRing overflow)
     uint64_t wait_start_time;         // TSC timestamp when waiting (0 = not waiting)

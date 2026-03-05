@@ -128,6 +128,10 @@ void kernel_main(void)
     extern void idle_process_init(void);
     idle_process_init();
 
+    debug_printf("[INIT] ASLR...\n");
+    extern void aslr_init(void);
+    aslr_init();
+
     debug_printf("[INIT] Process Management...\n");
     process_init();
 
