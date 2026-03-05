@@ -46,16 +46,20 @@ static irq_chip_t pic_chip = {
 
 // --- APIC backend (LAPIC + IO-APIC) ---
 
-static void apic_chip_enable(uint8_t gsi) {
-    if (gsi < IRQ_MAX_COUNT) {
-        uint8_t vector = irq_gsi_to_vector(gsi);
-        ioapic_enable_irq(gsi, vector, madt_info.bsp_lapic_id);
+static void apic_chip_enable(uint8_t irq) {
+    if (irq < IRQ_MAX_COUNT) {
+        // Apply ISA-to-GSI mapping (e.g., MADT says IRQ 0 -> GSI 2 for PIT)
+        uint32_t gsi = ioapic_isa_to_gsi(irq);
+        // Vector is based on IRQ number, not GSI — so IRQ handler maps back correctly
+        uint8_t vector = IRQ_VECTOR_BASE + irq;
+        ioapic_enable_irq((uint8_t)gsi, vector, madt_info.bsp_lapic_id);
     }
 }
 
-static void apic_chip_disable(uint8_t gsi) {
-    if (gsi < IRQ_MAX_COUNT) {
-        ioapic_disable_irq(gsi);
+static void apic_chip_disable(uint8_t irq) {
+    if (irq < IRQ_MAX_COUNT) {
+        uint32_t gsi = ioapic_isa_to_gsi(irq);
+        ioapic_disable_irq((uint8_t)gsi);
     }
 }
 
