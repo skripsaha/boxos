@@ -13,11 +13,14 @@ global load_gdt
 global clear_screen_vga
 global hide_cursor
 
+extern _kernel_end
+
 _start:
     jmp short .past_header          ; 2 bytes — skip header
     db 'KERNEL'                     ; 6 bytes — magic identifier
     dd 1                            ; 4 bytes — header version
-    times 20 db 0                   ; 20 bytes — reserved
+    dd _kernel_end                  ; 4 bytes — true kernel end address (includes BSS)
+    times 16 db 0                   ; 16 bytes — reserved
 .past_header:
     mov al, 'K'
     mov dx, 0x3f8
@@ -29,9 +32,10 @@ _start:
     mov fs, ax
     mov gs, ax
 
-    ; Stack must be AFTER BSS to avoid corruption!
-    ; Kernel at 0x100000, page tables at 0xE00000, stack at 0xF00000 = 15MB
-    mov rsp, 0xF00000
+    ; Read stack address from boot_info structure (set dynamically by bootloader)
+    ; boot_info at 0x9000, stack_base at offset +32
+    xor rsp, rsp
+    mov esp, [0x9000 + 32]
     mov rbp, rsp
 
     mov al, 'S'

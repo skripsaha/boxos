@@ -3,6 +3,7 @@
 #include "klib.h"
 #include "boxos_memory.h"
 #include "cpuid.h"
+#include "boot_info.h"
 
 typedef struct {
     uintptr_t base;
@@ -128,8 +129,18 @@ void pmm_init(void) {
         panic("[PMM] ERROR: Not enough usable RAM!");
     }
 
-    pmm_zone.bitmap = (uint8_t*)ALIGN_UP((uintptr_t)&_kernel_end, 4096);
-    debug_printf("[PMM] Bitmap placed at %p (after kernel)\n", pmm_zone.bitmap);
+    // Place bitmap after all boot infrastructure (kernel + page tables + stack)
+    // boot_info->stack_base is the highest address used by the bootloader
+    boot_info_t *bi = boot_info_get();
+    uintptr_t bitmap_start;
+    if (boot_info_valid(bi)) {
+        bitmap_start = ALIGN_UP((uintptr_t)bi->stack_base, 4096);
+    } else {
+        // Fallback: place after kernel (legacy behavior)
+        bitmap_start = ALIGN_UP((uintptr_t)&_kernel_end, 4096);
+    }
+    pmm_zone.bitmap = (uint8_t*)bitmap_start;
+    debug_printf("[PMM] Bitmap placed at %p (after boot infrastructure)\n", pmm_zone.bitmap);
 
     size_t temp_pages = (mem_end - (uintptr_t)pmm_zone.bitmap) / PMM_PAGE_SIZE;
     size_t bitmap_size = (temp_pages + 7) / 8;

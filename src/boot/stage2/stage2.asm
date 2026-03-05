@@ -2,31 +2,31 @@
 [ORG 0x8000]
 DEFAULT ABS
 
-; Memory map:
-; 0x0500      - E820 memory map
-; 0x7C00      - Stage1 (512 bytes)
-; 0x8000      - Stage2 (8192 bytes = 16 sectors)
-; 0x9000      - Boot info for kernel (structured, versioned)
-; 0x9100      - TagFS superblock buffer (512 bytes)
-; 0x9300      - TagFS metadata buffer (512 bytes)
-; 0x10000     - Bounce buffer for INT 13h reads (32KB)
-; 0x100000    - Kernel run address (1MB, linked address, loaded via Unreal Mode)
-; 0xE00000    - Page tables (32KB: PML4, PDPT, up to 4 PDs) - E820 validated
-; 0xF00000    - Stack (grows downward)
+; Memory map (dynamic layout — addresses computed from actual kernel size):
+; 0x0500              - E820 memory map
+; 0x7C00              - Stage1 (512 bytes)
+; 0x8000              - Stage2 (8192 bytes = 16 sectors)
+; 0x9000              - Boot info for kernel (structured, versioned)
+; 0x9100              - TagFS superblock buffer (512 bytes)
+; 0x9300              - TagFS metadata buffer (512 bytes)
+; 0x10000             - Bounce buffer for INT 13h reads (32KB)
+; 0x100000            - Kernel run address (1MB, linked address, loaded via Unreal Mode)
+; kernel_end + 4KB    - Page tables (32KB: PML4, PDPT, up to 4 PDs) - DYNAMIC
+; page_tables + 36KB  - Stack (grows downward) - DYNAMIC
 
 KERNEL_BOUNCE_ADDR    equ 0x10000      ; bounce buffer for INT 13h disk reads
 KERNEL_BOUNCE_SEG     equ 0x1000       ; segment value for bounce buffer (0x1000 * 16 = 0x10000)
-KERNEL_RUN_ADDR       equ 0x100000     ; linked run address (1MB)
-KERNEL_MAX_ADDR       equ 0xE00000     ; max kernel end (13MB, must stay below page tables)
+KERNEL_RUN_ADDR       equ 0x100000     ; linked run address (1MB, must match linker.ld)
+KERNEL_MAX_SIZE       equ 0x2000000    ; 32MB sanity limit for kernel binary size
 
-; Page tables at 14MB — gives kernel 13MB to grow
-; 32KB allocated: PML4(4KB) + PDPT(4KB) + up to 4 PDs(16KB) + spare
-PAGE_TABLE_BASE       equ 0xE00000
+; Page table allocation: PML4(4KB) + PDPT(4KB) + up to 4 PDs(16KB) + spare = 32KB
 PAGE_TABLE_SIZE       equ 0x8000       ; 32KB
+GUARD_PAGE_SIZE       equ 0x1000       ; 4KB guard page
+BOOT_STACK_SIZE       equ 0x10000      ; 64KB boot stack (stack grows downward)
+
 E820_MAP_ADDR         equ 0x500
 E820_COUNT_ADDR       equ 0x4FE
 E820_SIZE_ADDR        equ 0x4FC
-STACK_BASE            equ 0xF00000     ; 15MB — above page tables
 BOOT_INFO_ADDR        equ 0x9000
 
 STAGE2_SIGNATURE      equ 0x2907
@@ -73,7 +73,6 @@ start_stage2:
     call enable_a20_enhanced
     call enter_unreal_mode
     call detect_memory_e820
-    call validate_page_table_location
     call load_kernel_tagfs
     call check_long_mode_support
 
@@ -99,7 +98,8 @@ protected_mode_start:
     mov gs, ax
     mov ss, ax
 
-    mov esp, STACK_BASE
+    ; Temporary stack in former stage1 area (no longer needed, safe)
+    mov esp, 0x7C00
 
     push dword 0
     popf
@@ -111,10 +111,116 @@ protected_mode_start:
     mov al, 'M'
     mov [edi+2], ax
 
-    call setup_paging_fixed
-    call enable_long_mode_fixed
+    ; Compute dynamic page table and stack placement after kernel
+    call compute_dynamic_layout
+
+    ; Validate placement fits within usable E820 RAM
+    call validate_dynamic_layout
+
+    ; Switch to final dynamically-placed stack
+    mov esp, [dynamic_stack_base]
+
+    call setup_paging
+    call enable_long_mode
 
     jmp 0x18:long_mode_start
+
+; Computes page table and stack addresses from the REAL kernel memory footprint.
+; Reads _kernel_end from kernel header at offset +12 (filled by linker, includes BSS).
+; Layout (low to high):
+;   kernel_end  →  guard  →  page tables (32KB)  →  guard  →  stack space (64KB)
+;                                                              ↑ ESP here (top, grows down)
+compute_dynamic_layout:
+    push eax
+
+    ; Read true kernel_end from kernel header (includes BSS section)
+    ; Header: [jmp 2B][KERNEL 6B][version 4B][kernel_end 4B @ offset +12]
+    mov eax, [KERNEL_RUN_ADDR + 12]
+
+    ; page-align
+    add eax, 0xFFF
+    and eax, 0xFFFFF000
+
+    ; page_table_base = kernel_end + guard page
+    add eax, GUARD_PAGE_SIZE
+    mov [dynamic_pt_base], eax
+
+    ; stack_top = page_table_base + page tables + guard + stack space
+    add eax, PAGE_TABLE_SIZE
+    add eax, GUARD_PAGE_SIZE
+    add eax, BOOT_STACK_SIZE
+    mov [dynamic_stack_base], eax
+
+    pop eax
+    ret
+
+; Validates that [dynamic_pt_base .. dynamic_stack_base + 64KB] fits in usable E820 RAM.
+; Halts with VGA error "NO MEM" if validation fails.
+validate_dynamic_layout:
+    push eax
+    push ebx
+    push ecx
+    push edx
+    push esi
+
+    ; We need usable RAM from pt_base to stack_base (already includes stack space)
+    mov edx, [dynamic_stack_base]
+
+    movzx ecx, word [E820_COUNT_ADDR]
+    test ecx, ecx
+    jz .vdl_fail
+
+    mov esi, E820_MAP_ADDR
+
+.vdl_loop:
+    cmp dword [esi+16], 1          ; type == usable?
+    jne .vdl_next
+    cmp dword [esi+4], 0           ; base_high == 0? (below 4GB)
+    jne .vdl_next
+
+    mov eax, [esi]                 ; region_base
+    cmp eax, [dynamic_pt_base]
+    ja .vdl_next                   ; region starts after our area
+
+    ; region_end = base + length
+    mov ebx, eax
+    add ebx, [esi+8]
+    jc .vdl_found                  ; overflow = huge region, definitely fits
+    cmp ebx, edx                   ; region_end >= needed_end?
+    jae .vdl_found
+
+.vdl_next:
+    add esi, 24
+    dec ecx
+    jnz .vdl_loop
+
+.vdl_fail:
+    ; Fatal: not enough contiguous RAM — display "NO MEM" on VGA
+    mov edi, 0xB8000 + 160         ; second VGA line
+    mov ah, 0x4F                   ; white on red
+    mov al, 'N'
+    mov [edi], ax
+    mov al, 'O'
+    mov [edi+2], ax
+    mov al, ' '
+    mov [edi+4], ax
+    mov al, 'M'
+    mov [edi+6], ax
+    mov al, 'E'
+    mov [edi+8], ax
+    mov al, 'M'
+    mov [edi+10], ax
+    cli
+    hlt
+    jmp $
+
+.vdl_found:
+    pop esi
+    pop edx
+    pop ecx
+    pop ebx
+    pop eax
+    ret
 
 [BITS 64]
 long_mode_start:
@@ -125,7 +231,9 @@ long_mode_start:
     mov gs, ax
     mov ss, ax
 
-    mov rsp, STACK_BASE
+    ; Use dynamically computed stack
+    xor rsp, rsp
+    mov esp, [dynamic_stack_base]
 
     push qword 0
     popf
@@ -164,8 +272,12 @@ long_mode_start:
     mov byte  [BOOT_INFO_ADDR+25],   0                   ; +25: reserved
     mov word  [BOOT_INFO_ADDR+26],   0                   ; +26: reserved
 
-    mov dword [BOOT_INFO_ADDR+28],   PAGE_TABLE_BASE     ; +28: page_table_base
-    mov dword [BOOT_INFO_ADDR+32],   36                  ; +32: total_size
+    ; Dynamic addresses from compute_dynamic_layout
+    mov eax, [dynamic_pt_base]
+    mov dword [BOOT_INFO_ADDR+28],   eax                 ; +28: page_table_base
+    mov eax, [dynamic_stack_base]
+    mov dword [BOOT_INFO_ADDR+32],   eax                 ; +32: stack_base
+    mov dword [BOOT_INFO_ADDR+36],   40                  ; +36: total_size
 
     jmp KERNEL_RUN_ADDR
 
@@ -722,8 +834,10 @@ tagfs_load_kernel_file:
     add ebx, eax
     sub cx, ax
 
-    ; Safety: kernel must not overrun page table area
-    cmp edi, KERNEL_MAX_ADDR
+    ; Safety: kernel must not exceed max size (sanity check)
+    mov eax, edi
+    sub eax, KERNEL_RUN_ADDR
+    cmp eax, KERNEL_MAX_SIZE
     jae .size_error
 
     test cx, cx
@@ -984,86 +1098,6 @@ detect_memory_e820:
     call print_string_16
     ret
 
-; Validates PAGE_TABLE_BASE (0x820000-0x823FFF) is in usable RAM via E820
-; Halts if not found
-validate_page_table_location:
-    push ax
-    push bx
-    push cx
-    push si
-    push di
-    push es
-
-    mov cx, [E820_COUNT_ADDR]
-    test cx, cx
-    jz .validation_failed
-
-    mov ax, 0x50
-    mov es, ax
-    xor di, di
-
-.check_loop:
-    mov eax, [es:di]
-    mov ebx, [es:di+4]
-
-    mov esi, [es:di+8]
-    mov edx, [es:di+12]
-
-    add esi, eax
-    adc edx, ebx
-
-    mov eax, [es:di+16]
-    cmp eax, 1
-    jne .next_entry
-
-    mov eax, [es:di]
-    mov ebx, [es:di+4]
-
-    cmp ebx, 0x00
-    ja .next_entry
-    jb .check_end
-    cmp eax, PAGE_TABLE_BASE
-    ja .next_entry
-
-.check_end:
-    cmp edx, 0x00
-    ja .found
-    jb .next_entry
-    cmp esi, PAGE_TABLE_BASE + PAGE_TABLE_SIZE
-    jae .found
-
-.next_entry:
-    add di, 24
-    dec cx
-    jnz .check_loop
-
-    jmp .validation_failed
-
-.found:
-    xor ax, ax
-    mov es, ax
-
-    mov si, msg_page_table_safe
-    call print_string_16
-
-    pop es
-    pop di
-    pop si
-    pop cx
-    pop bx
-    pop ax
-    ret
-
-.validation_failed:
-    xor ax, ax
-    mov es, ax
-
-    mov si, msg_page_table_unsafe
-    call print_string_16
-    call wait_key
-    cli
-    hlt
-    jmp $
 
 [BITS 32]
 
@@ -1140,15 +1174,18 @@ calculate_identity_map_size:
     pop eax
     ret
 
-setup_paging_fixed:
+; Sets up identity-mapped page tables at [dynamic_pt_base].
+; Layout within allocation: PML4(4KB) + PDPT(4KB) + PD0..PD3(4KB each)
+; Maps up to 4GB using 2MB pages, dynamically sized from E820.
+setup_paging:
     call calculate_identity_map_size
     ; ECX = total 2MB pages to map (64..2048)
 
     push ecx
     push ebx
 
-    ; Zero 32KB of page table space
-    mov edi, PAGE_TABLE_BASE
+    ; Zero 32KB of page table space at dynamic address
+    mov edi, [dynamic_pt_base]
     mov ecx, 8192          ; 32KB / 4 = 8192 dwords
     xor eax, eax
     rep stosd
@@ -1158,9 +1195,12 @@ setup_paging_fixed:
     push ecx
     mov ecx, ebx
 
-    ; PML4[0] -> PDPT
-    mov dword [PAGE_TABLE_BASE], PAGE_TABLE_BASE + 0x1000 + 3
-    mov dword [PAGE_TABLE_BASE + 4], 0x00000000
+    ; PML4[0] -> PDPT (base + 0x1000)
+    mov esi, [dynamic_pt_base]
+    mov eax, esi
+    add eax, 0x1000 + 3   ; PDPT address + Present + Writable
+    mov [esi], eax
+    mov dword [esi + 4], 0x00000000
 
     ; Calculate number of PDs needed: ceil(pages / 512)
     ; Each PD covers 512 entries × 2MB = 1GB
@@ -1174,9 +1214,11 @@ setup_paging_fixed:
 .setup_pdpt:
     mov eax, edx
     shl eax, 12            ; PD offset = index * 4096
-    add eax, PAGE_TABLE_BASE + 0x2000
+    add eax, [dynamic_pt_base]
+    add eax, 0x2000
     or eax, 3              ; Present + Writable
-    mov edi, PAGE_TABLE_BASE + 0x1000
+    mov edi, [dynamic_pt_base]
+    add edi, 0x1000
     lea edi, [edi + edx*8]
     mov [edi], eax
     mov dword [edi+4], 0
@@ -1185,8 +1227,9 @@ setup_paging_fixed:
     cmp edx, ebx
     jb .setup_pdpt
 
-    ; Fill all PD entries with 2MB pages
-    mov edi, PAGE_TABLE_BASE + 0x2000
+    ; Fill all PD entries with 2MB identity-mapped pages
+    mov edi, [dynamic_pt_base]
+    add edi, 0x2000
     mov eax, 0x000083      ; Present, Writable, Page Size (2MB)
     pop ecx                ; ECX = total 2MB pages
 
@@ -1199,12 +1242,12 @@ setup_paging_fixed:
 
     ret
 
-enable_long_mode_fixed:
+enable_long_mode:
     mov eax, cr4
     or eax, (1 << 5)      ; PAE
     mov cr4, eax
 
-    mov eax, PAGE_TABLE_BASE
+    mov eax, [dynamic_pt_base]
     mov cr3, eax
 
     mov ecx, 0xC0000080   ; EFER MSR
@@ -1316,6 +1359,11 @@ dap_kernel_chunk:
 
 align 4
 boot_drive_saved:       db 0
+
+align 4
+dynamic_pt_base:        dd 0            ; computed page table base (after kernel)
+dynamic_stack_base:     dd 0            ; computed stack base (after page tables)
+
 kernel_file_id:         dw 0
 kernel_start_block:     dd 0
 kernel_block_count:     dd 0
@@ -1333,7 +1381,7 @@ msg_e820_fail         db '[WARN] E820 failed, using fallback', 13, 10, 0
 msg_memory_fallback   db '[OK] Fallback memory detection', 13, 10, 0
 msg_memory_error      db '[ERROR] Memory detection failed!', 13, 10, 0
 msg_unreal_mode       db '[OK] Unreal Mode (4GB addressing) active', 13, 10, 0
-msg_kernel_too_large  db '[ERROR] Kernel exceeds 13MB limit!', 13, 10, 0
+msg_kernel_too_large  db '[ERROR] Kernel exceeds 32MB limit!', 13, 10, 0
 msg_loading_tagfs     db 'Loading kernel via TagFS (Unreal Mode)...', 13, 10, 0
 msg_kernel_loaded_tagfs db '[OK] Kernel loaded to 0x100000 via Unreal Mode', 13, 10, 0
 msg_tagfs_error       db '[ERROR] TagFS superblock read failed!', 13, 10, 0
@@ -1343,7 +1391,6 @@ msg_long_mode_ok      db '[OK] CPU supports 64-bit mode', 13, 10, 0
 msg_no_cpuid          db '[ERROR] CPUID not supported!', 13, 10, 0
 msg_no_long_mode      db '[ERROR] 64-bit mode not supported!', 13, 10, 0
 msg_entering_protected db 'Entering protected mode...', 13, 10, 0
-msg_page_table_safe   db '[OK] Page table location validated (0xE00000)', 13, 10, 0
-msg_page_table_unsafe db '[ERROR] Page tables at 0xE00000 in unusable memory! Need 16MB+ RAM', 13, 10, 0
+; (page table validation now done dynamically in 32-bit mode via VGA "NO MEM" on failure)
 msg_kernel_tag_not_found  db '[WARN] Kernel tag not found, searching by header...', 13, 10, 0
 msg_kernel_loaded_header  db '[OK] Kernel loaded via header scan', 13, 10, 0

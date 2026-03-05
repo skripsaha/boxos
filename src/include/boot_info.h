@@ -18,11 +18,12 @@ typedef struct {
     uint8_t  boot_drive;      /* +24: BIOS boot drive number */
     uint8_t  reserved2;       /* +25: padding */
     uint16_t reserved3;       /* +26: padding */
-    uint32_t page_table_base; /* +28: boot page table physical address */
-    uint32_t total_size;      /* +32: size of this structure */
+    uint32_t page_table_base; /* +28: boot page table physical address (dynamic) */
+    uint32_t stack_base;      /* +32: kernel stack base (dynamic, after page tables) */
+    uint32_t total_size;      /* +36: size of this structure */
 } __attribute__((packed)) boot_info_t;
 
-_Static_assert(sizeof(boot_info_t) == 36, "boot_info_t must be 36 bytes");
+_Static_assert(sizeof(boot_info_t) == 40, "boot_info_t must be 40 bytes");
 
 static inline boot_info_t* boot_info_get(void) {
     return (boot_info_t*)(uintptr_t)BOOT_INFO_ADDR;
