@@ -15,10 +15,10 @@ NOTIFY_MAX_PREFIXES  = 16    // MUST match EVENT_MAX_PREFIXES
 NOTIFY_DATA_SIZE     = 256   // MUST match EVENT_DATA_SIZE
 NOTIFY_PAGE_SIZE     = 8192  // sizeof(notify_page_t) = CABIN_NOTIFY_PAGE_SIZE (8KB, 2 pages)
 
-RESULT_RING_SIZE     = 111   // Result ring capacity (fits in 28KB result region)
+RESULT_RING_SIZE     = 128   // Result ring capacity (fits in 36KB result region)
 RESULT_ENTRY_SIZE    = 256   // sizeof(result_entry_t)
 RESULT_PAYLOAD_SIZE  = 244   // Payload bytes per result entry
-RESULT_PAGE_SIZE     = 28672 // sizeof(result_page_t) = CABIN_RESULT_PAGE_SIZE (28KB, 7 pages)
+RESULT_PAGE_SIZE     = 36864 // sizeof(result_page_t) = CABIN_RESULT_PAGE_SIZE (36KB, 9 pages)
 ```
 
 ## Event Structure
@@ -104,17 +104,17 @@ typedef struct __packed {
     uint8_t _pad1[60];
     volatile uint32_t tail __attribute__((aligned(64)));  // 64 bytes with padding
     uint8_t _pad2[60];
-    result_entry_t entries[RESULT_RING_SIZE];             // 28416 bytes (111 * 256)
-} result_ring_t;                                          // TOTAL: 28544 bytes
+    result_entry_t entries[RESULT_RING_SIZE];             // 32768 bytes (128 * 256)
+} result_ring_t;                                          // TOTAL: 32896 bytes
 
 typedef struct __packed {
     uint32_t magic;                          // 4 bytes: 0x52455355 "RESU"
     uint32_t _padding;                       // 4 bytes
     volatile uint8_t notification_flag;      // 1 byte: at offset 8, in first cache line
     uint8_t _pad_notify[63];                 // 63 bytes: isolate notification_flag
-    result_ring_t ring;                      // 28544 bytes
-    uint8_t _reserved[56];                   // 56 bytes: pad to 28672
-} result_page_t;                             // TOTAL: 28672 bytes (28KB, 7 pages)
+    result_ring_t ring;                      // 32896 bytes
+    uint8_t _reserved[56];                   // 56 bytes: pad to 36864
+} result_page_t;                             // TOTAL: 36864 bytes (36KB, 9 pages)
 ```
 
 ## Size Constraints
@@ -128,7 +128,7 @@ typedef struct __packed {
 2. **Inline Data:** Maximum 256 bytes per event
    - Larger payloads require storage deck operations
 
-3. **Result Ring:** Maximum 111 pending results per process
+3. **Result Ring:** Maximum 128 pending results per process
    - When full, kernel sets result_page_full backpressure flag
    - Overflow results go to kernel Pending Queue for deferred delivery
 
@@ -145,9 +145,9 @@ STATIC_ASSERT(NOTIFY_MAX_PREFIXES == EVENT_MAX_PREFIXES, "Prefix count mismatch"
 STATIC_ASSERT(NOTIFY_DATA_SIZE == EVENT_DATA_SIZE, "Data size mismatch");
 STATIC_ASSERT(sizeof(notify_page_t) == CABIN_NOTIFY_PAGE_SIZE, "Notify page must be 8KB");
 
-STATIC_ASSERT(RESULT_RING_SIZE == 111, "Result ring size mismatch");
+STATIC_ASSERT(RESULT_RING_SIZE == 128, "Result ring size mismatch");
 STATIC_ASSERT(sizeof(result_entry_t) == 256, "Result entry size mismatch");
-STATIC_ASSERT(sizeof(result_page_t) == CABIN_RESULT_PAGE_SIZE, "Result page must be 28KB");
+STATIC_ASSERT(sizeof(result_page_t) == CABIN_RESULT_PAGE_SIZE, "Result page must be 36KB");
 ```
 
 ## References

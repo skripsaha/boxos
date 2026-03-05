@@ -1643,8 +1643,8 @@ int vmm_map_code_region(vmm_context_t* ctx, uintptr_t code_phys, uint64_t size) 
         uint64_t memsz_aligned = ((memsz + page_offset + VMM_PAGE_SIZE - 1) / VMM_PAGE_SIZE) * VMM_PAGE_SIZE;
         size_t page_count = memsz_aligned / VMM_PAGE_SIZE;
 
-        if (vaddr_aligned < 0x3000) {
-            debug_printf("[VMM] ERROR: Invalid ELF segment vaddr 0x%llx (below 0x3000)\n", vaddr_aligned);
+        if (vaddr_aligned < CABIN_CODE_START_ADDR) {
+            debug_printf("[VMM] ERROR: Invalid ELF segment vaddr 0x%llx (below 0x%llx)\n", vaddr_aligned, (uint64_t)CABIN_CODE_START_ADDR);
             for (int k = 0; k < mapped_seg_count; k++) {
                 pmm_free((void*)mapped_segs[k].phys, mapped_segs[k].pages);
             }

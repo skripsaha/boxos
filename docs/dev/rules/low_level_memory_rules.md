@@ -91,8 +91,8 @@ jmp 0x100000                    ; прыжок на _start ядра
 ─────────────────────  ────────  ────────────────────────────
 0x0000 - 0x0FFF        4KB       NULL trap zone (не маппится)
 0x1000 - 0x2FFF        8KB       Notify Page (User → Kernel)
-0x3000 - 0x9FFF        28KB      Result Page (Kernel → User)
-0xA000 - ...           var       Code + Data + BSS (entry point)
+0x3000 - 0xBFFF        36KB      Result Page (Kernel → User)
+0xC000 - ...           var       Code + Data + BSS (entry point)
 0x20000 - ...          var       Heap (растёт вверх)
 ...                    ...       (свободно)
 0x7FFFF000             4KB       CPU Caps Page (read-only)
@@ -138,13 +138,13 @@ jmp 0x100000                    ; прыжок на _start ядра
 ### Текущие адреса и безопасные границы
 
 ```
-User code:    0xA000 → 0xA000 + binary_size
+User code:    0xC000 → 0xC000 + binary_size
 Kernel code:  0x100000 → ~0x15D000 (растёт с ростом ядра, до 0x800000 max)
 
-Зазор:        0xA000 .. 0x100000 = 0xF6000 = 984KB
+Зазор:        0xC000 .. 0x100000 = 0xF4000 = 976KB
 ```
 
-**Максимальный безопасный размер user binary: ~984KB**
+**Максимальный безопасный размер user binary: ~976KB**
 
 При бинарнике > 984KB user code дойдёт до 0x100000 и затрёт ядро.
 
@@ -361,7 +361,7 @@ if (!is_identity_map) {
 _Static_assert(sizeof(notify_page_t) == CABIN_NOTIFY_PAGE_SIZE)
 ```
 
-### Result Page (28KB, 7 pages)
+### Result Page (36KB, 9 pages)
 
 ```
 Файлы:
@@ -371,8 +371,8 @@ _Static_assert(sizeof(notify_page_t) == CABIN_NOTIFY_PAGE_SIZE)
 
 Структура result_page_t:
   - Заголовок 24 байта
-  - result_entry_t entries[RESULT_RING_SIZE]  (RESULT_RING_SIZE = 111)
-  - Итого ≤ 28672 байт = CABIN_RESULT_PAGE_SIZE
+  - result_entry_t entries[RESULT_RING_SIZE]  (RESULT_RING_SIZE = 128)
+  - Итого ≤ 36864 байт = CABIN_RESULT_PAGE_SIZE
 
 _Static_assert(sizeof(result_page_t) <= CABIN_RESULT_PAGE_SIZE)
 ```
@@ -400,7 +400,7 @@ _Static_assert(sizeof(result_page_t) <= CABIN_RESULT_PAGE_SIZE)
 - [ ] `box/result.h` (userspace) — static_assert идентичен
 - [ ] `user.ld` — `USER_BASE` = `CABIN_CODE_START_ADDR`
 - [ ] `boxos_addresses.h` — комментарии актуальны
-- [ ] **User binary не перекрывает kernel**: `CABIN_CODE_START_ADDR + max_binary_size < 0x100000`
+- [ ] **User binary не перекрывает kernel**: `CABIN_CODE_START_ADDR + max_binary_size < 0x100000` (зазор от 0xC000 = ~976KB)
 
 ### При изменении адреса загрузки ядра
 
@@ -446,12 +446,12 @@ _Static_assert(sizeof(result_page_t) <= CABIN_RESULT_PAGE_SIZE)
 | Boot page tables | `0x820000` | stage2.asm |
 | Cabin NULL trap | `0x0000-0x0FFF` | cabin_layout.h |
 | Cabin Notify | `0x1000-0x2FFF` (8KB) | cabin_layout.h |
-| Cabin Result | `0x3000-0x9FFF` (28KB) | cabin_layout.h |
-| Cabin Code start | `0xA000` | cabin_layout.h |
+| Cabin Result | `0x3000-0xBFFF` (36KB) | cabin_layout.h |
+| Cabin Code start | `0xC000` | cabin_layout.h |
 | User stack top | `0x7FFFFFFFE000` | vmm.h |
 | User heap base | `0x20000` | vmm.h |
 | Kernel heap (higher-half) | `0xFFFF800000000000` | vmm.h |
-| RESULT_RING_SIZE | 111 entries | boxos_sizes.h |
+| RESULT_RING_SIZE | 128 entries | boxos_sizes.h |
 | Per-process kernel stack | 4 pages (16KB) + 1 guard | kernel_config.h |
 | User stack | 16 pages (64KB) + 1 guard | kernel_config.h |
 | Idle process stack | 1 page (4KB) | idle.c |

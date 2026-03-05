@@ -37,8 +37,8 @@ typedef struct PACKED
     volatile uint8_t notification_flag; // Offset 8
     uint8_t _pad_notify[63];            // Offset 9-71
 
-    result_ring_t ring;    // Offset 72
-    uint8_t _reserved[56]; // Offset 28616-28671
+    result_ring_t ring;      // Offset 72
+    uint8_t _reserved[3896]; // pad to 36864 (9 pages)
 } result_page_t;
 
 STATIC_ASSERT(sizeof(result_page_t) == CABIN_RESULT_PAGE_SIZE, "Result page must be exactly CABIN_RESULT_PAGE_SIZE (28KB)");
