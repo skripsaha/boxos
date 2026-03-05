@@ -3,9 +3,9 @@
 
 #include "boxos_limits.h"
 
-#define CONFIG_KERNEL_LOAD_ADDR 0x100000ULL  // 1MB - kernel run address
-#define CONFIG_PAGE_TABLE_BASE 0x820000ULL   // 8MB - page tables
-#define CONFIG_KERNEL_STACK_BASE 0x900000ULL // 9MB - kernel stack
+#define CONFIG_KERNEL_LOAD_ADDR 0x100000ULL   // 1MB - kernel run address
+#define CONFIG_PAGE_TABLE_BASE 0xE00000ULL   // 14MB - boot page tables (32KB)
+#define CONFIG_KERNEL_STACK_BASE 0xF00000ULL // 15MB - kernel stack
 
 #define CONFIG_USER_CODE_BASE 0x20000000ULL  // 512MB - user code start
 #define CONFIG_USER_STACK_BASE 0x20100000ULL // 513MB - user stack start
