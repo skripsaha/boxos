@@ -32,7 +32,14 @@ typedef struct __packed {
     uint32_t route_target;
     char     route_tag[32];
     uint32_t spawner_pid;
-    uint8_t  _reserved[7854];                // pad to 8192 bytes (CABIN_NOTIFY_PAGE_SIZE)
+
+    // ASLR: kernel writes actual randomized addresses here at process creation.
+    // Userspace reads these to initialize heap/stack with correct bases.
+    uint64_t cabin_heap_base;                // actual heap base (CABIN_HEAP_BASE + random offset)
+    uint64_t cabin_heap_max_size;            // max heap size from this base
+    uint64_t cabin_buf_heap_base;            // actual buffer heap base
+    uint64_t cabin_stack_top;                // actual stack top
+    uint8_t  _reserved[7822];                // pad to 8192 bytes (CABIN_NOTIFY_PAGE_SIZE)
 } notify_page_t;
 
 STATIC_ASSERT(NOTIFY_MAX_PREFIXES == EVENT_MAX_PREFIXES, "Prefix count must match Event structure - see docs/api/event_structures.md");

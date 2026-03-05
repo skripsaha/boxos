@@ -1,6 +1,7 @@
 #include "box/heap.h"
 #include "box/sync.h"
 #include "box/string.h"
+#include "box/notify.h"
 #include "cabin_layout.h"
 
 // ---------------------------------------------------------------------------
@@ -44,9 +45,17 @@ static uint32_t stat_free_calls   = 0;
 // ---- helpers (called with lock held) -------------------------------------
 
 static void heap_init_locked(void) {
-    heap_base    = CABIN_HEAP_BASE;
+    // ASLR: read actual heap base from notify page (set by kernel)
+    notify_page_t* np = notify_page();
+    if (np->cabin_heap_base != 0 && np->cabin_heap_max_size != 0) {
+        heap_base = np->cabin_heap_base;
+        heap_max  = heap_base + np->cabin_heap_max_size;
+    } else {
+        // fallback for legacy/pre-ASLR kernels
+        heap_base = CABIN_HEAP_BASE;
+        heap_max  = heap_base + CABIN_HEAP_MAX_SIZE;
+    }
     heap_current = heap_base;
-    heap_max     = heap_base + CABIN_HEAP_MAX_SIZE;
     free_list    = NULL;
     initialized  = 1;
 }

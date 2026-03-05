@@ -1766,7 +1766,8 @@ int vmm_handle_page_fault(uintptr_t fault_addr, uint64_t error_code) {
 
     vmm_context_t* ctx = vmm_get_current_context();
     if (ctx && user) {
-        uint64_t stack_top = VMM_USER_STACK_TOP;
+        // ASLR: use per-process stack top from VMM context
+        uint64_t stack_top = ctx->stack_top;
         uint64_t guard_base = stack_top - (CONFIG_USER_STACK_TOTAL_PAGES * VMM_PAGE_SIZE);
         uint64_t guard_end = guard_base + (CONFIG_USER_STACK_GUARD_PAGES * VMM_PAGE_SIZE);
 

@@ -10,6 +10,8 @@
 #include "pid_allocator.h"
 #include "cpu_caps_page.h"
 #include "fpu.h"
+#include "aslr.h"
+#include "notify_page.h"
 
 static process_t* process_list_head = NULL;
 static volatile uint32_t process_count = 0;
@@ -21,6 +23,7 @@ static process_t* cleanup_queue_dequeue(void);
 static void process_cleanup_immediate(process_t* proc);
 
 void process_init(void) {
+    aslr_init();
     pid_allocator_init();
 
     process_list_head = NULL;
@@ -92,7 +95,13 @@ process_t* process_create(const char* tags) {
     proc->code_start = VMM_CABIN_CODE_START;
     proc->code_size = 0;
     proc->started = false;
-    proc->buf_heap_next = CABIN_BUF_HEAP_START;
+
+    // ASLR: generate per-process random offsets
+    aslr_offsets_t aslr = aslr_generate();
+    proc->aslr_stack_top     = VMM_USER_STACK_TOP - aslr.stack_offset;
+    proc->aslr_heap_base     = CABIN_HEAP_BASE + aslr.heap_offset;
+    proc->aslr_buf_heap_base = CABIN_BUF_HEAP_START + aslr.buf_heap_offset;
+    proc->buf_heap_next      = proc->aslr_buf_heap_base;
     proc->next = NULL;
 
     if (tags) {
@@ -376,9 +385,12 @@ int process_load_binary(process_t* proc, const void* binary_data, size_t size) {
         return -1;
     }
 
+    // ASLR: use randomized stack top
+    uint64_t stack_top = proc->aslr_stack_top;
+
     // stack layout: [guard page][...data pages...]
     // only map data pages; guard page is left unmapped for overflow detection
-    uint64_t guard_page_base = VMM_USER_STACK_TOP - (CONFIG_USER_STACK_TOTAL_PAGES * VMM_PAGE_SIZE);
+    uint64_t guard_page_base = stack_top - (CONFIG_USER_STACK_TOTAL_PAGES * VMM_PAGE_SIZE);
     uint64_t stack_data_base = guard_page_base + (CONFIG_USER_STACK_GUARD_PAGES * VMM_PAGE_SIZE);
 
     vmm_map_result_t map_result = vmm_map_pages(
@@ -396,8 +408,8 @@ int process_load_binary(process_t* proc, const void* binary_data, size_t size) {
         return -1;
     }
 
-    // === Heap initialization ===
-    uintptr_t heap_start = CABIN_HEAP_BASE;
+    // === Heap initialization (ASLR: use randomized heap base) ===
+    uintptr_t heap_start = proc->aslr_heap_base;
     void* heap_phys = pmm_alloc_zero(CONFIG_USER_HEAP_INITIAL_PAGES);
     if (!heap_phys) {
         debug_printf("[PROCESS] ERROR: Failed to allocate initial heap pages\n");
@@ -424,10 +436,21 @@ int process_load_binary(process_t* proc, const void* binary_data, size_t size) {
 
     proc->cabin->heap_start = heap_start;
     proc->cabin->heap_end = heap_start + CONFIG_USER_HEAP_INITIAL_SIZE;
+    proc->cabin->stack_top = stack_top;
+
+    // Write ASLR cabin info to notify page so userspace knows its layout
+    notify_page_t* np = (notify_page_t*)vmm_phys_to_virt(proc->notify_page_phys);
+    np->cabin_heap_base     = heap_start;
+    np->cabin_heap_max_size = CABIN_HEAP_MAX_SIZE;
+    np->cabin_buf_heap_base = proc->aslr_buf_heap_base;
+    np->cabin_stack_top     = stack_top;
 
     proc->code_size = size;
     proc->context.rip = VMM_CABIN_CODE_START;
-    proc->context.rsp = VMM_USER_STACK_TOP;
+    proc->context.rsp = stack_top;
+
+    debug_printf("[PROCESS] ASLR: PID %u heap=0x%lx stack=0x%lx buf=0x%lx\n",
+                 proc->pid, heap_start, stack_top, proc->aslr_buf_heap_base);
 
     return 0;
 }

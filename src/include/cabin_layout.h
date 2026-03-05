@@ -21,8 +21,11 @@
 #define CABIN_NOTIFY_PAGE_PAGES  (CABIN_NOTIFY_PAGE_SIZE / 4096)  // 2
 #define CABIN_RESULT_PAGE_PAGES  (CABIN_RESULT_PAGE_SIZE / 4096)  // 7
 
-#define CABIN_HEAP_BASE          0x0000000010000000ULL  // 256MB: heap start (above identity-mapped region)
-#define CABIN_BUF_HEAP_START     0x0000000040000000ULL  // 1GB: buffer alloc region
+// Nominal base addresses — actual per-process addresses are randomized by ASLR.
+// Kernel adds a random page-aligned offset at process creation time.
+// Userspace reads the actual heap base from cabin_info in the notify page.
+#define CABIN_HEAP_BASE          0x0000000010000000ULL  // 256MB: nominal heap start
+#define CABIN_BUF_HEAP_START     0x0000000040000000ULL  // 1GB: nominal buffer alloc region
 
 #define NOTIFY_PAGE_VADDR        CABIN_NOTIFY_PAGE_ADDR
 #define RESULT_PAGE_VADDR        CABIN_RESULT_PAGE_ADDR
