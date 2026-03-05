@@ -308,7 +308,16 @@ void guide_run(void)
 
         if (event.state == EVENT_STATE_RETRY)
         {
-            execution_deck_handler(&event);
+            // Re-queue the event for delivery on the next guide_run() cycle.
+            // This gives the scheduler a chance to run the blocked process
+            // so it can drain its result ring / pending queue.
+            event.state = EVENT_STATE_NEW;
+            error_t retry_err = event_ring_push(kernel_event_ring, &event);
+            if (IS_ERROR(retry_err)) {
+                // Event ring itself is full — last-resort: try execution deck directly
+                event.state = EVENT_STATE_COMPLETED;
+                execution_deck_handler(&event);
+            }
             need_execution_deck = false;
             continue;
         }
@@ -372,6 +381,9 @@ void guide_run(void)
     uint8_t backpressure_flag = (ring_usage_percent > 90) ? 1 : 0;
 
     extern process_t *process_get_first(void);
+    extern void process_list_lock(void);
+    extern void process_list_unlock(void);
+    process_list_lock();
     process_t *proc = process_get_first();
     while (proc)
     {
@@ -385,6 +397,7 @@ void guide_run(void)
         }
         proc = proc->next;
     }
+    process_list_unlock();
 }
 
 uint32_t guide_alloc_event_id(void)

@@ -83,21 +83,13 @@ int pending_results_try_deliver(uint32_t pid) {
         pending_result_t* pending = &pending_q.entries[scan];
 
         if (pending->pid == pid) {
-            process_t* proc = process_find(pid);
+            process_t* proc = process_find_ref(pid);
             if (!proc) {
-                scan = (scan + 1) % PENDING_QUEUE_SIZE;
-                continue;
-            }
-
-            // validate magic before use to catch corrupted process structs
-            if (proc->magic != PROCESS_MAGIC) {
-                debug_printf("[PENDING_RESULTS] WARNING: Corrupted process PID %u (bad magic), skipping\n", pid);
+                // process gone — discard this pending entry
                 pending->pid = 0;
                 scan = (scan + 1) % PENDING_QUEUE_SIZE;
                 continue;
             }
-
-            process_ref_inc(proc);
 
             uint64_t result_phys = proc->result_page_phys;
             if (result_phys == 0) {
@@ -180,11 +172,30 @@ void pending_results_flush_all(void) {
         return;
     }
 
+    // Collect unique PIDs from pending queue under lock
+    // to avoid iterating the process list unsafely.
+    uint32_t pids[PENDING_QUEUE_SIZE];
+    uint32_t pid_count = 0;
+    uint32_t scan = tail;
+    while (scan != head && pid_count < PENDING_QUEUE_SIZE) {
+        uint32_t pid = pending_q.entries[scan].pid;
+        if (pid != 0) {
+            // deduplicate: only add if not already in list
+            bool found = false;
+            for (uint32_t i = 0; i < pid_count; i++) {
+                if (pids[i] == pid) { found = true; break; }
+            }
+            if (!found) {
+                pids[pid_count++] = pid;
+            }
+        }
+        scan = (scan + 1) % PENDING_QUEUE_SIZE;
+    }
+
     spin_unlock(&pending_q.lock);
 
-    process_t* proc = process_get_first();
-    while (proc) {
-        pending_results_try_deliver(proc->pid);
-        proc = proc->next;
+    // Deliver to each PID — no process list iteration needed
+    for (uint32_t i = 0; i < pid_count; i++) {
+        pending_results_try_deliver(pids[i]);
     }
 }
