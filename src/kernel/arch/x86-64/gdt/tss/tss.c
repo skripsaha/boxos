@@ -72,11 +72,6 @@ void tss_setup_dynamic_stacks(void) {
 
     vmm_context_t *kernel_ctx = vmm_get_kernel_context();
     const char *ist_names[] = {"Double Fault", "NMI", "Machine Check", "Debug", "Stack Fault"};
-    uint64_t *ist_ptrs[] = {
-        &kernel_tss.ist1, &kernel_tss.ist2, &kernel_tss.ist3,
-        &kernel_tss.ist4, &kernel_tss.ist5
-    };
-
     for (int i = 0; i < IST_COUNT; i++) {
         size_t total_pages = IST_GUARD_PAGES + IST_STACK_PAGES;
         void *phys = pmm_alloc(total_pages);
@@ -98,7 +93,14 @@ void tss_setup_dynamic_stacks(void) {
 
         // Stack top = base + guard + data - 16 (alignment)
         uint64_t stack_top = (uint64_t)virt_base + (total_pages * 4096) - 16;
-        *ist_ptrs[i] = stack_top;
+
+        switch (i) {
+            case 0: kernel_tss.ist1 = stack_top; break;
+            case 1: kernel_tss.ist2 = stack_top; break;
+            case 2: kernel_tss.ist3 = stack_top; break;
+            case 3: kernel_tss.ist4 = stack_top; break;
+            case 4: kernel_tss.ist5 = stack_top; break;
+        }
 
         debug_printf("[TSS] IST%d (%s): guard=0x%p stack_top=0x%p [dynamic]\n",
                      i + 1, ist_names[i], virt_base, (void *)stack_top);
