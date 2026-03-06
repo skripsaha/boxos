@@ -1,4 +1,5 @@
 [BITS 64]
+DEFAULT ABS
 [EXTERN kernel_main]
 
 section .text
