@@ -1,7 +1,7 @@
 #ifndef SYSTEM_DECK_H
 #define SYSTEM_DECK_H
 
-#include "events.h"
+#include "pocket.h"
 #include "boxos_decks.h"
 
 #define SYSTEM_DECK_ID           DECK_SYSTEM
@@ -61,7 +61,7 @@ typedef struct __packed {
     uint8_t reserved[180];
 } fragmentation_score_response_t;
 
-int system_deck_handler(Event* event);
+int system_deck_handler(Pocket* pocket);
 bool system_security_gate(uint32_t pid, uint8_t deck_id, uint8_t opcode);
 
 #endif // SYSTEM_DECK_H

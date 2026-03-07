@@ -9,8 +9,6 @@
 #define BOXOS_PROC_MAX_BINARY_SIZE  (64 * 1024 * 1024)    // 64MB max binary size
 #define BOXOS_PROC_MAX_BUFFER_SIZE  (64 * 1024 * 1024)    // 64MB max buffer size
 
-#define MAX_PENDING_RESULTS 512
-
 #define IDT_ENTRIES        256
 #define ATA_SECTOR_SIZE    512
 

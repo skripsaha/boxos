@@ -1362,8 +1362,8 @@ void vmm_test_basic(void) {
     vmm_dump_context_stats(kernel_context);
 }
 
-vmm_context_t* vmm_create_cabin(uint64_t* notify_page_phys, uint64_t* result_page_phys) {
-    if (!notify_page_phys || !result_page_phys) {
+vmm_context_t* vmm_create_cabin(uint64_t* cabin_info_phys, uint64_t* pocket_ring_phys, uint64_t* result_ring_phys) {
+    if (!cabin_info_phys || !pocket_ring_phys || !result_ring_phys) {
         vmm_set_error("Invalid output parameters for Cabin creation");
         return NULL;
     }
@@ -1374,45 +1374,68 @@ vmm_context_t* vmm_create_cabin(uint64_t* notify_page_phys, uint64_t* result_pag
         return NULL;
     }
 
-    void* notify_phys = pmm_alloc(CABIN_NOTIFY_PAGE_PAGES);
-    if (!notify_phys) {
+    // Allocate physical pages for CabinInfo (1 page), PocketRing (1 page), ResultRing (9 pages)
+    void* info_phys = pmm_alloc(CABIN_INFO_PAGES);
+    if (!info_phys) {
         vmm_destroy_context(cabin_ctx);
-        vmm_set_error("Failed to allocate Notify region");
+        vmm_set_error("Failed to allocate CabinInfo page");
         return NULL;
     }
 
-    void* result_phys = pmm_alloc(CABIN_RESULT_PAGE_PAGES);
+    void* pocket_phys = pmm_alloc(CABIN_POCKET_RING_PAGES);
+    if (!pocket_phys) {
+        pmm_free(info_phys, CABIN_INFO_PAGES);
+        vmm_destroy_context(cabin_ctx);
+        vmm_set_error("Failed to allocate PocketRing page");
+        return NULL;
+    }
+
+    void* result_phys = pmm_alloc(CABIN_RESULT_RING_PAGES);
     if (!result_phys) {
-        pmm_free(notify_phys, CABIN_NOTIFY_PAGE_PAGES);
+        pmm_free(pocket_phys, CABIN_POCKET_RING_PAGES);
+        pmm_free(info_phys, CABIN_INFO_PAGES);
         vmm_destroy_context(cabin_ctx);
-        vmm_set_error("Failed to allocate Result region");
+        vmm_set_error("Failed to allocate ResultRing pages");
         return NULL;
     }
 
-    memset(vmm_phys_to_virt((uintptr_t)notify_phys), 0, CABIN_NOTIFY_PAGE_SIZE);
-    memset(vmm_phys_to_virt((uintptr_t)result_phys), 0, CABIN_RESULT_PAGE_SIZE);
+    memset(vmm_phys_to_virt((uintptr_t)info_phys), 0, CABIN_INFO_SIZE);
+    memset(vmm_phys_to_virt((uintptr_t)pocket_phys), 0, CABIN_POCKET_RING_SIZE);
+    memset(vmm_phys_to_virt((uintptr_t)result_phys), 0, CABIN_RESULT_RING_SIZE);
 
     if (vmm_setup_null_trap(cabin_ctx) != 0) {
-        pmm_free(result_phys, CABIN_RESULT_PAGE_PAGES);
-        pmm_free(notify_phys, CABIN_NOTIFY_PAGE_PAGES);
+        pmm_free(result_phys, CABIN_RESULT_RING_PAGES);
+        pmm_free(pocket_phys, CABIN_POCKET_RING_PAGES);
+        pmm_free(info_phys, CABIN_INFO_PAGES);
         vmm_destroy_context(cabin_ctx);
         vmm_set_error("Failed to setup NULL trap");
         return NULL;
     }
 
-    if (vmm_map_notify_page(cabin_ctx, (uintptr_t)notify_phys) != 0) {
-        pmm_free(result_phys, CABIN_RESULT_PAGE_PAGES);
-        pmm_free(notify_phys, CABIN_NOTIFY_PAGE_PAGES);
+    if (vmm_map_cabin_info(cabin_ctx, (uintptr_t)info_phys) != 0) {
+        pmm_free(result_phys, CABIN_RESULT_RING_PAGES);
+        pmm_free(pocket_phys, CABIN_POCKET_RING_PAGES);
+        pmm_free(info_phys, CABIN_INFO_PAGES);
         vmm_destroy_context(cabin_ctx);
-        vmm_set_error("Failed to map Notify region");
+        vmm_set_error("Failed to map CabinInfo");
         return NULL;
     }
 
-    if (vmm_map_result_page(cabin_ctx, (uintptr_t)result_phys) != 0) {
-        pmm_free(result_phys, CABIN_RESULT_PAGE_PAGES);
-        pmm_free(notify_phys, CABIN_NOTIFY_PAGE_PAGES);
+    if (vmm_map_pocket_ring(cabin_ctx, (uintptr_t)pocket_phys) != 0) {
+        pmm_free(result_phys, CABIN_RESULT_RING_PAGES);
+        pmm_free(pocket_phys, CABIN_POCKET_RING_PAGES);
+        pmm_free(info_phys, CABIN_INFO_PAGES);
         vmm_destroy_context(cabin_ctx);
-        vmm_set_error("Failed to map Result region");
+        vmm_set_error("Failed to map PocketRing");
+        return NULL;
+    }
+
+    if (vmm_map_result_ring(cabin_ctx, (uintptr_t)result_phys) != 0) {
+        pmm_free(result_phys, CABIN_RESULT_RING_PAGES);
+        pmm_free(pocket_phys, CABIN_POCKET_RING_PAGES);
+        pmm_free(info_phys, CABIN_INFO_PAGES);
+        vmm_destroy_context(cabin_ctx);
+        vmm_set_error("Failed to map ResultRing");
         return NULL;
     }
 
@@ -1425,41 +1448,80 @@ vmm_context_t* vmm_create_cabin(uint64_t* notify_page_phys, uint64_t* result_pag
         }
     }
 
-    *notify_page_phys = (uint64_t)notify_phys;
-    *result_page_phys = (uint64_t)result_phys;
+    *cabin_info_phys = (uint64_t)info_phys;
+    *pocket_ring_phys = (uint64_t)pocket_phys;
+    *result_ring_phys = (uint64_t)result_phys;
 
     return cabin_ctx;
 }
 
-int vmm_map_notify_page(vmm_context_t* ctx, uintptr_t phys_page) {
+int vmm_map_cabin_info(vmm_context_t* ctx, uintptr_t phys_page) {
     if (!ctx) return -1;
 
-    uint64_t flags = VMM_FLAG_PRESENT | VMM_FLAG_WRITABLE | VMM_FLAG_USER;
+    // CabinInfo is read-only for userspace
+    uint64_t flags = VMM_FLAG_PRESENT | VMM_FLAG_USER;
 
-    vmm_map_result_t result = vmm_map_pages(ctx, VMM_CABIN_NOTIFY_PAGE, phys_page,
-                                             CABIN_NOTIFY_PAGE_PAGES, flags);
+    vmm_map_result_t result = vmm_map_pages(ctx, VMM_CABIN_INFO, phys_page,
+                                             CABIN_INFO_PAGES, flags);
     if (!result.success) {
-        debug_printf("[VMM] Failed to map Notify Region: %s\n", result.error_msg);
+        debug_printf("[VMM] Failed to map CabinInfo: %s\n", result.error_msg);
         return -1;
     }
 
     return 0;
 }
 
-int vmm_map_result_page(vmm_context_t* ctx, uintptr_t phys_page) {
+int vmm_map_pocket_ring(vmm_context_t* ctx, uintptr_t phys_page) {
     if (!ctx) return -1;
 
-    // user needs write access to update head index after reading results
+    // PocketRing is RW for userspace (producer writes Pockets, advances tail)
     uint64_t flags = VMM_FLAG_PRESENT | VMM_FLAG_WRITABLE | VMM_FLAG_USER;
 
-    vmm_map_result_t result = vmm_map_pages(ctx, VMM_CABIN_RESULT_PAGE, phys_page,
-                                             CABIN_RESULT_PAGE_PAGES, flags);
+    vmm_map_result_t result = vmm_map_pages(ctx, VMM_CABIN_POCKET_RING, phys_page,
+                                             CABIN_POCKET_RING_PAGES, flags);
     if (!result.success) {
-        debug_printf("[VMM] Failed to map Result Region: %s\n", result.error_msg);
+        debug_printf("[VMM] Failed to map PocketRing: %s\n", result.error_msg);
         return -1;
     }
 
     return 0;
+}
+
+int vmm_map_result_ring(vmm_context_t* ctx, uintptr_t phys_page) {
+    if (!ctx) return -1;
+
+    // ResultRing is RW for userspace (consumer reads Results, advances head)
+    uint64_t flags = VMM_FLAG_PRESENT | VMM_FLAG_WRITABLE | VMM_FLAG_USER;
+
+    vmm_map_result_t result = vmm_map_pages(ctx, VMM_CABIN_RESULT_RING, phys_page,
+                                             CABIN_RESULT_RING_PAGES, flags);
+    if (!result.success) {
+        debug_printf("[VMM] Failed to map ResultRing: %s\n", result.error_msg);
+        return -1;
+    }
+
+    return 0;
+}
+
+void* vmm_translate_user_addr(vmm_context_t* ctx, uintptr_t user_vaddr, size_t size) {
+    if (!ctx || size == 0) return NULL;
+
+    // Validate that the entire range falls within a single page
+    // (cross-page translations require per-page walks)
+    uintptr_t page_start = user_vaddr & VMM_PAGE_MASK;
+    uintptr_t end_addr = user_vaddr + size - 1;
+    uintptr_t page_end = end_addr & VMM_PAGE_MASK;
+
+    if (page_start != page_end) {
+        // Range crosses page boundary — only translate first page's portion.
+        // Caller must handle multi-page data in chunks.
+        size = VMM_PAGE_SIZE - (user_vaddr & VMM_PAGE_OFFSET_MASK);
+    }
+
+    uintptr_t phys = vmm_virt_to_phys(ctx, user_vaddr);
+    if (phys == 0) return NULL;
+
+    return vmm_phys_to_virt(phys);
 }
 
 int vmm_setup_null_trap(vmm_context_t* ctx) {

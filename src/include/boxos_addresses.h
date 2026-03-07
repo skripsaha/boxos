@@ -3,12 +3,15 @@
 
 #include "cabin_layout.h"
 
-#define NOTIFY_PAGE_ADDR      CABIN_NOTIFY_PAGE_ADDR   // 0x1000
-#define RESULT_PAGE_ADDR      CABIN_RESULT_PAGE_ADDR   // 0x3000
+// Cabin region addresses (per-process, virtual)
+#define CABIN_INFO_VADDR          CABIN_INFO_ADDR          // 0x1000
+#define POCKET_RING_VADDR         CABIN_POCKET_RING_ADDR   // 0x2000
+#define RESULT_RING_VADDR         CABIN_RESULT_RING_ADDR   // 0x3000
 
-// 0x7FFFF000: before user stack (0x7FFFFFFFE000), after code (0xC000+), leaves ~2GB for heap
-#define CPU_CAPS_PAGE_ADDR    0x0000000007FFFF000ULL
+// CPU capabilities page (shared read-only, before user stack)
+#define CPU_CAPS_PAGE_ADDR        0x0000000007FFFF000ULL
 
-#define USER_STACK_TOP        0x00007FFFFFFFE000ULL
+// User stack top (~128TB user space)
+#define USER_STACK_TOP            0x00007FFFFFFFE000ULL
 
 #endif // BOXOS_ADDRESSES_H

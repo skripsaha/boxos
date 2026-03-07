@@ -17,10 +17,11 @@
 
 // CABIN MEMORY MODEL (Snowball Architecture - Flat Binary, NO ELF)
 // Each process lives in isolated Cabin with fixed virtual layout:
-#define VMM_CABIN_NULL_TRAP     CABIN_NULL_TRAP_START  // 0x0000-0x0FFF: NULL trap zone (unmapped)
-#define VMM_CABIN_NOTIFY_PAGE   CABIN_NOTIFY_PAGE_ADDR // 0x1000-0x2FFF: Notify Region (User->Kernel, 8KB)
-#define VMM_CABIN_RESULT_PAGE   CABIN_RESULT_PAGE_ADDR // 0x3000-0xBFFF: Result Region (Kernel->User, 36KB)
-#define VMM_CABIN_CODE_START    CABIN_CODE_START_ADDR  // 0xC000+: Code, data, heap, stack (ENTRY POINT)
+#define VMM_CABIN_NULL_TRAP     CABIN_NULL_TRAP_START    // 0x0000-0x0FFF: NULL trap zone (unmapped)
+#define VMM_CABIN_INFO          CABIN_INFO_ADDR          // 0x1000: CabinInfo (4KB, read-only)
+#define VMM_CABIN_POCKET_RING   CABIN_POCKET_RING_ADDR   // 0x2000: PocketRing (4KB, user RW)
+#define VMM_CABIN_RESULT_RING   CABIN_RESULT_RING_ADDR   // 0x3000: ResultRing (36KB, user RW)
+#define VMM_CABIN_CODE_START    CABIN_CODE_START_ADDR    // 0xC000+: Code, data, heap, stack (ENTRY POINT)
 
 #define VMM_USER_BASE           VMM_CABIN_CODE_START   // flat binary entry point (NOT ELF!)
 #define VMM_USER_STACK_TOP      0x00007FFFFFFFE000ULL  // ~128TB user space top
@@ -213,10 +214,17 @@ static inline uintptr_t vmm_virt_to_phys_direct(void* virt_addr) {
 int vmm_handle_page_fault(uintptr_t fault_addr, uint64_t error_code);
 
 // Cabin: isolated virtual address space for user processes.
-// Layout: 0x0000-0x0FFF (NULL trap), 0x1000-0x2FFF (Notify 8KB), 0x3000-0xBFFF (Result 36KB), 0xC000+ (Code/Data/Heap/Stack)
-vmm_context_t* vmm_create_cabin(uint64_t* notify_page_phys, uint64_t* result_page_phys);
-int vmm_map_notify_page(vmm_context_t* ctx, uintptr_t phys_page);
-int vmm_map_result_page(vmm_context_t* ctx, uintptr_t phys_page);
+// Layout: 0x0000 (NULL trap), 0x1000 (CabinInfo RO), 0x2000 (PocketRing RW),
+//         0x3000 (ResultRing RW), 0xC000+ (Code/Data/Heap/Stack)
+vmm_context_t* vmm_create_cabin(uint64_t* cabin_info_phys, uint64_t* pocket_ring_phys, uint64_t* result_ring_phys);
+int vmm_map_cabin_info(vmm_context_t* ctx, uintptr_t phys_page);
+int vmm_map_pocket_ring(vmm_context_t* ctx, uintptr_t phys_page);
+int vmm_map_result_ring(vmm_context_t* ctx, uintptr_t phys_page);
+
+// Translate a user virtual address in a process's page table to a kernel-accessible pointer.
+// Walks the process's page tables, resolves the physical address, and returns it as a
+// kernel pointer via identity mapping. Returns NULL if the address is not mapped.
+void* vmm_translate_user_addr(vmm_context_t* ctx, uintptr_t user_vaddr, size_t size);
 int vmm_setup_null_trap(vmm_context_t* ctx);
 int vmm_map_code_region(vmm_context_t* ctx, uintptr_t code_phys, uint64_t size);
 
