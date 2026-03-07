@@ -7,18 +7,27 @@
 #include "box/file.h"
 #include "box/cpu.h"
 
+// Scratch buffer for IPC data (must be in mapped memory)
+static uint8_t g_ipc_buf[256] __attribute__((aligned(16)));
+
 int send(uint32_t target_pid, const void* data, uint16_t size) {
     if (target_pid == 0) return -ERR_INVALID_ARGUMENT;
 
-    route(target_pid);
+    Pocket p;
+    pocket_prepare(&p);
+    p.target_pid = target_pid;
+    p.route_tag[0] = '\0';
+    pocket_add_prefix(&p, DECK_SYSTEM, 0x40);
 
     if (data && size > 0) {
-        notify_data(data, size);
+        uint16_t copy = size > sizeof(g_ipc_buf) ? sizeof(g_ipc_buf) : size;
+        memcpy(g_ipc_buf, data, copy);
+        pocket_set_data(&p, g_ipc_buf, copy);
     }
 
-    notify();
+    pocket_submit(&p);
 
-    result_entry_t result;
+    Result result;
     if (!result_wait(&result, 500000)) {
         return -ERR_TIMEOUT;
     }
@@ -33,15 +42,24 @@ int send(uint32_t target_pid, const void* data, uint16_t size) {
 int broadcast(const char* tag, const void* data, uint16_t size) {
     if (!tag || tag[0] == '\0') return -ERR_INVALID_ARGUMENT;
 
-    route_tag(tag);
+    Pocket p;
+    pocket_prepare(&p);
+    p.target_pid = 0;
+    size_t tlen = strlen(tag);
+    if (tlen > 31) tlen = 31;
+    memcpy(p.route_tag, tag, tlen);
+    p.route_tag[tlen] = '\0';
+    pocket_add_prefix(&p, DECK_SYSTEM, 0x41);
 
     if (data && size > 0) {
-        notify_data(data, size);
+        uint16_t copy = size > sizeof(g_ipc_buf) ? sizeof(g_ipc_buf) : size;
+        memcpy(g_ipc_buf, data, copy);
+        pocket_set_data(&p, g_ipc_buf, copy);
     }
 
-    notify();
+    pocket_submit(&p);
 
-    result_entry_t result;
+    Result result;
     if (!result_wait(&result, 500000)) {
         return -ERR_TIMEOUT;
     }
@@ -55,9 +73,8 @@ int broadcast(const char* tag, const void* data, uint16_t size) {
 
 int listen(uint8_t source_type, uint8_t flags) {
     hw_listen(source_type, flags);
-    notify();
 
-    result_entry_t result;
+    Result result;
     if (!result_wait(&result, 500000)) {
         return -ERR_TIMEOUT;
     }
@@ -69,28 +86,23 @@ int listen(uint8_t source_type, uint8_t flags) {
     return OK;
 }
 
-bool receive(result_entry_t* out_entry) {
-    if (!out_entry) return false;
-    return result_pop_ipc(out_entry);
+bool receive(Result* out) {
+    if (!out) return false;
+    return result_pop_ipc(out);
 }
 
-// Wall-clock timeout via rdtsc (not iteration counting).
-// Iteration counting breaks with multiple yielding processes: voluntary yields
-// bypass the timer, so N processes cycling through yields burn iterations in
-// microseconds instead of the assumed 10ms each — making timeouts 100-1000x
-// shorter than intended.
+// Wall-clock timeout via rdtsc
 static inline uint64_t ipc_rdtsc(void) {
     uint32_t lo, hi;
     __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
     return ((uint64_t)hi << 32) | lo;
 }
 
-bool receive_wait(result_entry_t* out_entry, uint32_t timeout_ms) {
-    if (!out_entry) return false;
+bool receive_wait(Result* out, uint32_t timeout_ms) {
+    if (!out) return false;
 
-    if (result_pop_ipc(out_entry)) return true;
+    if (result_pop_ipc(out)) return true;
 
-    result_page_t* rp = result_page();
     uint64_t deadline = 0;
     if (timeout_ms > 0) {
         deadline = ipc_rdtsc() + cpu_ms_to_tsc(timeout_ms);
@@ -99,12 +111,10 @@ bool receive_wait(result_entry_t* out_entry, uint32_t timeout_ms) {
     while (1) {
         __sync_synchronize();
 
-        if (rp->notification_flag != 0 || result_available() || result_ipc_stash_count() > 0) {
-            if (result_pop_ipc(out_entry)) {
-                rp->notification_flag = 0;
+        if (result_available() || result_ipc_stash_count() > 0) {
+            if (result_pop_ipc(out)) {
                 return true;
             }
-            rp->notification_flag = 0;
         }
 
         if (timeout_ms > 0 && ipc_rdtsc() >= deadline) {
@@ -130,10 +140,13 @@ int send_args(uint32_t target_pid, int argc, char** argv) {
 }
 
 int receive_args(int* argc, char argv[][64], int max_args) {
-    result_entry_t entry;
+    Result entry;
     if (!receive_wait(&entry, 1000)) return -1;
-    const char* buf = (const char*)entry.payload;
-    uint16_t total = entry.size;
+
+    if (entry.data_addr == 0 || entry.data_length == 0) return -1;
+    const char* buf = (const char*)(uintptr_t)entry.data_addr;
+    uint32_t total = entry.data_length;
+
     *argc = (uint8_t)buf[0];
     int pos = 1;
     for (int i = 0; i < *argc && i < max_args; i++) {
@@ -144,10 +157,9 @@ int receive_args(int* argc, char argv[][64], int max_args) {
     }
 
     // Apply context tags if present after args
-    // Format: [ctx_count:1byte] [ctx_tag0\0] [ctx_tag1\0] ...
-    if (pos < total) {
+    if ((uint32_t)pos < total) {
         uint8_t ctx_count = (uint8_t)buf[pos++];
-        for (uint8_t i = 0; i < ctx_count && pos < total; i++) {
+        for (uint8_t i = 0; i < ctx_count && (uint32_t)pos < total; i++) {
             context_set(buf + pos);
             pos += strlen(buf + pos) + 1;
         }

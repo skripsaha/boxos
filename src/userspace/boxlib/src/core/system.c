@@ -13,12 +13,8 @@ int proc_info(uint16_t pid, proc_info_t* info) {
     }
 
     proc_query(pid);
-    event_id_t event_id = notify();
-    if (event_id == 0) {
-        return ERR_EVENT_FAILED;
-    }
 
-    result_entry_t result;
+    Result result;
     if (!result_wait(&result, 5000)) {
         return ERR_TIMEOUT;
     }
@@ -27,14 +23,15 @@ int proc_info(uint16_t pid, proc_info_t* info) {
         return result.error_code;
     }
 
-    if (result.size < 8) {
+    if (result.data_length < 8 || result.data_addr == 0) {
         return ERR_RESULT_INVALID;
     }
 
-    memcpy(&info->pid, result.payload, 2);
-    memcpy(&info->state, result.payload + 2, 1);
-    memcpy(&info->priority, result.payload + 3, 1);
-    memcpy(&info->memory_usage, result.payload + 4, 4);
+    uint8_t* data = (uint8_t*)(uintptr_t)result.data_addr;
+    memcpy(&info->pid, data, 2);
+    memcpy(&info->state, data + 2, 1);
+    memcpy(&info->priority, data + 3, 1);
+    memcpy(&info->memory_usage, data + 4, 4);
 
     return OK;
 }
@@ -42,14 +39,13 @@ int proc_info(uint16_t pid, proc_info_t* info) {
 void exit(uint32_t exit_code) {
     io_flush();
 
-    notify_page_t* np = notify_page();
-    if (np->spawner_pid != 0) {
+    CabinInfo* ci = cabin_info();
+    if (ci->spawner_pid != 0) {
         uint8_t msg[2] = {0xFE, (uint8_t)(exit_code & 0xFF)};
-        send(np->spawner_pid, msg, 2);
+        send(ci->spawner_pid, msg, 2);
     }
 
     proc_kill(0);
-    notify();
 
     while (1) {
         __asm__ volatile("pause");
@@ -67,12 +63,8 @@ int proc_exec(const char* filename) {
     }
 
     proc_spawn(filename);
-    event_id_t event_id = notify();
-    if (event_id == 0) {
-        return -1;
-    }
 
-    result_entry_t result;
+    Result result;
     if (!result_wait(&result, 5000)) {
         return -1;
     }
@@ -81,12 +73,12 @@ int proc_exec(const char* filename) {
         return -1;
     }
 
-    if (result.size < 4) {
+    if (result.data_length < 4 || result.data_addr == 0) {
         return -1;
     }
 
     uint32_t new_pid = 0;
-    memcpy(&new_pid, result.payload, 4);
+    memcpy(&new_pid, (void*)(uintptr_t)result.data_addr, 4);
     return (int)new_pid;
 }
 
@@ -100,12 +92,8 @@ int buffer_alloc(uint8_t size_class, uint16_t* out_buffer_id, uint32_t* out_addr
     }
 
     buf_alloc(size_class);
-    event_id_t event_id = notify();
-    if (event_id == 0) {
-        return ERR_EVENT_FAILED;
-    }
 
-    result_entry_t result;
+    Result result;
     if (!result_wait(&result, 5000)) {
         return ERR_TIMEOUT;
     }
@@ -114,14 +102,15 @@ int buffer_alloc(uint8_t size_class, uint16_t* out_buffer_id, uint32_t* out_addr
         return result.error_code;
     }
 
-    if (result.size < 6) {
+    if (result.data_length < 6 || result.data_addr == 0) {
         return ERR_RESULT_INVALID;
     }
 
+    uint8_t* data = (uint8_t*)(uintptr_t)result.data_addr;
     uint16_t buffer_id;
     uint32_t address;
-    memcpy(&buffer_id, result.payload, 2);
-    memcpy(&address, result.payload + 2, 4);
+    memcpy(&buffer_id, data, 2);
+    memcpy(&address, data + 2, 4);
 
     *out_buffer_id = buffer_id;
     *out_address = address;
@@ -131,12 +120,8 @@ int buffer_alloc(uint8_t size_class, uint16_t* out_buffer_id, uint32_t* out_addr
 
 int buffer_free(uint16_t buffer_id) {
     buf_release(buffer_id);
-    event_id_t event_id = notify();
-    if (event_id == 0) {
-        return ERR_EVENT_FAILED;
-    }
 
-    result_entry_t result;
+    Result result;
     if (!result_wait(&result, 5000)) {
         return ERR_TIMEOUT;
     }
@@ -165,12 +150,8 @@ int proc_tag_add(const char* tag) {
     }
 
     ptag_add(info.pid, tag);
-    event_id_t event_id = notify();
-    if (event_id == 0) {
-        return ERR_EVENT_FAILED;
-    }
 
-    result_entry_t res;
+    Result res;
     if (!result_wait(&res, 5000)) {
         return ERR_TIMEOUT;
     }
@@ -199,12 +180,8 @@ int proc_tag_remove(const char* tag) {
     }
 
     ptag_remove(info.pid, tag);
-    event_id_t event_id = notify();
-    if (event_id == 0) {
-        return ERR_EVENT_FAILED;
-    }
 
-    result_entry_t res;
+    Result res;
     if (!result_wait(&res, 5000)) {
         return ERR_TIMEOUT;
     }
@@ -233,12 +210,8 @@ int proc_tag_check(const char* tag, bool* has_tag) {
     }
 
     ptag_check(info.pid, tag);
-    event_id_t event_id = notify();
-    if (event_id == 0) {
-        return ERR_EVENT_FAILED;
-    }
 
-    result_entry_t res;
+    Result res;
     if (!result_wait(&res, 5000)) {
         return ERR_TIMEOUT;
     }
@@ -247,12 +220,12 @@ int proc_tag_check(const char* tag, bool* has_tag) {
         return res.error_code;
     }
 
-    if (res.size < 1) {
+    if (res.data_length < 1 || res.data_addr == 0) {
         return ERR_RESULT_INVALID;
     }
 
     uint8_t tag_present;
-    memcpy(&tag_present, res.payload, 1);
+    memcpy(&tag_present, (void*)(uintptr_t)res.data_addr, 1);
 
     *has_tag = (tag_present != 0);
 
@@ -261,18 +234,16 @@ int proc_tag_check(const char* tag, bool* has_tag) {
 
 int reboot(void) {
     hw_reboot();
-    notify();
 
-    result_entry_t result;
+    Result result;
     result_wait(&result, 5000);
     return -1;
 }
 
 int shutdown(void) {
     hw_shutdown();
-    notify();
 
-    result_entry_t result;
+    Result result;
     result_wait(&result, 5000);
     return -1;
 }
@@ -291,30 +262,29 @@ int sysinfo(system_info_t* info) {
 
 int defrag(uint32_t file_id, uint32_t target_block) {
     fs_defrag(file_id, target_block);
-    notify();
 
-    result_entry_t result;
+    Result result;
     if (!result_wait(&result, 5000)) return -1;
     if (result.error_code != OK) return -1;
-    if (result.size < 8) return -1;
+    if (result.data_length < 8 || result.data_addr == 0) return -1;
 
+    uint8_t* data = (uint8_t*)(uintptr_t)result.data_addr;
     uint32_t error_code, frag_score;
-    memcpy(&error_code, result.payload, 4);
-    memcpy(&frag_score, result.payload + 4, 4);
+    memcpy(&error_code, data, 4);
+    memcpy(&frag_score, data + 4, 4);
 
     return (error_code != 0) ? -1 : (int)frag_score;
 }
 
 int fragmentation(void) {
     fs_fraginfo();
-    notify();
 
-    result_entry_t result;
+    Result result;
     if (!result_wait(&result, 5000)) return -1;
     if (result.error_code != OK) return -1;
-    if (result.size < 4) return -1;
+    if (result.data_length < 4 || result.data_addr == 0) return -1;
 
     uint32_t score;
-    memcpy(&score, result.payload, 4);
+    memcpy(&score, (void*)(uintptr_t)result.data_addr, 4);
     return (int)score;
 }

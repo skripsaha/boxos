@@ -9,25 +9,23 @@ static inline uint64_t rdtsc(void) {
     return ((uint64_t)hi << 32) | lo;
 }
 
-static bool result_wait_umwait(result_entry_t* out_entry, uint32_t timeout_ms) {
-    result_page_t* rp = result_page();
-    volatile uint8_t* flag_addr = &rp->notification_flag;
+static bool result_wait_umwait(Result* out, uint32_t timeout_ms) {
+    ResultRing* rr = result_ring();
+    volatile uint32_t* tail_addr = &rr->tail;
 
     while (1) {
         __sync_synchronize();
 
-        if (*flag_addr != 0 || result_available()) {
-            if (result_pop_non_ipc(out_entry)) {
-                *flag_addr = 0;
+        if (result_available()) {
+            if (result_pop_non_ipc(out)) {
                 return true;
             }
-            *flag_addr = 0;
         }
 
-        umonitor((volatile void*)flag_addr);
+        umonitor((volatile void*)tail_addr);
         __sync_synchronize();
 
-        if (*flag_addr == 0 && !result_available()) {
+        if (!result_available()) {
             uint64_t deadline_tsc;
             if (timeout_ms == 0) {
                 deadline_tsc = 0xFFFFFFFFFFFFFFFFULL;
@@ -41,7 +39,7 @@ static bool result_wait_umwait(result_entry_t* out_entry, uint32_t timeout_ms) {
 
             if (wake_reason == 1 && timeout_ms > 0) {
                 __sync_synchronize();
-                if (*flag_addr == 0 && !result_available()) {
+                if (!result_available()) {
                     return false;
                 }
             }
@@ -49,12 +47,7 @@ static bool result_wait_umwait(result_entry_t* out_entry, uint32_t timeout_ms) {
     }
 }
 
-static bool result_wait_yield(result_entry_t* out_entry, uint32_t timeout_ms) {
-    result_page_t* rp = result_page();
-
-    // Use rdtsc for wall-clock timeout instead of iteration counting.
-    // With multiple yielding processes, voluntary yields cycle in microseconds
-    // (not the assumed 10ms), making iteration-based timeouts 100-1000x too short.
+static bool result_wait_yield(Result* out, uint32_t timeout_ms) {
     uint64_t deadline = 0;
     if (timeout_ms > 0) {
         deadline = rdtsc() + cpu_ms_to_tsc(timeout_ms);
@@ -63,12 +56,10 @@ static bool result_wait_yield(result_entry_t* out_entry, uint32_t timeout_ms) {
     while (1) {
         __sync_synchronize();
 
-        if (rp->notification_flag != 0 || result_available()) {
-            if (result_pop_non_ipc(out_entry)) {
-                rp->notification_flag = 0;
+        if (result_available()) {
+            if (result_pop_non_ipc(out)) {
                 return true;
             }
-            rp->notification_flag = 0;
         }
 
         if (timeout_ms > 0 && rdtsc() >= deadline) {
@@ -79,14 +70,14 @@ static bool result_wait_yield(result_entry_t* out_entry, uint32_t timeout_ms) {
     }
 }
 
-bool result_wait(result_entry_t* out_entry, uint32_t timeout_ms) {
-    if (result_pop_non_ipc(out_entry)) {
+bool result_wait(Result* out, uint32_t timeout_ms) {
+    if (result_pop_non_ipc(out)) {
         return true;
     }
 
     if (cpu_has_waitpkg()) {
-        return result_wait_umwait(out_entry, timeout_ms);
+        return result_wait_umwait(out, timeout_ms);
     } else {
-        return result_wait_yield(out_entry, timeout_ms);
+        return result_wait_yield(out, timeout_ms);
     }
 }
