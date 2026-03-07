@@ -46,36 +46,44 @@ static bool deliver_pocket_to_process(process_t* target, Pocket* pocket, uint32_
         return false;
     }
 
-    uintptr_t ring_phys = (uintptr_t)target->pocket_ring_phys;
-    if (ring_phys == 0) {
+    if (!target->result_ring_phys) {
         return false;
     }
 
-    PocketRing* ring = (PocketRing*)vmm_phys_to_virt(ring_phys);
-    if (!ring) {
+    ResultRing* rring = (ResultRing*)vmm_phys_to_virt(target->result_ring_phys);
+    if (!rring) {
         return false;
     }
 
-    if (pocket_ring_is_full(ring)) {
+    // Copy data from sender's heap to target's heap at the same virtual address
+    if (pocket->data_length > 0 && pocket->data_addr != 0) {
+        process_t* sender = process_find(pocket->pid);
+        if (sender) {
+            void* src = vmm_translate_user_addr(sender->cabin, pocket->data_addr, pocket->data_length);
+            void* dst = vmm_translate_user_addr(target->cabin, pocket->data_addr, pocket->data_length);
+            if (src && dst) {
+                memcpy(dst, src, pocket->data_length);
+            }
+        }
+    }
+
+    // Push Result directly to target's ResultRing
+    Result result;
+    result.error_code = OK;
+    result.data_length = pocket->data_length;
+    result.data_addr = pocket->data_addr;
+    result.sender_pid = sender_pid;
+    result._reserved = 0;
+
+    if (!result_ring_push(rring, &result)) {
         return false;
     }
 
-    Pocket routed;
-    memcpy(&routed, pocket, sizeof(Pocket));
-    routed.pid        = target->pid;
-    routed.target_pid = sender_pid;
-
-    routed.prefixes[0]         = 0x0000;
-    routed.current_prefix_idx  = 0;
-    routed.prefix_count        = 1;
-    routed.error_code          = 0;
-
-    bool pushed = pocket_ring_push(ring, &routed);
-    if (!pushed) {
-        return false;
+    // Wake target if it's waiting for a message
+    if (process_get_state(target) == PROC_WAITING) {
+        process_set_state(target, PROC_WORKING);
     }
 
-    ready_queue_push(&g_ready_queue, target);
     return true;
 }
 
@@ -113,6 +121,9 @@ int system_deck_route(Pocket* pocket) {
 
     debug_printf("[ROUTE] PID %u -> PID %u (direct)\n", sender_pid, pocket->target_pid);
 
+    // Clear target_pid so execution_deck sets sender_pid=0 in the originator's Result.
+    // The routed pocket already has target_pid=sender_pid for the receiver.
+    pocket->target_pid = 0;
     pocket->error_code = 0;
     return 0;
 }
@@ -171,6 +182,7 @@ int system_deck_route_tag(Pocket* pocket) {
     debug_printf("[ROUTE_TAG] PID %u -> %u/%u targets matching '%s'\n",
                  sender_pid, delivered, target_count, pocket->route_tag);
 
+    pocket->target_pid = 0;
     pocket->error_code = 0;
     return 0;
 }
