@@ -9,6 +9,7 @@
 #include "pocket_ring.h"
 #include "ready_queue.h"
 #include "result_ring.h"
+#include "cabin_info.h"
 
 #define MAX_ROUTE_TAG_TARGETS 16
 
@@ -55,14 +56,29 @@ static bool deliver_pocket_to_process(process_t* target, Pocket* pocket, uint32_
         return false;
     }
 
-    // Copy data from sender's heap to target's heap at the same virtual address
+    // Copy data from sender's address space to target's
+    uint32_t result_data_addr = pocket->data_addr;
+    uint16_t result_data_length = pocket->data_length;
+
     if (pocket->data_length > 0 && pocket->data_addr != 0) {
         process_t* sender = process_find(pocket->pid);
         if (sender) {
             void* src = vmm_translate_user_addr(sender->cabin, pocket->data_addr, pocket->data_length);
-            void* dst = vmm_translate_user_addr(target->cabin, pocket->data_addr, pocket->data_length);
-            if (src && dst) {
-                memcpy(dst, src, pocket->data_length);
+            if (src) {
+                void* dst = vmm_translate_user_addr(target->cabin, pocket->data_addr, pocket->data_length);
+                if (dst) {
+                    // Same address mapped in both — copy directly
+                    memcpy(dst, src, pocket->data_length);
+                } else {
+                    // Address not mapped in target — use CabinInfo IPC inbox
+                    uint16_t copy_len = pocket->data_length > CABIN_IPC_INBOX_SIZE
+                                        ? CABIN_IPC_INBOX_SIZE : pocket->data_length;
+                    uint8_t* inbox = (uint8_t*)vmm_phys_to_virt(target->cabin_info_phys)
+                                     + CABIN_IPC_INBOX_OFFSET;
+                    memcpy(inbox, src, copy_len);
+                    result_data_addr = (uint32_t)CABIN_IPC_INBOX_VADDR;
+                    result_data_length = copy_len;
+                }
             }
         }
     }
@@ -70,8 +86,8 @@ static bool deliver_pocket_to_process(process_t* target, Pocket* pocket, uint32_
     // Push Result directly to target's ResultRing
     Result result;
     result.error_code = OK;
-    result.data_length = pocket->data_length;
-    result.data_addr = pocket->data_addr;
+    result.data_length = result_data_length;
+    result.data_addr = result_data_addr;
     result.sender_pid = sender_pid;
     result._reserved = 0;
 

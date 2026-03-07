@@ -16,8 +16,15 @@ typedef struct __packed {
     uint64_t heap_max_size;   // max heap size
     uint64_t buf_heap_base;   // ASLR randomized buffer heap start
     uint64_t stack_top;       // ASLR randomized stack top
-    uint8_t  _reserved[4048]; // pad to exactly 4096 bytes (1 page)
+    uint8_t  ipc_inbox[256];  // IPC inbox: kernel writes incoming data here when sender addr unmapped
+    uint8_t  _reserved[3792]; // pad to exactly 4096 bytes (1 page)
 } CabinInfo;
+
+// IPC inbox location within CabinInfo page (0x1000)
+// offset = 48 bytes (after magic+pid+spawner_pid+flags+heap_base+heap_max_size+buf_heap_base+stack_top)
+#define CABIN_IPC_INBOX_OFFSET  48
+#define CABIN_IPC_INBOX_VADDR   (0x1000 + CABIN_IPC_INBOX_OFFSET)
+#define CABIN_IPC_INBOX_SIZE    256
 
 _Static_assert(sizeof(CabinInfo) == 4096, "CabinInfo must be exactly one page (4096 bytes)");
 
