@@ -88,7 +88,9 @@ void println(const char* str) {
             io_buf_append(str, len);
         }
         io_buf_putc('\n');
-        io_flush();
+        // Don't flush on every println — let the buffer batch multiple lines.
+        // The buffer auto-flushes when full (IO_BUF_SIZE), and callers flush
+        // explicitly before readline, prompt, or exit.
         return;
     }
     if (str) print_raw(str);

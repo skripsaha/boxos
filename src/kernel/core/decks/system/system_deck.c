@@ -340,7 +340,7 @@ bool system_security_gate(uint32_t pid, uint8_t deck_id, uint8_t opcode) {
             }
 
             if (opcode >= 0x60 && opcode <= 0x62) {
-                return snapshot_has_tag(tags_snapshot, "hw_keyboard") ||
+                return snapshot_has_tag(tags_snapshot, "hw_kb") ||
                        snapshot_has_tag(tags_snapshot, "system");
             }
 

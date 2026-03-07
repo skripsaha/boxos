@@ -26,6 +26,12 @@ typedef struct __packed {
 #define CABIN_IPC_INBOX_VADDR   (0x1000 + CABIN_IPC_INBOX_OFFSET)
 #define CABIN_IPC_INBOX_SIZE    256
 
+// Rotating IPC inbox slots: the 4048 bytes after the header (offset 48..4095)
+// are divided into 15 slots of 256 bytes each. Each IPC delivery uses the next
+// slot, preventing rapid-fire messages from overwriting each other.
+#define IPC_INBOX_SLOT_SIZE     256
+#define IPC_INBOX_SLOTS         15
+
 _Static_assert(sizeof(CabinInfo) == 4096, "CabinInfo must be exactly one page (4096 bytes)");
 
 static inline bool cabin_info_valid(const CabinInfo* ci)
