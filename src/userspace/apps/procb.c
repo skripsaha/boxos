@@ -5,8 +5,8 @@
 
 int main(void)
 {
-    notify_page_t *np = notify_page();
-    uint64_t spawner = np->spawner_pid;
+    CabinInfo *ci = cabin_info();
+    uint32_t spawner = ci->spawner_pid;
     // printf("Spawner PID: %d\n", spawner);
 
     for (int i = 0; i < 5; i++)

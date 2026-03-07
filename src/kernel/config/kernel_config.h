@@ -38,10 +38,9 @@
 #define CONFIG_PROC_MAX_BUFFER_SIZE BOXOS_PROC_MAX_BUFFER_SIZE
 
 // Ring buffer capacities are defined at their source of truth:
-// - Event ring: event_ring.h (EVENT_RING_MIN_CAPACITY / EVENT_RING_MAX_CAPACITY)
-// - Result ring: boxos_sizes.h (RESULT_RING_SIZE)
-
-#define CONFIG_EVENTRING_BLOCK_TIMEOUT_MS 500
+// - PocketRing: boxos_sizes.h (POCKET_RING_CAPACITY)
+// - ResultRing: boxos_sizes.h (RESULT_RING_CAPACITY)
+// - ReadyQueue: boxos_sizes.h (READY_QUEUE_CAPACITY)
 
 #define CONFIG_TAGFS_VERSION 2
 #define CONFIG_TAGFS_BLOCK_SIZE 4096

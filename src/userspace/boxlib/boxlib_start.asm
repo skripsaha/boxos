@@ -3,8 +3,8 @@
 ;
 ; On entry:
 ;   - Stack is set up by kernel
-;   - Ring buffers are mapped at USER_RINGS_VADDR
-;   - argc in RDI, argv in RSI (future)
+;   - PocketRing mapped at 0x2000, ResultRing at 0x3000
+;   - CabinInfo at 0x1000
 
 [BITS 64]
 
@@ -38,11 +38,27 @@ _start:
 global exit_asm
 exit_asm:
     ; rdi = exit_code
-    notify_prepare
-    mov eax, NOTIFY_PAGE
-    mov word [rax + NP_DATA], di
-    notify_prefix DECK_SYSTEM, 0x02
-    notify_send
-.halt:
+    ; Build a Pocket on stack: kill self (DECK_SYSTEM, opcode 0x02)
+    sub rsp, 96
+    mov rsi, rsp
+    ; Zero it
+    push rcx
+    mov ecx, 96
+.zero:
+    mov byte [rsi + rcx - 1], 0
+    dec ecx
+    jnz .zero
+    pop rcx
+    ; Set prefix_count = 1
+    mov byte [rsp + PKT_PREFIX_COUNT], 1
+    ; Set prefix[0] = (DECK_SYSTEM << 8) | 0x02 = 0xFF02
+    mov word [rsp + PKT_PREFIXES], 0xFF02
+    ; Push to PocketRing
+    mov rdi, rsp
+    pocket_push
+    add rsp, 96
+    ; Fire syscall
+    int 0x80
+.halt_exit:
     hlt
-    jmp .halt
+    jmp .halt_exit

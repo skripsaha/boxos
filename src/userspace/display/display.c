@@ -50,16 +50,18 @@ static void render(const uint8_t* data, uint16_t len) {
 int main(void) {
     io_set_mode(IO_MODE_VGA);
 
-    notify_page_t* np = notify_page();
-    if (np->spawner_pid != 0) {
+    CabinInfo* ci = cabin_info();
+    if (ci->spawner_pid != 0) {
         uint8_t ready = 0xFF;
-        send(np->spawner_pid, &ready, 1);
+        send(ci->spawner_pid, &ready, 1);
     }
 
     while (1) {
-        result_entry_t entry;
+        Result entry;
         if (receive_wait(&entry, 0)) {
-            render(entry.payload, entry.size);
+            if (entry.data_addr != 0 && entry.data_length > 0) {
+                render((const uint8_t*)(uintptr_t)entry.data_addr, (uint16_t)entry.data_length);
+            }
         }
     }
 

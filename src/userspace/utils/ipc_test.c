@@ -37,25 +37,28 @@ int main(void) {
     int exits = 0;
 
     while (received < 20) {
-        result_entry_t entry;
+        Result entry;
         bool got = receive_wait(&entry, 500);
         if (!got) {
             break;
         }
 
         // Skip exit notifications from child processes
-        if (entry.size >= 1 && entry.payload[0] == 0xFE) {
+        if (entry.data_length >= 1 && entry.data_addr != 0 &&
+            *(uint8_t*)(uintptr_t)entry.data_addr == 0xFE) {
             exits++;
             if (exits >= 2) break;
             continue;
         }
 
-        char buf[RESULT_PAYLOAD_SIZE + 1];
-        uint16_t len = entry.size;
-        if (len > RESULT_PAYLOAD_SIZE) {
-            len = RESULT_PAYLOAD_SIZE;
+        char buf[257];
+        uint32_t len = entry.data_length;
+        if (len > 256) {
+            len = 256;
         }
-        memcpy(buf, entry.payload, len);
+        if (entry.data_addr != 0 && len > 0) {
+            memcpy(buf, (void*)(uintptr_t)entry.data_addr, len);
+        }
         buf[len] = '\0';
 
         printf("[PID %u] -> \"%s\"\n", entry.sender_pid, buf);

@@ -22,7 +22,7 @@ int executor_run(parsed_command_t *cmd)
 
     // Drain stale IPC from previous commands
     {
-        result_entry_t stale;
+        Result stale;
         while (receive(&stale)) { /* discard */ }
     }
 
@@ -65,11 +65,12 @@ int executor_run(parsed_command_t *cmd)
         }
         send((uint32_t)pid, buf, (uint16_t)pos);
 
-        result_entry_t entry;
+        Result entry;
         int idle_ticks = 0;
         while (1) {
             if (receive_wait(&entry, 100)) {
-                if (entry.size >= 1 && entry.payload[0] == 0xFE) {
+                if (entry.data_length >= 1 && entry.data_addr != 0 &&
+                    *(uint8_t*)(uintptr_t)entry.data_addr == 0xFE) {
                     break;
                 }
                 idle_ticks = 0;

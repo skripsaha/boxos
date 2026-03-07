@@ -1,14 +1,25 @@
-; notify.inc — BoxOS notify page macros for NASM assembly.
-; Mirrors the C API from box/notify.h and box/chain.h.
+; notify.inc — BoxOS PocketRing macros for NASM assembly.
+; Mirrors the C API from box/notify.h (Pocket + PocketRing architecture).
 ;
-; Notify page layout (packed struct at NOTIFY_PAGE):
-;   0x00  magic         uint32_t
-;   0x04  prefix_count  uint8_t
-;   0x05  flags         uint8_t
-;   0x06  status        uint8_t
-;   0x07  reserved1     uint8_t
-;   0x08  prefixes[16]  uint16_t each  (32 bytes total)
-;   0x28  data[256]     uint8_t
+; PocketRing layout (packed struct at POCKET_RING, 4KB page):
+;   0x00  head          uint32_t  (kernel advances)
+;   0x04  tail          uint32_t  (userspace advances)
+;   0x08  slots[42]     Pocket[42] (42 * 96 = 4032 bytes)
+;
+; Pocket layout (96 bytes):
+;   0x00  pid           uint32_t  (kernel overwrites)
+;   0x04  target_pid    uint32_t
+;   0x08  error_code    uint32_t
+;   0x0C  prefix_count  uint8_t
+;   0x0D  current_prefix_idx uint8_t
+;   0x0E  flags         uint8_t
+;   0x0F  _reserved     uint8_t
+;   0x10  data_length   uint32_t
+;   0x14  data_addr     uint64_t
+;   0x1C  route_tag[32] char[32]
+;   0x3C  prefixes[16]  uint16_t[16]
+;   0x5C  _pad[4]       uint8_t[4]
+;   total = 96 bytes
 
 %ifndef NOTIFY_INC
 %define NOTIFY_INC
@@ -17,18 +28,27 @@
 ; Constants
 ; -------------------------------------------------------------------------
 
-NOTIFY_PAGE        equ 0x1000
+POCKET_RING        equ 0x2000
+POCKET_RING_HEAD   equ 0x00
+POCKET_RING_TAIL   equ 0x04
+POCKET_RING_SLOTS  equ 0x08
 
-NP_MAGIC           equ 0x00
-NP_PREFIX_COUNT    equ 0x04
-NP_FLAGS           equ 0x05
-NP_STATUS          equ 0x06
-NP_PREFIXES        equ 0x08
-NP_DATA            equ 0x28
+POCKET_SIZE        equ 96
+POCKET_RING_CAP    equ 42
 
-NOTIFY_MAGIC       equ 0x4E4F5449   ; "NOTI"
+; Pocket field offsets
+PKT_PID            equ 0x00
+PKT_TARGET_PID     equ 0x04
+PKT_ERROR_CODE     equ 0x08
+PKT_PREFIX_COUNT   equ 0x0C
+PKT_CURRENT_IDX    equ 0x0D
+PKT_FLAGS          equ 0x0E
+PKT_DATA_LENGTH    equ 0x10
+PKT_DATA_ADDR      equ 0x14
+PKT_ROUTE_TAG      equ 0x1C
+PKT_PREFIXES       equ 0x3C
 
-NOTIFY_FLAG_YIELD  equ 0x80
+POCKET_FLAG_YIELD  equ 0x80
 
 DECK_EXECUTION     equ 0x00
 DECK_OPERATIONS    equ 0x01
@@ -37,78 +57,81 @@ DECK_HARDWARE      equ 0x03
 DECK_SYSTEM        equ 0xFF
 
 ; -------------------------------------------------------------------------
-; notify_prepare — initialize notify page for a new syscall.
-; Sets magic, clears prefix_count, flags, status.
-; Clobbers: rax
+; pocket_push — push a Pocket to the PocketRing from stack-local buffer.
+; Input: rdi = pointer to 96-byte Pocket struct
+; Output: eax = 0 on success, -1 if ring full
+; Clobbers: rax, rcx, rdx, rsi
 ; -------------------------------------------------------------------------
-%macro notify_prepare 0
-    mov eax, NOTIFY_PAGE
-    mov dword [rax + NP_MAGIC],        NOTIFY_MAGIC
-    mov byte  [rax + NP_PREFIX_COUNT], 0
-    mov byte  [rax + NP_FLAGS],        0
-    mov byte  [rax + NP_STATUS],       0
-%endmacro
-
-; -------------------------------------------------------------------------
-; notify_prefix deck_id, opcode — append one prefix to the page.
-; Prefix encoding: (deck_id << 8) | opcode, stored as uint16_t.
-; Clobbers: rax, ecx
-; -------------------------------------------------------------------------
-%macro notify_prefix 2
-    mov eax, NOTIFY_PAGE
-    movzx ecx, byte [rax + NP_PREFIX_COUNT]
-    ; ecx zero-extends to rcx; rax zero-extends to 64-bit base — use rax, rcx
-    mov word [rax + rcx * 2 + NP_PREFIXES], ((%1) << 8) | (%2)
-    inc byte [rax + NP_PREFIX_COUNT]
-%endmacro
-
-; -------------------------------------------------------------------------
-; notify_send — issue int 0x80, then clear magic.
-; Returns event_id in rax.
-; Uses rbx internally (push/pop) to preserve rax across magic clear.
-; -------------------------------------------------------------------------
-%macro notify_send 0
-    int 0x80
+%macro pocket_push 0
+    mov eax, POCKET_RING
+    mov ecx, [rax + POCKET_RING_TAIL]
+    ; Check if full: (tail + 1) % CAP == head
+    lea edx, [ecx + 1]
     push rbx
-    mov ebx, NOTIFY_PAGE
-    mov dword [rbx + NP_MAGIC], 0
+    mov ebx, POCKET_RING_CAP
+    xor edx, edx
+    mov eax, ecx
+    inc eax
+    div ebx                     ; edx = (tail+1) % CAP
+    mov eax, POCKET_RING
+    cmp edx, [rax + POCKET_RING_HEAD]
     pop rbx
-%endmacro
-
-; -------------------------------------------------------------------------
-; NOTIFY deck0, op0 [, deck1, op1 ...] — all-in-one variadic syscall macro.
-; Prepares page, adds all prefix pairs, fires int 0x80, clears magic.
-; Arguments must come in (deck_id, opcode) pairs.
-; Returns event_id in rax.
-; Uses rbx for cleanup (push/pop).
-; -------------------------------------------------------------------------
-%macro NOTIFY 2-*
-    notify_prepare
-%rep (%0 / 2)
-    notify_prefix %1, %2
-    %rotate 2
-%endrep
-    int 0x80
+    je %%full
+    ; Copy 96 bytes from rdi to ring->slots[tail]
+    ; slot_addr = POCKET_RING + POCKET_RING_SLOTS + tail * POCKET_SIZE
+    imul ecx, ecx, POCKET_SIZE
+    lea rsi, [rax + POCKET_RING_SLOTS]
+    add rsi, rcx
+    ; rdi = source, rsi = dest — swap for rep movsb
+    push rdi
+    push rsi
+    pop rdi          ; dest = slot
+    pop rsi          ; source = pocket
+    mov ecx, POCKET_SIZE
+    rep movsb
+    ; Advance tail
+    mov eax, POCKET_RING
+    mov ecx, [rax + POCKET_RING_TAIL]
+    inc ecx
     push rbx
-    mov ebx, NOTIFY_PAGE
-    mov dword [rbx + NP_MAGIC], 0
+    mov ebx, POCKET_RING_CAP
+    xor edx, edx
+    mov eax, ecx
+    div ebx
+    mov eax, POCKET_RING
+    mov [rax + POCKET_RING_TAIL], edx
     pop rbx
+    xor eax, eax     ; return 0 = success
+    jmp %%done
+%%full:
+    mov eax, -1
+%%done:
 %endmacro
 
 ; -------------------------------------------------------------------------
 ; YIELD — send a yield hint to the scheduler.
-; Sets NOTIFY_FLAG_YIELD, fires int 0x80, clears magic.
-; Clobbers: rax
+; Pushes an empty Pocket with POCKET_FLAG_YIELD, fires int 0x80.
+; Uses stack-allocated 96-byte buffer.
+; Clobbers: rax, rcx, rdx, rdi, rsi
 ; -------------------------------------------------------------------------
 %macro YIELD 0
-    mov eax, NOTIFY_PAGE
-    mov dword [rax + NP_MAGIC],        NOTIFY_MAGIC
-    mov byte  [rax + NP_PREFIX_COUNT], 0
-    mov byte  [rax + NP_FLAGS],        NOTIFY_FLAG_YIELD
-    mov byte  [rax + NP_STATUS],       0
+    sub rsp, 96
+    mov rdi, rsp
+    ; Zero the pocket
+    push rcx
+    mov ecx, 96
+%%zero:
+    mov byte [rdi + rcx - 1], 0
+    dec ecx
+    jnz %%zero
+    pop rcx
+    ; Set yield flag
+    mov byte [rsp + PKT_FLAGS], POCKET_FLAG_YIELD
+    ; Push to ring
+    mov rdi, rsp
+    pocket_push
+    add rsp, 96
     int 0x80
-    mov eax, NOTIFY_PAGE
-    mov dword [rax + NP_MAGIC], 0
 %endmacro
 
 %endif ; NOTIFY_INC
