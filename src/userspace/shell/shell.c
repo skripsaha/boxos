@@ -7,7 +7,6 @@
 #include "box/result.h"
 #include "box/system.h"
 #include "box/notify.h"
-#include "box/chain.h"
 
 static shell_state_t g_shell_state;
 
@@ -88,28 +87,6 @@ void shell_print_prompt()
 
 void shell_main_loop(void)
 {
-    // DEBUG: Simulate keyboard readline retries, then test proc_exec
-    {
-        println("[DEBUG] Simulating 50 kb_readline WOULD_BLOCK retries...");
-        io_flush();
-        for (int i = 0; i < 50; i++) {
-            hw_kb_readline(128, true);
-            Result r;
-            result_wait(&r, 1000);
-            // Should get WOULD_BLOCK each time
-        }
-        println("[DEBUG] Now running proc_exec('help')...");
-        io_flush();
-        // Drain stale IPC like executor does
-        { Result stale; while (receive(&stale)) {} }
-        int pid = proc_exec("help");
-        if (pid > 0) {
-            println("[DEBUG] proc_exec OK!");
-        } else {
-            println("[DEBUG] proc_exec FAILED!");
-        }
-    }
-
     shell_print_prompt();
 
     while (g_shell_state.running)
