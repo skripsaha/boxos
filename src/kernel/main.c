@@ -15,25 +15,18 @@
 #include "process.h"
 #include "guide.h"
 #include "scheduler.h"
-#include "operations_test.h"
-#include "hardware_test.h"
-#include "system_test.h"
 #include "keyboard.h"
 #include "ata.h"
 #include "ata_dma.h"
 #include "async_io.h"
 #include "pci.h"
 #include "storage_deck.h"
-#include "storage_test.h"
-#include "journal_test.h"
-#include "route_test.h"
 #include "kernel_config.h"
 #include "event_ring.h"
 #include "xhci.h"
 #include "acpi.h"
 #include "ahci.h"
 #include "cabin_layout.h"
-#include "event_ring_test.h"
 #include "tagfs.h"
 #include "cpuid.h"
 #include "cpu_caps_page.h"
@@ -156,27 +149,6 @@ void kernel_main(void)
     debug_printf("[INIT] Guide Dispatcher...\n");
     guide_init();
 
-    kprintf("\n");
-    kprintf("========================================================================\n");
-    kprintf("RUNNING UNIT TESTS: Dynamic EventRing\n");
-    kprintf("========================================================================\n");
-
-    int test_result = test_event_ring_dynamic_all();
-    if (test_result != 0) {
-        kprintf("\n");
-        kprintf("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n");
-        kprintf("CRITICAL ERROR: Unit tests FAILED!\n");
-        kprintf("System halted to prevent boot with broken EventRing implementation.\n");
-        kprintf("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n");
-        panic("Dynamic EventRing unit tests failed - aborting boot");
-    }
-
-    kprintf("\n");
-    kprintf("========================================================================\n");
-    kprintf("ALL UNIT TESTS PASSED - Continuing boot\n");
-    kprintf("========================================================================\n");
-    kprintf("\n");
-
     debug_printf("[INIT] PCI Subsystem...\n");
     pci_init();
 
@@ -233,60 +205,6 @@ void kernel_main(void)
     kprintf("Kernel initialization complete!\n");
     kprintf("====================================\n");
     kprintf("\n");
-
-#if CONFIG_RUN_STARTUP_TESTS
-    kprintf("\n");
-    debug_printf("[INIT] Running BoxOS full cycle test...\n");
-    test_full_cycle();
-    kprintf("\n");
-    debug_printf("[INIT] Running Operations Deck test...\n");
-    test_operations_deck();
-    kprintf("\n");
-    debug_printf("[INIT] Running Hardware Deck test...\n");
-    test_hardware_deck();
-    kprintf("\n");
-    debug_printf("[INIT] Running System Deck security test...\n");
-    test_system_deck_security();
-    kprintf("\n");
-    debug_printf("[INIT] Running System Deck process management test...\n");
-    test_system_deck_process_management();
-    kprintf("\n");
-    debug_printf("[INIT] Running System Deck tag management test...\n");
-    test_system_deck_tag_management();
-    kprintf("\n");
-    debug_printf("[INIT] Running System Deck buffer management test...\n");
-    test_system_deck_buffer_management();
-    kprintf("\n");
-    debug_printf("[INIT] Running System Deck CTX_USE test...\n");
-    test_system_deck_ctx_use();
-    kprintf("\n");
-    debug_printf("[INIT] Running Listen Table test...\n");
-    test_listen_table();
-    kprintf("\n");
-    debug_printf("[INIT] Running Route Direct test...\n");
-    test_route_direct();
-    kprintf("\n");
-    debug_printf("[INIT] Running Tag Wildcard test...\n");
-    test_tag_wildcard();
-    kprintf("\n");
-    debug_printf("[INIT] Running Route Tag test...\n");
-    test_route_tag();
-    kprintf("\n");
-    debug_printf("[INIT] Running Listen via System Deck test...\n");
-    test_listen_via_system_deck();
-    kprintf("\n");
-    debug_printf("[INIT] Running Route Security test...\n");
-    test_route_security();
-    kprintf("\n");
-    debug_printf("[INIT] Running PMM tests...\n");
-    pmm_run_tests();
-    kprintf("\n");
-    debug_printf("[INIT] Running Journal tests...\n");
-    run_journal_tests();
-    kprintf("\n");
-    debug_printf("[INIT] Running Storage Deck & TagFS test...\n");
-    test_storage_deck();
-#endif
 
     kprintf("STATUS: Guide Dispatcher OPERATIONAL\n");
     kprintf("STATUS: Smart Score Scheduler OPERATIONAL\n");

@@ -39,6 +39,4 @@ uint64_t pmm_get_mem_end(void);
 // used by VMM to refuse mapping managed RAM as MMIO
 bool pmm_is_usable_ram(uintptr_t phys_addr, size_t size);
 
-void pmm_run_tests(void);
-
 #endif // PMM_H
