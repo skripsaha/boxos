@@ -147,15 +147,13 @@ int kb_readline_async(char* buffer, size_t size, bool echo) {
         return -ERR_INVALID_ARGS;
     }
 
-    memset(g_kb_buf, 0, 4);
-    g_kb_buf[0] = (uint8_t)(size >> 8);
-    g_kb_buf[1] = (uint8_t)(size & 0xFF);
-    g_kb_buf[2] = echo ? 1 : 0;
-    g_kb_buf[3] = 0;
+    memset(g_kb_buf, 0, 192);
+    g_kb_buf[0] = (uint8_t)size;
+    g_kb_buf[1] = echo ? 1 : 0;
 
     Pocket p;
     pocket_prepare(&p);
-    pocket_set_data(&p, g_kb_buf, 4);
+    pocket_set_data(&p, g_kb_buf, 192);
     pocket_add_prefix(&p, DECK_HARDWARE, KB_OP_READLINE);
     pocket_submit(&p);
 

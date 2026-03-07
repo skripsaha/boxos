@@ -1,4 +1,5 @@
 #include "hardware_deck.h"
+#include "error.h"
 #include "klib.h"
 #include "io.h"
 #include "pit.h"
@@ -692,7 +693,7 @@ int hardware_deck_handler(Pocket* pocket) {
                 data[2] = 0;
                 data[3] = 0;
                 data[pocket->data_length - 1] = HW_KB_WOULD_BLOCK;
-                pocket->error_code = HW_KB_WOULD_BLOCK;
+                pocket->error_code = ERR_WOULD_BLOCK;
                 return 0;
             }
         }

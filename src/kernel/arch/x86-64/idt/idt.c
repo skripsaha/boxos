@@ -395,29 +395,11 @@ void syscall_handler(interrupt_frame_t* frame) {
     PocketRing *pring = (PocketRing *)vmm_phys_to_virt(proc->pocket_ring_phys);
     if (!pring || pocket_ring_is_empty(pring)) {
         // Nothing to process — just yield
-        // Only log empty ring for non-display processes to reduce noise
-        if (proc->pid != 131073) {
-            debug_printf("[SYSCALL] PID %u: ring empty (phys=0x%lx h=%u t=%u)\n",
-                         proc->pid, proc->pocket_ring_phys,
-                         pring ? pring->head : 0, pring ? pring->tail : 0);
-        }
         frame->rax = 0;
         context_save_from_frame(proc, frame);
         process_ref_dec(proc);
         scheduler_yield_from_interrupt(frame);
         return;
-    }
-
-    // Log non-yield pockets only
-    {
-        Pocket *peek = &pring->slots[pring->head];
-        if (!(peek->flags & 0x80)) {
-            uint16_t pfx = peek->prefix_count > 0 ? peek->prefixes[0] : 0;
-            debug_printf("[SYSCALL] PID %u: deck=0x%02x op=0x%02x dlen=%u daddr=0x%lx (h=%u t=%u)\n",
-                         proc->pid, (pfx >> 8) & 0xFF, pfx & 0xFF,
-                         peek->data_length, peek->data_addr,
-                         pring->head, pring->tail);
-        }
     }
 
     // Push process to ReadyQueue for Guide to process its Pockets

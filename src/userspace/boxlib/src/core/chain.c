@@ -499,13 +499,13 @@ void hw_kb_getchar(void) {
 }
 
 void hw_kb_readline(uint8_t max_size, bool echo) {
-    memset(g_data_buf, 0, 4);
+    memset(g_data_buf, 0, 192);
     g_data_buf[0] = max_size;
     g_data_buf[1] = echo ? 1 : 0;
 
     Pocket p;
     pocket_prepare(&p);
-    pocket_set_data(&p, g_data_buf, 4);
+    pocket_set_data(&p, g_data_buf, 192);
     pocket_add_prefix(&p, DECK_HARDWARE, 0x61);
     pocket_submit(&p);
 }

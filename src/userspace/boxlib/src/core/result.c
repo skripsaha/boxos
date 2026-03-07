@@ -60,7 +60,29 @@ static bool ipc_stash_shift(Result* out) {
     return true;
 }
 
+#define NON_IPC_STASH_SIZE 16
+static Result non_ipc_stash_buf[NON_IPC_STASH_SIZE];
+static uint32_t non_ipc_stash_cnt = 0;
+
+static void non_ipc_stash_push(Result* entry) {
+    if (non_ipc_stash_cnt < NON_IPC_STASH_SIZE) {
+        non_ipc_stash_buf[non_ipc_stash_cnt++] = *entry;
+    }
+}
+
+static bool non_ipc_stash_shift(Result* out) {
+    if (non_ipc_stash_cnt == 0) return false;
+    *out = non_ipc_stash_buf[0];
+    for (uint32_t i = 1; i < non_ipc_stash_cnt; i++) {
+        non_ipc_stash_buf[i - 1] = non_ipc_stash_buf[i];
+    }
+    non_ipc_stash_cnt--;
+    return true;
+}
+
 bool result_pop_non_ipc(Result* out) {
+    if (non_ipc_stash_shift(out)) return true;
+
     Result entry;
     while (result_pop(&entry)) {
         if (entry.sender_pid != 0) {
@@ -82,6 +104,7 @@ bool result_pop_ipc(Result* out) {
             *out = entry;
             return true;
         }
+        non_ipc_stash_push(&entry);
     }
     return false;
 }
