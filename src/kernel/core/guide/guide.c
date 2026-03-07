@@ -87,6 +87,13 @@ static void guide_process_pocket(process_t *proc)
     pocket->error_code = OK;
     pocket->current_prefix_idx = 0;
 
+    // Yield pockets: just consume, no processing or Result
+    if (pocket->flags & POCKET_FLAG_YIELD)
+    {
+        pocket_ring_pop(pring);
+        return;
+    }
+
     bool need_execution_deck = true;
 
     while (pocket->current_prefix_idx < pocket->prefix_count)
@@ -192,6 +199,12 @@ void guide_run(void)
                 guide_process_pocket(proc);
                 processed_count++;
             }
+        }
+
+        // Wake the process — all its pockets have been processed
+        if (process_get_state(proc) == PROC_WAITING)
+        {
+            process_set_state(proc, PROC_WORKING);
         }
     }
 
