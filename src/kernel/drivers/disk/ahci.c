@@ -7,10 +7,9 @@
 #include "irqchip.h"
 #include "atomics.h"
 #include "async_io.h"
-#include "events.h"
+#include "result_ring.h"
 #include "error.h"
 #include "pic.h"
-#include "event_ring.h"
 #include "process.h"
 #include "cpu_calibrate.h"
 #include "boxos_memory.h"
@@ -20,7 +19,18 @@ static ahci_controller_t ahci_ctrl;
 // 2 seconds timeout in TSC cycles (calibrated at boot)
 #define AHCI_TIMEOUT_MS 2000
 
-extern EventRingBuffer* kernel_event_ring;
+// Helper: push a Result to a process's ResultRing
+static void ahci_push_result(uint32_t pid, uint32_t error_code) {
+    process_t* proc = process_find(pid);
+    if (!proc || !proc->result_ring_phys) return;
+    ResultRing* rring = (ResultRing*)vmm_phys_to_virt(proc->result_ring_phys);
+    if (!rring) return;
+    Result r;
+    memset(&r, 0, sizeof(Result));
+    r.error_code = error_code;
+    r.sender_pid = 0;  // kernel
+    result_ring_push(rring, &r);
+}
 
 static inline ahci_port_regs_t* ahci_get_port_regs(uint8_t port_num) {
     uintptr_t port_base = (uintptr_t)ahci_ctrl.hba_mem + 0x100 + (port_num * 0x80);
@@ -417,11 +427,7 @@ void ahci_check_timeouts(void) {
 
             async_io_mark_failed(state->event_id[slot]);
 
-            Event err;
-            event_init(&err, state->pid[slot], state->event_id[slot]);
-            err.error_code = ERR_TIMEOUT;
-            err.state = EVENT_STATE_ERROR;
-            event_ring_push(kernel_event_ring, &err);
+            ahci_push_result(state->pid[slot], ERR_TIMEOUT);
 
             ahci_free_slot(p, slot);
             __sync_fetch_and_and(&state->ci_snapshot, ~(1U << slot));
