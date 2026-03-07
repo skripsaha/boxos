@@ -18,7 +18,6 @@ void idle_process_init(void) {
     g_idle_process.pid = IDLE_PID;
     g_idle_process.state = PROC_WORKING;
     g_idle_process.ref_count = 0;
-    g_idle_process.result_there = false;
     g_idle_process.score = -1000;  // lowest priority
 
     strncpy(g_idle_process.tags, "idle", PROCESS_TAG_SIZE - 1);
