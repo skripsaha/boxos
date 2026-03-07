@@ -456,7 +456,7 @@ void ata_dma_irq_handler(void) {
             ResultRing* rring = (ResultRing*)vmm_phys_to_virt(proc->result_ring_phys);
             Result result;
             memset(&result, 0, sizeof(Result));
-            result.error_code = ERR_IO_ERROR;
+            result.error_code = ERR_IO;
             result.sender_pid = 0;
             result_ring_push(rring, &result);
         }

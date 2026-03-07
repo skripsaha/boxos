@@ -3,6 +3,7 @@
 
 #include "ktypes.h"
 #include "boxos_sizes.h"
+#include "klib.h"
 
 // ReadyQueue: global FIFO queue of processes that have pending Pockets.
 // Replaces the old EventRing — holds process_t* pointers instead of full Event copies.
