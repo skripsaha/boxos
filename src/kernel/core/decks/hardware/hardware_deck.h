@@ -1,7 +1,7 @@
 #ifndef HARDWARE_DECK_H
 #define HARDWARE_DECK_H
 
-#include "events.h"
+#include "pocket.h"
 #include "boxos_decks.h"
 
 #define HARDWARE_DECK_ID DECK_HARDWARE
@@ -97,6 +97,6 @@
 #define USB_ERR_NO_DEVICE        0x14
 #define USB_ERR_ACCESS_DENIED    0x15
 
-int hardware_deck_handler(Event* event);
+int hardware_deck_handler(Pocket* pocket);
 
 #endif // HARDWARE_DECK_H

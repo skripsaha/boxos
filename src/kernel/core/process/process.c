@@ -11,12 +11,42 @@
 #include "cpu_caps_page.h"
 #include "fpu.h"
 #include "aslr.h"
-#include "notify_page.h"
+#include "cabin_info.h"
 
 static process_t *process_list_head = NULL;
 static volatile uint32_t process_count = 0;
 static spinlock_t process_lock;
 static process_cleanup_queue_t g_cleanup_queue;
+
+// Hash table for O(1) process_find(pid)
+#define PROCESS_HASH_SIZE 256
+static process_t *process_hash_table[PROCESS_HASH_SIZE];
+
+static inline uint32_t process_hash(uint32_t pid)
+{
+    return pid % PROCESS_HASH_SIZE;
+}
+
+static void process_hash_insert(process_t *proc)
+{
+    uint32_t idx = process_hash(proc->pid);
+    proc->hash_next = process_hash_table[idx];
+    process_hash_table[idx] = proc;
+}
+
+static void process_hash_remove(process_t *proc)
+{
+    uint32_t idx = process_hash(proc->pid);
+    process_t **pp = &process_hash_table[idx];
+    while (*pp) {
+        if (*pp == proc) {
+            *pp = proc->hash_next;
+            proc->hash_next = NULL;
+            return;
+        }
+        pp = &(*pp)->hash_next;
+    }
+}
 
 static bool cleanup_queue_enqueue(process_t *proc);
 static process_t *cleanup_queue_dequeue(void);
@@ -36,11 +66,14 @@ void process_init(void)
     g_cleanup_queue.count = 0;
     spinlock_init(&g_cleanup_queue.lock);
 
+    memset(process_hash_table, 0, sizeof(process_hash_table));
+
     debug_printf("[PROCESS] Process management initialized\n");
     debug_printf("[PROCESS] Max processes: %u\n", PROCESS_MAX_COUNT);
-    debug_printf("[PROCESS] Cabin layout: 0x%lx-0x%lx (NULL trap), 0x%lx (Notify), 0x%lx (Result), 0x%lx+ (Code)\n",
-                 CABIN_NULL_TRAP_START, CABIN_NULL_TRAP_END,
-                 CABIN_NOTIFY_PAGE_ADDR, CABIN_RESULT_PAGE_ADDR, CABIN_CODE_START_ADDR);
+    debug_printf("[PROCESS] Cabin layout: 0x%lx (NULL trap), 0x%lx (CabinInfo), 0x%lx (PocketRing), 0x%lx (ResultRing), 0x%lx+ (Code)\n",
+                 CABIN_NULL_TRAP_START,
+                 CABIN_INFO_ADDR, CABIN_POCKET_RING_ADDR, CABIN_RESULT_RING_ADDR, CABIN_CODE_START_ADDR);
+    debug_printf("[PROCESS] Hash table size: %u buckets\n", PROCESS_HASH_SIZE);
     debug_printf("[PROCESS] Deferred cleanup queue initialized (max_size=%u)\n",
                  PROCESS_CLEANUP_QUEUE_SIZE);
 }
@@ -65,9 +98,10 @@ process_t *process_create(const char *tags)
     memset(proc, 0, sizeof(process_t));
     proc->magic = PROCESS_MAGIC;
 
-    uint64_t notify_phys = 0;
+    uint64_t info_phys = 0;
+    uint64_t pocket_phys = 0;
     uint64_t result_phys = 0;
-    vmm_context_t *cabin = vmm_create_cabin(&notify_phys, &result_phys);
+    vmm_context_t *cabin = vmm_create_cabin(&info_phys, &pocket_phys, &result_phys);
     if (!cabin)
     {
         debug_printf("[PROCESS] ERROR: Failed to create cabin\n");
@@ -86,15 +120,13 @@ process_t *process_create(const char *tags)
     }
 
     proc->cabin = cabin;
-    proc->notify_page_phys = notify_phys;
-    proc->result_page_phys = result_phys;
+    proc->cabin_info_phys = info_phys;
+    proc->pocket_ring_phys = pocket_phys;
+    proc->result_ring_phys = result_phys;
     proc->score = 0;
-    proc->result_there = false;
     proc->last_run_time = 0;
     proc->consecutive_runs = 0;
     proc->total_cpu_time = 0;
-    proc->result_overflow_count = 0;
-    proc->result_overflow_flag = 0;
     proc->state = PROC_CREATED;
     spinlock_init(&proc->state_lock);
     proc->ref_count = 0;
@@ -121,8 +153,8 @@ process_t *process_create(const char *tags)
     }
 
     proc->wait_reason = WAIT_NONE;
-    proc->next_waiting = NULL;
     proc->wait_start_time = 0;
+    proc->hash_next = NULL;
 
     // kernel stack layout: [guard page (unmapped)] [data pages]
     size_t kernel_stack_size = CONFIG_KERNEL_STACK_PAGES * VMM_PAGE_SIZE;
@@ -216,6 +248,7 @@ process_t *process_create(const char *tags)
 
     proc->next = process_list_head;
     process_list_head = proc;
+    process_hash_insert(proc);
     process_count++;
     spin_unlock(&process_lock);
 
@@ -361,6 +394,9 @@ void process_destroy(process_t *proc)
         process_set_state(proc, PROC_DONE);
         return;
     }
+
+    // remove from hash table before poisoning magic
+    process_hash_remove(proc);
 
     // poison magic before removing from list to catch use-after-remove
     proc->magic = 0xDEADDEAD;
@@ -509,12 +545,16 @@ int process_load_binary(process_t *proc, const void *binary_data, size_t size)
     proc->cabin->heap_end = heap_start + CONFIG_USER_HEAP_INITIAL_SIZE;
     proc->cabin->stack_top = stack_top;
 
-    // Write ASLR cabin info to notify page so userspace knows its layout
-    notify_page_t *np = (notify_page_t *)vmm_phys_to_virt(proc->notify_page_phys);
-    np->cabin_heap_base = heap_start;
-    np->cabin_heap_max_size = CABIN_HEAP_MAX_SIZE;
-    np->cabin_buf_heap_base = proc->aslr_buf_heap_base;
-    np->cabin_stack_top = stack_top;
+    // Write ASLR cabin info to CabinInfo page so userspace knows its layout
+    CabinInfo *ci = (CabinInfo *)vmm_phys_to_virt(proc->cabin_info_phys);
+    ci->magic = CABIN_INFO_MAGIC;
+    ci->pid = proc->pid;
+    ci->spawner_pid = proc->spawner_pid;
+    ci->flags = 0;
+    ci->heap_base = heap_start;
+    ci->heap_max_size = CABIN_HEAP_MAX_SIZE;
+    ci->buf_heap_base = proc->aslr_buf_heap_base;
+    ci->stack_top = stack_top;
 
     proc->code_size = size;
     proc->context.rip = VMM_CABIN_CODE_START;
@@ -598,7 +638,8 @@ process_t *process_find(uint32_t pid)
 
     spin_lock(&process_lock);
 
-    process_t *curr = process_list_head;
+    uint32_t idx = process_hash(pid);
+    process_t *curr = process_hash_table[idx];
     while (curr)
     {
         if (curr->pid == pid && curr->magic == PROCESS_MAGIC)
@@ -606,7 +647,7 @@ process_t *process_find(uint32_t pid)
             spin_unlock(&process_lock);
             return curr;
         }
-        curr = curr->next;
+        curr = curr->hash_next;
     }
 
     spin_unlock(&process_lock);
@@ -622,7 +663,8 @@ process_t *process_find_ref(uint32_t pid)
 
     spin_lock(&process_lock);
 
-    process_t *curr = process_list_head;
+    uint32_t idx = process_hash(pid);
+    process_t *curr = process_hash_table[idx];
     while (curr)
     {
         if (curr->pid == pid && curr->magic == PROCESS_MAGIC)
@@ -631,7 +673,7 @@ process_t *process_find_ref(uint32_t pid)
             spin_unlock(&process_lock);
             return curr;
         }
-        curr = curr->next;
+        curr = curr->hash_next;
     }
 
     spin_unlock(&process_lock);
@@ -700,8 +742,9 @@ void process_test(void)
     debug_printf("[TEST]   PID: %u\n", proc->pid);
     debug_printf("[TEST]   State: %s\n", proc->state == PROC_CREATED ? "CREATED" : "UNKNOWN");
     debug_printf("[TEST]   Cabin: %p\n", proc->cabin);
-    debug_printf("[TEST]   Notify page (phys): 0x%lx\n", proc->notify_page_phys);
-    debug_printf("[TEST]   Result page (phys): 0x%lx\n", proc->result_page_phys);
+    debug_printf("[TEST]   CabinInfo (phys): 0x%lx\n", proc->cabin_info_phys);
+    debug_printf("[TEST]   PocketRing (phys): 0x%lx\n", proc->pocket_ring_phys);
+    debug_printf("[TEST]   ResultRing (phys): 0x%lx\n", proc->result_ring_phys);
     debug_printf("[TEST]   Code start (virt): 0x%lx\n", proc->code_start);
     debug_printf("[TEST]   Tags: %s\n", proc->tags);
 

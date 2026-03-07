@@ -34,18 +34,10 @@
 
 void kernel_main(void)
 {
-    // BSS is already zeroed by kernel_entry.asm (rep stosb with __bss_start/__bss_end)
-
     vga_init();
     serial_init();
 
-    kprintf("====================================\n");
-    kprintf("BoxOS - Clean Foundation\n");
-    kprintf("====================================\n");
-    kprintf("Architecture: x86-64 (64-bit)\n");
-    kprintf("Model: Snowball command pipeline (BoxOS)\n");
-    kprintf("Syscall: kernel_notify (INT 0x80)\n");
-    kprintf("Memory Model: Cabin (0x%lx Notify, 0x%lx Result, 0x%lx Code)\n",
+    kprintf(" Cabin (0x%lx Notify, 0x%lx Result, 0x%lx Code)\n",
             CABIN_NOTIFY_PAGE_ADDR, CABIN_RESULT_PAGE_ADDR, CABIN_CODE_START_ADDR);
     kprintf("\n");
 
@@ -73,9 +65,9 @@ void kernel_main(void)
 
     debug_printf("[INIT] Boot Info...\n");
     boot_info_t *bi = boot_info_get();
-    if (!boot_info_valid(bi)) {
-        kprintf("[PANIC] Boot info invalid! magic=0x%x version=%u\n", bi->magic, bi->version);
-        while (1) { asm volatile("cli; hlt"); }
+    if (!boot_info_valid(bi))
+    {
+        panic("Boot info invalid! magic=0x%x version=%u\n", bi->magic, bi->version);
     }
     kprintf("[BOOT] Boot info v%u OK (drive=0x%x, kernel 0x%x-0x%x, pt=0x%x, stack=0x%x)\n",
             bi->version, bi->boot_drive, bi->kernel_start, bi->kernel_end,
@@ -85,9 +77,9 @@ void kernel_main(void)
     e820_entry_t *e820_map = (e820_entry_t *)(uintptr_t)bi->e820_map_addr;
     uint16_t e820_count = bi->e820_count;
 
-    if (e820_count == 0) {
-        kprintf("[PANIC] E820: No memory map entries\n");
-        while (1) { asm volatile("cli; hlt"); }
+    if (e820_count == 0)
+    {
+        panic("[PANIC] E820: No memory map entries\n");
     }
 
     debug_printf("[E820] Entries at 0x%x, count = %u\n", bi->e820_map_addr, e820_count);
@@ -111,9 +103,12 @@ void kernel_main(void)
     // ACPI must init early so irqchip_init can parse MADT for APIC detection
     debug_printf("[INIT] ACPI Subsystem (early)...\n");
     acpi_error_t acpi_err = acpi_init();
-    if (acpi_err == ACPI_OK) {
+    if (acpi_err == ACPI_OK)
+    {
         debug_printf("[INIT] ACPI initialized successfully\n");
-    } else {
+    }
+    else
+    {
         debug_printf("[INIT] ACPI initialization failed (error %d), shutdown may use fallback methods\n", acpi_err);
     }
 
@@ -154,20 +149,25 @@ void kernel_main(void)
 
 #ifdef CONFIG_AHCI_DRIVER
     debug_printf("[INIT] AHCI Driver...\n");
-    if (ahci_init() == 0) {
+    if (ahci_init() == 0)
+    {
         debug_printf("[INIT] AHCI initialized successfully\n");
 
         debug_printf("[INIT] AHCI IRQ setup...\n");
         ahci_init_irq();
         uint32_t ahci_active = ahci_get_active_port_mask();
-        for (uint8_t p = 0; p < 32 && ahci_active; p++) {
-            if (ahci_active & (1U << p)) {
+        for (uint8_t p = 0; p < 32 && ahci_active; p++)
+        {
+            if (ahci_active & (1U << p))
+            {
                 ahci_port_enable_irq(p);
                 ahci_active &= ~(1U << p);
             }
         }
         debug_printf("[INIT] AHCI NCQ enabled (%u port(s))\n", ahci_get_active_port_count());
-    } else {
+    }
+    else
+    {
         debug_printf("[INIT] AHCI not available, using legacy ATA\n");
     }
 #endif
@@ -176,10 +176,13 @@ void kernel_main(void)
     ata_init();
 
     debug_printf("[INIT] ATA DMA...\n");
-    if (ata_dma_init() == 0) {
+    if (ata_dma_init() == 0)
+    {
         debug_printf("[INIT] ATA DMA enabled successfully\n");
-        irqchip_enable_irq(14);  // Enable IRQ14 (ATA Primary DMA)
-    } else {
+        irqchip_enable_irq(14); // Enable IRQ14 (ATA Primary DMA)
+    }
+    else
+    {
         debug_printf("[INIT] ATA DMA not available, using PIO mode\n");
     }
 
@@ -194,26 +197,20 @@ void kernel_main(void)
 
     debug_printf("[INIT] USB xHCI Driver...\n");
     int xhci_result = xhci_init();
-    if (xhci_result == 0) {
+    if (xhci_result == 0)
+    {
         debug_printf("[INIT] xHCI controller initialized successfully\n");
-    } else {
+    }
+    else
+    {
         debug_printf("[INIT] xHCI controller not found or initialization failed\n");
     }
 
-    kprintf("\n");
-    kprintf("====================================\n");
     kprintf("Kernel initialization complete!\n");
-    kprintf("====================================\n");
-    kprintf("\n");
-
-    kprintf("STATUS: Guide Dispatcher OPERATIONAL\n");
-    kprintf("STATUS: Smart Score Scheduler OPERATIONAL\n");
     kprintf("\n");
 
 #if CONFIG_START_USERSPACE
-    kprintf("====================================\n");
-    kprintf("STARTING USERSPACE EXECUTION\n");
-    kprintf("====================================\n");
+    kprintf("Starting userspace...\n");
     kprintf("\n");
 
     // ============================================================
@@ -222,10 +219,11 @@ void kernel_main(void)
     // ============================================================
     debug_printf("[AUTOSTART] Scanning TagFS for autostart files...\n");
 
-    TagFSState* tfs_state = tagfs_get_state();
+    TagFSState *tfs_state = tagfs_get_state();
     uint32_t autostart_max = tfs_state ? tfs_state->max_files : TAGFS_MAX_FILES;
-    uint32_t* file_ids = kmalloc(sizeof(uint32_t) * autostart_max);
-    if (!file_ids) {
+    uint32_t *file_ids = kmalloc(sizeof(uint32_t) * autostart_max);
+    if (!file_ids)
+    {
         debug_printf("[AUTOSTART] Failed to allocate file_ids buffer\n");
         autostart_max = 0;
     }
@@ -233,7 +231,8 @@ void kernel_main(void)
     process_t *initial_proc = NULL;
     int autostart_count = 0;
 
-    for (int i = 0; i < file_count; i++) {
+    for (int i = 0; i < file_count; i++)
+    {
         TagFSMetadata *meta = tagfs_get_metadata(file_ids[i]);
         if (!meta || !(meta->flags & TAGFS_FILE_ACTIVE))
             continue;
@@ -241,7 +240,8 @@ void kernel_main(void)
         bool has_autostart = false;
         bool has_exec_tag = false;
 
-        for (uint8_t t = 0; t < meta->tag_count; t++) {
+        for (uint8_t t = 0; t < meta->tag_count; t++)
+        {
             if (meta->tags[t].type != TAGFS_TAG_SYSTEM)
                 continue;
             const char *key = meta->tags[t].key;
@@ -260,7 +260,8 @@ void kernel_main(void)
         // Collect all system tags for the new process
         char found_tags[PROCESS_TAG_SIZE];
         size_t pos = 0;
-        for (uint8_t t = 0; t < meta->tag_count; t++) {
+        for (uint8_t t = 0; t < meta->tag_count; t++)
+        {
             if (meta->tags[t].type != TAGFS_TAG_SYSTEM)
                 continue;
             const char *key = meta->tags[t].key;
@@ -276,7 +277,8 @@ void kernel_main(void)
 
         // Load binary from TagFS
         uint64_t file_size = meta->size;
-        if (file_size == 0 || file_size > CONFIG_PROC_MAX_BINARY_SIZE) {
+        if (file_size == 0 || file_size > CONFIG_PROC_MAX_BINARY_SIZE)
+        {
             debug_printf("[AUTOSTART] Skip '%s': invalid size %lu\n",
                          meta->filename, file_size);
             continue;
@@ -284,7 +286,8 @@ void kernel_main(void)
 
         size_t pages_needed = (file_size + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE;
         void *phys_buf = pmm_alloc_zero(pages_needed);
-        if (!phys_buf) {
+        if (!phys_buf)
+        {
             debug_printf("[AUTOSTART] Skip '%s': memory allocation failed\n",
                          meta->filename);
             continue;
@@ -293,7 +296,8 @@ void kernel_main(void)
         void *virt_buf = vmm_phys_to_virt((uintptr_t)phys_buf);
 
         TagFSFileHandle *fh = tagfs_open(file_ids[i], TAGFS_HANDLE_READ);
-        if (!fh) {
+        if (!fh)
+        {
             pmm_free(phys_buf, pages_needed);
             debug_printf("[AUTOSTART] Skip '%s': tagfs_open failed\n",
                          meta->filename);
@@ -303,7 +307,8 @@ void kernel_main(void)
         int read_result = tagfs_read(fh, virt_buf, file_size);
         tagfs_close(fh);
 
-        if (read_result < 0) {
+        if (read_result < 0)
+        {
             pmm_free(phys_buf, pages_needed);
             debug_printf("[AUTOSTART] Skip '%s': tagfs_read failed (%d)\n",
                          meta->filename, read_result);
@@ -312,7 +317,8 @@ void kernel_main(void)
 
         // Create process with all file tags
         process_t *proc = process_create(found_tags);
-        if (!proc) {
+        if (!proc)
+        {
             pmm_free(phys_buf, pages_needed);
             debug_printf("[AUTOSTART] Skip '%s': process_create failed\n",
                          meta->filename);
@@ -322,7 +328,8 @@ void kernel_main(void)
         int load_result = process_load_binary(proc, virt_buf, (size_t)file_size);
         pmm_free(phys_buf, pages_needed);
 
-        if (load_result != 0) {
+        if (load_result != 0)
+        {
             process_destroy(proc);
             debug_printf("[AUTOSTART] Skip '%s': load_binary failed (%d)\n",
                          meta->filename, load_result);
@@ -340,16 +347,19 @@ void kernel_main(void)
             initial_proc = proc;
     }
 
-    if (file_ids) {
+    if (file_ids)
+    {
         kfree(file_ids);
     }
 
     // Fallback: if no autostart files found, use embedded shell binary
-    if (!initial_proc) {
+    if (!initial_proc)
+    {
         kprintf("[AUTOSTART] No autostart files found, falling back to embedded shell\n");
 
         process_t *shell_proc = process_create("shell");
-        if (!shell_proc) {
+        if (!shell_proc)
+        {
             panic("Failed to create fallback shell process");
         }
 
@@ -364,12 +374,14 @@ void kernel_main(void)
         extern uint8_t _binary_shell_stripped_elf_end[];
         size_t shell_size = (size_t)(_binary_shell_stripped_elf_end - _binary_shell_stripped_elf_start);
 
-        if (shell_size == 0 || shell_size > CONFIG_PROC_MAX_BINARY_SIZE) {
+        if (shell_size == 0 || shell_size > CONFIG_PROC_MAX_BINARY_SIZE)
+        {
             panic("Invalid embedded shell binary size");
         }
 
         int load_result = process_load_binary(shell_proc, _binary_shell_stripped_elf_start, shell_size);
-        if (load_result != 0) {
+        if (load_result != 0)
+        {
             panic("Failed to load embedded shell binary");
         }
 
@@ -392,12 +404,7 @@ void kernel_main(void)
     kprintf("System idle. Guide will process events on demand.\n");
     kprintf("\n");
 
-    kprintf("====================================\n");
-    kprintf("KERNEL EVENT LOOP ACTIVE\n");
-    kprintf("====================================\n");
-    kprintf("Timer: 100Hz (IRQ0 triggers scheduler)\n");
-    kprintf("Guide: Processes events from EventRing\n");
-    kprintf("Status: Interrupts enabled, entering idle loop\n");
+    kprintf("Kernel loop\n");
     kprintf("\n");
 
     asm volatile("sti");
@@ -409,7 +416,7 @@ void kernel_main(void)
 
         if ((loop_count % 100) == 0)
         {
-            extern EventRingBuffer* kernel_event_ring;
+            extern EventRingBuffer *kernel_event_ring;
             size_t pending = event_ring_count(kernel_event_ring);
             if (pending > 0)
             {

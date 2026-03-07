@@ -2,7 +2,7 @@
 #define STORAGE_DECK_H
 
 #include "ktypes.h"
-#include "events.h"
+#include "pocket.h"
 #include "boxos_decks.h"
 
 #define STORAGE_DECK_ID DECK_STORAGE
@@ -132,10 +132,10 @@ STATIC_ASSERT(sizeof(obj_get_info_request_t) == 192, "obj_get_info_request_t mus
 STATIC_ASSERT(sizeof(obj_get_info_response_t) == 192, "obj_get_info_response_t must be 192 bytes");
 
 void storage_deck_init(void);
-int storage_deck_handler(Event *event);
+int storage_deck_handler(Pocket *event);
 
 // Synchronous I/O handlers (bypass async path)
-int handle_obj_read(Event *event);
-int handle_obj_write(Event *event);
+int handle_obj_read(Pocket *event);
+int handle_obj_write(Pocket *event);
 
 #endif // STORAGE_DECK_H

@@ -27,9 +27,7 @@ struct process_t;
 typedef enum {
     WAIT_NONE = 0,
     WAIT_RESULT,
-    WAIT_RING_FULL,
-    WAIT_IO,
-    WAIT_OVERFLOW
+    WAIT_IO
 } wait_reason_t;
 
 #define PROCESS_CLEANUP_QUEUE_SIZE 512
@@ -78,17 +76,14 @@ typedef struct process_t {
     uint32_t magic;
     uint32_t pid;
     vmm_context_t* cabin;
-    uint64_t notify_page_phys;
-    uint64_t result_page_phys;
+    uint64_t cabin_info_phys;
+    uint64_t pocket_ring_phys;
+    uint64_t result_ring_phys;
 
     int32_t score;
-    volatile bool result_there;       // set from IRQ context
     uint64_t last_run_time;
     uint32_t consecutive_runs;
     uint64_t total_cpu_time;
-
-    volatile uint32_t result_overflow_count;
-    volatile uint8_t result_overflow_flag; // uint8 for atomic consistency
 
     volatile process_state_t state;
     spinlock_t state_lock;
@@ -115,10 +110,10 @@ typedef struct process_t {
     uint64_t aslr_buf_heap_base; // actual buffer heap start
 
     volatile wait_reason_t wait_reason;
-    struct process_t* next_waiting;   // wait queue linkage (EventRing overflow)
     uint64_t wait_start_time;         // TSC timestamp when waiting (0 = not waiting)
 
-    struct process_t* next;
+    struct process_t* hash_next;  // hash table collision chain
+    struct process_t* next;       // global process list
 } process_t;
 
 _Static_assert(sizeof(process_t) < 4096, "Process structure must fit in one page");

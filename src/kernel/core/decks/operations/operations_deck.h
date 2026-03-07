@@ -1,7 +1,7 @@
 #ifndef OPERATIONS_DECK_H
 #define OPERATIONS_DECK_H
 
-#include "events.h"
+#include "pocket.h"
 #include "boxos_decks.h"
 
 #define OPERATIONS_DECK_ID DECK_OPERATIONS
@@ -17,6 +17,6 @@
 #define OP_BIT_SWAP     0x09  // Endianness swap
 #define OP_VAL_ADD      0x0A  // Increment/decrement value
 
-int operations_deck_handler(Event* event);
+int operations_deck_handler(Pocket* pocket);
 
 #endif // OPERATIONS_DECK_H

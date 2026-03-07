@@ -1,6 +1,8 @@
 #include "system_deck_context.h"
 #include "scheduler.h"
 #include "klib.h"
+#include "vmm.h"
+#include "process.h"
 
 static int ctx_use_parse_tags(const char* input, char tags[][CTX_TAG_LENGTH], uint32_t* tag_count) {
     if (!input || !tags || !tag_count) {
@@ -13,9 +15,9 @@ static int ctx_use_parse_tags(const char* input, char tags[][CTX_TAG_LENGTH], ui
         return CTX_USE_ERR_SUCCESS;
     }
 
-    char buffer[EVENT_DATA_SIZE];
-    strncpy(buffer, input, EVENT_DATA_SIZE - 1);
-    buffer[EVENT_DATA_SIZE - 1] = '\0';
+    char buffer[CTX_USE_PARSE_BUF_SIZE];
+    strncpy(buffer, input, CTX_USE_PARSE_BUF_SIZE - 1);
+    buffer[CTX_USE_PARSE_BUF_SIZE - 1] = '\0';
 
     char* saveptr = NULL;
     char* token = strtok_r(buffer, ",", &saveptr);
@@ -55,13 +57,25 @@ static int ctx_use_parse_tags(const char* input, char tags[][CTX_TAG_LENGTH], ui
     return CTX_USE_ERR_SUCCESS;
 }
 
-int system_deck_ctx_use(Event* event) {
-    if (!event) {
+int system_deck_ctx_use(Pocket* pocket) {
+    if (!pocket) {
         return -1;
     }
 
-    ctx_use_event_t* req = (ctx_use_event_t*)event->data;
-    ctx_use_response_t* resp = (ctx_use_response_t*)event->data;
+    process_t* proc = process_find(pocket->pid);
+    if (!proc) {
+        pocket->error_code = CTX_USE_ERR_INVALID_FORMAT;
+        return -1;
+    }
+
+    void* data = vmm_translate_user_addr(proc->cabin, pocket->data_addr, pocket->data_length);
+    if (!data) {
+        pocket->error_code = CTX_USE_ERR_INVALID_FORMAT;
+        return -1;
+    }
+
+    ctx_use_event_t* req = (ctx_use_event_t*)data;
+    ctx_use_response_t* resp = (ctx_use_response_t*)data;
 
     char parsed_tags[MAX_CTX_USE_TAGS][CTX_TAG_LENGTH];
     uint32_t tag_count = 0;
@@ -71,7 +85,7 @@ int system_deck_ctx_use(Event* event) {
     int parse_result = ctx_use_parse_tags(req->context_string, parsed_tags, &tag_count);
 
     if (parse_result != CTX_USE_ERR_SUCCESS) {
-        memset(event->data, 0, EVENT_DATA_SIZE);
+        memset(data, 0, sizeof(ctx_use_response_t));
         resp->error_code = parse_result;
 
         switch (parse_result) {
@@ -88,18 +102,18 @@ int system_deck_ctx_use(Event* event) {
         }
         resp->message[sizeof(resp->message) - 1] = '\0';
 
-        event->state = EVENT_STATE_ERROR;
+        pocket->error_code = parse_result;
         debug_printf("[CTX_USE] Parse error: %s\n", resp->message);
         return -1;
     }
 
     if (tag_count == 0) {
         scheduler_clear_use_context();
-        memset(event->data, 0, EVENT_DATA_SIZE);
+        memset(data, 0, sizeof(ctx_use_response_t));
         resp->error_code = CTX_USE_ERR_SUCCESS;
         strncpy(resp->message, "Context cleared", sizeof(resp->message) - 1);
         resp->message[sizeof(resp->message) - 1] = '\0';
-        event->state = EVENT_STATE_COMPLETED;
+        pocket->error_code = 0;
         debug_printf("[CTX_USE] Context cleared\n");
         return 0;
     }
@@ -111,7 +125,7 @@ int system_deck_ctx_use(Event* event) {
 
     scheduler_set_use_context(tag_ptrs, tag_count);
 
-    memset(event->data, 0, EVENT_DATA_SIZE);
+    memset(data, 0, sizeof(ctx_use_response_t));
     resp->error_code = CTX_USE_ERR_SUCCESS;
 
     char context_desc[128];
@@ -137,7 +151,7 @@ int system_deck_ctx_use(Event* event) {
     strncpy(resp->message, context_desc, sizeof(resp->message) - 1);
     resp->message[sizeof(resp->message) - 1] = '\0';
 
-    event->state = EVENT_STATE_COMPLETED;
+    pocket->error_code = 0;
     debug_printf("[CTX_USE] %s\n", resp->message);
 
     return 0;
