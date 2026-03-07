@@ -140,6 +140,7 @@ process_t *process_create(const char *tags)
     proc->aslr_heap_base = CABIN_HEAP_BASE + aslr.heap_offset;
     proc->aslr_buf_heap_base = CABIN_BUF_HEAP_START + aslr.buf_heap_offset;
     proc->buf_heap_next = proc->aslr_buf_heap_base;
+    proc->ipc_inbox_slot = 0;
     proc->next = NULL;
 
     if (tags)

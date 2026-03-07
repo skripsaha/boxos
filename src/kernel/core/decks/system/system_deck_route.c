@@ -56,29 +56,27 @@ static bool deliver_pocket_to_process(process_t* target, Pocket* pocket, uint32_
         return false;
     }
 
-    // Copy data from sender's address space to target's
-    uint32_t result_data_addr = pocket->data_addr;
-    uint16_t result_data_length = pocket->data_length;
+    // Copy data from sender's address space into target's rotating IPC inbox.
+    // Each delivery uses a different slot so rapid-fire messages don't overwrite
+    // each other before the target reads them.
+    uint32_t result_data_addr = 0;
+    uint16_t result_data_length = 0;
 
     if (pocket->data_length > 0 && pocket->data_addr != 0) {
         process_t* sender = process_find(pocket->pid);
         if (sender) {
             void* src = vmm_translate_user_addr(sender->cabin, pocket->data_addr, pocket->data_length);
             if (src) {
-                void* dst = vmm_translate_user_addr(target->cabin, pocket->data_addr, pocket->data_length);
-                if (dst) {
-                    // Same address mapped in both — copy directly
-                    memcpy(dst, src, pocket->data_length);
-                } else {
-                    // Address not mapped in target — use CabinInfo IPC inbox
-                    uint16_t copy_len = pocket->data_length > CABIN_IPC_INBOX_SIZE
-                                        ? CABIN_IPC_INBOX_SIZE : pocket->data_length;
-                    uint8_t* inbox = (uint8_t*)vmm_phys_to_virt(target->cabin_info_phys)
-                                     + CABIN_IPC_INBOX_OFFSET;
-                    memcpy(inbox, src, copy_len);
-                    result_data_addr = (uint32_t)CABIN_IPC_INBOX_VADDR;
-                    result_data_length = copy_len;
-                }
+                uint16_t slot = target->ipc_inbox_slot % IPC_INBOX_SLOTS;
+                target->ipc_inbox_slot++;
+
+                uint16_t copy_len = pocket->data_length > IPC_INBOX_SLOT_SIZE
+                                    ? IPC_INBOX_SLOT_SIZE : pocket->data_length;
+                uint8_t* inbox = (uint8_t*)vmm_phys_to_virt(target->cabin_info_phys)
+                                 + CABIN_IPC_INBOX_OFFSET + (slot * IPC_INBOX_SLOT_SIZE);
+                memcpy(inbox, src, copy_len);
+                result_data_addr = (uint32_t)(CABIN_IPC_INBOX_VADDR + (slot * IPC_INBOX_SLOT_SIZE));
+                result_data_length = copy_len;
             }
         }
     }

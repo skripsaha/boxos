@@ -121,7 +121,7 @@ static bool check_keyboard_access(uint32_t pid) {
         return false;
     }
 
-    return process_has_tag(proc, "hw_keyboard") ||
+    return process_has_tag(proc, "hw_kb") ||
            process_has_tag(proc, "system");
 }
 

@@ -103,6 +103,7 @@ typedef struct process_t {
     bool started;
     uint32_t spawner_pid;
     uint64_t buf_heap_next;  // next free virtual address for buffer mapping
+    uint16_t ipc_inbox_slot; // rotating IPC inbox slot index
 
     // ASLR: per-process randomized addresses (set at creation time)
     uint64_t aslr_heap_base;     // actual heap start (CABIN_HEAP_BASE + random)
