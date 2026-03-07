@@ -4,24 +4,26 @@
 #include "box/result.h"
 #include "box/string.h"
 
+// Scratch buffer for keyboard data (must be in mapped memory)
+static uint8_t g_kb_buf[256] __attribute__((aligned(16)));
+
 static void kb_sleep(uint32_t iterations) {
     for (uint32_t i = 0; i < iterations; i++) {
         __asm__ volatile("pause");
     }
 }
 
-static uint32_t kb_decode_u32(const uint8_t* payload, size_t offset) {
-    return ((uint32_t)payload[offset] << 24) |
-           ((uint32_t)payload[offset + 1] << 16) |
-           ((uint32_t)payload[offset + 2] << 8) |
-           ((uint32_t)payload[offset + 3]);
+static uint32_t kb_decode_u32(const uint8_t* data, size_t offset) {
+    return ((uint32_t)data[offset] << 24) |
+           ((uint32_t)data[offset + 1] << 16) |
+           ((uint32_t)data[offset + 2] << 8) |
+           ((uint32_t)data[offset + 3]);
 }
 
 int kb_getchar(void) {
     hw_kb_getchar();
-    notify();
 
-    result_entry_t result;
+    Result result;
     if (!result_wait(&result, 1000)) {
         return -ERR_TIMEOUT;
     }
@@ -30,14 +32,17 @@ int kb_getchar(void) {
         return -(int)result.error_code;
     }
 
-    return (int)(uint8_t)result.payload[0];
+    if (result.data_addr == 0 || result.data_length == 0) {
+        return -ERR_RESULT_INVALID;
+    }
+
+    return (int)(uint8_t)(*(uint8_t*)(uintptr_t)result.data_addr);
 }
 
 int kb_getchar_timeout(uint32_t timeout_ms) {
     hw_kb_getchar();
-    notify();
 
-    result_entry_t result;
+    Result result;
     if (!result_wait(&result, timeout_ms)) {
         return -ERR_TIMEOUT;
     }
@@ -46,7 +51,11 @@ int kb_getchar_timeout(uint32_t timeout_ms) {
         return -(int)result.error_code;
     }
 
-    return (int)(uint8_t)result.payload[0];
+    if (result.data_addr == 0 || result.data_length == 0) {
+        return -ERR_RESULT_INVALID;
+    }
+
+    return (int)(uint8_t)(*(uint8_t*)(uintptr_t)result.data_addr);
 }
 
 int kb_getchar_ex(kb_char_t* out_char) {
@@ -55,9 +64,8 @@ int kb_getchar_ex(kb_char_t* out_char) {
     }
 
     hw_kb_getchar();
-    notify();
 
-    result_entry_t result;
+    Result result;
     if (!result_wait(&result, 1000)) {
         return -ERR_TIMEOUT;
     }
@@ -66,9 +74,14 @@ int kb_getchar_ex(kb_char_t* out_char) {
         return -(int)result.error_code;
     }
 
-    out_char->ch = result.payload[0];
-    out_char->scancode = result.payload[1];
-    out_char->flags = result.payload[2];
+    if (result.data_addr == 0 || result.data_length < 3) {
+        return -ERR_RESULT_INVALID;
+    }
+
+    uint8_t* data = (uint8_t*)(uintptr_t)result.data_addr;
+    out_char->ch = data[0];
+    out_char->scancode = data[1];
+    out_char->flags = data[2];
     out_char->reserved = 0;
 
     return 0;
@@ -84,15 +97,20 @@ int kb_readline(char* buffer, size_t size, bool echo) {
 
     while (retry_count < max_retries) {
         hw_kb_readline((uint8_t)size, echo);
-        notify();
 
-        result_entry_t result;
+        Result result;
         if (!result_wait(&result, 60000)) {
             return -ERR_TIMEOUT;
         }
 
         if (result.error_code == OK) {
-            uint32_t length = kb_decode_u32(result.payload, 0);
+            if (result.data_addr == 0 || result.data_length < 4) {
+                buffer[0] = '\0';
+                return 0;
+            }
+
+            uint8_t* data = (uint8_t*)(uintptr_t)result.data_addr;
+            uint32_t length = kb_decode_u32(data, 0);
 
             if (length == 0) {
                 buffer[0] = '\0';
@@ -103,7 +121,7 @@ int kb_readline(char* buffer, size_t size, bool echo) {
                 length = size - 1;
             }
 
-            memcpy(buffer, result.payload + 4, length);
+            memcpy(buffer, data + 4, length);
             buffer[length] = '\0';
 
             return (int)length;
@@ -129,22 +147,19 @@ int kb_readline_async(char* buffer, size_t size, bool echo) {
         return -ERR_INVALID_ARGS;
     }
 
-    notify_page_t* np = notify_page();
-    if (np->magic != NOTIFY_MAGIC) {
-        notify_prepare();
-    }
+    memset(g_kb_buf, 0, 4);
+    g_kb_buf[0] = (uint8_t)(size >> 8);
+    g_kb_buf[1] = (uint8_t)(size & 0xFF);
+    g_kb_buf[2] = echo ? 1 : 0;
+    g_kb_buf[3] = 0;
 
-    uint8_t data[4];
-    data[0] = (uint8_t)(size >> 8);
-    data[1] = (uint8_t)(size & 0xFF);
-    data[2] = echo ? 1 : 0;
-    data[3] = 0;
+    Pocket p;
+    pocket_prepare(&p);
+    pocket_set_data(&p, g_kb_buf, 4);
+    pocket_add_prefix(&p, DECK_HARDWARE, KB_OP_READLINE);
+    pocket_submit(&p);
 
-    notify_write_data(data, 4);
-    notify_add_prefix(DECK_HARDWARE, KB_OP_READLINE);
-    event_id_t event_id = notify();
-
-    return (int)event_id;
+    return 0;
 }
 
 int kb_status(kb_status_t* status) {
@@ -153,9 +168,8 @@ int kb_status(kb_status_t* status) {
     }
 
     hw_kb_status();
-    notify();
 
-    result_entry_t result;
+    Result result;
     if (!result_wait(&result, 1000)) {
         return -ERR_TIMEOUT;
     }
@@ -164,8 +178,13 @@ int kb_status(kb_status_t* status) {
         return -(int)result.error_code;
     }
 
-    status->available = kb_decode_u32(result.payload, 0);
-    status->buffer_size = kb_decode_u32(result.payload, 4);
+    if (result.data_addr == 0 || result.data_length < 8) {
+        return -ERR_RESULT_INVALID;
+    }
+
+    uint8_t* data = (uint8_t*)(uintptr_t)result.data_addr;
+    status->available = kb_decode_u32(data, 0);
+    status->buffer_size = kb_decode_u32(data, 4);
 
     return 0;
 }

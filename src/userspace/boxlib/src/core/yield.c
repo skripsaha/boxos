@@ -2,14 +2,13 @@
 #include "box/system.h"
 
 void yield(void) {
-    notify_page_t* np = notify_page();
+    // Submit an empty pocket with yield flag set
+    Pocket p;
+    pocket_prepare(&p);
+    p.flags = 0x80;  // YIELD flag
 
-    np->magic = NOTIFY_MAGIC;
-    np->prefix_count = 0;
-    np->flags = NOTIFY_FLAG_YIELD;
-    np->status = 0;
+    PocketRing* ring = pocket_ring();
+    pocket_ring_push(ring, &p);
 
-    __asm__ volatile("int $0x80");
-
-    np->magic = 0;
+    __asm__ volatile("int $0x80" ::: "memory");
 }

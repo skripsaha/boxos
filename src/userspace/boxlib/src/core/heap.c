@@ -45,11 +45,11 @@ static uint32_t stat_free_calls   = 0;
 // ---- helpers (called with lock held) -------------------------------------
 
 static void heap_init_locked(void) {
-    // ASLR: read actual heap base from notify page (set by kernel)
-    notify_page_t* np = notify_page();
-    if (np->cabin_heap_base != 0 && np->cabin_heap_max_size != 0) {
-        heap_base = np->cabin_heap_base;
-        heap_max  = heap_base + np->cabin_heap_max_size;
+    // ASLR: read actual heap base from CabinInfo (set by kernel)
+    CabinInfo* ci = cabin_info();
+    if (ci->heap_base != 0 && ci->heap_max_size != 0) {
+        heap_base = ci->heap_base;
+        heap_max  = heap_base + ci->heap_max_size;
     } else {
         // fallback for legacy/pre-ASLR kernels
         heap_base = CABIN_HEAP_BASE;

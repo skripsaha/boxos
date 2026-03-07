@@ -2,81 +2,99 @@
 #include "box/notify.h"
 #include "box/string.h"
 
-static void ensure_ready(void) {
-    notify_page_t* np = notify_page();
-    if (np->magic != NOTIFY_MAGIC) {
-        notify_prepare();
-    }
-}
+// Scratch buffer in BSS for data that needs to be in the cabin heap
+// (PocketRing data_addr must point to mapped memory)
+static uint8_t g_data_buf[256] __attribute__((aligned(16)));
 
 void route(uint32_t target_pid) {
-    ensure_ready();
-    notify_page_t* np = notify_page();
-    np->route_target = target_pid;
-    np->route_tag[0] = '\0';
-    notify_add_prefix(DECK_SYSTEM, 0x40);
+    Pocket p;
+    pocket_prepare(&p);
+    p.target_pid = target_pid;
+    p.route_tag[0] = '\0';
+    pocket_add_prefix(&p, DECK_SYSTEM, 0x40);
+    pocket_submit(&p);
 }
 
 void route_tag(const char* tag) {
     if (!tag) return;
-    ensure_ready();
-    notify_page_t* np = notify_page();
-    np->route_target = 0;
+    Pocket p;
+    pocket_prepare(&p);
+    p.target_pid = 0;
     size_t len = strlen(tag);
     if (len > 31) len = 31;
-    memcpy(np->route_tag, tag, len);
-    np->route_tag[len] = '\0';
-    notify_add_prefix(DECK_SYSTEM, 0x41);
+    memcpy(p.route_tag, tag, len);
+    p.route_tag[len] = '\0';
+    pocket_add_prefix(&p, DECK_SYSTEM, 0x41);
+    pocket_submit(&p);
 }
 
 void hw_listen(uint8_t source_type, uint8_t flags) {
-    ensure_ready();
-    notify_page_t* np = notify_page();
-    np->data[0] = source_type;
-    np->data[1] = flags;
-    np->data[2] = 0;
-    np->data[3] = 0;
-    notify_add_prefix(DECK_SYSTEM, 0x42);
+    memset(g_data_buf, 0, 4);
+    g_data_buf[0] = source_type;
+    g_data_buf[1] = flags;
+
+    Pocket p;
+    pocket_prepare(&p);
+    pocket_set_data(&p, g_data_buf, 4);
+    pocket_add_prefix(&p, DECK_SYSTEM, 0x42);
+    pocket_submit(&p);
 }
 
 void proc_kill(uint16_t pid) {
-    ensure_ready();
-    notify_write_data(&pid, sizeof(pid));
-    notify_add_prefix(DECK_SYSTEM, 0x02);
+    memcpy(g_data_buf, &pid, sizeof(pid));
+
+    Pocket p;
+    pocket_prepare(&p);
+    pocket_set_data(&p, g_data_buf, sizeof(pid));
+    pocket_add_prefix(&p, DECK_SYSTEM, 0x02);
+    pocket_submit(&p);
 }
 
 void proc_query(uint16_t pid) {
-    ensure_ready();
-    notify_write_data(&pid, sizeof(pid));
-    notify_add_prefix(DECK_SYSTEM, 0x03);
+    memcpy(g_data_buf, &pid, sizeof(pid));
+
+    Pocket p;
+    pocket_prepare(&p);
+    pocket_set_data(&p, g_data_buf, sizeof(pid));
+    pocket_add_prefix(&p, DECK_SYSTEM, 0x03);
+    pocket_submit(&p);
 }
 
 void proc_spawn(const char* filename) {
     if (!filename) return;
-    ensure_ready();
-    uint8_t data[192];
-    memset(data, 0, 192);
+    memset(g_data_buf, 0, 192);
     size_t len = strlen(filename);
     if (len > 31) len = 31;
-    memcpy(data, filename, len);
-    notify_write_data(data, 192);
-    notify_add_prefix(DECK_SYSTEM, 0x06);
+    memcpy(g_data_buf, filename, len);
+
+    Pocket p;
+    pocket_prepare(&p);
+    pocket_set_data(&p, g_data_buf, 192);
+    pocket_add_prefix(&p, DECK_SYSTEM, 0x06);
+    pocket_submit(&p);
 }
 
 void buf_alloc(uint8_t size_class) {
-    ensure_ready();
-    notify_write_data(&size_class, sizeof(size_class));
-    notify_add_prefix(DECK_SYSTEM, 0x10);
+    g_data_buf[0] = size_class;
+
+    Pocket p;
+    pocket_prepare(&p);
+    pocket_set_data(&p, g_data_buf, sizeof(size_class));
+    pocket_add_prefix(&p, DECK_SYSTEM, 0x10);
+    pocket_submit(&p);
 }
 
 void buf_release(uint16_t buffer_id) {
-    ensure_ready();
-    notify_write_data(&buffer_id, sizeof(buffer_id));
-    notify_add_prefix(DECK_SYSTEM, 0x11);
+    memcpy(g_data_buf, &buffer_id, sizeof(buffer_id));
+
+    Pocket p;
+    pocket_prepare(&p);
+    pocket_set_data(&p, g_data_buf, sizeof(buffer_id));
+    pocket_add_prefix(&p, DECK_SYSTEM, 0x11);
+    pocket_submit(&p);
 }
 
 static void ptag_common(uint16_t pid, const char* tag, uint8_t opcode) {
-    ensure_ready();
     struct PACKED {
         uint16_t pid;
         char tag[32];
@@ -86,8 +104,14 @@ static void ptag_common(uint16_t pid, const char* tag, uint8_t opcode) {
     size_t len = strlen(tag);
     if (len > 31) len = 31;
     memcpy(request.tag, tag, len);
-    notify_write_data(&request, sizeof(request));
-    notify_add_prefix(DECK_SYSTEM, opcode);
+
+    memcpy(g_data_buf, &request, sizeof(request));
+
+    Pocket p;
+    pocket_prepare(&p);
+    pocket_set_data(&p, g_data_buf, sizeof(request));
+    pocket_add_prefix(&p, DECK_SYSTEM, opcode);
+    pocket_submit(&p);
 }
 
 void ptag_add(uint16_t pid, const char* tag) {
@@ -103,26 +127,29 @@ void ptag_check(uint16_t pid, const char* tag) {
 }
 
 void fs_defrag(uint32_t file_id, uint32_t target_block) {
-    ensure_ready();
-    uint8_t data[192];
-    memset(data, 0, 192);
-    memcpy(data, &file_id, 4);
-    memcpy(data + 4, &target_block, 4);
-    notify_write_data(data, 192);
-    notify_add_prefix(DECK_SYSTEM, 0x18);
+    memset(g_data_buf, 0, 192);
+    memcpy(g_data_buf, &file_id, 4);
+    memcpy(g_data_buf + 4, &target_block, 4);
+
+    Pocket p;
+    pocket_prepare(&p);
+    pocket_set_data(&p, g_data_buf, 192);
+    pocket_add_prefix(&p, DECK_SYSTEM, 0x18);
+    pocket_submit(&p);
 }
 
 void fs_fraginfo(void) {
-    ensure_ready();
-    uint8_t data[192];
-    memset(data, 0, 192);
-    notify_write_data(data, 192);
-    notify_add_prefix(DECK_SYSTEM, 0x19);
+    memset(g_data_buf, 0, 192);
+
+    Pocket p;
+    pocket_prepare(&p);
+    pocket_set_data(&p, g_data_buf, 192);
+    pocket_add_prefix(&p, DECK_SYSTEM, 0x19);
+    pocket_submit(&p);
 }
 
 void obj_create(const char* filename, const char* tags) {
     if (!filename) return;
-    ensure_ready();
     struct PACKED {
         char filename[32];
         char tags[160];
@@ -137,12 +164,16 @@ void obj_create(const char* filename, const char* tags) {
             memcpy(request.tags, tags, tag_len);
         }
     }
-    notify_write_data(&request, sizeof(request));
-    notify_add_prefix(DECK_STORAGE, 0x07);
+    memcpy(g_data_buf, &request, sizeof(request));
+
+    Pocket p;
+    pocket_prepare(&p);
+    pocket_set_data(&p, g_data_buf, sizeof(request));
+    pocket_add_prefix(&p, DECK_STORAGE, 0x07);
+    pocket_submit(&p);
 }
 
 void obj_read(uint32_t file_id, uint64_t offset, uint32_t length) {
-    ensure_ready();
     struct PACKED {
         uint32_t file_id;
         uint64_t offset;
@@ -153,12 +184,16 @@ void obj_read(uint32_t file_id, uint64_t offset, uint32_t length) {
     request.file_id = file_id;
     request.offset = offset;
     request.length = length;
-    notify_write_data(&request, sizeof(request));
-    notify_add_prefix(DECK_STORAGE, 0x05);
+    memcpy(g_data_buf, &request, sizeof(request));
+
+    Pocket p;
+    pocket_prepare(&p);
+    pocket_set_data(&p, g_data_buf, sizeof(request));
+    pocket_add_prefix(&p, DECK_STORAGE, 0x05);
+    pocket_submit(&p);
 }
 
 void obj_write(uint32_t file_id, uint64_t offset, const void* buf, uint32_t length) {
-    ensure_ready();
     struct PACKED {
         uint32_t file_id;
         uint64_t offset;
@@ -176,25 +211,33 @@ void obj_write(uint32_t file_id, uint64_t offset, const void* buf, uint32_t leng
         uint32_t copy_len = length > 168 ? 168 : length;
         memcpy(request.data, buf, copy_len);
     }
-    notify_write_data(&request, sizeof(request));
-    notify_add_prefix(DECK_STORAGE, 0x06);
+    memcpy(g_data_buf, &request, sizeof(request));
+
+    Pocket p;
+    pocket_prepare(&p);
+    pocket_set_data(&p, g_data_buf, sizeof(request));
+    pocket_add_prefix(&p, DECK_STORAGE, 0x06);
+    pocket_submit(&p);
 }
 
 void obj_delete(uint32_t file_id) {
-    ensure_ready();
     struct PACKED {
         uint32_t file_id;
         uint8_t reserved[188];
     } request;
     memset(&request, 0, sizeof(request));
     request.file_id = file_id;
-    notify_write_data(&request, sizeof(request));
-    notify_add_prefix(DECK_STORAGE, 0x08);
+    memcpy(g_data_buf, &request, sizeof(request));
+
+    Pocket p;
+    pocket_prepare(&p);
+    pocket_set_data(&p, g_data_buf, sizeof(request));
+    pocket_add_prefix(&p, DECK_STORAGE, 0x08);
+    pocket_submit(&p);
 }
 
 void obj_rename(uint32_t file_id, const char* new_name) {
     if (!new_name) return;
-    ensure_ready();
     struct PACKED {
         uint32_t file_id;
         char new_filename[32];
@@ -205,39 +248,49 @@ void obj_rename(uint32_t file_id, const char* new_name) {
     size_t len = strlen(new_name);
     if (len > 31) len = 31;
     memcpy(request.new_filename, new_name, len);
-    notify_write_data(&request, sizeof(request));
-    notify_add_prefix(DECK_STORAGE, 0x09);
+    memcpy(g_data_buf, &request, sizeof(request));
+
+    Pocket p;
+    pocket_prepare(&p);
+    pocket_set_data(&p, g_data_buf, sizeof(request));
+    pocket_add_prefix(&p, DECK_STORAGE, 0x09);
+    pocket_submit(&p);
 }
 
 void obj_info(uint32_t file_id) {
-    ensure_ready();
     struct PACKED {
         uint32_t file_id;
         uint8_t reserved[188];
     } request;
     memset(&request, 0, sizeof(request));
     request.file_id = file_id;
-    notify_write_data(&request, sizeof(request));
-    notify_add_prefix(DECK_STORAGE, 0x0A);
+    memcpy(g_data_buf, &request, sizeof(request));
+
+    Pocket p;
+    pocket_prepare(&p);
+    pocket_set_data(&p, g_data_buf, sizeof(request));
+    pocket_add_prefix(&p, DECK_STORAGE, 0x0A);
+    pocket_submit(&p);
 }
 
 void obj_query(const char* tags) {
-    ensure_ready();
-    char tag_buffer[192];
-    memset(tag_buffer, 0, 192);
+    memset(g_data_buf, 0, 192);
     if (tags && tags[0] != '\0') {
         size_t len = strlen(tags);
         if (len < 192) {
-            memcpy(tag_buffer, tags, len);
+            memcpy(g_data_buf, tags, len);
         }
     }
-    notify_write_data(tag_buffer, 192);
-    notify_add_prefix(DECK_STORAGE, 0x01);
+
+    Pocket p;
+    pocket_prepare(&p);
+    pocket_set_data(&p, g_data_buf, 192);
+    pocket_add_prefix(&p, DECK_STORAGE, 0x01);
+    pocket_submit(&p);
 }
 
 void obj_tag_set(uint32_t file_id, const char* tag) {
     if (!tag) return;
-    ensure_ready();
     struct PACKED {
         uint32_t file_id;
         char tag[32];
@@ -248,13 +301,17 @@ void obj_tag_set(uint32_t file_id, const char* tag) {
     size_t len = strlen(tag);
     if (len > 31) len = 31;
     memcpy(request.tag, tag, len);
-    notify_write_data(&request, sizeof(request));
-    notify_add_prefix(DECK_STORAGE, 0x02);
+    memcpy(g_data_buf, &request, sizeof(request));
+
+    Pocket p;
+    pocket_prepare(&p);
+    pocket_set_data(&p, g_data_buf, sizeof(request));
+    pocket_add_prefix(&p, DECK_STORAGE, 0x02);
+    pocket_submit(&p);
 }
 
 void obj_tag_unset(uint32_t file_id, const char* key) {
     if (!key) return;
-    ensure_ready();
     struct PACKED {
         uint32_t file_id;
         char tag[32];
@@ -265,174 +322,230 @@ void obj_tag_unset(uint32_t file_id, const char* key) {
     size_t len = strlen(key);
     if (len > 31) len = 31;
     memcpy(request.tag, key, len);
-    notify_write_data(&request, sizeof(request));
-    notify_add_prefix(DECK_STORAGE, 0x03);
+    memcpy(g_data_buf, &request, sizeof(request));
+
+    Pocket p;
+    pocket_prepare(&p);
+    pocket_set_data(&p, g_data_buf, sizeof(request));
+    pocket_add_prefix(&p, DECK_STORAGE, 0x03);
+    pocket_submit(&p);
 }
 
 void ctx_set(const char* tag) {
     if (!tag) return;
-    ensure_ready();
-    char tag_buffer[192];
-    memset(tag_buffer, 0, 192);
+    memset(g_data_buf, 0, 192);
     size_t len = strlen(tag);
     if (len < 192) {
-        memcpy(tag_buffer, tag, len);
+        memcpy(g_data_buf, tag, len);
     }
-    notify_write_data(tag_buffer, 192);
-    notify_add_prefix(DECK_STORAGE, 0x10);
+
+    Pocket p;
+    pocket_prepare(&p);
+    pocket_set_data(&p, g_data_buf, 192);
+    pocket_add_prefix(&p, DECK_STORAGE, 0x10);
+    pocket_submit(&p);
 }
 
 void ctx_clear(void) {
-    ensure_ready();
-    uint8_t dummy[192];
-    memset(dummy, 0, 192);
-    notify_write_data(dummy, 192);
-    notify_add_prefix(DECK_STORAGE, 0x11);
+    memset(g_data_buf, 0, 192);
+
+    Pocket p;
+    pocket_prepare(&p);
+    pocket_set_data(&p, g_data_buf, 192);
+    pocket_add_prefix(&p, DECK_STORAGE, 0x11);
+    pocket_submit(&p);
 }
 
 void hw_vga_putchar(uint8_t row, uint8_t col, char c, uint8_t color) {
-    ensure_ready();
-    uint8_t data[4];
-    data[0] = row;
-    data[1] = col;
-    data[2] = (uint8_t)c;
-    data[3] = color;
-    notify_write_data(data, 4);
-    notify_add_prefix(DECK_HARDWARE, 0x70);
+    g_data_buf[0] = row;
+    g_data_buf[1] = col;
+    g_data_buf[2] = (uint8_t)c;
+    g_data_buf[3] = color;
+
+    Pocket p;
+    pocket_prepare(&p);
+    pocket_set_data(&p, g_data_buf, 4);
+    pocket_add_prefix(&p, DECK_HARDWARE, 0x70);
+    pocket_submit(&p);
 }
 
 void hw_vga_putstring(const char* str, uint8_t len, uint8_t color) {
     if (len > 188) len = 188;
-    ensure_ready();
-    uint8_t data[192];
-    memset(data, 0, 192);
-    data[0] = len;
-    data[1] = color;
-    data[2] = 0;
-    data[3] = 0;
-    memcpy(data + 4, str, len);
-    notify_write_data(data, len + 4);
-    notify_add_prefix(DECK_HARDWARE, 0x71);
+    memset(g_data_buf, 0, 192);
+    g_data_buf[0] = len;
+    g_data_buf[1] = color;
+    g_data_buf[2] = 0;
+    g_data_buf[3] = 0;
+    memcpy(g_data_buf + 4, str, len);
+
+    Pocket p;
+    pocket_prepare(&p);
+    pocket_set_data(&p, g_data_buf, len + 4);
+    pocket_add_prefix(&p, DECK_HARDWARE, 0x71);
+    pocket_submit(&p);
 }
 
 void hw_vga_clear(uint8_t color) {
-    ensure_ready();
-    notify_write_data(&color, 1);
-    notify_add_prefix(DECK_HARDWARE, 0x72);
+    g_data_buf[0] = color;
+
+    Pocket p;
+    pocket_prepare(&p);
+    pocket_set_data(&p, g_data_buf, 1);
+    pocket_add_prefix(&p, DECK_HARDWARE, 0x72);
+    pocket_submit(&p);
 }
 
 void hw_vga_clear_line(uint8_t row, uint8_t color) {
-    ensure_ready();
-    uint8_t data[2];
-    data[0] = row;
-    data[1] = color;
-    notify_write_data(data, 2);
-    notify_add_prefix(DECK_HARDWARE, 0x73);
+    g_data_buf[0] = row;
+    g_data_buf[1] = color;
+
+    Pocket p;
+    pocket_prepare(&p);
+    pocket_set_data(&p, g_data_buf, 2);
+    pocket_add_prefix(&p, DECK_HARDWARE, 0x73);
+    pocket_submit(&p);
 }
 
 void hw_vga_clear_to_eol(uint8_t color) {
-    ensure_ready();
-    notify_write_data(&color, 1);
-    notify_add_prefix(DECK_HARDWARE, 0x74);
+    g_data_buf[0] = color;
+
+    Pocket p;
+    pocket_prepare(&p);
+    pocket_set_data(&p, g_data_buf, 1);
+    pocket_add_prefix(&p, DECK_HARDWARE, 0x74);
+    pocket_submit(&p);
 }
 
 void hw_vga_scroll(uint8_t lines, uint8_t fill_color) {
-    ensure_ready();
-    uint8_t data[2];
-    data[0] = lines;
-    data[1] = fill_color;
-    notify_write_data(data, 2);
-    notify_add_prefix(DECK_HARDWARE, 0x79);
+    g_data_buf[0] = lines;
+    g_data_buf[1] = fill_color;
+
+    Pocket p;
+    pocket_prepare(&p);
+    pocket_set_data(&p, g_data_buf, 2);
+    pocket_add_prefix(&p, DECK_HARDWARE, 0x79);
+    pocket_submit(&p);
 }
 
 void hw_vga_newline(void) {
-    ensure_ready();
-    notify_add_prefix(DECK_HARDWARE, 0x7A);
+    Pocket p;
+    pocket_prepare(&p);
+    pocket_add_prefix(&p, DECK_HARDWARE, 0x7A);
+    pocket_submit(&p);
 }
 
 void hw_vga_getcursor(void) {
-    ensure_ready();
-    notify_add_prefix(DECK_HARDWARE, 0x75);
+    Pocket p;
+    pocket_prepare(&p);
+    pocket_add_prefix(&p, DECK_HARDWARE, 0x75);
+    pocket_submit(&p);
 }
 
 void hw_vga_setcursor(uint8_t row, uint8_t col) {
-    ensure_ready();
-    uint8_t data[2];
-    data[0] = row;
-    data[1] = col;
-    notify_write_data(data, 2);
-    notify_add_prefix(DECK_HARDWARE, 0x76);
+    g_data_buf[0] = row;
+    g_data_buf[1] = col;
+
+    Pocket p;
+    pocket_prepare(&p);
+    pocket_set_data(&p, g_data_buf, 2);
+    pocket_add_prefix(&p, DECK_HARDWARE, 0x76);
+    pocket_submit(&p);
 }
 
 void hw_vga_getcolor(void) {
-    ensure_ready();
-    notify_add_prefix(DECK_HARDWARE, 0x78);
+    Pocket p;
+    pocket_prepare(&p);
+    pocket_add_prefix(&p, DECK_HARDWARE, 0x78);
+    pocket_submit(&p);
 }
 
 void hw_vga_setcolor(uint8_t color) {
-    ensure_ready();
-    notify_write_data(&color, 1);
-    notify_add_prefix(DECK_HARDWARE, 0x77);
+    g_data_buf[0] = color;
+
+    Pocket p;
+    pocket_prepare(&p);
+    pocket_set_data(&p, g_data_buf, 1);
+    pocket_add_prefix(&p, DECK_HARDWARE, 0x77);
+    pocket_submit(&p);
 }
 
 void hw_vga_getdimensions(void) {
-    ensure_ready();
-    notify_add_prefix(DECK_HARDWARE, 0x7B);
+    Pocket p;
+    pocket_prepare(&p);
+    pocket_add_prefix(&p, DECK_HARDWARE, 0x7B);
+    pocket_submit(&p);
 }
 
 void hw_kb_getchar(void) {
-    ensure_ready();
-    notify_add_prefix(DECK_HARDWARE, 0x60);
+    Pocket p;
+    pocket_prepare(&p);
+    pocket_add_prefix(&p, DECK_HARDWARE, 0x60);
+    pocket_submit(&p);
 }
 
 void hw_kb_readline(uint8_t max_size, bool echo) {
-    ensure_ready();
-    uint8_t data[4];
-    data[0] = max_size;
-    data[1] = echo ? 1 : 0;
-    data[2] = 0;
-    data[3] = 0;
-    notify_write_data(data, 4);
-    notify_add_prefix(DECK_HARDWARE, 0x61);
+    memset(g_data_buf, 0, 4);
+    g_data_buf[0] = max_size;
+    g_data_buf[1] = echo ? 1 : 0;
+
+    Pocket p;
+    pocket_prepare(&p);
+    pocket_set_data(&p, g_data_buf, 4);
+    pocket_add_prefix(&p, DECK_HARDWARE, 0x61);
+    pocket_submit(&p);
 }
 
 void hw_kb_status(void) {
-    ensure_ready();
-    notify_add_prefix(DECK_HARDWARE, 0x62);
+    Pocket p;
+    pocket_prepare(&p);
+    pocket_add_prefix(&p, DECK_HARDWARE, 0x62);
+    pocket_submit(&p);
 }
 
 void hw_timer_ms(void) {
-    ensure_ready();
-    notify_add_prefix(DECK_HARDWARE, 0x11);
+    Pocket p;
+    pocket_prepare(&p);
+    pocket_add_prefix(&p, DECK_HARDWARE, 0x11);
+    pocket_submit(&p);
 }
 
 void hw_rtc_time(void) {
-    ensure_ready();
-    notify_add_prefix(DECK_HARDWARE, 0x15);
+    Pocket p;
+    pocket_prepare(&p);
+    pocket_add_prefix(&p, DECK_HARDWARE, 0x15);
+    pocket_submit(&p);
 }
 
 void hw_rtc_unix64(void) {
-    ensure_ready();
-    notify_add_prefix(DECK_HARDWARE, 0x16);
+    Pocket p;
+    pocket_prepare(&p);
+    pocket_add_prefix(&p, DECK_HARDWARE, 0x16);
+    pocket_submit(&p);
 }
 
 void hw_rtc_uptime(void) {
-    ensure_ready();
-    notify_add_prefix(DECK_HARDWARE, 0x17);
+    Pocket p;
+    pocket_prepare(&p);
+    pocket_add_prefix(&p, DECK_HARDWARE, 0x17);
+    pocket_submit(&p);
 }
 
 void hw_reboot(void) {
-    ensure_ready();
-    uint8_t data[192];
-    memset(data, 0, 192);
-    notify_write_data(data, 192);
-    notify_add_prefix(DECK_HARDWARE, 0x80);
+    memset(g_data_buf, 0, 192);
+
+    Pocket p;
+    pocket_prepare(&p);
+    pocket_set_data(&p, g_data_buf, 192);
+    pocket_add_prefix(&p, DECK_HARDWARE, 0x80);
+    pocket_submit(&p);
 }
 
 void hw_shutdown(void) {
-    ensure_ready();
-    uint8_t data[192];
-    memset(data, 0, 192);
-    notify_write_data(data, 192);
-    notify_add_prefix(DECK_HARDWARE, 0x81);
+    memset(g_data_buf, 0, 192);
+
+    Pocket p;
+    pocket_prepare(&p);
+    pocket_set_data(&p, g_data_buf, 192);
+    pocket_add_prefix(&p, DECK_HARDWARE, 0x81);
+    pocket_submit(&p);
 }
