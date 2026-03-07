@@ -1518,10 +1518,16 @@ void* vmm_translate_user_addr(vmm_context_t* ctx, uintptr_t user_vaddr, size_t s
         size = VMM_PAGE_SIZE - (user_vaddr & VMM_PAGE_OFFSET_MASK);
     }
 
-    uintptr_t phys = vmm_virt_to_phys(ctx, user_vaddr);
-    if (phys == 0) return NULL;
+    // Check that the page is user-accessible (not just present)
+    pte_t* pte = vmm_get_pte(ctx, user_vaddr);
+    if (!pte || !(*pte & VMM_FLAG_PRESENT) || !(*pte & VMM_FLAG_USER)) {
+        return NULL;
+    }
 
-    return vmm_phys_to_virt(phys);
+    uintptr_t phys = vmm_pte_to_phys(*pte);
+    uintptr_t offset = user_vaddr & VMM_PAGE_OFFSET_MASK;
+
+    return vmm_phys_to_virt(phys + offset);
 }
 
 int vmm_setup_null_trap(vmm_context_t* ctx) {
