@@ -17,7 +17,7 @@ typedef struct __packed {
     uint32_t error_code;         // deck handlers write errors here
     uint8_t  prefix_count;       // number of valid prefixes
     uint8_t  current_prefix_idx; // current position in chain (for async resume)
-    uint8_t  flags;              // reserved
+    uint8_t  flags;              // POCKET_FLAG_YIELD = 0x80
     uint8_t  _reserved;
     uint32_t data_length;        // bytes of valid data at data_addr
     uint64_t data_addr;          // virtual address of data in process cabin heap
@@ -27,6 +27,8 @@ typedef struct __packed {
 } Pocket;
 
 _Static_assert(sizeof(Pocket) == 96, "Pocket must be 96 bytes for PocketRing packing");
+
+#define POCKET_FLAG_YIELD 0x80
 
 // Pocket helpers
 
