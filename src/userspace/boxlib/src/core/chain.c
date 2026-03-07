@@ -428,15 +428,21 @@ void hw_vga_scroll(uint8_t lines, uint8_t fill_color) {
 }
 
 void hw_vga_newline(void) {
+    memset(g_data_buf, 0, 4);
+
     Pocket p;
     pocket_prepare(&p);
+    pocket_set_data(&p, g_data_buf, 4);
     pocket_add_prefix(&p, DECK_HARDWARE, 0x7A);
     pocket_submit(&p);
 }
 
 void hw_vga_getcursor(void) {
+    memset(g_data_buf, 0, 4);
+
     Pocket p;
     pocket_prepare(&p);
+    pocket_set_data(&p, g_data_buf, 4);
     pocket_add_prefix(&p, DECK_HARDWARE, 0x75);
     pocket_submit(&p);
 }
@@ -453,8 +459,11 @@ void hw_vga_setcursor(uint8_t row, uint8_t col) {
 }
 
 void hw_vga_getcolor(void) {
+    memset(g_data_buf, 0, 4);
+
     Pocket p;
     pocket_prepare(&p);
+    pocket_set_data(&p, g_data_buf, 4);
     pocket_add_prefix(&p, DECK_HARDWARE, 0x78);
     pocket_submit(&p);
 }
@@ -470,15 +479,21 @@ void hw_vga_setcolor(uint8_t color) {
 }
 
 void hw_vga_getdimensions(void) {
+    memset(g_data_buf, 0, 4);
+
     Pocket p;
     pocket_prepare(&p);
+    pocket_set_data(&p, g_data_buf, 4);
     pocket_add_prefix(&p, DECK_HARDWARE, 0x7B);
     pocket_submit(&p);
 }
 
 void hw_kb_getchar(void) {
+    memset(g_data_buf, 0, 4);
+
     Pocket p;
     pocket_prepare(&p);
+    pocket_set_data(&p, g_data_buf, 4);
     pocket_add_prefix(&p, DECK_HARDWARE, 0x60);
     pocket_submit(&p);
 }
@@ -496,36 +511,51 @@ void hw_kb_readline(uint8_t max_size, bool echo) {
 }
 
 void hw_kb_status(void) {
+    memset(g_data_buf, 0, 16);
+
     Pocket p;
     pocket_prepare(&p);
+    pocket_set_data(&p, g_data_buf, 16);
     pocket_add_prefix(&p, DECK_HARDWARE, 0x62);
     pocket_submit(&p);
 }
 
 void hw_timer_ms(void) {
+    memset(g_data_buf, 0, 8);
+
     Pocket p;
     pocket_prepare(&p);
+    pocket_set_data(&p, g_data_buf, 8);
     pocket_add_prefix(&p, DECK_HARDWARE, 0x11);
     pocket_submit(&p);
 }
 
 void hw_rtc_time(void) {
+    memset(g_data_buf, 0, 16);
+
     Pocket p;
     pocket_prepare(&p);
+    pocket_set_data(&p, g_data_buf, 16);
     pocket_add_prefix(&p, DECK_HARDWARE, 0x15);
     pocket_submit(&p);
 }
 
 void hw_rtc_unix64(void) {
+    memset(g_data_buf, 0, 16);
+
     Pocket p;
     pocket_prepare(&p);
+    pocket_set_data(&p, g_data_buf, 16);
     pocket_add_prefix(&p, DECK_HARDWARE, 0x16);
     pocket_submit(&p);
 }
 
 void hw_rtc_uptime(void) {
+    memset(g_data_buf, 0, 16);
+
     Pocket p;
     pocket_prepare(&p);
+    pocket_set_data(&p, g_data_buf, 16);
     pocket_add_prefix(&p, DECK_HARDWARE, 0x17);
     pocket_submit(&p);
 }
