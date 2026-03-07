@@ -2,6 +2,7 @@
 #define POCKET_H
 
 #include "ktypes.h"
+#include "klib.h"
 #include "boxos_sizes.h"
 #include "boxos_decks.h"
 #include "error.h"
@@ -22,6 +23,7 @@ typedef struct __packed {
     uint64_t data_addr;          // virtual address of data in process cabin heap
     char     route_tag[POCKET_ROUTE_TAG_SIZE];  // for ROUTE_TAG broadcasts
     uint16_t prefixes[POCKET_MAX_PREFIXES];     // deck_id << 8 | opcode, last = 0x0000
+    uint8_t  _pad[4];            // padding to reach 96 bytes for PocketRing packing
 } Pocket;
 
 _Static_assert(sizeof(Pocket) == 96, "Pocket must be 96 bytes for PocketRing packing");

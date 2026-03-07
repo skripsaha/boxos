@@ -1,7 +1,7 @@
 #ifndef SYSTEM_DECK_PROCESS_H
 #define SYSTEM_DECK_PROCESS_H
 
-#include "events.h"
+#include "pocket.h"
 #include "process.h"
 #include "kernel_config.h"
 
@@ -28,7 +28,7 @@
 #define BUF_MAX_SIZE                 CONFIG_PROC_MAX_BUFFER_SIZE
 #define BUF_MAX_COUNT                64
 
-#define PROC_SPAWN_MAX_PHYS_ADDR     0x100000000ULL  // 4GB physical address limit for 32-bit compatibility
+#define PROC_SPAWN_MAX_PHYS_ADDR     0x100000000ULL
 
 typedef struct __packed {
     uint64_t binary_phys_addr;
@@ -59,20 +59,16 @@ typedef struct __packed {
 typedef struct __packed {
     uint32_t pid;
     uint32_t state;
-    int32_t score;
+    int32_t  score;
     uint32_t reserved1;
-    uint64_t notify_page_phys;
-    uint64_t result_page_phys;
     uint64_t code_start;
     uint64_t code_size;
-    bool result_there;
-    uint8_t reserved2[7];
     char tags[PROC_INFO_TAGS_SIZE];
 } proc_info_response_t;
 
 typedef struct __packed {
-    char     filename[32];
-    uint8_t  reserved[160];
+    char    filename[32];
+    uint8_t reserved[160];
 } proc_exec_event_t;
 
 typedef struct __packed {
@@ -84,7 +80,7 @@ typedef struct __packed {
 typedef struct __packed {
     uint64_t size;
     uint32_t flags;
-    uint8_t reserved[180];
+    uint8_t  reserved[180];
 } buf_alloc_event_t;
 
 typedef struct __packed {
@@ -93,71 +89,70 @@ typedef struct __packed {
     uint64_t actual_size;
     uint64_t virt_addr;
     uint32_t error_code;
-    uint8_t reserved[156];
+    uint8_t  reserved[156];
 } buf_alloc_response_t;
 
 typedef struct __packed {
     uint64_t buffer_handle;
-    uint8_t reserved[184];
+    uint8_t  reserved[184];
 } buf_free_event_t;
 
 typedef struct __packed {
     uint32_t error_code;
-    uint8_t reserved[188];
+    uint8_t  reserved[188];
 } buf_free_response_t;
 
 typedef struct __packed {
     uint64_t buffer_handle;
     uint64_t new_size;
-    uint8_t reserved[176];
+    uint8_t  reserved[176];
 } buf_resize_event_t;
 
 typedef struct __packed {
     uint64_t buffer_handle;
     uint64_t actual_size;
     uint32_t error_code;
-    uint8_t reserved[168];
+    uint8_t  reserved[168];
 } buf_resize_response_t;
 
 typedef struct __packed {
     uint32_t target_pid;
-    char tag[64];
-    uint8_t reserved[124];
+    char     tag[64];
+    uint8_t  reserved[124];
 } tag_modify_event_t;
 
 typedef struct __packed {
     uint32_t error_code;
-    char message[128];
-    uint8_t reserved[60];
+    char     message[128];
+    uint8_t  reserved[60];
 } tag_modify_response_t;
 
 typedef struct __packed {
     uint32_t target_pid;
-    char tag[64];
-    uint8_t reserved[124];
+    char     tag[64];
+    uint8_t  reserved[124];
 } tag_check_event_t;
 
 typedef struct __packed {
-    bool has_tag;
+    bool    has_tag;
     uint8_t reserved1[3];
     uint32_t error_code;
     uint8_t reserved2[184];
 } tag_check_response_t;
 
-int system_deck_proc_spawn(Event* event);
-int system_deck_proc_kill(Event* event);
-int system_deck_proc_info(Event* event);
-int system_deck_proc_exec(Event* event);
+int system_deck_proc_spawn(Pocket* pocket);
+int system_deck_proc_kill(Pocket* pocket);
+int system_deck_proc_info(Pocket* pocket);
+int system_deck_proc_exec(Pocket* pocket);
 
-int system_deck_buf_alloc(Event* event);
-int system_deck_buf_free(Event* event);
-int system_deck_buf_resize(Event* event);
+int system_deck_buf_alloc(Pocket* pocket);
+int system_deck_buf_free(Pocket* pocket);
+int system_deck_buf_resize(Pocket* pocket);
 
-int system_deck_tag_add(Event* event);
-int system_deck_tag_remove(Event* event);
-int system_deck_tag_check(Event* event);
+int system_deck_tag_add(Pocket* pocket);
+int system_deck_tag_remove(Pocket* pocket);
+int system_deck_tag_check(Pocket* pocket);
 
-// Call on process destruction to free all buffers owned by pid
 void system_deck_cleanup_process_buffers(uint32_t pid);
 
 #endif // SYSTEM_DECK_PROCESS_H
