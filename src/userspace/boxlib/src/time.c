@@ -1,6 +1,5 @@
 #include "box/time.h"
 #include "box/chain.h"
-#include "box/notify.h"
 #include "box/result.h"
 
 static uint64_t read_u64_be(const uint8_t* p) {
@@ -23,13 +22,12 @@ int time_get(time_t* out) {
     if (!out) return ERR_NULL_POINTER;
 
     hw_rtc_time();
-    notify();
 
-    result_entry_t result;
+    Result result;
     if (!result_wait(&result, 50000)) return ERR_TIMEOUT;
     if (result.error_code != OK) return (int)result.error_code;
 
-    const uint8_t* p = result.payload;
+    const uint8_t* p = (const uint8_t*)(uintptr_t)result.data_addr;
     out->seconds = read_u64_be(p + 0);
     out->nanosec = read_u32_be(p + 8);
     out->year    = read_u16_be(p + 12);
@@ -46,13 +44,13 @@ int time_get_secs(uint64_t* out_seconds) {
     if (!out_seconds) return ERR_NULL_POINTER;
 
     hw_rtc_unix64();
-    notify();
 
-    result_entry_t result;
+    Result result;
     if (!result_wait(&result, 50000)) return ERR_TIMEOUT;
     if (result.error_code != OK) return (int)result.error_code;
 
-    *out_seconds = read_u64_be(result.payload);
+    const uint8_t* p = (const uint8_t*)(uintptr_t)result.data_addr;
+    *out_seconds = read_u64_be(p);
     return OK;
 }
 
@@ -60,13 +58,13 @@ int time_uptime_ms(uint64_t* out_ms) {
     if (!out_ms) return ERR_NULL_POINTER;
 
     hw_timer_ms();
-    notify();
 
-    result_entry_t result;
+    Result result;
     if (!result_wait(&result, 50000)) return ERR_TIMEOUT;
     if (result.error_code != OK) return (int)result.error_code;
 
-    *out_ms = read_u64_be(result.payload);
+    const uint8_t* p = (const uint8_t*)(uintptr_t)result.data_addr;
+    *out_ms = read_u64_be(p);
     return OK;
 }
 
@@ -74,13 +72,13 @@ int time_uptime_ns(uint64_t* out_ns) {
     if (!out_ns) return ERR_NULL_POINTER;
 
     hw_rtc_uptime();
-    notify();
 
-    result_entry_t result;
+    Result result;
     if (!result_wait(&result, 50000)) return ERR_TIMEOUT;
     if (result.error_code != OK) return (int)result.error_code;
 
-    *out_ns = read_u64_be(result.payload);
+    const uint8_t* p = (const uint8_t*)(uintptr_t)result.data_addr;
+    *out_ns = read_u64_be(p);
     return OK;
 }
 

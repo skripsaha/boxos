@@ -17,15 +17,15 @@ void shell_init(void)
     g_shell_state.running = true;
     memcpy(g_shell_state.prompt, "~ ", 3);
 
-    notify_page_t *np = notify_page();
+    CabinInfo *ci = cabin_info();
 
-    if (np->spawner_pid == 0)
+    if (ci->spawner_pid == 0)
     {
         // Root shell (autostart): create display process
         int display_pid = proc_exec("display");
         if (display_pid > 0)
         {
-            result_entry_t entry;
+            Result entry;
             if (receive_wait(&entry, 2000))
             {
                 io_set_mode(IO_MODE_IPC);

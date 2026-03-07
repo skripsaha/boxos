@@ -1,12 +1,7 @@
 #include "box/io/vga.h"
 #include "box/chain.h"
-#include "box/notify.h"
 #include "box/result.h"
 #include "box/string.h"
-
-static uint16_t vga_decode_u16(const uint8_t* payload, size_t offset) {
-    return ((uint16_t)payload[offset] << 8) | ((uint16_t)payload[offset + 1]);
-}
 
 int vga_putchar(char c) {
     vga_pos_t pos = {0, 0};
@@ -18,9 +13,8 @@ int vga_putchar(char c) {
     }
 
     hw_vga_putchar(pos.row, pos.col, c, (uint8_t)color);
-    notify();
 
-    result_entry_t result;
+    Result result;
     if (!result_wait(&result, 100000)) {
         return -ERR_TIMEOUT;
     }
@@ -53,9 +47,8 @@ int vga_puts(const char* str) {
         }
 
         hw_vga_putstring(str + offset, (uint8_t)chunk_size, (uint8_t)color);
-        notify();
 
-        result_entry_t result;
+        Result result;
         if (!result_wait(&result, 100000)) {
             return -ERR_TIMEOUT;
         }
@@ -64,7 +57,8 @@ int vga_puts(const char* str) {
             return -(int)result.error_code;
         }
 
-        uint16_t chars_written = vga_decode_u16(result.payload, 0);
+        uint8_t* data = (uint8_t*)(uintptr_t)result.data_addr;
+        uint16_t chars_written = ((uint16_t)data[0] << 8) | (uint16_t)data[1];
         total_written += chars_written;
         offset += chunk_size;
     }
@@ -74,9 +68,8 @@ int vga_puts(const char* str) {
 
 int vga_clear(uint8_t color) {
     hw_vga_clear(color);
-    notify();
 
-    result_entry_t result;
+    Result result;
     if (!result_wait(&result, 100000)) {
         return -ERR_TIMEOUT;
     }
@@ -90,9 +83,8 @@ int vga_clear(uint8_t color) {
 
 int vga_clear_line(uint8_t row, uint8_t color) {
     hw_vga_clear_line(row, color);
-    notify();
 
-    result_entry_t result;
+    Result result;
     if (!result_wait(&result, 100000)) {
         return -ERR_TIMEOUT;
     }
@@ -106,9 +98,8 @@ int vga_clear_line(uint8_t row, uint8_t color) {
 
 int vga_clear_to_eol(uint8_t color) {
     hw_vga_clear_to_eol(color);
-    notify();
 
-    result_entry_t result;
+    Result result;
     if (!result_wait(&result, 100000)) {
         return -ERR_TIMEOUT;
     }
@@ -122,9 +113,8 @@ int vga_clear_to_eol(uint8_t color) {
 
 int vga_scroll_up(uint8_t lines, uint8_t fill_color) {
     hw_vga_scroll(lines, fill_color);
-    notify();
 
-    result_entry_t result;
+    Result result;
     if (!result_wait(&result, 100000)) {
         return -ERR_TIMEOUT;
     }
@@ -138,9 +128,8 @@ int vga_scroll_up(uint8_t lines, uint8_t fill_color) {
 
 int vga_newline(void) {
     hw_vga_newline();
-    notify();
 
-    result_entry_t result;
+    Result result;
     if (!result_wait(&result, 100000)) {
         return -ERR_TIMEOUT;
     }
@@ -158,9 +147,8 @@ int vga_getcursor(vga_pos_t* pos) {
     }
 
     hw_vga_getcursor();
-    notify();
 
-    result_entry_t result;
+    Result result;
     if (!result_wait(&result, 100000)) {
         return -ERR_TIMEOUT;
     }
@@ -169,17 +157,17 @@ int vga_getcursor(vga_pos_t* pos) {
         return -(int)result.error_code;
     }
 
-    pos->row = result.payload[1];
-    pos->col = result.payload[2];
+    uint8_t* data = (uint8_t*)(uintptr_t)result.data_addr;
+    pos->row = data[1];
+    pos->col = data[2];
 
     return 0;
 }
 
 int vga_setcursor(uint8_t row, uint8_t col) {
     hw_vga_setcursor(row, col);
-    notify();
 
-    result_entry_t result;
+    Result result;
     if (!result_wait(&result, 100000)) {
         return -ERR_TIMEOUT;
     }
@@ -193,9 +181,8 @@ int vga_setcursor(uint8_t row, uint8_t col) {
 
 int vga_getcolor(void) {
     hw_vga_getcolor();
-    notify();
 
-    result_entry_t result;
+    Result result;
     if (!result_wait(&result, 100000)) {
         return -ERR_TIMEOUT;
     }
@@ -204,14 +191,14 @@ int vga_getcolor(void) {
         return -(int)result.error_code;
     }
 
-    return (int)(uint8_t)result.payload[1];
+    uint8_t* data = (uint8_t*)(uintptr_t)result.data_addr;
+    return (int)data[1];
 }
 
 int vga_setcolor(uint8_t color) {
     hw_vga_setcolor(color);
-    notify();
 
-    result_entry_t result;
+    Result result;
     if (!result_wait(&result, 100000)) {
         return -ERR_TIMEOUT;
     }
@@ -229,9 +216,8 @@ int vga_getdimensions(vga_dimensions_t* dims) {
     }
 
     hw_vga_getdimensions();
-    notify();
 
-    result_entry_t result;
+    Result result;
     if (!result_wait(&result, 100000)) {
         return -ERR_TIMEOUT;
     }
@@ -240,8 +226,9 @@ int vga_getdimensions(vga_dimensions_t* dims) {
         return -(int)result.error_code;
     }
 
-    dims->rows = result.payload[0];
-    dims->cols = result.payload[1];
+    uint8_t* data = (uint8_t*)(uintptr_t)result.data_addr;
+    dims->rows = data[0];
+    dims->cols = data[1];
 
     return 0;
 }

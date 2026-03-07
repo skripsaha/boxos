@@ -37,8 +37,8 @@ void kernel_main(void)
     vga_init();
     serial_init();
 
-    kprintf(" Cabin (0x%lx Notify, 0x%lx Result, 0x%lx Code)\n",
-            CABIN_NOTIFY_PAGE_ADDR, CABIN_RESULT_PAGE_ADDR, CABIN_CODE_START_ADDR);
+    kprintf(" Cabin (0x%lx Info, 0x%lx PocketRing, 0x%lx ResultRing, 0x%lx Code)\n",
+            CABIN_INFO_ADDR, CABIN_POCKET_RING_ADDR, CABIN_RESULT_RING_ADDR, CABIN_CODE_START_ADDR);
     kprintf("\n");
 
     debug_printf("[INIT] CPU Feature Detection (early)...\n");
