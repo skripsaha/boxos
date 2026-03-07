@@ -448,6 +448,10 @@ int system_deck_proc_exec(Pocket* pocket) {
         return -1;
     }
 
+    // Set spawner_pid BEFORE load_binary — load_binary writes CabinInfo page
+    // which userspace reads to discover its spawner. If set after, spawner_pid=0.
+    proc->spawner_pid = pocket->pid;
+
     int load_result = process_load_binary(proc, virt_buf, (size_t)file_size);
     pmm_free(phys_buf, pages_needed);
 
@@ -458,7 +462,6 @@ int system_deck_proc_exec(Pocket* pocket) {
         return -1;
     }
 
-    proc->spawner_pid = pocket->pid;
     __sync_synchronize();
 
     process_set_state(proc, PROC_WORKING);
