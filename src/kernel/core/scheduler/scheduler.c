@@ -6,13 +6,11 @@
 #include "tss.h"
 #include "atomics.h"
 #include "idle.h"
-#include "pending_results.h"
 #include "guide.h"
+#include "ready_queue.h"
 #include "xhci_interrupt.h"
 
 static scheduler_state_t sched;
-
-static void scheduler_check_wait_timeouts(void);
 
 void scheduler_init(void) {
     debug_printf("[SCHEDULER] Initializing Smart Score Scheduler...\n");
@@ -64,32 +62,6 @@ int32_t scheduler_calculate_score(process_t* proc) {
     }
 
     int32_t score = 0;
-
-    // hot result bonus decays with consecutive runs and elapsed time
-    if (proc->result_there) {
-        int32_t result_bonus = SCHEDULER_BOOST_HOT_RESULT;
-
-        if (proc->consecutive_runs > 0) {
-            result_bonus -= (proc->consecutive_runs * 5);
-        }
-
-        uint64_t ticks_since_run = 0;
-        if (sched.total_ticks >= proc->last_run_time && proc->last_run_time > 0) {
-            ticks_since_run = sched.total_ticks - proc->last_run_time;
-        }
-        if (ticks_since_run > SCHEDULER_MILD_STARVATION_TICKS) {
-            result_bonus -= (int32_t)(ticks_since_run / 5);
-        }
-
-        if (result_bonus < 0) {
-            result_bonus = 0;
-        }
-        score += result_bonus;
-    }
-
-    if (proc->wait_reason == WAIT_OVERFLOW) {
-        score += 200;  // highest priority to recover from overflow
-    }
 
     if (scheduler_matches_use_context(proc)) {
         score += SCHEDULER_BOOST_CONTEXT_MATCH;
@@ -195,12 +167,6 @@ void scheduler_yield(void) {
     spin_lock(&sched.scheduler_lock);
     process_t* current = sched.current_process;
 
-    if (current && process_get_state(current) == PROC_WORKING) {
-        if (!process_is_idle(current) && current->result_there) {
-            atomic_store_u8((volatile uint8_t*)&current->result_there, 0);
-        }
-    }
-
     process_t* next = scheduler_select_next();
 
     if (next) {
@@ -219,10 +185,6 @@ void scheduler_yield_cooperative(void) {
     process_t* current = sched.current_process;
 
     if (current && process_get_state(current) == PROC_WORKING) {
-        if (!process_is_idle(current) && current->result_there) {
-            atomic_store_u8((volatile uint8_t*)&current->result_there, 0);
-        }
-
         process_t* next = scheduler_select_next();
 
         if (next) {
@@ -263,11 +225,6 @@ void scheduler_yield_from_interrupt(void* frame_ptr) {
         }
 
         context_save_from_frame(current, frame);
-
-        if (!process_is_idle(current) && current->result_there) {
-            __sync_synchronize();
-            atomic_store_u8((volatile uint8_t*)&current->result_there, 0);
-        }
     }
 
     if ((sched.total_ticks % SCHEDULER_CRITICAL_STARVATION_TICKS) == 0) {
@@ -324,15 +281,8 @@ void scheduler_yield_from_interrupt(void* frame_ptr) {
         should_run_guide = true;
     }
 
-    // run if processes are waiting on EventRing
-    extern event_ring_wait_queue_t event_ring_waiters;
-    if (event_ring_waiters.count > 0) {
-        should_run_guide = true;
-    }
-
-    // run if kernel event ring has pending events; without this, ROUTE_TAG clones
-    // can sit unprocessed between timer ticks while userspace yield-loops spin
-    if (!event_ring_is_empty(kernel_event_ring)) {
+    // run if ReadyQueue has processes with pending Pockets
+    if (!ready_queue_is_empty(&g_ready_queue)) {
         should_run_guide = true;
     }
 
@@ -375,9 +325,7 @@ void scheduler_yield_from_interrupt(void* frame_ptr) {
     }
 
     if ((sched.total_ticks % 10) == 0) {
-        pending_results_flush_all();
         process_cleanup_deferred();
-        scheduler_check_wait_timeouts();
     }
 
     context_restore_to_frame(next, frame);
@@ -385,136 +333,6 @@ void scheduler_yield_from_interrupt(void* frame_ptr) {
     // do NOT sti here — iretq restores RFLAGS atomically including IF=1;
     // an sti before iretq creates a window where a timer fires in kernel mode
     // and corrupts the process context being restored
-}
-
-// Check blocked processes for timeouts (WAIT_RING_FULL, WAIT_OVERFLOW).
-// Called from scheduler_yield_from_interrupt every 10 ticks.
-// Runs with interrupts disabled (cli context).
-static void scheduler_check_wait_timeouts(void) {
-    extern uint64_t cpu_get_tsc_freq_khz(void);
-    static uint64_t last_timeout_log = 0;
-    static uint64_t last_timeout_log_tick = 0;
-    static uint64_t last_tsc_overflow_log = 0;
-    static uint64_t last_timeout_log_tsc = 0;
-
-    uint32_t kill_pids[16];
-    uint32_t kill_count = 0;
-
-    process_list_lock();
-    process_t* proc = process_get_first();
-    while (proc) {
-        process_t* next = proc->next;
-
-        if (proc->wait_reason == WAIT_RING_FULL &&
-            proc->wait_start_time != 0) {
-
-            uint64_t tsc_khz = cpu_get_tsc_freq_khz();
-            if (tsc_khz == 0) {
-                proc = next;
-                continue;
-            }
-
-            uint64_t now = rdtsc();
-            if (now < proc->wait_start_time) {
-                proc->wait_start_time = now;
-                proc = next;
-                continue;
-            }
-
-            uint64_t elapsed_tsc = now - proc->wait_start_time;
-            uint64_t elapsed_ms = elapsed_tsc / tsc_khz;
-
-            if (elapsed_ms > CONFIG_EVENTRING_BLOCK_TIMEOUT_MS) {
-                uint64_t current_tick = sched.total_ticks;
-
-                if ((current_tick - last_timeout_log) > SCHEDULER_SEVERE_STARVATION_TICKS) {
-                    debug_printf("[SCHEDULER] TIMEOUT: PID %u blocked on EventRing for %llu ms, killing\n",
-                                 proc->pid, elapsed_ms);
-                    last_timeout_log = current_tick;
-                }
-
-                if (kill_count < 16) {
-                    kill_pids[kill_count++] = proc->pid;
-                }
-            }
-
-            proc = next;
-            continue;
-        }
-
-        if (proc->wait_reason == WAIT_OVERFLOW &&
-            proc->wait_start_time != 0) {
-
-            uint64_t tsc_khz = cpu_get_tsc_freq_khz();
-            if (tsc_khz == 0) {
-                if (proc->last_run_time == 0) {
-                    proc->last_run_time = sched.total_ticks;
-                    proc = next;
-                    continue;
-                }
-
-                uint64_t blocked_ticks = sched.total_ticks - proc->last_run_time;
-                if (blocked_ticks > SCHEDULER_SEVERE_STARVATION_TICKS) {
-                    uint64_t current_tick = sched.total_ticks;
-
-                    if ((current_tick - last_timeout_log_tick) > SCHEDULER_SEVERE_STARVATION_TICKS) {
-                        debug_printf("[SCHEDULER] CRITICAL: PID %u timeout (tick-based >%d ticks), killing\n",
-                                     proc->pid, SCHEDULER_SEVERE_STARVATION_TICKS);
-                        last_timeout_log_tick = current_tick;
-                    }
-
-                    if (kill_count < 16) {
-                        kill_pids[kill_count++] = proc->pid;
-                    }
-                }
-
-                proc = next;
-                continue;
-            }
-
-            uint64_t now = rdtsc();
-            if (now < proc->wait_start_time) {
-                uint64_t current_tick = sched.total_ticks;
-
-                if ((current_tick - last_tsc_overflow_log) > SCHEDULER_CRITICAL_STARVATION_TICKS) {
-                    debug_printf("[SCHEDULER] ANOMALY: TSC wrap-around detected for PID %u (now=%llu, start=%llu)\n",
-                                 proc->pid, now, proc->wait_start_time);
-                    last_tsc_overflow_log = current_tick;
-                }
-
-                proc->wait_start_time = now;
-                proc = next;
-                continue;
-            }
-
-            uint64_t elapsed_tsc = now - proc->wait_start_time;
-            uint64_t elapsed_ms = elapsed_tsc / tsc_khz;
-
-            if (elapsed_ms > 500) {
-                uint64_t current_tick = sched.total_ticks;
-
-                if ((current_tick - last_timeout_log_tsc) > SCHEDULER_SEVERE_STARVATION_TICKS) {
-                    debug_printf("[SCHEDULER] CRITICAL: PID %u timeout on ResultRing (>500ms), killing\n",
-                                 proc->pid);
-                    last_timeout_log_tsc = current_tick;
-                }
-
-                if (kill_count < 16) {
-                    kill_pids[kill_count++] = proc->pid;
-                }
-            }
-        }
-
-        proc = next;
-    }
-    process_list_unlock();
-
-    for (uint32_t i = 0; i < kill_count; i++) {
-        process_t* p = process_find(kill_pids[i]);
-        if (p) {
-            process_destroy_safe(p);
-        }
-    }
 }
 
 void scheduler_set_use_context(const char* tags[], uint32_t count) {

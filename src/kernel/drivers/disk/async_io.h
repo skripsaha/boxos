@@ -22,7 +22,7 @@ typedef struct {
     uint8_t  is_master;
     async_io_operation_t op;
 
-    /* For WRITE: buffer points to Event.data which is only valid until
+    /* For WRITE: buffer points to user heap data which is only valid until
      * ata_dma_start_async_transfer() returns; data must be copied before returning.
      * data_length is the actual valid bytes in buffer_virt (may be < sector_count * 512). */
     void*    buffer_virt;

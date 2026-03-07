@@ -57,9 +57,9 @@ void idle_process_init(void) {
     __asm__ volatile("mov %%cr3, %0" : "=r"(g_idle_process.context.cr3));
 
     g_idle_process.cabin = NULL;
-    g_idle_process.notify_page_phys = 0;
-    g_idle_process.result_page_phys = 0;
-    // Already set above
+    g_idle_process.cabin_info_phys = 0;
+    g_idle_process.pocket_ring_phys = 0;
+    g_idle_process.result_ring_phys = 0;
 
     g_idle_process.next = NULL;
 

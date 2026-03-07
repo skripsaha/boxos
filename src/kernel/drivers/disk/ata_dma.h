@@ -2,7 +2,6 @@
 #define ATA_DMA_H
 
 #include "ktypes.h"
-#include "events.h"
 #include "async_io.h"
 #include "kernel_config.h"
 
@@ -66,6 +65,7 @@ typedef struct {
     uint32_t file_id;
     uint64_t write_offset;
     uint64_t original_file_size;
+    uint64_t data_addr;          // user heap address for result data
 } ata_dma_request_t;
 
 typedef struct {

@@ -22,7 +22,7 @@
 #include "pci.h"
 #include "storage_deck.h"
 #include "kernel_config.h"
-#include "event_ring.h"
+#include "ready_queue.h"
 #include "xhci.h"
 #include "acpi.h"
 #include "ahci.h"
@@ -416,11 +416,10 @@ void kernel_main(void)
 
         if ((loop_count % 100) == 0)
         {
-            extern EventRingBuffer *kernel_event_ring;
-            size_t pending = event_ring_count(kernel_event_ring);
+            uint32_t pending = ready_queue_count(&g_ready_queue);
             if (pending > 0)
             {
-                debug_printf("[MAIN] EventRing has %zu pending events\n", pending);
+                debug_printf("[MAIN] ReadyQueue has %u pending processes\n", pending);
             }
         }
         loop_count++;

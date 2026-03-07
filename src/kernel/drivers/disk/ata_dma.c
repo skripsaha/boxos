@@ -1,6 +1,7 @@
 #include "ata_dma.h"
 #include "pci.h"
 #include "pmm.h"
+#include "vmm.h"
 #include "io.h"
 #include "klib.h"
 #include "atomics.h"
@@ -12,6 +13,8 @@
 #include "async_io.h"
 #include "storage_deck.h"
 #include "tagfs.h"
+#include "result_ring.h"
+#include "process.h"
 
 #if CONFIG_ATA_DMA_DEBUG
     #define ATA_DMA_DEBUG(...) debug_printf(__VA_ARGS__)
@@ -396,44 +399,67 @@ void ata_dma_irq_handler(void) {
         ATA_DMA_DEBUG("[ATA DMA] IRQ: Transfer completed for event_id=%u\n", req->event_id);
     }
 
-    Event completion_event;
-    event_init(&completion_event, req->pid, req->event_id);
-    completion_event.state = transfer_success ? EVENT_STATE_COMPLETED : EVENT_STATE_ERROR;
-
+    // Write result data to process's heap and push Result to ResultRing
     if (transfer_success) {
-        if (!req->is_write) {
-            size_t copy_size = req->buffer_size;
-            if (copy_size > EVENT_DATA_SIZE) {
-                copy_size = EVENT_DATA_SIZE;
-            }
-            memcpy(completion_event.data, (void*)req->buffer_phys, copy_size);
-        } else {
-            obj_write_response_t* resp = (obj_write_response_t*)completion_event.data;
-            memset(resp, 0, sizeof(obj_write_response_t));
-            resp->bytes_written = req->buffer_size;
+        process_t* proc = process_find(req->pid);
+        if (proc && proc->result_ring_phys) {
+            if (!req->is_write) {
+                // Read completion: copy DMA buffer to process heap at data_addr
+                if (req->data_addr != 0) {
+                    void* user_buf = vmm_translate_user_addr(proc->cabin, req->data_addr, req->buffer_size);
+                    if (user_buf) {
+                        memcpy(user_buf, (void*)req->buffer_phys, req->buffer_size);
+                    }
+                }
+            } else {
+                // Write completion: update file metadata
+                uint64_t write_end = req->write_offset + req->buffer_size;
+                uint64_t new_file_size = (write_end > req->original_file_size)
+                                          ? write_end
+                                          : req->original_file_size;
 
-            uint64_t write_end = req->write_offset + req->buffer_size;
-            resp->new_file_size = (write_end > req->original_file_size)
-                                  ? write_end
-                                  : req->original_file_size;
-            resp->error_code = OK;
+                TagFSMetadata* meta = tagfs_get_metadata(req->file_id);
+                if (meta && (meta->flags & TAGFS_FILE_ACTIVE)) {
+                    if (new_file_size > meta->size) {
+                        meta->size = new_file_size;
+                        meta->modified_time++;
+                        tagfs_write_metadata(req->file_id, meta);
+                    }
+                }
 
-            TagFSMetadata* meta = tagfs_get_metadata(req->file_id);
-            if (meta && (meta->flags & TAGFS_FILE_ACTIVE)) {
-                if (resp->new_file_size > meta->size) {
-                    meta->size = resp->new_file_size;
-                    meta->modified_time++;
-                    tagfs_write_metadata(req->file_id, meta);
+                // Write response data to process heap at data_addr
+                if (req->data_addr != 0) {
+                    void* user_buf = vmm_translate_user_addr(proc->cabin, req->data_addr, sizeof(obj_write_response_t));
+                    if (user_buf) {
+                        obj_write_response_t* resp = (obj_write_response_t*)user_buf;
+                        memset(resp, 0, sizeof(obj_write_response_t));
+                        resp->bytes_written = req->buffer_size;
+                        resp->new_file_size = new_file_size;
+                        resp->error_code = OK;
+                    }
                 }
             }
-        }
-    }
 
-    if (!event_ring_push(kernel_event_ring, &completion_event)) {
-        debug_printf("[ATA DMA] CRITICAL: EventRing full (system overload), marking failed immediately\n");
-        atomic_fetch_add_u32(&dma_state.failed_requests, 1);
-        async_io_mark_failed(req->event_id);
-        req->status = ATA_DMA_STATUS_ERROR_DMA;
+            ResultRing* rring = (ResultRing*)vmm_phys_to_virt(proc->result_ring_phys);
+            Result result;
+            memset(&result, 0, sizeof(Result));
+            result.error_code = OK;
+            result.data_length = req->buffer_size;
+            result.data_addr = req->data_addr;
+            result.sender_pid = 0;
+            result_ring_push(rring, &result);
+        }
+    } else {
+        // Error: push error Result
+        process_t* proc = process_find(req->pid);
+        if (proc && proc->result_ring_phys) {
+            ResultRing* rring = (ResultRing*)vmm_phys_to_virt(proc->result_ring_phys);
+            Result result;
+            memset(&result, 0, sizeof(Result));
+            result.error_code = ERR_IO_ERROR;
+            result.sender_pid = 0;
+            result_ring_push(rring, &result);
+        }
     }
 
     pmm_free((void*)req->buffer_phys, 1);
@@ -478,12 +504,15 @@ void ata_dma_check_timeouts(void) {
 
         async_io_mark_failed(req->event_id);
 
-        Event timeout_event;
-        event_init(&timeout_event, req->pid, req->event_id);
-        timeout_event.state = EVENT_STATE_ERROR;
-
-        if (!event_ring_push(kernel_event_ring, &timeout_event)) {
-            debug_printf("[ATA DMA] CRITICAL: EventRing full during timeout handling\n");
+        // Push timeout error Result to process's ResultRing
+        process_t* proc = process_find(req->pid);
+        if (proc && proc->result_ring_phys) {
+            ResultRing* rring = (ResultRing*)vmm_phys_to_virt(proc->result_ring_phys);
+            Result result;
+            memset(&result, 0, sizeof(Result));
+            result.error_code = ERR_TIMEOUT;
+            result.sender_pid = 0;
+            result_ring_push(rring, &result);
         }
 
         pmm_free((void*)req->buffer_phys, 1);

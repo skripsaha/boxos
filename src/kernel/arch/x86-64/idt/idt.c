@@ -8,8 +8,7 @@
 #include "lapic.h"
 #include "process.h"
 #include "guide.h"
-#include "events.h"
-#include "notify_page.h"
+#include "pocket_ring.h"
 #include "vmm.h"
 #include "atomics.h"
 #include "scheduler.h"
@@ -389,113 +388,29 @@ void syscall_handler(interrupt_frame_t* frame) {
         return;
     }
 
-    uint64_t notify_phys = proc->notify_page_phys;
-    if (!notify_phys) {
-        process_ref_dec(proc);
-        frame->rax = (uint64_t)-1;
-        return;
-    }
+    // New architecture: userspace has already written the Pocket into its PocketRing.
+    // The syscall just pushes the process onto the ReadyQueue and yields.
 
-    notify_page_t* notify_virt = (notify_page_t*)vmm_phys_to_virt(notify_phys);
-    if (!notify_virt) {
-        process_ref_dec(proc);
-        frame->rax = (uint64_t)-1;
-        return;
-    }
-
-    uint32_t magic = notify_virt->magic;
-    if (magic != NOTIFY_PAGE_MAGIC) {
-        process_ref_dec(proc);
-        frame->rax = (uint64_t)-1;
-        return;
-    }
-
-    if (notify_virt->flags & NOTIFY_FLAG_YIELD) {
-        notify_virt->status = NOTIFY_STATUS_OK;
+    // Validate PocketRing has pending Pockets
+    PocketRing *pring = (PocketRing *)vmm_phys_to_virt(proc->pocket_ring_phys);
+    if (!pring || pocket_ring_is_empty(pring)) {
+        // Nothing to process — just yield
         frame->rax = 0;
-
         context_save_from_frame(proc, frame);
         process_ref_dec(proc);
-
         scheduler_yield_from_interrupt(frame);
         return;
     }
 
-    uint8_t prefix_count = notify_virt->prefix_count;
-    if (prefix_count > NOTIFY_MAX_PREFIXES) {
-        process_ref_dec(proc);
-        frame->rax = (uint64_t)-1;
-        return;
-    }
-
-    // Clamp prefix_count to EVENT_MAX_PREFIXES (truncation is intentional)
-    // If notify_virt has more prefixes than EVENT_MAX_PREFIXES, extras are silently dropped
-    if (prefix_count > EVENT_MAX_PREFIXES) {
-        prefix_count = EVENT_MAX_PREFIXES;
-    }
-
-    Event event;
-    event_init(&event, proc->pid, guide_alloc_event_id());
-    event.prefix_count = prefix_count;
-    event.current_prefix_idx = 0;
-    event.timestamp = rdtsc();
-
-    for (uint8_t i = 0; i < prefix_count; i++) {
-        event.prefixes[i] = notify_virt->prefixes[i];
-    }
-
-    // Add null terminator if there's space (after truncation)
-    if (prefix_count < EVENT_MAX_PREFIXES) {
-        event.prefixes[prefix_count] = 0x0000;
-    }
-
-    size_t data_copy_size = EVENT_DATA_SIZE;
-    if (NOTIFY_DATA_SIZE < data_copy_size) {
-        data_copy_size = NOTIFY_DATA_SIZE;
-    }
-    memcpy(event.data, notify_virt->data, data_copy_size);
-
-    event.route_target = notify_virt->route_target;
-    memcpy(event.route_tag, notify_virt->route_tag, 32);
-    event.route_tag[31] = '\0';
-
-    event_push_result_t result = event_ring_push_priority(
-        kernel_event_ring,
-        &event,
-        EVENT_PRIORITY_USER  // User notify() calls
-    );
-
-    if (result == EVENT_PUSH_FULL_BLOCKED) {
-        notify_virt->status = NOTIFY_STATUS_RING_FULL;
-        notify_virt->flags |= NOTIFY_FLAG_CHECK_STATUS;
-        __sync_synchronize();
-
-        context_save_from_frame(proc, frame);
-
-        proc->wait_reason = WAIT_RING_FULL;
-        proc->wait_start_time = rdtsc();
-
-        guide_wait_on_event_ring(proc);
-
-        process_set_state(proc, PROC_WAITING);
-        process_ref_dec(proc);
-
-        scheduler_yield_from_interrupt(frame);
-        return;
-    }
-
-    notify_virt->status = NOTIFY_STATUS_OK;
-    notify_virt->flags &= ~NOTIFY_FLAG_CHECK_STATUS;
-    __sync_synchronize();
-
+    // Push process to ReadyQueue for Guide to process its Pockets
+    ready_queue_push(&g_ready_queue, proc);
     guide_wake();
 
-    frame->rax = event.event_id;
+    frame->rax = 0;
 
     context_save_from_frame(proc, frame);
     process_set_state(proc, PROC_WAITING);
 
-    // Decrement before scheduler_yield to avoid ref leak if process is destroyed
     process_ref_dec(proc);
 
     scheduler_yield_from_interrupt(frame);

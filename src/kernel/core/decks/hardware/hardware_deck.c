@@ -6,6 +6,7 @@
 #include "pic.h"
 #include "irqchip.h"
 #include "process.h"
+#include "vmm.h"
 #include "ata.h"
 #include "keyboard.h"
 #include "vga.h"
@@ -142,13 +143,12 @@ static bool check_power_access(uint32_t pid) {
     return process_has_tag(proc, "system") || process_has_tag(proc, "hw_power");
 }
 
-static int do_reboot(Event* event) {
-    debug_printf("[Hardware] SYSTEM_REBOOT request from PID %u\n", event->pid);
+static int do_reboot(Pocket* pocket) {
+    debug_printf("[Hardware] SYSTEM_REBOOT request from PID %u\n", pocket->pid);
 
-    if (!check_power_access(event->pid)) {
-        debug_printf("[Hardware] ERROR: PID %u lacks permission for reboot\n", event->pid);
-        event->data[0] = HW_ERR_ACCESS_DENIED;
-        event->state = EVENT_STATE_ACCESS_DENIED;
+    if (!check_power_access(pocket->pid)) {
+        debug_printf("[Hardware] ERROR: PID %u lacks permission for reboot\n", pocket->pid);
+        pocket->error_code = HW_ERR_ACCESS_DENIED;
         return -5;
     }
 
@@ -164,13 +164,12 @@ static int do_reboot(Event* event) {
     return 0;
 }
 
-static int do_shutdown(Event* event) {
-    debug_printf("[Hardware] SYSTEM_SHUTDOWN request from PID %u\n", event->pid);
+static int do_shutdown(Pocket* pocket) {
+    debug_printf("[Hardware] SYSTEM_SHUTDOWN request from PID %u\n", pocket->pid);
 
-    if (!check_power_access(event->pid)) {
-        debug_printf("[Hardware] ERROR: PID %u lacks permission for shutdown\n", event->pid);
-        event->data[0] = HW_ERR_ACCESS_DENIED;
-        event->state = EVENT_STATE_ACCESS_DENIED;
+    if (!check_power_access(pocket->pid)) {
+        debug_printf("[Hardware] ERROR: PID %u lacks permission for shutdown\n", pocket->pid);
+        pocket->error_code = HW_ERR_ACCESS_DENIED;
         return -5;
     }
 
@@ -187,102 +186,123 @@ static int do_shutdown(Event* event) {
     return 0;
 }
 
-int hardware_deck_handler(Event* event) {
-    if (!event) {
+int hardware_deck_handler(Pocket* pocket) {
+    if (!pocket) {
         return -1;
     }
 
-    uint8_t opcode = event_get_opcode(event, event->current_prefix_idx);
+    uint8_t opcode = pocket_get_opcode(pocket, pocket->current_prefix_idx);
 
     switch (opcode) {
         case HW_TIMER_GET_TICKS: {
+            process_t* proc = process_find(pocket->pid);
+            uint8_t* data = vmm_translate_user_addr(proc->cabin, pocket->data_addr, pocket->data_length);
+            if (!data) return -1;
+
             uint64_t ticks = pit_get_ticks();
-            write_u64(event->data, ticks);
-            event->state = EVENT_STATE_COMPLETED;
+            write_u64(data, ticks);
             return 0;
         }
 
         case HW_TIMER_GET_MS: {
+            process_t* proc = process_find(pocket->pid);
+            uint8_t* data = vmm_translate_user_addr(proc->cabin, pocket->data_addr, pocket->data_length);
+            if (!data) return -1;
+
             uint64_t ticks = pit_get_ticks();
             uint32_t freq = pit_get_frequency();
 
             if (freq == 0) {
-                event->state = EVENT_STATE_ERROR;
+                pocket->error_code = 1;
                 return -1;
             }
 
             uint64_t ms = (ticks * 1000) / freq;
-            write_u64(event->data, ms);
-            event->state = EVENT_STATE_COMPLETED;
+            write_u64(data, ms);
             return 0;
         }
 
         case HW_TIMER_GET_FREQ: {
+            process_t* proc = process_find(pocket->pid);
+            uint8_t* data = vmm_translate_user_addr(proc->cabin, pocket->data_addr, pocket->data_length);
+            if (!data) return -1;
+
             uint32_t freq = pit_get_frequency();
-            write_u32(event->data, freq);
-            event->state = EVENT_STATE_COMPLETED;
+            write_u32(data, freq);
             return 0;
         }
 
         case HW_TIMER_SCHEDULE: {
-            event->state = EVENT_STATE_ERROR;
+            pocket->error_code = 1;
             return -1;
         }
 
         case HW_TIMER_CANCEL: {
-            event->state = EVENT_STATE_ERROR;
+            pocket->error_code = 1;
             return -1;
         }
 
         case HW_RTC_GET_TIME: {
+            process_t* proc = process_find(pocket->pid);
+            uint8_t* data = vmm_translate_user_addr(proc->cabin, pocket->data_addr, pocket->data_length);
+            if (!data) return -1;
+
             time_t t;
             rtc_get_boxtime(&t);
-            write_u64(event->data + 0, t.seconds);
-            write_u32(event->data + 8, t.nanosec);
-            write_u16(event->data + 12, t.year);
-            event->data[14] = t.month;
-            event->data[15] = t.day;
-            event->data[16] = t.hour;
-            event->data[17] = t.minute;
-            event->data[18] = t.second;
-            event->data[19] = t.weekday;
-            event->state = EVENT_STATE_COMPLETED;
+            write_u64(data + 0, t.seconds);
+            write_u32(data + 8, t.nanosec);
+            write_u16(data + 12, t.year);
+            data[14] = t.month;
+            data[15] = t.day;
+            data[16] = t.hour;
+            data[17] = t.minute;
+            data[18] = t.second;
+            data[19] = t.weekday;
             return 0;
         }
 
         case HW_RTC_GET_UNIX64: {
+            process_t* proc = process_find(pocket->pid);
+            uint8_t* data = vmm_translate_user_addr(proc->cabin, pocket->data_addr, pocket->data_length);
+            if (!data) return -1;
+
             uint64_t secs = rtc_get_unix64();
-            write_u64(event->data, secs);
-            event->state = EVENT_STATE_COMPLETED;
+            write_u64(data, secs);
             return 0;
         }
 
         case HW_RTC_GET_UPTIME: {
+            process_t* proc = process_find(pocket->pid);
+            uint8_t* data = vmm_translate_user_addr(proc->cabin, pocket->data_addr, pocket->data_length);
+            if (!data) return -1;
+
             uint64_t ns = rtc_get_uptime_ns();
-            write_u64(event->data, ns);
-            event->state = EVENT_STATE_COMPLETED;
+            write_u64(data, ns);
             return 0;
         }
 
         case HW_PORT_INB: {
-            uint16_t port = read_u16(event->data);
+            process_t* proc = process_find(pocket->pid);
+            uint8_t* data = vmm_translate_user_addr(proc->cabin, pocket->data_addr, pocket->data_length);
+            if (!data) return -1;
+
+            uint16_t port = read_u16(data);
 
             if (hw_port_is_forbidden(port)) {
                 debug_printf("[HW_DECK] FORBIDDEN port 0x%04x blocked (INB)\n", port);
-                event->state = EVENT_STATE_ACCESS_DENIED;
+                pocket->error_code = HW_ERR_ACCESS_DENIED;
                 return -5;
             }
 
-            process_t* proc = process_find(event->pid);
             if (proc) {
                 process_ref_inc(proc);
 
                 if (!process_has_tag(proc, "system")) {
                     if (!hw_port_is_safe_read(port)) {
                         debug_printf("[HW_DECK] Port 0x%04x requires system tag (INB)\n", port);
-                    event->state = EVENT_STATE_ACCESS_DENIED;
-                    process_ref_dec(proc);
-                    return -5;
+                        pocket->error_code = HW_ERR_ACCESS_DENIED;
+                        process_ref_dec(proc);
+                        return -5;
                     }
                 }
 
@@ -290,31 +310,33 @@ int hardware_deck_handler(Event* event) {
             }
 
             uint8_t value = inb(port);
-            event->data[0] = value;
-            event->state = EVENT_STATE_COMPLETED;
+            data[0] = value;
             return 0;
         }
 
         case HW_PORT_OUTB: {
-            uint16_t port = read_u16(event->data);
-            uint8_t value = event->data[2];
+            process_t* proc = process_find(pocket->pid);
+            uint8_t* data = vmm_translate_user_addr(proc->cabin, pocket->data_addr, pocket->data_length);
+            if (!data) return -1;
+
+            uint16_t port = read_u16(data);
+            uint8_t value = data[2];
 
             if (hw_port_is_forbidden(port)) {
                 debug_printf("[HW_DECK] FORBIDDEN port 0x%04x blocked (OUTB)\n", port);
-                event->state = EVENT_STATE_ACCESS_DENIED;
+                pocket->error_code = HW_ERR_ACCESS_DENIED;
                 return -5;
             }
 
-            process_t* proc = process_find(event->pid);
             if (proc) {
                 process_ref_inc(proc);
 
                 if (!process_has_tag(proc, "system")) {
                     if (!hw_port_is_safe_write(port)) {
                         debug_printf("[HW_DECK] Port 0x%04x requires system tag (OUTB)\n", port);
-                    event->state = EVENT_STATE_ACCESS_DENIED;
-                    process_ref_dec(proc);
-                    return -5;
+                        pocket->error_code = HW_ERR_ACCESS_DENIED;
+                        process_ref_dec(proc);
+                        return -5;
                     }
                 }
 
@@ -322,30 +344,32 @@ int hardware_deck_handler(Event* event) {
             }
 
             outb(port, value);
-            event->data[0] = 0;
-            event->state = EVENT_STATE_COMPLETED;
+            data[0] = 0;
             return 0;
         }
 
         case HW_PORT_INW: {
-            uint16_t port = read_u16(event->data);
+            process_t* proc = process_find(pocket->pid);
+            uint8_t* data = vmm_translate_user_addr(proc->cabin, pocket->data_addr, pocket->data_length);
+            if (!data) return -1;
+
+            uint16_t port = read_u16(data);
 
             if (hw_port_is_forbidden(port)) {
                 debug_printf("[HW_DECK] FORBIDDEN port 0x%04x blocked (INW)\n", port);
-                event->state = EVENT_STATE_ACCESS_DENIED;
+                pocket->error_code = HW_ERR_ACCESS_DENIED;
                 return -5;
             }
 
-            process_t* proc = process_find(event->pid);
             if (proc) {
                 process_ref_inc(proc);
 
                 if (!process_has_tag(proc, "system")) {
                     if (!hw_port_is_safe_read(port)) {
                         debug_printf("[HW_DECK] Port 0x%04x requires system tag (INW)\n", port);
-                    event->state = EVENT_STATE_ACCESS_DENIED;
-                    process_ref_dec(proc);
-                    return -5;
+                        pocket->error_code = HW_ERR_ACCESS_DENIED;
+                        process_ref_dec(proc);
+                        return -5;
                     }
                 }
 
@@ -353,31 +377,33 @@ int hardware_deck_handler(Event* event) {
             }
 
             uint16_t value = inw(port);
-            write_u16(event->data, value);
-            event->state = EVENT_STATE_COMPLETED;
+            write_u16(data, value);
             return 0;
         }
 
         case HW_PORT_OUTW: {
-            uint16_t port = read_u16(event->data);
-            uint16_t value = read_u16(event->data + 2);
+            process_t* proc = process_find(pocket->pid);
+            uint8_t* data = vmm_translate_user_addr(proc->cabin, pocket->data_addr, pocket->data_length);
+            if (!data) return -1;
+
+            uint16_t port = read_u16(data);
+            uint16_t value = read_u16(data + 2);
 
             if (hw_port_is_forbidden(port)) {
                 debug_printf("[HW_DECK] FORBIDDEN port 0x%04x blocked (OUTW)\n", port);
-                event->state = EVENT_STATE_ACCESS_DENIED;
+                pocket->error_code = HW_ERR_ACCESS_DENIED;
                 return -5;
             }
 
-            process_t* proc = process_find(event->pid);
             if (proc) {
                 process_ref_inc(proc);
 
                 if (!process_has_tag(proc, "system")) {
                     if (!hw_port_is_safe_write(port)) {
                         debug_printf("[HW_DECK] Port 0x%04x requires system tag (OUTW)\n", port);
-                    event->state = EVENT_STATE_ACCESS_DENIED;
-                    process_ref_dec(proc);
-                    return -5;
+                        pocket->error_code = HW_ERR_ACCESS_DENIED;
+                        process_ref_dec(proc);
+                        return -5;
                     }
                 }
 
@@ -385,30 +411,32 @@ int hardware_deck_handler(Event* event) {
             }
 
             outw(port, value);
-            event->data[0] = 0;
-            event->state = EVENT_STATE_COMPLETED;
+            data[0] = 0;
             return 0;
         }
 
         case HW_PORT_INL: {
-            uint16_t port = read_u16(event->data);
+            process_t* proc = process_find(pocket->pid);
+            uint8_t* data = vmm_translate_user_addr(proc->cabin, pocket->data_addr, pocket->data_length);
+            if (!data) return -1;
+
+            uint16_t port = read_u16(data);
 
             if (hw_port_is_forbidden(port)) {
                 debug_printf("[HW_DECK] FORBIDDEN port 0x%04x blocked (INL)\n", port);
-                event->state = EVENT_STATE_ACCESS_DENIED;
+                pocket->error_code = HW_ERR_ACCESS_DENIED;
                 return -5;
             }
 
-            process_t* proc = process_find(event->pid);
             if (proc) {
                 process_ref_inc(proc);
 
                 if (!process_has_tag(proc, "system")) {
                     if (!hw_port_is_safe_read(port)) {
                         debug_printf("[HW_DECK] Port 0x%04x requires system tag (INL)\n", port);
-                    event->state = EVENT_STATE_ACCESS_DENIED;
-                    process_ref_dec(proc);
-                    return -5;
+                        pocket->error_code = HW_ERR_ACCESS_DENIED;
+                        process_ref_dec(proc);
+                        return -5;
                     }
                 }
 
@@ -416,31 +444,33 @@ int hardware_deck_handler(Event* event) {
             }
 
             uint32_t value = inl(port);
-            write_u32(event->data, value);
-            event->state = EVENT_STATE_COMPLETED;
+            write_u32(data, value);
             return 0;
         }
 
         case HW_PORT_OUTL: {
-            uint16_t port = read_u16(event->data);
-            uint32_t value = read_u32(event->data + 2);
+            process_t* proc = process_find(pocket->pid);
+            uint8_t* data = vmm_translate_user_addr(proc->cabin, pocket->data_addr, pocket->data_length);
+            if (!data) return -1;
+
+            uint16_t port = read_u16(data);
+            uint32_t value = read_u32(data + 2);
 
             if (hw_port_is_forbidden(port)) {
                 debug_printf("[HW_DECK] FORBIDDEN port 0x%04x blocked (OUTL)\n", port);
-                event->state = EVENT_STATE_ACCESS_DENIED;
+                pocket->error_code = HW_ERR_ACCESS_DENIED;
                 return -5;
             }
 
-            process_t* proc = process_find(event->pid);
             if (proc) {
                 process_ref_inc(proc);
 
                 if (!process_has_tag(proc, "system")) {
                     if (!hw_port_is_safe_write(port)) {
                         debug_printf("[HW_DECK] Port 0x%04x requires system tag (OUTL)\n", port);
-                    event->state = EVENT_STATE_ACCESS_DENIED;
-                    process_ref_dec(proc);
-                    return -5;
+                        pocket->error_code = HW_ERR_ACCESS_DENIED;
+                        process_ref_dec(proc);
+                        return -5;
                     }
                 }
 
@@ -448,166 +478,188 @@ int hardware_deck_handler(Event* event) {
             }
 
             outl(port, value);
-            event->data[0] = 0;
-            event->state = EVENT_STATE_COMPLETED;
+            data[0] = 0;
             return 0;
         }
 
         case HW_IRQ_ENABLE: {
-            uint8_t irq = event->data[0];
+            process_t* proc = process_find(pocket->pid);
+            uint8_t* data = vmm_translate_user_addr(proc->cabin, pocket->data_addr, pocket->data_length);
+            if (!data) return -1;
+
+            uint8_t irq = data[0];
             if (!hw_irq_is_valid(irq)) {
-                event->state = EVENT_STATE_ACCESS_DENIED;
+                pocket->error_code = HW_ERR_ACCESS_DENIED;
                 return -5;
             }
             irqchip_enable_irq(irq);
-            event->data[0] = 0;
-            event->state = EVENT_STATE_COMPLETED;
+            data[0] = 0;
             return 0;
         }
 
         case HW_IRQ_DISABLE: {
-            uint8_t irq = event->data[0];
+            process_t* proc = process_find(pocket->pid);
+            uint8_t* data = vmm_translate_user_addr(proc->cabin, pocket->data_addr, pocket->data_length);
+            if (!data) return -1;
+
+            uint8_t irq = data[0];
             if (!hw_irq_is_valid(irq)) {
-                event->state = EVENT_STATE_ACCESS_DENIED;
+                pocket->error_code = HW_ERR_ACCESS_DENIED;
                 return -5;
             }
             irqchip_disable_irq(irq);
-            event->data[0] = 0;
-            event->state = EVENT_STATE_COMPLETED;
+            data[0] = 0;
             return 0;
         }
 
         case HW_IRQ_GET_ISR: {
+            process_t* proc = process_find(pocket->pid);
+            uint8_t* data = vmm_translate_user_addr(proc->cabin, pocket->data_addr, pocket->data_length);
+            if (!data) return -1;
+
             uint32_t isr = irqchip_get_isr();
-            write_u32(event->data, isr);
-            event->state = EVENT_STATE_COMPLETED;
+            write_u32(data, isr);
             return 0;
         }
 
         case HW_IRQ_GET_IRR: {
+            process_t* proc = process_find(pocket->pid);
+            uint8_t* data = vmm_translate_user_addr(proc->cabin, pocket->data_addr, pocket->data_length);
+            if (!data) return -1;
+
             uint32_t irr = irqchip_get_irr();
-            write_u32(event->data, irr);
-            event->state = EVENT_STATE_COMPLETED;
+            write_u32(data, irr);
             return 0;
         }
 
         case HW_IRQ_REGISTER: {
-            event->state = EVENT_STATE_ERROR;
+            pocket->error_code = 1;
             return -1;
         }
 
         case HW_IRQ_UNREGISTER: {
-            event->state = EVENT_STATE_ERROR;
+            pocket->error_code = 1;
             return -1;
         }
 
         case HW_IRQ_SEND_EOI: {
-            uint8_t irq = event->data[0];
+            process_t* proc = process_find(pocket->pid);
+            uint8_t* data = vmm_translate_user_addr(proc->cabin, pocket->data_addr, pocket->data_length);
+            if (!data) return -1;
+
+            uint8_t irq = data[0];
             if (!hw_irq_is_valid(irq)) {
-                event->state = EVENT_STATE_ACCESS_DENIED;
+                pocket->error_code = HW_ERR_ACCESS_DENIED;
                 return -5;
             }
             irqchip_send_eoi(irq);
-            event->data[0] = 0;
-            event->state = EVENT_STATE_COMPLETED;
+            data[0] = 0;
             return 0;
         }
 
         case HW_CPU_HALT: {
+            process_t* proc = process_find(pocket->pid);
+            uint8_t* data = vmm_translate_user_addr(proc->cabin, pocket->data_addr, pocket->data_length);
+            if (!data) return -1;
+
             hlt();
-            event->data[0] = 0;
-            event->state = EVENT_STATE_COMPLETED;
+            data[0] = 0;
             return 0;
         }
 
         case HW_DISK_INFO: {
-            uint8_t is_master = event->data[0];
+            process_t* proc = process_find(pocket->pid);
+            uint8_t* data = vmm_translate_user_addr(proc->cabin, pocket->data_addr, pocket->data_length);
+            if (!data) return -1;
+
+            uint8_t is_master = data[0];
             ATADevice* device = is_master ? &ata_primary_master : &ata_primary_slave;
 
-            event->data[0] = device->exists;
-            memcpy(&event->data[1], device->model, 40);
-            memcpy(&event->data[41], device->serial, 20);
+            data[0] = device->exists;
+            memcpy(&data[1], device->model, 40);
+            memcpy(&data[41], device->serial, 20);
 
             // Big-endian encoding for portability (8 bytes for 48-bit LBA)
             uint64_t sectors = device->total_sectors;
-            event->data[61] = (sectors >> 56) & 0xFF;
-            event->data[62] = (sectors >> 48) & 0xFF;
-            event->data[63] = (sectors >> 40) & 0xFF;
-            event->data[64] = (sectors >> 32) & 0xFF;
-            event->data[65] = (sectors >> 24) & 0xFF;
-            event->data[66] = (sectors >> 16) & 0xFF;
-            event->data[67] = (sectors >> 8) & 0xFF;
-            event->data[68] = sectors & 0xFF;
+            data[61] = (sectors >> 56) & 0xFF;
+            data[62] = (sectors >> 48) & 0xFF;
+            data[63] = (sectors >> 40) & 0xFF;
+            data[64] = (sectors >> 32) & 0xFF;
+            data[65] = (sectors >> 24) & 0xFF;
+            data[66] = (sectors >> 16) & 0xFF;
+            data[67] = (sectors >> 8) & 0xFF;
+            data[68] = sectors & 0xFF;
 
             uint64_t size_mb = device->size_mb;
-            event->data[69] = (size_mb >> 56) & 0xFF;
-            event->data[70] = (size_mb >> 48) & 0xFF;
-            event->data[71] = (size_mb >> 40) & 0xFF;
-            event->data[72] = (size_mb >> 32) & 0xFF;
-            event->data[73] = (size_mb >> 24) & 0xFF;
-            event->data[74] = (size_mb >> 16) & 0xFF;
-            event->data[75] = (size_mb >> 8) & 0xFF;
-            event->data[76] = size_mb & 0xFF;
+            data[69] = (size_mb >> 56) & 0xFF;
+            data[70] = (size_mb >> 48) & 0xFF;
+            data[71] = (size_mb >> 40) & 0xFF;
+            data[72] = (size_mb >> 32) & 0xFF;
+            data[73] = (size_mb >> 24) & 0xFF;
+            data[74] = (size_mb >> 16) & 0xFF;
+            data[75] = (size_mb >> 8) & 0xFF;
+            data[76] = size_mb & 0xFF;
 
-            event->state = EVENT_STATE_COMPLETED;
             return 0;
         }
 
         case HW_DISK_FLUSH: {
-            uint8_t is_master = event->data[0];
+            process_t* proc = process_find(pocket->pid);
+            uint8_t* data = vmm_translate_user_addr(proc->cabin, pocket->data_addr, pocket->data_length);
+            if (!data) return -1;
+
+            uint8_t is_master = data[0];
             int result = ata_flush_cache(is_master);
-            event->data[0] = (result == 0) ? 0 : 1;
-            event->state = EVENT_STATE_COMPLETED;
+            data[0] = (result == 0) ? 0 : 1;
             return 0;
         }
 
         case HW_KEYBOARD_GETCHAR: {
-            if (!check_keyboard_access(event->pid)) {
-                event->data[0] = 0;
-                event->data[1] = 0;
-                event->data[2] = 0;
-                event->data[3] = HW_KB_ACCESS_DENIED;
-                event->state = EVENT_STATE_ACCESS_DENIED;
+            if (!check_keyboard_access(pocket->pid)) {
+                pocket->error_code = HW_KB_ACCESS_DENIED;
                 return -5;
             }
 
+            process_t* proc = process_find(pocket->pid);
+            uint8_t* data = vmm_translate_user_addr(proc->cabin, pocket->data_addr, pocket->data_length);
+            if (!data) return -1;
+
             if (!keyboard_has_input()) {
-                event->data[0] = 0;
-                event->data[1] = 0;
-                event->data[2] = 0;
-                event->data[3] = HW_KB_NO_DATA;
-                event->state = EVENT_STATE_COMPLETED;
+                data[0] = 0;
+                data[1] = 0;
+                data[2] = 0;
+                data[3] = HW_KB_NO_DATA;
                 return 0;
             }
 
             char ch = keyboard_getchar();
             keyboard_state_t* kb_state = keyboard_get_state();
 
-            event->data[0] = (uint8_t)ch;
-            event->data[1] = kb_state->last_keycode;
+            data[0] = (uint8_t)ch;
+            data[1] = kb_state->last_keycode;
 
             uint8_t modifiers = 0;
             if (kb_state->shift_pressed) modifiers |= 0x01;
             if (kb_state->ctrl_pressed)  modifiers |= 0x02;
             if (kb_state->alt_pressed)   modifiers |= 0x04;
-            event->data[2] = modifiers;
+            data[2] = modifiers;
 
-            event->data[3] = HW_KB_SUCCESS;
-            event->state = EVENT_STATE_COMPLETED;
-
+            data[3] = HW_KB_SUCCESS;
             return 0;
         }
 
         case HW_KEYBOARD_READLINE: {
-            if (!check_keyboard_access(event->pid)) {
-                memset(event->data, 0, EVENT_DATA_SIZE);
-                event->data[EVENT_DATA_SIZE - 1] = HW_KB_ACCESS_DENIED;
-                event->state = EVENT_STATE_ACCESS_DENIED;
+            if (!check_keyboard_access(pocket->pid)) {
+                pocket->error_code = HW_KB_ACCESS_DENIED;
                 return -5;
             }
 
-            uint8_t max_length = event->data[0];
-            uint8_t echo_mode = event->data[1];
+            process_t* proc = process_find(pocket->pid);
+            uint8_t* data = vmm_translate_user_addr(proc->cabin, pocket->data_addr, pocket->data_length);
+            if (!data) return -1;
+
+            uint8_t max_length = data[0];
+            uint8_t echo_mode = data[1];
 
             if (max_length == 0 || max_length > 187) {
                 max_length = 187;
@@ -623,72 +675,72 @@ int hardware_deck_handler(Event* event) {
             if (line_ready) {
                 size_t len = strlen(line_buffer);
 
-                event->data[0] = (len >> 24) & 0xFF;
-                event->data[1] = (len >> 16) & 0xFF;
-                event->data[2] = (len >> 8) & 0xFF;
-                event->data[3] = len & 0xFF;
+                data[0] = (len >> 24) & 0xFF;
+                data[1] = (len >> 16) & 0xFF;
+                data[2] = (len >> 8) & 0xFF;
+                data[3] = len & 0xFF;
 
                 size_t copy_len = len < 187 ? len : 187;
-                memcpy(&event->data[4], line_buffer, copy_len);
-                event->data[4 + copy_len] = '\0';
+                memcpy(&data[4], line_buffer, copy_len);
+                data[4 + copy_len] = '\0';
 
-                event->data[EVENT_DATA_SIZE - 1] = HW_KB_SUCCESS;
-                event->state = EVENT_STATE_COMPLETED;
-
+                data[pocket->data_length - 1] = HW_KB_SUCCESS;
                 return 0;
             } else {
-                event->data[0] = 0;
-                event->data[1] = 0;
-                event->data[2] = 0;
-                event->data[3] = 0;
-                event->data[EVENT_DATA_SIZE - 1] = HW_KB_WOULD_BLOCK;
-                event->first_error = ERR_WOULD_BLOCK;
-                event->state = EVENT_STATE_RETRY;
-
+                data[0] = 0;
+                data[1] = 0;
+                data[2] = 0;
+                data[3] = 0;
+                data[pocket->data_length - 1] = HW_KB_WOULD_BLOCK;
+                pocket->error_code = HW_KB_WOULD_BLOCK;
                 return 0;
             }
         }
 
         case HW_KEYBOARD_STATUS: {
-            if (!check_keyboard_access(event->pid)) {
-                memset(event->data, 0, 192);
-                event->state = EVENT_STATE_ACCESS_DENIED;
+            if (!check_keyboard_access(pocket->pid)) {
+                pocket->error_code = HW_KB_ACCESS_DENIED;
                 return -5;
             }
 
+            process_t* proc = process_find(pocket->pid);
+            uint8_t* data = vmm_translate_user_addr(proc->cabin, pocket->data_addr, pocket->data_length);
+            if (!data) return -1;
+
             uint32_t available = keyboard_available();
 
-            event->data[0] = (available >> 24) & 0xFF;
-            event->data[1] = (available >> 16) & 0xFF;
-            event->data[2] = (available >> 8) & 0xFF;
-            event->data[3] = available & 0xFF;
+            data[0] = (available >> 24) & 0xFF;
+            data[1] = (available >> 16) & 0xFF;
+            data[2] = (available >> 8) & 0xFF;
+            data[3] = available & 0xFF;
 
             uint32_t buffer_size = 256;
-            event->data[4] = (buffer_size >> 24) & 0xFF;
-            event->data[5] = (buffer_size >> 16) & 0xFF;
-            event->data[6] = (buffer_size >> 8) & 0xFF;
-            event->data[7] = buffer_size & 0xFF;
-
-            event->state = EVENT_STATE_COMPLETED;
+            data[4] = (buffer_size >> 24) & 0xFF;
+            data[5] = (buffer_size >> 16) & 0xFF;
+            data[6] = (buffer_size >> 8) & 0xFF;
+            data[7] = buffer_size & 0xFF;
 
             return 0;
         }
 
         case HW_VGA_PUTCHAR: {
-            if (!check_vga_access(event->pid)) {
-                event->data[0] = VGA_ERR_ACCESS_DENIED;
-                event->state = EVENT_STATE_ACCESS_DENIED;
+            if (!check_vga_access(pocket->pid)) {
+                pocket->error_code = VGA_ERR_ACCESS_DENIED;
                 return -5;
             }
 
-            uint8_t row = event->data[0];
-            uint8_t col = event->data[1];
-            uint8_t character = event->data[2];
-            uint8_t color = event->data[3];
+            process_t* proc = process_find(pocket->pid);
+            uint8_t* data = vmm_translate_user_addr(proc->cabin, pocket->data_addr, pocket->data_length);
+            if (!data) return -1;
+
+            uint8_t row = data[0];
+            uint8_t col = data[1];
+            uint8_t character = data[2];
+            uint8_t color = data[3];
 
             if (row >= VGA_HEIGHT || col >= VGA_WIDTH) {
-                event->data[0] = VGA_ERR_OUT_OF_BOUNDS;
-                event->state = EVENT_STATE_ERROR;
+                data[0] = VGA_ERR_OUT_OF_BOUNDS;
+                pocket->error_code = VGA_ERR_OUT_OF_BOUNDS;
                 return -1;
             }
 
@@ -703,25 +755,27 @@ int hardware_deck_handler(Event* event) {
             vga_set_cursor_position(old_x, old_y);
             vga_set_color(old_color);
 
-            event->data[0] = VGA_SUCCESS;
-            event->state = EVENT_STATE_COMPLETED;
+            data[0] = VGA_SUCCESS;
             return 0;
         }
 
         case HW_VGA_PUTSTRING: {
-            if (!check_vga_access(event->pid)) {
-                event->data[0] = VGA_ERR_ACCESS_DENIED;
-                event->state = EVENT_STATE_ACCESS_DENIED;
+            if (!check_vga_access(pocket->pid)) {
+                pocket->error_code = VGA_ERR_ACCESS_DENIED;
                 return -5;
             }
 
-            uint8_t length = event->data[0];
-            uint8_t color = event->data[1];
-            uint8_t flags = event->data[2];
+            process_t* proc = process_find(pocket->pid);
+            uint8_t* data = vmm_translate_user_addr(proc->cabin, pocket->data_addr, pocket->data_length);
+            if (!data) return -1;
+
+            uint8_t length = data[0];
+            uint8_t color  = data[1];
+            uint8_t flags  = data[2];
 
             if (length > 185) {
-                event->data[0] = VGA_ERR_STRING_TOO_LONG;
-                event->state = EVENT_STATE_ERROR;
+                data[0] = VGA_ERR_STRING_TOO_LONG;
+                pocket->error_code = VGA_ERR_STRING_TOO_LONG;
                 return -1;
             }
 
@@ -729,8 +783,8 @@ int hardware_deck_handler(Event* event) {
             vga_set_color(color);
 
             uint8_t chars_written = 0;
-            for (uint8_t i = 0; i < length && event->data[4 + i] != '\0'; i++) {
-                char ch = event->data[4 + i];
+            for (uint8_t i = 0; i < length && data[4 + i] != '\0'; i++) {
+                char ch = data[4 + i];
                 vga_print_char(ch, color);
                 serial_putchar(ch);
                 chars_written++;
@@ -743,46 +797,50 @@ int hardware_deck_handler(Event* event) {
             uint8_t final_row = vga_get_cursor_position_y();
             uint8_t final_col = vga_get_cursor_position_x();
 
-            event->data[0] = VGA_SUCCESS;
-            event->data[1] = chars_written;
-            event->data[2] = final_row;
-            event->data[3] = final_col;
-            event->state = EVENT_STATE_COMPLETED;
+            data[0] = VGA_SUCCESS;
+            data[1] = chars_written;
+            data[2] = final_row;
+            data[3] = final_col;
             return 0;
         }
 
         case HW_VGA_CLEAR_SCREEN: {
-            if (!check_vga_access(event->pid)) {
-                event->data[0] = VGA_ERR_ACCESS_DENIED;
-                event->state = EVENT_STATE_ACCESS_DENIED;
+            if (!check_vga_access(pocket->pid)) {
+                pocket->error_code = VGA_ERR_ACCESS_DENIED;
                 return -5;
             }
 
-            uint8_t color = event->data[0];
+            process_t* proc = process_find(pocket->pid);
+            uint8_t* data = vmm_translate_user_addr(proc->cabin, pocket->data_addr, pocket->data_length);
+            if (!data) return -1;
+
+            uint8_t color = data[0];
             uint8_t old_color = vga_get_color();
 
             vga_set_color(color);
             vga_clear_screen();
             vga_set_color(old_color);
 
-            event->data[0] = VGA_SUCCESS;
-            event->state = EVENT_STATE_COMPLETED;
+            data[0] = VGA_SUCCESS;
             return 0;
         }
 
         case HW_VGA_CLEAR_LINE: {
-            if (!check_vga_access(event->pid)) {
-                event->data[0] = VGA_ERR_ACCESS_DENIED;
-                event->state = EVENT_STATE_ACCESS_DENIED;
+            if (!check_vga_access(pocket->pid)) {
+                pocket->error_code = VGA_ERR_ACCESS_DENIED;
                 return -5;
             }
 
-            uint8_t row = event->data[0];
-            uint8_t color = event->data[1];
+            process_t* proc = process_find(pocket->pid);
+            uint8_t* data = vmm_translate_user_addr(proc->cabin, pocket->data_addr, pocket->data_length);
+            if (!data) return -1;
+
+            uint8_t row = data[0];
+            uint8_t color = data[1];
 
             if (row >= VGA_HEIGHT) {
-                event->data[0] = VGA_ERR_OUT_OF_BOUNDS;
-                event->state = EVENT_STATE_ERROR;
+                data[0] = VGA_ERR_OUT_OF_BOUNDS;
+                pocket->error_code = VGA_ERR_OUT_OF_BOUNDS;
                 return -1;
             }
 
@@ -791,45 +849,52 @@ int hardware_deck_handler(Event* event) {
             vga_clear_line(row);
             vga_set_color(old_color);
 
-            event->data[0] = VGA_SUCCESS;
-            event->state = EVENT_STATE_COMPLETED;
+            data[0] = VGA_SUCCESS;
             return 0;
         }
 
         case HW_VGA_CLEAR_TO_EOL: {
-            if (!check_vga_access(event->pid)) {
-                event->data[0] = VGA_ERR_ACCESS_DENIED;
-                event->state = EVENT_STATE_ACCESS_DENIED;
+            if (!check_vga_access(pocket->pid)) {
+                pocket->error_code = VGA_ERR_ACCESS_DENIED;
                 return -5;
             }
 
+            process_t* proc = process_find(pocket->pid);
+            uint8_t* data = vmm_translate_user_addr(proc->cabin, pocket->data_addr, pocket->data_length);
+            if (!data) return -1;
+
             vga_clear_to_eol();
 
-            event->data[0] = VGA_SUCCESS;
-            event->state = EVENT_STATE_COMPLETED;
+            data[0] = VGA_SUCCESS;
             return 0;
         }
 
         case HW_VGA_GET_CURSOR: {
+            process_t* proc = process_find(pocket->pid);
+            uint8_t* data = vmm_translate_user_addr(proc->cabin, pocket->data_addr, pocket->data_length);
+            if (!data) return -1;
+
             uint8_t row = vga_get_cursor_position_y();
             uint8_t col = vga_get_cursor_position_x();
 
-            event->data[0] = VGA_SUCCESS;
-            event->data[1] = row;
-            event->data[2] = col;
-            event->state = EVENT_STATE_COMPLETED;
+            data[0] = VGA_SUCCESS;
+            data[1] = row;
+            data[2] = col;
             return 0;
         }
 
         case HW_VGA_SET_CURSOR: {
-            if (!check_vga_access(event->pid)) {
-                event->data[0] = VGA_ERR_ACCESS_DENIED;
-                event->state = EVENT_STATE_ACCESS_DENIED;
+            if (!check_vga_access(pocket->pid)) {
+                pocket->error_code = VGA_ERR_ACCESS_DENIED;
                 return -5;
             }
 
-            uint8_t row = event->data[0];
-            uint8_t col = event->data[1];
+            process_t* proc = process_find(pocket->pid);
+            uint8_t* data = vmm_translate_user_addr(proc->cabin, pocket->data_addr, pocket->data_length);
+            if (!data) return -1;
+
+            uint8_t row = data[0];
+            uint8_t col = data[1];
 
             if (row >= VGA_HEIGHT) row = VGA_HEIGHT - 1;
             if (col >= VGA_WIDTH) col = VGA_WIDTH - 1;
@@ -839,102 +904,111 @@ int hardware_deck_handler(Event* event) {
             uint8_t clamped_row = vga_get_cursor_position_y();
             uint8_t clamped_col = vga_get_cursor_position_x();
 
-            event->data[0] = VGA_SUCCESS;
-            event->data[1] = clamped_row;
-            event->data[2] = clamped_col;
-            event->state = EVENT_STATE_COMPLETED;
+            data[0] = VGA_SUCCESS;
+            data[1] = clamped_row;
+            data[2] = clamped_col;
             return 0;
         }
 
         case HW_VGA_SET_COLOR: {
-            if (!check_vga_access(event->pid)) {
-                event->data[0] = VGA_ERR_ACCESS_DENIED;
-                event->state = EVENT_STATE_ACCESS_DENIED;
+            if (!check_vga_access(pocket->pid)) {
+                pocket->error_code = VGA_ERR_ACCESS_DENIED;
                 return -5;
             }
 
-            uint8_t color = event->data[0];
+            process_t* proc = process_find(pocket->pid);
+            uint8_t* data = vmm_translate_user_addr(proc->cabin, pocket->data_addr, pocket->data_length);
+            if (!data) return -1;
+
+            uint8_t color = data[0];
             uint8_t old_color = vga_get_color();
 
             vga_set_color(color);
 
-            event->data[0] = VGA_SUCCESS;
-            event->data[1] = old_color;
-            event->state = EVENT_STATE_COMPLETED;
+            data[0] = VGA_SUCCESS;
+            data[1] = old_color;
             return 0;
         }
 
         case HW_VGA_GET_COLOR: {
+            process_t* proc = process_find(pocket->pid);
+            uint8_t* data = vmm_translate_user_addr(proc->cabin, pocket->data_addr, pocket->data_length);
+            if (!data) return -1;
+
             uint8_t color = vga_get_color();
 
-            event->data[0] = VGA_SUCCESS;
-            event->data[1] = color;
-            event->state = EVENT_STATE_COMPLETED;
+            data[0] = VGA_SUCCESS;
+            data[1] = color;
             return 0;
         }
 
         case HW_VGA_SCROLL_UP: {
-            if (!check_vga_access(event->pid)) {
-                event->data[0] = VGA_ERR_ACCESS_DENIED;
-                event->state = EVENT_STATE_ACCESS_DENIED;
+            if (!check_vga_access(pocket->pid)) {
+                pocket->error_code = VGA_ERR_ACCESS_DENIED;
                 return -5;
             }
 
+            process_t* proc = process_find(pocket->pid);
+            uint8_t* data = vmm_translate_user_addr(proc->cabin, pocket->data_addr, pocket->data_length);
+            if (!data) return -1;
+
             vga_scroll_up();
 
-            event->data[0] = VGA_SUCCESS;
-            event->state = EVENT_STATE_COMPLETED;
+            data[0] = VGA_SUCCESS;
             return 0;
         }
 
         case HW_VGA_NEWLINE: {
-            if (!check_vga_access(event->pid)) {
-                event->data[0] = VGA_ERR_ACCESS_DENIED;
-                event->state = EVENT_STATE_ACCESS_DENIED;
+            if (!check_vga_access(pocket->pid)) {
+                pocket->error_code = VGA_ERR_ACCESS_DENIED;
                 return -5;
             }
+
+            process_t* proc = process_find(pocket->pid);
+            uint8_t* data = vmm_translate_user_addr(proc->cabin, pocket->data_addr, pocket->data_length);
+            if (!data) return -1;
 
             vga_print_newline();
 
             uint8_t new_row = vga_get_cursor_position_y();
             uint8_t new_col = vga_get_cursor_position_x();
 
-            event->data[0] = VGA_SUCCESS;
-            event->data[1] = new_row;
-            event->data[2] = new_col;
-            event->state = EVENT_STATE_COMPLETED;
+            data[0] = VGA_SUCCESS;
+            data[1] = new_row;
+            data[2] = new_col;
             return 0;
         }
 
         case HW_VGA_GET_DIMENSIONS: {
-            event->data[0] = VGA_SUCCESS;
-            event->data[1] = VGA_WIDTH;
-            event->data[2] = VGA_HEIGHT;
-            event->state = EVENT_STATE_COMPLETED;
+            process_t* proc = process_find(pocket->pid);
+            uint8_t* data = vmm_translate_user_addr(proc->cabin, pocket->data_addr, pocket->data_length);
+            if (!data) return -1;
+
+            data[0] = VGA_SUCCESS;
+            data[1] = VGA_WIDTH;
+            data[2] = VGA_HEIGHT;
             return 0;
         }
 
         case HW_SYSTEM_REBOOT:
-            return do_reboot(event);
+            return do_reboot(pocket);
 
         case HW_SYSTEM_SHUTDOWN:
-            return do_shutdown(event);
+            return do_shutdown(pocket);
 
         case HW_USB_INIT: {
-            process_t* proc = process_find(event->pid);
+            process_t* proc = process_find(pocket->pid);
             if (!proc) {
-                event->data[0] = USB_ERR_ACCESS_DENIED;
-                event->state = EVENT_STATE_ACCESS_DENIED;
+                pocket->error_code = USB_ERR_ACCESS_DENIED;
                 return -5;
             }
 
             process_ref_inc(proc);
 
             if (!process_has_tag(proc, "hw_usb") && !process_has_tag(proc, "system")) {
-                event->data[0] = USB_ERR_ACCESS_DENIED;
-                    event->state = EVENT_STATE_ACCESS_DENIED;
-                    process_ref_dec(proc);
-                    return -5;
+                pocket->error_code = USB_ERR_ACCESS_DENIED;
+                process_ref_dec(proc);
+                return -5;
             }
 
             int result = xhci_init();
@@ -942,37 +1016,33 @@ int hardware_deck_handler(Event* event) {
             process_ref_dec(proc);
 
             if (result != 0) {
-                event->data[0] = USB_ERR_NO_CONTROLLER;
-                event->state = EVENT_STATE_ERROR;
+                pocket->error_code = USB_ERR_NO_CONTROLLER;
                 return -1;
             }
 
-            event->data[0] = 0x00;
-            event->state = EVENT_STATE_COMPLETED;
+            uint8_t* data = vmm_translate_user_addr(proc->cabin, pocket->data_addr, pocket->data_length);
+            if (data) data[0] = 0x00;
             return 0;
         }
 
         case HW_USB_RESET: {
-            process_t* proc = process_find(event->pid);
+            process_t* proc = process_find(pocket->pid);
             if (!proc) {
-                event->data[0] = USB_ERR_ACCESS_DENIED;
-                event->state = EVENT_STATE_ACCESS_DENIED;
+                pocket->error_code = USB_ERR_ACCESS_DENIED;
                 return -5;
             }
 
             process_ref_inc(proc);
 
             if (!process_has_tag(proc, "hw_usb") && !process_has_tag(proc, "system")) {
-                event->data[0] = USB_ERR_ACCESS_DENIED;
-                    event->state = EVENT_STATE_ACCESS_DENIED;
-                    process_ref_dec(proc);
-                    return -5;
+                pocket->error_code = USB_ERR_ACCESS_DENIED;
+                process_ref_dec(proc);
+                return -5;
             }
 
             xhci_controller_t* ctrl = xhci_get_controller();
             if (!ctrl) {
-                event->data[0] = USB_ERR_NOT_INITIALIZED;
-                event->state = EVENT_STATE_ERROR;
+                pocket->error_code = USB_ERR_NOT_INITIALIZED;
                 process_ref_dec(proc);
                 return -1;
             }
@@ -982,37 +1052,33 @@ int hardware_deck_handler(Event* event) {
             process_ref_dec(proc);
 
             if (result != 0) {
-                event->data[0] = USB_ERR_RESET_TIMEOUT;
-                event->state = EVENT_STATE_ERROR;
+                pocket->error_code = USB_ERR_RESET_TIMEOUT;
                 return -1;
             }
 
-            event->data[0] = 0x00;
-            event->state = EVENT_STATE_COMPLETED;
+            uint8_t* data = vmm_translate_user_addr(proc->cabin, pocket->data_addr, pocket->data_length);
+            if (data) data[0] = 0x00;
             return 0;
         }
 
         case HW_USB_START: {
-            process_t* proc = process_find(event->pid);
+            process_t* proc = process_find(pocket->pid);
             if (!proc) {
-                event->data[0] = USB_ERR_ACCESS_DENIED;
-                event->state = EVENT_STATE_ACCESS_DENIED;
+                pocket->error_code = USB_ERR_ACCESS_DENIED;
                 return -5;
             }
 
             process_ref_inc(proc);
 
             if (!process_has_tag(proc, "hw_usb") && !process_has_tag(proc, "system")) {
-                event->data[0] = USB_ERR_ACCESS_DENIED;
-                    event->state = EVENT_STATE_ACCESS_DENIED;
-                    process_ref_dec(proc);
-                    return -5;
+                pocket->error_code = USB_ERR_ACCESS_DENIED;
+                process_ref_dec(proc);
+                return -5;
             }
 
             xhci_controller_t* ctrl = xhci_get_controller();
             if (!ctrl) {
-                event->data[0] = USB_ERR_NOT_INITIALIZED;
-                event->state = EVENT_STATE_ERROR;
+                pocket->error_code = USB_ERR_NOT_INITIALIZED;
                 process_ref_dec(proc);
                 return -1;
             }
@@ -1022,124 +1088,123 @@ int hardware_deck_handler(Event* event) {
             process_ref_dec(proc);
 
             if (result != 0) {
-                event->data[0] = USB_ERR_RESET_TIMEOUT;
-                event->state = EVENT_STATE_ERROR;
+                pocket->error_code = USB_ERR_RESET_TIMEOUT;
                 return -1;
             }
 
-            event->data[0] = 0x00;
-            event->state = EVENT_STATE_COMPLETED;
+            uint8_t* data = vmm_translate_user_addr(proc->cabin, pocket->data_addr, pocket->data_length);
+            if (data) data[0] = 0x00;
             return 0;
         }
 
         case HW_USB_STOP: {
-            process_t* proc = process_find(event->pid);
+            process_t* proc = process_find(pocket->pid);
             if (!proc) {
-                event->data[0] = USB_ERR_ACCESS_DENIED;
-                event->state = EVENT_STATE_ACCESS_DENIED;
+                pocket->error_code = USB_ERR_ACCESS_DENIED;
                 return -5;
             }
 
             process_ref_inc(proc);
 
             if (!process_has_tag(proc, "hw_usb") && !process_has_tag(proc, "system")) {
-                event->data[0] = USB_ERR_ACCESS_DENIED;
-                    event->state = EVENT_STATE_ACCESS_DENIED;
-                    process_ref_dec(proc);
-                    return -5;
+                pocket->error_code = USB_ERR_ACCESS_DENIED;
+                process_ref_dec(proc);
+                return -5;
             }
 
             process_ref_dec(proc);
 
-            event->data[0] = 0x00;
-            event->state = EVENT_STATE_COMPLETED;
+            uint8_t* data = vmm_translate_user_addr(proc->cabin, pocket->data_addr, pocket->data_length);
+            if (data) data[0] = 0x00;
             return 0;
         }
 
         case HW_USB_PORT_STATUS: {
-            process_t* proc = process_find(event->pid);
+            process_t* proc = process_find(pocket->pid);
             if (!proc) {
-                event->data[0] = USB_ERR_ACCESS_DENIED;
-                event->state = EVENT_STATE_ACCESS_DENIED;
+                pocket->error_code = USB_ERR_ACCESS_DENIED;
                 return -5;
             }
 
             process_ref_inc(proc);
 
             if (!process_has_tag(proc, "hw_usb") && !process_has_tag(proc, "system")) {
-                event->data[0] = USB_ERR_ACCESS_DENIED;
-                    event->state = EVENT_STATE_ACCESS_DENIED;
-                    process_ref_dec(proc);
-                    return -5;
+                pocket->error_code = USB_ERR_ACCESS_DENIED;
+                process_ref_dec(proc);
+                return -5;
             }
 
-            uint8_t port = event->data[0];
+            uint8_t* data = vmm_translate_user_addr(proc->cabin, pocket->data_addr, pocket->data_length);
+            if (!data) {
+                process_ref_dec(proc);
+                return -1;
+            }
+
+            uint8_t port = data[0];
             xhci_controller_t* ctrl = xhci_get_controller();
 
             if (!ctrl || !ctrl->initialized) {
-                event->data[0] = USB_ERR_NOT_INITIALIZED;
-                event->state = EVENT_STATE_ERROR;
+                pocket->error_code = USB_ERR_NOT_INITIALIZED;
                 process_ref_dec(proc);
                 return -1;
             }
 
             if (port == 0 || port > ctrl->max_ports) {
-                event->data[0] = USB_ERR_INVALID_PORT;
-                event->state = EVENT_STATE_ERROR;
+                pocket->error_code = USB_ERR_INVALID_PORT;
                 process_ref_dec(proc);
                 return -1;
             }
 
             uint32_t portsc = xhci_get_port_status(ctrl, port);
 
-            event->data[0] = 0x00;
-            event->data[1] = (portsc >> 24) & 0xFF;
-            event->data[2] = (portsc >> 16) & 0xFF;
-            event->data[3] = (portsc >> 8) & 0xFF;
-            event->data[4] = portsc & 0xFF;
-            event->state = EVENT_STATE_COMPLETED;
+            data[0] = 0x00;
+            data[1] = (portsc >> 24) & 0xFF;
+            data[2] = (portsc >> 16) & 0xFF;
+            data[3] = (portsc >> 8) & 0xFF;
+            data[4] = portsc & 0xFF;
 
             process_ref_dec(proc);
             return 0;
         }
 
         case HW_USB_PORT_RESET: {
-            process_t* proc = process_find(event->pid);
+            process_t* proc = process_find(pocket->pid);
             if (!proc) {
-                event->data[0] = USB_ERR_ACCESS_DENIED;
-                event->state = EVENT_STATE_ACCESS_DENIED;
+                pocket->error_code = USB_ERR_ACCESS_DENIED;
                 return -5;
             }
 
             process_ref_inc(proc);
 
             if (!process_has_tag(proc, "hw_usb") && !process_has_tag(proc, "system")) {
-                event->data[0] = USB_ERR_ACCESS_DENIED;
-                    event->state = EVENT_STATE_ACCESS_DENIED;
-                    process_ref_dec(proc);
-                    return -5;
+                pocket->error_code = USB_ERR_ACCESS_DENIED;
+                process_ref_dec(proc);
+                return -5;
             }
 
-            uint8_t port = event->data[0];
+            uint8_t* data = vmm_translate_user_addr(proc->cabin, pocket->data_addr, pocket->data_length);
+            if (!data) {
+                process_ref_dec(proc);
+                return -1;
+            }
+
+            uint8_t port = data[0];
             xhci_controller_t* ctrl = xhci_get_controller();
 
             if (!ctrl || !ctrl->initialized) {
-                event->data[0] = USB_ERR_NOT_INITIALIZED;
-                event->state = EVENT_STATE_ERROR;
+                pocket->error_code = USB_ERR_NOT_INITIALIZED;
                 process_ref_dec(proc);
                 return -1;
             }
 
             if (port == 0 || port > ctrl->max_ports) {
-                event->data[0] = USB_ERR_INVALID_PORT;
-                event->state = EVENT_STATE_ERROR;
+                pocket->error_code = USB_ERR_INVALID_PORT;
                 process_ref_dec(proc);
                 return -1;
             }
 
             if (!xhci_port_has_device(ctrl, port)) {
-                event->data[0] = USB_ERR_NO_DEVICE;
-                event->state = EVENT_STATE_ERROR;
+                pocket->error_code = USB_ERR_NO_DEVICE;
                 process_ref_dec(proc);
                 return -1;
             }
@@ -1147,79 +1212,82 @@ int hardware_deck_handler(Event* event) {
             int result = xhci_reset_port(ctrl, port);
 
             if (result != 0) {
-                event->data[0] = USB_ERR_RESET_TIMEOUT;
-                event->state = EVENT_STATE_ERROR;
+                pocket->error_code = USB_ERR_RESET_TIMEOUT;
                 process_ref_dec(proc);
                 return -1;
             }
 
-            event->data[0] = 0x00;
-            event->state = EVENT_STATE_COMPLETED;
+            data[0] = 0x00;
 
             process_ref_dec(proc);
             return 0;
         }
 
         case HW_USB_PORT_QUERY: {
-            process_t* proc = process_find(event->pid);
+            process_t* proc = process_find(pocket->pid);
             if (!proc) {
-                event->data[0] = USB_ERR_ACCESS_DENIED;
-                event->state = EVENT_STATE_ACCESS_DENIED;
+                pocket->error_code = USB_ERR_ACCESS_DENIED;
                 return -5;
             }
 
             process_ref_inc(proc);
 
             if (!process_has_tag(proc, "hw_usb") && !process_has_tag(proc, "system")) {
-                event->data[0] = USB_ERR_ACCESS_DENIED;
-                    event->state = EVENT_STATE_ACCESS_DENIED;
-                    process_ref_dec(proc);
-                    return -5;
+                pocket->error_code = USB_ERR_ACCESS_DENIED;
+                process_ref_dec(proc);
+                return -5;
             }
 
             xhci_controller_t* ctrl = xhci_get_controller();
 
             if (!ctrl || !ctrl->initialized) {
-                event->data[0] = USB_ERR_NOT_INITIALIZED;
-                event->state = EVENT_STATE_ERROR;
+                pocket->error_code = USB_ERR_NOT_INITIALIZED;
                 process_ref_dec(proc);
                 return -1;
             }
 
-            event->data[0] = 0x00;
-            event->data[1] = ctrl->max_ports;
-            event->data[2] = ctrl->max_slots;
-            event->data[3] = ctrl->irq_line;
-            event->data[4] = ctrl->use_polling ? 1 : 0;
-            event->state = EVENT_STATE_COMPLETED;
+            uint8_t* data = vmm_translate_user_addr(proc->cabin, pocket->data_addr, pocket->data_length);
+            if (!data) {
+                process_ref_dec(proc);
+                return -1;
+            }
+
+            data[0] = 0x00;
+            data[1] = ctrl->max_ports;
+            data[2] = ctrl->max_slots;
+            data[3] = ctrl->irq_line;
+            data[4] = ctrl->use_polling ? 1 : 0;
 
             process_ref_dec(proc);
             return 0;
         }
 
         case HW_USB_ENUM_DEVICE: {
-            process_t* proc = process_find(event->pid);
+            process_t* proc = process_find(pocket->pid);
             if (!proc) {
-                event->data[0] = USB_ERR_ACCESS_DENIED;
-                event->state = EVENT_STATE_ACCESS_DENIED;
+                pocket->error_code = USB_ERR_ACCESS_DENIED;
                 return -5;
             }
 
             process_ref_inc(proc);
 
             if (!process_has_tag(proc, "hw_usb") && !process_has_tag(proc, "system")) {
-                event->data[0] = USB_ERR_ACCESS_DENIED;
-                    event->state = EVENT_STATE_ACCESS_DENIED;
-                    process_ref_dec(proc);
-                    return -5;
+                pocket->error_code = USB_ERR_ACCESS_DENIED;
+                process_ref_dec(proc);
+                return -5;
             }
 
-            uint8_t port = event->data[0];
+            uint8_t* data = vmm_translate_user_addr(proc->cabin, pocket->data_addr, pocket->data_length);
+            if (!data) {
+                process_ref_dec(proc);
+                return -1;
+            }
+
+            uint8_t port = data[0];
 
             xhci_controller_t* ctrl = xhci_get_controller();
             if (!ctrl || !ctrl->running) {
-                event->data[0] = USB_ERR_NO_CONTROLLER;
-                event->state = EVENT_STATE_ERROR;
+                pocket->error_code = USB_ERR_NO_CONTROLLER;
                 process_ref_dec(proc);
                 return -1;
             }
@@ -1228,79 +1296,78 @@ int hardware_deck_handler(Event* event) {
             process_ref_dec(proc);
 
             if (result < 0) {
-                event->state = EVENT_STATE_ERROR;
-
                 if (result == -1) {
-                    event->data[0] = USB_ERR_NO_CONTROLLER;
+                    data[0] = USB_ERR_NO_CONTROLLER;
                 } else if (result == -2) {
-                    event->data[0] = USB_ERR_INVALID_PORT;
+                    data[0] = USB_ERR_INVALID_PORT;
                 } else if (result == -3) {
-                    event->data[0] = USB_ERR_INVALID_PORT;
+                    data[0] = USB_ERR_INVALID_PORT;
                 } else if (result == -4) {
-                    event->data[0] = 0x04;
+                    data[0] = 0x04;
                 } else if (result == -5) {
-                    event->data[0] = 0x02;
+                    data[0] = 0x02;
                 } else if (result == -6) {
-                    event->data[0] = 0x03;
+                    data[0] = 0x03;
                 } else {
-                    event->data[0] = 0xFF;
+                    data[0] = 0xFF;
                 }
 
+                pocket->error_code = data[0];
                 return -1;
             }
 
-            event->data[0] = 0x00;
-            event->state = EVENT_STATE_COMPLETED;
+            data[0] = 0x00;
             return 0;
         }
 
         case HW_USB_GET_INFO: {
-            process_t* proc = process_find(event->pid);
+            process_t* proc = process_find(pocket->pid);
             if (!proc) {
-                event->data[0] = USB_ERR_ACCESS_DENIED;
-                event->state = EVENT_STATE_ACCESS_DENIED;
+                pocket->error_code = USB_ERR_ACCESS_DENIED;
                 return -5;
             }
 
             process_ref_inc(proc);
 
             if (!process_has_tag(proc, "hw_usb") && !process_has_tag(proc, "system")) {
-                event->data[0] = USB_ERR_ACCESS_DENIED;
-                    event->state = EVENT_STATE_ACCESS_DENIED;
-                    process_ref_dec(proc);
-                    return -5;
+                pocket->error_code = USB_ERR_ACCESS_DENIED;
+                process_ref_dec(proc);
+                return -5;
             }
 
-            uint8_t slot_id = event->data[0];
+            uint8_t* data = vmm_translate_user_addr(proc->cabin, pocket->data_addr, pocket->data_length);
+            if (!data) {
+                process_ref_dec(proc);
+                return -1;
+            }
+
+            uint8_t slot_id = data[0];
 
             xhci_controller_t* ctrl = xhci_get_controller();
             if (!ctrl || !ctrl->running) {
-                event->data[0] = USB_ERR_NO_CONTROLLER;
-                event->state = EVENT_STATE_ERROR;
+                pocket->error_code = USB_ERR_NO_CONTROLLER;
                 process_ref_dec(proc);
                 return -1;
             }
 
             xhci_device_slot_t* slot = xhci_get_device_slot(ctrl, slot_id);
             if (!slot) {
-                event->data[0] = USB_ERR_NO_DEVICE;
-                event->state = EVENT_STATE_ERROR;
+                pocket->error_code = USB_ERR_NO_DEVICE;
                 process_ref_dec(proc);
                 return -1;
             }
 
-            event->data[0] = 0x00;
-            event->data[1] = slot->slot_id;
-            event->data[2] = slot->port_num;
-            event->data[3] = slot->state;
-            event->state = EVENT_STATE_COMPLETED;
+            data[0] = 0x00;
+            data[1] = slot->slot_id;
+            data[2] = slot->port_num;
+            data[3] = slot->state;
 
             process_ref_dec(proc);
             return 0;
         }
 
         default: {
-            event->state = EVENT_STATE_ERROR;
+            pocket->error_code = 1;
             return -1;
         }
     }
