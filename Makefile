@@ -65,7 +65,6 @@ KERNEL_ENTRY_SRC  = $(ENTRYDIR)/kernel_entry.asm
 
 # ==== DISCOVER FILES ====
 # Exclude macOS metadata files (._*) and userspace
-# Include test files since CONFIG_RUN_STARTUP_TESTS is enabled
 C_SRCS      := $(shell find $(SRCDIR) -name '*.c' ! -name '._*' ! -path '*/userspace/*')
 ASM_SRCS    := $(shell find $(SRCDIR) -name '*.asm' ! -name '._*' ! -path '*/userspace/*')
 

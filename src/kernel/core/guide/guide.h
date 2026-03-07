@@ -39,7 +39,4 @@ typedef struct {
 deck_handler_t guide_get_deck_handler(uint8_t deck_id);
 uint32_t guide_alloc_event_id(void);
 
-void guide_testrun(void);
-void test_full_cycle(void);
-
 #endif // GUIDE_H
