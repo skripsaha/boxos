@@ -5,10 +5,14 @@
 
 // Selector format: [Index:13][TI:1][RPL:2]
 // RPL: 0=Ring0 (kernel), 3=Ring3 (user)
+//
+// SYSRET layout: CPU computes User SS = STAR[63:48]+8, User CS = STAR[63:48]+16.
+// With STAR[63:48]=0x10: SS=0x18|3=0x1B, CS=0x20|3=0x23.
+// Therefore User Data MUST be at index 3, User Code at index 4.
 #define GDT_KERNEL_CODE   0x08              // Index 1, RPL=0
 #define GDT_KERNEL_DATA   0x10              // Index 2, RPL=0
-#define GDT_USER_CODE     (0x18 | 3)        // Index 3, RPL=3 (0x1B)
-#define GDT_USER_DATA     (0x20 | 3)        // Index 4, RPL=3 (0x23)
+#define GDT_USER_DATA     (0x18 | 3)        // Index 3, RPL=3 (0x1B) — before Code for SYSRET
+#define GDT_USER_CODE     (0x20 | 3)        // Index 4, RPL=3 (0x23)
 #define GDT_TSS           0x28              // Index 5
 
 typedef struct {

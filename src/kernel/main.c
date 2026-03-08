@@ -31,6 +31,7 @@
 #include "cpuid.h"
 #include "cpu_caps_page.h"
 #include "boot_info.h"
+#include "syscall.h"
 
 void kernel_main(void)
 {
@@ -59,6 +60,9 @@ void kernel_main(void)
 
     debug_printf("[INIT] IDT...\n");
     idt_init();
+
+    debug_printf("[INIT] Fast Notify (SYSCALL/SYSRET)...\n");
+    syscall_init();
 
     debug_printf("[INIT] PIC (early init for boot)...\n");
     pic_init();

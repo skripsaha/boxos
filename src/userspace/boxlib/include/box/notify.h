@@ -78,7 +78,7 @@ bool pocket_add_prefix(Pocket* p, uint8_t deck_id, uint8_t opcode);
 // Set data buffer in the Pocket (points to cabin heap)
 void pocket_set_data(Pocket* p, void* data, uint32_t length);
 
-// Submit a Pocket: push to PocketRing and fire int 0x80.
+// Submit a Pocket: push to PocketRing and notify the kernel.
 // Returns 0 on success.
 int pocket_submit(Pocket* p);
 
