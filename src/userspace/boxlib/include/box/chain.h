@@ -10,8 +10,8 @@ void route(uint32_t target_pid);
 void route_tag(const char* tag);
 void hw_listen(uint8_t source_type, uint8_t flags);
 
-void proc_kill(uint16_t pid);
-void proc_query(uint16_t pid);
+void proc_kill(uint32_t pid);
+void proc_query(uint32_t pid);
 void proc_spawn(const char* filename);
 
 void buf_alloc(uint8_t size_class);

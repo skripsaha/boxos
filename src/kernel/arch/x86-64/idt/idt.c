@@ -351,9 +351,9 @@ void syscall_handler(interrupt_frame_t* frame) {
     spin_unlock(&sched_state->scheduler_lock);
 
     frame->rax = 0;
-    context_save_from_frame(proc, frame);
 
     // Architecture flow: push -> set WAITING -> guide() -> schedule()
+    // guide() wakes process back to WORKING, schedule() does the single context save.
     ready_queue_push(&g_ready_queue, proc);
     process_set_state(proc, PROC_WAITING);
     guide();

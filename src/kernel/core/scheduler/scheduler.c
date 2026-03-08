@@ -141,35 +141,6 @@ void schedule(void* frame_ptr) {
         context_save_from_frame(current, frame);
     }
 
-    // Periodic cleanup of finished processes
-    if ((sched.total_ticks % SCHEDULER_CRITICAL_STARVATION_TICKS) == 0) {
-        uint32_t cleanup_pids[16];
-        uint32_t cleanup_count = 0;
-
-        process_list_lock();
-        process_t* proc = process_get_first();
-        while (proc && cleanup_count < 16) {
-            process_state_t state = process_get_state(proc);
-            uint32_t refs = process_ref_count(proc);
-
-            if ((state == PROC_CRASHED || state == PROC_DONE) && refs == 0) {
-                cleanup_pids[cleanup_count++] = proc->pid;
-            }
-            proc = proc->next;
-        }
-        process_list_unlock();
-
-        for (uint32_t i = 0; i < cleanup_count; i++) {
-            process_t* p = process_find(cleanup_pids[i]);
-            if (p) {
-                if (process_get_state(p) == PROC_DONE) {
-                    process_set_state(p, PROC_CRASHED);
-                }
-                process_destroy_safe(p);
-            }
-        }
-    }
-
     // Select next process
     process_t* next = scheduler_select_next();
 

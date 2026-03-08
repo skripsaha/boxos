@@ -180,6 +180,49 @@ void guide(void)
         }
     }
 
+    // Periodic cleanup of finished processes (runs in syscall context, not IRQ)
+    {
+        static uint64_t last_cleanup_tsc = 0;
+        uint64_t now_tsc = rdtsc();
+        if (last_cleanup_tsc == 0)
+            last_cleanup_tsc = now_tsc;
+
+        if ((now_tsc - last_cleanup_tsc) > cpu_ms_to_tsc(1000))
+        {
+            uint32_t cleanup_pids[16];
+            uint32_t cleanup_count = 0;
+
+            process_list_lock();
+            process_t *p = process_get_first();
+            while (p && cleanup_count < 16)
+            {
+                process_state_t state = process_get_state(p);
+                uint32_t refs = process_ref_count(p);
+                if ((state == PROC_CRASHED || state == PROC_DONE) && refs == 0)
+                {
+                    cleanup_pids[cleanup_count++] = p->pid;
+                }
+                p = p->next;
+            }
+            process_list_unlock();
+
+            for (uint32_t i = 0; i < cleanup_count; i++)
+            {
+                process_t *cp = process_find(cleanup_pids[i]);
+                if (cp)
+                {
+                    if (process_get_state(cp) == PROC_DONE)
+                    {
+                        process_set_state(cp, PROC_CRASHED);
+                    }
+                    process_destroy_safe(cp);
+                }
+            }
+
+            last_cleanup_tsc = now_tsc;
+        }
+    }
+
     // Handle async I/O completions and dispatch
     guide_process_ahci_completions();
 

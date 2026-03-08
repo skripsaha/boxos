@@ -378,7 +378,6 @@ static void vmm_free_user_space_tables(vmm_context_t* ctx) {
                             size_t bit_idx = page_idx % 8;
 
                             if (freed_bitmap[byte_idx] & (1 << bit_idx)) {
-                                debug_printf("[VMM]   SKIP: Page 0x%lx already freed (duplicate PT entry at virt=0x%lx)\n", phys, virt);
                                 should_free = false;
                             } else {
                                 freed_bitmap[byte_idx] |= (1 << bit_idx);
@@ -386,7 +385,6 @@ static void vmm_free_user_space_tables(vmm_context_t* ctx) {
                         }
 
                         if (should_free) {
-                            debug_printf("[VMM]   FREE: Page 0x%lx (virt=0x%lx, PT entry %d)\n", phys, virt, p1);
                             pmm_free((void*)phys, 1);
                             freed_pages++;
                         }
