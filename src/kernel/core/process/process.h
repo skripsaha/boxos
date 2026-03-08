@@ -19,7 +19,7 @@
  */
 
 #define PROCESS_MAX_COUNT       MAX_PROCESSES
-#define PROCESS_TAG_SIZE        64
+#define PROCESS_TAG_SIZE        256
 #define PROCESS_INVALID_PID     0
 
 struct process_t;
@@ -90,7 +90,10 @@ typedef struct process_t {
 
     volatile uint32_t ref_count;
 
-    char tags[PROCESS_TAG_SIZE];
+    uint64_t    tag_bits;
+    uint16_t*   tag_overflow_ids;
+    uint16_t    tag_overflow_count;
+    uint16_t    tag_overflow_capacity;
 
     uintptr_t code_start;
     size_t code_size;
@@ -144,6 +147,7 @@ void process_test(void);
 void process_start_initial(process_t* proc);
 
 bool process_has_tag(process_t* proc, const char* tag);
+bool process_has_tag_id(process_t* proc, uint16_t tag_id);
 int process_add_tag(process_t* proc, const char* tag);
 int process_remove_tag(process_t* proc, const char* tag);
 size_t process_snapshot_tags(process_t* proc, char* buffer, size_t buffer_size);

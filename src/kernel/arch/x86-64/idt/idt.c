@@ -167,7 +167,7 @@ void exception_handler(interrupt_frame_t* frame) {
                     frame->vector, proc->pid);
             kprintf("[EXCEPTION] RIP=0x%lx RSP=0x%lx Error=0x%lx\n",
                     frame->rip, frame->rsp, frame->error_code);
-            kprintf("[EXCEPTION] Tags: %s\n", proc->tags);
+            kprintf("[EXCEPTION] TagBits: 0x%lx\n", proc->tag_bits);
 
             if (frame->vector == 14) {
                 uint64_t fault_addr;
@@ -214,7 +214,7 @@ void exception_handler(interrupt_frame_t* frame) {
             kprintf("================================================================\n");
             kprintf("KERNEL STACK OVERFLOW: Exception #%u recovered\n", frame->vector);
             kprintf("================================================================\n");
-            kprintf("  PID: %u  Tags: %s\n", overflow_proc->pid, overflow_proc->tags);
+            kprintf("  PID: %u  TagBits: 0x%lx\n", overflow_proc->pid, overflow_proc->tag_bits);
             kprintf("  RSP: 0x%lx  RIP: 0x%lx\n", frame->rsp, frame->rip);
             if (overflow_proc->kernel_stack_guard_base) {
                 kprintf("  Guard: 0x%lx  Stack: 0x%lx-0x%lx\n",

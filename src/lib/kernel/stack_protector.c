@@ -62,8 +62,8 @@ void __attribute__((noreturn)) __stack_chk_fail(void) {
     process_t* proc = process_get_current();
 
     if (proc && proc->pid != 0) {
-        kprintf("\n[STACK PROTECTOR] Stack smashing detected in PID %u (%s)\n",
-                proc->pid, proc->tags);
+        kprintf("\n[STACK PROTECTOR] Stack smashing detected in PID %u (tags=0x%lx)\n",
+                proc->pid, proc->tag_bits);
         process_set_state(proc, PROC_CRASHED);
         // Timer IRQ will call schedule() and pick a different process
     }

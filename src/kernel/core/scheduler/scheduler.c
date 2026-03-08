@@ -10,6 +10,7 @@
 #include "ready_queue.h"
 #include "xhci_interrupt.h"
 #include "notify.h"
+#include "tagfs.h"
 
 static scheduler_state_t sched;
 
@@ -20,7 +21,10 @@ void scheduler_init(void) {
     sched.current_process = NULL;
     spinlock_init(&sched.scheduler_lock);
     sched.use_context.enabled = false;
-    sched.use_context.tag_count = 0;
+    sched.use_context.context_bits = 0;
+    sched.use_context.overflow_ids = NULL;
+    sched.use_context.overflow_count = 0;
+    sched.use_context.overflow_capacity = 0;
     sched.total_ticks = 0;
     spinlock_init(&sched.context_lock);
 
@@ -28,22 +32,27 @@ void scheduler_init(void) {
 }
 
 bool scheduler_matches_use_context(process_t* proc) {
-    if (!proc) {
-        return false;
-    }
+    if (!proc) return false;
 
     spin_lock(&sched.context_lock);
 
-    if (!sched.use_context.enabled || sched.use_context.tag_count == 0) {
+    if (!sched.use_context.enabled) {
         spin_unlock(&sched.context_lock);
         return false;
     }
 
-    bool match = false;
-    for (uint32_t i = 0; i < sched.use_context.tag_count; i++) {
-        if (process_has_tag(proc, sched.use_context.active_tags[i])) {
-            match = true;
-            break;
+    // Fast path: single AND for tag_ids 0-63
+    bool match = (proc->tag_bits & sched.use_context.context_bits) != 0;
+
+    if (!match) {
+        // Slow path: check overflow arrays (tag_ids >= 64)
+        for (uint16_t i = 0; i < proc->tag_overflow_count && !match; i++) {
+            for (uint16_t j = 0; j < sched.use_context.overflow_count; j++) {
+                if (proc->tag_overflow_ids[i] == sched.use_context.overflow_ids[j]) {
+                    match = true;
+                    break;
+                }
+            }
         }
     }
 
@@ -181,34 +190,67 @@ void schedule(void* frame_ptr) {
 }
 
 void scheduler_set_use_context(const char* tags[], uint32_t count) {
-    if (!tags || count == 0 || count > MAX_USE_CONTEXT_TAGS) {
+    if (!tags || count == 0) {
         debug_printf("[SCHEDULER] ERROR: Invalid use context parameters\n");
         return;
     }
 
+    TagFSState* fs = tagfs_get_state();
+    if (!fs || !fs->registry) return;
+
     spin_lock(&sched.context_lock);
 
-    sched.use_context.tag_count = 0;
+    sched.use_context.context_bits = 0;
+    sched.use_context.overflow_count = 0;
 
-    for (uint32_t i = 0; i < count && i < MAX_USE_CONTEXT_TAGS; i++) {
-        if (tags[i]) {
-            strncpy(sched.use_context.active_tags[i], tags[i], TAG_LENGTH - 1);
-            sched.use_context.active_tags[i][TAG_LENGTH - 1] = '\0';
-            sched.use_context.tag_count++;
+    for (uint32_t i = 0; i < count; i++) {
+        if (!tags[i]) continue;
+
+        char key[256], value[256];
+        tagfs_parse_tag(tags[i], key, sizeof(key), value, sizeof(value));
+
+        uint16_t tid = tag_registry_intern(fs->registry, key, value);
+        if (tid == TAGFS_INVALID_TAG_ID) continue;
+
+        if (tid < 64) {
+            sched.use_context.context_bits |= ((uint64_t)1 << tid);
+        } else {
+            if (sched.use_context.overflow_count >= sched.use_context.overflow_capacity) {
+                uint16_t new_cap = sched.use_context.overflow_capacity == 0
+                    ? 8 : sched.use_context.overflow_capacity * 2;
+                uint16_t* new_ids = kmalloc(sizeof(uint16_t) * new_cap);
+                if (new_ids) {
+                    if (sched.use_context.overflow_ids) {
+                        memcpy(new_ids, sched.use_context.overflow_ids,
+                               sizeof(uint16_t) * sched.use_context.overflow_count);
+                        kfree(sched.use_context.overflow_ids);
+                    }
+                    sched.use_context.overflow_ids = new_ids;
+                    sched.use_context.overflow_capacity = new_cap;
+                }
+            }
+            if (sched.use_context.overflow_count < sched.use_context.overflow_capacity) {
+                sched.use_context.overflow_ids[sched.use_context.overflow_count++] = tid;
+            }
         }
     }
 
     sched.use_context.enabled = true;
-
     spin_unlock(&sched.context_lock);
 
-    debug_printf("[SCHEDULER] Use context set: %u tags\n", sched.use_context.tag_count);
+    debug_printf("[SCHEDULER] Use context set: %u tags\n", count);
 }
 
 void scheduler_clear_use_context(void) {
     spin_lock(&sched.context_lock);
     sched.use_context.enabled = false;
-    sched.use_context.tag_count = 0;
+    sched.use_context.context_bits = 0;
+    if (sched.use_context.overflow_ids) {
+        kfree(sched.use_context.overflow_ids);
+        sched.use_context.overflow_ids = NULL;
+    }
+    sched.use_context.overflow_count = 0;
+    sched.use_context.overflow_capacity = 0;
     spin_unlock(&sched.context_lock);
     debug_printf("[SCHEDULER] Use context cleared\n");
 }
