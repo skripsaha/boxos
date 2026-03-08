@@ -292,19 +292,25 @@ int             tag_bitmap_tags_for_file(TagBitmapIndex* idx, uint32_t file_id,
 // File Table API
 // ----------------------------------------------------------------------------
 
-int file_table_init(void);
-int file_table_lookup(uint32_t file_id, uint32_t* out_block, uint32_t* out_offset);
-int file_table_update(uint32_t file_id, uint32_t meta_block, uint32_t meta_offset);
+int  file_table_init(uint32_t first_block, uint32_t block_count);
+void file_table_shutdown(void);
+int  file_table_lookup(uint32_t file_id, uint32_t* out_block, uint32_t* out_offset);
+int  file_table_update(uint32_t file_id, uint32_t meta_block, uint32_t meta_offset);
+int  file_table_delete(uint32_t file_id);
+int  file_table_flush(void);
 
 // ----------------------------------------------------------------------------
 // Metadata Pool API
 // ----------------------------------------------------------------------------
 
-int  meta_pool_init(void);
-int  meta_pool_read(uint32_t file_id, TagFSMetadata* out);
-int  meta_pool_write(uint32_t file_id, const TagFSMetadata* meta);
-int  meta_pool_delete(uint32_t file_id);
-void tagfs_metadata_free(TagFSMetadata* meta);
+int      meta_pool_init(uint32_t first_block, uint32_t block_count);
+void     meta_pool_shutdown(void);
+int      meta_pool_read(uint32_t block, uint32_t offset, TagFSMetadata* out);
+int      meta_pool_write(const TagFSMetadata* meta, uint32_t* out_block, uint32_t* out_offset);
+int      meta_pool_delete(uint32_t block, uint32_t offset);
+void     tagfs_metadata_free(TagFSMetadata* meta);
+uint32_t meta_pool_record_size(const TagFSMetadata* meta);
+int      meta_pool_flush(void);
 
 // ----------------------------------------------------------------------------
 // Main TagFS API
@@ -346,6 +352,14 @@ TagFSState* tagfs_get_state(void);
 
 int      tagfs_defrag_file(uint32_t file_id, uint32_t target_block);
 uint32_t tagfs_get_fragmentation_score(void);
+
+// ----------------------------------------------------------------------------
+// Block I/O (for subsystem use)
+// ----------------------------------------------------------------------------
+
+int  tagfs_read_block(uint32_t block, void* buffer);
+int  tagfs_write_block(uint32_t block, const void* buffer);
+int  tagfs_write_superblock(const TagFSSuperblock* sb);
 
 // ----------------------------------------------------------------------------
 // Context API

@@ -29,13 +29,59 @@ int meta_pool_init(uint32_t first_block, uint32_t block_count) {
 
     spinlock_init(&g_lock);
 
-    debug_printf("[MetaPool] initialized: first_block=%u block_count=%u\n",
-                 first_block, block_count);
+    int read_result = tagfs_read_block(first_block, &g_current_block);
+    if (read_result < 0) {
+        debug_printf("[MetaPool] init: failed to read first block %u, starting fresh\n", first_block);
+        memset(&g_current_block, 0, sizeof(MetaPoolBlock));
+        g_current_block.magic = TAGFS_MPOOL_MAGIC;
+        g_current_dirty = true;
+        debug_printf("[MetaPool] initialized (fresh): first_block=%u block_count=%u\n",
+                     first_block, block_count);
+        return 0;
+    }
+
+    if (g_current_block.magic != TAGFS_MPOOL_MAGIC) {
+        debug_printf("[MetaPool] init: bad magic 0x%x on block %u, starting fresh\n",
+                     g_current_block.magic, first_block);
+        memset(&g_current_block, 0, sizeof(MetaPoolBlock));
+        g_current_block.magic = TAGFS_MPOOL_MAGIC;
+        g_current_dirty = true;
+        debug_printf("[MetaPool] initialized (fresh): first_block=%u block_count=%u\n",
+                     first_block, block_count);
+        return 0;
+    }
+
+    while (g_current_block.next_block != 0) {
+        uint32_t next = g_current_block.next_block;
+        MetaPoolBlock next_block_buf;
+        int chain_result = tagfs_read_block(next, &next_block_buf);
+        if (chain_result < 0) {
+            debug_printf("[MetaPool] init: chain read failed at block %u, stopping\n", next);
+            break;
+        }
+        if (next_block_buf.magic != TAGFS_MPOOL_MAGIC) {
+            debug_printf("[MetaPool] init: bad magic in chain at block %u, stopping\n", next);
+            break;
+        }
+        g_current_block_num = next;
+        g_current_block     = next_block_buf;
+    }
+
+    debug_printf("[MetaPool] initialized: first_block=%u block_count=%u last_block=%u\n",
+                 first_block, block_count, g_current_block_num);
     return 0;
 }
 
 int meta_pool_flush(void) {
-    // TODO: write g_current_block to disk at g_current_block_num using ahci_write_sectors()
+    if (!g_current_dirty) {
+        return 0;
+    }
+    int result = tagfs_write_block(g_current_block_num, &g_current_block);
+    if (result < 0) {
+        debug_printf("[MetaPool] flush: write failed for block %u\n", g_current_block_num);
+        return result;
+    }
+    g_current_dirty = false;
     return 0;
 }
 
@@ -229,12 +275,14 @@ int meta_pool_write(const TagFSMetadata* meta, uint32_t* out_block, uint32_t* ou
 // Public: read
 // ---------------------------------------------------------------------------
 
-int meta_pool_read(uint32_t file_id, TagFSMetadata* out) {
-    // TODO: read the block from disk at the block+offset provided by the file
-    // table, then call unpack_record(). Requires ahci_read_sectors() integration.
-    (void)file_id;
-    (void)out;
-    return -1;
+int meta_pool_read(uint32_t block, uint32_t offset, TagFSMetadata* out) {
+    uint8_t buf[TAGFS_BLOCK_SIZE];
+    int result = tagfs_read_block(block, buf);
+    if (result < 0) {
+        debug_printf("[MetaPool] read: tagfs_read_block failed for block %u\n", block);
+        return result;
+    }
+    return unpack_record(buf + offset, out);
 }
 
 // ---------------------------------------------------------------------------
@@ -242,9 +290,18 @@ int meta_pool_read(uint32_t file_id, TagFSMetadata* out) {
 // ---------------------------------------------------------------------------
 
 int meta_pool_delete(uint32_t block, uint32_t offset) {
-    // TODO: read the block at 'block', zero the file_id field at 'offset'
-    // (4 bytes at offset+2 within the block), mark dirty, flush.
-    (void)block;
-    (void)offset;
+    uint8_t buf[TAGFS_BLOCK_SIZE];
+    int result = tagfs_read_block(block, buf);
+    if (result < 0) {
+        debug_printf("[MetaPool] delete: tagfs_read_block failed for block %u\n", block);
+        return result;
+    }
+    // record layout: uint16_t record_len, then uint32_t file_id
+    memset(buf + offset + 2, 0, 4);
+    result = tagfs_write_block(block, buf);
+    if (result < 0) {
+        debug_printf("[MetaPool] delete: tagfs_write_block failed for block %u\n", block);
+        return result;
+    }
     return 0;
 }

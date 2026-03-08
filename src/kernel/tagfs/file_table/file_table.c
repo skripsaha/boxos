@@ -28,6 +28,40 @@ int file_table_init(uint32_t first_block, uint32_t block_count) {
     g_dirty    = false;
     spinlock_init(&g_lock);
 
+    uint32_t block      = first_block;
+    uint32_t block_idx  = 0;
+
+    while (block != 0) {
+        FileTableBlock fb;
+        int ret = tagfs_read_block(block, &fb);
+        if (ret < 0) {
+            debug_printf("[FileTable] init: read failed at block=%u\n", block);
+            break;
+        }
+
+        if (fb.magic != TAGFS_FILETBL_MAGIC) {
+            debug_printf("[FileTable] init: bad magic at block=%u (got 0x%x)\n",
+                         block, fb.magic);
+            break;
+        }
+
+        uint32_t entry_offset = block_idx * TAGFS_FTABLE_PER_BLOCK;
+        uint32_t count        = fb.entry_count;
+        if (count > TAGFS_FTABLE_PER_BLOCK) {
+            count = TAGFS_FTABLE_PER_BLOCK;
+        }
+
+        for (uint32_t i = 0; i < count; i++) {
+            uint32_t idx = entry_offset + i;
+            if (idx < g_capacity) {
+                g_entries[idx] = fb.entries[i];
+            }
+        }
+
+        block_idx++;
+        block = fb.next_block;
+    }
+
     debug_printf("[FileTable] initialized: first_block=%u block_count=%u capacity=%u\n",
                  first_block, block_count, capacity);
     return 0;
@@ -116,7 +150,61 @@ int file_table_delete(uint32_t file_id) {
 }
 
 int file_table_flush(void) {
-    // TODO: pack g_entries into FileTableBlock structures and write to disk
-    // using ahci_write_sectors(), starting at g_first_block, for g_block_count blocks.
+    spin_lock(&g_lock);
+
+    if (!g_dirty) {
+        spin_unlock(&g_lock);
+        return 0;
+    }
+
+    uint32_t total_entries  = g_capacity;
+    uint32_t current_block  = g_first_block;
+    uint32_t entry_offset   = 0;
+
+    while (entry_offset < total_entries) {
+        uint32_t entries_this_block = total_entries - entry_offset;
+        if (entries_this_block > TAGFS_FTABLE_PER_BLOCK) {
+            entries_this_block = TAGFS_FTABLE_PER_BLOCK;
+        }
+
+        uint32_t remaining_after = total_entries - entry_offset - entries_this_block;
+
+        uint32_t next_block = 0;
+        if (remaining_after > 0) {
+            int ret = tagfs_alloc_blocks(1, &next_block);
+            if (ret < 0) {
+                spin_unlock(&g_lock);
+                debug_printf("[FileTable] flush: alloc failed at entry_offset=%u\n", entry_offset);
+                return -1;
+            }
+        }
+
+        FileTableBlock block;
+        block.magic       = TAGFS_FILETBL_MAGIC;
+        block.next_block  = next_block;
+        block.entry_count = entries_this_block;
+        block.reserved    = 0;
+
+        for (uint32_t i = 0; i < entries_this_block; i++) {
+            block.entries[i] = g_entries[entry_offset + i];
+        }
+        for (uint32_t i = entries_this_block; i < TAGFS_FTABLE_PER_BLOCK; i++) {
+            block.entries[i].meta_block  = 0;
+            block.entries[i].meta_offset = 0;
+        }
+
+        int ret = tagfs_write_block(current_block, &block);
+        if (ret < 0) {
+            spin_unlock(&g_lock);
+            debug_printf("[FileTable] flush: write failed at block=%u\n", current_block);
+            return -1;
+        }
+
+        entry_offset  += entries_this_block;
+        current_block  = next_block;
+    }
+
+    g_dirty = false;
+    spin_unlock(&g_lock);
     return 0;
 }
