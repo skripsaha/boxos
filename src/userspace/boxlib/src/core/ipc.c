@@ -1,5 +1,4 @@
 #include "box/ipc.h"
-#include "box/chain.h"
 #include "box/notify.h"
 #include "box/result.h"
 #include "box/system.h"
@@ -72,7 +71,8 @@ int broadcast(const char* tag, const void* data, uint16_t size) {
 }
 
 int listen(uint8_t source_type, uint8_t flags) {
-    hw_listen(source_type, flags);
+    uint8_t buf[4] = {source_type, flags, 0, 0};
+    pocket_send(DECK_SYSTEM, 0x42, buf, 4);
 
     Result result;
     if (!result_wait(&result, 500000)) {

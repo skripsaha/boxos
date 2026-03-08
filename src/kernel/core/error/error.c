@@ -151,22 +151,24 @@ const char* error_string(error_t err) {
         case ERR_ACPI_PARSE_ERROR:
             return "ACPI parse error";
 
-        case ERR_EVENT_RING_FULL:
-            return "Event ring buffer full";
+        case ERR_POCKET_RING_FULL:
+            return "Pocket ring buffer full";
         case ERR_RESULT_RING_FULL:
             return "Result ring buffer full";
-        case ERR_INVALID_EVENT:
-            return "Invalid event";
+        case ERR_INVALID_POCKET:
+            return "Invalid pocket";
         case ERR_INVALID_DECK_ID:
             return "Invalid deck ID";
         case ERR_INVALID_OPCODE:
             return "Invalid opcode";
         case ERR_PREFIX_CHAIN_TOO_LONG:
             return "Prefix chain too long";
-        case ERR_EVENT_PROCESSING_FAILED:
-            return "Event processing failed";
+        case ERR_POCKET_PROCESSING_FAILED:
+            return "Pocket processing failed";
         case ERR_PENDING_QUEUE_FULL:
             return "Pending queue full";
+        case ERR_POCKET_FAILED:
+            return "Pocket failed";
 
         case ERR_ROUTE_TARGET_FULL:
             return "Route target queue full";

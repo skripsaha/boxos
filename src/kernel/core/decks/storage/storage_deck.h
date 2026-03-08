@@ -20,7 +20,6 @@
 #define STORAGE_CONTEXT_CLEAR 0x11
 
 // Storage Deck error codes are defined in error.h
-// (STORAGE_OK, STORAGE_ERR_INVALID, STORAGE_ERR_NOT_FOUND, etc.)
 
 typedef struct __packed
 {

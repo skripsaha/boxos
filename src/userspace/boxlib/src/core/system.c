@@ -2,7 +2,6 @@
 #include "box/notify.h"
 #include "box/ipc.h"
 #include "box/io.h"
-#include "box/chain.h"
 #include "box/result.h"
 #include "box/string.h"
 #include "box/error.h"
@@ -12,7 +11,10 @@ int proc_info(uint16_t pid, proc_info_t* info) {
         return ERR_INVALID_ARGS;
     }
 
-    proc_query(pid);
+    uint8_t args[8];
+    memset(args, 0, sizeof(args));
+    memcpy(args, &pid, sizeof(pid));
+    pocket_send(DECK_SYSTEM, 0x03, args, sizeof(args));
 
     Result result;
     if (!result_wait(&result, 5000)) {
@@ -45,7 +47,11 @@ void exit(uint32_t exit_code) {
         send(ci->spawner_pid, msg, 2);
     }
 
-    proc_kill(0);
+    uint32_t zero_pid = 0;
+    uint8_t kill_args[8];
+    memset(kill_args, 0, sizeof(kill_args));
+    memcpy(kill_args, &zero_pid, sizeof(zero_pid));
+    pocket_send(DECK_SYSTEM, 0x02, kill_args, sizeof(kill_args));
 
     while (1) {
         __asm__ volatile("pause");
@@ -62,7 +68,10 @@ int proc_exec(const char* filename) {
         return -1;
     }
 
-    proc_spawn(filename);
+    uint8_t spawn_args[192];
+    memset(spawn_args, 0, sizeof(spawn_args));
+    memcpy(spawn_args, filename, name_len);
+    pocket_send(DECK_SYSTEM, 0x06, spawn_args, sizeof(spawn_args));
 
     Result result;
     if (!result_wait(&result, 5000)) {
@@ -91,7 +100,7 @@ int buffer_alloc(uint8_t size_class, uint16_t* out_buffer_id, uint32_t* out_addr
         return ERR_INVALID_ARGS;
     }
 
-    buf_alloc(size_class);
+    pocket_send(DECK_SYSTEM, 0x10, &size_class, sizeof(size_class));
 
     Result result;
     if (!result_wait(&result, 5000)) {
@@ -119,7 +128,7 @@ int buffer_alloc(uint8_t size_class, uint16_t* out_buffer_id, uint32_t* out_addr
 }
 
 int buffer_free(uint16_t buffer_id) {
-    buf_release(buffer_id);
+    pocket_send(DECK_SYSTEM, 0x11, &buffer_id, sizeof(buffer_id));
 
     Result result;
     if (!result_wait(&result, 5000)) {
@@ -133,6 +142,19 @@ int buffer_free(uint16_t buffer_id) {
     return OK;
 }
 
+static void ptag_send(uint16_t pid, const char* tag, uint8_t opcode) {
+    struct PACKED {
+        uint16_t pid;
+        char tag[32];
+    } args;
+    args.pid = pid;
+    memset(args.tag, 0, sizeof(args.tag));
+    size_t len = strlen(tag);
+    if (len > 31) len = 31;
+    memcpy(args.tag, tag, len);
+    pocket_send(DECK_SYSTEM, opcode, &args, sizeof(args));
+}
+
 int proc_tag_add(const char* tag) {
     if (!tag) {
         return ERR_INVALID_ARGS;
@@ -143,13 +165,8 @@ int proc_tag_add(const char* tag) {
         return ERR_INVALID_ARGS;
     }
 
-    proc_info_t info;
-    int rc = proc_info(0, &info);
-    if (rc != OK) {
-        return rc;
-    }
-
-    ptag_add(info.pid, tag);
+    uint32_t my_pid = cabin_info()->pid;
+    ptag_send((uint16_t)my_pid, tag, 0x20);
 
     Result res;
     if (!result_wait(&res, 5000)) {
@@ -173,13 +190,8 @@ int proc_tag_remove(const char* tag) {
         return ERR_INVALID_ARGS;
     }
 
-    proc_info_t info;
-    int rc = proc_info(0, &info);
-    if (rc != OK) {
-        return rc;
-    }
-
-    ptag_remove(info.pid, tag);
+    uint32_t my_pid = cabin_info()->pid;
+    ptag_send((uint16_t)my_pid, tag, 0x21);
 
     Result res;
     if (!result_wait(&res, 5000)) {
@@ -203,13 +215,8 @@ int proc_tag_check(const char* tag, bool* has_tag) {
         return ERR_INVALID_ARGS;
     }
 
-    proc_info_t info;
-    int rc = proc_info(0, &info);
-    if (rc != OK) {
-        return rc;
-    }
-
-    ptag_check(info.pid, tag);
+    uint32_t my_pid = cabin_info()->pid;
+    ptag_send((uint16_t)my_pid, tag, 0x22);
 
     Result res;
     if (!result_wait(&res, 5000)) {
@@ -233,7 +240,9 @@ int proc_tag_check(const char* tag, bool* has_tag) {
 }
 
 int reboot(void) {
-    hw_reboot();
+    uint8_t args[192];
+    memset(args, 0, sizeof(args));
+    pocket_send(DECK_HARDWARE, 0x80, args, sizeof(args));
 
     Result result;
     result_wait(&result, 5000);
@@ -241,7 +250,9 @@ int reboot(void) {
 }
 
 int shutdown(void) {
-    hw_shutdown();
+    uint8_t args[192];
+    memset(args, 0, sizeof(args));
+    pocket_send(DECK_HARDWARE, 0x81, args, sizeof(args));
 
     Result result;
     result_wait(&result, 5000);
@@ -261,7 +272,11 @@ int sysinfo(system_info_t* info) {
 }
 
 int defrag(uint32_t file_id, uint32_t target_block) {
-    fs_defrag(file_id, target_block);
+    uint8_t defrag_args[192];
+    memset(defrag_args, 0, sizeof(defrag_args));
+    memcpy(defrag_args,     &file_id,      4);
+    memcpy(defrag_args + 4, &target_block, 4);
+    pocket_send(DECK_SYSTEM, 0x18, defrag_args, sizeof(defrag_args));
 
     Result result;
     if (!result_wait(&result, 5000)) return -1;
@@ -277,7 +292,9 @@ int defrag(uint32_t file_id, uint32_t target_block) {
 }
 
 int fragmentation(void) {
-    fs_fraginfo();
+    uint8_t frag_args[192];
+    memset(frag_args, 0, sizeof(frag_args));
+    pocket_send(DECK_SYSTEM, 0x19, frag_args, sizeof(frag_args));
 
     Result result;
     if (!result_wait(&result, 5000)) return -1;

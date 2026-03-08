@@ -1,5 +1,5 @@
 #include "box/time.h"
-#include "box/chain.h"
+#include "box/notify.h"
 #include "box/result.h"
 
 static uint64_t read_u64_be(const uint8_t* p) {
@@ -21,7 +21,8 @@ static uint16_t read_u16_be(const uint8_t* p) {
 int time_get(time_t* out) {
     if (!out) return ERR_NULL_POINTER;
 
-    hw_rtc_time();
+    uint8_t buf[16] = {0};
+    pocket_send(DECK_HARDWARE, 0x15, buf, sizeof(buf));
 
     Result result;
     if (!result_wait(&result, 50000)) return ERR_TIMEOUT;
@@ -43,7 +44,8 @@ int time_get(time_t* out) {
 int time_get_secs(uint64_t* out_seconds) {
     if (!out_seconds) return ERR_NULL_POINTER;
 
-    hw_rtc_unix64();
+    uint8_t unix_buf[16] = {0};
+    pocket_send(DECK_HARDWARE, 0x16, unix_buf, sizeof(unix_buf));
 
     Result result;
     if (!result_wait(&result, 50000)) return ERR_TIMEOUT;
@@ -57,7 +59,8 @@ int time_get_secs(uint64_t* out_seconds) {
 int time_uptime_ms(uint64_t* out_ms) {
     if (!out_ms) return ERR_NULL_POINTER;
 
-    hw_timer_ms();
+    uint8_t timer_buf[8] = {0};
+    pocket_send(DECK_HARDWARE, 0x11, timer_buf, sizeof(timer_buf));
 
     Result result;
     if (!result_wait(&result, 50000)) return ERR_TIMEOUT;
@@ -71,7 +74,8 @@ int time_uptime_ms(uint64_t* out_ms) {
 int time_uptime_ns(uint64_t* out_ns) {
     if (!out_ns) return ERR_NULL_POINTER;
 
-    hw_rtc_uptime();
+    uint8_t uptime_buf[16] = {0};
+    pocket_send(DECK_HARDWARE, 0x17, uptime_buf, sizeof(uptime_buf));
 
     Result result;
     if (!result_wait(&result, 50000)) return ERR_TIMEOUT;
@@ -113,25 +117,3 @@ int time_format(const time_t* t, char* buf, size_t buf_size) {
     return OK;
 }
 
-int64_t time_diff(const time_t* a, const time_t* b) {
-    return (int64_t)a->seconds - (int64_t)b->seconds;
-}
-
-void time_add_ms(const time_t* t, int64_t ms, time_t* out) {
-    time_t tmp = *t;
-
-    int64_t extra_ns = (ms % 1000) * 1000000LL;
-    int64_t new_ns = (int64_t)tmp.nanosec + extra_ns;
-
-    if (new_ns < 0) {
-        int64_t borrow = (-new_ns + 999999999LL) / 1000000000LL;
-        new_ns += borrow * 1000000000LL;
-        tmp.seconds = (uint64_t)((int64_t)tmp.seconds - borrow);
-    }
-
-    int64_t carry = new_ns / 1000000000LL;
-    tmp.nanosec = (uint32_t)(new_ns % 1000000000LL);
-    tmp.seconds = (uint64_t)((int64_t)tmp.seconds + ms / 1000 + carry);
-
-    *out = tmp;
-}

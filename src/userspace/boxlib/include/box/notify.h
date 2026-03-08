@@ -85,4 +85,7 @@ int pocket_submit(Pocket* p);
 // Yield: hint to scheduler without submitting a pocket
 void yield(void);
 
+// Send a single-prefix Pocket: prepare, set data, add prefix, submit.
+int pocket_send(uint8_t deck_id, uint8_t opcode, void* data, uint32_t length);
+
 #endif // BOX_NOTIFY_H

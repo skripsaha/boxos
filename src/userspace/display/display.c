@@ -3,7 +3,6 @@
 #include "box/ipc.h"
 #include "box/notify.h"
 #include "box/result.h"
-#include "box/chain.h"
 #include "box/string.h"
 #include "box/system.h"
 
@@ -41,14 +40,20 @@ static void render(const uint8_t* data, uint16_t len) {
         if (b >= 0x20) {
             char buf[192];
             int pos = 0;
-            while (i < len && data[i] >= 0x20 && pos < 190) {
+            while (i < len && data[i] >= 0x20 && pos < 185) {
                 buf[pos++] = (char)data[i++];
             }
             buf[pos] = '\0';
-            // Use hw_vga_putstring directly with cached color.
+            // Build putstring packet directly with cached color.
             // vga_puts() calls vga_getcolor() per chunk (extra syscall),
             // so bypassing it halves the syscall count for text rendering.
-            hw_vga_putstring(buf, (uint8_t)pos, display_cached_color);
+            uint8_t pkt[192];
+            pkt[0] = (uint8_t)pos;
+            pkt[1] = display_cached_color;
+            pkt[2] = 0;
+            pkt[3] = 0;
+            memcpy(pkt + 4, buf, pos);
+            pocket_send(DECK_HARDWARE, 0x71, pkt, (uint32_t)(pos + 4));
             Result result;
             result_wait(&result, 100000);
             continue;

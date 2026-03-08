@@ -1,11 +1,7 @@
 #include "box/io/keyboard.h"
-#include "box/chain.h"
 #include "box/notify.h"
 #include "box/result.h"
 #include "box/string.h"
-
-// Scratch buffer for keyboard data (must be in mapped memory)
-static uint8_t g_kb_buf[256] __attribute__((aligned(16)));
 
 static void kb_sleep(uint32_t iterations) {
     for (uint32_t i = 0; i < iterations; i++) {
@@ -21,7 +17,8 @@ static uint32_t kb_decode_u32(const uint8_t* data, size_t offset) {
 }
 
 int kb_getchar(void) {
-    hw_kb_getchar();
+    uint8_t buf[4] = {0};
+    pocket_send(DECK_HARDWARE, KB_OP_GETCHAR, buf, 4);
 
     Result result;
     if (!result_wait(&result, 1000)) {
@@ -40,7 +37,8 @@ int kb_getchar(void) {
 }
 
 int kb_getchar_timeout(uint32_t timeout_ms) {
-    hw_kb_getchar();
+    uint8_t buf[4] = {0};
+    pocket_send(DECK_HARDWARE, KB_OP_GETCHAR, buf, 4);
 
     Result result;
     if (!result_wait(&result, timeout_ms)) {
@@ -63,7 +61,8 @@ int kb_getchar_ex(kb_char_t* out_char) {
         return -ERR_INVALID_ARGS;
     }
 
-    hw_kb_getchar();
+    uint8_t getchar_buf[4] = {0};
+    pocket_send(DECK_HARDWARE, KB_OP_GETCHAR, getchar_buf, 4);
 
     Result result;
     if (!result_wait(&result, 1000)) {
@@ -96,7 +95,11 @@ int kb_readline(char* buffer, size_t size, bool echo) {
     uint32_t retry_count = 0;
 
     while (retry_count < max_retries) {
-        hw_kb_readline((uint8_t)size, echo);
+        uint8_t readline_buf[192];
+        memset(readline_buf, 0, sizeof(readline_buf));
+        readline_buf[0] = (uint8_t)size;
+        readline_buf[1] = echo ? 1 : 0;
+        pocket_send(DECK_HARDWARE, KB_OP_READLINE, readline_buf, sizeof(readline_buf));
 
         Result result;
         if (!result_wait(&result, 60000)) {
@@ -147,15 +150,11 @@ int kb_readline_async(char* buffer, size_t size, bool echo) {
         return -ERR_INVALID_ARGS;
     }
 
-    memset(g_kb_buf, 0, 192);
-    g_kb_buf[0] = (uint8_t)size;
-    g_kb_buf[1] = echo ? 1 : 0;
-
-    Pocket p;
-    pocket_prepare(&p);
-    pocket_set_data(&p, g_kb_buf, 192);
-    pocket_add_prefix(&p, DECK_HARDWARE, KB_OP_READLINE);
-    pocket_submit(&p);
+    uint8_t async_buf[192];
+    memset(async_buf, 0, sizeof(async_buf));
+    async_buf[0] = (uint8_t)size;
+    async_buf[1] = echo ? 1 : 0;
+    pocket_send(DECK_HARDWARE, KB_OP_READLINE, async_buf, sizeof(async_buf));
 
     return 0;
 }
@@ -165,7 +164,8 @@ int kb_status(kb_status_t* status) {
         return -ERR_INVALID_ARGS;
     }
 
-    hw_kb_status();
+    uint8_t status_buf[16] = {0};
+    pocket_send(DECK_HARDWARE, KB_OP_STATUS, status_buf, sizeof(status_buf));
 
     Result result;
     if (!result_wait(&result, 1000)) {
