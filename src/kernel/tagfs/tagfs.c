@@ -525,6 +525,60 @@ int tagfs_create_file(const char* filename, const uint16_t* tag_ids, uint16_t ta
 
     uint32_t file_id = g_state.superblock.next_file_id++;
 
+    // Derive auto-label tag from filename stem (e.g. "kernel.bin" → "kernel")
+    char stem[128];
+    {
+        const char* dot = NULL;
+        size_t flen = strlen(filename);
+        for (size_t i = flen; i > 0; i--) {
+            if (filename[i - 1] == '.') { dot = filename + i - 1; break; }
+        }
+        size_t slen = dot ? (size_t)(dot - filename) : flen;
+        if (slen >= sizeof(stem)) slen = sizeof(stem) - 1;
+        memcpy(stem, filename, slen);
+        stem[slen] = '\0';
+    }
+
+    // Intern the auto-label tag (lock is already held, call intern directly)
+    uint16_t auto_tag = TAGFS_INVALID_TAG_ID;
+    if (stem[0] != '\0' && g_state.registry) {
+        // Release state lock briefly to avoid lock ordering issues with registry
+        spin_unlock(&g_state.lock);
+        auto_tag = tag_registry_intern(g_state.registry, stem, NULL);
+        spin_lock(&g_state.lock);
+    }
+
+    // Build deduplicated tag array: auto-label first, then caller's tags
+    uint16_t final_count = 0;
+    uint16_t* final_tags = NULL;
+    {
+        uint16_t max_tags = tag_count + 1;
+        final_tags = kmalloc(sizeof(uint16_t) * max_tags);
+        if (!final_tags) {
+            debug_printf("[TagFS] create_file: kmalloc for final_tags failed\n");
+            spin_unlock(&g_state.lock);
+            return -1;
+        }
+
+        // Add auto-label tag first
+        if (auto_tag != TAGFS_INVALID_TAG_ID) {
+            final_tags[final_count++] = auto_tag;
+        }
+
+        // Add caller's tags, skipping duplicates
+        for (uint16_t i = 0; i < tag_count; i++) {
+            if (!tag_ids) break;
+            uint16_t tid = tag_ids[i];
+            bool dup = false;
+            for (uint16_t j = 0; j < final_count; j++) {
+                if (final_tags[j] == tid) { dup = true; break; }
+            }
+            if (!dup) {
+                final_tags[final_count++] = tid;
+            }
+        }
+    }
+
     // Build metadata
     TagFSMetadata meta;
     memset(&meta, 0, sizeof(meta));
@@ -540,23 +594,14 @@ int tagfs_create_file(const char* filename, const uint16_t* tag_ids, uint16_t ta
     meta.filename = kmalloc(name_len + 1);
     if (!meta.filename) {
         debug_printf("[TagFS] create_file: kmalloc for filename failed\n");
+        kfree(final_tags);
         spin_unlock(&g_state.lock);
         return -1;
     }
     memcpy(meta.filename, filename, name_len + 1);
 
-    meta.tag_count = tag_count;
-    meta.tag_ids   = NULL;
-    if (tag_count > 0 && tag_ids) {
-        meta.tag_ids = kmalloc(sizeof(uint16_t) * tag_count);
-        if (!meta.tag_ids) {
-            debug_printf("[TagFS] create_file: kmalloc for tag_ids failed\n");
-            kfree(meta.filename);
-            spin_unlock(&g_state.lock);
-            return -1;
-        }
-        memcpy(meta.tag_ids, tag_ids, sizeof(uint16_t) * tag_count);
-    }
+    meta.tag_count = final_count;
+    meta.tag_ids   = final_tags;
 
     // Write to metadata pool
     uint32_t meta_block, meta_offset;
@@ -577,8 +622,8 @@ int tagfs_create_file(const char* filename, const uint16_t* tag_ids, uint16_t ta
         return -1;
     }
 
-    // Add to bitmap index
-    for (uint16_t i = 0; i < tag_count; i++) {
+    // Add to bitmap index (use final_count, the deduplicated count)
+    for (uint16_t i = 0; i < final_count; i++) {
         if (meta.tag_ids[i] != TAGFS_INVALID_TAG_ID) {
             tag_bitmap_set(g_state.bitmap_index, meta.tag_ids[i], file_id);
         }

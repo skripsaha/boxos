@@ -177,10 +177,38 @@ static uint16_t intern_tag(const char* key, const char* value) {
     return id;
 }
 
+/* Extract filename stem: "kernel.bin" → "kernel", "files.elf" → "files" */
+static void extract_stem(const char* filename, char* stem, size_t stem_size) {
+    const char* base = strrchr(filename, '/');
+    base = base ? base + 1 : filename;
+
+    const char* dot = strrchr(base, '.');
+    size_t len = dot ? (size_t)(dot - base) : strlen(base);
+    if (len >= stem_size) len = stem_size - 1;
+    memcpy(stem, base, len);
+    stem[len] = '\0';
+}
+
+/* Check if tag_id already in array */
+static int has_tag_id(const uint16_t* ids, uint16_t count, uint16_t id) {
+    for (uint16_t i = 0; i < count; i++) {
+        if (ids[i] == id) return 1;
+    }
+    return 0;
+}
+
 /* Parse comma-separated tag string like "system,type:elf,utility" */
-static void parse_tags(const char* tag_string, uint16_t** out_ids, uint16_t* out_count) {
+static void parse_tags(const char* tag_string, const char* filename,
+                        uint16_t** out_ids, uint16_t* out_count) {
     uint16_t  ids[256];
     uint16_t  count = 0;
+
+    /* Auto-label tag from filename stem (always first) */
+    char stem[256];
+    extract_stem(filename, stem, sizeof(stem));
+    if (stem[0] != '\0') {
+        ids[count++] = intern_tag(stem, NULL);
+    }
 
     char buf[4096];
     strncpy(buf, tag_string, sizeof(buf) - 1);
@@ -190,12 +218,18 @@ static void parse_tags(const char* tag_string, uint16_t** out_ids, uint16_t* out
     while (token && count < 256) {
         while (*token == ' ') token++;
 
+        uint16_t id;
         char* colon = strchr(token, ':');
         if (colon) {
             *colon = '\0';
-            ids[count++] = intern_tag(token, colon + 1);
+            id = intern_tag(token, colon + 1);
         } else {
-            ids[count++] = intern_tag(token, NULL);
+            id = intern_tag(token, NULL);
+        }
+
+        /* Deduplicate: skip if already in the array */
+        if (!has_tag_id(ids, count, id)) {
+            ids[count++] = id;
         }
         token = strtok(NULL, ",");
     }
@@ -460,7 +494,7 @@ int main(int argc, char* argv[]) {
         if (files[i].block_count == 0) files[i].block_count = 1;
         files[i].start_block = next_block;
 
-        parse_tags(tags_str, &files[i].tag_ids, &files[i].tag_count);
+        parse_tags(tags_str, files[i].filename, &files[i].tag_ids, &files[i].tag_count);
 
         /* Check if this file has a "kernel" tag → use for boot hints */
         for (uint16_t t = 0; t < files[i].tag_count; t++) {
