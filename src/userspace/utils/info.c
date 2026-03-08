@@ -44,7 +44,10 @@ int main(void) {
 
     println("  Tags:");
     for (uint8_t i = 0; i < info.tag_count && i < 5; i++) {
-        printf("    %s:%s (type=%u)\n", info.tags[i].key, info.tags[i].value, info.tags[i].type);
+        if (info.tags[i].value[0])
+            printf("    %s:%s\n", info.tags[i].key, info.tags[i].value);
+        else
+            printf("    %s\n", info.tags[i].key);
     }
 
     exit(0);

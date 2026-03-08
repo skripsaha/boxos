@@ -3,12 +3,69 @@
 #include "tag_bitmap/tag_bitmap.h"
 #include "file_table/file_table.h"
 #include "metadata_pool/meta_pool.h"
+#include "journal/journal.h"
 #include "error.h"
 #include "ahci_sync.h"
 #include "ahci.h"
 #include "ata.h"
 
 static TagFSState g_state;
+
+// ----------------------------------------------------------------------------
+// Open File Table — per-file write serialization
+// ----------------------------------------------------------------------------
+
+static OpenFileEntry* g_open_files[OPEN_FILE_BUCKETS];
+static spinlock_t     g_open_table_lock;
+
+static uint32_t ofe_hash(uint32_t file_id) {
+    return file_id % OPEN_FILE_BUCKETS;
+}
+
+static OpenFileEntry* ofe_acquire(uint32_t file_id) {
+    spin_lock(&g_open_table_lock);
+    uint32_t bucket = ofe_hash(file_id);
+    OpenFileEntry* e = g_open_files[bucket];
+    while (e) {
+        if (e->file_id == file_id) {
+            e->ref_count++;
+            spin_unlock(&g_open_table_lock);
+            return e;
+        }
+        e = e->next;
+    }
+    e = kmalloc(sizeof(OpenFileEntry));
+    if (!e) {
+        spin_unlock(&g_open_table_lock);
+        return NULL;
+    }
+    e->file_id   = file_id;
+    e->ref_count = 1;
+    spinlock_init(&e->write_lock);
+    e->next = g_open_files[bucket];
+    g_open_files[bucket] = e;
+    spin_unlock(&g_open_table_lock);
+    return e;
+}
+
+static void ofe_release(OpenFileEntry* ofe) {
+    if (!ofe) return;
+    spin_lock(&g_open_table_lock);
+    ofe->ref_count--;
+    if (ofe->ref_count == 0) {
+        uint32_t bucket = ofe_hash(ofe->file_id);
+        OpenFileEntry** ptr = &g_open_files[bucket];
+        while (*ptr) {
+            if (*ptr == ofe) {
+                *ptr = ofe->next;
+                kfree(ofe);
+                break;
+            }
+            ptr = &(*ptr)->next;
+        }
+    }
+    spin_unlock(&g_open_table_lock);
+}
 
 // ----------------------------------------------------------------------------
 // Bitmap bit helpers
@@ -383,6 +440,8 @@ int tagfs_init(void) {
     debug_printf("[TagFS] Initializing...\n");
 
     spinlock_init(&g_state.lock);
+    spinlock_init(&g_open_table_lock);
+    memset(g_open_files, 0, sizeof(g_open_files));
 
     // --- Read superblock ---
     TagFSSuperblock sb;
@@ -431,6 +490,16 @@ int tagfs_init(void) {
     memcpy(&g_state.superblock, &sb, sizeof(TagFSSuperblock));
     debug_printf("[TagFS] Superblock OK: %u blocks, %u free, %u files\n",
                  sb.total_blocks, sb.free_blocks, sb.total_files);
+
+    // --- Journal init + replay (before loading subsystems) ---
+    if (journal_init(sb.journal_superblock_sector) != 0) {
+        debug_printf("[TagFS] Warning: journal_init failed (continuing without journal)\n");
+    } else {
+        int replay_result = journal_validate_and_replay();
+        if (replay_result != 0) {
+            debug_printf("[TagFS] Warning: journal replay failed (result=%d)\n", replay_result);
+        }
+    }
 
     // --- Tag Registry ---
     g_state.registry = kmalloc(sizeof(TagRegistry));
@@ -515,6 +584,82 @@ int tagfs_init(void) {
 
     free_list_build();
 
+    // --- Mount-time fsck: cross-check file extents vs bitmap ---
+    {
+        uint32_t bitmap_bytes_sz = (sb.total_blocks + 7) / 8;
+        uint8_t* computed_bm = kmalloc(bitmap_bytes_sz);
+        if (computed_bm) {
+            memset(computed_bm, 0, bitmap_bytes_sz);
+
+            // Mark reserved blocks (tag registry, file table, metadata pool)
+            for (uint32_t r = 0; r < 3 && r < sb.total_blocks; r++) {
+                bitmap_set_bit(computed_bm, r);
+            }
+
+            // Scan all files and mark their extents
+            uint32_t files_checked = 0;
+            uint32_t orphan_blocks = 0;
+            uint32_t missing_blocks = 0;
+
+            for (uint32_t fid = 1; fid < sb.next_file_id; fid++) {
+                uint32_t mb, mo;
+                if (file_table_lookup(fid, &mb, &mo) != 0) continue;
+
+                TagFSMetadata meta;
+                memset(&meta, 0, sizeof(meta));
+                if (meta_pool_read(mb, mo, &meta) != 0) continue;
+
+                if (!(meta.flags & TAGFS_FILE_ACTIVE)) {
+                    tagfs_metadata_free(&meta);
+                    continue;
+                }
+
+                for (uint16_t e = 0; e < meta.extent_count; e++) {
+                    uint32_t start = meta.extents[e].start_block;
+                    uint32_t count = meta.extents[e].block_count;
+                    for (uint32_t b = start; b < start + count && b < sb.total_blocks; b++) {
+                        bitmap_set_bit(computed_bm, b);
+                    }
+                }
+                files_checked++;
+
+                // Rebuild bitmap index from disk metadata
+                for (uint16_t t = 0; t < meta.tag_count; t++) {
+                    tag_bitmap_set(g_state.bitmap_index, meta.tag_ids[t], fid);
+                }
+
+                tagfs_metadata_free(&meta);
+            }
+
+            // Compare computed vs on-disk bitmap
+            for (uint32_t b = 0; b < sb.total_blocks; b++) {
+                bool on_disk  = bitmap_test_bit(g_state.block_bitmap.bitmap, b);
+                bool computed = bitmap_test_bit(computed_bm, b);
+                if (on_disk && !computed) orphan_blocks++;
+                if (!on_disk && computed) missing_blocks++;
+            }
+
+            if (orphan_blocks > 0 || missing_blocks > 0) {
+                debug_printf("[TagFS FSCK] Bitmap mismatch: %u orphan, %u missing — repairing\n",
+                             orphan_blocks, missing_blocks);
+                memcpy(g_state.block_bitmap.bitmap, computed_bm, bitmap_bytes_sz);
+                free_list_build();
+
+                // Count actual free blocks
+                uint32_t used = 0;
+                for (uint32_t b = 0; b < sb.total_blocks; b++) {
+                    if (bitmap_test_bit(g_state.block_bitmap.bitmap, b)) used++;
+                }
+                g_state.superblock.free_blocks = sb.total_blocks - used;
+            }
+
+            debug_printf("[TagFS FSCK] Checked %u files, bitmap %s\n",
+                         files_checked,
+                         (orphan_blocks == 0 && missing_blocks == 0) ? "OK" : "repaired");
+            kfree(computed_bm);
+        }
+    }
+
     g_state.initialized = true;
     debug_printf("[TagFS] Initialized successfully\n");
     return 0;
@@ -545,6 +690,13 @@ void tagfs_sync(void) {
             debug_printf("[TagFS] sync: failed to write block bitmap\n");
         }
         kfree(bm_buf);
+    }
+
+    // Journal the superblock update before writing
+    JournalTxn txn;
+    if (journal_begin(&txn) == 0) {
+        journal_log_superblock(&txn, TAGFS_SUPERBLOCK_SECTOR, &g_state.superblock);
+        journal_commit(&txn);
     }
 
     tagfs_write_superblock(&g_state.superblock);
@@ -1043,8 +1195,13 @@ TagFSFileHandle* tagfs_open(uint32_t file_id, uint32_t flags) {
         return NULL;
     }
 
+    OpenFileEntry* ofe = ofe_acquire(file_id);
+
     TagFSFileHandle* handle = kmalloc(sizeof(TagFSFileHandle));
-    if (!handle) return NULL;
+    if (!handle) {
+        ofe_release(ofe);
+        return NULL;
+    }
 
     handle->file_id      = file_id;
     handle->flags        = flags;
@@ -1052,6 +1209,7 @@ TagFSFileHandle* tagfs_open(uint32_t file_id, uint32_t flags) {
     handle->file_size    = 0;
     handle->extents      = NULL;
     handle->extent_count = 0;
+    handle->ofe          = ofe;
 
     TagFSMetadata meta;
     memset(&meta, 0, sizeof(meta));
@@ -1073,6 +1231,7 @@ TagFSFileHandle* tagfs_open(uint32_t file_id, uint32_t flags) {
 
 void tagfs_close(TagFSFileHandle* handle) {
     if (!handle) return;
+    ofe_release(handle->ofe);
     if (handle->extents) kfree(handle->extents);
     kfree(handle);
 }
@@ -1131,6 +1290,9 @@ int tagfs_write(TagFSFileHandle* handle, const void* buffer, uint64_t size) {
     if (!handle || !buffer || size == 0) return -1;
     if (!g_state.initialized) return -1;
     if (!(handle->flags & TAGFS_HANDLE_WRITE)) return -1;
+
+    // Serialize writes to the same file
+    if (handle->ofe) spin_lock(&handle->ofe->write_lock);
 
     const uint8_t* in = (const uint8_t*)buffer;
     uint8_t block_buf[TAGFS_BLOCK_SIZE];
@@ -1210,6 +1372,8 @@ int tagfs_write(TagFSFileHandle* handle, const void* buffer, uint64_t size) {
         handle->file_size = handle->offset;
     }
 
+    // Ordered journal: data blocks already written above.
+    // Now journal the metadata update, then apply it.
     if (bytes_written > 0) {
         uint32_t meta_block, meta_offset;
         if (file_table_lookup(handle->file_id, &meta_block, &meta_offset) == 0) {
@@ -1224,6 +1388,17 @@ int tagfs_write(TagFSFileHandle* handle, const void* buffer, uint64_t size) {
                     memcpy(meta.extents, handle->extents,
                            sizeof(FileExtent) * handle->extent_count);
                 }
+
+                // Journal the metadata before committing to disk
+                JournalTxn txn;
+                if (journal_begin(&txn) == 0) {
+                    uint64_t meta_sector = block_to_sector(meta_block) +
+                                           (uint64_t)(meta_offset / 512);
+                    journal_log_metadata(&txn, handle->file_id,
+                                         (uint32_t)meta_sector, &meta);
+                    journal_commit(&txn);
+                }
+
                 meta_pool_delete(meta_block, meta_offset);
                 uint32_t new_mb, new_mo;
                 if (meta_pool_write(&meta, &new_mb, &new_mo) == 0) {
@@ -1234,6 +1409,7 @@ int tagfs_write(TagFSFileHandle* handle, const void* buffer, uint64_t size) {
         }
     }
 
+    if (handle->ofe) spin_unlock(&handle->ofe->write_lock);
     return (int)bytes_written;
 }
 

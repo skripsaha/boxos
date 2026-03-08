@@ -102,14 +102,10 @@ int main(void)
             if (printed_tags > 0)
                 print(", ");
 
-            if (info.tags[t].type == 0)
-            {
+            if (info.tags[t].value[0])
                 printf("%s:%s", info.tags[t].key, info.tags[t].value);
-            }
             else
-            {
                 print(info.tags[t].key);
-            }
             printed_tags++;
         }
 
