@@ -10,6 +10,5 @@ void yield(void) {
     PocketRing* ring = pocket_ring();
     pocket_ring_push(ring, &p);
 
-    // notify — yield hint to scheduler
-    __asm__ volatile("syscall" ::: "memory", "rcx", "r11");
+    __notify();
 }

@@ -130,8 +130,10 @@ typedef struct __packed
 STATIC_ASSERT(sizeof(obj_get_info_request_t) == 192, "obj_get_info_request_t must be 192 bytes");
 STATIC_ASSERT(sizeof(obj_get_info_response_t) == 192, "obj_get_info_response_t must be 192 bytes");
 
+typedef struct process_t process_t;
+
 void storage_deck_init(void);
-int storage_deck_handler(Pocket *event);
+int storage_deck_handler(Pocket *event, process_t* proc);
 
 // Synchronous I/O handlers (bypass async path)
 int handle_obj_read(Pocket *event);

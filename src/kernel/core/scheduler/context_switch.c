@@ -5,7 +5,7 @@
 #include "tss.h"
 #include "idt.h"
 #include "fpu.h"
-#include "syscall.h"
+#include "notify.h"
 
 void context_save(process_t* proc, ProcessContext* ctx) {
     if (!proc || !ctx) {
@@ -34,7 +34,7 @@ void context_restore(process_t* proc, ProcessContext* ctx) {
     }
 
     tss_set_rsp0((uint64_t)proc->kernel_stack_top);
-    syscall_set_kernel_rsp((uint64_t)proc->kernel_stack_top);
+    notify_set_kernel_rsp((uint64_t)proc->kernel_stack_top);
 }
 
 void context_switch(process_t* from, process_t* to) {

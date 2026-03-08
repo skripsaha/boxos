@@ -27,8 +27,7 @@ int pocket_submit(Pocket* p) {
         return -1;  // ring full
     }
 
-    // notify — signal kernel that PocketRing has work for the Guide
-    __asm__ volatile("syscall" ::: "memory", "rcx", "r11");
+    __notify();
 
     return 0;
 }

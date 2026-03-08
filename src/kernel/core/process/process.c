@@ -12,7 +12,7 @@
 #include "fpu.h"
 #include "aslr.h"
 #include "cabin_info.h"
-#include "syscall.h"
+#include "notify.h"
 
 static process_t *process_list_head = NULL;
 static volatile uint32_t process_count = 0;
@@ -977,7 +977,7 @@ void process_start_initial(process_t *proc)
     asm volatile("cli");
 
     tss_set_rsp0((uint64_t)proc->kernel_stack_top);
-    syscall_set_kernel_rsp((uint64_t)proc->kernel_stack_top);
+    notify_set_kernel_rsp((uint64_t)proc->kernel_stack_top);
 
     __asm__ volatile("mov %0, %%cr3" : : "r"(proc->context.cr3) : "memory");
 

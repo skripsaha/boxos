@@ -15,7 +15,8 @@ void guide(void);
 
 // Deck handler: processes a single Pocket prefix.
 // Returns 0 on success, negative error_t on failure.
-typedef int (*deck_handler_t)(Pocket* pocket);
+// proc = source process (already resolved by Guide, avoids redundant process_find).
+typedef int (*deck_handler_t)(Pocket* pocket, process_t* proc);
 
 typedef struct {
     uint8_t deck_id;

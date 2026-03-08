@@ -89,7 +89,7 @@ static void guide_process_pocket(process_t *proc)
             pocket->error_code = ERR_INVALID_POCKET;
             debug_printf("[GUIDE] ERROR: Invalid prefix index %u (count=%u)\n",
                          pocket->current_prefix_idx, pocket->prefix_count);
-            execution_deck_handler(pocket);
+            execution_deck_handler(pocket, proc);
             need_execution_deck = false;
             break;
         }
@@ -98,7 +98,7 @@ static void guide_process_pocket(process_t *proc)
 
         if (prefix == 0x0000)
         {
-            execution_deck_handler(pocket);
+            execution_deck_handler(pocket, proc);
             need_execution_deck = false;
             break;
         }
@@ -106,13 +106,13 @@ static void guide_process_pocket(process_t *proc)
         uint8_t deck_id = pocket_get_deck_id(pocket, pocket->current_prefix_idx);
         uint8_t opcode = pocket_get_opcode(pocket, pocket->current_prefix_idx);
 
-        bool security_ok = system_security_gate(pocket->pid, deck_id, opcode);
+        bool security_ok = system_security_gate(proc, deck_id, opcode);
         if (!security_ok)
         {
             pocket->error_code = ERR_ACCESS_DENIED;
             debug_printf("[GUIDE] Security gate failed for PID %u deck=0x%02x op=0x%02x\n",
                          pocket->pid, deck_id, opcode);
-            execution_deck_handler(pocket);
+            execution_deck_handler(pocket, proc);
             need_execution_deck = false;
             break;
         }
@@ -122,13 +122,13 @@ static void guide_process_pocket(process_t *proc)
         {
             pocket->error_code = ERR_INVALID_DECK_ID;
             debug_printf("[GUIDE] Unknown deck 0x%02x\n", deck_id);
-            execution_deck_handler(pocket);
+            execution_deck_handler(pocket, proc);
             need_execution_deck = false;
             break;
         }
 
         uint64_t deck_start = rdtsc();
-        int deck_ret = handler(pocket);
+        int deck_ret = handler(pocket, proc);
         uint64_t deck_elapsed_us = cpu_tsc_to_us(rdtsc() - deck_start);
 
         if (deck_ret < 0)
@@ -139,7 +139,7 @@ static void guide_process_pocket(process_t *proc)
             }
             debug_printf("[GUIDE] Deck 0x%02x failed: %s\n",
                          deck_id, error_string(pocket->error_code));
-            execution_deck_handler(pocket);
+            execution_deck_handler(pocket, proc);
             need_execution_deck = false;
             break;
         }
@@ -157,7 +157,7 @@ static void guide_process_pocket(process_t *proc)
 
     if (need_execution_deck)
     {
-        execution_deck_handler(pocket);
+        execution_deck_handler(pocket, proc);
     }
 
     // Consume the Pocket from the ring
