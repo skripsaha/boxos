@@ -194,7 +194,7 @@ int system_deck_proc_kill(Pocket* pocket) {
     memset(&kill_req, 0, sizeof(kill_req));
 
     void* data = get_request_data(pocket);
-    if (!data) {
+    if (!data || pocket->data_length < sizeof(proc_kill_event_t)) {
         deliver_response(pocket, SYSTEM_ERR_INVALID_ARGS, NULL, 0);
         return -1;
     }

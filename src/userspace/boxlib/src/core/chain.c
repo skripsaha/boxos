@@ -40,22 +40,24 @@ void hw_listen(uint8_t source_type, uint8_t flags) {
     pocket_submit(&p);
 }
 
-void proc_kill(uint16_t pid) {
+void proc_kill(uint32_t pid) {
+    memset(g_data_buf, 0, 8);
     memcpy(g_data_buf, &pid, sizeof(pid));
 
     Pocket p;
     pocket_prepare(&p);
-    pocket_set_data(&p, g_data_buf, sizeof(pid));
+    pocket_set_data(&p, g_data_buf, 8);
     pocket_add_prefix(&p, DECK_SYSTEM, 0x02);
     pocket_submit(&p);
 }
 
-void proc_query(uint16_t pid) {
+void proc_query(uint32_t pid) {
+    memset(g_data_buf, 0, 8);
     memcpy(g_data_buf, &pid, sizeof(pid));
 
     Pocket p;
     pocket_prepare(&p);
-    pocket_set_data(&p, g_data_buf, sizeof(pid));
+    pocket_set_data(&p, g_data_buf, 8);
     pocket_add_prefix(&p, DECK_SYSTEM, 0x03);
     pocket_submit(&p);
 }
