@@ -110,9 +110,9 @@ DECK_SYSTEM        equ 0xFF
 
 ; -------------------------------------------------------------------------
 ; YIELD — send a yield hint to the scheduler.
-; Pushes an empty Pocket with POCKET_FLAG_YIELD, fires int 0x80.
+; Pushes an empty Pocket with POCKET_FLAG_YIELD, fires notify.
 ; Uses stack-allocated 96-byte buffer.
-; Clobbers: rax, rcx, rdx, rdi, rsi
+; Clobbers: rax, rcx, rdx, rdi, rsi, r11
 ; -------------------------------------------------------------------------
 %macro YIELD 0
     sub rsp, 96
@@ -131,7 +131,7 @@ DECK_SYSTEM        equ 0xFF
     mov rdi, rsp
     pocket_push
     add rsp, 96
-    int 0x80
+    syscall                             ; notify
 %endmacro
 
 %endif ; NOTIFY_INC

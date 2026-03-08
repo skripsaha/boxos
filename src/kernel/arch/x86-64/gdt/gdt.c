@@ -45,8 +45,8 @@ void gdt_init(void) {
     gdt_set_entry(0, 0, 0, 0, 0);
     gdt_set_entry(1, 0, 0xFFFFF, 0x9A, 0xA0);
     gdt_set_entry(2, 0, 0xFFFFF, 0x92, 0xC0);
-    gdt_set_entry(3, 0, 0xFFFFF, 0xFA, 0xA0);
-    gdt_set_entry(4, 0, 0xFFFFF, 0xF2, 0xC0);
+    gdt_set_entry(3, 0, 0xFFFFF, 0xF2, 0xC0);  // User Data — index 3 (SYSRET: SS = STAR+8)
+    gdt_set_entry(4, 0, 0xFFFFF, 0xFA, 0xA0);  // User Code — index 4 (SYSRET: CS = STAR+16)
 
     // Indices 5 and 6 reserved for TSS (16 bytes in x86-64)
     gdt_desc.limit = sizeof(gdt) - 1;
