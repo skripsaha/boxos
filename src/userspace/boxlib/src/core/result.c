@@ -40,7 +40,7 @@ bool result_pop(Result* out) {
     return true;
 }
 
-#define IPC_STASH_SIZE 16
+#define IPC_STASH_SIZE 64
 static Result ipc_stash_buf[IPC_STASH_SIZE];
 static uint32_t ipc_stash_cnt = 0;
 
@@ -60,7 +60,7 @@ static bool ipc_stash_shift(Result* out) {
     return true;
 }
 
-#define NON_IPC_STASH_SIZE 16
+#define NON_IPC_STASH_SIZE 64
 static Result non_ipc_stash_buf[NON_IPC_STASH_SIZE];
 static uint32_t non_ipc_stash_cnt = 0;
 
