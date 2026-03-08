@@ -674,13 +674,25 @@ int main(int argc, char* argv[]) {
     }
     free(bitmap);
 
-    /* ---- Write journal superblock (empty) ---- */
+    /* ---- Write journal superblock (empty, with proper fields) ---- */
     printf("[create_tagfs] Writing journal superblock...\n");
     {
         uint8_t jbuf[512];
         memset(jbuf, 0, 512);
-        uint32_t jmag = JOURNAL_MAGIC;
-        memcpy(jbuf, &jmag, 4);
+        uint32_t jmag  = JOURNAL_MAGIC;
+        uint32_t jver  = 2;
+        uint32_t jstart = TAGFS_JOURNAL_ENTRIES_START;
+        uint32_t jcount = TAGFS_JOURNAL_ENTRY_COUNT;
+        uint32_t jhead = 0;
+        uint32_t jtail = 0;
+        uint32_t jseq  = 1;
+        memcpy(jbuf + 0,  &jmag,   4);
+        memcpy(jbuf + 4,  &jver,   4);
+        memcpy(jbuf + 8,  &jstart, 4);
+        memcpy(jbuf + 12, &jcount, 4);
+        memcpy(jbuf + 16, &jhead,  4);
+        memcpy(jbuf + 20, &jtail,  4);
+        memcpy(jbuf + 24, &jseq,   4);
 
         write_at_sector(disk, TAGFS_JOURNAL_SB_SECTOR, jbuf, 512);
         write_at_sector(disk, TAGFS_JOURNAL_BACKUP_SECTOR, jbuf, 512);

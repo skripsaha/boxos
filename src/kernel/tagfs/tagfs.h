@@ -216,6 +216,16 @@ typedef struct {
 // In-Memory Structures: File Handles and Metadata
 // ----------------------------------------------------------------------------
 
+// Per-file lock entry in the open file table
+#define OPEN_FILE_BUCKETS 32
+
+typedef struct OpenFileEntry {
+    uint32_t              file_id;
+    uint32_t              ref_count;
+    spinlock_t            write_lock;
+    struct OpenFileEntry* next;
+} OpenFileEntry;
+
 typedef struct {
     uint32_t    file_id;
     uint32_t    flags;
@@ -223,6 +233,7 @@ typedef struct {
     uint64_t    file_size;
     FileExtent* extents;
     uint16_t    extent_count;
+    OpenFileEntry* ofe;   // back-pointer to open file entry (for locking)
 } TagFSFileHandle;
 
 typedef struct {
