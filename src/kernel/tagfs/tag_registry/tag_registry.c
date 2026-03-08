@@ -329,7 +329,6 @@ int tag_registry_flush(TagRegistry* reg) {
     if (!state) return -1;
 
     uint32_t current_block = state->superblock.tag_registry_block;
-    if (current_block == 0) return -1;
 
     spin_lock(&reg->lock);
 
@@ -406,13 +405,14 @@ int tag_registry_flush(TagRegistry* reg) {
 }
 
 int tag_registry_load(TagRegistry* reg, uint32_t first_block) {
-    if (!reg || first_block == 0) return -1;
+    if (!reg) return -1;
 
     spin_lock(&reg->lock);
 
     uint32_t block_num = first_block;
 
-    while (block_num != 0) {
+    /* Read at least the first block (block 0 is valid in our layout) */
+    while (1) {
         TagRegistryBlock blk;
         int read_result = tagfs_read_block(block_num, &blk);
         if (read_result != 0) {
@@ -475,6 +475,7 @@ int tag_registry_load(TagRegistry* reg, uint32_t first_block) {
         }
 
         block_num = blk.next_block;
+        if (block_num == 0) break;  /* end of chain */
     }
 
     spin_unlock(&reg->lock);
