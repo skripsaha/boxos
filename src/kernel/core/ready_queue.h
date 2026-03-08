@@ -6,7 +6,7 @@
 #include "klib.h"
 
 // ReadyQueue: global FIFO queue of processes that have pending Pockets.
-// Replaces the old EventRing — holds process_t* pointers instead of full Event copies.
+// Holds process_t* pointers — Guide pops and processes their PocketRings.
 // Syscall handler and ISR push here; Guide pops and processes.
 
 typedef struct process_t process_t;
