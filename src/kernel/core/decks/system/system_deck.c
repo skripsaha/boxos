@@ -168,47 +168,10 @@ bool system_security_gate(uint32_t pid, uint8_t deck_id, uint8_t opcode) {
             return snapshot_has_tag(tags, "system");
         }
 
-        case 0x03: {
-            if (opcode == 0x10 || opcode == 0x11 || opcode == 0x12 ||
-                opcode == 0x15 || opcode == 0x16 || opcode == 0x17 ||
-                opcode == 0x7B) {
-                return true;
-            }
-            if (opcode == 0x34 || opcode == 0x35 || opcode == 0x53 ||
-                opcode == 0x75 || opcode == 0x78) {
-                return snapshot_has_tag(tags, "hw_access") ||
-                       snapshot_has_tag(tags, "hardware") ||
-                       snapshot_has_tag(tags, "system");
-            }
-            if (opcode >= 0x60 && opcode <= 0x62) {
-                return snapshot_has_tag(tags, "hw_kb") ||
-                       snapshot_has_tag(tags, "system");
-            }
-            if ((opcode >= 0x70 && opcode <= 0x74) ||
-                opcode == 0x76 || opcode == 0x77 ||
-                opcode == 0x79 || opcode == 0x7A) {
-                return snapshot_has_tag(tags, "hw_vga") ||
-                       snapshot_has_tag(tags, "system");
-            }
-            if (opcode == 0x52) {
-                return snapshot_has_tag(tags, "storage") ||
-                       snapshot_has_tag(tags, "system");
-            }
-            if ((opcode >= 0x20 && opcode <= 0x25) ||
-                (opcode >= 0x32 && opcode <= 0x36) ||
-                opcode == 0x40) {
-                return snapshot_has_tag(tags, "hw_access") ||
-                       snapshot_has_tag(tags, "hardware") ||
-                       snapshot_has_tag(tags, "system");
-            }
-            if (opcode == 0x80 || opcode == 0x81) {
-                return snapshot_has_tag(tags, "hw_power") ||
-                       snapshot_has_tag(tags, "utility") ||
-                       snapshot_has_tag(tags, "system");
-            }
-            return snapshot_has_tag(tags, "utility") ||
-                   snapshot_has_tag(tags, "system");
-        }
+        case 0x03:
+            // Hardware Deck: require "system" or "bypass" per spec
+            return snapshot_has_tag(tags, "system") ||
+                   snapshot_has_tag(tags, "bypass");
 
         case 0x04:
             return snapshot_has_tag(tags, "network") ||

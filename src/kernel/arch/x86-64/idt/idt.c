@@ -352,9 +352,15 @@ void syscall_handler(interrupt_frame_t* frame) {
 
     frame->rax = 0;
 
+    // Save process context before any state change or scheduling.
+    // schedule() only saves context for PROC_WORKING, but we set PROC_WAITING
+    // below, so we must save explicitly here — otherwise the process resumes
+    // with stale registers from a previous syscall.
+    context_save_from_frame(proc, frame);
+
     // Check if this is a yield (sleep request).
     // Yield pockets skip guide() entirely — the process sleeps in PROC_WAITING
-    // until execution_deck delivers a Result and wakes it via process_set_state.
+    // until an IPC delivery or Result wakes it via process_set_state(PROC_WORKING).
     PocketRing* pring = (PocketRing*)vmm_phys_to_virt(proc->pocket_ring_phys);
     Pocket* peek = pocket_ring_peek(pring);
 
