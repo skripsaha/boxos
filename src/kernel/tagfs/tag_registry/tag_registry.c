@@ -106,6 +106,74 @@ static uint16_t lookup_unlocked(TagRegistry* reg, const char* key, const char* v
     return TAGFS_INVALID_TAG_ID;
 }
 
+// Grow by_id array to accommodate at least `needed_id`
+static int ensure_by_id_capacity(TagRegistry* reg, uint16_t needed_id) {
+    while (needed_id >= reg->by_id_capacity) {
+        uint32_t new_cap = reg->by_id_capacity * 2;
+        TagRegistryEntry** new_by_id = kmalloc(sizeof(TagRegistryEntry*) * new_cap);
+        if (!new_by_id) {
+            debug_printf("[TagRegistry] ensure_by_id_capacity: alloc failed\n");
+            return -1;
+        }
+        memcpy(new_by_id, reg->by_id, sizeof(TagRegistryEntry*) * reg->by_id_capacity);
+        memset(new_by_id + reg->by_id_capacity, 0,
+               sizeof(TagRegistryEntry*) * (new_cap - reg->by_id_capacity));
+        kfree(reg->by_id);
+        reg->by_id = new_by_id;
+        reg->by_id_capacity = new_cap;
+    }
+    return 0;
+}
+
+// Insert a tag at a specific ID (used by load to preserve disk IDs)
+static uint16_t intern_with_id_unlocked(TagRegistry* reg, uint16_t tag_id,
+                                         const char* key, const char* value) {
+    // If this exact tag already exists, return existing
+    uint16_t existing = lookup_unlocked(reg, key, value);
+    if (existing != TAGFS_INVALID_TAG_ID) return existing;
+
+    if (tag_id > TAGFS_MAX_TAG_ID) return TAGFS_INVALID_TAG_ID;
+
+    if (ensure_by_id_capacity(reg, tag_id) != 0) return TAGFS_INVALID_TAG_ID;
+
+    // Slot already occupied — collision (shouldn't happen on clean load)
+    if (reg->by_id[tag_id]) {
+        debug_printf("[TagRegistry] intern_with_id: slot %u already used\n", tag_id);
+        return TAGFS_INVALID_TAG_ID;
+    }
+
+    TagRegistryEntry* entry = kmalloc(sizeof(TagRegistryEntry));
+    if (!entry) return TAGFS_INVALID_TAG_ID;
+
+    entry->key = copy_string(key);
+    if (!entry->key) { kfree(entry); return TAGFS_INVALID_TAG_ID; }
+
+    entry->value = copy_string(value);
+    if (value && !entry->value) { kfree(entry->key); kfree(entry); return TAGFS_INVALID_TAG_ID; }
+
+    entry->flags  = (value != NULL) ? 1 : 0;
+    entry->tag_id = tag_id;
+
+    TagRegistryNode* node = kmalloc(sizeof(TagRegistryNode));
+    if (!node) { kfree(entry->value); kfree(entry->key); kfree(entry); return TAGFS_INVALID_TAG_ID; }
+
+    uint32_t bucket = registry_hash(key, value, reg->bucket_count);
+    node->tag_id = tag_id;
+    node->next   = reg->buckets[bucket];
+    reg->buckets[bucket] = node;
+
+    reg->by_id[tag_id] = entry;
+
+    TagKeyGroup* group = find_or_create_key_group(reg, key);
+    if (group) add_to_key_group(group, tag_id);
+
+    // Keep next_id above all known IDs
+    if (tag_id >= reg->next_id) reg->next_id = tag_id + 1;
+    reg->total_tags++;
+
+    return tag_id;
+}
+
 static uint16_t intern_unlocked(TagRegistry* reg, const char* key, const char* value) {
     uint16_t existing = lookup_unlocked(reg, key, value);
     if (existing != TAGFS_INVALID_TAG_ID) {
@@ -117,20 +185,7 @@ static uint16_t intern_unlocked(TagRegistry* reg, const char* key, const char* v
         return TAGFS_INVALID_TAG_ID;
     }
 
-    if (reg->next_id >= reg->by_id_capacity) {
-        uint32_t new_cap = reg->by_id_capacity * 2;
-        TagRegistryEntry** new_by_id = kmalloc(sizeof(TagRegistryEntry*) * new_cap);
-        if (!new_by_id) {
-            debug_printf("[TagRegistry] intern: by_id grow alloc failed\n");
-            return TAGFS_INVALID_TAG_ID;
-        }
-        memcpy(new_by_id, reg->by_id, sizeof(TagRegistryEntry*) * reg->by_id_capacity);
-        memset(new_by_id + reg->by_id_capacity, 0,
-               sizeof(TagRegistryEntry*) * (new_cap - reg->by_id_capacity));
-        kfree(reg->by_id);
-        reg->by_id = new_by_id;
-        reg->by_id_capacity = new_cap;
-    }
+    if (ensure_by_id_capacity(reg, reg->next_id) != 0) return TAGFS_INVALID_TAG_ID;
 
     TagRegistryEntry* entry = kmalloc(sizeof(TagRegistryEntry));
     if (!entry) {
@@ -141,7 +196,6 @@ static uint16_t intern_unlocked(TagRegistry* reg, const char* key, const char* v
     entry->key = copy_string(key);
     if (!entry->key) {
         kfree(entry);
-        debug_printf("[TagRegistry] intern: key copy failed\n");
         return TAGFS_INVALID_TAG_ID;
     }
 
@@ -149,7 +203,6 @@ static uint16_t intern_unlocked(TagRegistry* reg, const char* key, const char* v
     if (value && !entry->value) {
         kfree(entry->key);
         kfree(entry);
-        debug_printf("[TagRegistry] intern: value copy failed\n");
         return TAGFS_INVALID_TAG_ID;
     }
 
@@ -161,7 +214,6 @@ static uint16_t intern_unlocked(TagRegistry* reg, const char* key, const char* v
         kfree(entry->value);
         kfree(entry->key);
         kfree(entry);
-        debug_printf("[TagRegistry] intern: node alloc failed\n");
         return TAGFS_INVALID_TAG_ID;
     }
 
@@ -434,11 +486,12 @@ int tag_registry_load(TagRegistry* reg, uint32_t first_block) {
 
             uint8_t* p = blk.data + offset;
 
-            uint16_t tag_id   = *((uint16_t*)p); p += sizeof(uint16_t);
-            (void)tag_id;
+            uint16_t tag_id;
+            memcpy(&tag_id, p, sizeof(uint16_t)); p += sizeof(uint16_t);
             uint8_t  flags    = *p++;
             uint8_t  key_len  = *p++;
-            uint16_t value_len = *((uint16_t*)p); p += sizeof(uint16_t);
+            uint16_t value_len;
+            memcpy(&value_len, p, sizeof(uint16_t)); p += sizeof(uint16_t);
 
             uint32_t record_size = sizeof(uint16_t) + sizeof(uint8_t) + sizeof(uint8_t)
                                  + sizeof(uint16_t) + key_len + value_len;
@@ -466,7 +519,8 @@ int tag_registry_load(TagRegistry* reg, uint32_t first_block) {
                 value_ptr = value;
             }
 
-            uint16_t new_id = intern_unlocked(reg, key, value_ptr);
+            // Use the stored disk tag_id to preserve ID mapping across reboots
+            uint16_t new_id = intern_with_id_unlocked(reg, tag_id, key, value_ptr);
             if (new_id != TAGFS_INVALID_TAG_ID && reg->by_id[new_id]) {
                 reg->by_id[new_id]->flags = flags;
             }
