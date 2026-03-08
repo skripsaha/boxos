@@ -1151,8 +1151,13 @@ int tagfs_write(TagFSFileHandle* handle, const void* buffer, uint64_t size) {
         }
 
         if (found < 0) {
+            // extent_start = cumulative size of all existing extents (from loop)
+            // Allocate enough blocks to cover from extent_start to file_pos+1
+            uint32_t blocks_needed = (uint32_t)((file_pos - extent_start) / TAGFS_BLOCK_SIZE) + 1;
+            if (blocks_needed > 0xFFFF) blocks_needed = 0xFFFF;
+
             uint32_t new_start;
-            if (tagfs_alloc_blocks(1, &new_start) != 0) {
+            if (tagfs_alloc_blocks(blocks_needed, &new_start) != 0) {
                 debug_printf("[TagFS] write: block alloc failed\n");
                 break;
             }
@@ -1160,7 +1165,7 @@ int tagfs_write(TagFSFileHandle* handle, const void* buffer, uint64_t size) {
             uint16_t new_count = handle->extent_count + 1;
             FileExtent* new_extents = kmalloc(sizeof(FileExtent) * new_count);
             if (!new_extents) {
-                tagfs_free_blocks(new_start, 1);
+                tagfs_free_blocks(new_start, blocks_needed);
                 break;
             }
             if (handle->extents && handle->extent_count > 0) {
@@ -1168,12 +1173,12 @@ int tagfs_write(TagFSFileHandle* handle, const void* buffer, uint64_t size) {
                 kfree(handle->extents);
             }
             new_extents[handle->extent_count].start_block = new_start;
-            new_extents[handle->extent_count].block_count = 1;
+            new_extents[handle->extent_count].block_count = (uint16_t)blocks_needed;
             handle->extents      = new_extents;
             handle->extent_count = new_count;
 
-            found        = handle->extent_count - 1;
-            extent_start = file_pos;
+            found = handle->extent_count - 1;
+            // extent_start stays as cumulative end — math works correctly now
         }
 
         uint64_t offset_in_extent = file_pos - extent_start;
@@ -1458,15 +1463,26 @@ int tagfs_defrag_file(uint32_t file_id, uint32_t target_block) {
     }
 
     if (meta.extents) kfree(meta.extents);
-    meta.extents = kmalloc(sizeof(FileExtent));
+
+    // Split into multiple extents if total_blocks exceeds uint16_t max
+    uint16_t new_extent_count = (uint16_t)((total_blocks + 0xFFFE) / 0xFFFF);
+    if (new_extent_count == 0) new_extent_count = 1;
+    meta.extents = kmalloc(sizeof(FileExtent) * new_extent_count);
     if (!meta.extents) {
         tagfs_metadata_free(&meta);
         spin_unlock(&g_state.lock);
         return -1;
     }
-    meta.extents[0].start_block = new_start;
-    meta.extents[0].block_count = (uint16_t)total_blocks;
-    meta.extent_count = 1;
+    uint32_t remaining = total_blocks;
+    uint32_t block_pos = new_start;
+    for (uint16_t e = 0; e < new_extent_count; e++) {
+        uint32_t chunk = remaining > 0xFFFF ? 0xFFFF : remaining;
+        meta.extents[e].start_block = block_pos;
+        meta.extents[e].block_count = (uint16_t)chunk;
+        block_pos += chunk;
+        remaining -= chunk;
+    }
+    meta.extent_count = new_extent_count;
 
     meta_pool_delete(meta_block, meta_offset);
     uint32_t new_mb, new_mo;

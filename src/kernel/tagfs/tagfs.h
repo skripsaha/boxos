@@ -288,6 +288,7 @@ int             tag_bitmap_query(TagBitmapIndex* idx,
                     uint32_t* out_file_ids, uint32_t max_results);
 int             tag_bitmap_tags_for_file(TagBitmapIndex* idx, uint32_t file_id,
                     uint16_t* out_ids, uint32_t max_ids);
+int             tag_bitmap_tag_count_for_file(TagBitmapIndex* idx, uint32_t file_id);
 
 // ----------------------------------------------------------------------------
 // File Table API

@@ -460,3 +460,18 @@ int tag_bitmap_tags_for_file(TagBitmapIndex* idx, uint32_t file_id,
     spin_unlock(&idx->lock);
     return (int)copy_count;
 }
+
+int tag_bitmap_tag_count_for_file(TagBitmapIndex* idx, uint32_t file_id) {
+    if (!idx) return 0;
+
+    spin_lock(&idx->lock);
+
+    if (file_id >= idx->file_capacity) {
+        spin_unlock(&idx->lock);
+        return 0;
+    }
+
+    int count = (int)idx->file_to_tags[file_id].count;
+    spin_unlock(&idx->lock);
+    return count;
+}

@@ -244,11 +244,9 @@ int meta_pool_write(const TagFSMetadata* meta, uint32_t* out_block, uint32_t* ou
         debug_printf("[MetaPool] write: block %u full (used=%u need=%u), chaining to new block\n",
                      g_current_block_num, g_current_block.used_bytes, record_size);
 
-        // Allocate a new block for the chain (release lock to call alloc)
+        // Allocate a new block for the chain (safe: g_lock != g_state.lock)
         uint32_t new_block;
-        spin_unlock(&g_lock);
         int alloc_ret = tagfs_alloc_blocks(1, &new_block);
-        spin_lock(&g_lock);
         if (alloc_ret != 0) {
             debug_printf("[MetaPool] write: failed to allocate new block\n");
             spin_unlock(&g_lock);

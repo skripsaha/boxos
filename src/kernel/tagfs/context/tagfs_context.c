@@ -175,9 +175,21 @@ bool tagfs_context_matches_file(uint32_t pid, uint32_t file_id) {
         return false;
     }
 
-    uint16_t file_tag_ids[256];
+    int tag_count = tag_bitmap_tag_count_for_file(state->bitmap_index, file_id);
+    if (tag_count <= 0) {
+        // File has no tags — cannot satisfy any context requirement
+        spin_unlock(&g_lock);
+        return (ctx->context_bits == 0 && ctx->overflow_count == 0);
+    }
+
+    uint16_t* file_tag_ids = kmalloc(sizeof(uint16_t) * (uint32_t)tag_count);
+    if (!file_tag_ids) {
+        spin_unlock(&g_lock);
+        return false;
+    }
+
     int count = tag_bitmap_tags_for_file(state->bitmap_index, file_id,
-                                         file_tag_ids, 256);
+                                         file_tag_ids, (uint32_t)tag_count);
     if (count < 0)
         count = 0;
 
@@ -188,6 +200,7 @@ bool tagfs_context_matches_file(uint32_t pid, uint32_t file_id) {
     }
 
     if ((file_bits & ctx->context_bits) != ctx->context_bits) {
+        kfree(file_tag_ids);
         spin_unlock(&g_lock);
         return false;
     }
@@ -201,11 +214,13 @@ bool tagfs_context_matches_file(uint32_t pid, uint32_t file_id) {
             }
         }
         if (!found) {
+            kfree(file_tag_ids);
             spin_unlock(&g_lock);
             return false;
         }
     }
 
+    kfree(file_tag_ids);
     spin_unlock(&g_lock);
     return true;
 }

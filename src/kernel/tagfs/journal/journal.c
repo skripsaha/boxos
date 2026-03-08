@@ -5,6 +5,7 @@
 static JournalSuperblock g_journal_sb;
 static bool g_journal_initialized = false;
 static bool g_txn_active = false;  // Only one transaction at a time
+static spinlock_t g_journal_lock;
 
 static uint32_t g_journal_sector;   // Primary journal superblock sector
 static uint32_t g_journal_backup;   // Backup journal superblock sector
@@ -195,6 +196,7 @@ int journal_reload(void) {
 int journal_init(uint32_t superblock_sector) {
     if (g_journal_initialized) return 0;
 
+    spinlock_init(&g_journal_lock);
     g_journal_sector = superblock_sector;
     g_journal_backup = superblock_sector + 1;
 
@@ -239,8 +241,6 @@ int journal_init(uint32_t superblock_sector) {
 //      — skip them (effectively rolled back)
 // ---------------------------------------------------------------------------
 
-#define MAX_COMMITTED_SEQS 128  // Max distinct transactions in one replay pass
-
 int journal_validate_and_replay(void) {
     if (!g_journal_initialized) {
         debug_printf("[Journal] ERROR: Journal not initialized\n");
@@ -275,26 +275,33 @@ int journal_validate_and_replay(void) {
     debug_printf("[Journal] Replaying transactions (tail=%u, head=%u)...\n",
                  g_journal_sb.tail, g_journal_sb.head);
 
-    // --- Pass 1: Find committed transaction sequences ---
-    uint32_t committed_seqs[MAX_COMMITTED_SEQS];
+    // Each transaction needs at least 2 entries (BEGIN+COMMIT), so max
+    // committed transactions = entry_count / 2.  Dynamically allocate.
+    uint32_t max_committed = g_journal_sb.entry_count / 2;
+    if (max_committed == 0) max_committed = 1;
+
+    uint32_t* committed_seqs = kmalloc(sizeof(uint32_t) * max_committed);
+    if (!committed_seqs) {
+        debug_printf("[Journal] ERROR: kmalloc failed for committed_seqs (%u)\n", max_committed);
+        return -1;
+    }
     uint32_t num_committed = 0;
 
+    // --- Pass 1: Find committed transaction sequences ---
     uint32_t index = g_journal_sb.tail;
     while (index != g_journal_sb.head) {
         JournalEntry entry;
         if (journal_read_entry(index, &entry) != 0) {
             debug_printf("[Journal] ERROR: Failed to read entry %u\n", index);
+            kfree(committed_seqs);
             return -1;
         }
 
         if (entry.magic == JOURNAL_ENTRY_MAGIC &&
             entry.type == JTYPE_COMMIT &&
             entry.committed == 1) {
-            if (num_committed < MAX_COMMITTED_SEQS) {
+            if (num_committed < max_committed) {
                 committed_seqs[num_committed++] = entry.seq;
-            } else {
-                debug_printf("[Journal] WARNING: Too many committed txns, truncating replay\n");
-                break;
             }
         }
 
@@ -303,6 +310,7 @@ int journal_validate_and_replay(void) {
 
     if (num_committed == 0) {
         debug_printf("[Journal] No committed transactions found — all incomplete, rolling back\n");
+        kfree(committed_seqs);
         g_journal_sb.tail = g_journal_sb.head;
         if (journal_write_superblock() != 0) {
             debug_printf("[Journal] ERROR: Failed to truncate journal\n");
@@ -320,6 +328,7 @@ int journal_validate_and_replay(void) {
         JournalEntry entry;
         if (journal_read_entry(index, &entry) != 0) {
             debug_printf("[Journal] ERROR: Failed to read entry %u\n", index);
+            kfree(committed_seqs);
             return -1;
         }
 
@@ -371,6 +380,7 @@ int journal_validate_and_replay(void) {
         uint8_t* buffer = kmalloc(ATA_SECTOR_SIZE);
         if (!buffer) {
             debug_printf("[Journal] ERROR: Memory allocation failed\n");
+            kfree(committed_seqs);
             return -1;
         }
 
@@ -393,6 +403,7 @@ int journal_validate_and_replay(void) {
             debug_printf("[Journal] ERROR: Failed to write data sector %u for entry %u\n",
                          entry.sector, index);
             kfree(buffer);
+            kfree(committed_seqs);
             return -1;
         }
 
@@ -400,6 +411,7 @@ int journal_validate_and_replay(void) {
 
         if (journal_mark_replayed(index) != 0) {
             debug_printf("[Journal] ERROR: Failed to mark entry %u as replayed\n", index);
+            kfree(committed_seqs);
             return -1;
         }
 
@@ -413,6 +425,7 @@ int journal_validate_and_replay(void) {
     if (replayed_count > 0) {
         if (ata_flush_cache(1) != 0) {
             debug_printf("[Journal] ERROR: Batch flush failed after replay\n");
+            kfree(committed_seqs);
             return -1;
         }
     }
@@ -429,6 +442,9 @@ int journal_validate_and_replay(void) {
         }
         index = (index + 1) % g_journal_sb.entry_count;
     }
+
+    // Done with committed_seqs
+    kfree(committed_seqs);
 
     // Truncate journal
     g_journal_sb.tail = g_journal_sb.head;
@@ -448,8 +464,11 @@ int journal_validate_and_replay(void) {
 int journal_begin(JournalTxn* txn) {
     if (!g_journal_initialized || !txn) return -1;
 
+    spin_lock(&g_journal_lock);
+
     if (g_txn_active) {
         debug_printf("[Journal] ERROR: Transaction already in progress\n");
+        spin_unlock(&g_journal_lock);
         return -1;
     }
 
@@ -461,6 +480,7 @@ int journal_begin(JournalTxn* txn) {
     // Need at least 2 slots (1 data + 1 commit)
     if (!ring_has_space(2)) {
         debug_printf("[Journal] ERROR: Journal full, cannot begin transaction\n");
+        spin_unlock(&g_journal_lock);
         return -1;
     }
 
@@ -470,6 +490,7 @@ int journal_begin(JournalTxn* txn) {
     txn->active = true;
     g_txn_active = true;
 
+    spin_unlock(&g_journal_lock);
     return 0;
 }
 
@@ -477,11 +498,14 @@ int journal_log_metadata(JournalTxn* txn, uint32_t file_id, uint32_t target_sect
                          const TagFSMetadata* meta) {
     if (!g_journal_initialized || !txn || !txn->active || !meta) return -1;
 
+    spin_lock(&g_journal_lock);
+
     // Need space for this entry — try compaction if full
     if (!ring_has_space(1)) {
         journal_compact();
         if (!ring_has_space(1)) {
             debug_printf("[Journal] ERROR: Journal full during log_metadata (even after compact)\n");
+            spin_unlock(&g_journal_lock);
             return -1;
         }
     }
@@ -495,27 +519,31 @@ int journal_log_metadata(JournalTxn* txn, uint32_t file_id, uint32_t target_sect
     entry.type = JTYPE_METADATA;
     entry.file_id = file_id;
     entry.sector = target_sector;
-    entry.committed = 1;  // Entry data is valid
+    entry.committed = 1;
     entry.replayed = 0;
     memcpy(entry.data, meta, sizeof(TagFSMetadata));
 
     if (journal_write_entry(idx, &entry) != 0) {
-        // Rollback head
         g_journal_sb.head = txn->first_idx;
+        spin_unlock(&g_journal_lock);
         return -1;
     }
 
     txn->entry_count++;
+    spin_unlock(&g_journal_lock);
     return 0;
 }
 
 int journal_log_superblock(JournalTxn* txn, uint32_t target_sector, const TagFSSuperblock* sb) {
     if (!g_journal_initialized || !txn || !txn->active || !sb) return -1;
 
+    spin_lock(&g_journal_lock);
+
     if (!ring_has_space(1)) {
         journal_compact();
         if (!ring_has_space(1)) {
             debug_printf("[Journal] ERROR: Journal full during log_superblock (even after compact)\n");
+            spin_unlock(&g_journal_lock);
             return -1;
         }
     }
@@ -535,30 +563,36 @@ int journal_log_superblock(JournalTxn* txn, uint32_t target_sector, const TagFSS
 
     if (journal_write_entry(idx, &entry) != 0) {
         g_journal_sb.head = txn->first_idx;
+        spin_unlock(&g_journal_lock);
         return -1;
     }
 
     txn->entry_count++;
+    spin_unlock(&g_journal_lock);
     return 0;
 }
 
 int journal_commit(JournalTxn* txn) {
     if (!g_journal_initialized || !txn || !txn->active) return -1;
 
+    spin_lock(&g_journal_lock);
+
     if (txn->entry_count == 0) {
         debug_printf("[Journal] WARNING: Committing empty transaction\n");
         txn->active = false;
         g_txn_active = false;
+        spin_unlock(&g_journal_lock);
         return 0;
     }
+
+    // All error paths jump here to release lock
+    int commit_result = -1;
 
     // --- Step 1: Write COMMIT record ---
     if (!ring_has_space(1)) {
         debug_printf("[Journal] ERROR: No space for commit record\n");
         g_journal_sb.head = txn->first_idx;
-        txn->active = false;
-        g_txn_active = false;
-        return -1;
+        goto commit_done;
     }
 
     uint32_t commit_idx = ring_alloc();
@@ -569,72 +603,55 @@ int journal_commit(JournalTxn* txn) {
     commit_entry.seq = txn->seq;
     commit_entry.type = JTYPE_COMMIT;
     commit_entry.file_id = 0;
-    commit_entry.sector = txn->entry_count;  // Store entry count for diagnostics
+    commit_entry.sector = txn->entry_count;
     commit_entry.committed = 1;
     commit_entry.replayed = 0;
 
     if (journal_write_entry(commit_idx, &commit_entry) != 0) {
         debug_printf("[Journal] ERROR: Failed to write commit record\n");
         g_journal_sb.head = txn->first_idx;
-        txn->active = false;
-        g_txn_active = false;
-        return -1;
+        goto commit_done;
     }
 
     // --- Step 2: Flush to ensure commit record is durable ---
-    // THIS IS THE POINT OF NO RETURN
     if (ata_flush_cache(1) != 0) {
         debug_printf("[Journal] ERROR: Flush failed after commit record\n");
-        // Can't safely rollback — commit may or may not be on disk
-        // On next mount, replay will handle either case
-        txn->active = false;
-        g_txn_active = false;
-        return -1;
+        goto commit_done;
     }
 
     // --- Step 3: Apply all data entries to their target sectors ---
-    uint32_t idx = txn->first_idx;
-    for (uint32_t i = 0; i < txn->entry_count; i++) {
-        JournalEntry entry;
-        if (journal_read_entry(idx, &entry) != 0) {
-            debug_printf("[Journal] ERROR: Failed to read entry %u during apply\n", idx);
-            // Transaction is committed — replay will handle on next mount
-            txn->active = false;
-            g_txn_active = false;
-            return -1;
+    {
+        uint32_t idx = txn->first_idx;
+        for (uint32_t i = 0; i < txn->entry_count; i++) {
+            JournalEntry entry;
+            if (journal_read_entry(idx, &entry) != 0) {
+                debug_printf("[Journal] ERROR: Failed to read entry %u during apply\n", idx);
+                goto commit_done;
+            }
+
+            uint8_t* buffer = kmalloc(ATA_SECTOR_SIZE);
+            if (!buffer) goto commit_done;
+
+            memset(buffer, 0, ATA_SECTOR_SIZE);
+
+            if (entry.type == JTYPE_METADATA) {
+                memcpy(buffer, entry.data, sizeof(TagFSMetadata));
+            } else if (entry.type == JTYPE_SUPERBLOCK) {
+                memcpy(buffer, entry.data, sizeof(TagFSSuperblock));
+            }
+
+            int result = ata_write_sectors(1, entry.sector, 1, buffer);
+            kfree(buffer);
+
+            if (result != 0) {
+                debug_printf("[Journal] ERROR: Failed to apply entry %u to sector %u\n",
+                             idx, entry.sector);
+                goto commit_done;
+            }
+
+            journal_mark_replayed(idx);
+            idx = (idx + 1) % g_journal_sb.entry_count;
         }
-
-        uint8_t* buffer = kmalloc(ATA_SECTOR_SIZE);
-        if (!buffer) {
-            txn->active = false;
-            g_txn_active = false;
-            return -1;
-        }
-
-        memset(buffer, 0, ATA_SECTOR_SIZE);
-
-        if (entry.type == JTYPE_METADATA) {
-            memcpy(buffer, entry.data, sizeof(TagFSMetadata));
-        } else if (entry.type == JTYPE_SUPERBLOCK) {
-            memcpy(buffer, entry.data, sizeof(TagFSSuperblock));
-        }
-
-        int result = ata_write_sectors(1, entry.sector, 1, buffer);
-        kfree(buffer);
-
-        if (result != 0) {
-            debug_printf("[Journal] ERROR: Failed to apply entry %u to sector %u\n",
-                         idx, entry.sector);
-            // Committed — replay will fix on next mount
-            txn->active = false;
-            g_txn_active = false;
-            return -1;
-        }
-
-        // Mark entry as replayed
-        journal_mark_replayed(idx);
-
-        idx = (idx + 1) % g_journal_sb.entry_count;
     }
 
     // Mark commit record as replayed
@@ -646,15 +663,19 @@ int journal_commit(JournalTxn* txn) {
     // --- Step 5: Advance tail and sequence, persist superblock ---
     g_journal_sb.tail = (commit_idx + 1) % g_journal_sb.entry_count;
     g_journal_sb.commit_seq++;
+    commit_result = journal_write_superblock();
 
+commit_done:
     txn->active = false;
     g_txn_active = false;
-
-    return journal_write_superblock();
+    spin_unlock(&g_journal_lock);
+    return commit_result;
 }
 
 void journal_abort(JournalTxn* txn) {
     if (!g_journal_initialized || !txn || !txn->active) return;
+
+    spin_lock(&g_journal_lock);
 
     // Rollback head to before this transaction
     g_journal_sb.head = txn->first_idx;
@@ -662,4 +683,6 @@ void journal_abort(JournalTxn* txn) {
 
     txn->active = false;
     g_txn_active = false;
+
+    spin_unlock(&g_journal_lock);
 }
