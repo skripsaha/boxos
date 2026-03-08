@@ -224,7 +224,9 @@ void kernel_main(void)
     debug_printf("[AUTOSTART] Scanning TagFS for autostart files...\n");
 
     TagFSState *tfs_state = tagfs_get_state();
-    uint32_t autostart_max = tfs_state ? tfs_state->max_files : TAGFS_MAX_FILES;
+    uint32_t autostart_max = (tfs_state && tfs_state->superblock.total_files > 0)
+                             ? tfs_state->superblock.total_files
+                             : TAGFS_MAX_FILES;
     uint32_t *file_ids = kmalloc(sizeof(uint32_t) * autostart_max);
     if (!file_ids)
     {
@@ -237,18 +239,22 @@ void kernel_main(void)
 
     for (int i = 0; i < file_count; i++)
     {
-        TagFSMetadata *meta = tagfs_get_metadata(file_ids[i]);
-        if (!meta || !(meta->flags & TAGFS_FILE_ACTIVE))
+        TagFSMetadata meta;
+        if (tagfs_get_metadata(file_ids[i], &meta) != 0)
             continue;
+        if (!(meta.flags & TAGFS_FILE_ACTIVE))
+        {
+            tagfs_metadata_free(&meta);
+            continue;
+        }
 
         bool has_autostart = false;
         bool has_exec_tag = false;
 
-        for (uint8_t t = 0; t < meta->tag_count; t++)
+        for (uint16_t t = 0; t < meta.tag_count; t++)
         {
-            if (meta->tags[t].type != TAGFS_TAG_SYSTEM)
-                continue;
-            const char *key = meta->tags[t].key;
+            const char *key = tag_registry_key(tfs_state->registry, meta.tag_ids[t]);
+            if (!key) continue;
             if (strcmp(key, "autostart") == 0)
                 has_autostart = true;
             if (strcmp(key, "app") == 0 || strcmp(key, "utility") == 0)
@@ -256,19 +262,21 @@ void kernel_main(void)
         }
 
         if (!has_autostart || !has_exec_tag)
+        {
+            tagfs_metadata_free(&meta);
             continue;
+        }
 
         debug_printf("[AUTOSTART] Found: '%s' (file_id=%u)\n",
-                     meta->filename, file_ids[i]);
+                     meta.filename, file_ids[i]);
 
-        // Collect all system tags for the new process
+        // Collect all tags for the new process
         char found_tags[PROCESS_TAG_SIZE];
         size_t pos = 0;
-        for (uint8_t t = 0; t < meta->tag_count; t++)
+        for (uint16_t t = 0; t < meta.tag_count; t++)
         {
-            if (meta->tags[t].type != TAGFS_TAG_SYSTEM)
-                continue;
-            const char *key = meta->tags[t].key;
+            const char *key = tag_registry_key(tfs_state->registry, meta.tag_ids[t]);
+            if (!key) continue;
             size_t klen = strlen(key);
             if (pos + klen + 2 > PROCESS_TAG_SIZE)
                 break;
@@ -280,11 +288,12 @@ void kernel_main(void)
         found_tags[pos] = '\0';
 
         // Load binary from TagFS
-        uint64_t file_size = meta->size;
+        uint64_t file_size = meta.size;
         if (file_size == 0 || file_size > CONFIG_PROC_MAX_BINARY_SIZE)
         {
             debug_printf("[AUTOSTART] Skip '%s': invalid size %lu\n",
-                         meta->filename, file_size);
+                         meta.filename, file_size);
+            tagfs_metadata_free(&meta);
             continue;
         }
 
@@ -293,7 +302,8 @@ void kernel_main(void)
         if (!phys_buf)
         {
             debug_printf("[AUTOSTART] Skip '%s': memory allocation failed\n",
-                         meta->filename);
+                         meta.filename);
+            tagfs_metadata_free(&meta);
             continue;
         }
 
@@ -304,7 +314,8 @@ void kernel_main(void)
         {
             pmm_free(phys_buf, pages_needed);
             debug_printf("[AUTOSTART] Skip '%s': tagfs_open failed\n",
-                         meta->filename);
+                         meta.filename);
+            tagfs_metadata_free(&meta);
             continue;
         }
 
@@ -315,7 +326,8 @@ void kernel_main(void)
         {
             pmm_free(phys_buf, pages_needed);
             debug_printf("[AUTOSTART] Skip '%s': tagfs_read failed (%d)\n",
-                         meta->filename, read_result);
+                         meta.filename, read_result);
+            tagfs_metadata_free(&meta);
             continue;
         }
 
@@ -325,7 +337,8 @@ void kernel_main(void)
         {
             pmm_free(phys_buf, pages_needed);
             debug_printf("[AUTOSTART] Skip '%s': process_create failed\n",
-                         meta->filename);
+                         meta.filename);
+            tagfs_metadata_free(&meta);
             continue;
         }
 
@@ -336,7 +349,8 @@ void kernel_main(void)
         {
             process_destroy(proc);
             debug_printf("[AUTOSTART] Skip '%s': load_binary failed (%d)\n",
-                         meta->filename, load_result);
+                         meta.filename, load_result);
+            tagfs_metadata_free(&meta);
             continue;
         }
 
@@ -344,7 +358,9 @@ void kernel_main(void)
         autostart_count++;
 
         kprintf("[AUTOSTART] Started '%s' (PID %u, tags: %s)\n",
-                meta->filename, proc->pid, found_tags);
+                meta.filename, proc->pid, found_tags);
+
+        tagfs_metadata_free(&meta);
 
         // First autostart process becomes the initial process
         if (!initial_proc)

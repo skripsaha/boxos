@@ -820,20 +820,24 @@ static int proc_exec(Pocket* pocket, process_t* proc) {
     char     found_tags[PROCESS_TAG_SIZE];
     found_tags[0] = '\0';
 
+    TagFSState* tfs = tagfs_get_state();
+
     for (int i = 0; i < file_count; i++) {
-        TagFSMetadata* meta = tagfs_get_metadata(file_ids[i]);
-        if (!meta || !(meta->flags & TAGFS_FILE_ACTIVE)) {
+        TagFSMetadata meta;
+        if (tagfs_get_metadata(file_ids[i], &meta) != 0) {
+            continue;
+        }
+        if (!(meta.flags & TAGFS_FILE_ACTIVE)) {
+            tagfs_metadata_free(&meta);
             continue;
         }
 
         bool has_name     = false;
         bool has_exec_tag = false;
 
-        for (uint8_t t = 0; t < meta->tag_count; t++) {
-            if (meta->tags[t].type != TAGFS_TAG_SYSTEM) {
-                continue;
-            }
-            const char* key = meta->tags[t].key;
+        for (uint16_t t = 0; t < meta.tag_count; t++) {
+            const char* key = tfs ? tag_registry_key(tfs->registry, meta.tag_ids[t]) : NULL;
+            if (!key) continue;
             if (strcmp(key, filename) == 0) {
                 has_name = true;
             }
@@ -846,12 +850,10 @@ static int proc_exec(Pocket* pocket, process_t* proc) {
             found_id = file_ids[i];
 
             size_t pos = 0;
-            for (uint8_t t = 0; t < meta->tag_count; t++) {
-                if (meta->tags[t].type != TAGFS_TAG_SYSTEM) {
-                    continue;
-                }
-                const char* key  = meta->tags[t].key;
-                size_t      klen = strlen(key);
+            for (uint16_t t = 0; t < meta.tag_count; t++) {
+                const char* key = tfs ? tag_registry_key(tfs->registry, meta.tag_ids[t]) : NULL;
+                if (!key) continue;
+                size_t klen = strlen(key);
                 if (pos + klen + 2 > PROCESS_TAG_SIZE) {
                     break;
                 }
@@ -862,8 +864,10 @@ static int proc_exec(Pocket* pocket, process_t* proc) {
                 pos += klen;
             }
             found_tags[pos] = '\0';
+            tagfs_metadata_free(&meta);
             break;
         }
+        tagfs_metadata_free(&meta);
     }
 
     kfree(file_ids);
@@ -874,8 +878,13 @@ static int proc_exec(Pocket* pocket, process_t* proc) {
         return -1;
     }
 
-    TagFSMetadata* meta      = tagfs_get_metadata(found_id);
-    uint64_t       file_size = meta->size;
+    TagFSMetadata exec_meta;
+    if (tagfs_get_metadata(found_id, &exec_meta) != 0) {
+        pocket->error_code = ERR_FILE_NOT_FOUND;
+        return -1;
+    }
+    uint64_t file_size = exec_meta.size;
+    tagfs_metadata_free(&exec_meta);
 
     if (file_size == 0 || file_size > PROC_SPAWN_MAX_BINARY_SIZE) {
         pocket->error_code = ERR_BINARY_TOO_LARGE;
@@ -1566,10 +1575,14 @@ static int frag_score(Pocket* pocket, process_t* proc) {
 
     TagFSState* fs_state = tagfs_get_state();
     if (fs_state && fs_state->initialized) {
-        for (uint32_t i = 0; i < fs_state->max_files; i++) {
-            TagFSMetadata* meta = tagfs_get_metadata(i + 1);
-            if (meta && (meta->flags & TAGFS_FILE_ACTIVE) && meta->block_count > 0) {
-                total_files++;
+        uint32_t max_id = fs_state->superblock.next_file_id;
+        for (uint32_t i = 1; i < max_id; i++) {
+            TagFSMetadata meta;
+            if (tagfs_get_metadata(i, &meta) == 0) {
+                if (meta.flags & TAGFS_FILE_ACTIVE) {
+                    total_files++;
+                }
+                tagfs_metadata_free(&meta);
             }
         }
     }

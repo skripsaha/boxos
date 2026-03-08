@@ -323,14 +323,160 @@ TagKeyGroup* tag_registry_key_group(TagRegistry* reg, const char* key) {
 }
 
 int tag_registry_flush(TagRegistry* reg) {
-    // TODO: write registry blocks to disk
-    (void)reg;
-    return 0;
+    if (!reg) return -1;
+
+    TagFSState* state = tagfs_get_state();
+    if (!state) return -1;
+
+    uint32_t current_block = state->superblock.tag_registry_block;
+    if (current_block == 0) return -1;
+
+    spin_lock(&reg->lock);
+
+    TagRegistryBlock blk;
+    memset(&blk, 0, sizeof(blk));
+    blk.magic       = TAGFS_REGISTRY_MAGIC;
+    blk.next_block  = 0;
+    blk.entry_count = 0;
+    blk.used_bytes  = 0;
+
+    uint32_t data_offset = 0;
+
+    for (uint32_t i = 0; i < reg->next_id; i++) {
+        TagRegistryEntry* entry = reg->by_id[i];
+        if (!entry) continue;
+
+        uint8_t  key_len   = (uint8_t)strlen(entry->key);
+        uint16_t value_len = entry->value ? (uint16_t)strlen(entry->value) : 0;
+
+        uint32_t record_size = sizeof(uint16_t) + sizeof(uint8_t) + sizeof(uint8_t)
+                             + sizeof(uint16_t) + key_len + value_len;
+
+        if (data_offset + record_size > TAGFS_REGISTRY_DATA_SIZE) {
+            uint32_t new_block;
+            int alloc_result = tagfs_alloc_blocks(1, &new_block);
+            if (alloc_result != 0) {
+                spin_unlock(&reg->lock);
+                return -1;
+            }
+
+            blk.next_block = new_block;
+            int write_result = tagfs_write_block(current_block, &blk);
+            if (write_result != 0) {
+                spin_unlock(&reg->lock);
+                return -1;
+            }
+
+            current_block = new_block;
+            memset(&blk, 0, sizeof(blk));
+            blk.magic      = TAGFS_REGISTRY_MAGIC;
+            blk.next_block = 0;
+            blk.entry_count = 0;
+            blk.used_bytes  = 0;
+            data_offset     = 0;
+        }
+
+        uint8_t* p = blk.data + data_offset;
+
+        *((uint16_t*)p) = entry->tag_id;
+        p += sizeof(uint16_t);
+
+        *p++ = entry->flags;
+        *p++ = key_len;
+
+        *((uint16_t*)p) = value_len;
+        p += sizeof(uint16_t);
+
+        memcpy(p, entry->key, key_len);
+        p += key_len;
+
+        if (value_len > 0) {
+            memcpy(p, entry->value, value_len);
+        }
+
+        data_offset += record_size;
+        blk.entry_count++;
+        blk.used_bytes = (uint16_t)data_offset;
+    }
+
+    int write_result = tagfs_write_block(current_block, &blk);
+
+    spin_unlock(&reg->lock);
+    return write_result;
 }
 
 int tag_registry_load(TagRegistry* reg, uint32_t first_block) {
-    // TODO: read registry blocks from disk and intern all entries
-    (void)reg;
-    (void)first_block;
+    if (!reg || first_block == 0) return -1;
+
+    spin_lock(&reg->lock);
+
+    uint32_t block_num = first_block;
+
+    while (block_num != 0) {
+        TagRegistryBlock blk;
+        int read_result = tagfs_read_block(block_num, &blk);
+        if (read_result != 0) {
+            spin_unlock(&reg->lock);
+            return -1;
+        }
+
+        if (blk.magic != TAGFS_REGISTRY_MAGIC) {
+            spin_unlock(&reg->lock);
+            return -1;
+        }
+
+        uint32_t offset = 0;
+        for (uint16_t e = 0; e < blk.entry_count; e++) {
+            if (offset + sizeof(uint16_t) + sizeof(uint8_t) + sizeof(uint8_t) + sizeof(uint16_t)
+                    > TAGFS_REGISTRY_DATA_SIZE) {
+                break;
+            }
+
+            uint8_t* p = blk.data + offset;
+
+            uint16_t tag_id   = *((uint16_t*)p); p += sizeof(uint16_t);
+            (void)tag_id;
+            uint8_t  flags    = *p++;
+            uint8_t  key_len  = *p++;
+            uint16_t value_len = *((uint16_t*)p); p += sizeof(uint16_t);
+
+            uint32_t record_size = sizeof(uint16_t) + sizeof(uint8_t) + sizeof(uint8_t)
+                                 + sizeof(uint16_t) + key_len + value_len;
+
+            if (offset + record_size > TAGFS_REGISTRY_DATA_SIZE) break;
+
+            char key[256];
+            if ((uint32_t)key_len >= sizeof(key)) {
+                offset += record_size;
+                continue;
+            }
+            memcpy(key, p, key_len);
+            key[key_len] = '\0';
+            p += key_len;
+
+            char* value_ptr = NULL;
+            char value[4096];
+            if (value_len > 0) {
+                if (value_len >= sizeof(value)) {
+                    offset += record_size;
+                    continue;
+                }
+                memcpy(value, p, value_len);
+                value[value_len] = '\0';
+                value_ptr = value;
+            }
+
+            uint16_t new_id = intern_unlocked(reg, key, value_ptr);
+            if (new_id != TAGFS_INVALID_TAG_ID && reg->by_id[new_id]) {
+                reg->by_id[new_id]->flags = flags;
+            }
+
+            offset += record_size;
+        }
+
+        block_num = blk.next_block;
+    }
+
+    spin_unlock(&reg->lock);
     return 0;
 }

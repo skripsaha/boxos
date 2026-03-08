@@ -417,13 +417,22 @@ void ata_dma_irq_handler(void) {
                                           ? write_end
                                           : req->original_file_size;
 
-                TagFSMetadata* meta = tagfs_get_metadata(req->file_id);
-                if (meta && (meta->flags & TAGFS_FILE_ACTIVE)) {
-                    if (new_file_size > meta->size) {
-                        meta->size = new_file_size;
-                        meta->modified_time++;
-                        tagfs_write_metadata(req->file_id, meta);
+                TagFSMetadata meta_update;
+                if (tagfs_get_metadata(req->file_id, &meta_update) == 0 &&
+                    (meta_update.flags & TAGFS_FILE_ACTIVE))
+                {
+                    if (new_file_size > meta_update.size) {
+                        meta_update.size = new_file_size;
+                        meta_update.modified_time++;
+                        // Re-create file to persist updated metadata
+                        tagfs_delete_file(req->file_id);
+                        uint32_t dummy_id;
+                        tagfs_create_file(meta_update.filename,
+                                          meta_update.tag_ids,
+                                          meta_update.tag_count,
+                                          &dummy_id);
                     }
+                    tagfs_metadata_free(&meta_update);
                 }
 
                 // Write response data to process heap at data_addr

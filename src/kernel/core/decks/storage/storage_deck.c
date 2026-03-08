@@ -4,6 +4,7 @@
 #include "process.h"
 #include "tagfs.h"
 #include "tag_bitmap.h"
+#include "tag_registry.h"
 #include "tagfs_context.h"
 #include "klib.h"
 #include "ata_dma.h"
@@ -123,8 +124,8 @@ static int handle_tag_query(Pocket *pocket)
 
     if (total_tag_count > 0)
     {
-        count = tag_bitmap_query(state->tag_index, all_tags, total_tag_count,
-                                 file_ids, max_results);
+        count = tagfs_query_files(all_tags, (uint32_t)total_tag_count,
+                                  file_ids, max_results);
         if (count < 0)
         {
             count = 0;
@@ -163,17 +164,16 @@ static int handle_tag_set(Pocket *pocket)
     uint32_t file_id = read_u32(data, 0);
     const char *tag_string = (const char *)(data + sizeof(uint32_t));
 
-    char key[12];
-    char value[13];
-    uint8_t tag_type;
+    char key[64];
+    char value[64];
 
-    if (tagfs_parse_tag(tag_string, key, value, &tag_type) != 0)
+    if (tagfs_parse_tag(tag_string, key, sizeof(key), value, sizeof(value)) != 0)
     {
         spin_unlock(&state->lock);
         return ERR_INVALID_ARGUMENT;
     }
 
-    if (tagfs_add_tag(file_id, key, value, tag_type) != 0)
+    if (tagfs_add_tag_string(file_id, key, value[0] ? value : NULL) != 0)
     {
         spin_unlock(&state->lock);
         return ERR_INVALID_ARGUMENT;
@@ -203,7 +203,7 @@ static int handle_tag_unset(Pocket *pocket)
     uint32_t file_id = read_u32(data, 0);
     const char *key = (const char *)(data + sizeof(uint32_t));
 
-    if (tagfs_remove_tag(file_id, key) != 0)
+    if (tagfs_remove_tag_string(file_id, key) != 0)
     {
         spin_unlock(&state->lock);
         return ERR_INVALID_ARGUMENT;
@@ -284,10 +284,10 @@ static int handle_obj_read_async(Pocket *pocket)
         return -1;
     }
 
-    uint32_t start_block = handle->metadata.start_block;
+    uint32_t start_block = (handle->extent_count > 0) ? handle->extents[0].start_block : 0;
     tagfs_close(handle);
 
-    uint32_t lba = start_block * 8 + (offset / 512);
+    uint32_t lba = start_block * 8 + (uint32_t)(offset / 512);
     uint16_t sector_count = (length + 511) / 512;
 
     async_io_request_t io_req;
@@ -352,8 +352,8 @@ static int handle_obj_write_async(Pocket *pocket)
         return -1;
     }
 
-    uint32_t start_block = handle->metadata.start_block;
-    uint64_t original_file_size = handle->metadata.size;
+    uint32_t start_block = (handle->extent_count > 0) ? handle->extents[0].start_block : 0;
+    uint64_t original_file_size = handle->file_size;
 
     uint64_t write_offset;
     if (flags & OBJ_WRITE_APPEND)
@@ -367,7 +367,7 @@ static int handle_obj_write_async(Pocket *pocket)
 
     tagfs_close(handle);
 
-    uint32_t lba = start_block * 8 + (write_offset / 512);
+    uint32_t lba = start_block * 8 + (uint32_t)(write_offset / 512);
     uint16_t sector_count = (length + 511) / 512;
 
     async_io_request_t areq;
@@ -508,7 +508,7 @@ int handle_obj_write(Pocket *pocket)
 
     if (flags & OBJ_WRITE_APPEND)
     {
-        handle->offset = handle->metadata.size;
+        handle->offset = handle->file_size;
     }
     else
     {
@@ -517,7 +517,7 @@ int handle_obj_write(Pocket *pocket)
 
     int written = tagfs_write(handle, write_buffer, length);
 
-    uint64_t final_size = handle->metadata.size;
+    uint64_t final_size = handle->file_size;
 
     tagfs_close(handle);
 
@@ -617,8 +617,27 @@ static int handle_obj_create(Pocket *pocket)
         tag_count++;
     }
 
+    // Intern tag strings to get tag_ids
+    TagFSState *tfs_state = tagfs_get_state();
+    uint16_t tag_id_buf[16];
+    uint16_t intern_count = 0;
+    if (tfs_state && tfs_state->registry) {
+        for (uint32_t ti = 0; ti < tag_count && intern_count < 16; ti++) {
+            char tkey[64];
+            char tval[64];
+            tagfs_parse_tag(tag_ptrs[ti], tkey, sizeof(tkey), tval, sizeof(tval));
+            uint16_t tid = tag_registry_intern(tfs_state->registry, tkey,
+                                               tval[0] ? tval : NULL);
+            if (tid != TAGFS_INVALID_TAG_ID) {
+                tag_id_buf[intern_count++] = tid;
+            }
+        }
+    }
+
     uint32_t file_id;
-    int result = tagfs_create_file(req->filename, tag_count > 0 ? tag_ptrs : NULL, tag_count, &file_id);
+    int result = tagfs_create_file(req->filename,
+                                   intern_count > 0 ? tag_id_buf : NULL,
+                                   intern_count, &file_id);
 
     obj_create_response_t *resp = (obj_create_response_t *)data;
     memset(resp, 0, sizeof(obj_create_response_t));
@@ -649,17 +668,33 @@ static int handle_obj_delete(Pocket *pocket)
     obj_delete_request_t *req = (obj_delete_request_t *)data;
     uint32_t file_id = req->file_id;
 
-    TagFSMetadata *meta = tagfs_get_metadata(file_id);
-    if (meta && (meta->flags & TAGFS_FILE_ACTIVE))
     {
-        for (uint8_t i = 0; i < meta->tag_count; i++)
+        TagFSMetadata del_meta;
+        TagFSState *del_state = tagfs_get_state();
+        if (tagfs_get_metadata(file_id, &del_meta) == 0 &&
+            (del_meta.flags & TAGFS_FILE_ACTIVE))
         {
-            if (meta->tags[i].type == TAGFS_TAG_SYSTEM)
+            for (uint16_t di = 0; di < del_meta.tag_count; di++)
             {
-                const char *key = meta->tags[i].key;
+                const char *key = del_state ?
+                    tag_registry_key(del_state->registry, del_meta.tag_ids[di]) : NULL;
+                const char *val = del_state ?
+                    tag_registry_value(del_state->registry, del_meta.tag_ids[di]) : NULL;
+                if (!key) continue;
                 if (strcmp(key, "system") == 0 || strcmp(key, "boot") == 0)
                 {
                     debug_printf("[Storage] ERROR: Cannot delete system file\n");
+                    tagfs_metadata_free(&del_meta);
+                    obj_delete_response_t *resp = (obj_delete_response_t *)data;
+                    memset(resp, 0, sizeof(obj_delete_response_t));
+                    resp->error_code = ERR_PERMISSION_DENIED;
+                    pocket->error_code = ERR_PERMISSION_DENIED;
+                    return ERR_PERMISSION_DENIED;
+                }
+                if (strcmp(key, "boot") == 0 && val && strcmp(val, "true") == 0)
+                {
+                    debug_printf("[Storage] ERROR: Cannot delete boot file\n");
+                    tagfs_metadata_free(&del_meta);
                     obj_delete_response_t *resp = (obj_delete_response_t *)data;
                     memset(resp, 0, sizeof(obj_delete_response_t));
                     resp->error_code = ERR_PERMISSION_DENIED;
@@ -667,17 +702,7 @@ static int handle_obj_delete(Pocket *pocket)
                     return ERR_PERMISSION_DENIED;
                 }
             }
-            if (meta->tags[i].type == TAGFS_TAG_USER &&
-                strcmp(meta->tags[i].key, "boot") == 0 &&
-                strcmp(meta->tags[i].value, "true") == 0)
-            {
-                debug_printf("[Storage] ERROR: Cannot delete boot file\n");
-                obj_delete_response_t *resp = (obj_delete_response_t *)data;
-                memset(resp, 0, sizeof(obj_delete_response_t));
-                resp->error_code = ERR_PERMISSION_DENIED;
-                pocket->error_code = ERR_PERMISSION_DENIED;
-                return ERR_PERMISSION_DENIED;
-            }
+            tagfs_metadata_free(&del_meta);
         }
     }
 
@@ -755,8 +780,9 @@ static int handle_obj_get_info(Pocket *pocket)
 
     debug_printf("[Storage] OBJ_GET_INFO: file_id=%u\n", req->file_id);
 
-    TagFSMetadata *metadata = tagfs_get_metadata(req->file_id);
-    if (!metadata || !(metadata->flags & TAGFS_FILE_ACTIVE))
+    TagFSMetadata metadata;
+    if (tagfs_get_metadata(req->file_id, &metadata) != 0 ||
+        !(metadata.flags & TAGFS_FILE_ACTIVE))
     {
         debug_printf("[Storage] ERROR: File %u not found\n", req->file_id);
         obj_get_info_response_t *resp = (obj_get_info_response_t *)data;
@@ -768,25 +794,37 @@ static int handle_obj_get_info(Pocket *pocket)
     obj_get_info_response_t *resp = (obj_get_info_response_t *)data;
     memset(resp, 0, sizeof(obj_get_info_response_t));
 
-    resp->error_code = 0;
-    resp->file_id = metadata->file_id;
-    resp->flags = metadata->flags;
-    resp->size = metadata->size;
-    resp->tag_count = (metadata->tag_count > 5) ? 5 : metadata->tag_count;
+    resp->error_code  = 0;
+    resp->file_id     = metadata.file_id;
+    resp->flags       = metadata.flags;
+    resp->size        = metadata.size;
+    resp->tag_count   = (metadata.tag_count > 5) ? 5 : (uint8_t)metadata.tag_count;
 
-    strncpy(resp->filename, metadata->filename, 31);
-    resp->filename[31] = '\0';
+    if (metadata.filename) {
+        strncpy(resp->filename, metadata.filename, 31);
+        resp->filename[31] = '\0';
+    }
 
+    TagFSState *gi_state = tagfs_get_state();
     for (uint8_t i = 0; i < resp->tag_count; i++)
     {
-        resp->tags[i].type = metadata->tags[i].type;
+        resp->tags[i].type = 0;
+        const char *rkey = gi_state ?
+            tag_registry_key(gi_state->registry, metadata.tag_ids[i]) : NULL;
+        const char *rval = gi_state ?
+            tag_registry_value(gi_state->registry, metadata.tag_ids[i]) : NULL;
 
-        memcpy(resp->tags[i].key, metadata->tags[i].key, 11);
-        resp->tags[i].key[10] = '\0';
-
-        memcpy(resp->tags[i].value, metadata->tags[i].value, 12);
-        resp->tags[i].value[11] = '\0';
+        if (rkey) {
+            strncpy(resp->tags[i].key, rkey, 10);
+            resp->tags[i].key[10] = '\0';
+        }
+        if (rval) {
+            strncpy(resp->tags[i].value, rval, 11);
+            resp->tags[i].value[11] = '\0';
+        }
     }
+
+    tagfs_metadata_free(&metadata);
 
     debug_printf("[Storage] OBJ_GET_INFO: Success (file='%s', tags=%u)\n",
                  resp->filename, resp->tag_count);
@@ -801,7 +839,24 @@ static int handle_context_set(Pocket *pocket)
 
     const char *tag_string = (const char *)data;
 
-    if (tagfs_context_add_tag(pocket->pid, tag_string) != 0)
+    char key[64];
+    char value[64];
+    const char *colon = strchr(tag_string, ':');
+    if (colon) {
+        size_t klen = (size_t)(colon - tag_string);
+        if (klen >= sizeof(key))
+            klen = sizeof(key) - 1;
+        memcpy(key, tag_string, klen);
+        key[klen] = '\0';
+        strncpy(value, colon + 1, sizeof(value) - 1);
+        value[sizeof(value) - 1] = '\0';
+    } else {
+        strncpy(key, tag_string, sizeof(key) - 1);
+        key[sizeof(key) - 1] = '\0';
+        value[0] = '\0';
+    }
+
+    if (tagfs_context_add_tag_string(pocket->pid, key, value[0] ? value : NULL) != 0)
     {
         return ERR_INVALID_ARGUMENT;
     }
