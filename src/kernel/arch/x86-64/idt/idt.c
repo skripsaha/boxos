@@ -358,15 +358,16 @@ void syscall_handler(interrupt_frame_t* frame) {
     // with stale registers from a previous syscall.
     context_save_from_frame(proc, frame);
 
-    // Check if this is a yield (sleep request).
-    // Yield pockets skip guide() entirely — the process sleeps in PROC_WAITING
-    // until an IPC delivery or Result wakes it via process_set_state(PROC_WORKING).
+    // Check if this is a yield (cooperative scheduling hint).
+    // Yield pockets skip guide() — the process stays WORKING and gives up its
+    // timeslice.  It remains schedulable so it will run again on the next tick.
+    // (Setting PROC_WAITING here would deadlock bare yield() calls in user code,
+    // since nothing would wake the process.)
     PocketRing* pring = (PocketRing*)vmm_phys_to_virt(proc->pocket_ring_phys);
     Pocket* peek = pocket_ring_peek(pring);
 
     if (peek && (peek->flags & POCKET_FLAG_YIELD)) {
         pocket_ring_pop(pring);
-        process_set_state(proc, PROC_WAITING);
         schedule(frame);
         return;
     }
