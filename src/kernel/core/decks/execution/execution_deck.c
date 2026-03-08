@@ -11,12 +11,42 @@ int execution_deck_handler(Pocket* pocket) {
         return -1;
     }
 
-    process_t* proc = process_find(pocket->pid);
-    if (!proc) {
-        return 0;
+    // Determine target: if target_pid != 0, deliver to target process (IPC).
+    // Otherwise deliver to the sender.
+    uint32_t target_pid = pocket->target_pid;
+    process_t* target;
+    Result result;
+
+    result.error_code = pocket->error_code;
+    result.data_length = pocket->data_length;
+    result.data_addr = pocket->data_addr;
+    result._reserved = 0;
+
+    if (target_pid != 0) {
+        // IPC: deliver Result to target process's ResultRing
+        target = process_find(target_pid);
+        if (!target) {
+            // Target gone — deliver error to sender instead
+            target = process_find(pocket->pid);
+            if (!target) return 0;
+            result.error_code = ERR_PROCESS_NOT_FOUND;
+            result.sender_pid = 0;
+        } else {
+            result.sender_pid = pocket->pid;  // sender's PID for IPC
+
+            // Wake target if it's waiting
+            if (process_get_state(target) == PROC_WAITING) {
+                process_set_state(target, PROC_WORKING);
+            }
+        }
+    } else {
+        // Self: deliver Result to sender's own ResultRing
+        target = process_find(pocket->pid);
+        if (!target) return 0;
+        result.sender_pid = 0;
     }
 
-    uint64_t rring_phys = proc->result_ring_phys;
+    uint64_t rring_phys = target->result_ring_phys;
     if (rring_phys == 0) {
         return -1;
     }
@@ -26,19 +56,9 @@ int execution_deck_handler(Pocket* pocket) {
         return -1;
     }
 
-    // Build the Result from the Pocket's final state
-    Result result;
-    result.error_code = pocket->error_code;
-    result.data_length = pocket->data_length;
-    result.data_addr = pocket->data_addr;
-    result.sender_pid = pocket->target_pid;  // who sent this (for IPC)
-    result._reserved = 0;
-
     if (!result_ring_push(rring, &result)) {
-        // ResultRing full — drop the result.
-        // Userspace must drain its ring; no kernel-side overflow queue.
         debug_printf("[EXECUTION] WARNING: PID %u ResultRing full, result dropped\n",
-                     pocket->pid);
+                     target->pid);
         return -1;
     }
 

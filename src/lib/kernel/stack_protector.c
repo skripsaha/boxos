@@ -1,6 +1,5 @@
 #include "klib.h"
 #include "process.h"
-#include "scheduler.h"
 #include "cpuid.h"
 #include "atomics.h"
 
@@ -66,7 +65,7 @@ void __attribute__((noreturn)) __stack_chk_fail(void) {
         kprintf("\n[STACK PROTECTOR] Stack smashing detected in PID %u (%s)\n",
                 proc->pid, proc->tags);
         process_set_state(proc, PROC_CRASHED);
-        scheduler_yield();
+        // Timer IRQ will call schedule() and pick a different process
     }
 
     kprintf("\n");

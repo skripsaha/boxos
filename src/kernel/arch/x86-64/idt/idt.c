@@ -185,8 +185,8 @@ void exception_handler(interrupt_frame_t* frame) {
             // Mark process as crashed so scheduler won't pick it again
             process_set_state(proc, PROC_CRASHED);
 
-            // Let the timer IRQ do cleanup; force a reschedule via the frame
-            scheduler_yield_from_interrupt(frame);
+            // Force a reschedule via the frame
+            schedule(frame);
             return;
         }
     }
@@ -228,7 +228,7 @@ void exception_handler(interrupt_frame_t* frame) {
             process_set_state(overflow_proc, PROC_CRASHED);
 
             // If the faulting code held the scheduler lock, force-release it
-            // so scheduler_yield_from_interrupt can acquire it without deadlock.
+            // so schedule() can acquire it without deadlock.
             // We use spin_force_release (NOT spin_unlock) because we're on an
             // IST stack — the original holder's saved_flags are meaningless here.
             scheduler_state_t* sched = scheduler_get_state();
@@ -237,7 +237,7 @@ void exception_handler(interrupt_frame_t* frame) {
             }
             __asm__ volatile("cli");
 
-            scheduler_yield_from_interrupt(frame);
+            schedule(frame);
             return;
         }
     }
@@ -316,26 +316,7 @@ void irq_handler(interrupt_frame_t* frame) {
             extern void xhci_process_events(void);
             xhci_process_events();
 
-            spin_lock(&sched->scheduler_lock);
-            process_t* current = sched->current_process;
-            spin_unlock(&sched->scheduler_lock);
-
-            if (current && process_get_state(current) == PROC_WORKING) {
-                scheduler_yield_from_interrupt(frame);
-            } else if (!current || process_get_state(current) != PROC_WORKING) {
-                process_t* next = scheduler_select_next();
-                if (next) {
-                    spin_lock(&sched->scheduler_lock);
-                    sched->current_process = next;
-                    spin_unlock(&sched->scheduler_lock);
-
-                    if (process_get_state(next) == PROC_CREATED) process_set_state(next, PROC_WORKING);
-                    next->last_run_time = sched->total_ticks;
-
-                    tss_set_rsp0((uint64_t)next->kernel_stack_top);
-                    context_restore_to_frame(next, frame);
-                }
-            }
+            schedule(frame);
             break;
         }
 
@@ -362,56 +343,19 @@ void syscall_handler(interrupt_frame_t* frame) {
 
     spin_lock(&sched_state->scheduler_lock);
     process_t* proc = sched_state->current_process;
-
-    if (!proc) {
+    if (!proc || proc->magic != PROCESS_MAGIC) {
         spin_unlock(&sched_state->scheduler_lock);
         frame->rax = (uint64_t)-1;
         return;
     }
-
-    // Increment ref_count before releasing lock to prevent proc from being destroyed
-    process_ref_inc(proc);
-
-    if (proc->magic != PROCESS_MAGIC) {
-        process_ref_dec(proc);
-        spin_unlock(&sched_state->scheduler_lock);
-        frame->rax = (uint64_t)-1;
-        return;
-    }
-
     spin_unlock(&sched_state->scheduler_lock);
 
-    process_state_t state = process_get_state(proc);
-    if (state != PROC_WORKING && state != PROC_WAITING) {
-        process_ref_dec(proc);
-        frame->rax = (uint64_t)-1;
-        return;
-    }
-
-    // New architecture: userspace has already written the Pocket into its PocketRing.
-    // The syscall just pushes the process onto the ReadyQueue and yields.
-
-    // Validate PocketRing has pending Pockets
-    PocketRing *pring = (PocketRing *)vmm_phys_to_virt(proc->pocket_ring_phys);
-    if (!pring || pocket_ring_is_empty(pring)) {
-        // Nothing to process — just yield
-        frame->rax = 0;
-        context_save_from_frame(proc, frame);
-        process_ref_dec(proc);
-        scheduler_yield_from_interrupt(frame);
-        return;
-    }
-
-    // Push process to ReadyQueue for Guide to process its Pockets
-    ready_queue_push(&g_ready_queue, proc);
-    guide_wake();
-
     frame->rax = 0;
-
     context_save_from_frame(proc, frame);
+
+    // Architecture flow: push -> set WAITING -> guide() -> schedule()
+    ready_queue_push(&g_ready_queue, proc);
     process_set_state(proc, PROC_WAITING);
-
-    process_ref_dec(proc);
-
-    scheduler_yield_from_interrupt(frame);
+    guide();
+    schedule(frame);
 }

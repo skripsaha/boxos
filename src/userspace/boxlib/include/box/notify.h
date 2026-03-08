@@ -3,21 +3,20 @@
 
 #include "types.h"
 
-// CabinInfo: read-only metadata page at CABIN_INFO_VADDR (0x1000)
+// CabinInfo: read-only metadata at CABIN_INFO_VADDR (0x1000)
 // Kernel fills this at process creation. Userspace reads pid, heap_base, etc.
 typedef struct PACKED {
     uint32_t magic;           // CABIN_INFO_MAGIC ("CABN")
     uint32_t pid;
     uint32_t spawner_pid;
-    uint32_t flags;
+    uint32_t reserved;
     uint64_t heap_base;
     uint64_t heap_max_size;
     uint64_t buf_heap_base;
     uint64_t stack_top;
-    uint8_t  _reserved[4048];
 } CabinInfo;
 
-STATIC_ASSERT(sizeof(CabinInfo) == 4096, "CabinInfo must be exactly one page");
+STATIC_ASSERT(sizeof(CabinInfo) == 48, "CabinInfo header must be 48 bytes");
 
 INLINE CabinInfo* cabin_info(void) {
     return (CabinInfo*)CABIN_INFO_VADDR;

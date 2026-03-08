@@ -140,7 +140,6 @@ process_t *process_create(const char *tags)
     proc->aslr_heap_base = CABIN_HEAP_BASE + aslr.heap_offset;
     proc->aslr_buf_heap_base = CABIN_BUF_HEAP_START + aslr.buf_heap_offset;
     proc->buf_heap_next = proc->aslr_buf_heap_base;
-    proc->ipc_inbox_slot = 0;
     proc->next = NULL;
 
     if (tags)
@@ -551,7 +550,7 @@ int process_load_binary(process_t *proc, const void *binary_data, size_t size)
     ci->magic = CABIN_INFO_MAGIC;
     ci->pid = proc->pid;
     ci->spawner_pid = proc->spawner_pid;
-    ci->flags = 0;
+    ci->reserved = 0;
     ci->heap_base = heap_start;
     ci->heap_max_size = CABIN_HEAP_MAX_SIZE;
     ci->buf_heap_base = proc->aslr_buf_heap_base;

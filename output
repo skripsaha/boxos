@@ -1,0 +1,95 @@
+Building boxlib...
+make[1]: Nothing to be done for `all'.
+Building shell process...
+make[1]: Nothing to be done for `all'.
+Shell binary: src/userspace/shell/shell.bin (39456 bytes)
+Building apps...
+make[1]: Nothing to be done for `all'.
+proca.elf: 42712 bytes
+procb.elf: 42712 bytes
+today.elf: 47240 bytes
+memtest.elf: 54448 bytes
+Building apps...
+make[1]: Nothing to be done for `all'.
+proca.elf: 42712 bytes
+procb.elf: 42712 bytes
+today.elf: 47240 bytes
+memtest.elf: 54448 bytes
+Building apps...
+make[1]: Nothing to be done for `all'.
+proca.elf: 42712 bytes
+procb.elf: 42712 bytes
+today.elf: 47240 bytes
+memtest.elf: 54448 bytes
+Building apps...
+make[1]: Nothing to be done for `all'.
+proca.elf: 42712 bytes
+procb.elf: 42712 bytes
+today.elf: 47240 bytes
+memtest.elf: 54448 bytes
+Building display server...
+make[1]: Nothing to be done for `all'.
+display.elf: 43592 bytes
+Building utilities...
+make[1]: Nothing to be done for `all'.
+Building utilities...
+make[1]: Nothing to be done for `all'.
+Building utilities...
+make[1]: Nothing to be done for `all'.
+Building utilities...
+make[1]: Nothing to be done for `all'.
+Building utilities...
+make[1]: Nothing to be done for `all'.
+Building utilities...
+make[1]: Nothing to be done for `all'.
+Building utilities...
+make[1]: Nothing to be done for `all'.
+Building utilities...
+make[1]: Nothing to be done for `all'.
+Building utilities...
+make[1]: Nothing to be done for `all'.
+Building utilities...
+make[1]: Nothing to be done for `all'.
+Building utilities...
+make[1]: Nothing to be done for `all'.
+Building utilities...
+make[1]: Nothing to be done for `all'.
+Building utilities...
+make[1]: Nothing to be done for `all'.
+Building utilities...
+make[1]: Nothing to be done for `all'.
+Building utilities...
+make[1]: Nothing to be done for `all'.
+Building utilities...
+make[1]: Nothing to be done for `all'.
+Building utilities...
+make[1]: Nothing to be done for `all'.
+Running BoxOS in QEMU...
+KSMZ Cabin (0x1000 Info, 0x2000 PocketRing, 0x3000 ResultRing, 0xc000 Code)
+
+  - Kernel Code: 0x08
+  - Kernel Data: 0x10
+  - User Code: 0x1B
+  - User Data: 0x23
+  - TSS: 0x28 (will be set by tss_init)
+[BOOT] Boot info v1 OK (drive=0x80, kernel 0x100000-0x12a000, pt=0x169000, stack=0x182000)
+  #0: base=0x0x0000000000000000 len=0x0x000000000009fc00 type=1
+  #1: base=0x0x000000000009fc00 len=0x0x0000000000000400 type=2
+  #2: base=0x0x00000000000f0000 len=0x0x0000000000010000 type=2
+  #3: base=0x0x0000000000100000 len=0x0x000000001fee0000 type=1
+  #4: base=0x0x000000001ffe0000 len=0x0x0000000000020000 type=2
+  #5: base=0x0x00000000fffc0000 len=0x0x0000000000040000 type=2
+  #6: base=0x0x000000fd00000000 len=0x0x0000000300000000 type=2
+  Other entries are ZERO.
+  Do not use type 2 entries. Only type 1 - only RAM.
+
+
+
+[INIT] Idle Process...
+Kernel initialization complete!
+
+Starting userspace...
+
+[AUTOSTART] Started 'shell.bin' (PID 131072, tags: utility,system,app,hw_vga,hw_kb,storage,autostart,shell)
+[AUTOSTART] 1 process(es) launched
+BoxOS Shell v1.0Type 'help' for available commands~ 

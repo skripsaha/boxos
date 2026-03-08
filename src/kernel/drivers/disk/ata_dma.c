@@ -6,7 +6,6 @@
 #include "klib.h"
 #include "atomics.h"
 #include "ata.h"
-#include "guide.h"
 #include "cpu_calibrate.h"
 #include "kernel_config.h"
 #include "boxos_memory.h"
@@ -468,7 +467,7 @@ void ata_dma_irq_handler(void) {
 
     spin_unlock(&dma_state.lock);
 
-    guide_wake();
+    // guide() will be called by next syscall or timer tick
 }
 
 void ata_dma_check_timeouts(void) {
@@ -519,7 +518,7 @@ void ata_dma_check_timeouts(void) {
         req->status = ATA_DMA_STATUS_FREE;
         dma_state.active_request_idx = 0xFF;
 
-        guide_wake();
+        // guide() will be called by next syscall or timer tick
     }
 
     spin_unlock(&dma_state.lock);
