@@ -765,8 +765,7 @@ static int proc_info(Pocket* pocket, process_t* proc) {
     *(uint32_t*)(data + 12) = 0;
     *(uint64_t*)(data + 16) = target->code_start;
     *(uint64_t*)(data + 24) = target->code_size;
-    strncpy((char*)(data + 32), target->tags, PROC_INFO_TAGS_SIZE);
-    ((char*)(data + 32))[PROC_INFO_TAGS_SIZE - 1] = '\0';
+    process_snapshot_tags(target, (char*)(data + 32), PROC_INFO_TAGS_SIZE);
 
     pocket->error_code = OK;
     debug_printf("[SYSTEM_DECK] PROC_INFO: SUCCESS PID %u\n", target->pid);

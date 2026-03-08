@@ -13,11 +13,54 @@
 #include "aslr.h"
 #include "cabin_info.h"
 #include "notify.h"
+#include "tagfs.h"
 
 static process_t *process_list_head = NULL;
 static volatile uint32_t process_count = 0;
 static spinlock_t process_lock;
 static process_cleanup_queue_t g_cleanup_queue;
+
+static int process_set_tag_bit(process_t *proc, uint16_t tag_id)
+{
+    if (tag_id < 64) {
+        proc->tag_bits |= ((uint64_t)1 << tag_id);
+        return 0;
+    }
+    for (uint16_t i = 0; i < proc->tag_overflow_count; i++) {
+        if (proc->tag_overflow_ids[i] == tag_id)
+            return 0;
+    }
+    if (proc->tag_overflow_count >= proc->tag_overflow_capacity) {
+        uint16_t new_cap = proc->tag_overflow_capacity == 0 ? 8 : proc->tag_overflow_capacity * 2;
+        uint16_t *new_ids = kmalloc(sizeof(uint16_t) * new_cap);
+        if (!new_ids)
+            return -1;
+        if (proc->tag_overflow_ids) {
+            memcpy(new_ids, proc->tag_overflow_ids, sizeof(uint16_t) * proc->tag_overflow_count);
+            kfree(proc->tag_overflow_ids);
+        }
+        proc->tag_overflow_ids = new_ids;
+        proc->tag_overflow_capacity = new_cap;
+    }
+    proc->tag_overflow_ids[proc->tag_overflow_count++] = tag_id;
+    return 0;
+}
+
+static int process_clear_tag_bit(process_t *proc, uint16_t tag_id)
+{
+    if (tag_id < 64) {
+        proc->tag_bits &= ~((uint64_t)1 << tag_id);
+        return 0;
+    }
+    for (uint16_t i = 0; i < proc->tag_overflow_count; i++) {
+        if (proc->tag_overflow_ids[i] == tag_id) {
+            proc->tag_overflow_ids[i] = proc->tag_overflow_ids[proc->tag_overflow_count - 1];
+            proc->tag_overflow_count--;
+            return 0;
+        }
+    }
+    return -1;
+}
 
 // Hash table for O(1) process_find(pid)
 #define PROCESS_HASH_SIZE 256
@@ -143,14 +186,31 @@ process_t *process_create(const char *tags)
     proc->buf_heap_next = proc->aslr_buf_heap_base;
     proc->next = NULL;
 
-    if (tags)
+    if (tags && tags[0] != '\0')
     {
-        strncpy(proc->tags, tags, PROCESS_TAG_SIZE - 1);
-        proc->tags[PROCESS_TAG_SIZE - 1] = '\0';
-    }
-    else
-    {
-        proc->tags[0] = '\0';
+        TagFSState *fs = tagfs_get_state();
+        if (fs && fs->registry) {
+            const char *pos = tags;
+            while (*pos) {
+                const char *comma = strchr(pos, ',');
+                size_t len = comma ? (size_t)(comma - pos) : strlen(pos);
+                if (len > 0 && len < 256) {
+                    char tag_buf[256];
+                    memcpy(tag_buf, pos, len);
+                    tag_buf[len] = '\0';
+
+                    char key[256], value[256];
+                    tagfs_parse_tag(tag_buf, key, sizeof(key), value, sizeof(value));
+
+                    uint16_t tid = tag_registry_intern(fs->registry, key, value);
+                    if (tid != TAGFS_INVALID_TAG_ID) {
+                        process_set_tag_bit(proc, tid);
+                    }
+                }
+                if (!comma) break;
+                pos = comma + 1;
+            }
+        }
     }
 
     proc->wait_reason = WAIT_NONE;
@@ -747,7 +807,7 @@ void process_test(void)
     debug_printf("[TEST]   PocketRing (phys): 0x%lx\n", proc->pocket_ring_phys);
     debug_printf("[TEST]   ResultRing (phys): 0x%lx\n", proc->result_ring_phys);
     debug_printf("[TEST]   Code start (virt): 0x%lx\n", proc->code_start);
-    debug_printf("[TEST]   Tags: %s\n", proc->tags);
+    debug_printf("[TEST]   TagBits: 0x%lx\n", proc->tag_bits);
 
     uint8_t test_binary[64];
     for (int i = 0; i < 64; i++)
@@ -794,145 +854,105 @@ void process_test(void)
     kprintf("\n");
 }
 
+bool process_has_tag_id(process_t *proc, uint16_t tag_id)
+{
+    if (!proc) return false;
+    if (tag_id < 64)
+        return (proc->tag_bits & ((uint64_t)1 << tag_id)) != 0;
+    for (uint16_t i = 0; i < proc->tag_overflow_count; i++) {
+        if (proc->tag_overflow_ids[i] == tag_id)
+            return true;
+    }
+    return false;
+}
+
 bool process_has_tag(process_t *proc, const char *tag)
 {
     if (!proc || !tag || tag[0] == '\0')
-    {
         return false;
+
+    TagFSState *fs = tagfs_get_state();
+    if (!fs || !fs->registry)
+        return false;
+    TagRegistry *reg = fs->registry;
+
+    if (!tag_is_wildcard(tag)) {
+        char key[256], value[256];
+        tagfs_parse_tag(tag, key, sizeof(key), value, sizeof(value));
+        uint16_t tid = tag_registry_lookup(reg, key, value);
+        if (tid == TAGFS_INVALID_TAG_ID) return false;
+        return process_has_tag_id(proc, tid);
     }
 
-    const char *pos = proc->tags;
-
-    while (*pos)
-    {
-        const char *comma = strchr(pos, ',');
-        size_t current_len = comma ? (size_t)(comma - pos) : strlen(pos);
-
-        char current_tag[PROCESS_TAG_SIZE];
-        size_t copy_len = current_len < PROCESS_TAG_SIZE - 1 ? current_len : PROCESS_TAG_SIZE - 1;
-        memcpy(current_tag, pos, copy_len);
-        current_tag[copy_len] = '\0';
-
-        if (tag_match(tag, current_tag))
-        {
-            return true;
-        }
-
-        if (!comma)
-        {
-            break;
-        }
-        pos = comma + 1;
+    // Wildcard: iterate all tags this process has
+    uint64_t bits = proc->tag_bits;
+    while (bits) {
+        uint16_t i = (uint16_t)__builtin_ctzll(bits);
+        bits &= bits - 1;
+        const char *k = tag_registry_key(reg, i);
+        const char *v = tag_registry_value(reg, i);
+        if (!k) continue;
+        char full[512];
+        tagfs_format_tag(full, sizeof(full), k, v);
+        if (tag_match(tag, full)) return true;
     }
-
+    for (uint16_t j = 0; j < proc->tag_overflow_count; j++) {
+        uint16_t tid = proc->tag_overflow_ids[j];
+        const char *k = tag_registry_key(reg, tid);
+        const char *v = tag_registry_value(reg, tid);
+        if (!k) continue;
+        char full[512];
+        tagfs_format_tag(full, sizeof(full), k, v);
+        if (tag_match(tag, full)) return true;
+    }
     return false;
 }
 
 int process_add_tag(process_t *proc, const char *tag)
 {
     if (!proc || !tag || tag[0] == '\0')
-    {
         return -1;
-    }
 
-    size_t tag_len = strlen(tag);
-    if (tag_len >= PROCESS_TAG_SIZE)
-    {
+    TagFSState *fs = tagfs_get_state();
+    if (!fs || !fs->registry)
         return -1;
-    }
+
+    char key[256], value[256];
+    tagfs_parse_tag(tag, key, sizeof(key), value, sizeof(value));
 
     spin_lock(&process_lock);
 
-    if (process_has_tag(proc, tag))
-    {
-        spin_unlock(&process_lock);
-        return 0;
-    }
-
-    size_t current_len = strlen(proc->tags);
-
-    if (current_len + tag_len + 2 > PROCESS_TAG_SIZE)
-    {
+    uint16_t tid = tag_registry_intern(fs->registry, key, value);
+    if (tid == TAGFS_INVALID_TAG_ID) {
         spin_unlock(&process_lock);
         return -1;
     }
 
-    if (current_len > 0)
-    {
-        proc->tags[current_len] = ',';
-        current_len++;
-    }
-    memcpy(proc->tags + current_len, tag, tag_len);
-    proc->tags[current_len + tag_len] = '\0';
-
+    int ret = process_set_tag_bit(proc, tid);
     spin_unlock(&process_lock);
-
-    return 0;
+    return ret;
 }
 
 int process_remove_tag(process_t *proc, const char *tag)
 {
     if (!proc || !tag || tag[0] == '\0')
-    {
         return -1;
-    }
+
+    TagFSState *fs = tagfs_get_state();
+    if (!fs || !fs->registry)
+        return -1;
+
+    char key[256], value[256];
+    tagfs_parse_tag(tag, key, sizeof(key), value, sizeof(value));
+
+    uint16_t tid = tag_registry_lookup(fs->registry, key, value);
+    if (tid == TAGFS_INVALID_TAG_ID)
+        return 0;
 
     spin_lock(&process_lock);
-
-    if (!process_has_tag(proc, tag))
-    {
-        spin_unlock(&process_lock);
-        return 0;
-    }
-
-    char new_tags[PROCESS_TAG_SIZE];
-    new_tags[0] = '\0';
-
-    const char *pos = proc->tags;
-    bool first = true;
-
-    while (*pos)
-    {
-        const char *comma = strchr(pos, ',');
-        size_t current_len = comma ? (size_t)(comma - pos) : strlen(pos);
-
-        if (current_len != strlen(tag) || strncmp(pos, tag, current_len) != 0)
-        {
-            if (!first)
-            {
-                size_t remaining = PROCESS_TAG_SIZE - strlen(new_tags) - 1;
-                if (remaining < 1)
-                {
-                    debug_printf("[PROCESS] ERROR: Tag string overflow during removal (comma)\n");
-                    spin_unlock(&process_lock);
-                    return -1;
-                }
-                strncat(new_tags, ",", remaining);
-            }
-            size_t remaining = PROCESS_TAG_SIZE - strlen(new_tags) - 1;
-            if (current_len > remaining)
-            {
-                debug_printf("[PROCESS] ERROR: Tag string overflow during removal (tag)\n");
-                spin_unlock(&process_lock);
-                return -1;
-            }
-            strncat(new_tags, pos, current_len < remaining ? current_len : remaining);
-            first = false;
-        }
-
-        if (!comma)
-        {
-            break;
-        }
-        pos = comma + 1;
-    }
-
-    strncpy(proc->tags, new_tags, PROCESS_TAG_SIZE - 1);
-    proc->tags[PROCESS_TAG_SIZE - 1] = '\0';
-
+    int ret = process_clear_tag_bit(proc, tid);
     spin_unlock(&process_lock);
-
-    return 0;
+    return ret;
 }
 
 void process_start_initial(process_t *proc)
@@ -1005,21 +1025,71 @@ void process_start_initial(process_t *proc)
 size_t process_snapshot_tags(process_t *proc, char *buffer, size_t buffer_size)
 {
     if (!proc || !buffer || buffer_size == 0)
-    {
+        return 0;
+
+    TagFSState *fs = tagfs_get_state();
+    if (!fs || !fs->registry) {
+        buffer[0] = '\0';
         return 0;
     }
+    TagRegistry *reg = fs->registry;
 
     spin_lock(&process_lock);
 
-    size_t len = strlen(proc->tags);
-    size_t copy_len = (len < buffer_size - 1) ? len : buffer_size - 1;
+    size_t pos = 0;
+    bool first = true;
 
-    memcpy(buffer, proc->tags, copy_len);
-    buffer[copy_len] = '\0';
+    uint64_t bits = proc->tag_bits;
+    while (bits) {
+        uint16_t i = (uint16_t)__builtin_ctzll(bits);
+        bits &= bits - 1;
+        const char *k = tag_registry_key(reg, i);
+        const char *v = tag_registry_value(reg, i);
+        if (!k) continue;
 
+        if (!first && pos < buffer_size - 1) buffer[pos++] = ',';
+        first = false;
+
+        size_t klen = strlen(k);
+        size_t vlen = v ? strlen(v) : 0;
+
+        if (vlen > 0) {
+            if (pos + klen + 1 + vlen >= buffer_size) break;
+            memcpy(buffer + pos, k, klen); pos += klen;
+            buffer[pos++] = ':';
+            memcpy(buffer + pos, v, vlen); pos += vlen;
+        } else {
+            if (pos + klen >= buffer_size) break;
+            memcpy(buffer + pos, k, klen); pos += klen;
+        }
+    }
+
+    for (uint16_t j = 0; j < proc->tag_overflow_count; j++) {
+        uint16_t tid = proc->tag_overflow_ids[j];
+        const char *k = tag_registry_key(reg, tid);
+        const char *v = tag_registry_value(reg, tid);
+        if (!k) continue;
+
+        if (!first && pos < buffer_size - 1) buffer[pos++] = ',';
+        first = false;
+
+        size_t klen = strlen(k);
+        size_t vlen = v ? strlen(v) : 0;
+
+        if (vlen > 0) {
+            if (pos + klen + 1 + vlen >= buffer_size) break;
+            memcpy(buffer + pos, k, klen); pos += klen;
+            buffer[pos++] = ':';
+            memcpy(buffer + pos, v, vlen); pos += vlen;
+        } else {
+            if (pos + klen >= buffer_size) break;
+            memcpy(buffer + pos, k, klen); pos += klen;
+        }
+    }
+
+    buffer[pos] = '\0';
     spin_unlock(&process_lock);
-
-    return copy_len;
+    return pos;
 }
 
 static bool cleanup_queue_enqueue(process_t *proc)
@@ -1065,6 +1135,13 @@ static void process_cleanup_immediate(process_t *proc)
 {
     if (!proc)
         return;
+
+    if (proc->tag_overflow_ids) {
+        kfree(proc->tag_overflow_ids);
+        proc->tag_overflow_ids = NULL;
+        proc->tag_overflow_count = 0;
+        proc->tag_overflow_capacity = 0;
+    }
 
     // Free dynamically allocated FPU state buffer
     if (proc->context.fpu_state) {

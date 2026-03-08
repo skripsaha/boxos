@@ -10,9 +10,6 @@
  * See process/process.h for the full hierarchy.
  */
 
-#define MAX_USE_CONTEXT_TAGS 16
-#define TAG_LENGTH 64
-
 #define SCHEDULER_MAX_CONSECUTIVE_RUNS 5
 
 #define SCHEDULER_BOOST_CONTEXT_MATCH        20
@@ -25,9 +22,11 @@
 #define SCHEDULER_MILD_STARVATION_TICKS      10
 
 typedef struct {
-    char active_tags[MAX_USE_CONTEXT_TAGS][TAG_LENGTH];
-    uint32_t tag_count;
-    bool enabled;
+    uint64_t  context_bits;
+    uint16_t* overflow_ids;
+    uint16_t  overflow_count;
+    uint16_t  overflow_capacity;
+    bool      enabled;
 } use_context_t;
 
 typedef struct {

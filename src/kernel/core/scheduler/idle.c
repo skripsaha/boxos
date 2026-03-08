@@ -20,8 +20,10 @@ void idle_process_init(void) {
     g_idle_process.ref_count = 0;
     g_idle_process.score = -1000;  // lowest priority
 
-    strncpy(g_idle_process.tags, "idle", PROCESS_TAG_SIZE - 1);
-    g_idle_process.tags[PROCESS_TAG_SIZE - 1] = '\0';
+    g_idle_process.tag_bits = 0;
+    g_idle_process.tag_overflow_ids = NULL;
+    g_idle_process.tag_overflow_count = 0;
+    g_idle_process.tag_overflow_capacity = 0;
 
     spinlock_init(&g_idle_process.state_lock);
 
