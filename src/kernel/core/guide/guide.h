@@ -11,9 +11,7 @@ extern ReadyQueue g_ready_queue;
 typedef struct process_t process_t;
 
 void guide_init(void);
-void guide_run(void);
-void guide_wake(void);
-bool guide_is_idle(void);
+void guide(void);
 
 // Deck handler: processes a single Pocket prefix.
 // Returns 0 on success, negative error_t on failure.

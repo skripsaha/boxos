@@ -38,21 +38,8 @@ static int system_deck_yield(Pocket* pocket) {
     if (!pocket) {
         return -1;
     }
-
-    process_t* proc = process_find_ref(pocket->pid);
-    if (!proc) {
-        return -1;
-    }
-
-    process_state_t state = process_get_state(proc);
-    if (state != PROC_WORKING) {
-        process_ref_dec(proc);
-        return -1;
-    }
-
-    scheduler_yield_cooperative();
-
-    process_ref_dec(proc);
+    // Yield is natural in the new architecture: the process is already
+    // WAITING during guide() processing, and schedule() picks the next.
     return 0;
 }
 

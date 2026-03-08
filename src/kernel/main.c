@@ -412,7 +412,7 @@ void kernel_main(void)
     uint64_t loop_count = 0;
     while (1)
     {
-        guide_run();
+        guide();
 
         if ((loop_count % 100) == 0)
         {

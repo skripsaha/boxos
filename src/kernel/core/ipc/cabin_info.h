@@ -8,31 +8,17 @@
 // Kernel fills this at process creation. Userspace reads pid, heap_base, etc.
 
 typedef struct __packed {
-    uint32_t magic;           // CABIN_INFO_MAGIC ("CABN")
+    uint32_t magic;              // CABIN_INFO_MAGIC ("CABN")
     uint32_t pid;
     uint32_t spawner_pid;
-    uint32_t flags;           // reserved for future use
-    uint64_t heap_base;       // ASLR randomized heap start
-    uint64_t heap_max_size;   // max heap size
-    uint64_t buf_heap_base;   // ASLR randomized buffer heap start
-    uint64_t stack_top;       // ASLR randomized stack top
-    uint8_t  ipc_inbox[256];  // IPC inbox: kernel writes incoming data here when sender addr unmapped
-    uint8_t  _reserved[3792]; // pad to exactly 4096 bytes (1 page)
+    uint32_t reserved;
+    uint64_t heap_base;          // ASLR randomized heap start
+    uint64_t heap_max_size;      // max heap size
+    uint64_t buf_heap_base;      // ASLR randomized buffer heap start
+    uint64_t stack_top;          // ASLR randomized stack top
 } CabinInfo;
 
-// IPC inbox location within CabinInfo page (0x1000)
-// offset = 48 bytes (after magic+pid+spawner_pid+flags+heap_base+heap_max_size+buf_heap_base+stack_top)
-#define CABIN_IPC_INBOX_OFFSET  48
-#define CABIN_IPC_INBOX_VADDR   (0x1000 + CABIN_IPC_INBOX_OFFSET)
-#define CABIN_IPC_INBOX_SIZE    256
-
-// Rotating IPC inbox slots: the 4048 bytes after the header (offset 48..4095)
-// are divided into 15 slots of 256 bytes each. Each IPC delivery uses the next
-// slot, preventing rapid-fire messages from overwriting each other.
-#define IPC_INBOX_SLOT_SIZE     256
-#define IPC_INBOX_SLOTS         15
-
-_Static_assert(sizeof(CabinInfo) == 4096, "CabinInfo must be exactly one page (4096 bytes)");
+_Static_assert(sizeof(CabinInfo) == 48, "CabinInfo header must be 48 bytes");
 
 static inline bool cabin_info_valid(const CabinInfo* ci)
 {

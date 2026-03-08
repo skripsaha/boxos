@@ -22,8 +22,6 @@ ReadyQueue g_ready_queue;
 
 static void guide_process_ahci_completions(void);
 
-static volatile uint8_t guide_idle = 1;
-
 static DeckEntry deck_table[] = {
     {0xFF, "System Deck", system_deck_handler},
     {0x01, "Operations Deck", operations_deck_handler},
@@ -37,11 +35,9 @@ void guide_init(void)
 
     ready_queue_init(&g_ready_queue);
 
-    atomic_store_u8(&guide_idle, 1);
-
     listen_table_init();
 
-    debug_printf("[GUIDE] ReadyQueue initialized (capacity=%u), Guide idle\n",
+    debug_printf("[GUIDE] ReadyQueue initialized (capacity=%u)\n",
                  READY_QUEUE_CAPACITY);
 }
 
@@ -55,16 +51,6 @@ deck_handler_t guide_get_deck_handler(uint8_t deck_id)
         }
     }
     return NULL;
-}
-
-void guide_wake(void)
-{
-    atomic_store_u8(&guide_idle, 0);
-}
-
-bool guide_is_idle(void)
-{
-    return atomic_load_u8(&guide_idle) != 0;
 }
 
 // Process one Pocket from a process's PocketRing through the prefix chain.
@@ -168,21 +154,8 @@ static void guide_process_pocket(process_t *proc)
     pocket_ring_pop(pring);
 }
 
-void guide_run(void)
+void guide(void)
 {
-    uint32_t processed_count = 0;
-    static uint64_t last_timeout_check = 0;
-    static uint64_t last_async_dispatch = 0;
-
-    if (last_timeout_check == 0)
-    {
-        last_timeout_check = rdtsc();
-    }
-    if (last_async_dispatch == 0)
-    {
-        last_async_dispatch = rdtsc();
-    }
-
     // Process all ready processes from the ReadyQueue
     while (!ready_queue_is_empty(&g_ready_queue))
     {
@@ -197,7 +170,6 @@ void guide_run(void)
             while (!pocket_ring_is_empty(pring))
             {
                 guide_process_pocket(proc);
-                processed_count++;
             }
         }
 
@@ -208,7 +180,16 @@ void guide_run(void)
         }
     }
 
+    // Handle async I/O completions and dispatch
     guide_process_ahci_completions();
+
+    static uint64_t last_timeout_check = 0;
+    static uint64_t last_async_dispatch = 0;
+
+    if (last_timeout_check == 0)
+        last_timeout_check = rdtsc();
+    if (last_async_dispatch == 0)
+        last_async_dispatch = rdtsc();
 
     uint64_t now = rdtsc();
     if ((now - last_async_dispatch) > cpu_ms_to_tsc(CONFIG_ASYNC_DISPATCH_INTERVAL_MS))
@@ -235,11 +216,6 @@ void guide_run(void)
         ahci_check_timeouts();
         async_io_expire_stale(cpu_ms_to_tsc(CONFIG_ASYNC_IO_QUEUE_TIMEOUT_MS));
         last_timeout_check = now;
-    }
-
-    if (ready_queue_is_empty(&g_ready_queue))
-    {
-        atomic_store_u8(&guide_idle, 1);
     }
 }
 

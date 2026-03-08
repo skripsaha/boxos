@@ -3,13 +3,13 @@
 #include "process.h"
 #include "klib.h"
 #include "vmm.h"
+#include "pmm.h"
 #include "error.h"
 #include "listen_table.h"
 #include "pocket.h"
 #include "pocket_ring.h"
 #include "ready_queue.h"
 #include "result_ring.h"
-#include "cabin_info.h"
 
 #define MAX_ROUTE_TAG_TARGETS 16
 
@@ -42,63 +42,50 @@ static bool tag_matches_process(process_t* proc, const char* route_tag) {
     return false;
 }
 
-static bool deliver_pocket_to_process(process_t* target, Pocket* pocket, uint32_t sender_pid) {
-    if (!target || !pocket) {
-        return false;
+// Allocate page(s) in target's buffer heap and copy data from sender's heap.
+// Returns the virtual address in target's address space, or 0 on failure.
+static uint64_t ipc_copy_to_heap(process_t* sender, process_t* target,
+                                  uint64_t src_addr, uint32_t length) {
+    if (!sender || !target || length == 0 || src_addr == 0) {
+        return 0;
     }
 
-    if (!target->result_ring_phys) {
-        return false;
+    // Translate sender's virtual address to kernel-accessible pointer
+    void* src = vmm_translate_user_addr(sender->cabin, src_addr, length);
+    if (!src) {
+        return 0;
     }
 
-    ResultRing* rring = (ResultRing*)vmm_phys_to_virt(target->result_ring_phys);
-    if (!rring) {
-        return false;
-    }
+    // Allocate page(s) in target's buffer heap
+    uint32_t pages_needed = (length + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE;
+    uint64_t target_vaddr = target->buf_heap_next;
 
-    // Copy data from sender's address space into target's rotating IPC inbox.
-    // Each delivery uses a different slot so rapid-fire messages don't overwrite
-    // each other before the target reads them.
-    uint32_t result_data_addr = 0;
-    uint16_t result_data_length = 0;
+    for (uint32_t i = 0; i < pages_needed; i++) {
+        void* page = pmm_alloc(1);
+        if (!page) {
+            return 0;
+        }
 
-    if (pocket->data_length > 0 && pocket->data_addr != 0) {
-        process_t* sender = process_find(pocket->pid);
-        if (sender) {
-            void* src = vmm_translate_user_addr(sender->cabin, pocket->data_addr, pocket->data_length);
-            if (src) {
-                uint16_t slot = target->ipc_inbox_slot % IPC_INBOX_SLOTS;
-                target->ipc_inbox_slot++;
-
-                uint16_t copy_len = pocket->data_length > IPC_INBOX_SLOT_SIZE
-                                    ? IPC_INBOX_SLOT_SIZE : pocket->data_length;
-                uint8_t* inbox = (uint8_t*)vmm_phys_to_virt(target->cabin_info_phys)
-                                 + CABIN_IPC_INBOX_OFFSET + (slot * IPC_INBOX_SLOT_SIZE);
-                memcpy(inbox, src, copy_len);
-                result_data_addr = (uint32_t)(CABIN_IPC_INBOX_VADDR + (slot * IPC_INBOX_SLOT_SIZE));
-                result_data_length = copy_len;
-            }
+        uint64_t vaddr = target_vaddr + (i * PMM_PAGE_SIZE);
+        vmm_map_result_t ret = vmm_map_page(target->cabin, vaddr, (uint64_t)page,
+                                              VMM_FLAGS_USER_RW);
+        if (!ret.success) {
+            pmm_free(page, 1);
+            return 0;
         }
     }
 
-    // Push Result directly to target's ResultRing
-    Result result;
-    result.error_code = OK;
-    result.data_length = result_data_length;
-    result.data_addr = result_data_addr;
-    result.sender_pid = sender_pid;
-    result._reserved = 0;
+    target->buf_heap_next += pages_needed * PMM_PAGE_SIZE;
 
-    if (!result_ring_push(rring, &result)) {
-        return false;
+    // Copy data from sender to target via kernel mappings
+    void* dst = vmm_translate_user_addr(target->cabin, target_vaddr, length);
+    if (!dst) {
+        return 0;
     }
 
-    // Wake target if it's waiting for a message
-    if (process_get_state(target) == PROC_WAITING) {
-        process_set_state(target, PROC_WORKING);
-    }
+    memcpy(dst, src, length);
 
-    return true;
+    return target_vaddr;
 }
 
 int system_deck_route(Pocket* pocket) {
@@ -126,22 +113,36 @@ int system_deck_route(Pocket* pocket) {
         return -1;
     }
 
-    uint32_t sender_pid = pocket->pid;
+    // Copy data from sender's heap to target's heap
+    if (pocket->data_length > 0 && pocket->data_addr != 0) {
+        process_t* sender = process_find(pocket->pid);
+        if (!sender) {
+            pocket->error_code = ERR_PROCESS_NOT_FOUND;
+            return -1;
+        }
 
-    if (!deliver_pocket_to_process(target, pocket, sender_pid)) {
-        pocket->error_code = ERR_ROUTE_TARGET_FULL;
-        return -1;
+        uint64_t new_addr = ipc_copy_to_heap(sender, target,
+                                              pocket->data_addr, pocket->data_length);
+        if (new_addr == 0) {
+            pocket->error_code = ERR_NO_MEMORY;
+            return -1;
+        }
+
+        // Update data_addr to point to the copy in target's heap.
+        // Execution deck will put this address in Result.data_addr.
+        pocket->data_addr = new_addr;
     }
 
-    debug_printf("[ROUTE] PID %u -> PID %u (direct)\n", sender_pid, pocket->target_pid);
-
-    // Clear target_pid so execution_deck sets sender_pid=0 in the originator's Result.
-    // The routed pocket already has target_pid=sender_pid for the receiver.
-    pocket->target_pid = 0;
+    // Keep target_pid set — execution_deck will deliver Result to target's ResultRing.
     pocket->error_code = 0;
+
+    debug_printf("[ROUTE] PID %u -> PID %u (heap copy)\n", pocket->pid, pocket->target_pid);
+
     return 0;
 }
 
+// Route tag broadcast: copies data to each matching target's heap and delivers Results directly.
+// Cannot use execution_deck routing because it supports only one target_pid.
 int system_deck_route_tag(Pocket* pocket) {
     if (!pocket) return -1;
 
@@ -170,32 +171,59 @@ int system_deck_route_tag(Pocket* pocket) {
         return -1;
     }
 
-    uint32_t sender_pid = pocket->pid;
-    uint32_t delivered  = 0;
+    process_t* sender = process_find(pocket->pid);
+    if (!sender) {
+        pocket->error_code = ERR_PROCESS_NOT_FOUND;
+        return -1;
+    }
+
+    uint32_t delivered = 0;
 
     for (uint32_t i = 0; i < target_count; i++) {
         process_t* t = process_find(targets[i]);
-        if (!t) {
-            continue;
+        if (!t) continue;
+
+        if (!t->result_ring_phys) continue;
+
+        ResultRing* rring = (ResultRing*)vmm_phys_to_virt(t->result_ring_phys);
+        if (!rring) continue;
+
+        // Copy data to target's heap
+        uint64_t target_data_addr = 0;
+        uint32_t target_data_length = 0;
+
+        if (pocket->data_length > 0 && pocket->data_addr != 0) {
+            target_data_addr = ipc_copy_to_heap(sender, t,
+                                                 pocket->data_addr, pocket->data_length);
+            if (target_data_addr != 0) {
+                target_data_length = pocket->data_length;
+            }
         }
-        if (deliver_pocket_to_process(t, pocket, sender_pid)) {
+
+        Result result;
+        result.error_code = OK;
+        result.data_length = target_data_length;
+        result.data_addr = target_data_addr;
+        result.sender_pid = pocket->pid;
+        result._reserved = 0;
+
+        if (result_ring_push(rring, &result)) {
             delivered++;
-        } else {
-            debug_printf("[ROUTE_TAG] WARNING: Failed to deliver to PID %u: ring full\n",
-                         targets[i]);
+            if (process_get_state(t) == PROC_WAITING) {
+                process_set_state(t, PROC_WORKING);
+            }
         }
     }
 
     if (delivered == 0) {
-        debug_printf("[ROUTE_TAG] ERROR: All %u deliveries failed for '%s'\n",
-                     target_count, pocket->route_tag);
         pocket->error_code = ERR_ROUTE_TARGET_FULL;
         return -1;
     }
 
     debug_printf("[ROUTE_TAG] PID %u -> %u/%u targets matching '%s'\n",
-                 sender_pid, delivered, target_count, pocket->route_tag);
+                 pocket->pid, delivered, target_count, pocket->route_tag);
 
+    // Clear target_pid so execution_deck delivers confirmation to sender
     pocket->target_pid = 0;
     pocket->error_code = 0;
     return 0;

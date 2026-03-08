@@ -14,7 +14,7 @@
  *   4. process_t->state_lock         — per-process state
  *
  * process_destroy() releases scheduler_lock before any resource cleanup.
- * scheduler_cleanup_finished() releases scheduler_lock before calling process_destroy().
+ * schedule() handles periodic cleanup of finished processes.
  * process_cleanup_deferred() runs without scheduler_lock or process_lock.
  */
 
@@ -103,7 +103,6 @@ typedef struct process_t {
     bool started;
     uint32_t spawner_pid;
     uint64_t buf_heap_next;  // next free virtual address for buffer mapping
-    uint16_t ipc_inbox_slot; // rotating IPC inbox slot index
 
     // ASLR: per-process randomized addresses (set at creation time)
     uint64_t aslr_heap_base;     // actual heap start (CABIN_HEAP_BASE + random)
