@@ -5,6 +5,8 @@
 #include "boxos_decks.h"
 #include "pocket.h"
 
+typedef struct process_t process_t;
+
 #define SYSTEM_OP_PROC_SPAWN        0x01
 #define SYSTEM_OP_PROC_KILL         0x02
 #define SYSTEM_OP_PROC_INFO         0x03
@@ -22,8 +24,8 @@
 #define SYSTEM_OP_ROUTE_TAG         0x41
 #define SYSTEM_OP_LISTEN            0x42
 
-int  system_deck_handler(Pocket* pocket);
-bool system_security_gate(uint32_t pid, uint8_t deck_id, uint8_t opcode);
+int  system_deck_handler(Pocket* pocket, process_t* proc);
+bool system_security_gate(process_t* proc, uint8_t deck_id, uint8_t opcode);
 void system_deck_cleanup_process_buffers(uint32_t pid);
 
 #endif // SYSTEM_DECK_H

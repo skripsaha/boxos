@@ -6,7 +6,7 @@
 #include "atomics.h"
 #include "error.h"
 
-int execution_deck_handler(Pocket* pocket) {
+int execution_deck_handler(Pocket* pocket, process_t* proc) {
     if (!pocket) {
         return -1;
     }
@@ -19,7 +19,7 @@ int execution_deck_handler(Pocket* pocket) {
         // IPC: deliver Result to target process's ResultRing,
         // then deliver confirmation Result to sender's ResultRing.
         process_t* target = process_find(target_pid);
-        process_t* sender = process_find(pocket->pid);
+        process_t* sender = proc;  // source process already resolved by Guide
 
         if (!target) {
             // Target gone — deliver error to sender only
@@ -78,7 +78,7 @@ int execution_deck_handler(Pocket* pocket) {
     }
 
     // Self: deliver Result to sender's own ResultRing
-    process_t* target = process_find(pocket->pid);
+    process_t* target = proc;  // source process already resolved by Guide
     if (!target) return 0;
 
     Result result;

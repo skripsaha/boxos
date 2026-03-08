@@ -4,6 +4,8 @@
 #include "pocket.h"
 #include "boxos_decks.h"
 
+typedef struct process_t process_t;
+
 #define OPERATIONS_DECK_ID DECK_OPERATIONS
 
 #define OP_BUF_MOVE     0x01  // Move block of bytes
@@ -17,6 +19,6 @@
 #define OP_BIT_SWAP     0x09  // Endianness swap
 #define OP_VAL_ADD      0x0A  // Increment/decrement value
 
-int operations_deck_handler(Pocket* pocket);
+int operations_deck_handler(Pocket* pocket, process_t* proc);
 
 #endif // OPERATIONS_DECK_H

@@ -94,6 +94,8 @@
 #define USB_ERR_NO_DEVICE        0x14
 #define USB_ERR_ACCESS_DENIED    0x15
 
-int hardware_deck_handler(Pocket* pocket);
+typedef struct process_t process_t;
+
+int hardware_deck_handler(Pocket* pocket, process_t* proc);
 
 #endif // HARDWARE_DECK_H

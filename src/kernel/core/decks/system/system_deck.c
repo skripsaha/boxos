@@ -44,11 +44,10 @@
 
 // --- Internal helpers ---
 
-static void* get_request_data(Pocket* pocket) {
+static void* get_request_data(Pocket* pocket, process_t* proc) {
     if (!pocket || pocket->data_length == 0) {
         return NULL;
     }
-    process_t* proc = process_find(pocket->pid);
     if (!proc) {
         return NULL;
     }
@@ -131,10 +130,9 @@ static bool system_deck_check_permission(process_t* proc, uint8_t opcode) {
     }
 }
 
-bool system_security_gate(uint32_t pid, uint8_t deck_id, uint8_t opcode) {
-    process_t* proc = process_find(pid);
+bool system_security_gate(process_t* proc, uint8_t deck_id, uint8_t opcode) {
     if (!proc) {
-        debug_printf("[SECURITY] DENY: Invalid PID %u\n", pid);
+        debug_printf("[SECURITY] DENY: NULL proc\n");
         return false;
     }
 
@@ -272,12 +270,12 @@ void system_deck_cleanup_process_buffers(uint32_t pid) {
     spin_unlock(&buffer_table_lock);
 }
 
-static int buf_alloc(Pocket* pocket) {
+static int buf_alloc(Pocket* pocket, process_t* proc) {
     if (!pocket) {
         return -1;
     }
 
-    uint8_t* data = (uint8_t*)get_request_data(pocket);
+    uint8_t* data = (uint8_t*)get_request_data(pocket, proc);
     if (!data) {
         pocket->error_code = ERR_INVALID_ARGUMENT;
         return -1;
@@ -356,7 +354,6 @@ static int buf_alloc(Pocket* pocket) {
     spin_unlock(&buffer_table_lock);
 
     uint64_t virt = 0;
-    process_t* proc = process_find(pocket->pid);
     if (proc && proc->cabin) {
         virt = proc->buf_heap_next;
         vmm_map_result_t mr = vmm_map_pages(proc->cabin, virt, (uintptr_t)phys,
@@ -386,12 +383,12 @@ static int buf_alloc(Pocket* pocket) {
     return 0;
 }
 
-static int buf_free(Pocket* pocket) {
+static int buf_free(Pocket* pocket, process_t* proc) {
     if (!pocket) {
         return -1;
     }
 
-    uint8_t* data = (uint8_t*)get_request_data(pocket);
+    uint8_t* data = (uint8_t*)get_request_data(pocket, proc);
     if (!data) {
         pocket->error_code = ERR_INVALID_ARGUMENT;
         return -1;
@@ -453,12 +450,12 @@ static int buf_free(Pocket* pocket) {
     return 0;
 }
 
-static int buf_resize(Pocket* pocket) {
+static int buf_resize(Pocket* pocket, process_t* proc) {
     if (!pocket) {
         return -1;
     }
 
-    uint8_t* data = (uint8_t*)get_request_data(pocket);
+    uint8_t* data = (uint8_t*)get_request_data(pocket, proc);
     if (!data) {
         pocket->error_code = ERR_INVALID_ARGUMENT;
         return -1;
@@ -529,7 +526,6 @@ static int buf_resize(Pocket* pocket) {
     memcpy(new_virt_kern, old_virt_kern, copy_size);
     __sync_synchronize();
 
-    process_t* proc     = process_find(pocket->pid);
     uint64_t   new_virt = old_virt;
 
     if (old_virt != 0 && proc && proc->cabin) {
@@ -577,12 +573,12 @@ static int buf_resize(Pocket* pocket) {
 
 // --- Process Operations ---
 
-static int proc_spawn(Pocket* pocket) {
+static int proc_spawn(Pocket* pocket, process_t* proc) {
     if (!pocket) {
         return -1;
     }
 
-    uint8_t* data = (uint8_t*)get_request_data(pocket);
+    uint8_t* data = (uint8_t*)get_request_data(pocket, proc);
     if (!data) {
         debug_printf("[SYSTEM_DECK] PROC_SPAWN: failed to read request data\n");
         pocket->error_code = ERR_INVALID_ARGUMENT;
@@ -639,39 +635,39 @@ static int proc_spawn(Pocket* pocket) {
         return -1;
     }
 
-    process_t* proc = process_create(tags);
-    if (!proc) {
+    process_t* new_proc = process_create(tags);
+    if (!new_proc) {
         pocket->error_code = ERR_SPAWN_FAILED;
         return -1;
     }
-    proc->spawner_pid = pocket->pid;
+    new_proc->spawner_pid = pocket->pid;
 
     const uint8_t* elf = (const uint8_t*)vmm_phys_to_virt(binary_phys);
     if (binary_size < 16 || elf[0] != 0x7F || elf[1] != 'E' ||
         elf[2] != 'L' || elf[3] != 'F') {
         debug_printf("[SYSTEM_DECK] PROC_SPAWN: invalid ELF magic\n");
-        process_destroy(proc);
+        process_destroy(new_proc);
         pocket->error_code = ERR_INVALID_ELF;
         return -1;
     }
 
-    if (process_load_binary(proc, (void*)elf, binary_size) != 0) {
+    if (process_load_binary(new_proc, (void*)elf, binary_size) != 0) {
         debug_printf("[SYSTEM_DECK] PROC_SPAWN: load binary failed\n");
-        process_destroy(proc);
+        process_destroy(new_proc);
         pocket->error_code = ERR_SPAWN_FAILED;
         return -1;
     }
 
     // Response layout: [uint32_t new_pid, uint32_t reserved]
-    *(uint32_t*)(data + 0) = proc->pid;
+    *(uint32_t*)(data + 0) = new_proc->pid;
     *(uint32_t*)(data + 4) = 0;
 
     pocket->error_code = OK;
-    debug_printf("[SYSTEM_DECK] PROC_SPAWN: SUCCESS PID %u\n", proc->pid);
+    debug_printf("[SYSTEM_DECK] PROC_SPAWN: SUCCESS PID %u\n", new_proc->pid);
     return 0;
 }
 
-static int proc_kill(Pocket* pocket) {
+static int proc_kill(Pocket* pocket, process_t* proc) {
     if (!pocket) {
         return -1;
     }
@@ -685,7 +681,7 @@ static int proc_kill(Pocket* pocket) {
         is_self_exit = true;
         debug_printf("[SYSTEM_DECK] PROC_KILL: PID %u graceful exit (no data)\n", target_pid);
     } else {
-        data = (uint8_t*)get_request_data(pocket);
+        data = (uint8_t*)get_request_data(pocket, proc);
         if (!data || pocket->data_length < 4) {
             pocket->error_code = ERR_INVALID_ARGUMENT;
             return -1;
@@ -708,16 +704,16 @@ static int proc_kill(Pocket* pocket) {
         return -1;
     }
 
-    process_t* proc = process_find(target_pid);
-    if (!proc) {
+    process_t* target = process_find(target_pid);
+    if (!target) {
         pocket->error_code = ERR_PROCESS_NOT_FOUND;
         return -1;
     }
 
     if (is_self_exit) {
-        process_set_state(proc, PROC_DONE);
+        process_set_state(target, PROC_DONE);
     } else {
-        process_set_state(proc, PROC_CRASHED);
+        process_set_state(target, PROC_CRASHED);
     }
     __sync_synchronize();
 
@@ -734,12 +730,12 @@ static int proc_kill(Pocket* pocket) {
     return 0;
 }
 
-static int proc_info(Pocket* pocket) {
+static int proc_info(Pocket* pocket, process_t* proc) {
     if (!pocket) {
         return -1;
     }
 
-    uint8_t* data = (uint8_t*)get_request_data(pocket);
+    uint8_t* data = (uint8_t*)get_request_data(pocket, proc);
     if (!data) {
         pocket->error_code = ERR_INVALID_ARGUMENT;
         return -1;
@@ -755,34 +751,34 @@ static int proc_info(Pocket* pocket) {
         debug_printf("[SYSTEM_DECK] PROC_INFO: PID %u\n", target_pid);
     }
 
-    process_t* proc = process_find(target_pid);
-    if (!proc) {
+    process_t* target = process_find(target_pid);
+    if (!target) {
         pocket->error_code = ERR_PROCESS_NOT_FOUND;
         return -1;
     }
 
     // Response layout: [uint32_t pid, uint32_t state, int32_t score, uint32_t reserved1,
     //                   uint64_t code_start, uint64_t code_size, char tags[64]]
-    *(uint32_t*)(data +  0) = proc->pid;
-    *(uint32_t*)(data +  4) = (uint32_t)proc->state;
-    *(int32_t* )(data +  8) = proc->score;
+    *(uint32_t*)(data +  0) = target->pid;
+    *(uint32_t*)(data +  4) = (uint32_t)target->state;
+    *(int32_t* )(data +  8) = target->score;
     *(uint32_t*)(data + 12) = 0;
-    *(uint64_t*)(data + 16) = proc->code_start;
-    *(uint64_t*)(data + 24) = proc->code_size;
-    strncpy((char*)(data + 32), proc->tags, PROC_INFO_TAGS_SIZE);
+    *(uint64_t*)(data + 16) = target->code_start;
+    *(uint64_t*)(data + 24) = target->code_size;
+    strncpy((char*)(data + 32), target->tags, PROC_INFO_TAGS_SIZE);
     ((char*)(data + 32))[PROC_INFO_TAGS_SIZE - 1] = '\0';
 
     pocket->error_code = OK;
-    debug_printf("[SYSTEM_DECK] PROC_INFO: SUCCESS PID %u\n", proc->pid);
+    debug_printf("[SYSTEM_DECK] PROC_INFO: SUCCESS PID %u\n", target->pid);
     return 0;
 }
 
-static int proc_exec(Pocket* pocket) {
+static int proc_exec(Pocket* pocket, process_t* proc) {
     if (!pocket) {
         return -1;
     }
 
-    uint8_t* data = (uint8_t*)get_request_data(pocket);
+    uint8_t* data = (uint8_t*)get_request_data(pocket, proc);
     if (!data) {
         pocket->error_code = ERR_INVALID_ARGUMENT;
         return -1;
@@ -911,44 +907,44 @@ static int proc_exec(Pocket* pocket) {
         return -1;
     }
 
-    process_t* proc = process_create(found_tags);
-    if (!proc) {
+    process_t* new_proc = process_create(found_tags);
+    if (!new_proc) {
         pmm_free(phys_buf, pages_needed);
         pocket->error_code = ERR_SPAWN_FAILED;
         return -1;
     }
 
-    proc->spawner_pid = pocket->pid;
+    new_proc->spawner_pid = pocket->pid;
 
-    int load_result = process_load_binary(proc, virt_buf, (size_t)file_size);
+    int load_result = process_load_binary(new_proc, virt_buf, (size_t)file_size);
     pmm_free(phys_buf, pages_needed);
 
     if (load_result != 0) {
-        process_destroy(proc);
+        process_destroy(new_proc);
         pocket->error_code = ERR_SPAWN_FAILED;
         return -1;
     }
 
     __sync_synchronize();
-    process_set_state(proc, PROC_WORKING);
+    process_set_state(new_proc, PROC_WORKING);
 
     // Response layout: [uint32_t new_pid, uint32_t reserved, uint8_t reserved2[184]]
-    *(uint32_t*)(data + 0) = proc->pid;
+    *(uint32_t*)(data + 0) = new_proc->pid;
     *(uint32_t*)(data + 4) = 0;
 
     pocket->error_code = OK;
-    debug_printf("[SYSTEM_DECK] PROC_EXEC: SUCCESS '%s' -> PID %u\n", filename, proc->pid);
+    debug_printf("[SYSTEM_DECK] PROC_EXEC: SUCCESS '%s' -> PID %u\n", filename, new_proc->pid);
     return 0;
 }
 
 // --- Tag Operations ---
 
-static int tag_add(Pocket* pocket) {
+static int tag_add(Pocket* pocket, process_t* proc) {
     if (!pocket) {
         return -1;
     }
 
-    uint8_t* data = (uint8_t*)get_request_data(pocket);
+    uint8_t* data = (uint8_t*)get_request_data(pocket, proc);
     if (!data) {
         pocket->error_code = ERR_INVALID_ARGUMENT;
         return -1;
@@ -976,13 +972,13 @@ static int tag_add(Pocket* pocket) {
         return -1;
     }
 
-    process_t* proc = process_find(target_pid);
-    if (!proc) {
+    process_t* target = process_find(target_pid);
+    if (!target) {
         pocket->error_code = ERR_PROCESS_NOT_FOUND;
         return -1;
     }
 
-    if (process_has_tag(proc, tag)) {
+    if (process_has_tag(target, tag)) {
         // Response layout: [uint32_t error_code, char message[128]]
         *(uint32_t*)(data + 0) = ERR_ALREADY_EXISTS;
         strncpy((char*)(data + 4), "Tag already exists", 127);
@@ -991,7 +987,7 @@ static int tag_add(Pocket* pocket) {
         return -1;
     }
 
-    if (process_add_tag(proc, tag) != 0) {
+    if (process_add_tag(target, tag) != 0) {
         *(uint32_t*)(data + 0) = ERR_TAG_LIMIT_EXCEEDED;
         strncpy((char*)(data + 4), "Tag buffer full", 127);
         ((char*)(data + 4))[127] = '\0';
@@ -1000,9 +996,9 @@ static int tag_add(Pocket* pocket) {
     }
 
     if (strcmp(tag, "stopped") == 0) {
-        process_state_t state = process_get_state(proc);
+        process_state_t state = process_get_state(target);
         if (state == PROC_WORKING || state == PROC_CREATED) {
-            process_set_state(proc, PROC_STOPPED);
+            process_set_state(target, PROC_STOPPED);
         }
     }
 
@@ -1015,12 +1011,12 @@ static int tag_add(Pocket* pocket) {
     return 0;
 }
 
-static int tag_remove(Pocket* pocket) {
+static int tag_remove(Pocket* pocket, process_t* proc) {
     if (!pocket) {
         return -1;
     }
 
-    uint8_t* data = (uint8_t*)get_request_data(pocket);
+    uint8_t* data = (uint8_t*)get_request_data(pocket, proc);
     if (!data) {
         pocket->error_code = ERR_INVALID_ARGUMENT;
         return -1;
@@ -1048,13 +1044,13 @@ static int tag_remove(Pocket* pocket) {
         return -1;
     }
 
-    process_t* proc = process_find(target_pid);
-    if (!proc) {
+    process_t* target = process_find(target_pid);
+    if (!target) {
         pocket->error_code = ERR_PROCESS_NOT_FOUND;
         return -1;
     }
 
-    if (!process_has_tag(proc, tag)) {
+    if (!process_has_tag(target, tag)) {
         *(uint32_t*)(data + 0) = ERR_TAG_NOT_FOUND;
         strncpy((char*)(data + 4), "Tag not found", 127);
         ((char*)(data + 4))[127] = '\0';
@@ -1062,14 +1058,14 @@ static int tag_remove(Pocket* pocket) {
         return -1;
     }
 
-    if (process_remove_tag(proc, tag) != 0) {
+    if (process_remove_tag(target, tag) != 0) {
         pocket->error_code = ERR_INVALID_ARGUMENT;
         return -1;
     }
 
     if (strcmp(tag, "stopped") == 0) {
-        if (process_get_state(proc) == PROC_STOPPED) {
-            process_set_state(proc, PROC_WORKING);
+        if (process_get_state(target) == PROC_STOPPED) {
+            process_set_state(target, PROC_WORKING);
         }
     }
 
@@ -1082,12 +1078,12 @@ static int tag_remove(Pocket* pocket) {
     return 0;
 }
 
-static int tag_check(Pocket* pocket) {
+static int tag_check(Pocket* pocket, process_t* proc) {
     if (!pocket) {
         return -1;
     }
 
-    uint8_t* data = (uint8_t*)get_request_data(pocket);
+    uint8_t* data = (uint8_t*)get_request_data(pocket, proc);
     if (!data) {
         pocket->error_code = ERR_INVALID_ARGUMENT;
         return -1;
@@ -1115,13 +1111,13 @@ static int tag_check(Pocket* pocket) {
         return -1;
     }
 
-    process_t* proc = process_find(target_pid);
-    if (!proc) {
+    process_t* target = process_find(target_pid);
+    if (!target) {
         pocket->error_code = ERR_PROCESS_NOT_FOUND;
         return -1;
     }
 
-    bool has = process_has_tag(proc, tag);
+    bool has = process_has_tag(target, tag);
 
     // Response layout: [bool has_tag (1 byte), uint8_t reserved1[3], uint32_t error_code]
     *(uint8_t* )(data + 0) = has ? 1 : 0;
@@ -1189,12 +1185,11 @@ static int ctx_use_parse_tags(const char* input, char tags[][CTX_TAG_LENGTH],
     return 0;
 }
 
-static int ctx_use(Pocket* pocket) {
+static int ctx_use(Pocket* pocket, process_t* proc) {
     if (!pocket) {
         return -1;
     }
 
-    process_t* proc = process_find(pocket->pid);
     if (!proc) {
         pocket->error_code = ERR_PROCESS_NOT_FOUND;
         return -1;
@@ -1346,7 +1341,7 @@ static bool tag_matches_process(process_t* proc, const char* route_tag) {
     return false;
 }
 
-static int route(Pocket* pocket) {
+static int route(Pocket* pocket, process_t* proc) {
     if (!pocket) return -1;
 
     if (pocket->target_pid == 0) {
@@ -1372,13 +1367,12 @@ static int route(Pocket* pocket) {
     }
 
     if (pocket->data_length > 0 && pocket->data_addr != 0) {
-        process_t* sender = process_find(pocket->pid);
-        if (!sender) {
+        if (!proc) {
             pocket->error_code = ERR_PROCESS_NOT_FOUND;
             return -1;
         }
 
-        uint64_t new_addr = ipc_copy_to_heap(sender, target,
+        uint64_t new_addr = ipc_copy_to_heap(proc, target,
                                               pocket->data_addr, pocket->data_length);
         if (new_addr == 0) {
             pocket->error_code = ERR_NO_MEMORY;
@@ -1393,7 +1387,7 @@ static int route(Pocket* pocket) {
     return 0;
 }
 
-static int route_tag(Pocket* pocket) {
+static int route_tag(Pocket* pocket, process_t* proc) {
     if (!pocket) return -1;
 
     if (pocket->route_tag[0] == '\0') {
@@ -1404,16 +1398,16 @@ static int route_tag(Pocket* pocket) {
     uint32_t targets[MAX_ROUTE_TAG_TARGETS];
     uint32_t target_count = 0;
 
-    process_t* proc = process_get_first();
-    while (proc && target_count < MAX_ROUTE_TAG_TARGETS) {
-        process_state_t pstate = process_get_state(proc);
+    process_t* iter = process_get_first();
+    while (iter && target_count < MAX_ROUTE_TAG_TARGETS) {
+        process_state_t pstate = process_get_state(iter);
         if ((pstate == PROC_WORKING || pstate == PROC_WAITING) &&
-            proc->pid != pocket->pid) {
-            if (tag_matches_process(proc, pocket->route_tag)) {
-                targets[target_count++] = proc->pid;
+            iter->pid != pocket->pid) {
+            if (tag_matches_process(iter, pocket->route_tag)) {
+                targets[target_count++] = iter->pid;
             }
         }
-        proc = proc->next;
+        iter = iter->next;
     }
 
     if (target_count == 0) {
@@ -1421,8 +1415,7 @@ static int route_tag(Pocket* pocket) {
         return -1;
     }
 
-    process_t* sender = process_find(pocket->pid);
-    if (!sender) {
+    if (!proc) {
         pocket->error_code = ERR_PROCESS_NOT_FOUND;
         return -1;
     }
@@ -1440,7 +1433,7 @@ static int route_tag(Pocket* pocket) {
         uint32_t target_data_length = 0;
 
         if (pocket->data_length > 0 && pocket->data_addr != 0) {
-            target_data_addr = ipc_copy_to_heap(sender, t,
+            target_data_addr = ipc_copy_to_heap(proc, t,
                                                  pocket->data_addr, pocket->data_length);
             if (target_data_addr != 0) {
                 target_data_length = pocket->data_length;
@@ -1475,10 +1468,9 @@ static int route_tag(Pocket* pocket) {
     return 0;
 }
 
-static int listen(Pocket* pocket) {
+static int listen(Pocket* pocket, process_t* proc) {
     if (!pocket) return -1;
 
-    process_t* proc = process_find(pocket->pid);
     if (!proc) {
         pocket->error_code = ERR_PROCESS_NOT_FOUND;
         return -1;
@@ -1519,12 +1511,11 @@ static int listen(Pocket* pocket) {
 
 // --- Filesystem Operations ---
 
-static int defrag_file(Pocket* pocket) {
+static int defrag_file(Pocket* pocket, process_t* proc) {
     if (!pocket) {
         return -1;
     }
 
-    process_t* proc = process_find(pocket->pid);
     if (!proc) {
         pocket->error_code = ERR_PROCESS_NOT_FOUND;
         return -1;
@@ -1552,12 +1543,11 @@ static int defrag_file(Pocket* pocket) {
     return (result == 0) ? 0 : -1;
 }
 
-static int frag_score(Pocket* pocket) {
+static int frag_score(Pocket* pocket, process_t* proc) {
     if (!pocket) {
         return -1;
     }
 
-    process_t* proc = process_find(pocket->pid);
     if (!proc) {
         pocket->error_code = ERR_PROCESS_NOT_FOUND;
         return -1;
@@ -1596,7 +1586,7 @@ static int frag_score(Pocket* pocket) {
 
 // --- Main Handler ---
 
-int system_deck_handler(Pocket* pocket) {
+int system_deck_handler(Pocket* pocket, process_t* proc) {
     if (!pocket) {
         debug_printf("[SYSTEM_DECK] ERROR: NULL pocket\n");
         return -1;
@@ -1605,22 +1595,22 @@ int system_deck_handler(Pocket* pocket) {
     uint8_t opcode = pocket_get_opcode(pocket, pocket->current_prefix_idx);
 
     switch (opcode) {
-        case SYSTEM_OP_PROC_SPAWN:   return proc_spawn(pocket);
-        case SYSTEM_OP_PROC_KILL:    return proc_kill(pocket);
-        case SYSTEM_OP_PROC_INFO:    return proc_info(pocket);
-        case SYSTEM_OP_PROC_EXEC:    return proc_exec(pocket);
-        case SYSTEM_OP_CTX_USE:      return ctx_use(pocket);
-        case SYSTEM_OP_BUF_ALLOC:    return buf_alloc(pocket);
-        case SYSTEM_OP_BUF_FREE:     return buf_free(pocket);
-        case SYSTEM_OP_BUF_RESIZE:   return buf_resize(pocket);
-        case SYSTEM_OP_TAG_ADD:      return tag_add(pocket);
-        case SYSTEM_OP_TAG_REMOVE:   return tag_remove(pocket);
-        case SYSTEM_OP_TAG_CHECK:    return tag_check(pocket);
-        case SYSTEM_OP_DEFRAG_FILE:  return defrag_file(pocket);
-        case SYSTEM_OP_FRAG_SCORE:   return frag_score(pocket);
-        case SYSTEM_OP_ROUTE:        return route(pocket);
-        case SYSTEM_OP_ROUTE_TAG:    return route_tag(pocket);
-        case SYSTEM_OP_LISTEN:       return listen(pocket);
+        case SYSTEM_OP_PROC_SPAWN:   return proc_spawn(pocket, proc);
+        case SYSTEM_OP_PROC_KILL:    return proc_kill(pocket, proc);
+        case SYSTEM_OP_PROC_INFO:    return proc_info(pocket, proc);
+        case SYSTEM_OP_PROC_EXEC:    return proc_exec(pocket, proc);
+        case SYSTEM_OP_CTX_USE:      return ctx_use(pocket, proc);
+        case SYSTEM_OP_BUF_ALLOC:    return buf_alloc(pocket, proc);
+        case SYSTEM_OP_BUF_FREE:     return buf_free(pocket, proc);
+        case SYSTEM_OP_BUF_RESIZE:   return buf_resize(pocket, proc);
+        case SYSTEM_OP_TAG_ADD:      return tag_add(pocket, proc);
+        case SYSTEM_OP_TAG_REMOVE:   return tag_remove(pocket, proc);
+        case SYSTEM_OP_TAG_CHECK:    return tag_check(pocket, proc);
+        case SYSTEM_OP_DEFRAG_FILE:  return defrag_file(pocket, proc);
+        case SYSTEM_OP_FRAG_SCORE:   return frag_score(pocket, proc);
+        case SYSTEM_OP_ROUTE:        return route(pocket, proc);
+        case SYSTEM_OP_ROUTE_TAG:    return route_tag(pocket, proc);
+        case SYSTEM_OP_LISTEN:       return listen(pocket, proc);
 
         default:
             debug_printf("[SYSTEM_DECK] Unknown opcode 0x%02x\n", opcode);

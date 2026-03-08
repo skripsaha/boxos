@@ -28,14 +28,8 @@ static inline void write_u32(uint8_t* data, size_t offset, uint32_t value) {
     data[offset + 3] = value & 0xFF;
 }
 
-int operations_deck_handler(Pocket* pocket) {
-    if (!pocket) {
-        return -1;
-    }
-
-    process_t* proc = process_find(pocket->pid);
-    if (!proc) {
-        pocket->error_code = ERR_PROCESS_NOT_FOUND;
+int operations_deck_handler(Pocket* pocket, process_t* proc) {
+    if (!pocket || !proc) {
         return -1;
     }
 

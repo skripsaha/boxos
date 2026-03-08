@@ -9,7 +9,7 @@
 #include "guide.h"
 #include "ready_queue.h"
 #include "xhci_interrupt.h"
-#include "syscall.h"
+#include "notify.h"
 
 static scheduler_state_t sched;
 
@@ -148,7 +148,7 @@ void schedule(void* frame_ptr) {
     // Set kernel stack for ring 3 -> ring 0 transitions (TSS for INT, PerCpuData for notify)
     if (!process_is_idle(next) && next->kernel_stack_top) {
         tss_set_rsp0((uint64_t)next->kernel_stack_top);
-        syscall_set_kernel_rsp((uint64_t)next->kernel_stack_top);
+        notify_set_kernel_rsp((uint64_t)next->kernel_stack_top);
     }
 
     // Switch current process

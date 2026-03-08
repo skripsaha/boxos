@@ -57,8 +57,7 @@ exit_asm:
     mov rdi, rsp
     pocket_push
     add rsp, 96
-    ; notify — tell kernel to process our exit Pocket
-    syscall
+    notify
 .halt_exit:
     hlt
     jmp .halt_exit

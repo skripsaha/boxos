@@ -24,6 +24,9 @@
 %ifndef NOTIFY_INC
 %define NOTIFY_INC
 
+; BoxOS notify — kernel entry instruction
+%define notify syscall
+
 ; -------------------------------------------------------------------------
 ; Constants
 ; -------------------------------------------------------------------------
@@ -131,7 +134,7 @@ DECK_SYSTEM        equ 0xFF
     mov rdi, rsp
     pocket_push
     add rsp, 96
-    syscall                             ; notify
+    notify
 %endmacro
 
 %endif ; NOTIFY_INC

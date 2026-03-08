@@ -3,6 +3,10 @@
 
 #include "types.h"
 
+// BoxOS notify — signal the kernel that PocketRing has work for the Guide.
+// Wraps the x86-64 fast entry instruction. INT 0x80 remains as fallback.
+#define __notify() __asm__ volatile("syscall" ::: "memory", "rcx", "r11")
+
 // CabinInfo: read-only metadata at CABIN_INFO_VADDR (0x1000)
 // Kernel fills this at process creation. Userspace reads pid, heap_base, etc.
 typedef struct PACKED {

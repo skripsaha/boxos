@@ -36,14 +36,17 @@ static inline void write_u32(uint8_t *data, size_t offset, uint32_t value)
 }
 
 // Resolve pocket->data_addr to a kernel-accessible pointer.
+// If proc is provided, uses it directly (avoids process_find).
 // Returns NULL if process not found, address not mapped, or data_length is 0.
-static void *pocket_data_ptr(Pocket *pocket)
+static void *pocket_data_ptr(Pocket *pocket, process_t *proc)
 {
     if (!pocket || pocket->data_length == 0 || pocket->data_addr == 0)
         return NULL;
-    process_t *proc = process_find(pocket->pid);
-    if (!proc)
-        return NULL;
+    if (!proc) {
+        proc = process_find(pocket->pid);
+        if (!proc)
+            return NULL;
+    }
     return vmm_translate_user_addr(proc->cabin, pocket->data_addr, pocket->data_length);
 }
 
@@ -71,7 +74,7 @@ static int handle_tag_query(Pocket *pocket)
 
     spin_lock(&state->lock);
 
-    uint8_t *data = pocket_data_ptr(pocket);
+    uint8_t *data = pocket_data_ptr(pocket, NULL);
     if (!data)
     {
         spin_unlock(&state->lock);
@@ -150,7 +153,7 @@ static int handle_tag_set(Pocket *pocket)
 
     spin_lock(&state->lock);
 
-    uint8_t *data = pocket_data_ptr(pocket);
+    uint8_t *data = pocket_data_ptr(pocket, NULL);
     if (!data)
     {
         spin_unlock(&state->lock);
@@ -190,7 +193,7 @@ static int handle_tag_unset(Pocket *pocket)
 
     spin_lock(&state->lock);
 
-    uint8_t *data = pocket_data_ptr(pocket);
+    uint8_t *data = pocket_data_ptr(pocket, NULL);
     if (!data)
     {
         spin_unlock(&state->lock);
@@ -252,7 +255,7 @@ static int parse_tag_list(const char *tag_string, const char *tags[], uint32_t m
 #ifdef CONFIG_ATA_DMA_ASYNC
 static int handle_obj_read_async(Pocket *pocket)
 {
-    uint8_t *data = pocket_data_ptr(pocket);
+    uint8_t *data = pocket_data_ptr(pocket, NULL);
     if (!data)
     {
         pocket->error_code = ERR_INVALID_ARGUMENT;
@@ -319,7 +322,7 @@ static int handle_obj_read_async(Pocket *pocket)
 
 static int handle_obj_write_async(Pocket *pocket)
 {
-    uint8_t *data = pocket_data_ptr(pocket);
+    uint8_t *data = pocket_data_ptr(pocket, NULL);
     if (!data)
     {
         pocket->error_code = ERR_INVALID_ARGUMENT;
@@ -405,7 +408,7 @@ static int handle_obj_write_async(Pocket *pocket)
 
 int handle_obj_read(Pocket *pocket)
 {
-    uint8_t *data = pocket_data_ptr(pocket);
+    uint8_t *data = pocket_data_ptr(pocket, NULL);
     if (!data)
     {
         pocket->error_code = ERR_INVALID_ARGUMENT;
@@ -460,7 +463,7 @@ int handle_obj_read(Pocket *pocket)
 
 int handle_obj_write(Pocket *pocket)
 {
-    uint8_t *data = pocket_data_ptr(pocket);
+    uint8_t *data = pocket_data_ptr(pocket, NULL);
     if (!data)
     {
         pocket->error_code = ERR_INVALID_ARGUMENT;
@@ -557,7 +560,7 @@ static void extract_filename_stem(const char *filename, char *stem, size_t stem_
 
 static int handle_obj_create(Pocket *pocket)
 {
-    uint8_t *data = pocket_data_ptr(pocket);
+    uint8_t *data = pocket_data_ptr(pocket, NULL);
     if (!data)
     {
         pocket->error_code = ERR_INVALID_ARGUMENT;
@@ -636,7 +639,7 @@ static int handle_obj_create(Pocket *pocket)
 
 static int handle_obj_delete(Pocket *pocket)
 {
-    uint8_t *data = pocket_data_ptr(pocket);
+    uint8_t *data = pocket_data_ptr(pocket, NULL);
     if (!data)
     {
         pocket->error_code = ERR_INVALID_ARGUMENT;
@@ -700,7 +703,7 @@ static int handle_obj_delete(Pocket *pocket)
 
 static int handle_obj_rename(Pocket *pocket)
 {
-    uint8_t *data = pocket_data_ptr(pocket);
+    uint8_t *data = pocket_data_ptr(pocket, NULL);
     if (!data)
     {
         pocket->error_code = ERR_INVALID_ARGUMENT;
@@ -741,7 +744,7 @@ static int handle_obj_rename(Pocket *pocket)
 
 static int handle_obj_get_info(Pocket *pocket)
 {
-    uint8_t *data = pocket_data_ptr(pocket);
+    uint8_t *data = pocket_data_ptr(pocket, NULL);
     if (!data)
     {
         pocket->error_code = ERR_INVALID_ARGUMENT;
@@ -792,7 +795,7 @@ static int handle_obj_get_info(Pocket *pocket)
 
 static int handle_context_set(Pocket *pocket)
 {
-    uint8_t *data = pocket_data_ptr(pocket);
+    uint8_t *data = pocket_data_ptr(pocket, NULL);
     if (!data)
         return ERR_INVALID_ARGUMENT;
 
@@ -812,8 +815,9 @@ static int handle_context_clear(Pocket *pocket)
     return OK;
 }
 
-int storage_deck_handler(Pocket *pocket)
+int storage_deck_handler(Pocket *pocket, process_t *proc)
 {
+    (void)proc;  // TODO: thread through to pocket_data_ptr for full elimination
     if (!pocket_validate(pocket))
     {
         return ERR_INVALID_ARGUMENT;
