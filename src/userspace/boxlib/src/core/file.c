@@ -1,5 +1,5 @@
-#include "box/chain.h"
 #include "box/file.h"
+#include "box/notify.h"
 #include "box/result.h"
 #include "box/string.h"
 #include "box/types.h"
@@ -10,7 +10,17 @@ int create(const char *filename, const char *tags)
     size_t fn_len = strlen(filename);
     if (fn_len >= 32) return -1;
 
-    obj_create(filename, tags);
+    struct PACKED {
+        char filename[32];
+        char tags[160];
+    } args;
+    memset(&args, 0, sizeof(args));
+    memcpy(args.filename, filename, fn_len);
+    if (tags && tags[0] != '\0') {
+        size_t tag_len = strlen(tags);
+        if (tag_len < 160) memcpy(args.tags, tags, tag_len);
+    }
+    pocket_send(DECK_STORAGE, 0x07, &args, sizeof(args));
 
     Result result;
     if (!result_wait(&result, 5000)) return -1;
@@ -30,7 +40,13 @@ int query(const char *tags, uint32_t *file_ids, size_t max_files)
 {
     if (!file_ids || max_files == 0) return -1;
 
-    obj_query(tags);
+    uint8_t args[192];
+    memset(args, 0, sizeof(args));
+    if (tags && tags[0] != '\0') {
+        size_t len = strlen(tags);
+        if (len < 192) memcpy(args, tags, len);
+    }
+    pocket_send(DECK_STORAGE, 0x01, args, sizeof(args));
 
     Result result;
     if (!result_wait(&result, 5000)) return -1;
@@ -55,7 +71,13 @@ int file_info(uint32_t file_id, file_info_t *info)
 {
     if (!info) return -1;
 
-    obj_info(file_id);
+    struct PACKED {
+        uint32_t file_id;
+        uint8_t reserved[188];
+    } args;
+    memset(&args, 0, sizeof(args));
+    args.file_id = file_id;
+    pocket_send(DECK_STORAGE, 0x0A, &args, sizeof(args));
 
     Result result;
     if (!result_wait(&result, 5000)) return -1;
@@ -89,7 +111,17 @@ int fread(uint32_t file_id, uint64_t offset, void *buffer, size_t size)
     if (!buffer || size == 0) return -1;
     if (size > 176) size = 176;
 
-    obj_read(file_id, offset, (uint32_t)size);
+    struct PACKED {
+        uint32_t file_id;
+        uint64_t offset;
+        uint32_t length;
+        uint8_t reserved[176];
+    } args;
+    memset(&args, 0, sizeof(args));
+    args.file_id = file_id;
+    args.offset  = offset;
+    args.length  = (uint32_t)size;
+    pocket_send(DECK_STORAGE, 0x05, &args, sizeof(args));
 
     Result result;
     if (!result_wait(&result, 5000)) return -1;
@@ -117,7 +149,21 @@ int fwrite(uint32_t file_id, uint64_t offset, const void *buffer, size_t size)
     if (!buffer || size == 0) return -1;
     if (size > 168) size = 168;
 
-    obj_write(file_id, offset, buffer, (uint32_t)size);
+    struct PACKED {
+        uint32_t file_id;
+        uint64_t offset;
+        uint32_t length;
+        uint32_t flags;
+        uint8_t data[168];
+        uint8_t reserved[4];
+    } args;
+    memset(&args, 0, sizeof(args));
+    args.file_id = file_id;
+    args.offset  = offset;
+    args.length  = (uint32_t)size;
+    args.flags   = 0;
+    memcpy(args.data, buffer, size);
+    pocket_send(DECK_STORAGE, 0x06, &args, sizeof(args));
 
     Result result;
     if (!result_wait(&result, 5000)) return -1;
@@ -140,7 +186,15 @@ int file_rename(uint32_t file_id, const char *new_filename)
     size_t fn_len = strlen(new_filename);
     if (fn_len == 0 || fn_len >= 32) return -1;
 
-    obj_rename(file_id, new_filename);
+    struct PACKED {
+        uint32_t file_id;
+        char new_filename[32];
+        uint8_t reserved[156];
+    } args;
+    memset(&args, 0, sizeof(args));
+    args.file_id = file_id;
+    memcpy(args.new_filename, new_filename, fn_len);
+    pocket_send(DECK_STORAGE, 0x09, &args, sizeof(args));
 
     Result result;
     if (!result_wait(&result, 5000)) return -1;
@@ -156,7 +210,13 @@ int file_rename(uint32_t file_id, const char *new_filename)
 
 int delete(uint32_t file_id)
 {
-    obj_delete(file_id);
+    struct PACKED {
+        uint32_t file_id;
+        uint8_t reserved[188];
+    } args;
+    memset(&args, 0, sizeof(args));
+    args.file_id = file_id;
+    pocket_send(DECK_STORAGE, 0x08, &args, sizeof(args));
 
     Result result;
     if (!result_wait(&result, 5000)) return -1;
@@ -176,7 +236,15 @@ int tag_add(uint32_t file_id, const char *tag)
     size_t tag_len = strlen(tag);
     if (tag_len >= 32) return -1;
 
-    obj_tag_set(file_id, tag);
+    struct PACKED {
+        uint32_t file_id;
+        char tag[32];
+        uint8_t reserved[156];
+    } args;
+    memset(&args, 0, sizeof(args));
+    args.file_id = file_id;
+    memcpy(args.tag, tag, tag_len);
+    pocket_send(DECK_STORAGE, 0x02, &args, sizeof(args));
 
     Result result;
     if (!result_wait(&result, 5000)) return -1;
@@ -190,7 +258,15 @@ int tag_remove(uint32_t file_id, const char *key)
     size_t key_len = strlen(key);
     if (key_len >= 32) return -1;
 
-    obj_tag_unset(file_id, key);
+    struct PACKED {
+        uint32_t file_id;
+        char tag[32];
+        uint8_t reserved[156];
+    } args;
+    memset(&args, 0, sizeof(args));
+    args.file_id = file_id;
+    memcpy(args.tag, key, key_len);
+    pocket_send(DECK_STORAGE, 0x03, &args, sizeof(args));
 
     Result result;
     if (!result_wait(&result, 5000)) return -1;
@@ -204,7 +280,10 @@ int context_set(const char *tag)
     size_t tag_len = strlen(tag);
     if (tag_len >= 32) return -1;
 
-    ctx_set(tag);
+    uint8_t args[192];
+    memset(args, 0, sizeof(args));
+    memcpy(args, tag, tag_len);
+    pocket_send(DECK_STORAGE, 0x10, args, sizeof(args));
 
     Result result;
     if (!result_wait(&result, 5000)) return -1;
@@ -214,7 +293,9 @@ int context_set(const char *tag)
 
 int context_clear(void)
 {
-    ctx_clear();
+    uint8_t args[192];
+    memset(args, 0, sizeof(args));
+    pocket_send(DECK_STORAGE, 0x11, args, sizeof(args));
 
     Result result;
     if (!result_wait(&result, 5000)) return -1;

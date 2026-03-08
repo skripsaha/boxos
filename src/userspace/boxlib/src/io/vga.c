@@ -1,5 +1,5 @@
 #include "box/io/vga.h"
-#include "box/chain.h"
+#include "box/notify.h"
 #include "box/result.h"
 #include "box/string.h"
 
@@ -12,7 +12,8 @@ int vga_putchar(char c) {
         color = VGA_SCHEME_DEFAULT;
     }
 
-    hw_vga_putchar(pos.row, pos.col, c, (uint8_t)color);
+    uint8_t buf[4] = {pos.row, pos.col, (uint8_t)c, (uint8_t)color};
+    pocket_send(DECK_HARDWARE, 0x70, buf, 4);
 
     Result result;
     if (!result_wait(&result, 100000)) {
@@ -46,7 +47,14 @@ int vga_puts(const char* str) {
             color = VGA_SCHEME_DEFAULT;
         }
 
-        hw_vga_putstring(str + offset, (uint8_t)chunk_size, (uint8_t)color);
+        uint8_t putstr_buf[192];
+        memset(putstr_buf, 0, sizeof(putstr_buf));
+        putstr_buf[0] = (uint8_t)chunk_size;
+        putstr_buf[1] = (uint8_t)color;
+        putstr_buf[2] = 0;
+        putstr_buf[3] = 0;
+        memcpy(putstr_buf + 4, str + offset, chunk_size);
+        pocket_send(DECK_HARDWARE, 0x71, putstr_buf, (uint32_t)(chunk_size + 4));
 
         Result result;
         if (!result_wait(&result, 100000)) {
@@ -67,7 +75,7 @@ int vga_puts(const char* str) {
 }
 
 int vga_clear(uint8_t color) {
-    hw_vga_clear(color);
+    pocket_send(DECK_HARDWARE, 0x72, &color, 1);
 
     Result result;
     if (!result_wait(&result, 100000)) {
@@ -82,7 +90,8 @@ int vga_clear(uint8_t color) {
 }
 
 int vga_clear_line(uint8_t row, uint8_t color) {
-    hw_vga_clear_line(row, color);
+    uint8_t buf[2] = {row, color};
+    pocket_send(DECK_HARDWARE, 0x73, buf, 2);
 
     Result result;
     if (!result_wait(&result, 100000)) {
@@ -97,7 +106,7 @@ int vga_clear_line(uint8_t row, uint8_t color) {
 }
 
 int vga_clear_to_eol(uint8_t color) {
-    hw_vga_clear_to_eol(color);
+    pocket_send(DECK_HARDWARE, 0x74, &color, 1);
 
     Result result;
     if (!result_wait(&result, 100000)) {
@@ -112,7 +121,8 @@ int vga_clear_to_eol(uint8_t color) {
 }
 
 int vga_scroll_up(uint8_t lines, uint8_t fill_color) {
-    hw_vga_scroll(lines, fill_color);
+    uint8_t buf[2] = {lines, fill_color};
+    pocket_send(DECK_HARDWARE, 0x79, buf, 2);
 
     Result result;
     if (!result_wait(&result, 100000)) {
@@ -127,7 +137,8 @@ int vga_scroll_up(uint8_t lines, uint8_t fill_color) {
 }
 
 int vga_newline(void) {
-    hw_vga_newline();
+    uint8_t buf[4] = {0};
+    pocket_send(DECK_HARDWARE, 0x7A, buf, 4);
 
     Result result;
     if (!result_wait(&result, 100000)) {
@@ -146,7 +157,8 @@ int vga_getcursor(vga_pos_t* pos) {
         return -ERR_INVALID_ARGS;
     }
 
-    hw_vga_getcursor();
+    uint8_t buf[4] = {0};
+    pocket_send(DECK_HARDWARE, 0x75, buf, 4);
 
     Result result;
     if (!result_wait(&result, 100000)) {
@@ -165,7 +177,8 @@ int vga_getcursor(vga_pos_t* pos) {
 }
 
 int vga_setcursor(uint8_t row, uint8_t col) {
-    hw_vga_setcursor(row, col);
+    uint8_t buf[2] = {row, col};
+    pocket_send(DECK_HARDWARE, 0x76, buf, 2);
 
     Result result;
     if (!result_wait(&result, 100000)) {
@@ -180,7 +193,8 @@ int vga_setcursor(uint8_t row, uint8_t col) {
 }
 
 int vga_getcolor(void) {
-    hw_vga_getcolor();
+    uint8_t buf[4] = {0};
+    pocket_send(DECK_HARDWARE, 0x78, buf, 4);
 
     Result result;
     if (!result_wait(&result, 100000)) {
@@ -196,7 +210,7 @@ int vga_getcolor(void) {
 }
 
 int vga_setcolor(uint8_t color) {
-    hw_vga_setcolor(color);
+    pocket_send(DECK_HARDWARE, 0x77, &color, 1);
 
     Result result;
     if (!result_wait(&result, 100000)) {
@@ -215,7 +229,8 @@ int vga_getdimensions(vga_dimensions_t* dims) {
         return -ERR_INVALID_ARGS;
     }
 
-    hw_vga_getdimensions();
+    uint8_t buf[4] = {0};
+    pocket_send(DECK_HARDWARE, 0x7B, buf, 4);
 
     Result result;
     if (!result_wait(&result, 100000)) {

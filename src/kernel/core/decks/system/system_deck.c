@@ -713,21 +713,31 @@ static int proc_kill(Pocket* pocket) {
         return -1;
     }
 
-    uint8_t* data = (uint8_t*)get_request_data(pocket);
-    if (!data || pocket->data_length < 4) {
-        pocket->error_code = ERR_INVALID_ARGUMENT;
-        return -1;
-    }
+    uint32_t target_pid;
+    bool     is_self_exit;
+    uint8_t* data = NULL;
 
-    // Request layout: [uint32_t target_pid, uint32_t reserved]
-    uint32_t target_pid  = *(uint32_t*)(data + 0);
-    bool     is_self_exit = (target_pid == 0);
-
-    if (is_self_exit) {
+    if (pocket->data_length == 0) {
         target_pid = pocket->pid;
-        debug_printf("[SYSTEM_DECK] PROC_KILL: PID %u graceful exit\n", target_pid);
+        is_self_exit = true;
+        debug_printf("[SYSTEM_DECK] PROC_KILL: PID %u graceful exit (no data)\n", target_pid);
     } else {
-        debug_printf("[SYSTEM_DECK] PROC_KILL: killing PID %u\n", target_pid);
+        data = (uint8_t*)get_request_data(pocket);
+        if (!data || pocket->data_length < 4) {
+            pocket->error_code = ERR_INVALID_ARGUMENT;
+            return -1;
+        }
+
+        // Request layout: [uint32_t target_pid, uint32_t reserved]
+        target_pid = *(uint32_t*)(data + 0);
+        is_self_exit = (target_pid == 0);
+
+        if (is_self_exit) {
+            target_pid = pocket->pid;
+            debug_printf("[SYSTEM_DECK] PROC_KILL: PID %u graceful exit\n", target_pid);
+        } else {
+            debug_printf("[SYSTEM_DECK] PROC_KILL: killing PID %u\n", target_pid);
+        }
     }
 
     if (target_pid == PROCESS_INVALID_PID) {
@@ -750,9 +760,11 @@ static int proc_kill(Pocket* pocket) {
 
     system_deck_cleanup_process_buffers(target_pid);
 
-    // Response layout: [uint32_t killed_pid, uint32_t reserved]
-    *(uint32_t*)(data + 0) = target_pid;
-    *(uint32_t*)(data + 4) = 0;
+    if (data && pocket->data_length >= 8) {
+        // Response layout: [uint32_t killed_pid, uint32_t reserved]
+        *(uint32_t*)(data + 0) = target_pid;
+        *(uint32_t*)(data + 4) = 0;
+    }
 
     pocket->error_code = OK;
     debug_printf("[SYSTEM_DECK] PROC_KILL: SUCCESS\n");

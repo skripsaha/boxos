@@ -149,7 +149,7 @@ static int do_reboot(Pocket* pocket) {
 
     if (!check_power_access(pocket->pid)) {
         debug_printf("[Hardware] ERROR: PID %u lacks permission for reboot\n", pocket->pid);
-        pocket->error_code = HW_ERR_ACCESS_DENIED;
+        pocket->error_code = ERR_ACCESS_DENIED;
         return -5;
     }
 
@@ -170,7 +170,7 @@ static int do_shutdown(Pocket* pocket) {
 
     if (!check_power_access(pocket->pid)) {
         debug_printf("[Hardware] ERROR: PID %u lacks permission for shutdown\n", pocket->pid);
-        pocket->error_code = HW_ERR_ACCESS_DENIED;
+        pocket->error_code = ERR_ACCESS_DENIED;
         return -5;
     }
 
@@ -291,7 +291,7 @@ int hardware_deck_handler(Pocket* pocket) {
 
             if (hw_port_is_forbidden(port)) {
                 debug_printf("[HW_DECK] FORBIDDEN port 0x%04x blocked (INB)\n", port);
-                pocket->error_code = HW_ERR_ACCESS_DENIED;
+                pocket->error_code = ERR_ACCESS_DENIED;
                 return -5;
             }
 
@@ -301,7 +301,7 @@ int hardware_deck_handler(Pocket* pocket) {
                 if (!process_has_tag(proc, "system")) {
                     if (!hw_port_is_safe_read(port)) {
                         debug_printf("[HW_DECK] Port 0x%04x requires system tag (INB)\n", port);
-                        pocket->error_code = HW_ERR_ACCESS_DENIED;
+                        pocket->error_code = ERR_ACCESS_DENIED;
                         process_ref_dec(proc);
                         return -5;
                     }
@@ -325,7 +325,7 @@ int hardware_deck_handler(Pocket* pocket) {
 
             if (hw_port_is_forbidden(port)) {
                 debug_printf("[HW_DECK] FORBIDDEN port 0x%04x blocked (OUTB)\n", port);
-                pocket->error_code = HW_ERR_ACCESS_DENIED;
+                pocket->error_code = ERR_ACCESS_DENIED;
                 return -5;
             }
 
@@ -335,7 +335,7 @@ int hardware_deck_handler(Pocket* pocket) {
                 if (!process_has_tag(proc, "system")) {
                     if (!hw_port_is_safe_write(port)) {
                         debug_printf("[HW_DECK] Port 0x%04x requires system tag (OUTB)\n", port);
-                        pocket->error_code = HW_ERR_ACCESS_DENIED;
+                        pocket->error_code = ERR_ACCESS_DENIED;
                         process_ref_dec(proc);
                         return -5;
                     }
@@ -358,7 +358,7 @@ int hardware_deck_handler(Pocket* pocket) {
 
             if (hw_port_is_forbidden(port)) {
                 debug_printf("[HW_DECK] FORBIDDEN port 0x%04x blocked (INW)\n", port);
-                pocket->error_code = HW_ERR_ACCESS_DENIED;
+                pocket->error_code = ERR_ACCESS_DENIED;
                 return -5;
             }
 
@@ -368,7 +368,7 @@ int hardware_deck_handler(Pocket* pocket) {
                 if (!process_has_tag(proc, "system")) {
                     if (!hw_port_is_safe_read(port)) {
                         debug_printf("[HW_DECK] Port 0x%04x requires system tag (INW)\n", port);
-                        pocket->error_code = HW_ERR_ACCESS_DENIED;
+                        pocket->error_code = ERR_ACCESS_DENIED;
                         process_ref_dec(proc);
                         return -5;
                     }
@@ -392,7 +392,7 @@ int hardware_deck_handler(Pocket* pocket) {
 
             if (hw_port_is_forbidden(port)) {
                 debug_printf("[HW_DECK] FORBIDDEN port 0x%04x blocked (OUTW)\n", port);
-                pocket->error_code = HW_ERR_ACCESS_DENIED;
+                pocket->error_code = ERR_ACCESS_DENIED;
                 return -5;
             }
 
@@ -402,7 +402,7 @@ int hardware_deck_handler(Pocket* pocket) {
                 if (!process_has_tag(proc, "system")) {
                     if (!hw_port_is_safe_write(port)) {
                         debug_printf("[HW_DECK] Port 0x%04x requires system tag (OUTW)\n", port);
-                        pocket->error_code = HW_ERR_ACCESS_DENIED;
+                        pocket->error_code = ERR_ACCESS_DENIED;
                         process_ref_dec(proc);
                         return -5;
                     }
@@ -425,7 +425,7 @@ int hardware_deck_handler(Pocket* pocket) {
 
             if (hw_port_is_forbidden(port)) {
                 debug_printf("[HW_DECK] FORBIDDEN port 0x%04x blocked (INL)\n", port);
-                pocket->error_code = HW_ERR_ACCESS_DENIED;
+                pocket->error_code = ERR_ACCESS_DENIED;
                 return -5;
             }
 
@@ -435,7 +435,7 @@ int hardware_deck_handler(Pocket* pocket) {
                 if (!process_has_tag(proc, "system")) {
                     if (!hw_port_is_safe_read(port)) {
                         debug_printf("[HW_DECK] Port 0x%04x requires system tag (INL)\n", port);
-                        pocket->error_code = HW_ERR_ACCESS_DENIED;
+                        pocket->error_code = ERR_ACCESS_DENIED;
                         process_ref_dec(proc);
                         return -5;
                     }
@@ -459,7 +459,7 @@ int hardware_deck_handler(Pocket* pocket) {
 
             if (hw_port_is_forbidden(port)) {
                 debug_printf("[HW_DECK] FORBIDDEN port 0x%04x blocked (OUTL)\n", port);
-                pocket->error_code = HW_ERR_ACCESS_DENIED;
+                pocket->error_code = ERR_ACCESS_DENIED;
                 return -5;
             }
 
@@ -469,7 +469,7 @@ int hardware_deck_handler(Pocket* pocket) {
                 if (!process_has_tag(proc, "system")) {
                     if (!hw_port_is_safe_write(port)) {
                         debug_printf("[HW_DECK] Port 0x%04x requires system tag (OUTL)\n", port);
-                        pocket->error_code = HW_ERR_ACCESS_DENIED;
+                        pocket->error_code = ERR_ACCESS_DENIED;
                         process_ref_dec(proc);
                         return -5;
                     }
@@ -490,7 +490,7 @@ int hardware_deck_handler(Pocket* pocket) {
 
             uint8_t irq = data[0];
             if (!hw_irq_is_valid(irq)) {
-                pocket->error_code = HW_ERR_ACCESS_DENIED;
+                pocket->error_code = ERR_ACCESS_DENIED;
                 return -5;
             }
             irqchip_enable_irq(irq);
@@ -505,7 +505,7 @@ int hardware_deck_handler(Pocket* pocket) {
 
             uint8_t irq = data[0];
             if (!hw_irq_is_valid(irq)) {
-                pocket->error_code = HW_ERR_ACCESS_DENIED;
+                pocket->error_code = ERR_ACCESS_DENIED;
                 return -5;
             }
             irqchip_disable_irq(irq);
@@ -550,7 +550,7 @@ int hardware_deck_handler(Pocket* pocket) {
 
             uint8_t irq = data[0];
             if (!hw_irq_is_valid(irq)) {
-                pocket->error_code = HW_ERR_ACCESS_DENIED;
+                pocket->error_code = ERR_ACCESS_DENIED;
                 return -5;
             }
             irqchip_send_eoi(irq);

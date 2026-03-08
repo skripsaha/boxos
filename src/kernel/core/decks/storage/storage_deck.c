@@ -66,7 +66,7 @@ static int handle_tag_query(Pocket *pocket)
     TagFSState *state = tagfs_get_state();
     if (!state->initialized)
     {
-        return STORAGE_ERR_INVALID;
+        return ERR_INVALID_ARGUMENT;
     }
 
     spin_lock(&state->lock);
@@ -75,7 +75,7 @@ static int handle_tag_query(Pocket *pocket)
     if (!data)
     {
         spin_unlock(&state->lock);
-        return STORAGE_ERR_INVALID;
+        return ERR_INVALID_ARGUMENT;
     }
 
     const char *tag_string = (const char *)data;
@@ -90,7 +90,7 @@ static int handle_tag_query(Pocket *pocket)
     {
         write_u32(data, 0, 0);
         spin_unlock(&state->lock);
-        return STORAGE_OK;
+        return OK;
     }
 
     int count = 0;
@@ -137,7 +137,7 @@ static int handle_tag_query(Pocket *pocket)
     kfree(file_ids);
 
     spin_unlock(&state->lock);
-    return STORAGE_OK;
+    return OK;
 }
 
 static int handle_tag_set(Pocket *pocket)
@@ -145,7 +145,7 @@ static int handle_tag_set(Pocket *pocket)
     TagFSState *state = tagfs_get_state();
     if (!state->initialized)
     {
-        return STORAGE_ERR_INVALID;
+        return ERR_INVALID_ARGUMENT;
     }
 
     spin_lock(&state->lock);
@@ -154,7 +154,7 @@ static int handle_tag_set(Pocket *pocket)
     if (!data)
     {
         spin_unlock(&state->lock);
-        return STORAGE_ERR_INVALID;
+        return ERR_INVALID_ARGUMENT;
     }
 
     uint32_t file_id = read_u32(data, 0);
@@ -167,17 +167,17 @@ static int handle_tag_set(Pocket *pocket)
     if (tagfs_parse_tag(tag_string, key, value, &tag_type) != 0)
     {
         spin_unlock(&state->lock);
-        return STORAGE_ERR_INVALID;
+        return ERR_INVALID_ARGUMENT;
     }
 
     if (tagfs_add_tag(file_id, key, value, tag_type) != 0)
     {
         spin_unlock(&state->lock);
-        return STORAGE_ERR_INVALID;
+        return ERR_INVALID_ARGUMENT;
     }
 
     spin_unlock(&state->lock);
-    return STORAGE_OK;
+    return OK;
 }
 
 static int handle_tag_unset(Pocket *pocket)
@@ -185,7 +185,7 @@ static int handle_tag_unset(Pocket *pocket)
     TagFSState *state = tagfs_get_state();
     if (!state->initialized)
     {
-        return STORAGE_ERR_INVALID;
+        return ERR_INVALID_ARGUMENT;
     }
 
     spin_lock(&state->lock);
@@ -194,7 +194,7 @@ static int handle_tag_unset(Pocket *pocket)
     if (!data)
     {
         spin_unlock(&state->lock);
-        return STORAGE_ERR_INVALID;
+        return ERR_INVALID_ARGUMENT;
     }
 
     uint32_t file_id = read_u32(data, 0);
@@ -203,11 +203,11 @@ static int handle_tag_unset(Pocket *pocket)
     if (tagfs_remove_tag(file_id, key) != 0)
     {
         spin_unlock(&state->lock);
-        return STORAGE_ERR_INVALID;
+        return ERR_INVALID_ARGUMENT;
     }
 
     spin_unlock(&state->lock);
-    return STORAGE_OK;
+    return OK;
 }
 
 static int parse_tag_list(const char *tag_string, const char *tags[], uint32_t max_tags, char buffer[16][32])
@@ -255,7 +255,7 @@ static int handle_obj_read_async(Pocket *pocket)
     uint8_t *data = pocket_data_ptr(pocket);
     if (!data)
     {
-        pocket->error_code = STORAGE_ERR_INVALID;
+        pocket->error_code = ERR_INVALID_ARGUMENT;
         return -1;
     }
 
@@ -264,8 +264,8 @@ static int handle_obj_read_async(Pocket *pocket)
 
     if (req->length > 176)
     {
-        resp->error_code = STORAGE_ERR_INVALID;
-        pocket->error_code = STORAGE_ERR_INVALID;
+        resp->error_code = ERR_INVALID_ARGUMENT;
+        pocket->error_code = ERR_INVALID_ARGUMENT;
         return -1;
     }
 
@@ -276,8 +276,8 @@ static int handle_obj_read_async(Pocket *pocket)
     TagFSFileHandle *handle = tagfs_open(file_id, TAGFS_HANDLE_READ);
     if (!handle)
     {
-        resp->error_code = STORAGE_ERR_NOT_FOUND;
-        pocket->error_code = STORAGE_ERR_NOT_FOUND;
+        resp->error_code = ERR_FILE_NOT_FOUND;
+        pocket->error_code = ERR_FILE_NOT_FOUND;
         return -1;
     }
 
@@ -311,7 +311,7 @@ static int handle_obj_read_async(Pocket *pocket)
     }
     else
     {
-        resp->error_code = STORAGE_ERR_IO;
+        resp->error_code = ERR_IO;
         pocket->error_code = rc;
         return -1;
     }
@@ -322,7 +322,7 @@ static int handle_obj_write_async(Pocket *pocket)
     uint8_t *data = pocket_data_ptr(pocket);
     if (!data)
     {
-        pocket->error_code = STORAGE_ERR_INVALID;
+        pocket->error_code = ERR_INVALID_ARGUMENT;
         return -1;
     }
 
@@ -331,8 +331,8 @@ static int handle_obj_write_async(Pocket *pocket)
 
     if (req->length > 168)
     {
-        resp->error_code = STORAGE_ERR_INVALID;
-        pocket->error_code = STORAGE_ERR_INVALID;
+        resp->error_code = ERR_INVALID_ARGUMENT;
+        pocket->error_code = ERR_INVALID_ARGUMENT;
         return -1;
     }
 
@@ -344,8 +344,8 @@ static int handle_obj_write_async(Pocket *pocket)
     TagFSFileHandle *handle = tagfs_open(file_id, TAGFS_HANDLE_WRITE);
     if (!handle)
     {
-        resp->error_code = STORAGE_ERR_NOT_FOUND;
-        pocket->error_code = STORAGE_ERR_NOT_FOUND;
+        resp->error_code = ERR_FILE_NOT_FOUND;
+        pocket->error_code = ERR_FILE_NOT_FOUND;
         return -1;
     }
 
@@ -396,7 +396,7 @@ static int handle_obj_write_async(Pocket *pocket)
     }
     else
     {
-        resp->error_code = STORAGE_ERR_IO;
+        resp->error_code = ERR_IO;
         pocket->error_code = rc;
         return -1;
     }
@@ -408,7 +408,7 @@ int handle_obj_read(Pocket *pocket)
     uint8_t *data = pocket_data_ptr(pocket);
     if (!data)
     {
-        pocket->error_code = STORAGE_ERR_INVALID;
+        pocket->error_code = ERR_INVALID_ARGUMENT;
         return -1;
     }
 
@@ -417,8 +417,8 @@ int handle_obj_read(Pocket *pocket)
 
     if (req->length > 176)
     {
-        resp->error_code = STORAGE_ERR_INVALID;
-        pocket->error_code = STORAGE_ERR_INVALID;
+        resp->error_code = ERR_INVALID_ARGUMENT;
+        pocket->error_code = ERR_INVALID_ARGUMENT;
         return -1;
     }
 
@@ -429,8 +429,8 @@ int handle_obj_read(Pocket *pocket)
     TagFSFileHandle *handle = tagfs_open(file_id, TAGFS_HANDLE_READ);
     if (!handle)
     {
-        resp->error_code = STORAGE_ERR_NOT_FOUND;
-        pocket->error_code = STORAGE_ERR_NOT_FOUND;
+        resp->error_code = ERR_FILE_NOT_FOUND;
+        pocket->error_code = ERR_FILE_NOT_FOUND;
         return -1;
     }
 
@@ -445,15 +445,15 @@ int handle_obj_read(Pocket *pocket)
     if (bytes_read >= 0)
     {
         resp->bytes_read = bytes_read;
-        resp->error_code = STORAGE_OK;
+        resp->error_code = OK;
         memcpy(resp->data, read_buffer, bytes_read);
         return 0;
     }
     else
     {
         resp->bytes_read = 0;
-        resp->error_code = STORAGE_ERR_IO;
-        pocket->error_code = STORAGE_ERR_IO;
+        resp->error_code = ERR_IO;
+        pocket->error_code = ERR_IO;
         return -1;
     }
 }
@@ -463,7 +463,7 @@ int handle_obj_write(Pocket *pocket)
     uint8_t *data = pocket_data_ptr(pocket);
     if (!data)
     {
-        pocket->error_code = STORAGE_ERR_INVALID;
+        pocket->error_code = ERR_INVALID_ARGUMENT;
         return -1;
     }
 
@@ -472,8 +472,8 @@ int handle_obj_write(Pocket *pocket)
 
     if (req->length > 168)
     {
-        resp->error_code = STORAGE_ERR_INVALID;
-        pocket->error_code = STORAGE_ERR_INVALID;
+        resp->error_code = ERR_INVALID_ARGUMENT;
+        pocket->error_code = ERR_INVALID_ARGUMENT;
         return -1;
     }
 
@@ -487,8 +487,8 @@ int handle_obj_write(Pocket *pocket)
     {
         debug_printf("[StorageDeck] ERROR: Write length %u exceeds max data size %zu\n",
                      length, max_data_size);
-        resp->error_code = STORAGE_ERR_INVALID;
-        pocket->error_code = STORAGE_ERR_INVALID;
+        resp->error_code = ERR_INVALID_ARGUMENT;
+        pocket->error_code = ERR_INVALID_ARGUMENT;
         return -1;
     }
 
@@ -498,8 +498,8 @@ int handle_obj_write(Pocket *pocket)
     TagFSFileHandle *handle = tagfs_open(file_id, TAGFS_HANDLE_WRITE);
     if (!handle)
     {
-        resp->error_code = STORAGE_ERR_NOT_FOUND;
-        pocket->error_code = STORAGE_ERR_NOT_FOUND;
+        resp->error_code = ERR_FILE_NOT_FOUND;
+        pocket->error_code = ERR_FILE_NOT_FOUND;
         return -1;
     }
 
@@ -523,15 +523,15 @@ int handle_obj_write(Pocket *pocket)
     {
         resp->bytes_written = written;
         resp->new_file_size = final_size;
-        resp->error_code = STORAGE_OK;
+        resp->error_code = OK;
         return 0;
     }
     else
     {
         resp->bytes_written = 0;
         resp->new_file_size = final_size;
-        resp->error_code = STORAGE_ERR_IO;
-        pocket->error_code = STORAGE_ERR_IO;
+        resp->error_code = ERR_IO;
+        pocket->error_code = ERR_IO;
         return -1;
     }
 }
@@ -560,7 +560,7 @@ static int handle_obj_create(Pocket *pocket)
     uint8_t *data = pocket_data_ptr(pocket);
     if (!data)
     {
-        pocket->error_code = STORAGE_ERR_INVALID;
+        pocket->error_code = ERR_INVALID_ARGUMENT;
         return -1;
     }
 
@@ -570,8 +570,8 @@ static int handle_obj_create(Pocket *pocket)
     {
         obj_create_response_t *resp = (obj_create_response_t *)data;
         resp->file_id = 0;
-        resp->error_code = STORAGE_ERR_INVALID;
-        pocket->error_code = STORAGE_ERR_INVALID;
+        resp->error_code = ERR_INVALID_ARGUMENT;
+        pocket->error_code = ERR_INVALID_ARGUMENT;
         return -1;
     }
 
@@ -622,14 +622,14 @@ static int handle_obj_create(Pocket *pocket)
     if (result == 0)
     {
         resp->file_id = file_id;
-        resp->error_code = STORAGE_OK;
+        resp->error_code = OK;
         return 0;
     }
     else
     {
         resp->file_id = 0;
-        resp->error_code = STORAGE_ERR_NO_SPACE;
-        pocket->error_code = STORAGE_ERR_NO_SPACE;
+        resp->error_code = ERR_DISK_FULL;
+        pocket->error_code = ERR_DISK_FULL;
         return -1;
     }
 }
@@ -639,7 +639,7 @@ static int handle_obj_delete(Pocket *pocket)
     uint8_t *data = pocket_data_ptr(pocket);
     if (!data)
     {
-        pocket->error_code = STORAGE_ERR_INVALID;
+        pocket->error_code = ERR_INVALID_ARGUMENT;
         return -1;
     }
 
@@ -659,9 +659,9 @@ static int handle_obj_delete(Pocket *pocket)
                     debug_printf("[Storage] ERROR: Cannot delete system file\n");
                     obj_delete_response_t *resp = (obj_delete_response_t *)data;
                     memset(resp, 0, sizeof(obj_delete_response_t));
-                    resp->error_code = STORAGE_ERR_PERMISSION;
-                    pocket->error_code = STORAGE_ERR_PERMISSION;
-                    return STORAGE_ERR_PERMISSION;
+                    resp->error_code = ERR_PERMISSION_DENIED;
+                    pocket->error_code = ERR_PERMISSION_DENIED;
+                    return ERR_PERMISSION_DENIED;
                 }
             }
             if (meta->tags[i].type == TAGFS_TAG_USER &&
@@ -671,9 +671,9 @@ static int handle_obj_delete(Pocket *pocket)
                 debug_printf("[Storage] ERROR: Cannot delete boot file\n");
                 obj_delete_response_t *resp = (obj_delete_response_t *)data;
                 memset(resp, 0, sizeof(obj_delete_response_t));
-                resp->error_code = STORAGE_ERR_PERMISSION;
-                pocket->error_code = STORAGE_ERR_PERMISSION;
-                return STORAGE_ERR_PERMISSION;
+                resp->error_code = ERR_PERMISSION_DENIED;
+                pocket->error_code = ERR_PERMISSION_DENIED;
+                return ERR_PERMISSION_DENIED;
             }
         }
     }
@@ -685,16 +685,16 @@ static int handle_obj_delete(Pocket *pocket)
 
     if (result == 0)
     {
-        resp->error_code = STORAGE_OK;
+        resp->error_code = OK;
         debug_printf("[Storage] OBJ_DELETE: Success (file_id=%u)\n", file_id);
-        return STORAGE_OK;
+        return OK;
     }
     else
     {
-        resp->error_code = STORAGE_ERR_NOT_FOUND;
-        pocket->error_code = STORAGE_ERR_NOT_FOUND;
+        resp->error_code = ERR_FILE_NOT_FOUND;
+        pocket->error_code = ERR_FILE_NOT_FOUND;
         debug_printf("[Storage] OBJ_DELETE: Failed (file_id=%u)\n", file_id);
-        return STORAGE_ERR_NOT_FOUND;
+        return ERR_FILE_NOT_FOUND;
     }
 }
 
@@ -703,7 +703,7 @@ static int handle_obj_rename(Pocket *pocket)
     uint8_t *data = pocket_data_ptr(pocket);
     if (!data)
     {
-        pocket->error_code = STORAGE_ERR_INVALID;
+        pocket->error_code = ERR_INVALID_ARGUMENT;
         return -1;
     }
 
@@ -716,8 +716,8 @@ static int handle_obj_rename(Pocket *pocket)
     {
         debug_printf("[Storage] ERROR: Empty filename\n");
         obj_rename_response_t *resp = (obj_rename_response_t *)data;
-        resp->error_code = STORAGE_ERR_INVALID;
-        pocket->error_code = STORAGE_ERR_INVALID;
+        resp->error_code = ERR_INVALID_ARGUMENT;
+        pocket->error_code = ERR_INVALID_ARGUMENT;
         return -1;
     }
 
@@ -731,8 +731,8 @@ static int handle_obj_rename(Pocket *pocket)
     }
     else
     {
-        resp->error_code = STORAGE_ERR_INVALID;
-        pocket->error_code = STORAGE_ERR_INVALID;
+        resp->error_code = ERR_INVALID_ARGUMENT;
+        pocket->error_code = ERR_INVALID_ARGUMENT;
         debug_printf("[Storage] OBJ_RENAME: Failed\n");
     }
 
@@ -744,7 +744,7 @@ static int handle_obj_get_info(Pocket *pocket)
     uint8_t *data = pocket_data_ptr(pocket);
     if (!data)
     {
-        pocket->error_code = STORAGE_ERR_INVALID;
+        pocket->error_code = ERR_INVALID_ARGUMENT;
         return -1;
     }
 
@@ -757,8 +757,8 @@ static int handle_obj_get_info(Pocket *pocket)
     {
         debug_printf("[Storage] ERROR: File %u not found\n", req->file_id);
         obj_get_info_response_t *resp = (obj_get_info_response_t *)data;
-        resp->error_code = STORAGE_ERR_NOT_FOUND;
-        pocket->error_code = STORAGE_ERR_NOT_FOUND;
+        resp->error_code = ERR_FILE_NOT_FOUND;
+        pocket->error_code = ERR_FILE_NOT_FOUND;
         return -1;
     }
 
@@ -794,29 +794,29 @@ static int handle_context_set(Pocket *pocket)
 {
     uint8_t *data = pocket_data_ptr(pocket);
     if (!data)
-        return STORAGE_ERR_INVALID;
+        return ERR_INVALID_ARGUMENT;
 
     const char *tag_string = (const char *)data;
 
     if (tagfs_context_add_tag(pocket->pid, tag_string) != 0)
     {
-        return STORAGE_ERR_INVALID;
+        return ERR_INVALID_ARGUMENT;
     }
 
-    return STORAGE_OK;
+    return OK;
 }
 
 static int handle_context_clear(Pocket *pocket)
 {
     tagfs_context_clear(pocket->pid);
-    return STORAGE_OK;
+    return OK;
 }
 
 int storage_deck_handler(Pocket *pocket)
 {
     if (!pocket_validate(pocket))
     {
-        return STORAGE_ERR_INVALID;
+        return ERR_INVALID_ARGUMENT;
     }
 
     uint16_t prefix = pocket_current_prefix(pocket);
@@ -826,10 +826,10 @@ int storage_deck_handler(Pocket *pocket)
     if (deck_id != 0x02)
     {
         debug_printf("[Storage Deck] ERROR: Invalid deck_id: 0x%02x\n", deck_id);
-        return STORAGE_ERR_INVALID;
+        return ERR_INVALID_ARGUMENT;
     }
 
-    int result = STORAGE_ERR_INVALID;
+    int result = ERR_INVALID_ARGUMENT;
 
     switch (opcode)
     {
@@ -876,11 +876,11 @@ int storage_deck_handler(Pocket *pocket)
         break;
     default:
         debug_printf("[Storage Deck] ERROR: Unknown opcode: 0x%02x\n", opcode);
-        pocket->error_code = STORAGE_ERR_INVALID;
-        return STORAGE_ERR_INVALID;
+        pocket->error_code = ERR_INVALID_ARGUMENT;
+        return ERR_INVALID_ARGUMENT;
     }
 
-    if (result != STORAGE_OK)
+    if (result != OK)
     {
         pocket->error_code = (uint32_t)result;
     }

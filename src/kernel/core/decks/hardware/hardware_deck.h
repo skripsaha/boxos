@@ -86,9 +86,6 @@
 #define HW_USB_ENUM_DEVICE       0x96
 #define HW_USB_GET_INFO          0x97
 
-// Hardware Error Codes
-#define HW_ERR_ACCESS_DENIED     0x10
-
 // USB Error Codes
 #define USB_ERR_NOT_INITIALIZED  0x10
 #define USB_ERR_NO_CONTROLLER    0x11

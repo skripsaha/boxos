@@ -86,7 +86,7 @@ static void guide_process_pocket(process_t *proc)
     {
         if (pocket->current_prefix_idx >= POCKET_MAX_PREFIXES)
         {
-            pocket->error_code = ERR_INVALID_EVENT;
+            pocket->error_code = ERR_INVALID_POCKET;
             debug_printf("[GUIDE] ERROR: Invalid prefix index %u (count=%u)\n",
                          pocket->current_prefix_idx, pocket->prefix_count);
             execution_deck_handler(pocket);
@@ -135,7 +135,7 @@ static void guide_process_pocket(process_t *proc)
         {
             if (pocket->error_code == OK)
             {
-                pocket->error_code = error_from_legacy_int(deck_ret);
+                pocket->error_code = ERR_INTERNAL;
             }
             debug_printf("[GUIDE] Deck 0x%02x failed: %s\n",
                          deck_id, error_string(pocket->error_code));

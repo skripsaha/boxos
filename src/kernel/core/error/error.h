@@ -93,14 +93,14 @@ typedef enum {
     ERR_ACPI_CHECKSUM_FAILED = 802,
     ERR_ACPI_PARSE_ERROR = 803,
 
-    // Event System Errors (900-999)
-    ERR_EVENT_RING_FULL = 900,
+    // Pocket System Errors (900-999)
+    ERR_POCKET_RING_FULL = 900,
     ERR_RESULT_RING_FULL = 901,
-    ERR_INVALID_EVENT = 902,
+    ERR_INVALID_POCKET = 902,
     ERR_INVALID_DECK_ID = 903,
     ERR_INVALID_OPCODE = 904,
     ERR_PREFIX_CHAIN_TOO_LONG = 905,
-    ERR_EVENT_PROCESSING_FAILED = 906,
+    ERR_POCKET_PROCESSING_FAILED = 906,
     ERR_PENDING_QUEUE_FULL = 907,
 
     // Routing/IPC Errors (940-949)
@@ -109,6 +109,8 @@ typedef enum {
     ERR_ROUTE_SELF           = 942,
     ERR_LISTEN_TABLE_FULL    = 943,
     ERR_LISTEN_ALREADY       = 944,
+
+    ERR_POCKET_FAILED        = 950,
 
     ERR_MAX = 999
 } error_t;
@@ -122,49 +124,6 @@ typedef enum {
         return _err; \
     } \
 } while (0)
-
-static inline error_t error_from_legacy_int(int legacy_code) {
-    if (legacy_code == 0) return OK;
-    if (legacy_code == -1) return ERR_INTERNAL;
-    if (legacy_code == -2) return ERR_INVALID_ARGUMENT;
-    if (legacy_code == -3) return ERR_NO_MEMORY;
-    if (legacy_code == -4) return ERR_FILE_NOT_FOUND;
-    if (legacy_code == -5) return ERR_ACCESS_DENIED;
-    if (legacy_code < 0) return ERR_UNKNOWN;
-    return (error_t)legacy_code;
-}
-
-static inline int error_to_legacy_int(error_t err) {
-    if (err == OK) return 0;
-    if (err > 0) return -1;
-    return (int)err;
-}
-
-#define STORAGE_OK               OK
-#define STORAGE_ERR_INVALID      ERR_INVALID_ARGUMENT
-#define STORAGE_ERR_NOT_FOUND    ERR_FILE_NOT_FOUND
-#define STORAGE_ERR_NO_SPACE     ERR_DISK_FULL
-#define STORAGE_ERR_IO           ERR_IO
-#define STORAGE_ERR_EXISTS       ERR_ALREADY_EXISTS
-#define STORAGE_ERR_PERMISSION   ERR_ACCESS_DENIED
-#define STORAGE_ERR_FILE_LIMIT   ERR_BUFFER_LIMIT_EXCEEDED
-#define STORAGE_ERR_TAG_INVALID  ERR_INVALID_TAG
-#define STORAGE_ERR_TAG_LIMIT    ERR_TAG_LIMIT_EXCEEDED
-
-#define HW_OK                    OK
-#define HW_ERR_NOT_FOUND         ERR_INVALID_DEVICE
-#define HW_ERR_TIMEOUT           ERR_TIMEOUT
-#define HW_ERR_IO                ERR_IO
-#define HW_ERR_BUSY              ERR_DEVICE_BUSY
-
-#define OPS_OK                   OK
-#define OPS_ERR_INVALID          ERR_INVALID_ARGUMENT
-#define OPS_ERR_NOT_FOUND        ERR_OBJECT_NOT_FOUND
-
-#define SYS_OK                   OK
-#define SYS_ERR_INVALID          ERR_INVALID_ARGUMENT
-#define SYS_ERR_NO_MEMORY        ERR_NO_MEMORY
-#define SYS_ERR_NOT_FOUND        ERR_PROCESS_NOT_FOUND
 
 const char* error_string(error_t err);
 

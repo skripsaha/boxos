@@ -352,8 +352,20 @@ void syscall_handler(interrupt_frame_t* frame) {
 
     frame->rax = 0;
 
-    // Architecture flow: push -> set WAITING -> guide() -> schedule()
-    // guide() wakes process back to WORKING, schedule() does the single context save.
+    // Check if this is a yield (sleep request).
+    // Yield pockets skip guide() entirely — the process sleeps in PROC_WAITING
+    // until execution_deck delivers a Result and wakes it via process_set_state.
+    PocketRing* pring = (PocketRing*)vmm_phys_to_virt(proc->pocket_ring_phys);
+    Pocket* peek = pocket_ring_peek(pring);
+
+    if (peek && (peek->flags & POCKET_FLAG_YIELD)) {
+        pocket_ring_pop(pring);
+        process_set_state(proc, PROC_WAITING);
+        schedule(frame);
+        return;
+    }
+
+    // Normal syscall: push to ReadyQueue, process through guide, then reschedule.
     ready_queue_push(&g_ready_queue, proc);
     process_set_state(proc, PROC_WAITING);
     guide();
