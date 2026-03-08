@@ -33,11 +33,12 @@ TAGFS_TOOL = tools/create_tagfs
 #   Sector 0        : Stage1 (512 bytes, MBR)
 #   Sectors 1-16    : Stage2 (16 sectors = 8192 bytes)
 #   Sectors 17+     : Kernel (dynamic size, loaded via TagFS + Unreal Mode)
-#   Sector 1034     : TagFS Superblock
-#   Sectors 1035-2058 : TagFS Metadata (1024 entries)
-#   Sectors 2059-2060 : Journal Superblock (primary + backup)
-#   Sectors 2061-3085 : Journal Entries (512 entries * 2 sectors)
-#   Sector 3086+    : TagFS Data
+#   Sector 1034     : TagFS Superblock (primary)
+#   Sector 1035     : TagFS Superblock (backup)
+#   Sector 1036-1037: Journal Superblock (primary + backup)
+#   Sectors 1038-2061: Journal Entries (512 entries * 2 sectors)
+#   Sector 2062+    : Block Bitmap (dynamic size)
+#   After bitmap    : Data Blocks (block 0=registry, 1=ftable, 2=mpool, 3+=files)
 STAGE2_SECTORS      = 16
 KERNEL_MAX_BYTES    = 33554432  # 32MB (sanity check; bootloader places page tables dynamically after kernel)
 KERNEL_START_SECTOR = 17
@@ -259,9 +260,9 @@ $(IMAGE): $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(SHELL_BIN) $(PROCA_BIN) $(
 	@dd if=$(STAGE2_BIN) of=$@ bs=512 seek=1 conv=notrunc status=none
 	@echo "  Writing Kernel (sector $(KERNEL_START_SECTOR)+, dynamic size via TagFS)..."
 	@dd if=$(KERNEL_BIN) of=$@ bs=512 seek=$(KERNEL_START_SECTOR) conv=notrunc status=none
-	@echo "  Creating TagFS (superblock=1034, metadata=1035, data=3086)..."
-	@$(TAGFS_TOOL) $@ 1034 1035 3086 \
-		$(KERNEL_BIN)   "system" \
+	@echo "  Creating TagFS v1..."
+	@$(TAGFS_TOOL) $@ \
+		$(KERNEL_BIN)   "system,kernel" \
 		$(SHELL_BIN)    "utility,system,app,hw_vga,hw_kb,storage,autostart" \
 		$(PROCA_BIN)    "app" \
 		$(PROCB_BIN)    "app" \
