@@ -209,7 +209,7 @@ void scheduler_set_use_context(const char* tags[], uint32_t count) {
         char key[256], value[256];
         tagfs_parse_tag(tags[i], key, sizeof(key), value, sizeof(value));
 
-        uint16_t tid = tag_registry_intern(fs->registry, key, value);
+        uint16_t tid = tag_registry_intern(fs->registry, key, value[0] ? value : NULL);
         if (tid == TAGFS_INVALID_TAG_ID) continue;
 
         if (tid < 64) {

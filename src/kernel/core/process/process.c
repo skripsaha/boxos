@@ -202,7 +202,8 @@ process_t *process_create(const char *tags)
                     char key[256], value[256];
                     tagfs_parse_tag(tag_buf, key, sizeof(key), value, sizeof(value));
 
-                    uint16_t tid = tag_registry_intern(fs->registry, key, value);
+                    uint16_t tid = tag_registry_intern(fs->registry, key,
+                                                        value[0] ? value : NULL);
                     if (tid != TAGFS_INVALID_TAG_ID) {
                         process_set_tag_bit(proc, tid);
                     }
@@ -879,7 +880,7 @@ bool process_has_tag(process_t *proc, const char *tag)
     if (!tag_is_wildcard(tag)) {
         char key[256], value[256];
         tagfs_parse_tag(tag, key, sizeof(key), value, sizeof(value));
-        uint16_t tid = tag_registry_lookup(reg, key, value);
+        uint16_t tid = tag_registry_lookup(reg, key, value[0] ? value : NULL);
         if (tid == TAGFS_INVALID_TAG_ID) return false;
         return process_has_tag_id(proc, tid);
     }
@@ -922,7 +923,7 @@ int process_add_tag(process_t *proc, const char *tag)
 
     spin_lock(&process_lock);
 
-    uint16_t tid = tag_registry_intern(fs->registry, key, value);
+    uint16_t tid = tag_registry_intern(fs->registry, key, value[0] ? value : NULL);
     if (tid == TAGFS_INVALID_TAG_ID) {
         spin_unlock(&process_lock);
         return -1;
@@ -945,7 +946,7 @@ int process_remove_tag(process_t *proc, const char *tag)
     char key[256], value[256];
     tagfs_parse_tag(tag, key, sizeof(key), value, sizeof(value));
 
-    uint16_t tid = tag_registry_lookup(fs->registry, key, value);
+    uint16_t tid = tag_registry_lookup(fs->registry, key, value[0] ? value : NULL);
     if (tid == TAGFS_INVALID_TAG_ID)
         return 0;
 
