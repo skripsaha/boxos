@@ -10,6 +10,7 @@
 // ----------------------------------------------------------------------------
 
 #define TAGFS_VERSION               1
+#define TAGFS_SB_CRC_OFFSET        400   /* CRC32 stored at reserved[400..403] */
 #define TAGFS_BLOCK_SIZE            4096
 
 #define TAGFS_SUPERBLOCK_SECTOR     1034

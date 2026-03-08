@@ -55,6 +55,8 @@
 #define BOOT_HINT_KERNEL_SIZE     8   /* reserved[8..11] */
 #define BOOT_HINT_DATA_START     12   /* reserved[12..15] */
 
+#define TAGFS_SB_CRC_OFFSET     400   /* CRC32 stored at reserved[400..403] */
+
 /* ====================================================================
  * On-disk structures — must match kernel's tagfs.h exactly
  * ==================================================================== */
@@ -422,6 +424,27 @@ static void generate_uuid(uint8_t uuid[16]) {
 }
 
 /* ====================================================================
+ * CRC32 (ISO 3309 — must match kernel's tagfs_crc32 exactly)
+ * ==================================================================== */
+
+static uint32_t tagfs_crc32(const uint8_t* data, uint32_t len) {
+    uint32_t crc = 0xFFFFFFFF;
+    for (uint32_t i = 0; i < len; i++) {
+        crc ^= data[i];
+        for (int j = 0; j < 8; j++) {
+            crc = (crc >> 1) ^ (0xEDB88320 & (-(crc & 1)));
+        }
+    }
+    return ~crc;
+}
+
+static void superblock_stamp_crc(TagFSSuperblock* sb) {
+    memset(sb->reserved + TAGFS_SB_CRC_OFFSET, 0, 4);
+    uint32_t crc = tagfs_crc32((const uint8_t*)sb, sizeof(TagFSSuperblock));
+    memcpy(sb->reserved + TAGFS_SB_CRC_OFFSET, &crc, 4);
+}
+
+/* ====================================================================
  * Main
  * ==================================================================== */
 
@@ -513,7 +536,7 @@ int main(int argc, char* argv[]) {
 
         next_block += files[i].block_count;
 
-        printf("  File %2d: %-30s  id=%u  size=%-8lu  blocks=%u-%u  tags=%s\n",
+        printf("  File %2d: %-30s  id=%u  size=%-8llu  blocks=%u-%u  tags=%s\n",
                i + 1, files[i].filename, files[i].file_id, files[i].file_size,
                files[i].start_block, files[i].start_block + files[i].block_count - 1,
                tags_str);
@@ -550,11 +573,14 @@ int main(int argc, char* argv[]) {
         fclose(f);
     }
 
-    /* ---- Write metadata pool (block 2) ---- */
+    /* ---- Write metadata pool (block 2, chains if needed) ---- */
     printf("[create_tagfs] Writing metadata pool...\n");
     MetaPoolBlock mpool;
     memset(&mpool, 0, sizeof(MetaPoolBlock));
     mpool.magic = TAGFS_MPOOL_MAGIC;
+
+    uint32_t current_mpool_block = 2;  /* first mpool block */
+    uint32_t mpool_block_count   = 1;  /* how many mpool blocks total */
 
     /* Also build file table entries as we go */
     FileTableBlock ftable;
@@ -571,9 +597,28 @@ int main(int argc, char* argv[]) {
             fclose(disk); return 1;
         }
 
+        /* If current block is full, chain to a new block */
         if (mpool.used_bytes + record_size > TAGFS_MPOOL_DATA_SIZE) {
-            fprintf(stderr, "Metadata pool block full (TODO: multi-block support)\n");
-            fclose(disk); return 1;
+            uint32_t new_mpool_block = next_block++;
+            if (new_mpool_block >= total_blocks) {
+                fprintf(stderr, "Not enough blocks for metadata pool chain\n");
+                fclose(disk); return 1;
+            }
+
+            /* Link old block → new block, write old block to disk */
+            mpool.next_block = new_mpool_block;
+            if (write_block(disk, data_start_sector, current_mpool_block, &mpool) != 0) {
+                fprintf(stderr, "Failed to write metadata pool block %u\n", current_mpool_block);
+                fclose(disk); return 1;
+            }
+            printf("  Metadata pool: block %u full (%u records, %u bytes), chaining to block %u\n",
+                   current_mpool_block, mpool.record_count, mpool.used_bytes, new_mpool_block);
+
+            /* Start fresh block */
+            current_mpool_block = new_mpool_block;
+            memset(&mpool, 0, sizeof(MetaPoolBlock));
+            mpool.magic = TAGFS_MPOOL_MAGIC;
+            mpool_block_count++;
         }
 
         /* meta_offset = MPOOL_BLOCK_HEADER + current used_bytes */
@@ -585,7 +630,7 @@ int main(int argc, char* argv[]) {
         /* File table: entry at index file_id */
         uint32_t fid = files[i].file_id;
         if (fid < TAGFS_FTABLE_PER_BLOCK) {
-            ftable.entries[fid].meta_block  = 2;  /* metadata pool is at block 2 */
+            ftable.entries[fid].meta_block  = current_mpool_block;
             ftable.entries[fid].meta_offset = meta_offset;
         }
     }
@@ -595,9 +640,13 @@ int main(int argc, char* argv[]) {
         ftable.entry_count = TAGFS_FTABLE_PER_BLOCK;
     }
 
-    if (write_block(disk, data_start_sector, 2, &mpool) != 0) {
-        fprintf(stderr, "Failed to write metadata pool block\n");
+    /* Write final (or only) mpool block */
+    if (write_block(disk, data_start_sector, current_mpool_block, &mpool) != 0) {
+        fprintf(stderr, "Failed to write metadata pool block %u\n", current_mpool_block);
         fclose(disk); return 1;
+    }
+    if (mpool_block_count > 1) {
+        printf("  Metadata pool: %u blocks total\n", mpool_block_count);
     }
 
     /* ---- Write file table (block 1) ---- */
@@ -609,24 +658,14 @@ int main(int argc, char* argv[]) {
 
     /* ---- Write block bitmap ---- */
     printf("[create_tagfs] Writing block bitmap...\n");
-    uint32_t bitmap_bytes = (total_blocks + 7) / 8;
     uint32_t bitmap_buf_size = bitmap_sectors * 512;
     uint8_t* bitmap = calloc(1, bitmap_buf_size);
     if (!bitmap) { fprintf(stderr, "calloc failed for bitmap\n"); fclose(disk); return 1; }
 
-    /* Mark reserved blocks (0=registry, 1=ftable, 2=mpool) as used */
-    for (uint32_t b = 0; b < 3; b++) {
+    /* Mark all used blocks: 0=registry, 1=ftable, 2=mpool, plus any chained mpool blocks
+       and all file data blocks. next_block tracks the high-water mark. */
+    for (uint32_t b = 0; b < next_block && b < total_blocks; b++) {
         bitmap[b / 8] |= (uint8_t)(1u << (b % 8));
-    }
-
-    /* Mark file data blocks as used */
-    for (int i = 0; i < file_count; i++) {
-        for (uint32_t b = files[i].start_block;
-             b < files[i].start_block + files[i].block_count; b++) {
-            if (b < total_blocks) {
-                bitmap[b / 8] |= (uint8_t)(1u << (b % 8));
-            }
-        }
     }
 
     if (write_at_sector(disk, TAGFS_BITMAP_SECTOR_START, bitmap, bitmap_buf_size) != 0) {
@@ -681,7 +720,7 @@ int main(int argc, char* argv[]) {
     sb.file_table_block         = 1;
     sb.file_table_block_count   = 1;
     sb.metadata_pool_block      = 2;
-    sb.metadata_pool_block_count = 1;
+    sb.metadata_pool_block_count = mpool_block_count;
     sb.block_bitmap_sector       = TAGFS_BITMAP_SECTOR_START;
     sb.block_bitmap_sector_count = bitmap_sectors;
     sb.journal_superblock_sector = TAGFS_JOURNAL_SB_SECTOR;
@@ -714,7 +753,9 @@ int main(int argc, char* argv[]) {
         memcpy(sb.reserved + BOOT_HINT_DATA_START, &data_start_sector, 4);
     }
 
-    /* Write primary and backup */
+    /* Stamp CRC32 and write primary + backup */
+    superblock_stamp_crc(&sb);
+
     if (write_at_sector(disk, TAGFS_SUPERBLOCK_SECTOR, &sb, sizeof(sb)) != 0) {
         fprintf(stderr, "Failed to write primary superblock\n");
         fclose(disk); return 1;
