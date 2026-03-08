@@ -627,140 +627,55 @@ tagfs_read_superblock:
     pop ax
     ret
 
-; Returns: CF=0 on success (kernel_file_id, start_block, block_count set), CF=1 on error
+; Returns: CF=0 on success (kernel_start_block, block_count, tagfs_data_start set), CF=1 on error
+; Reads boot hints from superblock reserved[] area (offsets 108-123).
+; New TagFS v1 format stores boot hints directly in the superblock so the
+; bootloader does not need to understand the metadata pool format.
 tagfs_find_kernel:
     push ax
     push bx
-    push cx
-    push dx
-    push si
-    push di
     push es
 
-    mov cx, 64
-
-.scan_loop:
-    push cx
-
-    mov ax, 64
-    sub ax, cx
-    add ax, TAGFS_METADATA_START
-    mov [dap_tagfs_metadata + 8], ax
-
-    mov si, dap_tagfs_metadata
-    mov ah, 0x42
-    mov dl, [boot_drive_saved]
-    int 0x13
-    jc .scan_next
-
-    mov ax, 0x930
+    ; Superblock already loaded at 0x9100 by tagfs_read_superblock
+    mov ax, 0x910
     mov es, ax
     xor bx, bx
-    mov eax, [es:bx]
-    cmp eax, TAGFS_METADATA_MAGIC
-    jne .scan_next
 
-    mov al, [es:bx + 8]
-    test al, TAGFS_FILE_ACTIVE
-    jz .scan_next
-
-    mov di, 80              ; Tags array offset
-
-    mov bx, 16
-
-.tag_loop:
-    ; Bounds check: entire tag (24 bytes) must fit in 512-byte sector
-    mov ax, di
-    add ax, 24
-    cmp ax, 512
-    jae .next_tag
-
-    ; tag.key starts at offset di+1
-    lea si, [di + 1]
-
-    mov ax, es
-    push ds
-    mov ds, ax
-
-    ; Match key = "kernel" (system tag, no value check needed)
-    mov al, [si]
-    cmp al, 'k'
-    jne .next_tag_pop
-    mov al, [si+1]
-    cmp al, 'e'
-    jne .next_tag_pop
-    mov al, [si+2]
-    cmp al, 'r'
-    jne .next_tag_pop
-    mov al, [si+3]
-    cmp al, 'n'
-    jne .next_tag_pop
-    mov al, [si+4]
-    cmp al, 'e'
-    jne .next_tag_pop
-    mov al, [si+5]
-    cmp al, 'l'
-    jne .next_tag_pop
-    mov al, [si+6]
-    test al, al
-    jnz .next_tag_pop
-
-    pop ds
-    xor bx, bx
-    mov eax, [es:bx + 4]
-    mov [kernel_file_id], ax
-
-    mov eax, [es:bx + 12]           ; file size (low 32 bits, offset 12)
-    mov [kernel_size_bytes], eax
-
-    mov eax, [es:bx + 20]
+    ; Boot hints in reserved[]:
+    ;   offset 108: boot_kernel_block  (uint32_t)
+    ;   offset 112: boot_kernel_blocks (uint32_t)
+    ;   offset 116: boot_kernel_size   (uint32_t)
+    ;   offset 120: boot_data_start    (uint32_t)
+    mov eax, [es:bx + 108]
     mov [kernel_start_block], eax
 
-    mov eax, [es:bx + 24]
+    mov eax, [es:bx + 112]
     mov [kernel_block_count], eax
 
-    mov ax, 0x910
-    push es
-    mov es, ax
-    xor bx, bx
-    mov eax, [es:bx + 32]
+    mov eax, [es:bx + 116]
+    mov [kernel_size_bytes], eax
+
+    mov eax, [es:bx + 120]
     mov [tagfs_data_start], eax
-    pop es
 
     xor ax, ax
     mov es, ax
 
-    pop cx
+    ; Validate: kernel_start_block must be nonzero
+    cmp dword [kernel_start_block], 0
+    je .no_boot_hints
+
+    cmp dword [kernel_block_count], 0
+    je .no_boot_hints
+
     pop es
-    pop di
-    pop si
-    pop dx
-    pop cx
     pop bx
     pop ax
     clc
     ret
 
-.next_tag_pop:
-    pop ds
-
-.next_tag:
-    add di, 24
-    dec bx
-    jnz .tag_loop
-
-.scan_next:
-    pop cx
-    dec cx
-    jnz .scan_loop
-
-    xor ax, ax
-    mov es, ax
+.no_boot_hints:
     pop es
-    pop di
-    pop si
-    pop dx
-    pop cx
     pop bx
     pop ax
     stc
@@ -872,9 +787,8 @@ tagfs_load_kernel_file:
     stc
     ret
 
-; Fallback: find kernel by scanning file data for KERNEL header magic
-; Iterates metadata entries, reads first data sector of each active file,
-; checks for "KERNEL" magic at offset 2.
+; Fallback: find kernel by reading each data block and checking for
+; a KERNEL header magic. Uses data_start from superblock offsets 60+64.
 ; Returns: CF=0 on success (kernel_start_block, kernel_block_count, tagfs_data_start set), CF=1 on error
 tagfs_find_kernel_by_header:
     push ax
@@ -882,68 +796,32 @@ tagfs_find_kernel_by_header:
     push cx
     push dx
     push si
-    push di
     push es
 
-    ; Get data_start_sector from superblock (already at 0x9100)
+    ; Compute data_start_sector from superblock (already at 0x9100):
+    ;   data_start = block_bitmap_sector (offset 60) + block_bitmap_sector_count (offset 64)
     mov ax, 0x910
     mov es, ax
     xor bx, bx
-    mov eax, [es:bx + 32]          ; data_start_sector
+    mov eax, [es:bx + 60]          ; block_bitmap_sector
+    add eax, [es:bx + 64]          ; + block_bitmap_sector_count
     mov [tagfs_data_start], eax
     xor ax, ax
     mov es, ax
 
-    mov cx, 64                      ; scan up to 64 metadata entries
+    ; Scan data blocks 3..66 (first 64 file blocks after reserved blocks)
+    mov cx, 64
+    mov edx, 3                      ; start at block 3
 
 .hdr_scan_loop:
     push cx
 
-    ; Calculate metadata sector number
-    mov ax, 64
-    sub ax, cx
-    add ax, TAGFS_METADATA_START
-    mov [dap_tagfs_metadata + 8], ax
-    mov dword [dap_tagfs_metadata + 10], 0
-
-    ; Read metadata sector
-    mov si, dap_tagfs_metadata
-    mov ah, 0x42
-    mov dl, [boot_drive_saved]
-    int 0x13
-    jc .hdr_scan_next
-
-    ; Check metadata magic
-    mov ax, 0x930
-    mov es, ax
-    xor bx, bx
-    mov eax, [es:bx]
-    cmp eax, TAGFS_METADATA_MAGIC
-    jne .hdr_scan_next_clean
-
-    ; Check file is active
-    mov al, [es:bx + 8]
-    test al, TAGFS_FILE_ACTIVE
-    jz .hdr_scan_next_clean
-
-    ; Save size, start_block and block_count from metadata
-    mov eax, [es:bx + 12]           ; file size (low 32 bits)
-    mov [kernel_size_bytes], eax
-    mov eax, [es:bx + 20]
-    mov [kernel_start_block], eax
-    mov eax, [es:bx + 24]
-    mov [kernel_block_count], eax
-
-    ; Calculate data sector: data_start + start_block * 8
-    mov eax, [kernel_start_block]
+    ; Calculate data sector: data_start + block * 8
+    mov eax, edx
     shl eax, 3
     add eax, [tagfs_data_start]
 
-    ; Restore ES before disk read
-    xor bx, bx
-    mov es, bx
-
-    ; Read first sector of this file's data into 0x9300 buffer
+    ; Read first sector of this block into 0x9300 buffer
     mov [dap_tagfs_metadata + 8], eax
     mov dword [dap_tagfs_metadata + 10], 0
     mov si, dap_tagfs_metadata
@@ -962,12 +840,21 @@ tagfs_find_kernel_by_header:
     jne .hdr_scan_next_clean
 
     ; Found kernel by header!
+    mov [kernel_start_block], edx
+
+    ; Estimate block count from total blocks (overestimate is safe)
+    mov ax, 0x910
+    mov es, ax
+    xor bx, bx
+    mov eax, [es:bx + 12]          ; total_blocks
+    sub eax, edx                    ; remaining blocks from this point
+    mov [kernel_block_count], eax
+
     xor ax, ax
     mov es, ax
 
     pop cx
     pop es
-    pop di
     pop si
     pop dx
     pop cx
@@ -981,6 +868,7 @@ tagfs_find_kernel_by_header:
     mov es, ax
 
 .hdr_scan_next:
+    inc edx
     pop cx
     dec cx
     jnz .hdr_scan_loop
@@ -988,7 +876,6 @@ tagfs_find_kernel_by_header:
     xor ax, ax
     mov es, ax
     pop es
-    pop di
     pop si
     pop dx
     pop cx

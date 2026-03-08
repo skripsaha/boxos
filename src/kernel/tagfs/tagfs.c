@@ -5,6 +5,8 @@
 #include "metadata_pool/meta_pool.h"
 #include "error.h"
 #include "ahci_sync.h"
+#include "ahci.h"
+#include "ata.h"
 
 static TagFSState g_state;
 
@@ -28,6 +30,18 @@ static inline bool bitmap_test_bit(const uint8_t* bitmap, uint32_t bit) {
 // Disk I/O helpers
 // ----------------------------------------------------------------------------
 
+static int disk_read_sectors(uint64_t lba, uint16_t count, void* buffer) {
+    if (ahci_is_initialized())
+        return ahci_read_sectors_sync(0, lba, count, buffer);
+    return ata_read_sectors_retry(1, lba, count, (uint8_t*)buffer);
+}
+
+static int disk_write_sectors(uint64_t lba, uint16_t count, const void* buffer) {
+    if (ahci_is_initialized())
+        return ahci_write_sectors_sync(0, lba, count, buffer);
+    return ata_write_sectors_retry(1, lba, count, (const uint8_t*)buffer);
+}
+
 static uint64_t block_to_sector(uint32_t block) {
     uint32_t data_start = g_state.superblock.block_bitmap_sector +
                           g_state.superblock.block_bitmap_sector_count;
@@ -35,11 +49,11 @@ static uint64_t block_to_sector(uint32_t block) {
 }
 
 static int read_block(uint32_t block, void* buffer) {
-    return ahci_read_sectors_sync(0, block_to_sector(block), 8, buffer);
+    return disk_read_sectors(block_to_sector(block), 8, buffer);
 }
 
 static int write_block(uint32_t block, const void* buffer) {
-    return ahci_write_sectors_sync(0, block_to_sector(block), 8, (const void*)buffer);
+    return disk_write_sectors(block_to_sector(block), 8, (void*)buffer);
 }
 
 int tagfs_read_block(uint32_t block, void* buffer) {
@@ -56,7 +70,7 @@ int tagfs_write_block(uint32_t block, const void* buffer) {
 
 static int read_superblock(uint32_t sector, TagFSSuperblock* out) {
     uint8_t buf[512];
-    if (ahci_read_sectors_sync(0, (uint64_t)sector, 1, buf) != 0) {
+    if (disk_read_sectors((uint64_t)sector, 1, buf) != 0) {
         return -1;
     }
     memcpy(out, buf, sizeof(TagFSSuperblock));
@@ -67,7 +81,7 @@ static int write_superblock_to_sector(uint32_t sector, const TagFSSuperblock* sb
     uint8_t buf[512];
     memset(buf, 0, 512);
     memcpy(buf, sb, sizeof(TagFSSuperblock));
-    return ahci_write_sectors_sync(0, (uint64_t)sector, 1, buf);
+    return disk_write_sectors((uint64_t)sector, 1, buf);
 }
 
 int tagfs_write_superblock(const TagFSSuperblock* sb) {
@@ -260,7 +274,7 @@ int tagfs_format(uint32_t total_blocks) {
     memset(bitmap_buf, 0, bitmap_buf_size);
     memcpy(bitmap_buf, bitmap, bitmap_bytes);
 
-    if (ahci_write_sectors_sync(0, (uint64_t)bitmap_sector_start, (uint16_t)bitmap_sectors, bitmap_buf) != 0) {
+    if (disk_write_sectors((uint64_t)bitmap_sector_start, (uint16_t)bitmap_sectors, bitmap_buf) != 0) {
         debug_printf("[TagFS] format: failed to write block bitmap\n");
         kfree(bitmap_buf);
         kfree(bitmap);
@@ -308,7 +322,7 @@ int tagfs_format(uint32_t total_blocks) {
     // Write magic "JOUR" at offset 0 so it's identifiable
     uint32_t journal_magic = JOURNAL_MAGIC;
     memcpy(journal_sb_buf, &journal_magic, 4);
-    if (ahci_write_sectors_sync(0, TAGFS_JOURNAL_SB_SECTOR, 1, journal_sb_buf) != 0) {
+    if (disk_write_sectors(TAGFS_JOURNAL_SB_SECTOR, 1, journal_sb_buf) != 0) {
         debug_printf("[TagFS] format: warning — failed to write journal superblock\n");
     }
 
@@ -425,7 +439,7 @@ int tagfs_init(void) {
     uint32_t bm_buf_size     = bm_sector_count * 512;
     uint8_t* bm_buf = kmalloc(bm_buf_size);
     if (bm_buf) {
-        if (ahci_read_sectors_sync(0, (uint64_t)sb.block_bitmap_sector, (uint16_t)bm_sector_count, bm_buf) == 0) {
+        if (disk_read_sectors((uint64_t)sb.block_bitmap_sector, (uint16_t)bm_sector_count, bm_buf) == 0) {
             uint32_t copy_bytes = bitmap_bytes < bm_buf_size ? bitmap_bytes : bm_buf_size;
             memcpy(g_state.block_bitmap.bitmap, bm_buf, copy_bytes);
             debug_printf("[TagFS] Block bitmap loaded from disk\n");
@@ -462,8 +476,8 @@ void tagfs_sync(void) {
         memset(bm_buf, 0, bm_buf_size);
         uint32_t copy_bytes = bitmap_bytes < bm_buf_size ? bitmap_bytes : bm_buf_size;
         memcpy(bm_buf, g_state.block_bitmap.bitmap, copy_bytes);
-        if (ahci_write_sectors_sync(0, (uint64_t)g_state.superblock.block_bitmap_sector,
-                                   (uint16_t)sector_count, bm_buf) != 0) {
+        if (disk_write_sectors((uint64_t)g_state.superblock.block_bitmap_sector,
+                              (uint16_t)sector_count, bm_buf) != 0) {
             debug_printf("[TagFS] sync: failed to write block bitmap\n");
         }
         kfree(bm_buf);
