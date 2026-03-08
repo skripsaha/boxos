@@ -65,6 +65,40 @@ int tagfs_write_block(uint32_t block, const void* buffer) {
 }
 
 // ----------------------------------------------------------------------------
+// CRC32 (ISO 3309 polynomial, used for superblock integrity)
+// ----------------------------------------------------------------------------
+
+static uint32_t tagfs_crc32(const uint8_t* data, uint32_t len) {
+    uint32_t crc = 0xFFFFFFFF;
+    for (uint32_t i = 0; i < len; i++) {
+        crc ^= data[i];
+        for (int j = 0; j < 8; j++) {
+            crc = (crc >> 1) ^ (0xEDB88320 & (-(crc & 1)));
+        }
+    }
+    return ~crc;
+}
+
+static void superblock_stamp_crc(TagFSSuperblock* sb) {
+    // Zero the CRC field before computing
+    memset(sb->reserved + TAGFS_SB_CRC_OFFSET, 0, 4);
+    uint32_t crc = tagfs_crc32((const uint8_t*)sb, sizeof(TagFSSuperblock));
+    memcpy(sb->reserved + TAGFS_SB_CRC_OFFSET, &crc, 4);
+}
+
+static bool superblock_verify_crc(const TagFSSuperblock* sb) {
+    uint32_t stored_crc;
+    memcpy(&stored_crc, sb->reserved + TAGFS_SB_CRC_OFFSET, 4);
+    if (stored_crc == 0) return true;  // No CRC stored (legacy format) — accept
+
+    TagFSSuperblock copy;
+    memcpy(&copy, sb, sizeof(TagFSSuperblock));
+    memset(copy.reserved + TAGFS_SB_CRC_OFFSET, 0, 4);
+    uint32_t computed = tagfs_crc32((const uint8_t*)&copy, sizeof(TagFSSuperblock));
+    return computed == stored_crc;
+}
+
+// ----------------------------------------------------------------------------
 // Superblock I/O
 // ----------------------------------------------------------------------------
 
@@ -86,12 +120,17 @@ static int write_superblock_to_sector(uint32_t sector, const TagFSSuperblock* sb
 
 int tagfs_write_superblock(const TagFSSuperblock* sb) {
     if (!sb) return -1;
-    int r = write_superblock_to_sector(TAGFS_SUPERBLOCK_SECTOR, sb);
+    // Stamp CRC before writing
+    TagFSSuperblock stamped;
+    memcpy(&stamped, sb, sizeof(TagFSSuperblock));
+    superblock_stamp_crc(&stamped);
+
+    int r = write_superblock_to_sector(TAGFS_SUPERBLOCK_SECTOR, &stamped);
     if (r != 0) {
         debug_printf("[TagFS] Failed to write primary superblock\n");
         return r;
     }
-    if (write_superblock_to_sector(TAGFS_BACKUP_SB_SECTOR, sb) != 0) {
+    if (write_superblock_to_sector(TAGFS_BACKUP_SB_SECTOR, &stamped) != 0) {
         debug_printf("[TagFS] Warning: failed to write backup superblock\n");
     }
     return 0;
@@ -347,6 +386,7 @@ int tagfs_init(void) {
 
     // --- Read superblock ---
     TagFSSuperblock sb;
+    bool used_backup = false;
     if (read_superblock(TAGFS_SUPERBLOCK_SECTOR, &sb) != 0 || sb.magic != TAGFS_MAGIC) {
         debug_printf("[TagFS] Primary superblock invalid, trying backup at sector %u\n",
                      TAGFS_BACKUP_SB_SECTOR);
@@ -354,8 +394,32 @@ int tagfs_init(void) {
             debug_printf("[TagFS] CRITICAL: Both superblocks invalid — not formatted?\n");
             return -1;
         }
+        used_backup = true;
         debug_printf("[TagFS] Using backup superblock\n");
-        // Restore primary
+    }
+
+    // Verify CRC32 integrity
+    if (!superblock_verify_crc(&sb)) {
+        debug_printf("[TagFS] CRC32 mismatch on %s superblock\n",
+                     used_backup ? "backup" : "primary");
+        if (!used_backup) {
+            // Primary corrupted — try backup
+            if (read_superblock(TAGFS_BACKUP_SB_SECTOR, &sb) == 0 &&
+                sb.magic == TAGFS_MAGIC && superblock_verify_crc(&sb)) {
+                debug_printf("[TagFS] Backup superblock CRC OK, recovering\n");
+                used_backup = true;
+            } else {
+                debug_printf("[TagFS] CRITICAL: Both superblocks corrupted\n");
+                return -1;
+            }
+        } else {
+            debug_printf("[TagFS] CRITICAL: Backup superblock CRC also bad\n");
+            return -1;
+        }
+    }
+
+    // Restore primary from backup if needed
+    if (used_backup) {
         write_superblock_to_sector(TAGFS_SUPERBLOCK_SECTOR, &sb);
     }
 
@@ -916,8 +980,8 @@ int tagfs_query_files(const char* query_strings[], uint32_t count,
         const char* qs = query_strings[i];
         if (!qs) continue;
 
-        char key[128];
-        char value[128];
+        char key[256];
+        char value[256];
         tagfs_parse_tag(qs, key, sizeof(key), value, sizeof(value));
 
         // Check for wildcard (value == "...")

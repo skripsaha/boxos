@@ -477,10 +477,13 @@ int journal_log_metadata(JournalTxn* txn, uint32_t file_id, uint32_t target_sect
                          const TagFSMetadata* meta) {
     if (!g_journal_initialized || !txn || !txn->active || !meta) return -1;
 
-    // Need space for this entry + the commit record
+    // Need space for this entry — try compaction if full
     if (!ring_has_space(1)) {
-        debug_printf("[Journal] ERROR: Journal full during log_metadata\n");
-        return -1;
+        journal_compact();
+        if (!ring_has_space(1)) {
+            debug_printf("[Journal] ERROR: Journal full during log_metadata (even after compact)\n");
+            return -1;
+        }
     }
 
     uint32_t idx = ring_alloc();
@@ -510,8 +513,11 @@ int journal_log_superblock(JournalTxn* txn, uint32_t target_sector, const TagFSS
     if (!g_journal_initialized || !txn || !txn->active || !sb) return -1;
 
     if (!ring_has_space(1)) {
-        debug_printf("[Journal] ERROR: Journal full during log_superblock\n");
-        return -1;
+        journal_compact();
+        if (!ring_has_space(1)) {
+            debug_printf("[Journal] ERROR: Journal full during log_superblock (even after compact)\n");
+            return -1;
+        }
     }
 
     uint32_t idx = ring_alloc();

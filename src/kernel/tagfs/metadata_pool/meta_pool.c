@@ -241,17 +241,37 @@ int meta_pool_write(const TagFSMetadata* meta, uint32_t* out_block, uint32_t* ou
     }
 
     if (record_size > (uint32_t)(TAGFS_MPOOL_DATA_SIZE - g_current_block.used_bytes)) {
-        debug_printf("[MetaPool] write: block %u full (used=%u need=%u), moving to next\n",
+        debug_printf("[MetaPool] write: block %u full (used=%u need=%u), chaining to new block\n",
                      g_current_block_num, g_current_block.used_bytes, record_size);
 
-        g_current_dirty = true;
-        g_current_block_num++;
+        // Allocate a new block for the chain (release lock to call alloc)
+        uint32_t new_block;
+        spin_unlock(&g_lock);
+        int alloc_ret = tagfs_alloc_blocks(1, &new_block);
+        spin_lock(&g_lock);
+        if (alloc_ret != 0) {
+            debug_printf("[MetaPool] write: failed to allocate new block\n");
+            spin_unlock(&g_lock);
+            return -1;
+        }
 
+        // Link old block → new block, then flush old block to disk
+        g_current_block.next_block = new_block;
+        int flush_ret = tagfs_write_block(g_current_block_num, &g_current_block);
+        if (flush_ret != 0) {
+            debug_printf("[MetaPool] write: failed to flush old block %u\n", g_current_block_num);
+            spin_unlock(&g_lock);
+            return -1;
+        }
+
+        // Move to the new block
+        g_current_block_num = new_block;
         memset(&g_current_block, 0, sizeof(MetaPoolBlock));
         g_current_block.magic        = TAGFS_MPOOL_MAGIC;
         g_current_block.used_bytes   = 0;
         g_current_block.record_count = 0;
         g_current_block.next_block   = 0;
+        g_current_dirty = false;  // fresh block, not yet dirty
     }
 
     uint8_t* dest = g_current_block.payload + g_current_block.used_bytes;
