@@ -8,7 +8,9 @@
 
 // TagFS
 #define TAGFS_MAGIC            0x54414746  // "TAGF"
-#define TAGFS_META_MAGIC       0x544D4554  // "TMET"
+#define TAGFS_REGISTRY_MAGIC   0x54524547  // "TREG"
+#define TAGFS_FILETBL_MAGIC    0x54465442  // "TFTB"
+#define TAGFS_MPOOL_MAGIC      0x544D504C  // "TMPL"
 #define JOURNAL_MAGIC          0x4A4F5552  // "JOUR"
 #define JOURNAL_ENTRY_MAGIC    0x4A454E54  // "JENT"
 
