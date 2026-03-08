@@ -109,9 +109,12 @@ void clear(void) {
 
 void color(uint8_t c) {
     if (io_get_mode() == IO_MODE_IPC) {
-        io_flush();
-        uint8_t cmd[2] = {0x02, c};
-        broadcast("display", cmd, 2);
+        // Embed color command inline in IO buffer (0x02 = DISPLAY_CMD_COLOR).
+        // This avoids a separate flush + broadcast per color change, which
+        // previously caused the display's IPC stash to overflow and silently
+        // drop queued messages.
+        char cmd[2] = {0x02, (char)c};
+        io_buf_append(cmd, 2);
         return;
     }
     vga_setcolor(c);

@@ -127,7 +127,9 @@ static void guide_process_pocket(process_t *proc)
             break;
         }
 
+        uint64_t deck_start = rdtsc();
         int deck_ret = handler(pocket);
+        uint64_t deck_elapsed_us = cpu_tsc_to_us(rdtsc() - deck_start);
 
         if (deck_ret < 0)
         {
@@ -141,6 +143,14 @@ static void guide_process_pocket(process_t *proc)
             need_execution_deck = false;
             break;
         }
+
+#if CONFIG_DEBUG_ENABLED
+        if (deck_elapsed_us > 50)
+        {
+            debug_printf("[GUIDE] PID %u deck=0x%02x op=0x%02x: %llu us\n",
+                         pocket->pid, deck_id, opcode, deck_elapsed_us);
+        }
+#endif
 
         pocket_advance(pocket);
     }
@@ -156,6 +166,9 @@ static void guide_process_pocket(process_t *proc)
 
 void guide(void)
 {
+    uint64_t guide_start = rdtsc();
+    uint32_t pockets_processed = 0;
+
     // Process all ready processes from the ReadyQueue
     while (!ready_queue_is_empty(&g_ready_queue))
     {
@@ -170,6 +183,7 @@ void guide(void)
             while (!pocket_ring_is_empty(pring))
             {
                 guide_process_pocket(proc);
+                pockets_processed++;
             }
         }
 
@@ -260,6 +274,17 @@ void guide(void)
         async_io_expire_stale(cpu_ms_to_tsc(CONFIG_ASYNC_IO_QUEUE_TIMEOUT_MS));
         last_timeout_check = now;
     }
+
+#if CONFIG_DEBUG_ENABLED
+    {
+        uint64_t guide_us = cpu_tsc_to_us(rdtsc() - guide_start);
+        if (guide_us > 200 && pockets_processed > 0)
+        {
+            debug_printf("[GUIDE] Processed %u pockets in %llu us\n",
+                         pockets_processed, guide_us);
+        }
+    }
+#endif
 }
 
 static void guide_process_ahci_completions(void)

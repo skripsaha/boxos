@@ -174,6 +174,13 @@ uint64_t cpu_tsc_to_ms(uint64_t cycles) {
     return cycles / tsc_freq_khz;
 }
 
+uint64_t cpu_tsc_to_us(uint64_t cycles) {
+    if (tsc_freq_khz == 0) return 0;
+    // tsc_freq_khz = cycles per ms, so cycles per us = tsc_freq_khz / 1000
+    // us = cycles / (tsc_freq_khz / 1000) = (cycles * 1000) / tsc_freq_khz
+    return (cycles * 1000) / tsc_freq_khz;
+}
+
 uint64_t cpu_get_tsc_freq_khz(void) {
     return tsc_freq_khz;
 }
