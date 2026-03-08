@@ -539,25 +539,6 @@ int handle_obj_write(Pocket *pocket)
     }
 }
 
-static void extract_filename_stem(const char *filename, char *stem, size_t stem_size)
-{
-    size_t len = strlen(filename);
-    size_t dot_pos = len;
-    for (size_t i = len; i > 0; i--)
-    {
-        if (filename[i - 1] == '.')
-        {
-            dot_pos = i - 1;
-            break;
-        }
-    }
-    if (dot_pos == 0)
-        dot_pos = len;
-    size_t copy_len = dot_pos < stem_size - 1 ? dot_pos : stem_size - 1;
-    memcpy(stem, filename, copy_len);
-    stem[copy_len] = '\0';
-}
-
 static int handle_obj_create(Pocket *pocket)
 {
     uint8_t *data = pocket_data_ptr(pocket, NULL);
@@ -585,19 +566,7 @@ static int handle_obj_create(Pocket *pocket)
     char tag_buffer[16][32];
     uint32_t tag_count = 0;
 
-    char label_stem[32];
-    extract_filename_stem(req->filename, label_stem, sizeof(label_stem));
-
-    if (label_stem[0] != '\0' && tag_count < 15)
-    {
-        size_t slen = strlen(label_stem);
-        if (slen > 31)
-            slen = 31;
-        memcpy(tag_buffer[tag_count], label_stem, slen);
-        tag_buffer[tag_count][slen] = '\0';
-        tag_ptrs[tag_count] = tag_buffer[tag_count];
-        tag_count++;
-    }
+    /* Auto-label tag is now handled by tagfs_create_file() — no manual stem here */
 
     if (req->tags[0] != '\0')
     {

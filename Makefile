@@ -262,7 +262,7 @@ $(IMAGE): $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(SHELL_BIN) $(PROCA_BIN) $(
 	@dd if=$(KERNEL_BIN) of=$@ bs=512 seek=$(KERNEL_START_SECTOR) conv=notrunc status=none
 	@echo "  Creating TagFS v1..."
 	@$(TAGFS_TOOL) $@ \
-		$(KERNEL_BIN)   "system,kernel" \
+		$(KERNEL_BIN)   "system" \
 		$(SHELL_BIN)    "utility,system,app,hw_vga,hw_kb,storage,autostart" \
 		$(PROCA_BIN)    "app" \
 		$(PROCB_BIN)    "app" \
