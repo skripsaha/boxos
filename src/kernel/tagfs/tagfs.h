@@ -285,6 +285,26 @@ typedef struct {
     spinlock_t       lock;
 } TagFSState;
 
+// Well-known system tag bitmasks (populated by tagfs_init_well_known_tags).
+// Each field stores (1ULL << tag_id) for O(1) process tag_bits checks.
+// Zero means the tag was not found in registry.
+typedef struct {
+    uint64_t system;
+    uint64_t utility;
+    uint64_t app;
+    uint64_t display;
+    uint64_t god;
+    uint64_t stopped;
+    uint64_t storage;
+    uint64_t bypass;
+    uint64_t network;
+    uint64_t net_access;
+    uint64_t proc_spawn;
+} WellKnownTags;
+
+extern WellKnownTags g_well_known;
+void tagfs_init_well_known_tags(void);
+
 // ----------------------------------------------------------------------------
 // Tag Registry API
 // ----------------------------------------------------------------------------
