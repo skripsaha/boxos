@@ -683,14 +683,18 @@ static int handle_obj_delete(Pocket *pocket)
     if (result == 0)
     {
         resp->error_code = OK;
+#if CONFIG_DEBUG_TAGFS
         debug_printf("[Storage] OBJ_DELETE: Success (file_id=%u)\n", file_id);
+#endif
         return OK;
     }
     else
     {
         resp->error_code = ERR_FILE_NOT_FOUND;
         pocket->error_code = ERR_FILE_NOT_FOUND;
+#if CONFIG_DEBUG_TAGFS
         debug_printf("[Storage] OBJ_DELETE: Failed (file_id=%u)\n", file_id);
+#endif
         return ERR_FILE_NOT_FOUND;
     }
 }
@@ -747,7 +751,9 @@ static int handle_obj_get_info(Pocket *pocket)
 
     obj_get_info_request_t *req = (obj_get_info_request_t *)data;
 
+#if CONFIG_DEBUG_TAGFS
     debug_printf("[Storage] OBJ_GET_INFO: file_id=%u\n", req->file_id);
+#endif
 
     TagFSMetadata metadata;
     if (tagfs_get_metadata(req->file_id, &metadata) != 0 ||
@@ -795,8 +801,10 @@ static int handle_obj_get_info(Pocket *pocket)
 
     tagfs_metadata_free(&metadata);
 
+#if CONFIG_DEBUG_TAGFS
     debug_printf("[Storage] OBJ_GET_INFO: Success (file='%s', tags=%u)\n",
                  resp->filename, resp->tag_count);
+#endif
     return 0;
 }
 
