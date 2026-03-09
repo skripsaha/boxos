@@ -64,8 +64,7 @@ static bool system_deck_check_permission(process_t* proc, uint8_t opcode) {
     switch (opcode) {
         case SYSTEM_OP_PROC_SPAWN:
         case SYSTEM_OP_PROC_EXEC:
-            return (t & (g_well_known.utility | g_well_known.system)) ||
-                   (t & g_well_known.proc_spawn);
+            return t & (g_well_known.utility | g_well_known.system);
 
         case SYSTEM_OP_PROC_KILL:
         case SYSTEM_OP_PROC_INFO:
@@ -93,7 +92,7 @@ static bool system_deck_check_permission(process_t* proc, uint8_t opcode) {
             return t & (g_well_known.app | g_well_known.utility | g_well_known.system);
 
         case SYSTEM_OP_LISTEN:
-            return t & (g_well_known.app | g_well_known.utility | g_well_known.display | g_well_known.system);
+            return t & (g_well_known.app | g_well_known.utility | g_well_known.system);
 
         default:
             return false;
@@ -119,9 +118,9 @@ bool system_security_gate(process_t* proc, uint8_t deck_id, uint8_t opcode) {
             bool is_read  = (opcode == 0x01 || opcode == 0x05 || opcode == 0x0A);
 
             if (is_write)
-                return t & (g_well_known.utility | g_well_known.storage | g_well_known.system);
+                return t & (g_well_known.utility | g_well_known.system);
             if (is_read)
-                return t & (g_well_known.app | g_well_known.utility | g_well_known.storage | g_well_known.system);
+                return t & (g_well_known.app | g_well_known.utility | g_well_known.system);
             return t & g_well_known.system;
         }
 
@@ -129,9 +128,7 @@ bool system_security_gate(process_t* proc, uint8_t deck_id, uint8_t opcode) {
             return t & (g_well_known.system | g_well_known.bypass);
 
         case 0x04:  // Network Deck
-            return (t & g_well_known.system) ||
-                   (t & g_well_known.network) ||
-                   (t & g_well_known.net_access);
+            return t & (g_well_known.network | g_well_known.system);
 
         case DECK_SYSTEM:
             return system_deck_check_permission(proc, opcode);

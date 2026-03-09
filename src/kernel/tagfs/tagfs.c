@@ -445,17 +445,13 @@ void tagfs_init_well_known_tags(void)
     if (!fs || !fs->registry) return;
     TagRegistry *reg = fs->registry;
 
-    register_well_known(&g_well_known.system,     reg, "system");
-    register_well_known(&g_well_known.utility,    reg, "utility");
-    register_well_known(&g_well_known.app,        reg, "app");
-    register_well_known(&g_well_known.display,    reg, "display");
-    register_well_known(&g_well_known.god,        reg, "god");
-    register_well_known(&g_well_known.stopped,    reg, "stopped");
-    register_well_known(&g_well_known.storage,    reg, "storage");
-    register_well_known(&g_well_known.bypass,     reg, "bypass");
-    register_well_known(&g_well_known.network,    reg, "network");
-    register_well_known(&g_well_known.net_access, reg, "net_access");
-    register_well_known(&g_well_known.proc_spawn, reg, "proc_spawn");
+    register_well_known(&g_well_known.system,  reg, "system");
+    register_well_known(&g_well_known.utility, reg, "utility");
+    register_well_known(&g_well_known.app,     reg, "app");
+    register_well_known(&g_well_known.god,     reg, "god");
+    register_well_known(&g_well_known.stopped, reg, "stopped");
+    register_well_known(&g_well_known.bypass,  reg, "bypass");
+    register_well_known(&g_well_known.network, reg, "network");
 }
 
 // ----------------------------------------------------------------------------
