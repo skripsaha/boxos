@@ -11,8 +11,8 @@
  */
 
 #define SCHEDULER_MAX_CONSECUTIVE_RUNS 5
+#define SCHEDULER_FAIRNESS_INTERVAL    5
 
-#define SCHEDULER_BOOST_CONTEXT_MATCH        20
 #define SCHEDULER_BOOST_STARVATION           10
 #define SCHEDULER_BOOST_CRITICAL_STARVATION 100
 #define SCHEDULER_BOOST_SEVERE_STARVATION    30
@@ -47,7 +47,7 @@ void scheduler_init(void);
 void schedule(void* frame);
 
 process_t* scheduler_select_next(void);
-int32_t scheduler_calculate_score(process_t* proc);
+int32_t scheduler_calculate_score(process_t* proc, uint64_t ctx_bits, bool fairness_round);
 
 void scheduler_set_use_context(const char* tags[], uint32_t count);
 void scheduler_clear_use_context(void);

@@ -10,6 +10,7 @@
 #include "ata.h"
 
 static TagFSState g_state;
+WellKnownTags g_well_known;
 
 // ----------------------------------------------------------------------------
 // Open File Table — per-file write serialization
@@ -428,6 +429,36 @@ int tagfs_format(uint32_t total_blocks) {
 }
 
 // ----------------------------------------------------------------------------
+// tagfs_init_well_known_tags
+// ----------------------------------------------------------------------------
+
+static void register_well_known(uint64_t *field, TagRegistry *reg, const char *key)
+{
+    uint16_t tid = tag_registry_intern(reg, key, NULL);
+    *field = (tid != TAGFS_INVALID_TAG_ID && tid < 64) ? (1ULL << tid) : 0;
+}
+
+void tagfs_init_well_known_tags(void)
+{
+    memset(&g_well_known, 0, sizeof(g_well_known));
+    TagFSState *fs = tagfs_get_state();
+    if (!fs || !fs->registry) return;
+    TagRegistry *reg = fs->registry;
+
+    register_well_known(&g_well_known.system,     reg, "system");
+    register_well_known(&g_well_known.utility,    reg, "utility");
+    register_well_known(&g_well_known.app,        reg, "app");
+    register_well_known(&g_well_known.display,    reg, "display");
+    register_well_known(&g_well_known.god,        reg, "god");
+    register_well_known(&g_well_known.stopped,    reg, "stopped");
+    register_well_known(&g_well_known.storage,    reg, "storage");
+    register_well_known(&g_well_known.bypass,     reg, "bypass");
+    register_well_known(&g_well_known.network,    reg, "network");
+    register_well_known(&g_well_known.net_access, reg, "net_access");
+    register_well_known(&g_well_known.proc_spawn, reg, "proc_spawn");
+}
+
+// ----------------------------------------------------------------------------
 // tagfs_init
 // ----------------------------------------------------------------------------
 
@@ -659,6 +690,9 @@ int tagfs_init(void) {
             kfree(computed_bm);
         }
     }
+
+    // Populate well-known tag bitmasks for O(1) checks
+    tagfs_init_well_known_tags();
 
     // Load mirror cache so future meta reads skip disk
     meta_pool_mirror_init(g_state.superblock.next_file_id + 64);

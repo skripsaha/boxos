@@ -22,16 +22,7 @@
 #define PROCESS_TAG_SIZE        256
 #define PROCESS_INVALID_PID     0
 
-// Role bits: cached tag roles for O(1) scheduler/security checks.
-// Updated by process_add_tag / process_remove_tag.
-#define ROLE_SYSTEM    (1 << 0)
-#define ROLE_UTILITY   (1 << 1)
-#define ROLE_APP       (1 << 2)
-#define ROLE_DISPLAY   (1 << 3)
-#define ROLE_GOD       (1 << 4)
-#define ROLE_STOPPED   (1 << 5)
-#define ROLE_STORAGE   (1 << 6)
-#define ROLE_BYPASS    (1 << 7)
+// Fast O(1) role checks use proc->tag_bits AND g_well_known bitmasks from tagfs.h.
 
 struct process_t;
 
@@ -105,8 +96,6 @@ typedef struct process_t {
     uint16_t*   tag_overflow_ids;
     uint16_t    tag_overflow_count;
     uint16_t    tag_overflow_capacity;
-
-    uint8_t     role_bits;  // cached roles for fast scheduler/security checks
 
     uintptr_t code_start;
     size_t code_size;

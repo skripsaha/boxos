@@ -20,19 +20,6 @@ static volatile uint32_t process_count = 0;
 static spinlock_t process_lock;
 static process_cleanup_queue_t g_cleanup_queue;
 
-static uint8_t role_bit_for_key(const char *key)
-{
-    if (strcmp(key, "system") == 0)  return ROLE_SYSTEM;
-    if (strcmp(key, "utility") == 0) return ROLE_UTILITY;
-    if (strcmp(key, "app") == 0)     return ROLE_APP;
-    if (strcmp(key, "display") == 0) return ROLE_DISPLAY;
-    if (strcmp(key, "god") == 0)     return ROLE_GOD;
-    if (strcmp(key, "stopped") == 0) return ROLE_STOPPED;
-    if (strcmp(key, "storage") == 0) return ROLE_STORAGE;
-    if (strcmp(key, "bypass") == 0)  return ROLE_BYPASS;
-    return 0;
-}
-
 static int process_set_tag_bit(process_t *proc, uint16_t tag_id)
 {
     if (tag_id < 64) {
@@ -219,7 +206,6 @@ process_t *process_create(const char *tags)
                                                         value[0] ? value : NULL);
                     if (tid != TAGFS_INVALID_TAG_ID) {
                         process_set_tag_bit(proc, tid);
-                        proc->role_bits |= role_bit_for_key(key);
                     }
                 }
                 if (!comma) break;
@@ -944,7 +930,6 @@ int process_add_tag(process_t *proc, const char *tag)
     }
 
     int ret = process_set_tag_bit(proc, tid);
-    proc->role_bits |= role_bit_for_key(key);
     spin_unlock(&process_lock);
     return ret;
 }
@@ -967,7 +952,6 @@ int process_remove_tag(process_t *proc, const char *tag)
 
     spin_lock(&process_lock);
     int ret = process_clear_tag_bit(proc, tid);
-    proc->role_bits &= ~role_bit_for_key(key);
     spin_unlock(&process_lock);
     return ret;
 }

@@ -33,47 +33,31 @@ void scheduler_init(void) {
 
 bool scheduler_matches_use_context(process_t* proc) {
     if (!proc) return false;
-
-    // Fast lockless check — enabled is only set under context_lock,
-    // but reading a bool is atomic on x86-64. Avoids lock on common path.
     if (!sched.use_context.enabled) return false;
 
+    if (proc->tag_bits & sched.use_context.context_bits) return true;
+
     spin_lock(&sched.context_lock);
-
-    // Re-check under lock (could have changed between fast check and lock)
-    if (!sched.use_context.enabled) {
-        spin_unlock(&sched.context_lock);
-        return false;
-    }
-
-    // Fast path: single AND for tag_ids 0-63
-    bool match = (proc->tag_bits & sched.use_context.context_bits) != 0;
-
-    if (!match) {
-        // Slow path: check overflow arrays (tag_ids >= 64)
-        for (uint16_t i = 0; i < proc->tag_overflow_count && !match; i++) {
-            for (uint16_t j = 0; j < sched.use_context.overflow_count; j++) {
-                if (proc->tag_overflow_ids[i] == sched.use_context.overflow_ids[j]) {
-                    match = true;
-                    break;
-                }
+    bool match = false;
+    for (uint16_t i = 0; i < proc->tag_overflow_count && !match; i++) {
+        for (uint16_t j = 0; j < sched.use_context.overflow_count; j++) {
+            if (proc->tag_overflow_ids[i] == sched.use_context.overflow_ids[j]) {
+                match = true;
+                break;
             }
         }
     }
-
     spin_unlock(&sched.context_lock);
     return match;
 }
 
-int32_t scheduler_calculate_score(process_t* proc) {
-    if (!proc) {
-        return INT32_MIN;
-    }
+int32_t scheduler_calculate_score(process_t* proc, uint64_t ctx_bits, bool fairness_round) {
+    if (!proc) return INT32_MIN;
 
     int32_t score = 0;
 
-    if (scheduler_matches_use_context(proc)) {
-        score += SCHEDULER_BOOST_CONTEXT_MATCH;
+    if (!fairness_round && ctx_bits != 0 && (proc->tag_bits & ctx_bits) != 0) {
+        score += 1000;
     }
 
     uint64_t ticks_since_run = 0;
@@ -92,18 +76,15 @@ int32_t scheduler_calculate_score(process_t* proc) {
         score -= SCHEDULER_BOOST_CRITICAL_STARVATION;
     }
 
-    if (proc->role_bits & (ROLE_UTILITY | ROLE_SYSTEM)) {
-        score += 5;
-    }
-
-    if (score > INT32_MAX / 2) {
-        score = INT32_MAX / 2;
-    }
-
     return score;
 }
 
 process_t* scheduler_select_next(void) {
+    bool ctx_enabled = sched.use_context.enabled;
+    uint64_t ctx_bits = ctx_enabled ? sched.use_context.context_bits : 0;
+
+    bool fairness_round = (sched.total_ticks % SCHEDULER_FAIRNESS_INTERVAL == 0);
+
     process_t* best = NULL;
     int32_t best_score = INT32_MIN;
 
@@ -123,7 +104,7 @@ process_t* scheduler_select_next(void) {
         }
 
         if (state == PROC_WORKING || state == PROC_CREATED) {
-            int32_t score = scheduler_calculate_score(proc);
+            int32_t score = scheduler_calculate_score(proc, ctx_bits, fairness_round);
             if (score > best_score) {
                 best_score = score;
                 best = proc;
