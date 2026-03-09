@@ -8,10 +8,12 @@
  *   0x18 DEFRAG_FILE   0x19 FRAG_SCORE
  *   0x20 TAG_ADD       0x21 TAG_REMOVE     0x22 TAG_CHECK
  *   0x40 ROUTE         0x41 ROUTE_TAG      0x42 LISTEN
+ *   0x50 PERF_DUMP
  * ============================================================ */
 
 // --- Includes ---
 #include "system_deck.h"
+#include "perf_trace.h"
 #include "klib.h"
 #include "process.h"
 #include "scheduler.h"
@@ -93,6 +95,9 @@ static bool system_deck_check_permission(process_t* proc, uint8_t opcode) {
 
         case SYSTEM_OP_LISTEN:
             return t & (g_well_known.app | g_well_known.utility | g_well_known.system);
+
+        case SYSTEM_OP_PERF_DUMP:
+            return t & (g_well_known.utility | g_well_known.system);
 
         default:
             return false;
@@ -1593,6 +1598,7 @@ int system_deck_handler(Pocket* pocket, process_t* proc) {
         case SYSTEM_OP_ROUTE:        return route(pocket, proc);
         case SYSTEM_OP_ROUTE_TAG:    return route_tag(pocket, proc);
         case SYSTEM_OP_LISTEN:       return listen(pocket, proc);
+        case SYSTEM_OP_PERF_DUMP:    perf_dump(); return 0;
 
         default:
             debug_printf("[SYSTEM_DECK] Unknown opcode 0x%02x\n", opcode);

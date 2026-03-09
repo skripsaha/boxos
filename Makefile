@@ -71,8 +71,7 @@ ASM_SRCS    := $(shell find $(SRCDIR) -name '*.asm' ! -name '._*' ! -path '*/use
 
 # ==== EXCLUSIONS ====
 BOOT_ASM_SRCS     := $(STAGE1_SRC) $(STAGE2_SRC)
-# USER_ASM_SRCS     := $(SRCDIR)/userspace/user_test.asm $(SRCDIR)/userspace/user_storage_test.asm $(SRCDIR)/userspace/concurrent_test.asm
-EXCLUDED_ASM_SRCS := $(BOOT_ASM_SRCS) $(KERNEL_ENTRY_SRC) $(USER_ASM_SRCS)
+EXCLUDED_ASM_SRCS := $(BOOT_ASM_SRCS) $(KERNEL_ENTRY_SRC)
 ASM_SRCS          := $(filter-out $(EXCLUDED_ASM_SRCS),$(ASM_SRCS))
 
 # ==== OBJECT FILES ====

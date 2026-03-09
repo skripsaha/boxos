@@ -498,11 +498,7 @@ int tag_registry_load(TagRegistry* reg, uint32_t first_block) {
 
             if (offset + record_size > TAGFS_REGISTRY_DATA_SIZE) break;
 
-            char key[256];
-            if ((uint32_t)key_len >= sizeof(key)) {
-                offset += record_size;
-                continue;
-            }
+            char key[256];  // uint8_t key_len always fits with null terminator
             memcpy(key, p, key_len);
             key[key_len] = '\0';
             p += key_len;

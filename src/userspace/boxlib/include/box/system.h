@@ -16,6 +16,7 @@
 #define SYSTEM_TAG_ADD          0x20
 #define SYSTEM_TAG_REMOVE       0x21
 #define SYSTEM_TAG_CHECK        0x22
+#define SYSTEM_PERF_DUMP        0x50
 
 #define BUFFER_SIZE_256         0
 #define BUFFER_SIZE_512         1
@@ -60,6 +61,7 @@ int sysinfo(system_info_t* info);
 
 int defrag(uint32_t file_id, uint32_t target_block);
 int fragmentation(void);
+int perf_dump(void);
 
 void yield(void);
 

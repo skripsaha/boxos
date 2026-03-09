@@ -23,6 +23,7 @@ typedef struct process_t process_t;
 #define SYSTEM_OP_ROUTE             0x40
 #define SYSTEM_OP_ROUTE_TAG         0x41
 #define SYSTEM_OP_LISTEN            0x42
+#define SYSTEM_OP_PERF_DUMP         0x50
 
 int  system_deck_handler(Pocket* pocket, process_t* proc);
 bool system_security_gate(process_t* proc, uint8_t deck_id, uint8_t opcode);

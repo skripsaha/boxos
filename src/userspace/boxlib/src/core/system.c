@@ -305,3 +305,10 @@ int fragmentation(void) {
     memcpy(&score, (void*)(uintptr_t)result.data_addr, 4);
     return (int)score;
 }
+
+int perf_dump(void) {
+    pocket_send(DECK_SYSTEM, SYSTEM_PERF_DUMP, NULL, 0);
+    Result result;
+    if (!result_wait(&result, 5000)) return -1;
+    return result.error_code;
+}
