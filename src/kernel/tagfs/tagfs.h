@@ -336,6 +336,8 @@ void     meta_pool_shutdown(void);
 int      meta_pool_read(uint32_t block, uint32_t offset, TagFSMetadata* out);
 int      meta_pool_write(const TagFSMetadata* meta, uint32_t* out_block, uint32_t* out_offset);
 int      meta_pool_delete(uint32_t block, uint32_t offset);
+int      meta_pool_mirror_init(uint32_t max_file_id);
+int      meta_pool_read_cached(uint32_t file_id, TagFSMetadata* out);
 void     tagfs_metadata_free(TagFSMetadata* meta);
 uint32_t meta_pool_record_size(const TagFSMetadata* meta);
 int      meta_pool_flush(void);

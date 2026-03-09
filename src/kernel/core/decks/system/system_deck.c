@@ -54,39 +54,19 @@ static void* get_request_data(Pocket* pocket, process_t* proc) {
     return vmm_translate_user_addr(proc->cabin, pocket->data_addr, pocket->data_length);
 }
 
-static bool snapshot_has_tag(const char* snapshot, const char* tag) {
-    if (!snapshot || !tag || tag[0] == '\0') {
-        return false;
-    }
-    size_t tag_len = strlen(tag);
-    const char* pos = snapshot;
-    while (*pos) {
-        const char* comma = strchr(pos, ',');
-        size_t current_len = comma ? (size_t)(comma - pos) : strlen(pos);
-        if (current_len == tag_len && strncmp(pos, tag, tag_len) == 0) {
-            return true;
-        }
-        if (!comma) break;
-        pos = comma + 1;
-    }
-    return false;
-}
 
 // --- Security Gate ---
 
 static bool system_deck_check_permission(process_t* proc, uint8_t opcode) {
-    if (!proc) {
-        return false;
-    }
-    char tags[PROCESS_TAG_SIZE];
-    process_snapshot_tags(proc, tags, sizeof(tags));
+    if (!proc) return false;
+    uint8_t r = proc->role_bits;
 
     switch (opcode) {
         case SYSTEM_OP_PROC_SPAWN:
         case SYSTEM_OP_PROC_EXEC:
-            return snapshot_has_tag(tags, "proc_spawn") ||
-                   snapshot_has_tag(tags, "utility") ||
-                   snapshot_has_tag(tags, "system");
+            // proc_spawn is checked via process_has_tag (rare tag, not cached)
+            return (r & (ROLE_UTILITY | ROLE_SYSTEM)) ||
+                   process_has_tag(proc, "proc_spawn");
 
         case SYSTEM_OP_PROC_KILL:
         case SYSTEM_OP_PROC_INFO:
@@ -95,14 +75,11 @@ static bool system_deck_check_permission(process_t* proc, uint8_t opcode) {
         case SYSTEM_OP_BUF_ALLOC:
         case SYSTEM_OP_BUF_FREE:
         case SYSTEM_OP_BUF_RESIZE:
-            return snapshot_has_tag(tags, "app") ||
-                   snapshot_has_tag(tags, "utility") ||
-                   snapshot_has_tag(tags, "system");
+            return r & (ROLE_APP | ROLE_UTILITY | ROLE_SYSTEM);
 
         case SYSTEM_OP_TAG_ADD:
         case SYSTEM_OP_TAG_REMOVE:
-            return snapshot_has_tag(tags, "utility") ||
-                   snapshot_has_tag(tags, "system");
+            return r & (ROLE_UTILITY | ROLE_SYSTEM);
 
         case SYSTEM_OP_TAG_CHECK:
         case SYSTEM_OP_CTX_USE:
@@ -110,20 +87,14 @@ static bool system_deck_check_permission(process_t* proc, uint8_t opcode) {
 
         case SYSTEM_OP_DEFRAG_FILE:
         case SYSTEM_OP_FRAG_SCORE:
-            return snapshot_has_tag(tags, "utility") ||
-                   snapshot_has_tag(tags, "system");
+            return r & (ROLE_UTILITY | ROLE_SYSTEM);
 
         case SYSTEM_OP_ROUTE:
         case SYSTEM_OP_ROUTE_TAG:
-            return snapshot_has_tag(tags, "app") ||
-                   snapshot_has_tag(tags, "utility") ||
-                   snapshot_has_tag(tags, "system");
+            return r & (ROLE_APP | ROLE_UTILITY | ROLE_SYSTEM);
 
         case SYSTEM_OP_LISTEN:
-            return snapshot_has_tag(tags, "app") ||
-                   snapshot_has_tag(tags, "utility") ||
-                   snapshot_has_tag(tags, "display") ||
-                   snapshot_has_tag(tags, "system");
+            return r & (ROLE_APP | ROLE_UTILITY | ROLE_DISPLAY | ROLE_SYSTEM);
 
         default:
             return false;
@@ -131,56 +102,43 @@ static bool system_deck_check_permission(process_t* proc, uint8_t opcode) {
 }
 
 bool system_security_gate(process_t* proc, uint8_t deck_id, uint8_t opcode) {
-    if (!proc) {
-        debug_printf("[SECURITY] DENY: NULL proc\n");
-        return false;
-    }
+    if (!proc) return false;
 
-    char tags[PROCESS_TAG_SIZE];
-    process_snapshot_tags(proc, tags, sizeof(tags));
+    uint8_t r = proc->role_bits;
 
-    if (snapshot_has_tag(tags, "god"))     return true;
-    if (snapshot_has_tag(tags, "stopped")) return false;
+    // Fast bitmap checks instead of snapshot + string search
+    if (r & ROLE_GOD)     return true;
+    if (r & ROLE_STOPPED) return false;
 
     switch (deck_id) {
-        case 0x01:
+        case 0x01:  // Operations Deck — open to all
             return true;
 
-        case 0x02: {
+        case 0x02: {  // Storage Deck
             bool is_write = (opcode == 0x02 || opcode == 0x03 || opcode == 0x06 ||
                              opcode == 0x07 || opcode == 0x08 || opcode == 0x09 ||
                              opcode == 0x10 || opcode == 0x11);
             bool is_read  = (opcode == 0x01 || opcode == 0x05 || opcode == 0x0A);
 
-            if (is_write) {
-                return snapshot_has_tag(tags, "utility") ||
-                       snapshot_has_tag(tags, "storage") ||
-                       snapshot_has_tag(tags, "system");
-            }
-            if (is_read) {
-                return snapshot_has_tag(tags, "app") ||
-                       snapshot_has_tag(tags, "utility") ||
-                       snapshot_has_tag(tags, "storage") ||
-                       snapshot_has_tag(tags, "system");
-            }
-            return snapshot_has_tag(tags, "system");
+            if (is_write)
+                return r & (ROLE_UTILITY | ROLE_STORAGE | ROLE_SYSTEM);
+            if (is_read)
+                return r & (ROLE_APP | ROLE_UTILITY | ROLE_STORAGE | ROLE_SYSTEM);
+            return r & ROLE_SYSTEM;
         }
 
-        case 0x03:
-            // Hardware Deck: require "system" or "bypass" per spec
-            return snapshot_has_tag(tags, "system") ||
-                   snapshot_has_tag(tags, "bypass");
+        case 0x03:  // Hardware Deck
+            return r & (ROLE_SYSTEM | ROLE_BYPASS);
 
-        case 0x04:
-            return snapshot_has_tag(tags, "network") ||
-                   snapshot_has_tag(tags, "net_access") ||
-                   snapshot_has_tag(tags, "system");
+        case 0x04:  // Network Deck — network/net_access are rare, use string fallback
+            return (r & ROLE_SYSTEM) ||
+                   process_has_tag(proc, "network") ||
+                   process_has_tag(proc, "net_access");
 
         case DECK_SYSTEM:
             return system_deck_check_permission(proc, opcode);
 
         default:
-            debug_printf("[SECURITY] DENY: Unknown deck 0x%02x\n", deck_id);
             return false;
     }
 }
