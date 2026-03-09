@@ -212,7 +212,7 @@ int xhci_init(void) {
         goto cleanup_resources;
     }
 
-    if (xhci_ring_init(&ctrl->command_ring, 256) != 0) {
+    if (xhci_ring_init(&ctrl->command_ring, 256, true) != 0) {
         debug_printf("[xHCI] ERROR: Failed to allocate command ring\n");
         goto cleanup_resources;
     }
@@ -220,7 +220,7 @@ int xhci_init(void) {
     debug_printf("[xHCI] Command ring allocated at phys 0x%llx\n",
                  ctrl->command_ring.trbs_phys);
 
-    if (xhci_ring_init(&ctrl->event_ring, 256) != 0) {
+    if (xhci_ring_init(&ctrl->event_ring, 256, false) != 0) {
         debug_printf("[xHCI] ERROR: Failed to allocate event ring\n");
         goto cleanup_resources;
     }

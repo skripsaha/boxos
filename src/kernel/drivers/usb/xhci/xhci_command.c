@@ -32,8 +32,7 @@ static int find_cmd_by_trb_phys(uint64_t trb_phys) {
     spin_lock(&pending_cmds_lock);
     for (int i = 0; i < XHCI_MAX_PENDING_CMDS; i++) {
         if (pending_cmds[i].state == CMD_STATE_POSTED &&
-            pending_cmds[i].trb_phys == trb_phys &&
-            pending_cmds[i].sequence <= cmd_sequence) {
+            pending_cmds[i].trb_phys == trb_phys) {
             spin_unlock(&pending_cmds_lock);
             return i;
         }
@@ -42,21 +41,31 @@ static int find_cmd_by_trb_phys(uint64_t trb_phys) {
     return -1;
 }
 
-static void ring_command_doorbell(xhci_controller_t* ctrl) {
-    if (!ctrl || !ctrl->doorbells) {
-        return;
+static int post_command(xhci_controller_t* ctrl, xhci_trb_t* trb, uint8_t slot_id) {
+    int cmd_idx = find_free_cmd_slot();
+    if (cmd_idx < 0) {
+        debug_printf("[xHCI CMD] No free command slots\n");
+        return -1;
     }
-    ctrl->doorbells->doorbells[0].doorbell = 0;
-}
 
-static void advance_command_ring(xhci_ring_t* ring) {
-    spin_lock(&ring->ring_lock);
-    ring->enqueue_idx++;
-    if (ring->enqueue_idx >= ring->num_trbs) {
-        ring->enqueue_idx = 0;
-        ring->cycle_state ^= 1;
+    uint64_t trb_phys = xhci_ring_enqueue(&ctrl->command_ring, trb);
+    if (trb_phys == 0) {
+        debug_printf("[xHCI CMD] Command ring full\n");
+        return -1;
     }
-    spin_unlock(&ring->ring_lock);
+
+    pending_cmds[cmd_idx].trb_phys = trb_phys;
+    pending_cmds[cmd_idx].timestamp_posted = rdtsc();
+    pending_cmds[cmd_idx].sequence = ++cmd_sequence;
+    pending_cmds[cmd_idx].slot_id = slot_id;
+    pending_cmds[cmd_idx].state = CMD_STATE_POSTED;
+    pending_cmds[cmd_idx].completion_code = 0;
+    pending_cmds[cmd_idx].completion_param = 0;
+
+    __sync_synchronize();
+    ctrl->doorbells->doorbells[0].doorbell = 0;
+
+    return 0;
 }
 
 int xhci_post_enable_slot_cmd(xhci_controller_t* ctrl) {
@@ -64,36 +73,21 @@ int xhci_post_enable_slot_cmd(xhci_controller_t* ctrl) {
         return -1;
     }
 
-    int cmd_idx = find_free_cmd_slot();
-    if (cmd_idx < 0) {
-        debug_printf("[xHCI CMD] No free command slots\n");
+    xhci_trb_t trb = {0};
+    trb.control = TRB_SET_TYPE(TRB_TYPE_ENABLE_SLOT);
+
+    return post_command(ctrl, &trb, 0);
+}
+
+int xhci_post_disable_slot_cmd(xhci_controller_t* ctrl, uint8_t slot_id) {
+    if (!ctrl || !ctrl->running || slot_id == 0 || slot_id > ctrl->max_slots) {
         return -1;
     }
 
-    xhci_ring_t* cmd_ring = &ctrl->command_ring;
-    xhci_trb_t* trb = &cmd_ring->trbs[cmd_ring->enqueue_idx];
+    xhci_trb_t trb = {0};
+    trb.control = TRB_SET_TYPE(TRB_TYPE_DISABLE_SLOT) | ((uint32_t)slot_id << 24);
 
-    uint64_t trb_phys = cmd_ring->trbs_phys + (cmd_ring->enqueue_idx * sizeof(xhci_trb_t));
-
-    trb->parameter = 0;
-    trb->status = 0;
-    trb->control = TRB_SET_TYPE(TRB_TYPE_ENABLE_SLOT) |
-                   (cmd_ring->cycle_state ? TRB_C : 0);
-
-    pending_cmds[cmd_idx].trb_phys = trb_phys;
-    pending_cmds[cmd_idx].timestamp_posted = rdtsc();
-    pending_cmds[cmd_idx].sequence = ++cmd_sequence;
-    pending_cmds[cmd_idx].slot_id = 0;
-    pending_cmds[cmd_idx].state = CMD_STATE_POSTED;
-    pending_cmds[cmd_idx].completion_code = 0;
-    pending_cmds[cmd_idx].completion_param = 0;
-
-    advance_command_ring(cmd_ring);
-    ring_command_doorbell(ctrl);
-
-    debug_printf("[xHCI CMD] Enable Slot posted (TRB phys=0x%llx)\n", trb_phys);
-
-    return 0;
+    return post_command(ctrl, &trb, slot_id);
 }
 
 int xhci_post_address_device_cmd(xhci_controller_t* ctrl, uint8_t slot_id, uint64_t input_ctx_phys) {
@@ -101,38 +95,11 @@ int xhci_post_address_device_cmd(xhci_controller_t* ctrl, uint8_t slot_id, uint6
         return -1;
     }
 
-    int cmd_idx = find_free_cmd_slot();
-    if (cmd_idx < 0) {
-        debug_printf("[xHCI CMD] No free command slots\n");
-        return -1;
-    }
+    xhci_trb_t trb = {0};
+    trb.parameter = input_ctx_phys;
+    trb.control = TRB_SET_TYPE(TRB_TYPE_ADDRESS_DEVICE) | ((uint32_t)slot_id << 24);
 
-    xhci_ring_t* cmd_ring = &ctrl->command_ring;
-    xhci_trb_t* trb = &cmd_ring->trbs[cmd_ring->enqueue_idx];
-
-    uint64_t trb_phys = cmd_ring->trbs_phys + (cmd_ring->enqueue_idx * sizeof(xhci_trb_t));
-
-    trb->parameter = input_ctx_phys;
-    trb->status = 0;
-    trb->control = TRB_SET_TYPE(TRB_TYPE_ADDRESS_DEVICE) |
-                   ((uint32_t)slot_id << 24) |
-                   (cmd_ring->cycle_state ? TRB_C : 0);
-
-    pending_cmds[cmd_idx].trb_phys = trb_phys;
-    pending_cmds[cmd_idx].timestamp_posted = rdtsc();
-    pending_cmds[cmd_idx].sequence = ++cmd_sequence;
-    pending_cmds[cmd_idx].slot_id = slot_id;
-    pending_cmds[cmd_idx].state = CMD_STATE_POSTED;
-    pending_cmds[cmd_idx].completion_code = 0;
-    pending_cmds[cmd_idx].completion_param = 0;
-
-    advance_command_ring(cmd_ring);
-    ring_command_doorbell(ctrl);
-
-    debug_printf("[xHCI CMD] Address Device posted (slot=%u, input_ctx=0x%llx)\n",
-                 slot_id, input_ctx_phys);
-
-    return 0;
+    return post_command(ctrl, &trb, slot_id);
 }
 
 int xhci_post_configure_endpoint_cmd(xhci_controller_t* ctrl, uint8_t slot_id, uint64_t input_ctx_phys) {
@@ -140,36 +107,23 @@ int xhci_post_configure_endpoint_cmd(xhci_controller_t* ctrl, uint8_t slot_id, u
         return -1;
     }
 
-    int cmd_idx = find_free_cmd_slot();
-    if (cmd_idx < 0) {
-        debug_printf("[xHCI CMD] No free command slots\n");
+    xhci_trb_t trb = {0};
+    trb.parameter = input_ctx_phys;
+    trb.control = TRB_SET_TYPE(TRB_TYPE_CONFIGURE_ENDPOINT) | ((uint32_t)slot_id << 24);
+
+    return post_command(ctrl, &trb, slot_id);
+}
+
+int xhci_post_evaluate_context_cmd(xhci_controller_t* ctrl, uint8_t slot_id, uint64_t input_ctx_phys) {
+    if (!ctrl || !ctrl->running || slot_id == 0 || slot_id > ctrl->max_slots) {
         return -1;
     }
 
-    xhci_ring_t* cmd_ring = &ctrl->command_ring;
-    xhci_trb_t* trb = &cmd_ring->trbs[cmd_ring->enqueue_idx];
+    xhci_trb_t trb = {0};
+    trb.parameter = input_ctx_phys;
+    trb.control = TRB_SET_TYPE(TRB_TYPE_EVALUATE_CONTEXT) | ((uint32_t)slot_id << 24);
 
-    uint64_t trb_phys = cmd_ring->trbs_phys + (cmd_ring->enqueue_idx * sizeof(xhci_trb_t));
-
-    trb->parameter = input_ctx_phys;
-    trb->status = 0;
-    trb->control = (12 << 10) | ((uint32_t)slot_id << 24) | (cmd_ring->cycle_state ? TRB_C : 0);
-
-    pending_cmds[cmd_idx].trb_phys = trb_phys;
-    pending_cmds[cmd_idx].timestamp_posted = rdtsc();
-    pending_cmds[cmd_idx].sequence = ++cmd_sequence;
-    pending_cmds[cmd_idx].slot_id = slot_id;
-    pending_cmds[cmd_idx].state = CMD_STATE_POSTED;
-
-    advance_command_ring(cmd_ring);
-
-    __sync_synchronize();
-    ring_command_doorbell(ctrl);
-
-    debug_printf("[xHCI CMD] Configure Endpoint posted (slot=%u, input_ctx=0x%llx)\n",
-                 slot_id, input_ctx_phys);
-
-    return 0;
+    return post_command(ctrl, &trb, slot_id);
 }
 
 void xhci_handle_command_completion(xhci_controller_t* ctrl, xhci_trb_t* event) {
@@ -181,9 +135,6 @@ void xhci_handle_command_completion(xhci_controller_t* ctrl, xhci_trb_t* event) 
     uint8_t completion_code = (event->status >> 24) & 0xFF;
     uint8_t slot_id = (event->control >> 24) & 0xFF;
 
-    debug_printf("[xHCI CMD] Command Completion: TRB=0x%llx, code=%u, slot=%u\n",
-                 trb_phys, completion_code, slot_id);
-
     int cmd_idx = find_cmd_by_trb_phys(trb_phys);
     if (cmd_idx < 0) {
         debug_printf("[xHCI CMD] No matching pending command for TRB 0x%llx\n", trb_phys);
@@ -191,21 +142,18 @@ void xhci_handle_command_completion(xhci_controller_t* ctrl, xhci_trb_t* event) 
     }
 
     spin_lock(&pending_cmds_lock);
-    pending_cmds[cmd_idx].state = CMD_STATE_COMPLETED;
     pending_cmds[cmd_idx].completion_code = completion_code;
     pending_cmds[cmd_idx].slot_id = slot_id;
     pending_cmds[cmd_idx].completion_param = event->status;
+    pending_cmds[cmd_idx].state = (completion_code == TRB_COMPLETION_SUCCESS)
+                                   ? CMD_STATE_COMPLETED : CMD_STATE_ERROR;
     spin_unlock(&pending_cmds_lock);
 
     if (completion_code != TRB_COMPLETION_SUCCESS) {
-        debug_printf("[xHCI CMD] Command failed: code=%u\n", completion_code);
-        spin_lock(&pending_cmds_lock);
-        pending_cmds[cmd_idx].state = CMD_STATE_ERROR;
-        spin_unlock(&pending_cmds_lock);
-        xhci_enum_advance_state(ctrl, slot_id, completion_code);
-    } else {
-        xhci_enum_advance_state(ctrl, slot_id, completion_code);
+        debug_printf("[xHCI CMD] Command failed: slot=%u code=%u\n", slot_id, completion_code);
     }
+
+    xhci_enum_advance_state(ctrl, slot_id, completion_code);
 
     spin_lock(&pending_cmds_lock);
     pending_cmds[cmd_idx].state = CMD_STATE_IDLE;
@@ -230,6 +178,9 @@ void xhci_check_command_timeouts(xhci_controller_t* ctrl) {
                              pending_cmds[i].trb_phys, pending_cmds[i].slot_id);
 
                 uint8_t slot_id = pending_cmds[i].slot_id;
+                pending_cmds[i].state = CMD_STATE_IDLE;
+                pending_cmds[i].trb_phys = 0;
+
                 if (slot_id > 0 && slot_id <= ctrl->max_slots) {
                     spin_unlock(&pending_cmds_lock);
                     xhci_device_slot_t* slot = xhci_get_device_slot(ctrl, slot_id);
@@ -238,9 +189,6 @@ void xhci_check_command_timeouts(xhci_controller_t* ctrl) {
                     }
                     spin_lock(&pending_cmds_lock);
                 }
-
-                pending_cmds[i].state = CMD_STATE_IDLE;
-                pending_cmds[i].trb_phys = 0;
             }
         }
     }

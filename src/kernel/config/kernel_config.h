@@ -111,7 +111,7 @@
 #define CONFIG_DEBUG_WORKFLOW 0
 #define CONFIG_DEBUG_TAGFS 0
 
-#define CONFIG_PERF_TRACE 1  // 1=in-memory ring buffer trace (fast: ~15 cycles, no serial I/O)
+#define CONFIG_PERF_TRACE 0 // 1=in-memory ring buffer trace (fast: ~15 cycles, no serial I/O)
 #define CONFIG_GUIDE_BATCH_SIZE 16
 #define CONFIG_PREFETCH_ENABLED 1
 #define CONFIG_CACHE_LINE_SIZE 64 // x86-64 standard

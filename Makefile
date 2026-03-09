@@ -308,13 +308,13 @@ $(VBOX_VDI): $(IMAGE)
 # ==== UTILITIES ====
 FULLSCREEN ?= on
 
-run-xhci: $(IMAGE)
-	@echo "Running BoxOS in QEMU with xHCI..."
-	@$(QEMU) -drive file=$<,format=raw,index=0,media=disk -m 512M -serial stdio -device qemu-xhci -device usb-kbd
+run-nousb: $(IMAGE)
+	@echo "Running BoxOS in QEMU (no USB)..."
+	@$(QEMU) -drive format=raw,file=$< -m 512M -serial stdio
 
 run: $(IMAGE)
-	@echo "Running BoxOS in QEMU..."
-	@$(QEMU) -drive format=raw,file=$< -m 512M -serial stdio
+	@echo "Running BoxOS in QEMU (xHCI + USB keyboard)..."
+	@$(QEMU) -drive file=$<,format=raw,index=0,media=disk -m 512M -serial stdio -device qemu-xhci -device usb-kbd
 
 run-fullscreen: $(IMAGE)
 	@echo "Running BoxOS in QEMU (Fullscreen=$(FULLSCREEN))..."

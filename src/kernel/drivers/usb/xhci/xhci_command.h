@@ -33,8 +33,10 @@ extern uint32_t cmd_sequence;
 void xhci_command_init(void);
 
 int xhci_post_enable_slot_cmd(xhci_controller_t* ctrl);
+int xhci_post_disable_slot_cmd(xhci_controller_t* ctrl, uint8_t slot_id);
 int xhci_post_address_device_cmd(xhci_controller_t* ctrl, uint8_t slot_id, uint64_t input_ctx_phys);
 int xhci_post_configure_endpoint_cmd(xhci_controller_t* ctrl, uint8_t slot_id, uint64_t input_ctx_phys);
+int xhci_post_evaluate_context_cmd(xhci_controller_t* ctrl, uint8_t slot_id, uint64_t input_ctx_phys);
 
 void xhci_handle_command_completion(xhci_controller_t* ctrl, xhci_trb_t* event);
 void xhci_check_command_timeouts(xhci_controller_t* ctrl);
