@@ -89,18 +89,27 @@ void perf_dump(void);
 void perf_dump_slow(uint64_t min_cycles);
 
 /*
+ * perf_trace_flush_since — prints entries recorded since snapshot_total.
+ * Called by guide() AFTER all pockets are processed, so serial I/O
+ * does not affect measurement accuracy.
+ */
+void perf_trace_flush_since(uint32_t snapshot_total);
+
+/*
  * perf_reset — clears all entries and resets head/total to zero.
  */
 void perf_reset(void);
 
 /* ------------------------------------------------------------------ */
-/* Inline record implementation (lives in header so it inlines at      */
-/* the call site inside guide.c — zero function-call overhead)         */
+/* Inline implementations (need g_perf_ring to be declared first)      */
 /* ------------------------------------------------------------------ */
 
-/* Forward-declare the global ring so the inline can reference it.
-   The actual definition is in perf_trace.c. */
 extern PerfTraceRing g_perf_ring;
+
+/*
+ * perf_trace_snapshot — returns current total for flush_since pairing.
+ */
+static inline uint32_t perf_trace_snapshot(void) { return g_perf_ring.total; }
 
 static inline void perf_trace_record(uint64_t tsc_start,
                                      uint64_t tsc_end,
@@ -130,7 +139,7 @@ static inline void perf_trace_record(uint64_t tsc_start,
 /* Hot-path macros — used in guide.c                                   */
 /* ------------------------------------------------------------------ */
 
-/* Drop-in replacement for the existing CONFIG_TRACE_GUIDE timing block */
+/* Used in guide.c around each deck handler call */
 #define PERF_TRACE_START(var)   uint64_t var = rdtsc()
 
 #define PERF_TRACE_END(start_var, pocket_pid, did, op, err)    \
@@ -149,6 +158,8 @@ static inline void perf_trace_record(uint64_t tsc_start,
 static inline void perf_trace_init(void)  { }
 static inline void perf_dump(void)        { }
 static inline void perf_dump_slow(uint64_t c) { (void)c; }
+static inline void perf_trace_flush_since(uint32_t s) { (void)s; }
+static inline uint32_t perf_trace_snapshot(void) { return 0; }
 static inline void perf_reset(void)       { }
 
 #endif /* CONFIG_PERF_TRACE */

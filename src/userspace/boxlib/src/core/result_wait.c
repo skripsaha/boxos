@@ -11,7 +11,8 @@ static inline uint64_t rdtsc(void) {
 
 static bool result_wait_umwait(Result* out, uint32_t timeout_ms) {
     ResultRing* rr = result_ring();
-    volatile uint32_t* tail_addr = &rr->tail;
+    volatile uint32_t* tail_addr;
+    { char* base = (char*)rr; tail_addr = (volatile uint32_t*)(base + 4); }
 
     while (1) {
         __sync_synchronize();

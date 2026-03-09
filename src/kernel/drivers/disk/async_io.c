@@ -211,21 +211,3 @@ uint32_t async_io_expire_stale(uint64_t timeout_tsc) {
     return expired;
 }
 
-void async_io_get_stats(uint32_t* submitted, uint32_t* completed,
-                        uint32_t* failed, uint32_t* queue_full,
-                        uint64_t* avg_latency_cycles) {
-    if (submitted) *submitted = atomic_load_u32(&g_async_queue.total_submitted);
-    if (completed) *completed = atomic_load_u32(&g_async_queue.total_completed);
-    if (failed) *failed = atomic_load_u32(&g_async_queue.total_failed);
-    if (queue_full) *queue_full = atomic_load_u32(&g_async_queue.queue_full_count);
-
-    if (avg_latency_cycles) {
-        uint32_t comp = atomic_load_u32(&g_async_queue.total_completed);
-        if (comp > 0) {
-            uint64_t total_lat = atomic_load_u64(&g_async_queue.total_latency_cycles);
-            *avg_latency_cycles = total_lat / comp;
-        } else {
-            *avg_latency_cycles = 0;
-        }
-    }
-}

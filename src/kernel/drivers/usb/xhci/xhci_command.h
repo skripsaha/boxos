@@ -3,7 +3,7 @@
 
 #include "xhci.h"
 #include "xhci_trb.h"
-#include "spinlock.h"
+#include "klib.h"
 
 typedef enum {
     CMD_STATE_IDLE = 0,

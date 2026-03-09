@@ -111,7 +111,6 @@
 #define CONFIG_DEBUG_WORKFLOW 0
 #define CONFIG_DEBUG_TAGFS 0
 
-#define CONFIG_TRACE_GUIDE 0 // 1=log every deck invocation (slow: serial I/O in hot path)
 #define CONFIG_PERF_TRACE 1  // 1=in-memory ring buffer trace (fast: ~15 cycles, no serial I/O)
 #define CONFIG_GUIDE_BATCH_SIZE 16
 #define CONFIG_PREFETCH_ENABLED 1
