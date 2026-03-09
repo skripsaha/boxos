@@ -17,6 +17,7 @@
 #include "ata_dma.h"
 #include "ahci.h"
 #include "cpu_calibrate.h"
+#include "perf_trace.h"
 
 ReadyQueue g_ready_queue;
 
@@ -36,6 +37,8 @@ void guide_init(void)
     ready_queue_init(&g_ready_queue);
 
     listen_table_init();
+
+    perf_trace_init();
 
     debug_printf("[GUIDE] ReadyQueue initialized (capacity=%u)\n",
                  READY_QUEUE_CAPACITY);
@@ -104,7 +107,7 @@ static void guide_process_pocket(process_t *proc)
         }
 
         uint8_t deck_id = pocket_get_deck_id(pocket, pocket->current_prefix_idx);
-        uint8_t opcode = pocket_get_opcode(pocket, pocket->current_prefix_idx);
+        uint8_t opcode  = pocket_get_opcode(pocket, pocket->current_prefix_idx);
 
         bool security_ok = system_security_gate(proc, deck_id, opcode);
         if (!security_ok)
@@ -130,7 +133,12 @@ static void guide_process_pocket(process_t *proc)
 #if CONFIG_TRACE_GUIDE
         uint64_t deck_start = rdtsc();
 #endif
+        PERF_TRACE_START(perf_start);
+
         int deck_ret = handler(pocket, proc);
+
+        PERF_TRACE_END(perf_start, pocket->pid, deck_id, opcode,
+                       (uint16_t)pocket->error_code);
 #if CONFIG_TRACE_GUIDE
         uint64_t deck_elapsed_us = cpu_tsc_to_us(rdtsc() - deck_start);
 #endif
@@ -317,9 +325,9 @@ static void guide_process_ahci_completions(void)
             continue;
         }
 
-        uint32_t event_id = state->event_id[slot];
-        uint32_t pid = state->pid[slot];
-        uint64_t submit_tsc = state->submit_tsc[slot];
+        uint32_t event_id    = state->event_id[slot];
+        uint32_t pid         = state->pid[slot];
+        uint64_t submit_tsc  = state->submit_tsc[slot];
 
         bool error = (port->tfd & 0x01);
 
@@ -340,11 +348,11 @@ static void guide_process_ahci_completions(void)
             if (rring)
             {
                 Result result;
-                result.error_code = error ? ERR_IO : OK;
+                result.error_code  = error ? ERR_IO : OK;
                 result.data_length = 0;
-                result.data_addr = 0;
-                result.sender_pid = 0;
-                result._reserved = 0;
+                result.data_addr   = 0;
+                result.sender_pid  = 0;
+                result._reserved   = 0;
                 result_ring_push(rring, &result);
             }
         }
