@@ -313,8 +313,9 @@ void irq_handler(interrupt_frame_t* frame) {
             scheduler_state_t* sched = scheduler_get_state();
             sched->total_ticks++;
 
-            extern void xhci_process_events(void);
-            xhci_process_events();
+            /* xHCI events handled via IRQ; poll only as fallback */
+            extern void xhci_poll_events(void);
+            xhci_poll_events();
 
             schedule(frame);
             break;

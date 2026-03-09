@@ -3,8 +3,9 @@
 #include "vmm.h"
 #include "klib.h"
 
-int xhci_ring_init(xhci_ring_t* ring, uint32_t num_trbs) {
-    if (!ring || num_trbs == 0) {
+int xhci_ring_init(xhci_ring_t* ring, uint32_t num_trbs, bool producer)
+{
+    if (!ring || num_trbs < 4) {
         return -1;
     }
 
@@ -20,12 +21,24 @@ int xhci_ring_init(xhci_ring_t* ring, uint32_t num_trbs) {
     ring->enqueue_idx = 0;
     ring->dequeue_idx = 0;
     ring->cycle_state = 1;
+    ring->producer = producer;
     spinlock_init(&ring->ring_lock);
+
+    if (producer) {
+        /* Place Link TRB at the last slot pointing back to ring start.
+         * TC (Toggle Cycle) bit is set so HC toggles cycle on wrap.
+         * Cycle bit starts as 0 — software sets it when enqueue wraps. */
+        xhci_trb_t* link = &ring->trbs[num_trbs - 1];
+        link->parameter = ring->trbs_phys;
+        link->status = 0;
+        link->control = TRB_SET_TYPE(TRB_TYPE_LINK) | TRB_TC;
+    }
 
     return 0;
 }
 
-void xhci_ring_destroy(xhci_ring_t* ring) {
+void xhci_ring_destroy(xhci_ring_t* ring)
+{
     if (!ring || !ring->trbs) {
         return;
     }
@@ -38,14 +51,61 @@ void xhci_ring_destroy(xhci_ring_t* ring) {
     ring->num_trbs = 0;
 }
 
-uint64_t xhci_ring_get_phys_addr(xhci_ring_t* ring) {
+uint64_t xhci_ring_get_phys_addr(xhci_ring_t* ring)
+{
     if (!ring) {
         return 0;
     }
     return ring->trbs_phys;
 }
 
-int xhci_erst_init(xhci_erst_t* erst, xhci_ring_t* event_ring) {
+uint64_t xhci_ring_enqueue(xhci_ring_t* ring, xhci_trb_t* trb)
+{
+    if (!ring || !trb || !ring->trbs) {
+        return 0;
+    }
+
+    spin_lock(&ring->ring_lock);
+
+    uint32_t idx = ring->enqueue_idx;
+
+    /* For producer rings, last slot is the Link TRB — can't write there */
+    if (ring->producer && idx >= ring->num_trbs - 1) {
+        spin_unlock(&ring->ring_lock);
+        return 0;
+    }
+
+    /* Set cycle bit to match current producer cycle state */
+    trb->control = (trb->control & ~TRB_C) | (ring->cycle_state ? TRB_C : 0);
+
+    /* Write TRB to ring */
+    ring->trbs[idx] = *trb;
+    __sync_synchronize();
+
+    uint64_t trb_phys = ring->trbs_phys + (idx * sizeof(xhci_trb_t));
+
+    /* Advance index */
+    ring->enqueue_idx = idx + 1;
+
+    if (ring->producer && ring->enqueue_idx >= ring->num_trbs - 1) {
+        /* Reached Link TRB slot — activate it and wrap */
+        xhci_trb_t* link = &ring->trbs[ring->num_trbs - 1];
+        link->control = TRB_SET_TYPE(TRB_TYPE_LINK) | TRB_TC |
+                        (ring->cycle_state ? TRB_C : 0);
+        __sync_synchronize();
+        ring->cycle_state ^= 1;
+        ring->enqueue_idx = 0;
+    } else if (!ring->producer && ring->enqueue_idx >= ring->num_trbs) {
+        ring->enqueue_idx = 0;
+        ring->cycle_state ^= 1;
+    }
+
+    spin_unlock(&ring->ring_lock);
+    return trb_phys;
+}
+
+int xhci_erst_init(xhci_erst_t* erst, xhci_ring_t* event_ring)
+{
     if (!erst || !event_ring || !event_ring->trbs) {
         return -1;
     }
@@ -66,7 +126,8 @@ int xhci_erst_init(xhci_erst_t* erst, xhci_ring_t* event_ring) {
     return 0;
 }
 
-void xhci_erst_destroy(xhci_erst_t* erst) {
+void xhci_erst_destroy(xhci_erst_t* erst)
+{
     if (!erst || !erst->entries) {
         return;
     }
@@ -76,7 +137,8 @@ void xhci_erst_destroy(xhci_erst_t* erst) {
     erst->entries_phys = 0;
 }
 
-uint64_t xhci_erst_get_phys_addr(xhci_erst_t* erst) {
+uint64_t xhci_erst_get_phys_addr(xhci_erst_t* erst)
+{
     if (!erst) {
         return 0;
     }
