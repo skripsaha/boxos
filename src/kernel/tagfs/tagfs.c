@@ -660,6 +660,9 @@ int tagfs_init(void) {
         }
     }
 
+    // Load mirror cache so future meta reads skip disk
+    meta_pool_mirror_init(g_state.superblock.next_file_id + 64);
+
     g_state.initialized = true;
     debug_printf("[TagFS] Initialized successfully\n");
     return 0;
@@ -1526,6 +1529,13 @@ int tagfs_free_blocks(uint32_t start_block, uint32_t count) {
 int tagfs_get_metadata(uint32_t file_id, TagFSMetadata* out) {
     if (!g_state.initialized) return -1;
     if (!out) return -1;
+
+    // Fast path: read from mirror (no disk I/O)
+    if (meta_pool_read_cached(file_id, out) == 0) {
+        return 0;
+    }
+
+    // Slow path: disk read
     uint32_t block, offset;
     if (file_table_lookup(file_id, &block, &offset) != 0) return -1;
     return meta_pool_read(block, offset, out);

@@ -10,6 +10,11 @@ static uint32_t     g_current_block_num = 0;
 static bool         g_current_dirty    = false;
 static spinlock_t   g_lock;
 
+// Memory Mirror: in-memory cache of all metadata, indexed by file_id
+static TagFSMetadata* g_mirror          = NULL;
+static uint32_t       g_mirror_capacity = 0;
+static bool*          g_mirror_valid    = NULL;
+
 // ---------------------------------------------------------------------------
 // Public: init / shutdown / flush
 // ---------------------------------------------------------------------------
@@ -87,6 +92,21 @@ int meta_pool_flush(void) {
 
 void meta_pool_shutdown(void) {
     meta_pool_flush();
+
+    if (g_mirror) {
+        for (uint32_t i = 0; i < g_mirror_capacity; i++) {
+            if (g_mirror_valid && g_mirror_valid[i]) {
+                tagfs_metadata_free(&g_mirror[i]);
+            }
+        }
+        kfree(g_mirror);
+        g_mirror = NULL;
+    }
+    if (g_mirror_valid) {
+        kfree(g_mirror_valid);
+        g_mirror_valid = NULL;
+    }
+    g_mirror_capacity = 0;
 
     memset(&g_current_block, 0, sizeof(MetaPoolBlock));
     g_first_block       = 0;
@@ -225,6 +245,102 @@ void tagfs_metadata_free(TagFSMetadata* meta) {
 }
 
 // ---------------------------------------------------------------------------
+// Internal: deep-copy src into dst (allocates new memory for pointers)
+// ---------------------------------------------------------------------------
+
+static void mirror_deep_copy(const TagFSMetadata* src, TagFSMetadata* dst) {
+    dst->file_id       = src->file_id;
+    dst->flags         = src->flags;
+    dst->size          = src->size;
+    dst->created_time  = src->created_time;
+    dst->modified_time = src->modified_time;
+    dst->tag_count     = src->tag_count;
+    dst->extent_count  = src->extent_count;
+    dst->tag_ids  = NULL;
+    dst->extents  = NULL;
+    dst->filename = NULL;
+
+    if (src->tag_count > 0 && src->tag_ids) {
+        dst->tag_ids = kmalloc(sizeof(uint16_t) * src->tag_count);
+        if (dst->tag_ids) memcpy(dst->tag_ids, src->tag_ids, sizeof(uint16_t) * src->tag_count);
+    }
+    if (src->extent_count > 0 && src->extents) {
+        dst->extents = kmalloc(sizeof(FileExtent) * src->extent_count);
+        if (dst->extents) memcpy(dst->extents, src->extents, sizeof(FileExtent) * src->extent_count);
+    }
+    if (src->filename) {
+        size_t len = strlen(src->filename);
+        dst->filename = kmalloc(len + 1);
+        if (dst->filename) {
+            memcpy(dst->filename, src->filename, len);
+            dst->filename[len] = '\0';
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Public: mirror init / cached read
+// ---------------------------------------------------------------------------
+
+int meta_pool_mirror_init(uint32_t max_file_id) {
+    g_mirror_capacity = max_file_id + 1;
+    g_mirror       = kmalloc(sizeof(TagFSMetadata) * g_mirror_capacity);
+    g_mirror_valid = kmalloc(sizeof(bool) * g_mirror_capacity);
+    if (!g_mirror || !g_mirror_valid) {
+        debug_printf("[MetaPool] Mirror: alloc failed\n");
+        return -1;
+    }
+    memset(g_mirror,       0, sizeof(TagFSMetadata) * g_mirror_capacity);
+    memset(g_mirror_valid, 0, sizeof(bool)           * g_mirror_capacity);
+
+    uint32_t block_num = g_first_block;
+    uint32_t loaded    = 0;
+    while (block_num != 0) {
+        uint8_t buf[TAGFS_BLOCK_SIZE];
+        if (tagfs_read_block(block_num, buf) < 0) break;
+
+        MetaPoolBlock* hdr = (MetaPoolBlock*)buf;
+        if (hdr->magic != TAGFS_MPOOL_MAGIC) break;
+
+        uint32_t pos = 0;
+        while (pos < hdr->used_bytes) {
+            uint16_t record_len;
+            memcpy(&record_len, hdr->payload + pos, sizeof(uint16_t));
+            if (record_len == 0 || record_len > TAGFS_MPOOL_DATA_SIZE - pos) break;
+
+            uint32_t file_id;
+            memcpy(&file_id, hdr->payload + pos + 2, sizeof(uint32_t));
+
+            if (file_id > 0 && file_id < g_mirror_capacity) {
+                TagFSMetadata meta;
+                memset(&meta, 0, sizeof(meta));
+                if (unpack_record(hdr->payload + pos, &meta) == 0) {
+                    if (g_mirror_valid[file_id]) {
+                        tagfs_metadata_free(&g_mirror[file_id]);
+                    }
+                    g_mirror[file_id] = meta;
+                    g_mirror_valid[file_id] = true;
+                    loaded++;
+                }
+            }
+            pos += record_len;
+        }
+        block_num = hdr->next_block;
+    }
+
+    debug_printf("[MetaPool] Mirror loaded: %u entries\n", loaded);
+    return 0;
+}
+
+int meta_pool_read_cached(uint32_t file_id, TagFSMetadata* out) {
+    if (!g_mirror || file_id >= g_mirror_capacity || !g_mirror_valid[file_id]) {
+        return -1;
+    }
+    mirror_deep_copy(&g_mirror[file_id], out);
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
 // Public: write
 // ---------------------------------------------------------------------------
 
@@ -285,6 +401,15 @@ int meta_pool_write(const TagFSMetadata* meta, uint32_t* out_block, uint32_t* ou
     debug_printf("[MetaPool] write: file_id=%u block=%u offset=%u size=%u\n",
                  meta->file_id, *out_block, *out_offset, record_size);
 
+    // Write-through: update mirror
+    if (g_mirror && meta->file_id < g_mirror_capacity) {
+        if (g_mirror_valid[meta->file_id]) {
+            tagfs_metadata_free(&g_mirror[meta->file_id]);
+        }
+        mirror_deep_copy(meta, &g_mirror[meta->file_id]);
+        g_mirror_valid[meta->file_id] = true;
+    }
+
     spin_unlock(&g_lock);
     return 0;
 }
@@ -314,6 +439,16 @@ int meta_pool_delete(uint32_t block, uint32_t offset) {
         debug_printf("[MetaPool] delete: tagfs_read_block failed for block %u\n", block);
         return result;
     }
+
+    // Invalidate mirror before zeroing the file_id on disk
+    uint32_t del_file_id;
+    memcpy(&del_file_id, buf + offset + 2, sizeof(uint32_t));
+    if (g_mirror && del_file_id < g_mirror_capacity && g_mirror_valid[del_file_id]) {
+        tagfs_metadata_free(&g_mirror[del_file_id]);
+        memset(&g_mirror[del_file_id], 0, sizeof(TagFSMetadata));
+        g_mirror_valid[del_file_id] = false;
+    }
+
     // record layout: uint16_t record_len, then uint32_t file_id
     memset(buf + offset + 2, 0, 4);
     result = tagfs_write_block(block, buf);

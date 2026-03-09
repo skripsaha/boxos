@@ -34,8 +34,13 @@ void scheduler_init(void) {
 bool scheduler_matches_use_context(process_t* proc) {
     if (!proc) return false;
 
+    // Fast lockless check — enabled is only set under context_lock,
+    // but reading a bool is atomic on x86-64. Avoids lock on common path.
+    if (!sched.use_context.enabled) return false;
+
     spin_lock(&sched.context_lock);
 
+    // Re-check under lock (could have changed between fast check and lock)
     if (!sched.use_context.enabled) {
         spin_unlock(&sched.context_lock);
         return false;
@@ -87,7 +92,7 @@ int32_t scheduler_calculate_score(process_t* proc) {
         score -= SCHEDULER_BOOST_CRITICAL_STARVATION;
     }
 
-    if (process_has_tag(proc, "utility") || process_has_tag(proc, "system")) {
+    if (proc->role_bits & (ROLE_UTILITY | ROLE_SYSTEM)) {
         score += 5;
     }
 

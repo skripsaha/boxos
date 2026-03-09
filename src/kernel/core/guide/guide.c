@@ -127,9 +127,13 @@ static void guide_process_pocket(process_t *proc)
             break;
         }
 
+#if CONFIG_TRACE_GUIDE
         uint64_t deck_start = rdtsc();
+#endif
         int deck_ret = handler(pocket, proc);
+#if CONFIG_TRACE_GUIDE
         uint64_t deck_elapsed_us = cpu_tsc_to_us(rdtsc() - deck_start);
+#endif
 
         if (deck_ret < 0)
         {
@@ -144,7 +148,7 @@ static void guide_process_pocket(process_t *proc)
             break;
         }
 
-#if CONFIG_DEBUG_ENABLED
+#if CONFIG_TRACE_GUIDE
         if (deck_elapsed_us > 50)
         {
             debug_printf("[GUIDE] PID %u deck=0x%02x op=0x%02x: %llu us\n",
@@ -166,7 +170,9 @@ static void guide_process_pocket(process_t *proc)
 
 void guide(void)
 {
+#if CONFIG_TRACE_GUIDE
     uint64_t guide_start = rdtsc();
+#endif
     uint32_t pockets_processed = 0;
 
     // Process all ready processes from the ReadyQueue
@@ -275,7 +281,7 @@ void guide(void)
         last_timeout_check = now;
     }
 
-#if CONFIG_DEBUG_ENABLED
+#if CONFIG_TRACE_GUIDE
     {
         uint64_t guide_us = cpu_tsc_to_us(rdtsc() - guide_start);
         if (guide_us > 200 && pockets_processed > 0)

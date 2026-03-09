@@ -27,7 +27,11 @@ void context_restore(process_t* proc, ProcessContext* ctx) {
         return;
     }
 
-    __asm__ volatile("mov %0, %%cr3" : : "r"(ctx->cr3) : "memory");
+    uint64_t current_cr3;
+    __asm__ volatile("mov %%cr3, %0" : "=r"(current_cr3));
+    if (current_cr3 != ctx->cr3) {
+        __asm__ volatile("mov %0, %%cr3" : : "r"(ctx->cr3) : "memory");
+    }
 
     if (ctx->fpu_initialized) {
         fpu_restore(ctx->fpu_state);
@@ -103,7 +107,12 @@ void context_restore_to_frame(process_t* proc, interrupt_frame_t* frame) {
 
     ProcessContext* ctx = &proc->context;
 
-    __asm__ volatile("mov %0, %%cr3" : : "r"(ctx->cr3) : "memory");
+    // Skip CR3 reload if returning to same address space (avoids full TLB flush)
+    uint64_t current_cr3;
+    __asm__ volatile("mov %%cr3, %0" : "=r"(current_cr3));
+    if (current_cr3 != ctx->cr3) {
+        __asm__ volatile("mov %0, %%cr3" : : "r"(ctx->cr3) : "memory");
+    }
 
     frame->rax = ctx->rax;
     frame->rbx = ctx->rbx;
