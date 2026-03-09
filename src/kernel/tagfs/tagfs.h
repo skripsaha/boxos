@@ -184,6 +184,18 @@ typedef struct {
     uint16_t  capacity;
 } TagIdList;
 
+// Query cache: stores recent query results, invalidated by generation counter
+#define QUERY_CACHE_SLOTS 16
+
+typedef struct {
+    uint32_t  hash;         // hash of sorted tag_ids
+    uint32_t  generation;   // generation when cached
+    uint32_t* file_ids;     // cached result array
+    uint32_t  count;        // number of results
+    uint16_t* tag_key;      // copy of sorted tag_ids (for validation)
+    uint16_t  tag_count;    // number of tags in key
+} QueryCacheEntry;
+
 typedef struct {
     TagBitmap** bitmaps;
     uint32_t    bitmap_capacity;
@@ -191,6 +203,9 @@ typedef struct {
 
     TagIdList*  file_to_tags;
     uint32_t    file_capacity;
+
+    uint32_t    generation;     // incremented on every mutation
+    QueryCacheEntry cache[QUERY_CACHE_SLOTS];
 
     spinlock_t  lock;
 } TagBitmapIndex;
