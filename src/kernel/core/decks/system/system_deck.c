@@ -637,7 +637,9 @@ static int proc_kill(Pocket* pocket, process_t* proc) {
     if (pocket->data_length == 0) {
         target_pid = pocket->pid;
         is_self_exit = true;
+#if CONFIG_DEBUG_PROCESS
         debug_printf("[SYSTEM_DECK] PROC_KILL: PID %u graceful exit (no data)\n", target_pid);
+#endif
     } else {
         data = (uint8_t*)get_request_data(pocket, proc);
         if (!data || pocket->data_length < 4) {
@@ -651,9 +653,14 @@ static int proc_kill(Pocket* pocket, process_t* proc) {
 
         if (is_self_exit) {
             target_pid = pocket->pid;
+#if CONFIG_DEBUG_PROCESS
             debug_printf("[SYSTEM_DECK] PROC_KILL: PID %u graceful exit\n", target_pid);
         } else {
             debug_printf("[SYSTEM_DECK] PROC_KILL: killing PID %u\n", target_pid);
+#else
+        } else {
+            (void)0;
+#endif
         }
     }
 
@@ -684,7 +691,9 @@ static int proc_kill(Pocket* pocket, process_t* proc) {
     }
 
     pocket->error_code = OK;
+#if CONFIG_DEBUG_PROCESS
     debug_printf("[SYSTEM_DECK] PROC_KILL: SUCCESS\n");
+#endif
     return 0;
 }
 
@@ -757,7 +766,9 @@ static int proc_exec(Pocket* pocket, process_t* proc) {
         return -1;
     }
 
+#if CONFIG_DEBUG_PROCESS
     debug_printf("[SYSTEM_DECK] PROC_EXEC: looking for '%s'\n", filename);
+#endif
 
     if (process_get_count() >= PROCESS_MAX_COUNT) {
         pocket->error_code = ERR_PROCESS_LIMIT_EXCEEDED;
@@ -899,7 +910,9 @@ static int proc_exec(Pocket* pocket, process_t* proc) {
     *(uint32_t*)(data + 4) = 0;
 
     pocket->error_code = OK;
+#if CONFIG_DEBUG_PROCESS
     debug_printf("[SYSTEM_DECK] PROC_EXEC: SUCCESS '%s' -> PID %u\n", filename, new_proc->pid);
+#endif
     return 0;
 }
 
@@ -1349,7 +1362,9 @@ static int route(Pocket* pocket, process_t* proc) {
     }
 
     pocket->error_code = OK;
+#if CONFIG_DEBUG_WORKFLOW
     debug_printf("[ROUTE] PID %u -> PID %u\n", pocket->pid, pocket->target_pid);
+#endif
     return 0;
 }
 
@@ -1426,8 +1441,10 @@ static int route_tag(Pocket* pocket, process_t* proc) {
         return -1;
     }
 
+#if CONFIG_DEBUG_WORKFLOW
     debug_printf("[ROUTE_TAG] PID %u -> %u/%u targets matching '%s'\n",
                  pocket->pid, delivered, target_count, pocket->route_tag);
+#endif
 
     pocket->target_pid = 0;
     pocket->error_code = OK;
