@@ -292,14 +292,10 @@ typedef struct {
     uint64_t system;
     uint64_t utility;
     uint64_t app;
-    uint64_t display;
     uint64_t god;
     uint64_t stopped;
-    uint64_t storage;
     uint64_t bypass;
     uint64_t network;
-    uint64_t net_access;
-    uint64_t proc_spawn;
 } WellKnownTags;
 
 extern WellKnownTags g_well_known;
