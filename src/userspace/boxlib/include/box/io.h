@@ -9,6 +9,9 @@
 void io_set_mode(uint8_t mode);
 uint8_t io_get_mode(void);
 
+void io_set_display_pid(uint32_t pid);
+uint32_t io_get_display_pid(void);
+
 void print(const char* str);
 void println(const char* str);
 int printf(const char* fmt, ...);
