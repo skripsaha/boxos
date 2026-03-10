@@ -28,6 +28,7 @@ void shell_init(void)
             if (receive_wait(&entry, 2000))
             {
                 io_set_mode(IO_MODE_IPC);
+                io_set_display_pid(entry.sender_pid);
             }
         }
     }

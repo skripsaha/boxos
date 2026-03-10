@@ -5,6 +5,7 @@
 #include "box/ipc.h"
 #include "box/convert.h"
 #include "box/notify.h"
+#include "box/display_proto.h"
 
 // ============================================================================
 // IPC output buffer — batches print/println into fewer broadcast() calls.
@@ -14,6 +15,11 @@
 #define IO_BUF_SIZE 200
 static char io_buf[IO_BUF_SIZE];
 static int  io_buf_pos = 0;
+
+static uint32_t g_display_pid = 0;
+
+void io_set_display_pid(uint32_t pid) { g_display_pid = pid; }
+uint32_t io_get_display_pid(void) { return g_display_pid; }
 
 void io_flush(void) {
     if (io_get_mode() == IO_MODE_IPC && io_buf_pos > 0) {
@@ -127,16 +133,45 @@ int readline(char* buffer, size_t max_len) {
         return -1;
     }
 
-    int result = kb_readline(buffer, max_len, true);
-    if (result < 0) {
-        return -1;
+    if (io_get_mode() == IO_MODE_IPC && g_display_pid != 0) {
+        uint8_t capped = (uint8_t)(max_len > 255 ? 255 : max_len);
+        uint8_t req[3] = {DISP_CMD_READLINE, capped, 1};
+        send(g_display_pid, req, 3);
+
+        Result result;
+        if (!receive_wait(&result, 60000)) return -1;
+        if (result.error_code != OK) return -1;
+        if (result.data_addr == 0 || result.data_length < 4) return -1;
+
+        const uint8_t* resp = (const uint8_t*)(uintptr_t)result.data_addr;
+        uint32_t len;
+        memcpy(&len, resp, 4);
+        if (len > max_len - 1) len = (uint32_t)(max_len - 1);
+        memcpy(buffer, resp + 4, len);
+        buffer[len] = '\0';
+        return (int)len;
     }
 
-    return result;
+    int len = kb_readline(buffer, max_len, true);
+    if (len < 0) return -1;
+    return len;
 }
 
 int getchar(void) {
     io_flush();
+
+    if (io_get_mode() == IO_MODE_IPC && g_display_pid != 0) {
+        uint8_t req = DISP_CMD_GETCHAR;
+        send(g_display_pid, &req, 1);
+
+        Result result;
+        if (!receive_wait(&result, 60000)) return -1;
+        if (result.error_code != OK) return -1;
+        if (result.data_addr == 0 || result.data_length < 1) return -1;
+
+        return *(const uint8_t*)(uintptr_t)result.data_addr;
+    }
+
     return kb_getchar();
 }
 
