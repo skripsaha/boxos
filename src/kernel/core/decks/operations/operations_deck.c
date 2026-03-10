@@ -2,6 +2,7 @@
 #include "klib.h"
 #include "vmm.h"
 #include "process.h"
+#include "../deck_utils.h"
 
 static int op_buf_move(Pocket* pocket, uint8_t* data, uint32_t data_len);
 static int op_buf_fill(Pocket* pocket, uint8_t* data, uint32_t data_len);
@@ -13,20 +14,6 @@ static int op_buf_pack(Pocket* pocket, uint8_t* data, uint32_t data_len);
 static int op_buf_unpack(Pocket* pocket, uint8_t* data, uint32_t data_len);
 static int op_bit_swap(Pocket* pocket, uint8_t* data, uint32_t data_len);
 static int op_val_add(Pocket* pocket, uint8_t* data, uint32_t data_len);
-
-static inline uint32_t read_u32(const uint8_t* data, size_t offset) {
-    return ((uint32_t)data[offset] << 24) |
-           ((uint32_t)data[offset + 1] << 16) |
-           ((uint32_t)data[offset + 2] << 8) |
-           ((uint32_t)data[offset + 3]);
-}
-
-static inline void write_u32(uint8_t* data, size_t offset, uint32_t value) {
-    data[offset] = (value >> 24) & 0xFF;
-    data[offset + 1] = (value >> 16) & 0xFF;
-    data[offset + 2] = (value >> 8) & 0xFF;
-    data[offset + 3] = value & 0xFF;
-}
 
 int operations_deck_handler(Pocket* pocket, process_t* proc) {
     if (!pocket || !proc) {
@@ -89,9 +76,9 @@ static int op_buf_move(Pocket* pocket, uint8_t* data, uint32_t data_len) {
         return -1;
     }
 
-    uint32_t from_off = read_u32(data, 0);
-    uint32_t to_off   = read_u32(data, 4);
-    uint32_t len      = read_u32(data, 8);
+    uint32_t from_off = deck_read_u32(&data[0]);
+    uint32_t to_off   = deck_read_u32(&data[4]);
+    uint32_t len      = deck_read_u32(&data[8]);
 
     if (len > data_len ||
         from_off > data_len - len ||
@@ -112,9 +99,9 @@ static int op_buf_fill(Pocket* pocket, uint8_t* data, uint32_t data_len) {
         return -1;
     }
 
-    uint32_t offset = read_u32(data, 0);
-    uint32_t len    = read_u32(data, 4);
-    uint8_t  byte   = (uint8_t)(read_u32(data, 8) & 0xFF);
+    uint32_t offset = deck_read_u32(&data[0]);
+    uint32_t len    = deck_read_u32(&data[4]);
+    uint8_t  byte   = (uint8_t)(deck_read_u32(&data[8]) & 0xFF);
 
     if (len > data_len || offset > data_len - len) {
         debug_printf("[OPS_DECK] BUF_FILL: out of bounds\n");
@@ -132,9 +119,9 @@ static int op_buf_xor(Pocket* pocket, uint8_t* data, uint32_t data_len) {
         return -1;
     }
 
-    uint32_t offset = read_u32(data, 0);
-    uint32_t len    = read_u32(data, 4);
-    uint8_t  mask   = (uint8_t)(read_u32(data, 8) & 0xFF);
+    uint32_t offset = deck_read_u32(&data[0]);
+    uint32_t len    = deck_read_u32(&data[4]);
+    uint8_t  mask   = (uint8_t)(deck_read_u32(&data[8]) & 0xFF);
 
     if (len > data_len || offset > data_len - len) {
         pocket->error_code = ERR_OUT_OF_RANGE;
@@ -156,9 +143,9 @@ static int op_buf_hash(Pocket* pocket, uint8_t* data, uint32_t data_len) {
         return -1;
     }
 
-    uint32_t offset     = read_u32(data, 0);
-    uint32_t len        = read_u32(data, 4);
-    uint32_t target_off = read_u32(data, 8);
+    uint32_t offset     = deck_read_u32(&data[0]);
+    uint32_t len        = deck_read_u32(&data[4]);
+    uint32_t target_off = deck_read_u32(&data[8]);
 
     if (len > data_len ||
         offset > data_len - len ||
@@ -173,7 +160,7 @@ static int op_buf_hash(Pocket* pocket, uint8_t* data, uint32_t data_len) {
         hash = (hash << 5) | (hash >> 27);  // rotate left 5 bits
     }
 
-    write_u32(data, target_off, hash);
+    deck_write_u32(&data[target_off], hash);
     return 0;
 }
 
@@ -183,9 +170,9 @@ static int op_buf_cmp(Pocket* pocket, uint8_t* data, uint32_t data_len) {
         return -1;
     }
 
-    uint32_t off1 = read_u32(data, 0);
-    uint32_t off2 = read_u32(data, 4);
-    uint32_t len  = read_u32(data, 8);
+    uint32_t off1 = deck_read_u32(&data[0]);
+    uint32_t off2 = deck_read_u32(&data[4]);
+    uint32_t len  = deck_read_u32(&data[8]);
 
     if (len > data_len ||
         off1 > data_len - len ||
@@ -195,7 +182,7 @@ static int op_buf_cmp(Pocket* pocket, uint8_t* data, uint32_t data_len) {
     }
 
     int result = memcmp(&data[off1], &data[off2], len);
-    write_u32(data, 0, (result == 0) ? 0 : 1);
+    deck_write_u32(&data[0], (result == 0) ? 0 : 1);
 
     return 0;
 }
@@ -206,7 +193,7 @@ static int op_buf_find(Pocket* pocket, uint8_t* data, uint32_t data_len) {
         return -1;
     }
 
-    uint32_t pattern_len = read_u32(data, 0);
+    uint32_t pattern_len = deck_read_u32(&data[0]);
 
     if (pattern_len == 0 || pattern_len > data_len - 8) {
         pocket->error_code = ERR_INVALID_ARGUMENT;
@@ -224,7 +211,7 @@ static int op_buf_find(Pocket* pocket, uint8_t* data, uint32_t data_len) {
         }
     }
 
-    write_u32(data, 0, found_offset);
+    deck_write_u32(&data[0], found_offset);
     return 0;
 }
 
@@ -237,9 +224,9 @@ static int op_buf_pack(Pocket* pocket, uint8_t* data, uint32_t data_len) {
         return -1;
     }
 
-    uint32_t src_off = read_u32(data, 0);
-    uint32_t src_len = read_u32(data, 4);
-    uint32_t dst_off = read_u32(data, 8);
+    uint32_t src_off = deck_read_u32(&data[0]);
+    uint32_t src_len = deck_read_u32(&data[4]);
+    uint32_t dst_off = deck_read_u32(&data[8]);
 
     if (src_len == 0 || src_off > data_len - src_len ||
         dst_off >= data_len || src_off == dst_off) {
@@ -267,7 +254,7 @@ static int op_buf_pack(Pocket* pocket, uint8_t* data, uint32_t data_len) {
         }
 
         if (out + 2 > max_out) {
-            write_u32(data, 0, 0);
+            deck_write_u32(&data[0], 0);
             pocket->error_code = ERR_BUFFER_TOO_SMALL;
             vfree(tmp);
             return -1;
@@ -279,7 +266,7 @@ static int op_buf_pack(Pocket* pocket, uint8_t* data, uint32_t data_len) {
     }
 
     memcpy(&data[dst_off], tmp, out);
-    write_u32(data, 0, out);
+    deck_write_u32(&data[0], out);
     vfree(tmp);
     return 0;
 }
@@ -293,9 +280,9 @@ static int op_buf_unpack(Pocket* pocket, uint8_t* data, uint32_t data_len) {
         return -1;
     }
 
-    uint32_t src_off = read_u32(data, 0);
-    uint32_t src_len = read_u32(data, 4);
-    uint32_t dst_off = read_u32(data, 8);
+    uint32_t src_off = deck_read_u32(&data[0]);
+    uint32_t src_len = deck_read_u32(&data[4]);
+    uint32_t dst_off = deck_read_u32(&data[8]);
 
     if (src_len == 0 || src_len % 2 != 0 ||
         src_off > data_len - src_len ||
@@ -318,7 +305,7 @@ static int op_buf_unpack(Pocket* pocket, uint8_t* data, uint32_t data_len) {
         uint8_t byte  = data[src_off + i + 1];
 
         if (out + count > max_out) {
-            write_u32(data, 0, 0);
+            deck_write_u32(&data[0], 0);
             pocket->error_code = ERR_BUFFER_TOO_SMALL;
             vfree(tmp);
             return -1;
@@ -329,7 +316,7 @@ static int op_buf_unpack(Pocket* pocket, uint8_t* data, uint32_t data_len) {
     }
 
     memcpy(&data[dst_off], tmp, out);
-    write_u32(data, 0, out);
+    deck_write_u32(&data[0], out);
     vfree(tmp);
     return 0;
 }
@@ -340,9 +327,9 @@ static int op_bit_swap(Pocket* pocket, uint8_t* data, uint32_t data_len) {
         return -1;
     }
 
-    uint32_t offset = read_u32(data, 0);
-    uint32_t len    = read_u32(data, 4);
-    uint32_t mode   = read_u32(data, 8);
+    uint32_t offset = deck_read_u32(&data[0]);
+    uint32_t len    = deck_read_u32(&data[4]);
+    uint32_t mode   = deck_read_u32(&data[8]);
 
     if (len > data_len || offset > data_len - len) {
         pocket->error_code = ERR_OUT_OF_RANGE;
@@ -393,9 +380,9 @@ static int op_val_add(Pocket* pocket, uint8_t* data, uint32_t data_len) {
         return -1;
     }
 
-    uint32_t offset    = read_u32(data, 0);
-    uint32_t type_size = read_u32(data, 4);
-    int32_t  delta     = (int32_t)read_u32(data, 8);
+    uint32_t offset    = deck_read_u32(&data[0]);
+    uint32_t type_size = deck_read_u32(&data[4]);
+    int32_t  delta     = (int32_t)deck_read_u32(&data[8]);
 
     if (type_size > data_len || offset > data_len - type_size) {
         pocket->error_code = ERR_OUT_OF_RANGE;
@@ -409,16 +396,15 @@ static int op_val_add(Pocket* pocket, uint8_t* data, uint32_t data_len) {
         break;
     }
     case 2: {
-        uint16_t val = ((uint16_t)data[offset] << 8) | data[offset + 1];
+        uint16_t val = deck_read_u16(&data[offset]);
         val += (int16_t)delta;
-        data[offset]     = (val >> 8) & 0xFF;
-        data[offset + 1] = val & 0xFF;
+        deck_write_u16(&data[offset], val);
         break;
     }
     case 4: {
-        uint32_t val = read_u32(data, offset);
+        uint32_t val = deck_read_u32(&data[offset]);
         val += (uint32_t)delta;
-        write_u32(data, offset, val);
+        deck_write_u32(&data[offset], val);
         break;
     }
     default:

@@ -386,9 +386,6 @@ void kernel_main(void)
         process_add_tag(shell_proc, "system");
         process_add_tag(shell_proc, "utility");
         process_add_tag(shell_proc, "app");
-        process_add_tag(shell_proc, "hw_vga");
-        process_add_tag(shell_proc, "hw_kb");
-        process_add_tag(shell_proc, "storage");
 
         extern uint8_t _binary_shell_stripped_elf_start[];
         extern uint8_t _binary_shell_stripped_elf_end[];

@@ -5,6 +5,7 @@
 #define DECK_OPERATIONS    0x01
 #define DECK_STORAGE       0x02
 #define DECK_HARDWARE      0x03
+#define DECK_NETWORK       0x04
 #define DECK_SYSTEM        0xFF
 
 #define DECK_PREFIX(deck_id, opcode) ((uint16_t)(((uint8_t)(deck_id) << 8) | ((uint8_t)(opcode))))

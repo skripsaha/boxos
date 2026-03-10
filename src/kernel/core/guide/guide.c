@@ -7,21 +7,12 @@
 #include "listen_table.h"
 #include "process.h"
 #include "klib.h"
-#include "atomics.h"
-#include "pmm.h"
 #include "vmm.h"
 #include "pocket_ring.h"
-#include "result_ring.h"
 #include "error.h"
-#include "async_io.h"
-#include "ata_dma.h"
-#include "ahci.h"
-#include "cpu_calibrate.h"
 #include "perf_trace.h"
 
 ReadyQueue g_ready_queue;
-
-static void guide_process_ahci_completions(void);
 
 static DeckEntry deck_table[] = {
     {0xFF, "System Deck", system_deck_handler},
@@ -197,145 +188,5 @@ void guide(void)
     {
         perf_trace_flush_since(perf_snapshot);
     }
-
-    // Periodic cleanup of finished processes (runs in syscall context, not IRQ)
-    {
-        static uint64_t last_cleanup_tsc = 0;
-        uint64_t now_tsc = rdtsc();
-        if (last_cleanup_tsc == 0)
-            last_cleanup_tsc = now_tsc;
-
-        if ((now_tsc - last_cleanup_tsc) > cpu_ms_to_tsc(1000))
-        {
-            uint32_t cleanup_pids[16];
-            uint32_t cleanup_count = 0;
-
-            process_list_lock();
-            process_t *p = process_get_first();
-            while (p && cleanup_count < 16)
-            {
-                process_state_t state = process_get_state(p);
-                uint32_t refs = process_ref_count(p);
-                if ((state == PROC_CRASHED || state == PROC_DONE) && refs == 0)
-                {
-                    cleanup_pids[cleanup_count++] = p->pid;
-                }
-                p = p->next;
-            }
-            process_list_unlock();
-
-            for (uint32_t i = 0; i < cleanup_count; i++)
-            {
-                process_t *cp = process_find(cleanup_pids[i]);
-                if (cp)
-                {
-                    if (process_get_state(cp) == PROC_DONE)
-                    {
-                        process_set_state(cp, PROC_CRASHED);
-                    }
-                    process_destroy_safe(cp);
-                }
-            }
-
-            last_cleanup_tsc = now_tsc;
-        }
-    }
-
-    // Handle async I/O completions and dispatch
-    guide_process_ahci_completions();
-
-    static uint64_t last_timeout_check = 0;
-    static uint64_t last_async_dispatch = 0;
-
-    if (last_timeout_check == 0)
-        last_timeout_check = rdtsc();
-    if (last_async_dispatch == 0)
-        last_async_dispatch = rdtsc();
-
-    uint64_t now = rdtsc();
-    if ((now - last_async_dispatch) > cpu_ms_to_tsc(CONFIG_ASYNC_DISPATCH_INTERVAL_MS))
-    {
-        if (async_io_pending_count() > 0 && ahci_can_submit_port(0))
-        {
-            async_io_request_t io_req;
-            if (async_io_dequeue(&io_req))
-            {
-                error_t err = ahci_start_async_transfer((struct async_io_request *)&io_req);
-                if (IS_ERROR(err))
-                {
-                    async_io_mark_failed(io_req.event_id);
-                    debug_printf("[GUIDE] AHCI async I/O dispatch failed for event_id=%u: %s\n",
-                                 io_req.event_id, error_string(err));
-                }
-            }
-        }
-        last_async_dispatch = now;
-    }
-
-    if ((now - last_timeout_check) > cpu_ms_to_tsc(CONFIG_DMA_TIMEOUT_CHECK_INTERVAL_MS))
-    {
-        ahci_check_timeouts();
-        async_io_expire_stale(cpu_ms_to_tsc(CONFIG_ASYNC_IO_QUEUE_TIMEOUT_MS));
-        last_timeout_check = now;
-    }
 }
 
-static void guide_process_ahci_completions(void)
-{
-    ahci_port_t *state = ahci_get_port_state(0);
-    if (!state)
-    {
-        return;
-    }
-
-    uint32_t completed = __sync_fetch_and_and(&state->completed_slots, 0);
-    mfence();
-    if (completed == 0)
-    {
-        return;
-    }
-
-    volatile ahci_port_regs_t *port = ahci_get_port_regs_pub(0);
-
-    for (uint8_t slot = 0; slot < 32; slot++)
-    {
-        if (!(completed & (1U << slot)))
-        {
-            continue;
-        }
-
-        uint32_t event_id    = state->event_id[slot];
-        uint32_t pid         = state->pid[slot];
-        uint64_t submit_tsc  = state->submit_tsc[slot];
-
-        bool error = (port->tfd & 0x01);
-
-        if (error)
-        {
-            async_io_mark_failed(event_id);
-        }
-        else
-        {
-            async_io_mark_completed_with_latency(event_id, submit_tsc);
-        }
-
-        // Deliver I/O completion result directly to the process's ResultRing
-        process_t *proc = process_find(pid);
-        if (proc && proc->result_ring_phys)
-        {
-            ResultRing *rring = (ResultRing *)vmm_phys_to_virt(proc->result_ring_phys);
-            if (rring)
-            {
-                Result result;
-                result.error_code  = error ? ERR_IO : OK;
-                result.data_length = 0;
-                result.data_addr   = 0;
-                result.sender_pid  = 0;
-                result._reserved   = 0;
-                result_ring_push(rring, &result);
-            }
-        }
-
-        ahci_free_slot(0, slot);
-    }
-}
