@@ -262,7 +262,7 @@ $(IMAGE): $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(SHELL_BIN) $(PROCA_BIN) $(
 	@echo "  Creating TagFS v1..."
 	@$(TAGFS_TOOL) $@ \
 		$(KERNEL_BIN)   "system" \
-		$(SHELL_BIN)    "utility,system,app,hw_vga,hw_kb,storage,autostart" \
+		$(SHELL_BIN)    "utility,system,app,autostart" \
 		$(PROCA_BIN)    "app" \
 		$(PROCB_BIN)    "app" \
 		$(TODAY_BIN)    "app,utility" \

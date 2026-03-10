@@ -65,9 +65,8 @@ int vga_puts(const char* str) {
             return -(int)result.error_code;
         }
 
-        uint8_t* data = (uint8_t*)(uintptr_t)result.data_addr;
-        uint16_t chars_written = ((uint16_t)data[0] << 8) | (uint16_t)data[1];
-        total_written += chars_written;
+        uint8_t* rdata = (uint8_t*)(uintptr_t)result.data_addr;
+        total_written += rdata[1];
         offset += chunk_size;
     }
 

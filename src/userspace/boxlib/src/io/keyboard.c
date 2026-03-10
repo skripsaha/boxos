@@ -9,11 +9,10 @@ static void kb_sleep(uint32_t iterations) {
     }
 }
 
-static uint32_t kb_decode_u32(const uint8_t* data, size_t offset) {
-    return ((uint32_t)data[offset] << 24) |
-           ((uint32_t)data[offset + 1] << 16) |
-           ((uint32_t)data[offset + 2] << 8) |
-           ((uint32_t)data[offset + 3]);
+static uint32_t kb_decode_u32(const void* ptr) {
+    uint32_t v;
+    memcpy(&v, ptr, sizeof(v));
+    return v;
 }
 
 int kb_getchar(void) {
@@ -113,7 +112,7 @@ int kb_readline(char* buffer, size_t size, bool echo) {
             }
 
             uint8_t* data = (uint8_t*)(uintptr_t)result.data_addr;
-            uint32_t length = kb_decode_u32(data, 0);
+            uint32_t length = kb_decode_u32(data);
 
             if (length == 0) {
                 buffer[0] = '\0';
@@ -181,8 +180,8 @@ int kb_status(kb_status_t* status) {
     }
 
     uint8_t* data = (uint8_t*)(uintptr_t)result.data_addr;
-    status->available = kb_decode_u32(data, 0);
-    status->buffer_size = kb_decode_u32(data, 4);
+    status->available = kb_decode_u32(data);
+    status->buffer_size = kb_decode_u32(data + 4);
 
     return 0;
 }

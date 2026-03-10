@@ -136,7 +136,7 @@ void storage_deck_init(void);
 int storage_deck_handler(Pocket *event, process_t* proc);
 
 // Synchronous I/O handlers (bypass async path)
-int handle_obj_read(Pocket *event);
-int handle_obj_write(Pocket *event);
+int handle_obj_read(Pocket *event, process_t *proc);
+int handle_obj_write(Pocket *event, process_t *proc);
 
 #endif // STORAGE_DECK_H

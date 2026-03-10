@@ -59,48 +59,33 @@ static void* get_request_data(Pocket* pocket, process_t* proc) {
 
 // --- Security Gate ---
 
-static bool system_deck_check_permission(process_t* proc, uint8_t opcode) {
-    if (!proc) return false;
-    uint64_t t = proc->tag_bits;
+static bool system_deck_gate(uint64_t t, uint8_t opcode) {
+    uint64_t app_or_higher = g_well_known.app | g_well_known.utility | g_well_known.system;
+    uint64_t util_or_sys   = g_well_known.utility | g_well_known.system;
 
     switch (opcode) {
-        case SYSTEM_OP_PROC_SPAWN:
-        case SYSTEM_OP_PROC_EXEC:
-            return t & (g_well_known.utility | g_well_known.system);
+        // IPC — any app can route and listen
+        case SYSTEM_OP_ROUTE:
+        case SYSTEM_OP_ROUTE_TAG:
+        case SYSTEM_OP_LISTEN:
+            return !!(t & app_or_higher);
 
-        case SYSTEM_OP_PROC_KILL:
-        case SYSTEM_OP_PROC_INFO:
-            return true;
-
+        // Buffers — any app can allocate
         case SYSTEM_OP_BUF_ALLOC:
         case SYSTEM_OP_BUF_FREE:
         case SYSTEM_OP_BUF_RESIZE:
-            return t & (g_well_known.app | g_well_known.utility | g_well_known.system);
+            return !!(t & app_or_higher);
 
-        case SYSTEM_OP_TAG_ADD:
-        case SYSTEM_OP_TAG_REMOVE:
-            return t & (g_well_known.utility | g_well_known.system);
-
+        // Info queries — anyone
+        case SYSTEM_OP_PROC_INFO:
         case SYSTEM_OP_TAG_CHECK:
         case SYSTEM_OP_CTX_USE:
+        case SYSTEM_OP_PROC_KILL:
             return true;
 
-        case SYSTEM_OP_DEFRAG_FILE:
-        case SYSTEM_OP_FRAG_SCORE:
-            return t & (g_well_known.utility | g_well_known.system);
-
-        case SYSTEM_OP_ROUTE:
-        case SYSTEM_OP_ROUTE_TAG:
-            return t & (g_well_known.app | g_well_known.utility | g_well_known.system);
-
-        case SYSTEM_OP_LISTEN:
-            return t & (g_well_known.app | g_well_known.utility | g_well_known.system);
-
-        case SYSTEM_OP_PERF_DUMP:
-            return t & (g_well_known.utility | g_well_known.system);
-
+        // Everything else (spawn, exec, tags, defrag, perf) — utility+
         default:
-            return false;
+            return !!(t & util_or_sys);
     }
 }
 
@@ -112,34 +97,29 @@ bool system_security_gate(process_t* proc, uint8_t deck_id, uint8_t opcode) {
     if (t & g_well_known.god)     return true;
     if (t & g_well_known.stopped) return false;
 
+    uint64_t app_or_higher = g_well_known.app | g_well_known.utility | g_well_known.system;
+
     switch (deck_id) {
-        case 0x01:  // Operations Deck — open to all
+        case DECK_EXECUTION:
             return true;
 
-        case 0x02: {  // Storage Deck
-            bool is_write = (opcode == 0x02 || opcode == 0x03 || opcode == 0x06 ||
-                             opcode == 0x07 || opcode == 0x08 || opcode == 0x09 ||
-                             opcode == 0x10 || opcode == 0x11);
-            bool is_read  = (opcode == 0x01 || opcode == 0x05 || opcode == 0x0A);
+        case DECK_OPERATIONS:
+            return !!(t & app_or_higher);
 
-            if (is_write)
-                return t & (g_well_known.utility | g_well_known.system);
-            if (is_read)
-                return t & (g_well_known.app | g_well_known.utility | g_well_known.system);
-            return t & g_well_known.system;
-        }
+        case DECK_STORAGE:
+            return !!(t & app_or_higher);
 
-        case 0x03:  // Hardware Deck
-            return t & (g_well_known.system | g_well_known.bypass);
+        case DECK_HARDWARE:
+            return !!(t & (g_well_known.system | g_well_known.bypass));
 
-        case 0x04:  // Network Deck
-            return t & (g_well_known.network | g_well_known.system);
+        case DECK_NETWORK:
+            return !!(t & g_well_known.network);
 
         case DECK_SYSTEM:
-            return system_deck_check_permission(proc, opcode);
+            return system_deck_gate(t, opcode);
 
         default:
-            return false;
+            return true;
     }
 }
 

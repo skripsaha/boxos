@@ -12,10 +12,11 @@
 #include "async_io.h"
 #include "kernel_config.h"
 #include "atomics.h"
+#include "deck_utils.h"
 
 static int parse_tag_list(const char *tag_string, const char *tags[], uint32_t max_tags, char buffer[16][32]);
-int handle_obj_read(Pocket *pocket);
-int handle_obj_write(Pocket *pocket);
+int handle_obj_read(Pocket *pocket, process_t *proc);
+int handle_obj_write(Pocket *pocket, process_t *proc);
 
 static atomic_u32_t async_id_counter = 0;
 
@@ -24,20 +25,8 @@ static inline uint32_t next_async_id(void)
     return atomic_fetch_add_u32(&async_id_counter, 1);
 }
 
-static inline uint32_t read_u32(const uint8_t *data, size_t offset)
-{
-    uint32_t value;
-    memcpy(&value, data + offset, sizeof(uint32_t));
-    return value;
-}
-
-static inline void write_u32(uint8_t *data, size_t offset, uint32_t value)
-{
-    memcpy(data + offset, &value, sizeof(uint32_t));
-}
-
 // Resolve pocket->data_addr to a kernel-accessible pointer.
-// If proc is provided, uses it directly (avoids process_find).
+// Uses proc directly; falls back to process_find if proc is NULL.
 // Returns NULL if process not found, address not mapped, or data_length is 0.
 static void *pocket_data_ptr(Pocket *pocket, process_t *proc)
 {
@@ -65,7 +54,7 @@ void storage_deck_init(void)
     debug_printf("[Storage Deck] Initialization complete\n");
 }
 
-static int handle_tag_query(Pocket *pocket)
+static int handle_tag_query(Pocket *pocket, process_t *proc)
 {
     TagFSState *state = tagfs_get_state();
     if (!state->initialized)
@@ -75,7 +64,7 @@ static int handle_tag_query(Pocket *pocket)
 
     spin_lock(&state->lock);
 
-    uint8_t *data = pocket_data_ptr(pocket, NULL);
+    uint8_t *data = pocket_data_ptr(pocket, proc);
     if (!data)
     {
         spin_unlock(&state->lock);
@@ -92,7 +81,7 @@ static int handle_tag_query(Pocket *pocket)
     uint32_t *file_ids = kmalloc(max_results * sizeof(uint32_t));
     if (!file_ids)
     {
-        write_u32(data, 0, 0);
+        deck_write_u32(data, 0);
         spin_unlock(&state->lock);
         return OK;
     }
@@ -136,7 +125,7 @@ static int handle_tag_query(Pocket *pocket)
         count = tagfs_list_all_files(file_ids, max_results);
     }
 
-    write_u32(data, 0, (uint32_t)count);
+    deck_write_u32(data, (uint32_t)count);
     memcpy(data + sizeof(uint32_t), file_ids, count * sizeof(uint32_t));
     kfree(file_ids);
 
@@ -144,7 +133,7 @@ static int handle_tag_query(Pocket *pocket)
     return OK;
 }
 
-static int handle_tag_set(Pocket *pocket)
+static int handle_tag_set(Pocket *pocket, process_t *proc)
 {
     TagFSState *state = tagfs_get_state();
     if (!state->initialized)
@@ -154,14 +143,14 @@ static int handle_tag_set(Pocket *pocket)
 
     spin_lock(&state->lock);
 
-    uint8_t *data = pocket_data_ptr(pocket, NULL);
+    uint8_t *data = pocket_data_ptr(pocket, proc);
     if (!data)
     {
         spin_unlock(&state->lock);
         return ERR_INVALID_ARGUMENT;
     }
 
-    uint32_t file_id = read_u32(data, 0);
+    uint32_t file_id = deck_read_u32(data);
     const char *tag_string = (const char *)(data + sizeof(uint32_t));
 
     char key[64];
@@ -183,7 +172,7 @@ static int handle_tag_set(Pocket *pocket)
     return OK;
 }
 
-static int handle_tag_unset(Pocket *pocket)
+static int handle_tag_unset(Pocket *pocket, process_t *proc)
 {
     TagFSState *state = tagfs_get_state();
     if (!state->initialized)
@@ -193,14 +182,14 @@ static int handle_tag_unset(Pocket *pocket)
 
     spin_lock(&state->lock);
 
-    uint8_t *data = pocket_data_ptr(pocket, NULL);
+    uint8_t *data = pocket_data_ptr(pocket, proc);
     if (!data)
     {
         spin_unlock(&state->lock);
         return ERR_INVALID_ARGUMENT;
     }
 
-    uint32_t file_id = read_u32(data, 0);
+    uint32_t file_id = deck_read_u32(data);
     const char *key = (const char *)(data + sizeof(uint32_t));
 
     if (tagfs_remove_tag_string(file_id, key) != 0)
@@ -253,9 +242,9 @@ static int parse_tag_list(const char *tag_string, const char *tags[], uint32_t m
 }
 
 #ifdef CONFIG_ATA_DMA_ASYNC
-static int handle_obj_read_async(Pocket *pocket)
+static int handle_obj_read_async(Pocket *pocket, process_t *proc)
 {
-    uint8_t *data = pocket_data_ptr(pocket, NULL);
+    uint8_t *data = pocket_data_ptr(pocket, proc);
     if (!data)
     {
         pocket->error_code = ERR_INVALID_ARGUMENT;
@@ -264,13 +253,6 @@ static int handle_obj_read_async(Pocket *pocket)
 
     obj_read_event_t *req = (obj_read_event_t *)data;
     obj_read_response_t *resp = (obj_read_response_t *)data;
-
-    if (req->length > 176)
-    {
-        resp->error_code = ERR_INVALID_ARGUMENT;
-        pocket->error_code = ERR_INVALID_ARGUMENT;
-        return -1;
-    }
 
     uint32_t file_id = req->file_id;
     uint64_t offset = req->offset;
@@ -310,7 +292,7 @@ static int handle_obj_read_async(Pocket *pocket)
     else if (rc == ERR_IO_QUEUE_FULL)
     {
         debug_printf("[Storage Deck] Async queue full, falling back to sync OBJ_READ\n");
-        return handle_obj_read(pocket);
+        return handle_obj_read(pocket, proc);
     }
     else
     {
@@ -320,9 +302,9 @@ static int handle_obj_read_async(Pocket *pocket)
     }
 }
 
-static int handle_obj_write_async(Pocket *pocket)
+static int handle_obj_write_async(Pocket *pocket, process_t *proc)
 {
-    uint8_t *data = pocket_data_ptr(pocket, NULL);
+    uint8_t *data = pocket_data_ptr(pocket, proc);
     if (!data)
     {
         pocket->error_code = ERR_INVALID_ARGUMENT;
@@ -331,13 +313,6 @@ static int handle_obj_write_async(Pocket *pocket)
 
     obj_write_event_t *req = (obj_write_event_t *)data;
     obj_write_response_t *resp = (obj_write_response_t *)data;
-
-    if (req->length > 168)
-    {
-        resp->error_code = ERR_INVALID_ARGUMENT;
-        pocket->error_code = ERR_INVALID_ARGUMENT;
-        return -1;
-    }
 
     uint32_t file_id = req->file_id;
     uint64_t offset = req->offset;
@@ -395,7 +370,7 @@ static int handle_obj_write_async(Pocket *pocket)
     else if (rc == ERR_IO_QUEUE_FULL)
     {
         debug_printf("[Storage Deck] Async queue full, falling back to sync OBJ_WRITE\n");
-        return handle_obj_write(pocket);
+        return handle_obj_write(pocket, proc);
     }
     else
     {
@@ -406,9 +381,9 @@ static int handle_obj_write_async(Pocket *pocket)
 }
 #endif
 
-int handle_obj_read(Pocket *pocket)
+int handle_obj_read(Pocket *pocket, process_t *proc)
 {
-    uint8_t *data = pocket_data_ptr(pocket, NULL);
+    uint8_t *data = pocket_data_ptr(pocket, proc);
     if (!data)
     {
         pocket->error_code = ERR_INVALID_ARGUMENT;
@@ -417,13 +392,6 @@ int handle_obj_read(Pocket *pocket)
 
     obj_read_event_t *req = (obj_read_event_t *)data;
     obj_read_response_t *resp = (obj_read_response_t *)data;
-
-    if (req->length > 176)
-    {
-        resp->error_code = ERR_INVALID_ARGUMENT;
-        pocket->error_code = ERR_INVALID_ARGUMENT;
-        return -1;
-    }
 
     uint32_t file_id = req->file_id;
     uint64_t offset = req->offset;
@@ -461,9 +429,9 @@ int handle_obj_read(Pocket *pocket)
     }
 }
 
-int handle_obj_write(Pocket *pocket)
+int handle_obj_write(Pocket *pocket, process_t *proc)
 {
-    uint8_t *data = pocket_data_ptr(pocket, NULL);
+    uint8_t *data = pocket_data_ptr(pocket, proc);
     if (!data)
     {
         pocket->error_code = ERR_INVALID_ARGUMENT;
@@ -472,13 +440,6 @@ int handle_obj_write(Pocket *pocket)
 
     obj_write_event_t *req = (obj_write_event_t *)data;
     obj_write_response_t *resp = (obj_write_response_t *)data;
-
-    if (req->length > 168)
-    {
-        resp->error_code = ERR_INVALID_ARGUMENT;
-        pocket->error_code = ERR_INVALID_ARGUMENT;
-        return -1;
-    }
 
     uint32_t file_id = req->file_id;
     uint64_t offset = req->offset;
@@ -539,9 +500,9 @@ int handle_obj_write(Pocket *pocket)
     }
 }
 
-static int handle_obj_create(Pocket *pocket)
+static int handle_obj_create(Pocket *pocket, process_t *proc)
 {
-    uint8_t *data = pocket_data_ptr(pocket, NULL);
+    uint8_t *data = pocket_data_ptr(pocket, proc);
     if (!data)
     {
         pocket->error_code = ERR_INVALID_ARGUMENT;
@@ -566,7 +527,7 @@ static int handle_obj_create(Pocket *pocket)
     char tag_buffer[16][32];
     uint32_t tag_count = 0;
 
-    /* Auto-label tag is now handled by tagfs_create_file() — no manual stem here */
+    /* Auto-label tag is now handled by tagfs_create_file() -- no manual stem here */
 
     if (req->tags[0] != '\0')
     {
@@ -586,7 +547,6 @@ static int handle_obj_create(Pocket *pocket)
         tag_count++;
     }
 
-    // Intern tag strings to get tag_ids
     TagFSState *tfs_state = tagfs_get_state();
     uint16_t tag_id_buf[16];
     uint16_t intern_count = 0;
@@ -625,9 +585,9 @@ static int handle_obj_create(Pocket *pocket)
     }
 }
 
-static int handle_obj_delete(Pocket *pocket)
+static int handle_obj_delete(Pocket *pocket, process_t *proc)
 {
-    uint8_t *data = pocket_data_ptr(pocket, NULL);
+    uint8_t *data = pocket_data_ptr(pocket, proc);
     if (!data)
     {
         pocket->error_code = ERR_INVALID_ARGUMENT;
@@ -699,9 +659,9 @@ static int handle_obj_delete(Pocket *pocket)
     }
 }
 
-static int handle_obj_rename(Pocket *pocket)
+static int handle_obj_rename(Pocket *pocket, process_t *proc)
 {
-    uint8_t *data = pocket_data_ptr(pocket, NULL);
+    uint8_t *data = pocket_data_ptr(pocket, proc);
     if (!data)
     {
         pocket->error_code = ERR_INVALID_ARGUMENT;
@@ -740,9 +700,9 @@ static int handle_obj_rename(Pocket *pocket)
     return result;
 }
 
-static int handle_obj_get_info(Pocket *pocket)
+static int handle_obj_get_info(Pocket *pocket, process_t *proc)
 {
-    uint8_t *data = pocket_data_ptr(pocket, NULL);
+    uint8_t *data = pocket_data_ptr(pocket, proc);
     if (!data)
     {
         pocket->error_code = ERR_INVALID_ARGUMENT;
@@ -808,9 +768,9 @@ static int handle_obj_get_info(Pocket *pocket)
     return 0;
 }
 
-static int handle_context_set(Pocket *pocket)
+static int handle_context_set(Pocket *pocket, process_t *proc)
 {
-    uint8_t *data = pocket_data_ptr(pocket, NULL);
+    uint8_t *data = pocket_data_ptr(pocket, proc);
     if (!data)
         return ERR_INVALID_ARGUMENT;
 
@@ -849,7 +809,6 @@ static int handle_context_clear(Pocket *pocket)
 
 int storage_deck_handler(Pocket *pocket, process_t *proc)
 {
-    (void)proc;  // TODO: thread through to pocket_data_ptr for full elimination
     if (!pocket_validate(pocket))
     {
         return ERR_INVALID_ARGUMENT;
@@ -870,42 +829,42 @@ int storage_deck_handler(Pocket *pocket, process_t *proc)
     switch (opcode)
     {
     case STORAGE_TAG_QUERY:
-        result = handle_tag_query(pocket);
+        result = handle_tag_query(pocket, proc);
         break;
     case STORAGE_TAG_SET:
-        result = handle_tag_set(pocket);
+        result = handle_tag_set(pocket, proc);
         break;
     case STORAGE_TAG_UNSET:
-        result = handle_tag_unset(pocket);
+        result = handle_tag_unset(pocket, proc);
         break;
     case STORAGE_OBJ_READ:
 #ifdef CONFIG_ATA_DMA_ASYNC
-        result = handle_obj_read_async(pocket);
+        result = handle_obj_read_async(pocket, proc);
 #else
-        result = handle_obj_read(pocket);
+        result = handle_obj_read(pocket, proc);
 #endif
         break;
     case STORAGE_OBJ_WRITE:
 #ifdef CONFIG_ATA_DMA_ASYNC
-        result = handle_obj_write_async(pocket);
+        result = handle_obj_write_async(pocket, proc);
 #else
-        result = handle_obj_write(pocket);
+        result = handle_obj_write(pocket, proc);
 #endif
         break;
     case STORAGE_OBJ_CREATE:
-        result = handle_obj_create(pocket);
+        result = handle_obj_create(pocket, proc);
         break;
     case STORAGE_OBJ_DELETE:
-        result = handle_obj_delete(pocket);
+        result = handle_obj_delete(pocket, proc);
         break;
     case STORAGE_OBJ_RENAME:
-        result = handle_obj_rename(pocket);
+        result = handle_obj_rename(pocket, proc);
         break;
     case STORAGE_OBJ_GET_INFO:
-        result = handle_obj_get_info(pocket);
+        result = handle_obj_get_info(pocket, proc);
         break;
     case STORAGE_CONTEXT_SET:
-        result = handle_context_set(pocket);
+        result = handle_context_set(pocket, proc);
         break;
     case STORAGE_CONTEXT_CLEAR:
         result = handle_context_clear(pocket);
