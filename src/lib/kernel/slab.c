@@ -6,7 +6,7 @@
 static SlabAllocator g_slab;
 
 static const size_t SLAB_SIZES[SLAB_NUM_CLASSES] = {
-    16, 32, 64, 128, 256, 512, 1024, 2048, 4096
+    16, 32, 64, 128, 256, 512, 1024, 2048
 };
 
 // Find size class index for a given size. Returns -1 if too large.
