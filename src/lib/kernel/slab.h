@@ -4,11 +4,12 @@
 #include "ktypes.h"
 #include "klib.h"
 
-#define SLAB_NUM_CLASSES     9
+#define SLAB_NUM_CLASSES     8
 #define SLAB_PAGE_SIZE       4096
-#define SLAB_LARGE_THRESHOLD 4096
+#define SLAB_LARGE_THRESHOLD 2048
 
-// Size classes: 16, 32, 64, 128, 256, 512, 1024, 2048, 4096
+// Size classes: 16, 32, 64, 128, 256, 512, 1024, 2048
+// 4096 removed: obj_size == page_size leaves 0 slots after header.
 // Each SlabPage header sits at offset 0 of a PMM page.
 // Free slots use uint16_t offsets from page start (no rebasing needed).
 
