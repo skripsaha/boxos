@@ -298,9 +298,12 @@ vmm_context_t* vmm_create_context(void) {
     spinlock_init(&ctx->lock);
 
     if (kernel_context && kernel_context->pml4) {
-        // When Pull Map is active, user contexts get clean PML4[0] — no identity map.
-        // When Pull Map is NOT active (during vmm_init), copy identity-mapped PD for compatibility.
-        if (!g_pull_map_active) {
+        // Deep copy PML4[0] identity mapping so each context has its own PDPT/PD.
+        // Required for: (1) ISR code at 0x100000+ reachable via identity mapping,
+        // (2) Cabin can split 2MB large pages for 4KB mappings at 0x1000+.
+        // USER bit on intermediate levels lets Cabin pages work; kernel pages
+        // stay protected (no USER on the actual PT entries).
+        {
             uintptr_t new_pdpt_phys = vmm_alloc_page_table();
             if (!new_pdpt_phys) {
                 vmm_free_page_table(pml4_phys);
@@ -340,11 +343,6 @@ vmm_context_t* vmm_create_context(void) {
             }
 
             ctx->pml4->entries[0] = vmm_make_pte(new_pdpt_phys, VMM_FLAGS_KERNEL_RW | VMM_FLAG_USER);
-        } else {
-            // Pull Map active — share kernel's PML4[0] for supervisor access only.
-            // Kernel ISR code at 0x100000+ must be reachable when interrupts fire
-            // in user mode. No USER bit — ring 3 cannot access these pages.
-            ctx->pml4->entries[0] = kernel_context->pml4->entries[0];
         }
 
         // Upper half (256..511) is kernel space — shared directly
@@ -383,12 +381,6 @@ static void vmm_free_user_space_tables(vmm_context_t* ctx) {
     for (int p4 = 0; p4 < 256; p4++) {
         pte_t pml4_entry = ctx->pml4->entries[p4];
         if (!(pml4_entry & VMM_FLAG_PRESENT)) continue;
-
-        // After Pull Map, PML4[0] is shared from kernel context — don't free it
-        if (p4 == 0 && g_pull_map_active) {
-            ctx->pml4->entries[0] = 0;
-            continue;
-        }
 
         uintptr_t pdpt_phys = vmm_pte_to_phys(pml4_entry);
         page_table_t* pdpt = (page_table_t*)vmm_phys_to_virt(pdpt_phys);
@@ -610,9 +602,9 @@ vmm_map_result_t vmm_map_page(vmm_context_t* ctx, uintptr_t virt_addr,
             return result;
         }
 
-        // Allow remapping identity-mapped kernel pages (only pre-Pull Map)
-        bool is_identity_map = (!g_pull_map_active) &&
-                              (existing_phys == virt_addr) &&
+        // Allow remapping identity-mapped kernel pages (phys == virt, supervisor-only)
+        // Cabin setup overrides these for CabinInfo/PocketRing at 0x1000-0xBFFF
+        bool is_identity_map = (existing_phys == virt_addr) &&
                               !(existing_flags & VMM_FLAG_USER);
 
         if (!is_identity_map) {
