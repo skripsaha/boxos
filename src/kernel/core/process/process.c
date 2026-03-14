@@ -261,7 +261,7 @@ process_t *process_create(const char *tags)
                  proc->pid);
 
     memset(&proc->context, 0, sizeof(ProcessContext));
-    proc->context.cr3 = proc->cabin->pml4_phys;
+    proc->context.cr3 = vmm_build_cr3(proc->cabin);
     proc->context.rflags = 0x202;
     proc->context.cs = GDT_USER_CODE;
     proc->context.ds = GDT_USER_DATA;
@@ -1000,7 +1000,9 @@ void process_start_initial(process_t *proc)
     tss_set_rsp0((uint64_t)proc->kernel_stack_top);
     notify_set_kernel_rsp((uint64_t)proc->kernel_stack_top);
 
-    __asm__ volatile("mov %0, %%cr3" : : "r"(proc->context.cr3) : "memory");
+    uint64_t target_cr3 = proc->context.cr3;
+    if (vmm_pcid_active()) target_cr3 |= (1ULL << 63);  // NOFLUSH
+    __asm__ volatile("mov %0, %%cr3" : : "r"(target_cr3) : "memory");
 
     uint64_t verify_cr3;
     __asm__ volatile("mov %%cr3, %0" : "=r"(verify_cr3));

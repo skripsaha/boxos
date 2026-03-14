@@ -1,6 +1,7 @@
 #include "context_switch.h"
 #include "scheduler.h"
 #include "process.h"
+#include "vmm.h"
 #include "klib.h"
 #include "tss.h"
 #include "idt.h"
@@ -19,7 +20,7 @@ void context_save(process_t* proc, ProcessContext* ctx) {
         return;
     }
 
-    ctx->cr3 = proc->cabin->pml4_phys;
+    ctx->cr3 = vmm_build_cr3(proc->cabin);
 }
 
 void context_restore(process_t* proc, ProcessContext* ctx) {
@@ -30,7 +31,9 @@ void context_restore(process_t* proc, ProcessContext* ctx) {
     uint64_t current_cr3;
     __asm__ volatile("mov %%cr3, %0" : "=r"(current_cr3));
     if (current_cr3 != ctx->cr3) {
-        __asm__ volatile("mov %0, %%cr3" : : "r"(ctx->cr3) : "memory");
+        uint64_t new_cr3 = ctx->cr3;
+        if (vmm_pcid_active()) new_cr3 |= (1ULL << 63);  // NOFLUSH
+        __asm__ volatile("mov %0, %%cr3" : : "r"(new_cr3) : "memory");
     }
 
     if (ctx->fpu_initialized) {
@@ -95,7 +98,7 @@ void context_save_from_frame(process_t* proc, interrupt_frame_t* frame) {
     if (!proc->cabin) {
         return;
     }
-    ctx->cr3 = proc->cabin->pml4_phys;
+    ctx->cr3 = vmm_build_cr3(proc->cabin);
 
     proc->started = true;
 }
@@ -107,11 +110,13 @@ void context_restore_to_frame(process_t* proc, interrupt_frame_t* frame) {
 
     ProcessContext* ctx = &proc->context;
 
-    // Skip CR3 reload if returning to same address space (avoids full TLB flush)
+    // Skip CR3 reload if returning to same address space
     uint64_t current_cr3;
     __asm__ volatile("mov %%cr3, %0" : "=r"(current_cr3));
     if (current_cr3 != ctx->cr3) {
-        __asm__ volatile("mov %0, %%cr3" : : "r"(ctx->cr3) : "memory");
+        uint64_t new_cr3 = ctx->cr3;
+        if (vmm_pcid_active()) new_cr3 |= (1ULL << 63);  // NOFLUSH
+        __asm__ volatile("mov %0, %%cr3" : : "r"(new_cr3) : "memory");
     }
 
     frame->rax = ctx->rax;
