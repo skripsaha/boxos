@@ -52,12 +52,12 @@ static inline BuddyFreeNode* phys_to_node(uintptr_t phys) {
 
 // Get physical address from a node pointer
 static inline uintptr_t node_to_phys(BuddyFreeNode* node) {
-    return vmm_virt_to_phys_direct((uintptr_t)node);
+    return vmm_virt_to_phys_direct((void*)node);
 }
 
 // --- Free list operations (doubly-linked, intrusive) ---
 
-static void list_insert(BuddyFreeList* list, BuddyFreeNode* node, int order) {
+static void buddy_list_insert(BuddyFreeList* list, BuddyFreeNode* node, int order) {
     node->order = (uint8_t)order;
     node->prev = NULL;
     node->next = list->head;
@@ -68,7 +68,7 @@ static void list_insert(BuddyFreeList* list, BuddyFreeNode* node, int order) {
     list->count++;
 }
 
-static void list_remove(BuddyFreeList* list, BuddyFreeNode* node) {
+static void buddy_list_remove(BuddyFreeList* list, BuddyFreeNode* node) {
     if (node->prev) {
         node->prev->next = node->next;
     } else {
@@ -151,7 +151,7 @@ void buddy_free_range(BuddyZone* zone, uintptr_t start, uintptr_t end) {
 
         // Insert into free list
         BuddyFreeNode* node = phys_to_node(addr);
-        list_insert(&zone->free_lists[order], node, order);
+        buddy_list_insert(&zone->free_lists[order], node, order);
 
         addr += block_pages * BUDDY_PAGE_SIZE;
     }
@@ -184,7 +184,7 @@ void buddy_reserve_range(BuddyZone* zone, uintptr_t start, uintptr_t end) {
             // Check if block overlaps with reserved range
             if (block_phys < end && block_end > start) {
                 // Remove from free list
-                list_remove(&zone->free_lists[o], node);
+                buddy_list_remove(&zone->free_lists[o], node);
                 zone->free_count -= block_pages;
                 alloc_map_mark_range(zone, page_index(zone, block_phys), block_pages, true);
 
@@ -224,7 +224,7 @@ void* buddy_alloc(BuddyZone* zone, size_t pages) {
     // Pop block from free list
     BuddyFreeNode* block_node = zone->free_lists[o].head;
     uintptr_t block_phys = node_to_phys(block_node);
-    list_remove(&zone->free_lists[o], block_node);
+    buddy_list_remove(&zone->free_lists[o], block_node);
 
     // Split down to target order
     while (o > order) {
@@ -233,7 +233,7 @@ void* buddy_alloc(BuddyZone* zone, size_t pages) {
 
         // Insert upper half (buddy) into free list at order o
         BuddyFreeNode* buddy_node = phys_to_node(buddy_phys);
-        list_insert(&zone->free_lists[o], buddy_node, o);
+        buddy_list_insert(&zone->free_lists[o], buddy_node, o);
     }
 
     // Mark allocated in alloc_map
@@ -295,7 +295,7 @@ void buddy_free(BuddyZone* zone, void* addr, size_t pages) {
         if (buddy_node->order != (uint8_t)order) break;
 
         // Remove buddy from its free list
-        list_remove(&zone->free_lists[order], buddy_node);
+        buddy_list_remove(&zone->free_lists[order], buddy_node);
 
         // Merged block starts at min(block, buddy)
         if (buddy_phys < block) block = buddy_phys;
@@ -304,7 +304,7 @@ void buddy_free(BuddyZone* zone, void* addr, size_t pages) {
 
     // Insert coalesced block
     BuddyFreeNode* node = phys_to_node(block);
-    list_insert(&zone->free_lists[order], node, order);
+    buddy_list_insert(&zone->free_lists[order], node, order);
 
     spin_unlock(&zone->lock);
 }

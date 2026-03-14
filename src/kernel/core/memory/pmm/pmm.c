@@ -1,4 +1,5 @@
 #include "pmm.h"
+#include "buddy.h"
 #include "vmm.h"
 #include "e820.h"
 #include "klib.h"
@@ -6,28 +7,13 @@
 #include "cpuid.h"
 #include "boot_info.h"
 
-typedef struct {
-    uintptr_t base;
-    size_t pages;
-    uint8_t* bitmap;
-    uintptr_t bitmap_phys;
-    spinlock_t lock;
-    size_t last_free;
-    size_t free_count;  // maintained incrementally — avoids O(n) scan in pmm_free_pages()
-} pmm_zone_t;
-
-static pmm_zone_t pmm_zone;
+static BuddyZone pmm_buddy;
 static bool pmm_initialized = false;
 
 static uint8_t pmm_maxphyaddr = 0;
 static uint64_t pmm_max_phys_addr = 0;
 
 static uint64_t pmm_mem_end = 0;
-
-static void pmm_reserve_region(uintptr_t base, uintptr_t end, const char* name);
-static void pmm_set_bit(size_t bit, pmm_frame_state_t state);
-static pmm_frame_state_t pmm_get_bit(size_t bit);
-static size_t pmm_find_free_sequence(size_t count);
 
 static void pmm_init_maxphyaddr(void) {
     pmm_maxphyaddr = cpuid_get_maxphyaddr();
@@ -67,7 +53,6 @@ void pmm_init(void) {
         return;
     }
 
-    // detect MAXPHYADDR before filtering memory to avoid Reserved Bit Violation
     pmm_init_maxphyaddr();
 
     debug_printf("[PMM] Fetching e820 memory map...\n");
@@ -132,43 +117,41 @@ void pmm_init(void) {
         panic("[PMM] ERROR: Not enough usable RAM!");
     }
 
-    // Place bitmap after all boot infrastructure (kernel + page tables + stack)
-    // boot_info->stack_base is the highest address used by the bootloader
+    // Place alloc_map after all boot infrastructure (kernel + page tables + stack)
     boot_info_t *bi = boot_info_get();
-    uintptr_t bitmap_start;
+    uintptr_t map_start;
     if (boot_info_valid(bi)) {
-        bitmap_start = ALIGN_UP((uintptr_t)bi->stack_base, 4096);
+        map_start = ALIGN_UP((uintptr_t)bi->stack_base, 4096);
     } else {
-        // Fallback: place after kernel (use physical address)
         extern uintptr_t _kernel_phys_end;
-        bitmap_start = ALIGN_UP((uintptr_t)&_kernel_phys_end, 4096);
-    }
-    pmm_zone.bitmap = (uint8_t*)bitmap_start;
-    pmm_zone.bitmap_phys = bitmap_start;
-    debug_printf("[PMM] Bitmap placed at %p (after boot infrastructure)\n", pmm_zone.bitmap);
-
-    size_t temp_pages = (mem_end - (uintptr_t)pmm_zone.bitmap) / PMM_PAGE_SIZE;
-    size_t bitmap_size = (temp_pages + 7) / 8;
-    debug_printf("[PMM] Bitmap size = %d bytes\n", (int)bitmap_size);
-
-    pmm_zone.base = ALIGN_UP((uintptr_t)pmm_zone.bitmap + bitmap_size, 4096);
-    debug_printf("[PMM] Managing pages from 0x%p\n", (void*)pmm_zone.base);
-
-    if (pmm_zone.base >= mem_end) {
-        panic("[PMM] FATAL: Kernel loaded at 0x%lx beyond usable memory (max 0x%lx, MAXPHYADDR %u bits)!",
-              pmm_zone.base, mem_end - 1, pmm_maxphyaddr);
+        map_start = ALIGN_UP((uintptr_t)&_kernel_phys_end, 4096);
     }
 
-    pmm_zone.pages = (mem_end - pmm_zone.base) / PMM_PAGE_SIZE;
-    debug_printf("[PMM] Total pages = %d\n", (int)pmm_zone.pages);
+    uint8_t* alloc_map = (uint8_t*)map_start;
+    uintptr_t alloc_map_phys = map_start;
+    size_t temp_pages = (mem_end - map_start) / PMM_PAGE_SIZE;
+    size_t alloc_map_size = (temp_pages + 7) / 8;
+    debug_printf("[PMM] Buddy alloc_map at %p (%zu bytes)\n", alloc_map, alloc_map_size);
 
-    if (pmm_zone.pages == 0) {
+    uintptr_t zone_base = ALIGN_UP(map_start + alloc_map_size, 4096);
+    debug_printf("[PMM] Buddy zone base: 0x%lx\n", zone_base);
+
+    if (zone_base >= mem_end) {
+        panic("[PMM] FATAL: Kernel too large for available memory!");
+    }
+
+    size_t total_pages = (mem_end - zone_base) / PMM_PAGE_SIZE;
+    debug_printf("[PMM] Buddy total pages: %zu\n", total_pages);
+
+    if (total_pages == 0) {
         panic("[PMM] ERROR: No usable pages!");
     }
 
-    memset(pmm_zone.bitmap, 0xFF, bitmap_size);
+    // Initialize buddy allocator (marks all pages as allocated)
+    buddy_init(&pmm_buddy, zone_base, total_pages,
+               alloc_map, alloc_map_phys, alloc_map_size);
 
-    // filter regions beyond MAXPHYADDR to prevent Reserved Bit Violation
+    // Free usable e820 regions into buddy
     size_t unusable_pages = 0;
 
     for (size_t i = 0; i < entry_count; i++) {
@@ -177,60 +160,48 @@ void pmm_init(void) {
             uintptr_t end = entries[i].base + entries[i].length;
 
             if (start >= pmm_max_phys_addr) {
-                debug_printf("[PMM] Skipping region 0x%lx-0x%lx (beyond MAXPHYADDR 0x%llx)\n",
-                       start, end, pmm_max_phys_addr - 1);
                 unusable_pages += (end - start) / PMM_PAGE_SIZE;
                 continue;
             }
 
             if (end > pmm_max_phys_addr) {
-                debug_printf("[PMM] Clamping region 0x%lx-0x%lx to MAXPHYADDR limit 0x%llx\n",
-                       start, end, pmm_max_phys_addr - 1);
                 unusable_pages += (end - pmm_max_phys_addr) / PMM_PAGE_SIZE;
                 end = pmm_max_phys_addr;
             }
 
-            if (end <= pmm_zone.base) continue;
-            if (start < pmm_zone.base) start = pmm_zone.base;
+            if (end <= zone_base) continue;
+            if (start < zone_base) start = zone_base;
             if (start >= end) continue;
 
-            size_t start_page = (start - pmm_zone.base) / PMM_PAGE_SIZE;
-            size_t end_page = (end - pmm_zone.base) / PMM_PAGE_SIZE;
-            if (end_page > pmm_zone.pages) end_page = pmm_zone.pages;
-
-            debug_printf("[PMM] Freeing pages: %zu .. %zu\n", start_page, end_page - 1);
-
-            for (size_t j = start_page; j < end_page; j++) {
-                pmm_set_bit(j, PMM_FRAME_FREE);
-            }
-
-            debug_printf("[PMM] Verifying first 10 freed pages...\n");
-            for (size_t j = start_page; j < start_page + 10 && j < end_page; j++) {
-                pmm_frame_state_t state = pmm_get_bit(j);
-                debug_printf("[PMM]   Page %zu: state=%d (0=FREE, 1=USED)\n", j, state);
-            }
+            debug_printf("[PMM] Buddy: freeing 0x%lx-0x%lx (%zu pages)\n",
+                         start, end, (end - start) / PMM_PAGE_SIZE);
+            buddy_free_range(&pmm_buddy, start, end);
         }
     }
 
     if (unusable_pages > 0) {
-        debug_printf("[PMM] WARNING: %zu pages (%zu MB) beyond MAXPHYADDR marked unusable\n",
-               unusable_pages, (unusable_pages * PMM_PAGE_SIZE) / (1024 * 1024));
+        debug_printf("[PMM] WARNING: %zu pages beyond MAXPHYADDR marked unusable\n", unusable_pages);
     }
 
-    // Reserve kernel physical pages (boot_info has physical addresses)
-    pmm_reserve_region((uintptr_t)bi->kernel_start, (uintptr_t)bi->kernel_end, "Kernel");
-    pmm_reserve_region((uintptr_t)pmm_zone.bitmap, (uintptr_t)pmm_zone.bitmap + bitmap_size, "Bitmap");
+    // Reserve kernel and alloc_map regions
+    kprintf("PMM: Reserved Kernel at %p-%p\n", bi->kernel_start, bi->kernel_end);
+    buddy_reserve_range(&pmm_buddy, (uintptr_t)bi->kernel_start, (uintptr_t)bi->kernel_end);
+    kprintf("PMM: Reserved AllocMap at %p-%p\n", (void*)alloc_map_phys, (void*)(alloc_map_phys + alloc_map_size));
+    buddy_reserve_range(&pmm_buddy, alloc_map_phys, alloc_map_phys + alloc_map_size);
 
-    pmm_zone.last_free = 0;
-    // free_count was maintained incrementally by pmm_set_bit during init above
-
-    spinlock_init(&pmm_zone.lock);
     pmm_initialized = true;
 
-    debug_printf("[PMM] Initialized: %d MB available, %d pages.\n",
-        (int)((pmm_zone.pages * PMM_PAGE_SIZE) / (1024 * 1024)),
-        (int)pmm_zone.pages
-    );
+    debug_printf("[PMM] Buddy allocator initialized: %zu MB available, %zu pages free\n",
+        (pmm_buddy.free_count * PMM_PAGE_SIZE) / (1024 * 1024),
+        pmm_buddy.free_count);
+
+    // Log free list distribution
+    for (int o = 0; o <= BUDDY_MAX_ORDER; o++) {
+        if (pmm_buddy.free_lists[o].count > 0) {
+            debug_printf("[PMM]   Order %2d (%6zuKB blocks): %zu free\n",
+                         o, (1UL << o) * 4, pmm_buddy.free_lists[o].count);
+        }
+    }
 }
 
 void* pmm_alloc(size_t pages) {
@@ -238,43 +209,17 @@ void* pmm_alloc(size_t pages) {
         return NULL;
     }
 
-    spin_lock(&pmm_zone.lock);
+    void* addr = buddy_alloc(&pmm_buddy, pages);
+    if (!addr) return NULL;
 
-    size_t start = pmm_find_free_sequence(pages);
-    if (start == (size_t)-1) {
-        spin_unlock(&pmm_zone.lock);
-        return NULL;
-    }
-
-    for (size_t i = 0; i < pages; i++) {
-        pmm_set_bit(start + i, PMM_FRAME_USED);
-    }
-
-    void* addr = (void*)(pmm_zone.base + start * PMM_PAGE_SIZE);
-
-    // validate allocation doesn't exceed MAXPHYADDR — would cause Reserved Bit Violation in PTE
-    uintptr_t phys_addr = (uintptr_t)addr;
-    uintptr_t phys_end = phys_addr + (pages * PMM_PAGE_SIZE) - 1;
-
+    // Validate allocation doesn't exceed MAXPHYADDR
+    uintptr_t phys_end = (uintptr_t)addr + (pages * PMM_PAGE_SIZE) - 1;
     if (phys_end >= pmm_max_phys_addr) {
-        debug_printf("[PMM] ERROR: Allocated address range 0x%lx-0x%lx exceeds MAXPHYADDR (0x%llx)\n",
-               phys_addr, phys_end, pmm_max_phys_addr - 1);
-        debug_printf("[PMM]        This would cause Reserved Bit Violation!\n");
-        debug_printf("[PMM]        Rolling back allocation...\n");
-
-        for (size_t i = 0; i < pages; i++) {
-            pmm_set_bit(start + i, PMM_FRAME_FREE);
-        }
-
-        if (start < pmm_zone.last_free) {
-            pmm_zone.last_free = start;
-        }
-
-        spin_unlock(&pmm_zone.lock);
+        debug_printf("[PMM] ERROR: Allocation 0x%lx exceeds MAXPHYADDR, rolling back\n", (uintptr_t)addr);
+        buddy_free(&pmm_buddy, addr, pages);
         return NULL;
     }
 
-    spin_unlock(&pmm_zone.lock);
     return addr;
 }
 
@@ -284,149 +229,29 @@ void* pmm_alloc_zero(size_t pages) {
         void* virt = vmm_phys_to_virt((uintptr_t)addr);
         memset(virt, 0, pages * PMM_PAGE_SIZE);
     }
-    return addr;  // returns physical address — callers expect this
+    return addr;  // returns physical address
 }
 
 void pmm_free(void* addr, size_t pages) {
     if (!addr || !pages || !pmm_initialized) return;
 
     uintptr_t base = (uintptr_t)addr;
-    if (base < pmm_zone.base || base >= pmm_zone.base + pmm_zone.pages * PMM_PAGE_SIZE) {
+    uintptr_t zone_end = pmm_buddy.base + pmm_buddy.total_pages * PMM_PAGE_SIZE;
+    if (base < pmm_buddy.base || base >= zone_end) {
         panic("PMM: Invalid free address %p", addr);
     }
 
-    size_t first = (base - pmm_zone.base) / PMM_PAGE_SIZE;
-
-    spin_lock(&pmm_zone.lock);
-
-    // validate ALL pages before freeing ANY to prevent partial free on double-free detection
-    for (size_t i = first; i < first + pages; i++) {
-        if (pmm_get_bit(i) == PMM_FRAME_FREE) {
-            debug_printf("[PMM] ERROR: Double free detected!\n");
-            debug_printf("[PMM]   Address: 0x%lx\n", base + (i - first) * PMM_PAGE_SIZE);
-            debug_printf("[PMM]   Page index: %lu (of %lu)\n", i, pmm_zone.pages);
-            debug_printf("[PMM]   Pages requested: %lu\n", pages);
-            panic("PMM: Double free detected at page %d", i);
-        }
-    }
-
-    for (size_t i = first; i < first + pages; i++) {
-        pmm_set_bit(i, PMM_FRAME_FREE);
-    }
-
-    if (first < pmm_zone.last_free) {
-        pmm_zone.last_free = first;
-    }
-
-    spin_unlock(&pmm_zone.lock);
-}
-
-static void pmm_reserve_region(uintptr_t base, uintptr_t end, const char* name) {
-    base = ALIGN_DOWN(base, PMM_PAGE_SIZE);
-    end = ALIGN_UP(end, PMM_PAGE_SIZE);
-
-    if (base >= end) return;
-
-    // clamp base to zone start to avoid underflow arithmetic
-    if (base < pmm_zone.base) {
-        debug_printf("[PMM] Reserve: base 0x%lx < zone.base 0x%lx, clamping\n",
-                     base, pmm_zone.base);
-        base = pmm_zone.base;
-    }
-
-    if (base >= pmm_zone.base + pmm_zone.pages * PMM_PAGE_SIZE) {
-        return;
-    }
-    if (end <= pmm_zone.base) {
-        return;
-    }
-
-    uintptr_t zone_end = pmm_zone.base + pmm_zone.pages * PMM_PAGE_SIZE;
-    if (end > zone_end) {
-        end = zone_end;
-    }
-
-    size_t start_page = (base - pmm_zone.base) / PMM_PAGE_SIZE;
-    size_t end_page = (end - pmm_zone.base) / PMM_PAGE_SIZE;
-
-    if (start_page >= pmm_zone.pages) {
-        return;
-    }
-    if (end_page > pmm_zone.pages) {
-        end_page = pmm_zone.pages;
-    }
-
-    for (size_t i = start_page; i < end_page; i++) {
-        pmm_set_bit(i, PMM_FRAME_RESERVED);
-    }
-
-    kprintf("PMM: Reserved %s at %p-%p\n", name, (void*)base, (void*)end);
-}
-
-static void pmm_set_bit(size_t bit, pmm_frame_state_t state) {
-    size_t byte = bit / PMM_BITMAP_ALIGN;
-    size_t offset = bit % PMM_BITMAP_ALIGN;
-    bool was_free = !(pmm_zone.bitmap[byte] & (1 << offset));
-
-    switch(state) {
-        case PMM_FRAME_FREE:
-            pmm_zone.bitmap[byte] &= ~(1 << offset);
-            if (!was_free) pmm_zone.free_count++;
-            break;
-        default:
-            pmm_zone.bitmap[byte] |= (1 << offset);
-            if (was_free) pmm_zone.free_count--;
-            break;
-    }
-}
-
-static pmm_frame_state_t pmm_get_bit(size_t bit) {
-    size_t byte = bit / PMM_BITMAP_ALIGN;
-    size_t offset = bit % PMM_BITMAP_ALIGN;
-    // returns USED (1) or FREE (0); other states are not distinguishable
-    return (pmm_zone.bitmap[byte] & (1 << offset)) ? PMM_FRAME_USED : PMM_FRAME_FREE;
-}
-
-static size_t pmm_find_free_sequence(size_t count) {
-    size_t consecutive = 0;
-    size_t start_search_from = pmm_zone.last_free;
-
-    for (size_t i = start_search_from; i < pmm_zone.pages; i++) {
-        if (pmm_get_bit(i) == PMM_FRAME_FREE) {
-            consecutive++;
-            if (consecutive == count) {
-                pmm_zone.last_free = i - count + 1;
-                return i - count + 1;
-            }
-        } else {
-            consecutive = 0;
-        }
-    }
-
-    consecutive = 0;
-    for (size_t i = 0; i < start_search_from; i++) {
-        if (pmm_get_bit(i) == PMM_FRAME_FREE) {
-            consecutive++;
-            if (consecutive == count) {
-                pmm_zone.last_free = i - count + 1;
-                return i - count + 1;
-            }
-        } else {
-            consecutive = 0;
-        }
-    }
-
-    return (size_t)-1;
+    buddy_free(&pmm_buddy, addr, pages);
 }
 
 size_t pmm_total_pages(void) {
-    return pmm_zone.pages;
+    return pmm_buddy.total_pages;
 }
 
 size_t pmm_free_pages(void) {
-    spin_lock(&pmm_zone.lock);
-    size_t count = pmm_zone.free_count;
-    spin_unlock(&pmm_zone.lock);
+    spin_lock(&pmm_buddy.lock);
+    size_t count = pmm_buddy.free_count;
+    spin_unlock(&pmm_buddy.lock);
     return count;
 }
 
@@ -435,11 +260,11 @@ size_t pmm_used_pages(void) {
 }
 
 uint64_t pmm_get_total_memory(void) {
-    return pmm_zone.base + (pmm_zone.pages * PMM_PAGE_SIZE);
+    return pmm_buddy.base + (pmm_buddy.total_pages * PMM_PAGE_SIZE);
 }
 
 void pmm_dump_stats(void) {
-    kprintf("Physical Memory Manager Statistics:\n");
+    kprintf("Physical Memory Manager (Buddy Allocator):\n");
     kprintf("  Total pages: %d (%d MB)\n",
            pmm_total_pages(),
            (pmm_total_pages() * PMM_PAGE_SIZE) / (1024 * 1024));
@@ -449,6 +274,14 @@ void pmm_dump_stats(void) {
     kprintf("  Free pages:  %d (%d MB)\n",
            pmm_free_pages(),
            (pmm_free_pages() * PMM_PAGE_SIZE) / (1024 * 1024));
+    kprintf("  Max order:   %d (%d KB max block)\n",
+           BUDDY_MAX_ORDER, (1 << BUDDY_MAX_ORDER) * 4);
+    for (int o = 0; o <= BUDDY_MAX_ORDER; o++) {
+        if (pmm_buddy.free_lists[o].count > 0) {
+            kprintf("  Order %2d (%6dKB): %d blocks\n",
+                   o, (1 << o) * 4, (int)pmm_buddy.free_lists[o].count);
+        }
+    }
 }
 
 void pmm_print_memory_map(void) {
@@ -465,25 +298,27 @@ void pmm_print_memory_map(void) {
 }
 
 bool pmm_check_integrity(void) {
-    // Use physical kernel_end from boot_info
     boot_info_t *bi = boot_info_get();
     uintptr_t kernel_phys_end = boot_info_valid(bi) ? (uintptr_t)bi->kernel_end : 0;
 
-    for (size_t i = 0; i < pmm_zone.pages; i++) {
-        uintptr_t addr = pmm_zone.base + i * PMM_PAGE_SIZE;
+    for (size_t i = 0; i < pmm_buddy.total_pages; i++) {
+        uintptr_t addr = pmm_buddy.base + i * PMM_PAGE_SIZE;
 
-        if (addr < kernel_phys_end &&
-            pmm_get_bit(i) != PMM_FRAME_USED) {
-            return false;
+        if (addr < kernel_phys_end) {
+            // Kernel pages must be allocated (bit set in alloc_map)
+            size_t byte = i / 8;
+            size_t bit = i % 8;
+            if (!(pmm_buddy.alloc_map[byte] & (1 << bit))) {
+                return false;
+            }
         }
     }
     return true;
 }
 
 void pmm_activate_pull_map(void) {
-    pmm_zone.bitmap = (uint8_t*)vmm_phys_to_virt(pmm_zone.bitmap_phys);
-    debug_printf("[PMM] Bitmap rebased to Pull Map: %p (phys: 0x%lx)\n",
-                 pmm_zone.bitmap, pmm_zone.bitmap_phys);
+    buddy_activate_pull_map(&pmm_buddy);
+    debug_printf("[PMM] Buddy allocator rebased to Pull Map\n");
 }
 
 bool pmm_is_usable_ram(uintptr_t phys_addr, size_t size) {
@@ -493,7 +328,6 @@ bool pmm_is_usable_ram(uintptr_t phys_addr, size_t size) {
 
     uintptr_t range_end = phys_addr + size;
 
-    // overflow means the range wraps around; treat conservatively as RAM to block MMIO mapping
     if (range_end < phys_addr) {
         debug_printf("[PMM] pmm_is_usable_ram: overflow detected for phys=0x%llx size=0x%llx\n",
                      (uint64_t)phys_addr, (uint64_t)size);
