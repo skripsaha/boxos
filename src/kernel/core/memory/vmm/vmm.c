@@ -340,8 +340,12 @@ vmm_context_t* vmm_create_context(void) {
             }
 
             ctx->pml4->entries[0] = vmm_make_pte(new_pdpt_phys, VMM_FLAGS_KERNEL_RW | VMM_FLAG_USER);
+        } else {
+            // Pull Map active — share kernel's PML4[0] for supervisor access only.
+            // Kernel ISR code at 0x100000+ must be reachable when interrupts fire
+            // in user mode. No USER bit — ring 3 cannot access these pages.
+            ctx->pml4->entries[0] = kernel_context->pml4->entries[0];
         }
-        // else: Pull Map active — PML4[0] stays zero (clean user space)
 
         // Upper half (256..511) is kernel space — shared directly
         // This includes Pull Map at PML4[272]
@@ -379,6 +383,12 @@ static void vmm_free_user_space_tables(vmm_context_t* ctx) {
     for (int p4 = 0; p4 < 256; p4++) {
         pte_t pml4_entry = ctx->pml4->entries[p4];
         if (!(pml4_entry & VMM_FLAG_PRESENT)) continue;
+
+        // After Pull Map, PML4[0] is shared from kernel context — don't free it
+        if (p4 == 0 && g_pull_map_active) {
+            ctx->pml4->entries[0] = 0;
+            continue;
+        }
 
         uintptr_t pdpt_phys = vmm_pte_to_phys(pml4_entry);
         page_table_t* pdpt = (page_table_t*)vmm_phys_to_virt(pdpt_phys);
