@@ -460,27 +460,31 @@ static int ahci_port_init(uint8_t port_num) {
         return -1;
     }
 
-    memset(clb_page, 0, 4096);
+    uintptr_t clb_phys = (uintptr_t)clb_page;
+    void* clb_virt = vmm_phys_to_virt(clb_phys);
+    memset(clb_virt, 0, 4096);
 
-    port->clb_virt = clb_page;
-    port->clb_phys = (uintptr_t)clb_page;
-    port->fis_virt = (uint8_t*)clb_page + 1024;
-    port->fis_phys = port->clb_phys + 1024;
+    port->clb_virt = clb_virt;
+    port->clb_phys = clb_phys;
+    port->fis_virt = (uint8_t*)clb_virt + 1024;
+    port->fis_phys = clb_phys + 1024;
 
     for (uint8_t slot = 0; slot < AHCI_MAX_SLOTS; slot++) {
         void* ctba_page = pmm_alloc(1);
         if (!ctba_page) {
             debug_printf("[AHCI] Port %u: Failed to allocate CTBA for slot %u\n", port_num, slot);
             for (uint8_t i = 0; i < slot; i++) {
-                pmm_free(port->ctba_virt[i], 1);
+                pmm_free((void*)port->ctba_phys[i], 1);
             }
             pmm_free(clb_page, 1);
             return -1;
         }
 
-        memset(ctba_page, 0, 4096);
-        port->ctba_virt[slot] = ctba_page;
-        port->ctba_phys[slot] = (uintptr_t)ctba_page;
+        uintptr_t ctba_phys = (uintptr_t)ctba_page;
+        void* ctba_virt = vmm_phys_to_virt(ctba_phys);
+        memset(ctba_virt, 0, 4096);
+        port->ctba_virt[slot] = ctba_virt;
+        port->ctba_phys[slot] = ctba_phys;
 
         ahci_cmd_header_t* cmdheader = (ahci_cmd_header_t*)port->clb_virt;
         cmdheader[slot].prdtl = 0;
@@ -505,7 +509,7 @@ static int ahci_port_init(uint8_t port_num) {
                 pmm_free(port->staging_phys[j], 1);
             }
             for (uint8_t k = 0; k < AHCI_MAX_SLOTS; k++) {
-                pmm_free(port->ctba_virt[k], 1);
+                pmm_free((void*)port->ctba_phys[k], 1);
             }
             pmm_free(clb_page, 1);
             return -1;
@@ -539,7 +543,7 @@ static int ahci_port_init(uint8_t port_num) {
     if (ahci_port_start(port) != 0) {
         debug_printf("[AHCI] Port %u: Failed to start\n", port_num);
         for (uint8_t i = 0; i < AHCI_MAX_SLOTS; i++) {
-            pmm_free(port->ctba_virt[i], 1);
+            pmm_free((void*)port->ctba_phys[i], 1);
         }
         pmm_free(clb_page, 1);
         return -1;
@@ -868,19 +872,19 @@ void ahci_test_read(void) {
 
     debug_printf("[AHCI] Test READ: Reading sector 0 (MBR)...\n");
 
-    void* dma_buffer = pmm_alloc(1);
-    if (!dma_buffer) {
+    void* dma_page = pmm_alloc(1);
+    if (!dma_page) {
         debug_printf("[AHCI] Test READ: Failed to allocate DMA buffer\n");
         return;
     }
 
-    memset(dma_buffer, 0, 4096);
+    uintptr_t dma_phys = (uintptr_t)dma_page;
+    void* dma_virt = vmm_phys_to_virt(dma_phys);
+    memset(dma_virt, 0, 4096);
 
-    uintptr_t dma_phys = (uintptr_t)dma_buffer;
     if (!ahci_ctrl.s64a_support && !IS_32BIT_SAFE(dma_phys)) {
         debug_printf("[AHCI] Test READ: DMA buffer above 4GB (0x%lx), allocating below 4GB\n", dma_phys);
-        pmm_free(dma_buffer, 1);
-        // Controller lacks 64-bit support; cannot use this buffer
+        pmm_free(dma_page, 1);
         return;
     }
 
@@ -896,8 +900,8 @@ void ahci_test_read(void) {
     ahci_cmd_table_t* cmdtbl = (ahci_cmd_table_t*)port->ctba_virt[slot];
     memset(cmdtbl, 0, sizeof(ahci_cmd_table_t));
 
-    cmdtbl->prdt[0].dba = (uint32_t)(uintptr_t)dma_buffer;
-    cmdtbl->prdt[0].dbau = (uint32_t)((uintptr_t)dma_buffer >> 32);
+    cmdtbl->prdt[0].dba = (uint32_t)dma_phys;
+    cmdtbl->prdt[0].dbau = (uint32_t)(dma_phys >> 32);
     cmdtbl->prdt[0].dbc = 511;  // 512 - 1 (0-based byte count)
     cmdtbl->prdt[0].i = 1;
 
@@ -935,18 +939,18 @@ void ahci_test_read(void) {
 
     if (port->regs->ci & (1 << slot)) {
         debug_printf("[AHCI] Test READ: Timeout waiting for command completion\n");
-        pmm_free(dma_buffer, 1);
+        pmm_free(dma_page, 1);
         return;
     }
 
     uint32_t tfd = port->regs->tfd;
     if (tfd & AHCI_PTFD_STS_ERR) {
         debug_printf("[AHCI] Test READ: Error bit set in TFD (0x%08x)\n", tfd);
-        pmm_free(dma_buffer, 1);
+        pmm_free(dma_page, 1);
         return;
     }
 
-    uint8_t* mbr = (uint8_t*)dma_buffer;
+    uint8_t* mbr = (uint8_t*)dma_virt;
     uint8_t sig1 = mbr[510];
     uint8_t sig2 = mbr[511];
 
@@ -960,7 +964,7 @@ void ahci_test_read(void) {
     }
 
     port->slot_bitmap |= (1 << slot);
-    pmm_free(dma_buffer, 1);
+    pmm_free(dma_page, 1);
 }
 
 uint8_t ahci_get_active_port_count(void) {
