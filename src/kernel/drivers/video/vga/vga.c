@@ -1,9 +1,15 @@
 #include "vga.h"
+#include "vmm.h"
 #include "io.h"
 #include "klib.h"
 #include "serial.h"
 
 unsigned char *vga = (unsigned char*)VGA;
+
+void vga_activate_pull_map(void) {
+    vga = (unsigned char*)vmm_phys_to_virt(VGA_TEXT_BUFFER_ADDR);
+    debug_printf("[VGA] Buffer rebased to Pull Map: %p\n", vga);
+}
 
 uint8_t vga_attr_backup[VGA_WIDTH * VGA_HEIGHT];
 

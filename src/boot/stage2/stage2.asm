@@ -1134,6 +1134,45 @@ setup_paging:
     add edi, 8
     loop .fill_pd
 
+    ; ---- Higher-half kernel mapping ----
+    ; Map kernel at 0xFFFFFFFF80000000+ (PML4[511] -> PDPT_high -> PD_high)
+    ; PDPT_high at dynamic_pt_base + 0x6000, PD_high at dynamic_pt_base + 0x7000
+    ; Both were already zeroed by the rep stosd above.
+
+    ; Copy first 16 PD entries from identity PD[0] to PD_high
+    ; This maps first 32MB of physical memory at the higher-half address
+    mov esi, [dynamic_pt_base]
+    add esi, 0x2000             ; source: identity PD[0]
+    mov edi, [dynamic_pt_base]
+    add edi, 0x7000             ; dest: PD_high
+    mov ecx, 16                 ; 16 entries = 32MB (covers kernel + boot stack)
+.copy_pd_high:
+    mov eax, [esi]
+    mov [edi], eax
+    mov eax, [esi+4]
+    mov [edi+4], eax
+    add esi, 8
+    add edi, 8
+    dec ecx
+    jnz .copy_pd_high
+
+    ; PDPT_high[510] -> PD_high (index 510 = 0xFFFFFFFF80000000 range)
+    mov edi, [dynamic_pt_base]
+    add edi, 0x6000             ; PDPT_high base
+    mov eax, [dynamic_pt_base]
+    add eax, 0x7000
+    or eax, 3                   ; Present + Writable
+    mov [edi + 510*8], eax
+    mov dword [edi + 510*8 + 4], 0
+
+    ; PML4[511] -> PDPT_high
+    mov edi, [dynamic_pt_base]  ; PML4 base
+    mov eax, [dynamic_pt_base]
+    add eax, 0x6000
+    or eax, 3                   ; Present + Writable
+    mov [edi + 511*8], eax
+    mov dword [edi + 511*8 + 4], 0
+
     ret
 
 enable_long_mode:

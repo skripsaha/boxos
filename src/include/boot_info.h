@@ -25,8 +25,12 @@ typedef struct {
 
 _Static_assert(sizeof(boot_info_t) == 40, "boot_info_t must be 40 bytes");
 
+// Returns boot_info pointer via Pull Map (if active) or identity address (early boot).
+// vmm_phys_to_virt is defined in vmm.c — no header dependency needed.
+extern void* vmm_phys_to_virt(uintptr_t phys_addr);
+
 static inline boot_info_t* boot_info_get(void) {
-    return (boot_info_t*)(uintptr_t)BOOT_INFO_ADDR;
+    return (boot_info_t*)vmm_phys_to_virt(BOOT_INFO_ADDR);
 }
 
 static inline bool boot_info_valid(const boot_info_t* bi) {
