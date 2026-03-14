@@ -50,6 +50,8 @@ void enable_fpu(void) {
         cr4 |= (1ULL << 21);
     }
 
+    cr4 |= (1ULL << 7);   // PGE — enable global pages (Pull Map)
+
     asm volatile("mov %0, %%cr4" :: "r"(cr4));
 
     if (g_cpu_caps.has_smep || g_cpu_caps.has_smap) {

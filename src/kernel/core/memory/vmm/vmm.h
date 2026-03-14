@@ -15,6 +15,11 @@
 #define VMM_KERNEL_MMIO_BASE    0xFFFF800040000000ULL  // starts after 1GB heap
 #define VMM_KERNEL_MMIO_SIZE    (3ULL << 30)           // 3GB MMIO region
 
+// Pull Map: all physical RAM mapped at fixed offset in kernel higher-half.
+// Replaces identity mapping. Immutable after boot, uses Global pages.
+#define PULL_MAP_BASE           0xFFFF880000000000ULL
+#define PULL_MAP_PML4_INDEX     272   // (PULL_MAP_BASE >> 39) & 0x1FF
+
 // CABIN MEMORY MODEL (Snowball Architecture - Flat Binary, NO ELF)
 // Each process lives in isolated Cabin with fixed virtual layout:
 #define VMM_CABIN_NULL_TRAP     CABIN_NULL_TRAP_START    // 0x0000-0x0FFF: NULL trap zone (unmapped)
@@ -196,16 +201,18 @@ static inline pte_t vmm_make_pte(uintptr_t phys_addr, uint64_t flags) {
     return masked_phys | (flags & VMM_PTE_FLAGS_MASK);
 }
 
-// VMM/PMM currently relies on identity mapping: physical == virtual for low memory.
-// Future: use higher-half direct mapping (0xFFFF880000000000+).
-static inline void* vmm_phys_to_virt(uintptr_t phys_addr) {
-    return (void*)phys_addr;
-}
+// Pull Map: converts physical address to kernel-accessible virtual address.
+// Before Pull Map is activated (during early boot), returns identity mapping.
+// After activation, returns phys + PULL_MAP_BASE.
+void* vmm_phys_to_virt(uintptr_t phys_addr);
 
 static inline uintptr_t vmm_virt_to_phys_direct(void* virt_addr) {
     uintptr_t virt = (uintptr_t)virt_addr;
+    if (virt >= PULL_MAP_BASE) {
+        return virt - PULL_MAP_BASE;
+    }
     if (virt >= VMM_KERNEL_BASE) {
-        return 0;  // higher-half mapping not yet supported
+        return 0;
     }
     return virt;
 }
@@ -223,9 +230,12 @@ int vmm_map_result_ring(vmm_context_t* ctx, uintptr_t phys_page);
 
 // Translate a user virtual address in a process's page table to a kernel-accessible pointer.
 // Walks the process's page tables, resolves the physical address, and returns it as a
-// kernel pointer via identity mapping. Returns NULL if the address is not mapped.
+// kernel pointer via Pull Map. Returns NULL if the address is not mapped.
 void* vmm_translate_user_addr(vmm_context_t* ctx, uintptr_t user_vaddr, size_t size);
 int vmm_setup_null_trap(vmm_context_t* ctx);
 int vmm_map_code_region(vmm_context_t* ctx, uintptr_t code_phys, uint64_t size);
+
+// Called by vmm_init() after Pull Map is live to rebase PMM bitmap pointer
+void pmm_activate_pull_map(void);
 
 #endif // VMM_H

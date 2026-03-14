@@ -13,6 +13,8 @@ typedef struct {
     bool has_avx512;            // AVX-512 Foundation (CPUID.7.0:EBX[16])
     bool has_smep;              // Supervisor Mode Execution Prevention (CPUID.7.0:EBX[7])
     bool has_smap;              // Supervisor Mode Access Prevention (CPUID.7.0:EBX[20])
+    bool has_1gb_pages;         // 1GB pages (CPUID.80000001h:EDX bit 26, PDPE1GB)
+    bool has_pcid;              // Process-Context Identifiers (CPUID.1:ECX bit 17)
     char vendor_string[13];     // CPU vendor (e.g., "GenuineIntel")
     uint32_t max_basic_leaf;    // Maximum CPUID basic leaf
     uint32_t max_extended_leaf; // Maximum CPUID extended leaf

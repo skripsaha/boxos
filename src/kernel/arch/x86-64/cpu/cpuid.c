@@ -38,6 +38,7 @@ void cpu_detect_features(void) {
         g_cpu_caps.has_x2apic = (ecx & (1 << 21)) != 0;
         g_cpu_caps.has_xsave = (ecx & (1 << 26)) != 0;
         g_cpu_caps.has_avx = (ecx & (1 << 28)) != 0;
+        g_cpu_caps.has_pcid = (ecx & (1 << 17)) != 0;
     }
 
     // Check WAITPKG and AVX-512 support (CPUID.7.0)
@@ -67,5 +68,10 @@ void cpu_detect_features(void) {
     if (g_cpu_caps.max_extended_leaf >= 0x80000007) {
         cpuid(0x80000007, &eax, &ebx, &ecx, &edx);
         g_cpu_caps.has_invariant_tsc = (edx & (1 << 8)) != 0;
+    }
+
+    if (g_cpu_caps.max_extended_leaf >= 0x80000001) {
+        cpuid(0x80000001, &eax, &ebx, &ecx, &edx);
+        g_cpu_caps.has_1gb_pages = (edx & (1 << 26)) != 0;
     }
 }
