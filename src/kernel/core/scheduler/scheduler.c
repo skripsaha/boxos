@@ -15,7 +15,7 @@
 static scheduler_state_t sched;
 
 void scheduler_init(void) {
-    debug_printf("[SCHEDULER] Initializing scheduler...\n");
+    debug_printf("[SCHEDULER] Initializing O(1) scheduler...\n");
 
     memset(&sched, 0, sizeof(scheduler_state_t));
     sched.current_process = NULL;
@@ -27,8 +27,10 @@ void scheduler_init(void) {
     sched.use_context.overflow_capacity = 0;
     sched.total_ticks = 0;
     spinlock_init(&sched.context_lock);
+    runqueue_init(&sched.runqueue);
 
-    debug_printf("[SCHEDULER] Scheduler initialized\n");
+    debug_printf("[SCHEDULER] O(1) scheduler initialized (4 priority levels, capacity=%d/level)\n",
+                 RUNQUEUE_CAPACITY);
 }
 
 bool scheduler_matches_use_context(process_t* proc) {
@@ -51,77 +53,94 @@ bool scheduler_matches_use_context(process_t* proc) {
     return match;
 }
 
-int32_t scheduler_calculate_score(process_t* proc, uint64_t ctx_bits, bool fairness_round) {
-    if (!proc) return INT32_MIN;
+// Determine priority level for a process. Called at enqueue time.
+// CONTEXT(3) > STARVED(2) > NORMAL(1) > IDLE(0)
+int sched_determine_priority(process_t* proc) {
+    if (!proc) return SCHED_PRIO_NORMAL;
 
-    int32_t score = 0;
-
-    if (!fairness_round && ctx_bits != 0 && (proc->tag_bits & ctx_bits) != 0) {
-        score += 1000;
-    }
-
+    // Starvation check (highest non-context priority)
     uint64_t ticks_since_run = 0;
     if (sched.total_ticks >= proc->last_run_time) {
         ticks_since_run = sched.total_ticks - proc->last_run_time;
     }
-    if (ticks_since_run >= SCHEDULER_CRITICAL_STARVATION_TICKS) {
-        score += SCHEDULER_BOOST_CRITICAL_STARVATION;
-    } else if (ticks_since_run >= SCHEDULER_SEVERE_STARVATION_TICKS) {
-        score += SCHEDULER_BOOST_SEVERE_STARVATION;
-    } else if (ticks_since_run >= SCHEDULER_MILD_STARVATION_TICKS) {
-        score += SCHEDULER_BOOST_STARVATION;
+    if (ticks_since_run >= SCHEDULER_MILD_STARVATION_TICKS) {
+        return SCHED_PRIO_STARVED;
     }
 
-    if (proc->consecutive_runs >= SCHEDULER_MAX_CONSECUTIVE_RUNS) {
-        score -= SCHEDULER_BOOST_CRITICAL_STARVATION;
+    // Context match boost
+    if (sched.use_context.enabled && scheduler_matches_use_context(proc)) {
+        return SCHED_PRIO_CONTEXT;
     }
 
-    return score;
+    return SCHED_PRIO_NORMAL;
 }
 
-process_t* scheduler_select_next(void) {
-    bool ctx_enabled = sched.use_context.enabled;
-    uint64_t ctx_bits = ctx_enabled ? sched.use_context.context_bits : 0;
+// Enqueue a process into the O(1) RunQueue.
+// Caller: process_set_state hook, schedule() re-enqueue.
+void sched_enqueue(process_t* proc) {
+    if (!proc || process_is_idle(proc)) return;
 
+    // Don't enqueue the currently running process
+    if (proc == sched.current_process) return;
+
+    int prio = sched_determine_priority(proc);
+
+    spin_lock(&sched.runqueue.lock);
+    if (!runqueue_contains(&sched.runqueue, proc)) {
+        runqueue_enqueue(&sched.runqueue, proc, prio);
+    }
+    spin_unlock(&sched.runqueue.lock);
+}
+
+// Remove a process from the RunQueue (e.g., when it leaves PROC_WORKING).
+void sched_dequeue(process_t* proc) {
+    if (!proc || process_is_idle(proc)) return;
+
+    spin_lock(&sched.runqueue.lock);
+    runqueue_remove(&sched.runqueue, proc);
+    spin_unlock(&sched.runqueue.lock);
+}
+
+// O(1) process selection using priority bitmap.
+// Fairness round (1 in every SCHEDULER_FAIRNESS_INTERVAL ticks):
+//   skip CONTEXT level so starved/normal processes get a chance.
+process_t* scheduler_select_next(void) {
     bool fairness_round = (sched.total_ticks % SCHEDULER_FAIRNESS_INTERVAL == 0);
 
-    process_t* best = NULL;
-    int32_t best_score = INT32_MIN;
+    spin_lock(&sched.runqueue.lock);
 
-    process_list_lock();
-    process_t* proc = process_get_first();
-    while (proc) {
-        if (proc->magic != PROCESS_MAGIC) {
-            proc = proc->next;
-            continue;
+    process_t* next = NULL;
+
+    if (fairness_round) {
+        // Mask out CONTEXT priority — let STARVED/NORMAL win
+        uint32_t fair_bitmap = sched.runqueue.active_bitmap & ~(1u << SCHED_PRIO_CONTEXT);
+        if (fair_bitmap != 0) {
+            int prio = 31 - __builtin_clz(fair_bitmap);
+            SchedQueue* q = &sched.runqueue.queues[prio];
+            next = q->procs[q->head];
+            q->procs[q->head] = NULL;
+            q->head = (q->head + 1) % RUNQUEUE_CAPACITY;
+            q->count--;
+            if (q->count == 0)
+                sched.runqueue.active_bitmap &= ~(1u << prio);
+        } else {
+            // Only CONTEXT processes available — dequeue normally
+            next = runqueue_dequeue_best(&sched.runqueue);
         }
-
-        process_state_t state = process_get_state(proc);
-
-        if (state == PROC_CRASHED || state == PROC_DONE) {
-            proc = proc->next;
-            continue;
-        }
-
-        if (state == PROC_WORKING || state == PROC_CREATED) {
-            int32_t score = scheduler_calculate_score(proc, ctx_bits, fairness_round);
-            if (score > best_score) {
-                best_score = score;
-                best = proc;
-            }
-        }
-        proc = proc->next;
-    }
-    process_list_unlock();
-
-    if (!best) {
-        best = idle_process_get();
+    } else {
+        next = runqueue_dequeue_best(&sched.runqueue);
     }
 
-    return best;
+    spin_unlock(&sched.runqueue.lock);
+
+    if (!next) {
+        next = idle_process_get();
+    }
+
+    return next;
 }
 
-// Single unified schedule() function.
+// Single unified schedule() function — O(1) via priority bitmap RunQueue.
 // Saves context of current process, selects next, restores context.
 void schedule(void* frame_ptr) {
     interrupt_frame_t* frame = (interrupt_frame_t*)frame_ptr;
@@ -132,12 +151,26 @@ void schedule(void* frame_ptr) {
     process_t* current = sched.current_process;
     spin_unlock(&sched.scheduler_lock);
 
-    // Save context of current process if it's running
-    if (current && process_get_state(current) == PROC_WORKING) {
-        context_save_from_frame(current, frame);
+    // Save context of current process
+    if (current) {
+        process_state_t cur_state = process_get_state(current);
+        if (cur_state == PROC_WORKING || cur_state == PROC_WAITING) {
+            context_save_from_frame(current, frame);
+        }
     }
 
-    // Select next process
+    // Re-enqueue current process into RunQueue if still WORKING
+    if (current && !process_is_idle(current) &&
+        process_get_state(current) == PROC_WORKING) {
+        int prio = sched_determine_priority(current);
+        spin_lock(&sched.runqueue.lock);
+        if (!runqueue_contains(&sched.runqueue, current)) {
+            runqueue_enqueue(&sched.runqueue, current, prio);
+        }
+        spin_unlock(&sched.runqueue.lock);
+    }
+
+    // O(1) select next process
     process_t* next = scheduler_select_next();
 
     // Set kernel stack for ring 3 -> ring 0 transitions (TSS for INT, PerCpuData for notify)
@@ -151,8 +184,11 @@ void schedule(void* frame_ptr) {
     sched.current_process = next;
     spin_unlock(&sched.scheduler_lock);
 
+    // PROC_CREATED → PROC_WORKING: set state directly to avoid spurious enqueue
     if (process_get_state(next) == PROC_CREATED) {
-        process_set_state(next, PROC_WORKING);
+        spin_lock(&next->state_lock);
+        next->state = PROC_WORKING;
+        spin_unlock(&next->state_lock);
     }
     next->last_run_time = sched.total_ticks;
 

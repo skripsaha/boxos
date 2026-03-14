@@ -375,9 +375,18 @@ void process_set_state(process_t *proc, process_state_t new_state)
 {
     if (!proc)
         return;
+
     spin_lock(&proc->state_lock);
+    process_state_t old_state = proc->state;
     proc->state = new_state;
     spin_unlock(&proc->state_lock);
+
+    // O(1) RunQueue integration: enqueue/dequeue on PROC_WORKING transitions
+    if (new_state == PROC_WORKING && old_state != PROC_WORKING) {
+        sched_enqueue(proc);
+    } else if (new_state != PROC_WORKING && old_state == PROC_WORKING) {
+        sched_dequeue(proc);
+    }
 }
 
 process_state_t process_get_state(process_t *proc)

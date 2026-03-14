@@ -171,7 +171,7 @@ int ata_dma_init(void) {
     debug_printf("[ATA DMA] Bus Master Base: 0x%04x\n", dma_state.bus_master_base);
 
     dma_state.prd_table_virt = prd_table_static;
-    dma_state.prd_table_phys = (uintptr_t)prd_table_static;
+    dma_state.prd_table_phys = (uintptr_t)prd_table_static - CONFIG_KERNEL_VMA_OFFSET;
 
     debug_printf("[ATA DMA] PRD Table: virt=0x%p phys=0x%lx\n",
                  dma_state.prd_table_virt, dma_state.prd_table_phys);

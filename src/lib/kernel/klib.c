@@ -1,4 +1,5 @@
 #include "klib.h"
+#include "slab.h"
 #include "vga.h"
 #include "io.h"
 #include "serial.h"
@@ -47,6 +48,9 @@ void mem_activate_pull_map(void)
             block = block->next;
         }
     }
+
+    // Rebase slab allocator pages
+    slab_activate_pull_map();
 }
 
 void mem_init(void)
@@ -97,6 +101,9 @@ void mem_init(void)
     free_list->next = NULL;
     free_list->magic = KLIB_MAGIC_NUMBER;
     debug_printf("[KLIB] Free list initialized\n");
+
+    // Initialize slab allocator for O(1) small allocations
+    slab_init();
 }
 
 static void *kmalloc_internal(size_t size)
@@ -186,6 +193,14 @@ static void *kmalloc_internal(size_t size)
 void* kmalloc(size_t size) {
     if (size == 0) return NULL;
 
+    // Slab path: O(1) for small allocations (<= 4096 bytes)
+    if (size <= SLAB_LARGE_THRESHOLD) {
+        void* ptr = slab_alloc(size);
+        if (ptr) return ptr;
+        // Fall through to legacy allocator if slab fails
+    }
+
+    // Legacy path: large allocations or slab fallback
 #if HEAP_GUARD_ENABLED
     size_t total_size = sizeof(heap_guard_t) + size + sizeof(uint64_t);
     heap_guard_t* guard = (heap_guard_t*)kmalloc_internal(total_size);
@@ -271,6 +286,13 @@ static void kfree_internal(void *ptr)
 void kfree(void* ptr) {
     if (!ptr) return;
 
+    // Slab path: O(1) free for slab-owned pointers
+    if (slab_owns(ptr)) {
+        slab_free(ptr);
+        return;
+    }
+
+    // Legacy path: large allocations from the old pool
 #if HEAP_GUARD_ENABLED
     heap_guard_t* guard = (heap_guard_t*)((uint8_t*)ptr - sizeof(heap_guard_t));
 

@@ -4,6 +4,7 @@
 #include "ktypes.h"
 #include "process.h"
 #include "klib.h"
+#include "runqueue.h"
 
 /*
  * Lock ordering: scheduler_lock must be acquired BEFORE process_lock.
@@ -35,6 +36,7 @@ typedef struct {
     use_context_t use_context;
     spinlock_t context_lock;
     uint64_t total_ticks;
+    RunQueue runqueue;           // O(1) priority bitmap runqueue
 } scheduler_state_t;
 
 void scheduler_init(void);
@@ -47,11 +49,15 @@ void scheduler_init(void);
 void schedule(void* frame);
 
 process_t* scheduler_select_next(void);
-int32_t scheduler_calculate_score(process_t* proc, uint64_t ctx_bits, bool fairness_round);
 
 void scheduler_set_use_context(const char* tags[], uint32_t count);
 void scheduler_clear_use_context(void);
 bool scheduler_matches_use_context(process_t* proc);
+
+// O(1) RunQueue integration
+int sched_determine_priority(process_t* proc);
+void sched_enqueue(process_t* proc);
+void sched_dequeue(process_t* proc);
 
 scheduler_state_t* scheduler_get_state(void);
 
