@@ -26,6 +26,29 @@ static uint8_t current_attr = TEXT_ATTR_DEFAULT;
 
 static const char digits[] = "0123456789abcdefghijklmnopqrstuvwxyz";
 
+void mem_activate_pull_map(void)
+{
+    extern void* vmm_phys_to_virt(uintptr_t phys_addr);
+
+    // Rebase memory pool pointer from identity to Pull Map address
+    uintptr_t pool_phys = (uintptr_t)memory_pool;
+    memory_pool = (uint8_t*)vmm_phys_to_virt(pool_phys);
+
+    // Rebase free list head
+    if (free_list) {
+        free_list = (mem_block_t*)vmm_phys_to_virt((uintptr_t)free_list);
+
+        // Walk free list and rebase all next pointers
+        mem_block_t* block = free_list;
+        while (block) {
+            if (block->next) {
+                block->next = (mem_block_t*)vmm_phys_to_virt((uintptr_t)block->next);
+            }
+            block = block->next;
+        }
+    }
+}
+
 void mem_init(void)
 {
     extern size_t pmm_total_pages(void);

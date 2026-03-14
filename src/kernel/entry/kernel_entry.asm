@@ -14,15 +14,19 @@ global load_gdt
 global clear_screen_vga
 global hide_cursor
 
-extern _kernel_end
+extern _kernel_phys_end
+
+; Higher-half offset: VMA - LMA
+KERNEL_VMA_OFFSET equ 0xFFFFFFFF80000000
 
 _start:
     jmp short .past_header          ; 2 bytes — skip header
     db 'KERNEL'                     ; 6 bytes — magic identifier
     dd 1                            ; 4 bytes — header version
-    dd _kernel_end                  ; 4 bytes — true kernel end address (includes BSS)
+    dd _kernel_phys_end             ; 4 bytes — true kernel PHYSICAL end (includes BSS)
     times 16 db 0                   ; 16 bytes — reserved
 .past_header:
+    ; Debug: 'K' on serial — we're alive at identity address
     mov al, 'K'
     mov dx, 0x3f8
     out dx, al
@@ -33,7 +37,7 @@ _start:
     mov fs, ax
     mov gs, ax
 
-    ; Read stack address from boot_info structure (set dynamically by bootloader)
+    ; Read stack address from boot_info structure (identity address, boot tables active)
     ; boot_info at 0x9000, stack_base at offset +32
     xor rsp, rsp
     mov esp, [0x9000 + 32]
@@ -43,12 +47,33 @@ _start:
     mov dx, 0x3f8
     out dx, al
 
+    ; ---- Jump to higher-half ----
+    ; RIP is at identity address (~0x10XXXX). LEA [rel] gives identity address.
+    ; Add KERNEL_VMA_OFFSET to get higher-half address. Stage2 mapped both.
+    lea rax, [rel .higher_half]
+    mov rbx, KERNEL_VMA_OFFSET
+    add rax, rbx
+    jmp rax
+
+.higher_half:
+    ; Now executing at higher-half address (0xFFFFFFFF801XXXXX)
+    mov al, 'H'
+    mov dx, 0x3f8
+    out dx, al
+
+    ; Convert RSP from identity to higher-half
+    ; Boot stack is at physical ~0x3XXXXX, mapped by PD_high in stage2
+    mov rax, KERNEL_VMA_OFFSET
+    add rsp, rax
+    add rbp, rax
+
     mov al, 'M'
     mov dx, 0x3f8
     out dx, al
 
     ; Zero BSS — C standard requires uninitialized globals be zero.
-    ; This is the single canonical place for BSS zeroing in BoxOS.
+    ; Linker resolves __bss_start/__bss_end to higher-half VMA addresses.
+    ; Page tables map these to the correct physical memory.
     extern __bss_start
     extern __bss_end
 

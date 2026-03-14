@@ -298,55 +298,12 @@ vmm_context_t* vmm_create_context(void) {
     spinlock_init(&ctx->lock);
 
     if (kernel_context && kernel_context->pml4) {
-        // Deep copy PML4[0] identity mapping so each context has its own PDPT/PD.
-        // Required for: (1) ISR code at 0x100000+ reachable via identity mapping,
-        // (2) Cabin can split 2MB large pages for 4KB mappings at 0x1000+.
-        // USER bit on intermediate levels lets Cabin pages work; kernel pages
-        // stay protected (no USER on the actual PT entries).
-        {
-            uintptr_t new_pdpt_phys = vmm_alloc_page_table();
-            if (!new_pdpt_phys) {
-                vmm_free_page_table(pml4_phys);
-                kfree(ctx);
-                vmm_set_error("Failed to allocate PDPT for new context");
-                return NULL;
-            }
-
-            page_table_t* new_pdpt = (page_table_t*)vmm_phys_to_virt(new_pdpt_phys);
-
-            pte_t kernel_pml4_entry = kernel_context->pml4->entries[0];
-            if (kernel_pml4_entry & VMM_FLAG_PRESENT) {
-                page_table_t* kernel_pdpt = (page_table_t*)vmm_phys_to_virt(vmm_pte_to_phys(kernel_pml4_entry));
-
-                pte_t kernel_pdpt_entry = kernel_pdpt->entries[0];
-                if (kernel_pdpt_entry & VMM_FLAG_PRESENT) {
-                    if (!(kernel_pdpt_entry & VMM_FLAG_LARGE_PAGE)) {
-                        uintptr_t new_pd_phys = vmm_alloc_page_table();
-                        if (!new_pd_phys) {
-                            vmm_free_page_table(new_pdpt_phys);
-                            vmm_free_page_table(pml4_phys);
-                            kfree(ctx);
-                            vmm_set_error("Failed to allocate PD for identity mapping");
-                            return NULL;
-                        }
-
-                        page_table_t* new_pd = (page_table_t*)vmm_phys_to_virt(new_pd_phys);
-                        page_table_t* kernel_pd = (page_table_t*)vmm_phys_to_virt(vmm_pte_to_phys(kernel_pdpt_entry));
-
-                        for (int i = 0; i < 128; i++) {
-                            new_pd->entries[i] = kernel_pd->entries[i];
-                        }
-
-                        new_pdpt->entries[0] = vmm_make_pte(new_pd_phys, VMM_FLAGS_KERNEL_RW | VMM_FLAG_USER);
-                    }
-                }
-            }
-
-            ctx->pml4->entries[0] = vmm_make_pte(new_pdpt_phys, VMM_FLAGS_KERNEL_RW | VMM_FLAG_USER);
-        }
+        // Higher-half kernel: no PML4[0] identity mapping needed.
+        // ISR code is at higher-half addresses (PML4[511]).
+        // Cabin pages at 0x1000+ are mapped individually by vmm_map_page.
 
         // Upper half (256..511) is kernel space — shared directly
-        // This includes Pull Map at PML4[272]
+        // This includes Pull Map at PML4[272] and kernel code at PML4[511]
         for (int i = 256; i < 512; i++) {
             ctx->pml4->entries[i] = kernel_context->pml4->entries[i];
         }
@@ -385,8 +342,7 @@ static void vmm_free_user_space_tables(vmm_context_t* ctx) {
         uintptr_t pdpt_phys = vmm_pte_to_phys(pml4_entry);
         page_table_t* pdpt = (page_table_t*)vmm_phys_to_virt(pdpt_phys);
 
-        bool is_identity_pml4_entry = (p4 == 0);
-        int skip_pt_free = is_identity_pml4_entry ? 1 : 0;
+        int skip_pt_free = 0;
 
         for (int p3 = 0; p3 < 512; p3++) {
             pte_t pdpt_entry = pdpt->entries[p3];
@@ -405,25 +361,6 @@ static void vmm_free_user_space_tables(vmm_context_t* ctx) {
 
                 if (pd_entry & VMM_FLAG_LARGE_PAGE) {
                     continue;
-                }
-
-                if (is_identity_pml4_entry) {
-                    vmm_context_t* kern = vmm_get_kernel_context();
-                    if (kern && kern->pml4) {
-                        pte_t kern_pml4e = kern->pml4->entries[0];
-                        if (kern_pml4e & VMM_FLAG_PRESENT) {
-                            page_table_t* kern_pdpt = (page_table_t*)vmm_phys_to_virt(vmm_pte_to_phys(kern_pml4e));
-                            pte_t kern_pdpte = kern_pdpt->entries[p3];
-                            if ((kern_pdpte & VMM_FLAG_PRESENT) && !(kern_pdpte & VMM_FLAG_LARGE_PAGE)) {
-                                page_table_t* kern_pd = (page_table_t*)vmm_phys_to_virt(vmm_pte_to_phys(kern_pdpte));
-                                pte_t kern_pd_entry = kern_pd->entries[p2];
-                                if ((kern_pd_entry & VMM_FLAG_PRESENT) &&
-                                    vmm_pte_to_phys(pd_entry) == vmm_pte_to_phys(kern_pd_entry)) {
-                                    continue;
-                                }
-                            }
-                        }
-                    }
                 }
 
                 uintptr_t pt_phys = vmm_pte_to_phys(pd_entry);
@@ -1180,34 +1117,34 @@ void vmm_init(void) {
     debug_printf("[VMM] Kernel context created at %p\n", kernel_context);
     debug_printf("[VMM] PML4 physical address: 0x%p\n", (void*)kernel_context->pml4_phys);
 
-    // identity-map all usable RAM using 2MB large pages so kernel code at 0x100000
-    // remains accessible at that virtual address throughout boot
+    // Higher-half kernel mapping: map kernel code+data+stack at PML4[511] PDPT[510]
+    // using 2MB large pages. No identity mapping — kernel runs at 0xFFFFFFFF80100000+
     uint64_t total_mem = pmm_get_total_memory();
-    uintptr_t identity_map_end = ALIGN_UP(total_mem, 2 * 1024 * 1024);
-
-    debug_printf("[VMM] Setting up identity mapping for 0x0 - 0x%llx (%llu MB) using 2MB large pages...\n",
-            identity_map_end, identity_map_end / (1024*1024));
 
     #define LARGE_PAGE_SIZE (2 * 1024 * 1024)
+    #define HIGHER_HALF_BASE 0xFFFFFFFF80000000ULL
+    // Map first 64MB at higher-half (covers kernel + boot infrastructure)
+    #define HIGHER_HALF_MAP_SIZE (64ULL * 1024 * 1024)
     size_t large_pages_mapped = 0;
 
-    for (uintptr_t addr = 0; addr < identity_map_end; addr += LARGE_PAGE_SIZE) {
-        page_table_t* pd = vmm_get_or_create_table(kernel_context, addr, 2);
+    debug_printf("[VMM] Setting up higher-half kernel mapping at 0x%p (%llu MB)...\n",
+            (void*)HIGHER_HALF_BASE, HIGHER_HALF_MAP_SIZE / (1024*1024));
+
+    for (uintptr_t phys = 0; phys < HIGHER_HALF_MAP_SIZE; phys += LARGE_PAGE_SIZE) {
+        uintptr_t virt = HIGHER_HALF_BASE + phys;
+        page_table_t* pd = vmm_get_or_create_table(kernel_context, virt, 2);
         if (!pd) {
-            if (addr < 0x1000000) {
-                panic("Failed to create page directory for identity mapping");
-            }
-            continue;
+            panic("Failed to create page directory for higher-half mapping");
         }
 
-        uint32_t pd_idx = VMM_PD_INDEX(addr);
+        uint32_t pd_idx = VMM_PD_INDEX(virt);
         pte_t* pd_entry = &pd->entries[pd_idx];
 
-        *pd_entry = vmm_make_pte(addr, VMM_FLAGS_KERNEL_RW | VMM_FLAG_LARGE_PAGE);
+        *pd_entry = vmm_make_pte(phys, VMM_FLAGS_KERNEL_RW | VMM_FLAG_LARGE_PAGE);
         large_pages_mapped++;
     }
 
-    debug_printf("[VMM] Identity mapped %zu large pages (%zu MB)\n",
+    debug_printf("[VMM] Higher-half mapped %zu large pages (%zu MB) at PML4[511]\n",
            large_pages_mapped, large_pages_mapped * 2);
 
     // Pull Map: map all physical RAM at PULL_MAP_BASE using 1GB or 2MB pages
@@ -1272,31 +1209,39 @@ void vmm_init(void) {
                  (void*)VMM_KERNEL_MMIO_BASE,
                  (void*)(VMM_KERNEL_MMIO_BASE + VMM_KERNEL_MMIO_SIZE));
 
-    debug_printf("[VMM] Testing identity mapping...\n");
-    volatile uint32_t* test_ptr = (volatile uint32_t*)0x200000;
-    uint32_t old_value = *test_ptr;
-    *test_ptr = 0xDEADBEEF;
-    if (*test_ptr != 0xDEADBEEF) {
-        panic("Identity mapping test failed");
-    }
-    *test_ptr = old_value;
-    debug_printf("[VMM] Identity mapping test: PASSED\n");
+    // Save values that will be inaccessible after identity mapping is removed.
+    // kernel_context was kmalloc'd at identity address — will be a dangling pointer after switch.
+    uintptr_t saved_pml4_phys = kernel_context->pml4_phys;
+    uintptr_t saved_ctx_phys = (uintptr_t)kernel_context;
 
+    // Switch to new kernel page tables.
+    // After this: identity mapping is GONE. Only higher-half + Pull Map exist.
+    // RSP is at higher-half address (converted in kernel_entry.asm), mapped by PML4[511].
     current_context = kernel_context;
     vmm_switch_context(kernel_context);
 
-    *test_ptr = 0xCAFEBABE;
-    if (*test_ptr != 0xCAFEBABE) {
-        panic("Page table switch broke memory access");
-    }
-    *test_ptr = old_value;
-
-    // Activate Pull Map — from this point, vmm_phys_to_virt returns Pull Map addresses
+    // Immediately activate Pull Map — identity addresses are dead, Pull Map is alive
     asm volatile("" ::: "memory");
     g_pull_map_active = true;
 
+    // Rebase kernel_context from identity to Pull Map address (was kmalloc'd at phys addr)
+    kernel_context = (vmm_context_t*)vmm_phys_to_virt(saved_ctx_phys);
+    current_context = kernel_context;
+    kernel_context->pml4 = (page_table_t*)vmm_phys_to_virt(saved_pml4_phys);
+
+    // VGA MUST be rebased FIRST — all subsequent prints go through VGA
+    extern void vga_activate_pull_map(void);
+    vga_activate_pull_map();
+
+    // Rebase kmalloc heap pool and free list from identity to Pull Map addresses
+    mem_activate_pull_map();
+
     // Rebase PMM bitmap to Pull Map address
     pmm_activate_pull_map();
+
+    // Rebase e820 entries to Pull Map address
+    extern void e820_activate_pull_map(void);
+    e820_activate_pull_map();
 
     // Verify Pull Map access
     volatile uint32_t* pull_test = (volatile uint32_t*)((uintptr_t)0x200000 + PULL_MAP_BASE);
@@ -1307,9 +1252,10 @@ void vmm_init(void) {
     }
     *pull_test = pull_old;
     debug_printf("[VMM] Pull Map verification: PASSED\n");
+    debug_printf("[VMM] Identity mapping removed — higher-half kernel active\n");
 
     // Enable PCID if CPU supports it — zero-flush context switches
-    // CR4.PCIDE requires CR3[11:0] = 0 when enabling (kernel PML4 is page-aligned ✓)
+    // CR4.PCIDE requires CR3[11:0] = 0 when enabling (kernel PML4 is page-aligned)
     extern cpu_capabilities_t g_cpu_caps;
     if (g_cpu_caps.has_pcid) {
         uint64_t cr4;
@@ -1329,7 +1275,7 @@ void vmm_init(void) {
     vmm_initialized = true;
 
     debug_printf("[VMM] Virtual memory layout:\n");
-    debug_printf("[VMM]   Kernel base:      0x%p\n", (void*)VMM_KERNEL_BASE);
+    debug_printf("[VMM]   Kernel code:      0x%p (higher-half)\n", (void*)HIGHER_HALF_BASE);
     debug_printf("[VMM]   Kernel heap:      0x%p - 0x%p (on-demand)\n",
            (void*)VMM_KERNEL_HEAP_BASE,
            (void*)(VMM_KERNEL_HEAP_BASE + VMM_KERNEL_HEAP_SIZE));
@@ -1341,6 +1287,7 @@ void vmm_init(void) {
     debug_printf("[VMM]   User heap:        0x%p\n", (void*)VMM_USER_HEAP_BASE);
     debug_printf("[VMM]   User stack top:   0x%p\n", (void*)VMM_USER_STACK_TOP);
     debug_printf("[VMM]   PCID:            %s\n", g_pcid_active ? "active (zero-flush)" : "off");
+    debug_printf("[VMM]   Identity map:     NONE (removed)\n");
 
     debug_printf("[VMM] %[S]Virtual Memory Manager initialized successfully!%[D]\n");
 }

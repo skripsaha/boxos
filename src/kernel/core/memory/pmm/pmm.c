@@ -139,8 +139,9 @@ void pmm_init(void) {
     if (boot_info_valid(bi)) {
         bitmap_start = ALIGN_UP((uintptr_t)bi->stack_base, 4096);
     } else {
-        // Fallback: place after kernel (legacy behavior)
-        bitmap_start = ALIGN_UP((uintptr_t)&_kernel_end, 4096);
+        // Fallback: place after kernel (use physical address)
+        extern uintptr_t _kernel_phys_end;
+        bitmap_start = ALIGN_UP((uintptr_t)&_kernel_phys_end, 4096);
     }
     pmm_zone.bitmap = (uint8_t*)bitmap_start;
     pmm_zone.bitmap_phys = bitmap_start;
@@ -216,9 +217,8 @@ void pmm_init(void) {
                unusable_pages, (unusable_pages * PMM_PAGE_SIZE) / (1024 * 1024));
     }
 
-    extern uintptr_t _kernel_start;
-    extern uintptr_t _kernel_end;
-    pmm_reserve_region((uintptr_t)&_kernel_start, (uintptr_t)&_kernel_end, "Kernel");
+    // Reserve kernel physical pages (boot_info has physical addresses)
+    pmm_reserve_region((uintptr_t)bi->kernel_start, (uintptr_t)bi->kernel_end, "Kernel");
     pmm_reserve_region((uintptr_t)pmm_zone.bitmap, (uintptr_t)pmm_zone.bitmap + bitmap_size, "Bitmap");
 
     pmm_zone.last_free = 0;
@@ -465,10 +465,14 @@ void pmm_print_memory_map(void) {
 }
 
 bool pmm_check_integrity(void) {
+    // Use physical kernel_end from boot_info
+    boot_info_t *bi = boot_info_get();
+    uintptr_t kernel_phys_end = boot_info_valid(bi) ? (uintptr_t)bi->kernel_end : 0;
+
     for (size_t i = 0; i < pmm_zone.pages; i++) {
         uintptr_t addr = pmm_zone.base + i * PMM_PAGE_SIZE;
 
-        if (addr < (uintptr_t)&_kernel_end &&
+        if (addr < kernel_phys_end &&
             pmm_get_bit(i) != PMM_FRAME_USED) {
             return false;
         }

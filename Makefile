@@ -47,7 +47,7 @@ ASM_INCLUDE    = -I$(SRCDIR)/kernel/arch/x86-64/gdt/
 ASMFLAGS       =  -g -f bin
 ASMFLAGS_ELF   = -g -f elf64 $(ASM_INCLUDE)
 CFLAGS         = -Os -m64 -ffreestanding -nostdlib -mno-red-zone -mno-sse -mno-mmx -mno-avx \
-                 -Wall -Wextra -fstack-protector-strong
+                 -mcmodel=kernel -Wall -Wextra -fstack-protector-strong
 INCLUDE_DIRS   := $(shell find src -type d)
 CFLAGS         += $(addprefix -I,$(INCLUDE_DIRS))
 LDFLAGS        = -g -T $(ENTRYDIR)/linker.ld -nostdlib -z max-page-size=0x1000 --oformat=binary

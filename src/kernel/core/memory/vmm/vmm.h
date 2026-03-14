@@ -217,6 +217,10 @@ static inline uintptr_t vmm_virt_to_phys_direct(void* virt_addr) {
     if (virt >= PULL_MAP_BASE) {
         return virt - PULL_MAP_BASE;
     }
+    // Higher-half kernel: 0xFFFFFFFF80000000+ maps to physical 0+
+    if (virt >= 0xFFFFFFFF80000000ULL) {
+        return virt - 0xFFFFFFFF80000000ULL;
+    }
     if (virt >= VMM_KERNEL_BASE) {
         return 0;
     }
