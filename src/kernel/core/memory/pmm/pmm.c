@@ -1,4 +1,5 @@
 #include "pmm.h"
+#include "vmm.h"
 #include "e820.h"
 #include "klib.h"
 #include "boxos_memory.h"
@@ -9,6 +10,7 @@ typedef struct {
     uintptr_t base;
     size_t pages;
     uint8_t* bitmap;
+    uintptr_t bitmap_phys;
     spinlock_t lock;
     size_t last_free;
     size_t free_count;  // maintained incrementally — avoids O(n) scan in pmm_free_pages()
@@ -141,6 +143,7 @@ void pmm_init(void) {
         bitmap_start = ALIGN_UP((uintptr_t)&_kernel_end, 4096);
     }
     pmm_zone.bitmap = (uint8_t*)bitmap_start;
+    pmm_zone.bitmap_phys = bitmap_start;
     debug_printf("[PMM] Bitmap placed at %p (after boot infrastructure)\n", pmm_zone.bitmap);
 
     size_t temp_pages = (mem_end - (uintptr_t)pmm_zone.bitmap) / PMM_PAGE_SIZE;
@@ -278,14 +281,10 @@ void* pmm_alloc(size_t pages) {
 void* pmm_alloc_zero(size_t pages) {
     void* addr = pmm_alloc(pages);
     if (addr) {
-        // pmm_alloc returns a physical address; this memset relies on identity
-        // mapping (phys == virt) which is set up by the bootloader for low memory.
-        // For addresses above the identity-mapped region, this would need
-        // vmm_phys_to_virt(), but all PMM-managed memory is within the
-        // identity-mapped range (0-256MB via 2MB large pages).
-        memset(addr, 0, pages * PMM_PAGE_SIZE);
+        void* virt = vmm_phys_to_virt((uintptr_t)addr);
+        memset(virt, 0, pages * PMM_PAGE_SIZE);
     }
-    return addr;
+    return addr;  // returns physical address — callers expect this
 }
 
 void pmm_free(void* addr, size_t pages) {
@@ -475,6 +474,12 @@ bool pmm_check_integrity(void) {
         }
     }
     return true;
+}
+
+void pmm_activate_pull_map(void) {
+    pmm_zone.bitmap = (uint8_t*)vmm_phys_to_virt(pmm_zone.bitmap_phys);
+    debug_printf("[PMM] Bitmap rebased to Pull Map: %p (phys: 0x%lx)\n",
+                 pmm_zone.bitmap, pmm_zone.bitmap_phys);
 }
 
 bool pmm_is_usable_ram(uintptr_t phys_addr, size_t size) {

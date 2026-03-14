@@ -12,6 +12,7 @@
 static vmm_context_t* kernel_context = NULL;
 static vmm_context_t* current_context = NULL;
 static bool vmm_initialized = false;
+static bool g_pull_map_active = false;
 static char last_error[256] = {0};
 static vmm_stats_t global_stats = {0};
 static spinlock_t vmm_global_lock = {0};
@@ -45,6 +46,13 @@ void vmm_set_error(const char* error) {
 
 const char* vmm_get_last_error(void) {
     return last_error;
+}
+
+void* vmm_phys_to_virt(uintptr_t phys_addr) {
+    if (g_pull_map_active) {
+        return (void*)(phys_addr + PULL_MAP_BASE);
+    }
+    return (void*)phys_addr;
 }
 
 uintptr_t vmm_alloc_page_table(void) {
@@ -220,52 +228,53 @@ vmm_context_t* vmm_create_context(void) {
     spinlock_init(&ctx->lock);
 
     if (kernel_context && kernel_context->pml4) {
-        // PML4[0] is NOT shared: user space (0-512GB) is in that range, so sharing
-        // it would let one process's mappings pollute another's address space.
-        // Instead: allocate a fresh PDPT/PD per context and copy only the
-        // identity-mapped large pages (0-256MB).
-        uintptr_t new_pdpt_phys = vmm_alloc_page_table();
-        if (!new_pdpt_phys) {
-            vmm_free_page_table(pml4_phys);
-            kfree(ctx);
-            vmm_set_error("Failed to allocate PDPT for new context");
-            return NULL;
-        }
+        // When Pull Map is active, user contexts get clean PML4[0] — no identity map.
+        // When Pull Map is NOT active (during vmm_init), copy identity-mapped PD for compatibility.
+        if (!g_pull_map_active) {
+            uintptr_t new_pdpt_phys = vmm_alloc_page_table();
+            if (!new_pdpt_phys) {
+                vmm_free_page_table(pml4_phys);
+                kfree(ctx);
+                vmm_set_error("Failed to allocate PDPT for new context");
+                return NULL;
+            }
 
-        page_table_t* new_pdpt = (page_table_t*)vmm_phys_to_virt(new_pdpt_phys);
+            page_table_t* new_pdpt = (page_table_t*)vmm_phys_to_virt(new_pdpt_phys);
 
-        pte_t kernel_pml4_entry = kernel_context->pml4->entries[0];
-        if (kernel_pml4_entry & VMM_FLAG_PRESENT) {
-            page_table_t* kernel_pdpt = (page_table_t*)vmm_phys_to_virt(vmm_pte_to_phys(kernel_pml4_entry));
+            pte_t kernel_pml4_entry = kernel_context->pml4->entries[0];
+            if (kernel_pml4_entry & VMM_FLAG_PRESENT) {
+                page_table_t* kernel_pdpt = (page_table_t*)vmm_phys_to_virt(vmm_pte_to_phys(kernel_pml4_entry));
 
-            pte_t kernel_pdpt_entry = kernel_pdpt->entries[0];
-            if (kernel_pdpt_entry & VMM_FLAG_PRESENT) {
-                if (!(kernel_pdpt_entry & VMM_FLAG_LARGE_PAGE)) {
-                    uintptr_t new_pd_phys = vmm_alloc_page_table();
-                    if (!new_pd_phys) {
-                        vmm_free_page_table(new_pdpt_phys);
-                        vmm_free_page_table(pml4_phys);
-                        kfree(ctx);
-                        vmm_set_error("Failed to allocate PD for identity mapping");
-                        return NULL;
+                pte_t kernel_pdpt_entry = kernel_pdpt->entries[0];
+                if (kernel_pdpt_entry & VMM_FLAG_PRESENT) {
+                    if (!(kernel_pdpt_entry & VMM_FLAG_LARGE_PAGE)) {
+                        uintptr_t new_pd_phys = vmm_alloc_page_table();
+                        if (!new_pd_phys) {
+                            vmm_free_page_table(new_pdpt_phys);
+                            vmm_free_page_table(pml4_phys);
+                            kfree(ctx);
+                            vmm_set_error("Failed to allocate PD for identity mapping");
+                            return NULL;
+                        }
+
+                        page_table_t* new_pd = (page_table_t*)vmm_phys_to_virt(new_pd_phys);
+                        page_table_t* kernel_pd = (page_table_t*)vmm_phys_to_virt(vmm_pte_to_phys(kernel_pdpt_entry));
+
+                        for (int i = 0; i < 128; i++) {
+                            new_pd->entries[i] = kernel_pd->entries[i];
+                        }
+
+                        new_pdpt->entries[0] = vmm_make_pte(new_pd_phys, VMM_FLAGS_KERNEL_RW | VMM_FLAG_USER);
                     }
-
-                    page_table_t* new_pd = (page_table_t*)vmm_phys_to_virt(new_pd_phys);
-                    page_table_t* kernel_pd = (page_table_t*)vmm_phys_to_virt(vmm_pte_to_phys(kernel_pdpt_entry));
-
-                    // copy identity-mapped 2MB large pages for 0-256MB (entries 0-127)
-                    for (int i = 0; i < 128; i++) {
-                        new_pd->entries[i] = kernel_pd->entries[i];
-                    }
-
-                    new_pdpt->entries[0] = vmm_make_pte(new_pd_phys, VMM_FLAGS_KERNEL_RW | VMM_FLAG_USER);
                 }
             }
+
+            ctx->pml4->entries[0] = vmm_make_pte(new_pdpt_phys, VMM_FLAGS_KERNEL_RW | VMM_FLAG_USER);
         }
+        // else: Pull Map active — PML4[0] stays zero (clean user space)
 
-        ctx->pml4->entries[0] = vmm_make_pte(new_pdpt_phys, VMM_FLAGS_KERNEL_RW | VMM_FLAG_USER);
-
-        // upper half (256..511) is kernel space — safe to share directly
+        // Upper half (256..511) is kernel space — shared directly
+        // This includes Pull Map at PML4[272]
         for (int i = 256; i < 512; i++) {
             ctx->pml4->entries[i] = kernel_context->pml4->entries[i];
         }
@@ -359,7 +368,7 @@ static void vmm_free_user_space_tables(vmm_context_t* ctx) {
                                      (p3 * 1024 * 1024 * 1024) +
                                      (p2 * 2 * 1024 * 1024) +
                                      (p1 * 4096);
-                    bool is_identity_mapped = (phys == virt);
+                    bool is_identity_mapped = (!g_pull_map_active) && (phys == virt);
 
                     extern uint64_t g_cpu_caps_page_phys;
                     if (phys == g_cpu_caps_page_phys) {
@@ -508,8 +517,9 @@ vmm_map_result_t vmm_map_page(vmm_context_t* ctx, uintptr_t virt_addr,
             return result;
         }
 
-        // allow remapping if it's an identity-mapped kernel page (replacing with user mapping)
-        bool is_identity_map = (existing_phys == virt_addr) &&
+        // Allow remapping identity-mapped kernel pages (only pre-Pull Map)
+        bool is_identity_map = (!g_pull_map_active) &&
+                              (existing_phys == virt_addr) &&
                               !(existing_flags & VMM_FLAG_USER);
 
         if (!is_identity_map) {
@@ -1085,8 +1095,8 @@ void vmm_init(void) {
     debug_printf("[VMM] Kernel context created at %p\n", kernel_context);
     debug_printf("[VMM] PML4 physical address: 0x%p\n", (void*)kernel_context->pml4_phys);
 
-    // identity-map all usable RAM using 2MB large pages so PMM-allocated physical
-    // addresses equal virtual addresses (PMM can allocate beyond 256MB on large systems)
+    // identity-map all usable RAM using 2MB large pages so kernel code at 0x100000
+    // remains accessible at that virtual address throughout boot
     uint64_t total_mem = pmm_get_total_memory();
     uintptr_t identity_map_end = ALIGN_UP(total_mem, 2 * 1024 * 1024);
 
@@ -1115,6 +1125,61 @@ void vmm_init(void) {
     debug_printf("[VMM] Identity mapped %zu large pages (%zu MB)\n",
            large_pages_mapped, large_pages_mapped * 2);
 
+    // Pull Map: map all physical RAM at PULL_MAP_BASE using 1GB or 2MB pages
+    extern cpu_capabilities_t g_cpu_caps;
+    bool use_1gb_pages = g_cpu_caps.has_1gb_pages;
+
+    uintptr_t pull_pdpt_phys = vmm_alloc_page_table();
+    if (!pull_pdpt_phys) {
+        panic("Failed to allocate Pull Map PDPT");
+    }
+    // g_pull_map_active is false, so vmm_phys_to_virt returns identity — safe to access
+    page_table_t* pull_pdpt = (page_table_t*)vmm_phys_to_virt(pull_pdpt_phys);
+
+    if (use_1gb_pages) {
+        size_t num_1gb = (total_mem + (1ULL << 30) - 1) >> 30;
+        if (num_1gb > 512) num_1gb = 512;
+
+        debug_printf("[VMM] Pull Map: using 1GB pages (%zu entries for %llu MB)\n",
+                     num_1gb, total_mem / (1024*1024));
+
+        for (size_t i = 0; i < num_1gb; i++) {
+            uintptr_t phys = (uintptr_t)i << 30;
+            pull_pdpt->entries[i] = vmm_make_pte(phys,
+                VMM_FLAG_PRESENT | VMM_FLAG_WRITABLE | VMM_FLAG_GLOBAL | VMM_FLAG_LARGE_PAGE);
+        }
+    } else {
+        size_t num_1gb_ranges = (total_mem + (1ULL << 30) - 1) >> 30;
+        if (num_1gb_ranges > 512) num_1gb_ranges = 512;
+
+        debug_printf("[VMM] Pull Map: using 2MB pages (no 1GB page support), %zu PD tables\n",
+                     num_1gb_ranges);
+
+        for (size_t i = 0; i < num_1gb_ranges; i++) {
+            uintptr_t pd_phys = vmm_alloc_page_table();
+            if (!pd_phys) {
+                panic("Failed to allocate Pull Map PD");
+            }
+            page_table_t* pd = (page_table_t*)vmm_phys_to_virt(pd_phys);
+
+            for (int j = 0; j < 512; j++) {
+                uintptr_t phys = ((uintptr_t)i << 30) + ((uintptr_t)j << 21);
+                if (phys >= total_mem) break;
+                pd->entries[j] = vmm_make_pte(phys,
+                    VMM_FLAG_PRESENT | VMM_FLAG_WRITABLE | VMM_FLAG_GLOBAL | VMM_FLAG_LARGE_PAGE);
+            }
+
+            pull_pdpt->entries[i] = vmm_make_pte(pd_phys,
+                VMM_FLAG_PRESENT | VMM_FLAG_WRITABLE);
+        }
+    }
+
+    kernel_context->pml4->entries[PULL_MAP_PML4_INDEX] =
+        vmm_make_pte(pull_pdpt_phys, VMM_FLAG_PRESENT | VMM_FLAG_WRITABLE);
+
+    debug_printf("[VMM] Pull Map installed at PML4[%d] = 0x%lx\n",
+                 PULL_MAP_PML4_INDEX, pull_pdpt_phys);
+
     debug_printf("[VMM] Kernel heap will be mapped on demand starting at 0x%p\n",
            (void*)VMM_KERNEL_HEAP_BASE);
 
@@ -1141,6 +1206,23 @@ void vmm_init(void) {
     }
     *test_ptr = old_value;
 
+    // Activate Pull Map — from this point, vmm_phys_to_virt returns Pull Map addresses
+    asm volatile("" ::: "memory");
+    g_pull_map_active = true;
+
+    // Rebase PMM bitmap to Pull Map address
+    pmm_activate_pull_map();
+
+    // Verify Pull Map access
+    volatile uint32_t* pull_test = (volatile uint32_t*)((uintptr_t)0x200000 + PULL_MAP_BASE);
+    uint32_t pull_old = *pull_test;
+    *pull_test = 0x5055BA5E;
+    if (*pull_test != 0x5055BA5E) {
+        panic("Pull Map verification failed");
+    }
+    *pull_test = pull_old;
+    debug_printf("[VMM] Pull Map verification: PASSED\n");
+
     vmm_initialized = true;
 
     debug_printf("[VMM] Virtual memory layout:\n");
@@ -1148,6 +1230,10 @@ void vmm_init(void) {
     debug_printf("[VMM]   Kernel heap:      0x%p - 0x%p (on-demand)\n",
            (void*)VMM_KERNEL_HEAP_BASE,
            (void*)(VMM_KERNEL_HEAP_BASE + VMM_KERNEL_HEAP_SIZE));
+    debug_printf("[VMM]   Pull Map:        0x%p - 0x%p (%s pages)\n",
+           (void*)PULL_MAP_BASE,
+           (void*)(PULL_MAP_BASE + total_mem),
+           use_1gb_pages ? "1GB" : "2MB");
     debug_printf("[VMM]   User base:        0x%p\n", (void*)VMM_USER_BASE);
     debug_printf("[VMM]   User heap:        0x%p\n", (void*)VMM_USER_HEAP_BASE);
     debug_printf("[VMM]   User stack top:   0x%p\n", (void*)VMM_USER_STACK_TOP);
@@ -1916,8 +2002,8 @@ int vmm_handle_page_fault(uintptr_t fault_addr, uint64_t error_code) {
         return 0;
     }
 
-    // restore identity mapping for low-memory faults caused by large page splitting
-    if (page_addr < (256ULL * 1024 * 1024)) {
+    // Restore identity mapping for low-memory faults (only when Pull Map is not active)
+    if (!g_pull_map_active && page_addr < (256ULL * 1024 * 1024)) {
         debug_printf("[VMM] WARNING: Restoring identity mapping for 0x%llx\n", page_addr);
         uint64_t flags = VMM_FLAG_PRESENT | VMM_FLAG_WRITABLE;
         vmm_map_result_t result = vmm_map_page(kernel_context, page_addr, page_addr, flags);

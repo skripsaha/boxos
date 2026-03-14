@@ -1,5 +1,6 @@
 #include "cpu.h"
 #include "klib.h"
+#include "cpuid.h"
 
 static cpu_info_t cpu_info = {0};
 
@@ -176,6 +177,8 @@ void cpu_print_detailed_info(void) {
     if (cpu_info.features_ecx & (1 << 25)) kprintf("AES ");
     if (cpu_info.features_ecx & (1 << 26)) kprintf("XSAVE ");
     if (cpu_info.features_ecx & (1 << 28)) kprintf("AVX ");
+    if (g_cpu_caps.has_1gb_pages) kprintf("1GB-Pages ");
+    if (g_cpu_caps.has_pcid) kprintf("PCID ");
     kprintf("\n");
 
     kprintf("Extended features: ");
