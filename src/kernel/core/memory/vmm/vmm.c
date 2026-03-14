@@ -17,6 +17,17 @@ static char last_error[256] = {0};
 static vmm_stats_t global_stats = {0};
 static spinlock_t vmm_global_lock = {0};
 
+// PCID allocator — 0 reserved for kernel, 1-4095 for user contexts
+#define PCID_MAX        4095
+#define PCID_KERNEL     0
+#define CR3_NOFLUSH     (1ULL << 63)
+
+static bool g_pcid_active = false;
+static uint16_t pcid_next = 1;
+static uint16_t pcid_free_stack[PCID_MAX];
+static size_t pcid_free_count = 0;
+static spinlock_t pcid_lock = {0};
+
 uint8_t vmm_maxphyaddr = 36;
 uint64_t vmm_pte_addr_mask = 0x0000000FFFFFF000ULL;
 
@@ -53,6 +64,64 @@ void* vmm_phys_to_virt(uintptr_t phys_addr) {
         return (void*)(phys_addr + PULL_MAP_BASE);
     }
     return (void*)phys_addr;
+}
+
+bool vmm_pcid_active(void) {
+    return g_pcid_active;
+}
+
+static uint16_t pcid_alloc(void) {
+    if (!g_pcid_active) return 0;
+
+    spin_lock(&pcid_lock);
+    uint16_t pcid;
+
+    if (pcid_free_count > 0) {
+        pcid = pcid_free_stack[--pcid_free_count];
+    } else if (pcid_next <= PCID_MAX) {
+        pcid = pcid_next++;
+    } else {
+        // All 4095 PCIDs exhausted — full TLB flush and reset
+        pcid_next = 2;
+        pcid_free_count = 0;
+        pcid = 1;
+
+        // Toggle CR4.PGE to flush entire TLB (all PCIDs + globals)
+        uint64_t cr4;
+        asm volatile("mov %%cr4, %0" : "=r"(cr4));
+        asm volatile("mov %0, %%cr4" : : "r"(cr4 & ~(1ULL << 7)) : "memory");
+        asm volatile("mov %0, %%cr4" : : "r"(cr4) : "memory");
+
+        debug_printf("[VMM] PCID pool exhausted — full TLB flush + reset\n");
+    }
+
+    spin_unlock(&pcid_lock);
+    return pcid;
+}
+
+static void pcid_release(uint16_t pcid) {
+    if (pcid == PCID_KERNEL || pcid > PCID_MAX || !g_pcid_active) return;
+    spin_lock(&pcid_lock);
+    if (pcid_free_count < PCID_MAX) {
+        pcid_free_stack[pcid_free_count++] = pcid;
+    }
+    spin_unlock(&pcid_lock);
+}
+
+uint64_t vmm_build_cr3(vmm_context_t* ctx) {
+    if (!ctx) return 0;
+    if (g_pcid_active) {
+        return ctx->pml4_phys | (uint64_t)ctx->pcid;
+    }
+    return ctx->pml4_phys;
+}
+
+uint64_t vmm_build_cr3_noflush(vmm_context_t* ctx) {
+    if (!ctx) return 0;
+    if (g_pcid_active) {
+        return ctx->pml4_phys | (uint64_t)ctx->pcid | CR3_NOFLUSH;
+    }
+    return ctx->pml4_phys;
 }
 
 uintptr_t vmm_alloc_page_table(void) {
@@ -224,6 +293,7 @@ vmm_context_t* vmm_create_context(void) {
     ctx->heap_start = VMM_USER_HEAP_BASE;
     ctx->heap_end = VMM_USER_HEAP_BASE;
     ctx->stack_top = VMM_USER_STACK_TOP;
+    ctx->pcid = pcid_alloc();
 
     spinlock_init(&ctx->lock);
 
@@ -435,13 +505,17 @@ void vmm_destroy_context(vmm_context_t* ctx) {
 
     uintptr_t saved_cr3;
     asm volatile("mov %%cr3, %0" : "=r"(saved_cr3));
+    uintptr_t saved_pml4 = saved_cr3 & ~0xFFFULL;
 
     // switch to kernel CR3 before walking page tables: user contexts have split PD
     // entries that may not identity-map all physical addresses used by other contexts'
     // page table structures; kernel context has pristine 2MB identity mapping
     uintptr_t destroyed_pml4 = ctx->pml4_phys;
-    if (saved_cr3 != kernel_context->pml4_phys) {
-        asm volatile("mov %0, %%cr3" :: "r"(kernel_context->pml4_phys) : "memory");
+    uintptr_t kernel_pml4 = kernel_context->pml4_phys;
+
+    if (saved_pml4 != kernel_pml4) {
+        uint64_t kernel_cr3 = vmm_build_cr3_noflush(kernel_context);
+        asm volatile("mov %0, %%cr3" :: "r"(kernel_cr3) : "memory");
     }
 
     spin_lock(&ctx->lock);
@@ -454,10 +528,14 @@ void vmm_destroy_context(vmm_context_t* ctx) {
 
     spin_unlock(&ctx->lock);
 
+    uint16_t freed_pcid = ctx->pcid;
     kfree(ctx);
+    pcid_release(freed_pcid);
 
-    if (saved_cr3 != destroyed_pml4 && saved_cr3 != kernel_context->pml4_phys) {
-        asm volatile("mov %0, %%cr3" :: "r"(saved_cr3) : "memory");
+    if (saved_pml4 != destroyed_pml4 && saved_pml4 != kernel_pml4) {
+        uint64_t restore_cr3 = saved_cr3;
+        if (g_pcid_active) restore_cr3 |= CR3_NOFLUSH;
+        asm volatile("mov %0, %%cr3" :: "r"(restore_cr3) : "memory");
     }
 
     spin_lock(&vmm_global_lock);
@@ -477,8 +555,13 @@ void vmm_switch_context(vmm_context_t* ctx) {
     if (!ctx || !ctx->pml4_phys) return;
 
     current_context = ctx;
-    asm volatile("mov %0, %%cr3" : : "r"(ctx->pml4_phys) : "memory");
-    vmm_flush_tlb();
+    if (g_pcid_active) {
+        // NOFLUSH: preserve TLB entries from other PCIDs
+        asm volatile("mov %0, %%cr3" : : "r"(vmm_build_cr3_noflush(ctx)) : "memory");
+    } else {
+        asm volatile("mov %0, %%cr3" : : "r"(ctx->pml4_phys) : "memory");
+        vmm_flush_tlb();
+    }
 }
 
 vmm_map_result_t vmm_map_page(vmm_context_t* ctx, uintptr_t virt_addr,
@@ -1223,6 +1306,24 @@ void vmm_init(void) {
     *pull_test = pull_old;
     debug_printf("[VMM] Pull Map verification: PASSED\n");
 
+    // Enable PCID if CPU supports it — zero-flush context switches
+    // CR4.PCIDE requires CR3[11:0] = 0 when enabling (kernel PML4 is page-aligned ✓)
+    extern cpu_capabilities_t g_cpu_caps;
+    if (g_cpu_caps.has_pcid) {
+        uint64_t cr4;
+        asm volatile("mov %%cr4, %0" : "=r"(cr4));
+        cr4 |= (1ULL << 17);  // CR4.PCIDE
+        asm volatile("mov %0, %%cr4" : : "r"(cr4) : "memory");
+
+        spinlock_init(&pcid_lock);
+        kernel_context->pcid = PCID_KERNEL;
+        g_pcid_active = true;
+
+        debug_printf("[VMM] %[S]PCID enabled — zero-flush context switches active%[D]\n");
+    } else {
+        debug_printf("[VMM] PCID not supported — using full TLB flush on context switch\n");
+    }
+
     vmm_initialized = true;
 
     debug_printf("[VMM] Virtual memory layout:\n");
@@ -1237,6 +1338,7 @@ void vmm_init(void) {
     debug_printf("[VMM]   User base:        0x%p\n", (void*)VMM_USER_BASE);
     debug_printf("[VMM]   User heap:        0x%p\n", (void*)VMM_USER_HEAP_BASE);
     debug_printf("[VMM]   User stack top:   0x%p\n", (void*)VMM_USER_STACK_TOP);
+    debug_printf("[VMM]   PCID:            %s\n", g_pcid_active ? "active (zero-flush)" : "off");
 
     debug_printf("[VMM] %[S]Virtual Memory Manager initialized successfully!%[D]\n");
 }

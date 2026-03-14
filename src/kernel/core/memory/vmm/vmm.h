@@ -70,6 +70,7 @@ typedef struct {
 typedef struct {
     page_table_t* pml4;
     uintptr_t pml4_phys;
+    uint16_t pcid;              // Process Context Identifier (0=kernel, 1-4095=user)
     spinlock_t lock;
     size_t mapped_pages;
     size_t kernel_pages;
@@ -126,6 +127,11 @@ void vmm_dump_page_tables(vmm_context_t* ctx, uintptr_t virt_addr);
 void vmm_dump_context_stats(vmm_context_t* ctx);
 void vmm_flush_tlb(void);
 void vmm_flush_tlb_page(uintptr_t virt_addr);
+
+// PCID (Process Context Identifiers) — zero-flush context switches
+bool vmm_pcid_active(void);
+uint64_t vmm_build_cr3(vmm_context_t* ctx);
+uint64_t vmm_build_cr3_noflush(vmm_context_t* ctx);
 
 bool vmm_protect(vmm_context_t* ctx, uintptr_t virt_addr, size_t size, uint64_t new_flags);
 bool vmm_is_user_accessible(uintptr_t virt_addr);
