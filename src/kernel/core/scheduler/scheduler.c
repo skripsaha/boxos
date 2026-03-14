@@ -37,17 +37,23 @@ bool scheduler_matches_use_context(process_t* proc) {
     if (!proc) return false;
     if (!sched.use_context.enabled) return false;
 
-    if (proc->tag_bits & sched.use_context.context_bits) return true;
+    // AND semantics: process must have ALL context tags
+    // Fast path: check bitmap tags (ids < 64)
+    uint64_t ctx_bits = sched.use_context.context_bits;
+    if (ctx_bits && (proc->tag_bits & ctx_bits) != ctx_bits) return false;
 
+    // Overflow tags (ids >= 64): process must contain every overflow context tag
     spin_lock(&sched.context_lock);
-    bool match = false;
-    for (uint16_t i = 0; i < proc->tag_overflow_count && !match; i++) {
-        for (uint16_t j = 0; j < sched.use_context.overflow_count; j++) {
+    bool match = true;
+    for (uint16_t j = 0; j < sched.use_context.overflow_count && match; j++) {
+        bool found = false;
+        for (uint16_t i = 0; i < proc->tag_overflow_count; i++) {
             if (proc->tag_overflow_ids[i] == sched.use_context.overflow_ids[j]) {
-                match = true;
+                found = true;
                 break;
             }
         }
+        if (!found) match = false;
     }
     spin_unlock(&sched.context_lock);
     return match;

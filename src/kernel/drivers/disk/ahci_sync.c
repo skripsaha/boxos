@@ -19,14 +19,14 @@ int ahci_read_sectors_sync(uint8_t port, uint64_t lba,
     /* Allocate a DMA-safe buffer (physical address guaranteed below 4GB from PMM) */
     uint32_t pages_needed = (sector_count * 512 + 4095) / 4096;
     if (pages_needed == 0) pages_needed = 1;
-    void* dma_buffer = pmm_alloc(pages_needed);
-    if (!dma_buffer) {
+    void* dma_page = pmm_alloc(pages_needed);
+    if (!dma_page) {
         debug_printf("[AHCI Sync] Failed to allocate DMA buffer for read\n");
         return -1;
     }
-    memset(dma_buffer, 0, pages_needed * 4096);
-
-    uintptr_t dma_phys = (uintptr_t)dma_buffer;
+    uintptr_t dma_phys = (uintptr_t)dma_page;
+    void* dma_virt = vmm_phys_to_virt(dma_phys);
+    memset(dma_virt, 0, pages_needed * 4096);
 
     for (int retry = 0; retry < AHCI_MAX_RETRIES; retry++) {
         int slot = ahci_alloc_slot(port);
@@ -40,7 +40,7 @@ int ahci_read_sectors_sync(uint8_t port, uint64_t lba,
         error_t err = ahci_build_ncq_read(port, slot, lba, sector_count, (void*)dma_phys);
         if (err != OK) {
             ahci_free_slot(port, slot);
-            pmm_free(dma_buffer, pages_needed);
+            pmm_free(dma_page, pages_needed);
             return -1;
         }
 
@@ -56,8 +56,8 @@ int ahci_read_sectors_sync(uint8_t port, uint64_t lba,
 
             if (!(ci & (1U << slot)) && !(sact & (1U << slot))) {
                 ahci_free_slot(port, slot);
-                memcpy(buffer, dma_buffer, sector_count * 512);
-                pmm_free(dma_buffer, pages_needed);
+                memcpy(buffer, dma_virt, sector_count * 512);
+                pmm_free(dma_page, pages_needed);
                 return 0;
             }
 
@@ -87,7 +87,7 @@ int ahci_read_sectors_sync(uint8_t port, uint64_t lba,
         }
     }
 
-    pmm_free(dma_buffer, pages_needed);
+    pmm_free(dma_page, pages_needed);
     debug_printf("[AHCI Sync] Read failed after %d retries\n", AHCI_MAX_RETRIES);
     return -1;
 }
@@ -105,15 +105,15 @@ int ahci_write_sectors_sync(uint8_t port, uint64_t lba,
     /* Allocate a DMA-safe buffer and copy data into it */
     uint32_t pages_needed = (sector_count * 512 + 4095) / 4096;
     if (pages_needed == 0) pages_needed = 1;
-    void* dma_buffer = pmm_alloc(pages_needed);
-    if (!dma_buffer) {
+    void* dma_page = pmm_alloc(pages_needed);
+    if (!dma_page) {
         debug_printf("[AHCI Sync] Failed to allocate DMA buffer for write\n");
         return -1;
     }
-    memcpy(dma_buffer, buffer, sector_count * 512);
+    uintptr_t dma_phys = (uintptr_t)dma_page;
+    void* dma_virt = vmm_phys_to_virt(dma_phys);
+    memcpy(dma_virt, buffer, sector_count * 512);
     mfence();
-
-    uintptr_t dma_phys = (uintptr_t)dma_buffer;
 
     for (int retry = 0; retry < AHCI_MAX_RETRIES; retry++) {
         int slot = ahci_alloc_slot(port);
@@ -127,7 +127,7 @@ int ahci_write_sectors_sync(uint8_t port, uint64_t lba,
         error_t err = ahci_build_ncq_write(port, slot, lba, sector_count, (void*)dma_phys);
         if (err != OK) {
             ahci_free_slot(port, slot);
-            pmm_free(dma_buffer, pages_needed);
+            pmm_free(dma_page, pages_needed);
             return -1;
         }
 
@@ -140,7 +140,7 @@ int ahci_write_sectors_sync(uint8_t port, uint64_t lba,
         while (rdtsc() < timeout_tsc) {
             if (!(regs->ci & (1U << slot)) && !(regs->sact & (1U << slot))) {
                 ahci_free_slot(port, slot);
-                pmm_free(dma_buffer, pages_needed);
+                pmm_free(dma_page, pages_needed);
                 return 0;
             }
 
@@ -170,7 +170,7 @@ int ahci_write_sectors_sync(uint8_t port, uint64_t lba,
         }
     }
 
-    pmm_free(dma_buffer, pages_needed);
+    pmm_free(dma_page, pages_needed);
     debug_printf("[AHCI Sync] Write failed after %d retries\n", AHCI_MAX_RETRIES);
     return -1;
 }
