@@ -17,6 +17,11 @@
 #define LAPIC_TIMER_VECTOR      0xFE    // 254
 #define LAPIC_SPURIOUS_VECTOR   0xFF    // 255
 
+// AMP inter-processor interrupt vectors
+#define IPI_WAKE_VECTOR         0xF0    // 240 — wake idle AP or reschedule
+#define IPI_SHOOTDOWN_VECTOR    0xF1    // 241 — TLB shootdown
+#define IPI_PANIC_VECTOR        0xF2    // 242 — broadcast halt on panic
+
 // Interrupt controller type
 typedef enum {
     IRQCHIP_PIC,        // Legacy 8259A PIC (fallback)

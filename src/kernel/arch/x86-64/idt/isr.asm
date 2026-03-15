@@ -103,6 +103,11 @@ ISR_NOERROR 129  ; workflow completion notification
 ISR_NOERROR 254  ; LAPIC timer
 ISR_NOERROR 255  ; LAPIC spurious
 
+; IPI vectors (AMP inter-processor interrupts)
+ISR_NOERROR 240  ; IPI_WAKE     (0xF0)
+ISR_NOERROR 241  ; IPI_SHOOTDOWN (0xF1)
+ISR_NOERROR 242  ; IPI_PANIC    (0xF2)
+
 ; Common ISR entry point
 ; Stack layout on entry (top to bottom):
 ;   r15, r14, r13, r12, r11, r10, r9, r8
@@ -196,8 +201,14 @@ isr_table:
     dq isr128
     ; Completion IRQ (129)
     dq isr129
-    ; Unimplemented (130-253) - use GPF handler
-    times 124 dq isr13
+    ; Unimplemented (130-239) - use GPF handler
+    times 110 dq isr13
+    ; IPI vectors (240-242)
+    dq isr240
+    dq isr241
+    dq isr242
+    ; Unimplemented (243-253) - use GPF handler
+    times 11 dq isr13
     ; LAPIC timer (254)
     dq isr254
     ; LAPIC spurious (255)

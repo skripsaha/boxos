@@ -84,4 +84,8 @@ typedef struct {
 
 acpi_error_t acpi_parse_madt(madt_info_t* info);
 
+// Collect all enabled LAPIC IDs from MADT into ids_out[].
+// Returns count of IDs written (0 on failure).
+uint8_t amp_collect_lapics(uint8_t* ids_out, uint8_t max_count);
+
 #endif // ACPI_MADT_H

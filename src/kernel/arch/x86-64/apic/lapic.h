@@ -60,4 +60,8 @@ void lapic_timer_stop(void);
 uint32_t lapic_read(uint32_t reg);
 void lapic_write(uint32_t reg, uint32_t value);
 
+// IPI delivery
+void lapic_send_ipi(uint8_t dest_lapic_id, uint8_t vector);
+void lapic_send_ipi_all_excluding_self(uint8_t vector);
+
 #endif // LAPIC_H

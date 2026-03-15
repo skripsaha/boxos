@@ -122,6 +122,11 @@
 #define CONFIG_START_USERSPACE 1
 #endif
 
+// AMP Configuration
+#define CONFIG_MAX_CORES            256
+#define CONFIG_AP_TRAMPOLINE_PHYS   0x8000
+#define CONFIG_AP_STACK_PAGES       4
+
 _Static_assert(CONFIG_TAGFS_BLOCK_SIZE == CONFIG_PAGE_SIZE,
                "CONFIG_TAGFS_BLOCK_SIZE must match CONFIG_PAGE_SIZE");
 _Static_assert((CONFIG_USER_STACK_SIZE % CONFIG_PAGE_SIZE) == 0,
