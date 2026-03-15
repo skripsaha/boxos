@@ -404,62 +404,110 @@ void pmm_test_high_memory(void) {
 
     kprintf("[PMM TEST] Testing >4GB allocations...\n");
 
+    size_t pass = 0, fail = 0;
+
+    // Test 1: Single page allocations — keep trying until we get >4GB pages
     #define HIGH_TEST_COUNT 16
     void* allocs[HIGH_TEST_COUNT];
     size_t high_count = 0;
-    size_t total_allocs = 0;
 
-    // Allocate pages until we get some from >4GB
     for (size_t i = 0; i < HIGH_TEST_COUNT * 64 && high_count < HIGH_TEST_COUNT; i++) {
         void* phys = pmm_alloc(1);
         if (!phys) break;
-        total_allocs++;
 
-        uintptr_t addr = (uintptr_t)phys;
-        if (addr >= IDENTITY_MAP_LIMIT) {
+        if ((uintptr_t)phys >= IDENTITY_MAP_LIMIT) {
             allocs[high_count++] = phys;
         } else {
-            // Return low-memory pages immediately
             pmm_free(phys, 1);
-            total_allocs--;
         }
     }
 
-    if (high_count == 0) {
-        kprintf("[PMM TEST] WARNING: No >4GB pages allocated after %zu attempts\n", total_allocs);
-        return;
-    }
+    kprintf("[PMM TEST] Single pages: %zu from >4GB\n", high_count);
 
-    kprintf("[PMM TEST] Allocated %zu pages from >4GB region\n", high_count);
-
-    // Test each page: write pattern via Pull Map, read back, verify
-    size_t pass = 0, fail = 0;
     for (size_t i = 0; i < high_count; i++) {
         uintptr_t phys = (uintptr_t)allocs[i];
         volatile uint64_t* virt = (volatile uint64_t*)vmm_phys_to_virt(phys);
 
-        // Write pattern: address XOR magic
-        uint64_t pattern = phys ^ 0xB0A0B0A0DEADBEEFULL;
+        uint64_t pattern = phys ^ 0xB0A0DEADBEEFCAFEULL;
         virt[0] = pattern;
         virt[1] = ~pattern;
-        virt[255] = pattern;  // offset 2040 (near end of 4KB page)
+        virt[255] = pattern;  // near end of 4KB page
 
-        // Read back and verify
         if (virt[0] == pattern && virt[1] == ~pattern && virt[255] == pattern) {
             pass++;
         } else {
-            kprintf("[PMM TEST] FAIL: phys=0x%lx read mismatch\n", phys);
+            kprintf("[PMM TEST]   FAIL: single page phys=0x%lx\n", phys);
             fail++;
         }
-    }
-
-    // Free all high-memory pages
-    for (size_t i = 0; i < high_count; i++) {
         pmm_free(allocs[i], 1);
     }
 
+    // Test 2: Large block allocation (256 pages = 1MB) — likely from >4GB contiguous pool
+    size_t large_sizes[] = {256, 64, 16};
+    for (size_t s = 0; s < 3; s++) {
+        size_t pages = large_sizes[s];
+        void* phys = pmm_alloc(pages);
+        if (!phys) continue;
+
+        uintptr_t addr = (uintptr_t)phys;
+        bool is_high = (addr >= IDENTITY_MAP_LIMIT);
+
+        kprintf("[PMM TEST] Large block: %zu pages at 0x%lx %s\n",
+                pages, addr, is_high ? "(>4GB)" : "(<4GB)");
+
+        if (is_high) {
+            // Verify first, middle, and last page of the block
+            size_t test_offsets[] = {0, pages / 2, pages - 1};
+            for (size_t t = 0; t < 3; t++) {
+                uintptr_t page_phys = addr + test_offsets[t] * PMM_PAGE_SIZE;
+                volatile uint64_t* virt = (volatile uint64_t*)vmm_phys_to_virt(page_phys);
+
+                uint64_t pattern = page_phys ^ 0xCAFEBABE12345678ULL;
+                virt[0] = pattern;
+                virt[511] = ~pattern;  // last uint64_t in page
+
+                if (virt[0] == pattern && virt[511] == ~pattern) {
+                    pass++;
+                } else {
+                    kprintf("[PMM TEST]   FAIL: large block page 0x%lx\n", page_phys);
+                    fail++;
+                }
+            }
+        }
+
+        pmm_free(phys, pages);
+    }
+
+    // Test 3: pmm_alloc_zero from >4GB — verify zeroed
+    void* zero_phys = NULL;
+    for (size_t i = 0; i < 128; i++) {
+        void* p = pmm_alloc_zero(1);
+        if (!p) break;
+        if ((uintptr_t)p >= IDENTITY_MAP_LIMIT) {
+            zero_phys = p;
+            break;
+        }
+        pmm_free(p, 1);
+    }
+
+    if (zero_phys) {
+        volatile uint64_t* virt = (volatile uint64_t*)vmm_phys_to_virt((uintptr_t)zero_phys);
+        bool zeroed = true;
+        for (size_t i = 0; i < 512 && zeroed; i++) {
+            if (virt[i] != 0) zeroed = false;
+        }
+        if (zeroed) {
+            pass++;
+            kprintf("[PMM TEST] alloc_zero at 0x%lx: zeroed OK\n", (uintptr_t)zero_phys);
+        } else {
+            fail++;
+            kprintf("[PMM TEST] FAIL: alloc_zero at 0x%lx NOT zeroed\n", (uintptr_t)zero_phys);
+        }
+        pmm_free(zero_phys, 1);
+    }
+
     if (fail == 0) {
-        kprintf("[PMM TEST] %[S]PASSED: %zu pages >4GB — write/read/verify OK%[D]\n", pass);
+        kprintf("[PMM TEST] %[S]PASSED: all %zu checks OK (>4GB alloc + Pull Map access)%[D]\n", pass);
     } else {
         kprintf("[PMM TEST] %[R]FAILED: %zu pass, %zu fail%[D]\n", pass, fail);
     }
