@@ -184,3 +184,33 @@ acpi_error_t acpi_parse_madt(madt_info_t* info) {
 
     return info->valid ? ACPI_OK : ACPI_ERR_INVALID_TABLE;
 }
+
+uint8_t amp_collect_lapics(uint8_t* ids_out, uint8_t max_count) {
+    if (!ids_out || max_count == 0) return 0;
+    if (!g_acpi.initialized || !g_acpi.rsdp) return 0;
+
+    acpi_madt_t* madt = (acpi_madt_t*)acpi_find_table("APIC");
+    if (!madt) return 0;
+
+    uint8_t count = 0;
+    uint8_t* ptr = (uint8_t*)madt + sizeof(acpi_madt_t);
+    uint8_t* end = (uint8_t*)madt + madt->header.length;
+
+    while (ptr < end && count < max_count) {
+        madt_entry_header_t* entry = (madt_entry_header_t*)ptr;
+        if (entry->length < 2) break;
+
+        if (entry->type == MADT_TYPE_LOCAL_APIC) {
+            madt_local_apic_t* lapic = (madt_local_apic_t*)entry;
+            bool enabled = (lapic->flags & MADT_LAPIC_ENABLED) ||
+                           (lapic->flags & MADT_LAPIC_ONLINE_CAP);
+            if (enabled) {
+                ids_out[count++] = lapic->apic_id;
+            }
+        }
+
+        ptr += entry->length;
+    }
+
+    return count;
+}

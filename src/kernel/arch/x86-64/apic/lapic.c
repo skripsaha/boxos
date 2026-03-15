@@ -171,3 +171,19 @@ void lapic_timer_stop(void) {
     lapic_write(LAPIC_REG_TIMER_LVT, LAPIC_LVT_MASKED);
     lapic_write(LAPIC_REG_TIMER_ICR, 0);
 }
+
+void lapic_send_ipi(uint8_t dest_lapic_id, uint8_t vector) {
+    while (lapic_read(LAPIC_REG_ICR_LOW) & (1 << 12)) {
+        __asm__ volatile("pause");
+    }
+    lapic_write(LAPIC_REG_ICR_HIGH, (uint32_t)dest_lapic_id << 24);
+    lapic_write(LAPIC_REG_ICR_LOW, (uint32_t)vector);
+}
+
+void lapic_send_ipi_all_excluding_self(uint8_t vector) {
+    while (lapic_read(LAPIC_REG_ICR_LOW) & (1 << 12)) {
+        __asm__ volatile("pause");
+    }
+    lapic_write(LAPIC_REG_ICR_HIGH, 0);
+    lapic_write(LAPIC_REG_ICR_LOW, (uint32_t)vector | (3 << 18));
+}

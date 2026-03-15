@@ -29,6 +29,10 @@ static void idt_load_asm(uint64_t idt_desc_addr) {
     asm volatile("lidt (%0)" : : "r" (idt_desc_addr) : "memory");
 }
 
+void idt_load(void) {
+    idt_load_asm((uint64_t)&idt_desc);
+}
+
 void idt_set_entry(int index, uint64_t handler, uint16_t selector, uint8_t type_attr, uint8_t ist) {
     idt[index].offset_low = handler & 0xFFFF;
     idt[index].selector = selector;
@@ -90,6 +94,14 @@ void idt_init(void) {
     idt_set_entry(LAPIC_TIMER_VECTOR, (uint64_t)isr_table[LAPIC_TIMER_VECTOR],
                   GDT_KERNEL_CODE, IDT_TYPE_INTERRUPT_GATE, 0);
     idt_set_entry(LAPIC_SPURIOUS_VECTOR, (uint64_t)isr_table[LAPIC_SPURIOUS_VECTOR],
+                  GDT_KERNEL_CODE, IDT_TYPE_INTERRUPT_GATE, 0);
+
+    // AMP IPI vectors (0xF0-0xF2)
+    idt_set_entry(IPI_WAKE_VECTOR,      (uint64_t)isr_table[IPI_WAKE_VECTOR],
+                  GDT_KERNEL_CODE, IDT_TYPE_INTERRUPT_GATE, 0);
+    idt_set_entry(IPI_SHOOTDOWN_VECTOR, (uint64_t)isr_table[IPI_SHOOTDOWN_VECTOR],
+                  GDT_KERNEL_CODE, IDT_TYPE_INTERRUPT_GATE, 0);
+    idt_set_entry(IPI_PANIC_VECTOR,     (uint64_t)isr_table[IPI_PANIC_VECTOR],
                   GDT_KERNEL_CODE, IDT_TYPE_INTERRUPT_GATE, 0);
 
     idt_load_asm((uint64_t)&idt_desc);
@@ -284,10 +296,15 @@ void irq_handler(interrupt_frame_t* frame) {
     }
 
     // LAPIC timer vector: reserved for future use.
-    // Currently all scheduling is driven by PIT IRQ 0 (case 0 below).
-    // If lapic_timer_init() is called, this handler must take over scheduling
-    // and PIT IRQ 0 scheduling must be disabled to prevent double-scheduling.
     if (vector == LAPIC_TIMER_VECTOR) {
+        lapic_send_eoi();
+        return;
+    }
+
+    // AMP IPI vectors: acknowledge and return (Phase 1 — no action yet)
+    if (vector == IPI_WAKE_VECTOR ||
+        vector == IPI_SHOOTDOWN_VECTOR ||
+        vector == IPI_PANIC_VECTOR) {
         lapic_send_eoi();
         return;
     }

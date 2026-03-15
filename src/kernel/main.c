@@ -32,6 +32,7 @@
 #include "cpu_caps_page.h"
 #include "boot_info.h"
 #include "notify.h"
+#include "amp.h"
 
 void kernel_main(void)
 {
@@ -120,6 +121,9 @@ void kernel_main(void)
     debug_printf("[INIT] Interrupt Controller...\n");
     irqchip_init();
 
+    debug_printf("[INIT] AMP Core Detection...\n");
+    amp_init();
+
     debug_printf("[INIT] PIT...\n");
     pit_init(100);
 
@@ -147,6 +151,11 @@ void kernel_main(void)
 
     debug_printf("[INIT] Guide Dispatcher...\n");
     guide_init();
+
+    if (g_amp.total_cores > 1) {
+        debug_printf("[INIT] Booting Application Processors...\n");
+        amp_boot_aps();
+    }
 
     debug_printf("[INIT] PCI Subsystem...\n");
     pci_init();
