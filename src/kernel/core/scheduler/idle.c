@@ -92,7 +92,6 @@ void idle_process_init(void) {
 }
 
 void idle_process_init_core(uint8_t core_index) {
-    if (core_index >= MAX_CORES) return;
     if (g_core_idle[core_index]) return;  // already initialized
 
     process_t* idle = kmalloc(sizeof(process_t));

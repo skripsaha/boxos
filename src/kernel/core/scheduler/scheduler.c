@@ -55,8 +55,6 @@ void scheduler_init(void) {
 }
 
 void scheduler_init_core(uint8_t core_index) {
-    if (core_index >= MAX_CORES) return;
-
     scheduler_state_t* s = &g_core_sched[core_index];
     sched_init_one(s);
 
@@ -73,7 +71,6 @@ scheduler_state_t* scheduler_get_state(void) {
 }
 
 scheduler_state_t* scheduler_get_core(uint8_t core_idx) {
-    if (core_idx >= MAX_CORES) return &g_core_sched[0];
     return &g_core_sched[core_idx];
 }
 
@@ -155,7 +152,6 @@ void sched_enqueue(process_t* proc) {
 // Enqueue a process onto a specific core's RunQueue (cross-core safe).
 void sched_enqueue_on(uint8_t core_idx, process_t* proc) {
     if (!proc || process_is_idle(proc)) return;
-    if (core_idx >= MAX_CORES) return;
 
     scheduler_state_t* target = &g_core_sched[core_idx];
 
