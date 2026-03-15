@@ -49,6 +49,9 @@ process_t* ready_queue_pop(ReadyQueue* rq)
     return proc;
 }
 
+// Lock-free check: safe because this is only called from the single-core
+// sync path (guide()) where IRQs are disabled and no other core accesses
+// the ready queue.  head/tail are volatile, so reads are not reordered.
 bool ready_queue_is_empty(const ReadyQueue* rq)
 {
     if (!rq) return true;

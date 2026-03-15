@@ -416,10 +416,14 @@ void process_set_state(process_t *proc, process_state_t new_state)
     if (!proc)
         return;
 
+    // Hold state_lock across both the state write and the runqueue operation.
+    // Without this, another core could change the state between our write and
+    // the enqueue/dequeue, causing the process to be in the wrong runqueue state.
+    // Lock ordering: state_lock -> runqueue.lock is safe — no path holds
+    // runqueue.lock and then acquires state_lock.
     spin_lock(&proc->state_lock);
     process_state_t old_state = proc->state;
     proc->state = new_state;
-    spin_unlock(&proc->state_lock);
 
     // O(1) RunQueue integration: enqueue/dequeue on PROC_WORKING transitions
     if (new_state == PROC_WORKING && old_state != PROC_WORKING) {
@@ -427,6 +431,8 @@ void process_set_state(process_t *proc, process_state_t new_state)
     } else if (new_state != PROC_WORKING && old_state == PROC_WORKING) {
         sched_dequeue(proc);
     }
+
+    spin_unlock(&proc->state_lock);
 }
 
 process_state_t process_get_state(process_t *proc)
@@ -1242,11 +1248,14 @@ uint32_t process_cleanup_queue_size(void)
 void process_cleanup_queue_flush(void)
 {
     debug_printf("[PROCESS] Flushing cleanup queue (pending=%u)...\n",
-                 g_cleanup_queue.count);
+                 process_cleanup_queue_size());
 
     uint32_t total_cleaned = 0;
 
-    while (g_cleanup_queue.count > 0)
+    // Use cleanup_queue_dequeue() as the authoritative emptiness check
+    // (it acquires the lock internally). Avoid reading g_cleanup_queue.count
+    // without the lock — another core could be enqueuing concurrently.
+    for (;;)
     {
         process_t *proc = cleanup_queue_dequeue();
         if (!proc)
