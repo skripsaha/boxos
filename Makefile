@@ -305,52 +305,46 @@ $(VBOX_VDI): $(IMAGE)
 	@echo "Creating VirtualBox VDI..."
 	@VBoxManage convertfromraw $< $@ --format VDI
 
-# ==== UTILITIES ====
-FULLSCREEN ?= on
+# Comma helper for $(if ...) inside recipes
+comma := ,
 
-run-nousb: $(IMAGE)
-	@echo "Running BoxOS in QEMU (no USB)..."
-	@$(QEMU) -drive format=raw,file=$< -m 512M -serial stdio
+# ==== RUN CONFIGURATION ====
+# Usage: make run [CORES=N] [MEM=size] [FULLSCREEN=on] [USB=on|off] [AHCI=on] [LOG=on] [DEBUG=on]
+#
+# Examples:
+#   make run                          — 1 core, 512M, USB keyboard
+#   make run CORES=4 MEM=4G          — 4 cores, 4GB RAM
+#   make run FULLSCREEN=on           — cocoa fullscreen mode
+#   make run LOG=on                  — enable QEMU interrupt/reset logging
+#   make run DEBUG=on                — pause for GDB attach (-s -S)
+#   make run AHCI=on USB=off         — AHCI disk controller, no USB
+#   make run CORES=8 MEM=4G LOG=on FULLSCREEN=on
+
+CORES      ?= 1
+MEM        ?= 512M
+FULLSCREEN ?= off
+USB        ?= on
+AHCI       ?= off
+LOG        ?= off
+DEBUG      ?= off
 
 run: $(IMAGE)
-	@echo "Running BoxOS in QEMU (xHCI + USB keyboard)..."
-	@$(QEMU) -drive file=$<,format=raw,index=0,media=disk -m 512M -serial stdio -device qemu-xhci -device usb-kbd
-
-run-fullscreen: $(IMAGE)
-	@echo "Running BoxOS in QEMU (Fullscreen=$(FULLSCREEN))..."
-	@$(QEMU) -drive format=raw,file=$< \
-		-m 512M \
+	@echo "=== BoxOS QEMU ==="
+	@echo "  Cores: $(CORES) | RAM: $(MEM) | USB: $(USB) | AHCI: $(AHCI)"
+	@echo "  Fullscreen: $(FULLSCREEN) | Log: $(LOG) | Debug: $(DEBUG)"
+	@echo "==================="
+	@$(QEMU) \
+		$(if $(filter on,$(AHCI)), \
+			-drive id=disk0$(comma)file=$<$(comma)format=raw$(comma)if=none \
+			-device ahci$(comma)id=ahci -device ide-hd$(comma)drive=disk0$(comma)bus=ahci.0, \
+			-drive format=raw$(comma)file=$<$(comma)index=0$(comma)media=disk) \
+		-m $(MEM) \
 		-serial stdio \
-		-no-reboot \
-		-no-shutdown \
-		-display cocoa,full-screen=$(FULLSCREEN),zoom-to-fit=on
-
-runlog: $(IMAGE)
-	@echo "Running BoxOS in QEMU with full logging..."
-	@$(QEMU) -drive format=raw,file=$< -m 512M -serial stdio \
-		-d int,cpu_reset -no-reboot -no-shutdown \
-		-D boxos_qemu.log
-
-CORES = 4
-MEM = 4096M
-
-run1: $(IMAGE)
-	@echo "Running BoxOS in QEMU with $(CORES) cores and $(MEM) memory size"
-	@$(QEMU) -drive format=raw,file=$< -m $(MEM) -serial stdio \
-		-smp $(CORES),cores=$(CORES),threads=1,sockets=1 \
-		-d int,cpu_reset \
-		-D boxos_qemu.log
-
-debug: $(IMAGE)
-	@echo "Running BoxOS in QEMU with debugger..."
-	@$(QEMU) -drive format=raw,file=$< -m 512M -serial stdio -s -S
-
-run-ahci: $(IMAGE)
-	@echo "Running BoxOS in QEMU with AHCI controller..."
-	@$(QEMU) -drive id=ahci0,file=$<,format=raw,if=none \
-		-device ahci,id=ahci \
-		-device ide-hd,drive=ahci0,bus=ahci.0 \
-		-m 512M -serial stdio
+		$(if $(filter-out 1,$(CORES)),-smp $(CORES)$(comma)cores=$(CORES)$(comma)threads=1$(comma)sockets=1) \
+		$(if $(filter on,$(FULLSCREEN)),-display cocoa$(comma)full-screen=on$(comma)zoom-to-fit=on) \
+		$(if $(filter on,$(USB)),-device qemu-xhci -device usb-kbd) \
+		$(if $(filter on,$(LOG)),-d int$(comma)cpu_reset -no-reboot -no-shutdown -D boxos_qemu.log) \
+		$(if $(filter on,$(DEBUG)),-s -S)
 
 clean:
 	@echo "Cleaning build..."
