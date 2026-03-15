@@ -34,6 +34,9 @@
 #include "notify.h"
 #include "amp.h"
 #include "per_core.h"
+#include "kcore.h"
+#include "lapic.h"
+#include "idle.h"
 
 void kernel_main(void)
 {
@@ -157,8 +160,16 @@ void kernel_main(void)
     guide_init();
 
     if (g_amp.total_cores > 1) {
+        debug_printf("[INIT] K-Core Queues...\n");
+        kcore_init();
+
+        debug_printf("[INIT] Syscall Mode: ASYNC...\n");
+        idt_set_syscall_mode(true);
+
         debug_printf("[INIT] Booting Application Processors...\n");
         amp_boot_aps();
+    } else {
+        idt_set_syscall_mode(false);
     }
 
     debug_printf("[INIT] PCI Subsystem...\n");
@@ -421,6 +432,42 @@ void kernel_main(void)
     }
 
     kprintf("[AUTOSTART] %d process(es) launched\n", autostart_count);
+
+    if (g_amp.multicore_active) {
+        // ================================================================
+        // Multi-core bootstrap: BSP is a K-Core, processes run on App Cores.
+        // Enqueue all WORKING processes on their home App Core RunQueues,
+        // wake App Cores via IPI, then BSP enters the K-Core guide loop.
+        // ================================================================
+        kprintf("[KERNEL] Multi-core mode: %u K-Core(s), %u App Core(s)\n",
+                g_amp.k_count, g_amp.app_count);
+
+        // Enqueue all created processes on their home App Core RunQueues
+        process_list_lock();
+        process_t *p = process_get_first();
+        while (p) {
+            if (p->magic == PROCESS_MAGIC && p->state == PROC_WORKING &&
+                !process_is_idle(p)) {
+                sched_enqueue(p);
+                debug_printf("[KERNEL] Enqueued PID %u on App Core %u\n",
+                             p->pid, p->home_core);
+            }
+            p = p->next;
+        }
+        process_list_unlock();
+
+        // Wake all App Cores to start scheduling
+        for (uint8_t c = 0; c < g_amp.total_cores; c++) {
+            if (!g_amp.cores[c].is_kcore && g_amp.cores[c].online) {
+                lapic_send_ipi(g_amp.cores[c].lapic_id, IPI_WAKE_VECTOR);
+            }
+        }
+
+        kprintf("[KERNEL] BSP entering K-Core guide loop...\n");
+        kcore_run_loop();  // never returns
+    }
+
+    // Single-core: jump directly to initial process on BSP
     debug_printf("[KERNEL] Starting initial process (PID %u) - jumping to Ring 3...\n",
                  initial_proc->pid);
 

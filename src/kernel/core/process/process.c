@@ -15,11 +15,15 @@
 #include "notify.h"
 #include "tagfs.h"
 #include "per_core.h"
+#include "amp.h"
 
 static process_t *process_list_head = NULL;
 static volatile uint32_t process_count = 0;
 static spinlock_t process_lock;
 static process_cleanup_queue_t g_cleanup_queue;
+
+// Round-robin counter for App Core assignment (multi-core only).
+static volatile uint32_t g_appcore_rr_counter = 0;
 
 static int process_set_tag_bit(process_t *proc, uint16_t tag_id)
 {
@@ -178,7 +182,25 @@ process_t *process_create(const char *tags)
     proc->code_start = VMM_CABIN_CODE_START;
     proc->code_size = 0;
     proc->started = false;
-    proc->home_core = 0;  // default: BSP runs all processes (Phase 3)
+    proc->kcore_pending = 0;
+
+    // Assign home_core: round-robin across App Cores (multi-core) or BSP (single-core).
+    if (g_amp.app_count > 0) {
+        uint32_t rr = atomic_fetch_add_u32(&g_appcore_rr_counter, 1);
+        uint32_t target = rr % g_amp.app_count;
+        uint32_t app_seen = 0;
+        for (uint8_t c = 0; c < g_amp.total_cores; c++) {
+            if (!g_amp.cores[c].is_kcore) {
+                if (app_seen == target) {
+                    proc->home_core = c;
+                    break;
+                }
+                app_seen++;
+            }
+        }
+    } else {
+        proc->home_core = g_amp.bsp_index;
+    }
 
     // ASLR: generate per-process random offsets
     aslr_offsets_t aslr = aslr_generate();

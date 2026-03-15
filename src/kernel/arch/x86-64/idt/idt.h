@@ -87,6 +87,10 @@ void exception_handler(interrupt_frame_t* frame);
 void irq_handler(interrupt_frame_t* frame);
 void syscall_handler(interrupt_frame_t* frame);
 
+// Switch syscall dispatch between sync (single-core) and async (multi-core).
+// Must be called after kcore_init() and before any user processes start.
+void idt_set_syscall_mode(bool multicore);
+
 extern void* isr_table[IDT_ENTRIES];
 
 #endif // IDT_H

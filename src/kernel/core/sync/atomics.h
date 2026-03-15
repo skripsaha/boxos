@@ -126,4 +126,15 @@ static inline uint8_t atomic_load_u8(const volatile uint8_t* ptr) {
     return __atomic_load_n((uint8_t*)ptr, __ATOMIC_SEQ_CST);
 }
 
+static inline bool atomic_cas_u8(volatile uint8_t* ptr, uint8_t expected, uint8_t desired) {
+    uint8_t prev;
+    __asm__ __volatile__(
+        "lock cmpxchgb %2, %1"
+        : "=a"(prev), "+m"(*ptr)
+        : "r"(desired), "0"(expected)
+        : "memory"
+    );
+    return prev == expected;
+}
+
 #endif // ATOMICS_H

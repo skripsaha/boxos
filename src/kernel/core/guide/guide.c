@@ -190,3 +190,29 @@ void guide(void)
     }
 }
 
+// Process all pending Pockets for one process (K-Core guide loop entry point).
+// Drains PocketRing completely and writes Results. Does NOT change process state.
+void guide_process_one(process_t *proc)
+{
+    if (!proc || !proc->cabin)
+        return;
+
+    PocketRing *pring = (PocketRing *)vmm_phys_to_virt(proc->pocket_ring_phys);
+    if (!pring)
+        return;
+
+    uint32_t perf_snapshot = perf_trace_snapshot();
+    uint32_t count = 0;
+
+    while (!pocket_ring_is_empty(pring))
+    {
+        guide_process_pocket(proc);
+        count++;
+    }
+
+    if (count > 0)
+    {
+        perf_trace_flush_since(perf_snapshot);
+    }
+}
+

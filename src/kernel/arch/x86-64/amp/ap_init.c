@@ -5,6 +5,7 @@
 #include "klib.h"
 #include "scheduler.h"
 #include "idle.h"
+#include "kcore.h"
 
 void ap_entry_c(uint64_t core_index, uint64_t stack_top) {
     // per_core_init_ap sets up:
@@ -27,9 +28,17 @@ void ap_entry_c(uint64_t core_index, uint64_t stack_top) {
 
     g_amp.cores[core_index].online = true;
 
-    kprintf("[AMP] Core %u online (LAPIC ID %u)\n",
-            (uint32_t)core_index, lapic_get_id());
+    kprintf("[AMP] Core %u online (LAPIC ID %u, role=%s)\n",
+            (uint32_t)core_index, lapic_get_id(),
+            g_amp.cores[core_index].is_kcore ? "K-Core" : "App-Core");
 
+    // K-Cores enter the guide loop — processes Pockets from MPSC queue.
+    // App Cores idle until the scheduler assigns user processes.
+    if (g_amp.cores[core_index].is_kcore) {
+        kcore_run_loop();  // never returns
+    }
+
+    // App Core: enable interrupts and wait for scheduling
     __asm__ volatile("sti");
     while (1) {
         __asm__ volatile("hlt");
