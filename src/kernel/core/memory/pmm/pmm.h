@@ -41,4 +41,7 @@ bool pmm_is_usable_ram(uintptr_t phys_addr, size_t size);
 
 void pmm_activate_pull_map(void);
 
+// Test: allocate pages from >4GB, write/read via Pull Map, verify
+void pmm_test_high_memory(void);
+
 #endif // PMM_H

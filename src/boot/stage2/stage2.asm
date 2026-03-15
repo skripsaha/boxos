@@ -1075,8 +1075,7 @@ setup_paging:
     call calculate_identity_map_size
     ; ECX = total 2MB pages to map (64..2048)
 
-    push ecx
-    push ebx
+    push ecx               ; save total 2MB pages (for fill_pd later)
 
     ; Zero 32KB of page table space at dynamic address
     mov edi, [dynamic_pt_base]
@@ -1084,10 +1083,8 @@ setup_paging:
     xor eax, eax
     rep stosd
 
-    pop ebx                ; EBX = total 2MB pages
-    pop ecx
-    push ecx
-    mov ecx, ebx
+    pop ecx                ; ECX = total 2MB pages
+    push ecx               ; re-save for fill_pd pop
 
     ; PML4[0] -> PDPT (base + 0x1000)
     mov esi, [dynamic_pt_base]

@@ -103,6 +103,8 @@ void kernel_main(void)
     debug_printf("[INIT] VMM...\n");
     vmm_init();
 
+    pmm_test_high_memory();
+
     debug_printf("[INIT] TSS Dynamic Stacks...\n");
     tss_setup_dynamic_stacks();
 
