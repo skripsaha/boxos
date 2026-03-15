@@ -154,8 +154,6 @@ void vmm_flush_tlb(void) {
 }
 
 void vmm_flush_tlb_page(uintptr_t virt_addr) {
-    // only flushes TLB on current core; IPI-based shootdown not yet implemented
-    // TODO: implement IPI-based TLB shootdown for multi-core support
     asm volatile("invlpg (%0)" : : "r"(virt_addr) : "memory");
     spin_lock(&vmm_global_lock);
     global_stats.tlb_flushes++;
@@ -164,6 +162,118 @@ void vmm_flush_tlb_page(uintptr_t virt_addr) {
 
 void vmm_invalidate_page(uintptr_t virt_addr) {
     vmm_flush_tlb_page(virt_addr);
+}
+
+// ---------------------------------------------------------------------------
+// TLB Shootdown — cross-core invalidation via IPI_SHOOTDOWN_VECTOR
+// ---------------------------------------------------------------------------
+#include "amp.h"
+#include "lapic.h"
+#include "irqchip.h"
+#include "scheduler.h"
+
+// Global shootdown descriptor — single-slot, serialized by g_shootdown_lock.
+static struct {
+    volatile uintptr_t addr;           // target address (0 = full flush)
+    volatile uint32_t  page_count;     // pages to invalidate (0 = full flush)
+    volatile uint32_t  pending_acks;   // atomic countdown
+    volatile bool      active;
+} __attribute__((aligned(64))) g_shootdown;
+
+static spinlock_t g_shootdown_lock;
+
+void vmm_tlb_shootdown_handler(void)
+{
+    if (!g_shootdown.active) return;
+
+    uintptr_t addr   = g_shootdown.addr;
+    uint32_t  count  = g_shootdown.page_count;
+
+    if (addr == 0 || count == 0 || count > 64) {
+        // Full TLB flush
+        uintptr_t cr3;
+        asm volatile("mov %%cr3, %0" : "=r"(cr3));
+        asm volatile("mov %0, %%cr3" : : "r"(cr3) : "memory");
+    } else {
+        for (uint32_t i = 0; i < count; i++) {
+            asm volatile("invlpg (%0)" : : "r"(addr + i * VMM_PAGE_SIZE) : "memory");
+        }
+    }
+
+    atomic_fetch_sub_u32(&g_shootdown.pending_acks, 1);
+}
+
+void vmm_shootdown_pages(vmm_context_t* ctx, uintptr_t virt_addr, size_t page_count)
+{
+    // Single-core: local invalidation only
+    if (!g_amp.multicore_active || g_amp.total_cores <= 1) {
+        for (size_t i = 0; i < page_count; i++) {
+            asm volatile("invlpg (%0)" : : "r"(virt_addr + i * VMM_PAGE_SIZE) : "memory");
+        }
+        return;
+    }
+
+    // Determine which remote cores have this context loaded in CR3.
+    // Kernel context (shared PML4 entries) → all cores.
+    // User context → only cores whose current_process uses this cabin.
+    bool is_kernel = (ctx == kernel_context);
+    uint8_t my_core = amp_get_core_index();
+    uint8_t targets[MAX_CORES];
+    uint8_t target_count = 0;
+
+    for (uint8_t c = 0; c < g_amp.total_cores; c++) {
+        if (c == my_core) continue;
+        if (!g_amp.cores[c].online) continue;
+
+        if (is_kernel) {
+            targets[target_count++] = c;
+        } else {
+            scheduler_state_t* rs = scheduler_get_core(c);
+            process_t* rp = rs->current_process;  // snapshot, no lock needed
+            if (rp && rp->cabin && rp->cabin->pml4_phys == ctx->pml4_phys) {
+                targets[target_count++] = c;
+            }
+        }
+    }
+
+    // Flush self first
+    if (page_count <= 64) {
+        for (size_t i = 0; i < page_count; i++) {
+            asm volatile("invlpg (%0)" : : "r"(virt_addr + i * VMM_PAGE_SIZE) : "memory");
+        }
+    } else {
+        uintptr_t cr3;
+        asm volatile("mov %%cr3, %0" : "=r"(cr3));
+        asm volatile("mov %0, %%cr3" : : "r"(cr3) : "memory");
+    }
+
+    if (target_count == 0) return;
+
+    // Arm the shootdown descriptor and broadcast
+    spin_lock(&g_shootdown_lock);
+
+    g_shootdown.addr         = (page_count <= 64) ? virt_addr : 0;
+    g_shootdown.page_count   = (page_count <= 64) ? (uint32_t)page_count : 0;
+    atomic_store_u32(&g_shootdown.pending_acks, target_count);
+    g_shootdown.active       = true;
+    mfence();
+
+    for (uint8_t i = 0; i < target_count; i++) {
+        lapic_send_ipi(g_amp.cores[targets[i]].lapic_id, IPI_SHOOTDOWN_VECTOR);
+    }
+
+    // Spin until all targets ACK
+    while (atomic_load_u32(&g_shootdown.pending_acks) != 0) {
+        cpu_pause();
+    }
+
+    g_shootdown.active = false;
+    spin_unlock(&g_shootdown_lock);
+}
+
+void vmm_shootdown_page(vmm_context_t* ctx, uintptr_t virt_addr)
+{
+    vmm_shootdown_pages(ctx, virt_addr, 1);
 }
 
 page_table_t* vmm_get_or_create_table(vmm_context_t* ctx, uintptr_t virt_addr, int level) {
@@ -645,7 +755,8 @@ bool vmm_unmap_page(vmm_context_t* ctx, uintptr_t virt_addr) {
 
     spin_unlock(&ctx->lock);
 
-    vmm_flush_tlb_page(virt_addr);
+    // Cross-core TLB shootdown: invalidate on all cores sharing this context.
+    vmm_shootdown_page(ctx, virt_addr);
 
     return true;
 }
@@ -653,6 +764,11 @@ bool vmm_unmap_page(vmm_context_t* ctx, uintptr_t virt_addr) {
 bool vmm_unmap_pages(vmm_context_t* ctx, uintptr_t virt_addr, size_t page_count) {
     bool success = true;
 
+    // Unmap locally (each vmm_unmap_page does local invlpg via shootdown).
+    // For bulk unmap, a single batched shootdown is more efficient —
+    // but vmm_unmap_page already handles cross-core per page. This is
+    // acceptable for small page counts. Large bulk unmaps (vmm_destroy_context)
+    // don't call this — they reload CR3 entirely.
     for (size_t i = 0; i < page_count; i++) {
         if (!vmm_unmap_page(ctx, virt_addr + i * VMM_PAGE_SIZE)) {
             success = false;
@@ -1026,7 +1142,8 @@ bool vmm_protect(vmm_context_t* ctx, uintptr_t virt_addr, size_t size, uint64_t 
     if (!ctx || size == 0) return false;
 
     size_t page_count = vmm_size_to_pages(size);
-    uintptr_t current_addr = vmm_page_align_down(virt_addr);
+    uintptr_t base_addr = vmm_page_align_down(virt_addr);
+    uintptr_t current_addr = base_addr;
 
     spin_lock(&ctx->lock);
 
@@ -1042,11 +1159,14 @@ bool vmm_protect(vmm_context_t* ctx, uintptr_t virt_addr, size_t size, uint64_t 
         if (!(flags_to_set & VMM_FLAG_PRESENT)) flags_to_set |= VMM_FLAG_PRESENT;
         *pte = vmm_make_pte(phys_addr, flags_to_set);
 
-        vmm_flush_tlb_page(current_addr);
         current_addr += VMM_PAGE_SIZE;
     }
 
     spin_unlock(&ctx->lock);
+
+    // Batched cross-core shootdown for all modified pages
+    vmm_shootdown_pages(ctx, base_addr, page_count);
+
     return true;
 }
 
@@ -1108,6 +1228,7 @@ void vmm_init(void) {
     spinlock_init(&kernel_heap_lock);
     spinlock_init(&vmalloc_lock);
     spinlock_init(&kernel_mmio_lock);
+    spinlock_init(&g_shootdown_lock);
 
     kernel_context = vmm_create_context();
     if (!kernel_context) {

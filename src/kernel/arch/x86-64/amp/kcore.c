@@ -192,9 +192,11 @@ void kcore_run_loop(void)
             kcore_process_entry(proc);
         }
 
-        // Periodic deferred cleanup on BSP K-Core (processes marked DONE/CRASHED).
-        // schedule() no longer runs on K-Cores, so cleanup must happen here.
-        if (my_idx == g_amp.bsp_index && (++loop_count % 10) == 0) {
+        // Periodic deferred cleanup on ALL K-Cores (distributed).
+        // Each K-Core drains a portion of the shared cleanup queue under lock,
+        // so throughput scales with K-Core count. No double-free: queue lock
+        // ensures each entry is dequeued exactly once.
+        if ((++loop_count % 10) == 0) {
             process_cleanup_deferred();
         }
 

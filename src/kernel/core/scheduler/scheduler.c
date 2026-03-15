@@ -214,6 +214,64 @@ process_t* scheduler_select_next(void) {
 }
 
 // ---------------------------------------------------------------------------
+// Work stealing: idle App Cores steal from the busiest neighbor
+// ---------------------------------------------------------------------------
+
+static process_t* sched_try_steal(uint8_t my_core) {
+    // Find the App Core with the most processes in its RunQueue
+    uint8_t victim = 0xFF;
+    uint32_t max_count = 1;  // only steal if victim has > 1
+
+    for (uint8_t c = 0; c < g_amp.total_cores; c++) {
+        if (c == my_core) continue;
+        if (g_amp.cores[c].is_kcore) continue;
+        if (!g_amp.cores[c].online) continue;
+
+        uint32_t cnt = runqueue_total_count(&g_core_sched[c].runqueue);
+        if (cnt > max_count) {
+            max_count = cnt;
+            victim = c;
+        }
+    }
+
+    if (victim == 0xFF) return NULL;
+
+    // Lock victim's RunQueue and steal the lowest-priority process
+    scheduler_state_t* vs = &g_core_sched[victim];
+    spin_lock(&vs->runqueue.lock);
+
+    // Re-check under lock
+    if (runqueue_total_count(&vs->runqueue) <= 1) {
+        spin_unlock(&vs->runqueue.lock);
+        return NULL;
+    }
+
+    // Steal from the lowest priority level that has processes (least impactful)
+    process_t* stolen = NULL;
+    for (int prio = SCHED_PRIO_NORMAL; prio >= SCHED_PRIO_IDLE; prio--) {
+        SchedQueue* q = &vs->runqueue.queues[prio];
+        if (q->count == 0) continue;
+
+        stolen = q->procs[q->head];
+        q->procs[q->head] = NULL;
+        q->head = (q->head + 1) % RUNQUEUE_CAPACITY;
+        q->count--;
+        if (q->count == 0)
+            vs->runqueue.active_bitmap &= ~(1u << prio);
+        break;
+    }
+
+    spin_unlock(&vs->runqueue.lock);
+
+    if (stolen) {
+        // Reparent: future enqueues will target our core
+        stolen->home_core = my_core;
+    }
+
+    return stolen;
+}
+
+// ---------------------------------------------------------------------------
 // schedule() — per-core unified scheduling
 // ---------------------------------------------------------------------------
 
@@ -250,6 +308,19 @@ void schedule(void* frame_ptr) {
     // O(1) select next process from THIS core's RunQueue
     process_t* next = scheduler_select_next();
 
+    // Work stealing: if our RunQueue is empty (idle selected) and we're an
+    // App Core in multi-core mode, try to steal from the busiest neighbor.
+    if (process_is_idle(next) && amp_is_appcore() && g_amp.multicore_active) {
+        uint64_t ticks_since_steal = s->total_ticks - s->last_steal_tick;
+        if (ticks_since_steal >= STEAL_COOLDOWN_TICKS) {
+            s->last_steal_tick = s->total_ticks;
+            process_t* stolen = sched_try_steal(amp_get_core_index());
+            if (stolen) {
+                next = stolen;
+            }
+        }
+    }
+
     // Set kernel stack for ring 3 -> ring 0 transitions
     if (!process_is_idle(next) && next->kernel_stack_top) {
         per_core_set_kernel_rsp((uint64_t)next->kernel_stack_top);
@@ -276,12 +347,8 @@ void schedule(void* frame_ptr) {
         next->consecutive_runs++;
     }
 
-    // Periodic deferred cleanup (only on BSP to avoid contention)
-    if (amp_get_core_index() == g_amp.bsp_index) {
-        if ((s->total_ticks % 10) == 0) {
-            process_cleanup_deferred();
-        }
-    }
+    // Cleanup is handled by K-Cores in kcore_run_loop() (distributed).
+    // App Cores spend their time running user processes, not cleaning.
 
     // Restore next process context to frame
     context_restore_to_frame(next, frame);

@@ -128,6 +128,16 @@ void vmm_dump_context_stats(vmm_context_t* ctx);
 void vmm_flush_tlb(void);
 void vmm_flush_tlb_page(uintptr_t virt_addr);
 
+// TLB Shootdown: cross-core TLB invalidation via IPI.
+// Called after vmm_unmap/vmm_map/vmm_protect to flush stale entries on
+// remote cores that share the same address space (vmm_context_t).
+// Single-core: local invlpg only. Multi-core: IPI to affected cores.
+void vmm_shootdown_page(vmm_context_t* ctx, uintptr_t virt_addr);
+void vmm_shootdown_pages(vmm_context_t* ctx, uintptr_t virt_addr, size_t page_count);
+
+// Called from IPI_SHOOTDOWN_VECTOR handler in idt.c.
+void vmm_tlb_shootdown_handler(void);
+
 // PCID (Process Context Identifiers) — zero-flush context switches
 bool vmm_pcid_active(void);
 uint64_t vmm_build_cr3(vmm_context_t* ctx);

@@ -262,27 +262,66 @@ void exception_handler(interrupt_frame_t* frame) {
     kprintf("KERNEL PANIC: Exception #%u\n", frame->vector);
     kprintf("====================================================================\n");
     kprintf("Error code: 0x%lx\n", frame->error_code);
-    kprintf("RIP: 0x%lx\n", frame->rip);
-    kprintf("RSP: 0x%lx\n", frame->rsp);
-    kprintf("RFLAGS: 0x%lx\n", frame->rflags);
-    kprintf("CS: 0x%lx  SS: 0x%lx\n", frame->cs, frame->ss);
-    kprintf("Exception count: %lu\n", exception_count);
+    kprintf("Exception count: %lu  Core: %u\n", exception_count, (uint32_t)amp_get_core_index());
+
+    // Full GPR dump
+    kprintf("  RAX=%016lx  RBX=%016lx\n", frame->rax, frame->rbx);
+    kprintf("  RCX=%016lx  RDX=%016lx\n", frame->rcx, frame->rdx);
+    kprintf("  RSI=%016lx  RDI=%016lx\n", frame->rsi, frame->rdi);
+    kprintf("  RBP=%016lx  RSP=%016lx\n", frame->rbp, frame->rsp);
+    kprintf("  R8 =%016lx  R9 =%016lx\n", frame->r8,  frame->r9);
+    kprintf("  R10=%016lx  R11=%016lx\n", frame->r10, frame->r11);
+    kprintf("  R12=%016lx  R13=%016lx\n", frame->r12, frame->r13);
+    kprintf("  R14=%016lx  R15=%016lx\n", frame->r14, frame->r15);
+    kprintf("  RIP=%016lx  RFL=%016lx\n", frame->rip, frame->rflags);
+    kprintf("  CS=%04lx  SS=%04lx\n", frame->cs, frame->ss);
+
+    uint64_t panic_cr2, panic_cr3;
+    __asm__ volatile("mov %%cr2, %0" : "=r"(panic_cr2));
+    __asm__ volatile("mov %%cr3, %0" : "=r"(panic_cr3));
+    kprintf("  CR2=%016lx  CR3=%016lx\n", panic_cr2, panic_cr3);
 
     if (frame->vector == 14) {
-        uint64_t fault_addr;
-        __asm__ volatile("mov %%cr2, %0" : "=r"(fault_addr));
-        kprintf("Page Fault Address (CR2): 0x%lx\n", fault_addr);
-        kprintf("Page Fault Error Code:\n");
-        kprintf("  Present: %s\n", (frame->error_code & 0x1) ? "YES" : "NO");
-        kprintf("  Write: %s\n", (frame->error_code & 0x2) ? "YES" : "NO");
-        kprintf("  User: %s\n", (frame->error_code & 0x4) ? "YES" : "NO");
-        kprintf("  Reserved: %s\n", (frame->error_code & 0x8) ? "YES" : "NO");
-        kprintf("  Instruction Fetch: %s\n", (frame->error_code & 0x10) ? "YES" : "NO");
+        kprintf("Page Fault at 0x%lx (P=%d W=%d U=%d R=%d I=%d)\n",
+                panic_cr2,
+                (int)(frame->error_code & 0x1),
+                (int)((frame->error_code >> 1) & 0x1),
+                (int)((frame->error_code >> 2) & 0x1),
+                (int)((frame->error_code >> 3) & 0x1),
+                (int)((frame->error_code >> 4) & 0x1));
     }
 
-    kprintf("\n");
-    kprintf("System halted.\n");
+    // RBP-chain stack walk
+    extern char _text_start[];
+    extern char _text_end[];
+    kprintf("Stack trace:\n");
+    uint64_t walk_rbp = frame->rbp;
+    for (uint32_t depth = 0; depth < 20; depth++) {
+        if (walk_rbp == 0 || (walk_rbp & 7) != 0) break;
+        if (!vmm_is_kernel_addr(walk_rbp)) break;
+
+        uint64_t *fp = (uint64_t *)walk_rbp;
+        uint64_t saved_rbp = fp[0];
+        uint64_t ret_addr  = fp[1];
+
+        bool in_text = (ret_addr >= (uint64_t)_text_start && ret_addr < (uint64_t)_text_end);
+        kprintf("  #%u  %016lx%s\n", depth, ret_addr, in_text ? "" : "  [!]");
+
+        if (saved_rbp <= walk_rbp || saved_rbp == 0) break;
+        walk_rbp = saved_rbp;
+    }
+
     kprintf("====================================================================\n");
+    kprintf("System halted.\n");
+
+    // Halt all cores via IPI_PANIC
+    if (g_amp.multicore_active) {
+        for (uint8_t c = 0; c < g_amp.total_cores; c++) {
+            if (c == amp_get_core_index()) continue;
+            if (!g_amp.cores[c].online) continue;
+            lapic_send_ipi(g_amp.cores[c].lapic_id, IPI_PANIC_VECTOR);
+        }
+    }
 
     while (1) {
         asm volatile("cli; hlt");
@@ -319,10 +358,15 @@ void irq_handler(interrupt_frame_t* frame) {
         return;
     }
 
-    if (vector == IPI_SHOOTDOWN_VECTOR ||
-        vector == IPI_PANIC_VECTOR) {
+    if (vector == IPI_SHOOTDOWN_VECTOR) {
+        vmm_tlb_shootdown_handler();
         lapic_send_eoi();
         return;
+    }
+
+    if (vector == IPI_PANIC_VECTOR) {
+        lapic_send_eoi();
+        while (1) { asm volatile("cli; hlt"); }
     }
 
     // Standard hardware IRQ (vectors 32-55 -> IRQ 0-23)
