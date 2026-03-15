@@ -137,9 +137,6 @@ void sched_enqueue(process_t* proc) {
 
     scheduler_state_t* home = &g_core_sched[proc->home_core];
 
-    // Don't enqueue the currently running process (racy but benign)
-    if (proc == home->current_process) return;
-
     int prio = sched_determine_priority(proc);
 
     spin_lock(&home->runqueue.lock);

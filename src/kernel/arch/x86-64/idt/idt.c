@@ -380,30 +380,36 @@ void irq_handler(interrupt_frame_t* frame) {
 // ---------------------------------------------------------------------------
 
 // Sync path: process Pockets immediately on the calling core (N=1).
-static void sync_syscall_dispatch(process_t* proc) {
+static void sync_syscall_dispatch(process_t* proc, interrupt_frame_t* frame) {
+    context_save_from_frame(proc, frame);
     ready_queue_push(&g_ready_queue, proc);
     process_set_state(proc, PROC_WAITING);
     guide();
+    schedule(frame);
 }
 
-// Async path: submit to a K-Core queue for processing (N>1).
-// The process stays PROC_WAITING until the K-Core drains its PocketRing
-// and sets it back to PROC_WORKING (which auto-enqueues on home RunQueue).
-static void async_syscall_dispatch(process_t* proc) {
-    process_set_state(proc, PROC_WAITING);
+// Async path: non-blocking doorbell to K-Core (N>1).
+// Process stays PROC_WORKING and returns to userspace immediately.
+// K-Core processes Pockets in parallel, writes Results to ResultRing.
+// Process spins in result_wait() with pause until Result appears.
+// No state change, no schedule(), no IPI back — true parallelism.
+static void async_syscall_dispatch(process_t* proc, interrupt_frame_t* frame) {
+    (void)frame;  // not needed — process continues running
+
     // CAS: only submit if not already queued (dedup)
     if (atomic_cas_u8(&proc->kcore_pending, 0, 1)) {
         kcore_submit(proc);
     }
+    // Return to userspace — iretq restores frame, process keeps running.
 }
 
 // Function pointer set at boot — never changes at runtime.
-static void (*g_syscall_dispatch)(process_t* proc) = sync_syscall_dispatch;
+static void (*g_syscall_dispatch)(process_t*, interrupt_frame_t*) = sync_syscall_dispatch;
 
 void idt_set_syscall_mode(bool multicore) {
     if (multicore) {
         g_syscall_dispatch = async_syscall_dispatch;
-        debug_printf("[IDT] Syscall mode: ASYNC (multi-core, K-Core dispatch)\n");
+        debug_printf("[IDT] Syscall mode: ASYNC (multi-core, non-blocking)\n");
     } else {
         g_syscall_dispatch = sync_syscall_dispatch;
         debug_printf("[IDT] Syscall mode: SYNC (single-core)\n");
@@ -428,12 +434,6 @@ void syscall_handler(interrupt_frame_t* frame) {
 
     frame->rax = 0;
 
-    // Save process context before any state change or scheduling.
-    // schedule() only saves context for PROC_WORKING, but we set PROC_WAITING
-    // below, so we must save explicitly here — otherwise the process resumes
-    // with stale registers from a previous syscall.
-    context_save_from_frame(proc, frame);
-
     // Check if this is a yield (cooperative scheduling hint).
     // Yield pockets skip guide() — the process stays WORKING and gives up its
     // timeslice.  It remains schedulable so it will run again on the next tick.
@@ -442,11 +442,11 @@ void syscall_handler(interrupt_frame_t* frame) {
 
     if (peek && (peek->flags & POCKET_FLAG_YIELD)) {
         pocket_ring_pop(pring);
+        context_save_from_frame(proc, frame);
         schedule(frame);
         return;
     }
 
-    // Dispatch: sync on single-core, async on multi-core.
-    g_syscall_dispatch(proc);
-    schedule(frame);
+    // Dispatch: sync blocks + schedules, async returns immediately.
+    g_syscall_dispatch(proc, frame);
 }
