@@ -13,6 +13,10 @@ typedef struct process_t process_t;
 void guide_init(void);
 void guide(void);
 
+// Process all pending Pockets for one process (drain PocketRing, write Results).
+// Used by K-Core guide loop. Does NOT change process state — caller manages that.
+void guide_process_one(process_t* proc);
+
 // Deck handler: processes a single Pocket prefix.
 // Returns 0 on success, negative error_t on failure.
 // proc = source process (already resolved by Guide, avoids redundant process_find).

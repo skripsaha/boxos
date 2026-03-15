@@ -16,6 +16,8 @@
 #include "keyboard.h"
 #include "ata_dma.h"
 #include "idle.h"
+#include "amp.h"
+#include "kcore.h"
 
 static idt_entry_t idt[IDT_ENTRIES];
 static idt_descriptor_t idt_desc;
@@ -295,18 +297,29 @@ void irq_handler(interrupt_frame_t* frame) {
         return;
     }
 
-    // LAPIC timer vector: per-core scheduling (APs use this as their tick source)
+    // LAPIC timer vector: per-core tick counter + scheduling.
+    // K-Cores run kcore_run_loop — schedule() would hijack them.
     if (vector == LAPIC_TIMER_VECTOR) {
         scheduler_state_t* s = scheduler_get_state();
         s->total_ticks++;
-        schedule(frame);
+        if (amp_is_appcore()) {
+            schedule(frame);
+        }
         lapic_send_eoi();
         return;
     }
 
-    // AMP IPI vectors: acknowledge and return (Phase 1 — no action yet)
-    if (vector == IPI_WAKE_VECTOR ||
-        vector == IPI_SHOOTDOWN_VECTOR ||
+    // IPI_WAKE: On App Cores, reschedule to pick up newly-woken processes.
+    // On K-Cores, just ACK — the interrupt breaks HLT in kcore_run_loop.
+    if (vector == IPI_WAKE_VECTOR) {
+        if (amp_is_appcore()) {
+            schedule(frame);
+        }
+        lapic_send_eoi();
+        return;
+    }
+
+    if (vector == IPI_SHOOTDOWN_VECTOR ||
         vector == IPI_PANIC_VECTOR) {
         lapic_send_eoi();
         return;
@@ -337,7 +350,10 @@ void irq_handler(interrupt_frame_t* frame) {
             extern void xhci_poll_events(void);
             xhci_poll_events();
 
-            schedule(frame);
+            // K-Cores run kcore_run_loop — schedule() would hijack them.
+            if (amp_is_appcore()) {
+                schedule(frame);
+            }
             break;
         }
 
@@ -358,6 +374,45 @@ void irq_handler(interrupt_frame_t* frame) {
 
     irqchip_send_eoi(irq);
 }
+
+// ---------------------------------------------------------------------------
+// Syscall dispatch: sync (single-core) vs async (multi-core)
+// ---------------------------------------------------------------------------
+
+// Sync path: process Pockets immediately on the calling core (N=1).
+static void sync_syscall_dispatch(process_t* proc) {
+    ready_queue_push(&g_ready_queue, proc);
+    process_set_state(proc, PROC_WAITING);
+    guide();
+}
+
+// Async path: submit to a K-Core queue for processing (N>1).
+// The process stays PROC_WAITING until the K-Core drains its PocketRing
+// and sets it back to PROC_WORKING (which auto-enqueues on home RunQueue).
+static void async_syscall_dispatch(process_t* proc) {
+    process_set_state(proc, PROC_WAITING);
+    // CAS: only submit if not already queued (dedup)
+    if (atomic_cas_u8(&proc->kcore_pending, 0, 1)) {
+        kcore_submit(proc);
+    }
+}
+
+// Function pointer set at boot — never changes at runtime.
+static void (*g_syscall_dispatch)(process_t* proc) = sync_syscall_dispatch;
+
+void idt_set_syscall_mode(bool multicore) {
+    if (multicore) {
+        g_syscall_dispatch = async_syscall_dispatch;
+        debug_printf("[IDT] Syscall mode: ASYNC (multi-core, K-Core dispatch)\n");
+    } else {
+        g_syscall_dispatch = sync_syscall_dispatch;
+        debug_printf("[IDT] Syscall mode: SYNC (single-core)\n");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// syscall_handler — unified entry point for SYSCALL and INT 0x80
+// ---------------------------------------------------------------------------
 
 void syscall_handler(interrupt_frame_t* frame) {
     scheduler_state_t* sched_state = scheduler_get_state();
@@ -382,8 +437,6 @@ void syscall_handler(interrupt_frame_t* frame) {
     // Check if this is a yield (cooperative scheduling hint).
     // Yield pockets skip guide() — the process stays WORKING and gives up its
     // timeslice.  It remains schedulable so it will run again on the next tick.
-    // (Setting PROC_WAITING here would deadlock bare yield() calls in user code,
-    // since nothing would wake the process.)
     PocketRing* pring = (PocketRing*)vmm_phys_to_virt(proc->pocket_ring_phys);
     Pocket* peek = pocket_ring_peek(pring);
 
@@ -393,9 +446,7 @@ void syscall_handler(interrupt_frame_t* frame) {
         return;
     }
 
-    // Normal syscall: push to ReadyQueue, process through guide, then reschedule.
-    ready_queue_push(&g_ready_queue, proc);
-    process_set_state(proc, PROC_WAITING);
-    guide();
+    // Dispatch: sync on single-core, async on multi-core.
+    g_syscall_dispatch(proc);
     schedule(frame);
 }

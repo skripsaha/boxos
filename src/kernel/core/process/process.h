@@ -106,7 +106,8 @@ typedef struct process_t {
     void* kernel_stack_guard_base;
 
     bool started;
-    uint8_t home_core;           // core index for scheduling (RunQueue lives here)
+    uint8_t home_core;              // App Core index for scheduling (RunQueue lives here)
+    volatile uint8_t kcore_pending; // 1 = already in a K-Core queue, 0 = free (atomic CAS)
     uint32_t spawner_pid;
     uint64_t buf_heap_next;  // next free virtual address for buffer mapping
 

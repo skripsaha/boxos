@@ -67,7 +67,11 @@ static bool result_wait_yield(Result* out, uint32_t timeout_ms) {
             return false;
         }
 
-        yield();
+        // Use pause instead of yield() to avoid re-entering the kernel.
+        // On multi-core the K-Core writes results directly to ResultRing;
+        // the process just spins until the result appears. pause reduces
+        // power and avoids pipeline stalls from tight spin loops.
+        __asm__ volatile("pause");
     }
 }
 
