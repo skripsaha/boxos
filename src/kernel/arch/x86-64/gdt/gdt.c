@@ -87,3 +87,8 @@ void gdt_load(void) {
     debug_printf("[GDT] Loading GDT at 0x%p (limit: %d)...\n", (void*)gdt_desc.base, gdt_desc.limit);
     gdt_load_asm((uint64_t)&gdt_desc);
 }
+
+void gdt_copy_entries(gdt_entry_t* dest, int count) {
+    if (count > 7) count = 7;
+    memcpy(dest, gdt, sizeof(gdt_entry_t) * count);
+}

@@ -11,6 +11,7 @@
 #include "xhci_interrupt.h"
 #include "notify.h"
 #include "tagfs.h"
+#include "per_core.h"
 
 static scheduler_state_t sched;
 
@@ -179,10 +180,9 @@ void schedule(void* frame_ptr) {
     // O(1) select next process
     process_t* next = scheduler_select_next();
 
-    // Set kernel stack for ring 3 -> ring 0 transitions (TSS for INT, PerCpuData for notify)
+    // Set kernel stack for ring 3 -> ring 0 transitions (TSS.rsp0 + PerCpuData.kernel_rsp)
     if (!process_is_idle(next) && next->kernel_stack_top) {
-        tss_set_rsp0((uint64_t)next->kernel_stack_top);
-        notify_set_kernel_rsp((uint64_t)next->kernel_stack_top);
+        per_core_set_kernel_rsp((uint64_t)next->kernel_stack_top);
     }
 
     // Switch current process

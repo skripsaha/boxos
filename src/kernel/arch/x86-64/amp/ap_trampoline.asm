@@ -78,6 +78,10 @@ ap_long_mode:
     mov rbx, 0x8000
     mov rsp, [rbx + DATA_OFFSET_STACK]
 
+    ; ap_entry_c(core_index, stack_top)
+    ;   RDI = core_index  (first arg)
+    ;   RSI = stack_top    (second arg)
+    mov rsi, rsp                            ; RSI = stack top (before call pushes retaddr)
     xor rdi, rdi
     mov dil, [rbx + DATA_OFFSET_CORE_IDX]
 
