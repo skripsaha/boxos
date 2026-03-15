@@ -14,6 +14,7 @@
 #include "cabin_info.h"
 #include "notify.h"
 #include "tagfs.h"
+#include "per_core.h"
 
 static process_t *process_list_head = NULL;
 static volatile uint32_t process_count = 0;
@@ -1006,8 +1007,7 @@ void process_start_initial(process_t *proc)
 
     asm volatile("cli");
 
-    tss_set_rsp0((uint64_t)proc->kernel_stack_top);
-    notify_set_kernel_rsp((uint64_t)proc->kernel_stack_top);
+    per_core_set_kernel_rsp((uint64_t)proc->kernel_stack_top);
 
     uint64_t target_cr3 = proc->context.cr3;
     if (vmm_pcid_active()) target_cr3 |= (1ULL << 63);  // NOFLUSH

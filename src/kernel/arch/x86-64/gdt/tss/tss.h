@@ -50,4 +50,7 @@ void tss_set_rsp0(uint64_t rsp0);
 void tss_load(void);
 uint64_t tss_get_ist_stack(int ist_num);
 
+// Get pointer to the static BSP TSS (for per-core copying).
+tss_t* tss_get_ptr(void);
+
 #endif // TSS_H

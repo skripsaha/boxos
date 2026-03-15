@@ -1,26 +1,21 @@
 #include "amp.h"
+#include "per_core.h"
 #include "lapic.h"
-#include "gdt.h"
 #include "idt.h"
 #include "klib.h"
-#include "fpu.h"
 
-void ap_entry_c(uint64_t core_index) {
-    gdt_load();
+void ap_entry_c(uint64_t core_index, uint64_t stack_top) {
+    // per_core_init_ap sets up:
+    //   - Per-core GDT (with per-core TSS descriptor)
+    //   - Per-core TSS (rsp0, IST stacks with guard pages)
+    //   - FPU/SSE/AVX
+    //   - SYSCALL MSRs (EFER.SCE+NXE, STAR, LSTAR, SFMASK)
+    //   - PerCpuData + MSR_KERNEL_GS_BASE (for swapgs)
+    //   - LAPIC enable + LAPIC timer (100Hz periodic)
+    per_core_init_ap((uint8_t)core_index, stack_top);
 
+    // IDT is shared across all cores (single static table)
     idt_load();
-
-    enable_fpu();
-
-    // Enable LAPIC: set spurious vector register with enable bit.
-    // lapic_base_virt is already mapped by BSP and visible via shared page tables.
-    lapic_enable();
-
-    // EFER.NXE is per-core — set it explicitly
-    uint32_t lo, hi;
-    __asm__ volatile("rdmsr" : "=a"(lo), "=d"(hi) : "c"(0xC0000080));
-    lo |= (1 << 11);
-    __asm__ volatile("wrmsr" : : "c"(0xC0000080), "a"(lo), "d"(hi));
 
     g_amp.cores[core_index].online = true;
 

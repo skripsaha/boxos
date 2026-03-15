@@ -34,4 +34,7 @@ void gdt_set_entry(int index, uint64_t base, uint64_t limit, uint8_t access, uin
 void gdt_set_tss_entry(int index, uint64_t base, uint64_t limit);
 void gdt_load(void);
 
+// Copy the static GDT entries to dest (for per-core GDT initialization).
+void gdt_copy_entries(gdt_entry_t* dest, int count);
+
 #endif // GDT_H

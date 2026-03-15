@@ -33,6 +33,7 @@
 #include "boot_info.h"
 #include "notify.h"
 #include "amp.h"
+#include "per_core.h"
 
 void kernel_main(void)
 {
@@ -123,6 +124,9 @@ void kernel_main(void)
 
     debug_printf("[INIT] AMP Core Detection...\n");
     amp_init();
+
+    debug_printf("[INIT] Per-core GDT/TSS/Notify (BSP)...\n");
+    per_core_init_bsp();
 
     debug_printf("[INIT] PIT...\n");
     pit_init(100);

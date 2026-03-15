@@ -119,6 +119,10 @@ void tss_load(void) {
     asm volatile("ltr %0" : : "r" ((uint16_t)GDT_TSS));
 }
 
+tss_t* tss_get_ptr(void) {
+    return &kernel_tss;
+}
+
 uint64_t tss_get_ist_stack(int ist_num) {
     // access IST entries by index without pointer arithmetic on struct members
     switch (ist_num) {

@@ -7,6 +7,7 @@
 #include "idt.h"
 #include "fpu.h"
 #include "notify.h"
+#include "per_core.h"
 
 void context_save(process_t* proc, ProcessContext* ctx) {
     if (!proc || !ctx) {
@@ -40,8 +41,7 @@ void context_restore(process_t* proc, ProcessContext* ctx) {
         fpu_restore(ctx->fpu_state);
     }
 
-    tss_set_rsp0((uint64_t)proc->kernel_stack_top);
-    notify_set_kernel_rsp((uint64_t)proc->kernel_stack_top);
+    per_core_set_kernel_rsp((uint64_t)proc->kernel_stack_top);
 }
 
 void context_switch(process_t* from, process_t* to) {
