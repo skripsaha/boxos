@@ -15,6 +15,16 @@ static uint64_t pmm_max_phys_addr = 0;
 
 static uint64_t pmm_mem_end = 0;
 
+// Deferred high-memory regions (above 4GB identity map limit).
+// Saved during pmm_init Phase 1, freed in pmm_activate_pull_map Phase 2.
+#define PMM_DEFERRED_MAX 8
+typedef struct {
+    uintptr_t start;
+    uintptr_t end;
+} DeferredRegion;
+static DeferredRegion pmm_deferred[PMM_DEFERRED_MAX];
+static size_t pmm_deferred_count = 0;
+
 static void pmm_init_maxphyaddr(void) {
     pmm_maxphyaddr = cpuid_get_maxphyaddr();
     pmm_max_phys_addr = (1ULL << pmm_maxphyaddr);
@@ -151,7 +161,9 @@ void pmm_init(void) {
     buddy_init(&pmm_buddy, zone_base, total_pages,
                alloc_map, alloc_map_phys, alloc_map_size);
 
-    // Free usable e820 regions into buddy
+    // Phase 1: Free usable e820 regions below 4GB (identity-mapped, accessible now).
+    // Regions above 4GB are deferred to pmm_activate_pull_map() when Pull Map is live.
+    #define IDENTITY_MAP_LIMIT 0x100000000ULL
     size_t unusable_pages = 0;
 
     for (size_t i = 0; i < entry_count; i++) {
@@ -167,6 +179,20 @@ void pmm_init(void) {
             if (end > pmm_max_phys_addr) {
                 unusable_pages += (end - pmm_max_phys_addr) / PMM_PAGE_SIZE;
                 end = pmm_max_phys_addr;
+            }
+
+            // Defer regions above identity map limit to phase 2
+            if (start >= IDENTITY_MAP_LIMIT || end > IDENTITY_MAP_LIMIT) {
+                uintptr_t hi_start = (start >= IDENTITY_MAP_LIMIT) ? start : IDENTITY_MAP_LIMIT;
+                uintptr_t hi_end = end;
+                if (hi_start < hi_end && pmm_deferred_count < PMM_DEFERRED_MAX) {
+                    pmm_deferred[pmm_deferred_count].start = hi_start;
+                    pmm_deferred[pmm_deferred_count].end = hi_end;
+                    pmm_deferred_count++;
+                    debug_printf("[PMM] Deferred high-memory region: 0x%lx-0x%lx\n", hi_start, hi_end);
+                }
+                if (start >= IDENTITY_MAP_LIMIT) continue;
+                end = IDENTITY_MAP_LIMIT;
             }
 
             if (end <= zone_base) continue;
@@ -319,6 +345,20 @@ bool pmm_check_integrity(void) {
 void pmm_activate_pull_map(void) {
     buddy_activate_pull_map(&pmm_buddy);
     debug_printf("[PMM] Buddy allocator rebased to Pull Map\n");
+
+    // Phase 2: Free deferred high-memory regions (saved during Phase 1).
+    for (size_t i = 0; i < pmm_deferred_count; i++) {
+        uintptr_t start = pmm_deferred[i].start;
+        uintptr_t end = pmm_deferred[i].end;
+
+        debug_printf("[PMM] Phase 2: freeing high memory 0x%lx-0x%lx (%zu pages)\n",
+                     start, end, (end - start) / PMM_PAGE_SIZE);
+        buddy_free_range(&pmm_buddy, start, end);
+    }
+
+    debug_printf("[PMM] Total memory available: %zu MB (%zu pages)\n",
+                 (pmm_buddy.free_count * PMM_PAGE_SIZE) / (1024 * 1024),
+                 pmm_buddy.free_count);
 }
 
 bool pmm_is_usable_ram(uintptr_t phys_addr, size_t size) {
@@ -354,4 +394,73 @@ bool pmm_is_usable_ram(uintptr_t phys_addr, size_t size) {
     }
 
     return false;
+}
+
+void pmm_test_high_memory(void) {
+    if (pmm_deferred_count == 0) {
+        kprintf("[PMM TEST] No high memory regions — skipping (RAM <= 4GB)\n");
+        return;
+    }
+
+    kprintf("[PMM TEST] Testing >4GB allocations...\n");
+
+    #define HIGH_TEST_COUNT 16
+    void* allocs[HIGH_TEST_COUNT];
+    size_t high_count = 0;
+    size_t total_allocs = 0;
+
+    // Allocate pages until we get some from >4GB
+    for (size_t i = 0; i < HIGH_TEST_COUNT * 64 && high_count < HIGH_TEST_COUNT; i++) {
+        void* phys = pmm_alloc(1);
+        if (!phys) break;
+        total_allocs++;
+
+        uintptr_t addr = (uintptr_t)phys;
+        if (addr >= IDENTITY_MAP_LIMIT) {
+            allocs[high_count++] = phys;
+        } else {
+            // Return low-memory pages immediately
+            pmm_free(phys, 1);
+            total_allocs--;
+        }
+    }
+
+    if (high_count == 0) {
+        kprintf("[PMM TEST] WARNING: No >4GB pages allocated after %zu attempts\n", total_allocs);
+        return;
+    }
+
+    kprintf("[PMM TEST] Allocated %zu pages from >4GB region\n", high_count);
+
+    // Test each page: write pattern via Pull Map, read back, verify
+    size_t pass = 0, fail = 0;
+    for (size_t i = 0; i < high_count; i++) {
+        uintptr_t phys = (uintptr_t)allocs[i];
+        volatile uint64_t* virt = (volatile uint64_t*)vmm_phys_to_virt(phys);
+
+        // Write pattern: address XOR magic
+        uint64_t pattern = phys ^ 0xB0A0B0A0DEADBEEFULL;
+        virt[0] = pattern;
+        virt[1] = ~pattern;
+        virt[255] = pattern;  // offset 2040 (near end of 4KB page)
+
+        // Read back and verify
+        if (virt[0] == pattern && virt[1] == ~pattern && virt[255] == pattern) {
+            pass++;
+        } else {
+            kprintf("[PMM TEST] FAIL: phys=0x%lx read mismatch\n", phys);
+            fail++;
+        }
+    }
+
+    // Free all high-memory pages
+    for (size_t i = 0; i < high_count; i++) {
+        pmm_free(allocs[i], 1);
+    }
+
+    if (fail == 0) {
+        kprintf("[PMM TEST] %[S]PASSED: %zu pages >4GB — write/read/verify OK%[D]\n", pass);
+    } else {
+        kprintf("[PMM TEST] %[R]FAILED: %zu pass, %zu fail%[D]\n", pass, fail);
+    }
 }
