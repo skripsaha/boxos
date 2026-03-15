@@ -39,8 +39,21 @@ static void halt_all_ap_cores(void) {
     kprintf("[HALT] All AP cores stopped\n");
 }
 
+static void halt_detach_all_schedulers(void) {
+    // Clear current_process on every core's scheduler.
+    // AP cores are already in cli;hlt — they will never touch these pointers again.
+    // This prevents process_destroy() from refusing to destroy "current" processes.
+    for (uint8_t c = 0; c < g_amp.total_cores; c++) {
+        scheduler_state_t* s = scheduler_get_core(c);
+        s->current_process = NULL;
+    }
+}
+
 static void halt_terminate_all_processes(void) {
     kprintf("[HALT] Terminating all processes...\n");
+
+    // Detach all processes from scheduler before destruction
+    halt_detach_all_schedulers();
 
     process_cleanup_queue_flush();
 
@@ -59,7 +72,6 @@ static void halt_terminate_all_processes(void) {
     for (uint32_t i = 0; i < pid_count; i++) {
         process_t* p = process_find(pids[i]);
         if (p) {
-            // Force state to PROC_DONE — AP cores are halted, processes are frozen
             process_set_state(p, PROC_DONE);
             process_destroy(p);
             killed++;

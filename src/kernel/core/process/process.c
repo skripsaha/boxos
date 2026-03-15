@@ -1178,16 +1178,17 @@ static void process_cleanup_immediate(process_t *proc)
     if (proc->kernel_stack_guard_base)
     {
         uintptr_t guard_virt = (uintptr_t)proc->kernel_stack_guard_base;
+        uintptr_t stack_phys = vmm_virt_to_phys_direct(proc->kernel_stack_guard_base);
 
+        // Restore guard page PTE before freeing (use physical, not virtual address)
         vmm_context_t *kernel_ctx = vmm_get_kernel_context();
         pte_t *guard_pte = vmm_get_pte(kernel_ctx, guard_virt);
         if (guard_pte)
         {
-            *guard_pte = vmm_make_pte(guard_virt, VMM_FLAG_PRESENT | VMM_FLAG_WRITABLE);
+            *guard_pte = vmm_make_pte(stack_phys, VMM_FLAG_PRESENT | VMM_FLAG_WRITABLE);
             vmm_flush_tlb_page(guard_virt);
         }
 
-        uintptr_t stack_phys = vmm_virt_to_phys_direct(proc->kernel_stack_guard_base);
         pmm_free((void *)stack_phys, CONFIG_KERNEL_STACK_TOTAL_PAGES);
 
         debug_printf("[PROCESS] Freed kernel stack: guard=0x%lx (PID %u)\n",
