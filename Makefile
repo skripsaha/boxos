@@ -338,7 +338,7 @@ run1: $(IMAGE)
 	@echo "Running BoxOS in QEMU with $(CORES) cores and $(MEM) memory size"
 	@$(QEMU) -drive format=raw,file=$< -m $(MEM) -serial stdio \
 		-smp $(CORES),cores=$(CORES),threads=1,sockets=1 \
-		-d int,cpu_reset -no-reboot -no-shutdown \
+		-d int,cpu_reset \
 		-D boxos_qemu.log
 
 debug: $(IMAGE)
