@@ -18,6 +18,7 @@
 #include "xhci_enumeration.h"
 #include "acpi.h"
 #include "tagfs.h"
+#include "system_halt.h"
 
 static bool hw_irq_is_valid(uint8_t irq) {
     return (irq < irqchip_max_irqs() && irq != 0 && irq != 2);
@@ -25,32 +26,14 @@ static bool hw_irq_is_valid(uint8_t irq) {
 
 static int do_reboot(Pocket* pocket, process_t* proc) {
     debug_printf("[Hardware] SYSTEM_REBOOT request from PID %u\n", pocket->pid);
-    debug_printf("[Hardware] Rebooting system...\n");
-
     (void)proc;
-    outb(0x64, 0xFE);
-
-    while (1) {
-        asm volatile("cli; hlt");
-    }
-
-    return 0;
+    system_halt(true);
 }
 
 static int do_shutdown(Pocket* pocket, process_t* proc) {
     debug_printf("[Hardware] SYSTEM_SHUTDOWN request from PID %u\n", pocket->pid);
-    debug_printf("[Hardware] Shutting down system...\n");
-
     (void)proc;
-    process_cleanup_queue_flush();
-
-    tagfs_sync();
-
-    ata_flush_cache(1);
-
-    acpi_shutdown();
-
-    return 0;
+    system_halt(false);
 }
 
 int hardware_deck_handler(Pocket* pocket, process_t* proc) {

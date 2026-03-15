@@ -123,6 +123,7 @@ typedef struct {
 
 acpi_error_t acpi_init(void);
 void acpi_shutdown(void) __attribute__((noreturn));
+void acpi_reboot(void) __attribute__((noreturn));
 void acpi_print_info(void);
 
 #endif // ACPI_H
