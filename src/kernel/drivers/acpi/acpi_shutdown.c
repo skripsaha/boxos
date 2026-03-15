@@ -40,12 +40,6 @@ static void attempt_keyboard_reset(void) {
     delay_ms(100);
 }
 
-static void attempt_qemu_shutdown(void) {
-    debug_printf("[ACPI] Attempting QEMU shutdown (port 0x604)...\n");
-    outw(0x604, 0x2000);
-    delay_ms(50);
-}
-
 static void attempt_acpi_pm1(uint32_t pm_ctrl, uint16_t slp_typ) {
     if (pm_ctrl == 0) return;
 
@@ -59,8 +53,36 @@ static void attempt_acpi_pm1(uint32_t pm_ctrl, uint16_t slp_typ) {
     delay_ms(100);
 }
 
+static void attempt_acpi_reset(void) {
+    if (!g_acpi.initialized || !g_acpi.fadt) return;
+
+    if (!(g_acpi.fadt->flags & (1 << 10))) {
+        debug_printf("[ACPI] FADT does not support reset register\n");
+        return;
+    }
+
+    acpi_gas_t* reg = &g_acpi.fadt->reset_reg;
+    uint8_t val = g_acpi.fadt->reset_value;
+
+    debug_printf("[ACPI] ACPI reset: addr_space=%u addr=0x%lx value=0x%x\n",
+                 reg->address_space, (unsigned long)reg->address, val);
+
+    switch (reg->address_space) {
+        case 0:
+            *(volatile uint8_t*)(uintptr_t)reg->address = val;
+            break;
+        case 1:
+            outb((uint16_t)reg->address, val);
+            break;
+        case 2:
+            break;
+    }
+
+    delay_ms(100);
+}
+
 void acpi_shutdown(void) {
-    cli();
+    __asm__ volatile("cli");
 
     if (g_acpi.initialized) {
         debug_printf("[ACPI] Using ACPI shutdown (PM1a=0x%x, PM1b=0x%x)\n",
@@ -71,7 +93,6 @@ void acpi_shutdown(void) {
         debug_printf("[ACPI] ACPI not initialized, using fallback methods\n");
     }
 
-    // Method 1: Standard ACPI PM1 shutdown (works on real hardware with proper DSDT)
     if (g_acpi.initialized && g_acpi.pm1a_cnt_blk != 0) {
         attempt_acpi_pm1(g_acpi.pm1a_cnt_blk, g_acpi.slp_typa);
     }
@@ -80,17 +101,28 @@ void acpi_shutdown(void) {
         attempt_acpi_pm1(g_acpi.pm1b_cnt_blk, g_acpi.slp_typb);
     }
 
-    // Method 2: QEMU/Bochs shutdown port (only as fallback if ACPI PM1 failed)
-    debug_printf("[ACPI] PM1 shutdown failed, trying QEMU/Bochs fallback...\n");
-    attempt_qemu_shutdown();
-
-    // Method 3: Keyboard controller reset (8042)
+    debug_printf("[ACPI] PM1 shutdown failed, trying keyboard reset...\n");
     attempt_keyboard_reset();
 
-    // Method 4: Triple fault forces CPU reset
     triple_fault();
 
     debug_printf("[ACPI] All shutdown methods failed, entering HLT loop\n");
+    while (1) {
+        hlt();
+    }
+}
+
+void acpi_reboot(void) {
+    __asm__ volatile("cli");
+
+    debug_printf("[ACPI] Attempting ACPI reset register...\n");
+    attempt_acpi_reset();
+
+    attempt_keyboard_reset();
+
+    triple_fault();
+
+    debug_printf("[ACPI] All reboot methods failed, entering HLT loop\n");
     while (1) {
         hlt();
     }
