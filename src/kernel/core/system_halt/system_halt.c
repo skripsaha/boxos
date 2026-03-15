@@ -59,7 +59,9 @@ static void halt_terminate_all_processes(void) {
     for (uint32_t i = 0; i < pid_count; i++) {
         process_t* p = process_find(pids[i]);
         if (p) {
-            process_destroy_safe(p);
+            // Force state to PROC_DONE — AP cores are halted, processes are frozen
+            process_set_state(p, PROC_DONE);
+            process_destroy(p);
             killed++;
         }
     }
