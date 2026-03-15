@@ -1,15 +1,12 @@
 #include "kcore.h"
 #include "process.h"
 #include "guide.h"
-#include "scheduler.h"
 #include "lapic.h"
 #include "irqchip.h"
 #include "atomics.h"
 #include "klib.h"
 #include "vmm.h"
-#include "pocket_ring.h"
 #include "perf_trace.h"
-#include "idle.h"
 
 KCorePocketQueue g_kcore_queues[MAX_CORES];
 
@@ -146,7 +143,7 @@ submitted:
 }
 
 // ---------------------------------------------------------------------------
-// Process one entry from the queue: drain all pockets, write results, wake
+// Process one entry from the queue: drain all pockets, write results
 // ---------------------------------------------------------------------------
 
 static void kcore_process_entry(struct process_t* proc)
@@ -165,27 +162,10 @@ static void kcore_process_entry(struct process_t* proc)
     atomic_store_u8(&proc->kcore_pending, 0);
     mfence();
 
-    // Drain ALL pockets from this process's PocketRing
+    // Drain ALL pockets from this process's PocketRing.
+    // Results are written to ResultRing — the process is already running
+    // on its App Core spinning in result_wait(), and will see them immediately.
     guide_process_one(proc);
-
-    // Check if process is still alive after guide processing
-    process_state_t st = process_get_state(proc);
-    if (st == PROC_DONE || st == PROC_CRASHED) {
-        process_ref_dec(proc);
-        return;
-    }
-
-    // Wake the process: PROC_WAITING → PROC_WORKING (enqueues to home RunQueue)
-    if (process_get_state(proc) == PROC_WAITING) {
-        uint8_t home = proc->home_core;
-        process_set_state(proc, PROC_WORKING);
-        // process_set_state already calls sched_enqueue when transitioning to WORKING.
-        // Send IPI_WAKE to the home App Core so it reschedules immediately
-        // instead of waiting for the next timer tick (10ms latency → ~0).
-        if (home < g_amp.total_cores && !g_amp.cores[home].is_kcore) {
-            lapic_send_ipi(g_amp.cores[home].lapic_id, IPI_WAKE_VECTOR);
-        }
-    }
 
     process_ref_dec(proc);
 }
