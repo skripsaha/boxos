@@ -178,7 +178,7 @@ process_t *process_create(const char *tags)
     proc->total_cpu_time = 0;
     proc->state = PROC_CREATED;
     spinlock_init(&proc->state_lock);
-    proc->ref_count = 0;
+    proc->ref_count = 1;  // "alive" reference — released in process_destroy
     proc->code_start = VMM_CABIN_CODE_START;
     proc->code_size = 0;
     proc->started = false;
@@ -375,17 +375,33 @@ void process_ref_dec(process_t *proc)
 
     if (old == 0)
     {
-        // underflow detected — restore to 1 to prevent further damage
-        // the process will leak but the system survives
-        atomic_store_u32(&proc->ref_count, 1);
-        kprintf("[PROCESS] ERROR: ref_count underflow for PID %u — recovered (process leaked)\n",
-                proc->pid);
+        // Underflow: restore to 0 (not 1 — that would leak).
+        // The wrapped value (UINT32_MAX) is corrected immediately.
+        atomic_store_u32(&proc->ref_count, 0);
+        kprintf("[PROCESS] BUG: ref_count underflow for PID %u\n", proc->pid);
         return;
     }
 
 #ifdef DEBUG_REFCOUNT
     debug_printf("[REFCOUNT] PID %u: %u -> %u (DEC)\n", proc->pid, old, old - 1);
 #endif
+
+    // old == 1 means we just decremented to 0 — last reference released.
+    if (old == 1) {
+        process_state_t state = process_get_state(proc);
+        if (state == PROC_DONE || state == PROC_CRASHED) {
+            // Process already unlinked by process_destroy (magic == 0xDEADDEAD).
+            // Safe to enqueue for final resource cleanup.
+            if (proc->magic == 0xDEADDEAD) {
+                if (!cleanup_queue_enqueue(proc)) {
+                    process_cleanup_immediate(proc);
+                }
+            }
+        } else {
+            kprintf("[PROCESS] WARNING: ref_count=0 for live PID %u (state=%d)\n",
+                    proc->pid, (int)state);
+        }
+    }
 }
 
 uint32_t process_ref_count(process_t *proc)
@@ -438,14 +454,6 @@ int process_destroy_safe(process_t *proc)
         return -1;
     }
 
-    uint32_t refs = process_ref_count(proc);
-    if (refs > 0)
-    {
-        debug_printf("[PROCESS] ERROR: Cannot destroy PID %u with ref_count=%u\n",
-                     proc->pid, refs);
-        return -1;
-    }
-
     process_destroy(proc);
     return 0;
 }
@@ -480,21 +488,9 @@ void process_destroy(process_t *proc)
 
     spin_lock(&process_lock);
 
-    uint32_t refs = process_ref_count(proc);
-    if (refs > 0)
-    {
-        spin_unlock(&process_lock);
-        debug_printf("[PROCESS] PID %u has ref_count=%u, transitioning to DONE\n",
-                     proc->pid, refs);
-        process_set_state(proc, PROC_DONE);
-        return;
-    }
-
-    // remove from hash table before poisoning magic
+    // Always unlink from list and hash — process is unreachable after this.
     process_hash_remove(proc);
-
-    // poison magic before removing from list to catch use-after-remove
-    proc->magic = 0xDEADDEAD;
+    proc->magic = 0xDEADDEAD;  // poison: marks as unlinked, pending cleanup
 
     if (process_list_head == proc)
     {
@@ -526,14 +522,9 @@ void process_destroy(process_t *proc)
                      cancelled, proc->pid);
     }
 
-    if (!cleanup_queue_enqueue(proc))
-    {
-        // queue full — fall back to immediate cleanup
-        debug_printf("[PROCESS] WARNING: Cleanup queue full, immediate cleanup for PID %u\n",
-                     proc->pid);
-        process_cleanup_immediate(proc);
-    }
-    // resources (PMM/VMM) are NOT freed here; deferred to process_cleanup_deferred()
+    // Release the "alive" reference.  If K-Core still holds refs,
+    // cleanup is deferred until the last ref_dec triggers it.
+    process_ref_dec(proc);
 }
 
 int process_load_binary(process_t *proc, const void *binary_data, size_t size)

@@ -29,6 +29,10 @@
 #define SCHEDULER_SEVERE_STARVATION_TICKS    50
 #define SCHEDULER_MILD_STARVATION_TICKS      10
 
+// Work stealing: idle App Cores steal from the busiest neighbor.
+// Cooldown prevents thundering-herd when multiple cores go idle.
+#define STEAL_COOLDOWN_TICKS  3
+
 typedef struct {
     uint64_t  context_bits;
     uint16_t* overflow_ids;
@@ -43,6 +47,7 @@ typedef struct {
     process_t* current_process;
     spinlock_t scheduler_lock;   // protects current_process
     uint64_t total_ticks;
+    uint64_t last_steal_tick;    // tick of last work-steal attempt (cooldown)
     RunQueue runqueue;           // O(1) priority bitmap runqueue
 } scheduler_state_t;
 
