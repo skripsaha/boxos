@@ -80,14 +80,26 @@ scheduler_state_t* scheduler_get_core(uint8_t core_idx) {
 
 bool scheduler_matches_use_context(process_t* proc) {
     if (!proc) return false;
-    if (!g_use_context.enabled) return false;
+
+    // All reads of g_use_context must be under g_context_lock.
+    // Without the lock, a concurrent scheduler_clear_use_context() could
+    // free overflow_ids between our enabled check and the overflow loop,
+    // causing use-after-free.
+    spin_lock(&g_context_lock);
+
+    if (!g_use_context.enabled) {
+        spin_unlock(&g_context_lock);
+        return false;
+    }
 
     // AND semantics: process must have ALL context tags
     uint64_t ctx_bits = g_use_context.context_bits;
-    if (ctx_bits && (proc->tag_bits & ctx_bits) != ctx_bits) return false;
+    if (ctx_bits && (proc->tag_bits & ctx_bits) != ctx_bits) {
+        spin_unlock(&g_context_lock);
+        return false;
+    }
 
     // Overflow tags (ids >= 64)
-    spin_lock(&g_context_lock);
     bool match = true;
     for (uint16_t j = 0; j < g_use_context.overflow_count && match; j++) {
         bool found = false;
@@ -123,8 +135,9 @@ int sched_determine_priority(process_t* proc) {
         return SCHED_PRIO_STARVED;
     }
 
-    // Context match boost
-    if (g_use_context.enabled && scheduler_matches_use_context(proc)) {
+    // Context match boost (scheduler_matches_use_context acquires g_context_lock
+    // internally and returns false when disabled, so no lock-free pre-check needed)
+    if (scheduler_matches_use_context(proc)) {
         return SCHED_PRIO_CONTEXT;
     }
 
@@ -227,7 +240,11 @@ static process_t* sched_try_steal(uint8_t my_core) {
         if (g_amp.cores[c].is_kcore) continue;
         if (!g_amp.cores[c].online) continue;
 
+        // Read count under lock to avoid torn reads during concurrent
+        // enqueue/dequeue on the remote core's runqueue.
+        spin_lock(&g_core_sched[c].runqueue.lock);
         uint32_t cnt = runqueue_total_count(&g_core_sched[c].runqueue);
+        spin_unlock(&g_core_sched[c].runqueue.lock);
         if (cnt > max_count) {
             max_count = cnt;
             victim = c;

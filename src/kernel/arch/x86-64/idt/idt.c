@@ -24,8 +24,8 @@ static idt_descriptor_t idt_desc;
 
 static irq_callback_t irq_callbacks[IRQ_MAX_COUNT] = {NULL};
 
-static uint64_t exception_count = 0;
-static uint64_t irq_count[IRQ_MAX_COUNT] = {0};
+static volatile uint64_t exception_count = 0;
+static volatile uint64_t irq_count[IRQ_MAX_COUNT] = {0};
 
 static void idt_load_asm(uint64_t idt_desc_addr) {
     asm volatile("lidt (%0)" : : "r" (idt_desc_addr) : "memory");
@@ -160,7 +160,7 @@ static process_t* find_process_by_kernel_stack_overflow(uint64_t rsp) {
 }
 
 void exception_handler(interrupt_frame_t* frame) {
-    exception_count++;
+    atomic_fetch_add_u64(&exception_count, 1);
 
     if (frame->vector == 14) {
         uint64_t fault_addr;
@@ -262,7 +262,7 @@ void exception_handler(interrupt_frame_t* frame) {
     kprintf("KERNEL PANIC: Exception #%u\n", frame->vector);
     kprintf("====================================================================\n");
     kprintf("Error code: 0x%lx\n", frame->error_code);
-    kprintf("Exception count: %lu  Core: %u\n", exception_count, (uint32_t)amp_get_core_index());
+    kprintf("Exception count: %lu  Core: %u\n", atomic_load_u64(&exception_count), (uint32_t)amp_get_core_index());
 
     // Full GPR dump
     kprintf("  RAX=%016lx  RBX=%016lx\n", frame->rax, frame->rbx);
@@ -376,7 +376,7 @@ void irq_handler(interrupt_frame_t* frame) {
         irqchip_send_eoi(0);
         return;
     }
-    irq_count[irq]++;
+    atomic_fetch_add_u64(&irq_count[irq], 1);
 
     if (irq_callbacks[irq] != NULL) {
         irq_callbacks[irq]();

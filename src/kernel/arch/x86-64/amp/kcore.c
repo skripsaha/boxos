@@ -155,17 +155,23 @@ static void kcore_process_entry(struct process_t* proc)
     // Hold a reference to prevent destruction while we're processing
     process_ref_inc(proc);
 
-    // Clear the pending flag BEFORE draining.
-    // If the process does another notify() while we drain, it will see
-    // kcore_pending == 0 and submit again (to the same or different K-Core).
-    // That's fine — the new entry will be processed after we finish this drain.
-    atomic_store_u8(&proc->kcore_pending, 0);
-    mfence();
-
     // Drain ALL pockets from this process's PocketRing.
     // Results are written to ResultRing — the process is already running
     // on its App Core spinning in result_wait(), and will see them immediately.
+    //
+    // IMPORTANT: kcore_pending must stay == 1 during the entire drain.
+    // If we cleared it before draining, userspace could re-notify() and get
+    // queued to a different K-Core, creating two concurrent consumers on the
+    // same SPSC PocketRing — a data race that causes double-processing.
     guide_process_one(proc);
+
+    // Clear the pending flag AFTER draining is complete.
+    // If userspace submitted new pockets while we were draining, the while
+    // loop in guide_process_one already consumed them.  If a pocket arrives
+    // after this store, the next notify() will CAS kcore_pending 0->1 and
+    // re-submit — no pockets are lost.
+    mfence();
+    atomic_store_u8(&proc->kcore_pending, 0);
 
     process_ref_dec(proc);
 }
