@@ -3,6 +3,8 @@
 #include "lapic.h"
 #include "idt.h"
 #include "klib.h"
+#include "scheduler.h"
+#include "idle.h"
 
 void ap_entry_c(uint64_t core_index, uint64_t stack_top) {
     // per_core_init_ap sets up:
@@ -16,6 +18,12 @@ void ap_entry_c(uint64_t core_index, uint64_t stack_top) {
 
     // IDT is shared across all cores (single static table)
     idt_load();
+
+    // Per-core scheduler + idle process.
+    // MUST be before sti — LAPIC timer is already counting and will fire
+    // as soon as interrupts are enabled, calling schedule().
+    scheduler_init_core((uint8_t)core_index);
+    idle_process_init_core((uint8_t)core_index);
 
     g_amp.cores[core_index].online = true;
 

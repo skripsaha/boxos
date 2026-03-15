@@ -106,6 +106,7 @@ typedef struct process_t {
     void* kernel_stack_guard_base;
 
     bool started;
+    uint8_t home_core;           // core index for scheduling (RunQueue lives here)
     uint32_t spawner_pid;
     uint64_t buf_heap_next;  // next free virtual address for buffer mapping
 

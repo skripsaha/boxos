@@ -14,8 +14,10 @@ void context_save(process_t* proc, ProcessContext* ctx) {
         return;
     }
 
-    fpu_save(ctx->fpu_state);
-    ctx->fpu_initialized = true;
+    if (ctx->fpu_state) {
+        fpu_save(ctx->fpu_state);
+        ctx->fpu_initialized = true;
+    }
 
     if (!proc->cabin) {
         return;
@@ -70,8 +72,10 @@ void context_save_from_frame(process_t* proc, interrupt_frame_t* frame) {
     ProcessContext* ctx = &proc->context;
 
     // save FPU state before anything else can clobber it
-    fpu_save(ctx->fpu_state);
-    ctx->fpu_initialized = true;
+    if (ctx->fpu_state) {
+        fpu_save(ctx->fpu_state);
+        ctx->fpu_initialized = true;
+    }
 
     ctx->rax = frame->rax;
     ctx->rbx = frame->rbx;

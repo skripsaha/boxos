@@ -295,8 +295,11 @@ void irq_handler(interrupt_frame_t* frame) {
         return;
     }
 
-    // LAPIC timer vector: reserved for future use.
+    // LAPIC timer vector: per-core scheduling (APs use this as their tick source)
     if (vector == LAPIC_TIMER_VECTOR) {
+        scheduler_state_t* s = scheduler_get_state();
+        s->total_ticks++;
+        schedule(frame);
         lapic_send_eoi();
         return;
     }

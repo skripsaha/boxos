@@ -178,6 +178,7 @@ process_t *process_create(const char *tags)
     proc->code_start = VMM_CABIN_CODE_START;
     proc->code_size = 0;
     proc->started = false;
+    proc->home_core = 0;  // default: BSP runs all processes (Phase 3)
 
     // ASLR: generate per-process random offsets
     aslr_offsets_t aslr = aslr_generate();
@@ -442,17 +443,17 @@ void process_destroy(process_t *proc)
         }
     }
 
-    scheduler_state_t *sched = scheduler_get_state();
+    // Check if process is current on its home core (not the calling core)
+    scheduler_state_t *home_sched = scheduler_get_core(proc->home_core);
 
-    // check current_process under short lock
-    spin_lock(&sched->scheduler_lock);
-    if (sched->current_process == proc)
+    spin_lock(&home_sched->scheduler_lock);
+    if (home_sched->current_process == proc)
     {
-        spin_unlock(&sched->scheduler_lock);
+        spin_unlock(&home_sched->scheduler_lock);
         debug_printf("[PROCESS] ERROR: Cannot destroy current process PID %u\n", proc->pid);
         return;
     }
-    spin_unlock(&sched->scheduler_lock);
+    spin_unlock(&home_sched->scheduler_lock);
     // scheduler_lock is now FREE — no deadlock possible below
 
     spin_lock(&process_lock);

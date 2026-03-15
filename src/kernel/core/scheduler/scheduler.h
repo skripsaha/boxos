@@ -9,6 +9,13 @@
 /*
  * Lock ordering: scheduler_lock must be acquired BEFORE process_lock.
  * See process/process.h for the full hierarchy.
+ *
+ * Per-core scheduling (Phase 3):
+ *   Each core has its own scheduler_state_t with independent RunQueue,
+ *   current_process, and tick counter.  g_core_sched[MAX_CORES] is indexed
+ *   by core_index.  scheduler_get_state() returns the calling core's entry.
+ *
+ *   use_context (tag-based focus) is a GLOBAL policy shared across all cores.
  */
 
 #define SCHEDULER_MAX_CONSECUTIVE_RUNS 5
@@ -30,20 +37,24 @@ typedef struct {
     bool      enabled;
 } use_context_t;
 
+// Per-core scheduler state.
+// Each core has its own instance in g_core_sched[].
 typedef struct {
     process_t* current_process;
     spinlock_t scheduler_lock;   // protects current_process
-    use_context_t use_context;
-    spinlock_t context_lock;
     uint64_t total_ticks;
     RunQueue runqueue;           // O(1) priority bitmap runqueue
 } scheduler_state_t;
 
+// Initialize BSP scheduler (core 0).  Called once from kernel_main().
 void scheduler_init(void);
+
+// Initialize scheduler for an AP core.  Called from ap_entry_c().
+void scheduler_init_core(uint8_t core_index);
 
 // Single unified scheduling function. Called from:
 //   - syscall_handler (after guide())
-//   - timer IRQ
+//   - timer IRQ (PIT on BSP, LAPIC timer on APs)
 //   - exception recovery
 // Selects next process, saves/restores context via frame.
 void schedule(void* frame);
@@ -59,6 +70,13 @@ int sched_determine_priority(process_t* proc);
 void sched_enqueue(process_t* proc);
 void sched_dequeue(process_t* proc);
 
+// Enqueue a process onto a specific core's RunQueue (cross-core safe).
+void sched_enqueue_on(uint8_t core_idx, process_t* proc);
+
+// Return the calling core's scheduler state (indexed by LAPIC ID).
 scheduler_state_t* scheduler_get_state(void);
+
+// Return a specific core's scheduler state by index.
+scheduler_state_t* scheduler_get_core(uint8_t core_idx);
 
 #endif
