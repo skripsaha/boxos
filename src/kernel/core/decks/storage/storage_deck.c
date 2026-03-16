@@ -141,12 +141,9 @@ static int handle_tag_set(Pocket *pocket, process_t *proc)
         return ERR_INVALID_ARGUMENT;
     }
 
-    spin_lock(&state->lock);
-
     uint8_t *data = pocket_data_ptr(pocket, proc);
     if (!data)
     {
-        spin_unlock(&state->lock);
         return ERR_INVALID_ARGUMENT;
     }
 
@@ -158,17 +155,14 @@ static int handle_tag_set(Pocket *pocket, process_t *proc)
 
     if (tagfs_parse_tag(tag_string, key, sizeof(key), value, sizeof(value)) != 0)
     {
-        spin_unlock(&state->lock);
         return ERR_INVALID_ARGUMENT;
     }
 
     if (tagfs_add_tag_string(file_id, key, value[0] ? value : NULL) != 0)
     {
-        spin_unlock(&state->lock);
         return ERR_INVALID_ARGUMENT;
     }
 
-    spin_unlock(&state->lock);
     return OK;
 }
 
@@ -180,12 +174,9 @@ static int handle_tag_unset(Pocket *pocket, process_t *proc)
         return ERR_INVALID_ARGUMENT;
     }
 
-    spin_lock(&state->lock);
-
     uint8_t *data = pocket_data_ptr(pocket, proc);
     if (!data)
     {
-        spin_unlock(&state->lock);
         return ERR_INVALID_ARGUMENT;
     }
 
@@ -194,11 +185,9 @@ static int handle_tag_unset(Pocket *pocket, process_t *proc)
 
     if (tagfs_remove_tag_string(file_id, key) != 0)
     {
-        spin_unlock(&state->lock);
         return ERR_INVALID_ARGUMENT;
     }
 
-    spin_unlock(&state->lock);
     return OK;
 }
 

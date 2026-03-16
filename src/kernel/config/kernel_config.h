@@ -3,8 +3,8 @@
 
 #include "boxos_limits.h"
 
-#define CONFIG_KERNEL_LOAD_ADDR 0xFFFFFFFF80100000ULL // Higher-half kernel VMA (must match linker.ld)
-#define CONFIG_KERNEL_PHYS_ADDR 0x100000ULL           // 1MB - physical load address
+#define CONFIG_KERNEL_LOAD_ADDR 0xFFFFFFFF80100000ULL  // Higher-half kernel VMA (must match linker.ld)
+#define CONFIG_KERNEL_PHYS_ADDR 0x100000ULL            // 1MB - physical load address
 #define CONFIG_KERNEL_VMA_OFFSET 0xFFFFFFFF80000000ULL // Higher-half base (VMA - phys = offset)
 // PAGE_TABLE_BASE and KERNEL_STACK_BASE are now DYNAMIC — placed after kernel_end
 // by the bootloader. Available at runtime via boot_info_t (boot_info.h).
@@ -123,9 +123,9 @@
 #endif
 
 // AMP Configuration
-#define CONFIG_MAX_CORES            256
-#define CONFIG_AP_TRAMPOLINE_PHYS   0x8000
-#define CONFIG_AP_STACK_PAGES       4
+#define CONFIG_MAX_CORES 256
+#define CONFIG_AP_TRAMPOLINE_PHYS 0x8000
+#define CONFIG_AP_STACK_PAGES 4
 
 _Static_assert(CONFIG_TAGFS_BLOCK_SIZE == CONFIG_PAGE_SIZE,
                "CONFIG_TAGFS_BLOCK_SIZE must match CONFIG_PAGE_SIZE");

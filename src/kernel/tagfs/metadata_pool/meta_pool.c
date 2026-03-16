@@ -419,6 +419,16 @@ int meta_pool_write(const TagFSMetadata* meta, uint32_t* out_block, uint32_t* ou
 // ---------------------------------------------------------------------------
 
 int meta_pool_read(uint32_t block, uint32_t offset, TagFSMetadata* out) {
+    // Current block may have unflushed data — read from in-memory copy
+    spin_lock(&g_lock);
+    if (block == g_current_block_num) {
+        int r = unpack_record((uint8_t *)&g_current_block + offset, out);
+        spin_unlock(&g_lock);
+        return r;
+    }
+    spin_unlock(&g_lock);
+
+    // Non-current blocks are always flushed — read from disk
     uint8_t buf[TAGFS_BLOCK_SIZE];
     int result = tagfs_read_block(block, buf);
     if (result < 0) {
@@ -433,6 +443,26 @@ int meta_pool_read(uint32_t block, uint32_t offset, TagFSMetadata* out) {
 // ---------------------------------------------------------------------------
 
 int meta_pool_delete(uint32_t block, uint32_t offset) {
+    // Invalidate mirror + zero file_id in the record
+    spin_lock(&g_lock);
+    if (block == g_current_block_num) {
+        // Current block lives in memory — modify directly (no disk round-trip)
+        uint8_t *rec = (uint8_t *)&g_current_block + offset;
+        uint32_t del_file_id;
+        memcpy(&del_file_id, rec + 2, sizeof(uint32_t));
+        if (g_mirror && del_file_id < g_mirror_capacity && g_mirror_valid[del_file_id]) {
+            tagfs_metadata_free(&g_mirror[del_file_id]);
+            memset(&g_mirror[del_file_id], 0, sizeof(TagFSMetadata));
+            g_mirror_valid[del_file_id] = false;
+        }
+        memset(rec + 2, 0, 4);
+        g_current_dirty = true;
+        spin_unlock(&g_lock);
+        return 0;
+    }
+    spin_unlock(&g_lock);
+
+    // Non-current block — read from disk, modify, write back
     uint8_t buf[TAGFS_BLOCK_SIZE];
     int result = tagfs_read_block(block, buf);
     if (result < 0) {
@@ -440,7 +470,6 @@ int meta_pool_delete(uint32_t block, uint32_t offset) {
         return result;
     }
 
-    // Invalidate mirror before zeroing the file_id on disk
     uint32_t del_file_id;
     memcpy(&del_file_id, buf + offset + 2, sizeof(uint32_t));
     if (g_mirror && del_file_id < g_mirror_capacity && g_mirror_valid[del_file_id]) {
@@ -449,7 +478,6 @@ int meta_pool_delete(uint32_t block, uint32_t offset) {
         g_mirror_valid[del_file_id] = false;
     }
 
-    // record layout: uint16_t record_len, then uint32_t file_id
     memset(buf + offset + 2, 0, 4);
     result = tagfs_write_block(block, buf);
     if (result < 0) {
