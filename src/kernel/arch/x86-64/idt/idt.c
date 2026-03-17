@@ -18,6 +18,8 @@
 #include "idle.h"
 #include "amp.h"
 #include "kcore.h"
+#include "xhci_interrupt.h"
+#include "linker_symbols.h"
 
 static idt_entry_t idt[IDT_ENTRIES];
 static idt_descriptor_t idt_desc;
@@ -292,8 +294,6 @@ void exception_handler(interrupt_frame_t* frame) {
     }
 
     // RBP-chain stack walk
-    extern char _text_start[];
-    extern char _text_end[];
     kprintf("Stack trace:\n");
     uint64_t walk_rbp = frame->rbp;
     for (uint32_t depth = 0; depth < 20; depth++) {
@@ -391,7 +391,6 @@ void irq_handler(interrupt_frame_t* frame) {
             sched->total_ticks++;
 
             /* xHCI events handled via IRQ; poll only as fallback */
-            extern void xhci_poll_events(void);
             xhci_poll_events();
 
             // K-Cores run kcore_run_loop — schedule() would hijack them.

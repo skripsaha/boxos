@@ -9,6 +9,8 @@
 #include "cpu_caps_page.h"
 #include "boxos_addresses.h"
 #include "amp.h"
+#include "vga.h"
+#include "e820.h"
 
 static vmm_context_t* kernel_context = NULL;
 static vmm_context_t* current_context = NULL;
@@ -487,7 +489,6 @@ static void vmm_free_user_space_tables(vmm_context_t* ctx) {
                                      (p1 * 4096);
                     bool is_identity_mapped = (!g_pull_map_active) && (phys == virt);
 
-                    extern uint64_t g_cpu_caps_page_phys;
                     if (phys == g_cpu_caps_page_phys) {
                         if (!is_identity_mapped) {
                             pt->entries[p1] = 0;
@@ -1261,7 +1262,6 @@ void vmm_init(void) {
            large_pages_mapped, large_pages_mapped * 2);
 
     // Pull Map: map all physical RAM at PULL_MAP_BASE using 1GB or 2MB pages
-    extern cpu_capabilities_t g_cpu_caps;
     bool use_1gb_pages = g_cpu_caps.has_1gb_pages;
 
     uintptr_t pull_pdpt_phys = vmm_alloc_page_table();
@@ -1343,7 +1343,6 @@ void vmm_init(void) {
     kernel_context->pml4 = (page_table_t*)vmm_phys_to_virt(saved_pml4_phys);
 
     // VGA MUST be rebased FIRST — all subsequent prints go through VGA
-    extern void vga_activate_pull_map(void);
     vga_activate_pull_map();
 
     // Rebase kmalloc heap pool and free list from identity to Pull Map addresses
@@ -1353,7 +1352,6 @@ void vmm_init(void) {
     pmm_activate_pull_map();
 
     // Rebase e820 entries to Pull Map address
-    extern void e820_activate_pull_map(void);
     e820_activate_pull_map();
 
     // Verify Pull Map access
@@ -1369,7 +1367,6 @@ void vmm_init(void) {
 
     // Enable PCID if CPU supports it — zero-flush context switches
     // CR4.PCIDE requires CR3[11:0] = 0 when enabling (kernel PML4 is page-aligned)
-    extern cpu_capabilities_t g_cpu_caps;
     if (g_cpu_caps.has_pcid) {
         uint64_t cr4;
         asm volatile("mov %%cr4, %0" : "=r"(cr4));

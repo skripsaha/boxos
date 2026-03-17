@@ -13,6 +13,7 @@
 #include "process.h"
 #include "cpu_calibrate.h"
 #include "boxos_memory.h"
+#include "idt.h"
 
 static ahci_controller_t ahci_ctrl;
 
@@ -195,7 +196,6 @@ void ahci_init_irq(void) {
         return;
     }
 
-    extern void irq_register_handler(uint8_t irq, void (*handler)(void));
     irq_register_handler(ahci_ctrl.irq_vector, ahci_irq_handler);
     irqchip_enable_irq(ahci_ctrl.irq_vector);
 

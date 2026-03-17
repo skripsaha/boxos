@@ -266,8 +266,6 @@ void per_core_init_ap(uint8_t core_index, uint64_t stack_top) {
 void per_core_set_kernel_rsp(uint64_t rsp) {
     if (!g_per_core_active) {
         // Early boot: use static BSP TSS + PerCpuData
-        extern void tss_set_rsp0(uint64_t rsp0);
-        extern void notify_set_kernel_rsp(uint64_t rsp);
         tss_set_rsp0(rsp);
         notify_set_kernel_rsp(rsp);
         return;

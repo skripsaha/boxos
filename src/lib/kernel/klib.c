@@ -4,6 +4,7 @@
 #include "io.h"
 #include "serial.h"
 #include "pmm.h"
+#include "vmm.h"
 #include "atomics.h"
 #include "cpu_calibrate.h"
 #include "pit.h"
@@ -29,8 +30,6 @@ static const char digits[] = "0123456789abcdefghijklmnopqrstuvwxyz";
 
 void mem_activate_pull_map(void)
 {
-    extern void* vmm_phys_to_virt(uintptr_t phys_addr);
-
     // Rebase memory pool pointer from identity to Pull Map address
     uintptr_t pool_phys = (uintptr_t)memory_pool;
     memory_pool = (uint8_t*)vmm_phys_to_virt(pool_phys);
@@ -55,7 +54,6 @@ void mem_activate_pull_map(void)
 
 void mem_init(void)
 {
-    extern size_t pmm_total_pages(void);
     size_t total_pages = pmm_total_pages();
     size_t total_ram = total_pages * 4096;
 

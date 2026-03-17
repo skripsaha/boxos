@@ -60,6 +60,8 @@ size_t list_size(list_t* list);
 void list_remove(list_t* list, void* data, bool (*cmp)(void*, void*));
 void list_for_each(list_t* list, void (*func)(void*));
 
+void stack_canary_init(void);
+
 void mem_init(void);
 void mem_activate_pull_map(void);
 void* kmalloc(size_t size);

@@ -136,12 +136,15 @@ int tagfs_write_block(uint32_t block, const void* buffer) {
 // CRC32 (ISO 3309 polynomial, used for superblock integrity)
 // ----------------------------------------------------------------------------
 
+#define CRC32_POLYNOMIAL  0xEDB88320  // ISO 3309 reversed polynomial
+#define CRC32_INIT_VALUE  0xFFFFFFFF
+
 static uint32_t tagfs_crc32(const uint8_t* data, uint32_t len) {
-    uint32_t crc = 0xFFFFFFFF;
+    uint32_t crc = CRC32_INIT_VALUE;
     for (uint32_t i = 0; i < len; i++) {
         crc ^= data[i];
         for (int j = 0; j < 8; j++) {
-            crc = (crc >> 1) ^ (0xEDB88320 & (-(crc & 1)));
+            crc = (crc >> 1) ^ (CRC32_POLYNOMIAL & (-(crc & 1)));
         }
     }
     return ~crc;

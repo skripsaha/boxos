@@ -70,6 +70,7 @@ extern unsigned char *vga;
 #define TEXT_ATTR_SUCCESS   GREEN_ON_BLACK
 
 void vga_init(void);
+void vga_activate_pull_map(void);
 
 void vga_print(const char *str);
 void vga_print_char(char ch, const unsigned char attr);

@@ -37,6 +37,9 @@
 #include "kcore.h"
 #include "lapic.h"
 #include "idle.h"
+#include "cpu_calibrate.h"
+#include "aslr.h"
+#include "linker_symbols.h"
 
 void kernel_main(void)
 {
@@ -51,7 +54,6 @@ void kernel_main(void)
     cpu_detect_features();
 
     // Randomize stack canary ASAP after CPUID is available
-    extern void stack_canary_init(void);
     stack_canary_init();
 
     debug_printf("[INIT] FPU/SSE/AVX...\n");
@@ -140,16 +142,13 @@ void kernel_main(void)
     rtc_init();
 
     debug_printf("[INIT] CPU Calibration...\n");
-    extern void cpu_calibrate_tsc(void);
     cpu_calibrate_tsc();
 
     // Initialize idle process (PID 0) before process system
     kprintf("[INIT] Idle Process...\n");
-    extern void idle_process_init(void);
     idle_process_init();
 
     debug_printf("[INIT] ASLR...\n");
-    extern void aslr_init(void);
     aslr_init();
 
     debug_printf("[INIT] Process Management...\n");
@@ -413,8 +412,6 @@ void kernel_main(void)
         process_add_tag(shell_proc, "utility");
         process_add_tag(shell_proc, "app");
 
-        extern uint8_t _binary_shell_stripped_elf_start[];
-        extern uint8_t _binary_shell_stripped_elf_end[];
         size_t shell_size = (size_t)(_binary_shell_stripped_elf_end - _binary_shell_stripped_elf_start);
 
         if (shell_size == 0 || shell_size > CONFIG_PROC_MAX_BINARY_SIZE)
