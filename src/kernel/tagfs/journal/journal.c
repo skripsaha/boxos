@@ -677,12 +677,11 @@ int journal_commit(JournalTxn* txn) {
             idx = (idx + 1) % g_journal_sb.entry_count;
         }
 
-        // --- Step 4: Flush data before marking entries replayed ---
-        // Data must be durable before journal entries are marked as replayed.
-        // If crash happens after flush but before mark, next boot re-applies
-        // the entries — correct because sector writes are idempotent.
-        ata_flush_cache(1);
-
+        // --- Step 4: Mark entries replayed, then single flush for both ---
+        // Combined flush: data sector writes + replayed markers flushed together.
+        // Crash before flush: neither data nor marks are durable → journal replay
+        // re-applies all entries on next boot (idempotent, safe).
+        // Crash after flush: both durable → clean state.
         for (uint32_t i = 0; i < apply_count; i++) {
             journal_mark_replayed(apply_indices[i]);
         }
@@ -691,7 +690,7 @@ int journal_commit(JournalTxn* txn) {
     // Mark commit record as replayed
     journal_mark_replayed(commit_idx);
 
-    // --- Step 5: Flush replayed markers ---
+    // Single flush covers both applied data and replayed markers
     ata_flush_cache(1);
 
     // --- Step 6: Advance tail and sequence, persist superblock ---

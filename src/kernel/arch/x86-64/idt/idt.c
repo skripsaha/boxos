@@ -341,11 +341,12 @@ void irq_handler(interrupt_frame_t* frame) {
     }
 
     // LAPIC timer vector: per-core tick counter + scheduling.
+    // g_global_tick is incremented ONLY by BSP via PIT IRQ 0 to avoid
+    // cache-line bouncing across all cores on every tick.
     // K-Cores run kcore_run_loop — schedule() would hijack them.
     if (vector == LAPIC_TIMER_VECTOR) {
         scheduler_state_t* s = scheduler_get_state();
         s->total_ticks++;
-        __atomic_fetch_add(&g_global_tick, 1, __ATOMIC_RELAXED);
         if (amp_is_appcore()) {
             schedule(frame);
         }

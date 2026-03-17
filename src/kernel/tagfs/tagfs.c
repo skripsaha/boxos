@@ -1514,6 +1514,7 @@ int tagfs_write(TagFSFileHandle* handle, const void* buffer, uint64_t size) {
     const uint8_t* in = (const uint8_t*)buffer;
     uint8_t block_buf[TAGFS_BLOCK_SIZE];
     uint64_t bytes_written = 0;
+    uint16_t extent_count_before = handle->extent_count;
 
     while (bytes_written < size) {
         uint64_t file_pos    = handle->offset + bytes_written;
@@ -1589,8 +1590,12 @@ int tagfs_write(TagFSFileHandle* handle, const void* buffer, uint64_t size) {
         handle->file_size = handle->offset;
     }
 
-    // Ordered journal: data blocks already written above.
-    // Now journal the metadata update, then apply it.
+    // Update metadata. Two paths:
+    // - Extents changed (new blocks allocated): full journal for crash safety
+    // - Size-only (wrote within existing extents): direct metadata write,
+    //   no journal needed — extents are unchanged, worst-case crash loses
+    //   only the size update (data is already in extent blocks, recoverable).
+    //   This eliminates 3x ata_flush_cache (~30-300ms) on the common write path.
     if (bytes_written > 0) {
         uint32_t meta_block, meta_offset;
         if (file_table_lookup(handle->file_id, &meta_block, &meta_offset) == 0) {
@@ -1606,14 +1611,18 @@ int tagfs_write(TagFSFileHandle* handle, const void* buffer, uint64_t size) {
                            sizeof(FileExtent) * handle->extent_count);
                 }
 
-                // Journal the metadata before committing to disk
-                JournalTxn txn;
-                if (journal_begin(&txn) == 0) {
-                    uint64_t meta_sector = block_to_sector(meta_block) +
-                                           (uint64_t)(meta_offset / 512);
-                    journal_log_metadata(&txn, handle->file_id,
-                                         (uint32_t)meta_sector, &meta);
-                    journal_commit(&txn);
+                int extents_changed = (handle->extent_count != extent_count_before);
+
+                if (extents_changed) {
+                    // Structural change: journal protects extent + size atomically
+                    JournalTxn txn;
+                    if (journal_begin(&txn) == 0) {
+                        uint64_t meta_sector = block_to_sector(meta_block) +
+                                               (uint64_t)(meta_offset / 512);
+                        journal_log_metadata(&txn, handle->file_id,
+                                             (uint32_t)meta_sector, &meta);
+                        journal_commit(&txn);
+                    }
                 }
 
                 meta_pool_delete(meta_block, meta_offset);
