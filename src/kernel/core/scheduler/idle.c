@@ -111,8 +111,9 @@ process_t* idle_process_get(void) {
     uint8_t idx = amp_get_core_index();
     process_t* idle = g_core_idle[idx];
     if (idle) return idle;
-    // Fallback to BSP idle (should never happen if init order is correct)
-    return &g_idle_process;
+    kprintf("[IDLE] FATAL: No idle process for core %u — init order bug\n", idx);
+    while (1) { asm volatile("cli; hlt"); }
+    __builtin_unreachable();
 }
 
 bool process_is_idle(process_t* proc) {

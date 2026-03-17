@@ -54,16 +54,26 @@ static void ofe_release(OpenFileEntry* ofe) {
     spin_lock(&g_open_table_lock);
     ofe->ref_count--;
     if (ofe->ref_count == 0) {
+        // Drain any in-flight writer before freeing.
+        // Table lock is held so no new writer can call ofe_acquire()
+        // and bump ref_count back up; acquiring write_lock here
+        // ensures any writer already inside tagfs_write() finishes
+        // and releases write_lock before we touch the memory.
+        spin_lock(&ofe->write_lock);
+
         uint32_t bucket = ofe_hash(ofe->file_id);
         OpenFileEntry** ptr = &g_open_files[bucket];
         while (*ptr) {
             if (*ptr == ofe) {
                 *ptr = ofe->next;
-                kfree(ofe);
                 break;
             }
             ptr = &(*ptr)->next;
         }
+        spin_unlock(&ofe->write_lock);
+        spin_unlock(&g_open_table_lock);
+        kfree(ofe);
+        return;
     }
     spin_unlock(&g_open_table_lock);
 }

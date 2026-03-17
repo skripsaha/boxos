@@ -48,17 +48,19 @@ int executor_run(parsed_command_t *cmd)
         char buf[240];
         int pos = 0;
         buf[pos++] = (char)cmd->argc;
-        for (int i = 0; i < cmd->argc && pos < 200; i++) {
+        for (int i = 0; i < cmd->argc; i++) {
             size_t len = strlen(cmd->argv[i]);
-            if (pos + (int)len + 1 >= 220) break;
+            if (pos + (int)len + 1 > (int)sizeof(buf) - 2) break;
             memcpy(buf + pos, cmd->argv[i], len);
             pos += (int)len;
             buf[pos++] = '\0';
         }
-        buf[pos++] = (char)state->context_tag_count;
-        for (uint32_t ci = 0; ci < state->context_tag_count && pos < 235; ci++) {
+        if (pos < (int)sizeof(buf)) {
+            buf[pos++] = (char)state->context_tag_count;
+        }
+        for (uint32_t ci = 0; ci < state->context_tag_count; ci++) {
             size_t len = strlen(state->context_tags[ci]);
-            if (pos + (int)len + 1 >= 240) break;
+            if (pos + (int)len + 1 > (int)sizeof(buf)) break;
             memcpy(buf + pos, state->context_tags[ci], len);
             pos += (int)len;
             buf[pos++] = '\0';

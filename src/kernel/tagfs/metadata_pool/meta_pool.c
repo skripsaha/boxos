@@ -28,6 +28,10 @@ static TagFSMetadata* g_mirror          = NULL;
 static uint32_t       g_mirror_capacity = 0;
 static bool*          g_mirror_valid    = NULL;
 
+// Seqlock for mirror: readers are lock-free, writers bump sequence.
+// Odd sequence = write in progress, even = stable.
+static volatile uint32_t g_mirror_seq   = 0;
+
 // ---------------------------------------------------------------------------
 // Public: init / shutdown / flush
 // ---------------------------------------------------------------------------
@@ -379,11 +383,26 @@ int meta_pool_mirror_init(uint32_t max_file_id) {
 }
 
 int meta_pool_read_cached(uint32_t file_id, TagFSMetadata* out) {
-    if (!g_mirror || file_id >= g_mirror_capacity || !g_mirror_valid[file_id]) {
-        return -1;
+    // Seqlock read: no spinlock, retry if writer was active.
+    // kfree() in kernel heap doesn't unmap pages, so reading stale
+    // pointers during a concurrent write won't fault — the seqlock
+    // retry detects the race and discards the garbage copy.
+    for (;;) {
+        uint32_t seq = __atomic_load_n(&g_mirror_seq, __ATOMIC_ACQUIRE);
+        if (seq & 1) { __asm__ volatile("pause"); continue; }
+
+        if (!g_mirror || file_id >= g_mirror_capacity || !g_mirror_valid[file_id]) {
+            return -1;
+        }
+        mirror_deep_copy(&g_mirror[file_id], out);
+
+        __asm__ volatile("" ::: "memory");
+        if (__atomic_load_n(&g_mirror_seq, __ATOMIC_ACQUIRE) == seq)
+            return 0;
+
+        // Writer was active during our copy — discard and retry
+        tagfs_metadata_free(out);
     }
-    mirror_deep_copy(&g_mirror[file_id], out);
-    return 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -452,13 +471,15 @@ int meta_pool_write(const TagFSMetadata* meta, uint32_t* out_block, uint32_t* ou
     debug_printf("[MetaPool] write: file_id=%u block=%u offset=%u size=%u\n",
                  meta->file_id, *out_block, *out_offset, record_size);
 
-    // Write-through: update mirror
+    // Write-through: update mirror (seqlock write)
     if (g_mirror && meta->file_id < g_mirror_capacity) {
+        __atomic_fetch_add(&g_mirror_seq, 1, __ATOMIC_RELEASE);  // odd = writing
         if (g_mirror_valid[meta->file_id]) {
             tagfs_metadata_free(&g_mirror[meta->file_id]);
         }
         mirror_deep_copy(meta, &g_mirror[meta->file_id]);
         g_mirror_valid[meta->file_id] = true;
+        __atomic_fetch_add(&g_mirror_seq, 1, __ATOMIC_RELEASE);  // even = done
     }
 
     spin_unlock(&g_lock);
@@ -502,9 +523,11 @@ int meta_pool_delete(uint32_t block, uint32_t offset) {
         uint32_t del_file_id;
         memcpy(&del_file_id, rec + 2, sizeof(uint32_t));
         if (g_mirror && del_file_id < g_mirror_capacity && g_mirror_valid[del_file_id]) {
+            __atomic_fetch_add(&g_mirror_seq, 1, __ATOMIC_RELEASE);
             tagfs_metadata_free(&g_mirror[del_file_id]);
             memset(&g_mirror[del_file_id], 0, sizeof(TagFSMetadata));
             g_mirror_valid[del_file_id] = false;
+            __atomic_fetch_add(&g_mirror_seq, 1, __ATOMIC_RELEASE);
         }
         memset(rec + 2, 0, 4);
         g_current_dirty = true;
@@ -523,10 +546,13 @@ int meta_pool_delete(uint32_t block, uint32_t offset) {
 
     uint32_t del_file_id;
     memcpy(&del_file_id, buf + offset + 2, sizeof(uint32_t));
+
     if (g_mirror && del_file_id < g_mirror_capacity && g_mirror_valid[del_file_id]) {
+        __atomic_fetch_add(&g_mirror_seq, 1, __ATOMIC_RELEASE);
         tagfs_metadata_free(&g_mirror[del_file_id]);
         memset(&g_mirror[del_file_id], 0, sizeof(TagFSMetadata));
         g_mirror_valid[del_file_id] = false;
+        __atomic_fetch_add(&g_mirror_seq, 1, __ATOMIC_RELEASE);
     }
 
     memset(buf + offset + 2, 0, 4);
