@@ -209,6 +209,11 @@ int ahci_alloc_slot(uint8_t port_num) {
 
     spin_lock(&port->lock);
 
+    if (!port->active) {
+        spin_unlock(&port->lock);
+        return -1;
+    }
+
     int slot = -1;
     for (uint8_t s = 0; s < AHCI_MAX_SLOTS; s++) {
         if (port->slot_bitmap & (1U << s)) {
@@ -228,6 +233,10 @@ void ahci_free_slot(uint8_t port_num, uint8_t slot) {
     if (!port) return;
 
     spin_lock(&port->lock);
+    if (!port->active) {
+        spin_unlock(&port->lock);
+        return;
+    }
     port->slot_bitmap |= (1U << slot);
     spin_unlock(&port->lock);
 }

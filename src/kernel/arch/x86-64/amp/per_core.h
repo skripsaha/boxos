@@ -40,7 +40,7 @@ typedef struct {
 } __attribute__((aligned(64))) PerCoreData;
 
 extern PerCoreData g_per_core[MAX_CORES];
-extern bool g_per_core_active;
+extern volatile bool g_per_core_active;
 
 // Initialize per-core data for BSP.
 // Transitions BSP from static GDT/TSS to per-core copies.

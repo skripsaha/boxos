@@ -22,6 +22,7 @@ static struct xhci_device_slot* find_free_slot(void) {
     spin_lock(&device_slots_lock);
     for (int i = 0; i < XHCI_MAX_DEVICE_SLOTS; i++) {
         if (device_slots[i].state == ENUM_STATE_IDLE) {
+            device_slots[i].state = ENUM_STATE_CLAIMING;
             spin_unlock(&device_slots_lock);
             return &device_slots[i];
         }
@@ -90,10 +91,27 @@ int xhci_enumerate_device(xhci_controller_t* ctrl, uint8_t port) {
         return -5;
     }
 
-    memset(slot, 0, sizeof(struct xhci_device_slot));
+    // slot->state is already ENUM_STATE_CLAIMING — zero individual fields only
+    slot->slot_id = 0;
     slot->port_num = port;
-    slot->state = ENUM_STATE_RESETTING_PORT;
+    slot->speed = 0;
+    slot->dev_ctx = NULL;
+    slot->dev_ctx_phys = 0;
+    slot->input_ctx_phys = 0;
+    slot->ep0_ring = NULL;
+    slot->ep0_ring_phys = 0;
+    slot->descriptor_buffer_virt = NULL;
+    slot->descriptor_buffer_phys = 0;
+    slot->interrupt_ring = NULL;
+    slot->interrupt_ring_phys = 0;
+    slot->interrupt_data_buffer_virt = NULL;
+    slot->interrupt_data_buffer_phys = 0;
+    slot->keyboard_endpoint_dci = 0;
+    slot->is_keyboard = false;
+    memset(&slot->device_desc, 0, sizeof(slot->device_desc));
+    memset(&slot->keyboard_info, 0, sizeof(slot->keyboard_info));
     slot->timestamp_started = rdtsc();
+    slot->state = ENUM_STATE_RESETTING_PORT;
 
     debug_printf("[xHCI ENUM] Starting enumeration for port %u\n", port);
 

@@ -247,8 +247,12 @@ void exception_handler(interrupt_frame_t* frame) {
             // so schedule() can acquire it without deadlock.
             // We use spin_force_release (NOT spin_unlock) because we're on an
             // IST stack — the original holder's saved_flags are meaningless here.
+            // Safety: scheduler_get_state() returns THIS core's state (IST never
+            // migrates to another core), so we always release our own lock.
             scheduler_state_t* sched = scheduler_get_state();
             if (sched->scheduler_lock.locked) {
+                debug_printf("[IST] Core %u: force-releasing scheduler lock for crashed PID %u\n",
+                             amp_get_core_index(), overflow_proc->pid);
                 spin_force_release(&sched->scheduler_lock);
             }
             __asm__ volatile("cli");
@@ -341,6 +345,7 @@ void irq_handler(interrupt_frame_t* frame) {
     if (vector == LAPIC_TIMER_VECTOR) {
         scheduler_state_t* s = scheduler_get_state();
         s->total_ticks++;
+        __atomic_fetch_add(&g_global_tick, 1, __ATOMIC_RELAXED);
         if (amp_is_appcore()) {
             schedule(frame);
         }
@@ -389,6 +394,7 @@ void irq_handler(interrupt_frame_t* frame) {
             // Timer IRQ (PIT via PIC or IO-APIC GSI 0)
             scheduler_state_t* sched = scheduler_get_state();
             sched->total_ticks++;
+            __atomic_fetch_add(&g_global_tick, 1, __ATOMIC_RELAXED);
 
             /* xHCI events handled via IRQ; poll only as fallback */
             xhci_poll_events();

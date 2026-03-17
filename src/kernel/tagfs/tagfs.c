@@ -52,6 +52,12 @@ static OpenFileEntry* ofe_acquire(uint32_t file_id) {
 static void ofe_release(OpenFileEntry* ofe) {
     if (!ofe) return;
     spin_lock(&g_open_table_lock);
+    if (ofe->ref_count == 0) {
+        debug_printf("[TagFS] BUG: ofe_release called with ref_count=0 for file_id=%u\n",
+                     ofe->file_id);
+        spin_unlock(&g_open_table_lock);
+        return;
+    }
     ofe->ref_count--;
     if (ofe->ref_count == 0) {
         // Drain any in-flight writer before freeing.
@@ -151,22 +157,34 @@ static uint32_t tagfs_crc32(const uint8_t* data, uint32_t len) {
 }
 
 static void superblock_stamp_crc(TagFSSuperblock* sb) {
-    // Zero the CRC field before computing
     memset(sb->reserved + TAGFS_SB_CRC_OFFSET, 0, 4);
+    sb->reserved[TAGFS_SB_CRC_SENTINEL_OFFSET] = 0;
     uint32_t crc = tagfs_crc32((const uint8_t*)sb, sizeof(TagFSSuperblock));
     memcpy(sb->reserved + TAGFS_SB_CRC_OFFSET, &crc, 4);
+    sb->reserved[TAGFS_SB_CRC_SENTINEL_OFFSET] = TAGFS_SB_CRC_SENTINEL;
 }
 
 static bool superblock_verify_crc(const TagFSSuperblock* sb) {
+    uint8_t sentinel = sb->reserved[TAGFS_SB_CRC_SENTINEL_OFFSET];
+    if (sentinel != TAGFS_SB_CRC_SENTINEL) {
+        debug_printf("[TagFS] WARNING: superblock has no CRC sentinel (legacy format) — accepted, will re-stamp on next write\n");
+        return true;
+    }
+
     uint32_t stored_crc;
     memcpy(&stored_crc, sb->reserved + TAGFS_SB_CRC_OFFSET, 4);
-    if (stored_crc == 0) return true;  // No CRC stored (legacy format) — accept
 
     TagFSSuperblock copy;
     memcpy(&copy, sb, sizeof(TagFSSuperblock));
+    copy.reserved[TAGFS_SB_CRC_SENTINEL_OFFSET] = 0;
     memset(copy.reserved + TAGFS_SB_CRC_OFFSET, 0, 4);
     uint32_t computed = tagfs_crc32((const uint8_t*)&copy, sizeof(TagFSSuperblock));
-    return computed == stored_crc;
+    if (computed != stored_crc) {
+        debug_printf("[TagFS] ERROR: superblock CRC mismatch (stored=0x%08x computed=0x%08x)\n",
+                     stored_crc, computed);
+        return false;
+    }
+    return true;
 }
 
 // ----------------------------------------------------------------------------

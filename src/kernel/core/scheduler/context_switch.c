@@ -56,7 +56,7 @@ void context_switch(process_t* from, process_t* to) {
         if (process_get_state(to) == PROC_CREATED) {
             process_set_state(to, PROC_WORKING);
         }
-        to->last_run_time = scheduler_get_state()->total_ticks;
+        to->last_run_time = __atomic_load_n(&g_global_tick, __ATOMIC_RELAXED);
         scheduler_state_t* sched = scheduler_get_state();
         spin_lock(&sched->scheduler_lock);
         sched->current_process = to;
