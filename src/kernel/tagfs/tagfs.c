@@ -1245,14 +1245,26 @@ int tagfs_remove_tag(uint32_t file_id, uint16_t tag_id) {
 bool tagfs_has_tag(uint32_t file_id, uint16_t tag_id) {
     if (!g_state.initialized) return false;
 
-    uint32_t results[1];
-    uint16_t tag_arr[1] = { tag_id };
-    int count = tag_bitmap_query(g_state.bitmap_index, tag_arr, 1, NULL, 0, results, 1);
+    TagBitmapIndex* idx = g_state.bitmap_index;
+    if (!idx) return false;
 
-    for (int i = 0; i < count; i++) {
-        if (results[i] == file_id) return true;
+    spin_lock(&idx->lock);
+
+    if ((uint32_t)tag_id >= idx->bitmap_capacity || !idx->bitmaps[tag_id]) {
+        spin_unlock(&idx->lock);
+        return false;
     }
-    return false;
+
+    TagBitmap* bm = idx->bitmaps[tag_id];
+    uint32_t byte_idx = file_id / 8;
+    uint32_t bit_idx  = file_id % 8;
+    uint32_t bm_bytes = (bm->bit_count + 7) / 8;
+
+    bool result = (byte_idx < bm_bytes) &&
+                  (bm->bits[byte_idx] & (1 << bit_idx));
+
+    spin_unlock(&idx->lock);
+    return result;
 }
 
 int tagfs_add_tag_string(uint32_t file_id, const char* key, const char* value) {
