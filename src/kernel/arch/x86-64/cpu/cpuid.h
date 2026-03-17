@@ -3,6 +3,16 @@
 
 #include "ktypes.h"
 
+// CPUID Leaf Numbers
+#define CPUID_LEAF_VENDOR        0x00000000
+#define CPUID_LEAF_FEATURES      0x00000001
+#define CPUID_LEAF_EXT_FEATURES  0x00000007
+#define CPUID_LEAF_XSAVE         0x0000000D
+#define CPUID_LEAF_EXT_MAX       0x80000000
+#define CPUID_LEAF_EXT_FEATURES2 0x80000001
+#define CPUID_LEAF_APM           0x80000007
+#define CPUID_LEAF_ADDR_SIZE     0x80000008
+
 typedef struct {
     bool has_apic;              // On-chip APIC (CPUID.1:EDX[9])
     bool has_x2apic;            // x2APIC support (CPUID.1:ECX[21])
@@ -31,13 +41,13 @@ void cpu_detect_features(void);
 static inline uint8_t cpuid_get_maxphyaddr(void) {
     uint32_t eax, ebx, ecx, edx;
 
-    cpuid(0x80000000, &eax, &ebx, &ecx, &edx);
+    cpuid(CPUID_LEAF_EXT_MAX, &eax, &ebx, &ecx, &edx);
 
-    if (eax < 0x80000008) {
+    if (eax < CPUID_LEAF_ADDR_SIZE) {
         return 36;
     }
 
-    cpuid(0x80000008, &eax, &ebx, &ecx, &edx);
+    cpuid(CPUID_LEAF_ADDR_SIZE, &eax, &ebx, &ecx, &edx);
     uint8_t phys_bits = (uint8_t)(eax & 0xFF);
 
     if (phys_bits < 32 || phys_bits > 52) {
@@ -50,13 +60,13 @@ static inline uint8_t cpuid_get_maxphyaddr(void) {
 static inline uint8_t cpuid_get_maxvirtaddr(void) {
     uint32_t eax, ebx, ecx, edx;
 
-    cpuid(0x80000000, &eax, &ebx, &ecx, &edx);
+    cpuid(CPUID_LEAF_EXT_MAX, &eax, &ebx, &ecx, &edx);
 
-    if (eax < 0x80000008) {
+    if (eax < CPUID_LEAF_ADDR_SIZE) {
         return 48;
     }
 
-    cpuid(0x80000008, &eax, &ebx, &ecx, &edx);
+    cpuid(CPUID_LEAF_ADDR_SIZE, &eax, &ebx, &ecx, &edx);
     uint8_t virt_bits = (uint8_t)((eax >> 8) & 0xFF);
 
     if (virt_bits < 48 || virt_bits > 57) {

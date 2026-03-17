@@ -1,25 +1,23 @@
 #include "amp.h"
 #include "acpi_madt.h"
 #include "lapic.h"
+#include "pit.h"
 #include "pmm.h"
 #include "vmm.h"
 #include "klib.h"
 #include "io.h"
 #include "atomics.h"
+#include "linker_symbols.h"
 
 AmpLayout g_amp;
 
 // O(1) lookup: lapic_id -> core_index
 static uint8_t lapic_to_index[256];
 
-extern uint8_t ap_trampoline_start;
-extern uint8_t ap_trampoline_end;
-extern uint8_t ap_trampoline_data;
-
 // PIT channel 2 busy-wait delay
 static void pit_delay_us(uint32_t microseconds)
 {
-    uint16_t count = (uint16_t)((uint32_t)1193182 * microseconds / 1000000);
+    uint16_t count = (uint16_t)((uint32_t)PIT_FREQUENCY * microseconds / 1000000);
     if (count < 1)
         count = 1;
 
@@ -94,7 +92,6 @@ void amp_init(void)
     g_amp.bsp_lapic_id = my_lapic_id;
 
     // Collect all enabled LAPIC IDs from MADT via amp_collect_lapics() (acpi_madt.c)
-    extern uint8_t amp_collect_lapics(uint8_t *ids_out, uint8_t max_count);
     uint8_t lapic_ids[MAX_CORES];
     // max_count is uint8_t; MAX_CORES=256 wraps to 0, so use 255 (ACPI limit anyway)
     uint8_t count = amp_collect_lapics(lapic_ids, 255);
@@ -165,34 +162,31 @@ void amp_init(void)
 
 static void send_init_ipi(uint8_t dest_lapic_id)
 {
-    // Wait for delivery status clear
-    while (lapic_read(LAPIC_REG_ICR_LOW) & (1 << 12))
+    while (lapic_read(LAPIC_REG_ICR_LOW) & LAPIC_ICR_SEND_PENDING)
     {
         __asm__ volatile("pause");
     }
-    // INIT assert
     lapic_write(LAPIC_REG_ICR_HIGH, (uint32_t)dest_lapic_id << 24);
-    lapic_write(LAPIC_REG_ICR_LOW, 0x00004500);
+    lapic_write(LAPIC_REG_ICR_LOW, LAPIC_IPI_INIT);
 
     pit_delay_us(10000); // 10ms
 
-    // INIT deassert
-    while (lapic_read(LAPIC_REG_ICR_LOW) & (1 << 12))
+    while (lapic_read(LAPIC_REG_ICR_LOW) & LAPIC_ICR_SEND_PENDING)
     {
         __asm__ volatile("pause");
     }
     lapic_write(LAPIC_REG_ICR_HIGH, (uint32_t)dest_lapic_id << 24);
-    lapic_write(LAPIC_REG_ICR_LOW, 0x00008500);
+    lapic_write(LAPIC_REG_ICR_LOW, LAPIC_IPI_INIT_DEASSERT);
 }
 
 static void send_sipi(uint8_t dest_lapic_id, uint8_t vector_page)
 {
-    while (lapic_read(LAPIC_REG_ICR_LOW) & (1 << 12))
+    while (lapic_read(LAPIC_REG_ICR_LOW) & LAPIC_ICR_SEND_PENDING)
     {
         __asm__ volatile("pause");
     }
     lapic_write(LAPIC_REG_ICR_HIGH, (uint32_t)dest_lapic_id << 24);
-    lapic_write(LAPIC_REG_ICR_LOW, 0x00004600 | vector_page);
+    lapic_write(LAPIC_REG_ICR_LOW, LAPIC_IPI_SIPI | vector_page);
 }
 
 void amp_boot_aps(void)

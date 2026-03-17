@@ -6,6 +6,7 @@
 #include "boxos_memory.h"
 #include "cpuid.h"
 #include "boot_info.h"
+#include "linker_symbols.h"
 
 static BuddyZone pmm_buddy;
 static bool pmm_initialized = false;
@@ -133,7 +134,6 @@ void pmm_init(void) {
     if (boot_info_valid(bi)) {
         map_start = ALIGN_UP((uintptr_t)bi->stack_base, 4096);
     } else {
-        extern uintptr_t _kernel_phys_end;
         map_start = ALIGN_UP((uintptr_t)&_kernel_phys_end, 4096);
     }
 

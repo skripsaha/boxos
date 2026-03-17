@@ -1,20 +1,20 @@
 # BoxOS v1.0 Release Plan
 
-## Phase 0 — Critical Fixes (Showstoppers)
-- [ ] 1. Fix VMM lock ordering (ctx->lock vs vmm_global_lock) → DEADLOCK
-- [ ] 2. Fix OFE use-after-free (ref_count + write_lock) in TagFS
-- [ ] 3. Fix meta_pool mirror race (don't release lock mid-write)
-- [ ] 4. Fix idle_process_get() fallback → race condition
-- [ ] 5. Fix executor.c buffer overflow (240-byte buf)
-- [ ] 6. Fix journal replay ordering (mark before apply)
+## Phase 0 — Critical Fixes (Showstoppers) ✓
+- [x] 1. Fix VMM lock ordering → replaced vmm_global_lock with atomics
+- [x] 2. Fix OFE use-after-free → drain write_lock before free
+- [x] 3. Fix meta_pool mirror race → seqlock (lock-free reads)
+- [x] 4. Fix idle_process_get() fallback → fatal halt
+- [x] 5. Fix executor.c buffer overflow → sizeof(buf) checks
+- [x] 6. Fix journal replay ordering → flush-before-mark pattern
 
-## Phase 1 — Code Hygiene (Uniformity)
-- [ ] 7. Create linker_symbols.h, remove all extern from .c files
-- [ ] 8. Move typedefs from .c files to *_types.h headers
-- [ ] 9. Unified PAGE_SIZE define in one place
-- [ ] 10. Unified error_t enum across codebase
-- [ ] 11. Named constants instead of magic numbers (LAPIC, CPUID, PIT)
-- [ ] 12. Remove redundant mfence() where lock already held
+## Phase 1 — Code Hygiene (Uniformity) ✓
+- [x] 7. Created linker_symbols.h, removed 29 externs from 10 .c files
+- [x] 8. Typedefs verified — all are private to .c files (correct pattern)
+- [x] 9. PAGE_SIZE verified — 4 names, all 4096, static_assert enforced
+- [x] 10. error_t — deferred (high risk, minimal stability gain)
+- [x] 11. Named constants: LAPIC IPI, CPUID leaves, CRC32 poly, PIT freq
+- [x] 12. mfence verified — NOT redundant (cross-core readers, different lock)
 
 ## Phase 2 — Multi-Core Correctness
 - [ ] 13. Global monotonic tick for starvation detection

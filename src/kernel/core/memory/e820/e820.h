@@ -21,5 +21,6 @@ typedef struct {
 void e820_set_entries(e820_entry_t* entries, size_t count);
 e820_entry_t* memory_map_get_entries(void);
 size_t memory_map_get_entry_count(void);
+void e820_activate_pull_map(void);
 
 #endif // E820_H

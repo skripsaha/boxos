@@ -3,6 +3,7 @@
 #include "io.h"
 #include "atomics.h"
 #include "cpu_calibrate.h"
+#include "irqchip.h"
 
 #define KEYBOARD_BUFFER_SIZE 256
 
@@ -216,7 +217,6 @@ void keyboard_init(void)
 
     kb_flush_output();
 
-    extern void irqchip_enable_irq(uint8_t gsi);
     irqchip_enable_irq(1);
     debug_printf("[KEYBOARD] IRQ1 enabled\n");
 

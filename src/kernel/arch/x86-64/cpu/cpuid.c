@@ -24,7 +24,7 @@ void cpu_detect_features(void) {
 
     memset(&g_cpu_caps, 0, sizeof(g_cpu_caps));
 
-    cpuid(0, &eax, &ebx, &ecx, &edx);
+    cpuid(CPUID_LEAF_VENDOR, &eax, &ebx, &ecx, &edx);
     g_cpu_caps.max_basic_leaf = eax;
     *((uint32_t*)&g_cpu_caps.vendor_string[0]) = ebx;
     *((uint32_t*)&g_cpu_caps.vendor_string[4]) = edx;
@@ -32,8 +32,8 @@ void cpu_detect_features(void) {
     g_cpu_caps.vendor_string[12] = '\0';
 
     // Check APIC/x2APIC/XSAVE/AVX support (CPUID.1)
-    if (g_cpu_caps.max_basic_leaf >= 1) {
-        cpuid(1, &eax, &ebx, &ecx, &edx);
+    if (g_cpu_caps.max_basic_leaf >= CPUID_LEAF_FEATURES) {
+        cpuid(CPUID_LEAF_FEATURES, &eax, &ebx, &ecx, &edx);
         g_cpu_caps.has_apic = (edx & (1 << 9)) != 0;
         g_cpu_caps.has_x2apic = (ecx & (1 << 21)) != 0;
         g_cpu_caps.has_xsave = (ecx & (1 << 26)) != 0;
@@ -42,8 +42,8 @@ void cpu_detect_features(void) {
     }
 
     // Check WAITPKG and AVX-512 support (CPUID.7.0)
-    if (g_cpu_caps.max_basic_leaf >= 7) {
-        cpuid_count(7, 0, &eax, &ebx, &ecx, &edx);
+    if (g_cpu_caps.max_basic_leaf >= CPUID_LEAF_EXT_FEATURES) {
+        cpuid_count(CPUID_LEAF_EXT_FEATURES, 0, &eax, &ebx, &ecx, &edx);
         g_cpu_caps.has_waitpkg = (ecx & (1 << 5)) != 0;
         g_cpu_caps.has_avx512 = (ebx & (1 << 16)) != 0;
         g_cpu_caps.has_smep = (ebx & (1 << 7)) != 0;
@@ -51,8 +51,8 @@ void cpu_detect_features(void) {
     }
 
     // Query XSAVE area size and supported components (CPUID.0xD:0)
-    if (g_cpu_caps.has_xsave && g_cpu_caps.max_basic_leaf >= 0xD) {
-        cpuid_count(0xD, 0, &eax, &ebx, &ecx, &edx);
+    if (g_cpu_caps.has_xsave && g_cpu_caps.max_basic_leaf >= CPUID_LEAF_XSAVE) {
+        cpuid_count(CPUID_LEAF_XSAVE, 0, &eax, &ebx, &ecx, &edx);
         // EAX = valid bits of XCR0 (lower 32)
         // EDX = valid bits of XCR0 (upper 32)
         // EBX = max size for currently enabled features
@@ -61,17 +61,17 @@ void cpu_detect_features(void) {
         g_cpu_caps.xsave_area_size = ecx;
     }
 
-    // Check Invariant TSC (CPUID.0x80000007:EDX[8])
-    cpuid(0x80000000, &eax, &ebx, &ecx, &edx);
+    // Check Invariant TSC (CPUID.APM:EDX[8])
+    cpuid(CPUID_LEAF_EXT_MAX, &eax, &ebx, &ecx, &edx);
     g_cpu_caps.max_extended_leaf = eax;
 
-    if (g_cpu_caps.max_extended_leaf >= 0x80000007) {
-        cpuid(0x80000007, &eax, &ebx, &ecx, &edx);
+    if (g_cpu_caps.max_extended_leaf >= CPUID_LEAF_APM) {
+        cpuid(CPUID_LEAF_APM, &eax, &ebx, &ecx, &edx);
         g_cpu_caps.has_invariant_tsc = (edx & (1 << 8)) != 0;
     }
 
-    if (g_cpu_caps.max_extended_leaf >= 0x80000001) {
-        cpuid(0x80000001, &eax, &ebx, &ecx, &edx);
+    if (g_cpu_caps.max_extended_leaf >= CPUID_LEAF_EXT_FEATURES2) {
+        cpuid(CPUID_LEAF_EXT_FEATURES2, &eax, &ebx, &ecx, &edx);
         g_cpu_caps.has_1gb_pages = (edx & (1 << 26)) != 0;
     }
 }

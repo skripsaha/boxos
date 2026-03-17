@@ -60,6 +60,14 @@ void lapic_timer_stop(void);
 uint32_t lapic_read(uint32_t reg);
 void lapic_write(uint32_t reg, uint32_t value);
 
+// IPI (Inter-Processor Interrupt) command values for ICR
+#define LAPIC_IPI_INIT          0x00004500  // INIT assert
+#define LAPIC_IPI_INIT_DEASSERT 0x00008500  // INIT de-assert (level-triggered)
+#define LAPIC_IPI_SIPI          0x00004600  // Startup IPI (OR with page number in low byte)
+
+// ICR delivery status bit
+#define LAPIC_ICR_SEND_PENDING  (1 << 12)
+
 // IPI delivery
 void lapic_send_ipi(uint8_t dest_lapic_id, uint8_t vector);
 void lapic_send_ipi_all_excluding_self(uint8_t vector);
