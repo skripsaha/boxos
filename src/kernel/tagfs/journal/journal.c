@@ -320,8 +320,28 @@ int journal_validate_and_replay(void) {
     }
 
     // --- Pass 2: Apply committed data entries ---
+    // Crash-safe ordering:
+    //   1. Write all target sectors (data in OS disk cache, not yet durable)
+    //   2. ata_flush_cache() — data sectors are now durable
+    //   3. Mark journal entries as replayed (safe: data is already on disk)
+    //   4. ata_flush_cache() — replayed markers are now durable
+    // If we crash between step 1 and 2, data is not durable but entries are
+    // not marked replayed, so next boot re-applies them (idempotent).
+    // If we crash between step 2 and 3, data IS durable but entries are not
+    // marked replayed, so next boot re-applies them again (still idempotent).
+
     uint32_t replayed_count = 0;
     uint32_t skipped_count = 0;
+
+    uint32_t applied_capacity = ring_count(g_journal_sb.tail, g_journal_sb.head,
+                                           g_journal_sb.entry_count);
+    uint32_t* applied_indices = kmalloc(sizeof(uint32_t) * (applied_capacity + 1));
+    if (!applied_indices) {
+        debug_printf("[Journal] ERROR: kmalloc failed for applied_indices\n");
+        kfree(committed_seqs);
+        return -1;
+    }
+    uint32_t applied_count = 0;
 
     index = g_journal_sb.tail;
     while (index != g_journal_sb.head) {
@@ -329,37 +349,18 @@ int journal_validate_and_replay(void) {
         if (journal_read_entry(index, &entry) != 0) {
             debug_printf("[Journal] ERROR: Failed to read entry %u\n", index);
             kfree(committed_seqs);
+            kfree(applied_indices);
             return -1;
         }
 
-        // Skip non-data entries and already-replayed entries
         if (entry.magic != JOURNAL_ENTRY_MAGIC ||
             entry.committed != 1 ||
             entry.replayed == 1 ||
             entry.type == JTYPE_COMMIT) {
-            if (entry.magic == JOURNAL_ENTRY_MAGIC && entry.committed == 1 &&
-                entry.replayed == 0 && entry.type != JTYPE_COMMIT) {
-                // Data entry but not committed txn — check if its seq is committed
-                bool seq_committed = false;
-                for (uint32_t s = 0; s < num_committed; s++) {
-                    if (committed_seqs[s] == entry.seq) {
-                        seq_committed = true;
-                        break;
-                    }
-                }
-                if (!seq_committed) {
-                    debug_printf("[Journal] INFO: Entry %u (seq=%u) — incomplete txn, skipping\n",
-                                 index, entry.seq);
-                    skipped_count++;
-                }
-                // If seq_committed, fall through below won't happen because we already
-                // checked type != JTYPE_COMMIT; re-check below
-            }
             index = (index + 1) % g_journal_sb.entry_count;
             continue;
         }
 
-        // Check if this entry's transaction was committed
         bool seq_committed = false;
         for (uint32_t s = 0; s < num_committed; s++) {
             if (committed_seqs[s] == entry.seq) {
@@ -376,20 +377,19 @@ int journal_validate_and_replay(void) {
             continue;
         }
 
-        // Safety: skip entries targeting sector 0 (bootloader area — invalid target)
         if (entry.sector == 0) {
             debug_printf("[Journal] WARNING: Skipping replay of entry %u with sector=0\n", index);
-            journal_mark_replayed(index);
+            if (applied_count < applied_capacity) applied_indices[applied_count++] = index;
             skipped_count++;
             index = (index + 1) % g_journal_sb.entry_count;
             continue;
         }
 
-        // Apply this entry
         uint8_t* buffer = kmalloc(ATA_SECTOR_SIZE);
         if (!buffer) {
             debug_printf("[Journal] ERROR: Memory allocation failed\n");
             kfree(committed_seqs);
+            kfree(applied_indices);
             return -1;
         }
 
@@ -409,21 +409,16 @@ int journal_validate_and_replay(void) {
         }
 
         if (ata_write_sectors(1, entry.sector, 1, buffer) != 0) {
-            debug_printf("[Journal] ERROR: Failed to write data sector %u for entry %u\n",
-                         entry.sector, index);
+            debug_printf("[Journal] ERROR: Failed to apply entry %u to sector %u\n",
+                         index, entry.sector);
             kfree(buffer);
             kfree(committed_seqs);
+            kfree(applied_indices);
             return -1;
         }
 
         kfree(buffer);
-
-        if (journal_mark_replayed(index) != 0) {
-            debug_printf("[Journal] ERROR: Failed to mark entry %u as replayed\n", index);
-            kfree(committed_seqs);
-            return -1;
-        }
-
+        if (applied_count < applied_capacity) applied_indices[applied_count++] = index;
         replayed_count++;
         index = (index + 1) % g_journal_sb.entry_count;
     }
@@ -431,15 +426,24 @@ int journal_validate_and_replay(void) {
     debug_printf("[Journal] Replay complete: %u applied, %u skipped\n",
                  replayed_count, skipped_count);
 
+    // Flush ALL applied data before marking entries as replayed.
+    // If crash happens here, entries are not marked replayed, so next boot
+    // re-applies them — correct because writes are idempotent.
     if (replayed_count > 0) {
         if (ata_flush_cache(1) != 0) {
             debug_printf("[Journal] ERROR: Batch flush failed after replay\n");
             kfree(committed_seqs);
+            kfree(applied_indices);
             return -1;
         }
     }
 
-    // Mark all COMMIT entries as replayed too
+    // Data is now durable. Safe to mark entries as replayed.
+    for (uint32_t i = 0; i < applied_count; i++) {
+        journal_mark_replayed(applied_indices[i]);
+    }
+
+    // Mark COMMIT entries as replayed
     index = g_journal_sb.tail;
     while (index != g_journal_sb.head) {
         JournalEntry entry;
@@ -452,7 +456,7 @@ int journal_validate_and_replay(void) {
         index = (index + 1) % g_journal_sb.entry_count;
     }
 
-    // Done with committed_seqs
+    kfree(applied_indices);
     kfree(committed_seqs);
 
     // Truncate journal
@@ -629,7 +633,11 @@ int journal_commit(JournalTxn* txn) {
     }
 
     // --- Step 3: Apply all data entries to their target sectors ---
+    // Collect applied indices so we can mark replayed AFTER flush (crash-safe).
     {
+        uint32_t apply_indices[JOURNAL_ENTRY_COUNT];
+        uint32_t apply_count = 0;
+
         uint32_t idx = txn->first_idx;
         for (uint32_t i = 0; i < txn->entry_count; i++) {
             JournalEntry entry;
@@ -638,10 +646,9 @@ int journal_commit(JournalTxn* txn) {
                 goto commit_done;
             }
 
-            // Safety: skip entries targeting sector 0 (bootloader area)
             if (entry.sector == 0) {
                 debug_printf("[Journal] WARNING: Skipping entry %u with sector=0 (invalid target)\n", idx);
-                journal_mark_replayed(idx);
+                apply_indices[apply_count++] = idx;
                 idx = (idx + 1) % g_journal_sb.entry_count;
                 continue;
             }
@@ -666,18 +673,28 @@ int journal_commit(JournalTxn* txn) {
                 goto commit_done;
             }
 
-            journal_mark_replayed(idx);
+            apply_indices[apply_count++] = idx;
             idx = (idx + 1) % g_journal_sb.entry_count;
+        }
+
+        // --- Step 4: Flush data before marking entries replayed ---
+        // Data must be durable before journal entries are marked as replayed.
+        // If crash happens after flush but before mark, next boot re-applies
+        // the entries — correct because sector writes are idempotent.
+        ata_flush_cache(1);
+
+        for (uint32_t i = 0; i < apply_count; i++) {
+            journal_mark_replayed(apply_indices[i]);
         }
     }
 
     // Mark commit record as replayed
     journal_mark_replayed(commit_idx);
 
-    // --- Step 4: Flush applied data ---
+    // --- Step 5: Flush replayed markers ---
     ata_flush_cache(1);
 
-    // --- Step 5: Advance tail and sequence, persist superblock ---
+    // --- Step 6: Advance tail and sequence, persist superblock ---
     g_journal_sb.tail = (commit_idx + 1) % g_journal_sb.entry_count;
     g_journal_sb.commit_seq++;
     commit_result = journal_write_superblock();

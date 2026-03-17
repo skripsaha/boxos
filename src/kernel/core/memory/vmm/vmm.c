@@ -15,8 +15,7 @@ static vmm_context_t* current_context = NULL;
 static bool vmm_initialized = false;
 static bool g_pull_map_active = false;
 static char last_error[256] = {0};
-static vmm_stats_t global_stats = {0};
-static spinlock_t vmm_global_lock = {0};
+static volatile vmm_stats_t global_stats = {0};
 
 // PCID allocator — 0 reserved for kernel, 1-4095 for user contexts
 #define PCID_MAX        4095
@@ -136,34 +135,27 @@ uintptr_t vmm_alloc_page_table(void) {
         vmm_set_error("Failed to allocate page table from PMM");
         return 0;
     }
-    spin_lock(&vmm_global_lock);
-    global_stats.page_tables_allocated++;
-    spin_unlock(&vmm_global_lock);
+    atomic_fetch_add_u64((volatile uint64_t*)&global_stats.page_tables_allocated, 1);
     return (uintptr_t)page;
 }
 
 void vmm_free_page_table(uintptr_t phys_addr) {
     if (!phys_addr) return;
     pmm_free((void*)phys_addr, 1);
-    spin_lock(&vmm_global_lock);
-    if (global_stats.page_tables_allocated > 0) global_stats.page_tables_allocated--;
-    spin_unlock(&vmm_global_lock);
+    if (global_stats.page_tables_allocated > 0)
+        atomic_fetch_sub_u64((volatile uint64_t*)&global_stats.page_tables_allocated, 1);
 }
 
 void vmm_flush_tlb(void) {
     uintptr_t cr3;
     asm volatile("mov %%cr3, %0" : "=r"(cr3));
     asm volatile("mov %0, %%cr3" : : "r"(cr3) : "memory");
-    spin_lock(&vmm_global_lock);
-    global_stats.tlb_flushes++;
-    spin_unlock(&vmm_global_lock);
+    atomic_fetch_add_u64((volatile uint64_t*)&global_stats.tlb_flushes, 1);
 }
 
 void vmm_flush_tlb_page(uintptr_t virt_addr) {
     asm volatile("invlpg (%0)" : : "r"(virt_addr) : "memory");
-    spin_lock(&vmm_global_lock);
-    global_stats.tlb_flushes++;
-    spin_unlock(&vmm_global_lock);
+    atomic_fetch_add_u64((volatile uint64_t*)&global_stats.tlb_flushes, 1);
 }
 
 void vmm_invalidate_page(uintptr_t virt_addr) {
@@ -424,9 +416,7 @@ vmm_context_t* vmm_create_context(void) {
         }
     }
 
-    spin_lock(&vmm_global_lock);
-    global_stats.total_contexts++;
-    spin_unlock(&vmm_global_lock);
+    atomic_fetch_add_u64((volatile uint64_t*)&global_stats.total_contexts, 1);
 
     return ctx;
 }
@@ -595,9 +585,8 @@ void vmm_destroy_context(vmm_context_t* ctx) {
         asm volatile("mov %0, %%cr3" :: "r"(restore_cr3) : "memory");
     }
 
-    spin_lock(&vmm_global_lock);
-    if (global_stats.total_contexts > 0) global_stats.total_contexts--;
-    spin_unlock(&vmm_global_lock);
+    if (global_stats.total_contexts > 0)
+        atomic_fetch_sub_u64((volatile uint64_t*)&global_stats.total_contexts, 1);
 }
 
 vmm_context_t* vmm_get_kernel_context(void) {
@@ -680,16 +669,12 @@ vmm_map_result_t vmm_map_page(vmm_context_t* ctx, uintptr_t virt_addr,
     ctx->mapped_pages++;
     if (flags & VMM_FLAG_USER) {
         ctx->user_pages++;
-        spin_lock(&vmm_global_lock);
-        global_stats.user_mapped_pages++;
-        global_stats.total_mapped_pages++;
-        spin_unlock(&vmm_global_lock);
+        atomic_fetch_add_u64((volatile uint64_t*)&global_stats.user_mapped_pages, 1);
+        atomic_fetch_add_u64((volatile uint64_t*)&global_stats.total_mapped_pages, 1);
     } else {
         ctx->kernel_pages++;
-        spin_lock(&vmm_global_lock);
-        global_stats.kernel_mapped_pages++;
-        global_stats.total_mapped_pages++;
-        spin_unlock(&vmm_global_lock);
+        atomic_fetch_add_u64((volatile uint64_t*)&global_stats.kernel_mapped_pages, 1);
+        atomic_fetch_add_u64((volatile uint64_t*)&global_stats.total_mapped_pages, 1);
     }
 
     spin_unlock(&ctx->lock);
@@ -745,16 +730,16 @@ bool vmm_unmap_page(vmm_context_t* ctx, uintptr_t virt_addr) {
     uint64_t flags = vmm_pte_to_flags(*pte);
     if (flags & VMM_FLAG_USER) {
         if (ctx->user_pages > 0) ctx->user_pages--;
-        spin_lock(&vmm_global_lock);
-        if (global_stats.user_mapped_pages > 0) global_stats.user_mapped_pages--;
-        if (global_stats.total_mapped_pages > 0) global_stats.total_mapped_pages--;
-        spin_unlock(&vmm_global_lock);
+        if (global_stats.user_mapped_pages > 0)
+            atomic_fetch_sub_u64((volatile uint64_t*)&global_stats.user_mapped_pages, 1);
+        if (global_stats.total_mapped_pages > 0)
+            atomic_fetch_sub_u64((volatile uint64_t*)&global_stats.total_mapped_pages, 1);
     } else {
         if (ctx->kernel_pages > 0) ctx->kernel_pages--;
-        spin_lock(&vmm_global_lock);
-        if (global_stats.kernel_mapped_pages > 0) global_stats.kernel_mapped_pages--;
-        if (global_stats.total_mapped_pages > 0) global_stats.total_mapped_pages--;
-        spin_unlock(&vmm_global_lock);
+        if (global_stats.kernel_mapped_pages > 0)
+            atomic_fetch_sub_u64((volatile uint64_t*)&global_stats.kernel_mapped_pages, 1);
+        if (global_stats.total_mapped_pages > 0)
+            atomic_fetch_sub_u64((volatile uint64_t*)&global_stats.total_mapped_pages, 1);
     }
 
     if (ctx->mapped_pages > 0) ctx->mapped_pages--;
@@ -1232,7 +1217,6 @@ void vmm_init(void) {
     // detect MAXPHYADDR before creating any page tables to build the correct PTE mask
     vmm_init_maxphyaddr();
 
-    spinlock_init(&vmm_global_lock);
     spinlock_init(&kernel_heap_lock);
     spinlock_init(&vmalloc_lock);
     spinlock_init(&kernel_mmio_lock);
@@ -1511,10 +1495,13 @@ void vmm_dump_context_stats(vmm_context_t* ctx) {
 
 void vmm_get_global_stats(vmm_stats_t* stats) {
     if (!stats) return;
-
-    spin_lock(&vmm_global_lock);
-    *stats = global_stats;
-    spin_unlock(&vmm_global_lock);
+    stats->total_contexts        = atomic_load_u64((volatile uint64_t*)&global_stats.total_contexts);
+    stats->total_mapped_pages    = atomic_load_u64((volatile uint64_t*)&global_stats.total_mapped_pages);
+    stats->kernel_mapped_pages   = atomic_load_u64((volatile uint64_t*)&global_stats.kernel_mapped_pages);
+    stats->user_mapped_pages     = atomic_load_u64((volatile uint64_t*)&global_stats.user_mapped_pages);
+    stats->page_tables_allocated = atomic_load_u64((volatile uint64_t*)&global_stats.page_tables_allocated);
+    stats->page_faults_handled   = atomic_load_u64((volatile uint64_t*)&global_stats.page_faults_handled);
+    stats->tlb_flushes           = atomic_load_u64((volatile uint64_t*)&global_stats.tlb_flushes);
 }
 
 void vmm_print_stats(void) {
