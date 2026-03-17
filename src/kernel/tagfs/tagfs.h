@@ -11,6 +11,8 @@
 
 #define TAGFS_VERSION               1
 #define TAGFS_SB_CRC_OFFSET        400   /* CRC32 stored at reserved[400..403] */
+#define TAGFS_SB_CRC_SENTINEL_OFFSET  399   /* sentinel byte at reserved[399] */
+#define TAGFS_SB_CRC_SENTINEL         0xCC  /* written alongside CRC to mark presence */
 #define TAGFS_BLOCK_SIZE            4096
 
 #define TAGFS_SUPERBLOCK_SECTOR     1034
@@ -189,7 +191,7 @@ typedef struct {
 
 typedef struct {
     uint32_t  hash;         // hash of sorted tag_ids
-    uint32_t  generation;   // generation when cached
+    uint64_t  generation;   // generation when cached
     uint32_t* file_ids;     // cached result array
     uint32_t  count;        // number of results
     uint16_t* tag_key;      // copy of sorted tag_ids (for validation)
@@ -204,7 +206,7 @@ typedef struct {
     TagIdList*  file_to_tags;
     uint32_t    file_capacity;
 
-    uint32_t    generation;     // incremented on every mutation
+    uint64_t    generation;     // incremented on every mutation
     QueryCacheEntry cache[QUERY_CACHE_SLOTS];
 
     spinlock_t  lock;

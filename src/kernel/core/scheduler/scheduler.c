@@ -15,6 +15,12 @@
 #include "amp.h"
 
 // ---------------------------------------------------------------------------
+// Global monotonic tick — incremented by every core on every timer tick.
+// Used for starvation detection so migrated processes are treated fairly.
+// ---------------------------------------------------------------------------
+volatile uint64_t g_global_tick = 0;
+
+// ---------------------------------------------------------------------------
 // Per-core scheduler array
 // ---------------------------------------------------------------------------
 static scheduler_state_t g_core_sched[MAX_CORES];
@@ -119,17 +125,16 @@ bool scheduler_matches_use_context(process_t* proc) {
 // Priority + RunQueue
 // ---------------------------------------------------------------------------
 
-// Determine priority level for a process.  Uses the HOME core's tick counter
-// for starvation detection.
+// Determine priority level for a process.  Uses the global tick counter
+// for starvation detection so core migrations don't confuse the calculation.
 int sched_determine_priority(process_t* proc) {
     if (!proc) return SCHED_PRIO_NORMAL;
 
-    scheduler_state_t* home = &g_core_sched[proc->home_core];
-
     // Starvation check
+    uint64_t now = __atomic_load_n(&g_global_tick, __ATOMIC_RELAXED);
     uint64_t ticks_since_run = 0;
-    if (home->total_ticks >= proc->last_run_time) {
-        ticks_since_run = home->total_ticks - proc->last_run_time;
+    if (now >= proc->last_run_time) {
+        ticks_since_run = now - proc->last_run_time;
     }
     if (ticks_since_run >= SCHEDULER_MILD_STARVATION_TICKS) {
         return SCHED_PRIO_STARVED;
@@ -354,7 +359,7 @@ void schedule(void* frame_ptr) {
         next->state = PROC_WORKING;
         spin_unlock(&next->state_lock);
     }
-    next->last_run_time = s->total_ticks;
+    next->last_run_time = __atomic_load_n(&g_global_tick, __ATOMIC_RELAXED);
 
     // Track consecutive runs
     if (current && current != next) {

@@ -2,24 +2,29 @@
 #include "box/string.h"
 
 static char* tokenize(char* str, char** saveptr) {
-    if (!str && !*saveptr) {
+    if (!str && !*saveptr)
         return NULL;
-    }
 
     char* start = str ? str : *saveptr;
 
-    while (*start == ' ' || *start == '\t') {
+    while (*start == ' ' || *start == '\t')
         start++;
-    }
 
     if (*start == '\0') {
         *saveptr = NULL;
         return NULL;
     }
 
-    char* end = start;
-    while (*end != '\0' && *end != ' ' && *end != '\t') {
-        end++;
+    char* end;
+    if (*start == '"') {
+        start++;
+        end = start;
+        while (*end != '\0' && *end != '"')
+            end++;
+    } else {
+        end = start;
+        while (*end != '\0' && *end != ' ' && *end != '\t')
+            end++;
     }
 
     if (*end != '\0') {

@@ -177,6 +177,22 @@ static uint32_t pack_record(const TagFSMetadata* meta, uint8_t* buf) {
     }
 
     if (meta->extent_count > 0 && meta->extents) {
+        TagFSState* fs = tagfs_get_state();
+        uint32_t total_blocks = (fs && fs->initialized) ? fs->superblock.total_blocks : 0;
+
+        for (uint16_t e = 0; e < meta->extent_count; e++) {
+            uint32_t start = meta->extents[e].start_block;
+            uint32_t count = meta->extents[e].block_count;
+            bool overflow  = (count > 0) && ((uint64_t)start + count > (uint64_t)0xFFFFFFFFU);
+            bool oob       = (total_blocks > 0) &&
+                             (start >= total_blocks || (uint64_t)start + count > total_blocks);
+            if (count == 0 || overflow || oob) {
+                debug_printf("[MetaPool] pack: extent %u invalid (start=%u count=%u total=%u) — skipping write\n",
+                             e, start, count, total_blocks);
+                return 0;
+            }
+        }
+
         uint32_t extent_bytes = (uint32_t)meta->extent_count * sizeof(FileExtent);
         memcpy(buf + pos, meta->extents, extent_bytes);
         pos += extent_bytes;
@@ -263,6 +279,25 @@ static int unpack_record(const uint8_t* buf, TagFSMetadata* out) {
         uint32_t extent_bytes = (uint32_t)out->extent_count * sizeof(FileExtent);
         memcpy(out->extents, buf + pos, extent_bytes);
         pos += extent_bytes;
+
+        TagFSState* fs = tagfs_get_state();
+        uint32_t total_blocks = (fs && fs->initialized) ? fs->superblock.total_blocks : 0;
+
+        for (uint16_t e = 0; e < out->extent_count; e++) {
+            uint32_t start = out->extents[e].start_block;
+            uint32_t count = out->extents[e].block_count;
+            bool overflow  = (count > 0) && ((uint64_t)start + count > (uint64_t)0xFFFFFFFFU);
+            bool oob       = (total_blocks > 0) &&
+                             (start >= total_blocks || (uint64_t)start + count > total_blocks);
+            if (count == 0 || overflow || oob) {
+                debug_printf("[MetaPool] WARNING: extent %u invalid (start=%u count=%u total=%u) — discarding extents\n",
+                             e, start, count, total_blocks);
+                kfree(out->extents);
+                out->extents      = NULL;
+                out->extent_count = 0;
+                break;
+            }
+        }
     }
 
     out->filename = kmalloc(name_len + 1);

@@ -8,7 +8,7 @@
 #include "fpu.h"
 
 PerCoreData g_per_core[MAX_CORES] __attribute__((aligned(64)));
-bool g_per_core_active = false;
+volatile bool g_per_core_active = false;
 
 // ---------------------------------------------------------------------------
 // MSR helpers (local to this file)
@@ -203,7 +203,7 @@ void per_core_init_bsp(void) {
     per_core_setup_notify_msrs(pc);
 
     pc->initialized = true;
-    g_per_core_active = true;
+    __atomic_store_n(&g_per_core_active, true, __ATOMIC_RELEASE);
 
     kprintf("[PER_CORE] BSP ready: GDT=0x%lx TSS=0x%lx KernelGSBASE=0x%lx\n",
             (uint64_t)&pc->gdt, (uint64_t)&pc->tss, (uint64_t)&pc->notify);
@@ -264,7 +264,7 @@ void per_core_init_ap(uint8_t core_index, uint64_t stack_top) {
 }
 
 void per_core_set_kernel_rsp(uint64_t rsp) {
-    if (!g_per_core_active) {
+    if (!__atomic_load_n(&g_per_core_active, __ATOMIC_ACQUIRE)) {
         // Early boot: use static BSP TSS + PerCpuData
         tss_set_rsp0(rsp);
         notify_set_kernel_rsp(rsp);

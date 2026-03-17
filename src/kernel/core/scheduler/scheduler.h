@@ -18,6 +18,8 @@
  *   use_context (tag-based focus) is a GLOBAL policy shared across all cores.
  */
 
+extern volatile uint64_t g_global_tick;
+
 #define SCHEDULER_MAX_CONSECUTIVE_RUNS 5
 #define SCHEDULER_FAIRNESS_INTERVAL    5
 

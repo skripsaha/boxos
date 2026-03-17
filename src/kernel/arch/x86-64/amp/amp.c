@@ -136,6 +136,9 @@ void amp_init(void)
         core_idx++;
     }
 
+    // Ensure lapic_to_index[] is visible to APs before they boot
+    mfence();
+
     g_amp.total_cores = core_idx;
     g_amp.k_count = (uint8_t)amp_calculate_kcores(g_amp.total_cores);
     g_amp.app_count = g_amp.total_cores - g_amp.k_count;
@@ -160,31 +163,35 @@ void amp_init(void)
     }
 }
 
-static void send_init_ipi(uint8_t dest_lapic_id)
+static void wait_icr_not_pending(void)
 {
-    while (lapic_read(LAPIC_REG_ICR_LOW) & LAPIC_ICR_SEND_PENDING)
+    uint32_t timeout = 100000;
+    while ((lapic_read(LAPIC_REG_ICR_LOW) & LAPIC_ICR_SEND_PENDING) && --timeout)
     {
         __asm__ volatile("pause");
     }
+    if (timeout == 0)
+    {
+        debug_printf("[AMP] WARNING: LAPIC ICR send pending timeout\n");
+    }
+}
+
+static void send_init_ipi(uint8_t dest_lapic_id)
+{
+    wait_icr_not_pending();
     lapic_write(LAPIC_REG_ICR_HIGH, (uint32_t)dest_lapic_id << 24);
     lapic_write(LAPIC_REG_ICR_LOW, LAPIC_IPI_INIT);
 
     pit_delay_us(10000); // 10ms
 
-    while (lapic_read(LAPIC_REG_ICR_LOW) & LAPIC_ICR_SEND_PENDING)
-    {
-        __asm__ volatile("pause");
-    }
+    wait_icr_not_pending();
     lapic_write(LAPIC_REG_ICR_HIGH, (uint32_t)dest_lapic_id << 24);
     lapic_write(LAPIC_REG_ICR_LOW, LAPIC_IPI_INIT_DEASSERT);
 }
 
 static void send_sipi(uint8_t dest_lapic_id, uint8_t vector_page)
 {
-    while (lapic_read(LAPIC_REG_ICR_LOW) & LAPIC_ICR_SEND_PENDING)
-    {
-        __asm__ volatile("pause");
-    }
+    wait_icr_not_pending();
     lapic_write(LAPIC_REG_ICR_HIGH, (uint32_t)dest_lapic_id << 24);
     lapic_write(LAPIC_REG_ICR_LOW, LAPIC_IPI_SIPI | vector_page);
 }

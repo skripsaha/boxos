@@ -161,11 +161,9 @@ void tagfs_context_clear(uint32_t pid) {
 }
 
 bool tagfs_context_matches_file(uint32_t pid, uint32_t file_id) {
-    // Snapshot context under lock, then release before doing expensive
-    // bitmap queries — reduces lock hold time for concurrent callers.
-    uint64_t ctx_bits;
-    uint16_t overflow_count;
-    uint16_t overflow_snapshot[64];  // local snapshot of overflow ids
+    uint64_t  ctx_bits;
+    uint16_t  overflow_count;
+    uint16_t* overflow_snapshot = NULL;
 
     spin_lock(&g_lock);
 
@@ -175,11 +173,15 @@ bool tagfs_context_matches_file(uint32_t pid, uint32_t file_id) {
         return true;
     }
 
-    ctx_bits = ctx->context_bits;
+    ctx_bits       = ctx->context_bits;
     overflow_count = ctx->overflow_count;
-    if (overflow_count > 64) overflow_count = 64;
     if (overflow_count > 0) {
-        memcpy(overflow_snapshot, ctx->overflow_ids, overflow_count * sizeof(uint16_t));
+        overflow_snapshot = kmalloc(overflow_count * sizeof(uint16_t));
+        if (overflow_snapshot) {
+            memcpy(overflow_snapshot, ctx->overflow_ids, overflow_count * sizeof(uint16_t));
+        } else {
+            overflow_count = 0;
+        }
     }
 
     spin_unlock(&g_lock);
@@ -213,6 +215,7 @@ bool tagfs_context_matches_file(uint32_t pid, uint32_t file_id) {
 
     if ((file_bits & ctx_bits) != ctx_bits) {
         kfree(file_tag_ids);
+        if (overflow_snapshot) kfree(overflow_snapshot);
         return false;
     }
 
@@ -226,11 +229,13 @@ bool tagfs_context_matches_file(uint32_t pid, uint32_t file_id) {
         }
         if (!found) {
             kfree(file_tag_ids);
+            if (overflow_snapshot) kfree(overflow_snapshot);
             return false;
         }
     }
 
     kfree(file_tag_ids);
+    if (overflow_snapshot) kfree(overflow_snapshot);
     return true;
 }
 
