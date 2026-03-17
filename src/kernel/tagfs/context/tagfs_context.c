@@ -161,6 +161,12 @@ void tagfs_context_clear(uint32_t pid) {
 }
 
 bool tagfs_context_matches_file(uint32_t pid, uint32_t file_id) {
+    // Snapshot context under lock, then release before doing expensive
+    // bitmap queries — reduces lock hold time for concurrent callers.
+    uint64_t ctx_bits;
+    uint16_t overflow_count;
+    uint16_t overflow_snapshot[64];  // local snapshot of overflow ids
+
     spin_lock(&g_lock);
 
     TagFSContext* ctx = find_context(pid);
@@ -169,22 +175,28 @@ bool tagfs_context_matches_file(uint32_t pid, uint32_t file_id) {
         return true;
     }
 
+    ctx_bits = ctx->context_bits;
+    overflow_count = ctx->overflow_count;
+    if (overflow_count > 64) overflow_count = 64;
+    if (overflow_count > 0) {
+        memcpy(overflow_snapshot, ctx->overflow_ids, overflow_count * sizeof(uint16_t));
+    }
+
+    spin_unlock(&g_lock);
+
+    // All bitmap queries run lock-free from here
     TagFSState* state = tagfs_get_state();
     if (!state || !state->bitmap_index) {
-        spin_unlock(&g_lock);
         return false;
     }
 
     int tag_count = tag_bitmap_tag_count_for_file(state->bitmap_index, file_id);
     if (tag_count <= 0) {
-        // File has no tags — cannot satisfy any context requirement
-        spin_unlock(&g_lock);
-        return (ctx->context_bits == 0 && ctx->overflow_count == 0);
+        return (ctx_bits == 0 && overflow_count == 0);
     }
 
     uint16_t* file_tag_ids = kmalloc(sizeof(uint16_t) * (uint32_t)tag_count);
     if (!file_tag_ids) {
-        spin_unlock(&g_lock);
         return false;
     }
 
@@ -199,29 +211,26 @@ bool tagfs_context_matches_file(uint32_t pid, uint32_t file_id) {
             file_bits |= (uint64_t)1 << file_tag_ids[i];
     }
 
-    if ((file_bits & ctx->context_bits) != ctx->context_bits) {
+    if ((file_bits & ctx_bits) != ctx_bits) {
         kfree(file_tag_ids);
-        spin_unlock(&g_lock);
         return false;
     }
 
-    for (uint16_t oi = 0; oi < ctx->overflow_count; oi++) {
+    for (uint16_t oi = 0; oi < overflow_count; oi++) {
         bool found = false;
         for (int fi = 0; fi < count; fi++) {
-            if (file_tag_ids[fi] == ctx->overflow_ids[oi]) {
+            if (file_tag_ids[fi] == overflow_snapshot[oi]) {
                 found = true;
                 break;
             }
         }
         if (!found) {
             kfree(file_tag_ids);
-            spin_unlock(&g_lock);
             return false;
         }
     }
 
     kfree(file_tag_ids);
-    spin_unlock(&g_lock);
     return true;
 }
 

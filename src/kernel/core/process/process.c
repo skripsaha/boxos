@@ -25,6 +25,10 @@ static process_cleanup_queue_t g_cleanup_queue;
 // Round-robin counter for App Core assignment (multi-core only).
 static volatile uint32_t g_appcore_rr_counter = 0;
 
+// Tag overflow reallocation uses publish-before-free: the new pointer is
+// written (with a store barrier) BEFORE the old buffer is freed.  This
+// prevents use-after-free when scheduler_matches_use_context() on another
+// core reads tag_overflow_ids under g_context_lock (a different lock).
 static int process_set_tag_bit(process_t *proc, uint16_t tag_id)
 {
     if (tag_id < 64) {
@@ -40,12 +44,18 @@ static int process_set_tag_bit(process_t *proc, uint16_t tag_id)
         uint16_t *new_ids = kmalloc(sizeof(uint16_t) * new_cap);
         if (!new_ids)
             return -1;
-        if (proc->tag_overflow_ids) {
-            memcpy(new_ids, proc->tag_overflow_ids, sizeof(uint16_t) * proc->tag_overflow_count);
-            kfree(proc->tag_overflow_ids);
+        uint16_t *old_ids = proc->tag_overflow_ids;
+        if (old_ids) {
+            memcpy(new_ids, old_ids, sizeof(uint16_t) * proc->tag_overflow_count);
         }
+        // Publish new pointer before freeing old — concurrent readers see valid data
+        mfence();
         proc->tag_overflow_ids = new_ids;
         proc->tag_overflow_capacity = new_cap;
+        mfence();
+        if (old_ids) {
+            kfree(old_ids);
+        }
     }
     proc->tag_overflow_ids[proc->tag_overflow_count++] = tag_id;
     return 0;
@@ -477,6 +487,13 @@ void process_destroy(process_t *proc)
         {
             asm volatile("cli; hlt");
         }
+    }
+
+    // Bounds-check home_core before indexing g_core_sched[]
+    if (proc->home_core >= g_amp.total_cores) {
+        debug_printf("[PROCESS] ERROR: PID %u has invalid home_core %u (max %u)\n",
+                     proc->pid, proc->home_core, g_amp.total_cores);
+        return;
     }
 
     // Check if process is current on its home core (not the calling core)

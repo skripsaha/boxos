@@ -13,8 +13,6 @@ static uint8_t kernel_stack_boot[32768] __attribute__((aligned(16)));
 // Phase 2: dynamic IST stacks with guard pages (set by tss_setup_dynamic_stacks)
 static void *ist_guard_bases[IST_COUNT];  // for diagnostics
 
-extern void gdt_set_tss_entry(int index, uint64_t base, uint64_t limit);
-
 void tss_init(void) {
     debug_printf("[TSS] Initializing Task State Segment...\n");
 

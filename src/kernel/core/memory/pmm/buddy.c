@@ -263,9 +263,8 @@ void buddy_free(BuddyZone* zone, void* addr, size_t pages) {
 
     spin_lock(&zone->lock);
 
-    // Double-free check
+    // Double-free check — panic with lock held to prevent corruption
     if (!alloc_map_test(zone, idx)) {
-        spin_unlock(&zone->lock);
         panic("[BUDDY] Double free at phys=0x%lx pages=%lu order=%d", phys, pages, order);
     }
 

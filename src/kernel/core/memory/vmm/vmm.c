@@ -8,6 +8,7 @@
 #include "process.h"
 #include "cpu_caps_page.h"
 #include "boxos_addresses.h"
+#include "amp.h"
 
 static vmm_context_t* kernel_context = NULL;
 static vmm_context_t* current_context = NULL;
@@ -81,18 +82,23 @@ static uint16_t pcid_alloc(void) {
     } else if (pcid_next <= PCID_MAX) {
         pcid = pcid_next++;
     } else {
-        // All 4095 PCIDs exhausted — full TLB flush and reset
+        // All 4095 PCIDs exhausted — full TLB flush on ALL cores and reset.
         pcid_next = 2;
         pcid_free_count = 0;
         pcid = 1;
 
-        // Toggle CR4.PGE to flush entire TLB (all PCIDs + globals)
+        // Flush local TLB via CR4.PGE toggle
         uint64_t cr4;
         asm volatile("mov %%cr4, %0" : "=r"(cr4));
         asm volatile("mov %0, %%cr4" : : "r"(cr4 & ~(1ULL << 7)) : "memory");
         asm volatile("mov %0, %%cr4" : : "r"(cr4) : "memory");
 
-        debug_printf("[VMM] PCID pool exhausted — full TLB flush + reset\n");
+        // Flush remote cores via TLB shootdown (full flush: addr=0, count=0)
+        if (g_amp.multicore_active && g_amp.total_cores > 1) {
+            vmm_shootdown_pages(kernel_context, 0, 0);
+        }
+
+        debug_printf("[VMM] PCID pool exhausted — full TLB flush on all cores + reset\n");
     }
 
     spin_unlock(&pcid_lock);
@@ -301,7 +307,8 @@ page_table_t* vmm_get_or_create_table(vmm_context_t* ctx, uintptr_t virt_addr, i
             *entry = vmm_make_pte(new_table_phys, VMM_FLAGS_KERNEL_RW | VMM_FLAG_USER);
         } else {
             if (i == 2 && (*entry & VMM_FLAG_LARGE_PAGE)) {
-                // split 2MB large page into 512 4KB pages
+                // Split 2MB large page into 512 4KB pages.
+                // Caller (vmm_map_page) holds ctx->lock, so no concurrent split.
                 pte_t old_entry = *entry;
                 if (!(old_entry & VMM_FLAG_LARGE_PAGE)) {
                     goto entry_ready;
@@ -323,10 +330,8 @@ page_table_t* vmm_get_or_create_table(vmm_context_t* ctx, uintptr_t virt_addr, i
                     new_pt->entries[j] = vmm_make_pte(page_phys, large_page_flags);
                 }
 
-                pte_t new_entry = vmm_make_pte(new_pt_phys, VMM_FLAGS_KERNEL_RW | VMM_FLAG_USER);
-                if (!atomic_cas_u64((volatile uint64_t*)entry, old_entry, new_entry)) {
-                    vmm_free_page_table(new_pt_phys);
-                }
+                // Direct write: ctx->lock serializes all callers
+                *entry = vmm_make_pte(new_pt_phys, VMM_FLAGS_KERNEL_RW | VMM_FLAG_USER);
             }
 entry_ready:
             ;
@@ -440,10 +445,13 @@ static void vmm_free_user_space_tables(vmm_context_t* ctx) {
     uint8_t* freed_bitmap = kmalloc(dedup_bitmap_size);
     bool has_dedup = (freed_bitmap != NULL);
     if (!has_dedup) {
-        debug_printf("[VMM] WARNING: kmalloc(%zu) failed for dedup bitmap, freeing without duplicate detection\n", dedup_bitmap_size);
+        debug_printf("[VMM] WARNING: kmalloc(%zu) failed for dedup bitmap — skipping user page frees to avoid double-free\n", dedup_bitmap_size);
     } else {
         memset(freed_bitmap, 0, dedup_bitmap_size);
     }
+    // When has_dedup is false we still walk the tables to free page-table
+    // structures but SKIP freeing data pages (pmm_free) to prevent
+    // double-free if two PTEs point to the same physical frame.
 
     for (int p4 = 0; p4 < 256; p4++) {
         pte_t pml4_entry = ctx->pml4->entries[p4];
@@ -497,11 +505,11 @@ static void vmm_free_user_space_tables(vmm_context_t* ctx) {
                         continue;
                     }
 
-                    if (!is_identity_mapped) {
+                    if (!is_identity_mapped && has_dedup) {
                         size_t page_idx = phys / VMM_PAGE_SIZE;
                         bool should_free = true;
 
-                        if (has_dedup && page_idx < dedup_total_pages) {
+                        if (page_idx < dedup_total_pages) {
                             size_t byte_idx = page_idx / 8;
                             size_t bit_idx = page_idx % 8;
 

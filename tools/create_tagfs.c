@@ -46,7 +46,8 @@
 #define TAGFS_FTABLE_PER_BLOCK     510
 #define TAGFS_INVALID_TAG_ID       0xFFFF
 
-#define RECORD_HEADER_SIZE    40   /* metadata pool record header */
+#define RECORD_HEADER_SIZE    42   /* metadata pool record header (40 fields + 2 CRC16) */
+#define RECORD_CRC_OFFSET     40   /* CRC16 stored at bytes [40..41] of packed record */
 #define MPOOL_BLOCK_HEADER    16   /* MetaPoolBlock header before payload */
 
 /* Boot hint offsets within superblock (in reserved[] area, byte offset 108+) */
@@ -356,6 +357,18 @@ static int build_registry_block(TagRegistryBlock* blk) {
     return 0;
 }
 
+/* CRC-16/CCITT-FALSE — must match kernel's meta_crc16 exactly */
+static uint16_t meta_crc16(const uint8_t* data, uint32_t len) {
+    uint16_t crc = 0xFFFF;
+    for (uint32_t i = 0; i < len; i++) {
+        crc ^= (uint16_t)data[i] << 8;
+        for (int j = 0; j < 8; j++) {
+            crc = (crc & 0x8000) ? (crc << 1) ^ 0x1021 : (crc << 1);
+        }
+    }
+    return crc;
+}
+
 /* ====================================================================
  * Build metadata pool record (matches kernel's pack_record exactly)
  * ==================================================================== */
@@ -392,6 +405,9 @@ static uint32_t pack_metadata_record(uint8_t* buf, const FileInfo* fi) {
     memcpy(buf + pos, &extent_count, 2);          pos += 2;
     /* name_len */
     memcpy(buf + pos, &name_len, 2);              pos += 2;
+    /* CRC16 placeholder — zeroed for computation, stamped below */
+    uint16_t zero_crc = 0;
+    memcpy(buf + pos, &zero_crc, 2);              pos += 2;
 
     /* tag_ids[] */
     if (fi->tag_count > 0) {
@@ -409,6 +425,10 @@ static uint32_t pack_metadata_record(uint8_t* buf, const FileInfo* fi) {
     /* filename */
     memcpy(buf + pos, fname, name_len);
     pos += name_len;
+
+    /* Stamp CRC16 over the entire record (with CRC field zeroed) */
+    uint16_t crc = meta_crc16(buf, (uint32_t)record_len);
+    memcpy(buf + RECORD_CRC_OFFSET, &crc, 2);
 
     return (uint32_t)record_len;
 }

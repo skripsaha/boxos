@@ -376,6 +376,15 @@ int journal_validate_and_replay(void) {
             continue;
         }
 
+        // Safety: skip entries targeting sector 0 (bootloader area — invalid target)
+        if (entry.sector == 0) {
+            debug_printf("[Journal] WARNING: Skipping replay of entry %u with sector=0\n", index);
+            journal_mark_replayed(index);
+            skipped_count++;
+            index = (index + 1) % g_journal_sb.entry_count;
+            continue;
+        }
+
         // Apply this entry
         uint8_t* buffer = kmalloc(ATA_SECTOR_SIZE);
         if (!buffer) {
@@ -627,6 +636,14 @@ int journal_commit(JournalTxn* txn) {
             if (journal_read_entry(idx, &entry) != 0) {
                 debug_printf("[Journal] ERROR: Failed to read entry %u during apply\n", idx);
                 goto commit_done;
+            }
+
+            // Safety: skip entries targeting sector 0 (bootloader area)
+            if (entry.sector == 0) {
+                debug_printf("[Journal] WARNING: Skipping entry %u with sector=0 (invalid target)\n", idx);
+                journal_mark_replayed(idx);
+                idx = (idx + 1) % g_journal_sb.entry_count;
+                continue;
             }
 
             uint8_t* buffer = kmalloc(ATA_SECTOR_SIZE);
