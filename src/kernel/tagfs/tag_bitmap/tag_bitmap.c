@@ -505,6 +505,10 @@ int tag_bitmap_query(TagBitmapIndex* idx,
             for (uint32_t w = 0; w < words; w++) {
                 r64[w] &= b64[w];
             }
+            // AND remaining bytes that don't fill a full 64-bit word
+            for (uint32_t b = words * 8; b < copy_len; b++) {
+                result_bitmap[b] &= bm->bits[b];
+            }
             for (uint32_t b = copy_len; b < result_size; b++) {
                 result_bitmap[b] = 0;
             }
@@ -547,6 +551,10 @@ int tag_bitmap_query(TagBitmapIndex* idx,
             for (uint32_t w = 0; w < words; w++) {
                 t64[w] |= b64[w];
             }
+            // OR remaining bytes that don't fill a full 64-bit word
+            for (uint32_t b = words * 8; b < or_len; b++) {
+                temp[b] |= bm->bits[b];
+            }
         }
 
         if (first) {
@@ -582,8 +590,8 @@ int tag_bitmap_query(TagBitmapIndex* idx,
                                        idx->max_file_id,
                                        out_file_ids, max_results);
 
-    // --- Store in cache (simple tag-only queries) ---
-    if (tag_count > 0 && group_count == 0) {
+    // --- Store in cache (simple tag-only queries, non-truncated only) ---
+    if (tag_count > 0 && group_count == 0 && count < max_results) {
         cache_store(idx, hash, tag_ids, tag_count, out_file_ids, count);
     }
 
