@@ -28,12 +28,14 @@ static int do_reboot(Pocket* pocket, process_t* proc) {
     debug_printf("[Hardware] SYSTEM_REBOOT request from PID %u\n", pocket->pid);
     (void)proc;
     system_halt(true);
+    return 0;
 }
 
 static int do_shutdown(Pocket* pocket, process_t* proc) {
     debug_printf("[Hardware] SYSTEM_SHUTDOWN request from PID %u\n", pocket->pid);
     (void)proc;
     system_halt(false);
+    return 0;
 }
 
 int hardware_deck_handler(Pocket* pocket, process_t* proc) {

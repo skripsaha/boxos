@@ -221,6 +221,11 @@ static int parse_tag_list(const char *tag_string, const char *tags[], uint32_t m
         }
 
         pos += len;
+        // Skip any remaining characters of an oversized tag name
+        while (*pos != ',' && *pos != '\0')
+        {
+            pos++;
+        }
         if (*pos == ',')
         {
             pos++;
@@ -746,6 +751,12 @@ static int handle_obj_get_info(Pocket *pocket, process_t *proc)
             strncpy(resp->tags[i].value, rval, 11);
             resp->tags[i].value[11] = '\0';
         }
+    }
+
+    // Synthesize FILE_FLAG_TRASHED from "trashed" tag presence.
+    // This ensures flags & 0x02 is authoritative regardless of 5-tag limit.
+    if (tagfs_has_tag_string(metadata.file_id, "trashed", NULL)) {
+        resp->flags |= 0x02;  // FILE_FLAG_TRASHED
     }
 
     tagfs_metadata_free(&metadata);

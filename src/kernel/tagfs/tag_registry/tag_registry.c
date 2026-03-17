@@ -1,5 +1,7 @@
 #include "tag_registry.h"
 
+static bool g_registry_dirty = false;
+
 static uint32_t registry_hash(const char* key, const char* value, uint32_t bucket_count) {
     uint32_t hash = 5381;
     while (*key) {
@@ -170,6 +172,7 @@ static uint16_t intern_with_id_unlocked(TagRegistry* reg, uint16_t tag_id,
     // Keep next_id above all known IDs
     if (tag_id >= reg->next_id) reg->next_id = tag_id + 1;
     reg->total_tags++;
+    g_registry_dirty = true;
 
     return tag_id;
 }
@@ -233,6 +236,7 @@ static uint16_t intern_unlocked(TagRegistry* reg, const char* key, const char* v
     uint16_t assigned_id = reg->next_id;
     reg->next_id++;
     reg->total_tags++;
+    g_registry_dirty = true;
 
     debug_printf("[TagRegistry] interned tag_id=%u key='%s' value='%s'\n",
                  assigned_id, key, value ? value : "(null)");
@@ -374,6 +378,10 @@ TagKeyGroup* tag_registry_key_group(TagRegistry* reg, const char* key) {
     return group;
 }
 
+bool tag_registry_is_dirty(void) {
+    return g_registry_dirty;
+}
+
 int tag_registry_flush(TagRegistry* reg) {
     if (!reg) return -1;
 
@@ -451,6 +459,10 @@ int tag_registry_flush(TagRegistry* reg) {
     }
 
     int write_result = tagfs_write_block(current_block, &blk);
+
+    if (write_result == 0) {
+        g_registry_dirty = false;
+    }
 
     spin_unlock(&reg->lock);
     return write_result;

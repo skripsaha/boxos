@@ -17,8 +17,6 @@ static process_t g_idle_process;
 // AP cores point to dynamically allocated idle processes.
 static process_t* g_core_idle[MAX_CORES];
 
-extern void idle_loop(void);
-
 // Common helper: set up a process_t as an idle process with its own kernel stack.
 static void idle_setup(process_t* idle, uint8_t core_index) {
     memset(idle, 0, sizeof(process_t));

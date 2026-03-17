@@ -58,16 +58,19 @@ void runqueue_remove(RunQueue* rq, struct process_t* proc) {
         uint32_t idx = q->head;
         for (uint32_t n = 0; n < q->count; n++) {
             if (q->procs[idx] == proc) {
-                // Shift remaining entries left to fill the gap.
-                uint32_t cur = idx;
-                for (uint32_t m = 0; m < q->count - n - 1; m++) {
-                    uint32_t next = (cur + 1) % RUNQUEUE_CAPACITY;
-                    q->procs[cur] = q->procs[next];
-                    cur = next;
+                // Rebuild: compact the circular buffer by shifting all
+                // entries after the removed one toward head.
+                uint32_t remaining = q->count - n - 1;
+                uint32_t dst = idx;
+                for (uint32_t m = 0; m < remaining; m++) {
+                    uint32_t src = (dst + 1) % RUNQUEUE_CAPACITY;
+                    q->procs[dst] = q->procs[src];
+                    dst = src;
                 }
-                q->procs[cur] = NULL;
-                q->tail = (q->tail == 0 ? RUNQUEUE_CAPACITY : q->tail) - 1;
+                q->procs[dst] = NULL;
+                // Recompute tail from head + new count
                 q->count--;
+                q->tail = (q->head + q->count) % RUNQUEUE_CAPACITY;
 
                 if (q->count == 0)
                     rq->active_bitmap &= ~(1u << prio);

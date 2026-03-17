@@ -20,9 +20,6 @@ static const uint8_t usb_to_ps2[256] = {
 
 static usb_boot_keyboard_report_t prev_report = {0};
 
-extern void keyboard_handle_scancode(uint8_t scancode);
-extern keyboard_state_t* keyboard_get_state(void);
-
 int xhci_parse_config_descriptor(void* data, uint16_t len, usb_keyboard_info_t* info) {
     if (!data || !info || len < 9) {
         return -1;

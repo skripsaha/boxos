@@ -296,6 +296,8 @@ typedef struct {
     uint64_t stopped;
     uint64_t bypass;
     uint64_t network;
+    uint64_t trashed;
+    uint64_t hidden;
 } WellKnownTags;
 
 extern WellKnownTags g_well_known;
@@ -313,6 +315,7 @@ const char*  tag_registry_key(TagRegistry* reg, uint16_t tag_id);
 const char*  tag_registry_value(TagRegistry* reg, uint16_t tag_id);
 TagKeyGroup* tag_registry_key_group(TagRegistry* reg, const char* key);
 int          tag_registry_flush(TagRegistry* reg);
+bool         tag_registry_is_dirty(void);
 int          tag_registry_load(TagRegistry* reg, uint32_t first_block);
 
 // ----------------------------------------------------------------------------

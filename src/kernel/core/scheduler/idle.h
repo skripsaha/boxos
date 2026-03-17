@@ -13,8 +13,11 @@ void idle_process_init(void);
 void idle_process_init_core(uint8_t core_index);
 
 // Return the idle process for the calling core.
-process_t* idle_process_get(void);
+process_t *idle_process_get(void);
 
-bool process_is_idle(process_t* proc);
+bool process_is_idle(process_t *proc);
+
+// Assembly entry point: hlt loop (idle_loop.asm)
+void idle_loop(void);
 
 #endif // IDLE_H

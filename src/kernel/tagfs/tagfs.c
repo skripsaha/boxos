@@ -429,6 +429,31 @@ int tagfs_format(uint32_t total_blocks) {
 }
 
 // ----------------------------------------------------------------------------
+// System behavior tag helpers
+// ----------------------------------------------------------------------------
+
+// Check if a file has trashed or hidden tag. skip_trashed/skip_hidden control
+// which behavior tags to check (allows callers to exempt explicitly-queried tags).
+static bool file_has_system_behavior_tag(uint32_t file_id,
+                                          bool skip_trashed, bool skip_hidden) {
+    if (!skip_trashed && !skip_hidden) return false;
+
+    uint16_t trashed_id = g_well_known.trashed
+        ? (uint16_t)__builtin_ctzll(g_well_known.trashed) : TAGFS_INVALID_TAG_ID;
+    uint16_t hidden_id  = g_well_known.hidden
+        ? (uint16_t)__builtin_ctzll(g_well_known.hidden)  : TAGFS_INVALID_TAG_ID;
+
+    uint16_t file_tags[32];
+    int count = tag_bitmap_tags_for_file(g_state.bitmap_index, file_id, file_tags, 32);
+
+    for (int i = 0; i < count; i++) {
+        if (skip_trashed && file_tags[i] == trashed_id) return true;
+        if (skip_hidden  && file_tags[i] == hidden_id)  return true;
+    }
+    return false;
+}
+
+// ----------------------------------------------------------------------------
 // tagfs_init_well_known_tags
 // ----------------------------------------------------------------------------
 
@@ -452,6 +477,8 @@ void tagfs_init_well_known_tags(void)
     register_well_known(&g_well_known.stopped, reg, "stopped");
     register_well_known(&g_well_known.bypass,  reg, "bypass");
     register_well_known(&g_well_known.network, reg, "network");
+    register_well_known(&g_well_known.trashed, reg, "trashed");
+    register_well_known(&g_well_known.hidden,  reg, "hidden");
 }
 
 // ----------------------------------------------------------------------------
@@ -634,9 +661,19 @@ int tagfs_init(void) {
 
                 TagFSMetadata meta;
                 memset(&meta, 0, sizeof(meta));
-                if (meta_pool_read(mb, mo, &meta) != 0) continue;
+                if (meta_pool_read(mb, mo, &meta) != 0) {
+                    // Orphaned file_table entry — metadata is gone or corrupted.
+                    // Clean up the dangling reference.
+                    file_table_delete(fid);
+                    continue;
+                }
 
                 if (!(meta.flags & TAGFS_FILE_ACTIVE)) {
+                    // File was marked for deletion (journal replay or incomplete delete).
+                    // Complete the cleanup: remove file_table entry and free blocks.
+                    debug_printf("[TagFS FSCK] File %u has ACTIVE=0 — completing cleanup\n", fid);
+                    file_table_delete(fid);
+                    // Don't mark extents in computed_bm → blocks will be reclaimed
                     tagfs_metadata_free(&meta);
                     continue;
                 }
@@ -794,6 +831,10 @@ int tagfs_create_file(const char* filename, const uint16_t* tag_ids, uint16_t ta
         // Release state lock briefly to avoid lock ordering issues with registry
         spin_unlock(&g_state.lock);
         auto_tag = tag_registry_intern(g_state.registry, stem, NULL);
+        // Flush registry to disk if a new tag was created (crash safety)
+        if (tag_registry_is_dirty()) {
+            tag_registry_flush(g_state.registry);
+        }
         spin_lock(&g_state.lock);
     }
 
@@ -851,6 +892,12 @@ int tagfs_create_file(const char* filename, const uint16_t* tag_ids, uint16_t ta
 
     meta.tag_count = final_count;
     meta.tag_ids   = final_tags;
+
+    // No journal for create: metadata is NEW (no previous on-disk state to protect).
+    // Write ordering ensures consistency:
+    //   1. meta_pool_write (append-only, crash → orphaned record, fsck cleans up)
+    //   2. file_table_update (crash → table points to valid metadata, counters off → fsck fixes)
+    //   3. superblock update (eventual)
 
     // Write to metadata pool
     uint32_t meta_block, meta_offset;
@@ -912,13 +959,32 @@ int tagfs_delete_file(uint32_t file_id) {
     memset(&meta, 0, sizeof(meta));
     int has_meta = meta_pool_read(meta_block, meta_offset, &meta);
 
+    // Journal the delete intent: write metadata with ACTIVE flag cleared.
+    // On crash recovery, journal replay writes ACTIVE=0 metadata to disk,
+    // then fsck skips non-ACTIVE files and cleans orphaned entries.
+    if (has_meta == 0) {
+        TagFSMetadata del_meta;
+        memcpy(&del_meta, &meta, sizeof(TagFSMetadata));
+        del_meta.flags &= ~TAGFS_FILE_ACTIVE;
+        del_meta.extents = NULL;  // Don't serialize pointers
+
+        JournalTxn txn;
+        if (journal_begin(&txn) == 0) {
+            uint64_t meta_sector = block_to_sector(meta_block) +
+                                   (uint64_t)(meta_offset / 512);
+            journal_log_metadata(&txn, file_id, (uint32_t)meta_sector, &del_meta);
+            journal_commit(&txn);
+        }
+    }
+
+    // Cleanup order: bitmap → file_table → blocks → metadata pool.
+    // file_table_delete before block_free ensures that on crash,
+    // fsck won't find a file referencing freed (and possibly reused) blocks.
+
     // Remove from bitmap index
     tag_bitmap_remove_file(g_state.bitmap_index, file_id);
 
-    // Delete from metadata pool
-    meta_pool_delete(meta_block, meta_offset);
-
-    // Delete from file table
+    // Delete from file table (commit point: file officially gone)
     file_table_delete(file_id);
 
     // Free data blocks if we could read metadata
@@ -928,6 +994,9 @@ int tagfs_delete_file(uint32_t file_id) {
         }
         tagfs_metadata_free(&meta);
     }
+
+    // Delete from metadata pool (last: safe to zero after file_table is gone)
+    meta_pool_delete(meta_block, meta_offset);
 
     if (g_state.superblock.total_files > 0) {
         g_state.superblock.total_files--;
@@ -973,6 +1042,23 @@ int tagfs_rename_file(uint32_t file_id, const char* new_filename) {
         return -1;
     }
     memcpy(meta.filename, new_filename, len + 1);
+
+    // Journal the renamed metadata before any destructive changes.
+    // On crash: if journal replays, the new metadata (with new filename)
+    // overwrites the old sector — file is safe with new name.
+    // If crash happens after delete but before write, journal replay
+    // restores the renamed metadata.
+    {
+        JournalTxn txn;
+        if (journal_begin(&txn) == 0) {
+            uint64_t meta_sector = block_to_sector(meta_block) +
+                                   (uint64_t)(meta_offset / 512);
+            journal_log_metadata(&txn, file_id, (uint32_t)meta_sector, &meta);
+            if (journal_commit(&txn) != 0) {
+                debug_printf("[TagFS] rename_file: journal commit failed\n");
+            }
+        }
+    }
 
     // Delete old record, write new
     meta_pool_delete(meta_block, meta_offset);
@@ -1040,6 +1126,17 @@ int tagfs_add_tag(uint32_t file_id, uint16_t tag_id) {
     meta.tag_ids  = new_ids;
     meta.tag_count = new_count;
 
+    // Journal the updated metadata before destructive delete+write
+    {
+        JournalTxn txn;
+        if (journal_begin(&txn) == 0) {
+            uint64_t meta_sector = block_to_sector(meta_block) +
+                                   (uint64_t)(meta_offset / 512);
+            journal_log_metadata(&txn, file_id, (uint32_t)meta_sector, &meta);
+            journal_commit(&txn);
+        }
+    }
+
     meta_pool_delete(meta_block, meta_offset);
 
     uint32_t new_block, new_offset;
@@ -1089,6 +1186,17 @@ int tagfs_remove_tag(uint32_t file_id, uint16_t tag_id) {
         return -1;
     }
 
+    // Journal the updated metadata before destructive delete+write
+    {
+        JournalTxn txn;
+        if (journal_begin(&txn) == 0) {
+            uint64_t meta_sector = block_to_sector(meta_block) +
+                                   (uint64_t)(meta_offset / 512);
+            journal_log_metadata(&txn, file_id, (uint32_t)meta_sector, &meta);
+            journal_commit(&txn);
+        }
+    }
+
     meta_pool_delete(meta_block, meta_offset);
 
     uint32_t new_block, new_offset;
@@ -1121,6 +1229,10 @@ int tagfs_add_tag_string(uint32_t file_id, const char* key, const char* value) {
     if (!key) return -1;
     uint16_t tag_id = tag_registry_intern(g_state.registry, key, value);
     if (tag_id == TAGFS_INVALID_TAG_ID) return -1;
+    // Flush registry to disk if a new tag was created (crash safety)
+    if (tag_registry_is_dirty()) {
+        tag_registry_flush(g_state.registry);
+    }
     return tagfs_add_tag(file_id, tag_id);
 }
 
@@ -1193,6 +1305,44 @@ int tagfs_query_files(const char* query_strings[], uint32_t count,
                                   groups, group_count,
                                   out_file_ids, max_results);
 
+    // Post-filter: remove trashed/hidden files unless explicitly queried
+    if (result > 0) {
+        uint16_t trashed_id = g_well_known.trashed
+            ? (uint16_t)__builtin_ctzll(g_well_known.trashed) : TAGFS_INVALID_TAG_ID;
+        uint16_t hidden_id  = g_well_known.hidden
+            ? (uint16_t)__builtin_ctzll(g_well_known.hidden)  : TAGFS_INVALID_TAG_ID;
+
+        // Check if trashed/hidden were explicitly part of the query
+        bool query_has_trashed = false;
+        bool query_has_hidden  = false;
+
+        for (uint32_t i = 0; i < tag_count; i++) {
+            if (tag_ids[i] == trashed_id) query_has_trashed = true;
+            if (tag_ids[i] == hidden_id)  query_has_hidden  = true;
+        }
+        // Also check wildcard groups — if a group contains the tag, it's explicit
+        for (uint32_t g = 0; g < group_count && (!query_has_trashed || !query_has_hidden); g++) {
+            if (!groups[g]) continue;
+            for (uint32_t k = 0; k < groups[g]->count; k++) {
+                if (groups[g]->tag_ids[k] == trashed_id) query_has_trashed = true;
+                if (groups[g]->tag_ids[k] == hidden_id)  query_has_hidden  = true;
+            }
+        }
+
+        bool skip_trashed = !query_has_trashed && trashed_id != TAGFS_INVALID_TAG_ID;
+        bool skip_hidden  = !query_has_hidden  && hidden_id  != TAGFS_INVALID_TAG_ID;
+
+        if (skip_trashed || skip_hidden) {
+            int filtered = 0;
+            for (int i = 0; i < result; i++) {
+                if (!file_has_system_behavior_tag(out_file_ids[i], skip_trashed, skip_hidden)) {
+                    out_file_ids[filtered++] = out_file_ids[i];
+                }
+            }
+            result = filtered;
+        }
+    }
+
     kfree(tag_ids);
     kfree(groups);
     return result;
@@ -1208,6 +1358,9 @@ int tagfs_list_all_files(uint32_t* out_file_ids, uint32_t max_results) {
     for (uint32_t fid = 1; fid < max_id && found < max_results; fid++) {
         uint32_t mb, mo;
         if (file_table_lookup(fid, &mb, &mo) == 0 && mb != 0) {
+            // Skip files with trashed/hidden system behavior tags
+            if (file_has_system_behavior_tag(fid, true, true))
+                continue;
             out_file_ids[found++] = fid;
         }
     }

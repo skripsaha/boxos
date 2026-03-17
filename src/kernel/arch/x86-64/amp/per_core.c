@@ -35,13 +35,6 @@ static inline void wrmsr_pc(uint32_t msr, uint64_t value) {
                      "d"((uint32_t)(value >> 32)));
 }
 
-// SYSCALL entry point (notify_entry.asm)
-extern void notify_entry(void);
-
-// BSP's static GDT/TSS helpers (gdt.c, tss.c)
-extern void gdt_copy_entries(gdt_entry_t* dest, int count);
-extern tss_t* tss_get_ptr(void);
-
 // ---------------------------------------------------------------------------
 // GDT helpers
 // ---------------------------------------------------------------------------
@@ -112,10 +105,13 @@ static void per_core_alloc_ist(tss_t* tss, uint8_t core_index) {
 
         // Unmap guard page (first page) — access triggers page fault
         pte_t* guard_pte = vmm_get_or_create_pte(kctx, (uintptr_t)virt_base);
-        if (guard_pte) {
-            *guard_pte = 0;
-            vmm_flush_tlb_page((uintptr_t)virt_base);
+        if (!guard_pte) {
+            kprintf("[PER_CORE] FATAL: IST%d guard page PTE failed for core %u\n",
+                    i + 1, core_index);
+            while (1) { __asm__ volatile("cli; hlt"); }
         }
+        *guard_pte = 0;
+        vmm_flush_tlb_page((uintptr_t)virt_base);
 
         // Stack grows down: top = base + (guard + data) * PAGE_SIZE - 16
         uint64_t stack_top = (uint64_t)virt_base + (total_pages * 4096) - 16;

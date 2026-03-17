@@ -1,7 +1,20 @@
 #include "meta_pool.h"
 
-#define RECORD_HEADER_SIZE  40
+#define RECORD_HEADER_SIZE  42   // 40 bytes of fields + 2 bytes CRC16
 #define MPOOL_BLOCK_HEADER  16
+#define RECORD_CRC_OFFSET   40   // CRC16 stored at bytes [40..41] of packed record
+
+// CRC-16/CCITT-FALSE — lightweight integrity check for metadata records
+static uint16_t meta_crc16(const uint8_t* data, uint32_t len) {
+    uint16_t crc = 0xFFFF;
+    for (uint32_t i = 0; i < len; i++) {
+        crc ^= (uint16_t)data[i] << 8;
+        for (int j = 0; j < 8; j++) {
+            crc = (crc & 0x8000) ? (crc << 1) ^ 0x1021 : (crc << 1);
+        }
+    }
+    return crc;
+}
 
 static uint32_t     g_first_block      = 0;
 static uint32_t     g_block_count      = 0;
@@ -149,6 +162,10 @@ static uint32_t pack_record(const TagFSMetadata* meta, uint8_t* buf) {
     memcpy(buf + pos, &meta->extent_count,  sizeof(uint16_t));  pos += 2;
     memcpy(buf + pos, &name_len,            sizeof(uint16_t));  pos += 2;
 
+    // CRC16 placeholder — zero during computation, stamped below
+    uint16_t zero_crc = 0;
+    memcpy(buf + pos, &zero_crc, sizeof(uint16_t));             pos += 2;
+
     if (meta->tag_count > 0 && meta->tag_ids) {
         uint32_t tag_bytes = (uint32_t)meta->tag_count * sizeof(uint16_t);
         memcpy(buf + pos, meta->tag_ids, tag_bytes);
@@ -166,6 +183,10 @@ static uint32_t pack_record(const TagFSMetadata* meta, uint8_t* buf) {
         pos += name_len;
     }
 
+    // Stamp CRC16 over the entire record (with CRC field zeroed)
+    uint16_t crc = meta_crc16(buf, (uint32_t)record_len);
+    memcpy(buf + RECORD_CRC_OFFSET, &crc, sizeof(uint16_t));
+
     return (uint32_t)record_len;
 }
 
@@ -174,6 +195,29 @@ static int unpack_record(const uint8_t* buf, TagFSMetadata* out) {
 
     uint16_t record_len;
     memcpy(&record_len,         buf + pos, sizeof(uint16_t));  pos += 2;
+
+    // Validate record_len sanity before CRC check
+    if (record_len < RECORD_HEADER_SIZE || record_len > TAGFS_MPOOL_DATA_SIZE) {
+        debug_printf("[MetaPool] unpack: invalid record_len=%u\n", record_len);
+        return -1;
+    }
+
+    // Verify CRC16 integrity (zero the CRC field for computation)
+    uint16_t stored_crc;
+    memcpy(&stored_crc, buf + RECORD_CRC_OFFSET, sizeof(uint16_t));
+    if (stored_crc != 0) {
+        uint8_t check_buf[TAGFS_MPOOL_DATA_SIZE];
+        memcpy(check_buf, buf, record_len);
+        memset(check_buf + RECORD_CRC_OFFSET, 0, 2);
+        uint16_t computed_crc = meta_crc16(check_buf, record_len);
+        if (computed_crc != stored_crc) {
+            debug_printf("[MetaPool] unpack: CRC16 mismatch (stored=0x%04x computed=0x%04x)\n",
+                         stored_crc, computed_crc);
+            return -1;
+        }
+    }
+    // stored_crc == 0 accepted for backward compatibility with pre-CRC records
+
     memcpy(&out->file_id,       buf + pos, sizeof(uint32_t));  pos += 4;
     memcpy(&out->flags,         buf + pos, sizeof(uint32_t));  pos += 4;
     memcpy(&out->size,          buf + pos, sizeof(uint64_t));  pos += 8;
@@ -184,6 +228,8 @@ static int unpack_record(const uint8_t* buf, TagFSMetadata* out) {
 
     uint16_t name_len;
     memcpy(&name_len, buf + pos, sizeof(uint16_t));            pos += 2;
+
+    pos += 2;  // Skip CRC16 field (already validated above)
 
     out->tag_ids  = NULL;
     out->extents  = NULL;
@@ -360,9 +406,14 @@ int meta_pool_write(const TagFSMetadata* meta, uint32_t* out_block, uint32_t* ou
         debug_printf("[MetaPool] write: block %u full (used=%u need=%u), chaining to new block\n",
                      g_current_block_num, g_current_block.used_bytes, record_size);
 
-        // Allocate a new block for the chain (safe: g_lock != g_state.lock)
+        // Release g_lock before tagfs_alloc_blocks to avoid AB-BA deadlock
+        // (tagfs_alloc_blocks acquires g_state.lock; callers may hold g_state.lock
+        //  and then call meta_pool_write → g_lock, creating reverse order)
+        spin_unlock(&g_lock);
         uint32_t new_block;
         int alloc_ret = tagfs_alloc_blocks(1, &new_block);
+        spin_lock(&g_lock);
+
         if (alloc_ret != 0) {
             debug_printf("[MetaPool] write: failed to allocate new block\n");
             spin_unlock(&g_lock);

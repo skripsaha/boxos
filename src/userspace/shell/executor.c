@@ -65,6 +65,22 @@ int executor_run(parsed_command_t *cmd)
         }
         send((uint32_t)pid, buf, (uint16_t)pos);
 
+        // Fast path: on multi-core the child may have already exited
+        // before we enter the wait loop (0xFE stashed during send's result_wait)
+        {
+            Result early;
+            if (receive(&early)) {
+                if (early.data_length >= 1 && early.data_addr != 0 &&
+                    *(uint8_t*)(uintptr_t)early.data_addr == 0xFE) {
+                    // Drain any remaining stale IPC
+                    Result drain;
+                    while (receive(&drain)) { /* discard */ }
+                    return 0;
+                }
+                // Not the sentinel — fall through to main wait loop
+            }
+        }
+
         Result entry;
         int idle_ticks = 0;
         while (1) {
@@ -86,6 +102,14 @@ int executor_run(parsed_command_t *cmd)
                     }
                 }
             }
+        }
+
+        // Drain any leftover IPC from the child (e.g. late-arriving
+        // messages after sentinel, or stale entries from process cleanup)
+        // to prevent them from being consumed by readline's receive_wait
+        {
+            Result drain;
+            while (receive(&drain)) { /* discard */ }
         }
         return 0;
     }

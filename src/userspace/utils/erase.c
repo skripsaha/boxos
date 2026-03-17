@@ -43,15 +43,7 @@ int main(void) {
     if (count <= 0) { println("Error: File not found"); exit(1); return 1; }
     if (count > 1) { println("Error: Ambiguous filename"); exit(1); return 1; }
 
-    int has_trashed_tag = 0;
-    for (uint8_t i = 0; i < infos[0].tag_count; i++) {
-        if (infos[0].tags[i].type == 1 && strcmp(infos[0].tags[i].key, "trashed") == 0) {
-            has_trashed_tag = 1;
-            break;
-        }
-    }
-
-    if (!has_trashed_tag) {
+    if (!(infos[0].flags & FILE_FLAG_TRASHED)) {
         println("Error: File must be trashed first (use 'trash' command)");
         exit(1);
         return 1;

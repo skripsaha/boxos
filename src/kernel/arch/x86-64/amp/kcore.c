@@ -40,6 +40,7 @@ uint32_t kcore_queue_depth(uint8_t core_idx)
 static bool kcore_queue_push(KCorePocketQueue* q, struct process_t* proc)
 {
     uint32_t old_tail, new_tail;
+    uint32_t spins = 0;
     for (;;) {
         old_tail = atomic_load_u32(&q->tail);
         new_tail = (old_tail + 1) & KCORE_QUEUE_MASK;
@@ -53,8 +54,12 @@ static bool kcore_queue_push(KCorePocketQueue* q, struct process_t* proc)
         if (atomic_cas_u32(&q->tail, old_tail, new_tail)) {
             break;
         }
-        // CAS failed — another App Core beat us, retry
-        cpu_pause();
+        // CAS failed — exponential backoff to reduce cache line bouncing
+        uint32_t backoff = 1u << (spins < 4 ? spins : 4);
+        for (uint32_t b = 0; b < backoff; b++) {
+            cpu_pause();
+        }
+        spins++;
     }
 
     // Write the pointer into the claimed slot.
