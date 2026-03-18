@@ -58,9 +58,11 @@ static void render(const uint8_t* data, uint16_t len) {
     }
 }
 
-static void handle_readline(uint32_t requester, uint8_t max_len, uint8_t echo) {
-    char line_buf[256];
-    int len = kb_readline(line_buf, max_len > 0 ? max_len : 128, echo != 0);
+static void handle_readline(uint32_t requester, uint16_t max_len, uint8_t echo) {
+    char line_buf[1024];
+    uint16_t cap = max_len > 0 ? max_len : 128;
+    if (cap > sizeof(line_buf)) cap = sizeof(line_buf);
+    int len = kb_readline(line_buf, cap, echo != 0);
 
     if (len < 0) {
         uint8_t reply[4] = {0, 0, 0, 0};
@@ -68,7 +70,7 @@ static void handle_readline(uint32_t requester, uint8_t max_len, uint8_t echo) {
         return;
     }
 
-    uint8_t reply[260];
+    uint8_t reply[1028];
     uint32_t ulen = (uint32_t)len;
     memcpy(reply, &ulen, 4);
     memcpy(reply + 4, line_buf, ulen);
@@ -100,8 +102,9 @@ int main(void) {
         uint16_t len = (uint16_t)entry.data_length;
         uint8_t cmd = data[0];
 
-        if (cmd == DISP_CMD_READLINE && entry.sender_pid != 0 && len >= 3) {
-            handle_readline(entry.sender_pid, data[1], data[2]);
+        if (cmd == DISP_CMD_READLINE && entry.sender_pid != 0 && len >= 4) {
+            uint16_t rl_max = (uint16_t)data[1] | ((uint16_t)data[2] << 8);
+            handle_readline(entry.sender_pid, rl_max, data[3]);
         } else if (cmd == DISP_CMD_GETCHAR && entry.sender_pid != 0) {
             handle_getchar(entry.sender_pid);
         } else if (cmd == DISP_CMD_PING && entry.sender_pid != 0) {

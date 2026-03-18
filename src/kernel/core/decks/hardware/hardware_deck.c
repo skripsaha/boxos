@@ -324,19 +324,24 @@ int hardware_deck_handler(Pocket* pocket, process_t* proc) {
 
         case HW_KEYBOARD_READLINE: {
             uint8_t* data = vmm_translate_user_addr(proc->cabin, pocket->data_addr, pocket->data_length);
-            if (!data) return -1;
+            if (!data || pocket->data_length < 8) return -1;
 
-            uint8_t max_length = data[0];
-            uint8_t echo_mode = data[1];
+            /* Protocol: data[0..1] = uint16_t max_length (LE), data[2] = echo_mode
+               Response: data[0..3] = uint32_t length, data[4..] = string, last byte = status */
+            uint16_t max_length = (uint16_t)data[0] | ((uint16_t)data[1] << 8);
+            uint8_t echo_mode = data[2];
 
-            if (max_length == 0 || max_length > 187) {
-                max_length = 187;
-            }
+            /* Dynamic limit: pocket data area minus header (4) and status (1) and NUL (1) */
+            uint32_t data_capacity = pocket->data_length - 6;
+            if (data_capacity > KEYBOARD_LINE_BUFFER_SIZE - 1)
+                data_capacity = KEYBOARD_LINE_BUFFER_SIZE - 1;
+            if (max_length == 0 || max_length > data_capacity)
+                max_length = (uint16_t)data_capacity;
 
             keyboard_set_echo(echo_mode != 0);
 
-            char line_buffer[188];
-            memset(line_buffer, 0, sizeof(line_buffer));
+            char line_buffer[KEYBOARD_LINE_BUFFER_SIZE];
+            memset(line_buffer, 0, (size_t)max_length + 1);
 
             int line_ready = keyboard_readline_async(line_buffer, max_length);
 
@@ -345,7 +350,7 @@ int hardware_deck_handler(Pocket* pocket, process_t* proc) {
 
                 deck_write_u32(data, (uint32_t)len);
 
-                size_t copy_len = len < 187 ? len : 187;
+                size_t copy_len = len < data_capacity ? len : data_capacity;
                 memcpy(&data[4], line_buffer, copy_len);
                 data[4 + copy_len] = '\0';
 
@@ -366,7 +371,7 @@ int hardware_deck_handler(Pocket* pocket, process_t* proc) {
             uint32_t available = keyboard_available();
             deck_write_u32(data + 0, available);
 
-            uint32_t buffer_size = 256;
+            uint32_t buffer_size = KEYBOARD_LINE_BUFFER_SIZE;
             deck_write_u32(data + 4, buffer_size);
 
             return 0;

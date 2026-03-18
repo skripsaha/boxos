@@ -86,19 +86,25 @@ int kb_getchar_ex(kb_char_t* out_char) {
 }
 
 int kb_readline(char* buffer, size_t size, bool echo) {
-    if (!buffer || size == 0 || size > 256) {
+    if (!buffer || size == 0 || size > 1024) {
         return -ERR_INVALID_ARGS;
     }
+
+    /* Pocket data buffer: 4 bytes header + up to (size-1) chars + NUL + 1 status = size + 5
+       We allocate a fixed 1030-byte buffer to cover any size up to 1024. */
+    uint8_t readline_buf[1030];
 
     const uint32_t max_retries = 10000;
     uint32_t retry_count = 0;
 
     while (retry_count < max_retries) {
-        uint8_t readline_buf[192];
-        memset(readline_buf, 0, sizeof(readline_buf));
-        readline_buf[0] = (uint8_t)size;
-        readline_buf[1] = echo ? 1 : 0;
-        pocket_send(DECK_HARDWARE, KB_OP_READLINE, readline_buf, sizeof(readline_buf));
+        memset(readline_buf, 0, size + 6);
+        /* Protocol: data[0..1] = uint16_t max_length (LE), data[2] = echo_mode */
+        uint16_t max_len = (uint16_t)size;
+        readline_buf[0] = (uint8_t)(max_len & 0xFF);
+        readline_buf[1] = (uint8_t)(max_len >> 8);
+        readline_buf[2] = echo ? 1 : 0;
+        pocket_send(DECK_HARDWARE, KB_OP_READLINE, readline_buf, (uint32_t)(size + 6));
 
         Result result;
         if (!result_wait(&result, 60000)) {
@@ -120,7 +126,7 @@ int kb_readline(char* buffer, size_t size, bool echo) {
             }
 
             if (length >= size) {
-                length = size - 1;
+                length = (uint32_t)(size - 1);
             }
 
             memcpy(buffer, data + 4, length);
@@ -145,15 +151,17 @@ int kb_readline(char* buffer, size_t size, bool echo) {
 }
 
 int kb_readline_async(char* buffer, size_t size, bool echo) {
-    if (!buffer || size == 0 || size > 256) {
+    if (!buffer || size == 0 || size > 1024) {
         return -ERR_INVALID_ARGS;
     }
 
-    uint8_t async_buf[192];
-    memset(async_buf, 0, sizeof(async_buf));
-    async_buf[0] = (uint8_t)size;
-    async_buf[1] = echo ? 1 : 0;
-    pocket_send(DECK_HARDWARE, KB_OP_READLINE, async_buf, sizeof(async_buf));
+    uint8_t async_buf[1030];
+    memset(async_buf, 0, size + 6);
+    uint16_t max_len = (uint16_t)size;
+    async_buf[0] = (uint8_t)(max_len & 0xFF);
+    async_buf[1] = (uint8_t)(max_len >> 8);
+    async_buf[2] = echo ? 1 : 0;
+    pocket_send(DECK_HARDWARE, KB_OP_READLINE, async_buf, (uint32_t)(size + 6));
 
     return 0;
 }

@@ -3,7 +3,7 @@
 
 #include "box/defs.h"
 
-#define SHELL_MAX_INPUT 256
+#define SHELL_MAX_INPUT 1024
 #define SHELL_MAX_ARGS 16
 #define SHELL_PROMPT_SIZE 64
 #define SHELL_MAX_CONTEXT_TAGS 8
