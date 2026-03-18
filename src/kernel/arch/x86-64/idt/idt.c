@@ -397,6 +397,9 @@ void irq_handler(interrupt_frame_t* frame) {
             sched->total_ticks++;
             __atomic_fetch_add(&g_global_tick, 1, __ATOMIC_RELAXED);
 
+            /* Software key repeat driven by PIT tick */
+            keyboard_timer_tick();
+
             /* xHCI events handled via IRQ; poll only as fallback */
             xhci_poll_events();
 
