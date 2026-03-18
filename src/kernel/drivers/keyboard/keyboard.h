@@ -12,9 +12,6 @@
 #define KB_REPEAT_DELAY_TICKS   50  /* 500 ms initial delay  */
 #define KB_REPEAT_RATE_TICKS     3  /* ~33 ms between repeats = ~30 chars/sec */
 
-/* Maximum bytes in a single key sequence (e.g. "\033[5~" = 4) */
-#define KB_SEQ_MAX 4
-
 typedef struct {
     uint8_t shift_pressed  : 1;
     uint8_t ctrl_pressed   : 1;
