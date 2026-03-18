@@ -134,9 +134,9 @@ int readline(char* buffer, size_t max_len) {
     }
 
     if (io_get_mode() == IO_MODE_IPC && g_display_pid != 0) {
-        uint8_t capped = (uint8_t)(max_len > 255 ? 255 : max_len);
-        uint8_t req[3] = {DISP_CMD_READLINE, capped, 1};
-        send(g_display_pid, req, 3);
+        uint16_t capped = (uint16_t)(max_len > 1024 ? 1024 : max_len);
+        uint8_t req[4] = {DISP_CMD_READLINE, (uint8_t)(capped & 0xFF), (uint8_t)(capped >> 8), 1};
+        send(g_display_pid, req, 4);
 
         Result result;
         if (!receive_wait(&result, 60000)) return -1;
