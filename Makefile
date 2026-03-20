@@ -284,6 +284,7 @@ $(IMAGE): $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(SHELL_BIN) $(PROCA_BIN) $(
 		$(UTILS_DIR)/bye.elf     "utility,system" \
 		$(UTILS_DIR)/defrag.elf  "utility,storage" \
 		$(UTILS_DIR)/fsck.elf    "utility,storage" \
+		$(USERSPACE_DIR)/hello.txt   "message,text" \
 		$(UTILS_DIR)/ipc_test.elf "utility"
 	@echo "Disk image created: $(IMAGE)"
 
