@@ -1,4 +1,5 @@
 #include "xhci.h"
+#include "xhci_input.h"
 #include "xhci_regs.h"
 #include "xhci_rings.h"
 #include "xhci_device.h"
@@ -105,6 +106,7 @@ int xhci_init(void) {
 
     xhci_command_init();
     xhci_enumeration_init();
+    UsbInput_Init();  // Initialize USB input subsystem
 
     if (pci_find_device_by_class(0x0C, 0x03, 0x30, &ctrl->pci_dev) != 0) {
         debug_printf("[xHCI] No xHCI controller found\n");

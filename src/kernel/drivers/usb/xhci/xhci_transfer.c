@@ -1,3 +1,4 @@
+#include "xhci.h"
 #include "xhci_transfer.h"
 #include "xhci_command.h"
 #include "xhci_enumeration.h"
