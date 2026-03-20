@@ -1,9 +1,12 @@
 #ifndef XHCI_TRANSFER_H
 #define XHCI_TRANSFER_H
 
-#include "xhci.h"
+#include "ktypes.h"
+#include "xhci_trb.h"
 #include "xhci_rings.h"
 #include "usb_descriptors.h"
+
+// Types are defined in xhci.h - include xhci.h before this header
 
 int xhci_alloc_ep0_ring(xhci_controller_t* ctrl, xhci_device_slot_t* slot);
 void xhci_free_ep0_ring(xhci_device_slot_t* slot);

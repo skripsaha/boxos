@@ -8,6 +8,9 @@
 #include "pci.h"
 #include "boxos_limits.h"
 
+// Forward declaration - xhci_input.h included separately
+// #include "xhci_input.h"
+
 #define XHCI_MAX_PORTS       127
 
 typedef struct xhci_device_slot xhci_device_slot_t;
