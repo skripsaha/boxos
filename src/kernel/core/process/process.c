@@ -496,18 +496,36 @@ void process_destroy(process_t *proc)
         return;
     }
 
-    // Check if process is current on its home core (not the calling core)
-    scheduler_state_t *home_sched = scheduler_get_core(proc->home_core);
-
-    spin_lock(&home_sched->scheduler_lock);
-    if (home_sched->current_process == proc)
-    {
-        spin_unlock(&home_sched->scheduler_lock);
-        debug_printf("[PROCESS] ERROR: Cannot destroy current process PID %u\n", proc->pid);
+    // CRITICAL: Check if process is currently executing on ANY core.
+    // We must check all cores, not just home_core, because work stealing
+    // can migrate processes to different App Cores.
+    //
+    // Lock ordering: acquire all scheduler_locks in core index order to prevent
+    // deadlock if multiple cores call process_destroy() simultaneously.
+    bool is_running = false;
+    uint8_t running_on_core = 0;
+    
+    for (uint8_t c = 0; c < g_amp.total_cores; c++) {
+        scheduler_state_t *sched = scheduler_get_core(c);
+        spin_lock(&sched->scheduler_lock);
+        if (sched->current_process == proc) {
+            is_running = true;
+            running_on_core = c;
+            // Don't break — need to release all locks in reverse order
+        }
+    }
+    
+    // Release all scheduler_locks in reverse order
+    for (uint8_t c = g_amp.total_cores; c > 0; c--) {
+        spin_unlock(&scheduler_get_core(c - 1)->scheduler_lock);
+    }
+    
+    if (is_running) {
+        debug_printf("[PROCESS] ERROR: Cannot destroy running process PID %u (on core %u)\n",
+                     proc->pid, running_on_core);
         return;
     }
-    spin_unlock(&home_sched->scheduler_lock);
-    // scheduler_lock is now FREE — no deadlock possible below
+    // All scheduler_locks released — no deadlock possible below
 
     spin_lock(&process_lock);
 

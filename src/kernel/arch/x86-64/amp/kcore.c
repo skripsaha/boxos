@@ -7,6 +7,7 @@
 #include "klib.h"
 #include "vmm.h"
 #include "perf_trace.h"
+#include "amp.h"
 
 KCorePocketQueue g_kcore_queues[MAX_CORES];
 
@@ -124,6 +125,7 @@ static uint8_t kcore_find_least_loaded(void)
 void kcore_submit(struct process_t* proc)
 {
     uint8_t target = kcore_find_least_loaded();
+    uint8_t my_core = amp_get_core_index();
 
     if (!kcore_queue_push(&g_kcore_queues[target], proc)) {
         // Queue full — fallback: try all K-Cores
@@ -143,6 +145,13 @@ void kcore_submit(struct process_t* proc)
     }
 
 submitted:
+    // Debug: show submission
+    const char* my_type = amp_is_kcore() ? "K" : (my_core == g_amp.bsp_index ? "BSP" : "A");
+    const char* target_type = g_amp.cores[target].is_kcore ? "K" : "A";
+    debug_printf("[%s%u] KCORE submit PID %u -> %s%u (queue depth=%u)\n",
+                 my_type, my_core, proc->pid, 
+                 target_type, target, kcore_queue_depth(target));
+
     // Wake the target K-Core from HLT
     lapic_send_ipi(g_amp.cores[target].lapic_id, IPI_WAKE_VECTOR);
 }
@@ -160,6 +169,10 @@ static void kcore_process_entry(struct process_t* proc)
     // Hold a reference to prevent destruction while we're processing
     process_ref_inc(proc);
 
+    // Debug: show processing start
+    uint8_t core_idx = amp_get_core_index();
+    debug_printf("[K%u] KCORE process PID %u\n", core_idx, proc->pid);
+
     // Drain ALL pockets from this process's PocketRing.
     // Results are written to ResultRing — the process is already running
     // on its App Core spinning in result_wait(), and will see them immediately.
@@ -171,10 +184,8 @@ static void kcore_process_entry(struct process_t* proc)
     guide_process_one(proc);
 
     // Clear the pending flag AFTER draining is complete.
-    // If userspace submitted new pockets while we were draining, the while
-    // loop in guide_process_one already consumed them.  If a pocket arrives
-    // after this store, the next notify() will CAS kcore_pending 0->1 and
-    // re-submit — no pockets are lost.
+    // If userspace submitted new pockets while we were draining, the next
+    // notify() will CAS kcore_pending 0->1 and re-submit — no pockets lost.
     mfence();
     atomic_store_u8(&proc->kcore_pending, 0);
 

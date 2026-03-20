@@ -11,6 +11,7 @@
 #include "pocket_ring.h"
 #include "error.h"
 #include "perf_trace.h"
+#include "amp.h"
 
 ReadyQueue g_ready_queue;
 
@@ -74,6 +75,12 @@ static void guide_process_pocket(process_t *proc)
         return;
     }
 
+    // Debug: show pocket processing start
+    uint8_t core_idx = amp_get_core_index();
+    const char* core_type = amp_is_kcore() ? "K" : (core_idx == g_amp.bsp_index ? "BSP" : "A");
+    debug_printf("[%s%u] GUIDE pocket PID %u prefixes=%u\n", 
+                 core_type, core_idx, proc->pid, pocket->prefix_count);
+
     bool need_execution_deck = true;
 
     while (pocket->current_prefix_idx < pocket->prefix_count)
@@ -122,6 +129,8 @@ static void guide_process_pocket(process_t *proc)
         }
 
         PERF_TRACE_START(perf_start);
+
+        debug_printf("[%s%u]   -> Deck 0x%02x op=0x%02x\n", core_type, core_idx, deck_id, opcode);
 
         int deck_ret = handler(pocket, proc);
 

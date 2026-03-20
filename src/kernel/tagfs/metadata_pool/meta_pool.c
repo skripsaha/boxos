@@ -1,4 +1,6 @@
 #include "meta_pool.h"
+#include "../tagfs.h"
+#include "tagfs.h"
 
 #define RECORD_HEADER_SIZE  42   // 40 bytes of fields + 2 bytes CRC16
 #define MPOOL_BLOCK_HEADER  16
@@ -516,6 +518,9 @@ int meta_pool_write(const TagFSMetadata* meta, uint32_t* out_block, uint32_t* ou
         g_mirror_valid[meta->file_id] = true;
         __atomic_fetch_add(&g_mirror_seq, 1, __ATOMIC_RELEASE);  // even = done
     }
+
+    // Self-Healing: store metadata in mirror for recovery
+    TagFS_SelfHealOnMetadataWrite(*out_block, (const uint8_t*)meta);
 
     spin_unlock(&g_lock);
     return 0;

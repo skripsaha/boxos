@@ -449,9 +449,14 @@ static void sync_syscall_dispatch(process_t* proc, interrupt_frame_t* frame) {
 static void async_syscall_dispatch(process_t* proc, interrupt_frame_t* frame) {
     (void)frame;  // not needed — process continues running
 
+    uint8_t core_idx = amp_get_core_index();
+    
     // CAS: only submit if not already queued (dedup)
     if (atomic_cas_u8(&proc->kcore_pending, 0, 1)) {
+        debug_printf("[A%u] ASYNC submit PID %u to K-Core\n", core_idx, proc->pid);
         kcore_submit(proc);
+    } else {
+        debug_printf("[A%u] ASYNC skip PID %u (already pending)\n", core_idx, proc->pid);
     }
     // Return to userspace — iretq restores frame, process keeps running.
 }
@@ -487,18 +492,28 @@ void syscall_handler(interrupt_frame_t* frame) {
 
     frame->rax = 0;
 
+    // Debug: log syscall entry with core info
+    uint8_t core_idx = amp_get_core_index();
+    const char* core_type = amp_is_kcore() ? "K" : (core_idx == g_amp.bsp_index ? "BSP" : "A");
+    
     // Check if this is a yield (cooperative scheduling hint).
     // Yield pockets skip guide() — the process stays WORKING and gives up its
     // timeslice.  It remains schedulable so it will run again on the next tick.
+    // CRITICAL: Check yield BEFORE async dispatch to avoid kcore_pending race!
     PocketRing* pring = (PocketRing*)vmm_phys_to_virt(proc->pocket_ring_phys);
     Pocket* peek = pocket_ring_peek(pring);
 
     if (peek && (peek->flags & POCKET_FLAG_YIELD)) {
+        debug_printf("[%s%u] SYSCALL yield from PID %u\n", core_type, core_idx, proc->pid);
         pocket_ring_pop(pring);
         context_save_from_frame(proc, frame);
         schedule(frame);
         return;
     }
+
+    // Debug: show syscall with pocket count
+    uint32_t pocket_count = pocket_ring_count(pring);
+    debug_printf("[%s%u] SYSCALL notify PID %u (pockets=%u)\n", core_type, core_idx, proc->pid, pocket_count);
 
     // Dispatch: sync blocks + schedules, async returns immediately.
     g_syscall_dispatch(proc, frame);

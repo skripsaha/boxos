@@ -4,13 +4,24 @@
 #include "file_table/file_table.h"
 #include "metadata_pool/meta_pool.h"
 #include "journal/journal.h"
+#include "data_roll/data_roll.h"
 #include "error.h"
 #include "ahci_sync.h"
 #include "ahci.h"
 #include "ata.h"
 
+// Forward declarations
+void tagfs_snapshots_init(void);
+void tagfs_auto_snapshot_before_write(uint32_t file_id);
+
 static TagFSState g_state;
-WellKnownTags g_well_known;
+static WellKnownTags g_well_known;
+
+// Accessor function for well-known tags (tagfs_get_state already defined below)
+WellKnownTags* tagfs_get_well_known_tags(void) { return &g_well_known; }
+
+// Internal macro for accessing well-known tags
+#define g_wk (*tagfs_get_well_known_tags())
 
 // ----------------------------------------------------------------------------
 // Open File Table — per-file write serialization
@@ -469,10 +480,10 @@ static bool file_has_system_behavior_tag(uint32_t file_id,
                                           bool skip_trashed, bool skip_hidden) {
     if (!skip_trashed && !skip_hidden) return false;
 
-    uint16_t trashed_id = g_well_known.trashed
-        ? (uint16_t)__builtin_ctzll(g_well_known.trashed) : TAGFS_INVALID_TAG_ID;
-    uint16_t hidden_id  = g_well_known.hidden
-        ? (uint16_t)__builtin_ctzll(g_well_known.hidden)  : TAGFS_INVALID_TAG_ID;
+    uint16_t trashed_id = g_wk.trashed
+        ? (uint16_t)__builtin_ctzll(g_wk.trashed) : TAGFS_INVALID_TAG_ID;
+    uint16_t hidden_id  = g_wk.hidden
+        ? (uint16_t)__builtin_ctzll(g_wk.hidden)  : TAGFS_INVALID_TAG_ID;
 
     uint16_t file_tags[32];
     int count = tag_bitmap_tags_for_file(g_state.bitmap_index, file_id, file_tags, 32);
@@ -501,15 +512,15 @@ void tagfs_init_well_known_tags(void)
     if (!fs || !fs->registry) return;
     TagRegistry *reg = fs->registry;
 
-    register_well_known(&g_well_known.system,  reg, "system");
-    register_well_known(&g_well_known.utility, reg, "utility");
-    register_well_known(&g_well_known.app,     reg, "app");
-    register_well_known(&g_well_known.god,     reg, "god");
-    register_well_known(&g_well_known.stopped, reg, "stopped");
-    register_well_known(&g_well_known.bypass,  reg, "bypass");
-    register_well_known(&g_well_known.network, reg, "network");
-    register_well_known(&g_well_known.trashed, reg, "trashed");
-    register_well_known(&g_well_known.hidden,  reg, "hidden");
+    register_well_known(&g_wk.system,  reg, "system");
+    register_well_known(&g_wk.utility, reg, "utility");
+    register_well_known(&g_wk.app,     reg, "app");
+    register_well_known(&g_wk.god,     reg, "god");
+    register_well_known(&g_wk.stopped, reg, "stopped");
+    register_well_known(&g_wk.bypass,  reg, "bypass");
+    register_well_known(&g_wk.network, reg, "network");
+    register_well_known(&g_wk.trashed, reg, "trashed");
+    register_well_known(&g_wk.hidden,  reg, "hidden");
 }
 
 // ----------------------------------------------------------------------------
@@ -585,6 +596,26 @@ int tagfs_init(void) {
             debug_printf("[TagFS] Warning: journal replay failed (result=%d)\n", replay_result);
         }
     }
+
+    // --- DataRoll init + replay (production data journaling) ---
+    if (DataRollInit(sb.journal_superblock_sector + 2) != 0) {
+        debug_printf("[TagFS] Warning: DataRollInit failed (continuing without data journaling)\n");
+    } else {
+        int replay_result = DataRollValidateAndReplay();
+        if (replay_result != 0) {
+            debug_printf("[TagFS] Warning: DataRoll replay failed (result=%d)\n", replay_result);
+        }
+        debug_printf("[TagFS] DataRoll journaling enabled (production mode)\n");
+    }
+
+    // --- Snapshots init (ZFS-like production feature) ---
+    tagfs_snapshots_init();
+
+    // --- Data Deduplication init (ZFS-like production feature) ---
+    TagFS_DedupInit();
+
+    // --- Self-Healing init (ZFS-like production feature) ---
+    TagFS_SelfHealInit();
 
     // --- Tag Registry ---
     g_state.registry = kmalloc(sizeof(TagRegistry));
@@ -1350,10 +1381,10 @@ int tagfs_query_files(const char* query_strings[], uint32_t count,
 
     // Post-filter: remove trashed/hidden files unless explicitly queried
     if (result > 0) {
-        uint16_t trashed_id = g_well_known.trashed
-            ? (uint16_t)__builtin_ctzll(g_well_known.trashed) : TAGFS_INVALID_TAG_ID;
-        uint16_t hidden_id  = g_well_known.hidden
-            ? (uint16_t)__builtin_ctzll(g_well_known.hidden)  : TAGFS_INVALID_TAG_ID;
+        uint16_t trashed_id = g_wk.trashed
+            ? (uint16_t)__builtin_ctzll(g_wk.trashed) : TAGFS_INVALID_TAG_ID;
+        uint16_t hidden_id  = g_wk.hidden
+            ? (uint16_t)__builtin_ctzll(g_wk.hidden)  : TAGFS_INVALID_TAG_ID;
 
         // Check if trashed/hidden were explicitly part of the query
         bool query_has_trashed = false;
@@ -1520,6 +1551,9 @@ int tagfs_write(TagFSFileHandle* handle, const void* buffer, uint64_t size) {
     if (!g_state.initialized) return -1;
     if (!(handle->flags & TAGFS_HANDLE_WRITE)) return -1;
 
+    // Auto-snapshot before write if versioning enabled (production feature)
+    tagfs_auto_snapshot_before_write(handle->file_id);
+
     // Serialize writes to the same file
     if (handle->ofe) spin_lock(&handle->ofe->write_lock);
 
@@ -1589,9 +1623,42 @@ int tagfs_write(TagFSFileHandle* handle, const void* buffer, uint64_t size) {
 
         memcpy(block_buf + offset_in_block, in + bytes_written, chunk);
 
-        if (write_block(disk_block, block_buf) != 0) {
-            debug_printf("[TagFS] write: failed to write block %u\n", disk_block);
-            break;
+        // DataRoll: Journal data block before writing to disk (production reliability)
+        DataRollTxn DataRollTxn;
+        bool UseDataRoll = (g_state.initialized && DataRollIsInitialized());
+        
+        if (UseDataRoll && DataRollBegin(&DataRollTxn) == 0) {
+            // Log data to journal
+            uint64_t DiskSector = block_to_sector(disk_block);
+            if (DataRollLogData(&DataRollTxn, handle->file_id, 
+                                handle->offset - bytes_written + bytes_written,
+                                (uint32_t)DiskSector, block_buf, chunk) == 0) {
+                if (DataRollCommit(&DataRollTxn) == 0) {
+                    // Journal successful, now write to disk
+                    if (write_block(disk_block, block_buf) != 0) {
+                        debug_printf("[TagFS] write: failed to write block %u\n", disk_block);
+                        break;
+                    }
+                } else {
+                    debug_printf("[TagFS] DataRoll commit failed, writing directly\n");
+                    if (write_block(disk_block, block_buf) != 0) {
+                        debug_printf("[TagFS] write: failed to write block %u\n", disk_block);
+                        break;
+                    }
+                }
+            } else {
+                debug_printf("[TagFS] DataRoll log failed, writing directly\n");
+                if (write_block(disk_block, block_buf) != 0) {
+                    debug_printf("[TagFS] write: failed to write block %u\n", disk_block);
+                    break;
+                }
+            }
+        } else {
+            // Fallback: direct write (no journal)
+            if (write_block(disk_block, block_buf) != 0) {
+                debug_printf("[TagFS] write: failed to write block %u\n", disk_block);
+                break;
+            }
         }
 
         bytes_written += chunk;
