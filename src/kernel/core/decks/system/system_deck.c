@@ -30,6 +30,9 @@
 #include "guide.h"
 #include "kernel_config.h"
 
+// Use accessor function instead of extern
+#define g_well_known (*tagfs_get_well_known_tags())
+
 // --- Constants ---
 #define PROC_SPAWN_MAX_BINARY_SIZE   CONFIG_PROC_MAX_BINARY_SIZE
 #define PROC_SPAWN_MAX_PHYS_ADDR     0x100000000ULL

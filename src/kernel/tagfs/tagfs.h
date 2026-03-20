@@ -302,8 +302,8 @@ typedef struct {
     uint64_t hidden;
 } WellKnownTags;
 
-extern WellKnownTags g_well_known;
-void tagfs_init_well_known_tags(void);
+// Accessor functions (no extern needed)
+WellKnownTags* tagfs_get_well_known_tags(void);
 
 // ----------------------------------------------------------------------------
 // Tag Registry API
@@ -432,5 +432,77 @@ int      tagfs_context_get_tags(uint32_t pid, const char* tags[], uint32_t max_t
 void tagfs_format_tag(char* dest, size_t dest_size, const char* key, const char* value);
 int  tagfs_parse_tag(const char* tag_string, char* key, size_t key_size,
                      char* value, size_t value_size);
+
+// ----------------------------------------------------------------------------
+// DataRoll Journaling API (Production Feature)
+// ----------------------------------------------------------------------------
+
+// Forward declaration - DataRoll included separately
+struct DataRollTxn;
+
+// ----------------------------------------------------------------------------
+// Snapshots API (Production Feature - ZFS-like)
+// ----------------------------------------------------------------------------
+
+#define TAGFS_MAX_SNAPSHOTS     64
+#define TAGFS_SNAPSHOT_NAME_LEN 32
+
+typedef struct {
+    uint32_t snapshot_id;
+    uint32_t parent_file_id;   // 0 = entire filesystem snapshot
+    uint64_t created_time;
+    uint32_t file_count;       // Number of files in snapshot
+    uint64_t total_size;       // Total size of all files
+    char     name[TAGFS_SNAPSHOT_NAME_LEN];
+    uint8_t  flags;            // 0x01 = readonly, 0x02 = auto-created
+    uint8_t  _reserved[3];
+} TagFSSnapshot;
+
+// Snapshot management
+int tagfs_snapshot_create(const char* name, uint32_t file_id);  // 0 = entire FS
+int tagfs_snapshot_delete(uint32_t snapshot_id);
+int tagfs_snapshot_restore(uint32_t snapshot_id, uint32_t target_file_id);
+int tagfs_snapshot_list(uint32_t* ids, uint32_t max_count);
+int tagfs_snapshot_info(uint32_t snapshot_id, TagFSSnapshot* info);
+
+// File versioning (auto-snapshot before modify)
+int tagfs_enable_versioning(uint32_t file_id, uint32_t max_versions);
+int tagfs_disable_versioning(uint32_t file_id);
+int tagfs_list_versions(uint32_t file_id, uint32_t* snapshot_ids, uint32_t max_count);
+
+// ----------------------------------------------------------------------------
+// Accessor Functions (no extern needed)
+// ----------------------------------------------------------------------------
+
+WellKnownTags* tagfs_get_well_known_tags(void);
+TagFSState* tagfs_get_state(void);  // Defined in tagfs.c
+
+// ----------------------------------------------------------------------------
+// Data Deduplication API (Production Feature - ZFS-like)
+// ----------------------------------------------------------------------------
+
+void TagFS_DedupInit(void);
+void TagFS_DedupShutdown(void);
+int TagFS_DedupCheck(const uint8_t* BlockData, uint32_t* ExistingBlock);
+int TagFS_DedupRegister(uint32_t PhysicalBlock, const uint8_t* BlockData);
+int TagFS_DedupUnregister(uint32_t PhysicalBlock);
+void TagFS_DedupGetStats(uint64_t* BlocksSaved, uint64_t* BytesSaved, uint32_t* EntryCount);
+int TagFS_DedupAllocBlock(const uint8_t* BlockData, uint32_t* AllocatedBlock, int* IsDuplicate);
+
+// ----------------------------------------------------------------------------
+// Self-Healing API (Production Feature - ZFS-like)
+// ----------------------------------------------------------------------------
+
+void TagFS_SelfHealInit(void);
+void TagFS_SelfHealShutdown(void);
+void TagFS_SelfHealEnable(bool Enable);
+int TagFS_SelfHealGetStats(
+    uint64_t* CorruptionsDetected,
+    uint64_t* CorruptionsFixed,
+    uint64_t* ScrubRuns,
+    uint64_t* LastScrubTime);
+void TagFS_SelfHealOnMetadataWrite(uint32_t BlockNumber, const uint8_t* Data);
+int TagFS_SelfHealOnMetadataRead(uint32_t BlockNumber, uint8_t* Data);
+void TagFS_SelfHealPeriodicCheck(void);
 
 #endif // TAGFS_H
