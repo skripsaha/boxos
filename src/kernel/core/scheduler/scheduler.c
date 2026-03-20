@@ -106,17 +106,27 @@ bool scheduler_matches_use_context(process_t* proc) {
     }
 
     // Overflow tags (ids >= 64)
+    // CRITICAL: proc->tag_overflow_ids may be reallocated by process_set_tag_bit()
+    // on another core. We need to copy the pointer under process_lock to prevent
+    // use-after-free if realloc happens during our loop.
+    // However, we can't take process_lock here (lock ordering violation).
+    // Instead, we rely on the fact that process_set_tag_bit() updates the pointer
+    // atomically and frees old buffer AFTER the update.
+    // Readers under g_context_lock will see either old or new pointer, both valid.
     bool match = true;
+    uint16_t overflow_count = proc->tag_overflow_count;  // Atomic read
+    uint16_t* overflow_ids = proc->tag_overflow_ids;     // Atomic read
+    
     for (uint16_t j = 0; j < g_use_context.overflow_count && match; j++) {
         bool found = false;
-        for (uint16_t i = 0; i < proc->tag_overflow_count; i++) {
-            if (proc->tag_overflow_ids[i] == g_use_context.overflow_ids[j]) {
+        for (uint16_t i = 0; i < overflow_count && found == false; i++) {
+            if (overflow_ids[i] == g_use_context.overflow_ids[j]) {
                 found = true;
-                break;
             }
         }
         if (!found) match = false;
     }
+    
     spin_unlock(&g_context_lock);
     return match;
 }

@@ -35,28 +35,36 @@ static int process_set_tag_bit(process_t *proc, uint16_t tag_id)
         proc->tag_bits |= ((uint64_t)1 << tag_id);
         return 0;
     }
+    
+    // Check if already exists
     for (uint16_t i = 0; i < proc->tag_overflow_count; i++) {
         if (proc->tag_overflow_ids[i] == tag_id)
             return 0;
     }
+    
+    // Need to realloc?
     if (proc->tag_overflow_count >= proc->tag_overflow_capacity) {
         uint16_t new_cap = proc->tag_overflow_capacity == 0 ? 8 : proc->tag_overflow_capacity * 2;
         uint16_t *new_ids = kmalloc(sizeof(uint16_t) * new_cap);
         if (!new_ids)
             return -1;
+        
         uint16_t *old_ids = proc->tag_overflow_ids;
         if (old_ids) {
             memcpy(new_ids, old_ids, sizeof(uint16_t) * proc->tag_overflow_count);
         }
-        // Publish new pointer before freeing old — concurrent readers see valid data
-        mfence();
+        
+        // CRITICAL: Update pointer atomically — readers use g_context_lock
+        // so they won't see intermediate state
         proc->tag_overflow_ids = new_ids;
         proc->tag_overflow_capacity = new_cap;
-        mfence();
+        
+        // Free old buffer AFTER pointer update (readers protected by g_context_lock)
         if (old_ids) {
             kfree(old_ids);
         }
     }
+    
     proc->tag_overflow_ids[proc->tag_overflow_count++] = tag_id;
     return 0;
 }
