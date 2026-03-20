@@ -63,7 +63,10 @@ static void guide_process_pocket(process_t *proc)
     if (!pocket)
         return;
 
-    // Fill in the source PID (kernel sets this, not userspace)
+    // CRITICAL: Fill in the source PID (kernel sets this, not userspace).
+    // PocketRing is SPSC: userspace is producer (writes tail), kernel is consumer (reads head).
+    // At this point, kernel owns this pocket (userspace won't read it until we pop).
+    // No lock needed — SPSC contract ensures no concurrent access to this slot.
     pocket->pid = proc->pid;
     pocket->error_code = OK;
     pocket->current_prefix_idx = 0;
