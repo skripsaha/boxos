@@ -8,6 +8,7 @@
 #include "lapic.h"
 #include "process.h"
 #include "guide.h"
+#include "ready_queue.h" // for g_ready_queue
 #include "pocket_ring.h"
 #include "vmm.h"
 #include "atomics.h"
@@ -29,15 +30,18 @@ static irq_callback_t irq_callbacks[IRQ_MAX_COUNT] = {NULL};
 static volatile uint64_t exception_count = 0;
 static volatile uint64_t irq_count[IRQ_MAX_COUNT] = {0};
 
-static void idt_load_asm(uint64_t idt_desc_addr) {
-    asm volatile("lidt (%0)" : : "r" (idt_desc_addr) : "memory");
+static void idt_load_asm(uint64_t idt_desc_addr)
+{
+    asm volatile("lidt (%0)" : : "r"(idt_desc_addr) : "memory");
 }
 
-void idt_load(void) {
+void idt_load(void)
+{
     idt_load_asm((uint64_t)&idt_desc);
 }
 
-void idt_set_entry(int index, uint64_t handler, uint16_t selector, uint8_t type_attr, uint8_t ist) {
+void idt_set_entry(int index, uint64_t handler, uint16_t selector, uint8_t type_attr, uint8_t ist)
+{
     idt[index].offset_low = handler & 0xFFFF;
     idt[index].selector = selector;
     idt[index].ist = ist & 0x07;
@@ -47,7 +51,8 @@ void idt_set_entry(int index, uint64_t handler, uint16_t selector, uint8_t type_
     idt[index].reserved = 0;
 }
 
-void idt_init(void) {
+void idt_init(void)
+{
     debug_printf("[IDT] Initializing Interrupt Descriptor Table (minimal)...\n");
 
     memset(idt, 0, sizeof(idt));
@@ -57,26 +62,28 @@ void idt_init(void) {
 
     debug_printf("[IDT] Setting up exception handlers (0-31)...\n");
 
-    for (int i = 0; i < 32; i++) {
-        uint8_t ist = 0;  // No IST by default
+    for (int i = 0; i < 32; i++)
+    {
+        uint8_t ist = 0; // No IST by default
 
         // Critical exceptions use IST
-        switch(i) {
-            case 1:   // Debug
-                ist = IST_DEBUG;
-                break;
-            case 2:   // NMI
-                ist = IST_NMI;
-                break;
-            case 8:   // Double Fault
-                ist = IST_DOUBLE_FAULT;
-                break;
-            case 12:  // Stack Fault
-                ist = IST_STACK_FAULT;
-                break;
-            case 18:  // Machine Check
-                ist = IST_MACHINE_CHECK;
-                break;
+        switch (i)
+        {
+        case 1: // Debug
+            ist = IST_DEBUG;
+            break;
+        case 2: // NMI
+            ist = IST_NMI;
+            break;
+        case 8: // Double Fault
+            ist = IST_DOUBLE_FAULT;
+            break;
+        case 12: // Stack Fault
+            ist = IST_STACK_FAULT;
+            break;
+        case 18: // Machine Check
+            ist = IST_MACHINE_CHECK;
+            break;
         }
 
         idt_set_entry(i, (uint64_t)isr_table[i], GDT_KERNEL_CODE, IDT_TYPE_INTERRUPT_GATE, ist);
@@ -85,7 +92,8 @@ void idt_init(void) {
     debug_printf("[IDT] Setting up IRQ handlers (32-55)...\n");
 
     // Vectors 32-55: Hardware IRQs (PIC IRQ 0-15 + IO-APIC GSI 16-23)
-    for (int i = 32; i < 56; i++) {
+    for (int i = 32; i < 56; i++)
+    {
         idt_set_entry(i, (uint64_t)isr_table[i], GDT_KERNEL_CODE, IDT_TYPE_INTERRUPT_GATE, 0);
     }
 
@@ -101,11 +109,11 @@ void idt_init(void) {
                   GDT_KERNEL_CODE, IDT_TYPE_INTERRUPT_GATE, 0);
 
     // AMP IPI vectors (0xF0-0xF2)
-    idt_set_entry(IPI_WAKE_VECTOR,      (uint64_t)isr_table[IPI_WAKE_VECTOR],
+    idt_set_entry(IPI_WAKE_VECTOR, (uint64_t)isr_table[IPI_WAKE_VECTOR],
                   GDT_KERNEL_CODE, IDT_TYPE_INTERRUPT_GATE, 0);
     idt_set_entry(IPI_SHOOTDOWN_VECTOR, (uint64_t)isr_table[IPI_SHOOTDOWN_VECTOR],
                   GDT_KERNEL_CODE, IDT_TYPE_INTERRUPT_GATE, 0);
-    idt_set_entry(IPI_PANIC_VECTOR,     (uint64_t)isr_table[IPI_PANIC_VECTOR],
+    idt_set_entry(IPI_PANIC_VECTOR, (uint64_t)isr_table[IPI_PANIC_VECTOR],
                   GDT_KERNEL_CODE, IDT_TYPE_INTERRUPT_GATE, 0);
 
     idt_load_asm((uint64_t)&idt_desc);
@@ -113,13 +121,16 @@ void idt_init(void) {
     debug_printf("[IDT] IDT loaded successfully at 0x%lx (limit=%d)\n", idt_desc.base, idt_desc.limit);
 }
 
-void irq_register_handler(uint8_t irq, irq_callback_t callback) {
-    if (irq >= IRQ_MAX_COUNT) {
+void irq_register_handler(uint8_t irq, irq_callback_t callback)
+{
+    if (irq >= IRQ_MAX_COUNT)
+    {
         debug_printf("[IDT] ERROR: Invalid IRQ/GSI %u (max %u)\n", irq, IRQ_MAX_COUNT - 1);
         return;
     }
 
-    if (irq_callbacks[irq] != NULL) {
+    if (irq_callbacks[irq] != NULL)
+    {
         debug_printf("[IDT] WARNING: Overwriting existing handler for IRQ %u\n", irq);
     }
 
@@ -127,8 +138,10 @@ void irq_register_handler(uint8_t irq, irq_callback_t callback) {
     debug_printf("[IDT] Registered callback for IRQ %u\n", irq);
 }
 
-void irq_unregister_handler(uint8_t irq) {
-    if (irq >= IRQ_MAX_COUNT) {
+void irq_unregister_handler(uint8_t irq)
+{
+    if (irq >= IRQ_MAX_COUNT)
+    {
         debug_printf("[IDT] ERROR: Invalid IRQ/GSI %u (max %u)\n", irq, IRQ_MAX_COUNT - 1);
         return;
     }
@@ -137,47 +150,58 @@ void irq_unregister_handler(uint8_t irq) {
     debug_printf("[IDT] Unregistered callback for IRQ %u\n", irq);
 }
 
-static process_t* find_process_by_kernel_stack_overflow(uint64_t rsp) {
+static process_t *find_process_by_kernel_stack_overflow(uint64_t rsp)
+{
     // Called from IST exception handlers (double fault / stack fault).
     // process_lock may be held by the interrupted code, so use trylock
     // to avoid deadlock. If we can't get the lock, fall back to unlocked
     // iteration — best-effort crash recovery.
     bool locked = spin_trylock_process_list();
 
-    process_t* proc = process_get_first();
-    while (proc) {
-        if (proc->magic == PROCESS_MAGIC && proc->kernel_stack_guard_base) {
+    process_t *proc = process_get_first();
+    while (proc)
+    {
+        if (proc->magic == PROCESS_MAGIC && proc->kernel_stack_guard_base)
+        {
             uintptr_t guard_start = (uintptr_t)proc->kernel_stack_guard_base;
             uintptr_t guard_end = guard_start + (CONFIG_KERNEL_STACK_GUARD_PAGES * CONFIG_PAGE_SIZE);
-            if (rsp >= guard_start && rsp < guard_end) {
-                if (locked) process_list_unlock();
+            if (rsp >= guard_start && rsp < guard_end)
+            {
+                if (locked)
+                    process_list_unlock();
                 return proc;
             }
         }
         proc = proc->next;
     }
 
-    if (locked) process_list_unlock();
+    if (locked)
+        process_list_unlock();
     return NULL;
 }
 
-void exception_handler(interrupt_frame_t* frame) {
+void exception_handler(interrupt_frame_t *frame)
+{
     atomic_fetch_add_u64(&exception_count, 1);
 
-    if (frame->vector == 14) {
+    if (frame->vector == 14)
+    {
         uint64_t fault_addr;
         __asm__ volatile("mov %%cr2, %0" : "=r"(fault_addr));
 
         int result = vmm_handle_page_fault(fault_addr, frame->error_code);
-        if (result == 0) {
+        if (result == 0)
+        {
             return;
         }
     }
 
     // User-mode exception: kill the faulting process, don't crash the kernel
-    if ((frame->cs & 3) == 3) {
-        process_t* proc = process_get_current();
-        if (proc) {
+    if ((frame->cs & 3) == 3)
+    {
+        process_t *proc = process_get_current();
+        if (proc)
+        {
             kprintf("\n");
             kprintf("[EXCEPTION] User-mode exception #%u in PID %u\n",
                     frame->vector, proc->pid);
@@ -185,7 +209,8 @@ void exception_handler(interrupt_frame_t* frame) {
                     frame->rip, frame->rsp, frame->error_code);
             kprintf("[EXCEPTION] TagBits: 0x%lx\n", proc->tag_bits);
 
-            if (frame->vector == 14) {
+            if (frame->vector == 14)
+            {
                 uint64_t fault_addr;
                 __asm__ volatile("mov %%cr2, %0" : "=r"(fault_addr));
                 kprintf("[EXCEPTION] Page Fault at 0x%lx (P=%d W=%d U=%d R=%d)\n",
@@ -208,11 +233,14 @@ void exception_handler(interrupt_frame_t* frame) {
     }
 
     // Kernel stack overflow recovery via double fault / stack fault
-    if (frame->vector == 8 || frame->vector == 12) {
-        process_t* overflow_proc = find_process_by_kernel_stack_overflow(frame->rsp);
-        if (!overflow_proc) {
+    if (frame->vector == 8 || frame->vector == 12)
+    {
+        process_t *overflow_proc = find_process_by_kernel_stack_overflow(frame->rsp);
+        if (!overflow_proc)
+        {
             overflow_proc = process_get_current();
-            if (overflow_proc && process_is_idle(overflow_proc)) {
+            if (overflow_proc && process_is_idle(overflow_proc))
+            {
                 // idle process stack overflow is fatal — it cannot be killed
                 kprintf("\n");
                 kprintf("================================================================\n");
@@ -225,14 +253,16 @@ void exception_handler(interrupt_frame_t* frame) {
             }
         }
 
-        if (overflow_proc) {
+        if (overflow_proc)
+        {
             kprintf("\n");
             kprintf("================================================================\n");
             kprintf("KERNEL STACK OVERFLOW: Exception #%u recovered\n", frame->vector);
             kprintf("================================================================\n");
             kprintf("  PID: %u  TagBits: 0x%lx\n", overflow_proc->pid, overflow_proc->tag_bits);
             kprintf("  RSP: 0x%lx  RIP: 0x%lx\n", frame->rsp, frame->rip);
-            if (overflow_proc->kernel_stack_guard_base) {
+            if (overflow_proc->kernel_stack_guard_base)
+            {
                 kprintf("  Guard: 0x%lx  Stack: 0x%lx-0x%lx\n",
                         (uintptr_t)overflow_proc->kernel_stack_guard_base,
                         (uintptr_t)overflow_proc->kernel_stack,
@@ -249,8 +279,9 @@ void exception_handler(interrupt_frame_t* frame) {
             // IST stack — the original holder's saved_flags are meaningless here.
             // Safety: scheduler_get_state() returns THIS core's state (IST never
             // migrates to another core), so we always release our own lock.
-            scheduler_state_t* sched = scheduler_get_state();
-            if (sched->scheduler_lock.locked) {
+            scheduler_state_t *sched = scheduler_get_state();
+            if (sched->scheduler_lock.locked)
+            {
                 debug_printf("[IST] Core %u: force-releasing scheduler lock for crashed PID %u\n",
                              amp_get_core_index(), overflow_proc->pid);
                 spin_force_release(&sched->scheduler_lock);
@@ -275,7 +306,7 @@ void exception_handler(interrupt_frame_t* frame) {
     kprintf("  RCX=%016lx  RDX=%016lx\n", frame->rcx, frame->rdx);
     kprintf("  RSI=%016lx  RDI=%016lx\n", frame->rsi, frame->rdi);
     kprintf("  RBP=%016lx  RSP=%016lx\n", frame->rbp, frame->rsp);
-    kprintf("  R8 =%016lx  R9 =%016lx\n", frame->r8,  frame->r9);
+    kprintf("  R8 =%016lx  R9 =%016lx\n", frame->r8, frame->r9);
     kprintf("  R10=%016lx  R11=%016lx\n", frame->r10, frame->r11);
     kprintf("  R12=%016lx  R13=%016lx\n", frame->r12, frame->r13);
     kprintf("  R14=%016lx  R15=%016lx\n", frame->r14, frame->r15);
@@ -287,7 +318,8 @@ void exception_handler(interrupt_frame_t* frame) {
     __asm__ volatile("mov %%cr3, %0" : "=r"(panic_cr3));
     kprintf("  CR2=%016lx  CR3=%016lx\n", panic_cr2, panic_cr3);
 
-    if (frame->vector == 14) {
+    if (frame->vector == 14)
+    {
         kprintf("Page Fault at 0x%lx (P=%d W=%d U=%d R=%d I=%d)\n",
                 panic_cr2,
                 (int)(frame->error_code & 0x1),
@@ -300,18 +332,22 @@ void exception_handler(interrupt_frame_t* frame) {
     // RBP-chain stack walk
     kprintf("Stack trace:\n");
     uint64_t walk_rbp = frame->rbp;
-    for (uint32_t depth = 0; depth < 20; depth++) {
-        if (walk_rbp == 0 || (walk_rbp & 7) != 0) break;
-        if (!vmm_is_kernel_addr(walk_rbp)) break;
+    for (uint32_t depth = 0; depth < 20; depth++)
+    {
+        if (walk_rbp == 0 || (walk_rbp & 7) != 0)
+            break;
+        if (!vmm_is_kernel_addr(walk_rbp))
+            break;
 
         uint64_t *fp = (uint64_t *)walk_rbp;
         uint64_t saved_rbp = fp[0];
-        uint64_t ret_addr  = fp[1];
+        uint64_t ret_addr = fp[1];
 
         bool in_text = (ret_addr >= (uint64_t)_text_start && ret_addr < (uint64_t)_text_end);
         kprintf("  #%u  %016lx%s\n", depth, ret_addr, in_text ? "" : "  [!]");
 
-        if (saved_rbp <= walk_rbp || saved_rbp == 0) break;
+        if (saved_rbp <= walk_rbp || saved_rbp == 0)
+            break;
         walk_rbp = saved_rbp;
     }
 
@@ -319,24 +355,31 @@ void exception_handler(interrupt_frame_t* frame) {
     kprintf("System halted.\n");
 
     // Halt all cores via IPI_PANIC
-    if (g_amp.multicore_active) {
-        for (uint8_t c = 0; c < g_amp.total_cores; c++) {
-            if (c == amp_get_core_index()) continue;
-            if (!g_amp.cores[c].online) continue;
+    if (g_amp.multicore_active)
+    {
+        for (uint8_t c = 0; c < g_amp.total_cores; c++)
+        {
+            if (c == amp_get_core_index())
+                continue;
+            if (!g_amp.cores[c].online)
+                continue;
             lapic_send_ipi(g_amp.cores[c].lapic_id, IPI_PANIC_VECTOR);
         }
     }
 
-    while (1) {
+    while (1)
+    {
         asm volatile("cli; hlt");
     }
 }
 
-void irq_handler(interrupt_frame_t* frame) {
+void irq_handler(interrupt_frame_t *frame)
+{
     uint8_t vector = frame->vector;
 
     // LAPIC spurious vector: do NOT send EOI
-    if (vector == LAPIC_SPURIOUS_VECTOR) {
+    if (vector == LAPIC_SPURIOUS_VECTOR)
+    {
         return;
     }
 
@@ -344,10 +387,12 @@ void irq_handler(interrupt_frame_t* frame) {
     // g_global_tick is incremented ONLY by BSP via PIT IRQ 0 to avoid
     // cache-line bouncing across all cores on every tick.
     // K-Cores run kcore_run_loop — schedule() would hijack them.
-    if (vector == LAPIC_TIMER_VECTOR) {
-        scheduler_state_t* s = scheduler_get_state();
+    if (vector == LAPIC_TIMER_VECTOR)
+    {
+        scheduler_state_t *s = scheduler_get_state();
         s->total_ticks++;
-        if (amp_is_appcore()) {
+        if (amp_is_appcore())
+        {
             schedule(frame);
         }
         lapic_send_eoi();
@@ -356,73 +401,87 @@ void irq_handler(interrupt_frame_t* frame) {
 
     // IPI_WAKE: On App Cores, reschedule to pick up newly-woken processes.
     // On K-Cores, just ACK — the interrupt breaks HLT in kcore_run_loop.
-    if (vector == IPI_WAKE_VECTOR) {
-        if (amp_is_appcore()) {
+    if (vector == IPI_WAKE_VECTOR)
+    {
+        if (amp_is_appcore())
+        {
             schedule(frame);
         }
         lapic_send_eoi();
         return;
     }
 
-    if (vector == IPI_SHOOTDOWN_VECTOR) {
+    if (vector == IPI_SHOOTDOWN_VECTOR)
+    {
         vmm_tlb_shootdown_handler();
         lapic_send_eoi();
         return;
     }
 
-    if (vector == IPI_PANIC_VECTOR) {
+    if (vector == IPI_PANIC_VECTOR)
+    {
         lapic_send_eoi();
-        while (1) { asm volatile("cli; hlt"); }
+        while (1)
+        {
+            asm volatile("cli; hlt");
+        }
     }
 
     // Standard hardware IRQ (vectors 32-55 -> IRQ 0-23)
     uint8_t irq = irq_vector_to_gsi(vector);
-    if (irq >= IRQ_MAX_COUNT) {
+    if (irq >= IRQ_MAX_COUNT)
+    {
         // Unknown vector outside our IRQ range — send EOI to prevent stuck interrupts
         irqchip_send_eoi(0);
         return;
     }
     atomic_fetch_add_u64(&irq_count[irq], 1);
 
-    if (irq_callbacks[irq] != NULL) {
+    if (irq_callbacks[irq] != NULL)
+    {
         irq_callbacks[irq]();
         irqchip_send_eoi(irq);
         return;
     }
 
-    switch (irq) {
-        case 0: {
-            // Timer IRQ (PIT via PIC or IO-APIC GSI 0)
-            scheduler_state_t* sched = scheduler_get_state();
-            sched->total_ticks++;
-            __atomic_fetch_add(&g_global_tick, 1, __ATOMIC_RELAXED);
+    switch (irq)
+    {
+    case 0:
+    {
+        // Timer IRQ (PIT via PIC or IO-APIC GSI 0)
+        scheduler_state_t *sched = scheduler_get_state();
+        sched->total_ticks++;
+        __atomic_fetch_add(&g_global_tick, 1, __ATOMIC_RELAXED);
 
-            /* Software key repeat driven by PIT tick */
-            keyboard_timer_tick();
+        /* Software key repeat driven by PIT tick */
+        keyboard_timer_tick();
 
-            /* xHCI events handled via IRQ; poll only as fallback */
-            xhci_poll_events();
+        /* xHCI events handled via IRQ; poll only as fallback */
+        xhci_poll_events();
 
-            // K-Cores run kcore_run_loop — schedule() would hijack them.
-            if (amp_is_appcore()) {
-                schedule(frame);
-            }
-            break;
+        // K-Cores run kcore_run_loop — schedule() would hijack them.
+        if (amp_is_appcore())
+        {
+            schedule(frame);
         }
+        break;
+    }
 
-        case 1: {
-            uint8_t scancode = inb(0x60);
-            keyboard_handle_scancode(scancode);
-            break;
-        }
+    case 1:
+    {
+        uint8_t scancode = inb(0x60);
+        keyboard_handle_scancode(scancode);
+        break;
+    }
 
-        case 14: {
-            ata_dma_irq_handler();
-            break;
-        }
+    case 14:
+    {
+        ata_dma_irq_handler();
+        break;
+    }
 
-        default:
-            break;
+    default:
+        break;
     }
 
     irqchip_send_eoi(irq);
@@ -433,7 +492,8 @@ void irq_handler(interrupt_frame_t* frame) {
 // ---------------------------------------------------------------------------
 
 // Sync path: process Pockets immediately on the calling core (N=1).
-static void sync_syscall_dispatch(process_t* proc, interrupt_frame_t* frame) {
+static void sync_syscall_dispatch(process_t *proc, interrupt_frame_t *frame)
+{
     context_save_from_frame(proc, frame);
     ready_queue_push(&g_ready_queue, proc);
     process_set_state(proc, PROC_WAITING);
@@ -446,29 +506,37 @@ static void sync_syscall_dispatch(process_t* proc, interrupt_frame_t* frame) {
 // K-Core processes Pockets in parallel, writes Results to ResultRing.
 // Process spins in result_wait() with pause until Result appears.
 // No state change, no schedule(), no IPI back — true parallelism.
-static void async_syscall_dispatch(process_t* proc, interrupt_frame_t* frame) {
-    (void)frame;  // not needed — process continues running
+static void async_syscall_dispatch(process_t *proc, interrupt_frame_t *frame)
+{
+    (void)frame; // not needed — process continues running
 
     uint8_t core_idx = amp_get_core_index();
-    
+
     // CAS: only submit if not already queued (dedup)
-    if (atomic_cas_u8(&proc->kcore_pending, 0, 1)) {
+    if (atomic_cas_u8(&proc->kcore_pending, 0, 1))
+    {
         debug_printf("[A%u] ASYNC submit PID %u to K-Core\n", core_idx, proc->pid);
         kcore_submit(proc);
-    } else {
+    }
+    else
+    {
         debug_printf("[A%u] ASYNC skip PID %u (already pending)\n", core_idx, proc->pid);
     }
     // Return to userspace — iretq restores frame, process keeps running.
 }
 
 // Function pointer set at boot — never changes at runtime.
-static void (*g_syscall_dispatch)(process_t*, interrupt_frame_t*) = sync_syscall_dispatch;
+static void (*g_syscall_dispatch)(process_t *, interrupt_frame_t *) = sync_syscall_dispatch;
 
-void idt_set_syscall_mode(bool multicore) {
-    if (multicore) {
+void idt_set_syscall_mode(bool multicore)
+{
+    if (multicore)
+    {
         g_syscall_dispatch = async_syscall_dispatch;
         debug_printf("[IDT] Syscall mode: ASYNC (multi-core, non-blocking)\n");
-    } else {
+    }
+    else
+    {
         g_syscall_dispatch = sync_syscall_dispatch;
         debug_printf("[IDT] Syscall mode: SYNC (single-core)\n");
     }
@@ -478,12 +546,14 @@ void idt_set_syscall_mode(bool multicore) {
 // syscall_handler — unified entry point for SYSCALL and INT 0x80
 // ---------------------------------------------------------------------------
 
-void syscall_handler(interrupt_frame_t* frame) {
-    scheduler_state_t* sched_state = scheduler_get_state();
+void syscall_handler(interrupt_frame_t *frame)
+{
+    scheduler_state_t *sched_state = scheduler_get_state();
 
     spin_lock(&sched_state->scheduler_lock);
-    process_t* proc = sched_state->current_process;
-    if (!proc || proc->magic != PROCESS_MAGIC) {
+    process_t *proc = sched_state->current_process;
+    if (!proc || proc->magic != PROCESS_MAGIC)
+    {
         spin_unlock(&sched_state->scheduler_lock);
         frame->rax = (uint64_t)-1;
         return;
@@ -494,16 +564,17 @@ void syscall_handler(interrupt_frame_t* frame) {
 
     // Debug: log syscall entry with core info
     uint8_t core_idx = amp_get_core_index();
-    const char* core_type = amp_is_kcore() ? "K" : (core_idx == g_amp.bsp_index ? "BSP" : "A");
-    
+    const char *core_type = amp_is_kcore() ? "K" : (core_idx == g_amp.bsp_index ? "BSP" : "A");
+
     // Check if this is a yield (cooperative scheduling hint).
     // Yield pockets skip guide() — the process stays WORKING and gives up its
     // timeslice.  It remains schedulable so it will run again on the next tick.
     // CRITICAL: Check yield BEFORE async dispatch to avoid kcore_pending race!
-    PocketRing* pring = (PocketRing*)vmm_phys_to_virt(proc->pocket_ring_phys);
-    Pocket* peek = pocket_ring_peek(pring);
+    PocketRing *pring = (PocketRing *)vmm_phys_to_virt(proc->pocket_ring_phys);
+    Pocket *peek = pocket_ring_peek(pring);
 
-    if (peek && (peek->flags & POCKET_FLAG_YIELD)) {
+    if (peek && (peek->flags & POCKET_FLAG_YIELD))
+    {
         debug_printf("[%s%u] SYSCALL yield from PID %u\n", core_type, core_idx, proc->pid);
         pocket_ring_pop(pring);
         context_save_from_frame(proc, frame);
