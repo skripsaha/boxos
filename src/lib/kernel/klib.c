@@ -10,13 +10,14 @@
 #include "pit.h"
 
 #define HEAP_CANARY_MAGIC 0xDEADBEEFCAFEBABEULL
-#define HEAP_GUARD_ENABLED 1  // Set to 0 to disable
+#define HEAP_GUARD_ENABLED 1 // Set to 0 to disable
 
-typedef struct {
+typedef struct
+{
     uint64_t canary_start;
     size_t size;
-    const char* caller;
-    size_t canary_end_offset;  // Location of end canary
+    const char *caller;
+    size_t canary_end_offset; // Location of end canary
 } heap_guard_t;
 
 static uint8_t *memory_pool = NULL;
@@ -32,17 +33,20 @@ void mem_activate_pull_map(void)
 {
     // Rebase memory pool pointer from identity to Pull Map address
     uintptr_t pool_phys = (uintptr_t)memory_pool;
-    memory_pool = (uint8_t*)vmm_phys_to_virt(pool_phys);
+    memory_pool = (uint8_t *)vmm_phys_to_virt(pool_phys);
 
     // Rebase free list head
-    if (free_list) {
-        free_list = (mem_block_t*)vmm_phys_to_virt((uintptr_t)free_list);
+    if (free_list)
+    {
+        free_list = (mem_block_t *)vmm_phys_to_virt((uintptr_t)free_list);
 
         // Walk free list and rebase all next pointers
-        mem_block_t* block = free_list;
-        while (block) {
-            if (block->next) {
-                block->next = (mem_block_t*)vmm_phys_to_virt((uintptr_t)block->next);
+        mem_block_t *block = free_list;
+        while (block)
+        {
+            if (block->next)
+            {
+                block->next = (mem_block_t *)vmm_phys_to_virt((uintptr_t)block->next);
             }
             block = block->next;
         }
@@ -73,7 +77,7 @@ void mem_init(void)
     if (heap_size > BOOTLOADER_SAFE_HEAP_SIZE)
     {
         debug_printf("[KLIB] Heap size capped at 2MB (bootloader mapping limit), will be %zu MB after VMM init\n",
-                heap_size / (1024 * 1024));
+                     heap_size / (1024 * 1024));
         heap_size = BOOTLOADER_SAFE_HEAP_SIZE;
     }
 
@@ -83,7 +87,7 @@ void mem_init(void)
     size_t pages_needed = heap_size / 4096;
 
     debug_printf("[KLIB] Total RAM: %zu MB, Kernel heap: %zu MB (%zu pages)\n",
-            total_ram / (1024 * 1024), heap_size / (1024 * 1024), pages_needed);
+                 total_ram / (1024 * 1024), heap_size / (1024 * 1024), pages_needed);
 
     debug_printf("[KLIB] Allocating memory pool from PMM...\n");
     memory_pool = (uint8_t *)pmm_alloc_zero(pages_needed);
@@ -127,7 +131,7 @@ static void *kmalloc_internal(size_t size)
             (uintptr_t)curr >= (uintptr_t)memory_pool + memory_pool_size)
         {
             panic("kmalloc corruption: free_list entry 0x%p out of heap range [0x%p - 0x%p]",
-                  curr, memory_pool, (void*)((uintptr_t)memory_pool + memory_pool_size));
+                  curr, memory_pool, (void *)((uintptr_t)memory_pool + memory_pool_size));
         }
 
         if (curr->size >= size)
@@ -158,7 +162,7 @@ static void *kmalloc_internal(size_t size)
                 (uintptr_t)result >= (uintptr_t)memory_pool + memory_pool_size)
             {
                 panic("kmalloc corruption: returned pointer 0x%p out of heap range [0x%p - 0x%p]",
-                      result, memory_pool, (void*)((uintptr_t)memory_pool + memory_pool_size));
+                      result, memory_pool, (void *)((uintptr_t)memory_pool + memory_pool_size));
             }
 
             break;
@@ -172,7 +176,7 @@ static void *kmalloc_internal(size_t size)
                 (uintptr_t)curr->next >= (uintptr_t)memory_pool + memory_pool_size)
             {
                 panic("kmalloc corruption: free_list->next 0x%p out of heap range [0x%p - 0x%p]",
-                      curr->next, memory_pool, (void*)((uintptr_t)memory_pool + memory_pool_size));
+                      curr->next, memory_pool, (void *)((uintptr_t)memory_pool + memory_pool_size));
             }
         }
 
@@ -188,32 +192,37 @@ static void *kmalloc_internal(size_t size)
     return result;
 }
 
-void* kmalloc(size_t size) {
-    if (size == 0) return NULL;
+void *kmalloc(size_t size)
+{
+    if (size == 0)
+        return NULL;
 
     // Slab path: O(1) for small allocations (<= 4096 bytes)
-    if (size <= SLAB_LARGE_THRESHOLD) {
-        void* ptr = slab_alloc(size);
-        if (ptr) return ptr;
+    if (size <= SLAB_LARGE_THRESHOLD)
+    {
+        void *ptr = slab_alloc(size);
+        if (ptr)
+            return ptr;
         // Fall through to legacy allocator if slab fails
     }
 
     // Legacy path: large allocations or slab fallback
 #if HEAP_GUARD_ENABLED
     size_t total_size = sizeof(heap_guard_t) + size + sizeof(uint64_t);
-    heap_guard_t* guard = (heap_guard_t*)kmalloc_internal(total_size);
+    heap_guard_t *guard = (heap_guard_t *)kmalloc_internal(total_size);
 
-    if (!guard) return NULL;
+    if (!guard)
+        return NULL;
 
     guard->canary_start = HEAP_CANARY_MAGIC;
     guard->size = size;
     guard->caller = "kmalloc";
     guard->canary_end_offset = sizeof(heap_guard_t) + size;
 
-    uint64_t* end_canary = (uint64_t*)((uint8_t*)guard + guard->canary_end_offset);
+    uint64_t *end_canary = (uint64_t *)((uint8_t *)guard + guard->canary_end_offset);
     *end_canary = HEAP_CANARY_MAGIC;
 
-    return (void*)((uint8_t*)guard + sizeof(heap_guard_t));
+    return (void *)((uint8_t *)guard + sizeof(heap_guard_t));
 #else
     return kmalloc_internal(size);
 #endif
@@ -281,34 +290,45 @@ static void kfree_internal(void *ptr)
     spin_unlock(&heap_lock);
 }
 
-void kfree(void* ptr) {
-    if (!ptr) return;
+void kfree(void *ptr)
+{
+    if (!ptr)
+        return;
 
     // Slab path: O(1) free for slab-owned pointers
-    if (slab_owns(ptr)) {
+    if (slab_owns(ptr))
+    {
         slab_free(ptr);
         return;
     }
 
     // Legacy path: large allocations from the old pool
 #if HEAP_GUARD_ENABLED
-    heap_guard_t* guard = (heap_guard_t*)((uint8_t*)ptr - sizeof(heap_guard_t));
+    heap_guard_t *guard = (heap_guard_t *)((uint8_t *)ptr - sizeof(heap_guard_t));
 
-    if (guard->canary_start != HEAP_CANARY_MAGIC) {
+    if (guard->canary_start != HEAP_CANARY_MAGIC)
+    {
         debug_printf("[HEAP] CORRUPTION: Start canary destroyed at %p\n", ptr);
         debug_printf("[HEAP]   Expected: 0x%llx, Got: 0x%llx\n",
                      HEAP_CANARY_MAGIC, guard->canary_start);
-        while (1) { asm volatile("cli; hlt"); }
+        while (1)
+        {
+            asm volatile("cli; hlt");
+        }
     }
 
-    uint64_t* end_canary = (uint64_t*)((uint8_t*)guard + guard->canary_end_offset);
-    if (*end_canary != HEAP_CANARY_MAGIC) {
+    uint64_t *end_canary = (uint64_t *)((uint8_t *)guard + guard->canary_end_offset);
+    if (*end_canary != HEAP_CANARY_MAGIC)
+    {
         debug_printf("[HEAP] CORRUPTION: End canary destroyed at %p (size=%zu)\n",
                      ptr, guard->size);
         debug_printf("[HEAP]   Expected: 0x%llx, Got: 0x%llx\n",
                      HEAP_CANARY_MAGIC, *end_canary);
         debug_printf("[HEAP]   This indicates buffer overflow!\n");
-        while (1) { asm volatile("cli; hlt"); }
+        while (1)
+        {
+            asm volatile("cli; hlt");
+        }
     }
 
     kfree_internal(guard);
@@ -883,7 +903,11 @@ int kprintf(const char *format, ...)
             {
                 // Floating point is not supported in kernel mode (no SSE)
                 const char *msg = "<no-float>";
-                while (*msg) { kputchar(*msg++); ++count; }
+                while (*msg)
+                {
+                    kputchar(*msg++);
+                    ++count;
+                }
                 break;
             }
             case 'c':
@@ -1057,8 +1081,25 @@ bool spin_trylock(spinlock_t *lock)
 void spin_force_release(spinlock_t *lock)
 {
     // Force-release a spinlock WITHOUT restoring saved_flags.
-    // Use ONLY in fatal recovery paths (IST exception handlers)
-    // where the original lock holder's context is lost.
+    //
+    // DANGER: This is ONLY safe in IST (Interrupt Stack Table) exception
+    // handlers where the original lock holder's context is lost (e.g., kernel
+    // stack overflow). The original IRQ state CANNOT be restored because the
+    // original stack frame may be corrupted.
+    //
+    // Caller MUST ensure:
+    //   1. This is a fatal recovery path (process kill, not normal operation)
+    //   2. IRQ state is irrelevant (we're about to schedule away or halt)
+    //   3. No other locks are held that depend on IRQ restoration
+    //
+    // After calling this, the caller should either:
+    //   - Call schedule() to switch away from the crashed context
+    //   - Explicitly restore IRQ state if continuing execution
+    //
+    // Usage example (from idt.c IST handler):
+    //   spin_force_release(&sched->scheduler_lock);
+    //   schedule(frame);  // schedule() will set up correct IRQ state
+    //
     __sync_lock_release(&lock->locked);
 }
 
@@ -1359,7 +1400,8 @@ int strncmp(const char *s1, const char *s2, size_t n)
 {
     if (n == 0)
         return 0;
-    while (n > 0 && *s1 && (*s1 == *s2)) {
+    while (n > 0 && *s1 && (*s1 == *s2))
+    {
         s1++;
         s2++;
         n--;
@@ -1862,7 +1904,6 @@ char *ulltoa(unsigned long long value, char *str, int base)
     return utoa64((uint64_t)value, str, base);
 }
 
-
 int atoi(const char *str)
 {
     int result = 0;
@@ -1946,67 +1987,84 @@ long long atoll(const char *str)
 
 void delay(uint32_t milliseconds)
 {
-    if (cpu_tsc_is_calibrated()) {
+    if (cpu_tsc_is_calibrated())
+    {
         uint64_t deadline = rdtsc() + cpu_ms_to_tsc(milliseconds);
-        while (rdtsc() < deadline) {
+        while (rdtsc() < deadline)
+        {
             asm volatile("pause");
         }
-    } else {
+    }
+    else
+    {
         // Pre-calibration fallback: use PIT busy-wait (port 0x80, ~1us per I/O)
         pit_delay_busy(milliseconds);
     }
 }
 
-bool tag_is_wildcard(const char* tag)
+bool tag_is_wildcard(const char *tag)
 {
-    if (!tag) return false;
+    if (!tag)
+        return false;
     return strstr(tag, "...") != NULL;
 }
 
 // Match a single part (key or value) with "..." as glob wildcard
-static bool tag_match_part(const char* pattern, const char* text)
+static bool tag_match_part(const char *pattern, const char *text)
 {
-    const char* wild = strstr(pattern, "...");
-    if (!wild) {
+    const char *wild = strstr(pattern, "...");
+    if (!wild)
+    {
         return strcmp(pattern, text) == 0;
     }
 
     size_t prefix_len = wild - pattern;
-    const char* suffix = wild + 3;
+    const char *suffix = wild + 3;
     size_t suffix_len = strlen(suffix);
     size_t text_len = strlen(text);
 
-    if (text_len < prefix_len + suffix_len) return false;
-    if (prefix_len > 0 && strncmp(pattern, text, prefix_len) != 0) return false;
-    if (suffix_len > 0 && strcmp(text + text_len - suffix_len, suffix) != 0) return false;
+    if (text_len < prefix_len + suffix_len)
+        return false;
+    if (prefix_len > 0 && strncmp(pattern, text, prefix_len) != 0)
+        return false;
+    if (suffix_len > 0 && strcmp(text + text_len - suffix_len, suffix) != 0)
+        return false;
 
     return true;
 }
 
-bool tag_match(const char* pattern, const char* tag)
+bool tag_match(const char *pattern, const char *tag)
 {
-    if (!pattern || !tag) return false;
-    if (!tag_is_wildcard(pattern)) {
+    if (!pattern || !tag)
+        return false;
+    if (!tag_is_wildcard(pattern))
+    {
         return strcmp(pattern, tag) == 0;
     }
 
-    const char* p_colon = strchr(pattern, ':');
-    const char* t_colon = strchr(tag, ':');
+    const char *p_colon = strchr(pattern, ':');
+    const char *t_colon = strchr(tag, ':');
 
-    if (p_colon && t_colon) {
+    if (p_colon && t_colon)
+    {
         // Both have colon: match key and value parts separately
         char p_key[64], t_key[64];
         size_t p_key_len = p_colon - pattern;
         size_t t_key_len = t_colon - tag;
-        if (p_key_len >= 64) p_key_len = 63;
-        if (t_key_len >= 64) t_key_len = 63;
-        memcpy(p_key, pattern, p_key_len); p_key[p_key_len] = '\0';
-        memcpy(t_key, tag, t_key_len); t_key[t_key_len] = '\0';
+        if (p_key_len >= 64)
+            p_key_len = 63;
+        if (t_key_len >= 64)
+            t_key_len = 63;
+        memcpy(p_key, pattern, p_key_len);
+        p_key[p_key_len] = '\0';
+        memcpy(t_key, tag, t_key_len);
+        t_key[t_key_len] = '\0';
 
         return tag_match_part(p_key, t_key) && tag_match_part(p_colon + 1, t_colon + 1);
     }
 
-    if (!p_colon && !t_colon) {
+    if (!p_colon && !t_colon)
+    {
         // Neither has colon: simple tag match with wildcard
         return tag_match_part(pattern, tag);
     }
