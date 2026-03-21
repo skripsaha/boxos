@@ -32,7 +32,8 @@ static void *pocket_data_ptr(Pocket *pocket, process_t *proc)
 {
     if (!pocket || pocket->data_length == 0 || pocket->data_addr == 0)
         return NULL;
-    if (!proc) {
+    if (!proc)
+    {
         proc = process_find(pocket->pid);
         if (!proc)
             return NULL;
@@ -242,7 +243,7 @@ static int handle_obj_read_async(Pocket *pocket, process_t *proc)
     if (!data)
     {
         pocket->error_code = ERR_INVALID_ARGUMENT;
-        return -1;
+        return ERR_INVALID_ARGUMENT;
     }
 
     obj_read_event_t *req = (obj_read_event_t *)data;
@@ -257,7 +258,7 @@ static int handle_obj_read_async(Pocket *pocket, process_t *proc)
     {
         resp->error_code = ERR_FILE_NOT_FOUND;
         pocket->error_code = ERR_FILE_NOT_FOUND;
-        return -1;
+        return ERR_FILE_NOT_FOUND;
     }
 
     uint32_t start_block = (handle->extent_count > 0) ? handle->extents[0].start_block : 0;
@@ -281,7 +282,7 @@ static int handle_obj_read_async(Pocket *pocket, process_t *proc)
     if (rc == OK)
     {
         pocket->error_code = ERR_IO_PENDING;
-        return 0;
+        return OK;
     }
     else if (rc == ERR_IO_QUEUE_FULL)
     {
@@ -292,7 +293,7 @@ static int handle_obj_read_async(Pocket *pocket, process_t *proc)
     {
         resp->error_code = ERR_IO;
         pocket->error_code = rc;
-        return -1;
+        return ERR_IO;
     }
 }
 
@@ -302,7 +303,7 @@ static int handle_obj_write_async(Pocket *pocket, process_t *proc)
     if (!data)
     {
         pocket->error_code = ERR_INVALID_ARGUMENT;
-        return -1;
+        return ERR_INVALID_ARGUMENT;
     }
 
     obj_write_event_t *req = (obj_write_event_t *)data;
@@ -318,7 +319,7 @@ static int handle_obj_write_async(Pocket *pocket, process_t *proc)
     {
         resp->error_code = ERR_FILE_NOT_FOUND;
         pocket->error_code = ERR_FILE_NOT_FOUND;
-        return -1;
+        return ERR_FILE_NOT_FOUND;
     }
 
     uint32_t start_block = (handle->extent_count > 0) ? handle->extents[0].start_block : 0;
@@ -359,7 +360,7 @@ static int handle_obj_write_async(Pocket *pocket, process_t *proc)
     if (rc == OK)
     {
         pocket->error_code = ERR_IO_PENDING;
-        return 0;
+        return OK;
     }
     else if (rc == ERR_IO_QUEUE_FULL)
     {
@@ -370,7 +371,7 @@ static int handle_obj_write_async(Pocket *pocket, process_t *proc)
     {
         resp->error_code = ERR_IO;
         pocket->error_code = rc;
-        return -1;
+        return ERR_IO;
     }
 }
 #endif
@@ -381,7 +382,7 @@ int handle_obj_read(Pocket *pocket, process_t *proc)
     if (!data)
     {
         pocket->error_code = ERR_INVALID_ARGUMENT;
-        return -1;
+        return ERR_INVALID_ARGUMENT;
     }
 
     obj_read_event_t *req = (obj_read_event_t *)data;
@@ -396,7 +397,7 @@ int handle_obj_read(Pocket *pocket, process_t *proc)
     {
         resp->error_code = ERR_FILE_NOT_FOUND;
         pocket->error_code = ERR_FILE_NOT_FOUND;
-        return -1;
+        return ERR_FILE_NOT_FOUND;
     }
 
     handle->offset = offset;
@@ -412,14 +413,14 @@ int handle_obj_read(Pocket *pocket, process_t *proc)
         resp->bytes_read = bytes_read;
         resp->error_code = OK;
         memcpy(resp->data, read_buffer, bytes_read);
-        return 0;
+        return OK;
     }
     else
     {
         resp->bytes_read = 0;
         resp->error_code = ERR_IO;
         pocket->error_code = ERR_IO;
-        return -1;
+        return ERR_IO;
     }
 }
 
@@ -429,7 +430,7 @@ int handle_obj_write(Pocket *pocket, process_t *proc)
     if (!data)
     {
         pocket->error_code = ERR_INVALID_ARGUMENT;
-        return -1;
+        return ERR_INVALID_ARGUMENT;
     }
 
     obj_write_event_t *req = (obj_write_event_t *)data;
@@ -447,7 +448,7 @@ int handle_obj_write(Pocket *pocket, process_t *proc)
                      length, max_data_size);
         resp->error_code = ERR_INVALID_ARGUMENT;
         pocket->error_code = ERR_INVALID_ARGUMENT;
-        return -1;
+        return ERR_INVALID_ARGUMENT;
     }
 
     uint8_t write_buffer[168];
@@ -458,7 +459,7 @@ int handle_obj_write(Pocket *pocket, process_t *proc)
     {
         resp->error_code = ERR_FILE_NOT_FOUND;
         pocket->error_code = ERR_FILE_NOT_FOUND;
-        return -1;
+        return ERR_FILE_NOT_FOUND;
     }
 
     if (flags & OBJ_WRITE_APPEND)
@@ -482,7 +483,7 @@ int handle_obj_write(Pocket *pocket, process_t *proc)
         resp->bytes_written = written;
         resp->new_file_size = final_size;
         resp->error_code = OK;
-        return 0;
+        return OK;
     }
     else
     {
@@ -490,7 +491,7 @@ int handle_obj_write(Pocket *pocket, process_t *proc)
         resp->new_file_size = final_size;
         resp->error_code = ERR_IO;
         pocket->error_code = ERR_IO;
-        return -1;
+        return ERR_IO;
     }
 }
 
@@ -500,7 +501,7 @@ static int handle_obj_create(Pocket *pocket, process_t *proc)
     if (!data)
     {
         pocket->error_code = ERR_INVALID_ARGUMENT;
-        return -1;
+        return ERR_INVALID_ARGUMENT;
     }
 
     obj_create_event_t *req = (obj_create_event_t *)data;
@@ -511,7 +512,7 @@ static int handle_obj_create(Pocket *pocket, process_t *proc)
         resp->file_id = 0;
         resp->error_code = ERR_INVALID_ARGUMENT;
         pocket->error_code = ERR_INVALID_ARGUMENT;
-        return -1;
+        return ERR_INVALID_ARGUMENT;
     }
 
     req->filename[31] = '\0';
@@ -544,14 +545,17 @@ static int handle_obj_create(Pocket *pocket, process_t *proc)
     TagFSState *tfs_state = tagfs_get_state();
     uint16_t tag_id_buf[16];
     uint16_t intern_count = 0;
-    if (tfs_state && tfs_state->registry) {
-        for (uint32_t ti = 0; ti < tag_count && intern_count < 16; ti++) {
+    if (tfs_state && tfs_state->registry)
+    {
+        for (uint32_t ti = 0; ti < tag_count && intern_count < 16; ti++)
+        {
             char tkey[64];
             char tval[64];
             tagfs_parse_tag(tag_ptrs[ti], tkey, sizeof(tkey), tval, sizeof(tval));
             uint16_t tid = tag_registry_intern(tfs_state->registry, tkey,
                                                tval[0] ? tval : NULL);
-            if (tid != TAGFS_INVALID_TAG_ID) {
+            if (tid != TAGFS_INVALID_TAG_ID)
+            {
                 tag_id_buf[intern_count++] = tid;
             }
         }
@@ -568,14 +572,14 @@ static int handle_obj_create(Pocket *pocket, process_t *proc)
     {
         resp->file_id = file_id;
         resp->error_code = OK;
-        return 0;
+        return OK;
     }
     else
     {
         resp->file_id = 0;
         resp->error_code = ERR_DISK_FULL;
         pocket->error_code = ERR_DISK_FULL;
-        return -1;
+        return ERR_DISK_FULL;
     }
 }
 
@@ -585,7 +589,7 @@ static int handle_obj_delete(Pocket *pocket, process_t *proc)
     if (!data)
     {
         pocket->error_code = ERR_INVALID_ARGUMENT;
-        return -1;
+        return ERR_INVALID_ARGUMENT;
     }
 
     obj_delete_request_t *req = (obj_delete_request_t *)data;
@@ -599,11 +603,10 @@ static int handle_obj_delete(Pocket *pocket, process_t *proc)
         {
             for (uint16_t di = 0; di < del_meta.tag_count; di++)
             {
-                const char *key = del_state ?
-                    tag_registry_key(del_state->registry, del_meta.tag_ids[di]) : NULL;
-                const char *val = del_state ?
-                    tag_registry_value(del_state->registry, del_meta.tag_ids[di]) : NULL;
-                if (!key) continue;
+                const char *key = del_state ? tag_registry_key(del_state->registry, del_meta.tag_ids[di]) : NULL;
+                const char *val = del_state ? tag_registry_value(del_state->registry, del_meta.tag_ids[di]) : NULL;
+                if (!key)
+                    continue;
                 if (strcmp(key, "system") == 0 || strcmp(key, "boot") == 0)
                 {
                     debug_printf("[Storage] ERROR: Cannot delete system file\n");
@@ -659,7 +662,7 @@ static int handle_obj_rename(Pocket *pocket, process_t *proc)
     if (!data)
     {
         pocket->error_code = ERR_INVALID_ARGUMENT;
-        return -1;
+        return ERR_INVALID_ARGUMENT;
     }
 
     obj_rename_request_t *req = (obj_rename_request_t *)data;
@@ -673,7 +676,7 @@ static int handle_obj_rename(Pocket *pocket, process_t *proc)
         obj_rename_response_t *resp = (obj_rename_response_t *)data;
         resp->error_code = ERR_INVALID_ARGUMENT;
         pocket->error_code = ERR_INVALID_ARGUMENT;
-        return -1;
+        return ERR_INVALID_ARGUMENT;
     }
 
     int result = tagfs_rename_file(req->file_id, req->new_filename);
@@ -681,7 +684,7 @@ static int handle_obj_rename(Pocket *pocket, process_t *proc)
     obj_rename_response_t *resp = (obj_rename_response_t *)data;
     if (result == 0)
     {
-        resp->error_code = 0;
+        resp->error_code = OK;
         debug_printf("[Storage] OBJ_RENAME: Success\n");
     }
     else
@@ -700,7 +703,7 @@ static int handle_obj_get_info(Pocket *pocket, process_t *proc)
     if (!data)
     {
         pocket->error_code = ERR_INVALID_ARGUMENT;
-        return -1;
+        return ERR_INVALID_ARGUMENT;
     }
 
     obj_get_info_request_t *req = (obj_get_info_request_t *)data;
@@ -717,19 +720,20 @@ static int handle_obj_get_info(Pocket *pocket, process_t *proc)
         obj_get_info_response_t *resp = (obj_get_info_response_t *)data;
         resp->error_code = ERR_FILE_NOT_FOUND;
         pocket->error_code = ERR_FILE_NOT_FOUND;
-        return -1;
+        return ERR_FILE_NOT_FOUND;
     }
 
     obj_get_info_response_t *resp = (obj_get_info_response_t *)data;
     memset(resp, 0, sizeof(obj_get_info_response_t));
 
-    resp->error_code  = 0;
-    resp->file_id     = metadata.file_id;
-    resp->flags       = metadata.flags;
-    resp->size        = metadata.size;
-    resp->tag_count   = (metadata.tag_count > 5) ? 5 : (uint8_t)metadata.tag_count;
+    resp->error_code = 0;
+    resp->file_id = metadata.file_id;
+    resp->flags = metadata.flags;
+    resp->size = metadata.size;
+    resp->tag_count = (metadata.tag_count > 5) ? 5 : (uint8_t)metadata.tag_count;
 
-    if (metadata.filename) {
+    if (metadata.filename)
+    {
         strncpy(resp->filename, metadata.filename, 31);
         resp->filename[31] = '\0';
     }
@@ -738,16 +742,16 @@ static int handle_obj_get_info(Pocket *pocket, process_t *proc)
     for (uint8_t i = 0; i < resp->tag_count; i++)
     {
         resp->tags[i].type = 0;
-        const char *rkey = gi_state ?
-            tag_registry_key(gi_state->registry, metadata.tag_ids[i]) : NULL;
-        const char *rval = gi_state ?
-            tag_registry_value(gi_state->registry, metadata.tag_ids[i]) : NULL;
+        const char *rkey = gi_state ? tag_registry_key(gi_state->registry, metadata.tag_ids[i]) : NULL;
+        const char *rval = gi_state ? tag_registry_value(gi_state->registry, metadata.tag_ids[i]) : NULL;
 
-        if (rkey) {
+        if (rkey)
+        {
             strncpy(resp->tags[i].key, rkey, 10);
             resp->tags[i].key[10] = '\0';
         }
-        if (rval) {
+        if (rval)
+        {
             strncpy(resp->tags[i].value, rval, 11);
             resp->tags[i].value[11] = '\0';
         }
@@ -755,8 +759,9 @@ static int handle_obj_get_info(Pocket *pocket, process_t *proc)
 
     // Synthesize FILE_FLAG_TRASHED from "trashed" tag presence.
     // This ensures flags & 0x02 is authoritative regardless of 5-tag limit.
-    if (tagfs_has_tag_string(metadata.file_id, "trashed", NULL)) {
-        resp->flags |= 0x02;  // FILE_FLAG_TRASHED
+    if (tagfs_has_tag_string(metadata.file_id, "trashed", NULL))
+    {
+        resp->flags |= 0x02; // FILE_FLAG_TRASHED
     }
 
     tagfs_metadata_free(&metadata);
@@ -779,7 +784,8 @@ static int handle_context_set(Pocket *pocket, process_t *proc)
     char key[64];
     char value[64];
     const char *colon = strchr(tag_string, ':');
-    if (colon) {
+    if (colon)
+    {
         size_t klen = (size_t)(colon - tag_string);
         if (klen >= sizeof(key))
             klen = sizeof(key) - 1;
@@ -787,7 +793,9 @@ static int handle_context_set(Pocket *pocket, process_t *proc)
         key[klen] = '\0';
         strncpy(value, colon + 1, sizeof(value) - 1);
         value[sizeof(value) - 1] = '\0';
-    } else {
+    }
+    else
+    {
         strncpy(key, tag_string, sizeof(key) - 1);
         key[sizeof(key) - 1] = '\0';
         value[0] = '\0';

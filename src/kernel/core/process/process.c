@@ -447,10 +447,11 @@ void process_ref_dec(process_t *proc)
 
     if (old == 0)
     {
-        // Underflow: restore to 0 (not 1 — that would leak).
-        // The wrapped value (UINT32_MAX) is corrected immediately.
-        atomic_store_u32(&proc->ref_count, 0);
-        kprintf("[PROCESS] BUG: ref_count underflow for PID %u\n", proc->pid);
+        // Underflow: ref_count was 0, subtracted 1 → wrapped to UINT32_MAX.
+        // Restore to 1 to prevent infinite underflow loop.
+        // This is a bug — caller decremented without holding a reference.
+        atomic_store_u32(&proc->ref_count, 1);
+        kprintf("[PROCESS] BUG: ref_count underflow for PID %u (restored to 1)\n", proc->pid);
         return;
     }
 
@@ -572,6 +573,13 @@ void process_destroy(process_t *proc)
         return;
     }
 
+    // CRITICAL: Set destroying flag FIRST — before any checks or locks.
+    // This prevents scheduler_select_next() from selecting this process
+    // during the window between is_running check and unlinking.
+    // Use atomic store with SEQ_CST for visibility across all cores.
+    __atomic_store_n(&proc->destroying, 1, __ATOMIC_SEQ_CST);
+    mfence(); // Ensure visibility before proceeding
+
     // CRITICAL: Check if process is currently executing on ANY core.
     // We must check all cores, not just home_core, because work stealing
     // can migrate processes to different App Cores.
@@ -601,17 +609,13 @@ void process_destroy(process_t *proc)
 
     if (is_running)
     {
+        // Process is running — clear destroying flag and abort
+        __atomic_store_n(&proc->destroying, 0, __ATOMIC_SEQ_CST);
         debug_printf("[PROCESS] ERROR: Cannot destroy running process PID %u (on core %u)\n",
                      proc->pid, running_on_core);
         return;
     }
     // All scheduler_locks released — no deadlock possible below
-
-    // CRITICAL: Set destroying flag BEFORE releasing scheduler_locks above.
-    // This prevents scheduler_select_next() from selecting this process
-    // between releasing scheduler_locks and unlinking from process_list.
-    // Use atomic store to ensure visibility across all cores.
-    __atomic_store_n(&proc->destroying, 1, __ATOMIC_SEQ_CST);
 
     spin_lock(&process_lock);
 

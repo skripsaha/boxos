@@ -6,7 +6,7 @@
 #include "pocket.h"
 #include "klib.h"
 
-extern ReadyQueue g_ready_queue;
+// g_ready_queue is declared in ready_queue.h — no extern needed here
 
 typedef struct process_t process_t;
 
@@ -15,16 +15,17 @@ void guide(void);
 
 // Process all pending Pockets for one process (drain PocketRing, write Results).
 // Used by K-Core guide loop. Does NOT change process state — caller manages that.
-void guide_process_one(process_t* proc);
+void guide_process_one(process_t *proc);
 
 // Deck handler: processes a single Pocket prefix.
 // Returns 0 on success, negative error_t on failure.
 // proc = source process (already resolved by Guide, avoids redundant process_find).
-typedef int (*deck_handler_t)(Pocket* pocket, process_t* proc);
+typedef int (*deck_handler_t)(Pocket *pocket, process_t *proc);
 
-typedef struct {
+typedef struct
+{
     uint8_t deck_id;
-    const char* name;
+    const char *name;
     deck_handler_t handler;
 } DeckEntry;
 

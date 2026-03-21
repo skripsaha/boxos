@@ -307,20 +307,18 @@ process_t *scheduler_select_next(void)
     // CRITICAL: Skip processes marked for destruction.
     // A process can be selected between being dequeued and returned.
     // Check destroying flag atomically to avoid race with process_destroy().
+    //
+    // FIX: Do NOT enqueue skipped processes back — they will be cleaned up
+    // by process_destroy when ref_count reaches 0. Re-enqueuing creates a
+    // race where the process could be selected again while being destroyed.
     while (next && !process_is_idle(next) &&
            __atomic_load_n(&next->destroying, __ATOMIC_ACQUIRE))
     {
-        // Process is being destroyed — skip it and get next
+        // Process is being destroyed — skip it and get next.
+        // Do NOT put it back — let process_destroy handle cleanup.
         process_t *skipped = next;
         next = runqueue_dequeue_best(&s->runqueue);
-
-        // Put skipped process back if it's not being destroyed
-        // (shouldn't happen, but be defensive)
-        if (!__atomic_load_n(&skipped->destroying, __ATOMIC_ACQUIRE))
-        {
-            int prio = sched_determine_priority(skipped);
-            runqueue_enqueue(&s->runqueue, skipped, prio);
-        }
+        // skipped will be freed when its ref_count reaches 0
     }
 
     spin_unlock(&s->runqueue.lock);
