@@ -161,7 +161,8 @@ void kernel_main(void)
     debug_printf("[INIT] Guide Dispatcher...\n");
     guide_init();
 
-    if (g_amp.total_cores > 1) {
+    if (g_amp.total_cores > 1)
+    {
         debug_printf("[INIT] K-Core Queues...\n");
         kcore_init();
 
@@ -170,7 +171,9 @@ void kernel_main(void)
 
         debug_printf("[INIT] Booting Application Processors...\n");
         amp_boot_aps();
-    } else {
+    }
+    else
+    {
         idt_set_syscall_mode(false);
     }
 
@@ -230,7 +233,7 @@ void kernel_main(void)
     if (xhci_result == 0)
     {
         debug_printf("[INIT] xHCI controller initialized successfully\n");
-        UsbInput_Enable(true);  // Enable USB input devices
+        UsbInput_Enable(true); // Enable USB input devices
     }
     else
     {
@@ -252,8 +255,8 @@ void kernel_main(void)
 
     TagFSState *tfs_state = tagfs_get_state();
     uint32_t autostart_max = (tfs_state && tfs_state->superblock.total_files > 0)
-                             ? tfs_state->superblock.total_files
-                             : TAGFS_MAX_FILES;
+                                 ? tfs_state->superblock.total_files
+                                 : TAGFS_MAX_FILES;
     uint32_t *file_ids = kmalloc(sizeof(uint32_t) * autostart_max);
     if (!file_ids)
     {
@@ -281,7 +284,8 @@ void kernel_main(void)
         for (uint16_t t = 0; t < meta.tag_count; t++)
         {
             const char *key = tag_registry_key(tfs_state->registry, meta.tag_ids[t]);
-            if (!key) continue;
+            if (!key)
+                continue;
             if (strcmp(key, "autostart") == 0)
                 has_autostart = true;
             if (strcmp(key, "app") == 0 || strcmp(key, "utility") == 0)
@@ -303,7 +307,8 @@ void kernel_main(void)
         for (uint16_t t = 0; t < meta.tag_count; t++)
         {
             const char *key = tag_registry_key(tfs_state->registry, meta.tag_ids[t]);
-            if (!key) continue;
+            if (!key)
+                continue;
             size_t klen = strlen(key);
             if (pos + klen + 2 > PROCESS_TAG_SIZE)
                 break;
@@ -434,7 +439,8 @@ void kernel_main(void)
 
     kprintf("[AUTOSTART] %d process(es) launched\n", autostart_count);
 
-    if (g_amp.multicore_active) {
+    if (g_amp.multicore_active)
+    {
         // ================================================================
         // Multi-core bootstrap: BSP is a K-Core, processes run on App Cores.
         // Enqueue all WORKING processes on their home App Core RunQueues,
@@ -446,26 +452,36 @@ void kernel_main(void)
         // Enqueue all created processes on their home App Core RunQueues
         process_list_lock();
         process_t *p = process_get_first();
-        while (p) {
+        while (p)
+        {
             if (p->magic == PROCESS_MAGIC && p->state == PROC_WORKING &&
-                !process_is_idle(p)) {
-                sched_enqueue(p);
-                debug_printf("[KERNEL] Enqueued PID %u on App Core %u\n",
-                             p->pid, p->home_core);
+                !process_is_idle(p))
+            {
+                if (sched_enqueue(p))
+                {
+                    debug_printf("[KERNEL] Enqueued PID %u on App Core %u\n",
+                                 p->pid, p->home_core);
+                }
+                else
+                {
+                    debug_printf("[KERNEL] FAILED to enqueue PID %u\n", p->pid);
+                }
             }
             p = p->next;
         }
         process_list_unlock();
 
         // Wake all App Cores to start scheduling
-        for (uint8_t c = 0; c < g_amp.total_cores; c++) {
-            if (!g_amp.cores[c].is_kcore && g_amp.cores[c].online) {
+        for (uint8_t c = 0; c < g_amp.total_cores; c++)
+        {
+            if (!g_amp.cores[c].is_kcore && g_amp.cores[c].online)
+            {
                 lapic_send_ipi(g_amp.cores[c].lapic_id, IPI_WAKE_VECTOR);
             }
         }
 
         kprintf("[KERNEL] BSP entering K-Core guide loop...\n");
-        kcore_run_loop();  // never returns
+        kcore_run_loop(); // never returns
     }
 
     // Single-core: jump directly to initial process on BSP

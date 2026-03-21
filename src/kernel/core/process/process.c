@@ -25,58 +25,87 @@ static process_cleanup_queue_t g_cleanup_queue;
 // Round-robin counter for App Core assignment (multi-core only).
 static volatile uint32_t g_appcore_rr_counter = 0;
 
-// Tag overflow reallocation uses publish-before-free: the new pointer is
-// written (with a store barrier) BEFORE the old buffer is freed.  This
-// prevents use-after-free when scheduler_matches_use_context() on another
-// core reads tag_overflow_ids under g_context_lock (a different lock).
+// Tag overflow reallocation with lock-free read protection.
+//
+// Readers (scheduler_matches_use_context) use this pattern:
+//   1. Read overflow_ids pointer atomically
+//   2. Read overflow_count atomically
+//   3. Loop using these stable values
+//
+// Writers (this function) use publish-before-free:
+//   1. Allocate new buffer
+//   2. Copy data to new buffer
+//   3. Atomic store-release of new pointer (publishes to readers)
+//   4. Atomic store-release of new capacity
+//   5. Memory barrier (ensures all writes visible before kfree)
+//   6. Free old buffer (safe — readers see either old or new pointer)
+//
+// Lock ordering: caller must hold process_lock when modifying tags.
 static int process_set_tag_bit(process_t *proc, uint16_t tag_id)
 {
-    if (tag_id < 64) {
-        proc->tag_bits |= ((uint64_t)1 << tag_id);
+    if (tag_id < 64)
+    {
+        __atomic_or_fetch(&proc->tag_bits, ((uint64_t)1 << tag_id), __ATOMIC_RELAXED);
         return 0;
     }
-    
-    // Check if already exists
-    for (uint16_t i = 0; i < proc->tag_overflow_count; i++) {
+
+    // Check if already exists (caller holds process_lock, no concurrent modification)
+    for (uint16_t i = 0; i < proc->tag_overflow_count; i++)
+    {
         if (proc->tag_overflow_ids[i] == tag_id)
             return 0;
     }
-    
+
     // Need to realloc?
-    if (proc->tag_overflow_count >= proc->tag_overflow_capacity) {
+    if (proc->tag_overflow_count >= proc->tag_overflow_capacity)
+    {
         uint16_t new_cap = proc->tag_overflow_capacity == 0 ? 8 : proc->tag_overflow_capacity * 2;
         uint16_t *new_ids = kmalloc(sizeof(uint16_t) * new_cap);
         if (!new_ids)
             return -1;
-        
+
         uint16_t *old_ids = proc->tag_overflow_ids;
-        if (old_ids) {
+        if (old_ids)
+        {
             memcpy(new_ids, old_ids, sizeof(uint16_t) * proc->tag_overflow_count);
         }
-        
-        // CRITICAL: Update pointer atomically — readers use g_context_lock
-        // so they won't see intermediate state
-        proc->tag_overflow_ids = new_ids;
-        proc->tag_overflow_capacity = new_cap;
-        
-        // Free old buffer AFTER pointer update (readers protected by g_context_lock)
-        if (old_ids) {
+
+        // CRITICAL: Atomic publish with release semantics.
+        // Readers using atomic load-acquire will see:
+        //   - Either old pointer + old count (before publish)
+        //   - Or new pointer + new count (after publish)
+        // Never: new pointer + old count (would read garbage)
+        __atomic_store_n(&proc->tag_overflow_ids, new_ids, __ATOMIC_RELEASE);
+        __atomic_store_n(&proc->tag_overflow_capacity, new_cap, __ATOMIC_RELEASE);
+
+        // Full memory barrier before kfree — ensures old_ids is not freed
+        // until all readers have completed their load-acquire.
+        mfence();
+
+        // Safe to free: any reader that saw old pointer is done,
+        // any reader that sees new pointer never touches old_ids.
+        if (old_ids)
+        {
             kfree(old_ids);
         }
     }
-    
+
+    // Append new tag_id (caller holds process_lock, safe to modify count)
     proc->tag_overflow_ids[proc->tag_overflow_count++] = tag_id;
     return 0;
 }
 
 static int process_clear_tag_bit(process_t *proc, uint16_t tag_id)
 {
-    if (tag_id < 64) {
+    if (tag_id < 64)
+    {
         proc->tag_bits &= ~((uint64_t)1 << tag_id);
         return 0;
     }
-    for (uint16_t i = 0; i < proc->tag_overflow_count; i++) {
-        if (proc->tag_overflow_ids[i] == tag_id) {
+    for (uint16_t i = 0; i < proc->tag_overflow_count; i++)
+    {
+        if (proc->tag_overflow_ids[i] == tag_id)
+        {
             proc->tag_overflow_ids[i] = proc->tag_overflow_ids[proc->tag_overflow_count - 1];
             proc->tag_overflow_count--;
             return 0;
@@ -105,8 +134,10 @@ static void process_hash_remove(process_t *proc)
 {
     uint32_t idx = process_hash(proc->pid);
     process_t **pp = &process_hash_table[idx];
-    while (*pp) {
-        if (*pp == proc) {
+    while (*pp)
+    {
+        if (*pp == proc)
+        {
             *pp = proc->hash_next;
             proc->hash_next = NULL;
             return;
@@ -197,26 +228,42 @@ process_t *process_create(const char *tags)
     proc->state = PROC_CREATED;
     spinlock_init(&proc->state_lock);
     proc->ref_count = 1;  // "alive" reference — released in process_destroy
+    proc->destroying = 0; // Not being destroyed
     proc->code_start = VMM_CABIN_CODE_START;
     proc->code_size = 0;
     proc->started = false;
     proc->kcore_pending = 0;
 
     // Assign home_core: round-robin across App Cores (multi-core) or BSP (single-core).
-    if (g_amp.app_count > 0) {
+    if (g_amp.app_count > 0)
+    {
         uint32_t rr = atomic_fetch_add_u32(&g_appcore_rr_counter, 1);
         uint32_t target = rr % g_amp.app_count;
         uint32_t app_seen = 0;
-        for (uint8_t c = 0; c < g_amp.total_cores; c++) {
-            if (!g_amp.cores[c].is_kcore) {
-                if (app_seen == target) {
+        for (uint8_t c = 0; c < g_amp.total_cores; c++)
+        {
+            if (!g_amp.cores[c].is_kcore)
+            {
+                if (app_seen == target)
+                {
                     proc->home_core = c;
                     break;
                 }
                 app_seen++;
             }
         }
-    } else {
+    }
+    else
+    {
+        proc->home_core = g_amp.bsp_index;
+    }
+
+    // CRITICAL: Validate home_core is within bounds before using.
+    // This prevents out-of-bounds access in sched_enqueue/sched_dequeue.
+    if (proc->home_core >= g_amp.total_cores)
+    {
+        debug_printf("[PROCESS] ERROR: Invalid home_core %u assigned (max %u), using BSP\n",
+                     proc->home_core, g_amp.total_cores);
         proc->home_core = g_amp.bsp_index;
     }
 
@@ -231,12 +278,15 @@ process_t *process_create(const char *tags)
     if (tags && tags[0] != '\0')
     {
         TagFSState *fs = tagfs_get_state();
-        if (fs && fs->registry) {
+        if (fs && fs->registry)
+        {
             const char *pos = tags;
-            while (*pos) {
+            while (*pos)
+            {
                 const char *comma = strchr(pos, ',');
                 size_t len = comma ? (size_t)(comma - pos) : strlen(pos);
-                if (len > 0 && len < 256) {
+                if (len > 0 && len < 256)
+                {
                     char tag_buf[256];
                     memcpy(tag_buf, pos, len);
                     tag_buf[len] = '\0';
@@ -245,12 +295,14 @@ process_t *process_create(const char *tags)
                     tagfs_parse_tag(tag_buf, key, sizeof(key), value, sizeof(value));
 
                     uint16_t tid = tag_registry_intern(fs->registry, key,
-                                                        value[0] ? value : NULL);
-                    if (tid != TAGFS_INVALID_TAG_ID) {
+                                                       value[0] ? value : NULL);
+                    if (tid != TAGFS_INVALID_TAG_ID)
+                    {
                         process_set_tag_bit(proc, tid);
                     }
                 }
-                if (!comma) break;
+                if (!comma)
+                    break;
                 pos = comma + 1;
             }
         }
@@ -315,9 +367,11 @@ process_t *process_create(const char *tags)
     // Allocate FPU/SSE/AVX state buffer dynamically (size depends on CPU features)
     uint32_t fpu_buf_size = fpu_alloc_size();
     proc->context.fpu_state = kmalloc(fpu_buf_size);
-    if (!proc->context.fpu_state) {
+    if (!proc->context.fpu_state)
+    {
         debug_printf("[PROCESS] ERROR: Failed to allocate FPU state buffer (%u bytes)\n", fpu_buf_size);
-        if (proc->kernel_stack_guard_base) {
+        if (proc->kernel_stack_guard_base)
+        {
             uintptr_t sp = vmm_virt_to_phys_direct(proc->kernel_stack_guard_base);
             pmm_free((void *)sp, CONFIG_KERNEL_STACK_TOTAL_PAGES);
         }
@@ -405,17 +459,23 @@ void process_ref_dec(process_t *proc)
 #endif
 
     // old == 1 means we just decremented to 0 — last reference released.
-    if (old == 1) {
+    if (old == 1)
+    {
         process_state_t state = process_get_state(proc);
-        if (state == PROC_DONE || state == PROC_CRASHED) {
+        if (state == PROC_DONE || state == PROC_CRASHED)
+        {
             // Process already unlinked by process_destroy (magic == 0xDEADDEAD).
             // Safe to enqueue for final resource cleanup.
-            if (proc->magic == 0xDEADDEAD) {
-                if (!cleanup_queue_enqueue(proc)) {
+            if (proc->magic == 0xDEADDEAD)
+            {
+                if (!cleanup_queue_enqueue(proc))
+                {
                     process_cleanup_immediate(proc);
                 }
             }
-        } else {
+        }
+        else
+        {
             kprintf("[PROCESS] WARNING: ref_count=0 for live PID %u (state=%d)\n",
                     proc->pid, (int)state);
         }
@@ -444,9 +504,16 @@ void process_set_state(process_t *proc, process_state_t new_state)
     proc->state = new_state;
 
     // O(1) RunQueue integration: enqueue/dequeue on PROC_WORKING transitions
-    if (new_state == PROC_WORKING && old_state != PROC_WORKING) {
-        sched_enqueue(proc);
-    } else if (new_state != PROC_WORKING && old_state == PROC_WORKING) {
+    if (new_state == PROC_WORKING && old_state != PROC_WORKING)
+    {
+        if (!sched_enqueue(proc))
+        {
+            debug_printf("[PROCESS] WARNING: sched_enqueue failed for PID %u (state -> WORKING)\n",
+                         proc->pid);
+        }
+    }
+    else if (new_state != PROC_WORKING && old_state == PROC_WORKING)
+    {
         sched_dequeue(proc);
     }
 
@@ -498,7 +565,8 @@ void process_destroy(process_t *proc)
     }
 
     // Bounds-check home_core before indexing g_core_sched[]
-    if (proc->home_core >= g_amp.total_cores) {
+    if (proc->home_core >= g_amp.total_cores)
+    {
         debug_printf("[PROCESS] ERROR: PID %u has invalid home_core %u (max %u)\n",
                      proc->pid, proc->home_core, g_amp.total_cores);
         return;
@@ -512,34 +580,44 @@ void process_destroy(process_t *proc)
     // deadlock if multiple cores call process_destroy() simultaneously.
     bool is_running = false;
     uint8_t running_on_core = 0;
-    
-    for (uint8_t c = 0; c < g_amp.total_cores; c++) {
+
+    for (uint8_t c = 0; c < g_amp.total_cores; c++)
+    {
         scheduler_state_t *sched = scheduler_get_core(c);
         spin_lock(&sched->scheduler_lock);
-        if (sched->current_process == proc) {
+        if (sched->current_process == proc)
+        {
             is_running = true;
             running_on_core = c;
             // Don't break — need to release all locks in reverse order
         }
     }
-    
+
     // Release all scheduler_locks in reverse order
-    for (uint8_t c = g_amp.total_cores; c > 0; c--) {
+    for (uint8_t c = g_amp.total_cores; c > 0; c--)
+    {
         spin_unlock(&scheduler_get_core(c - 1)->scheduler_lock);
     }
-    
-    if (is_running) {
+
+    if (is_running)
+    {
         debug_printf("[PROCESS] ERROR: Cannot destroy running process PID %u (on core %u)\n",
                      proc->pid, running_on_core);
         return;
     }
     // All scheduler_locks released — no deadlock possible below
 
+    // CRITICAL: Set destroying flag BEFORE releasing scheduler_locks above.
+    // This prevents scheduler_select_next() from selecting this process
+    // between releasing scheduler_locks and unlinking from process_list.
+    // Use atomic store to ensure visibility across all cores.
+    __atomic_store_n(&proc->destroying, 1, __ATOMIC_SEQ_CST);
+
     spin_lock(&process_lock);
 
     // Always unlink from list and hash — process is unreachable after this.
     process_hash_remove(proc);
-    proc->magic = 0xDEADDEAD;  // poison: marks as unlinked, pending cleanup
+    proc->magic = 0xDEADDEAD; // poison: marks as unlinked, pending cleanup
 
     if (process_list_head == proc)
     {
@@ -930,10 +1008,12 @@ void process_test(void)
 
 bool process_has_tag_id(process_t *proc, uint16_t tag_id)
 {
-    if (!proc) return false;
+    if (!proc)
+        return false;
     if (tag_id < 64)
         return (proc->tag_bits & ((uint64_t)1 << tag_id)) != 0;
-    for (uint16_t i = 0; i < proc->tag_overflow_count; i++) {
+    for (uint16_t i = 0; i < proc->tag_overflow_count; i++)
+    {
         if (proc->tag_overflow_ids[i] == tag_id)
             return true;
     }
@@ -950,34 +1030,42 @@ bool process_has_tag(process_t *proc, const char *tag)
         return false;
     TagRegistry *reg = fs->registry;
 
-    if (!tag_is_wildcard(tag)) {
+    if (!tag_is_wildcard(tag))
+    {
         char key[256], value[256];
         tagfs_parse_tag(tag, key, sizeof(key), value, sizeof(value));
         uint16_t tid = tag_registry_lookup(reg, key, value[0] ? value : NULL);
-        if (tid == TAGFS_INVALID_TAG_ID) return false;
+        if (tid == TAGFS_INVALID_TAG_ID)
+            return false;
         return process_has_tag_id(proc, tid);
     }
 
     // Wildcard: iterate all tags this process has
     uint64_t bits = proc->tag_bits;
-    while (bits) {
+    while (bits)
+    {
         uint16_t i = (uint16_t)__builtin_ctzll(bits);
         bits &= bits - 1;
         const char *k = tag_registry_key(reg, i);
         const char *v = tag_registry_value(reg, i);
-        if (!k) continue;
+        if (!k)
+            continue;
         char full[512];
         tagfs_format_tag(full, sizeof(full), k, v);
-        if (tag_match(tag, full)) return true;
+        if (tag_match(tag, full))
+            return true;
     }
-    for (uint16_t j = 0; j < proc->tag_overflow_count; j++) {
+    for (uint16_t j = 0; j < proc->tag_overflow_count; j++)
+    {
         uint16_t tid = proc->tag_overflow_ids[j];
         const char *k = tag_registry_key(reg, tid);
         const char *v = tag_registry_value(reg, tid);
-        if (!k) continue;
+        if (!k)
+            continue;
         char full[512];
         tagfs_format_tag(full, sizeof(full), k, v);
-        if (tag_match(tag, full)) return true;
+        if (tag_match(tag, full))
+            return true;
     }
     return false;
 }
@@ -997,7 +1085,8 @@ int process_add_tag(process_t *proc, const char *tag)
     spin_lock(&process_lock);
 
     uint16_t tid = tag_registry_intern(fs->registry, key, value[0] ? value : NULL);
-    if (tid == TAGFS_INVALID_TAG_ID) {
+    if (tid == TAGFS_INVALID_TAG_ID)
+    {
         spin_unlock(&process_lock);
         return -1;
     }
@@ -1073,7 +1162,8 @@ void process_start_initial(process_t *proc)
     per_core_set_kernel_rsp((uint64_t)proc->kernel_stack_top);
 
     uint64_t target_cr3 = proc->context.cr3;
-    if (vmm_pcid_active()) target_cr3 |= (1ULL << 63);  // NOFLUSH
+    if (vmm_pcid_active())
+        target_cr3 |= (1ULL << 63); // NOFLUSH
     __asm__ volatile("mov %0, %%cr3" : : "r"(target_cr3) : "memory");
 
     uint64_t verify_cr3;
@@ -1103,7 +1193,8 @@ size_t process_snapshot_tags(process_t *proc, char *buffer, size_t buffer_size)
         return 0;
 
     TagFSState *fs = tagfs_get_state();
-    if (!fs || !fs->registry) {
+    if (!fs || !fs->registry)
+    {
         buffer[0] = '\0';
         return 0;
     }
@@ -1115,50 +1206,72 @@ size_t process_snapshot_tags(process_t *proc, char *buffer, size_t buffer_size)
     bool first = true;
 
     uint64_t bits = proc->tag_bits;
-    while (bits) {
+    while (bits)
+    {
         uint16_t i = (uint16_t)__builtin_ctzll(bits);
         bits &= bits - 1;
         const char *k = tag_registry_key(reg, i);
         const char *v = tag_registry_value(reg, i);
-        if (!k) continue;
+        if (!k)
+            continue;
 
-        if (!first && pos < buffer_size - 1) buffer[pos++] = ',';
+        if (!first && pos < buffer_size - 1)
+            buffer[pos++] = ',';
         first = false;
 
         size_t klen = strlen(k);
         size_t vlen = v ? strlen(v) : 0;
 
-        if (vlen > 0) {
-            if (pos + klen + 1 + vlen >= buffer_size) break;
-            memcpy(buffer + pos, k, klen); pos += klen;
+        if (vlen > 0)
+        {
+            if (pos + klen + 1 + vlen >= buffer_size)
+                break;
+            memcpy(buffer + pos, k, klen);
+            pos += klen;
             buffer[pos++] = ':';
-            memcpy(buffer + pos, v, vlen); pos += vlen;
-        } else {
-            if (pos + klen >= buffer_size) break;
-            memcpy(buffer + pos, k, klen); pos += klen;
+            memcpy(buffer + pos, v, vlen);
+            pos += vlen;
+        }
+        else
+        {
+            if (pos + klen >= buffer_size)
+                break;
+            memcpy(buffer + pos, k, klen);
+            pos += klen;
         }
     }
 
-    for (uint16_t j = 0; j < proc->tag_overflow_count; j++) {
+    for (uint16_t j = 0; j < proc->tag_overflow_count; j++)
+    {
         uint16_t tid = proc->tag_overflow_ids[j];
         const char *k = tag_registry_key(reg, tid);
         const char *v = tag_registry_value(reg, tid);
-        if (!k) continue;
+        if (!k)
+            continue;
 
-        if (!first && pos < buffer_size - 1) buffer[pos++] = ',';
+        if (!first && pos < buffer_size - 1)
+            buffer[pos++] = ',';
         first = false;
 
         size_t klen = strlen(k);
         size_t vlen = v ? strlen(v) : 0;
 
-        if (vlen > 0) {
-            if (pos + klen + 1 + vlen >= buffer_size) break;
-            memcpy(buffer + pos, k, klen); pos += klen;
+        if (vlen > 0)
+        {
+            if (pos + klen + 1 + vlen >= buffer_size)
+                break;
+            memcpy(buffer + pos, k, klen);
+            pos += klen;
             buffer[pos++] = ':';
-            memcpy(buffer + pos, v, vlen); pos += vlen;
-        } else {
-            if (pos + klen >= buffer_size) break;
-            memcpy(buffer + pos, k, klen); pos += klen;
+            memcpy(buffer + pos, v, vlen);
+            pos += vlen;
+        }
+        else
+        {
+            if (pos + klen >= buffer_size)
+                break;
+            memcpy(buffer + pos, k, klen);
+            pos += klen;
         }
     }
 
@@ -1211,7 +1324,8 @@ static void process_cleanup_immediate(process_t *proc)
     if (!proc)
         return;
 
-    if (proc->tag_overflow_ids) {
+    if (proc->tag_overflow_ids)
+    {
         kfree(proc->tag_overflow_ids);
         proc->tag_overflow_ids = NULL;
         proc->tag_overflow_count = 0;
@@ -1219,7 +1333,8 @@ static void process_cleanup_immediate(process_t *proc)
     }
 
     // Free dynamically allocated FPU state buffer
-    if (proc->context.fpu_state) {
+    if (proc->context.fpu_state)
+    {
         kfree(proc->context.fpu_state);
         proc->context.fpu_state = NULL;
     }
