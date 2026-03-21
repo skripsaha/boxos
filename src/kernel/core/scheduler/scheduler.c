@@ -518,12 +518,14 @@ void scheduler_set_use_context(const char *tags[], uint32_t count)
     if (!fs || !fs->registry)
         return;
 
-    spin_lock(&g_context_lock);
+    // FIX: Resolve all tag IDs BEFORE acquiring g_context_lock.
+    // This prevents lock ordering violation: g_context_lock -> reg->lock.
+    // tag_registry_intern() takes reg->lock internally, so we must call it
+    // outside of g_context_lock to avoid potential deadlock.
+    uint16_t resolved_tags[64];
+    uint32_t resolved_count = 0;
 
-    g_use_context.context_bits = 0;
-    g_use_context.overflow_count = 0;
-
-    for (uint32_t i = 0; i < count; i++)
+    for (uint32_t i = 0; i < count && resolved_count < 64; i++)
     {
         if (!tags[i])
             continue;
@@ -532,8 +534,21 @@ void scheduler_set_use_context(const char *tags[], uint32_t count)
         tagfs_parse_tag(tags[i], key, sizeof(key), value, sizeof(value));
 
         uint16_t tid = tag_registry_intern(fs->registry, key, value[0] ? value : NULL);
-        if (tid == TAGFS_INVALID_TAG_ID)
-            continue;
+        if (tid != TAGFS_INVALID_TAG_ID)
+        {
+            resolved_tags[resolved_count++] = tid;
+        }
+    }
+
+    // Now acquire g_context_lock and update use_context (no nested locks)
+    spin_lock(&g_context_lock);
+
+    g_use_context.context_bits = 0;
+    g_use_context.overflow_count = 0;
+
+    for (uint32_t i = 0; i < resolved_count; i++)
+    {
+        uint16_t tid = resolved_tags[i];
 
         if (tid < 64)
         {
@@ -569,7 +584,7 @@ void scheduler_set_use_context(const char *tags[], uint32_t count)
     g_use_context.enabled = true;
     spin_unlock(&g_context_lock);
 
-    debug_printf("[SCHEDULER] Use context set: %u tags\n", count);
+    debug_printf("[SCHEDULER] Use context set: %u tags\n", resolved_count);
 }
 
 void scheduler_clear_use_context(void)
