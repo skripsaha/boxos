@@ -4,23 +4,25 @@
 # Builds: disk image, floppy image, ISO, VDI, ELF with debug symbols
 # Supports: Linux, macOS, Windows (Cygwin/MSYS2)
 # ===================================================================
+# IMPORTANT: Uses x86_64-elf-gcc cross-compiler on ALL platforms for
+# consistent, reproducible builds. Native system gcc is NEVER used for
+# kernel/userspace compilation (only for host tools like create_tagfs).
+# ===================================================================
 
 UNAME_S := $(shell uname -s)
+UNAME_M := $(shell uname -m)
 
-# OS-specific toolchain selection
-ifeq ($(UNAME_S),Darwin)  # macOS
-    CC       = x86_64-elf-gcc
-    LD       = x86_64-elf-ld
-    OBJCOPY  = x86_64-elf-objcopy
-else ifeq ($(UNAME_S),Linux)  # Linux
-    CC       = gcc
-    LD       = ld
-    OBJCOPY  = objcopy
-else  # Windows (Cygwin/MSYS2) or other
-    CC       = gcc
-    LD       = ld
-    OBJCOPY  = objcopy
-endif
+# Host compiler for tools (native to current OS)
+CC_HOST = gcc
+
+# Cross-compiler toolchain - SAME on all platforms
+# This ensures identical code generation regardless of host OS
+CC       = x86_64-elf-gcc
+LD       = x86_64-elf-ld
+OBJCOPY  = x86_64-elf-objcopy
+AR       = x86_64-elf-ar
+AS       = x86_64-elf-as
+NM       = x86_64-elf-nm
 
 # ==== TOOLS ====
 ASM      = nasm
@@ -47,8 +49,9 @@ ASM_INCLUDE    = -I$(SRCDIR)/kernel/arch/x86-64/gdt/
 ASMFLAGS       =  -g -f bin
 ASMFLAGS_ELF   = -g -f elf64 $(ASM_INCLUDE)
 CFLAGS         = -Os -m64 -ffreestanding -nostdlib -mno-red-zone -mno-sse -mno-mmx -mno-avx \
-                 -mcmodel=kernel -Wall -Wextra -fstack-protector-strong -fno-omit-frame-pointer
-INCLUDE_DIRS   := $(shell find src -type d)
+                 -mcmodel=kernel -fno-PIC -fno-stack-protector -Wall -Wextra -fno-omit-frame-pointer
+# Kernel directories first to ensure correct header resolution
+INCLUDE_DIRS   := src $(shell find src/kernel -type d) $(shell find src/lib -type d) $(shell find src/boot -type d) $(shell find src/include -type d) $(shell find src/userspace -type d)
 CFLAGS         += $(addprefix -I,$(INCLUDE_DIRS))
 LDFLAGS        = -g -T $(ENTRYDIR)/linker.ld -nostdlib -z max-page-size=0x1000 --oformat=binary
 
@@ -125,10 +128,21 @@ all: check-deps $(IMAGE) $(KERNEL_ELF) $(FLOPPY_IMG) $(ISO) $(VBOX_VDI)
 # ==== DEP CHECK ====
 check-deps:
 	@echo "Checking dependencies..."
+	@echo "  Using cross-compiler: $(CC)"
 	@command -v $(ASM) >/dev/null || (echo "ERROR: nasm not found" && exit 1)
-	@command -v $(CC) >/dev/null || (echo "ERROR: gcc not found" && exit 1)
-	@command -v $(LD) >/dev/null || (echo "ERROR: ld not found" && exit 1)
-	@command -v $(QEMU) >/dev/null || echo "WARNING: qemu not found (needed for 'make run')"
+	@command -v $(CC) >/dev/null || (echo "ERROR: x86_64-elf-gcc not found" && echo "" && \
+		echo "Install cross-compiler toolchain:" && \
+		echo "  Debian/Ubuntu: sudo apt install binutils-x86-64-linux-gnu gcc-x86-64-linux-gnu" && \
+		echo "  Then create symlinks:" && \
+		echo "    sudo ln -s /usr/bin/x86_64-linux-gnu-gcc /usr/local/bin/x86_64-elf-gcc" && \
+		echo "    sudo ln -s /usr/bin/x86_64-linux-gnu-ld /usr/local/bin/x86_64-elf-ld" && \
+		echo "    sudo ln -s /usr/bin/x86_64-linux-gnu-objcopy /usr/local/bin/x86_64-elf-objcopy" && \
+		echo "    sudo ln -s /usr/bin/x86_64-linux-gnu-ar /usr/local/bin/x86_64-elf-ar" && \
+		echo "" && \
+		exit 1)
+	@command -v $(LD) >/dev/null || (echo "ERROR: x86_64-elf-ld not found" && exit 1)
+	@command -v $(OBJCOPY) >/dev/null || (echo "ERROR: x86_64-elf-objcopy not found" && exit 1)
+	@command -v $(QEMU) >/dev/null || echo "WARNING: qemu-system-x86_64 not found (needed for 'make run')"
 	@command -v xorriso >/dev/null || echo "WARNING: xorriso not found (needed for ISO)"
 	@command -v VBoxManage >/dev/null || (echo "WARNING: VBoxManage not found" && sleep 2)
 	@echo "All dependencies OK."
@@ -137,9 +151,23 @@ check-deps:
 $(BUILDDIR):
 	@mkdir -p $(BUILDDIR)
 
-$(TAGFS_TOOL): tools/create_tagfs.c
-	@echo "Compiling TagFS tool..."
-	@gcc -o $@ $< -Wall -Wextra
+# Cross-platform build for create_tagfs (host tool, not target)
+# Store OS signature to detect when to rebuild
+TAGFS_OS_SIGNATURE = $(BUILDDIR)/.tagfs_host_os
+
+$(TAGFS_TOOL): tools/create_tagfs.c $(TAGFS_OS_SIGNATURE) | $(BUILDDIR)
+	@if [ ! -f "$(TAGFS_TOOL)" ] || [ "$$(cat $(TAGFS_OS_SIGNATURE) 2>/dev/null)" != "$(UNAME_S):$(UNAME_M)" ]; then \
+		echo "OS changed or first build - compiling TagFS tool for $(UNAME_S) ($(UNAME_M))..."; \
+		$(CC_HOST) -o $@ $< -Wall -Wextra; \
+		echo "$(UNAME_S):$(UNAME_M)" > $(TAGFS_OS_SIGNATURE); \
+		echo "TagFS tool built: $@"; \
+	else \
+		echo "TagFS tool already built for $(UNAME_S), skipping..."; \
+	fi
+
+# Create OS signature file on first build
+$(TAGFS_OS_SIGNATURE): | $(BUILDDIR)
+	@echo "$(UNAME_S):$(UNAME_M)" > $@
 
 $(BUILDDIR)/kernel/drivers/usb/%.o: $(SRCDIR)/kernel/drivers/usb/%.c | $(BUILDDIR)
 	@echo "Compiling USB driver $<..."
@@ -342,7 +370,7 @@ run: $(IMAGE)
 		-m $(MEM) \
 		-serial stdio \
 		$(if $(filter-out 1,$(CORES)),-smp $(CORES)$(comma)cores=$(CORES)$(comma)threads=1$(comma)sockets=1) \
-		$(if $(filter on,$(FULLSCREEN)),-display cocoa$(comma)full-screen=on$(comma)zoom-to-fit=on) \
+		$(if $(filter on,$(FULLSCREEN)),$(if $(filter Darwin,$(UNAME_S)),-display cocoa$(comma)full-screen=on$(comma)zoom-to-fit=on,-full-screen)) \
 		$(if $(filter on,$(USB)),-device qemu-xhci -device usb-kbd) \
 		$(if $(filter on,$(LOG)),-d int$(comma)cpu_reset -no-reboot -no-shutdown -D boxos_qemu.log) \
 		$(if $(filter on,$(DEBUG)),-s -S)
@@ -350,6 +378,7 @@ run: $(IMAGE)
 clean:
 	@echo "Cleaning build..."
 	@rm -rf $(BUILDDIR)
+	@rm -f $(TAGFS_TOOL)
 	@cd $(USERSPACE_DIR) && $(MAKE) clean
 	@cd $(SHELL_DIR) && $(MAKE) clean
 	@cd $(APPS_DIR) && $(MAKE) clean
@@ -358,9 +387,36 @@ clean:
 	@cd $(USERSPACE_DIR)/boxlib && $(MAKE) clean
 
 install-deps:
-	@echo "Installing dependencies..."
-	@sudo apt update
-	@sudo apt install -y nasm gcc binutils qemu-system-x86 xorriso virtualbox make
+	@echo "Installing dependencies for $(UNAME_S)..."
+	@if [ "$(UNAME_S)" = "Linux" ]; then \
+		echo "Linux detected (Debian/Ubuntu)..."; \
+		sudo apt update; \
+		sudo apt install -y nasm qemu-system-x86 xorriso virtualbox make \
+			binutils-x86-64-linux-gnu gcc-x86-64-linux-gnu; \
+		echo "Creating symlinks for x86_64-elf-gcc toolchain..."; \
+		sudo mkdir -p /usr/local/bin; \
+		sudo ln -sf /usr/bin/x86_64-linux-gnu-gcc /usr/local/bin/x86_64-elf-gcc; \
+		sudo ln -sf /usr/bin/x86_64-linux-gnu-ld /usr/local/bin/x86_64-elf-ld; \
+		sudo ln -sf /usr/bin/x86_64-linux-gnu-objcopy /usr/local/bin/x86_64-elf-objcopy; \
+		sudo ln -sf /usr/bin/x86_64-linux-gnu-ar /usr/local/bin/x86_64-elf-ar; \
+		sudo ln -sf /usr/bin/x86_64-linux-gnu-as /usr/local/bin/x86_64-elf-as; \
+		sudo ln -sf /usr/bin/x86_64-linux-gnu-nm /usr/local/bin/x86_64-elf-nm; \
+		echo "Cross-compiler toolchain installed and configured."; \
+	elif [ "$(UNAME_S)" = "Darwin" ]; then \
+		echo "macOS detected..."; \
+		echo "Install dependencies using Homebrew:"; \
+		echo "  brew install nasm qemu xorriso x86_64-elf-gcc"; \
+		echo ""; \
+		echo "Or using MacPorts:"; \
+		echo "  sudo port install nasm qemu xorriso crossgcc-x86_64-elf"; \
+	else \
+		echo "Unsupported OS: $(UNAME_S)"; \
+		echo "Please install dependencies manually:"; \
+		echo "  - nasm (assembler)"; \
+		echo "  - x86_64-elf-gcc (cross-compiler)"; \
+		echo "  - qemu-system-x86_64 (emulator)"; \
+	fi
+	@echo "Run 'make check-deps' to verify installation."
 
 info:
 	@echo $(QEMU) -drive format=raw,file=$(IMAGE) -m 512M -serial stdio -no-reboot -no-shutdown

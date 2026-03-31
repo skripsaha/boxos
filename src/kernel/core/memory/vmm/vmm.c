@@ -19,7 +19,6 @@ static bool g_pull_map_active = false;
 static char last_error[256] = {0};
 static volatile vmm_stats_t global_stats = {0};
 
-// PCID allocator — 0 reserved for kernel, 1-4095 for user contexts
 #define PCID_MAX 4095
 #define PCID_KERNEL 0
 #define CR3_NOFLUSH (1ULL << 63)
@@ -81,58 +80,62 @@ bool vmm_pcid_active(void)
     return g_pcid_active;
 }
 
-static uint16_t pcid_alloc(void)
+static error_t pcid_alloc_safe(uint16_t *out_pcid)
 {
+    if (!out_pcid)
+        return ERR_NULL_POINTER;
+    
     if (!g_pcid_active)
-        return 0;
+    {
+        *out_pcid = 0;
+        return OK;
+    }
 
     spin_lock(&pcid_lock);
-    uint16_t pcid;
-
+    
     if (pcid_free_count > 0)
     {
-        // FIX: Bounds check to prevent array overflow
         if (pcid_free_count > PCID_MAX)
         {
-            panic("PCID: free stack overflow (count=%u, max=%u)",
-                  pcid_free_count, PCID_MAX);
+            spin_unlock(&pcid_lock);
+            return ERR_INTERNAL;
         }
-        pcid = pcid_free_stack[--pcid_free_count];
+        *out_pcid = pcid_free_stack[--pcid_free_count];
+        spin_unlock(&pcid_lock);
+        return OK;
     }
-    else if (pcid_next <= PCID_MAX)
+    
+    if (pcid_next <= PCID_MAX)
     {
-        pcid = pcid_next++;
+        *out_pcid = pcid_next++;
+        spin_unlock(&pcid_lock);
+        return OK;
     }
-    else
+    
+    // PCID exhausted — reset with full TLB flush
+    pcid_next = 2;
+    pcid_free_count = 0;
+    *out_pcid = 1;
+
+    uintptr_t cr4;
+    asm volatile("mov %%cr4, %0" : "=r"(cr4));
+    asm volatile("mov %0, %%cr4" : : "r"(cr4 & ~(1ULL << 7)) : "memory");
+    asm volatile("mov %0, %%cr4" : : "r"(cr4) : "memory");
+
+    if (g_amp.multicore_active && g_amp.total_cores > 1)
     {
-        // All 4095 PCIDs exhausted — full TLB flush on ALL cores and reset.
-        pcid_next = 2;
-        pcid_free_count = 0;
-        pcid = 1;
-
-        // Flush local TLB via CR4.PGE toggle
-        uint64_t cr4;
-        asm volatile("mov %%cr4, %0" : "=r"(cr4));
-        asm volatile("mov %0, %%cr4" : : "r"(cr4 & ~(1ULL << 7)) : "memory");
-        asm volatile("mov %0, %%cr4" : : "r"(cr4) : "memory");
-
-        // Flush remote cores via TLB shootdown (full flush: addr=0, count=0)
-        if (g_amp.multicore_active && g_amp.total_cores > 1)
-        {
-            vmm_shootdown_pages(kernel_context, 0, 0);
-        }
-
-        debug_printf("[VMM] PCID pool exhausted — full TLB flush on all cores + reset\n");
+        vmm_shootdown_pages(kernel_context, 0, 0);
     }
 
     spin_unlock(&pcid_lock);
-    return pcid;
+    return ERR_PCID_EXHAUSTED;
 }
 
 static void pcid_release(uint16_t pcid)
 {
     if (pcid == PCID_KERNEL || pcid > PCID_MAX || !g_pcid_active)
         return;
+    
     spin_lock(&pcid_lock);
     if (pcid_free_count < PCID_MAX)
     {
@@ -502,18 +505,17 @@ vmm_context_t *vmm_create_context(void)
     ctx->heap_start = VMM_USER_HEAP_BASE;
     ctx->heap_end = VMM_USER_HEAP_BASE;
     ctx->stack_top = VMM_USER_STACK_TOP;
-    ctx->pcid = pcid_alloc();
+
+    error_t pcid_err = pcid_alloc_safe(&ctx->pcid);
+    if (pcid_err == ERR_PCID_EXHAUSTED)
+    {
+        debug_printf("[VMM] PCID exhausted, full TLB flush occurred\n");
+    }
 
     spinlock_init(&ctx->lock);
 
     if (kernel_context && kernel_context->pml4)
     {
-        // Higher-half kernel: no PML4[0] identity mapping needed.
-        // ISR code is at higher-half addresses (PML4[511]).
-        // Cabin pages at 0x1000+ are mapped individually by vmm_map_page.
-
-        // Upper half (256..511) is kernel space — shared directly
-        // This includes Pull Map at PML4[272] and kernel code at PML4[511]
         for (int i = 256; i < 512; i++)
         {
             ctx->pml4->entries[i] = kernel_context->pml4->entries[i];

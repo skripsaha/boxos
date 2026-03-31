@@ -495,22 +495,17 @@ void process_set_state(process_t *proc, process_state_t new_state)
     if (!proc)
         return;
 
-    // Hold state_lock across both the state write and the runqueue operation.
-    // Without this, another core could change the state between our write and
-    // the enqueue/dequeue, causing the process to be in the wrong runqueue state.
-    // Lock ordering: state_lock -> runqueue.lock is safe — no path holds
-    // runqueue.lock and then acquires state_lock.
     spin_lock(&proc->state_lock);
     process_state_t old_state = proc->state;
     proc->state = new_state;
 
-    // O(1) RunQueue integration: enqueue/dequeue on PROC_WORKING transitions
     if (new_state == PROC_WORKING && old_state != PROC_WORKING)
     {
-        if (!sched_enqueue(proc))
+        error_t err = sched_enqueue(proc);
+        if (err != OK)
         {
-            debug_printf("[PROCESS] WARNING: sched_enqueue failed for PID %u (state -> WORKING)\n",
-                         proc->pid);
+            debug_printf("[PROCESS] sched_enqueue failed for PID %u: %s\n",
+                         proc->pid, ErrorString(err));
         }
     }
     else if (new_state != PROC_WORKING && old_state == PROC_WORKING)

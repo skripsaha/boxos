@@ -1,15 +1,19 @@
+# ============================================================================
 # BoxOS Utilities Makefile
+# ============================================================================
+# Uses x86_64-elf-gcc cross-compiler on ALL platforms for consistency.
+# ============================================================================
 
-UNAME_S := $(shell uname -s)
+# Cross-compiler toolchain - SAME on all platforms
+CC      = x86_64-elf-gcc
 
-ifeq ($(UNAME_S),Darwin)
-    CC      = x86_64-elf-gcc
-else
-    CC      = gcc
-endif
-
-CFLAGS = -nostdlib -ffreestanding -fno-builtin -mno-red-zone -fstack-protector-strong \
-         -fno-pic -static -Wall -Wextra -g \
+# Compiler flags
+# -fno-stack-protector: No libc in userspace, canary support unavailable
+# -fno-pic: Position-independent code not needed for static binary
+# -mno-red-zone: Required for interrupt context compatibility
+CFLAGS = -nostdlib -ffreestanding -fno-builtin -mno-red-zone \
+         -fno-stack-protector -fno-pic -static \
+         -Wall -Wextra -g \
          -I../boxlib/include \
          -I../../include
 
