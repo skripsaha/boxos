@@ -98,7 +98,11 @@ void kernel_main(void)
     e820_set_entries(e820_map, (size_t)e820_count);
 
     debug_printf("[INIT] PMM...\n");
-    pmm_init();
+    error_t pmm_err = pmm_init();
+    if (pmm_err != OK)
+    {
+        panic("[PANIC] PMM init failed: %s\n", ErrorString(pmm_err));
+    }
 
     debug_printf("[INIT] Kernel Heap...\n");
     mem_init();

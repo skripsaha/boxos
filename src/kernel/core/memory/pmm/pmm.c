@@ -7,6 +7,7 @@
 #include "cpuid.h"
 #include "boot_info.h"
 #include "linker_symbols.h"
+#include "error.h"
 
 static BuddyZone pmm_buddy;
 static bool pmm_initialized = false;
@@ -16,8 +17,6 @@ static uint64_t pmm_max_phys_addr = 0;
 
 static uint64_t pmm_mem_end = 0;
 
-// Deferred high-memory regions (above 4GB identity map limit).
-// Saved during pmm_init Phase 1, freed in pmm_activate_pull_map Phase 2.
 #define PMM_DEFERRED_MAX 8
 typedef struct {
     uintptr_t start;
@@ -26,28 +25,31 @@ typedef struct {
 static DeferredRegion pmm_deferred[PMM_DEFERRED_MAX];
 static size_t pmm_deferred_count = 0;
 
-static void pmm_init_maxphyaddr(void) {
-    pmm_maxphyaddr = cpuid_get_maxphyaddr();
+static error_t pmm_init_maxphyaddr(void) {
+    uint8_t maxphyaddr = cpuid_get_maxphyaddr();
+    if (maxphyaddr < 32 || maxphyaddr > 52) {
+        debug_printf("[PMM] Invalid MAXPHYADDR from CPUID: %u\n", maxphyaddr);
+        return ERR_CPU_ERROR;
+    }
+    
+    pmm_maxphyaddr = maxphyaddr;
     pmm_max_phys_addr = (1ULL << pmm_maxphyaddr);
 
-    debug_printf("[PMM] MAXPHYADDR detection:\n");
-    debug_printf("[PMM]   Physical address bits: %u\n", pmm_maxphyaddr);
-    debug_printf("[PMM]   Max physical address: 0x%llx (%llu MB)\n",
-           pmm_max_phys_addr - 1,
-           pmm_max_phys_addr / (1024 * 1024));
+    debug_printf("[PMM] MAXPHYADDR: %u bits (max 0x%llx)\n",
+           pmm_maxphyaddr, pmm_max_phys_addr - 1);
+    return OK;
 }
 
-void pmm_set_maxphyaddr(uint8_t maxphyaddr) {
+error_t pmm_set_maxphyaddr(uint8_t maxphyaddr) {
     if (maxphyaddr < 32 || maxphyaddr > 52) {
-        debug_printf("[PMM] Invalid MAXPHYADDR: %u (must be 32-52)\n", maxphyaddr);
-        return;
+        return ERR_INVALID_ARGUMENT;
     }
 
     pmm_maxphyaddr = maxphyaddr;
     pmm_max_phys_addr = (1ULL << maxphyaddr);
 
-    debug_printf("[PMM] MAXPHYADDR overridden to %u bits (max 0x%llx)\n",
-           pmm_maxphyaddr, pmm_max_phys_addr - 1);
+    debug_printf("[PMM] MAXPHYADDR set to %u bits\n", pmm_maxphyaddr);
+    return OK;
 }
 
 uint8_t pmm_get_maxphyaddr(void) {
@@ -58,77 +60,55 @@ uint64_t pmm_get_mem_end(void) {
     return pmm_mem_end;
 }
 
-void pmm_init(void) {
+static error_t pmm_defer_region(uintptr_t start, uintptr_t end) {
+    if (pmm_deferred_count >= PMM_DEFERRED_MAX) {
+        debug_printf("[PMM] WARNING: Deferred region table full, dropping 0x%lx-0x%lx\n", start, end);
+        return ERR_NO_MEMORY;
+    }
+    
+    pmm_deferred[pmm_deferred_count].start = start;
+    pmm_deferred[pmm_deferred_count].end = end;
+    pmm_deferred_count++;
+    return OK;
+}
+
+error_t pmm_init(void) {
     if (pmm_initialized) {
-        debug_printf("[PMM] Already initialized!\n");
-        return;
+        return ERR_ALREADY_INITIALIZED;
     }
 
-    pmm_init_maxphyaddr();
+    error_t err = pmm_init_maxphyaddr();
+    if (err != OK) {
+        return err;
+    }
 
-    debug_printf("[PMM] Fetching e820 memory map...\n");
     e820_entry_t* entries = memory_map_get_entries();
     size_t entry_count = memory_map_get_entry_count();
-    debug_printf("[PMM] e820 entry count = %d\n", entry_count);
 
     if (entry_count == 0) {
-        panic("[PMM] ERROR: e820 map is empty!");
+        return ERR_E820_FAILED;
     }
-
-    for (size_t i = 0; i < entry_count; i++) {
-        if(entries[i].type != 0){
-            kprintf("  #%d: base=0x%p len=0x%p type=%d\n", i, (void*)entries[i].base, (void*)entries[i].length, entries[i].type);
-        }
-    }
-    kprintf("  Other entries are ZERO.\n");
-    kprintf("  %[W]Do not use type 2 entries. Only type 1 - only RAM.%[D]\n\n");
 
     uintptr_t mem_end = 0;
     for (size_t i = 0; i < entry_count; i++) {
-        debug_printf("[PMM] Entry %zu: base=0x%llx len=0x%llx type=%u\n",
-                i, entries[i].base, entries[i].length, entries[i].type);
         if (entries[i].type == E820_USABLE && entries[i].length > 0) {
-            debug_printf("[PMM] --> USABLE!\n");
             uintptr_t region_end = entries[i].base + entries[i].length;
             if (region_end > mem_end) {
                 mem_end = region_end;
-                debug_printf("[PMM] --> New mem_end = 0x%llx\n", (unsigned long long)mem_end);
             }
         }
     }
-    debug_printf("[PMM] mem_end = 0x%p\n", (void*)mem_end);
-
-    debug_printf("[PMM] E820 Memory Map (%zu entries):\n", entry_count);
-    for (size_t i = 0; i < entry_count; i++) {
-        const char* type_str = "UNKNOWN";
-        switch (entries[i].type) {
-            case E820_USABLE:     type_str = "USABLE"; break;
-            case E820_RESERVED:   type_str = "RESERVED"; break;
-            case E820_ACPI_RECL:  type_str = "ACPI_RECL"; break;
-            case E820_ACPI_NVS:   type_str = "ACPI_NVS"; break;
-            case E820_BAD:        type_str = "BAD"; break;
-        }
-        debug_printf("[PMM]   [%zu] 0x%016llx-0x%016llx (%10llu bytes) %s\n",
-                     i,
-                     (uint64_t)entries[i].base,
-                     (uint64_t)(entries[i].base + entries[i].length - 1),
-                     (uint64_t)entries[i].length,
-                     type_str);
-    }
 
     if (mem_end > pmm_max_phys_addr) {
-        debug_printf("[PMM] WARNING: e820 reports RAM up to 0x%lx, clamping to MAXPHYADDR 0x%llx\n",
-               mem_end, pmm_max_phys_addr - 1);
         mem_end = pmm_max_phys_addr;
     }
 
     pmm_mem_end = mem_end;
 
     if (mem_end <= LOW_MEMORY_END) {
-        panic("[PMM] ERROR: Not enough usable RAM!");
+        panic("[PMM] Not enough usable RAM!");
     }
 
-    // Place alloc_map after all boot infrastructure (kernel + page tables + stack)
     boot_info_t *bi = boot_info_get();
     uintptr_t map_start;
     if (boot_info_valid(bi)) {
@@ -141,28 +121,22 @@ void pmm_init(void) {
     uintptr_t alloc_map_phys = map_start;
     size_t temp_pages = (mem_end - map_start) / PMM_PAGE_SIZE;
     size_t alloc_map_size = (temp_pages + 7) / 8;
-    debug_printf("[PMM] Buddy alloc_map at %p (%zu bytes)\n", alloc_map, alloc_map_size);
 
     uintptr_t zone_base = ALIGN_UP(map_start + alloc_map_size, 4096);
-    debug_printf("[PMM] Buddy zone base: 0x%lx\n", zone_base);
 
     if (zone_base >= mem_end) {
-        panic("[PMM] FATAL: Kernel too large for available memory!");
+        panic("[PMM] Kernel too large for available memory!");
     }
 
     size_t total_pages = (mem_end - zone_base) / PMM_PAGE_SIZE;
-    debug_printf("[PMM] Buddy total pages: %zu\n", total_pages);
 
     if (total_pages == 0) {
-        panic("[PMM] ERROR: No usable pages!");
+        panic("[PMM] No usable pages!");
     }
 
-    // Initialize buddy allocator (marks all pages as allocated)
     buddy_init(&pmm_buddy, zone_base, total_pages,
                alloc_map, alloc_map_phys, alloc_map_size);
 
-    // Phase 1: Free usable e820 regions below 4GB (identity-mapped, accessible now).
-    // Regions above 4GB are deferred to pmm_activate_pull_map() when Pull Map is live.
     #define IDENTITY_MAP_LIMIT 0x100000000ULL
     size_t unusable_pages = 0;
 
@@ -181,15 +155,11 @@ void pmm_init(void) {
                 end = pmm_max_phys_addr;
             }
 
-            // Defer regions above identity map limit to phase 2
             if (start >= IDENTITY_MAP_LIMIT || end > IDENTITY_MAP_LIMIT) {
                 uintptr_t hi_start = (start >= IDENTITY_MAP_LIMIT) ? start : IDENTITY_MAP_LIMIT;
                 uintptr_t hi_end = end;
-                if (hi_start < hi_end && pmm_deferred_count < PMM_DEFERRED_MAX) {
-                    pmm_deferred[pmm_deferred_count].start = hi_start;
-                    pmm_deferred[pmm_deferred_count].end = hi_end;
-                    pmm_deferred_count++;
-                    debug_printf("[PMM] Deferred high-memory region: 0x%lx-0x%lx\n", hi_start, hi_end);
+                if (hi_start < hi_end) {
+                    pmm_defer_region(hi_start, hi_end);
                 }
                 if (start >= IDENTITY_MAP_LIMIT) continue;
                 end = IDENTITY_MAP_LIMIT;
@@ -199,35 +169,22 @@ void pmm_init(void) {
             if (start < zone_base) start = zone_base;
             if (start >= end) continue;
 
-            debug_printf("[PMM] Buddy: freeing 0x%lx-0x%lx (%zu pages)\n",
-                         start, end, (end - start) / PMM_PAGE_SIZE);
             buddy_free_range(&pmm_buddy, start, end);
         }
     }
 
     if (unusable_pages > 0) {
-        debug_printf("[PMM] WARNING: %zu pages beyond MAXPHYADDR marked unusable\n", unusable_pages);
+        debug_printf("[PMM] %zu pages beyond MAXPHYADDR unusable\n", unusable_pages);
     }
 
-    // Reserve kernel and alloc_map regions
-    kprintf("PMM: Reserved Kernel at %p-%p\n", bi->kernel_start, bi->kernel_end);
     buddy_reserve_range(&pmm_buddy, (uintptr_t)bi->kernel_start, (uintptr_t)bi->kernel_end);
-    kprintf("PMM: Reserved AllocMap at %p-%p\n", (void*)alloc_map_phys, (void*)(alloc_map_phys + alloc_map_size));
     buddy_reserve_range(&pmm_buddy, alloc_map_phys, alloc_map_phys + alloc_map_size);
 
     pmm_initialized = true;
 
-    debug_printf("[PMM] Buddy allocator initialized: %zu MB available, %zu pages free\n",
-        (pmm_buddy.free_count * PMM_PAGE_SIZE) / (1024 * 1024),
-        pmm_buddy.free_count);
-
-    // Log free list distribution
-    for (int o = 0; o <= BUDDY_MAX_ORDER; o++) {
-        if (pmm_buddy.free_lists[o].count > 0) {
-            debug_printf("[PMM]   Order %2d (%6zuKB blocks): %zu free\n",
-                         o, (1UL << o) * 4, pmm_buddy.free_lists[o].count);
-        }
-    }
+    debug_printf("[PMM] Initialized: %zu MB available\n",
+        (pmm_buddy.free_count * PMM_PAGE_SIZE) / (1024 * 1024));
+    return OK;
 }
 
 void* pmm_alloc(size_t pages) {

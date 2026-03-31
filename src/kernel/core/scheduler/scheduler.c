@@ -187,82 +187,85 @@ int sched_determine_priority(process_t *proc)
     return SCHED_PRIO_NORMAL;
 }
 
-// Enqueue a process into its home core's RunQueue.
-// Returns: true on success, false on error (invalid proc, idle proc, or bad home_core)
-bool sched_enqueue(process_t *proc)
+error_t sched_enqueue(process_t *proc)
 {
     if (!proc || process_is_idle(proc))
-        return false;
+        return ERR_INVALID_ARGUMENT;
 
-    // CRITICAL: Bounds-check home_core before indexing g_core_sched[]
     if (proc->home_core >= g_amp.total_cores)
     {
-        debug_printf("[SCHED] ERROR: sched_enqueue: PID %u has invalid home_core %u (max %u)\n",
-                     proc->pid, proc->home_core, g_amp.total_cores);
-        return false;
+        debug_printf("[SCHED] Invalid home_core %u for PID %u\n",
+                     proc->home_core, proc->pid);
+        return ERR_HOME_CORE_INVALID;
     }
 
     scheduler_state_t *home = &g_core_sched[proc->home_core];
-
     int prio = sched_determine_priority(proc);
 
     spin_lock(&home->runqueue.lock);
-    bool result = false;
+    error_t result = ERR_RUNQUEUE_FULL;
+    
     if (!runqueue_contains(&home->runqueue, proc))
     {
-        result = runqueue_enqueue(&home->runqueue, proc, prio);
-        if (!result)
+        if (runqueue_enqueue(&home->runqueue, proc, prio))
         {
-            debug_printf("[SCHED] ERROR: sched_enqueue: RunQueue full for PID %u on core %u\n",
-                         proc->pid, proc->home_core);
+            result = OK;
         }
     }
     else
     {
-        result = true; // Already enqueued, consider success
+        result = OK;
     }
     spin_unlock(&home->runqueue.lock);
 
     return result;
 }
 
-// Enqueue a process onto a specific core's RunQueue (cross-core safe).
-void sched_enqueue_on(uint8_t core_idx, process_t *proc)
+error_t sched_enqueue_on(uint8_t core_idx, process_t *proc)
 {
     if (!proc || process_is_idle(proc))
-        return;
+        return ERR_INVALID_ARGUMENT;
+
+    if (core_idx >= g_amp.total_cores)
+        return ERR_HOME_CORE_INVALID;
 
     scheduler_state_t *target = &g_core_sched[core_idx];
-
     int prio = sched_determine_priority(proc);
 
     spin_lock(&target->runqueue.lock);
+    error_t result = ERR_RUNQUEUE_FULL;
+    
     if (!runqueue_contains(&target->runqueue, proc))
     {
-        runqueue_enqueue(&target->runqueue, proc, prio);
+        if (runqueue_enqueue(&target->runqueue, proc, prio))
+        {
+            result = OK;
+        }
+    }
+    else
+    {
+        result = OK;
     }
     spin_unlock(&target->runqueue.lock);
+
+    return result;
 }
 
-// Remove a process from its home core's RunQueue.
-void sched_dequeue(process_t *proc)
+error_t sched_dequeue(process_t *proc)
 {
     if (!proc || process_is_idle(proc))
-        return;
+        return ERR_INVALID_ARGUMENT;
 
-    // CRITICAL: Bounds-check home_core before indexing g_core_sched[]
     if (proc->home_core >= g_amp.total_cores)
-    {
-        debug_printf("[SCHED] ERROR: sched_dequeue: PID %u has invalid home_core %u (max %u)\n",
-                     proc->pid, proc->home_core, g_amp.total_cores);
-        return;
-    }
+        return ERR_HOME_CORE_INVALID;
 
     scheduler_state_t *home = &g_core_sched[proc->home_core];
 
     spin_lock(&home->runqueue.lock);
     runqueue_remove(&home->runqueue, proc);
     spin_unlock(&home->runqueue.lock);
+    
+    return OK;
 }
 
 // ---------------------------------------------------------------------------
@@ -314,11 +317,7 @@ process_t *scheduler_select_next(void)
     while (next && !process_is_idle(next) &&
            __atomic_load_n(&next->destroying, __ATOMIC_ACQUIRE))
     {
-        // Process is being destroyed — skip it and get next.
-        // Do NOT put it back — let process_destroy handle cleanup.
-        process_t *skipped = next;
         next = runqueue_dequeue_best(&s->runqueue);
-        // skipped will be freed when its ref_count reaches 0
     }
 
     spin_unlock(&s->runqueue.lock);

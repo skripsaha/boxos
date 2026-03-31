@@ -1,14 +1,20 @@
-UNAME := $(shell uname -s)
-ifeq ($(UNAME),Darwin)
-    CC = x86_64-elf-gcc
-    AR = x86_64-elf-ar
-else
-    CC = gcc
-    AR = ar
-endif
+# ============================================================================
+# BoxLib Makefile - Cross-platform userspace C library
+# ============================================================================
+# Uses x86_64-elf-gcc cross-compiler on ALL platforms for consistency.
+# Native system gcc is NEVER used.
+# ============================================================================
 
+# Cross-compiler toolchain - SAME on all platforms
+CC  = x86_64-elf-gcc
+AR  = x86_64-elf-ar
+
+# Compiler flags
+# -fno-stack-protector: No libc in userspace, canary support unavailable
+# -mno-red-zone: Required for kernel/interrupt context compatibility
 CFLAGS = -nostdlib -fno-builtin -ffreestanding -mno-red-zone \
-         -Iinclude -I../../include -Wall -Wextra -O2 -fstack-protector-strong -Wno-unused-parameter
+         -fno-stack-protector \
+         -Iinclude -I../../include -Wall -Wextra -O2 -Wno-unused-parameter
 
 SRCS = src/core/notify.c src/core/result.c src/core/string.c \
        src/core/io.c src/core/file.c src/core/system.c \

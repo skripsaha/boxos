@@ -147,7 +147,7 @@ static void guide_process_pocket(process_t *proc)
                 pocket->error_code = ERR_INTERNAL;
             }
             debug_printf("[GUIDE] Deck 0x%02x failed: %s\n",
-                         deck_id, error_string(pocket->error_code));
+                         deck_id, ErrorString(pocket->error_code));
             execution_deck_handler(pocket, proc);
             need_execution_deck = false;
             break;

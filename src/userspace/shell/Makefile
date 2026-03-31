@@ -1,21 +1,21 @@
+# ============================================================================
 # BoxOS Shell Makefile
+# ============================================================================
+# Uses x86_64-elf-gcc cross-compiler on ALL platforms for consistency.
+# ============================================================================
 
-# Detect OS for cross-compilation
-UNAME_S := $(shell uname -s)
-
-ifeq ($(UNAME_S),Darwin)
-    # macOS: use cross-compiler
-    CC = x86_64-elf-gcc
-    AR = x86_64-elf-ar
-else
-    # Linux: use system compiler
-    CC = gcc
-    AR = ar
-endif
+# Cross-compiler toolchain - SAME on all platforms
+CC      = x86_64-elf-gcc
+AR      = x86_64-elf-ar
+OBJCOPY = x86_64-elf-objcopy
 
 # Compiler flags
-CFLAGS = -nostdlib -ffreestanding -fno-builtin -mno-red-zone -fstack-protector-strong \
-         -fno-pic -static -Wall -Wextra -g \
+# -fno-stack-protector: No libc in userspace, canary support unavailable
+# -fno-pic: Position-independent code not needed for static binary
+# -mno-red-zone: Required for interrupt context compatibility
+CFLAGS = -nostdlib -ffreestanding -fno-builtin -mno-red-zone \
+         -fno-stack-protector -fno-pic -static \
+         -Wall -Wextra -g \
          -I../boxlib/include \
          -I../../include \
          -I.
@@ -40,7 +40,6 @@ OBJS = $(SRCS:.c=.o)
 # Output binary
 TARGET_ELF = shell.elf
 TARGET = shell.bin
-OBJCOPY = x86_64-elf-objcopy
 
 # Build rules
 all: $(TARGET)
