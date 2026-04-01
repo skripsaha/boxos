@@ -4,43 +4,55 @@
 #include "../../lib/kernel/ktypes.h"
 #include "../../lib/kernel/klib.h"
 #include "../../include/boxos_magic.h"
+#include "../../include/boxos_limits.h"
+#include "../core/error/error.h"
 
-// ----------------------------------------------------------------------------
-// Constants
-// ----------------------------------------------------------------------------
+// ============================================================================
+// TagFS Constants — Production Configuration
+// ============================================================================
 
 #define TAGFS_VERSION               1
-#define TAGFS_SB_CRC_OFFSET        400   /* CRC32 stored at reserved[400..403] */
-#define TAGFS_SB_CRC_SENTINEL_OFFSET  399   /* sentinel byte at reserved[399] */
-#define TAGFS_SB_CRC_SENTINEL         0xCC  /* written alongside CRC to mark presence */
 #define TAGFS_BLOCK_SIZE            4096
 
+// CRC configuration
+#define TAGFS_SB_CRC_OFFSET         400
+#define TAGFS_SB_CRC_SENTINEL_OFFSET 399
+#define TAGFS_SB_CRC_SENTINEL       0xCC
+
+// Disk Layout (sectors)
 #define TAGFS_SUPERBLOCK_SECTOR     1034
 #define TAGFS_BACKUP_SB_SECTOR      1035
-#define TAGFS_JOURNAL_SB_SECTOR     1036
+#define TAGFS_DISK_BOOK_SB_SECTOR   1036
+#define TAGFS_DISK_BOOK_START       1038
 
+// Tag constants
 #define TAGFS_INVALID_TAG_ID        0xFFFF
 #define TAGFS_MAX_TAG_ID            0xFFFE
 
+// File flags
 #define TAGFS_FILE_ACTIVE           (1 << 0)
 #define TAGFS_FILE_TRASHED          (1 << 1)
 #define TAGFS_FILE_HIDDEN           (1 << 2)
 
+// Handle flags
 #define TAGFS_HANDLE_READ           (1 << 0)
 #define TAGFS_HANDLE_WRITE          (1 << 1)
 
+// Registry constants
 #define TAGFS_REG_BUCKETS           512
 #define TAGFS_KEY_BUCKETS           128
 #define TAGFS_REGISTRY_DATA_SIZE    4080
 #define TAGFS_MPOOL_DATA_SIZE       4080
 #define TAGFS_FTABLE_PER_BLOCK      510
 
-// ----------------------------------------------------------------------------
-// On-Disk Structures
-// ----------------------------------------------------------------------------
+// Snapshot limits (production)
+#define TAGFS_MAX_SNAPSHOTS         64
+#define TAGFS_SNAPSHOT_NAME_LEN     32
 
-// All 9 uint32_t header fields + 9 uint32_t region fields + 2 uint64_t +
-// 16-byte UUID + 1 uint32_t backup = 108 bytes. Pad to 512.
+// ============================================================================
+// On-Disk Structures
+// ============================================================================
+
 typedef struct __packed {
     uint32_t magic;
     uint32_t version;
@@ -60,7 +72,7 @@ typedef struct __packed {
     uint32_t metadata_pool_block_count;
     uint32_t block_bitmap_sector;
     uint32_t block_bitmap_sector_count;
-    uint32_t journal_superblock_sector;
+    uint32_t disk_book_superblock_sector;
 
     uint64_t fs_created_time;
     uint64_t fs_modified_time;
@@ -433,76 +445,54 @@ void tagfs_format_tag(char* dest, size_t dest_size, const char* key, const char*
 int  tagfs_parse_tag(const char* tag_string, char* key, size_t key_size,
                      char* value, size_t value_size);
 
-// ----------------------------------------------------------------------------
-// DataRoll Journaling API (Production Feature)
-// ----------------------------------------------------------------------------
-
-// Forward declaration - DataRoll included separately
-struct DataRollTxn;
-
-// ----------------------------------------------------------------------------
-// Snapshots API (Production Feature - ZFS-like)
-// ----------------------------------------------------------------------------
-
-#define TAGFS_MAX_SNAPSHOTS     64
-#define TAGFS_SNAPSHOT_NAME_LEN 32
+// ============================================================================
+// Snapshot API
+// ============================================================================
 
 typedef struct {
     uint32_t snapshot_id;
-    uint32_t parent_file_id;   // 0 = entire filesystem snapshot
+    uint32_t parent_file_id;
     uint64_t created_time;
-    uint32_t file_count;       // Number of files in snapshot
-    uint64_t total_size;       // Total size of all files
+    uint32_t file_count;
+    uint64_t total_size;
     char     name[TAGFS_SNAPSHOT_NAME_LEN];
-    uint8_t  flags;            // 0x01 = readonly, 0x02 = auto-created
+    uint8_t  flags;
     uint8_t  _reserved[3];
 } TagFSSnapshot;
 
-// Snapshot management
-int tagfs_snapshot_create(const char* name, uint32_t file_id);  // 0 = entire FS
+int tagfs_snapshot_create(const char* name, uint32_t file_id);
 int tagfs_snapshot_delete(uint32_t snapshot_id);
-int tagfs_snapshot_restore(uint32_t snapshot_id, uint32_t target_file_id);
 int tagfs_snapshot_list(uint32_t* ids, uint32_t max_count);
 int tagfs_snapshot_info(uint32_t snapshot_id, TagFSSnapshot* info);
 
-// File versioning (auto-snapshot before modify)
-int tagfs_enable_versioning(uint32_t file_id, uint32_t max_versions);
-int tagfs_disable_versioning(uint32_t file_id);
-int tagfs_list_versions(uint32_t file_id, uint32_t* snapshot_ids, uint32_t max_count);
-
-// ----------------------------------------------------------------------------
-// Accessor Functions (no extern needed)
-// ----------------------------------------------------------------------------
-
-WellKnownTags* tagfs_get_well_known_tags(void);
-TagFSState* tagfs_get_state(void);  // Defined in tagfs.c
-
-// ----------------------------------------------------------------------------
-// Data Deduplication API (Production Feature - ZFS-like)
-// ----------------------------------------------------------------------------
-
-void TagFS_DedupInit(void);
-void TagFS_DedupShutdown(void);
-int TagFS_DedupCheck(const uint8_t* BlockData, uint32_t* ExistingBlock);
-int TagFS_DedupRegister(uint32_t PhysicalBlock, const uint8_t* BlockData);
-int TagFS_DedupUnregister(uint32_t PhysicalBlock);
-void TagFS_DedupGetStats(uint64_t* BlocksSaved, uint64_t* BytesSaved, uint32_t* EntryCount);
-int TagFS_DedupAllocBlock(const uint8_t* BlockData, uint32_t* AllocatedBlock, int* IsDuplicate);
-
-// ----------------------------------------------------------------------------
-// Self-Healing API (Production Feature - ZFS-like)
-// ----------------------------------------------------------------------------
+// ============================================================================
+// Self-Healing API (Stub)
+// ============================================================================
 
 void TagFS_SelfHealInit(void);
 void TagFS_SelfHealShutdown(void);
-void TagFS_SelfHealEnable(bool Enable);
-int TagFS_SelfHealGetStats(
-    uint64_t* CorruptionsDetected,
-    uint64_t* CorruptionsFixed,
-    uint64_t* ScrubRuns,
-    uint64_t* LastScrubTime);
-void TagFS_SelfHealOnMetadataWrite(uint32_t BlockNumber, const uint8_t* Data);
-int TagFS_SelfHealOnMetadataRead(uint32_t BlockNumber, uint8_t* Data);
+void TagFS_SelfHealEnable(bool enable);
+void TagFS_SelfHealOnMetadataWrite(uint32_t block_number, const uint8_t* data);
+int TagFS_SelfHealOnMetadataRead(uint32_t block_number, uint8_t* data);
 void TagFS_SelfHealPeriodicCheck(void);
 
-#endif // TAGFS_H
+// ============================================================================
+// Data Deduplication API (Stub)
+// ============================================================================
+
+void TagFS_DedupInit(void);
+void TagFS_DedupShutdown(void);
+int TagFS_DedupCheck(const uint8_t* block_data, uint32_t* existing_block);
+int TagFS_DedupRegister(uint32_t physical_block, const uint8_t* block_data);
+int TagFS_DedupUnregister(uint32_t physical_block);
+void TagFS_DedupGetStats(uint64_t* blocks_saved, uint64_t* bytes_saved, uint32_t* entry_count);
+int TagFS_DedupAllocBlock(const uint8_t* block_data, uint32_t* allocated_block, int* is_duplicate);
+
+// ============================================================================
+// Accessor Functions
+// ============================================================================
+
+WellKnownTags* tagfs_get_well_known_tags(void);
+TagFSState* tagfs_get_state(void);
+
+#endif
