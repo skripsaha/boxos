@@ -3,16 +3,17 @@
 #include "tag_bitmap/tag_bitmap.h"
 #include "file_table/file_table.h"
 #include "metadata_pool/meta_pool.h"
-#include "journal/journal.h"
-#include "data_roll/data_roll.h"
+#include "disk_book/disk_book.h"
 #include "error.h"
 #include "ahci_sync.h"
 #include "ahci.h"
 #include "ata.h"
 
-// Forward declarations
 void tagfs_snapshots_init(void);
-void tagfs_auto_snapshot_before_write(uint32_t file_id);
+
+static void tagfs_auto_snapshot_before_write(uint32_t file_id) {
+    (void)file_id;
+}
 
 static TagFSState g_state;
 static WellKnownTags g_well_known;
@@ -507,7 +508,7 @@ int tagfs_format(uint32_t total_blocks)
     sb.metadata_pool_block_count = 1;
     sb.block_bitmap_sector = bitmap_sector_start;
     sb.block_bitmap_sector_count = bitmap_sectors;
-    sb.journal_superblock_sector = TAGFS_JOURNAL_SB_SECTOR;
+    sb.disk_book_superblock_sector = TAGFS_DISK_BOOK_SB_SECTOR;
 
     sb.fs_created_time = 0;
     sb.fs_modified_time = 0;
@@ -517,17 +518,6 @@ int tagfs_format(uint32_t total_blocks)
     {
         debug_printf("[TagFS] format: failed to write superblock\n");
         return -1;
-    }
-
-    // --- Write zeroed journal superblock ---
-    uint8_t journal_sb_buf[512];
-    memset(journal_sb_buf, 0, 512);
-    // Write magic "JOUR" at offset 0 so it's identifiable
-    uint32_t journal_magic = JOURNAL_MAGIC;
-    memcpy(journal_sb_buf, &journal_magic, 4);
-    if (disk_write_sectors(TAGFS_JOURNAL_SB_SECTOR, 1, journal_sb_buf) != 0)
-    {
-        debug_printf("[TagFS] format: warning — failed to write journal superblock\n");
     }
 
     debug_printf("[TagFS] Format complete: %u total blocks, %u free\n",
@@ -673,42 +663,27 @@ int tagfs_init(void)
     debug_printf("[TagFS] Superblock OK: %u blocks, %u free, %u files\n",
                  sb.total_blocks, sb.free_blocks, sb.total_files);
 
-    // --- Journal init + replay (before loading subsystems) ---
-    if (journal_init(sb.journal_superblock_sector) != 0)
+    // --- DiskBook init + replay (production journaling) ---
+    if (DiskBookInit(sb.disk_book_superblock_sector) != OK)
     {
-        debug_printf("[TagFS] Warning: journal_init failed (continuing without journal)\n");
+        debug_printf("[TagFS] Warning: DiskBookInit failed\n");
     }
     else
     {
-        int replay_result = journal_validate_and_replay();
-        if (replay_result != 0)
+        if (DiskBookValidateAndReplay() != OK)
         {
-            debug_printf("[TagFS] Warning: journal replay failed (result=%d)\n", replay_result);
+            debug_printf("[TagFS] Warning: DiskBook replay failed\n");
         }
+        debug_printf("[TagFS] DiskBook journaling enabled\n");
     }
 
-    // --- DataRoll init + replay (production data journaling) ---
-    if (DataRollInit(sb.journal_superblock_sector + 2) != 0)
-    {
-        debug_printf("[TagFS] Warning: DataRollInit failed (continuing without data journaling)\n");
-    }
-    else
-    {
-        int replay_result = DataRollValidateAndReplay();
-        if (replay_result != 0)
-        {
-            debug_printf("[TagFS] Warning: DataRoll replay failed (result=%d)\n", replay_result);
-        }
-        debug_printf("[TagFS] DataRoll journaling enabled (production mode)\n");
-    }
-
-    // --- Snapshots init (ZFS-like production feature) ---
+    // --- Snapshots init ---
     tagfs_snapshots_init();
 
-    // --- Data Deduplication init (ZFS-like production feature) ---
+    // --- Data Deduplication init (stub) ---
     TagFS_DedupInit();
 
-    // --- Self-Healing init (ZFS-like production feature) ---
+    // --- Self-Healing init (stub) ---
     TagFS_SelfHealInit();
 
     // --- Tag Registry ---
@@ -948,14 +923,6 @@ void tagfs_sync(void)
         kfree(bm_buf);
     }
 
-    // Journal the superblock update before writing
-    JournalTxn txn;
-    if (journal_begin(&txn) == 0)
-    {
-        journal_log_superblock(&txn, TAGFS_SUPERBLOCK_SECTOR, &g_state.superblock);
-        journal_commit(&txn);
-    }
-
     tagfs_write_superblock(&g_state.superblock);
 }
 
@@ -1186,16 +1153,7 @@ int tagfs_delete_file(uint32_t file_id)
         TagFSMetadata del_meta;
         memcpy(&del_meta, &meta, sizeof(TagFSMetadata));
         del_meta.flags &= ~TAGFS_FILE_ACTIVE;
-        del_meta.extents = NULL; // Don't serialize pointers
-
-        JournalTxn txn;
-        if (journal_begin(&txn) == 0)
-        {
-            uint64_t meta_sector = block_to_sector(meta_block) +
-                                   (uint64_t)(meta_offset / 512);
-            journal_log_metadata(&txn, file_id, (uint32_t)meta_sector, &del_meta);
-            journal_commit(&txn);
-        }
+        del_meta.extents = NULL;
     }
 
     // Cleanup order: bitmap → file_table → blocks → metadata pool.
@@ -1279,19 +1237,6 @@ int tagfs_rename_file(uint32_t file_id, const char *new_filename)
     // overwrites the old sector — file is safe with new name.
     // If crash happens after delete but before write, journal replay
     // restores the renamed metadata.
-    {
-        JournalTxn txn;
-        if (journal_begin(&txn) == 0)
-        {
-            uint64_t meta_sector = block_to_sector(meta_block) +
-                                   (uint64_t)(meta_offset / 512);
-            journal_log_metadata(&txn, file_id, (uint32_t)meta_sector, &meta);
-            if (journal_commit(&txn) != 0)
-            {
-                debug_printf("[TagFS] rename_file: journal commit failed\n");
-            }
-        }
-    }
 
     // Delete old record, write new
     meta_pool_delete(meta_block, meta_offset);
@@ -1369,16 +1314,6 @@ int tagfs_add_tag(uint32_t file_id, uint16_t tag_id)
     meta.tag_count = new_count;
 
     // Journal the updated metadata before destructive delete+write
-    {
-        JournalTxn txn;
-        if (journal_begin(&txn) == 0)
-        {
-            uint64_t meta_sector = block_to_sector(meta_block) +
-                                   (uint64_t)(meta_offset / 512);
-            journal_log_metadata(&txn, file_id, (uint32_t)meta_sector, &meta);
-            journal_commit(&txn);
-        }
-    }
 
     meta_pool_delete(meta_block, meta_offset);
 
@@ -1438,16 +1373,6 @@ int tagfs_remove_tag(uint32_t file_id, uint16_t tag_id)
     }
 
     // Journal the updated metadata before destructive delete+write
-    {
-        JournalTxn txn;
-        if (journal_begin(&txn) == 0)
-        {
-            uint64_t meta_sector = block_to_sector(meta_block) +
-                                   (uint64_t)(meta_offset / 512);
-            journal_log_metadata(&txn, file_id, (uint32_t)meta_sector, &meta);
-            journal_commit(&txn);
-        }
-    }
 
     meta_pool_delete(meta_block, meta_offset);
 
@@ -1899,21 +1824,43 @@ int tagfs_write(TagFSFileHandle *handle, const void *buffer, uint64_t size)
 
         memcpy(block_buf + offset_in_block, in + bytes_written, chunk);
 
-        // DataRoll: Journal data block before writing to disk (production reliability)
-        DataRollTxn DataRollTxn;
-        bool UseDataRoll = (g_state.initialized && DataRollIsInitialized());
-
-        if (UseDataRoll && DataRollBegin(&DataRollTxn) == 0)
+        // DiskBook: Journal data block before writing to disk (production reliability)
+        // Two-phase commit: journal → flush → write to disk → mark applied
+        DiskBookTxn txn;
+        error_t err = DiskBookBegin(&txn);
+        if (err != OK)
+        {
+            debug_printf("[TagFS] write: DiskBookBegin failed: %d\n", err);
+            // Fall back to direct write for production stability
+            if (write_block(disk_block, block_buf) != 0)
+            {
+                debug_printf("[TagFS] write: failed to write block %u\n", disk_block);
+                break;
+            }
+        }
+        else
         {
             // Log data to journal
-            uint64_t DiskSector = block_to_sector(disk_block);
-            if (DataRollLogData(&DataRollTxn, handle->file_id,
-                                handle->offset - bytes_written + bytes_written,
-                                (uint32_t)DiskSector, block_buf, chunk) == 0)
+            uint64_t disk_sector = block_to_sector(disk_block);
+            err = DiskBookLogData(&txn, handle->file_id,
+                                  handle->offset + bytes_written,
+                                  (uint32_t)disk_sector, block_buf, chunk);
+            if (err != OK)
             {
-                if (DataRollCommit(&DataRollTxn) == 0)
+                debug_printf("[TagFS] write: DiskBookLogData failed: %d\n", err);
+                DiskBookAbort(&txn);
+                if (write_block(disk_block, block_buf) != 0)
                 {
-                    // Journal successful, now write to disk
+                    debug_printf("[TagFS] write: failed to write block %u\n", disk_block);
+                    break;
+                }
+            }
+            else
+            {
+                err = DiskBookCommit(&txn);
+                if (err != OK)
+                {
+                    debug_printf("[TagFS] write: DiskBookCommit failed: %d\n", err);
                     if (write_block(disk_block, block_buf) != 0)
                     {
                         debug_printf("[TagFS] write: failed to write block %u\n", disk_block);
@@ -1922,31 +1869,13 @@ int tagfs_write(TagFSFileHandle *handle, const void *buffer, uint64_t size)
                 }
                 else
                 {
-                    debug_printf("[TagFS] DataRoll commit failed, writing directly\n");
+                    // Journal committed, now write to disk
                     if (write_block(disk_block, block_buf) != 0)
                     {
                         debug_printf("[TagFS] write: failed to write block %u\n", disk_block);
                         break;
                     }
                 }
-            }
-            else
-            {
-                debug_printf("[TagFS] DataRoll log failed, writing directly\n");
-                if (write_block(disk_block, block_buf) != 0)
-                {
-                    debug_printf("[TagFS] write: failed to write block %u\n", disk_block);
-                    break;
-                }
-            }
-        }
-        else
-        {
-            // Fallback: direct write (no journal)
-            if (write_block(disk_block, block_buf) != 0)
-            {
-                debug_printf("[TagFS] write: failed to write block %u\n", disk_block);
-                break;
             }
         }
 
@@ -1989,16 +1918,7 @@ int tagfs_write(TagFSFileHandle *handle, const void *buffer, uint64_t size)
 
                 if (extents_changed)
                 {
-                    // Structural change: journal protects extent + size atomically
-                    JournalTxn txn;
-                    if (journal_begin(&txn) == 0)
-                    {
-                        uint64_t meta_sector = block_to_sector(meta_block) +
-                                               (uint64_t)(meta_offset / 512);
-                        journal_log_metadata(&txn, handle->file_id,
-                                             (uint32_t)meta_sector, &meta);
-                        journal_commit(&txn);
-                    }
+                    // Structural change: extents updated
                 }
 
                 meta_pool_delete(meta_block, meta_offset);
