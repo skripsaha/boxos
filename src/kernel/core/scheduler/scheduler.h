@@ -33,6 +33,11 @@ extern uint32_t g_dynamic_steal_cooldown;
 // Affinity: cache-warm threshold (ticks since last run on same core)
 #define SCHEDULER_AFFINITY_WARM_TICKS 5
 
+// Recalc interval: call scheduler_recalc_parameters() only every N global ticks.
+// At 250 Hz PIT this gives ~25 recalcs/second (40 ms). Core parking and adaptive
+// frequency still respond quickly enough at this rate.
+#define SCHED_RECALC_INTERVAL 10
+
 // Limits
 #define SCHEDULER_MAX_CONSECUTIVE_RUNS 5
 #define SCHEDULER_MIN_FAIRNESS         2
@@ -53,7 +58,7 @@ typedef struct {
     uint64_t    last_steal_tick;
     uint32_t    normal_ticks;          // Counter for adaptive fairness
     RunQueue    runqueue;
-    bool        is_parked;             // Core is parked (no timer IRQ, no scheduling)
+    _Atomic bool is_parked;            // Written by BSP recalc, read by AP timer IRQ — must be atomic
     uint32_t    idle_tick_count;       // Consecutive idle ticks
 } scheduler_state_t;
 

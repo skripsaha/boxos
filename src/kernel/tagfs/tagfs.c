@@ -94,10 +94,9 @@ static void ofe_release(OpenFileEntry *ofe)
     spin_lock(&g_open_table_lock);
     if (ofe->ref_count == 0)
     {
-        debug_printf("[TagFS] BUG: ofe_release called with ref_count=0 for file_id=%u\n",
-                     ofe->file_id);
+        uint32_t fid = ofe->file_id;
         spin_unlock(&g_open_table_lock);
-        return;
+        panic("[TagFS] ofe_release: ref_count already zero for file_id=%u — double-release or corruption", fid);
     }
     ofe->ref_count--;
     if (ofe->ref_count == 0)
