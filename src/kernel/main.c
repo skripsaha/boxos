@@ -141,7 +141,7 @@ void kernel_main(void)
     per_core_init_bsp();
 
     debug_printf("[INIT] PIT...\n");
-    pit_init(100);
+    pit_init(250);  // 250Hz = 4ms tick for better responsiveness
 
     debug_printf("[INIT] RTC...\n");
     rtc_init();
@@ -246,6 +246,21 @@ void kernel_main(void)
 
     kprintf("Kernel initialization complete!\n");
     kprintf("\n");
+
+#if CONFIG_RUN_STARTUP_TESTS
+    kprintf("\n[TESTS] Running startup tests...\n");
+    kprintf("========================================\n");
+    TagFSState* fs = tagfs_get_state();
+    kprintf("[TESTS] TagFS state: %s\n", fs ? (fs->initialized ? "initialized" : "NOT initialized") : "NULL");
+    error_t test_result = TagFS_RunTests();
+    kprintf("[TESTS] TagFS_RunTests returned: %d\n", test_result);
+    if (test_result == OK) {
+        kprintf("[TESTS] All tests PASSED\n");
+    } else {
+        kprintf("[TESTS] Some tests FAILED (error=%d: %s)\n", test_result, ErrorString(test_result));
+    }
+    kprintf("========================================\n\n");
+#endif
 
 #if CONFIG_START_USERSPACE
     kprintf("Starting userspace...\n");

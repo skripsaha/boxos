@@ -1,48 +1,92 @@
 #include "runqueue.h"
 #include "process.h"
 
+static bool schedqueue_resize(SchedQueue *sq, uint32_t new_cap)
+{
+    if (new_cap < sq->count || new_cap > RUNQUEUE_MAX_CAP)
+        return false;
+
+    struct process_t **new_procs = kmalloc(sizeof(struct process_t *) * new_cap);
+    if (!new_procs)
+        return false;  // Keep old buffer intact on allocation failure
+
+    // Copy existing entries in order
+    uint32_t idx = sq->head;
+    for (uint32_t i = 0; i < sq->count; i++) {
+        new_procs[i] = sq->procs[idx];
+        idx = (idx + 1) % sq->capacity;
+    }
+
+    // Only free old buffer AFTER successful copy
+    if (sq->procs)
+        kfree(sq->procs);
+
+    sq->procs = new_procs;
+    sq->capacity = new_cap;
+    sq->head = 0;
+    sq->tail = sq->count;
+    return true;
+}
+
 void runqueue_init(RunQueue *rq)
 {
+    if (!rq) return;
+
     for (int i = 0; i < SCHED_PRIO_LEVELS; i++)
     {
+        rq->queues[i].capacity = RUNQUEUE_INITIAL_CAP;
         rq->queues[i].head = 0;
         rq->queues[i].tail = 0;
         rq->queues[i].count = 0;
-        for (int j = 0; j < RUNQUEUE_CAPACITY; j++)
-        {
-            rq->queues[i].procs[j] = NULL;
+        rq->queues[i].procs = kmalloc(sizeof(struct process_t *) * RUNQUEUE_INITIAL_CAP);
+        if (rq->queues[i].procs) {
+            for (uint32_t j = 0; j < RUNQUEUE_INITIAL_CAP; j++)
+                rq->queues[i].procs[j] = NULL;
+        } else {
+            rq->queues[i].capacity = 0;
         }
     }
     rq->active_bitmap = 0;
     spinlock_init(&rq->lock);
 }
 
+void runqueue_shutdown(RunQueue *rq)
+{
+    if (!rq) return;
+
+    for (int i = 0; i < SCHED_PRIO_LEVELS; i++) {
+        if (rq->queues[i].procs) {
+            kfree(rq->queues[i].procs);
+            rq->queues[i].procs = NULL;
+        }
+        rq->queues[i].capacity = 0;
+    }
+}
+
 bool runqueue_enqueue(RunQueue *rq, struct process_t *proc, int prio)
 {
-    if (!proc || prio < 0 || prio >= SCHED_PRIO_LEVELS)
+    if (!rq || !proc || prio < 0 || prio >= SCHED_PRIO_LEVELS)
         return false;
 
     SchedQueue *q = &rq->queues[prio];
-
-    // CRITICAL: Check for queue overflow BEFORE modifying state
-    if (q->count >= RUNQUEUE_CAPACITY)
-    {
-        // This is a FATAL error — RunQueue capacity is 256 per priority level.
-        // If we hit this, either:
-        //   1. There's a bug causing processes to be enqueued multiple times
-        //   2. System has more runnable processes than designed
-        //   3. Memory corruption in the RunQueue structure
-        debug_printf("[RUNQUEUE] CRITICAL: Queue overflow at priority %d (count=%u, capacity=%u)\n",
-                     prio, q->count, RUNQUEUE_CAPACITY);
-        debug_printf("[RUNQUEUE] Active bitmap: 0x%x\n", rq->active_bitmap);
-        debug_printf("[RUNQUEUE] Attempting to enqueue PID %u\n", proc->pid);
-
-        // Don't enqueue — system is overloaded, but don't crash
+    if (!q->procs)
         return false;
+
+    // Auto-resize if near capacity
+    if (q->count >= q->capacity) {
+        uint32_t new_cap = q->capacity * 2;
+        if (new_cap > RUNQUEUE_MAX_CAP)
+            new_cap = RUNQUEUE_MAX_CAP;
+        if (new_cap <= q->count)
+            return false;  // Truly full
+        if (!schedqueue_resize(q, new_cap))
+            return false;
     }
 
     q->procs[q->tail] = proc;
-    q->tail = (q->tail + 1) % RUNQUEUE_CAPACITY;
+    proc->rq_prio = (int8_t)prio;
+    proc->rq_index = (int16_t)q->tail;
+    q->tail = (q->tail + 1) % q->capacity;
     q->count++;
 
     rq->active_bitmap |= (1u << prio);
@@ -51,77 +95,99 @@ bool runqueue_enqueue(RunQueue *rq, struct process_t *proc, int prio)
 
 struct process_t *runqueue_dequeue_best(RunQueue *rq)
 {
-    if (rq->active_bitmap == 0)
+    if (!rq || rq->active_bitmap == 0)
         return NULL;
 
     int prio = 31 - __builtin_clz(rq->active_bitmap);
 
     SchedQueue *q = &rq->queues[prio];
+    if (!q->procs || q->count == 0)
+        return NULL;
+
     struct process_t *proc = q->procs[q->head];
     q->procs[q->head] = NULL;
-    q->head = (q->head + 1) % RUNQUEUE_CAPACITY;
+    q->head = (q->head + 1) % q->capacity;
     q->count--;
 
     if (q->count == 0)
         rq->active_bitmap &= ~(1u << prio);
+
+    // Update removed process tracking
+    proc->rq_prio = -1;
+    proc->rq_index = -1;
+
+    // Shrink if significantly underutilized (save memory)
+    if (q->count < q->capacity / 4 && q->capacity > RUNQUEUE_INITIAL_CAP) {
+        uint32_t new_cap = q->capacity / 2;
+        if (new_cap < RUNQUEUE_INITIAL_CAP)
+            new_cap = RUNQUEUE_INITIAL_CAP;
+        schedqueue_resize(q, new_cap);
+    }
 
     return proc;
 }
 
 void runqueue_remove(RunQueue *rq, struct process_t *proc)
 {
-    if (!proc)
+    if (!rq || !proc)
         return;
+
+    // O(1) removal using stored index
+    int prio = proc->rq_prio;
+    int idx = proc->rq_index;
+    if (prio < 0 || idx < 0)
+        return;  // Not enqueued
+
+    SchedQueue *q = &rq->queues[prio];
+    if ((uint32_t)idx >= q->capacity || q->procs[idx] != proc)
+        return;  // Sanity check
+
+    q->count--;
+
+    if (q->count == 0) {
+        // Queue is now empty
+        q->procs[idx] = NULL;
+        rq->active_bitmap &= ~(1u << prio);
+        q->head = 0;
+        q->tail = 0;
+    } else if ((uint32_t)idx == q->head) {
+        // Removing head — advance
+        q->procs[idx] = NULL;
+        q->head = (q->head + 1) % q->capacity;
+    } else if ((uint32_t)idx == (q->tail - 1 + q->capacity) % q->capacity) {
+        // Removing tail — just decrement
+        q->procs[idx] = NULL;
+        q->tail = (q->tail - 1 + q->capacity) % q->capacity;
+    } else {
+        // Removing middle — swap with tail for O(1)
+        uint32_t tail_idx = (q->tail - 1 + q->capacity) % q->capacity;
+        q->procs[idx] = q->procs[tail_idx];
+        q->procs[idx]->rq_index = (int16_t)idx;
+        q->procs[tail_idx] = NULL;
+        q->tail = tail_idx;
+    }
+
+    proc->rq_prio = -1;
+    proc->rq_index = -1;
+}
+
+bool runqueue_contains(RunQueue *rq, struct process_t *proc)
+{
+    if (!rq || !proc)
+        return false;
 
     for (int prio = 0; prio < SCHED_PRIO_LEVELS; prio++)
     {
         SchedQueue *q = &rq->queues[prio];
-        if (q->count == 0)
+        if (!q->procs || q->count == 0)
             continue;
 
         uint32_t idx = q->head;
         for (uint32_t n = 0; n < q->count; n++)
         {
             if (q->procs[idx] == proc)
-            {
-                // Rebuild: compact the circular buffer by shifting all
-                // entries after the removed one toward head.
-                uint32_t remaining = q->count - n - 1;
-                uint32_t dst = idx;
-                for (uint32_t m = 0; m < remaining; m++)
-                {
-                    uint32_t src = (dst + 1) % RUNQUEUE_CAPACITY;
-                    q->procs[dst] = q->procs[src];
-                    dst = src;
-                }
-                q->procs[dst] = NULL;
-                // Recompute tail from head + new count
-                q->count--;
-                q->tail = (q->head + q->count) % RUNQUEUE_CAPACITY;
-
-                if (q->count == 0)
-                    rq->active_bitmap &= ~(1u << prio);
-                return;
-            }
-            idx = (idx + 1) % RUNQUEUE_CAPACITY;
-        }
-    }
-}
-
-bool runqueue_contains(RunQueue *rq, struct process_t *proc)
-{
-    if (!proc)
-        return false;
-
-    for (int prio = 0; prio < SCHED_PRIO_LEVELS; prio++)
-    {
-        SchedQueue *q = &rq->queues[prio];
-        uint32_t idx = q->head;
-        for (uint32_t n = 0; n < q->count; n++)
-        {
-            if (q->procs[idx] == proc)
                 return true;
-            idx = (idx + 1) % RUNQUEUE_CAPACITY;
+            idx = (idx + 1) % q->capacity;
         }
     }
     return false;
@@ -129,6 +195,8 @@ bool runqueue_contains(RunQueue *rq, struct process_t *proc)
 
 uint32_t runqueue_total_count(RunQueue *rq)
 {
+    if (!rq) return 0;
+
     uint32_t total = 0;
     for (int prio = 0; prio < SCHED_PRIO_LEVELS; prio++)
         total += rq->queues[prio].count;

@@ -4,15 +4,33 @@
 #include "file_table/file_table.h"
 #include "metadata_pool/meta_pool.h"
 #include "disk_book/disk_book.h"
+#include "bcdc/bcdc.h"
 #include "error.h"
 #include "ahci_sync.h"
 #include "ahci.h"
 #include "ata.h"
+#include "cow/cow.h"
+#include "../../kernel/drivers/timer/rtc.h"
+#include "../../lib/kernel/crypto.h"
 
 void tagfs_snapshots_init(void);
 
 static void tagfs_auto_snapshot_before_write(uint32_t file_id) {
-    (void)file_id;
+    if (file_id == 0)
+        return;
+
+    // Check if CoW is active for this file
+    if (TagFS_CowIsActive(file_id)) {
+        // Create auto-snapshot before write
+        char snap_name[64];
+        ksnprintf(snap_name, sizeof(snap_name), "auto-snap-%u", file_id);
+
+        uint32_t snapshot_id;
+        error_t err = TagFS_SnapshotCreate(snap_name, file_id, &snapshot_id);
+        if (err != OK) {
+            debug_printf("[TagFS] Auto-snapshot failed for file %u: %d\n", file_id, err);
+        }
+    }
 }
 
 static TagFSState g_state;
@@ -150,6 +168,57 @@ static int disk_write_sectors(uint64_t lba, uint16_t count, const void *buffer)
     return ata_write_sectors_retry(1, lba, count, (const uint8_t *)buffer);
 }
 
+static uint64_t block_to_sector(uint32_t block);
+static int read_block(uint32_t block, void *buffer);
+static int write_block(uint32_t block, const void *buffer);
+
+// ----------------------------------------------------------------------------
+// Read-Ahead Cache for Sequential Reads
+// ----------------------------------------------------------------------------
+
+typedef struct {
+    uint32_t block;
+    uint8_t  data[TAGFS_BLOCK_SIZE];
+    bool     valid;
+} ReadAheadEntry;
+
+static ReadAheadEntry g_read_ahead_cache[TAGFS_READ_AHEAD_BLOCKS];
+static uint32_t g_read_ahead_head = 0;
+static uint32_t g_read_ahead_last_block = 0;
+
+static void ReadAheadInit(void) {
+    memset(g_read_ahead_cache, 0, sizeof(g_read_ahead_cache));
+    g_read_ahead_head = 0;
+    g_read_ahead_last_block = 0;
+}
+
+static int ReadAheadLookup(uint32_t block, void *buffer) {
+    for (uint32_t i = 0; i < TAGFS_READ_AHEAD_BLOCKS; i++) {
+        if (g_read_ahead_cache[i].valid && g_read_ahead_cache[i].block == block) {
+            memcpy(buffer, g_read_ahead_cache[i].data, TAGFS_BLOCK_SIZE);
+            return 0;
+        }
+    }
+    return -1;
+}
+
+static void ReadAheadPrefetch(uint32_t start_block, uint32_t count) {
+    for (uint32_t i = 0; i < count && i < TAGFS_READ_AHEAD_BLOCKS; i++) {
+        uint32_t block = start_block + i;
+        if (block == g_read_ahead_last_block)
+            continue;
+
+        uint32_t slot = g_read_ahead_head % TAGFS_READ_AHEAD_BLOCKS;
+        if (read_block(block, g_read_ahead_cache[slot].data) == 0) {
+            g_read_ahead_cache[slot].block = block;
+            g_read_ahead_cache[slot].valid = true;
+            g_read_ahead_head++;
+        }
+    }
+    if (count > 0)
+        g_read_ahead_last_block = start_block + count - 1;
+}
+
 static uint64_t block_to_sector(uint32_t block)
 {
     uint32_t data_start = g_state.superblock.block_bitmap_sector +
@@ -159,6 +228,10 @@ static uint64_t block_to_sector(uint32_t block)
 
 static int read_block(uint32_t block, void *buffer)
 {
+    // Check read-ahead cache first
+    if (ReadAheadLookup(block, buffer) == 0) {
+        return 0;
+    }
     return disk_read_sectors(block_to_sector(block), 8, buffer);
 }
 
@@ -167,35 +240,35 @@ static int write_block(uint32_t block, const void *buffer)
     return disk_write_sectors(block_to_sector(block), 8, (void *)buffer);
 }
 
-int tagfs_read_block(uint32_t block, void *buffer)
-{
-    return read_block(block, buffer);
+error_t tagfs_read_block(uint32_t block, void *buffer) {
+    if (!buffer)
+        return ERR_NULL_POINTER;
+    
+    error_t err = read_block(block, buffer);
+    if (err != OK)
+        return ERR_READ_FAILED;
+    
+    return OK;
 }
 
-int tagfs_write_block(uint32_t block, const void *buffer)
-{
-    return write_block(block, buffer);
+error_t tagfs_write_block(uint32_t block, const void *buffer) {
+    if (!buffer)
+        return ERR_NULL_POINTER;
+    
+    error_t err = write_block(block, buffer);
+    if (err != OK)
+        return ERR_WRITE_FAILED;
+    
+    return OK;
 }
 
 // ----------------------------------------------------------------------------
-// CRC32 (ISO 3309 polynomial, used for superblock integrity)
+// CRC32 wrapper using shared crypto library
 // ----------------------------------------------------------------------------
-
-#define CRC32_POLYNOMIAL 0xEDB88320 // ISO 3309 reversed polynomial
-#define CRC32_INIT_VALUE 0xFFFFFFFF
 
 static uint32_t tagfs_crc32(const uint8_t *data, uint32_t len)
 {
-    uint32_t crc = CRC32_INIT_VALUE;
-    for (uint32_t i = 0; i < len; i++)
-    {
-        crc ^= data[i];
-        for (int j = 0; j < 8; j++)
-        {
-            crc = (crc >> 1) ^ (CRC32_POLYNOMIAL & (-(crc & 1)));
-        }
-    }
-    return ~crc;
+    return KCrc32(data, len);
 }
 
 static void superblock_stamp_crc(TagFSSuperblock *sb)
@@ -248,34 +321,43 @@ static int read_superblock(uint32_t sector, TagFSSuperblock *out)
     return 0;
 }
 
-static int write_superblock_to_sector(uint32_t sector, const TagFSSuperblock *sb)
-{
+static error_t write_superblock_to_sector(uint32_t sector, const TagFSSuperblock *sb) {
+    if (!sb)
+        return ERR_NULL_POINTER;
+    
     uint8_t buf[512];
     memset(buf, 0, 512);
     memcpy(buf, sb, sizeof(TagFSSuperblock));
-    return disk_write_sectors((uint64_t)sector, 1, buf);
+    
+    error_t err = disk_write_sectors((uint64_t)sector, 1, buf);
+    if (err != OK)
+        return ERR_WRITE_FAILED;
+    
+    return OK;
 }
 
-int tagfs_write_superblock(const TagFSSuperblock *sb)
-{
+error_t tagfs_write_superblock(const TagFSSuperblock *sb) {
     if (!sb)
-        return -1;
+        return ERR_NULL_POINTER;
+    
     // Stamp CRC before writing
     TagFSSuperblock stamped;
     memcpy(&stamped, sb, sizeof(TagFSSuperblock));
     superblock_stamp_crc(&stamped);
 
-    int r = write_superblock_to_sector(TAGFS_SUPERBLOCK_SECTOR, &stamped);
-    if (r != 0)
-    {
+    error_t err = write_superblock_to_sector(TAGFS_SUPERBLOCK_SECTOR, &stamped);
+    if (err != OK) {
         debug_printf("[TagFS] Failed to write primary superblock\n");
-        return r;
+        return ERR_TAGFS_METADATA_ERROR;
     }
-    if (write_superblock_to_sector(TAGFS_BACKUP_SB_SECTOR, &stamped) != 0)
-    {
+    
+    err = write_superblock_to_sector(TAGFS_BACKUP_SB_SECTOR, &stamped);
+    if (err != OK) {
         debug_printf("[TagFS] Warning: failed to write backup superblock\n");
+        // Don't fail - primary was written successfully
     }
-    return 0;
+    
+    return OK;
 }
 
 // ----------------------------------------------------------------------------
@@ -359,9 +441,11 @@ static void free_list_build(void)
 // tagfs_format
 // ----------------------------------------------------------------------------
 
-int tagfs_format(uint32_t total_blocks)
-{
+error_t tagfs_format(uint32_t total_blocks) {
     debug_printf("[TagFS] Formatting: total_blocks=%u\n", total_blocks);
+
+    if (total_blocks == 0)
+        return ERR_INVALID_ARGUMENT;
 
     // --- Compute layout ---
     //
@@ -379,10 +463,9 @@ int tagfs_format(uint32_t total_blocks)
 
     // --- Build initial block bitmap in memory ---
     uint8_t *bitmap = kmalloc(bitmap_bytes);
-    if (!bitmap)
-    {
+    if (!bitmap) {
         debug_printf("[TagFS] format: failed to allocate bitmap\n");
-        return -1;
+        return ERR_NO_MEMORY;
     }
     memset(bitmap, 0, bitmap_bytes);
 
@@ -393,11 +476,10 @@ int tagfs_format(uint32_t total_blocks)
 
     // --- Write initial TagRegistryBlock at block 0 ---
     TagRegistryBlock *reg_block = kmalloc(TAGFS_BLOCK_SIZE);
-    if (!reg_block)
-    {
+    if (!reg_block) {
         debug_printf("[TagFS] format: failed to allocate registry block\n");
         kfree(bitmap);
-        return -1;
+        return ERR_NO_MEMORY;
     }
     memset(reg_block, 0, TAGFS_BLOCK_SIZE);
     reg_block->magic = TAGFS_REGISTRY_MAGIC;
@@ -409,22 +491,20 @@ int tagfs_format(uint32_t total_blocks)
     g_state.superblock.block_bitmap_sector = bitmap_sector_start;
     g_state.superblock.block_bitmap_sector_count = bitmap_sectors;
 
-    if (write_block(0, reg_block) != 0)
-    {
+    if (write_block(0, reg_block) != OK) {
         debug_printf("[TagFS] format: failed to write registry block\n");
         kfree(reg_block);
         kfree(bitmap);
-        return -1;
+        return ERR_WRITE_FAILED;
     }
     kfree(reg_block);
 
     // --- Write initial FileTableBlock at block 1 ---
     FileTableBlock *ft_block = kmalloc(TAGFS_BLOCK_SIZE);
-    if (!ft_block)
-    {
+    if (!ft_block) {
         debug_printf("[TagFS] format: failed to allocate file table block\n");
         kfree(bitmap);
-        return -1;
+        return ERR_NO_MEMORY;
     }
     memset(ft_block, 0, TAGFS_BLOCK_SIZE);
     ft_block->magic = TAGFS_FILETBL_MAGIC;
@@ -432,22 +512,20 @@ int tagfs_format(uint32_t total_blocks)
     ft_block->entry_count = 0;
     ft_block->reserved = 0;
 
-    if (write_block(1, ft_block) != 0)
-    {
+    if (write_block(1, ft_block) != OK) {
         debug_printf("[TagFS] format: failed to write file table block\n");
         kfree(ft_block);
         kfree(bitmap);
-        return -1;
+        return ERR_WRITE_FAILED;
     }
     kfree(ft_block);
 
     // --- Write initial MetaPoolBlock at block 2 ---
     MetaPoolBlock *mp_block = kmalloc(TAGFS_BLOCK_SIZE);
-    if (!mp_block)
-    {
+    if (!mp_block) {
         debug_printf("[TagFS] format: failed to allocate meta pool block\n");
         kfree(bitmap);
-        return -1;
+        return ERR_NO_MEMORY;
     }
     memset(mp_block, 0, TAGFS_BLOCK_SIZE);
     mp_block->magic = TAGFS_MPOOL_MAGIC;
@@ -455,33 +533,30 @@ int tagfs_format(uint32_t total_blocks)
     mp_block->used_bytes = 0;
     mp_block->record_count = 0;
 
-    if (write_block(2, mp_block) != 0)
-    {
+    if (write_block(2, mp_block) != OK) {
         debug_printf("[TagFS] format: failed to write meta pool block\n");
         kfree(mp_block);
         kfree(bitmap);
-        return -1;
+        return ERR_WRITE_FAILED;
     }
     kfree(mp_block);
 
     // --- Write block bitmap to disk ---
     uint32_t bitmap_buf_size = bitmap_sectors * 512;
     uint8_t *bitmap_buf = kmalloc(bitmap_buf_size);
-    if (!bitmap_buf)
-    {
+    if (!bitmap_buf) {
         debug_printf("[TagFS] format: failed to allocate bitmap write buffer\n");
         kfree(bitmap);
-        return -1;
+        return ERR_NO_MEMORY;
     }
     memset(bitmap_buf, 0, bitmap_buf_size);
     memcpy(bitmap_buf, bitmap, bitmap_bytes);
 
-    if (disk_write_sectors((uint64_t)bitmap_sector_start, (uint16_t)bitmap_sectors, bitmap_buf) != 0)
-    {
+    if (disk_write_sectors((uint64_t)bitmap_sector_start, (uint16_t)bitmap_sectors, bitmap_buf) != OK) {
         debug_printf("[TagFS] format: failed to write block bitmap\n");
         kfree(bitmap_buf);
         kfree(bitmap);
-        return -1;
+        return ERR_WRITE_FAILED;
     }
     kfree(bitmap_buf);
     kfree(bitmap);
@@ -514,15 +589,14 @@ int tagfs_format(uint32_t total_blocks)
     sb.fs_modified_time = 0;
     sb.backup_superblock_sector = TAGFS_BACKUP_SB_SECTOR;
 
-    if (tagfs_write_superblock(&sb) != 0)
-    {
+    if (tagfs_write_superblock(&sb) != OK) {
         debug_printf("[TagFS] format: failed to write superblock\n");
-        return -1;
+        return ERR_TAGFS_METADATA_ERROR;
     }
 
     debug_printf("[TagFS] Format complete: %u total blocks, %u free\n",
                  total_blocks, sb.free_blocks);
-    return 0;
+    return OK;
 }
 
 // ----------------------------------------------------------------------------
@@ -590,12 +664,10 @@ void tagfs_init_well_known_tags(void)
 // tagfs_init
 // ----------------------------------------------------------------------------
 
-int tagfs_init(void)
-{
-    if (g_state.initialized)
-    {
+error_t tagfs_init(void) {
+    if (g_state.initialized) {
         debug_printf("[TagFS] Already initialized\n");
-        return 0;
+        return ERR_ALREADY_INITIALIZED;
     }
 
     debug_printf("[TagFS] Initializing...\n");
@@ -607,22 +679,19 @@ int tagfs_init(void)
     // --- Read superblock ---
     TagFSSuperblock sb;
     bool used_backup = false;
-    if (read_superblock(TAGFS_SUPERBLOCK_SECTOR, &sb) != 0 || sb.magic != TAGFS_MAGIC)
-    {
+    if (read_superblock(TAGFS_SUPERBLOCK_SECTOR, &sb) != OK || sb.magic != TAGFS_MAGIC) {
         debug_printf("[TagFS] Primary superblock invalid, trying backup at sector %u\n",
                      TAGFS_BACKUP_SB_SECTOR);
-        if (read_superblock(TAGFS_BACKUP_SB_SECTOR, &sb) != 0 || sb.magic != TAGFS_MAGIC)
-        {
+        if (read_superblock(TAGFS_BACKUP_SB_SECTOR, &sb) != OK || sb.magic != TAGFS_MAGIC) {
             debug_printf("[TagFS] CRITICAL: Both superblocks invalid — not formatted?\n");
-            return -1;
+            return ERR_TAGFS_CORRUPTED;
         }
         used_backup = true;
         debug_printf("[TagFS] Using backup superblock\n");
     }
 
     // Verify CRC32 integrity
-    if (!superblock_verify_crc(&sb))
-    {
+    if (!superblock_verify_crc(&sb)) {
         debug_printf("[TagFS] CRC32 mismatch on %s superblock\n",
                      used_backup ? "backup" : "primary");
         if (!used_backup)
@@ -680,63 +749,78 @@ int tagfs_init(void)
     // --- Snapshots init ---
     tagfs_snapshots_init();
 
-    // --- Data Deduplication init (stub) ---
-    TagFS_DedupInit();
+    // --- CoW Snapshots init ---
+    if (TagFS_CowInit() != OK) {
+        debug_printf("[TagFS] CoW init failed\n");
+        return ERR_COW_NOT_INITIALIZED;
+    }
 
-    // --- Self-Healing init (stub) ---
+    // --- Data Deduplication init ---
+    if (TagFS_DedupInit() != OK) {
+        debug_printf("[TagFS] Dedup init failed\n");
+        return ERR_DEDUP_NOT_INITIALIZED;
+    }
+
+    // --- Self-Healing init ---
     TagFS_SelfHealInit();
+
+    // --- Bcdc Compression init ---
+    if (BcdcInit() != OK) {
+        debug_printf("[TagFS] Bcdc init failed\n");
+        return ERR_NO_MEMORY;
+    }
+
+    // --- Test Framework init ---
+    if (TagFS_TestsInit() != OK) {
+        debug_printf("[TagFS] Test framework init failed\n");
+        return ERR_NO_MEMORY;
+    }
 
     // --- Tag Registry ---
     g_state.registry = kmalloc(sizeof(TagRegistry));
-    if (!g_state.registry)
-    {
+    if (!g_state.registry) {
         debug_printf("[TagFS] Failed to allocate tag registry\n");
-        return -1;
+        return ERR_NO_MEMORY;
     }
-    if (tag_registry_init(g_state.registry) != 0)
-    {
+    if (tag_registry_init(g_state.registry) != OK) {
         debug_printf("[TagFS] tag_registry_init failed\n");
         kfree(g_state.registry);
         g_state.registry = NULL;
-        return -1;
+        return ERR_TAGFS_REGISTRY_FULL;
     }
-    if (tag_registry_load(g_state.registry, sb.tag_registry_block) != 0)
-    {
+    if (tag_registry_load(g_state.registry, sb.tag_registry_block) != OK) {
         debug_printf("[TagFS] Warning: tag_registry_load failed (empty registry)\n");
     }
 
     // --- File Table ---
-    if (file_table_init(sb.file_table_block, sb.file_table_block_count) != 0)
-    {
+    if (file_table_init(sb.file_table_block, sb.file_table_block_count) != OK) {
         debug_printf("[TagFS] file_table_init failed\n");
         tag_registry_destroy(g_state.registry);
         kfree(g_state.registry);
         g_state.registry = NULL;
-        return -1;
+        return ERR_FILE_TABLE_CORRUPT;
     }
 
     // --- Metadata Pool ---
-    if (meta_pool_init(sb.metadata_pool_block, sb.metadata_pool_block_count) != 0)
-    {
+    if (meta_pool_init(sb.metadata_pool_block, sb.metadata_pool_block_count) != OK) {
         debug_printf("[TagFS] meta_pool_init failed\n");
         file_table_shutdown();
         tag_registry_destroy(g_state.registry);
         kfree(g_state.registry);
         g_state.registry = NULL;
-        return -1;
+        return ERR_METADATA_POOL_FULL;
     }
 
     // --- Bitmap Index ---
-    g_state.bitmap_index = tag_bitmap_create(64, 256);
-    if (!g_state.bitmap_index)
-    {
+    g_state.bitmap_index = tag_bitmap_create(TAGFS_BITMAP_INITIAL_TAG_CAP, TAGFS_BITMAP_INITIAL_FILE_CAP);
+    if (!g_state.bitmap_index) {
         debug_printf("[TagFS] tag_bitmap_create failed\n");
         meta_pool_shutdown();
         file_table_shutdown();
         tag_registry_destroy(g_state.registry);
         kfree(g_state.registry);
         g_state.registry = NULL;
-        return -1;
+        return ERR_NO_MEMORY;
     }
 
     // --- Block Bitmap ---
@@ -887,6 +971,9 @@ int tagfs_init(void)
     // Load mirror cache so future meta reads skip disk
     meta_pool_mirror_init(g_state.superblock.next_file_id + 64);
 
+    // Initialize read-ahead cache for sequential reads
+    ReadAheadInit();
+
     g_state.initialized = true;
     debug_printf("[TagFS] Initialized successfully\n");
     return 0;
@@ -951,8 +1038,32 @@ void tagfs_shutdown(void)
     }
     g_state.block_bitmap.total_blocks = 0;
 
+    // Shutdown Bcdc compression
+    BcdcShutdown();
+
+    // Shutdown test framework
+    TagFS_TestsShutdown();
+
     g_state.initialized = false;
     debug_printf("[TagFS] Shutdown complete\n");
+}
+
+// ----------------------------------------------------------------------------
+// Test runner interface (called from userspace via System Deck)
+// ----------------------------------------------------------------------------
+
+error_t TagFS_RunTests(void) {
+    if (!g_state.initialized)
+        return ERR_TAGFS_NOT_INITIALIZED;
+    
+    TestStats stats;
+    error_t result = TagFS_RunAllTests(&stats);
+    
+    if (result != OK) {
+        debug_printf("[TagFS] Tests failed: %u failures\n", stats.total_failed);
+    }
+    
+    return result;
 }
 
 // ----------------------------------------------------------------------------
@@ -1121,6 +1232,9 @@ int tagfs_create_file(const char *filename, const uint16_t *tag_ids, uint16_t ta
     return 0;
 }
 
+// Forward declaration
+static void tagfs_free_blocks_internal(uint32_t start_block, uint32_t count);
+
 // ----------------------------------------------------------------------------
 // tagfs_delete_file
 // ----------------------------------------------------------------------------
@@ -1135,7 +1249,6 @@ int tagfs_delete_file(uint32_t file_id)
     uint32_t meta_block, meta_offset;
     if (file_table_lookup(file_id, &meta_block, &meta_offset) != 0)
     {
-        debug_printf("[TagFS] delete_file: file_id=%u not found\n", file_id);
         spin_unlock(&g_state.lock);
         return -1;
     }
@@ -1144,17 +1257,6 @@ int tagfs_delete_file(uint32_t file_id)
     TagFSMetadata meta;
     memset(&meta, 0, sizeof(meta));
     int has_meta = meta_pool_read(meta_block, meta_offset, &meta);
-
-    // Journal the delete intent: write metadata with ACTIVE flag cleared.
-    // On crash recovery, journal replay writes ACTIVE=0 metadata to disk,
-    // then fsck skips non-ACTIVE files and cleans orphaned entries.
-    if (has_meta == 0)
-    {
-        TagFSMetadata del_meta;
-        memcpy(&del_meta, &meta, sizeof(TagFSMetadata));
-        del_meta.flags &= ~TAGFS_FILE_ACTIVE;
-        del_meta.extents = NULL;
-    }
 
     // Cleanup order: bitmap → file_table → blocks → metadata pool.
     // file_table_delete before block_free ensures that on crash,
@@ -1171,7 +1273,7 @@ int tagfs_delete_file(uint32_t file_id)
     {
         for (uint16_t i = 0; i < meta.extent_count; i++)
         {
-            tagfs_free_blocks(meta.extents[i].start_block, meta.extents[i].block_count);
+            tagfs_free_blocks_internal(meta.extents[i].start_block, meta.extents[i].block_count);
         }
         tagfs_metadata_free(&meta);
     }
@@ -1664,10 +1766,14 @@ void tagfs_close(TagFSFileHandle *handle)
 {
     if (!handle)
         return;
+    debug_printf("[TagFS] close: file_id=%u\n", handle->file_id);
     ofe_release(handle->ofe);
+    debug_printf("[TagFS] close: ofe released\n");
     if (handle->extents)
         kfree(handle->extents);
+    debug_printf("[TagFS] close: extents freed\n");
     kfree(handle);
+    debug_printf("[TagFS] close: handle freed\n");
 }
 
 int tagfs_read(TagFSFileHandle *handle, void *buffer, uint64_t size)
@@ -1677,6 +1783,9 @@ int tagfs_read(TagFSFileHandle *handle, void *buffer, uint64_t size)
     if (!g_state.initialized)
         return -1;
 
+    debug_printf("[TagFS] read: file_id=%u size=%lu offset=%lu file_size=%lu\n", 
+                 handle->file_id, size, handle->offset, handle->file_size);
+
     if (handle->offset >= handle->file_size)
         return 0;
 
@@ -1684,9 +1793,13 @@ int tagfs_read(TagFSFileHandle *handle, void *buffer, uint64_t size)
     if (size > remaining)
         size = remaining;
 
+    debug_printf("[TagFS] read: adjusted size=%lu remaining=%lu\n", size, remaining);
+
     uint8_t block_buf[TAGFS_BLOCK_SIZE];
     uint8_t *out = (uint8_t *)buffer;
     uint64_t bytes_read = 0;
+
+    debug_printf("[TagFS] read: starting read loop, extent_count=%u\n", handle->extent_count);
 
     while (bytes_read < size)
     {
@@ -1706,12 +1819,17 @@ int tagfs_read(TagFSFileHandle *handle, void *buffer, uint64_t size)
         }
 
         if (found < 0)
+        {
+            debug_printf("[TagFS] read: extent not found for file_pos=%lu\n", file_pos);
             break;
+        }
 
         uint64_t offset_in_extent = file_pos - extent_start;
         uint32_t block_index = (uint32_t)(offset_in_extent / TAGFS_BLOCK_SIZE);
         uint32_t offset_in_block = (uint32_t)(offset_in_extent % TAGFS_BLOCK_SIZE);
         uint32_t disk_block = handle->extents[found].start_block + block_index;
+
+        debug_printf("[TagFS] read: reading disk_block=%u\n", disk_block);
 
         if (read_block(disk_block, block_buf) != 0)
         {
@@ -1725,9 +1843,20 @@ int tagfs_read(TagFSFileHandle *handle, void *buffer, uint64_t size)
 
         memcpy(out + bytes_read, block_buf + offset_in_block, chunk);
         bytes_read += chunk;
+
+        // Read-ahead prefetch: if reading sequentially, prefetch next blocks
+        if (offset_in_block == 0 && chunk == TAGFS_BLOCK_SIZE) {
+            uint32_t next_block = disk_block + 1;
+            uint32_t blocks_remaining_in_extent = handle->extents[found].block_count - block_index - 1;
+            if (blocks_remaining_in_extent > 0) {
+                ReadAheadPrefetch(next_block, blocks_remaining_in_extent < TAGFS_READ_AHEAD_BLOCKS ?
+                                    blocks_remaining_in_extent : TAGFS_READ_AHEAD_BLOCKS);
+            }
+        }
     }
 
     handle->offset += bytes_read;
+    debug_printf("[TagFS] read: returning %d\n", (int)bytes_read);
     return (int)bytes_read;
 }
 
@@ -1750,7 +1879,6 @@ int tagfs_write(TagFSFileHandle *handle, const void *buffer, uint64_t size)
     const uint8_t *in = (const uint8_t *)buffer;
     uint8_t block_buf[TAGFS_BLOCK_SIZE];
     uint64_t bytes_written = 0;
-    uint16_t extent_count_before = handle->extent_count;
 
     while (bytes_written < size)
     {
@@ -1780,7 +1908,6 @@ int tagfs_write(TagFSFileHandle *handle, const void *buffer, uint64_t size)
             uint32_t new_start;
             if (tagfs_alloc_blocks(blocks_needed, &new_start) != 0)
             {
-                debug_printf("[TagFS] write: block alloc failed\n");
                 break;
             }
 
@@ -1824,59 +1951,13 @@ int tagfs_write(TagFSFileHandle *handle, const void *buffer, uint64_t size)
 
         memcpy(block_buf + offset_in_block, in + bytes_written, chunk);
 
-        // DiskBook: Journal data block before writing to disk (production reliability)
-        // Two-phase commit: journal → flush → write to disk → mark applied
-        DiskBookTxn txn;
-        error_t err = DiskBookBegin(&txn);
-        if (err != OK)
+        // Write data block directly to disk
+        // Note: DiskBook is for metadata journaling only, not data blocks
+        // Data blocks are written directly for performance
+        if (write_block(disk_block, block_buf) != 0)
         {
-            debug_printf("[TagFS] write: DiskBookBegin failed: %d\n", err);
-            // Fall back to direct write for production stability
-            if (write_block(disk_block, block_buf) != 0)
-            {
-                debug_printf("[TagFS] write: failed to write block %u\n", disk_block);
-                break;
-            }
-        }
-        else
-        {
-            // Log data to journal
-            uint64_t disk_sector = block_to_sector(disk_block);
-            err = DiskBookLogData(&txn, handle->file_id,
-                                  handle->offset + bytes_written,
-                                  (uint32_t)disk_sector, block_buf, chunk);
-            if (err != OK)
-            {
-                debug_printf("[TagFS] write: DiskBookLogData failed: %d\n", err);
-                DiskBookAbort(&txn);
-                if (write_block(disk_block, block_buf) != 0)
-                {
-                    debug_printf("[TagFS] write: failed to write block %u\n", disk_block);
-                    break;
-                }
-            }
-            else
-            {
-                err = DiskBookCommit(&txn);
-                if (err != OK)
-                {
-                    debug_printf("[TagFS] write: DiskBookCommit failed: %d\n", err);
-                    if (write_block(disk_block, block_buf) != 0)
-                    {
-                        debug_printf("[TagFS] write: failed to write block %u\n", disk_block);
-                        break;
-                    }
-                }
-                else
-                {
-                    // Journal committed, now write to disk
-                    if (write_block(disk_block, block_buf) != 0)
-                    {
-                        debug_printf("[TagFS] write: failed to write block %u\n", disk_block);
-                        break;
-                    }
-                }
-            }
+            // Disk I/O error - cannot continue
+            break;
         }
 
         bytes_written += chunk;
@@ -1889,47 +1970,53 @@ int tagfs_write(TagFSFileHandle *handle, const void *buffer, uint64_t size)
     }
 
     // Update metadata. Two paths:
-    // - Extents changed (new blocks allocated): full journal for crash safety
-    // - Size-only (wrote within existing extents): direct metadata write,
-    //   no journal needed — extents are unchanged, worst-case crash loses
-    //   only the size update (data is already in extent blocks, recoverable).
-    //   This eliminates 3x ata_flush_cache (~30-300ms) on the common write path.
+    // - Extents changed (new blocks allocated): journal for crash safety
+    // - Size-only (wrote within existing extents): direct metadata write
     if (bytes_written > 0)
     {
         uint32_t meta_block, meta_offset;
-        if (file_table_lookup(handle->file_id, &meta_block, &meta_offset) == 0)
+        if (file_table_lookup(handle->file_id, &meta_block, &meta_offset) != 0)
         {
-            TagFSMetadata meta;
-            memset(&meta, 0, sizeof(meta));
-            if (meta_pool_read(meta_block, meta_offset, &meta) == 0)
-            {
-                meta.size = handle->file_size;
-                if (meta.extents)
-                    kfree(meta.extents);
-                meta.extent_count = handle->extent_count;
-                meta.extents = kmalloc(sizeof(FileExtent) * handle->extent_count);
-                if (meta.extents)
-                {
-                    memcpy(meta.extents, handle->extents,
-                           sizeof(FileExtent) * handle->extent_count);
-                }
-
-                int extents_changed = (handle->extent_count != extent_count_before);
-
-                if (extents_changed)
-                {
-                    // Structural change: extents updated
-                }
-
-                meta_pool_delete(meta_block, meta_offset);
-                uint32_t new_mb, new_mo;
-                if (meta_pool_write(&meta, &new_mb, &new_mo) == 0)
-                {
-                    file_table_update(handle->file_id, new_mb, new_mo);
-                }
-                tagfs_metadata_free(&meta);
-            }
+            if (handle->ofe)
+                spin_unlock(&handle->ofe->write_lock);
+            return -1;
         }
+
+        TagFSMetadata meta;
+        memset(&meta, 0, sizeof(meta));
+        if (meta_pool_read(meta_block, meta_offset, &meta) != 0)
+        {
+            if (handle->ofe)
+                spin_unlock(&handle->ofe->write_lock);
+            return -1;
+        }
+
+        meta.size = handle->file_size;
+        if (meta.extents)
+            kfree(meta.extents);
+        meta.extent_count = handle->extent_count;
+        meta.extents = kmalloc(sizeof(FileExtent) * handle->extent_count);
+        if (!meta.extents)
+        {
+            tagfs_metadata_free(&meta);
+            if (handle->ofe)
+                spin_unlock(&handle->ofe->write_lock);
+            return -1;
+        }
+        memcpy(meta.extents, handle->extents, sizeof(FileExtent) * handle->extent_count);
+
+        // Write updated metadata
+        meta_pool_delete(meta_block, meta_offset);
+        uint32_t new_mb, new_mo;
+        if (meta_pool_write(&meta, &new_mb, &new_mo) != 0)
+        {
+            tagfs_metadata_free(&meta);
+            if (handle->ofe)
+                spin_unlock(&handle->ofe->write_lock);
+            return -1;
+        }
+        file_table_update(handle->file_id, new_mb, new_mo);
+        tagfs_metadata_free(&meta);
     }
 
     if (handle->ofe)
@@ -1941,15 +2028,10 @@ int tagfs_write(TagFSFileHandle *handle, const void *buffer, uint64_t size)
 // Block allocator
 // ----------------------------------------------------------------------------
 
-int tagfs_alloc_blocks(uint32_t count, uint32_t *out_start_block)
+// Internal version - caller MUST hold g_state.lock
+// Exported for use by meta_pool.c
+int tagfs_alloc_blocks_internal(uint32_t count, uint32_t *out_start_block)
 {
-    if (!g_state.initialized)
-        return -1;
-    if (count == 0 || !out_start_block)
-        return -1;
-
-    spin_lock(&g_state.lock);
-
     FreeExtent *prev = NULL;
     FreeExtent *cur = g_state.block_bitmap.free_list;
 
@@ -1986,26 +2068,34 @@ int tagfs_alloc_blocks(uint32_t count, uint32_t *out_start_block)
                 g_state.superblock.free_blocks -= count;
             }
 
-            spin_unlock(&g_state.lock);
             return 0;
         }
         prev = cur;
         cur = cur->next;
     }
 
-    debug_printf("[TagFS] alloc_blocks: no free extent of size %u\n", count);
-    spin_unlock(&g_state.lock);
     return -1;
 }
 
-int tagfs_free_blocks(uint32_t start_block, uint32_t count)
+// Public version - acquires g_state.lock
+int tagfs_alloc_blocks(uint32_t count, uint32_t *out_start_block)
 {
     if (!g_state.initialized)
         return -1;
-    if (count == 0)
-        return 0;
+    if (count == 0 || !out_start_block)
+        return -1;
 
     spin_lock(&g_state.lock);
+    int result = tagfs_alloc_blocks_internal(count, out_start_block);
+    spin_unlock(&g_state.lock);
+    return result;
+}
+
+// Internal version - caller MUST hold g_state.lock
+static void tagfs_free_blocks_internal(uint32_t start_block, uint32_t count)
+{
+    if (count == 0)
+        return;
 
     uint32_t end = start_block + count;
 
@@ -2049,23 +2139,31 @@ int tagfs_free_blocks(uint32_t start_block, uint32_t count)
     }
     else
     {
-        FreeExtent *ext = kmalloc(sizeof(FreeExtent));
-        if (!ext)
+        FreeExtent *new_extent = kmalloc(sizeof(FreeExtent));
+        if (new_extent)
         {
-            debug_printf("[TagFS] free_blocks: kmalloc for extent failed\n");
-            spin_unlock(&g_state.lock);
-            return -1;
+            new_extent->start = start_block;
+            new_extent->count = count;
+            new_extent->next = cur;
+            if (prev)
+                prev->next = new_extent;
+            else
+                g_state.block_bitmap.free_list = new_extent;
+            g_state.block_bitmap.extent_count++;
         }
-        ext->start = start_block;
-        ext->count = count;
-        ext->next = cur;
-        if (prev)
-            prev->next = ext;
-        else
-            g_state.block_bitmap.free_list = ext;
-        g_state.block_bitmap.extent_count++;
     }
+}
 
+// Public version - acquires g_state.lock
+int tagfs_free_blocks(uint32_t start_block, uint32_t count)
+{
+    if (!g_state.initialized)
+        return -1;
+    if (count == 0)
+        return 0;
+
+    spin_lock(&g_state.lock);
+    tagfs_free_blocks_internal(start_block, count);
     spin_unlock(&g_state.lock);
     return 0;
 }
@@ -2167,6 +2265,7 @@ int tagfs_defrag_file(uint32_t file_id, uint32_t target_block)
         return -1;
     }
 
+    // Nothing to defrag if file has 0 or 1 extent
     if (meta.extent_count <= 1)
     {
         tagfs_metadata_free(&meta);
@@ -2174,22 +2273,54 @@ int tagfs_defrag_file(uint32_t file_id, uint32_t target_block)
         return 0;
     }
 
+    // Calculate total blocks needed
     uint32_t total_blocks = 0;
     for (uint16_t i = 0; i < meta.extent_count; i++)
     {
         total_blocks += meta.extents[i].block_count;
     }
 
+    // Allocate contiguous space at target location or first available
     uint32_t new_start;
-    (void)target_block;
-    spin_unlock(&g_state.lock);
-    if (tagfs_alloc_blocks(total_blocks, &new_start) != 0)
-    {
-        tagfs_metadata_free(&meta);
-        return -1;
+    if (target_block != 0 && target_block < g_state.superblock.total_blocks) {
+        // Try to allocate at specific target block
+        // Check if target area is free
+        bool area_free = true;
+        for (uint32_t b = 0; b < total_blocks && area_free; b++) {
+            if (bitmap_test_bit(g_state.block_bitmap.bitmap, target_block + b)) {
+                area_free = false;
+            }
+        }
+        
+        if (area_free) {
+            new_start = target_block;
+            // Mark blocks as allocated
+            for (uint32_t b = 0; b < total_blocks; b++) {
+                bitmap_set_bit(g_state.block_bitmap.bitmap, new_start + b);
+            }
+            g_state.superblock.free_blocks -= total_blocks;
+        } else {
+            // Target not available, allocate first available
+            spin_unlock(&g_state.lock);
+            if (tagfs_alloc_blocks(total_blocks, &new_start) != 0)
+            {
+                tagfs_metadata_free(&meta);
+                return -1;
+            }
+            spin_lock(&g_state.lock);
+        }
+    } else {
+        // No target specified, allocate first available contiguous space
+        spin_unlock(&g_state.lock);
+        if (tagfs_alloc_blocks(total_blocks, &new_start) != 0)
+        {
+            tagfs_metadata_free(&meta);
+            return -1;
+        }
+        spin_lock(&g_state.lock);
     }
-    spin_lock(&g_state.lock);
 
+    // Copy all data to new contiguous location
     uint8_t block_buf[TAGFS_BLOCK_SIZE];
     uint32_t dest_block = new_start;
     bool copy_failed = false;
@@ -2210,12 +2341,14 @@ int tagfs_defrag_file(uint32_t file_id, uint32_t target_block)
 
     if (copy_failed)
     {
+        // Cleanup: free newly allocated blocks
         spin_unlock(&g_state.lock);
         tagfs_free_blocks(new_start, total_blocks);
         tagfs_metadata_free(&meta);
         return -1;
     }
 
+    // Free old fragmented blocks
     for (uint16_t i = 0; i < meta.extent_count; i++)
     {
         for (uint16_t b = 0; b < meta.extents[i].block_count; b++)
@@ -2229,29 +2362,21 @@ int tagfs_defrag_file(uint32_t file_id, uint32_t target_block)
     if (meta.extents)
         kfree(meta.extents);
 
-    // Split into multiple extents if total_blocks exceeds uint16_t max
-    uint16_t new_extent_count = (uint16_t)((total_blocks + 0xFFFE) / 0xFFFF);
-    if (new_extent_count == 0)
-        new_extent_count = 1;
-    meta.extents = kmalloc(sizeof(FileExtent) * new_extent_count);
+    // Create new single extent
+    meta.extents = kmalloc(sizeof(FileExtent));
     if (!meta.extents)
     {
         tagfs_metadata_free(&meta);
         spin_unlock(&g_state.lock);
         return -1;
     }
-    uint32_t remaining = total_blocks;
-    uint32_t block_pos = new_start;
-    for (uint16_t e = 0; e < new_extent_count; e++)
-    {
-        uint32_t chunk = remaining > 0xFFFF ? 0xFFFF : remaining;
-        meta.extents[e].start_block = block_pos;
-        meta.extents[e].block_count = (uint16_t)chunk;
-        block_pos += chunk;
-        remaining -= chunk;
-    }
-    meta.extent_count = new_extent_count;
+    
+    meta.extents[0].start_block = new_start;
+    meta.extents[0].block_count = (uint16_t)total_blocks;
+    meta.extent_count = 1;
+    meta.modified_time = rtc_get_unix64();
 
+    // Update metadata pool
     meta_pool_delete(meta_block, meta_offset);
     uint32_t new_mb, new_mo;
     if (meta_pool_write(&meta, &new_mb, &new_mo) == 0)

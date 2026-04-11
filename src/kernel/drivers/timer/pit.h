@@ -18,6 +18,7 @@
 #define PIT_CMD_CHANNEL0 0x00
 
 void pit_init(uint32_t frequency_hz);
+void pit_set_frequency(uint32_t frequency_hz);
 void pit_tick(void);
 uint64_t pit_get_ticks(void);
 void pit_sleep_ms(uint32_t milliseconds);

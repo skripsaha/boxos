@@ -1,21 +1,18 @@
 #include "meta_pool.h"
 #include "../tagfs.h"
 #include "tagfs.h"
+#include "../../lib/kernel/crypto.h"
+
+// Forward declaration - internal function in tagfs.c
+extern int tagfs_alloc_blocks_internal(uint32_t count, uint32_t *out_start_block);
 
 #define RECORD_HEADER_SIZE  42   // 40 bytes of fields + 2 bytes CRC16
 #define MPOOL_BLOCK_HEADER  16
 #define RECORD_CRC_OFFSET   40   // CRC16 stored at bytes [40..41] of packed record
 
-// CRC-16/CCITT-FALSE — lightweight integrity check for metadata records
+// CRC16 wrapper using shared crypto library
 static uint16_t meta_crc16(const uint8_t* data, uint32_t len) {
-    uint16_t crc = 0xFFFF;
-    for (uint32_t i = 0; i < len; i++) {
-        crc ^= (uint16_t)data[i] << 8;
-        for (int j = 0; j < 8; j++) {
-            crc = (crc & 0x8000) ? (crc << 1) ^ 0x1021 : (crc << 1);
-        }
-    }
-    return crc;
+    return KCrc16(data, len);
 }
 
 static uint32_t     g_first_block      = 0;
@@ -23,7 +20,8 @@ static uint32_t     g_block_count      = 0;
 static MetaPoolBlock g_current_block;
 static uint32_t     g_current_block_num = 0;
 static bool         g_current_dirty    = false;
-static spinlock_t   g_lock;
+// Note: No local lock - use g_state.lock from tagfs.c for all operations
+// static spinlock_t   g_lock;
 
 // Memory Mirror: in-memory cache of all metadata, indexed by file_id
 static TagFSMetadata* g_mirror          = NULL;
@@ -51,7 +49,7 @@ int meta_pool_init(uint32_t first_block, uint32_t block_count) {
     g_current_block_num = first_block;
     g_current_dirty     = false;
 
-    spinlock_init(&g_lock);
+    // spinlock_init removed
 
     int read_result = tagfs_read_block(first_block, &g_current_block);
     if (read_result < 0) {
@@ -168,7 +166,7 @@ static uint32_t pack_record(const TagFSMetadata* meta, uint8_t* buf) {
     memcpy(buf + pos, &meta->extent_count,  sizeof(uint16_t));  pos += 2;
     memcpy(buf + pos, &name_len,            sizeof(uint16_t));  pos += 2;
 
-    // CRC16 placeholder — zero during computation, stamped below
+    // CRC16 — zeroed during computation, stamped below
     uint16_t zero_crc = 0;
     memcpy(buf + pos, &zero_crc, sizeof(uint16_t));             pos += 2;
 
@@ -447,41 +445,37 @@ int meta_pool_read_cached(uint32_t file_id, TagFSMetadata* out) {
 // ---------------------------------------------------------------------------
 
 int meta_pool_write(const TagFSMetadata* meta, uint32_t* out_block, uint32_t* out_offset) {
-    spin_lock(&g_lock);
-
     uint32_t record_size = meta_pool_record_size(meta);
 
     if (record_size > TAGFS_MPOOL_DATA_SIZE) {
         debug_printf("[MetaPool] write: record too large (%u > %u) for file_id=%u\n",
                      record_size, TAGFS_MPOOL_DATA_SIZE, meta->file_id);
-        spin_unlock(&g_lock);
         return -1;
     }
 
+    // spin_lock removed - using g_state.lock
+
+    // Check if we need to chain to a new block
     if (record_size > (uint32_t)(TAGFS_MPOOL_DATA_SIZE - g_current_block.used_bytes)) {
-        debug_printf("[MetaPool] write: block %u full (used=%u need=%u), chaining to new block\n",
+        debug_printf("[MetaPool] CHAINING: block %u full (used=%u need=%u)\n",
                      g_current_block_num, g_current_block.used_bytes, record_size);
 
-        // Release g_lock before tagfs_alloc_blocks to avoid AB-BA deadlock
-        // (tagfs_alloc_blocks acquires g_state.lock; callers may hold g_state.lock
-        //  and then call meta_pool_write → g_lock, creating reverse order)
-        spin_unlock(&g_lock);
+        // Allocate new block - caller holds g_state.lock
+        // Use internal version to avoid double-lock
         uint32_t new_block;
-        int alloc_ret = tagfs_alloc_blocks(1, &new_block);
-        spin_lock(&g_lock);
-
+        int alloc_ret = tagfs_alloc_blocks_internal(1, &new_block);
         if (alloc_ret != 0) {
-            debug_printf("[MetaPool] write: failed to allocate new block\n");
-            spin_unlock(&g_lock);
+            debug_printf("[MetaPool] CHAINING: failed to allocate new block\n");
             return -1;
         }
 
-        // Link old block → new block, then flush old block to disk
+        // Link old block to new block and flush
+        debug_printf("[MetaPool] CHAINING: linking block %u -> %u\n", g_current_block_num, new_block);
         g_current_block.next_block = new_block;
         int flush_ret = tagfs_write_block(g_current_block_num, &g_current_block);
         if (flush_ret != 0) {
-            debug_printf("[MetaPool] write: failed to flush old block %u\n", g_current_block_num);
-            spin_unlock(&g_lock);
+            debug_printf("[MetaPool] CHAINING: failed to flush old block %u\n", g_current_block_num);
+            // spin_unlock removed - using g_state.lock
             return -1;
         }
 
@@ -492,7 +486,8 @@ int meta_pool_write(const TagFSMetadata* meta, uint32_t* out_block, uint32_t* ou
         g_current_block.used_bytes   = 0;
         g_current_block.record_count = 0;
         g_current_block.next_block   = 0;
-        g_current_dirty = false;  // fresh block, not yet dirty
+        g_current_dirty = true;
+        debug_printf("[MetaPool] CHAINING: switched to block %u\n", g_current_block_num);
     }
 
     uint8_t* dest = g_current_block.payload + g_current_block.used_bytes;
@@ -522,7 +517,7 @@ int meta_pool_write(const TagFSMetadata* meta, uint32_t* out_block, uint32_t* ou
     // Self-Healing: store metadata in mirror for recovery
     TagFS_SelfHealOnMetadataWrite(*out_block, (const uint8_t*)meta);
 
-    spin_unlock(&g_lock);
+    // spin_unlock removed - using g_state.lock
     return 0;
 }
 
@@ -532,13 +527,13 @@ int meta_pool_write(const TagFSMetadata* meta, uint32_t* out_block, uint32_t* ou
 
 int meta_pool_read(uint32_t block, uint32_t offset, TagFSMetadata* out) {
     // Current block may have unflushed data — read from in-memory copy
-    spin_lock(&g_lock);
+    // spin_lock removed - using g_state.lock
     if (block == g_current_block_num) {
         int r = unpack_record((uint8_t *)&g_current_block + offset, out);
-        spin_unlock(&g_lock);
+        // spin_unlock removed - using g_state.lock
         return r;
     }
-    spin_unlock(&g_lock);
+    // spin_unlock removed - using g_state.lock
 
     // Non-current blocks are always flushed — read from disk
     uint8_t buf[TAGFS_BLOCK_SIZE];
@@ -556,7 +551,7 @@ int meta_pool_read(uint32_t block, uint32_t offset, TagFSMetadata* out) {
 
 int meta_pool_delete(uint32_t block, uint32_t offset) {
     // Invalidate mirror + zero file_id in the record
-    spin_lock(&g_lock);
+    // spin_lock removed - using g_state.lock
     if (block == g_current_block_num) {
         // Current block lives in memory — modify directly (no disk round-trip)
         uint8_t *rec = (uint8_t *)&g_current_block + offset;
@@ -571,10 +566,10 @@ int meta_pool_delete(uint32_t block, uint32_t offset) {
         }
         memset(rec + 2, 0, 4);
         g_current_dirty = true;
-        spin_unlock(&g_lock);
+        // spin_unlock removed - using g_state.lock
         return 0;
     }
-    spin_unlock(&g_lock);
+    // spin_unlock removed - using g_state.lock
 
     // Non-current block — read from disk, modify, write back
     uint8_t buf[TAGFS_BLOCK_SIZE];

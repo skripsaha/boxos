@@ -43,16 +43,19 @@ static void *pocket_data_ptr(Pocket *pocket, process_t *proc)
 
 void storage_deck_init(void)
 {
-    debug_printf("[Storage Deck] Initializing...\n");
+    kprintf("[Storage Deck] Initializing...\n");
 
-    if (tagfs_init() != 0)
+    error_t result = tagfs_init();
+    if (result != 0)
     {
-        debug_printf("[Storage Deck] ERROR: Failed to initialize TagFS\n");
+        kprintf("[Storage Deck] ERROR: Failed to initialize TagFS (error=%d)\n", result);
+        TagFSState* fs = tagfs_get_state();
+        kprintf("[Storage Deck] TagFS state: %s\n", fs ? (fs->initialized ? "initialized" : "NOT initialized") : "NULL");
         return;
     }
 
     tagfs_context_init();
-    debug_printf("[Storage Deck] Initialization complete\n");
+    kprintf("[Storage Deck] Initialization complete\n");
 }
 
 static int handle_tag_query(Pocket *pocket, process_t *proc)

@@ -13,6 +13,8 @@
 
 // --- Includes ---
 #include "system_deck.h"
+#include "hardware_deck.h"
+#include "use_context.h"
 #include "perf_trace.h"
 #include "klib.h"
 #include "process.h"
@@ -113,7 +115,24 @@ bool system_security_gate(process_t* proc, uint8_t deck_id, uint8_t opcode) {
             return !!(t & app_or_higher);
 
         case DECK_HARDWARE:
-            return !!(t & (g_well_known.system | g_well_known.bypass));
+            // Allow system/bypass full access, utility can access RTC/timers
+            if (t & (g_well_known.system | g_well_known.bypass))
+                return true;
+            // Utility apps can access timer and RTC operations
+            if (t & g_well_known.utility) {
+                switch (opcode) {
+                    case HW_TIMER_GET_TICKS:
+                    case HW_TIMER_GET_MS:
+                    case HW_TIMER_GET_FREQ:
+                    case HW_RTC_GET_TIME:
+                    case HW_RTC_GET_UNIX64:
+                    case HW_RTC_GET_UPTIME:
+                        return true;
+                    default:
+                        return false;
+                }
+            }
+            return !!(t & g_well_known.app);
 
         case DECK_NETWORK:
             return !!(t & g_well_known.network);
@@ -1190,7 +1209,7 @@ static int ctx_use(Pocket* pocket, process_t* proc) {
     }
 
     if (tag_count == 0) {
-        scheduler_clear_use_context();
+        UseContextClear();
         *(uint32_t*)(data + 0) = OK;
         strncpy((char*)(data + 4), "Context cleared", 127);
         ((char*)(data + 4))[127] = '\0';
@@ -1203,7 +1222,13 @@ static int ctx_use(Pocket* pocket, process_t* proc) {
     for (uint32_t i = 0; i < tag_count; i++) {
         tag_ptrs[i] = parsed_tags[i];
     }
-    scheduler_set_use_context(tag_ptrs, tag_count);
+    error_t result = UseContextSet(tag_ptrs, tag_count);
+    if (result != OK) {
+        pocket->error_code = (uint32_t)result;
+        strncpy((char*)(data + 4), "Failed to set context", 127);
+        ((char*)(data + 4))[127] = '\0';
+        return -1;
+    }
 
     char context_desc[128];
     size_t offset = 0;

@@ -93,7 +93,10 @@ int hardware_deck_handler(Pocket* pocket, process_t* proc) {
 
         case HW_RTC_GET_TIME: {
             uint8_t* data = vmm_translate_user_addr(proc->cabin, pocket->data_addr, pocket->data_length);
-            if (!data) return -1;
+            if (!data) {
+                pocket->error_code = ERR_INVALID_ADDRESS;
+                return -1;
+            }
 
             time_t t;
             rtc_get_boxtime(&t);
@@ -106,24 +109,33 @@ int hardware_deck_handler(Pocket* pocket, process_t* proc) {
             data[17] = t.minute;
             data[18] = t.second;
             data[19] = t.weekday;
+            pocket->error_code = OK;
             return 0;
         }
 
         case HW_RTC_GET_UNIX64: {
             uint8_t* data = vmm_translate_user_addr(proc->cabin, pocket->data_addr, pocket->data_length);
-            if (!data) return -1;
+            if (!data) {
+                pocket->error_code = ERR_INVALID_ADDRESS;
+                return -1;
+            }
 
             uint64_t secs = rtc_get_unix64();
             deck_write_u64(data, secs);
+            pocket->error_code = OK;
             return 0;
         }
 
         case HW_RTC_GET_UPTIME: {
             uint8_t* data = vmm_translate_user_addr(proc->cabin, pocket->data_addr, pocket->data_length);
-            if (!data) return -1;
+            if (!data) {
+                pocket->error_code = ERR_INVALID_ADDRESS;
+                return -1;
+            }
 
             uint64_t ns = rtc_get_uptime_ns();
             deck_write_u64(data, ns);
+            pocket->error_code = OK;
             return 0;
         }
 

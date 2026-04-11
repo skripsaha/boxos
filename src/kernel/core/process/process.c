@@ -195,6 +195,8 @@ process_t *process_create(const char *tags)
 
     memset(proc, 0, sizeof(process_t));
     proc->magic = PROCESS_MAGIC;
+    proc->rq_prio = -1;
+    proc->rq_index = -1;
 
     uint64_t info_phys = 0;
     uint64_t pocket_phys = 0;
