@@ -47,6 +47,7 @@ void runqueue_init(RunQueue *rq)
         }
     }
     rq->active_bitmap = 0;
+    __atomic_store_n(&rq->total, 0, __ATOMIC_RELAXED);
     spinlock_init(&rq->lock);
 }
 
@@ -90,6 +91,7 @@ bool runqueue_enqueue(RunQueue *rq, struct process_t *proc, int prio)
     q->count++;
 
     rq->active_bitmap |= (1u << prio);
+    __atomic_fetch_add(&rq->total, 1, __ATOMIC_RELEASE);
     return true;
 }
 
@@ -115,6 +117,7 @@ struct process_t *runqueue_dequeue_best(RunQueue *rq)
     // Update removed process tracking
     proc->rq_prio = -1;
     proc->rq_index = -1;
+    __atomic_fetch_sub(&rq->total, 1, __ATOMIC_RELEASE);
 
     // Shrink if significantly underutilized (save memory)
     if (q->count < q->capacity / 4 && q->capacity > RUNQUEUE_INITIAL_CAP) {
@@ -143,6 +146,7 @@ void runqueue_remove(RunQueue *rq, struct process_t *proc)
         return;  // Sanity check
 
     q->count--;
+    __atomic_fetch_sub(&rq->total, 1, __ATOMIC_RELEASE);
 
     if (q->count == 0) {
         // Queue is now empty
@@ -201,4 +205,13 @@ uint32_t runqueue_total_count(RunQueue *rq)
     for (int prio = 0; prio < SCHED_PRIO_LEVELS; prio++)
         total += rq->queues[prio].count;
     return total;
+}
+
+// Lock-free read of the running total. Safe to call without holding rq->lock.
+// Uses ACQUIRE ordering so the caller sees all enqueue/dequeue side-effects
+// that preceded the most recent __ATOMIC_RELEASE store.
+uint32_t RunqueueAtomicTotal(const RunQueue *rq)
+{
+    if (!rq) return 0;
+    return __atomic_load_n(&rq->total, __ATOMIC_ACQUIRE);
 }

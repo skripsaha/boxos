@@ -213,6 +213,14 @@ void scheduler_recalc_parameters(void)
     if (!g_core_sched || !g_core_context_count || !g_core_normal_count || g_sched_core_count == 0)
         return;
 
+    // Throttle: only recalculate every SCHED_RECALC_INTERVAL global ticks.
+    // Called from BSP PIT IRQ only, so no concurrent access to s_last_recalc.
+    static uint64_t s_last_recalc = 0;
+    uint64_t now = __atomic_load_n(&g_global_tick, __ATOMIC_RELAXED);
+    if (now - s_last_recalc < SCHED_RECALC_INTERVAL)
+        return;
+    s_last_recalc = now;
+
     // Sum atomic counters — O(cores) but very fast (no locks)
     uint32_t total_context = 0;
     uint32_t total_normal = 0;
@@ -223,19 +231,20 @@ void scheduler_recalc_parameters(void)
         total_normal += __atomic_load_n(&g_core_normal_count[c], __ATOMIC_RELAXED);
 
         scheduler_state_t *s = &g_core_sched[c];
-        if (runqueue_total_count(&s->runqueue) > 0 ||
+        uint32_t rq_count = RunqueueAtomicTotal(&s->runqueue);
+        if (rq_count > 0 ||
             (s->current_process && !process_is_idle(s->current_process))) {
             busy_cores++;
         }
 
         // Core parking
-        if (!s->is_parked && runqueue_total_count(&s->runqueue) == 0 &&
+        if (!s->is_parked && rq_count == 0 &&
             (!s->current_process || process_is_idle(s->current_process))) {
             s->idle_tick_count++;
             if (s->idle_tick_count >= SCHEDULER_PARK_IDLE_TICKS) {
                 scheduler_park_core(c);
             }
-        } else if (s->is_parked && runqueue_total_count(&s->runqueue) >= SCHEDULER_UNPARK_LOAD_THRESH) {
+        } else if (s->is_parked && rq_count >= SCHEDULER_UNPARK_LOAD_THRESH) {
             scheduler_unpark_core(c);
         } else if (!s->is_parked) {
             s->idle_tick_count = 0;
@@ -363,14 +372,14 @@ error_t sched_enqueue(process_t *proc)
     // If cache-cold (not run recently), consider load balancing
     // Only migrate if another core has ≥2 fewer processes (avoid thrashing)
     if (ticks_since_run >= SCHEDULER_AFFINITY_WARM_TICKS) {
-        uint32_t home_load = runqueue_total_count(&g_core_sched[target_core].runqueue);
+        uint32_t home_load = RunqueueAtomicTotal(&g_core_sched[target_core].runqueue);
         uint32_t min_load = home_load;
         uint8_t best_core = target_core;
 
         for (uint8_t c = 0; c < g_sched_core_count; c++) {
             if (g_amp.cores[c].is_kcore) continue;
             if (scheduler_is_core_parked(c)) continue;
-            uint32_t load = runqueue_total_count(&g_core_sched[c].runqueue);
+            uint32_t load = RunqueueAtomicTotal(&g_core_sched[c].runqueue);
             if (load + 1 < min_load) {  // +1 because we're about to enqueue here
                 min_load = load;
                 best_core = c;
@@ -574,9 +583,7 @@ static process_t *sched_try_steal(uint8_t my_core)
         if (!g_amp.cores[c].online) continue;
         if (scheduler_is_core_parked(c)) continue;
 
-        spin_lock(&g_core_sched[c].runqueue.lock);
-        uint32_t cnt = runqueue_total_count(&g_core_sched[c].runqueue);
-        spin_unlock(&g_core_sched[c].runqueue.lock);
+        uint32_t cnt = RunqueueAtomicTotal(&g_core_sched[c].runqueue);
         if (cnt > max_count)
         {
             max_count = cnt;
@@ -590,7 +597,7 @@ static process_t *sched_try_steal(uint8_t my_core)
     scheduler_state_t *vs = &g_core_sched[victim];
     spin_lock(&vs->runqueue.lock);
 
-    if (runqueue_total_count(&vs->runqueue) <= 1)
+    if (RunqueueAtomicTotal(&vs->runqueue) <= 1)
     {
         spin_unlock(&vs->runqueue.lock);
         return NULL;
