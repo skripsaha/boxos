@@ -154,19 +154,6 @@ void rtc_init(void) {
 }
 
 void rtc_get_boxtime(time_t* out) {
-    uint64_t elapsed_ticks = pit_get_ticks() - rtc_state.base_pit_ticks;
-    uint32_t freq = pit_get_frequency();
-
-    if (freq == 0) {
-        out->seconds = rtc_state.base_seconds;
-        out->nanosec = 0;
-    } else {
-        uint64_t elapsed_secs = elapsed_ticks / freq;
-        uint64_t sub_ticks    = elapsed_ticks % freq;
-        out->seconds = rtc_state.base_seconds + elapsed_secs;
-        out->nanosec = (uint32_t)((sub_ticks * 1000000000ULL) / freq);
-    }
-
     out->year    = rtc_state.year;
     out->month   = rtc_state.month;
     out->day     = rtc_state.day;
@@ -174,6 +161,8 @@ void rtc_get_boxtime(time_t* out) {
     out->minute  = rtc_state.minute;
     out->second  = rtc_state.second;
     out->weekday = rtc_state.weekday;
+    out->seconds = rtc_state.base_seconds;
+    out->nanosec = 0;
 }
 
 uint64_t rtc_get_unix64(void) {

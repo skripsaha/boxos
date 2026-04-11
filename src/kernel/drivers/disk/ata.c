@@ -11,6 +11,10 @@
 ATADevice ata_primary_master;
 ATADevice ata_primary_slave;
 
+// Global ATA lock for multi-core safety
+static spinlock_t g_ata_lock;
+static bool g_ata_lock_initialized = false;
+
 static inline void ata_delay_400ns(void) {
     // Read status register 4 times (each read = ~100ns)
     for (int i = 0; i < 4; i++) {
@@ -174,8 +178,12 @@ int ata_read_sectors(uint8_t is_master, uint64_t lba, uint16_t count, uint8_t* b
         return ahci_read_sectors_sync(is_master ? 0 : 1, lba, count, buffer);
     }
 
+    // Lock ATA controller for multi-core safety
+    spin_lock(&g_ata_lock);
+
     ATADevice* device = is_master ? &ata_primary_master : &ata_primary_slave;
     if (!device->exists) {
+        spin_unlock(&g_ata_lock);
         debug_printf("[ATA] ERROR: Device does not exist\n");
         return ATA_ERR_NO_DEVICE;
     }
@@ -228,6 +236,7 @@ int ata_read_sectors(uint8_t is_master, uint64_t lba, uint16_t count, uint8_t* b
     for (int sector = 0; sector < count; sector++) {
         if (ata_wait_drq() != 0) {
             debug_printf("[ATA] ERROR: Read failed at sector %d\n", sector);
+            spin_unlock(&g_ata_lock);
             return -1;
         }
 
@@ -237,11 +246,17 @@ int ata_read_sectors(uint8_t is_master, uint64_t lba, uint16_t count, uint8_t* b
         }
     }
 
+    spin_unlock(&g_ata_lock);
     return 0;
 }
 
-
 int ata_write_sectors(uint8_t is_master, uint64_t lba, uint16_t count, const uint8_t* buffer) {
+    // Initialize lock on first use
+    if (!g_ata_lock_initialized) {
+        spinlock_init(&g_ata_lock);
+        g_ata_lock_initialized = true;
+    }
+
     if (!buffer || count == 0) {
         return ATA_ERR_INVALID_ARGS;
     }
@@ -250,8 +265,12 @@ int ata_write_sectors(uint8_t is_master, uint64_t lba, uint16_t count, const uin
         return ahci_write_sectors_sync(is_master ? 0 : 1, lba, count, buffer);
     }
 
+    // Lock ATA controller for multi-core safety
+    spin_lock(&g_ata_lock);
+
     ATADevice* device = is_master ? &ata_primary_master : &ata_primary_slave;
     if (!device->exists) {
+        spin_unlock(&g_ata_lock);
         return ATA_ERR_NO_DEVICE;
     }
 
@@ -312,6 +331,7 @@ int ata_write_sectors(uint8_t is_master, uint64_t lba, uint16_t count, const uin
     for (int sector = 0; sector < count; sector++) {
         if (ata_wait_drq() != 0) {
             debug_printf("[ATA] ERROR: Write failed at sector %d\n", sector);
+            spin_unlock(&g_ata_lock);
             return -1;
         }
 
@@ -324,6 +344,7 @@ int ata_write_sectors(uint8_t is_master, uint64_t lba, uint16_t count, const uin
     debug_printf("[ATA] WRITE COMPLETE: LBA %lu (%u bytes written to disk)\n",
                  (unsigned long)lba, count * 512);
 
+    spin_unlock(&g_ata_lock);
     return 0;
 }
 

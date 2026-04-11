@@ -310,6 +310,123 @@ const char* ErrorString(error_t err) {
         case ERR_KERNEL_LOAD_FAILED:
             return "Kernel load failed";
 
+        // TagFS Core Errors
+        case ERR_TAGFS_NOT_INITIALIZED:
+            return "TagFS not initialized";
+        case ERR_TAGFS_CORRUPTED:
+            return "TagFS corrupted";
+        case ERR_TAGFS_NO_SPACE:
+            return "TagFS no space";
+        case ERR_TAGFS_FILE_NOT_FOUND:
+            return "TagFS file not found";
+        case ERR_TAGFS_FILE_EXISTS:
+            return "TagFS file exists";
+        case ERR_TAGFS_INVALID_HANDLE:
+            return "TagFS invalid handle";
+        case ERR_TAGFS_READ_ONLY:
+            return "TagFS read only";
+        case ERR_TAGFS_QUOTA_EXCEEDED:
+            return "TagFS quota exceeded";
+        case ERR_TAGFS_METADATA_ERROR:
+            return "TagFS metadata error";
+        case ERR_TAGFS_BITMAP_FULL:
+            return "TagFS bitmap full";
+        case ERR_TAGFS_REGISTRY_FULL:
+            return "TagFS registry full";
+        case ERR_TAGFS_TAG_NOT_FOUND:
+            return "TagFS tag not found";
+        case ERR_TAGFS_TAG_EXISTS:
+            return "TagFS tag exists";
+        case ERR_TAGFS_INVALID_TAG:
+            return "TagFS invalid tag";
+        case ERR_TAGFS_EXTENT_ERROR:
+            return "TagFS extent error";
+        case ERR_TAGFS_RECOVERY_FAILED:
+            return "TagFS recovery failed";
+
+        // TagFS Module Errors
+        case ERR_DISKBOOK_NOT_INITIALIZED:
+            return "DiskBook not initialized";
+        case ERR_DISKBOOK_FULL:
+            return "DiskBook journal full";
+        case ERR_DISKBOOK_CORRUPTED:
+            return "DiskBook journal corrupted";
+        case ERR_DISKBOOK_COMMIT_FAILED:
+            return "DiskBook commit failed";
+        case ERR_DISKBOOK_CHECKPOINT_FAILED:
+            return "DiskBook checkpoint failed";
+        case ERR_DISKBOOK_REPLAY_FAILED:
+            return "DiskBook replay failed";
+        case ERR_DISKBOOK_INVALID_TXN:
+            return "DiskBook invalid transaction";
+        case ERR_DISKBOOK_WRITE_FAILED:
+            return "DiskBook write failed";
+        case ERR_DISKBOOK_READ_FAILED:
+            return "DiskBook read failed";
+        
+        case ERR_COW_NOT_INITIALIZED:
+            return "CoW snapshots not initialized";
+        case ERR_COW_SNAPSHOT_EXISTS:
+            return "Snapshot already exists";
+        case ERR_COW_SNAPSHOT_NOT_FOUND:
+            return "Snapshot not found";
+        case ERR_COW_SNAPSHOT_LIMIT:
+            return "Snapshot limit reached";
+        case ERR_COW_ALLOCATION_FAILED:
+            return "CoW allocation failed";
+        case ERR_COW_RESTORE_FAILED:
+            return "Snapshot restore failed";
+        
+        case ERR_DEDUP_NOT_INITIALIZED:
+            return "Dedup not initialized";
+        case ERR_DEDUP_HASH_COLLISION:
+            return "Dedup hash collision";
+        case ERR_DEDUP_POOL_EXHAUSTED:
+            return "Dedup entry pool exhausted";
+        case ERR_DEDUP_GC_FAILED:
+            return "Dedup GC failed";
+        case ERR_DEDUP_REGISTER_FAILED:
+            return "Dedup register failed";
+        
+        case ERR_SELF_HEAL_NOT_INITIALIZED:
+            return "Self-heal not initialized";
+        case ERR_SELF_HEAL_CORRUPTION_DETECTED:
+            return "Self-heal corruption detected";
+        case ERR_SELF_HEAL_RECOVERY_FAILED:
+            return "Self-heal recovery failed";
+        case ERR_SELF_HEAL_MIRROR_FAILED:
+            return "Self-heal mirror failed";
+        case ERR_SELF_HEAL_SCRUB_FAILED:
+            return "Self-heal scrub failed";
+        
+        case ERR_BOXHASH_INVALID_CONTEXT:
+            return "BoxHash invalid context";
+        case ERR_BOXHASH_VERIFICATION_FAILED:
+            return "BoxHash verification failed";
+        case ERR_BOXHASH_KEY_NOT_SET:
+            return "BoxHash key not set";
+        
+        case ERR_BRAID_NOT_INITIALIZED:
+            return "Braid not initialized";
+        case ERR_BRAID_DISK_OFFLINE:
+            return "Braid disk offline";
+        case ERR_BRAID_DISK_FULL:
+            return "Braid disk full";
+        case ERR_BRAID_READ_FAILED:
+            return "Braid read failed";
+        case ERR_BRAID_WRITE_FAILED:
+            return "Braid write failed";
+        case ERR_BRAID_CHECKSUM_MISMATCH:
+            return "Braid checksum mismatch";
+        case ERR_BRAID_HEAL_FAILED:
+            return "Braid heal failed";
+        case ERR_BRAID_INSUFFICIENT_DISKS:
+            return "Braid insufficient disks";
+        case ERR_BRAID_MODE_INVALID:
+            return "Braid invalid mode";
+        case ERR_BRAID_REBUILD_FAILED:
+            return "Braid rebuild failed";
+
         default:
             return "Unknown error code";
     }

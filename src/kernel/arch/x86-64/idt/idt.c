@@ -385,7 +385,8 @@ void irq_handler(interrupt_frame_t *frame)
 
     // LAPIC timer vector: per-core tick counter + scheduling.
     // g_global_tick is incremented ONLY by BSP via PIT IRQ 0 to avoid
-    // cache-line bouncing across all cores on every tick.
+    // cache-line bouncing and keep consistent wall-clock time across cores.
+    // Per-core scheduling uses s->total_ticks for fairness/starvation.
     // K-Cores run kcore_run_loop — schedule() would hijack them.
     if (vector == LAPIC_TIMER_VECTOR)
     {
@@ -452,6 +453,9 @@ void irq_handler(interrupt_frame_t *frame)
         scheduler_state_t *sched = scheduler_get_state();
         sched->total_ticks++;
         __atomic_fetch_add(&g_global_tick, 1, __ATOMIC_RELAXED);
+
+        /* Periodic scheduler parameter recalculation */
+        scheduler_recalc_parameters();
 
         /* Software key repeat driven by PIT tick */
         keyboard_timer_tick();

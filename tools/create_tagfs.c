@@ -556,8 +556,8 @@ int main(int argc, char* argv[]) {
 
         next_block += files[i].block_count;
 
-        printf("  File %2d: %-30s  id=%u  size=%-8llu  blocks=%u-%u  tags=%s\n",
-               i + 1, files[i].filename, files[i].file_id, files[i].file_size,
+        printf("  File %2d: %-30s  id=%u  size=%-8lu  blocks=%u-%u  tags=%s\n",
+               i + 1, files[i].filename, files[i].file_id, (unsigned long)files[i].file_size,
                files[i].start_block, files[i].start_block + files[i].block_count - 1,
                tags_str);
     }

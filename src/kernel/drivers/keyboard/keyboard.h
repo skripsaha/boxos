@@ -9,8 +9,13 @@
 #define KEYBOARD_STATUS_PORT 0x64
 
 /* Software typematic timing (PIT = 100 Hz, 1 tick = 10 ms) */
-#define KB_REPEAT_DELAY_TICKS   50  /* 500 ms initial delay  */
-#define KB_REPEAT_RATE_TICKS     3  /* ~33 ms between repeats = ~30 chars/sec */
+/* Keyboard software repeat timing (in ms, converted to ticks at init) */
+#define KB_REPEAT_DELAY_MS      500  /* 500 ms initial delay  */
+#define KB_REPEAT_RATE_MS        33  /* ~33 ms between repeats = ~30 chars/sec */
+
+/* Runtime values (calculated from ms based on timer frequency) */
+extern uint32_t g_kb_repeat_delay_ticks;
+extern uint32_t g_kb_repeat_rate_ticks;
 
 typedef struct {
     uint8_t shift_pressed  : 1;

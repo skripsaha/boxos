@@ -3,9 +3,19 @@
 
 #include "../../lib/kernel/ktypes.h"
 #include "../../lib/kernel/klib.h"
+#include "tagfs_constants.h"
 #include "../../include/boxos_magic.h"
 #include "../../include/boxos_limits.h"
 #include "../core/error/error.h"
+
+// ============================================================================
+// Include Submodule Headers (production implementations)
+// ============================================================================
+
+#include "disk_book/disk_book.h"
+#include "cow/cow.h"
+#include "dedup/dedup.h"
+#include "self_heal/self_heal.h"
 
 // ============================================================================
 // TagFS Constants — Production Configuration
@@ -33,6 +43,7 @@
 #define TAGFS_FILE_ACTIVE           (1 << 0)
 #define TAGFS_FILE_TRASHED          (1 << 1)
 #define TAGFS_FILE_HIDDEN           (1 << 2)
+#define TAGFS_FILE_COW              (1 << 3)  // Copy-on-Write enabled
 
 // Handle flags
 #define TAGFS_HANDLE_READ           (1 << 0)
@@ -379,11 +390,11 @@ int      meta_pool_flush(void);
 // Main TagFS API
 // ----------------------------------------------------------------------------
 
-int  tagfs_init(void);
+error_t  tagfs_init(void);
 void tagfs_shutdown(void);
 void tagfs_sync(void);
 
-int  tagfs_format(uint32_t total_blocks);
+error_t  tagfs_format(uint32_t total_blocks);
 
 int  tagfs_create_file(const char* filename, const uint16_t* tag_ids, uint16_t tag_count,
                        uint32_t* out_file_id);
@@ -420,9 +431,9 @@ uint32_t tagfs_get_fragmentation_score(void);
 // Block I/O (for subsystem use)
 // ----------------------------------------------------------------------------
 
-int  tagfs_read_block(uint32_t block, void* buffer);
-int  tagfs_write_block(uint32_t block, const void* buffer);
-int  tagfs_write_superblock(const TagFSSuperblock* sb);
+error_t  tagfs_read_block(uint32_t block, void* buffer);
+error_t  tagfs_write_block(uint32_t block, const void* buffer);
+error_t  tagfs_write_superblock(const TagFSSuperblock* sb);
 
 // ----------------------------------------------------------------------------
 // Context API
@@ -465,34 +476,19 @@ int tagfs_snapshot_delete(uint32_t snapshot_id);
 int tagfs_snapshot_list(uint32_t* ids, uint32_t max_count);
 int tagfs_snapshot_info(uint32_t snapshot_id, TagFSSnapshot* info);
 
-// ============================================================================
-// Self-Healing API (Stub)
-// ============================================================================
-
-void TagFS_SelfHealInit(void);
-void TagFS_SelfHealShutdown(void);
-void TagFS_SelfHealEnable(bool enable);
-void TagFS_SelfHealOnMetadataWrite(uint32_t block_number, const uint8_t* data);
-int TagFS_SelfHealOnMetadataRead(uint32_t block_number, uint8_t* data);
-void TagFS_SelfHealPeriodicCheck(void);
-
-// ============================================================================
-// Data Deduplication API (Stub)
-// ============================================================================
-
-void TagFS_DedupInit(void);
-void TagFS_DedupShutdown(void);
-int TagFS_DedupCheck(const uint8_t* block_data, uint32_t* existing_block);
-int TagFS_DedupRegister(uint32_t physical_block, const uint8_t* block_data);
-int TagFS_DedupUnregister(uint32_t physical_block);
-void TagFS_DedupGetStats(uint64_t* blocks_saved, uint64_t* bytes_saved, uint32_t* entry_count);
-int TagFS_DedupAllocBlock(const uint8_t* block_data, uint32_t* allocated_block, int* is_duplicate);
-
-// ============================================================================
 // Accessor Functions
 // ============================================================================
 
 WellKnownTags* tagfs_get_well_known_tags(void);
 TagFSState* tagfs_get_state(void);
 
-#endif
+// ============================================================================
+// Test Framework
+// ============================================================================
+
+#include "tests/tests.h"
+
+// Run all tests (called from userspace)
+error_t TagFS_RunTests(void);
+
+#endif // TAGFS_H

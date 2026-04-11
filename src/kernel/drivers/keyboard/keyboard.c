@@ -5,7 +5,11 @@
 #include "atomics.h"
 #include "cpu_calibrate.h"
 #include "irqchip.h"
-#include "scheduler.h"   /* g_global_tick */
+#include "scheduler.h"   /* g_global_tick, g_timer_frequency */
+
+/* Runtime repeat timing (calculated from ms based on timer frequency) */
+uint32_t g_kb_repeat_delay_ticks;
+uint32_t g_kb_repeat_rate_ticks;
 
 /* ─── Circular character buffer ─────────────────────────────────────────── */
 
@@ -99,7 +103,7 @@ static void kb_arm_repeat(const char* chars, uint8_t count,
     for (uint8_t i = 0; i < count && i < KB_SEQ_MAX; i++)
         kb_repeat.chars[i] = chars[i];
     kb_repeat.next_repeat_tick = __atomic_load_n(&g_global_tick, __ATOMIC_RELAXED)
-                                 + KB_REPEAT_DELAY_TICKS;
+                                 + g_kb_repeat_delay_ticks;
 }
 
 /* Cancel repeat if the released key matches the currently repeating key. */
@@ -216,7 +220,14 @@ void keyboard_init(void)
     /* Ensure all LEDs start off */
     keyboard_set_leds(0, 0, 0);
 
+    /* Calculate repeat timing based on actual timer frequency */
+    g_kb_repeat_delay_ticks = (KB_REPEAT_DELAY_MS * g_timer_frequency) / 1000;
+    g_kb_repeat_rate_ticks  = (KB_REPEAT_RATE_MS * g_timer_frequency) / 1000;
+
     debug_printf("[KEYBOARD] 8042 initialization complete\n");
+    debug_printf("[KEYBOARD] Repeat: delay=%u ticks (%u ms), rate=%u ticks (%u ms)\n",
+                 g_kb_repeat_delay_ticks, KB_REPEAT_DELAY_MS,
+                 g_kb_repeat_rate_ticks, KB_REPEAT_RATE_MS);
 }
 
 /* ─── Scancode handler (called from IRQ1) ──────────────────────────────── */
@@ -338,7 +349,7 @@ void keyboard_timer_tick(void)
     if (!kb_repeat.delay_passed) {
         kb_repeat.delay_passed = 1;
     }
-    kb_repeat.next_repeat_tick = now + KB_REPEAT_RATE_TICKS;
+    kb_repeat.next_repeat_tick = now + g_kb_repeat_rate_ticks;
 }
 
 /* ─── Push raw sequence (used by USB HID extended keys) ────────────────── */

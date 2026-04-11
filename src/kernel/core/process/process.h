@@ -91,6 +91,9 @@ typedef struct process_t
     uint64_t last_run_time;
     uint32_t consecutive_runs;
     uint64_t total_cpu_time;
+    int8_t current_prio;            // Current scheduler priority level (set on enqueue)
+    int8_t rq_prio;                 // Priority level in runqueue (-1 = not enqueued)
+    int16_t rq_index;               // Index in queue (-1 = not enqueued)
 
     volatile process_state_t state;
     spinlock_t state_lock;
