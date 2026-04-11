@@ -1,13 +1,20 @@
-Пиши код в PascalCase приемущественно. для переменных используй snake_case а для констант 
-UPPER_CASE; Используй ООП обязательно и используй различные конструкции языка если они действительно нужны, даже если редкие(например goto)
+- Use PascalCase primarily for functions, types, structs, and public interfaces.
+- Use snake_case for variables.
+- Use UPPER_CASE for constants.
 
-Чтобы пересобрать проект всегда используй make clean
-Чтобы собрать проект используй make
-Чтобы запустить проект используй make run
-После каждой сделанной фазы изменений пересобирай проект и тестируй в single-core и multi-core режиме: для single core - make run; для multi core - make run CORES=4 MEM=16G
+- Use structured architecture, encapsulation, and explicit interfaces where they are helpful.
+- Do not avoid language constructs just because they are rare; use them if they reduce complexity or improve correctness.
+- Do not leave TODOs or placeholders unless the limitation is explicitly explained and tracked.
 
-Не делай hardcode. Пиши динамичный код который подстраивается под разные случаи.
-Не перегружай файлы кодом - лучше создавать хорошую структуры с отдельными заголовочными файлами.
-Избегай externs - лучше полностью сделай include.
-Избегай философии unix.
-Пиши код без заглушек и с хорошей реализацией сразу.
+- Use make clean before full rebuilds or after build-system changes.
+- Use make to build the project.
+- Use make run to run the project.
+- After each major phase of changes, rebuild and test in both modes:
+  - make run
+  - make run CORES=4 MEM=16G
+
+- Do not hardcode values when dynamic handling is possible.
+- Keep files focused; prefer separate headers and clear module boundaries.
+- Avoid extern unless there is a strong architectural reason.
+- Avoid Unix-like assumptions and Unix philosophy unless they are explicitly justified.
+- Write complete implementations, not stubs.

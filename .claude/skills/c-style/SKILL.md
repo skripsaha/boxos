@@ -6,10 +6,13 @@ description: Use for writing and reviewing C code in the project’s required st
 # C Style
 
 ## Purpose
+
 Write C code that is consistent, readable, predictable, and safe for low-level systems work.
 
 ## When to use
+
 Use for:
+
 - kernel code
 - runtime code
 - boot code
@@ -19,6 +22,7 @@ Use for:
 - any C file in the project
 
 ## Rules
+
 - Prefer clarity over cleverness.
 - Keep functions small and single-purpose.
 - Use explicit types and explicit ownership rules.
@@ -31,18 +35,22 @@ Use for:
 - Avoid nested complexity.
 
 ## Style rules
+
 - Use consistent naming.
 - Keep local scope narrow.
 - Use `const` when data is read-only.
 - Use `static` for internal helpers.
-- Check all allocation and syscall failures.
+- Check all allocation and other failures.
 - Return explicit error codes.
 - Never ignore a failure path.
 - Document invariants near the code that depends on them.
 - Prefer straightforward structs and enums.
 - Do not over-comment obvious code.
+- Use PascalCase for functions, types, structs, and public interfaces in this project.
+- Use snake_case for local and internal variables unless the project defines otherwise.
 
 ## Workflow
+
 1. Understand the intent of the function.
 2. Define ownership, lifetime, and error rules.
 3. Write the simplest correct implementation.
@@ -52,17 +60,23 @@ Use for:
 7. Note any assumptions that need validation.
 
 ## Output format
+
 ### Intent
+
 - ...
 
 ### Style checks
+
 - ...
 
 ### Problems found
+
 - ...
 
 ### Proposed code
+
 - ...
 
 ### Notes
+
 - ...
