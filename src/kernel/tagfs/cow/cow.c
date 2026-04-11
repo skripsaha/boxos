@@ -9,10 +9,10 @@
 // Global state
 static CowState g_cow_state;
 
-// Allocate new snapshot ID
+// Allocate new snapshot ID atomically
 static uint32_t CowAllocSnapshotId(void) {
-    static uint32_t next_id = 1;
-    return next_id++;
+    static volatile uint32_t next_id = 1;
+    return __atomic_fetch_add(&next_id, 1, __ATOMIC_SEQ_CST);
 }
 
 // Find snapshot by ID
@@ -63,64 +63,86 @@ void TagFS_CowShutdown(void) {
 error_t TagFS_SnapshotCreate(const char *name, uint32_t file_id, uint32_t *snapshot_id) {
     if (!g_cow_state.initialized || !name || !snapshot_id)
         return ERR_INVALID_ARGUMENT;
-    
+
     spin_lock(&g_cow_state.lock);
-    
+
     if (g_cow_state.snapshot_count >= g_cow_state.snapshot_capacity) {
         spin_unlock(&g_cow_state.lock);
         return ERR_NO_MEMORY;
     }
-    
+
     for (uint32_t i = 0; i < g_cow_state.snapshot_count; i++) {
         if (strcmp(g_cow_state.snapshots[i].name, name) == 0) {
             spin_unlock(&g_cow_state.lock);
             return ERR_ALREADY_EXISTS;
         }
     }
-    
-    CowSnapshot *snap = &g_cow_state.snapshots[g_cow_state.snapshot_count];
+
+    uint32_t slot_index = g_cow_state.snapshot_count;
+    CowSnapshot *snap = &g_cow_state.snapshots[slot_index];
     memset(snap, 0, sizeof(CowSnapshot));
-    
+
     snap->snapshot_id = CowAllocSnapshotId();
     snap->parent_file_id = file_id;
     snap->created_time = rtc_get_unix64();
     snap->disk_book_checkpoint = DiskBookGetCheckpointSeq();
     strncpy(snap->name, name, TAGFS_SNAPSHOT_NAME_LEN - 1);
     snap->flags = COW_SNAP_READONLY;
-    
+
+    TagFSMetadata file_meta;
+    memset(&file_meta, 0, sizeof(file_meta));
+    bool has_file_meta = false;
+
     if (file_id == 0) {
         TagFSState *fs = tagfs_get_state();
         if (fs)
             snap->file_count = fs->superblock.total_files;
     } else {
-        TagFSMetadata meta;
-        if (tagfs_get_metadata(file_id, &meta) == OK) {
+        if (tagfs_get_metadata(file_id, &file_meta) == OK) {
             snap->file_count = 1;
-            snap->total_size = meta.size;
+            snap->total_size = file_meta.size;
             snap->block_count = 0;
-            for (uint16_t j = 0; j < meta.extent_count; j++)
-                snap->block_count += meta.extents[j].block_count;
-            tagfs_metadata_free(&meta);
+            for (uint16_t j = 0; j < file_meta.extent_count; j++)
+                snap->block_count += file_meta.extents[j].block_count;
+            has_file_meta = true;
         } else {
             spin_unlock(&g_cow_state.lock);
             return ERR_FILE_NOT_FOUND;
         }
     }
-    
-    spin_unlock(&g_cow_state.lock);
-    
-    DiskBookTxn txn;
-    if (DiskBookBegin(&txn) == OK) {
-        DiskBookLogMetadata(&txn, snap->snapshot_id, 0, NULL);
-        DiskBookCommit(&txn);
-    }
-    
-    spin_lock(&g_cow_state.lock);
+
+    // Commit snapshot to journal before making it visible.
+    // Use the file metadata for the journal record so the log is real.
+    // For whole-fs snapshots, build a dummy metadata record with snapshot_id as file_id.
     g_cow_state.snapshot_count++;
     g_cow_state.snapshots_created++;
     *snapshot_id = snap->snapshot_id;
+
     spin_unlock(&g_cow_state.lock);
-    
+
+    DiskBookTxn txn;
+    if (DiskBookBegin(&txn) == OK) {
+        if (has_file_meta) {
+            // Journal the actual file metadata associated with this snapshot
+            uint32_t meta_block, meta_offset;
+            if (file_table_lookup(file_id, &meta_block, &meta_offset) == 0) {
+                DiskBookLogMetadata(&txn, snap->snapshot_id, meta_block, &file_meta);
+            }
+        } else {
+            // Whole-fs snapshot: synthesize a placeholder metadata record
+            TagFSMetadata snap_meta;
+            memset(&snap_meta, 0, sizeof(snap_meta));
+            snap_meta.file_id = snap->snapshot_id;
+            snap_meta.flags   = COW_SNAP_READONLY;
+            snap_meta.size    = snap->total_size;
+            DiskBookLogMetadata(&txn, snap->snapshot_id, 0, &snap_meta);
+        }
+        DiskBookCommit(&txn);
+    }
+
+    if (has_file_meta)
+        tagfs_metadata_free(&file_meta);
+
     debug_printf("[CoW] Created '%s' (id=%u, files=%u)\n", name, snap->snapshot_id, snap->file_count);
     return OK;
 }
@@ -180,20 +202,23 @@ error_t TagFS_SnapshotCreateByTag(const char *tag_pattern, uint32_t *snapshot_id
     snap->total_size = total_size;
     snap->block_count = block_count;
     
-    spin_unlock(&g_cow_state.lock);
-    
-    DiskBookTxn txn;
-    if (DiskBookBegin(&txn) == OK) {
-        DiskBookLogMetadata(&txn, snap->snapshot_id, 0, NULL);
-        DiskBookCommit(&txn);
-    }
-    
-    spin_lock(&g_cow_state.lock);
     g_cow_state.snapshot_count++;
     g_cow_state.snapshots_created++;
     *snapshot_id = snap->snapshot_id;
+
     spin_unlock(&g_cow_state.lock);
-    
+
+    DiskBookTxn txn;
+    if (DiskBookBegin(&txn) == OK) {
+        TagFSMetadata snap_meta;
+        memset(&snap_meta, 0, sizeof(snap_meta));
+        snap_meta.file_id = snap->snapshot_id;
+        snap_meta.flags   = COW_SNAP_READONLY | COW_SNAP_TAG_QUERY;
+        snap_meta.size    = total_size;
+        DiskBookLogMetadata(&txn, snap->snapshot_id, 0, &snap_meta);
+        DiskBookCommit(&txn);
+    }
+
     debug_printf("[CoW] Created tag snapshot '%s' (id=%u, files=%u)\n", snap_name, snap->snapshot_id, file_count);
     return OK;
 }

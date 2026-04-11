@@ -32,16 +32,17 @@ static error_t BraidReadFromDisk(uint8_t disk_id, uint64_t block_num, void *data
     if (!data)
         return ERR_NULL_POINTER;
 
-    // Calculate sector address (block = 8 sectors for 4KB)
-    uint64_t sector = block_num * 8;
-    
+    // block_num is already a physical LBA (caller applies block_to_sector before calling).
+    // Read 8 sectors (one 4KB TagFS block).
+    uint64_t sector = block_num;
+
     // Try AHCI first, fallback to ATA
     int result = ERR_IO;
-    
+
     if (ahci_is_initialized()) {
         result = ahci_read_sectors_sync(g_braid_primary_port + disk_id, sector, 8, (uint8_t*)data);
     }
-    
+
     if (result != 0) {
         // Fallback to ATA
         result = ata_read_sectors_retry(1, sector, 8, (uint8_t*)data);
@@ -68,16 +69,17 @@ static error_t BraidWriteToDisk(uint8_t disk_id, uint64_t block_num, const void 
     if (!data)
         return ERR_NULL_POINTER;
 
-    // Calculate sector address (block = 8 sectors for 4KB)
-    uint64_t sector = block_num * 8;
-    
+    // block_num is already a physical LBA (caller applies block_to_sector before calling).
+    // Write 8 sectors (one 4KB TagFS block).
+    uint64_t sector = block_num;
+
     // Try AHCI first, fallback to ATA
     int result = ERR_IO;
-    
+
     if (ahci_is_initialized()) {
         result = ahci_write_sectors_sync(g_braid_primary_port + disk_id, sector, 8, (const uint8_t*)data);
     }
-    
+
     if (result != 0) {
         // Fallback to ATA
         result = ata_write_sectors_retry(1, sector, 8, (const uint8_t*)data);
@@ -301,17 +303,62 @@ error_t BraidWriteBlock(uint64_t block_num, const void *data, const uint8_t *tag
 error_t BraidVerifyBlock(uint64_t block_num, bool *is_valid) {
     if (!g_braid_state.initialized || !is_valid)
         return ERR_NOT_INITIALIZED;
-    
+
     *is_valid = false;
-    
-    uint8_t data[BRAID_BLOCK_SIZE];
-    BoxHash checksum;  // Would come from metadata in production
-    
-    error_t result = BraidReadBlock(block_num, data, &checksum);
-    if (result == OK)
+
+    if (g_braid_state.active_disks < 2) {
+        // Cannot cross-verify with only one disk — read and accept if I/O succeeds
+        uint8_t data[BRAID_BLOCK_SIZE];
+        error_t result = BraidReadBlock(block_num, data, NULL);
+        if (result == OK)
+            *is_valid = true;
+        return result;
+    }
+
+    // Read from each available disk and compare checksums to detect corruption.
+    // Agreement across at least two copies signals block integrity.
+    uint8_t ref_data[BRAID_BLOCK_SIZE];
+    BoxHash ref_hash;
+    bool ref_set = false;
+    uint8_t agreements = 0;
+
+    spin_lock(&g_braid_state.lock);
+
+    for (uint8_t i = 0; i < g_braid_state.disk_count; i++) {
+        if (!g_braid_state.disks[i].online)
+            continue;
+
+        uint8_t candidate[BRAID_BLOCK_SIZE];
+        if (BraidReadFromDisk(i, block_num, candidate) != OK)
+            continue;
+
+        BoxHash candidate_hash = BoxHashComputeSecure(candidate, BRAID_BLOCK_SIZE, &g_braid_state.hash_ctx);
+
+        if (!ref_set) {
+            memcpy(ref_data, candidate, BRAID_BLOCK_SIZE);
+            ref_hash = candidate_hash;
+            ref_set = true;
+            agreements = 1;
+        } else if (BoxHashEqual(&candidate_hash, &ref_hash)) {
+            agreements++;
+        }
+    }
+
+    spin_unlock(&g_braid_state.lock);
+
+    if (agreements >= 2) {
         *is_valid = true;
-    
-    return result;
+        return OK;
+    }
+
+    if (agreements == 1) {
+        // Only one readable copy — treat as valid but degraded
+        *is_valid = true;
+        g_braid_stats.checksum_errors++;
+        return OK;
+    }
+
+    return ERR_IO;
 }
 
 // Tag-aware read (unique to Braid!)
@@ -380,49 +427,72 @@ error_t BraidWriteBlockTagged(uint64_t block_num, const void *data, const uint8_
 }
 
 // Auto-healing from mirror (unique to Braid!)
+// Reads all available copies, selects the one agreed upon by majority (checksum consensus),
+// then re-writes the agreed copy to any disk that diverged.
 error_t BraidAutoHeal(uint64_t block_num) {
     if (!g_braid_state.initialized)
         return ERR_NOT_INITIALIZED;
 
     spin_lock(&g_braid_state.lock);
 
-    uint8_t data[BRAID_BLOCK_SIZE];
-    error_t result = ERR_IO;
-    uint8_t healed_from_disk = 0xFF;
+    // Gather one read per online disk
+    uint8_t copies[BRAID_MAX_DISKS][BRAID_BLOCK_SIZE];
+    BoxHash hashes[BRAID_MAX_DISKS];
+    bool    readable[BRAID_MAX_DISKS];
 
-    // Try to read from each disk until we get valid data
+    memset(readable, 0, sizeof(readable));
+
     for (uint8_t i = 0; i < g_braid_state.disk_count; i++) {
         if (!g_braid_state.disks[i].online)
             continue;
-
-        result = BraidReadFromDisk(i, block_num, data);
-        if (result != OK)
-            continue;
-        
-        // Verify checksum
-        // In production, checksum would come from metadata
-        // For now, assume first successful read is valid
-        healed_from_disk = i;
-        break;
-    }
-    
-    if (healed_from_disk != 0xFF) {
-        // Re-write to failed disks
-        for (uint8_t i = 0; i < g_braid_state.disk_count; i++) {
-            if (i == healed_from_disk || !g_braid_state.disks[i].online)
-                continue;
-            
-            BraidWriteToDisk(i, block_num, data);
+        if (BraidReadFromDisk(i, block_num, copies[i]) == OK) {
+            hashes[i] = BoxHashComputeSecure(copies[i], BRAID_BLOCK_SIZE, &g_braid_state.hash_ctx);
+            readable[i] = true;
         }
-        
-        g_braid_stats.auto_heals++;
-        debug_printf("[Braid] Auto-healed block %lu from disk %u\n", 
-                     (unsigned long)block_num, healed_from_disk);
-        result = OK;
     }
-    
+
+    // Find the hash that appears most often (majority vote)
+    uint8_t best_disk   = 0xFF;
+    uint8_t best_count  = 0;
+
+    for (uint8_t i = 0; i < g_braid_state.disk_count; i++) {
+        if (!readable[i])
+            continue;
+        uint8_t count = 0;
+        for (uint8_t j = 0; j < g_braid_state.disk_count; j++) {
+            if (readable[j] && BoxHashEqual(&hashes[i], &hashes[j]))
+                count++;
+        }
+        if (count > best_count) {
+            best_count = count;
+            best_disk  = i;
+        }
+    }
+
+    if (best_disk == 0xFF) {
+        spin_unlock(&g_braid_state.lock);
+        return ERR_IO;
+    }
+
+    // Re-write the agreed copy to any disk whose hash differs
+    uint8_t healed = 0;
+    for (uint8_t i = 0; i < g_braid_state.disk_count; i++) {
+        if (i == best_disk || !g_braid_state.disks[i].online)
+            continue;
+        if (!readable[i] || !BoxHashEqual(&hashes[i], &hashes[best_disk])) {
+            if (BraidWriteToDisk(i, block_num, copies[best_disk]) == OK)
+                healed++;
+        }
+    }
+
+    if (healed > 0) {
+        g_braid_stats.auto_heals++;
+        debug_printf("[Braid] Auto-healed block %lu: %u disks restored from disk %u (agreement=%u)\n",
+                     (unsigned long)block_num, healed, best_disk, best_count);
+    }
+
     spin_unlock(&g_braid_state.lock);
-    return result;
+    return OK;
 }
 
 error_t BraidGetStats(BraidStats *stats) {
