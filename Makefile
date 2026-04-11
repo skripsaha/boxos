@@ -29,6 +29,9 @@ ASM      = nasm
 QEMU     = qemu-system-x86_64
 TAGFS_TOOL = tools/create_tagfs
 
+# ==== DEBUG CONFIGURATION ====
+DEBUG    ?= off
+
 # ==== FLAGS ====
 # === BUILD CONFIGURATION ===
 # Bootloader layout (LBA addressing):
@@ -53,6 +56,11 @@ CFLAGS         = -Os -m64 -ffreestanding -nostdlib -mno-red-zone -mno-sse -mno-m
 # Kernel directories first to ensure correct header resolution
 INCLUDE_DIRS   := src $(shell find src/kernel -type d) $(shell find src/lib -type d) $(shell find src/boot -type d) $(shell find src/include -type d) $(shell find src/userspace -type d)
 CFLAGS         += $(addprefix -I,$(INCLUDE_DIRS))
+
+# Debug configuration (must be after CFLAGS definition)
+ifeq ($(DEBUG),on)
+CFLAGS += -DCONFIG_DEBUG_ENABLED=1 -DCONFIG_DEBUG_MODE=1
+endif
 LDFLAGS        = -g -T $(ENTRYDIR)/linker.ld -nostdlib -z max-page-size=0x1000 --oformat=binary
 
 # ==== DIRECTORIES ====
@@ -338,16 +346,17 @@ $(VBOX_VDI): $(IMAGE)
 comma := ,
 
 # ==== RUN CONFIGURATION ====
-# Usage: make run [CORES=N] [MEM=size] [FULLSCREEN=on] [USB=on|off] [AHCI=on] [LOG=on] [DEBUG=on]
+# Usage: make run [CORES=N] [MEM=size] [FULLSCREEN=on] [USB=on|off] [AHCI=on] [LOG=on] [GDB=on] [DEBUG=on]
 #
 # Examples:
 #   make run                          — 1 core, 512M, USB keyboard
 #   make run CORES=4 MEM=4G          — 4 cores, 4GB RAM
 #   make run FULLSCREEN=on           — cocoa fullscreen mode
 #   make run LOG=on                  — enable QEMU interrupt/reset logging
-#   make run DEBUG=on                — pause for GDB attach (-s -S)
+#   make run GDB=on                  — pause for GDB attach (-s -S)
 #   make run AHCI=on USB=off         — AHCI disk controller, no USB
 #   make run CORES=8 MEM=4G LOG=on FULLSCREEN=on
+#   make run DEBUG=on                — enable debug output (CONFIG_DEBUG_ENABLED)
 
 CORES      ?= 1
 MEM        ?= 512M
@@ -355,12 +364,13 @@ FULLSCREEN ?= off
 USB        ?= on
 AHCI       ?= off
 LOG        ?= off
+GDB        ?= off
 DEBUG      ?= off
 
 run: $(IMAGE)
 	@echo "=== BoxOS QEMU ==="
 	@echo "  Cores: $(CORES) | RAM: $(MEM) | USB: $(USB) | AHCI: $(AHCI)"
-	@echo "  Fullscreen: $(FULLSCREEN) | Log: $(LOG) | Debug: $(DEBUG)"
+	@echo "  Fullscreen: $(FULLSCREEN) | Log: $(LOG) | GDB: $(GDB) | Debug: $(DEBUG)"
 	@echo "==================="
 	@$(QEMU) \
 		$(if $(filter on,$(AHCI)), \
@@ -373,7 +383,7 @@ run: $(IMAGE)
 		$(if $(filter on,$(FULLSCREEN)),$(if $(filter Darwin,$(UNAME_S)),-display cocoa$(comma)full-screen=on$(comma)zoom-to-fit=on,-full-screen)) \
 		$(if $(filter on,$(USB)),-device qemu-xhci -device usb-kbd) \
 		$(if $(filter on,$(LOG)),-d int$(comma)cpu_reset -no-reboot -no-shutdown -D boxos_qemu.log) \
-		$(if $(filter on,$(DEBUG)),-s -S)
+		$(if $(filter on,$(GDB)),-s -S)
 
 clean:
 	@echo "Cleaning build..."
@@ -419,11 +429,23 @@ install-deps:
 	@echo "Run 'make check-deps' to verify installation."
 
 info:
-	@echo $(QEMU) -drive format=raw,file=$(IMAGE) -m 512M -serial stdio -no-reboot -no-shutdown
 	@echo "BoxOS Makefile Info"
 	@echo "Targets:"
 	@echo "  all        — full build (img, iso, elf)"
 	@echo "  run        — run BoxOS in QEMU"
-	@echo "  debug      — run QEMU with gdb waiting"
+	@echo "  debug      — run QEMU with GDB waiting (alias for GDB=on)"
 	@echo "  clean      — clean build directory"
 	@echo "  install-deps — install required packages"
+	@echo ""
+	@echo "Run flags:"
+	@echo "  DEBUG=on   — enable debug output (rebuilds with CONFIG_DEBUG_ENABLED=1)"
+	@echo "  GDB=on     — pause QEMU for GDB attach (-s -S)"
+	@echo "  CORES=N    — number of CPU cores"
+	@echo "  MEM=size   — RAM size (e.g. 512M, 4G)"
+	@echo "  FULLSCREEN=on — fullscreen mode"
+	@echo "  USB=on|off — enable/disable USB keyboard"
+	@echo "  AHCI=on    — use AHCI disk controller"
+	@echo "  LOG=on     — enable QEMU interrupt/reset logging"
+
+debug: $(IMAGE)
+	@$(MAKE) run GDB=on IMAGE=$(IMAGE) CORES=$(CORES) MEM=$(MEM) FULLSCREEN=$(FULLSCREEN) USB=$(USB) AHCI=$(AHCI) LOG=$(LOG) DEBUG=$(DEBUG)
