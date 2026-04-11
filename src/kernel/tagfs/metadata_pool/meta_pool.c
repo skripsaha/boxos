@@ -73,7 +73,9 @@ int meta_pool_init(uint32_t first_block, uint32_t block_count) {
         return 0;
     }
 
-    while (g_current_block.next_block != 0) {
+    uint32_t chain_steps = 0;
+    uint32_t max_chain = g_block_count + 1;
+    while (g_current_block.next_block != 0 && chain_steps < max_chain) {
         uint32_t next = g_current_block.next_block;
         MetaPoolBlock next_block_buf;
         int chain_result = tagfs_read_block(next, &next_block_buf);
@@ -87,6 +89,10 @@ int meta_pool_init(uint32_t first_block, uint32_t block_count) {
         }
         g_current_block_num = next;
         g_current_block     = next_block_buf;
+        chain_steps++;
+    }
+    if (chain_steps >= max_chain) {
+        debug_printf("[MetaPool] init: chain limit reached (%u), possible circular chain — stopped\n", max_chain);
     }
 
     debug_printf("[MetaPool] initialized: first_block=%u block_count=%u last_block=%u\n",

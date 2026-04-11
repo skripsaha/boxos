@@ -279,12 +279,14 @@ int ata_write_sectors(uint8_t is_master, uint64_t lba, uint16_t count, const uin
     if (lba < BOOTLOADER_PROTECTED_SECTORS) {
         debug_printf("[ATA] SECURITY: Write to protected LBA %lu blocked (bootloader area 0-399)\n",
                      (unsigned long)lba);
+        spin_unlock(&g_ata_lock);
         return ATA_ERR_PROTECTED_SECTOR;
     }
 
     if (lba >= device->total_sectors) {
         debug_printf("[ATA] ERROR: LBA %lu out of bounds (max %lu)\n",
                      (unsigned long)lba, (unsigned long)device->total_sectors);
+        spin_unlock(&g_ata_lock);
         return -1;
     }
 

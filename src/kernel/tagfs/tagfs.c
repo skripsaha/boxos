@@ -10,6 +10,7 @@
 #include "ahci.h"
 #include "ata.h"
 #include "cow/cow.h"
+#include "braid/braid.h"
 #include "../../kernel/drivers/timer/rtc.h"
 #include "../../lib/kernel/crypto.h"
 
@@ -231,11 +232,30 @@ static int read_block(uint32_t block, void *buffer)
     if (ReadAheadLookup(block, buffer) == 0) {
         return 0;
     }
+
+    // Route through Braid when it has active disks (provides redundancy/checksumming).
+    // Pass the physical LBA so Braid operates in sector-space, not TagFS block-space.
+    if (BraidIsHealthy()) {
+        error_t braid_result = BraidReadBlock(block_to_sector(block), buffer, NULL);
+        if (braid_result == OK)
+            return 0;
+        // Braid failed — fall through to direct disk read as recovery path
+    }
+
     return disk_read_sectors(block_to_sector(block), 8, buffer);
 }
 
 static int write_block(uint32_t block, const void *buffer)
 {
+    // Route through Braid when it has active disks (provides redundancy).
+    // Pass the physical LBA so Braid operates in sector-space, not TagFS block-space.
+    if (BraidIsHealthy()) {
+        error_t braid_result = BraidWriteBlock(block_to_sector(block), buffer, NULL);
+        if (braid_result == OK)
+            return 0;
+        // Braid failed — fall through to direct disk write as recovery path
+    }
+
     return disk_write_sectors(block_to_sector(block), 8, (void *)buffer);
 }
 
@@ -1896,6 +1916,7 @@ int tagfs_write(TagFSFileHandle *handle, const void *buffer, uint64_t size)
             extent_start += extent_size;
         }
 
+        bool newly_allocated = false;
         if (found < 0)
         {
             // extent_start = cumulative size of all existing extents (from loop)
@@ -1928,6 +1949,7 @@ int tagfs_write(TagFSFileHandle *handle, const void *buffer, uint64_t size)
             handle->extent_count = new_count;
 
             found = handle->extent_count - 1;
+            newly_allocated = true;
             // extent_start stays as cumulative end — math works correctly now
         }
 
@@ -1936,12 +1958,20 @@ int tagfs_write(TagFSFileHandle *handle, const void *buffer, uint64_t size)
         uint32_t offset_in_block = (uint32_t)(offset_in_extent % TAGFS_BLOCK_SIZE);
         uint32_t disk_block = handle->extents[found].start_block + block_index;
 
-        if (offset_in_block != 0 || (size - bytes_written) < TAGFS_BLOCK_SIZE)
+        // CoW only applies to pre-existing blocks, not newly allocated ones.
+        bool is_existing_block = !newly_allocated;
+        bool needs_partial_read = (offset_in_block != 0 || (size - bytes_written) < TAGFS_BLOCK_SIZE);
+
+        if (needs_partial_read)
         {
             if (read_block(disk_block, block_buf) != 0)
             {
                 memset(block_buf, 0, TAGFS_BLOCK_SIZE);
             }
+        }
+        else
+        {
+            memset(block_buf, 0, TAGFS_BLOCK_SIZE);
         }
 
         uint32_t chunk = TAGFS_BLOCK_SIZE - offset_in_block;
@@ -1950,13 +1980,49 @@ int tagfs_write(TagFSFileHandle *handle, const void *buffer, uint64_t size)
 
         memcpy(block_buf + offset_in_block, in + bytes_written, chunk);
 
-        // Write data block directly to disk
-        // Note: DiskBook is for metadata journaling only, not data blocks
-        // Data blocks are written directly for performance
-        if (write_block(disk_block, block_buf) != 0)
-        {
-            // Disk I/O error - cannot continue
-            break;
+        // CoW: before overwriting an existing block in a CoW-enabled file,
+        // redirect the write to a freshly allocated single-block copy.
+        // Only applied when writing a full block at block_index==0 in an extent,
+        // which covers the common case without requiring extent splits.
+        uint32_t write_target = disk_block;
+        if (is_existing_block && block_index == 0 && TagFS_CowIsActive(handle->file_id)) {
+            uint32_t cow_block = 0;
+            if (TagFS_CowBeforeWrite(handle->file_id, disk_block, &cow_block) == OK && cow_block != 0) {
+                // Redirect this extent's start to the new block
+                handle->extents[found].start_block = cow_block;
+                write_target = cow_block;
+                TagFS_CowAfterWrite(handle->file_id, disk_block, cow_block);
+            }
+        }
+
+        // Dedup: for complete single-block writes on newly allocated blocks only,
+        // check if identical data already resides on disk.
+        // We skip dedup for partial writes (read-modify-write) since we need
+        // the real data to already exist on disk for dedup to be safe.
+        bool wrote_block = false;
+        if (newly_allocated && block_index == 0 &&
+            offset_in_block == 0 && chunk == TAGFS_BLOCK_SIZE &&
+            TagFS_DedupIsInitialized()) {
+            uint32_t existing_block = 0;
+            bool is_dup = false;
+            if (TagFS_DedupCheck(block_buf, &existing_block, &is_dup) == OK && is_dup) {
+                // Identical block already on disk — free the just-allocated block
+                // and point the extent at the existing one instead.
+                tagfs_free_blocks(write_target, 1);
+                handle->extents[found].start_block = existing_block;
+                write_target = existing_block;
+                TagFS_DedupRegister(existing_block, block_buf, handle->file_id);
+                wrote_block = true;
+            } else {
+                TagFS_DedupRegister(write_target, block_buf, handle->file_id);
+            }
+        }
+
+        if (!wrote_block) {
+            if (write_block(write_target, block_buf) != 0)
+            {
+                break;
+            }
         }
 
         bytes_written += chunk;

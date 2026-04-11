@@ -3,6 +3,22 @@
 #include "../../lib/kernel/klib.h"
 #include "../../lib/kernel/crypto.h"
 #include "../../../kernel/drivers/timer/rtc.h"
+#include "../../../kernel/drivers/disk/ahci.h"
+#include "../../../kernel/drivers/disk/ahci_sync.h"
+#include "../../../kernel/drivers/disk/ata.h"
+
+// Direct sector I/O — bypasses tagfs block abstraction (which adds block_to_sector offset)
+static int disk_book_read_sectors(uint64_t lba, uint16_t count, void *buf) {
+    if (ahci_is_initialized())
+        return ahci_read_sectors_sync(0, lba, count, buf);
+    return ata_read_sectors_retry(1, lba, count, (uint8_t *)buf);
+}
+
+static int disk_book_write_sectors(uint64_t lba, uint16_t count, const void *buf) {
+    if (ahci_is_initialized())
+        return ahci_write_sectors_sync(0, lba, count, buf);
+    return ata_write_sectors_retry(1, lba, count, (const uint8_t *)buf);
+}
 
 // Global state
 static DiskBookSuperblock g_disk_book_sb;
@@ -41,68 +57,70 @@ static uint32_t DiskBookAlloc(void) {
     return idx;
 }
 
-// Write superblock to disk
+// Write superblock to disk using direct sector I/O.
+// The superblock is exactly 512 bytes = 1 sector.
 static int DiskBookWriteSuperblock(void) {
-    uint8_t buf[TAGFS_BLOCK_SIZE];
-    memset(buf, 0, TAGFS_BLOCK_SIZE);
+    uint8_t buf[512];
+    memset(buf, 0, sizeof(buf));
     memcpy(buf, &g_disk_book_sb, sizeof(DiskBookSuperblock));
-    
-    if (tagfs_write_block(g_disk_book_sector, buf) != OK)
+
+    if (disk_book_write_sectors(g_disk_book_sector, 1, buf) != 0)
         return ERR_IO;
-    tagfs_write_block(g_disk_book_backup_sector, buf);
+    disk_book_write_sectors(g_disk_book_backup_sector, 1, buf);
     return OK;
 }
 
-// Read superblock from disk
+// Read superblock from disk using direct sector I/O.
 static int DiskBookReadSuperblock(void) {
-    uint8_t buf[TAGFS_BLOCK_SIZE];
-    
-    if (tagfs_read_block(g_disk_book_sector, buf) != OK)
+    uint8_t buf[512];
+
+    if (disk_book_read_sectors(g_disk_book_sector, 1, buf) != 0)
         return ERR_IO;
-    
+
     memcpy(&g_disk_book_sb, buf, sizeof(DiskBookSuperblock));
-    
+
     if (g_disk_book_sb.magic != DISK_BOOK_SB_MAGIC) {
-        if (tagfs_read_block(g_disk_book_backup_sector, buf) != OK)
+        if (disk_book_read_sectors(g_disk_book_backup_sector, 1, buf) != 0)
             return ERR_CORRUPTED;
-        
+
         memcpy(&g_disk_book_sb, buf, sizeof(DiskBookSuperblock));
         if (g_disk_book_sb.magic != DISK_BOOK_SB_MAGIC)
             return ERR_CORRUPTED;
-        
-        tagfs_write_block(g_disk_book_sector, buf);
+
+        disk_book_write_sectors(g_disk_book_sector, 1, buf);
     }
     return OK;
 }
 
-// Read entry from disk
+// Read entry from disk using direct sector I/O.
+// Each entry is DISK_BOOK_ENTRY_SIZE (1024) bytes = DISK_BOOK_SECTORS_PER_ENTRY (2) sectors.
 static int DiskBookReadEntry(uint32_t idx, DiskBookEntry* entry) {
     if (idx >= g_disk_book_capacity || !entry)
         return ERR_INVALID_ARGUMENT;
-    
+
     uint8_t buf[DISK_BOOK_ENTRY_SIZE];
     uint64_t sector = g_disk_book_sb.start_sector + (uint64_t)idx * DISK_BOOK_SECTORS_PER_ENTRY;
-    
-    if (tagfs_read_block((uint32_t)sector, buf) != OK)
+
+    if (disk_book_read_sectors(sector, DISK_BOOK_SECTORS_PER_ENTRY, buf) != 0)
         return ERR_IO;
-    
+
     memcpy(entry, buf, DISK_BOOK_ENTRY_SIZE);
     return OK;
 }
 
-// Write entry to disk
+// Write entry to disk using direct sector I/O.
 static int DiskBookWriteEntry(uint32_t idx, const DiskBookEntry* entry) {
     if (idx >= g_disk_book_capacity || !entry)
         return ERR_INVALID_ARGUMENT;
-    
+
     uint8_t buf[DISK_BOOK_ENTRY_SIZE];
     memset(buf, 0, DISK_BOOK_ENTRY_SIZE);
     memcpy(buf, entry, DISK_BOOK_ENTRY_SIZE);
-    
+
     uint64_t sector = g_disk_book_sb.start_sector + (uint64_t)idx * DISK_BOOK_SECTORS_PER_ENTRY;
-    if (tagfs_write_block((uint32_t)sector, buf) != OK)
+    if (disk_book_write_sectors(sector, DISK_BOOK_SECTORS_PER_ENTRY, buf) != 0)
         return ERR_IO;
-    
+
     return OK;
 }
 
