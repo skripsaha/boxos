@@ -5,6 +5,7 @@
 #include "../tag_bitmap/tag_bitmap.h"
 #include "../../lib/kernel/klib.h"
 #include "../../../kernel/drivers/timer/rtc.h"
+#include "../tagfs.h"
 
 // Global state
 static CowState g_cow_state;
@@ -13,6 +14,60 @@ static CowState g_cow_state;
 static uint32_t CowAllocSnapshotId(void) {
     static volatile uint32_t next_id = 1;
     return __atomic_fetch_add(&next_id, 1, __ATOMIC_SEQ_CST);
+}
+
+// Write the in-memory snapshot list to the on-disk manifest block(s).
+// Caller must hold g_cow_state.lock OR be in a context where the snapshot
+// list is stable (e.g. after the lock is released but before returning).
+// This function acquires no locks itself to avoid re-entrancy.
+static void CowWriteManifest(void) {
+    TagFSState *fs = tagfs_get_state();
+    if (!fs || !fs->initialized)
+        return;
+
+    uint32_t primary_block = TAGFS_SB_COW_SNAPSHOT(&fs->superblock);
+
+    // Lazy allocation: on first snapshot, allocate a dedicated block for the manifest.
+    if (primary_block == 0) {
+        if (tagfs_alloc_blocks(1, &primary_block) != 0)
+            return;  // No free blocks — manifest cannot be persisted
+        TAGFS_SB_COW_SNAPSHOT(&fs->superblock) = primary_block;
+        tagfs_write_superblock(&fs->superblock);
+    }
+
+    CowManifest *manifest = kmalloc(sizeof(CowManifest));
+    if (!manifest)
+        return;
+
+    memset(manifest, 0, sizeof(CowManifest));
+    manifest->magic = COW_MANIFEST_MAGIC;
+
+    uint32_t count = g_cow_state.snapshot_count;
+    if (count > COW_MANIFEST_MAX)
+        count = COW_MANIFEST_MAX;
+    manifest->count = count;
+
+    for (uint32_t i = 0; i < count; i++) {
+        CowSnapshot    *snap = &g_cow_state.snapshots[i];
+        CowSnapshotDisk *dst = &manifest->entries[i];
+
+        dst->snapshot_id         = snap->snapshot_id;
+        dst->parent_file_id      = snap->parent_file_id;
+        dst->created_time        = snap->created_time;
+        dst->disk_book_checkpoint = (uint32_t)snap->disk_book_checkpoint;
+        dst->file_count          = snap->file_count;
+        dst->total_size          = snap->total_size;
+        dst->flags               = snap->flags;
+        memcpy(dst->name, snap->name, TAGFS_SNAPSHOT_NAME_LEN);
+    }
+
+    tagfs_write_block(primary_block, manifest);
+
+    uint32_t backup_block = TAGFS_SB_COW_SNAPSHOT_BACKUP(&fs->superblock);
+    if (backup_block != 0)
+        tagfs_write_block(backup_block, manifest);
+
+    kfree(manifest);
 }
 
 // Find snapshot by ID
@@ -143,6 +198,8 @@ error_t TagFS_SnapshotCreate(const char *name, uint32_t file_id, uint32_t *snaps
     if (has_file_meta)
         tagfs_metadata_free(&file_meta);
 
+    CowWriteManifest();
+
     debug_printf("[CoW] Created '%s' (id=%u, files=%u)\n", name, snap->snapshot_id, snap->file_count);
     return OK;
 }
@@ -219,6 +276,8 @@ error_t TagFS_SnapshotCreateByTag(const char *tag_pattern, uint32_t *snapshot_id
         DiskBookCommit(&txn);
     }
 
+    CowWriteManifest();
+
     debug_printf("[CoW] Created tag snapshot '%s' (id=%u, files=%u)\n", snap_name, snap->snapshot_id, file_count);
     return OK;
 }
@@ -240,7 +299,9 @@ error_t TagFS_SnapshotDelete(uint32_t snapshot_id) {
     
     g_cow_state.snapshot_count--;
     spin_unlock(&g_cow_state.lock);
-    
+
+    CowWriteManifest();
+
     debug_printf("[CoW] Deleted snapshot %u\n", snapshot_id);
     return OK;
 }
@@ -386,4 +447,30 @@ bool TagFS_CowIsActive(uint32_t file_id) {
 
 uint64_t TagFS_CowGetCheckpoint(void) {
     return g_cow_state.initialized ? DiskBookGetCheckpointSeq() : 0;
+}
+
+void TagFS_CowRestoreSnapshot(const CowSnapshot *snap) {
+    if (!g_cow_state.initialized || !snap)
+        return;
+
+    spin_lock(&g_cow_state.lock);
+
+    if (g_cow_state.snapshot_count >= g_cow_state.snapshot_capacity) {
+        spin_unlock(&g_cow_state.lock);
+        debug_printf("[CoW] RestoreSnapshot: no capacity for snapshot_id=%u\n", snap->snapshot_id);
+        return;
+    }
+
+    // Skip if already present (idempotent restore)
+    for (uint32_t i = 0; i < g_cow_state.snapshot_count; i++) {
+        if (g_cow_state.snapshots[i].snapshot_id == snap->snapshot_id) {
+            spin_unlock(&g_cow_state.lock);
+            return;
+        }
+    }
+
+    memcpy(&g_cow_state.snapshots[g_cow_state.snapshot_count], snap, sizeof(CowSnapshot));
+    g_cow_state.snapshot_count++;
+
+    spin_unlock(&g_cow_state.lock);
 }

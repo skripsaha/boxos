@@ -57,9 +57,10 @@ typedef struct {
     uint32_t magic;
     uint32_t version;
     HealMirrorEntry mirrors[HEAL_MIRROR_COUNT];
+    uint32_t mirror_head;   // next slot to use when mirroring a new block (round-robin)
     HealCorruptionRecord records[HEAL_MAX_RECORDS];
     uint32_t record_count;
-    uint32_t record_head;
+    uint32_t record_head;   // next slot to write (post-increment ring pointer)
     uint32_t scrub_block_start;
     uint32_t scrub_block_current;
     uint64_t last_scrub_time;

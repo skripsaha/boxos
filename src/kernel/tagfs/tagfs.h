@@ -24,10 +24,20 @@
 #define TAGFS_VERSION               1
 #define TAGFS_BLOCK_SIZE            4096
 
-// CRC configuration
+// CRC configuration (offsets within TagFSSuperblock.reserved[])
+// reserved[] starts at struct byte 108; sentinel at absolute byte 507, CRC at 508.
+// reserved[399] = sentinel (byte 507), reserved[400..403] = CRC32 (bytes 508-511).
 #define TAGFS_SB_CRC_OFFSET         400
 #define TAGFS_SB_CRC_SENTINEL_OFFSET 399
 #define TAGFS_SB_CRC_SENTINEL       0xCC
+
+// Boot hints in reserved[0..15] (absolute bytes 108-123) — used by stage2.
+// CoW manifest block numbers stored in reserved[16..23] (absolute bytes 124-131).
+// These do NOT conflict with boot hints and do NOT interfere with stage2.
+#define TAGFS_SB_COW_SNAPSHOT_ROFF        16
+#define TAGFS_SB_COW_SNAPSHOT_BACKUP_ROFF 20
+#define TAGFS_SB_COW_SNAPSHOT(sb)         (*(uint32_t *)((sb)->reserved + TAGFS_SB_COW_SNAPSHOT_ROFF))
+#define TAGFS_SB_COW_SNAPSHOT_BACKUP(sb)  (*(uint32_t *)((sb)->reserved + TAGFS_SB_COW_SNAPSHOT_BACKUP_ROFF))
 
 // Disk Layout (sectors)
 #define TAGFS_SUPERBLOCK_SECTOR     1034
@@ -90,6 +100,11 @@ typedef struct __packed {
     uint8_t  fs_uuid[16];
     uint32_t backup_superblock_sector;
 
+    // reserved[0..15]  — boot hints (absolute bytes 108-123), read by stage2
+    // reserved[16..19] — CoW snapshot manifest block (TAGFS_SB_COW_SNAPSHOT)
+    // reserved[20..23] — CoW snapshot backup block  (TAGFS_SB_COW_SNAPSHOT_BACKUP)
+    // reserved[399]    — CRC sentinel (TAGFS_SB_CRC_SENTINEL_OFFSET)
+    // reserved[400..403] — CRC32 (TAGFS_SB_CRC_OFFSET)
     uint8_t  reserved[404];
 } TagFSSuperblock;
 

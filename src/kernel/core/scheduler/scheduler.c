@@ -232,14 +232,18 @@ void scheduler_recalc_parameters(void)
 
         scheduler_state_t *s = &g_core_sched[c];
         uint32_t rq_count = RunqueueAtomicTotal(&s->runqueue);
-        if (rq_count > 0 ||
-            (s->current_process && !process_is_idle(s->current_process))) {
+
+        // Read current_process under lock to prevent torn pointer reads on SMP
+        spin_lock(&s->scheduler_lock);
+        process_t *cur = s->current_process;
+        spin_unlock(&s->scheduler_lock);
+
+        if (rq_count > 0 || (cur && !process_is_idle(cur))) {
             busy_cores++;
         }
 
         // Core parking
-        if (!s->is_parked && rq_count == 0 &&
-            (!s->current_process || process_is_idle(s->current_process))) {
+        if (!s->is_parked && rq_count == 0 && (!cur || process_is_idle(cur))) {
             s->idle_tick_count++;
             if (s->idle_tick_count >= SCHEDULER_PARK_IDLE_TICKS) {
                 scheduler_park_core(c);
@@ -323,8 +327,6 @@ int sched_determine_priority(process_t *proc)
     }
     if (ticks_since_run >= g_dynamic_starvation_ticks)
     {
-        debug_printf("[SCHED] PID %u STARVED (ticks=%u >= threshold=%u)\n",
-                      proc->pid, (uint32_t)ticks_since_run, g_dynamic_starvation_ticks);
         g_sched_stats.starvation_boosts++;
         return SCHED_PRIO_STARVED;
     }
@@ -341,7 +343,6 @@ int sched_determine_priority(process_t *proc)
     // Context match boost
     if (UseContextMatches(proc))
     {
-        debug_printf("[SCHED] PID %u CONTEXT match\n", proc->pid);
         return SCHED_PRIO_CONTEXT;
     }
 
@@ -509,6 +510,8 @@ process_t *scheduler_select_next(void)
 
     bool fairness_round = (s->normal_ticks >= g_dynamic_fairness_ratio);
 
+    uint8_t my_core = amp_get_core_index();
+
     spin_lock(&s->runqueue.lock);
 
     process_t *next = NULL;
@@ -528,30 +531,49 @@ process_t *scheduler_select_next(void)
             q->count--;
             if (q->count == 0)
                 s->runqueue.active_bitmap &= ~(1u << prio);
+            __atomic_fetch_sub(&s->runqueue.total, 1, __ATOMIC_RELEASE);
+            // Decrement tier counter: fairness round always pulls from non-CONTEXT queues
+            if (my_core < g_sched_core_count)
+                __atomic_fetch_sub(&g_core_normal_count[my_core], 1, __ATOMIC_RELAXED);
         }
         else
         {
             next = runqueue_dequeue_best(&s->runqueue);
+            if (next && !process_is_idle(next) && my_core < g_sched_core_count) {
+                if (next->current_prio == SCHED_PRIO_CONTEXT)
+                    __atomic_fetch_sub(&g_core_context_count[my_core], 1, __ATOMIC_RELAXED);
+                else
+                    __atomic_fetch_sub(&g_core_normal_count[my_core], 1, __ATOMIC_RELAXED);
+            }
         }
         s->normal_ticks = 0;
         g_sched_stats.fairness_rounds++;
-        debug_printf("[SCHED] FAIRNESS round: selected PID %u (prio=%d)\n",
-                      next ? next->pid : 0, next ? sched_determine_priority(next) : -1);
     }
     else
     {
         next = runqueue_dequeue_best(&s->runqueue);
+        if (next && !process_is_idle(next) && my_core < g_sched_core_count) {
+            if (next->current_prio == SCHED_PRIO_CONTEXT)
+                __atomic_fetch_sub(&g_core_context_count[my_core], 1, __ATOMIC_RELAXED);
+            else
+                __atomic_fetch_sub(&g_core_normal_count[my_core], 1, __ATOMIC_RELAXED);
+        }
         s->normal_ticks++;
-        debug_printf("[SCHED] Select: PID %u (normal_ticks=%u/%u)\n",
-                      next ? next->pid : 0, s->normal_ticks, g_dynamic_fairness_ratio);
     }
 
-    // Skip destroying processes
+    // Skip destroying processes.
+    // `next` was already dequeued and its counter decremented above.
+    // Each replacement also needs its counter decremented.
     while (next && !process_is_idle(next) &&
            __atomic_load_n(&next->destroying, __ATOMIC_ACQUIRE))
     {
-        debug_printf("[SCHED] Skip destroying PID %u\n", next->pid);
         next = runqueue_dequeue_best(&s->runqueue);
+        if (next && !process_is_idle(next) && my_core < g_sched_core_count) {
+            if (next->current_prio == SCHED_PRIO_CONTEXT)
+                __atomic_fetch_sub(&g_core_context_count[my_core], 1, __ATOMIC_RELAXED);
+            else
+                __atomic_fetch_sub(&g_core_normal_count[my_core], 1, __ATOMIC_RELAXED);
+        }
     }
 
     spin_unlock(&s->runqueue.lock);
@@ -559,7 +581,6 @@ process_t *scheduler_select_next(void)
     if (!next)
     {
         next = idle_process_get();
-        debug_printf("[SCHED] IDLE selected\n");
     }
 
     return next;
@@ -729,8 +750,6 @@ void schedule(void *frame_ptr)
     s->current_process = next;
     spin_unlock(&s->scheduler_lock);
 
-    debug_printf("[SCHED] Switch: PID %u -> PID %u\n",
-                  current ? current->pid : 0, next->pid);
     g_sched_stats.context_switches++;
 
     // PROC_CREATED → PROC_WORKING
