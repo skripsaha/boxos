@@ -238,7 +238,10 @@ error_t TagFS_DedupRegister(uint32_t physical_block, const uint8_t *block_data, 
     
     DedupEntry *new_entry = DedupAllocEntry();
     if (!new_entry) {
+        // Pool exhausted — release lock before calling GC (GC acquires its own lock)
+        spin_unlock(&g_dedup_state.lock);
         TagFS_DedupGC();
+        spin_lock(&g_dedup_state.lock);
         new_entry = DedupAllocEntry();
         if (!new_entry) {
             spin_unlock(&g_dedup_state.lock);
@@ -381,7 +384,7 @@ error_t TagFS_DedupGC(void) {
     
     uint64_t now = rtc_get_unix64();
     uint32_t freed = 0;
-    uint64_t threshold = 3600;
+    uint64_t threshold = DEDUP_GC_THRESHOLD_SECS;
     
     for (uint32_t i = 0; i < DEDUP_HASH_BUCKETS; i++) {
         DedupEntry **pp = &g_dedup_state.hash_table[i];

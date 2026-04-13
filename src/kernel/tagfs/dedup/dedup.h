@@ -9,11 +9,12 @@
 
 // Tag-Aware Deduplication with BoxHash Checksums
 
-#define DEDUP_MAGIC           0x44454450
-#define DEDUP_VERSION         1
-#define DEDUP_HASH_BUCKETS    8192
-#define DEDUP_MAX_ENTRIES     16384  // Reduced to fit within 2MB bootloader heap limit
-#define DEDUP_MAX_REFS        0xFFFF
+#define DEDUP_MAGIC              0x44454450
+#define DEDUP_VERSION            1
+#define DEDUP_HASH_BUCKETS       8192
+#define DEDUP_MAX_ENTRIES        16384  // Reduced to fit within 2MB bootloader heap limit
+#define DEDUP_MAX_REFS           0xFFFF
+#define DEDUP_GC_THRESHOLD_SECS  3600   // Evict unreferenced entries older than 1 hour
 
 // Use BoxHash for block identification
 typedef BoxHash DedupHash;

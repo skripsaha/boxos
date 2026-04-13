@@ -149,35 +149,54 @@ static void DiskBookMaybeCheckpoint(void) {
 error_t DiskBookInit(uint32_t sector) {
     if (g_disk_book_initialized)
         return ERR_DISKBOOK_NOT_INITIALIZED;
-    
+
     spinlock_init(&g_disk_book_lock);
-    
-    g_disk_book_sector = sector;
+
+    g_disk_book_sector        = sector;
     g_disk_book_backup_sector = sector + 1;
-    g_disk_book_sb.start_sector = sector + 2;
-    g_disk_book_sb.end_sector = sector + 2 + DISK_BOOK_CAPACITY;
-    g_disk_book_capacity = DISK_BOOK_CAPACITY;
-    
-    g_disk_book_sb.magic = DISK_BOOK_SB_MAGIC;
-    g_disk_book_sb.version = DISK_BOOK_VERSION;
-    g_disk_book_sb.head = 0;
-    g_disk_book_sb.tail = 0;
-    g_disk_book_sb.checkpoint_seq = 0;
-    g_disk_book_sb.checkpoint_tail = 0;
-    g_disk_book_sb.next_sequence = 1;
-    g_disk_book_sb.flags = 0;
-    memset(g_disk_book_sb.uuid, 0, 16);
-    
-    error_t err = DiskBookWriteSuperblock();
-    if (err != OK) {
-        debug_printf("[DiskBook] Init failed: superblock write error\n");
-        return ERR_DISKBOOK_WRITE_FAILED;
+    g_disk_book_capacity      = DISK_BOOK_CAPACITY;
+
+    // Attempt to load an existing journal before creating a fresh one.
+    // If valid magic is found, the journal is intact and will be replayed.
+    error_t read_err = DiskBookReadSuperblock();
+    if (read_err == OK &&
+        g_disk_book_sb.magic   == DISK_BOOK_SB_MAGIC &&
+        g_disk_book_sb.version == DISK_BOOK_VERSION) {
+        // Validate stored capacity against compiled constant
+        uint32_t stored_cap = (uint32_t)(g_disk_book_sb.end_sector - g_disk_book_sb.start_sector);
+        if (stored_cap == 0 || stored_cap > DISK_BOOK_CAPACITY) {
+            // Capacity field is corrupt — treat as fresh
+            goto fresh;
+        }
+        g_disk_book_capacity = stored_cap;
+        debug_printf("[DiskBook] Existing journal: head=%u tail=%u seq=%u cap=%u\n",
+                     g_disk_book_sb.head, g_disk_book_sb.tail,
+                     g_disk_book_sb.next_sequence, g_disk_book_capacity);
+    } else {
+fresh:
+        // No valid journal on disk — initialise a fresh one
+        memset(&g_disk_book_sb, 0, sizeof(DiskBookSuperblock));
+        g_disk_book_sb.magic          = DISK_BOOK_SB_MAGIC;
+        g_disk_book_sb.version        = DISK_BOOK_VERSION;
+        g_disk_book_sb.start_sector   = sector + 2;
+        g_disk_book_sb.end_sector     = sector + 2 + DISK_BOOK_CAPACITY;
+        g_disk_book_sb.head           = 0;
+        g_disk_book_sb.tail           = 0;
+        g_disk_book_sb.checkpoint_seq = 0;
+        g_disk_book_sb.checkpoint_tail = 0;
+        g_disk_book_sb.next_sequence  = 1;
+        g_disk_book_sb.flags          = 0;
+
+        error_t err = DiskBookWriteSuperblock();
+        if (err != OK) {
+            debug_printf("[DiskBook] Init failed: superblock write error\n");
+            return ERR_DISKBOOK_WRITE_FAILED;
+        }
+        debug_printf("[DiskBook] Fresh journal: %u entries\n", g_disk_book_capacity);
     }
-    
+
     g_disk_book_initialized = true;
-    g_disk_book_init_time = rtc_get_unix64();
-    
-    debug_printf("[DiskBook] Initialized: %u entries\n", g_disk_book_capacity);
+    g_disk_book_init_time   = rtc_get_unix64();
     return OK;
 }
 
@@ -245,13 +264,16 @@ error_t DiskBookValidateAndReplay(void) {
 void DiskBookShutdown(void) {
     if (!g_disk_book_initialized)
         return;
-    
-    spin_lock(&g_disk_book_lock);
+
+    // DiskBookCheckpoint acquires g_disk_book_lock internally — do not call it
+    // while already holding the lock or it will deadlock.
     DiskBookCheckpoint();
+
+    spin_lock(&g_disk_book_lock);
     DiskBookWriteSuperblock();
     g_disk_book_initialized = false;
     spin_unlock(&g_disk_book_lock);
-    
+
     debug_printf("[DiskBook] Shutdown complete\n");
 }
 
@@ -400,12 +422,12 @@ void DiskBookAbort(DiskBookTxn* txn) {
     while (count--) {
         DiskBookEntry entry;
         if (DiskBookReadEntry(idx, &entry) == OK) {
-            entry.state = DISK_BOOK_STATE_PENDING;
+            entry.state = DISK_BOOK_STATE_ABORTED;
             DiskBookWriteEntry(idx, &entry);
         }
         idx = (idx + 1) % g_disk_book_capacity;
     }
-    
+
     txn->active = 0;
     spin_unlock(&g_disk_book_lock);
     debug_printf("[DiskBook] Transaction %u aborted\n", txn->sequence);

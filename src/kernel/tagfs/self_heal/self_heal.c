@@ -25,12 +25,11 @@ static uint8_t SelfHealGetSeverity(uint32_t pattern) {
 // Add corruption record
 static error_t SelfHealAddRecord(uint32_t block_number, uint32_t pattern,
                                  const uint8_t *data, bool recovered, const uint8_t *recovered_data) {
-    if (g_self_heal_state.record_count >= HEAL_MAX_RECORDS)
-        g_self_heal_state.record_head = (g_self_heal_state.record_head + 1) % HEAL_MAX_RECORDS;
-    else
-        g_self_heal_state.record_count++;
-    
+    // Write at current head, then advance head.  count only grows until the ring is full.
     HealCorruptionRecord *rec = &g_self_heal_state.records[g_self_heal_state.record_head];
+    g_self_heal_state.record_head = (g_self_heal_state.record_head + 1) % HEAL_MAX_RECORDS;
+    if (g_self_heal_state.record_count < HEAL_MAX_RECORDS)
+        g_self_heal_state.record_count++;
     memset(rec, 0, sizeof(HealCorruptionRecord));
     
     rec->block_number = block_number;
@@ -101,17 +100,31 @@ error_t TagFS_SelfHealOnMetadataWrite(uint32_t block_number, const uint8_t *data
         return ERR_NOT_INITIALIZED;
     
     spin_lock(&g_self_heal_state.lock);
-    
+
+    // Locate an existing slot for this block or evict the oldest via round-robin.
+    // This ensures different blocks occupy different mirror slots so that
+    // multiple recent blocks are protected simultaneously.
+    int slot = -1;
     for (int i = 0; i < HEAL_MIRROR_COUNT; i++) {
-        HealMirrorEntry *m = &g_self_heal_state.mirrors[i];
-        m->block_number = block_number;
-        memcpy(m->data, data, TAGFS_BLOCK_SIZE);
-        m->crc32 = TagFS_SelfHealComputeCrc32(data, TAGFS_BLOCK_SIZE);
-        m->last_verified = rtc_get_unix64();
-        m->is_valid = 1;
-        m->mirror_index = i;
+        if (g_self_heal_state.mirrors[i].is_valid &&
+            g_self_heal_state.mirrors[i].block_number == block_number) {
+            slot = i;
+            break;
+        }
     }
-    
+    if (slot < 0) {
+        slot = (int)g_self_heal_state.mirror_head;
+        g_self_heal_state.mirror_head = (g_self_heal_state.mirror_head + 1) % HEAL_MIRROR_COUNT;
+    }
+
+    HealMirrorEntry *m = &g_self_heal_state.mirrors[slot];
+    m->block_number = block_number;
+    memcpy(m->data, data, TAGFS_BLOCK_SIZE);
+    m->crc32 = TagFS_SelfHealComputeCrc32(data, TAGFS_BLOCK_SIZE);
+    m->last_verified = rtc_get_unix64();
+    m->is_valid = 1;
+    m->mirror_index = (uint8_t)slot;
+
     g_self_heal_state.stats.mirror_syncs++;
     spin_unlock(&g_self_heal_state.lock);
     return OK;
@@ -255,12 +268,14 @@ error_t TagFS_SelfHealRecover(uint32_t block_number, uint8_t *recovered_data, bo
     }
     
     spin_unlock(&g_self_heal_state.lock);
-    
+
     if (!*success) {
+        spin_lock(&g_self_heal_state.lock);
         SelfHealAddRecord(block_number, 0, NULL, false, NULL);
         g_self_heal_state.stats.corruptions_unrecoverable++;
+        spin_unlock(&g_self_heal_state.lock);
     }
-    
+
     return OK;
 }
 
@@ -309,7 +324,8 @@ error_t TagFS_SelfHealGetCorruptionRecords(HealCorruptionRecord *records, uint32
     
     uint32_t copy_count = max_records < g_self_heal_state.record_count ? max_records : g_self_heal_state.record_count;
     for (uint32_t i = 0; i < copy_count; i++) {
-        uint32_t idx = (g_self_heal_state.record_head - i + HEAL_MAX_RECORDS) % HEAL_MAX_RECORDS;
+        // record_head points to the NEXT write slot, so head-1 is the most recent entry.
+        uint32_t idx = (g_self_heal_state.record_head - 1 - i + HEAL_MAX_RECORDS) % HEAL_MAX_RECORDS;
         records[i] = g_self_heal_state.records[idx];
     }
     

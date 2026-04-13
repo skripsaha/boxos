@@ -11,6 +11,8 @@
 #include "ata.h"
 #include "cow/cow.h"
 #include "braid/braid.h"
+#include "dedup/dedup.h"
+#include "self_heal/self_heal.h"
 #include "../../kernel/drivers/timer/rtc.h"
 #include "../../lib/kernel/crypto.h"
 
@@ -185,38 +187,74 @@ typedef struct {
 static ReadAheadEntry g_read_ahead_cache[TAGFS_READ_AHEAD_BLOCKS];
 static uint32_t g_read_ahead_head = 0;
 static uint32_t g_read_ahead_last_block = 0;
+static spinlock_t g_read_ahead_lock;
 
 static void ReadAheadInit(void) {
     memset(g_read_ahead_cache, 0, sizeof(g_read_ahead_cache));
     g_read_ahead_head = 0;
     g_read_ahead_last_block = 0;
+    spinlock_init(&g_read_ahead_lock);
 }
 
 static int ReadAheadLookup(uint32_t block, void *buffer) {
+    spin_lock(&g_read_ahead_lock);
     for (uint32_t i = 0; i < TAGFS_READ_AHEAD_BLOCKS; i++) {
         if (g_read_ahead_cache[i].valid && g_read_ahead_cache[i].block == block) {
             memcpy(buffer, g_read_ahead_cache[i].data, TAGFS_BLOCK_SIZE);
+            spin_unlock(&g_read_ahead_lock);
             return 0;
         }
     }
+    spin_unlock(&g_read_ahead_lock);
     return -1;
 }
 
 static void ReadAheadPrefetch(uint32_t start_block, uint32_t count) {
+    if (count == 0)
+        return;
+
+    // Phase 1: determine which blocks to fetch (under lock, no I/O)
+    uint32_t to_fetch[TAGFS_READ_AHEAD_BLOCKS];
+    uint32_t slots[TAGFS_READ_AHEAD_BLOCKS];
+    uint32_t n_fetch = 0;
+
+    spin_lock(&g_read_ahead_lock);
     for (uint32_t i = 0; i < count && i < TAGFS_READ_AHEAD_BLOCKS; i++) {
         uint32_t block = start_block + i;
         if (block == g_read_ahead_last_block)
             continue;
-
+        // Check cache — skip if already present
+        bool already = false;
+        for (uint32_t j = 0; j < TAGFS_READ_AHEAD_BLOCKS; j++) {
+            if (g_read_ahead_cache[j].valid && g_read_ahead_cache[j].block == block) {
+                already = true;
+                break;
+            }
+        }
+        if (already)
+            continue;
         uint32_t slot = g_read_ahead_head % TAGFS_READ_AHEAD_BLOCKS;
-        if (read_block(block, g_read_ahead_cache[slot].data) == 0) {
-            g_read_ahead_cache[slot].block = block;
-            g_read_ahead_cache[slot].valid = true;
-            g_read_ahead_head++;
+        // Invalidate the slot now so it won't be served stale during I/O
+        g_read_ahead_cache[slot].valid = false;
+        to_fetch[n_fetch] = block;
+        slots[n_fetch]    = slot;
+        n_fetch++;
+        g_read_ahead_head++;
+    }
+    g_read_ahead_last_block = start_block + count - 1;
+    spin_unlock(&g_read_ahead_lock);
+
+    // Phase 2: do disk I/O without holding the lock
+    for (uint32_t i = 0; i < n_fetch; i++) {
+        uint8_t tmp[TAGFS_BLOCK_SIZE];
+        if (disk_read_sectors(block_to_sector(to_fetch[i]), 8, tmp) == 0) {
+            spin_lock(&g_read_ahead_lock);
+            memcpy(g_read_ahead_cache[slots[i]].data, tmp, TAGFS_BLOCK_SIZE);
+            g_read_ahead_cache[slots[i]].block = to_fetch[i];
+            g_read_ahead_cache[slots[i]].valid = true;
+            spin_unlock(&g_read_ahead_lock);
         }
     }
-    if (count > 0)
-        g_read_ahead_last_block = start_block + count - 1;
 }
 
 static uint64_t block_to_sector(uint32_t block)
@@ -488,7 +526,8 @@ error_t tagfs_format(uint32_t total_blocks) {
     }
     memset(bitmap, 0, bitmap_bytes);
 
-    // Blocks 0,1,2 are reserved (tag registry, file table, metadata pool)
+    // Blocks 0, 1, 2 are reserved (tag registry, file table, metadata pool).
+    // Block 3 is the first data block, available for file allocation.
     bitmap_set_bit(bitmap, 0);
     bitmap_set_bit(bitmap, 1);
     bitmap_set_bit(bitmap, 2);
@@ -588,7 +627,7 @@ error_t tagfs_format(uint32_t total_blocks) {
     sb.version = TAGFS_VERSION;
     sb.block_size = TAGFS_BLOCK_SIZE;
     sb.total_blocks = total_blocks;
-    sb.free_blocks = total_blocks - 3;
+    sb.free_blocks = total_blocks - 3;  // blocks 0, 1, 2 reserved
     sb.total_files = 0;
     sb.next_file_id = 1;
     sb.next_tag_id = 1;
@@ -607,14 +646,80 @@ error_t tagfs_format(uint32_t total_blocks) {
     sb.fs_created_time = 0;
     sb.fs_modified_time = 0;
     sb.backup_superblock_sector = TAGFS_BACKUP_SB_SECTOR;
+    // CoW manifest block: not allocated at format time (lazy allocation on first snapshot).
+    // reserved[16..19] and reserved[20..23] hold these values; initialize to 0.
+    TAGFS_SB_COW_SNAPSHOT(&sb)        = 0;
+    TAGFS_SB_COW_SNAPSHOT_BACKUP(&sb) = 0;
 
     if (tagfs_write_superblock(&sb) != OK) {
         debug_printf("[TagFS] format: failed to write superblock\n");
         return ERR_TAGFS_METADATA_ERROR;
     }
 
-    debug_printf("[TagFS] Format complete: %u total blocks, %u free\n",
-                 total_blocks, sb.free_blocks);
+    // Pre-intern well-known tags so they get low IDs (< 64) and
+    // register_well_known() can build correct (1ULL << tag_id) bitmasks.
+    // g_state.superblock must have block_bitmap_sector and tag_registry_block
+    // set before tag_registry_flush (it uses tagfs_get_state() internally).
+    memcpy(&g_state.superblock, &sb, sizeof(TagFSSuperblock));
+
+    TagRegistry *tmp_reg = kmalloc(sizeof(TagRegistry));
+    if (!tmp_reg) {
+        debug_printf("[TagFS] format: failed to allocate tmp registry\n");
+        return ERR_TAGFS_METADATA_ERROR;
+    }
+
+    if (tag_registry_init(tmp_reg) != 0) {
+        debug_printf("[TagFS] format: tag_registry_init failed\n");
+        kfree(tmp_reg);
+        return ERR_TAGFS_METADATA_ERROR;
+    }
+
+    // Intern in fixed order so IDs are deterministic (0-based sequential)
+    tag_registry_intern(tmp_reg, "system",    NULL);
+    tag_registry_intern(tmp_reg, "utility",   NULL);
+    tag_registry_intern(tmp_reg, "app",       NULL);
+    tag_registry_intern(tmp_reg, "god",       NULL);
+    tag_registry_intern(tmp_reg, "stopped",   NULL);
+    tag_registry_intern(tmp_reg, "bypass",    NULL);
+    tag_registry_intern(tmp_reg, "network",   NULL);
+    tag_registry_intern(tmp_reg, "trashed",   NULL);
+    tag_registry_intern(tmp_reg, "hidden",    NULL);
+    tag_registry_intern(tmp_reg, "autostart", NULL);
+    tag_registry_intern(tmp_reg, "snapshot",  NULL);
+    tag_registry_intern(tmp_reg, "name",      NULL);
+
+    // Use the tmp registry as g_state.registry so flush writes to block 0
+    g_state.registry = tmp_reg;
+    if (tag_registry_flush(tmp_reg) != 0) {
+        debug_printf("[TagFS] format: tag_registry_flush failed\n");
+        tag_registry_destroy(tmp_reg);
+        kfree(tmp_reg);
+        g_state.registry = NULL;
+        return ERR_TAGFS_METADATA_ERROR;
+    }
+    g_state.registry = NULL;
+
+    // Read counts before destroying the registry
+    uint16_t wk_next_id    = tmp_reg->next_id;
+    uint32_t wk_total_tags = tmp_reg->total_tags;
+
+    tag_registry_destroy(tmp_reg);
+    kfree(tmp_reg);
+
+    sb.next_tag_id = wk_next_id;
+    sb.total_tags  = wk_total_tags;
+
+    // Update superblock with actual tag counts
+    if (tagfs_write_superblock(&sb) != OK) {
+        debug_printf("[TagFS] format: failed to write updated superblock\n");
+        return ERR_TAGFS_METADATA_ERROR;
+    }
+
+    // Keep g_state.superblock current
+    memcpy(&g_state.superblock, &sb, sizeof(TagFSSuperblock));
+
+    debug_printf("[TagFS] Format complete: %u total blocks, %u free, %u well-known tags\n",
+                 total_blocks, sb.free_blocks, sb.total_tags);
     return OK;
 }
 
@@ -637,17 +742,33 @@ static bool file_has_system_behavior_tag(uint32_t file_id,
                              ? (uint16_t)__builtin_ctzll(g_wk.hidden)
                              : TAGFS_INVALID_TAG_ID;
 
-    uint16_t file_tags[32];
-    int count = tag_bitmap_tags_for_file(g_state.bitmap_index, file_id, file_tags, 32);
+    int count = tag_bitmap_tag_count_for_file(g_state.bitmap_index, file_id);
+    if (count <= 0)
+        return false;
 
-    for (int i = 0; i < count; i++)
+    uint16_t *file_tags = kmalloc(sizeof(uint16_t) * (uint32_t)count);
+    if (!file_tags)
+        return true;
+
+    int actual = tag_bitmap_tags_for_file(g_state.bitmap_index, file_id, file_tags, (uint32_t)count);
+
+    bool found = false;
+    for (int i = 0; i < actual; i++)
     {
         if (skip_trashed && file_tags[i] == trashed_id)
-            return true;
+        {
+            found = true;
+            break;
+        }
         if (skip_hidden && file_tags[i] == hidden_id)
-            return true;
+        {
+            found = true;
+            break;
+        }
     }
-    return false;
+
+    kfree(file_tags);
+    return found;
 }
 
 // ----------------------------------------------------------------------------
@@ -694,6 +815,9 @@ error_t tagfs_init(void) {
     spinlock_init(&g_state.lock);
     spinlock_init(&g_open_table_lock);
     memset(g_open_files, 0, sizeof(g_open_files));
+
+    // Initialize read-ahead cache FIRST — read_block uses it before the rest of init
+    ReadAheadInit();
 
     // --- Read superblock ---
     TagFSSuperblock sb;
@@ -772,6 +896,39 @@ error_t tagfs_init(void) {
     if (TagFS_CowInit() != OK) {
         debug_printf("[TagFS] CoW init failed\n");
         return ERR_COW_NOT_INITIALIZED;
+    }
+
+    // --- Restore CoW snapshots from on-disk manifest ---
+    {
+        uint32_t cow_sector = TAGFS_SB_COW_SNAPSHOT(&g_state.superblock);
+        if (cow_sector != 0) {
+            CowManifest *manifest = kmalloc(sizeof(CowManifest));
+            if (manifest) {
+                if (tagfs_read_block(cow_sector, manifest) == OK &&
+                    manifest->magic == COW_MANIFEST_MAGIC &&
+                    manifest->count <= COW_MANIFEST_MAX) {
+                    for (uint32_t i = 0; i < manifest->count; i++) {
+                        CowSnapshotDisk *src = &manifest->entries[i];
+                        CowSnapshot snap;
+                        memset(&snap, 0, sizeof(snap));
+                        snap.snapshot_id          = src->snapshot_id;
+                        snap.parent_file_id       = src->parent_file_id;
+                        snap.created_time         = src->created_time;
+                        snap.disk_book_checkpoint = (uint64_t)src->disk_book_checkpoint;
+                        snap.file_count           = src->file_count;
+                        snap.total_size           = src->total_size;
+                        snap.flags                = src->flags;
+                        memcpy(snap.name, src->name, TAGFS_SNAPSHOT_NAME_LEN);
+                        TagFS_CowRestoreSnapshot(&snap);
+                    }
+                    debug_printf("[TagFS] Restored %u CoW snapshots from disk\n",
+                                 manifest->count);
+                } else {
+                    debug_printf("[TagFS] CoW manifest missing or invalid — starting fresh\n");
+                }
+                kfree(manifest);
+            }
+        }
     }
 
     // --- Data Deduplication init ---
@@ -891,7 +1048,7 @@ error_t tagfs_init(void) {
         {
             memset(computed_bm, 0, bitmap_bytes_sz);
 
-            // Mark reserved blocks (tag registry, file table, metadata pool)
+            // Mark reserved blocks: 0 = tag registry, 1 = file table, 2 = metadata pool
             for (uint32_t r = 0; r < 3 && r < sb.total_blocks; r++)
             {
                 bitmap_set_bit(computed_bm, r);
@@ -990,9 +1147,6 @@ error_t tagfs_init(void) {
     // Load mirror cache so future meta reads skip disk
     meta_pool_mirror_init(g_state.superblock.next_file_id + 64);
 
-    // Initialize read-ahead cache for sequential reads
-    ReadAheadInit();
-
     g_state.initialized = true;
     debug_printf("[TagFS] Initialized successfully\n");
     return 0;
@@ -1057,11 +1211,26 @@ void tagfs_shutdown(void)
     }
     g_state.block_bitmap.total_blocks = 0;
 
+    // Shutdown CoW snapshots
+    TagFS_CowShutdown();
+
+    // Shutdown deduplication
+    TagFS_DedupShutdown();
+
+    // Shutdown self-healing
+    TagFS_SelfHealShutdown();
+
+    // Shutdown Braid multi-disk layer
+    BraidShutdown();
+
     // Shutdown Bcdc compression
     BcdcShutdown();
 
     // Shutdown test framework
     TagFS_TestsShutdown();
+
+    // Flush and shutdown DiskBook WAL last (ensures all above shutdowns are journaled)
+    DiskBookShutdown();
 
     g_state.initialized = false;
     debug_printf("[TagFS] Shutdown complete\n");
@@ -1353,15 +1522,6 @@ int tagfs_rename_file(uint32_t file_id, const char *new_filename)
     }
     memcpy(meta.filename, new_filename, len + 1);
 
-    // Journal the renamed metadata before any destructive changes.
-    // On crash: if journal replays, the new metadata (with new filename)
-    // overwrites the old sector — file is safe with new name.
-    // If crash happens after delete but before write, journal replay
-    // restores the renamed metadata.
-
-    // Delete old record, write new
-    meta_pool_delete(meta_block, meta_offset);
-
     uint32_t new_block, new_offset;
     if (meta_pool_write(&meta, &new_block, &new_offset) != 0)
     {
@@ -1372,6 +1532,7 @@ int tagfs_rename_file(uint32_t file_id, const char *new_filename)
     }
 
     file_table_update(file_id, new_block, new_offset);
+    meta_pool_delete(meta_block, meta_offset);
 
     tagfs_metadata_free(&meta);
 
@@ -1434,21 +1595,21 @@ int tagfs_add_tag(uint32_t file_id, uint16_t tag_id)
     meta.tag_ids = new_ids;
     meta.tag_count = new_count;
 
-    // Journal the updated metadata before destructive delete+write
-
-    meta_pool_delete(meta_block, meta_offset);
-
     uint32_t new_block, new_offset;
     int r = meta_pool_write(&meta, &new_block, &new_offset);
-    if (r == 0)
+    if (r != 0)
     {
-        file_table_update(file_id, new_block, new_offset);
-        tag_bitmap_set(g_state.bitmap_index, tag_id, file_id);
+        tagfs_metadata_free(&meta);
+        spin_unlock(&g_state.lock);
+        return r;
     }
+    file_table_update(file_id, new_block, new_offset);
+    tag_bitmap_set(g_state.bitmap_index, tag_id, file_id);
+    meta_pool_delete(meta_block, meta_offset);
 
     tagfs_metadata_free(&meta);
     spin_unlock(&g_state.lock);
-    return r;
+    return 0;
 }
 
 int tagfs_remove_tag(uint32_t file_id, uint16_t tag_id)
@@ -1493,21 +1654,21 @@ int tagfs_remove_tag(uint32_t file_id, uint16_t tag_id)
         return -1;
     }
 
-    // Journal the updated metadata before destructive delete+write
-
-    meta_pool_delete(meta_block, meta_offset);
-
     uint32_t new_block, new_offset;
     int r = meta_pool_write(&meta, &new_block, &new_offset);
-    if (r == 0)
+    if (r != 0)
     {
-        file_table_update(file_id, new_block, new_offset);
-        tag_bitmap_clear(g_state.bitmap_index, tag_id, file_id);
+        tagfs_metadata_free(&meta);
+        spin_unlock(&g_state.lock);
+        return r;
     }
+    file_table_update(file_id, new_block, new_offset);
+    tag_bitmap_clear(g_state.bitmap_index, tag_id, file_id);
+    meta_pool_delete(meta_block, meta_offset);
 
     tagfs_metadata_free(&meta);
     spin_unlock(&g_state.lock);
-    return r;
+    return 0;
 }
 
 bool tagfs_has_tag(uint32_t file_id, uint16_t tag_id)
@@ -1802,9 +1963,6 @@ int tagfs_read(TagFSFileHandle *handle, void *buffer, uint64_t size)
     if (!g_state.initialized)
         return -1;
 
-    debug_printf("[TagFS] read: file_id=%u size=%lu offset=%lu file_size=%lu\n", 
-                 handle->file_id, size, handle->offset, handle->file_size);
-
     if (handle->offset >= handle->file_size)
         return 0;
 
@@ -1812,13 +1970,9 @@ int tagfs_read(TagFSFileHandle *handle, void *buffer, uint64_t size)
     if (size > remaining)
         size = remaining;
 
-    debug_printf("[TagFS] read: adjusted size=%lu remaining=%lu\n", size, remaining);
-
     uint8_t block_buf[TAGFS_BLOCK_SIZE];
     uint8_t *out = (uint8_t *)buffer;
     uint64_t bytes_read = 0;
-
-    debug_printf("[TagFS] read: starting read loop, extent_count=%u\n", handle->extent_count);
 
     while (bytes_read < size)
     {
@@ -1838,23 +1992,15 @@ int tagfs_read(TagFSFileHandle *handle, void *buffer, uint64_t size)
         }
 
         if (found < 0)
-        {
-            debug_printf("[TagFS] read: extent not found for file_pos=%lu\n", file_pos);
             break;
-        }
 
         uint64_t offset_in_extent = file_pos - extent_start;
         uint32_t block_index = (uint32_t)(offset_in_extent / TAGFS_BLOCK_SIZE);
         uint32_t offset_in_block = (uint32_t)(offset_in_extent % TAGFS_BLOCK_SIZE);
         uint32_t disk_block = handle->extents[found].start_block + block_index;
 
-        debug_printf("[TagFS] read: reading disk_block=%u\n", disk_block);
-
         if (read_block(disk_block, block_buf) != 0)
-        {
-            debug_printf("[TagFS] read: failed to read block %u\n", disk_block);
             break;
-        }
 
         uint32_t chunk = TAGFS_BLOCK_SIZE - offset_in_block;
         if (chunk > size - bytes_read)
@@ -1875,7 +2021,6 @@ int tagfs_read(TagFSFileHandle *handle, void *buffer, uint64_t size)
     }
 
     handle->offset += bytes_read;
-    debug_printf("[TagFS] read: returning %d\n", (int)bytes_read);
     return (int)bytes_read;
 }
 
@@ -2070,8 +2215,6 @@ int tagfs_write(TagFSFileHandle *handle, const void *buffer, uint64_t size)
         }
         memcpy(meta.extents, handle->extents, sizeof(FileExtent) * handle->extent_count);
 
-        // Write updated metadata
-        meta_pool_delete(meta_block, meta_offset);
         uint32_t new_mb, new_mo;
         if (meta_pool_write(&meta, &new_mb, &new_mo) != 0)
         {
@@ -2081,6 +2224,7 @@ int tagfs_write(TagFSFileHandle *handle, const void *buffer, uint64_t size)
             return -1;
         }
         file_table_update(handle->file_id, new_mb, new_mo);
+        meta_pool_delete(meta_block, meta_offset);
         tagfs_metadata_free(&meta);
     }
 

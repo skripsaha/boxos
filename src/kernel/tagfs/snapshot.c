@@ -76,17 +76,23 @@ int tagfs_snapshot_create(const char* name, uint32_t file_id) {
         }
     }
 
-    DiskBookTxn txn;
-    if (DiskBookBegin(&txn) == OK) {
-        DiskBookLogMetadata(&txn, snap->snapshot_id, 0, NULL);
-        DiskBookCommit(&txn);
-    }
-
+    // Copy snapshot for journaling before releasing the lock
+    TagFSSnapshot snap_copy = *snap;
     g_snapshot_count++;
     spin_unlock(&g_snapshot_lock);
 
+    // Journal snapshot creation outside the spinlock (DiskBook does its own locking
+    // and may perform disk I/O — holding g_snapshot_lock across that would block other
+    // snapshot operations for the duration of the write).
+    DiskBookTxn txn;
+    if (DiskBookBegin(&txn) == OK) {
+        DiskBookLogData(&txn, snap_copy.snapshot_id, 0, 0,
+                        &snap_copy, (uint16_t)sizeof(TagFSSnapshot));
+        DiskBookCommit(&txn);
+    }
+
     debug_printf("[TagFS Snapshot] Created '%s' (id=%u, files=%u)\n",
-                 name, snap->snapshot_id, snap->file_count);
+                 name, snap_copy.snapshot_id, snap_copy.file_count);
     return OK;
 }
 

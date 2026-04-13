@@ -49,6 +49,10 @@
 #define TAGFS_READ_AHEAD_BLOCKS         4
 
 // CRC configuration
+// Byte offsets into TagFSSuperblock.reserved[] where the sentinel and CRC32
+// are stored. reserved[] starts at struct byte 108 (after backup_superblock_sector).
+// Absolute byte 507 = reserved[399] = sentinel.
+// Absolute bytes 508-511 = reserved[400..403] = CRC32.
 #define TAGFS_SB_CRC_OFFSET         400
 #define TAGFS_SB_CRC_SENTINEL_OFFSET 399
 #define TAGFS_SB_CRC_SENTINEL       0xCC
