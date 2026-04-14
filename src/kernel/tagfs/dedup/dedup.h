@@ -12,7 +12,6 @@
 #define DEDUP_MAGIC              0x44454450
 #define DEDUP_VERSION            1
 #define DEDUP_HASH_BUCKETS       8192
-#define DEDUP_MAX_ENTRIES        16384  // Reduced to fit within 2MB bootloader heap limit
 #define DEDUP_MAX_REFS           0xFFFF
 #define DEDUP_GC_THRESHOLD_SECS  3600   // Evict unreferenced entries older than 1 hour
 
@@ -51,10 +50,6 @@ typedef struct {
     DedupEntry **hash_table;
     uint32_t hash_buckets;
     uint32_t entry_count;
-    DedupEntry *entry_pool;
-    uint32_t pool_capacity;
-    uint32_t pool_free;
-    DedupEntry *free_list;        // O(1) allocation free list
     uint64_t last_gc_time;
     uint32_t gc_interval_entries;
     DedupStats stats;

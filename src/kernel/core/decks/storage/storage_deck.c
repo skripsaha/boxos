@@ -278,7 +278,7 @@ static int handle_obj_read_async(Pocket *pocket, process_t *proc)
     io_req.is_master = 1;
     io_req.op = ASYNC_IO_OP_READ;
     io_req.buffer_virt = NULL;
-    io_req.submit_time = rdtsc();
+    io_req.submit_tick = kernel_tick_get();
 
     error_t rc = async_io_submit(&io_req);
 
@@ -352,7 +352,7 @@ static int handle_obj_write_async(Pocket *pocket, process_t *proc)
     areq.op = ASYNC_IO_OP_WRITE;
     areq.buffer_virt = req->data;
     areq.data_length = length;
-    areq.submit_time = rdtsc();
+    areq.submit_tick = kernel_tick_get();
 
     areq.file_id = file_id;
     areq.write_offset = write_offset;

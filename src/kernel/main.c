@@ -160,7 +160,11 @@ void kernel_main(void)
     process_init();
 
     debug_printf("[INIT] Scheduler...\n");
-    scheduler_init();
+    error_t sched_err = scheduler_init();
+    if (sched_err != OK)
+    {
+        panic("[PANIC] Scheduler init failed: %s\n", ErrorString(sched_err));
+    }
 
     debug_printf("[INIT] Guide Dispatcher...\n");
     guide_init();

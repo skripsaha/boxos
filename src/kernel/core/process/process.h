@@ -5,6 +5,7 @@
 #include "vmm.h"
 #include "boxos_magic.h"
 #include "boxos_limits.h"
+#include "atomics.h"
 
 /*
  * Lock ordering:
@@ -33,15 +34,12 @@ typedef enum
     WAIT_IO
 } wait_reason_t;
 
-#define PROCESS_CLEANUP_QUEUE_SIZE 512
-
 typedef struct
 {
-    struct process_t *queue[PROCESS_CLEANUP_QUEUE_SIZE];
-    uint32_t head;
-    uint32_t tail;
-    uint32_t count;
-    spinlock_t lock;
+    struct process_t *head;
+    struct process_t *tail;
+    uint32_t          count;
+    spinlock_t        lock;
 } process_cleanup_queue_t;
 
 typedef enum
@@ -98,7 +96,7 @@ typedef struct process_t
     volatile process_state_t state;
     spinlock_t state_lock;
 
-    volatile uint32_t ref_count;
+    atomic_u32_t ref_count;
 
     // Atomic flag: 1 = process is being destroyed, 0 = normal.
     // Set BEFORE releasing scheduler_lock in process_destroy().
@@ -132,8 +130,11 @@ typedef struct process_t
     volatile wait_reason_t wait_reason;
     uint64_t wait_start_time; // TSC timestamp when waiting (0 = not waiting)
 
-    struct process_t *hash_next; // hash table collision chain
-    struct process_t *next;      // global process list
+    struct process_t *hash_next;    // hash table collision chain
+    struct process_t *next;         // global process list
+    struct process_t *ready_next;   // intrusive link for ReadyQueue
+    struct process_t *cleanup_next; // intrusive link for process cleanup queue
+    volatile uint8_t  in_ready;     // CAS guard: 1 = currently enqueued in ReadyQueue
 } process_t;
 
 _Static_assert(sizeof(process_t) < 4096, "Process structure must fit in one page");

@@ -879,7 +879,7 @@ int ata_dma_start_async_transfer(async_io_request_t* req) {
     if (req->op == ASYNC_IO_OP_WRITE) {
         dma_req->start_time = rdtsc();
     } else {
-        dma_req->start_time = req->submit_time;
+        dma_req->start_time = req->submit_tick;
     }
 
     if (ata_dma_setup_prd(dma_req) != 0) {

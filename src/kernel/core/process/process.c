@@ -159,8 +159,8 @@ void process_init(void)
     process_count = 0;
     spinlock_init(&process_lock);
 
-    g_cleanup_queue.head = 0;
-    g_cleanup_queue.tail = 0;
+    g_cleanup_queue.head = NULL;
+    g_cleanup_queue.tail = NULL;
     g_cleanup_queue.count = 0;
     spinlock_init(&g_cleanup_queue.lock);
 
@@ -172,8 +172,7 @@ void process_init(void)
                  CABIN_NULL_TRAP_START,
                  CABIN_INFO_ADDR, CABIN_POCKET_RING_ADDR, CABIN_RESULT_RING_ADDR, CABIN_CODE_START_ADDR);
     debug_printf("[PROCESS] Hash table size: %u buckets\n", PROCESS_HASH_SIZE);
-    debug_printf("[PROCESS] Deferred cleanup queue initialized (max_size=%u)\n",
-                 PROCESS_CLEANUP_QUEUE_SIZE);
+    debug_printf("[PROCESS] Deferred cleanup queue initialized (intrusive, unbounded)\n");
 }
 
 process_t *process_create(const char *tags)
@@ -229,7 +228,7 @@ process_t *process_create(const char *tags)
     proc->total_cpu_time = 0;
     proc->state = PROC_CREATED;
     spinlock_init(&proc->state_lock);
-    proc->ref_count = 1;  // "alive" reference — released in process_destroy
+    atomic_store_u32(&proc->ref_count, 1);  // "alive" reference — released in process_destroy
     proc->destroying = 0; // Not being destroyed
     proc->code_start = VMM_CABIN_CODE_START;
     proc->code_size = 0;
@@ -275,7 +274,10 @@ process_t *process_create(const char *tags)
     proc->aslr_heap_base = CABIN_HEAP_BASE + aslr.heap_offset;
     proc->aslr_buf_heap_base = CABIN_BUF_HEAP_START + aslr.buf_heap_offset;
     proc->buf_heap_next = proc->aslr_buf_heap_base;
-    proc->next = NULL;
+    proc->next         = NULL;
+    proc->ready_next   = NULL;
+    proc->cleanup_next = NULL;
+    proc->in_ready     = 0;
 
     if (tags && tags[0] != '\0')
     {
@@ -1286,18 +1288,16 @@ static bool cleanup_queue_enqueue(process_t *proc)
     if (!proc)
         return false;
 
+    proc->cleanup_next = NULL;
+
     spin_lock(&g_cleanup_queue.lock);
-
-    if (g_cleanup_queue.count >= PROCESS_CLEANUP_QUEUE_SIZE)
-    {
-        spin_unlock(&g_cleanup_queue.lock);
-        return false;
+    if (g_cleanup_queue.tail) {
+        g_cleanup_queue.tail->cleanup_next = proc;
+    } else {
+        g_cleanup_queue.head = proc;
     }
-
-    g_cleanup_queue.queue[g_cleanup_queue.tail] = proc;
-    g_cleanup_queue.tail = (g_cleanup_queue.tail + 1) % PROCESS_CLEANUP_QUEUE_SIZE;
+    g_cleanup_queue.tail = proc;
     g_cleanup_queue.count++;
-
     spin_unlock(&g_cleanup_queue.lock);
     return true;
 }
@@ -1305,18 +1305,16 @@ static bool cleanup_queue_enqueue(process_t *proc)
 static process_t *cleanup_queue_dequeue(void)
 {
     spin_lock(&g_cleanup_queue.lock);
-
-    if (g_cleanup_queue.count == 0)
-    {
+    process_t *proc = g_cleanup_queue.head;
+    if (!proc) {
         spin_unlock(&g_cleanup_queue.lock);
         return NULL;
     }
-
-    process_t *proc = g_cleanup_queue.queue[g_cleanup_queue.head];
-    g_cleanup_queue.head = (g_cleanup_queue.head + 1) % PROCESS_CLEANUP_QUEUE_SIZE;
+    g_cleanup_queue.head = proc->cleanup_next;
+    if (!g_cleanup_queue.head) g_cleanup_queue.tail = NULL;
     g_cleanup_queue.count--;
-
     spin_unlock(&g_cleanup_queue.lock);
+    proc->cleanup_next = NULL;
     return proc;
 }
 

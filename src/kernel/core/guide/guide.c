@@ -32,8 +32,7 @@ void guide_init(void)
 
     perf_trace_init();
 
-    debug_printf("[GUIDE] ReadyQueue initialized (capacity=%u)\n",
-                 READY_QUEUE_CAPACITY);
+    debug_printf("[GUIDE] ReadyQueue initialized (intrusive, unbounded)\n");
 }
 
 deck_handler_t guide_get_deck_handler(uint8_t deck_id)
