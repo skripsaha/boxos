@@ -19,7 +19,7 @@ typedef struct {
     uint8_t           _pad[3];
 } __attribute__((aligned(64))) KCorePocketQueue;
 
-extern KCorePocketQueue g_kcore_queues[MAX_CORES];
+extern KCorePocketQueue *g_kcore_queues;
 
 void kcore_init(void);
 error_t kcore_submit(struct process_t* proc);

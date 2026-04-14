@@ -10,15 +10,22 @@
 #include "amp.h"
 #include "error.h"
 
-KCorePocketQueue g_kcore_queues[MAX_CORES];
+KCorePocketQueue *g_kcore_queues = NULL;
 
 void kcore_init(void)
 {
-    for (int i = 0; i < MAX_CORES; i++) {
-        memset(&g_kcore_queues[i], 0, sizeof(KCorePocketQueue));
+    uint32_t n = g_amp.total_cores;
+    g_kcore_queues = kmalloc(sizeof(KCorePocketQueue) * n);
+    if (!g_kcore_queues) {
+        kprintf("[KCORE] FATAL: cannot allocate queue array (%u cores)\n", n);
+        while (1) { __asm__ volatile("cli; hlt"); }
+    }
+    memset(g_kcore_queues, 0, sizeof(KCorePocketQueue) * n);
+    for (uint32_t i = 0; i < n; i++) {
         g_kcore_queues[i].kcore_idx = (uint8_t)i;
     }
-    debug_printf("[KCORE] %u K-Core queue(s) initialized\n", g_amp.k_count);
+    debug_printf("[KCORE] %u K-Core queue(s) initialized (%u bytes)\n",
+                 g_amp.k_count, (uint32_t)(sizeof(KCorePocketQueue) * n));
 }
 
 uint32_t kcore_queue_depth(uint8_t core_idx)

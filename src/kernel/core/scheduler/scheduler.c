@@ -67,7 +67,7 @@ static void sched_init_one(scheduler_state_t *s)
     runqueue_init(&s->runqueue);
 }
 
-void scheduler_init(void)
+error_t scheduler_init(void)
 {
     debug_printf("[SCHEDULER] Initializing per-core O(1) scheduler...\n");
 
@@ -75,25 +75,23 @@ void scheduler_init(void)
 
     memset(&g_sched_stats, 0, sizeof(g_sched_stats));
 
-    // Allocate scheduler structures based on actual core count
     g_sched_core_count = g_amp.total_cores;
     if (g_sched_core_count == 0 || g_sched_core_count > MAX_CORES) {
         debug_printf("[SCHEDULER] ERROR: Invalid core count %u\n", g_sched_core_count);
-        return;
+        return ERR_INVALID_ARGUMENT;
     }
 
-    g_core_sched = kmalloc(sizeof(scheduler_state_t) * g_sched_core_count);
+    g_core_sched         = kmalloc(sizeof(scheduler_state_t) * g_sched_core_count);
     g_core_context_count = kmalloc(sizeof(uint32_t) * g_sched_core_count);
-    g_core_normal_count = kmalloc(sizeof(uint32_t) * g_sched_core_count);
+    g_core_normal_count  = kmalloc(sizeof(uint32_t) * g_sched_core_count);
 
     if (!g_core_sched || !g_core_context_count || !g_core_normal_count) {
         debug_printf("[SCHEDULER] ERROR: Failed to allocate scheduler structures\n");
-        // Cleanup partial allocations
-        if (g_core_sched) { kfree(g_core_sched); g_core_sched = NULL; }
+        if (g_core_sched)         { kfree(g_core_sched);                g_core_sched = NULL; }
         if (g_core_context_count) { kfree((void *)g_core_context_count); g_core_context_count = NULL; }
-        if (g_core_normal_count) { kfree((void *)g_core_normal_count); g_core_normal_count = NULL; }
+        if (g_core_normal_count)  { kfree((void *)g_core_normal_count);  g_core_normal_count = NULL; }
         g_sched_core_count = 0;
-        return;
+        return ERR_NO_MEMORY;
     }
 
     for (uint32_t i = 0; i < g_sched_core_count; i++)
@@ -107,6 +105,7 @@ void scheduler_init(void)
 
     debug_printf("[SCHEDULER] Per-core O(1) scheduler ready (%u Hz, %u cores, init_cap=%u)\n",
                  g_timer_frequency, g_sched_core_count, RUNQUEUE_INITIAL_CAP);
+    return OK;
 }
 
 void scheduler_init_core(uint8_t core_index)

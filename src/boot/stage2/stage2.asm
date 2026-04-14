@@ -433,9 +433,20 @@ enable_a20_enhanced:
     pop cx
     pop ax
 
+    ; Final verification: confirm A20 is actually enabled after all methods.
+    ; If still disabled → fatal halt. Silent continue would corrupt memory at >1MB.
+    call test_a20
+    jc .a20_fatal
+
     mov si, msg_a20_enabled
     call print_string_16
     ret
+
+.a20_fatal:
+    mov si, msg_a20_fatal
+    call print_string_16
+    cli
+    hlt
 
 ; Returns CF=0 if A20 enabled, CF=1 if disabled
 test_a20:
@@ -469,7 +480,7 @@ test_a20:
 
     pop ax
     mov [es:bx], ah
-    xor ax, ax
+    mov ax, 0           ; must NOT use xor ax,ax — that sets ZF=1 and destroys the cmp result
     mov es, ax
     pop ax
     mov [es:0x7DFE], al
@@ -962,14 +973,75 @@ detect_memory_e820:
     mov dword [es:di+20], 0
     add di, 24
 
+    ; Try INT 15h AX=0xE801 — reliable up to 4GB, supported since ~1994.
+    ; Returns: AX = KB between 1MB and 16MB (or CX if AX=0)
+    ;          BX = 64KB blocks above 16MB   (or DX if BX=0)
+    xor cx, cx
+    xor dx, dx
+    mov ax, 0xE801
+    int 0x15
+    jc .try_int88
+
+    ; Some BIOSes return results in CX/DX instead of AX/BX
+    test ax, ax
+    jnz .e801_ax_ok
+    mov ax, cx
+.e801_ax_ok:
+    test bx, bx
+    jnz .e801_bx_ok
+    mov bx, dx
+.e801_bx_ok:
+
+    ; Entry 1: 1MB – (1MB + AX KB)  [0x100000 upward]
+    movzx eax, ax
+    shl eax, 10                     ; KB → bytes
+    mov dword [es:di], 0x00100000
+    mov dword [es:di+4], 0x00000000
+    mov [es:di+8], eax
+    mov dword [es:di+12], 0x00000000
+    mov dword [es:di+16], 1         ; E820_USABLE
+    mov dword [es:di+20], 0
+    add di, 24
+
+    ; Entry 2 (optional): above 16MB  [0x1000000 upward, BX * 64KB]
+    test bx, bx
+    jz .e801_done
+    movzx ebx, bx
+    shl ebx, 16                     ; 64KB blocks → bytes
+    mov dword [es:di], 0x01000000
+    mov dword [es:di+4], 0x00000000
+    mov [es:di+8], ebx
+    mov dword [es:di+12], 0x00000000
+    mov dword [es:di+16], 1
+    mov dword [es:di+20], 0
+    add di, 24
+
+    xor ax, ax
+    mov es, ax
+    mov word [E820_COUNT_ADDR], 3
+    mov word [E820_SIZE_ADDR], 72
+    mov si, msg_memory_fallback
+    call print_string_16
+    ret
+
+.e801_done:
+    xor ax, ax
+    mov es, ax
+    mov word [E820_COUNT_ADDR], 2
+    mov word [E820_SIZE_ADDR], 48
+    mov si, msg_memory_fallback
+    call print_string_16
+    ret
+
+    ; Last resort: INT 15h 0x88 — caps at 64MB, available on very old BIOSes.
+.try_int88:
     mov ah, 0x88
     int 0x15
     jc .memory_fail
-
+    movzx eax, ax
+    shl eax, 10                     ; KB → bytes
     mov dword [es:di], 0x00100000
     mov dword [es:di+4], 0x00000000
-    movzx eax, ax
-    shl eax, 10
     mov [es:di+8], eax
     mov dword [es:di+12], 0x00000000
     mov dword [es:di+16], 1
@@ -977,10 +1049,8 @@ detect_memory_e820:
 
     xor ax, ax
     mov es, ax
-
     mov word [E820_COUNT_ADDR], 2
     mov word [E820_SIZE_ADDR], 48
-
     mov si, msg_memory_fallback
     call print_string_16
     ret
@@ -1305,6 +1375,7 @@ kernel_loaded_bytes:    dd 0            ; total bytes loaded (sectors * 512)
 
 msg_stage2_start      db 'BoxKernel Stage2 Started', 13, 10, 0
 msg_a20_enabled       db '[OK] A20 line enabled', 13, 10, 0
+msg_a20_fatal         db '[FATAL] A20 enable failed — system halted', 13, 10, 0
 msg_detecting_memory  db 'Detecting memory (E820)...', 13, 10, 0
 msg_e820_success      db '[OK] E820 memory map created', 13, 10, 0
 msg_e820_fail         db '[WARN] E820 failed, using fallback', 13, 10, 0

@@ -1,68 +1,63 @@
 #include "ready_queue.h"
+#include "process.h"
 
-void ready_queue_init(ReadyQueue* rq)
-{
+void ready_queue_init(ReadyQueue *rq) {
     if (!rq) return;
-    rq->head = 0;
-    rq->tail = 0;
+    rq->head  = NULL;
+    rq->tail  = NULL;
+    rq->count = 0;
     spinlock_init(&rq->lock);
-    for (uint32_t i = 0; i < READY_QUEUE_CAPACITY; i++) {
-        rq->entries[i] = NULL;
-    }
 }
 
-bool ready_queue_push(ReadyQueue* rq, process_t* proc)
-{
+bool ready_queue_push(ReadyQueue *rq, process_t *proc) {
     if (!rq || !proc) return false;
 
-    spin_lock(&rq->lock);
-
-    uint32_t next_tail = (rq->tail + 1) % READY_QUEUE_CAPACITY;
-    if (next_tail == rq->head) {
-        spin_unlock(&rq->lock);
-        return false;  // queue full
+    // CAS guard: prevent double-enqueue from concurrent cores
+    uint8_t expected = 0;
+    if (!__atomic_compare_exchange_n(&proc->in_ready, &expected, 1,
+                                     false, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) {
+        return false;
     }
 
-    rq->entries[rq->tail] = proc;
-    rq->tail = next_tail;
+    proc->ready_next = NULL;
 
+    spin_lock(&rq->lock);
+    if (rq->tail) {
+        rq->tail->ready_next = proc;
+    } else {
+        rq->head = proc;
+    }
+    rq->tail = proc;
+    rq->count++;
     spin_unlock(&rq->lock);
     return true;
 }
 
-process_t* ready_queue_pop(ReadyQueue* rq)
-{
+process_t *ready_queue_pop(ReadyQueue *rq) {
     if (!rq) return NULL;
 
     spin_lock(&rq->lock);
-
-    if (rq->head == rq->tail) {
+    process_t *proc = rq->head;
+    if (!proc) {
         spin_unlock(&rq->lock);
-        return NULL;  // queue empty
+        return NULL;
     }
-
-    process_t* proc = rq->entries[rq->head];
-    rq->entries[rq->head] = NULL;
-    rq->head = (rq->head + 1) % READY_QUEUE_CAPACITY;
-
+    rq->head = proc->ready_next;
+    if (!rq->head) rq->tail = NULL;
+    rq->count--;
     spin_unlock(&rq->lock);
+
+    proc->ready_next = NULL;
+    __atomic_store_n(&proc->in_ready, 0, __ATOMIC_RELEASE);
     return proc;
 }
 
-// Lock-free check: safe because this is only called from the single-core
-// sync path (guide()) where IRQs are disabled and no other core accesses
-// the ready queue.  head/tail are volatile, so reads are not reordered.
-bool ready_queue_is_empty(const ReadyQueue* rq)
-{
+bool ready_queue_is_empty(const ReadyQueue *rq) {
     if (!rq) return true;
-    return rq->head == rq->tail;
+    return rq->head == NULL;
 }
 
-uint32_t ready_queue_count(const ReadyQueue* rq)
-{
+uint32_t ready_queue_count(const ReadyQueue *rq) {
     if (!rq) return 0;
-    uint32_t h = rq->head;
-    uint32_t t = rq->tail;
-    if (t >= h) return t - h;
-    return READY_QUEUE_CAPACITY - (h - t);
+    return rq->count;
 }

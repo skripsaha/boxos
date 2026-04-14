@@ -83,7 +83,7 @@ extern scheduler_stats_t g_sched_stats;
 // Public API
 // ============================================================================
 
-void scheduler_init(void);
+error_t scheduler_init(void);
 void scheduler_init_core(uint8_t core_index);
 void scheduler_shutdown(void);
 void schedule(void *frame);

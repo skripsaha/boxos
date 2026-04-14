@@ -42,11 +42,12 @@ typedef struct PACKED {
     uint8_t  _pad[4];
 } Pocket;
 
-STATIC_ASSERT(sizeof(Pocket) == 96, "Pocket must be 96 bytes");
+STATIC_ASSERT(sizeof(Pocket) == 128, "Pocket must be 128 bytes");
 
 // PocketRing: SPSC ring buffer at CABIN_POCKET_RING_ADDR (0x2000)
 // Userspace is the producer (writes Pockets, advances tail).
 // Kernel is the consumer (reads Pockets, advances head).
+// Layout: 8 bytes header + 31 * 128 = 3968 bytes slots = 3976 bytes total (fits in one page).
 typedef struct PACKED {
     volatile uint32_t head;
     volatile uint32_t tail;

@@ -17,13 +17,16 @@ static uint64_t pmm_max_phys_addr = 0;
 
 static uint64_t pmm_mem_end = 0;
 
-#define PMM_DEFERRED_MAX 8
 typedef struct {
     uintptr_t start;
     uintptr_t end;
 } DeferredRegion;
-static DeferredRegion pmm_deferred[PMM_DEFERRED_MAX];
-static size_t pmm_deferred_count = 0;
+
+// Allocated from bootstrap physical memory in pmm_init(), sized to E820 entry count.
+// No slots are ever dropped — capacity = total E820 entries.
+static DeferredRegion *pmm_deferred     = NULL;
+static size_t          pmm_deferred_cap = 0;
+static size_t          pmm_deferred_count = 0;
 
 static error_t pmm_init_maxphyaddr(void) {
     uint8_t maxphyaddr = cpuid_get_maxphyaddr();
@@ -61,13 +64,14 @@ uint64_t pmm_get_mem_end(void) {
 }
 
 static error_t pmm_defer_region(uintptr_t start, uintptr_t end) {
-    if (pmm_deferred_count >= PMM_DEFERRED_MAX) {
-        debug_printf("[PMM] WARNING: Deferred region table full, dropping 0x%lx-0x%lx\n", start, end);
+    if (!pmm_deferred || pmm_deferred_count >= pmm_deferred_cap) {
+        // Should never happen: capacity set to entry_count in pmm_init().
+        debug_printf("[PMM] BUG: deferred table overflow at 0x%lx-0x%lx\n", start, end);
         return ERR_NO_MEMORY;
     }
-    
+
     pmm_deferred[pmm_deferred_count].start = start;
-    pmm_deferred[pmm_deferred_count].end = end;
+    pmm_deferred[pmm_deferred_count].end   = end;
     pmm_deferred_count++;
     return OK;
 }
@@ -122,7 +126,16 @@ error_t pmm_init(void) {
     size_t temp_pages = (mem_end - map_start) / PMM_PAGE_SIZE;
     size_t alloc_map_size = (temp_pages + 7) / 8;
 
-    uintptr_t zone_base = ALIGN_UP(map_start + alloc_map_size, 4096);
+    // Allocate the deferred region array from bootstrap physical memory,
+    // immediately after the buddy bitmap. Sized to entry_count so that
+    // every E820 high-memory region is recorded — no silent drops.
+    uintptr_t deferred_base = ALIGN_UP(map_start + alloc_map_size, 8);
+    size_t    deferred_size = entry_count * sizeof(DeferredRegion);
+    pmm_deferred     = (DeferredRegion *)deferred_base;
+    pmm_deferred_cap = entry_count;
+    pmm_deferred_count = 0;
+
+    uintptr_t zone_base = ALIGN_UP(deferred_base + deferred_size, 4096);
 
     if (zone_base >= mem_end) {
         panic("[PMM] Kernel too large for available memory!");
@@ -179,6 +192,7 @@ error_t pmm_init(void) {
 
     buddy_reserve_range(&pmm_buddy, (uintptr_t)bi->kernel_start, (uintptr_t)bi->kernel_end);
     buddy_reserve_range(&pmm_buddy, alloc_map_phys, alloc_map_phys + alloc_map_size);
+    buddy_reserve_range(&pmm_buddy, deferred_base, deferred_base + deferred_size);
 
     pmm_initialized = true;
 

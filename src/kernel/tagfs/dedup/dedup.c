@@ -1,6 +1,7 @@
 #include "dedup.h"
 #include "../tagfs.h"
 #include "../../lib/kernel/klib.h"
+#include "../../lib/kernel/slab.h"
 #include "../../../kernel/drivers/timer/rtc.h"
 #include "../box_hash/box_hash.h"
 
@@ -29,39 +30,15 @@ static uint32_t DedupComputeTagContext(uint32_t tag_context) {
     return tag_context * 0x9e3779b9;
 }
 
-// Allocate entry from pool - O(1) using free list
-static DedupEntry* DedupAllocEntry(void) {
-    if (g_dedup_state.pool_free == 0)
-        return NULL;
-
-    // O(1) allocation from free list
-    if (g_dedup_state.free_list) {
-        DedupEntry *entry = g_dedup_state.free_list;
-        g_dedup_state.free_list = entry->next;
-        entry->next = NULL;
-        g_dedup_state.pool_free--;
-        return entry;
-    }
-
-    // Fallback: scan pool if free list is empty (shouldn't happen if pool_free > 0)
-    for (uint32_t i = 0; i < g_dedup_state.pool_capacity; i++) {
-        if (g_dedup_state.entry_pool[i].physical_block == 0) {
-            g_dedup_state.pool_free--;
-            return &g_dedup_state.entry_pool[i];
-        }
-    }
-    return NULL;
+static DedupEntry *DedupAllocEntry(void) {
+    DedupEntry *e = slab_alloc(sizeof(DedupEntry));
+    if (e) memset(e, 0, sizeof(DedupEntry));
+    return e;
 }
 
-// Free entry to pool - O(1) using free list
 static void DedupFreeEntry(DedupEntry *entry) {
-    if (!entry)
-        return;
-    entry->physical_block = 0;
-    entry->ref_count = 0;
-    entry->next = g_dedup_state.free_list;
-    g_dedup_state.free_list = entry;
-    g_dedup_state.pool_free++;
+    if (!entry) return;
+    slab_free(entry);
 }
 
 error_t TagFS_DedupCompress(const uint8_t *in_data, uint16_t in_size, uint8_t *out_data, uint16_t *out_size) {
@@ -126,24 +103,7 @@ error_t TagFS_DedupInit(void) {
     }
     memset(g_dedup_state.hash_table, 0, sizeof(DedupEntry*) * DEDUP_HASH_BUCKETS);
 
-    g_dedup_state.pool_capacity = DEDUP_MAX_ENTRIES;
-    debug_printf("[Dedup] Allocating entry pool (%u entries)...\n", DEDUP_MAX_ENTRIES);
-    g_dedup_state.entry_pool = kmalloc(sizeof(DedupEntry) * DEDUP_MAX_ENTRIES);
-    if (!g_dedup_state.entry_pool) {
-        debug_printf("[Dedup] FAILED: entry pool allocation\n");
-        kfree(g_dedup_state.hash_table);
-        return ERR_NO_MEMORY;
-    }
-    memset(g_dedup_state.entry_pool, 0, sizeof(DedupEntry) * DEDUP_MAX_ENTRIES);
-    g_dedup_state.pool_free = DEDUP_MAX_ENTRIES;
-
-    // Initialize O(1) free list
-    g_dedup_state.free_list = NULL;
-    for (uint32_t i = 0; i < DEDUP_MAX_ENTRIES; i++) {
-        g_dedup_state.entry_pool[i].next = g_dedup_state.free_list;
-        g_dedup_state.free_list = &g_dedup_state.entry_pool[i];
-    }
-
+    g_dedup_state.entry_count = 0;
     g_dedup_state.gc_interval_entries = 1000;
     g_dedup_state.magic = DEDUP_MAGIC;
     g_dedup_state.version = DEDUP_VERSION;
@@ -159,19 +119,16 @@ void TagFS_DedupShutdown(void) {
     
     spin_lock(&g_dedup_state.lock);
     
-    for (uint32_t i = 0; i < DEDUP_HASH_BUCKETS; i++) {
-        DedupEntry *entry = g_dedup_state.hash_table[i];
-        while (entry) {
-            DedupEntry *next = entry->next;
-            entry = next;
+    for (uint32_t i = 0; i < g_dedup_state.hash_buckets; i++) {
+        DedupEntry *e = g_dedup_state.hash_table[i];
+        while (e) {
+            DedupEntry *next = e->next;
+            slab_free(e);
+            e = next;
         }
         g_dedup_state.hash_table[i] = NULL;
     }
-    
-    if (g_dedup_state.entry_pool) {
-        kfree(g_dedup_state.entry_pool);
-        g_dedup_state.entry_pool = NULL;
-    }
+
     if (g_dedup_state.hash_table) {
         kfree(g_dedup_state.hash_table);
         g_dedup_state.hash_table = NULL;
