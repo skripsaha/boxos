@@ -6,11 +6,13 @@
 #include "error.h"
 
 // Bits 0-15 reserved for kernel use. Bits 16-63 available for user/driver tags.
-#define PHYS_TAG_DMA32    (1ULL <<  0)
-#define PHYS_TAG_USER     (1ULL <<  1)
-#define PHYS_TAG_HIGH     (1ULL <<  2)
-#define PHYS_TAG_KERNEL   (1ULL <<  3)
-#define PHYS_TAG_MMIO     (1ULL <<  4)
+#define PHYS_TAG_DMA32    (1ULL <<  0)  // below DMA32 boundary, 32-bit DMA safe
+#define PHYS_TAG_USER     (1ULL <<  1)  // DMA32..4GB general purpose
+#define PHYS_TAG_HIGH     (1ULL <<  2)  // above 4GB, post pull-map
+#define PHYS_TAG_KERNEL   (1ULL <<  3)  // kernel code, data, PMM metadata
+#define PHYS_TAG_MMIO     (1ULL <<  4)  // MMIO / firmware reserved region
+#define PHYS_TAG_SHARED   (1ULL <<  5)  // shared between kernel and userspace
+                                        // (PocketRing, ResultRing, cabin IPC pages)
 
 typedef struct {
     uint64_t  *tag_map;
