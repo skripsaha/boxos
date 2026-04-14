@@ -253,6 +253,11 @@ void* buddy_alloc_range(BuddyZone* zone, size_t pages, uintptr_t min_phys, uintp
     int order = pages_to_order(pages);
     if (order > BUDDY_MAX_ORDER) return NULL;
 
+    uintptr_t zone_end = zone->base + zone->total_pages * BUDDY_PAGE_SIZE;
+    if (min_phys < zone->base) min_phys = zone->base;
+    if (max_phys > zone_end)   max_phys = zone_end;
+    if (min_phys >= max_phys)  return NULL;
+
     spin_lock(&zone->lock);
 
     for (int o = order; o <= BUDDY_MAX_ORDER; o++) {
@@ -261,6 +266,11 @@ void* buddy_alloc_range(BuddyZone* zone, size_t pages, uintptr_t min_phys, uintp
         while (node) {
             uintptr_t block_phys = node_to_phys(node);
             uintptr_t block_end  = block_phys + ((uintptr_t)order_to_pages(o) * BUDDY_PAGE_SIZE);
+
+            if (block_phys >= max_phys || block_end <= min_phys) {
+                node = node->next;
+                continue;
+            }
 
             if (block_phys >= min_phys && block_end <= max_phys) {
                 // Found a block in range — remove it
@@ -299,6 +309,13 @@ void buddy_free(BuddyZone* zone, void* addr, size_t pages) {
 
     if (order > BUDDY_MAX_ORDER) {
         debug_printf("[BUDDY] ERROR: free order %d exceeds MAX_ORDER %d\n", order, BUDDY_MAX_ORDER);
+        return;
+    }
+
+    uintptr_t zone_end = zone->base + zone->total_pages * BUDDY_PAGE_SIZE;
+    if (phys < zone->base || phys >= zone_end) {
+        debug_printf("[BUDDY] ERROR: free address 0x%lx out of zone [0x%lx, 0x%lx)\n",
+                     phys, zone->base, zone_end);
         return;
     }
 

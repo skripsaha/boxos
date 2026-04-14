@@ -79,10 +79,19 @@ static struct process_t* kcore_queue_pop(KCorePocketQueue* q)
     }
 
     struct process_t* proc;
+    uint32_t spin_limit = 0;
     for (;;) {
         proc = __atomic_load_n(&q->slots[h], __ATOMIC_ACQUIRE);
         if (proc != NULL) break;
         cpu_pause();
+        if (++spin_limit > KCORE_POP_SPIN_LIMIT) {
+            debug_printf("[KCORE] WARNING: slot %u stale after %u spins, resetting\n",
+                         h, spin_limit);
+            q->slots[h] = NULL;
+            q->head = (h + 1) & KCORE_QUEUE_MASK;
+            atomic_fetch_sub_u32(&q->count, 1);
+            return NULL;
+        }
     }
 
     q->slots[h] = NULL;

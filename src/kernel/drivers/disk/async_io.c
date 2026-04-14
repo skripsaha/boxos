@@ -1,6 +1,7 @@
 #include "async_io.h"
 
 static async_io_queue_t g_async_queue;
+static uint32_t g_data_served_count = 0;
 
 static const uint32_t lane_capacities[ASYNC_IO_LANE_COUNT] = {
     ASYNC_IO_LANE_META_CAPACITY,
@@ -115,13 +116,32 @@ error_t async_io_submit(async_io_request_t* req) {
     return OK;
 }
 
+static bool dequeue_lane(async_io_lane_queue_t* lq, async_io_lane_t lane_id,
+                          async_io_request_t* out) {
+    while (atomic_load_u32(&lq->count) > 0) {
+        *out = lq->slots[lq->head];
+        lq->head = (lq->head + 1) & lq->mask;
+        atomic_fetch_sub_u32(&lq->count, 1);
+
+        if (!out->cancelled) {
+            debug_printf("[AsyncIO] Dequeued (pid=%u, lane=%s, op=%s, lba=%u)\n",
+                         out->pid,
+                         lane_name(lane_id),
+                         out->op == ASYNC_IO_OP_READ ? "READ" : "WRITE",
+                         out->lba);
+            return true;
+        }
+        debug_printf("[AsyncIO] Skipping cancelled pid=%u lba=%u\n", out->pid, out->lba);
+    }
+    return false;
+}
+
 bool async_io_dequeue(async_io_request_t* req) {
     if (req == NULL) {
         debug_printf("[AsyncIO] ERROR: NULL request output pointer\n");
         return false;
     }
 
-    // Fast path: check total pending count without lock
     bool any = false;
     for (int l = 0; l < ASYNC_IO_LANE_COUNT; l++) {
         if (atomic_load_u32(&g_async_queue.lanes[l].count) > 0) {
@@ -133,23 +153,44 @@ bool async_io_dequeue(async_io_request_t* req) {
 
     spin_lock(&g_async_queue.lock);
 
-    // Drain in priority order: META > DATA > BGND
-    for (int l = 0; l < ASYNC_IO_LANE_COUNT; l++) {
-        async_io_lane_queue_t* lq = &g_async_queue.lanes[l];
-        if (atomic_load_u32(&lq->count) == 0) continue;
+    async_io_lane_queue_t* meta = &g_async_queue.lanes[ASYNC_IO_LANE_META];
+    async_io_lane_queue_t* data = &g_async_queue.lanes[ASYNC_IO_LANE_DATA];
+    async_io_lane_queue_t* bgnd = &g_async_queue.lanes[ASYNC_IO_LANE_BGND];
 
-        *req = lq->slots[lq->head];
-        lq->head = (lq->head + 1) & lq->mask;
-        atomic_fetch_sub_u32(&lq->count, 1);
+    // META always highest priority
+    if (atomic_load_u32(&meta->count) > 0) {
+        if (dequeue_lane(meta, ASYNC_IO_LANE_META, req)) {
+            spin_unlock(&g_async_queue.lock);
+            return true;
+        }
+    }
 
-        spin_unlock(&g_async_queue.lock);
+    // Force BGND service every ASYNC_IO_BGND_SERVE_INTERVAL DATA dequeues
+    if (atomic_load_u32(&bgnd->count) > 0 &&
+        g_data_served_count >= ASYNC_IO_BGND_SERVE_INTERVAL) {
+        if (dequeue_lane(bgnd, ASYNC_IO_LANE_BGND, req)) {
+            g_data_served_count = 0;
+            spin_unlock(&g_async_queue.lock);
+            return true;
+        }
+    }
 
-        debug_printf("[AsyncIO] Dequeued (pid=%u, lane=%s, op=%s, lba=%u)\n",
-                     req->pid,
-                     lane_name((async_io_lane_t)l),
-                     req->op == ASYNC_IO_OP_READ ? "READ" : "WRITE",
-                     req->lba);
-        return true;
+    // Serve DATA
+    if (atomic_load_u32(&data->count) > 0) {
+        if (dequeue_lane(data, ASYNC_IO_LANE_DATA, req)) {
+            g_data_served_count++;
+            spin_unlock(&g_async_queue.lock);
+            return true;
+        }
+    }
+
+    // Last resort: serve BGND if DATA is empty
+    if (atomic_load_u32(&bgnd->count) > 0) {
+        if (dequeue_lane(bgnd, ASYNC_IO_LANE_BGND, req)) {
+            g_data_served_count = 0;
+            spin_unlock(&g_async_queue.lock);
+            return true;
+        }
     }
 
     spin_unlock(&g_async_queue.lock);
@@ -172,31 +213,16 @@ uint32_t async_io_cancel_by_pid(uint32_t pid) {
     for (int l = 0; l < ASYNC_IO_LANE_COUNT; l++) {
         async_io_lane_queue_t* lq = &g_async_queue.lanes[l];
         uint32_t cur = atomic_load_u32(&lq->count);
-        if (cur == 0) continue;
 
-        async_io_request_t* temp = kmalloc(sizeof(async_io_request_t) * cur);
-        if (!temp) continue;
-
-        uint32_t kept = 0;
         for (uint32_t i = 0; i < cur; i++) {
             uint32_t idx = (lq->head + i) & lq->mask;
-            if (lq->slots[idx].pid == pid) {
+            if (lq->slots[idx].pid == pid && !lq->slots[idx].cancelled) {
+                lq->slots[idx].cancelled = 1;
                 debug_printf("[AsyncIO] Cancelling pid=%u lane=%s lba=%u\n",
                              pid, lane_name((async_io_lane_t)l), lq->slots[idx].lba);
                 cancelled++;
-            } else {
-                temp[kept++] = lq->slots[idx];
             }
         }
-
-        lq->head = 0;
-        for (uint32_t i = 0; i < kept; i++) {
-            lq->slots[i] = temp[i];
-        }
-        lq->tail = kept;
-        atomic_store_u32(&lq->count, kept);
-
-        kfree(temp);
     }
 
     spin_unlock(&g_async_queue.lock);

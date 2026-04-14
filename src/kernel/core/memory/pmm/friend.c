@@ -2,14 +2,7 @@
 #include "pmm.h"
 #include "vmm.h"
 #include "klib.h"
-
-// Zone boundary constants
-#define FRIEND_DMA32_START  0x0000000000000000ULL
-#define FRIEND_DMA32_END    0x0000000040000000ULL   // 1 GB
-#define FRIEND_USER_START   0x0000000040000000ULL   // 1 GB
-#define FRIEND_USER_END     0x0000000100000000ULL   // 4 GB
-#define FRIEND_HIGH_START   0x0000000100000000ULL   // 4 GB
-// HIGH end is set dynamically from buddy zone maximum
+#include "kernel_config.h"
 
 static PhysZone g_zones[PHYS_TAG_COUNT];
 static bool     g_friend_initialized = false;
@@ -25,45 +18,38 @@ static inline size_t order_to_pages_friend(int order) {
     return (size_t)1 << order;
 }
 
+static void zone_init(PhysZone* zone, PhysTag tag, uintptr_t start, uintptr_t end) {
+    zone->tag          = tag;
+    zone->zone_start   = start;
+    zone->zone_end     = end;
+    zone->cached_pages = 0;
+    spinlock_init(&zone->lock);
+    for (int o = 0; o <= BUDDY_MAX_ORDER; o++) {
+        zone->free_lists[o].head  = NULL;
+        zone->free_lists[o].count = 0;
+    }
+}
+
 void FriendInit(void) {
     if (g_friend_initialized) return;
 
-    BuddyZone* buddy = pmm_get_buddy_zone();
+    uintptr_t actual_ram_end = pmm_get_mem_end();
 
-    uintptr_t buddy_end = buddy->base + buddy->total_pages * BUDDY_PAGE_SIZE;
+    uintptr_t dma32_end = CONFIG_PHYS_ZONE_DMA32_END;
+    uintptr_t user_end  = CONFIG_PHYS_ZONE_USER_END;
 
-    // DMA32 zone: physical 0 → 1 GB
-    g_zones[PHYS_TAG_DMA32].tag        = PHYS_TAG_DMA32;
-    g_zones[PHYS_TAG_DMA32].zone_start = FRIEND_DMA32_START;
-    g_zones[PHYS_TAG_DMA32].zone_end   = FRIEND_DMA32_END;
-    g_zones[PHYS_TAG_DMA32].cached_pages = 0;
-    spinlock_init(&g_zones[PHYS_TAG_DMA32].lock);
-    for (int o = 0; o <= BUDDY_MAX_ORDER; o++) {
-        g_zones[PHYS_TAG_DMA32].free_lists[o].head  = NULL;
-        g_zones[PHYS_TAG_DMA32].free_lists[o].count = 0;
+    if (actual_ram_end <= dma32_end) {
+        // Machine has less than 1GB RAM: DMA32 = all of RAM, USER and HIGH are empty
+        dma32_end = actual_ram_end;
+        user_end  = actual_ram_end;
+    } else if (actual_ram_end <= user_end) {
+        // Machine has between 1GB and 4GB RAM: USER = up to actual end, HIGH is empty
+        user_end = actual_ram_end;
     }
 
-    // USER zone: physical 1 GB → 4 GB
-    g_zones[PHYS_TAG_USER].tag        = PHYS_TAG_USER;
-    g_zones[PHYS_TAG_USER].zone_start = FRIEND_USER_START;
-    g_zones[PHYS_TAG_USER].zone_end   = FRIEND_USER_END;
-    g_zones[PHYS_TAG_USER].cached_pages = 0;
-    spinlock_init(&g_zones[PHYS_TAG_USER].lock);
-    for (int o = 0; o <= BUDDY_MAX_ORDER; o++) {
-        g_zones[PHYS_TAG_USER].free_lists[o].head  = NULL;
-        g_zones[PHYS_TAG_USER].free_lists[o].count = 0;
-    }
-
-    // HIGH zone: physical 4 GB → buddy end
-    g_zones[PHYS_TAG_HIGH].tag        = PHYS_TAG_HIGH;
-    g_zones[PHYS_TAG_HIGH].zone_start = FRIEND_HIGH_START;
-    g_zones[PHYS_TAG_HIGH].zone_end   = (buddy_end > FRIEND_HIGH_START) ? buddy_end : FRIEND_HIGH_START;
-    g_zones[PHYS_TAG_HIGH].cached_pages = 0;
-    spinlock_init(&g_zones[PHYS_TAG_HIGH].lock);
-    for (int o = 0; o <= BUDDY_MAX_ORDER; o++) {
-        g_zones[PHYS_TAG_HIGH].free_lists[o].head  = NULL;
-        g_zones[PHYS_TAG_HIGH].free_lists[o].count = 0;
-    }
+    zone_init(&g_zones[PHYS_TAG_DMA32], PHYS_TAG_DMA32, 0,         dma32_end);
+    zone_init(&g_zones[PHYS_TAG_USER],  PHYS_TAG_USER,  dma32_end, user_end);
+    zone_init(&g_zones[PHYS_TAG_HIGH],  PHYS_TAG_HIGH,  user_end,  actual_ram_end);
 
     g_friend_initialized = true;
 
@@ -74,8 +60,9 @@ void FriendInit(void) {
 }
 
 PhysTag FriendClassifyAddr(uintptr_t phys_addr) {
-    if (phys_addr < FRIEND_DMA32_END) return PHYS_TAG_DMA32;
-    if (phys_addr < FRIEND_USER_END)  return PHYS_TAG_USER;
+    for (int t = 0; t < PHYS_TAG_COUNT - 1; t++) {
+        if (phys_addr < g_zones[t].zone_end) return (PhysTag)t;
+    }
     return PHYS_TAG_HIGH;
 }
 
@@ -131,12 +118,17 @@ void FriendFree(void* addr, size_t pages) {
     int order = pages_to_order_friend(pages);
     if (order > BUDDY_MAX_ORDER) return;
 
-    // Map physical address to a virtual pointer to embed the intrusive node
-    BuddyFreeNode* node = (BuddyFreeNode*)vmm_phys_to_virt(phys);
-    node->order = (uint8_t)order;
-
     spin_lock(&zone->lock);
 
+    if (zone->cached_pages >= CONFIG_FRIEND_ZONE_CACHE_MAX_PAGES) {
+        spin_unlock(&zone->lock);
+        BuddyZone* buddy = pmm_get_buddy_zone();
+        buddy_free(buddy, (void*)phys, pages);
+        return;
+    }
+
+    BuddyFreeNode* node = (BuddyFreeNode*)vmm_phys_to_virt(phys);
+    node->order = (uint8_t)order;
     node->prev = NULL;
     node->next = zone->free_lists[order].head;
     if (zone->free_lists[order].head) {

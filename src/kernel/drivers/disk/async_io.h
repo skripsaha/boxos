@@ -17,6 +17,7 @@ typedef enum {
 #define ASYNC_IO_LANE_META_CAPACITY  64
 #define ASYNC_IO_LANE_DATA_CAPACITY  256
 #define ASYNC_IO_LANE_BGND_CAPACITY  64
+#define ASYNC_IO_BGND_SERVE_INTERVAL  8   // dequeue 1 BGND per N DATA dequeues
 
 typedef enum {
     ASYNC_IO_OP_READ = 0,
@@ -44,6 +45,7 @@ typedef struct {
     uint64_t original_file_size;
 
     async_io_lane_t lane;        // which priority lane this request belongs to
+    uint8_t  cancelled;          // set by async_io_cancel_by_pid(), checked in dequeue
 } async_io_request_t;
 
 typedef struct {
