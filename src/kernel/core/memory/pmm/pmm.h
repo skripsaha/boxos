@@ -3,6 +3,7 @@
 
 #include "klib.h"
 #include "error.h"
+#include "buddy.h"
 
 #define PMM_PAGE_SIZE       4096
 #define PMM_BITMAP_ALIGN    8
@@ -38,5 +39,8 @@ bool pmm_is_usable_ram(uintptr_t phys_addr, size_t size);
 
 void pmm_activate_pull_map(void);
 void pmm_test_high_memory(void);
+
+// Expose the internal BuddyZone for use by the Friend Allocator layer.
+BuddyZone* pmm_get_buddy_zone(void);
 
 #endif

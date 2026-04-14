@@ -247,6 +247,50 @@ void* buddy_alloc(BuddyZone* zone, size_t pages) {
     return (void*)block_phys;
 }
 
+void* buddy_alloc_range(BuddyZone* zone, size_t pages, uintptr_t min_phys, uintptr_t max_phys) {
+    if (!pages || !zone->initialized) return NULL;
+
+    int order = pages_to_order(pages);
+    if (order > BUDDY_MAX_ORDER) return NULL;
+
+    spin_lock(&zone->lock);
+
+    for (int o = order; o <= BUDDY_MAX_ORDER; o++) {
+        BuddyFreeList* list = &zone->free_lists[o];
+        BuddyFreeNode* node = list->head;
+        while (node) {
+            uintptr_t block_phys = node_to_phys(node);
+            uintptr_t block_end  = block_phys + ((uintptr_t)order_to_pages(o) * BUDDY_PAGE_SIZE);
+
+            if (block_phys >= min_phys && block_end <= max_phys) {
+                // Found a block in range — remove it
+                buddy_list_remove(list, node);
+
+                // Split down to target order
+                int cur = o;
+                while (cur > order) {
+                    cur--;
+                    uintptr_t split_buddy = block_phys + (uintptr_t)order_to_pages(cur) * BUDDY_PAGE_SIZE;
+                    BuddyFreeNode* split_node = phys_to_node(split_buddy);
+                    buddy_list_insert(&zone->free_lists[cur], split_node, cur);
+                }
+
+                size_t block_pages = order_to_pages(order);
+                size_t idx = page_index(zone, block_phys);
+                alloc_map_mark_range(zone, idx, block_pages, true);
+                zone->free_count -= block_pages;
+
+                spin_unlock(&zone->lock);
+                return (void*)block_phys;
+            }
+            node = node->next;
+        }
+    }
+
+    spin_unlock(&zone->lock);
+    return NULL;
+}
+
 void buddy_free(BuddyZone* zone, void* addr, size_t pages) {
     if (!addr || !pages || !zone->initialized) return;
 

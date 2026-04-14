@@ -12,7 +12,7 @@ typedef struct __packed {
     uint32_t data_length;    // bytes kernel wrote at data_addr
     uint64_t data_addr;      // for IPC: address of data in receiver's heap
     uint32_t sender_pid;     // for IPC: who sent this result (0 = kernel)
-    uint32_t _reserved;
+    uint32_t context;        // KResultContext: which subsystem generated this result
 } Result;
 
 _Static_assert(sizeof(Result) == 24, "Result must be 24 bytes for ResultRing packing");

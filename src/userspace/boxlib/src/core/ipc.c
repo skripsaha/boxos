@@ -70,9 +70,11 @@ int broadcast(const char* tag, const void* data, uint16_t size) {
     return OK;
 }
 
-int listen(uint8_t source_type, uint8_t flags) {
-    uint8_t buf[4] = {source_type, flags, 0, 0};
-    pocket_send(DECK_SYSTEM, 0x42, buf, 4);
+int listen(uint64_t required_tags, uint8_t flags) {
+    uint8_t buf[9];
+    memcpy(buf, &required_tags, sizeof(uint64_t));
+    buf[8] = flags;
+    pocket_send(DECK_SYSTEM, 0x42, buf, 9);
 
     Result result;
     if (!result_wait(&result, 500000)) {
