@@ -1,6 +1,6 @@
 #include "pmm.h"
 #include "buddy.h"
-#include "friend.h"
+#include "pmtag.h"
 #include "vmm.h"
 #include "e820.h"
 #include "klib.h"
@@ -339,7 +339,11 @@ void pmm_activate_pull_map(void) {
                  (pmm_buddy.free_count * PMM_PAGE_SIZE) / (1024 * 1024),
                  pmm_buddy.free_count);
 
-    FriendInit();
+    if (g_pmtag.initialized) {
+        for (size_t i = 0; i < pmm_deferred_count; i++) {
+            PhysTagSet(pmm_deferred[i].start, pmm_deferred[i].end, PHYS_TAG_HIGH);
+        }
+    }
 }
 
 BuddyZone* pmm_get_buddy_zone(void) {

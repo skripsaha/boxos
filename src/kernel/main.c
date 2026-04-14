@@ -41,6 +41,7 @@
 #include "cpu_calibrate.h"
 #include "aslr.h"
 #include "linker_symbols.h"
+#include "pmtag.h"
 
 void kernel_main(void)
 {
@@ -109,6 +110,12 @@ void kernel_main(void)
 
     debug_printf("[INIT] VMM...\n");
     vmm_init();
+
+    debug_printf("[INIT] Physical Memory Tag Table...\n");
+    error_t pmtag_err = PhysTagInit();
+    if (pmtag_err != OK) {
+        debug_printf("[INIT] WARNING: PMT init failed: %s (non-fatal)\n", ErrorString(pmtag_err));
+    }
 
     pmm_test_high_memory();
 
