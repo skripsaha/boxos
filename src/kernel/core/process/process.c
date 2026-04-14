@@ -1,6 +1,8 @@
 #include "process.h"
 #include "klib.h"
 #include "pmm.h"
+#include "pmtag.h"
+#include "cabin_layout.h"
 #include "scheduler.h"
 #include "gdt.h"
 #include "tss.h"
@@ -222,6 +224,16 @@ process_t *process_create(const char *tags)
     proc->cabin_info_phys = info_phys;
     proc->pocket_ring_phys = pocket_phys;
     proc->result_ring_phys = result_phys;
+
+    // Tag IPC ring pages as shared so PMT tracks the kernel↔userspace boundary.
+    // PocketRing and ResultRing are the only physical pages visible to both
+    // kernel (guide loop) and userspace (cabin mapping) simultaneously.
+    PhysTagSet(pocket_phys,
+               pocket_phys + CABIN_POCKET_RING_PAGES * PMM_PAGE_SIZE,
+               PHYS_TAG_SHARED);
+    PhysTagSet(result_phys,
+               result_phys + CABIN_RESULT_RING_PAGES * PMM_PAGE_SIZE,
+               PHYS_TAG_SHARED);
     proc->score = 0;
     proc->last_run_time = 0;
     proc->consecutive_runs = 0;
@@ -650,6 +662,19 @@ void process_destroy(process_t *proc)
     {
         debug_printf("[PROCESS] Cancelled %u pending async I/O for PID %u\n",
                      cancelled, proc->pid);
+    }
+
+    // Clear PHYS_TAG_SHARED on IPC ring pages — these are no longer shared
+    // once the process is destroyed and its cabin will be unmapped.
+    if (proc->pocket_ring_phys) {
+        PhysTagClear(proc->pocket_ring_phys,
+                     proc->pocket_ring_phys + CABIN_POCKET_RING_PAGES * PMM_PAGE_SIZE,
+                     PHYS_TAG_SHARED);
+    }
+    if (proc->result_ring_phys) {
+        PhysTagClear(proc->result_ring_phys,
+                     proc->result_ring_phys + CABIN_RESULT_RING_PAGES * PMM_PAGE_SIZE,
+                     PHYS_TAG_SHARED);
     }
 
     // Release the "alive" reference.  If K-Core still holds refs,

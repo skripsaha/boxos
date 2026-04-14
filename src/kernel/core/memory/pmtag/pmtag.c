@@ -218,29 +218,34 @@ static bool phys_tag_find_span_from(uint64_t required_tags, uintptr_t from_addr,
             in_span = true;
         }
 
-        // Scan for end of contiguous run within this word
-        // If mask != ~0 (i.e. there are zeros in this word after the start),
-        // find the first zero after span start and close the span there.
+        // Scan for end of contiguous run within this word.
+        // If not all 64 bits are set, the span ends somewhere in this word.
         if (mask != ~0ULL) {
-            // After the first set bit, find first zero
-            int start_bit = in_span ? (int)(span_start_page - w * 64) : 0;
-            // Build mask of bits from start_bit onward
-            uint64_t after_start = (start_bit == 0) ? mask : (mask >> start_bit) << start_bit;
-            // First zero after span start: invert and find first set bit
-            uint64_t inverted = ~after_start;
-            if (start_bit > 0) {
-                // Zero out bits before start_bit in inverted so we don't pick up pre-span zeros
-                inverted &= ~((1ULL << start_bit) - 1);
+            // start_bit: the bit within this word where the span starts.
+            // If span_start_page is in a PREVIOUS word, the entire current word
+            // (from bit 0) is part of the span — start_bit = 0.
+            // If span_start_page is in THIS word, start from its offset.
+            int start_bit = 0;
+            if (span_start_page / 64 == w) {
+                start_bit = (int)(span_start_page % 64);
             }
-            if (inverted) {
-                int first_zero = __builtin_ctzll(inverted);
+
+            // Find the first 0-bit at or after start_bit.
+            // ~mask gives 1s where bits were 0. Mask off bits before start_bit.
+            uint64_t zeros_after_start = ~mask;
+            if (start_bit > 0) {
+                zeros_after_start &= ~((1ULL << start_bit) - 1);
+            }
+
+            if (zeros_after_start) {
+                int first_zero = __builtin_ctzll(zeros_after_start);
                 size_t span_end_page = w * 64 + (size_t)first_zero;
                 *out_start = g_pmtag.base_phys + span_start_page * PMM_PAGE_SIZE;
                 *out_end   = g_pmtag.base_phys + span_end_page   * PMM_PAGE_SIZE;
                 if (*out_end > g_pmtag.mem_end) *out_end = g_pmtag.mem_end;
                 return true;
             }
-            // All bits from start_bit to 63 are set — span continues to next word
+            // All bits from start_bit to 63 are set — span continues into next word.
         }
     }
 
@@ -304,9 +309,10 @@ void PhysTagDump(void) {
         { PHYS_TAG_HIGH,   "HIGH"   },
         { PHYS_TAG_KERNEL, "KERNEL" },
         { PHYS_TAG_MMIO,   "MMIO"   },
+        { PHYS_TAG_SHARED, "SHARED" },
     };
 
-    for (size_t t = 0; t < 5; t++) {
+    for (size_t t = 0; t < 6; t++) {
         int band_idx = __builtin_ctzll(known_tags[t].bit);
         size_t count = 0;
         for (size_t w = 0; w < g_pmtag.band_words; w++) {
