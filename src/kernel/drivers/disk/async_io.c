@@ -2,27 +2,52 @@
 
 static async_io_queue_t g_async_queue;
 
+static const uint32_t lane_capacities[ASYNC_IO_LANE_COUNT] = {
+    ASYNC_IO_LANE_META_CAPACITY,
+    ASYNC_IO_LANE_DATA_CAPACITY,
+    ASYNC_IO_LANE_BGND_CAPACITY,
+};
+
+static const char* lane_name(async_io_lane_t lane) {
+    switch (lane) {
+        case ASYNC_IO_LANE_META: return "META";
+        case ASYNC_IO_LANE_DATA: return "DATA";
+        case ASYNC_IO_LANE_BGND: return "BGND";
+        default:                 return "?";
+    }
+}
+
 void async_io_init(void) {
     memset(&g_async_queue, 0, sizeof(async_io_queue_t));
     spinlock_init(&g_async_queue.lock);
 
-    g_async_queue.capacity = ASYNC_IO_DEFAULT_CAPACITY;
-    g_async_queue.mask     = ASYNC_IO_DEFAULT_CAPACITY - 1;
-    g_async_queue.queue    = kmalloc(sizeof(async_io_request_t) * ASYNC_IO_DEFAULT_CAPACITY);
-    if (!g_async_queue.queue) {
-        kprintf("[AsyncIO] FATAL: cannot allocate queue\n");
-        while (1) { __asm__ volatile("cli; hlt"); }
-    }
-    memset(g_async_queue.queue, 0, sizeof(async_io_request_t) * ASYNC_IO_DEFAULT_CAPACITY);
+    for (int l = 0; l < ASYNC_IO_LANE_COUNT; l++) {
+        async_io_lane_queue_t* lq = &g_async_queue.lanes[l];
+        uint32_t cap = lane_capacities[l];
 
-    atomic_init_u32(&g_async_queue.count, 0);
+        lq->slots    = kmalloc(sizeof(async_io_request_t) * cap);
+        if (!lq->slots) {
+            kprintf("[AsyncIO] FATAL: cannot allocate lane %d queue\n", l);
+            while (1) { __asm__ volatile("cli; hlt"); }
+        }
+        memset(lq->slots, 0, sizeof(async_io_request_t) * cap);
+        lq->capacity = cap;
+        lq->mask     = cap - 1;
+        lq->head     = 0;
+        lq->tail     = 0;
+        atomic_init_u32(&lq->count, 0);
+    }
+
     atomic_init_u32(&g_async_queue.total_submitted, 0);
     atomic_init_u32(&g_async_queue.total_completed, 0);
     atomic_init_u32(&g_async_queue.total_failed, 0);
     atomic_init_u32(&g_async_queue.queue_full_count, 0);
     atomic_init_u64(&g_async_queue.total_latency_cycles, 0);
 
-    debug_printf("[AsyncIO] Initialized (capacity: %u)\n", ASYNC_IO_DEFAULT_CAPACITY);
+    debug_printf("[AsyncIO] Initialized (META:%u DATA:%u BGND:%u)\n",
+                 ASYNC_IO_LANE_META_CAPACITY,
+                 ASYNC_IO_LANE_DATA_CAPACITY,
+                 ASYNC_IO_LANE_BGND_CAPACITY);
 }
 
 error_t async_io_submit(async_io_request_t* req) {
@@ -36,8 +61,8 @@ error_t async_io_submit(async_io_request_t* req) {
         return ERR_INVALID_ARGUMENT;
     }
 
-    if (req->buffer_virt == NULL) {
-        debug_printf("[AsyncIO] ERROR: NULL buffer pointer\n");
+    if (req->buffer_virt == NULL && req->op == ASYNC_IO_OP_WRITE) {
+        debug_printf("[AsyncIO] ERROR: NULL buffer on WRITE\n");
         return ERR_NULL_POINTER;
     }
 
@@ -46,38 +71,46 @@ error_t async_io_submit(async_io_request_t* req) {
         return ERR_INVALID_ARGUMENT;
     }
 
+    // Default lane if caller forgot to set it
+    if (req->lane >= ASYNC_IO_LANE_COUNT) {
+        req->lane = ASYNC_IO_LANE_DATA;
+    }
+
     req->submit_tick = kernel_tick_get();
 
-    if (atomic_load_u32(&g_async_queue.count) >= g_async_queue.capacity) {
+    async_io_lane_queue_t* lq = &g_async_queue.lanes[req->lane];
+
+    if (atomic_load_u32(&lq->count) >= lq->capacity) {
         atomic_fetch_add_u32(&g_async_queue.queue_full_count, 1);
-        debug_printf("[AsyncIO] Queue FULL (pid=%u, lba=%u)\n", req->pid, req->lba);
+        debug_printf("[AsyncIO] Lane %s FULL (pid=%u, lba=%u)\n",
+                     lane_name(req->lane), req->pid, req->lba);
         return ERR_IO_QUEUE_FULL;
     }
 
     spin_lock(&g_async_queue.lock);
 
-    if (atomic_load_u32(&g_async_queue.count) >= g_async_queue.capacity) {
+    if (atomic_load_u32(&lq->count) >= lq->capacity) {
         spin_unlock(&g_async_queue.lock);
         atomic_fetch_add_u32(&g_async_queue.queue_full_count, 1);
-        debug_printf("[AsyncIO] Queue FULL (pid=%u, lba=%u)\n", req->pid, req->lba);
+        debug_printf("[AsyncIO] Lane %s FULL (pid=%u, lba=%u)\n",
+                     lane_name(req->lane), req->pid, req->lba);
         return ERR_IO_QUEUE_FULL;
     }
 
-    g_async_queue.queue[g_async_queue.tail] = *req;
-    g_async_queue.tail = (g_async_queue.tail + 1) & g_async_queue.mask;
-    atomic_fetch_add_u32(&g_async_queue.count, 1);
+    lq->slots[lq->tail] = *req;
+    lq->tail = (lq->tail + 1) & lq->mask;
+    atomic_fetch_add_u32(&lq->count, 1);
 
     spin_unlock(&g_async_queue.lock);
 
     atomic_fetch_add_u32(&g_async_queue.total_submitted, 1);
 
-    debug_printf("[AsyncIO] Submitted (pid=%u, op=%s, lba=%u, sectors=%u, queue=%u/%u)\n",
+    debug_printf("[AsyncIO] Submitted (pid=%u, lane=%s, op=%s, lba=%u, sectors=%u)\n",
                  req->pid,
+                 lane_name(req->lane),
                  req->op == ASYNC_IO_OP_READ ? "READ" : "WRITE",
                  req->lba,
-                 req->sector_count,
-                 atomic_load_u32(&g_async_queue.count),
-                 g_async_queue.capacity);
+                 req->sector_count);
 
     return OK;
 }
@@ -88,77 +121,88 @@ bool async_io_dequeue(async_io_request_t* req) {
         return false;
     }
 
-    if (atomic_load_u32(&g_async_queue.count) == 0) {
-        return false;
+    // Fast path: check total pending count without lock
+    bool any = false;
+    for (int l = 0; l < ASYNC_IO_LANE_COUNT; l++) {
+        if (atomic_load_u32(&g_async_queue.lanes[l].count) > 0) {
+            any = true;
+            break;
+        }
     }
+    if (!any) return false;
 
     spin_lock(&g_async_queue.lock);
 
-    if (atomic_load_u32(&g_async_queue.count) == 0) {
+    // Drain in priority order: META > DATA > BGND
+    for (int l = 0; l < ASYNC_IO_LANE_COUNT; l++) {
+        async_io_lane_queue_t* lq = &g_async_queue.lanes[l];
+        if (atomic_load_u32(&lq->count) == 0) continue;
+
+        *req = lq->slots[lq->head];
+        lq->head = (lq->head + 1) & lq->mask;
+        atomic_fetch_sub_u32(&lq->count, 1);
+
         spin_unlock(&g_async_queue.lock);
-        return false;
+
+        debug_printf("[AsyncIO] Dequeued (pid=%u, lane=%s, op=%s, lba=%u)\n",
+                     req->pid,
+                     lane_name((async_io_lane_t)l),
+                     req->op == ASYNC_IO_OP_READ ? "READ" : "WRITE",
+                     req->lba);
+        return true;
     }
 
-    *req = g_async_queue.queue[g_async_queue.head];
-    g_async_queue.head = (g_async_queue.head + 1) & g_async_queue.mask;
-    atomic_fetch_sub_u32(&g_async_queue.count, 1);
-
     spin_unlock(&g_async_queue.lock);
-
-    debug_printf("[AsyncIO] Dequeued (pid=%u, op=%s, lba=%u, queue=%u/%u)\n",
-                 req->pid,
-                 req->op == ASYNC_IO_OP_READ ? "READ" : "WRITE",
-                 req->lba,
-                 atomic_load_u32(&g_async_queue.count),
-                 g_async_queue.capacity);
-
-    return true;
+    return false;
 }
 
 uint32_t async_io_pending_count(void) {
-    return atomic_load_u32(&g_async_queue.count);
+    uint32_t total = 0;
+    for (int l = 0; l < ASYNC_IO_LANE_COUNT; l++) {
+        total += atomic_load_u32(&g_async_queue.lanes[l].count);
+    }
+    return total;
 }
 
 uint32_t async_io_cancel_by_pid(uint32_t pid) {
     spin_lock(&g_async_queue.lock);
 
-    uint32_t current_count = atomic_load_u32(&g_async_queue.count);
-
-    async_io_request_t *temp = kmalloc(sizeof(async_io_request_t) * current_count);
-    if (!temp) {
-        spin_unlock(&g_async_queue.lock);
-        return 0;
-    }
-
     uint32_t cancelled = 0;
-    uint32_t temp_count = 0;
 
-    for (uint32_t i = 0; i < current_count; i++) {
-        uint32_t idx = (g_async_queue.head + i) & g_async_queue.mask;
+    for (int l = 0; l < ASYNC_IO_LANE_COUNT; l++) {
+        async_io_lane_queue_t* lq = &g_async_queue.lanes[l];
+        uint32_t cur = atomic_load_u32(&lq->count);
+        if (cur == 0) continue;
 
-        if (g_async_queue.queue[idx].pid == pid) {
-            cancelled++;
-            debug_printf("[AsyncIO] Cancelling pid=%u, lba=%u\n",
-                         pid, g_async_queue.queue[idx].lba);
-        } else {
-            temp[temp_count++] = g_async_queue.queue[idx];
+        async_io_request_t* temp = kmalloc(sizeof(async_io_request_t) * cur);
+        if (!temp) continue;
+
+        uint32_t kept = 0;
+        for (uint32_t i = 0; i < cur; i++) {
+            uint32_t idx = (lq->head + i) & lq->mask;
+            if (lq->slots[idx].pid == pid) {
+                debug_printf("[AsyncIO] Cancelling pid=%u lane=%s lba=%u\n",
+                             pid, lane_name((async_io_lane_t)l), lq->slots[idx].lba);
+                cancelled++;
+            } else {
+                temp[kept++] = lq->slots[idx];
+            }
         }
-    }
 
-    g_async_queue.head = 0;
-    for (uint32_t i = 0; i < temp_count; i++) {
-        g_async_queue.queue[i] = temp[i];
+        lq->head = 0;
+        for (uint32_t i = 0; i < kept; i++) {
+            lq->slots[i] = temp[i];
+        }
+        lq->tail = kept;
+        atomic_store_u32(&lq->count, kept);
+
+        kfree(temp);
     }
-    g_async_queue.tail = temp_count;
-    atomic_store_u32(&g_async_queue.count, temp_count);
 
     spin_unlock(&g_async_queue.lock);
 
-    kfree(temp);
-
     if (cancelled > 0) {
-        debug_printf("[AsyncIO] Cancelled %u requests from pid=%u (remaining=%u)\n",
-                     cancelled, pid, temp_count);
+        debug_printf("[AsyncIO] Cancelled %u requests from pid=%u\n", cancelled, pid);
     }
 
     return cancelled;
@@ -177,7 +221,7 @@ void async_io_mark_completed_with_latency(uint32_t event_id, uint64_t submit_tic
     atomic_fetch_add_u64(&g_async_queue.total_latency_cycles, latency);
     atomic_fetch_add_u32(&g_async_queue.total_completed, 1);
 
-    debug_printf("[AsyncIO] Completed event_id=%u latency=%llu cycles (total=%u)\n",
+    debug_printf("[AsyncIO] Completed event_id=%u latency=%llu ticks (total=%u)\n",
                  event_id, latency, atomic_load_u32(&g_async_queue.total_completed));
 }
 
@@ -187,50 +231,55 @@ void async_io_mark_failed(uint32_t event_id) {
                  event_id, atomic_load_u32(&g_async_queue.total_failed));
 }
 
-uint32_t async_io_expire_stale(uint64_t timeout_tsc) {
-    if (atomic_load_u32(&g_async_queue.count) == 0) {
-        return 0;
+uint32_t async_io_expire_stale(uint64_t timeout_ticks) {
+    bool any = false;
+    for (int l = 0; l < ASYNC_IO_LANE_COUNT; l++) {
+        if (atomic_load_u32(&g_async_queue.lanes[l].count) > 0) { any = true; break; }
     }
+    if (!any) return 0;
 
     spin_lock(&g_async_queue.lock);
 
-    uint32_t current_count = atomic_load_u32(&g_async_queue.count);
-
-    async_io_request_t *kept = kmalloc(sizeof(async_io_request_t) * current_count);
-    if (!kept) {
-        spin_unlock(&g_async_queue.lock);
-        return 0;
-    }
-
     uint32_t expired = 0;
-    uint64_t now = kernel_tick_get();   // global PIT tick — consistent across all cores
-    uint32_t kept_count = 0;
+    uint64_t now = kernel_tick_get();
 
-    for (uint32_t i = 0; i < current_count; i++) {
-        uint32_t idx = (g_async_queue.head + i) & g_async_queue.mask;
-        async_io_request_t *req = &g_async_queue.queue[idx];
+    for (int l = 0; l < ASYNC_IO_LANE_COUNT; l++) {
+        async_io_lane_queue_t* lq = &g_async_queue.lanes[l];
+        uint32_t cur = atomic_load_u32(&lq->count);
+        if (cur == 0) continue;
 
-        if (req->submit_tick > 0 && (now - req->submit_tick) > timeout_tsc) {
-            async_io_mark_failed(req->event_id);
-            debug_printf("[AsyncIO] Expired stale request: event_id=%u pid=%u lba=%u\n",
-                         req->event_id, req->pid, req->lba);
-            expired++;
-        } else {
-            kept[kept_count++] = *req;
+        async_io_request_t* kept = kmalloc(sizeof(async_io_request_t) * cur);
+        if (!kept) continue;
+
+        uint32_t kept_count = 0;
+
+        for (uint32_t i = 0; i < cur; i++) {
+            uint32_t idx = (lq->head + i) & lq->mask;
+            async_io_request_t* r = &lq->slots[idx];
+
+            if (r->submit_tick > 0 && (now - r->submit_tick) > timeout_ticks) {
+                async_io_mark_failed(r->event_id);
+                debug_printf("[AsyncIO] Expired stale: event_id=%u pid=%u lane=%s lba=%u\n",
+                             r->event_id, r->pid, lane_name((async_io_lane_t)l), r->lba);
+                expired++;
+            } else {
+                kept[kept_count++] = *r;
+            }
         }
-    }
 
-    if (expired > 0) {
-        g_async_queue.head = 0;
-        for (uint32_t i = 0; i < kept_count; i++) {
-            g_async_queue.queue[i] = kept[i];
+        if (expired > 0) {
+            lq->head = 0;
+            for (uint32_t i = 0; i < kept_count; i++) {
+                lq->slots[i] = kept[i];
+            }
+            lq->tail = kept_count;
+            atomic_store_u32(&lq->count, kept_count);
         }
-        g_async_queue.tail = kept_count;
-        atomic_store_u32(&g_async_queue.count, kept_count);
+
+        kfree(kept);
     }
 
     spin_unlock(&g_async_queue.lock);
 
-    kfree(kept);
     return expired;
 }

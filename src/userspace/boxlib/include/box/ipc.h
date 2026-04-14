@@ -9,9 +9,11 @@
 #define SOURCE_ROUTE    1
 #define SOURCE_HARDWARE 2
 
-#define LISTEN_KEYBOARD 0
-#define LISTEN_MOUSE    1
-#define LISTEN_NETWORK  2
+#define LISTEN_KEYBOARD  (1ULL << 0)
+#define LISTEN_MOUSE     (1ULL << 1)
+#define LISTEN_NETWORK   (1ULL << 2)
+#define LISTEN_STORAGE   (1ULL << 3)
+#define LISTEN_TIMER     (1ULL << 4)
 
 #define LISTEN_FLAG_EXCLUSIVE 0x01
 
@@ -26,7 +28,7 @@
 
 int send(uint32_t target_pid, const void* data, uint16_t size);
 int broadcast(const char* tag, const void* data, uint16_t size);
-int listen(uint8_t source_type, uint8_t flags);
+int listen(uint64_t required_tags, uint8_t flags);
 bool receive(Result* out);
 bool receive_wait(Result* out, uint32_t timeout_ms);
 

@@ -1,5 +1,6 @@
 #include "pmm.h"
 #include "buddy.h"
+#include "friend.h"
 #include "vmm.h"
 #include "e820.h"
 #include "klib.h"
@@ -330,6 +331,12 @@ void pmm_activate_pull_map(void) {
     debug_printf("[PMM] Total memory available: %zu MB (%zu pages)\n",
                  (pmm_buddy.free_count * PMM_PAGE_SIZE) / (1024 * 1024),
                  pmm_buddy.free_count);
+
+    FriendInit();
+}
+
+BuddyZone* pmm_get_buddy_zone(void) {
+    return &pmm_buddy;
 }
 
 bool pmm_is_usable_ram(uintptr_t phys_addr, size_t size) {

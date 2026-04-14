@@ -7,7 +7,16 @@
 #include "atomics.h"
 #include "kernel_clock.h"
 
-#define ASYNC_IO_DEFAULT_CAPACITY 256
+typedef enum {
+    ASYNC_IO_LANE_META  = 0,  // TagFS superblock, tag registry, bitmap writes — highest priority
+    ASYNC_IO_LANE_DATA  = 1,  // file data block reads/writes
+    ASYNC_IO_LANE_BGND  = 2,  // dedup GC, self-heal, BCDC background work
+    ASYNC_IO_LANE_COUNT = 3
+} async_io_lane_t;
+
+#define ASYNC_IO_LANE_META_CAPACITY  64
+#define ASYNC_IO_LANE_DATA_CAPACITY  256
+#define ASYNC_IO_LANE_BGND_CAPACITY  64
 
 typedef enum {
     ASYNC_IO_OP_READ = 0,
@@ -33,16 +42,22 @@ typedef struct {
     uint32_t file_id;
     uint64_t write_offset;
     uint64_t original_file_size;
+
+    async_io_lane_t lane;        // which priority lane this request belongs to
 } async_io_request_t;
 
 typedef struct {
-    async_io_request_t *queue;    // kmalloc'd ring, power-of-2 capacity
-    uint32_t            capacity; // number of slots
-    uint32_t            mask;     // capacity - 1
+    async_io_request_t *slots;
+    uint32_t            capacity;
+    uint32_t            mask;
     uint32_t            head;
     uint32_t            tail;
     atomic_u32_t        count;
-    spinlock_t          lock;
+} async_io_lane_queue_t;
+
+typedef struct {
+    async_io_lane_queue_t lanes[ASYNC_IO_LANE_COUNT];
+    spinlock_t            lock;
 
     atomic_u32_t total_submitted;
     atomic_u32_t total_completed;

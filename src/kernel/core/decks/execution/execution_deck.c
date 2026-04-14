@@ -5,6 +5,7 @@
 #include "result_ring.h"
 #include "atomics.h"
 #include "error.h"
+#include "kresult.h"
 
 int execution_deck_handler(Pocket *pocket, process_t *proc)
 {
@@ -35,7 +36,7 @@ int execution_deck_handler(Pocket *pocket, process_t *proc)
             err_result.data_length = 0;
             err_result.data_addr = 0;
             err_result.sender_pid = 0;
-            err_result._reserved = 0;
+            err_result.context = KCTX_IPC;
 
             if (sender->result_ring_phys)
             {
@@ -52,7 +53,7 @@ int execution_deck_handler(Pocket *pocket, process_t *proc)
         ipc_result.data_length = pocket->data_length;
         ipc_result.data_addr = pocket->data_addr;
         ipc_result.sender_pid = pocket->pid;
-        ipc_result._reserved = 0;
+        ipc_result.context = KCTX_IPC;
 
         if (target->result_ring_phys)
         {
@@ -77,7 +78,7 @@ int execution_deck_handler(Pocket *pocket, process_t *proc)
             confirm.data_length = 0;
             confirm.data_addr = 0;
             confirm.sender_pid = 0;
-            confirm._reserved = 0;
+            confirm.context = KCTX_IPC;
 
             ResultRing *srring = (ResultRing *)vmm_phys_to_virt(sender->result_ring_phys);
             if (srring)
@@ -99,7 +100,7 @@ int execution_deck_handler(Pocket *pocket, process_t *proc)
     result.data_length = pocket->data_length;
     result.data_addr = pocket->data_addr;
     result.sender_pid = 0;
-    result._reserved = 0;
+    result.context = KCTX_GUIDE;
 
     uint64_t rring_phys = target->result_ring_phys;
     if (rring_phys == 0)

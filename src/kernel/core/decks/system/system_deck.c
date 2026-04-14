@@ -27,6 +27,7 @@
 #include "result_ring.h"
 #include "error.h"
 #include "listen_table.h"
+#include "kresult.h"
 #include "pocket_ring.h"
 #include "ready_queue.h"
 #include "guide.h"
@@ -1434,7 +1435,7 @@ static int route_tag(Pocket* pocket, process_t* proc) {
         result.data_length = target_data_length;
         result.data_addr   = target_data_addr;
         result.sender_pid  = pocket->pid;
-        result._reserved   = 0;
+        result.context     = KCTX_IPC;
 
         if (result_ring_push(rring, &result)) {
             delivered++;
@@ -1468,16 +1469,17 @@ static int listen(Pocket* pocket, process_t* proc) {
     }
 
     void* data = vmm_translate_user_addr(proc->cabin, pocket->data_addr, pocket->data_length);
-    if (!data || pocket->data_length < 2) {
+    if (!data || pocket->data_length < 9) {
         pocket->error_code = ERR_INVALID_ARGUMENT;
         return -1;
     }
 
-    uint8_t* bytes      = (uint8_t*)data;
-    uint8_t  source_type = bytes[0];
-    uint8_t  flags       = bytes[1];
+    uint8_t* bytes         = (uint8_t*)data;
+    uint64_t required_tags;
+    memcpy(&required_tags, bytes, sizeof(uint64_t));
+    uint8_t flags = bytes[8];
 
-    int result = listen_table_add(pocket->pid, source_type, flags);
+    int result = listen_table_add(pocket->pid, required_tags, flags);
 
     if (result < 0) {
         error_t err;
