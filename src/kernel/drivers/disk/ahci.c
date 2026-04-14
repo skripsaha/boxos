@@ -15,10 +15,9 @@
 #include "boxos_memory.h"
 #include "idt.h"
 
-static ahci_controller_t ahci_ctrl;
+#define AHCI_TIMEOUT_MS CONFIG_AHCI_CMD_TIMEOUT_MS
 
-// 2 seconds timeout in TSC cycles (calibrated at boot)
-#define AHCI_TIMEOUT_MS 2000
+static ahci_controller_t ahci_ctrl;
 
 // Helper: push a Result to a process's ResultRing
 static void ahci_push_result(uint32_t pid, uint32_t error_code) {
@@ -132,7 +131,7 @@ void ahci_irq_handler(void) {
         return;
     }
 
-    uint32_t is = ahci_ctrl.hba_mem->is;
+    uint32_t is = __atomic_load_n(&ahci_ctrl.hba_mem->is, __ATOMIC_ACQUIRE);
     if (is == 0) {
         return;
     }
@@ -150,12 +149,13 @@ void ahci_irq_handler(void) {
         volatile ahci_port_regs_t* port = ahci_get_port_regs(i);
         uint32_t port_is = port->is;
 
-        uint32_t completed = state->ci_snapshot ^ port->ci;
+        uint32_t current_ci = __atomic_load_n(&port->ci, __ATOMIC_ACQUIRE);
+        uint32_t completed = state->ci_snapshot ^ current_ci;
         completed &= state->ci_snapshot;
 
         if (completed) {
             __sync_fetch_and_or(&state->completed_slots, completed);
-            __atomic_store_n(&state->ci_snapshot, port->ci, __ATOMIC_RELEASE);
+            __atomic_store_n(&state->ci_snapshot, current_ci, __ATOMIC_RELEASE);
         }
 
         if (port_is & (1 << 30)) {

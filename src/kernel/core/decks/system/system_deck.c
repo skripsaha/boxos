@@ -1479,19 +1479,11 @@ static int listen(Pocket* pocket, process_t* proc) {
     memcpy(&required_tags, bytes, sizeof(uint64_t));
     uint8_t flags = bytes[8];
 
-    int result = listen_table_add(pocket->pid, required_tags, flags);
+    error_t result = listen_table_add(pocket->pid, required_tags, flags);
 
-    if (result < 0) {
-        error_t err;
-        if (result == -ERR_LISTEN_ALREADY) {
-            err = ERR_LISTEN_ALREADY;
-        } else if (result == -ERR_LISTEN_TABLE_FULL) {
-            err = ERR_LISTEN_TABLE_FULL;
-        } else {
-            err = ERR_INTERNAL;
-        }
-        pocket->error_code = (uint32_t)err;
-        uint32_t err_out = (uint32_t)err;
+    if (result != OK) {
+        pocket->error_code = (uint32_t)result;
+        uint32_t err_out = (uint32_t)result;
         memcpy(data, &err_out, sizeof(uint32_t));
         return -1;
     }

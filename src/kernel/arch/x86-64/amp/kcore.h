@@ -5,8 +5,9 @@
 #include "amp.h"
 #include "error.h"
 
-#define KCORE_QUEUE_CAPACITY  512
-#define KCORE_QUEUE_MASK      (KCORE_QUEUE_CAPACITY - 1)
+#define KCORE_QUEUE_CAPACITY   512
+#define KCORE_QUEUE_MASK       (KCORE_QUEUE_CAPACITY - 1)
+#define KCORE_POP_SPIN_LIMIT   1000000
 
 struct process_t;
 

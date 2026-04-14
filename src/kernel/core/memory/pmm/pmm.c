@@ -151,6 +151,13 @@ error_t pmm_init(void) {
     buddy_init(&pmm_buddy, zone_base, total_pages,
                alloc_map, alloc_map_phys, alloc_map_size);
 
+    uintptr_t buddy_zone_end = zone_base + total_pages * PMM_PAGE_SIZE;
+    if (buddy_zone_end > pmm_max_phys_addr) {
+        panic("[PMM] ASSERT FAILED: buddy zone end 0x%lx exceeds MAXPHYADDR 0x%llx — "
+              "memory detection is inconsistent",
+              buddy_zone_end, pmm_max_phys_addr);
+    }
+
     #define IDENTITY_MAP_LIMIT 0x100000000ULL
     size_t unusable_pages = 0;
 
@@ -210,10 +217,10 @@ void* pmm_alloc(size_t pages) {
     void* addr = buddy_alloc(&pmm_buddy, pages);
     if (!addr) return NULL;
 
-    // Validate allocation doesn't exceed MAXPHYADDR
     uintptr_t phys_end = (uintptr_t)addr + (pages * PMM_PAGE_SIZE) - 1;
     if (phys_end >= pmm_max_phys_addr) {
-        debug_printf("[PMM] ERROR: Allocation 0x%lx exceeds MAXPHYADDR, rolling back\n", (uintptr_t)addr);
+        debug_printf("[PMM] WARNING: Allocation 0x%lx exceeds MAXPHYADDR — should never happen "
+                     "if pmm_init() assertion passed\n", (uintptr_t)addr);
         buddy_free(&pmm_buddy, addr, pages);
         return NULL;
     }
