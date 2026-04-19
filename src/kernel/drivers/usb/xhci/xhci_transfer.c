@@ -26,7 +26,7 @@ int xhci_alloc_ep0_ring(xhci_controller_t* ctrl, xhci_device_slot_t* slot) {
         return -1;
     }
 
-    void* ring_phys = pmm_alloc_zero(1);
+    void* ring_phys = pmm_alloc_zero(1, PHYS_TAG_DMA32);
     if (!ring_phys) {
         debug_printf("[xHCI TRANSFER] Failed to allocate EP0 ring structure\n");
         return -1;
@@ -47,7 +47,7 @@ int xhci_alloc_ep0_ring(xhci_controller_t* ctrl, xhci_device_slot_t* slot) {
     slot->ep0_ring = ring;
     slot->ep0_ring_phys = (uint64_t)ring_phys;
 
-    void* desc_phys = pmm_alloc_zero(1);
+    void* desc_phys = pmm_alloc_zero(1, PHYS_TAG_DMA32);
     if (!desc_phys) {
         xhci_ring_destroy(ring);
         pmm_free(ring_phys, 1);

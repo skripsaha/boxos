@@ -177,7 +177,7 @@ int UsbInput_OnDeviceConnected(uint8_t SlotId, uint8_t Port, const void* ConfigD
     }
     
     // Allocate transfer buffer
-    Device->transfer_buffer = pmm_alloc_zero(1);
+    Device->transfer_buffer = pmm_alloc_zero(1, PHYS_TAG_DMA32);
     if (!Device->transfer_buffer) {
         debug_printf("[USB Input] Failed to allocate transfer buffer\n");
         UsbInputFreeSlot(Device);

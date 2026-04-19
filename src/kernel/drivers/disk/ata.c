@@ -191,10 +191,12 @@ int ata_read_sectors(uint8_t is_master, uint64_t lba, uint16_t count, uint8_t* b
     if (lba >= device->total_sectors) {
         debug_printf("[ATA] ERROR: LBA %lu out of bounds (max %lu)\n",
                      (unsigned long)lba, (unsigned long)device->total_sectors);
+        spin_unlock(&g_ata_lock);
         return -1;
     }
 
     if (ata_wait_ready() != 0) {
+        spin_unlock(&g_ata_lock);
         return -1;
     }
 
@@ -251,12 +253,6 @@ int ata_read_sectors(uint8_t is_master, uint64_t lba, uint16_t count, uint8_t* b
 }
 
 int ata_write_sectors(uint8_t is_master, uint64_t lba, uint16_t count, const uint8_t* buffer) {
-    // Initialize lock on first use
-    if (!g_ata_lock_initialized) {
-        spinlock_init(&g_ata_lock);
-        g_ata_lock_initialized = true;
-    }
-
     if (!buffer || count == 0) {
         return ATA_ERR_INVALID_ARGS;
     }
@@ -294,6 +290,7 @@ int ata_write_sectors(uint8_t is_master, uint64_t lba, uint16_t count, const uin
                  (unsigned long)lba, count, count * 512);
 
     if (ata_wait_ready() != 0) {
+        spin_unlock(&g_ata_lock);
         return -1;
     }
 
@@ -343,6 +340,22 @@ int ata_write_sectors(uint8_t is_master, uint64_t lba, uint16_t count, const uin
         }
     }
 
+    // Confirm drive has committed the last sector (protocol compliance).
+    // BSY clears when the drive is fully done with the write command.
+    if (ata_wait_ready() != 0) {
+        debug_printf("[ATA] WARNING: Write completion BSY timeout at LBA %lu\n",
+                     (unsigned long)lba);
+        // Data was already transferred — attempt continues but result is uncertain.
+    } else {
+        uint8_t final_status = ata_read_status();
+        if (final_status & ATA_SR_ERR) {
+            debug_printf("[ATA] ERROR: Write error status after last sector at LBA %lu\n",
+                         (unsigned long)lba);
+            spin_unlock(&g_ata_lock);
+            return -1;
+        }
+    }
+
     debug_printf("[ATA] WRITE COMPLETE: LBA %lu (%u bytes written to disk)\n",
                  (unsigned long)lba, count * 512);
 
@@ -356,6 +369,8 @@ int ata_flush_cache(uint8_t is_master) {
         return ahci_flush_cache_sync(is_master ? 0 : 1);
     }
 
+    spin_lock(&g_ata_lock);
+
     ATADevice* device = is_master ? &ata_primary_master : &ata_primary_slave;
     uint8_t cmd = (device->exists && device->lba48_supported)
                   ? ATA_CMD_CACHE_FLUSH_EXT : ATA_CMD_CACHE_FLUSH;
@@ -365,10 +380,12 @@ int ata_flush_cache(uint8_t is_master) {
         outb(ATA_PRIMARY_COMMAND, cmd);
 
         if (ata_wait_ready() == 0) {
+            spin_unlock(&g_ata_lock);
             return 0;
         }
     }
 
+    spin_unlock(&g_ata_lock);
     debug_printf("[ATA] WARNING: Cache flush timeout after 3 retries\n");
     return -1;
 }
@@ -399,6 +416,11 @@ int ata_read_sectors_retry(uint8_t is_master, uint64_t lba, uint16_t count, uint
             return 0;
         }
 
+        // Device does not exist — retrying will not help
+        if (result == ATA_ERR_NO_DEVICE) {
+            return result;
+        }
+
         uint8_t error = ata_read_error();
         if (error != 0) {
             debug_printf("[ATA] Read error (retry %d/%d): %s (0x%02x)\n",
@@ -422,6 +444,11 @@ int ata_write_sectors_retry(uint8_t is_master, uint64_t lba, uint16_t count, con
 
         if (result == 0) {
             return 0;
+        }
+
+        // Device does not exist — retrying will not help
+        if (result == ATA_ERR_NO_DEVICE) {
+            return result;
         }
 
         uint8_t error = ata_read_error();
@@ -510,6 +537,9 @@ static void ata_soft_reset(void) {
 
 void ata_init(void) {
     debug_printf("[ATA] Initializing ATA/IDE driver...\n");
+
+    spinlock_init(&g_ata_lock);
+    g_ata_lock_initialized = true;
 
     memset(&ata_primary_master, 0, sizeof(ATADevice));
     memset(&ata_primary_slave, 0, sizeof(ATADevice));

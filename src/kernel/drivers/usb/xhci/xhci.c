@@ -238,7 +238,7 @@ int xhci_init(void) {
     debug_printf("[xHCI] ERST allocated at phys 0x%llx\n",
                  ctrl->event_ring_segment_table.entries_phys);
 
-    void* dcbaa_phys = pmm_alloc_zero(1);
+    void* dcbaa_phys = pmm_alloc_zero(1, PHYS_TAG_DMA32);
     if (!dcbaa_phys) {
         debug_printf("[xHCI] ERROR: Failed to allocate DCBAA\n");
         goto cleanup_resources;

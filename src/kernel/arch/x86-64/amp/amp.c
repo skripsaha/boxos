@@ -250,15 +250,26 @@ void amp_boot_aps(void)
 
         kprintf("[AMP] Booting AP %u (LAPIC ID %u)...\n", c->core_index, c->lapic_id);
 
-        // Allocate 16KB kernel stack for this AP
-        void *stack_phys = pmm_alloc(4);
+        // Allocate 16KB kernel stack for this AP (1 guard + 4 data pages).
+        // Guard page at the bottom traps stack overflow via page fault.
+        void *stack_phys = pmm_alloc(5);
         if (!stack_phys)
         {
             kprintf("[AMP] ERROR: cannot allocate stack for core %u\n", c->core_index);
             continue;
         }
         void *stack_virt = vmm_phys_to_virt((uintptr_t)stack_phys);
-        uint64_t stack_top = (uint64_t)stack_virt + 4 * 4096;
+
+        // Unmap first page as guard — stack overflow triggers #PF instead of
+        // silently corrupting adjacent memory.
+        vmm_context_t *kctx = vmm_get_kernel_context();
+        pte_t *guard_pte = vmm_get_or_create_pte(kctx, (uintptr_t)stack_virt);
+        if (guard_pte) {
+            *guard_pte = 0;
+            vmm_flush_tlb_page((uintptr_t)stack_virt);
+        }
+
+        uint64_t stack_top = (uint64_t)stack_virt + 5 * 4096 - 16;
 
         // Fill trampoline data area
         // +0: CR3

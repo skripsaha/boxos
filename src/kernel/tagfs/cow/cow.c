@@ -128,6 +128,7 @@ error_t TagFS_SnapshotCreate(const char *name, uint32_t file_id, uint32_t *snaps
 
     for (uint32_t i = 0; i < g_cow_state.snapshot_count; i++) {
         if (strcmp(g_cow_state.snapshots[i].name, name) == 0) {
+            *snapshot_id = g_cow_state.snapshots[i].snapshot_id;
             spin_unlock(&g_cow_state.lock);
             return ERR_ALREADY_EXISTS;
         }
@@ -220,11 +221,12 @@ error_t TagFS_SnapshotCreateByTag(const char *tag_pattern, uint32_t *snapshot_id
     
     for (uint32_t i = 0; i < g_cow_state.snapshot_count; i++) {
         if (strcmp(g_cow_state.snapshots[i].name, snap_name) == 0) {
+            *snapshot_id = g_cow_state.snapshots[i].snapshot_id;
             spin_unlock(&g_cow_state.lock);
             return ERR_ALREADY_EXISTS;
         }
     }
-    
+
     CowSnapshot *snap = &g_cow_state.snapshots[g_cow_state.snapshot_count];
     memset(snap, 0, sizeof(CowSnapshot));
     

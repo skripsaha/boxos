@@ -9,8 +9,10 @@ int xhci_ring_init(xhci_ring_t* ring, uint32_t num_trbs, bool producer)
         return -1;
     }
 
+    // TRB ring pages are DMA targets — xHCI controller reads them directly.
+    // Even if AC64=1, allocate below 4GB to stay safe with all QEMU configs.
     size_t pages_needed = vmm_size_to_pages(num_trbs * sizeof(xhci_trb_t));
-    void* trbs_phys = pmm_alloc_zero(pages_needed);
+    void* trbs_phys = pmm_alloc_zero(pages_needed, PHYS_TAG_DMA32);
     if (!trbs_phys) {
         return -1;
     }
@@ -110,7 +112,7 @@ int xhci_erst_init(xhci_erst_t* erst, xhci_ring_t* event_ring)
         return -1;
     }
 
-    void* entries_phys = pmm_alloc_zero(1);
+    void* entries_phys = pmm_alloc_zero(1, PHYS_TAG_DMA32);
     if (!entries_phys) {
         return -1;
     }

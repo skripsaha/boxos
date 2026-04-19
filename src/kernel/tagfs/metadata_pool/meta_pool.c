@@ -339,7 +339,8 @@ void tagfs_metadata_free(TagFSMetadata* meta) {
 // Internal: deep-copy src into dst (allocates new memory for pointers)
 // ---------------------------------------------------------------------------
 
-static void mirror_deep_copy(const TagFSMetadata* src, TagFSMetadata* dst) {
+// Returns true on success, false if any allocation failed (dst is left clean on failure).
+static bool mirror_deep_copy(const TagFSMetadata* src, TagFSMetadata* dst) {
     dst->file_id       = src->file_id;
     dst->flags         = src->flags;
     dst->size          = src->size;
@@ -353,20 +354,32 @@ static void mirror_deep_copy(const TagFSMetadata* src, TagFSMetadata* dst) {
 
     if (src->tag_count > 0 && src->tag_ids) {
         dst->tag_ids = kmalloc(sizeof(uint16_t) * src->tag_count);
-        if (dst->tag_ids) memcpy(dst->tag_ids, src->tag_ids, sizeof(uint16_t) * src->tag_count);
+        if (!dst->tag_ids) return false;
+        memcpy(dst->tag_ids, src->tag_ids, sizeof(uint16_t) * src->tag_count);
     }
     if (src->extent_count > 0 && src->extents) {
         dst->extents = kmalloc(sizeof(FileExtent) * src->extent_count);
-        if (dst->extents) memcpy(dst->extents, src->extents, sizeof(FileExtent) * src->extent_count);
+        if (!dst->extents) {
+            kfree(dst->tag_ids);
+            dst->tag_ids = NULL;
+            return false;
+        }
+        memcpy(dst->extents, src->extents, sizeof(FileExtent) * src->extent_count);
     }
     if (src->filename) {
         size_t len = strlen(src->filename);
         dst->filename = kmalloc(len + 1);
-        if (dst->filename) {
-            memcpy(dst->filename, src->filename, len);
-            dst->filename[len] = '\0';
+        if (!dst->filename) {
+            kfree(dst->tag_ids);
+            kfree(dst->extents);
+            dst->tag_ids = NULL;
+            dst->extents = NULL;
+            return false;
         }
+        memcpy(dst->filename, src->filename, len);
+        dst->filename[len] = '\0';
     }
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -435,7 +448,8 @@ int meta_pool_read_cached(uint32_t file_id, TagFSMetadata* out) {
         if (!g_mirror || file_id >= g_mirror_capacity || !g_mirror_valid[file_id]) {
             return -1;
         }
-        mirror_deep_copy(&g_mirror[file_id], out);
+        if (!mirror_deep_copy(&g_mirror[file_id], out))
+            return -1;
 
         __asm__ volatile("" ::: "memory");
         if (__atomic_load_n(&g_mirror_seq, __ATOMIC_ACQUIRE) == seq)
@@ -494,10 +508,21 @@ int meta_pool_write(const TagFSMetadata* meta, uint32_t* out_block, uint32_t* ou
         g_current_block.next_block   = 0;
         g_current_dirty = true;
         debug_printf("[MetaPool] CHAINING: switched to block %u\n", g_current_block_num);
+        // Write the new block header to disk immediately so that its magic is
+        // persisted before any other subsystem (e.g. CowWriteManifest) can
+        // overwrite the same physical block.  Without this, a crash before
+        // meta_pool_flush() leaves stale data on disk and triggers
+        // "bad magic in chain" on the next boot.
+        tagfs_write_block(g_current_block_num, &g_current_block);
     }
 
     uint8_t* dest = g_current_block.payload + g_current_block.used_bytes;
-    pack_record(meta, dest);
+    uint32_t packed = pack_record(meta, dest);
+    if (packed == 0) {
+        debug_printf("[MetaPool] write: pack_record failed for file_id=%u — invalid extent\n",
+                     meta->file_id);
+        return -1;
+    }
 
     *out_block  = g_current_block_num;
     *out_offset = MPOOL_BLOCK_HEADER + g_current_block.used_bytes;
@@ -515,8 +540,14 @@ int meta_pool_write(const TagFSMetadata* meta, uint32_t* out_block, uint32_t* ou
         if (g_mirror_valid[meta->file_id]) {
             tagfs_metadata_free(&g_mirror[meta->file_id]);
         }
-        mirror_deep_copy(meta, &g_mirror[meta->file_id]);
-        g_mirror_valid[meta->file_id] = true;
+        if (mirror_deep_copy(meta, &g_mirror[meta->file_id])) {
+            g_mirror_valid[meta->file_id] = true;
+        } else {
+            // Allocation failed: mark entry invalid so stale/partial data isn't returned.
+            g_mirror_valid[meta->file_id] = false;
+            debug_printf("[MetaPool] mirror: kmalloc failed for file_id=%u — entry invalidated\n",
+                         meta->file_id);
+        }
         __atomic_fetch_add(&g_mirror_seq, 1, __ATOMIC_RELEASE);  // even = done
     }
 

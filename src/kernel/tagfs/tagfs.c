@@ -30,7 +30,7 @@ static void tagfs_auto_snapshot_before_write(uint32_t file_id) {
 
         uint32_t snapshot_id;
         error_t err = TagFS_SnapshotCreate(snap_name, file_id, &snapshot_id);
-        if (err != OK) {
+        if (err != OK && err != ERR_ALREADY_EXISTS) {
             debug_printf("[TagFS] Auto-snapshot failed for file %u: %d\n", file_id, err);
         }
     }

@@ -42,6 +42,7 @@
 #include "aslr.h"
 #include "linker_symbols.h"
 #include "pmtag.h"
+#include "memtag.h"
 
 void kernel_main(void)
 {
@@ -117,7 +118,14 @@ void kernel_main(void)
         debug_printf("[INIT] WARNING: PMT init failed: %s (non-fatal)\n", ErrorString(pmtag_err));
     }
 
+    debug_printf("[INIT] MemTag Physical Region Tagging...\n");
+    error_t memtag_err = MemTagInit();
+    if (memtag_err != OK) {
+        debug_printf("[INIT] WARNING: MemTag init failed: %s (non-fatal)\n", ErrorString(memtag_err));
+    }
+
     pmm_test_high_memory();
+    MemTagStressTest();
 
     debug_printf("[INIT] TSS Dynamic Stacks...\n");
     tss_setup_dynamic_stacks();
