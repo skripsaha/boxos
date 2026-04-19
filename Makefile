@@ -128,10 +128,42 @@ ISO          = $(BUILDDIR)/boxos.iso
 ISO_DIR      = $(BUILDDIR)/isofiles
 VBOX_VDI     = $(BUILDDIR)/boxos.vdi
 
-.PHONY: all clean run debug info check-deps install-deps
+# ==== UEFI BOOTLOADER ====
+TAGBOOT_SRC    = src/boot/uefi/tagboot.c
+TAGBOOT_JUMP   = src/boot/uefi/tagboot_jump.asm
+TAGBOOT_LD     = src/boot/uefi/tagboot.ld
+TAGBOOT_EFI    = $(BUILDDIR)/BOOTX64.EFI
+TAGBOOT_SO     = $(BUILDDIR)/tagboot.so
+TAGBOOT_OBJ    = $(BUILDDIR)/tagboot.o
+TAGBOOT_JUMP_OBJ = $(BUILDDIR)/tagboot_jump.o
+
+# UEFI compile/link flags
+# gcc ELF path: compile with -fpic, link as .so, objcopy to PE32+
+UEFI_CC      = x86_64-elf-gcc
+UEFI_CFLAGS_GCC = -ffreestanding -nostdlib -nostdinc \
+                  -mno-red-zone -mno-sse -mno-mmx -mno-avx \
+                  -fpic -fshort-wchar -fno-stack-protector \
+                  -Wall -Wextra -Os \
+                  -I$(SRCDIR)/boot/uefi
+
+# clang direct-to-PE path: -fpic is invalid on MSVC target; PE handles
+# relocations natively via the .reloc section.
+UEFI_CFLAGS_CLANG = -ffreestanding -nostdlib -nostdinc \
+                    -mno-red-zone -mno-sse -mno-mmx -mno-avx \
+                    -fshort-wchar -fno-stack-protector \
+                    -Wall -Wextra -Os \
+                    -target x86_64-unknown-windows \
+                    -I$(SRCDIR)/boot/uefi
+
+# Detect whether lld-link is available for direct PE output via clang.
+# Apple clang does not ship lld-link, so we fall through to the gcc+objcopy path
+# even when 'clang' is in PATH.  Only enable the clang path when lld-link exists.
+CLANG_AVAILABLE := $(shell command -v lld-link 2>/dev/null)
+
+.PHONY: all clean run debug info check-deps install-deps uefi
 
 # ==== MAIN TARGET ====
-all: check-deps $(IMAGE) $(KERNEL_ELF) $(FLOPPY_IMG) $(ISO) $(VBOX_VDI)
+all: check-deps $(IMAGE) $(KERNEL_ELF) $(FLOPPY_IMG) $(ISO) $(VBOX_VDI) uefi
 
 # ==== DEP CHECK ====
 check-deps:
@@ -342,14 +374,72 @@ $(VBOX_VDI): $(IMAGE)
 	@echo "Creating VirtualBox VDI..."
 	@VBoxManage convertfromraw $< $@ --format VDI
 
+# ==== UEFI BOOTLOADER BUILD ====
+# Build strategy:
+#   If clang is available → compile directly to PE32+ using -target x86_64-unknown-windows
+#   Otherwise             → compile to ELF .so with x86_64-elf-gcc + objcopy to PE
+#
+# The EFI binary is placed at build/BOOTX64.EFI.  To boot it with OVMF:
+#   make run UEFI=on   (requires OVMF.fd in the project root or /usr/share/ovmf/)
+
+uefi: $(TAGBOOT_EFI)
+
+ifdef CLANG_AVAILABLE
+
+# ---- clang path: compile directly to PE32+ EFI application ----
+# Assemble tagboot_jump.asm to ELF64 first; clang links both objects into PE.
+$(TAGBOOT_JUMP_OBJ): $(TAGBOOT_JUMP) | $(BUILDDIR)
+	@echo "Assembling TagBoot jump trampoline..."
+	@$(ASM) -f elf64 $< -o $@
+
+$(TAGBOOT_EFI): $(TAGBOOT_SRC) $(TAGBOOT_JUMP_OBJ) $(TAGBOOT_LD) src/boot/uefi/uefi.h src/boot/uefi/tagfs_boot.h | $(BUILDDIR)
+	@echo "Building TagBoot UEFI (clang/lld → PE32+)..."
+	@clang $(UEFI_CFLAGS_CLANG) \
+		-Wl,-entry:TagBootMain \
+		-Wl,-subsystem:efi_application \
+		-Wl,-nodefaultlib \
+		-o $@ $< $(TAGBOOT_JUMP_OBJ)
+	@echo "TagBoot EFI: $@ ($$(stat -f%z $@ 2>/dev/null || stat -c%s $@ 2>/dev/null) bytes)"
+
+else
+
+# ---- gcc path: compile to ELF PIC .so, then objcopy to PE32+ ----
+$(TAGBOOT_JUMP_OBJ): $(TAGBOOT_JUMP) | $(BUILDDIR)
+	@echo "Assembling TagBoot jump trampoline..."
+	@$(ASM) -f elf64 $< -o $@
+
+$(TAGBOOT_OBJ): $(TAGBOOT_SRC) src/boot/uefi/uefi.h src/boot/uefi/tagfs_boot.h | $(BUILDDIR)
+	@echo "Building TagBoot UEFI object (gcc ELF)..."
+	@$(UEFI_CC) $(UEFI_CFLAGS_GCC) -c $< -o $@
+
+$(TAGBOOT_SO): $(TAGBOOT_OBJ) $(TAGBOOT_JUMP_OBJ) $(TAGBOOT_LD) | $(BUILDDIR)
+	@echo "Linking TagBoot ELF shared object..."
+	@$(LD) \
+		-nostdlib \
+		-shared \
+		-Bsymbolic \
+		-T $(TAGBOOT_LD) \
+		-o $@ $(TAGBOOT_OBJ) $(TAGBOOT_JUMP_OBJ)
+
+$(TAGBOOT_EFI): $(TAGBOOT_SO) | $(BUILDDIR)
+	@echo "Converting TagBoot ELF → PE32+ EFI binary..."
+	@$(OBJCOPY) \
+		--target=pei-x86-64 \
+		--subsystem=10 \
+		$< $@
+	@echo "TagBoot EFI: $@ ($$(stat -f%z $@ 2>/dev/null || stat -c%s $@ 2>/dev/null) bytes)"
+
+endif
+
 # Comma helper for $(if ...) inside recipes
 comma := ,
 
 # ==== RUN CONFIGURATION ====
-# Usage: make run [CORES=N] [MEM=size] [FULLSCREEN=on] [USB=on|off] [AHCI=on] [LOG=on] [GDB=on] [DEBUG=on]
+# Usage: make run [CORES=N] [MEM=size] [FULLSCREEN=on] [USB=on|off] [AHCI=on] [LOG=on] [GDB=on] [DEBUG=on] [UEFI=on]
 #
 # Examples:
-#   make run                          — 1 core, 512M, USB keyboard
+#   make run                          — 1 core, 512M, USB keyboard (MBR boot)
+#   make run UEFI=on                  — boot via OVMF + TagBoot EFI
 #   make run CORES=4 MEM=4G          — 4 cores, 4GB RAM
 #   make run FULLSCREEN=on           — cocoa fullscreen mode
 #   make run LOG=on                  — enable QEMU interrupt/reset logging
@@ -357,6 +447,7 @@ comma := ,
 #   make run AHCI=on USB=off         — AHCI disk controller, no USB
 #   make run CORES=8 MEM=4G LOG=on FULLSCREEN=on
 #   make run DEBUG=on                — enable debug output (CONFIG_DEBUG_ENABLED)
+#   make run UEFI=on CORES=4 MEM=4G
 
 CORES      ?= 1
 MEM        ?= 512M
@@ -366,17 +457,67 @@ AHCI       ?= off
 LOG        ?= off
 GDB        ?= off
 DEBUG      ?= off
+UEFI       ?= off
+
+# OVMF firmware search paths (common locations on macOS/Linux)
+OVMF_PATHS := /usr/share/ovmf/OVMF.fd \
+              /usr/share/qemu/OVMF.fd \
+              /usr/local/share/ovmf/OVMF.fd \
+              /opt/homebrew/share/ovmf/OVMF.fd \
+              OVMF.fd
+OVMF_FD := $(firstword $(foreach p,$(OVMF_PATHS),$(wildcard $(p))))
+
+# For UEFI boot: create a minimal ESP (EFI System Partition) FAT image that
+# holds EFI/BOOT/BOOTX64.EFI, then pass it as a second drive alongside the
+# BoxOS disk image (which still holds the TagFS data).
+UEFI_ESP_IMG = $(BUILDDIR)/esp.img
+
+$(UEFI_ESP_IMG): $(TAGBOOT_EFI) | $(BUILDDIR)
+	@echo "Creating UEFI ESP image..."
+	@dd if=/dev/zero of=$@ bs=512 count=2880 status=none
+	@if command -v mformat >/dev/null 2>&1; then \
+		mformat -i $@ -F -v "ESP" :: ; \
+		mmd     -i $@ ::/EFI ::/EFI/BOOT; \
+		mcopy   -i $@ $(TAGBOOT_EFI) ::/EFI/BOOT/BOOTX64.EFI; \
+		echo "ESP image created with mtools"; \
+	elif command -v mkdosfs >/dev/null 2>&1 || command -v mkfs.fat >/dev/null 2>&1; then \
+		$(if $(filter Darwin,$(UNAME_S)), \
+			hdiutil create -size 1m -fs FAT32 -volname ESP -ov -o $(BUILDDIR)/esp_tmp.dmg && \
+			LOOP=$$(hdiutil attach $(BUILDDIR)/esp_tmp.dmg -nobrowse | awk '{print $$NF}') && \
+			mkdir -p $$LOOP/EFI/BOOT && \
+			cp $(TAGBOOT_EFI) $$LOOP/EFI/BOOT/BOOTX64.EFI && \
+			hdiutil detach $$LOOP && \
+			mv $(BUILDDIR)/esp_tmp.dmg $@ , \
+			mkfs.fat -F 12 $@ && \
+			mkdir -p /tmp/boxos_esp && \
+			mount -o loop $@ /tmp/boxos_esp && \
+			mkdir -p /tmp/boxos_esp/EFI/BOOT && \
+			cp $(TAGBOOT_EFI) /tmp/boxos_esp/EFI/BOOT/BOOTX64.EFI && \
+			umount /tmp/boxos_esp) ; \
+	else \
+		echo "WARNING: no mtools or mkfs.fat found; ESP image may be empty"; \
+	fi
 
 run: $(IMAGE)
 	@echo "=== BoxOS QEMU ==="
-	@echo "  Cores: $(CORES) | RAM: $(MEM) | USB: $(USB) | AHCI: $(AHCI)"
+	@echo "  Cores: $(CORES) | RAM: $(MEM) | USB: $(USB) | AHCI: $(AHCI) | UEFI: $(UEFI)"
 	@echo "  Fullscreen: $(FULLSCREEN) | Log: $(LOG) | GDB: $(GDB) | Debug: $(DEBUG)"
 	@echo "==================="
+	$(if $(filter on,$(UEFI)), \
+		$(if $(OVMF_FD),, \
+			$(error UEFI=on requires OVMF.fd. Install ovmf package or place OVMF.fd in project root.)))
+	@$(MAKE) --no-print-directory $(if $(filter on,$(UEFI)),$(UEFI_ESP_IMG))
 	@$(QEMU) \
-		$(if $(filter on,$(AHCI)), \
-			-drive id=disk0$(comma)file=$<$(comma)format=raw$(comma)if=none \
-			-device ahci$(comma)id=ahci -device ide-hd$(comma)drive=disk0$(comma)bus=ahci.0, \
-			-drive format=raw$(comma)file=$<$(comma)index=0$(comma)media=disk) \
+		$(if $(filter on,$(UEFI)), \
+			-bios $(OVMF_FD) \
+			-drive format=raw$(comma)file=$(UEFI_ESP_IMG)$(comma)if=none$(comma)id=esp \
+			-device virtio-blk-pci$(comma)drive=esp \
+			-drive format=raw$(comma)file=$<$(comma)if=none$(comma)id=disk0 \
+			-device virtio-blk-pci$(comma)drive=disk0, \
+			$(if $(filter on,$(AHCI)), \
+				-drive id=disk0$(comma)file=$<$(comma)format=raw$(comma)if=none \
+				-device ahci$(comma)id=ahci -device ide-hd$(comma)drive=disk0$(comma)bus=ahci.0, \
+				-drive format=raw$(comma)file=$<$(comma)index=0$(comma)media=disk)) \
 		-m $(MEM) \
 		-serial stdio \
 		$(if $(filter-out 1,$(CORES)),-smp $(CORES)$(comma)cores=$(CORES)$(comma)threads=1$(comma)sockets=1) \
@@ -389,6 +530,7 @@ clean:
 	@echo "Cleaning build..."
 	@rm -rf $(BUILDDIR)
 	@rm -f $(TAGFS_TOOL)
+	@rm -f $(TAGBOOT_SO) $(TAGBOOT_OBJ) $(TAGBOOT_JUMP_OBJ)
 	@cd $(USERSPACE_DIR) && $(MAKE) clean
 	@cd $(SHELL_DIR) && $(MAKE) clean
 	@cd $(APPS_DIR) && $(MAKE) clean
@@ -431,7 +573,8 @@ install-deps:
 info:
 	@echo "BoxOS Makefile Info"
 	@echo "Targets:"
-	@echo "  all        — full build (img, iso, elf)"
+	@echo "  all        — full build (img, iso, elf, BOOTX64.EFI)"
+	@echo "  uefi       — build only the UEFI bootloader (build/BOOTX64.EFI)"
 	@echo "  run        — run BoxOS in QEMU"
 	@echo "  debug      — run QEMU with GDB waiting (alias for GDB=on)"
 	@echo "  clean      — clean build directory"
@@ -446,6 +589,7 @@ info:
 	@echo "  USB=on|off — enable/disable USB keyboard"
 	@echo "  AHCI=on    — use AHCI disk controller"
 	@echo "  LOG=on     — enable QEMU interrupt/reset logging"
+	@echo "  UEFI=on    — boot via OVMF + TagBoot EFI (requires OVMF.fd)"
 
 debug: $(IMAGE)
 	@$(MAKE) run GDB=on IMAGE=$(IMAGE) CORES=$(CORES) MEM=$(MEM) FULLSCREEN=$(FULLSCREEN) USB=$(USB) AHCI=$(AHCI) LOG=$(LOG) DEBUG=$(DEBUG)
