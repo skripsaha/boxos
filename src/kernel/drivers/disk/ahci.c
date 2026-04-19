@@ -463,7 +463,8 @@ static int ahci_port_init(uint8_t port_num) {
         return -1;
     }
 
-    void* clb_page = pmm_alloc(1);
+    // CLB, FIS, CTBA and staging buffers are DMA targets — must be below 4GB.
+    void* clb_page = pmm_alloc(1, PHYS_TAG_DMA32);
     if (!clb_page) {
         debug_printf("[AHCI] Port %u: Failed to allocate CLB page\n", port_num);
         return -1;
@@ -479,7 +480,7 @@ static int ahci_port_init(uint8_t port_num) {
     port->fis_phys = clb_phys + 1024;
 
     for (uint8_t slot = 0; slot < AHCI_MAX_SLOTS; slot++) {
-        void* ctba_page = pmm_alloc(1);
+        void* ctba_page = pmm_alloc(1, PHYS_TAG_DMA32);
         if (!ctba_page) {
             debug_printf("[AHCI] Port %u: Failed to allocate CTBA for slot %u\n", port_num, slot);
             for (uint8_t i = 0; i < slot; i++) {
@@ -511,7 +512,7 @@ static int ahci_port_init(uint8_t port_num) {
     port->regs->serr = 0xFFFFFFFF;
 
     for (int i = 0; i < AHCI_MAX_SLOTS; i++) {
-        void* staging_phys = pmm_alloc(1);
+        void* staging_phys = pmm_alloc(1, PHYS_TAG_DMA32);
         if (!staging_phys) {
             debug_printf("[AHCI] Port %u: Failed to allocate staging buffer for slot %u\n", port_num, i);
             for (int j = 0; j < i; j++) {
@@ -881,7 +882,7 @@ void ahci_test_read(void) {
 
     debug_printf("[AHCI] Test READ: Reading sector 0 (MBR)...\n");
 
-    void* dma_page = pmm_alloc(1);
+    void* dma_page = pmm_alloc(1, PHYS_TAG_DMA32);
     if (!dma_page) {
         debug_printf("[AHCI] Test READ: Failed to allocate DMA buffer\n");
         return;
@@ -890,12 +891,6 @@ void ahci_test_read(void) {
     uintptr_t dma_phys = (uintptr_t)dma_page;
     void* dma_virt = vmm_phys_to_virt(dma_phys);
     memset(dma_virt, 0, 4096);
-
-    if (!ahci_ctrl.s64a_support && !IS_32BIT_SAFE(dma_phys)) {
-        debug_printf("[AHCI] Test READ: DMA buffer above 4GB (0x%lx), allocating below 4GB\n", dma_phys);
-        pmm_free(dma_page, 1);
-        return;
-    }
 
     uint8_t slot = 0;
     port->slot_bitmap &= ~(1 << slot);

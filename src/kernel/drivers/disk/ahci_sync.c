@@ -16,10 +16,10 @@ int ahci_read_sectors_sync(uint8_t port, uint64_t lba,
         return -1;
     }
 
-    /* Allocate a DMA-safe buffer (physical address guaranteed below 4GB from PMM) */
+    // DMA buffer: AHCI PRDT addresses must be below 4GB unless s64a is confirmed.
     uint32_t pages_needed = (sector_count * 512 + 4095) / 4096;
     if (pages_needed == 0) pages_needed = 1;
-    void* dma_page = pmm_alloc(pages_needed);
+    void* dma_page = pmm_alloc(pages_needed, PHYS_TAG_DMA32);
     if (!dma_page) {
         debug_printf("[AHCI Sync] Failed to allocate DMA buffer for read\n");
         return -1;
@@ -102,10 +102,10 @@ int ahci_write_sectors_sync(uint8_t port, uint64_t lba,
         return -1;
     }
 
-    /* Allocate a DMA-safe buffer and copy data into it */
+    // DMA buffer: must be below 4GB.
     uint32_t pages_needed = (sector_count * 512 + 4095) / 4096;
     if (pages_needed == 0) pages_needed = 1;
-    void* dma_page = pmm_alloc(pages_needed);
+    void* dma_page = pmm_alloc(pages_needed, PHYS_TAG_DMA32);
     if (!dma_page) {
         debug_printf("[AHCI Sync] Failed to allocate DMA buffer for write\n");
         return -1;

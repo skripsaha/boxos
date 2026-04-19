@@ -4,7 +4,7 @@
 #include "ktypes.h"
 #include "klib.h"
 
-#define BUDDY_MAX_ORDER     11      // 2^11 = 2048 pages = 8MB max block
+#define BUDDY_MAX_ORDER     14      // 2^14 = 16384 pages = 64MB max block
 #define BUDDY_PAGE_SIZE     4096
 
 // Intrusive free node — lives inside the first 32 bytes of each free block

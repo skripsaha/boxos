@@ -164,11 +164,11 @@ error_t DiskBookInit(uint32_t sector) {
         g_disk_book_sb.version == DISK_BOOK_VERSION) {
         // Validate stored capacity against compiled constant
         uint32_t stored_cap = (uint32_t)(g_disk_book_sb.end_sector - g_disk_book_sb.start_sector);
-        if (stored_cap == 0 || stored_cap > DISK_BOOK_CAPACITY) {
-            // Capacity field is corrupt — treat as fresh
+        if (stored_cap == 0 || stored_cap > DISK_BOOK_CAPACITY * DISK_BOOK_SECTORS_PER_ENTRY) {
+            // Capacity field is corrupt or uses old format — treat as fresh
             goto fresh;
         }
-        g_disk_book_capacity = stored_cap;
+        g_disk_book_capacity = stored_cap / DISK_BOOK_SECTORS_PER_ENTRY;
         debug_printf("[DiskBook] Existing journal: head=%u tail=%u seq=%u cap=%u\n",
                      g_disk_book_sb.head, g_disk_book_sb.tail,
                      g_disk_book_sb.next_sequence, g_disk_book_capacity);
@@ -179,7 +179,7 @@ fresh:
         g_disk_book_sb.magic          = DISK_BOOK_SB_MAGIC;
         g_disk_book_sb.version        = DISK_BOOK_VERSION;
         g_disk_book_sb.start_sector   = sector + 2;
-        g_disk_book_sb.end_sector     = sector + 2 + DISK_BOOK_CAPACITY;
+        g_disk_book_sb.end_sector     = sector + 2 + DISK_BOOK_CAPACITY * DISK_BOOK_SECTORS_PER_ENTRY;
         g_disk_book_sb.head           = 0;
         g_disk_book_sb.tail           = 0;
         g_disk_book_sb.checkpoint_seq = 0;
@@ -208,7 +208,7 @@ error_t DiskBookReload(void) {
     if (err != OK)
         return err;
     
-    g_disk_book_capacity = (uint32_t)(g_disk_book_sb.end_sector - g_disk_book_sb.start_sector);
+    g_disk_book_capacity = (uint32_t)(g_disk_book_sb.end_sector - g_disk_book_sb.start_sector) / DISK_BOOK_SECTORS_PER_ENTRY;
     
     debug_printf("[DiskBook] Reloaded: head=%u tail=%u checkpoint=%u\n",
                  g_disk_book_sb.head, g_disk_book_sb.tail, g_disk_book_sb.checkpoint_seq);
@@ -270,6 +270,11 @@ void DiskBookShutdown(void) {
     DiskBookCheckpoint();
 
     spin_lock(&g_disk_book_lock);
+    // On clean shutdown all data is on disk. Reset the ring buffer so next
+    // boot has nothing to replay. Without this, tail never advances and every
+    // boot replays all entries since journal creation, corrupting state.
+    g_disk_book_sb.tail            = g_disk_book_sb.head;
+    g_disk_book_sb.checkpoint_tail = g_disk_book_sb.head;
     DiskBookWriteSuperblock();
     g_disk_book_initialized = false;
     spin_unlock(&g_disk_book_lock);

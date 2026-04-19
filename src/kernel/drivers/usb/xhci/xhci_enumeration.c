@@ -255,8 +255,8 @@ void xhci_enum_advance_state(xhci_controller_t* ctrl, uint8_t slot_id, uint8_t c
                 return;
             }
 
-            /* Allocate Device Context. */
-            void* dev_ctx_phys = pmm_alloc_zero(1);
+            /* Allocate Device Context — xHCI controller writes here directly. */
+            void* dev_ctx_phys = pmm_alloc_zero(1, PHYS_TAG_DMA32);
             if (!dev_ctx_phys) {
                 debug_printf("[xHCI ENUM] Failed to allocate Device Context\n");
                 xhci_device_slot_cleanup(ctrl, slot);
@@ -270,7 +270,7 @@ void xhci_enum_advance_state(xhci_controller_t* ctrl, uint8_t slot_id, uint8_t c
 
             /* Allocate Input Context (size depends on CSZ bit). */
             uint32_t input_ctx_pages = (ctrl->context_size == 64) ? 3 : 2;
-            void* input_ctx_phys = pmm_alloc_zero(input_ctx_pages);
+            void* input_ctx_phys = pmm_alloc_zero(input_ctx_pages, PHYS_TAG_DMA32);
             if (!input_ctx_phys) {
                 debug_printf("[xHCI ENUM] Failed to allocate Input Context\n");
                 xhci_device_slot_cleanup(ctrl, slot);
@@ -412,8 +412,8 @@ void xhci_enum_advance_state(xhci_controller_t* ctrl, uint8_t slot_id, uint8_t c
         }
 
         case ENUM_STATE_WAIT_SET_IDLE: {
-            /* Allocate interrupt ring. */
-            void* ring_phys = pmm_alloc_zero(1);
+            /* Allocate interrupt ring — xHCI controller DMA target. */
+            void* ring_phys = pmm_alloc_zero(1, PHYS_TAG_DMA32);
             if (!ring_phys) {
                 xhci_device_slot_cleanup(ctrl, slot);
                 return;
@@ -435,8 +435,8 @@ void xhci_enum_advance_state(xhci_controller_t* ctrl, uint8_t slot_id, uint8_t c
             slot->interrupt_ring = ring;
             slot->interrupt_ring_phys = (uint64_t)ring_phys;
 
-            /* Allocate interrupt data buffer. */
-            void* data_phys = pmm_alloc_zero(1);
+            /* Allocate interrupt data buffer — DMA target. */
+            void* data_phys = pmm_alloc_zero(1, PHYS_TAG_DMA32);
             if (!data_phys) {
                 xhci_device_slot_cleanup(ctrl, slot);
                 return;
@@ -446,7 +446,7 @@ void xhci_enum_advance_state(xhci_controller_t* ctrl, uint8_t slot_id, uint8_t c
 
             /* Allocate Input Context for Configure Endpoint. */
             uint32_t input_ctx_pages = (ctrl->context_size == 64) ? 3 : 2;
-            void* input_ctx_phys = pmm_alloc_zero(input_ctx_pages);
+            void* input_ctx_phys = pmm_alloc_zero(input_ctx_pages, PHYS_TAG_DMA32);
             if (!input_ctx_phys) {
                 xhci_device_slot_cleanup(ctrl, slot);
                 return;

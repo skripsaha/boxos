@@ -1,6 +1,7 @@
 #include "pmtag.h"
 #include "pmm.h"
 #include "buddy.h"
+#include "vmm.h"
 #include "e820.h"
 #include "boot_info.h"
 #include "kernel_config.h"
@@ -8,6 +9,14 @@
 #include "error.h"
 
 PhysTagTable g_pmtag = { 0 };
+
+// Freestanding popcount — no libgcc dependency (__popcountdi2 unavailable).
+static inline int pmtag_popcount64(uint64_t x) {
+    x = x - ((x >> 1) & 0x5555555555555555ULL);
+    x = (x & 0x3333333333333333ULL) + ((x >> 2) & 0x3333333333333333ULL);
+    x = (x + (x >> 4)) & 0x0f0f0f0f0f0f0f0fULL;
+    return (int)((x * 0x0101010101010101ULL) >> 56);
+}
 
 static void set_bits_in_page_range(size_t first_page, size_t last_page, uint64_t tags) {
     for (size_t p = first_page; p < last_page; p++) {
@@ -50,18 +59,27 @@ error_t PhysTagInit(void) {
     size_t page_count = mem_end / PMM_PAGE_SIZE;
     size_t band_words = (page_count + 63) / 64;
 
-    uint64_t *tag_map = kmalloc(page_count * sizeof(uint64_t));
-    if (!tag_map) {
-        return ERR_NO_MEMORY;
-    }
-    memset(tag_map, 0, page_count * sizeof(uint64_t));
+    // Allocate directly from PMM — these are permanent kernel metadata pages,
+    // not heap allocations. Pull map is live (vmm_init ran before PhysTagInit).
+    size_t tag_map_bytes = page_count * sizeof(uint64_t);
+    size_t tag_map_pages = (tag_map_bytes + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE;
 
-    uint64_t *band_mem = kmalloc(64 * band_words * sizeof(uint64_t));
-    if (!band_mem) {
-        kfree(tag_map);
+    uintptr_t tag_map_phys = (uintptr_t)pmm_alloc(tag_map_pages);
+    if (!tag_map_phys) {
         return ERR_NO_MEMORY;
     }
-    memset(band_mem, 0, 64 * band_words * sizeof(uint64_t));
+    uint64_t *tag_map = (uint64_t *)vmm_phys_to_virt(tag_map_phys);
+    memset(tag_map, 0, tag_map_bytes);
+
+    size_t band_bytes = 64 * band_words * sizeof(uint64_t);
+    size_t band_pages = (band_bytes + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE;
+    uintptr_t band_phys = (uintptr_t)pmm_alloc(band_pages);
+    if (!band_phys) {
+        pmm_free((void *)tag_map_phys, tag_map_pages);
+        return ERR_NO_MEMORY;
+    }
+    uint64_t *band_mem = (uint64_t *)vmm_phys_to_virt(band_phys);
+    memset(band_mem, 0, band_bytes);
 
     g_pmtag.tag_map   = tag_map;
     g_pmtag.page_count = page_count;
@@ -316,7 +334,7 @@ void PhysTagDump(void) {
         int band_idx = __builtin_ctzll(known_tags[t].bit);
         size_t count = 0;
         for (size_t w = 0; w < g_pmtag.band_words; w++) {
-            count += (size_t)__builtin_popcountll(g_pmtag.bands[band_idx][w]);
+            count += (size_t)pmtag_popcount64(g_pmtag.bands[band_idx][w]);
         }
         debug_printf("[PMTAG]   %-8s  %zu pages (%zu MB)\n",
                      known_tags[t].name, count,

@@ -2,6 +2,7 @@
 #include "buddy.h"
 #include "pmtag.h"
 #include "vmm.h"
+#include "memtag.h"
 #include "e820.h"
 #include "klib.h"
 #include "boxos_memory.h"
@@ -209,18 +210,48 @@ error_t pmm_init(void) {
     return OK;
 }
 
-void* pmm_alloc(size_t pages) {
-    if (!pages || !pmm_initialized) {
-        return NULL;
+// ─── Core allocator ──────────────────────────────────────────────────────────
+// Called via the pmm_alloc(pages[, tag]) macro defined in pmm.h.
+//
+// tags == 0                  → any zone, first-fit from buddy
+// tags == PHYS_TAG_DMA32     → [0,  DMA32_END)  O(log max_order)
+// tags == PHYS_TAG_USER      → [DMA32_END, 4GB) O(log max_order)
+// tags == PHYS_TAG_HIGH      → [4GB, mem_end)   O(log max_order)
+// tags == anything else      → PhysAllocTagged  O(band scan)
+// ─────────────────────────────────────────────────────────────────────────────
+void* _pmm_alloc_impl(size_t pages, uint64_t tags) {
+    if (!pages || !pmm_initialized) return NULL;
+
+    void* addr;
+
+    if (tags == 0) {
+        addr = buddy_alloc(&pmm_buddy, pages);
+    } else if (tags == PHYS_TAG_DMA32) {
+        addr = buddy_alloc_range(&pmm_buddy, pages,
+                                 0,
+                                 (uintptr_t)CONFIG_PHYS_ZONE_DMA32_END);
+    } else if (tags == PHYS_TAG_USER) {
+        addr = buddy_alloc_range(&pmm_buddy, pages,
+                                 (uintptr_t)CONFIG_PHYS_ZONE_DMA32_END,
+                                 (uintptr_t)CONFIG_PHYS_ZONE_USER_END);
+    } else if (tags == PHYS_TAG_HIGH) {
+        addr = buddy_alloc_range(&pmm_buddy, pages,
+                                 (uintptr_t)CONFIG_PHYS_ZONE_USER_END,
+                                 (uintptr_t)pmm_mem_end);
+    } else {
+        // Dynamic / semantic tags (SHARED, KERNEL, MMIO, user-defined):
+        // PhysAllocTagged scans PMTAG band index to find a matching span,
+        // then calls buddy_alloc_range internally.
+        // MAXPHYADDR check is inside PhysAllocTagged → return directly.
+        return PhysAllocTagged(pages, tags);
     }
 
-    void* addr = buddy_alloc(&pmm_buddy, pages);
     if (!addr) return NULL;
 
-    uintptr_t phys_end = (uintptr_t)addr + (pages * PMM_PAGE_SIZE) - 1;
+    uintptr_t phys_end = (uintptr_t)addr + pages * PMM_PAGE_SIZE - 1;
     if (phys_end >= pmm_max_phys_addr) {
-        debug_printf("[PMM] WARNING: Allocation 0x%lx exceeds MAXPHYADDR — should never happen "
-                     "if pmm_init() assertion passed\n", (uintptr_t)addr);
+        debug_printf("[PMM] WARNING: alloc 0x%lx exceeds MAXPHYADDR — zone boundary misconfigured\n",
+                     (uintptr_t)addr);
         buddy_free(&pmm_buddy, addr, pages);
         return NULL;
     }
@@ -228,13 +259,13 @@ void* pmm_alloc(size_t pages) {
     return addr;
 }
 
-void* pmm_alloc_zero(size_t pages) {
-    void* addr = pmm_alloc(pages);
+void* _pmm_alloc_zero_impl(size_t pages, uint64_t tags) {
+    void* addr = _pmm_alloc_impl(pages, tags);
     if (addr) {
         void* virt = vmm_phys_to_virt((uintptr_t)addr);
         memset(virt, 0, pages * PMM_PAGE_SIZE);
     }
-    return addr;  // returns physical address
+    return addr;
 }
 
 void pmm_free(void* addr, size_t pages) {
@@ -247,6 +278,7 @@ void pmm_free(void* addr, size_t pages) {
     }
 
     buddy_free(&pmm_buddy, addr, pages);
+    MemTagRemoveRegion(base);
 }
 
 size_t pmm_total_pages(void) {
@@ -324,6 +356,12 @@ bool pmm_check_integrity(void) {
 void pmm_activate_pull_map(void) {
     buddy_activate_pull_map(&pmm_buddy);
     debug_printf("[PMM] Buddy allocator rebased to Pull Map\n");
+
+    // Rebase pmm_deferred: it was set to a physical address in pmm_init()
+    // and is never valid as a virtual address after pull map activation.
+    if (pmm_deferred) {
+        pmm_deferred = (DeferredRegion*)vmm_phys_to_virt((uintptr_t)pmm_deferred);
+    }
 
     // Phase 2: Free deferred high-memory regions (saved during Phase 1).
     for (size_t i = 0; i < pmm_deferred_count; i++) {

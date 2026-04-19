@@ -1,6 +1,7 @@
 #include "ata_dma.h"
 #include "pci.h"
 #include "pmm.h"
+#include "pmtag.h"
 #include "vmm.h"
 #include "io.h"
 #include "klib.h"
@@ -231,10 +232,11 @@ int ata_dma_read_async(uint8_t is_master, uint32_t lba, uint16_t sector_count,
         return -1;
     }
 
-    void* dma_buffer = pmm_alloc(1);
+    // DMA buffers must be below 4GB — use PhysAllocTagged with PHYS_TAG_DMA32.
+    void* dma_buffer = PhysAllocTagged(1, PHYS_TAG_DMA32);
     if (!dma_buffer) {
         spin_unlock(&dma_state.lock);
-        debug_printf("[ATA DMA] ERROR: Failed to allocate DMA buffer\n");
+        debug_printf("[ATA DMA] ERROR: Failed to allocate DMA32 buffer\n");
         return -1;
     }
 
@@ -255,7 +257,7 @@ int ata_dma_read_async(uint8_t is_master, uint32_t lba, uint16_t sector_count,
     req->retry_count = 0;
 
     if (ata_dma_setup_prd(req) != 0) {
-        pmm_free(dma_buffer, 1);
+        PhysAllocTaggedFree(dma_buffer, 1);
         req->status = ATA_DMA_STATUS_FREE;
         spin_unlock(&dma_state.lock);
         debug_printf("[ATA DMA] ERROR: Failed to setup PRD\n");
@@ -263,7 +265,7 @@ int ata_dma_read_async(uint8_t is_master, uint32_t lba, uint16_t sector_count,
     }
 
     if (ata_dma_send_command(req) != 0) {
-        pmm_free(dma_buffer, 1);
+        PhysAllocTaggedFree(dma_buffer, 1);
         req->status = ATA_DMA_STATUS_FREE;
         spin_unlock(&dma_state.lock);
         debug_printf("[ATA DMA] ERROR: Failed to send DMA command\n");
@@ -300,14 +302,17 @@ int ata_dma_write_async(uint8_t is_master, uint32_t lba, uint16_t sector_count,
         return -1;
     }
 
-    void* dma_buffer = pmm_alloc(1);
+    // DMA buffers must be below 4GB — use PhysAllocTagged with PHYS_TAG_DMA32.
+    void* dma_buffer = PhysAllocTagged(1, PHYS_TAG_DMA32);
     if (!dma_buffer) {
         spin_unlock(&dma_state.lock);
-        debug_printf("[ATA DMA] ERROR: Failed to allocate DMA buffer\n");
+        debug_printf("[ATA DMA] ERROR: Failed to allocate DMA32 buffer\n");
         return -1;
     }
 
-    memcpy(dma_buffer, buffer_virt, sector_count * ATA_SECTOR_SIZE);
+    // CPU access requires virtual address (pull map may be active after vmm_init).
+    void* dma_buf_virt = vmm_phys_to_virt((uintptr_t)dma_buffer);
+    memcpy(dma_buf_virt, buffer_virt, sector_count * ATA_SECTOR_SIZE);
     mfence();
 
     ata_dma_request_t* req = &dma_state.active_request;
@@ -327,7 +332,7 @@ int ata_dma_write_async(uint8_t is_master, uint32_t lba, uint16_t sector_count,
     req->retry_count = 0;
 
     if (ata_dma_setup_prd(req) != 0) {
-        pmm_free(dma_buffer, 1);
+        PhysAllocTaggedFree(dma_buffer, 1);
         req->status = ATA_DMA_STATUS_FREE;
         spin_unlock(&dma_state.lock);
         debug_printf("[ATA DMA] ERROR: Failed to setup PRD\n");
@@ -335,7 +340,7 @@ int ata_dma_write_async(uint8_t is_master, uint32_t lba, uint16_t sector_count,
     }
 
     if (ata_dma_send_command(req) != 0) {
-        pmm_free(dma_buffer, 1);
+        PhysAllocTaggedFree(dma_buffer, 1);
         req->status = ATA_DMA_STATUS_FREE;
         spin_unlock(&dma_state.lock);
         debug_printf("[ATA DMA] ERROR: Failed to send DMA command\n");
@@ -407,7 +412,8 @@ void ata_dma_irq_handler(void) {
                 if (req->data_addr != 0) {
                     void* user_buf = vmm_translate_user_addr(proc->cabin, req->data_addr, req->buffer_size);
                     if (user_buf) {
-                        memcpy(user_buf, (void*)req->buffer_phys, req->buffer_size);
+                        void* dma_virt = vmm_phys_to_virt(req->buffer_phys);
+                        memcpy(user_buf, dma_virt, req->buffer_size);
                     }
                 }
             } else {
@@ -470,7 +476,7 @@ void ata_dma_irq_handler(void) {
         }
     }
 
-    pmm_free((void*)req->buffer_phys, 1);
+    PhysAllocTaggedFree((void*)req->buffer_phys, 1);
     req->status = ATA_DMA_STATUS_FREE;
     dma_state.active_request_idx = 0xFF;
 
@@ -523,7 +529,7 @@ void ata_dma_check_timeouts(void) {
             result_ring_push(rring, &result);
         }
 
-        pmm_free((void*)req->buffer_phys, 1);
+        PhysAllocTaggedFree((void*)req->buffer_phys, 1);
         req->status = ATA_DMA_STATUS_FREE;
         dma_state.active_request_idx = 0xFF;
 
@@ -547,7 +553,8 @@ int ata_read_sectors_dma(uint8_t is_master, uint32_t lba, uint8_t count, uint8_t
 
     ATA_DMA_DEBUG("[ATA DMA SYNC] Starting synchronous DMA read\n");
 
-    void* dma_buffer = pmm_alloc(1);
+    // DMA buffer must be below 4GB — ATA PIIX4 bus-master uses 32-bit addresses.
+    void* dma_buffer = pmm_alloc(1, PHYS_TAG_DMA32);
     if (!dma_buffer) {
         return -1;
     }
@@ -618,7 +625,8 @@ int ata_read_sectors_dma(uint8_t is_master, uint32_t lba, uint8_t count, uint8_t
                 return -1;
             }
 
-            memcpy(buffer, dma_buffer, req->buffer_size);
+            void* dma_virt = vmm_phys_to_virt((uintptr_t)dma_buffer);
+            memcpy(buffer, dma_virt, req->buffer_size);
 
             req->status = ATA_DMA_STATUS_COMPLETED;
             atomic_fetch_add_u32(&dma_state.completed_requests, 1);
@@ -661,12 +669,14 @@ int ata_write_sectors_dma(uint8_t is_master, uint32_t lba, uint8_t count, const 
         return -1;
     }
 
-    void* dma_buffer = pmm_alloc(1);
+    // DMA buffer must be below 4GB — ATA PIIX4 bus-master uses 32-bit addresses.
+    void* dma_buffer = pmm_alloc(1, PHYS_TAG_DMA32);
     if (!dma_buffer) {
         return -1;
     }
 
-    memcpy(dma_buffer, buffer, count * ATA_SECTOR_SIZE);
+    void* dma_buf_virt = vmm_phys_to_virt((uintptr_t)dma_buffer);
+    memcpy(dma_buf_virt, buffer, count * ATA_SECTOR_SIZE);
     mfence();
 
     spin_lock(&dma_state.lock);
@@ -834,7 +844,8 @@ int ata_dma_start_async_transfer(async_io_request_t* req) {
         return -1;
     }
 
-    void* dma_buffer = pmm_alloc(1);
+    // DMA buffer must be below 4GB — ATA PIIX4 bus-master uses 32-bit addresses.
+    void* dma_buffer = pmm_alloc(1, PHYS_TAG_DMA32);
     if (!dma_buffer) {
         spin_unlock(&dma_state.lock);
         debug_printf("[ATA DMA ASYNC] Failed to allocate DMA buffer\n");
@@ -848,10 +859,11 @@ int ata_dma_start_async_transfer(async_io_request_t* req) {
             copy_size = total_size;
         }
 
-        /* Zero entire DMA buffer first, then overlay valid data.
+        /* Zero entire DMA buffer first, then overlay valid data via Pull Map.
          * This ensures no stale data leaks into sectors beyond data_length. */
-        memset(dma_buffer, 0, total_size);
-        memcpy(dma_buffer, req->buffer_virt, copy_size);
+        void* dma_buf_virt = vmm_phys_to_virt((uintptr_t)dma_buffer);
+        memset(dma_buf_virt, 0, total_size);
+        memcpy(dma_buf_virt, req->buffer_virt, copy_size);
         mfence();
     }
 

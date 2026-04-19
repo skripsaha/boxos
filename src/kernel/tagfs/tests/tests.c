@@ -413,6 +413,11 @@ static TestResult test_braid_add_disk(void) {
     TEST_ASSERT(BraidIsHealthy(), "Braid should be healthy with 2 disks");
     TEST_ASSERT_EQ(BraidGetActiveDiskCount(), 2, "Should have 2 active disks");
     
+    // Clean up: remove test disks so Braid does not stay "healthy" and intercept
+    // all subsequent TagFS block I/O (which would route through non-existent ATA slave).
+    BraidRemoveDisk(0);
+    BraidRemoveDisk(1);
+    
     return TEST_PASS;
 }
 

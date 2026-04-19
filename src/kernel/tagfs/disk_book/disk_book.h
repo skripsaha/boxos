@@ -14,7 +14,7 @@
 #define DISK_BOOK_ENTRY_SIZE        1024
 #define DISK_BOOK_DATA_SIZE         970
 #define DISK_BOOK_SECTORS_PER_ENTRY 2
-#define DISK_BOOK_CAPACITY          2048
+#define DISK_BOOK_CAPACITY          512
 #define DISK_BOOK_CHECKPOINT_THRESH 256
 
 // Entry types

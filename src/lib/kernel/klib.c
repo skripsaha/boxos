@@ -26,6 +26,7 @@ static mem_block_t *free_list = NULL;
 static spinlock_t heap_lock = {0};
 
 static uint8_t current_attr = TEXT_ATTR_DEFAULT;
+static spinlock_t g_kprintf_lock;
 
 static const char digits[] = "0123456789abcdefghijklmnopqrstuvwxyz";
 
@@ -545,6 +546,7 @@ int kprintf(const char *format, ...)
 {
     va_list args;
     va_start(args, format);
+    spin_lock(&g_kprintf_lock);
     int count = 0;
 
     while (*format)
@@ -952,6 +954,7 @@ int kprintf(const char *format, ...)
         ++format;
     }
     va_end(args);
+    spin_unlock(&g_kprintf_lock);
     return count;
 }
 
