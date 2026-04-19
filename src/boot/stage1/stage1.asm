@@ -6,7 +6,7 @@ start:
     mov ds, ax
     mov es, ax
     mov ss, ax
-    mov sp, 0x7C00
+    mov sp, 0x7000      ; below stage1 (0x7C00), above E820 area (~0x1104): safe 24KB stack
 
     mov [boot_drive], dl
 

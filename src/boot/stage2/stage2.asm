@@ -24,9 +24,13 @@ PAGE_TABLE_SIZE       equ 0x8000       ; 32KB
 GUARD_PAGE_SIZE       equ 0x1000       ; 4KB guard page
 BOOT_STACK_SIZE       equ 0x10000      ; 64KB boot stack (stack grows downward)
 
-E820_MAP_ADDR         equ 0x500
-E820_COUNT_ADDR       equ 0x4FE
-E820_SIZE_ADDR        equ 0x4FC
+; E820 layout at 0x500 (out of BDA which ends at 0x4FF):
+;   0x500: count (uint16)   — number of valid E820 entries
+;   0x502: size  (uint16)   — byte size of the map (count * 24)
+;   0x504: map entries      — 24-byte e820_entry_t records
+E820_COUNT_ADDR       equ 0x500
+E820_SIZE_ADDR        equ 0x502
+E820_MAP_ADDR         equ 0x504
 E820_MAX_ENTRIES      equ 128           ; must match E820_MAX_ENTRIES in e820.h
 BOOT_INFO_ADDR        equ 0x9000
 
@@ -64,7 +68,13 @@ start_stage2:
     mov gs, ax
 
     mov ss, ax
-    mov sp, 0x7C00
+    mov sp, 0x7000      ; safe stack: below stage1 (0x7C00), above E820 data (~0x1104)
+
+    ; Force VGA text mode 3 (80x25 color) before any output.
+    ; On real hardware, BIOS does not guarantee a known video state at boot.
+    ; INT 10h also re-initialises the cursor, clears the screen — deterministic start.
+    mov ax, 0x0003
+    int 0x10
 
     sti
 
@@ -232,8 +242,7 @@ long_mode_start:
     mov gs, ax
     mov ss, ax
 
-    ; Use dynamically computed stack
-    xor rsp, rsp
+    ; Use dynamically computed stack (mov esp zero-extends into RSP)
     mov esp, [dynamic_stack_base]
 
     push qword 0
@@ -549,6 +558,39 @@ enter_unreal_mode:
     call print_string_16
     ret
 
+; =============================================================
+; Restore Unreal Mode (DS and ES descriptor caches to 4GB limit)
+; MUST be called after any BIOS interrupt that may have reloaded
+; DS or ES (INT 13h, INT 15h E820, etc.) — they all re-prime the
+; descriptor cache with a real-mode 64KB limit, which breaks the
+; 32-bit address overrides used by a32 rep movsd.
+; Requires: unreal GDT already loaded by enter_unreal_mode.
+; Clobbers: AX (low 16 bits of EAX), flags.
+; =============================================================
+restore_unreal_mode:
+    cli
+
+    mov eax, cr0
+    or eax, 1
+    mov cr0, eax
+
+    mov ax, 0x10        ; flat 4GB data segment
+    mov ds, ax
+    mov es, ax
+
+    mov eax, cr0
+    and eax, 0xFFFFFFFE
+    mov cr0, eax
+
+    jmp 0x0000:.rum_flush
+.rum_flush:
+    xor ax, ax          ; base = 0, but descriptor cache keeps 4GB limit
+    mov ds, ax
+    mov es, ax
+
+    sti
+    ret
+
 load_kernel_tagfs:
     mov si, msg_loading_tagfs
     call print_string_16
@@ -693,9 +735,10 @@ tagfs_find_kernel:
     ret
 
 ; Load kernel file via bounce buffer + Unreal Mode copy to above 1MB.
-; Reads sectors to bounce buffer (0x10000), copies each chunk to
-; KERNEL_RUN_ADDR+ using 32-bit Unreal Mode addressing.
-; Requires: Unreal Mode active, kernel_start_block/block_count/tagfs_data_start set
+; Reads sectors to bounce buffer (0x10000) via BIOS INT 13h, then
+; restores Unreal Mode (BIOS clobbers DS/ES caches) and copies each
+; chunk to KERNEL_RUN_ADDR+ using 32-bit address overrides.
+; Requires: enter_unreal_mode called once before load_kernel_tagfs.
 ; Returns: CF=0 on success (kernel_loaded_bytes set), CF=1 on error
 tagfs_load_kernel_file:
     push eax
@@ -711,66 +754,92 @@ tagfs_load_kernel_file:
     add eax, [tagfs_data_start]
     mov [kernel_load_sector], eax
 
-    ; total sectors = block_count * 8
+    ; total sectors = block_count * 8 (stored as dd)
     mov eax, [kernel_block_count]
     shl eax, 3
-    mov [kernel_load_sectors], ax
+    mov [kernel_load_sectors], eax
 
-    mov cx, [kernel_load_sectors]
+    mov ecx, [kernel_load_sectors]  ; 32-bit counter
     mov ebx, [kernel_load_sector]
-    mov edi, KERNEL_RUN_ADDR          ; destination above 1MB (Unreal Mode)
+    mov edi, KERNEL_RUN_ADDR        ; destination above 1MB (Unreal Mode)
 
 .load_loop:
-    mov ax, 64
-    cmp cx, 64
+    ; Sectors to read this pass: min(ecx, 64)
+    mov eax, 64
+    cmp ecx, 64
     jae .do_read
-    mov ax, cx
+    mov eax, ecx
 
 .do_read:
-    push cx
-    push ax
+    push ecx
+    push eax
 
-    ; Read chunk to bounce buffer via BIOS INT 13h
+    ; Set up DAP for this chunk
     mov [dap_kernel_chunk + 2], ax
     mov word [dap_kernel_chunk + 4], 0x0000
     mov word [dap_kernel_chunk + 6], KERNEL_BOUNCE_SEG
     mov [dap_kernel_chunk + 8], ebx
 
+    ; INT 13h with 3-attempt retry. Before each retry, reset the disk controller
+    ; (INT 13h AH=0x00) to clear its error state — required on real hardware
+    ; where a failed read leaves the controller in an undefined condition.
+    push bp
+    mov bp, 3
+.read_retry:
     mov si, dap_kernel_chunk
     mov ah, 0x42
     mov dl, [boot_drive_saved]
     int 0x13
+    jnc .read_ok
+    ; Reset disk controller before retry to clear hardware error state
+    xor ah, ah
+    mov dl, [boot_drive_saved]
+    int 0x13                ; ignore reset result — just clear controller state
+    dec bp
+    jnz .read_retry
+    pop bp
+    pop eax
+    pop ecx
+    jmp .load_error
 
-    pop ax
-    pop cx
-    jc .load_error
+.read_ok:
+    pop bp
+    pop eax     ; sectors read this pass
+    pop ecx     ; remaining sector count
 
-    ; Copy chunk from bounce buffer to destination via Unreal Mode
-    push cx
+    ; Restore Unreal Mode: INT 13h reloads ES/DS with real-mode 64KB limit.
+    ; Without this, a32 rep movsd to ES:EDI=0x100000+ silently wraps.
+    push eax
+    push ecx
+    call restore_unreal_mode
+    pop ecx
+    pop eax
+
+    ; Copy chunk: bounce buffer (DS:ESI=0x10000) → kernel (ES:EDI=0x100000+)
+    ; Both DS and ES now have 4GB limit from restore_unreal_mode.
+    push ecx
     movzx ecx, ax
-    shl ecx, 7              ; ecx = dwords to copy (sectors * 512 / 4)
+    shl ecx, 7              ; dwords to copy (sectors * 512 / 4)
     mov esi, KERNEL_BOUNCE_ADDR
-
     cld
-    a32 rep movsd            ; DS:ESI -> ES:EDI with 32-bit addressing
+    a32 rep movsd           ; 32-bit address override, 4GB-limited DS:ESI and ES:EDI
+    pop ecx
 
-    pop cx
-
-    ; Advance LBA, decrement remaining
+    ; Advance LBA and decrement remaining count
     movzx eax, ax
     add ebx, eax
-    sub cx, ax
+    sub ecx, eax
 
-    ; Safety: kernel must not exceed max size (sanity check)
+    ; Sanity: kernel must not exceed KERNEL_MAX_SIZE
     mov eax, edi
     sub eax, KERNEL_RUN_ADDR
     cmp eax, KERNEL_MAX_SIZE
     jae .size_error
 
-    test cx, cx
+    test ecx, ecx
     jnz .load_loop
 
-    ; Store actual loaded byte count
+    ; Record actual loaded byte count for boot_info
     mov eax, edi
     sub eax, KERNEL_RUN_ADDR
     mov [kernel_loaded_bytes], eax
@@ -910,7 +979,7 @@ detect_memory_e820:
     mov edx, 0x534D4150    ; 'SMAP'
     mov ax, 0x50
     mov es, ax
-    xor di, di
+    mov di, 4              ; entries start at ES:4 = physical 0x504 (0x500-0x503 = count/size header)
     xor bp, bp
 
 .e820_loop:
@@ -960,10 +1029,10 @@ detect_memory_e820:
     mov si, msg_e820_fail
     call print_string_16
 
-    ; Fallback: create minimal memory map
+    ; Fallback: create minimal memory map (entries start at ES:4 = physical 0x504)
     mov ax, 0x50
     mov es, ax
-    xor di, di
+    mov di, 4              ; entries start at offset 4, matching E820_MAP_ADDR = 0x504
 
     mov dword [es:di], 0x00000000
     mov dword [es:di+4], 0x00000000
@@ -1369,7 +1438,7 @@ kernel_start_block:     dd 0
 kernel_block_count:     dd 0
 tagfs_data_start:       dd 0
 kernel_load_sector:     dd 0
-kernel_load_sectors:    dw 0
+kernel_load_sectors:    dd 0
 kernel_size_bytes:      dd 0            ; actual file size from TagFS metadata
 kernel_loaded_bytes:    dd 0            ; total bytes loaded (sectors * 512)
 
