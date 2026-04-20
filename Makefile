@@ -422,12 +422,8 @@ $(TAGBOOT_SO): $(TAGBOOT_OBJ) $(TAGBOOT_JUMP_OBJ) $(TAGBOOT_LD) | $(BUILDDIR)
 		-o $@ $(TAGBOOT_OBJ) $(TAGBOOT_JUMP_OBJ)
 
 $(TAGBOOT_EFI): $(TAGBOOT_SO) | $(BUILDDIR)
-	@echo "Converting TagBoot ELF → PE32+ EFI binary..."
-	@$(OBJCOPY) \
-		--target=pei-x86-64 \
-		--subsystem=10 \
-		$< $@
-	@echo "TagBoot EFI: $@ ($$(stat -f%z $@ 2>/dev/null || stat -c%s $@ 2>/dev/null) bytes)"
+	@echo "Converting TagBoot ELF → PE32+ EFI binary (make_efi.py)..."
+	@python3 tools/make_efi.py $< $@
 
 endif
 
@@ -464,6 +460,8 @@ OVMF_PATHS := /usr/share/ovmf/OVMF.fd \
               /usr/share/qemu/OVMF.fd \
               /usr/local/share/ovmf/OVMF.fd \
               /opt/homebrew/share/ovmf/OVMF.fd \
+              $(wildcard /opt/homebrew/Cellar/qemu/*/share/qemu/edk2-x86_64-code.fd) \
+              $(wildcard /usr/local/Cellar/qemu/*/share/qemu/edk2-x86_64-code.fd) \
               OVMF.fd
 OVMF_FD := $(firstword $(foreach p,$(OVMF_PATHS),$(wildcard $(p))))
 
@@ -472,31 +470,31 @@ OVMF_FD := $(firstword $(foreach p,$(OVMF_PATHS),$(wildcard $(p))))
 # BoxOS disk image (which still holds the TagFS data).
 UEFI_ESP_IMG = $(BUILDDIR)/esp.img
 
-$(UEFI_ESP_IMG): $(TAGBOOT_EFI) | $(BUILDDIR)
-	@echo "Creating UEFI ESP image..."
-	@dd if=/dev/zero of=$@ bs=512 count=2880 status=none
-	@if command -v mformat >/dev/null 2>&1; then \
-		mformat -i $@ -F -v "ESP" :: ; \
-		mmd     -i $@ ::/EFI ::/EFI/BOOT; \
-		mcopy   -i $@ $(TAGBOOT_EFI) ::/EFI/BOOT/BOOTX64.EFI; \
-		echo "ESP image created with mtools"; \
-	elif command -v mkdosfs >/dev/null 2>&1 || command -v mkfs.fat >/dev/null 2>&1; then \
-		$(if $(filter Darwin,$(UNAME_S)), \
-			hdiutil create -size 1m -fs FAT32 -volname ESP -ov -o $(BUILDDIR)/esp_tmp.dmg && \
-			LOOP=$$(hdiutil attach $(BUILDDIR)/esp_tmp.dmg -nobrowse | awk '{print $$NF}') && \
-			mkdir -p $$LOOP/EFI/BOOT && \
-			cp $(TAGBOOT_EFI) $$LOOP/EFI/BOOT/BOOTX64.EFI && \
-			hdiutil detach $$LOOP && \
-			mv $(BUILDDIR)/esp_tmp.dmg $@ , \
-			mkfs.fat -F 12 $@ && \
-			mkdir -p /tmp/boxos_esp && \
-			mount -o loop $@ /tmp/boxos_esp && \
-			mkdir -p /tmp/boxos_esp/EFI/BOOT && \
-			cp $(TAGBOOT_EFI) /tmp/boxos_esp/EFI/BOOT/BOOTX64.EFI && \
-			umount /tmp/boxos_esp) ; \
+# UEFI NVRAM variables image — writable copy of the OVMF vars template.
+# Searched in common locations; falls back to an empty 256 KB file if no
+# template is found (OVMF will initialise it on first boot).
+OVMF_VARS_PATHS := \
+    /opt/homebrew/share/qemu/edk2-x86_64-vars.fd \
+    $(wildcard /opt/homebrew/Cellar/qemu/*/share/qemu/edk2-x86_64-vars.fd) \
+    /usr/share/OVMF/OVMF_VARS.fd \
+    /usr/share/qemu/OVMF_VARS.fd \
+    /usr/local/share/ovmf/OVMF_VARS.fd \
+    edk2-x86_64-vars.fd
+OVMF_VARS_TEMPLATE := $(firstword $(foreach p,$(OVMF_VARS_PATHS),$(wildcard $(p))))
+
+$(BUILDDIR)/edk2-vars.fd: | $(BUILDDIR)
+	@echo "Creating UEFI NVRAM vars image..."
+	@if [ -n "$(OVMF_VARS_TEMPLATE)" ]; then \
+		cp "$(OVMF_VARS_TEMPLATE)" $@; \
+		echo "  Copied NVRAM template: $(OVMF_VARS_TEMPLATE)"; \
 	else \
-		echo "WARNING: no mtools or mkfs.fat found; ESP image may be empty"; \
+		dd if=/dev/zero of=$@ bs=1024 count=256 status=none; \
+		echo "  Created empty 256 KB NVRAM (no OVMF_VARS template found)"; \
 	fi
+
+$(UEFI_ESP_IMG): $(TAGBOOT_EFI) $(BUILDDIR)/edk2-vars.fd | $(BUILDDIR)
+	@echo "Creating UEFI ESP image (FAT32, 34 MB)..."
+	@python3 tools/make_esp.py $(TAGBOOT_EFI) $@
 
 run: $(IMAGE)
 	@echo "=== BoxOS QEMU ==="
@@ -509,11 +507,11 @@ run: $(IMAGE)
 	@$(MAKE) --no-print-directory $(if $(filter on,$(UEFI)),$(UEFI_ESP_IMG))
 	@$(QEMU) \
 		$(if $(filter on,$(UEFI)), \
-			-bios $(OVMF_FD) \
-			-drive format=raw$(comma)file=$(UEFI_ESP_IMG)$(comma)if=none$(comma)id=esp \
-			-device virtio-blk-pci$(comma)drive=esp \
-			-drive format=raw$(comma)file=$<$(comma)if=none$(comma)id=disk0 \
-			-device virtio-blk-pci$(comma)drive=disk0, \
+			-machine q35 \
+			-drive if=pflash$(comma)format=raw$(comma)readonly=on$(comma)file=$(OVMF_FD) \
+			-drive if=pflash$(comma)format=raw$(comma)file=$(BUILDDIR)/edk2-vars.fd \
+			-drive format=raw$(comma)file=$(UEFI_ESP_IMG)$(comma)if=ide$(comma)index=0 \
+			-drive format=raw$(comma)file=$<$(comma)if=ide$(comma)index=1, \
 			$(if $(filter on,$(AHCI)), \
 				-drive id=disk0$(comma)file=$<$(comma)format=raw$(comma)if=none \
 				-device ahci$(comma)id=ahci -device ide-hd$(comma)drive=disk0$(comma)bus=ahci.0, \

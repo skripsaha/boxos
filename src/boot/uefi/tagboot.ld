@@ -1,19 +1,11 @@
 /*
  * tagboot.ld — Linker script for TagBoot UEFI application (PE32+ x86_64)
  *
- * Produces a relocatable shared object that objcopy converts to a PE32+ EFI
- * binary.  The entry point symbol must be TagBootMain.
- *
- * EFI applications are loaded at an arbitrary virtual address by the firmware;
- * -fpic + this script make the binary fully position-independent.
- *
- * Section names match what objcopy --target=efi-app expects:
- *   .text    → .text   (code)
- *   .data    → .data   (read-write data)
- *   .rodata  → .rodata (read-only data, merged into .text by objcopy)
- *   .bss     → .bss    (zero-initialised, not present in file)
- *
- * The output format is elf64-x86-64; objcopy converts it to pei-x86-64.
+ * The ELF shared object is converted to PE32+ by tools/make_efi.py.
+ * Starting at VMA 0x1000 ensures PE sections begin at RVA >= 0x1000
+ * (UEFI PE32+ rejects sections at RVA 0 because PE headers live there).
+ * With ImageBase = 0, ELF VMAs equal PE RVAs, so the Python converter
+ * can copy data verbatim and reuse ELF .rela.dyn entries as PE .reloc.
  */
 
 OUTPUT_FORMAT("elf64-x86-64")
@@ -22,7 +14,7 @@ ENTRY(TagBootMain)
 
 SECTIONS
 {
-    . = 0;
+    . = 0x1000;
 
     .text ALIGN(4096) : {
         *(.text)
@@ -36,6 +28,8 @@ SECTIONS
         *(.data.*)
         *(.got)
         *(.got.plt)
+        *(.data.rel.ro)
+        *(.data.rel.ro.*)
     }
 
     .bss ALIGN(4096) : {
@@ -45,6 +39,12 @@ SECTIONS
         *(COMMON)
         __bss_end = .;
     }
+
+    /*
+     * Keep .rela.dyn — the Python converter reads it to produce the PE .reloc
+     * section.  Without .reloc, UEFI cannot load the image at an address other
+     * than ImageBase (0), which would cause an EFI_LOAD_ERROR on real hardware.
+     */
 
     /DISCARD/ : {
         *(.note*)
@@ -59,5 +59,6 @@ SECTIONS
         *(.plt*)
         *(.rela.plt*)
         *(.rel.plt*)
+        *(.debug*)
     }
 }

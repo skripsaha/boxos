@@ -93,6 +93,18 @@ typedef struct {
 #define EFI_LOADED_IMAGE_PROTOCOL_GUID \
     EFI_GUID_INIT(0x5b1b31a1,0x9562,0x11d2, 0x8e,0x3f,0x00,0xa0,0xc9,0x69,0x72,0x3b)
 
+/* ACPI table GUIDs (UEFI spec §4.6) — for RSDP discovery */
+#define EFI_ACPI_20_TABLE_GUID \
+    EFI_GUID_INIT(0x8868e871,0xe4f1,0x11d3, 0xbc,0x22,0x00,0x80,0xc7,0x3c,0x88,0x81)
+#define EFI_ACPI_TABLE_GUID \
+    EFI_GUID_INIT(0xeb9d2d30,0x2d88,0x11d3, 0x9a,0x16,0x00,0x90,0x27,0x3f,0xc1,0x4d)
+
+/* EFI_CONFIGURATION_TABLE — one entry in the system table vendor table array */
+typedef struct {
+    EFI_GUID  vendor_guid;
+    void     *vendor_table;
+} EFI_CONFIGURATION_TABLE;
+
 /* =========================================================================
  * Memory types and map
  * ========================================================================= */
@@ -459,7 +471,7 @@ typedef struct {
     EFI_RUNTIME_SERVICES             *runtime_services;
     EFI_BOOT_SERVICES                *boot_services;
     UINTN                             number_of_table_entries;
-    void                             *configuration_table;
+    EFI_CONFIGURATION_TABLE          *configuration_table;
 } EFI_SYSTEM_TABLE;
 
 #endif /* UEFI_H */
