@@ -1283,13 +1283,50 @@ EFI_STATUS EFIAPI TagBootMain(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
     PrintDec(loaded_bytes);
     Print(" bytes)\r\n");
 
-    /* Validate kernel header magic — 'KERNEL' at byte offset 2 */
+    /* Validate kernel header magic — 'KERNEL' at byte offset 2.
+     * Kernel header layout:
+     *   +0  2 bytes  jmp short .past_header
+     *   +2  6 bytes  "KERNEL"
+     *   +8  4 bytes  header version
+     *   +12 4 bytes  _kernel_phys_end  (physical end INCLUDING BSS)
+     */
     if (!MemEqual((const void *)(uintptr_t)(KERNEL_LOAD_ADDR + 2), "KERNEL", 6)) {
         Panic("kernel header magic invalid — wrong binary at load address");
     }
     Print("TagBoot: kernel header OK\r\n");
 
+    /* Read the true physical end (including BSS) from the kernel header.
+     * This MUST be used for page table placement — if we place page tables
+     * before BSS end, kernel_entry.asm's "rep stosb" will overwrite them. */
+    uint32_t header_phys_end = 0;
+    MemCopy(&header_phys_end,
+            (const void *)(uintptr_t)(KERNEL_LOAD_ADDR + 12), 4);
+
     uint64_t kernel_end_phys = KERNEL_LOAD_ADDR + loaded_bytes;
+
+    if (header_phys_end > (uint32_t)kernel_end_phys && header_phys_end < 0x10000000U) {
+        /* The BSS extends past the loaded file data.  Reserve those pages so
+         * UEFI does not allocate them for its own use before ExitBootServices.
+         * UEFI allocate_pages returns zeroed pages (EFI spec §7.2), so BSS
+         * will be zero without any explicit memset by the bootloader. */
+        EFI_PHYSICAL_ADDRESS bss_pa  = (EFI_PHYSICAL_ADDRESS)kernel_end_phys;
+        UINTN bss_pages = ((uint64_t)header_phys_end - kernel_end_phys + PAGE_4KB - 1)
+                          / PAGE_4KB;
+        EFI_STATUS bss_status = g_bs->allocate_pages(AllocateAddress, EfiLoaderData,
+                                                      bss_pages, &bss_pa);
+        if (EFI_ERROR(bss_status)) {
+            /* Non-fatal: memory may already be free conventional memory.
+             * Try free+reallocate in case it was marked as boot-services data. */
+            g_bs->free_pages(bss_pa, bss_pages);
+            bss_status = g_bs->allocate_pages(AllocateAddress, EfiLoaderData,
+                                              bss_pages, &bss_pa);
+        }
+        kernel_end_phys = (uint64_t)header_phys_end;
+        Print("TagBoot: kernel phys end (BSS) ");
+        PrintHex64(kernel_end_phys);
+        if (EFI_ERROR(bss_status)) Print(" (BSS alloc warn)");
+        Print("\r\n");
+    }
 
     /* ----- 5. Get GOP framebuffer ----- */
     FbInfo fb = QueryGopFramebuffer();
