@@ -487,9 +487,13 @@ $(BUILDDIR)/edk2-vars.fd: | $(BUILDDIR)
 	@if [ -n "$(OVMF_VARS_TEMPLATE)" ]; then \
 		cp "$(OVMF_VARS_TEMPLATE)" $@; \
 		echo "  Copied NVRAM template: $(OVMF_VARS_TEMPLATE)"; \
+	elif [ -n "$(OVMF_FD)" ]; then \
+		CODE_SZ=$$(stat -f%z "$(OVMF_FD)" 2>/dev/null || stat -c%s "$(OVMF_FD)" 2>/dev/null); \
+		dd if=/dev/zero of=$@ bs=$$CODE_SZ count=1 status=none; \
+		echo "  Created zeroed NVRAM ($$CODE_SZ bytes, matches $(OVMF_FD))"; \
 	else \
 		dd if=/dev/zero of=$@ bs=1024 count=256 status=none; \
-		echo "  Created empty 256 KB NVRAM (no OVMF_VARS template found)"; \
+		echo "  Created empty 256 KB NVRAM (fallback)"; \
 	fi
 
 $(UEFI_ESP_IMG): $(TAGBOOT_EFI) $(BUILDDIR)/edk2-vars.fd | $(BUILDDIR)

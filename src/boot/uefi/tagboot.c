@@ -180,6 +180,42 @@ static int StrEqual8(const char *a, const char *b)
 #pragma GCC diagnostic pop
 
 /* =========================================================================
+ * COM1 serial debug output (raw port I/O — works before UEFI console)
+ *
+ * Use these before g_st is valid.  UEFI runs at ring 0, so outb is legal.
+ * QEMU -serial stdio will show this output on stdout.
+ * ========================================================================= */
+
+static void Com1Init(void)
+{
+    uint16_t p;
+    uint8_t  v;
+    p = 0x3F9; v = 0x00; __asm__ volatile("outb %0,%1"::"a"(v),"Nd"(p));  /* IER=0     */
+    p = 0x3FB; v = 0x80; __asm__ volatile("outb %0,%1"::"a"(v),"Nd"(p));  /* DLAB=1    */
+    p = 0x3F8; v = 0x01; __asm__ volatile("outb %0,%1"::"a"(v),"Nd"(p));  /* div lo=1  */
+    p = 0x3F9; v = 0x00; __asm__ volatile("outb %0,%1"::"a"(v),"Nd"(p));  /* div hi=0  */
+    p = 0x3FB; v = 0x03; __asm__ volatile("outb %0,%1"::"a"(v),"Nd"(p));  /* 8N1       */
+    p = 0x3FC; v = 0x03; __asm__ volatile("outb %0,%1"::"a"(v),"Nd"(p));  /* RTS+DTR   */
+}
+
+static void Com1Byte(char c)
+{
+    uint8_t  lsr;
+    uint16_t lsr_port = 0x3FD;
+    uint16_t dat_port = 0x3F8;
+    do {
+        __asm__ volatile("inb %1,%0":"=a"(lsr):"Nd"(lsr_port));
+    } while (!(lsr & 0x20));
+    uint8_t b = (uint8_t)c;
+    __asm__ volatile("outb %0,%1"::"a"(b),"Nd"(dat_port));
+}
+
+static void Com1Str(const char *s)
+{
+    for (; *s; s++) Com1Byte(*s);
+}
+
+/* =========================================================================
  * Utility: print to UEFI console
  * ========================================================================= */
 
@@ -1164,8 +1200,19 @@ static void CheckEfiLoadAddress(void)
  * UEFI entry point
  * ========================================================================= */
 
-EFI_STATUS TagBootMain(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
+/*
+ * TagBootMain — UEFI entry point.
+ *
+ * MUST be declared EFIAPI: UEFI firmware calls this with Microsoft x64 ABI
+ * (image_handle in RCX, st in RDX).  Without EFIAPI the gcc-compiled function
+ * reads System V registers RDI/RSI instead → garbage pointers → instant crash.
+ */
+EFI_STATUS EFIAPI TagBootMain(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
 {
+    /* Raw COM1 byte BEFORE touching any UEFI pointer — confirms we were called. */
+    Com1Init();
+    Com1Str("\r\n[TAGBOOT] Entry reached\r\n");
+
     g_st           = st;
     g_bs           = st->boot_services;
     g_image_handle = image_handle;
