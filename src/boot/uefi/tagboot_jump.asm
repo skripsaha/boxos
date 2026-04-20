@@ -7,8 +7,11 @@
 ;   rsi = stack     — boot stack base (grows downward)
 ;   rdx = entry     — kernel entry point (0x100000)
 ;
-; UEFI is already in long mode. We swap the page tables and jump.
+; UEFI is already in 64-bit long mode (EFER.LME=1, CR0.PG=1, CR4.PAE=1).
+; All we need is to install our CR3, switch to the boot stack, and jump.
 ; This function never returns.
+;
+; IMPORTANT: do NOT use rdmsr/wrmsr here — rdmsr clobbers rdx (entry point).
 
 global TagBootJump
 
@@ -18,23 +21,14 @@ TagBootJump:
     or  rax, 0x20
     mov cr4, rax
 
-    ; CR3: install our page tables (TLB flush happens automatically)
+    ; CR3: install our page tables (TLB flush happens automatically).
+    ; After this instruction, the CPU uses our identity + higher-half tables.
+    ; rdx (entry point) is preserved — we do NOT call rdmsr.
     mov cr3, rdi
 
-    ; EFER MSR (0xC0000080): ensure LME (bit 8) + NXE (bit 11)
-    mov ecx, 0xC0000080
-    rdmsr
-    or  eax, 0x900
-    wrmsr
-
-    ; CR0: ensure PG (bit 31)
-    mov rax, cr0
-    or  eax, 0x80000000
-    mov cr0, rax
-
-    ; Switch to boot stack; clear frame pointer
+    ; Switch to boot stack and clear frame pointer
     mov rsp, rsi
     xor rbp, rbp
 
-    ; Jump to kernel entry point
+    ; Jump to kernel entry point (rdx = 0x100000, unmodified)
     jmp rdx

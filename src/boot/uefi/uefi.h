@@ -5,6 +5,13 @@
  * Minimal UEFI type and protocol definitions for TagBoot.
  * No external dependencies — implements exactly what TagBoot needs.
  * Based on UEFI Specification 2.10.
+ *
+ * CALLING CONVENTION (critical):
+ *   UEFI on x86-64 uses the Microsoft x64 ABI (UEFI spec §2.3.4):
+ *   arguments in RCX, RDX, R8, R9 — NOT System V (RDI, RSI, RDX, RCX).
+ *   Every EFI function pointer and every EFI callback must be declared
+ *   EFIAPI so GCC emits correct call sequences.  Without this attribute
+ *   ALL UEFI calls silently pass arguments in the wrong registers.
  */
 
 /* =========================================================================
@@ -32,6 +39,16 @@ typedef unsigned long long uintptr_t;
 #ifndef _SIZE_T_DEFINED
 #define _SIZE_T_DEFINED
 typedef unsigned long long size_t;
+#endif
+
+/* =========================================================================
+ * EFIAPI — Microsoft x64 calling convention for all UEFI functions.
+ * Applied to every function pointer typedef and every EFI callback.
+ * ========================================================================= */
+#if defined(__GNUC__) || defined(__clang__)
+#  define EFIAPI __attribute__((ms_abi))
+#else
+#  define EFIAPI
 #endif
 
 typedef uint16_t  CHAR16;
@@ -161,11 +178,11 @@ typedef enum {
 
 typedef struct EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL;
 
-typedef EFI_STATUS (*EFI_TEXT_STRING)(
+typedef EFI_STATUS (EFIAPI *EFI_TEXT_STRING)(
     EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *this_proto,
     CHAR16                          *string);
 
-typedef EFI_STATUS (*EFI_TEXT_CLEAR_SCREEN)(
+typedef EFI_STATUS (EFIAPI *EFI_TEXT_CLEAR_SCREEN)(
     EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *this_proto);
 
 struct EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL {
@@ -205,25 +222,25 @@ typedef struct {
 
 typedef struct EFI_BLOCK_IO_PROTOCOL EFI_BLOCK_IO_PROTOCOL;
 
-typedef EFI_STATUS (*EFI_BLOCK_RESET)(
+typedef EFI_STATUS (EFIAPI *EFI_BLOCK_RESET)(
     EFI_BLOCK_IO_PROTOCOL *this_proto,
     BOOLEAN                extended_verification);
 
-typedef EFI_STATUS (*EFI_BLOCK_READ)(
+typedef EFI_STATUS (EFIAPI *EFI_BLOCK_READ)(
     EFI_BLOCK_IO_PROTOCOL *this_proto,
     uint32_t               media_id,
     EFI_LBA                lba,
     UINTN                  buffer_size,
     void                  *buffer);
 
-typedef EFI_STATUS (*EFI_BLOCK_WRITE)(
+typedef EFI_STATUS (EFIAPI *EFI_BLOCK_WRITE)(
     EFI_BLOCK_IO_PROTOCOL *this_proto,
     uint32_t               media_id,
     EFI_LBA                lba,
     UINTN                  buffer_size,
     void                  *buffer);
 
-typedef EFI_STATUS (*EFI_BLOCK_FLUSH)(
+typedef EFI_STATUS (EFIAPI *EFI_BLOCK_FLUSH)(
     EFI_BLOCK_IO_PROTOCOL *this_proto);
 
 struct EFI_BLOCK_IO_PROTOCOL {
@@ -276,13 +293,13 @@ typedef struct EFI_GRAPHICS_OUTPUT_PROTOCOL EFI_GRAPHICS_OUTPUT_PROTOCOL;
 
 typedef void *EFI_GRAPHICS_OUTPUT_PROTOCOL_BLT;  /* unused */
 
-typedef EFI_STATUS (*EFI_GRAPHICS_OUTPUT_PROTOCOL_QUERY_MODE)(
+typedef EFI_STATUS (EFIAPI *EFI_GRAPHICS_OUTPUT_PROTOCOL_QUERY_MODE)(
     EFI_GRAPHICS_OUTPUT_PROTOCOL            *this_proto,
     uint32_t                                 mode_number,
     UINTN                                   *size_of_info,
     EFI_GRAPHICS_OUTPUT_MODE_INFORMATION   **info);
 
-typedef EFI_STATUS (*EFI_GRAPHICS_OUTPUT_PROTOCOL_SET_MODE)(
+typedef EFI_STATUS (EFIAPI *EFI_GRAPHICS_OUTPUT_PROTOCOL_SET_MODE)(
     EFI_GRAPHICS_OUTPUT_PROTOCOL *this_proto,
     uint32_t                      mode_number);
 
@@ -317,53 +334,53 @@ typedef struct {
  * Boot Services
  * ========================================================================= */
 
-typedef EFI_STATUS (*EFI_ALLOCATE_PAGES)(
+typedef EFI_STATUS (EFIAPI *EFI_ALLOCATE_PAGES)(
     EFI_ALLOCATE_TYPE     type,
     EFI_MEMORY_TYPE       memory_type,
     UINTN                 pages,
     EFI_PHYSICAL_ADDRESS *memory);
 
-typedef EFI_STATUS (*EFI_FREE_PAGES)(
+typedef EFI_STATUS (EFIAPI *EFI_FREE_PAGES)(
     EFI_PHYSICAL_ADDRESS memory,
     UINTN                pages);
 
-typedef EFI_STATUS (*EFI_GET_MEMORY_MAP)(
+typedef EFI_STATUS (EFIAPI *EFI_GET_MEMORY_MAP)(
     UINTN                 *memory_map_size,
     EFI_MEMORY_DESCRIPTOR *memory_map,
     UINTN                 *map_key,
     UINTN                 *descriptor_size,
     uint32_t              *descriptor_version);
 
-typedef EFI_STATUS (*EFI_ALLOCATE_POOL)(
+typedef EFI_STATUS (EFIAPI *EFI_ALLOCATE_POOL)(
     EFI_MEMORY_TYPE  pool_type,
     UINTN            size,
     void           **buffer);
 
-typedef EFI_STATUS (*EFI_FREE_POOL)(
+typedef EFI_STATUS (EFIAPI *EFI_FREE_POOL)(
     void *buffer);
 
-typedef EFI_STATUS (*EFI_EXIT_BOOT_SERVICES)(
+typedef EFI_STATUS (EFIAPI *EFI_EXIT_BOOT_SERVICES)(
     EFI_HANDLE image_handle,
     UINTN      map_key);
 
-typedef EFI_STATUS (*EFI_LOCATE_PROTOCOL)(
+typedef EFI_STATUS (EFIAPI *EFI_LOCATE_PROTOCOL)(
     EFI_GUID *protocol,
     void     *registration,
     void    **interface);
 
-typedef EFI_STATUS (*EFI_HANDLE_PROTOCOL)(
+typedef EFI_STATUS (EFIAPI *EFI_HANDLE_PROTOCOL)(
     EFI_HANDLE  handle,
     EFI_GUID   *protocol,
     void      **interface);
 
-typedef EFI_STATUS (*EFI_LOCATE_HANDLE_BUFFER)(
+typedef EFI_STATUS (EFIAPI *EFI_LOCATE_HANDLE_BUFFER)(
     uint32_t      search_type,
     EFI_GUID     *protocol,
     void         *search_key,
     UINTN        *no_handles,
     EFI_HANDLE  **buffer);
 
-typedef EFI_STATUS (*EFI_OPEN_PROTOCOL)(
+typedef EFI_STATUS (EFIAPI *EFI_OPEN_PROTOCOL)(
     EFI_HANDLE  handle,
     EFI_GUID   *protocol,
     void      **interface,

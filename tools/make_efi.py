@@ -35,6 +35,12 @@ IMAGE_FILE_LARGE_ADDR  = 0x0020
 PE_CHARACTERISTICS     = (IMAGE_FILE_EXECUTABLE | IMAGE_FILE_LINE_NUMS |
                            IMAGE_FILE_LOCAL_SYMS | IMAGE_FILE_LARGE_ADDR)
 
+# DLL characteristics required by the UEFI specification (§2.3.4):
+#   NX_COMPAT (0x0100) — required for EFI applications
+# Additional:
+#   DYNAMIC_BASE (0x0040) — position-independent (we have .reloc)
+IMAGE_DLLCHARACTERISTICS_EFI = 0x0140   # NX_COMPAT | DYNAMIC_BASE
+
 SCN_CNT_CODE    = 0x00000020
 SCN_CNT_IDATA   = 0x00000040
 SCN_MEM_EXEC    = 0x20000000
@@ -283,8 +289,8 @@ def make_pe(elf_path, efi_path):
     struct.pack_into('<I',  out, p, image_size);              p += 4   # SizeOfImage
     struct.pack_into('<I',  out, p, hdr_file_sz);             p += 4   # SizeOfHeaders
     struct.pack_into('<I',  out, p, 0);                       p += 4   # CheckSum
-    struct.pack_into('<H',  out, p, IMAGE_SUBSYSTEM_EFI);     p += 2   # Subsystem
-    struct.pack_into('<H',  out, p, 0);                       p += 2   # DllCharacteristics
+    struct.pack_into('<H',  out, p, IMAGE_SUBSYSTEM_EFI);                p += 2   # Subsystem
+    struct.pack_into('<H',  out, p, IMAGE_DLLCHARACTERISTICS_EFI);      p += 2   # DllCharacteristics
     struct.pack_into('<QQ', out, p, 0, 0);                    p += 16  # SizeOfStackReserve/Commit (EFI ignores)
     struct.pack_into('<QQ', out, p, 0, 0);                    p += 16  # SizeOfHeapReserve/Commit  (EFI ignores)
     struct.pack_into('<I',  out, p, 0);                       p += 4   # LoaderFlags
