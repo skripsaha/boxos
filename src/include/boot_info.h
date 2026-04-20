@@ -11,7 +11,7 @@
 
 /*
  * v1: filled by stage2.asm (MBR/BIOS boot) — 40 bytes total.
- * v2: filled by tagboot.c  (UEFI boot)     — 68 bytes total.
+ * v2: filled by tagboot.c  (UEFI boot)     — 76 bytes total.
  *
  * Kernel code must check version before accessing v2 fields.
  * If version == 1, fields after offset 40 are undefined.
@@ -37,7 +37,7 @@ typedef struct
     uint16_t reserved3;       /* +26: padding */
     uint32_t page_table_base; /* +28: boot page table physical address */
     uint32_t stack_base;      /* +32: kernel stack base */
-    uint32_t total_size;      /* +36: 40 for v1, 68 for v2 */
+    uint32_t total_size;      /* +36: 40 for v1, 76 for v2 */
 
     /* v2 additions — only valid when version >= 2 (offset +40) */
     uint64_t fb_addr;         /* +40: GOP framebuffer physical address (0 if none) */
@@ -47,9 +47,11 @@ typedef struct
     uint32_t fb_format;       /* +60: 0=RGB, 1=BGR, 2=BGRX */
     uint8_t  boot_method;     /* +64: 0=BIOS/MBR, 1=UEFI */
     uint8_t  reserved_v2[3];  /* +65: padding to align */
+    /* UEFI extension — present when total_size == 76 and version == 2 */
+    uint64_t rsdp_addr;       /* +68: ACPI RSDP physical address (0 if not found) */
 } __attribute__((packed)) boot_info_t;
 
-_Static_assert(sizeof(boot_info_t) == 68, "boot_info_t must be 68 bytes");
+_Static_assert(sizeof(boot_info_t) == 76, "boot_info_t must be 76 bytes");
 
 /* Backwards-compat accessor: treat the struct as v1 (first 40 bytes only). */
 static inline bool boot_info_is_v1(const boot_info_t *bi)

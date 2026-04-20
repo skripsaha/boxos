@@ -2,6 +2,7 @@
 #include "io.h"
 #include "vmm.h"
 #include "klib.h"
+#include "boot_info.h"
 
 static bool validate_rsdp(acpi_rsdp_t* rsdp) {
     if (memcmp(rsdp->signature, "RSD PTR ", 8) != 0) {
@@ -48,6 +49,21 @@ static acpi_rsdp_t* scan_memory_range(uintptr_t start, uintptr_t end) {
 
 acpi_rsdp_t* acpi_find_rsdp(void) {
     acpi_rsdp_t* rsdp = NULL;
+
+    /* Under UEFI, the RSDP is passed via boot_info. Check it first. */
+    boot_info_t *bi = boot_info_get();
+    if (bi && boot_info_valid(bi) &&
+        bi->version == BOOT_INFO_VERSION2 &&
+        bi->total_size >= sizeof(boot_info_t) &&
+        bi->rsdp_addr != 0) {
+        acpi_rsdp_t *rsdp = (acpi_rsdp_t *)acpi_map_physical(bi->rsdp_addr,
+                                                               sizeof(acpi_rsdp_t));
+        if (rsdp && validate_rsdp(rsdp)) {
+            debug_printf("[ACPI] RSDP from UEFI boot_info: 0x%lx\n",
+                         (unsigned long)bi->rsdp_addr);
+            return rsdp;
+        }
+    }
 
     uint16_t* ebda_ptr = (uint16_t*)acpi_map_physical(0x40E, 2);
     if (ebda_ptr) {

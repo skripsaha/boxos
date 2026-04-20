@@ -95,7 +95,7 @@ typedef struct __attribute__((packed)) {
     uint16_t reserved3;       /* +26 */
     uint32_t page_table_base; /* +28 */
     uint32_t stack_base;      /* +32 */
-    uint32_t total_size;      /* +36 60 for v2 */
+    uint32_t total_size;      /* +36 76 for v2 */
     /* v2 additions (+40) */
     uint64_t fb_addr;         /* +40 GOP framebuffer physical address */
     uint32_t fb_width;        /* +48 */
@@ -104,9 +104,10 @@ typedef struct __attribute__((packed)) {
     uint32_t fb_format;       /* +60 0=RGB,1=BGR,2=BGRX */
     uint8_t  boot_method;     /* +64 1=UEFI */
     uint8_t  reserved_v2[3];  /* +65 */
+    uint64_t rsdp_addr;       /* +68 ACPI RSDP physical address (0 if not found) */
 } BootInfoV2;
 
-_Static_assert(sizeof(BootInfoV2) == 68, "BootInfoV2 must be 68 bytes");
+_Static_assert(sizeof(BootInfoV2) == 76, "BootInfoV2 must be 76 bytes");
 
 /* =========================================================================
  * e820_entry_t (matches kernel's e820.h)
@@ -154,6 +155,11 @@ static int MemEqual(const void *a, const void *b, size_t n)
         if (*p++ != *q++) return 0;
     }
     return 1;
+}
+
+static int GuidEqual(const EFI_GUID *a, const EFI_GUID *b)
+{
+    return MemEqual(a, b, sizeof(EFI_GUID));
 }
 
 static size_t StrLen8(const char *s)
@@ -227,11 +233,77 @@ static void Panic(const char *msg)
 }
 
 /* =========================================================================
+ * ACPI RSDP discovery from UEFI Configuration Table
+ * ========================================================================= */
+
+/*
+ * FindAcpiRsdp — scan the UEFI Configuration Table for the ACPI RSDP.
+ * Prefers ACPI 2.0 (XSDP) over ACPI 1.0 (RSDP).
+ * Returns the physical address of the RSDP, or 0 if not found.
+ */
+static uint64_t FindAcpiRsdp(void)
+{
+    if (!g_st || g_st->number_of_table_entries == 0) return 0;
+
+    EFI_GUID acpi20_guid = EFI_ACPI_20_TABLE_GUID;
+    EFI_GUID acpi10_guid = EFI_ACPI_TABLE_GUID;
+    EFI_CONFIGURATION_TABLE *ct = g_st->configuration_table;
+
+    uint64_t rsdp_v2 = 0;
+    uint64_t rsdp_v1 = 0;
+
+    for (UINTN i = 0; i < g_st->number_of_table_entries; i++) {
+        if (GuidEqual(&ct[i].vendor_guid, &acpi20_guid))
+            rsdp_v2 = (uint64_t)(uintptr_t)ct[i].vendor_table;
+        else if (GuidEqual(&ct[i].vendor_guid, &acpi10_guid))
+            rsdp_v1 = (uint64_t)(uintptr_t)ct[i].vendor_table;
+    }
+
+    return rsdp_v2 ? rsdp_v2 : rsdp_v1;
+}
+
+/* =========================================================================
  * Block IO: read sectors from disk
  * ========================================================================= */
 
 static EFI_BLOCK_IO_PROTOCOL *g_block_io = NULL;
 
+/*
+ * Probe a single BlockIO handle for the TagFS superblock magic.
+ * Returns TRUE if the magic is found at the expected sector.
+ */
+static int BlockIoProbeTagFs(EFI_BLOCK_IO_PROTOCOL *bio)
+{
+    if (!bio || !bio->media) return 0;
+    uint32_t bsz = bio->media->block_size;
+    if (bsz == 0 || !bio->media->media_present) return 0;
+
+    /* Map 512-byte logical sector 1034 to the device's physical block. */
+    uint64_t sb_lba  = (TAGFS_SUPERBLOCK_SECTOR * (uint64_t)TAGFS_SECTOR_SIZE) / bsz;
+    uint32_t read_sz = bsz < TAGFS_SECTOR_SIZE ? TAGFS_SECTOR_SIZE : bsz;
+
+    static uint8_t probe_buf[4096];   /* covers 4 KB physical sectors */
+    if (EFI_ERROR(bio->read_blocks(bio, bio->media->media_id,
+                                   (EFI_LBA)sb_lba, read_sz, probe_buf)))
+        return 0;
+
+    uint32_t magic_val;
+    MemCopy(&magic_val, probe_buf, 4);
+    return magic_val == TAGFS_MAGIC;
+}
+
+/*
+ * Find the BlockIO handle that contains the TagFS volume.
+ *
+ * Strategy:
+ *   1. Try the loaded-image device first (common case: booting from same disk
+ *      that holds both ESP and TagFS, e.g. on real hardware with GPT layout).
+ *   2. Scan every non-partition BlockIO handle and probe sector 1034 for the
+ *      TagFS magic (handles the QEMU two-drive setup and GPT/MBR edge cases).
+ *
+ * The probe is safe: reading one sector from a disk that lacks TagFS does no
+ * harm and the magic check is a 4-byte compare.
+ */
 static EFI_STATUS BlockIoFindDevice(EFI_HANDLE image_handle)
 {
     EFI_GUID loaded_image_guid = EFI_LOADED_IMAGE_PROTOCOL_GUID;
@@ -239,21 +311,27 @@ static EFI_STATUS BlockIoFindDevice(EFI_HANDLE image_handle)
     EFI_LOADED_IMAGE_PROTOCOL *loaded_image = NULL;
     EFI_STATUS status;
 
+    Print("TagBoot: scanning for TagFS block device...\r\n");
+
     status = g_bs->handle_protocol(image_handle,
                                    &loaded_image_guid,
                                    (void **)&loaded_image);
-    if (EFI_ERROR(status)) return status;
-
-    status = g_bs->handle_protocol(loaded_image->device_handle,
-                                   &block_io_guid,
-                                   (void **)&g_block_io);
-    if (!EFI_ERROR(status) && g_block_io && g_block_io->media &&
-        g_block_io->media->block_size > 0) {
-        return EFI_SUCCESS;
+    if (!EFI_ERROR(status) && loaded_image) {
+        EFI_BLOCK_IO_PROTOCOL *bio = NULL;
+        status = g_bs->handle_protocol(loaded_image->device_handle,
+                                       &block_io_guid,
+                                       (void **)&bio);
+        if (!EFI_ERROR(status) && BlockIoProbeTagFs(bio)) {
+            Print("TagBoot: TagFS found on loaded-image device\r\n");
+            g_block_io = bio;
+            return EFI_SUCCESS;
+        }
     }
 
-    /* Device handle did not work; scan all Block IO handles and find the one
-     * that contains our magic (sector 1034 has TagFS superblock). */
+    /* Loaded-image device does not carry TagFS.
+     * Enumerate all raw (non-partition) BlockIO handles and probe each. */
+    Print("TagBoot: loaded-image device has no TagFS, scanning all handles...\r\n");
+
     UINTN       handle_count = 0;
     EFI_HANDLE *handles      = NULL;
     status = g_bs->locate_handle_buffer(EFI_BY_PROTOCOL,
@@ -263,29 +341,17 @@ static EFI_STATUS BlockIoFindDevice(EFI_HANDLE image_handle)
                                         &handles);
     if (EFI_ERROR(status)) return status;
 
-    static uint8_t probe_buf[512];
     EFI_STATUS found = EFI_NOT_FOUND;
 
     for (UINTN i = 0; i < handle_count; i++) {
         EFI_BLOCK_IO_PROTOCOL *bio = NULL;
         if (EFI_ERROR(g_bs->handle_protocol(handles[i], &block_io_guid, (void **)&bio)))
             continue;
-        if (!bio || !bio->media || bio->media->block_size == 0) continue;
-        if (!bio->media->media_present)                          continue;
-        if (bio->media->logical_partition)                       continue;
+        if (!bio || !bio->media)              continue;
+        if (bio->media->logical_partition)    continue;  /* skip partitions */
+        if (!bio->media->media_present)       continue;
 
-        uint32_t bsz = bio->media->block_size;
-        uint64_t sb_lba = (TAGFS_SUPERBLOCK_SECTOR * 512ULL) / bsz;
-
-        EFI_STATUS rs = bio->read_blocks(bio, bio->media->media_id,
-                                         (EFI_LBA)sb_lba,
-                                         bsz < 512 ? 512 : bsz,
-                                         probe_buf);
-        if (EFI_ERROR(rs)) continue;
-
-        uint32_t magic_val;
-        MemCopy(&magic_val, probe_buf, 4);
-        if (magic_val == TAGFS_MAGIC) {
+        if (BlockIoProbeTagFs(bio)) {
             g_block_io = bio;
             found = EFI_SUCCESS;
             break;
@@ -293,6 +359,10 @@ static EFI_STATUS BlockIoFindDevice(EFI_HANDLE image_handle)
     }
 
     g_bs->free_pool(handles);
+
+    if (EFI_ERROR(found))
+        Print("TagBoot: no BlockIO handle has valid TagFS superblock\r\n");
+
     return found;
 }
 
@@ -440,10 +510,11 @@ static uint16_t TagRegistryFindLabel(const char *key)
 }
 
 /* Scan metadata pool for any record whose tag_ids[] contain target_tag_id.
- * Returns the start_block and block_count of the first active match. */
+ * Returns the start_block, block_count, and actual file_size of the first active match. */
 static int TagFsFindFileByTagId(uint16_t target_tag_id,
                                 uint32_t *out_start_block,
-                                uint32_t *out_block_count)
+                                uint32_t *out_block_count,
+                                uint64_t *out_file_size)
 {
     uint32_t data_start = TagFsDataStartSector();
     uint32_t block_idx  = g_superblock.metadata_pool_block;
@@ -492,6 +563,10 @@ static int TagFsFindFileByTagId(uint16_t target_tag_id,
                     MemCopy(&ext, extent_ptr, sizeof(ext));
                     *out_start_block  = ext.start_block;
                     *out_block_count  = ext.block_count;
+
+                    uint64_t file_size = 0;
+                    MemCopy(&file_size, r + META_RECORD_SIZE_OFF, 8);
+                    *out_file_size = file_size;
                     return 1;
                 }
             }
@@ -507,7 +582,8 @@ static int TagFsFindFileByTagId(uint16_t target_tag_id,
 }
 
 /* Try each tag in priority order; return 1 on success. */
-static int TagFsFindKernelByTags(uint32_t *out_start_block, uint32_t *out_block_count)
+static int TagFsFindKernelByTags(uint32_t *out_start_block, uint32_t *out_block_count,
+                                  uint64_t *out_file_size)
 {
     static const char *const priority_tags[] = { "god", "boot", "system", NULL };
 
@@ -521,7 +597,7 @@ static int TagFsFindKernelByTags(uint32_t *out_start_block, uint32_t *out_block_
         PrintDec(tid);
         Print(")\r\n");
 
-        if (TagFsFindFileByTagId(tid, out_start_block, out_block_count)) {
+        if (TagFsFindFileByTagId(tid, out_start_block, out_block_count, out_file_size)) {
             Print("TagBoot: kernel found via tag '");
             Print(priority_tags[i]);
             Print("'\r\n");
@@ -533,7 +609,7 @@ static int TagFsFindKernelByTags(uint32_t *out_start_block, uint32_t *out_block_
 
 /* Extract kernel location from superblock boot hints. */
 static int TagFsBootHints(uint32_t *out_start_block, uint32_t *out_block_count,
-                           uint32_t *out_data_start_sector)
+                           uint32_t *out_data_start_sector, uint64_t *out_file_size)
 {
     uint32_t kblock, kblocks, ksize, dstart;
     MemCopy(&kblock,  g_superblock.reserved + BOOT_HINT_KERNEL_BLOCK,  4);
@@ -541,12 +617,11 @@ static int TagFsBootHints(uint32_t *out_start_block, uint32_t *out_block_count,
     MemCopy(&ksize,   g_superblock.reserved + BOOT_HINT_KERNEL_SIZE,   4);
     MemCopy(&dstart,  g_superblock.reserved + BOOT_HINT_DATA_START,    4);
 
-    (void)ksize;
-
     if (kblock == 0 || kblocks == 0) return 0;
     *out_start_block        = kblock;
     *out_block_count        = kblocks;
     *out_data_start_sector  = dstart;
+    *out_file_size          = (uint64_t)ksize;
     return 1;
 }
 
@@ -555,10 +630,12 @@ static int TagFsBootHints(uint32_t *out_start_block, uint32_t *out_block_count,
  * ========================================================================= */
 
 /* Loads kernel file blocks to KERNEL_LOAD_ADDR.
- * Returns actual byte count loaded, or 0 on error. */
+ * Reads all block_count blocks from disk; returns file_size as the actual byte count,
+ * or 0 on error. */
 static uint64_t TagFsLoadKernel(uint32_t data_start_sector,
                                 uint32_t start_block,
-                                uint32_t block_count)
+                                uint32_t block_count,
+                                uint64_t file_size)
 {
     EFI_PHYSICAL_ADDRESS load_addr = KERNEL_LOAD_ADDR;
     uint64_t total_bytes = (uint64_t)block_count * TAGFS_BLOCK_SIZE;
@@ -569,6 +646,10 @@ static uint64_t TagFsLoadKernel(uint32_t data_start_sector,
         Print(" bytes)\r\n");
         return 0;
     }
+
+    /* Use actual file size if provided and fits within allocated blocks. */
+    if (file_size == 0 || file_size > total_bytes)
+        file_size = total_bytes;
 
     UINTN pages = (UINTN)((total_bytes + PAGE_4KB - 1) / PAGE_4KB);
     EFI_STATUS status = g_bs->allocate_pages(AllocateAddress,
@@ -605,7 +686,7 @@ static uint64_t TagFsLoadKernel(uint32_t data_start_sector,
         }
     }
 
-    return total_bytes;
+    return file_size;
 }
 
 /* =========================================================================
@@ -620,6 +701,52 @@ typedef struct {
     uint32_t format;  /* 0=RGB, 1=BGR, 2=BGRX */
 } FbInfo;
 
+/*
+ * SelectGopBestMode — iterate all GOP modes and set the one with the highest
+ * pixel count that has a real framebuffer (not PixelBltOnly).
+ * Called once before reading the framebuffer address.
+ */
+static void SelectGopBestMode(EFI_GRAPHICS_OUTPUT_PROTOCOL *gop)
+{
+    if (!gop || !gop->mode) return;
+
+    uint32_t best_mode   = gop->mode->mode;
+    uint32_t best_pixels = 0;
+
+    /* Seed with current mode so we never regress. */
+    if (gop->mode->info) {
+        best_pixels = gop->mode->info->horizontal_resolution *
+                      gop->mode->info->vertical_resolution;
+    }
+
+    for (uint32_t m = 0; m < gop->mode->max_mode; m++) {
+        UINTN size_of_info = 0;
+        EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *info = NULL;
+        if (EFI_ERROR(gop->query_mode(gop, m, &size_of_info, &info))) continue;
+        if (!info) continue;
+        if (info->pixel_format == PixelBltOnly) continue;   /* no real framebuffer */
+
+        uint32_t pixels = info->horizontal_resolution * info->vertical_resolution;
+        if (pixels > best_pixels) {
+            best_pixels = pixels;
+            best_mode   = m;
+        }
+    }
+
+    if (best_mode != gop->mode->mode) {
+        Print("TagBoot: GOP switching to mode ");
+        PrintDec(best_mode);
+        Print(" (");
+        /* set_mode succeeds or we stay at current mode — either is acceptable */
+        if (!EFI_ERROR(gop->set_mode(gop, best_mode))) {
+            Print("ok");
+        } else {
+            Print("failed, keeping current");
+        }
+        Print(")\r\n");
+    }
+}
+
 static FbInfo QueryGopFramebuffer(void)
 {
     FbInfo fb;
@@ -630,6 +757,8 @@ static FbInfo QueryGopFramebuffer(void)
 
     EFI_STATUS status = g_bs->locate_protocol(&gop_guid, NULL, (void **)&gop);
     if (EFI_ERROR(status) || !gop || !gop->mode) return fb;
+
+    SelectGopBestMode(gop);
 
     EFI_GRAPHICS_OUTPUT_PROTOCOL_MODE *mode = gop->mode;
     if (!mode->info) return fb;
@@ -762,17 +891,49 @@ static EFI_STATUS BuildMemoryMap(MemMapResult *out)
     return EFI_SUCCESS;
 }
 
-/* After ExitBootServices the allocator is gone — call this before that. */
-static UINTN GetFreshMapKey(void)
+/*
+ * DoExitBootServices — proper retry loop per UEFI spec.
+ *
+ * Strategy: allocate a pool buffer → get_memory_map (gets fresh key after
+ * the allocation) → exit_boot_services. If it fails, free the buffer and
+ * retry.  The buffer is intentionally NOT freed on success because freeing
+ * it would change the map key again before ExitBootServices can use it.
+ * After successful ExitBootServices the pool allocator is gone anyway.
+ *
+ * Three attempts are sufficient in practice; real failures are firmware bugs.
+ */
+static EFI_STATUS DoExitBootServices(EFI_HANDLE image_handle)
 {
-    UINTN    map_size     = 0;
-    UINTN    map_key      = 0;
-    UINTN    desc_size    = 0;
-    uint32_t desc_version = 0;
+    for (UINTN attempt = 0; attempt < 3; attempt++) {
+        UINTN    map_size     = 0;
+        UINTN    key          = 0;
+        UINTN    desc_sz      = 0;
+        uint32_t desc_ver     = 0;
+        void    *buf          = NULL;
 
-    /* Single shot — ignore buffer-too-small, map_key is still valid */
-    g_bs->get_memory_map(&map_size, NULL, &map_key, &desc_size, &desc_version);
-    return map_key;
+        /* First call: get required buffer size (EFI_BUFFER_TOO_SMALL expected). */
+        g_bs->get_memory_map(&map_size, NULL, &key, &desc_sz, &desc_ver);
+        map_size += desc_sz * 16;   /* slack for one more allocation */
+
+        /* Allocate — this changes the map key, so we MUST call get_memory_map
+         * again afterwards to obtain a key that matches the post-allocation map. */
+        EFI_STATUS s = g_bs->allocate_pool(EfiLoaderData, map_size, &buf);
+        if (EFI_ERROR(s)) continue;
+
+        /* Second call: get the fresh key that reflects our allocation. */
+        s = g_bs->get_memory_map(&map_size,
+                                  (EFI_MEMORY_DESCRIPTOR *)buf,
+                                  &key, &desc_sz, &desc_ver);
+        if (EFI_ERROR(s)) { g_bs->free_pool(buf); continue; }
+
+        /* Exit — do NOT free buf; freeing would change the key. */
+        s = g_bs->exit_boot_services(image_handle, key);
+        if (!EFI_ERROR(s)) return EFI_SUCCESS;
+
+        /* Failed — free buf and retry with a new key. */
+        g_bs->free_pool(buf);
+    }
+    return EFI_ABORTED;
 }
 
 /* =========================================================================
@@ -928,7 +1089,7 @@ static void FillBootInfo(const FbInfo *fb, uint32_t e820_count,
     bi->reserved3      = 0;
     bi->page_table_base = (uint32_t)g_pt_base;
     bi->stack_base     = (uint32_t)g_stack_base;
-    bi->total_size     = 68;
+    bi->total_size     = sizeof(BootInfoV2);
 
     bi->fb_addr        = fb->addr;
     bi->fb_width       = fb->width;
@@ -939,6 +1100,7 @@ static void FillBootInfo(const FbInfo *fb, uint32_t e820_count,
     bi->reserved_v2[0] = 0;
     bi->reserved_v2[1] = 0;
     bi->reserved_v2[2] = 0;
+    bi->rsdp_addr      = FindAcpiRsdp();
 }
 
 /* =========================================================================
@@ -965,6 +1127,37 @@ static void __attribute__((noreturn)) JumpToKernel(uint64_t pt_base)
 {
     TagBootJump(pt_base, g_stack_base, (uint64_t)KERNEL_LOAD_ADDR);
     __builtin_unreachable();
+}
+
+/*
+ * CheckEfiLoadAddress — verify the EFI application is within our identity map.
+ * On all practical OVMF systems (QEMU + real x86_64 hardware) the EFI app is
+ * loaded below 4 GB.  If it is above 4 GB we cannot safely switch CR3 without
+ * extending the identity map; panic early with a clear message.
+ */
+static void CheckEfiLoadAddress(void)
+{
+    EFI_GUID img_guid = EFI_LOADED_IMAGE_PROTOCOL_GUID;
+    EFI_LOADED_IMAGE_PROTOCOL *li = NULL;
+    if (EFI_ERROR(g_bs->handle_protocol(g_image_handle, &img_guid, (void **)&li)))
+        return;
+    if (!li || !li->image_base) return;
+
+    uint64_t app_base = (uint64_t)(uintptr_t)li->image_base;
+    uint64_t app_end  = app_base + li->image_size;
+
+    Print("TagBoot: EFI image at ");
+    PrintHex64(app_base);
+    Print(" size=");
+    PrintDec(li->image_size);
+    Print("\r\n");
+
+    if (app_end > 0x100000000ULL) {
+        Print("TagBoot: FATAL — EFI app loaded above 4 GB (");
+        PrintHex64(app_end);
+        Print("), identity map insufficient\r\n");
+        Panic("EFI application above 4 GB — cannot switch CR3 safely");
+    }
 }
 
 /* =========================================================================
@@ -1004,12 +1197,15 @@ EFI_STATUS TagBootMain(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
     /* ----- 3. Find kernel file ----- */
     uint32_t kernel_start_block = 0;
     uint32_t kernel_block_count = 0;
+    uint64_t kernel_file_size   = 0;
 
-    int found_by_tag = TagFsFindKernelByTags(&kernel_start_block, &kernel_block_count);
+    int found_by_tag = TagFsFindKernelByTags(&kernel_start_block, &kernel_block_count,
+                                              &kernel_file_size);
     if (!found_by_tag) {
         Print("TagBoot: tag search failed, trying boot hints...\r\n");
         uint32_t hint_data_start = 0;
-        if (!TagFsBootHints(&kernel_start_block, &kernel_block_count, &hint_data_start)) {
+        if (!TagFsBootHints(&kernel_start_block, &kernel_block_count,
+                             &hint_data_start, &kernel_file_size)) {
             Panic("kernel not found — no matching tag and no boot hints in superblock");
         }
         if (hint_data_start != 0) data_start_sector = hint_data_start;
@@ -1032,12 +1228,19 @@ EFI_STATUS TagBootMain(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
     Print("TagBoot: loading kernel to 0x100000...\r\n");
     uint64_t loaded_bytes = TagFsLoadKernel(data_start_sector,
                                              kernel_start_block,
-                                             kernel_block_count);
+                                             kernel_block_count,
+                                             kernel_file_size);
     if (loaded_bytes == 0) Panic("kernel load failed");
 
     Print("TagBoot: kernel loaded (");
     PrintDec(loaded_bytes);
     Print(" bytes)\r\n");
+
+    /* Validate kernel header magic — 'KERNEL' at byte offset 2 */
+    if (!MemEqual((const void *)(uintptr_t)(KERNEL_LOAD_ADDR + 2), "KERNEL", 6)) {
+        Panic("kernel header magic invalid — wrong binary at load address");
+    }
+    Print("TagBoot: kernel header OK\r\n");
 
     uint64_t kernel_end_phys = KERNEL_LOAD_ADDR + loaded_bytes;
 
@@ -1050,31 +1253,26 @@ EFI_STATUS TagBootMain(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
     status = BuildMemoryMap(&mmap);
     if (EFI_ERROR(status)) Panic("failed to get UEFI memory map");
 
-    /* ----- 7. Set up page tables ----- */
+    /* ----- 7. Check EFI load address before switching CR3 ----- */
+    CheckEfiLoadAddress();
+
+    /* ----- 8. Set up page tables ----- */
     Print("TagBoot: setting up page tables...\r\n");
     status = SetupPageTables(kernel_end_phys);
     if (EFI_ERROR(status)) Panic("page table setup failed");
 
-    /* ----- 8. Fill boot_info_t v2 ----- */
+    /* ----- 9. Fill boot_info_t v2 (includes RSDP — must be before EBS) ----- */
     FillBootInfo(&fb, mmap.e820_count, kernel_end_phys);
 
     Print("TagBoot: boot_info at 0x9000 (v2, method=UEFI)\r\n");
 
-    /* ----- 9. ExitBootServices -----
-     * Must get a fresh map key immediately before calling ExitBootServices.
-     * Any allocation after BuildMemoryMap() invalidates the key. */
+    /* ----- 10. ExitBootServices ----- */
     Print("TagBoot: exiting boot services...\r\n");
 
-    UINTN fresh_key = GetFreshMapKey();
-    status = g_bs->exit_boot_services(image_handle, fresh_key);
-    if (EFI_ERROR(status)) {
-        /* Map may have changed — retry once with a re-queried key. */
-        fresh_key = GetFreshMapKey();
-        status = g_bs->exit_boot_services(image_handle, fresh_key);
-        if (EFI_ERROR(status)) Panic("ExitBootServices failed");
-    }
+    status = DoExitBootServices(image_handle);
+    if (EFI_ERROR(status)) Panic("ExitBootServices failed after 3 attempts");
 
-    /* ----- 10. Jump to kernel ----- */
+    /* ----- 11. Jump to kernel ----- */
     /* From here: no UEFI services, no Print(). Pure bare metal. */
     JumpToKernel(g_pt_base);
 }
