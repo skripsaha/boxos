@@ -3,6 +3,7 @@
 
 #include "../types.h"
 #include "../error.h"
+#include "video_colors.h"
 
 #define VGA_OP_PUTCHAR         0x70
 #define VGA_OP_PUTSTRING       0x71
@@ -17,32 +18,33 @@
 #define VGA_OP_NEWLINE         0x7A
 #define VGA_OP_GET_DIMENSIONS  0x7B
 
-#define VGA_BLACK           0x00
-#define VGA_BLUE            0x01
-#define VGA_GREEN           0x02
-#define VGA_CYAN            0x03
-#define VGA_RED             0x04
-#define VGA_MAGENTA         0x05
-#define VGA_BROWN           0x06
-#define VGA_LIGHT_GRAY      0x07
-#define VGA_DARK_GRAY       0x08
-#define VGA_LIGHT_BLUE      0x09
-#define VGA_LIGHT_GREEN     0x0A
-#define VGA_LIGHT_CYAN      0x0B
-#define VGA_LIGHT_RED       0x0C
-#define VGA_LIGHT_MAGENTA   0x0D
-#define VGA_YELLOW          0x0E
-#define VGA_WHITE           0x0F
+/* Backward-compatible aliases for userspace code using VGA_* colour names */
+#define VGA_BLACK           VIDEO_BLACK
+#define VGA_BLUE            VIDEO_BLUE
+#define VGA_GREEN           VIDEO_GREEN
+#define VGA_CYAN            VIDEO_CYAN
+#define VGA_RED             VIDEO_RED
+#define VGA_MAGENTA         VIDEO_MAGENTA
+#define VGA_BROWN           VIDEO_BROWN
+#define VGA_LIGHT_GRAY      VIDEO_LIGHT_GRAY
+#define VGA_DARK_GRAY       VIDEO_DARK_GRAY
+#define VGA_LIGHT_BLUE      VIDEO_LIGHT_BLUE
+#define VGA_LIGHT_GREEN     VIDEO_LIGHT_GREEN
+#define VGA_LIGHT_CYAN      VIDEO_LIGHT_CYAN
+#define VGA_LIGHT_RED       VIDEO_LIGHT_RED
+#define VGA_LIGHT_MAGENTA   VIDEO_LIGHT_MAGENTA
+#define VGA_YELLOW          VIDEO_YELLOW
+#define VGA_WHITE           VIDEO_WHITE
 
-#define VGA_COLOR(fg, bg)   (((bg) << 4) | (fg))
-#define VGA_FG(color)       ((color) & 0x0F)
-#define VGA_BG(color)       (((color) >> 4) & 0x0F)
+#define VGA_COLOR(fg, bg)   VIDEO_COLOR(fg, bg)
+#define VGA_FG(color)       VIDEO_FG(color)
+#define VGA_BG(color)       VIDEO_BG(color)
 
-#define VGA_SCHEME_DEFAULT       VGA_COLOR(VGA_LIGHT_GRAY, VGA_BLACK)
-#define VGA_SCHEME_GRAY_ON_BLACK VGA_COLOR(VGA_LIGHT_GRAY, VGA_BLACK)
-#define VGA_SCHEME_WHITE_ON_BLUE VGA_COLOR(VGA_WHITE, VGA_BLUE)
-#define VGA_SCHEME_BLACK_ON_GRAY VGA_COLOR(VGA_BLACK, VGA_LIGHT_GRAY)
-#define VGA_SCHEME_GREEN_ON_BLACK VGA_COLOR(VGA_LIGHT_GREEN, VGA_BLACK)
+#define VGA_SCHEME_DEFAULT        VIDEO_ATTR_DEFAULT
+#define VGA_SCHEME_GRAY_ON_BLACK  VIDEO_GRAY_ON_BLACK
+#define VGA_SCHEME_WHITE_ON_BLUE  VIDEO_WHITE_ON_BLUE
+#define VGA_SCHEME_BLACK_ON_GRAY  VIDEO_BLACK_ON_GRAY
+#define VGA_SCHEME_GREEN_ON_BLACK VIDEO_GREEN_ON_BLACK
 
 #define VGA_ERR_OUT_OF_BOUNDS    ERR_VGA_ERROR
 #define VGA_ERR_INVALID_CURSOR   ERR_VGA_ERROR

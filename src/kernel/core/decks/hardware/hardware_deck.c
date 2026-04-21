@@ -11,7 +11,8 @@
 #include "vmm.h"
 #include "ata.h"
 #include "keyboard.h"
-#include "vga.h"
+#include "video.h"
+#include "hw_vga.h"
 #include "serial.h"
 #include "xhci.h"
 #include "xhci_port.h"
@@ -398,22 +399,22 @@ int hardware_deck_handler(Pocket* pocket, process_t* proc) {
             uint8_t character = data[2];
             uint8_t color = data[3];
 
-            if (row >= VGA_HEIGHT || col >= VGA_WIDTH) {
+            if (row >= (uint8_t)VideoGetRows() || col >= (uint8_t)VideoGetCols()) {
                 data[0] = VGA_ERR_OUT_OF_BOUNDS;
                 pocket->error_code = VGA_ERR_OUT_OF_BOUNDS;
                 return -1;
             }
 
-            uint8_t old_x = vga_get_cursor_position_x();
-            uint8_t old_y = vga_get_cursor_position_y();
-            uint8_t old_color = vga_get_color();
+            uint8_t old_x = (uint8_t)VideoGetCursorX();
+            uint8_t old_y = (uint8_t)VideoGetCursorY();
+            uint8_t old_color = VideoGetColor();
 
-            vga_set_cursor_position(col, row);
-            vga_set_color(color);
-            vga_print_char(character, color);
+            VideoSetCursor(col, row);
+            VideoSetColor(color);
+            VideoPrintChar(character, color);
 
-            vga_set_cursor_position(old_x, old_y);
-            vga_set_color(old_color);
+            VideoSetCursor(old_x, old_y);
+            VideoSetColor(old_color);
 
             data[0] = VGA_SUCCESS;
             return 0;
@@ -433,23 +434,23 @@ int hardware_deck_handler(Pocket* pocket, process_t* proc) {
                 return -1;
             }
 
-            uint8_t old_color = vga_get_color();
-            vga_set_color(color);
+            uint8_t old_color = VideoGetColor();
+            VideoSetColor(color);
 
             uint8_t chars_written = 0;
             for (uint8_t i = 0; i < length && data[4 + i] != '\0'; i++) {
                 char ch = data[4 + i];
-                vga_print_char(ch, color);
+                VideoPrintChar(ch, color);
                 serial_putchar(ch);
                 chars_written++;
             }
 
             if (!(flags & 0x02)) {
-                vga_set_color(old_color);
+                VideoSetColor(old_color);
             }
 
-            uint8_t final_row = vga_get_cursor_position_y();
-            uint8_t final_col = vga_get_cursor_position_x();
+            uint8_t final_row = (uint8_t)VideoGetCursorY();
+            uint8_t final_col = (uint8_t)VideoGetCursorX();
 
             data[0] = VGA_SUCCESS;
             data[1] = chars_written;
@@ -463,11 +464,11 @@ int hardware_deck_handler(Pocket* pocket, process_t* proc) {
             if (!data) return -1;
 
             uint8_t color = data[0];
-            uint8_t old_color = vga_get_color();
+            uint8_t old_color = VideoGetColor();
 
-            vga_set_color(color);
-            vga_clear_screen();
-            vga_set_color(old_color);
+            VideoSetColor(color);
+            VideoClearScreen();
+            VideoSetColor(old_color);
 
             data[0] = VGA_SUCCESS;
             return 0;
@@ -480,16 +481,16 @@ int hardware_deck_handler(Pocket* pocket, process_t* proc) {
             uint8_t row = data[0];
             uint8_t color = data[1];
 
-            if ((int)row >= vga_get_display_rows()) {
+            if ((int)row >= VideoGetRows()) {
                 data[0] = VGA_ERR_OUT_OF_BOUNDS;
                 pocket->error_code = VGA_ERR_OUT_OF_BOUNDS;
                 return -1;
             }
 
-            uint8_t old_color = vga_get_color();
-            vga_set_color(color);
-            vga_clear_line(row);
-            vga_set_color(old_color);
+            uint8_t old_color = VideoGetColor();
+            VideoSetColor(color);
+            VideoClearLine(row);
+            VideoSetColor(old_color);
 
             data[0] = VGA_SUCCESS;
             return 0;
@@ -499,7 +500,7 @@ int hardware_deck_handler(Pocket* pocket, process_t* proc) {
             uint8_t* data = vmm_translate_user_addr(proc->cabin, pocket->data_addr, pocket->data_length);
             if (!data) return -1;
 
-            vga_clear_to_eol();
+            VideoClearToEol();
 
             data[0] = VGA_SUCCESS;
             return 0;
@@ -509,8 +510,8 @@ int hardware_deck_handler(Pocket* pocket, process_t* proc) {
             uint8_t* data = vmm_translate_user_addr(proc->cabin, pocket->data_addr, pocket->data_length);
             if (!data) return -1;
 
-            uint8_t row = vga_get_cursor_position_y();
-            uint8_t col = vga_get_cursor_position_x();
+            uint8_t row = (uint8_t)VideoGetCursorY();
+            uint8_t col = (uint8_t)VideoGetCursorX();
 
             data[0] = VGA_SUCCESS;
             data[1] = row;
@@ -525,13 +526,10 @@ int hardware_deck_handler(Pocket* pocket, process_t* proc) {
             uint8_t row = data[0];
             uint8_t col = data[1];
 
-            /* Do not pre-clamp here — vga_set_cursor_position() handles
-             * bounds for both VGA text mode (80×25) and GOP framebuffer
-             * mode (actual resolution-derived columns × rows). */
-            vga_set_cursor_position(col, row);
+            VideoSetCursor(col, row);
 
-            uint8_t clamped_row = vga_get_cursor_position_y();
-            uint8_t clamped_col = vga_get_cursor_position_x();
+            uint8_t clamped_row = (uint8_t)VideoGetCursorY();
+            uint8_t clamped_col = (uint8_t)VideoGetCursorX();
 
             data[0] = VGA_SUCCESS;
             data[1] = clamped_row;
@@ -544,9 +542,9 @@ int hardware_deck_handler(Pocket* pocket, process_t* proc) {
             if (!data) return -1;
 
             uint8_t color = data[0];
-            uint8_t old_color = vga_get_color();
+            uint8_t old_color = VideoGetColor();
 
-            vga_set_color(color);
+            VideoSetColor(color);
 
             data[0] = VGA_SUCCESS;
             data[1] = old_color;
@@ -557,7 +555,7 @@ int hardware_deck_handler(Pocket* pocket, process_t* proc) {
             uint8_t* data = vmm_translate_user_addr(proc->cabin, pocket->data_addr, pocket->data_length);
             if (!data) return -1;
 
-            uint8_t color = vga_get_color();
+            uint8_t color = VideoGetColor();
 
             data[0] = VGA_SUCCESS;
             data[1] = color;
@@ -568,7 +566,7 @@ int hardware_deck_handler(Pocket* pocket, process_t* proc) {
             uint8_t* data = vmm_translate_user_addr(proc->cabin, pocket->data_addr, pocket->data_length);
             if (!data) return -1;
 
-            vga_scroll_up();
+            VideoScrollUp();
 
             data[0] = VGA_SUCCESS;
             return 0;
@@ -578,10 +576,10 @@ int hardware_deck_handler(Pocket* pocket, process_t* proc) {
             uint8_t* data = vmm_translate_user_addr(proc->cabin, pocket->data_addr, pocket->data_length);
             if (!data) return -1;
 
-            vga_print_newline();
+            VideoPrintNewline();
 
-            uint8_t new_row = vga_get_cursor_position_y();
-            uint8_t new_col = vga_get_cursor_position_x();
+            uint8_t new_row = (uint8_t)VideoGetCursorY();
+            uint8_t new_col = (uint8_t)VideoGetCursorX();
 
             data[0] = VGA_SUCCESS;
             data[1] = new_row;
@@ -594,8 +592,8 @@ int hardware_deck_handler(Pocket* pocket, process_t* proc) {
             if (!data) return -1;
 
             data[0] = VGA_SUCCESS;
-            data[1] = (uint8_t)vga_get_display_cols();
-            data[2] = (uint8_t)vga_get_display_rows();
+            data[1] = (uint8_t)VideoGetCols();
+            data[2] = (uint8_t)VideoGetRows();
             return 0;
         }
 

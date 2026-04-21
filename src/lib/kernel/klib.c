@@ -1,6 +1,6 @@
 #include "klib.h"
 #include "slab.h"
-#include "vga.h"
+#include "video.h"
 #include "io.h"
 #include "serial.h"
 #include "pmm.h"
@@ -25,7 +25,7 @@ static size_t memory_pool_size = 0;
 static mem_block_t *free_list = NULL;
 static spinlock_t heap_lock = {0};
 
-static uint8_t current_attr = TEXT_ATTR_DEFAULT;
+static uint8_t current_attr = VIDEO_ATTR_DEFAULT;
 static spinlock_t g_kprintf_lock;
 
 static const char digits[] = "0123456789abcdefghijklmnopqrstuvwxyz";
@@ -500,9 +500,9 @@ bool isspace(int c)
 
 int kputnl(void)
 {
-    vga_clear_to_eol();
-    vga_print_newline();
-    vga_update_cursor();
+    VideoClearToEol();
+    VideoPrintNewline();
+    VideoUpdateCursor();
     return 1;
 }
 
@@ -524,21 +524,21 @@ void kputchar(char c)
     }
     else if (c == '\r')
     {
-        vga_set_cursor_position(0, vga_get_cursor_position_y());
+        VideoSetCursor(0, VideoGetCursorY());
     }
     else if (c == '\b')
     {
-        int x = vga_get_cursor_position_x();
+        int x = VideoGetCursorX();
         if (x > 0)
         {
-            vga_set_cursor_position(x - 1, vga_get_cursor_position_y());
-            vga_update_cursor();
+            VideoSetCursor(x - 1, VideoGetCursorY());
+            VideoUpdateCursor();
         }
     }
     else
     {
-        vga_print_char(c, vga_get_color());
-        vga_update_cursor();
+        VideoPrintChar(c, VideoGetColor());
+        VideoUpdateCursor();
     }
 }
 
@@ -561,25 +561,25 @@ int kprintf(const char *format, ...)
                 switch (*format)
                 {
                 case 'E':
-                    current_attr = TEXT_ATTR_ERROR;
+                    current_attr = VIDEO_ATTR_ERROR;
                     break;
                 case 'S':
-                    current_attr = TEXT_ATTR_SUCCESS;
+                    current_attr = VIDEO_ATTR_SUCCESS;
                     break;
                 case 'H':
-                    current_attr = TEXT_ATTR_HINT;
+                    current_attr = VIDEO_ATTR_HINT;
                     break;
                 case 'D':
-                    current_attr = TEXT_ATTR_DEFAULT;
+                    current_attr = VIDEO_ATTR_DEFAULT;
                     break;
                 case 'W':
-                    current_attr = TEXT_ATTR_WARNING;
+                    current_attr = VIDEO_ATTR_WARNING;
                     break;
                 case 'P':
                 {
                     int x = va_arg(args, int);
                     int y = va_arg(args, int);
-                    vga_set_cursor_position(x, y);
+                    VideoSetCursor(x, y);
                     break;
                 }
                 case 'U':

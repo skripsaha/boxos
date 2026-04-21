@@ -9,7 +9,7 @@
 #include "cpu_caps_page.h"
 #include "boxos_addresses.h"
 #include "amp.h"
-#include "vga.h"
+#include "video.h"
 #include "e820.h"
 
 static vmm_context_t *kernel_context = NULL;
@@ -1720,7 +1720,7 @@ void vmm_init(void)
     kernel_context->pml4 = (page_table_t *)vmm_phys_to_virt(saved_pml4_phys);
 
     // VGA MUST be rebased FIRST — all subsequent prints go through VGA
-    vga_activate_pull_map();
+    VideoActivatePullMap();
 
     // Rebase kmalloc heap pool and free list from identity to Pull Map addresses
     mem_activate_pull_map();

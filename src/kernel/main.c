@@ -1,4 +1,4 @@
-#include "vga.h"
+#include "video.h"
 #include "klib.h"
 #include "serial.h"
 #include "gdt.h"
@@ -46,7 +46,7 @@
 
 void kernel_main(void)
 {
-    vga_init();
+    VideoInit();
     serial_init();
 
     kprintf(" Cabin (0x%lx Info, 0x%lx PocketRing, 0x%lx ResultRing, 0x%lx Code)\n",
@@ -120,9 +120,9 @@ void kernel_main(void)
     /* Switch to GOP framebuffer rendering if we booted via UEFI.
      * Must happen after vmm_init() so vmm_map_mmio() is available. */
     if (bi->version >= BOOT_INFO_VERSION2 && bi->fb_addr) {
-        vga_init_framebuffer(bi->fb_addr, bi->fb_width, bi->fb_height,
+        VideoInitFramebuffer(bi->fb_addr, bi->fb_width, bi->fb_height,
                              bi->fb_stride, bi->fb_format);
-        if (g_display_mode == DISPLAY_GOP_FB) {
+        if (VideoGetMode() == DISPLAY_GOP_FB) {
             kprintf("[DISPLAY] GOP framebuffer active: %ux%u (stride=%u fmt=%u)\n",
                     bi->fb_width, bi->fb_height, bi->fb_stride, bi->fb_format);
         }

@@ -2,7 +2,7 @@
 #define KEYBOARD_H
 
 #include "ktypes.h"
-#include "vga.h"
+#include "video.h"
 #include "boxos_limits.h"
 
 #define KEYBOARD_DATA_PORT   0x60
