@@ -156,18 +156,79 @@ static inline bool bitmap_test_bit(const uint8_t *bitmap, uint32_t bit)
 // Disk I/O helpers
 // ----------------------------------------------------------------------------
 
+/*
+ * Disk selection:
+ *   g_tagfs_drive      — ATA drive index (1=master, 0=slave).  Used when AHCI
+ *                        is NOT initialized (legacy IDE / BIOS boot).
+ *   g_tagfs_ahci_port  — AHCI port number.  Used when AHCI IS initialized
+ *                        (UEFI / q35 / SATA controller).
+ *
+ * Both are set by TagFSProbeDrive() before the first superblock read.
+ * Defaults match the single-disk BIOS boot layout (master, port 0).
+ */
+static uint8_t g_tagfs_drive     = 1; /* ATA: 1=master, 0=slave */
+static uint8_t g_tagfs_ahci_port = 0; /* AHCI port, probed at init */
+
+uint8_t tagfs_get_drive(void)     { return g_tagfs_drive;     }
+uint8_t tagfs_get_ahci_port(void) { return g_tagfs_ahci_port; }
+
+/*
+ * TagFSProbeDrive — locate the disk that holds the TagFS volume by scanning
+ * active drives/ports for the TagFS superblock magic.
+ * Sets g_tagfs_drive (ATA path) or g_tagfs_ahci_port (AHCI path).
+ * Called once at the very beginning of tagfs_init().
+ */
+static void TagFSProbeDrive(void)
+{
+    uint8_t buf[512];
+    uint32_t magic;
+
+    if (ahci_is_initialized()) {
+        /* AHCI path: probe each active port (max 32). */
+        uint32_t port_mask = ahci_get_active_port_mask();
+        for (uint8_t p = 0; p < 32; p++) {
+            if (!(port_mask & (1U << p))) continue;
+            if (ahci_read_sectors_sync(p, TAGFS_SUPERBLOCK_SECTOR, 1, buf) != 0)
+                continue;
+            __builtin_memcpy(&magic, buf, 4);
+            if (magic == TAGFS_MAGIC) {
+                g_tagfs_ahci_port = p;
+                debug_printf("[TagFS] Probe: TagFS on AHCI port %u\n", p);
+                return;
+            }
+        }
+        debug_printf("[TagFS] Probe: TagFS magic not found on any AHCI port\n");
+        return;
+    }
+
+    /* ATA (legacy IDE) path: try master (1) then slave (0). */
+    uint8_t drives[2] = {1, 0};
+    for (int i = 0; i < 2; i++) {
+        if (ata_read_sectors_retry(drives[i], TAGFS_SUPERBLOCK_SECTOR, 1, buf) != 0)
+            continue;
+        __builtin_memcpy(&magic, buf, 4);
+        if (magic == TAGFS_MAGIC) {
+            g_tagfs_drive = drives[i];
+            debug_printf("[TagFS] Probe: TagFS on ATA %s (drive=%u)\n",
+                         drives[i] ? "primary master" : "primary slave", drives[i]);
+            return;
+        }
+    }
+    debug_printf("[TagFS] Probe: TagFS magic not found on ATA master or slave\n");
+}
+
 static int disk_read_sectors(uint64_t lba, uint16_t count, void *buffer)
 {
     if (ahci_is_initialized())
-        return ahci_read_sectors_sync(0, lba, count, buffer);
-    return ata_read_sectors_retry(1, lba, count, (uint8_t *)buffer);
+        return ahci_read_sectors_sync(g_tagfs_ahci_port, lba, count, buffer);
+    return ata_read_sectors_retry(g_tagfs_drive, lba, count, (uint8_t *)buffer);
 }
 
 static int disk_write_sectors(uint64_t lba, uint16_t count, const void *buffer)
 {
     if (ahci_is_initialized())
-        return ahci_write_sectors_sync(0, lba, count, buffer);
-    return ata_write_sectors_retry(1, lba, count, (const uint8_t *)buffer);
+        return ahci_write_sectors_sync(g_tagfs_ahci_port, lba, count, buffer);
+    return ata_write_sectors_retry(g_tagfs_drive, lba, count, (const uint8_t *)buffer);
 }
 
 static uint64_t block_to_sector(uint32_t block);
@@ -811,6 +872,10 @@ error_t tagfs_init(void) {
     }
 
     debug_printf("[TagFS] Initializing...\n");
+
+    /* Detect which ATA drive (master/slave) holds the TagFS volume.
+     * Must run before any disk I/O so g_tagfs_drive is correct. */
+    TagFSProbeDrive();
 
     spinlock_init(&g_state.lock);
     spinlock_init(&g_open_table_lock);

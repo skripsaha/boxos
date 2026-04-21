@@ -275,7 +275,7 @@ static int handle_obj_read_async(Pocket *pocket, process_t *proc)
     io_req.pid = pocket->pid;
     io_req.lba = lba;
     io_req.sector_count = sector_count;
-    io_req.is_master = 1;
+    io_req.is_master = tagfs_get_drive();
     io_req.op = ASYNC_IO_OP_READ;
     io_req.buffer_virt = NULL;
     io_req.submit_tick = kernel_tick_get();
@@ -349,7 +349,7 @@ static int handle_obj_write_async(Pocket *pocket, process_t *proc)
     areq.pid = pocket->pid;
     areq.lba = lba;
     areq.sector_count = sector_count;
-    areq.is_master = 1;
+    areq.is_master = tagfs_get_drive();
     areq.op = ASYNC_IO_OP_WRITE;
     areq.buffer_virt = req->data;
     areq.data_length = length;
