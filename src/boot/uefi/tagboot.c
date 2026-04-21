@@ -738,21 +738,47 @@ typedef struct {
 } FbInfo;
 
 /*
- * SelectGopBestMode — iterate all GOP modes and set the one with the highest
- * pixel count that has a real framebuffer (not PixelBltOnly).
- * Called once before reading the framebuffer address.
+ * Target resolution for SelectGopBestMode.
+ *
+ * Rationale: picking the highest available mode (e.g. 2048×2048 on QEMU)
+ * produces a 16 MB framebuffer whose shadow→MMIO blit per scroll takes
+ * hundreds of milliseconds.  Capping at 1920×1080 keeps the framebuffer
+ * at ~8 MB and makes scrolling fast enough to be perceptible as instant.
+ */
+#define PREFERRED_FB_WIDTH  1920U
+#define PREFERRED_FB_HEIGHT 1080U
+
+/*
+ * SelectGopBestMode — pick the GOP mode whose resolution is closest to
+ * PREFERRED_FB_WIDTH × PREFERRED_FB_HEIGHT without exceeding it.
+ *
+ * Algorithm:
+ *   1. Prefer the largest mode whose pixel count ≤ target pixels.
+ *   2. If no mode fits (all modes exceed the target), fall back to the
+ *      smallest available mode — better than 2048×2048.
+ *   3. PixelBltOnly modes are skipped (no real linear framebuffer).
  */
 static void SelectGopBestMode(EFI_GRAPHICS_OUTPUT_PROTOCOL *gop)
 {
     if (!gop || !gop->mode) return;
 
-    uint32_t best_mode   = gop->mode->mode;
-    uint32_t best_pixels = 0;
+    uint32_t target_pixels = PREFERRED_FB_WIDTH * PREFERRED_FB_HEIGHT;
 
-    /* Seed with current mode so we never regress. */
+    uint32_t best_mode      = gop->mode->mode;  /* best mode ≤ target   */
+    uint32_t best_pixels    = 0;
+    int      found_in_range = 0;
+
+    uint32_t small_mode     = gop->mode->mode;  /* smallest fallback     */
+    uint32_t small_pixels   = 0xFFFFFFFFU;
+
+    /* Seed: if current mode is already within target, accept it. */
     if (gop->mode->info) {
-        best_pixels = gop->mode->info->horizontal_resolution *
-                      gop->mode->info->vertical_resolution;
+        uint32_t cur = gop->mode->info->horizontal_resolution *
+                       gop->mode->info->vertical_resolution;
+        if (cur <= target_pixels) {
+            best_pixels     = cur;
+            found_in_range  = 1;
+        }
     }
 
     for (uint32_t m = 0; m < gop->mode->max_mode; m++) {
@@ -760,24 +786,37 @@ static void SelectGopBestMode(EFI_GRAPHICS_OUTPUT_PROTOCOL *gop)
         EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *info = NULL;
         if (EFI_ERROR(gop->query_mode(gop, m, &size_of_info, &info))) continue;
         if (!info) continue;
-        if (info->pixel_format == PixelBltOnly) continue;   /* no real framebuffer */
+        if (info->pixel_format == PixelBltOnly) continue;  /* no linear fb */
 
         uint32_t pixels = info->horizontal_resolution * info->vertical_resolution;
-        if (pixels > best_pixels) {
-            best_pixels = pixels;
-            best_mode   = m;
+
+        /* Track the smallest available mode as an unconditional fallback. */
+        if (pixels < small_pixels) {
+            small_pixels = pixels;
+            small_mode   = m;
+        }
+
+        /* Prefer the largest mode that still fits within the target budget. */
+        if (pixels <= target_pixels && pixels > best_pixels) {
+            best_pixels    = pixels;
+            best_mode      = m;
+            found_in_range = 1;
         }
     }
+
+    /* Nothing fits within the target — use smallest mode to avoid huge fb. */
+    if (!found_in_range)
+        best_mode = small_mode;
 
     if (best_mode != gop->mode->mode) {
         Print("TagBoot: GOP switching to mode ");
         PrintDec(best_mode);
         Print(" (");
-        /* set_mode succeeds or we stay at current mode — either is acceptable */
         if (!EFI_ERROR(gop->set_mode(gop, best_mode))) {
             Print("ok");
         } else {
             Print("failed, keeping current");
+            best_mode = gop->mode->mode;
         }
         Print(")\r\n");
     }

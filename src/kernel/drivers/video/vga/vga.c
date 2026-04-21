@@ -335,10 +335,17 @@ void vga_init_framebuffer(uint64_t phys_addr, uint32_t width, uint32_t height,
     if (!phys_addr || !width || !height || !stride) return;
 
     size_t fb_size = (size_t)height * stride;
-    volatile void *virt = vmm_map_mmio((uintptr_t)phys_addr, fb_size,
-                                       VMM_FLAGS_KERNEL_RW | VMM_FLAG_CACHE_DISABLE);
+
+    /*
+     * Map the framebuffer with Write Combining (WC) caching via vmm_map_framebuffer.
+     * WC allows the CPU to coalesce sequential pixel writes into cache-line bursts
+     * before flushing to the bus — 10–50× faster than the UC mapping that
+     * vmm_map_mmio would produce, making FbFlush during scroll fast enough to
+     * be imperceptible to the user.
+     */
+    volatile void *virt = vmm_map_framebuffer((uintptr_t)phys_addr, fb_size);
     if (!virt) {
-        debug_printf("[VGA] vga_init_framebuffer: vmm_map_mmio failed\n");
+        debug_printf("[VGA] vga_init_framebuffer: vmm_map_framebuffer failed\n");
         return;
     }
 

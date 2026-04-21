@@ -39,7 +39,17 @@
 #define VMM_FLAG_CACHE_DISABLE  (1ULL << 4)
 #define VMM_FLAG_ACCESSED       (1ULL << 5)
 #define VMM_FLAG_DIRTY          (1ULL << 6)
-#define VMM_FLAG_LARGE_PAGE     (1ULL << 7)  // 2MB/1GB page
+#define VMM_FLAG_LARGE_PAGE     (1ULL << 7)  // 2MB/1GB page (PS bit in PDE)
+/*
+ * VMM_FLAG_PAT_BIT — bit 7 in a *leaf 4 KB PTE* is the PAT selector bit.
+ * Combined with PCD and PWT it selects the PAT entry (index 0–7) from the
+ * IA32_PAT MSR.  vmm_pat_init() programs entry 6 to Write Combining (WC):
+ *   PAT_bit=1, PCD=1, PWT=0  →  PAT index = (1<<2)|(1<<1)|0 = 6 = WC
+ * Use this flag together with VMM_FLAG_CACHE_DISABLE for framebuffer pages.
+ * IMPORTANT: never set this flag on intermediate PDE/PDPT entries — bit 7
+ * there is PS (page size) and enables large pages, not PAT selection.
+ */
+#define VMM_FLAG_PAT_BIT        (1ULL << 7)  // PAT selector in leaf 4KB PTEs
 #define VMM_FLAG_GLOBAL         (1ULL << 8)
 #define VMM_FLAG_NO_EXECUTE     (1ULL << 63) // NX bit
 
@@ -104,10 +114,28 @@ vmm_map_result_t vmm_map_pages(vmm_context_t* ctx, uintptr_t virt_addr,
 bool vmm_unmap_page(vmm_context_t* ctx, uintptr_t virt_addr);
 bool vmm_unmap_pages(vmm_context_t* ctx, uintptr_t virt_addr, size_t page_count);
 
-// Always applies VMM_FLAG_CACHE_DISABLE | VMM_FLAG_WRITE_THROUGH
-// Returns virtual address, or NULL on failure
+// Always applies VMM_FLAG_CACHE_DISABLE | VMM_FLAG_WRITE_THROUGH → UC mapping.
+// Returns virtual address, or NULL on failure.
 volatile void* vmm_map_mmio(uintptr_t phys_addr, size_t size, uint64_t flags);
 void vmm_unmap_mmio(volatile void* virt_addr, size_t size);
+
+/*
+ * vmm_map_framebuffer — map a linear framebuffer with Write Combining (WC).
+ *
+ * Unlike vmm_map_mmio (which forces UC = Uncacheable), this function uses
+ * WC caching: the CPU coalesces writes into cache-line bursts before pushing
+ * them to the bus, making sequential blits 10–50× faster.
+ *
+ * Requires vmm_pat_init() to have been called during vmm_init() so that
+ * IA32_PAT entry 6 is programmed to WC (type 1).
+ *
+ * PTE flags: VMM_FLAG_CACHE_DISABLE | VMM_FLAG_PAT_BIT (no WRITE_THROUGH)
+ *   → PCD=1, PAT=1, PWT=0 → PAT index 6 = WC.
+ *
+ * Virtual address is allocated from the kernel MMIO bump region, same pool
+ * as vmm_map_mmio, so the two functions never overlap.
+ */
+volatile void* vmm_map_framebuffer(uintptr_t phys_addr, size_t size);
 
 void* vmm_alloc_pages(vmm_context_t* ctx, size_t page_count, uint64_t flags);
 void vmm_free_pages(vmm_context_t* ctx, void* virt_addr, size_t page_count);

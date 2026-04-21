@@ -38,6 +38,53 @@ static spinlock_t kernel_heap_lock = {0};
 static uintptr_t kernel_mmio_current = VMM_KERNEL_MMIO_BASE;
 static spinlock_t kernel_mmio_lock = {0};
 
+/* =========================================================================
+ * PAT (Page Attribute Table) initialisation
+ *
+ * x86 IA32_PAT MSR (0x277) holds 8 one-byte memory-type entries (PA0–PA7).
+ * Each PTE selects an entry via the three PAT selector bits:
+ *   index = (PAT_bit << 2) | (PCD << 1) | PWT
+ *
+ * Hardware reset defaults (Intel SDM Vol.3 Table 11-10):
+ *   PA0=WB(6)  PA1=WT(4)  PA2=UC-(7)  PA3=UC(0)
+ *   PA4=WB(6)  PA5=WT(4)  PA6=UC-(7)  PA7=UC(0)
+ *
+ * We reprogram PA6 from UC-(7) to WC(1).  No other entry changes.
+ * vmm_map_framebuffer then selects PA6 via: PCD=1, PAT_bit=1, PWT=0 → index 6.
+ * vmm_map_mmio still selects PA3 via:       PCD=1, PWT=1,    PAT_bit=0 → index 3 = UC.
+ * ========================================================================= */
+
+#define MSR_IA32_PAT   0x277U
+#define PAT_TYPE_WB    0x06U
+#define PAT_TYPE_WT    0x04U
+#define PAT_TYPE_UCM   0x07U   /* UC- (weakly uncacheable) */
+#define PAT_TYPE_UC    0x00U
+#define PAT_TYPE_WC    0x01U   /* Write Combining            */
+
+static void vmm_pat_init(void)
+{
+    uint64_t pat =
+        ((uint64_t)PAT_TYPE_WB  <<  0) |  /* PA0 = WB  (unchanged) */
+        ((uint64_t)PAT_TYPE_WT  <<  8) |  /* PA1 = WT  (unchanged) */
+        ((uint64_t)PAT_TYPE_UCM << 16) |  /* PA2 = UC- (unchanged) */
+        ((uint64_t)PAT_TYPE_UC  << 24) |  /* PA3 = UC  (unchanged, used by vmm_map_mmio) */
+        ((uint64_t)PAT_TYPE_WB  << 32) |  /* PA4 = WB  (unchanged) */
+        ((uint64_t)PAT_TYPE_WT  << 40) |  /* PA5 = WT  (unchanged) */
+        ((uint64_t)PAT_TYPE_WC  << 48) |  /* PA6 = WC  ← was UC-; used by vmm_map_framebuffer */
+        ((uint64_t)PAT_TYPE_UC  << 56);   /* PA7 = UC  (unchanged) */
+
+    __asm__ volatile(
+        "wrmsr"
+        :
+        : "c" (MSR_IA32_PAT),
+          "a" ((uint32_t)(pat & 0xFFFFFFFFULL)),
+          "d" ((uint32_t)(pat >> 32))
+        :
+    );
+
+    debug_printf("[VMM] PAT MSR programmed: PA6=WC (framebuffer Write Combining enabled)\n");
+}
+
 typedef struct vmalloc_entry
 {
     void *virt_base;
@@ -1003,6 +1050,75 @@ volatile void *vmm_map_mmio(uintptr_t phys_addr, size_t size, uint64_t flags)
     return (volatile void *)(virt_base + offset);
 }
 
+/*
+ * vmm_map_framebuffer — map a GOP linear framebuffer with Write Combining (WC).
+ *
+ * WC lets the CPU coalesce sequential writes into cache-line bursts before
+ * flushing to the bus — 10–50× faster than UC for framebuffer blits.
+ *
+ * PAT selection: PCD=1, PAT_bit=1, PWT=0 → PAT index 6.
+ * vmm_pat_init() (called from vmm_init) must have set PA6 = WC (type 1).
+ *
+ * Virtual address is bump-allocated from the same MMIO region used by
+ * vmm_map_mmio, so the two functions never overlap.
+ */
+volatile void *vmm_map_framebuffer(uintptr_t phys_addr, size_t size)
+{
+    if (size == 0) {
+        vmm_set_error("vmm_map_framebuffer: size is zero");
+        return NULL;
+    }
+
+    bool is_legacy_bios = (phys_addr + size <= 0x100000);
+    if (!is_legacy_bios && pmm_is_usable_ram(phys_addr, size)) {
+        vmm_set_error("vmm_map_framebuffer: physical address overlaps USABLE RAM");
+        debug_printf("[VMM] ERROR: vmm_map_framebuffer phys=0x%lx size=0x%lx overlaps USABLE RAM\n",
+                     (unsigned long)phys_addr, (unsigned long)size);
+        return NULL;
+    }
+
+    uintptr_t phys_aligned = vmm_page_align_down(phys_addr);
+    size_t    offset       = phys_addr - phys_aligned;
+    size_t    size_aligned = vmm_page_align_up(size + offset);
+    size_t    page_count   = size_aligned / VMM_PAGE_SIZE;
+
+    spin_lock(&kernel_mmio_lock);
+    uintptr_t virt_base = kernel_mmio_current;
+    if (virt_base + size_aligned > VMM_KERNEL_MMIO_BASE + VMM_KERNEL_MMIO_SIZE) {
+        spin_unlock(&kernel_mmio_lock);
+        vmm_set_error("vmm_map_framebuffer: kernel MMIO region exhausted");
+        debug_printf("[VMM] ERROR: vmm_map_framebuffer: MMIO region exhausted\n");
+        return NULL;
+    }
+    kernel_mmio_current += size_aligned;
+    spin_unlock(&kernel_mmio_lock);
+
+    /*
+     * WC flag combination: PCD=1 (CACHE_DISABLE), PAT_bit=1, PWT=0 (no WRITE_THROUGH)
+     * → PAT index = (PAT_bit<<2)|(PCD<<1)|PWT = 4|2|0 = 6 = WC (programmed by vmm_pat_init)
+     */
+    uint64_t wc_flags = VMM_FLAGS_KERNEL_RW | VMM_FLAG_CACHE_DISABLE | VMM_FLAG_PAT_BIT;
+
+    vmm_context_t    *ctx    = vmm_get_kernel_context();
+    vmm_map_result_t  result = vmm_map_pages(ctx, virt_base, phys_aligned,
+                                              page_count, wc_flags);
+    if (!result.success) {
+        debug_printf("[VMM] ERROR: vmm_map_framebuffer: vmm_map_pages failed: %s\n",
+                     result.error_msg);
+        spin_lock(&kernel_mmio_lock);
+        if (kernel_mmio_current == virt_base + size_aligned)
+            kernel_mmio_current = virt_base;
+        spin_unlock(&kernel_mmio_lock);
+        return NULL;
+    }
+
+    debug_printf("[VMM] vmm_map_framebuffer: phys=0x%lx size=0x%lx → virt=0x%lx (WC)\n",
+                 (unsigned long)phys_addr, (unsigned long)size,
+                 (unsigned long)(virt_base + offset));
+
+    return (volatile void *)(virt_base + offset);
+}
+
 void vmm_unmap_mmio(volatile void *virt_addr, size_t size)
 {
     if (!virt_addr || size == 0)
@@ -1626,6 +1742,12 @@ void vmm_init(void)
     *pull_test = pull_old;
     debug_printf("[VMM] Pull Map verification: PASSED\n");
     debug_printf("[VMM] Identity mapping removed — higher-half kernel active\n");
+
+    /* Program IA32_PAT so that entry 6 = WC (Write Combining).
+     * This must be done while paging is active (after vmm_switch_context)
+     * so the new PAT takes effect for all subsequent page mappings.
+     * vmm_map_framebuffer uses PAT index 6 (PCD=1, PAT_bit=1, PWT=0). */
+    vmm_pat_init();
 
     // Enable PCID if CPU supports it — zero-flush context switches
     // CR4.PCIDE requires CR3[11:0] = 0 when enabling (kernel PML4 is page-aligned)
