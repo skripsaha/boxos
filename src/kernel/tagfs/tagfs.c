@@ -180,7 +180,7 @@ uint8_t tagfs_get_ahci_port(void) { return g_tagfs_ahci_port; }
  */
 static void TagFSProbeDrive(void)
 {
-    uint8_t buf[512];
+    uint8_t buf[TAGFS_SECTOR_SIZE];
     uint32_t magic;
 
     if (ahci_is_initialized()) {
@@ -430,7 +430,7 @@ static bool superblock_verify_crc(const TagFSSuperblock *sb)
 
 static int read_superblock(uint32_t sector, TagFSSuperblock *out)
 {
-    uint8_t buf[512];
+    uint8_t buf[TAGFS_SECTOR_SIZE];
     if (disk_read_sectors((uint64_t)sector, 1, buf) != 0)
     {
         return -1;
@@ -442,9 +442,9 @@ static int read_superblock(uint32_t sector, TagFSSuperblock *out)
 static error_t write_superblock_to_sector(uint32_t sector, const TagFSSuperblock *sb) {
     if (!sb)
         return ERR_NULL_POINTER;
-    
-    uint8_t buf[512];
-    memset(buf, 0, 512);
+
+    uint8_t buf[TAGFS_SECTOR_SIZE];
+    memset(buf, 0, TAGFS_SECTOR_SIZE);
     memcpy(buf, sb, sizeof(TagFSSuperblock));
     
     error_t err = disk_write_sectors((uint64_t)sector, 1, buf);
@@ -575,9 +575,9 @@ error_t tagfs_format(uint32_t total_blocks) {
     //   1038 : journal entries  (512 entries * 2 sectors = 1024 sectors -> 1038..2061)
     //   2062 : block bitmap start
     //
-    uint32_t bitmap_sector_start = 2062;
+    uint32_t bitmap_sector_start = TAGFS_BITMAP_SECTOR_START;
     uint32_t bitmap_bytes = (total_blocks + 7) / 8;
-    uint32_t bitmap_sectors = (bitmap_bytes + 511) / 512;
+    uint32_t bitmap_sectors = (bitmap_bytes + TAGFS_SECTOR_SIZE - 1) / TAGFS_SECTOR_SIZE;
 
     // --- Build initial block bitmap in memory ---
     uint8_t *bitmap = kmalloc(bitmap_bytes);
@@ -661,7 +661,7 @@ error_t tagfs_format(uint32_t total_blocks) {
     kfree(mp_block);
 
     // --- Write block bitmap to disk ---
-    uint32_t bitmap_buf_size = bitmap_sectors * 512;
+    uint32_t bitmap_buf_size = bitmap_sectors * TAGFS_SECTOR_SIZE;
     uint8_t *bitmap_buf = kmalloc(bitmap_buf_size);
     if (!bitmap_buf) {
         debug_printf("[TagFS] format: failed to allocate bitmap write buffer\n");
@@ -1086,7 +1086,7 @@ error_t tagfs_init(void) {
 
     // Read block bitmap from disk
     uint32_t bm_sector_count = sb.block_bitmap_sector_count;
-    uint32_t bm_buf_size = bm_sector_count * 512;
+    uint32_t bm_buf_size = bm_sector_count * TAGFS_SECTOR_SIZE;
     uint8_t *bm_buf = kmalloc(bm_buf_size);
     if (bm_buf)
     {
@@ -1233,7 +1233,7 @@ void tagfs_sync(void)
     // Write block bitmap to disk
     uint32_t bitmap_bytes = (g_state.superblock.total_blocks + 7) / 8;
     uint32_t sector_count = g_state.superblock.block_bitmap_sector_count;
-    uint32_t bm_buf_size = sector_count * 512;
+    uint32_t bm_buf_size = sector_count * TAGFS_SECTOR_SIZE;
     uint8_t *bm_buf = kmalloc(bm_buf_size);
     if (bm_buf)
     {

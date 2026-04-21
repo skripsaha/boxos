@@ -58,9 +58,9 @@ static uint32_t DiskBookAlloc(void) {
 }
 
 // Write superblock to disk using direct sector I/O.
-// The superblock is exactly 512 bytes = 1 sector.
+// The superblock is exactly TAGFS_SECTOR_SIZE bytes = 1 sector.
 static int DiskBookWriteSuperblock(void) {
-    uint8_t buf[512];
+    uint8_t buf[TAGFS_SECTOR_SIZE];
     memset(buf, 0, sizeof(buf));
     memcpy(buf, &g_disk_book_sb, sizeof(DiskBookSuperblock));
 
@@ -72,7 +72,7 @@ static int DiskBookWriteSuperblock(void) {
 
 // Read superblock from disk using direct sector I/O.
 static int DiskBookReadSuperblock(void) {
-    uint8_t buf[512];
+    uint8_t buf[TAGFS_SECTOR_SIZE];
 
     if (disk_book_read_sectors(g_disk_book_sector, 1, buf) != 0)
         return ERR_IO;
