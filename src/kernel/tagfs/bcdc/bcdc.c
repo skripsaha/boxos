@@ -429,15 +429,23 @@ error_t BcdcLZ_Compress(const void* input, uint16_t input_size,
             if (out_pos + 3 > BCDC_MAX_COMPRESSED)
                 break;
 
-            uint8_t len_byte = (uint8_t)((match_len - BCDC_LZ_MIN_MATCH) & 0x1F);
-            uint8_t offset_lo = match_offset & 0xFF;
-            uint8_t offset_hi = (match_offset >> 8) & 0x0F;
+            /* 3-byte match token encoding (Bcdc-LZ v2):
+             *   Byte 0: 1 LLLLLLL   — flag bit + lower 7 bits of (length - 3)
+             *   Byte 1: OOOOOOOO   — lower 8 bits of offset
+             *   Byte 2: LOOO OOOO  — high bit of length + upper 5 bits of offset
+             *
+             * Length:  8 bits total → range 0..255 + 3 = 3..258
+             * Offset: 13 bits total → range 0..8191 (covers window + dict)
+             */
+            uint16_t enc_len = match_len - BCDC_LZ_MIN_MATCH;
+            if (enc_len > 255) enc_len = 255;
 
-            out[out_pos++] = 0x80 | len_byte;
-            out[out_pos++] = offset_lo;
-            out[out_pos++] = (offset_hi << 4) | (len_byte >> 5);
+            out[out_pos++] = 0x80 | (uint8_t)(enc_len & 0x7F);
+            out[out_pos++] = (uint8_t)(match_offset & 0xFF);
+            out[out_pos++] = (uint8_t)(((enc_len >> 7) & 0x01) << 7) |
+                             (uint8_t)((match_offset >> 8) & 0x1F);
 
-            in_pos += match_len;
+            in_pos += BCDC_LZ_MIN_MATCH + enc_len;
         } else {
             if (out_pos + 1 >= BCDC_MAX_COMPRESSED)
                 break;
@@ -471,12 +479,18 @@ error_t BcdcLZ_Decompress(const void* input, uint16_t input_size,
             if (in_pos + 2 > input_size)
                 return ERR_CORRUPTED;
 
-            uint8_t len_low = token & 0x1F;
+            /* Decode Bcdc-LZ v2 match token:
+             *   token:  1 LLLLLLL  (lower 7 bits of length)
+             *   byte 1: OOOOOOOO  (lower 8 bits of offset)
+             *   byte 2: LOOOOOOO  (high length bit + upper 5 bits of offset) */
             uint8_t offset_lo = in[in_pos++];
-            uint8_t offset_hi_byte = in[in_pos++];
+            uint8_t byte2 = in[in_pos++];
 
-            uint16_t match_len = (uint16_t)len_low + BCDC_LZ_MIN_MATCH;
-            uint16_t match_offset = (uint16_t)offset_lo | ((uint16_t)(offset_hi_byte >> 4) << 8);
+            uint16_t match_len = (uint16_t)(token & 0x7F) |
+                                 ((uint16_t)(byte2 >> 7) << 7);
+            match_len += BCDC_LZ_MIN_MATCH;
+            uint16_t match_offset = (uint16_t)offset_lo |
+                                    ((uint16_t)(byte2 & 0x1F) << 8);
 
             if (match_offset == 0)
                 return ERR_CORRUPTED;
