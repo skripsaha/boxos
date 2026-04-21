@@ -16,6 +16,10 @@
 #define TAGFS_BACKUP_SB_SECTOR      1035
 #define TAGFS_DISK_BOOK_SB_SECTOR   1036
 #define TAGFS_DISK_BOOK_START       1038
+#define TAGFS_BITMAP_SECTOR_START   (TAGFS_DISK_BOOK_START + DISK_BOOK_JOURNAL_SECTORS)
+
+// DiskBook journal size on disk (must match disk_book.h CAPACITY × SECTORS_PER_ENTRY)
+#define DISK_BOOK_JOURNAL_SECTORS   1024    /* 512 entries × 2 sectors each */
 
 // Tag constants
 #define TAGFS_INVALID_TAG_ID        0xFFFF
