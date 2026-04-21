@@ -3,6 +3,20 @@
 
 #include "ktypes.h"
 
+/*
+ * Display mode: controls which backend vga_* functions dispatch to.
+ *   DISPLAY_VGA_TEXT — write to the hardware VGA text buffer (0xB8000).
+ *                      Used under BIOS/MBR boot.
+ *   DISPLAY_GOP_FB   — software-render characters into a GOP linear
+ *                      framebuffer.  Used under UEFI boot.
+ */
+typedef enum {
+    DISPLAY_VGA_TEXT = 0,
+    DISPLAY_GOP_FB   = 1,
+} DisplayMode;
+
+extern DisplayMode g_display_mode;
+
 #define VGA_TEXT_BUFFER_ADDR  0xB8000
 #define VGA                   VGA_TEXT_BUFFER_ADDR
 
@@ -71,6 +85,15 @@ extern unsigned char *vga;
 
 void vga_init(void);
 void vga_activate_pull_map(void);
+
+/*
+ * Switch to GOP framebuffer mode.  Must be called after vmm_init() so that
+ * vmm_map_mmio() is available.  phys_addr is the physical base of the linear
+ * framebuffer, width/height are in pixels, stride is bytes per scan line,
+ * format: 0=RGB, 1=BGR.
+ */
+void vga_init_framebuffer(uint64_t phys_addr, uint32_t width, uint32_t height,
+                          uint32_t stride, uint32_t format);
 
 void vga_print(const char *str);
 void vga_print_char(char ch, const unsigned char attr);
