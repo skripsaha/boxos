@@ -1,4 +1,14 @@
+/*
+ * shell.c — BoxOS interactive shell
+ *
+ * Architecture: Shell → IPC → Display Daemon → VGA
+ * Input: line editor with cursor movement and history
+ * Commands: built-in table + external utilities via proc_exec
+ * Context: tag-based focus via `use` command
+ */
+
 #include "shell.h"
+#include "line_edit.h"
 #include "parser.h"
 #include "executor.h"
 #include "box/io.h"
@@ -8,143 +18,170 @@
 #include "box/system.h"
 #include "box/notify.h"
 
-static shell_state_t g_shell_state;
+static ShellState    g_state;
+static LineEditState g_editor;
 
-void shell_init(void)
+/* =========================================================================
+ * Initialization
+ * ========================================================================= */
+
+void ShellInit(void)
 {
-    memset(&g_shell_state, 0, sizeof(shell_state_t));
-    g_shell_state.running = true;
-    memcpy(g_shell_state.prompt, "~ ", 3);
+    memset(&g_state, 0, sizeof(ShellState));
+    g_state.running = true;
+    memcpy(g_state.prompt, "~ ", 3);
+
+    LineEditInit(&g_editor);
 
     CabinInfo *ci = cabin_info();
 
-    if (ci->spawner_pid == 0)
-    {
-        // Root shell (autostart): create display process
+    if (ci->spawner_pid == 0) {
+        /* Root shell: spawn display daemon */
         int display_pid = proc_exec("display");
-        if (display_pid > 0)
-        {
+        if (display_pid > 0) {
             Result entry;
-            if (receive_wait(&entry, 2000))
-            {
+            if (receive_wait(&entry, 2000)) {
                 io_set_mode(IO_MODE_IPC);
                 io_set_display_pid(entry.sender_pid);
             }
         }
-    }
-    else
-    {
-        // Nested shell: display already exists, reuse it via IPC
+    } else {
+        /* Nested shell: display already exists */
         io_set_mode(IO_MODE_IPC);
     }
 
     clear();
-    println("BoxOS Shell v1.0");
-    println("Type 'help' for available commands");
+    println("BoxOS Shell v2.0");
+    println("Ctrl+Q to exit. Type 'help' for commands.");
     println("");
 }
 
-void shell_update_prompt(void)
+/* =========================================================================
+ * Prompt management
+ * ========================================================================= */
+
+void ShellUpdatePrompt(void)
 {
-    if (g_shell_state.context_tag_count > 0)
-    {
-        char ctx_str[SHELL_PROMPT_SIZE] = "[";
-        size_t pos = 1;
+    if (g_state.context_tag_count > 0) {
+        char ctx[SHELL_PROMPT_MAX];
+        int pos = 0;
+        ctx[pos++] = '[';
 
-        for (uint32_t i = 0; i < g_shell_state.context_tag_count && pos < SHELL_PROMPT_SIZE - 4; i++)
-        {
-            size_t tag_len = strlen(g_shell_state.context_tags[i]);
-            if (pos + tag_len + 2 < SHELL_PROMPT_SIZE - 4)
-            {
-                memcpy(ctx_str + pos, g_shell_state.context_tags[i], tag_len);
-                pos += tag_len;
+        for (uint32_t i = 0; i < g_state.context_tag_count && pos < SHELL_PROMPT_MAX - 5; i++) {
+            size_t tag_len = strlen(g_state.context_tags[i]);
+            if (pos + (int)tag_len + 2 >= SHELL_PROMPT_MAX - 5) break;
 
-                if (i < g_shell_state.context_tag_count - 1)
-                {
-                    ctx_str[pos++] = ',';
-                }
-            }
+            memcpy(ctx + pos, g_state.context_tags[i], tag_len);
+            pos += (int)tag_len;
+
+            if (i < g_state.context_tag_count - 1)
+                ctx[pos++] = ',';
         }
 
-        ctx_str[pos++] = ']';
-        ctx_str[pos++] = ' ';
-        ctx_str[pos++] = '~';
-        ctx_str[pos++] = ' ';
-        ctx_str[pos] = '\0';
-
-        memcpy(g_shell_state.prompt, ctx_str, pos + 1);
-    }
-    else
-    {
-        memcpy(g_shell_state.prompt, "~ ", 3);
+        ctx[pos++] = ']';
+        ctx[pos++] = ' ';
+        ctx[pos++] = '~';
+        ctx[pos++] = ' ';
+        ctx[pos]   = '\0';
+        memcpy(g_state.prompt, ctx, (size_t)pos + 1);
+    } else {
+        memcpy(g_state.prompt, "~ ", 3);
     }
 }
 
-void shell_print_prompt()
+/* =========================================================================
+ * Main loop
+ * ========================================================================= */
+
+/* =========================================================================
+ * TakeSurvey — ask user a yes/no question before irreversible actions
+ * ========================================================================= */
+
+static bool TakeSurvey(const char *message)
 {
-    print(g_shell_state.prompt);
+    color(0x0E); /* yellow */
+    print(message);
+    print(" [y/n] ");
+    color(0x07);
     io_flush();
+
+    while (1) {
+        int ch = getchar();
+        if (ch < 0) continue;
+        if (ch == 'y' || ch == 'Y') {
+            println("y");
+            return true;
+        }
+        if (ch == 'n' || ch == 'N' || ch == 0x1B) {
+            println("n");
+            return false;
+        }
+    }
 }
 
-void shell_main_loop(void)
+/* =========================================================================
+ * Main loop
+ * ========================================================================= */
+
+void ShellMainLoop(void)
 {
-    shell_print_prompt();
+    char input[SHELL_LINE_MAX];
 
-    while (g_shell_state.running)
-    {
-        memset(g_shell_state.input_buffer, 0, SHELL_MAX_INPUT);
+    while (g_state.running) {
+        int rc = LineEditRead(&g_editor, g_state.prompt, input, SHELL_LINE_MAX);
 
-        int len = readline(g_shell_state.input_buffer, SHELL_MAX_INPUT);
-        if (len < 0) {
-            shell_print_prompt();
-            continue;
-        }
-        if (len == 0) {
-            shell_print_prompt();
+        if (rc == LINE_EXIT_REQUEST) {
+            if (TakeSurvey("Shut down BoxOS?")) {
+                ShellStop();
+                break;
+            }
             continue;
         }
 
-        parsed_command_t cmd;
-        if (parser_parse(g_shell_state.input_buffer, &cmd) != 0)
-        {
-            println("Error: Failed to parse command");
-            shell_print_prompt();
+        if (rc == LINE_EMPTY || rc == LINE_ERROR)
+            continue;
+
+        /* Parse */
+        ParsedCommand cmd;
+        if (ParserParse(input, &cmd) != 0) {
+            println("Error: failed to parse command");
             continue;
         }
 
         if (cmd.argc == 0)
-        {
-            shell_print_prompt();
             continue;
-        }
 
-        int result = executor_run(&cmd);
-        if (result != 0)
-        {
-            const char *error = executor_get_error();
-            if (error && error[0] != '\0')
-            {
-                printf("Error: %s\n", error);
+        /* Execute */
+        int result = ExecutorRun(&cmd);
+        if (result != 0) {
+            const char *err = ExecutorGetError();
+            if (err && err[0] != '\0') {
+                color(0x0C); /* light red */
+                print("Error: ");
+                println(err);
+                color(0x07); /* reset to gray */
             }
         }
-
-        shell_print_prompt();
     }
 }
 
-void shell_stop(void)
+void ShellStop(void)
 {
-    g_shell_state.running = false;
+    g_state.running = false;
 }
 
-shell_state_t *shell_get_state(void)
+ShellState *ShellGetState(void)
 {
-    return &g_shell_state;
+    return &g_state;
 }
+
+/* =========================================================================
+ * Entry point
+ * ========================================================================= */
 
 int main(void)
 {
-    shell_init();
-    shell_main_loop();
+    ShellInit();
+    ShellMainLoop();
     return 0;
 }

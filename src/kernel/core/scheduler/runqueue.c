@@ -180,21 +180,21 @@ bool runqueue_contains(RunQueue *rq, struct process_t *proc)
     if (!rq || !proc)
         return false;
 
-    for (int prio = 0; prio < SCHED_PRIO_LEVELS; prio++)
-    {
-        SchedQueue *q = &rq->queues[prio];
-        if (!q->procs || q->count == 0)
-            continue;
+    /* O(1) check using the stored priority and index that every enqueue/dequeue
+     * already maintains.  The old O(N) linear scan was called on every timer
+     * IRQ (sched_enqueue re-enqueues the current process) — at 250 Hz with
+     * 50 processes that was 12,500 wasted pointer comparisons per second. */
+    int prio = proc->rq_prio;
+    int idx  = proc->rq_index;
 
-        uint32_t idx = q->head;
-        for (uint32_t n = 0; n < q->count; n++)
-        {
-            if (q->procs[idx] == proc)
-                return true;
-            idx = (idx + 1) % q->capacity;
-        }
-    }
-    return false;
+    if (prio < 0 || prio >= SCHED_PRIO_LEVELS || idx < 0)
+        return false;
+
+    SchedQueue *q = &rq->queues[prio];
+    if (!q->procs || (uint32_t)idx >= q->capacity)
+        return false;
+
+    return q->procs[idx] == proc;
 }
 
 uint32_t runqueue_total_count(RunQueue *rq)

@@ -118,9 +118,9 @@ error_t pmm_init(void) {
     boot_info_t *bi = boot_info_get();
     uintptr_t map_start;
     if (boot_info_valid(bi)) {
-        map_start = ALIGN_UP((uintptr_t)bi->stack_base, 4096);
+        map_start = ALIGN_UP((uintptr_t)bi->stack_base, PMM_PAGE_SIZE);
     } else {
-        map_start = ALIGN_UP((uintptr_t)&_kernel_phys_end, 4096);
+        map_start = ALIGN_UP((uintptr_t)&_kernel_phys_end, PMM_PAGE_SIZE);
     }
 
     uint8_t* alloc_map = (uint8_t*)map_start;
@@ -137,7 +137,7 @@ error_t pmm_init(void) {
     pmm_deferred_cap = entry_count;
     pmm_deferred_count = 0;
 
-    uintptr_t zone_base = ALIGN_UP(deferred_base + deferred_size, 4096);
+    uintptr_t zone_base = ALIGN_UP(deferred_base + deferred_size, PMM_PAGE_SIZE);
 
     if (zone_base >= mem_end) {
         panic("[PMM] Kernel too large for available memory!");

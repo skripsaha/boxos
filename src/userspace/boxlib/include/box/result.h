@@ -42,4 +42,8 @@ bool result_pop_non_ipc(Result* out);
 bool result_pop_ipc(Result* out);
 uint32_t result_ipc_stash_count(void);
 
+// Block until ANY result arrives (no filtering).
+// For IPC servers (display daemon, etc.) that receive both IPC and kernel results.
+bool result_wait_any(Result* out, uint32_t timeout_ms);
+
 #endif // BOX_RESULT_H

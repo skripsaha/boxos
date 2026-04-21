@@ -3,6 +3,6 @@
 
 #include "shell.h"
 
-int parser_parse(const char* input, parsed_command_t* cmd);
+int ParserParse(const char *input, ParsedCommand *cmd);
 
-#endif // PARSER_H
+#endif /* PARSER_H */

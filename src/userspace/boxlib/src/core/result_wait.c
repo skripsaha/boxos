@@ -86,3 +86,32 @@ bool result_wait(Result* out, uint32_t timeout_ms) {
         return result_wait_yield(out, timeout_ms);
     }
 }
+
+/* Block until ANY result arrives — no IPC/non-IPC filtering.
+ * For IPC servers (display daemon) that receive both kernel results
+ * (from their own VGA/keyboard calls) and IPC messages (from shell/apps).
+ * Checks both stashes first (in case result_wait or receive stashed
+ * something), then pops from the ring. */
+bool result_wait_any(Result* out, uint32_t timeout_ms) {
+    /* Drain stashes first — other functions may have stashed results */
+    if (result_pop_ipc(out)) return true;
+    if (result_pop_non_ipc(out)) return true;
+    if (result_pop(out)) return true;
+
+    uint64_t deadline = 0;
+    if (timeout_ms > 0) {
+        deadline = rdtsc() + cpu_ms_to_tsc(timeout_ms);
+    }
+
+    while (1) {
+        __sync_synchronize();
+
+        if (result_available()) {
+            if (result_pop(out)) return true;
+        }
+
+        if (timeout_ms > 0 && rdtsc() >= deadline) return false;
+
+        __asm__ volatile("pause");
+    }
+}
