@@ -277,52 +277,73 @@ BoxHash BoxHashComputeSHA256(const void *data, uint32_t size) {
         pos += 64;
     }
     
-    // Handle remaining bytes + padding
+    /* SHA-256 final padding (FIPS 180-4 §5.1.1):
+     * Append 0x80, then zeros, then 8-byte big-endian bit length.
+     * If remaining >= 56, the padding + length don't fit in one 64-byte
+     * block — we need TWO final blocks.  The old code only used one block,
+     * which corrupted the hash for any input where (size % 64) >= 56. */
+
     uint8_t chunk[64];
-    memset(chunk, 0, 64);
     uint32_t remaining = size - pos;
-    
-    if (remaining > 0) {
-        memcpy(chunk, &bytes[pos], MIN(remaining, 63));
-    }
-    
-    // Padding
-    chunk[remaining] = 0x80;
-    
-    // Length in bits (big-endian)
     uint64_t bit_len = (uint64_t)size * 8;
-    chunk[63] = bit_len & 0xFF;
-    chunk[62] = (bit_len >> 8) & 0xFF;
-    chunk[61] = (bit_len >> 16) & 0xFF;
-    chunk[60] = (bit_len >> 24) & 0xFF;
-    chunk[59] = (bit_len >> 32) & 0xFF;
-    chunk[58] = (bit_len >> 40) & 0xFF;
-    chunk[57] = (bit_len >> 48) & 0xFF;
-    chunk[56] = (bit_len >> 56) & 0xFF;
-    
-    // Process final chunk
+
+    /* Block N: remaining data + 0x80 + zeros (+ length if it fits) */
+    memset(chunk, 0, 64);
+    if (remaining > 0)
+        memcpy(chunk, &bytes[pos], remaining);
+    chunk[remaining] = 0x80;
+
+    if (remaining >= 56) {
+        /* No room for length in this block — process it without length,
+         * then emit a second block with only the length. */
+        uint32_t w[64];
+        for (int i = 0; i < 16; i++)
+            w[i] = ((uint32_t)chunk[i*4] << 24) | ((uint32_t)chunk[i*4+1] << 16) |
+                   ((uint32_t)chunk[i*4+2] << 8)  |  (uint32_t)chunk[i*4+3];
+        for (int i = 16; i < 64; i++)
+            w[i] = SHA256_Gamma1(w[i-2]) + w[i-7] + SHA256_Gamma0(w[i-15]) + w[i-16];
+
+        uint32_t a = h[0], b = h[1], c = h[2], d = h[3];
+        uint32_t e = h[4], f = h[5], g = h[6], hh = h[7];
+        for (int i = 0; i < 64; i++) {
+            uint32_t t1 = hh + SHA256_Sigma1(e) + SHA256_Ch(e,f,g) + SHA256_K[i] + w[i];
+            uint32_t t2 = SHA256_Sigma0(a) + SHA256_Maj(a,b,c);
+            hh = g; g = f; f = e; e = d + t1;
+            d = c; c = b; b = a; a = t1 + t2;
+        }
+        h[0] += a; h[1] += b; h[2] += c; h[3] += d;
+        h[4] += e; h[5] += f; h[6] += g; h[7] += hh;
+
+        /* Second block: all zeros except the last 8 bytes = bit length */
+        memset(chunk, 0, 64);
+    }
+
+    /* Write 8-byte big-endian bit length into the last 8 bytes */
+    chunk[56] = (uint8_t)(bit_len >> 56);
+    chunk[57] = (uint8_t)(bit_len >> 48);
+    chunk[58] = (uint8_t)(bit_len >> 40);
+    chunk[59] = (uint8_t)(bit_len >> 32);
+    chunk[60] = (uint8_t)(bit_len >> 24);
+    chunk[61] = (uint8_t)(bit_len >> 16);
+    chunk[62] = (uint8_t)(bit_len >> 8);
+    chunk[63] = (uint8_t)(bit_len);
+
+    /* Process final (or second-final) chunk */
     uint32_t w[64];
-    for (int i = 0; i < 16; i++) {
-        w[i] = ((uint32_t)chunk[i*4] << 24) |
-               ((uint32_t)chunk[i*4 + 1] << 16) |
-               ((uint32_t)chunk[i*4 + 2] << 8) |
-               ((uint32_t)chunk[i*4 + 3]);
-    }
-    
-    for (int i = 16; i < 64; i++) {
+    for (int i = 0; i < 16; i++)
+        w[i] = ((uint32_t)chunk[i*4] << 24) | ((uint32_t)chunk[i*4+1] << 16) |
+               ((uint32_t)chunk[i*4+2] << 8)  |  (uint32_t)chunk[i*4+3];
+    for (int i = 16; i < 64; i++)
         w[i] = SHA256_Gamma1(w[i-2]) + w[i-7] + SHA256_Gamma0(w[i-15]) + w[i-16];
-    }
-    
+
     uint32_t a = h[0], b = h[1], c = h[2], d = h[3];
     uint32_t e = h[4], f = h[5], g = h[6], hh = h[7];
-    
     for (int i = 0; i < 64; i++) {
-        uint32_t t1 = hh + SHA256_Sigma1(e) + SHA256_Ch(e, f, g) + SHA256_K[i] + w[i];
-        uint32_t t2 = SHA256_Sigma0(a) + SHA256_Maj(a, b, c);
+        uint32_t t1 = hh + SHA256_Sigma1(e) + SHA256_Ch(e,f,g) + SHA256_K[i] + w[i];
+        uint32_t t2 = SHA256_Sigma0(a) + SHA256_Maj(a,b,c);
         hh = g; g = f; f = e; e = d + t1;
         d = c; c = b; b = a; a = t1 + t2;
     }
-    
     h[0] += a; h[1] += b; h[2] += c; h[3] += d;
     h[4] += e; h[5] += f; h[6] += g; h[7] += hh;
     
