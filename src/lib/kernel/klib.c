@@ -1589,10 +1589,31 @@ void *memset(void *s, int c, size_t n)
 
 void *memcpy(void *dest, const void *src, size_t n)
 {
-    unsigned char *d = dest;
-    const unsigned char *s = src;
+    unsigned char *d = (unsigned char *)dest;
+    const unsigned char *s = (const unsigned char *)src;
+
+    /* Fast path: if BOTH pointers share the same alignment, we can
+     * align to 8 bytes and copy qwords.  If alignments differ, the
+     * source would be misaligned even after aligning the destination,
+     * risking a read across an unmapped page boundary — fall through
+     * to byte-by-byte which is always safe. */
+    if (((uintptr_t)d & 7) == ((uintptr_t)s & 7)) {
+        /* Align both to 8-byte boundary */
+        while (((uintptr_t)d & 7) && n > 0) {
+            *d++ = *s++;
+            n--;
+        }
+        /* Copy 8 bytes at a time — both pointers now 8-byte aligned */
+        while (n >= 8) {
+            *(uint64_t *)d = *(const uint64_t *)s;
+            d += 8; s += 8; n -= 8;
+        }
+    }
+
+    /* Tail (or full copy if alignments differ) */
     while (n--)
         *d++ = *s++;
+
     return dest;
 }
 
