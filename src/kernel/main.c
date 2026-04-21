@@ -112,6 +112,22 @@ void kernel_main(void)
     debug_printf("[INIT] VMM...\n");
     vmm_init();
 
+    /* vmm_init() removes the identity mapping and activates the pull map.
+     * The earlier bi pointer was the identity address (0x9000) and is now
+     * invalid.  Re-fetch via pull map so all further bi accesses are safe. */
+    bi = boot_info_get();
+
+    /* Switch to GOP framebuffer rendering if we booted via UEFI.
+     * Must happen after vmm_init() so vmm_map_mmio() is available. */
+    if (bi->version >= BOOT_INFO_VERSION2 && bi->fb_addr) {
+        vga_init_framebuffer(bi->fb_addr, bi->fb_width, bi->fb_height,
+                             bi->fb_stride, bi->fb_format);
+        if (g_display_mode == DISPLAY_GOP_FB) {
+            kprintf("[DISPLAY] GOP framebuffer active: %ux%u (stride=%u fmt=%u)\n",
+                    bi->fb_width, bi->fb_height, bi->fb_stride, bi->fb_format);
+        }
+    }
+
     debug_printf("[INIT] Physical Memory Tag Table...\n");
     error_t pmtag_err = PhysTagInit();
     if (pmtag_err != OK) {
