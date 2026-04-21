@@ -1067,22 +1067,26 @@ static EFI_STATUS SetupPageTables(uint64_t kernel_phys_end)
     g_pt_base   = aligned_end + GUARD_PAGE_SIZE;
     g_stack_base = g_pt_base + PAGE_TABLE_SIZE + GUARD_PAGE_SIZE + BOOT_STACK_SIZE;
 
-    /* Allocate the 32 KB for page tables. */
+    /* Allocate contiguous region: page tables (32 KB) + guard (4 KB) + stack (64 KB).
+     * All three must be reserved so UEFI firmware does not use them before
+     * ExitBootServices.  The guard page is included in the allocation but left
+     * unmapped — it exists only as a buffer between page tables and stack. */
+    uint64_t total_alloc = PAGE_TABLE_SIZE + GUARD_PAGE_SIZE + BOOT_STACK_SIZE;
     EFI_PHYSICAL_ADDRESS pt_alloc = (EFI_PHYSICAL_ADDRESS)g_pt_base;
-    UINTN pt_pages = PAGE_TABLE_SIZE / PAGE_4KB;
+    UINTN alloc_pages = (UINTN)(total_alloc / PAGE_4KB);
 
     EFI_STATUS status = g_bs->allocate_pages(AllocateAddress,
                                              EfiLoaderData,
-                                             pt_pages,
+                                             alloc_pages,
                                              &pt_alloc);
     if (EFI_ERROR(status)) {
-        g_bs->free_pages(pt_alloc, pt_pages);
+        g_bs->free_pages(pt_alloc, alloc_pages);
         status = g_bs->allocate_pages(AllocateAddress,
                                       EfiLoaderData,
-                                      pt_pages,
+                                      alloc_pages,
                                       &pt_alloc);
         if (EFI_ERROR(status)) {
-            Print("TagBoot: cannot allocate page tables at ");
+            Print("TagBoot: cannot allocate page tables + stack at ");
             PrintHex64(g_pt_base);
             Print("\r\n");
             return status;
@@ -1195,8 +1199,16 @@ static void FillBootInfo(const FbInfo *fb, uint32_t e820_count,
  * Implemented in tagboot_jump.asm — pure NASM, no inline asm ambiguity.
  * Installs our CR3, sets EFER.LME+NXE, CR0.PG, switches RSP, jumps to entry.
  * Never returns.
+ *
+ * IMPORTANT: the NASM code uses System V AMD64 ABI registers (rdi, rsi, rdx).
+ * When compiled with clang -target x86_64-unknown-windows, the default calling
+ * convention is MS ABI (rcx, rdx, r8), which would put arguments in the wrong
+ * registers and cause a triple fault.  The sysv_abi attribute forces System V
+ * calling convention regardless of the compilation target.
  */
-extern void TagBootJump(uint64_t pt_base, uint64_t stack, uint64_t entry);
+extern void __attribute__((sysv_abi)) TagBootJump(uint64_t pt_base,
+                                                   uint64_t stack,
+                                                   uint64_t entry);
 
 static void __attribute__((noreturn)) JumpToKernel(uint64_t pt_base)
 {
