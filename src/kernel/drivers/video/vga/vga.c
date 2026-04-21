@@ -23,7 +23,6 @@ uint8_t vga_current_color = TEXT_ATTR_DEFAULT;
 static unsigned int current_loc = 0;
 static unsigned int last_loc    = 0;
 
-static unsigned int current_line = 0;
 static unsigned int line_size    = VGA_WIDTH * BYTES_FOR_EACH_ELEMENT;
 
 /* =========================================================================
@@ -76,6 +75,93 @@ static const uint32_t vga_palette[16] = {
     0xFFFF55, /* E  YELLOW        */
     0xFFFFFF, /* F  WHITE         */
 };
+
+/* =========================================================================
+ * Fast memory primitives for framebuffer operations
+ *
+ * klib memmove/memset are byte-by-byte — catastrophically slow for multi-MB
+ * shadow buffers.  These replacements use x86-64 string instructions and
+ * SSE2 non-temporal stores that are mandatory on x86-64.
+ * ========================================================================= */
+
+/*
+ * FbMemMove — forward memory copy using rep movsq (8 bytes/iteration).
+ * dst MUST be <= src (forward copy — safe for scroll-up where dst < src).
+ * n is byte count; any tail < 8 bytes is handled with rep movsb.
+ */
+static void FbMemMove(void *dst, const void *src, size_t n)
+{
+    size_t qwords = n >> 3;
+    size_t tail   = n &  7;
+    __asm__ volatile("rep movsq"
+                     : "+D"(dst), "+S"(src), "+c"(qwords)
+                     :: "memory");
+    __asm__ volatile("rep movsb"
+                     : "+D"(dst), "+S"(src), "+c"(tail)
+                     :: "memory");
+}
+
+/*
+ * FbMemSet0 — zero-fill using rep stosq (8 bytes/iteration).
+ * n is byte count; tail handled with rep stosb.
+ */
+static void FbMemSet0(void *dst, size_t n)
+{
+    size_t qwords = n >> 3;
+    size_t tail   = n &  7;
+    __asm__ volatile("xorq %%rax,%%rax; rep stosq"
+                     : "+D"(dst), "+c"(qwords)
+                     :: "rax", "memory");
+    __asm__ volatile("xorb %%al,%%al; rep stosb"
+                     : "+D"(dst), "+c"(tail)
+                     :: "rax", "memory");
+}
+
+/*
+ * FbBlitNT — blit from WB shadow RAM to WC MMIO framebuffer using SSE2
+ * non-temporal stores (MOVNTDQ).
+ *
+ * MOVNTDQ bypasses the CPU data cache on writes and feeds the WC
+ * write-combining buffers directly.  Those buffers drain as 64-byte
+ * cache-line burst transactions — the fastest legal path to WC MMIO.
+ * The loop is 4x unrolled (one full cache line per iteration).
+ * SFENCE at the end ensures all NT stores are globally visible.
+ *
+ * The kernel is compiled with -mno-sse globally (no FPU/SSE in interrupt
+ * context).  The target("sse2") attribute enables SSE2 only for this
+ * function so MOVNTDQ and XMM clobbers are legal here without polluting
+ * the rest of the kernel.
+ */
+__attribute__((target("sse2")))
+static void FbBlitNT(volatile uint8_t *dst, const uint8_t *src, size_t bytes)
+{
+    size_t i = 0;
+
+    /* 64-byte (one cache line) granularity: 4 x MOVNTDQ per iteration. */
+    for (; i + 64 <= bytes; i += 64) {
+        __asm__ volatile(
+            "movdqu    (%1),  %%xmm0\n\t"
+            "movdqu  16(%1),  %%xmm1\n\t"
+            "movdqu  32(%1),  %%xmm2\n\t"
+            "movdqu  48(%1),  %%xmm3\n\t"
+            "movntdq %%xmm0,   (%0)\n\t"
+            "movntdq %%xmm1, 16(%0)\n\t"
+            "movntdq %%xmm2, 32(%0)\n\t"
+            "movntdq %%xmm3, 48(%0)\n\t"
+            :
+            : "r"((uint8_t *)dst + i), "r"(src + i)
+            : "xmm0", "xmm1", "xmm2", "xmm3", "memory"
+        );
+    }
+    /* Tail: any bytes not covered by the 64-byte loop. */
+    for (; i + 4 <= bytes; i += 4)
+        *(volatile uint32_t *)((uint8_t *)dst + i) = *(const uint32_t *)(src + i);
+    for (; i < bytes; i++)
+        *((volatile uint8_t *)dst + i) = src[i];
+
+    /* Fence: ensure all NT stores reach the WC buffers before we return. */
+    __asm__ volatile("sfence" ::: "memory");
+}
 
 /* =========================================================================
  * Low-level pixel helpers
@@ -135,13 +221,13 @@ static void FbFlushChar(uint32_t px_x, uint32_t px_y)
 
 /*
  * FbFlush — blit a contiguous range of horizontal pixel scan-lines from the
- * shadow buffer to the MMIO framebuffer.  Uses 32-bit stores.
+ * shadow buffer to the MMIO framebuffer.  Uses SSE2 NT stores via FbBlitNT.
  *
  * px_y      — first pixel row to blit (inclusive)
  * line_count — number of pixel rows
  *
- * Used by FbScrollUp and FbClearScreen / FbClearRow after bulk RAM
- * operations to commit the result to the display in one pass.
+ * Used by FbClearScreen / FbClearRow after bulk RAM operations to commit
+ * the result to the display in one pass.
  */
 static void FbFlush(uint32_t px_y, uint32_t line_count)
 {
@@ -152,13 +238,8 @@ static void FbFlush(uint32_t px_y, uint32_t line_count)
 
     size_t offset = (size_t)px_y * g_fb.stride;
     size_t bytes  = (size_t)line_count * g_fb.stride;
-    size_t n      = bytes / 4;
 
-    const  uint32_t   *src = (const uint32_t *)(g_fb.shadow + offset);
-    volatile uint32_t *dst = (volatile uint32_t *)(g_fb.virt  + offset);
-
-    for (size_t i = 0; i < n; i++)
-        dst[i] = src[i];
+    FbBlitNT(g_fb.virt + offset, g_fb.shadow + offset, bytes);
 }
 
 /* =========================================================================
@@ -194,13 +275,13 @@ static void FbDrawChar(uint32_t col, uint32_t row, char ch, uint8_t attr)
  * FbScrollUp — scroll the entire display up by one text row.
  *
  * With shadow buffer (normal path):
- *   1. memmove on RAM shadow — fast cached operation, no MMIO reads.
- *   2. memset the last row in shadow to zero (black background).
- *   3. FbFlush: blit entire shadow to MMIO framebuffer in one sequential
- *      pass of 32-bit stores.  ~3 MB at ~20 ns/store in QEMU ≈ 15 ms.
+ *   1. FbMemMove on RAM shadow — rep movsq, 8 bytes/cycle, no MMIO reads.
+ *   2. FbMemSet0 the last row in shadow — rep stosq, zero-fill.
+ *   3. FbBlitNT: blit entire shadow to WC MMIO via SSE2 MOVNTDQ — 64 bytes
+ *      per store burst, drains through write-combining buffers.
  *
  * Without shadow (fallback):
- *   Direct memmove on UC MMIO — very slow but correct.
+ *   Direct rep movsq / rep stosq on MMIO — slow but correct.
  */
 static void FbScrollUp(void)
 {
@@ -208,13 +289,17 @@ static void FbScrollUp(void)
     size_t move_sz   = (size_t)(g_fb.rows - 1) * row_bytes;
 
     if (g_fb.shadow) {
-        memmove(g_fb.shadow, g_fb.shadow + row_bytes, move_sz);
-        memset(g_fb.shadow + move_sz, 0, row_bytes);
-        FbFlush(0, g_fb.height);
+        /* Fast forward copy: dst < src so forward rep movsq is safe. */
+        FbMemMove(g_fb.shadow, g_fb.shadow + row_bytes, move_sz);
+        /* Zero-fill the new blank bottom row. */
+        FbMemSet0(g_fb.shadow + move_sz, row_bytes);
+        /* Blit entire updated shadow to WC MMIO via SSE2 NT stores. */
+        FbBlitNT(g_fb.virt, g_fb.shadow, (size_t)g_fb.height * g_fb.stride);
     } else {
+        /* Fallback: no shadow — direct MMIO ops (slow but correct). */
         uint8_t *base = (uint8_t *)g_fb.virt;
-        memmove(base, base + row_bytes, move_sz);
-        memset(base + move_sz, 0, row_bytes);
+        FbMemMove(base, base + row_bytes, move_sz);
+        FbMemSet0(base + move_sz, row_bytes);
     }
 }
 
@@ -222,10 +307,10 @@ static void FbScrollUp(void)
 static void FbClearScreen(void)
 {
     if (g_fb.shadow) {
-        memset(g_fb.shadow, 0, (size_t)g_fb.height * g_fb.stride);
+        FbMemSet0(g_fb.shadow, (size_t)g_fb.height * g_fb.stride);
         FbFlush(0, g_fb.height);
     } else {
-        memset((void *)g_fb.virt, 0, (size_t)g_fb.height * g_fb.stride);
+        FbMemSet0((void *)g_fb.virt, (size_t)g_fb.height * g_fb.stride);
     }
     g_fb_col = 0;
     g_fb_row = 0;
@@ -243,12 +328,12 @@ static void FbClearRow(uint32_t row)
     if (bg_rgb == 0) {
         /* Background is black — fast path: zero-fill. */
         if (g_fb.shadow) {
-            memset(g_fb.shadow + (size_t)py * g_fb.stride, 0,
-                   (size_t)FONT_H * g_fb.stride);
+            FbMemSet0(g_fb.shadow + (size_t)py * g_fb.stride,
+                      (size_t)FONT_H * g_fb.stride);
             FbFlush(py, FONT_H);
         } else {
-            memset((void *)(g_fb.virt + (size_t)py * g_fb.stride), 0,
-                   (size_t)FONT_H * g_fb.stride);
+            FbMemSet0((void *)(g_fb.virt + (size_t)py * g_fb.stride),
+                      (size_t)FONT_H * g_fb.stride);
         }
     } else {
         /* Non-black background — fill pixel by pixel into shadow, then flush. */
