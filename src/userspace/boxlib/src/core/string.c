@@ -35,16 +35,40 @@ int strncmp(const char* s1, const char* s2, size_t n) {
 }
 
 void* memcpy(void* dest, const void* src, size_t n) {
-    unsigned char* d = (unsigned char*)dest;
-    const unsigned char* s = (const unsigned char*)src;
+    unsigned char *d = (unsigned char *)dest;
+    const unsigned char *s = (const unsigned char *)src;
+
+    /* Fast path: both pointers same alignment → 8-byte qword copy.
+     * Only safe when both are aligned — avoids misaligned read
+     * crossing unmapped page boundaries. */
+    if (((uintptr_t)d & 7) == ((uintptr_t)s & 7)) {
+        while (((uintptr_t)d & 7) && n > 0) { *d++ = *s++; n--; }
+        while (n >= 8) {
+            *(uint64_t *)d = *(const uint64_t *)s;
+            d += 8; s += 8; n -= 8;
+        }
+    }
     while (n--) *d++ = *s++;
     return dest;
 }
 
 void* memset(void* ptr, int value, size_t n) {
-    unsigned char* p = (unsigned char*)ptr;
-    unsigned char val = (unsigned char)value;
-    while (n--) *p++ = val;
+    unsigned char *p = (unsigned char *)ptr;
+    unsigned char uc = (unsigned char)value;
+
+    /* Align then fill 8 bytes at a time (safe — memset only writes) */
+    while (((uintptr_t)p & 7) && n > 0) { *p++ = uc; n--; }
+    if (n >= 8) {
+        uint64_t pattern = (uint64_t)uc | ((uint64_t)uc << 8) |
+                           ((uint64_t)uc << 16) | ((uint64_t)uc << 24) |
+                           ((uint64_t)uc << 32) | ((uint64_t)uc << 40) |
+                           ((uint64_t)uc << 48) | ((uint64_t)uc << 56);
+        while (n >= 8) {
+            *(uint64_t *)p = pattern;
+            p += 8; n -= 8;
+        }
+    }
+    while (n--) *p++ = uc;
     return ptr;
 }
 
