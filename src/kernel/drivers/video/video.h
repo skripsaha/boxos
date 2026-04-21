@@ -36,6 +36,9 @@ void    VideoSetColor(uint8_t color);
 uint8_t VideoGetColor(void);
 void    VideoResetColor(void);
 
+void    VideoBatchBegin(void);
+void    VideoBatchEnd(void);
+
 int         VideoGetCols(void);
 int         VideoGetRows(void);
 DisplayMode VideoGetMode(void);
