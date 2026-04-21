@@ -109,8 +109,16 @@ void vga_change_background(unsigned char attr);
 
 void vga_update_cursor(void);
 void vga_set_cursor_position(int x, int y);
-int vga_get_cursor_position_x();
-int vga_get_cursor_position_y();
+int vga_get_cursor_position_x(void);
+int vga_get_cursor_position_y(void);
+
+/*
+ * Returns the current text-grid width/height:
+ *   GOP framebuffer mode — actual columns/rows derived from resolution.
+ *   VGA text mode        — fixed VGA_WIDTH / VGA_HEIGHT (80 / 25).
+ */
+int vga_get_display_cols(void);
+int vga_get_display_rows(void);
 
 extern uint8_t vga_current_color;
 void vga_set_color(uint8_t color);

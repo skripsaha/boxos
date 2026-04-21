@@ -32,14 +32,25 @@ static unsigned int line_size    = VGA_WIDTH * BYTES_FOR_EACH_ELEMENT;
 
 DisplayMode g_display_mode = DISPLAY_VGA_TEXT;
 
+/*
+ * FbParams — all framebuffer parameters plus the pixel-level shadow buffer.
+ *
+ * shadow: a copy of the framebuffer contents in regular (write-back) RAM.
+ *   - All drawing operations write here first (fast cached writes).
+ *   - FbFlushChar / FbFlush copy shadow → MMIO framebuffer (sequential
+ *     32-bit stores, minimising uncacheable MMIO traffic and eliminating
+ *     slow MMIO reads that made memmove on the raw framebuffer hang).
+ *   - NULL when vmalloc fails; fallback path writes directly to MMIO.
+ */
 typedef struct {
-    volatile uint8_t *virt;   /* virtual base of the mapped framebuffer  */
-    uint32_t          width;  /* pixels per row                           */
-    uint32_t          height; /* pixel rows                               */
-    uint32_t          stride; /* bytes per scan line                      */
-    uint32_t          format; /* 0=RGB, 1=BGR                             */
-    uint32_t          cols;   /* text columns = width  / FONT_W           */
-    uint32_t          rows;   /* text rows    = height / FONT_H           */
+    volatile uint8_t *virt;   /* kernel virtual base of the MMIO framebuffer */
+    uint8_t          *shadow; /* pixel copy in regular RAM (vmalloc, may be NULL) */
+    uint32_t          width;  /* pixels per row                               */
+    uint32_t          height; /* pixel rows                                   */
+    uint32_t          stride; /* bytes per scan line                          */
+    uint32_t          format; /* 0=RGB, 1=BGR                                 */
+    uint32_t          cols;   /* text columns = width  / FONT_W               */
+    uint32_t          rows;   /* text rows    = height / FONT_H               */
 } FbParams;
 
 static FbParams  g_fb     = { 0 };
@@ -66,21 +77,93 @@ static const uint32_t vga_palette[16] = {
     0xFFFFFF, /* F  WHITE         */
 };
 
-/* Write one 32-bpp pixel, honouring the framebuffer colour format. */
-static inline void FbWritePixel(uint32_t x, uint32_t y, uint32_t rgb)
-{
-    volatile uint32_t *px = (volatile uint32_t *)
-        (g_fb.virt + (size_t)y * g_fb.stride + (size_t)x * 4);
+/* =========================================================================
+ * Low-level pixel helpers
+ * ========================================================================= */
 
+/*
+ * FbEncodePixel — apply colour-format conversion and return the 32-bit word
+ * to be stored in the framebuffer / shadow buffer.
+ */
+static inline uint32_t FbEncodePixel(uint32_t rgb)
+{
     if (g_fb.format == 1) {   /* BGR: swap R↔B */
         uint8_t r = (rgb >> 16) & 0xFF;
         uint8_t g = (rgb >>  8) & 0xFF;
         uint8_t b =  rgb        & 0xFF;
-        *px = ((uint32_t)b << 16) | ((uint32_t)g << 8) | r;
-    } else {                  /* RGB (and BGRX / other) */
-        *px = rgb;
+        return ((uint32_t)b << 16) | ((uint32_t)g << 8) | r;
+    }
+    return rgb; /* RGB and BGRX — store as-is */
+}
+
+/*
+ * FbWritePixel — write one pixel to the shadow buffer (preferred) or
+ * directly to the MMIO framebuffer when no shadow is available.
+ */
+static inline void FbWritePixel(uint32_t x, uint32_t y, uint32_t rgb)
+{
+    uint32_t pixel = FbEncodePixel(rgb);
+    size_t   off   = (size_t)y * g_fb.stride + (size_t)x * 4;
+
+    if (g_fb.shadow) {
+        *(uint32_t *)(g_fb.shadow + off) = pixel;
+    } else {
+        *(volatile uint32_t *)(g_fb.virt + off) = pixel;
     }
 }
+
+/*
+ * FbFlushChar — blit one character cell (FONT_W × FONT_H pixels) from the
+ * shadow buffer to the MMIO framebuffer.  Uses 32-bit stores; each pixel is
+ * exactly 4 bytes so the loop is always word-aligned.
+ *
+ * Called after every FbDrawChar to minimise MMIO write traffic: only the
+ * 8×16 = 128 words that actually changed are written to the device.
+ */
+static void FbFlushChar(uint32_t px_x, uint32_t px_y)
+{
+    if (!g_fb.shadow) return;
+
+    for (uint32_t y = 0; y < FONT_H; y++) {
+        size_t row_off = (size_t)(px_y + y) * g_fb.stride + (size_t)px_x * 4;
+        const  uint32_t          *src = (const uint32_t *)(g_fb.shadow + row_off);
+        volatile uint32_t        *dst = (volatile uint32_t *)(g_fb.virt  + row_off);
+        for (uint32_t x = 0; x < FONT_W; x++)
+            dst[x] = src[x];
+    }
+}
+
+/*
+ * FbFlush — blit a contiguous range of horizontal pixel scan-lines from the
+ * shadow buffer to the MMIO framebuffer.  Uses 32-bit stores.
+ *
+ * px_y      — first pixel row to blit (inclusive)
+ * line_count — number of pixel rows
+ *
+ * Used by FbScrollUp and FbClearScreen / FbClearRow after bulk RAM
+ * operations to commit the result to the display in one pass.
+ */
+static void FbFlush(uint32_t px_y, uint32_t line_count)
+{
+    if (!g_fb.shadow) return;
+    if (px_y >= g_fb.height) return;
+    if (px_y + line_count > g_fb.height)
+        line_count = g_fb.height - px_y;
+
+    size_t offset = (size_t)px_y * g_fb.stride;
+    size_t bytes  = (size_t)line_count * g_fb.stride;
+    size_t n      = bytes / 4;
+
+    const  uint32_t   *src = (const uint32_t *)(g_fb.shadow + offset);
+    volatile uint32_t *dst = (volatile uint32_t *)(g_fb.virt  + offset);
+
+    for (size_t i = 0; i < n; i++)
+        dst[i] = src[i];
+}
+
+/* =========================================================================
+ * Character-level drawing (GOP framebuffer)
+ * ========================================================================= */
 
 /* Render one 8×16 glyph at text-grid position (col, row). */
 static void FbDrawChar(uint32_t col, uint32_t row, char ch, uint8_t attr)
@@ -101,23 +184,49 @@ static void FbDrawChar(uint32_t col, uint32_t row, char ch, uint8_t attr)
                          (bits & (0x80u >> x)) ? fg_rgb : bg_rgb);
         }
     }
+
+    /* Commit only this character's pixels to the MMIO framebuffer.
+     * 128 × 32-bit stores is negligible; avoids full-row blits per char. */
+    FbFlushChar(px, py);
 }
 
-/* Scroll the entire framebuffer up by one text row. */
+/*
+ * FbScrollUp — scroll the entire display up by one text row.
+ *
+ * With shadow buffer (normal path):
+ *   1. memmove on RAM shadow — fast cached operation, no MMIO reads.
+ *   2. memset the last row in shadow to zero (black background).
+ *   3. FbFlush: blit entire shadow to MMIO framebuffer in one sequential
+ *      pass of 32-bit stores.  ~3 MB at ~20 ns/store in QEMU ≈ 15 ms.
+ *
+ * Without shadow (fallback):
+ *   Direct memmove on UC MMIO — very slow but correct.
+ */
 static void FbScrollUp(void)
 {
-    uint8_t *base     = (uint8_t *)g_fb.virt;
-    size_t   row_px   = (size_t)FONT_H * g_fb.stride;
-    size_t   move_sz  = (size_t)(g_fb.rows - 1) * row_px;
+    size_t row_bytes = (size_t)FONT_H * g_fb.stride;
+    size_t move_sz   = (size_t)(g_fb.rows - 1) * row_bytes;
 
-    memmove(base, base + row_px, move_sz);
-    memset(base + move_sz, 0, row_px);
+    if (g_fb.shadow) {
+        memmove(g_fb.shadow, g_fb.shadow + row_bytes, move_sz);
+        memset(g_fb.shadow + move_sz, 0, row_bytes);
+        FbFlush(0, g_fb.height);
+    } else {
+        uint8_t *base = (uint8_t *)g_fb.virt;
+        memmove(base, base + row_bytes, move_sz);
+        memset(base + move_sz, 0, row_bytes);
+    }
 }
 
 /* Clear the full framebuffer and home the cursor. */
 static void FbClearScreen(void)
 {
-    memset((void *)g_fb.virt, 0, (size_t)g_fb.height * g_fb.stride);
+    if (g_fb.shadow) {
+        memset(g_fb.shadow, 0, (size_t)g_fb.height * g_fb.stride);
+        FbFlush(0, g_fb.height);
+    } else {
+        memset((void *)g_fb.virt, 0, (size_t)g_fb.height * g_fb.stride);
+    }
     g_fb_col = 0;
     g_fb_row = 0;
 }
@@ -126,19 +235,35 @@ static void FbClearScreen(void)
 static void FbClearRow(uint32_t row)
 {
     if (row >= g_fb.rows) return;
-    uint8_t bg = (vga_current_color >> 4) & 0x0F;
+
+    uint8_t  bg     = (vga_current_color >> 4) & 0x0F;
     uint32_t bg_rgb = vga_palette[bg];
-    uint32_t py = row * FONT_H;
+    uint32_t py     = row * FONT_H;
 
     if (bg_rgb == 0) {
-        uint8_t *base = (uint8_t *)g_fb.virt + (size_t)py * g_fb.stride;
-        memset(base, 0, (size_t)FONT_H * g_fb.stride);
-    } else {
-        for (uint32_t y = py; y < py + FONT_H; y++) {
-            for (uint32_t x = 0; x < g_fb.width; x++) {
-                FbWritePixel(x, y, bg_rgb);
-            }
+        /* Background is black — fast path: zero-fill. */
+        if (g_fb.shadow) {
+            memset(g_fb.shadow + (size_t)py * g_fb.stride, 0,
+                   (size_t)FONT_H * g_fb.stride);
+            FbFlush(py, FONT_H);
+        } else {
+            memset((void *)(g_fb.virt + (size_t)py * g_fb.stride), 0,
+                   (size_t)FONT_H * g_fb.stride);
         }
+    } else {
+        /* Non-black background — fill pixel by pixel into shadow, then flush. */
+        uint32_t encoded = FbEncodePixel(bg_rgb);
+        for (uint32_t y = py; y < py + FONT_H; y++) {
+            uint32_t *row_ptr;
+            if (g_fb.shadow) {
+                row_ptr = (uint32_t *)(g_fb.shadow + (size_t)y * g_fb.stride);
+            } else {
+                row_ptr = (uint32_t *)(g_fb.virt + (size_t)y * g_fb.stride);
+            }
+            for (uint32_t x = 0; x < g_fb.width; x++)
+                row_ptr[x] = encoded;
+        }
+        if (g_fb.shadow) FbFlush(py, FONT_H);
     }
 }
 
@@ -225,12 +350,56 @@ void vga_init_framebuffer(uint64_t phys_addr, uint32_t width, uint32_t height,
     g_fb.cols   = width  / FONT_W;
     g_fb.rows   = height / FONT_H;
 
+    /*
+     * Allocate pixel shadow buffer in regular (write-back) RAM.
+     * All drawing operates on this buffer; FbFlushChar/FbFlush commit
+     * changes to the UC MMIO framebuffer using sequential 32-bit stores,
+     * which is orders of magnitude faster than byte-by-byte memmove on
+     * raw MMIO (which would hang on large displays).
+     *
+     * vmalloc is used (not kmalloc) since fb_size can exceed the kernel
+     * heap's contiguous allocation limit (e.g. 8 MB for 1920×1080).
+     */
+    g_fb.shadow = (uint8_t *)vmalloc(fb_size);
+    if (!g_fb.shadow) {
+        debug_printf("[VGA] vga_init_framebuffer: shadow alloc failed "
+                     "(%zu bytes) — fallback to direct MMIO writes\n", fb_size);
+    }
+
     g_fb_col = 0;
     g_fb_row = 0;
 
     /* Switch mode before clearing so that subsequent kprintf goes to the FB. */
     g_display_mode = DISPLAY_GOP_FB;
     FbClearScreen();
+}
+
+/* =========================================================================
+ * Public dimension helpers
+ * ========================================================================= */
+
+/*
+ * vga_get_display_cols / vga_get_display_rows
+ *
+ * Return the actual text-grid dimensions of the current display mode:
+ *   GOP mode  — derived from the GOP framebuffer resolution.
+ *   Text mode — fixed 80 × 25 VGA hardware constants.
+ *
+ * Used by the hardware deck to report accurate screen geometry to userspace
+ * instead of the hardcoded 80 × 25 that was always returned before.
+ */
+int vga_get_display_cols(void)
+{
+    if (g_display_mode == DISPLAY_GOP_FB && g_fb.cols > 0)
+        return (int)g_fb.cols;
+    return VGA_WIDTH;
+}
+
+int vga_get_display_rows(void)
+{
+    if (g_display_mode == DISPLAY_GOP_FB && g_fb.rows > 0)
+        return (int)g_fb.rows;
+    return VGA_HEIGHT;
 }
 
 /* =========================================================================
