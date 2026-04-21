@@ -10,14 +10,14 @@
 // Direct sector I/O — bypasses tagfs block abstraction (which adds block_to_sector offset)
 static int disk_book_read_sectors(uint64_t lba, uint16_t count, void *buf) {
     if (ahci_is_initialized())
-        return ahci_read_sectors_sync(0, lba, count, buf);
-    return ata_read_sectors_retry(1, lba, count, (uint8_t *)buf);
+        return ahci_read_sectors_sync(tagfs_get_ahci_port(), lba, count, buf);
+    return ata_read_sectors_retry(tagfs_get_drive(), lba, count, (uint8_t *)buf);
 }
 
 static int disk_book_write_sectors(uint64_t lba, uint16_t count, const void *buf) {
     if (ahci_is_initialized())
-        return ahci_write_sectors_sync(0, lba, count, buf);
-    return ata_write_sectors_retry(1, lba, count, (const uint8_t *)buf);
+        return ahci_write_sectors_sync(tagfs_get_ahci_port(), lba, count, buf);
+    return ata_write_sectors_retry(tagfs_get_drive(), lba, count, (const uint8_t *)buf);
 }
 
 // Global state
