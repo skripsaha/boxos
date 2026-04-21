@@ -480,7 +480,7 @@ int hardware_deck_handler(Pocket* pocket, process_t* proc) {
             uint8_t row = data[0];
             uint8_t color = data[1];
 
-            if (row >= VGA_HEIGHT) {
+            if ((int)row >= vga_get_display_rows()) {
                 data[0] = VGA_ERR_OUT_OF_BOUNDS;
                 pocket->error_code = VGA_ERR_OUT_OF_BOUNDS;
                 return -1;
@@ -525,9 +525,9 @@ int hardware_deck_handler(Pocket* pocket, process_t* proc) {
             uint8_t row = data[0];
             uint8_t col = data[1];
 
-            if (row >= VGA_HEIGHT) row = VGA_HEIGHT - 1;
-            if (col >= VGA_WIDTH) col = VGA_WIDTH - 1;
-
+            /* Do not pre-clamp here — vga_set_cursor_position() handles
+             * bounds for both VGA text mode (80×25) and GOP framebuffer
+             * mode (actual resolution-derived columns × rows). */
             vga_set_cursor_position(col, row);
 
             uint8_t clamped_row = vga_get_cursor_position_y();
@@ -594,8 +594,8 @@ int hardware_deck_handler(Pocket* pocket, process_t* proc) {
             if (!data) return -1;
 
             data[0] = VGA_SUCCESS;
-            data[1] = VGA_WIDTH;
-            data[2] = VGA_HEIGHT;
+            data[1] = (uint8_t)vga_get_display_cols();
+            data[2] = (uint8_t)vga_get_display_rows();
             return 0;
         }
 
