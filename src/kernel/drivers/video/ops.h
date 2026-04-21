@@ -16,6 +16,8 @@ typedef struct {
     void     (*ChangeBackground)(uint8_t bg);
     uint16_t (*GetCols)(void);
     uint16_t (*GetRows)(void);
+    void     (*BatchBegin)(void);
+    void     (*BatchEnd)(void);
 } DisplayOps;
 
 #endif /* VIDEO_OPS_H */

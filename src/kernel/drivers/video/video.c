@@ -51,8 +51,10 @@ void VideoPrintChar(char ch, uint8_t attr)
 
 void VideoPrint(const char *str)
 {
+    g_ops->BatchBegin();
     while (*str)
         g_ops->PrintChar(*str++, g_current_color);
+    g_ops->BatchEnd();
     g_ops->UpdateCursor();
 }
 
@@ -76,20 +78,29 @@ void VideoUpdateCursor(void)      { g_ops->UpdateCursor(); }
 int VideoGetCols(void) { return (int)g_ops->GetCols(); }
 int VideoGetRows(void) { return (int)g_ops->GetRows(); }
 
+void VideoBatchBegin(void) { g_ops->BatchBegin(); }
+void VideoBatchEnd(void)   { g_ops->BatchEnd(); }
+
 void VideoPrintError(const char *str)
 {
+    g_ops->BatchBegin();
     while (*str) g_ops->PrintChar(*str++, VIDEO_ATTR_ERROR);
+    g_ops->BatchEnd();
     g_ops->UpdateCursor();
 }
 
 void VideoPrintSuccess(const char *str)
 {
+    g_ops->BatchBegin();
     while (*str) g_ops->PrintChar(*str++, VIDEO_ATTR_SUCCESS);
+    g_ops->BatchEnd();
     g_ops->UpdateCursor();
 }
 
 void VideoPrintHint(const char *str)
 {
+    g_ops->BatchBegin();
     while (*str) g_ops->PrintChar(*str++, VIDEO_ATTR_HINT);
+    g_ops->BatchEnd();
     g_ops->UpdateCursor();
 }

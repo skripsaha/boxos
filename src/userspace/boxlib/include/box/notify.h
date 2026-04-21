@@ -93,4 +93,43 @@ void yield(void);
 // Send a single-prefix Pocket: prepare, set data, add prefix, submit.
 int pocket_send(uint8_t deck_id, uint8_t opcode, void* data, uint32_t length);
 
+/* =========================================================================
+ * Batch API — push multiple Pockets, one SYSCALL for all.
+ *
+ * The Guide already drains the entire PocketRing per SYSCALL.  These
+ * functions let userspace fill the ring first, then trigger processing
+ * with a single kernel entry — eliminating N-1 round-trips.
+ *
+ * IMPORTANT: each queued Pocket's data_addr must point to a SEPARATE
+ * buffer that remains valid until pocket_flush / pocket_flush_wait
+ * completes.  The kernel reads data in-place; shared buffers will
+ * be corrupted by earlier handlers before later ones run.
+ *
+ * Example (5 VGA ops in 1 SYSCALL instead of 5):
+ *
+ *   uint8_t color_buf  = GREEN;
+ *   uint8_t str_buf[192];  // ... fill putstring packet ...
+ *   uint8_t nl_buf[4] = {0};
+ *
+ *   pocket_queue(DECK_HARDWARE, 0x77, &color_buf, 1);
+ *   pocket_queue(DECK_HARDWARE, 0x71, str_buf, len);
+ *   pocket_queue(DECK_HARDWARE, 0x7A, nl_buf, 4);
+ *
+ *   Result results[3];
+ *   int got = pocket_flush_wait(results, 3, 100000);
+ * ========================================================================= */
+
+// Queue a Pocket without triggering SYSCALL.
+// Data buffer must remain valid until flush completes.
+// Returns 0 on success, -1 if PocketRing is full.
+int pocket_queue(uint8_t deck_id, uint8_t opcode, void* data, uint32_t length);
+
+// Trigger one SYSCALL to process all queued Pockets.
+void pocket_flush(void);
+
+// Flush + wait for exactly `count` results (Result from box/result.h).
+// Returns number of results successfully received.
+// Caller must include box/result.h and pass a Result[] array.
+int pocket_flush_wait(void* results, int count, uint32_t timeout_ms);
+
 #endif // BOX_NOTIFY_H

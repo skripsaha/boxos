@@ -438,12 +438,14 @@ int hardware_deck_handler(Pocket* pocket, process_t* proc) {
             VideoSetColor(color);
 
             uint8_t chars_written = 0;
+            VideoBatchBegin();
             for (uint8_t i = 0; i < length && data[4 + i] != '\0'; i++) {
                 char ch = data[4 + i];
                 VideoPrintChar(ch, color);
                 serial_putchar(ch);
                 chars_written++;
             }
+            VideoBatchEnd();
 
             if (!(flags & 0x02)) {
                 VideoSetColor(old_color);

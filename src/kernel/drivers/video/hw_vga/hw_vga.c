@@ -170,6 +170,10 @@ static void HwChangeBackground(uint8_t bg)
 static uint16_t HwGetCols(void) { return HW_VGA_COLS; }
 static uint16_t HwGetRows(void) { return HW_VGA_ROWS; }
 
+/* VGA text mode: all writes are immediate MMIO — batch is a no-op */
+static void HwBatchBegin(void) { }
+static void HwBatchEnd(void)   { }
+
 const DisplayOps hw_vga_ops = {
     .PrintChar        = HwPrintChar,
     .ScrollUp         = HwScrollUp,
@@ -183,4 +187,6 @@ const DisplayOps hw_vga_ops = {
     .ChangeBackground = HwChangeBackground,
     .GetCols          = HwGetCols,
     .GetRows          = HwGetRows,
+    .BatchBegin       = HwBatchBegin,
+    .BatchEnd         = HwBatchEnd,
 };

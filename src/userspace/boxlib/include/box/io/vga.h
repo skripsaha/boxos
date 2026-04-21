@@ -78,6 +78,25 @@ int vga_setcolor(uint8_t color);
 
 int vga_getdimensions(vga_dimensions_t* dims);
 
+/* =========================================================================
+ * Batch session — multiple VGA operations in one SYSCALL.
+ *
+ *   vga_begin();
+ *   vga_setcolor(GREEN);       // queued, no SYSCALL
+ *   vga_puts("OK: ");          // queued, no SYSCALL
+ *   vga_setcolor(WHITE);       // queued, no SYSCALL
+ *   vga_puts(filename);        // queued, no SYSCALL
+ *   vga_newline();             // queued, no SYSCALL
+ *   vga_commit();              // ONE SYSCALL for all 5 ops
+ *
+ * Query functions (getcolor, getcursor, getdimensions) always return
+ * cached values — they work identically inside and outside batch mode.
+ * Auto-commits if batch buffer overflows.
+ * ========================================================================= */
+
+void vga_begin(void);
+int  vga_commit(void);
+
 INLINE int vga_map_error(int32_t kernel_error) {
     switch (kernel_error) {
         case 0:  return 0;
