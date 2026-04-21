@@ -652,7 +652,7 @@ static void vmm_free_user_space_tables(vmm_context_t *ctx)
                     uintptr_t virt = (p4 * 512ULL * 1024 * 1024 * 1024) +
                                      (p3 * 1024 * 1024 * 1024) +
                                      (p2 * 2 * 1024 * 1024) +
-                                     (p1 * 4096);
+                                     (p1 * VMM_PAGE_SIZE);
                     bool is_identity_mapped = (!g_pull_map_active) && (phys == virt);
 
                     if (phys == g_cpu_caps_page_phys)

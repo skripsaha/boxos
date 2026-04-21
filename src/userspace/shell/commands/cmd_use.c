@@ -4,17 +4,15 @@
 #include "box/file.h"
 #include "box/string.h"
 
-int cmd_use(int argc, char* argv[]) {
-    shell_state_t* state = shell_get_state();
+int cmd_use(int argc, char *argv[])
+{
+    ShellState *state = ShellGetState();
 
     if (argc == 1) {
         state->context_tag_count = 0;
         memset(state->context_tags, 0, sizeof(state->context_tags));
-
         context_clear();
-
-        shell_update_prompt();
-
+        ShellUpdatePrompt();
         println("Context cleared");
         return 0;
     }
@@ -24,7 +22,8 @@ int cmd_use(int argc, char* argv[]) {
 
     for (int i = 1; i < argc && state->context_tag_count < SHELL_MAX_CONTEXT_TAGS; i++) {
         size_t tag_len = strlen(argv[i]);
-        if (tag_len > 31) tag_len = 31;
+        if (tag_len > SHELL_CONTEXT_TAG_LEN - 1)
+            tag_len = SHELL_CONTEXT_TAG_LEN - 1;
 
         memcpy(state->context_tags[state->context_tag_count], argv[i], tag_len);
         state->context_tags[state->context_tag_count][tag_len] = '\0';
@@ -33,8 +32,7 @@ int cmd_use(int argc, char* argv[]) {
         context_set(argv[i]);
     }
 
-    shell_update_prompt();
-
+    ShellUpdatePrompt();
     println("Context set");
     return 0;
 }

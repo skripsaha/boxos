@@ -3,7 +3,7 @@
 
 #include "shell.h"
 
-int executor_run(parsed_command_t *cmd);
-const char *executor_get_error(void);
+int         ExecutorRun(ParsedCommand *cmd);
+const char *ExecutorGetError(void);
 
-#endif // EXECUTOR_H
+#endif /* EXECUTOR_H */

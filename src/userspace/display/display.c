@@ -36,21 +36,13 @@ static void render(const uint8_t* data, uint16_t len) {
         }
 
         if (b >= 0x20) {
-            char buf[192];
+            char buf[186];
             int pos = 0;
             while (i < len && data[i] >= 0x20 && pos < 185) {
                 buf[pos++] = (char)data[i++];
             }
             buf[pos] = '\0';
-            uint8_t pkt[192];
-            pkt[0] = (uint8_t)pos;
-            pkt[1] = display_cached_color;
-            pkt[2] = 0;
-            pkt[3] = 0;
-            memcpy(pkt + 4, buf, pos);
-            pocket_send(DECK_HARDWARE, 0x71, pkt, (uint32_t)(pos + 4));
-            Result result;
-            result_wait(&result, 100000);
+            vga_puts(buf);
             continue;
         }
 

@@ -1,12 +1,11 @@
 #include "commands.h"
 #include "../shell.h"
-#include "box/io.h"
+#include "box/system.h"
 
-int cmd_exit(int argc, char* argv[]) {
+int cmd_exit(int argc, char *argv[])
+{
     (void)argc;
     (void)argv;
-
-    println("Goodbye!");
-    shell_stop();
+    ShellStop();
     return 0;
 }
