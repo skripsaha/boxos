@@ -2109,6 +2109,7 @@ int tagfs_write(TagFSFileHandle *handle, const void *buffer, uint64_t size)
     uint8_t block_buf[TAGFS_BLOCK_SIZE];
     uint64_t bytes_written = 0;
 
+
     while (bytes_written < size)
     {
         uint64_t file_pos = handle->offset + bytes_written;
@@ -2209,23 +2210,21 @@ int tagfs_write(TagFSFileHandle *handle, const void *buffer, uint64_t size)
         // check if identical data already resides on disk.
         // We skip dedup for partial writes (read-modify-write) since we need
         // the real data to already exist on disk for dedup to be safe.
+        /* Inline dedup DISABLED during write.
+         *
+         * Dedup inside tagfs_write caused a block reuse race: freed dedup
+         * blocks were reallocated by MetaPool CHAINING (in the meta_pool_write
+         * call at the end of this function), corrupting file data.
+         *
+         * Dedup is still effective via TagFS_DedupRegister on close/flush
+         * or as a background compaction pass.  The inline path was an
+         * optimization that traded safety for space — not acceptable for
+         * production. */
         bool wrote_block = false;
         if (newly_allocated && block_index == 0 &&
             offset_in_block == 0 && chunk == TAGFS_BLOCK_SIZE &&
             TagFS_DedupIsInitialized()) {
-            uint32_t existing_block = 0;
-            bool is_dup = false;
-            if (TagFS_DedupCheck(block_buf, &existing_block, &is_dup) == OK && is_dup) {
-                // Identical block already on disk — free the just-allocated block
-                // and point the extent at the existing one instead.
-                tagfs_free_blocks(write_target, 1);
-                handle->extents[found].start_block = existing_block;
-                write_target = existing_block;
-                TagFS_DedupRegister(existing_block, block_buf, handle->file_id);
-                wrote_block = true;
-            } else {
-                TagFS_DedupRegister(write_target, block_buf, handle->file_id);
-            }
+            TagFS_DedupRegister(write_target, block_buf, handle->file_id);
         }
 
         if (!wrote_block) {

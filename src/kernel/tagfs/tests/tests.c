@@ -360,6 +360,20 @@ static TestResult test_stress_large_file(void) {
     memset(g_test_output, 0, sizeof(g_test_output));
     int read = tagfs_read(handle, g_test_output, 4096);
     TEST_ASSERT_EQ(read, 4096, "Should read 4096 bytes");
+
+    if (memcmp(g_test_buffer, g_test_output, 4096) != 0) {
+        /* Diagnostic: find first mismatch and dump context */
+        for (int i = 0; i < 4096; i++) {
+            if (g_test_buffer[i] != g_test_output[i]) {
+                debug_printf("[DIAG] large_file MISMATCH at byte %d: expected 0x%02x got 0x%02x\n",
+                             i, g_test_buffer[i], g_test_output[i]);
+                debug_printf("[DIAG] file_id=%u extent_count=%u extent[0].start=%u\n",
+                             handle->file_id, handle->extent_count,
+                             handle->extent_count > 0 ? handle->extents[0].start_block : 0);
+                break;
+            }
+        }
+    }
     TEST_ASSERT(memcmp(g_test_buffer, g_test_output, 4096) == 0, "First block should match");
 
     // Cleanup
