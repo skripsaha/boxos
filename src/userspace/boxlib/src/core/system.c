@@ -262,11 +262,36 @@ int shutdown(void) {
 int sysinfo(system_info_t* info) {
     if (!info) return -1;
 
-    memcpy(info->version, "BoxOS v0.1.0", 13);
-    info->version[13] = '\0';
-    info->uptime_seconds = 0;
-    info->total_memory = 16 * 1024 * 1024;
-    info->used_memory = 8 * 1024 * 1024;
+    uint8_t args[192];
+    memset(args, 0, sizeof(args));
+    pocket_send(DECK_SYSTEM, 0x07, args, sizeof(args));
+
+    Result result;
+    if (!result_wait(&result, 5000)) {
+        /* Kernel doesn't support sysinfo opcode yet — fill defaults */
+        memcpy(info->version, "BoxOS v0.1.0", 13);
+        info->version[12] = '\0';
+        info->uptime_seconds = 0;
+        info->total_memory = 0;
+        info->used_memory = 0;
+        return 0;
+    }
+
+    if (result.error_code != OK || result.data_length < 40 || result.data_addr == 0) {
+        memcpy(info->version, "BoxOS v0.1.0", 13);
+        info->version[12] = '\0';
+        info->uptime_seconds = 0;
+        info->total_memory = 0;
+        info->used_memory = 0;
+        return 0;
+    }
+
+    uint8_t* data = (uint8_t*)(uintptr_t)result.data_addr;
+    memcpy(info->version, data, 32);
+    info->version[31] = '\0';
+    memcpy(&info->uptime_seconds, data + 32, 4);
+    memcpy(&info->total_memory, data + 36, 4);
+    memcpy(&info->used_memory, data + 40, 4);
 
     return 0;
 }

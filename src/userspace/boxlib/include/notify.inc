@@ -4,9 +4,9 @@
 ; PocketRing layout (packed struct at POCKET_RING, 4KB page):
 ;   0x00  head          uint32_t  (kernel advances)
 ;   0x04  tail          uint32_t  (userspace advances)
-;   0x08  slots[42]     Pocket[42] (42 * 96 = 4032 bytes)
+;   0x08  slots[31]     Pocket[31] (31 * 128 = 3968 bytes)
 ;
-; Pocket layout (96 bytes):
+; Pocket layout (128 bytes — must match C sizeof(Pocket)):
 ;   0x00  pid           uint32_t  (kernel overwrites)
 ;   0x04  target_pid    uint32_t
 ;   0x08  error_code    uint32_t
@@ -17,9 +17,9 @@
 ;   0x10  data_length   uint32_t
 ;   0x14  data_addr     uint64_t
 ;   0x1C  route_tag[32] char[32]
-;   0x3C  prefixes[16]  uint16_t[16]
-;   0x5C  _pad[4]       uint8_t[4]
-;   total = 96 bytes
+;   0x3C  prefixes[32]  uint16_t[32]
+;   0x7C  _pad[4]       uint8_t[4]
+;   total = 128 bytes
 
 %ifndef NOTIFY_INC
 %define NOTIFY_INC
@@ -36,8 +36,8 @@ POCKET_RING_HEAD   equ 0x00
 POCKET_RING_TAIL   equ 0x04
 POCKET_RING_SLOTS  equ 0x08
 
-POCKET_SIZE        equ 96
-POCKET_RING_CAP    equ 42
+POCKET_SIZE        equ 128
+POCKET_RING_CAP    equ 31
 
 ; Pocket field offsets
 PKT_PID            equ 0x00
@@ -61,7 +61,7 @@ DECK_SYSTEM        equ 0xFF
 
 ; -------------------------------------------------------------------------
 ; pocket_push — push a Pocket to the PocketRing from stack-local buffer.
-; Input: rdi = pointer to 96-byte Pocket struct
+; Input: rdi = pointer to 128-byte Pocket struct
 ; Output: eax = 0 on success, -1 if ring full
 ; Clobbers: rax, rcx, rdx, rsi
 ; -------------------------------------------------------------------------
@@ -80,7 +80,7 @@ DECK_SYSTEM        equ 0xFF
     cmp edx, [rax + POCKET_RING_HEAD]
     pop rbx
     je %%full
-    ; Copy 96 bytes from rdi to ring->slots[tail]
+    ; Copy POCKET_SIZE bytes from rdi to ring->slots[tail]
     ; slot_addr = POCKET_RING + POCKET_RING_SLOTS + tail * POCKET_SIZE
     imul ecx, ecx, POCKET_SIZE
     lea rsi, [rax + POCKET_RING_SLOTS]
@@ -118,11 +118,11 @@ DECK_SYSTEM        equ 0xFF
 ; Clobbers: rax, rcx, rdx, rdi, rsi, r11
 ; -------------------------------------------------------------------------
 %macro YIELD 0
-    sub rsp, 96
+    sub rsp, POCKET_SIZE
     mov rdi, rsp
     ; Zero the pocket
     push rcx
-    mov ecx, 96
+    mov ecx, POCKET_SIZE
 %%zero:
     mov byte [rdi + rcx - 1], 0
     dec ecx
@@ -133,7 +133,7 @@ DECK_SYSTEM        equ 0xFF
     ; Push to ring
     mov rdi, rsp
     pocket_push
-    add rsp, 96
+    add rsp, POCKET_SIZE
     notify
 %endmacro
 

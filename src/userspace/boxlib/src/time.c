@@ -98,6 +98,66 @@ static void write4(char* buf, uint16_t v) {
     buf[3] = (char)('0' + v % 10);
 }
 
+int64_t time_diff(const time_t* a, const time_t* b) {
+    if (!a || !b) return 0;
+    int64_t sec_diff = (int64_t)a->seconds - (int64_t)b->seconds;
+    int64_t ns_diff  = (int64_t)a->nanosec - (int64_t)b->nanosec;
+    return sec_diff * 1000 + ns_diff / 1000000;
+}
+
+void time_add_ms(const time_t* t, int64_t ms, time_t* out) {
+    if (!t || !out) return;
+
+    int64_t total_ns = (int64_t)t->nanosec + (ms % 1000) * 1000000;
+    int64_t total_sec = (int64_t)t->seconds + ms / 1000;
+
+    if (total_ns >= 1000000000) {
+        total_sec += 1;
+        total_ns -= 1000000000;
+    } else if (total_ns < 0) {
+        total_sec -= 1;
+        total_ns += 1000000000;
+    }
+
+    out->seconds = (uint64_t)total_sec;
+    out->nanosec = (uint32_t)total_ns;
+
+    /* Recompute broken-down fields from total seconds.
+     * This is approximate — uses a simple epoch-relative calculation. */
+    uint64_t rem = (uint64_t)total_sec;
+
+    /* Days since epoch */
+    uint32_t days = (uint32_t)(rem / 86400);
+    rem %= 86400;
+    out->hour   = (uint8_t)(rem / 3600);
+    rem %= 3600;
+    out->minute = (uint8_t)(rem / 60);
+    out->second = (uint8_t)(rem % 60);
+    out->weekday = (uint8_t)((days + 4) % 7); /* epoch was Thursday */
+
+    /* Year/month/day from day count (civil calendar from day count) */
+    int32_t y = 1970;
+    while (1) {
+        uint32_t ydays = 365;
+        if ((y % 4 == 0 && y % 100 != 0) || y % 400 == 0) ydays = 366;
+        if (days < ydays) break;
+        days -= ydays;
+        y++;
+    }
+    out->year = (uint16_t)y;
+
+    static const uint8_t mdays[] = {31,28,31,30,31,30,31,31,30,31,30,31};
+    uint8_t leap = ((y % 4 == 0 && y % 100 != 0) || y % 400 == 0) ? 1 : 0;
+    uint8_t m;
+    for (m = 0; m < 12; m++) {
+        uint8_t md = mdays[m] + ((m == 1) ? leap : 0);
+        if (days < md) break;
+        days -= md;
+    }
+    out->month = m + 1;
+    out->day   = (uint8_t)(days + 1);
+}
+
 int time_format(const time_t* t, char* buf, size_t buf_size) {
     if (!t || !buf) return ERR_NULL_POINTER;
     if (buf_size < 20) return ERR_BUFFER_TOO_SMALL;

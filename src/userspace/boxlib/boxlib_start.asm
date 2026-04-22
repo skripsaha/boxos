@@ -39,11 +39,12 @@ global exit_asm
 exit_asm:
     ; rdi = exit_code
     ; Build a Pocket on stack: kill self (DECK_SYSTEM, opcode 0x02)
-    sub rsp, 96
+    ; Pocket is 128 bytes (must match C sizeof(Pocket))
+    sub rsp, POCKET_SIZE
     mov rsi, rsp
     ; Zero it
     push rcx
-    mov ecx, 96
+    mov ecx, POCKET_SIZE
 .zero:
     mov byte [rsi + rcx - 1], 0
     dec ecx
@@ -56,7 +57,7 @@ exit_asm:
     ; Push to PocketRing
     mov rdi, rsp
     pocket_push
-    add rsp, 96
+    add rsp, POCKET_SIZE
     notify
 .halt_exit:
     hlt

@@ -45,9 +45,14 @@ static Result ipc_stash_buf[IPC_STASH_SIZE];
 static uint32_t ipc_stash_cnt = 0;
 
 static void ipc_stash_push(Result* entry) {
-    if (ipc_stash_cnt < IPC_STASH_SIZE) {
-        ipc_stash_buf[ipc_stash_cnt++] = *entry;
+    if (ipc_stash_cnt >= IPC_STASH_SIZE) {
+        /* Stash full: drop oldest to make room */
+        for (uint32_t i = 1; i < ipc_stash_cnt; i++) {
+            ipc_stash_buf[i - 1] = ipc_stash_buf[i];
+        }
+        ipc_stash_cnt--;
     }
+    ipc_stash_buf[ipc_stash_cnt++] = *entry;
 }
 
 static bool ipc_stash_shift(Result* out) {
@@ -65,9 +70,14 @@ static Result non_ipc_stash_buf[NON_IPC_STASH_SIZE];
 static uint32_t non_ipc_stash_cnt = 0;
 
 static void non_ipc_stash_push(Result* entry) {
-    if (non_ipc_stash_cnt < NON_IPC_STASH_SIZE) {
-        non_ipc_stash_buf[non_ipc_stash_cnt++] = *entry;
+    if (non_ipc_stash_cnt >= NON_IPC_STASH_SIZE) {
+        /* Stash full: drop oldest to make room */
+        for (uint32_t i = 1; i < non_ipc_stash_cnt; i++) {
+            non_ipc_stash_buf[i - 1] = non_ipc_stash_buf[i];
+        }
+        non_ipc_stash_cnt--;
     }
+    non_ipc_stash_buf[non_ipc_stash_cnt++] = *entry;
 }
 
 static bool non_ipc_stash_shift(Result* out) {
