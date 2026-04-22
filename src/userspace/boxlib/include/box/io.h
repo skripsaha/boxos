@@ -43,6 +43,4 @@ void print_hex(uint32_t num);
 #define COLOR_YELLOW        0x0E
 #define COLOR_WHITE         0x0F
 
-#define VGA_COLOR(fg, bg) (((bg) << 4) | (fg))
-
 #endif // BOX_IO_H
