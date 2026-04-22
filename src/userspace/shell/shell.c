@@ -17,6 +17,7 @@
 #include "box/result.h"
 #include "box/system.h"
 #include "box/notify.h"
+#include "box/display_proto.h"
 
 static ShellState    g_state;
 static LineEditState g_editor;
@@ -46,8 +47,21 @@ void ShellInit(void)
             }
         }
     } else {
-        /* Nested shell: display already exists */
+        /* Nested shell: display already exists — discover it */
         io_set_mode(IO_MODE_IPC);
+
+        /* Drain the args IPC message sent by parent shell */
+        Result pending;
+        while (receive(&pending)) { }
+
+        /* Discover display daemon PID via PING broadcast */
+        uint8_t ping = DISP_CMD_PING;
+        broadcast("display", &ping, 1);
+
+        Result entry;
+        if (receive_wait(&entry, 2000) && entry.sender_pid != 0) {
+            io_set_display_pid(entry.sender_pid);
+        }
     }
 
     clear();

@@ -133,6 +133,16 @@ int readline(char* buffer, size_t max_len) {
         return -1;
     }
 
+    /* If in IPC mode but display daemon not yet known, try to discover it */
+    if (io_get_mode() == IO_MODE_IPC && g_display_pid == 0) {
+        uint8_t ping = DISP_CMD_PING;
+        broadcast("display", &ping, 1);
+        Result ping_result;
+        if (receive_wait(&ping_result, 2000) && ping_result.sender_pid != 0) {
+            g_display_pid = ping_result.sender_pid;
+        }
+    }
+
     if (io_get_mode() == IO_MODE_IPC && g_display_pid != 0) {
         uint16_t capped = (uint16_t)(max_len > 1024 ? 1024 : max_len);
         uint8_t req[4] = {DISP_CMD_READLINE, (uint8_t)(capped & 0xFF), (uint8_t)(capped >> 8), 1};
@@ -159,6 +169,16 @@ int readline(char* buffer, size_t max_len) {
 
 int getchar(void) {
     io_flush();
+
+    /* If in IPC mode but display daemon not yet known, try to discover it */
+    if (io_get_mode() == IO_MODE_IPC && g_display_pid == 0) {
+        uint8_t ping = DISP_CMD_PING;
+        broadcast("display", &ping, 1);
+        Result ping_result;
+        if (receive_wait(&ping_result, 2000) && ping_result.sender_pid != 0) {
+            g_display_pid = ping_result.sender_pid;
+        }
+    }
 
     if (io_get_mode() == IO_MODE_IPC && g_display_pid != 0) {
         uint8_t req = DISP_CMD_GETCHAR;

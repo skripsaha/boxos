@@ -128,14 +128,17 @@ bool receive_wait(Result* out, uint32_t timeout_ms) {
 }
 
 int send_args(uint32_t target_pid, int argc, char** argv) {
+    if (!argv || argc <= 0) return -ERR_INVALID_ARGUMENT;
+
     char buf[240];
     int pos = 0;
-    buf[pos++] = (char)argc;
-    for (int i = 0; i < argc && pos < 235; i++) {
+    buf[pos++] = (char)(argc > 127 ? 127 : argc);
+    for (int i = 0; i < argc && i < 127 && pos < 235; i++) {
+        if (!argv[i]) continue;
         size_t len = strlen(argv[i]);
-        if (pos + len + 1 >= 240) break;
+        if (pos + (int)len + 1 >= 240) break;
         memcpy(buf + pos, argv[i], len);
-        pos += len;
+        pos += (int)len;
         buf[pos++] = '\0';
     }
     return send(target_pid, buf, (uint16_t)pos);
@@ -149,21 +152,32 @@ int receive_args(int* argc, char argv[][64], int max_args) {
     const char* buf = (const char*)(uintptr_t)entry.data_addr;
     uint32_t total = entry.data_length;
 
+    if (total < 2) return -1;
+
     *argc = (uint8_t)buf[0];
-    int pos = 1;
+    uint32_t pos = 1;
     for (int i = 0; i < *argc && i < max_args; i++) {
-        size_t len = strlen(buf + pos);
+        if (pos >= total) break;
+
+        /* Safe strlen: scan at most to end of buffer */
+        size_t len = 0;
+        while (pos + len < total && buf[pos + len] != '\0') len++;
         if (len >= 64) len = 63;
-        memcpy(argv[i], buf + pos, len + 1);
+        memcpy(argv[i], buf + pos, len);
+        argv[i][len] = '\0';
         pos += len + 1;
     }
 
-    // Apply context tags if present after args
-    if ((uint32_t)pos < total) {
+    /* Apply context tags if present after args */
+    if (pos < total) {
         uint8_t ctx_count = (uint8_t)buf[pos++];
-        for (uint8_t i = 0; i < ctx_count && (uint32_t)pos < total; i++) {
-            context_set(buf + pos);
-            pos += strlen(buf + pos) + 1;
+        for (uint8_t i = 0; i < ctx_count && pos < total; i++) {
+            size_t tag_len = 0;
+            while (pos + tag_len < total && buf[pos + tag_len] != '\0') tag_len++;
+            if (tag_len > 0 && tag_len < 32) {
+                context_set(buf + pos);
+            }
+            pos += tag_len + 1;
         }
     }
 

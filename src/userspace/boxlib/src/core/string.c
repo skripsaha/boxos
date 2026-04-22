@@ -1,12 +1,15 @@
 #include "box/string.h"
 
 size_t strlen(const char* str) {
+    if (!str) return 0;
     size_t len = 0;
     while (str[len]) len++;
     return len;
 }
 
 char* strcpy(char* dest, const char* src) {
+    if (!dest) return NULL;
+    if (!src) { dest[0] = '\0'; return dest; }
     char* d = dest;
     while ((*d++ = *src++));
     return dest;
@@ -35,6 +38,7 @@ int strncmp(const char* s1, const char* s2, size_t n) {
 }
 
 void* memcpy(void* dest, const void* src, size_t n) {
+    if (!dest || !src || n == 0) return dest;
     unsigned char *d = (unsigned char *)dest;
     const unsigned char *s = (const unsigned char *)src;
 
@@ -53,6 +57,7 @@ void* memcpy(void* dest, const void* src, size_t n) {
 }
 
 void* memset(void* ptr, int value, size_t n) {
+    if (!ptr || n == 0) return ptr;
     unsigned char *p = (unsigned char *)ptr;
     unsigned char uc = (unsigned char)value;
 
