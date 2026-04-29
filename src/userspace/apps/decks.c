@@ -11,13 +11,13 @@
  */
 
 #include "box/print.h"
-#include "box/storage.h"
+#include "box/file.h"
 #include "box/system.h"
 #include "box/time.h"
 #include "box/vga.h"
-#include "box/manifest.h"
-#include "box/crate.h"
-#include "box/notify.h"
+#include "box/core/manifest.h"
+#include "box/core/crate.h"
+#include "box/core/notify.h"
 #include "box/string.h"
 #include "box/convert.h"
 

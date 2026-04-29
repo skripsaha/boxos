@@ -1,9 +1,9 @@
-#ifndef IPC_H
-#define IPC_H
+#ifndef BOX_IPC_H
+#define BOX_IPC_H
 
-#include "types.h"
-#include "result.h"
-#include "error.h"
+#include "box/types.h"
+#include "box/error.h"
+#include "box/core/result.h"
 
 int send(uint32_t target_pid, const void* data, uint16_t size);
 int broadcast(const char* tag, const void* data, uint16_t size);

@@ -1,5 +1,5 @@
-#include "box/result.h"
-#include "box/notify.h"
+#include "box/core/result.h"
+#include "box/core/notify.h"
 #include "box/system.h"
 #include "box/cpu.h"
 #include "../arch/x86_64/cpu_wait.h"

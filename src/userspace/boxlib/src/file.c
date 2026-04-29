@@ -7,10 +7,10 @@
  * caller's buffer size in a single syscall.
  */
 
-#include "box/storage.h"
-#include "box/manifest.h"
-#include "box/notify.h"
-#include "box/result.h"
+#include "box/file.h"
+#include "box/core/manifest.h"
+#include "box/core/notify.h"
+#include "box/core/result.h"
 #include "box/string.h"
 #include "box/types.h"
 

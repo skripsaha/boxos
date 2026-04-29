@@ -1,6 +1,6 @@
 #include "box/print.h"
 #include "box/system.h"
-#include "box/heap.h"
+#include "box/memory.h"
 #include "box/string.h"
 
 static int tests_passed = 0;

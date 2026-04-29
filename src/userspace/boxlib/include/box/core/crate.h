@@ -1,5 +1,5 @@
-#ifndef BOX_CRATE_H
-#define BOX_CRATE_H
+#ifndef BOX_CORE_CRATE_H
+#define BOX_CORE_CRATE_H
 
 #include "box/types.h"
 #include "boxos_crate.h"

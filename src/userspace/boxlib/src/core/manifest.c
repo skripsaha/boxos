@@ -1,6 +1,6 @@
-#include "box/manifest.h"
-#include "box/notify.h"
-#include "box/result.h"
+#include "box/core/manifest.h"
+#include "box/core/notify.h"
+#include "box/core/result.h"
 #include "box/string.h"
 #include "box/error.h"
 

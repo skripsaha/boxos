@@ -1,7 +1,7 @@
 #ifndef BOX_CPU_H
 #define BOX_CPU_H
 
-#include "types.h"
+#include "box/types.h"
 
 #define CPU_CAPS_PAGE_ADDR  0x7FFFF000UL
 

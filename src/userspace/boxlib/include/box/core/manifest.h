@@ -1,10 +1,10 @@
-#ifndef BOX_MANIFEST_H
-#define BOX_MANIFEST_H
+#ifndef BOX_CORE_MANIFEST_H
+#define BOX_CORE_MANIFEST_H
 
 #include "box/types.h"
-#include "box/notify.h"
-#include "box/result.h"
-#include "box/crate.h"
+#include "box/core/notify.h"
+#include "box/core/result.h"
+#include "box/core/crate.h"
 #include "boxos_manifest.h"
 
 /*

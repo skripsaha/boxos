@@ -3,10 +3,10 @@
  */
 
 #include "box/time.h"
-#include "box/manifest.h"
-#include "box/notify.h"
+#include "box/core/manifest.h"
+#include "box/core/notify.h"
 #include "box/string.h"
-#include "box/result.h"
+#include "box/core/result.h"
 
 #define HW_TIMER_GET_MS    0x11
 #define HW_RTC_GET_TIME    0x15

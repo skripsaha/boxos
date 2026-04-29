@@ -11,7 +11,7 @@
 #include "box/string.h"
 #include "box/system.h"
 #include "box/ipc.h"
-#include "box/result.h"
+#include "box/core/result.h"
 #include "box/print.h"
 
 static char g_error[SHELL_ERROR_MAX];

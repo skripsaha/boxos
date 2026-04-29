@@ -19,16 +19,16 @@ CFLAGS = -nostdlib -fno-builtin -ffreestanding -mno-red-zone \
 SRCS = src/core/notify.c \
        src/core/result.c \
        src/core/manifest.c \
-       src/deck/storage.c \
-       src/deck/system.c \
-       src/deck/ipc.c \
-       src/deck/hardware/vga.c \
-       src/deck/hardware/keyboard.c \
-       src/deck/hardware/time.c \
-       src/io/print.c \
-       src/util/string.c \
-       src/util/convert.c \
-       src/util/heap.c \
+       src/print.c \
+       src/file.c \
+       src/system.c \
+       src/ipc.c \
+       src/time.c \
+       src/memory.c \
+       src/vga.c \
+       src/keyboard.c \
+       src/string.c \
+       src/convert.c \
        src/arch/x86_64/stack_protector.c
 OBJS = $(SRCS:.c=.o)
 

@@ -13,11 +13,11 @@
  *   -> Result back into ResultRing.
  */
 
-#include "box/manifest.h"
+#include "box/core/manifest.h"
 #include "box/print.h"
 #include "box/system.h"
 #include "box/string.h"
-#include "box/notify.h"
+#include "box/core/notify.h"
 
 #define BUF_BYTES   64u
 #define MBUF_BYTES  256u
