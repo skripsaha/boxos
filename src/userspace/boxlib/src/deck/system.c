@@ -6,7 +6,7 @@
 #include "box/manifest.h"
 #include "box/notify.h"
 #include "box/ipc.h"
-#include "box/io.h"
+#include "box/print.h"
 #include "box/result.h"
 #include "box/string.h"
 #include "box/error.h"

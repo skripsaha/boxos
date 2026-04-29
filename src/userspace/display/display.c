@@ -1,12 +1,12 @@
-#include "box/io.h"
-#include "box/io/vga.h"
-#include "box/io/keyboard.h"
+#include "box/print.h"
+#include "box/vga.h"
+#include "box/keyboard.h"
 #include "box/ipc.h"
 #include "box/notify.h"
 #include "box/result.h"
 #include "box/string.h"
 #include "box/system.h"
-#include "box/display_proto.h"
+#include "box/display.h"
 
 static uint8_t display_cached_color = VIDEO_COLOR(VIDEO_LIGHT_GRAY, VIDEO_BLACK);
 

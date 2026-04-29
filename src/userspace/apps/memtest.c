@@ -1,4 +1,4 @@
-#include "box/io.h"
+#include "box/print.h"
 #include "box/system.h"
 #include "box/heap.h"
 #include "box/string.h"

@@ -10,11 +10,11 @@
  * `app,utility` — utility-level reach, no system).
  */
 
-#include "box/io.h"
-#include "box/file.h"
+#include "box/print.h"
+#include "box/storage.h"
 #include "box/system.h"
 #include "box/time.h"
-#include "box/io/vga.h"
+#include "box/vga.h"
 #include "box/manifest.h"
 #include "box/crate.h"
 #include "box/notify.h"

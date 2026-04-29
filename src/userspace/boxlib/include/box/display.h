@@ -1,5 +1,5 @@
-#ifndef DISPLAY_PROTO_H
-#define DISPLAY_PROTO_H
+#ifndef BOX_DISPLAY_H
+#define BOX_DISPLAY_H
 
 #define DISP_CMD_CLEAR    0x01
 #define DISP_CMD_COLOR    0x02
