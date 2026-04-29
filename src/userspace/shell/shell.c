@@ -37,30 +37,34 @@ void ShellInit(void)
 
     CabinInfo *ci = cabin_info();
 
-    if (ci->spawner_pid == 0) {
-        /* Root shell: spawn display daemon */
-        int display_pid = proc_exec("display");
-        if (display_pid > 0) {
-            Result entry;
-            if (receive_wait(&entry, 2000)) {
-                io_set_mode(IO_MODE_IPC);
-                io_set_display_pid(entry.sender_pid);
-            }
-        }
-    } else {
-        /* Nested shell: display already exists — discover it */
-        io_set_mode(IO_MODE_IPC);
+    /* Display daemon is now an autostart utility (kernel main.c launches
+     * any TagFS file tagged "autostart"+"utility|app" at boot). The root
+     * shell may still come up before display has registered, in which case
+     * we fall back to spawning a private one. Either way, discovery is via
+     * a single PING broadcast rather than an unconditional proc_exec —
+     * spawning a second copy aliases on the "display" tag and the duplicate
+     * page-faults during init.
+     *
+     * Nested shells (spawner_pid != 0) skip the parent's args IPC drain
+     * before doing the PING, so they don't consume their first user
+     * notification by mistake. */
+    io_set_mode(IO_MODE_IPC);
 
-        /* Drain the args IPC message sent by parent shell */
+    if (ci->spawner_pid != 0) {
         Result pending;
         while (receive(&pending)) { }
+    }
 
-        /* Discover display daemon PID via PING broadcast */
-        uint8_t ping = DISP_CMD_PING;
-        broadcast("display", &ping, 1);
+    uint8_t ping = DISP_CMD_PING;
+    broadcast("display", &ping, 1);
 
-        Result entry;
-        if (receive_wait(&entry, 2000) && entry.sender_pid != 0) {
+    Result entry;
+    if (receive_wait(&entry, 500) && entry.sender_pid != 0) {
+        io_set_display_pid(entry.sender_pid);
+    } else if (ci->spawner_pid == 0) {
+        /* No autostart display, no parent — last-resort spawn. */
+        int spawned = proc_exec("display");
+        if (spawned > 0 && receive_wait(&entry, 2000) && entry.sender_pid != 0) {
             io_set_display_pid(entry.sender_pid);
         }
     }
