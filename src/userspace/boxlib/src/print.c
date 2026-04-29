@@ -22,7 +22,19 @@ static uint32_t g_display_pid  = 0;
 static Color    g_color_fg     = COLOR_DEFAULT;
 static Color    g_color_bg     = COLOR_BLACK;
 
-void     io_set_mode(uint8_t mode)        { g_io_mode = mode; }
+/* Last 8-bit VGA attribute we sent to the kernel/daemon. Both the explicit
+ * set_color() path and the printf %color path consult this cache to skip
+ * redundant DISP_CMD_COLOR / vga_setcolor traffic. */
+static uint8_t  s_last_attr      = 0;
+static bool     s_last_attr_set  = false;
+
+void     io_set_mode(uint8_t mode)
+{
+    /* Switching between VGA and IPC paths invalidates the kernel/daemon
+     * colour state we cached locally; force the next emit to re-send. */
+    if (mode != g_io_mode) s_last_attr_set = false;
+    g_io_mode = mode;
+}
 uint8_t  io_get_mode(void)                { return g_io_mode; }
 void     io_set_display_pid(uint32_t pid) { g_display_pid = pid; }
 uint32_t io_get_display_pid(void)         { return g_display_pid; }
@@ -73,12 +85,16 @@ static void io_buf_putc(char c)
 static void push_vga_attr(void)
 {
     uint8_t attr = color_to_vga_attr(g_color_fg, g_color_bg);
+    if (s_last_attr_set && s_last_attr == attr) return;   /* no-op */
+
     if (g_io_mode == IO_MODE_IPC) {
         char cmd[2] = { (char)DISP_CMD_COLOR, (char)attr };
         io_buf_append(cmd, 2);
-        return;
+    } else {
+        vga_setcolor(attr);
     }
-    vga_setcolor(attr);
+    s_last_attr     = attr;
+    s_last_attr_set = true;
 }
 
 void  set_color(Color fg)    { g_color_fg = fg; push_vga_attr(); }
@@ -98,8 +114,12 @@ static void emit_run(const char *bytes, int len, Color fg, Color bg)
     uint8_t attr = color_to_vga_attr(fg, bg);
 
     if (g_io_mode == IO_MODE_IPC) {
-        char cmd[2] = { (char)DISP_CMD_COLOR, (char)attr };
-        io_buf_append(cmd, 2);
+        if (!s_last_attr_set || s_last_attr != attr) {
+            char cmd[2] = { (char)DISP_CMD_COLOR, (char)attr };
+            io_buf_append(cmd, 2);
+            s_last_attr     = attr;
+            s_last_attr_set = true;
+        }
         /* Split on '\n' so the daemon's renderer keeps newline semantics. */
         int seg_start = 0;
         for (int i = 0; i <= len; i++) {
@@ -114,13 +134,15 @@ static void emit_run(const char *bytes, int len, Color fg, Color bg)
         return;
     }
 
-    /* VGA direct: set colour once, emit text honouring newlines.
-     *
-     * vga_puts() takes a NUL-terminated string of arbitrary length, but the
-     * underlying syscall packs into a kernel buffer; for large segments we
-     * stream in 192-byte chunks. The loop has no upper bound on `len` — it
-     * iterates until the entire run is delivered. */
-    vga_setcolor(attr);
+    /* VGA direct: set colour only when it actually changed; emit text
+     * honouring newlines. vga_puts() takes a NUL-terminated string of
+     * arbitrary length, but the underlying syscall packs into a kernel
+     * buffer; for large segments we stream in 192-byte chunks. */
+    if (!s_last_attr_set || s_last_attr != attr) {
+        vga_setcolor(attr);
+        s_last_attr     = attr;
+        s_last_attr_set = true;
+    }
     char tmp[192];
     int  seg_start = 0;
     for (int i = 0; i <= len; i++) {
@@ -203,6 +225,10 @@ void println(const char* str)
 
 void clear(void)
 {
+    /* Display state resets on clear; invalidate the colour cache so the
+     * next coloured run re-sends its attribute. */
+    s_last_attr_set = false;
+
     if (g_io_mode == IO_MODE_IPC) {
         io_flush();
         uint8_t cmd = DISP_CMD_CLEAR;

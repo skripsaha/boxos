@@ -336,6 +336,7 @@ $(IMAGE): $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(SHELL_BIN) $(PROCA_BIN) $(
 	@echo "  Creating TagFS v1..."
 	@$(TAGFS_TOOL) $@ \
 		$(KERNEL_BIN)   "system" \
+		$(DISPLAY_BIN)  "display,system,utility,autostart" \
 		$(SHELL_BIN)    "utility,system,app,autostart" \
 		$(PROCA_BIN)    "app" \
 		$(PROCB_BIN)    "app" \
@@ -344,7 +345,6 @@ $(IMAGE): $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(SHELL_BIN) $(PROCA_BIN) $(
 		$(MTEST_BIN)    "utility,memory" \
 		$(CHAIN_BIN)    "app,utility" \
 		$(DECKS_BIN)    "app,utility" \
-		$(DISPLAY_BIN)  "display,system,utility" \
 		$(UTILS_DIR)/help.elf    "utility" \
 		$(UTILS_DIR)/create.elf  "utility,storage" \
 		$(UTILS_DIR)/show.elf    "utility,storage" \
