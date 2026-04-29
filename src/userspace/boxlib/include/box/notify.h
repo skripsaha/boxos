@@ -3,6 +3,10 @@
 
 #include "types.h"
 
+/* Pocket flag bits (mirror kernel src/kernel/core/ipc/pocket.h). */
+#define POCKET_FLAG_YIELD     0x80
+#define POCKET_FLAG_MANIFEST  0x40
+
 // BoxOS notify — signal the kernel that PocketRing has work for the Guide.
 // Wraps the x86-64 fast entry instruction. INT 0x80 remains as fallback.
 #define __notify() __asm__ volatile("syscall" ::: "memory", "rcx", "r11")
@@ -26,110 +30,89 @@ INLINE CabinInfo* cabin_info(void) {
     return (CabinInfo*)CABIN_INFO_VADDR;
 }
 
-// Pocket: syscall request written to PocketRing
+/* Pocket — Manifest-only envelope (Phase 12). The fields below mirror the
+ * kernel's pocket.h layout exactly. */
 typedef struct PACKED {
-    uint32_t pid;                // kernel overwrites (security)
-    uint32_t target_pid;         // 0 = result to self, != 0 = IPC route
+    uint32_t pid;                /* kernel overwrites (security) */
+    uint32_t target_pid;         /* 0 = self, != 0 = IPC route */
     uint32_t error_code;
-    uint8_t  prefix_count;
-    uint8_t  current_prefix_idx;
-    uint8_t  flags;
-    uint8_t  _reserved1;
-    uint32_t data_length;        // bytes of data at data_addr
-    uint64_t data_addr;          // virtual address of data in cabin heap
-    char     route_tag[POCKET_ROUTE_TAG_SIZE];
-    uint16_t prefixes[POCKET_MAX_PREFIXES];
-    uint8_t  _pad[4];
+    uint8_t  flags;              /* POCKET_FLAG_YIELD | POCKET_FLAG_MANIFEST */
+    uint8_t  _reserved[3];
+    uint32_t data_length;        /* manifest size */
+    uint64_t data_addr;          /* manifest user vaddr */
+    char     route_tag[32];      /* manifest mode: crates_addr/count/pier_id */
+    uint8_t  _pad[68];           /* pad to 128 bytes for PocketRing slot stride */
 } Pocket;
 
 STATIC_ASSERT(sizeof(Pocket) == 128, "Pocket must be 128 bytes");
 
-// PocketRing: SPSC ring buffer at CABIN_POCKET_RING_ADDR (0x2000)
-// Userspace is the producer (writes Pockets, advances tail).
-// Kernel is the consumer (reads Pockets, advances head).
-// Layout: 8 bytes header + 31 * 128 = 3968 bytes slots = 3976 bytes total (fits in one page).
+/* PocketRing — Phase 11 lazy-growable, monotonic-index SPSC.
+ *
+ * The header lives at CABIN_POCKET_RING_ADDR (0x2000) — one fixed page.
+ * Slots live at CABIN_POCKET_SLOTS_BASE in a 1 MiB virtual reservation; the
+ * kernel maps slot pages on demand the first time userspace touches them.
+ *
+ * Indices are 64-bit and never wrap. Slot lookup: slots_base + (idx % cap)*stride.
+ */
 typedef struct PACKED {
-    volatile uint32_t head;
-    volatile uint32_t tail;
-    Pocket slots[POCKET_RING_CAPACITY];
+    volatile uint64_t head;             /* kernel cursor */
+    volatile uint64_t tail;             /* userspace cursor */
+    uint64_t          slots_base;       /* user vaddr of slot 0 */
+    uint32_t          slot_size;        /* POCKET_SLOT_SIZE (128) */
+    uint32_t          slot_count_max;   /* ring capacity */
+    uint64_t          magic;
+    uint8_t           _pad[24];
+} PocketRingHeader;
+
+STATIC_ASSERT(sizeof(PocketRingHeader) == 64, "PocketRingHeader must be 64 bytes");
+
+typedef struct PACKED {
+    PocketRingHeader hdr;
+    uint8_t          _page_pad[4096 - sizeof(PocketRingHeader)];
 } PocketRing;
 
-STATIC_ASSERT(sizeof(PocketRing) <= 4096, "PocketRing must fit in one page");
+STATIC_ASSERT(sizeof(PocketRing) == 4096, "PocketRing header must be one page");
 
 INLINE PocketRing* pocket_ring(void) {
     return (PocketRing*)POCKET_RING_VADDR;
 }
 
-INLINE bool pocket_ring_is_full(const PocketRing* ring) {
-    return ((ring->tail + 1) % POCKET_RING_CAPACITY) == ring->head;
+INLINE bool pocket_ring_is_empty(const PocketRing* ring) {
+    return ring->hdr.head == ring->hdr.tail;
 }
 
-// Push a Pocket to the ring. Returns true on success.
+INLINE bool pocket_ring_is_full(const PocketRing* ring) {
+    return (ring->hdr.tail - ring->hdr.head) >= ring->hdr.slot_count_max;
+}
+
+INLINE uint32_t pocket_ring_count(const PocketRing* ring) {
+    uint64_t n = ring->hdr.tail - ring->hdr.head;
+    return n > 0xFFFFFFFFu ? 0xFFFFFFFFu : (uint32_t)n;
+}
+
+/* Push a Pocket. Writes to slots_base + (tail % cap)*slot_size — the slot page
+ * faults in if necessary; the kernel's #PF handler maps a fresh phys page and
+ * returns. The ABI guarantees slot_size == sizeof(Pocket) for PocketRing. */
 INLINE bool pocket_ring_push(PocketRing* ring, const Pocket* p) {
     if (pocket_ring_is_full(ring)) return false;
-    uint32_t idx = ring->tail;
-    ring->slots[idx] = *p;
+    uint64_t idx  = ring->hdr.tail;
+    Pocket  *slot = (Pocket *)(uintptr_t)
+        (ring->hdr.slots_base + (idx % ring->hdr.slot_count_max) * ring->hdr.slot_size);
+    *slot = *p;
     __sync_synchronize();
-    ring->tail = (idx + 1) % POCKET_RING_CAPACITY;
+    ring->hdr.tail = idx + 1;
     return true;
 }
 
 // Prepare a fresh Pocket for a new syscall
 void pocket_prepare(Pocket* p);
 
-// Add a prefix to the Pocket's chain
-bool pocket_add_prefix(Pocket* p, uint8_t deck_id, uint8_t opcode);
-
-// Set data buffer in the Pocket (points to cabin heap)
-void pocket_set_data(Pocket* p, void* data, uint32_t length);
-
-// Submit a Pocket: push to PocketRing and notify the kernel.
-// Returns 0 on success.
+// Submit a Pocket to the PocketRing and notify the kernel. Used internally
+// by box/manifest.c (ManifestSubmit). Userspace code should call MfCall1 or
+// the higher-level wrappers instead of building Pockets directly.
 int pocket_submit(Pocket* p);
 
-// Yield: hint to scheduler without submitting a pocket
+// Yield: hint to scheduler. Pushes a YIELD-flagged Pocket and returns.
 void yield(void);
-
-// Send a single-prefix Pocket: prepare, set data, add prefix, submit.
-int pocket_send(uint8_t deck_id, uint8_t opcode, void* data, uint32_t length);
-
-/* =========================================================================
- * Batch API — push multiple Pockets, one SYSCALL for all.
- *
- * The Guide already drains the entire PocketRing per SYSCALL.  These
- * functions let userspace fill the ring first, then trigger processing
- * with a single kernel entry — eliminating N-1 round-trips.
- *
- * IMPORTANT: each queued Pocket's data_addr must point to a SEPARATE
- * buffer that remains valid until pocket_flush / pocket_flush_wait
- * completes.  The kernel reads data in-place; shared buffers will
- * be corrupted by earlier handlers before later ones run.
- *
- * Example (5 VGA ops in 1 SYSCALL instead of 5):
- *
- *   uint8_t color_buf  = GREEN;
- *   uint8_t str_buf[192];  // ... fill putstring packet ...
- *   uint8_t nl_buf[4] = {0};
- *
- *   pocket_queue(DECK_HARDWARE, 0x77, &color_buf, 1);
- *   pocket_queue(DECK_HARDWARE, 0x71, str_buf, len);
- *   pocket_queue(DECK_HARDWARE, 0x7A, nl_buf, 4);
- *
- *   Result results[3];
- *   int got = pocket_flush_wait(results, 3, 100000);
- * ========================================================================= */
-
-// Queue a Pocket without triggering SYSCALL.
-// Data buffer must remain valid until flush completes.
-// Returns 0 on success, -1 if PocketRing is full.
-int pocket_queue(uint8_t deck_id, uint8_t opcode, void* data, uint32_t length);
-
-// Trigger one SYSCALL to process all queued Pockets.
-void pocket_flush(void);
-
-// Flush + wait for exactly `count` results (Result from box/result.h).
-// Returns number of results successfully received.
-// Caller must include box/result.h and pass a Result[] array.
-int pocket_flush_wait(void* results, int count, uint32_t timeout_ms);
 
 #endif // BOX_NOTIFY_H

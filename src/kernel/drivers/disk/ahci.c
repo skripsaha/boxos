@@ -8,6 +8,7 @@
 #include "atomics.h"
 #include "async_io.h"
 #include "result_ring.h"
+#include "kring.h"
 #include "error.h"
 #include "pic.h"
 #include "process.h"
@@ -22,14 +23,12 @@ static ahci_controller_t ahci_ctrl;
 // Helper: push a Result to a process's ResultRing
 static void ahci_push_result(uint32_t pid, uint32_t error_code) {
     process_t* proc = process_find(pid);
-    if (!proc || !proc->result_ring_phys) return;
-    ResultRing* rring = (ResultRing*)vmm_phys_to_virt(proc->result_ring_phys);
-    if (!rring) return;
+    if (!proc) return;
     Result r;
     memset(&r, 0, sizeof(Result));
     r.error_code = error_code;
     r.sender_pid = 0;  // kernel
-    result_ring_push(rring, &r);
+    KResultPush(proc, &r);
 }
 
 static inline ahci_port_regs_t* ahci_get_port_regs(uint8_t port_num) {

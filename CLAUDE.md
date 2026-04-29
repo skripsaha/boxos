@@ -1,28 +1,36 @@
-- Use PascalCase primarily for functions, types, structs, and public interfaces.
-- Use snake_case for variables.
-- Use UPPER_CASE for constants.
+# BoxOS - Bare-metal OS Kernel (C/assembly)
 
-- This is a bare-metal OS kernel project (BoxOS) written in C/assembly. When making fixes, always consider: lock ordering to prevent deadlocks, AMP/multicore safety, and that changes to one subsystem (e.g., keyboard, TagFS, VMM) can break others. Never apply a fix without reasoning about side effects on related subsystems.
+## Build & Test
+- `make clean && make` - full rebuild
+- `make run` - single core
+- `make run CORES=4 MEM=16G` - SMP test
 
-- Use structured architecture, encapsulation, and explicit interfaces where they are helpful.
-- Do not avoid language constructs just because they are rare; use them if they reduce complexity or improve correctness.
-- Do not leave TODOs or placeholders unless the limitation is explicitly explained and tracked.
+## Critical Rules
+- Lock ordering → check deadlocks before any fix
+- AMP/multicore safety
+- Subsystem side effects: keyboard, TagFS, VMM can break others
 
-- When analyzing this codebase, read ALL relevant files before producing output. Do not start writing analysis after reading only a subset of files. If the user asks for a 'full' or 'thorough' analysis, use agents to explore the entire relevant subsystem first.
+## Code Quality
+- No patches. Implement full solution or say "I don't know"
+- No garbage. Remove dead variables, huge comments, unused code
+- No half-measures. 100+ line function → refactor. 1000+ line file → split
+- Read ALL relevant files before analysis
 
-- Use make clean before full rebuilds or after build-system changes.
-- Use make to build the project.
-- Use make run to run the project.
-- After each major phase of changes, rebuild and test in both modes:
-  - make run
-  - make run CORES=4 MEM=16G
+## Working Mode
+- Don't know → say "I don't know"
+- Unsure → give 2-3 options with probability
+- Decision → ask: "I propose X. Approve?"
+- Missing info → ask me. Do not assume
+- You propose → I decide
+- New name → ask me
+- One concrete task per session. Do not tackle everything at once
+- No flattery. No "great question". Be direct
 
-- After applying any fix, always verify the build compiles cleanly (`make clean && make`) and run relevant tests before reporting success. If a fix touches locking or synchronization code, explicitly trace the lock acquisition order to check for deadlocks.
+## MCP Priority
+1. filesystem - read 3-5 files before advice
+2. sequential-thinking - complex reasoning (5+ steps)
+3. freebird/context7 - external knowledge
+4. memory - save after my approval
 
-- Do not hardcode values when dynamic handling is possible.
-- Keep files focused; prefer separate headers and clear module boundaries.
-- Avoid extern unless there is a strong architectural reason.
-- Avoid Unix-like assumptions and Unix philosophy unless they are explicitly justified.
-- Write complete implementations, not stubs.
-
-- Before starting work, create a todo list of all the steps needed. Check off items as you complete them so we can resume if interrupted.
+## Linked Rules
+@.claude/rules/karpathy-principles.md

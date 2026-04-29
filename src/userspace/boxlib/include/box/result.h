@@ -16,19 +16,36 @@ typedef struct PACKED {
 
 STATIC_ASSERT(sizeof(Result) == 24, "Result must be 24 bytes");
 
-// ResultRing: SPSC ring buffer at CABIN_RESULT_RING_ADDR (0x3000)
-// Kernel is the producer (writes Results, advances tail).
-// Userspace is the consumer (reads Results, advances head).
+/* ResultRing — Phase 11 lazy-growable, monotonic-index SPSC.
+ *
+ * Header at CABIN_RESULT_RING_ADDR (0x3000); slots at CABIN_RESULT_SLOTS_BASE.
+ * The kernel maps slot pages eagerly when it pushes (see kring.c).
+ */
 typedef struct PACKED {
-    volatile uint32_t head;
-    volatile uint32_t tail;
-    Result slots[RESULT_RING_CAPACITY];
+    volatile uint64_t head;             /* userspace cursor */
+    volatile uint64_t tail;             /* kernel cursor */
+    uint64_t          slots_base;       /* user vaddr of slot 0 */
+    uint32_t          slot_size;        /* RESULT_SLOT_SIZE (32) */
+    uint32_t          slot_count_max;
+    uint64_t          magic;
+    uint8_t           _pad[24];
+} ResultRingHeader;
+
+STATIC_ASSERT(sizeof(ResultRingHeader) == 64, "ResultRingHeader must be 64 bytes");
+
+typedef struct PACKED {
+    ResultRingHeader hdr;
+    uint8_t          _page_pad[4096 - sizeof(ResultRingHeader)];
 } ResultRing;
 
-STATIC_ASSERT(sizeof(ResultRing) <= CABIN_RESULT_RING_SIZE, "ResultRing must fit in result ring pages");
+STATIC_ASSERT(sizeof(ResultRing) == 4096, "ResultRing header must be one page");
 
 INLINE ResultRing* result_ring(void) {
     return (ResultRing*)RESULT_RING_VADDR;
+}
+
+INLINE bool result_ring_is_empty(const ResultRing* ring) {
+    return ring->hdr.head == ring->hdr.tail;
 }
 
 bool result_available(void);

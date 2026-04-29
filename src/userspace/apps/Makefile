@@ -24,7 +24,7 @@ BOXLIB_START = ../build/boxlib_start.o
 
 .PHONY: all clean
 
-all: proca.elf procb.elf today.elf memtest.elf
+all: proca.elf procb.elf today.elf memtest.elf mtest.elf chain.elf decks.elf
 
 # ---- ELF binaries (stored in TagFS) ----
 proca.elf: $(BOXLIB_START) proca.o $(BOXLIB)
@@ -38,6 +38,15 @@ today.elf: $(BOXLIB_START) today.o $(BOXLIB)
 
 memtest.elf: $(BOXLIB_START) memtest.o $(BOXLIB)
 	$(CC) $(LDFLAGS) -o $@ $(BOXLIB_START) memtest.o $(BOXLIB)
+
+mtest.elf: $(BOXLIB_START) mtest.o $(BOXLIB)
+	$(CC) $(LDFLAGS) -o $@ $(BOXLIB_START) mtest.o $(BOXLIB)
+
+chain.elf: $(BOXLIB_START) chain.o $(BOXLIB)
+	$(CC) $(LDFLAGS) -o $@ $(BOXLIB_START) chain.o $(BOXLIB)
+
+decks.elf: $(BOXLIB_START) decks.o $(BOXLIB)
+	$(CC) $(LDFLAGS) -o $@ $(BOXLIB_START) decks.o $(BOXLIB)
 
 # ---- object files ----
 %.o: %.c

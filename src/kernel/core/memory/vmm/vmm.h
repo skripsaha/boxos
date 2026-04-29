@@ -144,6 +144,13 @@ uintptr_t vmm_virt_to_phys(vmm_context_t* ctx, uintptr_t virt_addr);
 bool vmm_is_mapped(vmm_context_t* ctx, uintptr_t virt_addr);
 uint64_t vmm_get_page_flags(vmm_context_t* ctx, uintptr_t virt_addr);
 
+/* Ensure that the page covering `user_vaddr` is mapped user RW (and NX) in
+ * `ctx`. If already mapped, returns 0 immediately. If unmapped, allocates a
+ * zeroed phys page and maps it. Used by the kernel-side ResultRing producer
+ * (see kring.c) to map slot pages on demand without triggering a kernel
+ * page fault. Returns 0 on success, -1 on failure. */
+int vmm_ensure_user_page(vmm_context_t* ctx, uintptr_t user_vaddr, bool writable);
+
 void* vmalloc(size_t size);
 void* vzalloc(size_t size);
 void vfree(void* addr);

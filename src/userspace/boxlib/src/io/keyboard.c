@@ -1,195 +1,168 @@
+/*
+ * keyboard.c — userspace keyboard wrappers (Phase 12: Manifest-only).
+ *
+ * Each function builds a 1-op Manifest via MfCall1. The new HW_KEYBOARD_*
+ * ops put status into a u8 byte at the tail of the out_crate; readline
+ * accepts up to (out_capacity - 5) characters in a single syscall.
+ */
+
 #include "box/io/keyboard.h"
+#include "box/manifest.h"
 #include "box/notify.h"
 #include "box/result.h"
 #include "box/string.h"
 
-static void kb_sleep(uint32_t iterations) {
+#define HW_KB_GETCHAR   0x60
+#define HW_KB_READLINE  0x61
+#define HW_KB_STATUS    0x62
+
+#define HW_KB_SUCCESS    0
+#define HW_KB_NO_DATA    1
+#define HW_KB_WOULD_BLOCK 3
+
+static void kb_sleep(uint32_t iterations)
+{
     for (uint32_t i = 0; i < iterations; i++) {
         __asm__ volatile("pause");
     }
 }
 
-static uint32_t kb_decode_u32(const void* ptr) {
-    uint32_t v;
-    memcpy(&v, ptr, sizeof(v));
-    return v;
+int kb_getchar(void)
+{
+    uint8_t out[4] = {0};
+    int rc = MfCall1(DECK_HARDWARE, HW_KB_GETCHAR,
+                     NULL, 0, NULL, 0,
+                     out, sizeof(out), NULL,
+                     1000, NULL);
+    if (rc != 0) return rc < 0 ? rc : -rc;
+    if (out[3] != HW_KB_SUCCESS) return -ERR_RESULT_INVALID;
+    return (int)out[0];
 }
 
-int kb_getchar(void) {
-    uint8_t buf[4] = {0};
-    pocket_send(DECK_HARDWARE, KB_OP_GETCHAR, buf, 4);
-
-    Result result;
-    if (!result_wait(&result, 1000)) {
-        return -ERR_TIMEOUT;
-    }
-
-    if (result.error_code != OK) {
-        return -(int)result.error_code;
-    }
-
-    if (result.data_addr == 0 || result.data_length == 0) {
-        return -ERR_RESULT_INVALID;
-    }
-
-    return (int)(uint8_t)(*(uint8_t*)(uintptr_t)result.data_addr);
+int kb_getchar_timeout(uint32_t timeout_ms)
+{
+    uint8_t out[4] = {0};
+    int rc = MfCall1(DECK_HARDWARE, HW_KB_GETCHAR,
+                     NULL, 0, NULL, 0,
+                     out, sizeof(out), NULL,
+                     timeout_ms, NULL);
+    if (rc != 0) return rc < 0 ? rc : -rc;
+    if (out[3] != HW_KB_SUCCESS) return -ERR_RESULT_INVALID;
+    return (int)out[0];
 }
 
-int kb_getchar_timeout(uint32_t timeout_ms) {
-    uint8_t buf[4] = {0};
-    pocket_send(DECK_HARDWARE, KB_OP_GETCHAR, buf, 4);
+int kb_getchar_ex(kb_char_t *out_char)
+{
+    if (!out_char) return -ERR_INVALID_ARGS;
 
-    Result result;
-    if (!result_wait(&result, timeout_ms)) {
-        return -ERR_TIMEOUT;
-    }
+    uint8_t out[4] = {0};
+    int rc = MfCall1(DECK_HARDWARE, HW_KB_GETCHAR,
+                     NULL, 0, NULL, 0,
+                     out, sizeof(out), NULL,
+                     1000, NULL);
+    if (rc != 0) return rc < 0 ? rc : -rc;
+    if (out[3] != HW_KB_SUCCESS) return -ERR_RESULT_INVALID;
 
-    if (result.error_code != OK) {
-        return -(int)result.error_code;
-    }
-
-    if (result.data_addr == 0 || result.data_length == 0) {
-        return -ERR_RESULT_INVALID;
-    }
-
-    return (int)(uint8_t)(*(uint8_t*)(uintptr_t)result.data_addr);
-}
-
-int kb_getchar_ex(kb_char_t* out_char) {
-    if (!out_char) {
-        return -ERR_INVALID_ARGS;
-    }
-
-    uint8_t getchar_buf[4] = {0};
-    pocket_send(DECK_HARDWARE, KB_OP_GETCHAR, getchar_buf, 4);
-
-    Result result;
-    if (!result_wait(&result, 1000)) {
-        return -ERR_TIMEOUT;
-    }
-
-    if (result.error_code != OK) {
-        return -(int)result.error_code;
-    }
-
-    if (result.data_addr == 0 || result.data_length < 3) {
-        return -ERR_RESULT_INVALID;
-    }
-
-    uint8_t* data = (uint8_t*)(uintptr_t)result.data_addr;
-    out_char->ch = data[0];
-    out_char->scancode = data[1];
-    out_char->flags = data[2];
+    out_char->ch       = out[0];
+    out_char->scancode = out[1];
+    out_char->flags    = out[2];
     out_char->reserved = 0;
-
     return 0;
 }
 
-int kb_readline(char* buffer, size_t size, bool echo) {
-    if (!buffer || size == 0 || size > 1024) {
-        return -ERR_INVALID_ARGS;
-    }
+int kb_readline(char *buffer, size_t size, bool echo)
+{
+    if (!buffer || size == 0 || size > 1024) return -ERR_INVALID_ARGS;
 
-    /* Pocket data buffer: 4 bytes header + up to (size-1) chars + NUL + 1 status = size + 5
-       We allocate a fixed 1030-byte buffer to cover any size up to 1024. */
-    uint8_t readline_buf[1030];
+    /* Out-crate layout: [u32 len][char line[]][u8 status]. We size the buffer
+     * for size bytes of line + 4 length + 1 status + 1 NUL slack. */
+    uint8_t out[1030];
+    uint16_t max_len = (uint16_t)size;
+    uint8_t  params[3] = { (uint8_t)(max_len & 0xFF),
+                           (uint8_t)(max_len >> 8),
+                           (uint8_t)(echo ? 1 : 0) };
 
     const uint32_t max_retries = 10000;
-    uint32_t retry_count = 0;
+    for (uint32_t retry = 0; retry < max_retries; retry++) {
+        memset(out, 0, sizeof(out));
+        uint32_t out_actual = 0;
+        Result   r;
+        int rc = MfCall1(DECK_HARDWARE, HW_KB_READLINE,
+                         params, sizeof(params), NULL, 0,
+                         out, (uint32_t)(size + 5), &out_actual,
+                         60000, &r);
 
-    while (retry_count < max_retries) {
-        memset(readline_buf, 0, size + 6);
-        /* Protocol: data[0..1] = uint16_t max_length (LE), data[2] = echo_mode */
-        uint16_t max_len = (uint16_t)size;
-        readline_buf[0] = (uint8_t)(max_len & 0xFF);
-        readline_buf[1] = (uint8_t)(max_len >> 8);
-        readline_buf[2] = echo ? 1 : 0;
-        pocket_send(DECK_HARDWARE, KB_OP_READLINE, readline_buf, (uint32_t)(size + 6));
-
-        Result result;
-        if (!result_wait(&result, 60000)) {
-            return -ERR_TIMEOUT;
-        }
-
-        if (result.error_code == OK) {
-            if (result.data_addr == 0 || result.data_length < 4) {
-                buffer[0] = '\0';
-                return 0;
-            }
-
-            uint8_t* data = (uint8_t*)(uintptr_t)result.data_addr;
-            uint32_t length = kb_decode_u32(data);
-
-            if (length == 0) {
-                buffer[0] = '\0';
-                return 0;
-            }
-
-            if (length >= size) {
-                length = (uint32_t)(size - 1);
-            }
-
-            memcpy(buffer, data + 4, length);
+        if (rc == 0) {
+            uint32_t length = (uint32_t)out[0]
+                            | ((uint32_t)out[1] << 8)
+                            | ((uint32_t)out[2] << 16)
+                            | ((uint32_t)out[3] << 24);
+            if (length == 0) { buffer[0] = '\0'; return 0; }
+            if (length >= size) length = (uint32_t)(size - 1);
+            memcpy(buffer, out + 4, length);
             buffer[length] = '\0';
-
             return (int)length;
-        } else if (result.error_code == ERR_WOULD_BLOCK ||
-                   result.error_code == ERR_BUSY) {
-            retry_count++;
-            kb_sleep(50000);
-            continue;
-        } else if (result.error_code == ERR_ACCESS_DENIED) {
-            return -ERR_ACCESS_DENIED;
-        } else {
-            retry_count++;
+        }
+        if (rc == ERR_WOULD_BLOCK || rc == ERR_BUSY ||
+            r.error_code == ERR_WOULD_BLOCK || r.error_code == ERR_BUSY) {
             kb_sleep(50000);
             continue;
         }
+        if (rc == ERR_ACCESS_DENIED) return -ERR_ACCESS_DENIED;
+        kb_sleep(50000);
     }
-
     return -ERR_TIMEOUT;
 }
 
-int kb_readline_async(char* buffer, size_t size, bool echo) {
-    if (!buffer || size == 0 || size > 1024) {
-        return -ERR_INVALID_ARGS;
-    }
+int kb_readline_async(char *buffer, size_t size, bool echo)
+{
+    /* Async variant: fire-and-forget the syscall; the caller polls the
+     * ResultRing later via result_pop. We still need a buffer to receive
+     * data, but with manifest mode that buffer is *kernel-side* — we just
+     * fire the manifest and return. */
+    if (!buffer || size == 0 || size > 1024) return -ERR_INVALID_ARGS;
 
-    uint8_t async_buf[1030];
-    memset(async_buf, 0, size + 6);
+    static uint8_t async_out[1030];
     uint16_t max_len = (uint16_t)size;
-    async_buf[0] = (uint8_t)(max_len & 0xFF);
-    async_buf[1] = (uint8_t)(max_len >> 8);
-    async_buf[2] = echo ? 1 : 0;
-    pocket_send(DECK_HARDWARE, KB_OP_READLINE, async_buf, (uint32_t)(size + 6));
+    uint8_t  params[3] = { (uint8_t)(max_len & 0xFF),
+                           (uint8_t)(max_len >> 8),
+                           (uint8_t)(echo ? 1 : 0) };
+    /* Sync submit with a short timeout; non-zero out_actual indicates data
+     * was placed in async_out. The caller should treat the result as the
+     * full readline. */
+    uint32_t out_actual = 0;
+    int rc = MfCall1(DECK_HARDWARE, HW_KB_READLINE,
+                     params, sizeof(params), NULL, 0,
+                     async_out, (uint32_t)(size + 5), &out_actual,
+                     1, NULL);
+    if (rc != 0) return rc;
 
-    return 0;
+    uint32_t length = (uint32_t)async_out[0]
+                    | ((uint32_t)async_out[1] << 8)
+                    | ((uint32_t)async_out[2] << 16)
+                    | ((uint32_t)async_out[3] << 24);
+    if (length >= size) length = (uint32_t)(size - 1);
+    memcpy(buffer, async_out + 4, length);
+    buffer[length] = '\0';
+    return (int)length;
 }
 
-int kb_status(kb_status_t* status) {
-    if (!status) {
-        return -ERR_INVALID_ARGS;
-    }
-
-    uint8_t status_buf[16] = {0};
-    pocket_send(DECK_HARDWARE, KB_OP_STATUS, status_buf, sizeof(status_buf));
-
-    Result result;
-    if (!result_wait(&result, 1000)) {
-        return -ERR_TIMEOUT;
-    }
-
-    if (result.error_code != OK) {
-        return -(int)result.error_code;
-    }
-
-    if (result.data_addr == 0 || result.data_length < 8) {
-        return -ERR_RESULT_INVALID;
-    }
-
-    uint8_t* data = (uint8_t*)(uintptr_t)result.data_addr;
-    status->available = kb_decode_u32(data);
-    status->buffer_size = kb_decode_u32(data + 4);
-
+int kb_status(kb_status_t *status)
+{
+    if (!status) return -ERR_INVALID_ARGS;
+    uint8_t out[8] = {0};
+    int rc = MfCall1(DECK_HARDWARE, HW_KB_STATUS,
+                     NULL, 0, NULL, 0,
+                     out, sizeof(out), NULL,
+                     1000, NULL);
+    if (rc != 0) return rc < 0 ? rc : -rc;
+    status->available   = (uint32_t)out[0]
+                        | ((uint32_t)out[1] << 8)
+                        | ((uint32_t)out[2] << 16)
+                        | ((uint32_t)out[3] << 24);
+    status->buffer_size = (uint32_t)out[4]
+                        | ((uint32_t)out[5] << 8)
+                        | ((uint32_t)out[6] << 16)
+                        | ((uint32_t)out[7] << 24);
     return 0;
 }

@@ -3,64 +3,66 @@
 
 #include "ktypes.h"
 #include "result.h"
-#include "boxos_sizes.h"
+#include "cabin_layout.h"
 
-// ResultRing: per-process SPSC ring buffer for syscall Results.
-// Lives at CABIN_RESULT_RING_ADDR (0x3000), 9 pages (36KB).
-// Kernel is the producer (writes Results, advances tail).
-// Userspace is the consumer (reads Results, advances head).
+/*
+ * ResultRing — SPSC, monotonic 64-bit indices, lazy slot allocation.
+ *
+ *   Kernel producer: kresult_push() (see kring.h) ensures the destination slot
+ *   page is mapped before writing, then writes via vmm_translate_user_addr
+ *   and bumps tail.
+ *
+ *   Userspace consumer: reads Result at slots_base + (head % cap)*slot_size,
+ *   then bumps head. The slot pages it touches were already mapped by the
+ *   kernel as a side effect of the corresponding push, so no fault occurs in
+ *   correct SPSC use.
+ *
+ * Slot stride is RESULT_SLOT_SIZE (32B), but sizeof(Result)=24 — the trailing
+ * 8 bytes per slot are padding that prevents slots from straddling page
+ * boundaries (4096 % 32 == 0).
+ */
 
 typedef struct __packed {
-    volatile uint32_t head;                     // userspace advances after reading
-    volatile uint32_t tail;                     // kernel advances after writing
-    Result slots[RESULT_RING_CAPACITY];         // 1535 * 24 = 36840 bytes
+    volatile uint64_t head;             /* consumer cursor (userspace)     */
+    volatile uint64_t tail;             /* producer cursor (kernel)        */
+    uint64_t          slots_base;       /* user vaddr of slot 0            */
+    uint32_t          slot_size;        /* RESULT_SLOT_SIZE                */
+    uint32_t          slot_count_max;   /* hard upper bound on tail-head   */
+    uint64_t          magic;            /* RESULT_RING_MAGIC               */
+    uint8_t           _pad[24];
+} ResultRingHeader;
+
+_Static_assert(sizeof(ResultRingHeader) == 64,
+               "ResultRingHeader must be 64 bytes");
+
+typedef struct __packed {
+    ResultRingHeader hdr;
+    uint8_t          _page_pad[4096 - sizeof(ResultRingHeader)];
 } ResultRing;
 
-// 8 + 36840 = 36848 bytes, fits in 36864 (9 pages)
-_Static_assert(sizeof(ResultRing) <= 36864, "ResultRing must fit in 9 pages (36KB)");
+_Static_assert(sizeof(ResultRing) == 4096,
+               "ResultRing header page must be exactly one page");
 
-static inline bool result_ring_is_empty(const ResultRing* ring)
+static inline bool result_ring_is_empty(const ResultRing *r)
 {
-    return ring->head == ring->tail;
+    return r->hdr.head == r->hdr.tail;
 }
 
-static inline bool result_ring_is_full(const ResultRing* ring)
+static inline bool result_ring_is_full(const ResultRing *r)
 {
-    return ((ring->tail + 1) % RESULT_RING_CAPACITY) == ring->head;
+    return (r->hdr.tail - r->hdr.head) >= r->hdr.slot_count_max;
 }
 
-static inline uint32_t result_ring_count(const ResultRing* ring)
+static inline uint32_t result_ring_count(const ResultRing *r)
 {
-    uint32_t h = ring->head;
-    uint32_t t = ring->tail;
-    if (t >= h) return t - h;
-    return RESULT_RING_CAPACITY - (h - t);
+    uint64_t n = r->hdr.tail - r->hdr.head;
+    return n > 0xFFFFFFFFu ? 0xFFFFFFFFu : (uint32_t)n;
 }
 
-// Kernel push: write Result to tail, advance tail.
-// Returns true on success, false if ring is full.
-static inline bool result_ring_push(ResultRing* ring, const Result* result)
+static inline uintptr_t result_ring_slot_uvaddr(const ResultRing *r, uint64_t idx)
 {
-    if (result_ring_is_full(ring)) return false;
-
-    uint32_t idx = ring->tail;
-    ring->slots[idx] = *result;
-    __sync_synchronize();  // ensure data written before tail advance
-    ring->tail = (idx + 1) % RESULT_RING_CAPACITY;
-    return true;
+    return (uintptr_t)(r->hdr.slots_base
+                       + (idx % r->hdr.slot_count_max) * r->hdr.slot_size);
 }
 
-// Userspace pop: read Result from head, advance head.
-// Returns true on success, false if ring is empty.
-static inline bool result_ring_pop(ResultRing* ring, Result* out)
-{
-    if (result_ring_is_empty(ring)) return false;
-
-    uint32_t idx = ring->head;
-    *out = ring->slots[idx];
-    __sync_synchronize();  // ensure data read before head advance
-    ring->head = (idx + 1) % RESULT_RING_CAPACITY;
-    return true;
-}
-
-#endif // RESULT_RING_H
+#endif /* RESULT_RING_H */

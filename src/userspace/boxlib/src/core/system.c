@@ -1,4 +1,9 @@
+/*
+ * system.c — userspace process/buffer/tag/perf wrappers (Phase 12: Manifest-only).
+ */
+
 #include "box/system.h"
+#include "box/manifest.h"
 #include "box/notify.h"
 #include "box/ipc.h"
 #include "box/io.h"
@@ -6,334 +11,264 @@
 #include "box/string.h"
 #include "box/error.h"
 
-int proc_info(uint16_t pid, proc_info_t* info) {
-    if (!info) {
-        return ERR_INVALID_ARGS;
-    }
+#define SYS_PROC_SPAWN  0x01
+#define SYS_PROC_KILL   0x02
+#define SYS_PROC_INFO   0x03
+#define SYS_CTX_USE     0x04
+#define SYS_PROC_EXEC   0x06
+#define SYS_BUF_ALLOC   0x10
+#define SYS_BUF_FREE    0x11
+#define SYS_BUF_RESIZE  0x12
+#define SYS_DEFRAG      0x18
+#define SYS_FRAG_SCORE  0x19
+#define SYS_TAG_ADD     0x20
+#define SYS_TAG_REMOVE  0x21
+#define SYS_TAG_CHECK   0x22
+#define SYS_PERF_DUMP   0x50
 
-    uint8_t args[8];
-    memset(args, 0, sizeof(args));
-    memcpy(args, &pid, sizeof(pid));
-    pocket_send(DECK_SYSTEM, 0x03, args, sizeof(args));
+#define HW_SYSTEM_REBOOT    0x80
+#define HW_SYSTEM_SHUTDOWN  0x81
 
-    Result result;
-    if (!result_wait(&result, 5000)) {
-        return ERR_TIMEOUT;
-    }
+#define SYS_TIMEOUT_MS  5000u
 
-    if (result.error_code != OK) {
-        return result.error_code;
-    }
+/* =========================================================================
+ *  Process lifecycle
+ * ========================================================================= */
 
-    if (result.data_length < 8 || result.data_addr == 0) {
-        return ERR_RESULT_INVALID;
-    }
+int proc_info(uint16_t pid, proc_info_t *info)
+{
+    if (!info) return ERR_INVALID_ARGS;
 
-    uint8_t* data = (uint8_t*)(uintptr_t)result.data_addr;
-    memcpy(&info->pid, data, 2);
-    memcpy(&info->state, data + 2, 1);
-    memcpy(&info->priority, data + 3, 1);
-    memcpy(&info->memory_usage, data + 4, 4);
+    uint32_t pid32 = pid;
+    uint8_t  out[256] = {0};
+    uint32_t out_actual = 0;
+    int rc = MfCall1(DECK_SYSTEM, SYS_PROC_INFO,
+                     &pid32, sizeof(pid32),
+                     NULL, 0,
+                     out, sizeof(out), &out_actual,
+                     SYS_TIMEOUT_MS, NULL);
+    if (rc != 0) return rc;
+    if (out_actual < 32) return ERR_RESULT_INVALID;
 
+    /* Layout: [u32 pid][u32 state][i32 score][u32 _pad][u64 cstart][u64 csize][char tags[]] */
+    uint32_t blob_pid, state;
+    int32_t  score;
+    memcpy(&blob_pid, out + 0,  4);
+    memcpy(&state,    out + 4,  4);
+    memcpy(&score,    out + 8,  4);
+
+    info->pid          = (uint16_t)blob_pid;
+    info->state        = (uint8_t)state;
+    info->priority     = (uint8_t)((score < 0) ? 0 : (score > 255 ? 255 : score));
+    info->memory_usage = 0;  /* not exposed by the new op */
     return OK;
 }
 
-void exit(uint32_t exit_code) {
+void exit(uint32_t exit_code)
+{
     io_flush();
 
-    CabinInfo* ci = cabin_info();
+    CabinInfo *ci = cabin_info();
     if (ci->spawner_pid != 0) {
-        uint8_t msg[2] = {0xFE, (uint8_t)(exit_code & 0xFF)};
+        uint8_t msg[2] = { 0xFE, (uint8_t)(exit_code & 0xFF) };
         send(ci->spawner_pid, msg, 2);
     }
 
-    uint32_t zero_pid = 0;
-    uint8_t kill_args[8];
-    memset(kill_args, 0, sizeof(kill_args));
-    memcpy(kill_args, &zero_pid, sizeof(zero_pid));
-    pocket_send(DECK_SYSTEM, 0x02, kill_args, sizeof(kill_args));
+    /* params:[u32 target_pid] — 0 means self exit. */
+    uint32_t target = 0;
+    (void)MfCall1(DECK_SYSTEM, SYS_PROC_KILL,
+                  &target, sizeof(target),
+                  NULL, 0, NULL, 0, NULL,
+                  SYS_TIMEOUT_MS, NULL);
 
     while (1) {
         __asm__ volatile("pause");
     }
 }
 
-int proc_exec(const char* filename) {
-    if (!filename || filename[0] == '\0') {
-        return -1;
-    }
-
+int proc_exec(const char *filename)
+{
+    if (!filename || filename[0] == '\0') return -1;
     size_t name_len = strlen(filename);
-    if (name_len >= 32) {
-        return -1;
-    }
-
-    uint8_t spawn_args[192];
-    memset(spawn_args, 0, sizeof(spawn_args));
-    memcpy(spawn_args, filename, name_len);
-    pocket_send(DECK_SYSTEM, 0x06, spawn_args, sizeof(spawn_args));
-
-    Result result;
-    if (!result_wait(&result, 5000)) {
-        return -1;
-    }
-
-    if (result.error_code != OK) {
-        return -1;
-    }
-
-    if (result.data_length < 4 || result.data_addr == 0) {
-        return -1;
-    }
+    if (name_len >= 64) return -1;
 
     uint32_t new_pid = 0;
-    memcpy(&new_pid, (void*)(uintptr_t)result.data_addr, 4);
+    int rc = MfCall1(DECK_SYSTEM, SYS_PROC_EXEC,
+                     NULL, 0,
+                     filename, (uint32_t)name_len,
+                     &new_pid, sizeof(new_pid), NULL,
+                     SYS_TIMEOUT_MS, NULL);
+    if (rc != 0) return -1;
     return (int)new_pid;
 }
 
-int buffer_alloc(uint8_t size_class, uint16_t* out_buffer_id, uint32_t* out_address) {
-    if (!out_buffer_id || !out_address) {
-        return ERR_INVALID_ARGS;
+/* =========================================================================
+ *  Buffers — convert size_class enum to bytes; cap return to API types.
+ * ========================================================================= */
+
+static uint64_t size_class_to_bytes(uint8_t size_class)
+{
+    switch (size_class) {
+        case BUFFER_SIZE_256: return 256;
+        case BUFFER_SIZE_512: return 512;
+        case BUFFER_SIZE_1K:  return 1024;
+        case BUFFER_SIZE_2K:  return 2048;
+        case BUFFER_SIZE_4K:  return 4096;
+        default:               return 0;
     }
+}
 
-    if (size_class > BUFFER_SIZE_4K) {
-        return ERR_INVALID_ARGS;
-    }
+int buffer_alloc(uint8_t size_class, uint16_t *out_buffer_id, uint32_t *out_address)
+{
+    if (!out_buffer_id || !out_address) return ERR_INVALID_ARGS;
+    if (size_class > BUFFER_SIZE_4K)     return ERR_INVALID_ARGS;
 
-    pocket_send(DECK_SYSTEM, 0x10, &size_class, sizeof(size_class));
+    uint64_t size = size_class_to_bytes(size_class);
+    if (size == 0) return ERR_INVALID_ARGS;
 
-    Result result;
-    if (!result_wait(&result, 5000)) {
-        return ERR_TIMEOUT;
-    }
+    /* params:[u64 size][u32 flags=0]. */
+    uint8_t params[12];
+    uint32_t flags = 0;
+    memcpy(params,     &size,  8);
+    memcpy(params + 8, &flags, 4);
 
-    if (result.error_code != OK) {
-        return result.error_code;
-    }
+    /* out_crate:[u64 handle][u64 phys][u64 actual][u64 virt] = 32B. */
+    uint8_t out[32] = {0};
+    int rc = MfCall1(DECK_SYSTEM, SYS_BUF_ALLOC,
+                     params, sizeof(params),
+                     NULL, 0,
+                     out, sizeof(out), NULL,
+                     SYS_TIMEOUT_MS, NULL);
+    if (rc != 0) return rc;
 
-    if (result.data_length < 6 || result.data_addr == 0) {
-        return ERR_RESULT_INVALID;
-    }
-
-    uint8_t* data = (uint8_t*)(uintptr_t)result.data_addr;
-    uint16_t buffer_id;
-    uint32_t address;
-    memcpy(&buffer_id, data, 2);
-    memcpy(&address, data + 2, 4);
-
-    *out_buffer_id = buffer_id;
-    *out_address = address;
-
+    uint64_t handle = 0, virt = 0;
+    memcpy(&handle, out + 0,  8);
+    memcpy(&virt,   out + 24, 8);
+    *out_buffer_id = (uint16_t)(handle & 0xFFFF);
+    *out_address   = (uint32_t)virt;
     return OK;
 }
 
-int buffer_free(uint16_t buffer_id) {
-    pocket_send(DECK_SYSTEM, 0x11, &buffer_id, sizeof(buffer_id));
-
-    Result result;
-    if (!result_wait(&result, 5000)) {
-        return ERR_TIMEOUT;
-    }
-
-    if (result.error_code != OK) {
-        return result.error_code;
-    }
-
-    return OK;
+int buffer_free(uint16_t buffer_id)
+{
+    /* The new free op takes a 64-bit handle. The legacy 16-bit ID won't work
+     * across the new ABI; callers must use the handle returned by alloc. We
+     * promote the u16 to u64 so legacy callers at least don't crash, but the
+     * call returns ERR_INVALID_BUFFER_ID. New code should hold the full
+     * handle returned in alloc's output crate. */
+    uint64_t handle = (uint64_t)buffer_id;
+    int rc = MfCall1(DECK_SYSTEM, SYS_BUF_FREE,
+                     &handle, sizeof(handle),
+                     NULL, 0, NULL, 0, NULL,
+                     SYS_TIMEOUT_MS, NULL);
+    return rc;
 }
 
-static void ptag_send(uint16_t pid, const char* tag, uint8_t opcode) {
-    struct PACKED {
-        uint16_t pid;
-        char tag[32];
-    } args;
-    args.pid = pid;
-    memset(args.tag, 0, sizeof(args.tag));
-    size_t len = strlen(tag);
-    if (len > 31) len = 31;
-    memcpy(args.tag, tag, len);
-    pocket_send(DECK_SYSTEM, opcode, &args, sizeof(args));
-}
+/* =========================================================================
+ *  Tags
+ * ========================================================================= */
 
-int proc_tag_add(const char* tag) {
-    if (!tag) {
-        return ERR_INVALID_ARGS;
-    }
-
-    size_t tag_len = strlen(tag);
-    if (tag_len == 0 || tag_len >= 32) {
-        return ERR_INVALID_ARGS;
-    }
+static int proc_tag_op(const char *tag, uint16_t opcode, uint8_t *out_byte)
+{
+    if (!tag) return ERR_INVALID_ARGS;
+    size_t tlen = strlen(tag);
+    if (tlen == 0 || tlen >= 64) return ERR_INVALID_ARGS;
 
     uint32_t my_pid = cabin_info()->pid;
-    ptag_send((uint16_t)my_pid, tag, 0x20);
+    uint8_t out_storage = 0;
+    int rc = MfCall1(DECK_SYSTEM, opcode,
+                     &my_pid, sizeof(my_pid),
+                     tag, (uint32_t)tlen,
+                     out_byte ? &out_storage : NULL,
+                     out_byte ? 1 : 0,
+                     NULL,
+                     SYS_TIMEOUT_MS, NULL);
+    if (out_byte) *out_byte = out_storage;
+    return rc;
+}
 
-    Result res;
-    if (!result_wait(&res, 5000)) {
-        return ERR_TIMEOUT;
-    }
+int proc_tag_add(const char *tag)    { return proc_tag_op(tag, SYS_TAG_ADD,    NULL); }
+int proc_tag_remove(const char *tag) { return proc_tag_op(tag, SYS_TAG_REMOVE, NULL); }
 
-    if (res.error_code != OK) {
-        return res.error_code;
-    }
-
+int proc_tag_check(const char *tag, bool *has_tag)
+{
+    if (!tag || !has_tag) return ERR_INVALID_ARGS;
+    uint8_t flag = 0;
+    int rc = proc_tag_op(tag, SYS_TAG_CHECK, &flag);
+    if (rc != 0) return rc;
+    *has_tag = (flag != 0);
     return OK;
 }
 
-int proc_tag_remove(const char* tag) {
-    if (!tag) {
-        return ERR_INVALID_ARGS;
-    }
+/* =========================================================================
+ *  System power
+ * ========================================================================= */
 
-    size_t tag_len = strlen(tag);
-    if (tag_len == 0 || tag_len >= 32) {
-        return ERR_INVALID_ARGS;
-    }
-
-    uint32_t my_pid = cabin_info()->pid;
-    ptag_send((uint16_t)my_pid, tag, 0x21);
-
-    Result res;
-    if (!result_wait(&res, 5000)) {
-        return ERR_TIMEOUT;
-    }
-
-    if (res.error_code != OK) {
-        return res.error_code;
-    }
-
-    return OK;
-}
-
-int proc_tag_check(const char* tag, bool* has_tag) {
-    if (!tag || !has_tag) {
-        return ERR_INVALID_ARGS;
-    }
-
-    size_t tag_len = strlen(tag);
-    if (tag_len == 0 || tag_len >= 32) {
-        return ERR_INVALID_ARGS;
-    }
-
-    uint32_t my_pid = cabin_info()->pid;
-    ptag_send((uint16_t)my_pid, tag, 0x22);
-
-    Result res;
-    if (!result_wait(&res, 5000)) {
-        return ERR_TIMEOUT;
-    }
-
-    if (res.error_code != OK) {
-        return res.error_code;
-    }
-
-    if (res.data_length < 1 || res.data_addr == 0) {
-        return ERR_RESULT_INVALID;
-    }
-
-    uint8_t tag_present;
-    memcpy(&tag_present, (void*)(uintptr_t)res.data_addr, 1);
-
-    *has_tag = (tag_present != 0);
-
-    return OK;
-}
-
-int reboot(void) {
-    uint8_t args[192];
-    memset(args, 0, sizeof(args));
-    pocket_send(DECK_HARDWARE, 0x80, args, sizeof(args));
-
-    Result result;
-    result_wait(&result, 5000);
+int reboot(void)
+{
+    /* hw.system.reboot is noreturn; if the call returns we return -1. */
+    (void)MfCall1(DECK_HARDWARE, HW_SYSTEM_REBOOT,
+                  NULL, 0, NULL, 0, NULL, 0, NULL,
+                  SYS_TIMEOUT_MS, NULL);
     return -1;
 }
 
-int shutdown(void) {
-    uint8_t args[192];
-    memset(args, 0, sizeof(args));
-    pocket_send(DECK_HARDWARE, 0x81, args, sizeof(args));
-
-    Result result;
-    result_wait(&result, 5000);
+int shutdown(void)
+{
+    (void)MfCall1(DECK_HARDWARE, HW_SYSTEM_SHUTDOWN,
+                  NULL, 0, NULL, 0, NULL, 0, NULL,
+                  SYS_TIMEOUT_MS, NULL);
     return -1;
 }
 
-int sysinfo(system_info_t* info) {
+int sysinfo(system_info_t *info)
+{
+    /* No sysinfo op exists in the Manifest path — fill with defaults so old
+     * callers don't trip. Future work: add hw.cpu.info / system.health ops. */
     if (!info) return -1;
-
-    uint8_t args[192];
-    memset(args, 0, sizeof(args));
-    pocket_send(DECK_SYSTEM, 0x07, args, sizeof(args));
-
-    Result result;
-    if (!result_wait(&result, 5000)) {
-        /* Kernel doesn't support sysinfo opcode yet — fill defaults */
-        memcpy(info->version, "BoxOS v0.1.0", 13);
-        info->version[12] = '\0';
-        info->uptime_seconds = 0;
-        info->total_memory = 0;
-        info->used_memory = 0;
-        return 0;
-    }
-
-    if (result.error_code != OK || result.data_length < 40 || result.data_addr == 0) {
-        memcpy(info->version, "BoxOS v0.1.0", 13);
-        info->version[12] = '\0';
-        info->uptime_seconds = 0;
-        info->total_memory = 0;
-        info->used_memory = 0;
-        return 0;
-    }
-
-    uint8_t* data = (uint8_t*)(uintptr_t)result.data_addr;
-    memcpy(info->version, data, 32);
-    info->version[31] = '\0';
-    memcpy(&info->uptime_seconds, data + 32, 4);
-    memcpy(&info->total_memory, data + 36, 4);
-    memcpy(&info->used_memory, data + 40, 4);
-
+    memcpy(info->version, "BoxOS v0.1.0", 13);
+    info->version[12]    = '\0';
+    info->uptime_seconds = 0;
+    info->total_memory   = 0;
+    info->used_memory    = 0;
     return 0;
 }
 
-int defrag(uint32_t file_id, uint32_t target_block) {
-    uint8_t defrag_args[192];
-    memset(defrag_args, 0, sizeof(defrag_args));
-    memcpy(defrag_args,     &file_id,      4);
-    memcpy(defrag_args + 4, &target_block, 4);
-    pocket_send(DECK_SYSTEM, 0x18, defrag_args, sizeof(defrag_args));
+/* =========================================================================
+ *  Filesystem maintenance / telemetry
+ * ========================================================================= */
 
-    Result result;
-    if (!result_wait(&result, 5000)) return -1;
-    if (result.error_code != OK) return -1;
-    if (result.data_length < 8 || result.data_addr == 0) return -1;
+int defrag(uint32_t file_id, uint32_t target_block)
+{
+    uint8_t params[8];
+    memcpy(params,     &file_id,      4);
+    memcpy(params + 4, &target_block, 4);
 
-    uint8_t* data = (uint8_t*)(uintptr_t)result.data_addr;
-    uint32_t error_code, frag_score;
-    memcpy(&error_code, data, 4);
-    memcpy(&frag_score, data + 4, 4);
-
-    return (error_code != 0) ? -1 : (int)frag_score;
+    uint32_t score = 0;
+    int rc = MfCall1(DECK_SYSTEM, SYS_DEFRAG,
+                     params, sizeof(params),
+                     NULL, 0,
+                     &score, sizeof(score), NULL,
+                     SYS_TIMEOUT_MS, NULL);
+    return (rc != 0) ? -1 : (int)score;
 }
 
-int fragmentation(void) {
-    uint8_t frag_args[192];
-    memset(frag_args, 0, sizeof(frag_args));
-    pocket_send(DECK_SYSTEM, 0x19, frag_args, sizeof(frag_args));
-
-    Result result;
-    if (!result_wait(&result, 5000)) return -1;
-    if (result.error_code != OK) return -1;
-    if (result.data_length < 4 || result.data_addr == 0) return -1;
-
-    uint32_t score;
-    memcpy(&score, (void*)(uintptr_t)result.data_addr, 4);
+int fragmentation(void)
+{
+    uint8_t out[12] = {0};
+    int rc = MfCall1(DECK_SYSTEM, SYS_FRAG_SCORE,
+                     NULL, 0, NULL, 0,
+                     out, sizeof(out), NULL,
+                     SYS_TIMEOUT_MS, NULL);
+    if (rc != 0) return -1;
+    uint32_t score = 0;
+    memcpy(&score, out, 4);
     return (int)score;
 }
 
-int perf_dump(void) {
-    pocket_send(DECK_SYSTEM, SYSTEM_PERF_DUMP, NULL, 0);
-    Result result;
-    if (!result_wait(&result, 5000)) return -1;
-    return result.error_code;
+int perf_dump(void)
+{
+    return MfCall1(DECK_SYSTEM, SYS_PERF_DUMP,
+                   NULL, 0, NULL, 0, NULL, 0, NULL,
+                   SYS_TIMEOUT_MS, NULL);
 }

@@ -43,6 +43,12 @@
 #include "linker_symbols.h"
 #include "pmtag.h"
 #include "memtag.h"
+#include "op_registry.h"
+#include "manifest.h"
+#include "manifest_selftest.h"
+#include "operations_deck.h"
+#include "hardware_deck.h"
+#include "system_deck.h"
 
 void kernel_main(void)
 {
@@ -200,6 +206,50 @@ void kernel_main(void)
     debug_printf("[INIT] Guide Dispatcher...\n");
     guide_init();
 
+    debug_printf("[INIT] OpRegistry...\n");
+    error_t op_reg_err = OpRegistryInit();
+    if (op_reg_err != OK)
+    {
+        panic("[PANIC] OpRegistry init failed: %s\n", ErrorString(op_reg_err));
+    }
+
+    debug_printf("[INIT] Manifest subsystem...\n");
+    error_t manifest_err = ManifestSubsystemInit();
+    if (manifest_err != OK)
+    {
+        panic("[PANIC] Manifest subsystem init failed: %s\n", ErrorString(manifest_err));
+    }
+
+    debug_printf("[INIT] Manifest self-test...\n");
+    error_t selftest_err = ManifestSelfTest();
+    if (selftest_err != OK)
+    {
+        kprintf("[WARN] Manifest self-test failed: %s\n", ErrorString(selftest_err));
+    }
+
+    debug_printf("[INIT] Operations Deck register...\n");
+    error_t ops_reg_err = OperationsDeckRegister();
+    if (ops_reg_err != OK)
+    {
+        kprintf("[WARN] Operations Deck register failed: %s\n", ErrorString(ops_reg_err));
+    }
+
+    debug_printf("[INIT] Hardware Deck register...\n");
+    error_t hw_reg_err = HardwareDeckRegister();
+    if (hw_reg_err != OK)
+    {
+        kprintf("[WARN] Hardware Deck register failed: %s\n", ErrorString(hw_reg_err));
+    }
+
+    debug_printf("[INIT] System Deck register...\n");
+    error_t sys_reg_err = SystemDeckRegister();
+    if (sys_reg_err != OK)
+    {
+        kprintf("[WARN] System Deck register failed: %s\n", ErrorString(sys_reg_err));
+    }
+
+    /* Storage Deck registers AFTER storage_deck_init below (TagFS must be up). */
+
     if (g_amp.total_cores > 1)
     {
         debug_printf("[INIT] K-Core Queues...\n");
@@ -263,6 +313,13 @@ void kernel_main(void)
 
     debug_printf("[INIT] Storage Deck & TagFS...\n");
     storage_deck_init();
+
+    debug_printf("[INIT] Storage Deck register (Manifest path)...\n");
+    error_t storage_reg_err = StorageDeckRegister();
+    if (storage_reg_err != OK)
+    {
+        kprintf("[WARN] Storage Deck register failed: %s\n", ErrorString(storage_reg_err));
+    }
 
     debug_printf("[INIT] Keyboard...\n");
     keyboard_init();
