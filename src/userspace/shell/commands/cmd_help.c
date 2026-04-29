@@ -1,6 +1,6 @@
 #include "commands.h"
 #include "../shell.h"
-#include "box/io.h"
+#include "box/print.h"
 #include "box/string.h"
 
 extern const ShellCommand g_commands[];

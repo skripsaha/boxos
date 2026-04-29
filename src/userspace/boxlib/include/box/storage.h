@@ -1,5 +1,5 @@
-#ifndef BOX_FILE_H
-#define BOX_FILE_H
+#ifndef BOX_STORAGE_H
+#define BOX_STORAGE_H
 
 #include "box/defs.h"
 
@@ -36,4 +36,4 @@ int context_clear(void);
 
 int find_file_by_name(const char* filename, uint32_t* file_ids, file_info_t* out_infos, size_t max);
 
-#endif // BOX_FILE_H
+#endif // BOX_STORAGE_H

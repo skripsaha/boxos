@@ -7,7 +7,7 @@
 #include "box/sync.h"
 #include "box/string.h"
 #include "box/notify.h"
-#include "box/io.h"
+#include "box/print.h"
 #include "cabin_layout.h"
 
 // ---------------------------------------------------------------------------

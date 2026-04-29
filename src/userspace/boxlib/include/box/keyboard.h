@@ -1,8 +1,8 @@
-#ifndef BOX_IO_KEYBOARD_H
-#define BOX_IO_KEYBOARD_H
+#ifndef BOX_KEYBOARD_H
+#define BOX_KEYBOARD_H
 
-#include "../types.h"
-#include "../error.h"
+#include "box/types.h"
+#include "box/error.h"
 
 typedef struct {
     char    ch;
@@ -23,4 +23,4 @@ int kb_status(kb_status_t* status);
 int kb_getchar_timeout(uint32_t timeout_ms);
 int kb_getchar_ex(kb_char_t* out_char);
 
-#endif // BOX_IO_KEYBOARD_H
+#endif // BOX_KEYBOARD_H

@@ -6,7 +6,7 @@
  * accepts up to (out_capacity - 5) characters in a single syscall.
  */
 
-#include "box/io/keyboard.h"
+#include "box/keyboard.h"
 #include "box/manifest.h"
 #include "box/notify.h"
 #include "box/result.h"

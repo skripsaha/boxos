@@ -1,4 +1,4 @@
-#include "box/io.h"
+#include "box/print.h"
 #include "box/ipc.h"
 #include "box/notify.h"
 #include "box/system.h"

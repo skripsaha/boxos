@@ -1,5 +1,5 @@
-#ifndef BOX_IO_H
-#define BOX_IO_H
+#ifndef BOX_PRINT_H
+#define BOX_PRINT_H
 
 #include "box/defs.h"
 
@@ -43,4 +43,4 @@ void print_hex(uint32_t num);
 #define COLOR_YELLOW        0x0E
 #define COLOR_WHITE         0x0F
 
-#endif // BOX_IO_H
+#endif // BOX_PRINT_H

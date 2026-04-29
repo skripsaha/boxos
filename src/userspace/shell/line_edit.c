@@ -15,7 +15,7 @@
  */
 
 #include "line_edit.h"
-#include "box/io.h"
+#include "box/print.h"
 #include "box/string.h"
 
 /* =========================================================================

@@ -1,5 +1,5 @@
 #include "commands.h"
-#include "box/io.h"
+#include "box/print.h"
 
 int cmd_clear(int argc, char *argv[])
 {

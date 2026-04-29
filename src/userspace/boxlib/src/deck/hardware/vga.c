@@ -14,7 +14,7 @@
  * multi-op Manifest batching; for now correctness > throughput.
  */
 
-#include "box/io/vga.h"
+#include "box/vga.h"
 #include "box/manifest.h"
 #include "box/notify.h"
 #include "box/result.h"

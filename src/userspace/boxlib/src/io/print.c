@@ -1,25 +1,32 @@
-#include "box/io.h"
-#include "box/io/vga.h"
-#include "box/io/keyboard.h"
+#include "box/print.h"
+#include "box/vga.h"
+#include "box/keyboard.h"
 #include "box/string.h"
 #include "box/ipc.h"
 #include "box/convert.h"
 #include "box/notify.h"
-#include "box/display_proto.h"
+#include "box/display.h"
 
-// ============================================================================
-// IPC output buffer — batches print/println into fewer broadcast() calls.
-// The display server's result ring has only 15 slots; without buffering,
-// each print(" ") is a separate broadcast that overflows the ring.
-// ============================================================================
+/* ===========================================================================
+ * Cabin I/O state — IO mode + display daemon PID
+ * Was io_mode.c (merged Stage 2 — same conceptual domain).
+ * =========================================================================== */
+static uint8_t  g_io_mode    = IO_MODE_IPC;
+static uint32_t g_display_pid = 0;
+
+void     io_set_mode(uint8_t mode)        { g_io_mode = mode; }
+uint8_t  io_get_mode(void)                { return g_io_mode; }
+void     io_set_display_pid(uint32_t pid) { g_display_pid = pid; }
+uint32_t io_get_display_pid(void)         { return g_display_pid; }
+
+/* ===========================================================================
+ * IPC output buffer — batches print/println into fewer broadcast() calls.
+ * The display server's result ring has only 15 slots; without buffering,
+ * each print(" ") is a separate broadcast that overflows the ring.
+ * =========================================================================== */
 #define IO_BUF_SIZE 200
 static char io_buf[IO_BUF_SIZE];
 static int  io_buf_pos = 0;
-
-static uint32_t g_display_pid = 0;
-
-void io_set_display_pid(uint32_t pid) { g_display_pid = pid; }
-uint32_t io_get_display_pid(void) { return g_display_pid; }
 
 void io_flush(void) {
     if (io_get_mode() == IO_MODE_IPC && io_buf_pos > 0) {
@@ -216,4 +223,91 @@ void print_hex(uint32_t num) {
         num >>= 4;
     }
     print(buf);
+}
+
+/* ===========================================================================
+ * printf — was format.c (merged Stage 2).
+ * Builds a 512B formatted string then calls print().
+ * =========================================================================== */
+static void fmt_htoa64(unsigned long value, char *buf)
+{
+    const char *digits = "0123456789abcdef";
+    if (value == 0) { buf[0] = '0'; buf[1] = '\0'; return; }
+    char tmp[17];
+    int i = 0;
+    while (value > 0) {
+        tmp[i++] = digits[value & 0xF];
+        value >>= 4;
+    }
+    int j = 0;
+    while (i > 0) buf[j++] = tmp[--i];
+    buf[j] = '\0';
+}
+
+int printf(const char *fmt, ...)
+{
+    if (!fmt) return -1;
+
+    va_list args;
+    va_start(args, fmt);
+
+    char out[512];
+    int  pos = 0;
+    char numbuf[20];
+
+    while (*fmt && pos < 510) {
+        if (*fmt != '%') { out[pos++] = *fmt++; continue; }
+        fmt++;
+        switch (*fmt) {
+            case 's': {
+                const char *s = va_arg(args, const char *);
+                if (!s) s = "(null)";
+                while (*s && pos < 510) out[pos++] = *s++;
+                break;
+            }
+            case 'd': {
+                int v = va_arg(args, int);
+                to_str(v, numbuf, sizeof(numbuf));
+                for (int i = 0; numbuf[i] && pos < 510; i++) out[pos++] = numbuf[i];
+                break;
+            }
+            case 'u': {
+                unsigned int v = va_arg(args, unsigned int);
+                uint_to_str(v, numbuf, sizeof(numbuf));
+                for (int i = 0; numbuf[i] && pos < 510; i++) out[pos++] = numbuf[i];
+                break;
+            }
+            case 'x': case 'X': {
+                unsigned int v = va_arg(args, unsigned int);
+                to_hex(v, numbuf, sizeof(numbuf));
+                for (int i = 0; numbuf[i] && pos < 510; i++) out[pos++] = numbuf[i];
+                break;
+            }
+            case 'c': {
+                char c = (char)va_arg(args, int);
+                out[pos++] = c;
+                break;
+            }
+            case 'p': {
+                unsigned long v = va_arg(args, unsigned long);
+                if (pos < 508) { out[pos++] = '0'; out[pos++] = 'x'; }
+                fmt_htoa64(v, numbuf);
+                for (int i = 0; numbuf[i] && pos < 510; i++) out[pos++] = numbuf[i];
+                break;
+            }
+            case '%': out[pos++] = '%'; break;
+            case '\0': goto done;
+            default:
+                out[pos++] = '%';
+                if (pos < 510) out[pos++] = *fmt;
+                break;
+        }
+        fmt++;
+    }
+done:
+    out[pos] = '\0';
+    va_end(args);
+
+    print(out);
+    return pos;
 }

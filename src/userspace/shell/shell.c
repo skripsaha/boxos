@@ -11,13 +11,13 @@
 #include "line_edit.h"
 #include "parser.h"
 #include "executor.h"
-#include "box/io.h"
+#include "box/print.h"
 #include "box/string.h"
 #include "box/ipc.h"
 #include "box/result.h"
 #include "box/system.h"
 #include "box/notify.h"
-#include "box/display_proto.h"
+#include "box/display.h"
 
 static ShellState    g_state;
 static LineEditState g_editor;

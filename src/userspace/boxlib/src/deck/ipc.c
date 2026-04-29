@@ -3,7 +3,7 @@
 #include "box/result.h"
 #include "box/system.h"
 #include "box/string.h"
-#include "box/file.h"
+#include "box/storage.h"
 #include "box/cpu.h"
 #include "box/manifest.h"
 #include "box/crate.h"

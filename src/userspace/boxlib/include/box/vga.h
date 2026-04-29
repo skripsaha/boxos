@@ -1,8 +1,8 @@
-#ifndef BOX_IO_VGA_H
-#define BOX_IO_VGA_H
+#ifndef BOX_VGA_H
+#define BOX_VGA_H
 
-#include "../types.h"
-#include "../error.h"
+#include "box/types.h"
+#include "box/error.h"
 #include "video_colors.h"
 
 typedef struct {
@@ -40,4 +40,4 @@ int vga_getdimensions(vga_dimensions_t* dims);
 void vga_begin(void);
 int  vga_commit(void);
 
-#endif // BOX_IO_VGA_H
+#endif // BOX_VGA_H

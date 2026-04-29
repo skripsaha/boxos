@@ -16,14 +16,20 @@ CFLAGS = -nostdlib -fno-builtin -ffreestanding -mno-red-zone \
          -fno-stack-protector \
          -Iinclude -I../../include -Wall -Wextra -O2 -Wno-unused-parameter
 
-SRCS = src/core/notify.c src/core/result.c src/core/string.c \
-       src/core/io.c src/core/file.c src/core/system.c \
-       src/core/result_wait.c \
-       src/core/ipc.c src/core/format.c src/core/convert.c \
-       src/core/io_mode.c src/core/heap.c src/core/stack_protector.c \
+SRCS = src/core/notify.c \
+       src/core/result.c \
        src/core/manifest.c \
-       src/time.c \
-       src/io/keyboard.c src/io/vga.c
+       src/deck/storage.c \
+       src/deck/system.c \
+       src/deck/ipc.c \
+       src/deck/hardware/vga.c \
+       src/deck/hardware/keyboard.c \
+       src/deck/hardware/time.c \
+       src/io/print.c \
+       src/util/string.c \
+       src/util/convert.c \
+       src/util/heap.c \
+       src/arch/x86_64/stack_protector.c
 OBJS = $(SRCS:.c=.o)
 
 all: libbox.a ../build/boxlib_start.o

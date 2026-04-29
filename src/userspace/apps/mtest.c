@@ -14,7 +14,7 @@
  */
 
 #include "box/manifest.h"
-#include "box/io.h"
+#include "box/print.h"
 #include "box/system.h"
 #include "box/string.h"
 #include "box/notify.h"

@@ -12,7 +12,7 @@
  * Total Manifest size = sizeof(Manifest) [16] + N * 13 ≈ 13 KiB for N=1000.
  */
 
-#include "box/io.h"
+#include "box/print.h"
 #include "box/manifest.h"
 #include "box/crate.h"
 #include "box/notify.h"
