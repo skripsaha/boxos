@@ -17,6 +17,7 @@
 #define SYS_PROC_INFO   0x03
 #define SYS_CTX_USE     0x04
 #define SYS_PROC_EXEC   0x06
+#define SYSTEM_OP_INFO  0x07
 #define SYS_DEFRAG      0x18
 #define SYS_FRAG_SCORE  0x19
 #define SYS_TAG_ADD     0x20
@@ -159,14 +160,32 @@ int shutdown(void)
 
 int sysinfo(system_info_t *info)
 {
-    /* No sysinfo op exists in the Manifest path — fill with defaults so old
-     * callers don't trip. Future work: add hw.cpu.info / system.health ops. */
     if (!info) return -1;
-    memcpy(info->version, "BoxOS v0.1.0", 13);
-    info->version[12]    = '\0';
-    info->uptime_seconds = 0;
-    info->total_memory   = 0;
-    info->used_memory    = 0;
+
+    uint8_t  blob[96] = {0};
+    uint32_t got      = 0;
+    int rc = MfCall1(DECK_SYSTEM, SYSTEM_OP_INFO,
+                     NULL, 0, NULL, 0,
+                     blob, sizeof(blob), &got, SYS_TIMEOUT_MS, NULL);
+    if (rc != 0)            return -1;
+    if (got < sizeof(blob)) return -1;
+
+    memcpy(info->version, blob, 32);
+    info->version[31] = '\0';
+    memcpy(&info->uptime_ns,    blob + 32, sizeof(uint64_t));
+    memcpy(&info->total_memory, blob + 40, sizeof(uint64_t));
+    memcpy(&info->used_memory,  blob + 48, sizeof(uint64_t));
+    memcpy(&info->free_memory,  blob + 56, sizeof(uint64_t));
+    memcpy(&info->tsc_freq_khz, blob + 64, sizeof(uint64_t));
+    memcpy(&info->cpu_total,    blob + 72, sizeof(uint32_t));
+    memcpy(&info->cpu_k_cores,  blob + 76, sizeof(uint32_t));
+    memcpy(&info->cpu_app_cores,blob + 80, sizeof(uint32_t));
+    memcpy(&info->process_count,blob + 84, sizeof(uint32_t));
+    memcpy(&info->pit_freq_hz,  blob + 88, sizeof(uint32_t));
+    info->multicore_active  = blob[92];
+    info->has_invariant_tsc = blob[93];
+    info->has_waitpkg       = blob[94];
+    info->reserved          = 0;
     return 0;
 }
 

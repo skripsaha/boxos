@@ -36,6 +36,11 @@
 #include "use_context.h"
 #include "perf_trace.h"
 #include "kernel_config.h"
+#include "amp.h"
+#include "rtc.h"
+#include "pit.h"
+#include "cpu_calibrate.h"
+#include "cpuid.h"
 
 #define MAX_BROADCAST_TARGETS  256u
 #define BROADCAST_TAG_MAX      64u
@@ -796,6 +801,92 @@ static int SysFragScore(const ManifestOp *op, Crate *crates, uint16_t crate_coun
 }
 
 /* =========================================================================
+ *  System info — real-time snapshot (no hardcoded values)
+ *
+ *  Layout written into out_crate (must be ≥ 96 bytes, matches userspace
+ *  system_info_t):
+ *
+ *    [00..31]  char     version[32]
+ *    [32..39]  uint64_t uptime_ns
+ *    [40..47]  uint64_t total_memory
+ *    [48..55]  uint64_t used_memory
+ *    [56..63]  uint64_t free_memory
+ *    [64..71]  uint64_t tsc_freq_khz
+ *    [72..75]  uint32_t cpu_total
+ *    [76..79]  uint32_t cpu_k_cores
+ *    [80..83]  uint32_t cpu_app_cores
+ *    [84..87]  uint32_t process_count
+ *    [88..91]  uint32_t pit_freq_hz
+ *    [92]      uint8_t  multicore_active
+ *    [93]      uint8_t  has_invariant_tsc
+ *    [94]      uint8_t  has_waitpkg
+ *    [95]      uint8_t  reserved
+ * ========================================================================= */
+
+#define SYSINFO_BLOB_SIZE  96
+
+static int SysInfo(const ManifestOp *op, Crate *crates, uint16_t crate_count,
+                   const OpContext *ctx)
+{
+    (void)op; (void)crate_count;
+    if (!ctx)                              return ERR_INVALID_ARGUMENT;
+    if (op->out_crate == CRATE_INDEX_NONE) return ERR_INVALID_ARGUMENT;
+
+    Crate *out = &crates[op->out_crate];
+    if (out->capacity < SYSINFO_BLOB_SIZE) return ERR_BUFFER_TOO_SMALL;
+
+    uint8_t *kp = SysCrateWrite(out, ctx, SYSINFO_BLOB_SIZE);
+    if (!kp) return ERR_INVALID_ADDRESS;
+
+    /* Version string. Pinned here for now (kernel_config.h has no version
+     * macro yet); migrate to a single source when the version policy lands. */
+    static const char kver[] = "BoxOS v0.2.0";
+    size_t vlen = sizeof(kver) - 1;
+    if (vlen > 31) vlen = 31;
+    memset(kp, 0, 32);
+    memcpy(kp, kver, vlen);
+
+    /* Memory in bytes — PMM tracks pages; convert with PAGE_SIZE. */
+    uint64_t total_pages = (uint64_t)pmm_total_pages();
+    uint64_t used_pages  = (uint64_t)pmm_used_pages();
+    uint64_t free_pages  = total_pages > used_pages ? total_pages - used_pages : 0;
+    uint64_t total_b     = total_pages * PMM_PAGE_SIZE;
+    uint64_t used_b      = used_pages  * PMM_PAGE_SIZE;
+    uint64_t free_b      = free_pages  * PMM_PAGE_SIZE;
+
+    uint64_t uptime_ns   = rtc_get_uptime_ns();
+    uint64_t tsc_khz     = cpu_get_tsc_freq_khz();
+
+    uint32_t cpu_total   = (uint32_t)g_amp.total_cores;
+    uint32_t cpu_k       = (uint32_t)g_amp.k_count;
+    uint32_t cpu_app     = (uint32_t)g_amp.app_count;
+    uint32_t proc_count  = process_get_count();
+    uint32_t pit_hz      = pit_get_frequency();
+
+    uint8_t mc_active    = g_amp.multicore_active   ? 1 : 0;
+    uint8_t inv_tsc      = g_cpu_caps.has_invariant_tsc ? 1 : 0;
+    uint8_t waitpkg      = g_cpu_caps.has_waitpkg       ? 1 : 0;
+
+    memcpy(kp + 32, &uptime_ns, sizeof(uint64_t));
+    memcpy(kp + 40, &total_b,   sizeof(uint64_t));
+    memcpy(kp + 48, &used_b,    sizeof(uint64_t));
+    memcpy(kp + 56, &free_b,    sizeof(uint64_t));
+    memcpy(kp + 64, &tsc_khz,   sizeof(uint64_t));
+    memcpy(kp + 72, &cpu_total, sizeof(uint32_t));
+    memcpy(kp + 76, &cpu_k,     sizeof(uint32_t));
+    memcpy(kp + 80, &cpu_app,   sizeof(uint32_t));
+    memcpy(kp + 84, &proc_count,sizeof(uint32_t));
+    memcpy(kp + 88, &pit_hz,    sizeof(uint32_t));
+    kp[92] = mc_active;
+    kp[93] = inv_tsc;
+    kp[94] = waitpkg;
+    kp[95] = 0;
+
+    out->size = SYSINFO_BLOB_SIZE;
+    return OK;
+}
+
+/* =========================================================================
  *  Telemetry
  * ========================================================================= */
 
@@ -829,6 +920,7 @@ error_t SystemDeckRegister(void)
         { SYSTEM_OP_PROC_KILL,    SysProcKill,    OP_AUTH_NONE,   "system.proc.kill"  },
         { SYSTEM_OP_PROC_INFO,    SysProcInfo,    OP_AUTH_NONE,   "system.proc.info"  },
         { SYSTEM_OP_PROC_EXEC,    SysProcExec,    OP_AUTH_UTILITY,"system.proc.exec"  },
+        { SYSTEM_OP_INFO,         SysInfo,        OP_AUTH_NONE,   "system.info"       },
         /* Context, tags, buffers: app+. */
         { SYSTEM_OP_CTX_USE,      SysCtxUse,      OP_AUTH_APP,    "system.ctx.use"    },
         { SYSTEM_OP_BUF_ALLOC,    SysBufAlloc,    OP_AUTH_APP,    "system.buf.alloc"  },

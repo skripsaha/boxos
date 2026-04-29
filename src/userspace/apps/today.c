@@ -38,14 +38,10 @@ int main(void)
     char buf[20];
     time_format(&now, buf, sizeof(buf));
 
-    color(COLOR_LIGHT_CYAN);
-    printf("%s", buf);
-
-    color(COLOR_YELLOW);
-    printf("  %s", weekday_name(now.weekday));
-
-    color(COLOR_LIGHT_GRAY);
-    println("");
+    printf("%color%s%color  %s\n",
+           COLOR_CYAN,   buf,
+           COLOR_YELLOW, weekday_name(now.weekday));
+    set_color(COLOR_DEFAULT);
 
     exit(0);
     return 0;

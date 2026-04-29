@@ -2,6 +2,7 @@
 #define BOX_PRINT_H
 
 #include "box/defs.h"
+#include "box/color.h"
 
 #define IO_MODE_VGA 0
 #define IO_MODE_IPC 1
@@ -14,10 +15,25 @@ uint32_t io_get_display_pid(void);
 
 void print(const char* str);
 void println(const char* str);
-int printf(const char* fmt, ...);
 void clear(void);
-void color(uint8_t c);
 void io_flush(void);
+
+/* printf with BoxOS-native colored runs.
+ *
+ * Standard format specifiers:  %s %d %u %x %X %c %p %%
+ *
+ * Extension:  %color   — consumes one Color (uint32_t RGB) argument and
+ *                        switches the foreground colour for following text
+ *                        runs in the same printf call.
+ *
+ * UTF-8 input: ASCII passes through; multi-byte sequences are replaced with
+ * '?' until the kernel-side font extension lands. This keeps printf safe for
+ * arbitrary user strings without breaking the cell grid.
+ *
+ * The whole printf produces ONE syscall — output runs are batched as ops
+ * inside a single Manifest submit.
+ */
+int printf(const char* fmt, ...);
 
 int readline(char* buffer, size_t max_len);
 int getchar(void);
@@ -25,22 +41,5 @@ int input(const char* prompt, char* buffer, size_t max_len);
 
 void print_int(int num);
 void print_hex(uint32_t num);
-
-#define COLOR_BLACK         0x00
-#define COLOR_BLUE          0x01
-#define COLOR_GREEN         0x02
-#define COLOR_CYAN          0x03
-#define COLOR_RED           0x04
-#define COLOR_MAGENTA       0x05
-#define COLOR_BROWN         0x06
-#define COLOR_LIGHT_GRAY    0x07
-#define COLOR_DARK_GRAY     0x08
-#define COLOR_LIGHT_BLUE    0x09
-#define COLOR_LIGHT_GREEN   0x0A
-#define COLOR_LIGHT_CYAN    0x0B
-#define COLOR_LIGHT_RED     0x0C
-#define COLOR_LIGHT_MAGENTA 0x0D
-#define COLOR_YELLOW        0x0E
-#define COLOR_WHITE         0x0F
 
 #endif // BOX_PRINT_H

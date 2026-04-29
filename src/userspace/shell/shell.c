@@ -114,10 +114,8 @@ void ShellUpdatePrompt(void)
 
 static bool TakeSurvey(const char *message)
 {
-    color(0x0E); /* yellow */
-    print(message);
-    print(" [y/n] ");
-    color(0x07);
+    printf("%color%s [y/n] %color",
+           COLOR_YELLOW, message, COLOR_DEFAULT);
     io_flush();
 
     while (1) {
@@ -171,10 +169,8 @@ void ShellMainLoop(void)
         if (result != 0) {
             const char *err = ExecutorGetError();
             if (err && err[0] != '\0') {
-                color(0x0C); /* light red */
-                print("Error: ");
-                println(err);
-                color(0x07); /* reset to gray */
+                printf("%colorError: %s%color\n",
+                       COLOR_RED, err, COLOR_DEFAULT);
             }
         }
     }

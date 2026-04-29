@@ -8,15 +8,12 @@ static int tests_failed = 0;
 
 static void test_result(const char *name, bool passed) {
     if (passed) {
-        color(COLOR_GREEN);
-        printf("  [PASS] %s\n", name);
+        printf("  %color[PASS]%color %s\n", COLOR_GREEN, COLOR_DEFAULT, name);
         tests_passed++;
     } else {
-        color(COLOR_RED);
-        printf("  [FAIL] %s\n", name);
+        printf("  %color[FAIL]%color %s\n", COLOR_RED,   COLOR_DEFAULT, name);
         tests_failed++;
     }
-    color(COLOR_LIGHT_GRAY);
 }
 
 static void test_basic_malloc_free(void) {
@@ -287,10 +284,8 @@ static void test_tagged_dump(void) {
 }
 
 int main(void) {
-    color(COLOR_WHITE);
-    println("BoxOS Memory Test");
-    color(COLOR_LIGHT_GRAY);
-    println("------------------");
+    printf("%colorBoxOS Memory Test%color\n------------------\n",
+           COLOR_WHITE, COLOR_DEFAULT);
 
     test_basic_malloc_free();
     test_calloc_zeroed();
@@ -302,9 +297,8 @@ int main(void) {
     test_stress();
     test_large_alloc();
 
-    color(COLOR_WHITE);
-    println("-- Tagged malloc --");
-    color(COLOR_LIGHT_GRAY);
+    printf("%color-- Tagged malloc --%color\n", COLOR_WHITE, COLOR_DEFAULT);
+
     test_tagged_basic();
     test_tagged_multi();
     test_tagged_iterate();
@@ -314,15 +308,14 @@ int main(void) {
 
     println("------------------");
     if (tests_failed == 0) {
-        color(COLOR_GREEN);
-        printf("All %d tests passed.\n", tests_passed);
+        printf("%colorAll %d tests passed.%color\n",
+               COLOR_GREEN, tests_passed, COLOR_DEFAULT);
     } else {
-        color(COLOR_YELLOW);
-        printf("Results: %d passed, ", tests_passed);
-        color(COLOR_RED);
-        printf("%d failed\n", tests_failed);
+        printf("%colorResults: %d passed, %color%d failed%color\n",
+               COLOR_YELLOW, tests_passed,
+               COLOR_RED,    tests_failed,
+               COLOR_DEFAULT);
     }
-    color(COLOR_LIGHT_GRAY);
 
     exit(0);
     return 0;
