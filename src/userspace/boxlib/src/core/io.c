@@ -110,7 +110,7 @@ void clear(void) {
         broadcast("display", &cmd, 1);
         return;
     }
-    vga_clear(VGA_COLOR(VGA_LIGHT_GRAY, VGA_BLACK));
+    vga_clear(VIDEO_COLOR(VIDEO_LIGHT_GRAY, VIDEO_BLACK));
 }
 
 void color(uint8_t c) {

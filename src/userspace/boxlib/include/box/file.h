@@ -3,9 +3,7 @@
 
 #include "box/defs.h"
 
-#define FILE_FLAG_ACTIVE   (1 << 0)
 #define FILE_FLAG_TRASHED  (1 << 1)
-#define FILE_FLAG_HIDDEN   (1 << 2)
 
 typedef struct {
     uint8_t type;        // 0=user, 1=system
@@ -35,9 +33,6 @@ int tag_remove(uint32_t file_id, const char* key);
 
 int context_set(const char* tag);
 int context_clear(void);
-
-int fwrite_all(uint32_t file_id, const void* buffer, size_t total_size);
-int fread_all(uint32_t file_id, void* buffer, size_t max_size, size_t* bytes_read);
 
 int find_file_by_name(const char* filename, uint32_t* file_ids, file_info_t* out_infos, size_t max);
 

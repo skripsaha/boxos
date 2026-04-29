@@ -114,39 +114,6 @@ int kb_readline(char *buffer, size_t size, bool echo)
     return -ERR_TIMEOUT;
 }
 
-int kb_readline_async(char *buffer, size_t size, bool echo)
-{
-    /* Async variant: fire-and-forget the syscall; the caller polls the
-     * ResultRing later via result_pop. We still need a buffer to receive
-     * data, but with manifest mode that buffer is *kernel-side* — we just
-     * fire the manifest and return. */
-    if (!buffer || size == 0 || size > 1024) return -ERR_INVALID_ARGS;
-
-    static uint8_t async_out[1030];
-    uint16_t max_len = (uint16_t)size;
-    uint8_t  params[3] = { (uint8_t)(max_len & 0xFF),
-                           (uint8_t)(max_len >> 8),
-                           (uint8_t)(echo ? 1 : 0) };
-    /* Sync submit with a short timeout; non-zero out_actual indicates data
-     * was placed in async_out. The caller should treat the result as the
-     * full readline. */
-    uint32_t out_actual = 0;
-    int rc = MfCall1(DECK_HARDWARE, HW_KB_READLINE,
-                     params, sizeof(params), NULL, 0,
-                     async_out, (uint32_t)(size + 5), &out_actual,
-                     1, NULL);
-    if (rc != 0) return rc;
-
-    uint32_t length = (uint32_t)async_out[0]
-                    | ((uint32_t)async_out[1] << 8)
-                    | ((uint32_t)async_out[2] << 16)
-                    | ((uint32_t)async_out[3] << 24);
-    if (length >= size) length = (uint32_t)(size - 1);
-    memcpy(buffer, async_out + 4, length);
-    buffer[length] = '\0';
-    return (int)length;
-}
-
 int kb_status(kb_status_t *status)
 {
     if (!status) return -ERR_INVALID_ARGS;
