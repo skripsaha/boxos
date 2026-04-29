@@ -153,7 +153,7 @@ int vga_putchar(char c)
         if (rc < 0) return rc;
     }
     int color = vga_getcolor();
-    if (color < 0) color = VGA_SCHEME_DEFAULT;
+    if (color < 0) color = VIDEO_ATTR_DEFAULT;
 
     uint8_t params[4] = { s_cursor_row, s_cursor_col, (uint8_t)c, (uint8_t)color };
     return MfCall1(DECK_HARDWARE, HW_VGA_PUTCHAR,
@@ -167,7 +167,7 @@ int vga_puts(const char *str)
     if (!str) return -ERR_INVALID_ARGS;
 
     int color = vga_getcolor();
-    if (color < 0) color = VGA_SCHEME_DEFAULT;
+    if (color < 0) color = VIDEO_ATTR_DEFAULT;
 
     size_t len = strlen(str);
     uint8_t params[2] = { (uint8_t)color, 0 /* flags */ };

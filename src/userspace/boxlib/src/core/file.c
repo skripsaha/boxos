@@ -204,20 +204,6 @@ int fwrite(uint32_t file_id, uint64_t offset, const void *buffer, size_t size)
     return (int)bytes_written;
 }
 
-int fwrite_all(uint32_t file_id, const void *buffer, size_t total_size)
-{
-    /* New ObjWrite handles arbitrary size in one call. */
-    return fwrite(file_id, 0, buffer, total_size);
-}
-
-int fread_all(uint32_t file_id, void *buffer, size_t max_size, size_t *bytes_read)
-{
-    int got = fread(file_id, 0, buffer, max_size);
-    if (got < 0) return -1;
-    if (bytes_read) *bytes_read = (size_t)got;
-    return 0;
-}
-
 /* =========================================================================
  *  RENAME / DELETE
  * ========================================================================= */

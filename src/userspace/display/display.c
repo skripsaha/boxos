@@ -8,7 +8,7 @@
 #include "box/system.h"
 #include "box/display_proto.h"
 
-static uint8_t display_cached_color = VGA_COLOR(VGA_LIGHT_GRAY, VGA_BLACK);
+static uint8_t display_cached_color = VIDEO_COLOR(VIDEO_LIGHT_GRAY, VIDEO_BLACK);
 
 static void render(const uint8_t* data, uint16_t len) {
     uint16_t i = 0;
@@ -16,8 +16,8 @@ static void render(const uint8_t* data, uint16_t len) {
         uint8_t b = data[i];
 
         if (b == DISP_CMD_CLEAR) {
-            vga_clear(VGA_COLOR(VGA_LIGHT_GRAY, VGA_BLACK));
-            display_cached_color = VGA_COLOR(VGA_LIGHT_GRAY, VGA_BLACK);
+            vga_clear(VIDEO_COLOR(VIDEO_LIGHT_GRAY, VIDEO_BLACK));
+            display_cached_color = VIDEO_COLOR(VIDEO_LIGHT_GRAY, VIDEO_BLACK);
             i++;
             continue;
         }

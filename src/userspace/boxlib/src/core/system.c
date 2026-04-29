@@ -16,9 +16,6 @@
 #define SYS_PROC_INFO   0x03
 #define SYS_CTX_USE     0x04
 #define SYS_PROC_EXEC   0x06
-#define SYS_BUF_ALLOC   0x10
-#define SYS_BUF_FREE    0x11
-#define SYS_BUF_RESIZE  0x12
 #define SYS_DEFRAG      0x18
 #define SYS_FRAG_SCORE  0x19
 #define SYS_TAG_ADD     0x20
@@ -100,68 +97,6 @@ int proc_exec(const char *filename)
                      SYS_TIMEOUT_MS, NULL);
     if (rc != 0) return -1;
     return (int)new_pid;
-}
-
-/* =========================================================================
- *  Buffers — convert size_class enum to bytes; cap return to API types.
- * ========================================================================= */
-
-static uint64_t size_class_to_bytes(uint8_t size_class)
-{
-    switch (size_class) {
-        case BUFFER_SIZE_256: return 256;
-        case BUFFER_SIZE_512: return 512;
-        case BUFFER_SIZE_1K:  return 1024;
-        case BUFFER_SIZE_2K:  return 2048;
-        case BUFFER_SIZE_4K:  return 4096;
-        default:               return 0;
-    }
-}
-
-int buffer_alloc(uint8_t size_class, uint16_t *out_buffer_id, uint32_t *out_address)
-{
-    if (!out_buffer_id || !out_address) return ERR_INVALID_ARGS;
-    if (size_class > BUFFER_SIZE_4K)     return ERR_INVALID_ARGS;
-
-    uint64_t size = size_class_to_bytes(size_class);
-    if (size == 0) return ERR_INVALID_ARGS;
-
-    /* params:[u64 size][u32 flags=0]. */
-    uint8_t params[12];
-    uint32_t flags = 0;
-    memcpy(params,     &size,  8);
-    memcpy(params + 8, &flags, 4);
-
-    /* out_crate:[u64 handle][u64 phys][u64 actual][u64 virt] = 32B. */
-    uint8_t out[32] = {0};
-    int rc = MfCall1(DECK_SYSTEM, SYS_BUF_ALLOC,
-                     params, sizeof(params),
-                     NULL, 0,
-                     out, sizeof(out), NULL,
-                     SYS_TIMEOUT_MS, NULL);
-    if (rc != 0) return rc;
-
-    uint64_t handle = 0, virt = 0;
-    memcpy(&handle, out + 0,  8);
-    memcpy(&virt,   out + 24, 8);
-    *out_buffer_id = (uint16_t)(handle & 0xFFFF);
-    *out_address   = (uint32_t)virt;
-    return OK;
-}
-
-int buffer_free(uint16_t buffer_id)
-{
-    /* The new free op takes a 64-bit handle. The legacy 16-bit ID won't work
-     * across the new ABI; callers must use the handle returned by alloc. We
-     * promote the u16 to u64 so legacy callers at least don't crash, but the
-     * call returns ERR_INVALID_BUFFER_ID. New code should hold the full
-     * handle returned in alloc's output crate. */
-    uint64_t handle = (uint64_t)buffer_id;
-    int rc = MfCall1(DECK_SYSTEM, SYS_BUF_FREE,
-                     &handle, sizeof(handle),
-                     NULL, 0, NULL, 0, NULL,
-                     SYS_TIMEOUT_MS, NULL);
-    return rc;
 }
 
 /* =========================================================================
