@@ -142,6 +142,14 @@ int send_args(uint32_t target_pid, int argc, char** argv) {
 }
 
 int receive_args(int* argc, char argv[][64], int max_args) {
+    /* Always initialise *argc up-front. Otherwise the four early-return
+     * paths below leave the caller with an uninitialised int — typical
+     * usage in utilities is `int argc; receive_args(&argc, argv, 16);`
+     * with the return value discarded. A garbage argc then drives a
+     * loop that reads beyond argv[max_args-1] into stack noise; PID 44
+     * crashed exactly that way (see output.log). */
+    if (argc) *argc = 0;
+
     Result entry;
     if (!receive_wait(&entry, 1000)) return -1;
 

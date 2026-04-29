@@ -75,6 +75,17 @@ INLINE uint32_t pocket_ring_count(const PocketRing* ring) {
  */
 INLINE bool pocket_ring_push(PocketRing* ring, const Pocket* p) {
     if (pocket_ring_is_full(ring)) return false;
+
+    /* Sanity check the header before the slot store. If slots_base or
+     * slot_count_max is zero (uninitialised header, corrupted page, etc.),
+     * the slot pointer below would land somewhere meaningless — typically
+     * inside the process's .text segment, where the resulting write fault
+     * is hard to debug. Refusing the push here makes the failure mode
+     * recoverable instead of crashing. */
+    if (ring->hdr.slot_count_max == 0) return false;
+    if (ring->hdr.slots_base   == 0)   return false;
+    if (ring->hdr.slot_size    == 0)   return false;
+
     uint64_t idx  = ring->hdr.tail;
     Pocket  *slot = (Pocket *)(uintptr_t)
         (ring->hdr.slots_base + (idx % ring->hdr.slot_count_max) * ring->hdr.slot_size);
