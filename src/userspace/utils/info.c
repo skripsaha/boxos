@@ -12,16 +12,22 @@ int main(void) {
     if (argc < 2) {
         system_info_t sys;
         if (sysinfo(&sys) != 0) {
-            println("Error: Failed to get system info");
+            printf("%colorError:%color Failed to get system info\n",
+                   COLOR_RED, COLOR_DEFAULT);
             exit(1);
             return 1;
         }
 
-        println("BoxOS System Info:");
-        printf("  Version: %s\n", sys.version);
-        printf("  Uptime: %u seconds\n", sys.uptime_seconds);
-        printf("  Memory Total: %u bytes\n", sys.total_memory);
-        printf("  Memory Used: %u bytes\n", sys.used_memory);
+        uint64_t up_ms = sys.uptime_ns / 1000000ULL;
+        printf("%color%s%color  uptime %u ms  procs %u\n",
+               COLOR_CYAN, sys.version, COLOR_DEFAULT,
+               (unsigned)up_ms, sys.process_count);
+        printf("  RAM:  %u MB used / %u MB total\n",
+               (unsigned)(sys.used_memory  >> 20),
+               (unsigned)(sys.total_memory >> 20));
+        printf("  CPUs: %u (%u K, %u App)%s\n",
+               sys.cpu_total, sys.cpu_k_cores, sys.cpu_app_cores,
+               sys.multicore_active ? " AMP" : "");
 
         exit(0);
         return 0;

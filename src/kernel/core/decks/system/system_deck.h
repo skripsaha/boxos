@@ -13,6 +13,7 @@ typedef struct process_t process_t;
 #define SYSTEM_OP_PROC_INFO     0x03
 #define SYSTEM_OP_CTX_USE       0x04
 #define SYSTEM_OP_PROC_EXEC     0x06
+#define SYSTEM_OP_INFO          0x07
 #define SYSTEM_OP_BUF_ALLOC     0x10
 #define SYSTEM_OP_BUF_FREE      0x11
 #define SYSTEM_OP_BUF_RESIZE    0x12
