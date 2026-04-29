@@ -11,6 +11,7 @@
 #include "amp.h"
 #include "video.h"
 #include "e820.h"
+#include "cabin_layout.h"
 
 static vmm_context_t *kernel_context = NULL;
 static vmm_context_t *current_context = NULL;
@@ -1407,6 +1408,29 @@ bool vmm_is_mapped(vmm_context_t *ctx, uintptr_t virt_addr)
     return vmm_virt_to_phys(ctx, virt_addr) != 0;
 }
 
+int vmm_ensure_user_page(vmm_context_t *ctx, uintptr_t user_vaddr, bool writable)
+{
+    if (!ctx) return -1;
+
+    uintptr_t page_addr = user_vaddr & ~(VMM_PAGE_SIZE - 1);
+    if (vmm_is_mapped(ctx, page_addr)) {
+        return 0;
+    }
+
+    void *phys = pmm_alloc_zero(1);
+    if (!phys) return -1;
+
+    uint64_t flags = VMM_FLAG_PRESENT | VMM_FLAG_USER | VMM_FLAG_NO_EXECUTE;
+    if (writable) flags |= VMM_FLAG_WRITABLE;
+
+    vmm_map_result_t r = vmm_map_page(ctx, page_addr, (uintptr_t)phys, flags);
+    if (!r.success) {
+        pmm_free(phys, 1);
+        return -1;
+    }
+    return 0;
+}
+
 uint64_t vmm_get_page_flags(vmm_context_t *ctx, uintptr_t virt_addr)
 {
     if (!ctx)
@@ -2565,7 +2589,18 @@ int vmm_handle_page_fault(uintptr_t fault_addr, uint64_t error_code)
         }
     }
 
-    vmm_context_t *ctx = vmm_get_current_context();
+    /* For user-mode faults the active CR3 belongs to the faulting process'
+     * cabin, but `current_context` is only updated once at boot — the
+     * scheduler switches CR3 in assembly without touching the C-side global.
+     * Reach for the real cabin via process_get_current() instead, falling
+     * back to whatever `current_context` says for kernel-mode faults. */
+    vmm_context_t *ctx = NULL;
+    if (user && current) {
+        ctx = current->cabin;
+    }
+    if (!ctx) {
+        ctx = vmm_get_current_context();
+    }
     if (ctx && user)
     {
         // ASLR: use per-process stack top from VMM context
@@ -2617,6 +2652,38 @@ int vmm_handle_page_fault(uintptr_t fault_addr, uint64_t error_code)
             debug_printf("[VMM] Demand paging: mapped user heap page at 0x%lx\n", page_addr);
             return 0;
         }
+    }
+
+    // Phase 11: PocketRing/ResultRing slot regions — lazy first-touch mapping.
+    // The producer (userspace for PocketRing, kernel for ResultRing) walks
+    // through 1 MiB of reserved virtual space; pages are allocated on the
+    // fly. Once mapped, a slot page stays mapped and is reused via the
+    // monotonic-index modulo wrap.
+    if (ctx && !present &&
+        ((fault_addr >= CABIN_POCKET_SLOTS_BASE && fault_addr < CABIN_POCKET_SLOTS_END) ||
+         (fault_addr >= CABIN_RESULT_SLOTS_BASE && fault_addr < CABIN_RESULT_SLOTS_END)))
+    {
+        uintptr_t page_addr = fault_addr & ~(VMM_PAGE_SIZE - 1);
+
+        if (vmm_is_mapped(ctx, page_addr)) {
+            return 0;
+        }
+
+        void *phys = pmm_alloc_zero(1);
+        if (!phys) {
+            debug_printf("[VMM] ERROR: Out of memory for ring slot page at 0x%lx\n", page_addr);
+            return -1;
+        }
+
+        uint64_t flags = VMM_FLAG_PRESENT | VMM_FLAG_WRITABLE | VMM_FLAG_USER | VMM_FLAG_NO_EXECUTE;
+        vmm_map_result_t r = vmm_map_page(ctx, page_addr, (uintptr_t)phys, flags);
+        if (!r.success) {
+            pmm_free(phys, 1);
+            debug_printf("[VMM] ERROR: Failed to map ring slot page at 0x%lx\n", page_addr);
+            return -1;
+        }
+        debug_printf("[VMM] Demand paging: mapped ring slot page at 0x%lx\n", page_addr);
+        return 0;
     }
 
     if (present)

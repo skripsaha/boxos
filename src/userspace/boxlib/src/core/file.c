@@ -1,8 +1,36 @@
+/*
+ * file.c — userspace file/tag/context wrappers (Phase 12: Manifest-only).
+ *
+ * Storage Deck is now fully Manifest-native. Every wrapper builds a 1-op
+ * Manifest via MfCall1 with the new param/crate layout — the legacy
+ * 168/176-byte payload caps are gone. fread / fwrite now transfer up to the
+ * caller's buffer size in a single syscall.
+ */
+
 #include "box/file.h"
+#include "box/manifest.h"
 #include "box/notify.h"
 #include "box/result.h"
 #include "box/string.h"
 #include "box/types.h"
+
+#define STORAGE_TAG_QUERY       0x01
+#define STORAGE_TAG_SET         0x02
+#define STORAGE_TAG_UNSET       0x03
+#define STORAGE_OBJ_READ        0x05
+#define STORAGE_OBJ_WRITE       0x06
+#define STORAGE_OBJ_CREATE      0x07
+#define STORAGE_OBJ_DELETE      0x08
+#define STORAGE_OBJ_RENAME      0x09
+#define STORAGE_OBJ_GET_INFO    0x0A
+#define STORAGE_CONTEXT_SET     0x10
+#define STORAGE_CONTEXT_CLEAR   0x11
+
+#define STORAGE_TIMEOUT_MS      5000u
+
+/* =========================================================================
+ *  CREATE / QUERY
+ * ========================================================================= */
 
 int create(const char *filename, const char *tags)
 {
@@ -10,29 +38,25 @@ int create(const char *filename, const char *tags)
     size_t fn_len = strlen(filename);
     if (fn_len >= 32) return -1;
 
-    struct PACKED {
-        char filename[32];
-        char tags[160];
-    } args;
-    memset(&args, 0, sizeof(args));
-    memcpy(args.filename, filename, fn_len);
+    /* params: 32 bytes, NUL-padded filename. */
+    uint8_t params[32] = {0};
+    memcpy(params, filename, fn_len);
+
+    /* in_crate: tag list (optional). */
+    const void *in = NULL;
+    uint32_t    in_size = 0;
     if (tags && tags[0] != '\0') {
-        size_t tag_len = strlen(tags);
-        if (tag_len < 160) memcpy(args.tags, tags, tag_len);
+        in = tags;
+        in_size = (uint32_t)strlen(tags);
     }
-    pocket_send(DECK_STORAGE, 0x07, &args, sizeof(args));
 
-    Result result;
-    if (!result_wait(&result, 5000)) return -1;
-    if (result.error_code != OK) return -1;
-    if (result.data_length < 8) return -1;
-    if (!result.data_addr) return -1;
-
-    uint8_t *data = (uint8_t *)(uintptr_t)result.data_addr;
-    uint32_t file_id, error_code;
-    memcpy(&file_id,    data,     4);
-    memcpy(&error_code, data + 4, 4);
-    if (error_code != 0) return -1;
+    uint32_t file_id = 0;
+    int rc = MfCall1(DECK_STORAGE, STORAGE_OBJ_CREATE,
+                     params, sizeof(params),
+                     in, in_size,
+                     &file_id, sizeof(file_id), NULL,
+                     STORAGE_TIMEOUT_MS, NULL);
+    if (rc != 0) return -1;
     return (int)file_id;
 }
 
@@ -40,302 +64,242 @@ int query(const char *tags, uint32_t *file_ids, size_t max_files)
 {
     if (!file_ids || max_files == 0) return -1;
 
-    uint8_t args[192];
-    memset(args, 0, sizeof(args));
+    /* out_crate: [u32 count][u32 ids[max_files]]. */
+    uint32_t out_cap = (uint32_t)(4 + max_files * sizeof(uint32_t));
+    uint8_t  stack_buf[1024];
+    uint8_t *out = stack_buf;
+    if (out_cap > sizeof(stack_buf)) out_cap = (uint32_t)sizeof(stack_buf);
+
+    const void *in = NULL;
+    uint32_t    in_size = 0;
     if (tags && tags[0] != '\0') {
-        size_t len = strlen(tags);
-        if (len < 192) memcpy(args, tags, len);
+        in = tags;
+        in_size = (uint32_t)strlen(tags);
     }
-    pocket_send(DECK_STORAGE, 0x01, args, sizeof(args));
 
-    Result result;
-    if (!result_wait(&result, 5000)) return -1;
-    if (result.error_code != OK) return -1;
-    if (result.data_length < 4) return -1;
-    if (!result.data_addr) return -1;
+    uint32_t out_actual = 0;
+    int rc = MfCall1(DECK_STORAGE, STORAGE_TAG_QUERY,
+                     NULL, 0,
+                     in, in_size,
+                     out, out_cap, &out_actual,
+                     STORAGE_TIMEOUT_MS, NULL);
+    if (rc != 0) return -1;
+    if (out_actual < 4) return 0;
 
-    uint8_t *data = (uint8_t *)(uintptr_t)result.data_addr;
     uint32_t count;
-    memcpy(&count, data, 4);
-    if (count > max_files) count = max_files;
+    memcpy(&count, out, 4);
+    if (count > max_files) count = (uint32_t)max_files;
     for (uint32_t i = 0; i < count; i++) {
-        size_t offset = 4 + (i * 4);
-        if (offset + 4 <= result.data_length) {
-            memcpy(&file_ids[i], data + offset, 4);
-        }
+        memcpy(&file_ids[i], out + 4 + i * 4, 4);
     }
     return (int)count;
 }
+
+/* =========================================================================
+ *  FILE_INFO — parse the variable-length blob ObjGetInfo writes.
+ * ========================================================================= */
 
 int file_info(uint32_t file_id, file_info_t *info)
 {
     if (!info) return -1;
 
-    struct PACKED {
-        uint32_t file_id;
-        uint8_t reserved[188];
-    } args;
-    memset(&args, 0, sizeof(args));
-    args.file_id = file_id;
-    pocket_send(DECK_STORAGE, 0x0A, &args, sizeof(args));
+    uint8_t  out[1024];
+    uint32_t out_actual = 0;
+    int rc = MfCall1(DECK_STORAGE, STORAGE_OBJ_GET_INFO,
+                     &file_id, sizeof(file_id),
+                     NULL, 0,
+                     out, sizeof(out), &out_actual,
+                     STORAGE_TIMEOUT_MS, NULL);
+    if (rc != 0) return -1;
+    if (out_actual < 20) return -1;
 
-    Result result;
-    if (!result_wait(&result, 5000)) return -1;
-    if (result.error_code != OK) return -1;
-    if (result.data_length < 192) return -1;
-    if (!result.data_addr) return -1;
+    memset(info, 0, sizeof(*info));
 
-    uint8_t *data = (uint8_t *)(uintptr_t)result.data_addr;
-    int32_t error_code;
-    memcpy(&error_code, data, 4);
-    if (error_code != 0) return -1;
+    size_t pos = 0;
+    memcpy(&info->file_id, out + pos, 4); pos += 4;
+    memcpy(&info->flags,   out + pos, 4); pos += 4;
+    memcpy(&info->size,    out + pos, 8); pos += 8;
+    uint16_t tag_count_raw = 0, fn_len = 0;
+    memcpy(&tag_count_raw, out + pos, 2); pos += 2;
+    memcpy(&fn_len,        out + pos, 2); pos += 2;
 
-    memcpy(&info->file_id,   data + 4,  4);
-    memcpy(&info->flags,     data + 8,  4);
-    memcpy(&info->size,      data + 12, 8);
-    memcpy(&info->tag_count, data + 20, 1);
-    memcpy(info->filename,   data + 24, 32);
+    if (pos + fn_len > out_actual) return -1;
+    size_t fn_copy = fn_len < sizeof(info->filename) - 1 ? fn_len
+                                                          : sizeof(info->filename) - 1;
+    memcpy(info->filename, out + pos, fn_copy);
+    info->filename[fn_copy] = '\0';
+    pos += fn_len;
 
-    uint8_t tag_count = (info->tag_count > 5) ? 5 : info->tag_count;
-    for (uint8_t i = 0; i < tag_count; i++) {
-        size_t tag_offset = 56 + (i * 24);
-        memcpy(&info->tags[i].type,  data + tag_offset,      1);
-        memcpy(info->tags[i].key,    data + tag_offset + 1,  11);
-        memcpy(info->tags[i].value,  data + tag_offset + 12, 12);
+    info->tag_count = (uint8_t)(tag_count_raw > 5 ? 5 : tag_count_raw);
+
+    for (uint16_t i = 0; i < tag_count_raw; i++) {
+        if (pos + 4 > out_actual) break;
+        uint16_t kl = 0, vl = 0;
+        memcpy(&kl, out + pos, 2); pos += 2;
+        memcpy(&vl, out + pos, 2); pos += 2;
+        if (pos + kl + vl > out_actual) break;
+
+        if (i < 5) {
+            size_t kc = kl < sizeof(info->tags[i].key) - 1 ? kl
+                                                            : sizeof(info->tags[i].key) - 1;
+            size_t vc = vl < sizeof(info->tags[i].value) - 1 ? vl
+                                                              : sizeof(info->tags[i].value) - 1;
+            memcpy(info->tags[i].key,   out + pos,       kc);
+            info->tags[i].key[kc] = '\0';
+            memcpy(info->tags[i].value, out + pos + kl,  vc);
+            info->tags[i].value[vc] = '\0';
+            info->tags[i].type = 0;
+        }
+        pos += kl + vl;
     }
     return 0;
 }
 
+/* =========================================================================
+ *  READ / WRITE — single syscall, no chunking
+ * ========================================================================= */
+
 int fread(uint32_t file_id, uint64_t offset, void *buffer, size_t size)
 {
     if (!buffer || size == 0) return -1;
-    if (size > 176) size = 176;
 
-    struct PACKED {
-        uint32_t file_id;
-        uint64_t offset;
-        uint32_t length;
-        uint8_t reserved[176];
-    } args;
-    memset(&args, 0, sizeof(args));
-    args.file_id = file_id;
-    args.offset  = offset;
-    args.length  = (uint32_t)size;
-    pocket_send(DECK_STORAGE, 0x05, &args, sizeof(args));
+    /* params: [u32 file_id][u64 offset]. */
+    uint8_t params[12];
+    memcpy(params,     &file_id, 4);
+    memcpy(params + 4, &offset,  8);
 
-    Result result;
-    if (!result_wait(&result, 5000)) return -1;
-    if (result.error_code != OK) return -1;
-    if (result.data_length < 16) return -1;
-    if (!result.data_addr) return -1;
-
-    uint8_t *data = (uint8_t *)(uintptr_t)result.data_addr;
-    uint64_t bytes_read;
-    uint32_t error_code;
-    memcpy(&bytes_read, data,     8);
-    memcpy(&error_code, data + 8, 4);
-    if (error_code != 0) return -1;
-
-    if (bytes_read > 0) {
-        if (bytes_read > size) bytes_read = size;
-        if (result.data_length < 16 + bytes_read) return -1;
-        memcpy(buffer, data + 16, bytes_read);
-    }
-    return (int)bytes_read;
+    uint32_t out_actual = 0;
+    int rc = MfCall1(DECK_STORAGE, STORAGE_OBJ_READ,
+                     params, sizeof(params),
+                     NULL, 0,
+                     buffer, (uint32_t)size, &out_actual,
+                     STORAGE_TIMEOUT_MS, NULL);
+    if (rc != 0) return -1;
+    return (int)out_actual;
 }
 
 int fwrite(uint32_t file_id, uint64_t offset, const void *buffer, size_t size)
 {
     if (!buffer || size == 0) return -1;
-    if (size > 168) size = 168;
 
-    struct PACKED {
-        uint32_t file_id;
-        uint64_t offset;
-        uint32_t length;
-        uint32_t flags;
-        uint8_t data[168];
-        uint8_t reserved[4];
-    } args;
-    memset(&args, 0, sizeof(args));
-    args.file_id = file_id;
-    args.offset  = offset;
-    args.length  = (uint32_t)size;
-    args.flags   = 0;
-    memcpy(args.data, buffer, size);
-    pocket_send(DECK_STORAGE, 0x06, &args, sizeof(args));
+    /* params: [u32 file_id][u64 offset][u32 flags=0]. */
+    uint8_t params[16];
+    uint32_t flags = 0;
+    memcpy(params,      &file_id, 4);
+    memcpy(params + 4,  &offset,  8);
+    memcpy(params + 12, &flags,   4);
 
-    Result result;
-    if (!result_wait(&result, 5000)) return -1;
-    if (result.error_code != OK) return -1;
-    if (result.data_length < 20) return -1;
-    if (!result.data_addr) return -1;
+    uint8_t  out[16] = {0};
+    uint32_t out_actual = 0;
+    int rc = MfCall1(DECK_STORAGE, STORAGE_OBJ_WRITE,
+                     params, sizeof(params),
+                     buffer, (uint32_t)size,
+                     out, sizeof(out), &out_actual,
+                     STORAGE_TIMEOUT_MS, NULL);
+    if (rc != 0) return -1;
+    if (out_actual < 8) return (int)size; /* op succeeded; assume full write */
 
-    uint8_t *data = (uint8_t *)(uintptr_t)result.data_addr;
-    uint64_t bytes_written;
-    uint32_t error_code;
-    memcpy(&bytes_written, data,      8);
-    memcpy(&error_code,    data + 16, 4);
-    if (error_code != 0) return -1;
+    uint64_t bytes_written = 0;
+    memcpy(&bytes_written, out, 8);
     return (int)bytes_written;
 }
+
+int fwrite_all(uint32_t file_id, const void *buffer, size_t total_size)
+{
+    /* New ObjWrite handles arbitrary size in one call. */
+    return fwrite(file_id, 0, buffer, total_size);
+}
+
+int fread_all(uint32_t file_id, void *buffer, size_t max_size, size_t *bytes_read)
+{
+    int got = fread(file_id, 0, buffer, max_size);
+    if (got < 0) return -1;
+    if (bytes_read) *bytes_read = (size_t)got;
+    return 0;
+}
+
+/* =========================================================================
+ *  RENAME / DELETE
+ * ========================================================================= */
 
 int file_rename(uint32_t file_id, const char *new_filename)
 {
     if (!new_filename) return -1;
     size_t fn_len = strlen(new_filename);
-    if (fn_len == 0 || fn_len >= 32) return -1;
+    if (fn_len == 0 || fn_len >= 64) return -1;
 
-    struct PACKED {
-        uint32_t file_id;
-        char new_filename[32];
-        uint8_t reserved[156];
-    } args;
-    memset(&args, 0, sizeof(args));
-    args.file_id = file_id;
-    memcpy(args.new_filename, new_filename, fn_len);
-    pocket_send(DECK_STORAGE, 0x09, &args, sizeof(args));
+    /* params: [u32 file_id][u16 name_len][char name[name_len]]. */
+    uint8_t params[6 + 64];
+    uint16_t name_len = (uint16_t)fn_len;
+    memcpy(params,     &file_id,  4);
+    memcpy(params + 4, &name_len, 2);
+    memcpy(params + 6,  new_filename, fn_len);
 
-    Result result;
-    if (!result_wait(&result, 5000)) return -1;
-    if (result.error_code != OK) return -1;
-    if (result.data_length < 4) return -1;
-    if (!result.data_addr) return -1;
-
-    uint8_t *data = (uint8_t *)(uintptr_t)result.data_addr;
-    int32_t error_code;
-    memcpy(&error_code, data, 4);
-    return (error_code == 0) ? 0 : -1;
+    int rc = MfCall1(DECK_STORAGE, STORAGE_OBJ_RENAME,
+                     params, (uint16_t)(6 + fn_len),
+                     NULL, 0, NULL, 0, NULL,
+                     STORAGE_TIMEOUT_MS, NULL);
+    return rc == 0 ? 0 : -1;
 }
 
 int delete(uint32_t file_id)
 {
-    struct PACKED {
-        uint32_t file_id;
-        uint8_t reserved[188];
-    } args;
-    memset(&args, 0, sizeof(args));
-    args.file_id = file_id;
-    pocket_send(DECK_STORAGE, 0x08, &args, sizeof(args));
-
-    Result result;
-    if (!result_wait(&result, 5000)) return -1;
-    if (result.error_code != OK) return -1;
-    if (result.data_length < 4) return -1;
-    if (!result.data_addr) return -1;
-
-    uint8_t *data = (uint8_t *)(uintptr_t)result.data_addr;
-    int32_t error_code;
-    memcpy(&error_code, data, 4);
-    return (error_code == 0) ? 0 : -1;
+    int rc = MfCall1(DECK_STORAGE, STORAGE_OBJ_DELETE,
+                     &file_id, sizeof(file_id),
+                     NULL, 0, NULL, 0, NULL,
+                     STORAGE_TIMEOUT_MS, NULL);
+    return rc == 0 ? 0 : -1;
 }
+
+/* =========================================================================
+ *  TAGS / CONTEXT
+ * ========================================================================= */
 
 int tag_add(uint32_t file_id, const char *tag)
 {
     if (!tag || tag[0] == '\0') return -1;
     size_t tag_len = strlen(tag);
-    if (tag_len >= 32) return -1;
-
-    struct PACKED {
-        uint32_t file_id;
-        char tag[32];
-        uint8_t reserved[156];
-    } args;
-    memset(&args, 0, sizeof(args));
-    args.file_id = file_id;
-    memcpy(args.tag, tag, tag_len);
-    pocket_send(DECK_STORAGE, 0x02, &args, sizeof(args));
-
-    Result result;
-    if (!result_wait(&result, 5000)) return -1;
-    if (result.error_code != OK) return -1;
-    return 0;
+    if (tag_len >= 128) return -1;
+    int rc = MfCall1(DECK_STORAGE, STORAGE_TAG_SET,
+                     &file_id, sizeof(file_id),
+                     tag, (uint32_t)tag_len,
+                     NULL, 0, NULL,
+                     STORAGE_TIMEOUT_MS, NULL);
+    return rc == 0 ? 0 : -1;
 }
 
 int tag_remove(uint32_t file_id, const char *key)
 {
     if (!key || key[0] == '\0') return -1;
-    size_t key_len = strlen(key);
-    if (key_len >= 32) return -1;
-
-    struct PACKED {
-        uint32_t file_id;
-        char tag[32];
-        uint8_t reserved[156];
-    } args;
-    memset(&args, 0, sizeof(args));
-    args.file_id = file_id;
-    memcpy(args.tag, key, key_len);
-    pocket_send(DECK_STORAGE, 0x03, &args, sizeof(args));
-
-    Result result;
-    if (!result_wait(&result, 5000)) return -1;
-    if (result.error_code != OK) return -1;
-    return 0;
+    size_t kl = strlen(key);
+    if (kl >= 64) return -1;
+    int rc = MfCall1(DECK_STORAGE, STORAGE_TAG_UNSET,
+                     &file_id, sizeof(file_id),
+                     key, (uint32_t)kl,
+                     NULL, 0, NULL,
+                     STORAGE_TIMEOUT_MS, NULL);
+    return rc == 0 ? 0 : -1;
 }
 
 int context_set(const char *tag)
 {
     if (!tag || tag[0] == '\0') return -1;
-    size_t tag_len = strlen(tag);
-    if (tag_len >= 32) return -1;
-
-    uint8_t args[192];
-    memset(args, 0, sizeof(args));
-    memcpy(args, tag, tag_len);
-    pocket_send(DECK_STORAGE, 0x10, args, sizeof(args));
-
-    Result result;
-    if (!result_wait(&result, 5000)) return -1;
-    if (result.error_code != OK) return -1;
-    return 0;
+    size_t tl = strlen(tag);
+    if (tl >= 128) return -1;
+    int rc = MfCall1(DECK_STORAGE, STORAGE_CONTEXT_SET,
+                     NULL, 0,
+                     tag, (uint32_t)tl,
+                     NULL, 0, NULL,
+                     STORAGE_TIMEOUT_MS, NULL);
+    return rc == 0 ? 0 : -1;
 }
 
 int context_clear(void)
 {
-    uint8_t args[192];
-    memset(args, 0, sizeof(args));
-    pocket_send(DECK_STORAGE, 0x11, args, sizeof(args));
-
-    Result result;
-    if (!result_wait(&result, 5000)) return -1;
-    if (result.error_code != OK) return -1;
-    return 0;
-}
-
-int fwrite_all(uint32_t file_id, const void *buffer, size_t total_size)
-{
-    const uint8_t *src = (const uint8_t *)buffer;
-    size_t written = 0;
-    const size_t chunk_size = 168;
-
-    while (written < total_size) {
-        size_t to_write = total_size - written;
-        if (to_write > chunk_size) to_write = chunk_size;
-        int result = fwrite(file_id, written, src + written, to_write);
-        if (result < 0) return -1;
-        written += result;
-        if ((size_t)result < to_write) break;
-    }
-    return (int)written;
-}
-
-int fread_all(uint32_t file_id, void *buffer, size_t max_size, size_t *bytes_read)
-{
-    uint8_t *dest = (uint8_t *)buffer;
-    size_t total_read = 0;
-    const size_t chunk_size = 168;
-
-    while (total_read < max_size) {
-        size_t to_read = max_size - total_read;
-        if (to_read > chunk_size) to_read = chunk_size;
-        int result = fread(file_id, total_read, dest + total_read, to_read);
-        if (result < 0) return -1;
-        total_read += result;
-        if (result == 0 || (size_t)result < to_read) break;
-    }
-    if (bytes_read) *bytes_read = total_read;
-    return 0;
+    int rc = MfCall1(DECK_STORAGE, STORAGE_CONTEXT_CLEAR,
+                     NULL, 0, NULL, 0, NULL, 0, NULL,
+                     STORAGE_TIMEOUT_MS, NULL);
+    return rc == 0 ? 0 : -1;
 }
 
 int find_file_by_name(const char *filename, uint32_t *file_ids,

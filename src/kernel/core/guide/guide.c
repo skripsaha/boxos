@@ -1,167 +1,138 @@
+/*
+ * Guide — drains each process's PocketRing and dispatches each Pocket
+ * through the unified Manifest path.
+ *
+ * Phase 12 cleanup: the legacy prefix-chain dispatcher is gone. Every Pocket
+ * arriving at the kernel either carries the YIELD flag (cooperative tick) or
+ * the MANIFEST flag (single-shot Manifest execution). Anything else is a
+ * malformed Pocket and is rejected.
+ */
+
 #include "guide.h"
 #include "execution_deck.h"
-#include "system_deck.h"
-#include "operations_deck.h"
-#include "hardware_deck.h"
-#include "storage_deck.h"
 #include "listen_table.h"
 #include "process.h"
 #include "klib.h"
 #include "vmm.h"
 #include "pocket_ring.h"
+#include "kring.h"
 #include "error.h"
 #include "perf_trace.h"
 #include "amp.h"
+#include "boxos_crate.h"
+#include "boxos_manifest.h"
+#include "manifest_exec.h"
+#include "op_registry.h"
 
 ReadyQueue g_ready_queue;
-
-static DeckEntry deck_table[] = {
-    {0xFF, "System Deck", system_deck_handler},
-    {0x01, "Operations Deck", operations_deck_handler},
-    {0x02, "Storage Deck", storage_deck_handler},
-    {0x03, "Hardware Deck", hardware_deck_handler},
-    {0x00, NULL, NULL}};
 
 void guide_init(void)
 {
     debug_printf("[GUIDE] Initializing Guide Dispatcher...\n");
-
     ready_queue_init(&g_ready_queue);
-
     listen_table_init();
-
     perf_trace_init();
-
     debug_printf("[GUIDE] ReadyQueue initialized (intrusive, unbounded)\n");
 }
 
-deck_handler_t guide_get_deck_handler(uint8_t deck_id)
+/* Manifest-mode dispatch: extract Manifest+Crates from reinterpreted Pocket
+ * fields, translate user pointers, run ManifestExecuteOnce, deliver Result
+ * via execution_deck_handler. */
+static void guide_process_manifest_pocket(Pocket *pocket, process_t *proc)
 {
-    for (size_t i = 0; deck_table[i].name != NULL; i++)
-    {
-        if (deck_table[i].deck_id == deck_id)
-        {
-            return deck_table[i].handler;
+    uint64_t manifest_uaddr = PocketManifestAddr(pocket);
+    uint32_t manifest_size  = PocketManifestSize(pocket);
+    uint64_t crates_uaddr   = PocketCratesAddr(pocket);
+    uint16_t crate_count    = PocketCrateCount(pocket);
+
+    if (manifest_uaddr == 0 || manifest_size < sizeof(Manifest)) {
+        pocket->error_code = ERR_INVALID_ARGUMENT;
+        execution_deck_handler(pocket, proc);
+        return;
+    }
+
+    void *manifest_kp = vmm_translate_user_addr(proc->cabin,
+                                                (uintptr_t)manifest_uaddr,
+                                                (size_t)manifest_size);
+    if (!manifest_kp) {
+        pocket->error_code = ERR_INVALID_ADDRESS;
+        execution_deck_handler(pocket, proc);
+        return;
+    }
+
+    Crate *crates_kp = NULL;
+    if (crate_count > 0) {
+        size_t crates_bytes = (size_t)crate_count * sizeof(Crate);
+        crates_kp = vmm_translate_user_addr(proc->cabin,
+                                            (uintptr_t)crates_uaddr,
+                                            crates_bytes);
+        if (!crates_kp) {
+            pocket->error_code = ERR_INVALID_ADDRESS;
+            execution_deck_handler(pocket, proc);
+            return;
         }
     }
-    return NULL;
+
+    OpContext ctx;
+    ctx.proc       = proc;
+    ctx.target_pid = pocket->target_pid;
+    ctx.flags      = pocket->flags;
+    ctx.pier_id    = PocketPierId(pocket);
+    ctx._pad       = 0;
+
+    ManifestExecResult result;
+    error_t rc = ManifestExecuteOnce(manifest_kp, manifest_size,
+                                     crates_kp, crate_count,
+                                     &ctx, &result);
+    pocket->error_code = (uint32_t)rc;
+
+    debug_printf("[GUIDE] manifest PID=%u ops=%u/%u rc=%d\n",
+                 proc->pid, result.completed_ops, result.total_ops, rc);
+
+    /* Clear legacy data fields so the Result delivered to the sender's
+     * ResultRing does not leak the Manifest user vaddr. Zero target_pid:
+     * IPC delivery is the explicit job of system.route / system.broadcast
+     * ops; execution_deck_handler writes only the local confirmation
+     * Result back to the sender. */
+    pocket->data_addr   = 0;
+    pocket->data_length = 0;
+    pocket->target_pid  = 0;
+
+    execution_deck_handler(pocket, proc);
 }
 
-// Process one Pocket from a process's PocketRing through the prefix chain.
+/* Process one Pocket from a process's PocketRing. */
 static void guide_process_pocket(process_t *proc)
 {
-    if (!proc || !proc->cabin)
-        return;
+    if (!proc || !proc->cabin) return;
 
-    // Access PocketRing via physical address (identity mapping)
-    PocketRing *pring = (PocketRing *)vmm_phys_to_virt(proc->pocket_ring_phys);
-    if (!pring)
-        return;
+    Pocket *pocket = KPocketPeek(proc);
+    if (!pocket) return;
 
-    Pocket *pocket = pocket_ring_peek(pring);
-    if (!pocket)
-        return;
-
-    // CRITICAL: Fill in the source PID (kernel sets this, not userspace).
-    // PocketRing is SPSC: userspace is producer (writes tail), kernel is consumer (reads head).
-    // At this point, kernel owns this pocket (userspace won't read it until we pop).
-    // No lock needed — SPSC contract ensures no concurrent access to this slot.
+    /* Kernel sets pid (security: userspace can't forge it). */
     pocket->pid = proc->pid;
     pocket->error_code = OK;
-    pocket->current_prefix_idx = 0;
 
-    // Yield pockets: just consume, no processing or Result
-    if (pocket->flags & POCKET_FLAG_YIELD)
-    {
-        pocket_ring_pop(pring);
+    /* Yield: cooperative tick, no work, no Result. */
+    if (pocket->flags & POCKET_FLAG_YIELD) {
+        KPocketPop(proc);
         return;
     }
 
-    // Debug: show pocket processing start
-    uint8_t core_idx = amp_get_core_index();
-    const char* core_type = amp_is_kcore() ? "K" : (core_idx == g_amp.bsp_index ? "BSP" : "A");
-    debug_printf("[%s%u] GUIDE pocket PID %u prefixes=%u\n", 
-                 core_type, core_idx, proc->pid, pocket->prefix_count);
-
-    bool need_execution_deck = true;
-
-    while (pocket->current_prefix_idx < pocket->prefix_count)
-    {
-        if (pocket->current_prefix_idx >= POCKET_MAX_PREFIXES)
-        {
-            pocket->error_code = ERR_INVALID_POCKET;
-            debug_printf("[GUIDE] ERROR: Invalid prefix index %u (count=%u)\n",
-                         pocket->current_prefix_idx, pocket->prefix_count);
-            execution_deck_handler(pocket, proc);
-            need_execution_deck = false;
-            break;
-        }
-
-        uint16_t prefix = pocket_current_prefix(pocket);
-
-        if (prefix == 0x0000)
-        {
-            execution_deck_handler(pocket, proc);
-            need_execution_deck = false;
-            break;
-        }
-
-        uint8_t deck_id = pocket_get_deck_id(pocket, pocket->current_prefix_idx);
-        uint8_t opcode  = pocket_get_opcode(pocket, pocket->current_prefix_idx);
-
-        bool security_ok = system_security_gate(proc, deck_id, opcode);
-        if (!security_ok)
-        {
-            pocket->error_code = ERR_ACCESS_DENIED;
-            debug_printf("[GUIDE] Security gate failed for PID %u deck=0x%02x op=0x%02x\n",
-                         pocket->pid, deck_id, opcode);
-            execution_deck_handler(pocket, proc);
-            need_execution_deck = false;
-            break;
-        }
-
-        deck_handler_t handler = guide_get_deck_handler(deck_id);
-        if (!handler)
-        {
-            pocket->error_code = ERR_INVALID_DECK_ID;
-            debug_printf("[GUIDE] Unknown deck 0x%02x\n", deck_id);
-            execution_deck_handler(pocket, proc);
-            need_execution_deck = false;
-            break;
-        }
-
-        PERF_TRACE_START(perf_start);
-
-        debug_printf("[%s%u]   -> Deck 0x%02x op=0x%02x\n", core_type, core_idx, deck_id, opcode);
-
-        int deck_ret = handler(pocket, proc);
-
-        PERF_TRACE_END(perf_start, pocket->pid, deck_id, opcode,
-                       (uint16_t)pocket->error_code);
-
-        if (deck_ret < 0)
-        {
-            if (pocket->error_code == OK)
-            {
-                pocket->error_code = ERR_INTERNAL;
-            }
-            debug_printf("[GUIDE] Deck 0x%02x failed: %s\n",
-                         deck_id, ErrorString(pocket->error_code));
-            execution_deck_handler(pocket, proc);
-            need_execution_deck = false;
-            break;
-        }
-
-        pocket_advance(pocket);
+    /* All non-yield pockets must carry the Manifest flag in Phase 12. */
+    if (pocket->flags & POCKET_FLAG_MANIFEST) {
+        guide_process_manifest_pocket(pocket, proc);
+        KPocketPop(proc);
+        return;
     }
 
-    if (need_execution_deck)
-    {
-        execution_deck_handler(pocket, proc);
-    }
-
-    // Consume the Pocket from the ring
-    pocket_ring_pop(pring);
+    /* Malformed pocket — neither yield nor manifest. Deliver an error
+     * Result to the sender and drop. */
+    pocket->error_code = ERR_INVALID_POCKET;
+    debug_printf("[GUIDE] PID %u sent non-manifest pocket (flags=0x%x)\n",
+                 proc->pid, pocket->flags);
+    execution_deck_handler(pocket, proc);
+    KPocketPop(proc);
 }
 
 void guide(void)
@@ -169,61 +140,38 @@ void guide(void)
     uint32_t pockets_processed = 0;
     uint32_t perf_snapshot = perf_trace_snapshot();
 
-    // Process all ready processes from the ReadyQueue
-    while (!ready_queue_is_empty(&g_ready_queue))
-    {
+    while (!ready_queue_is_empty(&g_ready_queue)) {
         process_t *proc = ready_queue_pop(&g_ready_queue);
-        if (!proc)
-            break;
+        if (!proc) break;
 
-        // Process all pending Pockets for this process
-        PocketRing *pring = (PocketRing *)vmm_phys_to_virt(proc->pocket_ring_phys);
-        if (pring)
-        {
-            while (!pocket_ring_is_empty(pring))
-            {
-                guide_process_pocket(proc);
-                pockets_processed++;
-            }
+        while (!KPocketIsEmpty(proc)) {
+            guide_process_pocket(proc);
+            pockets_processed++;
         }
 
-        // Wake the process — all its pockets have been processed
-        if (process_get_state(proc) == PROC_WAITING)
-        {
+        if (process_get_state(proc) == PROC_WAITING) {
             process_set_state(proc, PROC_WORKING);
         }
     }
 
-    // Flush trace entries AFTER all measurements are done (serial I/O here is safe)
-    if (pockets_processed > 0)
-    {
+    if (pockets_processed > 0) {
         perf_trace_flush_since(perf_snapshot);
     }
 }
 
-// Process all pending Pockets for one process (K-Core guide loop entry point).
-// Drains PocketRing completely and writes Results. Does NOT change process state.
 void guide_process_one(process_t *proc)
 {
-    if (!proc || !proc->cabin)
-        return;
-
-    PocketRing *pring = (PocketRing *)vmm_phys_to_virt(proc->pocket_ring_phys);
-    if (!pring)
-        return;
+    if (!proc || !proc->cabin) return;
 
     uint32_t perf_snapshot = perf_trace_snapshot();
     uint32_t count = 0;
 
-    while (!pocket_ring_is_empty(pring))
-    {
+    while (!KPocketIsEmpty(proc)) {
         guide_process_pocket(proc);
         count++;
     }
 
-    if (count > 0)
-    {
+    if (count > 0) {
         perf_trace_flush_since(perf_snapshot);
     }
 }
-

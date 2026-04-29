@@ -10,6 +10,7 @@
 #include "guide.h"
 #include "ready_queue.h" // for g_ready_queue
 #include "pocket_ring.h"
+#include "kring.h"
 #include "vmm.h"
 #include "atomics.h"
 #include "scheduler.h"
@@ -574,20 +575,19 @@ void syscall_handler(interrupt_frame_t *frame)
     // Yield pockets skip guide() — the process stays WORKING and gives up its
     // timeslice.  It remains schedulable so it will run again on the next tick.
     // CRITICAL: Check yield BEFORE async dispatch to avoid kcore_pending race!
-    PocketRing *pring = (PocketRing *)vmm_phys_to_virt(proc->pocket_ring_phys);
-    Pocket *peek = pocket_ring_peek(pring);
+    Pocket *peek = KPocketPeek(proc);
 
     if (peek && (peek->flags & POCKET_FLAG_YIELD))
     {
         debug_printf("[%s%u] SYSCALL yield from PID %u\n", core_type, core_idx, proc->pid);
-        pocket_ring_pop(pring);
+        KPocketPop(proc);
         context_save_from_frame(proc, frame);
         schedule(frame);
         return;
     }
 
     // Debug: show syscall with pocket count
-    uint32_t pocket_count = pocket_ring_count(pring);
+    uint32_t pocket_count = KPocketCount(proc);
     debug_printf("[%s%u] SYSCALL notify PID %u (pockets=%u)\n", core_type, core_idx, proc->pid, pocket_count);
 
     // Dispatch: sync blocks + schedules, async returns immediately.

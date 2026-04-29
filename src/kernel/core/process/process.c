@@ -3,6 +3,8 @@
 #include "pmm.h"
 #include "pmtag.h"
 #include "cabin_layout.h"
+#include "kring.h"
+#include "vmm.h"
 #include "scheduler.h"
 #include "gdt.h"
 #include "tss.h"
@@ -225,9 +227,15 @@ process_t *process_create(const char *tags)
     proc->pocket_ring_phys = pocket_phys;
     proc->result_ring_phys = result_phys;
 
-    // Tag IPC ring pages as shared so PMT tracks the kernel↔userspace boundary.
-    // PocketRing and ResultRing are the only physical pages visible to both
-    // kernel (guide loop) and userspace (cabin mapping) simultaneously.
+    /* Phase 11: ring header initialization. The pages were zeroed in
+     * vmm_create_cabin; we now write head=tail=0, slots_base, slot_size and
+     * slot_count_max so userspace can locate slots without further help. */
+    KRingPocketInit((PocketRing *)vmm_phys_to_virt(pocket_phys));
+    KRingResultInit((ResultRing *)vmm_phys_to_virt(result_phys));
+
+    // Tag IPC ring header pages as shared so PMT tracks the kernel↔userspace boundary.
+    // The slot regions are mapped lazily via demand paging and are NOT tagged
+    // shared — each slot page belongs to exactly one cabin once allocated.
     PhysTagSet(pocket_phys,
                pocket_phys + CABIN_POCKET_RING_PAGES * PMM_PAGE_SIZE,
                PHYS_TAG_SHARED);

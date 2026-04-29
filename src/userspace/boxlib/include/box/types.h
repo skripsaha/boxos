@@ -13,15 +13,6 @@
 #define RESULT_RING_VADDR  CABIN_RESULT_RING_ADDR
 #define CODE_START_ADDR    CABIN_CODE_START_ADDR
 
-// Prefix encoding
-#define MAX_PREFIXES       POCKET_MAX_PREFIXES
-
-#define PREFIX(deck_id, opcode) \
-    ((uint16_t)(((uint8_t)(deck_id) << 8) | ((uint8_t)(opcode) & 0xFF)))
-
-#define DECK_ID(prefix)  (((prefix) >> 8) & 0xFF)
-#define OPCODE(prefix)   ((prefix) & 0xFF)
-
 #define PACKED __attribute__((packed))
 #define INLINE static inline __attribute__((always_inline))
 

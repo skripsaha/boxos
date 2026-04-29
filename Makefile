@@ -106,6 +106,9 @@ PROCA_BIN = $(APPS_DIR)/proca.elf
 PROCB_BIN = $(APPS_DIR)/procb.elf
 TODAY_BIN   = $(APPS_DIR)/today.elf
 MEMTEST_BIN = $(APPS_DIR)/memtest.elf
+MTEST_BIN = $(APPS_DIR)/mtest.elf
+CHAIN_BIN = $(APPS_DIR)/chain.elf
+DECKS_BIN = $(APPS_DIR)/decks.elf
 
 # Display server ELF
 DISPLAY_DIR = $(USERSPACE_DIR)/display
@@ -252,13 +255,16 @@ $(SHELL_BIN): $(USERSPACE_DIR)/boxlib/libbox.a
 	@echo "Shell binary: $@ ($$(stat -f%z $@ 2>/dev/null || stat -c%s $@ 2>/dev/null) bytes)"
 
 # Build apps (proca, procb, today, memtest)
-$(PROCA_BIN) $(PROCB_BIN) $(TODAY_BIN) $(MEMTEST_BIN): $(USERSPACE_DIR)/boxlib/libbox.a
+$(PROCA_BIN) $(PROCB_BIN) $(TODAY_BIN) $(MEMTEST_BIN) $(MTEST_BIN) $(CHAIN_BIN) $(DECKS_BIN): $(USERSPACE_DIR)/boxlib/libbox.a
 	@echo "Building apps..."
 	@cd $(APPS_DIR) && $(MAKE)
 	@echo "proca.elf: $$(stat -f%z $(PROCA_BIN) 2>/dev/null || stat -c%s $(PROCA_BIN) 2>/dev/null) bytes"
 	@echo "procb.elf: $$(stat -f%z $(PROCB_BIN) 2>/dev/null || stat -c%s $(PROCB_BIN) 2>/dev/null) bytes"
 	@echo "today.elf: $$(stat -f%z $(TODAY_BIN) 2>/dev/null || stat -c%s $(TODAY_BIN) 2>/dev/null) bytes"
 	@echo "memtest.elf: $$(stat -f%z $(MEMTEST_BIN) 2>/dev/null || stat -c%s $(MEMTEST_BIN) 2>/dev/null) bytes"
+	@echo "mtest.elf: $$(stat -f%z $(MTEST_BIN) 2>/dev/null || stat -c%s $(MTEST_BIN) 2>/dev/null) bytes"
+	@echo "chain.elf: $$(stat -f%z $(CHAIN_BIN) 2>/dev/null || stat -c%s $(CHAIN_BIN) 2>/dev/null) bytes"
+	@echo "decks.elf: $$(stat -f%z $(DECKS_BIN) 2>/dev/null || stat -c%s $(DECKS_BIN) 2>/dev/null) bytes"
 
 # Build display server
 $(DISPLAY_BIN): $(USERSPACE_DIR)/boxlib/libbox.a
@@ -318,7 +324,7 @@ $(KERNEL_ELF): $(KERNEL_ENTRY_OBJ) $(C_OBJS) $(ASM_OBJS) $(SHELL_EMBED)
 
 
 # ==== DISK IMAGES ====
-$(IMAGE): $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(SHELL_BIN) $(PROCA_BIN) $(PROCB_BIN) $(TODAY_BIN) $(MEMTEST_BIN) $(DISPLAY_BIN) $(UTIL_ELFS) $(TAGFS_TOOL)
+$(IMAGE): $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(SHELL_BIN) $(PROCA_BIN) $(PROCB_BIN) $(TODAY_BIN) $(MEMTEST_BIN) $(MTEST_BIN) $(CHAIN_BIN) $(DECKS_BIN) $(DISPLAY_BIN) $(UTIL_ELFS) $(TAGFS_TOOL)
 	@echo "Creating disk image (10MB)..."
 	@dd if=/dev/zero of=$@ bs=512 count=20480 status=none
 	@echo "  Writing Stage1 (sector 0, 512 bytes)..."
@@ -335,6 +341,9 @@ $(IMAGE): $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(SHELL_BIN) $(PROCA_BIN) $(
 		$(PROCB_BIN)    "app" \
 		$(TODAY_BIN)    "app,utility" \
 		$(MEMTEST_BIN)  "app,utility" \
+		$(MTEST_BIN)    "utility,memory" \
+		$(CHAIN_BIN)    "app,utility" \
+		$(DECKS_BIN)    "app,utility" \
 		$(DISPLAY_BIN)  "display,system,utility" \
 		$(UTILS_DIR)/help.elf    "utility" \
 		$(UTILS_DIR)/create.elf  "utility,storage" \

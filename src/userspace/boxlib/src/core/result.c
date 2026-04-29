@@ -5,38 +5,30 @@
 bool result_available(void) {
     ResultRing* rr = result_ring();
     __sync_synchronize();
-    return rr->head != rr->tail;
+    return rr->hdr.head != rr->hdr.tail;
 }
 
 uint32_t result_count(void) {
     ResultRing* rr = result_ring();
     __sync_synchronize();
-    uint32_t head = rr->head;
-    uint32_t tail = rr->tail;
-
-    if (tail >= head) {
-        return tail - head;
-    } else {
-        return (RESULT_RING_CAPACITY - head) + tail;
-    }
+    uint64_t n = rr->hdr.tail - rr->hdr.head;
+    return n > 0xFFFFFFFFu ? 0xFFFFFFFFu : (uint32_t)n;
 }
 
 bool result_pop(Result* out) {
     ResultRing* rr = result_ring();
-
     if (!result_available()) {
         return false;
     }
-
     __sync_synchronize();
 
-    uint32_t head = rr->head;
-    *out = rr->slots[head];
+    uint64_t idx = rr->hdr.head;
+    Result *slot = (Result *)(uintptr_t)
+        (rr->hdr.slots_base + (idx % rr->hdr.slot_count_max) * rr->hdr.slot_size);
+    *out = *slot;
 
     __sync_synchronize();
-
-    rr->head = (head + 1) % RESULT_RING_CAPACITY;
-
+    rr->hdr.head = idx + 1;
     return true;
 }
 
@@ -71,7 +63,6 @@ static uint32_t non_ipc_stash_cnt = 0;
 
 static void non_ipc_stash_push(Result* entry) {
     if (non_ipc_stash_cnt >= NON_IPC_STASH_SIZE) {
-        /* Stash full: drop oldest to make room */
         for (uint32_t i = 1; i < non_ipc_stash_cnt; i++) {
             non_ipc_stash_buf[i - 1] = non_ipc_stash_buf[i];
         }

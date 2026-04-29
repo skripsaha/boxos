@@ -1,4 +1,0 @@
-Example:
-
-claude -p "Find and fix all compilation warnings in the kernel source. Run make clean && make to verify." --allowedTools "Read,Grep,Edit,Bash,Glob"
-

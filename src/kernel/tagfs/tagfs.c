@@ -8,6 +8,7 @@
 #include "error.h"
 #include "ahci_sync.h"
 #include "ahci.h"
+#include "ata_dma.h"
 #include "ata.h"
 #include "cow/cow.h"
 #include "braid/braid.h"

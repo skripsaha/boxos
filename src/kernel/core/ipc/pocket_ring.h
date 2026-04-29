@@ -3,67 +3,72 @@
 
 #include "ktypes.h"
 #include "pocket.h"
-#include "boxos_sizes.h"
+#include "cabin_layout.h"
 
-// PocketRing: per-process SPSC ring buffer for syscall Pockets.
-// Lives at CABIN_POCKET_RING_ADDR (0x2000), 1 page (4KB).
-// Userspace is the producer (writes Pockets, advances tail).
-// Kernel is the consumer (reads Pockets, advances head).
+/*
+ * PocketRing — SPSC, monotonic 64-bit indices, lazy slot allocation.
+ *
+ *   Userspace producer: writes Pocket at slots_base + (tail % cap)*slot_size,
+ *   then bumps tail. The slot page is mapped on-demand by the kernel page
+ *   fault handler (vmm_handle_page_fault → vmm_demand_map_user_page).
+ *
+ *   Kernel consumer: reads Pocket at slots_base + (head % cap)*slot_size, then
+ *   bumps head. Slot pages are guaranteed mapped (the producer only writes
+ *   slots that already faulted in), but kernel access goes through
+ *   vmm_translate_user_addr because Cabin's CR3 may not be active.
+ *
+ * Empty: head == tail
+ * Full:  tail - head == slot_count_max  (8192 slots = 1 MiB at 128B/slot)
+ *
+ * Indices are 64-bit and never wrap during the lifetime of the universe.
+ */
 
 typedef struct __packed {
-    volatile uint32_t head;                    // kernel advances after processing
-    volatile uint32_t tail;                    // userspace advances after writing
-    Pocket slots[POCKET_RING_CAPACITY];        // 42 * 96 = 4032 bytes
+    volatile uint64_t head;             /* consumer cursor (kernel)        */
+    volatile uint64_t tail;             /* producer cursor (userspace)     */
+    uint64_t          slots_base;       /* user vaddr of slot 0            */
+    uint32_t          slot_size;        /* bytes per slot stride           */
+    uint32_t          slot_count_max;   /* hard upper bound on tail-head   */
+    uint64_t          magic;            /* POCKET_RING_MAGIC               */
+    uint8_t           _pad[24];
+} PocketRingHeader;
+
+_Static_assert(sizeof(PocketRingHeader) == 64,
+               "PocketRingHeader must be 64 bytes");
+
+/* The full ring page is the header followed by zero padding. We allocate one
+ * physical page; only the first 64 bytes carry meaning. */
+typedef struct __packed {
+    PocketRingHeader hdr;
+    uint8_t          _page_pad[4096 - sizeof(PocketRingHeader)];
 } PocketRing;
 
-// 8 + 4032 = 4040 bytes, fits in 4096
-_Static_assert(sizeof(PocketRing) <= 4096, "PocketRing must fit in one page");
+_Static_assert(sizeof(PocketRing) == 4096,
+               "PocketRing header page must be exactly one page");
 
-static inline bool pocket_ring_is_empty(const PocketRing* ring)
+/* ---- Inline accessors (callable from kernel where slots_base is *user* VA
+ *      mapped into the current cabin; otherwise use the kring helpers below) */
+
+static inline bool pocket_ring_is_empty(const PocketRing *r)
 {
-    return ring->head == ring->tail;
+    return r->hdr.head == r->hdr.tail;
 }
 
-static inline bool pocket_ring_is_full(const PocketRing* ring)
+static inline bool pocket_ring_is_full(const PocketRing *r)
 {
-    return ((ring->tail + 1) % POCKET_RING_CAPACITY) == ring->head;
+    return (r->hdr.tail - r->hdr.head) >= r->hdr.slot_count_max;
 }
 
-static inline uint32_t pocket_ring_count(const PocketRing* ring)
+static inline uint32_t pocket_ring_count(const PocketRing *r)
 {
-    uint32_t h = ring->head;
-    uint32_t t = ring->tail;
-    if (t >= h) return t - h;
-    return POCKET_RING_CAPACITY - (h - t);
+    uint64_t n = r->hdr.tail - r->hdr.head;
+    return n > 0xFFFFFFFFu ? 0xFFFFFFFFu : (uint32_t)n;
 }
 
-// Userspace push: write Pocket to tail, advance tail.
-// Returns true on success, false if ring is full.
-static inline bool pocket_ring_push(PocketRing* ring, const Pocket* pocket)
+static inline uintptr_t pocket_ring_slot_uvaddr(const PocketRing *r, uint64_t idx)
 {
-    if (pocket_ring_is_full(ring)) return false;
-
-    uint32_t idx = ring->tail;
-    ring->slots[idx] = *pocket;
-    __sync_synchronize();  // ensure data written before tail advance
-    ring->tail = (idx + 1) % POCKET_RING_CAPACITY;
-    return true;
+    return (uintptr_t)(r->hdr.slots_base
+                       + (idx % r->hdr.slot_count_max) * r->hdr.slot_size);
 }
 
-// Kernel peek: get pointer to current head Pocket without advancing.
-// Returns NULL if ring is empty.
-static inline Pocket* pocket_ring_peek(PocketRing* ring)
-{
-    if (pocket_ring_is_empty(ring)) return NULL;
-    return &ring->slots[ring->head];
-}
-
-// Kernel pop: advance head after processing.
-static inline void pocket_ring_pop(PocketRing* ring)
-{
-    if (!pocket_ring_is_empty(ring)) {
-        ring->head = (ring->head + 1) % POCKET_RING_CAPACITY;
-    }
-}
-
-#endif // POCKET_RING_H
+#endif /* POCKET_RING_H */

@@ -5,87 +5,84 @@
 #include "box/string.h"
 #include "box/file.h"
 #include "box/cpu.h"
+#include "box/manifest.h"
+#include "box/crate.h"
 
-// Scratch buffer for IPC data (must be in mapped memory)
-static uint8_t g_ipc_buf[256] __attribute__((aligned(16)));
+/*
+ * IPC primitives now travel through the Manifest path. The legacy 256-byte
+ * static scratch buffer (`g_ipc_buf`) is gone — payload is whatever the caller
+ * gave us, sent through a single Crate of arbitrary length.
+ */
+
+#define MFBUF_BYTES 64u  /* enough for one ManifestOp + small inline params */
+
+static int ipc_submit_one_op(uint16_t opcode,
+                             uint16_t in_crate_idx,
+                             const void *params,
+                             uint16_t param_size,
+                             Crate *crates,
+                             uint16_t crate_count,
+                             uint32_t target_pid,
+                             uint32_t timeout_ms)
+{
+    uint8_t mbuf[MFBUF_BYTES];
+    ManifestBuilder mb;
+    if (ManifestBuilderInit(&mb, mbuf, sizeof(mbuf)) != 0) return -ERR_INTERNAL;
+    if (ManifestBuilderAddOp(&mb, DECK_SYSTEM, opcode, 0,
+                             in_crate_idx, CRATE_INDEX_NONE,
+                             params, param_size) != 0) return -ERR_INTERNAL;
+    if (ManifestBuilderFinalize(&mb) != 0) return -ERR_INTERNAL;
+
+    Result r;
+    int rc = ManifestSubmitFull((const Manifest *)mbuf, crates, crate_count,
+                                target_pid, &r, timeout_ms);
+    return rc;
+}
 
 int send(uint32_t target_pid, const void* data, uint16_t size) {
     if (target_pid == 0) return -ERR_INVALID_ARGUMENT;
 
-    Pocket p;
-    pocket_prepare(&p);
-    p.target_pid = target_pid;
-    p.route_tag[0] = '\0';
-    pocket_add_prefix(&p, DECK_SYSTEM, 0x40);
-
+    Crate c;
     if (data && size > 0) {
-        uint16_t copy = size > sizeof(g_ipc_buf) ? sizeof(g_ipc_buf) : size;
-        memcpy(g_ipc_buf, data, copy);
-        pocket_set_data(&p, g_ipc_buf, copy);
+        CrateSetInput(&c, (void *)data, size);
+        return ipc_submit_one_op(0x40 /* ROUTE */, 0,
+                                 NULL, 0, &c, 1, target_pid, 500000);
     }
-
-    pocket_submit(&p);
-
-    Result result;
-    if (!result_wait(&result, 500000)) {
-        return -ERR_TIMEOUT;
-    }
-
-    if (result.error_code != OK) {
-        return -(int)result.error_code;
-    }
-
-    return OK;
+    return ipc_submit_one_op(0x40, CRATE_INDEX_NONE,
+                             NULL, 0, NULL, 0, target_pid, 500000);
 }
 
 int broadcast(const char* tag, const void* data, uint16_t size) {
     if (!tag || tag[0] == '\0') return -ERR_INVALID_ARGUMENT;
 
-    Pocket p;
-    pocket_prepare(&p);
-    p.target_pid = 0;
+    /* Tag travels as inline params (NUL-terminated). System.broadcast caps it
+     * at 64 bytes — same effective ceiling as before, no compile-time limit
+     * on payload itself. */
     size_t tlen = strlen(tag);
-    if (tlen > 31) tlen = 31;
-    memcpy(p.route_tag, tag, tlen);
-    p.route_tag[tlen] = '\0';
-    pocket_add_prefix(&p, DECK_SYSTEM, 0x41);
+    if (tlen >= 63) tlen = 63;
+    char tag_param[64];
+    memcpy(tag_param, tag, tlen);
+    tag_param[tlen] = '\0';
 
+    Crate c;
     if (data && size > 0) {
-        uint16_t copy = size > sizeof(g_ipc_buf) ? sizeof(g_ipc_buf) : size;
-        memcpy(g_ipc_buf, data, copy);
-        pocket_set_data(&p, g_ipc_buf, copy);
+        CrateSetInput(&c, (void *)data, size);
+        return ipc_submit_one_op(0x41 /* BROADCAST */, 0,
+                                 tag_param, (uint16_t)(tlen + 1),
+                                 &c, 1, 0, 500000);
     }
-
-    pocket_submit(&p);
-
-    Result result;
-    if (!result_wait(&result, 500000)) {
-        return -ERR_TIMEOUT;
-    }
-
-    if (result.error_code != OK) {
-        return -(int)result.error_code;
-    }
-
-    return OK;
+    return ipc_submit_one_op(0x41, CRATE_INDEX_NONE,
+                             tag_param, (uint16_t)(tlen + 1),
+                             NULL, 0, 0, 500000);
 }
 
 int listen(uint64_t required_tags, uint8_t flags) {
-    uint8_t buf[9];
-    memcpy(buf, &required_tags, sizeof(uint64_t));
-    buf[8] = flags;
-    pocket_send(DECK_SYSTEM, 0x42, buf, 9);
-
-    Result result;
-    if (!result_wait(&result, 500000)) {
-        return -ERR_TIMEOUT;
-    }
-
-    if (result.error_code != OK) {
-        return -(int)result.error_code;
-    }
-
-    return OK;
+    uint8_t params[9];
+    memcpy(params, &required_tags, sizeof(uint64_t));
+    params[8] = flags;
+    return ipc_submit_one_op(0x42 /* LISTEN */, CRATE_INDEX_NONE,
+                             params, sizeof(params),
+                             NULL, 0, 0, 500000);
 }
 
 bool receive(Result* out) {

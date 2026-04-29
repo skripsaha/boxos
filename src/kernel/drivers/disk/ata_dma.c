@@ -14,6 +14,7 @@
 #include "storage_deck.h"
 #include "tagfs.h"
 #include "result_ring.h"
+#include "kring.h"
 #include "process.h"
 
 #if CONFIG_ATA_DMA_DEBUG
@@ -406,7 +407,7 @@ void ata_dma_irq_handler(void) {
     // Write result data to process's heap and push Result to ResultRing
     if (transfer_success) {
         process_t* proc = process_find(req->pid);
-        if (proc && proc->result_ring_phys) {
+        if (proc) {
             if (!req->is_write) {
                 // Read completion: copy DMA buffer to process heap at data_addr
                 if (req->data_addr != 0) {
@@ -441,39 +442,42 @@ void ata_dma_irq_handler(void) {
                     tagfs_metadata_free(&meta_update);
                 }
 
-                // Write response data to process heap at data_addr
-                if (req->data_addr != 0) {
-                    void* user_buf = vmm_translate_user_addr(proc->cabin, req->data_addr, sizeof(obj_write_response_t));
-                    if (user_buf) {
-                        obj_write_response_t* resp = (obj_write_response_t*)user_buf;
-                        memset(resp, 0, sizeof(obj_write_response_t));
-                        resp->bytes_written = req->buffer_size;
-                        resp->new_file_size = new_file_size;
-                        resp->error_code = OK;
-                    }
-                }
+                /* Manifest path: the caller's out_crate (if any) is filled
+                 * by ObjWrite synchronously. The async DMA completion no
+                 * longer writes a legacy obj_write_response_t into the
+                 * sender's heap — the only way that struct shipped a result
+                 * was via the prefix-chain ABI, which is gone. */
+                (void)new_file_size;
             }
 
-            ResultRing* rring = (ResultRing*)vmm_phys_to_virt(proc->result_ring_phys);
             Result result;
             memset(&result, 0, sizeof(Result));
             result.error_code = OK;
             result.data_length = req->buffer_size;
             result.data_addr = req->data_addr;
             result.sender_pid = 0;
-            result_ring_push(rring, &result);
+            KResultPush(proc, &result);
         }
     } else {
         // Error: push error Result
         process_t* proc = process_find(req->pid);
-        if (proc && proc->result_ring_phys) {
-            ResultRing* rring = (ResultRing*)vmm_phys_to_virt(proc->result_ring_phys);
+        if (proc) {
             Result result;
             memset(&result, 0, sizeof(Result));
             result.error_code = ERR_IO;
             result.sender_pid = 0;
-            result_ring_push(rring, &result);
+            KResultPush(proc, &result);
         }
+    }
+
+    /* Sync DMA path: when the caller didn't register an event_id (== 0)
+     * AND has no owning pid (== 0), the caller is polling on req->status
+     * and will free the phys buffer and clear the slot itself once it
+     * sees COMPLETED. Leaving active_request_idx and the buffer alive
+     * here preserves the in-progress mutex without leaking resources. */
+    if (req->event_id == 0 && req->pid == 0) {
+        spin_unlock(&dma_state.lock);
+        return;
     }
 
     PhysAllocTaggedFree((void*)req->buffer_phys, 1);
@@ -520,13 +524,12 @@ void ata_dma_check_timeouts(void) {
 
         // Push timeout error Result to process's ResultRing
         process_t* proc = process_find(req->pid);
-        if (proc && proc->result_ring_phys) {
-            ResultRing* rring = (ResultRing*)vmm_phys_to_virt(proc->result_ring_phys);
+        if (proc) {
             Result result;
             memset(&result, 0, sizeof(Result));
             result.error_code = ERR_TIMEOUT;
             result.sender_pid = 0;
-            result_ring_push(rring, &result);
+            KResultPush(proc, &result);
         }
 
         PhysAllocTaggedFree((void*)req->buffer_phys, 1);
@@ -605,56 +608,46 @@ int ata_read_sectors_dma(uint8_t is_master, uint32_t lba, uint8_t count, uint8_t
     uint64_t timeout_cycles = cpu_ms_to_tsc(ATA_DMA_TIMEOUT_MS);
     uint64_t start = rdtsc();
 
+    /* Poll on req->status. The IRQ handler races with us to set COMPLETED
+     * and (per the event_id==0 && pid==0 sentinel above) leaves the slot
+     * alive so we can copy + free under our own lock. */
     while (1) {
-        uint16_t base = dma_state.bus_master_base;
-        uint8_t status = inb(base + 2);
-
-        if (status & ATA_DMA_STATUS_IRQ) {
-            outb(base + 2, ATA_DMA_STATUS_IRQ | ATA_DMA_STATUS_ERROR);
-            outb(base + 0, ATA_DMA_CMD_STOP);
-
+        __sync_synchronize();
+        uint8_t st = req->status;
+        if (st == ATA_DMA_STATUS_COMPLETED) {
             spin_lock(&dma_state.lock);
-
-            if (status & ATA_DMA_STATUS_ERROR) {
-                req->status = ATA_DMA_STATUS_ERROR_DMA;
-                atomic_fetch_add_u32(&dma_state.failed_requests, 1);
-                pmm_free(dma_buffer, 1);
-                req->status = ATA_DMA_STATUS_FREE;
-                dma_state.active_request_idx = 0xFF;
-                spin_unlock(&dma_state.lock);
-                return -1;
-            }
-
-            void* dma_virt = vmm_phys_to_virt((uintptr_t)dma_buffer);
+            void *dma_virt = vmm_phys_to_virt((uintptr_t)dma_buffer);
             memcpy(buffer, dma_virt, req->buffer_size);
-
-            req->status = ATA_DMA_STATUS_COMPLETED;
             atomic_fetch_add_u32(&dma_state.completed_requests, 1);
-
             pmm_free(dma_buffer, 1);
             req->status = ATA_DMA_STATUS_FREE;
             dma_state.active_request_idx = 0xFF;
-
             spin_unlock(&dma_state.lock);
             return 0;
+        }
+        if (st == ATA_DMA_STATUS_ERROR_DMA ||
+            st == ATA_DMA_STATUS_ERROR_TIMEOUT ||
+            st == ATA_DMA_STATUS_ERROR_ATA) {
+            spin_lock(&dma_state.lock);
+            atomic_fetch_add_u32(&dma_state.failed_requests, 1);
+            pmm_free(dma_buffer, 1);
+            req->status = ATA_DMA_STATUS_FREE;
+            dma_state.active_request_idx = 0xFF;
+            spin_unlock(&dma_state.lock);
+            return -1;
         }
 
         uint64_t elapsed = rdtsc() - start;
         if (elapsed > timeout_cycles) {
             spin_lock(&dma_state.lock);
-
             outb(dma_state.bus_master_base + 0, ATA_DMA_CMD_STOP);
-            req->status = ATA_DMA_STATUS_ERROR_TIMEOUT;
             atomic_fetch_add_u32(&dma_state.failed_requests, 1);
-
             pmm_free(dma_buffer, 1);
             req->status = ATA_DMA_STATUS_FREE;
             dma_state.active_request_idx = 0xFF;
-
             spin_unlock(&dma_state.lock);
             return -1;
         }
-
         cpu_pause();
     }
 }
@@ -725,57 +718,43 @@ int ata_write_sectors_dma(uint8_t is_master, uint32_t lba, uint8_t count, const 
     uint64_t timeout_cycles = cpu_ms_to_tsc(ATA_DMA_TIMEOUT_MS);
     uint64_t start = rdtsc();
 
+    /* Same poll-on-status pattern as ata_read_sectors_dma. */
     while (1) {
-        uint16_t base = dma_state.bus_master_base;
-        uint8_t status = inb(base + 2);
-
-        if (status & ATA_DMA_STATUS_IRQ) {
-            outb(base + 2, ATA_DMA_STATUS_IRQ | ATA_DMA_STATUS_ERROR);
-            outb(base + 0, ATA_DMA_CMD_STOP);
-
+        __sync_synchronize();
+        uint8_t st = req->status;
+        if (st == ATA_DMA_STATUS_COMPLETED) {
             spin_lock(&dma_state.lock);
-
-            if (status & ATA_DMA_STATUS_ERROR) {
-                req->status = ATA_DMA_STATUS_ERROR_DMA;
-                atomic_fetch_add_u32(&dma_state.failed_requests, 1);
-                pmm_free(dma_buffer, 1);
-                req->status = ATA_DMA_STATUS_FREE;
-                dma_state.active_request_idx = 0xFF;
-                spin_unlock(&dma_state.lock);
-                return -1;
-            }
-
-            req->status = ATA_DMA_STATUS_COMPLETED;
             atomic_fetch_add_u32(&dma_state.completed_requests, 1);
-
             pmm_free(dma_buffer, 1);
             req->status = ATA_DMA_STATUS_FREE;
             dma_state.active_request_idx = 0xFF;
-
             spin_unlock(&dma_state.lock);
-
-            /* Flush write cache to ensure data reaches persistent storage */
             ata_flush_cache(is_master);
-
             return 0;
+        }
+        if (st == ATA_DMA_STATUS_ERROR_DMA ||
+            st == ATA_DMA_STATUS_ERROR_TIMEOUT ||
+            st == ATA_DMA_STATUS_ERROR_ATA) {
+            spin_lock(&dma_state.lock);
+            atomic_fetch_add_u32(&dma_state.failed_requests, 1);
+            pmm_free(dma_buffer, 1);
+            req->status = ATA_DMA_STATUS_FREE;
+            dma_state.active_request_idx = 0xFF;
+            spin_unlock(&dma_state.lock);
+            return -1;
         }
 
         uint64_t elapsed = rdtsc() - start;
         if (elapsed > timeout_cycles) {
             spin_lock(&dma_state.lock);
-
             outb(dma_state.bus_master_base + 0, ATA_DMA_CMD_STOP);
-            req->status = ATA_DMA_STATUS_ERROR_TIMEOUT;
             atomic_fetch_add_u32(&dma_state.failed_requests, 1);
-
             pmm_free(dma_buffer, 1);
             req->status = ATA_DMA_STATUS_FREE;
             dma_state.active_request_idx = 0xFF;
-
             spin_unlock(&dma_state.lock);
             return -1;
         }
-
         cpu_pause();
     }
 }
