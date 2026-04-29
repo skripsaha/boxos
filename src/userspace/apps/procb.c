@@ -1,6 +1,7 @@
 #include "box/print.h"
 #include "box/ipc.h"
-#include "box/notify.h"
+#include "box/core/notify.h"
+#include "box/core/cabin.h"
 #include "box/system.h"
 
 int main(void)

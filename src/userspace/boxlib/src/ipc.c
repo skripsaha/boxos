@@ -1,12 +1,12 @@
 #include "box/ipc.h"
-#include "box/notify.h"
-#include "box/result.h"
+#include "box/core/notify.h"
+#include "box/core/result.h"
 #include "box/system.h"
 #include "box/string.h"
-#include "box/storage.h"
+#include "box/file.h"
 #include "box/cpu.h"
-#include "box/manifest.h"
-#include "box/crate.h"
+#include "box/core/manifest.h"
+#include "box/core/crate.h"
 
 /*
  * IPC primitives now travel through the Manifest path. The legacy 256-byte

@@ -1,8 +1,8 @@
-#ifndef BOX_RESULT_H
-#define BOX_RESULT_H
+#ifndef BOX_CORE_RESULT_H
+#define BOX_CORE_RESULT_H
 
-#include "types.h"
-#include "error.h"
+#include "box/types.h"
+#include "box/error.h"
 
 // Result: syscall response from kernel to userspace.
 // Data is NOT inline — data_addr points to cabin heap.

@@ -3,10 +3,11 @@
 #undef malloc
 #endif
 
-#include "box/heap.h"
+#include "box/memory.h"
 #include "box/sync.h"
 #include "box/string.h"
-#include "box/notify.h"
+#include "box/core/notify.h"
+#include "box/core/cabin.h"
 #include "box/print.h"
 #include "cabin_layout.h"
 

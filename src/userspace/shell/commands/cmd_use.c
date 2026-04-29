@@ -1,7 +1,7 @@
 #include "commands.h"
 #include "../shell.h"
 #include "box/print.h"
-#include "box/storage.h"
+#include "box/file.h"
 #include "box/string.h"
 
 int cmd_use(int argc, char *argv[])

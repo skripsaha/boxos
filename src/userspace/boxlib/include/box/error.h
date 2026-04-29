@@ -1,7 +1,7 @@
 #ifndef BOX_ERROR_H
 #define BOX_ERROR_H
 
-#include "types.h"
+#include "box/types.h"
 
 typedef uint32_t error_t;
 

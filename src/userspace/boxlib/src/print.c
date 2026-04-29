@@ -4,7 +4,7 @@
 #include "box/string.h"
 #include "box/ipc.h"
 #include "box/convert.h"
-#include "box/notify.h"
+#include "box/core/notify.h"
 #include "box/display.h"
 
 /* ===========================================================================

@@ -1,6 +1,6 @@
 #include "box/print.h"
 #include "box/ipc.h"
-#include "box/result.h"
+#include "box/core/result.h"
 #include "box/string.h"
 #include "box/system.h"
 

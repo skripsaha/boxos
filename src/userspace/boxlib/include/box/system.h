@@ -1,8 +1,8 @@
 #ifndef SYSTEM_H
 #define SYSTEM_H
 
-#include "types.h"
-#include "error.h"
+#include "box/types.h"
+#include "box/error.h"
 
 #define PROC_STATE_TERMINATED   4
 

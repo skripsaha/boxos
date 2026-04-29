@@ -7,9 +7,9 @@
  */
 
 #include "box/keyboard.h"
-#include "box/manifest.h"
-#include "box/notify.h"
-#include "box/result.h"
+#include "box/core/manifest.h"
+#include "box/core/notify.h"
+#include "box/core/result.h"
 #include "box/string.h"
 
 #define HW_KB_GETCHAR   0x60
