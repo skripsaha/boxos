@@ -109,6 +109,7 @@ MEMTEST_BIN = $(APPS_DIR)/memtest.elf
 MTEST_BIN = $(APPS_DIR)/mtest.elf
 CHAIN_BIN = $(APPS_DIR)/chain.elf
 DECKS_BIN = $(APPS_DIR)/decks.elf
+BENCH_BIN = $(APPS_DIR)/bench.elf
 
 # Display server ELF
 DISPLAY_DIR = $(USERSPACE_DIR)/display
@@ -255,7 +256,7 @@ $(SHELL_BIN): $(USERSPACE_DIR)/boxlib/libbox.a
 	@echo "Shell binary: $@ ($$(stat -f%z $@ 2>/dev/null || stat -c%s $@ 2>/dev/null) bytes)"
 
 # Build apps (proca, procb, today, memtest)
-$(PROCA_BIN) $(PROCB_BIN) $(TODAY_BIN) $(MEMTEST_BIN) $(MTEST_BIN) $(CHAIN_BIN) $(DECKS_BIN): $(USERSPACE_DIR)/boxlib/libbox.a
+$(PROCA_BIN) $(PROCB_BIN) $(TODAY_BIN) $(MEMTEST_BIN) $(MTEST_BIN) $(CHAIN_BIN) $(DECKS_BIN) $(BENCH_BIN): $(USERSPACE_DIR)/boxlib/libbox.a
 	@echo "Building apps..."
 	@cd $(APPS_DIR) && $(MAKE)
 	@echo "proca.elf: $$(stat -f%z $(PROCA_BIN) 2>/dev/null || stat -c%s $(PROCA_BIN) 2>/dev/null) bytes"
@@ -324,7 +325,7 @@ $(KERNEL_ELF): $(KERNEL_ENTRY_OBJ) $(C_OBJS) $(ASM_OBJS) $(SHELL_EMBED)
 
 
 # ==== DISK IMAGES ====
-$(IMAGE): $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(SHELL_BIN) $(PROCA_BIN) $(PROCB_BIN) $(TODAY_BIN) $(MEMTEST_BIN) $(MTEST_BIN) $(CHAIN_BIN) $(DECKS_BIN) $(DISPLAY_BIN) $(UTIL_ELFS) $(TAGFS_TOOL)
+$(IMAGE): $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(SHELL_BIN) $(PROCA_BIN) $(PROCB_BIN) $(TODAY_BIN) $(MEMTEST_BIN) $(MTEST_BIN) $(CHAIN_BIN) $(DECKS_BIN) $(BENCH_BIN) $(DISPLAY_BIN) $(UTIL_ELFS) $(TAGFS_TOOL)
 	@echo "Creating disk image (10MB)..."
 	@dd if=/dev/zero of=$@ bs=512 count=20480 status=none
 	@echo "  Writing Stage1 (sector 0, 512 bytes)..."
@@ -345,6 +346,7 @@ $(IMAGE): $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(SHELL_BIN) $(PROCA_BIN) $(
 		$(MTEST_BIN)    "utility,memory" \
 		$(CHAIN_BIN)    "app,utility" \
 		$(DECKS_BIN)    "app,utility" \
+		$(BENCH_BIN)    "app,utility,bench" \
 		$(UTILS_DIR)/help.elf    "utility" \
 		$(UTILS_DIR)/create.elf  "utility,storage" \
 		$(UTILS_DIR)/show.elf    "utility,storage" \
