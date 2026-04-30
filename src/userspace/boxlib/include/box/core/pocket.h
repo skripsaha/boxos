@@ -72,26 +72,41 @@ INLINE uint32_t pocket_ring_count(const PocketRing* ring) {
  * Push a Pocket. Writes to slots_base + (tail % cap)*slot_size — the slot page
  * faults in if necessary; the kernel's #PF handler maps a fresh phys page and
  * returns. ABI guarantees slot_size == sizeof(Pocket) for PocketRing.
+ *
+ * Sanity rules against header corruption / uninitialised mappings — the
+ * compiler used to optimise these checks away because the non-volatile
+ * fields look const-after-init from its viewpoint (kernel writes them
+ * before any user thread runs). Atomic-relaxed loads force a real memory
+ * read on every push so a bad header never lets us blast garbage into
+ * .text or NULL.
  */
 INLINE bool pocket_ring_push(PocketRing* ring, const Pocket* p) {
+    if (!ring || !p) return false;
+
+    uint64_t magic   = __atomic_load_n(&ring->hdr.magic,          __ATOMIC_RELAXED);
+    uint32_t cap     = __atomic_load_n(&ring->hdr.slot_count_max, __ATOMIC_RELAXED);
+    uint64_t base    = __atomic_load_n(&ring->hdr.slots_base,     __ATOMIC_RELAXED);
+    uint32_t stride  = __atomic_load_n(&ring->hdr.slot_size,      __ATOMIC_RELAXED);
+
+    if (magic   != POCKET_RING_MAGIC) return false;
+    if (cap     == 0)                 return false;
+    if (base    == 0)                 return false;
+    if (stride  == 0)                 return false;
+    /* Guard against the slot region accidentally landing inside the user
+     * binary mapping (low VA): Cabin pins POCKET_SLOTS at the 64 TB mark.
+     * Anything below 4 GB cannot be a valid slots_base. */
+    if (base    <  0x100000000ULL)    return false;
+
     if (pocket_ring_is_full(ring)) return false;
 
-    /* Sanity check the header before the slot store. If slots_base or
-     * slot_count_max is zero (uninitialised header, corrupted page, etc.),
-     * the slot pointer below would land somewhere meaningless — typically
-     * inside the process's .text segment, where the resulting write fault
-     * is hard to debug. Refusing the push here makes the failure mode
-     * recoverable instead of crashing. */
-    if (ring->hdr.slot_count_max == 0) return false;
-    if (ring->hdr.slots_base   == 0)   return false;
-    if (ring->hdr.slot_size    == 0)   return false;
+    uint64_t idx  = __atomic_load_n(&ring->hdr.tail, __ATOMIC_RELAXED);
+    if ((idx - __atomic_load_n(&ring->hdr.head, __ATOMIC_ACQUIRE)) >= cap) return false;
 
-    uint64_t idx  = ring->hdr.tail;
-    Pocket  *slot = (Pocket *)(uintptr_t)
-        (ring->hdr.slots_base + (idx % ring->hdr.slot_count_max) * ring->hdr.slot_size);
+    Pocket *slot = (Pocket *)(uintptr_t)(base + (idx % cap) * stride);
     *slot = *p;
-    __sync_synchronize();
-    ring->hdr.tail = idx + 1;
+    /* RELEASE pair with kernel ACQUIRE on tail — the consumer may not see
+     * the new tail before the slot store is visible. */
+    __atomic_store_n(&ring->hdr.tail, idx + 1, __ATOMIC_RELEASE);
     return true;
 }
 

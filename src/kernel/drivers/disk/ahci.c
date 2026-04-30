@@ -157,8 +157,22 @@ void ahci_irq_handler(void) {
             __atomic_store_n(&state->ci_snapshot, current_ci, __ATOMIC_RELEASE);
         }
 
+        /* Bit 30 = TFES (Task File Error Status) — at least one issued
+         * command finished with the device asserting ERR/DF in TFD. The
+         * earlier IRQ path bumped the counter and silently dropped the
+         * error; that made failed reads look successful. We now snapshot
+         * tfd/serr into per-port stats so the sync wrapper / async waiter
+         * can map "completed AND TFES" to a hard failure rather than OK.
+         *
+         * Marking individual slots as failed requires a per-slot
+         * pending mask which the async path will track separately — for
+         * now we capture the diagnostic context. */
         if (port_is & (1 << 30)) {
             __sync_fetch_and_add(&state->ncq_errors, 1);
+            state->stats.tfes_count++;
+            state->stats.last_tfd  = port->tfd;
+            state->stats.last_serr = port->serr;
+            state->stats.last_error_tsc = rdtsc();
         }
 
         port->is = port_is;
@@ -862,7 +876,12 @@ int ahci_init(void) {
 
     debug_printf("[AHCI] Initialization complete (%u active port(s))\n", ahci_ctrl.num_active_ports);
 
+    /* Self-test was unconditional and ran on every boot — fine in QEMU,
+     * questionable on real hardware where a hung port would stall the
+     * whole boot. Gate behind CONFIG_AHCI_SELFTEST. */
+#if defined(CONFIG_AHCI_SELFTEST) && CONFIG_AHCI_SELFTEST
     ahci_test_read();
+#endif
 
     return 0;
 }

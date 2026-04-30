@@ -1,5 +1,6 @@
 #include "process.h"
 #include "klib.h"
+#include "kernel_config.h"
 #include "pmm.h"
 #include "pmtag.h"
 #include "cabin_layout.h"
@@ -20,6 +21,14 @@
 #include "tagfs.h"
 #include "per_core.h"
 #include "amp.h"
+
+typedef struct
+{
+    struct process_t *head;
+    struct process_t *tail;
+    uint32_t          count;
+    spinlock_t        lock;
+} process_cleanup_queue_t;
 
 static process_t *process_list_head = NULL;
 static volatile uint32_t process_count = 0;
@@ -118,13 +127,16 @@ static int process_clear_tag_bit(process_t *proc, uint16_t tag_id)
     return -1;
 }
 
-// Hash table for O(1) process_find(pid)
-#define PROCESS_HASH_SIZE 256
+/* Hash table for O(1) process_find(pid). Size sourced from kernel_config.h
+ * (CONFIG_PROCESS_HASH_SIZE) — must be a power of two for the mask hash. */
+#define PROCESS_HASH_SIZE CONFIG_PROCESS_HASH_SIZE
+_Static_assert((PROCESS_HASH_SIZE & (PROCESS_HASH_SIZE - 1)) == 0,
+               "CONFIG_PROCESS_HASH_SIZE must be a power of two");
 static process_t *process_hash_table[PROCESS_HASH_SIZE];
 
 static inline uint32_t process_hash(uint32_t pid)
 {
-    return pid % PROCESS_HASH_SIZE;
+    return pid & (PROCESS_HASH_SIZE - 1);
 }
 
 static void process_hash_insert(process_t *proc)
@@ -472,10 +484,13 @@ void process_ref_dec(process_t *proc)
     if (old == 0)
     {
         // Underflow: ref_count was 0, subtracted 1 → wrapped to UINT32_MAX.
-        // Restore to 1 to prevent infinite underflow loop.
-        // This is a bug — caller decremented without holding a reference.
-        atomic_store_u32(&proc->ref_count, 1);
-        kprintf("[PROCESS] BUG: ref_count underflow for PID %u (restored to 1)\n", proc->pid);
+        // Restore via CAS so a concurrent ref_inc on another core doesn't get
+        // clobbered. If someone else has already moved the counter, leave it
+        // alone — they hold a fresh ref and will balance it themselves.
+        uint32_t expected = UINT32_MAX;
+        __atomic_compare_exchange_n(&proc->ref_count, &expected, 1u,
+                                    false, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED);
+        kprintf("[PROCESS] BUG: ref_count underflow for PID %u (restored)\n", proc->pid);
         return;
     }
 
@@ -491,7 +506,7 @@ void process_ref_dec(process_t *proc)
         {
             // Process already unlinked by process_destroy (magic == 0xDEADDEAD).
             // Safe to enqueue for final resource cleanup.
-            if (proc->magic == 0xDEADDEAD)
+            if (proc->magic == CONFIG_PROCESS_POISON_MAGIC)
             {
                 if (!cleanup_queue_enqueue(proc))
                 {
@@ -599,48 +614,45 @@ void process_destroy(process_t *proc)
     __atomic_store_n(&proc->destroying, 1, __ATOMIC_SEQ_CST);
     mfence(); // Ensure visibility before proceeding
 
-    // CRITICAL: Check if process is currently executing on ANY core.
-    // We must check all cores, not just home_core, because work stealing
-    // can migrate processes to different App Cores.
-    //
-    // Lock ordering: acquire all scheduler_locks in core index order to prevent
-    // deadlock if multiple cores call process_destroy() simultaneously.
+    // Check if process is currently executing on ANY core.
+    // Use atomic load on the pointer (naturally aligned, x86-64 word-tearing safe)
+    // so we avoid taking all scheduler_locks in order — that caused a lock-inversion
+    // risk when process_destroy_safe callers hold process_lock first.
+    // A full mfence before the scan pairs with the RELEASE store in schedule().
+    mfence();
     bool is_running = false;
     uint8_t running_on_core = 0;
 
     for (uint8_t c = 0; c < g_amp.total_cores; c++)
     {
         scheduler_state_t *sched = scheduler_get_core(c);
-        spin_lock(&sched->scheduler_lock);
-        if (sched->current_process == proc)
+        if (!sched) continue;
+        process_t *cur = __atomic_load_n(&sched->current_process, __ATOMIC_ACQUIRE);
+        if (cur == proc)
         {
             is_running = true;
             running_on_core = c;
-            // Don't break — need to release all locks in reverse order
+            break;
         }
-    }
-
-    // Release all scheduler_locks in reverse order
-    for (uint8_t c = g_amp.total_cores; c > 0; c--)
-    {
-        spin_unlock(&scheduler_get_core(c - 1)->scheduler_lock);
     }
 
     if (is_running)
     {
-        // Process is running — clear destroying flag and abort
         __atomic_store_n(&proc->destroying, 0, __ATOMIC_SEQ_CST);
         debug_printf("[PROCESS] ERROR: Cannot destroy running process PID %u (on core %u)\n",
                      proc->pid, running_on_core);
         return;
     }
-    // All scheduler_locks released — no deadlock possible below
 
     spin_lock(&process_lock);
 
     // Always unlink from list and hash — process is unreachable after this.
     process_hash_remove(proc);
-    proc->magic = 0xDEADDEAD; // poison: marks as unlinked, pending cleanup
+    /* Magic poisoning was previously done HERE, but `process_set_state` below
+     * calls `sched_dequeue(proc)` which can read `proc->magic` and `proc->cabin`
+     * on remote cores still holding a transient reference. Poison AFTER all
+     * state transitions complete (just before the final ref_dec at the bottom
+     * of this function). Audit 2026-04-29 confirmed the AMP race window. */
 
     if (process_list_head == proc)
     {
@@ -684,6 +696,11 @@ void process_destroy(process_t *proc)
                      proc->result_ring_phys + CABIN_RESULT_RING_PAGES * PMM_PAGE_SIZE,
                      PHYS_TAG_SHARED);
     }
+
+    /* Final state set is COMPLETE — now safe to poison the magic. Any
+     * sibling-core dereference past this point is a real bug we want to
+     * see, not a transient destroy-window race. */
+    proc->magic = CONFIG_PROCESS_POISON_MAGIC;
 
     // Release the "alive" reference.  If K-Core still holds refs,
     // cleanup is deferred until the last ref_dec triggers it.
@@ -971,6 +988,7 @@ uint32_t process_get_count(void)
     return atomic_load_u32(&process_count);
 }
 
+#ifdef CONFIG_KERNEL_TESTS
 void process_test(void)
 {
     kprintf("\n");
@@ -1041,6 +1059,7 @@ void process_test(void)
     kprintf("====================================\n");
     kprintf("\n");
 }
+#endif // CONFIG_KERNEL_TESTS
 
 bool process_has_tag_id(process_t *proc, uint16_t tag_id)
 {
@@ -1409,9 +1428,8 @@ static void process_cleanup_immediate(process_t *proc)
 void process_cleanup_deferred(void)
 {
     uint32_t cleaned = 0;
-    const uint32_t MAX_PER_CALL = 8; // throttle to avoid long latency spikes
 
-    while (cleaned < MAX_PER_CALL)
+    while (cleaned < CONFIG_PROCESS_CLEANUP_BATCH)
     {
         process_t *proc = cleanup_queue_dequeue();
         if (!proc)

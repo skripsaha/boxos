@@ -54,9 +54,30 @@ void pci_config_write_byte(uint8_t bus, uint8_t device, uint8_t function, uint8_
     pci_config_write_dword(bus, device, function, aligned_offset, dword);
 }
 
-// Recursive bus scan: enumerates all devices on a bus, following PCI-to-PCI bridges
-static int pci_scan_bus(uint8_t bus, uint8_t class_code, uint8_t subclass,
-                        uint8_t prog_if, pci_device_t* out) {
+/* Recursive bus scan with cycle guard: a malformed or virtualised bridge
+ * graph can advertise the same secondary bus from two different bridges,
+ * or even point back at an already-visited bus, sending plain recursion
+ * into an infinite loop and overflowing the kernel stack. The visited
+ * bitmap (256 bits = 32 bytes) costs nothing and guarantees termination. */
+static void pci_visited_clear(uint64_t visited[4]) {
+    visited[0] = visited[1] = visited[2] = visited[3] = 0;
+}
+
+static bool pci_visited_test_set(uint64_t visited[4], uint8_t bus) {
+    uint64_t mask = 1ULL << (bus & 63);
+    uint64_t *slot = &visited[bus >> 6];
+    if (*slot & mask) return true;   /* already visited */
+    *slot |= mask;
+    return false;
+}
+
+static int pci_scan_bus_impl(uint8_t bus, uint8_t class_code, uint8_t subclass,
+                             uint8_t prog_if, pci_device_t* out,
+                             uint64_t visited[4]) {
+    if (pci_visited_test_set(visited, bus)) {
+        debug_printf("[PCI] cycle guard: bus %u already visited, skipping\n", bus);
+        return -1;
+    }
     for (uint8_t device = 0; device < 32; device++) {
         for (uint8_t function = 0; function < 8; function++) {
             uint16_t vendor_id = pci_config_read_word(bus, device, function, PCI_VENDOR_ID);
@@ -101,7 +122,8 @@ static int pci_scan_bus(uint8_t bus, uint8_t class_code, uint8_t subclass,
                 if (secondary_bus != 0 && secondary_bus != bus) {
                     debug_printf("[PCI] Bridge %02x:%02x.%u -> secondary bus %u\n",
                                  bus, device, function, secondary_bus);
-                    int result = pci_scan_bus(secondary_bus, class_code, subclass, prog_if, out);
+                    int result = pci_scan_bus_impl(secondary_bus, class_code,
+                                                   subclass, prog_if, out, visited);
                     if (result == 0) {
                         return 0;
                     }
@@ -126,16 +148,19 @@ int pci_find_device_by_class(uint8_t class_code, uint8_t subclass, uint8_t prog_
     // Check if host bridge is multi-function (multiple PCI domains)
     uint8_t host_header = pci_config_read_byte(0, 0, 0, PCI_HEADER_TYPE);
 
+    uint64_t visited[4];
+    pci_visited_clear(visited);
+
     if (host_header & PCI_HEADER_TYPE_MF) {
         for (uint8_t fn = 0; fn < 8; fn++) {
             uint16_t vid = pci_config_read_word(0, 0, fn, PCI_VENDOR_ID);
             if (vid == PCI_INVALID_VENDOR) continue;
 
-            int result = pci_scan_bus(fn, class_code, subclass, prog_if, out);
+            int result = pci_scan_bus_impl(fn, class_code, subclass, prog_if, out, visited);
             if (result == 0) return 0;
         }
     } else {
-        return pci_scan_bus(0, class_code, subclass, prog_if, out);
+        return pci_scan_bus_impl(0, class_code, subclass, prog_if, out, visited);
     }
 
     return -1;

@@ -163,7 +163,7 @@ UEFI_CFLAGS_CLANG = -ffreestanding -nostdlib -nostdinc \
 # even when 'clang' is in PATH.  Only enable the clang path when lld-link exists.
 CLANG_AVAILABLE := $(shell command -v lld-link 2>/dev/null)
 
-.PHONY: all clean run debug info check-deps install-deps uefi
+.PHONY: all clean run run-bg run-stop debug info check-deps install-deps uefi
 
 # ==== MAIN TARGET ====
 all: check-deps $(IMAGE) $(KERNEL_ELF) $(FLOPPY_IMG) $(ISO) $(VBOX_VDI) uefi
@@ -381,6 +381,7 @@ $(ISO): $(FLOPPY_IMG)
 
 $(VBOX_VDI): $(IMAGE)
 	@echo "Creating VirtualBox VDI..."
+	@rm -f $@
 	@VBoxManage convertfromraw $< $@ --format VDI
 
 # ==== UEFI BOOTLOADER BUILD ====
@@ -536,6 +537,71 @@ run: $(IMAGE)
 		$(if $(filter on,$(USB)),-device qemu-xhci -device usb-kbd) \
 		$(if $(filter on,$(LOG)),-d int$(comma)cpu_reset -no-reboot -no-shutdown -D boxos_qemu.log) \
 		$(if $(filter on,$(GDB)),-s -S)
+
+# ===================================================================
+# Headless QEMU for automated key-injection testing.
+# - Monitor on a Unix socket (sendkey, screendump, info ...)
+# - Serial output to a file (kernel debug_printf, panic markers)
+# - VGA framebuffer dumpable via tools/qemu-input.sh shot
+# - Drive interactively from the shell with tools/qemu-input.sh.
+# Same vars as `run`: UEFI=on, CORES=N, MEM=size, USB=on, AHCI=on.
+# ===================================================================
+run-bg: $(IMAGE)
+	@$(MAKE) --no-print-directory $(if $(filter on,$(UEFI)),$(UEFI_ESP_IMG))
+	@if [ -f $(BUILDDIR)/qemu.pid ] && kill -0 $$(cat $(BUILDDIR)/qemu.pid) 2>/dev/null; then \
+		echo "[run-bg] QEMU already running (pid $$(cat $(BUILDDIR)/qemu.pid)). Use 'make run-stop' first."; \
+		exit 1; \
+	fi
+	@rm -f $(BUILDDIR)/qemu.mon $(BUILDDIR)/serial.log $(BUILDDIR)/qemu.pid
+	@touch $(BUILDDIR)/serial.log
+	@echo "=== BoxOS QEMU (background) ==="
+	@echo "  Monitor : $(BUILDDIR)/qemu.mon"
+	@echo "  Serial  : $(BUILDDIR)/serial.log"
+	@echo "  Pidfile : $(BUILDDIR)/qemu.pid"
+	@echo "==============================="
+	@$(QEMU) \
+		$(if $(filter on,$(UEFI)), \
+			-machine q35 \
+			-drive if=pflash$(comma)format=raw$(comma)readonly=on$(comma)file=$(OVMF_FD) \
+			-drive if=pflash$(comma)format=raw$(comma)file=$(BUILDDIR)/edk2-vars.fd \
+			-drive format=raw$(comma)file=$(UEFI_ESP_IMG)$(comma)if=ide$(comma)index=0 \
+			-drive format=raw$(comma)file=$<$(comma)if=ide$(comma)index=1, \
+			$(if $(filter on,$(AHCI)), \
+				-drive id=disk0$(comma)file=$<$(comma)format=raw$(comma)if=none \
+				-device ahci$(comma)id=ahci -device ide-hd$(comma)drive=disk0$(comma)bus=ahci.0, \
+				-drive format=raw$(comma)file=$<$(comma)index=0$(comma)media=disk)) \
+		-m $(MEM) \
+		-monitor unix:$(BUILDDIR)/qemu.mon$(comma)server$(comma)nowait \
+		-serial file:$(BUILDDIR)/serial.log \
+		-display none \
+		$(if $(filter-out 1,$(CORES)),-smp $(CORES)$(comma)cores=$(CORES)$(comma)threads=1$(comma)sockets=1) \
+		$(if $(filter on,$(USB)),-device qemu-xhci -device usb-kbd) \
+		-pidfile $(BUILDDIR)/qemu.pid \
+		-daemonize
+	@i=0; while [ ! -S $(BUILDDIR)/qemu.mon ] && [ $$i -lt 50 ]; do sleep 0.1; i=$$((i+1)); done
+	@if [ -f $(BUILDDIR)/qemu.pid ]; then \
+		echo "[run-bg] QEMU started (pid=$$(cat $(BUILDDIR)/qemu.pid))"; \
+		echo "[run-bg] Send keys : tools/qemu-input.sh type \"files\"; tools/qemu-input.sh key ret"; \
+		echo "[run-bg] View VGA  : tools/qemu-input.sh shot /tmp/screen.ppm"; \
+		echo "[run-bg] Tail log  : tools/qemu-input.sh tail"; \
+		echo "[run-bg] Stop      : make run-stop"; \
+	else \
+		echo "[run-bg] ERROR: QEMU failed to start"; exit 1; \
+	fi
+
+run-stop:
+	@if [ -f $(BUILDDIR)/qemu.pid ]; then \
+		PID=$$(cat $(BUILDDIR)/qemu.pid); \
+		if kill -0 $$PID 2>/dev/null; then \
+			kill $$PID 2>/dev/null && echo "[run-stop] killed pid=$$PID"; \
+			sleep 0.3; kill -0 $$PID 2>/dev/null && kill -9 $$PID 2>/dev/null; \
+		else \
+			echo "[run-stop] pid $$PID not running"; \
+		fi; \
+		rm -f $(BUILDDIR)/qemu.pid $(BUILDDIR)/qemu.mon; \
+	else \
+		echo "[run-stop] no pidfile at $(BUILDDIR)/qemu.pid"; \
+	fi
 
 clean:
 	@echo "Cleaning build..."

@@ -220,6 +220,19 @@ void exception_handler(interrupt_frame_t *frame)
                         (int)((frame->error_code >> 1) & 0x1),
                         (int)((frame->error_code >> 2) & 0x1),
                         (int)((frame->error_code >> 3) & 0x1));
+                /* Full register dump on user page fault — enables remote
+                 * debugging of "wild pointer in r10" / similar memory-
+                 * corruption bugs without requiring a connected gdb. */
+                kprintf("[EXCEPTION]  RAX=%016lx RBX=%016lx RCX=%016lx\n",
+                        frame->rax, frame->rbx, frame->rcx);
+                kprintf("[EXCEPTION]  RDX=%016lx RSI=%016lx RDI=%016lx\n",
+                        frame->rdx, frame->rsi, frame->rdi);
+                kprintf("[EXCEPTION]  RBP=%016lx  R8=%016lx  R9=%016lx\n",
+                        frame->rbp, frame->r8, frame->r9);
+                kprintf("[EXCEPTION]  R10=%016lx R11=%016lx R12=%016lx\n",
+                        frame->r10, frame->r11, frame->r12);
+                kprintf("[EXCEPTION]  R13=%016lx R14=%016lx R15=%016lx\n",
+                        frame->r13, frame->r14, frame->r15);
             }
 
             kprintf("[EXCEPTION] Killing PID %u and scheduling next process\n", proc->pid);
@@ -384,16 +397,26 @@ void irq_handler(interrupt_frame_t *frame)
         return;
     }
 
-    // LAPIC timer vector: per-core tick counter + scheduling.
-    // g_global_tick is incremented ONLY by BSP via PIT IRQ 0 to avoid
-    // cache-line bouncing and keep consistent wall-clock time across cores.
-    // Per-core scheduling uses s->total_ticks for fairness/starvation.
-    // K-Cores run kcore_run_loop — schedule() would hijack them.
+    /* LAPIC timer vector: per-core tick counter + scheduling.
+     *
+     * Multi-core layout: BSP is a K-Core running kcore_run_loop, App
+     * Cores run user processes. Only App Cores need preemptive
+     * `schedule()` — calling it on a K-Core would hijack the kernel
+     * loop. Hence the `amp_is_appcore()` gate.
+     *
+     * Single-core layout (AMP NOT active, or only one core total):
+     * the BSP IS the App Core. The previous code never scheduled in
+     * that case — processes were started but never switched, the
+     * initial process held the CPU forever (audit 2026-04-30, BIOS
+     * and UEFI single-core both reproduced).
+     *
+     * Schedule when either: (a) we're an App Core in multi-core, or
+     * (b) AMP is inactive — i.e. there is no separate K-Core. */
     if (vector == LAPIC_TIMER_VECTOR)
     {
         scheduler_state_t *s = scheduler_get_state();
         s->total_ticks++;
-        if (amp_is_appcore())
+        if (amp_is_appcore() || !g_amp.multicore_active)
         {
             schedule(frame);
         }
@@ -405,7 +428,7 @@ void irq_handler(interrupt_frame_t *frame)
     // On K-Cores, just ACK — the interrupt breaks HLT in kcore_run_loop.
     if (vector == IPI_WAKE_VECTOR)
     {
-        if (amp_is_appcore())
+        if (amp_is_appcore() || !g_amp.multicore_active)
         {
             schedule(frame);
         }
@@ -464,8 +487,12 @@ void irq_handler(interrupt_frame_t *frame)
         /* xHCI events handled via IRQ; poll only as fallback */
         xhci_poll_events();
 
-        // K-Cores run kcore_run_loop — schedule() would hijack them.
-        if (amp_is_appcore())
+        /* PIT IRQ 0: same scheduling rule as the LAPIC timer above —
+         * preempt on App Cores or whenever AMP isn't active (single-core
+         * boots where the BSP itself runs userspace). Without this, the
+         * PIT was firing but never rescheduling on single-core, so the
+         * initial process held the CPU forever. */
+        if (amp_is_appcore() || !g_amp.multicore_active)
         {
             schedule(frame);
         }

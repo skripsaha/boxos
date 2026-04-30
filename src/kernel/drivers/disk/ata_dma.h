@@ -8,17 +8,18 @@
 // PIIX4 IDE (emulated by QEMU) does not support NCQ: single BMCR, BMSR, and PRD table pointer.
 // Submitting two DMA commands simultaneously causes data loss. If DMA is busy, fallback to PIO.
 
-#define ATA_DMA_MAX_REQUESTS    16
+/* Sourced from kernel_config.h to avoid drift. The previous build
+ * shipped with both ATA_DMA_TIMEOUT_MS=5000 and CONFIG_ATA_TIMEOUT_MS=5000
+ * (and a separate CONFIG_AHCI_CMD_TIMEOUT_MS=2000 for the AHCI side);
+ * pin one source of truth per device class. */
+#define ATA_DMA_TIMEOUT_MS      CONFIG_ATA_TIMEOUT_MS
 #define ATA_DMA_PRD_MAX_ENTRIES 8
-#define ATA_DMA_TIMEOUT_MS      5000
-#define ATA_DMA_BUFFER_SIZE     (128 * 1024)
-#define ATA_DMA_MAX_RETRIES     CONFIG_ATA_MAX_RETRIES
 
 #define ATA_DMA_CMD_START       0x01
 #define ATA_DMA_CMD_STOP        0x00
 #define ATA_DMA_CMD_READ        0x08
 
-#define ATA_DMA_STATUS_ACTIVE   0x01
+/* Bus-master DMA status register bits (PCI IDE spec). */
 #define ATA_DMA_STATUS_ERROR    0x02
 #define ATA_DMA_STATUS_IRQ      0x04
 

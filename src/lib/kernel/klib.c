@@ -378,7 +378,7 @@ __attribute__((noreturn)) void panic(const char *message, ...)
     kprintf("\n%[E]KERNEL PANIC:%[D] ");
 
     char temp_buf[512];
-    ksnprintf(temp_buf, sizeof(temp_buf), message, args);
+    kvsnprintf(temp_buf, sizeof(temp_buf), message, args);
     kprintf("%s", temp_buf);
 
     kprintf("\n\nDebug info:");
@@ -958,10 +958,14 @@ int kprintf(const char *format, ...)
     return count;
 }
 
-int ksnprintf(char *buf, size_t size, const char *fmt, ...)
+/*
+ * kvsnprintf: the va_list-taking core. The variadic ksnprintf() is a thin
+ * wrapper, and panic() now calls kvsnprintf directly so format args don't
+ * silently disappear into a single "va_list-as-pointer" argument.
+ */
+int kvsnprintf(char *buf, size_t size, const char *fmt, va_list args)
 {
-    va_list args;
-    va_start(args, fmt);
+    if (!buf || size == 0) return 0;
 
     size_t pos = 0;
     const char *p = fmt;
@@ -999,6 +1003,7 @@ int ksnprintf(char *buf, size_t size, const char *fmt, ...)
             else if (*p == 's')
             {
                 const char *sval = va_arg(args, const char *);
+                if (!sval) sval = "(null)";
                 while (*sval && pos + 1 < size)
                     buf[pos++] = *sval++;
             }
@@ -1028,8 +1033,16 @@ int ksnprintf(char *buf, size_t size, const char *fmt, ...)
         }
     }
     buf[pos] = '\0';
-    va_end(args);
     return (int)pos;
+}
+
+int ksnprintf(char *buf, size_t size, const char *fmt, ...)
+{
+    va_list args;
+    va_start(args, fmt);
+    int n = kvsnprintf(buf, size, fmt, args);
+    va_end(args);
+    return n;
 }
 
 void spinlock_init(spinlock_t *lock)

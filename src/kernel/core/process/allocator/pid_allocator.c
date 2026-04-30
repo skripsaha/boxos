@@ -2,40 +2,50 @@
 #include "klib.h"
 #include "io.h"
 
-#define PID_BITMAP_SIZE ((PID_MAX_COUNT + 7) / 8)
+/* 64-bit-word bitmap: scanning uses __builtin_ctzll for ~64x speedup over the
+ * byte-loop. Requires PID_MAX_COUNT to be a multiple of 64; static-asserted
+ * below so a future config change can't silently round it down. */
+#define PID_BITMAP_QWORDS ((PID_MAX_COUNT + 63) / 64)
+_Static_assert((PID_MAX_COUNT % 64) == 0,
+               "PID_MAX_COUNT must be a multiple of 64 for the qword-bitmap scan");
 
 typedef struct
 {
-    uint8_t bitmap[PID_BITMAP_SIZE];    // 512 bytes for 4096 PIDs: allocation bitmap
-    uint32_t generation[PID_MAX_COUNT]; // generation counters (tracked but not exposed)
+    uint64_t bitmap[PID_BITMAP_QWORDS];  // 1 bit per PID, packed
+    uint32_t generation[PID_MAX_COUNT];  // generation counters (tracked but not exposed)
     uint32_t allocated_count;
     spinlock_t lock;
 } pid_allocator_t;
 
 static pid_allocator_t g_allocator;
 
-static inline void bitmap_set(uint8_t *bitmap, uint32_t index)
+static inline void bitmap_set(uint64_t *bitmap, uint32_t index)
 {
-    bitmap[index / 8] |= (1 << (index % 8));
+    bitmap[index >> 6] |= (1ULL << (index & 63));
 }
 
-static inline void bitmap_clear(uint8_t *bitmap, uint32_t index)
+static inline void bitmap_clear(uint64_t *bitmap, uint32_t index)
 {
-    bitmap[index / 8] &= ~(1 << (index % 8));
+    bitmap[index >> 6] &= ~(1ULL << (index & 63));
 }
 
-static inline bool bitmap_test(const uint8_t *bitmap, uint32_t index)
+static inline bool bitmap_test(const uint64_t *bitmap, uint32_t index)
 {
-    return (bitmap[index / 8] & (1 << (index % 8))) != 0;
+    return (bitmap[index >> 6] & (1ULL << (index & 63))) != 0;
 }
 
-static uint32_t bitmap_find_free(const uint8_t *bitmap, uint32_t max_bits)
+static uint32_t bitmap_find_free(const uint64_t *bitmap, uint32_t max_bits)
 {
-    for (uint32_t i = 0; i < max_bits; i++)
+    uint32_t qwords = (max_bits + 63) >> 6;
+    for (uint32_t w = 0; w < qwords; w++)
     {
-        if (!bitmap_test(bitmap, i))
+        uint64_t v = bitmap[w];
+        if (v != ~(uint64_t)0)
         {
-            return i;
+            uint32_t index = (w << 6) + (uint32_t)__builtin_ctzll(~v);
+            if (index < max_bits)
+                return index;
+            return max_bits;
         }
     }
     return max_bits; // not found

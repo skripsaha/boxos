@@ -17,6 +17,7 @@ typedef struct BuddyFreeNode {
 
 typedef struct {
     BuddyFreeNode* head;
+    BuddyFreeNode* tail;
     size_t         count;
 } BuddyFreeList;
 

@@ -116,12 +116,10 @@ error_t pmm_init(void) {
     }
 
     boot_info_t *bi = boot_info_get();
-    uintptr_t map_start;
-    if (boot_info_valid(bi)) {
-        map_start = ALIGN_UP((uintptr_t)bi->stack_base, PMM_PAGE_SIZE);
-    } else {
-        map_start = ALIGN_UP((uintptr_t)&_kernel_phys_end, PMM_PAGE_SIZE);
-    }
+    bool bi_ok = boot_info_valid(bi);
+    uintptr_t map_start = bi_ok
+        ? ALIGN_UP((uintptr_t)bi->stack_base, PMM_PAGE_SIZE)
+        : ALIGN_UP((uintptr_t)&_kernel_phys_end, PMM_PAGE_SIZE);
 
     uint8_t* alloc_map = (uint8_t*)map_start;
     uintptr_t alloc_map_phys = map_start;
@@ -199,7 +197,12 @@ error_t pmm_init(void) {
         debug_printf("[PMM] %zu pages beyond MAXPHYADDR unusable\n", unusable_pages);
     }
 
-    buddy_reserve_range(&pmm_buddy, (uintptr_t)bi->kernel_start, (uintptr_t)bi->kernel_end);
+    if (bi_ok) {
+        buddy_reserve_range(&pmm_buddy, (uintptr_t)bi->kernel_start, (uintptr_t)bi->kernel_end);
+    } else {
+        buddy_reserve_range(&pmm_buddy, CONFIG_KERNEL_PHYS_ADDR,
+                            ALIGN_UP((uintptr_t)&_kernel_phys_end, PMM_PAGE_SIZE));
+    }
     buddy_reserve_range(&pmm_buddy, alloc_map_phys, alloc_map_phys + alloc_map_size);
     buddy_reserve_range(&pmm_buddy, deferred_base, deferred_base + deferred_size);
 
@@ -297,7 +300,14 @@ size_t pmm_used_pages(void) {
 }
 
 uint64_t pmm_get_total_memory(void) {
+    /* Returns the physical TOP of the buddy zone (one-past-last byte), not
+     * the count of installed RAM. Kept as-is for ABI compatibility — see
+     * pmm_get_total_ram_bytes() for the bytes-of-RAM helper. */
     return pmm_buddy.base + (pmm_buddy.total_pages * PMM_PAGE_SIZE);
+}
+
+uint64_t pmm_get_total_ram_bytes(void) {
+    return (uint64_t)pmm_buddy.total_pages * PMM_PAGE_SIZE;
 }
 
 void pmm_dump_stats(void) {
@@ -332,25 +342,6 @@ void pmm_print_memory_map(void) {
                (void*)(entries[i].base + entries[i].length),
                entries[i].type == E820_USABLE ? "Usable" : "Reserved");
     }
-}
-
-bool pmm_check_integrity(void) {
-    boot_info_t *bi = boot_info_get();
-    uintptr_t kernel_phys_end = boot_info_valid(bi) ? (uintptr_t)bi->kernel_end : 0;
-
-    for (size_t i = 0; i < pmm_buddy.total_pages; i++) {
-        uintptr_t addr = pmm_buddy.base + i * PMM_PAGE_SIZE;
-
-        if (addr < kernel_phys_end) {
-            // Kernel pages must be allocated (bit set in alloc_map)
-            size_t byte = i / 8;
-            size_t bit = i % 8;
-            if (!(pmm_buddy.alloc_map[byte] & (1 << bit))) {
-                return false;
-            }
-        }
-    }
-    return true;
 }
 
 void pmm_activate_pull_map(void) {
@@ -398,7 +389,7 @@ bool pmm_is_usable_ram(uintptr_t phys_addr, size_t size) {
     if (range_end < phys_addr) {
         debug_printf("[PMM] pmm_is_usable_ram: overflow detected for phys=0x%llx size=0x%llx\n",
                      (uint64_t)phys_addr, (uint64_t)size);
-        return true;
+        return false;
     }
 
     e820_entry_t* entries = memory_map_get_entries();
@@ -433,20 +424,25 @@ void pmm_test_high_memory(void) {
 
     size_t pass = 0, fail = 0;
 
-    // Test 1: Single page allocations — keep trying until we get >4GB pages
+    /* Test 1: Single-page allocations from the >4GB band.
+     * Use PHYS_TAG_HIGH to deterministically request high memory via the
+     * range path — the untagged buddy_alloc() is first-fit and on a
+     * fresh boot the order-0 free list is dominated by sub-4GB pages
+     * left over from kernel init, so an untagged loop never touches the
+     * high zone (root cause of the false "0 from >4GB" report). */
     #define HIGH_TEST_COUNT 16
     void* allocs[HIGH_TEST_COUNT];
     size_t high_count = 0;
 
-    for (size_t i = 0; i < HIGH_TEST_COUNT * 64 && high_count < HIGH_TEST_COUNT; i++) {
-        void* phys = pmm_alloc(1);
+    for (size_t i = 0; i < HIGH_TEST_COUNT && high_count < HIGH_TEST_COUNT; i++) {
+        void* phys = pmm_alloc(1, PHYS_TAG_HIGH);
         if (!phys) break;
-
-        if ((uintptr_t)phys >= IDENTITY_MAP_LIMIT) {
-            allocs[high_count++] = phys;
-        } else {
+        if ((uintptr_t)phys < IDENTITY_MAP_LIMIT) {
+            /* Should never happen — PHYS_TAG_HIGH is range-bounded. */
             pmm_free(phys, 1);
+            continue;
         }
+        allocs[high_count++] = phys;
     }
 
     kprintf("[PMM TEST] Single pages: %zu from >4GB\n", high_count);
@@ -533,8 +529,11 @@ void pmm_test_high_memory(void) {
         pmm_free(zero_phys, 1);
     }
 
-    if (fail == 0) {
+    if (fail == 0 && pass > 0) {
         kprintf("[PMM TEST] %[S]PASSED: all %zu checks OK (>4GB alloc + Pull Map access)%[D]\n", pass);
+    } else if (pass == 0 && fail == 0) {
+        kprintf("[PMM TEST] %[Y]SKIPPED: zero high-memory pages were exercised — "
+                "high zone empty or first-fit returned only <4GB%[D]\n");
     } else {
         kprintf("[PMM TEST] %[R]FAILED: %zu pass, %zu fail%[D]\n", pass, fail);
     }

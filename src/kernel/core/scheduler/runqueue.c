@@ -197,16 +197,6 @@ bool runqueue_contains(RunQueue *rq, struct process_t *proc)
     return q->procs[idx] == proc;
 }
 
-uint32_t runqueue_total_count(RunQueue *rq)
-{
-    if (!rq) return 0;
-
-    uint32_t total = 0;
-    for (int prio = 0; prio < SCHED_PRIO_LEVELS; prio++)
-        total += rq->queues[prio].count;
-    return total;
-}
-
 // Lock-free read of the running total. Safe to call without holding rq->lock.
 // Uses ACQUIRE ordering so the caller sees all enqueue/dequeue side-effects
 // that preceded the most recent __ATOMIC_RELEASE store.

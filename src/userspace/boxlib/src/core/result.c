@@ -19,18 +19,29 @@ uint32_t result_count(void) {
 
 bool result_pop(Result* out) {
     ResultRing* rr = result_ring();
-    if (!result_available()) {
-        return false;
-    }
-    __sync_synchronize();
+    if (!rr || !out) return false;
 
-    uint64_t idx = rr->hdr.head;
-    Result *slot = (Result *)(uintptr_t)
-        (rr->hdr.slots_base + (idx % rr->hdr.slot_count_max) * rr->hdr.slot_size);
+    /* Force runtime loads — same rationale as pocket_ring_push: the
+     * compiler treats slots_base / slot_size / slot_count_max as
+     * const-after-init and was eliding the safety checks against a
+     * corrupted or uninitialised header (see decks-elf RIP=0x11b8c
+     * crash, 2026-04-29). */
+    uint32_t cap     = __atomic_load_n(&rr->hdr.slot_count_max, __ATOMIC_RELAXED);
+    uint64_t base    = __atomic_load_n(&rr->hdr.slots_base,     __ATOMIC_RELAXED);
+    uint32_t stride  = __atomic_load_n(&rr->hdr.slot_size,      __ATOMIC_RELAXED);
+    if (cap == 0 || base == 0 || stride == 0)        return false;
+    if (base < 0x100000000ULL)                       return false;
+
+    uint64_t tail = __atomic_load_n(&rr->hdr.tail, __ATOMIC_ACQUIRE);
+    uint64_t idx  = __atomic_load_n(&rr->hdr.head, __ATOMIC_RELAXED);
+    if (idx == tail) return false;
+
+    Result *slot = (Result *)(uintptr_t)(base + (idx % cap) * stride);
     *out = *slot;
 
-    __sync_synchronize();
-    rr->hdr.head = idx + 1;
+    /* RELEASE pair with kernel ACQUIRE on head — kernel must not see the
+     * advance before the slot read completed. */
+    __atomic_store_n(&rr->hdr.head, idx + 1, __ATOMIC_RELEASE);
     return true;
 }
 
@@ -84,6 +95,7 @@ static bool non_ipc_stash_shift(Result* out) {
 }
 
 bool result_pop_non_ipc(Result* out) {
+    if (!out) return false;
     if (non_ipc_stash_shift(out)) return true;
 
     Result entry;
@@ -99,6 +111,7 @@ bool result_pop_non_ipc(Result* out) {
 }
 
 bool result_pop_ipc(Result* out) {
+    if (!out) return false;
     if (ipc_stash_shift(out)) return true;
 
     Result entry;
@@ -183,6 +196,7 @@ static bool result_wait_yield(Result* out, uint32_t timeout_ms) {
 }
 
 bool result_wait(Result* out, uint32_t timeout_ms) {
+    if (!out) return false;
     if (result_pop_non_ipc(out)) return true;
 
     if (cpu_has_waitpkg()) return result_wait_umwait(out, timeout_ms);
@@ -194,6 +208,7 @@ bool result_wait(Result* out, uint32_t timeout_ms) {
  * (from their own VGA/keyboard calls) and IPC messages.
  * Drains both stashes first, then pops from the ring. */
 bool result_wait_any(Result* out, uint32_t timeout_ms) {
+    if (!out) return false;
     if (result_pop_ipc(out))     return true;
     if (result_pop_non_ipc(out)) return true;
     if (result_pop(out))         return true;

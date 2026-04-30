@@ -2,6 +2,7 @@
 #define PROCESS_H
 
 #include "ktypes.h"
+#include "kernel_config.h"
 #include "vmm.h"
 #include "boxos_magic.h"
 #include "boxos_limits.h"
@@ -33,14 +34,6 @@ typedef enum
     WAIT_RESULT,
     WAIT_IO
 } wait_reason_t;
-
-typedef struct
-{
-    struct process_t *head;
-    struct process_t *tail;
-    uint32_t          count;
-    spinlock_t        lock;
-} process_cleanup_queue_t;
 
 typedef enum
 {
@@ -160,7 +153,9 @@ bool spin_trylock_process_list(void);
 
 uint32_t process_get_count(void);
 
+#ifdef CONFIG_KERNEL_TESTS
 void process_test(void);
+#endif
 
 void process_start_initial(process_t *proc);
 
