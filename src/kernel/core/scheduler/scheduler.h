@@ -2,6 +2,7 @@
 #define SCHEDULER_H
 
 #include "ktypes.h"
+#include "kernel_config.h"
 #include "process.h"
 #include "klib.h"
 #include "runqueue.h"
@@ -11,9 +12,9 @@
 // Dynamic Scheduler Parameters (auto-tuned at runtime)
 // ============================================================================
 
-extern uint32_t g_scheduler_fairness_base;
-extern uint32_t g_scheduler_starvation_base;
-extern uint32_t g_scheduler_steal_cooldown_base;
+extern const uint32_t g_scheduler_fairness_base;
+extern const uint32_t g_scheduler_starvation_base;
+extern const uint32_t g_scheduler_steal_cooldown_base;
 extern uint32_t g_timer_frequency;
 
 // Calculated dynamic values (updated on timer IRQ)
@@ -21,29 +22,27 @@ extern uint32_t g_dynamic_fairness_ratio;
 extern uint32_t g_dynamic_starvation_ticks;
 extern uint32_t g_dynamic_steal_cooldown;
 
-// Adaptive tick rate bounds
-#define SCHEDULER_MIN_TICK_HZ     10
-#define SCHEDULER_MAX_TICK_HZ     500
-#define SCHEDULER_DEFAULT_TICK_HZ 250
+// Adaptive tick rate bounds — sourced from kernel_config.h
+#define SCHEDULER_MIN_TICK_HZ     CONFIG_SCHED_MIN_TICK_HZ
+#define SCHEDULER_MAX_TICK_HZ     CONFIG_SCHED_MAX_TICK_HZ
+#define SCHEDULER_DEFAULT_TICK_HZ CONFIG_SCHED_DEFAULT_TICK_HZ
 
 // Core parking thresholds
-#define SCHEDULER_PARK_IDLE_TICKS    100
-#define SCHEDULER_UNPARK_LOAD_THRESH 2
+#define SCHEDULER_PARK_IDLE_TICKS    CONFIG_SCHED_PARK_IDLE_TICKS
+#define SCHEDULER_UNPARK_LOAD_THRESH CONFIG_SCHED_UNPARK_LOAD_THRESH
 
-// Affinity: cache-warm threshold (ticks since last run on same core)
-#define SCHEDULER_AFFINITY_WARM_TICKS 5
+// Affinity: cache-warm threshold
+#define SCHEDULER_AFFINITY_WARM_TICKS CONFIG_SCHED_AFFINITY_WARM_TICKS
 
-// Recalc interval: call scheduler_recalc_parameters() only every N global ticks.
-// At 250 Hz PIT this gives ~25 recalcs/second (40 ms). Core parking and adaptive
-// frequency still respond quickly enough at this rate.
-#define SCHED_RECALC_INTERVAL 10
+// Recalc interval
+#define SCHED_RECALC_INTERVAL CONFIG_SCHED_RECALC_INTERVAL
 
 // Limits
-#define SCHEDULER_MAX_CONSECUTIVE_RUNS 5
-#define SCHEDULER_MIN_FAIRNESS         2
-#define SCHEDULER_MAX_FAIRNESS         20
-#define SCHEDULER_MIN_STARVATION       10
-#define SCHEDULER_MAX_STARVATION       100
+#define SCHEDULER_MAX_CONSECUTIVE_RUNS CONFIG_SCHED_MAX_CONSECUTIVE_RUNS
+#define SCHEDULER_MIN_FAIRNESS         CONFIG_SCHED_MIN_FAIRNESS
+#define SCHEDULER_MAX_FAIRNESS         CONFIG_SCHED_MAX_FAIRNESS
+#define SCHEDULER_MIN_STARVATION       CONFIG_SCHED_MIN_STARVATION
+#define SCHEDULER_MAX_STARVATION       CONFIG_SCHED_MAX_STARVATION
 
 // ============================================================================
 // Scheduler State

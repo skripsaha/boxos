@@ -59,12 +59,14 @@ static inline uintptr_t node_to_phys(BuddyFreeNode* node) {
 
 static void buddy_list_insert(BuddyFreeList* list, BuddyFreeNode* node, int order) {
     node->order = (uint8_t)order;
-    node->prev = NULL;
-    node->next = list->head;
-    if (list->head) {
-        list->head->prev = node;
+    node->next = NULL;
+    node->prev = list->tail;
+    if (list->tail) {
+        list->tail->next = node;
+    } else {
+        list->head = node;
     }
-    list->head = node;
+    list->tail = node;
     list->count++;
 }
 
@@ -76,6 +78,8 @@ static void buddy_list_remove(BuddyFreeList* list, BuddyFreeNode* node) {
     }
     if (node->next) {
         node->next->prev = node->prev;
+    } else {
+        list->tail = node->prev;
     }
     node->prev = NULL;
     node->next = NULL;
@@ -103,6 +107,7 @@ void buddy_init(BuddyZone* zone, uintptr_t base, size_t total_pages,
     // Initialize all free lists to empty
     for (int o = 0; o <= BUDDY_MAX_ORDER; o++) {
         zone->free_lists[o].head = NULL;
+        zone->free_lists[o].tail = NULL;
         zone->free_lists[o].count = 0;
     }
 
@@ -382,8 +387,9 @@ void buddy_activate_pull_map(BuddyZone* zone) {
         uintptr_t head_phys = (uintptr_t)list->head;
         list->head = (BuddyFreeNode*)vmm_phys_to_virt(head_phys);
 
-        // Walk and rebase all node pointers
+        // Walk and rebase all node pointers; track tail for tail-insertion
         BuddyFreeNode* node = list->head;
+        BuddyFreeNode* last = NULL;
         while (node) {
             if (node->next) {
                 uintptr_t next_phys = (uintptr_t)node->next;
@@ -393,8 +399,10 @@ void buddy_activate_pull_map(BuddyZone* zone) {
                 uintptr_t prev_phys = (uintptr_t)node->prev;
                 node->prev = (BuddyFreeNode*)vmm_phys_to_virt(prev_phys);
             }
+            last = node;
             node = node->next;
         }
+        list->tail = last;
     }
 
     debug_printf("[BUDDY] Pull Map activated: alloc_map rebased to %p\n", zone->alloc_map);

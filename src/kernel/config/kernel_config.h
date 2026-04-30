@@ -92,6 +92,55 @@
 #define CONFIG_AHCI_MAX_PORTS 32
 #define CONFIG_AHCI_MAX_SLOTS 32
 
+/* AHCI boot-time self-test: a one-sector READ probe issued in ahci_init.
+ * Useful on QEMU but on real HW it stalls boot if the device is slow or
+ * the LBA happens to be unreadable. Disabled in production. */
+#ifndef CONFIG_AHCI_SELFTEST
+#define CONFIG_AHCI_SELFTEST 0
+#endif
+
+/* ============================================================================
+ *  Scheduler / runqueue / process / IPC tunables
+ * ============================================================================ */
+
+/* Adaptive tick-rate bounds (Hz). */
+#define CONFIG_SCHED_MIN_TICK_HZ      10
+#define CONFIG_SCHED_MAX_TICK_HZ      500
+#define CONFIG_SCHED_DEFAULT_TICK_HZ  250
+
+/* Core parking. */
+#define CONFIG_SCHED_PARK_IDLE_TICKS    100
+#define CONFIG_SCHED_UNPARK_LOAD_THRESH 2
+
+/* Affinity: ticks since last run after which cache is considered cold. */
+#define CONFIG_SCHED_AFFINITY_WARM_TICKS 5
+
+/* How often (in global ticks) scheduler_recalc_parameters() runs. */
+#define CONFIG_SCHED_RECALC_INTERVAL  10
+
+/* Fairness and starvation limits. */
+#define CONFIG_SCHED_MAX_CONSECUTIVE_RUNS 5
+#define CONFIG_SCHED_MIN_FAIRNESS         2
+#define CONFIG_SCHED_MAX_FAIRNESS         20
+#define CONFIG_SCHED_MIN_STARVATION       10
+#define CONFIG_SCHED_MAX_STARVATION       100
+
+/* Per-core runqueue capacity. Grows from INITIAL_CAP up to MAX_CAP via
+ * runqueue_grow. */
+#define CONFIG_RUNQUEUE_INITIAL_CAP   64
+#define CONFIG_RUNQUEUE_MAX_CAP       4096
+
+/* Process bookkeeping. */
+#define CONFIG_PROCESS_HASH_SIZE      256   /* power-of-two for mask hashing */
+#define CONFIG_PROCESS_CLEANUP_BATCH  8     /* drain at most N corpses per tick */
+#define CONFIG_PROCESS_POISON_MAGIC   0xDEADDEADu
+#define CONFIG_IDLE_PID               0
+
+/* IPC routing limits. */
+#define CONFIG_BUF_MAX_COUNT          64    /* legacy buffer registry capacity */
+#define CONFIG_BROADCAST_TAG_MAX      64    /* max tag chars in a broadcast() */
+#define CONFIG_BROADCAST_TARGETS_MAX  256   /* max recipients per broadcast */
+
 #define CONFIG_KEYBOARD_BUFFER_SIZE 256
 
 #define CONFIG_SERIAL_BAUD_RATE 115200
@@ -102,6 +151,17 @@
 
 #define CONFIG_KMALLOC_MIN_SIZE 16
 #define CONFIG_KMALLOC_ALIGNMENT 16
+
+/* TagFS BCDC compressor — runtime-tuneable. The on-disk header still pins
+ * `dictionary_id` to a single byte (ID 0..255), so MAX_DICTS keeps that
+ * upper bound, but everything else is dynamic. Unused dicts cost zero
+ * memory: each struct is kmalloc'd on first BcdcCreateDictionary() and
+ * holds its own spinlock. Policies live in a growable list. */
+#define CONFIG_BCDC_MAX_DICTS         256   /* hard cap from on-disk uint8_t */
+#define CONFIG_BCDC_DEFAULT_DICT_SIZE 8192  /* bytes per dictionary buffer */
+#define CONFIG_BCDC_POLICY_INITIAL    16    /* policy table starts here */
+#define CONFIG_BCDC_POLICY_MAX        4096  /* policy table hard ceiling */
+#define CONFIG_BCDC_LZ_HASH_BITS      12    /* 4096-entry hash chain head[] */
 
 #ifndef CONFIG_DEBUG_ENABLED
 #define CONFIG_DEBUG_ENABLED 0

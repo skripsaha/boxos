@@ -20,10 +20,10 @@
 // Dynamic Scheduler Parameters
 // ---------------------------------------------------------------------------
 
-uint32_t g_scheduler_fairness_base       = 4;
-uint32_t g_scheduler_starvation_base     = 25;
-uint32_t g_scheduler_steal_cooldown_base = 10;
-uint32_t g_timer_frequency               = SCHEDULER_DEFAULT_TICK_HZ;
+const uint32_t g_scheduler_fairness_base       = 4;
+const uint32_t g_scheduler_starvation_base     = 25;
+const uint32_t g_scheduler_steal_cooldown_base = 10;
+uint32_t g_timer_frequency                     = SCHEDULER_DEFAULT_TICK_HZ;
 
 // Calculated dynamic values
 uint32_t g_dynamic_fairness_ratio;
@@ -112,8 +112,18 @@ void scheduler_init_core(uint8_t core_index)
 {
     if (!g_core_sched || core_index >= g_sched_core_count) return;
     scheduler_state_t *s = &g_core_sched[core_index];
-    sched_init_one(s);
 
+    /* scheduler_init() already called sched_init_one() on every slot during
+     * BSP startup; calling it again here would memset the state to zero and
+     * re-kmalloc every runqueue->queues[i].procs array, leaking the original
+     * memory and clobbering whatever's already enqueued. APs only need to
+     * notice their state was already prepared. */
+    if (s->runqueue.queues[0].procs != NULL) {
+        debug_printf("[SCHEDULER] Core %u already initialized — skipping double init\n", core_index);
+        return;
+    }
+
+    sched_init_one(s);
     debug_printf("[SCHEDULER] Core %u scheduler initialized\n", core_index);
 }
 
@@ -165,8 +175,8 @@ void scheduler_park_core(uint8_t core_idx)
 {
     if (!g_core_sched || core_idx >= g_sched_core_count) return;
     scheduler_state_t *s = &g_core_sched[core_idx];
-    if (!s->is_parked) {
-        s->is_parked = true;
+    if (!__atomic_load_n(&s->is_parked, __ATOMIC_ACQUIRE)) {
+        __atomic_store_n(&s->is_parked, true, __ATOMIC_RELEASE);
         g_sched_stats.parked_cores++;
         g_sched_stats.active_cores--;
         debug_printf("[SCHED] Core %u parked\n", core_idx);
@@ -177,9 +187,9 @@ void scheduler_unpark_core(uint8_t core_idx)
 {
     if (!g_core_sched || core_idx >= g_sched_core_count) return;
     scheduler_state_t *s = &g_core_sched[core_idx];
-    if (s->is_parked) {
-        s->is_parked = false;
+    if (__atomic_load_n(&s->is_parked, __ATOMIC_ACQUIRE)) {
         s->idle_tick_count = 0;
+        __atomic_store_n(&s->is_parked, false, __ATOMIC_RELEASE);
         g_sched_stats.parked_cores--;
         g_sched_stats.active_cores++;
         debug_printf("[SCHED] Core %u unparked\n", core_idx);
@@ -190,7 +200,7 @@ bool scheduler_is_core_parked(uint8_t core_idx)
 {
     if (!g_core_sched || core_idx >= g_sched_core_count)
         return false;
-    return g_core_sched[core_idx].is_parked;
+    return __atomic_load_n(&g_core_sched[core_idx].is_parked, __ATOMIC_ACQUIRE);
 }
 
 // ---------------------------------------------------------------------------
@@ -242,14 +252,15 @@ void scheduler_recalc_parameters(void)
         }
 
         // Core parking
-        if (!s->is_parked && rq_count == 0 && (!cur || process_is_idle(cur))) {
+        bool parked = __atomic_load_n(&s->is_parked, __ATOMIC_ACQUIRE);
+        if (!parked && rq_count == 0 && (!cur || process_is_idle(cur))) {
             s->idle_tick_count++;
             if (s->idle_tick_count >= SCHEDULER_PARK_IDLE_TICKS) {
                 scheduler_park_core(c);
             }
-        } else if (s->is_parked && rq_count >= SCHEDULER_UNPARK_LOAD_THRESH) {
+        } else if (parked && rq_count >= SCHEDULER_UNPARK_LOAD_THRESH) {
             scheduler_unpark_core(c);
-        } else if (!s->is_parked) {
+        } else if (!parked) {
             s->idle_tick_count = 0;
         }
     }
@@ -503,7 +514,7 @@ process_t *scheduler_select_next(void)
     if (!s) return idle_process_get();
 
     // Skip parked cores
-    if (s->is_parked) {
+    if (__atomic_load_n(&s->is_parked, __ATOMIC_ACQUIRE)) {
         return idle_process_get();
     }
 
@@ -637,6 +648,7 @@ static process_t *sched_try_steal(uint8_t my_core)
         q->count--;
         if (q->count == 0)
             vs->runqueue.active_bitmap &= ~(1u << prio);
+        __atomic_fetch_sub(&vs->runqueue.total, 1, __ATOMIC_RELEASE);
         break;
     }
 
@@ -679,7 +691,7 @@ void schedule(void *frame_ptr)
     }
 
     // Skip scheduling on parked cores
-    if (s->is_parked) {
+    if (__atomic_load_n(&s->is_parked, __ATOMIC_ACQUIRE)) {
         return;
     }
 

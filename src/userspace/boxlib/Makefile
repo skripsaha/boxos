@@ -11,9 +11,20 @@ AR  = x86_64-elf-ar
 
 # Compiler flags
 # -fno-stack-protector: No libc in userspace, canary support unavailable
-# -mno-red-zone: Required for kernel/interrupt context compatibility
+# -mno-red-zone:        Required for kernel/interrupt context compatibility
+# -fno-ipa-ra:          Force-save caller-saved regs around every call.
+#                       Without this, GCC's interprocedural register
+#                       allocator notices that some leaf functions don't
+#                       touch r10/r11 and parks `out` arguments in r10
+#                       across calls — but if anything (kernel save/restore
+#                       bug, IRQ stack-trash, scheduler context switch
+#                       hiccup) corrupts the supposedly-preserved register,
+#                       we silently dereference a wild pointer. Saving on
+#                       the stack across every call costs almost nothing
+#                       and removes a whole class of subtle UB. Hunted
+#                       on 2026-04-29 (random page-fault to .text).
 CFLAGS = -nostdlib -fno-builtin -ffreestanding -mno-red-zone \
-         -fno-stack-protector \
+         -fno-stack-protector -fno-ipa-ra \
          -Iinclude -I../../include -Wall -Wextra -O2 -Wno-unused-parameter
 
 SRCS = src/core/notify.c \

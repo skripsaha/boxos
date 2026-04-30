@@ -9,60 +9,9 @@
 #include "notify.h"
 #include "per_core.h"
 
-void context_save(process_t* proc, ProcessContext* ctx) {
-    if (!proc || !ctx) {
-        return;
-    }
-
-    if (ctx->fpu_state) {
-        fpu_save(ctx->fpu_state);
-        ctx->fpu_initialized = true;
-    }
-
-    if (!proc->cabin) {
-        return;
-    }
-
-    ctx->cr3 = vmm_build_cr3(proc->cabin);
-}
-
-void context_restore(process_t* proc, ProcessContext* ctx) {
-    if (!proc || !ctx) {
-        return;
-    }
-
-    uint64_t current_cr3;
-    __asm__ volatile("mov %%cr3, %0" : "=r"(current_cr3));
-    if (current_cr3 != ctx->cr3) {
-        uint64_t new_cr3 = ctx->cr3;
-        if (vmm_pcid_active()) new_cr3 |= (1ULL << 63);  // NOFLUSH
-        __asm__ volatile("mov %0, %%cr3" : : "r"(new_cr3) : "memory");
-    }
-
-    if (ctx->fpu_initialized) {
-        fpu_restore(ctx->fpu_state);
-    }
-
-    per_core_set_kernel_rsp((uint64_t)proc->kernel_stack_top);
-}
-
-void context_switch(process_t* from, process_t* to) {
-    if (from) {
-        context_save(from, &from->context);
-    }
-
-    if (to) {
-        context_restore(to, &to->context);
-        if (process_get_state(to) == PROC_CREATED) {
-            process_set_state(to, PROC_WORKING);
-        }
-        to->last_run_time = __atomic_load_n(&g_global_tick, __ATOMIC_RELAXED);
-        scheduler_state_t* sched = scheduler_get_state();
-        spin_lock(&sched->scheduler_lock);
-        sched->current_process = to;
-        spin_unlock(&sched->scheduler_lock);
-    }
-}
+/* The non-frame context_save / context_restore / context_switch helpers
+ * have been removed. The scheduler dispatches exclusively via the IRQ
+ * frame (`schedule(frame)`), so the pair below is the single live path. */
 
 void context_save_from_frame(process_t* proc, interrupt_frame_t* frame) {
     if (!proc || !frame) {
@@ -114,11 +63,13 @@ void context_restore_to_frame(process_t* proc, interrupt_frame_t* frame) {
 
     ProcessContext* ctx = &proc->context;
 
-    // Skip CR3 reload if returning to same address space
+    /* Skip CR3 reload only on a true address-space match. Same caveat as
+     * context_restore above: ignore bit 63 (NOFLUSH) when comparing. */
     uint64_t current_cr3;
     __asm__ volatile("mov %%cr3, %0" : "=r"(current_cr3));
-    if (current_cr3 != ctx->cr3) {
-        uint64_t new_cr3 = ctx->cr3;
+    const uint64_t CR3_COMPARE_MASK = ~(1ULL << 63);
+    if ((current_cr3 & CR3_COMPARE_MASK) != (ctx->cr3 & CR3_COMPARE_MASK)) {
+        uint64_t new_cr3 = ctx->cr3 & CR3_COMPARE_MASK;
         if (vmm_pcid_active()) new_cr3 |= (1ULL << 63);  // NOFLUSH
         __asm__ volatile("mov %0, %%cr3" : : "r"(new_cr3) : "memory");
     }

@@ -235,10 +235,20 @@ void vmm_free_page_table(uintptr_t phys_addr)
         atomic_fetch_sub_u64((volatile uint64_t *)&global_stats.page_tables_allocated, 1);
 }
 
+/* Force a full local TLB flush. Critical detail: when PCID is enabled,
+ * CR3 has bit 63 (NOFLUSH) set by vmm_build_cr3_noflush(). A naive
+ * read-modify-write of CR3 preserves that bit and the CPU then *skips*
+ * the flush — the very thing we asked for. Always clear bit 63 before
+ * writing CR3 here. This was the silent root cause behind random
+ * "page-fault on write into .text" crashes seen on 2026-04-29: TLB
+ * shootdowns appeared to fire but actually left stale entries alive,
+ * so a recycled physical page kept being addressable by cores that
+ * had switched off the destroyed cabin. */
 void vmm_flush_tlb(void)
 {
     uintptr_t cr3;
     asm volatile("mov %%cr3, %0" : "=r"(cr3));
+    cr3 &= ~(1ULL << 63);
     asm volatile("mov %0, %%cr3" : : "r"(cr3) : "memory");
     atomic_fetch_add_u64((volatile uint64_t *)&global_stats.tlb_flushes, 1);
 }
@@ -284,9 +294,12 @@ void vmm_tlb_shootdown_handler(void)
 
     if (addr == 0 || count == 0 || count > 64)
     {
-        // Full TLB flush
+        /* Full TLB flush — must clear CR3 bit 63 (NOFLUSH) or the CPU
+         * keeps stale entries when PCID is on. See vmm_flush_tlb for
+         * the full story. */
         uintptr_t cr3;
         asm volatile("mov %%cr3, %0" : "=r"(cr3));
+        cr3 &= ~(1ULL << 63);
         asm volatile("mov %0, %%cr3" : : "r"(cr3) : "memory");
     }
     else
@@ -352,8 +365,10 @@ void vmm_shootdown_pages(vmm_context_t *ctx, uintptr_t virt_addr, size_t page_co
     }
     else
     {
+        /* Self full flush — clear NOFLUSH bit before reload. */
         uintptr_t cr3;
         asm volatile("mov %%cr3, %0" : "=r"(cr3));
+        cr3 &= ~(1ULL << 63);
         asm volatile("mov %0, %%cr3" : : "r"(cr3) : "memory");
     }
 
@@ -393,6 +408,82 @@ void vmm_shootdown_pages(vmm_context_t *ctx, uintptr_t virt_addr, size_t page_co
             uint32_t remaining = atomic_load_u32(&g_shootdown.pending_acks);
             panic("TLB shootdown timeout: %u cores did not ACK (pending_acks=%u, spins=%u)",
                   target_count - (target_count - remaining), remaining, spins);
+        }
+    }
+
+    g_shootdown.active = false;
+    spin_unlock(&g_shootdown_lock);
+}
+
+/* Force a full TLB flush on every online core, irrespective of which
+ * context they are currently running. Used by vmm_destroy_context: when
+ * a cabin's page tables are torn down, the underlying physical pages
+ * are about to be returned to PMM and may be re-allocated to *any*
+ * cabin within microseconds. Without flushing every core, AMP cores
+ * that recently switched off the destroyed cabin keep stale TLB
+ * entries (PCID cached) — those entries then alias whichever new
+ * mapping receives the recycled PA, producing the unpredictable
+ * ".text page-fault on user write" pattern reported in 2026-04-29
+ * crash logs. */
+void vmm_shootdown_all_cores_full(void)
+{
+    if (!g_amp.multicore_active || g_amp.total_cores <= 1) {
+        /* Single-core: just flush ourselves (clear NOFLUSH bit). */
+        uintptr_t cr3;
+        asm volatile("mov %%cr3, %0" : "=r"(cr3));
+        cr3 &= ~(1ULL << 63);
+        asm volatile("mov %0, %%cr3" : : "r"(cr3) : "memory");
+        atomic_fetch_add_u64((volatile uint64_t *)&global_stats.tlb_flushes, 1);
+        return;
+    }
+
+    uint8_t my_core = amp_get_core_index();
+    uint8_t targets[MAX_CORES];
+    uint8_t target_count = 0;
+
+    for (uint8_t c = 0; c < g_amp.total_cores; c++) {
+        if (c == my_core) continue;
+        if (!g_amp.cores[c].online) continue;
+        targets[target_count++] = c;
+    }
+
+    /* Local self flush first — clear NOFLUSH bit before reload. */
+    {
+        uintptr_t cr3;
+        asm volatile("mov %%cr3, %0" : "=r"(cr3));
+        cr3 &= ~(1ULL << 63);
+        asm volatile("mov %0, %%cr3" : : "r"(cr3) : "memory");
+        atomic_fetch_add_u64((volatile uint64_t *)&global_stats.tlb_flushes, 1);
+    }
+
+    if (target_count == 0)
+        return;
+
+    spin_lock(&g_shootdown_lock);
+
+    g_shootdown.addr = 0;          /* 0 ⇒ handler does full flush */
+    g_shootdown.page_count = 0;
+    atomic_store_u32(&g_shootdown.pending_acks, target_count);
+    g_shootdown.active = true;
+    mfence();
+
+    for (uint8_t i = 0; i < target_count; i++) {
+        lapic_send_ipi(g_amp.cores[targets[i]].lapic_id, IPI_SHOOTDOWN_VECTOR);
+    }
+
+    uint64_t tsc_freq_mhz = cpu_get_tsc_freq_mhz();
+    uint64_t timeout_cycles = tsc_freq_mhz * 100;          /* 100 ms */
+    uint64_t start_tsc = rdtsc();
+    uint32_t spins = 0;
+    const uint32_t max_spins = 10000000;
+
+    while (atomic_load_u32(&g_shootdown.pending_acks) != 0) {
+        cpu_pause();
+        spins++;
+        if (spins >= max_spins || (rdtsc() - start_tsc) > timeout_cycles) {
+            uint32_t remaining = atomic_load_u32(&g_shootdown.pending_acks);
+            panic("Full TLB shootdown timeout: %u/%u cores did not ACK",
+                  remaining, target_count);
         }
     }
 
@@ -665,30 +756,24 @@ static void vmm_free_user_space_tables(vmm_context_t *ctx)
                         continue;
                     }
 
+                    /* Phase 1 of the two-phase teardown: zero the PTE here
+                     * but DO NOT pmm_free the underlying page yet — only
+                     * mark it in the dedup bitmap. The actual frees happen
+                     * after a cross-core TLB shootdown so no AMP core can
+                     * still have cached translations to a PA that PMM is
+                     * about to hand out to a different cabin. */
                     if (!is_identity_mapped && has_dedup)
                     {
                         size_t page_idx = phys / VMM_PAGE_SIZE;
-                        bool should_free = true;
-
                         if (page_idx < dedup_total_pages)
                         {
                             size_t byte_idx = page_idx / 8;
                             size_t bit_idx = page_idx % 8;
-
-                            if (freed_bitmap[byte_idx] & (1 << bit_idx))
-                            {
-                                should_free = false;
-                            }
-                            else
+                            if (!(freed_bitmap[byte_idx] & (1 << bit_idx)))
                             {
                                 freed_bitmap[byte_idx] |= (1 << bit_idx);
+                                freed_pages++;
                             }
-                        }
-
-                        if (should_free)
-                        {
-                            pmm_free((void *)phys, 1);
-                            freed_pages++;
                         }
                     }
 
@@ -700,7 +785,7 @@ static void vmm_free_user_space_tables(vmm_context_t *ctx)
 
                 if (freed_pages > 0)
                 {
-                    debug_printf("[VMM]   Freed %d data pages from PT\n", freed_pages);
+                    debug_printf("[VMM]   Marked %d data pages for deferred free\n", freed_pages);
                 }
 
                 if (!skip_pt_free)
@@ -718,11 +803,45 @@ static void vmm_free_user_space_tables(vmm_context_t *ctx)
         ctx->pml4->entries[p4] = 0;
     }
 
+    /* Phase 2: cross-core TLB shootdown. ALL online cores must drop any
+     * cached entries that referenced this cabin's user mappings (PCID
+     * caching means a CR3 swap alone does not flush them). Only after
+     * the shootdown completes is it safe to return the underlying
+     * physical pages to PMM — otherwise the next pmm_alloc on another
+     * core could hand the page to a different cabin while a stale TLB
+     * entry still maps it on a third core, causing the wild-write
+     * memory-corruption crash we hunted on 2026-04-29. */
+    vmm_shootdown_all_cores_full();
+
+    /* Phase 3: now safe to actually return the pages. */
     if (freed_bitmap)
     {
+        size_t freed_total = 0;
+        for (size_t pg = 0; pg < dedup_total_pages; pg++)
+        {
+            size_t byte_idx = pg / 8;
+            size_t bit_idx = pg % 8;
+            if (freed_bitmap[byte_idx] & (1 << bit_idx))
+            {
+                pmm_free((void *)(uintptr_t)(pg * VMM_PAGE_SIZE), 1);
+                freed_total++;
+            }
+        }
         kfree(freed_bitmap);
+        debug_printf("[VMM] User space tables: deferred-freed %zu data pages after TLB shootdown\n",
+                     freed_total);
     }
-    asm volatile("mov %%cr3, %%rax; mov %%rax, %%cr3" ::: "rax", "memory");
+    else
+    {
+        /* No dedup bitmap: we did not collect any frees. Still flush
+         * locally so this CPU does not see stale entries. Clear bit 63
+         * (NOFLUSH) explicitly — see vmm_flush_tlb. */
+        uintptr_t cr3;
+        asm volatile("mov %%cr3, %0" : "=r"(cr3));
+        cr3 &= ~(1ULL << 63);
+        asm volatile("mov %0, %%cr3" : : "r"(cr3) : "memory");
+        debug_printf("[VMM] User space tables freed (no dedup bitmap, no data pages reclaimed)\n");
+    }
 
     debug_printf("[VMM] User space tables freed\n");
 }
@@ -751,6 +870,21 @@ void vmm_destroy_context(vmm_context_t *ctx)
     spin_lock(&ctx->lock);
 
     vmm_free_user_space_tables(ctx);
+
+    /* After vmm_free_user_space_tables does its TLB shootdown, the shoot-
+     * down only flushes the CURRENT CR3's PCID (kernel PCID 0).  With PCID
+     * enabled, each PCID has its own TLB partition.  We must explicitly
+     * expunge the user process's PCID X partition before releasing the PCID
+     * for reuse.  Write the (now-empty) user PML4 with PCID X and NO-FLUSH
+     * bit clear — the CPU then invalidates every TLB entry tagged PCID X. */
+    if (g_pcid_active && ctx->pcid != 0 && ctx->pml4_phys)
+    {
+        uint64_t flush_cr3 = ctx->pml4_phys | (uint64_t)ctx->pcid; /* NOFLUSH=0 */
+        asm volatile("mov %0, %%cr3" ::"r"(flush_cr3) : "memory");
+        /* Immediately switch back to kernel. */
+        uint64_t kernel_cr3 = kernel_context->pml4_phys; /* kernel PCID 0, NOFLUSH=0 */
+        asm volatile("mov %0, %%cr3" ::"r"(kernel_cr3) : "memory");
+    }
 
     if (ctx->pml4_phys)
     {

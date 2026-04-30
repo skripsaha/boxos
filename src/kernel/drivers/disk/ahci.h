@@ -283,8 +283,9 @@ typedef struct {
 #define ATA_CMD_READ_FPDMA_QUEUED   0x60
 #define ATA_CMD_WRITE_FPDMA_QUEUED  0x61
 
-// Timeout configuration (ms)
-#define AHCI_TIMEOUT_CMD_DEFAULT     5000
+/* Timeout configuration (ms) — values now sourced from kernel_config.h to
+ * avoid the historic dual source of truth (5000 here vs 2000 in config). */
+#define AHCI_TIMEOUT_CMD_DEFAULT     CONFIG_AHCI_CMD_TIMEOUT_MS
 #define AHCI_TIMEOUT_COMRESET_WAIT   1000
 #define AHCI_TIMEOUT_CMD_ENGINE_STOP 500
 #define AHCI_TIMEOUT_MIN             1000

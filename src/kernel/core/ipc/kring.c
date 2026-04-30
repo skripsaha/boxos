@@ -51,32 +51,53 @@ static PocketRing *kring_pocket_hdr(process_t *proc)
     return (PocketRing *)vmm_phys_to_virt(proc->pocket_ring_phys);
 }
 
+/* Reads of the producer-side cursor (tail) MUST use ACQUIRE so the
+ * consumer sees the producer's slot store that preceded the tail bump.
+ * On x86 TSO plain volatile reads happen to behave like ACQUIRE, but
+ * the explicit semantics keep us honest on weaker memory models and
+ * defeat any compiler reordering across the load. Audit 2026-04-29. */
 bool KPocketIsEmpty(process_t *proc)
 {
     PocketRing *r = kring_pocket_hdr(proc);
-    return !r || pocket_ring_is_empty(r);
+    if (!r) return true;
+    uint64_t head = __atomic_load_n(&r->hdr.head, __ATOMIC_RELAXED);
+    uint64_t tail = __atomic_load_n(&r->hdr.tail, __ATOMIC_ACQUIRE);
+    return head == tail;
 }
 
 uint32_t KPocketCount(process_t *proc)
 {
     PocketRing *r = kring_pocket_hdr(proc);
-    return r ? pocket_ring_count(r) : 0;
+    if (!r) return 0;
+    uint64_t head = __atomic_load_n(&r->hdr.head, __ATOMIC_RELAXED);
+    uint64_t tail = __atomic_load_n(&r->hdr.tail, __ATOMIC_ACQUIRE);
+    uint64_t n = tail - head;
+    return n > 0xFFFFFFFFu ? 0xFFFFFFFFu : (uint32_t)n;
 }
 
 Pocket *KPocketPeek(process_t *proc)
 {
     PocketRing *r = kring_pocket_hdr(proc);
-    if (!r || pocket_ring_is_empty(r)) return NULL;
+    if (!r) return NULL;
+    uint64_t head = __atomic_load_n(&r->hdr.head, __ATOMIC_RELAXED);
+    uint64_t tail = __atomic_load_n(&r->hdr.tail, __ATOMIC_ACQUIRE);
+    if (head == tail) return NULL;
 
-    uintptr_t uvaddr = pocket_ring_slot_uvaddr(r, r->hdr.head);
+    uintptr_t uvaddr = pocket_ring_slot_uvaddr(r, head);
     return (Pocket *)vmm_translate_user_addr(proc->cabin, uvaddr, sizeof(Pocket));
 }
 
 void KPocketPop(process_t *proc)
 {
     PocketRing *r = kring_pocket_hdr(proc);
-    if (!r || pocket_ring_is_empty(r)) return;
-    r->hdr.head++;
+    if (!r) return;
+    uint64_t head = __atomic_load_n(&r->hdr.head, __ATOMIC_RELAXED);
+    uint64_t tail = __atomic_load_n(&r->hdr.tail, __ATOMIC_ACQUIRE);
+    if (head == tail) return;
+    /* Publish the new head with RELEASE so the userspace producer's view
+     * of "ring not full" cannot leapfrog ahead of the slot we already
+     * consumed. */
+    __atomic_store_n(&r->hdr.head, head + 1, __ATOMIC_RELEASE);
 }
 
 /* -------------------------------------------------------------------------
@@ -95,9 +116,13 @@ bool KResultPush(process_t *target, const Result *r)
 
     ResultRing *rr = kring_result_hdr(target);
     if (!rr) return false;
-    if (result_ring_is_full(rr)) return false;
+    /* ACQUIRE on head so we see the consumer's most recent advance; this
+     * is what tells us whether the ring really has room. */
+    uint64_t head = __atomic_load_n(&rr->hdr.head, __ATOMIC_ACQUIRE);
+    uint64_t tail = __atomic_load_n(&rr->hdr.tail, __ATOMIC_RELAXED);
+    if ((tail - head) >= rr->hdr.slot_count_max) return false;
 
-    uintptr_t uvaddr = result_ring_slot_uvaddr(rr, rr->hdr.tail);
+    uintptr_t uvaddr = result_ring_slot_uvaddr(rr, tail);
 
     /* Ensure the slot page is mapped user RW in the target's cabin. */
     if (vmm_ensure_user_page(target->cabin, uvaddr, /*writable=*/true) != 0) {
@@ -112,8 +137,11 @@ bool KResultPush(process_t *target, const Result *r)
      * (24B) — the trailing 8 bytes per slot remain whatever they were. The
      * consumer reads sizeof(Result), so the padding never escapes. */
     *slot = *r;
-    __sync_synchronize();
-    rr->hdr.tail++;
+    /* RELEASE pair with userspace ACQUIRE on tail: the consumer must not
+     * see the new tail before the slot store is visible. Replaces the old
+     * full fence + non-atomic tail bump pattern, which was the suspected
+     * "non-manifest pocket flags=0x0" race source. */
+    __atomic_store_n(&rr->hdr.tail, tail + 1, __ATOMIC_RELEASE);
 
     if (process_get_state(target) == PROC_WAITING) {
         process_set_state(target, PROC_WORKING);

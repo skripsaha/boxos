@@ -4,10 +4,15 @@
 #include "box/string.h"
 #include "box/system.h"
 
+/* Big arrays in BSS to keep the user stack ≤ a few KB. */
+#define HELP_MAX 256
+static uint32_t    s_file_ids[HELP_MAX];
+static file_info_t s_infos[HELP_MAX];
+static char        s_argv[16][64];
+
 int main(void) {
     int argc;
-    char argv[16][64];
-    receive_args(&argc, argv, 16);
+    receive_args(&argc, s_argv, 16);
 
     println("BoxOS Shell v1.0 - Available Commands:");
     println("");
@@ -18,34 +23,34 @@ int main(void) {
     println("");
     println("Utilities:");
 
-    uint32_t file_ids[256];
-    int count = query("utility", file_ids, 256);
+    int count = query("utility", s_file_ids, HELP_MAX);
+    if (count > HELP_MAX) count = HELP_MAX;
 
     if (count > 0) {
-        file_info_t infos[256];
-        for (int i = 0; i < count && i < 256; i++) {
-            if (file_info(file_ids[i], &infos[i]) != 0) {
-                infos[i].filename[0] = '\0';
+        for (int i = 0; i < count; i++) {
+            if (file_info(s_file_ids[i], &s_infos[i]) != 0) {
+                s_infos[i].filename[0] = '\0';
             }
         }
 
-        for (int i = 0; i < count - 1; i++) {
-            for (int j = 0; j < count - i - 1; j++) {
-                if (infos[j].filename[0] != '\0' &&
-                    infos[j + 1].filename[0] != '\0' &&
-                    strcmp(infos[j].filename, infos[j + 1].filename) > 0) {
-                    file_info_t tmp = infos[j];
-                    infos[j] = infos[j + 1];
-                    infos[j + 1] = tmp;
-                }
+        for (int i = 1; i < count; i++) {
+            file_info_t key = s_infos[i];
+            int j = i - 1;
+            while (j >= 0 &&
+                   s_infos[j].filename[0] != '\0' &&
+                   key.filename[0] != '\0' &&
+                   strcmp(s_infos[j].filename, key.filename) > 0) {
+                s_infos[j + 1] = s_infos[j];
+                j--;
             }
+            s_infos[j + 1] = key;
         }
 
         for (int i = 0; i < count; i++) {
-            if (infos[i].filename[0] == '\0') continue;
-            if (strcmp(infos[i].filename, "display.elf") == 0) continue;
-            if (strcmp(infos[i].filename, "shell.bin") == 0) continue;
-            printf("  %s\n", infos[i].filename);
+            if (s_infos[i].filename[0] == '\0') continue;
+            if (strcmp(s_infos[i].filename, "display.elf") == 0) continue;
+            if (strcmp(s_infos[i].filename, "shell.bin") == 0) continue;
+            printf("  %s\n", s_infos[i].filename);
         }
     } else {
         println("  (no utilities found)");

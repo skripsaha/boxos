@@ -269,9 +269,16 @@ long_mode_start:
     mov word  [BOOT_INFO_ADDR+14],   0                   ; +14: reserved
     mov dword [BOOT_INFO_ADDR+16],   KERNEL_RUN_ADDR     ; +16: kernel_start
 
-    ; kernel_end = KERNEL_RUN_ADDR + kernel_loaded_bytes, aligned to 4KB
-    mov eax, [kernel_loaded_bytes]
-    add eax, KERNEL_RUN_ADDR
+    ; kernel_end = the *true* end of memory the kernel will occupy at
+    ; runtime — i.e. including BSS. The linker bakes that value into the
+    ; kernel header at offset +12 (`_kernel_phys_end`), and that's the
+    ; same value compute_dynamic_layout already trusted to place the
+    ; page tables. Reporting `KERNEL_RUN_ADDR + kernel_loaded_bytes`
+    ; here used to leak the wrong number out of BIOS boot — the kernel
+    ; saw a kernel_end that stopped before BSS. UEFI's tagboot already
+    ; reports the BSS-inclusive value, so reporting it here too keeps
+    ; both boot paths telling the same story to PMM.
+    mov eax, [KERNEL_RUN_ADDR + 12]
     add eax, 0xFFF
     and eax, 0xFFFFF000
     mov dword [BOOT_INFO_ADDR+20],   eax                 ; +20: kernel_end

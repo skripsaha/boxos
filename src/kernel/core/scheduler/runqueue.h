@@ -3,6 +3,7 @@
 
 #include "ktypes.h"
 #include "klib.h"
+#include "kernel_config.h"
 
 #define SCHED_PRIO_IDLE    0
 #define SCHED_PRIO_NORMAL  1
@@ -10,8 +11,8 @@
 #define SCHED_PRIO_CONTEXT 3
 #define SCHED_PRIO_LEVELS  4
 
-#define RUNQUEUE_INITIAL_CAP  64
-#define RUNQUEUE_MAX_CAP      4096
+#define RUNQUEUE_INITIAL_CAP  CONFIG_RUNQUEUE_INITIAL_CAP
+#define RUNQUEUE_MAX_CAP      CONFIG_RUNQUEUE_MAX_CAP
 
 struct process_t;
 
@@ -36,7 +37,8 @@ bool runqueue_enqueue(RunQueue *rq, struct process_t *proc, int prio);
 struct process_t *runqueue_dequeue_best(RunQueue *rq);
 void runqueue_remove(RunQueue *rq, struct process_t *proc);
 bool runqueue_contains(RunQueue *rq, struct process_t *proc);
-uint32_t runqueue_total_count(RunQueue *rq);
+/* runqueue_total_count() removed — RunqueueAtomicTotal() is the lock-free
+ * canonical sum and was the only correct alternative anyway. */
 uint32_t RunqueueAtomicTotal(const RunQueue *rq);
 
 #endif // RUNQUEUE_H

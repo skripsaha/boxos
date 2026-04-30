@@ -39,9 +39,17 @@ static uint8_t cmos_read(uint8_t reg) {
     return inb(CMOS_DATA);
 }
 
-static void wait_not_uip(void) {
-    while (cmos_read(CMOS_REG_STA) & STA_UIP)
-        ;
+/* Returns true once the RTC clears its Update-In-Progress bit (≤1 ms on real
+ * HW), false if the deadline expires — protects against a wedged or absent
+ * RTC chip hanging boot indefinitely. The caller proceeds with whatever
+ * value is in the BCD/binary registers; rtc_init's two-read consistency
+ * check then catches any straddling update. */
+static bool wait_not_uip(void) {
+    for (uint32_t i = 0; i < 1000000; i++) {
+        if ((cmos_read(CMOS_REG_STA) & STA_UIP) == 0) return true;
+    }
+    debug_printf("[RTC] WARNING: UIP bit stuck — proceeding with possibly straddled read\n");
+    return false;
 }
 
 static uint8_t bcd_to_bin(uint8_t v) {

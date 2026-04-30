@@ -13,8 +13,16 @@ OBJCOPY = x86_64-elf-objcopy
 # -fno-stack-protector: No libc in userspace, canary support unavailable
 # -fno-pic: Position-independent code not needed for static binary
 # -mno-red-zone: Required for interrupt context compatibility
+# -fno-ipa-ra:   Disable IPRA. Without it, GCC parks live values in caller-
+#                saved registers across calls, assuming the callee leaves
+#                them alone. Any clobber (kernel save/restore quirk, IRQ
+#                stack-trash, scheduler context-switch hiccup) then yields
+#                a wild pointer that surfaces as a far-away page fault
+#                inside boxlib (memcpy/ManifestBuilderAddOp). Same fix that
+#                the boxlib Makefile already carries — must be on every
+#                userspace binary that links libbox.a.
 CFLAGS = -nostdlib -ffreestanding -fno-builtin -mno-red-zone \
-         -fno-stack-protector -fno-pic -static \
+         -fno-stack-protector -fno-pic -static -fno-ipa-ra \
          -Wall -Wextra -g \
          -I../boxlib/include \
          -I../../include \

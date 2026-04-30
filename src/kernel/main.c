@@ -595,7 +595,48 @@ void kernel_main(void)
         kcore_run_loop(); // never returns
     }
 
-    // Single-core: jump directly to initial process on BSP
+    /* ----------------------------------------------------------------
+     * Single-core path: BSP runs every userspace process itself.
+     *
+     * BUG (audit 2026-04-30): the previous code only `process_start_initial`'d
+     * the *initial* autostart process and jumped straight to Ring 3,
+     * leaving every other PROC_WORKING process unrouted into the
+     * scheduler's runqueue. When the BSP timer fired and `schedule()`
+     * looked for the next runnable process, the runqueue was empty —
+     * so the shell, the second utility, etc. never got a slice and the
+     * system silently sat on the initial process forever (display in
+     * the autostart case, which only does `receive_wait` and produces
+     * no output of its own). User-visible symptom: nothing happens
+     * after `[AUTOSTART] launched`, regardless of BIOS or UEFI.
+     *
+     * Fix: enqueue every WORKING non-idle process on this BSP's
+     * runqueue *before* the jump, and skip enqueuing `initial_proc`
+     * itself (it becomes current_process in process_start_initial).
+     * ---------------------------------------------------------------- */
+    kprintf("[KERNEL] Single-core mode: BSP scheduling all processes\n");
+
+    process_list_lock();
+    process_t *sp = process_get_first();
+    while (sp)
+    {
+        if (sp != initial_proc &&
+            sp->magic == PROCESS_MAGIC &&
+            sp->state == PROC_WORKING &&
+            !process_is_idle(sp))
+        {
+            if (sched_enqueue(sp))
+            {
+                debug_printf("[KERNEL] Enqueued PID %u on BSP\n", sp->pid);
+            }
+            else
+            {
+                debug_printf("[KERNEL] FAILED to enqueue PID %u\n", sp->pid);
+            }
+        }
+        sp = sp->next;
+    }
+    process_list_unlock();
+
     debug_printf("[KERNEL] Starting initial process (PID %u) - jumping to Ring 3...\n",
                  initial_proc->pid);
 

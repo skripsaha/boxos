@@ -104,31 +104,27 @@ notify_entry:
     add rsp, 16                         ; skip vector + error_code
 
     ; =================================================================
-    ; SYSRETQ fast path — only safe if returning to user code.
+    ; Return to user mode.
     ;
-    ; Guard 1: CS must be user code (schedule() may have switched process,
-    ;          or we may return to idle which runs in ring 0).
-    ; Guard 2: RIP must be canonical (CVE-2012-0217 — SYSRETQ with
-    ;          non-canonical RCX causes #GP in ring 0, game over).
+    ; IRETQ is always safe: it restores RIP, CS, RFLAGS, RSP and SS from
+    ; the hardware frame on the stack, and all GPRs have already been
+    ; restored by the pops above.  In particular, RCX is the value the
+    ; user process had when it was last saved — which may be a live data
+    ; pointer (e.g. a memset loop counter) rather than a return address.
+    ;
+    ; Why NOT SYSRETQ here:
+    ;   SYSRETQ requires that RCX already hold the return RIP before the
+    ;   instruction executes.  To set up RCX we would have to overwrite it
+    ;   with [frame->rip].  If the process was timer-interrupted (not via
+    ;   SYSCALL), its live RCX is a data register and overwriting it with
+    ;   a code address causes the next pointer-dereference to land inside
+    ;   .text → write page-fault.  That was the root cause of the
+    ;   RCX=0x10e70 / CR2=weird crash pattern (audit 2026-04-30).
+    ;
+    ;   Performance: IRETQ costs ≈ 30-50 cycles more than SYSRETQ but the
+    ;   notify path already pays hundreds of cycles for guide() processing,
+    ;   so the difference is negligible.
     ; =================================================================
 
-    ; Stack now: rip, cs, rflags, rsp, ss
-    cmp qword [rsp + 8], GDT_USER_CODE
-    jne .slow_exit
-
-    ; Canonical check: user addresses have bit 47 = 0
-    mov rcx, [rsp]                      ; load return RIP
-    bt  rcx, 47
-    jc  .slow_exit                      ; bit 47 set → non-canonical, bail
-
-    ; --- SYSRETQ fast path ---
-    mov r11, [rsp + 16]                 ; RFLAGS → R11 (SYSRETQ restores from R11)
-    mov rsp, [rsp + 24]                 ; user RSP
-
-    swapgs                              ; back to user GS
-    o64 sysret                          ; → Ring 3 at RCX with RFLAGS from R11
-
-.slow_exit:
-    ; --- IRETQ fallback (handles kernel return, non-canonical, etc.) ---
     swapgs
     iretq

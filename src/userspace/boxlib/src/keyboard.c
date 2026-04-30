@@ -75,8 +75,15 @@ int kb_readline(char *buffer, size_t size, bool echo)
     if (!buffer || size == 0 || size > 1024) return -ERR_INVALID_ARGS;
 
     /* Out-crate layout: [u32 len][char line[]][u8 status]. We size the buffer
-     * for size bytes of line + 4 length + 1 status + 1 NUL slack. */
-    uint8_t out[1030];
+     * for size bytes of line + 4 length + 1 status + 1 NUL slack.
+     *
+     * Kept in .bss (not on the stack): the typical caller chain
+     * handle_readline → kb_readline → MfCall1 → ManifestSubmitFull
+     * accumulates ~3 KB of frames; an extra 1 KB on the stack here was
+     * enough — combined with the IRQ save area — to overflow into the
+     * user-stack guard page during long readlines. Each Cabin runs a
+     * single thread, so .bss is reentrancy-safe. */
+    static uint8_t out[1030];
     uint16_t max_len = (uint16_t)size;
     uint8_t  params[3] = { (uint8_t)(max_len & 0xFF),
                            (uint8_t)(max_len >> 8),

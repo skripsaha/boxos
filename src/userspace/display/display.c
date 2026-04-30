@@ -52,22 +52,30 @@ static void render(const uint8_t* data, uint16_t len) {
 }
 
 static void handle_readline(uint32_t requester, uint16_t max_len, uint8_t echo) {
-    char line_buf[1024];
+    /* Daemon is single-threaded; keep the two big I/O buffers in .bss so the
+     * call chain handle_readline → kb_readline → MfCall1 → ManifestSubmitFull
+     * stays well under the user-stack guard. Previously these 2052 bytes on
+     * the stack pushed the cumulative chain past the lowest mapped page and
+     * a memset down the chain wrote into the guard page (CR2=0x7fff…d05000,
+     * err=0x6). */
+    static char    line_buf[1024];
+    static uint8_t reply_buf[1028];
+
     uint16_t cap = max_len > 0 ? max_len : 128;
     if (cap > sizeof(line_buf)) cap = sizeof(line_buf);
     int len = kb_readline(line_buf, cap, echo != 0);
 
     if (len < 0) {
-        uint8_t reply[4] = {0, 0, 0, 0};
-        send(requester, reply, 4);
+        uint8_t err_reply[4] = {0, 0, 0, 0};
+        send(requester, err_reply, 4);
         return;
     }
 
-    uint8_t reply[1028];
     uint32_t ulen = (uint32_t)len;
-    memcpy(reply, &ulen, 4);
-    memcpy(reply + 4, line_buf, ulen);
-    send(requester, reply, (uint16_t)(4 + ulen));
+    if (ulen > sizeof(reply_buf) - 4) ulen = sizeof(reply_buf) - 4;
+    memcpy(reply_buf, &ulen, 4);
+    memcpy(reply_buf + 4, line_buf, ulen);
+    send(requester, reply_buf, (uint16_t)(4 + ulen));
 }
 
 static void handle_getchar(uint32_t requester) {

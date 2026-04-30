@@ -24,11 +24,11 @@ void    pmm_free(void* addr, size_t pages);
 size_t   pmm_total_pages(void);
 size_t   pmm_free_pages(void);
 size_t   pmm_used_pages(void);
-uint64_t pmm_get_total_memory(void);
+uint64_t pmm_get_total_memory(void);     /* phys-top of buddy zone (one-past-last byte) */
+uint64_t pmm_get_total_ram_bytes(void);  /* total_pages * PMM_PAGE_SIZE                 */
 void     pmm_dump_stats(void);
 
 void pmm_print_memory_map(void);
-bool pmm_check_integrity(void);
 
 error_t pmm_set_maxphyaddr(uint8_t maxphyaddr);
 uint8_t pmm_get_maxphyaddr(void);
