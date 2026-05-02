@@ -156,31 +156,6 @@ static int SysRoute(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     return rc;
 }
 
-static bool tag_str_eq(const char *a, const char *b)
-{
-    while (*a && *b && *a == *b) { a++; b++; }
-    return *a == '\0' && *b == '\0';
-}
-
-static bool sys_proc_has_tag(process_t *p, const char *tag)
-{
-    char tags[PROCESS_TAG_SIZE];
-    process_snapshot_tags(p, tags, sizeof(tags));
-    const char *pos = tags;
-    while (*pos) {
-        const char *comma = strchr(pos, ',');
-        size_t len = comma ? (size_t)(comma - pos) : strlen(pos);
-        char cur[PROCESS_TAG_SIZE];
-        size_t cl = len < sizeof(cur) - 1 ? len : sizeof(cur) - 1;
-        memcpy(cur, pos, cl);
-        cur[cl] = '\0';
-        if (tag_str_eq(cur, tag)) return true;
-        if (!comma) break;
-        pos = comma + 1;
-    }
-    return false;
-}
-
 static int SysBroadcast(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                         const OpContext *ctx)
 {
@@ -204,22 +179,64 @@ static int SysBroadcast(const ManifestOp *op, Crate *crates, uint16_t crate_coun
         if (length > 0 && !SysCrateRead(src, ctx)) return ERR_INVALID_ADDRESS;
     }
 
+    /* Resolve the tag to its registry id once, outside the process-list
+     * lock — sys_proc_has_tag's string/wildcard path would re-acquire
+     * process_lock through process_snapshot_tags and self-deadlock. */
+    TagFSState *fs = tagfs_get_state();
+    if (!fs || !fs->registry) return ERR_ROUTE_NO_SUBSCRIBERS;
+    char key[256], value[256];
+    tagfs_parse_tag(tag, key, sizeof(key), value, sizeof(value));
+    uint16_t tid = tag_registry_lookup(fs->registry,
+                                       key, value[0] ? value : NULL);
+    if (tid == TAGFS_INVALID_TAG_ID) return ERR_ROUTE_NO_SUBSCRIBERS;
+
+    /* Phase 1: snapshot matching pids under process_list_lock so the
+     * iter->next chain cannot mutate mid-walk (process_destroy unlinks
+     * under the same lock). Tag check is the inline bitfield path —
+     * no nested lock acquisition. */
+    uint32_t pid_list[MAX_BROADCAST_TARGETS];
+    uint16_t pid_count = 0;
+    process_list_lock();
+    for (process_t *iter = process_get_first();
+         iter && pid_count < MAX_BROADCAST_TARGETS;
+         iter = iter->next)
+    {
+        if (iter->pid == ctx->proc->pid)        continue;
+        process_state_t s = iter->state;
+        if (s == PROC_CRASHED || s == PROC_DONE) continue;
+        if (!process_has_tag_id(iter, tid))      continue;
+        pid_list[pid_count++] = iter->pid;
+    }
+    process_list_unlock();
+
+    /* Phase 2: pin each target via process_find_ref before any cabin or
+     * result_ring dereference; release the ref before moving on. This
+     * is the same UAF-closing pattern as SysRoute. */
     uint32_t delivered = 0;
-    for (process_t *iter = process_get_first(); iter; iter = iter->next) {
-        if (iter->pid == ctx->proc->pid) continue;
-        if (!target_alive(iter))          continue;
-        if (!sys_proc_has_tag(iter, tag))  continue;
+    for (uint16_t i = 0; i < pid_count; i++) {
+        process_t *target = process_find_ref(pid_list[i]);
+        if (!target) continue;
+
+        /* Recheck liveness — pid could have been recycled. */
+        if (!target_alive(target)) {
+            process_ref_dec(target);
+            continue;
+        }
 
         uint64_t target_addr = 0;
         if (length > 0 && src) {
-            target_addr = ipc_copy_to_heap(ctx->proc, iter,
+            target_addr = ipc_copy_to_heap(ctx->proc, target,
                                            (uint64_t)src->addr, length);
-            if (target_addr == 0) continue;
+            if (target_addr == 0) {
+                process_ref_dec(target);
+                continue;
+            }
         }
-        if (push_ipc_result(iter, ctx->proc->pid, target_addr, length)) {
+        if (push_ipc_result(target, ctx->proc->pid, target_addr, length)) {
             delivered++;
-            if (delivered >= MAX_BROADCAST_TARGETS) break;
         }
+        process_ref_dec(target);
+        if (delivered >= MAX_BROADCAST_TARGETS) break;
     }
     return delivered > 0 ? OK : ERR_ROUTE_NO_SUBSCRIBERS;
 }
