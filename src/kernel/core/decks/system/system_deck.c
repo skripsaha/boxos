@@ -32,7 +32,15 @@ uint64_t ipc_copy_to_heap(process_t *sender, process_t *target,
     if (!src) return 0;
 
     uint32_t pages_needed = (length + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE;
-    uint64_t target_vaddr = target->buf_heap_next;
+    uint64_t bytes_needed = (uint64_t)pages_needed * PMM_PAGE_SIZE;
+
+    /* Atomically reserve a unique vaddr range. Plain `target_vaddr =
+     * buf_heap_next; … buf_heap_next += …` was not safe: two senders on
+     * different cores could read the same buf_heap_next, both write to
+     * the same target_vaddr, and stomp each other's payload. */
+    uint64_t target_vaddr = __atomic_fetch_add(&target->buf_heap_next,
+                                               bytes_needed,
+                                               __ATOMIC_ACQ_REL);
 
     for (uint32_t i = 0; i < pages_needed; i++) {
         void *page = pmm_alloc(1);
@@ -45,8 +53,6 @@ uint64_t ipc_copy_to_heap(process_t *sender, process_t *target,
             return 0;
         }
     }
-
-    target->buf_heap_next += pages_needed * PMM_PAGE_SIZE;
 
     void *dst = vmm_translate_user_addr(target->cabin, target_vaddr, length);
     if (!dst) return 0;
