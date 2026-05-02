@@ -20,15 +20,18 @@
 
 static ahci_controller_t ahci_ctrl;
 
-// Helper: push a Result to a process's ResultRing
+// Helper: push a Result to a process's ResultRing.
+// Uses process_find_ref so the process cannot be torn down between the lookup
+// and the dereference inside KResultPush. Caller never inherits the ref.
 static void ahci_push_result(uint32_t pid, uint32_t error_code) {
-    process_t* proc = process_find(pid);
+    process_t* proc = process_find_ref(pid);
     if (!proc) return;
     Result r;
     memset(&r, 0, sizeof(Result));
     r.error_code = error_code;
     r.sender_pid = 0;  // kernel
     KResultPush(proc, &r);
+    process_ref_dec(proc);
 }
 
 static inline ahci_port_regs_t* ahci_get_port_regs(uint8_t port_num) {
@@ -148,13 +151,24 @@ void ahci_irq_handler(void) {
         volatile ahci_port_regs_t* port = ahci_get_port_regs(i);
         uint32_t port_is = port->is;
 
-        uint32_t current_ci = __atomic_load_n(&port->ci, __ATOMIC_ACQUIRE);
-        uint32_t completed = state->ci_snapshot ^ current_ci;
-        completed &= state->ci_snapshot;
+        /* Read snapshot BEFORE ci to pair with the submitter's ordering:
+         *   submitter writes port->ci first, then __sync_fetch_and_or(ci_snapshot,...).
+         * On x86 TSO loads are not reordered, so reading snapshot first guarantees
+         * that any new bit visible in snapshot is also visible in the subsequent
+         * ci read. completed = snapshot & ~current_ci then never falsely flags a
+         * just-submitted slot as completed.
+         *
+         * fetch_and_and(~completed) clears only the bits we observed completed,
+         * preserving any concurrent submitter's OR of a fresh slot. The previous
+         * `__atomic_store_n(.., current_ci)` overwrote that OR and dropped the
+         * new submission. */
+        uint32_t snapshot_prev = __atomic_load_n(&state->ci_snapshot, __ATOMIC_ACQUIRE);
+        uint32_t current_ci    = __atomic_load_n(&port->ci, __ATOMIC_ACQUIRE);
+        uint32_t completed     = snapshot_prev & ~current_ci;
 
         if (completed) {
             __sync_fetch_and_or(&state->completed_slots, completed);
-            __atomic_store_n(&state->ci_snapshot, current_ci, __ATOMIC_RELEASE);
+            __sync_fetch_and_and(&state->ci_snapshot, ~completed);
         }
 
         /* Bit 30 = TFES (Task File Error Status) — at least one issued
@@ -164,15 +178,15 @@ void ahci_irq_handler(void) {
          * tfd/serr into per-port stats so the sync wrapper / async waiter
          * can map "completed AND TFES" to a hard failure rather than OK.
          *
-         * Marking individual slots as failed requires a per-slot
-         * pending mask which the async path will track separately — for
-         * now we capture the diagnostic context. */
+         * Stats fields are written via __atomic_* RELAXED so the reader
+         * (ahci_get_port_stats) can load them atomically without a
+         * data race; ordering between fields does not matter (diagnostic). */
         if (port_is & (1 << 30)) {
             __sync_fetch_and_add(&state->ncq_errors, 1);
-            state->stats.tfes_count++;
-            state->stats.last_tfd  = port->tfd;
-            state->stats.last_serr = port->serr;
-            state->stats.last_error_tsc = rdtsc();
+            __atomic_fetch_add(&state->stats.tfes_count, 1, __ATOMIC_RELAXED);
+            __atomic_store_n(&state->stats.last_tfd,       port->tfd, __ATOMIC_RELAXED);
+            __atomic_store_n(&state->stats.last_serr,      port->serr, __ATOMIC_RELAXED);
+            __atomic_store_n(&state->stats.last_error_tsc, rdtsc(),    __ATOMIC_RELAXED);
         }
 
         port->is = port_is;
@@ -257,7 +271,8 @@ void ahci_free_slot(uint8_t port_num, uint8_t slot) {
 bool ahci_can_submit_port(uint8_t port_num) {
     ahci_port_t* port = ahci_get_port(port_num);
     if (!port) return false;
-    return port->slot_bitmap != 0;
+    /* Advisory hint — actual allocation re-checks under port->lock. */
+    return __atomic_load_n(&port->slot_bitmap, __ATOMIC_RELAXED) != 0;
 }
 
 error_t ahci_build_ncq_read(uint8_t port_num, uint8_t slot, uint64_t lba,
@@ -394,14 +409,17 @@ error_t ahci_start_async_transfer(struct async_io_request* req_raw) {
             return ERR_IO;
         }
     } else {
-        // READ: translate user virtual -> physical for DMA
-        process_t* proc = process_find(req->pid);
+        // READ: translate user virtual -> physical for DMA.
+        // process_find_ref pins the process across the cabin/vmm dereference.
+        process_t* proc = process_find_ref(req->pid);
         if (!proc || !proc->cabin) {
+            if (proc) process_ref_dec(proc);
             ahci_free_slot(0, slot);
             return ERR_INVALID_ARGUMENT;
         }
 
         uintptr_t target_phys_addr = vmm_virt_to_phys(proc->cabin, (uintptr_t)req->buffer_virt);
+        process_ref_dec(proc);
         if (target_phys_addr == 0) {
             ahci_free_slot(0, slot);
             return ERR_INVALID_ADDRESS;
@@ -418,9 +436,14 @@ error_t ahci_start_async_transfer(struct async_io_request* req_raw) {
 
     mfence();
 
+    /* Submit RMW: port->sact / port->ci are MMIO RMW. Two cores doing
+     * `read; OR; write` concurrently can lose a bit. Serialize with port->lock
+     * so the OR is observed by both HW and the IRQ snapshot tracker. */
+    spin_lock(&state->lock);
     port->sact |= (1U << slot);
-    port->ci |= (1U << slot);
+    port->ci   |= (1U << slot);
     __sync_fetch_and_or(&state->ci_snapshot, (1U << slot));
+    spin_unlock(&state->lock);
 
     return OK;
 }
@@ -622,11 +645,11 @@ error_t ahci_port_comreset(ahci_port_t* port) {
 
     debug_printf("[AHCI] Port %u: Performing COMRESET...\n", port->port_num);
 
-    port->stats.comreset_count++;
+    __atomic_fetch_add(&port->stats.comreset_count, 1, __ATOMIC_RELAXED);
 
     if (ahci_port_stop(port) != 0) {
         debug_printf("[AHCI] Port %u: Failed to stop engine for COMRESET\n", port->port_num);
-        port->stats.comreset_fail_count++;
+        __atomic_fetch_add(&port->stats.comreset_fail_count, 1, __ATOMIC_RELAXED);
         return ERR_IO;
     }
 
@@ -662,7 +685,7 @@ error_t ahci_port_comreset(ahci_port_t* port) {
     }
 
     debug_printf("[AHCI] Port %u: COMRESET failed (timeout)\n", port->port_num);
-    port->stats.comreset_fail_count++;
+    __atomic_fetch_add(&port->stats.comreset_fail_count, 1, __ATOMIC_RELAXED);
     return ERR_TIMEOUT;
 }
 
@@ -673,7 +696,7 @@ error_t ahci_port_recover(ahci_port_t* port) {
 
     debug_printf("[AHCI] Port %u: Starting error recovery...\n", port->port_num);
 
-    port->stats.error_count++;
+    __atomic_fetch_add(&port->stats.error_count, 1, __ATOMIC_RELAXED);
 
     for (int attempt = 0; attempt < AHCI_MAX_COMRESET_ATTEMPTS; attempt++) {
         error_t result = ahci_port_comreset(port);
@@ -724,12 +747,12 @@ void ahci_log_error(ahci_port_t* port, uint32_t pxis) {
     uint32_t serr = regs->serr;
     uint32_t tfd = regs->tfd;
 
-    port->stats.last_error_tsc = rdtsc();
-    port->stats.last_serr = serr;
-    port->stats.last_tfd = tfd;
+    __atomic_store_n(&port->stats.last_error_tsc, rdtsc(), __ATOMIC_RELAXED);
+    __atomic_store_n(&port->stats.last_serr,      serr,    __ATOMIC_RELAXED);
+    __atomic_store_n(&port->stats.last_tfd,       tfd,     __ATOMIC_RELAXED);
 
     if (pxis & AHCI_PIS_TFES) {
-        port->stats.tfes_count++;
+        __atomic_fetch_add(&port->stats.tfes_count, 1, __ATOMIC_RELAXED);
     }
 
     debug_printf("[AHCI] Port %u ERROR: IS=0x%08x SERR=0x%08x TFD=0x%08x (%s)\n",
@@ -740,7 +763,19 @@ void ahci_get_port_stats(uint8_t port_num, ahci_port_stats_t* stats_out) {
     if (!stats_out) return;
     ahci_port_t* port = ahci_get_port(port_num);
     if (!port) return;
-    memcpy(stats_out, &port->stats, sizeof(ahci_port_stats_t));
+
+    /* Field-by-field atomic loads. Plain memcpy here would race with the IRQ
+     * path that writes stats fields via __atomic_store_n. Tearing across
+     * fields is acceptable since the snapshot is diagnostic. */
+    stats_out->cmd_count           = __atomic_load_n(&port->stats.cmd_count,           __ATOMIC_RELAXED);
+    stats_out->error_count         = __atomic_load_n(&port->stats.error_count,         __ATOMIC_RELAXED);
+    stats_out->timeout_count       = __atomic_load_n(&port->stats.timeout_count,       __ATOMIC_RELAXED);
+    stats_out->tfes_count          = __atomic_load_n(&port->stats.tfes_count,          __ATOMIC_RELAXED);
+    stats_out->comreset_count      = __atomic_load_n(&port->stats.comreset_count,      __ATOMIC_RELAXED);
+    stats_out->comreset_fail_count = __atomic_load_n(&port->stats.comreset_fail_count, __ATOMIC_RELAXED);
+    stats_out->last_error_tsc      = __atomic_load_n(&port->stats.last_error_tsc,      __ATOMIC_RELAXED);
+    stats_out->last_serr           = __atomic_load_n(&port->stats.last_serr,           __ATOMIC_RELAXED);
+    stats_out->last_tfd            = __atomic_load_n(&port->stats.last_tfd,            __ATOMIC_RELAXED);
 }
 
 int ahci_init(void) {
@@ -911,7 +946,9 @@ void ahci_test_read(void) {
     memset(dma_virt, 0, 4096);
 
     uint8_t slot = 0;
+    spin_lock(&port->lock);
     port->slot_bitmap &= ~(1 << slot);
+    spin_unlock(&port->lock);
 
     ahci_cmd_header_t* cmdheader = (ahci_cmd_header_t*)port->clb_virt;
     cmdheader[slot].cfl = sizeof(fis_reg_h2d_t) / sizeof(uint32_t);
@@ -985,7 +1022,9 @@ void ahci_test_read(void) {
         debug_printf("[AHCI] Test READ: FAILED (expected 0x55AA, got 0x%02x%02x)\n", sig1, sig2);
     }
 
+    spin_lock(&port->lock);
     port->slot_bitmap |= (1 << slot);
+    spin_unlock(&port->lock);
     pmm_free(dma_page, 1);
 }
 

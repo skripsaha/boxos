@@ -11,9 +11,11 @@
 ATADevice ata_primary_master;
 ATADevice ata_primary_slave;
 
-// Global ATA lock for multi-core safety
+// Global ATA lock for multi-core safety. Statically zero-initialised in BSS,
+// so spin_lock() works even before ata_init() runs spinlock_init() — but the
+// public API still funnels through ata_init() at boot, so the explicit init
+// remains the source of truth.
 static spinlock_t g_ata_lock;
-static bool g_ata_lock_initialized = false;
 
 static inline void ata_delay_400ns(void) {
     // Read status register 4 times (each read = ~100ns)
@@ -539,7 +541,6 @@ void ata_init(void) {
     debug_printf("[ATA] Initializing ATA/IDE driver...\n");
 
     spinlock_init(&g_ata_lock);
-    g_ata_lock_initialized = true;
 
     memset(&ata_primary_master, 0, sizeof(ATADevice));
     memset(&ata_primary_slave, 0, sizeof(ATADevice));
