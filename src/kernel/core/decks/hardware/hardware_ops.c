@@ -29,8 +29,25 @@
 #include "xhci_port.h"
 #include "xhci_enumeration.h"
 #include "serial.h"
+#include "kernel_config.h"
 
 #define VGA_PUTSTRING_FLAG_KEEP_COLOR 0x02u
+
+/* Mirror userspace VGA prints to COM1 so headless QEMU runs leave a
+ * shell-output trace in build/serial.log. Kernel-side prints already
+ * reach serial via kputchar; this fills the gap for user Manifest VGA
+ * ops. Gated behind CONFIG_VIDEO_SERIAL_MIRROR — keep OFF on real HW
+ * where serial is not wired or where 115200 baud (~87us/char) would
+ * dominate latency on long output. */
+static inline void HwVgaMirrorChar(char ch)
+{
+#if CONFIG_VIDEO_SERIAL_MIRROR
+    if (ch == '\n') serial_putchar('\r');
+    serial_putchar(ch);
+#else
+    (void)ch;
+#endif
+}
 
 /* -------------------------------------------------------------------------
  * Crate translation
@@ -78,6 +95,7 @@ static int HwVgaPutChar(const ManifestOp *op, Crate *crates, uint16_t crate_coun
     VideoSetCursor(col, row);
     VideoSetColor(color);
     VideoPrintChar((char)ch, color);
+    HwVgaMirrorChar((char)ch);
 
     VideoSetCursor(old_x, old_y);
     VideoSetColor(old_color);
@@ -110,6 +128,7 @@ static int HwVgaPutString(const ManifestOp *op, Crate *crates, uint16_t crate_co
         char c = str[i];
         if (c == '\0') break;
         VideoPrintChar(c, color);
+        HwVgaMirrorChar(c);
         chars_written++;
     }
     VideoBatchEnd();
@@ -274,6 +293,7 @@ static int HwVgaNewline(const ManifestOp *op, Crate *crates, uint16_t crate_coun
 {
     (void)crate_count;
     VideoPrintNewline();
+    HwVgaMirrorChar('\n');
 
     if (op->out_crate != CRATE_INDEX_NONE) {
         Crate *out = &crates[op->out_crate];

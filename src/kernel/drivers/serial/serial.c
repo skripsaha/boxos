@@ -37,8 +37,16 @@ static int serial_transmit_empty(void) {
 }
 
 void serial_putchar(char c) {
-    while (serial_transmit_empty() == 0);
-    outb(SERIAL_PORT_COM1 + SERIAL_DATA, c);
+    /* Bounded busy-wait: at 115200 baud the FIFO drains in ~87us per byte;
+     * cap at ~4M iterations (~1ms on a 4GHz CPU) so a missing/disconnected
+     * COM1 cannot wedge the kernel forever. Drop the byte on overflow. */
+    for (uint32_t spins = 0; spins < 4000000u; spins++) {
+        if (serial_transmit_empty()) {
+            outb(SERIAL_PORT_COM1 + SERIAL_DATA, c);
+            return;
+        }
+        asm volatile("pause");
+    }
 }
 
 void serial_print(const char* str) {

@@ -99,6 +99,15 @@
 #define CONFIG_AHCI_SELFTEST 0
 #endif
 
+/* Mirror every Video* user-side print to COM1 so headless QEMU runs leave
+ * a complete trace of shell output in build/serial.log. Adds one
+ * `serial_putchar` per VGA char — bounded by the serial transmit FIFO so
+ * worst-case latency is ~87us/char at 115200 baud. Default ON in dev/QEMU,
+ * turn OFF for production where COM1 may not be wired. */
+#ifndef CONFIG_VIDEO_SERIAL_MIRROR
+#define CONFIG_VIDEO_SERIAL_MIRROR 1
+#endif
+
 /* ============================================================================
  *  Scheduler / runqueue / process / IPC tunables
  * ============================================================================ */
