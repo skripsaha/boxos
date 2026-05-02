@@ -60,11 +60,14 @@ void pit_set_frequency(uint32_t frequency_hz) {
 }
 
 uint64_t pit_get_ticks(void) {
-    return pit_ticks;
+    /* Cross-core read of a counter the IRQ0 BSP increments. Aligned 64-bit
+     * load is atomic on x86_64; explicit __atomic_load_n removes the formal
+     * C11 data race with __atomic_fetch_add in pit_tick(). */
+    return __atomic_load_n(&pit_ticks, __ATOMIC_RELAXED);
 }
 
 void pit_tick(void) {
-    pit_ticks++;
+    __atomic_fetch_add(&pit_ticks, 1, __ATOMIC_RELAXED);
 }
 
 void pit_sleep_ms(uint32_t milliseconds) {
@@ -74,10 +77,10 @@ void pit_sleep_ms(uint32_t milliseconds) {
     }
 
     uint64_t ticks_to_wait = ((uint64_t)milliseconds * pit_frequency) / 1000;
-    uint64_t start_tick = pit_ticks;
+    uint64_t start_tick = __atomic_load_n(&pit_ticks, __ATOMIC_RELAXED);
     uint64_t target_tick = start_tick + ticks_to_wait;
 
-    while (pit_ticks < target_tick) {
+    while (__atomic_load_n(&pit_ticks, __ATOMIC_RELAXED) < target_tick) {
         asm volatile("hlt");
     }
 }
