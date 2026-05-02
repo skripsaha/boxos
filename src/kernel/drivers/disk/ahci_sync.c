@@ -35,7 +35,7 @@ int ahci_read_sectors_sync(uint8_t port, uint64_t lba,
             continue;
         }
 
-        port_state->stats.cmd_count++;
+        __atomic_fetch_add(&port_state->stats.cmd_count, 1, __ATOMIC_RELAXED);
 
         error_t err = ahci_build_ncq_read(port, slot, lba, sector_count, (void*)dma_phys);
         if (err != OK) {
@@ -45,8 +45,11 @@ int ahci_read_sectors_sync(uint8_t port, uint64_t lba,
         }
 
         volatile ahci_port_regs_t* regs = ahci_get_port_regs_pub(port);
+        /* Submit RMW on MMIO ci/sact must be serialized — see ahci.c:R3 note. */
+        spin_lock(&port_state->lock);
         regs->sact |= (1U << slot);
-        regs->ci |= (1U << slot);
+        regs->ci   |= (1U << slot);
+        spin_unlock(&port_state->lock);
 
         uint64_t timeout_tsc = rdtsc() + cpu_ms_to_tsc(AHCI_TIMEOUT_CMD_DEFAULT);
 
@@ -79,7 +82,7 @@ int ahci_read_sectors_sync(uint8_t port, uint64_t lba,
 
         if (rdtsc() >= timeout_tsc) {
             debug_printf("[AHCI Sync] Timeout on slot %d (retry %d/%d)\n", slot, retry + 1, AHCI_MAX_RETRIES);
-            port_state->stats.timeout_count++;
+            __atomic_fetch_add(&port_state->stats.timeout_count, 1, __ATOMIC_RELAXED);
             ahci_free_slot(port, slot);
             if (retry < AHCI_MAX_RETRIES - 1) {
                 ahci_port_recover(port_state);
@@ -122,7 +125,7 @@ int ahci_write_sectors_sync(uint8_t port, uint64_t lba,
             continue;
         }
 
-        port_state->stats.cmd_count++;
+        __atomic_fetch_add(&port_state->stats.cmd_count, 1, __ATOMIC_RELAXED);
 
         error_t err = ahci_build_ncq_write(port, slot, lba, sector_count, (void*)dma_phys);
         if (err != OK) {
@@ -132,8 +135,10 @@ int ahci_write_sectors_sync(uint8_t port, uint64_t lba,
         }
 
         volatile ahci_port_regs_t* regs = ahci_get_port_regs_pub(port);
+        spin_lock(&port_state->lock);
         regs->sact |= (1U << slot);
-        regs->ci |= (1U << slot);
+        regs->ci   |= (1U << slot);
+        spin_unlock(&port_state->lock);
 
         uint64_t timeout_tsc = rdtsc() + cpu_ms_to_tsc(AHCI_TIMEOUT_CMD_DEFAULT);
 
@@ -162,7 +167,7 @@ int ahci_write_sectors_sync(uint8_t port, uint64_t lba,
 
         if (rdtsc() >= timeout_tsc) {
             debug_printf("[AHCI Sync] Timeout on slot %d (retry %d/%d)\n", slot, retry + 1, AHCI_MAX_RETRIES);
-            port_state->stats.timeout_count++;
+            __atomic_fetch_add(&port_state->stats.timeout_count, 1, __ATOMIC_RELAXED);
             ahci_free_slot(port, slot);
             if (retry < AHCI_MAX_RETRIES - 1) {
                 ahci_port_recover(port_state);
@@ -206,7 +211,9 @@ int ahci_flush_cache_sync(uint8_t port) {
         mfence();
 
         volatile ahci_port_regs_t* regs = ahci_get_port_regs_pub(port);
+        spin_lock(&port_state->lock);
         regs->ci |= (1U << slot);
+        spin_unlock(&port_state->lock);
 
         uint64_t timeout_tsc = rdtsc() + cpu_ms_to_tsc(AHCI_TIMEOUT_CMD_DEFAULT);
 

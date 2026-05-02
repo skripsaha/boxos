@@ -253,13 +253,13 @@ int ata_dma_read_async(uint8_t is_master, uint32_t lba, uint16_t sector_count,
     req->buffer_virt = buffer_virt;
     req->buffer_phys = (uintptr_t)dma_buffer;
     req->buffer_size = sector_count * ATA_SECTOR_SIZE;
-    req->status = ATA_DMA_STATUS_PENDING;
+    __atomic_store_n(&req->status, ATA_DMA_STATUS_PENDING, __ATOMIC_RELEASE);
     req->start_time = rdtsc();
     req->retry_count = 0;
 
     if (ata_dma_setup_prd(req) != 0) {
         PhysAllocTaggedFree(dma_buffer, 1);
-        req->status = ATA_DMA_STATUS_FREE;
+        __atomic_store_n(&req->status, ATA_DMA_STATUS_FREE, __ATOMIC_RELEASE);
         spin_unlock(&dma_state.lock);
         debug_printf("[ATA DMA] ERROR: Failed to setup PRD\n");
         return -1;
@@ -267,13 +267,13 @@ int ata_dma_read_async(uint8_t is_master, uint32_t lba, uint16_t sector_count,
 
     if (ata_dma_send_command(req) != 0) {
         PhysAllocTaggedFree(dma_buffer, 1);
-        req->status = ATA_DMA_STATUS_FREE;
+        __atomic_store_n(&req->status, ATA_DMA_STATUS_FREE, __ATOMIC_RELEASE);
         spin_unlock(&dma_state.lock);
         debug_printf("[ATA DMA] ERROR: Failed to send DMA command\n");
         return -1;
     }
 
-    req->status = ATA_DMA_STATUS_IN_PROGRESS;
+    __atomic_store_n(&req->status, ATA_DMA_STATUS_IN_PROGRESS, __ATOMIC_RELEASE);
     dma_state.active_request_idx = 0;
     atomic_fetch_add_u32(&dma_state.total_requests, 1);
 
@@ -328,13 +328,13 @@ int ata_dma_write_async(uint8_t is_master, uint32_t lba, uint16_t sector_count,
     req->buffer_virt = (uint8_t*)buffer_virt;
     req->buffer_phys = (uintptr_t)dma_buffer;
     req->buffer_size = sector_count * ATA_SECTOR_SIZE;
-    req->status = ATA_DMA_STATUS_PENDING;
+    __atomic_store_n(&req->status, ATA_DMA_STATUS_PENDING, __ATOMIC_RELEASE);
     req->start_time = rdtsc();
     req->retry_count = 0;
 
     if (ata_dma_setup_prd(req) != 0) {
         PhysAllocTaggedFree(dma_buffer, 1);
-        req->status = ATA_DMA_STATUS_FREE;
+        __atomic_store_n(&req->status, ATA_DMA_STATUS_FREE, __ATOMIC_RELEASE);
         spin_unlock(&dma_state.lock);
         debug_printf("[ATA DMA] ERROR: Failed to setup PRD\n");
         return -1;
@@ -342,13 +342,13 @@ int ata_dma_write_async(uint8_t is_master, uint32_t lba, uint16_t sector_count,
 
     if (ata_dma_send_command(req) != 0) {
         PhysAllocTaggedFree(dma_buffer, 1);
-        req->status = ATA_DMA_STATUS_FREE;
+        __atomic_store_n(&req->status, ATA_DMA_STATUS_FREE, __ATOMIC_RELEASE);
         spin_unlock(&dma_state.lock);
         debug_printf("[ATA DMA] ERROR: Failed to send DMA command\n");
         return -1;
     }
 
-    req->status = ATA_DMA_STATUS_IN_PROGRESS;
+    __atomic_store_n(&req->status, ATA_DMA_STATUS_IN_PROGRESS, __ATOMIC_RELEASE);
     dma_state.active_request_idx = 0;
     atomic_fetch_add_u32(&dma_state.total_requests, 1);
 
@@ -384,7 +384,7 @@ void ata_dma_irq_handler(void) {
 
     ata_dma_request_t* req = &dma_state.active_request;
 
-    if (req->status != ATA_DMA_STATUS_IN_PROGRESS) {
+    if (__atomic_load_n(&req->status, __ATOMIC_ACQUIRE) != ATA_DMA_STATUS_IN_PROGRESS) {
         spin_unlock(&dma_state.lock);
         return;
     }
@@ -393,20 +393,22 @@ void ata_dma_irq_handler(void) {
 
     if (!transfer_success) {
         debug_printf("[ATA DMA] IRQ: DMA error status detected\n");
-        req->status = ATA_DMA_STATUS_ERROR_DMA;
+        __atomic_store_n(&req->status, ATA_DMA_STATUS_ERROR_DMA, __ATOMIC_RELEASE);
         atomic_fetch_add_u32(&dma_state.failed_requests, 1);
         async_io_mark_failed(req->event_id);
     } else {
-        req->status = ATA_DMA_STATUS_COMPLETED;
+        __atomic_store_n(&req->status, ATA_DMA_STATUS_COMPLETED, __ATOMIC_RELEASE);
         atomic_fetch_add_u32(&dma_state.completed_requests, 1);
         async_io_mark_completed_with_latency(req->event_id, req->start_time);
 
         ATA_DMA_DEBUG("[ATA DMA] IRQ: Transfer completed for event_id=%u\n", req->event_id);
     }
 
-    // Write result data to process's heap and push Result to ResultRing
+    // Write result data to process's heap and push Result to ResultRing.
+    // process_find_ref pins the process so it cannot be torn down between the
+    // lookup and the dereference of proc->cabin / KResultPush.
     if (transfer_success) {
-        process_t* proc = process_find(req->pid);
+        process_t* proc = process_find_ref(req->pid);
         if (proc) {
             if (!req->is_write) {
                 // Read completion: copy DMA buffer to process heap at data_addr
@@ -457,16 +459,18 @@ void ata_dma_irq_handler(void) {
             result.data_addr = req->data_addr;
             result.sender_pid = 0;
             KResultPush(proc, &result);
+            process_ref_dec(proc);
         }
     } else {
         // Error: push error Result
-        process_t* proc = process_find(req->pid);
+        process_t* proc = process_find_ref(req->pid);
         if (proc) {
             Result result;
             memset(&result, 0, sizeof(Result));
             result.error_code = ERR_IO;
             result.sender_pid = 0;
             KResultPush(proc, &result);
+            process_ref_dec(proc);
         }
     }
 
@@ -481,7 +485,7 @@ void ata_dma_irq_handler(void) {
     }
 
     PhysAllocTaggedFree((void*)req->buffer_phys, 1);
-    req->status = ATA_DMA_STATUS_FREE;
+    __atomic_store_n(&req->status, ATA_DMA_STATUS_FREE, __ATOMIC_RELEASE);
     dma_state.active_request_idx = 0xFF;
 
     spin_unlock(&dma_state.lock);
@@ -503,7 +507,7 @@ void ata_dma_check_timeouts(void) {
 
     ata_dma_request_t* req = &dma_state.active_request;
 
-    if (req->status != ATA_DMA_STATUS_IN_PROGRESS) {
+    if (__atomic_load_n(&req->status, __ATOMIC_ACQUIRE) != ATA_DMA_STATUS_IN_PROGRESS) {
         spin_unlock(&dma_state.lock);
         return;
     }
@@ -516,24 +520,26 @@ void ata_dma_check_timeouts(void) {
 
         outb(dma_state.bus_master_base + 0, ATA_DMA_CMD_STOP);
 
-        req->status = ATA_DMA_STATUS_ERROR_TIMEOUT;
+        __atomic_store_n(&req->status, ATA_DMA_STATUS_ERROR_TIMEOUT, __ATOMIC_RELEASE);
         atomic_fetch_add_u32(&dma_state.timeout_count, 1);
         atomic_fetch_add_u32(&dma_state.failed_requests, 1);
 
         async_io_mark_failed(req->event_id);
 
-        // Push timeout error Result to process's ResultRing
-        process_t* proc = process_find(req->pid);
+        // Push timeout error Result to process's ResultRing.
+        // process_find_ref pins the process across KResultPush.
+        process_t* proc = process_find_ref(req->pid);
         if (proc) {
             Result result;
             memset(&result, 0, sizeof(Result));
             result.error_code = ERR_TIMEOUT;
             result.sender_pid = 0;
             KResultPush(proc, &result);
+            process_ref_dec(proc);
         }
 
         PhysAllocTaggedFree((void*)req->buffer_phys, 1);
-        req->status = ATA_DMA_STATUS_FREE;
+        __atomic_store_n(&req->status, ATA_DMA_STATUS_FREE, __ATOMIC_RELEASE);
         dma_state.active_request_idx = 0xFF;
 
         // guide() will be called by next syscall or timer tick
@@ -582,25 +588,25 @@ int ata_read_sectors_dma(uint8_t is_master, uint32_t lba, uint8_t count, uint8_t
     req->buffer_virt = buffer;
     req->buffer_phys = (uintptr_t)dma_buffer;
     req->buffer_size = count * ATA_SECTOR_SIZE;
-    req->status = ATA_DMA_STATUS_PENDING;
+    __atomic_store_n(&req->status, ATA_DMA_STATUS_PENDING, __ATOMIC_RELEASE);
     req->start_time = rdtsc();
     req->retry_count = 0;
 
     if (ata_dma_setup_prd(req) != 0) {
         pmm_free(dma_buffer, 1);
-        req->status = ATA_DMA_STATUS_FREE;
+        __atomic_store_n(&req->status, ATA_DMA_STATUS_FREE, __ATOMIC_RELEASE);
         spin_unlock(&dma_state.lock);
         return -1;
     }
 
     if (ata_dma_send_command(req) != 0) {
         pmm_free(dma_buffer, 1);
-        req->status = ATA_DMA_STATUS_FREE;
+        __atomic_store_n(&req->status, ATA_DMA_STATUS_FREE, __ATOMIC_RELEASE);
         spin_unlock(&dma_state.lock);
         return -1;
     }
 
-    req->status = ATA_DMA_STATUS_IN_PROGRESS;
+    __atomic_store_n(&req->status, ATA_DMA_STATUS_IN_PROGRESS, __ATOMIC_RELEASE);
     dma_state.active_request_idx = 0;
 
     spin_unlock(&dma_state.lock);
@@ -612,15 +618,14 @@ int ata_read_sectors_dma(uint8_t is_master, uint32_t lba, uint8_t count, uint8_t
      * and (per the event_id==0 && pid==0 sentinel above) leaves the slot
      * alive so we can copy + free under our own lock. */
     while (1) {
-        __sync_synchronize();
-        uint8_t st = req->status;
+        ata_dma_status_t st = __atomic_load_n(&req->status, __ATOMIC_ACQUIRE);
         if (st == ATA_DMA_STATUS_COMPLETED) {
             spin_lock(&dma_state.lock);
             void *dma_virt = vmm_phys_to_virt((uintptr_t)dma_buffer);
             memcpy(buffer, dma_virt, req->buffer_size);
             atomic_fetch_add_u32(&dma_state.completed_requests, 1);
             pmm_free(dma_buffer, 1);
-            req->status = ATA_DMA_STATUS_FREE;
+            __atomic_store_n(&req->status, ATA_DMA_STATUS_FREE, __ATOMIC_RELEASE);
             dma_state.active_request_idx = 0xFF;
             spin_unlock(&dma_state.lock);
             return 0;
@@ -631,7 +636,7 @@ int ata_read_sectors_dma(uint8_t is_master, uint32_t lba, uint8_t count, uint8_t
             spin_lock(&dma_state.lock);
             atomic_fetch_add_u32(&dma_state.failed_requests, 1);
             pmm_free(dma_buffer, 1);
-            req->status = ATA_DMA_STATUS_FREE;
+            __atomic_store_n(&req->status, ATA_DMA_STATUS_FREE, __ATOMIC_RELEASE);
             dma_state.active_request_idx = 0xFF;
             spin_unlock(&dma_state.lock);
             return -1;
@@ -643,7 +648,7 @@ int ata_read_sectors_dma(uint8_t is_master, uint32_t lba, uint8_t count, uint8_t
             outb(dma_state.bus_master_base + 0, ATA_DMA_CMD_STOP);
             atomic_fetch_add_u32(&dma_state.failed_requests, 1);
             pmm_free(dma_buffer, 1);
-            req->status = ATA_DMA_STATUS_FREE;
+            __atomic_store_n(&req->status, ATA_DMA_STATUS_FREE, __ATOMIC_RELEASE);
             dma_state.active_request_idx = 0xFF;
             spin_unlock(&dma_state.lock);
             return -1;
@@ -692,25 +697,25 @@ int ata_write_sectors_dma(uint8_t is_master, uint32_t lba, uint8_t count, const 
     req->buffer_virt = (uint8_t*)buffer;
     req->buffer_phys = (uintptr_t)dma_buffer;
     req->buffer_size = count * ATA_SECTOR_SIZE;
-    req->status = ATA_DMA_STATUS_PENDING;
+    __atomic_store_n(&req->status, ATA_DMA_STATUS_PENDING, __ATOMIC_RELEASE);
     req->start_time = rdtsc();
     req->retry_count = 0;
 
     if (ata_dma_setup_prd(req) != 0) {
         pmm_free(dma_buffer, 1);
-        req->status = ATA_DMA_STATUS_FREE;
+        __atomic_store_n(&req->status, ATA_DMA_STATUS_FREE, __ATOMIC_RELEASE);
         spin_unlock(&dma_state.lock);
         return -1;
     }
 
     if (ata_dma_send_command(req) != 0) {
         pmm_free(dma_buffer, 1);
-        req->status = ATA_DMA_STATUS_FREE;
+        __atomic_store_n(&req->status, ATA_DMA_STATUS_FREE, __ATOMIC_RELEASE);
         spin_unlock(&dma_state.lock);
         return -1;
     }
 
-    req->status = ATA_DMA_STATUS_IN_PROGRESS;
+    __atomic_store_n(&req->status, ATA_DMA_STATUS_IN_PROGRESS, __ATOMIC_RELEASE);
     dma_state.active_request_idx = 0;
 
     spin_unlock(&dma_state.lock);
@@ -720,13 +725,12 @@ int ata_write_sectors_dma(uint8_t is_master, uint32_t lba, uint8_t count, const 
 
     /* Same poll-on-status pattern as ata_read_sectors_dma. */
     while (1) {
-        __sync_synchronize();
-        uint8_t st = req->status;
+        ata_dma_status_t st = __atomic_load_n(&req->status, __ATOMIC_ACQUIRE);
         if (st == ATA_DMA_STATUS_COMPLETED) {
             spin_lock(&dma_state.lock);
             atomic_fetch_add_u32(&dma_state.completed_requests, 1);
             pmm_free(dma_buffer, 1);
-            req->status = ATA_DMA_STATUS_FREE;
+            __atomic_store_n(&req->status, ATA_DMA_STATUS_FREE, __ATOMIC_RELEASE);
             dma_state.active_request_idx = 0xFF;
             spin_unlock(&dma_state.lock);
             ata_flush_cache(is_master);
@@ -738,7 +742,7 @@ int ata_write_sectors_dma(uint8_t is_master, uint32_t lba, uint8_t count, const 
             spin_lock(&dma_state.lock);
             atomic_fetch_add_u32(&dma_state.failed_requests, 1);
             pmm_free(dma_buffer, 1);
-            req->status = ATA_DMA_STATUS_FREE;
+            __atomic_store_n(&req->status, ATA_DMA_STATUS_FREE, __ATOMIC_RELEASE);
             dma_state.active_request_idx = 0xFF;
             spin_unlock(&dma_state.lock);
             return -1;
@@ -750,7 +754,7 @@ int ata_write_sectors_dma(uint8_t is_master, uint32_t lba, uint8_t count, const 
             outb(dma_state.bus_master_base + 0, ATA_DMA_CMD_STOP);
             atomic_fetch_add_u32(&dma_state.failed_requests, 1);
             pmm_free(dma_buffer, 1);
-            req->status = ATA_DMA_STATUS_FREE;
+            __atomic_store_n(&req->status, ATA_DMA_STATUS_FREE, __ATOMIC_RELEASE);
             dma_state.active_request_idx = 0xFF;
             spin_unlock(&dma_state.lock);
             return -1;
@@ -858,7 +862,7 @@ int ata_dma_start_async_transfer(async_io_request_t* req) {
     dma_req->buffer_virt = NULL;
     dma_req->buffer_phys = (uintptr_t)dma_buffer;
     dma_req->buffer_size = req->sector_count * ATA_SECTOR_SIZE;
-    dma_req->status = ATA_DMA_STATUS_PENDING;
+    __atomic_store_n(&dma_req->status, ATA_DMA_STATUS_PENDING, __ATOMIC_RELEASE);
     dma_req->retry_count = 0;
 
     dma_req->file_id = req->file_id;
@@ -875,7 +879,7 @@ int ata_dma_start_async_transfer(async_io_request_t* req) {
 
     if (ata_dma_setup_prd(dma_req) != 0) {
         pmm_free(dma_buffer, 1);
-        dma_req->status = ATA_DMA_STATUS_FREE;
+        __atomic_store_n(&dma_req->status, ATA_DMA_STATUS_FREE, __ATOMIC_RELEASE);
         spin_unlock(&dma_state.lock);
         debug_printf("[ATA DMA ASYNC] Failed to setup PRD\n");
         return -1;
@@ -883,13 +887,13 @@ int ata_dma_start_async_transfer(async_io_request_t* req) {
 
     if (ata_dma_send_command(dma_req) != 0) {
         pmm_free(dma_buffer, 1);
-        dma_req->status = ATA_DMA_STATUS_FREE;
+        __atomic_store_n(&dma_req->status, ATA_DMA_STATUS_FREE, __ATOMIC_RELEASE);
         spin_unlock(&dma_state.lock);
         debug_printf("[ATA DMA ASYNC] Failed to send DMA command\n");
         return -1;
     }
 
-    dma_req->status = ATA_DMA_STATUS_IN_PROGRESS;
+    __atomic_store_n(&dma_req->status, ATA_DMA_STATUS_IN_PROGRESS, __ATOMIC_RELEASE);
     dma_state.active_request_idx = 0;
     atomic_fetch_add_u32(&dma_state.total_requests, 1);
 
