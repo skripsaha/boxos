@@ -314,7 +314,10 @@ static int SysProcKill(const ManifestOp *op, Crate *crates, uint16_t crate_count
     if (self_exit) target_pid = ctx->proc->pid;
 
     if (target_pid == PROCESS_INVALID_PID) return ERR_INVALID_ARGUMENT;
-    process_t *target = process_find(target_pid);
+    /* Pin target across the state transition + buffer cleanup so a
+     * concurrent destroy on another core cannot recycle target_pid
+     * mid-flight. */
+    process_t *target = process_find_ref(target_pid);
     if (!target) return ERR_PROCESS_NOT_FOUND;
 
     process_set_state(target, self_exit ? PROC_DONE : PROC_CRASHED);
@@ -332,6 +335,7 @@ static int SysProcKill(const ManifestOp *op, Crate *crates, uint16_t crate_count
             }
         }
     }
+    process_ref_dec(target);
     return OK;
 }
 
@@ -352,14 +356,21 @@ static int SysProcInfo(const ManifestOp *op, Crate *crates, uint16_t crate_count
     memcpy(&target_pid, op->params, sizeof(uint32_t));
     if (target_pid == 0) target_pid = ctx->proc->pid;
 
-    process_t *target = process_find(target_pid);
+    /* Pin target across all field reads + tag snapshot. */
+    process_t *target = process_find_ref(target_pid);
     if (!target) return ERR_PROCESS_NOT_FOUND;
 
     Crate *out = &crates[op->out_crate];
-    if (out->capacity < 32) return ERR_BUFFER_TOO_SMALL;
+    if (out->capacity < 32) {
+        process_ref_dec(target);
+        return ERR_BUFFER_TOO_SMALL;
+    }
 
     uint8_t *kp = SysCrateWrite(out, ctx, out->capacity);
-    if (!kp) return ERR_INVALID_ADDRESS;
+    if (!kp) {
+        process_ref_dec(target);
+        return ERR_INVALID_ADDRESS;
+    }
 
     uint32_t pid    = target->pid;
     uint32_t state  = (uint32_t)target->state;
@@ -379,6 +390,7 @@ static int SysProcInfo(const ManifestOp *op, Crate *crates, uint16_t crate_count
     size_t copied   = process_snapshot_tags(target, (char *)(kp + 32), tag_room);
     out->size = 32 + copied;
     if (out->size > out->capacity) out->size = out->capacity;
+    process_ref_dec(target);
     return OK;
 }
 
@@ -657,6 +669,8 @@ static int SysBufResize(const ManifestOp *op, Crate *crates, uint16_t crate_coun
  *  Tags
  * ========================================================================= */
 
+/* On OK, *out_target carries a pinned reference; the caller MUST
+ * release it via process_ref_dec when done. On error, no ref is held. */
 static error_t sys_tag_target(const ManifestOp *op, Crate *crates,
                               const OpContext *ctx,
                               process_t **out_target,
@@ -671,11 +685,14 @@ static error_t sys_tag_target(const ManifestOp *op, Crate *crates,
     if (target_pid == PROCESS_INVALID_PID) return ERR_INVALID_ARGUMENT;
     if (target_pid == 0) target_pid = ctx->proc->pid;
 
-    process_t *t = process_find(target_pid);
+    process_t *t = process_find_ref(target_pid);
     if (!t) return ERR_PROCESS_NOT_FOUND;
 
     error_t srcrc = sys_crate_string(&crates[op->in_crate], ctx, tag_out, tag_out_size);
-    if (srcrc != OK) return srcrc;
+    if (srcrc != OK) {
+        process_ref_dec(t);
+        return srcrc;
+    }
 
     *out_target = t;
     return OK;
@@ -690,16 +707,19 @@ static int SysTagAdd(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     error_t rc = sys_tag_target(op, crates, ctx, &target, tag, sizeof(tag));
     if (rc != OK) return rc;
 
-    if (process_has_tag(target, tag)) return ERR_ALREADY_EXISTS;
-    if (process_add_tag(target, tag) != 0) return ERR_TAG_LIMIT_EXCEEDED;
-
-    if (strcmp(tag, "stopped") == 0) {
+    int result = OK;
+    if (process_has_tag(target, tag)) {
+        result = ERR_ALREADY_EXISTS;
+    } else if (process_add_tag(target, tag) != 0) {
+        result = ERR_TAG_LIMIT_EXCEEDED;
+    } else if (strcmp(tag, "stopped") == 0) {
         process_state_t s = process_get_state(target);
         if (s == PROC_WORKING || s == PROC_CREATED) {
             process_set_state(target, PROC_STOPPED);
         }
     }
-    return OK;
+    process_ref_dec(target);
+    return result;
 }
 
 static int SysTagRemove(const ManifestOp *op, Crate *crates, uint16_t crate_count,
@@ -711,15 +731,18 @@ static int SysTagRemove(const ManifestOp *op, Crate *crates, uint16_t crate_coun
     error_t rc = sys_tag_target(op, crates, ctx, &target, tag, sizeof(tag));
     if (rc != OK) return rc;
 
-    if (!process_has_tag(target, tag))           return ERR_TAG_NOT_FOUND;
-    if (process_remove_tag(target, tag) != 0)    return ERR_INVALID_ARGUMENT;
-
-    if (strcmp(tag, "stopped") == 0) {
+    int result = OK;
+    if (!process_has_tag(target, tag)) {
+        result = ERR_TAG_NOT_FOUND;
+    } else if (process_remove_tag(target, tag) != 0) {
+        result = ERR_INVALID_ARGUMENT;
+    } else if (strcmp(tag, "stopped") == 0) {
         if (process_get_state(target) == PROC_STOPPED) {
             process_set_state(target, PROC_WORKING);
         }
     }
-    return OK;
+    process_ref_dec(target);
+    return result;
 }
 
 /* SYSTEM_OP_TAG_CHECK   out_crate: u8 has_tag (0/1) */
@@ -741,6 +764,7 @@ static int SysTagCheck(const ManifestOp *op, Crate *crates, uint16_t crate_count
             if (kp) { kp[0] = has ? 1 : 0; out->size = 1; }
         }
     }
+    process_ref_dec(target);
     return OK;
 }
 
