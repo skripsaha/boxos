@@ -28,6 +28,11 @@ static keyboard_state_t kb_state = {0};
 
 static keyboard_line_state_t line_state = {0};
 static spinlock_t line_lock = {0};
+/* INVARIANT: readline_result is a singleton owned by the one thread that
+ * calls keyboard_readline() (in BoxOS this is shell.bin / display.elf
+ * stdin reader). If multiple threads ever read stdin concurrently the
+ * pointer returned by keyboard_readline() will alias their data. Don't
+ * call from more than one place. */
 static char readline_result[KEYBOARD_LINE_BUFFER_SIZE];
 
 /* ─── Extended scancode (0xE0) state ────────────────────────────────────── */
@@ -82,13 +87,14 @@ static char translate_key(uint8_t key)
     char shifted = scancode_to_ascii_shifted[key];
     int  is_alpha = (base >= 'a' && base <= 'z');
 
+    uint8_t shift = __atomic_load_n(&kb_state.shift_pressed, __ATOMIC_RELAXED);
     if (is_alpha) {
+        uint8_t caps = __atomic_load_n(&kb_state.caps_lock, __ATOMIC_RELAXED);
         /* XOR: exactly one of CapsLock/Shift active → uppercase */
-        int want_upper = kb_state.caps_lock ^ kb_state.shift_pressed;
-        return want_upper ? shifted : base;
+        return (caps ^ shift) ? shifted : base;
     }
 
-    return kb_state.shift_pressed ? shifted : base;
+    return shift ? shifted : base;
 }
 
 /* Arm the software repeat timer for the given key. */
@@ -260,11 +266,11 @@ void keyboard_handle_scancode(uint8_t scancode)
 
         /* Extended modifiers */
         if (key == 0x1D) {   /* Right Ctrl */
-            kb_state.ctrl_pressed = !is_release;
+            __atomic_store_n(&kb_state.ctrl_pressed, !is_release, __ATOMIC_RELAXED);
             return;
         }
         if (key == 0x38) {   /* Right Alt */
-            kb_state.alt_pressed = !is_release;
+            __atomic_store_n(&kb_state.alt_pressed, !is_release, __ATOMIC_RELAXED);
             return;
         }
 
@@ -288,32 +294,44 @@ void keyboard_handle_scancode(uint8_t scancode)
 
     /* Modifiers — track press/release, no character output */
     if (key == 0x2A || key == 0x36) {      /* Left/Right Shift */
-        kb_state.shift_pressed = !is_release;
+        __atomic_store_n(&kb_state.shift_pressed, !is_release, __ATOMIC_RELAXED);
         return;
     }
     if (key == 0x1D) {                     /* Left Ctrl */
-        kb_state.ctrl_pressed = !is_release;
+        __atomic_store_n(&kb_state.ctrl_pressed, !is_release, __ATOMIC_RELAXED);
         return;
     }
     if (key == 0x38) {                     /* Left Alt */
-        kb_state.alt_pressed = !is_release;
+        __atomic_store_n(&kb_state.alt_pressed, !is_release, __ATOMIC_RELAXED);
         return;
     }
 
-    /* Toggle keys — act on press only */
+    /* Toggle keys — act on press only. Toggle is a load+xor+store (3 ops);
+     * since IRQ1 is the sole writer (BSP) and toggles arrive serialised by
+     * the IRQ disable in spinlock paths used by readers, the load-then-store
+     * pattern is safe. Snapshot the post-toggle vector for keyboard_set_leds. */
     if (key == 0x3A && !is_release) {      /* Caps Lock */
-        kb_state.caps_lock = !kb_state.caps_lock;
-        keyboard_set_leds(kb_state.caps_lock, kb_state.num_lock, kb_state.scroll_lock);
+        uint8_t caps = !__atomic_load_n(&kb_state.caps_lock, __ATOMIC_RELAXED);
+        __atomic_store_n(&kb_state.caps_lock, caps, __ATOMIC_RELAXED);
+        keyboard_set_leds(caps,
+                          __atomic_load_n(&kb_state.num_lock,    __ATOMIC_RELAXED),
+                          __atomic_load_n(&kb_state.scroll_lock, __ATOMIC_RELAXED));
         return;
     }
     if (key == 0x45 && !is_release) {      /* Num Lock */
-        kb_state.num_lock = !kb_state.num_lock;
-        keyboard_set_leds(kb_state.caps_lock, kb_state.num_lock, kb_state.scroll_lock);
+        uint8_t num = !__atomic_load_n(&kb_state.num_lock, __ATOMIC_RELAXED);
+        __atomic_store_n(&kb_state.num_lock, num, __ATOMIC_RELAXED);
+        keyboard_set_leds(__atomic_load_n(&kb_state.caps_lock,   __ATOMIC_RELAXED),
+                          num,
+                          __atomic_load_n(&kb_state.scroll_lock, __ATOMIC_RELAXED));
         return;
     }
     if (key == 0x46 && !is_release) {      /* Scroll Lock */
-        kb_state.scroll_lock = !kb_state.scroll_lock;
-        keyboard_set_leds(kb_state.caps_lock, kb_state.num_lock, kb_state.scroll_lock);
+        uint8_t scroll = !__atomic_load_n(&kb_state.scroll_lock, __ATOMIC_RELAXED);
+        __atomic_store_n(&kb_state.scroll_lock, scroll, __ATOMIC_RELAXED);
+        keyboard_set_leds(__atomic_load_n(&kb_state.caps_lock, __ATOMIC_RELAXED),
+                          __atomic_load_n(&kb_state.num_lock,  __ATOMIC_RELAXED),
+                          scroll);
         return;
     }
 
@@ -324,7 +342,7 @@ void keyboard_handle_scancode(uint8_t scancode)
     }
 
     /* Translate scancode → ASCII */
-    kb_state.last_keycode = key;
+    __atomic_store_n(&kb_state.last_keycode, key, __ATOMIC_RELAXED);
     char ascii = translate_key(key);
 
     if (ascii != 0) {
@@ -364,23 +382,39 @@ void keyboard_push_sequence(const char* seq, uint8_t len)
    Buffer access API (unchanged interface)
    ═══════════════════════════════════════════════════════════════════════════ */
 
+/* Hint readers — head/tail are written under kb_lock by the IRQ-side
+ * producer; user-context probing without the lock is fine on x86 (aligned
+ * 32-bit loads are atomic) but expressed via __atomic_load_n to avoid the
+ * formal C11 data race vs the IRQ-side stores. */
 int keyboard_has_input(void)
 {
-    return kb_head != kb_tail;
+    uint32_t h = __atomic_load_n(&kb_head, __ATOMIC_RELAXED);
+    uint32_t t = __atomic_load_n(&kb_tail, __ATOMIC_RELAXED);
+    return h != t;
 }
 
 uint32_t keyboard_available(void)
 {
-    if (kb_head == kb_tail) return 0;
-    if (kb_head > kb_tail) return kb_head - kb_tail;
-    return KEYBOARD_BUFFER_SIZE - kb_tail + kb_head;
+    uint32_t h = __atomic_load_n(&kb_head, __ATOMIC_RELAXED);
+    uint32_t t = __atomic_load_n(&kb_tail, __ATOMIC_RELAXED);
+    if (h == t) return 0;
+    if (h > t) return h - t;
+    return KEYBOARD_BUFFER_SIZE - t + h;
 }
 
 char keyboard_getchar(void)
 {
-    if (kb_head == kb_tail) return 0;
+    if (__atomic_load_n(&kb_head, __ATOMIC_RELAXED) ==
+        __atomic_load_n(&kb_tail, __ATOMIC_RELAXED))
+        return 0;
 
     spin_lock(&kb_lock);
+    /* Re-check under lock: another consumer may have drained between the
+     * fast-path probe and here. */
+    if (kb_head == kb_tail) {
+        spin_unlock(&kb_lock);
+        return 0;
+    }
     char c = keyboard_buffer[kb_tail];
     kb_tail = (kb_tail + 1) % KEYBOARD_BUFFER_SIZE;
     spin_unlock(&kb_lock);
@@ -462,8 +496,11 @@ static void line_process_char(char c)
         return;
     }
 
-    /* Ctrl+C */
-    if (kb_state.ctrl_pressed && (c == 'c' || c == 'C')) {
+    /* Ctrl+C — atomic load: kb_state.ctrl_pressed is written from PS/2 IRQ
+     * (BSP) and xHCI HID IRQ (any core), but read here from any user-thread
+     * core. */
+    if (__atomic_load_n(&kb_state.ctrl_pressed, __ATOMIC_RELAXED) &&
+        (c == 'c' || c == 'C')) {
         line_state.ctrl_c_pressed = 1;
         line_state.length = 0;
         line_state.cursor = 0;

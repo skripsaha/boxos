@@ -94,9 +94,11 @@ void xhci_process_keyboard_report(usb_boot_keyboard_report_t* report)
     keyboard_state_t* kb = keyboard_get_state();
 
     uint8_t new_mods = report->modifiers;
-    kb->shift_pressed = (new_mods & 0x22) ? 1 : 0;
-    kb->ctrl_pressed  = (new_mods & 0x11) ? 1 : 0;
-    kb->alt_pressed   = (new_mods & 0x44) ? 1 : 0;
+    /* Atomic stores: kb_state is also written by PS/2 IRQ on BSP and read
+     * from any user-thread core (shell line discipline / Manifest hw_kb). */
+    __atomic_store_n(&kb->shift_pressed, (new_mods & 0x22) ? 1 : 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&kb->ctrl_pressed,  (new_mods & 0x11) ? 1 : 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&kb->alt_pressed,   (new_mods & 0x44) ? 1 : 0, __ATOMIC_RELAXED);
 
     /* ── Released keys ── */
     for (int i = 0; i < 6; i++) {
