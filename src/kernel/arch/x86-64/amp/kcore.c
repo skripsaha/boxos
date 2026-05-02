@@ -9,6 +9,7 @@
 #include "perf_trace.h"
 #include "amp.h"
 #include "error.h"
+#include "kring.h"  /* KPocketIsEmpty for re-arm after pending clear */
 
 KCorePocketQueue *g_kcore_queues = NULL;
 
@@ -170,6 +171,24 @@ static void kcore_process_entry(struct process_t* proc)
 
     mfence();
     atomic_store_u8(&proc->kcore_pending, 0);
+    mfence();
+
+    /* Re-arm window: between guide_process_one's last KPocketIsEmpty
+     * check and the kcore_pending=0 store above, userspace can have
+     * pushed a fresh Pocket. The next SYSCALL's CAS would fail (pending
+     * was still 1) and the Pocket would sit forever. After clearing
+     * pending we re-inspect the ring; if it's not empty we resubmit so
+     * a K-Core picks it up.
+     *
+     * We're allowed to call kcore_submit recursively here — the proc
+     * goes back into a queue, ref_inc balances ref_dec, and the next
+     * pop will land in another kcore_process_entry. No locks held
+     * across this. */
+    if (!KPocketIsEmpty(proc)) {
+        if (atomic_cas_u8(&proc->kcore_pending, 0, 1)) {
+            kcore_submit(proc);
+        }
+    }
 
     process_ref_dec(proc);
 }
