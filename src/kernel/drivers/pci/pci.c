@@ -2,6 +2,14 @@
 #include "io.h"
 #include "klib.h"
 
+/* PCI config space access is two stages:
+ *   outl(0xCF8, addr); inl/outl(0xCFC, ...);
+ * If two cores interleave, one's `inl` can read using the other's `outl` of
+ * 0xCF8 and return data from a different (bus,dev,fn,off). Currently config
+ * cycles only run during boot (BSP) and during driver init, but the lock
+ * makes the API safe to call from any core / any time. */
+static spinlock_t g_pci_cfg_lock = {0};
+
 static inline uint32_t pci_build_address(uint8_t bus, uint8_t device, uint8_t function, uint8_t offset) {
     return (uint32_t)(
         ((uint32_t)bus << 16) |
@@ -14,14 +22,19 @@ static inline uint32_t pci_build_address(uint8_t bus, uint8_t device, uint8_t fu
 
 uint32_t pci_config_read_dword(uint8_t bus, uint8_t device, uint8_t function, uint8_t offset) {
     uint32_t address = pci_build_address(bus, device, function, offset);
+    spin_lock(&g_pci_cfg_lock);
     outl(PCI_CONFIG_ADDRESS, address);
-    return inl(PCI_CONFIG_DATA);
+    uint32_t v = inl(PCI_CONFIG_DATA);
+    spin_unlock(&g_pci_cfg_lock);
+    return v;
 }
 
 void pci_config_write_dword(uint8_t bus, uint8_t device, uint8_t function, uint8_t offset, uint32_t value) {
     uint32_t address = pci_build_address(bus, device, function, offset);
+    spin_lock(&g_pci_cfg_lock);
     outl(PCI_CONFIG_ADDRESS, address);
     outl(PCI_CONFIG_DATA, value);
+    spin_unlock(&g_pci_cfg_lock);
 }
 
 uint16_t pci_config_read_word(uint8_t bus, uint8_t device, uint8_t function, uint8_t offset) {

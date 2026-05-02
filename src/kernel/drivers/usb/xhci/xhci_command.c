@@ -16,18 +16,6 @@ void xhci_command_init(void) {
     cmd_sequence = 0;
 }
 
-static int find_free_cmd_slot(void) {
-    spin_lock(&pending_cmds_lock);
-    for (int i = 0; i < XHCI_MAX_PENDING_CMDS; i++) {
-        if (pending_cmds[i].state == CMD_STATE_IDLE) {
-            spin_unlock(&pending_cmds_lock);
-            return i;
-        }
-    }
-    spin_unlock(&pending_cmds_lock);
-    return -1;
-}
-
 static int find_cmd_by_trb_phys(uint64_t trb_phys) {
     spin_lock(&pending_cmds_lock);
     for (int i = 0; i < XHCI_MAX_PENDING_CMDS; i++) {
@@ -41,15 +29,30 @@ static int find_cmd_by_trb_phys(uint64_t trb_phys) {
     return -1;
 }
 
+/* TOCTOU fix: previously find_free_cmd_slot() released the lock between
+ * locating an IDLE slot and the caller marking it POSTED, so two callers on
+ * different cores could grab the same index. Now allocate, populate, and
+ * mark POSTED as one critical section. cmd_sequence is also bumped under
+ * the lock so two posters cannot get the same sequence number. */
 static int post_command(xhci_controller_t* ctrl, xhci_trb_t* trb, uint8_t slot_id) {
-    int cmd_idx = find_free_cmd_slot();
+    spin_lock(&pending_cmds_lock);
+
+    int cmd_idx = -1;
+    for (int i = 0; i < XHCI_MAX_PENDING_CMDS; i++) {
+        if (pending_cmds[i].state == CMD_STATE_IDLE) {
+            cmd_idx = i;
+            break;
+        }
+    }
     if (cmd_idx < 0) {
+        spin_unlock(&pending_cmds_lock);
         debug_printf("[xHCI CMD] No free command slots\n");
         return -1;
     }
 
     uint64_t trb_phys = xhci_ring_enqueue(&ctrl->command_ring, trb);
     if (trb_phys == 0) {
+        spin_unlock(&pending_cmds_lock);
         debug_printf("[xHCI CMD] Command ring full\n");
         return -1;
     }
@@ -61,6 +64,8 @@ static int post_command(xhci_controller_t* ctrl, xhci_trb_t* trb, uint8_t slot_i
     pending_cmds[cmd_idx].state = CMD_STATE_POSTED;
     pending_cmds[cmd_idx].completion_code = 0;
     pending_cmds[cmd_idx].completion_param = 0;
+
+    spin_unlock(&pending_cmds_lock);
 
     __sync_synchronize();
     ctrl->doorbells->doorbells[0].doorbell = 0;
