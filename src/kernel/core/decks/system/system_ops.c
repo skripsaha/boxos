@@ -123,11 +123,20 @@ static int SysRoute(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     if (ctx->target_pid == 0)          return ERR_INVALID_ARGUMENT;
     if (ctx->target_pid == ctx->proc->pid) return ERR_ROUTE_SELF;
 
-    process_t *target = process_find(ctx->target_pid);
-    if (!target_alive(target))         return ERR_PROCESS_NOT_FOUND;
+    /* Pin the target with a refcount so it cannot be torn down between
+     * the lookup and the result push. Without this, a concurrent
+     * process_destroy on another core can free target's cabin/result_ring
+     * while ipc_copy_to_heap or KResultPush still dereferences them. */
+    process_t *target = process_find_ref(ctx->target_pid);
+    if (!target) return ERR_PROCESS_NOT_FOUND;
+    if (!target_alive(target)) {
+        process_ref_dec(target);
+        return ERR_PROCESS_NOT_FOUND;
+    }
 
     uint64_t target_addr = 0;
     uint32_t length      = 0;
+    int      rc          = OK;
 
     if (op->in_crate != CRATE_INDEX_NONE) {
         Crate *src = &crates[op->in_crate];
@@ -135,14 +144,16 @@ static int SysRoute(const ManifestOp *op, Crate *crates, uint16_t crate_count,
             length = (uint32_t)(src->size > UINT32_MAX ? UINT32_MAX : src->size);
             target_addr = ipc_copy_to_heap(ctx->proc, target,
                                            (uint64_t)src->addr, length);
-            if (target_addr == 0) return ERR_NO_MEMORY;
+            if (target_addr == 0) rc = ERR_NO_MEMORY;
         }
     }
 
-    if (!push_ipc_result(target, ctx->proc->pid, target_addr, length)) {
-        return ERR_ROUTE_TARGET_FULL;
+    if (rc == OK && !push_ipc_result(target, ctx->proc->pid, target_addr, length)) {
+        rc = ERR_ROUTE_TARGET_FULL;
     }
-    return OK;
+
+    process_ref_dec(target);
+    return rc;
 }
 
 static bool tag_str_eq(const char *a, const char *b)
