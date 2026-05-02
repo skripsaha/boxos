@@ -688,13 +688,15 @@ static int HwKbGetChar(const ManifestOp *op, Crate *crates, uint16_t crate_count
 
     char ch = keyboard_getchar();
     keyboard_state_t *kbs = keyboard_get_state();
+    /* Atomic loads — kb_state is mutated from PS/2 IRQ (BSP) and xHCI HID
+     * IRQ; this op runs on the calling user-core. */
     uint8_t mods = 0;
-    if (kbs->shift_pressed) mods |= 0x01;
-    if (kbs->ctrl_pressed)  mods |= 0x02;
-    if (kbs->alt_pressed)   mods |= 0x04;
+    if (__atomic_load_n(&kbs->shift_pressed, __ATOMIC_RELAXED)) mods |= 0x01;
+    if (__atomic_load_n(&kbs->ctrl_pressed,  __ATOMIC_RELAXED)) mods |= 0x02;
+    if (__atomic_load_n(&kbs->alt_pressed,   __ATOMIC_RELAXED)) mods |= 0x04;
 
     kp[0] = (uint8_t)ch;
-    kp[1] = kbs->last_keycode;
+    kp[1] = __atomic_load_n(&kbs->last_keycode, __ATOMIC_RELAXED);
     kp[2] = mods;
     kp[3] = HW_KB_SUCCESS;
     out->size = 4;

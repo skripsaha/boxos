@@ -17,14 +17,21 @@
 extern uint32_t g_kb_repeat_delay_ticks;
 extern uint32_t g_kb_repeat_rate_ticks;
 
+/* Modifier/lock fields are touched by three different cores:
+ *   - PS/2 IRQ1 (always BSP via IO-APIC) — sets shift/ctrl/alt/caps/num/scroll
+ *   - xHCI HID IRQ (any LAPIC) — also sets shift/ctrl/alt
+ *   - user thread on any app-core — reads via keyboard_get_state /
+ *     line_process_char / hw_kb.modifiers
+ * A bitfield byte cannot be safely RMW'd from multiple cores, so each
+ * field gets its own _Atomic uint8_t storage. Access via __atomic_*. */
 typedef struct {
-    uint8_t shift_pressed  : 1;
-    uint8_t ctrl_pressed   : 1;
-    uint8_t alt_pressed    : 1;
-    uint8_t caps_lock      : 1;
-    uint8_t num_lock       : 1;
-    uint8_t scroll_lock    : 1;
-    uint8_t last_keycode;
+    _Atomic uint8_t shift_pressed;
+    _Atomic uint8_t ctrl_pressed;
+    _Atomic uint8_t alt_pressed;
+    _Atomic uint8_t caps_lock;
+    _Atomic uint8_t num_lock;
+    _Atomic uint8_t scroll_lock;
+    _Atomic uint8_t last_keycode;
 } keyboard_state_t;
 
 typedef struct {
