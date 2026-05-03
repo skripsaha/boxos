@@ -462,8 +462,15 @@ int readline(char* buffer, size_t max_len)
                             1 };
         send(g_display_pid, req, 4);
 
+        /* Block indefinitely. readline is conceptually a blocking primitive
+         * — a finite timeout here was a leftover defence from earlier IPC
+         * race investigations.  With reliable cross-core delivery (K-Core
+         * fix 2026-05-03), waking on the user's first keypress is the only
+         * correct exit; timing out and re-prompting created phantom prompts
+         * + stash-poisoned input where the line typed at one prompt would
+         * appear at the next. */
         Result result;
-        if (!receive_wait(&result, 60000))                        return -1;
+        if (!receive_wait(&result, 0))                            return -1;
         if (result.error_code != OK)                              return -1;
         if (result.data_addr == 0 || result.data_length < 4)      return -1;
 
@@ -495,8 +502,10 @@ int getchar(void)
         uint8_t req = DISP_CMD_GETCHAR;
         send(g_display_pid, &req, 1);
 
+        /* Same rationale as readline above: block until display delivers a
+         * keypress.  No timeout — getchar is blocking by definition. */
         Result result;
-        if (!receive_wait(&result, 60000))                        return -1;
+        if (!receive_wait(&result, 0))                            return -1;
         if (result.error_code != OK)                              return -1;
         if (result.data_addr == 0 || result.data_length < 1)      return -1;
         return *(const uint8_t*)(uintptr_t)result.data_addr;
