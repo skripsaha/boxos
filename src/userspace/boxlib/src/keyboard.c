@@ -106,25 +106,27 @@ int kb_readline(char *buffer, size_t size, bool echo)
                          60000, &r);
 
         if (rc == 0) {
+            /* rc=OK means the kernel produced a COMPLETE line — including
+             * an empty Enter (length==0). Pass it through so the shell
+             * loop can treat it as LINE_EMPTY and re-prompt. The previous
+             * iteration of this fix accidentally swallowed empty Enters
+             * by polling on length==0 — that path only applies when the
+             * kernel returned WOULD_BLOCK below. */
             uint32_t length = (uint32_t)out[0]
                             | ((uint32_t)out[1] << 8)
                             | ((uint32_t)out[2] << 16)
                             | ((uint32_t)out[3] << 24);
-            if (length == 0) {
-                /* No complete line yet — keep polling. (Earlier code
-                 * returned 0 here, propagating an empty reply that shell
-                 * misinterpreted as a fresh empty Enter, redrawing the
-                 * prompt.) */
-                kb_sleep(50000);
-                continue;
-            }
             if (length >= size) length = (uint32_t)(size - 1);
-            memcpy(buffer, out + 4, length);
+            if (length > 0) memcpy(buffer, out + 4, length);
             buffer[length] = '\0';
             return (int)length;
         }
         if (rc == ERR_WOULD_BLOCK || rc == ERR_BUSY ||
             r.error_code == ERR_WOULD_BLOCK || r.error_code == ERR_BUSY) {
+            /* Kernel buffer doesn't have a complete line yet — pace the
+             * userspace poll. Note: with HW_KEYBOARD_READLINE async, this
+             * is the ONLY path that means "no line yet"; rc=OK with
+             * length=0 means "empty Enter, line is complete". */
             kb_sleep(50000);
             continue;
         }
