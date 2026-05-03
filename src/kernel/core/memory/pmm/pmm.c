@@ -19,6 +19,17 @@ static uint64_t pmm_max_phys_addr = 0;
 
 static uint64_t pmm_mem_end = 0;
 
+/*
+ * Pristine free count just after E820 USABLE entries were inserted into the
+ * buddy zone, before any boot-time reserves were applied.  This is the actual
+ * installed RAM (in pages) — distinct from `pmm_buddy.total_pages` which is
+ * (mem_end - zone_base) / PAGE_SIZE and includes PCI MMIO holes, ACPI/UEFI
+ * runtime regions, and any other gaps between usable E820 chunks.  Reporting
+ * `total - free` against the SPAN inflates "used" by every gigabyte of hole
+ * the kernel never owned in the first place.
+ */
+static size_t pmm_usable_pages = 0;
+
 typedef struct {
     uintptr_t start;
     uintptr_t end;
@@ -197,6 +208,15 @@ error_t pmm_init(void) {
         debug_printf("[PMM] %zu pages beyond MAXPHYADDR unusable\n", unusable_pages);
     }
 
+    /* Snapshot the actual installed RAM (in pages) AFTER all USABLE E820
+     * regions have been inserted into the buddy and BEFORE any reserve
+     * pass below.  This is the correct denominator for memory accounting:
+     * holes between usable chunks (PCI MMIO, UEFI runtime, ACPI tables,
+     * etc.) live inside [zone_base, mem_end) but were never free'd into
+     * the buddy, so charging them as "used" against the SPAN inflates
+     * usage by gigabytes on a typical 16 GiB UEFI box. */
+    pmm_usable_pages = pmm_buddy.free_count;
+
     if (bi_ok) {
         buddy_reserve_range(&pmm_buddy, (uintptr_t)bi->kernel_start, (uintptr_t)bi->kernel_end);
     } else {
@@ -296,7 +316,10 @@ void pmm_free(void* addr, size_t pages) {
 }
 
 size_t pmm_total_pages(void) {
-    return pmm_buddy.total_pages;
+    /* Installed RAM in pages — count of E820 USABLE entries inserted into
+     * the buddy at init.  NOT (mem_end - zone_base)/PAGE_SIZE: that span
+     * includes MMIO holes the kernel never owns. */
+    return pmm_usable_pages;
 }
 
 size_t pmm_free_pages(void) {
@@ -307,18 +330,19 @@ size_t pmm_free_pages(void) {
 }
 
 size_t pmm_used_pages(void) {
-    return pmm_total_pages() - pmm_free_pages();
+    size_t free = pmm_free_pages();
+    return pmm_usable_pages > free ? pmm_usable_pages - free : 0;
 }
 
 uint64_t pmm_get_total_memory(void) {
-    /* Returns the physical TOP of the buddy zone (one-past-last byte), not
-     * the count of installed RAM. Kept as-is for ABI compatibility — see
-     * pmm_get_total_ram_bytes() for the bytes-of-RAM helper. */
+    /* Physical TOP of the buddy zone (one-past-last byte).  Used by code
+     * that needs the addressable span (e.g. identity-map sizing); for
+     * RAM-quantity reporting use pmm_get_total_ram_bytes(). */
     return pmm_buddy.base + (pmm_buddy.total_pages * PMM_PAGE_SIZE);
 }
 
 uint64_t pmm_get_total_ram_bytes(void) {
-    return (uint64_t)pmm_buddy.total_pages * PMM_PAGE_SIZE;
+    return (uint64_t)pmm_usable_pages * PMM_PAGE_SIZE;
 }
 
 void pmm_dump_stats(void) {
