@@ -249,7 +249,18 @@ void* _pmm_alloc_impl(size_t pages, uint64_t tags) {
         return PhysAllocTagged(pages, tags);
     }
 
-    if (!addr) return NULL;
+    if (!addr) {
+        /* Diagnostic: any pmm_alloc failure is a memory pressure signal.
+         * Rate-limited so a stuck-allocator loop doesn't flood serial. */
+        static volatile uint64_t g_pmm_fail = 0;
+        uint64_t cnt = __atomic_add_fetch(&g_pmm_fail, 1, __ATOMIC_RELAXED);
+        if (cnt == 1 || cnt == 10 || (cnt % 100) == 0) {
+            kprintf("[TRC] PMM_FAIL pages=%lu tags=0x%lx free=%zu cnt=%lu\n",
+                    (unsigned long)pages, (unsigned long)tags,
+                    pmm_buddy.free_count, cnt);
+        }
+        return NULL;
+    }
 
     uintptr_t phys_end = (uintptr_t)addr + pages * PMM_PAGE_SIZE - 1;
     if (phys_end >= pmm_max_phys_addr) {
