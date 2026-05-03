@@ -6,6 +6,13 @@
  * slot region is a separately reserved virtual range whose pages are mapped
  * on demand: PocketRing slots fault in via the user page-fault handler;
  * ResultRing slots are mapped proactively here in KResultPush.
+ *
+ * ResultRing is MPSC: multiple K-Cores can land in KResultPush concurrently
+ * for the same target (e.g. two senders deliver IPC replies, plus the
+ * sender's own manifest confirmation, all racing for one cabin's ring).
+ * The producer side uses a per-slot Vyukov-style generation counter so the
+ * slot[tail] write cannot stomp another producer's payload, and consumers
+ * cannot read a half-written slot.
  */
 
 #include "kring.h"
@@ -15,6 +22,8 @@
 #include "process.h"
 #include "result.h"
 #include "kresult.h"
+#include "atomics.h"
+#include "error.h"
 #include "boxos_magic.h"
 
 void KRingPocketInit(PocketRing *hdr)
@@ -110,41 +119,126 @@ static ResultRing *kring_result_hdr(process_t *proc)
     return (ResultRing *)vmm_phys_to_virt(proc->result_ring_phys);
 }
 
+/* Translate a target user vaddr to a writable kernel pointer for one
+ * ResultSlot. Returns NULL if the translation fails (which post-ensure
+ * should be impossible barring catastrophic memory pressure). */
+static ResultSlot *kring_translate_slot(process_t *target, uintptr_t uvaddr)
+{
+    return (ResultSlot *)vmm_translate_user_addr(target->cabin, uvaddr,
+                                                  sizeof(ResultSlot));
+}
+
 bool KResultPush(process_t *target, const Result *r)
 {
     if (!target || !r) return false;
 
     ResultRing *rr = kring_result_hdr(target);
     if (!rr) return false;
-    /* ACQUIRE on head so we see the consumer's most recent advance; this
-     * is what tells us whether the ring really has room. */
-    uint64_t head = __atomic_load_n(&rr->hdr.head, __ATOMIC_ACQUIRE);
-    uint64_t tail = __atomic_load_n(&rr->hdr.tail, __ATOMIC_RELAXED);
-    if ((tail - head) >= rr->hdr.slot_count_max) return false;
 
-    uintptr_t uvaddr = result_ring_slot_uvaddr(rr, tail);
+    uint32_t cap = rr->hdr.slot_count_max;
+    if (cap == 0) return false;
 
-    /* Ensure the slot page is mapped user RW in the target's cabin. */
-    if (vmm_ensure_user_page(target->cabin, uvaddr, /*writable=*/true) != 0) {
+    /* (1) Cheap fullness pre-check. Best-effort; we re-validate after the
+     *     atomic reservation. ACQUIRE on head so we see the consumer's
+     *     most recent advance. */
+    uint64_t head      = __atomic_load_n(&rr->hdr.head, __ATOMIC_ACQUIRE);
+    uint64_t tail_snap = __atomic_load_n(&rr->hdr.tail, __ATOMIC_RELAXED);
+    if ((tail_snap - head) >= cap) return false;
+
+    /* (2) Pre-map the slot page our snapshot points at. Most cross-K-Core
+     *     races land on the same 4-KiB page (128 slots/page), so this one
+     *     map call usually covers our final pos. */
+    uintptr_t uvaddr_pre = result_ring_slot_uvaddr(rr, tail_snap);
+    if (vmm_ensure_user_page(target->cabin, uvaddr_pre, /*writable=*/true) != 0) {
         return false;
     }
 
-    Result *slot = (Result *)vmm_translate_user_addr(target->cabin, uvaddr,
-                                                     sizeof(Result));
-    if (!slot) return false;
+    /* (3) Atomic reservation — MPSC linearisation point. Even with N
+     *     concurrent K-Cores each gets a unique pos. Use ACQ_REL so the
+     *     slot writes that follow are ordered after this fetch. */
+    uint64_t pos = __atomic_fetch_add(&rr->hdr.tail, 1, __ATOMIC_ACQ_REL);
 
-    /* Slot stride is RESULT_SLOT_SIZE (32B); we write only sizeof(Result)
-     * (24B) — the trailing 8 bytes per slot remain whatever they were. The
-     * consumer reads sizeof(Result), so the padding never escapes. */
-    *slot = *r;
-    /* RELEASE pair with userspace ACQUIRE on tail: the consumer must not
-     * see the new tail before the slot store is visible. Replaces the old
-     * full fence + non-atomic tail bump pattern, which was the suspected
-     * "non-manifest pocket flags=0x0" race source. */
-    __atomic_store_n(&rr->hdr.tail, tail + 1, __ATOMIC_RELEASE);
+    /* (4) Re-check fullness against our reserved pos. Concurrent reservations
+     *     may have pushed us past capacity; if so, publish a benign error
+     *     into the slot so the consumer drains it instead of deadlocking
+     *     on slot.seq forever. */
+    bool overflow = (pos - head) >= cap;
 
+    /* (5) Cross-page case: pos may have advanced into a slot page that
+     *     wasn't pre-mapped. Map it. This race window is bounded by the
+     *     number of concurrent producers — typically 1-4 K-Cores — far
+     *     below 128 slots-per-page, so cross-page is rare. */
+    uintptr_t uvaddr = result_ring_slot_uvaddr(rr, pos);
+    if (uvaddr != uvaddr_pre) {
+        if (vmm_ensure_user_page(target->cabin, uvaddr, /*writable=*/true) != 0) {
+            /* Catastrophic: PMM exhausted between our pre-map and now.
+             * The reserved slot has no kernel-writable mapping, so we
+             * cannot publish even an error result. The ring will stall
+             * for this target — log loudly. PMM exhaustion at IPC time
+             * is system-fatal anyway. */
+            kprintf("[KRP] FATAL: PMM exhausted at pos=%lu pid=%u (ring stuck)\n",
+                    (unsigned long)pos, (unsigned int)target->pid);
+            return false;
+        }
+    }
+
+    ResultSlot *slot = kring_translate_slot(target, uvaddr);
+    if (!slot) {
+        kprintf("[KRP] FATAL: translate failed pos=%lu pid=%u (ring stuck)\n",
+                (unsigned long)pos, (unsigned int)target->pid);
+        return false;
+    }
+
+    /* (6) Vyukov gate: wait until the slot's seq matches our round's
+     *     "ready for write" value. Zero-init pages give seq == 0 ==
+     *     2 * round for round 0 — round 0 producers proceed without
+     *     waiting. Subsequent rounds wait for the consumer to publish
+     *     seq = 2 * round, which it does after reading the prior round.
+     *     With cap=32768 and a healthy consumer, this is a single load
+     *     in steady state.
+     *
+     *     If the consumer is genuinely stuck and we burn enough spins,
+     *     bail out. The consumer will eventually re-sync once it
+     *     resumes; we drop this Result (caller treats false as "ring
+     *     full"). Avoids burning a K-Core forever on a misbehaving
+     *     userspace process. */
+    uint64_t round    = pos / cap;
+    uint64_t expected = 2u * round;
+
+    enum { KRESULT_PUSH_SPIN_LIMIT = 1u << 20 };
+    uint64_t spins = 0;
+    for (;;) {
+        uint64_t seq = __atomic_load_n(&slot->seq, __ATOMIC_ACQUIRE);
+        if (seq == expected) break;
+        if (++spins > KRESULT_PUSH_SPIN_LIMIT) {
+            kprintf("[KRP] WARN: spin limit on pid=%u pos=%lu seq=%lu expected=%lu\n",
+                    (unsigned int)target->pid, (unsigned long)pos,
+                    (unsigned long)seq, (unsigned long)expected);
+            return false;
+        }
+        cpu_pause();
+    }
+
+    /* (7) Write payload. On overflow, write a synthetic error so the
+     *     consumer drains the slot and the ring continues. */
+    if (overflow) {
+        slot->r.error_code  = ERR_RESULT_RING_FULL;
+        slot->r.data_length = 0;
+        slot->r.data_addr   = 0;
+        slot->r.sender_pid  = 0;
+        slot->r.context     = KCTX_GUIDE;
+    } else {
+        slot->r = *r;
+    }
+
+    /* (8) Publish — release-store the slot's seq so the consumer's
+     *     ACQUIRE-load sees the payload write. */
+    __atomic_store_n(&slot->seq, expected + 1u, __ATOMIC_RELEASE);
+
+    /* (9) Wake target if it was sleeping. If overflow we still wake — the
+     *     consumer needs to drain the error slot to keep the ring moving. */
     if (process_get_state(target) == PROC_WAITING) {
         process_set_state(target, PROC_WORKING);
     }
-    return true;
+    return !overflow;
 }

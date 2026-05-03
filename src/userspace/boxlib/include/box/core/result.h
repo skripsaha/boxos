@@ -16,16 +16,32 @@ typedef struct PACKED {
 
 STATIC_ASSERT(sizeof(Result) == 24, "Result must be 24 bytes");
 
-/* ResultRing — Phase 11 lazy-growable, monotonic-index SPSC.
+/* ResultRing — Phase 11 lazy-growable, monotonic-index, MPSC kernel
+ * producers / SP userspace consumer.
  *
- * Header at CABIN_RESULT_RING_ADDR (0x3000); slots at CABIN_RESULT_SLOTS_BASE.
- * The kernel maps slot pages eagerly when it pushes (see kring.c).
+ * Header at CABIN_RESULT_RING_ADDR (0x3000); slots at CABIN_RESULT_SLOTS_BASE,
+ * lazily mapped by the kernel on first KResultPush touch.
+ *
+ * Each slot carries a Vyukov generation counter (slot.seq) used to gate
+ * producer/consumer access:
+ *   seq == 2*round           — slot empty, producer for `round` may write
+ *   seq == 2*round + 1       — producer wrote, consumer for `round` may read
+ *   seq == 2*(round + 1)     — consumer read, slot ready for next round
+ * where round = pos / slot_count_max. Zero-init pages naturally satisfy
+ * round-0 producers; no eager init is required.
  */
 typedef struct PACKED {
+    Result   r;                          /* 24 bytes payload */
+    uint64_t seq;                        /* 8  bytes generation counter */
+} ResultSlot;
+
+STATIC_ASSERT(sizeof(ResultSlot) == 32, "ResultSlot must be 32 bytes");
+
+typedef struct PACKED {
     volatile uint64_t head;             /* userspace cursor */
-    volatile uint64_t tail;             /* kernel cursor */
+    volatile uint64_t tail;             /* kernel reservation cursor (MPSC) */
     uint64_t          slots_base;       /* user vaddr of slot 0 */
-    uint32_t          slot_size;        /* RESULT_SLOT_SIZE (32) */
+    uint32_t          slot_size;        /* sizeof(ResultSlot) == 32 */
     uint32_t          slot_count_max;
     uint64_t          magic;
     uint8_t           _pad[24];

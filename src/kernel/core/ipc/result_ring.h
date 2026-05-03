@@ -6,25 +6,35 @@
 #include "cabin_layout.h"
 
 /*
- * ResultRing — SPSC, monotonic 64-bit indices, lazy slot allocation.
+ * ResultRing — MPSC producer / SP consumer, monotonic 64-bit indices,
+ * lazy slot allocation.
  *
- *   Kernel producer: kresult_push() (see kring.h) ensures the destination slot
- *   page is mapped before writing, then writes via vmm_translate_user_addr
- *   and bumps tail.
+ *   Kernel producers (multiple K-Cores): KResultPush atomically reserves a
+ *   unique slot index via fetch_add(tail), maps the slot page on demand,
+ *   spins on a per-slot generation counter (slot.seq) until the previous
+ *   round has been drained by the consumer, writes the payload, and
+ *   release-stores slot.seq to publish.
  *
- *   Userspace consumer: reads Result at slots_base + (head % cap)*slot_size,
- *   then bumps head. The slot pages it touches were already mapped by the
- *   kernel as a side effect of the corresponding push, so no fault occurs in
- *   correct SPSC use.
+ *   Userspace consumer (single, the cabin owner): reads slot[head%cap], gates
+ *   on slot.seq matching the expected publish value for the current round,
+ *   copies the payload, release-stores slot.seq to free the slot for the
+ *   next producer round, and bumps head.
  *
- * Slot stride is RESULT_SLOT_SIZE (32B), but sizeof(Result)=24 — the trailing
- * 8 bytes per slot are padding that prevents slots from straddling page
- * boundaries (4096 % 32 == 0).
+ * Slot stride RESULT_SLOT_SIZE (32B) packs Result (24B) + per-slot seq (8B)
+ * exactly. The seq generation pattern is:
+ *
+ *   seq == 2*round           — slot is empty / available for round (round = pos / cap)
+ *   seq == 2*round + 1       — producer has written, consumer has not read
+ *   seq == 2*(round + 1)     — consumer has read, slot ready for next round
+ *
+ * Initial state: all seq fields are zero (pages are pmm_alloc_zero'd on first
+ * touch). Round-0 producers see seq == 0 == 2*0 and proceed immediately, so
+ * no eager initialisation is needed — the lazy-mapping invariant is preserved.
  */
 
 typedef struct __packed {
     volatile uint64_t head;             /* consumer cursor (userspace)     */
-    volatile uint64_t tail;             /* producer cursor (kernel)        */
+    volatile uint64_t tail;             /* producer reservation cursor (kernel, MPSC) */
     uint64_t          slots_base;       /* user vaddr of slot 0            */
     uint32_t          slot_size;        /* RESULT_SLOT_SIZE                */
     uint32_t          slot_count_max;   /* hard upper bound on tail-head   */
@@ -34,6 +44,18 @@ typedef struct __packed {
 
 _Static_assert(sizeof(ResultRingHeader) == 64,
                "ResultRingHeader must be 64 bytes");
+
+/* Per-slot Vyukov-style envelope: payload + generation counter.
+ * Lives at slots_base + (idx % slot_count_max) * RESULT_SLOT_SIZE. */
+typedef struct __packed {
+    Result   r;                          /* 24 bytes */
+    uint64_t seq;                        /* 8  bytes — see file comment */
+} ResultSlot;
+
+_Static_assert(sizeof(ResultSlot) == 32,
+               "ResultSlot must match RESULT_SLOT_SIZE for cabin layout");
+_Static_assert(sizeof(ResultSlot) == RESULT_SLOT_SIZE,
+               "ResultSlot stride mismatch with cabin_layout.h");
 
 typedef struct __packed {
     ResultRingHeader hdr;

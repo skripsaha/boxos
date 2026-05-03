@@ -108,16 +108,7 @@ static bool push_ipc_result(process_t *target,
     r.data_addr   = target_data_addr;
     r.sender_pid  = sender_pid;
     r.context     = KCTX_IPC;
-    bool ok = KResultPush(target, &r);
-    /* Diagnostic: log every IPC delivery FAILURE plus every push to
-     * shell-like targets (pid 2). The latter is rare (mostly child exit
-     * sentinels) so we can spot a lost sentinel that wedges the parent
-     * in receive_wait. Keep enabled — it's low-frequency. */
-    if (!ok || target->pid == 2 || (sender_pid == 2 && data_length > 16)) {
-        kprintf("[TRC] PUSH_IPC target=%u sender=%u len=%u ok=%d\n",
-                target->pid, sender_pid, data_length, ok ? 1 : 0);
-    }
-    return ok;
+    return KResultPush(target, &r);
 }
 
 /* =========================================================================
@@ -247,23 +238,6 @@ static int SysBroadcast(const ManifestOp *op, Crate *crates, uint16_t crate_coun
         process_ref_dec(target);
         if (delivered >= MAX_BROADCAST_TARGETS) break;
     }
-    /* TRACE — broadcast delivery (revert before commit). */
-    {
-        static volatile uint64_t g_bc_total = 0;
-        static volatile uint64_t g_bc_zero  = 0;
-        uint64_t t = __atomic_add_fetch(&g_bc_total, 1, __ATOMIC_RELAXED);
-        if (delivered == 0) {
-            uint64_t z = __atomic_add_fetch(&g_bc_zero, 1, __ATOMIC_RELAXED);
-            if (z == 1 || z == 10 || (z % 100) == 0) {
-                kprintf("[TRC] BCAST_ZERO sender=%u tag=%s pids_seen=%u (zero/total=%lu/%lu)\n",
-                        ctx->proc->pid, tag, pid_count, z, t);
-            }
-        } else if ((t % 1000) == 0) {
-            kprintf("[TRC] BCAST total=%lu zero=%lu\n", t,
-                    __atomic_load_n(&g_bc_zero, __ATOMIC_RELAXED));
-        }
-    }
-
     return delivered > 0 ? OK : ERR_ROUTE_NO_SUBSCRIBERS;
 }
 

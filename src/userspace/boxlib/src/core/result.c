@@ -31,17 +31,36 @@ bool result_pop(Result* out) {
     uint32_t stride  = __atomic_load_n(&rr->hdr.slot_size,      __ATOMIC_RELAXED);
     if (cap == 0 || base == 0 || stride == 0)        return false;
     if (base < 0x100000000ULL)                       return false;
+    /* ABI guard: the kernel must publish slots in 32-byte ResultSlot units. */
+    if (stride != sizeof(ResultSlot))                return false;
 
+    /* Cheap drain check — if no producer has reserved beyond our cursor,
+     * no work to do. Without this the seq read below would still correctly
+     * report "not ready", but the empty-ring case is hot and skipping the
+     * slot translate pays for the extra atomic load. ACQUIRE on tail
+     * pairs with the kernel's ACQ_REL fetch_add so we never see a stale
+     * seq from a slot the producer is about to write. */
     uint64_t tail = __atomic_load_n(&rr->hdr.tail, __ATOMIC_ACQUIRE);
-    uint64_t idx  = __atomic_load_n(&rr->hdr.head, __ATOMIC_RELAXED);
-    if (idx == tail) return false;
+    uint64_t pos  = __atomic_load_n(&rr->hdr.head, __ATOMIC_RELAXED);
+    if (pos == tail) return false;
 
-    Result *slot = (Result *)(uintptr_t)(base + (idx % cap) * stride);
-    *out = *slot;
+    /* Vyukov consumer: slot is ready for our round when seq == 2*round + 1.
+     * If the producer holding `pos` hasn't released its seq yet, slot.seq
+     * is still 2*round (the prior round's "free" marker) — we treat it as
+     * empty and the caller will retry on its next poll. */
+    ResultSlot *slot   = (ResultSlot *)(uintptr_t)(base + (pos % cap) * stride);
+    uint64_t expected  = 2u * (pos / (uint64_t)cap) + 1u;
+    uint64_t seq       = __atomic_load_n(&slot->seq, __ATOMIC_ACQUIRE);
+    if (seq != expected) return false;
 
-    /* RELEASE pair with kernel ACQUIRE on head — kernel must not see the
-     * advance before the slot read completed. */
-    __atomic_store_n(&rr->hdr.head, idx + 1, __ATOMIC_RELEASE);
+    *out = slot->r;
+
+    /* Release the slot for the producer's next round at this index.
+     * Producer for round R+1 expects seq == 2*(R+1) before it may write. */
+    __atomic_store_n(&slot->seq, expected + 1u, __ATOMIC_RELEASE);
+    /* Advance head — kernel's ACQUIRE-load of head will pair with this
+     * RELEASE so the released seq is visible before fullness probes. */
+    __atomic_store_n(&rr->hdr.head, pos + 1u, __ATOMIC_RELEASE);
     return true;
 }
 
