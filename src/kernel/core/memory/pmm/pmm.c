@@ -208,14 +208,26 @@ error_t pmm_init(void) {
         debug_printf("[PMM] %zu pages beyond MAXPHYADDR unusable\n", unusable_pages);
     }
 
-    /* Snapshot the actual installed RAM (in pages) AFTER all USABLE E820
-     * regions have been inserted into the buddy and BEFORE any reserve
-     * pass below.  This is the correct denominator for memory accounting:
-     * holes between usable chunks (PCI MMIO, UEFI runtime, ACPI tables,
-     * etc.) live inside [zone_base, mem_end) but were never free'd into
-     * the buddy, so charging them as "used" against the SPAN inflates
-     * usage by gigabytes on a typical 16 GiB UEFI box. */
-    pmm_usable_pages = pmm_buddy.free_count;
+    /* Count actual installed RAM by summing every USABLE E820 entry, capped
+     * at MAXPHYADDR.  This INCLUDES high memory that's currently deferred
+     * (will be promoted in pmm_activate_pull_map) and INCLUDES the area
+     * below zone_base where the kernel image / alloc_map / deferred table
+     * live — those pages are physically present even though they're never
+     * inserted into the buddy.  Read against pmm_buddy.free_count, this
+     * gives the correct (usable - free = used = reserves + allocations)
+     * relation throughout the boot. */
+    {
+        size_t usable_total = 0;
+        for (size_t i = 0; i < entry_count; i++) {
+            if (entries[i].type != E820_USABLE || entries[i].length == 0) continue;
+            uintptr_t s = entries[i].base;
+            uintptr_t e = entries[i].base + entries[i].length;
+            if (s >= pmm_max_phys_addr) continue;
+            if (e > pmm_max_phys_addr) e = pmm_max_phys_addr;
+            if (e > s) usable_total += (e - s) / PMM_PAGE_SIZE;
+        }
+        pmm_usable_pages = usable_total;
+    }
 
     if (bi_ok) {
         buddy_reserve_range(&pmm_buddy, (uintptr_t)bi->kernel_start, (uintptr_t)bi->kernel_end);

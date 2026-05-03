@@ -89,8 +89,14 @@ int kb_readline(char *buffer, size_t size, bool echo)
                            (uint8_t)(max_len >> 8),
                            (uint8_t)(echo ? 1 : 0) };
 
-    const uint32_t max_retries = 10000;
-    for (uint32_t retry = 0; retry < max_retries; retry++) {
+    /* Poll forever — readline is a blocking primitive. The kernel's
+     * HW_KEYBOARD_READLINE op is async (returns ERR_WOULD_BLOCK when no
+     * complete line is buffered yet), so we pace the retry loop with
+     * kb_sleep(50 ms) and only exit on hard errors (ACCESS_DENIED) or a
+     * successful line. Previously the loop was capped at 10000 iterations
+     * (~8 min), which surfaced as phantom shell prompts every few minutes
+     * when the user took longer than that to type. */
+    for (;;) {
         memset(out, 0, sizeof(out));
         uint32_t out_actual = 0;
         Result   r;
@@ -104,7 +110,14 @@ int kb_readline(char *buffer, size_t size, bool echo)
                             | ((uint32_t)out[1] << 8)
                             | ((uint32_t)out[2] << 16)
                             | ((uint32_t)out[3] << 24);
-            if (length == 0) { buffer[0] = '\0'; return 0; }
+            if (length == 0) {
+                /* No complete line yet — keep polling. (Earlier code
+                 * returned 0 here, propagating an empty reply that shell
+                 * misinterpreted as a fresh empty Enter, redrawing the
+                 * prompt.) */
+                kb_sleep(50000);
+                continue;
+            }
             if (length >= size) length = (uint32_t)(size - 1);
             memcpy(buffer, out + 4, length);
             buffer[length] = '\0';
@@ -118,7 +131,6 @@ int kb_readline(char *buffer, size_t size, bool echo)
         if (rc == ERR_ACCESS_DENIED) return -ERR_ACCESS_DENIED;
         kb_sleep(50000);
     }
-    return -ERR_TIMEOUT;
 }
 
 int kb_status(kb_status_t *status)
