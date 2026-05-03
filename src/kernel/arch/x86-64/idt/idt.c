@@ -416,7 +416,16 @@ void irq_handler(interrupt_frame_t *frame)
     {
         scheduler_state_t *s = scheduler_get_state();
         s->total_ticks++;
-        if (amp_is_appcore() || !g_amp.multicore_active)
+        /* Only App Cores reschedule on timer. K-Cores must NEVER call
+         * schedule() — it would pick idle and hijack the K-Core's stack.
+         *
+         * Use total_cores (set ONCE during amp_init() before any AP boots)
+         * instead of multicore_active (set LATE, after every AP comes
+         * online). The previous `!g_amp.multicore_active` check
+         * incorrectly fired for AP K-Cores whose LAPIC timer ticked
+         * during the AP-boot window — schedule() ran on the K-Core and
+         * permanently hijacked it into the per-core idle process. */
+        if (amp_is_appcore() || g_amp.total_cores == 1)
         {
             schedule(frame);
         }
@@ -428,7 +437,7 @@ void irq_handler(interrupt_frame_t *frame)
     // On K-Cores, just ACK — the interrupt breaks HLT in kcore_run_loop.
     if (vector == IPI_WAKE_VECTOR)
     {
-        if (amp_is_appcore() || !g_amp.multicore_active)
+        if (amp_is_appcore() || g_amp.total_cores == 1)
         {
             schedule(frame);
         }
@@ -488,11 +497,11 @@ void irq_handler(interrupt_frame_t *frame)
         xhci_poll_events();
 
         /* PIT IRQ 0: same scheduling rule as the LAPIC timer above —
-         * preempt on App Cores or whenever AMP isn't active (single-core
-         * boots where the BSP itself runs userspace). Without this, the
-         * PIT was firing but never rescheduling on single-core, so the
-         * initial process held the CPU forever. */
-        if (amp_is_appcore() || !g_amp.multicore_active)
+         * preempt on App Cores or in single-core mode where the BSP
+         * itself runs userspace. Use total_cores (set during amp_init
+         * before any AP boots) — `multicore_active` is set LATE and was
+         * causing AP K-Cores to be hijacked into idle on early ticks. */
+        if (amp_is_appcore() || g_amp.total_cores == 1)
         {
             schedule(frame);
         }

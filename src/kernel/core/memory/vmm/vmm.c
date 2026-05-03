@@ -1559,7 +1559,15 @@ int vmm_ensure_user_page(vmm_context_t *ctx, uintptr_t user_vaddr, bool writable
 
     vmm_map_result_t r = vmm_map_page(ctx, page_addr, (uintptr_t)phys, flags);
     if (!r.success) {
+        /* Race tolerance: another producer mapped the same page between
+         * our vmm_is_mapped probe and vmm_map_page. vmm_map_page rejects
+         * the duplicate; free our spare phys page and report success if
+         * the page is now genuinely mapped. Without this, MPSC producers
+         * landing on a fresh slot page will see spurious failures. */
         pmm_free(phys, 1);
+        if (vmm_is_mapped(ctx, page_addr)) {
+            return 0;
+        }
         return -1;
     }
     return 0;
