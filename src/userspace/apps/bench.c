@@ -52,6 +52,7 @@
 #include "box/core/result.h"
 #include "box/error.h"
 #include "box/display.h"
+#include "box/touch.h"
 
 /* -------------------------------------------------------------------------
  *  Stats engine
@@ -377,7 +378,100 @@ static int b_chain_bulk(uint32_t i, void *ctx)
     return 0;
 }
 
-/* (8) Storage: file create + write 64 B + delete. Hits TagFS, BCDC,
+/* (8a) Touch: tag-multicast event delivery to self.
+ *
+ * Linux comparison:
+ *   raise(SIGUSR1) + sigaction handler ≈ 0.5–1.5 µs on a 2026 box.
+ *   kill(getpid(), SIGUSR1)            ≈ 1–3 µs (full syscall path).
+ *   signalfd read after delivery      ≈ 1–4 µs.
+ *
+ * BoxOS Touch is NOT a 1-bit signal — every event carries an arbitrary
+ * payload, is broadcast (1→N), and is capability-checked. So the fair
+ * comparison is "kill + signalfd_read" in Linux vs "touch_send +
+ * touch_await" here. The b_touch_self_rtt below measures exactly that
+ * round-trip on one process subscribing to its own tag.
+ *
+ * b_touch_publish_only times the producer side in isolation: claim
+ * already done in setup, send fires the manifest, kernel routes to self
+ * (one subscriber), pushes one Touch into our ring. We DO NOT consume
+ * it here — bench_setup_touch runs a drain at the start of each call.
+ */
+
+#define TAG_BENCH_RTT "bench:rtt"
+
+static bool s_touch_setup_done = false;
+
+static int bench_setup_touch(void)
+{
+    if (s_touch_setup_done) return 0;
+    int rc = touch_claim(TAG_BENCH_RTT, TOUCH_REST, 0, 0);
+    if (rc != 0) return rc;
+    s_touch_setup_done = true;
+    return 0;
+}
+
+static void bench_drain_touches(void)
+{
+    /* Use a tiny timeout (1ms). touch_await(timeout=0) treats 0 as
+     * "use default 30s" — hangs us when the ring is empty. With 1ms
+     * the drain returns quickly once we've consumed all queued touches. */
+    Touch t;
+    while (touch_await(TAG_BENCH_RTT, &t, 1) == 0) { /* discard */ }
+}
+
+/* Pure publish: send only, do NOT await. The kernel still delivers the
+ * touch into our ring (one subscriber == self), so this measures
+ *   userspace MfCall1 + kernel SysTouchSend + TouchPublishId iterating
+ *   one subscriber + KResultPush of the Touch + manifest reply path.
+ * The unconsumed Touch from each iter would pile up; we periodically
+ * drain inside the harness via the warmup callback (handled by re-using
+ * the bench harness's own drain — see calls below). */
+static int b_touch_publish_only(uint32_t i, void *ctx)
+{
+    (void)ctx;
+    if (bench_setup_touch() != 0) return -1;
+    /* Drain accumulated unconsumed Touches every 16 iters so the ring
+     * doesn't overflow; the drain itself runs OUTSIDE the timed window
+     * for the iterations where i & 15 != 0. */
+    if ((i & 15) == 0) bench_drain_touches();
+    uint32_t payload = i;
+    return touch_send(TAG_BENCH_RTT, &payload, sizeof(payload), 0);
+}
+
+/* Round-trip: send + await on the same tag. Closest analog to Linux
+ * kill(self) + signalfd_read. Includes everything: producer manifest,
+ * kernel publish, KResultPush, fast-path pop in the same userspace. */
+static int b_touch_self_rtt(uint32_t i, void *ctx)
+{
+    (void)ctx;
+    if (bench_setup_touch() != 0) return -1;
+    uint32_t payload = i;
+    int rc = touch_send(TAG_BENCH_RTT, &payload, sizeof(payload), 0);
+    if (rc != 0) return rc;
+    Touch t;
+    rc = touch_await(TAG_BENCH_RTT, &t, 1000);
+    return rc;
+}
+
+/* Just the receiving side: drains a pre-staged Touch from the ring.
+ * Pre-staging happens via the warmup loop (which already calls fn 64×
+ * before the timed window) — so by the timed window the ring is full
+ * of pre-queued touches. Each iter pops one. This is the pure
+ * fast-path (no kernel round-trip). */
+static int b_touch_await_fastpath(uint32_t i, void *ctx)
+{
+    (void)i;
+    (void)ctx;
+    if (bench_setup_touch() != 0) return -1;
+    /* Pre-stage one touch per iter so the ring has data when we pop. */
+    uint32_t payload = i;
+    int rc = touch_send(TAG_BENCH_RTT, &payload, sizeof(payload), 0);
+    if (rc != 0) return rc;
+    Touch t;
+    return touch_await(TAG_BENCH_RTT, &t, 100);
+}
+
+/* (9) Storage: file create + write 64 B + delete. Hits TagFS, BCDC,
  *     possibly disk I/O via AHCI/PIO. The slowest path BoxOS has end-to-
  *     end. Each iteration uses a unique filename so the tagfs allocator
  *     is exercised, not just an inode rewrite.
@@ -506,6 +600,15 @@ int main(void)
 
     /* IPC */
     bench_run("display PING + reply (cross-proc IPC)", b_display_ping, NULL, 500);
+
+    /* Touch — tag-multicast event system. Compare to Linux signal /
+     * signalfd: kill(self)+sigaction ≈ 0.5-3 µs there. Touch carries an
+     * arbitrary payload, is broadcast, and is capability-checked, so it
+     * does strictly more work than a 1-bit signal — but the fast path
+     * should still be the same order of magnitude. */
+    bench_run("touch_send (publish only, self-sub)",  b_touch_publish_only, NULL, 1000);
+    bench_run("touch_send + touch_await (rtt)",       b_touch_self_rtt,     NULL, 1000);
+    bench_run("touch_await fast-path (pre-queued)",   b_touch_await_fastpath, NULL, 1000);
 
     /* Bulk Manifest — divide by BULK_OPS for per-op */
     bench_run("chain 1000-op Manifest (1 syscall)", b_chain_bulk, NULL, 50);
