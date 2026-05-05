@@ -328,6 +328,7 @@ process_t *process_create(const char *tags)
     proc->aslr_buf_heap_base = CABIN_BUF_HEAP_START + aslr.buf_heap_offset;
     proc->buf_heap_next = proc->aslr_buf_heap_base;
     proc->next         = NULL;
+    proc->prev         = NULL;
     proc->ready_next   = NULL;
     proc->cleanup_next = NULL;
     proc->in_ready     = 0;
@@ -461,7 +462,11 @@ process_t *process_create(const char *tags)
         return NULL;
     }
 
+    /* Doubly-linked insert at head: O(1). Pair with O(1) unlink in
+     * process_destroy. */
+    proc->prev = NULL;
     proc->next = process_list_head;
+    if (process_list_head) process_list_head->prev = proc;
     process_list_head = proc;
     process_hash_insert(proc);
     process_count++;
@@ -675,22 +680,14 @@ void process_destroy(process_t *proc)
      * state transitions complete (just before the final ref_dec at the bottom
      * of this function). Audit 2026-04-29 confirmed the AMP race window. */
 
-    if (process_list_head == proc)
-    {
-        process_list_head = proc->next;
-    }
-    else
-    {
-        process_t *curr = process_list_head;
-        while (curr && curr->next != proc)
-        {
-            curr = curr->next;
-        }
-        if (curr)
-        {
-            curr->next = proc->next;
-        }
-    }
+    /* O(1) unlink — doubly-linked list. Both ends fixed up; head adjusted
+     * if proc was first. The previous O(N) walk-from-head used to dominate
+     * process_destroy under high churn (every shell-spawned utility). */
+    if (proc->prev) proc->prev->next = proc->next;
+    else            process_list_head = proc->next;
+    if (proc->next) proc->next->prev = proc->prev;
+    proc->prev = NULL;
+    proc->next = NULL;
 
     process_count--;
 

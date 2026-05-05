@@ -153,7 +153,8 @@ typedef struct process_t
     spinlock_t touch_alloc_lock;
 
     struct process_t *hash_next;    // hash table collision chain
-    struct process_t *next;         // global process list
+    struct process_t *next;         // global process list (forward)
+    struct process_t *prev;         // global process list (backward) — O(1) unlink in process_destroy
     struct process_t *ready_next;   // intrusive link for ReadyQueue
     struct process_t *cleanup_next; // intrusive link for process cleanup queue
     volatile uint8_t  in_ready;     // CAS guard: 1 = currently enqueued in ReadyQueue
