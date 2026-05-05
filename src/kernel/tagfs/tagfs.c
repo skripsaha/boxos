@@ -327,6 +327,11 @@ static uint64_t block_to_sector(uint32_t block)
     return (uint64_t)data_start + (uint64_t)block * 8;
 }
 
+uint64_t tagfs_block_to_sector(uint32_t block)
+{
+    return block_to_sector(block);
+}
+
 static int read_block(uint32_t block, void *buffer)
 {
     // Check read-ahead cache first
