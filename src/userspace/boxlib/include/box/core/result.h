@@ -80,6 +80,11 @@ uint32_t result_ipc_stash_count(void);
  * no stale `error_code` that would otherwise be returned for the new op. */
 void result_drain_orphan_replies(void);
 
+/* Pop a KCTX_TOUCH entry from stash/ring. Used by touch_await to
+ * fast-path consume already-queued touches without paying for a
+ * kernel manifest round-trip. */
+bool result_pop_touch(Result* out);
+
 // Block until ANY result arrives (no filtering).
 // For IPC servers (display daemon, etc.) that receive both IPC and kernel results.
 bool result_wait_any(Result* out, uint32_t timeout_ms);

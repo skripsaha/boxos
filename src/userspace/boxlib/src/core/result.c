@@ -189,6 +189,48 @@ uint32_t result_non_ipc_stash_count(void) {
     return non_ipc_stash.count;
 }
 
+/* Pop a single KCTX_TOUCH-tagged entry without disturbing manifest replies
+ * or non-touch IPC. Used by touch_await's fast path so a listener with a
+ * full ring of pre-queued touches never has to round-trip through the
+ * kernel just to park-and-wake on each one. Returns false if nothing
+ * matches; non-touch entries get re-stashed (ipc_stash for sender_pid!=0,
+ * non_ipc_stash for sender_pid==0). */
+bool result_pop_touch(Result* out) {
+    if (!out) return false;
+
+    /* First scan ipc_stash, since touches commonly land there via
+     * result_pop_non_ipc's fan-out. Use a temp ring to preserve order. */
+    uint32_t initial = ipc_stash.count;
+    for (uint32_t i = 0; i < initial; i++) {
+        Result e;
+        if (!ipc_stash_shift(&e)) break;
+        if (e._reserved == 9 /* KCTX_TOUCH */) {
+            *out = e;
+            return true;
+        }
+        ipc_stash_push(&e);  /* not a touch — re-queue */
+    }
+
+    /* Now drain the ring, classifying each entry. */
+    Result entry;
+    while (result_pop(&entry)) {
+        if (entry._reserved == 9 /* KCTX_TOUCH */) {
+            *out = entry;
+            return true;
+        }
+        if (entry.sender_pid != 0) {
+            ipc_stash_push(&entry);
+            continue;
+        }
+        if (entry.error_code == 9 /* ERR_WOULD_BLOCK */) {
+            /* drop async-park ack */
+            continue;
+        }
+        non_ipc_stash_push(&entry);
+    }
+    return false;
+}
+
 /* Drop orphan manifest replies — replies whose original submitter timed out
  * and is no longer waiting for them. Without this, the very next MfCall1's
  * result_wait would dequeue the orphan and treat it as ITS reply, leaking
