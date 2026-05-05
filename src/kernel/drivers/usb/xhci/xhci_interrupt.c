@@ -8,6 +8,7 @@
 #include "xhci_transfer.h"
 #include "xhci_enumeration.h"
 #include "klib.h"
+#include "touch.h"
 
 void xhci_process_events(void) {
     xhci_controller_t* ctrl = xhci_get_controller();
@@ -103,9 +104,30 @@ void xhci_irq_handler(void) {
                     xhci_post_disable_slot_cmd(ctrl, slot->slot_id);
                     xhci_device_slot_cleanup(ctrl, slot);
                 }
+                /* Hot-unplug Touch — subscribers can release driver
+                 * state for the port. vendor/product not tracked here
+                 * (slot was already torn down); a future enrichment
+                 * could publish before xhci_device_slot_cleanup runs. */
+                struct __attribute__((packed)) {
+                    uint8_t  port; uint8_t speed;
+                    uint16_t vendor_id; uint16_t product_id;
+                    uint16_t _reserved;
+                } ev = { port, 0, 0, 0, 0 };
+                TouchPublish("usb:disconnect", &ev, sizeof(ev));
             } else if ((portsc & XHCI_PORTSC_CSC) && (portsc & XHCI_PORTSC_CCS)) {
                 debug_printf("[xHCI] Device connected on port %u\n", port);
                 xhci_enumerate_device(ctrl, port);
+                /* Hot-plug Touch event — port + speed fields. Enumeration
+                 * runs asynchronously and fills vendor/product later;
+                 * subscribers that need device IDs query the slot APIs
+                 * once a descriptor is in. */
+                uint8_t speed = (uint8_t)((portsc >> 10) & 0xF);
+                struct __attribute__((packed)) {
+                    uint8_t  port; uint8_t speed;
+                    uint16_t vendor_id; uint16_t product_id;
+                    uint16_t _reserved;
+                } ev = { port, speed, 0, 0, 0 };
+                TouchPublish("usb:connect", &ev, sizeof(ev));
             }
         }
     }
