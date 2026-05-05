@@ -118,6 +118,35 @@ int touch_await(const char *tag, Touch *out, uint32_t timeout_ms)
 {
     if (!tag || !out) return -ERR_INVALID_ARGS;
 
+    /* Fast path: a touch is already in the ring (queued by a prior
+     * TouchRestDeliver). Skip the kernel round-trip entirely — no manifest
+     * submit, no PROC_WAITING park, no IPI wake. This is the difference
+     * between a tight in-process loop and a 20ms-per-touch scheduler hop:
+     * S3 wait phase drops from 9-10s to ~0ms when touches are pre-queued.
+     *
+     * If empty, briefly spin (cpu_pause loop) before parking. A producer
+     * that is publishing N touches per ms only needs us to wait a few µs
+     * for the next one — vs paying for a kernel round-trip + scheduler
+     * tick (~10 ms on LAPIC@100Hz). The spin budget is bounded so we don't
+     * burn cycles when the producer is genuinely silent. */
+    {
+        Result r;
+        for (int s = 0; s < 4096; s++) {
+            if (result_pop_touch(&r)) {
+                __atomic_add_fetch(&g_ta_entries_popped,    1, __ATOMIC_RELAXED);
+                __atomic_add_fetch(&g_ta_touches_returned,  1, __ATOMIC_RELAXED);
+                if (r.error_code == 0 && r.data_addr != 0 && r.data_length >= sizeof(Touch)) {
+                    memcpy(out, (const void *)(uintptr_t)r.data_addr, sizeof(Touch));
+                    return 0;
+                }
+                __atomic_add_fetch(&g_ta_bad_payload, 1, __ATOMIC_RELAXED);
+                /* Bad payload → fall through to slow path. */
+                break;
+            }
+            __asm__ volatile("pause");
+        }
+    }
+
     /* Build a 1-op Manifest for SYSTEM_OP_TOUCH_AWAIT. */
     uint8_t mbuf[200];
     ManifestBuilder mb;
