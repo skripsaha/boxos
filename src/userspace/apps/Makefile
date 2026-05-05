@@ -31,7 +31,7 @@ BOXLIB_START = ../build/boxlib_start.o
 
 .PHONY: all clean
 
-all: proca.elf procb.elf today.elf memtest.elf mtest.elf chain.elf decks.elf bench.elf
+all: proca.elf procb.elf today.elf memtest.elf mtest.elf chain.elf decks.elf bench.elf touch_test.elf touch_stress.elf
 
 # ---- ELF binaries (stored in TagFS) ----
 proca.elf: $(BOXLIB_START) proca.o $(BOXLIB)
@@ -57,6 +57,12 @@ decks.elf: $(BOXLIB_START) decks.o $(BOXLIB)
 
 bench.elf: $(BOXLIB_START) bench.o $(BOXLIB)
 	$(CC) $(LDFLAGS) -o $@ $(BOXLIB_START) bench.o $(BOXLIB)
+
+touch_test.elf: $(BOXLIB_START) touch_test.o $(BOXLIB)
+	$(CC) $(LDFLAGS) -o $@ $(BOXLIB_START) touch_test.o $(BOXLIB)
+
+touch_stress.elf: $(BOXLIB_START) touch_stress.o $(BOXLIB)
+	$(CC) $(LDFLAGS) -o $@ $(BOXLIB_START) touch_stress.o $(BOXLIB)
 
 # ---- object files ----
 %.o: %.c

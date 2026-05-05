@@ -8,6 +8,7 @@
 #include "error.h"
 #include "ahci_sync.h"
 #include "ahci.h"
+#include "touch.h"
 #include "ata_dma.h"
 #include "ata.h"
 #include "cow/cow.h"
@@ -2295,6 +2296,22 @@ int tagfs_write(TagFSFileHandle *handle, const void *buffer, uint64_t size)
 
     if (handle->ofe)
         spin_unlock(&handle->ofe->write_lock);
+
+    if (bytes_written > 0 && TouchHasAnyListeners()) {
+        TagFSMetadata wmeta;
+        memset(&wmeta, 0, sizeof(wmeta));
+        uint32_t wmb, wmo;
+        if (file_table_lookup(handle->file_id, &wmb, &wmo) == 0 &&
+            meta_pool_read(wmb, wmo, &wmeta) == 0) {
+            struct { uint32_t file_id; uint8_t op; } ev = { handle->file_id, 1 };
+            for (uint16_t ti = 0; ti < wmeta.tag_count; ti++) {
+                TouchPublishId(wmeta.tag_ids[ti], &ev, sizeof(ev),
+                                 0, TOUCH_FLAG_TAGFS);
+            }
+            tagfs_metadata_free(&wmeta);
+        }
+    }
+
     return (int)bytes_written;
 }
 

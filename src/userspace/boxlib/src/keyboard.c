@@ -1,12 +1,10 @@
 /*
  * keyboard.c — userspace keyboard wrappers (Phase 12: Manifest-only).
- *
- * Each function builds a 1-op Manifest via MfCall1. The new HW_KEYBOARD_*
- * ops put status into a u8 byte at the tail of the out_crate; readline
- * accepts up to (out_capacity - 5) characters in a single syscall.
  */
 
 #include "box/keyboard.h"
+#include "box/touch.h"
+#include "box/vga.h"
 #include "box/core/manifest.h"
 #include "box/core/notify.h"
 #include "box/core/result.h"
@@ -19,13 +17,6 @@
 #define HW_KB_SUCCESS    0
 #define HW_KB_NO_DATA    1
 #define HW_KB_WOULD_BLOCK 3
-
-static void kb_sleep(uint32_t iterations)
-{
-    for (uint32_t i = 0; i < iterations; i++) {
-        __asm__ volatile("pause");
-    }
-}
 
 int kb_getchar(void)
 {
@@ -70,69 +61,58 @@ int kb_getchar_ex(kb_char_t *out_char)
     return 0;
 }
 
+/* Keyboard touch payload layout: { uint8_t scancode, char ascii, uint8_t mods }
+ * Published by kernel/drivers/keyboard/keyboard.c */
+typedef struct __attribute__((packed)) {
+    uint8_t scancode;
+    char    ascii;
+    uint8_t mods;
+} KbTouchPayload;
+
 int kb_readline(char *buffer, size_t size, bool echo)
 {
     if (!buffer || size == 0 || size > 1024) return -ERR_INVALID_ARGS;
 
-    /* Out-crate layout: [u32 len][char line[]][u8 status]. We size the buffer
-     * for size bytes of line + 4 length + 1 status + 1 NUL slack.
-     *
-     * Kept in .bss (not on the stack): the typical caller chain
-     * handle_readline → kb_readline → MfCall1 → ManifestSubmitFull
-     * accumulates ~3 KB of frames; an extra 1 KB on the stack here was
-     * enough — combined with the IRQ save area — to overflow into the
-     * user-stack guard page during long readlines. Each Cabin runs a
-     * single thread, so .bss is reentrancy-safe. */
-    static uint8_t out[1030];
-    uint16_t max_len = (uint16_t)size;
-    uint8_t  params[3] = { (uint8_t)(max_len & 0xFF),
-                           (uint8_t)(max_len >> 8),
-                           (uint8_t)(echo ? 1 : 0) };
+    touch_claim(TOUCH_TAG_KEYBOARD, TOUCH_REST, 0, 0);
 
-    /* Poll forever — readline is a blocking primitive. The kernel's
-     * HW_KEYBOARD_READLINE op is async (returns ERR_WOULD_BLOCK when no
-     * complete line is buffered yet), so we pace the retry loop with
-     * kb_sleep(50 ms) and only exit on hard errors (ACCESS_DENIED) or a
-     * successful line. Previously the loop was capped at 10000 iterations
-     * (~8 min), which surfaced as phantom shell prompts every few minutes
-     * when the user took longer than that to type. */
-    for (;;) {
-        memset(out, 0, sizeof(out));
-        uint32_t out_actual = 0;
-        Result   r;
-        int rc = MfCall1(DECK_HARDWARE, HW_KB_READLINE,
-                         params, sizeof(params), NULL, 0,
-                         out, (uint32_t)(size + 5), &out_actual,
-                         60000, &r);
+    size_t pos   = 0;
+    bool   done  = false;
 
-        if (rc == 0) {
-            /* rc=OK means the kernel produced a COMPLETE line — including
-             * an empty Enter (length==0). Pass it through so the shell
-             * loop can treat it as LINE_EMPTY and re-prompt. The previous
-             * iteration of this fix accidentally swallowed empty Enters
-             * by polling on length==0 — that path only applies when the
-             * kernel returned WOULD_BLOCK below. */
-            uint32_t length = (uint32_t)out[0]
-                            | ((uint32_t)out[1] << 8)
-                            | ((uint32_t)out[2] << 16)
-                            | ((uint32_t)out[3] << 24);
-            if (length >= size) length = (uint32_t)(size - 1);
-            if (length > 0) memcpy(buffer, out + 4, length);
-            buffer[length] = '\0';
-            return (int)length;
-        }
-        if (rc == ERR_WOULD_BLOCK || rc == ERR_BUSY ||
-            r.error_code == ERR_WOULD_BLOCK || r.error_code == ERR_BUSY) {
-            /* Kernel buffer doesn't have a complete line yet — pace the
-             * userspace poll. Note: with HW_KEYBOARD_READLINE async, this
-             * is the ONLY path that means "no line yet"; rc=OK with
-             * length=0 means "empty Enter, line is complete". */
-            kb_sleep(50000);
+    while (!done) {
+        Touch t;
+        int rc = touch_await(TOUCH_TAG_KEYBOARD, &t, 30000);
+        if (rc != 0) continue;
+
+        /* payload_addr points into our cabin heap — directly readable */
+        if (t.payload_len < sizeof(KbTouchPayload)) continue;
+
+        const KbTouchPayload *kp = (const KbTouchPayload *)(uintptr_t)t.payload_addr;
+        char ch = kp->ascii;
+        if (ch == 0) continue;
+
+        if (ch == '\b' || ch == 0x7F) {
+            if (pos > 0) {
+                pos--;
+                if (echo) vga_puts("\b \b");
+            }
             continue;
         }
-        if (rc == ERR_ACCESS_DENIED) return -ERR_ACCESS_DENIED;
-        kb_sleep(50000);
+
+        if (ch == '\r' || ch == '\n') {
+            buffer[pos] = '\0';
+            if (echo) vga_puts("\n");
+            done = true;
+            continue;
+        }
+
+        if (pos < size - 1) {
+            buffer[pos++] = ch;
+            if (echo) vga_putchar(ch);
+        }
     }
+
+    buffer[pos] = '\0';
+    return (int)pos;
 }
 
 int kb_status(kb_status_t *status)

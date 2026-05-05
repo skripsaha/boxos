@@ -1,0 +1,38 @@
+# Cortex Configuration
+# See https://github.com/sparn-labs/cortex for documentation
+#
+# agent: 'claude-code' was auto-detected.
+#   - 'claude-code': Optimized for Claude Code (conversation boost, BTSP patterns)
+#   - 'generic': Agent-agnostic optimization
+#
+# pruning.threshold: Top % entries to keep (1-100, lower = more aggressive)
+# decay.defaultTTL: Hours before entries start decaying (default: 24)
+# realtime.tokenBudget: Target token count after optimization (default: 40000)
+# realtime.autoOptimizeThreshold: Auto-optimize when context exceeds this (default: 60000)
+
+pruning:
+  threshold: 5
+  aggressiveness: 50
+decay:
+  defaultTTL: 24
+  decayThreshold: 0.95
+states:
+  activeThreshold: 0.7
+  readyThreshold: 0.3
+agent: claude-code
+ui:
+  colors: true
+  sounds: false
+  verbose: false
+autoConsolidate: null
+realtime:
+  tokenBudget: 40000
+  autoOptimizeThreshold: 60000
+  watchPatterns:
+    - '**/*.jsonl'
+  pidFile: .cortex/daemon.pid
+  logFile: .cortex/daemon.log
+  debounceMs: 5000
+  incremental: true
+  windowSize: 500
+  consolidationInterval: null

@@ -14,6 +14,7 @@ typedef enum {
     KCTX_IPC    = 6,
     KCTX_GUIDE  = 7,
     KCTX_FRIEND = 8,
+    KCTX_TOUCH  = 9,
 } KResultContext;
 
 typedef struct {

@@ -29,6 +29,8 @@
 #include "xhci_port.h"
 #include "xhci_enumeration.h"
 #include "serial.h"
+#include "touch.h"
+#include "kring.h"
 #include "kernel_config.h"
 
 #define VGA_PUTSTRING_FLAG_KEEP_COLOR 0x02u
@@ -132,6 +134,7 @@ static int HwVgaPutString(const ManifestOp *op, Crate *crates, uint16_t crate_co
         chars_written++;
     }
     VideoBatchEnd();
+    VideoUpdateCursor();
 
     if (!(flags & VGA_PUTSTRING_FLAG_KEEP_COLOR)) {
         VideoSetColor(old_color);
@@ -937,6 +940,34 @@ static int HwUsbGetInfo(const ManifestOp *op, Crate *crates, uint16_t crate_coun
 }
 
 /* =========================================================================
+ *  Debug print — serial output from userspace via kernel kprintf
+ *  HW_DEBUG_PRINT  in_crate: NUL-terminated string (max 256 bytes)
+ * ========================================================================= */
+
+static int HwDebugPrint(const ManifestOp *op, Crate *crates, uint16_t crate_count,
+                        const OpContext *ctx)
+{
+    (void)crate_count;
+    if (op->in_crate == CRATE_INDEX_NONE) return ERR_INVALID_ARGUMENT;
+
+    Crate *c = &crates[op->in_crate];
+    uint64_t bytes = c->size < 256 ? c->size : 256;
+    if (bytes == 0) return ERR_INVALID_ARGUMENT;
+
+    const char *src = HwCrateMap(c, ctx, bytes);
+    if (!src) return ERR_INVALID_ADDRESS;
+
+    char buf[257];
+    uint64_t copy = bytes < 256 ? bytes : 256;
+    memcpy(buf, src, copy);
+    buf[copy] = '\0';
+
+    uint32_t pid = (ctx && ctx->proc) ? ctx->proc->pid : 0;
+    kprintf("[%u] %s\n", pid, buf);
+    return OK;
+}
+
+/* =========================================================================
  *  Registration
  * ========================================================================= */
 
@@ -991,8 +1022,9 @@ error_t HardwareDeckRegister(void)
         { HW_VGA_NEWLINE,        HwVgaNewline,       OP_AUTH_NONE,   "hw.vga.newline"   },
         { HW_VGA_GET_DIMENSIONS, HwVgaGetDimensions, OP_AUTH_NONE,   "hw.vga.dims"      },
         /* System power: only system-tagged processes can reboot/shutdown. */
-        { HW_SYSTEM_REBOOT,      HwSystemReboot,     OP_AUTH_SYSTEM, "hw.system.reboot" },
+        { HW_SYSTEM_REBOOT,      HwSystemReboot,     OP_AUTH_SYSTEM, "hw.system.reboot"  },
         { HW_SYSTEM_SHUTDOWN,    HwSystemShutdown,   OP_AUTH_SYSTEM, "hw.system.shutdown"},
+        { HW_DEBUG_PRINT,        HwDebugPrint,       OP_AUTH_NONE,   "hw.debug.print"    },
         /* USB: hardware control, system+. */
         { HW_USB_INIT,           HwUsbInit,          OP_AUTH_SYSTEM, "hw.usb.init"      },
         { HW_USB_RESET,          HwUsbReset,         OP_AUTH_SYSTEM, "hw.usb.reset"     },

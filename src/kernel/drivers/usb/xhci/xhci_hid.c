@@ -2,6 +2,7 @@
 #include "keyboard.h"
 #include "keymaps.h"
 #include "klib.h"
+#include "touch.h"
 
 /* Check if a USB HID keycode is an extended key and push its sequence.
    Returns 1 if handled, 0 if not an extended key. */

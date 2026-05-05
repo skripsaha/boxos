@@ -10,7 +10,7 @@
 
 #include "guide.h"
 #include "execution_deck.h"
-#include "listen_table.h"
+#include "touch.h"
 #include "process.h"
 #include "klib.h"
 #include "vmm.h"
@@ -30,7 +30,7 @@ void guide_init(void)
 {
     debug_printf("[GUIDE] Initializing Guide Dispatcher...\n");
     ready_queue_init(&g_ready_queue);
-    listen_table_init();
+    TouchInit();
     perf_trace_init();
     debug_printf("[GUIDE] ReadyQueue initialized (intrusive, unbounded)\n");
 }
@@ -97,6 +97,17 @@ static void guide_process_manifest_pocket(Pocket *pocket, process_t *proc)
     pocket->data_addr   = 0;
     pocket->data_length = 0;
     pocket->target_pid  = 0;
+
+    /* When an op parks the process asynchronously (PROC_WAITING) and returns
+     * ERR_WOULD_BLOCK, no synchronous Result should be pushed. The async path
+     * (KResultPush from TouchRestDeliver, etc.) will deliver the real result
+     * later. Pushing ERR_WOULD_BLOCK now would cause result_wait to return
+     * immediately with an empty out-crate before the event has fired.
+     *
+     * Synchronous ERR_WOULD_BLOCK (e.g. HwKbReadline with no data ready) does
+     * NOT set PROC_WAITING — the op writes a "no data" marker in the out_crate
+     * and still needs the Result delivered so the caller can retry. */
+    if (rc == ERR_WOULD_BLOCK && process_get_state(proc) == PROC_WAITING) return;
 
     execution_deck_handler(pocket, proc);
 }

@@ -147,19 +147,30 @@ int vga_setcursor(uint8_t row, uint8_t col)
 
 int vga_putchar(char c)
 {
-    if (!s_cursor_valid) {
-        vga_pos_t pos;
-        int rc = vga_getcursor(&pos);
-        if (rc < 0) return rc;
-    }
+    /* Route through PUTSTRING with a 1-byte buffer: PUTCHAR's kernel handler
+     * saves and restores the cursor around the write, which means consecutive
+     * single-char writes all overwrite the same cell. PUTSTRING leaves the
+     * cursor naturally advanced. */
     int color = vga_getcolor();
     if (color < 0) color = VIDEO_ATTR_DEFAULT;
 
-    uint8_t params[4] = { s_cursor_row, s_cursor_col, (uint8_t)c, (uint8_t)color };
-    return MfCall1(DECK_HARDWARE, HW_VGA_PUTCHAR,
-                   params, 4, NULL, 0,
-                   NULL, 0, NULL,
-                   VGA_TIMEOUT_MS, NULL);
+    char buf[1] = { c };
+    uint8_t params[2] = { (uint8_t)color, 0 };
+    uint8_t out[3] = {0};
+    uint32_t out_actual = 0;
+    int rc = MfCall1(DECK_HARDWARE, HW_VGA_PUTSTRING,
+                     params, 2,
+                     buf, 1,
+                     out, sizeof(out), &out_actual,
+                     VGA_TIMEOUT_MS, NULL);
+    if (rc == 0 && out_actual >= 3) {
+        s_cursor_row = out[1];
+        s_cursor_col = out[2];
+        s_cursor_valid = true;
+    } else {
+        s_cursor_valid = false;
+    }
+    return rc;
 }
 
 int vga_puts(const char *str)

@@ -24,7 +24,7 @@
 #include "boxos_crate.h"
 #include "system_deck.h"
 #include "buffer_registry.h"
-#include "listen_table.h"
+#include "touch.h"
 #include "result.h"
 #include "result_ring.h"
 #include "kring.h"
@@ -241,20 +241,6 @@ static int SysBroadcast(const ManifestOp *op, Crate *crates, uint16_t crate_coun
     return delivered > 0 ? OK : ERR_ROUTE_NO_SUBSCRIBERS;
 }
 
-static int SysListen(const ManifestOp *op, Crate *crates, uint16_t crate_count,
-                     const OpContext *ctx)
-{
-    (void)crates; (void)crate_count;
-    if (!ctx || !ctx->proc) return ERR_INVALID_ARGUMENT;
-    if (op->param_size < 9) return ERR_INVALID_ARGUMENT;
-
-    uint64_t required_tags;
-    memcpy(&required_tags, op->params, sizeof(uint64_t));
-    uint8_t flags = op->params[8];
-
-    return listen_table_add(ctx->proc->pid, required_tags, flags);
-}
-
 /* =========================================================================
  *  Process lifecycle
  * ========================================================================= */
@@ -339,6 +325,11 @@ static int SysProcKill(const ManifestOp *op, Crate *crates, uint16_t crate_count
 
     process_set_state(target, self_exit ? PROC_DONE : PROC_CRASHED);
     __sync_synchronize();
+
+    /* Publish process.died and release touch claims before the process
+     * disappears.  TouchCleanupProcess is idempotent (sets claim_table=NULL
+     * after the first call) so the later process_destroy call is safe. */
+    TouchCleanupProcess(target);
 
     BufferRegistryCleanupProcess(target_pid);
 
@@ -965,7 +956,6 @@ error_t SystemDeckRegister(void)
         /* IPC: app+ — IPC is the lifeblood of any process. */
         { SYSTEM_OP_ROUTE,        SysRoute,       OP_AUTH_APP,    "system.route"      },
         { SYSTEM_OP_ROUTE_TAG,    SysBroadcast,   OP_AUTH_APP,    "system.broadcast"  },
-        { SYSTEM_OP_LISTEN,       SysListen,      OP_AUTH_APP,    "system.listen"     },
         /* Process lifecycle: spawn/exec are utility+; info/kill/exit are open
          * (kill of pid==0 is self-exit, used by every process). */
         { SYSTEM_OP_PROC_SPAWN,   SysProcSpawn,   OP_AUTH_UTILITY,"system.proc.spawn" },
@@ -999,6 +989,10 @@ error_t SystemDeckRegister(void)
             return rc;
         }
     }
+
+    error_t touch_rc = TouchOpsRegister();
+    if (touch_rc != OK) return touch_rc;
+
     debug_printf("[SystemDeck] registered %zu ops (full surface, gated)\n",
                  sizeof(table) / sizeof(table[0]));
     return OK;
