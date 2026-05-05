@@ -18,6 +18,7 @@
 #include "aslr.h"
 #include "cabin_info.h"
 #include "notify.h"
+#include "touch.h"
 #include "tagfs.h"
 #include "per_core.h"
 #include "amp.h"
@@ -265,7 +266,27 @@ process_t *process_create(const char *tags)
     proc->code_start = VMM_CABIN_CODE_START;
     proc->code_size = 0;
     proc->started = false;
-    proc->kcore_pending = 0;
+    proc->kcore_pending  = 0;
+    proc->touch_cleaned  = 0;
+
+    proc->ear_bits              = 0;
+    proc->ear_overflow_ids      = NULL;
+    proc->ear_overflow_count    = 0;
+    proc->ear_overflow_capacity = 0;
+    proc->claim_table           = NULL;
+    proc->claim_count           = 0;
+    proc->claim_capacity        = 0;
+    proc->irq_stack_top         = 0;
+    proc->irq_rip               = 0;
+    proc->irq_active            = 0;
+    proc->irq_saved_rip         = 0;
+    proc->irq_saved_rsp         = 0;
+    proc->irq_saved_rflags      = 0;
+    proc->irq_pending_head      = NULL;
+    spinlock_init(&proc->irq_lock);
+    proc->touch_page_base       = 0;
+    proc->touch_page_off        = 0;
+    spinlock_init(&proc->touch_alloc_lock);
 
     // Assign home_core: round-robin across App Cores (multi-core) or BSP (single-core).
     if (g_amp.app_count > 0)
@@ -697,6 +718,8 @@ void process_destroy(process_t *proc)
                      PHYS_TAG_SHARED);
     }
 
+    TouchCleanupProcess(proc);
+
     /* Final state set is COMPLETE — now safe to poison the magic. Any
      * sibling-core dereference past this point is a real bug we want to
      * see, not a transient destroy-window race. */
@@ -747,6 +770,22 @@ int process_load_binary(process_t *proc, const void *binary_data, size_t size)
                      (uintptr_t)code_phys, size);
         pmm_free(code_phys, page_count);
         return -1;
+    }
+
+    /* For ELF binaries vmm_map_code_region copies each segment into freshly
+     * allocated pages and maps THOSE; the buffer we just passed in (`code_phys`)
+     * served only as the parser's scratch. If we keep it, every spawned ELF
+     * leaks `page_count` frames — 100 spawns ≈ 5 MiB leaked, eventually
+     * exhausting PMM and producing page-faults at RIP=0xc000 on freshly
+     * spawned processes (because vmm_map_pages ends up with NULL frames).
+     *
+     * For flat binaries the same buffer is mapped directly into the cabin
+     * and must stay live; detect via ELF magic. */
+    const uint8_t *probe = (const uint8_t *)code_virt;
+    bool was_elf = (size >= 4 && probe[0] == 0x7F && probe[1] == 'E' &&
+                    probe[2] == 'L' && probe[3] == 'F');
+    if (was_elf) {
+        pmm_free(code_phys, page_count);
     }
 
     void *user_stack_phys = pmm_alloc(CONFIG_USER_STACK_TOTAL_PAGES);
@@ -893,6 +932,22 @@ void process_list_validate(const char *caller)
 
     kfree(seen);
     spin_unlock(&process_lock);
+}
+
+uint32_t process_snapshot_pids(uint32_t *out, uint32_t max)
+{
+    if (!out || max == 0) return 0;
+    uint32_t n = 0;
+    spin_lock(&process_lock);
+    for (uint32_t b = 0; b < PROCESS_HASH_SIZE && n < max; b++) {
+        for (process_t *p = process_hash_table[b]; p && n < max; p = p->hash_next) {
+            if (p->magic == PROCESS_MAGIC && !p->destroying) {
+                out[n++] = p->pid;
+            }
+        }
+    }
+    spin_unlock(&process_lock);
+    return n;
 }
 
 process_t *process_find(uint32_t pid)

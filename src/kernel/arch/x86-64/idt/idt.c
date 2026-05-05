@@ -22,6 +22,8 @@
 #include "kcore.h"
 #include "xhci_interrupt.h"
 #include "linker_symbols.h"
+#include "touch_queue.h"
+#include "pit.h"
 
 static idt_entry_t idt[IDT_ENTRIES];
 static idt_descriptor_t idt_desc;
@@ -485,6 +487,7 @@ void irq_handler(interrupt_frame_t *frame)
         // Timer IRQ (PIT via PIC or IO-APIC GSI 0)
         scheduler_state_t *sched = scheduler_get_state();
         sched->total_ticks++;
+        pit_tick();
         __atomic_fetch_add(&g_global_tick, 1, __ATOMIC_RELAXED);
 
         /* Periodic scheduler parameter recalculation */
@@ -492,6 +495,9 @@ void irq_handler(interrupt_frame_t *frame)
 
         /* Software key repeat driven by PIT tick */
         keyboard_timer_tick();
+
+        /* Deferred touch event delivery */
+        TouchQueueTick(__atomic_load_n(&g_global_tick, __ATOMIC_RELAXED));
 
         /* xHCI events handled via IRQ; poll only as fallback */
         xhci_poll_events();

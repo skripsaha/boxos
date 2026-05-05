@@ -123,6 +123,35 @@ typedef struct process_t
     volatile wait_reason_t wait_reason;
     uint64_t wait_start_time; // TSC timestamp when waiting (0 = not waiting)
 
+    uint64_t  ear_bits;
+    uint16_t *ear_overflow_ids;
+    uint16_t  ear_overflow_count;
+    uint16_t  ear_overflow_capacity;
+
+    void     *claim_table;
+    uint16_t  claim_count;
+    uint16_t  claim_capacity;
+
+    uint64_t         irq_stack_top;
+    uint64_t         irq_rip;
+    volatile uint8_t irq_active;
+    uint8_t          _irq_pad[3];
+    uint64_t         irq_saved_rip;
+    uint64_t         irq_saved_rsp;
+    uint64_t         irq_saved_rflags;
+    void            *irq_pending_head;
+    spinlock_t       irq_lock;
+
+    uint8_t           touch_cleaned; // set to 1 after TouchCleanupProcess runs once
+
+    /* Current Touch payload page — Touch records are packed back-to-back here
+     * so 4 concurrent producers don't burn one PMM page per event. New page
+     * is allocated on first publish and whenever the next record would not
+     * fit. Protected by touch_alloc_lock. */
+    uint64_t   touch_page_base;
+    uint32_t   touch_page_off;
+    spinlock_t touch_alloc_lock;
+
     struct process_t *hash_next;    // hash table collision chain
     struct process_t *next;         // global process list
     struct process_t *ready_next;   // intrusive link for ReadyQueue
@@ -152,6 +181,11 @@ void process_list_unlock(void);
 bool spin_trylock_process_list(void);
 
 uint32_t process_get_count(void);
+
+/* Snapshot all live PIDs into out[] via hash-table iteration.
+ * Returns number written. Used by Touch to bypass linked-list corruption
+ * paths and remain robust against transient process_list races. */
+uint32_t process_snapshot_pids(uint32_t *out, uint32_t max);
 
 #ifdef CONFIG_KERNEL_TESTS
 void process_test(void);

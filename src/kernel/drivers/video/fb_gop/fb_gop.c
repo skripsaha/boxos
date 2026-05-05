@@ -20,6 +20,7 @@
 
 #include "fb_gop.h"
 #include "../ops.h"
+#include "../video.h"
 #include "fb_pixel.h"
 #include "../font/vga_font.h"
 #include "vmm.h"
@@ -440,7 +441,59 @@ static void FbSetCursor(int x, int y)
 
 static int      FbGetCursorX(void)    { return (int)s_col; }
 static int      FbGetCursorY(void)    { return (int)s_row; }
-static void     FbUpdateCursor(void)  { /* no hardware cursor in GOP mode */ }
+
+/* Software cursor caret in GOP mode: a 2-pixel underline drawn in the
+ * foreground colour of the cell at (s_col, s_row). The previous caret cell
+ * is repainted from the cells buffer so the underline does not leave a trail. */
+static uint32_t s_caret_col = 0xFFFFFFFFu;
+static uint32_t s_caret_row = 0xFFFFFFFFu;
+
+static void FbEraseCaret(void)
+{
+    if (s_caret_col == 0xFFFFFFFFu || !s_fb.cells) return;
+    if (s_caret_col >= s_fb.cols || s_caret_row >= s_fb.rows) {
+        s_caret_col = 0xFFFFFFFFu; return;
+    }
+    TextCell *cell = &s_fb.cells[s_caret_row * s_fb.cols + s_caret_col];
+    FbDrawChar(s_caret_col, s_caret_row, cell->ch ? cell->ch : ' ', cell->attr);
+    s_caret_col = 0xFFFFFFFFu;
+}
+
+static void FbDrawCaret(void)
+{
+    if (s_col >= s_fb.cols || s_row >= s_fb.rows) return;
+
+    uint32_t px = s_col * FONT_W;
+    uint32_t py = s_row * FONT_H + (FONT_H - 2);
+
+    uint8_t attr = VideoGetColor();
+    if (s_fb.cells) {
+        TextCell *cell = &s_fb.cells[s_row * s_fb.cols + s_col];
+        attr = cell->attr ? cell->attr : attr;
+    }
+    uint32_t fg = FbPixelEncode(vga_palette[attr & 0x0F], s_fb.format);
+
+    if (s_fb.shadow) {
+        for (uint32_t y = 0; y < 2; y++) {
+            uint32_t *p = (uint32_t *)(s_fb.shadow + (size_t)(py + y) * s_fb.stride + (size_t)px * 4);
+            for (uint32_t x = 0; x < FONT_W; x++) p[x] = fg;
+        }
+        FbFlushChar(px, s_row * FONT_H);
+    } else {
+        for (uint32_t y = 0; y < 2; y++) {
+            volatile uint32_t *p = (volatile uint32_t *)(s_fb.virt + (size_t)(py + y) * s_fb.stride + (size_t)px * 4);
+            for (uint32_t x = 0; x < FONT_W; x++) p[x] = fg;
+        }
+    }
+    s_caret_col = s_col;
+    s_caret_row = s_row;
+}
+
+static void FbUpdateCursor(void)
+{
+    FbEraseCaret();
+    FbDrawCaret();
+}
 static uint16_t FbGetCols(void)       { return (uint16_t)s_fb.cols; }
 static uint16_t FbGetRows(void)       { return (uint16_t)s_fb.rows; }
 

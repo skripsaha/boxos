@@ -128,28 +128,67 @@ static ResultSlot *kring_translate_slot(process_t *target, uintptr_t uvaddr)
                                                   sizeof(ResultSlot));
 }
 
+/* Diagnostic: per-return-path counters. Snapshot via KResultPushStats(). */
+static volatile uint64_t g_krp_null_args;
+static volatile uint64_t g_krp_no_hdr;
+static volatile uint64_t g_krp_zero_cap;
+static volatile uint64_t g_krp_pre_full;
+static volatile uint64_t g_krp_premap_fail;
+static volatile uint64_t g_krp_crosspg_fail;
+static volatile uint64_t g_krp_translate_fail;
+static volatile uint64_t g_krp_spin_limit;
+static volatile uint64_t g_krp_overflow;
+static volatile uint64_t g_krp_success;
+
+void KResultPushStats(uint64_t out[10])
+{
+    out[0] = __atomic_load_n(&g_krp_null_args,      __ATOMIC_RELAXED);
+    out[1] = __atomic_load_n(&g_krp_no_hdr,         __ATOMIC_RELAXED);
+    out[2] = __atomic_load_n(&g_krp_zero_cap,       __ATOMIC_RELAXED);
+    out[3] = __atomic_load_n(&g_krp_pre_full,       __ATOMIC_RELAXED);
+    out[4] = __atomic_load_n(&g_krp_premap_fail,    __ATOMIC_RELAXED);
+    out[5] = __atomic_load_n(&g_krp_crosspg_fail,   __ATOMIC_RELAXED);
+    out[6] = __atomic_load_n(&g_krp_translate_fail, __ATOMIC_RELAXED);
+    out[7] = __atomic_load_n(&g_krp_spin_limit,     __ATOMIC_RELAXED);
+    out[8] = __atomic_load_n(&g_krp_overflow,       __ATOMIC_RELAXED);
+    out[9] = __atomic_load_n(&g_krp_success,        __ATOMIC_RELAXED);
+}
+
 bool KResultPush(process_t *target, const Result *r)
 {
-    if (!target || !r) return false;
+    if (!target || !r) {
+        __atomic_add_fetch(&g_krp_null_args, 1, __ATOMIC_RELAXED);
+        return false;
+    }
 
     ResultRing *rr = kring_result_hdr(target);
-    if (!rr) return false;
+    if (!rr) {
+        __atomic_add_fetch(&g_krp_no_hdr, 1, __ATOMIC_RELAXED);
+        return false;
+    }
 
     uint32_t cap = rr->hdr.slot_count_max;
-    if (cap == 0) return false;
+    if (cap == 0) {
+        __atomic_add_fetch(&g_krp_zero_cap, 1, __ATOMIC_RELAXED);
+        return false;
+    }
 
     /* (1) Cheap fullness pre-check. Best-effort; we re-validate after the
      *     atomic reservation. ACQUIRE on head so we see the consumer's
      *     most recent advance. */
     uint64_t head      = __atomic_load_n(&rr->hdr.head, __ATOMIC_ACQUIRE);
     uint64_t tail_snap = __atomic_load_n(&rr->hdr.tail, __ATOMIC_RELAXED);
-    if ((tail_snap - head) >= cap) return false;
+    if ((tail_snap - head) >= cap) {
+        __atomic_add_fetch(&g_krp_pre_full, 1, __ATOMIC_RELAXED);
+        return false;
+    }
 
     /* (2) Pre-map the slot page our snapshot points at. Most cross-K-Core
      *     races land on the same 4-KiB page (128 slots/page), so this one
      *     map call usually covers our final pos. */
     uintptr_t uvaddr_pre = result_ring_slot_uvaddr(rr, tail_snap);
     if (vmm_ensure_user_page(target->cabin, uvaddr_pre, /*writable=*/true) != 0) {
+        __atomic_add_fetch(&g_krp_premap_fail, 1, __ATOMIC_RELAXED);
         return false;
     }
 
@@ -171,11 +210,7 @@ bool KResultPush(process_t *target, const Result *r)
     uintptr_t uvaddr = result_ring_slot_uvaddr(rr, pos);
     if (uvaddr != uvaddr_pre) {
         if (vmm_ensure_user_page(target->cabin, uvaddr, /*writable=*/true) != 0) {
-            /* Catastrophic: PMM exhausted between our pre-map and now.
-             * The reserved slot has no kernel-writable mapping, so we
-             * cannot publish even an error result. The ring will stall
-             * for this target — log loudly. PMM exhaustion at IPC time
-             * is system-fatal anyway. */
+            __atomic_add_fetch(&g_krp_crosspg_fail, 1, __ATOMIC_RELAXED);
             kprintf("[KRP] FATAL: PMM exhausted at pos=%lu pid=%u (ring stuck)\n",
                     (unsigned long)pos, (unsigned int)target->pid);
             return false;
@@ -184,39 +219,31 @@ bool KResultPush(process_t *target, const Result *r)
 
     ResultSlot *slot = kring_translate_slot(target, uvaddr);
     if (!slot) {
+        __atomic_add_fetch(&g_krp_translate_fail, 1, __ATOMIC_RELAXED);
         kprintf("[KRP] FATAL: translate failed pos=%lu pid=%u (ring stuck)\n",
                 (unsigned long)pos, (unsigned int)target->pid);
         return false;
     }
 
     /* (6) Vyukov gate: wait until the slot's seq matches our round's
-     *     "ready for write" value. Zero-init pages give seq == 0 ==
-     *     2 * round for round 0 — round 0 producers proceed without
-     *     waiting. Subsequent rounds wait for the consumer to publish
-     *     seq = 2 * round, which it does after reading the prior round.
-     *     With cap=32768 and a healthy consumer, this is a single load
-     *     in steady state.
-     *
-     *     If the consumer is genuinely stuck and we burn enough spins,
-     *     bail out. The consumer will eventually re-sync once it
-     *     resumes; we drop this Result (caller treats false as "ring
-     *     full"). Avoids burning a K-Core forever on a misbehaving
-     *     userspace process. */
+     *     "ready for write" value. tail was already incremented, so
+     *     abandoning the slot would strand it and the consumer would
+     *     spin forever. We never give up — cpu_pause keeps the core
+     *     friendly under contention. */
     uint64_t round    = pos / cap;
     uint64_t expected = 2u * round;
 
-    enum { KRESULT_PUSH_SPIN_LIMIT = 1u << 20 };
     uint64_t spins = 0;
     for (;;) {
         uint64_t seq = __atomic_load_n(&slot->seq, __ATOMIC_ACQUIRE);
         if (seq == expected) break;
-        if (++spins > KRESULT_PUSH_SPIN_LIMIT) {
-            kprintf("[KRP] WARN: spin limit on pid=%u pos=%lu seq=%lu expected=%lu\n",
+        cpu_pause();
+        if (++spins == (1u << 24)) {
+            __atomic_add_fetch(&g_krp_spin_limit, 1, __ATOMIC_RELAXED);
+            kprintf("[KRP] WARN: long spin pid=%u pos=%lu seq=%lu expected=%lu\n",
                     (unsigned int)target->pid, (unsigned long)pos,
                     (unsigned long)seq, (unsigned long)expected);
-            return false;
         }
-        cpu_pause();
     }
 
     /* (7) Write payload. On overflow, write a synthetic error so the
@@ -227,8 +254,10 @@ bool KResultPush(process_t *target, const Result *r)
         slot->r.data_addr   = 0;
         slot->r.sender_pid  = 0;
         slot->r.context     = KCTX_GUIDE;
+        __atomic_add_fetch(&g_krp_overflow, 1, __ATOMIC_RELAXED);
     } else {
         slot->r = *r;
+        __atomic_add_fetch(&g_krp_success, 1, __ATOMIC_RELAXED);
     }
 
     /* (8) Publish — release-store the slot's seq so the consumer's

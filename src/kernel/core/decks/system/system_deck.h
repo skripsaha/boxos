@@ -24,8 +24,14 @@ typedef struct process_t process_t;
 #define SYSTEM_OP_TAG_CHECK     0x22
 #define SYSTEM_OP_ROUTE         0x40
 #define SYSTEM_OP_ROUTE_TAG     0x41
-#define SYSTEM_OP_LISTEN        0x42
 #define SYSTEM_OP_PERF_DUMP     0x50
+#define SYSTEM_OP_TOUCH_CLAIM      0x51
+#define SYSTEM_OP_TOUCH_RELEASE    0x52
+#define SYSTEM_OP_TOUCH_SEND       0x53
+#define SYSTEM_OP_TOUCH_AWAIT      0x54
+#define SYSTEM_OP_TOUCH_IRQ_RETURN 0x55
+#define SYSTEM_OP_TOUCH_REGISTER   0x56
+#define SYSTEM_OP_TOUCH_ACK        0x57
 
 /* Free every buffer owned by the given pid. Called during process teardown.
  * Equivalent to BufferRegistryCleanupProcess(pid) — the wrapper exists for
@@ -40,5 +46,8 @@ uint64_t ipc_copy_to_heap(process_t *sender, process_t *target,
 
 /* Register Manifest-native System Deck ops. Defined in system_ops.c. */
 error_t SystemDeckRegister(void);
+
+/* Register Touch ops. Defined in touch_ops.c. Called from SystemDeckRegister. */
+error_t TouchOpsRegister(void);
 
 #endif /* SYSTEM_DECK_H */

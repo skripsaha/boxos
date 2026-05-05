@@ -17,9 +17,31 @@ uint32_t result_count(void) {
     return n > 0xFFFFFFFFu ? 0xFFFFFFFFu : (uint32_t)n;
 }
 
+/* Diagnostic counters — see result_pop_stats(). */
+static volatile uint32_t g_rp_calls;
+static volatile uint32_t g_rp_empty;       /* head == tail */
+static volatile uint32_t g_rp_seq_mismatch; /* head != tail but slot.seq != expected */
+static volatile uint32_t g_rp_success;
+static volatile uint64_t g_rp_last_seq_seen;
+static volatile uint64_t g_rp_last_expected;
+static volatile uint64_t g_rp_last_pos;
+static volatile uint64_t g_rp_last_tail;
+
+void result_pop_stats(uint64_t out[8]) {
+    out[0] = __atomic_load_n(&g_rp_calls,         __ATOMIC_RELAXED);
+    out[1] = __atomic_load_n(&g_rp_empty,         __ATOMIC_RELAXED);
+    out[2] = __atomic_load_n(&g_rp_seq_mismatch,  __ATOMIC_RELAXED);
+    out[3] = __atomic_load_n(&g_rp_success,       __ATOMIC_RELAXED);
+    out[4] = __atomic_load_n(&g_rp_last_seq_seen, __ATOMIC_RELAXED);
+    out[5] = __atomic_load_n(&g_rp_last_expected, __ATOMIC_RELAXED);
+    out[6] = __atomic_load_n(&g_rp_last_pos,      __ATOMIC_RELAXED);
+    out[7] = __atomic_load_n(&g_rp_last_tail,     __ATOMIC_RELAXED);
+}
+
 bool result_pop(Result* out) {
     ResultRing* rr = result_ring();
     if (!rr || !out) return false;
+    __atomic_add_fetch(&g_rp_calls, 1, __ATOMIC_RELAXED);
 
     /* Force runtime loads — same rationale as pocket_ring_push: the
      * compiler treats slots_base / slot_size / slot_count_max as
@@ -42,7 +64,10 @@ bool result_pop(Result* out) {
      * seq from a slot the producer is about to write. */
     uint64_t tail = __atomic_load_n(&rr->hdr.tail, __ATOMIC_ACQUIRE);
     uint64_t pos  = __atomic_load_n(&rr->hdr.head, __ATOMIC_RELAXED);
-    if (pos == tail) return false;
+    if (pos == tail) {
+        __atomic_add_fetch(&g_rp_empty, 1, __ATOMIC_RELAXED);
+        return false;
+    }
 
     /* Vyukov consumer: slot is ready for our round when seq == 2*round + 1.
      * If the producer holding `pos` hasn't released its seq yet, slot.seq
@@ -51,7 +76,15 @@ bool result_pop(Result* out) {
     ResultSlot *slot   = (ResultSlot *)(uintptr_t)(base + (pos % cap) * stride);
     uint64_t expected  = 2u * (pos / (uint64_t)cap) + 1u;
     uint64_t seq       = __atomic_load_n(&slot->seq, __ATOMIC_ACQUIRE);
-    if (seq != expected) return false;
+    if (seq != expected) {
+        __atomic_store_n(&g_rp_last_seq_seen, seq, __ATOMIC_RELAXED);
+        __atomic_store_n(&g_rp_last_expected, expected, __ATOMIC_RELAXED);
+        __atomic_store_n(&g_rp_last_pos, pos, __ATOMIC_RELAXED);
+        __atomic_store_n(&g_rp_last_tail, tail, __ATOMIC_RELAXED);
+        __atomic_add_fetch(&g_rp_seq_mismatch, 1, __ATOMIC_RELAXED);
+        return false;
+    }
+    __atomic_add_fetch(&g_rp_success, 1, __ATOMIC_RELAXED);
 
     *out = slot->r;
 
@@ -64,58 +97,59 @@ bool result_pop(Result* out) {
     return true;
 }
 
-#define IPC_STASH_SIZE 64
-static Result ipc_stash_buf[IPC_STASH_SIZE];
-static uint32_t ipc_stash_cnt = 0;
+/* Stash is a static-sized circular FIFO. The original 64-slot cap dropped
+ * touches under multi-core stress (a 4000-event burst overflowed and lost
+ * events that never made it back to the consumer). 8192 covers any realistic
+ * burst without dynamic allocation, and drop-oldest semantics ensure stale
+ * entries from prior calls don't accumulate to corrupt future replies. */
+#define STASH_CAP 8192
 
-static void ipc_stash_push(Result* entry) {
-    if (ipc_stash_cnt >= IPC_STASH_SIZE) {
-        /* Stash full: drop oldest to make room */
-        for (uint32_t i = 1; i < ipc_stash_cnt; i++) {
-            ipc_stash_buf[i - 1] = ipc_stash_buf[i];
-        }
-        ipc_stash_cnt--;
+typedef struct {
+    Result   buf[STASH_CAP];
+    uint32_t head;
+    uint32_t tail;
+    uint32_t count;
+} StashRing;
+
+static StashRing ipc_stash;
+static StashRing non_ipc_stash;
+
+static void stash_push(StashRing *s, const Result *entry) {
+    if (s->count >= STASH_CAP) {
+        /* Drop oldest to make room. Preserves FIFO order; loses the oldest
+         * unconsumed entry, which is preferable to dropping the new one
+         * that may be the actual reply the caller is waiting for. */
+        s->head = (s->head + 1) % STASH_CAP;
+        s->count--;
     }
-    ipc_stash_buf[ipc_stash_cnt++] = *entry;
+    s->buf[s->tail] = *entry;
+    s->tail = (s->tail + 1) % STASH_CAP;
+    s->count++;
 }
 
-static bool ipc_stash_shift(Result* out) {
-    if (ipc_stash_cnt == 0) return false;
-    *out = ipc_stash_buf[0];
-    for (uint32_t i = 1; i < ipc_stash_cnt; i++) {
-        ipc_stash_buf[i - 1] = ipc_stash_buf[i];
-    }
-    ipc_stash_cnt--;
+static bool stash_shift(StashRing *s, Result *out) {
+    if (s->count == 0) return false;
+    *out = s->buf[s->head];
+    s->head = (s->head + 1) % STASH_CAP;
+    s->count--;
     return true;
 }
 
-#define NON_IPC_STASH_SIZE 64
-static Result non_ipc_stash_buf[NON_IPC_STASH_SIZE];
-static uint32_t non_ipc_stash_cnt = 0;
-
-static void non_ipc_stash_push(Result* entry) {
-    if (non_ipc_stash_cnt >= NON_IPC_STASH_SIZE) {
-        for (uint32_t i = 1; i < non_ipc_stash_cnt; i++) {
-            non_ipc_stash_buf[i - 1] = non_ipc_stash_buf[i];
-        }
-        non_ipc_stash_cnt--;
-    }
-    non_ipc_stash_buf[non_ipc_stash_cnt++] = *entry;
-}
-
-static bool non_ipc_stash_shift(Result* out) {
-    if (non_ipc_stash_cnt == 0) return false;
-    *out = non_ipc_stash_buf[0];
-    for (uint32_t i = 1; i < non_ipc_stash_cnt; i++) {
-        non_ipc_stash_buf[i - 1] = non_ipc_stash_buf[i];
-    }
-    non_ipc_stash_cnt--;
-    return true;
-}
+static void ipc_stash_push(Result* entry)        { stash_push(&ipc_stash, entry); }
+static bool ipc_stash_shift(Result* out)         { return stash_shift(&ipc_stash, out); }
+static void non_ipc_stash_push(Result* entry)    { stash_push(&non_ipc_stash, entry); }
+static bool non_ipc_stash_shift(Result* out)     { return stash_shift(&non_ipc_stash, out); }
 
 bool result_pop_non_ipc(Result* out) {
     if (!out) return false;
-    if (non_ipc_stash_shift(out)) return true;
+    /* Skip ERR_WOULD_BLOCK entries — these are transient kernel acks for
+     * async-parking ops (touch_await, kb_readline) and never valid replies
+     * to a synchronous manifest submission. If we returned them as the
+     * reply for a different submission the caller would see a stale 9 and
+     * misinterpret it as its own error. */
+    while (non_ipc_stash_shift(out)) {
+        if (out->error_code != 9 /* ERR_WOULD_BLOCK */) return true;
+    }
 
     Result entry;
     while (result_pop(&entry)) {
@@ -123,6 +157,7 @@ bool result_pop_non_ipc(Result* out) {
             ipc_stash_push(&entry);
             continue;
         }
+        if (entry.error_code == 9 /* ERR_WOULD_BLOCK */) continue;
         *out = entry;
         return true;
     }
@@ -139,13 +174,19 @@ bool result_pop_ipc(Result* out) {
             *out = entry;
             return true;
         }
+        /* Skip transient async-park acks (see result_pop_non_ipc). */
+        if (entry.error_code == 9 /* ERR_WOULD_BLOCK */) continue;
         non_ipc_stash_push(&entry);
     }
     return false;
 }
 
 uint32_t result_ipc_stash_count(void) {
-    return ipc_stash_cnt;
+    return ipc_stash.count;
+}
+
+uint32_t result_non_ipc_stash_count(void) {
+    return non_ipc_stash.count;
 }
 
 /* ===========================================================================
@@ -249,3 +290,4 @@ bool result_wait_any(Result* out, uint32_t timeout_ms) {
         __asm__ volatile("pause");
     }
 }
+
