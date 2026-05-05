@@ -411,6 +411,11 @@ uint8_t  tagfs_get_ahci_port(void);  /* AHCI port number — valid when AHCI is 
 void tagfs_shutdown(void);
 void tagfs_sync(void);
 
+/* Convert a TagFS logical block number to its absolute disk-sector LBA.
+ * Used by the async storage path which submits raw AHCI reads outside
+ * the read_block helper. */
+uint64_t tagfs_block_to_sector(uint32_t block);
+
 error_t  tagfs_format(uint32_t total_blocks);
 
 int  tagfs_create_file(const char* filename, const uint16_t* tag_ids, uint16_t tag_count,

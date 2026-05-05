@@ -32,7 +32,12 @@
 #include "tagfs.h"
 #include "tag_registry.h"
 #include "vmm.h"
+#include "pmm.h"
 #include "process.h"
+#include "ahci.h"
+#include "ahci_async.h"
+#include "kring.h"
+#include "kresult.h"
 
 #define OBJ_WRITE_APPEND_FLAG (1u << 0)
 
@@ -77,7 +82,65 @@ static uint16_t param_u16(const ManifestOp *op, uint16_t off)
 
 /* -------------------------------------------------------------------------
  * OBJ_READ — fill out_crate with up to capacity bytes from file at offset.
+ *
+ * Stage 2 async fast-path: when the request lands entirely inside one
+ * disk block, we submit an ahci_submit_read_async, park the caller
+ * (PROC_WAITING) and return ERR_WOULD_BLOCK. The AHCI IRQ fires the
+ * obj_read_async_complete callback which memcpy's DMA → user buffer,
+ * writes the actual byte count back into the Crate, KResultPush'es a
+ * Result and ref_dec's the pinned process — KResultPush also flips
+ * PROC_WAITING → PROC_WORKING so the caller wakes.
+ *
+ * Fallback (multi-block, off-block, no AHCI, allocation failure, no
+ * proc context) takes the existing tagfs_read sync path.
  * ------------------------------------------------------------------------- */
+
+typedef struct {
+    process_t       *target;       /* pinned via process_find_ref */
+    TagFSFileHandle *handle;       /* close on completion */
+    Crate           *out_crate;    /* user-mapped, write back size on completion */
+    void            *out_kp;       /* user out buffer (kernel direct map) */
+    uint32_t         out_size;     /* bytes to copy from DMA */
+    uint32_t         offset_in_block;
+    void            *dma_phys;
+    void            *dma_virt;
+} ObjReadAsyncCtx;
+
+static void obj_read_async_complete(uint8_t port, uint8_t slot,
+                                     error_t status, void *ctx_)
+{
+    (void)port;
+    (void)slot;
+    ObjReadAsyncCtx *ctx = (ObjReadAsyncCtx *)ctx_;
+
+    Result r;
+    memset(&r, 0, sizeof(r));
+    if (status == OK) {
+        memcpy(ctx->out_kp,
+               (uint8_t *)ctx->dma_virt + ctx->offset_in_block,
+               ctx->out_size);
+        ctx->out_crate->size = ctx->out_size;
+        r.error_code  = OK;
+        r.data_length = ctx->out_size;
+    } else {
+        ctx->out_crate->size = 0;
+        r.error_code  = ERR_IO;
+        r.data_length = 0;
+    }
+    r.sender_pid = 0;
+    r.context    = KCTX_GUIDE;
+
+    /* Cleanup BEFORE pushing the result so a userspace wakeup that
+     * races with us cannot see the buffer half-freed. */
+    pmm_free(ctx->dma_phys, 1);
+    tagfs_close(ctx->handle);
+
+    /* KResultPush also flips PROC_WAITING → PROC_WORKING (kring.c:269)
+     * which re-enqueues the caller on its home App-Core. */
+    KResultPush(ctx->target, &r);
+    process_ref_dec(ctx->target);
+    kfree(ctx);
+}
 
 static int ObjRead(const ManifestOp *op,
                    Crate            *crates,
@@ -100,6 +163,72 @@ static int ObjRead(const ManifestOp *op,
     if (!handle) return ERR_FILE_NOT_FOUND;
 
     handle->offset = offset;
+
+    /* Async fast-path — single-block, in-bounds reads. Multi-block /
+     * off-block / no-AHCI fall through to sync. */
+    if (offset < handle->file_size && handle->extent_count > 0 &&
+        ahci_is_initialized() && ctx && ctx->proc) {
+
+        uint64_t remaining = handle->file_size - offset;
+        uint64_t to_read   = (out->capacity > remaining) ? remaining : out->capacity;
+
+        /* Locate extent that holds `offset`. */
+        uint64_t extent_start = 0;
+        uint16_t ext_idx = 0xFFFF;
+        for (uint16_t i = 0; i < handle->extent_count; i++) {
+            uint64_t ext_size = (uint64_t)handle->extents[i].block_count * TAGFS_BLOCK_SIZE;
+            if (offset < extent_start + ext_size) { ext_idx = i; break; }
+            extent_start += ext_size;
+        }
+
+        if (ext_idx != 0xFFFF) {
+            uint64_t off_in_ext = offset - extent_start;
+            uint32_t blk_in_ext = (uint32_t)(off_in_ext / TAGFS_BLOCK_SIZE);
+            uint32_t off_in_blk = (uint32_t)(off_in_ext % TAGFS_BLOCK_SIZE);
+            uint32_t disk_block = handle->extents[ext_idx].start_block + blk_in_ext;
+
+            /* Single-block constraint: the read must end before block boundary. */
+            if (off_in_blk + to_read <= TAGFS_BLOCK_SIZE) {
+                void *dma_phys = pmm_alloc(1, PHYS_TAG_DMA32);
+                if (dma_phys) {
+                    void *dma_virt = vmm_phys_to_virt((uintptr_t)dma_phys);
+                    ObjReadAsyncCtx *async_ctx = kmalloc(sizeof(*async_ctx));
+                    if (async_ctx) {
+                        process_t *target = process_find_ref(ctx->proc->pid);
+                        if (target) {
+                            async_ctx->target          = target;
+                            async_ctx->handle          = handle;
+                            async_ctx->out_crate       = out;
+                            async_ctx->out_kp          = kp;
+                            async_ctx->out_size        = (uint32_t)to_read;
+                            async_ctx->offset_in_block = off_in_blk;
+                            async_ctx->dma_phys        = dma_phys;
+                            async_ctx->dma_virt        = dma_virt;
+
+                            uint64_t lba = tagfs_block_to_sector(disk_block);
+                            uint8_t slot;
+                            error_t err = ahci_submit_read_async(
+                                0, lba, 8, dma_phys,
+                                obj_read_async_complete, async_ctx, &slot);
+                            if (err == OK) {
+                                /* Park caller; IRQ wakes via KResultPush. */
+                                process_set_state(ctx->proc, PROC_WAITING);
+                                return ERR_WOULD_BLOCK;
+                            }
+                            /* Submit failed — undo. */
+                            process_ref_dec(target);
+                        }
+                        kfree(async_ctx);
+                    }
+                    pmm_free(dma_phys, 1);
+                }
+                /* Allocation / submit failure → fall through to sync. */
+            }
+        }
+    }
+
+    /* Sync fallback (multi-block, off-block, no AHCI, alloc failure,
+     * boot/early-init when ctx->proc is NULL). */
     int got = tagfs_read(handle, kp, out->capacity);
     tagfs_close(handle);
 
