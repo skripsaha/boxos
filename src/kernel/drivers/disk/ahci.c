@@ -169,6 +169,28 @@ void ahci_irq_handler(void) {
         if (completed) {
             __sync_fetch_and_or(&state->completed_slots, completed);
             __sync_fetch_and_and(&state->ci_snapshot, ~completed);
+
+            /* Async completion fan-out. For each slot whose owner
+             * registered a callback, fire it now. Sync callers leave
+             * cb[slot] == NULL — they continue to detect completion
+             * via the completed_slots bitmap above. cb is captured
+             * + cleared under the (per-slot) lock-free assumption
+             * that exactly one path owns a slot at a time, which is
+             * already enforced by ahci_alloc_slot. */
+            uint32_t cb_mask = completed;
+            bool tfes = (port_is & (1 << 30)) != 0;
+            error_t status = tfes ? ERR_IO : OK;
+            while (cb_mask) {
+                uint8_t slot = (uint8_t)__builtin_ctz(cb_mask);
+                cb_mask &= cb_mask - 1;
+                if (state->cb[slot]) {
+                    void (*cb)(uint8_t, uint8_t, error_t, void*) = state->cb[slot];
+                    void *ctx = state->cb_ctx[slot];
+                    state->cb[slot]     = NULL;
+                    state->cb_ctx[slot] = NULL;
+                    cb(i, slot, status, ctx);
+                }
+            }
         }
 
         /* Bit 30 = TFES (Task File Error Status) — at least one issued
@@ -245,6 +267,12 @@ int ahci_alloc_slot(uint8_t port_num) {
     for (uint8_t s = 0; s < AHCI_MAX_SLOTS; s++) {
         if (port->slot_bitmap & (1U << s)) {
             port->slot_bitmap &= ~(1U << s);
+            /* Defensive reset — we never want to inherit a stale
+             * async callback from a freed slot. ahci_free_slot is
+             * supposed to leave these NULL too, but reset on alloc
+             * keeps the invariant locally enforced. */
+            port->cb[s]     = NULL;
+            port->cb_ctx[s] = NULL;
             slot = s;
             break;
         }

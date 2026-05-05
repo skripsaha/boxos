@@ -338,6 +338,16 @@ typedef struct {
     uint32_t pid[AHCI_MAX_SLOTS];
     uint64_t submit_tsc[AHCI_MAX_SLOTS];
 
+    /* Per-slot async completion. Set non-NULL by ahci_submit_*_async(); the
+     * IRQ handler invokes the callback once the slot retires (or on TFES).
+     * Sync callers leave these NULL — the existing port->ci poll path
+     * picks up their completion. Each slot is owned by exactly one flow
+     * (sync OR async, never both) since ahci_alloc_slot returns a unique
+     * slot index. */
+    void   (*cb[AHCI_MAX_SLOTS])(uint8_t port, uint8_t slot,
+                                  error_t status, void *ctx);
+    void   *cb_ctx[AHCI_MAX_SLOTS];
+
     // Staging buffers for WRITE DMA (4KB each)
     void* staging_phys[AHCI_MAX_SLOTS];
     void* staging_virt[AHCI_MAX_SLOTS];
