@@ -19,6 +19,10 @@ void cpu_caps_page_init(void) {
     caps_page->has_waitpkg = g_cpu_caps.has_waitpkg;
     caps_page->has_invariant_tsc = g_cpu_caps.has_invariant_tsc;
     caps_page->tsc_freq_khz = 0;  // Will be filled after TSC calibration
+
+    /* Register as shared so vmm_destroy_context skips the pmm_free —
+     * this page lives for the whole kernel session. */
+    vmm_register_shared_phys(g_cpu_caps_page_phys);
 }
 
 void cpu_caps_page_set_tsc_freq(uint64_t freq_khz) {

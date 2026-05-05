@@ -27,6 +27,11 @@ void clockboard_init(void)
     s_clockboard_kva->tsc_freq_khz    = 0;  /* set by clockboard_set_tsc_freq_khz */
     s_clockboard_kva->boot_unix_secs  = 0;  /* set by clockboard_set_boot_unix_secs */
 
+    /* Register as shared so vmm_destroy_context skips pmm_free — this
+     * page is mapped R/O into every Cabin and lives for the whole
+     * kernel session. */
+    vmm_register_shared_phys(s_clockboard_phys);
+
     kprintf("[CLOCKBOARD] page allocated phys=0x%lx kva=0x%lx\n",
             (unsigned long)s_clockboard_phys, (unsigned long)s_clockboard_kva);
 }

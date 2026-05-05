@@ -107,6 +107,18 @@ vmm_context_t* vmm_get_kernel_context(void);
 vmm_context_t* vmm_get_current_context(void);
 void vmm_switch_context(vmm_context_t* ctx);
 
+/* Shared-physical registry. Pages registered here are mapped into many
+ * Cabins (cpu_caps page, ClockBoard, future vDSO-style pages) but live
+ * for the whole kernel session. vmm_destroy_context skips them — without
+ * this, the second process to be torn down hits a buddy double-free
+ * panic on the same physical. Call once at boot, after the page is
+ * allocated; safe to register before any Cabin is created.
+ *
+ * Returns true on success, false if the registry is full or phys is 0.
+ * Idempotent: registering the same phys twice is a silent no-op.        */
+bool vmm_register_shared_phys(uint64_t phys);
+bool vmm_is_shared_phys(uint64_t phys);
+
 vmm_map_result_t vmm_map_page(vmm_context_t* ctx, uintptr_t virt_addr,
                               uintptr_t phys_addr, uint64_t flags);
 vmm_map_result_t vmm_map_pages(vmm_context_t* ctx, uintptr_t virt_addr,
