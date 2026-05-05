@@ -257,6 +257,14 @@ static bool result_wait_yield(Result* out, uint32_t timeout_ms) {
 
 bool result_wait(Result* out, uint32_t timeout_ms) {
     if (!out) return false;
+    /* Discard stale stash entries — manifest_submit always wants a FRESH
+     * reply for THIS submission, never an old stash entry. Stale-reply
+     * mismatch (got reply for op N when waiting for op N+1) breaks
+     * touch_claim/release sequencing on multi-core stress. */
+    {
+        Result discard;
+        while (non_ipc_stash_shift(&discard)) { /* drain */ }
+    }
     if (result_pop_non_ipc(out)) return true;
 
     if (cpu_has_waitpkg()) return result_wait_umwait(out, timeout_ms);
