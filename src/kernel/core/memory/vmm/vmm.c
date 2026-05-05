@@ -757,6 +757,20 @@ static void vmm_free_user_space_tables(vmm_context_t *ctx)
                         continue;
                     }
 
+                    /* ClockBoard: one physical page shared (R/O) by every
+                     * Cabin. Never freed on process_destroy — the page
+                     * lives for the whole kernel session. Without this
+                     * skip, the second process to be destroyed would hit
+                     * a buddy double-free panic on the same physical. */
+                    if (phys == clockboard_phys() && clockboard_phys() != 0)
+                    {
+                        if (!is_identity_mapped)
+                        {
+                            pt->entries[p1] = 0;
+                        }
+                        continue;
+                    }
+
                     /* Phase 1 of the two-phase teardown: zero the PTE here
                      * but DO NOT pmm_free the underlying page yet — only
                      * mark it in the dedup bitmap. The actual frees happen
