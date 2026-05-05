@@ -748,21 +748,13 @@ static void vmm_free_user_space_tables(vmm_context_t *ctx)
                                      (p1 * VMM_PAGE_SIZE);
                     bool is_identity_mapped = (!g_pull_map_active) && (phys == virt);
 
-                    if (phys == g_cpu_caps_page_phys)
-                    {
-                        if (!is_identity_mapped)
-                        {
-                            pt->entries[p1] = 0;
-                        }
-                        continue;
-                    }
-
-                    /* ClockBoard: one physical page shared (R/O) by every
-                     * Cabin. Never freed on process_destroy — the page
-                     * lives for the whole kernel session. Without this
-                     * skip, the second process to be destroyed would hit
-                     * a buddy double-free panic on the same physical. */
-                    if (phys == clockboard_phys() && clockboard_phys() != 0)
+                    /* Shared kernel pages (cpu_caps, ClockBoard, future
+                     * vDSO-style pages) are mapped into many Cabins but
+                     * the physical lives for the whole kernel session.
+                     * Skip the pmm_free — only zero the PTE so the next
+                     * process to be created does NOT inherit the entry.
+                     * Registered via vmm_register_shared_phys() at boot. */
+                    if (vmm_is_shared_phys(phys))
                     {
                         if (!is_identity_mapped)
                         {
@@ -927,6 +919,68 @@ void vmm_destroy_context(vmm_context_t *ctx)
 vmm_context_t *vmm_get_kernel_context(void)
 {
     return kernel_context;
+}
+
+/* ===========================================================================
+ * Shared-physical registry — see vmm.h for the rationale. Small fixed-size
+ * array because the set of shared kernel pages is bounded and known at
+ * design time (cpu_caps, ClockBoard, future vDSO-style pages — never more
+ * than a handful).
+ * =========================================================================== */
+#define VMM_SHARED_PHYS_MAX 8
+
+static uint64_t      g_shared_phys[VMM_SHARED_PHYS_MAX];
+static uint8_t       g_shared_phys_count = 0;
+static spinlock_t    g_shared_phys_lock;
+static uint8_t       g_shared_phys_lock_inited = 0;
+
+static inline void shared_phys_lock_init_once(void)
+{
+    if (!g_shared_phys_lock_inited) {
+        spinlock_init(&g_shared_phys_lock);
+        g_shared_phys_lock_inited = 1;
+    }
+}
+
+bool vmm_register_shared_phys(uint64_t phys)
+{
+    if (phys == 0) return false;
+    shared_phys_lock_init_once();
+
+    spin_lock(&g_shared_phys_lock);
+    /* Idempotent — registering the same page twice is a silent success. */
+    for (uint8_t i = 0; i < g_shared_phys_count; i++) {
+        if (g_shared_phys[i] == phys) {
+            spin_unlock(&g_shared_phys_lock);
+            return true;
+        }
+    }
+    if (g_shared_phys_count >= VMM_SHARED_PHYS_MAX) {
+        spin_unlock(&g_shared_phys_lock);
+        debug_printf("[VMM] shared-phys registry full (%u entries)\n",
+                     VMM_SHARED_PHYS_MAX);
+        return false;
+    }
+    g_shared_phys[g_shared_phys_count++] = phys;
+    spin_unlock(&g_shared_phys_lock);
+    return true;
+}
+
+bool vmm_is_shared_phys(uint64_t phys)
+{
+    if (phys == 0) return false;
+    if (!g_shared_phys_lock_inited) return false;  /* nothing registered yet */
+    /* Hot path — called per-PTE during process_destroy. The lock is held
+     * very briefly; alternative would be RCU, but the registry is
+     * append-only after boot so this is fine. */
+    spin_lock(&g_shared_phys_lock);
+    uint8_t  count = g_shared_phys_count;
+    bool     hit   = false;
+    for (uint8_t i = 0; i < count; i++) {
+        if (g_shared_phys[i] == phys) { hit = true; break; }
+    }
+    spin_unlock(&g_shared_phys_lock);
+    return hit;
 }
 
 vmm_context_t *vmm_get_current_context(void)
