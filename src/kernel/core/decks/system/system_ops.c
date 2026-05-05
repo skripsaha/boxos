@@ -286,6 +286,17 @@ static int SysProcSpawn(const ManifestOp *op, Crate *crates, uint16_t crate_coun
         return ERR_SPAWN_FAILED;
     }
 
+    /* Publish process:spawned so monitors / shells can react. Pair with
+     * the process:died event in TouchCleanupProcess — together they form
+     * the lifecycle stream apps subscribe to instead of polling. */
+    {
+        struct __attribute__((packed)) {
+            uint32_t pid;
+            uint32_t parent_pid;
+        } ev = { new_proc->pid, ctx->proc->pid };
+        TouchPublish("process:spawned", &ev, sizeof(ev));
+    }
+
     if (op->out_crate != CRATE_INDEX_NONE) {
         Crate *out = &crates[op->out_crate];
         if (out->capacity >= sizeof(uint32_t)) {
@@ -508,6 +519,17 @@ static int SysProcExec(const ManifestOp *op, Crate *crates, uint16_t crate_count
 
     __sync_synchronize();
     process_set_state(new_proc, PROC_WORKING);
+
+    /* Publish process:spawned (mirrors SysProcSpawn). proc_exec is the
+     * primary userspace entry — without this hook subscribers see only
+     * binary-from-memory spawns and miss every shell-invoked one. */
+    {
+        struct __attribute__((packed)) {
+            uint32_t pid;
+            uint32_t parent_pid;
+        } ev = { new_proc->pid, ctx->proc->pid };
+        TouchPublish("process:spawned", &ev, sizeof(ev));
+    }
 
     if (op->out_crate != CRATE_INDEX_NONE) {
         Crate *out = &crates[op->out_crate];

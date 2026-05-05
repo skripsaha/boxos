@@ -157,6 +157,17 @@ bool result_pop_non_ipc(Result* out) {
             ipc_stash_push(&entry);
             continue;
         }
+        /* Touch events (kernel-published, source_pid==0 → sender_pid==0)
+         * MUST NOT be returned as manifest replies. Without this filter
+         * a kernel-broadcast touch (process:spawned, etc.) would be
+         * popped here and treated as the calling MfCall1's own reply,
+         * leaking its `error_code=0` while the real reply orphans in
+         * the ring. Stash to ipc_stash so touch_await's fast path picks
+         * it up by KCTX_TOUCH. */
+        if (entry._reserved == 9 /* KCTX_TOUCH */) {
+            ipc_stash_push(&entry);
+            continue;
+        }
         if (entry.error_code == 9 /* ERR_WOULD_BLOCK */) continue;
         *out = entry;
         return true;
@@ -170,7 +181,15 @@ bool result_pop_ipc(Result* out) {
 
     Result entry;
     while (result_pop(&entry)) {
+        /* Sender_pid != 0 → IPC payload (route from another process). */
         if (entry.sender_pid != 0) {
+            *out = entry;
+            return true;
+        }
+        /* Kernel-broadcast touch (sender_pid==0 + KCTX_TOUCH) — process
+         * lifecycle, USB, system halt — also count as "IPC-like" for
+         * subscribers using receive_wait()/receive(). */
+        if (entry._reserved == 9 /* KCTX_TOUCH */) {
             *out = entry;
             return true;
         }

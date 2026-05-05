@@ -4,8 +4,17 @@
 #include "box/types.h"
 #include "box/error.h"
 
-#define TOUCH_TAG_KEYBOARD    "keyboard"
-#define TOUCH_TAG_PROCESS_DIED "process.died"
+/* Canonical Touch tag names. Convention is `key:value` (TagFS bucket
+ * format) — subscribing to bare "key" catches all values; subscribing
+ * to "key:value" catches one. Keep these in lock-step with the
+ * kernel's TouchPublish() call sites or events vanish silently. */
+#define TOUCH_TAG_KEYBOARD          "keyboard"
+#define TOUCH_TAG_PROCESS_DIED      "process:died"
+#define TOUCH_TAG_PROCESS_SPAWNED   "process:spawned"
+#define TOUCH_TAG_SYSTEM_SHUTDOWN   "system:shutdown"
+#define TOUCH_TAG_SYSTEM_REBOOT     "system:reboot"
+#define TOUCH_TAG_USB_CONNECT       "usb:connect"
+#define TOUCH_TAG_USB_DISCONNECT    "usb:disconnect"
 
 typedef enum {
     TOUCH_REST      = 0,
@@ -26,6 +35,33 @@ typedef struct __attribute__((packed)) {
     uint64_t timestamp_tsc;
     uint32_t reserved;
 } Touch;
+
+/* Canonical payload shapes for kernel-published Touch events. Keep
+ * these byte-for-byte identical with the kernel publishers — TouchPublish
+ * passes raw bytes via ipc_copy_to_heap so any size/layout drift breaks
+ * subscribers silently. */
+typedef struct __attribute__((packed)) {
+    uint32_t pid;
+    int32_t  exit_code;
+} TouchProcessDied;
+
+typedef struct __attribute__((packed)) {
+    uint32_t pid;
+    uint32_t parent_pid;
+} TouchProcessSpawned;
+
+typedef struct __attribute__((packed)) {
+    uint32_t reason;     /* opaque shutdown reason; 0 = clean halt */
+    uint32_t grace_ms;   /* hint: ms left to flush before halt fires */
+} TouchSystemHalt;
+
+typedef struct __attribute__((packed)) {
+    uint8_t  port;
+    uint8_t  speed;      /* xHCI port speed code */
+    uint16_t vendor_id;
+    uint16_t product_id;
+    uint16_t _reserved;
+} TouchUsbConnect;
 
 typedef enum {
     TOUCH_POLICY_EDGE    = 0,

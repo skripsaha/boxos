@@ -13,16 +13,21 @@
 #include "cpu_calibrate.h"
 #include "xhci.h"
 #include "xhci_port.h"
+#include "touch.h"
 
-static void halt_delay_ms(uint32_t ms) {
+static void halt_delay_ms(uint32_t ms)
+{
     uint64_t deadline = rdtsc() + cpu_ms_to_tsc(ms);
-    while (rdtsc() < deadline) {
+    while (rdtsc() < deadline)
+    {
         __asm__ volatile("pause");
     }
 }
 
-static void halt_all_ap_cores(void) {
-    if (!g_amp.multicore_active) return;
+static void halt_all_ap_cores(void)
+{
+    if (!g_amp.multicore_active)
+        return;
 
     kprintf("[HALT] Stopping all AP cores...\n");
 
@@ -31,25 +36,30 @@ static void halt_all_ap_cores(void) {
     halt_delay_ms(5);
 
     uint8_t my_index = amp_get_core_index();
-    for (uint8_t c = 0; c < g_amp.total_cores; c++) {
-        if (c == my_index) continue;
+    for (uint8_t c = 0; c < g_amp.total_cores; c++)
+    {
+        if (c == my_index)
+            continue;
         g_amp.cores[c].online = false;
     }
 
     kprintf("[HALT] All AP cores stopped\n");
 }
 
-static void halt_detach_all_schedulers(void) {
+static void halt_detach_all_schedulers(void)
+{
     // Clear current_process on every core's scheduler.
     // AP cores are already in cli;hlt — they will never touch these pointers again.
     // This prevents process_destroy() from refusing to destroy "current" processes.
-    for (uint8_t c = 0; c < g_amp.total_cores; c++) {
-        scheduler_state_t* s = scheduler_get_core(c);
+    for (uint8_t c = 0; c < g_amp.total_cores; c++)
+    {
+        scheduler_state_t *s = scheduler_get_core(c);
         s->current_process = NULL;
     }
 }
 
-static void halt_terminate_all_processes(void) {
+static void halt_terminate_all_processes(void)
+{
     kprintf("[HALT] Terminating all processes...\n");
 
     // Detach all processes from scheduler before destruction
@@ -61,17 +71,20 @@ static void halt_terminate_all_processes(void) {
     uint32_t pid_count = 0;
 
     process_list_lock();
-    process_t* proc = process_get_first();
-    while (proc && pid_count < 256) {
+    process_t *proc = process_get_first();
+    while (proc && pid_count < 256)
+    {
         pids[pid_count++] = proc->pid;
         proc = proc->next;
     }
     process_list_unlock();
 
     uint32_t killed = 0;
-    for (uint32_t i = 0; i < pid_count; i++) {
-        process_t* p = process_find(pids[i]);
-        if (p) {
+    for (uint32_t i = 0; i < pid_count; i++)
+    {
+        process_t *p = process_find(pids[i]);
+        if (p)
+        {
             process_set_state(p, PROC_DONE);
             process_destroy(p);
             killed++;
@@ -83,7 +96,8 @@ static void halt_terminate_all_processes(void) {
     kprintf("[HALT] %u processes terminated\n", killed);
 }
 
-static void halt_sync_storage(void) {
+static void halt_sync_storage(void)
+{
     kprintf("[HALT] Syncing TagFS...\n");
     tagfs_shutdown();
 
@@ -93,27 +107,51 @@ static void halt_sync_storage(void) {
     kprintf("[HALT] Storage sync complete\n");
 }
 
-static void halt_stop_hardware(void) {
-    xhci_controller_t* ctrl = xhci_get_controller();
-    if (ctrl && ctrl->initialized) {
+static void halt_stop_hardware(void)
+{
+    xhci_controller_t *ctrl = xhci_get_controller();
+    if (ctrl && ctrl->initialized)
+    {
         kprintf("[HALT] Stopping USB controller...\n");
-        for (uint8_t p = 1; p <= ctrl->max_ports; p++) {
+        for (uint8_t p = 1; p <= ctrl->max_ports; p++)
+        {
             xhci_disable_port(ctrl, p);
         }
     }
 
     kprintf("[HALT] Masking all IRQs...\n");
-    for (uint8_t irq = 0; irq < irqchip_max_irqs(); irq++) {
+    for (uint8_t irq = 0; irq < irqchip_max_irqs(); irq++)
+    {
         irqchip_disable_irq(irq);
     }
 }
 
-void system_halt(bool reboot) {
+void system_halt(bool reboot)
+{
+    /* Publish system:shutdown/system:reboot BEFORE we cli, so subscribers
+     * (e.g. user daemons holding open files / dirty caches) get woken on
+     * their App-Cores while interrupts and the scheduler still work. The
+     * grace_ms hint is currently nominal — the actual halt path doesn't
+     * await acks, but a future scheduler tick can be added between
+     * publish and `cli` to give listeners a chance to run. */
+    {
+        struct __attribute__((packed)) {
+            uint32_t reason;
+            uint32_t grace_ms;
+        } hint = { 0u, 50u };
+        TouchPublish(reboot ? "system:reboot" : "system:shutdown",
+                     &hint, sizeof(hint));
+    }
+
+    /* Drain any pending Touch deliveries and let App-Cores run subscribers
+     * for a brief window before we kill interrupts. 50 ms is a hint — apps
+     * that need more should checkpoint on every state change, not on
+     * shutdown alone. */
+    halt_delay_ms(50);
+
     __asm__ volatile("cli");
 
-    kprintf("\n========================================\n");
-    kprintf("  SYSTEM %s INITIATED\n", reboot ? "REBOOT" : "SHUTDOWN");
-    kprintf("========================================\n");
+    kprintf("%s initiated\n", reboot ? "reboot" : "shutdown");
 
     halt_all_ap_cores();
     halt_terminate_all_processes();
@@ -122,10 +160,13 @@ void system_halt(bool reboot) {
 
     kprintf("[HALT] Cleanup complete.\n");
 
-    if (reboot) {
+    if (reboot)
+    {
         kprintf("[HALT] Rebooting...\n");
         acpi_reboot();
-    } else {
+    }
+    else
+    {
         kprintf("[HALT] Powering off...\n");
         acpi_shutdown();
     }
