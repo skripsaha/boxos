@@ -374,11 +374,11 @@ error_t tagfs_read_block(uint32_t block, void *buffer) {
 error_t tagfs_write_block(uint32_t block, const void *buffer) {
     if (!buffer)
         return ERR_NULL_POINTER;
-    
+
     error_t err = write_block(block, buffer);
     if (err != OK)
         return ERR_WRITE_FAILED;
-    
+
     return OK;
 }
 
@@ -1173,6 +1173,40 @@ error_t tagfs_init(void) {
                 tagfs_metadata_free(&meta);
             }
 
+            /* Walk meta_pool / file_table / registry chains and mark
+             * every chain block in computed_bm. Without this, chain
+             * blocks (e.g. meta_pool's chain to 566) appear as
+             * "orphan" — used in on-disk bitmap, missing in computed
+             * — and the old fsck would silently zero them, releasing
+             * still-live metadata pages to the allocator. CoW or any
+             * subsequent tagfs_alloc_blocks would then claim those
+             * pages and overwrite live metadata.
+             *
+             * Each subsystem's first block is in the superblock and
+             * its chain is on disk linked via next_block. Walk it
+             * here at fsck time using the same magic-check pattern
+             * the per-subsystem init's do. */
+            #define MARK_CHAIN_BLOCKS(first_block, expected_magic) do {       \
+                uint32_t _cb = (first_block);                                  \
+                uint32_t _hops = 0;                                            \
+                while (_cb != 0 && _hops < sb.total_blocks) {                  \
+                    if (_cb < sb.total_blocks)                                 \
+                        bitmap_set_bit(computed_bm, _cb);                      \
+                    uint8_t _bbuf[TAGFS_BLOCK_SIZE];                           \
+                    if (tagfs_read_block(_cb, _bbuf) != OK) break;             \
+                    uint32_t _mg, _nx;                                         \
+                    memcpy(&_mg, _bbuf + 0, 4);                                \
+                    memcpy(&_nx, _bbuf + 4, 4);                                \
+                    if (_mg != (expected_magic)) break;                        \
+                    _cb = _nx;                                                 \
+                    _hops++;                                                   \
+                }                                                              \
+            } while (0)
+            MARK_CHAIN_BLOCKS(sb.tag_registry_block,    TAGFS_REGISTRY_MAGIC);
+            MARK_CHAIN_BLOCKS(sb.file_table_block,      TAGFS_FILETBL_MAGIC);
+            MARK_CHAIN_BLOCKS(sb.metadata_pool_block,   TAGFS_MPOOL_MAGIC);
+            #undef MARK_CHAIN_BLOCKS
+
             // Compare computed vs on-disk bitmap
             for (uint32_t b = 0; b < sb.total_blocks; b++)
             {
@@ -1186,9 +1220,24 @@ error_t tagfs_init(void) {
 
             if (orphan_blocks > 0 || missing_blocks > 0)
             {
-                debug_printf("[TagFS FSCK] Bitmap mismatch: %u orphan, %u missing — repairing\n",
+                debug_printf("[TagFS FSCK] Bitmap mismatch: %u orphan, %u missing — additive repair\n",
                              orphan_blocks, missing_blocks);
-                memcpy(g_state.block_bitmap.bitmap, computed_bm, bitmap_bytes_sz);
+                /* Additive repair: union (on_disk OR computed). Never
+                 * release a block on-disk says is used — the chain
+                 * walk above is best-effort and a subsystem we don't
+                 * yet enumerate (CoW snapshots, disk_book journal,
+                 * future vDSO-style) might also legitimately own a
+                 * block that on-disk bitmap correctly captured but
+                 * we don't reproduce. Erring towards "keep used" is
+                 * safe; the worst case is a slow, leaky allocator
+                 * that fsck will eventually resolve as files come
+                 * and go. The opposite (release-into-allocator a
+                 * block that's still live metadata) corrupts the
+                 * filesystem. */
+                for (uint32_t b = 0; b < sb.total_blocks; b++) {
+                    if (bitmap_test_bit(computed_bm, b))
+                        bitmap_set_bit(g_state.block_bitmap.bitmap, b);
+                }
                 free_list_build();
 
                 // Count actual free blocks
