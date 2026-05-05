@@ -48,7 +48,7 @@ int touch_claim(const char *tag, TouchMode mode, uint64_t manifest_or_handler,
                    params, param_size,
                    tag, (uint32_t)(strlen(tag) + 1),
                    NULL, 0, NULL,
-                   1000, NULL);
+                   30000, NULL);
 }
 
 int touch_release(const char *tag)
@@ -59,7 +59,7 @@ int touch_release(const char *tag)
                    NULL, 0,
                    tag, (uint32_t)(strlen(tag) + 1),
                    NULL, 0, NULL,
-                   1000, NULL);
+                   30000, NULL);
 }
 
 int touch_send(const char *tag, const void *payload, uint32_t plen, uint32_t after_ms)

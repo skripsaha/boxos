@@ -359,13 +359,15 @@ static int HwTimerGetMs(const ManifestOp *op, Crate *crates, uint16_t crate_coun
     Crate *out = &crates[op->out_crate];
     if (out->capacity < sizeof(uint64_t)) return ERR_BUFFER_TOO_SMALL;
 
-    uint32_t freq = pit_get_frequency();
-    if (freq == 0) return ERR_NOT_INITIALIZED;
-
     void *kp = HwCrateMap(out, ctx, sizeof(uint64_t));
     if (!kp) return ERR_INVALID_ADDRESS;
 
-    uint64_t ms = (pit_get_ticks() * 1000ULL) / freq;
+    /* Use the dedicated monotonic uptime counter (advanced per-tick by
+     * 1_000_000/freq µs) instead of deriving from `ticks * 1000 / freq`,
+     * which is NOT monotonic when the scheduler reprograms the PIT under
+     * load. The old derivation produced backwards-jumps causing S1's
+     * "elapsed=0xFFFFFFFFFFFF…" underflow. */
+    uint64_t ms = pit_get_uptime_ms();
     memcpy(kp, &ms, sizeof(uint64_t));
     out->size = sizeof(uint64_t);
     return OK;

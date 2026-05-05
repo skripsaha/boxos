@@ -75,6 +75,11 @@ bool result_pop_non_ipc(Result* out);
 bool result_pop_ipc(Result* out);
 uint32_t result_ipc_stash_count(void);
 
+/* Drop orphan manifest replies left behind by timed-out callers. Call
+ * BEFORE each fresh synchronous ManifestSubmit so the stash+ring carry
+ * no stale `error_code` that would otherwise be returned for the new op. */
+void result_drain_orphan_replies(void);
+
 // Block until ANY result arrives (no filtering).
 // For IPC servers (display daemon, etc.) that receive both IPC and kernel results.
 bool result_wait_any(Result* out, uint32_t timeout_ms);

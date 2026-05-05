@@ -7,6 +7,13 @@
 static volatile uint64_t pit_ticks = 0;
 static uint32_t pit_frequency = 0;
 
+/* Monotonic uptime in microseconds, advanced per tick by (1_000_000 / freq).
+ * Decouples uptime from `pit_ticks * 1000 / current_freq` (which is NOT
+ * monotonic when the scheduler reprograms the PIT — old ticks counted at
+ * a slow rate get divided by a higher freq, yielding a smaller ms value
+ * than a previous reading. The S1 underflow `elapsed=0xFFFF...` was this. */
+static volatile uint64_t pit_uptime_us = 0;
+
 void pit_init(uint32_t frequency_hz) {
     if (frequency_hz == 0 || frequency_hz > PIT_FREQUENCY) {
         debug_printf("[PIT] Invalid frequency: %u Hz (max: %u Hz)\n", frequency_hz, PIT_FREQUENCY);
@@ -68,6 +75,24 @@ uint64_t pit_get_ticks(void) {
 
 void pit_tick(void) {
     __atomic_fetch_add(&pit_ticks, 1, __ATOMIC_RELAXED);
+
+    /* Advance microsecond counter. freq may change between ticks (scheduler
+     * reprograms PIT under load), but each tick contributes 1_000_000/freq
+     * microseconds at the freq IT was issued at — preserving monotonicity. */
+    uint32_t freq = pit_frequency;
+    if (freq > 0) {
+        __atomic_fetch_add(&pit_uptime_us,
+                           1000000ULL / (uint64_t)freq,
+                           __ATOMIC_RELAXED);
+    }
+}
+
+uint64_t pit_get_uptime_ms(void) {
+    return __atomic_load_n(&pit_uptime_us, __ATOMIC_RELAXED) / 1000ULL;
+}
+
+uint64_t pit_get_uptime_us(void) {
+    return __atomic_load_n(&pit_uptime_us, __ATOMIC_RELAXED);
 }
 
 void pit_sleep_ms(uint32_t milliseconds) {

@@ -111,6 +111,16 @@ int ManifestSubmitFull(const Manifest *m,
     if (m->magic != MANIFEST_MAGIC)           return -ERR_INVALID_ARGS;
     if (crate_count > 0 && !crates)           return -ERR_INVALID_ARGS;
 
+    /* Drop any orphan replies left over from prior timed-out callers BEFORE
+     * we submit. A stale reply in the ring would be popped first by our own
+     * result_wait and we would return its error_code as if it belonged to
+     * THIS submission — the cascading 902/302 in the multi-core S2 stress.
+     *
+     * Safe because ManifestSubmitFull is the synchronous entry point: when
+     * we reach here there is, by construction, no other pending submission
+     * for this process to whom an unconsumed reply could rightfully belong. */
+    result_drain_orphan_replies();
+
     Pocket p;
     encode_manifest_pocket(&p, m, crates, crate_count, target_pid);
 
