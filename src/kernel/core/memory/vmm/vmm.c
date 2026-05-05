@@ -8,6 +8,7 @@
 #include "process.h"
 #include "cpu_caps_page.h"
 #include "boxos_addresses.h"
+#include "clockboard.h"
 #include "amp.h"
 #include "video.h"
 #include "e820.h"
@@ -2280,6 +2281,26 @@ vmm_context_t *vmm_create_cabin(uint64_t *cabin_info_phys, uint64_t *pocket_ring
         {
             debug_printf("[VMM] WARNING: Failed to map CPU caps page at 0x%lx: %s\n",
                          CPU_CAPS_PAGE_ADDR, map_result.error_msg);
+        }
+    }
+
+    /* ClockBoard — read-only kernel-published clock page. ONE physical
+     * page allocated at boot (clockboard_init) and mapped at the same VA
+     * into every Cabin. No WRITABLE flag — userspace can read uptime in a
+     * single load, kernel writes via the shared kernel direct-map. */
+    {
+        uint64_t cb_phys = clockboard_phys();
+        if (cb_phys != 0)
+        {
+            uint64_t flags = VMM_FLAG_PRESENT | VMM_FLAG_USER;  /* R/O for user */
+            vmm_map_result_t map_result = vmm_map_page(cabin_ctx,
+                                                        CABIN_CLOCKBOARD_ADDR,
+                                                        cb_phys, flags);
+            if (!map_result.success)
+            {
+                debug_printf("[VMM] WARNING: Failed to map ClockBoard at 0x%lx: %s\n",
+                             (unsigned long)CABIN_CLOCKBOARD_ADDR, map_result.error_msg);
+            }
         }
     }
 

@@ -3,6 +3,7 @@
 #include "klib.h"
 #include "irqchip.h"
 #include "scheduler.h"  // For g_timer_frequency
+#include "clockboard.h"
 
 static volatile uint64_t pit_ticks = 0;
 static uint32_t pit_frequency = 0;
@@ -74,17 +75,26 @@ uint64_t pit_get_ticks(void) {
 }
 
 void pit_tick(void) {
-    __atomic_fetch_add(&pit_ticks, 1, __ATOMIC_RELAXED);
+    uint64_t new_ticks = __atomic_add_fetch(&pit_ticks, 1, __ATOMIC_RELAXED);
 
     /* Advance microsecond counter. freq may change between ticks (scheduler
      * reprograms PIT under load), but each tick contributes 1_000_000/freq
      * microseconds at the freq IT was issued at — preserving monotonicity. */
     uint32_t freq = pit_frequency;
+    uint64_t new_us = 0;
     if (freq > 0) {
-        __atomic_fetch_add(&pit_uptime_us,
-                           1000000ULL / (uint64_t)freq,
-                           __ATOMIC_RELAXED);
+        new_us = __atomic_add_fetch(&pit_uptime_us,
+                                     1000000ULL / (uint64_t)freq,
+                                     __ATOMIC_RELAXED);
+    } else {
+        new_us = __atomic_load_n(&pit_uptime_us, __ATOMIC_RELAXED);
     }
+
+    /* Mirror dynamic counters into the userspace-visible ClockBoard so a
+     * read in userspace costs zero syscalls. Single-writer (this is the
+     * BSP-only IRQ handler), so the plain stores inside the helper are
+     * race-free against any cross-core reader. */
+    clockboard_tick_update(new_us, new_ticks);
 }
 
 uint64_t pit_get_uptime_ms(void) {

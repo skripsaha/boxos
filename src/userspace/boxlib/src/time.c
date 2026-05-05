@@ -7,6 +7,7 @@
 #include "box/core/notify.h"
 #include "box/string.h"
 #include "box/core/result.h"
+#include "box/clock.h"
 
 #define HW_TIMER_GET_MS    0x11
 #define HW_RTC_GET_TIME    0x15
@@ -55,6 +56,19 @@ int time_get_secs(uint64_t *out_seconds)
 int time_uptime_ms(uint64_t *out_ms)
 {
     if (!out_ms) return ERR_NULL_POINTER;
+
+    /* ClockBoard fast path: a single memory load instead of a 46 µs
+     * HW-deck round trip. Falls through to the manifest path if the
+     * page is missing or carries the wrong magic (older kernel,
+     * missing mapping, future ABI mismatch). The page is mapped R/O
+     * into every Cabin at CLOCKBOARD_VA. */
+    const volatile ClockBoardView *v =
+        (const volatile ClockBoardView *)(uintptr_t)CLOCKBOARD_VA;
+    if (v->magic == CLOCKBOARD_MAGIC_USER && v->version >= 1u) {
+        *out_ms = v->uptime_ms;
+        return OK;
+    }
+
     uint8_t buf[8] = {0};
     int rc = MfCall1(DECK_HARDWARE, HW_TIMER_GET_MS,
                      NULL, 0, NULL, 0,

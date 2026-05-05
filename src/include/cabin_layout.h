@@ -40,10 +40,26 @@
 #define CABIN_RESULT_RING_SIZE         0x1000
 #define CABIN_RESULT_RING_PAGES        1
 
-/* Code starts after the ring headers. The 0x4000-0xC000 gap (formerly part of
- * the legacy fixed-size ResultRing) is left unmapped — it is recoverable in a
- * later phase but for now we keep CABIN_CODE_START_ADDR at the same value so
- * existing user ELFs (linked at 0xC000) continue to load unchanged. */
+/* ClockBoard — read-only kernel-published wall/uptime clock.
+ *
+ * One physical page allocated at boot, mapped read-only into EVERY Cabin
+ * at this fixed VA. The PIT IRQ (BSP only) writes uptime_us / uptime_ms /
+ * tick_count per tick; static fields (tsc_freq_khz, boot_unix_secs) are
+ * populated once during early boot. Userspace reads via plain pointer
+ * load — no syscall, no manifest, no ring round-trip.
+ *
+ * Replaces `time_uptime_ms` (a 46 µs HW-deck call) for the hot uptime
+ * read with a ~10 ns memory load. The dynamic-PIT-freq architecture is
+ * preserved: ClockBoard inherits monotonicity from pit_uptime_us which
+ * already adds 1_000_000/current_freq µs per tick. */
+#define CABIN_CLOCKBOARD_ADDR          0x0000000000004000ULL
+#define CABIN_CLOCKBOARD_SIZE          0x1000
+#define CABIN_CLOCKBOARD_PAGES         1
+
+/* Code starts after the ring headers + clockboard. The 0x5000-0xC000 gap
+ * (formerly part of the legacy fixed-size ResultRing) is left unmapped — it
+ * is recoverable in a later phase but for now we keep CABIN_CODE_START_ADDR
+ * at the same value so existing user ELFs (linked at 0xC000) load unchanged. */
 #define CABIN_CODE_START_ADDR          0x000000000000C000ULL
 
 /* High-VA slot regions. 64 TiB into user space — well clear of the heap and

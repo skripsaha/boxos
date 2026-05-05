@@ -35,6 +35,7 @@ SRCS = src/core/notify.c \
        src/system.c \
        src/ipc.c \
        src/time.c \
+       src/clock.c \
        src/memory.c \
        src/vga.c \
        src/keyboard.c \

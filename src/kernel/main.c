@@ -10,6 +10,7 @@
 #include "irqchip.h"
 #include "pit.h"
 #include "rtc.h"
+#include "clockboard.h"
 #include "e820.h"
 #include "fpu.h"
 #include "process.h"
@@ -177,14 +178,22 @@ void kernel_main(void)
     debug_printf("[INIT] Per-core GDT/TSS/Notify (BSP)...\n");
     per_core_init_bsp();
 
+    /* ClockBoard MUST be initialised before pit_init so the IRQ handler
+     * always finds a valid backing page. Late-boot setters (TSC freq,
+     * RTC unix-secs) are called after their respective inits below. */
+    debug_printf("[INIT] ClockBoard...\n");
+    clockboard_init();
+
     debug_printf("[INIT] PIT...\n");
     pit_init(250);  // 250Hz = 4ms tick for better responsiveness
 
     debug_printf("[INIT] RTC...\n");
     rtc_init();
+    clockboard_set_boot_unix_secs(rtc_get_unix64());
 
     debug_printf("[INIT] CPU Calibration...\n");
     cpu_calibrate_tsc();
+    clockboard_set_tsc_freq_khz(cpu_get_tsc_freq_khz());
 
     // Initialize idle process (PID 0) before process system
     kprintf("[INIT] Idle Process...\n");
