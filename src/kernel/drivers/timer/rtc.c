@@ -183,12 +183,9 @@ uint64_t rtc_get_unix64(void) {
 }
 
 uint64_t rtc_get_uptime_ns(void) {
-    uint32_t freq = pit_get_frequency();
-    if (freq == 0) {
-        return 0;
-    }
-    uint64_t ticks = pit_get_ticks() - rtc_state.base_pit_ticks;
-    uint64_t secs = ticks / freq;
-    uint64_t sub  = ticks % freq;
-    return secs * 1000000000ULL + (sub * 1000000000ULL) / freq;
+    /* Use the monotonic microsecond counter — surviving freq changes — and
+     * extend to nanoseconds. The old `(ticks - base) / freq * 1e9 + …`
+     * derivation was non-monotonic when the scheduler reprogrammed the PIT
+     * (see HwTimerGetMs comment). */
+    return pit_get_uptime_us() * 1000ULL;
 }

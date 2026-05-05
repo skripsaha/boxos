@@ -117,6 +117,10 @@ static void test_s2(void)
     uint64_t t0 = uptime_ms();
     bool crashed = false;
 
+    int first_bad_iter = -1;
+    int first_bad_rc   = 0;
+    int bad_count      = 0;
+
     for (int i = 0; i < 10000 && !crashed; i++) {
         char tag[32];
         int p = 0;
@@ -127,7 +131,19 @@ static void test_s2(void)
 
         int rc = touch_claim(tag, TOUCH_REST, 0, 0);
         if (rc < 0) { crashed = true; break; }
-        touch_release(tag);
+        if (rc != 0) {
+            bad_count++;
+            if (first_bad_iter < 0) { first_bad_iter = i; first_bad_rc = rc; }
+        }
+        int rc2 = touch_release(tag);
+        if (rc2 != 0) {
+            bad_count++;
+            if (first_bad_iter < 0) { first_bad_iter = i; first_bad_rc = rc2; }
+        }
+    }
+    if (bad_count > 0) {
+        kdbg_print("[STRESS S2] bad_count=%d first_bad_iter=%d first_bad_rc=%d",
+                   bad_count, first_bad_iter, first_bad_rc);
     }
 
     /* Final claim must succeed after all churn. */

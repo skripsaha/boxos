@@ -189,6 +189,40 @@ uint32_t result_non_ipc_stash_count(void) {
     return non_ipc_stash.count;
 }
 
+/* Drop orphan manifest replies — replies whose original submitter timed out
+ * and is no longer waiting for them. Without this, the very next MfCall1's
+ * result_wait would dequeue the orphan and treat it as ITS reply, leaking
+ * the prior call's error_code (e.g. 302 / 902) into a brand-new operation.
+ *
+ * Filter rules (must mirror result_pop_non_ipc):
+ *   - sender_pid != 0   → IPC / touch event (preserve in ipc_stash)
+ *   - context==KCTX_TOUCH → LEVEL touch with kernel source_pid=0 (preserve)
+ *   - error_code==9 (WOULD_BLOCK) → async-park ack (discard, not a real reply)
+ *   - everything else   → orphan manifest reply (DISCARD)
+ *
+ * Safe to call ONLY before submitting a fresh synchronous Manifest. Async
+ * paths (touch_await, kb_readline) must NOT use this helper because their
+ * pending replies look identical to orphans. */
+void result_drain_orphan_replies(void) {
+    /* Drop everything sitting in the local non_ipc_stash too — those are by
+     * definition entries the caller skipped past. */
+    Result discard;
+    while (non_ipc_stash_shift(&discard)) { /* drop */ }
+
+    Result entry;
+    while (result_pop(&entry)) {
+        if (entry.sender_pid != 0) {
+            ipc_stash_push(&entry);
+            continue;
+        }
+        if (entry._reserved == 9 /* KCTX_TOUCH */) {
+            ipc_stash_push(&entry);
+            continue;
+        }
+        /* Manifest-reply slot with sender_pid==0 — orphan. Drop. */
+    }
+}
+
 /* ===========================================================================
  * Blocking waits — was result_wait.c (merged Stage 2).
  * UMWAIT-based fast path on CPUs with WAITPKG; pause-spin fallback otherwise.

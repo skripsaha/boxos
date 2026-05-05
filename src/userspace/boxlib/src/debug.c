@@ -84,11 +84,17 @@ static int debug_vsnprintf(char *dst, int cap, const char *fmt, va_list ap)
 void kdbg(const char *msg)
 {
     if (!msg) return;
+    /* Long timeout (60s) — under heavy multi-core load (e.g. mid-stress)
+     * the kernel can take 100ms+ to dispatch HW_DEBUG_PRINT. A short timeout
+     * leaves the actual reply orphaned in our ResultRing, where the very
+     * next MfCall1 would pop it as if it were ITS own reply, leaking the
+     * stale error_code into an unrelated call. (S2 final_rc=302 / 902
+     * cascade.) */
     MfCall1(DECK_HARDWARE, HW_DEBUG_PRINT,
             NULL, 0,
             msg, (uint32_t)(strlen(msg) + 1),
             NULL, 0, NULL,
-            100, NULL);
+            60000, NULL);
 }
 
 int kdbg_print(const char *fmt, ...)

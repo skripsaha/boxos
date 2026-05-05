@@ -21,6 +21,8 @@ void pit_init(uint32_t frequency_hz);
 void pit_set_frequency(uint32_t frequency_hz);
 void pit_tick(void);
 uint64_t pit_get_ticks(void);
+uint64_t pit_get_uptime_ms(void);
+uint64_t pit_get_uptime_us(void);
 void pit_sleep_ms(uint32_t milliseconds);
 // Busy-wait that works without interrupts (for TSC calibration)
 void pit_delay_busy(uint32_t milliseconds);

@@ -86,8 +86,17 @@ static void guide_process_manifest_pocket(Pocket *pocket, process_t *proc)
                                      &ctx, &result);
     pocket->error_code = (uint32_t)rc;
 
-    debug_printf("[GUIDE] manifest PID=%u ops=%u/%u rc=%d\n",
-                 proc->pid, result.completed_ops, result.total_ops, rc);
+    /* Log every non-OK manifest. Filter to test PIDs (3+) only; PIDs 1 and
+     * 2 (display, shell) generate constant kb/HW chatter we don't care
+     * about for race hunting. */
+    if (rc != OK && proc->pid >= 3) {
+        const Manifest *mh = (const Manifest *)manifest_kp;
+        debug_printf("[MANIFEST_FAIL] PID=%u rc=%d ops=%u/%u "
+                     "magic=0x%x ver=%u op_count=%u total=%u uaddr=0x%lx\n",
+                     proc->pid, rc, result.completed_ops, result.total_ops,
+                     mh->magic, mh->version, mh->op_count, mh->total_size,
+                     (unsigned long)manifest_uaddr);
+    }
 
     /* Clear legacy data fields so the Result delivered to the sender's
      * ResultRing does not leak the Manifest user vaddr. Zero target_pid:
