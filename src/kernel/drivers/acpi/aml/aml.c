@@ -325,8 +325,11 @@ static aml_status_t handle_package(const uint8_t** p, const uint8_t* end,
     const uint8_t* body_end   = *p + pklen;
     if (body_end > end || body_start >= body_end) return AML_ERR_BOUNDS;
 
+    /* PackageOp NumElements is a single byte — 0..255 fits any value
+     * we'd care to track. (VarPackageOp would use a TermArg and need a
+     * cap; that path is rare enough we currently parse only fixed-size
+     * Packages.) */
     uint8_t num = body_start[0];
-    if (num > AML_MAX_PACKAGE_LEN) return AML_ERR_BOUNDS;
     obj->type = AML_OBJ_PACKAGE;
     obj->v.package.count = num;
     /* Capture the first element's integer value if it is one. We keep
@@ -890,51 +893,18 @@ static aml_object_t* resolve_target(const uint8_t** p, const uint8_t* end,
     return resolve_name(p, end, fr->scope, false, NULL);
 }
 
-/* Map a Local/Arg pseudo-slot back to its index. We rely on stable
- * static arrays — `resolve_target` returns a pointer into them. */
-static int local_idx(aml_object_t* o) {
-    extern aml_object_t* aml_dummy_locals_base(void);
-    (void)aml_dummy_locals_base;
-    /* Not actually used; Store uses pointer comparison below. */
-    (void)o;
-    return -1;
-}
-
-/* Store(value, target). Re-resolve target so we can write back into
- * the correct slot. */
-static void exec_store(uint64_t value, aml_object_t* target, exec_frame_t* fr,
-                        uint8_t kind) {
+/*
+ * Store a value back through a previously-resolved target.
+ *
+ * For Local/Arg the executor handles the write inline at the call
+ * site (it knows the opcode index, which we don't have here), so kind
+ * 1/2 are never passed in. This helper covers the NamePath case —
+ * Name objects, raw Integer slots, and OpRegion-backed Fields.
+ */
+static void exec_store(uint64_t value, aml_object_t* target,
+                        exec_frame_t* fr, uint8_t kind) {
+    (void)fr;
     if (!target || kind == 0) return;
-    if (kind == 1) {
-        /* Local: target is one of static locals_slots. We don't have a
-         * pointer to that array here, but we can locate the slot by
-         * comparing addresses inside this same TU. Use a side-table. */
-        for (int i = 0; i < 8; i++) {
-            extern aml_object_t* aml_get_local_slot(int);
-            (void)aml_get_local_slot;
-            (void)i;
-        }
-        /* Easier: stash kind+index inside the object via type field —
-         * we set v.integer to the value and then copy back when the
-         * caller knows the index. Here, just write value to the slot's
-         * "integer" — see below for the Local-aware path that recomputes
-         * the index from the opcode. */
-        target->v.integer = value;
-        /* Best-effort: write through to all locals that match the
-         * dummy slot — keyed via address arithmetic below. */
-        for (int i = 0; i < 8; i++) {
-            /* The dummy slot indices line up 1:1 with locals[i]; we
-             * leverage the fact that exec_term passes the consumed
-             * opcode in `target->v.integer` only when kind==1 — but we
-             * don't have it. Re-resolve from the original byte cursor
-             * instead by calling a helper that handles store inline. */
-            (void)i;
-        }
-        /* Fall through to the in-line handler below — note Store on
-         * Local/Arg is therefore handled at the call site, not here. */
-        return;
-    }
-    if (kind == 2) { target->v.integer = value; return; }
     if (target->type == AML_OBJ_NAME)    { target->v.integer = value; return; }
     if (target->type == AML_OBJ_INTEGER) { target->v.integer = value; return; }
     if (target->type == AML_OBJ_FIELD)   { field_write(target, value); return; }
