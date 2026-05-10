@@ -5,6 +5,7 @@
 #include "idt.h"
 #include "irqchip.h"
 #include "ioapic.h"
+#include "touch.h"
 
 acpi_state_t g_acpi = {0};
 
@@ -74,6 +75,20 @@ int acpi_enter_sleep(uint8_t state) {
         }
     }
 
+    /* Broadcast to subscribers before we tip the platform into the
+     * sleep state. Daemons can flush, persist, drop hardware claims.
+     * The hardware-halt path in system_halt.c already drained the
+     * deferred work for S5; for S1/S2/S3 this is the canonical event
+     * that says "going down". */
+    struct { uint8_t state; uint16_t slp_typa; uint16_t slp_typb; } ev =
+        { state, slp_typa, slp_typb };
+    static const char *sleep_tags[] = {
+        "acpi:sleep:s1", "acpi:sleep:s2", "acpi:sleep:s3", "acpi:sleep:s4"
+    };
+    if (state >= 1 && state <= 4) {
+        TouchPublish(sleep_tags[state - 1], &ev, sizeof(ev));
+    }
+
     uint32_t pm1a = g_acpi.fadt->pm1a_control_block;
     uint32_t pm1b = g_acpi.fadt->pm1b_control_block;
     uint16_t va = (uint16_t)((slp_typa << 10) | (1u << 13));
@@ -87,9 +102,16 @@ int acpi_enter_sleep(uint8_t state) {
     return 0;
 }
 
-/* Dispatch every fired bit in `block_base..block_base+half_len` to the
- * registered handler. `gpe_base` is the global GPE index of bit 0 in
- * this byte. */
+/* Dispatch every fired bit in `block_base..block_base+half_len`. Two
+ * fan-outs in priority order:
+ *   1. The C-callback registry (`acpi_gpe_register`) — fast in-kernel
+ *      handlers (EC, thermal-zone). Runs first because subscribers there
+ *      need the lowest latency.
+ *   2. A Touch publish on a per-GPE tag (`acpi:gpe:NN`) — userspace
+ *      daemons can subscribe to GPE bits without writing kernel code.
+ * Touch publish is bounded MPSC push (zero blocking), so it doesn't
+ * slow the IRQ path beyond the registry call.
+ */
 static void gpe_dispatch_block(uint8_t* fired_bytes, uint8_t bytes,
                                 uint16_t gpe_base) {
     for (uint8_t b = 0; b < bytes; b++) {
@@ -100,6 +122,15 @@ static void gpe_dispatch_block(uint8_t* fired_bytes, uint8_t bytes,
             if (idx < ACPI_MAX_GPES && g_gpe_handlers[idx]) {
                 g_gpe_handlers[idx](idx);
             }
+            /* Tag form: acpi:gpe:<decimal>. Build inline — itoa-free. */
+            char tag[20] = "acpi:gpe:";
+            uint16_t v = idx; int pos = 9;
+            char tmp[6]; int tl = 0;
+            if (v == 0) tmp[tl++] = '0';
+            while (v) { tmp[tl++] = (char)('0' + v % 10); v /= 10; }
+            while (tl-- > 0) tag[pos++] = tmp[tl];
+            tag[pos] = 0;
+            TouchPublish(tag, &idx, sizeof(idx));
             f = (uint8_t)(f & ~(1u << bit));
         }
     }
@@ -136,17 +167,26 @@ static void acpi_sci_handler(void) {
 
     uint16_t sts = inw((uint16_t)pm1a_evt);
 
+    /* Every PM1 event class fires both a debug line (keeps the boot log
+     * useful) and a Touch publish (lets every userspace listener that
+     * subscribed to the matching tag wake up and react — power-manager,
+     * lockscreen, RTC alarm daemon, etc.). The wire payload is the raw
+     * PM1 status word so subscribers can decode flags they care about. */
     if (sts & PM1_STS_PWRBTN) {
         debug_printf("[ACPI] power button event\n");
+        TouchPublish("acpi:power-button", &sts, sizeof(sts));
     }
     if (sts & PM1_STS_SLPBTN) {
         debug_printf("[ACPI] sleep button event\n");
+        TouchPublish("acpi:sleep-button", &sts, sizeof(sts));
     }
     if (sts & PM1_STS_RTC) {
         debug_printf("[ACPI] RTC alarm event\n");
+        TouchPublish("acpi:rtc-alarm", &sts, sizeof(sts));
     }
     if (sts & PM1_STS_WAK) {
         debug_printf("[ACPI] wake event\n");
+        TouchPublish("acpi:wake", &sts, sizeof(sts));
     }
 
     /* W1C: write the read value back to clear every set bit at once.
@@ -285,6 +325,23 @@ acpi_error_t acpi_init(void) {
                  g_acpi.hpet.present ? "yes" : "no",
                  g_acpi.mcfg.present ? "yes" : "no",
                  g_acpi.s5_found     ? "yes" : "fallback");
+
+    /* Broadcast capability bitmap so userspace daemons can decide what
+     * features to bring up (battery service only matters if S3 works,
+     * IOMMU service only if DMAR/IVRS exposed something, etc.).
+     * Bits are stable across boots: this is the wire format that
+     * userspace subscribers see. */
+    uint32_t caps =
+        (g_acpi.hpet.present ? (1u <<  0) : 0) |
+        (g_acpi.mcfg.present ? (1u <<  1) : 0) |
+        (g_acpi.s5_found     ? (1u <<  2) : 0) |
+        (g_acpi.numa.present ? (1u <<  3) : 0) |
+        (g_acpi.dmar.present ? (1u <<  4) : 0) |
+        (g_acpi.ivrs.present ? (1u <<  5) : 0) |
+        (g_acpi.apei.hest_present ? (1u <<  6) : 0) |
+        (g_acpi.apei.bert_present ? (1u <<  7) : 0) |
+        (g_acpi.apei.erst_present ? (1u <<  8) : 0);
+    TouchPublish("acpi:ready", &caps, sizeof(caps));
 
 #if CONFIG_ACPI_DEBUG
     acpi_print_info();

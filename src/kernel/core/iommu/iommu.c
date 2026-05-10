@@ -1,6 +1,7 @@
 #include "iommu.h"
 #include "acpi.h"
 #include "klib.h"
+#include "touch.h"
 
 /*
  * IOMMU subsystem entry point. Picks a backend at boot:
@@ -37,6 +38,10 @@ int iommu_init(void) {
         g_ops = NULL;
         return -2;
     }
+    /* Tell userspace which IOMMU backend is online so DMA-buffer
+     * services (`iommu:ready` subscriber) know whether they need to
+     * route allocations through a domain or can DMA directly. */
+    TouchPublish("iommu:ready", g_ops->name, 0);
     return 0;
 }
 

@@ -5,6 +5,7 @@
 #include "vmm.h"
 #include "io.h"
 #include "pci.h"
+#include "touch.h"
 
 /* =====================================================================
  * AML interpreter — production subset of ACPI 6.5 §20.
@@ -122,6 +123,10 @@ struct aml_object {
             uint8_t  space;
             uint64_t base;
             uint64_t len;
+            /* MMIO cache: first SystemMemory access maps the region UC
+             * once; every subsequent read/write is a direct load/store
+             * with zero VMM calls. NULL until the first miss. */
+            volatile uint8_t* mapped_virt;
         } region;
         struct {
             const uint8_t* aml;
@@ -575,9 +580,18 @@ uint64_t aml_region_read(aml_object_t* region, uint64_t offset, uint8_t bits) {
             if (bytes == 4) return inl((uint16_t)addr);
             return 0;
         case REGION_SYSTEM_MEMORY: {
-            volatile void* p = vmm_map_mmio((uintptr_t)addr, 8,
-                                             VMM_FLAGS_KERNEL_RW);
-            if (!p) return 0;
+            /* O(1) hot path: first access maps the whole region UC and
+             * caches the VA; subsequent reads dereference directly with
+             * zero VMM calls. */
+            if (!region->v.region.mapped_virt) {
+                region->v.region.mapped_virt = (volatile uint8_t*)
+                    vmm_map_mmio((uintptr_t)region->v.region.base,
+                                  region->v.region.len ? region->v.region.len
+                                                       : 4096,
+                                  VMM_FLAGS_KERNEL_RW);
+                if (!region->v.region.mapped_virt) return 0;
+            }
+            volatile uint8_t* p = region->v.region.mapped_virt + offset;
             if (bytes == 1) return *(volatile uint8_t*)p;
             if (bytes == 2) return *(volatile uint16_t*)p;
             if (bytes == 4) return *(volatile uint32_t*)p;
@@ -617,9 +631,15 @@ void aml_region_write(aml_object_t* region, uint64_t offset, uint8_t bits,
             if (bytes == 4) outl((uint16_t)addr, (uint32_t)value);
             return;
         case REGION_SYSTEM_MEMORY: {
-            volatile void* p = vmm_map_mmio((uintptr_t)addr, 8,
-                                             VMM_FLAGS_KERNEL_RW);
-            if (!p) return;
+            if (!region->v.region.mapped_virt) {
+                region->v.region.mapped_virt = (volatile uint8_t*)
+                    vmm_map_mmio((uintptr_t)region->v.region.base,
+                                  region->v.region.len ? region->v.region.len
+                                                       : 4096,
+                                  VMM_FLAGS_KERNEL_RW);
+                if (!region->v.region.mapped_virt) return;
+            }
+            volatile uint8_t* p = region->v.region.mapped_virt + offset;
             if (bytes == 1) *(volatile uint8_t*)p  = (uint8_t)value;
             if (bytes == 2) *(volatile uint16_t*)p = (uint16_t)value;
             if (bytes == 4) *(volatile uint32_t*)p = (uint32_t)value;
@@ -682,6 +702,11 @@ aml_status_t aml_init(void) {
     g_loaded = true;
     debug_printf("[AML] namespace loaded: %u objects across DSDT + SSDTs\n",
                  g_pool_used);
+    /* Daemons that need the AML namespace (power manager, EC subscriber,
+     * thermal monitor) wait on this tag. The payload is the object
+     * count so subscribers can size their caches. */
+    uint32_t cnt = g_pool_used;
+    TouchPublish("aml:ready", &cnt, sizeof(cnt));
     return AML_OK;
 }
 
