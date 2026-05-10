@@ -149,6 +149,20 @@ void irqchip_init(void) {
     // Step 5: Initialize IO-APIC
     ioapic_init(madt_info.ioapic_address, madt_info.ioapic_gsi_base);
 
+    /* Step 5.5: Program MADT NMI Source entries (Type 3) into the IOAPIC.
+     * ACPI 6.5 §5.2.12.6: any IOAPIC input that the platform wires as a
+     * non-maskable interrupt source — typically a server-grade watchdog
+     * or chassis intrusion alert — must be programmed by OSPM with
+     * Delivery Mode = 100 (NMI). Route to the BSP; servers that need
+     * cluster-wide NMI broadcast will be revisited when the SMP audit
+     * adds multi-IOAPIC and cluster mode. */
+    for (uint8_t i = 0; i < madt_info.nmi_source_count; i++) {
+        const madt_nmi_source_info_t* s = &madt_info.nmi_sources[i];
+        if (!s->valid) continue;
+        ioapic_program_nmi_source(s->gsi, s->mps_flags,
+                                   madt_info.bsp_lapic_id);
+    }
+
     // Step 6: Activate APIC backend
     active_type = IRQCHIP_APIC;
     active_chip = &apic_chip;
@@ -165,6 +179,31 @@ use_pic:
     active_chip = &pic_chip;
 
     debug_printf("[IRQCHIP] %[S]Using legacy PIC mode (16 IRQs)%[D]\n");
+}
+
+const struct madt_info *irqchip_get_madt(void) {
+    if (active_type != IRQCHIP_APIC) return NULL;
+    return &madt_info;
+}
+
+void irqchip_apply_lapic_nmi_self(void) {
+    if (active_type != IRQCHIP_APIC) return;
+    uint32_t my_apic_id = lapic_get_id();
+    uint8_t  acpi_pid   = 0xFF;
+    bool found = false;
+    for (uint16_t i = 0; i < madt_info.cpu_map_count; i++) {
+        if (madt_info.cpu_map[i].apic_id == my_apic_id) {
+            acpi_pid = (uint8_t)(madt_info.cpu_map[i].acpi_processor_id & 0xFF);
+            found = true;
+            break;
+        }
+    }
+    if (!found) {
+        /* Fall back to the broadcast key (0xFF). MADT NMI entries with
+         * processor_id == 0xFF still apply. */
+        acpi_pid = MADT_NMI_PROCESSOR_ALL;
+    }
+    lapic_apply_madt_nmi(&madt_info, acpi_pid);
 }
 
 void irqchip_enable_irq(uint8_t gsi) {

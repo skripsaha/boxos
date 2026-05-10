@@ -186,6 +186,227 @@ typedef struct {
 } acpi_mcfg_info_t;
 
 /* ============================================================
+ * SRAT (Static Resource Affinity Table) — ACPI 6.5 §5.2.16
+ * ============================================================ */
+typedef struct {
+    acpi_sdt_header_t header;
+    uint32_t reserved1;     /* must be 1 per spec */
+    uint64_t reserved2;
+} __attribute__((packed)) acpi_srat_t;
+
+#define SRAT_TYPE_LOCAL_APIC   0
+#define SRAT_TYPE_MEMORY       1
+#define SRAT_TYPE_LOCAL_X2APIC 2
+
+typedef struct {
+    uint8_t  type;
+    uint8_t  length;
+} __attribute__((packed)) srat_entry_header_t;
+
+/* Type 0 — Processor Local APIC/SAPIC Affinity, 16 bytes. */
+typedef struct {
+    srat_entry_header_t header;
+    uint8_t  lo_domain;
+    uint8_t  apic_id;
+    uint32_t flags;             /* bit 0 = enabled */
+    uint8_t  sapic_eid;
+    uint8_t  hi_domain[3];      /* bits 8..31 of proximity domain */
+    uint32_t clock_domain;
+} __attribute__((packed)) srat_local_apic_t;
+_Static_assert(sizeof(srat_local_apic_t) == 16, "SRAT Type 0 = 16 bytes");
+
+/* Type 1 — Memory Affinity, 40 bytes. */
+typedef struct {
+    srat_entry_header_t header;
+    uint32_t domain;
+    uint16_t reserved1;
+    uint64_t base_address;
+    uint64_t length;
+    uint32_t reserved2;
+    uint32_t flags;             /* bit 0=enabled, bit 1=hot-pluggable, bit 2=non-volatile */
+    uint64_t reserved3;
+} __attribute__((packed)) srat_memory_t;
+_Static_assert(sizeof(srat_memory_t) == 40, "SRAT Type 1 = 40 bytes");
+
+/* Type 2 — Processor Local x2APIC Affinity, 24 bytes. */
+typedef struct {
+    srat_entry_header_t header;
+    uint16_t reserved1;
+    uint32_t domain;
+    uint32_t x2apic_id;
+    uint32_t flags;             /* bit 0 = enabled */
+    uint32_t clock_domain;
+    uint32_t reserved2;
+} __attribute__((packed)) srat_local_x2apic_t;
+_Static_assert(sizeof(srat_local_x2apic_t) == 24, "SRAT Type 2 = 24 bytes");
+
+#define SRAT_FLAG_ENABLED       (1u << 0)
+#define SRAT_MEM_FLAG_HOTPLUG   (1u << 1)
+#define SRAT_MEM_FLAG_NONVOL    (1u << 2)
+
+#define ACPI_NUMA_MAX_DOMAINS   32
+#define ACPI_NUMA_MAX_CPUS      256
+#define ACPI_NUMA_MAX_MEM_RANGES 64
+
+typedef struct {
+    uint32_t apic_id;       /* x2APIC ID (also fits 8-bit LAPIC IDs) */
+    uint32_t domain;
+    bool     enabled;
+} acpi_numa_cpu_t;
+
+typedef struct {
+    uint64_t base;
+    uint64_t length;
+    uint32_t domain;
+    uint32_t flags;
+} acpi_numa_mem_t;
+
+typedef struct {
+    acpi_numa_cpu_t cpus[ACPI_NUMA_MAX_CPUS];
+    uint16_t        cpu_count;        /* up to ACPI_NUMA_MAX_CPUS (256) */
+    acpi_numa_mem_t mem[ACPI_NUMA_MAX_MEM_RANGES];
+    uint8_t         mem_count;
+    uint8_t         domain_count;     /* unique domain IDs observed */
+    uint32_t        domains[ACPI_NUMA_MAX_DOMAINS];
+    bool            present;
+} acpi_numa_info_t;
+
+/* ============================================================
+ * SLIT (System Locality Information Table) — ACPI 6.5 §5.2.17
+ * ============================================================ */
+typedef struct {
+    acpi_sdt_header_t header;
+    uint64_t locality_count;
+    /* uint8_t matrix[locality_count * locality_count]; */
+} __attribute__((packed)) acpi_slit_t;
+
+typedef struct {
+    uint8_t  locality_count;
+    /* Flattened row-major matrix: distance[i*N + j]. NULL when absent. */
+    uint8_t  matrix[ACPI_NUMA_MAX_DOMAINS * ACPI_NUMA_MAX_DOMAINS];
+    bool     present;
+} acpi_slit_info_t;
+
+/* ============================================================
+ * DMAR (Intel VT-d) — VT-d Spec §8.1
+ * ============================================================ */
+typedef struct {
+    acpi_sdt_header_t header;
+    uint8_t  host_address_width;   /* max guest address width minus 1 */
+    uint8_t  flags;
+    uint8_t  reserved[10];
+} __attribute__((packed)) acpi_dmar_t;
+_Static_assert(sizeof(acpi_dmar_t) == 48, "DMAR header = 48 bytes");
+
+#define DMAR_TYPE_DRHD   0
+#define DMAR_TYPE_RMRR   1
+#define DMAR_TYPE_ATSR   2
+#define DMAR_TYPE_RHSA   3
+#define DMAR_TYPE_ANDD   4
+
+typedef struct {
+    uint16_t type;
+    uint16_t length;
+} __attribute__((packed)) dmar_entry_header_t;
+
+typedef struct {
+    dmar_entry_header_t header;
+    uint8_t  flags;             /* bit 0 = INCLUDE_PCI_ALL */
+    uint8_t  reserved;
+    uint16_t segment;
+    uint64_t register_base;
+} __attribute__((packed)) dmar_drhd_t;
+_Static_assert(sizeof(dmar_drhd_t) == 16, "DMAR DRHD header = 16 bytes");
+
+#define ACPI_DMAR_MAX_DRHD  8
+
+typedef struct {
+    uint64_t register_base;
+    uint16_t segment;
+    bool     include_pci_all;
+} acpi_drhd_info_t;
+
+typedef struct {
+    uint8_t  host_address_width_bits;   /* HAW value + 1 */
+    uint8_t  flags;
+    acpi_drhd_info_t drhd[ACPI_DMAR_MAX_DRHD];
+    uint8_t  drhd_count;
+    bool     present;
+} acpi_dmar_info_t;
+
+/* ============================================================
+ * IVRS (AMD IOMMU) — AMD I/O Virtualization Tech Spec
+ * ============================================================ */
+typedef struct {
+    acpi_sdt_header_t header;
+    uint32_t iv_info;
+    uint64_t reserved;
+} __attribute__((packed)) acpi_ivrs_t;
+_Static_assert(sizeof(acpi_ivrs_t) == 48, "IVRS header = 48 bytes");
+
+#define IVRS_BLOCK_IVHD_TYPE10  0x10
+#define IVRS_BLOCK_IVHD_TYPE11  0x11
+#define IVRS_BLOCK_IVHD_TYPE40  0x40
+
+typedef struct {
+    uint8_t  type;
+    uint8_t  flags;
+    uint16_t length;
+    uint16_t device_id;
+    uint16_t capability_offset;
+    uint64_t iommu_base;
+    uint16_t pci_segment;
+    uint16_t iommu_info;
+    uint32_t iommu_feature;     /* Type 0x10 — feature reporting; 0x11/0x40 differ */
+} __attribute__((packed)) ivrs_ivhd_t;
+_Static_assert(sizeof(ivrs_ivhd_t) == 24, "IVRS IVHD core = 24 bytes");
+
+#define ACPI_IVRS_MAX_IVHD  4
+
+typedef struct {
+    uint64_t iommu_base;
+    uint16_t pci_segment;
+    uint8_t  type;
+} acpi_ivhd_info_t;
+
+typedef struct {
+    acpi_ivhd_info_t ivhd[ACPI_IVRS_MAX_IVHD];
+    uint8_t  ivhd_count;
+    bool     present;
+} acpi_ivrs_info_t;
+
+/* ============================================================
+ * APEI tables — HEST/BERT/ERST — ACPI 6.5 §18
+ * ============================================================ */
+typedef struct {
+    acpi_sdt_header_t header;
+    uint32_t error_source_count;
+} __attribute__((packed)) acpi_hest_t;
+
+typedef struct {
+    acpi_sdt_header_t header;
+    uint32_t region_length;
+    uint64_t region_address;
+} __attribute__((packed)) acpi_bert_t;
+
+typedef struct {
+    acpi_sdt_header_t header;
+    uint32_t serialization_header_size;
+    uint32_t reserved;
+    uint32_t instruction_entry_count;
+} __attribute__((packed)) acpi_erst_t;
+
+typedef struct {
+    uint32_t hest_error_source_count;
+    uint64_t bert_region_address;
+    uint32_t bert_region_length;
+    uint32_t erst_instruction_count;
+    bool     hest_present;
+    bool     bert_present;
+    bool     erst_present;
+} acpi_apei_info_t;
+
+/* ============================================================
  * AML opcodes — minimal set for _S5 parsing
  * ============================================================ */
 #define AML_SCOPE_OP        0x10
@@ -200,8 +421,55 @@ void acpi_shutdown(void) __attribute__((noreturn));
 void acpi_reboot(void) __attribute__((noreturn));
 void acpi_print_info(void);
 
+/* Surface any pre-boot hardware error recorded by firmware (APEI BERT
+ * region) plus a summary of HEST / ERST visibility. Safe no-op when
+ * the APEI tables are absent. Intended for kernel boot dmesg. */
+void acpi_apei_consume(void);
+
+/* Register and unmask the System Control Interrupt (SCI) on the GSI
+ * announced by FADT.sci_interrupt. Subsequent SCI events (power button,
+ * GPE, GHES SCI-class notifications) land in a kernel handler that
+ * clears PM1 status bits + walks the active GPE block. Safe no-op
+ * when ACPI is not initialised or sci_interrupt is zero. */
+void acpi_sci_register(void);
+
+/* Enter ACPI sleep state `s` ∈ {1..5}. Reads \_Sx package from AML
+ * namespace to derive SLP_TYPa/SLP_TYPb, calls _PTS(s) and _BFS(s)
+ * (when present) before writing PM1a/b CNT with SLP_TYP + SLP_EN.
+ * S5 is implemented via acpi_shutdown(); other states return.
+ * Returns 0 on success or negative on missing prerequisites. */
+int acpi_enter_sleep(uint8_t state);
+
+/* GPE (General Purpose Event) handler registry. Each GPE bit may have
+ * one C-callback. When the SCI handler observes the bit fire, the
+ * callback runs at IRQ context — keep it short or queue work elsewhere.
+ *
+ * `gpe` is the global GPE index: 0..(gpe0_length/2*8 - 1) live in GPE0
+ * block, the rest in GPE1.
+ *
+ * Future AML interpreter audit will wire the firmware-defined
+ * `\_GPE._Lxx` / `\_GPE._Exx` methods through the same dispatcher by
+ * registering an AML-callback wrapper as the handler. */
+typedef void (*acpi_gpe_handler_t)(uint16_t gpe);
+#define ACPI_MAX_GPES  256
+int  acpi_gpe_register(uint16_t gpe, acpi_gpe_handler_t cb);
+void acpi_gpe_unregister(uint16_t gpe);
+
 /* Subsystem accessors. Return NULL/false until acpi_init() succeeds. */
 const acpi_hpet_info_t *acpi_get_hpet(void);
 const acpi_mcfg_info_t *acpi_get_mcfg(void);
+const acpi_numa_info_t *acpi_get_numa(void);
+const acpi_slit_info_t *acpi_get_slit(void);
+
+/* Look up the NUMA proximity domain that owns `phys`. Returns the domain
+ * ID on hit, ACPI_NUMA_DOMAIN_UNKNOWN otherwise (e.g. no SRAT, address
+ * outside every enabled SRAT memory range). Cheap linear scan — the
+ * memory range table is bounded to ACPI_NUMA_MAX_MEM_RANGES (64) and
+ * lives in g_acpi. Future NUMA-aware PMM consumes this directly. */
+#define ACPI_NUMA_DOMAIN_UNKNOWN  0xFFFFFFFFu
+uint32_t acpi_numa_domain_for_phys(uint64_t phys);
+const acpi_dmar_info_t *acpi_get_dmar(void);
+const acpi_ivrs_info_t *acpi_get_ivrs(void);
+const acpi_apei_info_t *acpi_get_apei(void);
 
 #endif // ACPI_H

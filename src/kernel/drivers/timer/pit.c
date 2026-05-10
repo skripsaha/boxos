@@ -1,4 +1,5 @@
 #include "pit.h"
+#include "hpet.h"
 #include "io.h"
 #include "klib.h"
 #include "irqchip.h"
@@ -23,6 +24,19 @@ void pit_init(uint32_t frequency_hz) {
 
     pit_frequency = frequency_hz;
     g_timer_frequency = frequency_hz;  // Update scheduler with actual frequency
+
+    /* When HPET LegacyReplacement is sourcing IRQ0 we MUST NOT program
+     * the 8254 — its counter output and HPET timer 0 would both clock
+     * the IOAPIC's IRQ0 pin and the existing pit_tick() handler would
+     * double-count. Leave the 8254 quiescent (no command byte, no
+     * counter load) and just enable IRQ0 routing so the HPET-delivered
+     * pulses reach the kernel. */
+    if (hpet_tick_active()) {
+        debug_printf("[PIT] HPET legacy tick active — leaving 8254 idle, "
+                     "registering IRQ0 only (%u Hz logical)\n", pit_frequency);
+        irqchip_enable_irq(0);
+        return;
+    }
 
     uint32_t divisor = PIT_FREQUENCY / frequency_hz;
 
@@ -98,10 +112,17 @@ void pit_tick(void) {
 }
 
 uint64_t pit_get_uptime_ms(void) {
+    /* When HPET is online its 10 ns-class main counter is monotonic with
+     * sub-microsecond resolution — use it transparently behind the
+     * legacy PIT uptime API so every caller automatically gets the
+     * higher-resolution clock. Falls back to PIT-accumulated us on
+     * boards without HPET (pre-PIIX4 etc.). */
+    if (hpet_is_present()) return hpet_now_us() / 1000ULL;
     return __atomic_load_n(&pit_uptime_us, __ATOMIC_RELAXED) / 1000ULL;
 }
 
 uint64_t pit_get_uptime_us(void) {
+    if (hpet_is_present()) return hpet_now_us();
     return __atomic_load_n(&pit_uptime_us, __ATOMIC_RELAXED);
 }
 

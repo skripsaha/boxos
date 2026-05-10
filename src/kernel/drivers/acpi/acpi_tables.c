@@ -297,10 +297,25 @@ acpi_error_t acpi_parse_tables(acpi_rsdp_t* rsdp) {
         g_acpi.s5_found = false;
     }
 
-    /* Optional tables: HPET (timer) and MCFG (PCIe ECAM). Absence is not
-     * fatal — only signalled in `acpi_*_info_t.present`. */
+    /* Optional tables — absence is not fatal, only signalled by the
+     * `present` flag in each accessor. Order is deliberate:
+     *   HPET / MCFG          — used by Timer + PCI subsystems
+     *   SRAT / SLIT          — NUMA topology + distance
+     *   DMAR / IVRS          — IOMMU detection (Intel / AMD)
+     *   APEI (HEST/BERT/ERST) — RAS error reporting
+     */
     acpi_parse_hpet();
     acpi_parse_mcfg();
+    acpi_parse_srat();
+    acpi_parse_slit();
+    acpi_parse_dmar();
+    acpi_parse_ivrs();
+    acpi_parse_apei();
+
+    /* Phase J — once DMAR's DRHD entries are known, peek inside each
+     * register block to log version + features. Read-only, never enables
+     * translation; that belongs to the future IOMMU driver. */
+    acpi_dmar_probe_registers();
 
     return ACPI_OK;
 }

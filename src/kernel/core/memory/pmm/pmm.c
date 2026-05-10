@@ -1,4 +1,5 @@
 #include "pmm.h"
+#include "acpi.h"
 #include "buddy.h"
 #include "pmtag.h"
 #include "vmm.h"
@@ -243,6 +244,79 @@ error_t pmm_init(void) {
     debug_printf("[PMM] Initialized: %zu MB available\n",
         (pmm_buddy.free_count * PMM_PAGE_SIZE) / (1024 * 1024));
     return OK;
+}
+
+uint32_t pmm_phys_domain(uintptr_t phys) {
+    return acpi_numa_domain_for_phys((uint64_t)phys);
+}
+
+size_t pmm_pages_in_domain(uint32_t domain) {
+    const acpi_numa_info_t* n = acpi_get_numa();
+    if (!n) return 0;
+    uint64_t total = 0;
+    for (uint8_t i = 0; i < n->mem_count; i++) {
+        if (!(n->mem[i].flags & 0x1)) continue;          /* not enabled */
+        if (n->mem[i].domain != domain) continue;
+        total += n->mem[i].length;
+    }
+    return (size_t)(total / PMM_PAGE_SIZE);
+}
+
+void* pmm_alloc_in_domain(size_t pages, uint32_t domain) {
+    if (!pmm_initialized || !pages) return NULL;
+    const acpi_numa_info_t* n = acpi_get_numa();
+    if (domain == ACPI_NUMA_DOMAIN_UNKNOWN || !n) {
+        return buddy_alloc(&pmm_buddy, pages);
+    }
+
+    /* Range-constrained allocation: walk every SRAT memory range that
+     * belongs to `domain` and ask buddy_alloc_range for pages within
+     * its [base, base+length). First range that satisfies wins. This
+     * is O(domain_ranges) and never causes buddy churn (unlike the
+     * sample-retry approach we used before). */
+    for (uint8_t i = 0; i < n->mem_count; i++) {
+        if (!(n->mem[i].flags & 0x1)) continue;     /* not enabled */
+        if (n->mem[i].domain != domain) continue;
+        uintptr_t lo = (uintptr_t)n->mem[i].base;
+        uintptr_t hi = (uintptr_t)(n->mem[i].base + n->mem[i].length);
+        void* p = buddy_alloc_range(&pmm_buddy, pages, lo, hi);
+        if (p) return p;
+    }
+
+    /* No domain-local memory free at this size — fall back. */
+    return buddy_alloc(&pmm_buddy, pages);
+}
+
+/* Aggregate the SRAT enabled memory ranges into one log line per domain
+ * with total bytes per domain. Read-only — no allocator decisions taken
+ * here; the future NUMA-aware buddy partition consumes this same data
+ * directly via acpi_get_numa(). */
+void pmm_log_numa_topology(void) {
+    const acpi_numa_info_t* n = acpi_get_numa();
+    if (!n) {
+        debug_printf("[PMM] NUMA: no SRAT — uniform memory\n");
+        return;
+    }
+    debug_printf("[PMM] NUMA: %u domain(s), %u CPU(s), %u memory range(s)\n",
+                 n->domain_count, n->cpu_count, n->mem_count);
+    for (uint8_t d = 0; d < n->domain_count; d++) {
+        uint32_t dom = n->domains[d];
+        uint64_t total = 0;
+        uint8_t  ranges = 0;
+        uint8_t  cpus = 0;
+        for (uint8_t i = 0; i < n->mem_count; i++) {
+            if (n->mem[i].domain == dom &&
+                (n->mem[i].flags & 0x1)) {
+                total += n->mem[i].length;
+                ranges++;
+            }
+        }
+        for (uint8_t i = 0; i < n->cpu_count; i++) {
+            if (n->cpus[i].enabled && n->cpus[i].domain == dom) cpus++;
+        }
+        debug_printf("[PMM]   domain %u: %lu MB across %u range(s), %u CPU(s)\n",
+                     dom, (unsigned long)(total >> 20), ranges, cpus);
+    }
 }
 
 // ─── Core allocator ──────────────────────────────────────────────────────────

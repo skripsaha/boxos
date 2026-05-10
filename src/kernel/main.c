@@ -9,6 +9,9 @@
 #include "pic.h"
 #include "irqchip.h"
 #include "pit.h"
+#include "hpet.h"
+#include "iommu.h"
+#include "aml.h"
 #include "rtc.h"
 #include "clockboard.h"
 #include "e820.h"
@@ -163,6 +166,16 @@ void kernel_main(void)
     if (acpi_err == ACPI_OK)
     {
         debug_printf("[INIT] ACPI initialized successfully\n");
+        /* Surface any pre-boot hardware error captured by firmware. */
+        acpi_apei_consume();
+        /* Log NUMA topology now that both PMM and ACPI/SRAT are ready. */
+        pmm_log_numa_topology();
+        /* IOMMU skeleton — picks backend, runs init stub, does not
+         * enable translation yet. */
+        iommu_init();
+        /* AML interpreter skeleton — currently returns NOT_LOADED.
+         * Hook here lets future implementation tie into boot. */
+        aml_init();
     }
     else
     {
@@ -172,6 +185,9 @@ void kernel_main(void)
     // Detect and initialize interrupt controller (APIC or PIC fallback)
     debug_printf("[INIT] Interrupt Controller...\n");
     irqchip_init();
+
+    /* Register the ACPI SCI handler now that IOAPIC routing is live. */
+    if (acpi_err == ACPI_OK) acpi_sci_register();
 
     debug_printf("[INIT] AMP Core Detection...\n");
     amp_init();
@@ -184,6 +200,18 @@ void kernel_main(void)
      * RTC unix-secs) are called after their respective inits below. */
     debug_printf("[INIT] ClockBoard...\n");
     clockboard_init();
+
+    /* HPET first — provides a 10 ns-class monotonic counter we use as the
+     * high-resolution time source. When LegacyReplacement is supported,
+     * HPET timer 0 takes over IRQ0 entirely and the 8254 stays idle. */
+    debug_printf("[INIT] HPET...\n");
+    if (hpet_init()) {
+        if (hpet_start_legacy_tick(250)) {
+            debug_printf("[INIT] HPET sourcing IRQ0 system tick @ 250 Hz\n");
+        }
+    } else {
+        debug_printf("[INIT] HPET unavailable — high-res time falls back to TSC/PIT\n");
+    }
 
     debug_printf("[INIT] PIT...\n");
     pit_init(250);  // 250Hz = 4ms tick for better responsiveness

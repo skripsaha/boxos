@@ -16,8 +16,8 @@ static uint8_t expected_entry_length(uint8_t type) {
         case MADT_TYPE_NMI_SOURCE:        return 8;   /* spec fixed */
         case MADT_TYPE_LOCAL_APIC_NMI:    return sizeof(madt_lapic_nmi_t);
         case MADT_TYPE_LAPIC_OVERRIDE:    return sizeof(madt_lapic_override_t);
-        case MADT_TYPE_LX2APIC:           return 16;
-        case MADT_TYPE_LX2APIC_NMI:       return 12;
+        case MADT_TYPE_LX2APIC:           return sizeof(madt_lx2apic_t);
+        case MADT_TYPE_LX2APIC_NMI:       return sizeof(madt_lx2apic_nmi_t);
         default:                          return 0;   /* type unknown to us */
     }
 }
@@ -100,14 +100,18 @@ acpi_error_t acpi_parse_madt(madt_info_t* info) {
                              lapic->acpi_processor_id, lapic->apic_id,
                              enabled ? "enabled" : "disabled");
                 /* Resolve BSP ACPI processor ID by matching the APIC ID
-                 * that CPUID reported for the running CPU. This is the
-                 * key used to apply Local APIC NMI entries that target a
-                 * specific processor. */
+                 * that CPUID reported for the running CPU. */
                 if (info->bsp_lapic_found &&
                     !info->bsp_acpi_id_resolved &&
                     lapic->apic_id == info->bsp_lapic_id) {
                     info->bsp_acpi_processor_id = lapic->acpi_processor_id;
                     info->bsp_acpi_id_resolved  = true;
+                }
+                if (info->cpu_map_count < MADT_MAX_CPU_MAP) {
+                    madt_cpu_map_t* m = &info->cpu_map[info->cpu_map_count++];
+                    m->apic_id           = lapic->apic_id;
+                    m->acpi_processor_id = lapic->acpi_processor_id;
+                    m->enabled           = enabled;
                 }
                 break;
             }
@@ -165,11 +169,60 @@ acpi_error_t acpi_parse_madt(madt_info_t* info) {
                 break;
             }
 
+            case MADT_TYPE_LX2APIC: {
+                madt_lx2apic_t* x = (madt_lx2apic_t*)entry;
+                bool enabled = (x->flags & MADT_LAPIC_ENABLED) ||
+                               (x->flags & MADT_LAPIC_ONLINE_CAP);
+                debug_printf("[MADT]   x2APIC: UID=%u APIC ID=%u %s\n",
+                             x->acpi_processor_uid, x->x2apic_id,
+                             enabled ? "enabled" : "disabled");
+                if (info->bsp_lapic_found &&
+                    !info->bsp_acpi_id_resolved &&
+                    x->x2apic_id == info->bsp_lapic_id) {
+                    info->bsp_acpi_processor_id =
+                        (uint8_t)(x->acpi_processor_uid & 0xFF);
+                    info->bsp_acpi_id_resolved = true;
+                }
+                if (info->cpu_map_count < MADT_MAX_CPU_MAP) {
+                    madt_cpu_map_t* m = &info->cpu_map[info->cpu_map_count++];
+                    m->apic_id           = x->x2apic_id;
+                    m->acpi_processor_id = x->acpi_processor_uid;
+                    m->enabled           = enabled;
+                }
+                break;
+            }
+
+            case MADT_TYPE_LX2APIC_NMI: {
+                madt_lx2apic_nmi_t* n = (madt_lx2apic_nmi_t*)entry;
+                if (n->lint > 1) break;
+                if (info->nmi_count >= MADT_MAX_NMI_ENTRIES) break;
+                madt_nmi_entry_t* slot = &info->nmi[info->nmi_count++];
+                /* Truncate UID to one byte for our processor-ID match
+                 * — adequate until BoxOS supports >255 CPUs. */
+                slot->acpi_processor_id = (n->acpi_processor_uid == 0xFFFFFFFFu)
+                                          ? MADT_NMI_PROCESSOR_ALL
+                                          : (uint8_t)(n->acpi_processor_uid & 0xFF);
+                slot->lint      = n->lint;
+                slot->mps_flags = n->flags;
+                slot->valid     = true;
+                debug_printf("[MADT]   x2APIC NMI: UID=%u LINT%u flags=0x%04x stored\n",
+                             n->acpi_processor_uid, n->lint, n->flags);
+                break;
+            }
+
             case MADT_TYPE_NMI_SOURCE: {
-                /* IOAPIC-routed NMI source — handled in IOAPIC subsystem
-                 * audit. Log for visibility. */
-                debug_printf("[MADT]   NMI Source entry (len=%u) — IOAPIC routing not yet wired\n",
-                             entry->length);
+                madt_nmi_source_t* src = (madt_nmi_source_t*)entry;
+                if (info->nmi_source_count >= MADT_MAX_NMI_SOURCES) {
+                    debug_printf("[MADT]   NMI Source: storage full, dropping\n");
+                    break;
+                }
+                madt_nmi_source_info_t* slot =
+                    &info->nmi_sources[info->nmi_source_count++];
+                slot->gsi       = src->gsi;
+                slot->mps_flags = src->flags;
+                slot->valid     = true;
+                debug_printf("[MADT]   NMI Source: GSI %u flags=0x%04x stored\n",
+                             src->gsi, src->flags);
                 break;
             }
 

@@ -13,10 +13,14 @@
 #define IOAPIC_REG_ARB      0x02    // IO-APIC Arbitration ID
 #define IOAPIC_REG_REDTBL   0x10    // Redirection Table base (entries at 0x10 + 2*n)
 
-// Redirection table entry flags (low 32 bits)
+// Redirection table entry flags (low 32 bits) — Intel 82093AA §3.2.4
 #define IOAPIC_REDIR_VECTOR_MASK    0xFF
 #define IOAPIC_REDIR_DELMOD_FIXED   (0 << 8)
 #define IOAPIC_REDIR_DELMOD_LOWEST  (1 << 8)
+#define IOAPIC_REDIR_DELMOD_SMI     (2 << 8)
+#define IOAPIC_REDIR_DELMOD_NMI     (4 << 8)
+#define IOAPIC_REDIR_DELMOD_INIT    (5 << 8)
+#define IOAPIC_REDIR_DELMOD_EXTINT  (7 << 8)
 #define IOAPIC_REDIR_DESTMOD_PHYS   (0 << 11)
 #define IOAPIC_REDIR_DESTMOD_LOGIC  (1 << 11)
 #define IOAPIC_REDIR_POLARITY_HIGH  (0 << 13)
@@ -47,6 +51,13 @@ uintptr_t ioapic_get_base(void);
 void ioapic_register_iso(uint8_t isa_irq, uint32_t gsi, uint16_t flags);
 uint32_t ioapic_isa_to_gsi(uint8_t isa_irq);
 uint16_t ioapic_get_iso_flags(uint8_t isa_irq);
+
+/* Program a redirection entry as an NMI Source (MADT Type 3 / IOAPIC
+ * Delivery Mode 100). The vector field is don't care for NMI per Intel
+ * 82093AA §3.2.4; polarity and trigger come from the MPS INTI flag bits
+ * provided in the MADT NMI Source structure. */
+void ioapic_program_nmi_source(uint32_t gsi, uint16_t mps_flags,
+                                uint8_t dest_lapic_id);
 
 // Register access
 uint32_t ioapic_read(uint32_t reg);

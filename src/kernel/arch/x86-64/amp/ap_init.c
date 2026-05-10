@@ -2,6 +2,7 @@
 #include "per_core.h"
 #include "lapic.h"
 #include "idt.h"
+#include "irqchip.h"
 #include "klib.h"
 #include "scheduler.h"
 #include "idle.h"
@@ -16,6 +17,11 @@ void ap_entry_c(uint64_t core_index, uint64_t stack_top) {
     //   - PerCpuData + MSR_KERNEL_GS_BASE (for swapgs)
     //   - LAPIC enable + LAPIC timer (100Hz periodic)
     per_core_init_ap((uint8_t)core_index, stack_top);
+
+    /* Apply MADT Local APIC NMI entries to this AP's LVT (mirrors the
+     * BSP step in irqchip_init). Without it, NMI watchdogs only fire on
+     * the BSP. Safe no-op when running on PIC fallback. */
+    irqchip_apply_lapic_nmi_self();
 
     // IDT is shared across all cores (single static table)
     idt_load();
