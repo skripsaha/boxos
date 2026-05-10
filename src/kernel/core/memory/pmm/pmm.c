@@ -1,5 +1,6 @@
 #include "pmm.h"
 #include "acpi.h"
+#include "touch.h"
 #include "buddy.h"
 #include "pmtag.h"
 #include "vmm.h"
@@ -299,6 +300,11 @@ void pmm_log_numa_topology(void) {
     }
     debug_printf("[PMM] NUMA: %u domain(s), %u CPU(s), %u memory range(s)\n",
                  n->domain_count, n->cpu_count, n->mem_count);
+    /* Topology summary on `numa:topology` so scheduler/affinity
+     * daemons can plan placement without re-walking SRAT. */
+    struct { uint8_t domains; uint16_t cpus; uint8_t mem_ranges; } topo =
+        { n->domain_count, n->cpu_count, n->mem_count };
+    TouchPublish("numa:topology", &topo, sizeof(topo));
     for (uint8_t d = 0; d < n->domain_count; d++) {
         uint32_t dom = n->domains[d];
         uint64_t total = 0;

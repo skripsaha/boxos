@@ -181,14 +181,43 @@ void acpi_for_each_table(const char* signature,
     }
 }
 
+/* Signature → header* cache. Populated lazily on first hit. ACPI
+ * tables live for the kernel lifetime so once mapped, the pointer is
+ * stable forever — perfect for a small open-addressed cache. */
+#define ACPI_FIND_CACHE_SIZE   32
+static struct {
+    char sig[4];
+    acpi_sdt_header_t* hdr;
+} g_find_cache[ACPI_FIND_CACHE_SIZE];
+static uint8_t g_find_cache_used = 0;
+
 acpi_sdt_header_t* acpi_find_table(const char* signature) {
     if (!signature) return NULL;
+    /* O(1)-amortised cache probe. The set is tiny (<= 12 named ACPI
+     * tables on most platforms) so a linear scan over `used` is
+     * cache-line friendly and beats a hash table. */
+    for (uint8_t i = 0; i < g_find_cache_used; i++) {
+        if (g_find_cache[i].sig[0] == signature[0] &&
+            g_find_cache[i].sig[1] == signature[1] &&
+            g_find_cache[i].sig[2] == signature[2] &&
+            g_find_cache[i].sig[3] == signature[3]) {
+            return g_find_cache[i].hdr;
+        }
+    }
+
     iter_ctx_t ctx = { signature, find_first_cb, NULL, NULL };
-    ctx.user = &ctx;   /* find_first_cb writes back into ctx->first_hit */
-    if (g_xsdt) {
-        iterate_xsdt(&ctx);
-    } else {
-        iterate_rsdt(&ctx);
+    ctx.user = &ctx;
+    if (g_xsdt) iterate_xsdt(&ctx);
+    else        iterate_rsdt(&ctx);
+
+    /* Cache the hit (and the miss — NULL is also stable). */
+    if (g_find_cache_used < ACPI_FIND_CACHE_SIZE) {
+        g_find_cache[g_find_cache_used].sig[0] = signature[0];
+        g_find_cache[g_find_cache_used].sig[1] = signature[1];
+        g_find_cache[g_find_cache_used].sig[2] = signature[2];
+        g_find_cache[g_find_cache_used].sig[3] = signature[3];
+        g_find_cache[g_find_cache_used].hdr    = ctx.first_hit;
+        g_find_cache_used++;
     }
     return ctx.first_hit;
 }

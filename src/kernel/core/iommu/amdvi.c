@@ -3,6 +3,7 @@
 #include "klib.h"
 #include "vmm.h"
 #include "pmm.h"
+#include "touch.h"
 
 /* =====================================================================
  * AMD-Vi (AMD IOMMU) driver — production implementation.
@@ -368,6 +369,10 @@ void amdvi_poll_events(void) {
             uint8_t* slot = (uint8_t*)u->evt_log + (head & (EVT_LOG_BYTES - 1));
             uint32_t code = ((*(uint32_t*)slot) >> 28) & 0xF;
             debug_printf("[AMD-Vi] IVHD[%u] event code=0x%x\n", i, code);
+            /* Per-event broadcast — userspace logger / fault recoverer
+             * subscribes by `iommu:fault` and decodes the 16-byte slot
+             * we shipped as payload. */
+            TouchPublish("iommu:fault", slot, 16);
             head = (head + 16) & (EVT_LOG_BYTES - 1);
         }
         *(volatile uint64_t*)(u->reg + MMIO_EVT_HEAD) = tail;

@@ -1,6 +1,7 @@
 #include "acpi_internal.h"
 #include "klib.h"
 #include "vmm.h"
+#include "touch.h"
 
 /* ACPI 6.5 §18.3.2 — Boot Error Region.
  * 32 byte header followed by CPER records. Block Status flags the kind
@@ -142,6 +143,12 @@ static void cper_decode_region(volatile uint8_t* region,
                  cper_severity_text(rec->error_severity),
                  rec->flags, rec->record_length);
 
+    static const char* sect_tag[] = {
+        [0] = "acpi:cper:processor",
+        [1] = "acpi:cper:memory",
+        [2] = "acpi:cper:pcie",
+        [3] = "acpi:cper:generic",
+    };
     volatile cper_section_desc_t* desc =
         (volatile cper_section_desc_t*)(rec + 1);
     for (uint16_t i = 0; i < rec->section_count; i++) {
@@ -160,6 +167,18 @@ static void cper_decode_region(volatile uint8_t* region,
                      i, tname,
                      cper_severity_text(desc[i].section_severity),
                      desc[i].section_length, desc[i].section_offset);
+        /* Per-section tag broadcast: subscribers can scope their
+         * interest (e.g. only memory or only PCIe). */
+        int kind = (tname[0] == 'P' && tname[1] == 'r') ? 0
+                 : (tname[0] == 'M') ? 1
+                 : (tname[0] == 'P') ? 2
+                 : (tname[0] == 'G') ? 3 : -1;
+        if (kind >= 0) {
+            struct { uint32_t sev; uint32_t len; uint32_t off; } sev_ev =
+                { desc[i].section_severity, desc[i].section_length,
+                  desc[i].section_offset };
+            TouchPublish(sect_tag[kind], &sev_ev, sizeof(sev_ev));
+        }
     }
 }
 
@@ -413,6 +432,13 @@ void acpi_apei_consume(void) {
                  (status & 0x8) ? "multi-corr"    : "unknown",
                  severity_text(rg->error_severity),
                  rg->data_length);
+
+    /* Broadcast the prior-boot error so a userspace logger / telemetry
+     * daemon (anyone subscribing to `acpi:boot-error`) can persist it
+     * before the next crash. */
+    struct { uint32_t status; uint32_t severity; uint32_t data_length; } ev =
+        { status, rg->error_severity, rg->data_length };
+    TouchPublish("acpi:boot-error", &ev, sizeof(ev));
 
     /* Decode the embedded CPER record + each section. */
     cper_decode_region((volatile uint8_t*)rg,

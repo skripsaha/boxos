@@ -3,6 +3,7 @@
 #include "klib.h"
 #include "acpi.h"
 #include "vmm.h"
+#include "touch.h"
 
 /* PCI config space access is two stages:
  *   outl(0xCF8, addr); inl/outl(0xCFC, ...);
@@ -590,6 +591,43 @@ static void enumerate_function(uint16_t segment, uint8_t bus, uint8_t dev,
 
     debug_printf("[PCI]   %04x:%02x:%02x.%x  %04x:%04x  class=%02x.%02x.%02x\n",
                  segment, bus, dev, fn, vendor, devid, cls, sub, prog);
+
+    /* Tag-driven driver discovery — every found function publishes
+     * a `pci:vendor:VVVV:DDDD` (specific match) tag AND a broader
+     * `pci:class:CC:SS:PP` tag. Drivers subscribe by either tag and
+     * wake up here, instead of registering match tables. Payload is
+     * the full coordinate tuple so the driver can talk back. */
+    struct {
+        uint16_t segment;
+        uint8_t  bus, dev, fn;
+        uint16_t vendor, devid;
+        uint8_t  cls, sub, prog;
+    } ev = { segment, bus, dev, fn, vendor, devid, cls, sub, prog };
+
+    /* Build vendor:device tag inline (no kmalloc, no snprintf — pure
+     * hex digits). Format: "pci:vendor:XXXX:XXXX\0" = 21 bytes. */
+    static const char hex[] = "0123456789abcdef";
+    char vt[24] = "pci:vendor:";
+    vt[11] = hex[(vendor >> 12) & 0xF];
+    vt[12] = hex[(vendor >>  8) & 0xF];
+    vt[13] = hex[(vendor >>  4) & 0xF];
+    vt[14] = hex[ vendor        & 0xF];
+    vt[15] = ':';
+    vt[16] = hex[(devid >> 12) & 0xF];
+    vt[17] = hex[(devid >>  8) & 0xF];
+    vt[18] = hex[(devid >>  4) & 0xF];
+    vt[19] = hex[ devid        & 0xF];
+    vt[20] = '\0';
+    TouchPublish(vt, &ev, sizeof(ev));
+
+    char ct[20] = "pci:class:";
+    ct[10] = hex[(cls >> 4) & 0xF]; ct[11] = hex[cls & 0xF];
+    ct[12] = ':';
+    ct[13] = hex[(sub >> 4) & 0xF]; ct[14] = hex[sub & 0xF];
+    ct[15] = ':';
+    ct[16] = hex[(prog >> 4) & 0xF]; ct[17] = hex[prog & 0xF];
+    ct[18] = '\0';
+    TouchPublish(ct, &ev, sizeof(ev));
 
     /* Capability list. */
     uint8_t msi_off  = pci_find_capability(bus, dev, fn, PCI_CAP_ID_MSI);
