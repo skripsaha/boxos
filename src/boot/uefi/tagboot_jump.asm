@@ -8,6 +8,12 @@
 ;   rdx = entry     — kernel entry point (0x100000)
 ;
 ; UEFI is already in 64-bit long mode (EFER.LME=1, CR0.PG=1, CR4.PAE=1).
+; We trust those bits without re-checking — UEFI spec §2.3.4 mandates them
+; for AMD64 firmware, and exposing them to a wrmsr here is dangerous because
+; rdmsr clobbers rdx (which carries our kernel entry point). The kernel is
+; responsible for setting any further EFER bits it needs (NXE, SCE for
+; syscall, LMA is read-only) — bootloader assumes UEFI defaults.
+;
 ; All we need is to install our CR3, switch to the boot stack, and jump.
 ; This function never returns.
 ;

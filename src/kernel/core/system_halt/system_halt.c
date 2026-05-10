@@ -14,6 +14,9 @@
 #include "xhci.h"
 #include "xhci_port.h"
 #include "touch.h"
+#include "write_cont_queue.h"
+#include "ahci.h"
+#include "amp.h"
 
 static void halt_delay_ms(uint32_t ms)
 {
@@ -22,6 +25,51 @@ static void halt_delay_ms(uint32_t ms)
     {
         __asm__ volatile("pause");
     }
+}
+
+/*
+ * Drain in-flight async storage I/O before we kill cores. Two targets:
+ *   1. Per-K-Core WriteContQueue — state-machine continuations posted
+ *      by the AHCI IRQ that haven't been pumped yet.
+ *   2. AHCI port command issue (CI/SACT) — commands the controller is
+ *      still executing.
+ * We poll both until they're idle or the timeout elapses. Other cores
+ * are still live at this point (cli not yet executed) so their guide
+ * loops keep pumping continuations naturally.
+ */
+static void halt_drain_async_writes(void)
+{
+    kprintf("[HALT] Draining async writes...\n");
+    uint64_t deadline = rdtsc() + cpu_ms_to_tsc(3000);
+    while (rdtsc() < deadline) {
+        bool any = false;
+
+        if (g_write_cont_queues) {
+            for (uint8_t i = 0; i < g_amp.total_cores; i++) {
+                if (atomic_load_u32(&g_write_cont_queues[i].pending) > 0) {
+                    any = true;
+                    break;
+                }
+            }
+        }
+
+        if (!any && ahci_is_initialized()) {
+            uint32_t mask = ahci_get_active_port_mask();
+            for (uint8_t p = 0; p < 32 && mask; p++) {
+                if (!(mask & (1u << p))) continue;
+                mask &= ~(1u << p);
+                volatile ahci_port_regs_t *regs = ahci_get_port_regs_pub(p);
+                if (regs && (regs->ci != 0 || regs->sact != 0)) {
+                    any = true;
+                    break;
+                }
+            }
+        }
+
+        if (!any) break;
+        __asm__ volatile("pause");
+    }
+    kprintf("[HALT] Async writes drained\n");
 }
 
 static void halt_all_ap_cores(void)
@@ -148,6 +196,10 @@ void system_halt(bool reboot)
      * that need more should checkpoint on every state change, not on
      * shutdown alone. */
     halt_delay_ms(50);
+
+    /* Drain BEFORE cli — other cores need their guide loops alive to
+     * pump pending continuations from the AHCI IRQ. */
+    halt_drain_async_writes();
 
     __asm__ volatile("cli");
 

@@ -10,6 +10,7 @@
 #include "amp.h"
 #include "error.h"
 #include "kring.h"  /* KPocketIsEmpty for re-arm after pending clear */
+#include "write_cont_queue.h"  /* Async write state-machine continuations */
 
 KCorePocketQueue *g_kcore_queues = NULL;
 
@@ -208,6 +209,12 @@ void kcore_run_loop(void)
         while ((proc = kcore_queue_pop(q)) != NULL) {
             kcore_process_entry(proc);
         }
+
+        /* Drain async-write continuations on this K-Core. State-machine
+         * transitions that came back from an AHCI IRQ live here; running
+         * them inside the same loop body keeps cache-locality with the
+         * pocket pump and avoids an extra IPI round-trip. */
+        WriteContPump(my_idx);
 
         if ((++loop_count % 10) == 0) {
             process_cleanup_deferred();

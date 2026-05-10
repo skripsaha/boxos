@@ -19,6 +19,16 @@
 #define STORAGE_OBJ_GET_INFO    0x0A
 #define STORAGE_CONTEXT_SET     0x10
 #define STORAGE_CONTEXT_CLEAR   0x11
+#define STORAGE_SNAP_CREATE     0x20
+#define STORAGE_SNAP_DELETE     0x21
+#define STORAGE_SNAP_LIST       0x22
+/* anchor — durability + tag-event fan-out. params = [u32 file_id].
+ * file_id == 0 anchors the entire FS and publishes a generic "anchor"
+ * Touch event. Non-zero anchors and additionally fans out the event on
+ * every tag of that file, so observers keyed by tag (Touch REST) wake
+ * with payload {file_id, op=2, ...}. No POSIX equivalent — fsync()
+ * returns silently and offers no notification side-channel. */
+#define STORAGE_OBJ_ANCHOR      0x23
 
 void    storage_deck_init(void);
 error_t StorageDeckRegister(void);

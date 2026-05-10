@@ -363,6 +363,12 @@ typedef EFI_STATUS (EFIAPI *EFI_EXIT_BOOT_SERVICES)(
     EFI_HANDLE image_handle,
     UINTN      map_key);
 
+typedef EFI_STATUS (EFIAPI *EFI_SET_WATCHDOG_TIMER)(
+    UINTN     timeout,
+    uint64_t  watchdog_code,
+    UINTN     data_size,
+    uint16_t *watchdog_data);
+
 typedef EFI_STATUS (EFIAPI *EFI_LOCATE_PROTOCOL)(
     EFI_GUID *protocol,
     void     *registration,
@@ -439,7 +445,7 @@ typedef struct {
     /* misc */
     void                     *get_next_monotonic_count;
     void                     *stall;
-    void                     *set_watchdog_timer;
+    EFI_SET_WATCHDOG_TIMER    set_watchdog_timer;
     /* driver */
     void                     *connect_controller;
     void                     *disconnect_controller;

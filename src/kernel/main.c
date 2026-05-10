@@ -37,6 +37,7 @@
 #include "amp.h"
 #include "per_core.h"
 #include "kcore.h"
+#include "write_cont_queue.h"
 #include "lapic.h"
 #include "idle.h"
 #include "cpu_calibrate.h"
@@ -263,6 +264,9 @@ void kernel_main(void)
     {
         debug_printf("[INIT] K-Core Queues...\n");
         kcore_init();
+
+        debug_printf("[INIT] Write Continuation Queues...\n");
+        WriteContQueueInit();
 
         debug_printf("[INIT] Syscall Mode: ASYNC...\n");
         idt_set_syscall_mode(true);

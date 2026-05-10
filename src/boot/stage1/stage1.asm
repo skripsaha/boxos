@@ -10,6 +10,20 @@ start:
 
     mov [boot_drive], dl
 
+    ; Validate BIOS-reported drive number. Only 0x80 (primary HDD) and
+    ; 0x81 (secondary) are supported by stage1's EDD path and stage2's
+    ; raw-PIO path. Anything else (0x00 floppy, 0xFF "no drive", 0x82+
+    ; multi-disk) cannot map to the Primary IDE channel — reject upfront
+    ; with a clear message instead of silently booting the wrong device.
+    cmp dl, 0x80
+    je .drive_ok
+    cmp dl, 0x81
+    je .drive_ok
+    mov si, msg_bad_drive
+    call print
+    jmp hang
+.drive_ok:
+
     mov ah, 0x41
     mov bx, 0x55AA
     mov dl, [boot_drive]
@@ -22,10 +36,18 @@ start:
     int 0x13
     jc disk_error
 
-    mov ax, [0x8000]
+    ; Stage2 layout: byte 0 = `jmp short past_sig` (EB 02), bytes 2-3 = sig
+    ; word 0x2907, byte 4+ = real code. We verify the signature at offset +2
+    ; (where stage2 actually places it) and let the CPU enter at +0; the
+    ; built-in jmp short skips the signature so CPU never executes data as
+    ; instructions (which would clobber ES/DL on the way in).
+    mov ax, [0x8002]
     cmp ax, 0x2907
     jne stage2_error
 
+    ; Some BIOSes (Phoenix, AMI legacy) clobber DL during INT 13h. Restore
+    ; the saved drive number explicitly so stage2 reads the correct value.
+    mov dl, [boot_drive]
     jmp 0x0000:0x8000
 
 no_lba:
@@ -78,6 +100,7 @@ dap_stage2:
 msg_no_lba      db "LBA required!", 13, 10, 0
 msg_disk_error  db "Disk error!", 13, 10, 0
 msg_stage2_error db "Stage2 fail!", 13, 10, 0
+msg_bad_drive   db "Bad drive!", 13, 10, 0
 
 times 510-($-$$) db 0
 dw 0xAA55

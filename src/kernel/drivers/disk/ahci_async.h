@@ -46,4 +46,16 @@ error_t ahci_submit_read_async(uint8_t port, uint64_t lba,
                                 ahci_async_cb_t cb, void *ctx,
                                 uint8_t *out_slot);
 
+/*
+ * Submit a non-blocking write. Symmetric to read_async — the buffer at
+ * `dma_buf_phys` is the source; caller has already staged bytes there.
+ * Same failure modes and slot semantics. The callback fires from the
+ * AHCI IRQ when the controller retires the slot.
+ */
+error_t ahci_submit_write_async(uint8_t port, uint64_t lba,
+                                 uint16_t sector_count,
+                                 void *dma_buf_phys,
+                                 ahci_async_cb_t cb, void *ctx,
+                                 uint8_t *out_slot);
+
 #endif /* AHCI_ASYNC_H */

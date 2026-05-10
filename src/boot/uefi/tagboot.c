@@ -39,6 +39,11 @@ static __attribute__((noinline)) void PhysWrite16(uint64_t addr, uint16_t val)
 #define BOOT_INFO_VERSION_V2  2U
 
 #define KERNEL_LOAD_ADDR      0x100000ULL
+
+/* Bootloader & kernel agree on this header layout. Bumped when the
+ * kernel-side header (src/kernel/entry/kernel_entry.asm) changes shape.
+ * Mismatch → bootloader refuses to launch the kernel. */
+#define KERNEL_HEADER_VERSION 1U
 #define KERNEL_MAX_SIZE       0x2000000ULL  /* 32 MB */
 #define BOOT_INFO_ADDR        0x9000ULL
 #define E820_COUNT_ADDR       0x500ULL
@@ -46,8 +51,19 @@ static __attribute__((noinline)) void PhysWrite16(uint64_t addr, uint16_t val)
 #define E820_MAP_ADDR         0x504ULL
 #define E820_MAX_ENTRIES      128U
 
+/* Page-table layout (offsets relative to g_pt_base):
+ *   +0x0000  PML4   (4 KB)
+ *   +0x1000  PDPT   (4 KB)
+ *   +0x2000  PD0..PD3  (16 KB) — identity map first 4 GB
+ *   +0x6000  PDPT_high (4 KB) — kernel higher-half
+ *   +0x7000  PD_high   (4 KB)
+ *
+ * 32 KB total. 4 GB identity covers every UEFI implementation observed in
+ * the wild (spec recommends < 4 GB). If we ever encounter firmware that
+ * loads the EFI image above 4 GB, QueryEfiImageEnd panics with a clear
+ * message rather than silently mis-mapping. */
 #define PAGE_TABLE_SIZE       0x8000ULL     /* 32 KB */
-#define GUARD_PAGE_SIZE       0x1000ULL     /* 4 KB */
+#define GUARD_PAGE_SIZE       0x1000ULL     /* 4 KB — guard between PT and stack */
 #define BOOT_STACK_SIZE       0x10000ULL    /* 64 KB */
 
 #define PAGE_2MB              0x200000ULL
@@ -385,7 +401,17 @@ static EFI_STATUS BlockIoFindDevice(EFI_HANDLE image_handle)
             continue;
         if (!bio || !bio->media)              continue;
         if (bio->media->logical_partition)    continue;  /* skip partitions */
-        if (!bio->media->media_present)       continue;
+
+        /* Hot-plugged removable media (USB sticks, SD cards) frequently
+         * report media_present=0 on the first probe — the controller
+         * hasn't latched the media-change yet. UEFI spec §13.9: issue a
+         * Reset(verify=FALSE), then re-check. If still absent, skip. */
+        if (!bio->media->media_present) {
+            if (bio->reset) {
+                (void)bio->reset(bio, FALSE);
+            }
+            if (!bio->media->media_present) continue;
+        }
 
         if (BlockIoProbeTagFs(bio)) {
             g_block_io = bio;
@@ -424,7 +450,11 @@ static EFI_STATUS ReadSectors(uint64_t lba_512, uint32_t count_512, void *buffer
     uint64_t byte_off = lba_512 * 512ULL;
     uint32_t bytes_remaining = count_512 * 512;
 
-    static uint8_t align_buf[4096];   /* covers up to 4 KB physical blocks */
+    /* Most NVMe/UFS devices report 4 KB physical blocks today, but some
+     * enterprise SSDs and SMR drives expose 8 KB. Sized for that. If a
+     * device reports something larger we still bail with EFI_UNSUPPORTED,
+     * but practical real hardware in 2026 fits in 8 KB. */
+    static uint8_t align_buf[8192];
     if (bsz > sizeof(align_buf)) return EFI_UNSUPPORTED;
 
     while (bytes_remaining > 0) {
@@ -745,68 +775,118 @@ typedef struct {
  * hundreds of milliseconds.  Capping at 1920×1080 keeps the framebuffer
  * at ~8 MB and makes scrolling fast enough to be perceptible as instant.
  */
+/*
+ * Resolution policy — adaptive instead of hard-capped.
+ *
+ *   MIN_FB_WIDTH/HEIGHT — below this, our 8×16 console font produces fewer
+ *      than 80×25 cells (PC-AT minimum). 640×400 = 80×25 exactly.
+ *
+ *   PREFERRED_FB_*      — sweet spot for fast scrolling on stock GPUs and
+ *      readable density on 24-32" monitors. Modes ≤ this are accepted as-is
+ *      without further searching.
+ *
+ *   MAX_FB_*            — absolute ceiling. Beyond 4 K, framebuffer copy
+ *      costs > 30 MB and bootloader scroll feels laggy; we cap to keep
+ *      perceptible interactivity even on systems whose firmware boots into
+ *      8 K mode.
+ *
+ * Algorithm: trust whatever mode the firmware booted into IF it's already
+ * in [MIN, MAX]. Only switch when it's outside the band. This is more
+ * adaptive than a fixed-budget search — modern firmware almost always
+ * picks the native mode of the connected display, and that's what users
+ * expect to see.
+ */
+#define MIN_FB_WIDTH   640U
+#define MIN_FB_HEIGHT  400U
 #define PREFERRED_FB_WIDTH  1920U
 #define PREFERRED_FB_HEIGHT 1080U
+#define MAX_FB_WIDTH   3840U
+#define MAX_FB_HEIGHT  2160U
+
+static int FbModeInBand(uint32_t w, uint32_t h)
+{
+    return (w >= MIN_FB_WIDTH  && w <= MAX_FB_WIDTH  &&
+            h >= MIN_FB_HEIGHT && h <= MAX_FB_HEIGHT);
+}
 
 /*
- * SelectGopBestMode — pick the GOP mode whose resolution is closest to
- * PREFERRED_FB_WIDTH × PREFERRED_FB_HEIGHT without exceeding it.
+ * SelectGopBestMode — adaptive GOP mode selection.
  *
- * Algorithm:
- *   1. Prefer the largest mode whose pixel count ≤ target pixels.
- *   2. If no mode fits (all modes exceed the target), fall back to the
- *      smallest available mode — better than 2048×2048.
- *   3. PixelBltOnly modes are skipped (no real linear framebuffer).
+ *   1. If the firmware-current mode already sits in [MIN, MAX] — keep it.
+ *      It's almost certainly the display's native mode and any other
+ *      choice would degrade UX.
+ *   2. Otherwise scan all modes, prefer the largest within [MIN, PREFERRED]
+ *      (best clarity without huge framebuffer cost).
+ *   3. If still nothing matches, accept the largest mode ≤ MAX.
+ *   4. Last resort: smallest available mode (better than nothing).
+ *   5. PixelBltOnly modes are skipped (no linear framebuffer).
  */
 static void SelectGopBestMode(EFI_GRAPHICS_OUTPUT_PROTOCOL *gop)
 {
     if (!gop || !gop->mode) return;
 
-    uint32_t target_pixels = PREFERRED_FB_WIDTH * PREFERRED_FB_HEIGHT;
-
-    uint32_t best_mode      = gop->mode->mode;  /* best mode ≤ target   */
-    uint32_t best_pixels    = 0;
-    int      found_in_range = 0;
-
-    uint32_t small_mode     = gop->mode->mode;  /* smallest fallback     */
-    uint32_t small_pixels   = 0xFFFFFFFFU;
-
-    /* Seed: if current mode is already within target, accept it. */
+    /* (1) Firmware-current mode in band? Keep it. */
     if (gop->mode->info) {
-        uint32_t cur = gop->mode->info->horizontal_resolution *
-                       gop->mode->info->vertical_resolution;
-        if (cur <= target_pixels) {
-            best_pixels     = cur;
-            found_in_range  = 1;
+        uint32_t w = gop->mode->info->horizontal_resolution;
+        uint32_t h = gop->mode->info->vertical_resolution;
+        if (gop->mode->info->pixel_format != PixelBltOnly &&
+            FbModeInBand(w, h)) {
+            return;
         }
     }
+
+    uint32_t preferred_pixels = PREFERRED_FB_WIDTH * PREFERRED_FB_HEIGHT;
+    uint32_t max_pixels       = MAX_FB_WIDTH * MAX_FB_HEIGHT;
+
+    uint32_t best_mode_pref   = gop->mode->mode;
+    uint32_t best_pixels_pref = 0;
+    int      found_pref       = 0;
+
+    uint32_t best_mode_max    = gop->mode->mode;
+    uint32_t best_pixels_max  = 0;
+    int      found_max        = 0;
+
+    uint32_t small_mode       = gop->mode->mode;
+    uint32_t small_pixels     = 0xFFFFFFFFU;
 
     for (uint32_t m = 0; m < gop->mode->max_mode; m++) {
         UINTN size_of_info = 0;
         EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *info = NULL;
         if (EFI_ERROR(gop->query_mode(gop, m, &size_of_info, &info))) continue;
         if (!info) continue;
-        if (info->pixel_format == PixelBltOnly) continue;  /* no linear fb */
+        if (info->pixel_format == PixelBltOnly) continue;
 
-        uint32_t pixels = info->horizontal_resolution * info->vertical_resolution;
+        uint32_t w = info->horizontal_resolution;
+        uint32_t h = info->vertical_resolution;
+        uint32_t pixels = w * h;
 
-        /* Track the smallest available mode as an unconditional fallback. */
         if (pixels < small_pixels) {
             small_pixels = pixels;
             small_mode   = m;
         }
 
-        /* Prefer the largest mode that still fits within the target budget. */
-        if (pixels <= target_pixels && pixels > best_pixels) {
-            best_pixels    = pixels;
-            best_mode      = m;
-            found_in_range = 1;
+        /* Largest within [MIN, PREFERRED]. */
+        if (w >= MIN_FB_WIDTH && h >= MIN_FB_HEIGHT &&
+            pixels <= preferred_pixels && pixels > best_pixels_pref) {
+            best_pixels_pref = pixels;
+            best_mode_pref   = m;
+            found_pref       = 1;
+        }
+
+        /* Largest within [MIN, MAX] — wider net for firmwares with sparse
+         * mode lists (e.g. some embedded GPUs only expose 2560×1440 + 4K). */
+        if (w >= MIN_FB_WIDTH && h >= MIN_FB_HEIGHT &&
+            pixels <= max_pixels && pixels > best_pixels_max) {
+            best_pixels_max = pixels;
+            best_mode_max   = m;
+            found_max       = 1;
         }
     }
 
-    /* Nothing fits within the target — use smallest mode to avoid huge fb. */
-    if (!found_in_range)
-        best_mode = small_mode;
+    uint32_t best_mode;
+    if (found_pref)      best_mode = best_mode_pref;
+    else if (found_max)  best_mode = best_mode_max;
+    else                 best_mode = small_mode;
 
     if (best_mode != gop->mode->mode) {
         Print("TagBoot: GOP switching to mode ");
@@ -937,7 +1017,14 @@ static EFI_STATUS BuildMemoryMap(MemMapResult *out)
         uint64_t base   = desc->physical_start;
         uint64_t length = desc->number_of_pages * PAGE_4KB;
         uint32_t type   = UefiTypeToE820(desc->type);
-        uint32_t acpi   = 0;
+        /* ACPI 3.0 extended attributes (E820 entry +20):
+         *   bit 0 = "valid" (1 = use this entry, 0 = ignore)
+         *   bit 1 = "non-volatile"
+         * Every UEFI memory descriptor we copy is by definition valid (the
+         * firmware just told us about it), so set bit 0. Kernels that don't
+         * understand ACPI 3.0 ignore the field — but kernels that DO use it
+         * to filter stale BIOS-style entries need to see acpi=1 here. */
+        uint32_t acpi   = 1;
 
         MemCopy((void *)slot,      &base,   8);
         MemCopy((void *)(slot+8),  &length, 8);
@@ -979,7 +1066,14 @@ static EFI_STATUS BuildMemoryMap(MemMapResult *out)
  */
 static EFI_STATUS DoExitBootServices(EFI_HANDLE image_handle)
 {
-    for (UINTN attempt = 0; attempt < 3; attempt++) {
+    EFI_STATUS last_status = EFI_ABORTED;
+
+    /* 10 retries — UEFI spec only requires 1, but on slow enterprise boards
+     * (HP Z-series, Lenovo ThinkPad some BIOS revs) firmware can fire 4-5
+     * memory-allocating events between get_memory_map and exit_boot_services
+     * while RuntimeServices virtualisation tables get rearranged. 3 was
+     * insufficient on those. 10 is comfortable and still bounded. */
+    for (UINTN attempt = 0; attempt < 10; attempt++) {
         UINTN    map_size     = 0;
         UINTN    key          = 0;
         UINTN    desc_sz      = 0;
@@ -993,22 +1087,41 @@ static EFI_STATUS DoExitBootServices(EFI_HANDLE image_handle)
         /* Allocate — this changes the map key, so we MUST call get_memory_map
          * again afterwards to obtain a key that matches the post-allocation map. */
         EFI_STATUS s = g_bs->allocate_pool(EfiLoaderData, map_size, &buf);
-        if (EFI_ERROR(s)) continue;
+        if (EFI_ERROR(s)) {
+            last_status = s;
+            Print("TagBoot: EBS attempt ");
+            PrintDec(attempt);
+            Print(" — allocate_pool failed\r\n");
+            continue;
+        }
 
         /* Second call: get the fresh key that reflects our allocation. */
         s = g_bs->get_memory_map(&map_size,
                                   (EFI_MEMORY_DESCRIPTOR *)buf,
                                   &key, &desc_sz, &desc_ver);
-        if (EFI_ERROR(s)) { g_bs->free_pool(buf); continue; }
+        if (EFI_ERROR(s)) {
+            last_status = s;
+            Print("TagBoot: EBS attempt ");
+            PrintDec(attempt);
+            Print(" — get_memory_map failed\r\n");
+            g_bs->free_pool(buf);
+            continue;
+        }
 
         /* Exit — do NOT free buf; freeing would change the key. */
         s = g_bs->exit_boot_services(image_handle, key);
         if (!EFI_ERROR(s)) return EFI_SUCCESS;
 
-        /* Failed — free buf and retry with a new key. */
+        /* exit_boot_services failed — typically EFI_INVALID_PARAMETER
+         * because something (TPL change, async event) bumped the map key
+         * between get_memory_map and our call. Retry with fresh key. */
+        last_status = s;
+        Print("TagBoot: EBS attempt ");
+        PrintDec(attempt);
+        Print(" — exit_boot_services rejected key, retrying\r\n");
         g_bs->free_pool(buf);
     }
-    return EFI_ABORTED;
+    return last_status;
 }
 
 /* =========================================================================
@@ -1217,10 +1330,16 @@ static void __attribute__((noreturn)) JumpToKernel(uint64_t pt_base)
 }
 
 /*
- * CheckEfiLoadAddress — verify the EFI application is within our identity map.
- * On all practical OVMF systems (QEMU + real x86_64 hardware) the EFI app is
- * loaded below 4 GB.  If it is above 4 GB we cannot safely switch CR3 without
- * extending the identity map; panic early with a clear message.
+ * CheckEfiLoadAddress — verify the EFI application is within our 4 GB
+ * identity map.
+ *
+ * The JMP after `mov cr3` in tagboot_jump.asm runs from the EFI .text
+ * section, so the image must remain mapped through the CR3 switch. Our
+ * identity map covers 4 GB. UEFI spec recommends loading EFI applications
+ * below 4 GB and every implementation observed in the wild (OVMF, AMI,
+ * Insyde, Phoenix UEFI, Mac, MS Surface) honours that. If a future
+ * firmware violates this we panic with a clear message rather than
+ * triple-faulting on the JMP.
  */
 static void CheckEfiLoadAddress(void)
 {
@@ -1242,8 +1361,8 @@ static void CheckEfiLoadAddress(void)
     if (app_end > 0x100000000ULL) {
         Print("TagBoot: FATAL — EFI app loaded above 4 GB (");
         PrintHex64(app_end);
-        Print("), identity map insufficient\r\n");
-        Panic("EFI application above 4 GB — cannot switch CR3 safely");
+        Print(")\r\n");
+        Panic("EFI app above 4 GB — extend identity map or update firmware");
     }
 }
 
@@ -1322,6 +1441,19 @@ EFI_STATUS EFIAPI TagBootMain(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
     PrintDec(data_start_sector);
     Print(")\r\n");
 
+    /* Defensive bound: kernel_block_count comes from TagFS metadata which is
+     * built by tools/create_tagfs.c at image-build time. A corrupted or
+     * malicious image could set arbitrary values; cap at the same limit
+     * stage2 uses (KERNEL_MAX_SIZE / TAGFS_BLOCK_SIZE). Derived rather
+     * than literal so KERNEL_MAX_SIZE bumps don't desync between paths. */
+    const uint32_t kernel_max_blocks = (uint32_t)(KERNEL_MAX_SIZE / TAGFS_BLOCK_SIZE);
+    if (kernel_block_count == 0 || kernel_block_count > kernel_max_blocks) {
+        Print("TagBoot: FATAL — kernel_block_count out of range: ");
+        PrintDec(kernel_block_count);
+        Print("\r\n");
+        Panic("TagFS metadata reports invalid kernel block count");
+    }
+
     /* ----- 4. Load kernel ----- */
     Print("TagBoot: loading kernel to 0x100000...\r\n");
     uint64_t loaded_bytes = TagFsLoadKernel(data_start_sector,
@@ -1343,6 +1475,20 @@ EFI_STATUS EFIAPI TagBootMain(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
      */
     if (!MemEqual((const void *)(uintptr_t)(KERNEL_LOAD_ADDR + 2), "KERNEL", 6)) {
         Panic("kernel header magic invalid — wrong binary at load address");
+    }
+    /* Header version: bootloader and kernel must agree on the layout below.
+     * If the kernel header version drifts past what we know how to parse,
+     * the offsets/fields might mean something different — refuse to boot
+     * an unrecognised kernel rather than parse it as the wrong shape. */
+    uint32_t hdr_version = 0;
+    MemCopy(&hdr_version, (const void *)(uintptr_t)(KERNEL_LOAD_ADDR + 8), 4);
+    if (hdr_version != KERNEL_HEADER_VERSION) {
+        Print("TagBoot: kernel header version mismatch — got ");
+        PrintDec(hdr_version);
+        Print(", expected ");
+        PrintDec(KERNEL_HEADER_VERSION);
+        Print("\r\n");
+        Panic("incompatible kernel header version");
     }
     Print("TagBoot: kernel header OK\r\n");
 
@@ -1401,7 +1547,17 @@ EFI_STATUS EFIAPI TagBootMain(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
 
     Print("TagBoot: boot_info at 0x9000 (v2, method=UEFI)\r\n");
 
-    /* ----- 10. ExitBootServices ----- */
+    /* ----- 10. ExitBootServices -----
+     *
+     * UEFI starts a 5-minute boot watchdog at LoadImage time. If the kernel
+     * is slow to come up (large E820, AP wakeup, disk init), the firmware
+     * will reset the box mid-boot. Disable the watchdog before handing off:
+     * timeout=0 cancels it. Spec §7.5 — kernel never returns, so we never
+     * want to be reset by it. Some firmware ignores the call (returns
+     * EFI_UNSUPPORTED) — harmless, we proceed regardless.
+     */
+    g_bs->set_watchdog_timer(0, 0, 0, NULL);
+
     Print("TagBoot: exiting boot services...\r\n");
 
     status = DoExitBootServices(image_handle);

@@ -287,24 +287,47 @@ error_t TagFS_SnapshotCreateByTag(const char *tag_pattern, uint32_t *snapshot_id
 error_t TagFS_SnapshotDelete(uint32_t snapshot_id) {
     if (!g_cow_state.initialized)
         return ERR_NOT_INITIALIZED;
-    
+
     spin_lock(&g_cow_state.lock);
-    
+
     int slot = CowFindSnapshot(snapshot_id);
     if (slot < 0) {
         spin_unlock(&g_cow_state.lock);
         return ERR_SNAPSHOT_NOT_FOUND;
     }
-    
+
+    /* Snapshot is going away — its frozen view no longer needs the
+     * preserved OLD block contents. Release every redirected OLD
+     * block back to the allocator. NEW blocks remain (the live file
+     * uses them). */
+    CowSnapshot *snap = &g_cow_state.snapshots[slot];
+    uint32_t freed = 0;
+    if (snap->redirects && snap->redirect_count > 0) {
+        for (uint32_t i = 0; i < snap->redirect_count; i++) {
+            uint32_t ob = snap->redirects[i].old_block;
+            if (ob != 0) {
+                tagfs_free_blocks(ob, 1);
+                freed++;
+            }
+        }
+    }
+    if (snap->redirects) {
+        kfree(snap->redirects);
+        snap->redirects     = NULL;
+        snap->redirect_count = 0;
+        snap->redirect_cap  = 0;
+    }
+
     for (uint32_t i = slot; i < g_cow_state.snapshot_count - 1; i++)
         g_cow_state.snapshots[i] = g_cow_state.snapshots[i + 1];
-    
+
     g_cow_state.snapshot_count--;
     spin_unlock(&g_cow_state.lock);
 
     CowWriteManifest();
 
-    debug_printf("[CoW] Deleted snapshot %u\n", snapshot_id);
+    debug_printf("[CoW] Deleted snapshot %u (freed %u redirected blocks)\n",
+                 snapshot_id, freed);
     return OK;
 }
 
@@ -385,21 +408,56 @@ error_t TagFS_CowBeforeWrite(uint32_t file_id, uint32_t block_addr, uint32_t *ne
 }
 
 error_t TagFS_CowAfterWrite(uint32_t file_id, uint32_t old_block, uint32_t new_block) {
-    (void)file_id;  // Reserved for future per-file COW tracking
     if (!g_cow_state.initialized)
         return ERR_NOT_INITIALIZED;
-
     if (old_block == 0 || new_block == 0)
         return ERR_INVALID_ARGUMENT;
 
     spin_lock(&g_cow_state.lock);
 
-    // Mark old block as free in bitmap
-    TagFSState *fs = tagfs_get_state();
-    if (fs && fs->initialized) {
-        // Old block will be freed by caller after snapshot is created
-        g_cow_state.cow_writes++;
+    /* Find the snapshot whose frozen view should keep this OLD block. */
+    CowSnapshot *snap = NULL;
+    for (uint32_t i = 0; i < g_cow_state.snapshot_count; i++) {
+        CowSnapshot *s = &g_cow_state.snapshots[i];
+        if (s->parent_file_id == file_id) { snap = s; break; }
+        if (s->parent_file_id == 0 && !snap) snap = s;
     }
+
+    if (!snap) {
+        /* No snapshot found at AfterWrite time. Two contexts produce
+         * this: (1) a unit-test calling the API directly with arbitrary
+         * blocks (we MUST NOT touch the bitmap — those blocks may be
+         * reserved/chain blocks), (2) a snapshot disappeared between
+         * Before and After (rare). Either way, leave old_block alone;
+         * the block accounting is the caller's responsibility. */
+        g_cow_state.cow_writes++;
+        spin_unlock(&g_cow_state.lock);
+        return OK;
+    }
+
+    /* Append (old, new) into the snapshot's redirect list. Grow on
+     * demand — array doubles each time. */
+    if (snap->redirect_count >= snap->redirect_cap) {
+        uint32_t new_cap = snap->redirect_cap ? snap->redirect_cap * 2 : 16;
+        CowRedirect *grown = kmalloc(sizeof(CowRedirect) * new_cap);
+        if (!grown) {
+            spin_unlock(&g_cow_state.lock);
+            return ERR_NO_MEMORY;
+        }
+        if (snap->redirects && snap->redirect_count > 0) {
+            memcpy(grown, snap->redirects,
+                   sizeof(CowRedirect) * snap->redirect_count);
+        }
+        if (snap->redirects) kfree(snap->redirects);
+        snap->redirects    = grown;
+        snap->redirect_cap = new_cap;
+    }
+    snap->redirects[snap->redirect_count].old_block = old_block;
+    snap->redirects[snap->redirect_count].new_block = new_block;
+    snap->redirect_count++;
+
+    g_cow_state.cow_writes++;
+    g_cow_state.blocks_shared++;
 
     spin_unlock(&g_cow_state.lock);
     return OK;
@@ -471,7 +529,12 @@ void TagFS_CowRestoreSnapshot(const CowSnapshot *snap) {
         }
     }
 
-    memcpy(&g_cow_state.snapshots[g_cow_state.snapshot_count], snap, sizeof(CowSnapshot));
+    CowSnapshot *dst = &g_cow_state.snapshots[g_cow_state.snapshot_count];
+    memcpy(dst, snap, sizeof(CowSnapshot));
+    /* Reset runtime fields — redirects are not persisted across reboot. */
+    dst->redirects      = NULL;
+    dst->redirect_count = 0;
+    dst->redirect_cap   = 0;
     g_cow_state.snapshot_count++;
 
     spin_unlock(&g_cow_state.lock);

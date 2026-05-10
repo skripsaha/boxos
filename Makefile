@@ -114,6 +114,11 @@ TOUCH_TEST_BIN   = $(APPS_DIR)/touch_test.elf
 TOUCH_STRESS_BIN = $(APPS_DIR)/touch_stress.elf
 LIFECYCLE_BIN    = $(APPS_DIR)/lifecycle.elf
 PERSIST_BIN      = $(APPS_DIR)/persist.elf
+WRITE_STRESS_BIN = $(APPS_DIR)/write_stress.elf
+WRITE_CONC_BIN   = $(APPS_DIR)/write_concurrent.elf
+WRITE_OBS_BIN    = $(APPS_DIR)/write_observer.elf
+COW_TEST_BIN     = $(APPS_DIR)/cow_test.elf
+ANCHOR_TEST_BIN  = $(APPS_DIR)/anchor_test.elf
 
 # Display server ELF
 DISPLAY_DIR = $(USERSPACE_DIR)/display
@@ -168,7 +173,7 @@ UEFI_CFLAGS_CLANG = -ffreestanding -nostdlib -nostdinc \
 # even when 'clang' is in PATH.  Only enable the clang path when lld-link exists.
 CLANG_AVAILABLE := $(shell command -v lld-link 2>/dev/null)
 
-.PHONY: all clean run run-bg run-stop debug info check-deps install-deps uefi
+.PHONY: all clean run run-bg run-stop debug info check-deps install-deps uefi usb
 
 # ==== MAIN TARGET ====
 all: check-deps $(IMAGE) $(KERNEL_ELF) $(FLOPPY_IMG) $(ISO) $(VBOX_VDI) uefi
@@ -191,6 +196,7 @@ check-deps:
 	@command -v $(LD) >/dev/null || (echo "ERROR: x86_64-elf-ld not found" && exit 1)
 	@command -v $(OBJCOPY) >/dev/null || (echo "ERROR: x86_64-elf-objcopy not found" && exit 1)
 	@command -v $(QEMU) >/dev/null || echo "WARNING: qemu-system-x86_64 not found (needed for 'make run')"
+	@command -v bochs   >/dev/null || echo "WARNING: bochs not found (needed for 'make bochs')"
 	@command -v xorriso >/dev/null || echo "WARNING: xorriso not found (needed for ISO)"
 	@command -v VBoxManage >/dev/null || (echo "WARNING: VBoxManage not found" && sleep 2)
 	@echo "All dependencies OK."
@@ -260,7 +266,7 @@ $(SHELL_BIN): $(USERSPACE_DIR)/boxlib/libbox.a
 	@echo "Shell binary: $@ ($$(stat -f%z $@ 2>/dev/null || stat -c%s $@ 2>/dev/null) bytes)"
 
 # Build apps (proca, procb, today, memtest)
-$(PROCA_BIN) $(PROCB_BIN) $(TODAY_BIN) $(MEMTEST_BIN) $(MTEST_BIN) $(CHAIN_BIN) $(DECKS_BIN) $(BENCH_BIN) $(TOUCH_TEST_BIN) $(TOUCH_STRESS_BIN) $(LIFECYCLE_BIN) $(PERSIST_BIN): $(USERSPACE_DIR)/boxlib/libbox.a
+$(PROCA_BIN) $(PROCB_BIN) $(TODAY_BIN) $(MEMTEST_BIN) $(MTEST_BIN) $(CHAIN_BIN) $(DECKS_BIN) $(BENCH_BIN) $(TOUCH_TEST_BIN) $(TOUCH_STRESS_BIN) $(LIFECYCLE_BIN) $(PERSIST_BIN) $(WRITE_STRESS_BIN) $(WRITE_CONC_BIN) $(WRITE_OBS_BIN) $(COW_TEST_BIN) $(ANCHOR_TEST_BIN): $(USERSPACE_DIR)/boxlib/libbox.a
 	@echo "Building apps..."
 	@cd $(APPS_DIR) && $(MAKE)
 	@echo "proca.elf: $$(stat -f%z $(PROCA_BIN) 2>/dev/null || stat -c%s $(PROCA_BIN) 2>/dev/null) bytes"
@@ -329,7 +335,7 @@ $(KERNEL_ELF): $(KERNEL_ENTRY_OBJ) $(C_OBJS) $(ASM_OBJS) $(SHELL_EMBED)
 
 
 # ==== DISK IMAGES ====
-$(IMAGE): $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(SHELL_BIN) $(PROCA_BIN) $(PROCB_BIN) $(TODAY_BIN) $(MEMTEST_BIN) $(MTEST_BIN) $(CHAIN_BIN) $(DECKS_BIN) $(BENCH_BIN) $(TOUCH_TEST_BIN) $(TOUCH_STRESS_BIN) $(LIFECYCLE_BIN) $(PERSIST_BIN) $(DISPLAY_BIN) $(UTIL_ELFS) $(TAGFS_TOOL)
+$(IMAGE): $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(SHELL_BIN) $(PROCA_BIN) $(PROCB_BIN) $(TODAY_BIN) $(MEMTEST_BIN) $(MTEST_BIN) $(CHAIN_BIN) $(DECKS_BIN) $(BENCH_BIN) $(TOUCH_TEST_BIN) $(TOUCH_STRESS_BIN) $(LIFECYCLE_BIN) $(PERSIST_BIN) $(WRITE_STRESS_BIN) $(WRITE_CONC_BIN) $(WRITE_OBS_BIN) $(COW_TEST_BIN) $(ANCHOR_TEST_BIN) $(DISPLAY_BIN) $(UTIL_ELFS) $(TAGFS_TOOL)
 	@echo "Creating disk image (10MB)..."
 	@dd if=/dev/zero of=$@ bs=512 count=20480 status=none
 	@echo "  Writing Stage1 (sector 0, 512 bytes)..."
@@ -355,6 +361,11 @@ $(IMAGE): $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(SHELL_BIN) $(PROCA_BIN) $(
 		$(TOUCH_STRESS_BIN)  "app,utility,test" \
 		$(LIFECYCLE_BIN)     "app,utility,test" \
 		$(PERSIST_BIN)       "app,utility,test" \
+		$(WRITE_STRESS_BIN)  "app,utility,test" \
+		$(WRITE_CONC_BIN)    "app,utility,test" \
+		$(WRITE_OBS_BIN)     "app,utility,test" \
+		$(COW_TEST_BIN)      "app,utility,test" \
+		$(ANCHOR_TEST_BIN)   "app,utility,test" \
 		$(UTILS_DIR)/help.elf    "utility" \
 		$(UTILS_DIR)/create.elf  "utility,storage" \
 		$(UTILS_DIR)/show.elf    "utility,storage" \
@@ -451,20 +462,30 @@ endif
 comma := ,
 
 # ==== RUN CONFIGURATION ====
-# Usage: make run [CORES=N] [MEM=size] [FULLSCREEN=on] [USB=on|off] [AHCI=on] [LOG=on] [GDB=on] [DEBUG=on] [UEFI=on]
+# Usage: make run [EMU=qemu|bochs] [CORES=N] [MEM=size] [FULLSCREEN=on]
+#                 [USB=on|off] [AHCI=on] [LOG=on] [GDB=on] [DEBUG=on] [UEFI=on]
+#                 [BOCHSDBG=on] [BOCHS_DISPLAY=sdl2|x|term|nogui]
+#                 [BOCHS_CPU=name] [BOCHS_IPS=N]
 #
 # Examples:
-#   make run                          — 1 core, 512M, USB keyboard (MBR boot)
-#   make run UEFI=on                  — boot via OVMF + TagBoot EFI
-#   make run CORES=4 MEM=4G          — 4 cores, 4GB RAM
-#   make run FULLSCREEN=on           — cocoa fullscreen mode
-#   make run LOG=on                  — enable QEMU interrupt/reset logging
-#   make run GDB=on                  — pause for GDB attach (-s -S)
-#   make run AHCI=on USB=off         — AHCI disk controller, no USB
-#   make run CORES=8 MEM=4G LOG=on FULLSCREEN=on
-#   make run DEBUG=on                — enable debug output (CONFIG_DEBUG_ENABLED)
+#   make run                          — QEMU, 1 core, 512M, USB kbd (MBR boot)
+#   make run EMU=bochs                — Bochs (SDL2 on macOS, X11 on Linux)
+#   make run EMU=bochs BOCHSDBG=on    — Bochs + internal text debugger
+#   make run EMU=bochs GDB=on         — Bochs gdb stub on tcp:1234
+#   make run UEFI=on                  — QEMU via OVMF + TagBoot EFI
+#   make run UEFI=on EMU=bochs        — Bochs via OVMF (only on Bochs builds with
+#                                       extended ROM area; stock builds reject 3.5MB OVMF)
+#   make run EMU=bochs CORES=4        — only works on Bochs built --enable-smp
+#   make run EMU=bochs BOCHS_CPU=ryzen — pick a different CPU profile
+#   make run CORES=4 MEM=4G           — 4 cores, 4GB RAM (any EMU)
+#   make run FULLSCREEN=on            — QEMU cocoa fullscreen
+#   make run LOG=on                   — verbose logging (QEMU IRQs / Bochs info)
+#   make run GDB=on                   — QEMU: pause for gdb / Bochs: gdbstub
+#   make run AHCI=on USB=off          — AHCI disk controller, no USB (QEMU only)
+#   make run DEBUG=on                 — kernel CONFIG_DEBUG_ENABLED at compile
 #   make run UEFI=on CORES=4 MEM=4G
 
+EMU        ?= qemu
 CORES      ?= 1
 MEM        ?= 512M
 FULLSCREEN ?= off
@@ -474,6 +495,61 @@ LOG        ?= off
 GDB        ?= off
 DEBUG      ?= off
 UEFI       ?= off
+# STRICT=on — make QEMU emulate real-HW behaviour without softening:
+#   • -cpu max               — exposes every feature TCG can emulate
+#                              (RDRAND/RDSEED/AVX2/AES-NI/SMEP/SMAP/UMIP/+invtsc).
+#                              Catches "kernel uses CPU feature without CPUID
+#                              guard" bugs that default qemu64 silently masks.
+#   • -machine q35           — modern PCH chipset (PCIe, AHCI, MSI-X, ACPI 6.x).
+#                              Default i440fx is a 1996 PIIX board no longer
+#                              shipping on real hardware.
+#   • -d guest_errors,unimp,cpu_reset — log every undefined / unimplemented
+#                              guest behaviour QEMU normally absorbs silently.
+#   STRICT deliberately does NOT set -no-reboot or -no-shutdown:
+#     - Real hardware reboots after reset (and triple-fault); STRICT mirrors
+#       that — `reboot` actually restarts the VM, matching production.
+#     - `bye` (ACPI S5) cleanly exits QEMU without -no-shutdown blocking.
+#     - For triple-fault diagnostics (halt + log) use LOG=on instead, which
+#       keeps both flags set and writes boxos_qemu.log.
+#   • -overcommit cpu-pm=on   — match real CPU power-management semantics
+#                              (HLT/MWAIT actually descheduled, not no-op).
+STRICT     ?= off
+BOCHSDBG      ?= off
+BOCHS_DISPLAY ?= auto
+
+# Bochs runtime — auto-discover BIOS / VGA BIOS (only used when EMU=bochs).
+# Keymap is selected at config-gen time inside tools/make_bochsrc.sh based on
+# BOCHS_DISP_LIB (sdl2 vs x vs term) so we don't feed an X11 keymap to SDL2.
+# Use the BIOS-bochs-latest pair shipped with Bochs — QEMU's SeaBIOS is built
+# with CONFIG_QEMU=y and pulls fwcfg/PCI quirks Bochs doesn't emulate, so it
+# bricks boot. Override via BOCHS_BIOS=/your/bios.bin if you have a custom one.
+BOCHS         ?= bochs
+BOCHS_DATA_DIRS := /opt/homebrew/share/bochs \
+                   /usr/local/share/bochs \
+                   /usr/share/bochs \
+                   $(wildcard /opt/homebrew/Cellar/bochs/*/share/bochs)
+BOCHS_BIOS    ?= $(firstword $(foreach d,$(BOCHS_DATA_DIRS),$(wildcard $(d)/BIOS-bochs-latest)))
+BOCHS_VGABIOS ?= $(firstword $(foreach d,$(BOCHS_DATA_DIRS),$(wildcard $(d)/VGABIOS-lgpl-latest.bin)))
+BOCHS_RC      := $(BUILDDIR)/bochsrc.txt
+BOCHS_LOG     := $(BUILDDIR)/bochs.log
+
+# CPU emulation knobs — pass any Bochs-supported model + ips override.
+# `BOCHS_CPU` accepts anything from `bochs --help cpu` (corei7_haswell_4770,
+# corei7_skylake_x, ryzen, atom_x5_z8350, etc.). `BOCHS_IPS` is instructions
+# per second — affects realtime alignment / wall-clock fidelity.
+BOCHS_CPU     ?= corei7_haswell_4770
+BOCHS_IPS     ?= 50000000
+
+# Resolve display library: auto -> SDL2 on macOS, X11 on Linux/BSD.
+ifeq ($(BOCHS_DISPLAY),auto)
+ifeq ($(UNAME_S),Darwin)
+BOCHS_DISP_LIB := sdl2
+else
+BOCHS_DISP_LIB := x
+endif
+else
+BOCHS_DISP_LIB := $(BOCHS_DISPLAY)
+endif
 
 # OVMF firmware search paths (common locations on macOS/Linux)
 OVMF_PATHS := /usr/share/ovmf/OVMF.fd \
@@ -521,9 +597,53 @@ $(UEFI_ESP_IMG): $(TAGBOOT_EFI) $(BUILDDIR)/edk2-vars.fd | $(BUILDDIR)
 	@python3 tools/make_esp.py $(TAGBOOT_EFI) $@
 
 run: $(IMAGE)
+ifeq ($(EMU),bochs)
+	@echo "=== BoxOS Bochs ==="
+	@echo "  Cores: $(CORES) | RAM: $(MEM) | Display: $(BOCHS_DISP_LIB) | UEFI: $(UEFI)"
+	@echo "  CPU: $(BOCHS_CPU) | IPS: $(BOCHS_IPS)"
+	@echo "  Internal Debugger: $(BOCHSDBG) | GDB stub: $(GDB) | Log: $(LOG)"
+	@echo "  Config: $(BOCHS_RC)  Log: $(BOCHS_LOG)"
+	@echo "==================="
+	@command -v $(BOCHS) >/dev/null || \
+	    (echo "ERROR: bochs not found. Install: brew install bochs / apt install bochs"; exit 1)
+	@if [ -z "$(BOCHS_VGABIOS)" ]; then \
+	    echo "ERROR: VGABIOS-lgpl-latest.bin not found in any of: $(BOCHS_DATA_DIRS)"; \
+	    exit 1; \
+	fi
+	@if [ "$(UEFI)" = "on" ]; then \
+	    if [ -z "$(OVMF_FD)" ]; then \
+	        echo "ERROR: UEFI=on requires OVMF.fd. Install ovmf or place OVMF.fd at project root."; \
+	        exit 1; \
+	    fi; \
+	elif [ -z "$(BOCHS_BIOS)" ]; then \
+	    echo "ERROR: BIOS-bochs-latest not found."; \
+	    echo "  Install:  brew install bochs / sudo apt install bochs"; \
+	    echo "  Searched: $(BOCHS_DATA_DIRS)"; \
+	    exit 1; \
+	fi
+	@$(MAKE) --no-print-directory $(if $(filter on,$(UEFI)),$(UEFI_ESP_IMG))
+	@BOCHS_RC="$(BOCHS_RC)" \
+	  IMAGE="$<" \
+	  CORES="$(CORES)" \
+	  MEM="$(MEM)" \
+	  BOCHS_CPU="$(BOCHS_CPU)" \
+	  BOCHS_IPS="$(BOCHS_IPS)" \
+	  BOCHS_DISP_LIB="$(BOCHS_DISP_LIB)" \
+	  BOCHS_DATA_DIRS="$(BOCHS_DATA_DIRS)" \
+	  GDB="$(GDB)" \
+	  LOG="$(LOG)" \
+	  UEFI="$(UEFI)" \
+	  OVMF_FD="$(OVMF_FD)" \
+	  UEFI_ESP_IMG="$(UEFI_ESP_IMG)" \
+	  BOCHS_BIOS="$(BOCHS_BIOS)" \
+	  BOCHS_VGABIOS="$(BOCHS_VGABIOS)" \
+	  BOCHS_LOG="$(BOCHS_LOG)" \
+	  bash tools/make_bochsrc.sh
+	@$(BOCHS) -q -unlock -f $(BOCHS_RC) $(if $(filter on,$(BOCHSDBG)),-debugger)
+else
 	@echo "=== BoxOS QEMU ==="
 	@echo "  Cores: $(CORES) | RAM: $(MEM) | USB: $(USB) | AHCI: $(AHCI) | UEFI: $(UEFI)"
-	@echo "  Fullscreen: $(FULLSCREEN) | Log: $(LOG) | GDB: $(GDB) | Debug: $(DEBUG)"
+	@echo "  Fullscreen: $(FULLSCREEN) | Log: $(LOG) | GDB: $(GDB) | Debug: $(DEBUG) | Strict: $(STRICT)"
 	@echo "==================="
 	$(if $(filter on,$(UEFI)), \
 		$(if $(OVMF_FD),, \
@@ -536,10 +656,15 @@ run: $(IMAGE)
 			-drive if=pflash$(comma)format=raw$(comma)file=$(BUILDDIR)/edk2-vars.fd \
 			-drive format=raw$(comma)file=$(UEFI_ESP_IMG)$(comma)if=ide$(comma)index=0 \
 			-drive format=raw$(comma)file=$<$(comma)if=ide$(comma)index=1, \
+			$(if $(filter on,$(STRICT)),-machine q35) \
 			$(if $(filter on,$(AHCI)), \
 				-drive id=disk0$(comma)file=$<$(comma)format=raw$(comma)if=none \
 				-device ahci$(comma)id=ahci -device ide-hd$(comma)drive=disk0$(comma)bus=ahci.0, \
 				-drive format=raw$(comma)file=$<$(comma)index=0$(comma)media=disk)) \
+		$(if $(filter on,$(STRICT)), \
+		    -cpu max$(comma)+invtsc$(comma)+rdrand$(comma)+rdseed \
+		    -overcommit cpu-pm=on \
+		    -d guest_errors$(comma)unimp$(comma)cpu_reset) \
 		-m $(MEM) \
 		-serial stdio \
 		$(if $(filter-out 1,$(CORES)),-smp $(CORES)$(comma)cores=$(CORES)$(comma)threads=1$(comma)sockets=1) \
@@ -547,6 +672,7 @@ run: $(IMAGE)
 		$(if $(filter on,$(USB)),-device qemu-xhci -device usb-kbd) \
 		$(if $(filter on,$(LOG)),-d int$(comma)cpu_reset -no-reboot -no-shutdown -D boxos_qemu.log) \
 		$(if $(filter on,$(GDB)),-s -S)
+endif
 
 # ===================================================================
 # Headless QEMU for automated key-injection testing.
@@ -599,6 +725,77 @@ run-bg: $(IMAGE)
 		echo "[run-bg] ERROR: QEMU failed to start"; exit 1; \
 	fi
 
+# ===================================================================
+# === USB FLASHING (real hardware) ==================================
+# ===================================================================
+# Usage:  make usb DEV=/dev/diskN     (macOS — get from `diskutil list`)
+#         sudo make usb DEV=/dev/sdX  (Linux — get from `lsblk`)
+#
+# Writes the raw image (build/boxos.img) sector-by-sector to a USB stick
+# or external disk. Result: bootable on any x86_64 PC via BIOS legacy /
+# CSM AND UEFI:
+#   • Sector 0..16   = stage1 + stage2 (BIOS legacy boot path)
+#   • Sectors 17+    = kernel + TagFS (data + apps + UEFI loader files)
+#   • build/BOOTX64.EFI is embedded in the image too — UEFI firmware will
+#     find it automatically if the disk has GPT+ESP layout (left for a
+#     follow-up; current layout is raw + MBR signature, BIOS legacy only).
+#
+# SAFETY: refuses to write to /dev/disk0 / /dev/sda (likely host system),
+# requires explicit DEV=, asks for confirmation before destroying data.
+# ===================================================================
+
+usb: $(IMAGE)
+	@if [ -z "$(DEV)" ]; then \
+		echo "ERROR: specify target device, e.g. make usb DEV=/dev/disk4"; \
+		echo "  macOS: diskutil list  (look for the USB stick — never disk0!)"; \
+		echo "  Linux: lsblk         (look for sdb/sdc — never sda!)"; \
+		exit 1; \
+	fi
+	@case "$(DEV)" in \
+		/dev/disk0|/dev/disk0s*|/dev/sda|/dev/sda[0-9]*|/dev/nvme0n1|/dev/nvme0n1p*) \
+			echo "REFUSED: $(DEV) looks like the host system disk."; \
+			echo "         Pick a USB stick: diskutil list / lsblk."; \
+			exit 1 ;; \
+	esac
+	@if [ ! -e "$(DEV)" ]; then \
+		echo "ERROR: $(DEV) does not exist."; exit 1; \
+	fi
+	@IMG_SIZE=$$(stat -f%z $(IMAGE) 2>/dev/null || stat -c%s $(IMAGE)); \
+	IMG_MB=$$((IMG_SIZE / 1024 / 1024)); \
+	echo "================================================================"; \
+	echo "  About to overwrite $(DEV) with $(IMAGE) ($${IMG_MB} MB)"; \
+	echo "  All data on $(DEV) will be LOST."; \
+	echo "================================================================"; \
+	printf "  Type 'yes' to continue: "; \
+	read CONFIRM; \
+	if [ "$$CONFIRM" != "yes" ]; then \
+		echo "Aborted."; exit 1; \
+	fi
+	@if [ "$(UNAME_S)" = "Darwin" ]; then \
+		RAW_DEV=$$(echo $(DEV) | sed 's|/dev/disk|/dev/rdisk|'); \
+		echo "[usb] macOS detected — unmounting $(DEV) and writing to $${RAW_DEV} (raw, faster)"; \
+		diskutil unmountDisk $(DEV) || true; \
+		dd if=$(IMAGE) of=$${RAW_DEV} bs=4m status=progress conv=sync; \
+		SYNC_RC=$$?; \
+		diskutil eject $(DEV) || true; \
+		exit $$SYNC_RC; \
+	else \
+		echo "[usb] Linux detected — writing to $(DEV) (requires root)"; \
+		echo "  unmounting any mounted partitions on $(DEV)..."; \
+		for part in $$(mount | awk -v d=$(DEV) '$$1 ~ d {print $$1}'); do \
+			umount $$part 2>/dev/null || true; \
+		done; \
+		dd if=$(IMAGE) of=$(DEV) bs=4M status=progress conv=fsync oflag=direct; \
+		sync; \
+	fi
+	@echo "[usb] Done. The stick now boots BoxOS via BIOS legacy / CSM."
+	@echo "[usb] To boot on real hardware:"
+	@echo "       1) Plug the stick into the target PC"
+	@echo "       2) Enter firmware setup (F2/F12/Del at power-on)"
+	@echo "       3) Disable Secure Boot (we don't sign yet)"
+	@echo "       4) Enable Legacy/CSM boot OR pick the stick in UEFI menu"
+	@echo "       5) Boot from USB"
+
 run-stop:
 	@if [ -f $(BUILDDIR)/qemu.pid ]; then \
 		PID=$$(cat $(BUILDDIR)/qemu.pid); \
@@ -630,7 +827,7 @@ install-deps:
 	@if [ "$(UNAME_S)" = "Linux" ]; then \
 		echo "Linux detected (Debian/Ubuntu)..."; \
 		sudo apt update; \
-		sudo apt install -y nasm qemu-system-x86 xorriso virtualbox make \
+		sudo apt install -y nasm qemu-system-x86 xorriso virtualbox bochs make \
 			binutils-x86-64-linux-gnu gcc-x86-64-linux-gnu; \
 		echo "Creating symlinks for x86_64-elf-gcc toolchain..."; \
 		sudo mkdir -p /usr/local/bin; \
@@ -644,10 +841,10 @@ install-deps:
 	elif [ "$(UNAME_S)" = "Darwin" ]; then \
 		echo "macOS detected..."; \
 		echo "Install dependencies using Homebrew:"; \
-		echo "  brew install nasm qemu xorriso x86_64-elf-gcc"; \
+		echo "  brew install nasm qemu xorriso x86_64-elf-gcc bochs"; \
 		echo ""; \
 		echo "Or using MacPorts:"; \
-		echo "  sudo port install nasm qemu xorriso crossgcc-x86_64-elf"; \
+		echo "  sudo port install nasm qemu xorriso crossgcc-x86_64-elf bochs"; \
 	else \
 		echo "Unsupported OS: $(UNAME_S)"; \
 		echo "Please install dependencies manually:"; \
@@ -660,23 +857,36 @@ install-deps:
 info:
 	@echo "BoxOS Makefile Info"
 	@echo "Targets:"
-	@echo "  all        — full build (img, iso, elf, BOOTX64.EFI)"
-	@echo "  uefi       — build only the UEFI bootloader (build/BOOTX64.EFI)"
-	@echo "  run        — run BoxOS in QEMU"
-	@echo "  debug      — run QEMU with GDB waiting (alias for GDB=on)"
-	@echo "  clean      — clean build directory"
+	@echo "  all          — full build (img, iso, elf, BOOTX64.EFI)"
+	@echo "  uefi         — build only the UEFI bootloader (build/BOOTX64.EFI)"
+	@echo "  run          — run BoxOS (EMU=qemu by default; EMU=bochs for Bochs)"
+	@echo "  run-bg       — run QEMU in background with monitor socket (QEMU only)"
+	@echo "  run-stop     — stop background QEMU"
+	@echo "  debug        — alias for run GDB=on"
+	@echo "  usb DEV=...  — flash build/boxos.img to a USB stick (real-HW boot)"
+	@echo "  clean        — clean build directory"
 	@echo "  install-deps — install required packages"
 	@echo ""
-	@echo "Run flags:"
-	@echo "  DEBUG=on   — enable debug output (rebuilds with CONFIG_DEBUG_ENABLED=1)"
-	@echo "  GDB=on     — pause QEMU for GDB attach (-s -S)"
-	@echo "  CORES=N    — number of CPU cores"
-	@echo "  MEM=size   — RAM size (e.g. 512M, 4G)"
+	@echo "Emulator selection:"
+	@echo "  EMU=qemu      — (default) QEMU"
+	@echo "  EMU=bochs     — Bochs (per-instruction tracing, internal debugger)"
+	@echo ""
+	@echo "Run flags (shared):"
+	@echo "  DEBUG=on      — enable debug output (rebuilds with CONFIG_DEBUG_ENABLED=1)"
+	@echo "  GDB=on        — QEMU: pause for gdb (-s -S); Bochs: enable gdbstub on :1234"
+	@echo "  CORES=N       — number of CPU cores (Bochs SMP needs --enable-smp)"
+	@echo "  MEM=size      — RAM size (e.g. 512M, 4G)"
+	@echo "  LOG=on        — verbose logging (QEMU int/cpu_reset; Bochs info/debug)"
+	@echo ""
+	@echo "QEMU-only flags:"
 	@echo "  FULLSCREEN=on — fullscreen mode"
-	@echo "  USB=on|off — enable/disable USB keyboard"
-	@echo "  AHCI=on    — use AHCI disk controller"
-	@echo "  LOG=on     — enable QEMU interrupt/reset logging"
-	@echo "  UEFI=on    — boot via OVMF + TagBoot EFI (requires OVMF.fd)"
+	@echo "  USB=on|off    — enable/disable USB keyboard"
+	@echo "  AHCI=on       — use AHCI disk controller"
+	@echo "  UEFI=on       — boot via OVMF + TagBoot EFI (requires OVMF.fd)"
+	@echo ""
+	@echo "Bochs-only flags:"
+	@echo "  BOCHSDBG=on        — launch with -debugger (internal text debugger)"
+	@echo "  BOCHS_DISPLAY=...  — sdl2 (default macOS), x, term, nogui, win32"
 
 debug: $(IMAGE)
 	@$(MAKE) run GDB=on IMAGE=$(IMAGE) CORES=$(CORES) MEM=$(MEM) FULLSCREEN=$(FULLSCREEN) USB=$(USB) AHCI=$(AHCI) LOG=$(LOG) DEBUG=$(DEBUG)

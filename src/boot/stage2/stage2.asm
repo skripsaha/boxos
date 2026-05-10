@@ -21,7 +21,12 @@ KERNEL_MAX_SIZE       equ 0x2000000    ; 32MB sanity limit for kernel binary siz
 
 ; Page table allocation: PML4(4KB) + PDPT(4KB) + up to 4 PDs(16KB) + spare = 32KB
 PAGE_TABLE_SIZE       equ 0x8000       ; 32KB
-GUARD_PAGE_SIZE       equ 0x1000       ; 4KB guard page
+; Guard regions are full 2 MB so we can mark them non-present at PD-entry
+; granularity (the identity map uses 2 MB pages). A 4 KB guard would force
+; us to drop the entire surrounding 2 MB to 4 KB pages just to clear one
+; entry — far costlier than the few MB of physical address space we burn
+; for the alignment.
+GUARD_PAGE_SIZE       equ 0x200000     ; 2 MB (matches PD-entry granularity)
 BOOT_STACK_SIZE       equ 0x10000      ; 64KB boot stack (stack grows downward)
 
 ; E820 layout at 0x500 (out of BDA which ends at 0x4FF):
@@ -51,8 +56,37 @@ TAGFS_METADATA_ADDR     equ 0x9300
 
 KERNEL_HDR_MAGIC        equ 0x4E52454B  ; "KERN" little-endian
 KERNEL_HDR_MAGIC_HI     equ 0x4C45      ; "EL" little-endian
+KERNEL_HDR_VERSION      equ 1           ; must match kernel_entry.asm dd at offset +8
 
+; TagFS layout constants — mirror src/boot/uefi/tagfs_boot.h and
+; src/kernel/tagfs/tagfs_constants.h. NASM can't include C headers, so we
+; redefine here. Compile-time check via the assert at the bottom of this
+; file would be ideal, but NASM lacks _Static_assert; if any of these
+; change in C, also update here. KERNEL_MAX_BLOCKS is derived to keep the
+; bound consistent with KERNEL_MAX_SIZE.
+TAGFS_BLOCK_SIZE              equ 4096
+TAGFS_SECTOR_SIZE             equ 512
+TAGFS_SECTORS_PER_BLOCK       equ TAGFS_BLOCK_SIZE / TAGFS_SECTOR_SIZE   ; 8
+TAGFS_SECTORS_PER_BLOCK_LOG2  equ 3                                      ; 8 = 1<<3
+KERNEL_MAX_BLOCKS             equ KERNEL_MAX_SIZE / TAGFS_BLOCK_SIZE     ; 8192
+
+; Stage2 binary layout at offset 0 (= load address 0x8000):
+;   +0: jmp short past_sig    (2 bytes: EB 02) — branches over the signature
+;   +2: STAGE2_SIGNATURE word  (read by stage1 to verify it loaded a real
+;                               stage2 binary, not garbage from a bad sector)
+;   +4: real entry point — first instruction the CPU actually executes after
+;       stage1's `jmp 0x0000:0x8000` lands at offset 0 and falls through.
+;
+; Without the jump-over-signature, the CPU would interpret the signature
+; bytes 0x07 0x29 as instructions (`pop es; sub dx, di`) and clobber both
+; ES and DL before any of our real code runs. DL carries the BIOS boot
+; drive number — losing it breaks the entire raw-PIO disk path. QEMU
+; happened to land on register values that survived the sub-by-accident;
+; Bochs and various real-HW BIOSes leave different state and the boot
+; would silently fail with "TagFS superblock read failed!".
+jmp short past_sig
 dw STAGE2_SIGNATURE
+past_sig:
 
 start_stage2:
     cli
@@ -85,6 +119,7 @@ start_stage2:
     call enter_unreal_mode
     call detect_memory_e820
     call load_kernel_tagfs
+    call validate_kernel_magic
     call check_long_mode_support
 
     mov si, msg_entering_protected
@@ -148,16 +183,22 @@ compute_dynamic_layout:
     ; Header: [jmp 2B][KERNEL 6B][version 4B][kernel_end 4B @ offset +12]
     mov eax, [KERNEL_RUN_ADDR + 12]
 
-    ; page-align
-    add eax, 0xFFF
-    and eax, 0xFFFFF000
+    ; Round kernel_end up to 2 MB so the guard sits on a clean PD boundary.
+    add eax, 0x1FFFFF
+    and eax, 0xFFE00000
+    mov [guard1_base], eax
 
-    ; page_table_base = kernel_end + guard page
+    ; guard1 (2 MB, marked P=0 in setup_paging) → page tables
     add eax, GUARD_PAGE_SIZE
     mov [dynamic_pt_base], eax
 
-    ; stack_top = page_table_base + page tables + guard + stack space
+    ; Page tables (32 KB) → round up to 2 MB so the next guard is PD-aligned.
     add eax, PAGE_TABLE_SIZE
+    add eax, 0x1FFFFF
+    and eax, 0xFFE00000
+    mov [guard2_base], eax
+
+    ; guard2 (2 MB, P=0) → boot stack (64 KB)
     add eax, GUARD_PAGE_SIZE
     add eax, BOOT_STACK_SIZE
     mov [dynamic_stack_base], eax
@@ -602,9 +643,21 @@ load_kernel_tagfs:
     mov si, msg_loading_tagfs
     call print_string_16
 
+    ; Adaptive multi-drive probe: BIOSes occasionally hand us the wrong
+    ; drive number (USB-emulated-as-HDD, multi-disk multi-boot, RAID arrays
+    ; that re-enumerate). Try whatever DL the BIOS gave us first, then if
+    ; that fails toggle 0x80↔0x81 and try the other Primary IDE drive.
+    ; Stage1's DL validation guarantees boot_drive_saved ∈ {0x80, 0x81},
+    ; so a single XOR with 1 selects the alternate channel — exactly two
+    ; probes total, no redundant retry of the failing initial drive.
     call tagfs_read_superblock
-    jc .tagfs_error
+    jnc .got_superblock
 
+    xor byte [boot_drive_saved], 1
+    call tagfs_read_superblock
+    jc  .tagfs_error
+
+.got_superblock:
     call tagfs_find_kernel
     jc .try_header_fallback
 
@@ -651,15 +704,19 @@ load_kernel_tagfs:
     jmp $
 
 ; Returns: CF=0 on success, CF=1 on error
+;
+; Reads the TagFS superblock at LBA = TAGFS_SUPERBLOCK_SECTOR via raw ATA
+; PIO (see pio_read_lba_dap). Verifies the magic ("TAGF") at offset 0.
+; PIO is deterministic — no retry needed; either the disk yields the data
+; or it doesn't.
 tagfs_read_superblock:
     push ax
     push dx
     push si
 
     mov si, dap_tagfs_superblock
-    mov ah, 0x42
     mov dl, [boot_drive_saved]
-    int 0x13
+    call pio_read_lba_dap
     jc .error
 
     mov ax, 0x910
@@ -671,7 +728,6 @@ tagfs_read_superblock:
 
     xor ax, ax
     mov es, ax
-
     clc
     pop si
     pop dx
@@ -728,6 +784,13 @@ tagfs_find_kernel:
     cmp dword [kernel_block_count], 0
     je .no_boot_hints
 
+    ; Bound kernel_block_count by KERNEL_MAX_BLOCKS (KERNEL_MAX_SIZE /
+    ; TAGFS_BLOCK_SIZE). Defends against corrupted/malicious TagFS metadata
+    ; that would otherwise drive tagfs_load_kernel_file into a multi-GB read
+    ; loop.
+    cmp dword [kernel_block_count], KERNEL_MAX_BLOCKS
+    ja  .no_boot_hints
+
     pop es
     pop bx
     pop ax
@@ -740,6 +803,53 @@ tagfs_find_kernel:
     pop ax
     stc
     ret
+
+; Validate the loaded kernel binary's header magic before handing control to
+; long-mode entry. The kernel binary places "KERN" at offset +2 and "EL" at
+; offset +6 of its very first sector (matching tagfs_find_kernel_by_header's
+; scan pattern). If the load is corrupted (bad disk read, wrong file, mis-
+; aligned TagFS metadata), jumping to it would triple-fault silently — so
+; halt here with a clear message instead.
+;
+; Requires: Unreal Mode active (a32 access to 0x100000 needed).
+validate_kernel_magic:
+    push eax
+    push edi
+
+    xor eax, eax
+    mov es, ax
+    mov edi, KERNEL_RUN_ADDR
+    a32 mov eax, [es:edi + 2]
+    cmp eax, KERNEL_HDR_MAGIC
+    jne .bad_magic
+    a32 mov ax, [es:edi + 6]
+    cmp ax, KERNEL_HDR_MAGIC_HI
+    jne .bad_magic
+
+    ; Header version at offset +8 must match what the bootloader speaks.
+    ; A drift here means the kernel layout (e.g. _kernel_phys_end position)
+    ; might have moved — refuse to launch with stale assumptions.
+    a32 mov eax, [es:edi + 8]
+    cmp eax, KERNEL_HDR_VERSION
+    jne .bad_version
+
+    pop edi
+    pop eax
+    ret
+
+.bad_magic:
+    mov si, msg_kernel_bad_magic
+    call print_string_16
+    cli
+    hlt
+    jmp $
+
+.bad_version:
+    mov si, msg_kernel_bad_version
+    call print_string_16
+    cli
+    hlt
+    jmp $
 
 ; Load kernel file via bounce buffer + Unreal Mode copy to above 1MB.
 ; Reads sectors to bounce buffer (0x10000) via BIOS INT 13h, then
@@ -757,13 +867,13 @@ tagfs_load_kernel_file:
 
     ; sector = tagfs_data_start + (start_block * 8)
     mov eax, [kernel_start_block]
-    shl eax, 3              ; * 8 sectors per 4KB block
+    shl eax, TAGFS_SECTORS_PER_BLOCK_LOG2   ; block → sector LBA
     add eax, [tagfs_data_start]
     mov [kernel_load_sector], eax
 
-    ; total sectors = block_count * 8 (stored as dd)
+    ; total sectors = block_count * sectors_per_block
     mov eax, [kernel_block_count]
-    shl eax, 3
+    shl eax, TAGFS_SECTORS_PER_BLOCK_LOG2
     mov [kernel_load_sectors], eax
 
     mov ecx, [kernel_load_sectors]  ; 32-bit counter
@@ -794,9 +904,8 @@ tagfs_load_kernel_file:
     mov bp, 3
 .read_retry:
     mov si, dap_kernel_chunk
-    mov ah, 0x42
     mov dl, [boot_drive_saved]
-    int 0x13
+    call pio_read_lba_dap
     jnc .read_ok
     ; Reset disk controller before retry to clear hardware error state
     xor ah, ah
@@ -903,18 +1012,17 @@ tagfs_find_kernel_by_header:
 .hdr_scan_loop:
     push cx
 
-    ; Calculate data sector: data_start + block * 8
+    ; Calculate data sector: data_start + block * sectors_per_block
     mov eax, edx
-    shl eax, 3
+    shl eax, TAGFS_SECTORS_PER_BLOCK_LOG2
     add eax, [tagfs_data_start]
 
     ; Read first sector of this block into 0x9300 buffer
     mov [dap_tagfs_metadata + 8], eax
     mov dword [dap_tagfs_metadata + 10], 0
     mov si, dap_tagfs_metadata
-    mov ah, 0x42
     mov dl, [boot_drive_saved]
-    int 0x13
+    call pio_read_lba_dap
     jc .hdr_scan_next
 
     ; Check for KERNEL magic at offset 2
@@ -990,6 +1098,12 @@ detect_memory_e820:
     xor bp, bp
 
 .e820_loop:
+    ; Re-establish ES on every iteration. Some real BIOSes (older AMI/Phoenix)
+    ; have been known to clobber ES across INT 15h calls; explicit restore
+    ; keeps ES:DI pointed at the correct map slot regardless.
+    mov ax, 0x50
+    mov es, ax
+
     mov eax, 0xE820
     mov ecx, 24
     mov edx, 0x534D4150
@@ -1002,6 +1116,14 @@ detect_memory_e820:
     cmp ecx, 20
     jl .skip_entry
 
+    ; ACPI 3.0 24-byte entries carry a "valid" bit at offset +20 bit 0.
+    ; If the BIOS reports 24 bytes AND the valid bit is 0, drop the entry.
+    cmp ecx, 24
+    jb .accept_entry
+    test byte [es:di + 20], 1
+    jz .skip_entry
+
+.accept_entry:
     inc bp
     add di, 24
 
@@ -1138,6 +1260,249 @@ detect_memory_e820:
     call print_string_16
     ret
 
+;============================================================================
+; pio_read_lba_dap — Read sectors per DAP via raw ATA PIO LBA28.
+;
+; Bypasses BIOS INT 13h entirely. Talks directly to the Primary IDE port
+; range (0x1F0-0x1F7) which the PC/AT spec has frozen since 1981 and every
+; chipset (legacy IDE, SATA in IDE-compat mode, ICHx PIIX) honours. This
+; is what real OS bootloaders do once they're past the very first sector:
+; BIOS firmware varies wildly in correctness (BIOS-bochs-latest's AH=0x42
+; silently rejects sectors >= cyl1, AMI/Phoenix legacy quirks, etc.) but
+; the IDE controller itself is rock-solid.
+;
+; AHCI-only systems (no IDE compat) and NVMe boot via UEFI → TagBoot.efi
+; uses BlockIO protocol; this path is for the BIOS legacy/CSM boot only.
+;
+; Limits:
+;   • LBA28 — first 256 M sectors (128 GB). Bootloader reads stay <100 MB
+;     so this is comfortable. Kernel's AHCI/ATA driver uses LBA48 once it
+;     takes over.
+;   • Single-sector PIO per IDE command — predictable, no DMA, no IRQ
+;     coupling. Slower than DMA but boot only reads ~few MB before kernel.
+;
+; Input:  SI = pointer to DAP (size, _, count, off, seg, lba_lo, lba_hi)
+;         DL = boot drive number from BIOS (0x80 = master, 0x81 = slave)
+; Output: CF=0 on success, CF=1 on error/timeout
+; Preserves: all GP registers (via pushad/popad), ES
+;============================================================================
+pio_read_lba_dap:
+    pushad
+    push es
+
+    ; Validate boot drive number. BIOS uses 0x80=primary HDD, 0x81=secondary.
+    ; Anything else (0x00 floppy, 0xFF "no drive", 0x82+ multi-disk USB) cannot
+    ; map to the Primary IDE channel we drive directly. Reject upfront — better
+    ; than silently reading the wrong device.
+    cmp dl, 0x80
+    je .dl_ok
+    cmp dl, 0x81
+    je .dl_ok
+    pop es
+    popad
+    stc
+    ret
+.dl_ok:
+
+    ; AHCI-native detection moved into pio_wait_not_busy / pio_wait_drq:
+    ; reading 0x1F7 BEFORE any drive-select (0x1F6 write) is unreliable —
+    ; some BIOSes (notably Bochs's BIOS-bochs-latest after returning from
+    ; int 13h) leave the controller in a transient state where status
+    ; reads can return 0xFF momentarily even though IDE is alive. Doing
+    ; the check post-select inside the wait loops is correct: drive
+    ; register is set, controller has had time to clock the selection,
+    ; and 0xFF then truly means open-bus / no IDE decoding.
+
+    ; Compute drive-select base byte once: 0xE0 (master+LBA) or 0xF0 (slave+LBA).
+    ; DL bit 0 distinguishes master(0)/slave(1) given the validation above.
+    mov al, dl
+    and al, 1
+    shl al, 4                   ; 0x00 (master) or 0x10 (slave)
+    or  al, 0xE0                ; 0xE0 / 0xF0 — bit 6=LBA, bits 7,5=1
+    mov [pio_drive_base], al
+
+    ; Snapshot DAP into work variables (matches old layout).
+    movzx eax, word [si+2]
+    mov [dap_work_count], eax
+    mov ax, [si+4]
+    mov [dap_work_off], ax
+    mov ax, [si+6]
+    mov [dap_work_seg], ax
+    mov eax, [si+8]
+    mov [dap_work_lba], eax
+
+.next_sector:
+    cmp dword [dap_work_count], 0
+    je .ok
+
+    ; LBA28 cap — refuse silently rather than alias high bits.
+    mov eax, [dap_work_lba]
+    cmp eax, 0x10000000         ; 256 M sectors = 128 GB
+    jae .err
+
+    ; --- Issue READ SECTORS (LBA28, single sector) ---
+    ; Order calibrated to work on every BIOS chain we've encountered:
+    ;
+    ;   (1) Wait BSY=0 on the currently-selected drive. Stage1's int 13h
+    ;       has already selected and used the drive, so the controller
+    ;       sits in DRDY=1/BSY=0 — wait_not_busy returns immediately.
+    ;       Reading status FIRST avoids the Bochs BIOS-bochs-latest
+    ;       quirk where reading 0x1F7 right after a fresh out 0x1F6
+    ;       returns transient open-bus 0xFF until the controller clocks
+    ;       the new selection.
+    ;   (2) Write Device register (0x1F6) — drive byte | LBA[27:24]. If
+    ;       the drive is already the same one stage1 used, this is a
+    ;       hardware no-op. After multi-drive XOR-toggle it actually
+    ;       switches drives, and the 4× settle reads below clock that.
+    ;   (3) 4× Status reads — ATA-3 §9.4.2 drive-select settle (~400 ns).
+    ;       Required when switching master↔slave; harmless no-op when
+    ;       re-selecting the same drive. Mirrors Linux libata-sff.
+    ;   (4) Sector count, LBA bytes (0x1F2..0x1F5).
+    ;   (5) Command 0x20 (READ SECTORS).
+    ;   (6) Wait DRQ=1.
+    ;   (7) Transfer via INSW.
+
+    ; (1) Wait BSY=0 on currently-selected drive.
+    call pio_wait_not_busy
+    jc .err
+
+    ; (2) Drive register: base | LBA[27:24]
+    mov eax, [dap_work_lba]
+    shr eax, 24
+    and al, 0x0F
+    or  al, [pio_drive_base]
+    mov dx, 0x1F6
+    out dx, al
+
+    ; (3) Drive-select settle: 4× Status reads = ~400 ns bus cycles.
+    mov dx, 0x1F7
+    in al, dx
+    in al, dx
+    in al, dx
+    in al, dx
+
+    ; Sector count (0x1F2) = 1
+    mov dx, 0x1F2
+    mov al, 1
+    out dx, al
+
+    ; LBA[7:0]   → 0x1F3
+    mov eax, [dap_work_lba]
+    mov dx, 0x1F3
+    out dx, al
+
+    ; LBA[15:8]  → 0x1F4
+    mov eax, [dap_work_lba]
+    shr eax, 8
+    mov dx, 0x1F4
+    out dx, al
+
+    ; LBA[23:16] → 0x1F5
+    mov eax, [dap_work_lba]
+    shr eax, 16
+    mov dx, 0x1F5
+    out dx, al
+
+    ; Command (0x1F7) = 0x20 (READ SECTORS, LBA mode via drive bit 6=1)
+    mov dx, 0x1F7
+    mov al, 0x20
+    out dx, al
+
+    ; Wait DRQ=1 + BSY=0 (also detects ERR/DF).
+    call pio_wait_drq
+    jc .err
+
+    ; Transfer 512 bytes = 256 words via INSW from data port 0x1F0.
+    mov ax, [dap_work_seg]
+    mov es, ax
+    mov di, [dap_work_off]
+    mov dx, 0x1F0
+    mov cx, 256
+    rep insw
+
+    ; Advance dest pointer + LBA + counter.
+    mov ax, [dap_work_off]
+    add ax, 512
+    mov [dap_work_off], ax
+    jnc .no_seg_bump
+    mov ax, [dap_work_seg]
+    add ax, 0x1000              ; bump segment by 64 KB on offset wraparound
+    mov [dap_work_seg], ax
+.no_seg_bump:
+    inc dword [dap_work_lba]
+    dec dword [dap_work_count]
+    jmp .next_sector
+
+.ok:
+    pop es
+    popad
+    clc
+    ret
+
+.err:
+    pop es
+    popad
+    stc
+    ret
+
+
+; pio_wait_not_busy — poll 0x1F7 until BSY (bit 7) clears, with timeout.
+; Output: CF=0 ready, CF=1 timeout
+pio_wait_not_busy:
+    push ecx
+    push dx
+    mov dx, 0x1F7
+    ; Timeout sized for slowest realistic media: 5400-RPM SATA HDD with thermal
+    ; throttling can take ~100 ms for first read after idle; weak-MCU USB 3.0
+    ; sticks similar. 0x40000 polls × ~1 µs/IO ≈ 260 ms — comfortably above any
+    ; real-HW worst case while still bounded for diagnostic clarity.
+    mov ecx, 0x40000
+.wait:
+    in al, dx
+    test al, 0x80               ; BSY?
+    jz .ready
+    dec ecx
+    jnz .wait
+    pop dx
+    pop ecx
+    stc
+    ret
+.ready:
+    pop dx
+    pop ecx
+    clc
+    ret
+
+
+; pio_wait_drq — poll 0x1F7 until BSY=0 AND (DRQ=1 OR ERR/DF set).
+; Output: CF=0 data ready, CF=1 error or timeout
+pio_wait_drq:
+    push ecx
+    push dx
+    mov dx, 0x1F7
+    mov ecx, 0x40000
+.wait:
+    in al, dx
+    test al, 0x80               ; BSY?
+    jnz .pending
+    test al, 0x21               ; ERR (bit 0) or DF (bit 5)?
+    jnz .err_status
+    test al, 0x08               ; DRQ?
+    jnz .ready
+.pending:
+    dec ecx
+    jnz .wait
+.err_status:
+    pop dx
+    pop ecx
+    stc
+    ret
+.ready:
+    pop dx
+    pop ecx
+    clc
+    ret
+
 
 [BITS 32]
 
@@ -1264,17 +1629,37 @@ setup_paging:
     cmp edx, ebx
     jb .setup_pdpt
 
-    ; Fill all PD entries with 2MB identity-mapped pages
+    ; Fill all PD entries with 2MB identity-mapped pages, except the two
+    ; 2 MB-aligned guard regions (guard1 between kernel & page tables,
+    ; guard2 between page tables & boot stack) — those are left P=0 so a
+    ; stack overflow into them takes a #PF instead of silently corrupting
+    ; the page tables.
+    mov ebp, [guard1_base]
+    shr ebp, 21                    ; EBP = guard1 PD index
+    mov esi, [guard2_base]
+    shr esi, 21                    ; ESI = guard2 PD index
+
     mov edi, [dynamic_pt_base]
     add edi, 0x2000
-    mov eax, 0x000083      ; Present, Writable, Page Size (2MB)
-    pop ecx                ; ECX = total 2MB pages
+    mov eax, 0x000083              ; Present, Writable, Page Size (2MB)
+    xor edx, edx                   ; current PD index
+    pop ecx                        ; ECX = total 2MB pages
 
 .fill_pd:
+    cmp edx, ebp
+    je .guard_entry
+    cmp edx, esi
+    je .guard_entry
     mov [edi], eax
     mov dword [edi+4], 0
+    jmp .next_pd
+.guard_entry:
+    mov dword [edi], 0             ; non-present guard
+    mov dword [edi+4], 0
+.next_pd:
     add eax, 0x200000
     add edi, 8
+    inc edx
     loop .fill_pd
 
     ; ---- Higher-half kernel mapping ----
@@ -1436,9 +1821,23 @@ dap_kernel_chunk:
 align 4
 boot_drive_saved:       db 0
 
+; Drive-select base byte for raw ATA PIO LBA28. Computed once on first call
+; from boot_drive_saved (BIOS DL = 0x80 master, 0x81 slave). Bits encoded:
+;   0xE0 = 1110_xxxx = master + LBA mode
+;   0xF0 = 1111_xxxx = slave  + LBA mode
+; The low nibble carries LBA[27:24] at issue time and is OR-ed in per sector.
+pio_drive_base:         db 0
+align 4
+dap_work_lba:           dd 0
+dap_work_count:         dd 0
+dap_work_seg:           dw 0
+dap_work_off:           dw 0
+
 align 4
 dynamic_pt_base:        dd 0            ; computed page table base (after kernel)
 dynamic_stack_base:     dd 0            ; computed stack base (after page tables)
+guard1_base:            dd 0            ; 2 MB guard between kernel and page tables
+guard2_base:            dd 0            ; 2 MB guard between page tables and boot stack
 
 kernel_file_id:         dw 0
 kernel_start_block:     dd 0
@@ -1471,3 +1870,5 @@ msg_entering_protected db 'Entering protected mode...', 13, 10, 0
 ; (page table validation now done dynamically in 32-bit mode via VGA "NO MEM" on failure)
 msg_kernel_tag_not_found  db '[WARN] Kernel tag not found, searching by header...', 13, 10, 0
 msg_kernel_loaded_header  db '[OK] Kernel loaded via header scan', 13, 10, 0
+msg_kernel_bad_magic      db '[FATAL] Kernel header magic mismatch — corrupted load!', 13, 10, 0
+msg_kernel_bad_version    db '[FATAL] Kernel header version mismatch — rebuild required!', 13, 10, 0
