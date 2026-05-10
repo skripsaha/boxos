@@ -38,11 +38,28 @@
 #include "ahci_async.h"
 #include "kring.h"
 #include "kresult.h"
+#include "write_job.h"
+#include "ata.h"
+#include "touch.h"
+#include "cow.h"
 
 #define OBJ_WRITE_APPEND_FLAG (1u << 0)
 
 /* -------------------------------------------------------------------------
  * Crate translation
+ *
+ * StorageCrateMap is the legacy single-page fast path. Works only when
+ * the requested bytes fit inside one phys page — used for parameter-
+ * sized payloads (rename name, query result header, etc).
+ *
+ * For multi-page user payloads (read/write data crates) we bounce
+ * through a kmalloc'd kernel buffer:
+ *   crate_in_buf       — copy user → fresh kbuf (for input crates)
+ *   crate_out_alloc    — allocate empty kbuf same size as crate
+ *   crate_out_commit   — copy filled kbuf → user pages
+ *   crate_buf_free     — release kbuf
+ * Each helper handles arbitrary cross-page user ranges by walking the
+ * user PT page-by-page.
  * ------------------------------------------------------------------------- */
 
 static void *StorageCrateMap(const Crate *c, const OpContext *ctx, uint64_t bytes)
@@ -53,6 +70,45 @@ static void *StorageCrateMap(const Crate *c, const OpContext *ctx, uint64_t byte
         return vmm_translate_user_addr(ctx->proc->cabin, (uintptr_t)c->addr, (size_t)bytes);
     }
     return (void *)(uintptr_t)c->addr;
+}
+
+static void *crate_in_buf(const Crate *src, const OpContext *ctx)
+{
+    if (!src || src->size == 0) return NULL;
+    if (src->size > src->capacity) return NULL;
+    if (ctx && ctx->proc && ctx->proc->cabin) {
+        return vmm_user_buf_in(ctx->proc->cabin, (uintptr_t)src->addr, (size_t)src->size);
+    }
+    /* No cabin (kernel-internal caller) — just snapshot the bytes so
+     * cleanup is uniform. */
+    void *kbuf = kmalloc((size_t)src->size);
+    if (!kbuf) return NULL;
+    memcpy(kbuf, (const void *)(uintptr_t)src->addr, (size_t)src->size);
+    return kbuf;
+}
+
+static void *crate_out_alloc(const Crate *out, uint64_t bytes)
+{
+    if (!out || bytes == 0) return NULL;
+    if (bytes > out->capacity) return NULL;
+    return vmm_user_buf_alloc_out((size_t)bytes);
+}
+
+static int crate_out_commit(const Crate *out, const OpContext *ctx,
+                             const void *kbuf, uint64_t bytes)
+{
+    if (!out || !kbuf || bytes == 0) return 0;
+    if (ctx && ctx->proc && ctx->proc->cabin) {
+        return vmm_user_buf_commit_out(ctx->proc->cabin, (uintptr_t)out->addr,
+                                        kbuf, (size_t)bytes);
+    }
+    memcpy((void *)(uintptr_t)out->addr, kbuf, (size_t)bytes);
+    return 0;
+}
+
+static void crate_buf_free(void *kbuf)
+{
+    if (kbuf) vmm_user_buf_free(kbuf);
 }
 
 /* -------------------------------------------------------------------------
@@ -113,15 +169,13 @@ typedef struct {
     process_t       *target;       /* pinned via process_find_ref */
     TagFSFileHandle *handle;       /* close on completion */
     Crate           *out_crate;    /* user-mapped, write back size on completion */
-    uint8_t         *out_base;     /* user out buffer (kernel direct map) */
-    uint64_t         total_bytes;  /* bytes the caller asked for */
-    uint64_t         bytes_done;   /* bytes successfully memcpy'd so far */
-    uint64_t         start_offset; /* file offset the request started at */
+    uint8_t         *out_base;     /* kernel-side bounce buffer (kmalloc'd) */
+    uintptr_t        out_user_addr;/* user vaddr; commit_out target */
+    uint64_t         total_bytes;
+    uint64_t         bytes_done;
+    uint64_t         start_offset;
     void            *dma_phys;
     void            *dma_virt;
-    /* Pre-stored description of the in-flight chunk so the IRQ callback
-     * doesn't need to re-locate the extent — extents are already known
-     * to the handle and `start_offset + bytes_done` gives the cursor. */
     uint32_t         in_flight_off_in_blk;
     uint32_t         in_flight_chunk;
 } ObjReadAsyncCtx;
@@ -135,8 +189,6 @@ static void obj_read_finish(ObjReadAsyncCtx *ctx, error_t status, bool partial_o
 {
     Result r;
     memset(&r, 0, sizeof(r));
-    /* partial_ok=true means whatever we already memcpy'd is valid output;
-     * partial_ok=false means we hit a hard error and report 0 bytes. */
     uint64_t reported = partial_ok ? ctx->bytes_done : 0;
     ctx->out_crate->size = reported;
     r.error_code  = (status == OK) ? OK : ERR_IO;
@@ -144,11 +196,18 @@ static void obj_read_finish(ObjReadAsyncCtx *ctx, error_t status, bool partial_o
     r.sender_pid  = 0;
     r.context     = KCTX_GUIDE;
 
-    pmm_free(ctx->dma_phys, 1);
-    tagfs_close(ctx->handle);
+    /* Commit bounce buffer back into user pages BEFORE waking caller.
+     * If commit fails (e.g. user unmapped the page mid-flight) we still
+     * report the byte count — the user's buffer is just left untouched. */
+    if (reported > 0 && ctx->out_base && ctx->target && ctx->target->cabin) {
+        vmm_user_buf_commit_out(ctx->target->cabin, ctx->out_user_addr,
+                                 ctx->out_base, (size_t)reported);
+    }
 
-    /* KResultPush flips PROC_WAITING → PROC_WORKING (kring.c) so the
-     * caller's home App-Core picks it up on the next scheduler tick. */
+    if (ctx->out_base)  vmm_user_buf_free(ctx->out_base);
+    if (ctx->dma_phys)  pmm_free(ctx->dma_phys, 1);
+    if (ctx->handle)    tagfs_close(ctx->handle);
+
     KResultPush(ctx->target, &r);
     process_ref_dec(ctx->target);
     kfree(ctx);
@@ -234,11 +293,17 @@ static int ObjRead(const ManifestOp *op,
     Crate   *out     = &crates[op->out_crate];
     if (out->capacity == 0) return ERR_BUFFER_TOO_SMALL;
 
-    void *kp = StorageCrateMap(out, ctx, out->capacity);
+    /* Bounce buffer for multi-page user payloads. tagfs_read fills kp,
+     * we copy back to user pages at the end. The kernel address is one
+     * contiguous allocation regardless of how the user pages map. */
+    void *kp = crate_out_alloc(out, out->capacity);
     if (!kp) return ERR_INVALID_ADDRESS;
 
     TagFSFileHandle *handle = tagfs_open(file_id, TAGFS_HANDLE_READ);
-    if (!handle) return ERR_FILE_NOT_FOUND;
+    if (!handle) {
+        crate_buf_free(kp);
+        return ERR_FILE_NOT_FOUND;
+    }
 
     handle->offset = offset;
 
@@ -263,15 +328,16 @@ static int ObjRead(const ManifestOp *op,
                 if (async_ctx) {
                     process_t *target = process_find_ref(ctx->proc->pid);
                     if (target) {
-                        async_ctx->target       = target;
-                        async_ctx->handle       = handle;
-                        async_ctx->out_crate    = out;
-                        async_ctx->out_base     = (uint8_t *)kp;
-                        async_ctx->total_bytes  = to_read;
-                        async_ctx->bytes_done   = 0;
-                        async_ctx->start_offset = offset;
-                        async_ctx->dma_phys     = dma_phys;
-                        async_ctx->dma_virt     = dma_virt;
+                        async_ctx->target        = target;
+                        async_ctx->handle        = handle;
+                        async_ctx->out_crate     = out;
+                        async_ctx->out_base      = (uint8_t *)kp;
+                        async_ctx->out_user_addr = (uintptr_t)out->addr;
+                        async_ctx->total_bytes   = to_read;
+                        async_ctx->bytes_done    = 0;
+                        async_ctx->start_offset  = offset;
+                        async_ctx->dma_phys      = dma_phys;
+                        async_ctx->dma_virt      = dma_virt;
 
                         /* Park BEFORE the first submit — if the IRQ
                          * fires before we set WAITING, KResultPush's
@@ -291,14 +357,19 @@ static int ObjRead(const ManifestOp *op,
     }
 
     /* Sync fallback (no AHCI, no proc context, alloc failure, or empty
-     * read). */
+     * read). Same bounce path — we already allocated kp above. */
     int got = tagfs_read(handle, kp, out->capacity);
     tagfs_close(handle);
 
     if (got < 0) {
+        crate_buf_free(kp);
         out->size = 0;
         return ERR_IO;
     }
+    if (got > 0) {
+        crate_out_commit(out, ctx, kp, (uint64_t)got);
+    }
+    crate_buf_free(kp);
     out->size = (uint64_t)got;
     return OK;
 }
@@ -324,11 +395,41 @@ static int ObjWrite(const ManifestOp *op,
     Crate *src = &crates[op->in_crate];
     if (src->size == 0) return ERR_INVALID_ARGUMENT;
 
-    const void *src_kp = StorageCrateMap(src, ctx, src->size);
-    if (!src_kp) return ERR_INVALID_ADDRESS;
+    /* Bounce-buffer the input crate. Multi-page user buffers are common
+     * (any write over 4 KiB) and vmm_translate_user_addr cannot span
+     * pages, so we copy through a kmalloc'd kernel buffer. The async
+     * path takes ownership of src_bounce on a successful submit and
+     * frees it from W_DONE; otherwise we free here. */
+    void *src_bounce = crate_in_buf(src, ctx);
+    if (!src_bounce) return ERR_INVALID_ADDRESS;
 
+    /* Output stats crate (16 bytes) fits in a single page — direct map. */
+    Crate *out_crate = NULL;
+    void  *out_kp    = NULL;
+    if (op->out_crate != CRATE_INDEX_NONE) {
+        out_crate = &crates[op->out_crate];
+        if (out_crate->capacity >= 16) {
+            out_kp = StorageCrateMap(out_crate, ctx, 16);
+        }
+    }
+
+    if (ahci_is_initialized() && ctx && ctx->proc) {
+        int rc = ObjWriteAsync(file_id, offset, flags,
+                               src_bounce, (uint32_t)src->size,
+                               out_crate, out_kp, ctx);
+        if (rc == ERR_WOULD_BLOCK) {
+            /* Async owns src_bounce now — it frees on W_DONE. */
+            return ERR_WOULD_BLOCK;
+        }
+        /* Hard failure before submission — free + fall through. */
+    }
+
+    /* Sync fallback. */
     TagFSFileHandle *handle = tagfs_open(file_id, TAGFS_HANDLE_WRITE);
-    if (!handle) return ERR_FILE_NOT_FOUND;
+    if (!handle) {
+        crate_buf_free(src_bounce);
+        return ERR_FILE_NOT_FOUND;
+    }
 
     if (flags & OBJ_WRITE_APPEND_FLAG) {
         handle->offset = handle->file_size;
@@ -336,23 +437,18 @@ static int ObjWrite(const ManifestOp *op,
         handle->offset = offset;
     }
 
-    int wrote = tagfs_write(handle, src_kp, src->size);
+    int wrote = tagfs_write(handle, src_bounce, src->size);
     uint64_t final_size = handle->file_size;
     tagfs_close(handle);
+    crate_buf_free(src_bounce);
 
     if (wrote < 0) return ERR_IO;
 
-    if (op->out_crate != CRATE_INDEX_NONE) {
-        Crate *out = &crates[op->out_crate];
-        if (out->capacity >= 16) {
-            uint8_t *out_kp = StorageCrateMap(out, ctx, 16);
-            if (out_kp) {
-                uint64_t bytes_written = (uint64_t)wrote;
-                memcpy(out_kp + 0, &bytes_written, sizeof(uint64_t));
-                memcpy(out_kp + 8, &final_size,    sizeof(uint64_t));
-                out->size = 16;
-            }
-        }
+    if (out_kp && out_crate && out_crate->capacity >= 16) {
+        uint64_t bytes_written = (uint64_t)wrote;
+        memcpy((uint8_t *)out_kp + 0, &bytes_written, sizeof(uint64_t));
+        memcpy((uint8_t *)out_kp + 8, &final_size,    sizeof(uint64_t));
+        out_crate->size = 16;
     }
     return OK;
 }
@@ -796,6 +892,144 @@ static int ObjContextClear(const ManifestOp *op, Crate *crates, uint16_t crate_c
 }
 
 /* -------------------------------------------------------------------------
+ * Snapshot ops — userspace surface for CoW snapshots.
+ *
+ *   STORAGE_SNAP_CREATE  params: [u32 file_id][u8 name_len][char name[]]
+ *                        out_crate: [u32 snapshot_id]
+ *   STORAGE_SNAP_DELETE  params: [u32 snapshot_id]
+ *   STORAGE_SNAP_LIST    out_crate: [u32 count][u32 ids[count]]
+ * ------------------------------------------------------------------------- */
+
+static int ObjSnapCreate(const ManifestOp *op, Crate *crates, uint16_t crate_count,
+                          const OpContext *ctx)
+{
+    (void)crate_count; (void)ctx;
+    if (op->param_size < 5) return ERR_INVALID_ARGUMENT;
+
+    uint32_t file_id = param_u32(op, 0);
+    uint8_t name_len;
+    memcpy(&name_len, op->params + 4, 1);
+    if (name_len == 0 || name_len > 31) return ERR_INVALID_ARGUMENT;
+    if (op->param_size < (uint16_t)(5 + name_len)) return ERR_INVALID_ARGUMENT;
+
+    char name[32];
+    memcpy(name, op->params + 5, name_len);
+    name[name_len] = '\0';
+
+    uint32_t snapshot_id = 0;
+    error_t err = TagFS_SnapshotCreate(name, file_id, &snapshot_id);
+    if (err != OK) return err;
+
+    if (op->out_crate != CRATE_INDEX_NONE) {
+        Crate *out = &crates[op->out_crate];
+        if (out->capacity >= 4) {
+            void *kp = StorageCrateMap(out, ctx, 4);
+            if (kp) {
+                memcpy(kp, &snapshot_id, sizeof(uint32_t));
+                out->size = 4;
+            }
+        }
+    }
+    return OK;
+}
+
+static int ObjSnapDelete(const ManifestOp *op, Crate *crates, uint16_t crate_count,
+                          const OpContext *ctx)
+{
+    (void)crates; (void)crate_count; (void)ctx;
+    if (op->param_size < 4) return ERR_INVALID_ARGUMENT;
+    uint32_t snapshot_id = param_u32(op, 0);
+    return (int)TagFS_SnapshotDelete(snapshot_id);
+}
+
+static int ObjSnapList(const ManifestOp *op, Crate *crates, uint16_t crate_count,
+                        const OpContext *ctx)
+{
+    (void)crate_count;
+    if (op->out_crate == CRATE_INDEX_NONE) return ERR_INVALID_ARGUMENT;
+    Crate *out = &crates[op->out_crate];
+    if (out->capacity < 4) return ERR_BUFFER_TOO_SMALL;
+
+    uint32_t max_ids = (uint32_t)((out->capacity - 4) / 4);
+    if (max_ids > 64) max_ids = 64;
+
+    uint32_t ids[64];
+    uint32_t count = 0;
+    error_t err = TagFS_SnapshotList(ids, max_ids, &count);
+    if (err != OK) return err;
+
+    uint32_t bytes = 4 + count * 4;
+    void *kp = StorageCrateMap(out, ctx, bytes);
+    if (!kp) return ERR_INVALID_ADDRESS;
+    memcpy(kp, &count, 4);
+    if (count > 0) memcpy((uint8_t *)kp + 4, ids, count * 4);
+    out->size = bytes;
+    return OK;
+}
+
+/* -------------------------------------------------------------------------
+ * STORAGE_OBJ_ANCHOR — durability primitive.
+ *
+ *   params: [u32 file_id]   (0 = anchor everything; non-zero = the file
+ *                             whose tags get the Touch payload's fid)
+ *
+ * Blocking semantics for the caller — returns when meta_pool current
+ * block, file_table dirty blocks, block-bitmap, and superblock are all
+ * persisted to disk. Plus the AHCI cache flush is forced.
+ *
+ * Then publishes a Touch "anchor" event on every tag of file_id so any
+ * REST/REACT subscriber observing that tag wakes up: *this file is now
+ * durable*. No POSIX equivalent — fsync() returns silently; anchor()
+ * fans out a tag-targeted notification, so OBSERVERS get to react too.
+ * Combined with Touch's REST mode, an app can fire-and-forget many
+ * fwrites and have a single observer await N "anchor" events when its
+ * full transaction is durable.
+ *
+ *   Form A (blocking):  anchor(fid)             — POSIX-shaped sync.
+ *   Form B (Touch obs): touch_claim("anchor"…); — async durability fan-out.
+ * ------------------------------------------------------------------------- */
+static int ObjAnchor(const ManifestOp *op, Crate *crates, uint16_t crate_count,
+                      const OpContext *ctx)
+{
+    (void)crates; (void)crate_count; (void)ctx;
+    uint32_t file_id = (op->param_size >= 4) ? param_u32(op, 0) : 0;
+
+    /* Sync flush of all in-memory state — same path bye uses, but
+     * inline so caller's fwrite-then-anchor is durable without a
+     * shutdown. */
+    tagfs_sync();
+    ata_flush_cache(1);
+
+    /* Touch fan-out. For file_id == 0 we publish on a special "anchor"
+     * tag (registered well-known); for a specific fid, publish on every
+     * tag attached to that file so any observer keyed by file's tag
+     * wakes up. */
+    struct __attribute__((packed)) {
+        uint32_t file_id;
+        uint8_t  op;          /* 2 = ANCHOR */
+        uint8_t  _pad[3];
+        uint64_t now_us;
+    } ev = { file_id, 2, {0,0,0}, 0 };
+
+    uint32_t pid = (ctx && ctx->proc) ? ctx->proc->pid : 0;
+
+    if (file_id != 0) {
+        TagFSMetadata wmeta;
+        memset(&wmeta, 0, sizeof(wmeta));
+        if (tagfs_get_metadata(file_id, &wmeta) == OK) {
+            for (uint16_t ti = 0; ti < wmeta.tag_count; ti++) {
+                TouchPublishId(wmeta.tag_ids[ti], &ev, sizeof(ev),
+                               pid, TOUCH_FLAG_TAGFS);
+            }
+            tagfs_metadata_free(&wmeta);
+        }
+    }
+    /* Always also publish on the bare "anchor" tag — generic listeners. */
+    TouchPublish("anchor", &ev, sizeof(ev));
+    return OK;
+}
+
+/* -------------------------------------------------------------------------
  * Registration
  * ------------------------------------------------------------------------- */
 
@@ -821,6 +1055,11 @@ error_t StorageDeckRegister(void)
         /* Per-process context: app+. */
         { STORAGE_CONTEXT_SET,  ObjContextSet,   OP_AUTH_APP, "storage.ctx.set"  },
         { STORAGE_CONTEXT_CLEAR,ObjContextClear, OP_AUTH_APP, "storage.ctx.clear"},
+        /* Snapshot management: app+. */
+        { STORAGE_SNAP_CREATE,  ObjSnapCreate,   OP_AUTH_APP, "storage.snap.create"},
+        { STORAGE_SNAP_DELETE,  ObjSnapDelete,   OP_AUTH_APP, "storage.snap.delete"},
+        { STORAGE_SNAP_LIST,    ObjSnapList,     OP_AUTH_APP, "storage.snap.list"  },
+        { STORAGE_OBJ_ANCHOR,   ObjAnchor,       OP_AUTH_APP, "storage.anchor"     },
     };
 
     for (size_t i = 0; i < sizeof(table) / sizeof(table[0]); i++) {

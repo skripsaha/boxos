@@ -89,53 +89,66 @@ acpi_error_t acpi_extract_s5(uint32_t dsdt_addr, uint32_t dsdt_len) {
     debug_printf("[ACPI] Parsing DSDT AML (%u bytes)...\n", aml_len);
 
     for (uint32_t i = 0; i < aml_len - 8; i++) {
-        if (aml_start[i] == AML_NAME_OP &&
-            aml_start[i + 1] == '_' &&
-            aml_start[i + 2] == 'S' &&
-            aml_start[i + 3] == '5' &&
-            aml_start[i + 4] == '_') {
+        if (aml_start[i] != AML_NAME_OP)
+            continue;
 
-            debug_printf("[ACPI] Found _S5_ object at offset %u\n", i);
+        /* AML NameString may begin with RootChar '\' (0x5C) and/or one
+         * or more ParentPrefixChar '^' (0x5E). SeaBIOS and most real
+         * firmwares emit `\_S5` (with explicit root prefix) — the bare
+         * `_S5_` form is just the most common case. Skip prefix bytes
+         * before matching the NameSeg. */
+        uint32_t name_off = i + 1;
+        if (name_off < aml_len && aml_start[name_off] == 0x5C) name_off++;
+        while (name_off < aml_len && aml_start[name_off] == 0x5E) name_off++;
 
-            uint32_t pos = i + 5;
+        if (name_off + 4 >= aml_len) continue;
+        if (aml_start[name_off + 0] != '_' ||
+            aml_start[name_off + 1] != 'S' ||
+            aml_start[name_off + 2] != '5' ||
+            aml_start[name_off + 3] != '_')
+            continue;
 
-            if (aml_start[pos] != AML_PACKAGE_OP) {
-                debug_printf("[ACPI] _S5_ is not a package (opcode 0x%02x)\n", aml_start[pos]);
-                continue;
-            }
+        debug_printf("[ACPI] Found _S5_ object at offset %u (prefix=%u bytes)\n",
+                     i, name_off - i - 1);
 
-            pos++;
+        uint32_t pos = name_off + 4;
 
-            // Worst case: decode_pkg_length(4) + num_elements(1) + 2*extract_integer(5*2) = 15 bytes
-            if (pos + 15 >= aml_len) {
-                debug_printf("[ACPI] WARNING: _S5_ package truncated (insufficient buffer space)\n");
-                continue;
-            }
-
-            uint32_t pkg_bytes;
-            uint32_t pkg_len __unused = decode_pkg_length(&aml_start[pos], &pkg_bytes);
-            pos += pkg_bytes;
-
-            uint8_t num_elements = aml_start[pos++];
-
-            if (num_elements < 2) {
-                debug_printf("[ACPI] _S5_ package has only %u elements\n", num_elements);
-                continue;
-            }
-
-            uint32_t value_bytes;
-            g_acpi.slp_typa = extract_integer_value(&aml_start[pos], &value_bytes);
-            pos += value_bytes;
-
-            g_acpi.slp_typb = extract_integer_value(&aml_start[pos], &value_bytes);
-
-            g_acpi.s5_found = true;
-
-            debug_printf("[ACPI] _S5_ extracted: SLP_TYPa=0x%x, SLP_TYPb=0x%x\n",
-                         g_acpi.slp_typa, g_acpi.slp_typb);
-
-            return ACPI_OK;
+        if (aml_start[pos] != AML_PACKAGE_OP) {
+            debug_printf("[ACPI] _S5_ is not a package (opcode 0x%02x)\n", aml_start[pos]);
+            continue;
         }
+
+        pos++;
+
+        // Worst case: decode_pkg_length(4) + num_elements(1) + 2*extract_integer(5*2) = 15 bytes
+        if (pos + 15 >= aml_len) {
+            debug_printf("[ACPI] WARNING: _S5_ package truncated (insufficient buffer space)\n");
+            continue;
+        }
+
+        uint32_t pkg_bytes;
+        uint32_t pkg_len __unused = decode_pkg_length(&aml_start[pos], &pkg_bytes);
+        pos += pkg_bytes;
+
+        uint8_t num_elements = aml_start[pos++];
+
+        if (num_elements < 2) {
+            debug_printf("[ACPI] _S5_ package has only %u elements\n", num_elements);
+            continue;
+        }
+
+        uint32_t value_bytes;
+        g_acpi.slp_typa = extract_integer_value(&aml_start[pos], &value_bytes);
+        pos += value_bytes;
+
+        g_acpi.slp_typb = extract_integer_value(&aml_start[pos], &value_bytes);
+
+        g_acpi.s5_found = true;
+
+        debug_printf("[ACPI] _S5_ extracted: SLP_TYPa=0x%x, SLP_TYPb=0x%x\n",
+                     g_acpi.slp_typa, g_acpi.slp_typb);
+
+        return ACPI_OK;
     }
 
     debug_printf("[ACPI] _S5_ not found in DSDT, using fallback\n");

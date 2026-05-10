@@ -20,6 +20,18 @@
 #define COW_SNAP_AUTO       (1 << 1)
 #define COW_SNAP_TAG_QUERY  (1 << 2)
 
+/* In-memory snapshot record. The runtime fields after `tag_ids[8]`
+ * track CoW redirects so SnapshotDelete can release OLD blocks that
+ * were preserved for this snapshot's frozen view. They're per-session
+ * only — on reboot they re-init empty (a cold-start snapshot can't free
+ * OLD blocks the previous session redirected; fsck eventually catches
+ * orphans). The on-disk record (CowSnapshotDisk) is the persistent
+ * subset and unchanged. */
+typedef struct CowRedirect {
+    uint32_t old_block;
+    uint32_t new_block;
+} CowRedirect;
+
 typedef struct __packed {
     uint32_t snapshot_id;
     uint32_t parent_file_id;
@@ -32,7 +44,11 @@ typedef struct __packed {
     uint8_t  flags;
     uint8_t  tag_count;
     uint16_t tag_ids[8];
-    uint8_t  reserved[34];
+    /* runtime fields — not persisted */
+    struct CowRedirect *redirects;
+    uint32_t            redirect_count;
+    uint32_t            redirect_cap;
+    uint8_t             reserved[10];
 } CowSnapshot;
 
 // On-disk per-snapshot entry (68 bytes each)

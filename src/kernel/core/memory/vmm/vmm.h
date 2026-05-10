@@ -298,7 +298,30 @@ int vmm_map_result_ring(vmm_context_t* ctx, uintptr_t phys_page);
 // Translate a user virtual address in a process's page table to a kernel-accessible pointer.
 // Walks the process's page tables, resolves the physical address, and returns it as a
 // kernel pointer via Pull Map. Returns NULL if the address is not mapped.
+//
+// LIMITATION: works only within ONE physical page. The user's virtual range may be
+// contiguous, but the underlying physical pages need not be — so a multi-page request
+// gets clamped to the first page. Callers needing multi-page payloads must use the
+// vmm_user_buf_* helpers below, which copy through a kernel-side bounce buffer.
 void* vmm_translate_user_addr(vmm_context_t* ctx, uintptr_t user_vaddr, size_t size);
+
+/*
+ * Multi-page user buffer in/out via a kmalloc'd kernel bounce buffer.
+ *
+ *   vmm_user_buf_in        — copy user → fresh kernel buffer (input crates)
+ *   vmm_user_buf_alloc_out — allocate empty kernel buffer (output crates)
+ *   vmm_user_buf_commit_out— copy kernel buffer → user pages (after fill)
+ *   vmm_user_buf_free      — release the kernel buffer
+ *
+ * Each helper handles arbitrary cross-page user ranges by walking the
+ * page table per-page and memcpy'ing chunk by chunk. NULL means a fault
+ * mid-walk (unmapped, non-user, or alloc failure).
+ */
+void *vmm_user_buf_in(vmm_context_t *ctx, uintptr_t user_vaddr, size_t size);
+void *vmm_user_buf_alloc_out(size_t size);
+int   vmm_user_buf_commit_out(vmm_context_t *ctx, uintptr_t user_vaddr,
+                              const void *kbuf, size_t size);
+void  vmm_user_buf_free(void *kbuf);
 int vmm_setup_null_trap(vmm_context_t* ctx);
 int vmm_map_code_region(vmm_context_t* ctx, uintptr_t code_phys, uint64_t size);
 

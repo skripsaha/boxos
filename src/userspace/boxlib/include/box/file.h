@@ -36,4 +36,29 @@ int context_clear(void);
 
 int find_file_by_name(const char* filename, uint32_t* file_ids, file_info_t* out_infos, size_t max);
 
+/* CoW snapshots — capture a frozen view of a file (or all files when
+ * file_id == 0). The snapshot's redirected blocks are released back to
+ * the allocator at snap_delete. */
+int snap_create(const char *name, uint32_t file_id, uint32_t *out_snap_id);
+int snap_delete(uint32_t snap_id);
+int snap_list(uint32_t *out_ids, uint32_t max_ids, uint32_t *out_count);
+
+/*
+ * anchor() — durability primitive. Forces all in-memory metadata to
+ * disk and flushes the disk cache. Returns when persisted.
+ *
+ * Two ways to use it:
+ *   anchor(fid)        — explicit blocking call. POSIX-shaped.
+ *   touch_claim("anchor", REST, 0, 0); ... fwrite(...); anchor(fid);
+ *                       — observers subscribed on "anchor" wake up
+ *                         with payload {file_id, op=2, ...}, plus on
+ *                         every tag of the anchored file. So a
+ *                         monitor app can confirm durability without
+ *                         polling.
+ *
+ * file_id == 0 anchors the whole filesystem and publishes only the
+ * generic "anchor" event (no per-tag fan-out).
+ */
+int anchor(uint32_t file_id);
+
 #endif // BOX_STORAGE_H

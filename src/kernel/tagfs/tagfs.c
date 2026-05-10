@@ -83,6 +83,9 @@ static OpenFileEntry *ofe_acquire(uint32_t file_id)
     e->file_id = file_id;
     e->ref_count = 1;
     spinlock_init(&e->write_lock);
+    e->async_write_owner  = NULL;
+    e->async_pending_head = NULL;
+    spinlock_init(&e->async_token_lock);
     e->next = g_open_files[bucket];
     g_open_files[bucket] = e;
     spin_unlock(&g_open_table_lock);

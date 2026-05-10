@@ -43,14 +43,24 @@ void TouchStatsSnapshot(uint64_t out[5])
     out[4] = __atomic_load_n(&g_touch_push_fail,            __ATOMIC_RELAXED);
 }
 
+/* Listener counter — covers BOTH well-known (<64, tracked in
+ * g_ear_presence too) and overflow (>=64). g_ear_presence alone is
+ * a bitmap and can't represent overflow tags, so a TagFS write to a
+ * file tagged with a user-defined tag (id >= 64) would be silently
+ * skipped if we only checked the bitmap. The counter increments on
+ * every claim and decrements on release. */
+static volatile uint32_t g_listener_count = 0;
+
 bool TouchHasAnyListeners(void)
 {
-    return __atomic_load_n(&g_ear_presence, __ATOMIC_ACQUIRE) != 0;
+    if (__atomic_load_n(&g_ear_presence, __ATOMIC_ACQUIRE) != 0) return true;
+    return __atomic_load_n(&g_listener_count, __ATOMIC_ACQUIRE) != 0;
 }
 
 void TouchInit(void)
 {
     g_ear_presence = 0;
+    g_listener_count = 0;
     spinlock_init(&g_policy_lock);
     memset(&g_policy_table, 0, sizeof(g_policy_table));
     TouchQueueInit();
@@ -536,14 +546,14 @@ error_t TouchClaimSet(process_t *proc, uint16_t tag_id, TouchMode mode,
         }
         /* RELEASE-store the new claim_count so a sibling K-Core (e.g. one
          * processing this same process's NEXT Pocket — touch_release) sees
-         * the slot's writes before our claim_count bump. Without this, a
-         * release on a different K-Core could see claim_count==N+1 but
-         * stale table[N], or worse, see the old claim_count==N and miss
-         * the new entry — returning ERR_TAG_NOT_FOUND for a tag we just
-         * claimed. (S2 churn test exposed this; it manifests as random
-         * 302 final_rc on multi-core stress.) */
+         * the slot's writes before our claim_count bump. */
         __atomic_store_n(&proc->claim_count, (uint16_t)(slot + 1),
                          __ATOMIC_RELEASE);
+
+        /* Bump global listener count — covers overflow tags (>=64) too,
+         * so TouchHasAnyListeners() can short-circuit publish only when
+         * truly nothing subscribes anywhere. */
+        __atomic_add_fetch(&g_listener_count, 1, __ATOMIC_RELEASE);
     }
 
 update_ears:
@@ -604,6 +614,9 @@ error_t TouchClaimClear(process_t *proc, uint16_t tag_id)
         __atomic_store_n(&proc->claim_count, last, __ATOMIC_RELEASE);
         count = last;
 
+        /* Mirror the listener-counter bump in TouchClaimSet. */
+        __atomic_sub_fetch(&g_listener_count, 1, __ATOMIC_RELEASE);
+
         /* Clear ear bit / overflow entry */
         if (tag_id < 64) {
             /* Only clear if no other claim for this tag_id */
@@ -642,8 +655,14 @@ void TouchCleanupProcess(process_t *proc)
     if (proc->touch_cleaned) return;
     proc->touch_cleaned = 1;
 
-    /* Release all manifest handles from REACT claims */
+    /* Release all manifest handles from REACT claims; balance the
+     * global listener counter for every claim we're tearing down. */
     TouchClaim *table = (TouchClaim *)proc->claim_table;
+    if (proc->claim_count > 0) {
+        __atomic_sub_fetch(&g_listener_count,
+                           (uint32_t)proc->claim_count,
+                           __ATOMIC_RELEASE);
+    }
     for (uint16_t i = 0; i < proc->claim_count; i++) {
         if (table[i].mode == TOUCH_REACT && table[i].u.manifest != MANIFEST_HANDLE_INVALID)
             ManifestRelease(table[i].u.manifest);

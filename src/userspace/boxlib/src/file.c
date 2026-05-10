@@ -25,6 +25,10 @@
 #define STORAGE_OBJ_GET_INFO    0x0A
 #define STORAGE_CONTEXT_SET     0x10
 #define STORAGE_CONTEXT_CLEAR   0x11
+#define STORAGE_SNAP_CREATE     0x20
+#define STORAGE_SNAP_DELETE     0x21
+#define STORAGE_SNAP_LIST       0x22
+#define STORAGE_OBJ_ANCHOR      0x23
 
 #define STORAGE_TIMEOUT_MS      5000u
 
@@ -306,4 +310,77 @@ int find_file_by_name(const char *filename, uint32_t *file_ids,
         }
     }
     return match_count;
+}
+
+/* =========================================================================
+ *  CoW snapshot wrappers
+ * ========================================================================= */
+
+int snap_create(const char *name, uint32_t file_id, uint32_t *out_snap_id)
+{
+    if (!name || !out_snap_id) return -1;
+    size_t name_len = strlen(name);
+    if (name_len == 0 || name_len > 31) return -1;
+
+    uint8_t params[5 + 32];
+    memcpy(params,     &file_id, 4);
+    uint8_t nl = (uint8_t)name_len;
+    params[4] = nl;
+    memcpy(params + 5, name, name_len);
+
+    uint32_t out = 0;
+    uint32_t out_actual = 0;
+    int rc = MfCall1(DECK_STORAGE, STORAGE_SNAP_CREATE,
+                     params, (uint16_t)(5 + name_len),
+                     NULL, 0,
+                     &out, sizeof(out), &out_actual,
+                     STORAGE_TIMEOUT_MS, NULL);
+    if (rc != 0 || out_actual < 4) return -1;
+    *out_snap_id = out;
+    return 0;
+}
+
+int snap_delete(uint32_t snap_id)
+{
+    int rc = MfCall1(DECK_STORAGE, STORAGE_SNAP_DELETE,
+                     &snap_id, sizeof(snap_id),
+                     NULL, 0, NULL, 0, NULL,
+                     STORAGE_TIMEOUT_MS, NULL);
+    return rc == 0 ? 0 : -1;
+}
+
+int snap_list(uint32_t *out_ids, uint32_t max_ids, uint32_t *out_count)
+{
+    if (!out_ids || !out_count || max_ids == 0) return -1;
+    uint32_t buf_bytes = 4 + max_ids * 4;
+    uint8_t buf[4 + 64 * 4];
+    if (max_ids > 64) max_ids = 64;
+    buf_bytes = 4 + max_ids * 4;
+
+    uint32_t out_actual = 0;
+    int rc = MfCall1(DECK_STORAGE, STORAGE_SNAP_LIST,
+                     NULL, 0,
+                     NULL, 0,
+                     buf, buf_bytes, &out_actual,
+                     STORAGE_TIMEOUT_MS, NULL);
+    if (rc != 0 || out_actual < 4) return -1;
+    uint32_t count;
+    memcpy(&count, buf, 4);
+    if (count > max_ids) count = max_ids;
+    memcpy(out_ids, buf + 4, count * 4);
+    *out_count = count;
+    return 0;
+}
+
+/* =========================================================================
+ *  Durability — anchor()
+ * ========================================================================= */
+
+int anchor(uint32_t file_id)
+{
+    int rc = MfCall1(DECK_STORAGE, STORAGE_OBJ_ANCHOR,
+                     &file_id, sizeof(file_id),
+                     NULL, 0, NULL, 0, NULL,
+                     STORAGE_TIMEOUT_MS, NULL);
+    return rc == 0 ? 0 : -1;
 }

@@ -2475,6 +2475,75 @@ int vmm_setup_null_trap(vmm_context_t *ctx)
     return 0;
 }
 
+/*
+ * vmm_user_buf_in / vmm_user_buf_alloc_out / vmm_user_buf_commit_out / vmm_user_buf_free
+ *
+ * The single-page guarantee of vmm_translate_user_addr is correct (its
+ * kernel pointer covers exactly one phys page). For multi-page user
+ * buffers we need to walk the user PT page-by-page and either copy into
+ * a freshly-kmalloc'd kernel buffer (for input crates) or copy out from
+ * one (for output crates).
+ *
+ * Page-by-page walk handles non-contiguous physical pages, partial first
+ * page (offset != 0), and partial last page (size not a page multiple).
+ */
+
+void *vmm_user_buf_in(vmm_context_t *ctx, uintptr_t user_vaddr, size_t size)
+{
+    if (!ctx || size == 0) return NULL;
+
+    void *kbuf = kmalloc(size);
+    if (!kbuf) return NULL;
+
+    size_t copied = 0;
+    while (copied < size) {
+        uintptr_t off_in_page = (user_vaddr + copied) & VMM_PAGE_OFFSET_MASK;
+        size_t this_page = VMM_PAGE_SIZE - off_in_page;
+        if (this_page > size - copied) this_page = size - copied;
+
+        void *src = vmm_translate_user_addr(ctx, user_vaddr + copied, this_page);
+        if (!src) {
+            kfree(kbuf);
+            return NULL;
+        }
+        memcpy((uint8_t *)kbuf + copied, src, this_page);
+        copied += this_page;
+    }
+    return kbuf;
+}
+
+void *vmm_user_buf_alloc_out(size_t size)
+{
+    if (size == 0) return NULL;
+    void *kbuf = kmalloc(size);
+    if (kbuf) memset(kbuf, 0, size);
+    return kbuf;
+}
+
+int vmm_user_buf_commit_out(vmm_context_t *ctx, uintptr_t user_vaddr,
+                             const void *kbuf, size_t size)
+{
+    if (!ctx || !kbuf || size == 0) return -1;
+
+    size_t copied = 0;
+    while (copied < size) {
+        uintptr_t off_in_page = (user_vaddr + copied) & VMM_PAGE_OFFSET_MASK;
+        size_t this_page = VMM_PAGE_SIZE - off_in_page;
+        if (this_page > size - copied) this_page = size - copied;
+
+        void *dst = vmm_translate_user_addr(ctx, user_vaddr + copied, this_page);
+        if (!dst) return -1;
+        memcpy(dst, (const uint8_t *)kbuf + copied, this_page);
+        copied += this_page;
+    }
+    return 0;
+}
+
+void vmm_user_buf_free(void *kbuf)
+{
+    if (kbuf) kfree(kbuf);
+}
+
 typedef struct
 {
     uint8_t e_ident[16];

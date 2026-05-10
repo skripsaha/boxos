@@ -274,10 +274,18 @@ typedef struct {
 // Per-file lock entry in the open file table
 #define OPEN_FILE_BUCKETS 32
 
+/* Forward decl: WriteJob lives in storage/async/write_job.h. The OFE
+ * carries a token-handoff slot so concurrent async writers serialize
+ * without holding write_lock across an IO yield. */
+struct WriteJob;
+
 typedef struct OpenFileEntry {
     uint32_t              file_id;
     uint32_t              ref_count;
-    spinlock_t            write_lock;
+    spinlock_t            write_lock;        /* sync path only */
+    struct WriteJob *     async_write_owner; /* token (NULL = free) */
+    struct WriteJob *     async_pending_head;/* FIFO of waiters */
+    spinlock_t            async_token_lock;  /* guards above two fields */
     struct OpenFileEntry* next;
 } OpenFileEntry;
 

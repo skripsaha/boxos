@@ -188,7 +188,16 @@ void ahci_irq_handler(void) {
                     void *ctx = state->cb_ctx[slot];
                     state->cb[slot]     = NULL;
                     state->cb_ctx[slot] = NULL;
+                    /* Return the slot to the pool BEFORE invoking the
+                     * callback. The callback may submit a follow-up
+                     * async op (state-machine continuation) that needs
+                     * a free slot — without this, async pipelines starve
+                     * after AHCI_MAX_SLOTS in-flight operations. */
+                    ahci_free_slot(i, slot);
                     cb(i, slot, status, ctx);
+                } else {
+                    /* No callback — sync caller polls completed_slots
+                     * and frees the slot itself via ahci_free_slot. */
                 }
             }
         }

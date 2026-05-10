@@ -31,7 +31,7 @@ BOXLIB_START = ../build/boxlib_start.o
 
 .PHONY: all clean
 
-all: proca.elf procb.elf today.elf memtest.elf mtest.elf chain.elf decks.elf bench.elf touch_test.elf touch_stress.elf lifecycle.elf persist.elf
+all: proca.elf procb.elf today.elf memtest.elf mtest.elf chain.elf decks.elf bench.elf touch_test.elf touch_stress.elf lifecycle.elf persist.elf write_stress.elf write_concurrent.elf write_observer.elf cow_test.elf anchor_test.elf
 
 # ---- ELF binaries (stored in TagFS) ----
 proca.elf: $(BOXLIB_START) proca.o $(BOXLIB)
@@ -69,6 +69,21 @@ lifecycle.elf: $(BOXLIB_START) lifecycle.o $(BOXLIB)
 
 persist.elf: $(BOXLIB_START) persist.o $(BOXLIB)
 	$(CC) $(LDFLAGS) -o $@ $(BOXLIB_START) persist.o $(BOXLIB)
+
+write_stress.elf: $(BOXLIB_START) write_stress.o $(BOXLIB)
+	$(CC) $(LDFLAGS) -o $@ $(BOXLIB_START) write_stress.o $(BOXLIB)
+
+write_concurrent.elf: $(BOXLIB_START) write_concurrent.o $(BOXLIB)
+	$(CC) $(LDFLAGS) -o $@ $(BOXLIB_START) write_concurrent.o $(BOXLIB)
+
+write_observer.elf: $(BOXLIB_START) write_observer.o $(BOXLIB)
+	$(CC) $(LDFLAGS) -o $@ $(BOXLIB_START) write_observer.o $(BOXLIB)
+
+cow_test.elf: $(BOXLIB_START) cow_test.o $(BOXLIB)
+	$(CC) $(LDFLAGS) -o $@ $(BOXLIB_START) cow_test.o $(BOXLIB)
+
+anchor_test.elf: $(BOXLIB_START) anchor_test.o $(BOXLIB)
+	$(CC) $(LDFLAGS) -o $@ $(BOXLIB_START) anchor_test.o $(BOXLIB)
 
 # ---- object files ----
 %.o: %.c
