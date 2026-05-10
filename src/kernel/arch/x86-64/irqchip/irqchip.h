@@ -51,6 +51,18 @@ irqchip_type_t irqchip_get_type(void);
 const char* irqchip_get_name(void);
 uint8_t irqchip_max_irqs(void);
 
+/* Access to the MADT info captured by irqchip_init(). Returns NULL when
+ * running on the PIC fallback path (no MADT). Used by AP bring-up to
+ * apply Local APIC NMI assignments per-CPU. */
+struct madt_info; /* forward decl from acpi_madt.h */
+const struct madt_info *irqchip_get_madt(void);
+
+/* Apply MADT LAPIC NMI entries to the *currently executing* CPU.
+ * Looks up the running CPU's APIC ID via lapic_get_id(), finds the
+ * matching ACPI processor ID in the MADT CPU map, and writes the LVT
+ * NMI bits. Safe to call from the AP entry path after lapic_enable. */
+void irqchip_apply_lapic_nmi_self(void);
+
 // Convert between GSI and IDT vector
 static inline uint8_t irq_gsi_to_vector(uint8_t gsi) {
     return IRQ_VECTOR_BASE + gsi;

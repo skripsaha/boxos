@@ -37,6 +37,39 @@ uint64_t pmm_get_mem_end(void);
 
 bool pmm_is_usable_ram(uintptr_t phys_addr, size_t size);
 
+/* NUMA proximity domain of `phys` based on ACPI SRAT. Returns
+ * 0xFFFFFFFF when ACPI / SRAT did not classify the address (UMA hardware
+ * or address outside every enabled memory range). Wraps
+ * `acpi_numa_domain_for_phys()` so PMM can call without including ACPI
+ * headers — keeps the existing memory subsystem free of ACPI deps. */
+uint32_t pmm_phys_domain(uintptr_t phys);
+
+/* Walk every page-aligned chunk inside [base, base+len) and report the
+ * NUMA breakdown to the boot log. Coalesces consecutive same-domain
+ * ranges so the output stays compact. Pure observation — no
+ * side-effect. Used at pmm_init() tail when SRAT is present. */
+void pmm_log_numa_topology(void);
+
+/* Try to allocate `pages` contiguous physical pages whose backing memory
+ * is reported by SRAT to belong to `domain`. Falls back to any-domain
+ * allocation when:
+ *   - ACPI / SRAT did not classify memory (UMA hardware), OR
+ *   - no domain-local range satisfies the request.
+ *
+ * This is a *hint*, not a guarantee: the current allocator does not
+ * partition the buddy by domain, so we sample buddy_alloc results and
+ * retry up to `attempts` times if the returned page falls outside the
+ * desired domain. Production NUMA allocator (deferred) will partition
+ * the buddy and remove the sampling overhead. */
+void* pmm_alloc_in_domain(size_t pages, uint32_t domain);
+
+/* Total pages SRAT declares as enabled-memory in `domain`. Includes
+ * pages currently allocated — the future NUMA buddy partition will
+ * track free pages per domain; until then, this is the static upper
+ * bound and is sufficient for scheduler placement heuristics.
+ * Returns 0 when SRAT is absent or the domain is unknown. */
+size_t pmm_pages_in_domain(uint32_t domain);
+
 void pmm_activate_pull_map(void);
 void pmm_test_high_memory(void);
 

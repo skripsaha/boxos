@@ -172,3 +172,43 @@ uint16_t ioapic_get_iso_flags(uint8_t isa_irq) {
     }
     return 0;
 }
+
+void ioapic_program_nmi_source(uint32_t gsi, uint16_t mps_flags,
+                                uint8_t dest_lapic_id) {
+    if (!ioapic_base_virt) {
+        debug_printf("[IOAPIC] NMI source request but IOAPIC not mapped\n");
+        return;
+    }
+
+    if (gsi < ioapic_gsi_base) {
+        debug_printf("[IOAPIC] NMI Source GSI %u below this IOAPIC base %u\n",
+                     gsi, ioapic_gsi_base);
+        return;
+    }
+    uint32_t pin32 = gsi - ioapic_gsi_base;
+    if (pin32 > ioapic_max_entry) {
+        debug_printf("[IOAPIC] NMI Source GSI %u beyond max pin %u\n",
+                     gsi, ioapic_max_entry);
+        return;
+    }
+    uint8_t pin = (uint8_t)pin32;
+
+    /* Translate MPS INTI flags (ACPI 6.5 §5.2.12.5) into redirection bits.
+     * Bus default for the LPC/ISA bus is edge-triggered, active high; on
+     * the system bus the default is level-triggered, active low. NMI
+     * sources are almost always edge active high — but honour whatever
+     * the firmware explicitly states. */
+    uint32_t redir = IOAPIC_REDIR_DELMOD_NMI | IOAPIC_REDIR_DESTMOD_PHYS;
+    uint16_t polarity = mps_flags & 0x3;
+    uint16_t trigger  = (mps_flags >> 2) & 0x3;
+    if (polarity == 0x3) redir |= IOAPIC_REDIR_POLARITY_LOW;
+    if (trigger  == 0x3) redir |= IOAPIC_REDIR_TRIGGER_LEVEL;
+
+    /* Vector is don't-care for NMI delivery, but Intel SDM advises leaving
+     * a sentinel for analysis; 0x00 is fine. */
+    uint32_t high = ((uint32_t)dest_lapic_id) << 24;
+    ioapic_write_redir(pin, redir, high);
+
+    debug_printf("[IOAPIC] NMI Source: GSI %u pin %u mps=0x%04x dest=%u low=0x%08x\n",
+                 gsi, pin, mps_flags, dest_lapic_id, redir);
+}

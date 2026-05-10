@@ -4,6 +4,7 @@
 #include "atomics.h"
 #include "cpu_calibrate.h"
 #include "vmm.h"
+#include "pci.h"
 #include <stddef.h>
 
 /* ACPI Generic Address Structure address_space_id values (ACPI 6.x §5.2.3.2) */
@@ -89,13 +90,37 @@ static int gas_write_word(const acpi_gas_t *gas, uint16_t value) {
             return 0;
         }
 
-        case GAS_AS_PCI_CONFIG:
-            /* PCI config space is bus:dev:func:offset packed into address.
-             * BoxOS doesn't carry a generic PCI-config writer at this layer;
-             * uncommon in practice. Caller falls through to the next method. */
-            debug_printf("[ACPI] GAS PCI_CONFIG not implemented (addr=0x%lx)\n",
-                         (unsigned long)gas->address);
+        case GAS_AS_PCI_CONFIG: {
+            /* ACPI 6.5 §5.2.3.2 + edk2 layout for PCI Configuration Space:
+             *   address[63:48] PCI segment
+             *   address[31:24] PCI bus
+             *   address[23:19] device   (5 bits)
+             *   address[18:16] function (3 bits)
+             *   address[15:0]  register offset
+             * ECAM unlocks segments != 0 + extended (12-bit) offsets; the
+             * 0xCF8/0xCFC fallback is limited to segment 0, offset <= 0xFC. */
+            uint16_t segment = (uint16_t)((gas->address >> 48) & 0xFFFFu);
+            uint8_t  bus     = (uint8_t)((gas->address >> 24) & 0xFFu);
+            uint8_t  device  = (uint8_t)((gas->address >> 19) & 0x1Fu);
+            uint8_t  function = (uint8_t)((gas->address >> 16) & 0x07u);
+            uint16_t reg     = (uint16_t)(gas->address & 0xFFFFu);
+
+            debug_printf("[ACPI] GAS PCI_CONFIG seg=%u %02x:%02x.%x off=0x%x val=0x%x\n",
+                         segment, bus, device, function, reg, value);
+
+            if (pci_has_ecam()) {
+                pci_ecam_write_word(segment, bus, device, function,
+                                     reg, value);
+                return 0;
+            }
+            if (segment == 0 && reg <= 0xFEu) {
+                pci_config_write_word(bus, device, function,
+                                       (uint8_t)reg, value);
+                return 0;
+            }
+            debug_printf("[ACPI] GAS PCI_CONFIG: no ECAM and seg!=0/off>0xFE\n");
             return -1;
+        }
 
         default:
             debug_printf("[ACPI] GAS unknown address_space=%u\n", gas->address_space);
@@ -120,7 +145,26 @@ static int gas_write_byte(const acpi_gas_t *gas, uint8_t value) {
             return 0;
         }
 
-        case GAS_AS_PCI_CONFIG:
+        case GAS_AS_PCI_CONFIG: {
+            uint16_t segment = (uint16_t)((gas->address >> 48) & 0xFFFFu);
+            uint8_t  bus     = (uint8_t)((gas->address >> 24) & 0xFFu);
+            uint8_t  device  = (uint8_t)((gas->address >> 19) & 0x1Fu);
+            uint8_t  function = (uint8_t)((gas->address >> 16) & 0x07u);
+            uint16_t reg     = (uint16_t)(gas->address & 0xFFFFu);
+
+            if (pci_has_ecam()) {
+                pci_ecam_write_byte(segment, bus, device, function,
+                                     reg, value);
+                return 0;
+            }
+            if (segment == 0 && reg <= 0xFFu) {
+                pci_config_write_byte(bus, device, function,
+                                       (uint8_t)reg, value);
+                return 0;
+            }
+            return -1;
+        }
+
         default:
             return -1;
     }
@@ -315,5 +359,37 @@ void acpi_print_info(void) {
         }
     } else {
         debug_printf("\nMCFG: not present (PCI must use legacy 0xCF8/0xCFC)\n");
+    }
+
+    if (g_acpi.numa.present) {
+        debug_printf("\nSRAT (NUMA): %u CPU(s), %u memory range(s), %u domain(s)\n",
+                     g_acpi.numa.cpu_count,
+                     g_acpi.numa.mem_count,
+                     g_acpi.numa.domain_count);
+    } else {
+        debug_printf("\nSRAT: not present (uniform memory)\n");
+    }
+
+    if (g_acpi.slit.present) {
+        debug_printf("SLIT: %u localities\n", g_acpi.slit.locality_count);
+    }
+
+    if (g_acpi.dmar.present) {
+        debug_printf("\nDMAR (Intel VT-d): HAW=%u bits, flags=0x%x, %u DRHD\n",
+                     g_acpi.dmar.host_address_width_bits,
+                     g_acpi.dmar.flags,
+                     g_acpi.dmar.drhd_count);
+    }
+
+    if (g_acpi.ivrs.present) {
+        debug_printf("\nIVRS (AMD-Vi): %u IVHD\n", g_acpi.ivrs.ivhd_count);
+    }
+
+    if (g_acpi.apei.hest_present || g_acpi.apei.bert_present ||
+        g_acpi.apei.erst_present) {
+        debug_printf("\nAPEI: %s%s%s\n",
+                     g_acpi.apei.hest_present ? "HEST " : "",
+                     g_acpi.apei.bert_present ? "BERT " : "",
+                     g_acpi.apei.erst_present ? "ERST " : "");
     }
 }
