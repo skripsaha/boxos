@@ -154,9 +154,11 @@
 
 #define CONFIG_SERIAL_BAUD_RATE 115200
 
+/* ACPI 6.5 §5.2.5.3: when RSDP revision >= 2 and XsdtAddress != 0 the OS
+ * MUST use XSDT (32-bit RSDT may be stale on those firmwares). Selection
+ * is runtime, never a compile-time switch. CONFIG_ACPI_FALLBACK_QEMU was
+ * removed: emulator-targeted defaults are not part of the spec. */
 #define CONFIG_ACPI_DEBUG 0
-#define CONFIG_ACPI_USE_XSDT 1
-#define CONFIG_ACPI_FALLBACK_QEMU 1
 
 #define CONFIG_KMALLOC_MIN_SIZE 16
 #define CONFIG_KMALLOC_ALIGNMENT 16

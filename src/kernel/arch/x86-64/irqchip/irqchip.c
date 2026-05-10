@@ -135,6 +135,17 @@ void irqchip_init(void) {
         goto use_pic;
     }
 
+    /* Step 4.5: Program LVT LINT0/LINT1 from MADT NMI entries on the BSP.
+     * ACPI 6.5 §5.2.12.7 makes this OSPM's responsibility — without it the
+     * firmware-asserted NMI source (watchdog, IPMI alert) never reaches
+     * us. AP cores apply the same table during their bring-up. */
+    if (madt_info.bsp_acpi_id_resolved) {
+        lapic_apply_madt_nmi(&madt_info, madt_info.bsp_acpi_processor_id);
+    } else {
+        debug_printf("[IRQCHIP] BSP ACPI processor ID unresolved; "
+                     "skipping LAPIC NMI programming\n");
+    }
+
     // Step 5: Initialize IO-APIC
     ioapic_init(madt_info.ioapic_address, madt_info.ioapic_gsi_base);
 

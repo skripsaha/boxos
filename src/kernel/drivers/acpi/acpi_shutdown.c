@@ -270,7 +270,8 @@ void acpi_print_info(void) {
         debug_printf("  Revision: %u\n", g_acpi.rsdp->revision);
         debug_printf("  RSDT: 0x%x\n", g_acpi.rsdp->rsdt_address);
         if (g_acpi.rsdp->revision >= 2) {
-            debug_printf("  XSDT: 0x%lx\n", g_acpi.rsdp->xsdt_address);
+            debug_printf("  XSDT: 0x%lx\n",
+                         (unsigned long)g_acpi.rsdp->xsdt_address);
         }
     }
 
@@ -278,11 +279,41 @@ void acpi_print_info(void) {
         debug_printf("\nFADT:\n");
         debug_printf("  PM1a_CNT: 0x%x\n", g_acpi.pm1a_cnt_blk);
         debug_printf("  PM1b_CNT: 0x%x\n", g_acpi.pm1b_cnt_blk);
-        debug_printf("  DSDT: 0x%x\n", g_acpi.fadt->dsdt);
+        debug_printf("  DSDT: 0x%x  X_DSDT: 0x%lx\n",
+                     g_acpi.fadt->dsdt,
+                     (unsigned long)g_acpi.fadt->x_dsdt);
     }
 
     debug_printf("\n_S5 Object:\n");
-    debug_printf("  Found: %s\n", g_acpi.s5_found ? "Yes" : "No (using fallback)");
+    debug_printf("  Found: %s\n",
+                 g_acpi.s5_found ? "Yes" : "No (using fallback)");
     debug_printf("  SLP_TYPa: 0x%x\n", g_acpi.slp_typa);
     debug_printf("  SLP_TYPb: 0x%x\n", g_acpi.slp_typb);
+
+    if (g_acpi.hpet.present) {
+        debug_printf("\nHPET:\n");
+        debug_printf("  Base: 0x%lx vendor=0x%04x\n",
+                     (unsigned long)g_acpi.hpet.base,
+                     g_acpi.hpet.vendor_id);
+        debug_printf("  Counter: %s, %u comparators, min_tick=%u%s\n",
+                     g_acpi.hpet.counter_size_64 ? "64-bit" : "32-bit",
+                     g_acpi.hpet.comparator_count,
+                     g_acpi.hpet.minimum_tick,
+                     g_acpi.hpet.legacy_replacement ? " [LegacyReplace]" : "");
+    } else {
+        debug_printf("\nHPET: not present\n");
+    }
+
+    if (g_acpi.mcfg.present) {
+        debug_printf("\nMCFG (PCIe ECAM): %u segment(s)\n", g_acpi.mcfg.count);
+        for (uint8_t i = 0; i < g_acpi.mcfg.count; i++) {
+            const acpi_mcfg_segment_t* s = &g_acpi.mcfg.segments[i];
+            debug_printf("  [%u] group=%u base=0x%lx bus %u..%u\n",
+                         i, s->segment_group,
+                         (unsigned long)s->base_address,
+                         s->start_bus, s->end_bus);
+        }
+    } else {
+        debug_printf("\nMCFG: not present (PCI must use legacy 0xCF8/0xCFC)\n");
+    }
 }

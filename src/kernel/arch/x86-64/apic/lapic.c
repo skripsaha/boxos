@@ -3,6 +3,7 @@
 #include "io.h"
 #include "klib.h"
 #include "vmm.h"
+#include "acpi_madt.h"
 
 static volatile uint32_t* lapic_base_virt = NULL;
 static uintptr_t lapic_base_phys = 0;
@@ -186,4 +187,68 @@ void lapic_send_ipi_all_excluding_self(uint8_t vector) {
     }
     lapic_write(LAPIC_REG_ICR_HIGH, 0);
     lapic_write(LAPIC_REG_ICR_LOW, (uint32_t)vector | (3 << 18));
+}
+
+/*
+ * Translate ACPI 6.5 §5.2.12.5 MPS INTI Flags into LVT bits 13/15.
+ *
+ *   bits[1:0] Polarity:
+ *     00 = conforms to bus     -> treat as active high (ISA default)
+ *     01 = active high
+ *     10 = reserved
+ *     11 = active low
+ *
+ *   bits[3:2] Trigger Mode:
+ *     00 = conforms to bus     -> NMI is edge-triggered by hardware design,
+ *                                  so default to edge
+ *     01 = edge
+ *     10 = reserved
+ *     11 = level
+ *
+ * For NMI the trigger should almost always be edge; some firmware
+ * publishes "conforms" and trusts the OS to know that. We honour
+ * whatever the firmware explicitly states.
+ */
+static uint32_t mps_flags_to_lvt(uint16_t mps_flags) {
+    uint32_t lvt = 0;
+    uint16_t polarity = mps_flags & 0x3;
+    uint16_t trigger  = (mps_flags >> 2) & 0x3;
+
+    if (polarity == 0x3) lvt |= LAPIC_LVT_PIN_POLARITY_LOW;
+    /* 0x0 (conforms) and 0x1 (active high) map to "no polarity bit". */
+
+    if (trigger == 0x3) lvt |= LAPIC_LVT_TRIGGER_LEVEL;
+    /* 0x0 (conforms) and 0x1 (edge) map to edge — LVT bit 15 = 0. */
+
+    return lvt;
+}
+
+void lapic_apply_madt_nmi(const struct madt_info *info,
+                          uint8_t acpi_processor_id) {
+    if (!lapic_enabled || !info) return;
+
+    uint8_t applied[2] = { 0, 0 };  /* LINT0, LINT1 — track which we wrote */
+
+    for (uint8_t i = 0; i < info->nmi_count; i++) {
+        const madt_nmi_entry_t *e = &info->nmi[i];
+        if (!e->valid) continue;
+        if (e->acpi_processor_id != MADT_NMI_PROCESSOR_ALL &&
+            e->acpi_processor_id != acpi_processor_id)
+            continue;
+        if (e->lint > 1) continue;
+
+        uint32_t lvt = LAPIC_LVT_DELIVERY_NMI | mps_flags_to_lvt(e->mps_flags);
+        uint32_t reg = (e->lint == 0) ? LAPIC_REG_LINT0_LVT
+                                      : LAPIC_REG_LINT1_LVT;
+        lapic_write(reg, lvt);
+        applied[e->lint] = 1;
+
+        debug_printf("[LAPIC] LINT%u programmed NMI (mps=0x%04x lvt=0x%08x) for proc=%u\n",
+                     e->lint, e->mps_flags, lvt, e->acpi_processor_id);
+    }
+
+    if (!applied[0] && !applied[1]) {
+        debug_printf("[LAPIC] No MADT NMI entry matched proc=%u (LINT0/LINT1 stay masked)\n",
+                     acpi_processor_id);
+    }
 }

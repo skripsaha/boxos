@@ -25,9 +25,12 @@ acpi_error_t acpi_init(void) {
 
     g_acpi.initialized = true;
 
-    debug_printf("[ACPI] Initialization complete\n");
+    debug_printf("[ACPI] Initialization complete (HPET=%s MCFG=%s S5=%s)\n",
+                 g_acpi.hpet.present ? "yes" : "no",
+                 g_acpi.mcfg.present ? "yes" : "no",
+                 g_acpi.s5_found     ? "yes" : "fallback");
 
-#ifdef CONFIG_ACPI_DEBUG
+#if CONFIG_ACPI_DEBUG
     acpi_print_info();
 #endif
 

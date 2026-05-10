@@ -24,9 +24,17 @@
 // SVR flags
 #define LAPIC_SVR_ENABLE        (1 << 8)    // APIC Software Enable
 
-// LVT flags
-#define LAPIC_LVT_MASKED        (1 << 16)   // Interrupt masked
-#define LAPIC_LVT_TIMER_PERIODIC (1 << 17)  // Periodic timer mode
+// LVT flags (Intel SDM Vol 3 §11.5.1)
+#define LAPIC_LVT_MASKED            (1u << 16)   // Interrupt masked
+#define LAPIC_LVT_TIMER_PERIODIC    (1u << 17)   // Periodic timer mode
+#define LAPIC_LVT_TRIGGER_LEVEL     (1u << 15)   // 1 = level, 0 = edge
+#define LAPIC_LVT_REMOTE_IRR        (1u << 14)   // RO; for level-triggered
+#define LAPIC_LVT_PIN_POLARITY_LOW  (1u << 13)   // 1 = active low, 0 = active high
+#define LAPIC_LVT_DELIVERY_FIXED    (0u << 8)
+#define LAPIC_LVT_DELIVERY_SMI      (2u << 8)
+#define LAPIC_LVT_DELIVERY_NMI      (4u << 8)
+#define LAPIC_LVT_DELIVERY_EXTINT   (7u << 8)
+#define LAPIC_LVT_DELIVERY_INIT     (5u << 8)
 
 // Timer divider values for DCR
 #define LAPIC_TIMER_DIV_1       0x0B
@@ -71,5 +79,22 @@ void lapic_write(uint32_t reg, uint32_t value);
 // IPI delivery
 void lapic_send_ipi(uint8_t dest_lapic_id, uint8_t vector);
 void lapic_send_ipi_all_excluding_self(uint8_t vector);
+
+/* Apply MADT Local APIC NMI entries to the currently-running CPU's LVT.
+ *
+ * ACPI 6.5 §5.2.12.7: each Local APIC NMI Structure specifies which LINT
+ * pin (LINT0 or LINT1) is wired to NMI on a given processor (acpi_proc_id),
+ * or on all processors (0xFFu). OSPM is responsible for programming the
+ * LVT to deliver NMI for those pins. Without this step the firmware-
+ * provided NMI source (watchdog, IPMI alert, server PSU fault) never
+ * reaches the OS.
+ *
+ * `acpi_processor_id` is the ACPI processor ID of THIS CPU (from the
+ * matching MADT_TYPE_LOCAL_APIC entry); the function only programs
+ * entries whose processor_id is 0xFF or matches.
+ */
+struct madt_info; /* forward decl — full definition in acpi_madt.h */
+void lapic_apply_madt_nmi(const struct madt_info *info,
+                          uint8_t acpi_processor_id);
 
 #endif // LAPIC_H
