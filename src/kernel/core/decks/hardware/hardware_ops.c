@@ -19,6 +19,7 @@
 #include "process.h"
 #include "video.h"
 #include "pit.h"
+#include "serial.h"
 #include "rtc.h"
 #include "keyboard.h"
 #include "io.h"
@@ -90,6 +91,8 @@ static int HwVgaPutChar(const ManifestOp *op, Crate *crates, uint16_t crate_coun
         return ERR_OUT_OF_RANGE;
     }
 
+    console_lock_acquire();
+
     uint8_t old_x     = (uint8_t)VideoGetCursorX();
     uint8_t old_y     = (uint8_t)VideoGetCursorY();
     uint8_t old_color = VideoGetColor();
@@ -101,6 +104,8 @@ static int HwVgaPutChar(const ManifestOp *op, Crate *crates, uint16_t crate_coun
 
     VideoSetCursor(old_x, old_y);
     VideoSetColor(old_color);
+
+    console_lock_release();
     return OK;
 }
 
@@ -121,6 +126,13 @@ static int HwVgaPutString(const ManifestOp *op, Crate *crates, uint16_t crate_co
     const char *str = HwCrateMap(str_crate, ctx, str_crate->size);
     if (!str) return ERR_INVALID_ADDRESS;
 
+    /* Hold the console lock around the whole VGA + serial-mirror run.
+     * The framebuffer and cursor are global state; without serialisation
+     * a kprintf from another core (or another user process calling
+     * vga_puts in parallel) would interleave at cell-level and produce
+     * the character-salad screen the user saw on 2026-05-15. */
+    console_lock_acquire();
+
     uint8_t old_color = VideoGetColor();
     VideoSetColor(color);
 
@@ -130,15 +142,20 @@ static int HwVgaPutString(const ManifestOp *op, Crate *crates, uint16_t crate_co
         char c = str[i];
         if (c == '\0') break;
         VideoPrintChar(c, color);
-        HwVgaMirrorChar(c);
         chars_written++;
     }
     VideoBatchEnd();
     VideoUpdateCursor();
 
+#if CONFIG_VIDEO_SERIAL_MIRROR
+    serial_write(str, (size_t)chars_written);
+#endif
+
     if (!(flags & VGA_PUTSTRING_FLAG_KEEP_COLOR)) {
         VideoSetColor(old_color);
     }
+
+    console_lock_release();
 
     if (op->out_crate != CRATE_INDEX_NONE) {
         Crate *out = &crates[op->out_crate];
@@ -286,7 +303,9 @@ static int HwVgaScrollUp(const ManifestOp *op, Crate *crates, uint16_t crate_cou
                          const OpContext *ctx)
 {
     (void)op; (void)crates; (void)crate_count; (void)ctx;
+    console_lock_acquire();
     VideoScrollUp();
+    console_lock_release();
     return OK;
 }
 
@@ -295,6 +314,7 @@ static int HwVgaNewline(const ManifestOp *op, Crate *crates, uint16_t crate_coun
                         const OpContext *ctx)
 {
     (void)crate_count;
+    console_lock_acquire();
     VideoPrintNewline();
     HwVgaMirrorChar('\n');
 
@@ -309,6 +329,7 @@ static int HwVgaNewline(const ManifestOp *op, Crate *crates, uint16_t crate_coun
             }
         }
     }
+    console_lock_release();
     return OK;
 }
 

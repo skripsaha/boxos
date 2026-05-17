@@ -400,7 +400,13 @@ process_t *process_create(const char *tags)
     }
 
     *guard_pte = 0;
-    vmm_flush_tlb_page((uintptr_t)stack_virt_base);
+    /* Cross-core shootdown — vmm_demote_large_entry (the path that
+     * produced this PTE) only invalidates the writing core's TLB.
+     * Other cores still cache the original 1GB Pull-Map huge entry
+     * for this VA range; without a broadcast flush, a stack overflow
+     * on those cores walks the huge entry and lands on real RAM
+     * instead of the guard, producing silent corruption. */
+    vmm_shootdown_page(kernel_ctx, (uintptr_t)stack_virt_base);
 
     proc->kernel_stack_guard_base = stack_virt_base;
     proc->kernel_stack = (void *)((uintptr_t)stack_virt_base + VMM_PAGE_SIZE);

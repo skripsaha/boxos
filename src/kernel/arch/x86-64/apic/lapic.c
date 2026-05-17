@@ -9,6 +9,19 @@ static volatile uint32_t* lapic_base_virt = NULL;
 static uintptr_t lapic_base_phys = 0;
 static bool lapic_enabled = false;
 
+/* Cached x2APIC mode flag.
+ *
+ * Sampled once from IA32_APIC_BASE.EXTD (bit 10) at lapic_init time.
+ * BoxOS never disables x2APIC after enabling it (the spec also makes
+ * the transition extd→xapic require disabling-then-reenabling APIC,
+ * which we do not do), so this cache is stable for the kernel
+ * lifetime.
+ *
+ * Writing legacy MMIO ICR offsets 0x300/0x310 with EXTD=1 is a #GP
+ * (Intel SDM Vol 3A §10.12.9), so EVERY ICR write must consult this
+ * flag and dispatch through lapic_icr_write. */
+static bool g_x2apic_active = false;
+
 static inline uint64_t rdmsr(uint32_t msr) {
     uint32_t lo, hi;
     __asm__ volatile("rdmsr" : "=a"(lo), "=d"(hi) : "c"(msr));
@@ -43,10 +56,15 @@ void lapic_init(uintptr_t base_addr) {
         return;
     }
 
-    // Enable LAPIC via MSR (set global enable bit)
+    // Enable LAPIC via MSR (set global enable bit) — leave EXTD alone:
+    // if firmware/BSP enabled x2APIC, we honour it; if not, we stay xAPIC.
     uint64_t apic_base_msr = rdmsr(MSR_APIC_BASE);
     apic_base_msr |= MSR_APIC_BASE_ENABLE;
     wrmsr(MSR_APIC_BASE, apic_base_msr);
+
+    // Re-sample the EXTD bit AFTER enabling — some firmwares only expose
+    // x2APIC once the APIC global enable is set.
+    g_x2apic_active = (rdmsr(MSR_APIC_BASE) & MSR_APIC_BASE_EXTD) != 0;
 
     // Set Spurious Interrupt Vector Register: enable APIC + set spurious vector
     uint32_t svr = lapic_read(LAPIC_REG_SVR);
@@ -173,20 +191,43 @@ void lapic_timer_stop(void) {
     lapic_write(LAPIC_REG_TIMER_ICR, 0);
 }
 
-void lapic_send_ipi(uint8_t dest_lapic_id, uint8_t vector) {
-    while (lapic_read(LAPIC_REG_ICR_LOW) & (1 << 12)) {
+bool lapic_is_x2apic_active(void) {
+    return g_x2apic_active;
+}
+
+void lapic_icr_write(uint32_t dest_id, uint32_t cmd) {
+    if (g_x2apic_active) {
+        /* x2APIC: single 64-bit MSR write to 0x830. The destination
+         * goes in the upper 32 bits, the command in the lower 32.
+         * The CPU serialises delivery; no busy-poll is required (Intel
+         * SDM Vol 3A §10.12.9: "Write to IA32_X2APIC_ICR ... is
+         * self-clearing on completion"). */
+        wrmsr(MSR_X2APIC_ICR, ((uint64_t)dest_id << 32) | (uint64_t)cmd);
+        return;
+    }
+
+    /* xAPIC: poll delivery-status (bit 12) BEFORE writing, then write
+     * ICR_HIGH (destination in upper 8 bits), then ICR_LOW (the actual
+     * command — writing ICR_LOW triggers the send). Bounded poll so a
+     * wedged/disabled LAPIC can't hang the kernel. */
+    for (uint32_t spins = 0; spins < 100000u; spins++) {
+        if (!(lapic_read(LAPIC_REG_ICR_LOW) & LAPIC_ICR_SEND_PENDING)) break;
         __asm__ volatile("pause");
     }
-    lapic_write(LAPIC_REG_ICR_HIGH, (uint32_t)dest_lapic_id << 24);
-    lapic_write(LAPIC_REG_ICR_LOW, (uint32_t)vector);
+    lapic_write(LAPIC_REG_ICR_HIGH, (dest_id & 0xFFu) << 24);
+    lapic_write(LAPIC_REG_ICR_LOW,  cmd);
+}
+
+void lapic_send_ipi(uint8_t dest_lapic_id, uint8_t vector) {
+    lapic_icr_write((uint32_t)dest_lapic_id, (uint32_t)vector);
 }
 
 void lapic_send_ipi_all_excluding_self(uint8_t vector) {
-    while (lapic_read(LAPIC_REG_ICR_LOW) & (1 << 12)) {
-        __asm__ volatile("pause");
-    }
-    lapic_write(LAPIC_REG_ICR_HIGH, 0);
-    lapic_write(LAPIC_REG_ICR_LOW, (uint32_t)vector | (3 << 18));
+    /* Shorthand bits 18-19 = 11b ("all excluding self") cause the LAPIC
+     * to ignore the destination field; pass dest=0 for safety on both
+     * xAPIC and x2APIC paths. Identical layout on both modes for the
+     * shorthand field. */
+    lapic_icr_write(0u, (uint32_t)vector | (3u << 18));
 }
 
 /*

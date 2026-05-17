@@ -163,37 +163,22 @@ void amp_init(void)
     }
 }
 
-static void wait_icr_not_pending(void)
-{
-    uint32_t timeout = 100000;
-    while ((lapic_read(LAPIC_REG_ICR_LOW) & LAPIC_ICR_SEND_PENDING) && --timeout)
-    {
-        __asm__ volatile("pause");
-    }
-    if (timeout == 0)
-    {
-        debug_printf("[AMP] WARNING: LAPIC ICR send pending timeout\n");
-    }
-}
-
+/* INIT and SIPI delivery to a single AP, mode-correct on both xAPIC
+ * and x2APIC. lapic_icr_write picks the right path (legacy MMIO with
+ * delivery-status polling, or single wrmsr on 0x830). Writing the
+ * legacy MMIO ICR offsets directly on an x2APIC-enabled CPU is
+ * reserved (Intel SDM Vol 3A §10.12.9) and produces #GP — observed on
+ * STRICT mode with -cpu max prior to this refactor. */
 static void send_init_ipi(uint8_t dest_lapic_id)
 {
-    wait_icr_not_pending();
-    lapic_write(LAPIC_REG_ICR_HIGH, (uint32_t)dest_lapic_id << 24);
-    lapic_write(LAPIC_REG_ICR_LOW, LAPIC_IPI_INIT);
-
-    pit_delay_us(10000); // 10ms
-
-    wait_icr_not_pending();
-    lapic_write(LAPIC_REG_ICR_HIGH, (uint32_t)dest_lapic_id << 24);
-    lapic_write(LAPIC_REG_ICR_LOW, LAPIC_IPI_INIT_DEASSERT);
+    lapic_icr_write((uint32_t)dest_lapic_id, LAPIC_IPI_INIT);
+    pit_delay_us(10000); // 10ms per Intel MP boot sequence
+    lapic_icr_write((uint32_t)dest_lapic_id, LAPIC_IPI_INIT_DEASSERT);
 }
 
 static void send_sipi(uint8_t dest_lapic_id, uint8_t vector_page)
 {
-    wait_icr_not_pending();
-    lapic_write(LAPIC_REG_ICR_HIGH, (uint32_t)dest_lapic_id << 24);
-    lapic_write(LAPIC_REG_ICR_LOW, LAPIC_IPI_SIPI | vector_page);
+    lapic_icr_write((uint32_t)dest_lapic_id, LAPIC_IPI_SIPI | (uint32_t)vector_page);
 }
 
 void amp_boot_aps(void)
@@ -266,7 +251,9 @@ void amp_boot_aps(void)
         pte_t *guard_pte = vmm_get_or_create_pte(kctx, (uintptr_t)stack_virt);
         if (guard_pte) {
             *guard_pte = 0;
-            vmm_flush_tlb_page((uintptr_t)stack_virt);
+            /* Cross-core shootdown — other cores keep the cached huge
+             * Pull-Map entry covering this VA until invalidated. */
+            vmm_shootdown_page(kctx, (uintptr_t)stack_virt);
         }
 
         uint64_t stack_top = (uint64_t)stack_virt + 5 * 4096 - 16;

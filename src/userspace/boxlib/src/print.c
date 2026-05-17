@@ -50,7 +50,23 @@ static int  io_buf_pos = 0;
 void io_flush(void)
 {
     if (g_io_mode == IO_MODE_IPC && io_buf_pos > 0) {
-        broadcast("display", io_buf, (uint16_t)io_buf_pos);
+        /* Unicast to the resolved display daemon when we know it. Earlier
+         * code unconditionally broadcast()'d to the "display" tag; if a
+         * caller had — for whatever reason — spawned a redundant display
+         * (shell does this when the autostart daemon hasn't reached its
+         * receive loop within 500 ms, see 2026-05-14 audit), every render
+         * frame hit *both* daemons and the user saw a duplicated screen
+         * plus character-by-character interleaving in the serial mirror.
+         *
+         * Broadcast is now strictly the discovery fallback (no display
+         * pid known yet). Once io_set_display_pid() / readline() /
+         * getchar() has resolved a daemon, all subsequent traffic flows
+         * to that single PID. */
+        if (g_display_pid != 0) {
+            send(g_display_pid, io_buf, (uint16_t)io_buf_pos);
+        } else {
+            broadcast("display", io_buf, (uint16_t)io_buf_pos);
+        }
         io_buf_pos = 0;
     }
 }

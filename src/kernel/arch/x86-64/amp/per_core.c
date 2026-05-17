@@ -111,7 +111,10 @@ static void per_core_alloc_ist(tss_t* tss, uint8_t core_index) {
             while (1) { __asm__ volatile("cli; hlt"); }
         }
         *guard_pte = 0;
-        vmm_flush_tlb_page((uintptr_t)virt_base);
+        /* Cross-core shootdown so peer cores see the cleared guard
+         * PTE through the demoted 4 KB leaf rather than their cached
+         * huge Pull-Map entry. */
+        vmm_shootdown_page(kctx, (uintptr_t)virt_base);
 
         // Stack grows down: top = base + (guard + data) * PAGE_SIZE - 16
         uint64_t stack_top = (uint64_t)virt_base + (total_pages * 4096) - 16;
