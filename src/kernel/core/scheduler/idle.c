@@ -43,7 +43,10 @@ static void idle_setup(process_t* idle, uint8_t core_index) {
     pte_t* guard_pte = vmm_get_or_create_pte(kernel_ctx, (uintptr_t)stack_virt);
     if (guard_pte) {
         *guard_pte = 0;
-        vmm_flush_tlb_page((uintptr_t)stack_virt);
+        /* Cross-core shootdown so other cores observe the cleared
+         * guard PTE through the freshly demoted 4 KB leaf instead of
+         * their cached 1 GB Pull-Map entry. */
+        vmm_shootdown_page(kernel_ctx, (uintptr_t)stack_virt);
     }
 
     idle->kernel_stack_guard_base = stack_virt;

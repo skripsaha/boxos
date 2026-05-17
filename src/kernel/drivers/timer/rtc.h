@@ -22,4 +22,12 @@ void     rtc_get_boxtime(time_t* out);
 uint64_t rtc_get_unix64(void);
 uint64_t rtc_get_uptime_ns(void);
 
+/* Toggle the NMI mask state baked into every subsequent CMOS register
+ * selection. Default after rtc_init is "NMI enabled" (mask byte = 0).
+ * Pairs must be balanced — disable() before a critical sequence,
+ * enable() immediately after — to avoid permanently silencing the
+ * system NMI source. */
+void cmos_nmi_disable(void);
+void cmos_nmi_enable(void);
+
 #endif // RTC_H

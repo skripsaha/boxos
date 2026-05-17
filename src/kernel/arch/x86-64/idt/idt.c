@@ -621,7 +621,7 @@ void syscall_handler(interrupt_frame_t *frame)
 
     if (peek && (peek->flags & POCKET_FLAG_YIELD))
     {
-        debug_printf("[%s%u] SYSCALL yield from PID %u\n", core_type, core_idx, proc->pid);
+        // debug_printf("[%s%u] SYSCALL yield from PID %u\n", core_type, core_idx, proc->pid);
         KPocketPop(proc);
         context_save_from_frame(proc, frame);
         schedule(frame);
@@ -630,7 +630,7 @@ void syscall_handler(interrupt_frame_t *frame)
 
     // Debug: show syscall with pocket count
     uint32_t pocket_count = KPocketCount(proc);
-    debug_printf("[%s%u] SYSCALL notify PID %u (pockets=%u)\n", core_type, core_idx, proc->pid, pocket_count);
+    // debug_printf("[%s%u] SYSCALL notify PID %u (pockets=%u)\n", core_type, core_idx, proc->pid, pocket_count);
 
     // Dispatch: sync blocks + schedules, async returns immediately.
     g_syscall_dispatch(proc, frame);

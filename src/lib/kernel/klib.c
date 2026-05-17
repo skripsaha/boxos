@@ -28,6 +28,9 @@ static spinlock_t heap_lock = {0};
 static uint8_t current_attr = VIDEO_ATTR_DEFAULT;
 static spinlock_t g_kprintf_lock;
 
+void console_lock_acquire(void) { spin_lock(&g_kprintf_lock); }
+void console_lock_release(void) { spin_unlock(&g_kprintf_lock); }
+
 static const char digits[] = "0123456789abcdefghijklmnopqrstuvwxyz";
 
 void mem_activate_pull_map(void)
@@ -1180,12 +1183,25 @@ void list_push_back(list_t *list, void *data)
 
 void *list_pop_back(list_t *list)
 {
-    if (!list || !list->tail)
+    if (!list)
         return NULL;
 
+    /* Acquire the lock BEFORE inspecting list->tail. The unlocked
+     * `if (!list->tail) return NULL` shortcut that used to live here
+     * was an AMP correctness hole: a concurrent push_back on another
+     * core sets tail in between our unlocked NULL-check and the lock
+     * acquisition; we'd return NULL and the caller would believe the
+     * list was empty when it wasn't, losing the just-pushed item.
+     * Worse in the opposite direction — two concurrent pops would
+     * each see tail != NULL, both enter, and the second one would
+     * deref the now-NULL tail re-read under lock. */
     spin_lock(&list->lock);
 
     list_node_t *node = list->tail;
+    if (!node) {
+        spin_unlock(&list->lock);
+        return NULL;
+    }
     void *data = node->data;
 
     if (node->prev)
@@ -1236,12 +1252,18 @@ void list_push_front(list_t *list, void *data)
 
 void *list_pop_front(list_t *list)
 {
-    if (!list || !list->head)
+    if (!list)
         return NULL;
 
+    /* Lock before inspecting list->head — see list_pop_back for the
+     * full rationale (same AMP correctness hole). */
     spin_lock(&list->lock);
 
     list_node_t *node = list->head;
+    if (!node) {
+        spin_unlock(&list->lock);
+        return NULL;
+    }
     void *data = node->data;
 
     if (node->next)

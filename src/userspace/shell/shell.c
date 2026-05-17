@@ -55,16 +55,43 @@ void ShellInit(void)
         while (receive(&pending)) { }
     }
 
-    uint8_t ping = DISP_CMD_PING;
-    broadcast("display", &ping, 1);
-
+    /* Discovery: PING the "display" tag and pick up the first responder.
+     *
+     * The original 500 ms timeout was too aggressive — on a heavily-loaded
+     * 16-core boot (each AP racing through init), the autostart display
+     * daemon hadn't yet reached its `receive_wait` loop when this PING
+     * was issued, so PING went unanswered → shell concluded "no display"
+     * → spawned a second daemon → both daemons survived → every later
+     * `broadcast("display", ...)` hit both → the user saw duplicated
+     * banners and interleaved characters in the serial mirror (the
+     * 2026-05-14 STRICT-mode regression).
+     *
+     * Three-stage discovery:
+     *   1. fast PING with a generous wait (covers normal cold boot);
+     *   2. one retry — display may have responded to *another* process'
+     *      broadcast in the meantime, so we re-PING ourselves;
+     *   3. only if both rounds fail and we have no parent that could
+     *      have spawned us a display, fall back to proc_exec — and even
+     *      then we wait for *that* spawn's reply, never assuming the
+     *      original tag is silent forever. */
     Result entry;
-    if (receive_wait(&entry, 500) && entry.sender_pid != 0) {
-        io_set_display_pid(entry.sender_pid);
-    } else if (ci->spawner_pid == 0) {
-        /* No autostart display, no parent — last-resort spawn. */
+    bool   discovered = false;
+
+    for (int round = 0; !discovered && round < 2; round++) {
+        uint8_t ping = DISP_CMD_PING;
+        broadcast("display", &ping, 1);
+        if (receive_wait(&entry, 2500) && entry.sender_pid != 0) {
+            io_set_display_pid(entry.sender_pid);
+            discovered = true;
+        }
+    }
+
+    if (!discovered && ci->spawner_pid == 0) {
+        /* No autostart display reachable, no parent — last-resort spawn.
+         * Even here we only spawn ONE and wait long enough for it to
+         * register, so we never end up with two live daemons. */
         int spawned = proc_exec("display");
-        if (spawned > 0 && receive_wait(&entry, 2000) && entry.sender_pid != 0) {
+        if (spawned > 0 && receive_wait(&entry, 3000) && entry.sender_pid != 0) {
             io_set_display_pid(entry.sender_pid);
         }
     }

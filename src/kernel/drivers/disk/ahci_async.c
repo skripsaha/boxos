@@ -48,9 +48,14 @@ error_t ahci_submit_read_async(uint8_t port, uint64_t lba,
     port_state->cb_ctx[slot] = ctx;
 
     volatile ahci_port_regs_t *regs = ahci_get_port_regs_pub(port);
+    /* AHCI 1.3.1 §10.3.2: write SACT / CI as direct stores with only
+     * the new slot bit set, never RMW. Hardware clears bits for
+     * other slots independently as they complete; an OR reads a
+     * possibly-stale value and writes a cleared bit back, re-arming
+     * a completed slot with stale FIS/PRDT. Hidden on QEMU. */
     spin_lock(&port_state->lock);
-    regs->sact |= (1U << slot);
-    regs->ci   |= (1U << slot);
+    regs->sact = (1U << slot);
+    regs->ci   = (1U << slot);
     /* Track issued slot for the IRQ handler's snapshot/diff path. */
     __sync_fetch_and_or(&port_state->ci_snapshot, (1U << slot));
     spin_unlock(&port_state->lock);
@@ -104,9 +109,10 @@ error_t ahci_submit_write_async(uint8_t port, uint64_t lba,
     port_state->cb_ctx[slot] = ctx;
 
     volatile ahci_port_regs_t *regs = ahci_get_port_regs_pub(port);
+    /* Direct store, not RMW — see read path above for spec ref. */
     spin_lock(&port_state->lock);
-    regs->sact |= (1U << slot);
-    regs->ci   |= (1U << slot);
+    regs->sact = (1U << slot);
+    regs->ci   = (1U << slot);
     __sync_fetch_and_or(&port_state->ci_snapshot, (1U << slot));
     spin_unlock(&port_state->lock);
 

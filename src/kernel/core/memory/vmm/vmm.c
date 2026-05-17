@@ -390,10 +390,24 @@ void vmm_shootdown_pages(vmm_context_t *ctx, uintptr_t virt_addr, size_t page_co
         lapic_send_ipi(g_amp.cores[targets[i]].lapic_id, IPI_SHOOTDOWN_VECTOR);
     }
 
-    // Spin until all targets ACK with timeout
-    // FIX: Add timeout to prevent hang if AP doesn't respond
+    /* Spin until all targets ACK with timeout.
+     *
+     * Two pre-existing bugs in this loop, exposed when more call-sites
+     * started using cross-core shootdown:
+     *   (1) `tsc_freq_mhz * 100` is 100 *microseconds*, not 100 ms as
+     *       the comment claimed — far too tight for the IPI round-trip
+     *       on a heavily-loaded BSP.
+     *   (2) If `cpu_get_tsc_freq_mhz()` hasn't completed calibration
+     *       (it returns 0), `timeout_cycles` is 0 and the very first
+     *       iteration trips the timeout while the ACKs are still
+     *       in-flight — observed as
+     *       "TLB shootdown timeout: 0 cores did not ACK (pending_acks=0, spins=1)".
+     *   (3) Timeout fired between the while-condition read and this
+     *       check — by the time we panic, ACKs may have arrived.
+     *       Re-load `pending_acks` and break gracefully if so. */
     uint64_t tsc_freq_mhz = cpu_get_tsc_freq_mhz();
-    uint64_t timeout_cycles = tsc_freq_mhz * 100; // 100ms in TSC cycles
+    if (tsc_freq_mhz < 100) tsc_freq_mhz = 1000; /* fallback: assume 1 GHz */
+    uint64_t timeout_cycles = tsc_freq_mhz * 100000ULL; /* 100 ms */
     uint64_t start_tsc = rdtsc();
     uint32_t spins = 0;
     const uint32_t max_spins = 10000000; // Safety limit
@@ -407,8 +421,9 @@ void vmm_shootdown_pages(vmm_context_t *ctx, uintptr_t virt_addr, size_t page_co
         if (spins >= max_spins || (rdtsc() - start_tsc) > timeout_cycles)
         {
             uint32_t remaining = atomic_load_u32(&g_shootdown.pending_acks);
+            if (remaining == 0) break; /* race: ACKs landed during timeout calc */
             panic("TLB shootdown timeout: %u cores did not ACK (pending_acks=%u, spins=%u)",
-                  target_count - (target_count - remaining), remaining, spins);
+                  remaining, remaining, spins);
         }
     }
 
@@ -497,6 +512,122 @@ void vmm_shootdown_page(vmm_context_t *ctx, uintptr_t virt_addr)
     vmm_shootdown_pages(ctx, virt_addr, 1);
 }
 
+/* Atomically demote a LARGE_PAGE entry to a smaller-granularity table.
+ *
+ * Walks one level: replaces a 1 GB (level==1) or 2 MB (level==2) leaf
+ * entry with a pointer to a freshly-allocated PD/PT that re-creates
+ * the same physical mappings at finer granularity. Used to support
+ * per-page modification of regions originally mapped with huge pages
+ * (specifically the Pull Map/DPM when CPU exposes 1 GB pages, and
+ * any 2 MB region we later need to unmap a single 4 KB page from —
+ * kernel stack guard pages).
+ *
+ * Concurrency: every caller of vmm_get_or_create_table is potentially
+ * lock-free on the PDPT/PD level (e.g. idle_setup,
+ * tss_setup_dynamic_stacks, AP-boot and process_create paths all
+ * call vmm_get_or_create_pte → vmm_get_or_create_table directly,
+ * without holding any ctx lock). Two cores racing on the same
+ * huge-page entry would both allocate a replacement table and the
+ * loser's allocation would leak; worse, both writes to *entry could
+ * publish their own pointer producing a partial-PD/PT corruption.
+ *
+ * We therefore commit the replacement with a single CAS on the
+ * parent entry. The loser frees its just-allocated page back to PMM
+ * and re-reads the entry, which by then is either the winner's
+ * replacement (same physical translations) or already further
+ * demoted by a third party — either way next walk-level proceeds
+ * correctly.
+ *
+ * Real-HW TLB safety: Intel SDM Vol 3 §4.10.4.4 disallows changing
+ * the page size of a resident translation without invalidation. We
+ * issue a LOCAL `invlpg virt_addr` after a successful CAS to drop
+ * the stale huge-page entry on the writing core — this covers the
+ * Intel-cited "atomic re-walk" requirement for the core that
+ * actually published the change.
+ *
+ * Cross-core shootdown is intentionally NOT issued from here. The
+ * split is semantically transparent (same physical mapping at finer
+ * granularity); stale huge-page entries on other cores still decode
+ * to identical addresses until somebody actually rewrites one of
+ * the new fine-grained leaves. The leaf-modifying caller
+ * (vmm_unmap_page, guard-page clear) is responsible for the
+ * cross-core flush of *that specific leaf*. Issuing the cross-core
+ * shootdown here would deadlock against any concurrent path holding
+ * the same g_shootdown_lock — empirically observed 2026-05-14 as a
+ * "Full TLB shootdown timeout: N/N cores did not ACK" panic during
+ * AUTOSTART.
+ *
+ * Returns:
+ *   0  — split applied (CAS won) or no longer needed (entry no
+ *        longer LARGE_PAGE: another core won the race)
+ *   -1 — allocation failure (out of memory) */
+static int vmm_demote_large_entry(pte_t *entry, int level, uintptr_t virt_addr)
+{
+    pte_t old_entry = __atomic_load_n(entry, __ATOMIC_ACQUIRE);
+    if (!(old_entry & VMM_FLAG_PRESENT) || !(old_entry & VMM_FLAG_LARGE_PAGE))
+    {
+        /* Concurrent reader already saw the demoted form (or entry was
+         * cleared). Nothing to do. */
+        return 0;
+    }
+
+    uintptr_t large_base = vmm_pte_to_phys(old_entry);
+    uint64_t  inherit_flags = vmm_pte_to_flags(old_entry) & ~VMM_FLAG_LARGE_PAGE;
+
+    uintptr_t new_phys = vmm_alloc_page_table();
+    if (!new_phys)
+    {
+        vmm_set_error("Failed to allocate replacement table for large-page demotion");
+        return -1;
+    }
+
+    page_table_t *new_tbl = (page_table_t *)vmm_phys_to_virt(new_phys);
+
+    /* Populate the replacement with 512 entries at the next-finer
+     * granularity covering exactly the same physical range. At
+     * level==1 (1 GB → PD) each child is itself a 2 MB LARGE_PAGE;
+     * at level==2 (2 MB → PT) each child is a 4 KB PTE. */
+    if (level == 1)
+    {
+        for (int j = 0; j < 512; j++)
+        {
+            uintptr_t chunk = large_base + ((uintptr_t)j << 21);  /* 2 MB stride */
+            new_tbl->entries[j] = vmm_make_pte(chunk, inherit_flags | VMM_FLAG_LARGE_PAGE);
+        }
+    }
+    else
+    {
+        for (int j = 0; j < 512; j++)
+        {
+            uintptr_t chunk = large_base + ((uintptr_t)j * VMM_PAGE_SIZE);
+            new_tbl->entries[j] = vmm_make_pte(chunk, inherit_flags);
+        }
+    }
+
+    /* Publish: CAS the parent entry from <old large> to <new pointer>.
+     * Intermediate tables need USER so user-mode walks at finer
+     * granularity can still reach an eventually-USER leaf. */
+    pte_t new_entry  = vmm_make_pte(new_phys, VMM_FLAGS_KERNEL_RW | VMM_FLAG_USER);
+    pte_t expected   = old_entry;
+    bool  won        = __atomic_compare_exchange_n(entry, &expected, new_entry,
+                                                   false,
+                                                   __ATOMIC_RELEASE,
+                                                   __ATOMIC_ACQUIRE);
+    if (!won)
+    {
+        /* Lost the race — drop our replacement back into PMM. */
+        pmm_free((void *)new_phys, 1);
+        return 0;
+    }
+
+    /* Local invlpg: required by Intel SDM Vol 3 §4.10.4.4 — the writing
+     * core must invalidate its own TLB before it can safely observe
+     * translations through the just-demoted entry. Covers every TLB
+     * level the linear address touches (4 KB / 2 MB / 1 GB). */
+    asm volatile("invlpg (%0)" : : "r"(virt_addr) : "memory");
+    return 0;
+}
+
 page_table_t *vmm_get_or_create_table(vmm_context_t *ctx, uintptr_t virt_addr, int level)
 {
     if (!ctx || !ctx->pml4)
@@ -522,43 +653,33 @@ page_table_t *vmm_get_or_create_table(vmm_context_t *ctx, uintptr_t virt_addr, i
                 return NULL;
             }
 
-            // intermediate tables need USER bit for Ring 3 access at all levels
-            *entry = vmm_make_pte(new_table_phys, VMM_FLAGS_KERNEL_RW | VMM_FLAG_USER);
-        }
-        else
-        {
-            if (i == 2 && (*entry & VMM_FLAG_LARGE_PAGE))
+            /* Intermediate tables need USER bit so Ring 3 walks at all
+             * levels — leaf USER bit alone is not enough.
+             *
+             * Race: another core may have set the entry first. CAS so
+             * we don't leak the page or trample the winning pointer. */
+            pte_t new_entry  = vmm_make_pte(new_table_phys, VMM_FLAGS_KERNEL_RW | VMM_FLAG_USER);
+            pte_t expected   = 0;
+            bool  won        = __atomic_compare_exchange_n(entry, &expected, new_entry,
+                                                           false,
+                                                           __ATOMIC_RELEASE,
+                                                           __ATOMIC_ACQUIRE);
+            if (!won)
             {
-                // Split 2MB large page into 512 4KB pages.
-                // Caller (vmm_map_page) holds ctx->lock, so no concurrent split.
-                pte_t old_entry = *entry;
-                if (!(old_entry & VMM_FLAG_LARGE_PAGE))
-                {
-                    goto entry_ready;
-                }
-
-                uintptr_t large_page_base = vmm_pte_to_phys(old_entry);
-                uint64_t large_page_flags = vmm_pte_to_flags(old_entry) & ~VMM_FLAG_LARGE_PAGE;
-
-                uintptr_t new_pt_phys = vmm_alloc_page_table();
-                if (!new_pt_phys)
-                {
-                    vmm_set_error("Failed to allocate PT for large page split");
-                    return NULL;
-                }
-
-                page_table_t *new_pt = (page_table_t *)vmm_phys_to_virt(new_pt_phys);
-
-                for (int j = 0; j < 512; j++)
-                {
-                    uintptr_t page_phys = large_page_base + (j * VMM_PAGE_SIZE);
-                    new_pt->entries[j] = vmm_make_pte(page_phys, large_page_flags);
-                }
-
-                // Direct write: ctx->lock serializes all callers
-                *entry = vmm_make_pte(new_pt_phys, VMM_FLAGS_KERNEL_RW | VMM_FLAG_USER);
+                pmm_free((void *)new_table_phys, 1);
             }
-        entry_ready:;
+        }
+        else if ((i == 1 || i == 2) && (*entry & VMM_FLAG_LARGE_PAGE))
+        {
+            /* Demote 1 GB (i==1, PDPT) or 2 MB (i==2, PD) huge page so
+             * the walker can descend one more level. The helper is
+             * race-safe (CAS-published with local invlpg) and a no-op
+             * when the entry has already been demoted by another core
+             * since the last *entry read. */
+            if (vmm_demote_large_entry(entry, i, virt_addr) < 0)
+            {
+                return NULL;
+            }
         }
 
         uintptr_t next_table_phys = vmm_pte_to_phys(*entry);

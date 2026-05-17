@@ -86,7 +86,10 @@ void tss_setup_dynamic_stacks(void) {
         pte_t *guard_pte = vmm_get_or_create_pte(kernel_ctx, (uintptr_t)virt_base);
         if (guard_pte) {
             *guard_pte = 0;
-            vmm_flush_tlb_page((uintptr_t)virt_base);
+            /* Cross-core shootdown — without it, other cores keep the
+             * cached huge Pull-Map entry and IST stack overflow lands
+             * on real RAM instead of the guard. */
+            vmm_shootdown_page(kernel_ctx, (uintptr_t)virt_base);
         }
 
         // Stack top = base + guard + data - 16 (alignment)

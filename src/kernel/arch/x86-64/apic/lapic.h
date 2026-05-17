@@ -49,8 +49,13 @@
 // IA32_APIC_BASE MSR
 #define MSR_APIC_BASE           0x1B
 #define MSR_APIC_BASE_ENABLE    (1 << 11)
+#define MSR_APIC_BASE_EXTD      (1 << 10)   // x2APIC enable bit
 #define MSR_APIC_BASE_BSP       (1 << 8)
 #define MSR_APIC_BASE_ADDR_MASK 0xFFFFF000ULL
+
+// x2APIC MSR layout (Intel SDM Vol 3A §10.12.1)
+#define MSR_X2APIC_BASE         0x800       // x2APIC MSR window starts here
+#define MSR_X2APIC_ICR          0x830       // ICR: single 64-bit MSR write
 
 void lapic_init(uintptr_t base_addr);
 void lapic_send_eoi(void);
@@ -79,6 +84,25 @@ void lapic_write(uint32_t reg, uint32_t value);
 // IPI delivery
 void lapic_send_ipi(uint8_t dest_lapic_id, uint8_t vector);
 void lapic_send_ipi_all_excluding_self(uint8_t vector);
+
+/* Returns true if the local APIC is currently running in x2APIC mode
+ * (IA32_APIC_BASE bit 10 = EXTD). Sampled once at lapic_init and cached;
+ * BoxOS never disables x2APIC at runtime so the cached value is stable.
+ * Used by lapic_icr_write to pick the right register access path. */
+bool lapic_is_x2apic_active(void);
+
+/* Write the LAPIC Interrupt Command Register in a mode-correct way.
+ *
+ *   xAPIC:  busy-poll delivery-status bit, write ICR_HIGH (dest<<24),
+ *           write ICR_LOW (cmd) — the LOW write triggers the send.
+ *   x2APIC: single wrmsr(0x830, (dest << 32) | cmd) — write is atomic
+ *           and the CPU serialises delivery, no busy-poll required.
+ *
+ * Writing the legacy MMIO offsets (ICR_HIGH=0x310, ICR_LOW=0x300) on an
+ * x2APIC-enabled CPU is reserved (Intel SDM Vol 3A §10.12.9) and faults
+ * with #GP — every IPI path must go through this helper after x2APIC
+ * has been activated. */
+void lapic_icr_write(uint32_t dest_id, uint32_t cmd);
 
 /* Apply MADT Local APIC NMI entries to the currently-running CPU's LVT.
  *

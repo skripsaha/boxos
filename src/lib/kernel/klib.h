@@ -75,6 +75,15 @@ int kvsnprintf(char* buf, size_t size, const char* fmt, va_list args);
 void kputchar(char c);
 int kputnl(void);
 
+/* Console lock — acquired by kprintf, exposed so any other producer of
+ * VGA framebuffer + serial writes (HwVgaPutString, HwVgaPutChar,
+ * HwVgaNewline, …) can serialise against kprintf and against other
+ * cores doing the same. Without this, two cores writing the
+ * framebuffer concurrently race on cursor + cell stores → visible
+ * character salad on screen and interleaved binary in serial.log. */
+void console_lock_acquire(void);
+void console_lock_release(void);
+
 #if CONFIG_DEBUG_ENABLED
     #define debug_printf(...) kprintf(__VA_ARGS__)
 #else

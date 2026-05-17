@@ -45,10 +45,17 @@ int ahci_read_sectors_sync(uint8_t port, uint64_t lba,
         }
 
         volatile ahci_port_regs_t* regs = ahci_get_port_regs_pub(port);
-        /* Submit RMW on MMIO ci/sact must be serialized — see ahci.c:R3 note. */
+        /* Submit per AHCI 1.3.1 §10.3.2: write CI / SACT as a direct
+         * store with ONLY the new slot bit set, never RMW. The HBA
+         * clears bits independently as commands complete; a `|=` reads
+         * a possibly-stale value (a bit the HW just cleared for
+         * another slot) and writes it back, re-arming a completed slot
+         * to be re-executed with stale FIS/PRDT. The `port_state->lock`
+         * still serialises *software* writers to keep two SW-side
+         * stores from racing each other. */
         spin_lock(&port_state->lock);
-        regs->sact |= (1U << slot);
-        regs->ci   |= (1U << slot);
+        regs->sact = (1U << slot);
+        regs->ci   = (1U << slot);
         spin_unlock(&port_state->lock);
 
         uint64_t timeout_tsc = rdtsc() + cpu_ms_to_tsc(AHCI_TIMEOUT_CMD_DEFAULT);
@@ -135,9 +142,12 @@ int ahci_write_sectors_sync(uint8_t port, uint64_t lba,
         }
 
         volatile ahci_port_regs_t* regs = ahci_get_port_regs_pub(port);
+        /* Direct store, not RMW — see read path above for the spec
+         * reference. Re-arming a completed slot via stale-read OR
+         * corrupts NCQ on real Intel/AMD HBAs (hidden on QEMU). */
         spin_lock(&port_state->lock);
-        regs->sact |= (1U << slot);
-        regs->ci   |= (1U << slot);
+        regs->sact = (1U << slot);
+        regs->ci   = (1U << slot);
         spin_unlock(&port_state->lock);
 
         uint64_t timeout_tsc = rdtsc() + cpu_ms_to_tsc(AHCI_TIMEOUT_CMD_DEFAULT);
