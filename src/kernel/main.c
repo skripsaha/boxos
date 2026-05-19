@@ -210,14 +210,31 @@ void kernel_main(void)
     debug_printf("[INIT] ClockBoard...\n");
     clockboard_init();
 
-    /* HPET present but DO NOT take over IRQ0 — hpet_start_legacy_tick
-     * was identified 2026-05-19 as the root cause of bench TSC-calib
-     * mis-read + bench output corruption + bench user-mode page fault.
-     * Keeping hpet_init() so HPET counter is available as a monotonic
-     * read-only timestamp source, but 8254 PIT keeps driving IRQ0. */
+    /* HPET — high-precision timer.
+     *
+     * Two roles:
+     *   1. Free-running 64-bit main counter — always read-available
+     *      after hpet_init(), used by cpu_calibrate_tsc for the
+     *      measurement window (independent of IRQ0 routing) and by
+     *      pit_get_uptime_us() as the monotonic time source.
+     *   2. Optionally takes over IRQ0 via LegacyReplacement. This is
+     *      production-correct for modern hardware (many post-2018
+     *      server boards ship without an 8254 PIT). Safe to enable
+     *      now because cpu_calibrate_tsc no longer depends on PIT
+     *      channel-0 — see commit history of cpu_calibrate.c.
+     *
+     * The earlier 2026-05-19 regression (TSC-calib mis-read +
+     * bench corruption) was caused by the PIT-only calibration path
+     * being silently broken once HPET stole IRQ0. With the new
+     * CPUID.15h → HPET-counter → PIT preference order, that path
+     * is unreachable. */
     debug_printf("[INIT] HPET...\n");
     if (hpet_init()) {
-        debug_printf("[INIT] HPET counter available; PIT keeps IRQ0\n");
+        if (hpet_start_legacy_tick(250)) {
+            debug_printf("[INIT] HPET sourcing IRQ0 system tick @ 250 Hz\n");
+        } else {
+            debug_printf("[INIT] HPET counter available; PIT keeps IRQ0\n");
+        }
     } else {
         debug_printf("[INIT] HPET unavailable — TSC/PIT only\n");
     }
