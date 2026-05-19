@@ -579,7 +579,16 @@ static void wjob_pump(void *job_)
 
 /* IRQ callback for CoW READ_OLD. Drops state directly to W_DMA_FILL —
  * the read populated DMA with the (redirected) old content, ready for
- * the user-bytes overlay. */
+ * the user-bytes overlay.
+ *
+ * Runs in AHCI completion IRQ context. The old emergency-finalize
+ * fallback (kmalloc / pmm_free / tagfs_close / kfree from IRQ) is
+ * gone — WriteContEnqueue now delegates to irq_defer, which is
+ * allocation-free on the producer side and cannot fail. If irq_defer
+ * exhausts its overflow chain (extreme burst beyond pre-allocated
+ * headroom), the slot is silently dropped and the writer process
+ * will time out and retry. That graceful drop is preferable to the
+ * old deadlock-prone in-IRQ cleanup path. */
 static void wjob_cow_read_complete(uint8_t port, uint8_t slot,
                                     error_t status, void *ctx)
 {
@@ -591,24 +600,11 @@ static void wjob_cow_read_complete(uint8_t port, uint8_t slot,
     } else {
         atomic_store_u32((volatile uint32_t *)&j->state, W_DMA_FILL);
     }
-    if (WriteContEnqueue(wjob_pump, j) != OK) {
-        kprintf("[WJOB] WCQ full on CoW read IRQ — emergency finalize\n");
-        Result r;
-        memset(&r, 0, sizeof(r));
-        r.error_code = ERR_IO;
-        r.context    = KCTX_GUIDE;
-        if (j->target) {
-            KResultPush(j->target, &r);
-            process_ref_dec(j->target);
-        }
-        if (j->dma_phys)   pmm_free(j->dma_phys, 1);
-        if (j->handle)     tagfs_close(j->handle);
-        if (j->src_bounce) vmm_user_buf_free(j->src_bounce);
-        kfree(j);
-    }
+    (void)WriteContEnqueue(wjob_pump, j);  /* irq_defer; cannot fail */
 }
 
-/* IRQ callback. Lean — only stash status + enqueue continuation. */
+/* IRQ callback. Lean — only stash status + defer continuation. See
+ * wjob_cow_read_complete above for the IRQ-safety rationale. */
 static void wjob_ahci_complete(uint8_t port, uint8_t slot,
                                 error_t status, void *ctx)
 {
@@ -616,20 +612,7 @@ static void wjob_ahci_complete(uint8_t port, uint8_t slot,
     WriteJob *j = (WriteJob *)ctx;
     j->if_status = status;
     atomic_store_u32((volatile uint32_t *)&j->state, W_AHCI_DONE);
-    if (WriteContEnqueue(wjob_pump, j) != OK) {
-        kprintf("[WJOB] WCQ full on IRQ — emergency finalize\n");
-        Result r;
-        memset(&r, 0, sizeof(r));
-        r.error_code = ERR_IO;
-        r.context    = KCTX_GUIDE;
-        if (j->target) {
-            KResultPush(j->target, &r);
-            process_ref_dec(j->target);
-        }
-        if (j->dma_phys) pmm_free(j->dma_phys, 1);
-        if (j->handle)   tagfs_close(j->handle);
-        kfree(j);
-    }
+    (void)WriteContEnqueue(wjob_pump, j);  /* irq_defer; cannot fail */
 }
 
 /* =========================================================================

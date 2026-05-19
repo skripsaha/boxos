@@ -6,8 +6,74 @@
 #include "irqchip.h"
 #include "ioapic.h"
 #include "touch.h"
+#include "irq_defer.h"
+#include "atomics.h"
+#include "kernel_config.h"
 
 acpi_state_t g_acpi = {0};
+
+/* ============================================================
+ * Deferred Touch publish ring — copies (tag, payload) out of the
+ * SCI IRQ context into a static, pre-allocated slot, then irq_defer's
+ * a handler that calls TouchPublish from K-Core context (where
+ * kmalloc + process_snapshot_pids + Touch claim-table lookup is
+ * safe). Eliminates the kmalloc-from-IRQ deadlock path the audit
+ * found at acpi.c:177-189 + acpi.c:133.
+ *
+ * The ring is a simple MPSC bump-allocator (claim via fetch_add &
+ * mask). It is intentionally a CIRCULAR overwrite: under extreme
+ * burst, the OLDEST unprocessed event is silently lost. That is
+ * the correct semantics for ACPI events — losing one
+ * power-button-blink in an event flood is preferable to blocking
+ * the IRQ or panicking. The capacity comes from kernel_config.h,
+ * not from a magic constant in code.
+ * ============================================================ */
+#ifndef CONFIG_ACPI_TOUCH_EVENT_RING_SIZE
+#define CONFIG_ACPI_TOUCH_EVENT_RING_SIZE 64U  /* power-of-2 */
+#endif
+
+typedef struct {
+    char     tag[40];     /* "acpi:gpe:NNN" longest */
+    uint16_t payload;     /* sts or gpe idx */
+} AcpiTouchEvent;
+
+_Static_assert((CONFIG_ACPI_TOUCH_EVENT_RING_SIZE &
+                (CONFIG_ACPI_TOUCH_EVENT_RING_SIZE - 1)) == 0,
+               "CONFIG_ACPI_TOUCH_EVENT_RING_SIZE must be power-of-2");
+
+static AcpiTouchEvent g_acpi_touch_ring[CONFIG_ACPI_TOUCH_EVENT_RING_SIZE];
+static volatile uint32_t g_acpi_touch_idx = 0;
+static volatile uint64_t g_acpi_touch_dropped = 0;
+
+/* K-Core context — safe to call TouchPublish (kmalloc + process walk).
+ * The event slot remains valid for the lifetime of the kernel (static
+ * storage); rewriting by a fresh IRQ before we run is harmless because
+ * we read tag/payload immediately and TouchPublish copies them. */
+static void acpi_touch_deferred(void *ctx)
+{
+    AcpiTouchEvent *ev = (AcpiTouchEvent *)ctx;
+    TouchPublish(ev->tag, &ev->payload, sizeof(ev->payload));
+}
+
+/* IRQ-side: copy tag + payload into the next ring slot and defer the
+ * publish to K-Core. tag must be ≤ 39 chars; longer tags are
+ * truncated (BoxOS internal callers stay well under). */
+static void acpi_queue_touch_irq(const char *tag, uint16_t payload)
+{
+    uint32_t i = atomic_fetch_add_u32(&g_acpi_touch_idx, 1) &
+                 (CONFIG_ACPI_TOUCH_EVENT_RING_SIZE - 1);
+    AcpiTouchEvent *ev = &g_acpi_touch_ring[i];
+    size_t tlen = 0;
+    while (tag[tlen] && tlen < sizeof(ev->tag) - 1) {
+        ev->tag[tlen] = tag[tlen];
+        tlen++;
+    }
+    ev->tag[tlen] = '\0';
+    ev->payload = payload;
+    /* Slot writes complete before the deferred handler observes ctx —
+     * irq_defer's release-store on slot.ready provides the fence. */
+    irq_defer(acpi_touch_deferred, ev);
+}
 
 /* ============================================================
  * GPE registry — one C callback per GPE bit. Lookup is O(1).
@@ -130,7 +196,11 @@ static void gpe_dispatch_block(uint8_t* fired_bytes, uint8_t bytes,
             while (v) { tmp[tl++] = (char)('0' + v % 10); v /= 10; }
             while (tl-- > 0) tag[pos++] = tmp[tl];
             tag[pos] = 0;
-            TouchPublish(tag, &idx, sizeof(idx));
+            /* Defer the Touch publish to K-Core — TouchPublish takes
+             * kmalloc and walks the process list, both forbidden in
+             * IRQ context. The per-GPE tag and the bit index are
+             * captured into a static ring slot before deferring. */
+            acpi_queue_touch_irq(tag, idx);
             f = (uint8_t)(f & ~(1u << bit));
         }
     }
@@ -172,21 +242,25 @@ static void acpi_sci_handler(void) {
      * subscribed to the matching tag wake up and react — power-manager,
      * lockscreen, RTC alarm daemon, etc.). The wire payload is the raw
      * PM1 status word so subscribers can decode flags they care about. */
+    /* All TouchPublish calls below moved off the IRQ path via
+     * acpi_queue_touch_irq → irq_defer. The handler runs in K-Core
+     * context where kmalloc + process_snapshot_pids + Touch claim
+     * table lookup are safe. */
     if (sts & PM1_STS_PWRBTN) {
         debug_printf("[ACPI] power button event\n");
-        TouchPublish("acpi:power-button", &sts, sizeof(sts));
+        acpi_queue_touch_irq("acpi:power-button", sts);
     }
     if (sts & PM1_STS_SLPBTN) {
         debug_printf("[ACPI] sleep button event\n");
-        TouchPublish("acpi:sleep-button", &sts, sizeof(sts));
+        acpi_queue_touch_irq("acpi:sleep-button", sts);
     }
     if (sts & PM1_STS_RTC) {
         debug_printf("[ACPI] RTC alarm event\n");
-        TouchPublish("acpi:rtc-alarm", &sts, sizeof(sts));
+        acpi_queue_touch_irq("acpi:rtc-alarm", sts);
     }
     if (sts & PM1_STS_WAK) {
         debug_printf("[ACPI] wake event\n");
-        TouchPublish("acpi:wake", &sts, sizeof(sts));
+        acpi_queue_touch_irq("acpi:wake", sts);
     }
 
     /* W1C: write the read value back to clear every set bit at once.

@@ -27,6 +27,7 @@
 #include "storage_deck.h"
 #include "kernel_config.h"
 #include "ready_queue.h"
+#include "irq_defer.h"
 #include "xhci.h"
 #include "xhci_input.h"
 #include "acpi.h"
@@ -191,6 +192,14 @@ void kernel_main(void)
 
     debug_printf("[INIT] AMP Core Detection...\n");
     amp_init();
+
+    /* Deferred-work rings must exist before any IRQ handler that
+     * defers can fire. acpi_sci_register above only installed the
+     * handler with irqchip; the LAPIC still has the SCI vector
+     * masked until acpi_enable() runs much later. So initialising
+     * here is well before the first IRQ-with-defer can land. */
+    debug_printf("[INIT] IRQ defer rings...\n");
+    irq_defer_init();
 
     debug_printf("[INIT] Per-core GDT/TSS/Notify (BSP)...\n");
     per_core_init_bsp();

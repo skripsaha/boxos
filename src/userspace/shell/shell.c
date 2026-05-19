@@ -87,13 +87,29 @@ void ShellInit(void)
     }
 
     if (!discovered && ci->spawner_pid == 0) {
-        /* No autostart display reachable, no parent — last-resort spawn.
-         * Even here we only spawn ONE and wait long enough for it to
-         * register, so we never end up with two live daemons. */
-        int spawned = proc_exec("display");
-        if (spawned > 0 && receive_wait(&entry, 3000) && entry.sender_pid != 0) {
-            io_set_display_pid(entry.sender_pid);
-        }
+        /* Historical: spawned a "last-resort" display via proc_exec here.
+         * That was the root cause of the post-2026-05-15 "first-command-
+         * no-op" race: the autostart display was actually alive but its
+         * cold-boot init delayed past our PING window, so we spawned a
+         * SECOND daemon. Both daemons answered subsequent PINGs; the
+         * extra reply sat in the shell mailbox and the next
+         * receive_wait() (inside readline) pulled it instead of the
+         * typed-line reply — readline interpreted 4 bytes of display PID
+         * as a length-prefixed line, memcpy'd garbage past the buffer,
+         * and the shell silently dropped the user's first command.
+         *
+         * Fix: never spawn here. If no display answers in 2×2500 ms,
+         * fall back to direct VGA I/O — single-daemon invariant is more
+         * important than the "private display" affordance. */
+        io_set_mode(IO_MODE_VGA);
+    }
+
+    /* Drain any stale messages left over from discovery — second
+     * daemon's PING reply, retried broadcast echoes, etc. Without this
+     * the FIRST readline pulls the stale reply and returns garbage. */
+    {
+        Result drain;
+        while (receive(&drain)) { }
     }
 
     clear();
@@ -172,6 +188,17 @@ void ShellMainLoop(void)
     char input[SHELL_LINE_MAX];
 
     while (g_state.running) {
+        /* Drain any stale IPC left over from the previous iteration's
+         * child process or from late display PING replies. Without
+         * this, the next receive_wait inside readline pulls the stale
+         * message, mis-interprets its bytes as a length-prefixed line,
+         * and silently drops the user's typed command — observed as
+         * "first command after bench did nothing" in 2026-05-17. */
+        {
+            Result drain;
+            while (receive(&drain)) { }
+        }
+
         int rc = LineEditRead(&g_editor, g_state.prompt, input, SHELL_LINE_MAX);
 
         if (rc == LINE_EXIT_REQUEST) {
