@@ -8,6 +8,7 @@
 #include "vmm.h"
 #include "perf_trace.h"
 #include "amp.h"
+#include "irq_defer.h"
 #include "error.h"
 #include "kring.h"  /* KPocketIsEmpty for re-arm after pending clear */
 #include "write_cont_queue.h"  /* Async write state-machine continuations */
@@ -215,6 +216,12 @@ void kcore_run_loop(void)
          * them inside the same loop body keeps cache-locality with the
          * pocket pump and avoids an extra IPI round-trip. */
         WriteContPump(my_idx);
+
+        /* Universal IRQ-defer drain — runs SCI/GPE/AHCI bottom-halves
+         * that the IRQ stowed away with irq_defer(). Same K-Core
+         * context, so handlers can kmalloc / tagfs / process_walk
+         * safely. */
+        irq_defer_pump(my_idx);
 
         if ((++loop_count % 10) == 0) {
             process_cleanup_deferred();

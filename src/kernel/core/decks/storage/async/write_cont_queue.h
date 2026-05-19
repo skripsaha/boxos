@@ -5,43 +5,38 @@
 #include "error.h"
 
 /*
- * Write-Continuation Queue — per-K-Core unbounded MPSC linked-list.
+ * Write-Continuation Queue — historical thin wrapper around the
+ * generic irq_defer subsystem.
  *
- * BoxOS philosophy "динамика" — no fixed limits. Producers race only on
- * a single atomic XCHG of the tail pointer (Vyukov's MPSC algorithm).
- * Consumer is the owning K-Core; it walks `head -> next` links. Memory
- * cost per pending continuation is one node (24 bytes), reclaimed on
- * consume. Heap exhaustion is the only natural bound, signalled as
- * ERR_NO_MEMORY to caller.
+ * Originally an MPSC linked-list with per-node kmalloc, which was
+ * the central instance of the "kmalloc-from-IRQ" deadlock pattern
+ * the 2026-05-17 audit flagged. The implementation now delegates to
+ * irq_defer (elastic chunked ring, IRQ-safe, no allocation on the
+ * producer side). The old types and globals are gone — callers must
+ * use the function API only.
+ *
+ * Kept as a separate translation unit so the storage subsystem can
+ * grow a richer write-pipeline API later (priority lanes, fairness
+ * quotas) without burdening the universal irq_defer layer.
  */
 
 typedef void (*WriteContFn)(void *job);
 
-typedef struct WriteContNode {
-    WriteContFn                       fn;
-    void                             *job;
-    struct WriteContNode * volatile   next;
-} WriteContNode;
-
-typedef struct {
-    /* Producer-side cursor — every push XCHGs this. */
-    WriteContNode * volatile  tail;
-    /* Consumer-side cursor — only the owning K-Core touches it. */
-    WriteContNode            *head;
-    /* Dummy head node, never freed; keeps the list non-empty so push
-     * doesn't need a head/tail special case. */
-    WriteContNode             stub;
-    /* Approximate depth, RELAXED — used only for routing decisions. */
-    volatile uint32_t         pending;
-    uint8_t                   kcore_idx;
-    uint8_t                   _pad[3];
-} __attribute__((aligned(64))) WriteContQueue;
-
-extern WriteContQueue *g_write_cont_queues;
-
+/* No-op; preserved so existing init wiring compiles. The real ring
+ * setup happens in irq_defer_init() called from main.c. */
 void WriteContQueueInit(void);
+
+/* Enqueue a continuation on the irq_defer ring of the *calling core*.
+ * Safe to call from IRQ context. Returns OK on success, ERR_NO_MEMORY
+ * only when the underlying ring is mid-init (which the audit-tested
+ * boot order makes a non-issue in practice). */
 error_t WriteContEnqueue(WriteContFn fn, void *job);
+
+/* Consumer drain — calls irq_defer_pump for the given core. Returns
+ * the number of continuations invoked. */
 uint32_t WriteContPump(uint8_t kcore_idx);
+
+/* Approximate pending count for routing / halt-drain. */
 uint32_t WriteContDepth(uint8_t kcore_idx);
 
 #endif /* WRITE_CONT_QUEUE_H */

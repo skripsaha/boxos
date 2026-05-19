@@ -2,6 +2,7 @@
 #include "amp.h"
 #include "lapic.h"
 #include "irqchip.h"
+#include "irq_defer.h"
 #include "process.h"
 #include "scheduler.h"
 #include "tagfs.h"
@@ -44,12 +45,12 @@ static void halt_drain_async_writes(void)
     while (rdtsc() < deadline) {
         bool any = false;
 
-        if (g_write_cont_queues) {
-            for (uint8_t i = 0; i < g_amp.total_cores; i++) {
-                if (atomic_load_u32(&g_write_cont_queues[i].pending) > 0) {
-                    any = true;
-                    break;
-                }
+        /* Check pending continuations via the irq_defer accessor —
+         * the old WriteContQueue global is gone. */
+        for (uint8_t i = 0; i < g_amp.total_cores; i++) {
+            if (irq_defer_pending(i) > 0) {
+                any = true;
+                break;
             }
         }
 
