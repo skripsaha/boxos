@@ -201,16 +201,16 @@ void kernel_main(void)
     debug_printf("[INIT] ClockBoard...\n");
     clockboard_init();
 
-    /* HPET first — provides a 10 ns-class monotonic counter we use as the
-     * high-resolution time source. When LegacyReplacement is supported,
-     * HPET timer 0 takes over IRQ0 entirely and the 8254 stays idle. */
+    /* HPET present but DO NOT take over IRQ0 — hpet_start_legacy_tick
+     * was identified 2026-05-19 as the root cause of bench TSC-calib
+     * mis-read + bench output corruption + bench user-mode page fault.
+     * Keeping hpet_init() so HPET counter is available as a monotonic
+     * read-only timestamp source, but 8254 PIT keeps driving IRQ0. */
     debug_printf("[INIT] HPET...\n");
     if (hpet_init()) {
-        if (hpet_start_legacy_tick(250)) {
-            debug_printf("[INIT] HPET sourcing IRQ0 system tick @ 250 Hz\n");
-        }
+        debug_printf("[INIT] HPET counter available; PIT keeps IRQ0\n");
     } else {
-        debug_printf("[INIT] HPET unavailable — high-res time falls back to TSC/PIT\n");
+        debug_printf("[INIT] HPET unavailable — TSC/PIT only\n");
     }
 
     debug_printf("[INIT] PIT...\n");
