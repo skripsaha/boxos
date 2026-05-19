@@ -158,7 +158,20 @@ static uint16_t pit_read_count(void) {
 // Hardware-accurate busy-wait using PIT counter readback.
 // PIT crystal runs at exactly 1,193,182 Hz on all x86 hardware and is faithfully
 // emulated by QEMU/VirtualBox/Bochs. No dependency on CPU frequency.
+//
+// When HPET LegacyReplacement is active, the 8254 channel-0 counter is
+// idle (HPET timer 0 drives IRQ0 instead) and reading it returns stale
+// values — pit_delay_busy() would loop with `elapsed` stuck or jumping
+// randomly, producing delays of microseconds instead of the requested
+// milliseconds. In that mode we delegate to the HPET-counter busy-wait
+// which is always reliable. This single chokepoint keeps every existing
+// `pit_delay_busy()` caller correct on modern hardware that ships
+// without a functional 8254.
 void pit_delay_busy(uint32_t milliseconds) {
+    if (hpet_tick_active() && hpet_is_present()) {
+        hpet_busy_wait_us((uint64_t)milliseconds * 1000ULL);
+        return;
+    }
     if (pit_frequency == 0) {
         debug_printf("[PIT] ERROR: PIT not initialized!\n");
         return;
