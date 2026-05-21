@@ -38,6 +38,28 @@ static uintptr_t kernel_heap_current = VMM_KERNEL_HEAP_BASE;
 static spinlock_t kernel_heap_lock = {0};
 
 static uintptr_t kernel_mmio_current = VMM_KERNEL_MMIO_BASE;
+
+/* Kernel-MMIO VA free list — sorted by base, coalesced on insert.
+ *
+ * Without this, vmm_unmap_mmio leaked virtual address space forever:
+ * every PCIe rebind, framebuffer mode-change, or AHCI re-init would
+ * burn a fresh chunk of the 1 GiB VMM_KERNEL_MMIO_SIZE window. On a
+ * real PC with hot-plug and DXE driver re-init the kernel would run
+ * out of MMIO VA after hours. The free list rebuilds reclaimed ranges
+ * into the same allocator so the workload is steady-state-bounded.
+ *
+ * `kernel_mmio_lock` protects this list AND `kernel_mmio_current` —
+ * one lock for both so allocate/free races against the bump cursor
+ * are linearised. Nodes themselves are kmalloc'd; vmm_unmap_mmio is
+ * never called from IRQ context (only driver shutdown / hot-unplug),
+ * so kmalloc is safe. */
+typedef struct MmioFreeNode {
+    uintptr_t base;          /* page-aligned, page-multiple */
+    size_t    size;
+    struct MmioFreeNode *next;
+} MmioFreeNode;
+
+static MmioFreeNode *kernel_mmio_free_head = NULL;
 static spinlock_t kernel_mmio_lock = {0};
 
 /* =========================================================================
@@ -1314,6 +1336,94 @@ bool vmm_unmap_pages(vmm_context_t *ctx, uintptr_t virt_addr, size_t page_count)
     return success;
 }
 
+/* Try to take `size_aligned` bytes from the kernel-MMIO free list.
+ *
+ * First-fit on the sorted list. If the chosen node is larger than
+ * needed, the trailing slice is reinserted as a new node (we keep
+ * the head address so reclaimed regions migrate toward the front
+ * over time). Returns 0 if no fitting block exists — caller then
+ * bumps `kernel_mmio_current`.
+ *
+ * Caller must hold `kernel_mmio_lock`. */
+static uintptr_t mmio_free_list_take_locked(size_t size_aligned)
+{
+    MmioFreeNode **pp = &kernel_mmio_free_head;
+    while (*pp) {
+        MmioFreeNode *n = *pp;
+        if (n->size >= size_aligned) {
+            uintptr_t base = n->base;
+            if (n->size == size_aligned) {
+                *pp = n->next;
+                kfree(n);
+            } else {
+                n->base += size_aligned;
+                n->size -= size_aligned;
+            }
+            return base;
+        }
+        pp = &n->next;
+    }
+    return 0;
+}
+
+/* Insert a reclaimed range into the sorted free list and coalesce
+ * with any directly adjacent neighbours. Caller must hold the lock.
+ *
+ * Coalescing keeps the list short and prevents fragmentation: after
+ * a few full-cycle allocate/free passes the list shrinks back to one
+ * big block instead of growing without bound. */
+static void mmio_free_list_insert_locked(uintptr_t base, size_t size_aligned)
+{
+    /* Special case: the freed region is the immediately preceding
+     * top-of-bump, give it back to the cursor instead of fragmenting
+     * the free list — keeps the common shutdown-then-restart pattern
+     * fully bump-recyclable. */
+    if (base + size_aligned == kernel_mmio_current) {
+        kernel_mmio_current = base;
+        return;
+    }
+
+    MmioFreeNode *node = (MmioFreeNode *)kmalloc(sizeof(MmioFreeNode));
+    if (!node) {
+        /* Loss of the freed range is graceful: nothing crashes, the
+         * VA simply stays "in use" forever. Logged so the operator
+         * notices systematic leakage if it happens repeatedly. */
+        debug_printf("[VMM] WARN: kmalloc MmioFreeNode failed — "
+                     "leaking 0x%lx bytes of MMIO VA at 0x%lx\n",
+                     (unsigned long)size_aligned, (unsigned long)base);
+        return;
+    }
+    node->base = base;
+    node->size = size_aligned;
+    node->next = NULL;
+
+    /* Insert sorted by base. */
+    MmioFreeNode **pp = &kernel_mmio_free_head;
+    while (*pp && (*pp)->base < base) pp = &(*pp)->next;
+    node->next = *pp;
+    *pp = node;
+
+    /* Coalesce forward. */
+    if (node->next && node->base + node->size == node->next->base) {
+        MmioFreeNode *succ = node->next;
+        node->size += succ->size;
+        node->next  = succ->next;
+        kfree(succ);
+    }
+
+    /* Coalesce backward — walk again from head to find predecessor.
+     * O(N) but the list stays short (~10s of nodes max in practice). */
+    if (pp != &kernel_mmio_free_head) {
+        MmioFreeNode *pred = kernel_mmio_free_head;
+        while (pred->next != node) pred = pred->next;
+        if (pred->base + pred->size == node->base) {
+            pred->size += node->size;
+            pred->next  = node->next;
+            kfree(node);
+        }
+    }
+}
+
 volatile void *vmm_map_mmio(uintptr_t phys_addr, size_t size, uint64_t flags)
 {
     if (size == 0)
@@ -1341,17 +1451,22 @@ volatile void *vmm_map_mmio(uintptr_t phys_addr, size_t size, uint64_t flags)
 
     spin_lock(&kernel_mmio_lock);
 
-    uintptr_t virt_base = kernel_mmio_current;
+    /* Try the free list first — recycled VA cuts both fragmentation
+     * and total kernel-MMIO usage. Fall through to bump on miss. */
+    uintptr_t virt_base = mmio_free_list_take_locked(size_aligned);
+    if (virt_base == 0) {
+        virt_base = kernel_mmio_current;
 
-    if (virt_base + size_aligned > VMM_KERNEL_MMIO_BASE + VMM_KERNEL_MMIO_SIZE)
-    {
-        spin_unlock(&kernel_mmio_lock);
-        vmm_set_error("vmm_map_mmio: kernel MMIO region exhausted");
-        debug_printf("[VMM] ERROR: MMIO region exhausted (need %zu bytes)\n", size_aligned);
-        return NULL;
+        if (virt_base + size_aligned > VMM_KERNEL_MMIO_BASE + VMM_KERNEL_MMIO_SIZE)
+        {
+            spin_unlock(&kernel_mmio_lock);
+            vmm_set_error("vmm_map_mmio: kernel MMIO region exhausted");
+            debug_printf("[VMM] ERROR: MMIO region exhausted (need %zu bytes)\n", size_aligned);
+            return NULL;
+        }
+
+        kernel_mmio_current += size_aligned;
     }
-
-    kernel_mmio_current += size_aligned;
     spin_unlock(&kernel_mmio_lock);
 
     uint64_t mmio_flags = flags | VMM_FLAG_CACHE_DISABLE | VMM_FLAG_WRITE_THROUGH;
@@ -1363,11 +1478,10 @@ volatile void *vmm_map_mmio(uintptr_t phys_addr, size_t size, uint64_t flags)
     if (!result.success)
     {
         debug_printf("[VMM] ERROR: vmm_map_mmio: failed to map pages: %s\n", result.error_msg);
+        /* Return the just-allocated VA range to the recycler so the
+         * failure doesn't leak it. */
         spin_lock(&kernel_mmio_lock);
-        if (kernel_mmio_current == virt_base + size_aligned)
-        {
-            kernel_mmio_current = virt_base;
-        }
+        mmio_free_list_insert_locked(virt_base, size_aligned);
         spin_unlock(&kernel_mmio_lock);
         return NULL;
     }
@@ -1450,8 +1564,13 @@ void vmm_unmap_mmio(volatile void *virt_addr, size_t size)
         return;
 
     void *virt = (void *)virt_addr;
+    /* Align the original allocation: vmm_map_mmio aligned the size
+     * INCLUDING the sub-page offset of phys_addr. We don't have the
+     * original phys here, but the page-aligned virt + page-up size
+     * recovers the same range as long as the caller passed back the
+     * exact pointer vmm_map_mmio returned. */
     uintptr_t virt_base = vmm_page_align_down((uintptr_t)virt);
-    size_t size_aligned = vmm_page_align_up(size);
+    size_t size_aligned = vmm_page_align_up(size + ((uintptr_t)virt - virt_base));
     size_t page_count = size_aligned / VMM_PAGE_SIZE;
 
     debug_printf("[VMM] vmm_unmap_mmio: virt=%p size=0x%llx pages=%zu\n",
@@ -1460,7 +1579,12 @@ void vmm_unmap_mmio(volatile void *virt_addr, size_t size)
     vmm_context_t *ctx = vmm_get_kernel_context();
     vmm_unmap_pages(ctx, virt_base, page_count);
 
-    // virtual address space is not reclaimed (bump allocator); needs a free list for production
+    /* Reclaim the virtual address range. mmio_free_list_insert_locked
+     * coalesces adjacent ranges and folds top-of-bump back into the
+     * cursor, so steady-state allocate/free workloads never leak. */
+    spin_lock(&kernel_mmio_lock);
+    mmio_free_list_insert_locked(virt_base, size_aligned);
+    spin_unlock(&kernel_mmio_lock);
 }
 
 void *vmm_alloc_pages(vmm_context_t *ctx, size_t page_count, uint64_t flags)

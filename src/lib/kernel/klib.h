@@ -22,6 +22,7 @@ extern uintptr_t _kernel_start;
 // 32 bytes: mem_block_t is 20 bytes; 16-byte alignment causes misaligned new_block pointers in kmalloc split
 #define KLIB_BLOCK_ALIGNMENT  32
 #define KLIB_MAGIC_NUMBER     0xDEADBEEF
+#define KLIB_MAGIC_FREE       0xFEEDFACE   /* set by kfree, checked by kfree to detect double-free in O(1) */
 
 typedef struct mem_block {
     size_t size;

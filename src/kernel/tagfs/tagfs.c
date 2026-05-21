@@ -1308,6 +1308,23 @@ void tagfs_sync(void)
     }
 
     tagfs_write_superblock(&g_state.superblock);
+
+    /* Drive write-cache flush.
+     *
+     * NCQ WRITE FPDMA QUEUED returns "received" — bytes may still be
+     * in the on-disk write cache (16-256 MiB) when the command
+     * completes. Without an explicit FLUSH CACHE after the sync
+     * sequence, a power cut between this point and the next disk
+     * write loses the superblock + bitmap + journal commit records
+     * we just produced — the next mount sees a corrupted file
+     * system. ata_flush_cache(1) dispatches WRITE FLUSH EXT (or
+     * AHCI flush) which only returns when the drive's cache has
+     * been committed to media.
+     *
+     * Cost: ~5-15 ms per call on a spinning drive, ~50 µs on NVMe
+     * via SATA. tagfs_sync is called on user-initiated shutdown
+     * and on metadata-pool checkpoint, both rare. */
+    ata_flush_cache(1);
 }
 
 void tagfs_shutdown(void)

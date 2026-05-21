@@ -412,6 +412,16 @@ error_t DiskBookCommit(DiskBookTxn* txn) {
     
     txn->active = 0;
     spin_unlock(&g_disk_book_lock);
+
+    /* Drive write-cache flush after the commit record + state updates.
+     * NCQ WRITE FPDMA QUEUED returns when the drive's controller has
+     * received the bytes — they may sit in the 16-256 MiB on-disk
+     * write cache for seconds before reaching media. Without an
+     * explicit FLUSH CACHE, a power-cut here loses every journal entry
+     * we just produced; the next mount sees a truncated log and rolls
+     * back committed transactions. */
+    ata_flush_cache(1);
+
     DiskBookMaybeCheckpoint();
     return OK;
 }
