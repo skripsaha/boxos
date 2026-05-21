@@ -75,3 +75,61 @@ void cpu_detect_features(void) {
         g_cpu_caps.has_1gb_pages = (edx & (1 << 26)) != 0;
     }
 }
+
+/* Per-AP capability intersection.
+ *
+ * Heterogeneous CPUs (Intel Alder Lake-and-later "P+E" hybrid, ARM
+ * big.LITTLE) advertise different ECX/EDX bits on different cores. If
+ * the BSP is a P-core that publishes AVX-512 and the kernel caches
+ * that in g_cpu_caps, a later AP-init on an E-core (which lacks
+ * AVX-512) running kernel code that touches a ZMM register would #UD.
+ *
+ * Conservative fix: each AP re-runs CPUID locally and ANDs its
+ * capability bits with whatever the BSP / previous APs already
+ * recorded. The post-amp-boot g_cpu_caps reflects the INTERSECTION of
+ * features available on every online CPU — no path enables a feature
+ * the weakest core can't service.
+ *
+ * Same-CPU homogeneous systems (the common case under QEMU and on
+ * pre-Alder-Lake hardware) AND identically with themselves and the
+ * intersection is a no-op. Cost is one CPUID per AP at boot, never
+ * after. */
+void cpu_intersect_features_ap(void) {
+    uint32_t eax, ebx, ecx, edx;
+
+    /* AND only the booleans that gate code emission / instruction
+     * usage. max_basic_leaf / max_extended_leaf / vendor_string /
+     * xcr0_supported / xsave_area_size are descriptors of the CURRENT
+     * core; we keep the BSP values for those since cross-core CPUID
+     * variation in those fields is undefined behaviour (Intel SDM
+     * Vol 2A §CPUID — "topology" leaves vary, but max-leaf and vendor
+     * are required identical across all logical CPUs of a single
+     * package). */
+
+    if (g_cpu_caps.max_basic_leaf >= CPUID_LEAF_FEATURES) {
+        cpuid(CPUID_LEAF_FEATURES, &eax, &ebx, &ecx, &edx);
+        g_cpu_caps.has_apic    &= ((edx & (1 << 9))  != 0);
+        g_cpu_caps.has_x2apic  &= ((ecx & (1 << 21)) != 0);
+        g_cpu_caps.has_xsave   &= ((ecx & (1 << 26)) != 0);
+        g_cpu_caps.has_avx     &= ((ecx & (1 << 28)) != 0);
+        g_cpu_caps.has_pcid    &= ((ecx & (1 << 17)) != 0);
+    }
+
+    if (g_cpu_caps.max_basic_leaf >= CPUID_LEAF_EXT_FEATURES) {
+        cpuid_count(CPUID_LEAF_EXT_FEATURES, 0, &eax, &ebx, &ecx, &edx);
+        g_cpu_caps.has_waitpkg &= ((ecx & (1 << 5))  != 0);
+        g_cpu_caps.has_avx512  &= ((ebx & (1 << 16)) != 0);
+        g_cpu_caps.has_smep    &= ((ebx & (1 << 7))  != 0);
+        g_cpu_caps.has_smap    &= ((ebx & (1 << 20)) != 0);
+    }
+
+    if (g_cpu_caps.max_extended_leaf >= CPUID_LEAF_APM) {
+        cpuid(CPUID_LEAF_APM, &eax, &ebx, &ecx, &edx);
+        g_cpu_caps.has_invariant_tsc &= ((edx & (1 << 8)) != 0);
+    }
+
+    if (g_cpu_caps.max_extended_leaf >= CPUID_LEAF_EXT_FEATURES2) {
+        cpuid(CPUID_LEAF_EXT_FEATURES2, &eax, &ebx, &ecx, &edx);
+        g_cpu_caps.has_1gb_pages &= ((edx & (1 << 26)) != 0);
+    }
+}

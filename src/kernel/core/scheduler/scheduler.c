@@ -634,7 +634,18 @@ static process_t *sched_try_steal(uint8_t my_core)
         return NULL;
     }
 
+    /* Snapshot the stolen process AND the priority we are pulling it
+     * from INSIDE the victim's lock. The historical bug: prio was
+     * read from `stolen->current_prio` AFTER the unlock — between
+     * unlock and that read, another path on the victim core could
+     * mutate current_prio (e.g. a parallel priority recalculation),
+     * leading to a tier-counter decrement on the wrong queue and
+     * persistent counter drift (eventually wraps negative, makes
+     * `recalc_parameters` think every core is busy, parks live
+     * cores). Reading inside the lock + transferring both counters
+     * before unlocking eliminates the window. */
     process_t *stolen = NULL;
+    int        stolen_prio = -1;
     for (int prio = SCHED_PRIO_NORMAL; prio >= SCHED_PRIO_IDLE; prio--)
     {
         SchedQueue *q = &vs->runqueue.queues[prio];
@@ -649,18 +660,18 @@ static process_t *sched_try_steal(uint8_t my_core)
         if (q->count == 0)
             vs->runqueue.active_bitmap &= ~(1u << prio);
         __atomic_fetch_sub(&vs->runqueue.total, 1, __ATOMIC_RELEASE);
+        stolen_prio = stolen->current_prio;
         break;
     }
 
-    spin_unlock(&vs->runqueue.lock);
-
-    if (stolen)
-    {
+    /* Transfer the tier counter from victim to stealer while still
+     * holding the victim's lock — no other path on the victim can
+     * be modifying current_prio for this process here because we
+     * already pulled it off the runqueue. */
+    if (stolen && stolen_prio >= 0 && stolen_prio < SCHED_PRIO_LEVELS) {
         uint8_t core = amp_get_core_index();
-        int prio = stolen->current_prio;
-        // Validate priority before updating counters
-        if (prio >= 0 && prio < SCHED_PRIO_LEVELS && core < g_sched_core_count) {
-            if (prio == SCHED_PRIO_CONTEXT) {
+        if (core < g_sched_core_count) {
+            if (stolen_prio == SCHED_PRIO_CONTEXT) {
                 __atomic_fetch_sub(&g_core_context_count[victim], 1, __ATOMIC_RELAXED);
                 __atomic_fetch_add(&g_core_context_count[core], 1, __ATOMIC_RELAXED);
             } else {
@@ -668,7 +679,12 @@ static process_t *sched_try_steal(uint8_t my_core)
                 __atomic_fetch_add(&g_core_normal_count[core], 1, __ATOMIC_RELAXED);
             }
         }
-        stolen->home_core = core;
+    }
+
+    spin_unlock(&vs->runqueue.lock);
+
+    if (stolen) {
+        stolen->home_core = amp_get_core_index();
         g_sched_stats.steal_successes++;
     }
 
@@ -758,6 +774,26 @@ void schedule(void *frame_ptr)
 
     // Switch
     spin_lock(&s->scheduler_lock);
+    /* TOCTOU re-check: between scheduler_select_next (which filtered
+     * destroying processes) and this store, another core may have
+     * called process_destroy on `next` and marked destroying=1. If
+     * we commit `next` as current_process here, process_destroy's
+     * scan finds the just-stored pointer AND the destroyer races
+     * with us through the alive-ref window — net effect is a UAF
+     * when destroy eventually frees the process struct.
+     *
+     * Closing the window: re-read destroying under the same lock
+     * that process_destroy's scan synchronises with (via the
+     * ACQUIRE load on s->current_process in process_destroy.c:662).
+     * If destroying is set we fall back to idle for this tick;
+     * scheduler_select_next will pick a fresh candidate next tick. */
+    if (next && !process_is_idle(next) &&
+        __atomic_load_n(&next->destroying, __ATOMIC_ACQUIRE)) {
+        /* Bail out to NULL — next IRQ tick will run scheduler again
+         * and pick a fresh candidate. NULL is a valid current_process
+         * value (treated as "no current task"). */
+        next = NULL;
+    }
     s->current_process = next;
     spin_unlock(&s->scheduler_lock);
 

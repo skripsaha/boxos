@@ -38,6 +38,14 @@ void cpuid(uint32_t leaf, uint32_t* eax, uint32_t* ebx, uint32_t* ecx, uint32_t*
 void cpuid_count(uint32_t leaf, uint32_t subleaf, uint32_t* eax, uint32_t* ebx, uint32_t* ecx, uint32_t* edx);
 void cpu_detect_features(void);
 
+/* Per-AP capability intersection — call once on every AP after it has
+ * entered long mode but before any non-trivial kernel code path on
+ * that AP touches CPU features. ANDs the local CPUID feature bits
+ * into g_cpu_caps so the kernel-wide flags reflect the INTERSECTION
+ * of every online core's capabilities (safe on heterogeneous P+E /
+ * big.LITTLE CPUs). */
+void cpu_intersect_features_ap(void);
+
 static inline uint8_t cpuid_get_maxphyaddr(void) {
     uint32_t eax, ebx, ecx, edx;
 
