@@ -323,7 +323,16 @@ int   vmm_user_buf_commit_out(vmm_context_t *ctx, uintptr_t user_vaddr,
                               const void *kbuf, size_t size);
 void  vmm_user_buf_free(void *kbuf);
 int vmm_setup_null_trap(vmm_context_t* ctx);
-int vmm_map_code_region(vmm_context_t* ctx, uintptr_t code_phys, uint64_t size);
+/* Map a process code region.
+ *
+ *   code_phys / size   physical pages staged with the binary contents.
+ *   out_entry          (out) virtual entry point — `ehdr->e_entry` for
+ *                       ELF binaries, `VMM_CABIN_CODE_START` for raw
+ *                       flat binaries. Caller stores this into the
+ *                       process's saved RIP. NULL is permitted only
+ *                       for legacy callers that don't care. */
+int vmm_map_code_region(vmm_context_t* ctx, uintptr_t code_phys, uint64_t size,
+                        uintptr_t *out_entry);
 
 // Called by vmm_init() after Pull Map is live to rebase PMM bitmap pointer
 void pmm_activate_pull_map(void);

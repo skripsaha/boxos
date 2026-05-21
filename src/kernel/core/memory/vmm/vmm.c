@@ -2707,8 +2707,11 @@ typedef struct
 
 #define VMM_CABIN_MAX_CODE_SIZE (VMM_USER_STACK_TOP - VMM_CABIN_CODE_START - (64 * 1024))
 
-int vmm_map_code_region(vmm_context_t *ctx, uintptr_t code_phys, uint64_t size)
+int vmm_map_code_region(vmm_context_t *ctx, uintptr_t code_phys, uint64_t size,
+                        uintptr_t *out_entry)
 {
+    if (out_entry) *out_entry = VMM_CABIN_CODE_START;
+
     if (!ctx || !code_phys || size == 0)
         return -1;
 
@@ -2958,6 +2961,11 @@ int vmm_map_code_region(vmm_context_t *ctx, uintptr_t code_phys, uint64_t size)
 
     debug_printf("[VMM] ELF binary mapped: %zu total pages (W^X enforced)\n", total_mapped_pages);
 
+    /* Publish entry point from the ELF header. Production binaries link
+     * with `.text=0xC000` so this typically equals VMM_CABIN_CODE_START
+     * (the early-set default), but honouring e_entry lets a future
+     * linker move the start without breaking process spawn. */
+    if (out_entry) *out_entry = (uintptr_t)ehdr->e_entry;
     return 0;
 }
 
