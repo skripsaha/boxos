@@ -6,6 +6,7 @@
 #include "klib.h"
 #include "irqchip.h"
 #include "fpu.h"
+#include "cpuid.h"
 
 PerCoreData g_per_core[MAX_CORES] __attribute__((aligned(64)));
 volatile bool g_per_core_active = false;
@@ -213,6 +214,16 @@ void per_core_init_bsp(void) {
 }
 
 void per_core_init_ap(uint8_t core_index, uint64_t stack_top) {
+    /* Intersect THIS AP's CPUID feature bits with the kernel-wide
+     * g_cpu_caps. On homogeneous CPUs this is a no-op (every AP
+     * AND's identical bits in). On heterogeneous Intel P+E (Alder
+     * Lake and later) or ARM big.LITTLE it prevents kernel code from
+     * later emitting an instruction the weakest core can't execute,
+     * which would otherwise #UD on that AP. Runs BEFORE any g_cpu_caps
+     * consumer on this AP — per_core data init below only reads
+     * core-static structs, no CPU features yet. */
+    cpu_intersect_features_ap();
+
     PerCoreData* pc = &g_per_core[core_index];
 
     memset(pc, 0, sizeof(PerCoreData));
