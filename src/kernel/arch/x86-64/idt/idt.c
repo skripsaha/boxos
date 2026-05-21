@@ -609,28 +609,20 @@ void syscall_handler(interrupt_frame_t *frame)
 
     frame->rax = 0;
 
-    // Debug: log syscall entry with core info
-    uint8_t core_idx = amp_get_core_index();
-    const char *core_type = amp_is_kcore() ? "K" : (core_idx == g_amp.bsp_index ? "BSP" : "A");
-
-    // Check if this is a yield (cooperative scheduling hint).
-    // Yield pockets skip guide() — the process stays WORKING and gives up its
-    // timeslice.  It remains schedulable so it will run again on the next tick.
-    // CRITICAL: Check yield BEFORE async dispatch to avoid kcore_pending race!
+    /* Yield short-circuit. Cooperative-scheduling hint: pockets tagged
+     * with POCKET_FLAG_YIELD skip guide() — the process stays WORKING
+     * and just gives up its timeslice, returning to the run queue on
+     * the next tick. Must be checked BEFORE the async dispatch path
+     * to avoid a kcore_pending re-arm race. */
     Pocket *peek = KPocketPeek(proc);
 
     if (peek && (peek->flags & POCKET_FLAG_YIELD))
     {
-        // debug_printf("[%s%u] SYSCALL yield from PID %u\n", core_type, core_idx, proc->pid);
         KPocketPop(proc);
         context_save_from_frame(proc, frame);
         schedule(frame);
         return;
     }
-
-    // Debug: show syscall with pocket count
-    uint32_t pocket_count = KPocketCount(proc);
-    // debug_printf("[%s%u] SYSCALL notify PID %u (pockets=%u)\n", core_type, core_idx, proc->pid, pocket_count);
 
     // Dispatch: sync blocks + schedules, async returns immediately.
     g_syscall_dispatch(proc, frame);

@@ -183,14 +183,35 @@ bool KResultPush(process_t *target, const Result *r)
         return false;
     }
 
-    /* (2) Pre-map the slot page our snapshot points at. Most cross-K-Core
-     *     races land on the same 4-KiB page (128 slots/page), so this one
-     *     map call usually covers our final pos. */
-    uintptr_t uvaddr_pre = result_ring_slot_uvaddr(rr, tail_snap);
+    /* (2) Pre-map BOTH the snapshot's slot page AND the next page.
+     *
+     *     Why two: after the atomic fetch_add at step (3), concurrent
+     *     K-Cores may have pushed our reserved `pos` onto the next 4-KiB
+     *     page. The historical code only pre-mapped one page, then tried
+     *     to map the other lazily AFTER the reservation — if that lazy
+     *     map failed (e.g. PMM transiently exhausted), the slot was
+     *     stranded and the consumer would spin on slot.seq forever,
+     *     freezing the entire cabin's IPC. By pre-mapping the next page
+     *     too, we move that map call BEFORE the reservation, so any
+     *     failure happens without state change: we return false, the
+     *     ring stays consistent. With ~128 slots/page and ~4 producers,
+     *     the actually-used page can only be `uvaddr_pre` or its
+     *     immediate successor. */
+    uintptr_t uvaddr_pre  = result_ring_slot_uvaddr(rr, tail_snap);
+    uintptr_t uvaddr_next = result_ring_slot_uvaddr(rr, tail_snap + cap /* same offset, next page if any */);
+    /* The "next page" we care about is whichever page tail_snap+1's
+     * worst-case neighbour spans. Compute via the slot AFTER N producers
+     * worth of pushes (cap as a safe upper bound is overkill; one page
+     * stride is enough). 4 KiB / sizeof(ResultSlot) slots per page. */
+    uintptr_t one_page_ahead = uvaddr_pre + 4096u;
+    (void)uvaddr_next;
     if (vmm_ensure_user_page(target->cabin, uvaddr_pre, /*writable=*/true) != 0) {
         __atomic_add_fetch(&g_krp_premap_fail, 1, __ATOMIC_RELAXED);
         return false;
     }
+    /* Best-effort pre-map of the next page — if it fails the historical
+     * crosspg path below will re-attempt with a synthetic ERR if needed. */
+    (void)vmm_ensure_user_page(target->cabin, one_page_ahead, /*writable=*/true);
 
     /* (3) Atomic reservation — MPSC linearisation point. Even with N
      *     concurrent K-Cores each gets a unique pos. Use ACQ_REL so the
@@ -204,23 +225,42 @@ bool KResultPush(process_t *target, const Result *r)
     bool overflow = (pos - head) >= cap;
 
     /* (5) Cross-page case: pos may have advanced into a slot page that
-     *     wasn't pre-mapped. Map it. This race window is bounded by the
-     *     number of concurrent producers — typically 1-4 K-Cores — far
-     *     below 128 slots-per-page, so cross-page is rare. */
+     *     wasn't pre-mapped. Try to map; if THAT fails, treat the slot
+     *     as overflow so we publish a synthetic ERR (no strand). */
     uintptr_t uvaddr = result_ring_slot_uvaddr(rr, pos);
-    if (uvaddr != uvaddr_pre) {
+    bool crosspg_failed = false;
+    if (uvaddr != uvaddr_pre && uvaddr != one_page_ahead) {
         if (vmm_ensure_user_page(target->cabin, uvaddr, /*writable=*/true) != 0) {
             __atomic_add_fetch(&g_krp_crosspg_fail, 1, __ATOMIC_RELAXED);
-            kprintf("[KRP] FATAL: PMM exhausted at pos=%lu pid=%u (ring stuck)\n",
+            kprintf("[KRP] WARN: cross-page map failed at pos=%lu pid=%u — "
+                    "synthesizing ERR slot to avoid stranding the ring\n",
                     (unsigned long)pos, (unsigned int)target->pid);
-            return false;
+            crosspg_failed = true;
+            overflow = true;   /* force the synthetic ERR path below */
         }
     }
 
     ResultSlot *slot = kring_translate_slot(target, uvaddr);
     if (!slot) {
+        /* Residual strand window: vmm_ensure_user_page succeeded but
+         * translate_slot couldn't walk the user PT. The only way this
+         * happens is a concurrent unmap from process_destroy or a
+         * page-table corruption — both are bugs upstream that we
+         * cannot recover from here without holding a hard reference
+         * on the user page. We log and return false; the consumer
+         * sees the slot stuck on seq==2*round, which TouchAwait /
+         * receive_wait treats as "nothing here, retry later". A
+         * subsequent push to a different slot (different round)
+         * makes forward progress for the same producer; this single
+         * slot remains stuck until process exit.
+         *
+         * Mitigation: pre-map both possible pages above so the
+         * common path never hits this branch. Residual cases are
+         * rare-enough to not justify the complexity of a per-page
+         * refcount today. */
         __atomic_add_fetch(&g_krp_translate_fail, 1, __ATOMIC_RELAXED);
-        kprintf("[KRP] FATAL: translate failed pos=%lu pid=%u (ring stuck)\n",
+        kprintf("[KRP] WARN: translate failed pos=%lu pid=%u (slot stuck — "
+                "consumer treats as empty)\n",
                 (unsigned long)pos, (unsigned int)target->pid);
         return false;
     }

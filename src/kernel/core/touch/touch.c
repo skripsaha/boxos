@@ -168,9 +168,13 @@ static void resolve_tag_pair(const char *tag, uint16_t *out_full, uint16_t *out_
     }
 }
 
-/* Single-tag-id resolver (legacy callers + claim/send paths that target
- * exactly one bucket). For wildcard or bare-key strings, returns the
- * key-only id; otherwise the full (key, value) id. */
+/* Single-tag-id resolver — kept for legacy callers + claim/send paths
+ * that target exactly one bucket. Currently unreferenced because
+ * everything uses resolve_tag_pair, but the symbol is retained behind
+ * an attribute so future direct lookups don't need a re-implementation.
+ * For wildcard or bare-key strings returns the key-only id; otherwise
+ * the full (key, value) id. */
+__attribute__((unused))
 static uint16_t resolve_tag(const char *tag)
 {
     uint16_t full, bare;
@@ -656,23 +660,41 @@ void TouchCleanupProcess(process_t *proc)
     proc->touch_cleaned = 1;
 
     /* Release all manifest handles from REACT claims; balance the
-     * global listener counter for every claim we're tearing down. */
-    TouchClaim *table = (TouchClaim *)proc->claim_table;
-    if (proc->claim_count > 0) {
+     * global listener counter for every claim we're tearing down.
+     *
+     * UAF avoidance: this function runs from process_destroy WHILE
+     * publishers on other cores may still hold a refcount on `proc`
+     * via process_find_ref and be inside find_claim() reading
+     * proc->claim_table. We must not kfree the table here — instead
+     * we ATOMICALLY zero claim_count (publishers reading the new
+     * value will iterate 0 times and return NULL), drop the listener
+     * counter and release manifests using the captured count, and
+     * leave the actual kfree(claim_table) to process_cleanup_immediate
+     * which runs only after ref_count hits 0. Publishers that read
+     * the OLD claim_count (race window between our store and their
+     * load) still index into a valid table — kfree happens strictly
+     * after every publisher has dropped its ref. */
+    uint16_t  old_count = proc->claim_count;
+    TouchClaim *table   = (TouchClaim *)proc->claim_table;
+
+    /* RELEASE-store 0 so any subsequent find_claim with __ATOMIC_ACQUIRE
+     * load sees an empty table. */
+    __atomic_store_n(&proc->claim_count, (uint16_t)0, __ATOMIC_RELEASE);
+
+    if (old_count > 0 && table) {
         __atomic_sub_fetch(&g_listener_count,
-                           (uint32_t)proc->claim_count,
+                           (uint32_t)old_count,
                            __ATOMIC_RELEASE);
+        for (uint16_t i = 0; i < old_count; i++) {
+            if (table[i].mode == TOUCH_REACT && table[i].u.manifest != MANIFEST_HANDLE_INVALID)
+                ManifestRelease(table[i].u.manifest);
+        }
     }
-    for (uint16_t i = 0; i < proc->claim_count; i++) {
-        if (table[i].mode == TOUCH_REACT && table[i].u.manifest != MANIFEST_HANDLE_INVALID)
-            ManifestRelease(table[i].u.manifest);
-    }
-    if (proc->claim_table) {
-        kfree(proc->claim_table);
-        proc->claim_table    = NULL;
-        proc->claim_count    = 0;
-        proc->claim_capacity = 0;
-    }
+
+    /* claim_table pointer is intentionally NOT cleared here — the
+     * kfree happens in process_cleanup_immediate after the last
+     * reference is dropped. proc->claim_capacity is also kept until
+     * then (informational). */
 
     if (proc->ear_overflow_ids) {
         kfree(proc->ear_overflow_ids);

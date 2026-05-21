@@ -765,7 +765,9 @@ int process_load_binary(process_t *proc, const void *binary_data, size_t size)
     void *code_virt = vmm_phys_to_virt((uintptr_t)code_phys);
     memcpy(code_virt, binary_data, size);
 
-    int result = vmm_map_code_region(proc->cabin, (uintptr_t)code_phys, page_count * VMM_PAGE_SIZE);
+    uintptr_t entry_point = VMM_CABIN_CODE_START;
+    int result = vmm_map_code_region(proc->cabin, (uintptr_t)code_phys,
+                                     page_count * VMM_PAGE_SIZE, &entry_point);
     if (result != 0)
     {
         debug_printf("[PROCESS] ERROR: Failed to map code region\n");
@@ -865,7 +867,11 @@ int process_load_binary(process_t *proc, const void *binary_data, size_t size)
     ci->stack_top = stack_top;
 
     proc->code_size = size;
-    proc->context.rip = VMM_CABIN_CODE_START;
+    /* Use the entry point reported by vmm_map_code_region — equals
+     * ehdr->e_entry for ELF binaries (which is normally the same as
+     * VMM_CABIN_CODE_START because production binaries link with
+     * .text=0xC000, but honouring it survives a future linker bump). */
+    proc->context.rip = entry_point;
     proc->context.rsp = stack_top;
 
     debug_printf("[PROCESS] ASLR: PID %u heap=0x%lx stack=0x%lx buf=0x%lx\n",
@@ -1439,6 +1445,22 @@ static void process_cleanup_immediate(process_t *proc)
         proc->tag_overflow_ids = NULL;
         proc->tag_overflow_count = 0;
         proc->tag_overflow_capacity = 0;
+    }
+
+    /* Touch claim_table — deferred free.
+     *
+     * TouchCleanupProcess (called from process_destroy) only zeroes
+     * claim_count and releases manifest handles; the underlying
+     * table is left allocated because publishers on other cores can
+     * still be inside find_claim() reading it. We now hold the
+     * "last reference" (ref_count just hit 0) so no publisher can
+     * be active — safe to free. See touch.c:TouchCleanupProcess for
+     * the full rationale. */
+    if (proc->claim_table)
+    {
+        kfree(proc->claim_table);
+        proc->claim_table    = NULL;
+        proc->claim_capacity = 0;
     }
 
     // Free dynamically allocated FPU state buffer
