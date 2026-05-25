@@ -763,6 +763,8 @@ static TestResult test_integrity_detects_mismatch(void) {
     TEST_ASSERT(!IntegrityVerify(blk, g_test_buffer), "verify detects a 1-byte mismatch");
     TEST_ASSERT(IntegrityErrorCount() == before + 1, "bit-rot counter incremented exactly once");
 
+    IntegrityDrainReports();   // exercise the deferred Touch-report path (no crash)
+
     tagfs_free_blocks(blk, 1);
     return TEST_PASS;
 }
