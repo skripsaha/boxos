@@ -206,7 +206,13 @@ void ahci_irq_handler(void) {
              * every later command on this port would stall. COMRESET busy-
              * waits, so hand it to a K-Core via irq_defer (allocation-free,
              * IRQ-safe). The CAS coalesces a storm of error IRQs into one. */
-            if (__sync_bool_compare_and_swap(&state->recovering, 0, 1)) {
+            /* Only multi-core schedules deferred recovery: the COMRESET runs
+             * on a K-Core pump loop, which exists only when total_cores > 1.
+             * On a single core async I/O is disabled and the sync path
+             * recovers the port inline, so deferring here would just enqueue
+             * to a ring nothing drains. */
+            if (g_amp.total_cores > 1 &&
+                __sync_bool_compare_and_swap(&state->recovering, 0, 1)) {
                 irq_defer(ahci_deferred_recover, state);
             }
         }
