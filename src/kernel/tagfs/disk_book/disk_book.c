@@ -51,6 +51,11 @@ static uint64_t record_sector(uint32_t idx) {
 // Superblock I/O (primary + backup, each exactly one sector)
 // ----------------------------------------------------------------------------
 static int write_superblock_locked(void) {
+    /* Stamp CRC32 over the whole block with the crc32 field zeroed, so a torn
+     * superblock write is detected on the next mount and the backup is used. */
+    g_sb.crc32 = 0;
+    g_sb.crc32 = KCrc32((const uint8_t *)&g_sb, sizeof(DiskBookSuperblock));
+
     uint8_t buf[TAGFS_SECTOR_SIZE];
     memset(buf, 0, sizeof(buf));
     memcpy(buf, &g_sb, sizeof(DiskBookSuperblock));
@@ -60,19 +65,29 @@ static int write_superblock_locked(void) {
     return OK;
 }
 
+static bool sb_valid(const DiskBookSuperblock *sb) {
+    if (sb->magic != DISK_BOOK_SB_MAGIC)
+        return false;
+    DiskBookSuperblock t = *sb;
+    uint32_t stored = t.crc32;
+    t.crc32 = 0;
+    return KCrc32((const uint8_t *)&t, sizeof(t)) == stored;
+}
+
 static int read_superblock_into(DiskBookSuperblock *out) {
     uint8_t buf[TAGFS_SECTOR_SIZE];
-    if (disk_book_read_sectors(g_sb_sector, 1, buf) != 0)
-        return ERR_IO;
-    memcpy(out, buf, sizeof(DiskBookSuperblock));
-    if (out->magic != DISK_BOOK_SB_MAGIC) {
-        if (disk_book_read_sectors(g_sb_backup_sector, 1, buf) != 0)
-            return ERR_CORRUPTED;
+    if (disk_book_read_sectors(g_sb_sector, 1, buf) == 0) {
         memcpy(out, buf, sizeof(DiskBookSuperblock));
-        if (out->magic != DISK_BOOK_SB_MAGIC)
-            return ERR_CORRUPTED;
+        if (sb_valid(out))
+            return OK;
+        debug_printf("[DiskBook] primary superblock invalid (magic/CRC) — trying backup\n");
     }
-    return OK;
+    if (disk_book_read_sectors(g_sb_backup_sector, 1, buf) != 0)
+        return ERR_CORRUPTED;
+    memcpy(out, buf, sizeof(DiskBookSuperblock));
+    if (sb_valid(out))
+        return OK;
+    return ERR_CORRUPTED;
 }
 
 static int read_entry(uint32_t idx, DiskBookEntry *out) {

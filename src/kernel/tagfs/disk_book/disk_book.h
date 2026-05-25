@@ -50,8 +50,9 @@ typedef struct __packed {
     uint32_t count;          /* authoritative live record count [0..count)  */
     uint32_t generation;     /* monotonic; bumped on every mutation         */
     uint32_t flags;
+    uint32_t crc32;          /* CRC32 of this 512-byte block, crc32 field=0 */
     uint8_t  uuid[16];
-    uint8_t  reserved[464];
+    uint8_t  reserved[460];
 } DiskBookSuperblock;
 
 STATIC_ASSERT(sizeof(DiskBookSuperblock) == 512, "DiskBookSuperblock_must_be_512_bytes");
