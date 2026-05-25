@@ -227,6 +227,27 @@ void kcore_run_loop(void)
             process_cleanup_deferred();
         }
 
-        __asm__ volatile("hlt");
+        /* Sleep race-free. kcore_submit() pushes a pocket THEN sends IPI_WAKE;
+         * since the K-Core LAPIC timer is masked (App Cores carry preemption),
+         * that IPI is the ONLY pocket wakeup — so a bare HLT here has a classic
+         * lost-wakeup: a submit landing between the drain above and the HLT can
+         * have its IPI consumed before we sleep, stranding us in HLT with a
+         * queued pocket forever (the symptom: a command hangs with no crash,
+         * seen at 16 cores where there are several AP K-Cores). Close the
+         * window: disable interrupts, re-check the queue, and HLT only while
+         * it is still empty. STI;HLT is atomic — the one-instruction STI
+         * interrupt shadow defers delivery until after HLT executes — so an IPI
+         * that arrived under CLI wakes us the instant we sleep. Work fed by
+         * device IRQs (write-cont, irq-defer) wakes HLT via its own interrupt,
+         * so it needs no re-check here.
+         *
+         * (Before the K-Core timer was masked, the 100 Hz tick papered over
+         * this race by waking every 10 ms; this is the proper fix.) */
+        __asm__ volatile("cli");
+        if (kcore_queue_depth(my_idx) != 0) {
+            __asm__ volatile("sti");        /* raced submit — loop, don't sleep */
+        } else {
+            __asm__ volatile("sti; hlt");   /* atomic arm-and-sleep */
+        }
     }
 }
