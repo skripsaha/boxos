@@ -1,9 +1,10 @@
 #include "lapic.h"
 #include "irqchip.h"
-#include "io.h"
 #include "klib.h"
 #include "vmm.h"
 #include "acpi_madt.h"
+#include "cpu_calibrate.h"   // cpu_ms_to_tsc — TSC-based LAPIC timer calibration
+#include "atomics.h"         // rdtsc
 
 static volatile uint32_t* lapic_base_virt = NULL;
 static uintptr_t lapic_base_phys = 0;
@@ -108,6 +109,17 @@ void lapic_send_eoi(void) {
 }
 
 uint32_t lapic_get_id(void) {
+    /* x2APIC: the local APIC ID lives in the read-only MSR
+     * IA32_X2APIC_APICID (0x802) and is the FULL 32-bit register value —
+     * it is NOT shifted by 24 like the xAPIC MMIO form. The memory-mapped
+     * APIC register window (offset 0x20) is disabled while EXTD=1, so an
+     * MMIO read here returns garbage (typically all-ones) and would make
+     * every core resolve to the same bogus index (Intel SDM Vol 3A
+     * §10.12.1.2 "x2APIC Register Availability"). */
+    if (g_x2apic_active) {
+        return (uint32_t)rdmsr(MSR_X2APIC_APICID);
+    }
+    /* xAPIC: 8-bit APIC ID in bits 31:24 of the MMIO ID register. */
     return (lapic_read(LAPIC_REG_ID) >> 24) & 0xFF;
 }
 
@@ -136,46 +148,41 @@ uintptr_t lapic_get_base(void) {
 void lapic_timer_init(uint8_t vector, uint32_t frequency_hz) {
     debug_printf("[LAPIC] Calibrating APIC timer for %u Hz...\n", frequency_hz);
 
-    // Use PIT channel 2 for calibration (one-shot, ~10ms)
-    // PIT frequency = 1193182 Hz, count for 10ms = 11932
-    #define PIT_CALIBRATION_TICKS 11932
-    #define PIT_CALIBRATION_MS    10
+    /* Calibrate the LAPIC timer against the TSC, NOT PIT channel 2.
+     *
+     * Each AP runs this from per_core_init_ap() while the BSP is concurrently
+     * busy-waiting on PIT channel 2 (pit_delay_us) inside amp_boot_aps() to
+     * pace INIT/SIPI and to poll the AP-online flag. PIT channel 2 is a single
+     * shared resource (ports 0x42/0x43, gate via 0x61); two CPUs programming
+     * it at once corrupt each other's window, so the old channel-2 calibration
+     * yielded a wrong APIC timer period on real hardware (QEMU's looser timing
+     * masked it). The TSC is per-core and was already calibrated by
+     * cpu_calibrate_tsc() before any AP boots (main.c), so timing the window
+     * with rdtsc() needs no shared hardware and cannot race. */
+    #define LAPIC_CAL_MS 10u
 
-    // Set timer divider to 16
     lapic_write(LAPIC_REG_TIMER_DCR, LAPIC_TIMER_DIV_16);
 
-    // Setup PIT channel 2 for one-shot calibration
-    outb(0x61, (inb(0x61) & 0xFD) | 0x01);    // Gate high, speaker off
-    outb(0x43, 0xB0);                           // Channel 2, lobyte/hibyte, one-shot
-    outb(0x42, PIT_CALIBRATION_TICKS & 0xFF);
-    outb(0x42, (PIT_CALIBRATION_TICKS >> 8) & 0xFF);
-
-    // Reset PIT one-shot counter
-    uint8_t tmp = inb(0x61);
-    outb(0x61, tmp & 0xFE);
-    outb(0x61, tmp | 0x01);
-
-    // Start LAPIC timer with max count
+    // Free-run the count-down from max; the LVT stays masked so no IRQ fires
+    // during measurement.
     lapic_write(LAPIC_REG_TIMER_ICR, 0xFFFFFFFF);
 
-    // Wait for PIT to finish (bit 5 of port 0x61 goes high)
-    while (!(inb(0x61) & 0x20)) {
+    uint64_t tsc_deadline = rdtsc() + cpu_ms_to_tsc(LAPIC_CAL_MS);
+    while (rdtsc() < tsc_deadline)
         __asm__ volatile("pause");
-    }
 
-    // Read how many LAPIC ticks elapsed
     uint32_t elapsed = 0xFFFFFFFF - lapic_read(LAPIC_REG_TIMER_CCR);
 
     // Stop timer
     lapic_write(LAPIC_REG_TIMER_LVT, LAPIC_LVT_MASKED);
 
-    // Calculate ticks per desired period
-    // elapsed ticks in 10ms, so ticks_per_second = elapsed * 100
-    uint32_t ticks_per_sec = elapsed * (1000 / PIT_CALIBRATION_MS);
-    uint32_t ticks_per_period = ticks_per_sec / frequency_hz;
+    uint32_t ticks_per_sec    = elapsed * (1000u / LAPIC_CAL_MS);
+    uint32_t ticks_per_period = (frequency_hz > 0) ? (ticks_per_sec / frequency_hz) : 0;
+    if (ticks_per_period == 0)
+        ticks_per_period = 1;   // never load ICR=0 — that stops the timer
 
-    debug_printf("[LAPIC] Timer: %u ticks/10ms, %u ticks/s, period=%u ticks\n",
-                 elapsed, ticks_per_sec, ticks_per_period);
+    debug_printf("[LAPIC] Timer: %u ticks/%ums, %u ticks/s, period=%u ticks\n",
+                 elapsed, LAPIC_CAL_MS, ticks_per_sec, ticks_per_period);
 
     // Configure periodic timer
     lapic_write(LAPIC_REG_TIMER_DCR, LAPIC_TIMER_DIV_16);
