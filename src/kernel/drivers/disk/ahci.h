@@ -165,6 +165,11 @@
 // ATA Commands (non-NCQ)
 #define ATA_CMD_READ_DMA_EXT    0x25    // READ DMA EXT (48-bit LBA)
 #define ATA_CMD_WRITE_DMA_EXT   0x35    // WRITE DMA EXT (48-bit LBA)
+#define ATA_CMD_FLUSH_CACHE_EXT 0xEA    // FLUSH CACHE EXT (48-bit LBA)
+#define ATA_CMD_IDENTIFY_DEVICE 0xEC    // IDENTIFY DEVICE
+
+// PxCMD.ICC (Interface Communication Control, bits 31:28) values
+#define AHCI_PCMD_ICC_ACTIVE    0x1     // bring interface to active power state
 
 // Command Header Flags
 #define AHCI_CMDHDR_WRITE       (1U << 6)
@@ -350,6 +355,15 @@ typedef struct {
     uint32_t  slot_bitmap;  // 1 = free, 0 = used
     uint8_t   active;
     uint32_t  signature;
+
+    /* Per-port device geometry/capability from IDENTIFY DEVICE. The command
+     * class is decided per port (AHCI/SATA forbids mixing queued and
+     * non-queued commands outstanding on one port): ncq -> FPDMA QUEUED with
+     * PxSACT completion; !ncq -> READ/WRITE DMA EXT with PxCI completion. */
+    uint32_t  logical_sector_size;     // bytes; only 512 is supported by the stack
+    uint64_t  total_sectors;           // device capacity in logical sectors
+    bool      ncq;                     // HBA SNCQ && device IDENTIFY word 76 bit 8
+    bool      lba48;                   // 48-bit LBA addressing supported
 
     uint32_t ci_snapshot;              // Last known PxCI (for completion delta)
     volatile uint32_t completed_slots;

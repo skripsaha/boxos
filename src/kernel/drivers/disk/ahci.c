@@ -384,6 +384,75 @@ error_t ahci_build_ncq_write(uint8_t port_num, uint8_t slot, uint64_t lba,
     return OK;
 }
 
+/* Issue ATA IDENTIFY DEVICE (non-queued, via PxCI) into a DMA32 bounce
+ * buffer and copy the 256-word result to id_out. Run once per port at
+ * bring-up to learn sector size, NCQ support, LBA48 and capacity. The port
+ * engine (PxCMD.ST) must already be running and no other command may be
+ * outstanding (true during init), so command slot 0 is used directly. */
+static error_t ahci_port_identify(ahci_port_t* port, uint16_t* id_out) {
+    volatile ahci_port_regs_t* regs = port->regs;
+
+    void* buf_page = pmm_alloc(1, PHYS_TAG_DMA32);
+    if (!buf_page) {
+        return ERR_NO_MEMORY;
+    }
+    uintptr_t buf_phys = (uintptr_t)buf_page;
+    void* buf_virt = vmm_phys_to_virt(buf_phys);
+    memset(buf_virt, 0, 512);
+
+    ahci_cmd_header_t* cmdheader = (ahci_cmd_header_t*)port->clb_virt;
+    memset(&cmdheader[0], 0, sizeof(ahci_cmd_header_t));
+    cmdheader[0].cfl   = sizeof(fis_reg_h2d_t) / sizeof(uint32_t);
+    cmdheader[0].w     = 0;
+    cmdheader[0].prdtl = 1;
+    cmdheader[0].ctba  = (uint32_t)port->ctba_phys[0];
+    cmdheader[0].ctbau = (uint32_t)(port->ctba_phys[0] >> 32);
+
+    ahci_cmd_table_t* cmdtbl = (ahci_cmd_table_t*)port->ctba_virt[0];
+    memset(cmdtbl, 0, sizeof(ahci_cmd_table_t));
+    cmdtbl->prdt[0].dba  = (uint32_t)buf_phys;
+    cmdtbl->prdt[0].dbau = (uint32_t)(buf_phys >> 32);
+    cmdtbl->prdt[0].dbc  = 512 - 1;        // 0-based byte count
+    cmdtbl->prdt[0].i    = 0;
+
+    fis_reg_h2d_t* cmdfis = (fis_reg_h2d_t*)&cmdtbl->cfis[0];
+    memset(cmdfis, 0, sizeof(fis_reg_h2d_t));
+    cmdfis->fis_type = FIS_TYPE_REG_H2D;
+    cmdfis->c        = 1;
+    cmdfis->command  = ATA_CMD_IDENTIFY_DEVICE;
+    cmdfis->device   = 0;
+
+    mfence();
+    regs->ci = (1U << 0);                   // non-queued: PxCI only
+    mfence();
+
+    error_t result = ERR_TIMEOUT;
+    uint64_t deadline = rdtsc() + cpu_ms_to_tsc(AHCI_TIMEOUT_CMD_DEFAULT);
+    while (rdtsc() < deadline) {
+        if ((regs->ci & (1U << 0)) == 0) {
+            result = OK;
+            break;
+        }
+        if (regs->is & (AHCI_PIS_TFES | AHCI_PIS_HBFS | AHCI_PIS_IFS)) {
+            result = ERR_IO;
+            break;
+        }
+        cpu_pause();
+    }
+
+    if (result == OK && (regs->tfd & AHCI_PTFD_STS_ERR)) {
+        result = ERR_IO;
+    }
+    if (result == OK) {
+        memcpy(id_out, buf_virt, 512);
+    }
+
+    uint32_t isr = regs->is;               // W1C: clear any status the probe raised
+    regs->is = isr;
+    pmm_free(buf_page, 1);
+    return result;
+}
+
 static int ahci_port_init(uint8_t port_num) {
     if (port_num >= AHCI_MAX_PORTS) {
         return -1;
@@ -394,13 +463,18 @@ static int ahci_port_init(uint8_t port_num) {
 
     port->port_num = port_num;
     port->regs = ahci_get_port_regs(port_num);
+    spinlock_init(&port->lock);
+    port->status = AHCI_PORT_FAILED;
+
+    volatile ahci_port_regs_t* regs = port->regs;
 
     if (ahci_port_stop(port) != 0) {
         debug_printf("[AHCI] Port %u: Failed to stop\n", port_num);
         return -1;
     }
 
-    // CLB, FIS, CTBA and staging buffers are DMA targets — must be below 4GB.
+    // CLB (1KB) + received-FIS (256B) share one DMA32 page; both are DMA
+    // targets that must sit below 4GB (PHYS_TAG_DMA32 == [0,1GB)).
     void* clb_page = pmm_alloc(1, PHYS_TAG_DMA32);
     if (!clb_page) {
         debug_printf("[AHCI] Port %u: Failed to allocate CLB page\n", port_num);
@@ -436,50 +510,152 @@ static int ahci_port_init(uint8_t port_num) {
         ahci_cmd_header_t* cmdheader = (ahci_cmd_header_t*)port->clb_virt;
         cmdheader[slot].prdtl = 0;
         cmdheader[slot].prdbc = 0;
-        cmdheader[slot].ctba = (uint32_t)port->ctba_phys[slot];
+        cmdheader[slot].ctba  = (uint32_t)port->ctba_phys[slot];
         cmdheader[slot].ctbau = (uint32_t)(port->ctba_phys[slot] >> 32);
     }
 
-    port->regs->clb = (uint32_t)port->clb_phys;
-    port->regs->clbu = (uint32_t)(port->clb_phys >> 32);
-    port->regs->fb = (uint32_t)port->fis_phys;
-    port->regs->fbu = (uint32_t)(port->fis_phys >> 32);
+    regs->clb  = (uint32_t)port->clb_phys;
+    regs->clbu = (uint32_t)(port->clb_phys >> 32);
+    regs->fb   = (uint32_t)port->fis_phys;
+    regs->fbu  = (uint32_t)(port->fis_phys >> 32);
 
-    port->regs->is = 0xFFFFFFFF;
-    port->regs->serr = 0xFFFFFFFF;
+    // Clear stale interrupt/error state before bring-up.
+    regs->is   = 0xFFFFFFFF;
+    regs->serr = 0xFFFFFFFF;
 
-    port->ci_snapshot = 0;
-    port->completed_slots = 0;
-    memset(port->event_id, 0, sizeof(port->event_id));
-    memset(port->pid, 0, sizeof(port->pid));
-    memset(port->submit_tsc, 0, sizeof(port->submit_tsc));
+    // Enable FIS receive so the device's initial D2H register FIS lands.
+    regs->cmd |= AHCI_PCMD_FRE;
 
-    port->ncq_reads = 0;
-    port->ncq_writes = 0;
-    port->ncq_errors = 0;
-    port->ncq_timeouts = 0;
-
-    port->slot_bitmap = 0xFFFFFFFF;
-    port->active = 1;
-
-    spinlock_init(&port->lock);
-    memset(&port->stats, 0, sizeof(ahci_port_stats_t));
-    port->status = AHCI_PORT_ACTIVE;
-
-    if (ahci_port_start(port) != 0) {
-        debug_printf("[AHCI] Port %u: Failed to start\n", port_num);
-        for (uint8_t i = 0; i < AHCI_MAX_SLOTS; i++) {
-            pmm_free((void*)port->ctba_phys[i], 1);
-        }
-        pmm_free(clb_page, 1);
-        return -1;
+    /* Staggered spin-up (AHCI 1.3.1 §10.1.1): when CAP.SSS is set the drive
+     * stays spun down until commanded. Set SUD + power-on + ICC=active.
+     * Harmless on non-SSS HBAs where SUD reads as 1 / is reserved. */
+    if (ahci_ctrl.cap & AHCI_CAP_SSS) {
+        uint32_t cmd = regs->cmd;
+        cmd |= AHCI_PCMD_SUD | AHCI_PCMD_POD;
+        cmd  = (cmd & ~((uint32_t)AHCI_PCMD_ICC_MASK << AHCI_PCMD_ICC_SHIFT))
+               | ((uint32_t)AHCI_PCMD_ICC_ACTIVE << AHCI_PCMD_ICC_SHIFT);
+        regs->cmd = cmd;
+        mfence();
     }
 
-    port->signature = port->regs->sig;
+    // Wait for PHY communication established (PxSSTS.DET == 3), bounded 1s.
+    uint8_t det = 0;
+    uint64_t deadline = rdtsc() + cpu_ms_to_tsc(1000);
+    while (rdtsc() < deadline) {
+        det = (regs->ssts >> AHCI_SSTS_DET_SHIFT) & AHCI_SSTS_DET_MASK;
+        if (det == AHCI_SSTS_DET_PRESENT) {
+            break;
+        }
+        cpu_pause();
+    }
+    if (det != AHCI_SSTS_DET_PRESENT) {
+        debug_printf("[AHCI] Port %u: no device after spin-up (DET=%u)\n", port_num, det);
+        goto fail_free;
+    }
 
-    debug_printf("[AHCI] Port %u: Initialized (sig=0x%08x)\n", port_num, port->signature);
+    // Clear link errors raised while establishing communication.
+    regs->serr = 0xFFFFFFFF;
+
+    // Wait for the device to leave BSY/DRQ (ready for commands), bounded 1s.
+    deadline = rdtsc() + cpu_ms_to_tsc(1000);
+    while (rdtsc() < deadline) {
+        if ((regs->tfd & (AHCI_PTFD_STS_BSY | AHCI_PTFD_STS_DRQ)) == 0) {
+            break;
+        }
+        cpu_pause();
+    }
+    if (regs->tfd & (AHCI_PTFD_STS_BSY | AHCI_PTFD_STS_DRQ)) {
+        debug_printf("[AHCI] Port %u: device not ready (TFD=0x%08x)\n", port_num, regs->tfd);
+        goto fail_free;
+    }
+
+    // Start the command-list engine; commands may now be issued.
+    regs->cmd |= AHCI_PCMD_ST;
+    mfence();
+
+    port->signature = regs->sig;
+
+    // Only ATA disks are driven by this stack. ATAPI/PM/SEMB are skipped.
+    if (port->signature != AHCI_SIG_ATA) {
+        debug_printf("[AHCI] Port %u: non-ATA device (sig=0x%08x), skipping\n",
+                     port_num, port->signature);
+        ahci_port_stop(port);
+        goto fail_free;
+    }
+
+    // Learn geometry/capabilities via IDENTIFY DEVICE.
+    uint16_t id[256];
+    if (ahci_port_identify(port, id) != OK) {
+        debug_printf("[AHCI] Port %u: IDENTIFY DEVICE failed\n", port_num);
+        ahci_port_stop(port);
+        goto fail_free;
+    }
+
+    /* Logical sector size: IDENTIFY word 106 is valid when bit 14 is set and
+     * bit 15 clear; bit 12 then says words 117-118 carry the logical sector
+     * size in 16-bit words. Otherwise the logical sector is 256 words. */
+    uint32_t logical = 512;
+    if ((id[106] & (1u << 14)) && !(id[106] & (1u << 15)) && (id[106] & (1u << 12))) {
+        uint32_t words = (uint32_t)id[117] | ((uint32_t)id[118] << 16);
+        if (words >= 256) {
+            logical = words * 2u;
+        }
+    }
+    port->logical_sector_size = logical;
+
+    port->lba48 = (id[83] & (1u << 10)) != 0;
+    if (port->lba48) {
+        uint64_t s = 0;
+        memcpy(&s, &id[100], sizeof(uint64_t));   // words 100-103
+        port->total_sectors = s;
+    } else {
+        uint32_t s = 0;
+        memcpy(&s, &id[60], sizeof(uint32_t));     // words 60-61
+        port->total_sectors = s;
+    }
+
+    /* NCQ usable only if both the HBA (CAP.SNCQ) and the device (IDENTIFY
+     * word 76 bit 8) support it. Word 76 reads 0x0000/0xFFFF on non-SATA. */
+    bool dev_ncq = (id[76] != 0x0000 && id[76] != 0xFFFF) && (id[76] & (1u << 8));
+    port->ncq = ahci_ctrl.ncq_support && dev_ncq;
+
+    /* The storage stack (TagFS, block layer) is built on 512-byte sectors.
+     * A 4Kn drive would silently corrupt every LBA computation — refuse the
+     * port loudly instead. 512e drives (512 logical / 4096 physical) report
+     * logical 512 and work unchanged. */
+    if (port->logical_sector_size != 512) {
+        debug_printf("[AHCI] Port %u: unsupported logical sector size %u (need 512); refusing\n",
+                     port_num, port->logical_sector_size);
+        ahci_port_stop(port);
+        goto fail_free;
+    }
+
+    /* Command slots: cap to the HBA's advertised count; for non-NCQ ports
+     * allow only one outstanding command (non-queued commands may not
+     * overlap on a port). slot_bitmap: 1 = free. */
+    uint32_t usable = (ahci_ctrl.num_slots >= 32)
+                      ? 0xFFFFFFFFu
+                      : ((1u << ahci_ctrl.num_slots) - 1u);
+    port->slot_bitmap = port->ncq ? usable : 0x1u;
+
+    port->status = AHCI_PORT_ACTIVE;
+    port->active = 1;
+
+    debug_printf("[AHCI] Port %u: ATA disk, %llu sectors, sec=%uB, LBA%s, NCQ=%s (sig=0x%08x)\n",
+                 port_num, (unsigned long long)port->total_sectors,
+                 port->logical_sector_size, port->lba48 ? "48" : "28",
+                 port->ncq ? "yes" : "no", port->signature);
 
     return 0;
+
+fail_free:
+    for (uint8_t i = 0; i < AHCI_MAX_SLOTS; i++) {
+        if (port->ctba_phys[i]) {
+            pmm_free((void*)port->ctba_phys[i], 1);
+        }
+    }
+    pmm_free(clb_page, 1);
+    return -1;
 }
 
 static int ahci_init_ports(void) {
@@ -494,22 +670,26 @@ static int ahci_init_ports(void) {
     for (uint8_t i = 0; i < AHCI_MAX_PORTS; i++) {
         if (!(pi & (1U << i))) continue;
 
-        volatile ahci_port_regs_t* regs = ahci_get_port_regs(i);
-        uint32_t ssts = regs->ssts;
-        uint8_t det = (ssts >> AHCI_SSTS_DET_SHIFT) & AHCI_SSTS_DET_MASK;
-
-        if (det != AHCI_SSTS_DET_PRESENT) {
-            debug_printf("[AHCI] Port %u: No device present (SSTS=0x%08x)\n", i, ssts);
-            continue;
+        /* Fast-skip empty ports on non-SSS HBAs where DET is already
+         * meaningful. On staggered-spin-up controllers the device reports
+         * DET=0/1 until ahci_port_init() spins it up, so we must attempt
+         * full bring-up there rather than skip. */
+        if (!(ahci_ctrl.cap & AHCI_CAP_SSS)) {
+            volatile ahci_port_regs_t* regs = ahci_get_port_regs(i);
+            uint8_t det = (regs->ssts >> AHCI_SSTS_DET_SHIFT) & AHCI_SSTS_DET_MASK;
+            if (det != AHCI_SSTS_DET_PRESENT) {
+                debug_printf("[AHCI] Port %u: No device present (DET=%u)\n", i, det);
+                continue;
+            }
         }
 
-        debug_printf("[AHCI] Port %u: Device detected, initializing...\n", i);
+        debug_printf("[AHCI] Port %u: bringing up...\n", i);
 
         if (ahci_port_init(i) == 0) {
             ahci_ctrl.num_active_ports++;
             debug_printf("[AHCI] Port %u: Active\n", i);
         } else {
-            debug_printf("[AHCI] Port %u: Initialization failed\n", i);
+            debug_printf("[AHCI] Port %u: not active\n", i);
         }
     }
 
