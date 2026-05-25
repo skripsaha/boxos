@@ -10,7 +10,7 @@ static DedupState g_dedup_state;
 
 // Compute BoxHash for block (secure mode)
 static DedupHash DedupComputeHash(const uint8_t *data, uint32_t size) {
-    return BoxHashComputeSecure(data, size, &g_dedup_state.hash_ctx);
+    return BoxHashContent(data, size, &g_dedup_state.hash_ctx);
 }
 
 // Compare hashes
@@ -91,8 +91,9 @@ error_t TagFS_DedupInit(void) {
     memset(&g_dedup_state, 0, sizeof(DedupState));
     spinlock_init(&g_dedup_state.lock);
 
-    // Initialize unique hash context for this filesystem mount
-    BoxHashInit(&g_dedup_state.hash_ctx);
+    // Deterministic per-volume hash seed (fs_uuid) — content keys are stable
+    // across reboots (the old per-boot RTC salt broke cross-mount dedup).
+    BoxHashInit(&g_dedup_state.hash_ctx, tagfs_get_state()->superblock.fs_uuid, 16);
 
     g_dedup_state.hash_buckets = DEDUP_HASH_BUCKETS;
     debug_printf("[Dedup] Allocating hash table (%u buckets)...\n", DEDUP_HASH_BUCKETS);

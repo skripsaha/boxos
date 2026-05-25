@@ -608,6 +608,92 @@ void TagFS_DumpState(void) {
 }
 
 // Run all tests
+// ============================================================================
+// BoxHash v2 tests (deterministic integrity/content hashing)
+// ============================================================================
+
+static TestResult test_boxhash_determinism(void) {
+    uint8_t seed[16];
+    for (int i = 0; i < 16; i++) seed[i] = (uint8_t)(i * 7 + 1);
+    BoxHashContext c1, c2;
+    BoxHashInit(&c1, seed, 16);
+    BoxHashInit(&c2, seed, 16);
+    for (int i = 0; i < 256; i++) g_test_buffer[i] = (uint8_t)(i * 13 + 5);
+
+    BoxHash h1 = BoxHashContent(g_test_buffer, 256, &c1);
+    BoxHash h2 = BoxHashContent(g_test_buffer, 256, &c2);
+    TEST_ASSERT(BoxHashEqual(&h1, &h2), "same data+seed -> same 256-bit content hash");
+
+    uint64_t i1 = BoxHashIntegrity(g_test_buffer, 256, &c1);
+    uint64_t i2 = BoxHashIntegrity(g_test_buffer, 256, &c2);
+    TEST_ASSERT(i1 == i2, "same data+seed -> same 64-bit integrity hash");
+    TEST_ASSERT(i1 != 0, "integrity hash nonzero for nonempty data");
+    return TEST_PASS;
+}
+
+static TestResult test_boxhash_seed_separation(void) {
+    uint8_t s1[16], s2[16];
+    for (int i = 0; i < 16; i++) { s1[i] = (uint8_t)i; s2[i] = (uint8_t)(i + 1); }
+    BoxHashContext c1, c2;
+    BoxHashInit(&c1, s1, 16);
+    BoxHashInit(&c2, s2, 16);
+    for (int i = 0; i < 512; i++) g_test_buffer[i] = (uint8_t)(i & 0xFF);
+    BoxHash h1 = BoxHashContent(g_test_buffer, 512, &c1);
+    BoxHash h2 = BoxHashContent(g_test_buffer, 512, &c2);
+    TEST_ASSERT(!BoxHashEqual(&h1, &h2), "different volume seeds -> different hash");
+    return TEST_PASS;
+}
+
+static TestResult test_boxhash_avalanche(void) {
+    uint8_t seed[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+    BoxHashContext c;
+    BoxHashInit(&c, seed, 8);
+    for (int i = 0; i < 4096; i++) g_test_buffer[i] = (uint8_t)(i * 3 + 1);
+    BoxHash a = BoxHashContent(g_test_buffer, 4096, &c);
+    g_test_buffer[2000] ^= 0x01;                 // flip a single bit
+    BoxHash b = BoxHashContent(g_test_buffer, 4096, &c);
+    TEST_ASSERT(!BoxHashEqual(&a, &b), "1-bit change -> different hash");
+
+    int diff = 0;
+    for (int i = 0; i < BOX_HASH_BYTES; i++) {
+        uint8_t x = (uint8_t)(a.bytes[i] ^ b.bytes[i]);
+        while (x) { diff += x & 1; x >>= 1; }
+    }
+    TEST_ASSERT(diff > 64, "avalanche: >64 of 256 output bits flip on a 1-bit input change");
+    return TEST_PASS;
+}
+
+static TestResult test_boxhash_sha256_kat(void) {
+    // FIPS 180-4: SHA-256("abc")
+    static const uint8_t expected[32] = {
+        0xba,0x78,0x16,0xbf,0x8f,0x01,0xcf,0xea,0x41,0x41,0x40,0xde,0x5d,0xae,0x22,0x23,
+        0xb0,0x03,0x61,0xa3,0x96,0x17,0x7a,0x9c,0xb4,0x10,0xff,0x61,0xf2,0x00,0x15,0xad
+    };
+    BoxHash h = BoxHashSecure("abc", 3);
+    TEST_ASSERT(memcmp(h.bytes, expected, 32) == 0, "SHA-256(\"abc\") known-answer vector");
+    return TEST_PASS;
+}
+
+static TestResult test_boxhash_sizes(void) {
+    uint8_t seed[4] = {9, 8, 7, 6};
+    BoxHashContext c;
+    BoxHashInit(&c, seed, 4);
+    // Exercise every tail length class (wyhash 1-3 / 4-7 / 8-16 / >16) — no OOB.
+    static const uint32_t sizes[] = {1,7,8,15,16,17,31,32,33,63,64,65,4096};
+    uint64_t prev = 0;
+    for (uint32_t k = 0; k < sizeof(sizes)/sizeof(sizes[0]); k++) {
+        uint32_t n = sizes[k];
+        for (uint32_t i = 0; i < n; i++) g_test_buffer[i] = (uint8_t)(i + n);
+        uint64_t a = BoxHashIntegrity(g_test_buffer, n, &c);
+        uint64_t b = BoxHashIntegrity(g_test_buffer, n, &c);
+        TEST_ASSERT(a == b, "deterministic across all tail lengths");
+        TEST_ASSERT(a != prev, "distinct content -> distinct integrity hash");
+        prev = a;
+    }
+    TEST_ASSERT(BoxHashIntegrity(NULL, 0, &c) == 0, "null/empty input -> 0");
+    return TEST_PASS;
+}
+
 error_t TagFS_RunAllTests(TestStats* stats) {
     if (!g_tests_initialized)
         return ERR_NOT_INITIALIZED;
@@ -662,9 +748,17 @@ error_t TagFS_RunAllTests(TestStats* stats) {
         {"cow_before_after_write", test_cow_before_after_write, TEST_SKIP, 0, ""},
     };
 
+    TestCase boxhash_tests[] = {
+        {"boxhash_determinism", test_boxhash_determinism, TEST_SKIP, 0, ""},
+        {"boxhash_seed_separation", test_boxhash_seed_separation, TEST_SKIP, 0, ""},
+        {"boxhash_avalanche", test_boxhash_avalanche, TEST_SKIP, 0, ""},
+        {"boxhash_sha256_kat", test_boxhash_sha256_kat, TEST_SKIP, 0, ""},
+        {"boxhash_sizes", test_boxhash_sizes, TEST_SKIP, 0, ""},
+    };
+
     // Run all test suites
     TestCase* all_suites[] = {
-        core_tests, compression_tests, journal_tests, snapshot_tests, stress_tests, braid_tests, cow_tests
+        core_tests, compression_tests, journal_tests, snapshot_tests, stress_tests, braid_tests, cow_tests, boxhash_tests
     };
     uint32_t suite_sizes[] = {
         sizeof(core_tests)/sizeof(TestCase),
@@ -673,12 +767,13 @@ error_t TagFS_RunAllTests(TestStats* stats) {
         sizeof(snapshot_tests)/sizeof(TestCase),
         sizeof(stress_tests)/sizeof(TestCase),
         sizeof(braid_tests)/sizeof(TestCase),
-        sizeof(cow_tests)/sizeof(TestCase)
+        sizeof(cow_tests)/sizeof(TestCase),
+        sizeof(boxhash_tests)/sizeof(TestCase)
     };
 
     debug_printf("\n[Tests] Starting test run...\n");
 
-    for (uint32_t s = 0; s < 7; s++) {
+    for (uint32_t s = 0; s < 8; s++) {
         for (uint32_t i = 0; i < suite_sizes[s]; i++) {
             TestCase* test = &all_suites[s][i];
             uint64_t start = get_time_ms();
