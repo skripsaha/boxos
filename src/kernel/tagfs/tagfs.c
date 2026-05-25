@@ -236,6 +236,32 @@ static int disk_write_sectors(uint64_t lba, uint16_t count, const void *buffer)
     return ata_write_sectors_retry(g_tagfs_drive, lba, count, (const uint8_t *)buffer);
 }
 
+/*
+ * tagfs_flush_cache — force the volatile write cache of the disk that
+ * actually holds the TagFS volume out to the media.
+ *
+ * ATA8-ACS (T13/1699-D) FLUSH CACHE EXT (0xEA) / the AHCI port flush only
+ * return once the drive's on-disk write cache (16-256 MiB) has reached the
+ * platters/NAND; a write command "completing" merely means the bytes were
+ * received into that volatile cache. Without this, a power cut loses data
+ * the FS believes is durable.
+ *
+ * Routed to the PROBED device — the same dispatch disk_read_sectors /
+ * disk_write_sectors use. A hardcoded ata_flush_cache(1) flushes ATA
+ * master / AHCI port 0 regardless of where the volume lives, so on a real
+ * PC whose SATA boot disk is not on port 0 the flush hits the wrong (or an
+ * absent) device and every "durable" commit silently stays in cache.
+ */
+error_t tagfs_flush_cache(void)
+{
+    int rc;
+    if (ahci_is_initialized())
+        rc = ahci_flush_cache_sync(g_tagfs_ahci_port);
+    else
+        rc = ata_flush_cache(g_tagfs_drive); /* g_tagfs_drive: 1=master, 0=slave */
+    return (rc == 0) ? OK : ERR_IO;
+}
+
 static uint64_t block_to_sector(uint32_t block);
 static int read_block(uint32_t block, void *buffer);
 static int write_block(uint32_t block, const void *buffer);
@@ -323,6 +349,22 @@ static void ReadAheadPrefetch(uint32_t start_block, uint32_t count) {
     }
 }
 
+// Drop any cached copy of `block` so a read after a write to it never serves
+// pre-write data (read-after-write consistency). Called on every block write,
+// sync and async.
+static void ReadAheadInvalidate(uint32_t block) {
+    spin_lock(&g_read_ahead_lock);
+    for (uint32_t i = 0; i < TAGFS_READ_AHEAD_BLOCKS; i++) {
+        if (g_read_ahead_cache[i].valid && g_read_ahead_cache[i].block == block)
+            g_read_ahead_cache[i].valid = false;
+    }
+    spin_unlock(&g_read_ahead_lock);
+}
+
+void tagfs_readahead_invalidate(uint32_t block) {
+    ReadAheadInvalidate(block);
+}
+
 static uint64_t block_to_sector(uint32_t block)
 {
     uint32_t data_start = g_state.superblock.block_bitmap_sector +
@@ -356,16 +398,22 @@ static int read_block(uint32_t block, void *buffer)
 
 static int write_block(uint32_t block, const void *buffer)
 {
+    int rc = -1;
+
     // Route through Braid when it has active disks (provides redundancy).
     // Pass the physical LBA so Braid operates in sector-space, not TagFS block-space.
     if (BraidIsHealthy()) {
-        error_t braid_result = BraidWriteBlock(block_to_sector(block), buffer, NULL);
-        if (braid_result == OK)
-            return 0;
+        if (BraidWriteBlock(block_to_sector(block), buffer, NULL) == OK)
+            rc = 0;
         // Braid failed — fall through to direct disk write as recovery path
     }
+    if (rc != 0)
+        rc = disk_write_sectors(block_to_sector(block), 8, (void *)buffer);
 
-    return disk_write_sectors(block_to_sector(block), 8, (void *)buffer);
+    // Drop any stale read-ahead copy once the new data is on disk.
+    if (rc == 0)
+        ReadAheadInvalidate(block);
+    return rc;
 }
 
 error_t tagfs_read_block(uint32_t block, void *buffer) {
@@ -950,18 +998,12 @@ error_t tagfs_init(void) {
     debug_printf("[TagFS] Superblock OK: %u blocks, %u free, %u files\n",
                  sb.total_blocks, sb.free_blocks, sb.total_files);
 
-    // --- DiskBook init + replay (production journaling) ---
+    // --- DiskBook init (CoW redirect log). Replay is deferred until AFTER
+    //     CoW init + manifest restore below, so restored redirects attach to
+    //     the live snapshots they belong to.
     if (DiskBookInit(sb.disk_book_superblock_sector) != OK)
     {
         debug_printf("[TagFS] Warning: DiskBookInit failed\n");
-    }
-    else
-    {
-        if (DiskBookValidateAndReplay() != OK)
-        {
-            debug_printf("[TagFS] Warning: DiskBook replay failed\n");
-        }
-        debug_printf("[TagFS] DiskBook journaling enabled\n");
     }
 
     // --- Snapshots init ---
@@ -1004,6 +1046,14 @@ error_t tagfs_init(void) {
                 kfree(manifest);
             }
         }
+    }
+
+    // --- DiskBook replay: restore durable CoW redirects into the snapshots
+    //     just loaded from the manifest. Idempotent + CRC-verified. Runs after
+    //     TagFS_CowInit + manifest restore so the target snapshots exist.
+    if (DiskBookIsInitialized())
+    {
+        DiskBookValidateAndReplay();
     }
 
     // --- Data Deduplication init ---
@@ -1317,14 +1367,15 @@ void tagfs_sync(void)
      * sequence, a power cut between this point and the next disk
      * write loses the superblock + bitmap + journal commit records
      * we just produced — the next mount sees a corrupted file
-     * system. ata_flush_cache(1) dispatches WRITE FLUSH EXT (or
-     * AHCI flush) which only returns when the drive's cache has
-     * been committed to media.
+     * system. tagfs_flush_cache() dispatches FLUSH CACHE EXT to the
+     * *probed* device (the AHCI port / ATA drive that actually holds
+     * the volume — never a hardcoded port 0) and only returns when the
+     * drive's write cache has reached the media.
      *
      * Cost: ~5-15 ms per call on a spinning drive, ~50 µs on NVMe
      * via SATA. tagfs_sync is called on user-initiated shutdown
      * and on metadata-pool checkpoint, both rare. */
-    ata_flush_cache(1);
+    tagfs_flush_cache();
 }
 
 void tagfs_shutdown(void)

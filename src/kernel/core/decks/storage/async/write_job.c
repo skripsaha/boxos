@@ -5,7 +5,7 @@
  * is intentionally minimal: stash status, set state=W_AHCI_DONE, enqueue
  * continuation. The K-Core side does everything that needs locks
  * (alloc, meta_pool_write, file_table_update, token release, CoW,
- * DiskBook, Touch publish).
+ * cache flush, Touch publish).
  *
  * State flow (full):
  *
@@ -43,7 +43,6 @@
 #include "boxos_crate.h"
 #include "op_registry.h"
 #include "cow.h"
-#include "disk_book.h"
 #include "touch.h"
 
 /* ---- forward decls ---- */
@@ -322,6 +321,12 @@ static bool w_ahci_done(WriteJob *j)
         wjob_finalize(j, j->if_status);
         return false;
     }
+
+    /* The async path writes straight to the AHCI port, bypassing
+     * tagfs_write_block — so drop the just-written block from the read-ahead
+     * cache ourselves, or a later read could serve pre-write data. */
+    tagfs_readahead_invalidate(j->if_disk_block);
+
     j->bytes_done += j->if_chunk;
 
     /* Reset per-chunk flags before next iteration. */
@@ -338,15 +343,9 @@ static bool w_ahci_done(WriteJob *j)
 /* W_BEGIN_TXN — open a DiskBook transaction for crash safety. */
 static bool w_begin_txn(WriteJob *j)
 {
-    if (DiskBookBegin(&j->txn) != OK) {
-        /* Journal full or unavailable — degrade gracefully: skip journal
-         * and proceed. The write itself already hit disk; meta-commit
-         * still happens, just without a journal entry to replay on
-         * crash. */
-        j->txn_active = false;
-    } else {
-        j->txn_active = true;
-    }
+    /* No journal here: TagFS metadata is crash-consistent via append-ordering
+     * + mount fsck; durability of the data blocks written above is forced by
+     * the cache flush in W_COMMIT_TXN. */
     atomic_store_u32((volatile uint32_t *)&j->state, W_LOG_META);
     return true;
 }
@@ -386,11 +385,6 @@ static bool w_log_meta(WriteJob *j)
     if (end_pos > meta.size) {
         meta.size = end_pos;
         j->handle->file_size = end_pos;
-    }
-
-    /* Journal the meta record before persisting it (write-ahead). */
-    if (j->txn_active) {
-        DiskBookLogMetadata(&j->txn, j->file_id, 0, &meta);
     }
 
     uint32_t out_block = 0, out_offset = 0;
@@ -437,10 +431,10 @@ static bool w_cow_after(WriteJob *j)
 /* W_COMMIT_TXN — close out the journal txn. */
 static bool w_commit_txn(WriteJob *j)
 {
-    if (j->txn_active) {
-        DiskBookCommit(&j->txn);
-        j->txn_active = false;
-    }
+    /* Force the data blocks written above out of the drive's volatile write
+     * cache to media (routes to the probed AHCI port / ATA drive). This is the
+     * durability point for an async write. */
+    tagfs_flush_cache();
     atomic_store_u32((volatile uint32_t *)&j->state, W_PUBLISH);
     return true;
 }
@@ -503,12 +497,6 @@ static void wjob_finalize(WriteJob *j, int rc)
             atomic_store_u32((volatile uint32_t *)&next->state, W_LOCATE);
             WriteContEnqueue(wjob_pump, next);
         }
-    }
-
-    /* Abort journal txn if still open. */
-    if (j->txn_active) {
-        DiskBookAbort(&j->txn);
-        j->txn_active = false;
     }
 
     /* Roll back uncommitted allocations. */

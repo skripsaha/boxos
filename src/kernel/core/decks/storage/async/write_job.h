@@ -6,7 +6,6 @@
 #include "tagfs.h"
 #include "boxos_crate.h"
 #include "process.h"
-#include "disk_book.h"
 
 /*
  * WriteJob — async ObjWrite state machine.
@@ -79,10 +78,6 @@ typedef struct WriteJob {
 
     /* ---- token handoff ---- */
     struct WriteJob  *next_pending;
-
-    /* ---- DiskBook journal ---- */
-    DiskBookTxn       txn;
-    bool              txn_active;
 
     /* ---- result ---- */
     int               result_rc;

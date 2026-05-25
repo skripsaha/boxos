@@ -419,6 +419,10 @@ uint8_t  tagfs_get_ahci_port(void);  /* AHCI port number — valid when AHCI is 
 void tagfs_shutdown(void);
 void tagfs_sync(void);
 
+/* Flush the volatile write cache of the disk that holds the TagFS volume
+ * (routes to the probed AHCI port / ATA drive, not a hardcoded device). */
+error_t  tagfs_flush_cache(void);
+
 /* Convert a TagFS logical block number to its absolute disk-sector LBA.
  * Used by the async storage path which submits raw AHCI reads outside
  * the read_block helper. */
@@ -463,6 +467,11 @@ uint32_t tagfs_get_fragmentation_score(void);
 
 error_t  tagfs_read_block(uint32_t block, void* buffer);
 error_t  tagfs_write_block(uint32_t block, const void* buffer);
+
+/* Drop a block from the read-ahead cache (read-after-write consistency).
+ * The sync write path calls this internally; the async path (write_job) must
+ * call it after each block write since it bypasses tagfs_write_block. */
+void     tagfs_readahead_invalidate(uint32_t block);
 error_t  tagfs_write_superblock(const TagFSSuperblock* sb);
 
 // ----------------------------------------------------------------------------
