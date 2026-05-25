@@ -506,7 +506,18 @@ void irq_handler(interrupt_frame_t *frame)
         scheduler_state_t *sched = scheduler_get_state();
         sched->total_ticks++;
         pit_tick();
-        __atomic_fetch_add(&g_global_tick, 1, __ATOMIC_RELAXED);
+
+        /* Advance the global scheduler clock from the MONOTONIC wall-clock at a
+         * FIXED logical rate, decoupled from the adaptive PIT IRQ frequency.
+         * The PIT IRQ rate swings 10-500 Hz with load, so a per-IRQ "+1" made a
+         * tick's wall-clock duration drift — starvation/affinity thresholds
+         * (counted in ticks) wobbled with load. Deriving the tick from
+         * pit_get_uptime_us() pins it to SCHEDULER_DEFAULT_TICK_HZ (the rate
+         * consumers were tuned for), now stable. Monotonic (uptime only grows);
+         * single writer (BSP IRQ0); all consumers use deltas. */
+        __atomic_store_n(&g_global_tick,
+                         pit_get_uptime_us() / (1000000ULL / SCHEDULER_DEFAULT_TICK_HZ),
+                         __ATOMIC_RELAXED);
 
         /* Periodic scheduler parameter recalculation */
         scheduler_recalc_parameters();
