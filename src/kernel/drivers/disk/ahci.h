@@ -348,10 +348,6 @@ typedef struct {
                                   error_t status, void *ctx);
     void   *cb_ctx[AHCI_MAX_SLOTS];
 
-    // Staging buffers for WRITE DMA (4KB each)
-    void* staging_phys[AHCI_MAX_SLOTS];
-    void* staging_virt[AHCI_MAX_SLOTS];
-
     uint64_t ncq_reads;
     uint64_t ncq_writes;
     uint64_t ncq_errors;
@@ -405,10 +401,6 @@ error_t ahci_build_ncq_read(uint8_t port_num, uint8_t slot, uint64_t lba,
                                    uint16_t sector_count, void* buffer_phys);
 error_t ahci_build_ncq_write(uint8_t port_num, uint8_t slot, uint64_t lba,
                                     uint16_t sector_count, void* buffer_phys);
-
-struct async_io_request;
-error_t ahci_start_async_transfer(struct async_io_request* req);
-void ahci_check_timeouts(void);
 
 ahci_port_t* ahci_get_port_state(uint8_t port_num);
 volatile ahci_port_regs_t* ahci_get_port_regs_pub(uint8_t port_num);
