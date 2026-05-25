@@ -17,6 +17,7 @@
 #include "context_switch.h"
 #include "keyboard.h"
 #include "ata_dma.h"
+#include "ahci.h"
 #include "idle.h"
 #include "amp.h"
 #include "kcore.h"
@@ -109,6 +110,10 @@ void idt_init(void)
     idt_set_entry(LAPIC_TIMER_VECTOR, (uint64_t)isr_table[LAPIC_TIMER_VECTOR],
                   GDT_KERNEL_CODE, IDT_TYPE_INTERRUPT_GATE, 0);
     idt_set_entry(LAPIC_SPURIOUS_VECTOR, (uint64_t)isr_table[LAPIC_SPURIOUS_VECTOR],
+                  GDT_KERNEL_CODE, IDT_TYPE_INTERRUPT_GATE, 0);
+
+    // AHCI MSI vector (0x70) — message-signalled interrupt from the HBA
+    idt_set_entry(AHCI_MSI_VECTOR, (uint64_t)isr_table[AHCI_MSI_VECTOR],
                   GDT_KERNEL_CODE, IDT_TYPE_INTERRUPT_GATE, 0);
 
     // AMP IPI vectors (0xF0-0xF2)
@@ -461,6 +466,16 @@ void irq_handler(interrupt_frame_t *frame)
         {
             asm volatile("cli; hlt");
         }
+    }
+
+    /* AHCI message-signalled interrupt. MSI is delivered point-to-point to
+     * the LAPIC, so it is acknowledged with a LAPIC EOI — never the IOAPIC.
+     * The handler itself is allocation-free and defers heavy work. */
+    if (vector == AHCI_MSI_VECTOR)
+    {
+        ahci_irq_handler();
+        lapic_send_eoi();
+        return;
     }
 
     // Standard hardware IRQ (vectors 32-55 -> IRQ 0-23)
