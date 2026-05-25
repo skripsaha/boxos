@@ -17,7 +17,7 @@ static uint8_t BraidComputeTagDisk(const uint8_t *tag_context, uint8_t disk_coun
         return 0;
 
     // Hash tag context to determine disk
-    BoxHash tag_hash = BoxHashCompute(tag_context, 16, &g_braid_state.hash_ctx);
+    BoxHash tag_hash = BoxHashContent(tag_context, 16, &g_braid_state.hash_ctx);
     return tag_hash.bytes[0] % disk_count;
 }
 
@@ -85,7 +85,7 @@ static error_t BraidWriteToDisk(uint8_t disk_id, uint64_t block_num, const void 
 static bool BraidVerifyChecksum(const void *data, uint32_t size, const BoxHash *expected) {
     if (!expected)
         return false;
-    BoxHash computed = BoxHashComputeSecure(data, size, &g_braid_state.hash_ctx);
+    BoxHash computed = BoxHashContent(data, size, &g_braid_state.hash_ctx);
     return BoxHashEqual(&computed, expected);
 }
 
@@ -98,18 +98,18 @@ error_t BraidInit(BraidMode mode) {
     
     spinlock_init(&g_braid_state.lock);
     
-    // Initialize hash context with unique salt
-    BoxHashInit(&g_braid_state.hash_ctx);
-    
+    // Deterministic per-volume hash seed (fs_uuid) — survives reboot so block
+    // checksums re-verify across mounts (the old per-boot RTC salt did not).
+    BoxHashInit(&g_braid_state.hash_ctx, tagfs_get_state()->superblock.fs_uuid, 16);
+
     g_braid_state.magic = BRAID_MAGIC;
     g_braid_state.version = BRAID_VERSION;
     g_braid_state.mode = mode;
     g_braid_state.disk_count = 0;
     g_braid_state.active_disks = 0;
     g_braid_state.initialized = true;
-    
-    debug_printf("[Braid] Initialized: mode=%u, BoxHash %s\n", 
-                 mode, g_braid_state.hash_ctx.key_initialized ? "secure" : "fast");
+
+    debug_printf("[Braid] Initialized: mode=%u (BoxHash content digest)\n", mode);
     return OK;
 }
 
@@ -361,7 +361,7 @@ error_t BraidVerifyBlock(uint64_t block_num, bool *is_valid) {
         if (BraidReadFromDisk(i, block_num, candidate) != OK)
             continue;
 
-        BoxHash candidate_hash = BoxHashComputeSecure(candidate, BRAID_BLOCK_SIZE, &g_braid_state.hash_ctx);
+        BoxHash candidate_hash = BoxHashContent(candidate, BRAID_BLOCK_SIZE, &g_braid_state.hash_ctx);
 
         if (!ref_set) {
             memcpy(ref_data, candidate, BRAID_BLOCK_SIZE);
@@ -523,7 +523,7 @@ error_t BraidAutoHeal(uint64_t block_num) {
         if (!g_braid_state.disks[i].online)
             continue;
         if (BraidReadFromDisk(i, block_num, copies[i]) == OK) {
-            hashes[i] = BoxHashComputeSecure(copies[i], BRAID_BLOCK_SIZE, &g_braid_state.hash_ctx);
+            hashes[i] = BoxHashContent(copies[i], BRAID_BLOCK_SIZE, &g_braid_state.hash_ctx);
             readable[i] = true;
         }
     }

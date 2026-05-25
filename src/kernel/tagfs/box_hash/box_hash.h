@@ -3,53 +3,51 @@
 
 #include "../../lib/kernel/ktypes.h"
 
-// BoxHash — Cryptographically Secure Hash for BoxOS
-// Features:
-//   • 256-bit output (collision resistant like SHA-256)
-//   • Salt + Key support (HMAC-style security)
-//   • Fast for 4KB blocks (optimized for filesystem)
-//   • Unique to BoxOS (our custom algorithm)
+// ============================================================================
+// BoxHash — integrity & content hashing for BoxOS
 //
-// Security Level:
-//   • BoxHashCompute: Integrity (bit rot detection)
-//   • BoxHashComputeSecure: Security (attack resistance)
-//   • BoxHashComputeSHA256: Maximum security (standard SHA-256)
+//   BoxHashIntegrity — fast 64-bit checksum: silent bit-rot / torn-write
+//                      detection on data blocks. wyhash-class.
+//   BoxHashContent   — 256-bit content digest: dedup keys, block checksums.
+//   BoxHashSecure    — standard SHA-256. The ONLY cryptographic option here;
+//                      use it where tamper-resistance is actually required.
+//
+// Integrity/Content are DETERMINISTIC given a seed (set via BoxHashInit) — seed
+// them with the volume UUID so digests are stable across reboots and unique per
+// volume. They have strong avalanche and are excellent against random
+// corruption, but are NOT collision-proof against an adversary (that is what
+// BoxHashSecure is for). No per-boot randomness: a digest written now must
+// re-verify after a reboot.
+// ============================================================================
 
-#define BOX_HASH_SIZE      256
-#define BOX_HASH_BYTES     (BOX_HASH_SIZE / 8)  // 32 bytes
-#define BOX_HASH_SALT_SIZE 16
-#define BOX_HASH_KEY_SIZE  32
+#define BOX_HASH_BYTES 32   // 256-bit content digest
 
 typedef struct {
     uint8_t bytes[BOX_HASH_BYTES];
 } BoxHash;
 
+// Deterministic seed state derived from a caller seed (e.g. fs_uuid).
 typedef struct {
-    uint8_t salt[BOX_HASH_SALT_SIZE];
-    uint8_t key[BOX_HASH_KEY_SIZE];
-    bool    key_initialized;
+    uint64_t s[4];
 } BoxHashContext;
 
-// Initialize context with random salt and optional key
-void BoxHashInit(BoxHashContext *ctx);
-void BoxHashInitWithKey(BoxHashContext *ctx, const uint8_t *key, uint32_t key_size);
+// Derive the seed state from arbitrary seed bytes (volume UUID recommended).
+// Deterministic: same seed -> same state, every boot, every machine.
+void     BoxHashInit(BoxHashContext *ctx, const void *seed, uint32_t seed_len);
 
-// Compute hash (fast path - integrity checking)
-BoxHash BoxHashCompute(const void *data, uint32_t size, const BoxHashContext *ctx);
+// 64-bit integrity checksum (bit-rot / torn-write detection).
+uint64_t BoxHashIntegrity(const void *data, uint32_t size, const BoxHashContext *ctx);
 
-// Compute hash (secure path - attack resistance)
-BoxHash BoxHashComputeSecure(const void *data, uint32_t size, const BoxHashContext *ctx);
+// 256-bit content digest (dedup keys, block checksums).
+BoxHash  BoxHashContent(const void *data, uint32_t size, const BoxHashContext *ctx);
 
-// Compute SHA-256 hash (maximum security, slower)
-BoxHash BoxHashComputeSHA256(const void *data, uint32_t size);
+// SHA-256 (cryptographic; unseeded; standard FIPS 180-4).
+BoxHash  BoxHashSecure(const void *data, uint32_t size);
 
-// Compare two hashes (constant-time to prevent timing attacks)
-bool BoxHashEqual(const BoxHash *a, const BoxHash *b);
+// Constant-time 256-bit compare.
+bool     BoxHashEqual(const BoxHash *a, const BoxHash *b);
 
-// Convert to hex string (for debugging)
-void BoxHashToHex(const BoxHash *hash, char *out, uint32_t out_size);
-
-// Verify hash (returns true if valid)
-bool BoxHashVerify(const void *data, uint32_t size, const BoxHash *expected_hash, const BoxHashContext *ctx);
+// Hex string (2*BOX_HASH_BYTES + 1 bytes needed).
+void     BoxHashToHex(const BoxHash *hash, char *out, uint32_t out_size);
 
 #endif // BOX_HASH_H
