@@ -8,6 +8,7 @@
 #include "io.h"
 #include "atomics.h"
 #include "linker_symbols.h"
+#include "per_core.h"   // PerCpuData layout + g_per_core_active for the gs fast path
 
 AmpLayout g_amp;
 
@@ -312,11 +313,26 @@ void amp_boot_aps(void)
 
 uint8_t amp_get_core_index(void)
 {
+    /* Fast path: once per-cpu data is live, this CPU's dense core index is
+     * cached in PerCpuData.core_index and read directly through %gs. The entry
+     * stubs (isr.asm / notify_entry.asm / jump_to_userspace) keep the active
+     * GS base pointed at this CPU's PerCpuData in EVERY kernel context (IRQ,
+     * exception, syscall, thread), so this read is always valid here — and it
+     * is independent of APIC ID width (works on xAPIC and x2APIC alike). */
+    if (__atomic_load_n(&g_per_core_active, __ATOMIC_ACQUIRE)) {
+        uint32_t idx;
+        __asm__ volatile("mov %%gs:%c1, %0"
+                         : "=r"(idx)
+                         : "i"(__builtin_offsetof(PerCpuData, core_index)));
+        return (uint8_t)idx;
+    }
+
+    /* Early-boot fallback: BSP only, before per-core GS is established. Derive
+     * the index from the APIC ID — lapic_get_id() is x2APIC-correct (MSR 0x802
+     * when EXTD is set), so this is right in both APIC modes. */
     uint8_t lapic_id = (uint8_t)lapic_get_id();
     uint8_t idx = lapic_to_index[lapic_id];
-    if (idx == 0xFF)
-        return 0;
-    return idx;
+    return (idx == 0xFF) ? 0 : idx;
 }
 
 bool amp_is_kcore(void)
