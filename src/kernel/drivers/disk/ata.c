@@ -488,45 +488,6 @@ int ata_write_sectors_retry(uint8_t is_master, uint64_t lba, uint16_t count, con
     return -1;
 }
 
-// Sectors 0-15 reserved for bootloader (Stage1 + Stage2 occupy 0-9)
-#define FILESYSTEM_START_SECTOR 16
-
-int ata_read_block(uint32_t block_num, uint8_t* buffer) {
-    if (!buffer) return ATA_ERR_INVALID_ARGS;
-    if (!ata_primary_master.exists) return ATA_ERR_NO_DEVICE;
-
-    // TagFS blocks are already absolute sector numbers (no offset needed)
-    uint32_t lba = block_num * 8;
-    return ata_read_sectors_retry(1, lba, 8, buffer);
-}
-
-int ata_write_block(uint32_t block_num, const uint8_t* buffer) {
-    if (!buffer) return ATA_ERR_INVALID_ARGS;
-    if (!ata_primary_master.exists) return ATA_ERR_NO_DEVICE;
-
-    // TagFS blocks are already absolute sector numbers (no offset needed)
-    uint32_t lba = block_num * 8;
-    return ata_write_sectors_retry(1, lba, 8, buffer);
-}
-
-int ata_read_blocks(uint32_t start_block, uint32_t count, uint8_t* buffer) {
-    for (uint32_t i = 0; i < count; i++) {
-        if (ata_read_block(start_block + i, buffer + i * 4096) != 0) {
-            return -1;
-        }
-    }
-    return 0;
-}
-
-int ata_write_blocks(uint32_t start_block, uint32_t count, const uint8_t* buffer) {
-    for (uint32_t i = 0; i < count; i++) {
-        if (ata_write_block(start_block + i, buffer + i * 4096) != 0) {
-            return -1;
-        }
-    }
-    return 0;
-}
-
 static void ata_soft_reset(void) {
     debug_printf("[ATA] Performing software reset...\n");
 

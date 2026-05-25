@@ -18,8 +18,6 @@
 #include "../../kernel/drivers/timer/rtc.h"
 #include "../../lib/kernel/crypto.h"
 
-void tagfs_snapshots_init(void);
-
 static void tagfs_auto_snapshot_before_write(uint32_t file_id) {
     if (file_id == 0)
         return;
@@ -1005,9 +1003,6 @@ error_t tagfs_init(void) {
     {
         debug_printf("[TagFS] Warning: DiskBookInit failed\n");
     }
-
-    // --- Snapshots init ---
-    tagfs_snapshots_init();
 
     // --- CoW Snapshots init ---
     if (TagFS_CowInit() != OK) {

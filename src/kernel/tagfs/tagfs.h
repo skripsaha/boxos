@@ -495,25 +495,9 @@ void tagfs_format_tag(char* dest, size_t dest_size, const char* key, const char*
 int  tagfs_parse_tag(const char* tag_string, char* key, size_t key_size,
                      char* value, size_t value_size);
 
-// ============================================================================
-// Snapshot API
-// ============================================================================
-
-typedef struct {
-    uint32_t snapshot_id;
-    uint32_t parent_file_id;
-    uint64_t created_time;
-    uint32_t file_count;
-    uint64_t total_size;
-    char     name[TAGFS_SNAPSHOT_NAME_LEN];
-    uint8_t  flags;
-    uint8_t  _reserved[3];
-} TagFSSnapshot;
-
-int tagfs_snapshot_create(const char* name, uint32_t file_id);
-int tagfs_snapshot_delete(uint32_t snapshot_id);
-int tagfs_snapshot_list(uint32_t* ids, uint32_t max_count);
-int tagfs_snapshot_info(uint32_t snapshot_id, TagFSSnapshot* info);
+// Snapshots: see the CoW snapshot API (TagFS_Snapshot*) in tagfs/cow/cow.h.
+// The former in-memory-only tagfs_snapshot_* API (snapshot.c) was unused and
+// has been removed.
 
 // Accessor Functions
 // ============================================================================

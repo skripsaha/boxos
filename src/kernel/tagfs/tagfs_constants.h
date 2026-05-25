@@ -9,7 +9,6 @@
 #define TAGFS_VERSION               1
 #define TAGFS_BLOCK_SIZE            4096
 #define TAGFS_SECTOR_SIZE           512
-#define TAGFS_BLOCKS_PER_SECTOR     (TAGFS_BLOCK_SIZE / TAGFS_SECTOR_SIZE)
 
 // Disk Layout (sectors)
 #define TAGFS_SUPERBLOCK_SECTOR     1034
