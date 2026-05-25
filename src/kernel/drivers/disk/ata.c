@@ -135,6 +135,26 @@ int ata_identify(uint8_t is_master, ATADevice* device) {
         identify_data[i] = inw(ATA_PRIMARY_DATA);
     }
 
+    /* Logical sector size (ATA8-ACS): word 106 is valid when bit 14 is set
+     * and bit 15 clear; bit 12 then means words 117-118 hold the size in
+     * 16-bit words, else it is 256 words (512 bytes). The PIO transfer loop
+     * and the block layer are 512-based, so refuse a 4Kn drive rather than
+     * silently corrupt every LBA computation. */
+    uint32_t logical = 512;
+    if ((identify_data[106] & (1u << 14)) && !(identify_data[106] & (1u << 15)) &&
+        (identify_data[106] & (1u << 12))) {
+        uint32_t words = (uint32_t)identify_data[117] | ((uint32_t)identify_data[118] << 16);
+        if (words >= 256) {
+            logical = words * 2u;
+        }
+    }
+    if (logical != 512) {
+        debug_printf("[ATA] %s: unsupported logical sector size %u (need 512); ignoring drive\n",
+                     is_master ? "master" : "slave", logical);
+        return -1;
+    }
+    device->logical_sector_size = logical;
+
     device->exists = 1;
 
     // Check LBA48 support: IDENTIFY word 83, bit 10
@@ -551,6 +571,7 @@ void ata_init(void) {
         ata_primary_master.exists = 1;
         ata_primary_master.is_master = 1;
         ata_primary_master.lba48_supported = 1;
+        ata_primary_master.logical_sector_size = 512;         // AHCI ports validated as 512B
         ata_primary_master.total_sectors = 0xFFFFFFFFFFFFULL;  // AHCI supports 48-bit LBA
         strncpy(ata_primary_master.model, "AHCI SATA Drive", 40);
         ata_primary_master.model[40] = '\0';

@@ -52,6 +52,7 @@ typedef struct {
     uint8_t is_master;
     uint8_t lba48_supported;    // 1 if 48-bit LBA EXT commands available
     uint8_t reserved;
+    uint32_t logical_sector_size; // bytes; only 512 is supported by the stack
     uint64_t total_sectors;     // 48-bit sector count (up to 128 PB)
     uint64_t size_mb;
     char model[41];
