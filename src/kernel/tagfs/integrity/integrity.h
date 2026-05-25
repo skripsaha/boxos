@@ -30,6 +30,12 @@ void     IntegrityUpdate(uint32_t block, const void *data);
 bool     IntegrityVerify(uint32_t block, const void *data);
 
 error_t  IntegrityFlush(void);       // persist dirty map blocks
+
+// Publish a Touch event on the well-known "integrity" tag for each bit-rot
+// detection recorded since the last drain. Called from a lock-free context
+// (tagfs_sync) — never from the read path, which runs under g_state.lock.
+void     IntegrityDrainReports(void);
+
 bool     IntegrityIsInitialized(void);
 uint32_t IntegrityErrorCount(void);  // bit-rot detections this session
 

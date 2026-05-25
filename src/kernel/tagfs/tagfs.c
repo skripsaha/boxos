@@ -1352,6 +1352,7 @@ void tagfs_sync(void)
     file_table_flush();
     meta_pool_flush();
     IntegrityFlush();
+    IntegrityDrainReports();   // publish any pending bit-rot Touch events
 
     // Write block bitmap to disk
     uint32_t bitmap_bytes = (g_state.superblock.total_blocks + 7) / 8;

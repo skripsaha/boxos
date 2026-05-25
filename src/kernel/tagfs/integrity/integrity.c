@@ -2,6 +2,7 @@
 #include "../tagfs.h"
 #include "../box_hash/box_hash.h"
 #include "../../lib/kernel/klib.h"
+#include "touch.h"
 
 // Superblock reserved[] layout: 0..15 boot hints, 16..23 CoW manifest blocks,
 // 24..27 integrity-map first block, 28..31 integrity-map block count, 399/400
@@ -22,6 +23,13 @@ static uint32_t        g_map_count     = 0;      // map data blocks
 static bool           *g_dirty         = NULL;   // per map data block
 static BoxHashContext  g_ctx;
 static uint32_t        g_errors        = 0;
+
+// Pending bit-rot reports — a fixed ring filled on the (lock-held) read path
+// and drained from a lock-free context into tag-scoped Touch events.
+#define ROT_RING_MAX 64
+static uint32_t        g_rot_ring[ROT_RING_MAX];
+static uint32_t        g_rot_count     = 0;
+static uint16_t        g_integrity_tag = 0xFFFF;   // well-known "integrity" tag
 
 static inline bool in_map_region(uint32_t block) {
     return g_map_first_block != 0 &&
@@ -95,6 +103,10 @@ error_t IntegrityInit(void) {
                      g_map_count, first, total);
     }
 
+    // Well-known tag so bit-rot is reportable as a Touch event apps subscribe to.
+    if (fs->registry)
+        g_integrity_tag = tag_registry_intern(fs->registry, "integrity", NULL);
+
     g_initialized = true;   // hooks were no-ops until now (so Init's own I/O is safe)
     return OK;
 }
@@ -123,6 +135,10 @@ bool IntegrityVerify(uint32_t block, const void *data) {
     if (h == stored)
         return true;
     __atomic_fetch_add(&g_errors, 1, __ATOMIC_RELAXED);
+    spin_lock(&g_lock);
+    if (g_rot_count < ROT_RING_MAX)
+        g_rot_ring[g_rot_count++] = block;   // queued for deferred Touch report
+    spin_unlock(&g_lock);
     debug_printf("[Integrity] BIT-ROT on block %u: stored=%016lx read=%016lx\n",
                  block, (unsigned long)stored, (unsigned long)h);
     return false;
@@ -164,6 +180,28 @@ void IntegrityShutdown(void) {
 
 bool IntegrityIsInitialized(void) { return g_initialized; }
 uint32_t IntegrityErrorCount(void) { return g_errors; }
+
+void IntegrityDrainReports(void) {
+    if (!g_initialized || g_integrity_tag == 0xFFFF)
+        return;
+    uint32_t local[ROT_RING_MAX];
+    uint32_t n;
+    spin_lock(&g_lock);
+    n = g_rot_count;
+    if (n > ROT_RING_MAX) n = ROT_RING_MAX;
+    memcpy(local, g_rot_ring, n * sizeof(uint32_t));
+    g_rot_count = 0;
+    spin_unlock(&g_lock);
+
+    for (uint32_t i = 0; i < n; i++) {
+        struct __attribute__((packed)) {
+            uint32_t block;
+            uint8_t  op;        // 3 = integrity / bit-rot
+            uint8_t  _pad[3];
+        } ev = { local[i], 3, {0, 0, 0} };
+        TouchPublishId(g_integrity_tag, &ev, sizeof(ev), 0, TOUCH_FLAG_TAGFS);
+    }
+}
 
 void IntegrityMarkMapBlocks(uint8_t *computed_bm, uint32_t total_blocks) {
     if (!computed_bm)
