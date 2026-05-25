@@ -248,7 +248,7 @@ acpi_error_t acpi_parse_madt(madt_info_t* info) {
     return info->valid ? ACPI_OK : ACPI_ERR_INVALID_TABLE;
 }
 
-uint8_t amp_collect_lapics(uint8_t* ids_out, uint8_t max_count) {
+uint8_t amp_collect_lapics(uint32_t* ids_out, uint8_t max_count) {
     if (!ids_out || max_count == 0) return 0;
     if (!g_acpi.initialized || !g_acpi.rsdp) return 0;
 
@@ -259,19 +259,42 @@ uint8_t amp_collect_lapics(uint8_t* ids_out, uint8_t max_count) {
     uint8_t* ptr = (uint8_t*)madt + sizeof(acpi_madt_t);
     uint8_t* end = (uint8_t*)madt + madt->header.length;
 
+    /* Collect BOTH MADT Type 0 (Processor Local APIC, 8-bit id) and Type 9
+     * (Processor Local x2APIC, 32-bit id). ACPI 6.5 §5.2.12.2 / §5.2.12.12:
+     * a logical processor with id < 255 is listed via Type 0 (even in x2APIC
+     * mode), and any processor with id >= 255 MUST be listed via Type 9. A
+     * machine with >254 logical processors therefore interleaves both. */
     while (ptr + sizeof(madt_entry_header_t) <= end && count < max_count) {
         madt_entry_header_t* entry = (madt_entry_header_t*)ptr;
         if (entry->length < sizeof(madt_entry_header_t)) break;
         if (ptr + entry->length > end) break;
 
+        uint32_t id = 0xFFFFFFFFu;   /* sentinel: "no usable id from this entry" */
+
         if (entry->type == MADT_TYPE_LOCAL_APIC &&
             entry->length >= sizeof(madt_local_apic_t)) {
             madt_local_apic_t* lapic = (madt_local_apic_t*)entry;
-            bool enabled = (lapic->flags & MADT_LAPIC_ENABLED) ||
-                           (lapic->flags & MADT_LAPIC_ONLINE_CAP);
-            if (enabled) {
-                ids_out[count++] = lapic->apic_id;
-            }
+            if ((lapic->flags & MADT_LAPIC_ENABLED) ||
+                (lapic->flags & MADT_LAPIC_ONLINE_CAP))
+                id = lapic->apic_id;                 /* 8-bit xAPIC id */
+        } else if (entry->type == MADT_TYPE_LX2APIC &&
+                   entry->length >= sizeof(madt_lx2apic_t)) {
+            madt_lx2apic_t* x2 = (madt_lx2apic_t*)entry;
+            /* x2apic_id == 0xFFFFFFFF marks an unusable slot — skip it. */
+            if (((x2->flags & MADT_LAPIC_ENABLED) ||
+                 (x2->flags & MADT_LAPIC_ONLINE_CAP)) &&
+                x2->x2apic_id != 0xFFFFFFFFu)
+                id = x2->x2apic_id;                  /* 32-bit x2APIC id */
+        }
+
+        if (id != 0xFFFFFFFFu) {
+            /* A processor is listed in exactly one of Type 0 / Type 9, but be
+             * defensive against firmware that double-lists it. */
+            bool dup = false;
+            for (uint8_t i = 0; i < count; i++)
+                if (ids_out[i] == id) { dup = true; break; }
+            if (!dup)
+                ids_out[count++] = id;
         }
         ptr += entry->length;
     }

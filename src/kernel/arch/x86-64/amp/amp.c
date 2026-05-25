@@ -12,8 +12,19 @@
 
 AmpLayout g_amp;
 
-// O(1) lookup: lapic_id -> core_index
-static uint8_t lapic_to_index[256];
+// Reverse map lapic_id -> dense core_index. Used only on slow paths:
+// amp_init() while building the table, and amp_get_core_index()'s early-boot
+// fallback (before per-cpu GS is live). A linear scan over the (<=256) built
+// descriptors is width-independent — no 256-entry array that would break for
+// 32-bit x2APIC ids.
+static uint8_t amp_index_for_lapic(uint32_t lapic_id)
+{
+    for (uint8_t i = 0; i < g_amp.total_cores; i++) {
+        if (g_amp.cores[i].lapic_id == lapic_id)
+            return g_amp.cores[i].core_index;
+    }
+    return 0;   // unknown id -> attribute to BSP (matches prior behaviour)
+}
 
 // PIT channel 2 busy-wait delay
 static void pit_delay_us(uint32_t microseconds)
@@ -64,7 +75,6 @@ uint32_t amp_calculate_kcores(uint32_t total_cores)
 void amp_init(void)
 {
     memset(&g_amp, 0, sizeof(g_amp));
-    memset(lapic_to_index, 0xFF, sizeof(lapic_to_index));
 
     madt_info_t madt;
     // We need to re-walk MADT ourselves to collect ALL LAPIC IDs.
@@ -78,22 +88,21 @@ void amp_init(void)
         g_amp.k_count = 1;
         g_amp.app_count = 0;
         g_amp.bsp_index = 0;
-        g_amp.bsp_lapic_id = (uint8_t)lapic_get_id();
+        g_amp.bsp_lapic_id = lapic_get_id();
         g_amp.cores[0].lapic_id = g_amp.bsp_lapic_id;
         g_amp.cores[0].core_index = 0;
         g_amp.cores[0].is_bsp = true;
         g_amp.cores[0].is_kcore = true;
         g_amp.cores[0].online = true;
-        lapic_to_index[g_amp.bsp_lapic_id] = 0;
         return;
     }
 
-    // BSP is whoever we are right now (LAPIC ID of executing CPU)
-    uint8_t my_lapic_id = (uint8_t)lapic_get_id();
+    // BSP is whoever we are right now (full-width LAPIC ID of executing CPU)
+    uint32_t my_lapic_id = lapic_get_id();
     g_amp.bsp_lapic_id = my_lapic_id;
 
-    // Collect all enabled LAPIC IDs from MADT via amp_collect_lapics() (acpi_madt.c)
-    uint8_t lapic_ids[MAX_CORES];
+    // Collect all enabled LAPIC IDs from MADT — Type 0 (8-bit) + Type 9 (32-bit)
+    uint32_t lapic_ids[MAX_CORES];
     // max_count is uint8_t; MAX_CORES=256 wraps to 0, so use 255 (ACPI limit anyway)
     uint8_t count = amp_collect_lapics(lapic_ids, 255);
 
@@ -117,7 +126,6 @@ void amp_init(void)
             g_amp.cores[core_idx].core_index = core_idx;
             g_amp.cores[core_idx].is_bsp = true;
             g_amp.cores[core_idx].online = true;
-            lapic_to_index[my_lapic_id] = core_idx;
             g_amp.bsp_index = core_idx;
             core_idx++;
             break;
@@ -133,11 +141,10 @@ void amp_init(void)
         g_amp.cores[core_idx].core_index = core_idx;
         g_amp.cores[core_idx].is_bsp = false;
         g_amp.cores[core_idx].online = false;
-        lapic_to_index[lapic_ids[i]] = core_idx;
         core_idx++;
     }
 
-    // Ensure lapic_to_index[] is visible to APs before they boot
+    // Ensure g_amp.cores[] is fully populated and visible to APs before they boot
     mfence();
 
     g_amp.total_cores = core_idx;
@@ -328,11 +335,9 @@ uint8_t amp_get_core_index(void)
     }
 
     /* Early-boot fallback: BSP only, before per-core GS is established. Derive
-     * the index from the APIC ID — lapic_get_id() is x2APIC-correct (MSR 0x802
-     * when EXTD is set), so this is right in both APIC modes. */
-    uint8_t lapic_id = (uint8_t)lapic_get_id();
-    uint8_t idx = lapic_to_index[lapic_id];
-    return (idx == 0xFF) ? 0 : idx;
+     * the index from the (x2APIC-correct) APIC ID via a width-independent scan
+     * of the descriptor table. */
+    return amp_index_for_lapic(lapic_get_id());
 }
 
 bool amp_is_kcore(void)

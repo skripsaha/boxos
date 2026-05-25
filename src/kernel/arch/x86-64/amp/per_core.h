@@ -22,11 +22,11 @@ typedef struct {
     PerCpuData          notify;
 
     // --- Core identity ---
+    uint32_t            lapic_id;     // full-width xAPIC/x2APIC ID
     uint8_t             core_index;
-    uint8_t             lapic_id;
     bool                is_kcore;
     bool                initialized;
-    uint32_t            _pad0;
+    uint8_t             _pad0;
 
     // --- Per-core GDT (7 entries: null, kcode, kdata, udata, ucode, tss_lo, tss_hi) ---
     gdt_entry_t         gdt[PER_CORE_GDT_ENTRIES] __attribute__((aligned(16)));

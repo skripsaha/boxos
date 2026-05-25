@@ -225,8 +225,11 @@ void lapic_icr_write(uint32_t dest_id, uint32_t cmd) {
     lapic_write(LAPIC_REG_ICR_LOW,  cmd);
 }
 
-void lapic_send_ipi(uint8_t dest_lapic_id, uint8_t vector) {
-    lapic_icr_write((uint32_t)dest_lapic_id, (uint32_t)vector);
+void lapic_send_ipi(uint32_t dest_lapic_id, uint8_t vector) {
+    /* lapic_icr_write picks the mode-correct path: xAPIC uses dest[7:0] in
+     * ICR_HIGH[31:24], x2APIC uses the full 32-bit dest. So a 32-bit x2APIC
+     * destination is delivered correctly here. */
+    lapic_icr_write(dest_lapic_id, (uint32_t)vector);
 }
 
 void lapic_send_ipi_all_excluding_self(uint8_t vector) {
