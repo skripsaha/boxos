@@ -436,6 +436,9 @@ void irq_handler(interrupt_frame_t *frame)
         {
             schedule(frame);
         }
+        /* Re-arm the next tick. No-op unless the timer runs in TSC-deadline
+         * mode (one-shot per deadline); periodic mode reloads itself. */
+        lapic_timer_rearm();
         lapic_send_eoi();
         return;
     }
