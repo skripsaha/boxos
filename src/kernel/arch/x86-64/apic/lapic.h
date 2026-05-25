@@ -26,7 +26,8 @@
 
 // LVT flags (Intel SDM Vol 3 §11.5.1)
 #define LAPIC_LVT_MASKED            (1u << 16)   // Interrupt masked
-#define LAPIC_LVT_TIMER_PERIODIC    (1u << 17)   // Periodic timer mode
+#define LAPIC_LVT_TIMER_PERIODIC    (1u << 17)   // Periodic timer mode (bits 18:17 = 01)
+#define LAPIC_LVT_TIMER_TSC_DEADLINE (2u << 17)  // TSC-deadline mode (bits 18:17 = 10)
 #define LAPIC_LVT_TRIGGER_LEVEL     (1u << 15)   // 1 = level, 0 = edge
 #define LAPIC_LVT_REMOTE_IRR        (1u << 14)   // RO; for level-triggered
 #define LAPIC_LVT_PIN_POLARITY_LOW  (1u << 13)   // 1 = active low, 0 = active high
@@ -53,6 +54,9 @@
 #define MSR_APIC_BASE_BSP       (1 << 8)
 #define MSR_APIC_BASE_ADDR_MASK 0xFFFFF000ULL
 
+// LAPIC TSC-deadline timer MSR (Intel SDM Vol 3A §10.5.4.1)
+#define MSR_IA32_TSC_DEADLINE   0x6E0
+
 // x2APIC MSR layout (Intel SDM Vol 3A §10.12.1)
 #define MSR_X2APIC_BASE         0x800       // x2APIC MSR window starts here
 #define MSR_X2APIC_APICID       0x802       // APIC ID: 32-bit RO MSR (replaces MMIO 0x20)
@@ -69,6 +73,11 @@ uintptr_t lapic_get_base(void);
 // LAPIC timer
 void lapic_timer_init(uint8_t vector, uint32_t frequency_hz);
 void lapic_timer_stop(void);
+
+/* Re-arm the LAPIC timer for the next tick. No-op unless the timer is running
+ * in TSC-deadline mode (one-shot per deadline), in which case it programs the
+ * next absolute TSC deadline. Called from the LAPIC timer IRQ handler. */
+void lapic_timer_rearm(void);
 
 // Register access
 uint32_t lapic_read(uint32_t reg);

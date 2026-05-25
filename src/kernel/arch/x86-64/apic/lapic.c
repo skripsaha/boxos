@@ -3,8 +3,9 @@
 #include "klib.h"
 #include "vmm.h"
 #include "acpi_madt.h"
-#include "cpu_calibrate.h"   // cpu_ms_to_tsc — TSC-based LAPIC timer calibration
+#include "cpu_calibrate.h"   // cpu_ms_to_tsc / cpu_get_tsc_freq_khz
 #include "atomics.h"         // rdtsc
+#include "cpuid.h"           // g_cpu_caps.has_tsc_deadline
 
 static volatile uint32_t* lapic_base_virt = NULL;
 static uintptr_t lapic_base_phys = 0;
@@ -22,6 +23,17 @@ static bool lapic_enabled = false;
  * (Intel SDM Vol 3A §10.12.9), so EVERY ICR write must consult this
  * flag and dispatch through lapic_icr_write. */
 static bool g_x2apic_active = false;
+
+/* TSC-deadline timer state (Intel SDM Vol 3A §10.5.4.1). When the CPU supports
+ * the deadline timer, App Cores run the scheduler tick in deadline mode instead
+ * of periodic: it is driven by the invariant TSC (exact, low-jitter) rather
+ * than the bus-clock-derived LAPIC counter. The mode is one-shot per deadline,
+ * so lapic_timer_rearm() reloads the next deadline from the IRQ handler.
+ * g_lapic_tsc_period is the per-tick interval in TSC cycles. Both are written
+ * by every App Core in lapic_timer_init() to the same values (has_tsc_deadline
+ * is intersected across cores), so the shared writes are benign. */
+static bool     g_lapic_tsc_deadline = false;
+static uint64_t g_lapic_tsc_period   = 0;
 
 static inline uint64_t rdmsr(uint32_t msr) {
     uint32_t lo, hi;
@@ -148,7 +160,33 @@ uintptr_t lapic_get_base(void) {
 void lapic_timer_init(uint8_t vector, uint32_t frequency_hz) {
     debug_printf("[LAPIC] Calibrating APIC timer for %u Hz...\n", frequency_hz);
 
-    /* Calibrate the LAPIC timer against the TSC, NOT PIT channel 2.
+    /* Preferred on modern hardware: TSC-deadline mode. The timer is driven by
+     * the invariant TSC (exact, low-jitter) instead of the bus-clock-derived
+     * LAPIC counter, and needs no counter calibration — we derive the per-tick
+     * interval directly from the already-calibrated TSC frequency. It is a
+     * one-shot per deadline, so lapic_timer_rearm() reloads it each IRQ.
+     * Intel SDM Vol 3A §10.5.4.1. */
+    if (g_cpu_caps.has_tsc_deadline) {
+        uint64_t cyc_per_sec = cpu_get_tsc_freq_khz() * 1000ULL;
+        g_lapic_tsc_period = (frequency_hz > 0) ? (cyc_per_sec / frequency_hz)
+                                                : cyc_per_sec;
+        if (g_lapic_tsc_period == 0)
+            g_lapic_tsc_period = cyc_per_sec;   // guard against bad calibration
+        g_lapic_tsc_deadline = true;
+
+        lapic_write(LAPIC_REG_TIMER_LVT, vector | LAPIC_LVT_TIMER_TSC_DEADLINE);
+        /* The LVT-mode store must be ordered before the first deadline write —
+         * WRMSR(IA32_TSC_DEADLINE) is not otherwise serialized against the LVT
+         * MMIO store (SDM Vol 3A §10.5.4.1). */
+        __asm__ volatile("mfence" ::: "memory");
+        wrmsr(MSR_IA32_TSC_DEADLINE, rdtsc() + g_lapic_tsc_period);
+
+        debug_printf("[LAPIC] Timer configured: vector=%u, %u Hz TSC-deadline\n",
+                     vector, frequency_hz);
+        return;
+    }
+
+    /* Fallback: periodic mode, calibrated against the TSC, NOT PIT channel 2.
      *
      * Each AP runs this from per_core_init_ap() while the BSP is concurrently
      * busy-waiting on PIT channel 2 (pit_delay_us) inside amp_boot_aps() to
@@ -196,6 +234,15 @@ void lapic_timer_init(uint8_t vector, uint32_t frequency_hz) {
 void lapic_timer_stop(void) {
     lapic_write(LAPIC_REG_TIMER_LVT, LAPIC_LVT_MASKED);
     lapic_write(LAPIC_REG_TIMER_ICR, 0);
+}
+
+void lapic_timer_rearm(void) {
+    /* TSC-deadline is one-shot: the IA32_TSC_DEADLINE MSR self-clears when it
+     * fires, so the timer IRQ handler must program the next deadline or the
+     * tick stops. Relative to "now" (rdtsc) so it self-corrects if a tick ran
+     * long. No-op in periodic mode (the LAPIC reloads the count itself). */
+    if (g_lapic_tsc_deadline)
+        wrmsr(MSR_IA32_TSC_DEADLINE, rdtsc() + g_lapic_tsc_period);
 }
 
 bool lapic_is_x2apic_active(void) {
