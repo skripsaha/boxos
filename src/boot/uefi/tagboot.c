@@ -330,17 +330,26 @@ static int BlockIoProbeTagFs(EFI_BLOCK_IO_PROTOCOL *bio)
     uint32_t bsz = bio->media->block_size;
     if (bsz == 0 || !bio->media->media_present) return 0;
 
-    /* Map 512-byte logical sector 1034 to the device's physical block. */
-    uint64_t sb_lba  = (TAGFS_SUPERBLOCK_SECTOR * (uint64_t)TAGFS_SECTOR_SIZE) / bsz;
-    uint32_t read_sz = bsz < TAGFS_SECTOR_SIZE ? TAGFS_SECTOR_SIZE : bsz;
+    /* Map 512-byte logical sector 1034 to the device's physical block AND the
+     * byte offset within it. On a 4Kn device sector 1034 lives at byte 1024 of
+     * physical block 129, not at offset 0 — reading magic from probe_buf[0]
+     * would wrongly reject every 4Kn disk. Mirror ReadSectors' alignment math.
+     * Sized to the same 8 KB ceiling; larger physical blocks are skipped, never
+     * overflowed (the old probe_buf[4096] overflowed on 8Kn). */
+    uint64_t byte_off = (uint64_t)TAGFS_SUPERBLOCK_SECTOR * TAGFS_SECTOR_SIZE;
+    uint64_t sb_lba   = byte_off / bsz;
+    uint32_t off_in   = (uint32_t)(byte_off % bsz);
+    uint32_t read_sz  = bsz < TAGFS_SECTOR_SIZE ? TAGFS_SECTOR_SIZE : bsz;
 
-    static uint8_t probe_buf[4096];   /* covers 4 KB physical sectors */
+    static uint8_t probe_buf[8192];   /* covers up to 8 KB physical sectors */
+    if (read_sz > sizeof(probe_buf)) return 0;
+    if (off_in + 4 > read_sz)        return 0;   /* magic must lie within the read */
     if (EFI_ERROR(bio->read_blocks(bio, bio->media->media_id,
                                    (EFI_LBA)sb_lba, read_sz, probe_buf)))
         return 0;
 
     uint32_t magic_val;
-    MemCopy(&magic_val, probe_buf, 4);
+    MemCopy(&magic_val, probe_buf + off_in, 4);
     return magic_val == TAGFS_MAGIC;
 }
 
