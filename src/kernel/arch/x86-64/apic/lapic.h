@@ -83,7 +83,7 @@ void lapic_write(uint32_t reg, uint32_t value);
 #define LAPIC_ICR_SEND_PENDING  (1 << 12)
 
 // IPI delivery
-void lapic_send_ipi(uint8_t dest_lapic_id, uint8_t vector);
+void lapic_send_ipi(uint32_t dest_lapic_id, uint8_t vector);
 void lapic_send_ipi_all_excluding_self(uint8_t vector);
 
 /* Returns true if the local APIC is currently running in x2APIC mode

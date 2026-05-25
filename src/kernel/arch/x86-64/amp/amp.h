@@ -7,7 +7,7 @@
 #define AP_TRAMPOLINE_PHYS  0x8000
 
 typedef struct {
-    uint8_t  lapic_id;
+    uint32_t lapic_id;        // xAPIC (8-bit) or x2APIC (32-bit) ID — full width
     uint8_t  core_index;
     bool     is_bsp;
     bool     is_kcore;
@@ -20,7 +20,7 @@ typedef struct {
     uint8_t  k_count;
     uint8_t  app_count;
     uint8_t  bsp_index;
-    uint8_t  bsp_lapic_id;
+    uint32_t bsp_lapic_id;    // full-width APIC ID of the BSP
     bool     multicore_active;
 } AmpLayout;
 
