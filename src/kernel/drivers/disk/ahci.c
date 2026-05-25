@@ -658,6 +658,54 @@ void ahci_get_port_stats(uint8_t port_num, ahci_port_stats_t* stats_out) {
     stats_out->last_tfd            = __atomic_load_n(&port->stats.last_tfd,            __ATOMIC_RELAXED);
 }
 
+/* AHCI 1.3.1 §10.6.3 — BIOS/OS handoff. On platforms that share the HBA
+ * with SMM firmware (CAP2.BOH set — common on real laptops/desktops), the
+ * OS must request ownership before touching the controller, otherwise BIOS
+ * SMI code and the OS fight over the registers (hangs / corruption). This
+ * is a true no-op on QEMU, which never advertises BOH. Requires hba_mem
+ * already mapped. */
+static void ahci_bios_handoff(void) {
+    if (!(ahci_ctrl.hba_mem->cap2 & AHCI_CAP2_BOH)) {
+        return;  // handoff unsupported — OS already owns the HBA
+    }
+
+    debug_printf("[AHCI] BIOS/OS handoff: requesting OS ownership...\n");
+
+    // Request OS ownership (set OOS); other bits preserved.
+    ahci_ctrl.hba_mem->bohc |= AHCI_BOHC_OOS;
+    mfence();
+
+    /* Poll the BIOS Owned Semaphore until firmware releases it, bounded
+     * to 1s so a misbehaving BIOS cannot hang the boot. */
+    uint64_t deadline = rdtsc() + cpu_ms_to_tsc(1000);
+    while (rdtsc() < deadline) {
+        if ((ahci_ctrl.hba_mem->bohc & AHCI_BOHC_BOS) == 0) {
+            break;
+        }
+        cpu_pause();
+    }
+
+    if (ahci_ctrl.hba_mem->bohc & AHCI_BOHC_BOS) {
+        debug_printf("[AHCI] WARNING: BIOS did not release HBA within 1s (continuing)\n");
+    }
+
+    /* If BIOS Busy is still set, firmware is finishing cleanup (e.g.
+     * spinning drives down); spec recommends granting up to 2s more. */
+    if (ahci_ctrl.hba_mem->bohc & AHCI_BOHC_BB) {
+        debug_printf("[AHCI] BIOS busy after handoff; waiting up to 2s...\n");
+        deadline = rdtsc() + cpu_ms_to_tsc(2000);
+        while (rdtsc() < deadline) {
+            if ((ahci_ctrl.hba_mem->bohc & AHCI_BOHC_BB) == 0) {
+                break;
+            }
+            cpu_pause();
+        }
+    }
+
+    debug_printf("[AHCI] BIOS/OS handoff complete (BOHC=0x%08x)\n",
+                 ahci_ctrl.hba_mem->bohc);
+}
+
 int ahci_init(void) {
     debug_printf("[AHCI] Initializing AHCI driver...\n");
 
@@ -725,35 +773,34 @@ int ahci_init(void) {
     debug_printf("[AHCI] BAR5: 0x%lx\n", (unsigned long)ahci_ctrl.hba_phys);
 
     ahci_ctrl.hba_mem = (ahci_hba_mem_t*)vmm_map_mmio(ahci_ctrl.hba_phys,
-                                                       4096,
+                                                       AHCI_ABAR_SPAN,
                                                        VMM_FLAGS_KERNEL_RW);
     if (!ahci_ctrl.hba_mem) {
         debug_printf("[AHCI] Failed to map BAR5 MMIO\n");
         return -1;
     }
 
-    debug_printf("[AHCI] BAR5: phys=0x%08lx mapped to virt=0x%p\n",
-                 ahci_ctrl.hba_phys, ahci_ctrl.hba_mem);
+    debug_printf("[AHCI] BAR5: phys=0x%08lx mapped to virt=0x%p (span=0x%x)\n",
+                 ahci_ctrl.hba_phys, ahci_ctrl.hba_mem, (unsigned)AHCI_ABAR_SPAN);
 
+    /* CAP is RO and valid before AHCI enable; cache it. CAP2 carries the
+     * BOH bit and must be read before the handoff below. */
     ahci_ctrl.cap = ahci_ctrl.hba_mem->cap;
 
-    ahci_ctrl.s64a_support = (ahci_ctrl.cap & AHCI_CAP_S64A) != 0;
-    if (ahci_ctrl.s64a_support) {
-        debug_printf("[AHCI] 64-bit DMA addressing enabled\n");
-    }
+    /* AHCI 1.3.1 §10.6.3: take the HBA away from BIOS before driving it. */
+    ahci_bios_handoff();
 
-    ahci_ctrl.ncq_support = (ahci_ctrl.cap & AHCI_CAP_SNCQ) != 0;
-    ahci_ctrl.num_slots = ((ahci_ctrl.cap >> AHCI_CAP_NCS_SHIFT) & AHCI_CAP_NCS_MASK) + 1;
-
-    debug_printf("[AHCI] CAP: NCQ=%s, Slots=%u, S64A=%s\n",
-                 ahci_ctrl.ncq_support ? "yes" : "no",
-                 ahci_ctrl.num_slots,
-                 ahci_ctrl.s64a_support ? "yes" : "no");
+    /* §5.3.2.3: GHC.AE must be set before accessing other AHCI registers.
+     * Set it, issue the HBA reset (which clears AE), then set it again —
+     * the spec-mandated ordering for a clean reset. */
+    ahci_ctrl.hba_mem->ghc |= AHCI_GHC_AE;
+    mfence();
 
     debug_printf("[AHCI] Performing HBA reset...\n");
     ahci_ctrl.hba_mem->ghc |= AHCI_GHC_HR;
+    mfence();
 
-    // AHCI spec: controller must complete reset within 1 second
+    // §10.4.3: HR self-clears when the reset completes (<= 1 second).
     uint64_t reset_deadline = rdtsc() + cpu_ms_to_tsc(1000);
     while (rdtsc() < reset_deadline) {
         if ((ahci_ctrl.hba_mem->ghc & AHCI_GHC_HR) == 0) {
@@ -764,27 +811,40 @@ int ahci_init(void) {
 
     if (ahci_ctrl.hba_mem->ghc & AHCI_GHC_HR) {
         debug_printf("[AHCI] HBA reset timeout\n");
-        vmm_unmap_mmio(ahci_ctrl.hba_mem, 4096);
+        vmm_unmap_mmio(ahci_ctrl.hba_mem, AHCI_ABAR_SPAN);
         return -1;
     }
 
     debug_printf("[AHCI] HBA reset complete\n");
 
+    // Re-enable AHCI mode — the reset cleared GHC.AE.
     ahci_ctrl.hba_mem->ghc |= AHCI_GHC_AE;
+    mfence();
 
     if ((ahci_ctrl.hba_mem->ghc & AHCI_GHC_AE) == 0) {
         debug_printf("[AHCI] Failed to enable AHCI mode\n");
-        vmm_unmap_mmio(ahci_ctrl.hba_mem, 4096);
+        vmm_unmap_mmio(ahci_ctrl.hba_mem, AHCI_ABAR_SPAN);
         return -1;
     }
 
     debug_printf("[AHCI] AHCI mode enabled\n");
 
+    /* Derive capabilities (CAP is static across the HBA reset). */
+    ahci_ctrl.s64a_support = (ahci_ctrl.cap & AHCI_CAP_S64A) != 0;
+    ahci_ctrl.ncq_support  = (ahci_ctrl.cap & AHCI_CAP_SNCQ) != 0;
+    ahci_ctrl.num_slots    = ((ahci_ctrl.cap >> AHCI_CAP_NCS_SHIFT) & AHCI_CAP_NCS_MASK) + 1;
+
+    debug_printf("[AHCI] CAP: NCQ=%s, Slots=%u, S64A=%s, CAP2=0x%08x\n",
+                 ahci_ctrl.ncq_support ? "yes" : "no",
+                 ahci_ctrl.num_slots,
+                 ahci_ctrl.s64a_support ? "yes" : "no",
+                 ahci_ctrl.hba_mem->cap2);
+
     ahci_ctrl.initialized = true;
 
     if (ahci_init_ports() != 0) {
         debug_printf("[AHCI] No active ports found\n");
-        vmm_unmap_mmio(ahci_ctrl.hba_mem, 4096);
+        vmm_unmap_mmio(ahci_ctrl.hba_mem, AHCI_ABAR_SPAN);
         ahci_ctrl.initialized = false;
         return -1;
     }

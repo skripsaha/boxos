@@ -69,6 +69,19 @@
 #define AHCI_GHC_IE         (1U << 1)   // Interrupt Enable
 #define AHCI_GHC_HR         (1U << 0)   // HBA Reset
 
+// CAP2 register bits (offset 0x24)
+#define AHCI_CAP2_BOH       (1U << 0)   // BIOS/OS Handoff supported
+#define AHCI_CAP2_NVMP      (1U << 1)   // NVMHCI Present
+#define AHCI_CAP2_APST      (1U << 2)   // Automatic Partial to Slumber
+
+// BOHC register bits (offset 0x28) — BIOS/OS Handoff Control & Status
+// AHCI 1.3.1 §3.1.18
+#define AHCI_BOHC_BOS       (1U << 0)   // BIOS Owned Semaphore
+#define AHCI_BOHC_OOS       (1U << 1)   // OS Owned Semaphore
+#define AHCI_BOHC_SOOE      (1U << 2)   // SMI on OS Ownership Change Enable
+#define AHCI_BOHC_OOC       (1U << 3)   // OS Ownership Change (W1C)
+#define AHCI_BOHC_BB        (1U << 4)   // BIOS Busy
+
 // PxCMD register bits
 #define AHCI_PCMD_ICC_SHIFT 28
 #define AHCI_PCMD_ICC_MASK  0xF
@@ -162,6 +175,13 @@
 #define AHCI_MAX_PORTS          32
 #define AHCI_MAX_SLOTS          32
 #define AHCI_PRDT_MAX_ENTRIES   16
+
+/* HBA register span = generic regs (0x100) + one 0x80 port-register block
+ * per port. AHCI 1.3.1 §3: port N regs live at 0x100 + N*0x80, so a full
+ * 32-port HBA needs 0x1100 bytes. Mapping a single 4 KiB page (the prior
+ * bug) left ports >= 30 in unmapped memory -> #PF / silent loss on
+ * high-port-count controllers. vmm_map_mmio rounds this up to pages. */
+#define AHCI_ABAR_SPAN          (0x100 + AHCI_MAX_PORTS * 0x80)
 
 #define AHCI_CMDTBL_SIZE        128
 #define AHCI_PRDT_ENTRY_SIZE    16
