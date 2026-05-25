@@ -721,6 +721,11 @@ int main(int argc, char* argv[]) {
         memcpy(dbuf + 8,  &dstart, 8);
         memcpy(dbuf + 16, &dcap,   4);
         memcpy(dbuf + 20, &dcount, 4);
+        /* crc32 at offset 32 (after generation@24, flags@28), over the 512-byte
+         * block with the crc field zeroed — matches the kernel's DiskBook SB CRC
+         * so a freshly-imaged volume validates without a first-mount reformat. */
+        uint32_t dcrc = tagfs_crc32(dbuf, 512);
+        memcpy(dbuf + 32, &dcrc, 4);
 
         write_at_sector(disk, TAGFS_JOURNAL_SB_SECTOR, dbuf, 512);
         write_at_sector(disk, TAGFS_JOURNAL_BACKUP_SECTOR, dbuf, 512);
