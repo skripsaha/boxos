@@ -696,6 +696,55 @@ static TestResult test_boxhash_sizes(void) {
 }
 
 // ============================================================================
+// CoW redirect durability — snapshot frozen view survives reboot
+// Reproduces the post-reboot state (snapshot restored from the manifest with no
+// in-memory redirects) and runs the real mount-time DiskBook replay path,
+// confirming the redirect is restored from the durable log.
+// ============================================================================
+static TestResult test_cow_redirect_reboot_survival(void) {
+    if (!DiskBookIsInitialized())
+        return TEST_SKIP;
+
+    uint32_t oldb = 0, newb = 0;
+    if (tagfs_alloc_blocks(1, &oldb) != 0)
+        return TEST_SKIP;
+    if (tagfs_alloc_blocks(1, &newb) != 0) {
+        tagfs_free_blocks(oldb, 1);
+        return TEST_SKIP;
+    }
+
+    // Inject a snapshot exactly as the mount manifest-restore path does: present
+    // in memory, but with its redirect list empty (redirects are not in the
+    // manifest — they live only in the DiskBook log). This IS the post-reboot
+    // state before replay.
+    CowSnapshot snap;
+    memset(&snap, 0, sizeof(snap));
+    snap.snapshot_id = 0x7eb007u;     // "reboot" test id — won't collide
+    strncpy(snap.name, "_reboot_surv", TAGFS_SNAPSHOT_NAME_LEN - 1);
+    snap.flags = COW_SNAP_READONLY;
+    TagFS_CowRestoreSnapshot(&snap);
+
+    CowSnapshot info;
+    TEST_ASSERT(TagFS_SnapshotInfo(snap.snapshot_id, &info) == OK, "test snapshot exists");
+    TEST_ASSERT(info.redirect_count == 0, "post-reboot snapshot starts with 0 redirects");
+
+    // Durably record a redirect, as a pre-reboot CoW write would have.
+    TEST_ASSERT(DiskBookLogRedirect(snap.snapshot_id, oldb, newb, 0) == OK,
+                "DiskBookLogRedirect persists the redirect");
+
+    // Run the real mount-time recovery path — it must restore the redirect.
+    TEST_ASSERT(DiskBookValidateAndReplay() == OK, "DiskBook replay succeeds");
+    TEST_ASSERT(TagFS_SnapshotInfo(snap.snapshot_id, &info) == OK, "snapshot still exists");
+    TEST_ASSERT(info.redirect_count >= 1, "replay restored the CoW redirect (survives reboot)");
+
+    // Cleanup: delete frees the redirect's old_block + compacts the journal;
+    // free the new block we allocated.
+    TagFS_SnapshotDelete(snap.snapshot_id);
+    tagfs_free_blocks(newb, 1);
+    return TEST_PASS;
+}
+
+// ============================================================================
 // Data integrity (verify-on-read) test
 // ============================================================================
 static TestResult test_integrity_detects_mismatch(void) {
@@ -770,6 +819,7 @@ error_t TagFS_RunAllTests(TestStats* stats) {
     TestCase cow_tests[] = {
         {"cow_snapshot_create", test_cow_snapshot_create, TEST_SKIP, 0, ""},
         {"cow_before_after_write", test_cow_before_after_write, TEST_SKIP, 0, ""},
+        {"cow_redirect_reboot_survival", test_cow_redirect_reboot_survival, TEST_SKIP, 0, ""},
     };
 
     TestCase boxhash_tests[] = {
