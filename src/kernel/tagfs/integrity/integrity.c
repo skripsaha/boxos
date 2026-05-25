@@ -5,35 +5,83 @@
 #include "touch.h"
 
 // Superblock reserved[] layout: 0..15 boot hints, 16..23 CoW manifest blocks,
-// 24..27 integrity-map first block, 28..31 integrity-map block count, 399/400
-// CRC sentinel+value. 24..31 are otherwise unused.
+// 24..27 integrity-map first block, 28..31 integrity-map block count.
 #define INTEG_MAP_ROFF    24
 #define INTEG_COUNT_ROFF  28
 #define SB_MAP_BLOCK(sb)  (*(uint32_t *)((sb)->reserved + INTEG_MAP_ROFF))
 #define SB_MAP_COUNT(sb)  (*(uint32_t *)((sb)->reserved + INTEG_COUNT_ROFF))
 
 #define ENTRIES_PER_BLOCK (TAGFS_BLOCK_SIZE / (uint32_t)sizeof(uint64_t))  // 512
+#define MAP_CACHE_SLOTS   16          // bounded RAM: 16 * 4 KB = 64 KB, ANY disk size
+#define ROT_RING_MAX      64
+#define SLOT_EMPTY        0xFFFFFFFFu
 
-static bool            g_initialized   = false;
-static spinlock_t      g_lock;
-static uint64_t       *g_map           = NULL;   // per-block digest, [0..g_map_entries)
-static uint32_t        g_map_entries   = 0;      // == total_blocks
-static uint32_t        g_map_first_block = 0;    // first data block holding the map
-static uint32_t        g_map_count     = 0;      // map data blocks
-static bool           *g_dirty         = NULL;   // per map data block
-static BoxHashContext  g_ctx;
-static uint32_t        g_errors        = 0;
+// One cached map block (512 per-block digests). The map is paged on demand:
+// only MAP_CACHE_SLOTS blocks live in RAM, so memory is constant regardless of
+// disk size (the old design held total_blocks*8 bytes resident, ~2 GB on a 1 TB
+// disk). Misses load from disk; the LRU victim is written back if dirty.
+typedef struct {
+    uint32_t map_idx;                       // map block index; SLOT_EMPTY if free
+    uint32_t lru;
+    bool     dirty;
+    uint64_t entries[ENTRIES_PER_BLOCK];
+} MapSlot;
 
-// Pending bit-rot reports — a fixed ring filled on the (lock-held) read path
-// and drained from a lock-free context into tag-scoped Touch events.
-#define ROT_RING_MAX 64
-static uint32_t        g_rot_ring[ROT_RING_MAX];
-static uint32_t        g_rot_count     = 0;
-static uint16_t        g_integrity_tag = 0xFFFF;   // well-known "integrity" tag
+static bool           g_initialized   = false;
+static spinlock_t     g_lock;
+static uint32_t       g_map_entries   = 0;       // == total_blocks (bounds check)
+static uint32_t       g_map_first_block = 0;
+static uint32_t       g_map_count     = 0;       // map blocks on disk
+static MapSlot        g_cache[MAP_CACHE_SLOTS];  // ~64 KB static, fixed
+static uint32_t       g_lru_tick      = 0;
+static BoxHashContext g_ctx;
+static uint32_t       g_errors        = 0;
+static uint32_t       g_rot_ring[ROT_RING_MAX];
+static uint32_t       g_rot_count     = 0;
+static uint16_t       g_integrity_tag = 0xFFFF;
 
 static inline bool in_map_region(uint32_t block) {
     return g_map_first_block != 0 &&
            block >= g_map_first_block && block < g_map_first_block + g_map_count;
+}
+
+// Find/load the cache slot for map block `idx`. Caller holds g_lock. Returns
+// NULL on I/O failure. On a miss, evicts the LRU slot (writing it back if dirty)
+// and loads `idx` from disk. The map's own blocks are skipped by in_map_region()
+// in IntegrityUpdate/Verify before g_lock is taken, so the tagfs_read_block /
+// tagfs_write_block calls below never re-enter this function (no recursion).
+static MapSlot *cache_get(uint32_t idx) {
+    for (uint32_t s = 0; s < MAP_CACHE_SLOTS; s++) {
+        if (g_cache[s].map_idx == idx) {
+            g_cache[s].lru = ++g_lru_tick;
+            return &g_cache[s];
+        }
+    }
+    uint32_t victim = 0;
+    for (uint32_t s = 0; s < MAP_CACHE_SLOTS; s++) {
+        if (g_cache[s].map_idx == SLOT_EMPTY) { victim = s; break; }
+        if (g_cache[s].lru < g_cache[victim].lru) victim = s;
+    }
+    MapSlot *v = &g_cache[victim];
+
+    if (v->map_idx != SLOT_EMPTY && v->dirty) {
+        uint8_t buf[TAGFS_BLOCK_SIZE];
+        memset(buf, 0, sizeof(buf));
+        memcpy(buf, v->entries, sizeof(v->entries));
+        if (tagfs_write_block(g_map_first_block + v->map_idx, buf) != OK) {
+            // Keep the slot dirty — try again at the next flush. Don't lose data.
+            return NULL;
+        }
+    }
+
+    uint8_t buf[TAGFS_BLOCK_SIZE];
+    if (tagfs_read_block(g_map_first_block + idx, buf) != OK)
+        return NULL;
+    memcpy(v->entries, buf, sizeof(v->entries));
+    v->map_idx = idx;
+    v->dirty   = false;
+    v->lru     = ++g_lru_tick;
+    return v;
 }
 
 error_t IntegrityInit(void) {
@@ -45,65 +93,45 @@ error_t IntegrityInit(void) {
         return ERR_NOT_INITIALIZED;
 
     spinlock_init(&g_lock);
-    uint32_t total = fs->superblock.total_blocks;
-    g_map_entries  = total;
-    g_map_count    = (total + ENTRIES_PER_BLOCK - 1) / ENTRIES_PER_BLOCK;
-
+    g_map_entries = fs->superblock.total_blocks;
+    g_map_count   = (g_map_entries + ENTRIES_PER_BLOCK - 1) / ENTRIES_PER_BLOCK;
     BoxHashInit(&g_ctx, fs->superblock.fs_uuid, 16);
 
-    g_map   = kmalloc((uint32_t)(total * sizeof(uint64_t)));
-    g_dirty = kmalloc(g_map_count * sizeof(bool));
-    if (!g_map || !g_dirty) {
-        if (g_map) { kfree(g_map); g_map = NULL; }
-        if (g_dirty) { kfree(g_dirty); g_dirty = NULL; }
-        debug_printf("[Integrity] alloc failed — integrity disabled\n");
-        return ERR_NO_MEMORY;
+    for (uint32_t s = 0; s < MAP_CACHE_SLOTS; s++) {
+        g_cache[s].map_idx = SLOT_EMPTY;
+        g_cache[s].dirty   = false;
     }
-    memset(g_map, 0, (uint32_t)(total * sizeof(uint64_t)));
-    memset(g_dirty, 0, g_map_count * sizeof(bool));
+    g_lru_tick = 0;
+    g_rot_count = 0;
 
     uint32_t first = SB_MAP_BLOCK(&fs->superblock);
     if (first == 0) {
-        // First mount with this feature: lazily allocate a contiguous map region.
+        // First mount: lazily allocate a contiguous map region (first-mount only;
+        // later mounts just reuse it). Bounded RAM regardless of how big it is.
         uint32_t start = 0;
         if (tagfs_alloc_blocks(g_map_count, &start) != 0 || start == 0) {
-            kfree(g_map);  g_map = NULL;
-            kfree(g_dirty); g_dirty = NULL;
             debug_printf("[Integrity] could not allocate %u map blocks — disabled\n", g_map_count);
             return ERR_NO_MEMORY;
         }
         g_map_first_block = start;
-        SB_MAP_BLOCK(&fs->superblock)  = start;
-        SB_MAP_COUNT(&fs->superblock)  = g_map_count;
+        SB_MAP_BLOCK(&fs->superblock) = start;
+        SB_MAP_COUNT(&fs->superblock) = g_map_count;
 
         uint8_t zero[TAGFS_BLOCK_SIZE];
         memset(zero, 0, sizeof(zero));
         for (uint32_t i = 0; i < g_map_count; i++)
             tagfs_write_block(start + i, zero);
 
-        // Persist the superblock so the map location survives; the bitmap (map
-        // blocks marked used) flushes at the next sync, and mount-fsck re-marks
-        // the region from the superblock either way (no reuse on crash).
         tagfs_write_superblock(&fs->superblock);
-        debug_printf("[Integrity] fresh map: %u blocks at %u (covers %u blocks)\n",
-                     g_map_count, start, total);
+        debug_printf("[Integrity] fresh map: %u blocks at %u (covers %u, %u-slot cache)\n",
+                     g_map_count, start, g_map_entries, MAP_CACHE_SLOTS);
     } else {
         g_map_first_block = first;
-        uint32_t stored = SB_MAP_COUNT(&fs->superblock);
-        uint32_t load   = stored < g_map_count ? stored : g_map_count;
-        uint8_t buf[TAGFS_BLOCK_SIZE];
-        for (uint32_t i = 0; i < load; i++) {
-            if (tagfs_read_block(first + i, buf) != OK)
-                break;
-            uint32_t base = i * ENTRIES_PER_BLOCK;
-            uint32_t n    = (base + ENTRIES_PER_BLOCK <= total) ? ENTRIES_PER_BLOCK : (total - base);
-            memcpy(g_map + base, buf, n * sizeof(uint64_t));
-        }
-        debug_printf("[Integrity] map loaded: %u blocks at %u (covers %u blocks)\n",
-                     g_map_count, first, total);
+        debug_printf("[Integrity] map at %u (%u blocks, %u-slot paged cache)\n",
+                     first, g_map_count, MAP_CACHE_SLOTS);
+        // No full load — pages fault in on demand.
     }
 
-    // Well-known tag so bit-rot is reportable as a Touch event apps subscribe to.
     if (fs->registry)
         g_integrity_tag = tag_registry_intern(fs->registry, "integrity", NULL);
 
@@ -114,11 +142,14 @@ error_t IntegrityInit(void) {
 void IntegrityUpdate(uint32_t block, const void *data) {
     if (!g_initialized || !data || block >= g_map_entries || in_map_region(block))
         return;
-    uint64_t h = BoxHashIntegrity(data, TAGFS_BLOCK_SIZE, &g_ctx);
+    uint64_t h   = BoxHashIntegrity(data, TAGFS_BLOCK_SIZE, &g_ctx);
+    uint32_t idx = block / ENTRIES_PER_BLOCK;
+    uint32_t off = block % ENTRIES_PER_BLOCK;
     spin_lock(&g_lock);
-    if (g_map[block] != h) {
-        g_map[block] = h;
-        g_dirty[block / ENTRIES_PER_BLOCK] = true;
+    MapSlot *s = cache_get(idx);
+    if (s && s->entries[off] != h) {
+        s->entries[off] = h;
+        s->dirty = true;
     }
     spin_unlock(&g_lock);
 }
@@ -126,18 +157,23 @@ void IntegrityUpdate(uint32_t block, const void *data) {
 bool IntegrityVerify(uint32_t block, const void *data) {
     if (!g_initialized || !data || block >= g_map_entries || in_map_region(block))
         return true;
+    uint32_t idx = block / ENTRIES_PER_BLOCK;
+    uint32_t off = block % ENTRIES_PER_BLOCK;
     spin_lock(&g_lock);
-    uint64_t stored = g_map[block];
+    MapSlot *s    = cache_get(idx);
+    uint64_t stored = s ? s->entries[off] : 0;
     spin_unlock(&g_lock);
-    if (stored == 0)
-        return true;   // unknown — never false-positive pre-existing data
+
+    if (!s || stored == 0)
+        return true;                          // I/O failure or unknown — never false-positive
     uint64_t h = BoxHashIntegrity(data, TAGFS_BLOCK_SIZE, &g_ctx);
     if (h == stored)
         return true;
+
     __atomic_fetch_add(&g_errors, 1, __ATOMIC_RELAXED);
     spin_lock(&g_lock);
     if (g_rot_count < ROT_RING_MAX)
-        g_rot_ring[g_rot_count++] = block;   // queued for deferred Touch report
+        g_rot_ring[g_rot_count++] = block;    // queued for deferred Touch report
     spin_unlock(&g_lock);
     debug_printf("[Integrity] BIT-ROT on block %u: stored=%016lx read=%016lx\n",
                  block, (unsigned long)stored, (unsigned long)h);
@@ -148,38 +184,20 @@ error_t IntegrityFlush(void) {
     if (!g_initialized)
         return OK;
     spin_lock(&g_lock);
-    for (uint32_t i = 0; i < g_map_count; i++) {
-        if (!g_dirty[i])
+    for (uint32_t s = 0; s < MAP_CACHE_SLOTS; s++) {
+        if (g_cache[s].map_idx == SLOT_EMPTY || !g_cache[s].dirty)
             continue;
         uint8_t buf[TAGFS_BLOCK_SIZE];
         memset(buf, 0, sizeof(buf));
-        uint32_t base = i * ENTRIES_PER_BLOCK;
-        uint32_t n    = (base + ENTRIES_PER_BLOCK <= g_map_entries)
-                            ? ENTRIES_PER_BLOCK : (g_map_entries - base);
-        memcpy(buf, g_map + base, n * sizeof(uint64_t));
-        // Writing a map block re-enters IntegrityUpdate, but in_map_region()
-        // skips it before taking g_lock — no recursion, no deadlock.
-        if (tagfs_write_block(g_map_first_block + i, buf) == OK)
-            g_dirty[i] = false;
+        memcpy(buf, g_cache[s].entries, sizeof(g_cache[s].entries));
+        // tagfs_write_block re-enters IntegrityUpdate, but in_map_region() skips
+        // the map's own blocks before g_lock — no recursion / deadlock.
+        if (tagfs_write_block(g_map_first_block + g_cache[s].map_idx, buf) == OK)
+            g_cache[s].dirty = false;
     }
     spin_unlock(&g_lock);
     return OK;
 }
-
-void IntegrityShutdown(void) {
-    if (!g_initialized)
-        return;
-    IntegrityFlush();
-    spin_lock(&g_lock);
-    g_initialized = false;
-    if (g_map)   { kfree(g_map);   g_map = NULL; }
-    if (g_dirty) { kfree(g_dirty); g_dirty = NULL; }
-    g_map_entries = g_map_count = g_map_first_block = 0;
-    spin_unlock(&g_lock);
-}
-
-bool IntegrityIsInitialized(void) { return g_initialized; }
-uint32_t IntegrityErrorCount(void) { return g_errors; }
 
 void IntegrityDrainReports(void) {
     if (!g_initialized || g_integrity_tag == 0xFFFF)
@@ -202,6 +220,23 @@ void IntegrityDrainReports(void) {
         TouchPublishId(g_integrity_tag, &ev, sizeof(ev), 0, TOUCH_FLAG_TAGFS);
     }
 }
+
+void IntegrityShutdown(void) {
+    if (!g_initialized)
+        return;
+    IntegrityFlush();
+    spin_lock(&g_lock);
+    g_initialized = false;
+    for (uint32_t s = 0; s < MAP_CACHE_SLOTS; s++)
+        g_cache[s].map_idx = SLOT_EMPTY;
+    g_map_first_block = 0;
+    g_map_count = 0;
+    g_map_entries = 0;
+    spin_unlock(&g_lock);
+}
+
+bool IntegrityIsInitialized(void) { return g_initialized; }
+uint32_t IntegrityErrorCount(void) { return g_errors; }
 
 void IntegrityMarkMapBlocks(uint8_t *computed_bm, uint32_t total_blocks) {
     if (!computed_bm)
