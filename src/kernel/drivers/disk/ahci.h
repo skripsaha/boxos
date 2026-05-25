@@ -365,7 +365,10 @@ typedef struct {
     bool      ncq;                     // HBA SNCQ && device IDENTIFY word 76 bit 8
     bool      lba48;                   // 48-bit LBA addressing supported
 
-    uint32_t ci_snapshot;              // Last known PxCI (for completion delta)
+    /* Bitmask of command slots issued and awaiting completion. The IRQ
+     * handler computes completions as issued_mask & ~outstanding, where
+     * `outstanding` is PxSACT for NCQ ports or PxCI for non-NCQ ports. */
+    uint32_t issued_mask;
     volatile uint32_t completed_slots;
 
     uint32_t event_id[AHCI_MAX_SLOTS];
@@ -431,10 +434,19 @@ int ahci_alloc_slot(uint8_t port_num);
 void ahci_free_slot(uint8_t port_num, uint8_t slot);
 bool ahci_can_submit_port(uint8_t port_num);
 
-error_t ahci_build_ncq_read(uint8_t port_num, uint8_t slot, uint64_t lba,
-                                   uint16_t sector_count, void* buffer_phys);
-error_t ahci_build_ncq_write(uint8_t port_num, uint8_t slot, uint64_t lba,
-                                    uint16_t sector_count, void* buffer_phys);
+/* Build a read/write command for `slot`. Picks FPDMA QUEUED (NCQ) or
+ * READ/WRITE DMA EXT (non-queued) based on the port's command class, so the
+ * caller does not need to know which. Arm with ahci_arm_slot(). */
+error_t ahci_build_io(uint8_t port_num, uint8_t slot, uint64_t lba,
+                      uint16_t sector_count, void* buffer_phys, bool write);
+
+/* Arm a built slot: NCQ ports set PxSACT then PxCI; non-NCQ set PxCI only,
+ * and track the slot in issued_mask for the IRQ completion path. */
+void ahci_arm_slot(uint8_t port_num, uint8_t slot);
+
+/* True if the port issues NCQ (FPDMA) commands. Callers that poll for
+ * completion must watch PxSACT when true, PxCI when false. */
+bool ahci_port_is_ncq(uint8_t port_num);
 
 ahci_port_t* ahci_get_port_state(uint8_t port_num);
 volatile ahci_port_regs_t* ahci_get_port_regs_pub(uint8_t port_num);
