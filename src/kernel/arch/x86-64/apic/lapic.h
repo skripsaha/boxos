@@ -55,6 +55,7 @@
 
 // x2APIC MSR layout (Intel SDM Vol 3A §10.12.1)
 #define MSR_X2APIC_BASE         0x800       // x2APIC MSR window starts here
+#define MSR_X2APIC_APICID       0x802       // APIC ID: 32-bit RO MSR (replaces MMIO 0x20)
 #define MSR_X2APIC_ICR          0x830       // ICR: single 64-bit MSR write
 
 void lapic_init(uintptr_t base_addr);
