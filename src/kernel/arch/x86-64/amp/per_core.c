@@ -304,13 +304,23 @@ void per_core_init_ap(uint8_t core_index, uint64_t stack_top) {
     // ---- LAPIC ----
     lapic_enable();
 
-    // Calibrate and start LAPIC timer at 100 Hz (periodic)
-    lapic_timer_init(LAPIC_TIMER_VECTOR, 100);
+    if (pc->is_kcore) {
+        // K-Cores run kcore_run_loop() — HLT until an IPI_WAKE doorbell — and
+        // never call schedule(). A periodic LAPIC timer would only wake them
+        // ~100x/s to do nothing but EOI (see idt.c LAPIC_TIMER_VECTOR), burning
+        // real power and heat on hardware. Keep the timer LVT masked.
+        lapic_timer_stop();
+    } else {
+        // App Cores are preemptively scheduled by the LAPIC timer (calibrated
+        // against the per-core TSC in lapic_timer_init).
+        lapic_timer_init(LAPIC_TIMER_VECTOR, 100);
+    }
 
     pc->initialized = true;
 
-    kprintf("[PER_CORE] Core %u ready: GDT=0x%lx TSS=0x%lx LAPIC timer=100Hz %s\n",
+    kprintf("[PER_CORE] Core %u ready: GDT=0x%lx TSS=0x%lx timer=%s %s\n",
             core_index, (uint64_t)&pc->gdt, (uint64_t)&pc->tss,
+            pc->is_kcore ? "masked" : "100Hz",
             pc->is_kcore ? "[K-Core]" : "[App Core]");
 }
 
