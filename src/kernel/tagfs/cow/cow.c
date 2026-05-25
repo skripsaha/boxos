@@ -79,6 +79,52 @@ static int CowFindSnapshot(uint32_t id) {
     return -1;
 }
 
+// Append (old_block→new_block) to a snapshot's in-memory redirect list.
+// De-duped (idempotent for replay), grows the array on demand. Caller holds
+// g_cow_state.lock. Returns false only on allocation failure.
+static bool cow_append_redirect_locked(CowSnapshot *snap,
+                                       uint32_t old_block, uint32_t new_block) {
+    for (uint32_t i = 0; i < snap->redirect_count; i++) {
+        if (snap->redirects[i].old_block == old_block &&
+            snap->redirects[i].new_block == new_block)
+            return true;   /* already recorded */
+    }
+    if (snap->redirect_count >= snap->redirect_cap) {
+        uint32_t new_cap = snap->redirect_cap ? snap->redirect_cap * 2 : 16;
+        CowRedirect *grown = kmalloc(sizeof(CowRedirect) * new_cap);
+        if (!grown)
+            return false;
+        if (snap->redirects && snap->redirect_count > 0)
+            memcpy(grown, snap->redirects, sizeof(CowRedirect) * snap->redirect_count);
+        if (snap->redirects)
+            kfree(snap->redirects);
+        snap->redirects    = grown;
+        snap->redirect_cap = new_cap;
+    }
+    snap->redirects[snap->redirect_count].old_block = old_block;
+    snap->redirects[snap->redirect_count].new_block = new_block;
+    snap->redirect_count++;
+    return true;
+}
+
+// Compact the durable redirect log after a snapshot is deleted: drop all
+// on-disk redirects and re-log the survivors. Deleted snapshots' redirects are
+// harmless on replay (no matching snapshot) but waste journal slots — this
+// reclaims them so the bounded log doesn't fill prematurely.
+static void cow_resync_redirect_journal(void) {
+    spin_lock(&g_cow_state.lock);
+    DiskBookResetRedirects();
+    for (uint32_t i = 0; i < g_cow_state.snapshot_count; i++) {
+        CowSnapshot *s = &g_cow_state.snapshots[i];
+        for (uint32_t r = 0; r < s->redirect_count; r++) {
+            DiskBookLogRedirect(s->snapshot_id,
+                                s->redirects[r].old_block,
+                                s->redirects[r].new_block, 0);
+        }
+    }
+    spin_unlock(&g_cow_state.lock);
+}
+
 error_t TagFS_CowInit(void) {
     if (g_cow_state.initialized)
         return ERR_ALREADY_INITIALIZED;
@@ -176,26 +222,11 @@ error_t TagFS_SnapshotCreate(const char *name, uint32_t file_id, uint32_t *snaps
 
     spin_unlock(&g_cow_state.lock);
 
-    DiskBookTxn txn;
-    if (DiskBookBegin(&txn) == OK) {
-        if (has_file_meta) {
-            // Journal the actual file metadata associated with this snapshot
-            uint32_t meta_block, meta_offset;
-            if (file_table_lookup(file_id, &meta_block, &meta_offset) == 0) {
-                DiskBookLogMetadata(&txn, snap->snapshot_id, meta_block, &file_meta);
-            }
-        } else {
-            // Whole-fs snapshot: synthesize a placeholder metadata record
-            TagFSMetadata snap_meta;
-            memset(&snap_meta, 0, sizeof(snap_meta));
-            snap_meta.file_id = snap->snapshot_id;
-            snap_meta.flags   = COW_SNAP_READONLY;
-            snap_meta.size    = snap->total_size;
-            DiskBookLogMetadata(&txn, snap->snapshot_id, 0, &snap_meta);
-        }
-        DiskBookCommit(&txn);
-    }
-
+    /* Snapshot descriptors persist via the CoW manifest (CowWriteManifest).
+     * The old per-snapshot DiskBook log serialized an in-memory TagFSMetadata
+     * (heap pointers) by memcpy — meaningless after reboot — so it is gone.
+     * DiskBook now carries only what the manifest cannot: the per-block CoW
+     * redirect map, logged from TagFS_CowAfterWrite. */
     if (has_file_meta)
         tagfs_metadata_free(&file_meta);
 
@@ -267,17 +298,6 @@ error_t TagFS_SnapshotCreateByTag(const char *tag_pattern, uint32_t *snapshot_id
 
     spin_unlock(&g_cow_state.lock);
 
-    DiskBookTxn txn;
-    if (DiskBookBegin(&txn) == OK) {
-        TagFSMetadata snap_meta;
-        memset(&snap_meta, 0, sizeof(snap_meta));
-        snap_meta.file_id = snap->snapshot_id;
-        snap_meta.flags   = COW_SNAP_READONLY | COW_SNAP_TAG_QUERY;
-        snap_meta.size    = total_size;
-        DiskBookLogMetadata(&txn, snap->snapshot_id, 0, &snap_meta);
-        DiskBookCommit(&txn);
-    }
-
     CowWriteManifest();
 
     debug_printf("[CoW] Created tag snapshot '%s' (id=%u, files=%u)\n", snap_name, snap->snapshot_id, file_count);
@@ -325,6 +345,7 @@ error_t TagFS_SnapshotDelete(uint32_t snapshot_id) {
     spin_unlock(&g_cow_state.lock);
 
     CowWriteManifest();
+    cow_resync_redirect_journal();   /* reclaim the deleted snapshot's redirect slots */
 
     debug_printf("[CoW] Deleted snapshot %u (freed %u redirected blocks)\n",
                  snapshot_id, freed);
@@ -435,29 +456,20 @@ error_t TagFS_CowAfterWrite(uint32_t file_id, uint32_t old_block, uint32_t new_b
         return OK;
     }
 
-    /* Append (old, new) into the snapshot's redirect list. Grow on
-     * demand — array doubles each time. */
-    if (snap->redirect_count >= snap->redirect_cap) {
-        uint32_t new_cap = snap->redirect_cap ? snap->redirect_cap * 2 : 16;
-        CowRedirect *grown = kmalloc(sizeof(CowRedirect) * new_cap);
-        if (!grown) {
-            spin_unlock(&g_cow_state.lock);
-            return ERR_NO_MEMORY;
-        }
-        if (snap->redirects && snap->redirect_count > 0) {
-            memcpy(grown, snap->redirects,
-                   sizeof(CowRedirect) * snap->redirect_count);
-        }
-        if (snap->redirects) kfree(snap->redirects);
-        snap->redirects    = grown;
-        snap->redirect_cap = new_cap;
+    if (!cow_append_redirect_locked(snap, old_block, new_block)) {
+        spin_unlock(&g_cow_state.lock);
+        return ERR_NO_MEMORY;
     }
-    snap->redirects[snap->redirect_count].old_block = old_block;
-    snap->redirects[snap->redirect_count].new_block = new_block;
-    snap->redirect_count++;
 
     g_cow_state.cow_writes++;
     g_cow_state.blocks_shared++;
+
+    /* Mirror the redirect into the durable DiskBook log so this snapshot's
+     * frozen view of old_block survives a power cut — the in-memory list above
+     * is RAM-only and lost on reboot. Best-effort: on a full log or I/O error
+     * the block gracefully falls back to live data after crash recovery, never
+     * corruption. */
+    DiskBookLogRedirect(snap->snapshot_id, old_block, new_block, 0);
 
     spin_unlock(&g_cow_state.lock);
     return OK;
@@ -531,11 +543,23 @@ void TagFS_CowRestoreSnapshot(const CowSnapshot *snap) {
 
     CowSnapshot *dst = &g_cow_state.snapshots[g_cow_state.snapshot_count];
     memcpy(dst, snap, sizeof(CowSnapshot));
-    /* Reset runtime fields — redirects are not persisted across reboot. */
+    /* Reset runtime redirect fields — they are restored separately, after this,
+     * by DiskBookValidateAndReplay() → TagFS_CowRestoreRedirect(). */
     dst->redirects      = NULL;
     dst->redirect_count = 0;
     dst->redirect_cap   = 0;
     g_cow_state.snapshot_count++;
 
+    spin_unlock(&g_cow_state.lock);
+}
+
+void TagFS_CowRestoreRedirect(uint32_t snapshot_id, uint32_t old_block, uint32_t new_block) {
+    if (!g_cow_state.initialized || old_block == 0 || new_block == 0)
+        return;
+    spin_lock(&g_cow_state.lock);
+    int slot = CowFindSnapshot(snapshot_id);
+    if (slot >= 0)
+        cow_append_redirect_locked(&g_cow_state.snapshots[slot], old_block, new_block);
+    /* snapshot not found (deleted before this redirect was replayed) → ignore */
     spin_unlock(&g_cow_state.lock);
 }

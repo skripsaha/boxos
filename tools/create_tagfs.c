@@ -57,6 +57,8 @@
 #define BOOT_HINT_DATA_START     12   /* reserved[12..15] */
 
 #define TAGFS_SB_CRC_OFFSET     400   /* CRC32 stored at reserved[400..403] */
+#define TAGFS_SB_CRC_SENTINEL_OFFSET 399   /* reserved[399] = 0xCC marks "CRC present" */
+#define TAGFS_SB_CRC_SENTINEL        0xCC
 
 /* ====================================================================
  * On-disk structures — must match kernel's tagfs.h exactly
@@ -459,9 +461,15 @@ static uint32_t tagfs_crc32(const uint8_t* data, uint32_t len) {
 }
 
 static void superblock_stamp_crc(TagFSSuperblock* sb) {
+    /* Match the kernel's superblock_stamp_crc exactly: zero the sentinel and
+     * CRC region for the computation, write the CRC, then set the 0xCC
+     * sentinel. Without the sentinel the kernel treats a freshly-imaged volume
+     * as "legacy, CRC absent" and never validates it on first mount. */
+    sb->reserved[TAGFS_SB_CRC_SENTINEL_OFFSET] = 0;
     memset(sb->reserved + TAGFS_SB_CRC_OFFSET, 0, 4);
     uint32_t crc = tagfs_crc32((const uint8_t*)sb, sizeof(TagFSSuperblock));
     memcpy(sb->reserved + TAGFS_SB_CRC_OFFSET, &crc, 4);
+    sb->reserved[TAGFS_SB_CRC_SENTINEL_OFFSET] = TAGFS_SB_CRC_SENTINEL;
 }
 
 /* ====================================================================
@@ -694,28 +702,28 @@ int main(int argc, char* argv[]) {
     }
     free(bitmap);
 
-    /* ---- Write journal superblock (empty, with proper fields) ---- */
-    printf("[create_tagfs] Writing journal superblock...\n");
+    /* ---- Write DiskBook superblock (DBSB v2, empty redirect log) ---- */
+    printf("[create_tagfs] Writing DiskBook superblock...\n");
     {
-        uint8_t jbuf[512];
-        memset(jbuf, 0, 512);
-        uint32_t jmag  = JOURNAL_MAGIC;
-        uint32_t jver  = 2;
-        uint32_t jstart = TAGFS_JOURNAL_ENTRIES_START;
-        uint32_t jcount = TAGFS_JOURNAL_ENTRY_COUNT;
-        uint32_t jhead = 0;
-        uint32_t jtail = 0;
-        uint32_t jseq  = 1;
-        memcpy(jbuf + 0,  &jmag,   4);
-        memcpy(jbuf + 4,  &jver,   4);
-        memcpy(jbuf + 8,  &jstart, 4);
-        memcpy(jbuf + 12, &jcount, 4);
-        memcpy(jbuf + 16, &jhead,  4);
-        memcpy(jbuf + 20, &jtail,  4);
-        memcpy(jbuf + 24, &jseq,   4);
+        /* Must match the kernel's DiskBookSuperblock (disk_book.h):
+         *   u32 magic, u32 version, u64 start_sector, u32 capacity,
+         *   u32 count, u32 generation, u32 flags, u8 uuid[16], ...
+         * start_sector = sb_sector + 2 = first record sector. */
+        uint8_t dbuf[512];
+        memset(dbuf, 0, 512);
+        uint32_t dmag   = 0x44425342;                  /* "DBSB" */
+        uint32_t dver   = 2;                            /* DISK_BOOK_VERSION  */
+        uint64_t dstart = TAGFS_JOURNAL_ENTRIES_START;  /* 1038 = 1036 + 2    */
+        uint32_t dcap   = 512;                          /* DISK_BOOK_CAPACITY */
+        uint32_t dcount = 0;
+        memcpy(dbuf + 0,  &dmag,   4);
+        memcpy(dbuf + 4,  &dver,   4);
+        memcpy(dbuf + 8,  &dstart, 8);
+        memcpy(dbuf + 16, &dcap,   4);
+        memcpy(dbuf + 20, &dcount, 4);
 
-        write_at_sector(disk, TAGFS_JOURNAL_SB_SECTOR, jbuf, 512);
-        write_at_sector(disk, TAGFS_JOURNAL_BACKUP_SECTOR, jbuf, 512);
+        write_at_sector(disk, TAGFS_JOURNAL_SB_SECTOR, dbuf, 512);
+        write_at_sector(disk, TAGFS_JOURNAL_BACKUP_SECTOR, dbuf, 512);
     }
 
     /* Zero journal entries area */

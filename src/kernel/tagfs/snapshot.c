@@ -1,5 +1,4 @@
 #include "../tagfs.h"
-#include "disk_book/disk_book.h"
 #include "metadata_pool/meta_pool.h"
 #include "../../lib/kernel/klib.h"
 #include "../../kernel/drivers/timer/rtc.h"
@@ -76,21 +75,16 @@ int tagfs_snapshot_create(const char* name, uint32_t file_id) {
         }
     }
 
-    // Copy snapshot for journaling before releasing the lock
+    // Copy snapshot fields before releasing the lock (used in the log below)
     TagFSSnapshot snap_copy = *snap;
     g_snapshot_count++;
     spin_unlock(&g_snapshot_lock);
 
-    // Journal snapshot creation outside the spinlock (DiskBook does its own locking
-    // and may perform disk I/O — holding g_snapshot_lock across that would block other
-    // snapshot operations for the duration of the write).
-    DiskBookTxn txn;
-    if (DiskBookBegin(&txn) == OK) {
-        DiskBookLogData(&txn, snap_copy.snapshot_id, 0, 0,
-                        &snap_copy, (uint16_t)sizeof(TagFSSnapshot));
-        DiskBookCommit(&txn);
-    }
-
+    /* Removed: the old DiskBookLogData(disk_sector=0) wrote a TYPE_DATA journal
+     * record whose post-crash replay did tagfs_write_block(0, ...), clobbering
+     * block 0 (the tag registry) with snapshot bytes + stack garbage. These
+     * g_snapshots[] entries are an in-memory view only; durable snapshots live
+     * in the CoW subsystem (manifest + DiskBook redirect log). */
     debug_printf("[TagFS Snapshot] Created '%s' (id=%u, files=%u)\n",
                  name, snap_copy.snapshot_id, snap_copy.file_count);
     return OK;

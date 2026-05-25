@@ -114,4 +114,9 @@ uint64_t TagFS_CowGetCheckpoint(void);
 // Only called during mount from tagfs_init to replay the on-disk manifest.
 void TagFS_CowRestoreSnapshot(const CowSnapshot *snap);
 
+// Restore a single CoW redirect (old_block→new_block for a snapshot) at mount,
+// replayed from the DiskBook redirect log. Idempotent (de-duped); a redirect
+// for an unknown/deleted snapshot is safely ignored.
+void TagFS_CowRestoreRedirect(uint32_t snapshot_id, uint32_t old_block, uint32_t new_block);
+
 #endif // COW_H

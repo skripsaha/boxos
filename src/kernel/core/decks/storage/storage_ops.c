@@ -1011,7 +1011,7 @@ static int ObjAnchor(const ManifestOp *op, Crate *crates, uint16_t crate_count,
      * inline so caller's fwrite-then-anchor is durable without a
      * shutdown. */
     tagfs_sync();
-    ata_flush_cache(1);
+    tagfs_flush_cache();
 
     /* Touch fan-out. For file_id == 0 we publish on a special "anchor"
      * tag (registered well-known); for a specific fid, publish on every

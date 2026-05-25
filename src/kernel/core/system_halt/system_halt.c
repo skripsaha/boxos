@@ -151,7 +151,7 @@ static void halt_sync_storage(void)
     tagfs_shutdown();
 
     kprintf("[HALT] Flushing disk cache...\n");
-    ata_flush_cache(1);
+    tagfs_flush_cache();
 
     kprintf("[HALT] Storage sync complete\n");
 }

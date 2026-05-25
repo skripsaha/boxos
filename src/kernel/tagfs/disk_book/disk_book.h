@@ -6,111 +6,105 @@
 #include "../tagfs_constants.h"
 #include "../../core/error/error.h"
 
-// DiskBook — Tag-Aware Write-Ahead Log for TagFS
+// ============================================================================
+// DiskBook — durable, content-addressed redirect log for TagFS CoW snapshots
+//
+// DiskBook's one load-bearing job is making the CoW redirect map (old_block →
+// new_block, per snapshot) survive a power cut. TagFS metadata consistency is
+// already guaranteed by append-ordering + mount fsck, so a general write-ahead
+// log over that would be redundant. What fsck CANNOT reconstruct is which OLD
+// physical block a snapshot froze when a live write was redirected — that
+// mapping lived only in RAM and was lost on reboot, so after a crash a
+// snapshot read returned live data instead of its frozen view.
+//
+// Model: a dense on-disk array of CRC-protected, tag-scoped redirect records.
+// `count` (in the superblock) is authoritative — records [0..count) are live.
+// Appended on each CoW redirect; compacted (rewritten from the live in-memory
+// set) when a snapshot is deleted. Replayed at mount into the restored
+// snapshots. Each record is content-addressed (CRC32); a torn record is
+// skipped. The array persists across clean reboots — redirects live until
+// their snapshot is deleted, NOT until shutdown.
+//
+// Bound: DISK_BOOK_CAPACITY live redirects. Overflow is graceful — the redirect
+// is not journaled and that snapshot block falls back to live data on the next
+// crash recovery (never corruption). The in-memory redirect list (cow.c) stays
+// authoritative at runtime and is unbounded; DiskBook is its durable mirror.
+// ============================================================================
 
-#define DISK_BOOK_MAGIC             0x44424F4F
-#define DISK_BOOK_SB_MAGIC          0x44425342
-#define DISK_BOOK_VERSION           1
+#define DISK_BOOK_MAGIC             0x44424F4F  /* "DBOO" — redirect record    */
+#define DISK_BOOK_SB_MAGIC          0x44425342  /* "DBSB" — superblock         */
+#define DISK_BOOK_VERSION           2
 #define DISK_BOOK_ENTRY_SIZE        1024
-#define DISK_BOOK_DATA_SIZE         970
 #define DISK_BOOK_SECTORS_PER_ENTRY 2
 #define DISK_BOOK_CAPACITY          512
-#define DISK_BOOK_CHECKPOINT_THRESH 256
+#define DISK_BOOK_FLUSH_THRESH      64     /* flush cache every N appends      */
 
-// Entry types
-#define DISK_BOOK_TYPE_DATA         0x01
-#define DISK_BOOK_TYPE_METADATA     0x02
-#define DISK_BOOK_TYPE_COMMIT       0x03
-#define DISK_BOOK_TYPE_CHECKPOINT   0x04
-
-// Entry states
-#define DISK_BOOK_STATE_PENDING     0x00
-#define DISK_BOOK_STATE_COMMITTED   0x01
-#define DISK_BOOK_STATE_APPLIED     0x02
-#define DISK_BOOK_STATE_ABORTED     0x03
-
-// Flags
-#define DISK_BOOK_FLAG_COMPRESSED   0x01
-#define DISK_BOOK_FLAG_ZERO_FILL    0x02
+// Record types
+#define DISK_BOOK_TYPE_REDIRECT     0x01    /* CoW redirect: old_block→new_block */
 
 typedef struct __packed {
-    uint32_t magic;
-    uint32_t version;
-    uint64_t start_sector;
-    uint64_t end_sector;
-    uint32_t head;
-    uint32_t tail;
-    uint32_t checkpoint_seq;
-    uint32_t checkpoint_tail;
-    uint32_t next_sequence;
+    uint32_t magic;          /* DISK_BOOK_SB_MAGIC                           */
+    uint32_t version;        /* DISK_BOOK_VERSION                            */
+    uint64_t start_sector;   /* first record sector                          */
+    uint32_t capacity;       /* max live records (DISK_BOOK_CAPACITY)        */
+    uint32_t count;          /* authoritative live record count [0..count)  */
+    uint32_t generation;     /* monotonic; bumped on every mutation         */
     uint32_t flags;
     uint8_t  uuid[16];
-    uint8_t  reserved[448];
+    uint8_t  reserved[464];
 } DiskBookSuperblock;
 
 STATIC_ASSERT(sizeof(DiskBookSuperblock) == 512, "DiskBookSuperblock_must_be_512_bytes");
 
+// One record = DISK_BOOK_ENTRY_SIZE (1024 B = 2 sectors). The redirect payload
+// is tiny; the rest is reserved headroom so the on-disk geometry (2 sectors per
+// record, 512 records, 1024-sector region) is unchanged from the v1 layout.
 typedef struct __packed {
-    uint32_t magic;
-    uint32_t sequence;
-    uint16_t type;
+    uint32_t magic;          /* DISK_BOOK_MAGIC                              */
+    uint32_t sequence;       /* monotonic generation stamp at write time    */
+    uint16_t type;           /* DISK_BOOK_TYPE_*                            */
     uint16_t flags;
-    uint32_t file_id;
-    uint64_t block_offset;
-    uint32_t disk_sector;
-    uint16_t data_size;
-    uint8_t  state;
-    uint8_t  tag_count;
-    uint8_t  reserved[2];
-    uint8_t  tags[16];
-    uint32_t data_crc32;
-    uint8_t  data[DISK_BOOK_DATA_SIZE];
+    uint32_t snapshot_id;    /* snapshot that froze old_block               */
+    uint32_t old_block;      /* frozen (redirected-away) block              */
+    uint32_t new_block;      /* live block the file now points at           */
+    uint64_t tag_bits;       /* tag scope of the owning file (well-known)   */
+    uint32_t record_crc32;   /* CRC32 of the record with this field zeroed  */
+    uint8_t  reserved[988];
 } DiskBookEntry;
 
 STATIC_ASSERT(sizeof(DiskBookEntry) == 1024, "DiskBookEntry_must_be_1024_bytes");
 
 typedef struct {
-    uint32_t sequence;
-    uint32_t first_entry;
-    uint32_t entry_count;
-    uint8_t  active;
-    uint8_t  reserved[3];
-} DiskBookTxn;
-
-typedef struct {
     uint32_t total_entries;
     uint32_t used_entries;
     uint32_t free_entries;
-    uint32_t transactions;
-    uint32_t checkpoints;
-    uint32_t writes_total;
-    uint32_t writes_failed;
+    uint32_t redirects_logged;
     uint32_t replay_count;
     uint32_t crc_errors;
-    uint64_t bytes_logged;
+    uint32_t generation;
     uint32_t uptime_seconds;
 } DiskBookStats;
 
 // Public API
-error_t DiskBookInit(uint32_t superblock_sector);
-error_t DiskBookReload(void);
-error_t DiskBookValidateAndReplay(void);
-void DiskBookShutdown(void);
+error_t  DiskBookInit(uint32_t superblock_sector);
+error_t  DiskBookValidateAndReplay(void);   /* restore redirects into CoW    */
+void     DiskBookShutdown(void);
 
-error_t DiskBookBegin(DiskBookTxn* txn);
-error_t DiskBookLogData(DiskBookTxn* txn, uint32_t file_id, uint64_t block_offset,
-                        uint32_t disk_sector, const void* data, uint16_t data_size);
-error_t DiskBookLogMetadata(DiskBookTxn* txn, uint32_t file_id, uint32_t meta_sector,
-                            const void* meta);
-error_t DiskBookCommit(DiskBookTxn* txn);
-void DiskBookAbort(DiskBookTxn* txn);
+/* Append one CoW redirect durably. tag_bits = owning file's well-known tag
+ * bitmask (0 if unknown). Graceful on overflow (returns ERR_DISK_FULL). */
+error_t  DiskBookLogRedirect(uint32_t snapshot_id, uint32_t old_block,
+                             uint32_t new_block, uint64_t tag_bits);
 
-error_t DiskBookCheckpoint(void);
+/* Drop all on-disk redirects (count→0). Used to compact: caller then re-logs
+ * the surviving redirects. */
+void     DiskBookResetRedirects(void);
 
-error_t DiskBookGetStats(DiskBookStats* stats);
-error_t DiskBookPrintStats(void);
+error_t  DiskBookCheckpoint(void);          /* flush cache + persist          */
 
-bool DiskBookIsInitialized(void);
-uint32_t DiskBookGetCheckpointSeq(void);
+error_t  DiskBookGetStats(DiskBookStats* stats);
+error_t  DiskBookPrintStats(void);
+
+bool     DiskBookIsInitialized(void);
+uint32_t DiskBookGetCheckpointSeq(void);    /* current generation             */
 
 #endif // DISK_BOOK_H
