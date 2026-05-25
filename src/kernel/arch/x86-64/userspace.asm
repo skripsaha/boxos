@@ -22,6 +22,14 @@ jump_to_userspace:
     mov ds, ax
     mov es, ax
     mov fs, ax
+
+    ; Crossing ring 0 -> ring 3 (single-core initial launch). The kernel runs
+    ; with the per-cpu PerCpuData in the active GS base; swapgs parks it in the
+    ; shadow (IA32_KERNEL_GS_BASE) so the process's first SYSCALL swaps it back.
+    ; The following `mov gs,ax` sets the user GS selector; its descriptor base
+    ; is 0, which is exactly the user-mode active GS base we want. The shadow
+    ; (per-cpu) is untouched by the selector load.
+    swapgs
     mov gs, ax
 
     push GDT_USER_DATA

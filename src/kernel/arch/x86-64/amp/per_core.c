@@ -18,7 +18,8 @@ volatile bool g_per_core_active = false;
 #define MSR_STAR            0xC0000081
 #define MSR_LSTAR           0xC0000082
 #define MSR_SFMASK          0xC0000084
-#define MSR_KERNEL_GS_BASE  0xC0000102
+#define MSR_GS_BASE         0xC0000101   // active GS.base
+#define MSR_KERNEL_GS_BASE  0xC0000102   // swapgs shadow
 
 #define EFER_SCE            (1ULL << 0)
 #define EFER_NXE            (1ULL << 11)
@@ -72,7 +73,11 @@ static void per_core_load_gdt(gdt_descriptor_t* desc) {
         "movw %%ax, %%ds\n\t"
         "movw %%ax, %%es\n\t"
         "movw %%ax, %%fs\n\t"
-        "movw %%ax, %%gs\n\t"
+        /* Deliberately do NOT reload %gs here. In 64-bit mode a selector load
+         * resets the segment's hidden base to the descriptor base (0), which
+         * would wipe the per-cpu GS base that per_core_load_gs() programmed
+         * via IA32_GS_BASE. The kernel addresses per-cpu data through that MSR
+         * base, not the %gs selector, so we leave %gs untouched. */
         "movw %%ax, %%ss"
         :
         : "r" ((uint64_t)desc),
@@ -131,6 +136,24 @@ static void per_core_alloc_ist(tss_t* tss, uint8_t core_index) {
 }
 
 // ---------------------------------------------------------------------------
+// GS-base invariant (see notify.h)
+// ---------------------------------------------------------------------------
+//
+// Establish, for THIS cpu: active GS.base -> per-cpu PerCpuData; swapgs shadow
+// (IA32_KERNEL_GS_BASE) -> 0 (user placeholder). After this, kernel code may
+// read per-cpu fields via %gs in ANY context — the entry stubs (isr.asm,
+// notify_entry.asm, jump_to_userspace) keep the invariant across ring
+// crossings. MUST run before any path on this cpu calls amp_get_core_index()
+// while g_per_core_active is set, because that reads core_index through %gs
+// (e.g. vmm_shootdown_page() invoked from per_core_alloc_ist()).
+static void per_core_load_gs(PerCoreData* pc) {
+    pc->notify.self       = (uint64_t)&pc->notify;
+    pc->notify.core_index = pc->core_index;
+    wrmsr_pc(MSR_GS_BASE, (uint64_t)&pc->notify);   // active  = per-cpu (kernel view)
+    wrmsr_pc(MSR_KERNEL_GS_BASE, 0);                // shadow = user placeholder
+}
+
+// ---------------------------------------------------------------------------
 // SYSCALL / Notify MSR setup (per-core)
 // ---------------------------------------------------------------------------
 
@@ -153,13 +176,13 @@ static void per_core_setup_notify_msrs(PerCoreData* pc) {
     // SFMASK: clear IF, TF, DF on SYSCALL entry
     wrmsr_pc(MSR_SFMASK, SFMASK_VALUE);
 
-    // PerCpuData (at offset 0 of PerCoreData)
+    // PerCpuData (at offset 0 of PerCoreData). The GS base itself is set by
+    // per_core_load_gs() earlier in init — see the invariant in notify.h. We
+    // must NOT write IA32_KERNEL_GS_BASE here: under the new invariant the
+    // shadow holds the *user* GS base (0), not the per-cpu pointer.
     pc->notify.kernel_rsp = pc->kernel_stack_top;
     pc->notify.user_rsp   = 0;
     pc->notify.self        = (uint64_t)&pc->notify;
-
-    // KernelGSBASE → PerCpuData so swapgs loads it into GS.base
-    wrmsr_pc(MSR_KERNEL_GS_BASE, (uint64_t)&pc->notify);
 }
 
 // ===========================================================================
@@ -176,6 +199,12 @@ void per_core_init_bsp(void) {
     pc->core_index = bsp_idx;
     pc->lapic_id   = g_amp.bsp_lapic_id;
     pc->is_kcore   = g_amp.cores[bsp_idx].is_kcore;
+
+    // Program the per-cpu GS base now. per_core_load_gdt() below no longer
+    // reloads %gs, so this base survives to the end of init (and beyond),
+    // making amp_get_core_index()'s gs:core_index read valid once
+    // g_per_core_active flips on at the bottom of this function.
+    per_core_load_gs(pc);
 
     // ---- GDT ----
     // Copy BSP's static GDT entries (segments 0-4 are identical across all cores)
@@ -231,6 +260,14 @@ void per_core_init_ap(uint8_t core_index, uint64_t stack_top) {
     pc->lapic_id         = g_amp.cores[core_index].lapic_id;
     pc->is_kcore         = g_amp.cores[core_index].is_kcore;
     pc->kernel_stack_top = stack_top;
+
+    // Program the per-cpu GS base NOW — before per_core_alloc_ist() below,
+    // which calls vmm_shootdown_page() -> amp_get_core_index(). On an AP
+    // g_per_core_active is already set (by the BSP), so amp_get_core_index()
+    // takes the %gs fast path and the base must already be live. Because
+    // per_core_load_gdt() no longer reloads %gs, this base survives the rest
+    // of init — a single write here is enough.
+    per_core_load_gs(pc);
 
     // ---- GDT ----
     // Copy code/data segments (0-4) from BSP's per-core GDT

@@ -118,6 +118,16 @@ ISR_NOERROR 242  ; IPI_PANIC    (0xF2)
 ;   vector, error_code
 ;   rip, cs, rflags, rsp, ss  (saved by CPU)
 isr_common:
+    ; Conditional swapgs on entry: if we interrupted user mode (CS.RPL==3),
+    ; the active GS base is the user value — swap to the per-cpu kernel base so
+    ; C handlers can read %gs (amp_get_core_index etc.). If we interrupted
+    ; kernel mode (nested IRQ/exception/IST), the active base is ALREADY the
+    ; per-cpu base, so we must NOT swap. At this point rsp -> vector, and the
+    ; CPU frame sits above it: vector(+0) err(+8) rip(+16) cs(+24) ...
+    test byte [rsp+24], 3               ; came from user?
+    jz .isr_entry_kernel
+    swapgs
+.isr_entry_kernel:
     push rax
     push rbx
     push rcx
@@ -184,6 +194,15 @@ isr_common:
 
     add rsp, 16     ; Remove vector and error_code
 
+    ; Conditional swapgs on exit: mirror the entry. The handler may have
+    ; rewritten the frame (scheduler picks the next task), so test the CURRENT
+    ; frame CS. Returning to user (RPL==3) -> swap user GS base back in;
+    ; returning to kernel (idle/kcore, RPL==0) -> keep the per-cpu base.
+    ; After `add rsp,16` the stack top is the CPU frame: rip(+0) cs(+8) ...
+    test byte [rsp+8], 3                ; returning to user?
+    jz .isr_exit_kernel
+    swapgs
+.isr_exit_kernel:
     iretq
 
 section .data

@@ -126,5 +126,13 @@ notify_entry:
     ;   so the difference is negligible.
     ; =================================================================
 
+    ; Conditional swapgs: syscall_handler may have rescheduled to a ring-0
+    ; kernel process (e.g. the idle task), in which case the rewritten frame
+    ; carries a kernel CS and we must KEEP the per-cpu GS base. Only swap back
+    ; to the user GS base when actually returning to ring 3.
+    ; After `add rsp,16` the stack top is the CPU frame: rip(+0) cs(+8) ...
+    test byte [rsp+8], 3                ; CS.RPL == 3 ?  (returning to user)
+    jz .notify_ret_kernel
     swapgs
+.notify_ret_kernel:
     iretq
