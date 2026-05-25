@@ -769,6 +769,32 @@ static TestResult test_integrity_detects_mismatch(void) {
     return TEST_PASS;
 }
 
+// Integrity-map reboot survival: persist -> release the in-RAM map -> reload it
+// from disk, then confirm a digest written before the cycle still verifies (and
+// still catches corruption). This is the map's actual reboot-recovery path,
+// exercised safely in-kernel (no FS-wide teardown, no reboot orchestration).
+static TestResult test_integrity_persist_reload(void) {
+    if (!IntegrityIsInitialized())
+        return TEST_SKIP;
+    uint32_t blk;
+    if (tagfs_alloc_blocks(1, &blk) != 0)
+        return TEST_SKIP;
+
+    for (int i = 0; i < 4096; i++) g_test_buffer[i] = (uint8_t)(i * 11 + 3);
+    IntegrityUpdate(blk, g_test_buffer);   // record digest
+    IntegrityFlush();                       // persist the map to disk
+
+    IntegrityShutdown();                    // drop the in-RAM map (disk copy remains)
+    TEST_ASSERT(IntegrityInit() == OK, "integrity remount (re-init from disk) succeeds");
+
+    TEST_ASSERT(IntegrityVerify(blk, g_test_buffer), "digest survived persist + reload (reboot)");
+    g_test_buffer[50] ^= 0xFF;
+    TEST_ASSERT(!IntegrityVerify(blk, g_test_buffer), "reloaded map still detects corruption");
+
+    tagfs_free_blocks(blk, 1);
+    return TEST_PASS;
+}
+
 error_t TagFS_RunAllTests(TestStats* stats) {
     if (!g_tests_initialized)
         return ERR_NOT_INITIALIZED;
@@ -834,6 +860,7 @@ error_t TagFS_RunAllTests(TestStats* stats) {
 
     TestCase integrity_tests[] = {
         {"integrity_detects_mismatch", test_integrity_detects_mismatch, TEST_SKIP, 0, ""},
+        {"integrity_persist_reload", test_integrity_persist_reload, TEST_SKIP, 0, ""},
     };
 
     // Run all test suites
