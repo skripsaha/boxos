@@ -4,6 +4,7 @@
 #include "../disk_book/disk_book.h"
 #include "../braid/braid.h"
 #include "../cow/cow.h"
+#include "../integrity/integrity.h"
 #include "../../../kernel/drivers/timer/rtc.h"
 
 // ============================================================================
@@ -694,6 +695,29 @@ static TestResult test_boxhash_sizes(void) {
     return TEST_PASS;
 }
 
+// ============================================================================
+// Data integrity (verify-on-read) test
+// ============================================================================
+static TestResult test_integrity_detects_mismatch(void) {
+    if (!IntegrityIsInitialized())
+        return TEST_SKIP;
+    uint32_t blk;
+    if (tagfs_alloc_blocks(1, &blk) != 0)
+        return TEST_SKIP;
+
+    for (int i = 0; i < 4096; i++) g_test_buffer[i] = (uint8_t)(i * 7 + 1);
+    IntegrityUpdate(blk, g_test_buffer);
+    TEST_ASSERT(IntegrityVerify(blk, g_test_buffer), "verify matches the recorded digest");
+
+    uint32_t before = IntegrityErrorCount();
+    g_test_buffer[100] ^= 0xFF;                       // simulate a flipped bit on disk
+    TEST_ASSERT(!IntegrityVerify(blk, g_test_buffer), "verify detects a 1-byte mismatch");
+    TEST_ASSERT(IntegrityErrorCount() == before + 1, "bit-rot counter incremented exactly once");
+
+    tagfs_free_blocks(blk, 1);
+    return TEST_PASS;
+}
+
 error_t TagFS_RunAllTests(TestStats* stats) {
     if (!g_tests_initialized)
         return ERR_NOT_INITIALIZED;
@@ -756,9 +780,13 @@ error_t TagFS_RunAllTests(TestStats* stats) {
         {"boxhash_sizes", test_boxhash_sizes, TEST_SKIP, 0, ""},
     };
 
+    TestCase integrity_tests[] = {
+        {"integrity_detects_mismatch", test_integrity_detects_mismatch, TEST_SKIP, 0, ""},
+    };
+
     // Run all test suites
     TestCase* all_suites[] = {
-        core_tests, compression_tests, journal_tests, snapshot_tests, stress_tests, braid_tests, cow_tests, boxhash_tests
+        core_tests, compression_tests, journal_tests, snapshot_tests, stress_tests, braid_tests, cow_tests, boxhash_tests, integrity_tests
     };
     uint32_t suite_sizes[] = {
         sizeof(core_tests)/sizeof(TestCase),
@@ -768,12 +796,13 @@ error_t TagFS_RunAllTests(TestStats* stats) {
         sizeof(stress_tests)/sizeof(TestCase),
         sizeof(braid_tests)/sizeof(TestCase),
         sizeof(cow_tests)/sizeof(TestCase),
-        sizeof(boxhash_tests)/sizeof(TestCase)
+        sizeof(boxhash_tests)/sizeof(TestCase),
+        sizeof(integrity_tests)/sizeof(TestCase)
     };
 
     debug_printf("\n[Tests] Starting test run...\n");
 
-    for (uint32_t s = 0; s < 8; s++) {
+    for (uint32_t s = 0; s < 9; s++) {
         for (uint32_t i = 0; i < suite_sizes[s]; i++) {
             TestCase* test = &all_suites[s][i];
             uint64_t start = get_time_ms();
