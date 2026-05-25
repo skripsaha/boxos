@@ -44,6 +44,7 @@
 #include "op_registry.h"
 #include "cow.h"
 #include "touch.h"
+#include "integrity.h"
 
 /* ---- forward decls ---- */
 static void wjob_pump(void *job_);
@@ -326,6 +327,7 @@ static bool w_ahci_done(WriteJob *j)
      * tagfs_write_block — so drop the just-written block from the read-ahead
      * cache ourselves, or a later read could serve pre-write data. */
     tagfs_readahead_invalidate(j->if_disk_block);
+    IntegrityUpdate(j->if_disk_block, j->dma_virt);
 
     j->bytes_done += j->if_chunk;
 

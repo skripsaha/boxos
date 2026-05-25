@@ -15,6 +15,7 @@
 #include "braid/braid.h"
 #include "dedup/dedup.h"
 #include "self_heal/self_heal.h"
+#include "integrity/integrity.h"
 #include "../../kernel/drivers/timer/rtc.h"
 #include "../../lib/kernel/crypto.h"
 
@@ -391,7 +392,10 @@ static int read_block(uint32_t block, void *buffer)
         // Braid failed — fall through to direct disk read as recovery path
     }
 
-    return disk_read_sectors(block_to_sector(block), 8, buffer);
+    int rc = disk_read_sectors(block_to_sector(block), 8, buffer);
+    if (rc == 0)
+        (void)IntegrityVerify(block, buffer);   // detect silent bit-rot on read
+    return rc;
 }
 
 static int write_block(uint32_t block, const void *buffer)
@@ -408,9 +412,11 @@ static int write_block(uint32_t block, const void *buffer)
     if (rc != 0)
         rc = disk_write_sectors(block_to_sector(block), 8, (void *)buffer);
 
-    // Drop any stale read-ahead copy once the new data is on disk.
-    if (rc == 0)
+    // Drop any stale read-ahead copy + record the new integrity digest.
+    if (rc == 0) {
         ReadAheadInvalidate(block);
+        IntegrityUpdate(block, buffer);
+    }
     return rc;
 }
 
@@ -1260,6 +1266,10 @@ error_t tagfs_init(void) {
             MARK_CHAIN_BLOCKS(sb.metadata_pool_block,   TAGFS_MPOOL_MAGIC);
             #undef MARK_CHAIN_BLOCKS
 
+            // Integrity-map blocks are used on disk but referenced by no file —
+            // mark them so they are not treated as orphans or reused.
+            IntegrityMarkMapBlocks(computed_bm, sb.total_blocks);
+
             // Compare computed vs on-disk bitmap
             for (uint32_t b = 0; b < sb.total_blocks; b++)
             {
@@ -1317,6 +1327,14 @@ error_t tagfs_init(void) {
     meta_pool_mirror_init(g_state.superblock.next_file_id + 64);
 
     g_state.initialized = true;
+
+    // Data-block integrity map (verify-on-read). After initialized=true so the
+    // lazy first-mount allocation can use the block allocator.
+    if (IntegrityInit() != OK)
+        kprintf("[TagFS] integrity map unavailable - continuing without verify-on-read\n");
+    else
+        kprintf("[TagFS] data-integrity verify-on-read active\n");
+
     debug_printf("[TagFS] Initialized successfully\n");
     return 0;
 }
@@ -1333,6 +1351,7 @@ void tagfs_sync(void)
     tag_registry_flush(g_state.registry);
     file_table_flush();
     meta_pool_flush();
+    IntegrityFlush();
 
     // Write block bitmap to disk
     uint32_t bitmap_bytes = (g_state.superblock.total_blocks + 7) / 8;
@@ -1412,6 +1431,9 @@ void tagfs_shutdown(void)
 
     // Shutdown Bcdc compression
     BcdcShutdown();
+
+    // Flush + release the data-integrity map
+    IntegrityShutdown();
 
     // Shutdown test framework
     TagFS_TestsShutdown();
