@@ -99,6 +99,9 @@ ISR_NOERROR 128  ; kernel_notify syscall
 ; Completion IRQ (INT 0x81)
 ISR_NOERROR 129  ; workflow completion notification
 
+; MSI vector (INT 0x70) — AHCI message-signalled interrupt
+ISR_NOERROR 112  ; AHCI MSI
+
 ; LAPIC special vectors
 ISR_NOERROR 254  ; LAPIC timer
 ISR_NOERROR 255  ; LAPIC spurious
@@ -195,8 +198,12 @@ isr_table:
     dq irq8, irq9, irq10, irq11, irq12, irq13, irq14, irq15
     ; IRQs (48-55): IO-APIC extra pins (GSI 16-23)
     dq irq16, irq17, irq18, irq19, irq20, irq21, irq22, irq23
-    ; Unimplemented (56-127) - use GPF handler
-    times 72 dq isr13
+    ; Unimplemented (56-111) - use GPF handler
+    times 56 dq isr13
+    ; AHCI MSI (112 = 0x70)
+    dq isr112
+    ; Unimplemented (113-127) - use GPF handler
+    times 15 dq isr13
     ; Syscall (128)
     dq isr128
     ; Completion IRQ (129)

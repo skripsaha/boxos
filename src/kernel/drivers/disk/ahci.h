@@ -371,6 +371,11 @@ typedef struct {
     uint32_t issued_mask;
     volatile uint32_t completed_slots;
 
+    /* Set (CAS 0->1) by the IRQ handler when a fatal error schedules a
+     * deferred COMRESET; cleared by the recovery bottom-half. Prevents a
+     * storm of error IRQs from queuing redundant recoveries. */
+    volatile uint32_t recovering;
+
     uint32_t event_id[AHCI_MAX_SLOTS];
     uint32_t pid[AHCI_MAX_SLOTS];
     uint64_t submit_tsc[AHCI_MAX_SLOTS];

@@ -11,6 +11,8 @@
 #include "cpu_calibrate.h"
 #include "boxos_memory.h"
 #include "idt.h"
+#include "amp.h"
+#include "irq_defer.h"
 
 #define AHCI_TIMEOUT_MS CONFIG_AHCI_CMD_TIMEOUT_MS
 
@@ -107,6 +109,16 @@ static int ahci_port_start(ahci_port_t* port) {
     return 0;
 }
 
+/* K-Core bottom-half: full port recovery (COMRESET) after a fatal error.
+ * Dispatched via irq_defer because COMRESET busy-waits for hundreds of ms,
+ * far too long for interrupt context. The IRQ path already failed the
+ * port's outstanding async slots with ERR_IO before scheduling this. */
+static void ahci_deferred_recover(void* ctx) {
+    ahci_port_t* port = (ahci_port_t*)ctx;
+    ahci_port_recover(port);
+    __atomic_store_n(&port->recovering, 0, __ATOMIC_RELEASE);
+}
+
 /* Fire the completion callback and return the slot to the pool for each bit
  * in `mask`. Async slots always carry a callback (installed before arming);
  * sync slots are never tracked in issued_mask, so they never reach here and
@@ -189,6 +201,14 @@ void ahci_irq_handler(void) {
                 __sync_fetch_and_and(&state->issued_mask, ~stuck);
                 ahci_retire_slots(state, i, stuck, ERR_IO);
             }
+
+            /* The HBA halts PxCMD.ST on a fatal error, so without a restart
+             * every later command on this port would stall. COMRESET busy-
+             * waits, so hand it to a K-Core via irq_defer (allocation-free,
+             * IRQ-safe). The CAS coalesces a storm of error IRQs into one. */
+            if (__sync_bool_compare_and_swap(&state->recovering, 0, 1)) {
+                irq_defer(ahci_deferred_recover, state);
+            }
         }
 
         port->is = port_is;
@@ -220,16 +240,36 @@ void ahci_init_irq(void) {
         return;
     }
 
+    /* Prefer MSI: edge-triggered and delivered point-to-point to the LAPIC,
+     * so it sidesteps legacy INTx routing. The PCI 0x3C "interrupt line" is
+     * frequently stale/wrong on APIC systems, and PCI INTx needs level /
+     * active-low IOAPIC programming the firmware may not have arranged. MSI
+     * is universal on AHCI controllers. Route it to the BSP's LAPIC; the
+     * vector is dispatched directly by irq_handler (AHCI_MSI_VECTOR). */
+    int msi = pci_msi_enable(ahci_ctrl.pci_dev.bus,
+                             ahci_ctrl.pci_dev.device,
+                             ahci_ctrl.pci_dev.function,
+                             AHCI_MSI_VECTOR,
+                             g_amp.bsp_lapic_id);
+    if (msi == 0) {
+        ahci_ctrl.irq_vector  = AHCI_MSI_VECTOR;
+        ahci_ctrl.irq_enabled = true;
+        debug_printf("[AHCI] MSI enabled (vector 0x%02x -> LAPIC %u)\n",
+                     AHCI_MSI_VECTOR, g_amp.bsp_lapic_id);
+        return;
+    }
+
+    /* Fallback: legacy INTx via the PCI interrupt line (an IOAPIC GSI). */
     if (ahci_ctrl.irq_vector == 0xFF || ahci_ctrl.irq_vector >= IRQ_MAX_COUNT) {
-        debug_printf("[AHCI] No valid IRQ, using polling mode\n");
+        debug_printf("[AHCI] No MSI capability and no usable INTx line; polling mode\n");
+        ahci_ctrl.irq_enabled = false;
         return;
     }
 
     irq_register_handler(ahci_ctrl.irq_vector, ahci_irq_handler);
     irqchip_enable_irq(ahci_ctrl.irq_vector);
-
     ahci_ctrl.irq_enabled = true;
-    debug_printf("[AHCI] IRQ %u registered and enabled\n", ahci_ctrl.irq_vector);
+    debug_printf("[AHCI] INTx IRQ %u registered (MSI unavailable)\n", ahci_ctrl.irq_vector);
 }
 
 int ahci_alloc_slot(uint8_t port_num) {

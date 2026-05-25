@@ -17,6 +17,11 @@
 #define LAPIC_TIMER_VECTOR      0xFE    // 254
 #define LAPIC_SPURIOUS_VECTOR   0xFF    // 255
 
+// MSI (message-signalled interrupt) device vectors. MSI is delivered
+// straight to the LAPIC (acked with LAPIC EOI, not the IOAPIC) so these sit
+// outside the IOAPIC GSI range (32-55). Dispatched explicitly in irq_handler.
+#define AHCI_MSI_VECTOR         0x70    // 112 — AHCI controller
+
 // AMP inter-processor interrupt vectors
 #define IPI_WAKE_VECTOR         0xF0    // 240 — wake idle AP or reschedule
 #define IPI_SHOOTDOWN_VECTOR    0xF1    // 241 — TLB shootdown
