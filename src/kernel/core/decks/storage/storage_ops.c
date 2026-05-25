@@ -42,6 +42,7 @@
 #include "ata.h"
 #include "touch.h"
 #include "cow.h"
+#include "amp.h"   /* g_amp.total_cores — async write needs a K-Core to pump */
 
 #define OBJ_WRITE_APPEND_FLAG (1u << 0)
 
@@ -272,7 +273,7 @@ static void obj_read_step(ObjReadAsyncCtx *ctx)
 
     uint64_t lba = tagfs_block_to_sector(disk_block);
     uint8_t  slot;
-    error_t  err = ahci_submit_read_async(0, lba, 8, ctx->dma_phys,
+    error_t  err = ahci_submit_read_async(tagfs_get_ahci_port(), lba, 8, ctx->dma_phys,
                                            obj_read_async_complete, ctx, &slot);
     if (err != OK) {
         obj_read_finish(ctx, ERR_IO, /*partial_ok=*/false);
@@ -314,8 +315,13 @@ static int ObjRead(const ManifestOp *op,
      * the next read or finalizes. Sequential per-block submission keeps
      * the model simple — future work can batch consecutive blocks within
      * one extent into a single multi-sector read. */
+    /* Multi-core only: the async read completion (obj_read_finish) runs in
+     * AHCI IRQ context and touches the heap / tagfs / result ring. On a
+     * single core that IRQ preempts the very userspace thread that owns
+     * those structures; the sync read path below is correct there and on
+     * real HW (which is multi-core) the async path still applies. */
     if (offset < handle->file_size && handle->extent_count > 0 &&
-        ahci_is_initialized() && ctx && ctx->proc) {
+        ahci_is_initialized() && ctx && ctx->proc && g_amp.total_cores > 1) {
 
         uint64_t remaining = handle->file_size - offset;
         uint64_t to_read   = (out->capacity > remaining) ? remaining : out->capacity;
@@ -413,7 +419,14 @@ static int ObjWrite(const ManifestOp *op,
         }
     }
 
-    if (ahci_is_initialized() && ctx && ctx->proc) {
+    /* Async write requires a K-Core to pump its IRQ-deferred completion
+     * continuations (write completion does heavy work — alloc / DiskBook /
+     * CoW — that cannot run in IRQ context, so it is deferred via irq_defer
+     * and drained by kcore_run_loop). That loop only exists in multi-core
+     * mode; on a single core the BSP runs userspace and never pumps, so the
+     * job would strand. Use the sync path there — it is correct and has no
+     * benefit to lose (one core does everything regardless). */
+    if (ahci_is_initialized() && ctx && ctx->proc && g_amp.total_cores > 1) {
         int rc = ObjWriteAsync(file_id, offset, flags,
                                src_bounce, (uint32_t)src->size,
                                out_crate, out_kp, ctx);

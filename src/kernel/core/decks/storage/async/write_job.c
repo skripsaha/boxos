@@ -281,7 +281,7 @@ static bool w_cow_read_old(WriteJob *j)
 {
     uint64_t lba = tagfs_block_to_sector(j->if_disk_block);
     uint8_t  slot;
-    error_t  err = ahci_submit_read_async(0, lba, 8, j->dma_phys,
+    error_t  err = ahci_submit_read_async(tagfs_get_ahci_port(), lba, 8, j->dma_phys,
                                            wjob_cow_read_complete, j, &slot);
     if (err != OK) {
         wjob_finalize(j, ERR_IO);
@@ -306,7 +306,7 @@ static bool w_ahci_submit(WriteJob *j)
 {
     uint64_t lba = tagfs_block_to_sector(j->if_disk_block);
     uint8_t  slot;
-    error_t  err = ahci_submit_write_async(0, lba, 8, j->dma_phys,
+    error_t  err = ahci_submit_write_async(tagfs_get_ahci_port(), lba, 8, j->dma_phys,
                                             wjob_ahci_complete, j, &slot);
     if (err != OK) {
         wjob_finalize(j, ERR_IO);
@@ -684,9 +684,16 @@ int ObjWriteAsync(uint32_t            file_id,
 
     if (token_try_claim(j)) {
         atomic_store_u32((volatile uint32_t *)&j->state, W_LOCATE);
-        if (WriteContEnqueue(wjob_pump, j) != OK) {
-            wjob_pump(j);
-        }
+        /* Run the first pump synchronously in this syscall (thread) context.
+         * The initial kick is NOT an IRQ bottom-half: routing it through
+         * WriteContEnqueue/irq_defer enqueues to the current core's ring,
+         * which is drained only by that core's K-Core pump loop. The syscall
+         * runs on an App Core (or the single-core BSP, which never pumps at
+         * all), so the job would strand and the caller would wait forever.
+         * Thread context can safely take every lock the state machine needs;
+         * it pumps until it parks at W_AHCI_SUBMIT (yield to the AHCI IRQ,
+         * which correctly defers its continuation to a pumped K-Core). */
+        wjob_pump(j);
     } else {
         atomic_store_u32((volatile uint32_t *)&j->state, W_TOKEN_WAIT);
     }
