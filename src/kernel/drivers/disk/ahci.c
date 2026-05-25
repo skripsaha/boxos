@@ -223,14 +223,14 @@ void ahci_port_enable_irq(uint8_t port_num) {
 
     volatile ahci_port_regs_t* regs = port->regs;
 
-    regs->ie = (1 << 0)  |  // DHRE
-               (1 << 1)  |  // PSE
-               (1 << 2)  |  // DSE
-               (1 << 3)  |  // SDBS (NCQ)
-               (1 << 29) |  // TFES
-               (1 << 30);   // HBFS
+    regs->ie = AHCI_PIS_DHRS |   // Device-to-Host Register FIS
+               AHCI_PIS_PSS  |   // PIO Setup FIS
+               AHCI_PIS_DSS  |   // DMA Setup FIS
+               AHCI_PIS_SDBS |   // Set Device Bits (NCQ completion)
+               AHCI_PIS_HBFS |   // Host Bus Fatal Error
+               AHCI_PIS_TFES;    // Task File Error
 
-    ahci_ctrl.hba_mem->ghc |= (1 << 1);
+    ahci_ctrl.hba_mem->ghc |= AHCI_GHC_IE;   // global HBA interrupt enable
 
     debug_printf("[AHCI] Port %u: Interrupts enabled (IE=0x%08x)\n", port_num, regs->ie);
 }
