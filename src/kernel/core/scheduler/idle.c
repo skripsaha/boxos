@@ -8,6 +8,7 @@
 #include "kernel_config.h"
 #include "amp.h"
 #include "fpu.h"
+#include "cpuid.h"   // g_cpu_caps.has_monitor (MWAIT idle)
 
 // BSP idle process (static, PID 0)
 static process_t g_idle_process;
@@ -121,4 +122,30 @@ process_t* idle_process_get(void) {
 
 bool process_is_idle(process_t* proc) {
     return (proc && proc->pid == IDLE_PID);
+}
+
+// One idle wait, executed each iteration of idle_loop (idle_loop.asm).
+void cpu_idle(void) {
+    if (g_cpu_caps.has_monitor) {
+        /* MWAIT idle. Arm MONITOR on a per-core stack address (each idle
+         * process has its own stack), then MWAIT into C-state C1 with
+         * interrupts enabled. C1 keeps the LAPIC timer running (only C3+ would
+         * need ARAT), so App-Core preemption and the S3 TSC-deadline tick are
+         * unaffected. STI;MWAIT is atomic via the one-instruction STI interrupt
+         * shadow, so a timer/IPI arriving just before MWAIT still wakes us — no
+         * lost wakeup. Raw .byte encodings (0F 01 C8 = MONITOR, 0F 01 C9 =
+         * MWAIT) sidestep assembler-mnemonic portability issues. */
+        volatile uint8_t monitor_cell;
+        __asm__ volatile(".byte 0x0f,0x01,0xc8"        /* monitor rax,rcx,rdx */
+                         :
+                         : "a"(&monitor_cell), "c"(0), "d"(0)
+                         : "memory");
+        __asm__ volatile("sti; .byte 0x0f,0x01,0xc9"   /* sti; mwait eax,ecx   */
+                         :
+                         : "a"(0u), "c"(0u)
+                         : "memory");
+    } else {
+        /* No MWAIT: HLT is C1 and keeps the timer running. */
+        __asm__ volatile("sti; hlt");
+    }
 }

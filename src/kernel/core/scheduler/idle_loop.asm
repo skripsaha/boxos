@@ -2,8 +2,9 @@
 section .text
 
 global idle_loop
+extern cpu_idle
 idle_loop:
 .loop:
-    sti          ; Enable interrupts
-    hlt          ; Halt until interrupt (power-saving)
-    jmp .loop    ; Repeat forever
+    call cpu_idle    ; one idle wait: MWAIT-C1 if available, else STI;HLT
+                     ; (cpu_idle does its own STI; returns after an interrupt)
+    jmp .loop        ; repeat forever
