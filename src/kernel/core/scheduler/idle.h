@@ -17,7 +17,10 @@ process_t *idle_process_get(void);
 
 bool process_is_idle(process_t *proc);
 
-// Assembly entry point: hlt loop (idle_loop.asm)
+// Assembly entry point: idle loop (idle_loop.asm) — calls cpu_idle() per pass.
 void idle_loop(void);
+
+// One idle wait (MWAIT-C1 when available, else HLT). Called from idle_loop.
+void cpu_idle(void);
 
 #endif // IDLE_H

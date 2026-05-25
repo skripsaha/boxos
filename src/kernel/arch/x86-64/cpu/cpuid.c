@@ -37,6 +37,7 @@ void cpu_detect_features(void) {
         g_cpu_caps.has_apic = (edx & (1 << 9)) != 0;
         g_cpu_caps.has_x2apic = (ecx & (1 << 21)) != 0;
         g_cpu_caps.has_tsc_deadline = (ecx & (1 << 24)) != 0;
+        g_cpu_caps.has_monitor = (ecx & (1 << 3)) != 0;
         g_cpu_caps.has_xsave = (ecx & (1 << 26)) != 0;
         g_cpu_caps.has_avx = (ecx & (1 << 28)) != 0;
         g_cpu_caps.has_pcid = (ecx & (1 << 17)) != 0;
@@ -112,6 +113,7 @@ void cpu_intersect_features_ap(void) {
         g_cpu_caps.has_apic    &= ((edx & (1 << 9))  != 0);
         g_cpu_caps.has_x2apic  &= ((ecx & (1 << 21)) != 0);
         g_cpu_caps.has_tsc_deadline &= ((ecx & (1 << 24)) != 0);
+        g_cpu_caps.has_monitor &= ((ecx & (1 << 3)) != 0);
         g_cpu_caps.has_xsave   &= ((ecx & (1 << 26)) != 0);
         g_cpu_caps.has_avx     &= ((ecx & (1 << 28)) != 0);
         g_cpu_caps.has_pcid    &= ((ecx & (1 << 17)) != 0);
