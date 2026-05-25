@@ -6,12 +6,8 @@
 #include "io.h"
 #include "irqchip.h"
 #include "atomics.h"
-#include "async_io.h"
-#include "result_ring.h"
-#include "kring.h"
 #include "error.h"
 #include "pic.h"
-#include "process.h"
 #include "cpu_calibrate.h"
 #include "boxos_memory.h"
 #include "idt.h"
@@ -19,20 +15,6 @@
 #define AHCI_TIMEOUT_MS CONFIG_AHCI_CMD_TIMEOUT_MS
 
 static ahci_controller_t ahci_ctrl;
-
-// Helper: push a Result to a process's ResultRing.
-// Uses process_find_ref so the process cannot be torn down between the lookup
-// and the dereference inside KResultPush. Caller never inherits the ref.
-static void ahci_push_result(uint32_t pid, uint32_t error_code) {
-    process_t* proc = process_find_ref(pid);
-    if (!proc) return;
-    Result r;
-    memset(&r, 0, sizeof(Result));
-    r.error_code = error_code;
-    r.sender_pid = 0;  // kernel
-    KResultPush(proc, &r);
-    process_ref_dec(proc);
-}
 
 static inline ahci_port_regs_t* ahci_get_port_regs(uint8_t port_num) {
     uintptr_t port_base = (uintptr_t)ahci_ctrl.hba_mem + 0x100 + (port_num * 0x80);
@@ -402,124 +384,6 @@ error_t ahci_build_ncq_write(uint8_t port_num, uint8_t slot, uint64_t lba,
     return OK;
 }
 
-error_t ahci_start_async_transfer(struct async_io_request* req_raw) {
-    async_io_request_t* req = (async_io_request_t*)req_raw;
-
-    if (!req || !ahci_ctrl.initialized) {
-        return ERR_NULL_POINTER;
-    }
-
-    if (req->sector_count == 0 || req->sector_count > 8) {
-        return ERR_INVALID_ARGUMENT;
-    }
-
-    // TODO: async_io_request_t needs port_num field for multi-port async I/O
-    ahci_port_t* state = &ahci_ctrl.ports[0];
-    volatile ahci_port_regs_t* port = state->regs;
-
-    int slot = ahci_alloc_slot(0);
-    if (slot < 0) {
-        return ERR_IO_QUEUE_FULL;
-    }
-
-    state->event_id[slot] = req->event_id;
-    state->pid[slot] = req->pid;
-    state->submit_tsc[slot] = rdtsc();
-
-    void* target_phys;
-
-    if (req->op == ASYNC_IO_OP_WRITE) {
-        if (!req->buffer_virt) {
-            ahci_free_slot(0, slot);
-            return ERR_NULL_POINTER;
-        }
-
-        uint32_t total_size = req->sector_count * 512;
-        uint32_t copy_size = req->data_length < total_size ? req->data_length : total_size;
-        memset(state->staging_virt[slot], 0, total_size);
-        memcpy(state->staging_virt[slot], req->buffer_virt, copy_size);
-        target_phys = state->staging_phys[slot];
-        state->ncq_writes++;
-
-        if (ahci_build_ncq_write(0, slot, req->lba, req->sector_count, target_phys) != OK) {
-            ahci_free_slot(0, slot);
-            return ERR_IO;
-        }
-    } else {
-        // READ: translate user virtual -> physical for DMA.
-        // process_find_ref pins the process across the cabin/vmm dereference.
-        process_t* proc = process_find_ref(req->pid);
-        if (!proc || !proc->cabin) {
-            if (proc) process_ref_dec(proc);
-            ahci_free_slot(0, slot);
-            return ERR_INVALID_ARGUMENT;
-        }
-
-        uintptr_t target_phys_addr = vmm_virt_to_phys(proc->cabin, (uintptr_t)req->buffer_virt);
-        process_ref_dec(proc);
-        if (target_phys_addr == 0) {
-            ahci_free_slot(0, slot);
-            return ERR_INVALID_ADDRESS;
-        }
-
-        target_phys = (void*)target_phys_addr;
-        state->ncq_reads++;
-
-        if (ahci_build_ncq_read(0, slot, req->lba, req->sector_count, target_phys) != OK) {
-            ahci_free_slot(0, slot);
-            return ERR_IO;
-        }
-    }
-
-    mfence();
-
-    /* Submit RMW: port->sact / port->ci are MMIO RMW. Two cores doing
-     * `read; OR; write` concurrently can lose a bit. Serialize with port->lock
-     * so the OR is observed by both HW and the IRQ snapshot tracker. */
-    spin_lock(&state->lock);
-    port->sact |= (1U << slot);
-    port->ci   |= (1U << slot);
-    __sync_fetch_and_or(&state->ci_snapshot, (1U << slot));
-    spin_unlock(&state->lock);
-
-    return OK;
-}
-
-void ahci_check_timeouts(void) {
-    if (!ahci_ctrl.initialized) {
-        return;
-    }
-
-    uint64_t now = rdtsc();
-
-    for (uint8_t p = 0; p < AHCI_MAX_PORTS; p++) {
-        ahci_port_t* state = &ahci_ctrl.ports[p];
-        if (!state->active) continue;
-
-        uint32_t snapshot = __atomic_load_n(&state->ci_snapshot, __ATOMIC_ACQUIRE);
-
-        for (uint8_t slot = 0; slot < AHCI_MAX_SLOTS; slot++) {
-            if (!(snapshot & (1U << slot))) {
-                continue;
-            }
-
-            if ((now - state->submit_tsc[slot]) < cpu_ms_to_tsc(AHCI_TIMEOUT_MS)) {
-                continue;
-            }
-
-            async_io_mark_failed(state->event_id[slot]);
-
-            ahci_push_result(state->pid[slot], ERR_TIMEOUT);
-
-            ahci_free_slot(p, slot);
-            __sync_fetch_and_and(&state->ci_snapshot, ~(1U << slot));
-            __sync_fetch_and_add(&state->ncq_timeouts, 1);
-
-            debug_printf("[AHCI] Port %u: Timeout on slot %u (event_id=%u)\n", p, slot, state->event_id[slot]);
-        }
-    }
-}
-
 static int ahci_port_init(uint8_t port_num) {
     if (port_num >= AHCI_MAX_PORTS) {
         return -1;
@@ -583,27 +447,6 @@ static int ahci_port_init(uint8_t port_num) {
 
     port->regs->is = 0xFFFFFFFF;
     port->regs->serr = 0xFFFFFFFF;
-
-    for (int i = 0; i < AHCI_MAX_SLOTS; i++) {
-        void* staging_phys = pmm_alloc(1, PHYS_TAG_DMA32);
-        if (!staging_phys) {
-            debug_printf("[AHCI] Port %u: Failed to allocate staging buffer for slot %u\n", port_num, i);
-            for (int j = 0; j < i; j++) {
-                pmm_free(port->staging_phys[j], 1);
-            }
-            for (uint8_t k = 0; k < AHCI_MAX_SLOTS; k++) {
-                pmm_free((void*)port->ctba_phys[k], 1);
-            }
-            pmm_free(clb_page, 1);
-            return -1;
-        }
-
-        void* staging_virt = vmm_phys_to_virt((uintptr_t)staging_phys);
-        memset(staging_virt, 0, 4096);
-
-        port->staging_phys[i] = staging_phys;
-        port->staging_virt[i] = staging_virt;
-    }
 
     port->ci_snapshot = 0;
     port->completed_slots = 0;
