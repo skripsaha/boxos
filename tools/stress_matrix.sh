@@ -34,18 +34,34 @@ run_config() {
 
     # Boot. Use eval so env strings expand correctly.
     eval "${extra} make run-bg" >/dev/null 2>&1
-    # UEFI takes longer to reach shell prompt due to GOP init.
-    sleep 25
+    # Wait for the shell prompt (UEFI GOP init is slow). Poll instead of a
+    # fixed sleep so a slow-booting config is not raced.
+    for i in $(seq 1 90); do
+        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
+        sleep 0.5
+    done
+    sleep 2
 
-    # Mixed command burst. 7s between commands so bench (which can take
-    # ~5s to print all 11 rows under STRICT) finishes before next input
-    # is sent, and the final memtest has time to complete before halt.
+    # Mixed command burst. Poll each command to completion (its marker count
+    # reaches the cumulative expected) before sending the next. A fixed gap
+    # was occasionally too short for memtest on a jittery SMP config, dropping
+    # one "All 15 tests passed" line and producing a spurious 2/3 — the kernel
+    # was fine, the test was racing. This makes the burst deterministic.
+    mt_seen=0; fl_seen=0; bn_seen=0
     for c in memtest files bench memtest files bench memtest; do
         tools/qemu-input.sh type "$c" >/dev/null 2>&1
         tools/qemu-input.sh key ret  >/dev/null 2>&1
-        sleep 7
+        case "$c" in
+            memtest) mt_seen=$((mt_seen+1)); pat="All 15 tests passed";               want=$mt_seen ;;
+            files)   fl_seen=$((fl_seen+1)); pat="^Files:";                            want=$fl_seen ;;
+            bench)   bn_seen=$((bn_seen+1)); pat="create+write64+delete (TagFS+disk)"; want=$bn_seen ;;
+        esac
+        for i in $(seq 1 40); do   # up to ~20s per command
+            [ "$(grep -c "$pat" build/serial.log)" -ge "$want" ] && break
+            sleep 0.5
+        done
     done
-    sleep 8
+    sleep 2
 
     # Halt before grep so the file isn't being written.
     make run-stop >/dev/null 2>&1 || true
