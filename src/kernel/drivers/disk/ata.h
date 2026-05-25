@@ -69,12 +69,6 @@ int ata_flush_cache(uint8_t is_master);
 int ata_read_sectors_retry(uint8_t is_master, uint64_t lba, uint16_t count, uint8_t* buffer);
 int ata_write_sectors_retry(uint8_t is_master, uint64_t lba, uint16_t count, const uint8_t* buffer);
 
-// High-level block I/O for TagFS (4KB blocks = 8 sectors)
-int ata_read_block(uint32_t block_num, uint8_t* buffer);
-int ata_write_block(uint32_t block_num, const uint8_t* buffer);
-int ata_read_blocks(uint32_t start_block, uint32_t count, uint8_t* buffer);
-int ata_write_blocks(uint32_t start_block, uint32_t count, const uint8_t* buffer);
-
 int ata_wait_ready(void);
 int ata_wait_drq(void);
 uint8_t ata_read_status(void);
