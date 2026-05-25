@@ -56,7 +56,16 @@ run_config() {
             files)   fl_seen=$((fl_seen+1)); pat="^Files:";                            want=$fl_seen ;;
             bench)   bn_seen=$((bn_seen+1)); pat="create+write64+delete (TagFS+disk)"; want=$bn_seen ;;
         esac
-        for i in $(seq 1 40); do   # up to ~20s per command
+        # Up to ~90s per command — a HOST-LOAD margin, not a kernel wait. The
+        # poll exits the instant the command completes, so on an idle host this
+        # costs nothing; it only stretches when the host is saturated (e.g.
+        # running the full matrix back-to-back). The old 20s window produced
+        # spurious "memtest 2/3" while the kernel had actually finished:
+        # empirically every memtest completes (BIOS 16c 6/6 @35s; UEFI 4c — the
+        # slowest, OVMF+AHCI+4c — 4/4 @90s under heavy host saturation), with
+        # bench/files/0-PANIC clean on every config. A genuine hang still fails
+        # (after the budget); this only removes false failures from host load.
+        for i in $(seq 1 180); do
             [ "$(grep -c "$pat" build/serial.log)" -ge "$want" ] && break
             sleep 0.5
         done
