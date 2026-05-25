@@ -107,10 +107,30 @@ static int ahci_port_start(ahci_port_t* port) {
     return 0;
 }
 
-void ahci_irq_handler(void) {
-    // Called from irq_handler with interrupts disabled (interrupt gate).
-    // Do NOT call cli/sti or send EOI here — irq_handler handles EOI after return.
+/* Fire the completion callback and return the slot to the pool for each bit
+ * in `mask`. Async slots always carry a callback (installed before arming);
+ * sync slots are never tracked in issued_mask, so they never reach here and
+ * free themselves from their own poll loop. The slot is freed BEFORE the
+ * callback runs so a callback that chains another async op can reuse it. */
+static inline void ahci_retire_slots(ahci_port_t* state, uint8_t port_idx,
+                                     uint32_t mask, error_t status) {
+    while (mask) {
+        uint8_t slot = (uint8_t)__builtin_ctz(mask);
+        mask &= mask - 1;
+        void (*cb)(uint8_t, uint8_t, error_t, void*) = state->cb[slot];
+        void *ctx = state->cb_ctx[slot];
+        state->cb[slot]     = NULL;
+        state->cb_ctx[slot] = NULL;
+        ahci_free_slot(port_idx, slot);
+        if (cb) {
+            cb(port_idx, slot, status, ctx);
+        }
+    }
+}
 
+void ahci_irq_handler(void) {
+    // Called from the IRQ dispatcher with interrupts disabled. Do NOT cli/sti
+    // or send EOI here — the dispatcher EOIs after this returns.
     if (!ahci_ctrl.initialized) {
         return;
     }
@@ -133,73 +153,42 @@ void ahci_irq_handler(void) {
         volatile ahci_port_regs_t* port = ahci_get_port_regs(i);
         uint32_t port_is = port->is;
 
-        /* Read snapshot BEFORE ci to pair with the submitter's ordering:
-         *   submitter writes port->ci first, then __sync_fetch_and_or(ci_snapshot,...).
-         * On x86 TSO loads are not reordered, so reading snapshot first guarantees
-         * that any new bit visible in snapshot is also visible in the subsequent
-         * ci read. completed = snapshot & ~current_ci then never falsely flags a
-         * just-submitted slot as completed.
-         *
-         * fetch_and_and(~completed) clears only the bits we observed completed,
-         * preserving any concurrent submitter's OR of a fresh slot. The previous
-         * `__atomic_store_n(.., current_ci)` overwrote that OR and dropped the
-         * new submission. */
-        uint32_t snapshot_prev = __atomic_load_n(&state->ci_snapshot, __ATOMIC_ACQUIRE);
-        uint32_t current_ci    = __atomic_load_n(&port->ci, __ATOMIC_ACQUIRE);
-        uint32_t completed     = snapshot_prev & ~current_ci;
+        /* The completion register depends on the command class: NCQ commands
+         * clear PxSACT on completion (PxCI clears early, when the FIS is
+         * sent), non-queued commands clear PxCI. Read issued_mask BEFORE the
+         * register: the submitter writes the register then issued_mask under a
+         * lock with IRQs off, so on x86 TSO a slot visible in the snapshot is
+         * also visible (still set) in the register read, and completed =
+         * snapshot & ~outstanding never falsely retires a just-armed slot. */
+        uint32_t snapshot    = __atomic_load_n(&state->issued_mask, __ATOMIC_ACQUIRE);
+        uint32_t outstanding = state->ncq
+            ? __atomic_load_n(&port->sact, __ATOMIC_ACQUIRE)
+            : __atomic_load_n(&port->ci,   __ATOMIC_ACQUIRE);
+        uint32_t completed   = snapshot & ~outstanding;
 
         if (completed) {
             __sync_fetch_and_or(&state->completed_slots, completed);
-            __sync_fetch_and_and(&state->ci_snapshot, ~completed);
-
-            /* Async completion fan-out. For each slot whose owner
-             * registered a callback, fire it now. Sync callers leave
-             * cb[slot] == NULL — they continue to detect completion
-             * via the completed_slots bitmap above. cb is captured
-             * + cleared under the (per-slot) lock-free assumption
-             * that exactly one path owns a slot at a time, which is
-             * already enforced by ahci_alloc_slot. */
-            uint32_t cb_mask = completed;
-            bool tfes = (port_is & (1 << 30)) != 0;
-            error_t status = tfes ? ERR_IO : OK;
-            while (cb_mask) {
-                uint8_t slot = (uint8_t)__builtin_ctz(cb_mask);
-                cb_mask &= cb_mask - 1;
-                if (state->cb[slot]) {
-                    void (*cb)(uint8_t, uint8_t, error_t, void*) = state->cb[slot];
-                    void *ctx = state->cb_ctx[slot];
-                    state->cb[slot]     = NULL;
-                    state->cb_ctx[slot] = NULL;
-                    /* Return the slot to the pool BEFORE invoking the
-                     * callback. The callback may submit a follow-up
-                     * async op (state-machine continuation) that needs
-                     * a free slot — without this, async pipelines starve
-                     * after AHCI_MAX_SLOTS in-flight operations. */
-                    ahci_free_slot(i, slot);
-                    cb(i, slot, status, ctx);
-                } else {
-                    /* No callback — sync caller polls completed_slots
-                     * and frees the slot itself via ahci_free_slot. */
-                }
-            }
+            __sync_fetch_and_and(&state->issued_mask, ~completed);
+            ahci_retire_slots(state, i, completed, OK);
         }
 
-        /* Bit 30 = TFES (Task File Error Status) — at least one issued
-         * command finished with the device asserting ERR/DF in TFD. The
-         * earlier IRQ path bumped the counter and silently dropped the
-         * error; that made failed reads look successful. We now snapshot
-         * tfd/serr into per-port stats so the sync wrapper / async waiter
-         * can map "completed AND TFES" to a hard failure rather than OK.
-         *
-         * Stats fields are written via __atomic_* RELAXED so the reader
-         * (ahci_get_port_stats) can load them atomically without a
-         * data race; ordering between fields does not matter (diagnostic). */
-        if (port_is & (1 << 30)) {
+        /* Fatal port errors (TFES/HBFS/IFS). On a task-file error the failing
+         * NCQ tag's PxSACT bit is NOT cleared (so it never appears in
+         * `completed`) and the HBA halts PxCMD.ST. Snapshot diagnostics, then
+         * fail every still-outstanding async slot with ERR_IO so waiters do
+         * not hang. Port re-start is handled by the deferred recovery path. */
+        if (port_is & (AHCI_PIS_TFES | AHCI_PIS_HBFS | AHCI_PIS_IFS)) {
             __sync_fetch_and_add(&state->ncq_errors, 1);
             __atomic_fetch_add(&state->stats.tfes_count, 1, __ATOMIC_RELAXED);
-            __atomic_store_n(&state->stats.last_tfd,       port->tfd, __ATOMIC_RELAXED);
+            __atomic_store_n(&state->stats.last_tfd,       port->tfd,  __ATOMIC_RELAXED);
             __atomic_store_n(&state->stats.last_serr,      port->serr, __ATOMIC_RELAXED);
             __atomic_store_n(&state->stats.last_error_tsc, rdtsc(),    __ATOMIC_RELAXED);
+
+            uint32_t stuck = __atomic_load_n(&state->issued_mask, __ATOMIC_ACQUIRE);
+            if (stuck) {
+                __sync_fetch_and_and(&state->issued_mask, ~stuck);
+                ahci_retire_slots(state, i, stuck, ERR_IO);
+            }
         }
 
         port->is = port_is;
@@ -294,94 +283,92 @@ bool ahci_can_submit_port(uint8_t port_num) {
     return __atomic_load_n(&port->slot_bitmap, __ATOMIC_RELAXED) != 0;
 }
 
-error_t ahci_build_ncq_read(uint8_t port_num, uint8_t slot, uint64_t lba,
-                                   uint16_t sector_count, void* buffer_phys) {
+error_t ahci_build_io(uint8_t port_num, uint8_t slot, uint64_t lba,
+                      uint16_t sector_count, void* buffer_phys, bool write) {
     if (slot >= AHCI_MAX_SLOTS) return ERR_INVALID_ARGUMENT;
     ahci_port_t* port = ahci_get_port(port_num);
     if (!port) return ERR_DEVICE_NOT_READY;
 
+    /* S64A guard: a controller without 64-bit addressing can only DMA below
+     * 4 GiB. Every driver buffer uses PHYS_TAG_DMA32 (<1 GiB) so this never
+     * trips today, but reject a high address rather than silently truncate
+     * it into dba (which would DMA to the wrong physical page). */
+    if (!ahci_ctrl.s64a_support && ((uintptr_t)buffer_phys >> 32)) {
+        return ERR_INVALID_ADDRESS;
+    }
+
     ahci_cmd_header_t* cmdheader = (ahci_cmd_header_t*)port->clb_virt;
-    cmdheader[slot].cfl = sizeof(fis_reg_h2d_t) / sizeof(uint32_t);
-    cmdheader[slot].w = 0;
+    cmdheader[slot].cfl   = sizeof(fis_reg_h2d_t) / sizeof(uint32_t);
+    cmdheader[slot].w     = write ? 1 : 0;
     cmdheader[slot].prdtl = 1;
     cmdheader[slot].prdbc = 0;
 
     ahci_cmd_table_t* cmdtbl = (ahci_cmd_table_t*)port->ctba_virt[slot];
     memset(cmdtbl, 0, sizeof(ahci_cmd_table_t));
 
-    cmdtbl->prdt[0].dba = (uint32_t)(uintptr_t)buffer_phys;
+    cmdtbl->prdt[0].dba  = (uint32_t)(uintptr_t)buffer_phys;
     cmdtbl->prdt[0].dbau = (uint32_t)((uintptr_t)buffer_phys >> 32);
-    cmdtbl->prdt[0].dbc = (sector_count * 512) - 1;
-    cmdtbl->prdt[0].i = 1;
+    cmdtbl->prdt[0].dbc  = (sector_count * 512u) - 1u;
+    cmdtbl->prdt[0].i    = 1;
 
     fis_reg_h2d_t* cmdfis = (fis_reg_h2d_t*)&cmdtbl->cfis[0];
     memset(cmdfis, 0, sizeof(fis_reg_h2d_t));
 
     cmdfis->fis_type = FIS_TYPE_REG_H2D;
-    cmdfis->c = 1;
-    cmdfis->command = ATA_CMD_READ_FPDMA_QUEUED;
+    cmdfis->c        = 1;
+    cmdfis->device   = (1 << 6);   // LBA mode
 
-    cmdfis->lba0 = (lba >> 0) & 0xFF;
-    cmdfis->lba1 = (lba >> 8) & 0xFF;
+    cmdfis->lba0 = (lba >>  0) & 0xFF;
+    cmdfis->lba1 = (lba >>  8) & 0xFF;
     cmdfis->lba2 = (lba >> 16) & 0xFF;
     cmdfis->lba3 = (lba >> 24) & 0xFF;
     cmdfis->lba4 = (lba >> 32) & 0xFF;
     cmdfis->lba5 = (lba >> 40) & 0xFF;
 
-    cmdfis->device = (1 << 6);
-
-    cmdfis->featurel = sector_count & 0xFF;
-    cmdfis->featureh = (sector_count >> 8) & 0xFF;
-
-    cmdfis->countl = (slot << 3);  // NCQ tag in bits [7:3]
-    cmdfis->counth = 0;
+    if (port->ncq) {
+        /* FPDMA QUEUED: sector count goes in the features field, the NCQ TAG
+         * in count[7:3]. Completion is signalled by PxSACT clearing (SDB
+         * FIS) — NOT PxCI, which clears once the FIS is merely sent. */
+        cmdfis->command  = write ? ATA_CMD_WRITE_FPDMA_QUEUED
+                                 : ATA_CMD_READ_FPDMA_QUEUED;
+        cmdfis->featurel = sector_count & 0xFF;
+        cmdfis->featureh = (sector_count >> 8) & 0xFF;
+        cmdfis->countl   = (uint8_t)(slot << 3);
+        cmdfis->counth   = 0;
+    } else {
+        /* READ/WRITE DMA EXT: sector count in the count field; completion is
+         * signalled by PxCI clearing. Only one may be outstanding per port. */
+        cmdfis->command  = write ? ATA_CMD_WRITE_DMA_EXT : ATA_CMD_READ_DMA_EXT;
+        cmdfis->countl   = sector_count & 0xFF;
+        cmdfis->counth   = (sector_count >> 8) & 0xFF;
+    }
 
     return OK;
 }
 
-error_t ahci_build_ncq_write(uint8_t port_num, uint8_t slot, uint64_t lba,
-                                    uint16_t sector_count, void* buffer_phys) {
-    if (slot >= AHCI_MAX_SLOTS) return ERR_INVALID_ARGUMENT;
+void ahci_arm_slot(uint8_t port_num, uint8_t slot) {
     ahci_port_t* port = ahci_get_port(port_num);
-    if (!port) return ERR_DEVICE_NOT_READY;
+    if (!port || slot >= AHCI_MAX_SLOTS) return;
+    volatile ahci_port_regs_t* regs = port->regs;
 
-    ahci_cmd_header_t* cmdheader = (ahci_cmd_header_t*)port->clb_virt;
-    cmdheader[slot].cfl = sizeof(fis_reg_h2d_t) / sizeof(uint32_t);
-    cmdheader[slot].w = 1;
-    cmdheader[slot].prdtl = 1;
-    cmdheader[slot].prdbc = 0;
+    /* PxCI / PxSACT are write-1-to-set (writing 0 to a bit has no effect, and
+     * hardware clears bits independently as commands retire). A direct
+     * single-bit store is therefore correct; an RMW `|=` could re-arm a slot
+     * the HBA just cleared between the read and the write. For NCQ, PxSACT
+     * must be set before PxCI (AHCI 1.3.1 §5.5.3). The spin_lock disables
+     * IRQs so the completion handler cannot observe issued_mask mid-update. */
+    spin_lock(&port->lock);
+    if (port->ncq) {
+        regs->sact = (1U << slot);
+    }
+    regs->ci = (1U << slot);
+    __sync_fetch_and_or(&port->issued_mask, (1U << slot));
+    spin_unlock(&port->lock);
+}
 
-    ahci_cmd_table_t* cmdtbl = (ahci_cmd_table_t*)port->ctba_virt[slot];
-    memset(cmdtbl, 0, sizeof(ahci_cmd_table_t));
-
-    cmdtbl->prdt[0].dba = (uint32_t)(uintptr_t)buffer_phys;
-    cmdtbl->prdt[0].dbau = (uint32_t)((uintptr_t)buffer_phys >> 32);
-    cmdtbl->prdt[0].dbc = (sector_count * 512) - 1;
-    cmdtbl->prdt[0].i = 1;
-
-    fis_reg_h2d_t* cmdfis = (fis_reg_h2d_t*)&cmdtbl->cfis[0];
-    memset(cmdfis, 0, sizeof(fis_reg_h2d_t));
-
-    cmdfis->fis_type = FIS_TYPE_REG_H2D;
-    cmdfis->c = 1;
-    cmdfis->command = ATA_CMD_WRITE_FPDMA_QUEUED;
-
-    cmdfis->lba0 = (lba >> 0) & 0xFF;
-    cmdfis->lba1 = (lba >> 8) & 0xFF;
-    cmdfis->lba2 = (lba >> 16) & 0xFF;
-    cmdfis->lba3 = (lba >> 24) & 0xFF;
-    cmdfis->lba4 = (lba >> 32) & 0xFF;
-    cmdfis->lba5 = (lba >> 40) & 0xFF;
-
-    cmdfis->device = (1 << 6);
-
-    cmdfis->featurel = sector_count & 0xFF;
-    cmdfis->featureh = (sector_count >> 8) & 0xFF;
-
-    cmdfis->countl = (slot << 3);  // NCQ tag in bits [7:3]
-    cmdfis->counth = 0;
-
-    return OK;
+bool ahci_port_is_ncq(uint8_t port_num) {
+    ahci_port_t* port = ahci_get_port(port_num);
+    return port ? port->ncq : false;
 }
 
 /* Issue ATA IDENTIFY DEVICE (non-queued, via PxCI) into a DMA32 bounce

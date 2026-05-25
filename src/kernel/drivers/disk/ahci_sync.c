@@ -37,7 +37,7 @@ int ahci_read_sectors_sync(uint8_t port, uint64_t lba,
 
         __atomic_fetch_add(&port_state->stats.cmd_count, 1, __ATOMIC_RELAXED);
 
-        error_t err = ahci_build_ncq_read(port, slot, lba, sector_count, (void*)dma_phys);
+        error_t err = ahci_build_io(port, slot, lba, sector_count, (void*)dma_phys, false);
         if (err != OK) {
             ahci_free_slot(port, slot);
             pmm_free(dma_page, pages_needed);
@@ -54,8 +54,10 @@ int ahci_read_sectors_sync(uint8_t port, uint64_t lba,
          * still serialises *software* writers to keep two SW-side
          * stores from racing each other. */
         spin_lock(&port_state->lock);
-        regs->sact = (1U << slot);
-        regs->ci   = (1U << slot);
+        if (port_state->ncq) {
+            regs->sact = (1U << slot);   // NCQ only; non-queued uses PxCI alone
+        }
+        regs->ci = (1U << slot);
         spin_unlock(&port_state->lock);
 
         uint64_t timeout_tsc = rdtsc() + cpu_ms_to_tsc(AHCI_TIMEOUT_CMD_DEFAULT);
@@ -134,7 +136,7 @@ int ahci_write_sectors_sync(uint8_t port, uint64_t lba,
 
         __atomic_fetch_add(&port_state->stats.cmd_count, 1, __ATOMIC_RELAXED);
 
-        error_t err = ahci_build_ncq_write(port, slot, lba, sector_count, (void*)dma_phys);
+        error_t err = ahci_build_io(port, slot, lba, sector_count, (void*)dma_phys, true);
         if (err != OK) {
             ahci_free_slot(port, slot);
             pmm_free(dma_page, pages_needed);
@@ -146,8 +148,10 @@ int ahci_write_sectors_sync(uint8_t port, uint64_t lba,
          * reference. Re-arming a completed slot via stale-read OR
          * corrupts NCQ on real Intel/AMD HBAs (hidden on QEMU). */
         spin_lock(&port_state->lock);
-        regs->sact = (1U << slot);
-        regs->ci   = (1U << slot);
+        if (port_state->ncq) {
+            regs->sact = (1U << slot);   // NCQ only; non-queued uses PxCI alone
+        }
+        regs->ci = (1U << slot);
         spin_unlock(&port_state->lock);
 
         uint64_t timeout_tsc = rdtsc() + cpu_ms_to_tsc(AHCI_TIMEOUT_CMD_DEFAULT);
@@ -215,14 +219,17 @@ int ahci_flush_cache_sync(uint8_t port) {
         memset(cmdfis, 0, sizeof(fis_reg_h2d_t));
         cmdfis->fis_type = FIS_TYPE_REG_H2D;
         cmdfis->c = 1;
-        cmdfis->command = 0xEA; /* FLUSH CACHE EXT (48-bit LBA) */
+        cmdfis->command = ATA_CMD_FLUSH_CACHE_EXT;
         cmdfis->device = 0;
 
         mfence();
 
         volatile ahci_port_regs_t* regs = ahci_get_port_regs_pub(port);
+        /* FLUSH CACHE EXT is always non-queued — issue via PxCI only with a
+         * direct single-bit store (PxCI is write-1-to-set; an RMW could
+         * re-arm a slot the HBA just cleared). */
         spin_lock(&port_state->lock);
-        regs->ci |= (1U << slot);
+        regs->ci = (1U << slot);
         spin_unlock(&port_state->lock);
 
         uint64_t timeout_tsc = rdtsc() + cpu_ms_to_tsc(AHCI_TIMEOUT_CMD_DEFAULT);
