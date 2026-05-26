@@ -56,6 +56,38 @@ static void attempt_keyboard_reset(void) {
     delay_ms(100);
 }
 
+/* attempt_cf9_reset — reboot via the chipset Reset Control Register (RST_CNT).
+ *
+ * Intel PCH/ICH and the QEMU/Bochs PIIX southbridge expose a byte-wide reset
+ * register at I/O port 0xCF9 (Intel 400-series PCH register database, "Reset
+ * Control Register (RST_CNT) — offset cf9"; layout unchanged back to ICH/PIIX):
+ *   bit 1  SYS_RST  : 0 = soft reset (CPU INIT only), 1 = hard (asserts PCIRST#)
+ *   bit 2  RST_CPU  : a 0->1 transition initiates the reset
+ *   bit 3  FULL_RST : 1 = full power cycle (cold), 0 = warm
+ *
+ * Sequence matches Linux `reboot=pci`: arm a warm hard reset (SYS_RST), pause,
+ * then pulse RST_CPU 0->1 to fire it. 0x06 keeps it warm — no power cycle.
+ *
+ * This is the one method that resets legacy-BIOS Bochs (whose rombios FADT is
+ * ACPI 1.0 and carries no reset register), QEMU, and every modern x86 chipset,
+ * so it sits ahead of the 8042 and triple-fault fallbacks.
+ *
+ * 0xCF9 overlaps the high byte of the 0xCF8 PCI CONFIG_ADDRESS dword. The
+ * chipset decodes a *byte* write at 0xCF9 as RST_CNT, but a byte READ returns
+ * CONFIG_ADDRESS[15:8] — not the reset register. So we write fully-defined
+ * values instead of read-modify-write: an RMW would fold stray PCI-address
+ * bits (and any firmware-set FULL_RST) into the write and could turn the
+ * intended warm reset into a cold power-cycle. Explicit writes guarantee
+ * SYS_RST=1, FULL_RST=0, with a clean 0->1 edge on RST_CPU. */
+static void attempt_cf9_reset(void) {
+    debug_printf("[ACPI] Attempting 0xCF9 reset control register...\n");
+
+    outb(0xCF9, 0x02u);   /* SYS_RST=1, RST_CPU=0, FULL_RST=0: arm warm hard reset */
+    delay_ms(1);
+    outb(0xCF9, 0x06u);   /* RST_CPU 0->1: trigger warm hard reset */
+    delay_ms(100);
+}
+
 /* gas_write_word — write a 16-bit value through a Generic Address Structure.
  *
  * GAS address_space dispatch matches the ACPI spec rather than assuming I/O.
@@ -288,8 +320,18 @@ void acpi_shutdown(void) {
 void acpi_reboot(void) {
     __asm__ volatile("cli");
 
+    /* Escalating reboot methods, cleanest first; each is bounded and falls
+     * through to the next on failure:
+     *   1. ACPI reset register — firmware-described. On UEFI the FADT routes
+     *      this to 0xCF9 itself, so it is the spec-preferred entry point.
+     *   2. 0xCF9 RST_CNT — universal chipset reset (real PCH/ICH, QEMU, Bochs);
+     *      the only method that resets legacy BIOS whose FADT has no reset reg.
+     *   3. 8042 pulse (0xFE -> 0x64) — legacy keyboard-controller fallback.
+     *   4. triple fault — last resort; real CPUs always reset on it. */
     debug_printf("[ACPI] Attempting ACPI reset register...\n");
     attempt_acpi_reset();
+
+    attempt_cf9_reset();
 
     attempt_keyboard_reset();
 
