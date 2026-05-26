@@ -40,6 +40,15 @@ typedef struct {
                                 // timer keeps ticking through C3+ deep idle. Without
                                 // it, deep MWAIT/HLT stops LAPIC timer and scheduler
                                 // hangs on the affected CPU.
+    bool has_erms;              // Enhanced REP MOVSB/STOSB (CPUID.7.0:EBX[9]) — Intel
+                                // SDM Vol 2B "REP/REPE/REPZ … MOVSB". With ERMS the
+                                // CPU dispatches rep movsb/stosb as wide-internal
+                                // bursts (full DRAM bandwidth on Ivy Bridge+), so the
+                                // scalar 8-byte fallback can be replaced for bulk
+                                // copies — see memcpy/memset in klib.
+    bool has_fsrm;              // Fast Short REP MOV (CPUID.7.0:EDX[4]) — Ice Lake+.
+                                // Extends ERMS efficiency down to very small n, so
+                                // the bulk-copy threshold can drop further.
     char vendor_string[13];     // CPU vendor (e.g., "GenuineIntel")
     uint32_t max_basic_leaf;    // Maximum CPUID basic leaf
     uint32_t max_extended_leaf; // Maximum CPUID extended leaf

@@ -243,9 +243,13 @@ void amp_boot_aps(void)
 
         kprintf("[AMP] Booting AP %u (LAPIC ID %u)...\n", c->core_index, c->lapic_id);
 
-        // Allocate 16KB kernel stack for this AP (1 guard + 4 data pages).
-        // Guard page at the bottom traps stack overflow via page fault.
-        void *stack_phys = pmm_alloc(5);
+        /* AP kernel stack layout: same shape as per-process kernel stack —
+         * 1 guard page + CONFIG_KERNEL_STACK_PAGES data pages. Hardcoded
+         * page-counts here used to silently desync from kernel_config.h:
+         * a change to CONFIG_KERNEL_STACK_PAGES left AP stacks at the old
+         * size, so process_t::kernel_stack_guard_base could no longer be
+         * paired with this AP stack's geometry by the IST overflow path. */
+        void *stack_phys = pmm_alloc(CONFIG_KERNEL_STACK_TOTAL_PAGES);
         if (!stack_phys)
         {
             kprintf("[AMP] ERROR: cannot allocate stack for core %u\n", c->core_index);
@@ -264,7 +268,8 @@ void amp_boot_aps(void)
             vmm_shootdown_page(kctx, (uintptr_t)stack_virt);
         }
 
-        uint64_t stack_top = (uint64_t)stack_virt + 5 * 4096 - 16;
+        uint64_t stack_top = (uint64_t)stack_virt +
+                             CONFIG_KERNEL_STACK_TOTAL_PAGES * VMM_PAGE_SIZE - 16;
 
         // Fill trampoline data area
         // +0: CR3

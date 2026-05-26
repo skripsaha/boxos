@@ -70,6 +70,13 @@ void cpu_detect_features(void) {
         // only be detected (not corrected) on BIOSes that leave the TSC offset
         // unsynchronised across sockets.
         g_cpu_caps.has_tsc_adjust = (ebx & (1 << 1)) != 0;
+        // EBX[9]  ERMS  — Intel SDM Vol 1 §7.3.9.4 "Enhanced REP MOVSB and
+        //                 STOSB Operation". Microarchitecturally accelerates
+        //                 rep movsb / rep stosb to full memory bandwidth.
+        // EDX[4]  FSRM  — Intel SDM Vol 1: Fast Short REP MOV. Pushes the
+        //                 ERMS efficiency down to very small n on Ice Lake+.
+        g_cpu_caps.has_erms = (ebx & (1 << 9))  != 0;
+        g_cpu_caps.has_fsrm = (edx & (1 << 4))  != 0;
     }
 
     // Query XSAVE area size and supported components (CPUID.0xD:0)
@@ -172,6 +179,11 @@ void cpu_intersect_features_ap(void) {
          * capability bit (CPUID.7.0:EBX[1]) is uniform across the
          * package on every real CPU. Intersect for safety. */
         g_cpu_caps.has_tsc_adjust &= ((ebx & (1 << 1))  != 0);
+        /* ERMS/FSRM — uniform across a homogeneous package; on Alder
+         * Lake-class hybrid CPUs both classes implement ERMS, so the
+         * intersection is the BSP value in practice. */
+        g_cpu_caps.has_erms       &= ((ebx & (1 << 9))  != 0);
+        g_cpu_caps.has_fsrm       &= ((edx & (1 << 4))  != 0);
     }
 
     if (g_cpu_caps.max_extended_leaf >= CPUID_LEAF_APM) {
