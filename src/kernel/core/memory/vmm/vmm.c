@@ -106,6 +106,20 @@ void vmm_pat_init(void)
         :
     );
 
+    /* TLB invalidation after PAT change. Intel SDM Vol 3A §11.11.8: PAT
+     * entries are cached in the TLB along with the page-walk results, so
+     * a PAT update doesn't take effect for pre-existing TLB entries
+     * until a CR3 reload (or per-page INVLPG). On the BSP this hits
+     * before any WC mapping exists so the flush is purely defensive; on
+     * APs it ensures a framebuffer touched between vmm_pat_init() and
+     * the first context switch sees the new WC encoding rather than the
+     * AP's reset-default UC-. Clear the NOFLUSH bit (bit 63) before
+     * writing CR3 — see vmm_flush_tlb for the full story. */
+    uintptr_t cr3;
+    __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
+    cr3 &= ~(1ULL << 63);
+    __asm__ volatile("mov %0, %%cr3" : : "r"(cr3) : "memory");
+
     debug_printf("[VMM] PAT MSR programmed: PA6=WC (framebuffer Write Combining enabled)\n");
 }
 
@@ -184,13 +198,20 @@ static error_t pcid_alloc_safe(uint16_t *out_pcid)
     }
     
     /* PCID exhausted — Intel SDM Vol 3A §4.10.4.2. Local CR4.PGE toggle
-     * flushes this CPU's TLB. The previous vmm_shootdown_pages(kernel,
-     * 0, 0) was a no-op (count==0 loop runs zero invlpgs, ACKs never
-     * decrement) → stale PCID-tagged TLB on remote cores aliasing the
-     * recycled PCID's later PA — same crash class as 2026-04-29 once a
-     * long session burns 4095 PCIDs. vmm_shootdown_all_cores_full()
-     * reloads CR3 on every core with NOFLUSH cleared, which per SDM
-     * §4.10.4.1 invalidates every PCID partition. */
+     * flushes this CPU's TLB. The pre-fix vmm_shootdown_pages(kernel,
+     * 0, 0) was a no-op (count==0 → zero invlpgs, ACKs never decrement)
+     * → stale PCID-tagged TLB on remote cores aliasing the recycled
+     * PCID's later PA. vmm_shootdown_all_cores_full() reloads CR3 on
+     * every core with NOFLUSH cleared, which per SDM §4.10.4.1
+     * invalidates every PCID partition.
+     *
+     * pcid_lock is held across the broadcast so no sibling pcid_alloc
+     * can hand out a recycled PCID before every core's TLB has been
+     * invalidated. The broadcast latency is microseconds in practice
+     * (x2APIC ICR write) and the timeout cap is 100 ms only for the
+     * pathological "AP wedged" case. Rolled-over PCID allocation
+     * happens at most once per 4095 context creations, so the lock
+     * hold is a non-issue. */
     pcid_next = 2;
     pcid_free_count = 0;
     *out_pcid = 1;
@@ -200,13 +221,12 @@ static error_t pcid_alloc_safe(uint16_t *out_pcid)
     asm volatile("mov %0, %%cr4" : : "r"(cr4 & ~(1ULL << 7)) : "memory");
     asm volatile("mov %0, %%cr4" : : "r"(cr4) : "memory");
 
-    spin_unlock(&pcid_lock);
-
     if (g_amp.multicore_active && g_amp.total_cores > 1)
     {
         vmm_shootdown_all_cores_full();
     }
 
+    spin_unlock(&pcid_lock);
     return ERR_PCID_EXHAUSTED;
 }
 

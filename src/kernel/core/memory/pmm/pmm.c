@@ -90,7 +90,7 @@ uint64_t pmm_get_mem_end(void) {
  * gap before it (if any), then jump the cursor past its end. */
 static void pmm_buddy_free_carved(BuddyZone *zone,
                                   uintptr_t seed_start, uintptr_t seed_end,
-                                  e820_entry_t *entries, size_t count)
+                                  const e820_entry_t *entries, size_t count)
 {
     uintptr_t cur = seed_start;
     while (cur < seed_end) {
@@ -530,14 +530,20 @@ void pmm_activate_pull_map(void) {
      * collide with GPU stolen aperture / hot-plug-reserve slots that
      * firmware leaves RESERVED).
      *
-     * IMPORTANT: pmm_activate_pull_map runs AFTER vmm_init has activated
-     * the Pull Map but BEFORE e820_activate_pull_map rebases the e820
-     * pointer. The raw memory_map_get_entries() therefore still returns
-     * the identity address 0x504 — which is no longer mapped. We must
-     * route through vmm_phys_to_virt() so the read lands in Pull Map. */
-    uintptr_t e820_phys = (uintptr_t)memory_map_get_entries();
-    e820_entry_t *entries_for_carve       = (e820_entry_t *)vmm_phys_to_virt(e820_phys);
-    size_t        entries_for_carve_count = memory_map_get_entry_count();
+     * E820 pointer resolution. pmm_activate_pull_map runs AFTER the Pull
+     * Map is live but typically BEFORE e820_activate_pull_map rebases
+     * the e820_entries pointer — so memory_map_get_entries() still
+     * returns the identity address (0x504), which is no longer mapped.
+     * Resolving it via vmm_virt_to_phys_direct → vmm_phys_to_virt is
+     * idempotent: identity stays identity-then-PullMap'd to the live
+     * kernel address, and a future call after e820_activate_pull_map
+     * (where the returned pointer is already a Pull-Map address) decodes
+     * back to phys and re-maps to the same Pull-Map address. Survives
+     * any future re-ordering of vmm_init's tail. */
+    const e820_entry_t *entries_raw       = memory_map_get_entries();
+    uintptr_t          entries_phys       = vmm_virt_to_phys_direct((void *)entries_raw);
+    const e820_entry_t *entries_for_carve = (const e820_entry_t *)vmm_phys_to_virt(entries_phys);
+    size_t              entries_for_carve_count = memory_map_get_entry_count();
     for (size_t i = 0; i < pmm_deferred_count; i++) {
         uintptr_t start = pmm_deferred[i].start;
         uintptr_t end = pmm_deferred[i].end;

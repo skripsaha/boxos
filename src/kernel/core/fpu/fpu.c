@@ -64,7 +64,7 @@ void enable_fpu(void) {
 
     asm volatile("mov %0, %%cr4" :: "r"(cr4));
 
-    debug_printf("[FPU] CR4: SMEP=%s SMAP=%s UMIP=%s FSGSBASE=%s PGE=on\n",
+    debug_printf("[FPU] CR0.WP=on  CR4: SMEP=%s SMAP=%s UMIP=%s FSGSBASE=%s PGE=on\n",
                  g_cpu_caps.has_smep     ? "on" : "n/a",
                  g_cpu_caps.has_smap     ? "on" : "n/a",
                  g_cpu_caps.has_umip     ? "on" : "n/a",
