@@ -306,6 +306,23 @@ void per_core_init_ap(uint8_t core_index, uint64_t stack_top) {
      * torn/re-ordered pixels on real HW after the first AP comes online. */
     vmm_pat_init();
 
+    /* Enable CR4.PCIDE on this AP if the BSP turned PCID on. Intel SDM
+     * Vol 3A §4.10.4.1: CR4.PCIDE is per-logical-processor. Without
+     * this, an AP running with PCIDE=0 will #GP the moment the scheduler
+     * loads CR3 with a user process's PCID in bits 11:0 (the bits are
+     * reserved when PCIDE=0). The pre-condition for enabling PCIDE —
+     * CR3[11:0] = 0 — holds here because the AP trampoline loaded CR3
+     * with the kernel PML4 (PCID 0) and no context switch has happened
+     * yet on this AP. Without this fix, multi-core boots only work on
+     * QEMU TCG, which is lax about that reserved-bit rule; real Intel
+     * silicon and KVM enforce it strictly. */
+    if (vmm_pcid_active()) {
+        uint64_t cr4_pcid;
+        __asm__ volatile("mov %%cr4, %0" : "=r"(cr4_pcid));
+        cr4_pcid |= (1ULL << 17);   /* CR4.PCIDE */
+        __asm__ volatile("mov %0, %%cr4" : : "r"(cr4_pcid) : "memory");
+    }
+
     // ---- SYSCALL MSRs + PerCpuData + KernelGSBASE ----
     per_core_setup_notify_msrs(pc);
 

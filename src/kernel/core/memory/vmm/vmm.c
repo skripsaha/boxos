@@ -87,6 +87,16 @@ static spinlock_t kernel_mmio_lock = {0};
 
 void vmm_pat_init(void)
 {
+    /* PAT MSR (IA32_PAT, 0x277) exists only when CPUID.1:EDX[16] = 1.
+     * Every long-mode CPU ships with PAT since Pentium III, but a
+     * WRMSR to a non-existent MSR raises #GP → triple-fault, so gate
+     * defensively. has_pat is detected in cpu_detect_features() and
+     * AND-intersected on every AP in cpu_intersect_features_ap(). */
+    if (!g_cpu_caps.has_pat) {
+        debug_printf("[VMM] PAT not supported by CPU — skipping IA32_PAT program\n");
+        return;
+    }
+
     uint64_t pat =
         ((uint64_t)PAT_TYPE_WB  <<  0) |  /* PA0 = WB  (unchanged) */
         ((uint64_t)PAT_TYPE_WT  <<  8) |  /* PA1 = WT  (unchanged) */
