@@ -293,8 +293,39 @@ void scheduler_recalc_parameters(void)
     // Update stats
     g_sched_stats.active_cores = busy_cores;
 
-    // Adaptive tick rate: reprogram PIT hardware based on system load
-    // This is unique to BoxOS — no other OS does this dynamically
+    /* PIT frequency policy.
+     *
+     * Past revisions adaptively reprogrammed the 8254 PIT (10-500 Hz
+     * range) based on `busy_cores` to "save power when idle". In
+     * practice this caused three real-HW problems:
+     *
+     *  1. Latency spikes when load dropped to 0: PIT at 10 Hz means
+     *     100 ms before the next scheduler tick can wake new work.
+     *     User-visible as "system feels frozen" right after a job
+     *     ends — exactly what the user reported on Bochs/QEMU.
+     *
+     *  2. Non-deterministic timing for any subsystem that derives
+     *     its rate from g_timer_frequency (keyboard typematic ticks,
+     *     irq_defer batching, scheduler starvation thresholds). The
+     *     timer rate becoming load-dependent makes every other
+     *     subsystem load-dependent too.
+     *
+     *  3. PIT reprogramming itself is not free — outb to ports 0x43,
+     *     0x40 takes hundreds of cycles and races the in-flight IRQ
+     *     stream on some chipsets (real PCH and Bochs both observed
+     *     to occasionally drop or double-count ticks across a
+     *     reprogram window).
+     *
+     * Linux's dynticks (NO_HZ_FULL) achieves the same power goal
+     * WITHOUT reprogramming hardware — it just skips waking idle
+     * CPUs. BoxOS doesn't have that infrastructure yet, so the
+     * correct production-grade choice is "stable PIT at the boot
+     * frequency".
+     *
+     * Build override: -DCONFIG_SCHED_ADAPTIVE_PIT=1 re-enables the
+     * legacy adaptive path (kept for power-tuning experiments). The
+     * default (0) is the production policy. */
+#if defined(CONFIG_SCHED_ADAPTIVE_PIT) && CONFIG_SCHED_ADAPTIVE_PIT
     uint32_t target_frequency;
     if (busy_cores == 0 && g_sched_stats.context_switches == 0) {
         target_frequency = SCHEDULER_DEFAULT_TICK_HZ;
@@ -306,17 +337,16 @@ void scheduler_recalc_parameters(void)
         target_frequency = SCHEDULER_MIN_TICK_HZ +
             ((SCHEDULER_MAX_TICK_HZ - SCHEDULER_MIN_TICK_HZ) * busy_cores) / g_sched_core_count;
     }
-
-    // Bounds check
     if (target_frequency < SCHEDULER_MIN_TICK_HZ)
         target_frequency = SCHEDULER_MIN_TICK_HZ;
     if (target_frequency > SCHEDULER_MAX_TICK_HZ)
         target_frequency = SCHEDULER_MAX_TICK_HZ;
-
-    // Reprogram PIT only if frequency actually changed
     if (target_frequency != g_timer_frequency) {
         pit_set_frequency(target_frequency);
     }
+#endif
+    /* else: PIT stays at SCHEDULER_DEFAULT_TICK_HZ (250 Hz) for the
+     * lifetime of the kernel. Stable. */
 }
 
 // ---------------------------------------------------------------------------

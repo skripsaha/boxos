@@ -58,4 +58,12 @@ void per_core_init_ap(uint8_t core_index, uint64_t stack_top);
 // Replaces separate tss_set_rsp0() + notify_set_kernel_rsp() calls.
 void per_core_set_kernel_rsp(uint64_t rsp);
 
+/* Capture the BSP's TSC value + current uptime in microseconds as the
+ * anchor for per-AP TSC sync. Called from kernel_main after
+ * cpu_calibrate_tsc and before any AP boots. The values feed
+ * per_core_init_ap's IA32_TSC_ADJUST correction so multi-socket
+ * systems with skewed power-on TSCs don't produce negative cross-core
+ * cycle deltas. No-op (safe) if called multiple times. */
+void per_core_record_bsp_tsc_anchor(uint64_t now_us);
+
 #endif // PER_CORE_H

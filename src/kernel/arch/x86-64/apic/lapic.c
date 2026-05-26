@@ -165,8 +165,16 @@ void lapic_timer_init(uint8_t vector, uint32_t frequency_hz) {
      * LAPIC counter, and needs no counter calibration — we derive the per-tick
      * interval directly from the already-calibrated TSC frequency. It is a
      * one-shot per deadline, so lapic_timer_rearm() reloads it each IRQ.
-     * Intel SDM Vol 3A §10.5.4.1. */
-    if (g_cpu_caps.has_tsc_deadline) {
+     * Intel SDM Vol 3A §10.5.4.1.
+     *
+     * Hard precondition: invariant TSC. Without it the TSC rate changes
+     * with P-states and the precomputed g_lapic_tsc_period drifts. Intel
+     * SDM §17.17 — TSC invariance is reported via CPUID.80000007h:EDX[8].
+     * Real silicon from Nehalem (2008) onward is invariant; QEMU TCG with
+     * `-cpu qemu64` is NOT. Fall back to periodic mode for non-invariant
+     * targets — the periodic LAPIC counter is bus-clock-derived and
+     * already independent of P-states. */
+    if (g_cpu_caps.has_tsc_deadline && g_cpu_caps.has_invariant_tsc) {
         uint64_t cyc_per_sec = cpu_get_tsc_freq_khz() * 1000ULL;
         g_lapic_tsc_period = (frequency_hz > 0) ? (cyc_per_sec / frequency_hz)
                                                 : cyc_per_sec;

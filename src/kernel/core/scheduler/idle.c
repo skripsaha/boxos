@@ -8,7 +8,8 @@
 #include "kernel_config.h"
 #include "amp.h"
 #include "fpu.h"
-#include "cpuid.h"   // g_cpu_caps.has_monitor (MWAIT idle)
+#include "cpuid.h"          // g_cpu_caps.has_monitor (MWAIT idle)
+#include "cpu_calibrate.h"  // cpu_tsc_recal_if_pending — periodic TSC recal
 
 // BSP idle process (static, PID 0)
 static process_t g_idle_process;
@@ -126,15 +127,52 @@ bool process_is_idle(process_t* proc) {
 
 // One idle wait, executed each iteration of idle_loop (idle_loop.asm).
 void cpu_idle(void) {
+    /* Periodic TSC recalibration. Runs out of IRQ context so the
+     * 20ms HPET measurement window inside is harmless to interrupt
+     * latency. Gated by an internal pending flag that's set every
+     * TSC_RECAL_INTERVAL_US by the PIT IRQ — most idle iterations
+     * see no work to do and return in nanoseconds. Only meaningful
+     * on the BSP (PIT IRQ delivery target); App-Core idle calls fall
+     * through to the cheap "no work" path because the flag is never
+     * set there. */
+    cpu_tsc_recal_if_pending();
+
     if (g_cpu_caps.has_monitor) {
         /* MWAIT idle. Arm MONITOR on a per-core stack address (each idle
-         * process has its own stack), then MWAIT into C-state C1 with
-         * interrupts enabled. C1 keeps the LAPIC timer running (only C3+ would
-         * need ARAT), so App-Core preemption and the S3 TSC-deadline tick are
-         * unaffected. STI;MWAIT is atomic via the one-instruction STI interrupt
-         * shadow, so a timer/IPI arriving just before MWAIT still wakes us — no
-         * lost wakeup. Raw .byte encodings (0F 01 C8 = MONITOR, 0F 01 C9 =
-         * MWAIT) sidestep assembler-mnemonic portability issues. */
+         * process has its own stack), then MWAIT into the deepest
+         * SAFE C-state.
+         *
+         * C-state selection — Intel SDM Vol 3A §10.5.4.1 / §17.16.4:
+         *   - C1 always keeps the LAPIC timer ticking.
+         *   - C2+ stops the LAPIC timer counter UNLESS ARAT
+         *     (CPUID.06H:EAX[2]) is set.
+         *
+         * Encoding of MWAIT EAX hint:
+         *   bits 7:4  target C-state (0 = C0, 1 = C1, 2 = C2, ...)
+         *   bits 3:0  sub-C-state index (0 = first sub-state)
+         *
+         * Policy:
+         *   has_arat == 0  →  C1 (0x00) — never deeper, would stop timer
+         *   has_arat == 1  →  C2 (0x10) — modest power saving, IPI/timer
+         *                     still deliverable, exit latency typically
+         *                     under 10 µs.
+         *
+         * C3+ deliberately not picked: requires PAT/cache flush
+         * coordination per SDM §17.16.4.2 and exit latency jumps
+         * to ~100 µs — premature for a kernel that targets desktop /
+         * server workloads. Revisit for battery targets. */
+        /* Default to C1 (0x00) — always safe, LAPIC timer always ticks.
+         *
+         * C2 (0x10) hint when ARAT available was tried but caused
+         * intermittent timing regressions on QEMU TCG -cpu max: TCG's
+         * MWAIT emulation latency for C2 wakeup is markedly higher
+         * than for C1, enough to time out the stress-matrix command
+         * delivery window. Revert until either (a) TCG emulation is
+         * not in scope, or (b) we add per-environment idle policy
+         * (e.g. detect QEMU TCG vendor + force C1). */
+        uint32_t mwait_eax = 0x00;
+        (void)g_cpu_caps.has_arat;  /* placeholder for future C2 path */
+
         volatile uint8_t monitor_cell;
         __asm__ volatile(".byte 0x0f,0x01,0xc8"        /* monitor rax,rcx,rdx */
                          :
@@ -142,10 +180,10 @@ void cpu_idle(void) {
                          : "memory");
         __asm__ volatile("sti; .byte 0x0f,0x01,0xc9"   /* sti; mwait eax,ecx   */
                          :
-                         : "a"(0u), "c"(0u)
+                         : "a"(mwait_eax), "c"(0u)
                          : "memory");
     } else {
-        /* No MWAIT: HLT is C1 and keeps the timer running. */
+        /* No MWAIT: HLT is C1 and always keeps the LAPIC timer running. */
         __asm__ volatile("sti; hlt");
     }
 }

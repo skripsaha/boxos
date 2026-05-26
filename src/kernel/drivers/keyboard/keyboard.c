@@ -347,6 +347,11 @@ void keyboard_handle_scancode(uint8_t scancode)
     char ascii = translate_key(key);
 
     if (ascii != 0) {
+        /* (Make-debounce was tried here but broke rapid-type input —
+         * `qemu-input.sh type "memtest"` lost a 't' when break-t1
+         * was delayed past make-t2. Real fix for Bochs host-typematic
+         * passthrough needs time-based debounce or per-environment
+         * policy, not unconditional same-key suppression.) */
         kb_push_chars(&ascii, 1);
         kb_arm_repeat(&ascii, 1, key, 0);
 

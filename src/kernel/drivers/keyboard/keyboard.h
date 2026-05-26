@@ -4,14 +4,16 @@
 #include "ktypes.h"
 #include "video.h"
 #include "boxos_limits.h"
+#include "kernel_config.h"   /* CONFIG_KB_REPEAT_{DELAY,RATE}_MS */
 
 #define KEYBOARD_DATA_PORT   0x60
 #define KEYBOARD_STATUS_PORT 0x64
 
-/* Software typematic timing (PIT = 100 Hz, 1 tick = 10 ms) */
-/* Keyboard software repeat timing (in ms, converted to ticks at init) */
-#define KB_REPEAT_DELAY_MS      500  /* 500 ms initial delay  */
-#define KB_REPEAT_RATE_MS        33  /* ~33 ms between repeats = ~30 chars/sec */
+/* Software typematic timing — values live in kernel_config.h so they
+ * can be overridden at build (-DCONFIG_KB_REPEAT_DELAY_MS=N). Kept
+ * here as the legacy alias names that the driver internals use. */
+#define KB_REPEAT_DELAY_MS      CONFIG_KB_REPEAT_DELAY_MS
+#define KB_REPEAT_RATE_MS       CONFIG_KB_REPEAT_RATE_MS
 
 /* Runtime values (calculated from ms based on timer frequency) */
 extern uint32_t g_kb_repeat_delay_ticks;

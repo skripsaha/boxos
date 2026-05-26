@@ -12,6 +12,20 @@ typedef struct {
     uint32_t pm1a_cnt_blk;
     uint32_t pm1b_cnt_blk;
 
+    /* ACPI Power Management Timer (ACPI 6.5 §4.8.3.3).
+     *
+     * A free-running 24 or 32-bit counter clocked at exactly 3.579545
+     * MHz. Reachable via I/O port `pm_timer_io` (legacy) or via the
+     * SystemIO/SystemMemory GAS in FADT.X_PM_TIMER_BLOCK. Width is
+     * 32-bit when FADT.flags bit 8 (TMR_VAL_EXT) is set, else 24-bit.
+     *
+     * Used as a TSC calibration source when HPET is absent or untrust-
+     * worthy (some pre-2010 server boards ship without HPET; some
+     * QEMU/Bochs builds disable HPET emulation). 0 == not present. */
+    uint32_t pm_timer_io;       /* I/O port (legacy) or 0 if MMIO */
+    uint8_t  pm_timer_bits;     /* 24 or 32 */
+    bool     pm_timer_present;
+
     /* _S5 sleep type values for PM1 control word. */
     uint16_t slp_typa;
     uint16_t slp_typb;
