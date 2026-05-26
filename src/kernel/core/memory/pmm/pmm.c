@@ -525,14 +525,27 @@ void pmm_activate_pull_map(void) {
         pmm_deferred = (DeferredRegion*)vmm_phys_to_virt((uintptr_t)pmm_deferred);
     }
 
-    // Phase 2: Free deferred high-memory regions (saved during Phase 1).
+    /* Phase 2: free deferred high-memory regions (saved during Phase 1)
+     * with the same overlap carving Phase 1 uses (DIMMs above 4 GiB can
+     * collide with GPU stolen aperture / hot-plug-reserve slots that
+     * firmware leaves RESERVED).
+     *
+     * IMPORTANT: pmm_activate_pull_map runs AFTER vmm_init has activated
+     * the Pull Map but BEFORE e820_activate_pull_map rebases the e820
+     * pointer. The raw memory_map_get_entries() therefore still returns
+     * the identity address 0x504 — which is no longer mapped. We must
+     * route through vmm_phys_to_virt() so the read lands in Pull Map. */
+    uintptr_t e820_phys = (uintptr_t)memory_map_get_entries();
+    e820_entry_t *entries_for_carve       = (e820_entry_t *)vmm_phys_to_virt(e820_phys);
+    size_t        entries_for_carve_count = memory_map_get_entry_count();
     for (size_t i = 0; i < pmm_deferred_count; i++) {
         uintptr_t start = pmm_deferred[i].start;
         uintptr_t end = pmm_deferred[i].end;
 
         debug_printf("[PMM] Phase 2: freeing high memory 0x%lx-0x%lx (%zu pages)\n",
                      start, end, (end - start) / PMM_PAGE_SIZE);
-        buddy_free_range(&pmm_buddy, start, end);
+        pmm_buddy_free_carved(&pmm_buddy, start, end,
+                              entries_for_carve, entries_for_carve_count);
     }
 
     debug_printf("[PMM] Total memory available: %zu MB (%zu pages)\n",
