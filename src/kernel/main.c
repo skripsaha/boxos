@@ -91,9 +91,6 @@ void kernel_main(void)
                 g_hypervisor.tsc_khz, g_hypervisor.apic_bus_khz);
     }
 
-    // Randomize stack canary ASAP after CPUID is available
-    stack_canary_init();
-
     debug_printf("[INIT] FPU/SSE/AVX...\n");
     enable_fpu();
 

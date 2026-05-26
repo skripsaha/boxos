@@ -14,10 +14,21 @@ extern uintptr_t _kernel_start;
 #define ALIGN_UP(addr, align) (((addr) + (align) - 1) & ~((align) - 1))
 #define ALIGN_DOWN(addr, align) ((addr) & ~((align) - 1))
 
-// 3% of total RAM, clamped to [2MB, 16MB]
-#define KLIB_HEAP_MIN_SIZE    (2 * 1024 * 1024)
-#define KLIB_HEAP_MAX_SIZE    (16 * 1024 * 1024)
-#define KLIB_HEAP_RAM_PERCENT 3
+/* Kernel-heap sizing.
+ *   TARGET   = KLIB_HEAP_RAM_PERCENT% of total RAM
+ *   FLOOR    = KLIB_HEAP_MIN_SIZE
+ *   CEILING  = max(KLIB_HEAP_MAX_SIZE, total_ram / KLIB_HEAP_RAM_CAP_DIVISOR)
+ * The dynamic ceiling lifts the legacy fixed 16 MB cap on machines with
+ * > ~1 GB RAM — at the divisor below this is ≈1.56 % of physical RAM. */
+#define KLIB_HEAP_MIN_SIZE          (2 * 1024 * 1024)
+#define KLIB_HEAP_MAX_SIZE          (16 * 1024 * 1024)
+#define KLIB_HEAP_RAM_PERCENT       3
+#define KLIB_HEAP_RAM_CAP_DIVISOR   64
+
+/* The MBR + Stage2 path only identity-maps the first 128 MB until the VMM's
+ * Pull Map is activated. Until then the heap pool MUST fit in that window;
+ * after vmm_init + mem_activate_pull_map the full heap is reachable. */
+#define KLIB_HEAP_BOOTLOADER_SAFE_SIZE  (2 * 1024 * 1024)
 
 // 32 bytes: mem_block_t is 20 bytes; 16-byte alignment causes misaligned new_block pointers in kmalloc split
 #define KLIB_BLOCK_ALIGNMENT  32
@@ -60,8 +71,6 @@ bool list_empty(list_t* list);
 size_t list_size(list_t* list);
 void list_remove(list_t* list, void* data, bool (*cmp)(void*, void*));
 void list_for_each(list_t* list, void (*func)(void*));
-
-void stack_canary_init(void);
 
 void mem_init(void);
 void mem_activate_pull_map(void);
@@ -146,7 +155,8 @@ bool isspace(int c);
 int utf8_encode(uint32_t codepoint, char out[4]);
 int utf8_decode(const char* utf8, uint32_t* codepoint);
 
-char* strtok(char* str, const char* delim);
+/* strtok() removed — global saveptr was not AMP-safe; callers must use
+ * strtok_r() with a local saveptr. */
 char* strtok_r(char* str, const char* delim, char** saveptr);
 size_t strspn(const char* s, const char* accept);
 size_t strcspn(const char* s, const char* reject);

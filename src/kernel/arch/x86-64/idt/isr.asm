@@ -32,26 +32,57 @@ irq%1:
     jmp isr_common
 %endmacro
 
-ISR_NOERROR 0   ; Divide by zero
-ISR_NOERROR 1   ; Debug
-ISR_NOERROR 2   ; NMI
-ISR_NOERROR 3   ; Breakpoint
-ISR_NOERROR 4   ; Overflow
-ISR_NOERROR 5   ; Bound range exceeded
-ISR_NOERROR 6   ; Invalid opcode
-ISR_NOERROR 7   ; Device not available
-ISR_ERROR   8   ; Double fault
-ISR_NOERROR 9   ; Coprocessor segment overrun
-ISR_ERROR   10  ; Invalid TSS
-ISR_ERROR   11  ; Segment not present
-ISR_ERROR   12  ; Stack fault
-ISR_ERROR   13  ; General protection fault
-ISR_ERROR   14  ; Page fault
-ISR_NOERROR 15  ; Reserved
-ISR_NOERROR 16  ; FPU error
-ISR_ERROR   17  ; Alignment check
-ISR_NOERROR 18  ; Machine check
-ISR_NOERROR 19  ; SIMD exception
+; --- Paranoid-entry variants for IST exceptions (#DB/#NMI/#DF/#SS/#MC) ---
+;
+; The standard isr_common decides "swap GS or not" from CS.RPL on the saved
+; frame. For these five vectors that path is unsafe: SDM Vol 3A §6.14.5 hands
+; the handler an IST stack regardless of source CPL, so the handler can
+; nest INSIDE another interrupt's swapgs window. In that window, CS has
+; already been pushed as kernel CS by the CPU's gate transition but the
+; outer handler has not yet run its `swapgs` — active GS.base is still the
+; user value. A CS.RPL check would then leave the handler running with the
+; wrong GS.base.
+;
+; The race-free probe is to read IA32_GS_BASE via RDMSR and test the high
+; half: kernel base is canonical-high (bit 63 set, EDX negative), user/zero
+; is canonical-low (EDX non-negative). This is the same shape as the Linux
+; `paranoid_entry` pattern. See SDM Vol 3A §3.4.3 (IA32_GS_BASE) and §6.7
+; (NMI handling considerations).
+%macro ISR_PARANOID_NOERROR 1
+isr%1:
+    push 0          ; Dummy error code
+    push %1         ; Interrupt vector
+    jmp paranoid_isr_common
+%endmacro
+
+%macro ISR_PARANOID_ERROR 1
+isr%1:
+    xchg [rsp], rax
+    push %1
+    xchg [rsp+8], rax
+    jmp paranoid_isr_common
+%endmacro
+
+ISR_NOERROR 0           ; Divide by zero
+ISR_PARANOID_NOERROR 1  ; Debug                  — IST4
+ISR_PARANOID_NOERROR 2  ; NMI                    — IST2
+ISR_NOERROR 3           ; Breakpoint
+ISR_NOERROR 4           ; Overflow
+ISR_NOERROR 5           ; Bound range exceeded
+ISR_NOERROR 6           ; Invalid opcode
+ISR_NOERROR 7           ; Device not available
+ISR_PARANOID_ERROR   8  ; Double fault           — IST1
+ISR_NOERROR 9           ; Coprocessor segment overrun
+ISR_ERROR   10          ; Invalid TSS
+ISR_ERROR   11          ; Segment not present
+ISR_PARANOID_ERROR   12 ; Stack fault            — IST5
+ISR_ERROR   13          ; General protection fault
+ISR_ERROR   14          ; Page fault
+ISR_NOERROR 15          ; Reserved
+ISR_NOERROR 16          ; FPU error
+ISR_ERROR   17          ; Alignment check
+ISR_PARANOID_NOERROR 18 ; Machine check          — IST3
+ISR_NOERROR 19          ; SIMD exception
 ISR_NOERROR 20  ; Virtualization exception
 ISR_NOERROR 21  ; Reserved
 ISR_NOERROR 22  ; Reserved
@@ -203,6 +234,142 @@ isr_common:
     jz .isr_exit_kernel
     swapgs
 .isr_exit_kernel:
+    iretq
+
+; =============================================================================
+; paranoid_isr_common — entry pipeline for IST vectors (#DB/#NMI/#DF/#SS/#MC).
+;
+; Probes IA32_GS_BASE via RDMSR instead of trusting CS.RPL, so a nested IST
+; that lands inside another interrupt's swapgs window still computes the right
+; GS state. The swap decision made on entry is carried to exit through a
+; dedicated stack slot pushed just below the standard interrupt_frame_t, then
+; reversed before iretq so a nested IST cannot strand the outer interrupt with
+; a flipped GS base. The C handler sees the same interrupt_frame_t* as the
+; normal path; it never observes the smuggled flag.
+;
+; Spec refs:
+;   Intel SDM Vol 3A §3.4.3   — IA32_GS_BASE (MSR 0xC0000101)
+;   Intel SDM Vol 3A §6.7     — NMI handling; recommends paranoid GS probe
+;   Intel SDM Vol 3A §6.14.5  — IST mechanism in IA-32e mode
+; =============================================================================
+paranoid_isr_common:
+    ; Stack on entry:
+    ;   rsp+0   vector
+    ;   rsp+8   error_code
+    ;   rsp+16  rip
+    ;   rsp+24  cs
+    ;   rsp+32  rflags
+    ;   rsp+40  rsp
+    ;   rsp+48  ss
+
+    ; ---- Probe GS.base ----
+    ; Save scratch regs (RDMSR uses RAX/RCX/RDX).
+    push rax
+    push rcx
+    push rdx
+
+    mov ecx, 0xC0000101     ; IA32_GS_BASE
+    rdmsr                   ; EDX:EAX = current GS.base
+
+    ; Kernel GS.base is canonical-high (bit 63 set → EDX < 0).
+    ; User / zero base is canonical-low (EDX >= 0). Need swap iff base is low.
+    xor eax, eax
+    test edx, edx
+    setns al                ; al = 1 if EDX non-negative (user/zero) → swap needed
+
+    ; Smuggle the swap flag into the high 32 bits of the saved error_code
+    ; (now at rsp+32 after 3 scratch pushes). The low 32 bits hold the actual
+    ; error code (always fits in 32 bits for #DB/#NMI/#DF/#SS/#MC), the high
+    ; half is currently zero in every case (dummy push from the NOERROR macro
+    ; or zero pushed by the CPU for #DF). We restore the high half before the
+    ; C handler sees the frame.
+    mov [rsp + 32 + 4], eax
+
+    test al, al
+    jz .par_entry_keep_gs
+    swapgs
+.par_entry_keep_gs:
+
+    pop rdx
+    pop rcx
+    pop rax
+
+    ; ---- Build interrupt_frame_t (same layout as isr_common) ----
+    push rax
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push rbp
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+
+    ; Stack now: r15(+0) ... rax(+112) vector(+120) error_code(+128) rip(+136) ...
+
+    ; Recover the swap flag from the smuggled high half of error_code, then
+    ; zero the high half so the C handler sees a clean 32-bit error code.
+    ; (Using `and qword, 0xFFFFFFFF` would sign-extend the 32-bit immediate
+    ;  to 0xFFFFFFFFFFFFFFFF — a no-op.)
+    mov eax, [rsp + 128 + 4]
+    mov dword [rsp + 128 + 4], 0
+
+    ; Push swap flag as a dedicated slot directly below the frame.
+    ; After this push: [rsp+0] = swap_flag, [rsp+8] = r15, ...
+    push rax
+
+    lea rdi, [rsp + 8]      ; arg0 = interrupt_frame_t* (skip the flag slot)
+
+    ; 16-byte align per SysV AMD64 ABI §3.2 before `call`. After 16 qword
+    ; pushes (15 GPRs + flag) on top of an already-aligned CPU frame, we are
+    ; aligned; the dynamic correction below is defensive and zero-cost.
+    mov rax, rsp
+    and rax, 15
+    sub rsp, rax
+    push rax                ; save the alignment correction
+
+    ; Every paranoid vector is an exception (1, 2, 8, 12, 18 — all < 32),
+    ; so dispatch directly. No IRQ / syscall path lives here.
+    call exception_handler
+
+    pop rax
+    add rsp, rax            ; undo alignment correction
+
+    pop rax                 ; rax = swap_flag
+
+    ; ---- Mirror the entry swap on exit, BEFORE restoring GPRs. ----
+    ; This deliberately runs before pop r15..rax so the eventual register
+    ; restore can clobber any temporary we used here. swapgs is a hardware
+    ; instruction that affects MSR state only, not GPRs.
+    test al, al
+    jz .par_exit_keep_gs
+    swapgs
+.par_exit_keep_gs:
+
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rbp
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    pop rax
+
+    add rsp, 16             ; drop vector + error_code
+
     iretq
 
 section .data
