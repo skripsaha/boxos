@@ -41,15 +41,25 @@ void cpu_detect_features(void) {
         g_cpu_caps.has_xsave = (ecx & (1 << 26)) != 0;
         g_cpu_caps.has_avx = (ecx & (1 << 28)) != 0;
         g_cpu_caps.has_pcid = (ecx & (1 << 17)) != 0;
+        // PAT (CPUID.1:EDX[16]) — Intel SDM Vol 3A §11.12.2.
+        g_cpu_caps.has_pat  = (edx & (1 << 16)) != 0;
     }
 
-    // Check WAITPKG and AVX-512 support (CPUID.7.0)
+    // Check structured extended features (CPUID.7.0). Intel SDM Vol 2A.
     if (g_cpu_caps.max_basic_leaf >= CPUID_LEAF_EXT_FEATURES) {
         cpuid_count(CPUID_LEAF_EXT_FEATURES, 0, &eax, &ebx, &ecx, &edx);
-        g_cpu_caps.has_waitpkg = (ecx & (1 << 5)) != 0;
-        g_cpu_caps.has_avx512 = (ebx & (1 << 16)) != 0;
-        g_cpu_caps.has_smep = (ebx & (1 << 7)) != 0;
-        g_cpu_caps.has_smap = (ebx & (1 << 20)) != 0;
+        g_cpu_caps.has_waitpkg  = (ecx & (1 << 5))  != 0;
+        g_cpu_caps.has_avx512   = (ebx & (1 << 16)) != 0;
+        // EBX[0]  FSGSBASE   — Intel SDM Vol 3A §2.5 (CR4.FSGSBASE).
+        g_cpu_caps.has_fsgsbase = (ebx & (1 << 0))  != 0;
+        g_cpu_caps.has_smep     = (ebx & (1 << 7))  != 0;
+        // EBX[10] INVPCID    — Intel SDM Vol 3A §4.10.4.1.
+        g_cpu_caps.has_invpcid  = (ebx & (1 << 10)) != 0;
+        g_cpu_caps.has_smap     = (ebx & (1 << 20)) != 0;
+        // ECX[2]  UMIP       — Intel SDM Vol 3A §2.5 (CR4.UMIP).
+        g_cpu_caps.has_umip     = (ecx & (1 << 2))  != 0;
+        // ECX[16] LA57       — Intel SDM Vol 3A §4.5 (5-level paging).
+        g_cpu_caps.has_la57     = (ecx & (1 << 16)) != 0;
     }
 
     // Query XSAVE area size and supported components (CPUID.0xD:0)
@@ -75,6 +85,8 @@ void cpu_detect_features(void) {
     if (g_cpu_caps.max_extended_leaf >= CPUID_LEAF_EXT_FEATURES2) {
         cpuid(CPUID_LEAF_EXT_FEATURES2, &eax, &ebx, &ecx, &edx);
         g_cpu_caps.has_1gb_pages = (edx & (1 << 26)) != 0;
+        // NX/XD bit — CPUID.80000001h:EDX[20]. Intel SDM Vol 3A §4.6.
+        g_cpu_caps.has_nx        = (edx & (1 << 20)) != 0;
     }
 }
 
@@ -117,14 +129,19 @@ void cpu_intersect_features_ap(void) {
         g_cpu_caps.has_xsave   &= ((ecx & (1 << 26)) != 0);
         g_cpu_caps.has_avx     &= ((ecx & (1 << 28)) != 0);
         g_cpu_caps.has_pcid    &= ((ecx & (1 << 17)) != 0);
+        g_cpu_caps.has_pat     &= ((edx & (1 << 16)) != 0);
     }
 
     if (g_cpu_caps.max_basic_leaf >= CPUID_LEAF_EXT_FEATURES) {
         cpuid_count(CPUID_LEAF_EXT_FEATURES, 0, &eax, &ebx, &ecx, &edx);
-        g_cpu_caps.has_waitpkg &= ((ecx & (1 << 5))  != 0);
-        g_cpu_caps.has_avx512  &= ((ebx & (1 << 16)) != 0);
-        g_cpu_caps.has_smep    &= ((ebx & (1 << 7))  != 0);
-        g_cpu_caps.has_smap    &= ((ebx & (1 << 20)) != 0);
+        g_cpu_caps.has_waitpkg  &= ((ecx & (1 << 5))  != 0);
+        g_cpu_caps.has_avx512   &= ((ebx & (1 << 16)) != 0);
+        g_cpu_caps.has_fsgsbase &= ((ebx & (1 << 0))  != 0);
+        g_cpu_caps.has_smep     &= ((ebx & (1 << 7))  != 0);
+        g_cpu_caps.has_invpcid  &= ((ebx & (1 << 10)) != 0);
+        g_cpu_caps.has_smap     &= ((ebx & (1 << 20)) != 0);
+        g_cpu_caps.has_umip     &= ((ecx & (1 << 2))  != 0);
+        g_cpu_caps.has_la57     &= ((ecx & (1 << 16)) != 0);
     }
 
     if (g_cpu_caps.max_extended_leaf >= CPUID_LEAF_APM) {
@@ -135,5 +152,6 @@ void cpu_intersect_features_ap(void) {
     if (g_cpu_caps.max_extended_leaf >= CPUID_LEAF_EXT_FEATURES2) {
         cpuid(CPUID_LEAF_EXT_FEATURES2, &eax, &ebx, &ecx, &edx);
         g_cpu_caps.has_1gb_pages &= ((edx & (1 << 26)) != 0);
+        g_cpu_caps.has_nx        &= ((edx & (1 << 20)) != 0);
     }
 }

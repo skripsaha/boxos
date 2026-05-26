@@ -298,6 +298,14 @@ void per_core_init_ap(uint8_t core_index, uint64_t stack_top) {
     // ---- FPU/SSE/AVX ----
     enable_fpu();
 
+    /* Re-program IA32_PAT on this AP. Intel SDM Vol 3A §11.12.4: PAT is
+     * per-logical-processor. Without this call, an AP keeps the firmware
+     * reset default (PA6 = UC-) while the BSP programmed PA6 = WC for
+     * framebuffer mappings — any framebuffer write issued by code that
+     * lands on this AP gets coalesced as UC-, not WC. Manifests as
+     * torn/re-ordered pixels on real HW after the first AP comes online. */
+    vmm_pat_init();
+
     // ---- SYSCALL MSRs + PerCpuData + KernelGSBASE ----
     per_core_setup_notify_msrs(pc);
 

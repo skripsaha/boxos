@@ -24,41 +24,49 @@ static inline void xsetbv(uint32_t index, uint64_t value) {
 void enable_fpu(void) {
     uint64_t cr0, cr4;
 
-    // Step 1: Enable native FPU (CR0)
+    // Step 1: Configure CR0 — Intel SDM Vol 3A §2.5.
+    //   EM (bit 2) = 0  : let SSE/x87 execute (don't emulate)
+    //   MP (bit 1) = 1  : monitor coprocessor present
     asm volatile("mov %%cr0, %0" : "=r"(cr0));
-    cr0 &= ~(1ULL << 2); // EM = 0 (disable FPU emulation)
-    cr0 |=  (1ULL << 1); // MP = 1
+    cr0 &= ~(1ULL << 2);
+    cr0 |=  (1ULL << 1);
     asm volatile("mov %0, %%cr0" :: "r"(cr0));
 
-    // Step 2: Enable OSFXSR + OSXMMEXCPT (CR4) — needed for SSE
+    // Step 2: CR4 bring-up — Intel SDM Vol 3A §2.5.
     asm volatile("mov %%cr4, %0" : "=r"(cr4));
-    cr4 |= (1ULL << 9);   // OSFXSR — enable fxsave/fxrstor
-    cr4 |= (1ULL << 10);  // OSXMMEXCPT — enable SSE exceptions
 
-    // Step 3: If XSAVE supported, enable OSXSAVE (CR4 bit 18)
-    if (g_cpu_caps.has_xsave) {
-        cr4 |= (1ULL << 18); // OSXSAVE — enable xsave/xrstor and xsetbv/xgetbv
+    /* 5-level paging (LA57) interlock. Intel SDM Vol 3A §4.5: if firmware
+     * already set CR4.LA57=1, page-walks expect 5 levels and our 4-level
+     * PML4 will #GP on first user-mode fault. We don't yet implement 5LP,
+     * so refuse to keep going rather than triple-fault later. */
+    if (cr4 & (1ULL << 12)) {
+        panic("[FPU] CR4.LA57 set by firmware — 5-level paging not supported "
+              "by this kernel. Disable LA57 in firmware/BIOS or run with 4-level.");
     }
 
-    // Step 3b: Enable SMEP/SMAP if CPU supports them
-    // SMEP (bit 20): prevents kernel from executing user-mode pages
-    // SMAP (bit 21): prevents kernel from accessing user-mode pages (except via STAC/CLAC)
-    if (g_cpu_caps.has_smep) {
-        cr4 |= (1ULL << 20);
-    }
-    if (g_cpu_caps.has_smap) {
-        cr4 |= (1ULL << 21);
-    }
+    cr4 |= (1ULL << 9);   // OSFXSR
+    cr4 |= (1ULL << 10);  // OSXMMEXCPT
 
-    cr4 |= (1ULL << 7);   // PGE — enable global pages (Pull Map)
+    if (g_cpu_caps.has_xsave) cr4 |= (1ULL << 18);
+
+    if (g_cpu_caps.has_smep) cr4 |= (1ULL << 20);
+    if (g_cpu_caps.has_smap) cr4 |= (1ULL << 21);
+
+    /* UMIP (bit 11) — Intel SDM Vol 3A §2.5. */
+    if (g_cpu_caps.has_umip) cr4 |= (1ULL << 11);
+
+    /* FSGSBASE (bit 16) — Intel SDM Vol 3A §2.5. */
+    if (g_cpu_caps.has_fsgsbase) cr4 |= (1ULL << 16);
+
+    cr4 |= (1ULL << 7);   // PGE
 
     asm volatile("mov %0, %%cr4" :: "r"(cr4));
 
-    if (g_cpu_caps.has_smep || g_cpu_caps.has_smap) {
-        debug_printf("[FPU] Memory protection: SMEP=%s SMAP=%s\n",
-                     g_cpu_caps.has_smep ? "enabled" : "not supported",
-                     g_cpu_caps.has_smap ? "enabled" : "not supported");
-    }
+    debug_printf("[FPU] CR4: SMEP=%s SMAP=%s UMIP=%s FSGSBASE=%s PGE=on\n",
+                 g_cpu_caps.has_smep     ? "on" : "n/a",
+                 g_cpu_caps.has_smap     ? "on" : "n/a",
+                 g_cpu_caps.has_umip     ? "on" : "n/a",
+                 g_cpu_caps.has_fsgsbase ? "on" : "n/a");
 
     // Step 4: Configure XCR0 if XSAVE available
     if (g_cpu_caps.has_xsave) {

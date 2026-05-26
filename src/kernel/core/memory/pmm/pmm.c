@@ -78,6 +78,45 @@ uint64_t pmm_get_mem_end(void) {
     return pmm_mem_end;
 }
 
+/* Add `[seed_start, seed_end)` to the buddy zone, carving out every
+ * sub-range that overlaps a non-USABLE E820 entry. Real BIOSes can
+ * publish overlapping descriptors (USABLE that crosses an ACPI NVS
+ * region; USABLE that brushes the MCFG ECAM hole reported as RESERVED).
+ * Letting the buddy receive such overlap = handing the allocator pages
+ * firmware actively owns. BIOS_BOOT_SPEC §15.3.
+ *
+ * Iterative sweep: maintain a `[cur, seed_end)` cursor; on each step
+ * find the lowest non-USABLE entry that overlaps the cursor, emit the
+ * gap before it (if any), then jump the cursor past its end. */
+static void pmm_buddy_free_carved(BuddyZone *zone,
+                                  uintptr_t seed_start, uintptr_t seed_end,
+                                  e820_entry_t *entries, size_t count)
+{
+    uintptr_t cur = seed_start;
+    while (cur < seed_end) {
+        uintptr_t hit_start = 0, hit_end = 0;
+        bool       have_hit = false;
+        for (size_t i = 0; i < count; i++) {
+            if (entries[i].type == E820_USABLE || entries[i].length == 0) continue;
+            uintptr_t rs = entries[i].base;
+            uintptr_t re = entries[i].base + entries[i].length;
+            if (re <= cur || rs >= seed_end) continue;
+            if (!have_hit || rs < hit_start) {
+                hit_start = rs;
+                hit_end   = re;
+                have_hit  = true;
+            }
+        }
+        if (!have_hit) {
+            buddy_free_range(zone, cur, seed_end);
+            return;
+        }
+        if (hit_start > cur) buddy_free_range(zone, cur, hit_start);
+        if (hit_end >= seed_end) return;
+        cur = hit_end;
+    }
+}
+
 static error_t pmm_defer_region(uintptr_t start, uintptr_t end) {
     if (!pmm_deferred || pmm_deferred_count >= pmm_deferred_cap) {
         // Should never happen: capacity set to entry_count in pmm_init().
@@ -202,7 +241,12 @@ error_t pmm_init(void) {
             if (start < zone_base) start = zone_base;
             if (start >= end) continue;
 
-            buddy_free_range(&pmm_buddy, start, end);
+            /* Carve out any overlap with non-USABLE entries before
+             * inserting into the buddy. Protects against BIOSes that
+             * publish USABLE brushing a RESERVED region (MCFG ECAM
+             * hole, SMRAM leak, ACPI NVS inside USABLE). */
+            pmm_buddy_free_carved(&pmm_buddy, start, end,
+                                  entries, entry_count);
         }
     }
 

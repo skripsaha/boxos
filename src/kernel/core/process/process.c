@@ -1481,7 +1481,12 @@ static void process_cleanup_immediate(process_t *proc)
         if (guard_pte)
         {
             *guard_pte = vmm_make_pte(stack_phys, VMM_FLAG_PRESENT | VMM_FLAG_WRITABLE);
-            vmm_flush_tlb_page(guard_virt);
+            /* Cross-core shootdown — kernel_ctx is shared by every CPU.
+             * Intel SDM Vol 3A §4.10.4: local invlpg leaves stale "guard
+             * hole" translations on remote cores; the next kernel walk
+             * on them returns NULL via an entry this core has already
+             * re-populated. */
+            vmm_shootdown_page(kernel_ctx, guard_virt);
         }
 
         pmm_free((void *)stack_phys, CONFIG_KERNEL_STACK_TOTAL_PAGES);
