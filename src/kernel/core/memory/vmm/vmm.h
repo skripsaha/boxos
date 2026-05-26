@@ -337,4 +337,14 @@ int vmm_map_code_region(vmm_context_t* ctx, uintptr_t code_phys, uint64_t size,
 // Called by vmm_init() after Pull Map is live to rebase PMM bitmap pointer
 void pmm_activate_pull_map(void);
 
+/* Program IA32_PAT on the calling logical processor. Intel SDM Vol 3A
+ * §11.12.4: the PAT MSR is per-logical-processor and MUST be identically
+ * programmed on every CPU, otherwise WC framebuffer mappings touched on
+ * one core behave as UC- on another core (the reset default). */
+void vmm_pat_init(void);
+
+/* Cross-core full TLB flush — every online core reloads CR3 (NOFLUSH bit
+ * cleared). Used by callers that need every PCID partition invalidated. */
+void vmm_shootdown_all_cores_full(void);
+
 #endif // VMM_H

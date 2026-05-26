@@ -85,7 +85,7 @@ static spinlock_t kernel_mmio_lock = {0};
 #define PAT_TYPE_UC    0x00U
 #define PAT_TYPE_WC    0x01U   /* Write Combining            */
 
-static void vmm_pat_init(void)
+void vmm_pat_init(void)
 {
     uint64_t pat =
         ((uint64_t)PAT_TYPE_WB  <<  0) |  /* PA0 = WB  (unchanged) */
@@ -183,7 +183,14 @@ static error_t pcid_alloc_safe(uint16_t *out_pcid)
         return OK;
     }
     
-    // PCID exhausted — reset with full TLB flush
+    /* PCID exhausted — Intel SDM Vol 3A §4.10.4.2. Local CR4.PGE toggle
+     * flushes this CPU's TLB. The previous vmm_shootdown_pages(kernel,
+     * 0, 0) was a no-op (count==0 loop runs zero invlpgs, ACKs never
+     * decrement) → stale PCID-tagged TLB on remote cores aliasing the
+     * recycled PCID's later PA — same crash class as 2026-04-29 once a
+     * long session burns 4095 PCIDs. vmm_shootdown_all_cores_full()
+     * reloads CR3 on every core with NOFLUSH cleared, which per SDM
+     * §4.10.4.1 invalidates every PCID partition. */
     pcid_next = 2;
     pcid_free_count = 0;
     *out_pcid = 1;
@@ -193,12 +200,13 @@ static error_t pcid_alloc_safe(uint16_t *out_pcid)
     asm volatile("mov %0, %%cr4" : : "r"(cr4 & ~(1ULL << 7)) : "memory");
     asm volatile("mov %0, %%cr4" : : "r"(cr4) : "memory");
 
+    spin_unlock(&pcid_lock);
+
     if (g_amp.multicore_active && g_amp.total_cores > 1)
     {
-        vmm_shootdown_pages(kernel_context, 0, 0);
+        vmm_shootdown_all_cores_full();
     }
 
-    spin_unlock(&pcid_lock);
     return ERR_PCID_EXHAUSTED;
 }
 
@@ -509,8 +517,12 @@ void vmm_shootdown_all_cores_full(void)
         lapic_send_ipi(g_amp.cores[targets[i]].lapic_id, IPI_SHOOTDOWN_VECTOR);
     }
 
+    /* 100 ms timeout — NOT `tsc_freq_mhz * 100` (which is 100 µs and was
+     * the sibling bug previously fixed in vmm_shootdown_pages). Match the
+     * sibling path. */
     uint64_t tsc_freq_mhz = cpu_get_tsc_freq_mhz();
-    uint64_t timeout_cycles = tsc_freq_mhz * 100;          /* 100 ms */
+    if (tsc_freq_mhz < 100) tsc_freq_mhz = 1000;             /* fallback 1 GHz */
+    uint64_t timeout_cycles = tsc_freq_mhz * 100000ULL;      /* 100 ms */
     uint64_t start_tsc = rdtsc();
     uint32_t spins = 0;
     const uint32_t max_spins = 10000000;
@@ -520,6 +532,7 @@ void vmm_shootdown_all_cores_full(void)
         spins++;
         if (spins >= max_spins || (rdtsc() - start_tsc) > timeout_cycles) {
             uint32_t remaining = atomic_load_u32(&g_shootdown.pending_acks);
+            if (remaining == 0) break;   /* ACKs landed during timeout calc */
             panic("Full TLB shootdown timeout: %u/%u cores did not ACK",
                   remaining, target_count);
         }
@@ -1176,7 +1189,16 @@ vmm_map_result_t vmm_map_page(vmm_context_t *ctx, uintptr_t virt_addr,
         return result;
     }
 
-    if (*pte & VMM_FLAG_PRESENT)
+    /* Track whether this is a REMAP (PTE already present) vs first-time
+     * map. Intel SDM Vol 3A §4.10.2.1 — only existing TLB entries need
+     * invalidation. First-time maps create no stale TLB entry on any
+     * core, so the cross-core shootdown below can be skipped entirely.
+     * This keeps the M5 correctness fix (kernel-context maps now flush
+     * remote TLBs on remap) without paying an IPI broadcast for every
+     * heap demand-page / MMIO mapping / framebuffer page during boot. */
+    bool was_present = (*pte & VMM_FLAG_PRESENT) != 0;
+
+    if (was_present)
     {
         uintptr_t existing_phys = vmm_pte_to_phys(*pte);
         uint64_t existing_flags = vmm_pte_to_flags(*pte);
@@ -1228,7 +1250,21 @@ vmm_map_result_t vmm_map_page(vmm_context_t *ctx, uintptr_t virt_addr,
 
     spin_unlock(&ctx->lock);
 
-    vmm_flush_tlb_page(virt_addr);
+    /* TLB invalidation. Intel SDM Vol 3A §4.10.2.1: only TLB entries that
+     * actually existed need to be invalidated. First-time map (was_present
+     * == false) → no stale entry on any core → skip the flush entirely.
+     *
+     * Remap → must flush. For shared kernel VA (kernel_context / GLOBAL),
+     * every online core may hold the stale entry → cross-core shootdown.
+     * For user VA, only cores currently on this PML4 → vmm_shootdown_page
+     * filters by CR3 match. Both collapse to local invlpg on single-core. */
+    if (was_present)
+    {
+        if (ctx == kernel_context || (flags & VMM_FLAG_GLOBAL))
+            vmm_shootdown_page(ctx, virt_addr);
+        else
+            vmm_flush_tlb_page(virt_addr);
+    }
 
     result.success = true;
     result.virt_addr = virt_addr;
@@ -3285,19 +3321,13 @@ int vmm_handle_page_fault(uintptr_t fault_addr, uint64_t error_code)
         return 0;
     }
 
-    // Restore identity mapping for low-memory faults (only when Pull Map is not active)
-    if (!g_pull_map_active && page_addr < (256ULL * 1024 * 1024))
-    {
-        debug_printf("[VMM] WARNING: Restoring identity mapping for 0x%llx\n", page_addr);
-        uint64_t flags = VMM_FLAG_PRESENT | VMM_FLAG_WRITABLE;
-        vmm_map_result_t result = vmm_map_page(kernel_context, page_addr, page_addr, flags);
-        if (!result.success)
-        {
-            debug_printf("[VMM] FATAL: Failed to restore identity mapping at 0x%llx\n", page_addr);
-            return -1;
-        }
-        return 0;
-    }
+    /* No identity-restore fallback. Once vmm_init() flips g_pull_map_active,
+     * the identity window is dead — any fault landing there is a real bug
+     * and must surface. The early-boot window where !g_pull_map_active is
+     * true never raises page faults that need restoration (stage2 identity
+     * tables cover low RAM). The previous fallback could recurse via
+     * vmm_map_page → pmm_alloc → memset through the very identity window
+     * it was trying to repair. */
 
     debug_printf("[VMM] ERROR: Fault address not in valid range (0x%llx)\n", fault_addr);
     return -1;
