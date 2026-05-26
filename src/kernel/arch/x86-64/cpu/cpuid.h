@@ -6,6 +6,7 @@
 // CPUID Leaf Numbers
 #define CPUID_LEAF_VENDOR        0x00000000
 #define CPUID_LEAF_FEATURES      0x00000001
+#define CPUID_LEAF_THERMAL_PM    0x00000006   // Thermal/Power Mgmt — has ARAT bit
 #define CPUID_LEAF_EXT_FEATURES  0x00000007
 #define CPUID_LEAF_XSAVE         0x0000000D
 #define CPUID_LEAF_EXT_MAX       0x80000000
@@ -33,6 +34,12 @@ typedef struct {
     bool has_pat;               // Page Attribute Table (CPUID.1:EDX[16])
     bool has_1gb_pages;         // 1GB pages (CPUID.80000001h:EDX bit 26, PDPE1GB)
     bool has_pcid;              // Process-Context Identifiers (CPUID.1:ECX bit 17)
+    bool has_hypervisor;        // Hypervisor present (CPUID.1:ECX[31]) — see hypervisor.h
+    bool has_tsc_adjust;        // IA32_TSC_ADJUST MSR (CPUID.7.0:EBX[1]) — per-AP TSC sync
+    bool has_arat;              // Always Running APIC Timer (CPUID.6:EAX[2]) — LAPIC
+                                // timer keeps ticking through C3+ deep idle. Without
+                                // it, deep MWAIT/HLT stops LAPIC timer and scheduler
+                                // hangs on the affected CPU.
     char vendor_string[13];     // CPU vendor (e.g., "GenuineIntel")
     uint32_t max_basic_leaf;    // Maximum CPUID basic leaf
     uint32_t max_extended_leaf; // Maximum CPUID extended leaf

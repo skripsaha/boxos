@@ -23,6 +23,7 @@
 #include "kcore.h"
 #include "xhci_interrupt.h"
 #include "linker_symbols.h"
+#include "cpu_calibrate.h"  // cpu_tsc_recal_tick (periodic recalibration)
 #include "touch_queue.h"
 #include "pit.h"
 
@@ -200,6 +201,32 @@ void exception_handler(interrupt_frame_t *frame)
         int result = vmm_handle_page_fault(fault_addr, frame->error_code);
         if (result == 0)
         {
+            return;
+        }
+
+        /* Unhandled kernel-mode PF — full register dump for the FIRST
+         * N occurrences, then a single throttle notice, then keep
+         * IRET-retrying. The previous "log once globally then
+         * silently swallow forever" hid every subsequent real bug
+         * (NULL deref, stack overflow) behind the first transient
+         * demand-paging miss. Limiting per-occurrence rather than
+         * boolean preserves diagnosability while still allowing
+         * transient demand-paging races to resolve through retry. */
+        if ((frame->cs & 3) == 0) {
+            static volatile uint32_t kpf_logged = 0;
+            uint32_t n = __atomic_add_fetch(&kpf_logged, 1u, __ATOMIC_RELAXED);
+            if (n <= 4) {
+                kprintf("\n[VMM] Unhandled kernel PF #%u at 0x%lx err=0x%lx\n",
+                        n, fault_addr, frame->error_code);
+                kprintf("[VMM]   RIP=0x%lx RSP=0x%lx CS=0x%lx\n",
+                        frame->rip, frame->rsp, frame->cs);
+                kprintf("[VMM]   RAX=0x%lx RBX=0x%lx RCX=0x%lx RDX=0x%lx\n",
+                        frame->rax, frame->rbx, frame->rcx, frame->rdx);
+                kprintf("[VMM]   RSI=0x%lx RDI=0x%lx RBP=0x%lx\n",
+                        frame->rsi, frame->rdi, frame->rbp);
+            } else if (n == 5) {
+                kprintf("[VMM] (further unhandled kernel PFs throttled)\n");
+            }
             return;
         }
     }
@@ -521,6 +548,12 @@ void irq_handler(interrupt_frame_t *frame)
 
         /* Periodic scheduler parameter recalculation */
         scheduler_recalc_parameters();
+
+        /* Periodic TSC recalibration tick. Cheap — just stamps a
+         * timestamp + sets a pending flag every TSC_RECAL_INTERVAL_US.
+         * The actual ~20ms measurement runs in idle context
+         * (cpu_tsc_recal_if_pending) — never in IRQ. */
+        cpu_tsc_recal_tick(pit_get_uptime_us());
 
         /* Software key repeat driven by PIT tick */
         keyboard_timer_tick();

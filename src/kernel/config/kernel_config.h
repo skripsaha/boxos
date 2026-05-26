@@ -152,6 +152,27 @@
 
 #define CONFIG_KEYBOARD_BUFFER_SIZE 256
 
+/* Software typematic timing. Override at build with -DCONFIG_KB_REPEAT_*.
+ *
+ * Defaults are deliberately conservative — typing a key for under one
+ * second should NEVER produce more than one character. Past values
+ * (500 ms delay / 33 ms rate ≈ Windows-style aggressive) caused
+ * complaints on slower-emulated targets (Bochs ips=50M) where a
+ * sub-second hold yielded 5-10 chars.
+ *
+ *   CONFIG_KB_REPEAT_DELAY_MS  initial delay before repeat starts
+ *   CONFIG_KB_REPEAT_RATE_MS   interval between repeats while held
+ *
+ * Both are wall-clock ms (converted to ticks at runtime against the
+ * actual timer frequency, so they stay correct even after periodic
+ * TSC recalibration changes timing). */
+#ifndef CONFIG_KB_REPEAT_DELAY_MS
+#define CONFIG_KB_REPEAT_DELAY_MS  500   /* Windows-class initial delay */
+#endif
+#ifndef CONFIG_KB_REPEAT_RATE_MS
+#define CONFIG_KB_REPEAT_RATE_MS    33   /* ~30 chars/sec while held */
+#endif
+
 #define CONFIG_SERIAL_BAUD_RATE 115200
 
 /* ACPI 6.5 §5.2.5.3: when RSDP revision >= 2 and XsdtAddress != 0 the OS

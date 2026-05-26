@@ -77,10 +77,14 @@ int main(void) {
            info.cpu_total, info.cpu_total == 1 ? "" : "s",
            info.cpu_k_cores, info.cpu_app_cores,
            info.cpu_app_cores == 1 ? "" : "s");
+    /* Inverted UX: silent when the TSC invariant CPUID bit is set
+     * (the production-correct state), loud when it isn't (timing may
+     * drift with P-states). Previous "(invariant)" tag confused users
+     * into thinking it was a value rather than a feature flag. */
     if (info.tsc_freq_khz)
         printf("  TSC:       %u kHz%s\n",
                (unsigned)info.tsc_freq_khz,
-               info.has_invariant_tsc ? " (invariant)" : "");
+               info.has_invariant_tsc ? "" : "  [WARN: not invariant — timing may drift]");
     printf("  PIT:       %u Hz\n", info.pit_freq_hz);
     printf("  Processes: %u live\n", info.process_count);
     printf("  Mode:      %s%s\n",

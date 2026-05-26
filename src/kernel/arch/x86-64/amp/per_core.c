@@ -7,9 +7,62 @@
 #include "irqchip.h"
 #include "fpu.h"
 #include "cpuid.h"
+#include "atomics.h"      // rdtsc()
+#include "pvclock.h"      // pvclock_init_ap()
+#include "cpu_calibrate.h"// cpu_get_tsc_freq_khz()
+#include "pit.h"          // pit_get_uptime_us() — HPET-backed wall clock
 
 PerCoreData g_per_core[MAX_CORES] __attribute__((aligned(64)));
 volatile bool g_per_core_active = false;
+
+/* TSC-sync anchor captured by the BSP at calibration time. The triple
+ * (anchor_tsc, anchor_us, anchor_khz) must be read as a CONSISTENT
+ * snapshot — the periodic recalibrator can republish tsc_freq_khz at
+ * any time, and an AP that combines a fresh anchor_tsc with a stale
+ * tsc_khz (or vice versa) would compute a wild "expected" TSC and
+ * write a multi-second skew through IA32_TSC_ADJUST.
+ *
+ * Discipline: write `anchor_khz` and `anchor_us` first (relaxed),
+ * then `anchor_tsc` with RELEASE — APs gate on `anchor_tsc != 0` with
+ * ACQUIRE, which synchronises with the earlier writes.
+ *
+ * Why anchor here and not in cpu_calibrate.c: the anchor needs to be
+ * a single shared kernel global accessible from per_core_init_ap()
+ * before any scheduler / process plumbing. cpu_calibrate.c knows about
+ * calibration; per_core.c owns AP bring-up — that's where the AP-side
+ * sync code lives, so the BSP-side capture lives next to it. */
+volatile uint64_t g_bsp_tsc_anchor     = 0;   /* TSC the BSP read at anchor time */
+volatile uint64_t g_bsp_tsc_anchor_us  = 0;   /* uptime in µs at anchor time */
+volatile uint64_t g_bsp_tsc_anchor_khz = 0;   /* tsc_freq_khz used for extrapolation */
+
+/* Per-Intel SDM §17.17 typical inter-socket TSC skew on a well-behaved
+ * BIOS is < 50 cycles. AP_TSC_SKEW_THRESHOLD_US converts the audit
+ * recommendation ("≤4 µs") into a rate-relative cycle count at sync
+ * time, so the absolute threshold scales with the actual CPU clock —
+ * a 1 GHz Bochs CPU and a 5 GHz Xeon both get the same wall-clock
+ * tolerance. */
+#define AP_TSC_SKEW_THRESHOLD_US   4ULL
+
+void per_core_record_bsp_tsc_anchor(uint64_t now_us)
+{
+    /* Single-writer (BSP, during boot). Pre-fetch tsc_khz from the
+     * calibrated value at this exact moment, then publish the triple
+     * in the correct order: companions first (relaxed), gating
+     * anchor_tsc last (release). AP-side acquire on anchor_tsc
+     * synchronises-with our release and guarantees visibility of
+     * both anchor_us AND anchor_khz before extrapolation uses them.
+     *
+     * The earlier (us-then-tsc-only) pattern allowed an AP combining
+     * a fresh anchor with the periodic recal's newly-published
+     * tsc_khz — extrapolation would scale the elapsed time by the
+     * wrong rate and the IA32_TSC_ADJUST correction would jump the
+     * AP TSC by the difference. */
+    extern uint64_t cpu_get_tsc_freq_khz(void);
+    uint64_t khz_now = cpu_get_tsc_freq_khz();
+    __atomic_store_n(&g_bsp_tsc_anchor_us,  now_us,  __ATOMIC_RELAXED);
+    __atomic_store_n(&g_bsp_tsc_anchor_khz, khz_now, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_bsp_tsc_anchor,     rdtsc(), __ATOMIC_RELEASE);
+}
 
 // ---------------------------------------------------------------------------
 // MSR helpers (local to this file)
@@ -20,6 +73,9 @@ volatile bool g_per_core_active = false;
 #define MSR_SFMASK          0xC0000084
 #define MSR_GS_BASE         0xC0000101   // active GS.base
 #define MSR_KERNEL_GS_BASE  0xC0000102   // swapgs shadow
+#define MSR_IA32_TSC        0x00000010   // Time Stamp Counter
+#define MSR_IA32_TSC_ADJUST 0x0000003B   // Per-logical-processor TSC offset
+                                          // (Intel SDM Vol 3A §17.17.3)
 
 #define EFER_SCE            (1ULL << 0)
 #define EFER_NXE            (1ULL << 11)
@@ -322,6 +378,82 @@ void per_core_init_ap(uint8_t core_index, uint64_t stack_top) {
         cr4_pcid |= (1ULL << 17);   /* CR4.PCIDE */
         __asm__ volatile("mov %0, %%cr4" : : "r"(cr4_pcid) : "memory");
     }
+
+    /* Per-AP TSC sync via IA32_TSC_ADJUST. Intel SDM Vol 3A §17.17.3:
+     * the MSR is per-logical-processor; writing it adjusts the TSC value
+     * read by RDTSC on that logical processor by the delta written.
+     *
+     * Real-HW problem this fixes: on multi-socket boards the BIOS often
+     * leaves each socket's TSC slightly skewed at power-on (typical
+     * skew is < 100 cycles, but worst-case observed values on shipping
+     * boards exceed 1 ms). The kernel scheduler and lock subsystem
+     * compare TSC values across cores for things like spinlock
+     * contention timeouts; large skews cause spurious timeouts or
+     * negative deltas.
+     *
+     * Algorithm: compute the expected in-sync TSC by extrapolating from
+     * the BSP anchor over the wall-clock time that has elapsed since.
+     * The wall clock is HPET-backed via hpet_now_us() — already in use
+     * across the kernel and immune to PIT freq reprogramming. If the
+     * AP-local rdtsc differs from expected by more than
+     * AP_TSC_SKEW_THRESHOLD_CYC, write IA32_TSC_ADJUST to align so
+     * future rdtsc reads on this AP match the BSP. */
+    if (g_cpu_caps.has_tsc_adjust && g_bsp_tsc_anchor != 0) {
+        /* Snapshot ALL three anchor fields under one acquire-release
+         * fence pair. The BSP publishes (us, khz, tsc) in that order;
+         * we read in the reverse: anchor TSC last with ACQUIRE
+         * pairs with the BSP's RELEASE on anchor TSC, which makes
+         * the earlier (relaxed) us/khz stores visible to us. Using
+         * cpu_get_tsc_freq_khz() here would race with the periodic
+         * recalibration publishing a new rate against the OLD
+         * anchor — using anchor_khz keeps the triple consistent. */
+        uint64_t bsp_anchor_us  = __atomic_load_n(&g_bsp_tsc_anchor_us,  __ATOMIC_RELAXED);
+        uint64_t bsp_anchor_khz = __atomic_load_n(&g_bsp_tsc_anchor_khz, __ATOMIC_RELAXED);
+        uint64_t bsp_anchor     = __atomic_load_n(&g_bsp_tsc_anchor,     __ATOMIC_ACQUIRE);
+        uint64_t now_us         = pit_get_uptime_us();   /* HPET-backed when present */
+
+        if (bsp_anchor != 0 && bsp_anchor_khz != 0 && now_us > bsp_anchor_us) {
+            /* expected_tsc = bsp_anchor + (elapsed_us × tsc_khz / 1000)
+             *
+             *   elapsed_us  is bounded by boot duration (< 60 s on real
+             *               HW), tsc_khz < 10_000_000 → product fits
+             *               uint64_t with > 18 bits to spare.
+             *   /1000       converts µs × kHz → cycles. */
+            uint64_t elapsed_us  = now_us - bsp_anchor_us;
+            uint64_t expected    = bsp_anchor + (elapsed_us * bsp_anchor_khz / 1000ULL);
+            uint64_t my_tsc      = rdtsc();
+            uint64_t cur_adj     = rdmsr_pc(MSR_IA32_TSC_ADJUST);
+
+            /* Rate-relative threshold: AP_TSC_SKEW_THRESHOLD_US wall-
+             * clock µs converted to TSC cycles at the actual CPU rate.
+             * Keeps tolerance physically meaningful from 1 GHz Bochs
+             * to 5 GHz Xeon. */
+            uint64_t threshold_cyc = (bsp_anchor_khz * AP_TSC_SKEW_THRESHOLD_US) / 1000ULL;
+            if (threshold_cyc < 1000ULL) threshold_cyc = 1000ULL;  /* floor */
+
+            int64_t skew     = (int64_t)(my_tsc - expected);
+            int64_t abs_skew = skew < 0 ? -skew : skew;
+            if ((uint64_t)abs_skew > threshold_cyc) {
+                /* IA32_TSC_ADJUST adjusts visible TSC by the delta
+                 * written — a positive skew (we read AHEAD of expected)
+                 * needs ADJUST -= skew so a future rdtsc returns the
+                 * synchronised value. */
+                uint64_t new_adj = cur_adj - (uint64_t)skew;
+                wrmsr_pc(MSR_IA32_TSC_ADJUST, new_adj);
+                debug_printf("[PER_CORE] Core %u TSC skew %ld cycles "
+                             "corrected via IA32_TSC_ADJUST (was 0x%lx → 0x%lx, threshold=%lu)\n",
+                             core_index, (long)skew,
+                             (unsigned long)cur_adj, (unsigned long)new_adj,
+                             (unsigned long)threshold_cyc);
+            }
+        }
+    }
+
+    /* Activate kvmclock on this VCPU. KVM only updates the
+     * pvclock_vcpu_time_info slot whose physical address was written
+     * to MSR_KVM_SYSTEM_TIME_NEW on THAT VCPU — so each AP must wrmsr
+     * locally. No-op on bare metal / non-KVM hosts. */
+    pvclock_init_ap(core_index);
 
     // ---- SYSCALL MSRs + PerCpuData + KernelGSBASE ----
     per_core_setup_notify_msrs(pc);

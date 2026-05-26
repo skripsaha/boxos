@@ -43,8 +43,12 @@
 #include "kcore.h"
 #include "write_cont_queue.h"
 #include "lapic.h"
+#include "per_core.h"
 #include "idle.h"
 #include "cpu_calibrate.h"
+#include "hypervisor.h"
+#include "pvclock.h"
+#include "hvclock.h"
 #include "aslr.h"
 #include "linker_symbols.h"
 #include "pmtag.h"
@@ -67,6 +71,25 @@ void kernel_main(void)
 
     debug_printf("[INIT] CPU Feature Detection (early)...\n");
     cpu_detect_features();
+
+    /* Hypervisor detection must follow cpu_detect_features (so we know
+     * cpuid is usable) and precede everything that asks "are we on
+     * KVM/TCG/Hyper-V?" — currently that's TSC calibration and the
+     * para-virt clock drivers. Idempotent. */
+    debug_printf("[INIT] Hypervisor Detection...\n");
+    hypervisor_detect();
+    /* User-visible banner so the boot log always carries the
+     * environment ID. Lets the user (and bug reports) immediately
+     * know "running on KVM" vs "QEMU/TCG" vs "bare metal" without
+     * needing DEBUG=on. */
+    kprintf("[CPU] Environment: %s%s%s\n",
+            hv_vendor_name(),
+            g_hypervisor.tsc_khz ? ", hv.tsc=" : "",
+            "");
+    if (g_hypervisor.tsc_khz) {
+        kprintf("[CPU] Hypervisor CPUID.40000010h reports TSC=%u kHz, APIC bus=%u kHz\n",
+                g_hypervisor.tsc_khz, g_hypervisor.apic_bus_khz);
+    }
 
     // Randomize stack canary ASAP after CPUID is available
     stack_canary_init();
@@ -230,8 +253,9 @@ void kernel_main(void)
      * is unreachable. */
     debug_printf("[INIT] HPET...\n");
     if (hpet_init()) {
-        if (hpet_start_legacy_tick(250)) {
-            debug_printf("[INIT] HPET sourcing IRQ0 system tick @ 250 Hz\n");
+        if (hpet_start_legacy_tick(CONFIG_SCHED_DEFAULT_TICK_HZ)) {
+            debug_printf("[INIT] HPET sourcing IRQ0 system tick @ %u Hz\n",
+                         (unsigned)CONFIG_SCHED_DEFAULT_TICK_HZ);
         } else {
             debug_printf("[INIT] HPET counter available; PIT keeps IRQ0\n");
         }
@@ -240,15 +264,38 @@ void kernel_main(void)
     }
 
     debug_printf("[INIT] PIT...\n");
-    pit_init(250);  // 250Hz = 4ms tick for better responsiveness
+    /* PIT and HPET legacy-replacement run at the same rate to keep the
+     * scheduler tick math (idt.c uses SCHEDULER_DEFAULT_TICK_HZ
+     * directly) in sync regardless of who owns IRQ0. */
+    pit_init(CONFIG_SCHED_DEFAULT_TICK_HZ);
 
     debug_printf("[INIT] RTC...\n");
     rtc_init();
     clockboard_set_boot_unix_secs(rtc_get_unix64());
 
+    /* Para-virtual clocksources — must come AFTER pmm/vmm (they need
+     * a backing page and a phys→virt mapping) and BEFORE cpu_calibrate
+     * (which prefers pvclock_tsc_khz() as its highest-trust input).
+     * Each call no-ops on hosts that don't advertise the feature. */
+    debug_printf("[INIT] kvmclock (pvclock)...\n");
+    if (pvclock_init()) {
+        debug_printf("[INIT] kvmclock active — TSC calib will use pvclock_tsc_khz\n");
+    }
+
+    debug_printf("[INIT] Hyper-V reference TSC page (hvclock)...\n");
+    if (hvclock_init()) {
+        debug_printf("[INIT] hvclock active — Hyper-V reference TSC available\n");
+    }
+
     debug_printf("[INIT] CPU Calibration...\n");
     cpu_calibrate_tsc();
     clockboard_set_tsc_freq_khz(cpu_get_tsc_freq_khz());
+
+    /* Capture the BSP TSC anchor for per-AP TSC sync. Must be after
+     * cpu_calibrate_tsc (we need tsc_freq_khz published) and before
+     * amp_boot_aps (each AP reads the anchor in per_core_init_ap).
+     * Uses the current pit_uptime_us as the wall-clock pinpoint. */
+    per_core_record_bsp_tsc_anchor(pit_get_uptime_us());
 
     // Initialize idle process (PID 0) before process system
     kprintf("[INIT] Idle Process...\n");
@@ -635,7 +682,10 @@ void kernel_main(void)
             if (p->magic == PROCESS_MAGIC && p->state == PROC_WORKING &&
                 !process_is_idle(p))
             {
-                if (sched_enqueue(p))
+                /* sched_enqueue returns error_t: 0 = OK, non-zero = failure.
+                 * Earlier `if (sched_enqueue())` was backwards and printed
+                 * "FAILED to enqueue" on SUCCESS — confusing every boot log. */
+                if (sched_enqueue(p) == OK)
                 {
                     debug_printf("[KERNEL] Enqueued PID %u on App Core %u\n",
                                  p->pid, p->home_core);
@@ -691,7 +741,7 @@ void kernel_main(void)
             sp->state == PROC_WORKING &&
             !process_is_idle(sp))
         {
-            if (sched_enqueue(sp))
+            if (sched_enqueue(sp) == OK)
             {
                 debug_printf("[KERNEL] Enqueued PID %u on BSP\n", sp->pid);
             }

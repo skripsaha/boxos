@@ -43,6 +43,11 @@ void cpu_detect_features(void) {
         g_cpu_caps.has_pcid = (ecx & (1 << 17)) != 0;
         // PAT (CPUID.1:EDX[16]) — Intel SDM Vol 3A §11.12.2.
         g_cpu_caps.has_pat  = (edx & (1 << 16)) != 0;
+        // Hypervisor present (CPUID.1:ECX[31]) — industry convention; Intel SDM
+        // Vol 2A "CPUID — Hypervisor present". Any hypervisor sets it; bare
+        // silicon leaves it 0. Used by hypervisor_detect() to decide whether
+        // to probe leaf 0x40000000.
+        g_cpu_caps.has_hypervisor = (ecx & (1u << 31)) != 0;
     }
 
     // Check structured extended features (CPUID.7.0). Intel SDM Vol 2A.
@@ -60,6 +65,11 @@ void cpu_detect_features(void) {
         g_cpu_caps.has_umip     = (ecx & (1 << 2))  != 0;
         // ECX[16] LA57       — Intel SDM Vol 3A §4.5 (5-level paging).
         g_cpu_caps.has_la57     = (ecx & (1 << 16)) != 0;
+        // EBX[1]  TSC_ADJUST — Intel SDM Vol 3A §17.17.3 (IA32_TSC_ADJUST MSR).
+        // Required for per-AP TSC sync; without it, AP TSC skew vs. BSP can
+        // only be detected (not corrected) on BIOSes that leave the TSC offset
+        // unsynchronised across sockets.
+        g_cpu_caps.has_tsc_adjust = (ebx & (1 << 1)) != 0;
     }
 
     // Query XSAVE area size and supported components (CPUID.0xD:0)
@@ -87,6 +97,17 @@ void cpu_detect_features(void) {
         g_cpu_caps.has_1gb_pages = (edx & (1 << 26)) != 0;
         // NX/XD bit — CPUID.80000001h:EDX[20]. Intel SDM Vol 3A §4.6.
         g_cpu_caps.has_nx        = (edx & (1 << 20)) != 0;
+    }
+
+    /* ARAT (Always Running APIC Timer) — CPUID.06H:EAX[2]. Intel SDM
+     * Vol 3A §10.5.4.1: "The local APIC timer functions independently
+     * of the processor's power management state and continues to run
+     * even when the processor enters a low-power state". Without
+     * ARAT, MWAIT C3+ or deep HLT halt the LAPIC's internal timer
+     * counter — the next scheduled tick simply never fires. */
+    if (g_cpu_caps.max_basic_leaf >= CPUID_LEAF_THERMAL_PM) {
+        cpuid(CPUID_LEAF_THERMAL_PM, &eax, &ebx, &ecx, &edx);
+        g_cpu_caps.has_arat = (eax & (1u << 2)) != 0;
     }
 }
 
@@ -130,6 +151,11 @@ void cpu_intersect_features_ap(void) {
         g_cpu_caps.has_avx     &= ((ecx & (1 << 28)) != 0);
         g_cpu_caps.has_pcid    &= ((ecx & (1 << 17)) != 0);
         g_cpu_caps.has_pat     &= ((edx & (1 << 16)) != 0);
+        /* has_hypervisor is package-wide — the host either runs us
+         * virtualized or doesn't. We intersect (AND) defensively in case
+         * one AP somehow ends up directly on bare silicon (impossible
+         * under any sane hypervisor scheduler, but cheap). */
+        g_cpu_caps.has_hypervisor &= ((ecx & (1u << 31)) != 0);
     }
 
     if (g_cpu_caps.max_basic_leaf >= CPUID_LEAF_EXT_FEATURES) {
@@ -142,6 +168,10 @@ void cpu_intersect_features_ap(void) {
         g_cpu_caps.has_smap     &= ((ebx & (1 << 20)) != 0);
         g_cpu_caps.has_umip     &= ((ecx & (1 << 2))  != 0);
         g_cpu_caps.has_la57     &= ((ecx & (1 << 16)) != 0);
+        /* TSC_ADJUST is a per-logical-processor MSR; the architectural
+         * capability bit (CPUID.7.0:EBX[1]) is uniform across the
+         * package on every real CPU. Intersect for safety. */
+        g_cpu_caps.has_tsc_adjust &= ((ebx & (1 << 1))  != 0);
     }
 
     if (g_cpu_caps.max_extended_leaf >= CPUID_LEAF_APM) {
@@ -153,5 +183,13 @@ void cpu_intersect_features_ap(void) {
         cpuid(CPUID_LEAF_EXT_FEATURES2, &eax, &ebx, &ecx, &edx);
         g_cpu_caps.has_1gb_pages &= ((edx & (1 << 26)) != 0);
         g_cpu_caps.has_nx        &= ((edx & (1 << 20)) != 0);
+    }
+    /* ARAT — per-package architectural feature; intersect defensively
+     * in case some heterogeneous boxes mix ARAT-capable and non-capable
+     * cores (no shipping silicon does this, but the SDM does not
+     * forbid it). */
+    if (g_cpu_caps.max_basic_leaf >= CPUID_LEAF_THERMAL_PM) {
+        cpuid(CPUID_LEAF_THERMAL_PM, &eax, &ebx, &ecx, &edx);
+        g_cpu_caps.has_arat &= ((eax & (1u << 2)) != 0);
     }
 }
