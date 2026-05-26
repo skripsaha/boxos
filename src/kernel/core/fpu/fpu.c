@@ -27,9 +27,11 @@ void enable_fpu(void) {
     // Step 1: Configure CR0 — Intel SDM Vol 3A §2.5.
     //   EM (bit 2) = 0  : let SSE/x87 execute (don't emulate)
     //   MP (bit 1) = 1  : monitor coprocessor present
+    //   WP (bit 16) = 1 : enforce supervisor write-protect on RO pages.
     asm volatile("mov %%cr0, %0" : "=r"(cr0));
     cr0 &= ~(1ULL << 2);
     cr0 |=  (1ULL << 1);
+    cr0 |=  (1ULL << 16);
     asm volatile("mov %0, %%cr0" :: "r"(cr0));
 
     // Step 2: CR4 bring-up — Intel SDM Vol 3A §2.5.
