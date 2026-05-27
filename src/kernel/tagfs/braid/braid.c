@@ -27,17 +27,15 @@ static uint8_t BraidComputeTagDisk(const uint8_t *tag_context, uint8_t disk_coun
 static int BraidRawRead(uint8_t disk_id, uint64_t sector, void *data) {
     if (ahci_is_initialized())
         return ahci_read_sectors_sync(g_braid_primary_port + disk_id, sector, 8, (uint8_t*)data);
-    // ATA: disk_id 0 = primary master (is_master=1), disk_id 1 = primary slave (is_master=0)
-    uint8_t is_master = (disk_id == 0) ? 1 : 0;
-    return ata_read_sectors_retry(is_master, sector, 8, (uint8_t*)data);
+    /* ATA drive_idx convention matches Braid disk_id directly:
+     *   0=primary master  1=primary slave  2=2ndary master  3=2ndary slave */
+    return ata_read_sectors_retry(disk_id, sector, 8, (uint8_t*)data);
 }
 
 static int BraidRawWrite(uint8_t disk_id, uint64_t sector, const void *data) {
     if (ahci_is_initialized())
         return ahci_write_sectors_sync(g_braid_primary_port + disk_id, sector, 8, (const uint8_t*)data);
-    // ATA: disk_id 0 = primary master (is_master=1), disk_id 1 = primary slave (is_master=0)
-    uint8_t is_master = (disk_id == 0) ? 1 : 0;
-    return ata_write_sectors_retry(is_master, sector, 8, (const uint8_t*)data);
+    return ata_write_sectors_retry(disk_id, sector, 8, (const uint8_t*)data);
 }
 
 // Locked wrappers — used by BraidAutoHeal and BraidVerifyBlock which hold the lock

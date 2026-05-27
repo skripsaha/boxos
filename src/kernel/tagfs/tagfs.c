@@ -9,7 +9,6 @@
 #include "ahci_sync.h"
 #include "ahci.h"
 #include "touch.h"
-#include "ata_dma.h"
 #include "ata.h"
 #include "cow/cow.h"
 #include "braid/braid.h"
@@ -162,25 +161,42 @@ static inline bool bitmap_test_bit(const uint8_t *bitmap, uint32_t bit)
 
 /*
  * Disk selection:
- *   g_tagfs_drive      — ATA drive index (1=master, 0=slave).  Used when AHCI
- *                        is NOT initialized (legacy IDE / BIOS boot).
- *   g_tagfs_ahci_port  — AHCI port number.  Used when AHCI IS initialized
- *                        (UEFI / q35 / SATA controller).
+ *   g_tagfs_drive      — ATA drive index 0..3, per ata.h:
+ *                        0 = primary master, 1 = primary slave,
+ *                        2 = secondary master, 3 = secondary slave.
+ *                        Used when AHCI is NOT initialized.
+ *   g_tagfs_ahci_port  — AHCI port number. Used when AHCI IS initialized.
  *
  * Both are set by TagFSProbeDrive() before the first superblock read.
- * Defaults match the single-disk BIOS boot layout (master, port 0).
+ * Defaults match the single-disk BIOS boot layout (primary master,
+ * AHCI port 0).
  */
-static uint8_t g_tagfs_drive     = 1; /* ATA: 1=master, 0=slave */
+static uint8_t g_tagfs_drive     = 0; /* ATA: 0..3, default primary master */
 static uint8_t g_tagfs_ahci_port = 0; /* AHCI port, probed at init */
 
 uint8_t tagfs_get_drive(void)     { return g_tagfs_drive;     }
 uint8_t tagfs_get_ahci_port(void) { return g_tagfs_ahci_port; }
 
+static const char* ata_slot_name(uint8_t d) {
+    switch (d) {
+        case 0: return "primary master";
+        case 1: return "primary slave";
+        case 2: return "secondary master";
+        case 3: return "secondary slave";
+        default: return "?";
+    }
+}
+
 /*
- * TagFSProbeDrive — locate the disk that holds the TagFS volume by scanning
- * active drives/ports for the TagFS superblock magic.
- * Sets g_tagfs_drive (ATA path) or g_tagfs_ahci_port (AHCI path).
- * Called once at the very beginning of tagfs_init().
+ * TagFSProbeDrive — locate the disk that holds the TagFS volume by
+ * scanning active drives/ports for the TagFS superblock magic. Sets
+ * g_tagfs_drive (ATA path) or g_tagfs_ahci_port (AHCI path). Called
+ * once at the very beginning of tagfs_init().
+ *
+ * Real-PC layouts the audit must support:
+ *   - HDD on primary master  (default for QEMU PIIX3, most desktops)
+ *   - HDD on primary slave   (occurs when a CD-ROM is on master)
+ *   - HDD on secondary M/S   (servers with onboard DVD on primary)
  */
 static void TagFSProbeDrive(void)
 {
@@ -188,7 +204,6 @@ static void TagFSProbeDrive(void)
     uint32_t magic;
 
     if (ahci_is_initialized()) {
-        /* AHCI path: probe each active port (max 32). */
         uint32_t port_mask = ahci_get_active_port_mask();
         for (uint8_t p = 0; p < 32; p++) {
             if (!(port_mask & (1U << p))) continue;
@@ -205,20 +220,19 @@ static void TagFSProbeDrive(void)
         return;
     }
 
-    /* ATA (legacy IDE) path: try master (1) then slave (0). */
-    uint8_t drives[2] = {1, 0};
-    for (int i = 0; i < 2; i++) {
-        if (ata_read_sectors_retry(drives[i], TAGFS_SUPERBLOCK_SECTOR, 1, buf) != 0)
+    /* ATA legacy path: scan all four PATA slots in deterministic order. */
+    for (uint8_t d = 0; d < 4; d++) {
+        if (ata_read_sectors_retry(d, TAGFS_SUPERBLOCK_SECTOR, 1, buf) != 0)
             continue;
         __builtin_memcpy(&magic, buf, 4);
         if (magic == TAGFS_MAGIC) {
-            g_tagfs_drive = drives[i];
+            g_tagfs_drive = d;
             debug_printf("[TagFS] Probe: TagFS on ATA %s (drive=%u)\n",
-                         drives[i] ? "primary master" : "primary slave", drives[i]);
+                         ata_slot_name(d), d);
             return;
         }
     }
-    debug_printf("[TagFS] Probe: TagFS magic not found on ATA master or slave\n");
+    debug_printf("[TagFS] Probe: TagFS magic not found on any ATA slot\n");
 }
 
 static int disk_read_sectors(uint64_t lba, uint16_t count, void *buffer)
@@ -257,7 +271,7 @@ error_t tagfs_flush_cache(void)
     if (ahci_is_initialized())
         rc = ahci_flush_cache_sync(g_tagfs_ahci_port);
     else
-        rc = ata_flush_cache(g_tagfs_drive); /* g_tagfs_drive: 1=master, 0=slave */
+        rc = ata_flush_cache(g_tagfs_drive); /* drive_idx 0..3, set by TagFSProbeDrive */
     return (rc == 0) ? OK : ERR_IO;
 }
 

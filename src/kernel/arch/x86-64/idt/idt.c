@@ -16,7 +16,6 @@
 #include "scheduler.h"
 #include "context_switch.h"
 #include "keyboard.h"
-#include "ata_dma.h"
 #include "ahci.h"
 #include "idle.h"
 #include "amp.h"
@@ -583,13 +582,13 @@ void irq_handler(interrupt_frame_t *frame)
         break;
     }
 
-    case 14:
-    {
-        ata_dma_irq_handler();
-        break;
-    }
-
     default:
+        /* Legacy IDE IRQ14/15 are intentionally not dispatched. The
+         * PIO driver sets nIEN=1 on every detected drive and leaves
+         * the IOAPIC pins masked, so the channel IRQ line never
+         * fires. If something in the future re-enables it, falling
+         * through here sends a clean EOI without acting on the
+         * vector. */
         break;
     }
 
