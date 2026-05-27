@@ -25,6 +25,7 @@
 #include "io.h"
 #include "irqchip.h"
 #include "ata.h"
+#include "tagfs.h"
 #include "system_halt.h"
 #include "xhci.h"
 #include "xhci_port.h"
@@ -681,14 +682,24 @@ static int HwDiskInfo(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     return OK;
 }
 
-/* HW_DISK_FLUSH  params:[u8 is_master] */
+/* HW_DISK_FLUSH  params:[u8 is_master]
+ *
+ * The userspace ABI still carries the legacy 0/1 master/slave flag,
+ * but the only durable thing it can mean today is "flush the TagFS
+ * volume" — that is the device any commit really cares about. Route
+ * through tagfs_flush_cache(), which resolves the volume location
+ * (AHCI port number or ATA drive index) at the storage layer and
+ * therefore stays correct on every (ATA, AHCI) × (boot port) combo.
+ * The is_master parameter is preserved for ABI stability and logged
+ * for diagnostics.
+ */
 static int HwDiskFlush(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                        const OpContext *ctx)
 {
     (void)crates; (void)crate_count; (void)ctx;
     if (op->param_size < 1) return ERR_INVALID_ARGUMENT;
-    uint8_t is_master = op->params[0];
-    return ata_flush_cache(is_master) == 0 ? OK : ERR_INTERNAL;
+    (void)op->params[0];
+    return tagfs_flush_cache();
 }
 
 /* =========================================================================

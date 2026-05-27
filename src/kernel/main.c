@@ -21,7 +21,6 @@
 #include "scheduler.h"
 #include "keyboard.h"
 #include "ata.h"
-#include "ata_dma.h"
 #include "async_io.h"
 #include "pci.h"
 #include "storage_deck.h"
@@ -407,17 +406,6 @@ void kernel_main(void)
 
     debug_printf("[INIT] ATA Driver...\n");
     ata_init();
-
-    debug_printf("[INIT] ATA DMA...\n");
-    if (ata_dma_init() == 0)
-    {
-        debug_printf("[INIT] ATA DMA enabled successfully\n");
-        irqchip_enable_irq(14); // Enable IRQ14 (ATA Primary DMA)
-    }
-    else
-    {
-        debug_printf("[INIT] ATA DMA not available, using PIO mode\n");
-    }
 
     debug_printf("[INIT] Async I/O Queue...\n");
     async_io_init();

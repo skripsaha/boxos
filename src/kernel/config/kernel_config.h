@@ -71,8 +71,6 @@
 
 #define CONFIG_ATA_TIMEOUT_MS 5000
 #define CONFIG_ATA_SECTOR_SIZE 512 // Hardware constant
-#define CONFIG_ATA_DMA_DEBUG 0     // 0=production (errors only), 1=verbose debug
-#define CONFIG_ATA_DMA_ASYNC 1
 #define CONFIG_ATA_MAX_RETRIES 3
 
 #define CONFIG_ASYNC_DISPATCH_INTERVAL_MS 1
