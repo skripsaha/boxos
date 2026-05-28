@@ -37,6 +37,7 @@ static __attribute__((noinline)) void PhysWrite16(uint64_t addr, uint16_t val)
 
 #define BOOT_INFO_MAGIC       0x42583031U   /* "BX01" */
 #define BOOT_INFO_VERSION_V2  2U
+#define BOOT_INFO_VERSION_V3  3U   /* adds EFI runtime services + mmap copy */
 
 #define KERNEL_LOAD_ADDR      0x100000ULL
 
@@ -100,7 +101,7 @@ static __attribute__((noinline)) void PhysWrite16(uint64_t addr, uint16_t val)
 typedef struct __attribute__((packed)) {
     /* v1 fields (40 bytes) */
     uint32_t magic;           /* +0  BOOT_INFO_MAGIC */
-    uint32_t version;         /* +4  2 for UEFI boot */
+    uint32_t version;         /* +4  3 for v3 UEFI boot */
     uint32_t e820_map_addr;   /* +8  physical address of e820 entries */
     uint16_t e820_count;      /* +12 */
     uint16_t reserved1;       /* +14 */
@@ -111,7 +112,7 @@ typedef struct __attribute__((packed)) {
     uint16_t reserved3;       /* +26 */
     uint32_t page_table_base; /* +28 */
     uint32_t stack_base;      /* +32 */
-    uint32_t total_size;      /* +36 76 for v2 */
+    uint32_t total_size;      /* +36 108 for v3 */
     /* v2 additions (+40) */
     uint64_t fb_addr;         /* +40 GOP framebuffer physical address */
     uint32_t fb_width;        /* +48 */
@@ -121,9 +122,17 @@ typedef struct __attribute__((packed)) {
     uint8_t  boot_method;     /* +64 1=UEFI */
     uint8_t  reserved_v2[3];  /* +65 */
     uint64_t rsdp_addr;       /* +68 ACPI RSDP physical address (0 if not found) */
-} BootInfoV2;
+    /* v3 additions — EFI runtime services handoff.
+     * Layout MUST mirror src/include/boot_info.h exactly. */
+    uint64_t efi_rt_services_phys; /* +76 EFI_RUNTIME_SERVICES* phys (0 if absent) */
+    uint64_t efi_mmap_phys;        /* +84 copy of EFI memory map (EfiACPIMemoryNVS) */
+    uint32_t efi_mmap_size;        /* +92 total bytes */
+    uint32_t efi_mmap_desc_size;   /* +96 bytes per descriptor */
+    uint32_t efi_mmap_desc_ver;    /* +100 descriptor version */
+    uint32_t efi_fw_revision;      /* +104 firmware revision */
+} BootInfoV3;
 
-_Static_assert(sizeof(BootInfoV2) == 76, "BootInfoV2 must be 76 bytes");
+_Static_assert(sizeof(BootInfoV3) == 108, "BootInfoV3 must be 108 bytes");
 
 /* =========================================================================
  * e820_entry_t (matches kernel's e820.h)
@@ -983,6 +992,20 @@ typedef struct {
     uint32_t  e820_count;
 } MemMapResult;
 
+/* =========================================================================
+ * EFI runtime handoff state
+ *
+ * Captured pre-ExitBootServices and forwarded to the kernel via
+ * boot_info v3. The kernel uses this to invoke SetVirtualAddressMap
+ * (UEFI §8.4) and call runtime services like ResetSystem.
+ * ========================================================================= */
+static uint64_t g_efi_rt_services_phys = 0;
+static uint64_t g_efi_mmap_copy_phys   = 0;
+static uint32_t g_efi_mmap_copy_size   = 0;
+static uint32_t g_efi_mmap_desc_size   = 0;
+static uint32_t g_efi_mmap_desc_ver    = 0;
+static uint32_t g_efi_fw_revision      = 0;
+
 /* Allocate and retrieve UEFI memory map, convert to E820 at 0x500.
  * The map_key is needed for ExitBootServices. */
 static EFI_STATUS BuildMemoryMap(MemMapResult *out)
@@ -1063,72 +1086,105 @@ static EFI_STATUS BuildMemoryMap(MemMapResult *out)
 }
 
 /*
- * DoExitBootServices — proper retry loop per UEFI spec.
+ * DoExitBootServices — proper retry loop per UEFI 2.10 §7.4.6.
  *
- * Strategy: allocate a pool buffer → get_memory_map (gets fresh key after
- * the allocation) → exit_boot_services. If it fails, free the buffer and
- * retry.  The buffer is intentionally NOT freed on success because freeing
- * it would change the map key again before ExitBootServices can use it.
- * After successful ExitBootServices the pool allocator is gone anyway.
+ * Strategy per attempt:
+ *   1. Allocate a sized scratch buffer for the upcoming GetMemoryMap.
+ *      We use EfiACPIMemoryNVS so the buffer is treated as ACPI NVS by
+ *      the kernel's PMM (never reclaimed), letting it survive EBS and
+ *      still be referenced via boot_info → kernel-side EFI RT driver.
+ *   2. GetMemoryMap with that buffer to obtain a *fresh* key that
+ *      matches the post-allocation memory layout.
+ *   3. ExitBootServices(image_handle, key).
  *
- * Three attempts are sufficient in practice; real failures are firmware bugs.
+ * If step 3 returns EFI_INVALID_PARAMETER the key is stale (some firmware
+ * event allocated memory after step 2). Free the scratch and retry.
+ *
+ * On success we forward the staged map pointer + sizes to the kernel via
+ * boot_info v3 so the kernel can walk RUNTIME descriptors for
+ * SetVirtualAddressMap (UEFI 2.10 §8.4).
+ *
+ * 10 retries — spec only requires 1, but slow enterprise boards (HP Z,
+ * Lenovo ThinkPad certain BIOS revs) fire 4-5 memory-allocating events
+ * between GetMemoryMap and ExitBootServices while RT virtualisation
+ * tables get rearranged; 3 has been observed insufficient there.
  */
 static EFI_STATUS DoExitBootServices(EFI_HANDLE image_handle)
 {
     EFI_STATUS last_status = EFI_ABORTED;
 
-    /* 10 retries — UEFI spec only requires 1, but on slow enterprise boards
-     * (HP Z-series, Lenovo ThinkPad some BIOS revs) firmware can fire 4-5
-     * memory-allocating events between get_memory_map and exit_boot_services
-     * while RuntimeServices virtualisation tables get rearranged. 3 was
-     * insufficient on those. 10 is comfortable and still bounded. */
     for (UINTN attempt = 0; attempt < 10; attempt++) {
-        UINTN    map_size     = 0;
-        UINTN    key          = 0;
-        UINTN    desc_sz      = 0;
-        uint32_t desc_ver     = 0;
-        void    *buf          = NULL;
+        UINTN                map_size = 0;
+        UINTN                key      = 0;
+        UINTN                desc_sz  = 0;
+        uint32_t             desc_ver = 0;
+        EFI_PHYSICAL_ADDRESS buf_pa   = 0;
 
         /* First call: get required buffer size (EFI_BUFFER_TOO_SMALL expected). */
         g_bs->get_memory_map(&map_size, NULL, &key, &desc_sz, &desc_ver);
-        map_size += desc_sz * 16;   /* slack for one more allocation */
+        /* Slack for any allocation we make between this and ExitBootServices:
+         *   - the AllocatePages call itself creates a new descriptor split,
+         *   - some firmware fires watchdog/timer events that allocate more.
+         * 32 descriptors is wide enough for any reasonable firmware. */
+        map_size += desc_sz * 32;
 
-        /* Allocate — this changes the map key, so we MUST call get_memory_map
-         * again afterwards to obtain a key that matches the post-allocation map. */
-        EFI_STATUS s = g_bs->allocate_pool(EfiLoaderData, map_size, &buf);
+        /* Round up to whole pages — AllocatePages is page-granular. */
+        UINTN pages = (map_size + PAGE_4KB - 1) / PAGE_4KB;
+
+        /* Allocate as EfiACPIMemoryNVS: the kernel sees this region as
+         * E820 ACPI_NVS and PMM never reclaims it (real-HW carve in PMM
+         * follows the E820 type strictly). This is critical: the memory
+         * must outlive ExitBootServices because the kernel-side EFI RT
+         * driver walks the staged map at runtime. EfiLoaderData would
+         * survive EBS too, but PMM treats it as USABLE and frees it. */
+        EFI_STATUS s = g_bs->allocate_pages(AllocateAnyPages,
+                                            EfiACPIMemoryNVS,
+                                            pages,
+                                            &buf_pa);
         if (EFI_ERROR(s)) {
             last_status = s;
             Print("TagBoot: EBS attempt ");
             PrintDec(attempt);
-            Print(" — allocate_pool failed\r\n");
+            Print(" — allocate_pages(NVS) failed\r\n");
             continue;
         }
 
-        /* Second call: get the fresh key that reflects our allocation. */
+        /* Second call: get the fresh key + map into our NVS buffer. */
         s = g_bs->get_memory_map(&map_size,
-                                  (EFI_MEMORY_DESCRIPTOR *)buf,
+                                  (EFI_MEMORY_DESCRIPTOR *)(uintptr_t)buf_pa,
                                   &key, &desc_sz, &desc_ver);
         if (EFI_ERROR(s)) {
             last_status = s;
             Print("TagBoot: EBS attempt ");
             PrintDec(attempt);
             Print(" — get_memory_map failed\r\n");
-            g_bs->free_pool(buf);
+            g_bs->free_pages(buf_pa, pages);
             continue;
         }
+
+        /* Publish the map pointer + parameters BEFORE the call so even
+         * a misbehaving firmware that "succeeds" but rewrites parts of
+         * memory in flight still leaves the kernel a usable description.
+         * On retry these get overwritten by the next attempt. */
+        g_efi_mmap_copy_phys = (uint64_t)buf_pa;
+        g_efi_mmap_copy_size = (uint32_t)map_size;
+        g_efi_mmap_desc_size = (uint32_t)desc_sz;
+        g_efi_mmap_desc_ver  = desc_ver;
 
         /* Exit — do NOT free buf; freeing would change the key. */
         s = g_bs->exit_boot_services(image_handle, key);
         if (!EFI_ERROR(s)) return EFI_SUCCESS;
 
-        /* exit_boot_services failed — typically EFI_INVALID_PARAMETER
-         * because something (TPL change, async event) bumped the map key
-         * between get_memory_map and our call. Retry with fresh key. */
+        /* ExitBootServices failed — typically EFI_INVALID_PARAMETER because
+         * something (TPL change, async event) bumped the map key between
+         * GetMemoryMap and our call. Free + retry. */
         last_status = s;
         Print("TagBoot: EBS attempt ");
         PrintDec(attempt);
         Print(" — exit_boot_services rejected key, retrying\r\n");
-        g_bs->free_pool(buf);
+        g_bs->free_pages(buf_pa, pages);
+        g_efi_mmap_copy_phys = 0;
+        g_efi_mmap_copy_size = 0;
     }
     return last_status;
 }
@@ -1273,11 +1329,11 @@ static EFI_STATUS SetupPageTables(uint64_t kernel_phys_end)
 static void FillBootInfo(const FbInfo *fb, uint32_t e820_count,
                          uint64_t kernel_end_phys)
 {
-    BootInfoV2 *bi = (BootInfoV2 *)(uintptr_t)BOOT_INFO_ADDR;
-    MemZero(bi, sizeof(BootInfoV2));
+    BootInfoV3 *bi = (BootInfoV3 *)(uintptr_t)BOOT_INFO_ADDR;
+    MemZero(bi, sizeof(BootInfoV3));
 
     bi->magic          = BOOT_INFO_MAGIC;
-    bi->version        = BOOT_INFO_VERSION_V2;
+    bi->version        = BOOT_INFO_VERSION_V3;
     bi->e820_map_addr  = (uint32_t)E820_MAP_ADDR;
     bi->e820_count     = (uint16_t)e820_count;
     bi->reserved1      = 0;
@@ -1290,7 +1346,7 @@ static void FillBootInfo(const FbInfo *fb, uint32_t e820_count,
     bi->reserved3      = 0;
     bi->page_table_base = (uint32_t)g_pt_base;
     bi->stack_base     = (uint32_t)g_stack_base;
-    bi->total_size     = sizeof(BootInfoV2);
+    bi->total_size     = sizeof(BootInfoV3);
 
     bi->fb_addr        = fb->addr;
     bi->fb_width       = fb->width;
@@ -1302,6 +1358,30 @@ static void FillBootInfo(const FbInfo *fb, uint32_t e820_count,
     bi->reserved_v2[1] = 0;
     bi->reserved_v2[2] = 0;
     bi->rsdp_addr      = FindAcpiRsdp();
+
+    /* v3 fields. g_efi_mmap_* are populated inside DoExitBootServices —
+     * FillBootInfo runs BEFORE EBS so we publish placeholders here and
+     * the EBS retry-loop updates them in-place via the same fixed
+     * BOOT_INFO_ADDR. After EBS returns we patch the final values in
+     * TagBootMain (see PostEbsPatchBootInfo). */
+    bi->efi_rt_services_phys = g_efi_rt_services_phys;
+    bi->efi_mmap_phys        = 0;   /* set by post-EBS patch */
+    bi->efi_mmap_size        = 0;
+    bi->efi_mmap_desc_size   = 0;
+    bi->efi_mmap_desc_ver    = 0;
+    bi->efi_fw_revision      = g_efi_fw_revision;
+}
+
+/* After ExitBootServices succeeds we know the FINAL memory map staged in
+ * EfiACPIMemoryNVS; patch the still-mapped boot_info at BOOT_INFO_ADDR.
+ * No UEFI services are valid here — pure memory writes. */
+static void PostEbsPatchBootInfo(void)
+{
+    BootInfoV3 *bi = (BootInfoV3 *)(uintptr_t)BOOT_INFO_ADDR;
+    bi->efi_mmap_phys      = g_efi_mmap_copy_phys;
+    bi->efi_mmap_size      = g_efi_mmap_copy_size;
+    bi->efi_mmap_desc_size = g_efi_mmap_desc_size;
+    bi->efi_mmap_desc_ver  = g_efi_mmap_desc_ver;
 }
 
 /* =========================================================================
@@ -1396,9 +1476,22 @@ EFI_STATUS EFIAPI TagBootMain(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
     g_bs           = st->boot_services;
     g_image_handle = image_handle;
 
+    /* Capture EFI runtime services pointer + firmware revision before any
+     * boot-services call that could in theory reshape the system table.
+     * Per UEFI 2.10 §4.4.1 the RuntimeServices table lives in
+     * EfiRuntimeServicesData and survives ExitBootServices. The kernel
+     * will dereference this pointer to invoke ResetSystem/GetTime/etc. */
+    g_efi_rt_services_phys = (uint64_t)(uintptr_t)st->runtime_services;
+    g_efi_fw_revision      = st->firmware_revision;
+
     st->con_out->clear_screen(st->con_out);
-    Print("TagBoot v2 — BoxOS UEFI Bootloader\r\n");
+    Print("TagBoot v3 — BoxOS UEFI Bootloader\r\n");
     Print("------------------------------------\r\n");
+    Print("TagBoot: EFI RT services at ");
+    PrintHex64(g_efi_rt_services_phys);
+    Print(" fw_rev=");
+    PrintHex64(g_efi_fw_revision);
+    Print("\r\n");
 
     /* ----- 1. Find Block IO ----- */
     Print("TagBoot: locating disk...\r\n");
@@ -1554,7 +1647,7 @@ EFI_STATUS EFIAPI TagBootMain(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
     /* ----- 9. Fill boot_info_t v2 (includes RSDP — must be before EBS) ----- */
     FillBootInfo(&fb, mmap.e820_count, kernel_end_phys);
 
-    Print("TagBoot: boot_info at 0x9000 (v2, method=UEFI)\r\n");
+    Print("TagBoot: boot_info at 0x9000 (v3, method=UEFI)\r\n");
 
     /* ----- 10. ExitBootServices -----
      *
@@ -1570,9 +1663,13 @@ EFI_STATUS EFIAPI TagBootMain(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
     Print("TagBoot: exiting boot services...\r\n");
 
     status = DoExitBootServices(image_handle);
-    if (EFI_ERROR(status)) Panic("ExitBootServices failed after 3 attempts");
+    if (EFI_ERROR(status)) Panic("ExitBootServices failed after 10 attempts");
+
+    /* From here: no UEFI services, no Print(). Pure bare metal.
+     * Patch boot_info v3 with the FINAL EFI memory map (the one whose
+     * key was accepted by ExitBootServices). */
+    PostEbsPatchBootInfo();
 
     /* ----- 11. Jump to kernel ----- */
-    /* From here: no UEFI services, no Print(). Pure bare metal. */
     JumpToKernel(g_pt_base);
 }
