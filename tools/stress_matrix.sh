@@ -129,6 +129,12 @@ run_config() {
     make run-stop >/dev/null 2>&1 || true
     sleep 1
 
+    # Archive per-config log so failures can be diagnosed after the
+    # whole matrix completes. Filename sanitised for filesystem safety.
+    mkdir -p build/matrix_logs
+    safe_name=$(echo "${cfg_name}" | tr ' /' '__')
+    cp build/serial.log "build/matrix_logs/${safe_name}.log" 2>/dev/null || true
+
     if [ ! -f build/serial.log ]; then
         echo "  FAIL — serial.log missing"
         FAILED=$((FAILED + 1))
