@@ -1,4 +1,5 @@
 #include "ata.h"
+#include "ata_async.h"
 #include "klib.h"
 #include "io.h"
 #include "cpu_calibrate.h"
@@ -167,67 +168,11 @@ static void ata_string_fixup(char* str, int len) {
 }
 
 /* ===========================================================================
- *  Bus-Master IDE (BMIDE) — Intel BMIDE Spec Rev 1.0
- *
- *  Per-channel BMIDE register file is 8 bytes at BAR4+0 (primary) and
- *  BAR4+8 (secondary). The driver uses one Physical Region Descriptor
- *  (PRD) entry pointing at a pre-allocated DMA32 staging page so we
- *  trivially satisfy every alignment rule the spec lays out (§4.2):
- *    - PRD table is 4-byte aligned and inside one 64 KB region (it
- *      lives in a per-channel page-aligned BSS slot).
- *    - PRD region is at most 64 KB and never crosses a 64 KB boundary
- *      (a 4 KB page sized at offset 0 is comfortably under the rule).
- *    - PRD physical address is a 32-bit number — staging page is
- *      pulled from PHYS_TAG_DMA32 (PMM band capped at <4 GB), and the
- *      PRD table itself sits in kernel BSS which is below 4 GB on
- *      every boot path we ship.
- *
- *  Completion is polled (BMISR.Active = 0 plus drive STATUS.BSY = 0).
- *  This keeps the no-IRQ posture of the rest of the driver — nIEN=1
- *  stays asserted, the IOAPIC pin stays masked. DMA-mode negotiation
- *  (UDMA preferred, MDMA fallback) is done at IDENTIFY time via
- *  SET FEATURES 0xEF/0x03 per ATA-7 §7.41.5.
+ *  BMIDE engine, IRQ-driven DMA submit/wait, DMA-mode negotiation and
+ *  every other BMIDE register touch lives in ata_async.{c,h}. ata.c
+ *  retains only PIO + IDENTIFY + channel discovery + the legacy sync
+ *  read/write entry points, which call into ata_async via ata_dma_sync.
  * =========================================================================*/
-
-#define BMIDE_REG_CMD       0   /* BMICR */
-#define BMIDE_REG_STATUS    2   /* BMISR */
-#define BMIDE_REG_PRD       4   /* BMIDT — 32-bit PRD pointer */
-
-#define BMICR_START         0x01    /* SSBM — start bus-master */
-#define BMICR_READ_FROM_DISK 0x08   /* RWCON — 1 = engine WRITES memory
-                                     *         (i.e., reads from disk)
-                                     *         0 = engine READS memory
-                                     *         (i.e., writes to disk) */
-
-#define BMISR_ACTIVE        0x01    /* engine is moving data */
-#define BMISR_ERROR         0x02    /* write-1-to-clear */
-#define BMISR_IRQ           0x04    /* write-1-to-clear */
-
-#define ATA_PRD_EOT         0x8000  /* end-of-table flag (PRD entry word2 bit15) */
-
-#define ATA_DMA_MAX_SECTORS 8       /* one 4 KB staging page = 8 sectors */
-
-/* Forward decl — defined further down in the LBA programming section. */
-static int ata_program_lba(uint8_t drive_idx, uint64_t lba, uint16_t count,
-                           uint8_t cmd28, uint8_t cmd48);
-
-typedef struct {
-    bool       enabled;
-    uint16_t   base;            /* BMIDE register base for this channel */
-    uint8_t*   prd_virt;        /* PRD table virtual pointer (8 bytes used) */
-    uintptr_t  prd_phys;        /* 32-bit physical of PRD table */
-    void*      buf_virt;        /* DMA staging page virtual */
-    uintptr_t  buf_phys;        /* DMA staging page physical (<4 GB) */
-} AtaBmide;
-
-static AtaBmide g_bmide[ATA_CHANNEL_COUNT];
-
-/* PRD table backing storage — one page per channel, page-aligned so the
- * 64 KB-no-cross + 4-byte-align rules are satisfied unconditionally.
- * Only the first 8 bytes of each slot hold a PRD entry; the rest is
- * unused padding. */
-static __attribute__((aligned(4096), section(".bss")))
-    uint8_t g_prd_storage[ATA_CHANNEL_COUNT][4096];
 
 /* Submit a SET FEATURES "set transfer mode" command. Mode byte format
  * (ATA-7 §7.41.5):
@@ -236,7 +181,7 @@ static __attribute__((aligned(4096), section(".bss")))
  *    0x20 | n            -> Multiword DMA mode n (0..2)
  *    0x40 | n            -> Ultra DMA mode n (0..6)
  * Returns 0 on success, negative on drive ABORT or timeout. */
-static int ata_set_xfer_mode(uint8_t drive_idx, uint8_t mode_byte) {
+int ata_set_xfer_mode(uint8_t drive_idx, uint8_t mode_byte) {
     AtaChannel* ch = drive_channel_ptr(drive_idx);
     ata_select_drive(drive_idx);
     if (ata_wait_clear_bsy(drive_idx, CONFIG_ATA_TIMEOUT_MS) != 0)
@@ -250,182 +195,6 @@ static int ata_set_xfer_mode(uint8_t drive_idx, uint8_t mode_byte) {
         return ATA_ERR_TIMEOUT;
     if (ata_read_status(drive_idx) & ATA_SR_ERR) return ATA_ERR_NOT_SUPPORTED;
     return 0;
-}
-
-/* Initialise one channel's BMIDE state. Called from ata_init after the
- * channels are populated and the controller's PCI command register has
- * had Bus Master + I/O Space enabled (done in ata_discover_channels via
- * pci_enable_bus_master). Idempotent on re-entry. */
-static void ata_bmide_init_channel(uint8_t ch_idx) {
-    AtaChannel* ch = &g_ata_channels[ch_idx];
-    AtaBmide*   d  = &g_bmide[ch_idx];
-
-    d->enabled = false;
-    if (!ch->present || ch->bmide_base == 0) return;
-
-    d->base     = ch->bmide_base;
-    d->prd_virt = g_prd_storage[ch_idx];
-    d->prd_phys = (uintptr_t)d->prd_virt - CONFIG_KERNEL_VMA_OFFSET;
-    if (!IS_32BIT_SAFE(d->prd_phys)) {
-        debug_printf("[ATA] BMIDE ch%u: PRD table above 4 GB, DMA disabled\n",
-                     ch_idx);
-        return;
-    }
-
-    /* DMA staging page — PHYS_TAG_DMA32 guarantees <4 GB physical. */
-    void* page_phys = PhysAllocTagged(1, PHYS_TAG_DMA32);
-    if (!page_phys) {
-        debug_printf("[ATA] BMIDE ch%u: no DMA32 page available, DMA disabled\n",
-                     ch_idx);
-        return;
-    }
-    d->buf_phys = (uintptr_t)page_phys;
-    d->buf_virt = vmm_phys_to_virt(d->buf_phys);
-    if (!d->buf_virt) {
-        PhysAllocTaggedFree(page_phys, 1);
-        debug_printf("[ATA] BMIDE ch%u: cannot map staging page, DMA disabled\n",
-                     ch_idx);
-        return;
-    }
-
-    /* Clear any latched error/IRQ state from a stale handover. */
-    outb(d->base + BMIDE_REG_CMD, 0);
-    outb(d->base + BMIDE_REG_STATUS, BMISR_ERROR | BMISR_IRQ);
-
-    d->enabled = true;
-    debug_printf("[ATA] BMIDE ch%u enabled — bm_base=0x%04x prd_phys=0x%08lx "
-                 "buf_phys=0x%08lx\n",
-                 ch_idx, d->base, d->prd_phys, d->buf_phys);
-}
-
-/* Negotiate the highest DMA mode the drive advertises.
- *   IDENTIFY word 88 (when word 53 bit 2 set): UDMA modes 0..6 in
- *     bits 0..6; currently selected mode in bits 8..14.
- *   IDENTIFY word 63: MDMA modes 0..2 in bits 0..2; selected in 8..10.
- * Try UDMA highest-first, then MDMA highest-first; stop on the first
- * mode the drive accepts via SET FEATURES. ATA-7 §7.41 allows PIO and
- * DMA modes to be set independently, so the prior PIO-mode-4 negotiate
- * remains in effect for the PIO fallback path. */
-static void ata_negotiate_dma_mode(uint8_t drive_idx, const uint16_t* id) {
-    ATADevice* dev = &g_ata_devices[drive_idx];
-    dev->dma_type = ATA_DMA_TYPE_NONE;
-    dev->dma_mode = 0;
-
-    /* Drive must advertise DMA (IDENTIFY word 49 bit 8) for us to bother. */
-    if (!(id[49] & (1u << 8))) return;
-
-    /* UDMA path — only valid if word 53 bit 2 set ("words 88 valid"). */
-    if (id[53] & (1u << 2)) {
-        uint16_t udma_supported = id[88] & 0x7Fu;
-        for (int mode = 6; mode >= 0; mode--) {
-            if (!(udma_supported & (1u << mode))) continue;
-            if (ata_set_xfer_mode(drive_idx, (uint8_t)(0x40 | mode)) == 0) {
-                dev->dma_type = ATA_DMA_TYPE_UDMA;
-                dev->dma_mode = (uint8_t)mode;
-                return;
-            }
-        }
-    }
-
-    /* Multiword DMA fallback. */
-    uint16_t mdma_supported = id[63] & 0x07u;
-    for (int mode = 2; mode >= 0; mode--) {
-        if (!(mdma_supported & (1u << mode))) continue;
-        if (ata_set_xfer_mode(drive_idx, (uint8_t)(0x20 | mode)) == 0) {
-            dev->dma_type = ATA_DMA_TYPE_MDMA;
-            dev->dma_mode = (uint8_t)mode;
-            return;
-        }
-    }
-}
-
-/* Run one sync DMA transfer (count ≤ ATA_DMA_MAX_SECTORS). Caller must
- * hold g_ata_lock and ensure the drive's channel has BMIDE enabled and
- * dma_type != NONE. Returns 0 on success, ATA_ERR_* on failure. PIO is
- * the caller's fallback. */
-static int ata_dma_transfer(uint8_t drive_idx, uint64_t lba, uint16_t count,
-                            bool is_write, void* user_buf)
-{
-    uint8_t      ch_idx = drive_channel(drive_idx);
-    AtaBmide*    dma    = &g_bmide[ch_idx];
-    AtaChannel*  ch     = &g_ata_channels[ch_idx];
-
-    uint32_t total_bytes = (uint32_t)count * ATA_SECTOR_SIZE;
-
-    /* WRITE: stage caller's data into the DMA buffer up front. The
-     * mfence guarantees the stores are visible to the bus-master before
-     * we kick the engine — required on weaker memory orderings even
-     * though x86 stores are ordered. */
-    if (is_write) {
-        memcpy(dma->buf_virt, user_buf, total_bytes);
-        mfence();
-    }
-
-    /* PRD entry: phys (4B) | byte_count (2B) | flags (2B EOT). */
-    *(uint32_t*)(dma->prd_virt + 0) = (uint32_t)dma->buf_phys;
-    *(uint16_t*)(dma->prd_virt + 4) = (uint16_t)total_bytes;
-    *(uint16_t*)(dma->prd_virt + 6) = ATA_PRD_EOT;
-    mfence();
-
-    /* Reset BMIDE: stop engine, clear latched error/IRQ. */
-    outb(dma->base + BMIDE_REG_CMD,    0);
-    outb(dma->base + BMIDE_REG_STATUS, BMISR_ERROR | BMISR_IRQ);
-
-    /* Program PRD pointer (32-bit physical). */
-    outl(dma->base + BMIDE_REG_PRD, (uint32_t)dma->prd_phys);
-
-    /* Set direction now (must be stable before SSBM=1). */
-    uint8_t dir = is_write ? 0 : BMICR_READ_FROM_DISK;
-    outb(dma->base + BMIDE_REG_CMD, dir);
-
-    /* Drive-side: select, wait DRDY, program LBA + DMA command. */
-    ata_select_drive(drive_idx);
-    if (ata_wait_ready(drive_idx) != 0) return ATA_ERR_TIMEOUT;
-
-    ata_program_lba(drive_idx, lba, count,
-                    is_write ? ATA_CMD_WRITE_DMA     : ATA_CMD_READ_DMA,
-                    is_write ? ATA_CMD_WRITE_DMA_EXT : ATA_CMD_READ_DMA_EXT);
-
-    /* Start the bus-master engine. */
-    outb(dma->base + BMIDE_REG_CMD, dir | BMICR_START);
-
-    /* Poll for completion. With nIEN=1 the drive does not raise INTRQ
-     * so BMISR.IRQ never latches — Active=0 plus drive STATUS.BSY=0
-     * is the canonical "transfer done" condition (Intel BMIDE §3.1.2
-     * plus ATA-7 §6.2.5). */
-    uint64_t deadline = rdtsc() + cpu_ms_to_tsc(CONFIG_ATA_TIMEOUT_MS);
-    int rc = ATA_ERR_TIMEOUT;
-    while (rdtsc() < deadline) {
-        uint8_t bmsr = inb(dma->base + BMIDE_REG_STATUS);
-        if (bmsr & BMISR_ERROR) { rc = ATA_ERR_DRIVE_FAULT; break; }
-
-        uint8_t st = ata_read_status(drive_idx);
-        if (st == 0xFF) { rc = ATA_ERR_NO_DEVICE; break; }
-        if (st & ATA_SR_ERR) { rc = ATA_ERR_DRIVE_FAULT; break; }
-
-        if (!(bmsr & BMISR_ACTIVE) && !(st & ATA_SR_BSY) && !(st & ATA_SR_DRQ)) {
-            rc = 0;
-            break;
-        }
-        cpu_pause();
-    }
-
-    /* Always stop the engine and clear latched bits — even on success
-     * the IRQ bit is W1C and we want a clean slate for the next call. */
-    outb(dma->base + BMIDE_REG_CMD,    0);
-    outb(dma->base + BMIDE_REG_STATUS, BMISR_ERROR | BMISR_IRQ);
-    mfence();
-
-    if (rc == 0 && !is_write) {
-        memcpy(user_buf, dma->buf_virt, total_bytes);
-    }
-    return rc;
-}
-
-/* Quick test if the drive at drive_idx can use DMA right now. */
-static inline bool ata_dma_usable(uint8_t drive_idx) {
-    return g_bmide[drive_channel(drive_idx)].enabled &&
-           g_ata_devices[drive_idx].dma_type != ATA_DMA_TYPE_NONE;
 }
 
 /* ---------------------------------------------------------------------
@@ -604,7 +373,7 @@ int ata_identify(uint8_t drive_idx, ATADevice* device) {
      * so the SET FEATURES helpers' ata_select_drive() does not skip
      * the slot. */
     ata_negotiate_pio(drive_idx, id);
-    ata_negotiate_dma_mode(drive_idx, id);
+    ata_async_negotiate_dma_mode(drive_idx, id);
 
     const char* dma_name = (device->dma_type == ATA_DMA_TYPE_UDMA) ? "UDMA"
                          : (device->dma_type == ATA_DMA_TYPE_MDMA) ? "MDMA"
@@ -625,8 +394,10 @@ int ata_identify(uint8_t drive_idx, ATADevice* device) {
 /* ---------------------------------------------------------------------
  *  Read / Write sectors
  * ------------------------------------------------------------------ */
-static int ata_program_lba(uint8_t drive_idx, uint64_t lba, uint16_t count,
-                           uint8_t cmd28, uint8_t cmd48)
+/* Non-static — also invoked from ata_async.c::bmide_kick to program the
+ * drive side of a DMA submit. */
+int ata_program_lba(uint8_t drive_idx, uint64_t lba, uint16_t count,
+                    uint8_t cmd28, uint8_t cmd48)
 {
     AtaChannel* ch = drive_channel_ptr(drive_idx);
     ATADevice*  d  = &g_ata_devices[drive_idx];
@@ -680,23 +451,19 @@ int ata_read_sectors(uint8_t drive_idx, uint64_t lba, uint16_t count, uint8_t* b
     if (!d->exists || !ch->present) return ATA_ERR_NO_DEVICE;
     if (lba + count > d->total_sectors) return ATA_ERR_LBA_OUT_OF_BOUNDS;
 
-    spin_lock(&g_ata_lock);
-
-    /* Fast path: bus-master DMA when the controller has BMIDE, the
-     * drive has a negotiated DMA mode, and the request fits the single
-     * pre-allocated staging page. Falls through to PIO on either
-     * "DMA not usable" or "DMA transfer error" (the latter logs and
-     * lets the retry layer get another attempt via PIO). */
-    if (ata_dma_usable(drive_idx) && count <= ATA_DMA_MAX_SECTORS) {
-        int rc = ata_dma_transfer(drive_idx, lba, count, false, buffer);
-        if (rc == 0) {
-            spin_unlock(&g_ata_lock);
-            return 0;
-        }
+    /* Fast path: IRQ-driven Bus-Master DMA via ata_async. Run BEFORE
+     * acquiring g_ata_lock — ata_dma_sync may sti;hlt while waiting for
+     * the BMIDE IRQ, and that would violate the spinlock's IRQ-saved
+     * state. The async engine has its own per-channel cmd_lock for
+     * register-file mutual exclusion. */
+    if (ata_async_usable(drive_idx) && count <= ATA_ASYNC_MAX_SECTORS) {
+        int rc = ata_dma_sync(drive_idx, lba, count, false, buffer);
+        if (rc == 0) return 0;
         debug_printf("[ATA] drv%u: DMA read failed (rc=%d) @LBA %lu; PIO fallback\n",
                      drive_idx, rc, (unsigned long)lba);
     }
 
+    spin_lock(&g_ata_lock);
     ata_select_drive(drive_idx);
     if (ata_wait_ready(drive_idx) != 0) {
         spin_unlock(&g_ata_lock);
@@ -739,23 +506,18 @@ int ata_write_sectors(uint8_t drive_idx, uint64_t lba, uint16_t count, const uin
     }
     if (lba + count > d->total_sectors) return ATA_ERR_LBA_OUT_OF_BOUNDS;
 
-    spin_lock(&g_ata_lock);
-
-    /* DMA fast path — same gate as ata_read_sectors. The transfer
-     * polls until BMISR.Active and STATUS.BSY both clear, which is
-     * the drive's "command complete" signal; durability of the on-
-     * media bits is the caller's responsibility via a subsequent
-     * ata_flush_cache or tagfs_flush_cache. */
-    if (ata_dma_usable(drive_idx) && count <= ATA_DMA_MAX_SECTORS) {
-        int rc = ata_dma_transfer(drive_idx, lba, count, true, (void*)buffer);
-        if (rc == 0) {
-            spin_unlock(&g_ata_lock);
-            return 0;
-        }
+    /* DMA fast path — same gate as ata_read_sectors. Run BEFORE acquiring
+     * g_ata_lock so the sti;hlt in ata_dma_sync's wait loop doesn't
+     * collide with the lock's saved-IRQ state. Per-channel cmd_lock in
+     * ata_async covers register serialisation for the DMA path. */
+    if (ata_async_usable(drive_idx) && count <= ATA_ASYNC_MAX_SECTORS) {
+        int rc = ata_dma_sync(drive_idx, lba, count, true, (void*)buffer);
+        if (rc == 0) return 0;
         debug_printf("[ATA] drv%u: DMA write failed (rc=%d) @LBA %lu; PIO fallback\n",
                      drive_idx, rc, (unsigned long)lba);
     }
 
+    spin_lock(&g_ata_lock);
     ata_select_drive(drive_idx);
     if (ata_wait_ready(drive_idx) != 0) {
         spin_unlock(&g_ata_lock);
@@ -1043,13 +805,12 @@ void ata_init(void) {
         ata_channel_soft_reset(c);
     }
 
-    /* Bring up bus-master DMA per channel before any drive uses it.
-     * ata_identify -> ata_negotiate_dma_mode will then negotiate UDMA
-     * or MDMA on detected drives; ata_read/write_sectors will pick the
-     * fast path when both controller and drive can do DMA. */
-    for (uint8_t c = 0; c < ATA_CHANNEL_COUNT; c++) {
-        ata_bmide_init_channel(c);
-    }
+    /* Bring up the BMIDE async engine — per-channel staging + PRD, IRQ
+     * registration on each channel's GSI, nIEN cleared so the drive can
+     * raise INTRQ. ata_identify -> ata_async_negotiate_dma_mode then
+     * picks UDMA/MDMA on detected drives, and ata_read/write_sectors
+     * route through ata_dma_sync for the IRQ-driven fast path. */
+    ata_async_init();
 
     /* Probe every slot. ata_identify labels ATAPI devices for the log
      * even though they don't become block devices. */
@@ -1064,7 +825,8 @@ void ata_init(void) {
                  g_ata_devices[2].exists,   g_ata_devices[3].exists,
                  g_ata_devices[0].is_atapi, g_ata_devices[1].is_atapi,
                  g_ata_devices[2].is_atapi, g_ata_devices[3].is_atapi,
-                 g_bmide[0].enabled, g_bmide[1].enabled);
+                 ata_async_usable(0) || ata_async_usable(1) ? 1 : 0,
+                 ata_async_usable(2) || ata_async_usable(3) ? 1 : 0);
 }
 
 void ata_print_device_info(const ATADevice* device) {
