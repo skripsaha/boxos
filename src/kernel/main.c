@@ -12,6 +12,7 @@
 #include "hpet.h"
 #include "iommu.h"
 #include "aml.h"
+#include "efi.h"
 #include "rtc.h"
 #include "clockboard.h"
 #include "e820.h"
@@ -179,6 +180,20 @@ void kernel_main(void)
 
     debug_printf("[INIT] CPU Capabilities Page...\n");
     cpu_caps_page_init();
+
+    /* EFI runtime services bring-up — must precede ACPI so the kernel can
+     * fall back to EFI ResetSystem when the FADT lacks a reset register
+     * (e.g. ACPI 1.0b firmware, legacy Bochs). Idempotent + non-fatal:
+     * BIOS boots silently return false. Real-HW: maps every
+     * EFI_MEMORY_RUNTIME descriptor at EFI_RT_VA_BASE+phys and calls
+     * SetVirtualAddressMap (UEFI 2.10 §8.4) so subsequent RT calls
+     * dispatch via virtual addresses. */
+    debug_printf("[INIT] EFI runtime services...\n");
+    if (efi_runtime_init()) {
+        efi_runtime_print_info();
+    } else {
+        debug_printf("[INIT] EFI runtime services not available\n");
+    }
 
     // ACPI must init early so irqchip_init can parse MADT for APIC detection
     debug_printf("[INIT] ACPI Subsystem (early)...\n");

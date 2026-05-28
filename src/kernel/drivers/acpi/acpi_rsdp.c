@@ -103,9 +103,14 @@ static acpi_rsdp_t* rsdp_from_uefi(void) {
     boot_info_t* bi = boot_info_get();
     if (!bi || !boot_info_valid(bi))
         return NULL;
-    if (bi->version != BOOT_INFO_VERSION2)
+    /* Accept any UEFI version (v2 or v3+). The RSDP forwarding contract
+     * is identical from v2 onward — only the trailing fields grow. */
+    if (!boot_info_is_uefi(bi))
         return NULL;
-    if (bi->total_size < sizeof(boot_info_t))
+    /* total_size is the size of THIS boot_info_t copy at link time;
+     * loader-side may be older and write a smaller record. Require at
+     * least up through rsdp_addr. */
+    if (bi->total_size < offsetof(boot_info_t, rsdp_addr) + sizeof(bi->rsdp_addr))
         return NULL;
     if (bi->boot_method != 1)
         return NULL;             /* not UEFI */
@@ -174,7 +179,7 @@ acpi_rsdp_t* acpi_find_rsdp(void) {
      * no spec-compliant fallback. If TagBoot couldn't find the RSDP, neither
      * can we. */
     boot_info_t* bi = boot_info_get();
-    if (bi && boot_info_valid(bi) && bi->version == BOOT_INFO_VERSION2
+    if (bi && boot_info_valid(bi) && boot_info_is_uefi(bi)
         && bi->boot_method == 1) {
         return rsdp_from_uefi();
     }

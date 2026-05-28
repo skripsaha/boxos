@@ -5,6 +5,7 @@
 #include "cpu_calibrate.h"
 #include "vmm.h"
 #include "pci.h"
+#include "efi.h"
 #include <stddef.h>
 
 /* ACPI Generic Address Structure address_space_id values (ACPI 6.x §5.2.3.2) */
@@ -290,6 +291,17 @@ void acpi_shutdown(void) {
         debug_printf("[ACPI] not initialised; no soft poweroff available\n");
     }
 
+    /* UEFI 2.10 §8.5.1: EFI ResetSystem(EfiResetShutdown) is the
+     * firmware-supported soft-off path on UEFI machines. Prefer it
+     * because ACPI PM1 SLP_TYP writes can silently no-op when the SCI
+     * is disabled or the FADT is ACPI 1.0b without an _S5 object.
+     * Returns only if the firmware refuses; we then fall through to
+     * the spec-preferred ACPI PM1 path. */
+    if (efi_runtime_available()) {
+        debug_printf("[ACPI] trying EFI ResetSystem(SHUTDOWN)...\n");
+        efi_reset_system(EFI_RESET_SHUTDOWN, EFI_STATUS_SUCCESS, 0, NULL);
+    }
+
     if (g_acpi.initialized && g_acpi.fadt) {
         uint32_t flen = g_acpi.fadt->header.length;
         acpi_gas_t pm1a = resolve_pm1_gas(&g_acpi.fadt->x_pm1a_control_block,
@@ -322,12 +334,23 @@ void acpi_reboot(void) {
 
     /* Escalating reboot methods, cleanest first; each is bounded and falls
      * through to the next on failure:
-     *   1. ACPI reset register — firmware-described. On UEFI the FADT routes
-     *      this to 0xCF9 itself, so it is the spec-preferred entry point.
-     *   2. 0xCF9 RST_CNT — universal chipset reset (real PCH/ICH, QEMU, Bochs);
-     *      the only method that resets legacy BIOS whose FADT has no reset reg.
-     *   3. 8042 pulse (0xFE -> 0x64) — legacy keyboard-controller fallback.
-     *   4. triple fault — last resort; real CPUs always reset on it. */
+     *   1. EFI ResetSystem(EfiResetWarm) — UEFI 2.10 §8.5.1. Available
+     *      only on UEFI boots after efi_runtime_init succeeded. This is
+     *      the spec-mandated firmware reset on UEFI machines and works
+     *      uniformly across vendors when 0xCF9 is filtered or routed.
+     *   2. ACPI reset register — firmware-described. On UEFI the FADT
+     *      typically routes this to 0xCF9 itself.
+     *   3. 0xCF9 RST_CNT — universal chipset reset (real PCH/ICH, QEMU,
+     *      Bochs); the only method that resets legacy BIOS whose FADT
+     *      has no reset reg.
+     *   4. 8042 pulse (0xFE -> 0x64) — legacy keyboard-controller fallback.
+     *   5. triple fault — last resort; real CPUs always reset on it. */
+    if (efi_runtime_available()) {
+        debug_printf("[ACPI] Attempting EFI ResetSystem(WARM)...\n");
+        efi_reset_system(EFI_RESET_WARM, EFI_STATUS_SUCCESS, 0, NULL);
+        /* If the firmware refused (returns), fall through. */
+    }
+
     debug_printf("[ACPI] Attempting ACPI reset register...\n");
     attempt_acpi_reset();
 
