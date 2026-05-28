@@ -140,4 +140,13 @@ int  ata_write_sectors_retry(uint8_t drive_idx, uint64_t lba, uint16_t count, co
 
 void ata_print_device_info(const ATADevice* device);
 
+/* Exposed for ata_async.c's BMIDE submit path. ata_program_lba writes
+ * the LBA-and-command portion of an issue; ata_set_xfer_mode performs
+ * a SET FEATURES "set transfer mode" (also reused by ata_negotiate_pio
+ * in ata.c). Both expect the caller to have already selected the drive
+ * and to be holding any required channel-wide serialisation. */
+int  ata_program_lba(uint8_t drive_idx, uint64_t lba, uint16_t count,
+                     uint8_t cmd28, uint8_t cmd48);
+int  ata_set_xfer_mode(uint8_t drive_idx, uint8_t mode_byte);
+
 #endif /* ATA_H */
