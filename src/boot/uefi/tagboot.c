@@ -1275,9 +1275,10 @@ static EFI_STATUS DoExitBootServices(EFI_HANDLE image_handle)
          *     timers and RT-virtualisation tables get rearranged;
          *   - QEMU OVMF can fire CPU-add / hot-plug events on multi-AP boot
          *     before ExitBootServices completes.
-         * Linux uses 256 (1<<8) for the same reason. 32 was observed
-         * insufficient on real HP Z440 firmware (audit 2026-05-31). */
-        map_size += desc_sz * 256;
+         * Linux uses EFI_MMAP_SLACK_DESCS for the same reason. 32 was
+         * observed insufficient on real HP Z440 firmware (audit 2026-05-31). */
+        #define EFI_MMAP_SLACK_DESCS  256U
+        map_size += desc_sz * EFI_MMAP_SLACK_DESCS;
 
         /* Round up to whole pages — AllocatePages is page-granular. */
         UINTN pages = (map_size + PAGE_4KB - 1) / PAGE_4KB;

@@ -319,15 +319,20 @@ void amp_boot_aps(void)
         /* Long-wait timeout. Linux uses 1000 ms because BIOS-parked AP
          * loops, microcode reload, and PLL relock on physically cold
          * cores routinely exceed the old 200 ms ceiling on real boards.
-         * Iterating at 1 ms granularity keeps the wait responsive once
-         * the AP actually comes up. Intel SDM Vol 3A §9.4 gives no upper
-         * bound — the OS is told to retry/wait "as long as practical". */
-        const uint32_t LONG_WAIT_MS = 1000;
-        uint32_t waited_ms = 0;
+         * Iterating at LONG_WAIT_GRANULARITY_US keeps the wait
+         * responsive once the AP actually comes up. Intel SDM Vol 3A §9.4
+         * gives no upper bound — the OS is told to retry/wait "as long
+         * as practical". */
+        const uint32_t LONG_WAIT_MS            = 1000;
+        const uint32_t LONG_WAIT_GRANULARITY_US = 1000;     /* 1 ms */
+        const uint32_t LONG_WAIT_ITERATIONS    =
+            LONG_WAIT_MS * 1000U / LONG_WAIT_GRANULARITY_US;
+
+        uint32_t waited_iters = 0;
         ap_up = amp_core_online(c);
-        while (!ap_up && waited_ms < LONG_WAIT_MS) {
-            pit_delay_us(1000);
-            waited_ms++;
+        while (!ap_up && waited_iters < LONG_WAIT_ITERATIONS) {
+            pit_delay_us(LONG_WAIT_GRANULARITY_US);
+            waited_iters++;
             ap_up = amp_core_online(c);
         }
 
