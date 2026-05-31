@@ -53,18 +53,9 @@ void ap_entry_c(uint64_t core_index, uint64_t stack_top) {
      * cpu_intersect_features_ap call earlier emits a separate "feature
      * drop" line if this AP forced any kernel-wide capability off. */
     char prefix[24];
-    /* Tiny fixed-prefix formatter — kprintf is fine, but we want one
-     * single log line per AP rather than a tag + body split. */
-    const char *role = g_amp.cores[core_index].is_kcore ? "K" : "A";
-    /* Manual format: "AP %u (role=%s)" — small fixed sizes, no
-     * malloc. core_index fits in 3 digits (MAX_CORES=256 → 255). */
-    int p = 0;
-    prefix[p++] = 'A'; prefix[p++] = 'P'; prefix[p++] = ' ';
-    if (core_index >= 100) prefix[p++] = '0' + (core_index / 100);
-    if (core_index >= 10)  prefix[p++] = '0' + ((core_index / 10) % 10);
-    prefix[p++] = '0' + (core_index % 10);
-    prefix[p++] = ' '; prefix[p++] = '['; prefix[p++] = role[0];
-    prefix[p++] = ']'; prefix[p] = '\0';
+    ksnprintf(prefix, sizeof(prefix), "AP %u [%c]",
+              (unsigned)core_index,
+              g_amp.cores[core_index].is_kcore ? 'K' : 'A');
     cpu_log_identity(prefix);
 
     // K-Cores enter the guide loop — processes Pockets from MPSC queue.

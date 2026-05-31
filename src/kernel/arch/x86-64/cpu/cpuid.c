@@ -153,20 +153,36 @@ static inline void cpu_wrmsr(uint32_t msr, uint64_t v) {
 }
 
 uint32_t cpu_microcode_revision(void) {
-    /* Intel: clear MSR, CPUID(1) writes the running revision into the
-     * high 32 bits as a side effect. AMD: MSR is already-current at
-     * power-on, the CPUID dance is a harmless no-op. */
-    cpu_wrmsr(MSR_IA32_BIOS_SIGN_ID, 0);
+    /* Vendor-specific MSR 0x8B semantics — do NOT use one sequence for both:
+     *
+     *   Intel (SDM Vol 3A §9.11.7.1): the OS must (a) write 0 to MSR 0x8B,
+     *     (b) execute CPUID(EAX=1), and (c) read MSR 0x8B; the CPU populates
+     *     bits [63:32] with the running microcode revision as a side effect
+     *     of CPUID(1). Bits [31:0] are reserved. Skipping the pre-clear
+     *     can return a stale value the BIOS left behind.
+     *
+     *   AMD (APM Vol 2 / MSR PatchLevel C001_0020, aliased at 0x8B on many
+     *     parts): MSR holds the running PatchLevel in bits [31:0] at all
+     *     times. CPUID has NO side effect on it. Writing 0 from the OS is
+     *     destructive on parts that treat 0x8B as writable — it silently
+     *     loses the BIOS-loaded patch revision and the next read returns 0.
+     *
+     * Branch on vendor: pre-clear-then-CPUID is Intel-only; AMD/Hygon/VIA
+     * just read directly. */
     uint32_t a, b, c, d;
-    cpuid(CPUID_LEAF_FEATURES, &a, &b, &c, &d);
-    uint64_t v = cpu_rdmsr(MSR_IA32_BIOS_SIGN_ID);
+    cpuid(CPUID_LEAF_VENDOR, &a, &b, &c, &d);
+    bool is_intel = (b == 0x756E6547u /* "Genu" */ &&
+                     d == 0x49656E69u /* "ineI" */ &&
+                     c == 0x6C65746Eu /* "ntel" */);
 
-    /* Intel encodes revision in [63:32]; AMD encodes it in [31:0].
-     * Prefer Intel's slot when populated; fall back to AMD's when the
-     * high half is zero. Both empty ⇒ no microcode patch active. */
-    uint32_t intel_rev = (uint32_t)(v >> 32);
-    uint32_t amd_rev   = (uint32_t)(v & 0xFFFFFFFFu);
-    return intel_rev ? intel_rev : amd_rev;
+    if (is_intel) {
+        cpu_wrmsr(MSR_IA32_BIOS_SIGN_ID, 0);
+        cpuid(CPUID_LEAF_FEATURES, &a, &b, &c, &d);
+        return (uint32_t)(cpu_rdmsr(MSR_IA32_BIOS_SIGN_ID) >> 32);
+    }
+
+    /* AMD/Hygon/VIA/Zhaoxin: low 32 bits hold the PatchLevel directly. */
+    return (uint32_t)(cpu_rdmsr(MSR_IA32_BIOS_SIGN_ID) & 0xFFFFFFFFu);
 }
 
 void cpu_read_identity(cpu_identity_t* out) {
