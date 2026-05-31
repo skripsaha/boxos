@@ -133,6 +133,14 @@ run_config() {
     # whole matrix completes. Filename sanitised for filesystem safety.
     mkdir -p build/matrix_logs
     safe_name=$(echo "${cfg_name}" | tr ' /' '__')
+    # Per-run timestamped archive so duplicate-named configs do NOT overwrite
+    # each other (matrix runs BIOS 1c / BIOS 4c / UEFI 1c / UEFI 4c twice).
+    # Without the timestamp, a flaky first run is hidden by the duplicate's
+    # successful overwrite, and post-mortem cannot locate the failure.
+    ts=$(date +%H%M%S)
+    cp build/serial.log "build/matrix_logs/${safe_name}_${ts}.log" 2>/dev/null || true
+    # Also keep the legacy un-timestamped filename so existing tooling that
+    # greps build/matrix_logs/<config>.log still finds the *latest* run.
     cp build/serial.log "build/matrix_logs/${safe_name}.log" 2>/dev/null || true
 
     if [ ! -f build/serial.log ]; then
