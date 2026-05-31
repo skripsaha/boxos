@@ -89,7 +89,10 @@ static void halt_all_ap_cores(void)
     {
         if (c == my_index)
             continue;
-        g_amp.cores[c].online = false;
+        /* Release store pairs with amp_core_online's acquire load on the
+         * other side, so peers that still iterate g_amp.cores[] see this
+         * core leave the "online" set with proper cross-CPU visibility. */
+        __atomic_store_n(&g_amp.cores[c].online, (uint8_t)0, __ATOMIC_RELEASE);
     }
 
     kprintf("[HALT] All AP cores stopped\n");

@@ -72,6 +72,13 @@ void kernel_main(void)
     debug_printf("[INIT] CPU Feature Detection (early)...\n");
     cpu_detect_features();
 
+    /* Log the BSP's identity + microcode revision once feature detection
+     * is up. Doing it here (instead of inside cpu_detect_features) keeps
+     * the helper purely functional; the operator-visible log lives with
+     * the boot sequence. AP identity is logged from ap_entry_c so each
+     * core's silicon + patch level shows up in the boot log. */
+    cpu_log_identity("BSP");
+
     /* Hypervisor detection must follow cpu_detect_features (so we know
      * cpuid is usable) and precede everything that asks "are we on
      * KVM/TCG/Hyper-V?" — currently that's TSC calibration and the
@@ -702,7 +709,7 @@ void kernel_main(void)
         // Wake all App Cores to start scheduling
         for (uint8_t c = 0; c < g_amp.total_cores; c++)
         {
-            if (!g_amp.cores[c].is_kcore && g_amp.cores[c].online)
+            if (!g_amp.cores[c].is_kcore && amp_core_online(&g_amp.cores[c]))
             {
                 lapic_send_ipi(g_amp.cores[c].lapic_id, IPI_WAKE_VECTOR);
             }

@@ -70,6 +70,53 @@ void cpu_detect_features(void);
  * big.LITTLE CPUs). */
 void cpu_intersect_features_ap(void);
 
+/* Read the current microcode revision running on THIS logical CPU.
+ *
+ * Intel sequence (SDM Vol 3A §9.11.7.1 "Determining the Signature"):
+ *   1. wrmsr(IA32_BIOS_SIGN_ID, 0)         — clear the MSR
+ *   2. cpuid(EAX=1)                         — side-effect: populates
+ *                                             MSR with running revision
+ *   3. revision = rdmsr(IA32_BIOS_SIGN_ID) >> 32
+ *
+ * AMD: the same MSR (0x8B) directly reports the current PatchLevel
+ * without the cpuid-side-effect dance; the cpuid step is harmless on
+ * AMD so the same sequence works portably. The MSR layout differs
+ * (AMD packs revision in the LOW 32 bits, Intel in the high 32 bits) —
+ * we read both halves and return the non-zero one, biased toward
+ * Intel's high-half convention when both are populated. Returns 0
+ * when no microcode update is present (Intel: the post-cpuid MSR
+ * read returns 0; AMD: factory CPUs report 0 too). */
+uint32_t cpu_microcode_revision(void);
+
+/* CPU vendor / family / model / stepping decoded from CPUID leaf 1.
+ * The "effective family" computation follows Intel SDM Vol 2A "CPUID":
+ *   effective_family = base_family + (base_family==0x0F ? ext_family : 0)
+ *   effective_model  = base_model  | ((base_family==0x06||0x0F)
+ *                                      ? ext_model<<4 : 0)
+ * AMD APM Vol 3 §3.3 uses identical rules so the routine works for
+ * both vendors. */
+typedef struct {
+    char     vendor[13];      /* "GenuineIntel"/"AuthenticAMD"/etc., NUL-terminated */
+    uint32_t family;          /* effective family */
+    uint32_t model;           /* effective model  */
+    uint32_t stepping;        /* CPUID.1:EAX[3:0] */
+    uint32_t type;            /* CPUID.1:EAX[13:12] (Intel only) */
+    uint32_t microcode_rev;   /* result of cpu_microcode_revision() at probe */
+    uint32_t apic_id;         /* CPUID.1:EBX[31:24] (xAPIC) — packed here for
+                                 fast operator log without an extra MSR read */
+} cpu_identity_t;
+
+/* Read the running CPU's identity into *out. Always succeeds; vendor
+ * is the canonical 12-char string and the numeric fields hold the
+ * decoded values above. */
+void cpu_read_identity(cpu_identity_t* out);
+
+/* Log "[CPU] vendor F:M:S microcode=0xNNNN" via kprintf. `prefix`
+ * lets callers add a tag (e.g. "BSP" / "AP %u"). NULL prefix = no
+ * tag. Used by BSP init and each AP entry path to make the boot log
+ * a record of exactly what silicon the kernel saw. */
+void cpu_log_identity(const char* prefix);
+
 static inline uint8_t cpuid_get_maxphyaddr(void) {
     uint32_t eax, ebx, ecx, edx;
 

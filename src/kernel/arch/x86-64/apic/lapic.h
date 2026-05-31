@@ -83,9 +83,11 @@ void lapic_timer_rearm(void);
 uint32_t lapic_read(uint32_t reg);
 void lapic_write(uint32_t reg, uint32_t value);
 
-// IPI (Inter-Processor Interrupt) command values for ICR
+// IPI (Inter-Processor Interrupt) command values for ICR.
+// No INIT-deassert command: required only for the 82489DX discrete APIC
+// (Intel SDM Vol 3A §9.4.1) — modern integrated APICs treat INIT as
+// edge-triggered and ignore the deassert. See amp.c::send_init_ipi.
 #define LAPIC_IPI_INIT          0x00004500  // INIT assert
-#define LAPIC_IPI_INIT_DEASSERT 0x00008500  // INIT de-assert (level-triggered)
 #define LAPIC_IPI_SIPI          0x00004600  // Startup IPI (OR with page number in low byte)
 
 // ICR delivery status bit

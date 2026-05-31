@@ -408,7 +408,7 @@ void exception_handler(interrupt_frame_t *frame)
         {
             if (c == amp_get_core_index())
                 continue;
-            if (!g_amp.cores[c].online)
+            if (!amp_core_online(&g_amp.cores[c]))
                 continue;
             lapic_send_ipi(g_amp.cores[c].lapic_id, IPI_PANIC_VECTOR);
         }

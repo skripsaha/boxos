@@ -26,8 +26,13 @@ ap_trampoline_start:
     mov es, ax
     mov ss, ax
 
-    ; lgdt needs absolute address of ap_gdt_ptr in physical memory
-    lgdt [0x8000 + GDT_PTR_OFFSET]
+    ; Intel SDM Vol 2A "LGDT/LIDT": in 16-bit operand size the CPU
+    ; truncates the descriptor base to 24 bits. ap_gdt_ptr stores a full
+    ; 32-bit base (NASM `dd ...`), so without the o32 prefix the high
+    ; byte would silently be cleared. Today base < 16 MB so it works,
+    ; but on a hypothetical relocation > 16 MB it would silently fault;
+    ; the prefix makes the contract match the data we encoded.
+    o32 lgdt [0x8000 + GDT_PTR_OFFSET]
 
     mov eax, cr0
     or eax, 1
@@ -42,8 +47,23 @@ ap_protected:
     mov es, ax
     mov ss, ax
 
+    ; CR4: PAE (bit 5) is mandatory before enabling long mode.
+    ; Additionally:
+    ;   PGE       (bit 7)  — global-page TLB entries. Kernel page table
+    ;                        entries are flagged with the global bit, so
+    ;                        enabling PGE here keeps them across CR3
+    ;                        loads during the brief window before
+    ;                        per_core_init_ap → enable_fpu reconfigures
+    ;                        CR4 fully. Without it every CR3 load (e.g.
+    ;                        the first scheduler context switch on this
+    ;                        AP) flushes the entire TLB.
+    ;   OSFXSR    (bit 9)  — x86_64 ABI mandates SSE2; an emitted
+    ;                        SSE move in any C function called before
+    ;                        enable_fpu would #UD without it.
+    ;   OSXMMEXCPT(bit 10) — pairs with OSFXSR so SIMD FP exceptions
+    ;                        deliver as #XF instead of #UD.
     mov eax, cr4
-    or eax, (1 << 5)
+    or eax, (1 << 5)  | (1 << 7) | (1 << 9) | (1 << 10)
     mov cr4, eax
 
     ; Load CR3 from data area using register arithmetic (avoids ABS warning)
