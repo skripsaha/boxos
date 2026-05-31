@@ -38,6 +38,7 @@ static __attribute__((noinline)) void PhysWrite16(uint64_t addr, uint16_t val)
 #define BOOT_INFO_MAGIC       0x42583031U   /* "BX01" */
 #define BOOT_INFO_VERSION_V2  2U
 #define BOOT_INFO_VERSION_V3  3U   /* adds EFI runtime services + mmap copy */
+#define BOOT_INFO_VERSION_V4  4U   /* adds system_table + cfg_table + ESRT copy */
 
 #define KERNEL_LOAD_ADDR      0x100000ULL
 
@@ -101,7 +102,7 @@ static __attribute__((noinline)) void PhysWrite16(uint64_t addr, uint16_t val)
 typedef struct __attribute__((packed)) {
     /* v1 fields (40 bytes) */
     uint32_t magic;           /* +0  BOOT_INFO_MAGIC */
-    uint32_t version;         /* +4  3 for v3 UEFI boot */
+    uint32_t version;         /* +4  4 for v4 UEFI boot */
     uint32_t e820_map_addr;   /* +8  physical address of e820 entries */
     uint16_t e820_count;      /* +12 */
     uint16_t reserved1;       /* +14 */
@@ -112,7 +113,7 @@ typedef struct __attribute__((packed)) {
     uint16_t reserved3;       /* +26 */
     uint32_t page_table_base; /* +28 */
     uint32_t stack_base;      /* +32 */
-    uint32_t total_size;      /* +36 108 for v3 */
+    uint32_t total_size;      /* +36 140 for v4 */
     /* v2 additions (+40) */
     uint64_t fb_addr;         /* +40 GOP framebuffer physical address */
     uint32_t fb_width;        /* +48 */
@@ -130,9 +131,15 @@ typedef struct __attribute__((packed)) {
     uint32_t efi_mmap_desc_size;   /* +96 bytes per descriptor */
     uint32_t efi_mmap_desc_ver;    /* +100 descriptor version */
     uint32_t efi_fw_revision;      /* +104 firmware revision */
-} BootInfoV3;
+    /* v4 additions — EFI System Table + Configuration Table + ESRT copy. */
+    uint64_t efi_system_table_phys; /* +108 EFI_SYSTEM_TABLE* phys */
+    uint64_t efi_cfg_table_phys;    /* +116 EFI_CONFIGURATION_TABLE[] phys */
+    uint32_t efi_cfg_table_count;   /* +124 count */
+    uint64_t efi_esrt_copy_phys;    /* +128 NVS-preserved ESRT copy (0 if absent) */
+    uint32_t efi_esrt_copy_size;    /* +136 bytes (0 if absent) */
+} BootInfoV4;
 
-_Static_assert(sizeof(BootInfoV3) == 108, "BootInfoV3 must be 108 bytes");
+_Static_assert(sizeof(BootInfoV4) == 140, "BootInfoV4 must be 140 bytes");
 
 /* =========================================================================
  * e820_entry_t (matches kernel's e820.h)
@@ -996,8 +1003,9 @@ typedef struct {
  * EFI runtime handoff state
  *
  * Captured pre-ExitBootServices and forwarded to the kernel via
- * boot_info v3. The kernel uses this to invoke SetVirtualAddressMap
- * (UEFI §8.4) and call runtime services like ResetSystem.
+ * boot_info v4. The kernel uses this to invoke SetVirtualAddressMap
+ * (UEFI §8.4) and call runtime services like ResetSystem, plus walk
+ * the surviving Configuration Table for SMBIOS / ESRT / RT properties.
  * ========================================================================= */
 static uint64_t g_efi_rt_services_phys = 0;
 static uint64_t g_efi_mmap_copy_phys   = 0;
@@ -1005,6 +1013,101 @@ static uint32_t g_efi_mmap_copy_size   = 0;
 static uint32_t g_efi_mmap_desc_size   = 0;
 static uint32_t g_efi_mmap_desc_ver    = 0;
 static uint32_t g_efi_fw_revision      = 0;
+static uint64_t g_efi_system_table_phys = 0;
+static uint64_t g_efi_cfg_table_phys    = 0;
+static uint32_t g_efi_cfg_table_count   = 0;
+static uint64_t g_efi_esrt_copy_phys    = 0;
+static uint32_t g_efi_esrt_copy_size    = 0;
+
+/* =========================================================================
+ * EFI System Resource Table capture (UEFI 2.10 §23.4)
+ *
+ * ESRT lives in EfiBootServicesData per spec; after EBS the OS PMM treats
+ * those pages as USABLE and may overwrite them at any point. To preserve
+ * the firmware-published resource list we copy the ESRT (header + every
+ * EFI_SYSTEM_RESOURCE_ENTRY) into a fresh EfiACPIMemoryNVS allocation
+ * before EBS. PMM never reclaims ACPI_NVS so the kernel-side ESRT driver
+ * sees a stable image.
+ * ========================================================================= */
+
+#define ESRT_FW_RESOURCE_VERSION  1ULL    /* UEFI 2.10 §23.4 fixed */
+#define ESRT_ENTRY_SIZE           40U     /* sizeof(EFI_SYSTEM_RESOURCE_ENTRY) */
+
+#define EFI_SYSTEM_RESOURCE_TABLE_GUID \
+    EFI_GUID_INIT(0xb122a263,0x3661,0x4f68, 0x99,0x29,0x78,0xf8,0xb0,0xd6,0x21,0x80)
+
+typedef struct __attribute__((packed)) {
+    uint32_t fw_resource_count;
+    uint32_t fw_resource_count_max;
+    uint64_t fw_resource_version;
+} EsrtHeader;
+
+_Static_assert(sizeof(EsrtHeader) == 16, "ESRT header must be 16 bytes");
+
+/* Locate ESRT pointer + total size from the Configuration Table.
+ * Returns 0 if not found. The pointer is a physical address; the table
+ * is still in EfiBootServicesData here, valid only until EBS. */
+static uint64_t FindEsrt(uint32_t *out_size)
+{
+    *out_size = 0;
+    if (!g_st || g_st->number_of_table_entries == 0) return 0;
+
+    EFI_GUID esrt_guid = EFI_SYSTEM_RESOURCE_TABLE_GUID;
+    EFI_CONFIGURATION_TABLE *ct = g_st->configuration_table;
+
+    for (UINTN i = 0; i < g_st->number_of_table_entries; i++) {
+        if (!GuidEqual(&ct[i].vendor_guid, &esrt_guid)) continue;
+
+        EsrtHeader *hdr = (EsrtHeader *)ct[i].vendor_table;
+        if (!hdr) return 0;
+        if (hdr->fw_resource_version != ESRT_FW_RESOURCE_VERSION) {
+            Print("TagBoot: ESRT: unknown FwResourceVersion=");
+            PrintDec(hdr->fw_resource_version);
+            Print(" — ignoring\r\n");
+            return 0;
+        }
+        /* Defensive cap: 1024 entries (=40 KB) is wildly more than any
+         * board publishes; rejects a corrupted table that would otherwise
+         * overflow our NVS copy. */
+        if (hdr->fw_resource_count > 1024U) {
+            Print("TagBoot: ESRT: unreasonable FwResourceCount=");
+            PrintDec(hdr->fw_resource_count);
+            Print(" — ignoring\r\n");
+            return 0;
+        }
+        *out_size = sizeof(EsrtHeader) +
+                    hdr->fw_resource_count * ESRT_ENTRY_SIZE;
+        return (uint64_t)(uintptr_t)hdr;
+    }
+    return 0;
+}
+
+/* Copy ESRT to fresh EfiACPIMemoryNVS pages. Returns physical address of
+ * the copy, or 0 on failure. Idempotent in the sense that a subsequent
+ * call would just consume another arena — but TagBootMain calls this once.
+ *
+ * The ESRT here still resides in EfiBootServicesData and therefore must be
+ * fully read out before EBS. We do this immediately after FindEsrt. */
+static uint64_t CopyEsrtToNvs(uint64_t esrt_phys, uint32_t esrt_size)
+{
+    if (esrt_phys == 0 || esrt_size == 0) return 0;
+    if (esrt_size > 65536U) return 0;   /* 64 KB cap — same reason as above */
+
+    UINTN pages = (esrt_size + PAGE_4KB - 1) / PAGE_4KB;
+    EFI_PHYSICAL_ADDRESS buf = 0;
+    EFI_STATUS s = g_bs->allocate_pages(AllocateAnyPages,
+                                         EfiACPIMemoryNVS,
+                                         pages,
+                                         &buf);
+    if (EFI_ERROR(s)) {
+        Print("TagBoot: ESRT NVS alloc failed\r\n");
+        return 0;
+    }
+    MemCopy((void *)(uintptr_t)buf,
+             (const void *)(uintptr_t)esrt_phys,
+             esrt_size);
+    return (uint64_t)buf;
+}
 
 /* Allocate and retrieve UEFI memory map, convert to E820 at 0x500.
  * The map_key is needed for ExitBootServices. */
@@ -1329,11 +1432,11 @@ static EFI_STATUS SetupPageTables(uint64_t kernel_phys_end)
 static void FillBootInfo(const FbInfo *fb, uint32_t e820_count,
                          uint64_t kernel_end_phys)
 {
-    BootInfoV3 *bi = (BootInfoV3 *)(uintptr_t)BOOT_INFO_ADDR;
-    MemZero(bi, sizeof(BootInfoV3));
+    BootInfoV4 *bi = (BootInfoV4 *)(uintptr_t)BOOT_INFO_ADDR;
+    MemZero(bi, sizeof(BootInfoV4));
 
     bi->magic          = BOOT_INFO_MAGIC;
-    bi->version        = BOOT_INFO_VERSION_V3;
+    bi->version        = BOOT_INFO_VERSION_V4;
     bi->e820_map_addr  = (uint32_t)E820_MAP_ADDR;
     bi->e820_count     = (uint16_t)e820_count;
     bi->reserved1      = 0;
@@ -1346,7 +1449,7 @@ static void FillBootInfo(const FbInfo *fb, uint32_t e820_count,
     bi->reserved3      = 0;
     bi->page_table_base = (uint32_t)g_pt_base;
     bi->stack_base     = (uint32_t)g_stack_base;
-    bi->total_size     = sizeof(BootInfoV3);
+    bi->total_size     = sizeof(BootInfoV4);
 
     bi->fb_addr        = fb->addr;
     bi->fb_width       = fb->width;
@@ -1370,6 +1473,16 @@ static void FillBootInfo(const FbInfo *fb, uint32_t e820_count,
     bi->efi_mmap_desc_size   = 0;
     bi->efi_mmap_desc_ver    = 0;
     bi->efi_fw_revision      = g_efi_fw_revision;
+
+    /* v4 fields. system_table + config_table are captured at TagBootMain
+     * entry — they survive EBS because both live in EfiRuntimeServicesData.
+     * efi_esrt_copy_* are populated by the pre-EBS ESRT capture path; zero
+     * if the firmware did not publish an ESRT. */
+    bi->efi_system_table_phys = g_efi_system_table_phys;
+    bi->efi_cfg_table_phys    = g_efi_cfg_table_phys;
+    bi->efi_cfg_table_count   = g_efi_cfg_table_count;
+    bi->efi_esrt_copy_phys    = g_efi_esrt_copy_phys;
+    bi->efi_esrt_copy_size    = g_efi_esrt_copy_size;
 }
 
 /* After ExitBootServices succeeds we know the FINAL memory map staged in
@@ -1377,7 +1490,7 @@ static void FillBootInfo(const FbInfo *fb, uint32_t e820_count,
  * No UEFI services are valid here — pure memory writes. */
 static void PostEbsPatchBootInfo(void)
 {
-    BootInfoV3 *bi = (BootInfoV3 *)(uintptr_t)BOOT_INFO_ADDR;
+    BootInfoV4 *bi = (BootInfoV4 *)(uintptr_t)BOOT_INFO_ADDR;
     bi->efi_mmap_phys      = g_efi_mmap_copy_phys;
     bi->efi_mmap_size      = g_efi_mmap_copy_size;
     bi->efi_mmap_desc_size = g_efi_mmap_desc_size;
@@ -1476,19 +1589,30 @@ EFI_STATUS EFIAPI TagBootMain(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
     g_bs           = st->boot_services;
     g_image_handle = image_handle;
 
-    /* Capture EFI runtime services pointer + firmware revision before any
-     * boot-services call that could in theory reshape the system table.
-     * Per UEFI 2.10 §4.4.1 the RuntimeServices table lives in
-     * EfiRuntimeServicesData and survives ExitBootServices. The kernel
-     * will dereference this pointer to invoke ResetSystem/GetTime/etc. */
-    g_efi_rt_services_phys = (uint64_t)(uintptr_t)st->runtime_services;
-    g_efi_fw_revision      = st->firmware_revision;
+    /* Capture EFI runtime services + system table + config table pointers
+     * before any boot-services call that could reshape them. Per UEFI 2.10
+     * §4.4.1 and §4.6 all three structures live in EfiRuntimeServicesData
+     * and survive ExitBootServices, so a pre-EBS physical address remains
+     * a valid handle for the kernel. The kernel will dereference these to
+     * invoke RT services and walk the Configuration Table for ESRT /
+     * SMBIOS / RT-properties / debug-image-info lookups. */
+    g_efi_rt_services_phys   = (uint64_t)(uintptr_t)st->runtime_services;
+    g_efi_fw_revision        = st->firmware_revision;
+    g_efi_system_table_phys  = (uint64_t)(uintptr_t)st;
+    g_efi_cfg_table_phys     = (uint64_t)(uintptr_t)st->configuration_table;
+    g_efi_cfg_table_count    = (uint32_t)st->number_of_table_entries;
 
     st->con_out->clear_screen(st->con_out);
-    Print("TagBoot v3 — BoxOS UEFI Bootloader\r\n");
+    Print("TagBoot v4 — BoxOS UEFI Bootloader\r\n");
     Print("------------------------------------\r\n");
-    Print("TagBoot: EFI RT services at ");
+    Print("TagBoot: EFI ST=");
+    PrintHex64(g_efi_system_table_phys);
+    Print(" RT=");
     PrintHex64(g_efi_rt_services_phys);
+    Print(" CT=");
+    PrintHex64(g_efi_cfg_table_phys);
+    Print(" entries=");
+    PrintDec(g_efi_cfg_table_count);
     Print(" fw_rev=");
     PrintHex64(g_efi_fw_revision);
     Print("\r\n");
@@ -1644,10 +1768,31 @@ EFI_STATUS EFIAPI TagBootMain(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
     status = SetupPageTables(kernel_end_phys);
     if (EFI_ERROR(status)) Panic("page table setup failed");
 
-    /* ----- 9. Fill boot_info_t v2 (includes RSDP — must be before EBS) ----- */
+    /* ----- 8b. Capture ESRT before EBS — it lives in EfiBootServicesData
+     *           per UEFI 2.10 §23.4 and would be reclaimed by PMM otherwise. */
+    {
+        uint32_t esrt_size = 0;
+        uint64_t esrt_src  = FindEsrt(&esrt_size);
+        if (esrt_src != 0 && esrt_size != 0) {
+            uint64_t nvs = CopyEsrtToNvs(esrt_src, esrt_size);
+            if (nvs != 0) {
+                g_efi_esrt_copy_phys = nvs;
+                g_efi_esrt_copy_size = esrt_size;
+                Print("TagBoot: ESRT copied to ACPI_NVS at ");
+                PrintHex64(nvs);
+                Print(" (");
+                PrintDec(esrt_size);
+                Print(" bytes)\r\n");
+            }
+        } else {
+            Print("TagBoot: ESRT not published by firmware\r\n");
+        }
+    }
+
+    /* ----- 9. Fill boot_info_t v4 (includes RSDP + ESRT — must be before EBS) ----- */
     FillBootInfo(&fb, mmap.e820_count, kernel_end_phys);
 
-    Print("TagBoot: boot_info at 0x9000 (v3, method=UEFI)\r\n");
+    Print("TagBoot: boot_info at 0x9000 (v4, method=UEFI)\r\n");
 
     /* ----- 10. ExitBootServices -----
      *
