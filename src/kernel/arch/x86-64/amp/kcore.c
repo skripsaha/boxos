@@ -110,7 +110,14 @@ static uint8_t kcore_find_least_loaded(void)
     uint32_t best_depth = UINT32_MAX;
 
     for (uint8_t i = 0; i < g_amp.total_cores; i++) {
-        if (!g_amp.cores[i].is_kcore) continue;
+        CoreDescriptor *c = &g_amp.cores[i];
+        if (!c->is_kcore) continue;
+        /* Skip K-Cores that never came online (boot timed out) or have
+         * been quiesced. Without this check a dead K-Core's empty queue
+         * always wins the "least loaded" race, the producer pushes the
+         * pocket, fires IPI_WAKE at a CPU that never returned from
+         * INIT — and the pocket sits in the ring forever. */
+        if (!amp_core_online(c)) continue;
         uint32_t depth = kcore_queue_depth(i);
         if (depth < best_depth) {
             best_depth = depth;

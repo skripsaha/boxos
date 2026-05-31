@@ -136,8 +136,124 @@ void cpu_detect_features(void) {
  * pre-Alder-Lake hardware) AND identically with themselves and the
  * intersection is a no-op. Cost is one CPUID per AP at boot, never
  * after. */
+/* IA32_BIOS_SIGN_ID — Intel SDM Vol 3A §9.11.7.1 / Vol 4 Table 2-2.
+ * AMD MSRC0001_0020 ("PatchLevel"): same address, layout differs as
+ * documented in cpu_microcode_revision below. */
+#define MSR_IA32_BIOS_SIGN_ID  0x0000008B
+
+static inline uint64_t cpu_rdmsr(uint32_t msr) {
+    uint32_t lo, hi;
+    __asm__ volatile("rdmsr" : "=a"(lo), "=d"(hi) : "c"(msr));
+    return ((uint64_t)hi << 32) | lo;
+}
+
+static inline void cpu_wrmsr(uint32_t msr, uint64_t v) {
+    __asm__ volatile("wrmsr" : :
+                     "c"(msr), "a"((uint32_t)v), "d"((uint32_t)(v >> 32)));
+}
+
+uint32_t cpu_microcode_revision(void) {
+    /* Intel: clear MSR, CPUID(1) writes the running revision into the
+     * high 32 bits as a side effect. AMD: MSR is already-current at
+     * power-on, the CPUID dance is a harmless no-op. */
+    cpu_wrmsr(MSR_IA32_BIOS_SIGN_ID, 0);
+    uint32_t a, b, c, d;
+    cpuid(CPUID_LEAF_FEATURES, &a, &b, &c, &d);
+    uint64_t v = cpu_rdmsr(MSR_IA32_BIOS_SIGN_ID);
+
+    /* Intel encodes revision in [63:32]; AMD encodes it in [31:0].
+     * Prefer Intel's slot when populated; fall back to AMD's when the
+     * high half is zero. Both empty ⇒ no microcode patch active. */
+    uint32_t intel_rev = (uint32_t)(v >> 32);
+    uint32_t amd_rev   = (uint32_t)(v & 0xFFFFFFFFu);
+    return intel_rev ? intel_rev : amd_rev;
+}
+
+void cpu_read_identity(cpu_identity_t* out) {
+    if (!out) return;
+
+    uint32_t a, b, c, d;
+
+    /* Vendor (CPUID 0). EBX-EDX-ECX order per Intel SDM Vol 2A. */
+    cpuid(CPUID_LEAF_VENDOR, &a, &b, &c, &d);
+    *((uint32_t*)&out->vendor[0]) = b;
+    *((uint32_t*)&out->vendor[4]) = d;
+    *((uint32_t*)&out->vendor[8]) = c;
+    out->vendor[12] = '\0';
+
+    /* CPUID(1).EAX layout:
+     *   3:0   stepping
+     *   7:4   base_model
+     *   11:8  base_family
+     *   13:12 type   (Intel; reserved/0 on AMD)
+     *   19:16 ext_model
+     *   27:20 ext_family
+     * Apply the Intel/AMD effective-family/model rules — see header. */
+    cpuid(CPUID_LEAF_FEATURES, &a, &b, &c, &d);
+    uint32_t base_family = (a >> 8)  & 0xF;
+    uint32_t base_model  = (a >> 4)  & 0xF;
+    uint32_t ext_family  = (a >> 20) & 0xFF;
+    uint32_t ext_model   = (a >> 16) & 0xF;
+
+    out->stepping = a & 0xF;
+    out->type     = (a >> 12) & 0x3;
+    out->family   = base_family + (base_family == 0x0F ? ext_family : 0);
+    out->model    = base_model  | ((base_family == 0x06 || base_family == 0x0F)
+                                    ? (ext_model << 4) : 0);
+    out->apic_id  = (b >> 24) & 0xFF;
+
+    /* Microcode revision LAST — cpu_microcode_revision itself runs
+     * CPUID(1) as part of its sequence, so we don't double-cost it
+     * here (the side-effect populates the MSR which we then read). */
+    out->microcode_rev = cpu_microcode_revision();
+}
+
+void cpu_log_identity(const char* prefix) {
+    cpu_identity_t id;
+    cpu_read_identity(&id);
+
+    /* Microcode revision == 0 means either "no patch loaded" (factory
+     * silicon) or the BIOS did not run the update. Log it as "none"
+     * for operator clarity rather than printing literal 0. */
+    if (id.microcode_rev) {
+        kprintf("[CPU] %s%svendor=%s family=0x%x model=0x%x stepping=%u "
+                "apic=%u microcode=0x%08x\n",
+                prefix ? prefix : "", prefix ? " " : "",
+                id.vendor, id.family, id.model, id.stepping,
+                id.apic_id, id.microcode_rev);
+    } else {
+        kprintf("[CPU] %s%svendor=%s family=0x%x model=0x%x stepping=%u "
+                "apic=%u microcode=none\n",
+                prefix ? prefix : "", prefix ? " " : "",
+                id.vendor, id.family, id.model, id.stepping, id.apic_id);
+    }
+}
+
 void cpu_intersect_features_ap(void) {
     uint32_t eax, ebx, ecx, edx;
+
+    /* Snapshot the BSP's pre-intersect view of the booleans we care
+     * about so we can report which (if any) flipped to 0 on this AP.
+     * Reading after the AND would always show the post-intersect value
+     * and miss the moment the bit was lost. */
+    bool bsp_x2apic       = g_cpu_caps.has_x2apic;
+    bool bsp_tsc_deadline = g_cpu_caps.has_tsc_deadline;
+    bool bsp_monitor      = g_cpu_caps.has_monitor;
+    bool bsp_xsave        = g_cpu_caps.has_xsave;
+    bool bsp_avx          = g_cpu_caps.has_avx;
+    bool bsp_pcid         = g_cpu_caps.has_pcid;
+    bool bsp_pat          = g_cpu_caps.has_pat;
+    bool bsp_avx512       = g_cpu_caps.has_avx512;
+    bool bsp_fsgsbase     = g_cpu_caps.has_fsgsbase;
+    bool bsp_smep         = g_cpu_caps.has_smep;
+    bool bsp_smap         = g_cpu_caps.has_smap;
+    bool bsp_umip         = g_cpu_caps.has_umip;
+    bool bsp_invpcid      = g_cpu_caps.has_invpcid;
+    bool bsp_tsc_adjust   = g_cpu_caps.has_tsc_adjust;
+    bool bsp_erms         = g_cpu_caps.has_erms;
+    bool bsp_fsrm         = g_cpu_caps.has_fsrm;
+    bool bsp_inv_tsc      = g_cpu_caps.has_invariant_tsc;
+    bool bsp_arat         = g_cpu_caps.has_arat;
 
     /* AND only the booleans that gate code emission / instruction
      * usage. max_basic_leaf / max_extended_leaf / vendor_string /
@@ -204,4 +320,35 @@ void cpu_intersect_features_ap(void) {
         cpuid(CPUID_LEAF_THERMAL_PM, &eax, &ebx, &ecx, &edx);
         g_cpu_caps.has_arat &= ((eax & (1u << 2)) != 0);
     }
+
+    /* Heterogeneity log — only fires when this AP actually flipped a
+     * cached BSP boolean to 0, so the boot log shows exactly which
+     * features the kernel had to drop because some AP couldn't
+     * service them. Quiet on homogeneous packages (the common case).
+     * The kernel-wide policy is already correct (the bit is now off
+     * for every consumer) — this is operator visibility, not enforcement. */
+    #define _LOG_DROP(name, was) \
+        do { if ((was) && !g_cpu_caps.has_##name) { \
+            kprintf("[CPU] AP feature drop: " #name " unavailable on this core; " \
+                    "kernel-wide " #name " now off\n"); \
+        } } while (0)
+    _LOG_DROP(x2apic,       bsp_x2apic);
+    _LOG_DROP(tsc_deadline, bsp_tsc_deadline);
+    _LOG_DROP(monitor,      bsp_monitor);
+    _LOG_DROP(xsave,        bsp_xsave);
+    _LOG_DROP(avx,          bsp_avx);
+    _LOG_DROP(pcid,         bsp_pcid);
+    _LOG_DROP(pat,          bsp_pat);
+    _LOG_DROP(avx512,       bsp_avx512);
+    _LOG_DROP(fsgsbase,     bsp_fsgsbase);
+    _LOG_DROP(smep,         bsp_smep);
+    _LOG_DROP(smap,         bsp_smap);
+    _LOG_DROP(umip,         bsp_umip);
+    _LOG_DROP(invpcid,      bsp_invpcid);
+    _LOG_DROP(tsc_adjust,   bsp_tsc_adjust);
+    _LOG_DROP(erms,         bsp_erms);
+    _LOG_DROP(fsrm,         bsp_fsrm);
+    _LOG_DROP(invariant_tsc, bsp_inv_tsc);
+    _LOG_DROP(arat,         bsp_arat);
+    #undef _LOG_DROP
 }

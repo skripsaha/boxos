@@ -7,6 +7,7 @@
 #include "scheduler.h"
 #include "idle.h"
 #include "kcore.h"
+#include "cpuid.h"
 
 void ap_entry_c(uint64_t core_index, uint64_t stack_top) {
     // per_core_init_ap sets up:
@@ -32,11 +33,39 @@ void ap_entry_c(uint64_t core_index, uint64_t stack_top) {
     scheduler_init_core((uint8_t)core_index);
     idle_process_init_core((uint8_t)core_index);
 
-    g_amp.cores[core_index].online = true;
+    /* Publish online=true with __ATOMIC_RELEASE so the BSP's amp_boot_aps
+     * acquire-load — and every peer that asks amp_core_online() — observes a
+     * fully-initialized per-core state (GDT/TSS/IST/LAPIC/timer/notify MSRs)
+     * before they see this flag set. On x86 TSO the prior plain stores are
+     * already ordered, but the explicit release pairs with the explicit
+     * acquire on read sites so the discipline is portable and machine-
+     * checkable rather than implicit. */
+    __atomic_store_n(&g_amp.cores[core_index].online, (uint8_t)1, __ATOMIC_RELEASE);
 
     kprintf("[AMP] Core %u online (LAPIC ID %u, role=%s)\n",
             (uint32_t)core_index, lapic_get_id(),
             g_amp.cores[core_index].is_kcore ? "K-Core" : "App-Core");
+
+    /* Per-AP CPU identity + microcode revision log. Operator-visible
+     * record of exactly what silicon services this core; lets the boot
+     * log surface heterogeneous packages (different family/model on
+     * different cores) and stale microcode on individual sockets. The
+     * cpu_intersect_features_ap call earlier emits a separate "feature
+     * drop" line if this AP forced any kernel-wide capability off. */
+    char prefix[24];
+    /* Tiny fixed-prefix formatter — kprintf is fine, but we want one
+     * single log line per AP rather than a tag + body split. */
+    const char *role = g_amp.cores[core_index].is_kcore ? "K" : "A";
+    /* Manual format: "AP %u (role=%s)" — small fixed sizes, no
+     * malloc. core_index fits in 3 digits (MAX_CORES=256 → 255). */
+    int p = 0;
+    prefix[p++] = 'A'; prefix[p++] = 'P'; prefix[p++] = ' ';
+    if (core_index >= 100) prefix[p++] = '0' + (core_index / 100);
+    if (core_index >= 10)  prefix[p++] = '0' + ((core_index / 10) % 10);
+    prefix[p++] = '0' + (core_index % 10);
+    prefix[p++] = ' '; prefix[p++] = '['; prefix[p++] = role[0];
+    prefix[p++] = ']'; prefix[p] = '\0';
+    cpu_log_identity(prefix);
 
     // K-Cores enter the guide loop — processes Pockets from MPSC queue.
     // App Cores idle until the scheduler assigns user processes.

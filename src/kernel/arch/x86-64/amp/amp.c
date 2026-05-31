@@ -176,12 +176,21 @@ void amp_init(void)
  * delivery-status polling, or single wrmsr on 0x830). Writing the
  * legacy MMIO ICR offsets directly on an x2APIC-enabled CPU is
  * reserved (Intel SDM Vol 3A §10.12.9) and produces #GP — observed on
- * STRICT mode with -cpu max prior to this refactor. */
+ * STRICT mode with -cpu max prior to this refactor.
+ *
+ * Spec note on the missing INIT-DEASSERT: the level-deassert phase is
+ * required ONLY for the discrete 82489DX APIC (Intel SDM Vol 3A
+ * §9.4.1). Pentium and later integrated APICs treat any INIT IPI as
+ * edge-triggered and ignore the deassert form — sending it just burns
+ * an ICR write (and on x2APIC a wrmsr round-trip). The §9.4.4 "MP
+ * Initialization Example" pseudo-code wraps the deassert in
+ * `if (APIC_VERSION is an 82489DX)` for this exact reason. BoxOS
+ * targets x86_64 (P6-era and later integrated APIC mandatory), so
+ * the deassert is dead code on every supported part. */
 static void send_init_ipi(uint8_t dest_lapic_id)
 {
     lapic_icr_write((uint32_t)dest_lapic_id, LAPIC_IPI_INIT);
     pit_delay_us(10000); // 10ms per Intel MP boot sequence
-    lapic_icr_write((uint32_t)dest_lapic_id, LAPIC_IPI_INIT_DEASSERT);
 }
 
 static void send_sipi(uint8_t dest_lapic_id, uint8_t vector_page)
@@ -284,42 +293,120 @@ void amp_boot_aps(void)
 
         send_init_ipi(c->lapic_id);
 
-        pit_delay_us(200);
-        send_sipi(c->lapic_id, sipi_vector);
+        /* Intel SDM Vol 3A §9.4.4 example loop: send SIPI, poll briefly,
+         * if AP didn't acknowledge send SIPI #2, then long-wait. Skipping
+         * the second SIPI on responsive APs saves ~200 µs per AP (visible
+         * at high core counts). The poll-window between SIPIs must be at
+         * least 200 µs (the SDM "BSP DELAYs (200 µSEC)" requirement); we
+         * use that as the floor and bail early as soon as online flips. */
         pit_delay_us(200);
         send_sipi(c->lapic_id, sipi_vector);
 
-        // Poll online flag with ~200ms timeout (1000 x 200us)
-        uint32_t timeout = 1000;
-        while (!c->online && timeout > 0)
-        {
+        uint32_t sipi1_polls = 0;
+        const uint32_t SIPI1_POLL_MAX = 1; /* >=200 µs minimum window */
+        bool ap_up = amp_core_online(c);
+        while (!ap_up && sipi1_polls < SIPI1_POLL_MAX) {
             pit_delay_us(200);
-            timeout--;
-            __asm__ volatile("" ::: "memory");
+            sipi1_polls++;
+            ap_up = amp_core_online(c);
         }
 
-        if (c->online)
-        {
+        if (!ap_up) {
+            send_sipi(c->lapic_id, sipi_vector);
+            pit_delay_us(200);
+        }
+
+        /* Long-wait timeout. Linux uses 1000 ms because BIOS-parked AP
+         * loops, microcode reload, and PLL relock on physically cold
+         * cores routinely exceed the old 200 ms ceiling on real boards.
+         * Iterating at 1 ms granularity keeps the wait responsive once
+         * the AP actually comes up. Intel SDM Vol 3A §9.4 gives no upper
+         * bound — the OS is told to retry/wait "as long as practical". */
+        const uint32_t LONG_WAIT_MS = 1000;
+        uint32_t waited_ms = 0;
+        ap_up = amp_core_online(c);
+        while (!ap_up && waited_ms < LONG_WAIT_MS) {
+            pit_delay_us(1000);
+            waited_ms++;
+            ap_up = amp_core_online(c);
+        }
+
+        if (ap_up) {
             booted++;
+        } else {
+            kprintf("[AMP] WARNING: Core %u (LAPIC %u) did not respond in %u ms\n",
+                    c->core_index, c->lapic_id, LONG_WAIT_MS);
+            /* Restore the guard PTE BEFORE pmm_free. Without this the
+             * zeroed leaf persists past the free; PMM hands the same
+             * physical frame to a future allocator, that caller's
+             * vmm_phys_to_virt resolves to the same VA, and the first
+             * access faults on the still-cleared PTE. Re-map to the
+             * original physical frame with kernel-RW so the Pull-Map
+             * invariant (every RAM byte addressable via vmm_phys_to_virt)
+             * is preserved after the free. IST stacks intentionally
+             * leak — per_core_alloc_ist may have allocated them with
+             * their own guard pages before the AP timed out, and we
+             * cannot recover their stack_phys pointers from here. */
+            if (guard_pte) {
+                *guard_pte = (uint64_t)(uintptr_t)stack_phys
+                             | VMM_FLAGS_KERNEL_RW;
+                vmm_shootdown_page(kctx, (uintptr_t)stack_virt);
+            }
+            pmm_free(stack_phys, CONFIG_KERNEL_STACK_TOTAL_PAGES);
         }
-        else
-        {
-            kprintf("[AMP] WARNING: Core %u (LAPIC %u) did not respond\n",
-                    c->core_index, c->lapic_id);
+    }
+
+    /* Re-derive the per-role counts from what actually came up. The
+     * pre-boot counts (set in amp_init from total_cores) lie when an AP
+     * declined to start — a stale k_count makes kcore_init allocate
+     * queues for dead cores AND makes kcore_find_least_loaded pick them.
+     * After this re-count, every consumer that walks g_amp.cores[]
+     * sees a layout that matches what is actually servicing IPIs. */
+    {
+        uint8_t live_k = 0, live_a = 0;
+        for (uint8_t i = 0; i < g_amp.total_cores; i++) {
+            CoreDescriptor *c = &g_amp.cores[i];
+            if (c->is_bsp) {
+                /* BSP is always online — it is the one running this code. */
+                __atomic_store_n(&c->online, (uint8_t)1, __ATOMIC_RELEASE);
+            }
+            if (!amp_core_online(c)) continue;
+            if (c->is_kcore) live_k++; else live_a++;
         }
+        g_amp.k_count   = live_k;
+        g_amp.app_count = live_a;
     }
 
     uint32_t expected = g_amp.total_cores - 1;
-    if (booted == expected)
-    {
+    if (booted == expected) {
         g_amp.multicore_active = true;
-        kprintf("[AMP] All %u AP(s) online. AMP active.\n", booted);
-    }
-    else
-    {
-        kprintf("[AMP] %u/%u AP(s) online.\n", booted, expected);
+        kprintf("[AMP] All %u AP(s) online. AMP active "
+                "(K-Cores=%u App-Cores=%u).\n",
+                booted, g_amp.k_count, g_amp.app_count);
+    } else {
+        kprintf("[AMP] %u/%u AP(s) online "
+                "(K-Cores=%u App-Cores=%u after dead-AP cleanup).\n",
+                booted, expected, g_amp.k_count, g_amp.app_count);
         if (booted > 0)
             g_amp.multicore_active = true;
+    }
+
+    /* Trampoline cleanup: the 0x8000 identity mapping installed for AP
+     * bring-up is no longer needed. Leaving it wired exposes a writable
+     * code page at a well-known low address (Intel BIOS Writer's Guide
+     * §"AP cleanup") and pins one PMM page for the boot lifetime. The
+     * page was identity-mapped via vmm_map_page (PRESENT|WRITABLE) and
+     * its trampoline contents were never re-used after the last SIPI;
+     * unmap with cross-core shootdown so peer APs drop any cached TLB
+     * entry for the VA before some unrelated alloc reuses the physical
+     * frame. */
+    {
+        vmm_context_t *kctx = vmm_get_kernel_context();
+        pte_t *t = vmm_get_or_create_pte(kctx, AP_TRAMPOLINE_PHYS);
+        if (t) {
+            *t = 0;
+            vmm_shootdown_page(kctx, AP_TRAMPOLINE_PHYS);
+        }
     }
 }
 

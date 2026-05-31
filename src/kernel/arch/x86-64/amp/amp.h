@@ -11,7 +11,15 @@ typedef struct {
     uint8_t  core_index;
     bool     is_bsp;
     bool     is_kcore;
-    volatile bool online;
+    /* online: written by the AP from ap_entry_c with __ATOMIC_RELEASE after all
+     * per-core state has been published; read by the BSP in amp_boot_aps with
+     * __ATOMIC_ACQUIRE for the wait loop, and by every cross-CPU peer (IPI
+     * broadcast, kcore_find_least_loaded, panic-halt) with __ATOMIC_ACQUIRE to
+     * prove the target CPU is actually servicing interrupts. The flag is plain
+     * uint8_t (not volatile bool) because every access is wrapped in the
+     * C11 atomic builtins — `volatile` would only suppress the compiler's
+     * scheduler, not provide cross-CPU ordering. */
+    uint8_t  online;
 } CoreDescriptor;
 
 typedef struct {
@@ -32,5 +40,13 @@ uint8_t amp_get_core_index(void);
 bool amp_is_kcore(void);
 bool amp_is_appcore(void);
 uint32_t amp_calculate_kcores(uint32_t total_cores);
+
+/* True when the descriptor's `online` flag is set with __ATOMIC_ACQUIRE
+ * semantics. Wraps the C11 atomic load so every caller (kcore submit,
+ * IPI broadcast, panic halt) picks up the same memory-ordering rule
+ * the AP wrote with on the publish side. */
+static inline bool amp_core_online(const CoreDescriptor *c) {
+    return __atomic_load_n(&c->online, __ATOMIC_ACQUIRE) != 0;
+}
 
 #endif // AMP_H

@@ -398,7 +398,7 @@ void vmm_shootdown_pages(vmm_context_t *ctx, uintptr_t virt_addr, size_t page_co
     {
         if (c == my_core)
             continue;
-        if (!g_amp.cores[c].online)
+        if (!amp_core_online(&g_amp.cores[c]))
             continue;
 
         if (is_kernel)
@@ -519,7 +519,7 @@ void vmm_shootdown_all_cores_full(void)
 
     for (uint8_t c = 0; c < g_amp.total_cores; c++) {
         if (c == my_core) continue;
-        if (!g_amp.cores[c].online) continue;
+        if (!amp_core_online(&g_amp.cores[c])) continue;
         targets[target_count++] = c;
     }
 

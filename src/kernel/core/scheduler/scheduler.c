@@ -641,7 +641,7 @@ static process_t *sched_try_steal(uint8_t my_core)
     {
         if (c == my_core) continue;
         if (g_amp.cores[c].is_kcore) continue;
-        if (!g_amp.cores[c].online) continue;
+        if (!amp_core_online(&g_amp.cores[c])) continue;
         if (scheduler_is_core_parked(c)) continue;
 
         uint32_t cnt = RunqueueAtomicTotal(&g_core_sched[c].runqueue);
