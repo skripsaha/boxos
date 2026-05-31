@@ -36,9 +36,15 @@ static __attribute__((noinline)) void PhysWrite16(uint64_t addr, uint16_t val)
 }
 
 #define BOOT_INFO_MAGIC       0x42583031U   /* "BX01" */
-#define BOOT_INFO_VERSION_V2  2U
-#define BOOT_INFO_VERSION_V3  3U   /* adds EFI runtime services + mmap copy */
-#define BOOT_INFO_VERSION_V4  4U   /* adds system_table + cfg_table + ESRT copy */
+#define BOOT_INFO_VERSION_V4  4U   /* current TagBoot output: system_table +
+                                    * cfg_table + ESRT copy + EFI RT handoff */
+
+/* Defensive ceiling on EFI Configuration Table entry count. Real firmware
+ * publishes 6-20 entries (ACPI 1.0, ACPI 2.0, SMBIOS 2.1/3.0, ESRT, MPS,
+ * SAL, debug-image-info, RT-properties, etc.). A count larger than this
+ * indicates a corrupted system table; treat as "no entries" rather than
+ * loop over uncontrolled memory. */
+#define EFI_CFG_TABLE_MAX_ENTRIES  256U
 
 #define KERNEL_LOAD_ADDR      0x100000ULL
 
@@ -251,14 +257,32 @@ static void Com1Str(const char *s)
  * Utility: print to UEFI console
  * ========================================================================= */
 
-/* Print a narrow ASCII string by converting each char to CHAR16 on the fly. */
+/* Print a narrow ASCII string by widening to CHAR16 in a stack buffer,
+ * then one output_string call. Pre-fix did one boot-service call per
+ * character, which on serial console + heavy logging meant each line
+ * cost ~80 round-trips through firmware. Batching is a ~10x reduction
+ * in boot-time wall clock when the firmware funnels console through a
+ * 115200-baud serial port (real HP/Lenovo enterprise default).
+ *
+ * Buffer is on stack so re-entrant from any context; sized for the
+ * longest line we emit (~96 chars after rounding up). Strings longer
+ * than the buffer are chunked. */
 static void Print(const char *msg)
 {
-    if (!g_st || !g_st->con_out) return;
-    CHAR16 buf[2];
-    buf[1] = 0;
+    if (!g_st || !g_st->con_out || !msg) return;
+
+    CHAR16 buf[129];   /* 128 chars + terminator */
+    size_t pos = 0;
     for (size_t i = 0; msg[i]; i++) {
-        buf[0] = (CHAR16)(unsigned char)msg[i];
+        buf[pos++] = (CHAR16)(unsigned char)msg[i];
+        if (pos == 128) {
+            buf[128] = 0;
+            g_st->con_out->output_string(g_st->con_out, buf);
+            pos = 0;
+        }
+    }
+    if (pos > 0) {
+        buf[pos] = 0;
         g_st->con_out->output_string(g_st->con_out, buf);
     }
 }
@@ -313,14 +337,26 @@ static uint64_t FindAcpiRsdp(void)
 {
     if (!g_st || g_st->number_of_table_entries == 0) return 0;
 
+    /* Defensive: a sane firmware whose ConfigurationTable[] pointer is NULL
+     * MUST report number_of_table_entries==0 (UEFI 2.10 §4.3). Real boards
+     * are not always sane — refuse to deref NULL with non-zero count. */
+    EFI_CONFIGURATION_TABLE *ct = g_st->configuration_table;
+    if (!ct) return 0;
+
+    /* Bound the iteration. A corrupt system table with a >256 entry count
+     * (real firmware ships ~6-20) would otherwise have us scan arbitrary
+     * memory. Capped scan returns whatever ACPI/SMBIOS/ESRT GUIDs we find
+     * in the legitimate prefix and ignores the rest. */
+    UINTN n = g_st->number_of_table_entries;
+    if (n > EFI_CFG_TABLE_MAX_ENTRIES) n = EFI_CFG_TABLE_MAX_ENTRIES;
+
     EFI_GUID acpi20_guid = EFI_ACPI_20_TABLE_GUID;
     EFI_GUID acpi10_guid = EFI_ACPI_TABLE_GUID;
-    EFI_CONFIGURATION_TABLE *ct = g_st->configuration_table;
 
     uint64_t rsdp_v2 = 0;
     uint64_t rsdp_v1 = 0;
 
-    for (UINTN i = 0; i < g_st->number_of_table_entries; i++) {
+    for (UINTN i = 0; i < n; i++) {
         if (GuidEqual(&ct[i].vendor_guid, &acpi20_guid))
             rsdp_v2 = (uint64_t)(uintptr_t)ct[i].vendor_table;
         else if (GuidEqual(&ct[i].vendor_guid, &acpi10_guid))
@@ -1052,10 +1088,15 @@ static uint64_t FindEsrt(uint32_t *out_size)
     *out_size = 0;
     if (!g_st || g_st->number_of_table_entries == 0) return 0;
 
-    EFI_GUID esrt_guid = EFI_SYSTEM_RESOURCE_TABLE_GUID;
     EFI_CONFIGURATION_TABLE *ct = g_st->configuration_table;
+    if (!ct) return 0;   /* same defense as FindAcpiRsdp */
 
-    for (UINTN i = 0; i < g_st->number_of_table_entries; i++) {
+    UINTN n = g_st->number_of_table_entries;
+    if (n > EFI_CFG_TABLE_MAX_ENTRIES) n = EFI_CFG_TABLE_MAX_ENTRIES;
+
+    EFI_GUID esrt_guid = EFI_SYSTEM_RESOURCE_TABLE_GUID;
+
+    for (UINTN i = 0; i < n; i++) {
         if (!GuidEqual(&ct[i].vendor_guid, &esrt_guid)) continue;
 
         EsrtHeader *hdr = (EsrtHeader *)ct[i].vendor_table;
@@ -1225,11 +1266,18 @@ static EFI_STATUS DoExitBootServices(EFI_HANDLE image_handle)
 
         /* First call: get required buffer size (EFI_BUFFER_TOO_SMALL expected). */
         g_bs->get_memory_map(&map_size, NULL, &key, &desc_sz, &desc_ver);
-        /* Slack for any allocation we make between this and ExitBootServices:
-         *   - the AllocatePages call itself creates a new descriptor split,
-         *   - some firmware fires watchdog/timer events that allocate more.
-         * 32 descriptors is wide enough for any reasonable firmware. */
-        map_size += desc_sz * 32;
+        /* Slack for allocations we (and firmware) may do between this sizing
+         * call and ExitBootServices:
+         *   - the AllocatePages below splits the conventional-memory region
+         *     containing our buffer into two descriptors;
+         *   - many enterprise firmwares (HP Z, Lenovo, Insyde-based servers)
+         *     fire 4-8 memory-allocating events per attempt while TPL
+         *     timers and RT-virtualisation tables get rearranged;
+         *   - QEMU OVMF can fire CPU-add / hot-plug events on multi-AP boot
+         *     before ExitBootServices completes.
+         * Linux uses 256 (1<<8) for the same reason. 32 was observed
+         * insufficient on real HP Z440 firmware (audit 2026-05-31). */
+        map_size += desc_sz * 256;
 
         /* Round up to whole pages — AllocatePages is page-granular. */
         UINTN pages = (map_size + PAGE_4KB - 1) / PAGE_4KB;
@@ -1278,13 +1326,18 @@ static EFI_STATUS DoExitBootServices(EFI_HANDLE image_handle)
         s = g_bs->exit_boot_services(image_handle, key);
         if (!EFI_ERROR(s)) return EFI_SUCCESS;
 
-        /* ExitBootServices failed — typically EFI_INVALID_PARAMETER because
-         * something (TPL change, async event) bumped the map key between
-         * GetMemoryMap and our call. Free + retry. */
+        /* ExitBootServices failed — typically EFI_INVALID_PARAMETER (0x80000002)
+         * because something (TPL change, async event) bumped the map key
+         * between GetMemoryMap and our call. Other codes worth seeing on
+         * console for triage on real boards: EFI_OUT_OF_RESOURCES (0x80000009)
+         * indicates firmware is starved and may need a power cycle. Logging
+         * the status hex lets us tell them apart without a debugger. */
         last_status = s;
         Print("TagBoot: EBS attempt ");
         PrintDec(attempt);
-        Print(" — exit_boot_services rejected key, retrying\r\n");
+        Print(" — exit_boot_services failed status=");
+        PrintHex64((uint64_t)s);
+        Print(", retrying\r\n");
         g_bs->free_pages(buf_pa, pages);
         g_efi_mmap_copy_phys = 0;
         g_efi_mmap_copy_size = 0;
@@ -1600,11 +1653,39 @@ EFI_STATUS EFIAPI TagBootMain(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
     g_efi_fw_revision        = st->firmware_revision;
     g_efi_system_table_phys  = (uint64_t)(uintptr_t)st;
     g_efi_cfg_table_phys     = (uint64_t)(uintptr_t)st->configuration_table;
-    g_efi_cfg_table_count    = (uint32_t)st->number_of_table_entries;
+
+    /* Bound the count we forward to the kernel. Real firmware publishes
+     * ~6-20 entries; anything bigger here points at memory corruption
+     * (or, in adversarial scenarios, a tampered system table). The kernel
+     * walker uses this count as its loop bound, so capping at the source
+     * prevents a kernel-side OOB read even if downstream code forgets to
+     * re-check. */
+    uint64_t cfg_count_raw = st->number_of_table_entries;
+    if (cfg_count_raw > EFI_CFG_TABLE_MAX_ENTRIES)
+        cfg_count_raw = EFI_CFG_TABLE_MAX_ENTRIES;
+    g_efi_cfg_table_count    = (uint32_t)cfg_count_raw;
 
     st->con_out->clear_screen(st->con_out);
     Print("TagBoot v4 — BoxOS UEFI Bootloader\r\n");
     Print("------------------------------------\r\n");
+
+    /* Firmware vendor string is a CHAR16* in EfiRuntimeServicesData and
+     * survives EBS. Print as ASCII (best-effort transliteration; high
+     * bytes are dropped). Lets operator see "American Megatrends",
+     * "Insyde", "HP", "Apple", etc. without a debugger. */
+    if (st->firmware_vendor) {
+        Print("TagBoot: firmware vendor=");
+        for (CHAR16 *v = st->firmware_vendor; *v; v++) {
+            CHAR16 ch[2];
+            ch[0] = (*v < 0x80) ? *v : (CHAR16)'?';
+            ch[1] = 0;
+            st->con_out->output_string(st->con_out, ch);
+        }
+        Print(" rev=");
+        PrintHex64(g_efi_fw_revision);
+        Print("\r\n");
+    }
+
     Print("TagBoot: EFI ST=");
     PrintHex64(g_efi_system_table_phys);
     Print(" RT=");
@@ -1613,8 +1694,6 @@ EFI_STATUS EFIAPI TagBootMain(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
     PrintHex64(g_efi_cfg_table_phys);
     Print(" entries=");
     PrintDec(g_efi_cfg_table_count);
-    Print(" fw_rev=");
-    PrintHex64(g_efi_fw_revision);
     Print("\r\n");
 
     /* ----- 1. Find Block IO ----- */
@@ -1800,10 +1879,18 @@ EFI_STATUS EFIAPI TagBootMain(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
      * is slow to come up (large E820, AP wakeup, disk init), the firmware
      * will reset the box mid-boot. Disable the watchdog before handing off:
      * timeout=0 cancels it. Spec §7.5 — kernel never returns, so we never
-     * want to be reset by it. Some firmware ignores the call (returns
-     * EFI_UNSUPPORTED) — harmless, we proceed regardless.
+     * want to be reset by it. Some firmware returns EFI_UNSUPPORTED (no
+     * watchdog implementation) — harmless, we proceed regardless. Log the
+     * status so an unexpected EFI_DEVICE_ERROR surfaces in the boot log.
      */
-    g_bs->set_watchdog_timer(0, 0, 0, NULL);
+    {
+        EFI_STATUS wd = g_bs->set_watchdog_timer(0, 0, 0, NULL);
+        if (EFI_ERROR(wd)) {
+            Print("TagBoot: watchdog disable returned status=");
+            PrintHex64((uint64_t)wd);
+            Print(" (proceeding)\r\n");
+        }
+    }
 
     Print("TagBoot: exiting boot services...\r\n");
 
