@@ -130,13 +130,24 @@ typedef struct IrqDeferSlot {
 } IrqDeferSlot;
 
 /* Flexible array — slots are appended in memory immediately after the
- * header so a single kmalloc allocates the whole chunk. */
+ * header so a single kmalloc allocates the whole chunk.
+ *
+ * Cacheline layout: the producer cursor (prod_idx) and the consumer
+ * cursors (cons_idx, consumed_count) sit on SEPARATE cachelines so the
+ * producer's atomic fetch_add never invalidates the consumer's CAS line
+ * and vice-versa. This is the io_uring / Disruptor / rigtorp pattern —
+ * skipping it leaves visible "cache-line bouncing" tail latencies under
+ * cross-core production, which the MPMC pump explicitly enables. */
 typedef struct IrqDeferChunk {
     volatile uint32_t            prod_idx;        /* producer claim cursor */
+    char _pad_prod[CONFIG_CACHE_LINE_SIZE - sizeof(uint32_t)];
+
     volatile uint32_t            cons_idx;        /* consumer CAS claim cursor */
     volatile uint32_t            consumed_count;  /* handlers actually returned */
-    volatile struct IrqDeferChunk *next;
-    uint32_t                      capacity;
+    char _pad_cons[CONFIG_CACHE_LINE_SIZE - 2 * sizeof(uint32_t)];
+
+    volatile struct IrqDeferChunk *next;          /* set once at chain extension */
+    uint32_t                      capacity;       /* immutable after init */
     IrqDeferSlot                  slots[];
 } IrqDeferChunk;
 
