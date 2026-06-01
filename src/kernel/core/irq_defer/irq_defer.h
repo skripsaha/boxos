@@ -35,6 +35,38 @@
  * chunk reclamation. Any pumping core (typically a K-Core stalled in a
  * sync I/O wait loop) may drain any core's ring without corrupting state.
  *
+ * Why no producer hazard? Two structural invariants — together — make MP
+ * producer-side hazards redundant:
+ *
+ *   (1) "Write-slot" path (fetch_add returned idx < capacity):
+ *       cons_chunk can advance past chunk X only after cons_idx hits
+ *       capacity. cons_idx advances only by claiming a slot with ready=1.
+ *       ready=1 is set only after the owning producer has written
+ *       handler/ctx and done its release store. Hence cons_idx == capacity
+ *       implies every claimed slot has been fully published — no producer
+ *       can be mid-write in X by the time X is eligible for retirement.
+ *
+ *   (2) "Advance" path (fetch_add returned idx >= capacity):
+ *       The producer reads ch->next and CAS-advances prod_chunk. X cannot
+ *       be retired during this window because try_advance_cons_chunk()
+ *       checks `cur_prod != ch` and refuses to advance cons_chunk while
+ *       prod_chunk still points at ch. cur_prod transitions away from ch
+ *       only when SOME producer's CAS-advance succeeds — by which point
+ *       that producer has finished accessing ch entirely (the CAS is its
+ *       last touch). Consequently a producer mid-advance always sees an
+ *       intact, non-reset ch.
+ *
+ * Both invariants hold for any number of concurrent producers — current
+ * deployment is SP-per-ring (per-core IRQ serialisation), but the design
+ * is correct under arbitrary MP-per-ring (cross-core notification, future
+ * RT extensions) as long as producers run to publication once they have
+ * fetch_add'd. Kernel IRQ context guarantees the latter (handlers run to
+ * completion without preemption). A user-space port where producers may
+ * be preempted between fetch_add and the ready store would be the one
+ * scenario where producer-side hazard pointers (with the SEQ_CST publish-
+ * then-recheck mfence) would become necessary — see commit history's
+ * audit notes for the implementation sketch.
+ *
  * Design constraints (matching BoxOS philosophy: динамика, асинхронность,
  * уникальность, стабильность)
  * ---------------------------------------------------------------------
