@@ -75,6 +75,11 @@
 
 #define CONFIG_ASYNC_DISPATCH_INTERVAL_MS 1
 #define CONFIG_DMA_TIMEOUT_CHECK_INTERVAL_MS 100
+
+#define CONFIG_IRQ_DEFER_INITIAL_CAPACITY    16U
+#define CONFIG_IRQ_DEFER_MAX_CHUNK_CAPACITY  1024U
+#define CONFIG_IRQ_DEFER_GROWTH_FACTOR       2U   // each new chunk = prev × this, up to MAX_CHUNK_CAPACITY
+#define CONFIG_IRQ_DEFER_PRODUCER_RETRIES    4    // bounded chunk-advance retries per irq_defer() call
 #define CONFIG_ASYNC_IO_QUEUE_TIMEOUT_MS 5000 // 5s timeout for pending I/O in queue
 #define CONFIG_ASYNC_IO_BGND_SERVE_INTERVAL 8 // dequeue 1 BGND per N DATA dequeues
 #define CONFIG_FRIEND_ZONE_CACHE_MAX_PAGES 64 // max pages cached per Friend zone

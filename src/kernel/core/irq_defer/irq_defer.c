@@ -4,15 +4,11 @@
 #include "atomics.h"
 #include "kernel_config.h"
 
-/* Initial and maximum chunk sizes — see kernel_config.h for production
- * tuning. The chain grows in doubling steps until either capacity is hit
- * or steady-state has been reached. */
-#ifndef CONFIG_IRQ_DEFER_INITIAL_CAPACITY
-#define CONFIG_IRQ_DEFER_INITIAL_CAPACITY  16U
-#endif
-#ifndef CONFIG_IRQ_DEFER_MAX_CHUNK_CAPACITY
-#define CONFIG_IRQ_DEFER_MAX_CHUNK_CAPACITY 1024U
-#endif
+/* All tuning lives in kernel_config.h:
+ *   CONFIG_IRQ_DEFER_INITIAL_CAPACITY    starting slot count per chunk
+ *   CONFIG_IRQ_DEFER_MAX_CHUNK_CAPACITY  ceiling on a chunk's slot count
+ *   CONFIG_IRQ_DEFER_GROWTH_FACTOR       per-step multiplier on chunk size
+ *   CONFIG_IRQ_DEFER_PRODUCER_RETRIES    bounded retries inside irq_defer() */
 
 IrqDeferCore     *g_irq_defer            = NULL;
 CoreHazard       *g_pump_hazards         = NULL;
@@ -35,17 +31,13 @@ static IrqDeferChunk *chunk_alloc(uint32_t capacity)
 
 static void chunk_reset(IrqDeferChunk *ch)
 {
-    /* Slot.ready=0 is the "untouched" sentinel the consumer relies on
-     * before CAS-claim. Reset all bookkeeping cursors. */
-    for (uint32_t i = 0; i < ch->capacity; i++) {
-        ch->slots[i].handler = NULL;
-        ch->slots[i].ctx     = NULL;
-        ch->slots[i].ready   = 0;
-    }
-    ch->prod_idx       = 0;
-    ch->cons_idx       = 0;
-    ch->consumed_count = 0;
-    ch->next           = NULL;
+    /* Zero everything except the immutable `capacity`. slot.ready=0 is
+     * the "untouched" sentinel the consumer relies on before CAS-claim;
+     * all bookkeeping cursors restart at 0 for the next round. */
+    uint32_t cap = ch->capacity;
+    size_t bytes = sizeof(IrqDeferChunk) + (size_t)cap * sizeof(IrqDeferSlot);
+    memset(ch, 0, bytes);
+    ch->capacity = cap;
 }
 
 /* ==========================================================================
@@ -167,14 +159,14 @@ static void refill_producer_chain(IrqDeferCore *c)
         (void *volatile *)&prod->next, __ATOMIC_ACQUIRE);
     if (prod_next) return;  /* already has a successor */
 
-    /* Prefer recycled chunks; fall back to a fresh kmalloc that doubles
-     * capacity (up to the per-chunk ceiling). */
+    /* Prefer recycled chunks; fall back to a fresh kmalloc that scales
+     * capacity by CONFIG_IRQ_DEFER_GROWTH_FACTOR up to the ceiling. */
     IrqDeferChunk *fresh = free_list_pop(c);
     if (!fresh) {
-        uint32_t new_cap = prod->capacity * 2u;
+        uint32_t new_cap = prod->capacity * CONFIG_IRQ_DEFER_GROWTH_FACTOR;
         if (new_cap > (uint32_t)CONFIG_IRQ_DEFER_MAX_CHUNK_CAPACITY)
             new_cap = (uint32_t)CONFIG_IRQ_DEFER_MAX_CHUNK_CAPACITY;
-        if (new_cap < prod->capacity) new_cap = prod->capacity;
+        if (new_cap < prod->capacity) new_cap = prod->capacity;  /* overflow guard */
         fresh = chunk_alloc(new_cap);
         if (fresh) atomic_fetch_add_u64(&c->chunks_allocated, 1);
     }
@@ -235,10 +227,19 @@ void irq_defer_init(void)
 /* ==========================================================================
  *  Producer — irq_defer()
  *
- *  Lock-free, allocation-free. Single producer per ring in current use
- *  (per-core IRQ serialisation guarantees this), but written MP-safely via
- *  atomic fetch_add on prod_idx and CAS on prod_chunk so remote-producer
- *  use cases (cross-core notifications, future RT extensions) work too.
+ *  Lock-free, allocation-free, IRQ-safe.
+ *
+ *  Concurrency model: SINGLE producer per ring. Each call routes to the
+ *  calling core's own ring (amp_get_core_index()), and IRQs on a single
+ *  core are serialised by the LAPIC — so the producer side of any given
+ *  ring sees at most one writer at a time. The atomic fetch_add on
+ *  prod_idx and CAS on prod_chunk are still required because the consumer
+ *  side is MPMC and may load these fields concurrently.
+ *
+ *  Cross-core producer (e.g. cross-CPU notification queue) would require
+ *  producer-side hazard pointers to make chunk recycling safe against a
+ *  mid-flight stale producer. Not implemented today because no caller
+ *  needs it; adding it cleanly is a separate audit.
  * ========================================================================== */
 
 void irq_defer(void (*handler)(void *), void *ctx)
@@ -254,10 +255,10 @@ void irq_defer(void (*handler)(void *), void *ctx)
     IrqDeferCore *c = &g_irq_defer[core];
 
     /* Bounded loop: retry only enough times to chase legitimate chunk
-     * advances. 4 iterations covers the worst-case race-stack we can
+     * advances. The cap covers the worst-case race-stack we can
      * generate with a single producer (chunk-advance + concurrent CAS
-     * loss). */
-    for (int attempt = 0; attempt < 4; attempt++) {
+     * loss). Tunable via CONFIG_IRQ_DEFER_PRODUCER_RETRIES. */
+    for (int attempt = 0; attempt < CONFIG_IRQ_DEFER_PRODUCER_RETRIES; attempt++) {
         IrqDeferChunk *ch = (IrqDeferChunk *)__atomic_load_n(
             (void *volatile *)&c->prod_chunk, __ATOMIC_ACQUIRE);
 
@@ -357,9 +358,18 @@ static bool try_advance_cons_chunk(IrqDeferCore *c, IrqDeferChunk *ch,
     return false;
 }
 
-/* Publish the hazard pointer with the standard re-check pattern. Returns
- * the chunk pointer the hazard now protects, or NULL if cons_chunk is
- * empty. */
+/* Publish the hazard pointer with the standard re-check pattern (Maged
+ * Michael 2004 §3). Returns the chunk pointer the hazard now protects,
+ * or NULL if cons_chunk is empty.
+ *
+ * x86 TSO + correctness: the hazard store must be globally visible
+ * before the cons_chunk reload completes — otherwise reclaim on another
+ * core can read a stale (NULL or older) hazard, conclude ch is safe to
+ * free, recycle ch, and then this thread proceeds to use a recycled
+ * chunk → use-after-free. A plain RELEASE store leaves the store in the
+ * local CPU's store buffer and x86 explicitly permits StoreLoad
+ * reordering — only a SEQ_CST store (compiled to mov + mfence, or
+ * xchg) flushes that buffer before the subsequent load. */
 static IrqDeferChunk *acquire_hazard(IrqDeferCore *c,
                                      volatile struct IrqDeferChunk **hazard)
 {
@@ -370,8 +380,10 @@ static IrqDeferChunk *acquire_hazard(IrqDeferCore *c,
             __atomic_store_n(hazard, NULL, __ATOMIC_RELEASE);
             return NULL;
         }
+        /* SEQ_CST: see comment above. The mfence emitted here is the
+         * only correctness-critical store on the pump hot path. */
         __atomic_store_n(hazard, (volatile struct IrqDeferChunk *)ch,
-                         __ATOMIC_RELEASE);
+                         __ATOMIC_SEQ_CST);
 
         IrqDeferChunk *recheck = (IrqDeferChunk *)__atomic_load_n(
             (void *volatile *)&c->cons_chunk, __ATOMIC_ACQUIRE);
