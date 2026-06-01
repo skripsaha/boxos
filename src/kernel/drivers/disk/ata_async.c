@@ -610,27 +610,27 @@ int ata_dma_sync(uint8_t drive_idx, uint64_t lba, uint16_t count,
      * point to the BSP via the IO-APIC; a K-Core caller would HLT
      * forever waiting for an IRQ that never arrives on its LAPIC.
      *
-     * Pump our own irq_defer ring on every iteration: when WE are the
-     * BSP the IRQ deferred its completion to our ring and nothing else
-     * will drain it (the kcore_run_loop isn't running while we're
-     * waiting here). For non-BSP callers the BSP's normal kcore loop
-     * pumps its own ring and our cmd.done eventually flips, the spin
-     * just observes it.
+     * Pump BOTH the local ring AND the BSP's ring. The BMIDE completion
+     * is irq_defer'd onto whichever core received the IRQ — for legacy
+     * GSI 14 routing that is the BSP. Now that irq_defer is MPMC, the
+     * caller drains it directly without waiting for the BSP to fall out
+     * of whatever it's doing (a critical fix for the case where the BSP
+     * itself is spinning on a lock held by this caller — the textbook
+     * BMIDE × OFE write_lock deadlock).
      *
      * No deadline / no timeout return: the stack-allocated `cmd` becomes
      * invalid the moment this function returns, but the IRQ-deferred
-     * completion holds a pointer to it and may not have run yet (it
-     * could be sitting in irq_defer waiting for a pump cycle). Returning
-     * early on a deadline would race the deferred bottom-half writing
-     * to a dead stack frame — a UAF on real-HW transient stalls. The
+     * completion holds a pointer to it and may not have run yet. The
      * canonical recovery for a wedged BMIDE channel is a watchdog-
      * driven SRST reset (future work); until that lands, sync I/O
      * blocks until the drive answers. Healthy drives complete in <1 ms
      * so this is not observable in production. */
     uint8_t self_core = amp_get_core_index();
+    uint8_t bsp_core  = g_amp.bsp_index;
     asm volatile("sti" ::: "memory");
     while (!__atomic_load_n(&cmd.done, __ATOMIC_ACQUIRE)) {
         irq_defer_pump(self_core);
+        if (bsp_core != self_core) irq_defer_pump(bsp_core);
         cpu_pause();
     }
 
