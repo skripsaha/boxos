@@ -2,7 +2,7 @@
 #define IRQ_DEFER_H
 
 /* =========================================================================
- *  IrqDefer — elastic per-core deferred-work ring for IRQ bottom-halves
+ *  IrqDefer — MPMC per-core deferred-work ring for IRQ bottom-halves
  * =========================================================================
  *
  * Problem this solves
@@ -19,59 +19,70 @@
  *
  * The fix is the universal pattern: every IRQ handler that needs heap or
  * tagfs or process state defers the work to a K-Core context where those
- * locks may be taken safely. This file implements that defer mechanism.
+ * locks may be taken safely.
+ *
+ * MPMC: any core can pump any ring
+ * --------------------------------
+ * Legacy IO-APIC routing pins certain IRQs (BMIDE GSI 14, SCI, ...) to a
+ * single CPU — typically the BSP. The deferred handler then lives on that
+ * one core's ring, and only that core can drain it. If the BSP is stuck
+ * spinning on a lock held by a different K-Core that is itself waiting on
+ * an IRQ completion deferred to the BSP's ring, the system deadlocks.
+ *
+ * To break that class of bug, the ring is MPMC: producer side stays SP
+ * (each IRQ writes its own core's ring), but the consumer side is multi-
+ * consumer safe via CAS-claim on `cons_idx` + hazard-pointer-protected
+ * chunk reclamation. Any pumping core (typically a K-Core stalled in a
+ * sync I/O wait loop) may drain any core's ring without corrupting state.
  *
  * Design constraints (matching BoxOS philosophy: динамика, асинхронность,
  * уникальность, стабильность)
  * ---------------------------------------------------------------------
- *   - **Unbounded** — no compile-time slot cap. Storage adapts to load.
- *   - **Dynamic** — capacity grows in steps with the working set, shrinks
- *     (via free-list reuse) when load subsides.
- *   - **No hardcode** — initial chunk size and growth factor are
- *     configurable (kernel_config.h), not magic constants in code.
- *   - **IRQ-safe** — producer path is allocation-free, lock-free; uses
- *     only atomics and pre-existing slots. NO kmalloc/free/spinlock_t.
+ *   - **Unbounded** — no compile-time slot cap. Storage adapts to load via
+ *     chunk chaining; chunk capacity grows in doubling steps.
+ *   - **Dynamic** — drained chunks return to a per-core free-list; growth
+ *     stops once steady-state working set is satisfied.
+ *   - **No hardcode** — initial chunk size and growth factor live in
+ *     kernel_config.h, not magic constants in code.
+ *   - **IRQ-safe producer** — `irq_defer()` is allocation-free, lock-free,
+ *     uses only atomics + pre-existing slots. Safe from any IRQ context.
+ *   - **MPMC consumer** — `irq_defer_pump(core_idx)` may be called from
+ *     ANY core concurrently with any other call. Slots are CAS-claimed;
+ *     handlers run exactly once.
+ *   - **Memory-safe chunk reclaim** — hazard pointers per pumping core
+ *     guarantee no consumer dereferences a freed chunk. Retirement is
+ *     two-stage: advance cons_chunk → push to retired list → reclaim
+ *     when all hazards have moved on AND all in-chunk handlers returned.
  *   - **Production failure mode** — when the producer cannot find a slot
- *     (extreme burst beyond any pre-allocated chunk plus its successors),
- *     it drops the event and increments a counter. K-Core observes the
- *     counter via telemetry; never panics. Drop is graceful because the
- *     only callers that defer are AHCI completion (process times out and
- *     retries) and Touch publishing (event delivery is best-effort by
- *     design).
- *
- * Structure
- * ---------
- *   Per core:
- *     prod_chunk -> [chunk_n]<- IRQ writes via fetch_add(prod_idx)
- *                       |
- *                       | when full, IRQ CAS-advances prod_chunk
- *                       v
- *                   [chunk_{n+1}]   <- pre-allocated by K-Core pump
- *
- *   Each chunk:
- *     [slot 0][slot 1]...[slot capacity-1]    <- IrqDeferSlot, ready flag
- *
- *   Consumer (K-Core) walks slots in order, advances to next chunk when
- *   current is fully drained AND producer has moved past it. Drained
- *   chunks return to a per-core free-list (LIFO), reused for the next
- *   pre-allocation; growth only happens when free-list is empty.
- *
- * SPSC / MPSC properties
- * ----------------------
- * Producer = IRQ on the owning core (single — IRQs on a given core are
- * serialised by the LAPIC). Consumer = whichever K-Core pumps this core's
- * ring (single — a ring is pumped by exactly one K-Core: by default the
- * core itself if it's a K-Core, else by an assigned partner K-Core).
+ *     (extreme burst beyond pre-allocated chain length), the event is
+ *     dropped and counted. Never panics. Best-effort callers (Touch
+ *     publishing, AHCI completion-with-retry) tolerate this gracefully.
  *
  * Memory model
  * ------------
- *   - Producer publishes slot fields with __ATOMIC_RELEASE on `ready`.
- *   - Consumer observes slot fields with __ATOMIC_ACQUIRE on `ready`.
- *   - Chunk-advance writes use ACQ_REL CAS so cross-core observers see
- *     a consistent (chunk-pointer, slots-init) view.
+ *   - Producer publishes slot via ACQ_REL fetch_add on `prod_idx`, then
+ *     ordinary stores, then RELEASE store on `ready=1`.
+ *   - Consumer load-acquires `ready`, ACQ_REL CAS on `cons_idx` to claim,
+ *     reads slot fields, runs handler, fetch_add `consumed_count`.
+ *   - Chunk-pointer migrations use ACQ_REL CAS.
+ *   - Hazard pointer publish is RELEASE store; checker uses ACQUIRE load.
+ *
+ * Lifecycle of a chunk
+ * --------------------
+ *   1. chunk_alloc — kmalloc + memset(0). slot.ready=0 means "untouched".
+ *   2. Producer fills slots 0..capacity-1 (in order, single producer).
+ *   3. Multiple consumers race CAS-claim of cons_idx, each runs handler.
+ *   4. Final consumer (cons_idx hits capacity, prod_chunk has moved past)
+ *      CAS-advances cons_chunk to ch->next and pushes ch to retired list.
+ *   5. reclaim_retired walks the list; for each retired ch checks
+ *      (consumed_count == capacity) AND (no hazard points to ch); if both
+ *      hold, chunk_reset + push to free_list. Otherwise requeue.
+ *   6. refill_producer_chain pops from free_list (or kmallocs) and
+ *      CAS-publishes as the producer's next chunk.
  */
 
 #include "ktypes.h"
+#include "klib.h"
 
 /* One pending bottom-half. handler must be safe to invoke from K-Core
  * context (may kmalloc / take tagfs / process locks). ctx semantics are
@@ -80,50 +91,63 @@
 typedef struct IrqDeferSlot {
     void (*handler)(void *ctx);
     void *ctx;
-    /* 0 = empty / being written; 1 = published. Single-bit ABA-free
-     * because each slot is written once per chunk lifetime (we never
-     * rewrite a slot — we move to a fresh chunk instead). */
+    /* 0 = empty / being written; 1 = published. ACQ_REL ordering ties
+     * handler/ctx writes to the ready store. */
     volatile uint32_t ready;
 } IrqDeferSlot;
 
 /* Flexible array — slots are appended in memory immediately after the
  * header so a single kmalloc allocates the whole chunk. */
 typedef struct IrqDeferChunk {
-    volatile uint32_t            prod_idx;    /* IRQ producer claim */
-    volatile struct IrqDeferChunk *next;       /* chain to next chunk */
-    uint32_t                      capacity;    /* slot count */
+    volatile uint32_t            prod_idx;        /* producer claim cursor */
+    volatile uint32_t            cons_idx;        /* consumer CAS claim cursor */
+    volatile uint32_t            consumed_count;  /* handlers actually returned */
+    volatile struct IrqDeferChunk *next;
+    uint32_t                      capacity;
     IrqDeferSlot                  slots[];
 } IrqDeferChunk;
 
 /* Per-core ring control block. */
 typedef struct IrqDeferCore {
-    volatile struct IrqDeferChunk *prod_chunk;     /* IRQ producer side */
-    struct IrqDeferChunk          *cons_chunk;     /* K-Core consumer side */
-    uint32_t                       cons_idx;       /* index within cons_chunk */
+    volatile struct IrqDeferChunk *prod_chunk;     /* producer side */
+    volatile struct IrqDeferChunk *cons_chunk;     /* consumer side */
 
-    /* LIFO of recycled chunks ready for reuse — populated by consumer
-     * when a chunk is fully drained, drained by pump when refilling
-     * the producer's chain. Use atomic CAS on this head pointer. */
-    volatile struct IrqDeferChunk *free_head;
+    /* free_list (recycle) + retired_list (pending reclaim) — protected by
+     * free_lock to avoid ABA on raw CAS-stacks. Brief contention only on
+     * the pump's tail (cold path). */
+    spinlock_t                     free_lock;
+    struct IrqDeferChunk          *free_head;
+    struct IrqDeferChunk          *retired_head;
 
-    /* Telemetry — purely informational, never load-bearing. */
-    volatile uint64_t overflow_count;     /* IRQ couldn't get a slot */
-    volatile uint64_t chunks_allocated;   /* fresh kmalloc events */
-    volatile uint64_t chunks_recycled;    /* served from free_head */
-    volatile uint64_t processed_count;    /* slots handled by pump */
+    /* Telemetry — never load-bearing. */
+    volatile uint64_t overflow_count;
+    volatile uint64_t chunks_allocated;
+    volatile uint64_t chunks_recycled;
+    volatile uint64_t processed_count;
+    volatile uint64_t advance_failures;  /* CAS lost on cons_chunk advance */
 } IrqDeferCore;
 
-/* g_irq_defer is sized to g_amp.total_cores at irq_defer_init time. */
+/* One hazard slot per pumping core. A pumper publishes the cons_chunk it
+ * is currently traversing here; reclaim refuses to free a chunk while
+ * any hazard still references it. Cacheline-padded to avoid false-sharing
+ * between cores. */
+typedef struct CoreHazard {
+    volatile struct IrqDeferChunk *chunk;
+    char _pad[64 - sizeof(volatile struct IrqDeferChunk *)];
+} CoreHazard;
+
+/* Sized to g_amp.total_cores at irq_defer_init time. */
 extern IrqDeferCore *g_irq_defer;
+extern CoreHazard   *g_pump_hazards;
 
 /* Set to 1 once the rings are usable. IRQs that fire before this
  * silently drop (incrementing g_irq_defer_predropped) rather than touch
  * uninitialised memory. */
-extern volatile uint8_t g_irq_defer_ready;
+extern volatile uint8_t  g_irq_defer_ready;
 extern volatile uint64_t g_irq_defer_predropped;
 
-/* Initialise per-core rings. Must run after amp_init() (g_amp.total_cores
- * is consulted) and before any IRQ handler that defers may fire. */
+/* Initialise per-core rings + hazard table. Must run after amp_init() and
+ * before any IRQ handler that defers may fire. */
 void irq_defer_init(void);
 
 /* IRQ producer entry point. Safe to call from IRQ context. handler will
@@ -132,9 +156,10 @@ void irq_defer_init(void);
  * Returns silently on overflow (counter incremented). */
 void irq_defer(void (*handler)(void *), void *ctx);
 
-/* Consumer drain — call from K-Core guide loop. Drains all ready slots
- * for `core_idx` and refills the producer's chain headroom. Returns the
- * number of handlers invoked. */
+/* Consumer drain — may be called from ANY core concurrently with any
+ * other call. Drains as many ready slots as possible for `core_idx` and
+ * runs reclaim/refill maintenance on the tail. Returns the number of
+ * handlers invoked. */
 uint32_t irq_defer_pump(uint8_t core_idx);
 
 /* Telemetry accessors — used by bench / diagnostic commands. */

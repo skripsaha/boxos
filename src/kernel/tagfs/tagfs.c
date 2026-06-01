@@ -2262,16 +2262,21 @@ int tagfs_write(TagFSFileHandle *handle, const void *buffer, uint64_t size)
     // Auto-snapshot before write if versioning enabled (production feature)
     tagfs_auto_snapshot_before_write(handle->file_id);
 
-    /* Serialize writes to the same file. The plain `spin_lock` was
-     * deadlock-prone: this lock is held across `write_block → ata_dma_sync`,
-     * whose completion IRQ (legacy BMIDE on IO-APIC GSI 14) lands only on the
-     * BSP and is delivered via the BSP's irq_defer ring 0. A contending core
-     * spinning blindly on the lock never falls through to drain ring 0, so the
-     * holding core's `cmd.done` never flips and the holder never releases.
+    /* Serialize writes to the same file. The plain `spin_lock` would
+     * deadlock with the BMIDE-IRQ-on-BSP topology: this lock is held
+     * across `write_block → ata_dma_sync`, which waits for the BMIDE
+     * completion IRQ. That IRQ lands only on the BSP (legacy IO-APIC
+     * GSI 14). If the BSP is the CONTENDER here, its spin_lock has
+     * already CLI'd and the IRQ never delivers; the holder spins
+     * forever waiting for cmd.done and the BSP spins forever waiting
+     * for the lock.
      *
-     * Pump our own irq_defer ring on every contended iteration — each core
-     * pumps only its own ring (single-consumer invariant preserved), so on
-     * the BSP this drains the BMIDE completion and unblocks the holder. */
+     * Break the cycle by trylocking with the IRQ window open between
+     * attempts. Each failed trylock restores RFLAGS (re-enabling IRQs),
+     * so the pending BMIDE IRQ can fire and queue ata_complete_deferred
+     * onto the BSP's irq_defer ring; the pump on this very iteration
+     * drains it; the holder's cmd.done flips; the holder releases.
+     * Uncontended fast path is unchanged — trylock succeeds first try. */
     if (handle->ofe)
     {
         if (!spin_trylock(&handle->ofe->write_lock)) {
