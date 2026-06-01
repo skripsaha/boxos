@@ -83,6 +83,7 @@
 
 #include "ktypes.h"
 #include "klib.h"
+#include "kernel_config.h"
 
 /* One pending bottom-half. handler must be safe to invoke from K-Core
  * context (may kmalloc / take tagfs / process locks). ctx semantics are
@@ -130,10 +131,10 @@ typedef struct IrqDeferCore {
 /* One hazard slot per pumping core. A pumper publishes the cons_chunk it
  * is currently traversing here; reclaim refuses to free a chunk while
  * any hazard still references it. Cacheline-padded to avoid false-sharing
- * between cores. */
+ * between cores during the per-pump publish-and-clear traffic. */
 typedef struct CoreHazard {
     volatile struct IrqDeferChunk *chunk;
-    char _pad[64 - sizeof(volatile struct IrqDeferChunk *)];
+    char _pad[CONFIG_CACHE_LINE_SIZE - sizeof(volatile struct IrqDeferChunk *)];
 } CoreHazard;
 
 /* Sized to g_amp.total_cores at irq_defer_init time. */
