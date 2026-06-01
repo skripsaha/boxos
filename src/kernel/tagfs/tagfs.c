@@ -10,6 +10,8 @@
 #include "ahci.h"
 #include "touch.h"
 #include "ata.h"
+#include "amp.h"
+#include "irq_defer.h"
 #include "cow/cow.h"
 #include "braid/braid.h"
 #include "dedup/dedup.h"
@@ -2260,9 +2262,26 @@ int tagfs_write(TagFSFileHandle *handle, const void *buffer, uint64_t size)
     // Auto-snapshot before write if versioning enabled (production feature)
     tagfs_auto_snapshot_before_write(handle->file_id);
 
-    // Serialize writes to the same file
+    /* Serialize writes to the same file. The plain `spin_lock` was
+     * deadlock-prone: this lock is held across `write_block → ata_dma_sync`,
+     * whose completion IRQ (legacy BMIDE on IO-APIC GSI 14) lands only on the
+     * BSP and is delivered via the BSP's irq_defer ring 0. A contending core
+     * spinning blindly on the lock never falls through to drain ring 0, so the
+     * holding core's `cmd.done` never flips and the holder never releases.
+     *
+     * Pump our own irq_defer ring on every contended iteration — each core
+     * pumps only its own ring (single-consumer invariant preserved), so on
+     * the BSP this drains the BMIDE completion and unblocks the holder. */
     if (handle->ofe)
-        spin_lock(&handle->ofe->write_lock);
+    {
+        if (!spin_trylock(&handle->ofe->write_lock)) {
+            uint8_t self_core = amp_get_core_index();
+            while (!spin_trylock(&handle->ofe->write_lock)) {
+                irq_defer_pump(self_core);
+                cpu_pause();
+            }
+        }
+    }
 
     const uint8_t *in = (const uint8_t *)buffer;
     uint8_t block_buf[TAGFS_BLOCK_SIZE];
@@ -2454,21 +2473,13 @@ int tagfs_write(TagFSFileHandle *handle, const void *buffer, uint64_t size)
     if (handle->ofe)
         spin_unlock(&handle->ofe->write_lock);
 
-    if (bytes_written > 0 && TouchHasAnyListeners()) {
-        TagFSMetadata wmeta;
-        memset(&wmeta, 0, sizeof(wmeta));
-        uint32_t wmb, wmo;
-        if (file_table_lookup(handle->file_id, &wmb, &wmo) == 0 &&
-            meta_pool_read(wmb, wmo, &wmeta) == 0) {
-            struct { uint32_t file_id; uint8_t op; } ev = { handle->file_id, 1 };
-            for (uint16_t ti = 0; ti < wmeta.tag_count; ti++) {
-                TouchPublishId(wmeta.tag_ids[ti], &ev, sizeof(ev),
-                                 0, TOUCH_FLAG_TAGFS);
-            }
-            tagfs_metadata_free(&wmeta);
-        }
-    }
-
+    /* WROTE Touch fan-out is the caller's responsibility — published by
+     * storage_ops.c::ObjWrite (sync path) and write_job.c::w_publish
+     * (async path) using a unified 32-byte payload. Publishing here
+     * with a truncated 8-byte event drifted from the async contract
+     * (write_observer's payload-size check failed on every BIOS / 1-core
+     * config that takes the sync path). Keep tagfs_write itself free
+     * of IPC side-effects so its self-tests do not need Touch wiring. */
     return (int)bytes_written;
 }
 
