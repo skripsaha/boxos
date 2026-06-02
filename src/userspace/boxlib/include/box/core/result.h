@@ -3,15 +3,21 @@
 
 #include "box/types.h"
 #include "box/error.h"
+#include "boxos_kctx.h"      /* KResultContext enum — shared with kernel */
 
 // Result: syscall response from kernel to userspace.
 // Data is NOT inline — data_addr points to cabin heap.
+//
+// `context` is the kernel-stamped KResultContext (KCTX_TOUCH, KCTX_IPC, ...)
+// — boxlib's result_pop_* helpers fan out by this tag rather than by parsing
+// the payload. Layout matches the kernel-internal `Result` in src/kernel/
+// core/ipc/result.h exactly.
 typedef struct PACKED {
     uint32_t error_code;
     uint32_t data_length;
     uint64_t data_addr;      // virtual address of data in cabin heap
     uint32_t sender_pid;     // 0 = kernel, != 0 = IPC sender
-    uint32_t _reserved;
+    uint32_t context;        // KResultContext: which subsystem published this
 } Result;
 
 STATIC_ASSERT(sizeof(Result) == 24, "Result must be 24 bytes");
@@ -37,17 +43,32 @@ typedef struct PACKED {
 
 STATIC_ASSERT(sizeof(ResultSlot) == 32, "ResultSlot must be 32 bytes");
 
+/* ResultRingHeader — cacheline-separated cursors (mirror of kernel layout).
+ *
+ *   Cacheline 0 — consumer cursor (userspace) + read-only init metadata
+ *   Cacheline 1 — producer reservation cursor (kernel MPSC) — own cacheline
+ *
+ * Kernel K-Cores hammer `tail` via __atomic_fetch_add on every push.
+ * Without separation, the userspace consumer's load of `head` on a
+ * different core would force RFO traffic with every push. Intel SDM
+ * Vol 3 §11.4.4. Must stay BYTE-IDENTICAL to the kernel-side struct
+ * in src/kernel/core/ipc/result_ring.h. */
 typedef struct PACKED {
+    /* Cacheline 0 — consumer cursor + read-only metadata. */
     volatile uint64_t head;             /* userspace cursor */
-    volatile uint64_t tail;             /* kernel reservation cursor (MPSC) */
     uint64_t          slots_base;       /* user vaddr of slot 0 */
     uint32_t          slot_size;        /* sizeof(ResultSlot) == 32 */
     uint32_t          slot_count_max;
     uint64_t          magic;
-    uint8_t           _pad[24];
+    uint8_t           _pad_line0[32];   /* fill cacheline 0 */
+
+    /* Cacheline 1 — producer reservation cursor (kernel MPSC). */
+    volatile uint64_t tail;             /* kernel reservation cursor */
+    uint8_t           _pad_line1[56];   /* fill cacheline 1 */
 } ResultRingHeader;
 
-STATIC_ASSERT(sizeof(ResultRingHeader) == 64, "ResultRingHeader must be 64 bytes");
+STATIC_ASSERT(sizeof(ResultRingHeader) == 128,
+              "ResultRingHeader must be 128 bytes (two cachelines)");
 
 typedef struct PACKED {
     ResultRingHeader hdr;

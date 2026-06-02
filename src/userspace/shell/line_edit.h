@@ -4,14 +4,15 @@
 #include "box/defs.h"
 
 /* =========================================================================
- * LineEdit — Interactive line editor for BoxOS shell
+ * LineEdit — line editor for the BoxOS shell.
  *
- * Features:
- *   - Cursor movement (left, right, home, end)
- *   - Insert/delete at any position
- *   - Command history (up/down arrows)
- *   - Shift+Q instant exit
- *   - No Unix escape codes — uses BoxOS key events
+ * Today this is a thin wrapper over readline() (display daemon →
+ * kb_readline → kernel blocking read). Future expansion to per-char
+ * editing requires display-daemon protocol support for non-blocking
+ * key events — until then, blocking readline is the correct primitive.
+ *
+ * History is captured on every accepted line for future up/down recall
+ * once interactive editing lands.
  * ========================================================================= */
 
 #define LINE_CAPACITY       512     /* max single line (generous for a shell) */
@@ -21,13 +22,7 @@
 /* Return codes from LineEditRead */
 #define LINE_OK             0
 #define LINE_EMPTY          1
-#define LINE_EXIT_REQUEST   2     /* Shift+Q pressed */
 #define LINE_ERROR          (-1)
-
-/* Escape sequence states */
-#define ESC_NONE   0
-#define ESC_GOT    1    /* Got ESC (0x1B) */
-#define ESC_BRACKET 2   /* Got ESC [ */
 
 typedef struct {
     char buf[LINE_CAPACITY];

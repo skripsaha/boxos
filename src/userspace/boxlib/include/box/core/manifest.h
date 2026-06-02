@@ -111,6 +111,20 @@ int ManifestSubmitFull(const Manifest *m,
                        uint32_t        timeout_ms);
 
 /*
+ * Push a Manifest-mode Pocket to the kernel WITHOUT blocking for a reply.
+ *
+ * Use this when the caller has its own context-filtered reply loop
+ * (e.g. touch_await waits for KCTX_TOUCH-stamped Results, not the
+ * manifest's own ack). Returns OK on successful push, ERR_POCKET_RING_FULL
+ * if the producer ring has no capacity, or ERR_INVALID_ARGS on a bad
+ * Manifest header.
+ */
+int ManifestSubmitNoWait(const Manifest *m,
+                         const Crate    *crates,
+                         uint16_t        crate_count,
+                         uint32_t        target_pid);
+
+/*
  * MfCall1 — single-op Manifest convenience wrapper.
  *
  * Builds a 1-op Manifest with optional input crate (in_buf/in_size) and

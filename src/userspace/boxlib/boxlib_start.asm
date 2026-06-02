@@ -2,13 +2,23 @@
 ; Kernel jumps here after loading the ELF binary.
 ;
 ; On entry:
-;   - Stack is set up by kernel
-;   - PocketRing mapped at 0x2000, ResultRing at 0x3000
-;   - CabinInfo at 0x1000
+;   - Stack is set up by kernel; per System V AMD64 psABI §3.2 we make RSP
+;     16-byte aligned (mod 16 == 0) so the `call main` below leaves RSP%16==8
+;     on main's first instruction, exactly what GCC's prologue assumes for
+;     SSE-using callees.
+;   - PocketRing header  at CABIN_POCKET_RING_ADDR (0x2000), slots lazy-mapped
+;     at CABIN_POCKET_SLOTS_BASE (64 TiB).
+;   - ResultRing header  at CABIN_RESULT_RING_ADDR (0x3000), slots lazy-mapped
+;     at CABIN_RESULT_SLOTS_BASE.
+;   - CabinInfo (PID, heap layout, stack_top, spawner_pid) at CABIN_INFO_ADDR
+;     (0x1000), already populated by process.c::process_load.
+;
+; BoxOS user programs do NOT take argv via the entry point — argv is delivered
+; over IPC via send_args()/receive_args() so the spawner can supply it as
+; structured data rather than packed strings on the stack. We pass argc=0 /
+; argv=NULL here for source-compat with C main() signatures.
 
 [BITS 64]
-
-%include "notify.inc"
 
 section .text
 
@@ -18,47 +28,22 @@ extern exit
 global _start
 
 _start:
-    xor rbp, rbp        ; clear base pointer for stack traces
-    and rsp, -16        ; align stack to 16 bytes (ABI requirement)
+    xor rbp, rbp        ; clear base pointer so any stack trace stops here
+    and rsp, -16        ; align RSP for the System V AMD64 ABI
 
-    ; TODO: Parse command line from kernel
-    xor rdi, rdi        ; argc = 0
+    xor rdi, rdi        ; argc = 0   (see header comment)
     xor rsi, rsi        ; argv = NULL
 
     call main
 
-    ; exit with return code via C exit() — sends parent notification
+    ; main returned — translate its return value into the BoxOS exit syscall.
+    ; exit() in system.c sends the spawner a death notification (if any) and
+    ; submits DECK_SYSTEM/SYS_PROC_KILL; it does not return.
     mov edi, eax
     call exit
 
+    ; Defensive halt: if exit() ever returns (kernel torn down, etc.) park the
+    ; process so we don't fall through into whatever follows in memory.
 .halt:
     hlt
     jmp .halt
-
-global exit_asm
-exit_asm:
-    ; rdi = exit_code
-    ; Build a Pocket on stack: kill self (DECK_SYSTEM, opcode 0x02)
-    ; Pocket is 128 bytes (must match C sizeof(Pocket))
-    sub rsp, POCKET_SIZE
-    mov rsi, rsp
-    ; Zero it
-    push rcx
-    mov ecx, POCKET_SIZE
-.zero:
-    mov byte [rsi + rcx - 1], 0
-    dec ecx
-    jnz .zero
-    pop rcx
-    ; Set prefix_count = 1
-    mov byte [rsp + PKT_PREFIX_COUNT], 1
-    ; Set prefix[0] = (DECK_SYSTEM << 8) | 0x02 = 0xFF02
-    mov word [rsp + PKT_PREFIXES], 0xFF02
-    ; Push to PocketRing
-    mov rdi, rsp
-    pocket_push
-    add rsp, POCKET_SIZE
-    notify
-.halt_exit:
-    hlt
-    jmp .halt_exit

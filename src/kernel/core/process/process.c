@@ -5,6 +5,7 @@
 #include "pmtag.h"
 #include "cabin_layout.h"
 #include "kring.h"
+#include "touch_ring.h"
 #include "vmm.h"
 #include "scheduler.h"
 #include "gdt.h"
@@ -19,6 +20,8 @@
 #include "cabin_info.h"
 #include "notify.h"
 #include "touch.h"
+#include "bay.h"
+#include "brook.h"
 #include "tagfs.h"
 #include "per_core.h"
 #include "amp.h"
@@ -217,7 +220,9 @@ process_t *process_create(const char *tags)
     uint64_t info_phys = 0;
     uint64_t pocket_phys = 0;
     uint64_t result_phys = 0;
-    vmm_context_t *cabin = vmm_create_cabin(&info_phys, &pocket_phys, &result_phys);
+    uint64_t touch_phys = 0;
+    vmm_context_t *cabin = vmm_create_cabin(&info_phys, &pocket_phys, &result_phys,
+                                            &touch_phys);
     if (!cabin)
     {
         debug_printf("[PROCESS] ERROR: Failed to create cabin\n");
@@ -236,15 +241,17 @@ process_t *process_create(const char *tags)
     }
 
     proc->cabin = cabin;
-    proc->cabin_info_phys = info_phys;
+    proc->cabin_info_phys  = info_phys;
     proc->pocket_ring_phys = pocket_phys;
     proc->result_ring_phys = result_phys;
+    proc->touch_ring_phys  = touch_phys;
 
     /* Phase 11: ring header initialization. The pages were zeroed in
      * vmm_create_cabin; we now write head=tail=0, slots_base, slot_size and
      * slot_count_max so userspace can locate slots without further help. */
     KRingPocketInit((PocketRing *)vmm_phys_to_virt(pocket_phys));
     KRingResultInit((ResultRing *)vmm_phys_to_virt(result_phys));
+    KTouchRingInit((TouchRing *)vmm_phys_to_virt(touch_phys));
 
     // Tag IPC ring header pages as shared so PMT tracks the kernel↔userspace boundary.
     // The slot regions are mapped lazily via demand paging and are NOT tagged
@@ -254,6 +261,9 @@ process_t *process_create(const char *tags)
                PHYS_TAG_SHARED);
     PhysTagSet(result_phys,
                result_phys + CABIN_RESULT_RING_PAGES * PMM_PAGE_SIZE,
+               PHYS_TAG_SHARED);
+    PhysTagSet(touch_phys,
+               touch_phys + CABIN_TOUCH_RING_PAGES * PMM_PAGE_SIZE,
                PHYS_TAG_SHARED);
     proc->score = 0;
     proc->last_run_time = 0;
@@ -269,13 +279,8 @@ process_t *process_create(const char *tags)
     proc->kcore_pending  = 0;
     proc->touch_cleaned  = 0;
 
-    proc->ear_bits              = 0;
-    proc->ear_overflow_ids      = NULL;
-    proc->ear_overflow_count    = 0;
-    proc->ear_overflow_capacity = 0;
-    proc->claim_table           = NULL;
-    proc->claim_count           = 0;
-    proc->claim_capacity        = 0;
+    proc->subs_head             = NULL;
+    spinlock_init(&proc->subs_lock);
     proc->irq_stack_top         = 0;
     proc->irq_rip               = 0;
     proc->irq_active            = 0;
@@ -284,9 +289,6 @@ process_t *process_create(const char *tags)
     proc->irq_saved_rflags      = 0;
     proc->irq_pending_head      = NULL;
     spinlock_init(&proc->irq_lock);
-    proc->touch_page_base       = 0;
-    proc->touch_page_off        = 0;
-    spinlock_init(&proc->touch_alloc_lock);
 
     // Assign home_core: round-robin across App Cores (multi-core) or BSP (single-core).
     if (g_amp.app_count > 0)
@@ -327,6 +329,12 @@ process_t *process_create(const char *tags)
     proc->aslr_heap_base = CABIN_HEAP_BASE + aslr.heap_offset;
     proc->aslr_buf_heap_base = CABIN_BUF_HEAP_START + aslr.buf_heap_offset;
     proc->buf_heap_next = proc->aslr_buf_heap_base;
+    proc->bay_claims_head = NULL;
+    spinlock_init(&proc->bay_lock);
+    proc->bay_va_next = CABIN_BAY_BASE;
+    proc->brook_claims_head = NULL;
+    spinlock_init(&proc->brook_lock);
+    proc->brook_va_next = CABIN_BROOK_BASE;
     proc->next         = NULL;
     proc->prev         = NULL;
     proc->ready_next   = NULL;
@@ -720,8 +728,29 @@ void process_destroy(process_t *proc)
                      proc->result_ring_phys + CABIN_RESULT_RING_PAGES * PMM_PAGE_SIZE,
                      PHYS_TAG_SHARED);
     }
+    if (proc->touch_ring_phys) {
+        PhysTagClear(proc->touch_ring_phys,
+                     proc->touch_ring_phys + CABIN_TOUCH_RING_PAGES * PMM_PAGE_SIZE,
+                     PHYS_TAG_SHARED);
+    }
 
     TouchCleanupProcess(proc);
+
+    /* Drop every Bay claim this cabin holds BEFORE the VMM teardown.
+     * BayCleanupProcess walks proc->bay_claims_head, unmaps each claim
+     * from the cabin's page tables, decrements the BayObject ref_count
+     * (last drop returns chunks to PMM), and kfree's the claim. After
+     * this returns there are no Bay PDEs left in the cabin; the
+     * vmm_destroy_context LARGE_PAGE walker becomes a no-op for Bay
+     * regions and only sees user-heap implicit-huge pages. */
+    BayCleanupProcess(proc);
+
+    /* Drop every Brook claim this cabin holds. Same lifecycle pattern
+     * as Bay — peer-cabin receives -ERR_BROKEN_PIPE / END_OF_STREAM on
+     * its next push/pop. Must run BEFORE vmm_destroy_context so the
+     * per-claim VA windows are torn down through the proper unmap path
+     * (BrookObject ref drops to zero only when both peers release). */
+    BrookCleanupProcess(proc);
 
     /* Final state set is COMPLETE — now safe to poison the magic. Any
      * sibling-core dereference past this point is a real bug we want to
@@ -1447,21 +1476,15 @@ static void process_cleanup_immediate(process_t *proc)
         proc->tag_overflow_capacity = 0;
     }
 
-    /* Touch claim_table — deferred free.
+    /* Touch sub list — deferred free.
      *
-     * TouchCleanupProcess (called from process_destroy) only zeroes
-     * claim_count and releases manifest handles; the underlying
-     * table is left allocated because publishers on other cores can
-     * still be inside find_claim() reading it. We now hold the
-     * "last reference" (ref_count just hit 0) so no publisher can
-     * be active — safe to free. See touch.c:TouchCleanupProcess for
-     * the full rationale. */
-    if (proc->claim_table)
-    {
-        kfree(proc->claim_table);
-        proc->claim_table    = NULL;
-        proc->claim_capacity = 0;
-    }
+     * TouchCleanupProcess (called from process_destroy) unlinks every
+     * sub from its TouchBucket so concurrent publishes stop seeing this
+     * process, but leaves the sub structs allocated because publishers
+     * on other cores can still be holding pointers into them. We now
+     * hold the "last reference" (ref_count just hit 0) so no publisher
+     * can be active — safe to free the per-process chain. */
+    TouchFinalizeProcess(proc);
 
     // Free dynamically allocated FPU state buffer
     if (proc->context.fpu_state)

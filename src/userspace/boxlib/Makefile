@@ -29,6 +29,7 @@ CFLAGS = -nostdlib -fno-builtin -ffreestanding -mno-red-zone \
 
 SRCS = src/core/notify.c \
        src/core/result.c \
+       src/core/touch_ring.c \
        src/core/manifest.c \
        src/print.c \
        src/file.c \
@@ -40,10 +41,11 @@ SRCS = src/core/notify.c \
        src/vga.c \
        src/keyboard.c \
        src/touch.c \
+       src/bay.c \
+       src/brook.c \
        src/debug.c \
        src/string.c \
-       src/convert.c \
-       src/arch/x86_64/stack_protector.c
+       src/convert.c
 OBJS = $(SRCS:.c=.o)
 
 all: libbox.a ../build/boxlib_start.o
@@ -51,11 +53,13 @@ all: libbox.a ../build/boxlib_start.o
 libbox.a: $(OBJS)
 	$(AR) rcs $@ $^
 
-# Build entry point
+# Build entry point. boxlib_start.asm no longer %includes shared NASM
+# headers (notify.inc was Phase-11 prefix-chain era and is gone), so the
+# -I include/ search path is unnecessary.
 ../build/boxlib_start.o: boxlib_start.asm
 	@echo "Building entry point..."
 	@mkdir -p ../build
-	nasm -f elf64 -I include/ $< -o $@
+	nasm -f elf64 $< -o $@
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@

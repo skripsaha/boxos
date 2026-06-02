@@ -5,6 +5,8 @@
 #define CABIN_INFO_MAGIC       0x4341424E  // "CABN"
 #define POCKET_RING_MAGIC      0x504B5452  // "PKTR"
 #define RESULT_RING_MAGIC      0x52534C54  // "RSLT"
+#define TOUCH_RING_MAGIC       0x54434852  // "TCHR"
+#define BROOK_HEADER_MAGIC     0x42524B48  // "BRKH" — Brook SPSC stream header
 
 // TagFS
 #define TAGFS_MAGIC            0x54414746  // "TAGF"

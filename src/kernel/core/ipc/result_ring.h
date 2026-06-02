@@ -32,18 +32,40 @@
  * no eager initialisation is needed — the lazy-mapping invariant is preserved.
  */
 
+/*
+ * ResultRingHeader — cacheline-separated cursors.
+ *
+ *   Cacheline 0: consumer cursor (userspace) + read-only init metadata.
+ *                Userspace reads `head` to drain results; producers
+ *                only read it (via ACQUIRE) for full-checks.
+ *   Cacheline 1: producer reservation cursor (kernel MPSC) — own
+ *                cacheline. Many K-Cores hammer __atomic_fetch_add(&tail)
+ *                concurrently; without separation, every push would
+ *                invalidate the consumer's `head` cacheline (and vice
+ *                versa), producing RFO storms on real 16-core silicon.
+ *                Intel SDM Vol 3 §11.4.4. Mirrors irq_defer's `3cdc79c`
+ *                fix and TouchRingHeader / PocketRingHeader layouts.
+ */
 typedef struct __packed {
+    /* Cacheline 0 — consumer cursor + read-only metadata. */
     volatile uint64_t head;             /* consumer cursor (userspace)     */
-    volatile uint64_t tail;             /* producer reservation cursor (kernel, MPSC) */
     uint64_t          slots_base;       /* user vaddr of slot 0            */
     uint32_t          slot_size;        /* RESULT_SLOT_SIZE                */
     uint32_t          slot_count_max;   /* hard upper bound on tail-head   */
     uint64_t          magic;            /* RESULT_RING_MAGIC               */
-    uint8_t           _pad[24];
+    uint8_t           _pad_line0[32];   /* fill cacheline 0                */
+
+    /* Cacheline 1 — producer reservation cursor (kernel MPSC). */
+    volatile uint64_t tail;             /* producer reservation cursor (kernel) */
+    uint8_t           _pad_line1[56];   /* fill cacheline 1                */
 } ResultRingHeader;
 
-_Static_assert(sizeof(ResultRingHeader) == 64,
-               "ResultRingHeader must be 64 bytes");
+_Static_assert(sizeof(ResultRingHeader) == 128,
+               "ResultRingHeader must be 128 bytes (two cachelines)");
+_Static_assert(__builtin_offsetof(ResultRingHeader, head) == 0,
+               "ResultRingHeader.head must start at offset 0");
+_Static_assert(__builtin_offsetof(ResultRingHeader, tail) == 64,
+               "ResultRingHeader.tail must start at cacheline 1 (offset 64)");
 
 /* Per-slot Vyukov-style envelope: payload + generation counter.
  * Lives at slots_base + (idx % slot_count_max) * RESULT_SLOT_SIZE. */

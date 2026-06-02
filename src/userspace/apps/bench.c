@@ -399,12 +399,17 @@ static int b_chain_bulk(uint32_t i, void *ctx)
 
 #define TAG_BENCH_RTT "bench:rtt"
 
-static bool s_touch_setup_done = false;
+static bool        s_touch_setup_done = false;
+static TouchTagPair s_rtt_pair        = { TOUCH_TAG_INVALID, TOUCH_TAG_INVALID };
+static TouchTag     s_rtt_tag         = TOUCH_TAG_INVALID;
 
 static int bench_setup_touch(void)
 {
     if (s_touch_setup_done) return 0;
-    int rc = touch_claim(TAG_BENCH_RTT, TOUCH_REST, 0, 0);
+    s_rtt_pair = touch_intern(TAG_BENCH_RTT);
+    s_rtt_tag  = touch_pair_choose(s_rtt_pair);
+    if (s_rtt_tag == TOUCH_TAG_INVALID) return -1;
+    int rc = touch_claim(s_rtt_tag, TOUCH_REST, 0, 0);
     if (rc != 0) return rc;
     s_touch_setup_done = true;
     return 0;
@@ -416,7 +421,7 @@ static void bench_drain_touches(void)
      * "use default 30s" — hangs us when the ring is empty. With 1ms
      * the drain returns quickly once we've consumed all queued touches. */
     Touch t;
-    while (touch_await(TAG_BENCH_RTT, &t, 1) == 0) { /* discard */ }
+    while (touch_await(s_rtt_tag, &t, 1) == 0) { /* discard */ }
 }
 
 /* Pure publish: send only, do NOT await. The kernel still delivers the
@@ -435,7 +440,7 @@ static int b_touch_publish_only(uint32_t i, void *ctx)
      * for the iterations where i & 15 != 0. */
     if ((i & 15) == 0) bench_drain_touches();
     uint32_t payload = i;
-    return touch_send(TAG_BENCH_RTT, &payload, sizeof(payload), 0);
+    return touch_send(s_rtt_pair, &payload, sizeof(payload), 0);
 }
 
 /* Round-trip: send + await on the same tag. Closest analog to Linux
@@ -446,10 +451,10 @@ static int b_touch_self_rtt(uint32_t i, void *ctx)
     (void)ctx;
     if (bench_setup_touch() != 0) return -1;
     uint32_t payload = i;
-    int rc = touch_send(TAG_BENCH_RTT, &payload, sizeof(payload), 0);
+    int rc = touch_send(s_rtt_pair, &payload, sizeof(payload), 0);
     if (rc != 0) return rc;
     Touch t;
-    rc = touch_await(TAG_BENCH_RTT, &t, 1000);
+    rc = touch_await(s_rtt_tag, &t, 1000);
     return rc;
 }
 
@@ -465,10 +470,10 @@ static int b_touch_await_fastpath(uint32_t i, void *ctx)
     if (bench_setup_touch() != 0) return -1;
     /* Pre-stage one touch per iter so the ring has data when we pop. */
     uint32_t payload = i;
-    int rc = touch_send(TAG_BENCH_RTT, &payload, sizeof(payload), 0);
+    int rc = touch_send(s_rtt_pair, &payload, sizeof(payload), 0);
     if (rc != 0) return rc;
     Touch t;
-    return touch_await(TAG_BENCH_RTT, &t, 100);
+    return touch_await(s_rtt_tag, &t, 100);
 }
 
 /* (9) Storage: file create + write 64 B + delete. Hits TagFS, BCDC,

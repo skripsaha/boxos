@@ -1,0 +1,515 @@
+/*
+ * boxlib brook.c — userspace side of the SPSC streaming primitive.
+ *
+ * Hot path runs lock-free entirely in this process (atomic head/tail
+ * updates + memcpy of the frame slot). Block-on-full / block-on-empty
+ * loops via pause / UMWAIT / yield on the shared BrookHeader cursor —
+ * the cache line invalidation on the peer's release-store IS the wake.
+ * No wake-up syscall is needed; the cursor itself is the synchronization
+ * point. (Same model Touch uses for its event channel — see
+ * touch_wait_umwait / touch_wait_pause in this directory.)
+ *
+ * Peer death is detected by reading the kernel-managed *_alive flag in
+ * the shared header. The history bit (*_ever_attached) lets a reader
+ * that opens before any writer wait (vs returning EOF immediately).
+ *
+ * Timeouts are tracked in userspace via clock_uptime_ms — the kernel
+ * never gets involved in the wait, so the API can offer arbitrary
+ * deadlines without growing per-process state.
+ */
+
+#include "box/brook.h"
+#include "box/types.h"
+#include "box/string.h"
+#include "box/error.h"
+#include "box/memory.h"
+#include "box/clock.h"
+#include "box/system.h"
+#include "box/cpu.h"
+#include "box/core/manifest.h"
+#include "box/core/pocket.h"
+#include "boxos_decks.h"
+#include "arch/x86_64/cpu_wait.h"
+
+/* Mirror src/kernel/core/decks/system/system_deck.h */
+#define SYSTEM_OP_BROOK_OPEN       0x75
+#define SYSTEM_OP_BROOK_RELEASE    0x76
+#define SYSTEM_OP_BROOK_INFO       0x7A
+
+/* Shape limits — mirror kernel brook.h. Caller-side validation gives
+ * better error reporting before crossing the syscall boundary. */
+#define BROOK_FRAME_SIZE_MIN     8u
+#define BROOK_FRAME_SIZE_MAX     (64u * 1024u)
+#define BROOK_FRAME_COUNT_MIN    2u
+#define BROOK_FRAME_COUNT_MAX    16384u
+#define BROOK_MAX_TOTAL_SIZE     (1ULL * 1024 * 1024 * 1024)
+
+/* Sticky terminal sentinel — mirror kernel BROOK_ALIVE_FROZEN. */
+#define BROOK_ALIVE_FROZEN       0xFFFFFFFFu
+
+/* Spin tuning — how many pause() iterations to burn before yielding to
+ * the scheduler. PAUSE is a single µop on most micro-arches so a few
+ * hundred is well under one PIT tick (4 ms @ 250 Hz) and lets a peer
+ * that's actively pushing/popping complete without the round-trip
+ * cost of yield(). Beyond that we yield to let other processes run. */
+#define BROOK_SPIN_BUDGET        2048u
+
+/* ─────────────────────────────────────────────────────────────────────
+ * BrookHeader — must mirror kernel layout EXACTLY. Validated by the
+ * sizeof / offsetof asserts below; if the kernel struct ever changes
+ * the build fails here loudly.
+ *
+ * CL0 = writer state (watched by reader for both data-available AND
+ * peer-death). CL1 = reader state (watched by writer). See kernel
+ * brook.h for the full UMWAIT-correctness rationale.
+ * ───────────────────────────────────────────────────────────────────── */
+typedef struct PACKED {
+    /* Cacheline 0 — writer state, watched by reader */
+    volatile uint64_t tail;
+    volatile uint32_t writer_alive;
+    volatile uint32_t writer_ever_attached;
+    uint32_t          frame_size;
+    uint32_t          frame_count;
+    uint64_t          magic;
+    uint8_t           _pad_line0[32];
+
+    /* Cacheline 1 — reader state, watched by writer */
+    volatile uint64_t head;
+    volatile uint32_t reader_alive;
+    volatile uint32_t reader_ever_attached;
+    uint8_t           _pad_line1[48];
+} BrookHeaderUser;
+
+STATIC_ASSERT(sizeof(BrookHeaderUser) == 128,
+              "BrookHeaderUser must match kernel BrookHeader (128 B)");
+STATIC_ASSERT(OFFSETOF(BrookHeaderUser, tail) == 0,
+              "BrookHeaderUser.tail offset must be 0 (CL0)");
+STATIC_ASSERT(OFFSETOF(BrookHeaderUser, head) == 64,
+              "BrookHeaderUser.head offset must be 64 (CL1)");
+STATIC_ASSERT(OFFSETOF(BrookHeaderUser, writer_alive) < 64,
+              "writer_alive must share CL0 with tail");
+STATIC_ASSERT(OFFSETOF(BrookHeaderUser, reader_alive) >= 64,
+              "reader_alive must share CL1 with head");
+
+/* ─────────────────────────────────────────────────────────────────────
+ * Brook — opaque user handle. Allocated via malloc on open, freed on
+ * release.
+ * ───────────────────────────────────────────────────────────────────── */
+struct Brook {
+    BrookHeaderUser *hdr;        /* mapped header page */
+    uint8_t         *slots;      /* mapped slot region */
+    uint64_t         va_header;  /* original VA — used for syscalls */
+    uint32_t         frame_size; /* immutable after open */
+    uint32_t         frame_count;/* immutable after open, power-of-2 */
+    uint32_t         role;       /* BROOK_WRITER or BROOK_READER */
+    uint32_t         streaming;  /* BROOK_STREAM was set at open: skip EOF/TERM */
+};
+
+/* ─────────────────────────────────────────────────────────────────────
+ * Atomic helpers — GCC builtins.
+ * ───────────────────────────────────────────────────────────────────── */
+static inline uint64_t brook_load_acquire_u64(volatile uint64_t *p)
+{ return __atomic_load_n(p, __ATOMIC_ACQUIRE); }
+static inline uint64_t brook_load_relaxed_u64(volatile uint64_t *p)
+{ return __atomic_load_n(p, __ATOMIC_RELAXED); }
+static inline void brook_store_release_u64(volatile uint64_t *p, uint64_t v)
+{ __atomic_store_n(p, v, __ATOMIC_RELEASE); }
+static inline uint32_t brook_load_acquire_u32(volatile uint32_t *p)
+{ return __atomic_load_n(p, __ATOMIC_ACQUIRE); }
+
+static inline void brook_cpu_pause(void)
+{
+    __asm__ volatile("pause" ::: "memory");
+}
+
+/* ─────────────────────────────────────────────────────────────────────
+ * Syscall wrappers — only OPEN / RELEASE / INFO touch the kernel.
+ * ───────────────────────────────────────────────────────────────────── */
+static int brook_sys_open(const char *tag,
+                          uint32_t frame_size, uint32_t frame_count,
+                          uint32_t flags,
+                          uint64_t *out_va_header,
+                          uint64_t *out_va_slots,
+                          uint32_t *out_frame_size,
+                          uint32_t *out_frame_count)
+{
+    uint8_t params[12];
+    memcpy(params,     &frame_size,  sizeof(uint32_t));
+    memcpy(params + 4, &frame_count, sizeof(uint32_t));
+    memcpy(params + 8, &flags,       sizeof(uint32_t));
+
+    uint8_t out[24] = {0};
+    int rc = MfCall1(DECK_SYSTEM, SYSTEM_OP_BROOK_OPEN,
+                     params, sizeof(params),
+                     tag, (uint32_t)(strlen(tag) + 1),
+                     out, sizeof(out), 0,
+                     30000, 0);
+    if (rc != 0) return rc;
+    memcpy(out_va_header,    out,      sizeof(uint64_t));
+    memcpy(out_va_slots,     out + 8,  sizeof(uint64_t));
+    memcpy(out_frame_size,   out + 16, sizeof(uint32_t));
+    memcpy(out_frame_count,  out + 20, sizeof(uint32_t));
+    return 0;
+}
+
+static int brook_sys_release(uint64_t va_header)
+{
+    uint8_t params[8];
+    memcpy(params, &va_header, sizeof(uint64_t));
+    return MfCall1(DECK_SYSTEM, SYSTEM_OP_BROOK_RELEASE,
+                   params, sizeof(params), 0, 0, 0, 0, 0, 30000, 0);
+}
+
+/* ─────────────────────────────────────────────────────────────────────
+ * Validation helpers.
+ * ───────────────────────────────────────────────────────────────────── */
+static bool brook_is_pow2_u32(uint32_t v)
+{ return v != 0 && (v & (v - 1)) == 0; }
+
+static int brook_validate_create_shape(uint32_t fs, uint32_t fc)
+{
+    if (fs < BROOK_FRAME_SIZE_MIN  || fs > BROOK_FRAME_SIZE_MAX)  return -ERR_INVALID_ARGS;
+    if (fc < BROOK_FRAME_COUNT_MIN || fc > BROOK_FRAME_COUNT_MAX) return -ERR_INVALID_ARGS;
+    if (!brook_is_pow2_u32(fc))                                   return -ERR_INVALID_ARGS;
+    if ((uint64_t)fs * fc > BROOK_MAX_TOTAL_SIZE)                 return -ERR_INVALID_ARGS;
+    return 0;
+}
+
+/* ─────────────────────────────────────────────────────────────────────
+ * brook_open / brook_release
+ * ───────────────────────────────────────────────────────────────────── */
+Brook *brook_open(const char *tag, uint32_t frame_size, uint32_t frame_count,
+                  uint32_t flags)
+{
+    if (!tag || tag[0] == '\0') return 0;
+
+    uint32_t role = flags & (BROOK_WRITER | BROOK_READER);
+    if (role != BROOK_WRITER && role != BROOK_READER) return 0;
+
+    if (flags & BROOK_CREATE) {
+        if (brook_validate_create_shape(frame_size, frame_count) != 0) return 0;
+    }
+
+    uint64_t va_header = 0, va_slots = 0;
+    uint32_t out_fs = 0, out_fc = 0;
+    int rc = brook_sys_open(tag, frame_size, frame_count, flags,
+                            &va_header, &va_slots, &out_fs, &out_fc);
+    if (rc != 0) return 0;
+
+    Brook *b = (Brook *)malloc(sizeof(Brook));
+    if (!b) {
+        brook_sys_release(va_header);
+        return 0;
+    }
+    memset(b, 0, sizeof(*b));
+    b->hdr         = (BrookHeaderUser *)(uintptr_t)va_header;
+    b->slots       = (uint8_t *)(uintptr_t)va_slots;
+    b->va_header   = va_header;
+    b->frame_size  = out_fs;
+    b->frame_count = out_fc;
+    b->role        = role;
+    b->streaming   = (flags & BROOK_STREAM) ? 1u : 0u;
+    return b;
+}
+
+/* CAS the peer's alive flag 0 → FROZEN. Returns true if WE made the
+ * EOF decision (or it was already FROZEN — sticky), false if the peer
+ * just attached (alive=1) and we should NOT EOF.
+ *
+ * Memory ordering: ACQ_REL on success so a subsequent reader observes
+ * our FROZEN write and ANY pending state writes from the peer that
+ * preceded its alive=0 store are visible. ACQUIRE on failure to see
+ * the peer's freshly-published alive=1 + slot writes. */
+static inline bool brook_cas_freeze_peer(volatile uint32_t *peer_alive)
+{
+    uint32_t expected = 0u;
+    if (__atomic_compare_exchange_n(peer_alive, &expected,
+                                    BROOK_ALIVE_FROZEN,
+                                    false,
+                                    __ATOMIC_ACQ_REL,
+                                    __ATOMIC_ACQUIRE)) {
+        return true;
+    }
+    /* Expected was either FROZEN (sticky — peer already terminal in a
+     * prior loop iter, treat as success) or 1 (peer just attached;
+     * caller should not EOF). */
+    return expected == BROOK_ALIVE_FROZEN;
+}
+
+int brook_release(Brook *b)
+{
+    if (!b) return -ERR_INVALID_ARGS;
+    int rc = brook_sys_release(b->va_header);
+    free(b);
+    return rc;
+}
+
+/* ─────────────────────────────────────────────────────────────────────
+ * Wait policy.
+ *
+ * Two paths, chosen at runtime:
+ *
+ *  - UMWAIT path (gated on cpu_has_waitpkg, present on Intel Tremont
+ *    Atoms and Tiger Lake / Sapphire Rapids cores and newer): arm a
+ *    UMONITOR on the peer's cacheline (containing both the peer's
+ *    cursor AND the peer's alive flag — see the BrookHeader layout
+ *    rationale), then UMWAIT with a TSC deadline. The CPU enters a
+ *    low-power C0-sub state until the cacheline changes (peer push/
+ *    release/kernel-death wake), an interrupt fires, or the TSC
+ *    deadline expires. Recovers µs-range wake latency at near-zero
+ *    CPU draw.
+ *
+ *  - Pause+yield fallback: keep the cache line hot for BROOK_SPIN_BUDGET
+ *    pauses (≈ a few µs on real silicon), then yield the scheduler so
+ *    other processes get CPU. The peer's release-store will reach us
+ *    on the next loop iteration. Granularity ≈ scheduler tick (4 ms).
+ *
+ * Both paths are SAFE — they may wake spuriously; the caller's loop
+ * always re-checks the cursor + alive flag after wake.
+ *
+ * `watch_addr` MUST point into the peer's cacheline so a peer-state
+ * change (cursor advance OR kernel alive=0 write) wakes the monitor.
+ * `deadline_ms == 0` means "no caller-imposed deadline"; UMWAIT path
+ * still caps the kernel sleep at a moderate value so we periodically
+ * re-poll the alive flag even on pathological cache-coherence quirks.
+ * Returns nothing — caller's loop re-checks state on return.
+ * ───────────────────────────────────────────────────────────────────── */
+#define BROOK_UMWAIT_DEADLINE_CAP_MS    50u   /* periodic re-poll ceiling */
+
+static void brook_wait_cycle(volatile void *watch_addr,
+                             uint32_t *spin_counter,
+                             uint64_t deadline_ms)
+{
+    if (cpu_has_waitpkg()) {
+        /* UMONITOR arms the hardware monitor on the cacheline of
+         * `watch_addr`. Any subsequent write to that line (peer cursor
+         * advance OR kernel alive=0 flip — both co-located by design)
+         * wakes UMWAIT immediately. */
+        umonitor(watch_addr);
+
+        /* Compute TSC deadline. We always cap at
+         * BROOK_UMWAIT_DEADLINE_CAP_MS so a missed wake on real silicon
+         * (e.g. monitor latency, scheduler interaction) still drains
+         * into a fresh loop iteration within bounded time. The caller
+         * tracks the user-facing deadline separately and returns
+         * ERR_TIMEOUT on the next loop pass. */
+        uint64_t budget_ms = BROOK_UMWAIT_DEADLINE_CAP_MS;
+        if (deadline_ms != 0) {
+            uint64_t now_ms = clock_uptime_ms();
+            if (now_ms >= deadline_ms) return;       /* caller checks */
+            uint64_t remaining = deadline_ms - now_ms;
+            if (remaining < budget_ms) budget_ms = remaining;
+        }
+        uint64_t deadline_tsc = cpu_rdtsc() + cpu_ms_to_tsc(budget_ms);
+        umwait(0, deadline_tsc);
+        return;
+    }
+
+    /* Pause + yield fallback. */
+    if ((*spin_counter)++ < BROOK_SPIN_BUDGET) {
+        brook_cpu_pause();
+    } else {
+        *spin_counter = 0;
+        yield();
+    }
+}
+
+/* ─────────────────────────────────────────────────────────────────────
+ * brook_push core. `mode` selects block/timeout/try; deadline_ms is
+ * the absolute deadline (clock_uptime_ms-relative) for TIMEOUT mode.
+ * ───────────────────────────────────────────────────────────────────── */
+typedef enum {
+    BROOK_MODE_TRY     = 0,
+    BROOK_MODE_BLOCK   = 1,
+    BROOK_MODE_TIMEOUT = 2,
+} BrookWaitMode;
+
+static int brook_push_core(Brook *b, const void *frame,
+                           BrookWaitMode mode, uint64_t deadline_ms)
+{
+    if (!b || !frame)             return -ERR_INVALID_ARGS;
+    if (b->role != BROOK_WRITER)  return -ERR_INVALID_ARGS;
+
+    BrookHeaderUser *h = b->hdr;
+    uint32_t cap = b->frame_count;
+    uint32_t cap_mask = cap - 1;            /* power-of-2 guarantee */
+    uint32_t fs = b->frame_size;
+
+    uint32_t spin = 0;
+    for (;;) {
+        uint64_t tail = brook_load_relaxed_u64(&h->tail);
+        uint64_t head = brook_load_acquire_u64(&h->head);
+
+        if ((tail - head) < cap) {
+            /* Free slot — write payload, then release tail. Release on
+             * tail publishes the memcpy to the reader. */
+            uint8_t *slot = b->slots + ((uint32_t)(tail & cap_mask)) * fs;
+            memcpy(slot, frame, fs);
+            brook_store_release_u64(&h->tail, tail + 1);
+            return 0;
+        }
+
+        /* Ring full — peer-death detection. Single-session mode: attempt
+         * a CAS on reader_alive 0→FROZEN (atomic w.r.t. a concurrent
+         * reader attach). If the CAS commits, the session is terminal;
+         * subsequent reader attaches via the kernel fail with
+         * ERR_INVALID_STATE, eliminating the re-attach race.
+         *
+         * Streaming mode (b->streaming): no terminal decision — keep
+         * waiting through reader-leave/re-attach cycles. */
+        if (!b->streaming &&
+            brook_load_acquire_u32(&h->reader_alive) == 0 &&
+            brook_load_acquire_u32(&h->reader_ever_attached) != 0) {
+            if (brook_cas_freeze_peer(&h->reader_alive)) {
+                return -ERR_PROCESS_TERMINATED;
+            }
+            /* CAS lost: reader just re-attached. Continue loop — the
+             * next iter sees alive=1 and will eventually push when the
+             * reader drains a slot. */
+            continue;
+        }
+
+        if (mode == BROOK_MODE_TRY) return -ERR_WOULD_BLOCK;
+
+        if (mode == BROOK_MODE_TIMEOUT) {
+            uint64_t now = clock_uptime_ms();
+            if (now >= deadline_ms) return -ERR_TIMEOUT;
+        }
+
+        /* Writer monitors CL1 (reader state). A reader-side pop
+         * advances head, and a kernel-side reader-death writes to
+         * reader_alive — both on the same cacheline, both wake us. */
+        brook_wait_cycle(&h->head, &spin,
+                         (mode == BROOK_MODE_TIMEOUT) ? deadline_ms : 0);
+    }
+}
+
+static int brook_pop_core(Brook *b, void *frame,
+                          BrookWaitMode mode, uint64_t deadline_ms)
+{
+    if (!b || !frame)              return -ERR_INVALID_ARGS;
+    if (b->role != BROOK_READER)   return -ERR_INVALID_ARGS;
+
+    BrookHeaderUser *h = b->hdr;
+    uint32_t cap = b->frame_count;
+    uint32_t cap_mask = cap - 1;
+    uint32_t fs = b->frame_size;
+
+    uint32_t spin = 0;
+    for (;;) {
+        uint64_t head = brook_load_relaxed_u64(&h->head);
+        uint64_t tail = brook_load_acquire_u64(&h->tail);
+
+        if (head != tail) {
+            const uint8_t *slot = b->slots + ((uint32_t)(head & cap_mask)) * fs;
+            memcpy(frame, slot, fs);
+            brook_store_release_u64(&h->head, head + 1);
+            return 0;
+        }
+
+        /* Empty ring + writer transition. Single-session mode (default):
+         * if writer was ever attached and is now gone, CAS the
+         * writer_alive flag from 0 to FROZEN. Winning the CAS gives us
+         * a definitive EOF (subsequent writer attaches will fail in the
+         * kernel, eliminating the re-attach race). Losing the CAS means
+         * a new writer attached during this very loop iteration —
+         * continue waiting.
+         *
+         * If writer never attached (ever_attached=0), keep waiting — a
+         * reader opening before any writer is a valid producer-
+         * launches-after pattern.
+         *
+         * Streaming mode (b->streaming): skip terminal decision —
+         * block through writer-leave/re-attach cycles indefinitely. */
+        if (!b->streaming &&
+            brook_load_acquire_u32(&h->writer_alive) == 0 &&
+            brook_load_acquire_u32(&h->writer_ever_attached) != 0) {
+            if (brook_cas_freeze_peer(&h->writer_alive)) {
+                return -ERR_END_OF_FILE;
+            }
+            continue;
+        }
+
+        if (mode == BROOK_MODE_TRY) return -ERR_WOULD_BLOCK;
+
+        if (mode == BROOK_MODE_TIMEOUT) {
+            uint64_t now = clock_uptime_ms();
+            if (now >= deadline_ms) return -ERR_TIMEOUT;
+        }
+
+        /* Reader monitors CL0 (writer state). A writer-side push
+         * advances tail, and a kernel-side writer-death writes to
+         * writer_alive — both on the same cacheline. */
+        brook_wait_cycle(&h->tail, &spin,
+                         (mode == BROOK_MODE_TIMEOUT) ? deadline_ms : 0);
+    }
+}
+
+/* ─────────────────────────────────────────────────────────────────────
+ * Public push/pop variants.
+ * ───────────────────────────────────────────────────────────────────── */
+int brook_push(Brook *b, const void *frame)
+{
+    return brook_push_core(b, frame, BROOK_MODE_BLOCK, 0);
+}
+
+int brook_try_push(Brook *b, const void *frame)
+{
+    return brook_push_core(b, frame, BROOK_MODE_TRY, 0);
+}
+
+int brook_push_timeout(Brook *b, const void *frame, uint32_t timeout_ms)
+{
+    if (timeout_ms == 0) return brook_push(b, frame);
+    uint64_t deadline = clock_uptime_ms() + timeout_ms;
+    return brook_push_core(b, frame, BROOK_MODE_TIMEOUT, deadline);
+}
+
+int brook_pop(Brook *b, void *frame)
+{
+    return brook_pop_core(b, frame, BROOK_MODE_BLOCK, 0);
+}
+
+int brook_try_pop(Brook *b, void *frame)
+{
+    return brook_pop_core(b, frame, BROOK_MODE_TRY, 0);
+}
+
+int brook_pop_timeout(Brook *b, void *frame, uint32_t timeout_ms)
+{
+    if (timeout_ms == 0) return brook_pop(b, frame);
+    uint64_t deadline = clock_uptime_ms() + timeout_ms;
+    return brook_pop_core(b, frame, BROOK_MODE_TIMEOUT, deadline);
+}
+
+/* ─────────────────────────────────────────────────────────────────────
+ * Query helpers — zero syscalls.
+ * ───────────────────────────────────────────────────────────────────── */
+uint32_t brook_frame_size(const Brook *b)
+{
+    return b ? b->frame_size : 0;
+}
+
+uint32_t brook_frame_count(const Brook *b)
+{
+    return b ? b->frame_count : 0;
+}
+
+uint32_t brook_available(const Brook *b)
+{
+    if (!b) return 0;
+    uint64_t tail = brook_load_acquire_u64(&b->hdr->tail);
+    uint64_t head = brook_load_relaxed_u64(&b->hdr->head);
+    uint64_t n = tail - head;
+    return n > 0xFFFFFFFFu ? 0xFFFFFFFFu : (uint32_t)n;
+}
+
+uint32_t brook_free(const Brook *b)
+{
+    if (!b) return 0;
+    uint64_t head = brook_load_acquire_u64(&b->hdr->head);
+    uint64_t tail = brook_load_relaxed_u64(&b->hdr->tail);
+    uint64_t used = tail - head;
+    uint32_t cap = b->frame_count;
+    return used >= cap ? 0 : (uint32_t)(cap - used);
+}

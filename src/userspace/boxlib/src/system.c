@@ -6,6 +6,7 @@
 #include "box/core/manifest.h"
 #include "box/core/notify.h"
 #include "box/core/cabin.h"
+#include "box/debug.h"
 #include "box/ipc.h"
 #include "box/print.h"
 #include "box/core/result.h"
@@ -18,6 +19,12 @@
 #define SYS_CTX_USE     0x04
 #define SYS_PROC_EXEC   0x06
 #define SYSTEM_OP_INFO  0x07
+#define SYSTEM_OP_EFI_INFO       0x60
+#define SYSTEM_OP_EFI_ESRT_GET   0x61
+#define SYSTEM_OP_EFI_VERIFY_PE  0x62
+#define EFI_INFO_BLOB_SIZE       128u
+#define EFI_VERIFY_PE_OUT_SIZE   80u
+#define EFI_ESRT_ENTRY_SIZE      40u
 #define SYS_DEFRAG      0x18
 #define SYS_FRAG_SCORE  0x19
 #define SYS_TAG_ADD     0x20
@@ -75,11 +82,31 @@ void exit(uint32_t exit_code)
 
     /* params:[u32 target_pid] — 0 means self exit. */
     uint32_t target = 0;
-    (void)MfCall1(DECK_SYSTEM, SYS_PROC_KILL,
-                  &target, sizeof(target),
-                  NULL, 0, NULL, 0, NULL,
-                  SYS_TIMEOUT_MS, NULL);
 
+    /* Retry SYS_PROC_KILL — the syscall is supposed to be terminal but a
+     * transient kernel-side failure (ring full mid-burst, deck dispatcher
+     * busy) would otherwise drop us straight into the spin-pause loop
+     * below with a still-alive process. Spinning forever as a zombie
+     * holds onto kernel resources (file table entries, ring pages,
+     * touch claims). Three retries with a yield between is enough to
+     * out-wait any short-lived contention; if it still fails we kdbg the
+     * failure so the next run carries a paper trail. */
+    int kill_rc = -1;
+    for (int attempt = 0; attempt < 3 && kill_rc != 0; attempt++) {
+        kill_rc = MfCall1(DECK_SYSTEM, SYS_PROC_KILL,
+                          &target, sizeof(target),
+                          NULL, 0, NULL, 0, NULL,
+                          SYS_TIMEOUT_MS, NULL);
+        if (kill_rc != 0) yield();
+    }
+    if (kill_rc != 0) {
+        kdbg("[boxlib] exit(): SYS_PROC_KILL failed 3x; halting.");
+    }
+
+    /* If the kernel honoured kill we will not run another instruction.
+     * If it didn't (or returned and somehow rescheduled us), park the
+     * process indefinitely so we don't fall through to undefined code.
+     * cpu_pause keeps the core friendly under contention. */
     while (1) {
         __asm__ volatile("pause");
     }
@@ -226,4 +253,79 @@ int perf_dump(void)
     return MfCall1(DECK_SYSTEM, SYS_PERF_DUMP,
                    NULL, 0, NULL, 0, NULL, 0, NULL,
                    SYS_TIMEOUT_MS, NULL);
+}
+
+/* =========================================================================
+ *  EFI / Secure Boot introspection
+ * ========================================================================= */
+
+int efi_info(efi_info_t *out)
+{
+    if (!out) return -1;
+    uint8_t  blob[EFI_INFO_BLOB_SIZE] = {0};
+    uint32_t got = 0;
+    int rc = MfCall1(DECK_SYSTEM, SYSTEM_OP_EFI_INFO,
+                     NULL, 0, NULL, 0,
+                     blob, sizeof(blob), &got, SYS_TIMEOUT_MS, NULL);
+    if (rc != 0)            return -1;
+    if (got < sizeof(blob)) return -1;
+
+    memcpy(&out->version,         blob + 0,  4);
+    out->rt_available     = blob[4];
+    out->esrt_available   = blob[5];
+    out->sb_available     = blob[6];
+    out->sb_enforced      = blob[7];
+    out->sb_setup_mode    = blob[8];
+    out->sb_audit_mode    = blob[9];
+    out->sb_deployed_mode = blob[10];
+    out->_pad             = 0;
+    memcpy(&out->esrt_count,       blob + 12, 4);
+    memcpy(&out->cert_count_total, blob + 16, 4);
+    memcpy(&out->hash_count_total, blob + 20, 4);
+    memcpy(out->cert_count_by_db,  blob + 24, 6 * 4);
+    memcpy(out->hash_count_by_db,  blob + 48, 6 * 4);
+    return 0;
+}
+
+int efi_esrt_entry(uint32_t idx, efi_esrt_entry_t *out)
+{
+    if (!out) return -1;
+    uint8_t  params[4];
+    memcpy(params, &idx, 4);
+    uint8_t  blob[EFI_ESRT_ENTRY_SIZE] = {0};
+    uint32_t got = 0;
+    int rc = MfCall1(DECK_SYSTEM, SYSTEM_OP_EFI_ESRT_GET,
+                     NULL, 0, params, sizeof(params),
+                     blob, sizeof(blob), &got, SYS_TIMEOUT_MS, NULL);
+    if (rc != 0)            return -1;
+    if (got < sizeof(blob)) return -1;
+    memcpy(out->fw_class,                       blob + 0,  16);
+    memcpy(&out->fw_type,                       blob + 16, 4);
+    memcpy(&out->fw_version,                    blob + 20, 4);
+    memcpy(&out->lowest_supported_fw_version,   blob + 24, 4);
+    memcpy(&out->capsule_flags,                 blob + 28, 4);
+    memcpy(&out->last_attempt_version,          blob + 32, 4);
+    memcpy(&out->last_attempt_status,           blob + 36, 4);
+    return 0;
+}
+
+int efi_verify_pe(const void *pe_buf, uint32_t pe_size, efi_verify_t *out)
+{
+    if (!out || !pe_buf || pe_size == 0) return -1;
+    uint8_t  blob[EFI_VERIFY_PE_OUT_SIZE] = {0};
+    uint32_t got = 0;
+    int rc = MfCall1(DECK_SYSTEM, SYSTEM_OP_EFI_VERIFY_PE,
+                     pe_buf, pe_size, NULL, 0,
+                     blob, sizeof(blob), &got, SYS_TIMEOUT_MS, NULL);
+    if (rc != 0)            return -1;
+    if (got < sizeof(blob)) return -1;
+    uint32_t result_u32;
+    uint32_t pe_size_u32;
+    memcpy(&result_u32,  blob + 0,  4);
+    memcpy(&pe_size_u32, blob + 4,  4);
+    out->result  = (efi_verify_result_t)result_u32;
+    out->pe_size = pe_size_u32;
+    memcpy(out->pe_sha256,     blob + 8,  32);
+    memcpy(out->signer_sha256, blob + 40, 32);
+    return 0;
 }

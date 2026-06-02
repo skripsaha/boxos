@@ -36,6 +36,22 @@ static spinlock_t line_lock = {0};
  * call from more than one place. */
 static char readline_result[KEYBOARD_LINE_BUFFER_SIZE];
 
+/* ─── Touch tag handle cache (resolved once at keyboard_init) ──────────────
+ *
+ * keyboard_handle_scancode and keyboard_timer_tick both run in IRQ context
+ * (PS/2 IRQ1 dispatch + PIT IRQ0 tick). TouchTagResolve is NOT IRQ-safe —
+ * it takes the TagFS registry lock and may intern a fresh tag, which can
+ * kmalloc. We therefore resolve the "keyboard" tag once during driver
+ * initialization (non-IRQ context, TagFS registry already up) and cache
+ * the resulting handles here. IRQ-side code does an atomic load + passes
+ * the handles to TouchPublishIrqPair.
+ *
+ * Until keyboard_init has run, both handles read as TOUCH_TAG_INVALID and
+ * TouchPublishIrqPair becomes a no-op — early-boot IRQ fires (if any) are
+ * silently discarded rather than touching the registry from IRQ context. */
+static volatile uint16_t g_kbd_touch_full = TOUCH_TAG_INVALID;
+static volatile uint16_t g_kbd_touch_bare = TOUCH_TAG_INVALID;
+
 /* ─── Extended scancode (0xE0) state ────────────────────────────────────── */
 
 static volatile uint8_t kb_e0_pending = 0;
@@ -235,6 +251,22 @@ void keyboard_init(void)
     debug_printf("[KEYBOARD] Repeat: delay=%u ticks (%u ms), rate=%u ticks (%u ms)\n",
                  g_kb_repeat_delay_ticks, KB_REPEAT_DELAY_MS,
                  g_kb_repeat_rate_ticks, KB_REPEAT_RATE_MS);
+
+    /* Resolve and cache the "keyboard" Touch tag while we are still in
+     * non-IRQ context. TouchInit ran inside guide_init earlier in the
+     * boot sequence; the TagFS registry is fully online by the time
+     * keyboard_init is called.
+     *
+     * The "keyboard" tag is a bare key (no value), so TouchTagResolve
+     * fills only `bare`; `full` stays TOUCH_TAG_INVALID. That is still
+     * correct for TouchPublishIrqPair which publishes to whichever id
+     * is non-invalid. */
+    TouchTag full = TOUCH_TAG_INVALID, bare = TOUCH_TAG_INVALID;
+    TouchTagResolve("keyboard", &full, &bare);
+    __atomic_store_n(&g_kbd_touch_full, full, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_kbd_touch_bare, bare, __ATOMIC_RELEASE);
+    debug_printf("[KEYBOARD] Touch tag handles: full=%u bare=%u\n",
+                 (unsigned)full, (unsigned)bare);
 }
 
 /* ─── Scancode handler (called from IRQ1) ──────────────────────────────── */
@@ -364,7 +396,15 @@ void keyboard_handle_scancode(uint8_t scancode)
                 (__atomic_load_n(&kb_state.alt_pressed,   __ATOMIC_RELAXED) ? 0x04 : 0)
             ),
         };
-        TouchPublish("keyboard", &kb_ev, sizeof(kb_ev));
+        /* IRQ context (PS/2 IRQ1 / xHCI HID IRQ): defer the publish via
+         * the static-ring + irq_defer path. TouchPublish from here would
+         * touch the TagFS registry lock and per-bucket spinlocks while
+         * the CPU has IF=0, which is the deadlock pattern that
+         * irq_defer was created to break (memory `irq_defer_done_2026_05_17`). */
+        TouchTag full = __atomic_load_n(&g_kbd_touch_full, __ATOMIC_ACQUIRE);
+        TouchTag bare = __atomic_load_n(&g_kbd_touch_bare, __ATOMIC_ACQUIRE);
+        TouchPublishIrqPair(full, bare, &kb_ev, sizeof(kb_ev),
+                            0, TOUCH_FLAG_KERNEL);
     }
 }
 
@@ -386,7 +426,12 @@ void keyboard_timer_tick(void)
             .ascii    = kb_repeat.chars[0],
             .mods     = 0,
         };
-        TouchPublish("keyboard", &kb_ev, sizeof(kb_ev));
+        /* PIT IRQ0 context — defer via static ring + irq_defer (same
+         * rationale as the PS/2 IRQ1 site above). */
+        TouchTag full = __atomic_load_n(&g_kbd_touch_full, __ATOMIC_ACQUIRE);
+        TouchTag bare = __atomic_load_n(&g_kbd_touch_bare, __ATOMIC_ACQUIRE);
+        TouchPublishIrqPair(full, bare, &kb_ev, sizeof(kb_ev),
+                            0, TOUCH_FLAG_KERNEL);
     }
 
     /* After initial delay, switch to fast repeat rate */

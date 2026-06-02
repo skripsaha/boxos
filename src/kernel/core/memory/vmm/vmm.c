@@ -913,6 +913,18 @@ static void vmm_free_user_space_tables(vmm_context_t *ctx)
 
                 if (pd_entry & VMM_FLAG_LARGE_PAGE)
                 {
+                    /* User-owned 2 MB pages (Bay, user-heap implicit
+                     * huge) must be returned to PMM here. Kernel-side
+                     * 2 MB pages (identity, Pull Map) lack VMM_FLAG_USER
+                     * and we still skip them. Shared phys are skipped
+                     * too — they live for the whole kernel session. */
+                    if (pd_entry & VMM_FLAG_USER) {
+                        uintptr_t phys = vmm_pte_to_phys(pd_entry);
+                        if (!vmm_is_shared_phys(phys)) {
+                            pmm_free((void *)phys, VMM_LARGE_PAGE_2M_PAGES);
+                        }
+                        pd->entries[p2] = 0;
+                    }
                     continue;
                 }
 
@@ -2565,9 +2577,12 @@ void vmm_test_basic(void)
     vmm_dump_context_stats(kernel_context);
 }
 
-vmm_context_t *vmm_create_cabin(uint64_t *cabin_info_phys, uint64_t *pocket_ring_phys, uint64_t *result_ring_phys)
+vmm_context_t *vmm_create_cabin(uint64_t *cabin_info_phys,
+                                uint64_t *pocket_ring_phys,
+                                uint64_t *result_ring_phys,
+                                uint64_t *touch_ring_phys)
 {
-    if (!cabin_info_phys || !pocket_ring_phys || !result_ring_phys)
+    if (!cabin_info_phys || !pocket_ring_phys || !result_ring_phys || !touch_ring_phys)
     {
         vmm_set_error("Invalid output parameters for Cabin creation");
         return NULL;
@@ -2580,7 +2595,8 @@ vmm_context_t *vmm_create_cabin(uint64_t *cabin_info_phys, uint64_t *pocket_ring
         return NULL;
     }
 
-    // Allocate physical pages for CabinInfo (1 page), PocketRing (1 page), ResultRing (9 pages)
+    // Allocate physical pages: CabinInfo (1), PocketRing (1), ResultRing (1), TouchRing (1).
+    // Slot regions are lazily mapped on demand and are NOT pre-allocated here.
     void *info_phys = pmm_alloc(CABIN_INFO_PAGES);
     if (!info_phys)
     {
@@ -2608,12 +2624,25 @@ vmm_context_t *vmm_create_cabin(uint64_t *cabin_info_phys, uint64_t *pocket_ring
         return NULL;
     }
 
-    memset(vmm_phys_to_virt((uintptr_t)info_phys), 0, CABIN_INFO_SIZE);
+    void *touch_phys = pmm_alloc(CABIN_TOUCH_RING_PAGES);
+    if (!touch_phys)
+    {
+        pmm_free(result_phys, CABIN_RESULT_RING_PAGES);
+        pmm_free(pocket_phys, CABIN_POCKET_RING_PAGES);
+        pmm_free(info_phys, CABIN_INFO_PAGES);
+        vmm_destroy_context(cabin_ctx);
+        vmm_set_error("Failed to allocate TouchRing page");
+        return NULL;
+    }
+
+    memset(vmm_phys_to_virt((uintptr_t)info_phys),   0, CABIN_INFO_SIZE);
     memset(vmm_phys_to_virt((uintptr_t)pocket_phys), 0, CABIN_POCKET_RING_SIZE);
     memset(vmm_phys_to_virt((uintptr_t)result_phys), 0, CABIN_RESULT_RING_SIZE);
+    memset(vmm_phys_to_virt((uintptr_t)touch_phys),  0, CABIN_TOUCH_RING_SIZE);
 
     if (vmm_setup_null_trap(cabin_ctx) != 0)
     {
+        pmm_free(touch_phys, CABIN_TOUCH_RING_PAGES);
         pmm_free(result_phys, CABIN_RESULT_RING_PAGES);
         pmm_free(pocket_phys, CABIN_POCKET_RING_PAGES);
         pmm_free(info_phys, CABIN_INFO_PAGES);
@@ -2624,6 +2653,7 @@ vmm_context_t *vmm_create_cabin(uint64_t *cabin_info_phys, uint64_t *pocket_ring
 
     if (vmm_map_cabin_info(cabin_ctx, (uintptr_t)info_phys) != 0)
     {
+        pmm_free(touch_phys, CABIN_TOUCH_RING_PAGES);
         pmm_free(result_phys, CABIN_RESULT_RING_PAGES);
         pmm_free(pocket_phys, CABIN_POCKET_RING_PAGES);
         pmm_free(info_phys, CABIN_INFO_PAGES);
@@ -2634,6 +2664,7 @@ vmm_context_t *vmm_create_cabin(uint64_t *cabin_info_phys, uint64_t *pocket_ring
 
     if (vmm_map_pocket_ring(cabin_ctx, (uintptr_t)pocket_phys) != 0)
     {
+        pmm_free(touch_phys, CABIN_TOUCH_RING_PAGES);
         pmm_free(result_phys, CABIN_RESULT_RING_PAGES);
         pmm_free(pocket_phys, CABIN_POCKET_RING_PAGES);
         pmm_free(info_phys, CABIN_INFO_PAGES);
@@ -2644,6 +2675,7 @@ vmm_context_t *vmm_create_cabin(uint64_t *cabin_info_phys, uint64_t *pocket_ring
 
     if (vmm_map_result_ring(cabin_ctx, (uintptr_t)result_phys) != 0)
     {
+        pmm_free(touch_phys, CABIN_TOUCH_RING_PAGES);
         pmm_free(result_phys, CABIN_RESULT_RING_PAGES);
         pmm_free(pocket_phys, CABIN_POCKET_RING_PAGES);
         pmm_free(info_phys, CABIN_INFO_PAGES);
@@ -2652,14 +2684,25 @@ vmm_context_t *vmm_create_cabin(uint64_t *cabin_info_phys, uint64_t *pocket_ring
         return NULL;
     }
 
+    if (vmm_map_touch_ring(cabin_ctx, (uintptr_t)touch_phys) != 0)
+    {
+        pmm_free(touch_phys, CABIN_TOUCH_RING_PAGES);
+        pmm_free(result_phys, CABIN_RESULT_RING_PAGES);
+        pmm_free(pocket_phys, CABIN_POCKET_RING_PAGES);
+        pmm_free(info_phys, CABIN_INFO_PAGES);
+        vmm_destroy_context(cabin_ctx);
+        vmm_set_error("Failed to map TouchRing");
+        return NULL;
+    }
+
     if (g_cpu_caps_page_phys != 0)
     {
         uint64_t flags = VMM_FLAG_PRESENT | VMM_FLAG_USER;
-        vmm_map_result_t map_result = vmm_map_page(cabin_ctx, CPU_CAPS_PAGE_ADDR, g_cpu_caps_page_phys, flags);
+        vmm_map_result_t map_result = vmm_map_page(cabin_ctx, CABIN_CPU_CAPS_ADDR, g_cpu_caps_page_phys, flags);
         if (!map_result.success)
         {
             debug_printf("[VMM] WARNING: Failed to map CPU caps page at 0x%lx: %s\n",
-                         CPU_CAPS_PAGE_ADDR, map_result.error_msg);
+                         CABIN_CPU_CAPS_ADDR, map_result.error_msg);
         }
     }
 
@@ -2683,9 +2726,10 @@ vmm_context_t *vmm_create_cabin(uint64_t *cabin_info_phys, uint64_t *pocket_ring
         }
     }
 
-    *cabin_info_phys = (uint64_t)info_phys;
+    *cabin_info_phys  = (uint64_t)info_phys;
     *pocket_ring_phys = (uint64_t)pocket_phys;
     *result_ring_phys = (uint64_t)result_phys;
+    *touch_ring_phys  = (uint64_t)touch_phys;
 
     return cabin_ctx;
 }
@@ -2747,6 +2791,27 @@ int vmm_map_result_ring(vmm_context_t *ctx, uintptr_t phys_page)
     return 0;
 }
 
+int vmm_map_touch_ring(vmm_context_t *ctx, uintptr_t phys_page)
+{
+    if (!ctx)
+        return -1;
+
+    // TouchRing header is RW for userspace (consumer advances head, releases
+    // per-slot seq). Slot region (CABIN_TOUCH_SLOTS_BASE..) is mapped lazily
+    // on demand by KTouchPush via vmm_ensure_user_page.
+    uint64_t flags = VMM_FLAG_PRESENT | VMM_FLAG_WRITABLE | VMM_FLAG_USER;
+
+    vmm_map_result_t result = vmm_map_pages(ctx, VMM_CABIN_TOUCH_RING, phys_page,
+                                            CABIN_TOUCH_RING_PAGES, flags);
+    if (!result.success)
+    {
+        debug_printf("[VMM] Failed to map TouchRing: %s\n", result.error_msg);
+        return -1;
+    }
+
+    return 0;
+}
+
 void *vmm_translate_user_addr(vmm_context_t *ctx, uintptr_t user_vaddr, size_t size)
 {
     if (!ctx || size == 0)
@@ -2784,6 +2849,140 @@ int vmm_setup_null_trap(vmm_context_t *ctx)
         return -1;
     // 0x0000-0x0FFF is intentionally left unmapped; any access raises a page fault
     return 0;
+}
+
+/* ====================================================================
+ * 2 MB huge-page helpers — single PDE leaf with VMM_FLAG_LARGE_PAGE.
+ *
+ * Used by Bay (cross-cabin shared memory) and the user-heap pre-fault
+ * path. Pure leaf-PDE write, no intermediate PT allocated. PMM buddy
+ * order-9 (pmm_alloc(512)) naturally returns 2 MB-aligned phys blocks
+ * so callers don't need to align separately.
+ * ==================================================================== */
+
+bool vmm_map_huge_2m(vmm_context_t *ctx, uintptr_t virt_addr,
+                     uintptr_t phys_addr, uint64_t flags)
+{
+    if (!ctx) return false;
+    if (virt_addr & VMM_LARGE_PAGE_2M_MASK) return false;
+    if (phys_addr & VMM_LARGE_PAGE_2M_MASK) return false;
+
+    spin_lock(&ctx->lock);
+
+    /* Walk to PD level (level==2). vmm_get_or_create_table allocates
+     * any missing PML4/PDPT entries and demotes a parent LARGE_PAGE if
+     * the walker needs to descend further (won't trigger for a fresh
+     * user-VA range). */
+    page_table_t *pd = vmm_get_or_create_table(ctx, virt_addr, 2);
+    if (!pd) {
+        spin_unlock(&ctx->lock);
+        return false;
+    }
+
+    uint32_t pd_idx  = VMM_PD_INDEX(virt_addr);
+    pte_t   *pde     = &pd->entries[pd_idx];
+    pte_t    new_pte = vmm_make_pte(phys_addr, flags | VMM_FLAG_LARGE_PAGE);
+
+    pte_t expected = 0;
+    bool  won      = __atomic_compare_exchange_n(pde, &expected, new_pte,
+                                                 false,
+                                                 __ATOMIC_RELEASE,
+                                                 __ATOMIC_ACQUIRE);
+    if (!won) {
+        spin_unlock(&ctx->lock);
+        return false;
+    }
+
+    /* Accounting: count 512 × 4 KB units so existing stats remain
+     * comparable across 4 KB and 2 MB mappings. */
+    ctx->mapped_pages += VMM_LARGE_PAGE_2M_PAGES;
+    if (flags & VMM_FLAG_USER) {
+        ctx->user_pages += VMM_LARGE_PAGE_2M_PAGES;
+        atomic_fetch_add_u64((volatile uint64_t *)&global_stats.user_mapped_pages, VMM_LARGE_PAGE_2M_PAGES);
+        atomic_fetch_add_u64((volatile uint64_t *)&global_stats.total_mapped_pages, VMM_LARGE_PAGE_2M_PAGES);
+    } else {
+        ctx->kernel_pages += VMM_LARGE_PAGE_2M_PAGES;
+        atomic_fetch_add_u64((volatile uint64_t *)&global_stats.kernel_mapped_pages, VMM_LARGE_PAGE_2M_PAGES);
+        atomic_fetch_add_u64((volatile uint64_t *)&global_stats.total_mapped_pages, VMM_LARGE_PAGE_2M_PAGES);
+    }
+
+    spin_unlock(&ctx->lock);
+
+    /* First-time map (expected==0) — no stale TLB entry on any core,
+     * so the cross-core shootdown is a no-op. */
+    return true;
+}
+
+bool vmm_unmap_huge_2m(vmm_context_t *ctx, uintptr_t virt_addr)
+{
+    if (!ctx || (virt_addr & VMM_LARGE_PAGE_2M_MASK)) return false;
+
+    spin_lock(&ctx->lock);
+
+    uint32_t pml4_idx = VMM_PML4_INDEX(virt_addr);
+    uint32_t pdpt_idx = VMM_PDPT_INDEX(virt_addr);
+    uint32_t pd_idx   = VMM_PD_INDEX(virt_addr);
+
+    pte_t pml4_e = ctx->pml4->entries[pml4_idx];
+    if (!(pml4_e & VMM_FLAG_PRESENT)) {
+        spin_unlock(&ctx->lock);
+        return false;
+    }
+    page_table_t *pdpt = (page_table_t *)vmm_phys_to_virt(vmm_pte_to_phys(pml4_e));
+    pte_t pdpt_e = pdpt->entries[pdpt_idx];
+    if (!(pdpt_e & VMM_FLAG_PRESENT) || (pdpt_e & VMM_FLAG_LARGE_PAGE)) {
+        /* unmapped, or this VA is inside a 1 GB page — wrong API */
+        spin_unlock(&ctx->lock);
+        return false;
+    }
+    page_table_t *pd = (page_table_t *)vmm_phys_to_virt(vmm_pte_to_phys(pdpt_e));
+    pte_t pd_e = pd->entries[pd_idx];
+    if (!(pd_e & VMM_FLAG_PRESENT) || !(pd_e & VMM_FLAG_LARGE_PAGE)) {
+        /* PDE absent or demoted to 4 KB PT — caller should use vmm_unmap_pages */
+        spin_unlock(&ctx->lock);
+        return false;
+    }
+
+    uint64_t flags = vmm_pte_to_flags(pd_e);
+    pd->entries[pd_idx] = 0;
+
+    if (flags & VMM_FLAG_USER) {
+        if (ctx->user_pages >= VMM_LARGE_PAGE_2M_PAGES) ctx->user_pages -= VMM_LARGE_PAGE_2M_PAGES;
+        atomic_fetch_sub_u64((volatile uint64_t *)&global_stats.user_mapped_pages, VMM_LARGE_PAGE_2M_PAGES);
+        atomic_fetch_sub_u64((volatile uint64_t *)&global_stats.total_mapped_pages, VMM_LARGE_PAGE_2M_PAGES);
+    } else {
+        if (ctx->kernel_pages >= VMM_LARGE_PAGE_2M_PAGES) ctx->kernel_pages -= VMM_LARGE_PAGE_2M_PAGES;
+        atomic_fetch_sub_u64((volatile uint64_t *)&global_stats.kernel_mapped_pages, VMM_LARGE_PAGE_2M_PAGES);
+        atomic_fetch_sub_u64((volatile uint64_t *)&global_stats.total_mapped_pages, VMM_LARGE_PAGE_2M_PAGES);
+    }
+    if (ctx->mapped_pages >= VMM_LARGE_PAGE_2M_PAGES) ctx->mapped_pages -= VMM_LARGE_PAGE_2M_PAGES;
+
+    spin_unlock(&ctx->lock);
+
+    /* Stale 2 MB TLB entries may live on remote cores running this
+     * context — invalidate them. Single-page IPI covers the full 2 MB
+     * mapping at the level the TLB cached. */
+    vmm_shootdown_page(ctx, virt_addr);
+    return true;
+}
+
+uintptr_t vmm_virt_to_phys_huge_2m(vmm_context_t *ctx, uintptr_t virt_addr)
+{
+    if (!ctx || (virt_addr & VMM_LARGE_PAGE_2M_MASK)) return 0;
+
+    uint32_t pml4_idx = VMM_PML4_INDEX(virt_addr);
+    uint32_t pdpt_idx = VMM_PDPT_INDEX(virt_addr);
+    uint32_t pd_idx   = VMM_PD_INDEX(virt_addr);
+
+    pte_t pml4_e = ctx->pml4->entries[pml4_idx];
+    if (!(pml4_e & VMM_FLAG_PRESENT)) return 0;
+    page_table_t *pdpt = (page_table_t *)vmm_phys_to_virt(vmm_pte_to_phys(pml4_e));
+    pte_t pdpt_e = pdpt->entries[pdpt_idx];
+    if (!(pdpt_e & VMM_FLAG_PRESENT) || (pdpt_e & VMM_FLAG_LARGE_PAGE)) return 0;
+    page_table_t *pd = (page_table_t *)vmm_phys_to_virt(vmm_pte_to_phys(pdpt_e));
+    pte_t pd_e = pd->entries[pd_idx];
+    if (!(pd_e & VMM_FLAG_PRESENT) || !(pd_e & VMM_FLAG_LARGE_PAGE)) return 0;
+    return vmm_pte_to_phys(pd_e);
 }
 
 /*
@@ -3273,14 +3472,16 @@ int vmm_handle_page_fault(uintptr_t fault_addr, uint64_t error_code)
         }
     }
 
-    // Phase 11: PocketRing/ResultRing slot regions — lazy first-touch mapping.
-    // The producer (userspace for PocketRing, kernel for ResultRing) walks
-    // through 1 MiB of reserved virtual space; pages are allocated on the
-    // fly. Once mapped, a slot page stays mapped and is reused via the
-    // monotonic-index modulo wrap.
+    // Phase 11: PocketRing / ResultRing / TouchRing slot regions —
+    // lazy first-touch mapping. The producer side eagerly maps pages
+    // via vmm_ensure_user_page; this fault path covers the rare case
+    // of userspace touching a slot VA before the kernel producer has
+    // (e.g. premature consumer probe). Once mapped, a slot page stays
+    // mapped and is reused via the monotonic-index modulo wrap.
     if (ctx && !present &&
         ((fault_addr >= CABIN_POCKET_SLOTS_BASE && fault_addr < CABIN_POCKET_SLOTS_END) ||
-         (fault_addr >= CABIN_RESULT_SLOTS_BASE && fault_addr < CABIN_RESULT_SLOTS_END)))
+         (fault_addr >= CABIN_RESULT_SLOTS_BASE && fault_addr < CABIN_RESULT_SLOTS_END) ||
+         (fault_addr >= CABIN_TOUCH_SLOTS_BASE  && fault_addr < CABIN_TOUCH_SLOTS_END)))
     {
         uintptr_t page_addr = fault_addr & ~(VMM_PAGE_SIZE - 1);
 

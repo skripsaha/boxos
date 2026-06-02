@@ -54,4 +54,76 @@ int perf_dump(void);
 
 void yield(void);
 
+/* =========================================================================
+ *  EFI / Secure Boot / ESRT — userspace introspection
+ *
+ *  These wrap the kernel ops in system_ops.c:
+ *    SYSTEM_OP_EFI_INFO        — full state snapshot in one call.
+ *    SYSTEM_OP_EFI_ESRT_GET    — fetch one EFI System Resource Table entry.
+ *    SYSTEM_OP_EFI_VERIFY_PE   — Authenticode-verify a PE image against db/dbx.
+ * ========================================================================= */
+
+typedef struct {
+    uint32_t version;             /* layout version of this struct */
+    uint8_t  rt_available;        /* 1 iff EFI runtime services online */
+    uint8_t  esrt_available;      /* 1 iff ESRT was published by firmware */
+    uint8_t  sb_available;        /* 1 iff Secure Boot vars were enumerated */
+    uint8_t  sb_enforced;         /* SecureBoot variable value */
+    uint8_t  sb_setup_mode;       /* SetupMode variable value */
+    uint8_t  sb_audit_mode;       /* AuditMode variable value */
+    uint8_t  sb_deployed_mode;    /* DeployedMode variable value */
+    uint8_t  _pad;
+    uint32_t esrt_count;          /* total EFI System Resource entries */
+    uint32_t cert_count_total;    /* X.509 certs across all DBs */
+    uint32_t hash_count_total;    /* raw hashes across all DBs */
+    uint32_t cert_count_by_db[6]; /* PK, KEK, db, dbx, dbt, dbr */
+    uint32_t hash_count_by_db[6];
+} efi_info_t;
+
+typedef struct {
+    uint8_t  fw_class[16];        /* GUID */
+    uint32_t fw_type;             /* 0=unknown, 1=system, 2=device, 3=uefi-driver */
+    uint32_t fw_version;
+    uint32_t lowest_supported_fw_version;
+    uint32_t capsule_flags;
+    uint32_t last_attempt_version;
+    uint32_t last_attempt_status;
+} efi_esrt_entry_t;
+
+typedef enum {
+    EFI_VERIFY_OK                   = 0,
+    EFI_VERIFY_BAD_PE               = 1,
+    EFI_VERIFY_NO_CERT_TABLE        = 2,
+    EFI_VERIFY_BAD_CERT_TABLE       = 3,
+    EFI_VERIFY_BAD_SIGNED_DATA      = 4,
+    EFI_VERIFY_AUTH_HASH_MISMATCH   = 5,
+    EFI_VERIFY_UNSUPPORTED_DIGEST   = 6,
+    EFI_VERIFY_SIGNER_NOT_FOUND     = 7,
+    EFI_VERIFY_BAD_SIGNER_CERT      = 8,
+    EFI_VERIFY_BAD_RSA_KEY          = 9,
+    EFI_VERIFY_SIGNATURE_INVALID    = 10,
+    EFI_VERIFY_CHAIN_UNTRUSTED      = 11,
+    EFI_VERIFY_REVOKED_BY_DBX       = 12,
+    EFI_VERIFY_SB_UNAVAILABLE       = 13,
+} efi_verify_result_t;
+
+typedef struct {
+    efi_verify_result_t result;
+    uint32_t            pe_size;
+    uint8_t             pe_sha256[32];
+    uint8_t             signer_sha256[32];
+} efi_verify_t;
+
+/* Returns 0 on success, -1 on failure. */
+int efi_info(efi_info_t *out);
+
+/* idx in [0, efi_info().esrt_count). Returns 0 on success. */
+int efi_esrt_entry(uint32_t idx, efi_esrt_entry_t *out);
+
+/* Verify a PE image. `pe_buf` is the entire image bytes; `pe_size` is its
+ * length. `out` receives the result + hashes. Returns 0 if the call itself
+ * succeeded — `out->result` carries the verification verdict (== 0 means
+ * the PE is trusted; != 0 means rejected). */
+int efi_verify_pe(const void *pe_buf, uint32_t pe_size, efi_verify_t *out);
+
 #endif // SYSTEM_H

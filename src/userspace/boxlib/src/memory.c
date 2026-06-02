@@ -8,8 +8,26 @@
 #include "box/string.h"
 #include "box/core/notify.h"
 #include "box/core/cabin.h"
+#include "box/core/manifest.h"
 #include "box/print.h"
 #include "cabin_layout.h"
+
+/* Implicit 2 MiB heap pages.
+ *
+ * When a single allocation crosses the 2 MiB threshold we pad the heap
+ * up to the next 2 MiB boundary, ask the kernel to pre-back the region
+ * with 2 MiB physical pages (one PDE per chunk), and place the
+ * allocation at the aligned address. Sub-2 MiB allocations stay on the
+ * existing 4 KiB demand-paging path.
+ *
+ * The pre-fault syscall mirrors src/kernel/core/decks/system/system_deck.h
+ * SYSTEM_OP_HEAP_PREFAULT and the handler in bay_ops.c. */
+#include "boxos_sizes.h"
+#include "boxos_decks.h"
+
+#define HEAP_OP_PREFAULT         0x14u
+#define HEAP_HUGE_THRESHOLD      LARGE_PAGE_2M_SIZE
+#define HEAP_HUGE_MASK           LARGE_PAGE_2M_MASK
 
 // ---------------------------------------------------------------------------
 // Thread-safe first-fit heap allocator with tag support and diagnostics
@@ -120,6 +138,21 @@ static uint8_t get_or_create_tag_locked(const char *name) {
     return id;
 }
 
+/* Pre-fault a 2 MB-aligned, 2 MB-sized region. The kernel maps every
+ * 2 MB chunk inside [va_base, va_base+size_2m) with one PDE leaf,
+ * falling back to 4 KB pages transparently if PMM fragmentation
+ * prevents a chunk-level allocation. Returns 0 on success. */
+static int prefault_huge_locked(uintptr_t va_base, uint64_t size_2m_aligned) {
+    uint8_t params[16];
+    uint64_t va64 = (uint64_t)va_base;
+    memcpy(params,     &va64,           sizeof(uint64_t));
+    memcpy(params + 8, &size_2m_aligned, sizeof(uint64_t));
+    return MfCall1(DECK_SYSTEM, HEAP_OP_PREFAULT,
+                   params, sizeof(params),
+                   NULL, 0, NULL, 0, NULL,
+                   30000, NULL);
+}
+
 // Core allocation logic. tag_id must already be resolved.
 // Called with heap_lock held. Returns payload pointer or NULL.
 static void* alloc_locked(size_t size, uint8_t tag_id) {
@@ -169,6 +202,71 @@ static void* alloc_locked(size_t size, uint8_t tag_id) {
         return NULL;
     }
 
+    /* Implicit 2 MB-page growth — when this single allocation needs at
+     * least 2 MB of backing, ask the kernel to pre-back with 2 MB pages
+     * rather than spending hundreds of demand-fault syscalls. The block
+     * starts at a 2 MB boundary so the whole header+payload sits inside
+     * one PDE leaf (or spans multiple cleanly-aligned PDEs). Any gap
+     * between heap_current and the aligned base becomes a free padding
+     * block recycled by future small allocations. */
+    if (total >= HEAP_HUGE_THRESHOLD) {
+        uintptr_t cur      = heap_current;
+        uintptr_t aligned  = (cur + HEAP_HUGE_MASK) & ~HEAP_HUGE_MASK;
+        size_t    pad_size = aligned - cur;
+        size_t    huge_total   = (total + HEAP_HUGE_MASK) & ~HEAP_HUGE_MASK;
+        size_t    grow_total   = pad_size + huge_total;
+
+        if (heap_current + grow_total > heap_max) {
+            heap_last_error = ERR_HEAP_EXHAUSTED;
+            return NULL;
+        }
+
+        /* Insert padding free block (skip if the gap is smaller than a
+         * usable header+payload — then we simply waste those bytes of
+         * VA; physical RAM was never allocated for them). */
+        if (pad_size >= BLOCK_HDR_SIZE + HEAP_ALIGN) {
+            block_t *pad = (block_t *)cur;
+            pad->size  = pad_size - BLOCK_HDR_SIZE;
+            pad->magic = HEAP_MAGIC;
+            pad->free  = 1;
+            pad->tag   = HEAP_TAG_NONE;
+            pad->next  = NULL;
+            if (prev) {
+                prev->next = pad;
+            } else {
+                free_list = pad;
+            }
+            prev = pad;
+        }
+
+        if (prefault_huge_locked(aligned, (uint64_t)huge_total) != 0) {
+            /* Kernel could not back the region (PMM exhausted). Don't
+             * roll back the padding block — it's a legitimate free
+             * region that future small allocations can use. */
+            heap_last_error = ERR_NO_MEMORY;
+            return NULL;
+        }
+
+        heap_current = aligned + huge_total;
+
+        block_t *block = (block_t *)aligned;
+        block->size  = huge_total - BLOCK_HDR_SIZE;
+        block->magic = HEAP_MAGIC;
+        block->free  = 0;
+        block->tag   = tag_id;
+        block->next  = NULL;
+
+        if (prev) {
+            prev->next = block;
+        } else {
+            free_list = block;
+        }
+
+        heap_last_error = OK;
+        return (void *)((uint8_t *)block + BLOCK_HDR_SIZE);
+    }
+
+    /* Sub-2 MB growth — existing 4 KB demand-paged path. */
     void* mem = sbrk_locked(total);
     if (!mem) {
         heap_last_error = ERR_HEAP_EXHAUSTED;

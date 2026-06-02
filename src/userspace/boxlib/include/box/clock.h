@@ -15,7 +15,6 @@
  * a correct answer — slower, but never wrong.
  */
 
-#define CLOCKBOARD_VA            0x4000ULL
 #define CLOCKBOARD_MAGIC_USER    0x4b4c4342u    /* 'BCLK' */
 
 /* Mirrors the kernel struct exactly — keep in lock-step with

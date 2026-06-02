@@ -452,10 +452,46 @@ static int ObjWrite(const ManifestOp *op,
 
     int wrote = tagfs_write(handle, src_bounce, src->size);
     uint64_t final_size = handle->file_size;
+    uint64_t start_offset = (flags & OBJ_WRITE_APPEND_FLAG)
+                                ? (final_size - (uint64_t)(wrote > 0 ? wrote : 0))
+                                : offset;
     tagfs_close(handle);
     crate_buf_free(src_bounce);
 
     if (wrote < 0) return ERR_IO;
+
+    /* WROTE fan-out — same 32-byte payload as write_job.c::w_publish so
+     * a tag listener (write_observer, etc.) gets identical layout on
+     * sync (BIOS / single-core) and async (UEFI + AHCI + multi-core)
+     * paths. Drift between the two surfaced as
+     *   "[WO] FAIL: payload too small (8)"
+     * on every sync-path config. */
+    if (wrote > 0 && TouchHasAnyListeners()) {
+        TagFSMetadata wmeta;
+        memset(&wmeta, 0, sizeof(wmeta));
+        if (tagfs_get_metadata(file_id, &wmeta) == OK) {
+            struct {
+                uint32_t file_id;
+                uint8_t  op;          /* 1 = WRITE */
+                uint8_t  _pad[3];
+                uint64_t offset;
+                uint64_t bytes;
+                uint64_t final_size;
+            } __attribute__((packed)) ev = {
+                .file_id    = file_id,
+                .op         = 1,
+                .offset     = start_offset,
+                .bytes      = (uint64_t)wrote,
+                .final_size = final_size,
+            };
+            uint32_t pid = (ctx && ctx->proc) ? ctx->proc->pid : 0;
+            for (uint16_t ti = 0; ti < wmeta.tag_count; ti++) {
+                TouchPublishId(wmeta.tag_ids[ti], &ev, sizeof(ev),
+                               pid, TOUCH_FLAG_TAGFS);
+            }
+            tagfs_metadata_free(&wmeta);
+        }
+    }
 
     if (out_kp && out_crate && out_crate->capacity >= 16) {
         uint64_t bytes_written = (uint64_t)wrote;

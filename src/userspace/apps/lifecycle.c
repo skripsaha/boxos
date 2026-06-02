@@ -28,21 +28,24 @@ int main(void)
 
     kdbg_print("[LIFECYCLE] subscribing to process:spawned + process:died");
 
-    if (touch_claim(TOUCH_TAG_PROCESS_SPAWNED, TOUCH_REST, 0, 0) != 0) {
+    TouchTag spawned_tag = TOUCH_TAG_ID(TOUCH_TAG_PROCESS_SPAWNED);
+    TouchTag died_tag    = TOUCH_TAG_ID(TOUCH_TAG_PROCESS_DIED);
+
+    if (touch_claim(spawned_tag, TOUCH_REST, 0, 0) != 0) {
         kdbg_print("[LIFECYCLE] FAIL: claim process:spawned");
         return 1;
     }
-    if (touch_claim(TOUCH_TAG_PROCESS_DIED, TOUCH_REST, 0, 0) != 0) {
+    if (touch_claim(died_tag, TOUCH_REST, 0, 0) != 0) {
         kdbg_print("[LIFECYCLE] FAIL: claim process:died");
-        touch_release(TOUCH_TAG_PROCESS_SPAWNED);
+        touch_release(spawned_tag);
         return 1;
     }
 
     int child = proc_exec("lifecycle");
     if (child < 0) {
         kdbg_print("[LIFECYCLE] FAIL: spawn child rc=%d", child);
-        touch_release(TOUCH_TAG_PROCESS_SPAWNED);
-        touch_release(TOUCH_TAG_PROCESS_DIED);
+        touch_release(spawned_tag);
+        touch_release(died_tag);
         return 1;
     }
     kdbg_print("[LIFECYCLE] spawned child pid=%d", child);
@@ -52,11 +55,11 @@ int main(void)
     int saw_spawn = 0, saw_die = 0;
     for (int i = 0; i < 60 && (!saw_spawn || !saw_die); i++) {
         Touch t;
-        int rc = touch_await(TOUCH_TAG_PROCESS_SPAWNED, &t, 100);
+        int rc = touch_await(spawned_tag, &t, 100);
         if (rc == 0) {
-            const uint8_t *p = (const uint8_t *)(uintptr_t)t.payload_addr;
+            const uint8_t *p = t.payload;
             uint32_t pid = 0, parent = 0;
-            if (p && t.payload_len >= 8) {
+            if (t.payload_len >= 8) {
                 memcpy(&pid,    p + 0, 4);
                 memcpy(&parent, p + 4, 4);
             }
@@ -64,12 +67,12 @@ int main(void)
                        pid, parent, (unsigned)t.tag_id);
             if ((int)pid == child) saw_spawn = 1;
         }
-        rc = touch_await(TOUCH_TAG_PROCESS_DIED, &t, 100);
+        rc = touch_await(died_tag, &t, 100);
         if (rc == 0) {
-            const uint8_t *p = (const uint8_t *)(uintptr_t)t.payload_addr;
+            const uint8_t *p = t.payload;
             uint32_t pid = 0;
             int32_t  exitc = 0;
-            if (p && t.payload_len >= 8) {
+            if (t.payload_len >= 8) {
                 memcpy(&pid,   p + 0, 4);
                 memcpy(&exitc, p + 4, 4);
             }
@@ -78,8 +81,8 @@ int main(void)
         }
     }
 
-    touch_release(TOUCH_TAG_PROCESS_SPAWNED);
-    touch_release(TOUCH_TAG_PROCESS_DIED);
+    touch_release(spawned_tag);
+    touch_release(died_tag);
 
     if (saw_spawn && saw_die) {
         kdbg_print("[LIFECYCLE] PASS: spawn+die delivered for pid=%d", child);

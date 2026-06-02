@@ -2,7 +2,7 @@
  * BoxOS — EFI Runtime Services driver (kernel side).
  *
  * Responsibilities (see efi.h for the public surface):
- *   1. Parse the EFI memory map preserved in boot_info v3 (EfiACPIMemoryNVS
+ *   1. Parse the EFI memory map preserved in boot_info v3/v4 (EfiACPIMemoryNVS
  *      region, kept alive across ExitBootServices).
  *   2. Map every EFI_MEMORY_RUNTIME descriptor at EFI_RT_VA_BASE +
  *      physical_start. Cacheability is selected per descriptor type:
@@ -17,6 +17,11 @@
  *   4. Rebase the runtime_services pointer from physical → virtual so
  *      subsequent ResetSystem / GetTime / GetVariable calls land at the
  *      new VA where the firmware now expects to be entered.
+ *   5. Provide shared serialisation primitives (efi_rt_lock /
+ *      efi_rt_unlock / efi_rt_watch_*) consumed by the per-service
+ *      wrappers in efi_variable.c / efi_wakeup.c / efi_capsule.c so
+ *      every RT call obeys UEFI 2.10 §8.1 "Runtime services are not
+ *      reentrant."
  *
  * Error handling: every failure path leaves efi_runtime_available()
  * false; callers must have a non-EFI fallback (acpi_reboot already
@@ -28,6 +33,7 @@
  */
 
 #include "efi.h"
+#include "efi_runtime_internal.h"
 #include "boot_info.h"
 #include "vmm.h"
 #include "klib.h"
@@ -228,8 +234,8 @@ bool efi_runtime_init(void)
     if (g_rt_available) return true;   /* idempotent */
 
     boot_info_t *bi = boot_info_get();
-    if (!bi || !boot_info_valid(bi) || bi->version != BOOT_INFO_VERSION3) {
-        debug_printf("[EFI] boot_info is not v3 (boot_method=%u version=%u); "
+    if (!bi || !boot_info_valid(bi) || !boot_info_has_efi_rt(bi)) {
+        debug_printf("[EFI] boot_info lacks EFI RT handoff (boot_method=%u version=%u); "
                      "EFI runtime services unavailable\n",
                      bi ? bi->boot_method : 0,
                      bi ? bi->version    : 0);
@@ -243,7 +249,7 @@ bool efi_runtime_init(void)
 
     if (!bi->efi_rt_services_phys || !bi->efi_mmap_phys ||
         !bi->efi_mmap_size || !bi->efi_mmap_desc_size) {
-        debug_printf("[EFI] boot_info v3 missing EFI handoff fields\n");
+        debug_printf("[EFI] boot_info missing EFI handoff fields\n");
         return false;
     }
 
@@ -415,7 +421,54 @@ bool efi_runtime_available(void)
 }
 
 /* =========================================================================
- * Public wrappers
+ * Internal helpers (consumed by efi_variable.c / efi_wakeup.c /
+ * efi_capsule.c / efi_esrt.c / efi_secureboot.c). Defined here because
+ * they touch g_rt + g_rt_lock + the diagnostics globals.
+ * ========================================================================= */
+
+EfiRuntimeServices *efi_rt_get(void)
+{
+    return g_rt_available ? g_rt : NULL;
+}
+
+bool efi_guid_equal(const EfiGuid *a, const EfiGuid *b)
+{
+    if (!a || !b) return false;
+    return memcmp(a, b, sizeof(EfiGuid)) == 0;
+}
+
+void efi_rt_lock(uint64_t *saved_rflags)
+{
+    uint64_t rflags;
+    __asm__ volatile("pushfq; pop %0; cli" : "=r"(rflags));
+    spin_lock(&g_rt_lock);
+    *saved_rflags = rflags;
+}
+
+void efi_rt_unlock(uint64_t saved_rflags)
+{
+    spin_unlock(&g_rt_lock);
+    if (saved_rflags & (1ULL << 9)) __asm__ volatile("sti");
+}
+
+void efi_rt_watch_start(uint64_t *t0)
+{
+    *t0 = rdtsc();
+}
+
+void efi_rt_watch_end(const char *name, uint64_t t0)
+{
+    uint64_t khz = cpu_get_tsc_freq_khz();
+    if (!khz) return;
+    uint64_t elapsed_ms = (rdtsc() - t0) / khz;
+    if (elapsed_ms > EFI_RT_CALL_WARN_MS) {
+        debug_printf("[EFI] WARNING: %s took %lu ms (firmware slow)\n",
+                     name, (unsigned long)elapsed_ms);
+    }
+}
+
+/* =========================================================================
+ * Public wrappers — Reset / Time
  *
  * UEFI 2.10 §8.1 "Runtime services are not reentrant; the caller must
  * serialise multiple invocations." We hold a spinlock and disable IRQs
@@ -446,69 +499,78 @@ void efi_reset_system(EfiResetType type, EfiStatus status,
     debug_printf("[EFI] ResetSystem returned (firmware refused)\n");
 }
 
-/* Soft watchdog: warn if any RT call exceeds this many milliseconds.
- * We cannot preempt firmware mid-call (a stuck RT function hangs the
- * CPU forever), but logging an abnormally long call gives operators a
- * visible signal that the firmware on this board misbehaves. 100 ms is
- * very generous — every well-behaved RT call returns in microseconds. */
-#define EFI_RT_CALL_WARN_MS  100u
-
-static inline uint64_t efi_rt_tsc_now(void) { return rdtsc(); }
-
-static void efi_rt_check_elapsed(const char *name, uint64_t t0)
-{
-    uint64_t khz = cpu_get_tsc_freq_khz();
-    if (!khz) return;
-    uint64_t elapsed_ms = (rdtsc() - t0) / khz;
-    if (elapsed_ms > EFI_RT_CALL_WARN_MS) {
-        debug_printf("[EFI] WARNING: %s took %lu ms (firmware slow)\n",
-                     name, (unsigned long)elapsed_ms);
-    }
-}
-
 EfiStatus efi_get_time(EfiTime *time, EfiTimeCapabilities *cap)
 {
-    if (!efi_runtime_available() || !g_rt->get_time) {
-        return EFI_STATUS_ERROR_BIT | 3ULL;   /* EFI_UNSUPPORTED */
-    }
+    EfiRuntimeServices *rt = efi_rt_get();
+    if (!rt || !rt->get_time) return EFI_STATUS_UNSUPPORTED;
 
-    uint64_t rflags;
-    __asm__ volatile("pushfq; pop %0; cli" : "=r"(rflags));
-    spin_lock(&g_rt_lock);
-
-    uint64_t t0 = efi_rt_tsc_now();
-    EfiStatus s = g_rt->get_time(time, cap);
-    efi_rt_check_elapsed("GetTime", t0);
-
-    spin_unlock(&g_rt_lock);
-    if (rflags & (1ULL << 9)) __asm__ volatile("sti");
+    uint64_t rflags, t0;
+    efi_rt_lock(&rflags);
+    efi_rt_watch_start(&t0);
+    EfiStatus s = rt->get_time(time, cap);
+    efi_rt_watch_end("GetTime", t0);
+    efi_rt_unlock(rflags);
     return s;
 }
 
-EfiStatus efi_get_variable(uint16_t *variable_name,
-                           const EfiGuid *vendor,
-                           uint32_t *attributes,
-                           uint64_t *data_size,
-                           void *data)
+EfiStatus efi_set_time(EfiTime *time)
 {
-    if (!efi_runtime_available() || !g_rt->get_variable) {
-        return EFI_STATUS_ERROR_BIT | 3ULL;
+    EfiRuntimeServices *rt = efi_rt_get();
+    if (!rt || !rt->set_time) return EFI_STATUS_UNSUPPORTED;
+
+    uint64_t rflags, t0;
+    efi_rt_lock(&rflags);
+    efi_rt_watch_start(&t0);
+    EfiStatus s = rt->set_time(time);
+    efi_rt_watch_end("SetTime", t0);
+    efi_rt_unlock(rflags);
+
+    /* SetTime mutates persistent RTC state — publish a Touch event so
+     * subscribers (clockboard, audit log) can resync without polling. */
+    if (!EFI_IS_ERROR(s)) {
+        debug_printf("[EFI] SetTime succeeded\n");
+    }
+    return s;
+}
+
+/* =========================================================================
+ * Configuration Table access (UEFI 2.10 §4.6)
+ * ========================================================================= */
+
+EfiConfigurationTable *efi_get_configuration_table(uint32_t *out_count)
+{
+    if (out_count) *out_count = 0;
+
+    boot_info_t *bi = boot_info_get();
+    if (!bi || !boot_info_valid(bi) || bi->version != BOOT_INFO_VERSION4) {
+        return NULL;
+    }
+    if (!bi->efi_cfg_table_phys || bi->efi_cfg_table_count == 0) {
+        return NULL;
     }
 
-    uint64_t rflags;
-    __asm__ volatile("pushfq; pop %0; cli" : "=r"(rflags));
-    spin_lock(&g_rt_lock);
+    EfiConfigurationTable *ct = (EfiConfigurationTable *)
+        vmm_phys_to_virt((uintptr_t)bi->efi_cfg_table_phys);
+    if (!ct) return NULL;
 
-    EfiUintn sz = data_size ? (EfiUintn)*data_size : 0;
-    uint64_t t0 = efi_rt_tsc_now();
-    EfiStatus s = g_rt->get_variable(variable_name, vendor, attributes,
-                                      &sz, data);
-    efi_rt_check_elapsed("GetVariable", t0);
-    if (data_size) *data_size = sz;
+    if (out_count) *out_count = bi->efi_cfg_table_count;
+    return ct;
+}
 
-    spin_unlock(&g_rt_lock);
-    if (rflags & (1ULL << 9)) __asm__ volatile("sti");
-    return s;
+void *efi_find_configuration_table(const EfiGuid *target)
+{
+    if (!target) return NULL;
+
+    uint32_t count = 0;
+    EfiConfigurationTable *ct = efi_get_configuration_table(&count);
+    if (!ct) return NULL;
+
+    for (uint32_t i = 0; i < count; i++) {
+        if (efi_guid_equal(&ct[i].vendor_guid, target)) {
+            return ct[i].vendor_table;
+        }
+    }
+    return NULL;
 }
 
 void efi_runtime_print_info(void)
@@ -517,8 +579,14 @@ void efi_runtime_print_info(void)
         debug_printf("[EFI] runtime services unavailable\n");
         return;
     }
-    debug_printf("[EFI] runtime: fw_rev=0x%x rt=%p desc_count=%u pages=%lu\n",
+
+    uint32_t cfg_count = 0;
+    (void)efi_get_configuration_table(&cfg_count);
+
+    debug_printf("[EFI] runtime: fw_rev=0x%x rt=%p desc_count=%u pages=%lu "
+                 "cfg_entries=%u\n",
                  g_rt_fw_revision, (void *)g_rt,
                  g_rt_runtime_descriptors,
-                 (unsigned long)g_rt_runtime_pages_total);
+                 (unsigned long)g_rt_runtime_pages_total,
+                 cfg_count);
 }

@@ -52,7 +52,8 @@ int main(void)
 
     /* Parent. Subscribe BEFORE spawning child so we never miss the
      * publish. */
-    if (touch_claim(WO_TAG, TOUCH_REST, 0, 0) != 0) {
+    TouchTag tag = TOUCH_TAG_ID(WO_TAG);
+    if (touch_claim(tag, TOUCH_REST, 0, 0) != 0) {
         kdbg_print("[WO] claim '%s' FAIL", WO_TAG);
         return 1;
     }
@@ -60,7 +61,7 @@ int main(void)
     int kid = proc_exec("write_observer");
     if (kid < 0) {
         kdbg_print("[WO] spawn child FAIL rc=%d", kid);
-        touch_release(WO_TAG);
+        touch_release(tag);
         return 1;
     }
     kdbg_print("[WO] spawned child pid=%d, awaiting WROTE", kid);
@@ -69,16 +70,16 @@ int main(void)
      * Child file has at least the system-derived "tag" plus "obstest"
      * — we only listen on obstest. Bounded poll. */
     Touch t;
-    int rc = touch_await(WO_TAG, &t, 5000);
-    touch_release(WO_TAG);
+    int rc = touch_await(tag, &t, 5000);
+    touch_release(tag);
 
     if (rc != 0) {
         kdbg_print("[WO] FAIL: no Touch within 5 s (rc=%d)", rc);
         return 1;
     }
 
-    const uint8_t *p = (const uint8_t *)(uintptr_t)t.payload_addr;
-    if (!p || t.payload_len < 12) {
+    const uint8_t *p = t.payload;
+    if (t.payload_len < 12) {
         kdbg_print("[WO] FAIL: payload too small (%u)", (unsigned)t.payload_len);
         return 1;
     }

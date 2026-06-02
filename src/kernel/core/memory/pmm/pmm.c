@@ -187,7 +187,16 @@ error_t pmm_init(void) {
     pmm_deferred_cap = entry_count;
     pmm_deferred_count = 0;
 
-    uintptr_t zone_base = ALIGN_UP(deferred_base + deferred_size, PMM_PAGE_SIZE);
+    /* Align the buddy zone base to a 2 MiB boundary. The buddy guarantees
+     * order-N alignment relative to zone->base; if the base is only 4 KiB-
+     * aligned, allocations at order 9 (2 MiB) yield blocks whose absolute
+     * physical address is NOT 2 MiB-aligned, which breaks anything that
+     * needs to install a 2 MiB PDE leaf (Bay, implicit user-heap huge,
+     * future drivers requiring 2 MiB-aligned DMA). The waste here is at
+     * most ~2 MiB ONCE at boot — negligible compared to the alternative
+     * of allocating 4 MiB and carving a 2 MiB-aligned sub-block on every
+     * huge request. */
+    uintptr_t zone_base = ALIGN_UP(deferred_base + deferred_size, VMM_LARGE_PAGE_2M_SIZE);
 
     if (zone_base >= mem_end) {
         panic("[PMM] Kernel too large for available memory!");

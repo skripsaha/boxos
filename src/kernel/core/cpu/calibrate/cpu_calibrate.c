@@ -565,6 +565,25 @@ bool cpu_tsc_recal_now(void)
 {
     if (!calibrated) return false;
 
+    /* INVARIANT TSC guarantees a constant frequency — the architectural
+     * promise is that the counter advances at the nominal rate
+     * regardless of P-state / C-state / thermal throttling. Recal would
+     * only "catch" measurement noise from the HPET sample window, which
+     * we'd then publish as a phantom freq change. Don't. */
+    if (g_cpu_caps.has_invariant_tsc) return true;
+
+    /* QEMU TCG advertises NO INVARIANT_TSC under default qemu64 but its
+     * TSC is in fact a constant emulated counter (TCG fakes a 1 GHz
+     * clock). HPET-based measurement under TCG is busy-wait simulation
+     * that easily produces > 1 % apparent drift from sample to sample
+     * (TCG instruction-step timing isn't synchronized to wall time).
+     * Publishing those samples back into tsc_freq_khz makes per-process
+     * timing wobble on each recal cycle — observed as a stress_matrix
+     * flake when bench prints a "TSC freq:" outside the 1 GHz band on
+     * the second invocation. Skip — TCG's TSC is stable by emulator
+     * construction, no recal needed. */
+    if (hv_vendor() == HV_VENDOR_TCG) return true;
+
     const char *src = NULL;
     uint64_t new_khz = cpu_tsc_recal_sample(&src);
     if (new_khz == 0) return false;

@@ -100,6 +100,32 @@ static void encode_manifest_pocket(Pocket          *p,
     memcpy(p->route_tag + 10, &pier_id, sizeof(uint16_t));
 }
 
+/*
+ * ManifestSubmitNoWait — push a Manifest-mode Pocket to the kernel without
+ * blocking for the reply. Used by touch_await and other async-pattern
+ * callers that consume their own replies via a context-filtered
+ * result_wait_any loop instead of the synchronous error_code return.
+ *
+ * Sharing the encoder + push step here keeps the manifest-mode Pocket
+ * layout in exactly one place (encode_manifest_pocket above). Drift
+ * between async and sync paths was the original reason touch.c carried
+ * a hand-rolled copy of the route_tag packing.
+ */
+int ManifestSubmitNoWait(const Manifest *m,
+                         const Crate    *crates,
+                         uint16_t        crate_count,
+                         uint32_t        target_pid)
+{
+    if (!m)                                   return -ERR_INVALID_ARGS;
+    if (m->magic != MANIFEST_MAGIC)           return -ERR_INVALID_ARGS;
+    if (crate_count > 0 && !crates)           return -ERR_INVALID_ARGS;
+
+    Pocket p;
+    encode_manifest_pocket(&p, m, crates, crate_count, target_pid);
+    if (pocket_submit(&p) != 0) return -ERR_POCKET_RING_FULL;
+    return OK;
+}
+
 int ManifestSubmitFull(const Manifest *m,
                        Crate          *crates,
                        uint16_t        crate_count,

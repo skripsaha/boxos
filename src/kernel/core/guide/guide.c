@@ -11,6 +11,8 @@
 #include "guide.h"
 #include "execution_deck.h"
 #include "touch.h"
+#include "bay.h"
+#include "brook.h"
 #include "process.h"
 #include "klib.h"
 #include "vmm.h"
@@ -31,6 +33,8 @@ void guide_init(void)
     debug_printf("[GUIDE] Initializing Guide Dispatcher...\n");
     ready_queue_init(&g_ready_queue);
     TouchInit();
+    BayInit();
+    BrookInit();
     perf_trace_init();
     debug_printf("[GUIDE] ReadyQueue initialized (intrusive, unbounded)\n");
 }

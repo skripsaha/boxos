@@ -156,7 +156,11 @@ run_config() {
     pn=$(grep -cE "PANIC|^\\[EXCEPTION\\]" build/serial.log)
     at=$(grep -c "ATRC" build/serial.log)
     un=$(grep -c "Unknown command" build/serial.log)
-    tsc_good=$(grep -c "TSC freq: 100" build/serial.log)
+    # TSC band check — bench prints "TSC freq: 1000100 kHz" via boxlib's
+    # cpu_get_tsc_freq_khz(). Match any 100xxxx (≈ 1 GHz) value reported by
+    # bench, OR the kernel-side `[CPU] TSC source: ... — 100xxxx kHz`
+    # boot log (defensive: matches whichever side is in the log).
+    tsc_good=$(grep -cE "TSC freq: 100[0-9]{4}|TSC source:.*— 100[0-9]{4} kHz" build/serial.log)
 
     # Extended-suite counts.
     mtest_p=$(grep -c     "\[mtest\] PASS"            build/serial.log)

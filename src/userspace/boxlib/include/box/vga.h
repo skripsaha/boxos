@@ -34,8 +34,22 @@ int vga_getdimensions(vga_dimensions_t* dims);
 
 /* =========================================================================
  * Batch session — multiple VGA operations in one SYSCALL.
- * Currently no-op; Stage 3 will wire to a Manifest-batch builder so a
- * single printf with %color produces one syscall for all fragments.
+ *
+ * Between vga_begin() and vga_commit(), every write op (setcolor, puts,
+ * putchar, newline, clear, scroll) is appended to a per-process Manifest
+ * builder instead of firing immediately. vga_commit() submits the whole
+ * batch as a single multi-op Manifest — one kernel re-entry total
+ * regardless of how many ops are in the batch.
+ *
+ * This is the BoxOS Deck-dispatch advantage made concrete: a colored
+ * printf that used to cost 10+ syscalls (SET_COLOR / PUTSTRING pairs
+ * per colored run) now costs 1.
+ *
+ * Begin/commit nest correctly: inner vga_begin/vga_commit pairs only
+ * flush when the outermost one returns. Getter ops (vga_getcolor,
+ * vga_getcursor, vga_getdimensions) bypass the batch and resolve
+ * immediately — they need an answer before the next op decides what to
+ * do.
  * ========================================================================= */
 void vga_begin(void);
 int  vga_commit(void);

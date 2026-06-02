@@ -25,6 +25,7 @@
 #include "cpu_calibrate.h"  // cpu_tsc_recal_tick (periodic recalibration)
 #include "touch_queue.h"
 #include "pit.h"
+#include "irq_defer.h"
 
 static idt_entry_t idt[IDT_ENTRIES];
 static idt_descriptor_t idt_desc;
@@ -562,6 +563,30 @@ void irq_handler(interrupt_frame_t *frame)
 
         /* xHCI events handled via IRQ; poll only as fallback */
         xhci_poll_events();
+
+        /* Single-core mode: drain irq_defer here, when the PIT IRQ
+         * interrupted USERSPACE code.
+         *
+         * Background: irq_defer is the universal IRQ→K-Core hand-off
+         * for bottom-half work that touches kmalloc / tagfs / process
+         * tables. In multi-core configurations, K-Cores drain their
+         * own rings inside `kcore_run_loop`. Single-core mode does NOT
+         * run kcore_run_loop (the BSP runs userspace directly via
+         * scheduler), so without an explicit pump nothing ever drains
+         * the queued deferred handlers (keyboard Touch, USB Touch,
+         * SCI/GPE notifications, write_job completions, ...).
+         *
+         * Lock-safety: the deferred handlers take heap_lock, tagfs
+         * locks, process_lock, etc. If the PIT IRQ interrupted a
+         * kernel-mode syscall holding one of those locks, pumping here
+         * would deadlock against the interrupted thread on the same
+         * core. We gate the pump on `(frame->cs & 3) == 3` — the
+         * interrupted code was in user mode (CS=USER_CS, RPL=3) — which
+         * guarantees no kernel lock is held. Multi-core takes the
+         * `amp_is_appcore()` branch above and does not pump here. */
+        if (g_amp.total_cores == 1 && (frame->cs & 3) == 3) {
+            irq_defer_pump(0);
+        }
 
         /* PIT IRQ 0: same scheduling rule as the LAPIC timer above —
          * preempt on App Cores or in single-core mode where the BSP
