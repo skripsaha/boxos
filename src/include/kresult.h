@@ -3,19 +3,7 @@
 
 #include "ktypes.h"
 #include "error.h"
-
-typedef enum {
-    KCTX_NONE   = 0,
-    KCTX_PMM    = 1,
-    KCTX_VMM    = 2,
-    KCTX_TAGFS  = 3,
-    KCTX_AHCI   = 4,
-    KCTX_SCHED  = 5,
-    KCTX_IPC    = 6,
-    KCTX_GUIDE  = 7,
-    KCTX_FRIEND = 8,
-    KCTX_TOUCH  = 9,
-} KResultContext;
+#include "boxos_kctx.h"      /* KResultContext enum — shared with boxlib */
 
 typedef struct {
     uint32_t status;

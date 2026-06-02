@@ -73,20 +73,32 @@ int kb_readline(char *buffer, size_t size, bool echo)
 {
     if (!buffer || size == 0 || size > 1024) return -ERR_INVALID_ARGS;
 
-    touch_claim(TOUCH_TAG_KEYBOARD, TOUCH_REST, 0, 0);
+    /* Claim TOUCH_TAG_KEYBOARD once per process. The kernel handles a
+     * repeat-claim as a no-op but each call is still a manifest
+     * round-trip — 1 syscall + 1 reply per kb_readline before the
+     * process even got a chance to read its first character. Skipping
+     * after the first success drops that overhead. */
+    static bool s_claimed = false;
+    TouchTag kb_tag = TOUCH_TAG_ID(TOUCH_TAG_KEYBOARD);
+    if (!s_claimed) {
+        if (touch_claim(kb_tag, TOUCH_REST, 0, 0) == 0) {
+            s_claimed = true;
+        }
+    }
 
     size_t pos   = 0;
     bool   done  = false;
 
     while (!done) {
         Touch t;
-        int rc = touch_await(TOUCH_TAG_KEYBOARD, &t, 30000);
+        int rc = touch_await(kb_tag, &t, 30000);
         if (rc != 0) continue;
 
-        /* payload_addr points into our cabin heap — directly readable */
+        /* Payload is inline inside `t` (TouchRing copies it on pop) —
+         * no separate cabin allocation, lifetime is the local `Touch t`. */
         if (t.payload_len < sizeof(KbTouchPayload)) continue;
 
-        const KbTouchPayload *kp = (const KbTouchPayload *)(uintptr_t)t.payload_addr;
+        const KbTouchPayload *kp = (const KbTouchPayload *)t.payload;
         char ch = kp->ascii;
         if (ch == 0) continue;
 

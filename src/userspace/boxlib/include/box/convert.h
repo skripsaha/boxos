@@ -17,6 +17,12 @@ char* uint_to_str(unsigned int value, char* buf, size_t buf_size);
 char* to_hex(uint32_t value, char* buf, size_t buf_size);
 char* to_bin(uint32_t value, char* buf, size_t buf_size);
 
+/* 64-bit converters used by printf %ld/%lu/%llx and callers that need
+ * to format full uint64_t (TSC counters, addresses, large file IDs). */
+char* int64_to_str(int64_t value, char* buf, size_t buf_size);
+char* uint64_to_str(uint64_t value, char* buf, size_t buf_size);
+char* uint64_to_hex(uint64_t value, char* buf, size_t buf_size);
+
 bool is_digit(char c);
 bool is_alpha(char c);
 bool is_alnum(char c);

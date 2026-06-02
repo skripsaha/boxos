@@ -92,7 +92,8 @@ int main(void)
     }
 
     /* Subscribe to process:died so we know when children finish. */
-    if (touch_claim(TOUCH_TAG_PROCESS_DIED, TOUCH_REST, 0, 0) != 0) {
+    TouchTag died_tag = TOUCH_TAG_ID(TOUCH_TAG_PROCESS_DIED);
+    if (touch_claim(died_tag, TOUCH_REST, 0, 0) != 0) {
         kdbg_print("[WC] claim process:died FAIL");
         delete(fid);
         return 1;
@@ -104,7 +105,7 @@ int main(void)
         kids[i] = proc_exec("write_concurrent");
         if (kids[i] < 0) {
             kdbg_print("[WC] spawn child %d rc=%d", i, kids[i]);
-            touch_release(TOUCH_TAG_PROCESS_DIED);
+            touch_release(died_tag);
             delete(fid);
             return 1;
         }
@@ -115,10 +116,10 @@ int main(void)
     int seen[CHILD_COUNT] = {0};
     for (int spin = 0; spin < 200 && kids_alive > 0; spin++) {
         Touch t;
-        int rc = touch_await(TOUCH_TAG_PROCESS_DIED, &t, 200);
+        int rc = touch_await(died_tag, &t, 200);
         if (rc != 0) continue;
-        const uint8_t *p = (const uint8_t *)(uintptr_t)t.payload_addr;
-        if (!p || t.payload_len < 8) continue;
+        const uint8_t *p = t.payload;
+        if (t.payload_len < 8) continue;
         uint32_t dead_pid;
         memcpy(&dead_pid, p, 4);
         for (int i = 0; i < CHILD_COUNT; i++) {
@@ -131,7 +132,7 @@ int main(void)
         }
     }
 
-    touch_release(TOUCH_TAG_PROCESS_DIED);
+    touch_release(died_tag);
 
     if (kids_alive > 0) {
         kdbg_print("[WC] FAIL: %d children still alive after timeout", kids_alive);

@@ -32,17 +32,33 @@ typedef struct PACKED {
 
 STATIC_ASSERT(sizeof(Pocket) == 128, "Pocket must be 128 bytes");
 
+/* PocketRingHeader — cacheline-separated cursors (mirror of kernel layout).
+ *
+ *   Cacheline 0 — consumer cursor (kernel) + read-only init metadata
+ *   Cacheline 1 — producer cursor (userspace) — own cacheline
+ *
+ * Userspace producer writes `tail` on every pocket submit; without
+ * separation, the kernel-side load of `head` on another core would
+ * invalidate this line via cache coherence on every push (RFO storm
+ * under 16-core stress). Intel SDM Vol 3 §11.4.4. Layout must stay
+ * BYTE-IDENTICAL to the kernel-side struct in src/kernel/core/ipc/
+ * pocket_ring.h. */
 typedef struct PACKED {
+    /* Cacheline 0 — consumer cursor + read-only metadata. */
     volatile uint64_t head;             /* kernel cursor */
-    volatile uint64_t tail;             /* userspace cursor */
     uint64_t          slots_base;       /* user vaddr of slot 0 */
     uint32_t          slot_size;        /* POCKET_SLOT_SIZE (128) */
     uint32_t          slot_count_max;   /* ring capacity */
     uint64_t          magic;
-    uint8_t           _pad[24];
+    uint8_t           _pad_line0[32];   /* fill cacheline 0 */
+
+    /* Cacheline 1 — producer cursor (userspace). */
+    volatile uint64_t tail;             /* userspace cursor */
+    uint8_t           _pad_line1[56];   /* fill cacheline 1 */
 } PocketRingHeader;
 
-STATIC_ASSERT(sizeof(PocketRingHeader) == 64, "PocketRingHeader must be 64 bytes");
+STATIC_ASSERT(sizeof(PocketRingHeader) == 128,
+              "PocketRingHeader must be 128 bytes (two cachelines)");
 
 typedef struct PACKED {
     PocketRingHeader hdr;

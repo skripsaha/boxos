@@ -13,6 +13,9 @@
 #include "iommu.h"
 #include "aml.h"
 #include "efi.h"
+#include "efi_esrt.h"
+#include "efi_secureboot.h"
+#include "efi_selftest.h"
 #include "rtc.h"
 #include "clockboard.h"
 #include "e820.h"
@@ -195,9 +198,47 @@ void kernel_main(void)
      * EFI_MEMORY_RUNTIME descriptor at EFI_RT_VA_BASE+phys and calls
      * SetVirtualAddressMap (UEFI 2.10 §8.4) so subsequent RT calls
      * dispatch via virtual addresses. */
+    /* Crypto + ASN.1 + RSA + streaming-SHA-256 self-test BEFORE we
+     * start trusting any of those primitives for downstream policy
+     * decisions. A regression in any one of them is fatal to Secure
+     * Boot guarantees; surfacing it at boot beats discovering it
+     * during a customer's first signed-image load. */
+    debug_printf("[INIT] EFI crypto self-test...\n");
+    if (!efi_selftest_run()) {
+        kprintf("[BOOT] EFI self-test FAILED — Secure Boot disabled\n");
+        /* Non-fatal: BoxOS still boots, but Authenticode verification
+         * is unreliable. Production deployments should treat the boot
+         * log as a hard fail. */
+    }
+
     debug_printf("[INIT] EFI runtime services...\n");
     if (efi_runtime_init()) {
         efi_runtime_print_info();
+
+        /* EFI System Resource Table — must come after efi_runtime_init
+         * because efi_esrt_init reads boot_info's preserved ESRT copy
+         * (allocated in EfiACPIMemoryNVS by TagBoot). Independent of
+         * SVAM success: ESRT is a plain in-memory copy. Touch publish
+         * matches the acpi_init pattern: emit at boot — late subscribers
+         * can query via efi_esrt_get(). */
+        if (efi_esrt_init()) {
+            efi_esrt_print();
+        }
+
+        /* Secure Boot consumer — reads SecureBoot/SetupMode/PK/KEK/db/dbx
+         * via Variable Services. Safe to call even when firmware reports
+         * SB=0; populates state only and skips databases that are empty.
+         *
+         * NOTE: Touch publishing is deferred to after guide_init below
+         * because TouchInit happens inside guide_init — publishing here
+         * would land before the tag registry is ready, get dropped at
+         * resolve_tag_pair, and userspace subscribers would never see
+         * the boot-time state events. The kernel-internal state is
+         * available immediately via efi_secureboot_get_state() /
+         * efi_esrt_get() so the deferral is purely for Touch consumers. */
+        if (efi_secureboot_init()) {
+            efi_secureboot_print();
+        }
     } else {
         debug_printf("[INIT] EFI runtime services not available\n");
     }
@@ -334,6 +375,16 @@ void kernel_main(void)
 
     debug_printf("[INIT] Guide Dispatcher...\n");
     guide_init();
+
+    /* TouchInit has now run inside guide_init — replay every EFI boot-
+     * time event so late subscribers (userspace daemons, fleet inventory
+     * tools) actually observe the state instead of losing it to the pre-
+     * TouchInit resolve_tag_pair no-op. Re-publishing is idempotent: the
+     * payload identifies the source state snapshot. */
+    if (efi_runtime_available()) {
+        if (efi_esrt_available())       efi_esrt_publish_touch();
+        if (efi_secureboot_available()) efi_secureboot_publish_touch();
+    }
 
     debug_printf("[INIT] OpRegistry...\n");
     error_t op_reg_err = OpRegistryInit();

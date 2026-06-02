@@ -10,6 +10,42 @@
 #include "klib.h"
 #include "touch.h"
 
+/* ─── Touch tag handle cache (resolved once via xhci_interrupt_touch_init)
+ *
+ * xhci_irq_handler runs in MSI/MSI-X / legacy-INTx context. Resolving a
+ * tag string at IRQ time would take the TagFS registry lock and possibly
+ * kmalloc a fresh intern entry — both of which violate IRQ-context lock
+ * ordering on this kernel (see project memory `irq_defer_done_2026_05_17`).
+ *
+ * Two tags are cached because the xHCI port-change handler publishes to
+ * one of two distinct events depending on whether the device connected
+ * or disconnected. Both are bare keys (no value); the registry resolves
+ * `bare_id` populated and `full_id` invalid. TouchPublishIrqPair handles
+ * that case correctly by publishing to the non-invalid id only. */
+static volatile uint16_t g_xhci_touch_connect_full    = TOUCH_TAG_INVALID;
+static volatile uint16_t g_xhci_touch_connect_bare    = TOUCH_TAG_INVALID;
+static volatile uint16_t g_xhci_touch_disconnect_full = TOUCH_TAG_INVALID;
+static volatile uint16_t g_xhci_touch_disconnect_bare = TOUCH_TAG_INVALID;
+
+void xhci_interrupt_touch_init(void)
+{
+    TouchTag full, bare;
+
+    TouchTagResolve("usb:connect", &full, &bare);
+    __atomic_store_n(&g_xhci_touch_connect_full, full, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_xhci_touch_connect_bare, bare, __ATOMIC_RELEASE);
+
+    TouchTagResolve("usb:disconnect", &full, &bare);
+    __atomic_store_n(&g_xhci_touch_disconnect_full, full, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_xhci_touch_disconnect_bare, bare, __ATOMIC_RELEASE);
+
+    debug_printf("[xHCI] Touch tag handles cached: connect=%u/%u, disconnect=%u/%u\n",
+                 (unsigned)__atomic_load_n(&g_xhci_touch_connect_full,    __ATOMIC_RELAXED),
+                 (unsigned)__atomic_load_n(&g_xhci_touch_connect_bare,    __ATOMIC_RELAXED),
+                 (unsigned)__atomic_load_n(&g_xhci_touch_disconnect_full, __ATOMIC_RELAXED),
+                 (unsigned)__atomic_load_n(&g_xhci_touch_disconnect_bare, __ATOMIC_RELAXED));
+}
+
 void xhci_process_events(void) {
     xhci_controller_t* ctrl = xhci_get_controller();
     if (!ctrl || !ctrl->running) {
@@ -107,27 +143,43 @@ void xhci_irq_handler(void) {
                 /* Hot-unplug Touch — subscribers can release driver
                  * state for the port. vendor/product not tracked here
                  * (slot was already torn down); a future enrichment
-                 * could publish before xhci_device_slot_cleanup runs. */
+                 * could publish before xhci_device_slot_cleanup runs.
+                 *
+                 * IRQ context: hand off to K-Core via the static-ring +
+                 * irq_defer path. See touch.c TouchPublishIrqPair block. */
                 struct __attribute__((packed)) {
                     uint8_t  port; uint8_t speed;
                     uint16_t vendor_id; uint16_t product_id;
                     uint16_t _reserved;
                 } ev = { port, 0, 0, 0, 0 };
-                TouchPublish("usb:disconnect", &ev, sizeof(ev));
+                TouchTag full = __atomic_load_n(&g_xhci_touch_disconnect_full,
+                                               __ATOMIC_ACQUIRE);
+                TouchTag bare = __atomic_load_n(&g_xhci_touch_disconnect_bare,
+                                               __ATOMIC_ACQUIRE);
+                TouchPublishIrqPair(full, bare, &ev, sizeof(ev),
+                                    0, TOUCH_FLAG_KERNEL);
             } else if ((portsc & XHCI_PORTSC_CSC) && (portsc & XHCI_PORTSC_CCS)) {
                 debug_printf("[xHCI] Device connected on port %u\n", port);
                 xhci_enumerate_device(ctrl, port);
                 /* Hot-plug Touch event — port + speed fields. Enumeration
                  * runs asynchronously and fills vendor/product later;
                  * subscribers that need device IDs query the slot APIs
-                 * once a descriptor is in. */
+                 * once a descriptor is in.
+                 *
+                 * IRQ context: same K-Core hand-off as the disconnect
+                 * path above. */
                 uint8_t speed = (uint8_t)((portsc >> 10) & 0xF);
                 struct __attribute__((packed)) {
                     uint8_t  port; uint8_t speed;
                     uint16_t vendor_id; uint16_t product_id;
                     uint16_t _reserved;
                 } ev = { port, speed, 0, 0, 0 };
-                TouchPublish("usb:connect", &ev, sizeof(ev));
+                TouchTag full = __atomic_load_n(&g_xhci_touch_connect_full,
+                                               __ATOMIC_ACQUIRE);
+                TouchTag bare = __atomic_load_n(&g_xhci_touch_connect_bare,
+                                               __ATOMIC_ACQUIRE);
+                TouchPublishIrqPair(full, bare, &ev, sizeof(ev),
+                                    0, TOUCH_FLAG_KERNEL);
             }
         }
     }

@@ -55,4 +55,10 @@ void        ShellStop(void);
 ShellState *ShellGetState(void);
 void        ShellUpdatePrompt(void);
 
+/* Drop everything sitting in the IPC mailbox. Use between operations
+ * that could otherwise consume a leftover Result (child exit sentinel,
+ * late display PING reply, stray kernel Touch). See shell.c for the
+ * historical "first-command-no-op" race this guards against. */
+void        ShellDrainStaleIpc(void);
+
 #endif /* SHELL_H */

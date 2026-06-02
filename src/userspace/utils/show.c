@@ -61,8 +61,11 @@ int main(void)
     // printf("Content of %s (%lu bytes):\n", info.filename, (unsigned long)info.size);
     // println("----------------------------------------");
 
-    // Read and display file content in chunks
-    char buffer[176]; // max fread chunk size
+    /* Read and display file content in chunks. boxlib's fread no longer
+     * has the old 168/176-byte Pocket payload cap (Phase 12 Manifest +
+     * Crate makes it unbounded), so 4 KiB per fread is one storage
+     * syscall instead of ~24. */
+    char buffer[4096];
     size_t total_read = 0;
     size_t bytes_to_read = (info.size > 4096) ? 4096 : info.size; // limit display
 

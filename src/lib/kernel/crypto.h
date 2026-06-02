@@ -20,6 +20,29 @@ uint16_t KCrc16(const uint8_t *data, uint32_t len);
 // Used for: secure hashing, future cryptographic needs
 void KSha256(const uint8_t *data, uint32_t len, uint8_t *out_hash);
 
+// SHA-256 streaming API. Use Init → Update*N → Final to hash data that
+// arrives in chunks (e.g. PE Authenticode walk over disjoint regions of
+// a large image without copying the image into one contiguous buffer).
+//
+//   KSha256Init   — reset the context to initial state.
+//   KSha256Update — absorb `len` bytes; may be called any number of times.
+//                   No allocation; the internal 64-byte buffer holds at
+//                   most one block of leftover bytes between updates.
+//   KSha256Final  — produce the 32-byte digest and reset the context.
+//
+// All functions are no-allocation and IRQ-safe; the only kernel
+// dependency is memcpy/memset via klib.
+typedef struct {
+    uint32_t state[8];        // 256-bit running hash
+    uint64_t total_bits;      // length in bits (per FIPS 180-4)
+    uint32_t buffer_len;      // bytes currently in `buffer` (< 64)
+    uint8_t  buffer[64];      // partial block
+} KSha256Ctx;
+
+void KSha256Init(KSha256Ctx *ctx);
+void KSha256Update(KSha256Ctx *ctx, const uint8_t *data, uint32_t len);
+void KSha256Final(KSha256Ctx *ctx, uint8_t *out_hash);
+
 // Simple checksum8 (8-bit additive checksum)
 // Used for: lightweight integrity checks
 uint8_t KChecksum8(const uint8_t *data, uint32_t len);

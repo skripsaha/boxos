@@ -77,6 +77,7 @@ typedef struct process_t
     uint64_t cabin_info_phys;
     uint64_t pocket_ring_phys;
     uint64_t result_ring_phys;
+    uint64_t touch_ring_phys;             /* kernel→user Touch event channel */
 
     int32_t score;
     uint64_t last_run_time;
@@ -123,14 +124,32 @@ typedef struct process_t
     volatile wait_reason_t wait_reason;
     uint64_t wait_start_time; // TSC timestamp when waiting (0 = not waiting)
 
-    uint64_t  ear_bits;
-    uint16_t *ear_overflow_ids;
-    uint16_t  ear_overflow_count;
-    uint16_t  ear_overflow_capacity;
+    /* Touch subscriber list — head of doubly-linked TouchSub chain. Each
+     * sub also lives on a TouchBucket's bucket list (publish-side index).
+     * subs_lock orders link/unlink between TouchClaimSet/Clear and the
+     * O(N_my_claims) walk in TouchCleanupProcess. */
+    void       *subs_head;
+    spinlock_t  subs_lock;
 
-    void     *claim_table;
-    uint16_t  claim_count;
-    uint16_t  claim_capacity;
+    /* Bay claim list — per-cabin head of BayClaim chain. Walked by
+     * BayCleanupProcess at process_destroy to release every claim this
+     * cabin holds before vmm_destroy_context tears down the page tables.
+     * bay_va_next is a bump cursor inside CABIN_BAY_BASE..CABIN_BAY_END
+     * used to assign user-VA windows to incoming Bay maps. */
+    void       *bay_claims_head;
+    spinlock_t  bay_lock;
+    uint64_t    bay_va_next;
+
+    /* Brook claim list — per-cabin head of BrookClaim chain. Same
+     * lifecycle pattern as Bay: BrookCleanupProcess walks the list
+     * during process_destroy, drops every BrookObject reference (peer
+     * wakes with -ERR_BROKEN_PIPE), unmaps the per-claim VA windows.
+     * brook_va_next bump-allocates inside CABIN_BROOK_BASE..CABIN_BROOK_END.
+     * Held while linking/walking claims; no kernel allocation under this
+     * lock (Brook ops do PMM/VMM work without holding it). */
+    void       *brook_claims_head;
+    spinlock_t  brook_lock;
+    uint64_t    brook_va_next;
 
     uint64_t         irq_stack_top;
     uint64_t         irq_rip;
@@ -143,14 +162,6 @@ typedef struct process_t
     spinlock_t       irq_lock;
 
     uint8_t           touch_cleaned; // set to 1 after TouchCleanupProcess runs once
-
-    /* Current Touch payload page — Touch records are packed back-to-back here
-     * so 4 concurrent producers don't burn one PMM page per event. New page
-     * is allocated on first publish and whenever the next record would not
-     * fit. Protected by touch_alloc_lock. */
-    uint64_t   touch_page_base;
-    uint32_t   touch_page_off;
-    spinlock_t touch_alloc_lock;
 
     struct process_t *hash_next;    // hash table collision chain
     struct process_t *next;         // global process list (forward)

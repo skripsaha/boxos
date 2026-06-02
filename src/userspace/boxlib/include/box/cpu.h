@@ -3,8 +3,6 @@
 
 #include "box/types.h"
 
-#define CPU_CAPS_PAGE_ADDR  0x7FFFF000UL
-
 #define CPU_CAPS_MAGIC  0x43505543
 
 typedef struct PACKED {
@@ -18,7 +16,7 @@ typedef struct PACKED {
 
 STATIC_ASSERT(sizeof(cpu_caps_page_t) == 4096, "CPU caps page must be 4096 bytes");
 
-#define CPU_CAPS ((volatile cpu_caps_page_t*)CPU_CAPS_PAGE_ADDR)
+#define CPU_CAPS ((volatile cpu_caps_page_t*)CABIN_CPU_CAPS_ADDR)
 
 INLINE bool cpu_has_waitpkg(void) {
     volatile cpu_caps_page_t* caps = CPU_CAPS;

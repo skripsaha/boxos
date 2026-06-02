@@ -4,8 +4,9 @@
 /*
  * Userspace ClockBoard reader.
  *
- * The page lives at CLOCKBOARD_VA in every Cabin (mapped R/O by the
- * kernel during process creation). Plain pointer read — no syscall.
+ * The page lives at CABIN_CLOCKBOARD_ADDR in every Cabin (mapped R/O
+ * by the kernel during process creation). Plain pointer read — no
+ * syscall.
  * If the page is missing or carries the wrong header, every helper
  * falls back to the manifest path (time_uptime_ms etc.) so the answer
  * is still correct, just slow.
@@ -13,7 +14,7 @@
 
 static const ClockBoardView *cb(void)
 {
-    return (const ClockBoardView *)(uintptr_t)CLOCKBOARD_VA;
+    return (const ClockBoardView *)(uintptr_t)CABIN_CLOCKBOARD_ADDR;
 }
 
 bool clock_available(void)

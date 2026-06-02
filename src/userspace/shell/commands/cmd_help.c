@@ -27,6 +27,5 @@ int cmd_help(int argc, char *argv[])
 
     println("");
     println("Any other name runs an external utility.");
-    println("Ctrl+Q exits the shell at any time.");
     return 0;
 }

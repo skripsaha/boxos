@@ -8,6 +8,19 @@
 #define VMM_PAGE_MASK           0xFFFFFFFFFFFFF000ULL
 #define VMM_PAGE_OFFSET_MASK    0x0000000000000FFFULL
 
+/* 2 MiB huge page — single PDE leaf with VMM_FLAG_LARGE_PAGE. Used by
+ * Bay (cross-cabin shared memory), the user-heap implicit-huge path
+ * (SYSTEM_OP_HEAP_PREFAULT), and future drivers requiring 2 MiB-aligned
+ * DMA. Sizes/masks centralized here so callers stop sprinkling
+ * 0x200000 / 0x1FFFFF / 512 across the codebase.
+ *
+ * VMM_LARGE_PAGE_2M_PAGES is the number of 4 KiB PMM pages backing one
+ * 2 MiB chunk — the unit pmm_alloc() takes for order-9 allocations and
+ * the value used in mapped-page accounting. */
+#define VMM_LARGE_PAGE_2M_SIZE   0x200000UL
+#define VMM_LARGE_PAGE_2M_MASK   (VMM_LARGE_PAGE_2M_SIZE - 1)
+#define VMM_LARGE_PAGE_2M_PAGES  (VMM_LARGE_PAGE_2M_SIZE / VMM_PAGE_SIZE)
+
 #define VMM_KERNEL_BASE         0xFFFF800000000000ULL  // -128TB
 #define VMM_KERNEL_HEAP_BASE    0xFFFF800000000000ULL
 #define VMM_KERNEL_HEAP_SIZE    (1ULL << 30)           // 1GB kernel heap
@@ -24,8 +37,9 @@
 // Each process lives in isolated Cabin with fixed virtual layout:
 #define VMM_CABIN_NULL_TRAP     CABIN_NULL_TRAP_START    // 0x0000-0x0FFF: NULL trap zone (unmapped)
 #define VMM_CABIN_INFO          CABIN_INFO_ADDR          // 0x1000: CabinInfo (4KB, read-only)
-#define VMM_CABIN_POCKET_RING   CABIN_POCKET_RING_ADDR   // 0x2000: PocketRing (4KB, user RW)
-#define VMM_CABIN_RESULT_RING   CABIN_RESULT_RING_ADDR   // 0x3000: ResultRing (36KB, user RW)
+#define VMM_CABIN_POCKET_RING   CABIN_POCKET_RING_ADDR   // 0x2000: PocketRing (4KB header, user RW)
+#define VMM_CABIN_RESULT_RING   CABIN_RESULT_RING_ADDR   // 0x3000: ResultRing (4KB header, user RW)
+#define VMM_CABIN_TOUCH_RING    CABIN_TOUCH_RING_ADDR    // 0x5000: TouchRing (4KB header, user RW)
 #define VMM_CABIN_CODE_START    CABIN_CODE_START_ADDR    // 0xC000+: Code, data, heap, stack (ENTRY POINT)
 
 #define VMM_USER_BASE           VMM_CABIN_CODE_START   // flat binary entry point (NOT ELF!)
@@ -290,10 +304,14 @@ int vmm_handle_page_fault(uintptr_t fault_addr, uint64_t error_code);
 // Cabin: isolated virtual address space for user processes.
 // Layout: 0x0000 (NULL trap), 0x1000 (CabinInfo RO), 0x2000 (PocketRing RW),
 //         0x3000 (ResultRing RW), 0xC000+ (Code/Data/Heap/Stack)
-vmm_context_t* vmm_create_cabin(uint64_t* cabin_info_phys, uint64_t* pocket_ring_phys, uint64_t* result_ring_phys);
+vmm_context_t* vmm_create_cabin(uint64_t* cabin_info_phys,
+                                uint64_t* pocket_ring_phys,
+                                uint64_t* result_ring_phys,
+                                uint64_t* touch_ring_phys);
 int vmm_map_cabin_info(vmm_context_t* ctx, uintptr_t phys_page);
 int vmm_map_pocket_ring(vmm_context_t* ctx, uintptr_t phys_page);
 int vmm_map_result_ring(vmm_context_t* ctx, uintptr_t phys_page);
+int vmm_map_touch_ring(vmm_context_t* ctx, uintptr_t phys_page);
 
 // Translate a user virtual address in a process's page table to a kernel-accessible pointer.
 // Walks the process's page tables, resolves the physical address, and returns it as a
@@ -342,6 +360,36 @@ void pmm_activate_pull_map(void);
  * programmed on every CPU, otherwise WC framebuffer mappings touched on
  * one core behave as UC- on another core (the reset default). */
 void vmm_pat_init(void);
+
+/* ────────────────────────────────────────────────────────────────────────
+ * 2 MB huge-page mapping. Single PDE leaf with VMM_FLAG_LARGE_PAGE set.
+ *
+ * Both `virt_addr` and `phys_addr` MUST be 2 MB-aligned (0x200000). PMM's
+ * buddy returns naturally-aligned blocks at order 9 (pmm_alloc(512)) so
+ * the typical call sequence is:
+ *
+ *   void *phys = pmm_alloc(512);            // 2 MB-aligned phys
+ *   vmm_map_huge_2m(ctx, va, (uintptr_t)phys, VMM_FLAGS_USER_RW);
+ *
+ * The VMM_FLAG_LARGE_PAGE bit is added internally; callers pass the same
+ * flags they would pass to vmm_map_page(). Returns true on success; false
+ * if the PDE is already occupied (CAS lost) or an intermediate PML4/PDPT
+ * entry can't be allocated.
+ *
+ * Single-PDE mapping ⇒ 512 ⇒ one TLB entry covers 2 MB. Used by Bay
+ * (cross-cabin shared memory) and user-heap pre-fault path for ≥ 2 MB
+ * allocations. NOT used by the kernel boot mappings (those use direct
+ * PDE writes in vmm_init).
+ * ──────────────────────────────────────────────────────────────────────── */
+bool vmm_map_huge_2m(vmm_context_t *ctx, uintptr_t virt_addr,
+                     uintptr_t phys_addr, uint64_t flags);
+
+bool vmm_unmap_huge_2m(vmm_context_t *ctx, uintptr_t virt_addr);
+
+/* Resolve a 2 MB-mapped virt_addr to its backing physical 2 MB-aligned
+ * address. Returns 0 if the PDE is not present, was demoted to 4 KB, or
+ * the VA is not 2 MB-aligned. */
+uintptr_t vmm_virt_to_phys_huge_2m(vmm_context_t *ctx, uintptr_t virt_addr);
 
 /* Cross-core full TLB flush — every online core reloads CR3 (NOFLUSH bit
  * cleared). Used by callers that need every PCID partition invalidated. */

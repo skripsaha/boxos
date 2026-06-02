@@ -80,6 +80,13 @@
 #define CONFIG_IRQ_DEFER_MAX_CHUNK_CAPACITY  1024U
 #define CONFIG_IRQ_DEFER_GROWTH_FACTOR       2U   // each new chunk = prev × this, up to MAX_CHUNK_CAPACITY
 #define CONFIG_IRQ_DEFER_PRODUCER_RETRIES    4    // bounded chunk-advance retries per irq_defer() call
+
+/* Static MPSC ring of slots used by TouchPublishIrqPair to hand off a
+ * Touch event from IRQ context to a K-Core for the actual publish work.
+ * Power-of-2. Capacity sized to hold a worst-case IRQ burst from a fast
+ * key-repeat + USB hot-plug + ACPI GPE storm without dropping events;
+ * actual drop is silent (circular overwrite) by design. */
+#define CONFIG_TOUCH_IRQ_RING_SIZE           64U
 #define CONFIG_ASYNC_IO_QUEUE_TIMEOUT_MS 5000 // 5s timeout for pending I/O in queue
 #define CONFIG_ASYNC_IO_BGND_SERVE_INTERVAL 8 // dequeue 1 BGND per N DATA dequeues
 #define CONFIG_FRIEND_ZONE_CACHE_MAX_PAGES 64 // max pages cached per Friend zone

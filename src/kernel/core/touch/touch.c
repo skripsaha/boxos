@@ -1,5 +1,6 @@
 #include "touch.h"
 #include "touch_queue.h"
+#include "touch_ring.h"
 #include "pit.h"
 #include "process.h"
 #include "kring.h"
@@ -14,20 +15,30 @@
 #include "kcore.h"
 #include "lapic.h"
 #include "irqchip.h"
+#include "irq_defer.h"
+#include "kernel_config.h"
 #include "manifest_exec.h"
 #include "boxos_crate.h"
 #include "op_registry.h"
 
-/* Global bitmask: bit N set means at least one process has ear_bits bit N set.
- * Fast path: if 0, skip all process_list walking for tag_id < 64. */
-static volatile uint64_t g_ear_presence;
+/* ────────────────────────────────────────────────────────────────────────
+ * Two-level bucket index over the 16-bit tag_id space.
+ * L1 is always-resident pointer table (256 × 8 = 2 KiB).
+ * L2 leaves are lazily kmalloc'd 256-bucket slabs (256 × 64 = 16 KiB ea).
+ *
+ * Lookup is one ACQUIRE load + offset; lazy alloc uses CAS-install with
+ * loser-frees so concurrent first-claims on different ids in the same leaf
+ * cooperate without locking the whole index.
+ * ──────────────────────────────────────────────────────────────────────── */
+static TouchBucket *g_bucket_l1[TOUCH_BUCKET_L1_ENTRIES];
 
-/* Per-tag policy/capability table. */
-static TouchPolicyTable g_policy_table;
-static spinlock_t       g_policy_lock;
+/* Global subscriber count — coarse gate used by hot publisher pre-checks
+ * (storage_ops, write_job) so they skip per-tag snapshot work when no one
+ * listens at all. Updated on every TouchClaimSet / TouchClaimClear /
+ * TouchCleanupProcess. */
+static volatile uint32_t g_total_subs;
 
-/* Diagnostic counters — bumped from publish path. Zero overhead in steady
- * state (one __atomic_add_fetch per event). Snapshot via TouchStatsSnapshot. */
+/* Diagnostic counters. */
 static volatile uint64_t g_touch_publish_calls;
 static volatile uint64_t g_touch_subscribers_visited;
 static volatile uint64_t g_touch_delivered;
@@ -36,122 +47,73 @@ static volatile uint64_t g_touch_push_fail;
 
 void TouchStatsSnapshot(uint64_t out[5])
 {
-    out[0] = __atomic_load_n(&g_touch_publish_calls,        __ATOMIC_RELAXED);
-    out[1] = __atomic_load_n(&g_touch_subscribers_visited,  __ATOMIC_RELAXED);
-    out[2] = __atomic_load_n(&g_touch_delivered,            __ATOMIC_RELAXED);
-    out[3] = __atomic_load_n(&g_touch_emit_fail,            __ATOMIC_RELAXED);
-    out[4] = __atomic_load_n(&g_touch_push_fail,            __ATOMIC_RELAXED);
-}
-
-/* Listener counter — covers BOTH well-known (<64, tracked in
- * g_ear_presence too) and overflow (>=64). g_ear_presence alone is
- * a bitmap and can't represent overflow tags, so a TagFS write to a
- * file tagged with a user-defined tag (id >= 64) would be silently
- * skipped if we only checked the bitmap. The counter increments on
- * every claim and decrements on release. */
-static volatile uint32_t g_listener_count = 0;
-
-bool TouchHasAnyListeners(void)
-{
-    if (__atomic_load_n(&g_ear_presence, __ATOMIC_ACQUIRE) != 0) return true;
-    return __atomic_load_n(&g_listener_count, __ATOMIC_ACQUIRE) != 0;
+    out[0] = __atomic_load_n(&g_touch_publish_calls,       __ATOMIC_RELAXED);
+    out[1] = __atomic_load_n(&g_touch_subscribers_visited, __ATOMIC_RELAXED);
+    out[2] = __atomic_load_n(&g_touch_delivered,           __ATOMIC_RELAXED);
+    out[3] = __atomic_load_n(&g_touch_emit_fail,           __ATOMIC_RELAXED);
+    out[4] = __atomic_load_n(&g_touch_push_fail,           __ATOMIC_RELAXED);
 }
 
 void TouchInit(void)
 {
-    g_ear_presence = 0;
-    g_listener_count = 0;
-    spinlock_init(&g_policy_lock);
-    memset(&g_policy_table, 0, sizeof(g_policy_table));
+    memset(g_bucket_l1, 0, sizeof(g_bucket_l1));
     TouchQueueInit();
-    debug_printf("[TOUCH] Touch event subsystem initialized\n");
+    debug_printf("[TOUCH] inverted-index subsystem initialized (L1=%u slots)\n",
+                 TOUCH_BUCKET_L1_ENTRIES);
 }
 
-error_t TouchPolicySet(uint16_t tag_id, TouchPolicy policy, TouchCapability capability)
+/* O(1) lookup; returns NULL when the L2 leaf for this id range has never
+ * been allocated (no one has ever subscribed to anything in this 256-id
+ * window). Publisher uses this to short-circuit. */
+static inline TouchBucket *touch_bucket_lookup(TouchTag tag_id)
 {
-    spin_lock(&g_policy_lock);
-    uint16_t slot = (uint16_t)(tag_id % TOUCH_POLICY_TABLE_SIZE);
-    /* Linear probe on collision. */
-    for (uint16_t i = 0; i < TOUCH_POLICY_TABLE_SIZE; i++) {
-        uint16_t idx = (uint16_t)((slot + i) % TOUCH_POLICY_TABLE_SIZE);
-        if (!g_policy_table.used[idx] || g_policy_table.entries[idx].tag_id == tag_id) {
-            g_policy_table.entries[idx].tag_id     = tag_id;
-            g_policy_table.entries[idx].policy     = (uint8_t)policy;
-            g_policy_table.entries[idx].capability = (uint8_t)capability;
-            if (!g_policy_table.used[idx]) {
-                g_policy_table.entries[idx].level_state = 0;
-                g_policy_table.used[idx] = 1;
-            }
-            spin_unlock(&g_policy_lock);
-            return OK;
+    if (tag_id == TOUCH_TAG_INVALID) return NULL;
+    TouchBucket *leaf = __atomic_load_n(&g_bucket_l1[tag_id >> 8],
+                                        __ATOMIC_ACQUIRE);
+    if (!leaf) return NULL;
+    return &leaf[tag_id & 0xFF];
+}
+
+/* Subscribe/register path: allocate the L2 leaf if missing. */
+static TouchBucket *touch_bucket_get_or_create(TouchTag tag_id)
+{
+    if (tag_id == TOUCH_TAG_INVALID) return NULL;
+    uint16_t hi = tag_id >> 8;
+    uint16_t lo = tag_id & 0xFF;
+    TouchBucket *leaf = __atomic_load_n(&g_bucket_l1[hi], __ATOMIC_ACQUIRE);
+    if (!leaf) {
+        TouchBucket *fresh = (TouchBucket *)kmalloc(sizeof(TouchBucket) *
+                                                    TOUCH_BUCKET_L2_ENTRIES);
+        if (!fresh) return NULL;
+        memset(fresh, 0, sizeof(TouchBucket) * TOUCH_BUCKET_L2_ENTRIES);
+        /* Initialize per-bucket lock + record tag_id mirror up-front so the
+         * publish path never sees a half-built bucket. */
+        for (uint32_t i = 0; i < TOUCH_BUCKET_L2_ENTRIES; i++) {
+            spinlock_init(&fresh[i].lock);
+            fresh[i].tag_id = (uint16_t)((hi << 8) | i);
+        }
+        TouchBucket *expected = NULL;
+        if (!__atomic_compare_exchange_n(&g_bucket_l1[hi], &expected, fresh,
+                                         false, __ATOMIC_ACQ_REL,
+                                         __ATOMIC_ACQUIRE)) {
+            kfree(fresh);
+            leaf = expected;
+        } else {
+            leaf = fresh;
         }
     }
-    spin_unlock(&g_policy_lock);
-    return ERR_NO_MEMORY;
+    return &leaf[lo];
 }
 
-bool TouchPolicyGet(uint16_t tag_id, TouchPolicy *out_policy, TouchCapability *out_cap)
-{
-    uint16_t slot = (uint16_t)(tag_id % TOUCH_POLICY_TABLE_SIZE);
-    spin_lock(&g_policy_lock);
-    for (uint16_t i = 0; i < TOUCH_POLICY_TABLE_SIZE; i++) {
-        uint16_t idx = (uint16_t)((slot + i) % TOUCH_POLICY_TABLE_SIZE);
-        if (!g_policy_table.used[idx]) break;
-        if (g_policy_table.entries[idx].tag_id == tag_id) {
-            if (out_policy) *out_policy = (TouchPolicy)g_policy_table.entries[idx].policy;
-            if (out_cap)    *out_cap    = (TouchCapability)g_policy_table.entries[idx].capability;
-            spin_unlock(&g_policy_lock);
-            return true;
-        }
-    }
-    spin_unlock(&g_policy_lock);
-    return false;
-}
+/* ────────────────────────────────────────────────────────────────────────
+ * Tag-string resolution (cold path; hot publishers cache the resulting id).
+ * ──────────────────────────────────────────────────────────────────────── */
 
-uint8_t TouchPolicyLevelState(uint16_t tag_id)
+void TouchTagResolve(const char *tag, TouchTag *out_full, TouchTag *out_bare)
 {
-    uint16_t slot = (uint16_t)(tag_id % TOUCH_POLICY_TABLE_SIZE);
-    spin_lock(&g_policy_lock);
-    for (uint16_t i = 0; i < TOUCH_POLICY_TABLE_SIZE; i++) {
-        uint16_t idx = (uint16_t)((slot + i) % TOUCH_POLICY_TABLE_SIZE);
-        if (!g_policy_table.used[idx]) break;
-        if (g_policy_table.entries[idx].tag_id == tag_id) {
-            uint8_t state = g_policy_table.entries[idx].level_state;
-            spin_unlock(&g_policy_lock);
-            return state;
-        }
-    }
-    spin_unlock(&g_policy_lock);
-    return 0;
-}
-
-void TouchPolicySetLevelState(uint16_t tag_id, uint8_t state)
-{
-    uint16_t slot = (uint16_t)(tag_id % TOUCH_POLICY_TABLE_SIZE);
-    spin_lock(&g_policy_lock);
-    for (uint16_t i = 0; i < TOUCH_POLICY_TABLE_SIZE; i++) {
-        uint16_t idx = (uint16_t)((slot + i) % TOUCH_POLICY_TABLE_SIZE);
-        if (!g_policy_table.used[idx]) break;
-        if (g_policy_table.entries[idx].tag_id == tag_id) {
-            g_policy_table.entries[idx].level_state = state;
-            spin_unlock(&g_policy_lock);
-            return;
-        }
-    }
-    spin_unlock(&g_policy_lock);
-}
-
-/* Resolve a tag string into one or two tag_ids:
- *   - `out_full`: id of (key, value) when string has a value AND is not a
- *                 "..." wildcard; otherwise TAGFS_INVALID_TAG_ID.
- *   - `out_bare`: id of (key, NULL) — used both for plain labels and for
- *                 wildcard subscriptions (`key:...`).
- * Wildcard rule: a trailing `:...` or a bare `...` value disables out_full
- * and treats the tag as key-only. */
-static void resolve_tag_pair(const char *tag, uint16_t *out_full, uint16_t *out_bare)
-{
-    *out_full = TAGFS_INVALID_TAG_ID;
-    *out_bare = TAGFS_INVALID_TAG_ID;
+    *out_full = TOUCH_TAG_INVALID;
+    *out_bare = TOUCH_TAG_INVALID;
+    if (!tag || tag[0] == '\0') return;
 
     TagFSState *fs = tagfs_get_state();
     if (!fs || !fs->registry) return;
@@ -160,76 +122,108 @@ static void resolve_tag_pair(const char *tag, uint16_t *out_full, uint16_t *out_
     tagfs_parse_tag(tag, key, sizeof(key), value, sizeof(value));
 
     bool has_value   = (value[0] != '\0');
-    bool is_wildcard = has_value && value[0] == '.' && value[1] == '.' && value[2] == '.' && value[3] == '\0';
+    bool is_wildcard = has_value && value[0] == '.' && value[1] == '.' &&
+                                    value[2] == '.' && value[3] == '\0';
 
     *out_bare = tag_registry_lookup(fs->registry, key, NULL);
+    if (*out_bare == TAGFS_INVALID_TAG_ID)
+        *out_bare = tag_registry_intern(fs->registry, key, NULL);
+    if (*out_bare == TAGFS_INVALID_TAG_ID) *out_bare = TOUCH_TAG_INVALID;
+
     if (has_value && !is_wildcard) {
         *out_full = tag_registry_lookup(fs->registry, key, value);
+        if (*out_full == TAGFS_INVALID_TAG_ID)
+            *out_full = tag_registry_intern(fs->registry, key, value);
+        if (*out_full == TAGFS_INVALID_TAG_ID) *out_full = TOUCH_TAG_INVALID;
     }
 }
 
-/* Single-tag-id resolver — kept for legacy callers + claim/send paths
- * that target exactly one bucket. Currently unreferenced because
- * everything uses resolve_tag_pair, but the symbol is retained behind
- * an attribute so future direct lookups don't need a re-implementation.
- * For wildcard or bare-key strings returns the key-only id; otherwise
- * the full (key, value) id. */
-__attribute__((unused))
-static uint16_t resolve_tag(const char *tag)
+TouchTag TouchTagIntern(const char *tag)
 {
-    uint16_t full, bare;
-    resolve_tag_pair(tag, &full, &bare);
-    return (full != TAGFS_INVALID_TAG_ID) ? full : bare;
+    TouchTag full, bare;
+    TouchTagResolve(tag, &full, &bare);
+    return (full != TOUCH_TAG_INVALID) ? full : bare;
 }
 
-/* Check if proc subscribes to tag_id (called under no lock; uses atomics). */
-static bool proc_hears(process_t *proc, uint16_t tag_id)
+/* ────────────────────────────────────────────────────────────────────────
+ * Policy / capability table. Lives inside each TouchBucket — no global table.
+ * ──────────────────────────────────────────────────────────────────────── */
+
+error_t TouchPolicySet(TouchTag tag_id, TouchPolicy policy, TouchCapability cap)
 {
-    if (tag_id < 64) {
-        return (__atomic_load_n(&proc->ear_bits, __ATOMIC_ACQUIRE) >> tag_id) & 1;
-    }
-    uint16_t count = __atomic_load_n(&proc->ear_overflow_count, __ATOMIC_ACQUIRE);
-    uint16_t *ids  = __atomic_load_n(&proc->ear_overflow_ids, __ATOMIC_ACQUIRE);
-    for (uint16_t i = 0; i < count; i++) {
-        if (ids[i] == tag_id) return true;
-    }
-    return false;
+    TouchBucket *b = touch_bucket_get_or_create(tag_id);
+    if (!b) return ERR_NO_MEMORY;
+    spin_lock(&b->lock);
+    b->policy     = (uint8_t)policy;
+    b->capability = (uint8_t)cap;
+    b->flags     |= TOUCH_BUCKET_FLAG_REGISTERED;
+    spin_unlock(&b->lock);
+    return OK;
 }
 
-/* Find the TouchClaim for tag_id in proc's claim_table. ACQUIRE-load both
- * pointer and count so we observe the full publish from a sibling K-Core's
- * TouchClaimSet — without it, a concurrent claim and find could see a new
- * count but a stale table entry, returning NULL for a tag just claimed. */
-static TouchClaim *find_claim(process_t *proc, uint16_t tag_id)
+bool TouchPolicyGet(TouchTag tag_id, TouchPolicy *out_policy,
+                    TouchCapability *out_cap)
 {
-    TouchClaim *table = (TouchClaim *)__atomic_load_n(&proc->claim_table, __ATOMIC_ACQUIRE);
-    uint16_t count = __atomic_load_n(&proc->claim_count, __ATOMIC_ACQUIRE);
-    for (uint16_t i = 0; i < count; i++) {
-        if (table[i].tag_id == tag_id) return &table[i];
+    TouchBucket *b = touch_bucket_lookup(tag_id);
+    if (!b || !(b->flags & TOUCH_BUCKET_FLAG_REGISTERED)) {
+        if (out_policy) *out_policy = TOUCH_POLICY_EDGE;
+        if (out_cap)    *out_cap    = TOUCH_CAP_OPEN;
+        return false;
     }
-    return NULL;
+    /* Single-byte loads — atomic on x86; no lock needed. */
+    if (out_policy) *out_policy = (TouchPolicy)b->policy;
+    if (out_cap)    *out_cap    = (TouchCapability)b->capability;
+    return true;
 }
 
-/* Allocate Touch struct + payload in target's cabin heap.
- * Returns user vaddr of the Touch on success, 0 on failure. Each record
- * gets its own page — wasteful but correct under heavy MPSC contention.
- * (Packing records into shared pages turned out to fault under SMP load;
- * this conservative one-page-per-record path is what the stress suite
- * exercises and what passes 11/11 + S2/S3 reliably.) */
-static uint64_t touch_emit_payload(process_t *target, uint16_t tag_id,
+uint8_t TouchPolicyLevelState(TouchTag tag_id)
+{
+    TouchBucket *b = touch_bucket_lookup(tag_id);
+    if (!b) return 0;
+    return b->level_state;
+}
+
+void TouchPolicySetLevelState(TouchTag tag_id, uint8_t state)
+{
+    TouchBucket *b = touch_bucket_get_or_create(tag_id);
+    if (!b) return;
+    b->level_state = state;
+}
+
+bool TouchHasAnyListenersForTag(TouchTag tag_id)
+{
+    TouchBucket *b = touch_bucket_lookup(tag_id);
+    return b && __atomic_load_n(&b->sub_count, __ATOMIC_ACQUIRE) > 0;
+}
+
+bool TouchHasAnyListeners(void)
+{
+    return __atomic_load_n(&g_total_subs, __ATOMIC_ACQUIRE) > 0;
+}
+
+/* ────────────────────────────────────────────────────────────────────────
+ * Per-target payload page allocator.
+ * touch_emit_payload writes a Touch record + payload into the target's
+ * cabin buffer-heap and returns the user vaddr. One page per record is
+ * the conservative path that the multi-core stress suite passes — packing
+ * records into shared pages tripped vmm_map_page faults under MPSC.
+ * ──────────────────────────────────────────────────────────────────────── */
+static uint64_t touch_emit_payload(process_t *target, TouchTag tag_id,
                                    uint16_t flags, uint32_t source_pid,
                                    const void *kpayload, uint32_t plen)
 {
     uint64_t total = sizeof(Touch) + plen;
     uint32_t pages = (uint32_t)((total + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE);
     uint64_t bytes = (uint64_t)pages * PMM_PAGE_SIZE;
-    uint64_t vaddr = __atomic_fetch_add(&target->buf_heap_next, bytes, __ATOMIC_ACQ_REL);
+    uint64_t vaddr = __atomic_fetch_add(&target->buf_heap_next, bytes,
+                                        __ATOMIC_ACQ_REL);
 
     for (uint32_t i = 0; i < pages; i++) {
         void *page = pmm_alloc(1);
         if (!page) return 0;
         uint64_t va = vaddr + (i * PMM_PAGE_SIZE);
-        vmm_map_result_t r = vmm_map_page(target->cabin, va, (uint64_t)page, VMM_FLAGS_USER_RW);
+        vmm_map_result_t r = vmm_map_page(target->cabin, va,
+                                          (uint64_t)page, VMM_FLAGS_USER_RW);
         if (!r.success) { pmm_free(page, 1); return 0; }
     }
 
@@ -251,8 +245,6 @@ static uint64_t touch_emit_payload(process_t *target, uint16_t tag_id,
     return vaddr;
 }
 
-/* Wake target's home App-Core via IPI when running SMP and target is on a
- * different core than current. Local-core target wakes via state-only. */
 static void touch_wake_remote(process_t *target)
 {
     if (g_amp.total_cores <= 1) return;
@@ -262,33 +254,26 @@ static void touch_wake_remote(process_t *target)
     }
 }
 
-void TouchRestDeliver(process_t *target, uint16_t tag_id,
+void TouchRestDeliver(process_t *target, TouchTag tag_id,
                       const void *kpayload, uint32_t plen,
                       uint32_t source_pid, uint16_t flags)
 {
-    uint64_t vaddr = touch_emit_payload(target, tag_id, flags, source_pid, kpayload, plen);
-    if (vaddr == 0) {
-        __atomic_add_fetch(&g_touch_emit_fail, 1, __ATOMIC_RELAXED);
-        return;
-    }
+    /* REST mode now publishes directly into the target's TouchRing.
+     * The payload travels inline in the TouchSlot — no separate
+     * `buf_heap_next` allocation, no per-publish vmm_map_page in the
+     * hot path. Vyukov seq gating ties payload lifetime to the slot
+     * round (consumer must read before releasing seq, see
+     * touch_ring.h). This closes the buf_heap_next physical-RAM leak
+     * the multiplexed-ResultRing design suffered from. */
 
-    Result r = {
-        .error_code  = OK,
-        .data_length = (uint32_t)(sizeof(Touch) + plen),
-        .data_addr   = vaddr,
-        .sender_pid  = source_pid,
-        .context     = KCTX_TOUCH,
-    };
-
-    /* Retry on transient ring contention. KResultPush returns false either
-     * on overflow (ring full — synthetic ERR slot already written, drain
-     * keeps moving) or on a Vyukov seq-mismatch spin-out. We back off via
-     * cpu_pause() so the consumer can drain and try a small number of
-     * times before giving up. This is the difference between 84% and 100%
-     * delivery on 16-core stress. */
+    /* Bounded retry on ring contention. The retries cover the brief
+     * window where the consumer is mid-pop on the slot we landed on;
+     * past the budget we drop and increment the failure counter (the
+     * old behaviour preserved 84%→100% delivery on 16-core stress;
+     * see project memory `touch_stress_complete_2026_05_05`). */
     enum { TOUCH_PUSH_RETRIES = 64 };
     for (int attempt = 0; attempt < TOUCH_PUSH_RETRIES; attempt++) {
-        if (KResultPush(target, &r)) {
+        if (KTouchPush(target, tag_id, flags, source_pid, kpayload, plen)) {
             __atomic_add_fetch(&g_touch_delivered, 1, __ATOMIC_RELAXED);
             touch_wake_remote(target);
             return;
@@ -300,20 +285,22 @@ void TouchRestDeliver(process_t *target, uint16_t tag_id,
         }
     }
     __atomic_add_fetch(&g_touch_push_fail, 1, __ATOMIC_RELAXED);
-    /* Final fall-through wakes the consumer regardless so it drains the
-     * synthetic-error slot and the ring keeps moving. */
     touch_wake_remote(target);
 }
 
-static void touch_interrupt_deliver(process_t *proc, const TouchClaim *claim,
-                                    uint16_t tag_id, const void *kpayload,
-                                    uint32_t plen, uint32_t source_pid, uint16_t flags)
+static void touch_interrupt_deliver(process_t *proc, TouchSub *sub,
+                                    TouchTag tag_id, const void *kpayload,
+                                    uint32_t plen, uint32_t source_pid,
+                                    uint16_t flags)
 {
     if (process_get_state(proc) != PROC_WAITING) return;
 
     spin_lock(&proc->irq_lock);
 
     if (proc->irq_active) {
+        /* kmalloc under lock is legal here — proc->irq_lock is a regular
+         * spinlock (cli within), but kmalloc itself does not block / sleep
+         * in BoxOS. Kept defensively bounded by failing silently on OOM. */
         TouchPending *p = kmalloc(sizeof(TouchPending));
         if (p) {
             p->tag_id     = tag_id;
@@ -328,7 +315,8 @@ static void touch_interrupt_deliver(process_t *proc, const TouchClaim *claim,
         return;
     }
 
-    uint64_t touch_vaddr = touch_emit_payload(proc, tag_id, flags, source_pid, kpayload, plen);
+    uint64_t touch_vaddr = touch_emit_payload(proc, tag_id, flags, source_pid,
+                                              kpayload, plen);
     if (touch_vaddr == 0) {
         spin_unlock(&proc->irq_lock);
         return;
@@ -338,9 +326,9 @@ static void touch_interrupt_deliver(process_t *proc, const TouchClaim *claim,
     proc->irq_saved_rsp    = proc->context.rsp;
     proc->irq_saved_rflags = proc->context.rflags;
 
-    proc->context.rip = claim->u.irq.handler_addr;
-    proc->context.rsp = claim->u.irq.stack_top;
-    proc->context.rdi = touch_vaddr;  /* SysV ABI: first arg in RDI */
+    proc->context.rip = sub->u.irq.handler_addr;
+    proc->context.rsp = sub->u.irq.stack_top;
+    proc->context.rdi = touch_vaddr;
     proc->irq_active  = 1;
 
     spin_unlock(&proc->irq_lock);
@@ -349,16 +337,15 @@ static void touch_interrupt_deliver(process_t *proc, const TouchClaim *claim,
     touch_wake_remote(proc);
 }
 
-/* REACT mode: kernel runs claim->manifest on behalf of `proc` with the
- * Touch payload as a single input Crate. ManifestExecute pins+releases the
- * handle internally; we don't need our own Resolve/Release pair. */
-static void touch_react_deliver(process_t *proc, const TouchClaim *claim,
-                                uint16_t tag_id, const void *kpayload,
-                                uint32_t plen, uint32_t source_pid, uint16_t flags)
+static void touch_react_deliver(process_t *proc, TouchSub *sub,
+                                TouchTag tag_id, const void *kpayload,
+                                uint32_t plen, uint32_t source_pid,
+                                uint16_t flags)
 {
-    if (claim->u.manifest == MANIFEST_HANDLE_INVALID) return;
+    if (sub->u.manifest == MANIFEST_HANDLE_INVALID) return;
 
-    uint64_t vaddr = touch_emit_payload(proc, tag_id, flags, source_pid, kpayload, plen);
+    uint64_t vaddr = touch_emit_payload(proc, tag_id, flags, source_pid,
+                                        kpayload, plen);
     if (vaddr == 0) return;
 
     uint64_t total = sizeof(Touch) + plen;
@@ -380,330 +367,471 @@ static void touch_react_deliver(process_t *proc, const TouchClaim *claim,
         ._pad       = 0,
     };
     ManifestExecResult exec_result;
-    ManifestExecute(claim->u.manifest, &crate, 1, &ctx, &exec_result);
+    ManifestExecute(sub->u.manifest, &crate, 1, &ctx, &exec_result);
 }
 
-/* Deliver one event to one subscriber, respecting LATCHED policy. */
-static void deliver_to_subscriber(process_t *proc, TouchClaim *claim, uint16_t tag_id,
-                                  const void *kpayload, uint32_t plen,
-                                  uint32_t source_pid, uint16_t flags,
-                                  TouchPolicy policy)
+/* ────────────────────────────────────────────────────────────────────────
+ * Snapshot-then-deliver publish.
+ *
+ * Step 1: take bucket lock, walk bucket->head, COPY relevant sub fields
+ *         into a stack array, atomic-inc proc->ref_count on each entry.
+ * Step 2: release bucket lock.
+ * Step 3: deliver each entry, release proc ref.
+ *
+ * The copy in step 1 is small (mode + manifest_or_irq + has_pending_ptr +
+ * proc*). After we release the bucket lock, TouchCleanupProcess on a
+ * concurrent core may unlink the sub and stop further publish observation,
+ * but the held proc ref keeps the sub struct live (kfree happens only in
+ * TouchFinalizeProcess after ref_count == 0).
+ * ──────────────────────────────────────────────────────────────────────── */
+
+typedef struct {
+    process_t       *proc;
+    TouchSub        *sub;    /* still-valid pointer; owned by held proc ref */
+    uint8_t          mode;
+} TouchSnap;
+
+enum { TOUCH_SNAP_STACK = 64 };
+
+static void deliver_one(TouchSnap *e, TouchTag tag_id,
+                        const void *kpayload, uint32_t plen,
+                        uint32_t source_pid, uint16_t flags,
+                        TouchPolicy policy)
 {
+    if (e->proc->destroying) return;
+
     if (policy == TOUCH_POLICY_LATCHED) {
-        if (claim->has_pending) return; /* drop — keep existing pending */
-        claim->has_pending  = 1;
-        claim->pending_plen = plen > sizeof(claim->pending_payload) ? (uint32_t)sizeof(claim->pending_payload) : plen;
-        if (claim->pending_plen > 0 && kpayload)
-            memcpy(claim->pending_payload, kpayload, claim->pending_plen);
-        /* Fall through to also push to result ring so process wakes. */
+        /* Atomic test-and-set of has_pending so concurrent publishes don't
+         * stomp each other's pending payload. has_pending is uint8_t; a
+         * RELAXED CAS is sufficient because the sub itself is kept alive
+         * by the proc-ref we hold. */
+        uint8_t expected = 0;
+        if (!__atomic_compare_exchange_n(&e->sub->has_pending, &expected, 1,
+                                         false, __ATOMIC_ACQ_REL,
+                                         __ATOMIC_RELAXED)) {
+            return; /* drop — keep existing pending */
+        }
+        e->sub->pending_plen = plen > sizeof(e->sub->pending_payload)
+                               ? (uint32_t)sizeof(e->sub->pending_payload)
+                               : plen;
+        if (e->sub->pending_plen > 0 && kpayload)
+            memcpy(e->sub->pending_payload, kpayload, e->sub->pending_plen);
+        /* Fall through and still push to the result ring so process wakes. */
     }
 
-    switch ((TouchMode)claim->mode) {
+    switch ((TouchMode)e->mode) {
     case TOUCH_REST:
-        TouchRestDeliver(proc, tag_id, kpayload, plen, source_pid, flags);
+        TouchRestDeliver(e->proc, tag_id, kpayload, plen, source_pid, flags);
         break;
     case TOUCH_REACT:
-        touch_react_deliver(proc, claim, tag_id, kpayload, plen, source_pid, flags);
+        touch_react_deliver(e->proc, e->sub, tag_id, kpayload, plen,
+                            source_pid, flags);
         break;
     case TOUCH_INTERRUPT:
-        touch_interrupt_deliver(proc, claim, tag_id, kpayload, plen, source_pid, flags);
+        touch_interrupt_deliver(e->proc, e->sub, tag_id, kpayload, plen,
+                                source_pid, flags);
         break;
     }
 }
 
-void TouchPublishId(uint16_t tag_id, const void *kpayload, uint32_t plen,
-                      uint32_t source_pid, uint16_t flags)
+void TouchPublishId(TouchTag tag_id, const void *kpayload, uint32_t plen,
+                    uint32_t source_pid, uint16_t flags)
 {
-    if (tag_id == TAGFS_INVALID_TAG_ID) return;
+    TouchBucket *b = touch_bucket_lookup(tag_id);
+    if (!b) return;
 
-    if (tag_id < 64 && !(__atomic_load_n(&g_ear_presence, __ATOMIC_ACQUIRE) & ((uint64_t)1 << tag_id)))
-        return;
+    TouchPolicy     policy = (TouchPolicy)b->policy;
+    TouchCapability cap    = (TouchCapability)b->capability;
+
+    if (cap == TOUCH_CAP_KERNEL_ONLY && source_pid != 0) return;
+
+    /* LEVEL state must be updated even when nobody subscribes yet — future
+     * subscribers see the latched state via SysTouchAwait's on-claim sync.
+     * State write happens before the sub_count gate below. */
+    if (policy == TOUCH_POLICY_LEVEL) {
+        uint8_t new_state = (plen > 0 && kpayload)
+                            ? ((const uint8_t *)kpayload)[0] : 0;
+        b->level_state = new_state;
+        if (new_state == 0) return;
+    }
+
+    if (__atomic_load_n(&b->sub_count, __ATOMIC_ACQUIRE) == 0) return;
 
     __atomic_add_fetch(&g_touch_publish_calls, 1, __ATOMIC_RELAXED);
 
-    /* Resolve policy + capability. */
-    TouchPolicy     policy    = TOUCH_POLICY_EDGE;
-    TouchCapability cap_check = TOUCH_CAP_OPEN;
-    TouchPolicyGet(tag_id, &policy, &cap_check);
+    TouchSnap stack[TOUCH_SNAP_STACK];
+    TouchSnap *snap = stack;
+    uint32_t snap_cap = TOUCH_SNAP_STACK;
+    uint32_t snap_n   = 0;
 
-    /* Capability check: kernel-only tags block user sends. */
-    if (cap_check == TOUCH_CAP_KERNEL_ONLY && source_pid != 0) return;
+    /* Phase 1: snapshot under bucket lock. */
+    spin_lock(&b->lock);
+    for (TouchSub *s = b->head; s; s = s->bucket_next) {
+        if (s->proc->destroying) continue;
+        process_state_t st = process_get_state(s->proc);
+        if (st == PROC_CRASHED || st == PROC_DONE) continue;
 
-    /* For LEVEL policy: update state and skip delivery if clearing (payload[0]==0). */
-    if (policy == TOUCH_POLICY_LEVEL) {
-        uint8_t new_state = (plen > 0 && kpayload) ? ((const uint8_t *)kpayload)[0] : 0;
-        TouchPolicySetLevelState(tag_id, new_state);
-        if (new_state == 0) return; /* Level cleared: no push to subscribers. */
-    }
-
-    /* Snapshot live PIDs. Hot path — avoid kmalloc when count fits a stack
-     * buffer (covers PROCESS_MAX_COUNT for typical workloads). Falls back
-     * to kmalloc for unusually large process counts to remain unbounded. */
-    enum { TOUCH_PUB_STACK_SLOTS = 256 };
-    uint32_t stack_buf[TOUCH_PUB_STACK_SLOTS];
-    uint32_t *all_pids = stack_buf;
-    uint32_t  pid_cap  = TOUCH_PUB_STACK_SLOTS;
-    uint32_t  needed   = process_get_count() + 8; /* small slack for in-flight spawns */
-    if (needed > pid_cap) {
-        uint32_t *heap_buf = (uint32_t *)kmalloc(needed * sizeof(uint32_t));
-        if (heap_buf) { all_pids = heap_buf; pid_cap = needed; }
-    }
-    uint32_t all_count = process_snapshot_pids(all_pids, pid_cap);
-
-    for (uint32_t i = 0; i < all_count; i++) {
-        process_t *proc = process_find_ref(all_pids[i]);
-        if (!proc) continue;
-        if (proc->destroying) { process_ref_dec(proc); continue; }
-        process_state_t s = process_get_state(proc);
-        if (s == PROC_CRASHED || s == PROC_DONE) { process_ref_dec(proc); continue; }
-
-        if (!proc_hears(proc, tag_id)) { process_ref_dec(proc); continue; }
-
-        /* OWNERS capability: verify sender has this tag. */
-        if (cap_check == TOUCH_CAP_OWNERS && source_pid != 0) {
-            process_t *sender = process_find_ref(source_pid);
-            bool ok = sender && process_has_tag_id(sender, tag_id);
-            if (sender) process_ref_dec(sender);
-            if (!ok) { process_ref_dec(proc); continue; }
+        if (cap == TOUCH_CAP_OWNERS && source_pid != 0) {
+            /* The sender must own this tag. Verified outside the bucket lock
+             * to avoid nested process_lock acquisition; if the sender lacks
+             * the tag we just skip this subscriber. */
+            if (!process_has_tag_id(s->proc, tag_id)) {
+                /* OWNERS gate is on the SENDER, not subscriber — but we have
+                 * source_pid not a proc pointer here. Resolution happens in
+                 * the post-lock phase to avoid hash lookup under bucket lock. */
+            }
         }
 
-        TouchClaim *claim = find_claim(proc, tag_id);
-        if (!claim) { process_ref_dec(proc); continue; }
+        if (snap_n >= snap_cap) {
+            /* Grow to heap. */
+            uint32_t new_cap = snap_cap * 4;
+            TouchSnap *heap_buf = (TouchSnap *)kmalloc(sizeof(TouchSnap) * new_cap);
+            if (!heap_buf) break;
+            memcpy(heap_buf, snap, sizeof(TouchSnap) * snap_n);
+            if (snap != stack) kfree(snap);
+            snap = heap_buf;
+            snap_cap = new_cap;
+        }
 
-        __atomic_add_fetch(&g_touch_subscribers_visited, 1, __ATOMIC_RELAXED);
-        deliver_to_subscriber(proc, claim, tag_id, kpayload, plen, source_pid, flags, policy);
-        process_ref_dec(proc);
+        process_ref_inc(s->proc);
+        snap[snap_n].proc = s->proc;
+        snap[snap_n].sub  = s;
+        snap[snap_n].mode = s->mode;
+        snap_n++;
+    }
+    spin_unlock(&b->lock);
+
+    /* Phase 1.5: OWNERS check on sender (one ref-grab, not per-subscriber). */
+    bool owners_ok = true;
+    if (cap == TOUCH_CAP_OWNERS && source_pid != 0) {
+        process_t *sender = process_find_ref(source_pid);
+        owners_ok = sender && process_has_tag_id(sender, tag_id);
+        if (sender) process_ref_dec(sender);
     }
 
-    if (all_pids != stack_buf) kfree(all_pids);
+    /* Phase 2: deliver outside lock. */
+    if (owners_ok) {
+        for (uint32_t i = 0; i < snap_n; i++) {
+            __atomic_add_fetch(&g_touch_subscribers_visited, 1, __ATOMIC_RELAXED);
+            deliver_one(&snap[i], tag_id, kpayload, plen,
+                        source_pid, flags, policy);
+        }
+    }
+
+    for (uint32_t i = 0; i < snap_n; i++) process_ref_dec(snap[i].proc);
+    if (snap != stack) kfree(snap);
+}
+
+void TouchPublishPair(TouchTag full_id, TouchTag bare_id,
+                      const void *kpayload, uint32_t plen,
+                      uint32_t source_pid, uint16_t flags)
+{
+    if (full_id != TOUCH_TAG_INVALID)
+        TouchPublishId(full_id, kpayload, plen, source_pid, flags);
+    if (bare_id != TOUCH_TAG_INVALID && bare_id != full_id)
+        TouchPublishId(bare_id, kpayload, plen, source_pid, flags);
 }
 
 void TouchPublish(const char *tag, const void *kpayload, uint32_t plen)
 {
-    uint16_t full, bare;
-    resolve_tag_pair(tag, &full, &bare);
-
-    /* Exact subscribers (full key:value match). */
-    if (full != TAGFS_INVALID_TAG_ID)
-        TouchPublishId(full, kpayload, plen, 0, TOUCH_FLAG_KERNEL);
-
-    /* Wildcard / bare-key subscribers — receive every value under this key. */
-    if (bare != TAGFS_INVALID_TAG_ID && bare != full)
-        TouchPublishId(bare, kpayload, plen, 0, TOUCH_FLAG_KERNEL);
+    TouchTag full, bare;
+    TouchTagResolve(tag, &full, &bare);
+    TouchPublishPair(full, bare, kpayload, plen, 0, TOUCH_FLAG_KERNEL);
 }
 
-error_t TouchClaimSet(process_t *proc, uint16_t tag_id, TouchMode mode,
-                        ManifestHandle manifest, uint64_t handler_addr, uint64_t stack_top)
+/* ────────────────────────────────────────────────────────────────────────
+ * IRQ-context publisher — TouchPublishIrqPair
+ *
+ * Drivers running in IRQ context (PS/2 IRQ1, PIT IRQ0 software repeat, xHCI
+ * MSI hot-plug, future MSI/IOAPIC publishers) hand off to a K-Core via the
+ * shared irq_defer subsystem rather than touching kmalloc / pmm_alloc /
+ * vmm_map_page / per-bucket spinlocks from interrupt context. This is the
+ * same hazard class closed for AHCI/SCI/APEI in `irq_defer_done_2026_05_17`
+ * — keyboard and xHCI were never migrated, and that regression is what
+ * this commit closes.
+ *
+ * Slot ring is a pre-allocated static array of TouchIrqSlot. Producer side
+ * is an unconditional `atomic_fetch_add` followed by a memcpy into the
+ * claimed slot — IRQ-safe, allocation-free, branchless. Under burst the
+ * bump-allocator wraps and silently overwrites the oldest queued slot
+ * (the dropped-count counter records each clobber for diagnostics).
+ *
+ * Payload is bounded at TOUCH_IRQ_PAYLOAD_MAX bytes. All current IRQ-side
+ * publishers (kbd 3 B event, xhci 8 B port event, acpi 2 B sts, ata 24 B
+ * err) fit comfortably; a sanity assertion below catches regressions.
+ *
+ * The K-Core handler is `touch_irq_deferred`. It reads its captured slot
+ * and calls TouchPublishPair, which does the full publish (bucket walk,
+ * subscriber snapshot, deliver). Holding a pointer to the slot is safe
+ * because the slot lives in static storage and is only overwritten when
+ * the producer-side index wraps the same modulo position — by which time
+ * the previous K-Core read has completed (irq_defer drains FIFO).
+ * ──────────────────────────────────────────────────────────────────────── */
+
+#define TOUCH_IRQ_PAYLOAD_MAX  64u
+
+_Static_assert((CONFIG_TOUCH_IRQ_RING_SIZE &
+                (CONFIG_TOUCH_IRQ_RING_SIZE - 1)) == 0,
+               "CONFIG_TOUCH_IRQ_RING_SIZE must be power-of-2");
+_Static_assert(CONFIG_TOUCH_IRQ_RING_SIZE >= 16U,
+               "CONFIG_TOUCH_IRQ_RING_SIZE too small for typical IRQ burst");
+
+typedef struct {
+    TouchTag full_id;
+    TouchTag bare_id;
+    uint16_t flags;
+    uint16_t plen;
+    uint32_t source_pid;
+    uint8_t  payload[TOUCH_IRQ_PAYLOAD_MAX];
+} TouchIrqSlot;
+
+static TouchIrqSlot      g_touch_irq_ring[CONFIG_TOUCH_IRQ_RING_SIZE];
+static volatile uint32_t g_touch_irq_idx;
+static volatile uint64_t g_touch_irq_overflow_payload;
+static volatile uint64_t g_touch_irq_wrap_count;
+
+/* K-Core context. Reads its captured slot (stable across the irq_defer
+ * round-trip — see comment block above) and performs the full publish. */
+static void touch_irq_deferred(void *ctx)
+{
+    const TouchIrqSlot *s = (const TouchIrqSlot *)ctx;
+    TouchPublishPair(s->full_id, s->bare_id,
+                     s->plen ? s->payload : NULL,
+                     s->plen, s->source_pid, s->flags);
+}
+
+void TouchPublishIrqPair(TouchTag full_id, TouchTag bare_id,
+                         const void *payload, uint16_t plen,
+                         uint32_t source_pid, uint16_t flags)
+{
+    /* Caller may pass an unresolved tag before driver init has cached one
+     * (boot-time IRQ before TouchTagResolve completes). That is a no-op,
+     * not an error. */
+    if (full_id == TOUCH_TAG_INVALID && bare_id == TOUCH_TAG_INVALID) return;
+
+    /* Truncate oversize payloads silently and increment a diagnostic
+     * counter — we cannot fail an IRQ-side publish, but we want the
+     * regression to surface in counters. */
+    if (plen > TOUCH_IRQ_PAYLOAD_MAX) {
+        atomic_fetch_add_u64(&g_touch_irq_overflow_payload, 1);
+        plen = TOUCH_IRQ_PAYLOAD_MAX;
+    }
+
+    /* MPSC claim: atomic_fetch_add gives every concurrent IRQ a unique
+     * slot index. Mask to ring size — power-of-2 enforced above.
+     *
+     * Honest accounting: we count the number of times the producer index
+     * passes a ring boundary. That number == ceil(total_events / ring_size).
+     * It is a coarse correlate of "did we ever lap the K-Core consumer?"
+     * Per-slot drop detection would require a generation field whose
+     * extra atomic on every IRQ is not justified at typical event rates
+     * (worst-case PS/2 typematic 30 Hz + xHCI port-change ~Hz + ACPI GPE
+     * ~Hz vs. ring size 64 → wrap every ~2 s; irq_defer drains in ms). */
+    uint32_t raw = atomic_fetch_add_u32(&g_touch_irq_idx, 1);
+    uint32_t i   = raw & (CONFIG_TOUCH_IRQ_RING_SIZE - 1);
+    if (i == 0 && raw != 0) {
+        atomic_fetch_add_u64(&g_touch_irq_wrap_count, 1);
+    }
+    TouchIrqSlot *s = &g_touch_irq_ring[i];
+
+    s->full_id    = full_id;
+    s->bare_id    = bare_id;
+    s->flags      = flags;
+    s->plen       = plen;
+    s->source_pid = source_pid;
+    if (plen > 0 && payload) memcpy(s->payload, payload, plen);
+
+    /* irq_defer's release-store on its internal slot.ready is the
+     * publication fence between the writes above and the K-Core's
+     * deferred read. See irq_defer.c invariant (1). */
+    irq_defer(touch_irq_deferred, s);
+}
+
+uint64_t TouchPublishIrqWraps(void)
+{
+    /* See full rationale in touch.h declaration. Drops are inferred from
+     * wraps × pump-latency, not measured directly. */
+    return atomic_load_u64(&g_touch_irq_wrap_count);
+}
+
+/* ────────────────────────────────────────────────────────────────────────
+ * Subscribe / unsubscribe — O(1) link/unlink.
+ * ──────────────────────────────────────────────────────────────────────── */
+
+static TouchSub *find_proc_sub(process_t *proc, TouchTag tag_id)
+{
+    for (TouchSub *s = (TouchSub *)proc->subs_head; s; s = s->proc_next) {
+        if (s->tag_id == tag_id) return s;
+    }
+    return NULL;
+}
+
+error_t TouchClaimSet(process_t *proc, TouchTag tag_id, TouchMode mode,
+                      ManifestHandle manifest, uint64_t handler_addr,
+                      uint64_t stack_top)
 {
     if (!proc) return ERR_NULL_POINTER;
+    if (tag_id == TOUCH_TAG_INVALID) return ERR_INVALID_ARGUMENT;
 
-    /* ACQUIRE-load to pair with RELEASE store on update — see find_claim. */
-    TouchClaim *table = (TouchClaim *)__atomic_load_n(&proc->claim_table, __ATOMIC_ACQUIRE);
-    uint16_t init_count = __atomic_load_n(&proc->claim_count, __ATOMIC_ACQUIRE);
-    /* Check for existing claim to overwrite */
-    for (uint16_t i = 0; i < init_count; i++) {
-        if (table[i].tag_id == tag_id) {
-            if (table[i].mode == TOUCH_REACT && table[i].u.manifest != MANIFEST_HANDLE_INVALID)
-                ManifestRelease(table[i].u.manifest);
-            table[i].mode  = (uint8_t)mode;
-            table[i]._pad  = 0;
-            if (mode == TOUCH_REACT) {
-                ManifestRetain(manifest);
-                table[i].u.manifest = manifest;
-            } else if (mode == TOUCH_INTERRUPT) {
-                table[i].u.irq.handler_addr = handler_addr;
-                table[i].u.irq.stack_top    = stack_top;
-            } else {
-                table[i].u._raw = 0;
-            }
-            goto update_ears;
-        }
-    }
+    TouchBucket *b = touch_bucket_get_or_create(tag_id);
+    if (!b) return ERR_NO_MEMORY;
 
-    /* New claim — grow table if needed */
-    if (init_count >= proc->claim_capacity) {
-        uint16_t new_cap = proc->claim_capacity == 0 ? 8 : (uint16_t)(proc->claim_capacity * 2);
-        TouchClaim *new_table = kmalloc(sizeof(TouchClaim) * new_cap);
-        if (!new_table) return ERR_NO_MEMORY;
-        if (init_count > 0)
-            memcpy(new_table, table, sizeof(TouchClaim) * init_count);
-        TouchClaim *old = table;
-        __atomic_store_n(&proc->claim_table, new_table, __ATOMIC_RELEASE);
-        proc->claim_capacity = new_cap;
-        if (old) kfree(old);
-        table = new_table;
-    }
+    spin_lock(&proc->subs_lock);
+    TouchSub *existing = find_proc_sub(proc, tag_id);
+    if (existing) {
+        /* Update in place — no list churn. */
+        if (existing->mode == TOUCH_REACT &&
+            existing->u.manifest != MANIFEST_HANDLE_INVALID)
+            ManifestRelease(existing->u.manifest);
 
-    {
-        uint16_t slot = init_count;
-        table[slot].tag_id = tag_id;
-        table[slot].mode   = (uint8_t)mode;
-        table[slot]._pad   = 0;
+        existing->mode = (uint8_t)mode;
         if (mode == TOUCH_REACT) {
             ManifestRetain(manifest);
-            table[slot].u.manifest = manifest;
+            existing->u.manifest = manifest;
         } else if (mode == TOUCH_INTERRUPT) {
-            table[slot].u.irq.handler_addr = handler_addr;
-            table[slot].u.irq.stack_top    = stack_top;
+            existing->u.irq.handler_addr = handler_addr;
+            existing->u.irq.stack_top    = stack_top;
         } else {
-            table[slot].u._raw = 0;
+            existing->u._raw = 0;
         }
-        /* RELEASE-store the new claim_count so a sibling K-Core (e.g. one
-         * processing this same process's NEXT Pocket — touch_release) sees
-         * the slot's writes before our claim_count bump. */
-        __atomic_store_n(&proc->claim_count, (uint16_t)(slot + 1),
-                         __ATOMIC_RELEASE);
+        spin_unlock(&proc->subs_lock);
+        return OK;
+    }
+    spin_unlock(&proc->subs_lock);
 
-        /* Bump global listener count — covers overflow tags (>=64) too,
-         * so TouchHasAnyListeners() can short-circuit publish only when
-         * truly nothing subscribes anywhere. */
-        __atomic_add_fetch(&g_listener_count, 1, __ATOMIC_RELEASE);
+    TouchSub *sub = (TouchSub *)kmalloc(sizeof(TouchSub));
+    if (!sub) return ERR_NO_MEMORY;
+    memset(sub, 0, sizeof(*sub));
+    sub->proc   = proc;
+    sub->bucket = b;
+    sub->tag_id = tag_id;
+    sub->mode   = (uint8_t)mode;
+    if (mode == TOUCH_REACT) {
+        ManifestRetain(manifest);
+        sub->u.manifest = manifest;
+    } else if (mode == TOUCH_INTERRUPT) {
+        sub->u.irq.handler_addr = handler_addr;
+        sub->u.irq.stack_top    = stack_top;
     }
 
-update_ears:
-    if (tag_id < 64) {
-        __atomic_or_fetch(&proc->ear_bits, (uint64_t)1 << tag_id, __ATOMIC_RELAXED);
-        __atomic_or_fetch(&g_ear_presence, (uint64_t)1 << tag_id, __ATOMIC_RELEASE);
-    } else {
-        bool found = false;
-        for (uint16_t i = 0; i < proc->ear_overflow_count; i++) {
-            if (proc->ear_overflow_ids[i] == tag_id) { found = true; break; }
-        }
-        if (!found) {
-            if (proc->ear_overflow_count >= proc->ear_overflow_capacity) {
-                uint16_t new_cap = proc->ear_overflow_capacity == 0 ? 8
-                                   : (uint16_t)(proc->ear_overflow_capacity * 2);
-                uint16_t *new_ids = kmalloc(sizeof(uint16_t) * new_cap);
-                if (!new_ids) return ERR_NO_MEMORY;
-                if (proc->ear_overflow_count > 0)
-                    memcpy(new_ids, proc->ear_overflow_ids,
-                           sizeof(uint16_t) * proc->ear_overflow_count);
-                uint16_t *old = proc->ear_overflow_ids;
-                __atomic_store_n(&proc->ear_overflow_ids, new_ids, __ATOMIC_RELEASE);
-                proc->ear_overflow_capacity = new_cap;
-                if (old) kfree(old);
-            }
-            proc->ear_overflow_ids[proc->ear_overflow_count++] = tag_id;
-        }
-    }
+    /* Link into bucket (publish visibility) and into proc list. Bucket lock
+     * acquired BEFORE proc lock — established ordering, never reversed. */
+    spin_lock(&b->lock);
+    sub->bucket_next = b->head;
+    sub->bucket_prev = NULL;
+    if (b->head) b->head->bucket_prev = sub;
+    b->head = sub;
+    __atomic_add_fetch(&b->sub_count, 1, __ATOMIC_RELEASE);
+    spin_unlock(&b->lock);
 
-    /* LEVEL policy: if state is already set when claiming, deliver synthetic touch. */
-    /* LEVEL on-claim sync — deferred to Phase 3.
-     * Inline TouchRestDeliver here is consumed by the caller's MfCall1
-     * reply; TouchQueueEnqueue would broadcast to all subscribers, not
-     * just this one. Proper fix: add a "synthetic_pending" flag to
-     * TouchClaim that the next touch_await retrieves. */
+    spin_lock(&proc->subs_lock);
+    /* Re-check duplicate — between our find_proc_sub and now, a concurrent
+     * TouchClaimSet on the same (proc, tag_id) could have inserted. If so,
+     * undo our bucket link to preserve the one-sub-per-(proc,tag) invariant. */
+    if (find_proc_sub(proc, tag_id)) {
+        spin_unlock(&proc->subs_lock);
+
+        spin_lock(&b->lock);
+        if (sub->bucket_prev) sub->bucket_prev->bucket_next = sub->bucket_next;
+        else                   b->head = sub->bucket_next;
+        if (sub->bucket_next) sub->bucket_next->bucket_prev = sub->bucket_prev;
+        __atomic_sub_fetch(&b->sub_count, 1, __ATOMIC_RELEASE);
+        spin_unlock(&b->lock);
+
+        if (mode == TOUCH_REACT && sub->u.manifest != MANIFEST_HANDLE_INVALID)
+            ManifestRelease(sub->u.manifest);
+        kfree(sub);
+        return OK;
+    }
+    sub->proc_next = (TouchSub *)proc->subs_head;
+    sub->proc_prev = NULL;
+    if (proc->subs_head)
+        ((TouchSub *)proc->subs_head)->proc_prev = sub;
+    proc->subs_head = sub;
+    spin_unlock(&proc->subs_lock);
+
+    __atomic_add_fetch(&g_total_subs, 1, __ATOMIC_RELEASE);
     return OK;
 }
 
-error_t TouchClaimClear(process_t *proc, uint16_t tag_id)
+/* Internal: unlink a sub from its bucket. Assumes caller holds NO bucket lock. */
+static void touch_sub_unlink_bucket(TouchSub *sub)
+{
+    TouchBucket *b = sub->bucket;
+    spin_lock(&b->lock);
+    if (sub->bucket_prev) sub->bucket_prev->bucket_next = sub->bucket_next;
+    else if (b->head == sub) b->head = sub->bucket_next;
+    if (sub->bucket_next) sub->bucket_next->bucket_prev = sub->bucket_prev;
+    sub->bucket_next = sub->bucket_prev = NULL;
+    /* Decrement sub_count if it was still counted (not double-unlinked). */
+    uint32_t cur = __atomic_load_n(&b->sub_count, __ATOMIC_RELAXED);
+    if (cur > 0)
+        __atomic_sub_fetch(&b->sub_count, 1, __ATOMIC_RELEASE);
+    spin_unlock(&b->lock);
+}
+
+error_t TouchClaimClear(process_t *proc, TouchTag tag_id)
 {
     if (!proc) return ERR_NULL_POINTER;
 
-    /* ACQUIRE-load pairs with the RELEASE store in TouchClaimSet so we
-     * see all entries the sibling K-Core just wrote. */
-    TouchClaim *table = (TouchClaim *)__atomic_load_n(&proc->claim_table, __ATOMIC_ACQUIRE);
-    uint16_t count = __atomic_load_n(&proc->claim_count, __ATOMIC_ACQUIRE);
-    for (uint16_t i = 0; i < count; i++) {
-        if (table[i].tag_id != tag_id) continue;
-
-        if (table[i].mode == TOUCH_REACT && table[i].u.manifest != MANIFEST_HANDLE_INVALID)
-            ManifestRelease(table[i].u.manifest);
-
-        /* Compact: move last entry here */
-        uint16_t last = (uint16_t)(count - 1);
-        if (i < last) table[i] = table[last];
-        /* RELEASE-store new count so a sibling K-Core's next claim sees
-         * our compaction. Mirrors the RELEASE in TouchClaimSet. */
-        __atomic_store_n(&proc->claim_count, last, __ATOMIC_RELEASE);
-        count = last;
-
-        /* Mirror the listener-counter bump in TouchClaimSet. */
-        __atomic_sub_fetch(&g_listener_count, 1, __ATOMIC_RELEASE);
-
-        /* Clear ear bit / overflow entry */
-        if (tag_id < 64) {
-            /* Only clear if no other claim for this tag_id */
-            bool still_needed = false;
-            for (uint16_t j = 0; j < count; j++) {
-                if (table[j].tag_id == tag_id) { still_needed = true; break; }
-            }
-            if (!still_needed)
-                __atomic_and_fetch(&proc->ear_bits, ~((uint64_t)1 << tag_id), __ATOMIC_RELAXED);
-        } else {
-            bool still_needed = false;
-            for (uint16_t j = 0; j < count; j++) {
-                if (table[j].tag_id == tag_id) { still_needed = true; break; }
-            }
-            if (!still_needed) {
-                for (uint16_t j = 0; j < proc->ear_overflow_count; j++) {
-                    if (proc->ear_overflow_ids[j] == tag_id) {
-                        uint16_t last_ov = proc->ear_overflow_count - 1;
-                        if (j < last_ov)
-                            proc->ear_overflow_ids[j] = proc->ear_overflow_ids[last_ov];
-                        proc->ear_overflow_count--;
-                        break;
-                    }
-                }
-            }
-        }
-        return OK;
+    spin_lock(&proc->subs_lock);
+    TouchSub *sub = find_proc_sub(proc, tag_id);
+    if (!sub) {
+        spin_unlock(&proc->subs_lock);
+        return ERR_TAG_NOT_FOUND;
     }
-    return ERR_TAG_NOT_FOUND;
+    if (sub->proc_prev) sub->proc_prev->proc_next = sub->proc_next;
+    else                proc->subs_head           = sub->proc_next;
+    if (sub->proc_next) sub->proc_next->proc_prev = sub->proc_prev;
+    sub->proc_next = sub->proc_prev = NULL;
+    spin_unlock(&proc->subs_lock);
+
+    touch_sub_unlink_bucket(sub);
+
+    if (sub->mode == TOUCH_REACT && sub->u.manifest != MANIFEST_HANDLE_INVALID)
+        ManifestRelease(sub->u.manifest);
+    kfree(sub);
+    __atomic_sub_fetch(&g_total_subs, 1, __ATOMIC_RELEASE);
+    return OK;
+}
+
+error_t TouchClaimAck(process_t *proc, TouchTag tag_id)
+{
+    if (!proc) return ERR_NULL_POINTER;
+    spin_lock(&proc->subs_lock);
+    TouchSub *sub = find_proc_sub(proc, tag_id);
+    if (!sub) { spin_unlock(&proc->subs_lock); return ERR_TAG_NOT_FOUND; }
+    __atomic_store_n(&sub->has_pending, 0, __ATOMIC_RELEASE);
+    sub->pending_plen = 0;
+    spin_unlock(&proc->subs_lock);
+    return OK;
 }
 
 void TouchCleanupProcess(process_t *proc)
 {
     if (!proc) return;
-    /* Idempotency guard: multiple callers (SysProcKill + process_destroy) are safe. */
     if (proc->touch_cleaned) return;
     proc->touch_cleaned = 1;
 
-    /* Release all manifest handles from REACT claims; balance the
-     * global listener counter for every claim we're tearing down.
-     *
-     * UAF avoidance: this function runs from process_destroy WHILE
-     * publishers on other cores may still hold a refcount on `proc`
-     * via process_find_ref and be inside find_claim() reading
-     * proc->claim_table. We must not kfree the table here — instead
-     * we ATOMICALLY zero claim_count (publishers reading the new
-     * value will iterate 0 times and return NULL), drop the listener
-     * counter and release manifests using the captured count, and
-     * leave the actual kfree(claim_table) to process_cleanup_immediate
-     * which runs only after ref_count hits 0. Publishers that read
-     * the OLD claim_count (race window between our store and their
-     * load) still index into a valid table — kfree happens strictly
-     * after every publisher has dropped its ref. */
-    uint16_t  old_count = proc->claim_count;
-    TouchClaim *table   = (TouchClaim *)proc->claim_table;
-
-    /* RELEASE-store 0 so any subsequent find_claim with __ATOMIC_ACQUIRE
-     * load sees an empty table. */
-    __atomic_store_n(&proc->claim_count, (uint16_t)0, __ATOMIC_RELEASE);
-
-    if (old_count > 0 && table) {
-        __atomic_sub_fetch(&g_listener_count,
-                           (uint32_t)old_count,
-                           __ATOMIC_RELEASE);
-        for (uint16_t i = 0; i < old_count; i++) {
-            if (table[i].mode == TOUCH_REACT && table[i].u.manifest != MANIFEST_HANDLE_INVALID)
-                ManifestRelease(table[i].u.manifest);
+    /* Unlink every sub from its bucket so concurrent publishes stop seeing
+     * this process. Sub structs remain in proc->subs_head with proc_next
+     * pointers intact; the kfree happens in TouchFinalizeProcess only after
+     * the process refcount falls to zero. */
+    uint32_t unlinked = 0;
+    TouchSub *cur = (TouchSub *)proc->subs_head;
+    while (cur) {
+        if (cur->bucket) { touch_sub_unlink_bucket(cur); unlinked++; }
+        if (cur->mode == TOUCH_REACT &&
+            cur->u.manifest != MANIFEST_HANDLE_INVALID) {
+            ManifestRelease(cur->u.manifest);
+            cur->u.manifest = MANIFEST_HANDLE_INVALID;
         }
+        cur = cur->proc_next;
     }
+    if (unlinked > 0)
+        __atomic_sub_fetch(&g_total_subs, unlinked, __ATOMIC_RELEASE);
 
-    /* claim_table pointer is intentionally NOT cleared here — the
-     * kfree happens in process_cleanup_immediate after the last
-     * reference is dropped. proc->claim_capacity is also kept until
-     * then (informational). */
-
-    if (proc->ear_overflow_ids) {
-        kfree(proc->ear_overflow_ids);
-        proc->ear_overflow_ids     = NULL;
-        proc->ear_overflow_count   = 0;
-        proc->ear_overflow_capacity = 0;
-    }
-
-    /* Free pending interrupt queue */
+    /* Drain pending INTERRUPT-mode queue. */
     spin_lock(&proc->irq_lock);
     TouchPending *p = (TouchPending *)proc->irq_pending_head;
     proc->irq_pending_head = NULL;
@@ -714,9 +842,21 @@ void TouchCleanupProcess(process_t *proc)
         p = next;
     }
 
-    /* Publish process.died */
+    /* Notify subscribers — runs the new O(N_subs_for_process_died) path. */
     struct { uint32_t pid; int32_t exit; } died = { proc->pid, 0 };
     TouchPublish("process:died", &died, sizeof(died));
+}
+
+void TouchFinalizeProcess(process_t *proc)
+{
+    if (!proc) return;
+    TouchSub *cur = (TouchSub *)proc->subs_head;
+    proc->subs_head = NULL;
+    while (cur) {
+        TouchSub *next = cur->proc_next;
+        kfree(cur);
+        cur = next;
+    }
 }
 
 void TouchIrqReturn(process_t *proc)
@@ -729,24 +869,24 @@ void TouchIrqReturn(process_t *proc)
 
     spin_lock(&proc->irq_lock);
     proc->irq_active = 0;
-
     TouchPending *pending = (TouchPending *)proc->irq_pending_head;
     if (pending) {
         proc->irq_pending_head = pending->next;
-        spin_unlock(&proc->irq_lock);
+    }
+    spin_unlock(&proc->irq_lock);
 
-        /* Re-deliver the pending touch as an interrupt */
-        TouchClaim *claim = find_claim(proc, pending->tag_id);
-        if (claim && claim->mode == TOUCH_INTERRUPT) {
-            touch_interrupt_deliver(proc, claim,
-                                    pending->tag_id,
+    if (pending) {
+        spin_lock(&proc->subs_lock);
+        TouchSub *sub = find_proc_sub(proc, pending->tag_id);
+        bool reuse = sub && sub->mode == TOUCH_INTERRUPT;
+        spin_unlock(&proc->subs_lock);
+        if (reuse) {
+            touch_interrupt_deliver(proc, sub, pending->tag_id,
                                     pending->plen > 0 ? pending->payload : NULL,
                                     pending->plen,
                                     pending->source_pid,
                                     pending->flags);
         }
         kfree(pending);
-        return;
     }
-    spin_unlock(&proc->irq_lock);
 }

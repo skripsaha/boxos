@@ -157,15 +157,14 @@ bool result_pop_non_ipc(Result* out) {
             ipc_stash_push(&entry);
             continue;
         }
-        /* Touch events (kernel-published, source_pid==0 → sender_pid==0)
-         * MUST NOT be returned as manifest replies. Without this filter
-         * a kernel-broadcast touch (process:spawned, etc.) would be
-         * popped here and treated as the calling MfCall1's own reply,
-         * leaking its `error_code=0` while the real reply orphans in
-         * the ring. Stash to ipc_stash so touch_await's fast path picks
-         * it up by KCTX_TOUCH. */
-        if (entry._reserved == 9 /* KCTX_TOUCH */) {
-            ipc_stash_push(&entry);
+        /* Post-2026-06-01 TouchRing migration: KCTX_TOUCH no longer
+         * arrives via ResultRing. The dispatch below is a defensive
+         * fallback that should never fire on a synchronised kernel +
+         * boxlib build — but we keep the filter in case a future
+         * kernel publisher (or a stale third-party tool) still publishes
+         * a Touch through this channel. The entry is discarded; real
+         * Touches are delivered via touch_pop / touch_wait. */
+        if (entry.context == KCTX_TOUCH) {
             continue;
         }
         if (entry.error_code == 9 /* ERR_WOULD_BLOCK */) continue;
@@ -186,12 +185,12 @@ bool result_pop_ipc(Result* out) {
             *out = entry;
             return true;
         }
-        /* Kernel-broadcast touch (sender_pid==0 + KCTX_TOUCH) — process
-         * lifecycle, USB, system halt — also count as "IPC-like" for
-         * subscribers using receive_wait()/receive(). */
-        if (entry._reserved == 9 /* KCTX_TOUCH */) {
-            *out = entry;
-            return true;
+        /* Post-2026-06-01: Touch events come via TouchRing, not
+         * ResultRing. The defensive filter here drops any leftover
+         * KCTX_TOUCH-tagged entry that might still arrive from a
+         * mismatched kernel/boxlib build. */
+        if (entry.context == KCTX_TOUCH) {
+            continue;
         }
         /* Skip transient async-park acks (see result_pop_non_ipc). */
         if (entry.error_code == 9 /* ERR_WOULD_BLOCK */) continue;
@@ -208,45 +207,13 @@ uint32_t result_non_ipc_stash_count(void) {
     return non_ipc_stash.count;
 }
 
-/* Pop a single KCTX_TOUCH-tagged entry without disturbing manifest replies
- * or non-touch IPC. Used by touch_await's fast path so a listener with a
- * full ring of pre-queued touches never has to round-trip through the
- * kernel just to park-and-wake on each one. Returns false if nothing
- * matches; non-touch entries get re-stashed (ipc_stash for sender_pid!=0,
- * non_ipc_stash for sender_pid==0). */
+/* result_pop_touch removed 2026-06-01: Touch events migrated to a
+ * dedicated per-cabin TouchRing. Use touch_pop / touch_wait from
+ * box/touch.h instead. The function name lives on in the declaration
+ * for one release as a stub so build-time linker errors guide
+ * out-of-tree consumers to the new API. */
 bool result_pop_touch(Result* out) {
-    if (!out) return false;
-
-    /* First scan ipc_stash, since touches commonly land there via
-     * result_pop_non_ipc's fan-out. Use a temp ring to preserve order. */
-    uint32_t initial = ipc_stash.count;
-    for (uint32_t i = 0; i < initial; i++) {
-        Result e;
-        if (!ipc_stash_shift(&e)) break;
-        if (e._reserved == 9 /* KCTX_TOUCH */) {
-            *out = e;
-            return true;
-        }
-        ipc_stash_push(&e);  /* not a touch — re-queue */
-    }
-
-    /* Now drain the ring, classifying each entry. */
-    Result entry;
-    while (result_pop(&entry)) {
-        if (entry._reserved == 9 /* KCTX_TOUCH */) {
-            *out = entry;
-            return true;
-        }
-        if (entry.sender_pid != 0) {
-            ipc_stash_push(&entry);
-            continue;
-        }
-        if (entry.error_code == 9 /* ERR_WOULD_BLOCK */) {
-            /* drop async-park ack */
-            continue;
-        }
-        non_ipc_stash_push(&entry);
-    }
+    (void)out;
     return false;
 }
 
@@ -276,10 +243,9 @@ void result_drain_orphan_replies(void) {
             ipc_stash_push(&entry);
             continue;
         }
-        if (entry._reserved == 9 /* KCTX_TOUCH */) {
-            ipc_stash_push(&entry);
-            continue;
-        }
+        /* Post-2026-06-01: KCTX_TOUCH no longer arrives here. Any
+         * leftover entry tagged that way is treated as an orphan and
+         * discarded along with regular manifest-reply orphans. */
         /* Manifest-reply slot with sender_pid==0 — orphan. Drop. */
     }
 }
@@ -296,8 +262,21 @@ static inline uint64_t rdtsc(void) {
 
 static bool result_wait_umwait(Result* out, uint32_t timeout_ms) {
     ResultRing* rr = result_ring();
-    volatile uint32_t* tail_addr;
-    { char* base = (char*)rr; tail_addr = (volatile uint32_t*)(base + 4); }
+    /* Per Intel SDM Vol 2B, UMONITOR arms a hardware monitor over the
+     * cache line containing the supplied address (size from CPUID.05H:
+     * EAX[15:0], typically 64B). We want to wake when the producer
+     * (kernel KResultPush) advances `tail` — so monitor exactly that
+     * field, not the head/tail header at offset+4 (which used to work
+     * by 64B-cache-line accident: head, tail and the rest of the
+     * 64-byte ResultRingHeader all share one line).
+     *
+     * ResultRingHeader is __packed, so taking &rr->hdr.tail directly
+     * would draw -Waddress-of-packed-member. Computing the address via
+     * offsetof yields the same value, the page-aligned base + 8-byte
+     * offset is naturally 8-aligned, and the warning is silenced
+     * legitimately rather than via diagnostic-pragma noise. */
+    volatile uint64_t *tail_addr = (volatile uint64_t *)
+        ((uintptr_t)rr + OFFSETOF(ResultRing, hdr.tail));
 
     while (1) {
         __sync_synchronize();

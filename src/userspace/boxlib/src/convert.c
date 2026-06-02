@@ -133,6 +133,73 @@ char* uint_to_str(unsigned int value, char* buf, size_t buf_size) {
     return buf;
 }
 
+/* 64-bit converters — used by printf %ld/%lld/%lu/%llu/%zu and by callers
+ * that need to format Cabin-PIDs, file_ids > 2^32, TSC counters, etc.
+ * Max output: 20 chars for 18446744073709551615 + NUL. */
+char* int64_to_str(int64_t value, char* buf, size_t buf_size) {
+    if (!buf || buf_size < 2) return buf;
+    if (value == 0) { buf[0] = '0'; buf[1] = '\0'; return buf; }
+
+    char tmp[21];
+    int  i = 0;
+    int  neg = 0;
+    uint64_t uval;
+    if (value < 0) {
+        neg = 1;
+        /* Build positive magnitude without overflow on INT64_MIN: cast
+         * (-(v+1)) then add 1 so the intermediate stays in int64_t. */
+        uval = (uint64_t)(-(value + 1)) + 1;
+    } else {
+        uval = (uint64_t)value;
+    }
+    while (uval > 0 && i < 20) {
+        tmp[i++] = '0' + (char)(uval % 10);
+        uval /= 10;
+    }
+    size_t j = 0;
+    if (neg && j < buf_size - 1) buf[j++] = '-';
+    while (i > 0 && j < buf_size - 1) buf[j++] = tmp[--i];
+    buf[j] = '\0';
+    return buf;
+}
+
+char* uint64_to_str(uint64_t value, char* buf, size_t buf_size) {
+    if (!buf || buf_size < 2) return buf;
+    if (value == 0) { buf[0] = '0'; buf[1] = '\0'; return buf; }
+
+    char tmp[21];
+    int  i = 0;
+    while (value > 0 && i < 20) {
+        tmp[i++] = '0' + (char)(value % 10);
+        value /= 10;
+    }
+    size_t j = 0;
+    while (i > 0 && j < buf_size - 1) buf[j++] = tmp[--i];
+    buf[j] = '\0';
+    return buf;
+}
+
+char* uint64_to_hex(uint64_t value, char* buf, size_t buf_size) {
+    if (!buf || buf_size < 4) return buf;
+    const char digits[] = "0123456789abcdef";
+
+    if (value == 0) {
+        buf[0] = '0'; buf[1] = 'x'; buf[2] = '0'; buf[3] = '\0';
+        return buf;
+    }
+    char tmp[17];
+    int  i = 0;
+    while (value > 0 && i < 16) {
+        tmp[i++] = digits[value & 0xF];
+        value >>= 4;
+    }
+    size_t j = 0;
+    if (j + 2 < buf_size) { buf[j++] = '0'; buf[j++] = 'x'; }
+    while (i > 0 && j < buf_size - 1) buf[j++] = tmp[--i];
+    buf[j] = '\0';
+    return buf;
+}
+
 char* to_hex(uint32_t value, char* buf, size_t buf_size) {
     if (!buf || buf_size < 4) return buf;
 

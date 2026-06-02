@@ -194,17 +194,15 @@ bool KResultPush(process_t *target, const Result *r)
      *     freezing the entire cabin's IPC. By pre-mapping the next page
      *     too, we move that map call BEFORE the reservation, so any
      *     failure happens without state change: we return false, the
-     *     ring stays consistent. With ~128 slots/page and ~4 producers,
-     *     the actually-used page can only be `uvaddr_pre` or its
-     *     immediate successor. */
-    uintptr_t uvaddr_pre  = result_ring_slot_uvaddr(rr, tail_snap);
-    uintptr_t uvaddr_next = result_ring_slot_uvaddr(rr, tail_snap + cap /* same offset, next page if any */);
-    /* The "next page" we care about is whichever page tail_snap+1's
-     * worst-case neighbour spans. Compute via the slot AFTER N producers
-     * worth of pushes (cap as a safe upper bound is overkill; one page
-     * stride is enough). 4 KiB / sizeof(ResultSlot) slots per page. */
+     *     ring stays consistent.
+     *
+     *     With 32-byte ResultSlot stride and 4 KiB pages there are 128
+     *     slots per page. The reserved `pos` returned by fetch_add at
+     *     step (3) can be at most "tail_snap + concurrent_producers - 1"
+     *     ahead of our snapshot — so the actually-used page is either
+     *     uvaddr_pre's page or its immediate 4 KiB successor. */
+    uintptr_t uvaddr_pre     = result_ring_slot_uvaddr(rr, tail_snap);
     uintptr_t one_page_ahead = uvaddr_pre + 4096u;
-    (void)uvaddr_next;
     if (vmm_ensure_user_page(target->cabin, uvaddr_pre, /*writable=*/true) != 0) {
         __atomic_add_fetch(&g_krp_premap_fail, 1, __ATOMIC_RELAXED);
         return false;
@@ -228,14 +226,12 @@ bool KResultPush(process_t *target, const Result *r)
      *     wasn't pre-mapped. Try to map; if THAT fails, treat the slot
      *     as overflow so we publish a synthetic ERR (no strand). */
     uintptr_t uvaddr = result_ring_slot_uvaddr(rr, pos);
-    bool crosspg_failed = false;
     if (uvaddr != uvaddr_pre && uvaddr != one_page_ahead) {
         if (vmm_ensure_user_page(target->cabin, uvaddr, /*writable=*/true) != 0) {
             __atomic_add_fetch(&g_krp_crosspg_fail, 1, __ATOMIC_RELAXED);
             kprintf("[KRP] WARN: cross-page map failed at pos=%lu pid=%u — "
                     "synthesizing ERR slot to avoid stranding the ring\n",
                     (unsigned long)pos, (unsigned int)target->pid);
-            crosspg_failed = true;
             overflow = true;   /* force the synthetic ERR path below */
         }
     }
@@ -266,29 +262,62 @@ bool KResultPush(process_t *target, const Result *r)
     }
 
     /* (6) Vyukov gate: wait until the slot's seq matches our round's
-     *     "ready for write" value. tail was already incremented, so
-     *     abandoning the slot would strand it and the consumer would
-     *     spin forever. We never give up — cpu_pause keeps the core
-     *     friendly under contention. */
+     *     "ready for write" value.
+     *
+     *     `tail` was already incremented at step (3), so we may NEVER
+     *     abandon the slot without publishing a seq advance — the
+     *     consumer expects every reserved slot to eventually transition
+     *     `2*round → 2*round+1`, and a forgotten slot would freeze the
+     *     ring's modulo position forever.
+     *
+     *     But we also cannot spin unbounded. If the userspace consumer
+     *     has crashed, frozen, or simply fallen catastrophically behind
+     *     under real-HW IRQ pressure, an unbounded `for(;;)` here stalls
+     *     every K-Core that lands in KResultPush for the same target.
+     *     The fix is two-pronged: (a) cap the spin at KRP_SPIN_BUDGET
+     *     iterations of cpu_pause(), and (b) periodically probe
+     *     `target->destroying` so we bail out early once the cabin is
+     *     known to be tearing down.
+     *
+     *     On budget exhaustion or destroying-detect we set `overflow`
+     *     and fall through to publish a synthetic ERR_RESULT_RING_FULL
+     *     at step (7). The slot's seq still advances at step (8), the
+     *     consumer (if any) sees a benign error, and the ring stays
+     *     consistent. Empirically the worst observed spin under 16-core
+     *     stress is well below 1<<16 iterations; the 1<<20 budget gives
+     *     a comfortable ~ms headroom on real silicon before bailout. */
     uint64_t round    = pos / cap;
     uint64_t expected = 2u * round;
 
-    uint64_t spins = 0;
-    for (;;) {
+    enum { KRP_SPIN_BUDGET = 1u << 20 };
+    enum { KRP_DESTROYING_PROBE_MASK = 0xFFFFu };
+    bool consumer_lost = false;
+    for (uint64_t spins = 0; ; spins++) {
         uint64_t seq = __atomic_load_n(&slot->seq, __ATOMIC_ACQUIRE);
         if (seq == expected) break;
-        cpu_pause();
-        if (++spins == (1u << 24)) {
+        if (spins >= KRP_SPIN_BUDGET) {
             __atomic_add_fetch(&g_krp_spin_limit, 1, __ATOMIC_RELAXED);
-            kprintf("[KRP] WARN: long spin pid=%u pos=%lu seq=%lu expected=%lu\n",
+            kprintf("[KRP] WARN: spin budget exhausted pid=%u pos=%lu seq=%lu expected=%lu — publishing synthetic ERR\n",
                     (unsigned int)target->pid, (unsigned long)pos,
                     (unsigned long)seq, (unsigned long)expected);
+            consumer_lost = true;
+            break;
         }
+        if ((spins & KRP_DESTROYING_PROBE_MASK) == 0 &&
+            __atomic_load_n(&target->destroying, __ATOMIC_ACQUIRE)) {
+            __atomic_add_fetch(&g_krp_spin_limit, 1, __ATOMIC_RELAXED);
+            consumer_lost = true;
+            break;
+        }
+        cpu_pause();
     }
 
-    /* (7) Write payload. On overflow, write a synthetic error so the
-     *     consumer drains the slot and the ring continues. */
-    if (overflow) {
+    /* (7) Write payload. On overflow OR consumer-lost, write a synthetic
+     *     error so the consumer (if any wakes up) drains the slot and
+     *     the ring continues. Slot is NEVER abandoned mid-round — the
+     *     seq advance at step (8) is the linearisation guarantee for
+     *     the consumer. */
+    if (overflow || consumer_lost) {
         slot->r.error_code  = ERR_RESULT_RING_FULL;
         slot->r.data_length = 0;
         slot->r.data_addr   = 0;
@@ -304,10 +333,14 @@ bool KResultPush(process_t *target, const Result *r)
      *     ACQUIRE-load sees the payload write. */
     __atomic_store_n(&slot->seq, expected + 1u, __ATOMIC_RELEASE);
 
-    /* (9) Wake target if it was sleeping. If overflow we still wake — the
-     *     consumer needs to drain the error slot to keep the ring moving. */
-    if (process_get_state(target) == PROC_WAITING) {
+    /* (9) Wake target if it was sleeping. If overflow we still wake —
+     *     the consumer needs to drain the error slot to keep the ring
+     *     moving. Skip the wake when consumer_lost since either the
+     *     cabin is destroying (state writes during teardown race the
+     *     teardown logic, harmless but pointless) or it has been frozen
+     *     long enough that one more wake won't help. */
+    if (!consumer_lost && process_get_state(target) == PROC_WAITING) {
         process_set_state(target, PROC_WORKING);
     }
-    return !overflow;
+    return !overflow && !consumer_lost;
 }

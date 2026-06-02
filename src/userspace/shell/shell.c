@@ -23,6 +23,10 @@
 static ShellState    g_state;
 static LineEditState g_editor;
 
+/* Implementation lives in the main-loop section so the body is next
+ * to its primary user; the prototype in shell.h makes it visible to
+ * executor.c which also drains between user operations. */
+
 /* =========================================================================
  * Initialization
  * ========================================================================= */
@@ -51,8 +55,7 @@ void ShellInit(void)
     io_set_mode(IO_MODE_IPC);
 
     if (ci->spawner_pid != 0) {
-        Result pending;
-        while (receive(&pending)) { }
+        ShellDrainStaleIpc();
     }
 
     /* Discovery: PING the "display" tag and pick up the first responder.
@@ -107,14 +110,11 @@ void ShellInit(void)
     /* Drain any stale messages left over from discovery — second
      * daemon's PING reply, retried broadcast echoes, etc. Without this
      * the FIRST readline pulls the stale reply and returns garbage. */
-    {
-        Result drain;
-        while (receive(&drain)) { }
-    }
+    ShellDrainStaleIpc();
 
     clear();
     println("BoxOS Shell v2.0");
-    println("Ctrl+Q to exit. Type 'help' for commands.");
+    println("Type 'help' for commands, 'exit' to quit.");
     println("");
 }
 
@@ -155,59 +155,32 @@ void ShellUpdatePrompt(void)
  * Main loop
  * ========================================================================= */
 
-/* =========================================================================
- * TakeSurvey — ask user a yes/no question before irreversible actions
- * ========================================================================= */
-
-static bool TakeSurvey(const char *message)
+/*
+ * ShellDrainStaleIpc — drop everything sitting in the IPC mailbox.
+ *
+ * Used between user-visible operations so the next receive_wait inside
+ * readline / executor never pulls a stale message left behind by:
+ *   - a child process that posted its 0xFE exit sentinel late
+ *   - a duplicate display-daemon PING reply during discovery
+ *   - kernel-broadcast Touches the shell isn't subscribed to
+ *
+ * Previously inlined at six call sites; centralised so a future change
+ * (e.g. logging dropped traffic) edits one place.
+ */
+void ShellDrainStaleIpc(void)
 {
-    printf("%color%s [y/n] %color",
-           COLOR_YELLOW, message, COLOR_DEFAULT);
-    io_flush();
-
-    while (1) {
-        int ch = getchar();
-        if (ch < 0) continue;
-        if (ch == 'y' || ch == 'Y') {
-            println("y");
-            return true;
-        }
-        if (ch == 'n' || ch == 'N' || ch == 0x1B) {
-            println("n");
-            return false;
-        }
-    }
+    Result drain;
+    while (receive(&drain)) { }
 }
-
-/* =========================================================================
- * Main loop
- * ========================================================================= */
 
 void ShellMainLoop(void)
 {
     char input[SHELL_LINE_MAX];
 
     while (g_state.running) {
-        /* Drain any stale IPC left over from the previous iteration's
-         * child process or from late display PING replies. Without
-         * this, the next receive_wait inside readline pulls the stale
-         * message, mis-interprets its bytes as a length-prefixed line,
-         * and silently drops the user's typed command — observed as
-         * "first command after bench did nothing" in 2026-05-17. */
-        {
-            Result drain;
-            while (receive(&drain)) { }
-        }
+        ShellDrainStaleIpc();
 
         int rc = LineEditRead(&g_editor, g_state.prompt, input, SHELL_LINE_MAX);
-
-        if (rc == LINE_EXIT_REQUEST) {
-            if (TakeSurvey("Shut down BoxOS?")) {
-                ShellStop();
-                break;
-            }
-            continue;
-        }
 
         if (rc == LINE_EMPTY || rc == LINE_ERROR)
             continue;

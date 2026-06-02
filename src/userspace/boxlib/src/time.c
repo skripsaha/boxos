@@ -8,13 +8,14 @@
 #include "box/string.h"
 #include "box/core/result.h"
 #include "box/clock.h"
+#include "box/timeouts.h"
 
 #define HW_TIMER_GET_MS    0x11
 #define HW_RTC_GET_TIME    0x15
 #define HW_RTC_GET_UNIX64  0x16
 #define HW_RTC_GET_UPTIME  0x17
 
-#define TIME_TIMEOUT_MS    50000u
+#define TIME_TIMEOUT_MS    BOX_TIMEOUT_FAST_MS
 
 int time_get(time_t *out)
 {
@@ -61,9 +62,9 @@ int time_uptime_ms(uint64_t *out_ms)
      * HW-deck round trip. Falls through to the manifest path if the
      * page is missing or carries the wrong magic (older kernel,
      * missing mapping, future ABI mismatch). The page is mapped R/O
-     * into every Cabin at CLOCKBOARD_VA. */
+     * into every Cabin at CABIN_CLOCKBOARD_ADDR. */
     const volatile ClockBoardView *v =
-        (const volatile ClockBoardView *)(uintptr_t)CLOCKBOARD_VA;
+        (const volatile ClockBoardView *)(uintptr_t)CABIN_CLOCKBOARD_ADDR;
     if (v->magic == CLOCKBOARD_MAGIC_USER && v->version >= 1u) {
         *out_ms = v->uptime_ms;
         return OK;

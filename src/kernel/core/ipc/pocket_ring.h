@@ -23,21 +23,43 @@
  * Indices are 64-bit and never wrap during the lifetime of the universe.
  */
 
+/*
+ * PocketRingHeader — cacheline-separated cursors.
+ *
+ *   Cacheline 0: consumer cursor (kernel) + read-only init metadata.
+ *                Kernel reads `head` to advance; the metadata fields
+ *                are written once at init.
+ *   Cacheline 1: producer cursor (userspace) — own cacheline.
+ *                Userspace writes `tail` on every pocket submit; without
+ *                separation, the kernel-side load of `head` on a
+ *                different core would invalidate this line on every
+ *                submit (RFO storm under 16-core stress). Intel SDM
+ *                Vol 3 §11.4.4. Mirrors irq_defer's `3cdc79c` fix and
+ *                the TouchRingHeader layout in touch_ring.h.
+ */
 typedef struct __packed {
+    /* Cacheline 0 — consumer cursor + read-only metadata. */
     volatile uint64_t head;             /* consumer cursor (kernel)        */
-    volatile uint64_t tail;             /* producer cursor (userspace)     */
     uint64_t          slots_base;       /* user vaddr of slot 0            */
     uint32_t          slot_size;        /* bytes per slot stride           */
     uint32_t          slot_count_max;   /* hard upper bound on tail-head   */
     uint64_t          magic;            /* POCKET_RING_MAGIC               */
-    uint8_t           _pad[24];
+    uint8_t           _pad_line0[32];   /* fill cacheline 0                */
+
+    /* Cacheline 1 — producer cursor (userspace). */
+    volatile uint64_t tail;             /* producer cursor (userspace)     */
+    uint8_t           _pad_line1[56];   /* fill cacheline 1                */
 } PocketRingHeader;
 
-_Static_assert(sizeof(PocketRingHeader) == 64,
-               "PocketRingHeader must be 64 bytes");
+_Static_assert(sizeof(PocketRingHeader) == 128,
+               "PocketRingHeader must be 128 bytes (two cachelines)");
+_Static_assert(__builtin_offsetof(PocketRingHeader, head) == 0,
+               "PocketRingHeader.head must start at offset 0");
+_Static_assert(__builtin_offsetof(PocketRingHeader, tail) == 64,
+               "PocketRingHeader.tail must start at cacheline 1 (offset 64)");
 
 /* The full ring page is the header followed by zero padding. We allocate one
- * physical page; only the first 64 bytes carry meaning. */
+ * physical page; only the first sizeof(PocketRingHeader) bytes carry meaning. */
 typedef struct __packed {
     PocketRingHeader hdr;
     uint8_t          _page_pad[4096 - sizeof(PocketRingHeader)];

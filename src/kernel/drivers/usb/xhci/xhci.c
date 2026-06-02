@@ -275,6 +275,15 @@ int xhci_init(void) {
         ctrl->use_polling = true;
     } else {
         debug_printf("[xHCI] Registering IRQ handler for IRQ %u\n", ctrl->irq_line);
+
+        /* Resolve and cache "usb:connect" / "usb:disconnect" Touch tags
+         * BEFORE the IRQ handler can fire. Once registered + enabled,
+         * the controller may raise port-change interrupts at any time,
+         * and the IRQ-side TouchPublishIrqPair path MUST find the
+         * cached handles already populated (otherwise the first hot-plug
+         * event silently drops). */
+        xhci_interrupt_touch_init();
+
         irq_register_handler(ctrl->irq_line, xhci_irq_handler);
         irqchip_enable_irq(ctrl->irq_line);
         ctrl->use_polling = false;

@@ -139,61 +139,99 @@ static void KSha256Transform(uint32_t *state, const uint8_t *block)
     state[7] += h;
 }
 
+/* Streaming SHA-256 — FIPS 180-4. Internal buffer accumulates a single
+ * partial block; full 64-byte chunks transform straight from caller's
+ * buffer without copy. */
+void KSha256Init(KSha256Ctx *ctx)
+{
+    /* Initial hash values (first 32 bits of the fractional parts of the
+     * square roots of the first 8 primes 2..19). */
+    ctx->state[0] = 0x6a09e667;
+    ctx->state[1] = 0xbb67ae85;
+    ctx->state[2] = 0x3c6ef372;
+    ctx->state[3] = 0xa54ff53a;
+    ctx->state[4] = 0x510e527f;
+    ctx->state[5] = 0x9b05688c;
+    ctx->state[6] = 0x1f83d9ab;
+    ctx->state[7] = 0x5be0cd19;
+    ctx->total_bits = 0;
+    ctx->buffer_len = 0;
+}
+
+void KSha256Update(KSha256Ctx *ctx, const uint8_t *data, uint32_t len)
+{
+    ctx->total_bits += (uint64_t)len * 8;
+
+    /* If the internal buffer is partially full, fill it to 64 first. */
+    if (ctx->buffer_len > 0) {
+        uint32_t want = 64 - ctx->buffer_len;
+        if (want > len) want = len;
+        memcpy(ctx->buffer + ctx->buffer_len, data, want);
+        ctx->buffer_len += want;
+        data += want;
+        len  -= want;
+        if (ctx->buffer_len == 64) {
+            KSha256Transform(ctx->state, ctx->buffer);
+            ctx->buffer_len = 0;
+        }
+    }
+
+    /* Hash full blocks directly from caller's buffer. */
+    while (len >= 64) {
+        KSha256Transform(ctx->state, data);
+        data += 64;
+        len  -= 64;
+    }
+
+    /* Remainder lives in the internal buffer until the next Update or Final. */
+    if (len > 0) {
+        memcpy(ctx->buffer, data, len);
+        ctx->buffer_len = len;
+    }
+}
+
+void KSha256Final(KSha256Ctx *ctx, uint8_t *out_hash)
+{
+    uint64_t bit_len = ctx->total_bits;
+    uint8_t tail[64];
+    uint32_t pos = ctx->buffer_len;
+
+    memcpy(tail, ctx->buffer, pos);
+    tail[pos++] = 0x80;
+    if (pos > 56) {
+        while (pos < 64) tail[pos++] = 0;
+        KSha256Transform(ctx->state, tail);
+        pos = 0;
+    }
+    while (pos < 56) tail[pos++] = 0;
+    tail[56] = (bit_len >> 56) & 0xFF;
+    tail[57] = (bit_len >> 48) & 0xFF;
+    tail[58] = (bit_len >> 40) & 0xFF;
+    tail[59] = (bit_len >> 32) & 0xFF;
+    tail[60] = (bit_len >> 24) & 0xFF;
+    tail[61] = (bit_len >> 16) & 0xFF;
+    tail[62] = (bit_len >> 8) & 0xFF;
+    tail[63] =  bit_len        & 0xFF;
+    KSha256Transform(ctx->state, tail);
+
+    for (int i = 0; i < 8; i++) {
+        out_hash[i * 4]     = (ctx->state[i] >> 24) & 0xFF;
+        out_hash[i * 4 + 1] = (ctx->state[i] >> 16) & 0xFF;
+        out_hash[i * 4 + 2] = (ctx->state[i] >> 8)  & 0xFF;
+        out_hash[i * 4 + 3] =  ctx->state[i]        & 0xFF;
+    }
+
+    /* Zero state to remove the running hash from kernel memory after
+     * a sensitive operation. Cheap (~32 bytes). */
+    memset(ctx, 0, sizeof(*ctx));
+}
+
 void KSha256(const uint8_t *data, uint32_t len, uint8_t *out_hash)
 {
-    // Initial hash values (first 32 bits of the fractional parts of the square
-    // roots of the first 8 primes 2..19)
-    uint32_t state[8] = {
-        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
-        0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19
-    };
-
-    uint64_t total_len = len;
-    uint8_t buffer[64];
-
-    // Process full blocks
-    while (len >= 64)
-    {
-        KSha256Transform(state, data);
-        data += 64;
-        len -= 64;
-    }
-
-    // Pad remaining data
-    memset(buffer, 0, sizeof(buffer));
-    memcpy(buffer, data, len);
-
-    // Append bit '1'
-    buffer[len] = 0x80;
-
-    if (len >= 56)
-    {
-        // Need two blocks for padding
-        KSha256Transform(state, buffer);
-        memset(buffer, 0, sizeof(buffer));
-    }
-
-    // Append length in bits as 64-bit big-endian
-    uint64_t bit_len = total_len * 8;
-    buffer[56] = (bit_len >> 56) & 0xFF;
-    buffer[57] = (bit_len >> 48) & 0xFF;
-    buffer[58] = (bit_len >> 40) & 0xFF;
-    buffer[59] = (bit_len >> 32) & 0xFF;
-    buffer[60] = (bit_len >> 24) & 0xFF;
-    buffer[61] = (bit_len >> 16) & 0xFF;
-    buffer[62] = (bit_len >> 8) & 0xFF;
-    buffer[63] = bit_len & 0xFF;
-
-    KSha256Transform(state, buffer);
-
-    // Produce final hash value (big-endian)
-    for (int i = 0; i < 8; i++)
-    {
-        out_hash[i * 4]     = (state[i] >> 24) & 0xFF;
-        out_hash[i * 4 + 1] = (state[i] >> 16) & 0xFF;
-        out_hash[i * 4 + 2] = (state[i] >> 8) & 0xFF;
-        out_hash[i * 4 + 3] = state[i] & 0xFF;
-    }
+    KSha256Ctx ctx;
+    KSha256Init(&ctx);
+    KSha256Update(&ctx, data, len);
+    KSha256Final(&ctx, out_hash);
 }
 
 // ============================================================================

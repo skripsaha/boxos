@@ -25,10 +25,6 @@ static int spawn_role(uint8_t role)
     return child;
 }
 
-/* Cached last-good uptime so transient time_uptime_ms failures (e.g. under
- * heavy K-Core load when the HW_TIMER_GET_MS reply hits ring backpressure)
- * don't underflow elapsed_ms = uptime_ms() - t0. Returns last-good on error
- * which yields elapsed=0 instead of a 64-bit underflow. */
 static uint64_t s_last_uptime_ms = 0;
 
 static uint64_t uptime_ms(void)
@@ -54,15 +50,17 @@ static uint64_t uptime_ms(void)
 static void role_kv_producer(uint32_t parent_pid)
 {
     (void)parent_pid;
+    TouchTagPair pair = TOUCH_TAG_PAIR(TAG_KV);
     for (uint32_t i = 0; i < KV_ITERS; i++) {
-        touch_send(TAG_KV, &i, sizeof(i), 0);
+        touch_send(pair, &i, sizeof(i), 0);
     }
     exit(0);
 }
 
 static void test_s1(void)
 {
-    touch_claim(TAG_KV, TOUCH_REST, 0, 0);
+    TouchTag tag = TOUCH_TAG_ID(TAG_KV);
+    touch_claim(tag, TOUCH_REST, 0, 0);
 
     uint64_t t0 = uptime_ms();
 
@@ -71,7 +69,7 @@ static void test_s1(void)
         children[i] = spawn_role(ROLE_KV_PRODUCER);
         if (children[i] < 0) {
             kdbg_print("[STRESS S1] FAIL: spawn failed i=%d", i);
-            touch_release(TAG_KV);
+            touch_release(tag);
             return;
         }
     }
@@ -79,17 +77,14 @@ static void test_s1(void)
     uint32_t count    = 0;
     uint32_t expected = KV_PRODUCERS * KV_ITERS;
 
-    /* High per-call timeout to tolerate transient ring stalls under
-     * heavy MPSC contention. The test as a whole still bounded by the
-     * outer 30s default. */
     while (count < expected) {
         Touch t;
-        int rc = touch_await(TAG_KV, &t, 30000);
+        int rc = touch_await(tag, &t, 30000);
         if (rc != 0) break;
         count++;
     }
 
-    touch_release(TAG_KV);
+    touch_release(tag);
     uint64_t elapsed = uptime_ms() - t0;
 
     if (count == expected)
@@ -117,23 +112,31 @@ static void test_s2(void)
     uint64_t t0 = uptime_ms();
     bool crashed = false;
 
+    /* Dynamic tag names — must intern each iteration (no caching). */
     for (int i = 0; i < 10000 && !crashed; i++) {
-        char tag[32];
+        char tag_str[32];
         int p = 0;
         const char *pfx = "s:churn:";
-        while (*pfx) tag[p++] = *pfx++;
-        int_to_str(i % 200, tag, &p);  /* 200 unique names, cycling */
-        tag[p] = '\0';
+        while (*pfx) tag_str[p++] = *pfx++;
+        int_to_str(i % 200, tag_str, &p);
+        tag_str[p] = '\0';
 
-        int rc = touch_claim(tag, TOUCH_REST, 0, 0);
+        TouchTagPair pair = touch_intern(tag_str);
+        TouchTag tid = touch_pair_choose(pair);
+        if (tid == TOUCH_TAG_INVALID) { crashed = true; break; }
+
+        int rc = touch_claim(tid, TOUCH_REST, 0, 0);
         if (rc != 0) { crashed = true; break; }
-        int rc2 = touch_release(tag);
+        int rc2 = touch_release(tid);
         if (rc2 != 0) { crashed = true; break; }
     }
 
-    /* Final claim must succeed after all churn. */
-    int final_rc = touch_claim("s:churn:final", TOUCH_REST, 0, 0);
-    if (final_rc == 0) touch_release("s:churn:final");
+    int final_rc = -1;
+    TouchTag final_tid = TOUCH_TAG_ID("s:churn:final");
+    if (final_tid != TOUCH_TAG_INVALID) {
+        final_rc = touch_claim(final_tid, TOUCH_REST, 0, 0);
+        if (final_rc == 0) touch_release(final_tid);
+    }
 
     uint64_t elapsed = uptime_ms() - t0;
     bool ok = !crashed && (final_rc == 0);
@@ -153,26 +156,26 @@ static void test_s2(void)
 
 static void role_flood_listener(uint32_t parent_pid)
 {
-    touch_claim(TAG_FLOOD, TOUCH_REST, 0, 0);
+    TouchTag tag = TOUCH_TAG_ID(TAG_FLOOD);
+    touch_claim(tag, TOUCH_REST, 0, 0);
     uint8_t ready = 1;
     send(parent_pid, &ready, 1);
 
     uint32_t count = 0;
     while (count < FLOOD_SENDS) {
         Touch t;
-        int rc = touch_await(TAG_FLOOD, &t, 8000);
+        int rc = touch_await(tag, &t, 8000);
         if (rc != 0) break;
         count++;
     }
 
-    touch_release(TAG_FLOOD);
+    touch_release(tag);
     send(parent_pid, &count, sizeof(count));
     exit(0);
 }
 
 static void test_s3(void)
 {
-    /* Drain leftover. */
     { Result drain; while (receive_wait(&drain, 50)) { } }
 
     uint64_t t0 = uptime_ms();
@@ -186,7 +189,6 @@ static void test_s3(void)
         }
     }
 
-    /* Wait for ready from each specific child (filter by sender_pid). */
     Result r;
     int ready_count = 0;
     bool ready[FLOOD_LISTENERS] = { false };
@@ -205,14 +207,13 @@ static void test_s3(void)
         return;
     }
 
-    /* Small drain pause so all 4 listeners have entered touch_await. */
     for (volatile int i = 0; i < 500000; i++) {}
 
+    TouchTagPair pair = TOUCH_TAG_PAIR(TAG_FLOOD);
     for (int i = 0; i < FLOOD_SENDS; i++) {
-        touch_send(TAG_FLOOD, &i, sizeof(i), 0);
+        touch_send(pair, &i, sizeof(i), 0);
     }
 
-    /* Wait for count from each specific child (filter by sender_pid). */
     uint32_t counts[FLOOD_LISTENERS] = {0};
     int counts_received = 0;
     for (int t = 0; t < 100 && counts_received < FLOOD_LISTENERS; t++) {
@@ -243,20 +244,10 @@ static void test_s3(void)
     }
 }
 
-/* ---------- main ---------- */
 int main(void)
 {
     CabinInfo *ci = cabin_info();
 
-    /* Child detection: a non-zero spawner_pid that is NOT the shell (PID 2)
-     * means we were spawned by another touch_stress instance for a role.
-     * Wait indefinitely-with-bound for the role packet rather than fall
-     * through to running the full test recursively (each fall-through
-     * spawns 4 more children, cascading load until the system thrashes).
-     *
-     * Shell-launched: spawner_pid == 2. Run the full test battery.
-     * Test-launched: spawner_pid != 2 (and != 0). MUST find a role; if
-     * the role packet never arrives, exit silently. */
     if (ci && ci->spawner_pid != 0 && ci->spawner_pid != 2) {
         Result r;
         bool found_role = false;
@@ -280,8 +271,6 @@ int main(void)
             default: break;
             }
         }
-        /* Either the role completed or the role packet never arrived. In
-         * both cases exit — never recurse into the parent test. */
         exit(0);
     }
 

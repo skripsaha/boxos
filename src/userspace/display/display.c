@@ -12,6 +12,17 @@
 static uint8_t display_cached_color = VIDEO_COLOR(VIDEO_LIGHT_GRAY, VIDEO_BLACK);
 
 static void render(const uint8_t* data, uint16_t len) {
+    /* One shell render() = one user-visible frame fragment. With the
+     * boxlib VGA batching from the 2026-05-26 audit, wrapping the whole
+     * fragment in vga_begin/vga_commit collapses every internal
+     * vga_clear/setcolor/puts/newline into ONE multi-op Manifest. A
+     * typical printf("%color foo %color bar\n") used to fire 5+
+     * syscalls between daemon and kernel; it now fires one.
+     *
+     * Buffer 256 (was 186) is comfortably inside the batch payload
+     * arena and reduces inner iterations by ~33% per run. */
+    vga_begin();
+
     uint16_t i = 0;
     while (i < len) {
         uint8_t b = data[i];
@@ -37,9 +48,9 @@ static void render(const uint8_t* data, uint16_t len) {
         }
 
         if (b >= 0x20) {
-            char buf[186];
+            char buf[256];
             int pos = 0;
-            while (i < len && data[i] >= 0x20 && pos < 185) {
+            while (i < len && data[i] >= 0x20 && pos < (int)sizeof(buf) - 1) {
                 buf[pos++] = (char)data[i++];
             }
             buf[pos] = '\0';
@@ -49,6 +60,8 @@ static void render(const uint8_t* data, uint16_t len) {
 
         i++;
     }
+
+    vga_commit();
 }
 
 static void handle_readline(uint32_t requester, uint16_t max_len, uint8_t echo) {

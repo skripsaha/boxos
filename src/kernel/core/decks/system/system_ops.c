@@ -964,6 +964,147 @@ static int SysPerfDump(const ManifestOp *op, Crate *crates, uint16_t crate_count
 }
 
 /* =========================================================================
+ *  EFI runtime / Secure Boot / ESRT — read-only introspection ops.
+ *
+ *  Replaces the previous "subscribe to secureboot:on/off at boot" surface
+ *  with a synchronous query so userspace can poll state on demand. The
+ *  kernel-side state is cached in efi_secureboot.c / efi_esrt.c; these
+ *  handlers just marshal it into out_crate.
+ * ========================================================================= */
+
+#include "efi.h"
+#include "efi_esrt.h"
+#include "efi_secureboot.h"
+#include "efi_authenticode.h"
+
+static int SysEfiInfo(const ManifestOp *op, Crate *crates, uint16_t crate_count,
+                       const OpContext *ctx)
+{
+    (void)crate_count;
+    if (!ctx)                              return ERR_INVALID_ARGUMENT;
+    if (op->out_crate == CRATE_INDEX_NONE) return ERR_INVALID_ARGUMENT;
+    Crate *out = &crates[op->out_crate];
+    if (out->capacity < EFI_INFO_BLOB_SIZE) return ERR_BUFFER_TOO_SMALL;
+    uint8_t *kp = SysCrateWrite(out, ctx, EFI_INFO_BLOB_SIZE);
+    if (!kp) return ERR_INVALID_ADDRESS;
+    memset(kp, 0, EFI_INFO_BLOB_SIZE);
+
+    EfiSecureBootState sb = {0};
+    efi_secureboot_get_state(&sb);
+
+    uint32_t version       = EFI_INFO_VERSION;
+    uint8_t  rt_available  = efi_runtime_available() ? 1 : 0;
+    uint8_t  esrt_available= efi_esrt_available()    ? 1 : 0;
+    uint8_t  sb_available  = sb.available            ? 1 : 0;
+    uint8_t  sb_enforced   = sb.enforced             ? 1 : 0;
+    uint8_t  sb_setup      = sb.setup_mode           ? 1 : 0;
+    uint8_t  sb_audit      = sb.audit_mode           ? 1 : 0;
+    uint8_t  sb_deployed   = sb.deployed_mode        ? 1 : 0;
+    uint32_t esrt_count    = efi_esrt_count();
+    uint32_t cert_count    = sb.cert_count;
+    uint32_t hash_count    = sb.hash_count;
+
+    /* Layout (offset-aligned, packed):
+     *   +0   u32 version
+     *   +4   u8  rt_available
+     *   +5   u8  esrt_available
+     *   +6   u8  sb_available
+     *   +7   u8  sb_enforced
+     *   +8   u8  sb_setup_mode
+     *   +9   u8  sb_audit_mode
+     *   +10  u8  sb_deployed_mode
+     *   +11  u8  _pad
+     *   +12  u32 esrt_count
+     *   +16  u32 cert_count_total
+     *   +20  u32 hash_count_total
+     *   +24  u32 cert_count_by_db[6]   (PK,KEK,db,dbx,dbt,dbr)
+     *   +48  u32 hash_count_by_db[6]
+     *   +72  56  reserved (zero) */
+    memcpy(kp + 0,  &version,        4);
+    kp[4]  = rt_available;
+    kp[5]  = esrt_available;
+    kp[6]  = sb_available;
+    kp[7]  = sb_enforced;
+    kp[8]  = sb_setup;
+    kp[9]  = sb_audit;
+    kp[10] = sb_deployed;
+    memcpy(kp + 12, &esrt_count,    4);
+    memcpy(kp + 16, &cert_count,    4);
+    memcpy(kp + 20, &hash_count,    4);
+    memcpy(kp + 24, sb.cert_count_by_db, 6 * 4);
+    memcpy(kp + 48, sb.hash_count_by_db, 6 * 4);
+
+    out->size = EFI_INFO_BLOB_SIZE;
+    return OK;
+}
+
+/* SYSTEM_OP_EFI_ESRT_GET — fetch one EFI_SYSTEM_RESOURCE_ENTRY by index.
+ * Index travels in op->params as a u32; entry written to out_crate. */
+static int SysEfiEsrtGet(const ManifestOp *op, Crate *crates, uint16_t crate_count,
+                          const OpContext *ctx)
+{
+    (void)crate_count;
+    if (!ctx)                              return ERR_INVALID_ARGUMENT;
+    if (op->out_crate == CRATE_INDEX_NONE) return ERR_INVALID_ARGUMENT;
+    if (op->param_size < sizeof(uint32_t)) return ERR_INVALID_ARGUMENT;
+
+    uint32_t idx;
+    memcpy(&idx, op->params, sizeof(idx));
+
+    const EfiSystemResourceEntry *e = efi_esrt_get(idx);
+    if (!e) return ERR_OUT_OF_RANGE;
+
+    Crate *out = &crates[op->out_crate];
+    if (out->capacity < sizeof(EfiSystemResourceEntry)) return ERR_BUFFER_TOO_SMALL;
+    uint8_t *kp = SysCrateWrite(out, ctx, sizeof(EfiSystemResourceEntry));
+    if (!kp) return ERR_INVALID_ADDRESS;
+    memcpy(kp, e, sizeof(EfiSystemResourceEntry));
+    out->size = sizeof(EfiSystemResourceEntry);
+    return OK;
+}
+
+/* SYSTEM_OP_EFI_VERIFY_PE — verify an Authenticode-signed PE against
+ * the platform's db/dbx. in_crate carries the entire PE image; out_crate
+ * receives a 80-byte blob: { u32 result, u32 pe_size,
+ *                             u8 pe_sha256[32], u8 signer_sha256[32],
+ *                             u8 _pad[8] }. */
+#define EFI_VERIFY_PE_OUT_SIZE  80u
+static int SysEfiVerifyPe(const ManifestOp *op, Crate *crates, uint16_t crate_count,
+                           const OpContext *ctx)
+{
+    (void)crate_count;
+    if (!ctx)                              return ERR_INVALID_ARGUMENT;
+    if (op->in_crate == CRATE_INDEX_NONE)  return ERR_INVALID_ARGUMENT;
+    if (op->out_crate == CRATE_INDEX_NONE) return ERR_INVALID_ARGUMENT;
+
+    Crate *in  = &crates[op->in_crate];
+    Crate *out = &crates[op->out_crate];
+    if (in->size == 0)                     return ERR_INVALID_ARGUMENT;
+    if (in->size > (16u * 1024u * 1024u))  return ERR_INVALID_ARGUMENT;  /* 16 MB cap */
+    if (out->capacity < EFI_VERIFY_PE_OUT_SIZE) return ERR_BUFFER_TOO_SMALL;
+
+    const uint8_t *pe = SysCrateRead(in, ctx);
+    if (!pe) return ERR_INVALID_ADDRESS;
+
+    uint8_t pe_hash[32]     = {0};
+    uint8_t signer_hash[32] = {0};
+    EfiAuthenticodeResult r = efi_authenticode_verify_pe(
+        pe, (uint32_t)in->size, pe_hash, signer_hash);
+
+    uint8_t *kp = SysCrateWrite(out, ctx, EFI_VERIFY_PE_OUT_SIZE);
+    if (!kp) return ERR_INVALID_ADDRESS;
+    memset(kp, 0, EFI_VERIFY_PE_OUT_SIZE);
+    uint32_t result = (uint32_t)r;
+    uint32_t pe_size = (uint32_t)in->size;
+    memcpy(kp + 0, &result,      4);
+    memcpy(kp + 4, &pe_size,     4);
+    memcpy(kp + 8, pe_hash,      32);
+    memcpy(kp + 40, signer_hash, 32);
+    out->size = EFI_VERIFY_PE_OUT_SIZE;
+    return OK;
+}
+
+/* =========================================================================
  *  Registration
  * ========================================================================= */
 
@@ -998,6 +1139,14 @@ error_t SystemDeckRegister(void)
         { SYSTEM_OP_FRAG_SCORE,   SysFragScore,   OP_AUTH_NONE,   "system.fs.score"   },
         /* Telemetry: admin only. */
         { SYSTEM_OP_PERF_DUMP,    SysPerfDump,    OP_AUTH_SYSTEM, "system.perf.dump"  },
+        /* EFI introspection: open to any process (read-only state). */
+        { SYSTEM_OP_EFI_INFO,     SysEfiInfo,     OP_AUTH_NONE,   "system.efi.info"   },
+        { SYSTEM_OP_EFI_ESRT_GET, SysEfiEsrtGet,  OP_AUTH_NONE,   "system.efi.esrt"   },
+        /* PE verification gated to utility-or-better — it can be expensive
+         * (RSA modexp + SHA-256 stream) so we keep it out of the unauth
+         * lane to prevent a non-app process from DOSing the kernel with
+         * bogus PE buffers. */
+        { SYSTEM_OP_EFI_VERIFY_PE,SysEfiVerifyPe, OP_AUTH_UTILITY,"system.efi.verifype"},
     };
 
     for (size_t i = 0; i < sizeof(table) / sizeof(table[0]); i++) {
@@ -1014,6 +1163,12 @@ error_t SystemDeckRegister(void)
 
     error_t touch_rc = TouchOpsRegister();
     if (touch_rc != OK) return touch_rc;
+
+    error_t bay_rc = BayOpsRegister();
+    if (bay_rc != OK) return bay_rc;
+
+    error_t brook_rc = BrookOpsRegister();
+    if (brook_rc != OK) return brook_rc;
 
     debug_printf("[SystemDeck] registered %zu ops (full surface, gated)\n",
                  sizeof(table) / sizeof(table[0]));

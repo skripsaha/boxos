@@ -37,10 +37,14 @@ static int RunExternal(const char *name, ParsedCommand *cmd)
     int pid = proc_exec(name);
     if (pid <= 0) return -1;
 
-    /* Build args + context tags into IPC buffer */
+    /* Build args + context tags into IPC buffer. SHELL_ARGS_BUF_MAX
+     * (240 B) bounds the legacy send() payload; if the user's command
+     * + tags exceeds that, we ship a partial argv to the child and
+     * warn the user rather than silently corrupting their input. */
     ShellState *state = ShellGetState();
     char buf[SHELL_ARGS_BUF_MAX];
     int pos = 0;
+    int args_sent = 0;
 
     buf[pos++] = (char)cmd->argc;
     for (int i = 0; i < cmd->argc; i++) {
@@ -49,9 +53,19 @@ static int RunExternal(const char *name, ParsedCommand *cmd)
         memcpy(buf + pos, cmd->argv[i], len);
         pos += (int)len;
         buf[pos++] = '\0';
+        args_sent++;
+    }
+    /* Fix up the count byte so the child loops over what we actually
+     * shipped, not what the user originally typed. */
+    buf[0] = (char)args_sent;
+
+    if (args_sent < cmd->argc) {
+        printf("%colorWarning:%color shell IPC buffer full, sent %d/%d args\n",
+               COLOR_YELLOW, COLOR_DEFAULT, args_sent, cmd->argc);
     }
 
     /* Append context tags */
+    int tags_sent = 0;
     if (pos < SHELL_ARGS_BUF_MAX)
         buf[pos++] = (char)state->context_tag_count;
     for (uint32_t ci = 0; ci < state->context_tag_count; ci++) {
@@ -60,18 +74,26 @@ static int RunExternal(const char *name, ParsedCommand *cmd)
         memcpy(buf + pos, state->context_tags[ci], len);
         pos += (int)len;
         buf[pos++] = '\0';
+        tags_sent++;
+    }
+    if (tags_sent < (int)state->context_tag_count) {
+        printf("%colorWarning:%color sent %d/%u context tags\n",
+               COLOR_YELLOW, COLOR_DEFAULT,
+               tags_sent, state->context_tag_count);
     }
 
     send((uint32_t)pid, buf, (uint16_t)pos);
 
-    /* Fast path: child may have exited during send's result_wait */
+    /* Fast path: child may have exited during send's result_wait. The
+     * non-blocking receive() here is intentional — we only want the
+     * sentinel if it's already there; otherwise fall through to the
+     * polling wait below. */
     {
         Result early;
         if (receive(&early)) {
             if (early.data_length >= 1 && early.data_addr != 0 &&
                 *(uint8_t *)(uintptr_t)early.data_addr == SHELL_EXIT_SENTINEL) {
-                Result drain;
-                while (receive(&drain)) { }
+                ShellDrainStaleIpc();
                 return 0;
             }
         }
@@ -99,11 +121,8 @@ static int RunExternal(const char *name, ParsedCommand *cmd)
         }
     }
 
-    /* Drain leftover IPC */
-    {
-        Result drain;
-        while (receive(&drain)) { }
-    }
+    /* Drain leftover IPC (late exit sentinels, stray broadcasts). */
+    ShellDrainStaleIpc();
 
     return 0;
 }
@@ -116,11 +135,9 @@ int ExecutorRun(ParsedCommand *cmd)
 {
     g_error[0] = '\0';
 
-    /* Drain stale IPC */
-    {
-        Result stale;
-        while (receive(&stale)) { }
-    }
+    /* Drain stale IPC before dispatching so a leftover child-exit
+     * sentinel cannot be mis-routed to the new command. */
+    ShellDrainStaleIpc();
 
     if (!cmd || cmd->argc == 0) {
         memcpy(g_error, "No command", 11);

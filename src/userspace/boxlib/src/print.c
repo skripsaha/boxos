@@ -193,6 +193,14 @@ void print(const char* str)
 {
     if (!str) return;
 
+    /* IO_MODE_IPC already batches into io_buf and flushes via one
+     * send/broadcast; IO_MODE_VGA wins a syscall reduction by feeding
+     * every internal vga_setcolor/vga_puts/vga_newline into a single
+     * Manifest. The nested vga_begin/vga_commit composes with an outer
+     * caller that may itself be batching (printf, shell renderer). */
+    bool we_began = false;
+    if (g_io_mode == IO_MODE_VGA) { vga_begin(); we_began = true; }
+
     char chunk[256];
     while (*str) {
         /* Find how many input bytes we can safely consume so the filtered
@@ -227,16 +235,23 @@ void print(const char* str)
         emit_run(chunk, chunk_pos, g_color_fg, g_color_bg);
         str += src_consumed;
     }
+
+    if (we_began) vga_commit();
 }
 
 void println(const char* str)
 {
-    if (str) print(str);
     if (g_io_mode == IO_MODE_IPC) {
+        if (str) print(str);
         io_buf_putc('\n');
         return;
     }
+    /* VGA mode: wrap the print + newline in one batch so both fire as a
+     * single multi-op syscall. */
+    vga_begin();
+    if (str) print(str);
     vga_newline();
+    vga_commit();
 }
 
 void clear(void)
@@ -298,6 +313,11 @@ int printf(const char *fmt, ...)
 
     va_list args;
     va_start(args, fmt);
+
+    /* See print() for rationale — colored runs in VGA mode coalesce
+     * into a single Manifest submit instead of N syscalls. */
+    bool we_began = false;
+    if (g_io_mode == IO_MODE_VGA) { vga_begin(); we_began = true; }
 
     char buf[PRINTF_BUFLEN];
     int  pos       = 0;
@@ -363,6 +383,26 @@ int printf(const char *fmt, ...)
             continue;
         }
 
+        /* Length modifier — `l` / `ll` / `z`. Determines the size of the
+         * va_arg pulled for %d/%u/%x. C99 promotion rules: variadic
+         * int8/int16 promote to int, so %hhd/%hd are not needed; long
+         * stays long; long long stays long long. `z` matches size_t
+         * (== uint64_t in our LP64 userspace).
+         *
+         * width = 0 → int / unsigned int   (default)
+         *         1 → long / unsigned long (also size_t)
+         *         2 → long long / unsigned long long
+         */
+        int  width = 0;
+        if (*fmt == 'l') {
+            width = 1;
+            fmt++;
+            if (*fmt == 'l') { width = 2; fmt++; }
+        } else if (*fmt == 'z') {
+            width = 1;
+            fmt++;
+        }
+
         switch (*fmt) {
             case 's': {
                 const char *s = va_arg(args, const char *);
@@ -392,25 +432,42 @@ int printf(const char *fmt, ...)
                 }
                 break;
             }
-            case 'd': {
-                int v = va_arg(args, int);
-                to_str(v, numbuf, sizeof(numbuf));
-                ENSURE(16);
+            case 'd': case 'i': {
+                int64_t v;
+                if (width == 0)      v = (int64_t)va_arg(args, int);
+                else if (width == 1) v = (int64_t)va_arg(args, long);
+                else                 v = (int64_t)va_arg(args, long long);
+                int64_to_str(v, numbuf, sizeof(numbuf));
+                ENSURE(24);
                 pos = append_str(buf, pos, PRINTF_BUFLEN - 4, numbuf);
                 break;
             }
             case 'u': {
-                unsigned int v = va_arg(args, unsigned int);
-                uint_to_str(v, numbuf, sizeof(numbuf));
-                ENSURE(16);
+                uint64_t v;
+                if (width == 0)      v = (uint64_t)va_arg(args, unsigned int);
+                else if (width == 1) v = (uint64_t)va_arg(args, unsigned long);
+                else                 v = (uint64_t)va_arg(args, unsigned long long);
+                uint64_to_str(v, numbuf, sizeof(numbuf));
+                ENSURE(24);
                 pos = append_str(buf, pos, PRINTF_BUFLEN - 4, numbuf);
                 break;
             }
             case 'x': case 'X': {
-                unsigned int v = va_arg(args, unsigned int);
-                to_hex(v, numbuf, sizeof(numbuf));
-                ENSURE(16);
-                pos = append_str(buf, pos, PRINTF_BUFLEN - 4, numbuf);
+                uint64_t v;
+                if (width == 0)      v = (uint64_t)va_arg(args, unsigned int);
+                else if (width == 1) v = (uint64_t)va_arg(args, unsigned long);
+                else                 v = (uint64_t)va_arg(args, unsigned long long);
+                /* uint64_to_hex emits a "0x" prefix; printf %x in C is
+                 * "no prefix", so write the bare hex digits here. */
+                if (v == 0) {
+                    ENSURE(2);
+                    buf[pos++] = '0';
+                } else {
+                    char hex_tmp[24];
+                    fmt_htoa64((unsigned long)v, hex_tmp);
+                    ENSURE(24);
+                    pos = append_str(buf, pos, PRINTF_BUFLEN - 4, hex_tmp);
+                }
                 break;
             }
             case 'c': {
@@ -449,6 +506,8 @@ int printf(const char *fmt, ...)
 
     #undef FLUSH
     #undef ENSURE
+
+    if (we_began) vga_commit();
 
     va_end(args);
     return total_out;

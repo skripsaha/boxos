@@ -3,6 +3,7 @@
 #include "box/core/manifest.h"
 #include "box/string.h"
 #include "box/error.h"
+#include "box/timeouts.h"
 #include "boxos_decks.h"
 
 #define HW_DEBUG_PRINT  0x82
@@ -94,7 +95,7 @@ void kdbg(const char *msg)
             NULL, 0,
             msg, (uint32_t)(strlen(msg) + 1),
             NULL, 0, NULL,
-            60000, NULL);
+            BOX_TIMEOUT_KDBG_MS, NULL);
 }
 
 int kdbg_print(const char *fmt, ...)

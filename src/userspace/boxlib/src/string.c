@@ -16,6 +16,15 @@ char* strcpy(char* dest, const char* src) {
 }
 
 char* strncpy(char* dest, const char* src, size_t n) {
+    if (!dest) return NULL;
+    if (!src) {
+        /* Match strcpy() semantics: dest gets a single NUL when src is
+         * NULL. C99 says strncpy is UB on NULL src; boxlib chooses the
+         * safe-default behaviour because every userspace caller relies
+         * on strncpy not faulting on misuse. */
+        for (size_t i = 0; i < n; i++) dest[i] = '\0';
+        return dest;
+    }
     size_t i;
     for (i = 0; i < n && src[i]; i++) {
         dest[i] = src[i];
@@ -25,6 +34,7 @@ char* strncpy(char* dest, const char* src, size_t n) {
     }
     return dest;
 }
+
 
 int strcmp(const char* s1, const char* s2) {
     while (*s1 && (*s1 == *s2)) { s1++; s2++; }
