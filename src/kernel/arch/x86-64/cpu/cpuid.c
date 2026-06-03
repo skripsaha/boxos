@@ -116,7 +116,38 @@ void cpu_detect_features(void) {
         cpuid(CPUID_LEAF_THERMAL_PM, &eax, &ebx, &ecx, &edx);
         g_cpu_caps.has_arat = (eax & (1u << 2)) != 0;
     }
+
+    /* MONITOR/UMONITOR cacheline granularity — CPUID.05H.
+     *   EAX[15:0] = smallest monitor line size in bytes
+     *   EBX[15:0] = largest  monitor line size in bytes
+     * Intel SDM Vol 2A "CPUID — CPU Identification" leaf 5 + UMONITOR
+     * "The address range determined by the CPUID monitor leaf function".
+     *
+     * Real-HW data points:
+     *   - x86 desktop/server (Sandy Bridge..Sapphire Rapids): 64 B
+     *   - Intel Atom Tremont / Goldmont: 32 B
+     *   - Some Xeon Scalable with adjacent-line prefetcher fused: 128 B
+     *
+     * Leaf 5 unimplemented (max_basic_leaf < 5) is rare on UMONITOR-capable
+     * silicon — WAITPKG implies leaf 5 in practice. We default min=max=64
+     * so downstream consumers (Brook BrookHeader sizing, Touch ring
+     * padding) keep working on the absent-leaf case. */
+    g_cpu_caps.monitor_line_min = 64;
+    g_cpu_caps.monitor_line_max = 64;
+    if (g_cpu_caps.max_basic_leaf >= CPUID_LEAF_MONITOR) {
+        cpuid(CPUID_LEAF_MONITOR, &eax, &ebx, &ecx, &edx);
+        uint16_t min_line = (uint16_t)(eax & 0xFFFFu);
+        uint16_t max_line = (uint16_t)(ebx & 0xFFFFu);
+        if (min_line == 0) min_line = 64;
+        if (max_line == 0) max_line = 64;
+        g_cpu_caps.monitor_line_min = min_line;
+        g_cpu_caps.monitor_line_max = max_line;
+    }
 }
+
+/* IA32_UMWAIT_CONTROL — defined and called below, after cpu_wrmsr is
+ * visible. The body lives next to the other MSR helpers further down
+ * this file. */
 
 /* Per-AP capability intersection.
  *
@@ -150,6 +181,61 @@ static inline uint64_t cpu_rdmsr(uint32_t msr) {
 static inline void cpu_wrmsr(uint32_t msr, uint64_t v) {
     __asm__ volatile("wrmsr" : :
                      "c"(msr), "a"((uint32_t)v), "d"((uint32_t)(v >> 32)));
+}
+
+/* IA32_UMWAIT_CONTROL — Intel SDM Vol 4 §2.5.1 (MSR 0xE1).
+ *   bit 0       : C0.2 disable (1 = OS forbids C0.2, all requests revert
+ *                  to C0.1; we leave 0 = both states allowed).
+ *   bits 31:2   : OS-imposed maximum residency in TSC-quanta. 0 means
+ *                  no OS cap (CPU enforces its own internal default).
+ *
+ * Hardware reset value: 0 — but Intel reference BIOS sets a small cap
+ * (~100,000 TSC ticks ≈ 33 µs @ 3 GHz) before handing off to the OS.
+ * That makes the user-facing UMWAIT deadline (e.g. Brook's 50 ms)
+ * meaningless: the CPU returns CF=1 every ~33 µs and the wait loop
+ * re-enters thousands of times per ms — both extra power draw and
+ * extra instruction issue.
+ *
+ * BoxOS policy: program bits 31:2 to ~2 ms worth of TSC quanta. The
+ * cap is a safety net against silicon quirks where a monitor wake
+ * event is missed (microcode/cache-coherence pathology), so the loop
+ * top still re-polls within bounded time. With a 2 ms cap we burn
+ * ~500 UMWAIT enter/exit cycles per second of idle waiting — under
+ * 1 % of one core, vs the default's tens of thousands. Producer/
+ * consumer cursor wakes still arrive immediately via the monitored
+ * cacheline; the cap is the safety net, not the wake mechanism.
+ *
+ * Why not 0 (no cap)? On adversarial silicon a missed monitor wake
+ * could park us indefinitely; a bounded cap costs almost nothing and
+ * guarantees forward progress.
+ *
+ * Why 2 ms and not larger? Matches the scheduler tick
+ * (CONFIG_SCHED_DEFAULT_TICK_HZ ~ 500 Hz). Streaming primitives
+ * (Brook) want sub-scheduler-tick wake granularity in the pathological
+ * miss case. */
+#define MSR_IA32_UMWAIT_CONTROL    0x000000E1
+#define UMWAIT_CONTROL_CAP_MS      2u
+
+static uint64_t umwait_control_compose(uint64_t tsc_freq_khz) {
+    /* MSR field is bits[31:2] = max TSC quanta; bits[1:0] are reserved
+     * for the C0.2-disable flag (bit 0) and one reserved bit (bit 1).
+     * Mask the cap to ~3 so the encoded value lands on the spec layout.
+     *
+     * tsc_freq_khz × cap_ms = ticks per cap_ms; clamp to 32-bit field. */
+    uint64_t cap_ticks = tsc_freq_khz * (uint64_t)UMWAIT_CONTROL_CAP_MS;
+    if (cap_ticks > 0xFFFFFFFCULL) cap_ticks = 0xFFFFFFFCULL;
+    return cap_ticks & ~3ULL;
+}
+
+void cpu_umwait_control_init(uint64_t tsc_freq_khz) {
+    /* Gated on WAITPKG — non-WAITPKG CPUs ignore MSR 0xE1 (it's
+     * architectural to UMWAIT/TPAUSE only). Writing on AMD or
+     * pre-Tremont Intel would #GP. */
+    if (!g_cpu_caps.has_waitpkg) return;
+    if (tsc_freq_khz == 0)       return;   /* calibration not done yet */
+
+    uint64_t v = umwait_control_compose(tsc_freq_khz);
+    cpu_wrmsr(MSR_IA32_UMWAIT_CONTROL, v);
 }
 
 uint32_t cpu_microcode_revision(void) {
@@ -335,6 +421,23 @@ void cpu_intersect_features_ap(void) {
     if (g_cpu_caps.max_basic_leaf >= CPUID_LEAF_THERMAL_PM) {
         cpuid(CPUID_LEAF_THERMAL_PM, &eax, &ebx, &ecx, &edx);
         g_cpu_caps.has_arat &= ((eax & (1u << 2)) != 0);
+    }
+
+    /* MONITOR/UMONITOR cacheline range — intersect by widening to the
+     * worst case. The "smallest line size" we may encounter on ANY
+     * core is the MIN across all cores; the "largest" is the MAX.
+     * Downstream consumers (Brook BrookHeader padding sanity, Touch
+     * ring layout) read these to decide whether the kernel-wide 64 B
+     * cacheline assumption is safe — they want to know the worst
+     * case any AP could see. */
+    if (g_cpu_caps.max_basic_leaf >= CPUID_LEAF_MONITOR) {
+        cpuid(CPUID_LEAF_MONITOR, &eax, &ebx, &ecx, &edx);
+        uint16_t ap_min = (uint16_t)(eax & 0xFFFFu);
+        uint16_t ap_max = (uint16_t)(ebx & 0xFFFFu);
+        if (ap_min != 0 && ap_min < g_cpu_caps.monitor_line_min)
+            g_cpu_caps.monitor_line_min = ap_min;
+        if (ap_max != 0 && ap_max > g_cpu_caps.monitor_line_max)
+            g_cpu_caps.monitor_line_max = ap_max;
     }
 
     /* Heterogeneity log — only fires when this AP actually flipped a

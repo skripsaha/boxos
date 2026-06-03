@@ -6,6 +6,7 @@
 // CPUID Leaf Numbers
 #define CPUID_LEAF_VENDOR        0x00000000
 #define CPUID_LEAF_FEATURES      0x00000001
+#define CPUID_LEAF_MONITOR       0x00000005   // MONITOR/MWAIT line size (EAX,EBX [15:0])
 #define CPUID_LEAF_THERMAL_PM    0x00000006   // Thermal/Power Mgmt — has ARAT bit
 #define CPUID_LEAF_EXT_FEATURES  0x00000007
 #define CPUID_LEAF_XSAVE         0x0000000D
@@ -49,6 +50,17 @@ typedef struct {
     bool has_fsrm;              // Fast Short REP MOV (CPUID.7.0:EDX[4]) — Ice Lake+.
                                 // Extends ERMS efficiency down to very small n, so
                                 // the bulk-copy threshold can drop further.
+    /* MONITOR/UMONITOR cacheline granularity — CPUID.05H. Intel SDM Vol 2A
+     * UMONITOR: "The address range determined by the CPUID monitor leaf
+     * function". EAX[15:0] = smallest line size, EBX[15:0] = largest.
+     * 0 = leaf not implemented (treat as 64 B default for cacheline-shape
+     * decisions; UMONITOR still works correctly — granularity is a perf/
+     * false-sharing concern, not a correctness one). Used by Brook +
+     * Touch + ResultRing to verify the assumed 64 B cacheline padding is
+     * compatible with the running silicon (Atom Tremont/Goldmont report
+     * 32 B; some server CPUs report 128 B). */
+    uint16_t monitor_line_min;
+    uint16_t monitor_line_max;
     char vendor_string[13];     // CPU vendor (e.g., "GenuineIntel")
     uint32_t max_basic_leaf;    // Maximum CPUID basic leaf
     uint32_t max_extended_leaf; // Maximum CPUID extended leaf
@@ -69,6 +81,19 @@ void cpu_detect_features(void);
  * of every online core's capabilities (safe on heterogeneous P+E /
  * big.LITTLE CPUs). */
 void cpu_intersect_features_ap(void);
+
+/* IA32_UMWAIT_CONTROL programmer — Intel SDM Vol 4 §2.5.1 (MSR 0xE1).
+ * Sets the OS-imposed maximum UMWAIT/TPAUSE residency in TSC quanta so
+ * the wait loop top can re-poll within a bounded interval even if a
+ * monitor wake-event is missed (microcode / cache-coherence quirk).
+ *
+ * Must be called AFTER cpu_calibrate_tsc() (needs tsc_freq_khz) and on
+ * each AP after cpu_intersect_features_ap() (so a P-core's MSR write
+ * isn't issued on an E-core that has WAITPKG disabled).
+ *
+ * No-op on non-WAITPKG silicon (writing 0xE1 on AMD or pre-Tremont
+ * Intel would #GP). */
+void cpu_umwait_control_init(uint64_t tsc_freq_khz);
 
 /* Read the current microcode revision running on THIS logical CPU.
  *

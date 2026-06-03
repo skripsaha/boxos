@@ -31,3 +31,17 @@ void cpu_caps_page_set_tsc_freq(uint64_t freq_khz) {
     cpu_caps_page_t* caps_page = (cpu_caps_page_t*)vmm_phys_to_virt(g_cpu_caps_page_phys);
     caps_page->tsc_freq_khz = freq_khz;
 }
+
+void cpu_caps_page_refresh_waitpkg(void) {
+    if (g_cpu_caps_page_phys == 0) return;
+
+    /* RELEASE-store via __atomic so any userspace consumer that
+     * ACQUIRE-loads `has_waitpkg` (boxlib cpu_has_waitpkg) sees the
+     * post-intersect value coherently. The field is a single byte and
+     * already volatile in the userspace view; this barrier is for the
+     * benefit of the kernel-side writer's compiler. */
+    cpu_caps_page_t* caps_page = (cpu_caps_page_t*)vmm_phys_to_virt(g_cpu_caps_page_phys);
+    __atomic_store_n(&caps_page->has_waitpkg,
+                     g_cpu_caps.has_waitpkg,
+                     __ATOMIC_RELEASE);
+}
