@@ -359,6 +359,13 @@ void kernel_main(void)
      * see SDM Vol 4 Table 2-2 "Scope: Thread"). */
     cpu_umwait_control_init(cpu_get_tsc_freq_khz());
 
+    /* TEST_CTL bit 29 — Intel SDM Vol 4 Table 2-2. Clear split-lock-#AC
+     * enable on the BSP. Gated on g_cpu_caps.has_split_lock_detect so
+     * we never write the MSR on a CPU that lacks IA32_CORE_CAPABILITIES
+     * (would #GP). APs do the same in per_core_init_ap. Rationale lives
+     * in cpuid.h cpu_test_ctl_init declaration. */
+    cpu_test_ctl_init();
+
     /* Capture the BSP TSC anchor for per-AP TSC sync. Must be after
      * cpu_calibrate_tsc (we need tsc_freq_khz published) and before
      * amp_boot_aps (each AP reads the anchor in per_core_init_ap).

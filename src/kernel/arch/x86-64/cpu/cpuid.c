@@ -3,6 +3,27 @@
 
 cpu_capabilities_t g_cpu_caps;
 
+/* MSR addresses used by cpu_detect_features and cpu_test_ctl_init.
+ *   IA32_BIOS_SIGN_ID  — Intel SDM Vol 3A §9.11.7.1 / Vol 4 Table 2-2.
+ *   IA32_CORE_CAPABILITIES — Intel SDM Vol 4 Table 2-2 (MSR 0xCF).
+ *   TEST_CTL            — Intel SDM Vol 4 Table 2-2 (MSR 0x33; bit 29
+ *                         enables #AC on split-locked LOCK access). */
+#define MSR_IA32_BIOS_SIGN_ID       0x0000008Bu
+#define MSR_IA32_CORE_CAPABILITIES  0x000000CFu
+#define MSR_TEST_CTL                0x00000033u
+#define TEST_CTL_SPLIT_LOCK_AC_BIT  29u
+
+static inline uint64_t cpu_rdmsr(uint32_t msr) {
+    uint32_t lo, hi;
+    __asm__ volatile("rdmsr" : "=a"(lo), "=d"(hi) : "c"(msr));
+    return ((uint64_t)hi << 32) | lo;
+}
+
+static inline void cpu_wrmsr(uint32_t msr, uint64_t v) {
+    __asm__ volatile("wrmsr" : :
+                     "c"(msr), "a"((uint32_t)v), "d"((uint32_t)(v >> 32)));
+}
+
 void cpuid(uint32_t leaf, uint32_t* eax, uint32_t* ebx, uint32_t* ecx, uint32_t* edx) {
     __asm__ volatile(
         "cpuid"
@@ -77,6 +98,13 @@ void cpu_detect_features(void) {
         //                 ERMS efficiency down to very small n on Ice Lake+.
         g_cpu_caps.has_erms = (ebx & (1 << 9))  != 0;
         g_cpu_caps.has_fsrm = (edx & (1 << 4))  != 0;
+        /* CPUID.7.0:EDX[30] — IA32_CORE_CAPABILITIES MSR exists.
+         * Intel SDM Vol 4 Table 2-2 (CORE_CAPABILITIES). When set, the
+         * kernel may read MSR 0xCF; bit 5 of that MSR gates whether the
+         * CPU can raise #AC on split-lock LOCK ops. The MSR read itself
+         * is gated on this CPUID bit because reading 0xCF on a CPU that
+         * doesn't claim CORE_CAPABILITIES would #GP. */
+        g_cpu_caps.has_core_capabilities = (edx & (1u << 30)) != 0;
     }
 
     // Query XSAVE area size and supported components (CPUID.0xD:0)
@@ -143,6 +171,18 @@ void cpu_detect_features(void) {
         g_cpu_caps.monitor_line_min = min_line;
         g_cpu_caps.monitor_line_max = max_line;
     }
+
+    /* IA32_CORE_CAPABILITIES — Intel SDM Vol 4 Table 2-2 (MSR 0xCF).
+     * Bit 5 = SPLIT_LOCK_DETECT_SUPPORTED: the CPU can raise #AC on a
+     * cache-line-spanning LOCK access when TEST_CTL (MSR 0x33) bit 29
+     * is set. We only read 0xCF if CPUID.7.0:EDX[30] said the MSR is
+     * implemented, otherwise the read would #GP on Sandy Bridge era
+     * silicon. Used by cpu_test_ctl_init to gate the bit-29 program. */
+    g_cpu_caps.has_split_lock_detect = false;
+    if (g_cpu_caps.has_core_capabilities) {
+        uint64_t core_cap = cpu_rdmsr(MSR_IA32_CORE_CAPABILITIES);
+        g_cpu_caps.has_split_lock_detect = (core_cap & (1ULL << 5)) != 0;
+    }
 }
 
 /* IA32_UMWAIT_CONTROL — defined and called below, after cpu_wrmsr is
@@ -167,22 +207,6 @@ void cpu_detect_features(void) {
  * pre-Alder-Lake hardware) AND identically with themselves and the
  * intersection is a no-op. Cost is one CPUID per AP at boot, never
  * after. */
-/* IA32_BIOS_SIGN_ID — Intel SDM Vol 3A §9.11.7.1 / Vol 4 Table 2-2.
- * AMD MSRC0001_0020 ("PatchLevel"): same address, layout differs as
- * documented in cpu_microcode_revision below. */
-#define MSR_IA32_BIOS_SIGN_ID  0x0000008B
-
-static inline uint64_t cpu_rdmsr(uint32_t msr) {
-    uint32_t lo, hi;
-    __asm__ volatile("rdmsr" : "=a"(lo), "=d"(hi) : "c"(msr));
-    return ((uint64_t)hi << 32) | lo;
-}
-
-static inline void cpu_wrmsr(uint32_t msr, uint64_t v) {
-    __asm__ volatile("wrmsr" : :
-                     "c"(msr), "a"((uint32_t)v), "d"((uint32_t)(v >> 32)));
-}
-
 /* IA32_UMWAIT_CONTROL — Intel SDM Vol 4 §2.5.1 (MSR 0xE1).
  *   bit 0       : C0.2 disable (1 = OS forbids C0.2, all requests revert
  *                  to C0.1; we leave 0 = both states allowed).
@@ -236,6 +260,25 @@ void cpu_umwait_control_init(uint64_t tsc_freq_khz) {
 
     uint64_t v = umwait_control_compose(tsc_freq_khz);
     cpu_wrmsr(MSR_IA32_UMWAIT_CONTROL, v);
+}
+
+void cpu_test_ctl_init(void) {
+    /* Gated on CPUID-reported capability: writing TEST_CTL on a CPU
+     * that doesn't enumerate IA32_CORE_CAPABILITIES would #GP on
+     * pre-Tremont Intel and on AMD/Hygon. The has_split_lock_detect
+     * field already encapsulates "CPUID.7.0:EDX[30] set AND MSR 0xCF
+     * bit 5 set"; if false we have nothing to program here. */
+    if (!g_cpu_caps.has_split_lock_detect) return;
+
+    /* Read-modify-write so we only flip bit 29 — other TEST_CTL bits
+     * (notably bit 31, the SDM-reserved bus-lock detect on
+     * Sapphire Rapids+ via secondary MSR 0x1B4, but historically also
+     * occupying TEST_CTL on some part) are preserved. Intel SDM Vol 4
+     * Table 2-2 states unused TEST_CTL bits must read back unmodified;
+     * a blanket cpu_wrmsr(MSR_TEST_CTL, 0) is therefore unsafe. */
+    uint64_t v = cpu_rdmsr(MSR_TEST_CTL);
+    v &= ~(1ULL << TEST_CTL_SPLIT_LOCK_AC_BIT);
+    cpu_wrmsr(MSR_TEST_CTL, v);
 }
 
 uint32_t cpu_microcode_revision(void) {
@@ -356,6 +399,8 @@ void cpu_intersect_features_ap(void) {
     bool bsp_fsrm         = g_cpu_caps.has_fsrm;
     bool bsp_inv_tsc      = g_cpu_caps.has_invariant_tsc;
     bool bsp_arat         = g_cpu_caps.has_arat;
+    bool bsp_core_caps    = g_cpu_caps.has_core_capabilities;
+    bool bsp_split_lock   = g_cpu_caps.has_split_lock_detect;
 
     /* AND only the booleans that gate code emission / instruction
      * usage. max_basic_leaf / max_extended_leaf / vendor_string /
@@ -402,6 +447,11 @@ void cpu_intersect_features_ap(void) {
          * intersection is the BSP value in practice. */
         g_cpu_caps.has_erms       &= ((ebx & (1 << 9))  != 0);
         g_cpu_caps.has_fsrm       &= ((edx & (1 << 4))  != 0);
+        /* CORE_CAPABILITIES is package-architectural on shipping silicon,
+         * but the SDM doesn't forbid heterogeneous packages with mixed
+         * support — intersect defensively so a missing AP bit forces
+         * the kernel-wide split-lock policy off. */
+        g_cpu_caps.has_core_capabilities &= ((edx & (1u << 30)) != 0);
     }
 
     if (g_cpu_caps.max_extended_leaf >= CPUID_LEAF_APM) {
@@ -421,6 +471,21 @@ void cpu_intersect_features_ap(void) {
     if (g_cpu_caps.max_basic_leaf >= CPUID_LEAF_THERMAL_PM) {
         cpuid(CPUID_LEAF_THERMAL_PM, &eax, &ebx, &ecx, &edx);
         g_cpu_caps.has_arat &= ((eax & (1u << 2)) != 0);
+    }
+
+    /* Split-lock detection re-check on this AP: the IA32_CORE_CAPABILITIES
+     * MSR is per-logical-processor (Intel SDM Vol 4 Table 2-2 "Scope:
+     * Thread"). If the BSP claimed support but a later AP doesn't,
+     * intersect (= AND) the bit off so cpu_test_ctl_init on that AP is
+     * a no-op and the global policy reflects the weakest core. */
+    if (g_cpu_caps.has_core_capabilities) {
+        uint64_t core_cap = cpu_rdmsr(MSR_IA32_CORE_CAPABILITIES);
+        g_cpu_caps.has_split_lock_detect &= (core_cap & (1ULL << 5)) != 0;
+    } else {
+        /* If the package-level CORE_CAPABILITIES bit got intersected
+         * off above, the MSR is unreadable on this AP — force the
+         * derived bit off too so no AP attempts to write TEST_CTL. */
+        g_cpu_caps.has_split_lock_detect = false;
     }
 
     /* MONITOR/UMONITOR cacheline range — intersect by widening to the
@@ -469,5 +534,7 @@ void cpu_intersect_features_ap(void) {
     _LOG_DROP(fsrm,         bsp_fsrm);
     _LOG_DROP(invariant_tsc, bsp_inv_tsc);
     _LOG_DROP(arat,         bsp_arat);
+    _LOG_DROP(core_capabilities, bsp_core_caps);
+    _LOG_DROP(split_lock_detect, bsp_split_lock);
     #undef _LOG_DROP
 }

@@ -189,6 +189,48 @@ static process_t *find_process_by_kernel_stack_overflow(uint64_t rsp)
     return NULL;
 }
 
+/* Friendly mnemonic for the first 32 Intel exception vectors (SDM Vol 3
+ * §6.15 Table 6-1). Returned strings are static literals; safe to embed
+ * in kprintf without lifetime concerns. Vector >= 32 (= IRQ) returns
+ * "INT" — exception_handler is only called for the 0-31 range, but the
+ * defensive branch keeps the helper total. */
+static const char *exception_mnemonic(uint8_t vector)
+{
+    switch (vector) {
+    case 0:  return "#DE";
+    case 1:  return "#DB";
+    case 2:  return "NMI";
+    case 3:  return "#BP";
+    case 4:  return "#OF";
+    case 5:  return "#BR";
+    case 6:  return "#UD";
+    case 7:  return "#NM";
+    case 8:  return "#DF";
+    case 10: return "#TS";
+    case 11: return "#NP";
+    case 12: return "#SS";
+    case 13: return "#GP";
+    case 14: return "#PF";
+    case 16: return "#MF";
+    /* #AC (vector 17) — Intel SDM Vol 3 §6.15 Table 6-1. Two distinct
+     * triggers reach here: (1) classical alignment-check from a
+     * misaligned user-mode memory access while CR0.AM=1 and EFLAGS.AC=1,
+     * and (2) split-lock detection when IA32_CORE_CAPABILITIES.bit5 +
+     * TEST_CTL.bit29 are both set and a LOCK-prefixed instruction spans
+     * a cache line. BoxOS clears TEST_CTL.bit29 at every BSP/AP bringup
+     * (see cpu_test_ctl_init in cpuid.c), so #AC reaching this handler
+     * indicates either a misconfigured boot path, a hostile guest VM
+     * lying about CPUID, or a real classical AC — all worth a clear
+     * diagnostic instead of an anonymous "Exception #17". */
+    case 17: return "#AC";
+    case 18: return "#MC";
+    case 19: return "#XF";
+    case 20: return "#VE";
+    case 21: return "#CP";
+    default: return "INT";
+    }
+}
+
 void exception_handler(interrupt_frame_t *frame)
 {
     atomic_fetch_add_u64(&exception_count, 1);
@@ -238,11 +280,22 @@ void exception_handler(interrupt_frame_t *frame)
         if (proc)
         {
             kprintf("\n");
-            kprintf("[EXCEPTION] User-mode exception #%u in PID %u\n",
+            kprintf("[EXCEPTION] User-mode %s (vector %u) in PID %u\n",
+                    exception_mnemonic((uint8_t)frame->vector),
                     frame->vector, proc->pid);
             kprintf("[EXCEPTION] RIP=0x%lx RSP=0x%lx Error=0x%lx\n",
                     frame->rip, frame->rsp, frame->error_code);
             kprintf("[EXCEPTION] TagBits: 0x%lx\n", proc->tag_bits);
+            /* Split-lock #AC hint: if userspace fired #AC with error_code==0
+             * while BoxOS was supposed to clear TEST_CTL.bit29, the
+             * configuration drifted (BIOS re-asserted bit29 mid-runtime
+             * is rare but documented). Surface the hint inline so the
+             * operator knows what to investigate. */
+            if (frame->vector == 17 && frame->error_code == 0) {
+                kprintf("[EXCEPTION] Note: #AC error_code=0 suggests a "
+                        "cache-line-spanning LOCK access; check TEST_CTL "
+                        "MSR 0x33 bit 29 state on this core.\n");
+            }
 
             if (frame->vector == 14)
             {
@@ -344,9 +397,17 @@ void exception_handler(interrupt_frame_t *frame)
     // Kernel-mode exception: this is a real kernel panic
     kprintf("\n");
     kprintf("====================================================================\n");
-    kprintf("KERNEL PANIC: Exception #%u\n", frame->vector);
+    kprintf("KERNEL PANIC: %s (vector %u)\n",
+            exception_mnemonic((uint8_t)frame->vector), frame->vector);
     kprintf("====================================================================\n");
     kprintf("Error code: 0x%lx\n", frame->error_code);
+    if (frame->vector == 17) {
+        kprintf("Hint: #AC in kernel mode means BoxOS code emitted a "
+                "cache-line-spanning LOCK instruction. Either a regression "
+                "in atomic-target alignment or TEST_CTL bit 29 was re-asserted "
+                "by firmware after boot. Fix the alignment in the offending "
+                "atomic, don't mask the detection.\n");
+    }
     kprintf("Exception count: %lu  Core: %u\n", atomic_load_u64(&exception_count), (uint32_t)amp_get_core_index());
 
     // Full GPR dump

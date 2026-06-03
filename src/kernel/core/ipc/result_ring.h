@@ -43,8 +43,14 @@
  *                concurrently; without separation, every push would
  *                invalidate the consumer's `head` cacheline (and vice
  *                versa), producing RFO storms on real 16-core silicon.
- *                Intel SDM Vol 3 §11.4.4. Mirrors irq_defer's `3cdc79c`
- *                fix and TouchRingHeader / PocketRingHeader layouts.
+ *                Intel SDM Vol 3 §11.5 (Cache Control Protocol — MESI
+ *                line-state transitions) + Intel® 64 Optimization
+ *                Reference Manual, Cache & Memory Subsystem chapter
+ *                (false sharing). Cache line is 64 B on every shipping
+ *                Intel/AMD x86_64 part; verified at runtime via CPUID.
+ *                05H monitor-line probe (cpuid.c). Mirrors irq_defer's
+ *                `3cdc79c` fix and TouchRingHeader / PocketRingHeader
+ *                layouts.
  */
 typedef struct __packed {
     /* Cacheline 0 — consumer cursor + read-only metadata. */
