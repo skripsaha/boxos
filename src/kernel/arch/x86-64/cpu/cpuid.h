@@ -50,6 +50,18 @@ typedef struct {
     bool has_fsrm;              // Fast Short REP MOV (CPUID.7.0:EDX[4]) — Ice Lake+.
                                 // Extends ERMS efficiency down to very small n, so
                                 // the bulk-copy threshold can drop further.
+    /* Split-lock detection chain — CPUID.07H.0:EDX[30] enumerates that
+     * IA32_CORE_CAPABILITIES (MSR 0xCF) exists; bit 5 of that MSR then
+     * tells whether the CPU can raise #AC on cache-line-spanning LOCK
+     * operands. Intel SDM Vol 4 Table 2-2 (IA32_CORE_CAPABILITIES) +
+     * SDM Vol 3 §6.15 (#AC handling). Required on Tiger Lake / Ice Lake
+     * Server / Sapphire Rapids / Emerald Rapids; absent on AMD and on
+     * older Intel client silicon (pre-Tremont). When true, BoxOS
+     * explicitly programs TEST_CTL (MSR 0x33) bit 29 = 0 at every
+     * BSP/AP bringup, taking the "detection off / accept slow bus lock
+     * on split access" policy — see cpu_test_ctl_init for rationale. */
+    bool has_core_capabilities; // CPUID.7.0:EDX[30] — MSR 0xCF readable
+    bool has_split_lock_detect; // IA32_CORE_CAPABILITIES.bit5 — CPU can raise #AC
     /* MONITOR/UMONITOR cacheline granularity — CPUID.05H. Intel SDM Vol 2A
      * UMONITOR: "The address range determined by the CPUID monitor leaf
      * function". EAX[15:0] = smallest line size, EBX[15:0] = largest.
@@ -94,6 +106,26 @@ void cpu_intersect_features_ap(void);
  * No-op on non-WAITPKG silicon (writing 0xE1 on AMD or pre-Tremont
  * Intel would #GP). */
 void cpu_umwait_control_init(uint64_t tsc_freq_khz);
+
+/* TEST_CTL MSR (0x33) bit 29 programmer — Intel SDM Vol 4 §2.5 / Table
+ * 2-2 (TEST_CTL). When bit 29 is set, any cache-line-spanning LOCK-
+ * prefixed instruction on this logical processor raises #AC (vector 17,
+ * error_code = 0). When clear, the CPU silently asserts the system bus
+ * lock and serves the access (slow but correct).
+ *
+ * BoxOS policy: explicitly CLEAR bit 29 on every BSP and AP whose
+ * has_split_lock_detect == true. Our internal atomics are all 8-byte
+ * aligned within single cachelines (kring.c / touch_ring.c Vyukov gates,
+ * brook.c / bay.c headers), so we will never trigger split-lock. But
+ * userspace processes can race-corrupt their own state and emit
+ * unaligned LOCK ops; we don't want a buggy boxlib to silently turn
+ * into a #AC kernel-panic chain when running on Tiger Lake+. The
+ * trade-off is the (extremely rare) silent slowdown if userspace ever
+ * actually executes a split-lock RMW vs. predictable system stability.
+ *
+ * Idempotent — re-running on the same core just re-writes the same
+ * bit clear. Safe to call before or after cpu_umwait_control_init. */
+void cpu_test_ctl_init(void);
 
 /* Read the current microcode revision running on THIS logical CPU.
  *

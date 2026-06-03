@@ -27,10 +27,13 @@
  * ------
  * One 4 KiB header page at CABIN_TOUCH_RING_ADDR + a 1 MiB lazy-mapped
  * slot region at CABIN_TOUCH_SLOTS_BASE. Header carries head/tail
- * cursors on SEPARATE cachelines (Intel SDM Vol 3 §11.4.4 — false
- * sharing between heavily-modified independent cursors causes RFO
- * cacheline ping-pong on real silicon; the same fix landed for
- * irq_defer in commit `3cdc79c`).
+ * cursors on SEPARATE cachelines — Intel SDM Vol 3 §11.5 (Cache
+ * Control Protocol — MESI line-state transitions) + Intel® 64
+ * Optimization Reference Manual, Cache & Memory Subsystem chapter
+ * (false sharing & RFO storms). Cache line is 64 B on every shipping
+ * Intel/AMD x86_64 part; verified at runtime via CPUID.05H monitor-
+ * line probe (cpuid.c). The same fix landed for irq_defer in commit
+ * `3cdc79c`.
  *
  * Producer model — MPSC
  * ---------------------

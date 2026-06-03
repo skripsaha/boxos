@@ -327,6 +327,15 @@ void per_core_init_ap(uint8_t core_index, uint64_t stack_top) {
      * before amp_boot_aps). */
     cpu_umwait_control_init(cpu_get_tsc_freq_khz());
 
+    /* Clear TEST_CTL bit 29 on this AP so split-lock LOCK ops don't
+     * raise #AC. The MSR is per-logical-processor (Intel SDM Vol 4
+     * Table 2-2 "Scope: Thread"); BSP programmed its own copy in
+     * main.c. Gated inside on has_split_lock_detect — no-op on AMD
+     * and pre-Tremont Intel. Must follow the intersect above so the
+     * MSR isn't written on an AP that the intersect decided lacks
+     * the architectural capability. */
+    cpu_test_ctl_init();
+
     PerCoreData* pc = &g_per_core[core_index];
 
     memset(pc, 0, sizeof(PerCoreData));

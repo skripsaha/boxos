@@ -13,6 +13,7 @@
 #include "video.h"
 #include "e820.h"
 #include "cabin_layout.h"
+#include "acpi.h"
 
 static vmm_context_t *kernel_context = NULL;
 static vmm_context_t *current_context = NULL;
@@ -2577,6 +2578,57 @@ void vmm_test_basic(void)
     vmm_dump_context_stats(kernel_context);
 }
 
+/* NUMA-aware single-page allocator for cabin metadata pages (CabinInfo,
+ * PocketRing header, ResultRing header, TouchRing header).
+ *
+ * Real-HW rationale: every push/pop on the per-cabin IPC rings reads
+ * the header. On a 2-socket Xeon / EPYC, a header page that landed on
+ * the remote socket pays 3–5× cross-socket coherence cost per access.
+ * Brook (NUMA-audit 2026-06-03) co-locates its stream pages with the
+ * caller; Pocket/Result/Touch rings should match for consistency.
+ *
+ * Heuristic: prefer the NUMA domain of the CPU running this call —
+ * usually the process spawner — because the spawned cabin tends to be
+ * scheduled on the same socket via round-robin App-Core affinity. UMA
+ * machines see no difference (acpi_get_numa returns !present →
+ * UNKNOWN → fall through to plain pmm_alloc_zero). SRAT-absent BIOS
+ * paths also fall through. Intel® 64 Optimization Reference Manual
+ * §11.x (multi-socket memory hierarchy) — non-uniform access latency. */
+static void *vmm_cabin_alloc_zero_numa(size_t pages)
+{
+    uint32_t domain = ACPI_NUMA_DOMAIN_UNKNOWN;
+    const acpi_numa_info_t *n = acpi_get_numa();
+    if (n && n->present) {
+        uint8_t core = amp_get_core_index();
+        if (core < MAX_CORES) {
+            uint32_t lapic_id = g_amp.cores[core].lapic_id;
+            for (uint16_t i = 0; i < n->cpu_count; i++) {
+                if (!n->cpus[i].enabled) continue;
+                if (n->cpus[i].apic_id == lapic_id) {
+                    domain = n->cpus[i].domain;
+                    break;
+                }
+            }
+        }
+    }
+
+    if (domain == ACPI_NUMA_DOMAIN_UNKNOWN) {
+        return pmm_alloc_zero(pages);
+    }
+
+    void *p = pmm_alloc_in_domain(pages, domain);
+    if (!p) {
+        /* Domain-local pool exhausted; fall back to any-zone zero alloc
+         * so the cabin still comes up (correctness > NUMA optimality). */
+        return pmm_alloc_zero(pages);
+    }
+    /* pmm_alloc_in_domain returns raw uncleared pages — mirror brook's
+     * symmetric zero-fill so callers can rely on a freshly-cleared
+     * header regardless of which path served the allocation. */
+    memset((void *)vmm_phys_to_virt((uintptr_t)p), 0, pages * PMM_PAGE_SIZE);
+    return p;
+}
+
 vmm_context_t *vmm_create_cabin(uint64_t *cabin_info_phys,
                                 uint64_t *pocket_ring_phys,
                                 uint64_t *result_ring_phys,
@@ -2597,7 +2649,9 @@ vmm_context_t *vmm_create_cabin(uint64_t *cabin_info_phys,
 
     // Allocate physical pages: CabinInfo (1), PocketRing (1), ResultRing (1), TouchRing (1).
     // Slot regions are lazily mapped on demand and are NOT pre-allocated here.
-    void *info_phys = pmm_alloc(CABIN_INFO_PAGES);
+    // NUMA-aware allocation (see vmm_cabin_alloc_zero_numa rationale) co-
+    // locates each header with the spawner's socket; cleared on return.
+    void *info_phys = vmm_cabin_alloc_zero_numa(CABIN_INFO_PAGES);
     if (!info_phys)
     {
         vmm_destroy_context(cabin_ctx);
@@ -2605,7 +2659,7 @@ vmm_context_t *vmm_create_cabin(uint64_t *cabin_info_phys,
         return NULL;
     }
 
-    void *pocket_phys = pmm_alloc(CABIN_POCKET_RING_PAGES);
+    void *pocket_phys = vmm_cabin_alloc_zero_numa(CABIN_POCKET_RING_PAGES);
     if (!pocket_phys)
     {
         pmm_free(info_phys, CABIN_INFO_PAGES);
@@ -2614,7 +2668,7 @@ vmm_context_t *vmm_create_cabin(uint64_t *cabin_info_phys,
         return NULL;
     }
 
-    void *result_phys = pmm_alloc(CABIN_RESULT_RING_PAGES);
+    void *result_phys = vmm_cabin_alloc_zero_numa(CABIN_RESULT_RING_PAGES);
     if (!result_phys)
     {
         pmm_free(pocket_phys, CABIN_POCKET_RING_PAGES);
@@ -2624,7 +2678,7 @@ vmm_context_t *vmm_create_cabin(uint64_t *cabin_info_phys,
         return NULL;
     }
 
-    void *touch_phys = pmm_alloc(CABIN_TOUCH_RING_PAGES);
+    void *touch_phys = vmm_cabin_alloc_zero_numa(CABIN_TOUCH_RING_PAGES);
     if (!touch_phys)
     {
         pmm_free(result_phys, CABIN_RESULT_RING_PAGES);
@@ -2634,11 +2688,8 @@ vmm_context_t *vmm_create_cabin(uint64_t *cabin_info_phys,
         vmm_set_error("Failed to allocate TouchRing page");
         return NULL;
     }
-
-    memset(vmm_phys_to_virt((uintptr_t)info_phys),   0, CABIN_INFO_SIZE);
-    memset(vmm_phys_to_virt((uintptr_t)pocket_phys), 0, CABIN_POCKET_RING_SIZE);
-    memset(vmm_phys_to_virt((uintptr_t)result_phys), 0, CABIN_RESULT_RING_SIZE);
-    memset(vmm_phys_to_virt((uintptr_t)touch_phys),  0, CABIN_TOUCH_RING_SIZE);
+    /* Pages already zero-cleared by vmm_cabin_alloc_zero_numa — no
+     * redundant memset needed here. */
 
     if (vmm_setup_null_trap(cabin_ctx) != 0)
     {

@@ -25,6 +25,9 @@
 #include "atomics.h"
 #include "error.h"
 #include "boxos_magic.h"
+#include "amp.h"
+#include "lapic.h"
+#include "irqchip.h"
 
 void KRingPocketInit(PocketRing *hdr)
 {
@@ -126,6 +129,33 @@ static ResultSlot *kring_translate_slot(process_t *target, uintptr_t uvaddr)
 {
     return (ResultSlot *)vmm_translate_user_addr(target->cabin, uvaddr,
                                                   sizeof(ResultSlot));
+}
+
+/* Cross-core wake helper — mirrors touch_wake_remote in touch.c.
+ *
+ * Real-HW rationale: process_set_state(target, PROC_WORKING) below
+ * enqueues the target on its home_core's runqueue, but the core itself
+ * may be in HLT / MWAIT / UMWAIT idle. Without an explicit IPI the
+ * target only resumes on the next LAPIC timer tick (~1 ms at 1 kHz
+ * scheduling, longer if the BIOS configured a lower tick rate). On real
+ * Intel silicon with deeper C-states (intel_idle C3+) the wakeup tail
+ * can stretch to tens of ms — fatal for IPC reply latency.
+ *
+ * IPI_WAKE_VECTOR is the existing AMP-wide doorbell; its handler is a
+ * no-op acknowledger that triggers a reschedule probe on the receiver.
+ * Idempotent — extra IPIs to an already-running core are a few cycles
+ * each; missed IPIs are the real risk and we err on the side of always
+ * sending. Skip the IPI when target's home is this same core (we'll
+ * pick up the reschedule on return to userspace) or when SMP is
+ * single-core (no remote core to wake). */
+static inline void kring_wake_remote(process_t *target)
+{
+    if (!target) return;
+    if (g_amp.total_cores <= 1) return;
+    uint8_t core = target->home_core;
+    if (core >= g_amp.total_cores) return;
+    if (core == amp_get_core_index()) return;
+    lapic_send_ipi(g_amp.cores[core].lapic_id, IPI_WAKE_VECTOR);
 }
 
 /* Diagnostic: per-return-path counters. Snapshot via KResultPushStats(). */
@@ -284,13 +314,25 @@ bool KResultPush(process_t *target, const Result *r)
      *     at step (7). The slot's seq still advances at step (8), the
      *     consumer (if any) sees a benign error, and the ring stays
      *     consistent. Empirically the worst observed spin under 16-core
-     *     stress is well below 1<<16 iterations; the 1<<20 budget gives
-     *     a comfortable ~ms headroom on real silicon before bailout. */
+     *     stress is well below 1<<14 iterations on STRICT QEMU; real
+     *     silicon is similar. The 1<<14 budget gives ~500 µs headroom
+     *     at 3 GHz with ~100-cycle PAUSE — long enough for any sane
+     *     consumer to drain its prior slot, short enough that a frozen
+     *     consumer doesn't wedge producer K-Cores for tens of ms (the
+     *     historical 1<<20 ≈ 33 ms tail). With the IPI wake at step
+     *     (9) the consumer is poked as soon as we publish, so the long
+     *     tail is no longer needed. */
     uint64_t round    = pos / cap;
     uint64_t expected = 2u * round;
 
-    enum { KRP_SPIN_BUDGET = 1u << 20 };
-    enum { KRP_DESTROYING_PROBE_MASK = 0xFFFFu };
+    enum { KRP_SPIN_BUDGET = 1u << 14 };
+    /* Probe `target->destroying` every 4 K PAUSE iterations (≈ 125 µs at
+     * 3 GHz with Skylake+-class PAUSE ≈ 140 cycles); 4 probes over the
+     * 16 K budget keeps the "early bail when cabin tears down" promise
+     * meaningful instead of a single check at spin 0. Mask MUST be
+     * strictly smaller than KRP_SPIN_BUDGET-1 or the check degrades to
+     * once-per-spin. */
+    enum { KRP_DESTROYING_PROBE_MASK = 0x0FFFu };
     bool consumer_lost = false;
     for (uint64_t spins = 0; ; spins++) {
         uint64_t seq = __atomic_load_n(&slot->seq, __ATOMIC_ACQUIRE);
@@ -338,9 +380,24 @@ bool KResultPush(process_t *target, const Result *r)
      *     moving. Skip the wake when consumer_lost since either the
      *     cabin is destroying (state writes during teardown race the
      *     teardown logic, harmless but pointless) or it has been frozen
-     *     long enough that one more wake won't help. */
-    if (!consumer_lost && process_get_state(target) == PROC_WAITING) {
-        process_set_state(target, PROC_WORKING);
+     *     long enough that one more wake won't help.
+     *
+     *     IPI follows the state flip: process_set_state enqueues the
+     *     target on its home_core's runqueue, but the home core may be
+     *     HLT/MWAIT-idle and miss the new work until the next LAPIC
+     *     tick. The IPI is the doorbell that fires the reschedule
+     *     immediately. Mirrors the touch_wake_remote pattern in
+     *     touch.c TouchRestDeliver — without it, ResultRing replies
+     *     pick up a multi-ms wakeup tail on real silicon with deep
+     *     C-states. Always-send-on-publish is correct: even when the
+     *     target is currently running on home_core, an extra IPI is a
+     *     few cycles and avoids the race window where state lookup
+     *     sees PROC_WORKING but the consumer is in fact idle. */
+    if (!consumer_lost) {
+        if (process_get_state(target) == PROC_WAITING) {
+            process_set_state(target, PROC_WORKING);
+        }
+        kring_wake_remote(target);
     }
     return !overflow && !consumer_lost;
 }

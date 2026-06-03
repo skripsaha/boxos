@@ -33,6 +33,9 @@
 #include "process.h"
 #include "atomics.h"
 #include "boxos_magic.h"
+#include "amp.h"
+#include "lapic.h"
+#include "irqchip.h"
 
 void KTouchRingInit(TouchRing *hdr)
 {
@@ -60,6 +63,30 @@ static TouchSlot *ktr_translate_slot(process_t *target, uintptr_t uvaddr)
 {
     return (TouchSlot *)vmm_translate_user_addr(target->cabin, uvaddr,
                                                 sizeof(TouchSlot));
+}
+
+/* ------------------------------------------------------------------------
+ * Cross-core wake helper — mirrors kring_wake_remote and touch_wake_remote.
+ *
+ * Real-HW rationale (identical to KResultPush M3 wake): the home_core
+ * of `target` may sit in HLT / MWAIT / UMWAIT idle when we publish a
+ * Touch slot. Without an explicit IPI, the consumer only resumes on the
+ * next LAPIC timer tick (≤ 1 ms at 1 kHz; longer on deep C-states).
+ * TouchRestDeliver in touch.c also calls touch_wake_remote at its outer
+ * retry layer — that stays as the fallback. The inline wake here covers
+ * the common single-attempt fast path where the outer wake would only
+ * arrive AFTER the retry loop completes (~ms later on a contested ring).
+ *
+ * Defensive guards: skip on null/single-core/out-of-range/self — same
+ * shape as kring_wake_remote in kring.c. ------------------------- */
+static inline void ktr_wake_remote(process_t *target)
+{
+    if (!target) return;
+    if (g_amp.total_cores <= 1) return;
+    uint8_t core = target->home_core;
+    if (core >= g_amp.total_cores) return;
+    if (core == amp_get_core_index()) return;
+    lapic_send_ipi(g_amp.cores[core].lapic_id, IPI_WAKE_VECTOR);
 }
 
 /* ------------------------------------------------------------------------
@@ -187,12 +214,22 @@ bool KTouchPush(process_t *target,
     /* (6) Vyukov gate — bounded spin with destroying-probe. Identical
      *     contract to KResultPush: NEVER abandon a reserved slot, but
      *     ALWAYS exit eventually so a frozen/crashed consumer can't
-     *     wedge every producer K-Core. */
+     *     wedge every producer K-Core.
+     *
+     *     Budget tuned to match KResultPush (1<<14 ≈ 500 µs at 3 GHz
+     *     with Skylake+-class PAUSE). Pairs with the IPI wake at step
+     *     (9) so the consumer is poked the moment we publish — a long
+     *     spin tail isn't the safety net it used to be. Worst measured
+     *     spin under 16-core stress is well under 1<<14 iterations on
+     *     STRICT QEMU; real silicon is similar. Probe mask 0x0FFF
+     *     gives 4 destroying-checks across the 16 K budget (every
+     *     ~125 µs) — see kring.c KRP_DESTROYING_PROBE_MASK for the
+     *     mask-vs-budget invariant. */
     uint64_t round    = pos / cap;
     uint64_t expected = 2u * round;
 
-    enum { KTR_SPIN_BUDGET = 1u << 20 };
-    enum { KTR_DESTROYING_PROBE_MASK = 0xFFFFu };
+    enum { KTR_SPIN_BUDGET = 1u << 14 };
+    enum { KTR_DESTROYING_PROBE_MASK = 0x0FFFu };
     bool consumer_lost = false;
     for (uint64_t spins = 0; ; spins++) {
         uint64_t seq = __atomic_load_n(&slot->seq, __ATOMIC_ACQUIRE);
@@ -248,9 +285,24 @@ bool KTouchPush(process_t *target,
     __atomic_store_n(&slot->seq, expected + 1u, __ATOMIC_RELEASE);
 
     /* (9) Wake target if it was sleeping. Skip on consumer_lost — cabin
-     *     is destroying or unresponsive, one more wake won't help. */
-    if (!consumer_lost && process_get_state(target) == PROC_WAITING) {
-        process_set_state(target, PROC_WORKING);
+     *     is destroying or unresponsive, one more wake won't help.
+     *
+     *     IPI follows the state flip (mirrors KResultPush M3 wake): the
+     *     home_core may be HLT/MWAIT-idle and miss the new work until
+     *     the next LAPIC tick. The IPI is the doorbell that fires the
+     *     reschedule immediately. Always-send-on-publish is correct:
+     *     even when target is currently running on home_core, an extra
+     *     IPI is a few cycles and avoids the race window where state
+     *     lookup sees PROC_WORKING but the consumer is in fact idle.
+     *
+     *     TouchRestDeliver in touch.c also calls touch_wake_remote at
+     *     the outer retry layer; that stays as the fallback for the
+     *     "all retries exhausted" path. */
+    if (!consumer_lost) {
+        if (process_get_state(target) == PROC_WAITING) {
+            process_set_state(target, PROC_WORKING);
+        }
+        ktr_wake_remote(target);
     }
     return !overflow && !consumer_lost;
 }
