@@ -31,6 +31,7 @@
 #include "kernel_config.h"
 #include "acpi.h"          /* acpi_get_numa, ACPI_NUMA_DOMAIN_UNKNOWN */
 #include "amp.h"           /* amp_get_core_index, g_amp.cores */
+#include "cpuid.h"         /* g_cpu_caps for WAITPKG + monitor line size */
 
 /* ─────────────────────────────────────────────────────────────────────
  * Page-class policy mirrors Bay. 4 KiB by default; 2 MiB when total
@@ -79,6 +80,63 @@ void BrookInit(void)
     }
     debug_printf("[Brook] init: %u buckets, 2 MiB huge-page threshold\n",
                  (unsigned)BROOK_BUCKETS);
+
+    /* Real-HW posture log. Brook's wait path correctness depends on
+     * three runtime invariants:
+     *
+     *   - UMONITOR cacheline granularity (CPUID.05H) — the BrookHeader
+     *     layout (writer state on CL0, reader state on CL1) assumes 64 B
+     *     cachelines. Other sizes don't break correctness (every store
+     *     to the monitored line wakes the watcher, regardless of line
+     *     size) but expose either false-sharing penalty (line > 64 B,
+     *     CL0 and CL1 share one monitor line — spurious cross-peer
+     *     wakes) or unused padding (line < 64 B).
+     *
+     *   - WAITPKG (CPUID.07H:ECX[5]) — userspace cpu_has_waitpkg picks
+     *     the UMWAIT fast path; otherwise the PAUSE+yield fallback.
+     *     This bit is the kernel-wide INTERSECTION (per_core.c calls
+     *     cpu_intersect_features_ap on every AP) so heterogeneous P+E
+     *     CPUs surface here correctly.
+     *
+     *   - NUMA topology (SRAT) — brook_alloc_zero_in_domain places ring
+     *     pages on the opener's home node when SRAT is present. Log
+     *     domain count so the operator sees the placement landscape.
+     *
+     * One line per concern; quiet by default on uniform single-domain
+     * single-vendor configs (the common case). */
+    {
+        unsigned line_min = (unsigned)g_cpu_caps.monitor_line_min;
+        unsigned line_max = (unsigned)g_cpu_caps.monitor_line_max;
+        if (line_min == 0) line_min = 64;
+        if (line_max == 0) line_max = 64;
+
+        const char *wait_path =
+            g_cpu_caps.has_waitpkg ? "UMWAIT" : "PAUSE+yield";
+
+        const acpi_numa_info_t *n = acpi_get_numa();
+        unsigned domain_count = (n && n->present) ? n->domain_count : 0;
+
+        if (line_min == 64 && line_max == 64 && domain_count <= 1) {
+            debug_printf("[Brook] wait path=%s, monitor line=64 B, uniform memory\n",
+                         wait_path);
+        } else {
+            debug_printf("[Brook] wait path=%s, monitor line=%u..%u B, NUMA domains=%u\n",
+                         wait_path, line_min, line_max, domain_count);
+        }
+
+        /* BrookHeader layout sanity: with line_max > 64 the writer-side
+         * cacheline (CL0) and reader-side cacheline (CL1) collide on
+         * one monitor line. Correctness preserved (per SDM Vol 2A
+         * UMONITOR — any store to the monitored line wakes the
+         * watcher) but every push/pop pings both peers. Log the
+         * scenario so the operator can correlate any perf surprise. */
+        if (line_max > 64) {
+            debug_printf("[Brook] note: monitor line %u B > 64 B "
+                         "(writer/reader cachelines share one line — wakes correct, "
+                         "expect cross-peer wake amplification)\n",
+                         line_max);
+        }
+    }
 }
 
 /* ─────────────────────────────────────────────────────────────────────
@@ -468,7 +526,18 @@ static void brook_drop_ref_locked(BrookBucket *b, BrookObject *brook)
  * Header convenience — translate BrookObject.header_phys to a writable
  * kernel virtual pointer so the kernel side of wait/wake can read and
  * mutate the futex flags.
- * ───────────────────────────────────────────────────────────────────── */
+ *
+ * vmm_phys_to_virt resolves through the kernel direct map, which is
+ * mapped write-back (WB). That's the cacheability class UMONITOR
+ * requires for the userspace peer's monitor to fire: Intel SDM
+ * Vol 2A UMONITOR — "The address range must use memory of the
+ * write-back type. Only write-back memory is guaranteed to correctly
+ * trigger the monitoring hardware." If the kernel direct map were ever
+ * remapped UC/WC, the kernel's alive=0 store would bypass caches and
+ * the userspace peer's UMWAIT would never wake on it. The userspace
+ * mapping is also VMM_FLAGS_USER_RW (no PCD/PWT/PAT bits) → WB.
+ * Both aliases agree; alive-flag writes go through the cache and
+ * wake the monitor as expected. ────────────────────────────────────── */
 static inline BrookHeader *brook_kernel_header(const BrookObject *brook)
 {
     return (BrookHeader *)vmm_phys_to_virt(brook->header_phys);

@@ -281,18 +281,32 @@ static void brook_wait_cycle(volatile void *watch_addr,
                              uint64_t deadline_ms)
 {
     if (cpu_has_waitpkg()) {
-        /* UMONITOR arms the hardware monitor on the cacheline of
-         * `watch_addr`. Any subsequent write to that line (peer cursor
-         * advance OR kernel alive=0 flip — both co-located by design)
-         * wakes UMWAIT immediately. */
+        /* UMONITOR (Intel SDM Vol 2A — opcode F3 0F AE /6) arms the
+         * hardware monitor on the cacheline of `watch_addr`. The
+         * cacheline granularity comes from CPUID.05H (typically 64 B,
+         * 32 B on Atom Tremont/Goldmont, 128 B on some server SKUs).
+         * Any subsequent store to that line — peer cursor advance OR
+         * the kernel's alive=0 flip on peer-death (both co-located on
+         * the same cacheline by the BrookHeader layout, see kernel
+         * brook.h) — wakes UMWAIT immediately. SDM UMONITOR:
+         * "Only write-back memory is guaranteed to correctly trigger
+         * the monitoring hardware" — our header page is mapped via
+         * VMM_FLAGS_USER_RW (no PCD/PWT/PAT bits) → WB. */
         umonitor(watch_addr);
 
-        /* Compute TSC deadline. We always cap at
-         * BROOK_UMWAIT_DEADLINE_CAP_MS so a missed wake on real silicon
-         * (e.g. monitor latency, scheduler interaction) still drains
-         * into a fresh loop iteration within bounded time. The caller
-         * tracks the user-facing deadline separately and returns
-         * ERR_TIMEOUT on the next loop pass. */
+        /* Compute TSC deadline. Always cap at
+         * BROOK_UMWAIT_DEADLINE_CAP_MS so a missed wake on real
+         * silicon (monitor latency, scheduler interaction, IA32_
+         * UMWAIT_CONTROL OS-imposed early exit) drains into a fresh
+         * loop iteration within bounded time. The caller tracks the
+         * user-facing deadline separately and returns ERR_TIMEOUT on
+         * the next loop pass.
+         *
+         * The kernel programs IA32_UMWAIT_CONTROL (MSR 0xE1) to ~2 ms
+         * worth of TSC quanta — see kernel cpuid.c
+         * cpu_umwait_control_init. That cap supersedes our budget_ms
+         * here when smaller; CF=1 on early exit is harmless for
+         * Brook because the caller's loop re-checks state. */
         uint64_t budget_ms = BROOK_UMWAIT_DEADLINE_CAP_MS;
         if (deadline_ms != 0) {
             uint64_t now_ms = clock_uptime_ms();
@@ -301,11 +315,21 @@ static void brook_wait_cycle(volatile void *watch_addr,
             if (remaining < budget_ms) budget_ms = remaining;
         }
         uint64_t deadline_tsc = cpu_rdtsc() + cpu_ms_to_tsc(budget_ms);
-        umwait(0, deadline_tsc);
+
+        /* UMWAIT (Intel SDM Vol 2A — opcode F2 0F AE /6). State=0 ⇒
+         * C0.2 (slower wake, larger power saving) — matches Touch's
+         * choice for consistency across IPC primitives. Return value
+         * (CF) indicates whether OS time limit elapsed (1) or another
+         * wake event fired (0, e.g. monitor write, NMI, interrupt).
+         * The caller's loop re-checks head/tail/alive on return so we
+         * don't need to act on CF directly; both outcomes are safe. */
+        (void)umwait(0, deadline_tsc);
         return;
     }
 
-    /* Pause + yield fallback. */
+    /* Pause + yield fallback. PAUSE (Intel SDM Vol 2B PAUSE) is the
+     * SDM-recommended spin hint — saves power and reduces inter-core
+     * pipeline-flush penalties on a contended cacheline. */
     if ((*spin_counter)++ < BROOK_SPIN_BUDGET) {
         brook_cpu_pause();
     } else {
