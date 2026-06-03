@@ -29,6 +29,8 @@
 #include "atomics.h"
 #include "error.h"
 #include "kernel_config.h"
+#include "acpi.h"          /* acpi_get_numa, ACPI_NUMA_DOMAIN_UNKNOWN */
+#include "amp.h"           /* amp_get_core_index, g_amp.cores */
 
 /* ─────────────────────────────────────────────────────────────────────
  * Page-class policy mirrors Bay. 4 KiB by default; 2 MiB when total
@@ -99,6 +101,73 @@ static uint16_t brook_resolve_tag(const char *tag, bool intern_if_missing)
 }
 
 /* ─────────────────────────────────────────────────────────────────────
+ * NUMA-aware backing-page allocation.
+ *
+ * SPSC streams are sensitive to cross-node coherence: on a 2-socket
+ * Xeon / EPYC the cross-socket cache-coherent bounce of a tail update
+ * can be 3-5× slower than intra-socket. Brook's hot path is exactly
+ * that — producer writes tail, consumer's cacheline goes M → I → S.
+ * Co-locating the ring + header pages with the caller's CPU keeps the
+ * coherence chatter on-socket.
+ *
+ * Determine the preferred NUMA domain from the current CPU's APIC ID
+ * mapped through SRAT (acpi_numa_info_t.cpus[]). ACPI_NUMA_DOMAIN_UNKNOWN
+ * when there's no SRAT (uniform memory machine), no matching CPU entry,
+ * or CPUs are running before SRAT parse — every caller of
+ * pmm_alloc_in_domain handles UNKNOWN by falling through to any-zone
+ * buddy_alloc, so the unknown path is the safe default.
+ *
+ * The "opener's CPU wins" heuristic is intentional: in BoxOS the
+ * opening cabin typically also produces or consumes — proc-spawn
+ * affinity tends to keep the producer/consumer on the same socket as
+ * the original creator. Cross-socket spawns lose ~10 % vs an optimal
+ * placement; uniform-memory machines see no difference. ───────────── */
+static uint32_t brook_preferred_domain(void)
+{
+    const acpi_numa_info_t *n = acpi_get_numa();
+    if (!n || !n->present) return ACPI_NUMA_DOMAIN_UNKNOWN;
+
+    uint8_t core = amp_get_core_index();
+    if (core >= MAX_CORES) return ACPI_NUMA_DOMAIN_UNKNOWN;
+    uint32_t lapic_id = g_amp.cores[core].lapic_id;
+
+    for (uint16_t i = 0; i < n->cpu_count; i++) {
+        if (!n->cpus[i].enabled) continue;
+        if (n->cpus[i].apic_id == lapic_id) return n->cpus[i].domain;
+    }
+    return ACPI_NUMA_DOMAIN_UNKNOWN;
+}
+
+/* Zero-fill wrapper around pmm_alloc_in_domain. pmm_alloc_in_domain
+ * returns raw uncleared pages (vs pmm_alloc_zero); we must memset to
+ * preserve the "ring starts in a known state" invariant for the
+ * BrookHeader and the lock-free push path.
+ *
+ * Falls back to any-zone pmm_alloc_zero on UNKNOWN domain or in-domain
+ * failure — exactly what pmm_alloc_in_domain already does on the
+ * domain side, but we keep the symmetric fallback at the brook layer
+ * so the zero-fill always happens regardless of which path served the
+ * allocation. */
+static void *brook_alloc_zero_in_domain(size_t pages, uint32_t domain)
+{
+    if (domain == ACPI_NUMA_DOMAIN_UNKNOWN) {
+        return pmm_alloc_zero(pages);
+    }
+    void *p = pmm_alloc_in_domain(pages, domain);
+    if (!p) {
+        /* Domain-local allocator + global fallback inside it failed.
+         * Try the zero-fill any-zone path one more time — different
+         * code path inside the buddy might find pages even though the
+         * range-constrained walk didn't. */
+        p = pmm_alloc_zero(pages);
+        if (p) return p;
+        return NULL;
+    }
+    memset((void *)vmm_phys_to_virt((uintptr_t)p), 0, pages * PMM_PAGE_SIZE);
+    return p;
+}
+
+/* ─────────────────────────────────────────────────────────────────────
  * Allocate slot-region chunks. Same fall-back-to-4K pattern as Bay:
  * try 2 MiB chunks first when total ≥ 2 MiB, drop to 4 KiB for the
  * WHOLE region if even one chunk can't be served at 2 MiB granularity.
@@ -107,6 +176,7 @@ static uint16_t brook_resolve_tag(const char *tag, bool intern_if_missing)
  * allocated chunk is returned to PMM before propagating the error.
  * ───────────────────────────────────────────────────────────────────── */
 static error_t brook_alloc_slot_chunks(uint64_t total_size,
+                                       uint32_t domain,
                                        uint16_t *out_class,
                                        uint64_t *out_chunk_size,
                                        uint32_t *out_chunk_count,
@@ -131,7 +201,7 @@ static error_t brook_alloc_slot_chunks(uint64_t total_size,
 
     for (uint32_t i = 0; i < cc; i++) {
         size_t pages = (cls == BROOK_PAGE_CLASS_2M) ? BROOK_HUGE_PAGES : 1;
-        void *p = pmm_alloc_zero(pages);
+        void *p = brook_alloc_zero_in_domain(pages, domain);
         if (!p && cls == BROOK_PAGE_CLASS_2M) {
             /* Drop the partial 2 MiB run and rebuild at 4 KiB. */
             for (uint32_t j = 0; j < i; j++) {
@@ -480,14 +550,20 @@ error_t BrookOpenInternal(struct process_t *proc,
         spin_unlock(&b->lock);
 
         uint64_t slot_total = (uint64_t)frame_size * frame_count;
+        /* NUMA placement hint: the cabin that creates the Brook gets
+         * its ring + header on its CPU's home memory node. On uniform-
+         * memory (no SRAT) machines this resolves to UNKNOWN and the
+         * NUMA-aware helpers fall through to any-zone allocation. */
+        uint32_t domain = brook_preferred_domain();
         uint16_t  cls;
         uint64_t  cs;
         uint32_t  cc;
         uint64_t *chunks;
-        error_t rc = brook_alloc_slot_chunks(slot_total, &cls, &cs, &cc, &chunks);
+        error_t rc = brook_alloc_slot_chunks(slot_total, domain,
+                                             &cls, &cs, &cc, &chunks);
         if (rc != OK) return rc;
 
-        void *hdr_phys = pmm_alloc_zero(1);
+        void *hdr_phys = brook_alloc_zero_in_domain(1, domain);
         if (!hdr_phys) {
             for (uint32_t i = 0; i < cc; i++) {
                 if (chunks[i]) pmm_free((void *)chunks[i],
