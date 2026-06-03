@@ -63,7 +63,7 @@
  * peer-death). CL1 = reader state (watched by writer). See kernel
  * brook.h for the full UMWAIT-correctness rationale.
  * ───────────────────────────────────────────────────────────────────── */
-typedef struct PACKED {
+typedef struct {
     /* Cacheline 0 — writer state, watched by reader */
     volatile uint64_t tail;
     volatile uint32_t writer_alive;

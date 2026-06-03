@@ -192,8 +192,9 @@ void touch_await_stats(uint32_t out[7]);
  * the cache pins the first resolved value. Use touch_intern() directly there. */
 #define TOUCH_TAG_PAIR(str) \
     ({ static TouchTagPair _tp = { TOUCH_TAG_INVALID, TOUCH_TAG_INVALID }; \
-       if (_tp.full == TOUCH_TAG_INVALID && _tp.bare == TOUCH_TAG_INVALID) \
-           _tp = touch_intern(str); _tp; })
+       if (_tp.full == TOUCH_TAG_INVALID && _tp.bare == TOUCH_TAG_INVALID) { \
+           _tp = touch_intern(str); \
+       } _tp; })
 
 #define TOUCH_TAG_ID(str)  (touch_pair_choose(TOUCH_TAG_PAIR(str)))
 
