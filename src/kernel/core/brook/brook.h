@@ -167,7 +167,7 @@ struct process_t;
  *   alive==0 && ever_attached==0 → no peer YET; keep waiting (lets a
  *                                  reader open before any writer attaches).
  * ───────────────────────────────────────────────────────────────────── */
-typedef struct __packed {
+typedef struct {
     /* Cacheline 0 (64 B) — writer state, watched by reader */
     volatile uint64_t tail;                  /* writer writes; reader reads */
     volatile uint32_t writer_alive;
