@@ -24,4 +24,14 @@ extern uint64_t g_cpu_caps_page_phys;
 void cpu_caps_page_init(void);
 void cpu_caps_page_set_tsc_freq(uint64_t freq_khz);
 
+/* Re-publish g_cpu_caps.has_waitpkg into the userspace caps page.
+ *
+ * MUST be called after cpu_intersect_features_ap() on every AP. The
+ * initial cpu_caps_page_init() captures the BSP's has_waitpkg value.
+ * On heterogeneous Intel hybrids (Alder/Raptor Lake P+E), the AP
+ * intersection may flip the bit 1 → 0 because an E-core lacks
+ * WAITPKG; without this refresh, userspace reads stale `1`, executes
+ * UMWAIT on the E-core, and #UDs. */
+void cpu_caps_page_refresh_waitpkg(void);
+
 #endif // CPU_CAPS_PAGE_H

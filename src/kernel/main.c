@@ -350,6 +350,15 @@ void kernel_main(void)
     cpu_calibrate_tsc();
     clockboard_set_tsc_freq_khz(cpu_get_tsc_freq_khz());
 
+    /* IA32_UMWAIT_CONTROL on the BSP — Intel SDM Vol 4 §2.5.1.
+     * Programs the OS-imposed UMWAIT/TPAUSE residency cap so wait
+     * loops re-poll within a bounded interval even if a monitor wake
+     * is dropped by silicon/microcode quirks. WAITPKG-gated inside;
+     * no-op on AMD or pre-Tremont Intel. APs program their own copy
+     * inside per_core_init_ap (each MSR is per-logical-processor;
+     * see SDM Vol 4 Table 2-2 "Scope: Thread"). */
+    cpu_umwait_control_init(cpu_get_tsc_freq_khz());
+
     /* Capture the BSP TSC anchor for per-AP TSC sync. Must be after
      * cpu_calibrate_tsc (we need tsc_freq_khz published) and before
      * amp_boot_aps (each AP reads the anchor in per_core_init_ap).

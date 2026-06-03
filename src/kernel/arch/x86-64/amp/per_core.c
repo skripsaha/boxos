@@ -11,6 +11,7 @@
 #include "pvclock.h"      // pvclock_init_ap()
 #include "cpu_calibrate.h"// cpu_get_tsc_freq_khz()
 #include "pit.h"          // pit_get_uptime_us() — HPET-backed wall clock
+#include "cpu_caps_page.h"// cpu_caps_page_refresh_waitpkg()
 
 PerCoreData g_per_core[MAX_CORES] __attribute__((aligned(64)));
 volatile bool g_per_core_active = false;
@@ -308,6 +309,23 @@ void per_core_init_ap(uint8_t core_index, uint64_t stack_top) {
      * consumer on this AP — per_core data init below only reads
      * core-static structs, no CPU features yet. */
     cpu_intersect_features_ap();
+
+    /* Re-publish has_waitpkg into the userspace caps page so a UMWAIT
+     * caller running on this AP (or any later AP) sees the post-
+     * intersect value. On homogeneous CPUs the value is unchanged; on
+     * Intel hybrid (Alder/Raptor Lake) the bit may have flipped 1→0
+     * because an E-core lacks WAITPKG, and without this refresh
+     * userspace would read stale `1` and #UD on UMWAIT here. */
+    cpu_caps_page_refresh_waitpkg();
+
+    /* Program IA32_UMWAIT_CONTROL on this AP. WAITPKG-gated inside;
+     * no-op on AMD or E-cores that lack it. Must happen AFTER the
+     * intersect above so a P-core's MSR write isn't issued on an
+     * E-core where WAITPKG is off. Needs tsc_freq_khz so cpu_calibrate
+     * must have completed on the BSP — which it has by the time the
+     * first AP enters this function (main.c sequences cpu_calibrate
+     * before amp_boot_aps). */
+    cpu_umwait_control_init(cpu_get_tsc_freq_khz());
 
     PerCoreData* pc = &g_per_core[core_index];
 
