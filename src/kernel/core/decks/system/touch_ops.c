@@ -1,6 +1,7 @@
 #include "system_deck.h"
 #include "touch.h"
 #include "touch_queue.h"
+#include "touch_ring.h"
 #include "op_registry.h"
 #include "manifest_auth.h"
 #include "boxos_manifest.h"
@@ -258,6 +259,51 @@ static int SysTouchAwait(const ManifestOp *op, Crate *crates,
     }
 
     process_set_state(ctx->proc, PROC_WAITING);
+
+    /* Lost-wakeup guard — closes the touch_stress S3 ~4% flake on UEFI
+     * STRICT 16c (see project memory touch_stress_s3_race_2026_06_02).
+     *
+     * The AWAIT pocket is dispatched async (kcore_submit) on multi-core,
+     * so this handler runs after a variable latency on the K-Core that
+     * popped the calling process. During that window the publisher may
+     * have already pushed slots into ctx->proc->TouchRing — KTouchPush
+     * step (9) only flips PROC_WAITING→PROC_WORKING, and at publish
+     * time we were still PROC_WORKING (the AWAIT had not yet been
+     * dequeued by K-Core), so its wake was skipped. The userspace
+     * UMWAIT then wakes from the cacheline write on `tail` and the
+     * caller fast-pops slots through touch_await's fast path. Parking
+     * unconditionally HERE would strand the caller in PROC_WAITING
+     * after it had already moved past the touch_await call; with no
+     * further publishes coming (parent's burst is over) the listener
+     * times out the next touch_await and reports count = 0.
+     *
+     * Re-check the ring under ACQUIRE. If the publisher already
+     * advanced `tail` past `head`, undo the park so the next scheduler
+     * tick re-runs the caller and lets it drain the slot(s). Memory
+     * ordering pairs with KTouchPush's __atomic_fetch_add(tail,
+     * ACQ_REL) at touch_ring.c:180; both sides serialise on the same
+     * cacheline. The state write above is RELEASE (via spin_unlock
+     * inside process_set_state), so KTouchPush observing PROC_WAITING
+     * is guaranteed to be sequenced after our state set, and our load
+     * of `tail` here either sees the publisher's update (we undo) or
+     * the publisher sees our PROC_WAITING and wakes us (it wins). No
+     * permanently lost wakeup.
+     *
+     * ERR_WOULD_BLOCK is returned in both branches; if state was
+     * undone, guide.c pushes a Result that result_pop_non_ipc filters
+     * on error_code == 9 (see result.c:151), so the orphan never
+     * surfaces as a stale reply to a subsequent ManifestSubmitFull. */
+    if (ctx->proc->touch_ring_phys) {
+        TouchRing *rr = (TouchRing *)vmm_phys_to_virt(ctx->proc->touch_ring_phys);
+        if (rr) {
+            uint64_t tail = __atomic_load_n(&rr->hdr.tail, __ATOMIC_ACQUIRE);
+            uint64_t head = __atomic_load_n(&rr->hdr.head, __ATOMIC_RELAXED);
+            if (tail != head) {
+                process_set_state(ctx->proc, PROC_WORKING);
+            }
+        }
+    }
+
     return ERR_WOULD_BLOCK;
 }
 
