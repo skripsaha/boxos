@@ -9,8 +9,8 @@
  *
  * Builder writes the op stream after a placeholder header, then Finalize
  * back-patches the header. Submit packs the Manifest+Crate references into
- * the legacy Pocket fields (data_addr/data_length/route_tag) and sets
- * POCKET_FLAG_MANIFEST so the kernel routes through ManifestExecuteOnce.
+ * the Pocket envelope (manifest_addr/manifest_size/crates_addr/crate_count)
+ * and sets POCKET_FLAG_MANIFEST so the kernel routes through ManifestExecuteOnce.
  */
 
 int ManifestBuilderInit(ManifestBuilder *mb, void *buf, uint32_t capacity)
@@ -83,21 +83,13 @@ static void encode_manifest_pocket(Pocket          *p,
                                    uint32_t         target_pid)
 {
     pocket_prepare(p);
-    p->flags       = POCKET_FLAG_MANIFEST;
-    p->target_pid  = target_pid;
-    p->data_addr   = (uint64_t)(uintptr_t)m;
-    p->data_length = m->total_size;
-
-    /* route_tag layout in manifest mode:
-     *   [0..7]   crates_addr
-     *   [8..9]   crate_count
-     *   [10..11] pier_id (0 for now)
-     */
-    uint64_t crates_addr = (uint64_t)(uintptr_t)crates;
-    memcpy(p->route_tag + 0, &crates_addr, sizeof(uint64_t));
-    memcpy(p->route_tag + 8, &crate_count, sizeof(uint16_t));
-    uint16_t pier_id = 0;
-    memcpy(p->route_tag + 10, &pier_id, sizeof(uint16_t));
+    p->flags         = POCKET_FLAG_MANIFEST;
+    p->target_pid    = target_pid;
+    p->manifest_addr = (uint64_t)(uintptr_t)m;
+    p->manifest_size = m->total_size;
+    p->crates_addr   = (uint64_t)(uintptr_t)crates;
+    p->crate_count   = crate_count;
+    p->pier_id       = 0;
 }
 
 /*
@@ -109,7 +101,7 @@ static void encode_manifest_pocket(Pocket          *p,
  * Sharing the encoder + push step here keeps the manifest-mode Pocket
  * layout in exactly one place (encode_manifest_pocket above). Drift
  * between async and sync paths was the original reason touch.c carried
- * a hand-rolled copy of the route_tag packing.
+ * a hand-rolled copy of the envelope packing.
  */
 int ManifestSubmitNoWait(const Manifest *m,
                          const Crate    *crates,

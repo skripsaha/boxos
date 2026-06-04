@@ -1,6 +1,7 @@
 #include "manifest.h"
 #include "atomics.h"
 #include "process.h"
+#include "vmm.h"
 
 /*
  * Global ManifestTable: a growable slot array plus per-slot generation
@@ -16,6 +17,21 @@
 
 #define MANIFEST_TABLE_INITIAL_CAP 32u
 #define MANIFEST_TABLE_MAX_CAP     (1u << 24)
+
+/*
+ * Upper bound on the raw Manifest size accepted by ManifestCompile.
+ *
+ * 1 MiB is far beyond any realistic op stream — the 16-bit op_count field
+ * caps the wire format at 65535 ops, and even at the maximum 12-byte op
+ * header (param_size=0) that's 768 KiB without parameters; with realistic
+ * inline parameters the practical max is well under 256 KiB.
+ *
+ * The bound is purely a DoS guard against a malicious cabin passing an
+ * absurd `size` and forcing a giant kmalloc / page walk before the
+ * size-vs-total_size check inside manifest_validate_and_index rejects the
+ * input. Without it, the worst case is bounded only by uint32_t (4 GiB).
+ */
+#define MANIFEST_MAX_COMPILE_SIZE (1u << 20)
 
 typedef struct ManifestSlot {
     CompiledManifest *manifest;     /* NULL when slot is free */
@@ -254,19 +270,34 @@ error_t ManifestCompile(struct process_t *owner,
     if (!g_manifest_table.initialized) return ERR_NOT_INITIALIZED;
     if (!user_or_kernel || size == 0)  return ERR_INVALID_ARGUMENT;
     if (size < sizeof(Manifest))       return ERR_BUFFER_TOO_SMALL;
+    if (size > MANIFEST_MAX_COMPILE_SIZE) return ERR_INVALID_ARGUMENT;
 
-    /* Step 1: copy bytes into kernel-owned buffer. For user pointers we
-     * eventually translate via vmm_translate_user_addr; that path is wired
-     * in Phase 6 when we replace guide_process_pocket. Kernel-test path
-     * works today. */
-    if (!is_kernel_ptr) {
-        /* TODO(Phase 6): use vmm_translate_user_addr(owner->cabin, user_addr, size) */
-        return ERR_NOT_IMPLEMENTED;
+    /*
+     * Step 1: stage the raw Manifest bytes into a kernel-owned buffer.
+     *
+     *   is_kernel_ptr=true  — user_or_kernel already lives in kernel VA
+     *                          (self-tests, boot-time kernel manifests):
+     *                          direct memcpy after kmalloc.
+     *   is_kernel_ptr=false — user_or_kernel is a userland VA in owner's
+     *                          cabin: vmm_user_buf_in walks the user PT
+     *                          one phys page at a time, handling non-
+     *                          contiguous backing + non-page-aligned
+     *                          start/end. The helper does its own kmalloc
+     *                          + cleans up on any partial failure, so we
+     *                          either get a fully populated buffer or NULL.
+     */
+    uint8_t *raw = NULL;
+    if (is_kernel_ptr) {
+        raw = kmalloc(size);
+        if (!raw) return ERR_NO_MEMORY;
+        memcpy(raw, user_or_kernel, size);
+    } else {
+        if (!owner || !owner->cabin) return ERR_INVALID_ARGUMENT;
+        raw = (uint8_t *)vmm_user_buf_in(owner->cabin,
+                                          (uintptr_t)user_or_kernel,
+                                          (size_t)size);
+        if (!raw) return ERR_INVALID_ADDRESS;
     }
-
-    uint8_t *raw = kmalloc(size);
-    if (!raw) return ERR_NO_MEMORY;
-    for (uint32_t i = 0; i < size; i++) raw[i] = ((const uint8_t *)user_or_kernel)[i];
 
     /* Step 2: validate and index ops. */
     uint32_t  op_count = 0;
