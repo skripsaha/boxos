@@ -4,8 +4,8 @@
 #include "box/types.h"
 
 /*
- * Pocket — Manifest-only envelope (Phase 12). The fields below mirror the
- * kernel's pocket.h layout exactly.
+ * Pocket — Manifest-only envelope (Phase 12). Byte-identical to the
+ * kernel's pocket.h layout — 64 bytes after the Phase-12 stride shrink.
  *
  * PocketRing — Phase 11 lazy-growable, monotonic-index SPSC. The header
  * lives at CABIN_POCKET_RING_ADDR (0x2000) — one fixed page. Slots live
@@ -24,13 +24,15 @@ typedef struct PACKED {
     uint32_t error_code;
     uint8_t  flags;              /* POCKET_FLAG_YIELD | POCKET_FLAG_MANIFEST */
     uint8_t  _reserved[3];
-    uint32_t data_length;        /* manifest size */
-    uint64_t data_addr;          /* manifest user vaddr */
-    char     route_tag[32];      /* manifest mode: crates_addr/count/pier_id */
-    uint8_t  _pad[68];           /* pad to 128 bytes for PocketRing slot stride */
+    uint32_t manifest_size;      /* bytes at manifest_addr */
+    uint16_t crate_count;        /* number of entries in Crate[] */
+    uint16_t pier_id;            /* urgency lane */
+    uint64_t manifest_addr;      /* user vaddr of raw Manifest */
+    uint64_t crates_addr;        /* user vaddr of Crate[] */
+    uint8_t  _pad[24];           /* reserved for ABI growth (pad to 64 bytes) */
 } Pocket;
 
-STATIC_ASSERT(sizeof(Pocket) == 128, "Pocket must be 128 bytes");
+STATIC_ASSERT(sizeof(Pocket) == 64, "Pocket must be 64 bytes");
 
 /* PocketRingHeader — cacheline-separated cursors (mirror of kernel layout).
  *
@@ -47,7 +49,7 @@ typedef struct PACKED {
     /* Cacheline 0 — consumer cursor + read-only metadata. */
     volatile uint64_t head;             /* kernel cursor */
     uint64_t          slots_base;       /* user vaddr of slot 0 */
-    uint32_t          slot_size;        /* POCKET_SLOT_SIZE (128) */
+    uint32_t          slot_size;        /* POCKET_SLOT_SIZE (64) */
     uint32_t          slot_count_max;   /* ring capacity */
     uint64_t          magic;
     uint8_t           _pad_line0[32];   /* fill cacheline 0 */

@@ -42,8 +42,8 @@ int execution_deck_handler(Pocket *pocket, process_t *proc)
         // Deliver IPC Result to target
         Result ipc_result;
         ipc_result.error_code  = pocket->error_code;
-        ipc_result.data_length = pocket->data_length;
-        ipc_result.data_addr   = pocket->data_addr;
+        ipc_result.data_length = pocket->manifest_size;
+        ipc_result.data_addr   = pocket->manifest_addr;
         ipc_result.sender_pid  = pocket->pid;
         ipc_result.context     = KCTX_IPC;
         KResultPush(target, &ipc_result);
@@ -68,8 +68,8 @@ int execution_deck_handler(Pocket *pocket, process_t *proc)
 
     Result result;
     result.error_code  = pocket->error_code;
-    result.data_length = pocket->data_length;
-    result.data_addr   = pocket->data_addr;
+    result.data_length = pocket->manifest_size;
+    result.data_addr   = pocket->manifest_addr;
     result.sender_pid  = 0;
     result.context     = KCTX_GUIDE;
 

@@ -10,69 +10,62 @@
  * Pocket — kernel-bound syscall envelope (Phase 12: Manifest-only).
  *
  * Every Pocket either carries POCKET_FLAG_YIELD (cooperative tick, no work)
- * or POCKET_FLAG_MANIFEST (single-shot Manifest dispatch). The reinterpreted
- * fields below describe the Manifest payload:
+ * or POCKET_FLAG_MANIFEST (single-shot Manifest dispatch). In Manifest mode
+ * the envelope carries pointers to the raw Manifest byte stream and the
+ * Crate[] array, both living in the sender cabin's user heap.
  *
- *   data_addr       -> manifest_addr   (user vaddr of raw Manifest)
- *   data_length     -> manifest_size   (Manifest size in bytes)
- *   route_tag[0..7] -> crates_addr     (user vaddr of Crate[])
- *   route_tag[8..9] -> crate_count
- *   route_tag[10..11] -> pier_id
+ * Layout is 64 bytes — half the legacy 128-byte slot stride. The shrink
+ * doubles PocketRing capacity within the same 1 MiB slot reservation
+ * (POCKET_RING_SLOT_MAX: 8192 → 16384) and halves the cacheline footprint
+ * of the hot KPocketPeek / pocket_ring_push path.
  *
- * The struct stays at 128 bytes for slot stride compatibility — _pad reserves
- * the bytes that used to hold the legacy prefix-chain fields. Future cleanup
- * can shrink this to 64 bytes once the slot stride is renegotiated.
+ * The trailing _pad[24] is reserved for ABI growth (priority hints, deadline
+ * stamps, sender-credential bits) so future expansion does not renegotiate
+ * the slot stride again.
  */
 
 typedef struct __packed {
-    uint32_t pid;                /* kernel overwrites from process_t (security) */
-    uint32_t target_pid;         /* 0 = self, != 0 = IPC route */
-    uint32_t error_code;         /* deck handlers write errors here */
-    uint8_t  flags;              /* POCKET_FLAG_YIELD | POCKET_FLAG_MANIFEST */
+    uint32_t pid;             /* kernel overwrites from process_t (security)  */
+    uint32_t target_pid;      /* 0 = self, != 0 = IPC route                   */
+    uint32_t error_code;      /* deck handlers write errors here              */
+    uint8_t  flags;           /* POCKET_FLAG_YIELD | POCKET_FLAG_MANIFEST     */
     uint8_t  _reserved[3];
-    uint32_t data_length;        /* manifest size */
-    uint64_t data_addr;          /* manifest user vaddr */
-    char     route_tag[32];      /* manifest mode: crates_addr/count/pier_id */
-    uint8_t  _pad[68];           /* pad to 128 bytes for PocketRing slot stride */
+    uint32_t manifest_size;   /* bytes at manifest_addr                       */
+    uint16_t crate_count;     /* number of entries in Crate[]                 */
+    uint16_t pier_id;         /* urgency lane                                 */
+    uint64_t manifest_addr;   /* user vaddr of raw Manifest                   */
+    uint64_t crates_addr;     /* user vaddr of Crate[]                        */
+    uint8_t  _pad[24];        /* reserved for ABI growth (pad to 64 bytes)    */
 } Pocket;
 
-_Static_assert(sizeof(Pocket) == 128, "Pocket must be 128 bytes for PocketRing packing");
+_Static_assert(sizeof(Pocket) == 64, "Pocket must be 64 bytes for PocketRing packing");
 
 #define POCKET_FLAG_YIELD     0x80
 #define POCKET_FLAG_MANIFEST  0x40
 
 static inline uint64_t PocketManifestAddr(const Pocket *p)
 {
-    return p ? p->data_addr : 0;
+    return p ? p->manifest_addr : 0;
 }
 
 static inline uint32_t PocketManifestSize(const Pocket *p)
 {
-    return p ? p->data_length : 0;
+    return p ? p->manifest_size : 0;
 }
 
 static inline uint64_t PocketCratesAddr(const Pocket *p)
 {
-    if (!p) return 0;
-    uint64_t v;
-    memcpy(&v, p->route_tag, sizeof(v));
-    return v;
+    return p ? p->crates_addr : 0;
 }
 
 static inline uint16_t PocketCrateCount(const Pocket *p)
 {
-    if (!p) return 0;
-    uint16_t v;
-    memcpy(&v, p->route_tag + 8, sizeof(v));
-    return v;
+    return p ? p->crate_count : 0;
 }
 
 static inline uint16_t PocketPierId(const Pocket *p)
 {
-    if (!p) return 0;
-    uint16_t v;
-    memcpy(&v, p->route_tag + 10, sizeof(v));
-    return v;
+    return p ? p->pier_id : 0;
 }
 
 static inline void pocket_init(Pocket *p)

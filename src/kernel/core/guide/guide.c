@@ -102,14 +102,14 @@ static void guide_process_manifest_pocket(Pocket *pocket, process_t *proc)
                      (unsigned long)manifest_uaddr);
     }
 
-    /* Clear legacy data fields so the Result delivered to the sender's
+    /* Clear envelope payload fields so the Result delivered to the sender's
      * ResultRing does not leak the Manifest user vaddr. Zero target_pid:
      * IPC delivery is the explicit job of system.route / system.broadcast
      * ops; execution_deck_handler writes only the local confirmation
      * Result back to the sender. */
-    pocket->data_addr   = 0;
-    pocket->data_length = 0;
-    pocket->target_pid  = 0;
+    pocket->manifest_addr = 0;
+    pocket->manifest_size = 0;
+    pocket->target_pid    = 0;
 
     /* When an op parks the process asynchronously (PROC_WAITING) and returns
      * ERR_WOULD_BLOCK, no synchronous Result should be pushed. The async path

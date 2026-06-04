@@ -127,12 +127,14 @@
 #define CABIN_TOUCH_SLOTS_SIZE         (CABIN_TOUCH_SLOTS_PAGES * 0x1000ULL)
 #define CABIN_TOUCH_SLOTS_END          (CABIN_TOUCH_SLOTS_BASE + CABIN_TOUCH_SLOTS_SIZE)
 
-/* Slot strides. POCKET_SLOT_SIZE matches sizeof(Pocket); RESULT_SLOT_SIZE is
- * rounded up from sizeof(Result)=24 to the next power of two so a slot never
- * straddles a page boundary. TOUCH_SLOT_SIZE is 128 bytes — enough to inline
- * 96 bytes of Touch payload alongside the 24-byte metadata header and the
- * 8-byte seq counter, with 128 dividing 4 KiB evenly for clean page alignment. */
-#define POCKET_SLOT_SIZE               128
+/* Slot strides. POCKET_SLOT_SIZE matches sizeof(Pocket) — 64 bytes after the
+ * Phase-12 envelope shrink, which also doubles PocketRing capacity within the
+ * same 1 MiB reservation. RESULT_SLOT_SIZE is rounded up from sizeof(Result)=24
+ * to the next power of two so a slot never straddles a page boundary.
+ * TOUCH_SLOT_SIZE is 128 bytes — enough to inline 96 bytes of Touch payload
+ * alongside the 24-byte metadata header and the 8-byte seq counter, with 128
+ * dividing 4 KiB evenly for clean page alignment. */
+#define POCKET_SLOT_SIZE               64
 #define RESULT_SLOT_SIZE               32
 #define TOUCH_SLOT_SIZE                128
 
@@ -147,7 +149,7 @@
 #define BOXOS_TOUCH_PAYLOAD_MAX        96u
 
 /* Capacity computed from reservation / stride. */
-#define POCKET_RING_SLOT_MAX           (CABIN_POCKET_SLOTS_SIZE / POCKET_SLOT_SIZE)  /* 8192 */
+#define POCKET_RING_SLOT_MAX           (CABIN_POCKET_SLOTS_SIZE / POCKET_SLOT_SIZE)  /* 16384 */
 #define RESULT_RING_SLOT_MAX           (CABIN_RESULT_SLOTS_SIZE / RESULT_SLOT_SIZE)  /* 32768 */
 #define TOUCH_RING_SLOT_MAX            (CABIN_TOUCH_SLOTS_SIZE / TOUCH_SLOT_SIZE)    /* 8192 */
 
