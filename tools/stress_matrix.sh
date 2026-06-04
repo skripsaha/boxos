@@ -233,8 +233,29 @@ run_config() {
 }
 
 # Build once.
-echo "Building kernel + userspace... (mode=$MODE)"
-make >/dev/null 2>&1 || { echo "BUILD FAILED"; exit 2; }
+#
+# DEBUG=on environment variable (or first arg "debug") enables
+# CONFIG_DEBUG_ENABLED/CONFIG_DEBUG_MODE so debug_printf surfaces on
+# serial. Use when chasing a regression — without it debug_printf
+# silently no-ops and the only kernel chatter on serial is kprintf
+# (PANIC, perf_dump, deliberate diagnostic prints).
+#
+#   DEBUG=on tools/stress_matrix.sh
+#   tools/stress_matrix.sh debug
+#   tools/stress_matrix.sh fast debug
+#
+# Note: stress_matrix passes pattern checks regardless of DEBUG, but
+# DEBUG-on logs are MUCH larger (~10× serial.log size) and slow each
+# config by a few seconds. Don't enable for routine validation.
+DEBUG_FLAG=${DEBUG:-off}
+for arg in "$@"; do
+    case "$arg" in
+        debug|DEBUG=on|debug=on) DEBUG_FLAG=on ;;
+    esac
+done
+
+echo "Building kernel + userspace... (mode=$MODE debug=$DEBUG_FLAG)"
+make DEBUG=$DEBUG_FLAG >/dev/null 2>&1 || { echo "BUILD FAILED"; exit 2; }
 
 if [ "$MODE" = "fast" ]; then
     # 4 representative configs covering both firmwares + uniprocessor +

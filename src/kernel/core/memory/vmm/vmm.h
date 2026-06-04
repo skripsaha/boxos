@@ -336,6 +336,16 @@ void* vmm_translate_user_addr(vmm_context_t* ctx, uintptr_t user_vaddr, size_t s
  * mid-walk (unmapped, non-user, or alloc failure).
  */
 void *vmm_user_buf_in(vmm_context_t *ctx, uintptr_t user_vaddr, size_t size);
+
+/*
+ * vmm_user_buf_in_into — same page-walked copy as vmm_user_buf_in but
+ * writes into a caller-supplied kernel buffer (no kmalloc/kfree). Use
+ * when the caller already owns a destination (stack scratch, preallocated
+ * arena, etc.). Returns 0 on success, -1 if any page fails to translate.
+ */
+int  vmm_user_buf_in_into(vmm_context_t *ctx, uintptr_t user_vaddr,
+                           size_t size, void *kbuf);
+
 void *vmm_user_buf_alloc_out(size_t size);
 int   vmm_user_buf_commit_out(vmm_context_t *ctx, uintptr_t user_vaddr,
                               const void *kbuf, size_t size);

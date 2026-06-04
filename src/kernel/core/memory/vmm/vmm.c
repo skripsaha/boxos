@@ -3049,12 +3049,22 @@ uintptr_t vmm_virt_to_phys_huge_2m(vmm_context_t *ctx, uintptr_t virt_addr)
  * page (offset != 0), and partial last page (size not a page multiple).
  */
 
-void *vmm_user_buf_in(vmm_context_t *ctx, uintptr_t user_vaddr, size_t size)
+/*
+ * vmm_user_buf_in_into — copy a multi-page user-VA range into a caller-
+ * supplied kernel buffer. Page-by-page walk handles non-contiguous physical
+ * backing and non-page-aligned start/end. NO allocation: the caller owns
+ * the destination buffer (stack, heap, or preallocated scratch).
+ *
+ * Returns 0 on success. Returns -1 on the first page that fails to
+ * translate (PT missing, not VMM_FLAG_USER, etc.); on failure the contents
+ * of `kbuf` beyond `[0, fail_offset)` are undefined. Caller is expected to
+ * treat partial copies as full failure — i.e. discard kbuf or its
+ * downstream interpretation.
+ */
+int vmm_user_buf_in_into(vmm_context_t *ctx, uintptr_t user_vaddr,
+                          size_t size, void *kbuf)
 {
-    if (!ctx || size == 0) return NULL;
-
-    void *kbuf = kmalloc(size);
-    if (!kbuf) return NULL;
+    if (!ctx || !kbuf || size == 0) return -1;
 
     size_t copied = 0;
     while (copied < size) {
@@ -3063,12 +3073,23 @@ void *vmm_user_buf_in(vmm_context_t *ctx, uintptr_t user_vaddr, size_t size)
         if (this_page > size - copied) this_page = size - copied;
 
         void *src = vmm_translate_user_addr(ctx, user_vaddr + copied, this_page);
-        if (!src) {
-            kfree(kbuf);
-            return NULL;
-        }
+        if (!src) return -1;
         memcpy((uint8_t *)kbuf + copied, src, this_page);
         copied += this_page;
+    }
+    return 0;
+}
+
+void *vmm_user_buf_in(vmm_context_t *ctx, uintptr_t user_vaddr, size_t size)
+{
+    if (!ctx || size == 0) return NULL;
+
+    void *kbuf = kmalloc(size);
+    if (!kbuf) return NULL;
+
+    if (vmm_user_buf_in_into(ctx, user_vaddr, size, kbuf) != 0) {
+        kfree(kbuf);
+        return NULL;
     }
     return kbuf;
 }
