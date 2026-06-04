@@ -20,6 +20,7 @@
 #include "klib.h"
 #include "op_registry.h"
 #include "manifest_auth.h"
+#include "manifest_stage.h"
 #include "boxos_manifest.h"
 #include "boxos_crate.h"
 #include "system_deck.h"
@@ -960,6 +961,7 @@ static int SysPerfDump(const ManifestOp *op, Crate *crates, uint16_t crate_count
 {
     (void)op; (void)crates; (void)crate_count; (void)ctx;
     perf_dump();
+    ManifestStageDumpAll();
     return OK;
 }
 

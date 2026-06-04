@@ -39,6 +39,17 @@ typedef uint64_t ManifestHandle;
 
 #define COMPILED_MANIFEST_MAGIC 0x434D4E46u  /* 'CMNF' */
 
+/*
+ * Shared upper bound on raw Manifest payloads accepted by ANY entry point —
+ * ManifestCompile and the guide.c dispatch staging path (ManifestStage) both
+ * reject inputs larger than this. 1 MiB is far beyond any realistic op
+ * stream: the 16-bit op_count field caps the wire format at 65535 ops, and
+ * even at the maximum 12-byte op header (param_size=0) that's 768 KiB
+ * without parameters. Larger payloads should use Brook (streaming) or be
+ * split into multiple smaller submissions instead of growing this cap.
+ */
+#define MANIFEST_RAW_MAX_SIZE (1u << 20)
+
 typedef struct CompiledManifest {
     uint32_t                magic;
     uint32_t                handle_slot;     /* slot index this object lives in */

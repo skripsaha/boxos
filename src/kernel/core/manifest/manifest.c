@@ -18,20 +18,8 @@
 #define MANIFEST_TABLE_INITIAL_CAP 32u
 #define MANIFEST_TABLE_MAX_CAP     (1u << 24)
 
-/*
- * Upper bound on the raw Manifest size accepted by ManifestCompile.
- *
- * 1 MiB is far beyond any realistic op stream — the 16-bit op_count field
- * caps the wire format at 65535 ops, and even at the maximum 12-byte op
- * header (param_size=0) that's 768 KiB without parameters; with realistic
- * inline parameters the practical max is well under 256 KiB.
- *
- * The bound is purely a DoS guard against a malicious cabin passing an
- * absurd `size` and forcing a giant kmalloc / page walk before the
- * size-vs-total_size check inside manifest_validate_and_index rejects the
- * input. Without it, the worst case is bounded only by uint32_t (4 GiB).
- */
-#define MANIFEST_MAX_COMPILE_SIZE (1u << 20)
+/* Upper bound on raw Manifest size — shared with guide.c dispatch staging
+ * via MANIFEST_RAW_MAX_SIZE in manifest.h. */
 
 typedef struct ManifestSlot {
     CompiledManifest *manifest;     /* NULL when slot is free */
@@ -270,7 +258,7 @@ error_t ManifestCompile(struct process_t *owner,
     if (!g_manifest_table.initialized) return ERR_NOT_INITIALIZED;
     if (!user_or_kernel || size == 0)  return ERR_INVALID_ARGUMENT;
     if (size < sizeof(Manifest))       return ERR_BUFFER_TOO_SMALL;
-    if (size > MANIFEST_MAX_COMPILE_SIZE) return ERR_INVALID_ARGUMENT;
+    if (size > MANIFEST_RAW_MAX_SIZE) return ERR_INVALID_ARGUMENT;
 
     /*
      * Step 1: stage the raw Manifest bytes into a kernel-owned buffer.
