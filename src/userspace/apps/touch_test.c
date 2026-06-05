@@ -1,5 +1,6 @@
 #include "box/touch.h"
 #include "box/debug.h"
+#include "box/print.h"
 #include "box/ipc.h"
 #include "box/system.h"
 #include "box/time.h"
@@ -59,6 +60,30 @@ static int spawn_role(uint8_t role)
     uint8_t pkt[2] = { ROLE_MAGIC, role };
     send((uint32_t)child, pkt, 2);
     return child;
+}
+
+/*
+ * drain_state — wipe BOTH ResultRing and TouchRing before a test runs.
+ *
+ * Each touch_test sub-test relies on a deterministic empty-ring baseline:
+ *   - ResultRing leftovers from a previous test's await-timeout or IPC
+ *     could be popped by a subsequent receive_wait and skew payload
+ *     comparisons.
+ *   - TouchRing leftovers are even nastier — touch_pop is FIFO and does
+ *     not filter by tag, so a stale Touch from TT N-1 (e.g. TT 10's
+ *     wildcard catching multiple paired publishes) will satisfy TT N's
+ *     await with the wrong payload, surfacing as "TT N FAIL: ...".
+ *     This was the root cause of the historical TT 11 LATCHED flake
+ *     (~1-3 % per matrix run before this drain landed).
+ *
+ * The drain is cheap (each pop returns false immediately on an empty
+ * ring), so it's safe to apply to every test entry — defense in depth
+ * for any future TT that doesn't yet exist.
+ */
+static inline void drain_state(void)
+{
+    Result rd; while (receive_wait(&rd, 50)) { }
+    Touch  td; while (touch_pop(&td))         { }
 }
 
 /* ---------- child roles ---------- */
@@ -182,7 +207,7 @@ static void test1(void)
 /* ---------- T2: Multicast ---------- */
 static void test2(void)
 {
-    { Result drain; while (receive_wait(&drain, 50)) { } }
+    drain_state();
 
     int c1 = spawn_role(ROLE_BCAST_LISTEN);
     if (c1 < 0) { fail(2, "spawn c1 failed"); return; }
@@ -309,7 +334,7 @@ static void test6(void)
 /* ---------- T7: LEVEL policy ---------- */
 static void test7(void)
 {
-    { Result drain; while (receive_wait(&drain, 50)) { } }
+    drain_state();
 
     TouchTag tag = TOUCH_TAG_ID(TAG_LEVEL);
     touch_register(tag, TOUCH_POLICY_LEVEL, TOUCH_CAP_OPEN);
@@ -421,7 +446,7 @@ static void test9(void)
 /* ---------- T10: Wildcard — claim "key:..." catches any "key:value" send ---------- */
 static void test10(void)
 {
-    { Result drain; while (receive_wait(&drain, 50)) { } }
+    drain_state();
 
     /* Wildcard subscription resolves bare_id; sends to specific values
      * publish to BOTH full and bare → wildcard receives. */
@@ -447,7 +472,7 @@ static void test10(void)
 /* ---------- T11: LATCHED — only first publish queued until ack ---------- */
 static void test11(void)
 {
-    { Result drain; while (receive_wait(&drain, 50)) { } }
+    drain_state();
 
     TouchTag tag = TOUCH_TAG_ID("latch:slot");
     int rc_reg = touch_register(tag, TOUCH_POLICY_LATCHED, TOUCH_CAP_OPEN);
@@ -514,7 +539,7 @@ int main(void)
 
     kdbg_print("[TT] Touch Integration Tests starting");
 
-    { Result drain; while (receive_wait(&drain, 30)) { } }
+    drain_state();
 
     test1();
     test2();
