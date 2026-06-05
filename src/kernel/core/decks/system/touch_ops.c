@@ -237,15 +237,29 @@ static int SysTouchAwait(const ManifestOp *op, Crate *crates,
                                MANIFEST_HANDLE_INVALID, 0, 0);
     if (rc != OK) return rc;
 
-    /* LEVEL on-claim sync. */
+    /* LEVEL + LATCHED on-claim sync. */
     {
         TouchPolicy policy = TOUCH_POLICY_EDGE;
-        if (TouchPolicyGet(tag, &policy, NULL) &&
-            policy == TOUCH_POLICY_LEVEL) {
-            uint8_t state = TouchPolicyLevelState(tag);
-            if (state != 0)
-                TouchRestDeliver(ctx->proc, tag, &state, 1, 0,
-                                 TOUCH_FLAG_KERNEL);
+        if (TouchPolicyGet(tag, &policy, NULL)) {
+            if (policy == TOUCH_POLICY_LEVEL) {
+                uint8_t state = TouchPolicyLevelState(tag);
+                if (state != 0)
+                    TouchRestDeliver(ctx->proc, tag, &state, 1, 0,
+                                     TOUCH_FLAG_KERNEL);
+            } else if (policy == TOUCH_POLICY_LATCHED) {
+                /* If a publish happened before our claim and no ack has
+                 * cleared the bucket, deliver the latched payload now so
+                 * the awaiter never misses a one-shot value. Matches the
+                 * "first publish queued until ack" intuition for the
+                 * late-joiner case. The 96 B stack buffer is safe — the
+                 * bucket-side payload is capped at BOXOS_TOUCH_PAYLOAD_MAX. */
+                uint8_t buf[BOXOS_TOUCH_PAYLOAD_MAX];
+                uint32_t plen = TouchPolicyLatchedSnapshot(tag, buf);
+                if (plen > 0) {
+                    TouchRestDeliver(ctx->proc, tag, buf, plen, 0,
+                                     TOUCH_FLAG_KERNEL);
+                }
+            }
         }
     }
 

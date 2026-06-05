@@ -39,7 +39,15 @@ error_t crate_stage_commit_and_release(Crate                *crates,
 {
     if (!crates) return OK;
     error_t rc = OK;
-    if (count > 0 && cabin) {
+    /*
+     * user_uaddr == 0 is the sentinel for "kernel-internal staging" — used
+     * by touch_react_deliver where the Crate descriptor is synthesized
+     * inside the kernel and the subscriber's manifest never asked for a
+     * user-side write-back. In that mode we skip commit_out entirely and
+     * just kfree. The Pocket-dispatch path in guide.c always passes a
+     * real user vaddr, so this sentinel only matches the intended caller.
+     */
+    if (count > 0 && cabin && user_uaddr != 0) {
         size_t bytes = (size_t)count * sizeof(Crate);
         rc = vmm_user_buf_commit_out(cabin, (uintptr_t)user_uaddr, crates, bytes);
         if (rc != OK) {
