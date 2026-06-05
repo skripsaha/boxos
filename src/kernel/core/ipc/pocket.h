@@ -40,8 +40,17 @@ typedef struct __packed {
 
 _Static_assert(sizeof(Pocket) == 64, "Pocket must be 64 bytes for PocketRing packing");
 
-#define POCKET_FLAG_YIELD     0x80
-#define POCKET_FLAG_MANIFEST  0x40
+#define POCKET_FLAG_YIELD            0x80
+#define POCKET_FLAG_MANIFEST         0x40
+/*
+ * POCKET_FLAG_MANIFEST_HANDLE — handle-mode submit (set TOGETHER with
+ * POCKET_FLAG_MANIFEST). manifest_addr carries a 64-bit ManifestHandle
+ * returned by SYSTEM_OP_MANIFEST_COMPILE, not a user vaddr; manifest_size
+ * is ignored. The kernel resolves the handle, verifies the calling cabin
+ * owns it, and calls ManifestExecute on the cached CompiledManifest —
+ * skipping the full validate + per-op OpRegistryLookup pass.
+ */
+#define POCKET_FLAG_MANIFEST_HANDLE  0x20
 
 static inline uint64_t PocketManifestAddr(const Pocket *p)
 {

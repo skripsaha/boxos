@@ -125,4 +125,18 @@ error_t ManifestRelease(ManifestHandle handle);
 uint32_t ManifestActiveCount(void);
 void     ManifestDump(ManifestHandle handle);
 
+/*
+ * Release every handle owned by `owner_pid`. Called from process_destroy
+ * so a dying cabin doesn't leak compiled Manifests. Race-safe against
+ * concurrent ManifestExecute on the same handle from another core — Resolve
+ * pins the compiled form for the executor's duration, and our Release just
+ * drops the cabin's initial ref. The compiled form is freed when refcount
+ * hits 0 (i.e. after the in-flight Execute also Releases).
+ *
+ * Iterates in 64-handle batches so we hold g_manifest_table.lock briefly;
+ * the actual ManifestRelease calls happen unlocked. Generation counter in
+ * the handle makes any stale-slot race a harmless ERR_INVALID_ARGUMENT.
+ */
+void ManifestReleaseAllForOwner(uint32_t owner_pid);
+
 #endif /* MANIFEST_H */

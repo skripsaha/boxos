@@ -85,6 +85,17 @@ typedef struct WriteJob {
     /* ---- state machine ---- */
     _Atomic int       state;
     uint8_t           home_kcore;
+
+    /* ---- CrateStage handoff (async-safe Crate descriptor staging) ----
+     * Dispatcher allocated the Crate[] kbuf via crate_stage_in and points
+     * out_crate above into it. Ownership transfers to this WriteJob the
+     * moment ObjWriteAsync returns ERR_WOULD_BLOCK with PROC_WAITING.
+     * wjob_finalize writes out_crate->size = bytes_written, then calls
+     * crate_stage_commit_and_release to flush the descriptor array back
+     * to user memory and free the kbuf. */
+    Crate            *crates_kbuf;
+    uint64_t          crates_uaddr;
+    uint16_t          crate_count;
 } WriteJob;
 
 int ObjWriteAsync(uint32_t           file_id,
@@ -94,6 +105,9 @@ int ObjWriteAsync(uint32_t           file_id,
                   uint32_t           size,
                   Crate             *out_crate,
                   void              *out_kp,
-                  const struct OpContext *ctx);
+                  const struct OpContext *ctx,
+                  Crate             *crates_kbuf,   /* staged Crate[] ownership */
+                  uint16_t           crate_count,
+                  uint64_t           crates_uaddr);
 
 #endif /* WRITE_JOB_H */

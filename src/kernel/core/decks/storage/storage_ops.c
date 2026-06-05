@@ -24,6 +24,7 @@
  */
 
 #include "klib.h"
+#include "crate_stage.h"
 #include "op_registry.h"
 #include "manifest_auth.h"
 #include "boxos_manifest.h"
@@ -169,9 +170,9 @@ static uint16_t param_u16(const ManifestOp *op, uint16_t off)
 typedef struct {
     process_t       *target;       /* pinned via process_find_ref */
     TagFSFileHandle *handle;       /* close on completion */
-    Crate           *out_crate;    /* user-mapped, write back size on completion */
+    Crate           *out_crate;    /* points into crates_kbuf; valid until release */
     uint8_t         *out_base;     /* kernel-side bounce buffer (kmalloc'd) */
-    uintptr_t        out_user_addr;/* user vaddr; commit_out target */
+    uintptr_t        out_user_addr;/* user vaddr; commit_out target for payload */
     uint64_t         total_bytes;
     uint64_t         bytes_done;
     uint64_t         start_offset;
@@ -179,6 +180,16 @@ typedef struct {
     void            *dma_virt;
     uint32_t         in_flight_off_in_blk;
     uint32_t         in_flight_chunk;
+
+    /* CrateStage handoff: ownership of the staged Crate[] buffer transfers
+     * from the dispatcher to this async context the moment ObjRead returns
+     * ERR_WOULD_BLOCK with PROC_WAITING. Async completion writes
+     * crates_kbuf[idx].size = N (via out_crate above), then calls
+     * crate_stage_commit_and_release to write back + free. */
+    Crate           *crates_kbuf;
+    uint64_t         crates_uaddr;
+    uint16_t         crate_count;
+    uint16_t         _pad[3];
 } ObjReadAsyncCtx;
 
 static void obj_read_step(ObjReadAsyncCtx *ctx);
@@ -208,6 +219,17 @@ static void obj_read_finish(ObjReadAsyncCtx *ctx, error_t status, bool partial_o
     if (ctx->out_base)  vmm_user_buf_free(ctx->out_base);
     if (ctx->dma_phys)  pmm_free(ctx->dma_phys, 1);
     if (ctx->handle)    tagfs_close(ctx->handle);
+
+    /* CrateStage release: the dispatcher handed the staged Crate[] buffer
+     * to this async context at ERR_WOULD_BLOCK. We wrote crates[idx].size
+     * just above; now commit the whole descriptor array back to user
+     * memory and free the kbuf. Always run, even on partial-fail paths —
+     * the dispatcher will NOT clean up after async-park. */
+    if (ctx->crates_kbuf) {
+        crate_stage_commit_and_release(ctx->crates_kbuf, ctx->crate_count,
+                                        ctx->target ? ctx->target->cabin : NULL,
+                                        ctx->crates_uaddr);
+    }
 
     KResultPush(ctx->target, &r);
     process_ref_dec(ctx->target);
@@ -344,6 +366,17 @@ static int ObjRead(const ManifestOp *op,
                         async_ctx->start_offset  = offset;
                         async_ctx->dma_phys      = dma_phys;
                         async_ctx->dma_virt      = dma_virt;
+                        /* CrateStage ownership transfer: the dispatcher
+                         * staged the Crate[] kbuf and points `crates`
+                         * (handler arg) at it. We take that pointer +
+                         * the user-side write-back coordinates from
+                         * OpContext. After we return ERR_WOULD_BLOCK
+                         * + PROC_WAITING, the dispatcher will not touch
+                         * the staged crates; obj_read_finish must call
+                         * crate_stage_commit_and_release. */
+                        async_ctx->crates_kbuf   = crates;
+                        async_ctx->crates_uaddr  = ctx->crates_uaddr;
+                        async_ctx->crate_count   = ctx->crate_count;
 
                         /* Park BEFORE the first submit — if the IRQ
                          * fires before we set WAITING, KResultPush's
@@ -351,6 +384,13 @@ static int ObjRead(const ManifestOp *op,
                          * no-op and the wake is lost. Setting WAITING
                          * first makes that transition reliable. */
                         process_set_state(ctx->proc, PROC_WAITING);
+                        /* Signal ownership transfer of the staged crates
+                         * kbuf to the async_ctx. Dispatcher reads this
+                         * flag (instead of process state) to decide
+                         * whether to skip sync cleanup — race-safe vs
+                         * a fast AHCI completion that would have flipped
+                         * state back to PROC_WORKING. */
+                        if (ctx->async_owns_crates) *ctx->async_owns_crates = true;
                         obj_read_step(async_ctx);
                         return ERR_WOULD_BLOCK;
                     }
@@ -429,9 +469,11 @@ static int ObjWrite(const ManifestOp *op,
     if (ahci_is_initialized() && ctx && ctx->proc && g_amp.total_cores > 1) {
         int rc = ObjWriteAsync(file_id, offset, flags,
                                src_bounce, (uint32_t)src->size,
-                               out_crate, out_kp, ctx);
+                               out_crate, out_kp, ctx,
+                               crates, ctx->crate_count, ctx->crates_uaddr);
         if (rc == ERR_WOULD_BLOCK) {
-            /* Async owns src_bounce now — it frees on W_DONE. */
+            /* Async owns src_bounce AND the staged Crate[] kbuf now —
+             * wjob_finalize frees both at W_DONE. */
             return ERR_WOULD_BLOCK;
         }
         /* Hard failure before submission — free + fall through. */

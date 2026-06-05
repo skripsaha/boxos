@@ -175,6 +175,109 @@ int ManifestSubmit(const Manifest *m,
  * returns the kernel error_code (OK = 0).
  * ------------------------------------------------------------------------- */
 
+/* =========================================================================
+ *  Compile-and-reuse — wraps SYSTEM_OP_MANIFEST_COMPILE / _RELEASE +
+ *  the POCKET_FLAG_MANIFEST_HANDLE submit path. See manifest.h for the
+ *  workflow.
+ * ========================================================================= */
+
+/* Mirror of kernel/core/decks/system/system_deck.h — keep in sync. */
+#define SYSTEM_OP_MANIFEST_COMPILE 0x80
+#define SYSTEM_OP_MANIFEST_RELEASE 0x81
+
+int ManifestCompileHandle(const Manifest *m, ManifestHandle *out_handle)
+{
+    if (!m || !out_handle)             return -ERR_INVALID_ARGS;
+    if (m->magic != MANIFEST_MAGIC)    return -ERR_INVALID_ARGS;
+
+    /* Build an outer Manifest with ONE op = system.manifest.compile.
+     * Input crate = inner Manifest bytes; output crate = uint64 handle. */
+    uint8_t outer[sizeof(Manifest) + sizeof(ManifestOp)];
+    ManifestBuilder mb;
+    if (ManifestBuilderInit(&mb, outer, sizeof(outer)) != 0) return -ERR_INVALID_ARGS;
+    if (ManifestBuilderAddOp(&mb, DECK_SYSTEM, SYSTEM_OP_MANIFEST_COMPILE,
+                             0, 0, 1, NULL, 0) != 0)         return -ERR_INVALID_ARGS;
+    if (ManifestBuilderFinalize(&mb) != 0)                   return -ERR_INVALID_ARGS;
+
+    Crate crates[2];
+    CrateSetInput(&crates[0], (void *)m, m->total_size);
+    ManifestHandle handle_buf = 0;
+    CrateSetOutput(&crates[1], &handle_buf, sizeof(handle_buf));
+
+    Result r;
+    int rc = ManifestSubmit((Manifest *)outer, crates, 2, &r);
+    if (rc != OK) return rc;
+
+    *out_handle = handle_buf;
+    return OK;
+}
+
+static int submit_handle_pocket(ManifestHandle handle, const Crate *crates,
+                                uint16_t crate_count, uint32_t target_pid,
+                                Result *out_result, uint32_t timeout_ms)
+{
+    if (handle == 0)                          return -ERR_INVALID_ARGS;
+    if (crate_count > 0 && !crates)           return -ERR_INVALID_ARGS;
+
+    /* Drop orphan replies from prior timed-out submits — same hygiene as
+     * ManifestSubmitFull (manifest.c:148). */
+    result_drain_orphan_replies();
+
+    Pocket p;
+    pocket_prepare(&p);
+    p.flags         = POCKET_FLAG_MANIFEST | POCKET_FLAG_MANIFEST_HANDLE;
+    p.target_pid    = target_pid;
+    p.manifest_addr = (uint64_t)handle;   /* repurposed: carries the handle */
+    p.manifest_size = 0;                  /* unused in handle mode */
+    p.crates_addr   = (uint64_t)(uintptr_t)crates;
+    p.crate_count   = crate_count;
+    p.pier_id       = 0;
+
+    if (pocket_submit(&p) != 0) return -ERR_POCKET_RING_FULL;
+
+    Result tmp;
+    if (!result_wait(&tmp, timeout_ms)) return -ERR_TIMEOUT;
+    if (out_result) *out_result = tmp;
+    return (int)tmp.error_code;
+}
+
+int ManifestSubmitHandleTimeout(ManifestHandle  handle,
+                                Crate          *crates,
+                                uint16_t        crate_count,
+                                Result         *out_result,
+                                uint32_t        timeout_ms)
+{
+    return submit_handle_pocket(handle, crates, crate_count, 0,
+                                 out_result, timeout_ms);
+}
+
+int ManifestSubmitHandle(ManifestHandle  handle,
+                         Crate          *crates,
+                         uint16_t        crate_count,
+                         Result         *out_result)
+{
+    return ManifestSubmitHandleTimeout(handle, crates, crate_count,
+                                        out_result, 1000);
+}
+
+int ManifestReleaseHandle(ManifestHandle handle)
+{
+    if (handle == 0) return -ERR_INVALID_ARGS;
+
+    /* SYSTEM_OP_MANIFEST_RELEASE takes the handle as in_crate payload (8 B). */
+    uint8_t outer[sizeof(Manifest) + sizeof(ManifestOp)];
+    ManifestBuilder mb;
+    if (ManifestBuilderInit(&mb, outer, sizeof(outer)) != 0) return -ERR_INVALID_ARGS;
+    if (ManifestBuilderAddOp(&mb, DECK_SYSTEM, SYSTEM_OP_MANIFEST_RELEASE,
+                             0, 0, CRATE_INDEX_NONE, NULL, 0) != 0) return -ERR_INVALID_ARGS;
+    if (ManifestBuilderFinalize(&mb) != 0)                   return -ERR_INVALID_ARGS;
+
+    Crate crates[1];
+    CrateSetInput(&crates[0], &handle, sizeof(handle));
+
+    return ManifestSubmit((Manifest *)outer, crates, 1, NULL);
+}
+
 int MfCall1(uint16_t      deck,
             uint16_t      opcode,
             const void   *params,    uint16_t param_size,

@@ -966,6 +966,102 @@ static int SysPerfDump(const ManifestOp *op, Crate *crates, uint16_t crate_count
 }
 
 /* =========================================================================
+ *  Manifest compile-and-reuse — "prepared statement" pattern.
+ *
+ *  COMPILE:  in_crate  = raw Manifest bytes (any size up to MANIFEST_RAW_MAX_SIZE)
+ *            out_crate = uint64 handle (capacity ≥ 8)
+ *
+ *            The kernel copies the raw bytes via ManifestCompile (page-walked
+ *            user-PT copy is built into ManifestCompile's is_kernel_ptr=false
+ *            path), validates each op, resolves and caches per-op handler
+ *            pointers, allocates a slot in the global ManifestTable, and
+ *            returns a (gen << 32 | slot) handle. Ownership is recorded
+ *            against ctx->proc->pid so process_destroy can auto-release
+ *            any leaked handles.
+ *
+ *  RELEASE:  in_crate  = uint64 handle (size == 8)
+ *
+ *            Decrements the handle's refcount. On 0 the CompiledManifest is
+ *            freed. Ownership check: only the cabin that compiled the
+ *            handle may release it (ERR_ACCESS_DENIED otherwise). Concurrent
+ *            ManifestExecute on the same handle stays safe — its internal
+ *            Resolve holds the form alive past this Release.
+ * ========================================================================= */
+
+static int SysManifestCompile(const ManifestOp *op, Crate *crates,
+                               uint16_t crate_count, const OpContext *ctx)
+{
+    if (!ctx || !ctx->proc || !ctx->proc->cabin) return ERR_INVALID_ARGUMENT;
+    if (op->in_crate == CRATE_INDEX_NONE)        return ERR_INVALID_ARGUMENT;
+    if (op->out_crate == CRATE_INDEX_NONE)       return ERR_INVALID_ARGUMENT;
+    if (op->in_crate >= crate_count || op->out_crate >= crate_count)
+        return ERR_INVALID_ARGUMENT;
+
+    Crate *in  = &crates[op->in_crate];
+    Crate *out = &crates[op->out_crate];
+    if (!CrateIsValid(in) || !CrateIsValid(out)) return ERR_INVALID_BUFFER_ID;
+    if (in->size == 0 || in->size > MANIFEST_RAW_MAX_SIZE)
+        return ERR_INVALID_ARGUMENT;
+    if (out->capacity < sizeof(ManifestHandle))  return ERR_BUFFER_TOO_SMALL;
+
+    ManifestHandle handle = MANIFEST_HANDLE_INVALID;
+    error_t rc = ManifestCompile(ctx->proc,
+                                  (const void *)(uintptr_t)in->addr,
+                                  (uint32_t)in->size,
+                                  /*is_kernel_ptr=*/false,
+                                  &handle);
+    if (rc != OK) return (int)rc;
+
+    /* Publish handle into the user's out crate payload via page-walked
+     * commit_out. The Crate descriptor itself (out->size) is mutated in
+     * the staged kbuf and write-back by guide.c's commit-and-release. */
+    error_t commit_rc = vmm_user_buf_commit_out(ctx->proc->cabin,
+                                                 (uintptr_t)out->addr,
+                                                 &handle,
+                                                 sizeof(handle));
+    if (commit_rc != OK) {
+        /* Roll back the compile — userspace will never see this handle. */
+        ManifestRelease(handle);
+        return (int)commit_rc;
+    }
+    out->size = sizeof(handle);
+    return OK;
+}
+
+static int SysManifestRelease(const ManifestOp *op, Crate *crates,
+                               uint16_t crate_count, const OpContext *ctx)
+{
+    if (!ctx || !ctx->proc || !ctx->proc->cabin) return ERR_INVALID_ARGUMENT;
+    if (op->in_crate == CRATE_INDEX_NONE)        return ERR_INVALID_ARGUMENT;
+    if (op->in_crate >= crate_count)             return ERR_INVALID_ARGUMENT;
+
+    Crate *in = &crates[op->in_crate];
+    if (!CrateIsValid(in))                       return ERR_INVALID_BUFFER_ID;
+    if (in->size != sizeof(ManifestHandle))      return ERR_INVALID_ARGUMENT;
+
+    /* Read the handle out of the user payload. Single page by construction
+     * (8 bytes), so vmm_translate_user_addr is safe. */
+    ManifestHandle *src = (ManifestHandle *)vmm_translate_user_addr(
+        ctx->proc->cabin, (uintptr_t)in->addr, sizeof(ManifestHandle));
+    if (!src) return ERR_INVALID_ADDRESS;
+    ManifestHandle handle = *src;
+
+    /* Ownership check via Resolve (which pins the form, preventing concurrent
+     * free during the verification). Balance with one Release. */
+    CompiledManifest *cm = ManifestResolve(handle);
+    if (!cm) return ERR_INVALID_ARGUMENT;
+    if (cm->owner_pid != ctx->proc->pid) {
+        ManifestRelease(handle);
+        return ERR_ACCESS_DENIED;
+    }
+    /* Drop the Resolve's ref. */
+    ManifestRelease(handle);
+    /* Drop the user's initial ref (from compile). Concurrent Execute holds
+     * its own Resolve ref so the form survives until that completes. */
+    return (int)ManifestRelease(handle);
+}
+
+/* =========================================================================
  *  EFI runtime / Secure Boot / ESRT — read-only introspection ops.
  *
  *  Replaces the previous "subscribe to secureboot:on/off at boot" surface
@@ -1141,6 +1237,12 @@ error_t SystemDeckRegister(void)
         { SYSTEM_OP_FRAG_SCORE,   SysFragScore,   OP_AUTH_NONE,   "system.fs.score"   },
         /* Telemetry: admin only. */
         { SYSTEM_OP_PERF_DUMP,    SysPerfDump,    OP_AUTH_SYSTEM, "system.perf.dump"  },
+
+        /* Manifest compile-and-reuse — prepared-statement pattern. */
+        { SYSTEM_OP_MANIFEST_COMPILE, SysManifestCompile, OP_AUTH_APP,
+          "system.manifest.compile" },
+        { SYSTEM_OP_MANIFEST_RELEASE, SysManifestRelease, OP_AUTH_APP,
+          "system.manifest.release" },
         /* EFI introspection: open to any process (read-only state). */
         { SYSTEM_OP_EFI_INFO,     SysEfiInfo,     OP_AUTH_NONE,   "system.efi.info"   },
         { SYSTEM_OP_EFI_ESRT_GET, SysEfiEsrtGet,  OP_AUTH_NONE,   "system.efi.esrt"   },

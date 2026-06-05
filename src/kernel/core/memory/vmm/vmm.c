@@ -3061,10 +3061,10 @@ uintptr_t vmm_virt_to_phys_huge_2m(vmm_context_t *ctx, uintptr_t virt_addr)
  * treat partial copies as full failure — i.e. discard kbuf or its
  * downstream interpretation.
  */
-int vmm_user_buf_in_into(vmm_context_t *ctx, uintptr_t user_vaddr,
-                          size_t size, void *kbuf)
+error_t vmm_user_buf_in_into(vmm_context_t *ctx, uintptr_t user_vaddr,
+                              size_t size, void *kbuf)
 {
-    if (!ctx || !kbuf || size == 0) return -1;
+    if (!ctx || !kbuf || size == 0) return ERR_INVALID_ARGUMENT;
 
     size_t copied = 0;
     while (copied < size) {
@@ -3073,11 +3073,11 @@ int vmm_user_buf_in_into(vmm_context_t *ctx, uintptr_t user_vaddr,
         if (this_page > size - copied) this_page = size - copied;
 
         void *src = vmm_translate_user_addr(ctx, user_vaddr + copied, this_page);
-        if (!src) return -1;
+        if (!src) return ERR_INVALID_ADDRESS;
         memcpy((uint8_t *)kbuf + copied, src, this_page);
         copied += this_page;
     }
-    return 0;
+    return OK;
 }
 
 void *vmm_user_buf_in(vmm_context_t *ctx, uintptr_t user_vaddr, size_t size)
@@ -3087,7 +3087,7 @@ void *vmm_user_buf_in(vmm_context_t *ctx, uintptr_t user_vaddr, size_t size)
     void *kbuf = kmalloc(size);
     if (!kbuf) return NULL;
 
-    if (vmm_user_buf_in_into(ctx, user_vaddr, size, kbuf) != 0) {
+    if (vmm_user_buf_in_into(ctx, user_vaddr, size, kbuf) != OK) {
         kfree(kbuf);
         return NULL;
     }
@@ -3102,10 +3102,10 @@ void *vmm_user_buf_alloc_out(size_t size)
     return kbuf;
 }
 
-int vmm_user_buf_commit_out(vmm_context_t *ctx, uintptr_t user_vaddr,
-                             const void *kbuf, size_t size)
+error_t vmm_user_buf_commit_out(vmm_context_t *ctx, uintptr_t user_vaddr,
+                                 const void *kbuf, size_t size)
 {
-    if (!ctx || !kbuf || size == 0) return -1;
+    if (!ctx || !kbuf || size == 0) return ERR_INVALID_ARGUMENT;
 
     size_t copied = 0;
     while (copied < size) {
@@ -3114,11 +3114,11 @@ int vmm_user_buf_commit_out(vmm_context_t *ctx, uintptr_t user_vaddr,
         if (this_page > size - copied) this_page = size - copied;
 
         void *dst = vmm_translate_user_addr(ctx, user_vaddr + copied, this_page);
-        if (!dst) return -1;
+        if (!dst) return ERR_INVALID_ADDRESS;
         memcpy(dst, (const uint8_t *)kbuf + copied, this_page);
         copied += this_page;
     }
-    return 0;
+    return OK;
 }
 
 void vmm_user_buf_free(void *kbuf)

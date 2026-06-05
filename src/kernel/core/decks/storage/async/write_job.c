@@ -28,6 +28,7 @@
 
 #include "write_job.h"
 #include "write_cont_queue.h"
+#include "crate_stage.h"
 #include "tagfs.h"
 #include "ahci.h"
 #include "ahci_async.h"
@@ -519,6 +520,17 @@ static void wjob_finalize(WriteJob *j, int rc)
     if (j->handle)      tagfs_close(j->handle);
     if (j->src_bounce)  vmm_user_buf_free(j->src_bounce);
 
+    /* CrateStage release. Dispatcher handed us ownership of crates_kbuf
+     * at ObjWriteAsync's PROC_WAITING return. We just wrote
+     * j->out_crate->size = 16 above (into kbuf); commit_and_release
+     * flushes the whole descriptor array back to user memory and frees
+     * the kbuf. Cabin is target->cabin (already pinned via ref). */
+    if (j->crates_kbuf) {
+        crate_stage_commit_and_release(j->crates_kbuf, j->crate_count,
+                                        j->target ? j->target->cabin : NULL,
+                                        j->crates_uaddr);
+    }
+
     Result r;
     memset(&r, 0, sizeof(r));
     r.error_code  = (rc == OK) ? OK : (uint32_t)ERR_IO;
@@ -616,7 +628,10 @@ int ObjWriteAsync(uint32_t            file_id,
                   uint32_t            size,
                   Crate              *out_crate,
                   void               *out_kp,
-                  const struct OpContext *ctx)
+                  const struct OpContext *ctx,
+                  Crate              *crates_kbuf,
+                  uint16_t            crate_count,
+                  uint64_t            crates_uaddr)
 {
     if (!ctx || !ctx->proc || !src_kp || size == 0) return ERR_INVALID_ARGUMENT;
 
@@ -670,7 +685,20 @@ int ObjWriteAsync(uint32_t            file_id,
     j->bytes_done    = 0;
     j->home_kcore    = amp_get_core_index();
 
+    /* CrateStage ownership transfer from dispatcher. After we return
+     * ERR_WOULD_BLOCK below (via process_set_state PROC_WAITING), the
+     * dispatcher will not touch the staged crates kbuf. wjob_finalize
+     * writes out_crate->size = bytes and calls
+     * crate_stage_commit_and_release to flush + free. */
+    j->crates_kbuf   = crates_kbuf;
+    j->crate_count   = crate_count;
+    j->crates_uaddr  = crates_uaddr;
+
     process_set_state(ctx->proc, PROC_WAITING);
+    /* Signal staged-crates ownership transfer to wjob_finalize so the
+     * dispatcher skips its sync commit_out + kfree — race-safe vs a
+     * very-fast AHCI completion. */
+    if (ctx->async_owns_crates) *ctx->async_owns_crates = true;
 
     if (token_try_claim(j)) {
         atomic_store_u32((volatile uint32_t *)&j->state, W_LOCATE);

@@ -468,6 +468,13 @@ const acpi_slit_info_t *acpi_get_slit(void);
  * lives in g_acpi. Future NUMA-aware PMM consumes this directly. */
 #define ACPI_NUMA_DOMAIN_UNKNOWN  0xFFFFFFFFu
 uint32_t acpi_numa_domain_for_phys(uint64_t phys);
+
+/* Look up the NUMA proximity domain that owns the CPU with the given
+ * full-width APIC ID (xAPIC 8-bit or x2APIC 32-bit). Returns the domain ID
+ * on hit, ACPI_NUMA_DOMAIN_UNKNOWN otherwise (no SRAT, CPU not in SRAT, or
+ * SRAT marked the CPU disabled). Used by per-K-Core subsystems
+ * (ManifestStage scratch, Brook ring placement) to allocate local memory. */
+uint32_t acpi_numa_domain_for_apic(uint32_t apic_id);
 const acpi_dmar_info_t *acpi_get_dmar(void);
 const acpi_ivrs_info_t *acpi_get_ivrs(void);
 const acpi_apei_info_t *acpi_get_apei(void);

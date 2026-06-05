@@ -147,4 +147,58 @@ int MfCall1(uint16_t      deck,
             uint32_t      timeout_ms,
             Result       *out_result);
 
+/* =========================================================================
+ *  Compile-and-reuse API ("prepared statement" pattern)
+ *
+ *  Workflow for hot syscall loops:
+ *
+ *      uint8_t mbuf[64];
+ *      ManifestBuilder mb;
+ *      ManifestBuilderInit(&mb, mbuf, sizeof(mbuf));
+ *      ManifestBuilderAddOp(&mb, DECK_..., OP_..., 0, 0, 1, NULL, 0);
+ *      ManifestBuilderFinalize(&mb);
+ *
+ *      uint64_t handle;
+ *      if (ManifestCompileHandle((Manifest *)mbuf, &handle) != 0) error;
+ *
+ *      for (...) {
+ *          Crate crates[2] = { ... };
+ *          Result r;
+ *          ManifestSubmitHandle(handle, crates, 2, &r);
+ *      }
+ *
+ *      ManifestReleaseHandle(handle);
+ *
+ *  Each ManifestSubmitHandle skips the kernel's per-syscall validate +
+ *  per-op OpRegistryLookup pass (~500-700 ns per call on the benchmarked
+ *  workloads). Handles outstanding at process exit are auto-released by
+ *  the kernel — explicit release is courteous but not required.
+ *
+ *  Ownership: only the cabin that compiled a handle may submit-with or
+ *  release it. Other cabins receive ERR_ACCESS_DENIED.
+ * ========================================================================= */
+
+typedef uint64_t ManifestHandle;
+
+/* Compile a Manifest, return an opaque handle on success. */
+int ManifestCompileHandle(const Manifest *m, ManifestHandle *out_handle);
+
+/* Submit a handle-mode Pocket. Same call shape as ManifestSubmit but no
+ * Manifest bytes are copied into the kernel — the cached CompiledManifest
+ * is executed directly with the supplied Crate[]. */
+int ManifestSubmitHandle(ManifestHandle  handle,
+                         Crate          *crates,
+                         uint16_t        crate_count,
+                         Result         *out_result);
+
+int ManifestSubmitHandleTimeout(ManifestHandle  handle,
+                                Crate          *crates,
+                                uint16_t        crate_count,
+                                Result         *out_result,
+                                uint32_t        timeout_ms);
+
+/* Release a compiled handle. Idempotent against stale (generation-bumped)
+ * handles — returns OK. Caller MUST stop using the handle after release. */
+int ManifestReleaseHandle(ManifestHandle handle);
+
 #endif /* BOX_MANIFEST_H */

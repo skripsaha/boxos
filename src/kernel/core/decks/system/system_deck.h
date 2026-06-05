@@ -25,6 +25,25 @@ typedef struct process_t process_t;
 #define SYSTEM_OP_ROUTE         0x40
 #define SYSTEM_OP_ROUTE_TAG     0x41
 #define SYSTEM_OP_PERF_DUMP     0x50
+
+/*
+ * Manifest compile-and-reuse — "prepared statement" pattern for hot syscall
+ * paths. Userspace builds a Manifest once, pre-compiles it via COMPILE
+ * (in_crate = raw Manifest bytes, out_crate receives 8-byte handle), then
+ * submits the handle many times via POCKET_FLAG_MANIFEST_HANDLE. The submit
+ * path skips full validation, op-bounds walk, and per-op OpRegistryLookup —
+ * roughly the per-syscall overhead the dispatcher would otherwise repeat on
+ * identical-shape requests.
+ *
+ *   COMPILE  in_crate = const Manifest bytes; out_crate ≥ 8 B receives handle.
+ *   RELEASE  in_crate = 8-byte handle; decrements refcount, frees on 0.
+ *
+ * Ownership is per-process: only the cabin that compiled a handle may
+ * release it. Handles outstanding at process_destroy are auto-released via
+ * ManifestReleaseAllForOwner (no leak).
+ */
+#define SYSTEM_OP_MANIFEST_COMPILE 0x80
+#define SYSTEM_OP_MANIFEST_RELEASE 0x81
 /* Touch handle-based ABI (real-HW audit 2026-05-30).
  *
  * Userspace resolves a tag string ONCE via SYSTEM_OP_TOUCH_INTERN, caches

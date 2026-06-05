@@ -26,6 +26,7 @@
 #include "manifest.h"
 #include "manifest_exec.h"
 #include "manifest_stage.h"
+#include "crate_stage.h"
 #include "op_registry.h"
 
 ReadyQueue g_ready_queue;
@@ -54,32 +55,26 @@ void guide_init(void)
 /*
  * Manifest-mode dispatch.
  *
- *   1. Validate envelope sizes against MANIFEST_RAW_MAX_SIZE.
+ *   1. Validate envelope sizes against MANIFEST_RAW_MAX_SIZE. No cap on
+ *      crate_count — CrateStage handles arbitrary sizes safely.
  *   2. Stage the Manifest BYTES into this K-Core's ManifestStage scratch
- *      via vmm_user_buf_in_into — page-by-page walk that handles non-
- *      contiguous physical backing and unaligned start/end. This is the
- *      multi-page safety fix: the legacy vmm_translate_user_addr path
- *      silently truncated cross-page ranges, producing kernel-memory
- *      reads for Manifests > 4 KiB. Manifests are READ-ONLY in handlers
- *      (const ManifestOp *), and no handler captures op→params pointers
- *      into async state — staging is safe to release at dispatch exit.
- *   3. Translate the Crate[] array via the legacy vmm_translate_user_addr
- *      path (Pull-Map kernel pointer into the user PT). Crates are
- *      written by handlers AND have their descriptor pointer captured
- *      by async handlers (storage_ops:async_ctx→out_crate); the Pull-Map
- *      pointer points to USER memory which outlives the dispatch, so
- *      the async write of crates[i].size lands in the user's heap
- *      directly and survives our stage release. crate_count > ~102
- *      would silently truncate, but CrateIsValid trips on the garbage
- *      and ManifestExecuteOnce rejects gracefully — no kernel leak.
- *   4. Run ManifestExecuteOnce on the staged Manifest + Pull-Mapped Crates.
- *   5. Release the stage. No write-back step: Manifest is const (nothing
- *      to commit), Crates were never staged (writes already live to user).
+ *      via vmm_user_buf_in_into. Manifests are READ-ONLY in handlers
+ *      (const ManifestOp *) and no handler captures op→params pointers
+ *      into async state, so the scratch can be released at dispatch exit.
+ *   3. Stage the Crate[] array via CrateStage (kmalloc + page-walked copy
+ *      in). Unlike Manifest scratch, Crate ownership is conditional:
+ *      sync handlers leave it on the dispatcher to commit_out + free;
+ *      async handlers (storage_ops ObjRead, write_job) take ownership at
+ *      ERR_WOULD_BLOCK + PROC_WAITING and call
+ *      crate_stage_commit_and_release at I/O completion.
+ *   4. Run ManifestExecuteOnce on the staged Manifest + staged Crates.
+ *   5. Release: ManifestStage scratch always. CrateStage only on the sync
+ *      path (commit + free); on async-park the handler owns the buffer.
  *
- * Release ordering: stage is released BEFORE execution_deck_handler pushes
- * the synchronous Result. That hands the per-K-Core scratch back for the
- * next dispatch immediately and avoids holding it across the wake IPI
- * inside execution_deck_handler.
+ * Release ordering: ManifestStage scratch is released BEFORE
+ * execution_deck_handler pushes the synchronous Result. That hands the
+ * per-K-Core scratch back for the next dispatch immediately and avoids
+ * holding it across the wake IPI inside execution_deck_handler.
  */
 static void guide_process_manifest_pocket(Pocket *pocket, process_t *proc)
 {
@@ -88,73 +83,73 @@ static void guide_process_manifest_pocket(Pocket *pocket, process_t *proc)
     uint64_t crates_uaddr   = PocketCratesAddr(pocket);
     uint16_t crate_count    = PocketCrateCount(pocket);
 
-    if (manifest_uaddr == 0 || manifest_size < sizeof(Manifest)) {
-        pocket->error_code = ERR_INVALID_ARGUMENT;
-        execution_deck_handler(pocket, proc);
-        return;
-    }
-    if (manifest_size > MANIFEST_RAW_MAX_SIZE) {
-        pocket->error_code = ERR_INVALID_ARGUMENT;
-        execution_deck_handler(pocket, proc);
-        return;
-    }
+    /*
+     * Handle-mode dispatch (POCKET_FLAG_MANIFEST_HANDLE) skips:
+     *   - ManifestStage scratch acquire + page-walked manifest copy
+     *   - per-syscall validate + per-op OpRegistryLookup walk
+     * The CompiledManifest is already cached in kernel memory from a
+     * prior SYSTEM_OP_MANIFEST_COMPILE; we just verify ownership and
+     * call ManifestExecute on the cached handler-resolved op stream.
+     * Crate staging remains identical to the bytes-mode path — handlers
+     * still mutate crates[i].size etc., and async handlers still pin
+     * the staged kbuf into their async_ctx.
+     */
+    bool handle_mode = (pocket->flags & POCKET_FLAG_MANIFEST_HANDLE) != 0;
 
-    /* Crate[] uses vmm_translate_user_addr below (Pull-Map, async-safe).
-     * That helper silently clips ranges that cross a 4 KiB page boundary,
-     * so we explicitly cap crate_count at MAX_CRATES_PER_POCKET to fail
-     * fast with a clear error code instead of letting CrateIsValid trip
-     * on past-page garbage later. 100 crates × 40 B = 4000 B fits one
-     * page; the real boxlib MfCall1 / ManifestSubmit shapes use ≤ 4. */
-    if (crate_count > MAX_CRATES_PER_POCKET) {
-        pocket->error_code = ERR_INVALID_ARGUMENT;
-        execution_deck_handler(pocket, proc);
-        return;
-    }
+    ManifestStage      *st         = NULL;
+    ManifestStageGrant  grant      = { NULL, 0, MANIFEST_STAGE_TIER_INVALID, {0,0,0} };
+    uint8_t            *m_kbuf     = NULL;
+    ManifestHandle      handle     = MANIFEST_HANDLE_INVALID;
+    CompiledManifest   *cm_pinned  = NULL;   /* refcount pin (handle-mode) */
 
-    ManifestStage *st = ManifestStageCurrent();
-    if (!st) {
-        /* Pre-amp_init path or unknown K-Core — should never trigger
-         * post-boot, but a hard fail is preferable to silent corruption. */
-        pocket->error_code = ERR_NOT_INITIALIZED;
-        execution_deck_handler(pocket, proc);
-        return;
-    }
+    error_t rc;
 
-    ManifestStageGrant grant;
-    error_t rc = ManifestStageAcquire(st, manifest_size, &grant);
-    if (rc != OK) {
-        pocket->error_code = (uint32_t)rc;
-        execution_deck_handler(pocket, proc);
-        return;
-    }
+    if (handle_mode) {
+        /* manifest_addr carries a 64-bit handle, not a vaddr. manifest_size
+         * is ignored. Verify ownership via Resolve (pins the form). */
+        handle = (ManifestHandle)manifest_uaddr;
+        cm_pinned = ManifestResolve(handle);
+        if (!cm_pinned) {
+            pocket->error_code = ERR_INVALID_ARGUMENT;
+            execution_deck_handler(pocket, proc);
+            return;
+        }
+        if (cm_pinned->owner_pid != proc->pid) {
+            ManifestRelease(handle);
+            pocket->error_code = ERR_ACCESS_DENIED;
+            execution_deck_handler(pocket, proc);
+            return;
+        }
+    } else {
+        if (manifest_uaddr == 0 || manifest_size < sizeof(Manifest)) {
+            pocket->error_code = ERR_INVALID_ARGUMENT;
+            execution_deck_handler(pocket, proc);
+            return;
+        }
+        if (manifest_size > MANIFEST_RAW_MAX_SIZE) {
+            pocket->error_code = ERR_INVALID_ARGUMENT;
+            execution_deck_handler(pocket, proc);
+            return;
+        }
 
-    uint8_t *m_kbuf = (uint8_t *)grant.kbuf;
+        st = ManifestStageCurrent();
+        if (!st) {
+            pocket->error_code = ERR_NOT_INITIALIZED;
+            execution_deck_handler(pocket, proc);
+            return;
+        }
 
-    /* Stage the Manifest stream. vmm_user_buf_in_into walks the user PT
-     * one phys page at a time — safe for any range up to the stage's
-     * grant size. After this returns OK the kernel owns a contiguous
-     * copy of every byte; the user's original bytes can mutate without
-     * affecting dispatch. */
-    if (vmm_user_buf_in_into(proc->cabin, (uintptr_t)manifest_uaddr,
-                             (size_t)manifest_size, m_kbuf) != 0) {
-        ManifestStageRelease(st, &grant);
-        pocket->error_code = ERR_INVALID_ADDRESS;
-        execution_deck_handler(pocket, proc);
-        return;
-    }
+        rc = ManifestStageAcquire(st, manifest_size, &grant);
+        if (rc != OK) {
+            pocket->error_code = (uint32_t)rc;
+            execution_deck_handler(pocket, proc);
+            return;
+        }
 
-    /* Pull-Map translate Crates: kernel pointer that aliases user memory.
-     * Writes by handlers (crates[i].size = N) land directly in user heap
-     * and remain visible after stage release. Async handlers capture this
-     * pointer into per-op state; it stays valid for the lifetime of the
-     * user process because Pull-Map covers all of phys RAM. */
-    Crate *crates_kp = NULL;
-    if (crate_count > 0) {
-        size_t crates_bytes = (size_t)crate_count * sizeof(Crate);
-        crates_kp = (Crate *)vmm_translate_user_addr(proc->cabin,
-                                                     (uintptr_t)crates_uaddr,
-                                                     crates_bytes);
-        if (!crates_kp) {
+        m_kbuf = (uint8_t *)grant.kbuf;
+
+        if (vmm_user_buf_in_into(proc->cabin, (uintptr_t)manifest_uaddr,
+                                 (size_t)manifest_size, m_kbuf) != OK) {
             ManifestStageRelease(st, &grant);
             pocket->error_code = ERR_INVALID_ADDRESS;
             execution_deck_handler(pocket, proc);
@@ -162,60 +157,98 @@ static void guide_process_manifest_pocket(Pocket *pocket, process_t *proc)
         }
     }
 
+    /* Crate staging is identical for both modes — async handlers still pin
+     * the staged kbuf into async_ctx and call crate_stage_commit_and_release
+     * at I/O completion. */
+    Crate *crates_kp = NULL;
+    if (crate_count > 0) {
+        rc = crate_stage_in(proc->cabin, crates_uaddr, crate_count, &crates_kp);
+        if (rc != OK) {
+            if (cm_pinned) ManifestRelease(handle);
+            if (st)        ManifestStageRelease(st, &grant);
+            pocket->error_code = (uint32_t)rc;
+            execution_deck_handler(pocket, proc);
+            return;
+        }
+    }
+
+    bool async_owns_crates = false;
+
     OpContext ctx;
-    ctx.proc       = proc;
-    ctx.target_pid = pocket->target_pid;
-    ctx.flags      = pocket->flags;
-    ctx.pier_id    = PocketPierId(pocket);
-    ctx._pad       = 0;
+    ctx.proc              = proc;
+    ctx.target_pid        = pocket->target_pid;
+    ctx.flags             = pocket->flags;
+    ctx.pier_id           = PocketPierId(pocket);
+    ctx.crate_count       = crate_count;
+    ctx.crates_uaddr      = crates_uaddr;
+    ctx.async_owns_crates = &async_owns_crates;
 
     ManifestExecResult result;
-    rc = ManifestExecuteOnce(m_kbuf, manifest_size,
-                              crates_kp, crate_count,
-                              &ctx, &result);
+    if (handle_mode) {
+        rc = ManifestExecute(handle, crates_kp, crate_count, &ctx, &result);
+    } else {
+        rc = ManifestExecuteOnce(m_kbuf, manifest_size,
+                                  crates_kp, crate_count,
+                                  &ctx, &result);
+    }
     pocket->error_code = (uint32_t)rc;
 
-    /* Log every non-OK manifest. Filter to test PIDs (3+) only; PIDs 1 and
-     * 2 (display, shell) generate constant kb/HW chatter we don't care
-     * about for race hunting. */
     if (rc != OK && proc->pid >= 3) {
-        const Manifest *mh = (const Manifest *)m_kbuf;
-        debug_printf("[MANIFEST_FAIL] PID=%u rc=%d ops=%u/%u "
-                     "magic=0x%x ver=%u op_count=%u total=%u uaddr=0x%lx tier=%u\n",
-                     proc->pid, rc, result.completed_ops, result.total_ops,
-                     mh->magic, mh->version, mh->op_count, mh->total_size,
-                     (unsigned long)manifest_uaddr, (unsigned)grant.tier);
+        if (handle_mode) {
+            debug_printf("[MANIFEST_FAIL] PID=%u rc=%d ops=%u/%u "
+                         "mode=HANDLE handle=0x%lx\n",
+                         proc->pid, rc, result.completed_ops, result.total_ops,
+                         (unsigned long)handle);
+        } else {
+            const Manifest *mh = (const Manifest *)m_kbuf;
+            debug_printf("[MANIFEST_FAIL] PID=%u rc=%d ops=%u/%u "
+                         "magic=0x%x ver=%u op_count=%u total=%u uaddr=0x%lx tier=%u\n",
+                         proc->pid, rc, result.completed_ops, result.total_ops,
+                         mh->magic, mh->version, mh->op_count, mh->total_size,
+                         (unsigned long)manifest_uaddr, (unsigned)grant.tier);
+        }
     }
 
     /* Clear envelope payload fields so the Result delivered to the sender's
-     * ResultRing does not leak the Manifest user vaddr. Zero target_pid:
-     * IPC delivery is the explicit job of system.route / system.broadcast
-     * ops; execution_deck_handler writes only the local confirmation
-     * Result back to the sender. */
+     * ResultRing does not leak the Manifest user vaddr. */
     pocket->manifest_addr = 0;
     pocket->manifest_size = 0;
     pocket->target_pid    = 0;
 
-    /* When an op parks the process asynchronously (PROC_WAITING) and returns
-     * ERR_WOULD_BLOCK, no synchronous Result should be pushed. The async
-     * path (KResultPush from obj_read_finish, TouchRestDeliver, etc.) will
-     * deliver the real result later. Pushing ERR_WOULD_BLOCK now would
-     * cause result_wait to return immediately with an empty out-crate
-     * before the event fires.
+    /*
+     * Async-park detection — handler-set flag, not state read.
      *
-     * Synchronous ERR_WOULD_BLOCK (e.g. HwKbReadline with no data ready)
-     * does NOT set PROC_WAITING — the op writes a "no data" marker in the
-     * out_crate and still needs the Result delivered so the caller can
-     * retry. */
-    if (rc == ERR_WOULD_BLOCK && process_get_state(proc) == PROC_WAITING) {
-        ManifestStageRelease(st, &grant);
+     * The flag is set by async handlers (ObjReadAsync setup,
+     * ObjWriteAsync) BEFORE they hand control back via ERR_WOULD_BLOCK,
+     * to signal explicit ownership transfer of the staged crates kbuf.
+     * The previous state-based check (PROC_WAITING) raced on fast async
+     * paths: if AHCI completion fired before the dispatcher rechecked,
+     * the state was already PROC_WORKING, sync cleanup ran, and the
+     * staged crates were double-freed by both dispatcher and async.
+     *
+     * Sync ERR_WOULD_BLOCK (HwKbReadline "no data ready" etc.) does NOT
+     * set the flag — dispatcher cleans up normally and pushes the
+     * "would block" Result so userspace can retry.
+     */
+    if (rc == ERR_WOULD_BLOCK && async_owns_crates) {
+        /* Async handler owns crates_kp; it will commit+free at I/O
+         * completion via crate_stage_commit_and_release. */
+        if (st)        ManifestStageRelease(st, &grant);
+        if (cm_pinned) ManifestRelease(handle);
         return;
     }
 
-    /* Release scratch BEFORE the sync Result push — gets the per-K-Core
-     * scratch available for the next dispatch immediately, and avoids
-     * holding it across the wake IPI inside execution_deck_handler. */
-    ManifestStageRelease(st, &grant);
+    /* Sync path: write any handler-mutated Crate descriptors (crates[i].size
+     * for output crates) back to user memory and release the staged kbuf. */
+    if (crates_kp) {
+        crate_stage_commit_and_release(crates_kp, crate_count,
+                                        proc->cabin, crates_uaddr);
+    }
+
+    /* Release scratch + handle pin (both no-ops if respective mode was
+     * inactive) BEFORE the sync Result push to maximize K-Core throughput. */
+    if (st)        ManifestStageRelease(st, &grant);
+    if (cm_pinned) ManifestRelease(handle);
     execution_deck_handler(pocket, proc);
 }
 

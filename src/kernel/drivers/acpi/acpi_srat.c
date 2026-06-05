@@ -129,3 +129,13 @@ uint32_t acpi_numa_domain_for_phys(uint64_t phys) {
     }
     return ACPI_NUMA_DOMAIN_UNKNOWN;
 }
+
+uint32_t acpi_numa_domain_for_apic(uint32_t apic_id) {
+    if (!g_acpi.numa.present) return ACPI_NUMA_DOMAIN_UNKNOWN;
+    for (uint16_t i = 0; i < g_acpi.numa.cpu_count; i++) {
+        const acpi_numa_cpu_t *c = &g_acpi.numa.cpus[i];
+        if (!c->enabled) continue;
+        if (c->apic_id == apic_id) return c->domain;
+    }
+    return ACPI_NUMA_DOMAIN_UNKNOWN;
+}

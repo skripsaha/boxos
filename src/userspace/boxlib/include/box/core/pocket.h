@@ -15,8 +15,9 @@
  * Indices are 64-bit and never wrap. Slot lookup: slots_base + (idx % cap)*stride.
  */
 
-#define POCKET_FLAG_YIELD     0x80
-#define POCKET_FLAG_MANIFEST  0x40
+#define POCKET_FLAG_YIELD            0x80
+#define POCKET_FLAG_MANIFEST         0x40
+#define POCKET_FLAG_MANIFEST_HANDLE  0x20  /* manifest_addr is a uint64 handle, not a vaddr */
 
 typedef struct PACKED {
     uint32_t pid;                /* kernel overwrites (security) */

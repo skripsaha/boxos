@@ -3,6 +3,7 @@
 #include "kernel_config.h"
 #include "pmm.h"
 #include "pmtag.h"
+#include "manifest.h"
 #include "cabin_layout.h"
 #include "kring.h"
 #include "touch_ring.h"
@@ -715,6 +716,12 @@ void process_destroy(process_t *proc)
         debug_printf("[PROCESS] Cancelled %u pending async I/O for PID %u\n",
                      cancelled, proc->pid);
     }
+
+    /* Release every CompiledManifest this cabin pre-compiled via
+     * SYSTEM_OP_MANIFEST_COMPILE but did not explicitly release. Concurrent
+     * ManifestExecute from another core stays safe — its Resolve holds the
+     * compiled form alive until that Execute drops its own ref. */
+    ManifestReleaseAllForOwner(proc->pid);
 
     // Clear PHYS_TAG_SHARED on IPC ring pages — these are no longer shared
     // once the process is destroyed and its cabin will be unmapped.

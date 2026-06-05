@@ -80,10 +80,10 @@ run_config() {
     # and the long-tail tests (write_stress ~30 s, touch_stress ~30 s
     # plus historical flakiness — see memory:touch_stress_complete*).
     if [ "$MODE" = "fast" ]; then
-        burst="memtest files bench mtest chain cow_test lifecycle write_observer decks"
+        burst="memtest files bench mtest chain cow_test lifecycle write_observer decks htest"
     else
         burst="memtest files bench memtest files bench memtest \
-               mtest chain cow_test lifecycle write_observer \
+               mtest chain htest cow_test lifecycle write_observer \
                write_concurrent write_stress touch_test decks touch_stress"
     fi
     for c in $burst
@@ -103,6 +103,7 @@ run_config() {
                 pat="create+write64+delete (TagFS+disk)"; want=$bn_seen ;;
             mtest)            pat="\[mtest\] PASS";           want=1 ;;
             chain)            pat="\[chain\] PASS";           want=1 ;;
+            htest)            pat="\[htest\] PASS";           want=1 ;;
             cow_test)         pat="\[COW\] PASS";             want=1 ;;
             lifecycle)        pat="\[LIFECYCLE\] PASS";       want=1 ;;
             write_observer)   pat="\[WO\] PASS";              want=1 ;;
