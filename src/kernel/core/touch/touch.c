@@ -176,6 +176,22 @@ bool TouchPolicyGet(TouchTag tag_id, TouchPolicy *out_policy,
     return true;
 }
 
+uint32_t TouchPolicyLatchedSnapshot(TouchTag tag_id, uint8_t *out_buf)
+{
+    if (!out_buf) return 0;
+    TouchBucket *b = touch_bucket_lookup(tag_id);
+    if (!b) return 0;
+    uint32_t plen = 0;
+    spin_lock(&b->lock);
+    if (b->latched_payload && b->latched_plen > 0) {
+        plen = b->latched_plen;
+        if (plen > BOXOS_TOUCH_PAYLOAD_MAX) plen = BOXOS_TOUCH_PAYLOAD_MAX;
+        memcpy(out_buf, b->latched_payload, plen);
+    }
+    spin_unlock(&b->lock);
+    return plen;
+}
+
 uint8_t TouchPolicyLevelState(TouchTag tag_id)
 {
     TouchBucket *b = touch_bucket_lookup(tag_id);
@@ -348,8 +364,29 @@ static void touch_react_deliver(process_t *proc, TouchSub *sub,
                                         kpayload, plen);
     if (vaddr == 0) return;
 
+    /*
+     * Stage the Crate descriptor in a kmalloc'd buffer so async-capable
+     * ops (storage.read, write_job, …) can pin the descriptor pointer
+     * into their async_ctx without it disappearing the moment this
+     * function returns. The on-stack Crate of the previous design was a
+     * latent UAF for any REACT manifest that included an async op.
+     *
+     * Ownership protocol — mirrors guide.c:
+     *   sync handler  → async_owned stays false → we kfree at exit
+     *   async-park    → handler sets *async_owned = true via
+     *                   ctx->async_owns_crates → handler's completion
+     *                   path owns the kbuf and frees via
+     *                   crate_stage_commit_and_release. We skip the kfree.
+     *
+     * crates_uaddr = 0 is the kernel-internal sentinel: the subscriber's
+     * manifest never asked for a user write-back of the Crate descriptor,
+     * so crate_stage_commit_and_release will recognise the 0 sentinel
+     * and skip its vmm_user_buf_commit_out step — pure kfree.
+     */
     uint64_t total = sizeof(Touch) + plen;
-    Crate crate = {
+    Crate *crates_kbuf = (Crate *)kmalloc(sizeof(Crate));
+    if (!crates_kbuf) return;
+    *crates_kbuf = (Crate){
         .magic    = CRATE_MAGIC,
         .flags    = 0,
         .kind     = CRATE_KIND_INPUT,
@@ -359,17 +396,24 @@ static void touch_react_deliver(process_t *proc, TouchSub *sub,
         .size     = total,
         .capacity = total,
     };
+
+    bool async_owned = false;
     OpContext ctx = {
         .proc              = proc,
         .target_pid        = 0,
         .flags             = 0,
         .pier_id           = 0,
-        .crate_count       = 1,         /* single inline payload crate below */
-        .crates_uaddr      = 0,         /* kernel-internal — handlers don't write back */
-        .async_owns_crates = NULL,      /* no async-park path for tag callbacks */
+        .crate_count       = 1,
+        .crates_uaddr      = 0,             /* kernel-internal — see crate_stage_commit_and_release */
+        .async_owns_crates = &async_owned,  /* race-safe ownership transfer */
     };
     ManifestExecResult exec_result;
-    ManifestExecute(sub->u.manifest, &crate, 1, &ctx, &exec_result);
+    ManifestExecute(sub->u.manifest, crates_kbuf, 1, &ctx, &exec_result);
+
+    if (!async_owned) {
+        kfree(crates_kbuf);
+    }
+    /* else: handler kfrees via crate_stage_commit_and_release at I/O completion. */
 }
 
 /* ────────────────────────────────────────────────────────────────────────
@@ -418,6 +462,35 @@ static void deliver_one(TouchSnap *e, TouchTag tag_id,
                                : plen;
         if (e->sub->pending_plen > 0 && kpayload)
             memcpy(e->sub->pending_payload, kpayload, e->sub->pending_plen);
+
+        /* Bucket-level snapshot for on-claim sync. A subscriber that
+         * joins AFTER this publish but BEFORE any ack picks up the
+         * latched payload from the bucket via TouchPolicyLatchedSnapshot
+         * in SysTouchAwait — mirrors the LEVEL on-claim sync but for
+         * one-shot latched values.
+         *
+         * Allocated lazily so tags that never use LATCHED never pay the
+         * 96 B. Reused on subsequent first-of-cycle publishes (the
+         * intervening ack clears the buffer below). Bucket lock guards
+         * both pointer and bytes; callers of TouchPolicyLatchedSnapshot
+         * take the same lock. */
+        TouchBucket *bcb = e->sub->bucket;
+        if (bcb) {
+            uint32_t copy_plen = (plen > BOXOS_TOUCH_PAYLOAD_MAX)
+                                 ? BOXOS_TOUCH_PAYLOAD_MAX
+                                 : plen;
+            spin_lock(&bcb->lock);
+            if (!bcb->latched_payload) {
+                bcb->latched_payload = (uint8_t *)kmalloc(BOXOS_TOUCH_PAYLOAD_MAX);
+            }
+            if (bcb->latched_payload) {
+                if (copy_plen > 0 && kpayload) {
+                    memcpy(bcb->latched_payload, kpayload, copy_plen);
+                }
+                bcb->latched_plen = (uint16_t)copy_plen;
+            }
+            spin_unlock(&bcb->lock);
+        }
         /* Fall through and still push to the result ring so process wakes. */
     }
 
@@ -805,7 +878,32 @@ error_t TouchClaimAck(process_t *proc, TouchTag tag_id)
     if (!sub) { spin_unlock(&proc->subs_lock); return ERR_TAG_NOT_FOUND; }
     __atomic_store_n(&sub->has_pending, 0, __ATOMIC_RELEASE);
     sub->pending_plen = 0;
+    TouchBucket *bcb = sub->bucket;
     spin_unlock(&proc->subs_lock);
+
+    /* Clear bucket-level LATCHED state so a subsequent first-of-cycle
+     * publish establishes the new latched payload, and so a future
+     * subscriber that claims AFTER this ack but BEFORE any new publish
+     * does NOT receive the now-acked stale value via on-claim sync.
+     *
+     * Multi-sub LATCHED case: any single ack clears the bucket for ALL
+     * future joiners — simpler than reference-counting acks across subs
+     * and consistent with the "first publish queued until ack" intuition
+     * (the latch is a one-shot per cycle, not per-sub-cycle). Subs that
+     * already received the latched delivery still hold their own
+     * has_pending until they ack individually.
+     *
+     * Bucket lock is taken outside subs_lock to maintain the established
+     * bucket→proc ordering (see TouchClaimSet at line 720 commentary). */
+    if (bcb) {
+        spin_lock(&bcb->lock);
+        if (bcb->latched_payload) {
+            kfree(bcb->latched_payload);
+            bcb->latched_payload = NULL;
+        }
+        bcb->latched_plen = 0;
+        spin_unlock(&bcb->lock);
+    }
     return OK;
 }
 

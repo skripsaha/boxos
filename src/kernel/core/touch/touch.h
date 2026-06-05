@@ -126,7 +126,13 @@ typedef struct TouchBucket {
     uint8_t          level_state;  /* LEVEL: current state byte */
     uint8_t          flags;        /* bit 0: registered (policy/cap set) */
     uint16_t         tag_id;       /* mirror for diagnostics; == leaf index */
-    uint16_t         _pad;
+    uint16_t         latched_plen; /* LATCHED on-claim sync: byte count, 0 = no active latch */
+    /* LATCHED on-claim sync: payload of the most recent first-of-cycle
+     * publish, valid while latched_plen > 0. Heap-allocated (kmalloc) on
+     * first publish, kfree'd when any subscriber acks. Pointer fits in
+     * the bucket's remaining headroom — payload bytes themselves live
+     * outside to keep TouchBucket within its cache-line budget. */
+    uint8_t         *latched_payload;
 } TouchBucket;
 _Static_assert(sizeof(TouchBucket) <= 64, "TouchBucket must fit one cache line pair");
 
@@ -172,6 +178,15 @@ error_t TouchPolicySet(TouchTag tag_id, TouchPolicy policy, TouchCapability capa
 bool    TouchPolicyGet(TouchTag tag_id, TouchPolicy *out_policy, TouchCapability *out_cap);
 uint8_t TouchPolicyLevelState(TouchTag tag_id);
 void    TouchPolicySetLevelState(TouchTag tag_id, uint8_t state);
+
+/*
+ * LATCHED on-claim sync. Snapshot the currently-latched payload for `tag_id`
+ * into `out_buf` (which must be ≥ BOXOS_TOUCH_PAYLOAD_MAX bytes) under the
+ * bucket lock. Returns the byte count written (0 = no latched payload
+ * active). Used by SysTouchAwait to deliver the latched value to a fresh
+ * subscriber that joined after a publish but before any ack.
+ */
+uint32_t TouchPolicyLatchedSnapshot(TouchTag tag_id, uint8_t *out_buf);
 
 /* Publish to a single tag_id. Hot path. */
 void   TouchPublishId(TouchTag tag_id, const void *kpayload, uint32_t plen,
