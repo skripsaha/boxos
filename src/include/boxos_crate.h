@@ -33,18 +33,6 @@
 
 #define CRATE_MAGIC 0x43525441u  /* 'CRTA' */
 
-/*
- * Hard cap on the Crate[] array length accepted by one Manifest-mode
- * Pocket. 100 entries × 40 B = 4000 B which fits a single 4 KiB page —
- * the kernel's vmm_translate_user_addr clips past-page reads, so a
- * larger array would silently truncate. Realistic boxlib shapes
- * (MfCall1, ManifestSubmit, chain, decks) use ≤ 4 crates; cap is a
- * defensive guard, not a feature limit. Userspace can pre-check
- * against this constant; the kernel re-validates and rejects with
- * ERR_INVALID_ARGUMENT.
- */
-#define MAX_CRATES_PER_POCKET 100u
-
 typedef enum {
     CRATE_KIND_INPUT  = 0,  /* op reads only */
     CRATE_KIND_OUTPUT = 1,  /* op writes only; op may set size to actual produced bytes */

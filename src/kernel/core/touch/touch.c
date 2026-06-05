@@ -360,11 +360,13 @@ static void touch_react_deliver(process_t *proc, TouchSub *sub,
         .capacity = total,
     };
     OpContext ctx = {
-        .proc       = proc,
-        .target_pid = 0,
-        .flags      = 0,
-        .pier_id    = 0,
-        ._pad       = 0,
+        .proc              = proc,
+        .target_pid        = 0,
+        .flags             = 0,
+        .pier_id           = 0,
+        .crate_count       = 1,         /* single inline payload crate below */
+        .crates_uaddr      = 0,         /* kernel-internal — handlers don't write back */
+        .async_owns_crates = NULL,      /* no async-park path for tag callbacks */
     };
     ManifestExecResult exec_result;
     ManifestExecute(sub->u.manifest, &crate, 1, &ctx, &exec_result);

@@ -28,11 +28,35 @@
 struct process_t;
 
 typedef struct OpContext {
-    struct process_t *proc;       /* initiator */
-    uint32_t          target_pid; /* IPC routing target, 0 = result-to-self */
-    uint32_t          flags;      /* pocket-level flags propagated from envelope */
-    uint16_t          pier_id;    /* urgency lane */
-    uint16_t          _pad;
+    struct process_t *proc;        /* initiator */
+    uint32_t          target_pid;  /* IPC routing target, 0 = result-to-self */
+    uint32_t          flags;       /* pocket-level flags propagated from envelope */
+    uint16_t          pier_id;     /* urgency lane */
+    uint16_t          crate_count; /* mirror of the handler arg, exposed here so
+                                    * async handlers can stash it into their
+                                    * async_ctx without an extra parameter */
+    uint64_t          crates_uaddr;/* user vaddr of the Crate[] array. Async
+                                    * handlers that take ownership of the
+                                    * staged crates kbuf need this to write
+                                    * descriptor mutations back to user memory
+                                    * via crate_stage_commit_and_release. */
+    bool             *async_owns_crates;
+                                   /* Dispatcher-supplied pointer. Async
+                                    * handlers set *async_owns_crates = true
+                                    * BEFORE returning ERR_WOULD_BLOCK to
+                                    * signal that they've stashed the staged
+                                    * crates kbuf into their async_ctx and
+                                    * will commit+free at I/O completion.
+                                    *
+                                    * Using an explicit handler-set flag
+                                    * (instead of process_get_state == WAITING)
+                                    * avoids a race on fast async paths where
+                                    * the I/O completes and flips PROC_WORKING
+                                    * before the dispatcher rechecks state —
+                                    * which would have caused the sync
+                                    * cleanup path to double-free the staged
+                                    * crates. NULL is treated as false
+                                    * (handler refuses, dispatcher cleans). */
 } OpContext;
 
 typedef int (*OpHandler)(const ManifestOp *op,

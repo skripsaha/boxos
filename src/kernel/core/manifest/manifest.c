@@ -1,4 +1,5 @@
 #include "manifest.h"
+#include "manifest_auth.h"
 #include "atomics.h"
 #include "process.h"
 #include "vmm.h"
@@ -181,6 +182,15 @@ static error_t manifest_resolve_handlers(const uint8_t           *bytes,
     const OpRegistration **handlers = kmalloc(sizeof(OpRegistration *) * op_count);
     if (!handlers) return ERR_NO_MEMORY;
 
+    /* Synthesize an OpContext so ManifestOpAuthorize can apply the
+     * tag-level policy (OP_AUTH_NONE/APP/UTILITY/SYSTEM/NETWORK) instead of
+     * misinterpreting reg->security_mask as a literal bitfield. owner==NULL
+     * means kernel-internal (selftests) — ManifestOpAuthorize already
+     * fast-paths that to true via the ctx->proc==NULL check. */
+    OpContext compile_ctx;
+    memset(&compile_ctx, 0, sizeof(compile_ctx));
+    compile_ctx.proc = owner;
+
     for (uint32_t i = 0; i < op_count; i++) {
         const ManifestOp *op = (const ManifestOp *)(bytes + offsets[i]);
         const OpRegistration *reg = OpRegistryLookup(op->op_kind);
@@ -189,14 +199,12 @@ static error_t manifest_resolve_handlers(const uint8_t           *bytes,
             kfree(handlers);
             return ERR_INVALID_OPCODE;
         }
-        if (reg->security_mask != 0 && owner) {
-            uint64_t need = (uint64_t)reg->security_mask;
-            if ((owner->tag_bits & need) != need) {
-                debug_printf("[Manifest] op %u: security_mask 0x%x not satisfied\n",
-                             i, reg->security_mask);
-                kfree(handlers);
-                return ERR_ACCESS_DENIED;
-            }
+        if (!ManifestOpAuthorize(op->op_kind, &compile_ctx)) {
+            debug_printf("[Manifest] op %u: auth level %u denied for PID %u\n",
+                         i, reg->security_mask,
+                         owner ? owner->pid : 0);
+            kfree(handlers);
+            return ERR_ACCESS_DENIED;
         }
         handlers[i] = reg;
     }
@@ -391,6 +399,42 @@ uint32_t ManifestActiveCount(void)
 {
     if (!g_manifest_table.initialized) return 0;
     return g_manifest_table.active_count;
+}
+
+void ManifestReleaseAllForOwner(uint32_t owner_pid)
+{
+    if (!g_manifest_table.initialized) return;
+
+    /* Stack-bounded batch. A typical cabin holds 0-5 handles; 64 covers
+     * pathological cases without growing kernel stack. The outer
+     * while-loop catches the case where a cabin held > 64 — we keep
+     * draining until a pass finds none. */
+    ManifestHandle batch[64];
+    uint32_t       collected;
+    uint32_t       total_released = 0;
+
+    do {
+        collected = 0;
+        spin_lock(&g_manifest_table.lock);
+        for (uint32_t i = 0;
+             i < g_manifest_table.capacity && collected < 64; i++) {
+            CompiledManifest *cm = g_manifest_table.slots[i].manifest;
+            if (cm && cm->owner_pid == owner_pid) {
+                batch[collected++] = MANIFEST_MAKE_HANDLE(
+                    i, g_manifest_table.slots[i].generation);
+            }
+        }
+        spin_unlock(&g_manifest_table.lock);
+
+        for (uint32_t i = 0; i < collected; i++) {
+            if (ManifestRelease(batch[i]) == OK) total_released++;
+        }
+    } while (collected == 64);
+
+    if (total_released > 0) {
+        debug_printf("[Manifest] auto-released %u handle(s) for dying PID %u\n",
+                     total_released, owner_pid);
+    }
 }
 
 void ManifestDump(ManifestHandle handle)

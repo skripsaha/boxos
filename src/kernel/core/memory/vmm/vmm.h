@@ -2,6 +2,7 @@
 #define VMM_H
 
 #include "klib.h"
+#include "error.h"
 #include "cabin_layout.h"
 
 #define VMM_PAGE_SIZE           4096
@@ -341,15 +342,16 @@ void *vmm_user_buf_in(vmm_context_t *ctx, uintptr_t user_vaddr, size_t size);
  * vmm_user_buf_in_into — same page-walked copy as vmm_user_buf_in but
  * writes into a caller-supplied kernel buffer (no kmalloc/kfree). Use
  * when the caller already owns a destination (stack scratch, preallocated
- * arena, etc.). Returns 0 on success, -1 if any page fails to translate.
+ * arena, etc.). Returns OK on success, ERR_INVALID_ARGUMENT on a NULL/0
+ * argument, ERR_INVALID_ADDRESS if any page fails to translate.
  */
-int  vmm_user_buf_in_into(vmm_context_t *ctx, uintptr_t user_vaddr,
-                           size_t size, void *kbuf);
+error_t vmm_user_buf_in_into(vmm_context_t *ctx, uintptr_t user_vaddr,
+                              size_t size, void *kbuf);
 
-void *vmm_user_buf_alloc_out(size_t size);
-int   vmm_user_buf_commit_out(vmm_context_t *ctx, uintptr_t user_vaddr,
-                              const void *kbuf, size_t size);
-void  vmm_user_buf_free(void *kbuf);
+void   *vmm_user_buf_alloc_out(size_t size);
+error_t vmm_user_buf_commit_out(vmm_context_t *ctx, uintptr_t user_vaddr,
+                                 const void *kbuf, size_t size);
+void    vmm_user_buf_free(void *kbuf);
 int vmm_setup_null_trap(vmm_context_t* ctx);
 /* Map a process code region.
  *
