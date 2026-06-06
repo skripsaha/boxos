@@ -26,6 +26,19 @@ static uint32_t  g_mce_bank_count  = 0;
 static uint64_t  g_mce_mcg_cap     = 0;
 static uint64_t  g_mce_ban_mask    = 0;  /* bit i set ⇒ bank i CTL skipped */
 
+/* Pre-resolved Touch tag handles. The #MC handler runs on the IST stack
+ * (non-maskable, even more restrictive than IRQ context). Per touch.h
+ * §IRQ-Publishers, ISR-context code MUST NOT call TouchPublish/TouchPublishId
+ * directly because that path can take per-bucket spinlocks + kmalloc the
+ * L2 leaf, which deadlocks against any caller that held a Touch lock
+ * when the #MC fired. The IRQ-safe variant TouchPublishIrqPair takes
+ * pre-resolved tag handles + a bounded payload + queues for K-Core
+ * delivery. We resolve once at mce_init time (outside IRQ) and cache
+ * the handles here; mce_handle hot-path uses them. */
+static TouchTag  g_mce_tag_detected   = TOUCH_TAG_INVALID;
+static TouchTag  g_mce_tag_recovered  = TOUCH_TAG_INVALID;
+static TouchTag  g_mce_tag_fatal      = TOUCH_TAG_INVALID;
+
 /* ─── MSR primitives ──────────────────────────────────────────────── */
 
 static inline uint64_t mce_rdmsr(uint32_t msr) {
@@ -164,6 +177,20 @@ void mce_init(void) {
                  (unsigned long)skip,
                  (unsigned long)cap);
 
+    /* Pre-resolve Touch tag handles for the IST-safe publish path. Done
+     * here (outside IRQ context) because TouchTagResolve takes registry
+     * locks. The handles are stored as globals for mce_handle to use
+     * via TouchPublishIrqPair (which is the only Touch publisher safe
+     * to call from IST). Tags are MemTag-reserved in SeedReservedTags. */
+    g_mce_tag_detected  = TouchTagIntern("mce:fault:detected");
+    g_mce_tag_recovered = TouchTagIntern("mce:fault:recovered");
+    g_mce_tag_fatal     = TouchTagIntern("mce:fault:fatal");
+    debug_printf("[MCE] Touch handles cached: detected=0x%x recovered=0x%x "
+                 "fatal=0x%x\n",
+                 (unsigned)g_mce_tag_detected,
+                 (unsigned)g_mce_tag_recovered,
+                 (unsigned)g_mce_tag_fatal);
+
     g_mce_initialized = true;
 }
 
@@ -288,11 +315,18 @@ bool mce_handle(interrupt_frame_t *frame) {
             .pad        = 0,
         };
 
+        /* IRQ-safe Touch publish — see touch.h §IRQ-Publishers. The
+         * #MC handler runs on the IST_MACHINE_CHECK stack; calling
+         * TouchPublish here would deadlock against any caller holding
+         * a Touch lock at the moment #MC fired. TouchPublishIrqPair
+         * copies the payload into a preallocated static slot and
+         * defers actual publish to a K-Core worker. */
+        TouchTag pub_tag = TOUCH_TAG_INVALID;
         switch (sev) {
             case MCE_SEV_UC:
                 ev.recovered = 0;
                 any_fatal = true;
-                TouchPublish("mce:fault:fatal", &ev, sizeof(ev));
+                pub_tag = g_mce_tag_fatal;
                 break;
             case MCE_SEV_UCR:
                 /* Recoverable iff RIPV=1. Without RIPV, IRET resumes at
@@ -300,20 +334,25 @@ bool mce_handle(interrupt_frame_t *frame) {
                 ev.recovered = ripv ? 1 : 0;
                 if (ripv) {
                     any_recovered = true;
-                    TouchPublish("mce:fault:recovered", &ev, sizeof(ev));
+                    pub_tag = g_mce_tag_recovered;
                 } else {
                     any_fatal = true;
-                    TouchPublish("mce:fault:fatal", &ev, sizeof(ev));
+                    pub_tag = g_mce_tag_fatal;
                 }
                 break;
             case MCE_SEV_CORRECTED:
                 ev.recovered = 1;
                 any_recovered = true;
-                TouchPublish("mce:fault:detected", &ev, sizeof(ev));
+                pub_tag = g_mce_tag_detected;
                 break;
             case MCE_SEV_NONE:
             default:
                 break;
+        }
+        if (pub_tag != TOUCH_TAG_INVALID) {
+            TouchPublishIrqPair(pub_tag, TOUCH_TAG_INVALID,
+                                &ev, (uint16_t)sizeof(ev),
+                                0u /* source_pid: kernel */, 0u /* flags */);
         }
 
         /* Clear bank status so we don't re-read on the next #MC. SDM

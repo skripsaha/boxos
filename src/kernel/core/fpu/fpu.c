@@ -21,6 +21,55 @@ static inline void xsetbv(uint32_t index, uint64_t value) {
     __asm__ volatile("xsetbv" : : "c"(index), "a"(lo), "d"(hi));
 }
 
+/* Register an additional XCR0 component bit for inclusion in every
+ * future XSAVE/XRSTOR sequence. Sets the XCR0 bit on this CPU, then
+ * recomputes the per-component XSAVE area size via CPUID.0xD:0 and
+ * updates g_xsave_mask + g_xsave_area_size atomically.
+ *
+ * Returns true on success. False when:
+ *   - XSAVE is not supported
+ *   - The bit is not declared supported in CPUID.0xD:0 (xcr0_supported)
+ *   - Already registered
+ *
+ * Used by Phase 2H (PKRU bit 9), Phase 2K (CET_S bit 11 / CET_U bit 12)
+ * to wire their per-thread state into the existing FPU context-switch
+ * machinery without forking a parallel save/restore path.
+ *
+ * MUST be called BEFORE any process is spawned, because the FPU area
+ * size in process_t is sized at allocation time from g_xsave_area_size. */
+bool fpu_xsave_register_extension(uint64_t xcr0_bit, const char *name) {
+    if (!g_use_xsave) {
+        debug_printf("[FPU] xsave_register(%s): SKIP — XSAVE off\n",
+                     name ? name : "?");
+        return false;
+    }
+    if (!(g_cpu_caps.xcr0_supported & xcr0_bit)) {
+        debug_printf("[FPU] xsave_register(%s): SKIP — XCR0 bit not supported\n",
+                     name ? name : "?");
+        return false;
+    }
+    if (g_xsave_mask & xcr0_bit) {
+        return true;  /* already registered */
+    }
+
+    /* Set the XCR0 bit alongside the existing mask. */
+    uint64_t new_mask = g_xsave_mask | xcr0_bit;
+    xsetbv(0, new_mask);
+
+    /* Recompute area size for the new component set. */
+    uint32_t eax, ebx, ecx, edx;
+    cpuid_count(0xD, 0, &eax, &ebx, &ecx, &edx);
+
+    g_xsave_mask = new_mask;
+    g_xsave_area_size = ebx;
+
+    debug_printf("[FPU] xsave_register(%s): XCR0=0x%lx area_size=%u\n",
+                 name ? name : "?",
+                 (unsigned long)g_xsave_mask,
+                 (unsigned)g_xsave_area_size);
+    return true;
+}
+
 void enable_fpu(void) {
     uint64_t cr0, cr4;
 

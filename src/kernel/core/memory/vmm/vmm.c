@@ -14,6 +14,7 @@
 #include "video.h"
 #include "e820.h"
 #include "touch.h"   /* TouchPublish for pku:fault:denied (Phase 2H) */
+#include "fpu.h"     /* fpu_xsave_register_extension — XCR0 RMW + xsave area resize */
 #include "cabin_layout.h"
 #include "acpi.h"
 
@@ -344,6 +345,13 @@ void vmm_dump_mtrr_layout(void) {
 #define VMM_MSR_PKRU      0x6E0U
 #define VMM_MSR_PKRS      0x6E1U
 
+/* Pre-resolved Touch handle for the #PF.PK publish path. Resolved in
+ * vmm_pku_init (outside IRQ context). #PF runs with IF=0 + may hold
+ * locks from the faulting code path; calling TouchPublish directly
+ * would risk the same deadlock class documented in touch.h §IRQ-
+ * Publishers and mitigated in mce.c via TouchPublishIrqPair. */
+static TouchTag g_vmm_tag_pku_fault = TOUCH_TAG_INVALID;
+
 static inline void vmm_pku_program_cr4(void) {
     uint64_t cr4;
     __asm__ volatile("mov %%cr4, %0" : "=r"(cr4));
@@ -357,22 +365,11 @@ static inline void vmm_pku_program_cr4(void) {
 
 static inline void vmm_pku_program_xcr0(void) {
     if (!g_cpu_caps.has_xsave || !g_cpu_caps.has_pku) return;
-    /* XSAVE component 9 must be exposed in XCR0 for the kernel's
-     * XSAVE/XRSTOR sequences to save and restore PKRU on context
-     * switch. SDM Vol 1 §13.3: XCR0 bit 9 = PKRU state. The kernel
-     * has already enabled CR4.OSXSAVE in fpu_init; XSETBV is legal.
-     * Skip when PKU not supported on this AP. */
-    if (!(g_cpu_caps.xcr0_supported & VMM_XCR0_PKRU_BIT)) return;
-    uint64_t xcr0;
-    uint32_t lo, hi;
-    __asm__ volatile("xgetbv" : "=a"(lo), "=d"(hi) : "c"(0u));
-    xcr0 = ((uint64_t)hi << 32) | lo;
-    if (!(xcr0 & VMM_XCR0_PKRU_BIT)) {
-        xcr0 |= VMM_XCR0_PKRU_BIT;
-        uint32_t wlo = (uint32_t)(xcr0 & 0xFFFFFFFFu);
-        uint32_t whi = (uint32_t)(xcr0 >> 32);
-        __asm__ volatile("xsetbv" : : "c"(0u), "a"(wlo), "d"(whi));
-    }
+    /* SDM Vol 1 §13.3: XCR0 bit 9 = PKRU state. fpu_xsave_register_
+     * extension does the RMW on XCR0 *and* updates g_xsave_mask +
+     * g_xsave_area_size so the existing FPU context-switch path
+     * automatically saves/restores PKRU per-thread. */
+    (void)fpu_xsave_register_extension(VMM_XCR0_PKRU_BIT, "PKRU");
 }
 
 void vmm_pku_init(void) {
@@ -382,12 +379,16 @@ void vmm_pku_init(void) {
     }
     vmm_pku_program_cr4();
     vmm_pku_program_xcr0();
+    /* Cache Touch handle for IRQ-safe publish from PF.PK path. */
+    g_vmm_tag_pku_fault = TouchTagIntern("pku:fault:denied");
     debug_printf("[VMM] PKU/PKS BSP init: PKU=%d PKS=%d XCR0.PKRU=%d "
-                 "(default PKRU=0 → all keys allowed; per-process "
-                 "lifecycle pending)\n",
+                 "fault_tag=0x%x (default PKRU=0 → all keys allowed; "
+                 "per-process PKRU lifecycle = XSAVE/XRSTOR via "
+                 "XCR0.PKRU bit 9)\n",
                  (int)g_cpu_caps.has_pku,
                  (int)g_cpu_caps.has_pks,
-                 (int)((g_cpu_caps.has_pku && g_cpu_caps.has_xsave) ? 1 : 0));
+                 (int)((g_cpu_caps.has_pku && g_cpu_caps.has_xsave) ? 1 : 0),
+                 (unsigned)g_vmm_tag_pku_fault);
 }
 
 void vmm_pku_ap_init(void) {
@@ -647,26 +648,53 @@ static void pcid_release(uint16_t pcid)
     spin_unlock(&pcid_lock);
 }
 
+/* Phase 2I — OR per-context LAM bits into CR3. No-op when ctx->lam_mode
+ * is VMM_LAM_NONE or the CPU doesn't support LAM (writing LAM bits on
+ * non-LAM hardware just stays ignored, but defensive gate avoids
+ * confusing operators). */
+static inline uint64_t vmm_cr3_lam_bits(vmm_context_t *ctx) {
+    if (!g_cpu_caps.has_lam) return 0;
+    if (ctx->lam_mode == VMM_LAM_U48) return VMM_CR3_LAM_U48;
+    if (ctx->lam_mode == VMM_LAM_U57) return VMM_CR3_LAM_U57;
+    return 0;
+}
+
 uint64_t vmm_build_cr3(vmm_context_t *ctx)
 {
     if (!ctx)
         return 0;
+    uint64_t lam = vmm_cr3_lam_bits(ctx);
     if (g_pcid_active)
     {
-        return ctx->pml4_phys | (uint64_t)ctx->pcid;
+        return ctx->pml4_phys | (uint64_t)ctx->pcid | lam;
     }
-    return ctx->pml4_phys;
+    return ctx->pml4_phys | lam;
 }
 
 uint64_t vmm_build_cr3_noflush(vmm_context_t *ctx)
 {
     if (!ctx)
         return 0;
+    uint64_t lam = vmm_cr3_lam_bits(ctx);
     if (g_pcid_active)
     {
-        return ctx->pml4_phys | (uint64_t)ctx->pcid | CR3_NOFLUSH;
+        return ctx->pml4_phys | (uint64_t)ctx->pcid | CR3_NOFLUSH | lam;
     }
-    return ctx->pml4_phys;
+    return ctx->pml4_phys | lam;
+}
+
+/* Set the per-context LAM mode. Validates mode value, gates on has_lam.
+ * Caller is responsible for flushing this CPU's TLB + the next CR3
+ * reload picks up the new bits. Returns OK on success, ERR otherwise. */
+error_t vmm_set_user_lam(vmm_context_t *ctx, vmm_lam_mode_t mode) {
+    if (!ctx) return ERR_NULL_POINTER;
+    if (mode != VMM_LAM_NONE && !g_cpu_caps.has_lam) return ERR_UNSUPPORTED;
+    if (mode > VMM_LAM_U57) return ERR_INVALID_ARGUMENT;
+    /* LAM_U57 requires 5-level paging which BoxOS doesn't enable
+     * (enable_fpu panics on CR4.LA57 set by firmware). Reject. */
+    if (mode == VMM_LAM_U57) return ERR_UNSUPPORTED;
+    ctx->lam_mode = (uint8_t)mode;
+    return OK;
 }
 
 uintptr_t vmm_alloc_page_table(void)
@@ -3934,13 +3962,22 @@ int vmm_handle_page_fault(uintptr_t fault_addr, uint64_t error_code)
         if (pku_ctx) {
             uint8_t lvl = 0;
             pte_t *p = vmm_get_leaf_pte(pku_ctx, fault_addr & ~(VMM_PAGE_SIZE - 1), &lvl);
-            if (p) pkey = vmm_pte_pkey(__atomic_load_n(p, __ATOMIC_ACQUIRE));
+            if (p) pkey = vmm_pte_pkey_effective(__atomic_load_n(p, __ATOMIC_ACQUIRE));
         }
         struct { uint32_t pid; uint32_t pkey; uint64_t va; uint32_t pkru; uint32_t pad; } ev = {
             .pid = pku_pid, .pkey = pkey, .va = fault_addr,
             .pkru = vmm_read_pkru(), .pad = 0,
         };
-        TouchPublish("pku:fault:denied", &ev, sizeof(ev));
+        /* IRQ-safe publish: TouchPublishIrqPair takes pre-resolved tag
+         * handles + bounded payload, copies into a static slot, defers
+         * to K-Core. Direct TouchPublish here would risk deadlock if
+         * the faulting user thread held a Touch lock the publish path
+         * also wants. */
+        if (g_vmm_tag_pku_fault != TOUCH_TAG_INVALID) {
+            TouchPublishIrqPair(g_vmm_tag_pku_fault, TOUCH_TAG_INVALID,
+                                &ev, (uint16_t)sizeof(ev),
+                                pku_pid, 0u);
+        }
     }
 
     if (reserved)

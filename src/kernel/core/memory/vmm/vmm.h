@@ -92,10 +92,24 @@ typedef struct {
     pte_t entries[512];
 } __attribute__((aligned(4096))) page_table_t;
 
+/* Phase 2I LAM mode — per-context opt-in. Stored on vmm_context_t so
+ * vmm_build_cr3 can OR in the CR3.LAM_U48/U57 bits without per-call
+ * lookup. 0 = LAM disabled (default, canonical 48-bit). 1 = LAM_U48
+ * active (bits 62:48 of user VAs ignored). 2 = LAM_U57 active (bits
+ * 62:57 ignored). Userspace opts-in via a future syscall that calls
+ * vmm_set_user_lam(ctx, mode). */
+typedef enum {
+    VMM_LAM_NONE = 0,
+    VMM_LAM_U48  = 1,
+    VMM_LAM_U57  = 2,
+} vmm_lam_mode_t;
+
 typedef struct {
     page_table_t* pml4;
     uintptr_t pml4_phys;
     uint16_t pcid;              // Process Context Identifier (0=kernel, 1-4095=user)
+    uint8_t  lam_mode;          // Phase 2I: vmm_lam_mode_t (per-process opt-in)
+    uint8_t  reserved_a;
     spinlock_t lock;
     size_t mapped_pages;
     size_t kernel_pages;
@@ -263,11 +277,38 @@ void         vmm_dump_mtrr_layout(void);
 #define VMM_PTE_PKEY_MAX      ((1u << VMM_PTE_PKEY_BITS) - 1u)
 #define VMM_PTE_PKEY_MASK     (((uint64_t)VMM_PTE_PKEY_MAX) << VMM_PTE_PKEY_SHIFT)
 
+/* PKEY semantics depend on CR4.CET (Intel SDM Vol 3D §17): when CET
+ * is enabled, bit 60 of leaf PTEs is the supervisor shadow-stack
+ * indicator, NOT part of the PKEY field. The raw extractor below reads
+ * all 4 bits; cet_aware reads only bits 62, 61, 59 (mask out bit 60).
+ * Stamping code must call vmm_pte_assert_no_cet_conflict to prevent
+ * accidentally setting both a non-trivial PKEY and CET supv SS on the
+ * same page. */
 static inline uint64_t vmm_pte_encode_pkey(uint8_t pkey) {
     return (((uint64_t)pkey) & VMM_PTE_PKEY_MAX) << VMM_PTE_PKEY_SHIFT;
 }
 static inline uint8_t vmm_pte_pkey(uint64_t pte_val) {
     return (uint8_t)((pte_val >> VMM_PTE_PKEY_SHIFT) & VMM_PTE_PKEY_MAX);
+}
+/* Returns true when stamping `new_flags` (low + high PTE bits) onto a
+ * 4 KiB leaf would set both a non-zero PKEY field AND the CET supv-SS
+ * bit. Phase 2K + Phase 2H policy: never combine. Callers should
+ * assert/log/refuse when this returns true. */
+static inline bool vmm_pte_pkey_cet_conflict(uint64_t flags) {
+    bool any_pkey = (flags & VMM_PTE_PKEY_MASK & ~(1ULL << 60)) != 0ULL;
+    bool cet_ss   = (flags & (1ULL << 60)) != 0ULL;
+    return any_pkey && cet_ss;
+}
+/* CET-aware PKEY decoder. Reads CR4.CET; when set, masks bit 60 out of
+ * the PKEY field (bit 60 = CET supv SS, NOT PKEY). Returns a 3-bit
+ * effective PKEY (bits 62, 61, 59) under CET-on; 4-bit otherwise. */
+static inline uint8_t vmm_pte_pkey_effective(uint64_t pte_val) {
+    uint64_t cr4;
+    __asm__ volatile("mov %%cr4, %0" : "=r"(cr4));
+    uint64_t mask = (cr4 & (1ULL << 23))
+                    ? (VMM_PTE_PKEY_MASK & ~(1ULL << 60))
+                    : VMM_PTE_PKEY_MASK;
+    return (uint8_t)((pte_val & mask) >> VMM_PTE_PKEY_SHIFT);
 }
 
 /* BSP-side PKU/PKS bring-up: sets CR4.PKE (bit 22) when has_pku, CR4.PKS
@@ -339,6 +380,10 @@ static inline uint8_t  vmm_user_ptr_get_tag_u57(uint64_t ptr) {
  * snapshot at boot. Called from main.c right after vmm_pku_init. */
 void vmm_lam_probe(void);
 void vmm_lam_ap_probe(void);
+
+/* Phase 2I — per-process LAM opt-in. Sets ctx->lam_mode. Future CR3
+ * reload picks up the new LAM bits via vmm_build_cr3. */
+error_t vmm_set_user_lam(vmm_context_t *ctx, vmm_lam_mode_t mode);
 
 /* Phase 2J — TME / TME-MK (Total Memory Encryption Multi-Key).
  *

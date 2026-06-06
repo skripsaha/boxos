@@ -47,4 +47,11 @@ static inline void fpu_restore(const uint8_t* raw) {
 void enable_fpu(void);
 void fpu_init_state(uint8_t* raw);
 
+/* Register an additional XCR0 component bit (PKRU / CET-S / CET-U) for
+ * inclusion in every future XSAVE/XRSTOR sequence. Recomputes area
+ * size + mask atomically. Returns false when the bit isn't supported
+ * or XSAVE is off. MUST be called before any process is spawned —
+ * process FPU areas are sized at allocation time from g_xsave_area_size. */
+bool fpu_xsave_register_extension(uint64_t xcr0_bit, const char *name);
+
 #endif // FPU_H
