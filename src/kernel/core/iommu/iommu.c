@@ -145,6 +145,40 @@ int iommu_unmap(iommu_domain_t* d, uint64_t iova, uint64_t size) {
  * their own per-DRHD/IVHD bring-up; this wrapper adds a one-line
  * summary at the iommu_init call site so the boot log records the
  * MemTag/Touch surface state next to the backend log. */
+void *iommu_dma_alloc(iommu_domain_t *domain, size_t pages, uint32_t perm) {
+    if (!pages) return NULL;
+    /* Default to read|write when caller passes 0. */
+    if (perm == 0) perm = IOMMU_PERM_READ | IOMMU_PERM_WRITE;
+    /* DMA32 zone — most real DMA controllers can address up to 4 GiB
+     * by default; drivers that handle 64-bit DMA can extend later. */
+    void *phys = pmm_alloc(pages, PHYS_TAG_DMA32);
+    if (!phys) return NULL;
+    /* Tag the underlying region so userspace sees the lifecycle. */
+    (void)MemTagApplyByPhys((uintptr_t)phys, pages, "purpose:dma");
+    /* IOMMU map identity-style: iova == phys. When IOMMU is dormant
+     * (no backend), iommu_map is a no-op that returns 0; the buffer is
+     * still usable for legacy in-kernel DMA. */
+    if (g_ops && g_ops->map && domain) {
+        int r = iommu_map(domain, (uint64_t)(uintptr_t)phys,
+                          (uint64_t)(uintptr_t)phys,
+                          (uint64_t)pages * PMM_PAGE_SIZE, perm);
+        if (r != 0) {
+            pmm_free(phys, pages);
+            return NULL;
+        }
+    }
+    return phys;
+}
+
+void iommu_dma_free(iommu_domain_t *domain, void *phys, size_t pages) {
+    if (!phys || !pages) return;
+    if (g_ops && g_ops->unmap && domain) {
+        (void)iommu_unmap(domain, (uint64_t)(uintptr_t)phys,
+                          (uint64_t)pages * PMM_PAGE_SIZE);
+    }
+    pmm_free(phys, pages);
+}
+
 void iommu_audit_dump(void) {
     if (!g_ops) {
         debug_printf("[IOMMU] audit: no backend active (DMA bypasses IOMMU)\n");

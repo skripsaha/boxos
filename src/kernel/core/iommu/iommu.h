@@ -81,4 +81,17 @@ uint32_t        iommu_domain_id(iommu_domain_t*);
  * landscape next to the existing iommu:ready Touch event. */
 void            iommu_audit_dump(void);
 
+/* Phase 2G — DMA buffer auto-allocation wrapper.
+ *
+ * Combines pmm_alloc(pages, PHYS_TAG_DMA32) + iommu_map(domain, iova,
+ * phys, size, perm) into a single call. Returns the phys address of the
+ * allocated buffer (also the IOVA, since identity-map domain is used by
+ * default). NULL on failure.
+ *
+ * When IOMMU is dormant (no DMAR/IVRS or g_ops==NULL), falls back to
+ * plain pmm_alloc — driver code stays IOMMU-agnostic. Perm = read|write
+ * by default; pass IOMMU_PERM_* bits to constrain. */
+void *iommu_dma_alloc(iommu_domain_t *domain, size_t pages, uint32_t perm);
+void  iommu_dma_free (iommu_domain_t *domain, void *phys, size_t pages);
+
 #endif /* IOMMU_H */
