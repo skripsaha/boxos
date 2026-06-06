@@ -46,6 +46,11 @@ typedef struct iommu_ops {
                 uint64_t size, uint32_t perm);
     int  (*unmap)(iommu_domain_t*, uint64_t iova, uint64_t size);
     void (*invalidate)(iommu_domain_t*);
+    /* Phase 2G — opaque domain → integer ID accessor. Each backend's
+     * struct iommu_domain hides the layout but exposes a stable uint32_t
+     * id. Used by the iommu_map wrapper to derive `iommu:domain:N` tag
+     * strings without leaking backend struct layout to MemTag. */
+    uint32_t (*domain_id)(iommu_domain_t*);
 } iommu_ops_t;
 
 /* Probe ACPI; pick backend; call ops->init. Returns 0 if any IOMMU
@@ -64,5 +69,16 @@ int             iommu_device_attach(iommu_domain_t*, uint16_t seg,
 int             iommu_map(iommu_domain_t*, uint64_t iova, uint64_t phys,
                           uint64_t size, uint32_t perm);
 int             iommu_unmap(iommu_domain_t*, uint64_t iova, uint64_t size);
+
+/* Phase 2G — opaque domain-ID accessor. Returns 0xFFFFFFFF for NULL
+ * domain or when no backend is active. */
+uint32_t        iommu_domain_id(iommu_domain_t*);
+
+/* Phase 2G — boot-time audit. Logs the active backend name, # of
+ * remap units, # of domains carved, and identity-map state. Idempotent
+ * and free of side effects beyond debug_printf. Called from main.c
+ * right after iommu_init so the boot log carries the current IOMMU
+ * landscape next to the existing iommu:ready Touch event. */
+void            iommu_audit_dump(void);
 
 #endif /* IOMMU_H */

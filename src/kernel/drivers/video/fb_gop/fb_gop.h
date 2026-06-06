@@ -3,7 +3,12 @@
 
 #include "ktypes.h"
 
-int FbGopInit(uint64_t phys_addr, uint32_t width, uint32_t height,
-              uint32_t stride, uint32_t format);
+struct DisplayBackend;
+
+/* Initialise the GOP framebuffer backend and return its DisplayBackend
+ * vtable (NULL on failure — caller stays on the text-mode backend). */
+struct DisplayBackend *FbGopBackendInit(uint64_t phys_addr,
+                                        uint32_t width, uint32_t height,
+                                        uint32_t stride, uint32_t format);
 
 #endif /* FB_GOP_H */

@@ -1,5 +1,6 @@
 #include "vmm.h"
 #include "pmm.h"
+#include "memtag.h"
 #include "klib.h"
 #include "io.h"
 #include "atomics.h"
@@ -12,6 +13,7 @@
 #include "amp.h"
 #include "video.h"
 #include "e820.h"
+#include "touch.h"   /* TouchPublish for pku:fault:denied (Phase 2H) */
 #include "cabin_layout.h"
 #include "acpi.h"
 
@@ -85,6 +87,15 @@ static spinlock_t kernel_mmio_lock = {0};
 #define PAT_TYPE_UCM   0x07U   /* UC- (weakly uncacheable) */
 #define PAT_TYPE_UC    0x00U
 #define PAT_TYPE_WC    0x01U   /* Write Combining            */
+#define PAT_TYPE_WP    0x05U   /* Write Protected (reserved) */
+
+/* IA32_PAT MSR value programmed by vmm_pat_init on BSP. Used by:
+ *   - vmm_pte_cache_type — decode any PTE's leaf cache type via PAT index
+ *   - MemTagVerifyPatMsr — AP-side RDMSR vs BSP value (Intel SDM Vol 3A
+ *     §11.12.4: identical PAT required across coherent logical processors)
+ * 0 means "PAT not programmed" (e.g. !has_pat). Otherwise it's the 64-bit
+ * MSR pattern written via WRMSR — 8 one-byte entries (PA0..PA7). */
+uint64_t g_ia32_pat_value = 0;
 
 void vmm_pat_init(void)
 {
@@ -117,6 +128,12 @@ void vmm_pat_init(void)
         :
     );
 
+    /* Snapshot for AP-side consistency probe (MemTagVerifyPatMsr) and for
+     * runtime PTE→cache-type decoding (vmm_pte_cache_type). Atomic store
+     * with RELEASE so APs reading after their cpu_intersect_features_ap
+     * see the BSP-programmed value. */
+    __atomic_store_n(&g_ia32_pat_value, pat, __ATOMIC_RELEASE);
+
     /* TLB invalidation after PAT change. Intel SDM Vol 3A §11.11.8: PAT
      * entries are cached in the TLB along with the page-walk results, so
      * a PAT update doesn't take effect for pre-existing TLB entries
@@ -133,6 +150,382 @@ void vmm_pat_init(void)
 
     debug_printf("[VMM] PAT MSR programmed: PA6=WC (framebuffer Write Combining enabled)\n");
 }
+
+/*
+ * vmm_pte_pat_index — extract the 3-bit PAT selector from a leaf PTE.
+ *
+ * 4 KiB leaf (level 1): selectors are PWT (bit 3), PCD (bit 4), PAT (bit 7).
+ * 2 MiB / 1 GiB leaf  : PWT (bit 3), PCD (bit 4), PAT (bit 12) — because
+ *                       bit 7 is PS (Page Size) on the parent PDE/PDPT.
+ * Intel SDM Vol 3A §11.12.3 + Tables 4-19/4-21.
+ *
+ * Returns 0..7; the caller decodes via IA32_PAT MSR (g_ia32_pat_value).
+ */
+uint8_t vmm_pte_pat_index(uint64_t pte_val, bool is_huge_leaf)
+{
+    uint8_t idx = 0;
+    if (pte_val & VMM_FLAG_WRITE_THROUGH) idx |= 1u;
+    if (pte_val & VMM_FLAG_CACHE_DISABLE) idx |= 2u;
+    if (is_huge_leaf) {
+        if (pte_val & (1ULL << 12))       idx |= 4u;
+    } else {
+        if (pte_val & VMM_FLAG_PAT_BIT)   idx |= 4u;
+    }
+    return idx;
+}
+
+/*
+ * vmm_pat_type_at — decode the memory type stored at PAT entry `pat_idx`
+ * inside the live IA32_PAT MSR snapshot (g_ia32_pat_value).
+ *
+ * Returns one of:
+ *   0x00 PAT_TYPE_UC   — Strong Uncached
+ *   0x01 PAT_TYPE_WC   — Write Combining
+ *   0x04 PAT_TYPE_WT   — Write Through
+ *   0x05 PAT_TYPE_WP   — Write Protected
+ *   0x06 PAT_TYPE_WB   — Write Back
+ *   0x07 PAT_TYPE_UCM  — Uncached, weakly ordered
+ *   0xFF                — PAT not yet initialized (vmm_pat_init not run)
+ *
+ * Other values 0x02/0x03 are RESERVED per Intel SDM Vol 3A Table 11-10
+ * and SHOULD NOT appear; returned as-is if seen so callers can detect.
+ */
+uint8_t vmm_pat_type_at(uint8_t pat_idx)
+{
+    uint64_t pat = __atomic_load_n(&g_ia32_pat_value, __ATOMIC_ACQUIRE);
+    if (pat == 0) return 0xFFu;
+    return (uint8_t)((pat >> (pat_idx * 8u)) & 0x07u);
+}
+
+/*
+ * vmm_pte_cache_type_str — convenience: PTE → "cache:wb"/etc string.
+ *
+ * Composes vmm_pte_pat_index + vmm_pat_type_at into a stable string tag
+ * suitable for MemTagApply. Used by debug tools / userspace introspection.
+ * Returns "cache:unknown" when PAT isn't initialized.
+ */
+const char *vmm_pte_cache_type_str(uint64_t pte_val, bool is_huge_leaf)
+{
+    uint8_t pat_idx = vmm_pte_pat_index(pte_val, is_huge_leaf);
+    uint8_t type    = vmm_pat_type_at(pat_idx);
+    switch (type) {
+        case PAT_TYPE_UC:  return "cache:uc";
+        case PAT_TYPE_WC:  return "cache:wc";
+        case PAT_TYPE_WT:  return "cache:wt";
+        case PAT_TYPE_WP:  return "cache:wp";
+        case PAT_TYPE_WB:  return "cache:wb";
+        case PAT_TYPE_UCM: return "cache:uc-";
+        case 0xFFu:        return "cache:unknown";
+        default:           return "cache:reserved";
+    }
+}
+
+/*
+ * vmm_get_pat_msr_value — read the BSP-programmed IA32_PAT snapshot.
+ * 0 means PAT not initialized. AP-side consistency probe compares its
+ * own RDMSR to this value.
+ */
+uint64_t vmm_get_pat_msr_value(void)
+{
+    return __atomic_load_n(&g_ia32_pat_value, __ATOMIC_ACQUIRE);
+}
+
+/* ─── Phase 2E — PAT consistency + MTRR audit (CPU probes) ────────────
+ *
+ * These were originally in memtag.c with a MemTag* prefix, but they
+ * have ZERO MemTag-specific state — they're pure CPU MSR probes that
+ * happen to inform MemTag's cache:* tag decisions. Moved here in the
+ * post-Phase-2K audit pass so they sit alongside vmm_pat_init / the
+ * other VMM MSR helpers. */
+
+#define VMM_MSR_IA32_MTRRCAP        0xFEU
+#define VMM_MSR_MTRR_DEF_TYPE       0x2FFU
+#define VMM_MSR_MTRR_PHYSBASE0      0x200U
+#define VMM_MSR_MTRR_PHYSMASK0      0x201U
+
+static inline uint64_t vmm_rdmsr_local(uint32_t msr_id) {
+    uint32_t lo, hi;
+    __asm__ volatile("rdmsr" : "=a"(lo), "=d"(hi) : "c"(msr_id));
+    return ((uint64_t)hi << 32) | lo;
+}
+
+bool vmm_verify_pat_msr(void) {
+    if (!g_cpu_caps.has_pat) {
+        debug_printf("[VMM] PAT MSR verify SKIP: CPU lacks PAT\n");
+        return true;
+    }
+    uint64_t bsp = vmm_get_pat_msr_value();
+    if (bsp == 0) {
+        debug_printf("[VMM] PAT MSR verify SKIP: BSP snapshot not captured\n");
+        return true;
+    }
+    uint64_t local = vmm_rdmsr_local(MSR_IA32_PAT);
+    if (local != bsp) {
+        debug_printf("[VMM] PAT MSR ABORT: local=0x%016lx bsp=0x%016lx "
+                     "— Intel SDM Vol 3A §11.12.4 violation (heterogeneous "
+                     "PAT across coherent CPUs)\n",
+                     (unsigned long)local, (unsigned long)bsp);
+        return false;
+    }
+    debug_printf("[VMM] PAT MSR verify OK: 0x%016lx (matches BSP)\n",
+                 (unsigned long)local);
+    return true;
+}
+
+static const char *vmm_mtrr_type_str(uint8_t t) {
+    switch (t) {
+        case 0x00: return "UC";
+        case 0x01: return "WC";
+        case 0x04: return "WT";
+        case 0x05: return "WP";
+        case 0x06: return "WB";
+        default:   return NULL;
+    }
+}
+
+void vmm_dump_mtrr_layout(void) {
+    if (!g_cpu_caps.has_pat) {
+        debug_printf("[VMM] MTRR audit SKIP: CPU lacks PAT/MSRs\n");
+        return;
+    }
+    uint64_t cap = vmm_rdmsr_local(VMM_MSR_IA32_MTRRCAP);
+    uint64_t def = vmm_rdmsr_local(VMM_MSR_MTRR_DEF_TYPE);
+
+    uint8_t  vcnt    = (uint8_t)(cap & 0xFFu);
+    bool     fix_sup = (cap >> 8) & 1u;
+    bool     wc_sup  = (cap >> 10) & 1u;
+    bool     smrr    = (cap >> 11) & 1u;
+    uint8_t  def_typ = (uint8_t)(def & 0xFFu);
+    bool     fix_en  = (def >> 10) & 1u;
+    bool     mtrr_en = (def >> 11) & 1u;
+    const char *def_str = vmm_mtrr_type_str(def_typ);
+
+    debug_printf("[VMM] MTRR audit: cap=0x%016lx def=0x%016lx VCNT=%u "
+                 "FIX_sup=%d WC_sup=%d SMRR=%d FIX_en=%d MTRR_en=%d "
+                 "DEF_TYPE=%s(0x%02x)\n",
+                 (unsigned long)cap, (unsigned long)def,
+                 (unsigned)vcnt, (int)fix_sup, (int)wc_sup, (int)smrr,
+                 (int)fix_en, (int)mtrr_en,
+                 def_str ? def_str : "RESERVED", (unsigned)def_typ);
+
+    if (!mtrr_en) {
+        debug_printf("[VMM] MTRR audit WARN: MTRRs DISABLED — every "
+                     "range falls back to UC per Intel SDM §11.11.2.1 "
+                     "(MTRR_DEF_TYPE.E=0). Firmware misconfig.\n");
+    }
+    if (def_typ != 0x06u && mtrr_en) {
+        debug_printf("[VMM] MTRR audit WARN: DEF_TYPE=%s — non-WB "
+                     "default means PAT cache:wb tags may be silently "
+                     "demoted (Intel SDM §11.12.5 combination table).\n",
+                     def_str ? def_str : "RESERVED");
+    }
+
+    uint32_t walk_n = vcnt > 8 ? 8 : vcnt;
+    for (uint32_t i = 0; i < walk_n; i++) {
+        uint64_t base = vmm_rdmsr_local(VMM_MSR_MTRR_PHYSBASE0 + i * 2);
+        uint64_t mask = vmm_rdmsr_local(VMM_MSR_MTRR_PHYSMASK0 + i * 2);
+        if (!((mask >> 11) & 1u)) continue;
+        uint8_t  ty   = (uint8_t)(base & 0xFFu);
+        uint64_t phys = base & ~0xFFFULL;
+        uint64_t mphys = mask & ~0xFFFULL;
+        const char *ts = vmm_mtrr_type_str(ty);
+        debug_printf("[VMM]   MTRR var[%u]: base=0x%016lx mask=0x%016lx "
+                     "type=%s(0x%02x)\n",
+                     i, (unsigned long)phys, (unsigned long)mphys,
+                     ts ? ts : "RESERVED", (unsigned)ty);
+    }
+}
+
+/* ─── Phase 2H — PKU / PKS bring-up ───────────────────────────────── */
+
+#define VMM_CR4_PKE_BIT   (1ULL << 22)   /* CR4.PKE — Intel SDM Vol 3A §2.5 */
+#define VMM_CR4_PKS_BIT   (1ULL << 24)   /* CR4.PKS */
+#define VMM_XCR0_PKRU_BIT (1ULL << 9)    /* XSAVE component 9 */
+#define VMM_MSR_PKRU      0x6E0U
+#define VMM_MSR_PKRS      0x6E1U
+
+static inline void vmm_pku_program_cr4(void) {
+    uint64_t cr4;
+    __asm__ volatile("mov %%cr4, %0" : "=r"(cr4));
+    uint64_t want = cr4;
+    if (g_cpu_caps.has_pku) want |= VMM_CR4_PKE_BIT;
+    if (g_cpu_caps.has_pks) want |= VMM_CR4_PKS_BIT;
+    if (want != cr4) {
+        __asm__ volatile("mov %0, %%cr4" : : "r"(want) : "memory");
+    }
+}
+
+static inline void vmm_pku_program_xcr0(void) {
+    if (!g_cpu_caps.has_xsave || !g_cpu_caps.has_pku) return;
+    /* XSAVE component 9 must be exposed in XCR0 for the kernel's
+     * XSAVE/XRSTOR sequences to save and restore PKRU on context
+     * switch. SDM Vol 1 §13.3: XCR0 bit 9 = PKRU state. The kernel
+     * has already enabled CR4.OSXSAVE in fpu_init; XSETBV is legal.
+     * Skip when PKU not supported on this AP. */
+    if (!(g_cpu_caps.xcr0_supported & VMM_XCR0_PKRU_BIT)) return;
+    uint64_t xcr0;
+    uint32_t lo, hi;
+    __asm__ volatile("xgetbv" : "=a"(lo), "=d"(hi) : "c"(0u));
+    xcr0 = ((uint64_t)hi << 32) | lo;
+    if (!(xcr0 & VMM_XCR0_PKRU_BIT)) {
+        xcr0 |= VMM_XCR0_PKRU_BIT;
+        uint32_t wlo = (uint32_t)(xcr0 & 0xFFFFFFFFu);
+        uint32_t whi = (uint32_t)(xcr0 >> 32);
+        __asm__ volatile("xsetbv" : : "c"(0u), "a"(wlo), "d"(whi));
+    }
+}
+
+void vmm_pku_init(void) {
+    if (!g_cpu_caps.has_pku && !g_cpu_caps.has_pks) {
+        debug_printf("[VMM] PKU/PKS not supported — Phase 2H dormant\n");
+        return;
+    }
+    vmm_pku_program_cr4();
+    vmm_pku_program_xcr0();
+    debug_printf("[VMM] PKU/PKS BSP init: PKU=%d PKS=%d XCR0.PKRU=%d "
+                 "(default PKRU=0 → all keys allowed; per-process "
+                 "lifecycle pending)\n",
+                 (int)g_cpu_caps.has_pku,
+                 (int)g_cpu_caps.has_pks,
+                 (int)((g_cpu_caps.has_pku && g_cpu_caps.has_xsave) ? 1 : 0));
+}
+
+void vmm_pku_ap_init(void) {
+    if (!g_cpu_caps.has_pku && !g_cpu_caps.has_pks) return;
+    vmm_pku_program_cr4();
+    vmm_pku_program_xcr0();
+}
+
+/*
+ * PKRU is NOT an MSR — Intel SDM Vol 1 §18.2 defines RDPKRU (opcode
+ * 0F 01 EE) and WRPKRU (0F 01 EF) as dedicated instructions. Using
+ * RDMSR/WRMSR on 0x6E0 #GPs. We emit raw opcodes so we work with
+ * assemblers that don't yet know the mnemonics. Both require CR4.PKE=1
+ * (we set it in vmm_pku_init) and ECX=0; WRPKRU additionally needs
+ * EDX=0.
+ *
+ * PKS (supervisor variant), in contrast, IS a real MSR (IA32_PKRS,
+ * 0x6E1) — but Phase 2H doesn't yet drive it; reserved here for
+ * symmetry with the userspace helpers.
+ */
+uint32_t vmm_read_pkru(void) {
+    if (!g_cpu_caps.has_pku) return 0;
+    uint32_t pkru;
+    __asm__ volatile(".byte 0x0f, 0x01, 0xee"
+                     : "=a"(pkru)
+                     : "c"(0u)
+                     : "edx");
+    return pkru;
+}
+
+void vmm_write_pkru(uint32_t value) {
+    if (!g_cpu_caps.has_pku) return;
+    __asm__ volatile(".byte 0x0f, 0x01, 0xef"
+                     :
+                     : "a"(value), "c"(0u), "d"(0u));
+}
+
+/* ─── Phase 2I — LAM probe ─────────────────────────────────────────── */
+
+static void vmm_lam_probe_inner(const char *who) {
+    if (!g_cpu_caps.has_lam) {
+        debug_printf("[VMM/%s] LAM not supported — Phase 2I dormant\n", who);
+        return;
+    }
+    uint64_t cr3, cr4;
+    __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
+    __asm__ volatile("mov %%cr4, %0" : "=r"(cr4));
+    bool lam_u48 = (cr3 & VMM_CR3_LAM_U48) != 0;
+    bool lam_u57 = (cr3 & VMM_CR3_LAM_U57) != 0;
+    bool lam_sup = (cr4 & VMM_CR4_LAM_SUP) != 0;
+    debug_printf("[VMM/%s] LAM probe: CR3.LAM_U48=%d CR3.LAM_U57=%d "
+                 "CR4.LAM_SUP=%d → user-side dormant by default "
+                 "(per-process opt-in pending)\n",
+                 who, (int)lam_u48, (int)lam_u57, (int)lam_sup);
+}
+
+void vmm_lam_probe(void)    { vmm_lam_probe_inner("BSP"); }
+void vmm_lam_ap_probe(void) { vmm_lam_probe_inner("AP"); }
+
+/* ─── Phase 2J — TME / TME-MK probe ────────────────────────────────── */
+
+static void vmm_tme_probe_inner(const char *who) {
+    if (!g_cpu_caps.has_tme) {
+        debug_printf("[VMM/%s] TME not supported — Phase 2J dormant\n", who);
+        return;
+    }
+    /* MSRs gated by CPUID.07H.0:ECX[13]. Reading without that bit
+     * would #GP; the early-return above protects every call site. */
+    uint32_t lo, hi;
+    __asm__ volatile("rdmsr" : "=a"(lo), "=d"(hi)
+                     : "c"(VMM_MSR_IA32_TME_CAPABILITY));
+    uint64_t cap = ((uint64_t)hi << 32) | lo;
+    __asm__ volatile("rdmsr" : "=a"(lo), "=d"(hi)
+                     : "c"(VMM_MSR_IA32_TME_ACTIVATE));
+    uint64_t act = ((uint64_t)hi << 32) | lo;
+
+    bool   locked       = (act & VMM_TME_ACT_LOCK)        != 0;
+    bool   tme_enabled  = (act & VMM_TME_ACT_TME_EN)      != 0;
+    bool   mk_enabled   = (act & VMM_TME_ACT_TME_MK_EN)   != 0;
+    uint8_t num_keyid_bits = (uint8_t)((act & VMM_TME_ACT_KEYID_BITS_MASK)
+                                       >> VMM_TME_ACT_KEYID_BITS_SHIFT);
+
+    debug_printf("[VMM/%s] TME probe: cap=0x%016lx act=0x%016lx "
+                 "lock=%d TME_EN=%d MK_EN=%d num_keyid_bits=%u "
+                 "MAXPHYADDR=%u → KeyID window bits %u:%u\n",
+                 who,
+                 (unsigned long)cap, (unsigned long)act,
+                 (int)locked, (int)tme_enabled, (int)mk_enabled,
+                 (unsigned)num_keyid_bits,
+                 (unsigned)vmm_maxphyaddr,
+                 num_keyid_bits > 0
+                     ? (unsigned)(vmm_maxphyaddr - 1)
+                     : 0u,
+                 num_keyid_bits > 0
+                     ? (unsigned)(vmm_maxphyaddr - num_keyid_bits)
+                     : 0u);
+}
+
+void vmm_tme_probe(void)    { vmm_tme_probe_inner("BSP"); }
+void vmm_tme_ap_probe(void) { vmm_tme_probe_inner("AP"); }
+
+/* ─── Phase 2K — CET probe ─────────────────────────────────────────── */
+
+static void vmm_cet_probe_inner(const char *who) {
+    if (!g_cpu_caps.has_shstk && !g_cpu_caps.has_ibt) {
+        debug_printf("[VMM/%s] CET not supported (no SHSTK/IBT) — Phase 2K dormant\n", who);
+        return;
+    }
+    uint64_t cr4;
+    __asm__ volatile("mov %%cr4, %0" : "=r"(cr4));
+    bool cr4_cet = (cr4 & VMM_CR4_CET_BIT) != 0;
+
+    /* MSRs only readable when CR4.CET=1. Firmware may not have enabled
+     * it — gate the RDMSR. */
+    uint64_t s_cet = 0, u_cet = 0;
+    if (cr4_cet) {
+        uint32_t lo, hi;
+        __asm__ volatile("rdmsr" : "=a"(lo), "=d"(hi)
+                         : "c"(VMM_MSR_IA32_S_CET));
+        s_cet = ((uint64_t)hi << 32) | lo;
+        __asm__ volatile("rdmsr" : "=a"(lo), "=d"(hi)
+                         : "c"(VMM_MSR_IA32_U_CET));
+        u_cet = ((uint64_t)hi << 32) | lo;
+    }
+
+    debug_printf("[VMM/%s] CET probe: SHSTK=%d IBT=%d CR4.CET=%d "
+                 "IA32_S_CET=0x%016lx IA32_U_CET=0x%016lx → per-process "
+                 "lifecycle pending\n",
+                 who,
+                 (int)g_cpu_caps.has_shstk,
+                 (int)g_cpu_caps.has_ibt,
+                 (int)cr4_cet,
+                 (unsigned long)s_cet,
+                 (unsigned long)u_cet);
+}
+
+void vmm_cet_probe(void)    { vmm_cet_probe_inner("BSP"); }
+void vmm_cet_ap_probe(void) { vmm_cet_probe_inner("AP"); }
 
 typedef struct vmalloc_entry
 {
@@ -801,6 +1194,58 @@ pte_t *vmm_get_or_create_pte(vmm_context_t *ctx, uintptr_t virt_addr)
     if (!pt)
         return NULL;
     return &pt->entries[VMM_PT_INDEX(virt_addr)];
+}
+
+/*
+ * vmm_get_leaf_pte — return a pointer to whichever PT/PD/PDPT entry is
+ * the LEAF for `virt_addr`. Out-parameter `out_level` reports the level
+ * of the leaf:
+ *   1 → 4 KiB PT entry  (caller masks PTE bits 12+ for phys)
+ *   2 → 2 MiB PD leaf  (caller masks PTE bits 21+ for phys)
+ *   3 → 1 GiB PDPT leaf (caller masks PTE bits 30+ for phys)
+ *
+ * Returns NULL when no mapping covers `virt_addr` at any level. This is
+ * the only walker that can find a PRESENT 2 MiB / 1 GiB leaf — the
+ * existing `vmm_get_pte` short-circuits at LARGE_PAGE bits and returns
+ * NULL.  Phase 2C revoke/grant uses this to toggle PTE.P regardless of
+ * page size.
+ */
+pte_t *vmm_get_leaf_pte(vmm_context_t *ctx, uintptr_t virt_addr,
+                        uint8_t *out_level)
+{
+    if (out_level) *out_level = 0;
+    if (!ctx || !ctx->pml4) return NULL;
+
+    uint32_t pml4_idx = VMM_PML4_INDEX(virt_addr);
+    uint32_t pdpt_idx = VMM_PDPT_INDEX(virt_addr);
+    uint32_t pd_idx   = VMM_PD_INDEX(virt_addr);
+    uint32_t pt_idx   = VMM_PT_INDEX(virt_addr);
+
+    pte_t pml4_entry = ctx->pml4->entries[pml4_idx];
+    if (!(pml4_entry & VMM_FLAG_PRESENT)) return NULL;
+
+    page_table_t *pdpt =
+        (page_table_t *)vmm_phys_to_virt(vmm_pte_to_phys(pml4_entry));
+    pte_t pdpt_entry = pdpt->entries[pdpt_idx];
+    if (!(pdpt_entry & VMM_FLAG_PRESENT)) return NULL;
+    if (pdpt_entry & VMM_FLAG_LARGE_PAGE) {
+        if (out_level) *out_level = 3;
+        return &pdpt->entries[pdpt_idx];
+    }
+
+    page_table_t *pd =
+        (page_table_t *)vmm_phys_to_virt(vmm_pte_to_phys(pdpt_entry));
+    pte_t pd_entry = pd->entries[pd_idx];
+    if (!(pd_entry & VMM_FLAG_PRESENT)) return NULL;
+    if (pd_entry & VMM_FLAG_LARGE_PAGE) {
+        if (out_level) *out_level = 2;
+        return &pd->entries[pd_idx];
+    }
+
+    page_table_t *pt =
+        (page_table_t *)vmm_phys_to_virt(vmm_pte_to_phys(pd_entry));
+    if (out_level) *out_level = 1;
+    return &pt->entries[pt_idx];
 }
 
 pte_t *vmm_get_pte(vmm_context_t *ctx, uintptr_t virt_addr)
@@ -1565,6 +2010,20 @@ volatile void *vmm_map_mmio(uintptr_t phys_addr, size_t size, uint64_t flags)
         return NULL;
     }
 
+    /* Register a MemTag region so drivers can query MMIO mappings via tag
+     * algebra (`MemTagAnd("cache:uc", "purpose:mmio")` finds every
+     * uncacheable MMIO mapping). Phys may live outside id_by_page (device
+     * registers above mem_end) — registry tracks it regardless; only the
+     * O(1) phys lookup degrades to "not in id_by_page". */
+    uint32_t rid = MemRegionCreate(phys_aligned, virt_base, NULL, page_count,
+                                    MEMTAG_REGION_FLAG_KERNEL |
+                                    MEMTAG_REGION_FLAG_PHYSICAL |
+                                    MEMTAG_REGION_FLAG_VIRTUAL);
+    if (rid != MEMTAG_INVALID_REGION_ID) {
+        MemTagApply(rid, "purpose:mmio");
+        MemTagApply(rid, "cache:uc");
+    }
+
     return (volatile void *)(virt_base + offset);
 }
 
@@ -1633,6 +2092,15 @@ volatile void *vmm_map_framebuffer(uintptr_t phys_addr, size_t size)
     debug_printf("[VMM] vmm_map_framebuffer: phys=0x%lx size=0x%lx → virt=0x%lx (WC)\n",
                  (unsigned long)phys_addr, (unsigned long)size,
                  (unsigned long)(virt_base + offset));
+
+    uint32_t rid = MemRegionCreate(phys_aligned, virt_base, NULL, page_count,
+                                    MEMTAG_REGION_FLAG_KERNEL |
+                                    MEMTAG_REGION_FLAG_PHYSICAL |
+                                    MEMTAG_REGION_FLAG_VIRTUAL);
+    if (rid != MEMTAG_INVALID_REGION_ID) {
+        MemTagApply(rid, "purpose:framebuffer");
+        MemTagApply(rid, "cache:wc");
+    }
 
     return (volatile void *)(virt_base + offset);
 }
@@ -3436,6 +3904,8 @@ int vmm_map_code_region(vmm_context_t *ctx, uintptr_t code_phys, uint64_t size,
 #define PF_USER (1 << 2)
 #define PF_RESERVED (1 << 3) // reserved bit set in page table entry
 #define PF_INSTR (1 << 4)    // instruction fetch
+#define PF_PK   (1 << 5)     // protection-key violation (Phase 2H; SDM §4.6.2)
+#define PF_SS   (1 << 6)     // shadow-stack access (Phase 2K placeholder; §17)
 
 int vmm_handle_page_fault(uintptr_t fault_addr, uint64_t error_code)
 {
@@ -3448,6 +3918,30 @@ int vmm_handle_page_fault(uintptr_t fault_addr, uint64_t error_code)
     debug_printf("[VMM] Page fault at 0x%llx (error=0x%llx)\n", fault_addr, error_code);
     debug_printf("[VMM]   present=%d write=%d user=%d reserved=%d instr=%d\n",
                  present, write, user, reserved, instr_fetch);
+
+    /* Phase 2H — PF.PK decode. Bit 5 of the error code signals a
+     * Protection-Key violation (Intel SDM Vol 3A §4.7). We publish a
+     * Touch event with the PTE's PKEY field + current PKRU so
+     * subscribers can decide policy. The fault still propagates to
+     * the existing kill-process / kernel-panic flow below — Phase 2H
+     * is observe-only this iteration; per-process PKRU lifecycle is
+     * the next step that turns this into a recoverable signal. */
+    if (error_code & PF_PK) {
+        process_t *pku_proc = process_get_current();
+        uint32_t pku_pid = pku_proc ? pku_proc->pid : 0;
+        uint8_t pkey = 0;
+        vmm_context_t *pku_ctx = pku_proc ? pku_proc->cabin : vmm_get_current_context();
+        if (pku_ctx) {
+            uint8_t lvl = 0;
+            pte_t *p = vmm_get_leaf_pte(pku_ctx, fault_addr & ~(VMM_PAGE_SIZE - 1), &lvl);
+            if (p) pkey = vmm_pte_pkey(__atomic_load_n(p, __ATOMIC_ACQUIRE));
+        }
+        struct { uint32_t pid; uint32_t pkey; uint64_t va; uint32_t pkru; uint32_t pad; } ev = {
+            .pid = pku_pid, .pkey = pkey, .va = fault_addr,
+            .pkru = vmm_read_pkru(), .pad = 0,
+        };
+        TouchPublish("pku:fault:denied", &ev, sizeof(ev));
+    }
 
     if (reserved)
     {
@@ -3502,6 +3996,40 @@ int vmm_handle_page_fault(uintptr_t fault_addr, uint64_t error_code)
         {
             debug_printf("[VMM] ERROR: Stack overflow detected (guard page access at 0x%llx)\n", fault_addr);
             return -1;
+        }
+
+        /* MemTag Phase 2B + 2D — capability enforcement at fault time.
+         *
+         * Phase 2B: for faults on a PRESENT page (real protection-fault)
+         * or on a page whose backing region carries a guard the cabin
+         * doesn't hold: deny + publish memtag:fault:denied + return -1
+         * → cabin gets the standard user-PF kill path. Skip for unmapped
+         * pages with no region (lazy-alloc cases continue below).
+         *
+         * Phase 2D fast-path: single vmm_get_leaf_pte walk yields both
+         * phys (via addr_mask) AND the encoded region_id (PTE bits 52-58
+         * stamped by StampPteRegion at attach time). MemRegionFromPte
+         * verifies the encoded id covers `phys` and falls back to the
+         * dense reverse index on collision. Replaces the previous
+         * virt_to_phys + MemRegionFromPhys two-step. */
+        if (current && current->pid != 0) {
+            uintptr_t page_va = fault_addr & ~(VMM_PAGE_SIZE - 1);
+            uint8_t   level   = 0;
+            pte_t    *pte_ptr = vmm_get_leaf_pte(ctx, page_va, &level);
+            if (pte_ptr) {
+                pte_t     pte_val = __atomic_load_n(pte_ptr, __ATOMIC_ACQUIRE);
+                uintptr_t phys    = pte_val & vmm_get_addr_mask();
+                if (phys) {
+                    uint32_t rid = MemRegionFromPte(pte_val, phys);
+                    if (rid != MEMTAG_INVALID_REGION_ID) {
+                        if (!MemTagEnforce(current->pid, fault_addr, rid)) {
+                            debug_printf("[VMM] PID %u → 0x%lx: memtag-denied (rid=%u)\n",
+                                         current->pid, fault_addr, rid);
+                            return -1;
+                        }
+                    }
+                }
+            }
         }
     }
 

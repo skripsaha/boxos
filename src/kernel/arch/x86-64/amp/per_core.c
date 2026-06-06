@@ -12,6 +12,8 @@
 #include "cpu_calibrate.h"// cpu_get_tsc_freq_khz()
 #include "pit.h"          // pit_get_uptime_us() — HPET-backed wall clock
 #include "cpu_caps_page.h"// cpu_caps_page_refresh_waitpkg()
+#include "memtag.h"       // MemTagVerifyPteMetadataBits() — Phase 2D M5
+#include "mce.h"          // mce_ap_init() — Phase 2F
 
 PerCoreData g_per_core[MAX_CORES] __attribute__((aligned(64)));
 volatile bool g_per_core_active = false;
@@ -318,6 +320,14 @@ void per_core_init_ap(uint8_t core_index, uint64_t stack_top) {
      * userspace would read stale `1` and #UD on UMWAIT here. */
     cpu_caps_page_refresh_waitpkg();
 
+    /* MemTag Phase 2D M5 — verify PTE bits 52-58 are still "Ignored" on
+     * THIS AP. On hybrid CPUs an AP may report different CR4.PKE/CR4.CET
+     * state than the BSP; the probe logs the per-AP result. Failure
+     * here (MAXPHYADDR > 52 on a future arch) is informational — the
+     * encoding is still memory-safe, just degraded to fall-back-only
+     * via MemRegionFromPte's phys verification. */
+    (void)MemTagVerifyPteMetadataBits();
+
     /* Program IA32_UMWAIT_CONTROL on this AP. WAITPKG-gated inside;
      * no-op on AMD or E-cores that lack it. Must happen AFTER the
      * intersect above so a P-core's MSR write isn't issued on an
@@ -388,6 +398,48 @@ void per_core_init_ap(uint8_t core_index, uint64_t stack_top) {
      * lands on this AP gets coalesced as UC-, not WC. Manifests as
      * torn/re-ordered pixels on real HW after the first AP comes online. */
     vmm_pat_init();
+
+    /* MemTag Phase 2E — verify this AP's IA32_PAT matches the BSP-cached
+     * value. Intel SDM Vol 3A §11.12.4 mandates an identical PAT across
+     * all coherent logical processors; a divergence is a hardware bug or
+     * firmware misconfig and would cause silent cache-type splits between
+     * cores (e.g. AP-rendered framebuffer pixels coalesced as UC- while
+     * BSP-rendered pixels are WC). MemTagVerifyPatMsr also catches the
+     * race where an AP would run vmm_pat_init AFTER vmm_pat_init's
+     * RELEASE-store on BSP but before any consistency check fired. */
+    (void)MemTagVerifyPatMsr();
+
+    /* Phase 2F — Machine Check Architecture per-AP bring-up. Enables
+     * CR4.MCE on this AP, programs every reporting bank's IA32_MC<i>_CTL,
+     * clears stale status. Intel SDM Vol 3B §15.3.2: each logical
+     * processor has its own MCA registers; without this call the AP
+     * either ignores hardware errors (no #MC delivery) or remains in
+     * "MCIP=1" state from a firmware-injected probe error and silently
+     * drops the next real fault. */
+    mce_ap_init();
+
+    /* Phase 2H — Protection Keys per-AP. Sets CR4.PKE/PKS + XCR0.PKRU
+     * to match the BSP-decided policy. AP-local CR4/XCR0 are required
+     * by Intel SDM Vol 3A §4.6.2: both registers are per-logical-
+     * processor, so the BSP write doesn't propagate. Without this
+     * call, this AP would #PF with PF.PK=0 (key check off) while the
+     * BSP fires PF.PK=1, splitting the security model across cores. */
+    vmm_pku_ap_init();
+
+    /* Phase 2I — LAM per-AP probe (observe-only). Logs this AP's CR3
+     * LAM bits + CR4.LAM_SUP state. Catches a hybrid SKU's AP that
+     * lost has_lam during cpu_intersect_features_ap. */
+    vmm_lam_ap_probe();
+
+    /* Phase 2J — TME per-AP probe. TME activation is platform-wide,
+     * but every AP should see identical state; the probe verifies and
+     * logs any divergence (firmware bug class on multi-socket systems
+     * where one socket's TME programming drifted). */
+    vmm_tme_ap_probe();
+
+    /* Phase 2K — CET per-AP probe. Mirrors BSP path to log per-AP
+     * CR4.CET state + IA32_S_CET / IA32_U_CET. */
+    vmm_cet_ap_probe();
 
     /* Enable CR4.PCIDE on this AP if the BSP turned PCID on. Intel SDM
      * Vol 3A §4.10.4.1: CR4.PCIDE is per-logical-processor. Without

@@ -235,6 +235,21 @@ void exception_handler(interrupt_frame_t *frame)
 {
     atomic_fetch_add_u64(&exception_count, 1);
 
+    /* Phase 2F — #MC (vector 18) routes to MCE subsystem. The handler
+     * runs on the IST_MACHINE_CHECK stack (set by idt_init), walks every
+     * IA32_MC<i>_STATUS bank, poisons phys pages, publishes Touch
+     * events, and returns true if the error was recoverable (UC=0 or
+     * UCR with RIPV=1). On unrecoverable error: fall through to the
+     * standard kill-process / system_halt path below. */
+    if (frame->vector == 18) {
+        extern bool mce_handle(interrupt_frame_t *);
+        if (mce_handle(frame)) {
+            return;  /* recovered — IRET back to user/kernel */
+        }
+        /* fatal — drop into the generic exception path. (cs ring tells
+         * exception_handler whether to kill the process or halt.) */
+    }
+
     if (frame->vector == 14)
     {
         uint64_t fault_addr;

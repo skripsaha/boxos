@@ -2,7 +2,7 @@
 #include "klib.h"
 #include "kernel_config.h"
 #include "pmm.h"
-#include "pmtag.h"
+#include "memtag.h"
 #include "manifest.h"
 #include "cabin_layout.h"
 #include "kring.h"
@@ -254,18 +254,24 @@ process_t *process_create(const char *tags)
     KRingResultInit((ResultRing *)vmm_phys_to_virt(result_phys));
     KTouchRingInit((TouchRing *)vmm_phys_to_virt(touch_phys));
 
-    // Tag IPC ring header pages as shared so PMT tracks the kernel↔userspace boundary.
-    // The slot regions are mapped lazily via demand paging and are NOT tagged
-    // shared — each slot page belongs to exactly one cabin once allocated.
-    PhysTagSet(pocket_phys,
-               pocket_phys + CABIN_POCKET_RING_PAGES * PMM_PAGE_SIZE,
-               PHYS_TAG_SHARED);
-    PhysTagSet(result_phys,
-               result_phys + CABIN_RESULT_RING_PAGES * PMM_PAGE_SIZE,
-               PHYS_TAG_SHARED);
-    PhysTagSet(touch_phys,
-               touch_phys + CABIN_TOUCH_RING_PAGES * PMM_PAGE_SIZE,
-               PHYS_TAG_SHARED);
+    // Tag IPC ring header pages so MemTag tracks the kernel↔userspace
+    // boundary AND per-cabin ownership. Slot regions are mapped lazily
+    // via demand paging and are NOT tagged here — each slot page
+    // belongs to exactly one cabin once allocated.
+    char cabin_tag[32];
+    ksnprintf(cabin_tag, sizeof(cabin_tag), "cabin:%u", proc->pid);
+
+    MemTagApplyByPhys(pocket_phys, CABIN_POCKET_RING_PAGES, "purpose:shared");
+    MemTagApplyByPhys(pocket_phys, CABIN_POCKET_RING_PAGES, "purpose:pocket-ring");
+    MemTagApplyByPhys(pocket_phys, CABIN_POCKET_RING_PAGES, cabin_tag);
+
+    MemTagApplyByPhys(result_phys, CABIN_RESULT_RING_PAGES, "purpose:shared");
+    MemTagApplyByPhys(result_phys, CABIN_RESULT_RING_PAGES, "purpose:result-ring");
+    MemTagApplyByPhys(result_phys, CABIN_RESULT_RING_PAGES, cabin_tag);
+
+    MemTagApplyByPhys(touch_phys,  CABIN_TOUCH_RING_PAGES,  "purpose:shared");
+    MemTagApplyByPhys(touch_phys,  CABIN_TOUCH_RING_PAGES,  "purpose:touch-ring");
+    MemTagApplyByPhys(touch_phys,  CABIN_TOUCH_RING_PAGES,  cabin_tag);
     proc->score = 0;
     proc->last_run_time = 0;
     proc->consecutive_runs = 0;
@@ -723,22 +729,21 @@ void process_destroy(process_t *proc)
      * compiled form alive until that Execute drops its own ref. */
     ManifestReleaseAllForOwner(proc->pid);
 
-    // Clear PHYS_TAG_SHARED on IPC ring pages — these are no longer shared
-    // once the process is destroyed and its cabin will be unmapped.
+    // Clear ownership tags on IPC ring pages — pmm_free triggers
+    // MemTagPmmFreed which destroys the whole region; we publish the
+    // transition events explicitly so subscribers see the per-tag
+    // clears before the region-released event.
     if (proc->pocket_ring_phys) {
-        PhysTagClear(proc->pocket_ring_phys,
-                     proc->pocket_ring_phys + CABIN_POCKET_RING_PAGES * PMM_PAGE_SIZE,
-                     PHYS_TAG_SHARED);
+        MemTagClearByPhys(proc->pocket_ring_phys, "purpose:shared");
+        MemTagClearByPhys(proc->pocket_ring_phys, "purpose:pocket-ring");
     }
     if (proc->result_ring_phys) {
-        PhysTagClear(proc->result_ring_phys,
-                     proc->result_ring_phys + CABIN_RESULT_RING_PAGES * PMM_PAGE_SIZE,
-                     PHYS_TAG_SHARED);
+        MemTagClearByPhys(proc->result_ring_phys, "purpose:shared");
+        MemTagClearByPhys(proc->result_ring_phys, "purpose:result-ring");
     }
     if (proc->touch_ring_phys) {
-        PhysTagClear(proc->touch_ring_phys,
-                     proc->touch_ring_phys + CABIN_TOUCH_RING_PAGES * PMM_PAGE_SIZE,
-                     PHYS_TAG_SHARED);
+        MemTagClearByPhys(proc->touch_ring_phys, "purpose:shared");
+        MemTagClearByPhys(proc->touch_ring_phys, "purpose:touch-ring");
     }
 
     TouchCleanupProcess(proc);
@@ -758,6 +763,16 @@ void process_destroy(process_t *proc)
      * per-claim VA windows are torn down through the proper unmap path
      * (BrookObject ref drops to zero only when both peers release). */
     BrookCleanupProcess(proc);
+
+    /* Phase 2C bookkeeping is owned by Bay/Brook cleanup paths above —
+     * each MemRegionAttachCabin call from BayOpenInternal / BrookOpen
+     * has its matching MemRegionDetachCabin in the release/cleanup
+     * counterpart. We previously called MemTagDetachAllForCabin as a
+     * defensive O(R) scrub here, but it serialised 16-core process_destroy
+     * on the per-region bucket lock and showed up as a 16-core touch_stress
+     * S1 producer-consumer drop under load. The scrub is removed; any
+     * future subsystem that registers attaches must implement its own
+     * cleanup hook in this destroy chain. */
 
     /* Final state set is COMPLETE — now safe to poison the magic. Any
      * sibling-core dereference past this point is a real bug we want to
@@ -1173,6 +1188,22 @@ bool process_has_tag_id(process_t *proc, uint16_t tag_id)
             return true;
     }
     return false;
+}
+
+/* MemTag Phase 2A accessor — exposes the active_memtags inline array
+ * so memtag.c can grant/revoke capabilities without pulling process.h
+ * into its public headers (would create a circular dep). */
+uint64_t *process_active_memtags(process_t *proc)
+{
+    return proc ? proc->active_memtags : 0;
+}
+
+/* MemTag Phase 2C accessor — exposes proc->cabin (typed as opaque
+ * void*) so memtag.c can locate the vmm_context_t* for PTE manipulation
+ * without pulling process.h. NULL-safe. Caller casts to vmm_context_t*. */
+void *process_get_cabin(process_t *proc)
+{
+    return proc ? (void *)proc->cabin : 0;
 }
 
 bool process_has_tag(process_t *proc, const char *tag)

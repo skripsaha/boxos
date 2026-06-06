@@ -13,6 +13,9 @@ void VideoInit(void);
 void VideoActivatePullMap(void);
 void VideoInitFramebuffer(uint64_t phys_addr, uint32_t width, uint32_t height,
                           uint32_t stride, uint32_t format);
+/* Publish the `display:ready` Touch event.  Call once Touch is up
+ * (after guide_init).  Re-publish is idempotent. */
+void VideoNotifyReady(void);
 
 void VideoPrintChar(char ch, uint8_t attr);
 void VideoPrint(const char *str);

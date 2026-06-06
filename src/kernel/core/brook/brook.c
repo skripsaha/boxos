@@ -26,6 +26,7 @@
 #include "klib.h"
 #include "tagfs.h"
 #include "tag_registry.h"
+#include "memtag.h"
 #include "atomics.h"
 #include "error.h"
 #include "kernel_config.h"
@@ -297,6 +298,69 @@ static error_t brook_alloc_slot_chunks(uint64_t total_size,
 }
 
 /* Map slot chunks into proc->cabin at user_va_base. Unwinds on failure. */
+/* Phase 2C — register MemRegionAttach bookkeeping for the Brook header
+ * (1 page) + each slot chunk. Mirror flag set used in brook_map_*_into_cabin
+ * verbatim (USER_RW | NX). Best-effort per-chunk; future enforcement
+ * walks tolerate missing entries. */
+static void brook_memtag_attach_all(struct process_t *proc,
+                                     uint64_t hdr_phys,
+                                     uint64_t va_header,
+                                     uint64_t *slot_chunks,
+                                     uint32_t slot_cc,
+                                     uint64_t va_slots,
+                                     uint64_t slot_cs)
+{
+    const uint64_t att_flags = VMM_FLAGS_USER_RW | VMM_FLAG_NO_EXECUTE;
+
+    if (hdr_phys != 0) {
+        uint32_t hdr_rid = MemRegionFromPhys((uintptr_t)hdr_phys);
+        if (hdr_rid != MEMTAG_INVALID_REGION_ID) {
+            MemRegionAttachCabin(hdr_rid, (void *)proc->cabin,
+                                  va_header, 1,
+                                  MEMTAG_ATTACH_CLASS_4K, att_flags);
+        }
+    }
+
+    uint8_t  pc = (slot_cs == BROOK_HUGE_SIZE)
+                  ? MEMTAG_ATTACH_CLASS_2M : MEMTAG_ATTACH_CLASS_4K;
+    uint32_t pages_per_chunk = (slot_cs == BROOK_HUGE_SIZE)
+                               ? (uint32_t)BROOK_HUGE_PAGES : 1u;
+    for (uint32_t i = 0; i < slot_cc; i++) {
+        if (slot_chunks[i] == 0) continue;
+        uint64_t att_va = va_slots + (uint64_t)i * slot_cs;
+        uint32_t rid    = MemRegionFromPhys((uintptr_t)slot_chunks[i]);
+        if (rid != MEMTAG_INVALID_REGION_ID) {
+            MemRegionAttachCabin(rid, (void *)proc->cabin, att_va,
+                                  pages_per_chunk, pc, att_flags);
+        }
+    }
+}
+
+/* Inverse — detach header + every slot chunk. Idempotent. */
+static void brook_memtag_detach_all(struct process_t *proc,
+                                     uint64_t hdr_phys,
+                                     uint64_t va_header,
+                                     uint64_t *slot_chunks,
+                                     uint32_t slot_cc,
+                                     uint64_t va_slots,
+                                     uint64_t slot_cs)
+{
+    if (hdr_phys != 0) {
+        uint32_t hdr_rid = MemRegionFromPhys((uintptr_t)hdr_phys);
+        if (hdr_rid != MEMTAG_INVALID_REGION_ID) {
+            MemRegionDetachCabin(hdr_rid, (void *)proc->cabin, va_header);
+        }
+    }
+    for (uint32_t i = 0; i < slot_cc; i++) {
+        if (slot_chunks[i] == 0) continue;
+        uint64_t att_va = va_slots + (uint64_t)i * slot_cs;
+        uint32_t rid    = MemRegionFromPhys((uintptr_t)slot_chunks[i]);
+        if (rid != MEMTAG_INVALID_REGION_ID) {
+            MemRegionDetachCabin(rid, (void *)proc->cabin, att_va);
+        }
+    }
+}
+
 static error_t brook_map_slots_into_cabin(struct process_t *proc,
                                           uint64_t user_va_base,
                                           uint64_t *chunks,
@@ -690,6 +754,32 @@ error_t BrookOpenInternal(struct process_t *proc,
             brook              = fresh;
             atomic_fetch_add_u64(&g_stat_objects, 1);
             atomic_fetch_add_u64(&g_stat_pages, brook_total_pages(fresh));
+
+            /* MemTag integration: tag header + each slot chunk with the
+             * Brook's key:value AND "purpose:brook" + "purpose:stream"
+             * so the streaming buffers are queryable via tag algebra. */
+            TagFSState *brook_fs = tagfs_get_state();
+            if (brook_fs && brook_fs->registry) {
+                const char *bk = tag_registry_key(brook_fs->registry, tag_id);
+                const char *bv = tag_registry_value(brook_fs->registry, tag_id);
+                char tag_buf[128];
+                if (bk) {
+                    if (bv && bv[0])
+                        ksnprintf(tag_buf, sizeof(tag_buf), "%s:%s", bk, bv);
+                    else
+                        ksnprintf(tag_buf, sizeof(tag_buf), "%s", bk);
+                    MemTagApplyByPhys(fresh->header_phys, 1, tag_buf);
+                    MemTagApplyByPhys(fresh->header_phys, 1, "purpose:brook");
+                    MemTagApplyByPhys(fresh->header_phys, 1, "purpose:brook-header");
+                    size_t pages_per_chunk =
+                        (cs == BROOK_HUGE_SIZE) ? BROOK_HUGE_PAGES : 1;
+                    for (uint32_t ci = 0; ci < cc; ci++) {
+                        MemTagApplyByPhys((uintptr_t)chunks[ci], pages_per_chunk, tag_buf);
+                        MemTagApplyByPhys((uintptr_t)chunks[ci], pages_per_chunk, "purpose:brook");
+                        MemTagApplyByPhys((uintptr_t)chunks[ci], pages_per_chunk, "purpose:stream");
+                    }
+                }
+            }
         }
     }
 
@@ -740,6 +830,14 @@ error_t BrookOpenInternal(struct process_t *proc,
                                        &va_header, &va_slots);
     if (rc != OK) goto rollback_ref;
 
+    /* Phase 2B M2 — enforce MemTag capabilities BEFORE mapping the
+     * Brook's header/slot pages into the cabin. Header phys is the
+     * canonical witness — slot regions carry the same tags. */
+    if (!MemTagEnforcePhys(proc->pid, (uintptr_t)hdr_phys)) {
+        rc = ERR_PERMISSION_DENIED;
+        goto rollback_ref;
+    }
+
     /* Map header. */
     if (!brook_map_header_into_cabin(proc, va_header, hdr_phys)) {
         rc = ERR_NO_MEMORY;
@@ -754,9 +852,17 @@ error_t BrookOpenInternal(struct process_t *proc,
         goto rollback_ref;
     }
 
+    /* Phase 2C — attach bookkeeping for header + each slot chunk so
+     * future revoke/grant sweeps can locate Brook's PTEs without scanning
+     * the page table. */
+    brook_memtag_attach_all(proc, hdr_phys, va_header,
+                             brook->slot_chunks, slot_cc, va_slots, slot_cs);
+
     /* Allocate claim and link. */
     BrookClaim *claim = (BrookClaim *)kmalloc(sizeof(BrookClaim));
     if (!claim) {
+        brook_memtag_detach_all(proc, hdr_phys, va_header,
+                                 brook->slot_chunks, slot_cc, va_slots, slot_cs);
         brook_unmap_slots_from_cabin(proc, va_slots, slot_cc, slot_cs);
         brook_unmap_header_from_cabin(proc, va_header);
         rc = ERR_NO_MEMORY;
@@ -798,7 +904,9 @@ error_t BrookOpenInternal(struct process_t *proc,
                                          __ATOMIC_ACQUIRE)) {
             /* Either FROZEN (peer EOF'd this session — terminal) or 1
              * (shouldn't happen under bucket_lock + pid check). Roll
-             * back: unmap, free claim, drop ref. */
+             * back: detach memtag, unmap, free claim, drop ref. */
+            brook_memtag_detach_all(proc, hdr_phys, va_header,
+                                     brook->slot_chunks, slot_cc, va_slots, slot_cs);
             brook_unmap_slots_from_cabin(proc, va_slots, slot_cc, slot_cs);
             brook_unmap_header_from_cabin(proc, va_header);
             kfree(claim);
@@ -818,6 +926,8 @@ error_t BrookOpenInternal(struct process_t *proc,
         uint32_t one = 1u;
         __atomic_compare_exchange_n(alive_ptr, &one, 0u, false,
                                     __ATOMIC_RELEASE, __ATOMIC_RELAXED);
+        brook_memtag_detach_all(proc, hdr_phys, va_header,
+                                 brook->slot_chunks, slot_cc, va_slots, slot_cs);
         brook_unmap_slots_from_cabin(proc, va_slots, slot_cc, slot_cs);
         brook_unmap_header_from_cabin(proc, va_header);
         kfree(claim);
@@ -858,6 +968,11 @@ error_t BrookReleaseInternal(struct process_t *proc, uint64_t user_va_header)
 
     BrookObject *brook = claim->brook;
     if (!brook) { kfree(claim); return ERR_INVALID_STATE; }
+
+    /* Phase 2C — detach memtag attachments before the PTEs go away. */
+    brook_memtag_detach_all(proc, brook->header_phys, claim->user_va_header,
+                             brook->slot_chunks, brook->slot_chunk_count,
+                             claim->user_va_slots, brook->slot_chunk_size);
 
     /* Unmap from this cabin first. */
     brook_unmap_slots_from_cabin(proc, claim->user_va_slots,
@@ -917,6 +1032,9 @@ void BrookCleanupProcess(struct process_t *proc)
         BrookObject *brook = head->brook;
 
         if (brook && proc->cabin) {
+            brook_memtag_detach_all(proc, brook->header_phys, head->user_va_header,
+                                     brook->slot_chunks, brook->slot_chunk_count,
+                                     head->user_va_slots, brook->slot_chunk_size);
             brook_unmap_slots_from_cabin(proc, head->user_va_slots,
                                          brook->slot_chunk_count,
                                          brook->slot_chunk_size);

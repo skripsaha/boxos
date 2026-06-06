@@ -528,6 +528,11 @@ static void vtd_invalidate(iommu_domain_t* d) {
         if (g_units[i].online) vtd_global_flush(&g_units[i]);
 }
 
+/* Phase 2G — opaque domain → ID accessor. Trivial field read. */
+static uint32_t vtd_domain_id(iommu_domain_t* d) {
+    return d ? ((struct iommu_domain*)d)->id : 0xFFFFFFFFu;
+}
+
 const iommu_ops_t vtd_ops = {
     .name           = "Intel VT-d",
     .init           = vtd_init,
@@ -538,4 +543,5 @@ const iommu_ops_t vtd_ops = {
     .map            = vtd_map,
     .unmap          = vtd_unmap,
     .invalidate     = vtd_invalidate,
+    .domain_id      = vtd_domain_id,
 };

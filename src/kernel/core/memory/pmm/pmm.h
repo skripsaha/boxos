@@ -4,11 +4,25 @@
 #include "klib.h"
 #include "error.h"
 #include "buddy.h"
-#include "pmtag.h"          // PHYS_TAG_* visible at every pmm_alloc call site
 #include "kernel_config.h"  // CONFIG_PHYS_ZONE_DMA32_END, CONFIG_PHYS_ZONE_USER_END
 
 #define PMM_PAGE_SIZE       4096
 #define PMM_BITMAP_ALIGN    8
+
+/* ─── Zone bias hints ─────────────────────────────────────────────────
+ * Pass to pmm_alloc(pages, PHYS_TAG_*) as a hint for which physical zone
+ * the buddy should allocate from. Direct buddy_alloc_range; no bitmap
+ * involved. Distinct single-bit constants so callers may OR them.
+ *
+ *   PHYS_TAG_DMA32  — [0,   DMA32_END)  ISA/PCI 32-bit DMA safe
+ *   PHYS_TAG_USER   — [DMA32_END, USER_END)  general purpose <4GB
+ *   PHYS_TAG_HIGH   — [USER_END, mem_end)    above 4GB, post Pull Map
+ *
+ * Semantic ("purpose:*", "audio:*", ...) tagging is MemTag's job — see
+ * MemTagPmmAlloc / MemTagApply in memtag.h. */
+#define PHYS_TAG_DMA32   (1ULL << 0)
+#define PHYS_TAG_USER    (1ULL << 1)
+#define PHYS_TAG_HIGH    (1ULL << 2)
 
 typedef enum {
     PMM_FRAME_FREE = 0,
@@ -73,72 +87,59 @@ size_t pmm_pages_in_domain(uint32_t domain);
 void pmm_activate_pull_map(void);
 void pmm_test_high_memory(void);
 
+/* ─── Phase 2F — MCE poison-page bitmap ──────────────────────────────
+ *
+ * The MCE handler (src/kernel/core/mce/mce.c) calls pmm_set_poisoned()
+ * for every phys page reported by IA32_MC<i>_ADDR after a UCR or UC
+ * error. The buddy allocator post-checks every returned chunk against
+ * the bitmap; chunks containing poisoned pages are freed and the alloc
+ * retries (up to PMM_MCE_RETRY_MAX times).
+ *
+ * Bitmap is allocated at pmm_init tail and sized to pmm_get_mem_end() /
+ * PMM_PAGE_SIZE bits (~128 KiB per 4 GB RAM). Atomic byte-OR / byte-LOAD
+ * for thread-safe SET/IS without a lock.
+ *
+ * Safe to call from IST-context #MC handler — no kmalloc, no locks. */
+void pmm_set_poisoned(uintptr_t phys);
+bool pmm_is_poisoned(uintptr_t phys);
+bool pmm_is_range_poisoned(uintptr_t phys, size_t pages);
+size_t pmm_poisoned_page_count(void);
+
 // Expose the internal BuddyZone for use by the Friend Allocator layer.
 BuddyZone* pmm_get_buddy_zone(void);
 
 // ─── Physical allocation — variadic interface ─────────────────────────────────
 //
-// pmm_alloc(pages)               — any zone, first-fit (O(log max_order))
-// pmm_alloc(pages, PHYS_TAG_*)   — constrained to zone, direct range alloc
-//                                   O(log max_order) for well-known zone tags
-//                                   (DMA32, USER, HIGH bypass the PMTAG scan)
-// pmm_alloc_zero(pages [, tag])  — same, plus memset to 0 via Pull Map
+//   pmm_alloc(pages)                — any zone, first-fit
+//   pmm_alloc(pages, PHYS_TAG_ZONE) — constrained to the named zone
+//   pmm_alloc_zero(...)             — same, plus zero-fill via Pull Map
 //
-// Tags understood for fast-path (no PMTAG scan):
-//   PHYS_TAG_DMA32  — [0,  1GB)   ISA/PCI 32-bit DMA safe
-//   PHYS_TAG_USER   — [1GB, 4GB)  general purpose below identity-map limit
-//   PHYS_TAG_HIGH   — [4GB, end)  post Phase-2, requires Pull Map
+// PHYS_TAG_DMA32 / PHYS_TAG_USER / PHYS_TAG_HIGH are zone HINTS, not
+// semantic tags — they bias the buddy to a phys range. For semantic tags
+// (string "key:value" form) use MemTagPmmAlloc(pages, "tag") from
+// memtag.h, which routes through the same buddy and additionally
+// registers a MemRegion under the tag.
 //
-// Any other PHYS_TAG_* (SHARED, KERNEL, MMIO, user-defined) falls through to
-// PhysAllocTagged() which scans the PMTAG band index.
-//
-// pmm_free() is always tag-agnostic — the buddy owns allocation state.
+// pmm_free() is always tag-agnostic — the buddy owns allocation state;
+// MemTagPmmFreed (called from pmm_free) destroys any region that was
+// registered against the freed range.
 // ─────────────────────────────────────────────────────────────────────────────
 
-void* _pmm_alloc_impl(size_t pages, uint64_t tags);
-void* _pmm_alloc_zero_impl(size_t pages, uint64_t tags);
+void* _pmm_alloc_impl(size_t pages, uint64_t zone_hint);
+void* _pmm_alloc_zero_impl(size_t pages, uint64_t zone_hint);
 
-// Forward declaration — defined in memtag.c. Not including memtag.h here avoids
-// circular dependency (memtag.h includes pmm.h).
-void* _pmm_alloc_memtag(size_t pages, const char *tag);
-
-// Argument-count dispatcher (1 or 2 args)
 #define _PMM_NARG(...)              _PMM_NARG_I(__VA_ARGS__, 2, 1)
 #define _PMM_NARG_I(_1, _2, N, ...) N
 #define _PMM_CAT(a, b)              _PMM_CAT_(a, b)
 #define _PMM_CAT_(a, b)             a##b
 
 #define _pmm_alloc_1(p)             _pmm_alloc_impl((p), 0ULL)
-
-// Type dispatch: integer second arg → zone-constrained allocation (fast path).
-//               string/pointer second arg → MemTag registration via _pmm_alloc_memtag.
-// The unary + forces array decay (char[N] → char*) while leaving integer types
-// unchanged, giving __builtin_types_compatible_p a stable type to inspect.
-#define _pmm_alloc_2(p, arg)                                                              \
-    __builtin_choose_expr(                                                                 \
-        __builtin_types_compatible_p(__typeof__(+(arg)), unsigned long long)              \
-     || __builtin_types_compatible_p(__typeof__(+(arg)), unsigned long)                   \
-     || __builtin_types_compatible_p(__typeof__(+(arg)), unsigned int)                    \
-     || __builtin_types_compatible_p(__typeof__(+(arg)), unsigned short)                  \
-     || __builtin_types_compatible_p(__typeof__(+(arg)), unsigned char),                  \
-        _pmm_alloc_impl((p), (uint64_t)(arg)),                                            \
-        _pmm_alloc_memtag((p), (const char *)(arg))                                       \
-    )
+#define _pmm_alloc_2(p, hint)       _pmm_alloc_impl((p), (uint64_t)(hint))
 
 #define pmm_alloc(...)              _PMM_CAT(_pmm_alloc_, _PMM_NARG(__VA_ARGS__))(__VA_ARGS__)
 
 #define _pmm_alloc_zero_1(p)        _pmm_alloc_zero_impl((p), 0ULL)
-
-#define _pmm_alloc_zero_2(p, arg)                                                         \
-    __builtin_choose_expr(                                                                 \
-        __builtin_types_compatible_p(__typeof__(+(arg)), unsigned long long)              \
-     || __builtin_types_compatible_p(__typeof__(+(arg)), unsigned long)                   \
-     || __builtin_types_compatible_p(__typeof__(+(arg)), unsigned int)                    \
-     || __builtin_types_compatible_p(__typeof__(+(arg)), unsigned short)                  \
-     || __builtin_types_compatible_p(__typeof__(+(arg)), unsigned char),                  \
-        _pmm_alloc_zero_impl((p), (uint64_t)(arg)),                                       \
-        _pmm_alloc_memtag((p), (const char *)(arg))                                       \
-    )
+#define _pmm_alloc_zero_2(p, hint)  _pmm_alloc_zero_impl((p), (uint64_t)(hint))
 
 #define pmm_alloc_zero(...)         _PMM_CAT(_pmm_alloc_zero_, _PMM_NARG(__VA_ARGS__))(__VA_ARGS__)
 

@@ -48,7 +48,6 @@
 #include "atomics.h"
 #include "pci.h"
 #include "pmm.h"
-#include "pmtag.h"
 #include "vmm.h"
 #include "boxos_memory.h"
 #include "ahci.h"
@@ -657,7 +656,7 @@ static void bmide_init_channel(uint8_t ch_idx) {
         return;
     }
 
-    void *page_phys = PhysAllocTagged(1, PHYS_TAG_DMA32);
+    void *page_phys = pmm_alloc(1, PHYS_TAG_DMA32);
     if (!page_phys) {
         debug_printf("[ATA_ASYNC] ch%u: no DMA32 page, DMA disabled\n", ch_idx);
         return;
@@ -665,7 +664,7 @@ static void bmide_init_channel(uint8_t ch_idx) {
     aa->buf_phys = (uintptr_t)page_phys;
     aa->buf_virt = vmm_phys_to_virt(aa->buf_phys);
     if (!aa->buf_virt) {
-        PhysAllocTaggedFree(page_phys, 1);
+        pmm_free(page_phys, 1);
         debug_printf("[ATA_ASYNC] ch%u: cannot map staging page, DMA disabled\n", ch_idx);
         return;
     }

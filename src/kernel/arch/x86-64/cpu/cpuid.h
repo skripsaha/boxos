@@ -62,6 +62,37 @@ typedef struct {
      * on split access" policy — see cpu_test_ctl_init for rationale. */
     bool has_core_capabilities; // CPUID.7.0:EDX[30] — MSR 0xCF readable
     bool has_split_lock_detect; // IA32_CORE_CAPABILITIES.bit5 — CPU can raise #AC
+    /* Protection Keys (Phase 2H) — Intel SDM Vol 3A §4.6.2 (PKU) and
+     * §4.6.3 (PKS). PKU gives userspace 16 4-bit keys in PTE[62:59],
+     * checked via IA32_PKRU MSR per-thread. PKS extends the same idea
+     * to supervisor pages via IA32_PKRS. Both gate on CR4: PKE (bit 22)
+     * and PKS (bit 24). Backward-compatible: CR4.PKE=1 with default
+     * PKRU=0 leaves every key access-allowed. */
+    bool has_pku;               // CPUID.7.0:ECX[3] = OSPKE / PKU
+    bool has_pks;               // CPUID.7.0:ECX[31] = PKS
+    /* Linear Address Masking (Phase 2I) — Intel SDM Vol 3A §5.6.
+     * CPUID.07H.1:EAX[26] reports support. When CR3.LAM_U48 or
+     * CR3.LAM_U57 is set, the CPU ignores bits 62:48 / 62:57 of user-
+     * mode virtual addresses, freeing those bits for HWASAN-style
+     * tagged pointers. LAM is per-CR3 (per-process); Phase 2I lays
+     * the foundation, per-process opt-in is the follow-up. */
+    bool has_lam;               // CPUID.7.1:EAX[26]
+    /* TME / TME-MK (Phase 2J) — Intel SDM Vol 3D §15.5 + Vol 4 MSR
+     * Table. CPUID.07H.0:ECX[13] reports that IA32_TME_CAPABILITY
+     * (0x981) and IA32_TME_ACTIVATE (0x982) are accessible. Firmware
+     * actually programs the activation; the OS reads the post-lock
+     * state. When TME-MK is enabled, KeyID bits steal the top NUM_KEYID
+     * bits of the phys-addr field (MAXPHYADDR is reported reduced). */
+    bool has_tme;               // CPUID.07H.0:ECX[13]
+    /* CET (Phase 2K) — Intel SDM Vol 3D §17. Two sub-features:
+     *   CPUID.07H.0:ECX[7]  = SHSTK (Shadow Stack)
+     *   CPUID.07H.0:EDX[20] = IBT   (Indirect Branch Tracking)
+     * Both gate on CR4.CET (bit 23). PTE bit 60 selects supervisor
+     * shadow stack when set on a leaf 4 KiB PTE; bit 61 selects user
+     * SS. The SSP register lives in XSAVE component 11 (XCR0.CET_S/U
+     * via bits 11/12). */
+    bool has_shstk;             // CPUID.07H.0:ECX[7]
+    bool has_ibt;               // CPUID.07H.0:EDX[20]
     /* MONITOR/UMONITOR cacheline granularity — CPUID.05H. Intel SDM Vol 2A
      * UMONITOR: "The address range determined by the CPUID monitor leaf
      * function". EAX[15:0] = smallest line size, EBX[15:0] = largest.
