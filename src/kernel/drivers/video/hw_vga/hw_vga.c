@@ -1,192 +1,144 @@
+/*
+ * hw_vga.c — legacy 80×25 VGA text-mode backend.
+ *
+ * Writes char+attr pairs straight to VRAM at 0xB8000 (rebased onto the
+ * Pull Map after vmm_init).  No shadow buffer — the entire visible
+ * surface is 4000 bytes and a SW memmove on scroll costs sub-microsecond
+ * on any post-Pentium CPU.
+ *
+ * Caret: real CRTC hardware cursor (registers 0x0E/0x0F).  Visible
+ * immediately, no shadow flush needed.
+ *
+ * Why no CRTC HW scroll (Start Address bump): the CRTC Start Address
+ * register pair is *writable* on essentially every PC, but
+ * panning-via-Start-Address only behaves uniformly on the original IBM
+ * VGA hardware path.  Several emulators (Bochs default text mode in
+ * particular) accept the writes without actually moving the display
+ * origin, leaving the visible window pinned while we paint into ring-
+ * buffer positions past the visible 4000 bytes — the user sees what
+ * looks like a hang.  Since the SW memmove is sub-microsecond there is
+ * no observable upside in chasing this corner.  The DisplayBackend caps
+ * slot stays available for real GPU drivers (i915 pan-display) where
+ * HW scroll IS a real win and IS reliably specified.
+ */
+
 #include "hw_vga.h"
-#include "../ops.h"
-#include "video_colors.h"
-#include "io.h"
+#include "../canvas.h"
 #include "vmm.h"
-#include "serial.h"
+#include "io.h"
+#include "klib.h"
 
-static unsigned char *s_buf      = (unsigned char *)HW_VGA_BUF_ADDR;
-static uint8_t  s_attr_backup[HW_VGA_COLS * HW_VGA_ROWS];
-static unsigned s_cur_loc  = 0;
-static unsigned s_last_loc = 0;
+typedef struct {
+    DisplayBackend base;
+    unsigned char *vram;          /* identity-mapped at boot, Pull Map after vmm_init */
+} HwVgaState;
 
-void HwVgaActivatePullMap(void)
+static HwVgaState s_vga;
+
+/* =========================================================================
+ *  CRTC helpers
+ * ========================================================================= */
+
+static inline void crtc_write(uint8_t reg, uint8_t value)
 {
-    s_buf = (unsigned char *)vmm_phys_to_virt(HW_VGA_BUF_ADDR);
-    debug_printf("[VGA] Text buffer rebased to Pull Map: %p\n", s_buf);
+    outb(HW_VGA_CRTC_ADDR_PORT, reg);
+    outb(HW_VGA_CRTC_DATA_PORT, value);
 }
 
-static void HwUpdateCursor(void);
-
-static void HwScrollUp(void)
+static void cursor_to(uint32_t col, uint32_t row)
 {
-    for (unsigned i = 0; i < HW_VGA_BUF_SIZE - HW_VGA_LINE_BYTES; i += 2) {
-        s_buf[i]     = s_buf[i + HW_VGA_LINE_BYTES];
-        s_buf[i + 1] = s_buf[i + HW_VGA_LINE_BYTES + 1];
-        s_attr_backup[i / 2] = s_attr_backup[(i + HW_VGA_LINE_BYTES) / 2];
-    }
-    for (unsigned i = HW_VGA_BUF_SIZE - HW_VGA_LINE_BYTES; i < HW_VGA_BUF_SIZE; i += 2) {
-        s_buf[i]     = ' ';
-        s_buf[i + 1] = VIDEO_ATTR_DEFAULT;
-        s_attr_backup[i / 2] = VIDEO_ATTR_DEFAULT;
-    }
-    if (s_cur_loc >= HW_VGA_LINE_BYTES)
-        s_cur_loc -= HW_VGA_LINE_BYTES;
-    else
-        s_cur_loc = 0;
+    uint16_t pos = (uint16_t)(row * HW_VGA_COLS + col);
+    crtc_write(HW_VGA_CURSOR_LOW_REG,  (uint8_t)(pos & 0xFFu));
+    crtc_write(HW_VGA_CURSOR_HIGH_REG, (uint8_t)((pos >> 8) & 0xFFu));
 }
 
-static void HwClearScreen(void)
+/* =========================================================================
+ *  Backend vtable
+ * ========================================================================= */
+
+static inline unsigned char *cell_ptr(uint32_t row, uint32_t col)
 {
-    for (unsigned i = 0; i < HW_VGA_BUF_SIZE; i += 2) {
-        s_buf[i]     = ' ';
-        s_buf[i + 1] = VIDEO_ATTR_DEFAULT;
-        s_attr_backup[i / 2] = VIDEO_ATTR_DEFAULT;
-    }
-    s_cur_loc  = 0;
-    s_last_loc = 0;
+    return s_vga.vram + (size_t)row * HW_VGA_LINE_BYTES + (size_t)col * HW_VGA_BYTES_PER_CELL;
 }
 
-static void HwClearLine(int line)
+static void op_DrawCells(DisplayBackend *be,
+                         uint32_t row, uint32_t col_lo, uint32_t col_hi,
+                         const TextCell *cells_row)
 {
-    if (line < 0 || line >= (int)HW_VGA_ROWS) return;
-    unsigned start = (unsigned)line * HW_VGA_LINE_BYTES;
-    for (unsigned i = start; i < start + HW_VGA_LINE_BYTES; i += 2) {
-        s_buf[i]     = ' ';
-        s_buf[i + 1] = VIDEO_ATTR_DEFAULT;
-        s_attr_backup[i / 2] = VIDEO_ATTR_DEFAULT;
+    if (row >= be->rows) return;
+    if (col_hi > be->cols) col_hi = be->cols;
+    unsigned char *p = cell_ptr(row, col_lo);
+    for (uint32_t c = col_lo; c < col_hi; c++) {
+        *p++ = (unsigned char)cells_row[c].ch;
+        *p++ = cells_row[c].attr;
     }
 }
 
-static void HwClearToEol(uint8_t attr)
+static void op_Scroll(DisplayBackend *be, uint32_t dy)
 {
-    int x = (int)((s_cur_loc / 2) % HW_VGA_COLS);
-    int y = (int)((s_cur_loc / 2) / HW_VGA_COLS);
-    int idx = (y * (int)HW_VGA_COLS + x) * 2;
-    int end = (y * (int)HW_VGA_COLS + (int)HW_VGA_COLS) * 2;
-    for (; idx < end; idx += 2) {
-        s_buf[idx]     = ' ';
-        s_buf[idx + 1] = attr;
-        s_attr_backup[idx / 2] = attr;
-    }
-}
-
-static void HwSetCursor(int x, int y)
-{
-    if (x < 0) x = 0;
-    if (y < 0) y = 0;
-    if (x >= (int)HW_VGA_COLS) x = (int)HW_VGA_COLS - 1;
-    if (y >= (int)HW_VGA_ROWS) y = (int)HW_VGA_ROWS - 1;
-    s_cur_loc = (unsigned)y * HW_VGA_LINE_BYTES + (unsigned)x * HW_VGA_BYTES_PER_CELL;
-    HwUpdateCursor();
-}
-
-static int HwGetCursorX(void)
-{
-    return (int)((s_cur_loc / 2) % HW_VGA_COLS);
-}
-
-static int HwGetCursorY(void)
-{
-    return (int)((s_cur_loc / 2) / HW_VGA_COLS);
-}
-
-static void HwUpdateCursor(void)
-{
-    if (s_last_loc < HW_VGA_BUF_SIZE) {
-        uint16_t last_pos = s_last_loc / 2;
-        s_buf[s_last_loc + 1] = s_attr_backup[last_pos];
-    }
-    s_last_loc = s_cur_loc;
-
-    uint16_t pos = s_cur_loc / 2;
-    outb(HW_VGA_CRTC_ADDR_PORT, HW_VGA_CURSOR_LOW_REG);
-    outb(HW_VGA_CRTC_DATA_PORT, (uint8_t)(pos & 0xFF));
-    outb(HW_VGA_CRTC_ADDR_PORT, HW_VGA_CURSOR_HIGH_REG);
-    outb(HW_VGA_CRTC_DATA_PORT, (uint8_t)((pos >> 8) & 0xFF));
-}
-
-static void HwPrintChar(char c, uint8_t attr)
-{
-    if (c == '\n') {
-        int y = (int)((s_cur_loc / 2) / HW_VGA_COLS);
-        if (y + 1 >= (int)HW_VGA_ROWS) {
-            HwScrollUp();
-            s_cur_loc = ((int)HW_VGA_ROWS - 1) * HW_VGA_LINE_BYTES;
-        } else {
-            s_cur_loc = (unsigned)(y + 1) * HW_VGA_LINE_BYTES;
+    if (!dy) return;
+    if (dy >= be->rows) {
+        for (size_t i = 0; i < HW_VGA_BUF_SIZE; i += 2) {
+            s_vga.vram[i]     = ' ';
+            s_vga.vram[i + 1] = VIDEO_ATTR_DEFAULT;
         }
         return;
     }
-    if (c == '\r') {
-        int y = (int)((s_cur_loc / 2) / HW_VGA_COLS);
-        s_cur_loc = (unsigned)y * HW_VGA_LINE_BYTES;
-        return;
+    size_t move_sz = (size_t)(be->rows - dy) * HW_VGA_LINE_BYTES;
+    memmove(s_vga.vram, s_vga.vram + (size_t)dy * HW_VGA_LINE_BYTES, move_sz);
+    for (size_t off = move_sz; off < HW_VGA_BUF_SIZE; off += 2) {
+        s_vga.vram[off]     = ' ';
+        s_vga.vram[off + 1] = VIDEO_ATTR_DEFAULT;
     }
-    if (c == '\b') {
-        if (s_cur_loc >= HW_VGA_BYTES_PER_CELL) {
-            s_cur_loc -= HW_VGA_BYTES_PER_CELL;
-            s_buf[s_cur_loc]     = ' ';
-            s_buf[s_cur_loc + 1] = attr;
-            s_attr_backup[s_cur_loc / 2] = attr;
-        }
-        return;
-    }
-    if (c == '\t') {
-        int x = (int)((s_cur_loc / 2) % HW_VGA_COLS);
-        int y = (int)((s_cur_loc / 2) / HW_VGA_COLS);
-        int new_x = (x + 8) & ~7;
-        if (new_x >= (int)HW_VGA_COLS) {
-            new_x = 0;
-            y++;
-            if (y >= (int)HW_VGA_ROWS) {
-                HwScrollUp();
-                y = (int)HW_VGA_ROWS - 1;
-            }
-        }
-        s_cur_loc = (unsigned)y * HW_VGA_LINE_BYTES + (unsigned)new_x * HW_VGA_BYTES_PER_CELL;
-        return;
-    }
-
-    if (s_cur_loc >= HW_VGA_BUF_SIZE - 2)
-        HwScrollUp();
-
-    s_buf[s_cur_loc]     = (unsigned char)c;
-    s_buf[s_cur_loc + 1] = attr;
-    s_attr_backup[s_cur_loc / 2] = attr;
-    s_cur_loc += HW_VGA_BYTES_PER_CELL;
 }
 
-static void HwChangeBackground(uint8_t bg)
+static void op_FillRow(DisplayBackend *be, uint32_t row, uint8_t attr)
 {
-    bg = (bg & 0x0F) << 4;
-    for (unsigned i = 1; i < HW_VGA_BUF_SIZE; i += 2) {
-        unsigned char cur = s_buf[i];
-        s_buf[i] = (cur & 0x0F) | bg;
-        s_attr_backup[i / 2] = s_buf[i];
+    if (row >= be->rows) return;
+    unsigned char *p = cell_ptr(row, 0);
+    for (uint32_t c = 0; c < HW_VGA_COLS; c++) {
+        *p++ = ' ';
+        *p++ = attr;
     }
 }
 
-static uint16_t HwGetCols(void) { return HW_VGA_COLS; }
-static uint16_t HwGetRows(void) { return HW_VGA_ROWS; }
+static void op_Present(DisplayBackend *be, uint32_t row_lo, uint32_t row_hi)
+{
+    /* All writes hit VRAM in DrawCells/Scroll/FillRow.  Nothing to flush. */
+    (void)be; (void)row_lo; (void)row_hi;
+}
 
-/* VGA text mode: all writes are immediate MMIO — batch is a no-op */
-static void HwBatchBegin(void) { }
-static void HwBatchEnd(void)   { }
+static void op_DrawCaret(DisplayBackend *be, uint32_t col, uint32_t row, uint8_t attr)
+{
+    (void)attr;
+    if (col >= be->cols || row >= be->rows) return;
+    cursor_to(col, row);
+}
 
-const DisplayOps hw_vga_ops = {
-    .PrintChar        = HwPrintChar,
-    .ScrollUp         = HwScrollUp,
-    .ClearScreen      = HwClearScreen,
-    .ClearLine        = HwClearLine,
-    .ClearToEol       = HwClearToEol,
-    .SetCursor        = HwSetCursor,
-    .GetCursorX       = HwGetCursorX,
-    .GetCursorY       = HwGetCursorY,
-    .UpdateCursor     = HwUpdateCursor,
-    .ChangeBackground = HwChangeBackground,
-    .GetCols          = HwGetCols,
-    .GetRows          = HwGetRows,
-    .BatchBegin       = HwBatchBegin,
-    .BatchEnd         = HwBatchEnd,
-};
+static void op_ActivatePullMap(DisplayBackend *be)
+{
+    (void)be;
+    s_vga.vram = (unsigned char *)vmm_phys_to_virt(HW_VGA_BUF_ADDR);
+    debug_printf("[VGA] Text buffer rebased to Pull Map: %p\n", s_vga.vram);
+}
+
+/* =========================================================================
+ *  Initialisation
+ * ========================================================================= */
+
+DisplayBackend *HwVgaBackendInit(void)
+{
+    s_vga.vram = (unsigned char *)HW_VGA_BUF_ADDR;   /* identity at boot */
+
+    s_vga.base.caps  = 0;                            /* HW_SCROLL slot reserved for GPU drivers */
+    s_vga.base.cols  = HW_VGA_COLS;
+    s_vga.base.rows  = HW_VGA_ROWS;
+    s_vga.base.DrawCells       = op_DrawCells;
+    s_vga.base.Scroll          = op_Scroll;
+    s_vga.base.FillRow         = op_FillRow;
+    s_vga.base.Present         = op_Present;
+    s_vga.base.DrawCaret       = op_DrawCaret;
+    s_vga.base.ActivatePullMap = op_ActivatePullMap;
+
+    return &s_vga.base;
+}

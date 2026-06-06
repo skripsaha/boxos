@@ -105,6 +105,23 @@ void cpu_detect_features(void) {
          * is gated on this CPUID bit because reading 0xCF on a CPU that
          * doesn't claim CORE_CAPABILITIES would #GP. */
         g_cpu_caps.has_core_capabilities = (edx & (1u << 30)) != 0;
+        /* Phase 2H — Protection Keys (Intel SDM Vol 3A §4.6.2 / §4.6.3).
+         * PKU = userspace 16 keys via IA32_PKRU. PKS = supervisor variant. */
+        g_cpu_caps.has_pku  = (ecx & (1u << 3))  != 0;
+        g_cpu_caps.has_pks  = (ecx & (1u << 31)) != 0;
+        g_cpu_caps.has_tme   = (ecx & (1u << 13)) != 0;
+        g_cpu_caps.has_shstk = (ecx & (1u << 7))  != 0;
+        g_cpu_caps.has_ibt   = (edx & (1u << 20)) != 0;
+        /* Phase 2I — Linear Address Masking lives in CPUID.7.1:EAX[26]
+         * (subleaf 1, distinct from the canonical subleaf 0 above).
+         * Probe only if subleaf 1 is reachable per CPUID.07H.0:EAX
+         * which reports the maximum sub-leaf index. */
+        if (eax >= 1) {
+            uint32_t lam_eax, lam_ebx, lam_ecx, lam_edx;
+            cpuid_count(CPUID_LEAF_EXT_FEATURES, 1,
+                        &lam_eax, &lam_ebx, &lam_ecx, &lam_edx);
+            g_cpu_caps.has_lam = (lam_eax & (1u << 26)) != 0;
+        }
     }
 
     // Query XSAVE area size and supported components (CPUID.0xD:0)
@@ -452,6 +469,23 @@ void cpu_intersect_features_ap(void) {
          * support — intersect defensively so a missing AP bit forces
          * the kernel-wide split-lock policy off. */
         g_cpu_caps.has_core_capabilities &= ((edx & (1u << 30)) != 0);
+        /* Phase 2H — Protection Keys; intersect across every AP so a
+         * hybrid SKU with PKU on P-cores and absent on E-cores forces
+         * PKE off package-wide rather than #GP an E-core that runs a
+         * PKU-aware codepath. */
+        g_cpu_caps.has_pku &= ((ecx & (1u << 3))  != 0);
+        g_cpu_caps.has_pks &= ((ecx & (1u << 31)) != 0);
+        g_cpu_caps.has_tme   &= ((ecx & (1u << 13)) != 0);
+        g_cpu_caps.has_shstk &= ((ecx & (1u << 7))  != 0);
+        g_cpu_caps.has_ibt   &= ((edx & (1u << 20)) != 0);
+        if (eax >= 1) {
+            uint32_t lam_eax, lam_ebx, lam_ecx, lam_edx;
+            cpuid_count(CPUID_LEAF_EXT_FEATURES, 1,
+                        &lam_eax, &lam_ebx, &lam_ecx, &lam_edx);
+            g_cpu_caps.has_lam &= ((lam_eax & (1u << 26)) != 0);
+        } else {
+            g_cpu_caps.has_lam = false;  /* AP doesn't expose subleaf 1 */
+        }
     }
 
     if (g_cpu_caps.max_extended_leaf >= CPUID_LEAF_APM) {

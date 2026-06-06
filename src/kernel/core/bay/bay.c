@@ -32,6 +32,7 @@
 #include "klib.h"
 #include "tagfs.h"
 #include "tag_registry.h"
+#include "memtag.h"
 #include "atomics.h"
 #include "error.h"
 
@@ -236,6 +237,56 @@ static error_t bay_map_into_cabin(struct process_t *proc,
         }
     }
     return OK;
+}
+
+/* Phase 2C — register MemRegionAttach bookkeeping for every chunk this
+ * cabin just mapped. Mirror flag set used in bay_map_into_cabin so the
+ * stored orig_flags exactly match the live PTE flags. Calls are best-
+ * effort: any per-chunk failure is silently skipped (region creation
+ * race only — extremely rare; future enforcement walks will simply miss
+ * that one chunk, never corrupt). */
+static void bay_memtag_attach_all(struct process_t *proc,
+                                   uint64_t *chunks,
+                                   uint32_t chunk_count,
+                                   uint64_t va_base,
+                                   uint64_t chunk_size,
+                                   uint32_t bay_flags)
+{
+    uint64_t att_flags = (bay_flags & BAY_RO) ? VMM_FLAGS_USER_RO
+                                              : VMM_FLAGS_USER_RW;
+    att_flags |= VMM_FLAG_NO_EXECUTE;
+    uint8_t  page_class = (chunk_size == BAY_HUGE_SIZE)
+                          ? MEMTAG_ATTACH_CLASS_2M
+                          : MEMTAG_ATTACH_CLASS_4K;
+    uint32_t pages_per_chunk = (chunk_size == BAY_HUGE_SIZE)
+                               ? (uint32_t)BAY_HUGE_PAGES : 1u;
+    for (uint32_t i = 0; i < chunk_count; i++) {
+        if (chunks[i] == 0) continue;
+        uint64_t att_va = va_base + (uint64_t)i * chunk_size;
+        uint32_t rid    = MemRegionFromPhys((uintptr_t)chunks[i]);
+        if (rid != MEMTAG_INVALID_REGION_ID) {
+            MemRegionAttachCabin(rid, (void *)proc->cabin, att_va,
+                                  pages_per_chunk, page_class, att_flags);
+        }
+    }
+}
+
+/* Inverse of bay_memtag_attach_all — detach every chunk's attach record.
+ * Idempotent; safe to call when no attach was registered for a chunk. */
+static void bay_memtag_detach_all(struct process_t *proc,
+                                   uint64_t *chunks,
+                                   uint32_t chunk_count,
+                                   uint64_t va_base,
+                                   uint64_t chunk_size)
+{
+    for (uint32_t i = 0; i < chunk_count; i++) {
+        if (chunks[i] == 0) continue;
+        uint64_t att_va = va_base + (uint64_t)i * chunk_size;
+        uint32_t rid    = MemRegionFromPhys((uintptr_t)chunks[i]);
+        if (rid != MEMTAG_INVALID_REGION_ID) {
+            MemRegionDetachCabin(rid, (void *)proc->cabin, att_va);
+        }
+    }
 }
 
 static void bay_unmap_from_cabin(struct process_t *proc,
@@ -505,6 +556,30 @@ error_t BayOpenInternal(struct process_t *proc,
             atomic_fetch_add_u64(&g_stat_objects, 1);
             atomic_fetch_add_u64(&g_stat_pages,
                                  (uint64_t)cc * ((cs == BAY_HUGE_SIZE) ? BAY_HUGE_PAGES : 1));
+
+            /* MemTag integration: tag each chunk with the Bay's
+             * key:value AND "purpose:bay" so the region surface is
+             * queryable from outside the Bay subsystem. Chunks are
+             * destroyed via pmm_free in bay teardown which triggers
+             * MemTagPmmFreed → region cleanup. */
+            TagFSState *bay_fs = tagfs_get_state();
+            if (bay_fs && bay_fs->registry) {
+                const char *bk = tag_registry_key(bay_fs->registry, tag_id);
+                const char *bv = tag_registry_value(bay_fs->registry, tag_id);
+                char tag_buf[128];
+                if (bk) {
+                    if (bv && bv[0])
+                        ksnprintf(tag_buf, sizeof(tag_buf), "%s:%s", bk, bv);
+                    else
+                        ksnprintf(tag_buf, sizeof(tag_buf), "%s", bk);
+                    size_t pages_per_chunk =
+                        (cs == BAY_HUGE_SIZE) ? BAY_HUGE_PAGES : 1;
+                    for (uint32_t ci = 0; ci < cc; ci++) {
+                        MemTagApplyByPhys((uintptr_t)chunks[ci], pages_per_chunk, tag_buf);
+                        MemTagApplyByPhys((uintptr_t)chunks[ci], pages_per_chunk, "purpose:bay");
+                    }
+                }
+            }
         }
     }
 
@@ -538,6 +613,18 @@ error_t BayOpenInternal(struct process_t *proc,
     claim->user_va_size = total_size;
     claim->flags        = flags;
 
+    /* Phase 2B M2 — enforce MemTag capabilities BEFORE mapping pages
+     * into the cabin. Any guard tag on the Bay's region(s) that this
+     * cabin doesn't hold → deny mapping + publish memtag:fault:denied. */
+    if (bay->chunks && chunk_count > 0) {
+        if (!MemTagEnforcePhys(proc->pid, (uintptr_t)bay->chunks[0])) {
+            kfree(claim);
+            spin_lock(&b->lock);
+            bay_drop_ref_locked(b, bay);
+            return ERR_PERMISSION_DENIED;
+        }
+    }
+
     error_t rc = bay_map_into_cabin(proc, va, bay->chunks,
                                     chunk_count, chunk_size, flags);
     if (rc != OK) {
@@ -547,10 +634,16 @@ error_t BayOpenInternal(struct process_t *proc,
         return rc;
     }
 
+    /* Phase 2C — register attachment bookkeeping per chunk so future
+     * revoke/grant sweeps can locate this cabin's PTEs without scanning
+     * the page table. */
+    bay_memtag_attach_all(proc, bay->chunks, chunk_count, va, chunk_size, flags);
+
     /* Final link. The destroying-check inside bay_link_claim closes the
      * window where BayCleanupProcess might have drained the list while
      * we were busy with the bucket/PMM/VMM work above. */
     if (!bay_link_claim(proc, claim)) {
+        bay_memtag_detach_all(proc, bay->chunks, chunk_count, va, chunk_size);
         bay_unmap_from_cabin(proc, va, chunk_count, chunk_size);
         kfree(claim);
         spin_lock(&b->lock);
@@ -577,6 +670,10 @@ error_t BayReleaseInternal(struct process_t *proc, uint64_t user_va)
         kfree(claim);
         return ERR_INVALID_STATE;
     }
+
+    /* Phase 2C — detach attachment bookkeeping before the PTE goes away. */
+    bay_memtag_detach_all(proc, bay->chunks, bay->chunk_count,
+                          claim->user_va_base, bay->chunk_size);
 
     /* Unmap from this cabin first. After this the pages are exclusively
      * owned by other cabins (if any) — no chance the current proc still
@@ -617,6 +714,8 @@ void BayCleanupProcess(struct process_t *proc)
         BayObject *bay = head->bay;
 
         if (bay && proc->cabin) {
+            bay_memtag_detach_all(proc, bay->chunks, bay->chunk_count,
+                                   head->user_va_base, bay->chunk_size);
             bay_unmap_from_cabin(proc, head->user_va_base,
                                  bay->chunk_count, bay->chunk_size);
 

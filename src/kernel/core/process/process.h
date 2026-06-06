@@ -102,6 +102,20 @@ typedef struct process_t
     uint16_t tag_overflow_count;
     uint16_t tag_overflow_capacity;
 
+    /* MemTag capabilities — per-cabin bit-mask of HELD MemTag tag_ids.
+     * Inline 1024 bits (covers tag_ids 0..1023). For larger tag_ids the
+     * mask is sparse — currently capped at 1024 (production-typical tag
+     * count is <500). Phase 2B PTE-bit enforcement reads this on every
+     * tag-checked access; Phase 2A uses it for soft `mem_check_access`.
+     *
+     * Mutation is atomic per uint64_t word (single-bit set/clear via
+     * __atomic_*). No spinlock needed for word-bounded ops. Cross-word
+     * batch ops (grant_many) take memtag_lock briefly.
+     *
+     * Default: all zeros. Guard-flagged regions (MEMTAG_FLAG_GUARD on
+     * tag_registry entry) require cabin to hold the tag bit to access. */
+    uint64_t active_memtags[16];   /* 1024 bits total */
+
     uintptr_t code_start;
     size_t code_size;
 

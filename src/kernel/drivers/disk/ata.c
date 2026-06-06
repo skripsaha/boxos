@@ -7,7 +7,6 @@
 #include "atomics.h"
 #include "pci.h"
 #include "pmm.h"
-#include "pmtag.h"
 #include "vmm.h"
 #include "boxos_memory.h"
 #include "ahci.h"

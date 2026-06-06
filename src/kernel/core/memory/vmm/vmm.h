@@ -212,6 +212,232 @@ bool vmm_is_kernel_addr(uintptr_t addr);
 page_table_t* vmm_get_or_create_table(vmm_context_t* ctx, uintptr_t virt_addr, int level);
 pte_t* vmm_get_pte(vmm_context_t* ctx, uintptr_t virt_addr);
 pte_t* vmm_get_or_create_pte(vmm_context_t* ctx, uintptr_t virt_addr);
+
+/*
+ * Walk to whichever PT/PD/PDPT entry is the leaf for `virt_addr`.
+ * out_level is set to:
+ *   1 → 4 KiB PT entry
+ *   2 → 2 MiB PD leaf (VMM_FLAG_LARGE_PAGE set on returned entry)
+ *   3 → 1 GiB PDPT leaf
+ * Returns NULL if no mapping covers `virt_addr` at any level.
+ * Phase 2C (memtag enforcement) uses this to manipulate PRESENT bit on
+ * mappings independent of page size.
+ */
+pte_t* vmm_get_leaf_pte(vmm_context_t* ctx, uintptr_t virt_addr, uint8_t* out_level);
+
+/* Phase 2E — PAT MSR + cache-type decoding.
+ *
+ * vmm_pat_init() programs IA32_PAT (MSR 0x277) at boot. The 64-bit MSR
+ * value is snapshot in g_ia32_pat_value so:
+ *   1. Runtime helpers can decode any leaf PTE's effective cache type.
+ *   2. The MemTag AP-side consistency probe (MemTagVerifyPatMsr) can
+ *      compare each AP's RDMSR against the BSP value — Intel SDM Vol 3A
+ *      §11.12.4 mandates an identical PAT across coherent CPUs.
+ *
+ * vmm_pte_pat_index extracts the 3-bit PAT selector (PWT|PCD|PAT) from
+ * a leaf PTE, taking into account the bit shift difference between 4 KiB
+ * (PAT@bit 7) and 2 MiB/1 GiB (PAT@bit 12) leaves per Intel SDM §11.12.3.
+ */
+extern uint64_t g_ia32_pat_value;
+
+uint8_t      vmm_pte_pat_index(uint64_t pte_val, bool is_huge_leaf);
+uint8_t      vmm_pat_type_at(uint8_t pat_idx);
+const char  *vmm_pte_cache_type_str(uint64_t pte_val, bool is_huge_leaf);
+uint64_t     vmm_get_pat_msr_value(void);
+
+/* Phase 2E — CPU consistency probes (renamed in audit pass — these are
+ * PURE CPU MSR probes with no MemTag-specific state). Verify the PAT
+ * MSR is identical across coherent CPUs per Intel SDM Vol 3A §11.12.4;
+ * dump firmware-programmed MTRR layout per Intel SDM §11.11/§11.12.5. */
+bool         vmm_verify_pat_msr(void);
+void         vmm_dump_mtrr_layout(void);
+
+/* Phase 2H — Protection Keys (Intel SDM Vol 3A §4.6.2 / §4.6.3).
+ * Bits 62:59 of every leaf PTE form a 4-bit PKEY. The same field is
+ * checked against IA32_PKRU for user pages (U=1) and against IA32_PKRS
+ * for supervisor pages (U=0) — orthogonal to NX (bit 63), Phase 2D's
+ * region id (bits 58:52), and CET (bit 60 — only when CR4.CET=1; we
+ * verify gating in vmm_pku_init). */
+#define VMM_PTE_PKEY_SHIFT    59
+#define VMM_PTE_PKEY_BITS     4
+#define VMM_PTE_PKEY_MAX      ((1u << VMM_PTE_PKEY_BITS) - 1u)
+#define VMM_PTE_PKEY_MASK     (((uint64_t)VMM_PTE_PKEY_MAX) << VMM_PTE_PKEY_SHIFT)
+
+static inline uint64_t vmm_pte_encode_pkey(uint8_t pkey) {
+    return (((uint64_t)pkey) & VMM_PTE_PKEY_MAX) << VMM_PTE_PKEY_SHIFT;
+}
+static inline uint8_t vmm_pte_pkey(uint64_t pte_val) {
+    return (uint8_t)((pte_val >> VMM_PTE_PKEY_SHIFT) & VMM_PTE_PKEY_MAX);
+}
+
+/* BSP-side PKU/PKS bring-up: sets CR4.PKE (bit 22) when has_pku, CR4.PKS
+ * (bit 24) when has_pks, and XSETBV XCR0.PKRU (bit 9) when has_xsave +
+ * has_pku. Backward-compatible: default PKRU=0 means every key access
+ * is allowed, so enabling CR4.PKE has no behavior change until a thread
+ * explicitly writes PKRU. */
+void vmm_pku_init(void);
+
+/* Per-AP PKU/PKS bring-up. Same CR4 + XCR0 toggles on the calling AP.
+ * Called from per_core_init_ap after cpu_intersect_features_ap so a
+ * hybrid SKU's PKU-less AP isn't fed a CR4.PKE write that would still
+ * be safe but mismatched with the package-wide capability snapshot. */
+void vmm_pku_ap_init(void);
+
+/* Read / write IA32_PKRU MSR (0x6E0). Returns 0 on systems without PKU
+ * (caller may treat as "all keys allowed"). */
+uint32_t vmm_read_pkru(void);
+void     vmm_write_pkru(uint32_t value);
+
+/* Phase 2I — Linear Address Masking (LAM) infrastructure.
+ *
+ * Intel SDM Vol 3A §5.6. Per-CR3 (per-process) opt-in:
+ *   CR3.LAM_U48 (bit 62) — bits 62:48 of user VA become "ignored"
+ *                          (7 tag bits available in bits 62:56)
+ *   CR3.LAM_U57 (bit 61) — bits 62:57 ignored (6 tag bits, for the
+ *                          5-level paging variant)
+ *   CR4.LAM_SUP (bit 28) — supervisor-side LAM, kernel only
+ *
+ * Substrate for HWASAN-style tagged pointers: userspace stores a tag
+ * in the upper bits, the hardware silently masks them at translation.
+ * The OS must (a) preserve LAM bits across context switches via
+ * vmm_build_cr3, (b) NEVER treat LAM bits as part of the PML4 phys
+ * (use vmm_pte_addr_mask which strips them naturally), (c) gate any
+ * future per-process opt-in API on has_lam.
+ *
+ * Phase 2I lays the bit-layer foundation + BSP/AP probe. Per-process
+ * LAM opt-in (CR3 bit OR-in) is the follow-up; until then LAM is
+ * dormant and CR3 still carries LAM bits = 0 = no masking.
+ */
+#define VMM_CR3_LAM_U57    (1ULL << 61)
+#define VMM_CR3_LAM_U48    (1ULL << 62)
+#define VMM_CR3_LAM_MASK   (VMM_CR3_LAM_U48 | VMM_CR3_LAM_U57)
+#define VMM_CR4_LAM_SUP    (1ULL << 28)
+
+/* LAM tag-bit field accessors. LAM_U48 → bits 62:56 (7 bits), LAM_U57
+ * → bits 62:57 (6 bits). Bit 63 stays sign-extension / canonical.
+ * Pure functions; safe to call regardless of has_lam (the substrate
+ * is just bit manipulation). */
+static inline uint64_t vmm_lam_u48_tag_mask(void) { return 0x7FULL << 56; }
+static inline uint64_t vmm_lam_u57_tag_mask(void) { return 0x3FULL << 57; }
+
+static inline uint64_t vmm_user_ptr_set_tag_u48(uint64_t ptr, uint8_t tag) {
+    return (ptr & ~vmm_lam_u48_tag_mask()) | ((((uint64_t)tag) & 0x7F) << 56);
+}
+static inline uint8_t  vmm_user_ptr_get_tag_u48(uint64_t ptr) {
+    return (uint8_t)((ptr >> 56) & 0x7F);
+}
+static inline uint64_t vmm_user_ptr_set_tag_u57(uint64_t ptr, uint8_t tag) {
+    return (ptr & ~vmm_lam_u57_tag_mask()) | ((((uint64_t)tag) & 0x3F) << 57);
+}
+static inline uint8_t  vmm_user_ptr_get_tag_u57(uint64_t ptr) {
+    return (uint8_t)((ptr >> 57) & 0x3F);
+}
+
+/* BSP-side LAM probe. No CR3 writes — Phase 2I is observe-only; the
+ * per-process opt-in path will OR in CR3.LAM_U48 later. Logs the live
+ * state of CR3 LAM bits and CR4.LAM_SUP so operators can see the
+ * snapshot at boot. Called from main.c right after vmm_pku_init. */
+void vmm_lam_probe(void);
+void vmm_lam_ap_probe(void);
+
+/* Phase 2J — TME / TME-MK (Total Memory Encryption Multi-Key).
+ *
+ * Intel SDM Vol 3D §15.5. Two MSRs:
+ *   IA32_TME_CAPABILITY (0x981) — supported algorithms + max KeyID bits
+ *   IA32_TME_ACTIVATE   (0x982) — firmware-programmed activation
+ *
+ * IA32_TME_ACTIVATE layout:
+ *   bit 0   LOCK         — register is RO after firmware sets this
+ *   bit 1   TME enable
+ *   bits 4-7 TME_POLICY  — encryption algorithm selection
+ *   bits 32-35 NUM_KEYID_BITS
+ *   bit 36  TME_MK_EN    — Multi-Key extension active
+ *
+ * When TME-MK is active, the top NUM_KEYID_BITS of every phys address
+ * become the KeyID. The CPU reports MAXPHYADDR REDUCED accordingly via
+ * CPUID.80000008:EAX, so PMM already sees the smaller usable range.
+ *
+ * Phase 2J is observe-only: detect, decode, log. Per-region encryption
+ * (allocating with a specific KeyID and ORing into PTE phys bits) is
+ * the lifecycle follow-up.
+ */
+#define VMM_MSR_IA32_TME_CAPABILITY  0x981U
+#define VMM_MSR_IA32_TME_ACTIVATE    0x982U
+
+#define VMM_TME_ACT_LOCK             (1ULL << 0)
+#define VMM_TME_ACT_TME_EN           (1ULL << 1)
+#define VMM_TME_ACT_TME_MK_EN        (1ULL << 36)
+#define VMM_TME_ACT_KEYID_BITS_MASK  (0xFULL << 32)
+#define VMM_TME_ACT_KEYID_BITS_SHIFT 32
+
+void vmm_tme_probe(void);
+void vmm_tme_ap_probe(void);
+
+/* Phase 2K — CET (Control-flow Enforcement Technology).
+ *
+ * Intel SDM Vol 3D §17. Two sub-features (CET-SS Shadow Stack +
+ * CET-IBT Indirect Branch Tracking). Both gate on CR4.CET (bit 23).
+ *
+ *   IA32_S_CET (0x6A2)  — supervisor-side controls
+ *   IA32_U_CET (0x6A0)  — user-side controls
+ *   IA32_PL0_SSP (0x6A4) / PL1_SSP / PL2_SSP / PL3_SSP — shadow stack pointers
+ *
+ * Leaf PTE bit 60 = supervisor shadow-stack indicator (Intel SDM Vol 3A
+ * §4.5.1 Table 4-19). On a 4 KiB writable PTE with CR4.CET=1 +
+ * IA32_S_CET.SH_STK_EN=1, the page is marked supervisor SS. Bit 61 is
+ * the user SS analogue.
+ *
+ * SSP register saved via XSAVE component 11 (XCR0.CET_S / CET_U at
+ * bits 11/12 of XCR0).
+ *
+ * Phase 2K is observe-only foundation: detect, probe, log, expose
+ * encoding helpers + reserved namespace. Per-process shadow stack
+ * lifecycle (SSP allocate, IRET-on-SS, set CR4.CET) is the follow-up.
+ */
+#define VMM_CR4_CET_BIT          (1ULL << 23)
+#define VMM_MSR_IA32_U_CET       0x6A0U
+#define VMM_MSR_IA32_S_CET       0x6A2U
+#define VMM_MSR_IA32_PL0_SSP     0x6A4U
+#define VMM_MSR_IA32_PL3_SSP     0x6A7U
+
+#define VMM_PTE_CET_SS_SUPV      (1ULL << 60)
+#define VMM_PTE_CET_SS_USER      (1ULL << 61)
+
+#define VMM_XCR0_CET_S_BIT       (1ULL << 11)
+#define VMM_XCR0_CET_U_BIT       (1ULL << 12)
+
+void vmm_cet_probe(void);
+void vmm_cet_ap_probe(void);
+
+static inline uint64_t vmm_pte_with_cet_supv_ss(uint64_t pte) {
+    return pte | VMM_PTE_CET_SS_SUPV;
+}
+static inline bool vmm_pte_is_supv_ss(uint64_t pte) {
+    return (pte & VMM_PTE_CET_SS_SUPV) != 0;
+}
+
+/* Compose KeyID into the upper bits of a phys address. Pure function;
+ * caller must ensure `phys` doesn't already use the bits and that the
+ * KeyID fits in the platform's NUM_KEYID_BITS window. Phase 2J ships
+ * this as a building block; no callers wire it yet. */
+static inline uint64_t vmm_phys_with_keyid(uint64_t phys, uint8_t keyid,
+                                            uint8_t num_keyid_bits,
+                                            uint8_t reduced_maxphyaddr) {
+    /* Defensive bound check — Intel SDM caps NUM_KEYID_BITS at 15 and
+     * MAXPHYADDR at 52, so the largest physical position is bit 66 in
+     * the worst case (15 + 52 = 67), which overflows uint64. Guard so
+     * callers passing bogus values get phys back unchanged rather than
+     * UB-shifted garbage. */
+    if (num_keyid_bits == 0 ||
+        num_keyid_bits >= 64 ||
+        reduced_maxphyaddr >= 64 ||
+        (uint32_t)num_keyid_bits + (uint32_t)reduced_maxphyaddr > 64) {
+        return phys;
+    }
+    uint64_t mask = ((1ULL << num_keyid_bits) - 1ULL) << reduced_maxphyaddr;
+    return (phys & ~mask) | (((uint64_t)keyid << reduced_maxphyaddr) & mask);
+}
+
 void vmm_invalidate_page(uintptr_t virt_addr);
 
 uintptr_t vmm_alloc_page_table(void);

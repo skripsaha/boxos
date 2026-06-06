@@ -54,8 +54,8 @@
 #include "hvclock.h"
 #include "aslr.h"
 #include "linker_symbols.h"
-#include "pmtag.h"
 #include "memtag.h"
+#include "mce.h"
 #include "op_registry.h"
 #include "manifest.h"
 #include "manifest_selftest.h"
@@ -170,17 +170,63 @@ void kernel_main(void)
         }
     }
 
-    debug_printf("[INIT] Physical Memory Tag Table...\n");
-    error_t pmtag_err = PhysTagInit();
-    if (pmtag_err != OK) {
-        debug_printf("[INIT] WARNING: PMT init failed: %s (non-fatal)\n", ErrorString(pmtag_err));
-    }
-
-    debug_printf("[INIT] MemTag Physical Region Tagging...\n");
+    debug_printf("[INIT] MemTag...\n");
     error_t memtag_err = MemTagInit();
     if (memtag_err != OK) {
         debug_printf("[INIT] WARNING: MemTag init failed: %s (non-fatal)\n", ErrorString(memtag_err));
     }
+
+    /* MemTag Phase 2D M5 — verify PTE bits 52-58 are safely "Ignored"
+     * on the BSP. APs run the same probe from per_core_init_ap after
+     * cpu_intersect_features_ap so a hybrid CPU where the AP exposes
+     * different CR4 state can still be caught. */
+    (void)MemTagVerifyPteMetadataBits();
+
+    /* MemTag Phase 2E — BSP-side PAT MSR self-test (sanity: BSP RDMSR
+     * should match the value vmm_pat_init just programmed). APs run
+     * the same probe from per_core_init_ap after their own vmm_pat_init
+     * to catch heterogeneous PAT across coherent CPUs (Intel SDM Vol 3A
+     * §11.12.4). MTRR audit dumps the firmware-programmed MTRR layout
+     * so cache:wb tags can be reconciled with effective memory type
+     * (Intel SDM §11.12.5). Both are non-fatal — informational. */
+    (void)MemTagVerifyPatMsr();
+    MemTagDumpMtrrLayout();
+
+    /* Phase 2F — Machine Check Architecture bring-up on BSP. Enables
+     * CR4.MCE, programs every reporting bank's IA32_MC<i>_CTL, clears
+     * stale status, and (when supported) lights LMCE. Per-AP init runs
+     * later from per_core_init_ap. The IDT vector 18 handler is already
+     * registered with IST_MACHINE_CHECK by idt_init; mce_handle just
+     * decodes banks + poisons phys pages now that the path is hot. */
+    mce_init();
+
+    /* Phase 2H — Protection Keys (PKU/PKS) bring-up on BSP. Sets CR4.PKE
+     * (bit 22), CR4.PKS (bit 24) when supported, and XCR0.PKRU (bit 9)
+     * so XSAVE covers per-thread PKRU. Default PKRU=0 = "all 16 keys
+     * fully accessible" → backward-compatible until userspace writes
+     * PKRU. PTE bits 62:59 (the PKEY field) can now be stamped by
+     * MemTag policy. */
+    vmm_pku_init();
+
+    /* Phase 2I — Linear Address Masking BSP probe. Observe-only this
+     * iteration: logs CR3.LAM_U48 / CR3.LAM_U57 / CR4.LAM_SUP state so
+     * operators see the substrate snapshot at boot. Per-process LAM
+     * opt-in (setting CR3.LAM_U48 on a specific process) is deferred
+     * because it requires scheduler-side CR3 build modification —
+     * Phase 2I lays the bit-layer foundation. */
+    vmm_lam_probe();
+
+    /* Phase 2J — TME / TME-MK BSP probe (observe-only). Reads firmware-
+     * locked MSRs to log the encryption state: TME on/off, MK enable,
+     * KeyID bit count. Per-region encryption (allocating with a
+     * specific KeyID) is the lifecycle follow-up. */
+    vmm_tme_probe();
+
+    /* Phase 2K — CET (Control-flow Enforcement Technology) BSP probe.
+     * Detects SHSTK + IBT, reads IA32_S_CET / IA32_U_CET when CR4.CET=1.
+     * Observe-only — per-process shadow-stack allocation + SSP save/
+     * restore via XSAVE component 11 is the lifecycle follow-up. */
+    vmm_cet_probe();
 
     pmm_test_high_memory();
     MemTagStressTest();
@@ -256,6 +302,7 @@ void kernel_main(void)
         /* IOMMU skeleton — picks backend, runs init stub, does not
          * enable translation yet. */
         iommu_init();
+        iommu_audit_dump();   /* Phase 2G — log MemTag/Touch surface */
         /* AML interpreter skeleton — currently returns NOT_LOADED.
          * Hook here lets future implementation tie into boot. */
         aml_init();
@@ -391,6 +438,14 @@ void kernel_main(void)
 
     debug_printf("[INIT] Guide Dispatcher...\n");
     guide_init();
+
+    /* Touch is up after guide_init — let the Canvas surface broadcast
+     * its readiness so log collectors / power daemons can subscribe. */
+    VideoNotifyReady();
+
+    /* MemTag's lifecycle publishes (memtag:region:*, memtag:tag:*) become
+     * live once Touch resolves tags. Until now they silently no-op'd. */
+    MemTagEnableTouchPublish();
 
     /* TouchInit has now run inside guide_init — replay every EFI boot-
      * time event so late subscribers (userspace daemons, fleet inventory

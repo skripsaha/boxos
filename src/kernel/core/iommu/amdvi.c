@@ -388,6 +388,11 @@ static void amdvi_invalidate(iommu_domain_t* d) {
     }
 }
 
+/* Phase 2G — opaque domain → ID accessor. Trivial field read. */
+static uint32_t amdvi_domain_id(iommu_domain_t* d) {
+    return d ? ((struct iommu_domain*)d)->id : 0xFFFFFFFFu;
+}
+
 const iommu_ops_t amdvi_ops = {
     .name           = "AMD-Vi",
     .init           = amdvi_init,
@@ -398,4 +403,5 @@ const iommu_ops_t amdvi_ops = {
     .map            = amdvi_map,
     .unmap          = amdvi_unmap,
     .invalidate     = amdvi_invalidate,
+    .domain_id      = amdvi_domain_id,
 };

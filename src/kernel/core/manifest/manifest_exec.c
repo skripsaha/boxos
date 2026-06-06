@@ -2,6 +2,7 @@
 #include "manifest_auth.h"
 #include "klib.h"
 #include "boxos_manifest.h"
+#include "canvas.h"   /* CanvasBatchBegin/End — coalesce multi-op Manifests into one display commit */
 
 /*
  * Sequential executor. Walks the compiled op stream once, dispatching each
@@ -78,6 +79,13 @@ error_t ManifestExecute(ManifestHandle           handle,
     bool    prev_failed = false;
     bool    any_executed = false;
 
+    /* One Canvas batch wraps the whole op stream so multi-op Manifests
+     * coalesce into a single backend Present.  Single-op Manifests get
+     * no wrap — the op's own per-call batch already commits at the right
+     * boundary, and an extra begin/end here would just add lock cycles. */
+    const bool batch_wrap = (cm->op_count > 1);
+    if (batch_wrap) CanvasBatchBegin();
+
     for (uint32_t i = 0; i < cm->op_count; i++) {
         const ManifestOp     *op  = (const ManifestOp *)(cm->raw_bytes + cm->op_offsets[i]);
         const OpRegistration *reg = cm->handlers[i];
@@ -118,6 +126,8 @@ error_t ManifestExecute(ManifestHandle           handle,
         result.flags |= EXEC_RESULT_ALL_SKIPPED;
     }
 
+    if (batch_wrap) CanvasBatchEnd();
+
     if (out_result) *out_result = result;
     ManifestRelease(handle);
     return first_error;
@@ -150,6 +160,9 @@ error_t ManifestExecuteOnce(const void              *manifest_kp,
     error_t first_error  = OK;
     bool    prev_failed  = false;
     bool    any_executed = false;
+
+    const bool batch_wrap = (hdr->op_count > 1);
+    if (batch_wrap) CanvasBatchBegin();
 
     uint32_t cursor = sizeof(Manifest);
     for (uint32_t i = 0; i < hdr->op_count; i++) {
@@ -245,6 +258,9 @@ error_t ManifestExecuteOnce(const void              *manifest_kp,
     }
 
     if (!any_executed) result.flags |= EXEC_RESULT_ALL_SKIPPED;
+
+    if (batch_wrap) CanvasBatchEnd();
+
     if (out_result) *out_result = result;
     return first_error;
 }

@@ -20,6 +20,7 @@
  * happens to mean unlocked for the current spinlock_t layout. */
 #include "klib.h"
 #include "video.h"
+#include "canvas.h"
 #include "serial.h"
 
 /* Module-local state — neither escapes outside this TU. */
@@ -381,7 +382,12 @@ int kprintf(const char *format, ...)
     va_list args;
     va_start(args, format);
     spin_lock(&g_kprintf_lock);
+    /* Wrap the per-char emit loop in one Canvas batch.  A multi-line
+     * banner used to fire one full-frame blit per '\n'-induced scroll;
+     * batched, the whole banner ends in a single coalesced blit. */
+    VideoBatchBegin();
     int n = kvformat(&SCREEN_OPS, NULL, format, args);
+    VideoBatchEnd();
     spin_unlock(&g_kprintf_lock);
     va_end(args);
     return n;
@@ -413,6 +419,9 @@ __attribute__((noreturn)) void panic(const char *message, ...)
      * (sent from exception_handler) halts peer cores before they ever
      * spin_unlock again. */
     spin_force_release(&g_kprintf_lock);
+    /* Discard any pending Canvas batch state left by an interrupted
+     * Manifest op so the panic banner commits on its first kprintf. */
+    CanvasForceReset();
 
     asm volatile("cli");
 

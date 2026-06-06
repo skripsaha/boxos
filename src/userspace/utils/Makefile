@@ -30,7 +30,7 @@ BOXLIB     = ../boxlib/libbox.a
 BOXLIB_START = ../build/boxlib_start.o
 
 UTILS = help create show files tag untag name trash erase \
-        me info say reboot bye defrag fsck ipc_test
+        me info say reboot bye defrag fsck ipc_test memtag
 
 .PHONY: all clean
 

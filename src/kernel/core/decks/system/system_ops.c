@@ -1274,6 +1274,9 @@ error_t SystemDeckRegister(void)
     error_t brook_rc = BrookOpsRegister();
     if (brook_rc != OK) return brook_rc;
 
+    error_t memtag_rc = MemTagOpsRegister();
+    if (memtag_rc != OK) return memtag_rc;
+
     debug_printf("[SystemDeck] registered %zu ops (full surface, gated)\n",
                  sizeof(table) / sizeof(table[0]));
     return OK;

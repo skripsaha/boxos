@@ -2,7 +2,6 @@
 #include "acpi.h"
 #include "touch.h"
 #include "buddy.h"
-#include "pmtag.h"
 #include "vmm.h"
 #include "memtag.h"
 #include "e820.h"
@@ -20,6 +19,24 @@ static uint8_t pmm_maxphyaddr = 0;
 static uint64_t pmm_max_phys_addr = 0;
 
 static uint64_t pmm_mem_end = 0;
+
+/* Phase 2F — MCE poison bitmap. 1 bit per page. Allocated by pmm_init
+ * tail and stored as a PHYS address; vmm_phys_to_virt is called on
+ * every access so we survive the pull-map activation that follows
+ * pmm_init (identity-mapped pointer cached here would dangle once the
+ * identity map is torn down by pmm_activate_pull_map). 0 means "no
+ * tracking yet" → all queries return false and set_poisoned is a no-op
+ * (graceful degradation if the bitmap alloc failed on small-RAM hosts). */
+static uintptr_t pmm_poisoned_bitmap_phys = 0;
+static size_t    pmm_poisoned_bitmap_pages = 0;  /* mem_end / PMM_PAGE_SIZE */
+static volatile uint64_t pmm_poisoned_set_count = 0;
+
+#define PMM_MCE_RETRY_MAX 8
+
+static inline uint8_t *pmm_poisoned_bitmap_virt(void) {
+    if (!pmm_poisoned_bitmap_phys) return NULL;
+    return (uint8_t *)vmm_phys_to_virt(pmm_poisoned_bitmap_phys);
+}
 
 /*
  * Pristine free count just after E820 USABLE entries were inserted into the
@@ -295,9 +312,85 @@ error_t pmm_init(void) {
 
     pmm_initialized = true;
 
+    /* Phase 2F — allocate the MCE poison-page bitmap. Sized to mem_end
+     * (one bit per 4 KiB page). Failure is non-fatal: pmm_set_poisoned
+     * silently no-ops if the bitmap pointer stays NULL, and
+     * pmm_is_poisoned reads false; future #MC events are still logged
+     * via Touch, just not auto-skipped by the allocator. */
+    {
+        size_t pages_to_track = (size_t)(pmm_mem_end / PMM_PAGE_SIZE);
+        size_t bitmap_bytes   = (pages_to_track + 7u) / 8u;
+        size_t bitmap_pages   = (bitmap_bytes + PMM_PAGE_SIZE - 1u) / PMM_PAGE_SIZE;
+        if (bitmap_pages > 0) {
+            void *phys = buddy_alloc(&pmm_buddy, bitmap_pages);
+            if (phys) {
+                /* Zero via the current vmm_phys_to_virt mapping (identity
+                 * during boot, Pull Map after activation). Store the
+                 * PHYS — every subsequent access re-translates to catch
+                 * the post-pmm_activate_pull_map transition. */
+                uint8_t *zero_virt = (uint8_t *)vmm_phys_to_virt((uintptr_t)phys);
+                memset(zero_virt, 0, bitmap_pages * PMM_PAGE_SIZE);
+                pmm_poisoned_bitmap_phys  = (uintptr_t)phys;
+                pmm_poisoned_bitmap_pages = pages_to_track;
+                debug_printf("[PMM] MCE poison bitmap: %zu pages tracked, "
+                             "%zu bytes (%zu pages allocated at phys=0x%lx)\n",
+                             pages_to_track, bitmap_bytes, bitmap_pages,
+                             (unsigned long)phys);
+            } else {
+                debug_printf("[PMM] MCE poison bitmap alloc FAILED (%zu pages) — "
+                             "MCE handler will still log + Touch, but allocator "
+                             "won't auto-skip poisoned phys\n", bitmap_pages);
+            }
+        }
+    }
+
     debug_printf("[PMM] Initialized: %zu MB available\n",
         (pmm_buddy.free_count * PMM_PAGE_SIZE) / (1024 * 1024));
     return OK;
+}
+
+/* ─── Phase 2F — MCE poison bitmap API ────────────────────────────── */
+
+void pmm_set_poisoned(uintptr_t phys) {
+    uint8_t *bitmap = pmm_poisoned_bitmap_virt();
+    if (!bitmap) return;
+    size_t page = phys / PMM_PAGE_SIZE;
+    if (page >= pmm_poisoned_bitmap_pages) return;
+    size_t byte = page >> 3;
+    uint8_t bit = (uint8_t)(1u << (page & 7u));
+    /* Atomic OR avoids a lock; the bitmap is sparse so contention is
+     * effectively never seen. Use the byte-grained __atomic_fetch_or
+     * (Intel: LOCK OR BYTE PTR ...). */
+    uint8_t prev = __atomic_fetch_or(&bitmap[byte], bit, __ATOMIC_RELEASE);
+    if (!(prev & bit)) {
+        __atomic_add_fetch(&pmm_poisoned_set_count, 1, __ATOMIC_RELAXED);
+    }
+}
+
+bool pmm_is_poisoned(uintptr_t phys) {
+    uint8_t *bitmap = pmm_poisoned_bitmap_virt();
+    if (!bitmap) return false;
+    size_t page = phys / PMM_PAGE_SIZE;
+    if (page >= pmm_poisoned_bitmap_pages) return false;
+    size_t byte = page >> 3;
+    uint8_t bit = (uint8_t)(1u << (page & 7u));
+    uint8_t v = __atomic_load_n(&bitmap[byte], __ATOMIC_ACQUIRE);
+    return (v & bit) != 0;
+}
+
+bool pmm_is_range_poisoned(uintptr_t phys, size_t pages) {
+    if (!pmm_poisoned_bitmap_phys || !pages) return false;
+    /* Fast common case: zero poisoned set globally → skip the scan. */
+    if (__atomic_load_n(&pmm_poisoned_set_count, __ATOMIC_RELAXED) == 0)
+        return false;
+    for (size_t i = 0; i < pages; i++) {
+        if (pmm_is_poisoned(phys + i * PMM_PAGE_SIZE)) return true;
+    }
+    return false;
+}
+
+size_t pmm_poisoned_page_count(void) {
+    return (size_t)__atomic_load_n(&pmm_poisoned_set_count, __ATOMIC_RELAXED);
 }
 
 uint32_t pmm_phys_domain(uintptr_t phys) {
@@ -385,33 +478,62 @@ void pmm_log_numa_topology(void) {
 // tags == PHYS_TAG_DMA32     → [0,  DMA32_END)  O(log max_order)
 // tags == PHYS_TAG_USER      → [DMA32_END, 4GB) O(log max_order)
 // tags == PHYS_TAG_HIGH      → [4GB, mem_end)   O(log max_order)
-// tags == anything else      → PhysAllocTagged  O(band scan)
+// tags == anything else      → treated as no constraint (rejected as
+//                              non-zone hint; semantic tagging belongs
+//                              in MemTag string namespace, not numeric).
 // ─────────────────────────────────────────────────────────────────────────────
 void* _pmm_alloc_impl(size_t pages, uint64_t tags) {
     if (!pages || !pmm_initialized) return NULL;
 
-    void* addr;
+    void* addr = NULL;
+    /* Phase 2F — MCE poison retry. Most allocations exit on the first
+     * iteration because the bitmap is empty (no MCE event since boot).
+     * After a real MCE, we loop up to PMM_MCE_RETRY_MAX trying to find a
+     * clean chunk, freeing each poisoned chunk back to the buddy so it
+     * isn't permanently leaked. */
+    uint32_t retries_left = PMM_MCE_RETRY_MAX;
 
-    if (tags == 0) {
-        addr = buddy_alloc(&pmm_buddy, pages);
-    } else if (tags == PHYS_TAG_DMA32) {
-        addr = buddy_alloc_range(&pmm_buddy, pages,
-                                 0,
-                                 (uintptr_t)CONFIG_PHYS_ZONE_DMA32_END);
-    } else if (tags == PHYS_TAG_USER) {
-        addr = buddy_alloc_range(&pmm_buddy, pages,
-                                 (uintptr_t)CONFIG_PHYS_ZONE_DMA32_END,
-                                 (uintptr_t)CONFIG_PHYS_ZONE_USER_END);
-    } else if (tags == PHYS_TAG_HIGH) {
-        addr = buddy_alloc_range(&pmm_buddy, pages,
-                                 (uintptr_t)CONFIG_PHYS_ZONE_USER_END,
-                                 (uintptr_t)pmm_mem_end);
-    } else {
-        // Dynamic / semantic tags (SHARED, KERNEL, MMIO, user-defined):
-        // PhysAllocTagged scans PMTAG band index to find a matching span,
-        // then calls buddy_alloc_range internally.
-        // MAXPHYADDR check is inside PhysAllocTagged → return directly.
-        return PhysAllocTagged(pages, tags);
+    for (;;) {
+        if (tags == 0) {
+            addr = buddy_alloc(&pmm_buddy, pages);
+        } else if (tags == PHYS_TAG_DMA32) {
+            addr = buddy_alloc_range(&pmm_buddy, pages,
+                                     0,
+                                     (uintptr_t)CONFIG_PHYS_ZONE_DMA32_END);
+        } else if (tags == PHYS_TAG_USER) {
+            addr = buddy_alloc_range(&pmm_buddy, pages,
+                                     (uintptr_t)CONFIG_PHYS_ZONE_DMA32_END,
+                                     (uintptr_t)CONFIG_PHYS_ZONE_USER_END);
+        } else if (tags == PHYS_TAG_HIGH) {
+            addr = buddy_alloc_range(&pmm_buddy, pages,
+                                     (uintptr_t)CONFIG_PHYS_ZONE_USER_END,
+                                     (uintptr_t)pmm_mem_end);
+        } else {
+            /* Unknown numeric tag — semantic tagging is now MemTag's job
+             * (use pmm_alloc + MemTagApplyByPhys, or pmm_alloc_tagged). */
+            return NULL;
+        }
+
+        if (!addr) break;
+        if (!pmm_is_range_poisoned((uintptr_t)addr, pages)) break;
+
+        /* Returned chunk overlaps a poisoned page. We DO NOT buddy_free
+         * it — the buddy is LIFO so returning it would just hand the
+         * same poisoned chunk back on the next iteration, exhausting
+         * the retry budget without progress. Instead, *leak* the chunk
+         * (mark every page as poisoned so pmm_free can't re-introduce
+         * it later) and retry. Production semantics: a poisoned page
+         * is permanently bad; the retry cost is bounded; the leak is
+         * the correct outcome of a hardware-detected error. */
+        for (size_t pi = 0; pi < pages; pi++) {
+            pmm_set_poisoned((uintptr_t)addr + pi * PMM_PAGE_SIZE);
+        }
+        addr = NULL;
+        if (retries_left-- == 0) {
+            debug_printf("[PMM] MCE retry budget exhausted (pages=%zu tags=0x%lx)\n",
+                         pages, (unsigned long)tags);
+            break;
+        }
     }
 
     if (!addr) {
@@ -456,8 +578,23 @@ void pmm_free(void* addr, size_t pages) {
         panic("PMM: Invalid free address %p", addr);
     }
 
+    /* Phase 2F — if any page in the chunk is poisoned, leak the whole
+     * chunk rather than return it to the buddy. A poisoned page is
+     * permanently bad; re-inserting it would let a future pmm_alloc
+     * pick it up (and the alloc-side retry would then leak it anyway).
+     * Leaking conservatively here avoids the alloc-side churn and keeps
+     * the buddy free-list clean of known-bad memory. The neighbouring
+     * clean pages in the chunk are also leaked — they're already part
+     * of a buddy unit, splitting at free time would require a buddy
+     * API extension. The expected loss is negligible (1 MCE → ≤
+     * PMM_MCE_RETRY_MAX pages leaked over the system lifetime). */
+    if (pmm_is_range_poisoned(base, pages)) {
+        MemTagPmmFreed(base, pages);
+        return;
+    }
+
     buddy_free(&pmm_buddy, addr, pages);
-    MemTagRemoveRegion(base);
+    MemTagPmmFreed(base, pages);
 }
 
 size_t pmm_total_pages(void) {
@@ -567,11 +704,10 @@ void pmm_activate_pull_map(void) {
                  (pmm_buddy.free_count * PMM_PAGE_SIZE) / (1024 * 1024),
                  pmm_buddy.free_count);
 
-    if (g_pmtag.initialized) {
-        for (size_t i = 0; i < pmm_deferred_count; i++) {
-            PhysTagSet(pmm_deferred[i].start, pmm_deferred[i].end, PHYS_TAG_HIGH);
-        }
-    }
+    /* Deferred HIGH ranges (>4 GB carved post Pull Map activation) are
+     * already covered by MemTag's boot-seeded zone:high region. No
+     * additional per-range tagging needed — the zone descriptor covers
+     * the entire above-4GB span. */
 }
 
 BuddyZone* pmm_get_buddy_zone(void) {
