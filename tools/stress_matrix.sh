@@ -258,23 +258,29 @@ done
 echo "Building kernel + userspace... (mode=$MODE debug=$DEBUG_FLAG)"
 make DEBUG=$DEBUG_FLAG >/dev/null 2>&1 || { echo "BUILD FAILED"; exit 2; }
 
+#
+# STRICT=on is the DEFAULT for every config: production-grade BoxOS must
+# work on real-HW with -cpu max (PKU, PKS, SMAP, SMEP, UMIP, 1 GB pages,
+# WAITPKG, RDRAND/RDSEED, ...). Passing under qemu64 default is proof of
+# nothing — qemu64 is a 2003-era K8 with none of those features. Per
+# user directive 2026-06-07: "со STRICT запускать лучше чем без него.
+# Всегда". Use STRICT=off only to investigate a regression that is
+# clearly orthogonal to CPU features.
+#
 if [ "$MODE" = "fast" ]; then
     # 4 representative configs covering both firmwares + uniprocessor +
-    # small SMP. Skips 16c (slowest) and STRICT (alloc-pattern variant
-    # already exercised by 4c) — full matrix covers those for releases.
-    run_config "BIOS 1c"           "CORES=1  MEM=2G"
-    run_config "BIOS 4c"           "CORES=4  MEM=4G"
-    run_config "UEFI 1c"           "UEFI=on  CORES=1  MEM=2G"
-    run_config "UEFI 4c"           "UEFI=on  CORES=4  MEM=4G"
+    # small SMP. Skips 16c (slowest) — full matrix covers it.
+    run_config "BIOS STRICT 1c"    "STRICT=on CORES=1  MEM=2G"
+    run_config "BIOS STRICT 4c"    "STRICT=on CORES=4  MEM=4G"
+    run_config "UEFI STRICT 1c"    "UEFI=on STRICT=on CORES=1  MEM=2G"
+    run_config "UEFI STRICT 4c"    "UEFI=on STRICT=on CORES=4  MEM=4G"
 else
-    run_config "BIOS 1c"           "CORES=1  MEM=2G"
-    run_config "BIOS 4c"           "CORES=4  MEM=4G"
-    run_config "BIOS 16c"          "CORES=16 MEM=8G"
-    run_config "UEFI 1c"           "UEFI=on  CORES=1  MEM=2G"
-    run_config "UEFI 4c"           "UEFI=on  CORES=4  MEM=4G"
-    run_config "UEFI 16c"          "UEFI=on  CORES=16 MEM=8G"
-    run_config "UEFI STRICT 4c"    "UEFI=on  STRICT=on CORES=4  MEM=4G"
-    run_config "UEFI STRICT 16c"   "UEFI=on  STRICT=on CORES=16 MEM=8G"
+    run_config "BIOS STRICT 1c"    "STRICT=on CORES=1  MEM=2G"
+    run_config "BIOS STRICT 4c"    "STRICT=on CORES=4  MEM=4G"
+    run_config "BIOS STRICT 16c"   "STRICT=on CORES=16 MEM=8G"
+    run_config "UEFI STRICT 1c"    "UEFI=on STRICT=on CORES=1  MEM=2G"
+    run_config "UEFI STRICT 4c"    "UEFI=on STRICT=on CORES=4  MEM=4G"
+    run_config "UEFI STRICT 16c"   "UEFI=on STRICT=on CORES=16 MEM=8G"
 fi
 
 echo "================================================================"

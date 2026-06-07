@@ -672,7 +672,7 @@ else
 				-device ahci$(comma)id=ahci -device ide-hd$(comma)drive=disk0$(comma)bus=ahci.0, \
 				-drive format=raw$(comma)file=$<$(comma)index=0$(comma)media=disk)) \
 		$(if $(filter on,$(STRICT)), \
-		    -cpu max$(comma)+invtsc$(comma)+rdrand$(comma)+rdseed \
+		    -cpu max$(comma)+invtsc$(comma)+rdrand$(comma)+rdseed$(comma)-la57 \
 		    -overcommit cpu-pm=on \
 		    -d guest_errors$(comma)unimp$(comma)cpu_reset) \
 		-m $(MEM) \
@@ -714,8 +714,13 @@ run-bg: $(IMAGE)
 			-drive format=raw$(comma)file=$<$(comma)if=ide$(comma)index=1, \
 			$(if $(filter on,$(AHCI)), \
 				-drive id=disk0$(comma)file=$<$(comma)format=raw$(comma)if=none \
-				-device ahci$(comma)id=ahci -device ide-hd$(comma)drive=disk0$(comma)bus=ahci.0, \
+				-device ahci$(comma)id=ahci \
+				-device ide-hd$(comma)drive=disk0$(comma)bus=ahci.0$(comma)bootindex=0, \
 				-drive format=raw$(comma)file=$<$(comma)index=0$(comma)media=disk)) \
+		$(if $(filter on,$(STRICT)), \
+		    -cpu max$(comma)+invtsc$(comma)+rdrand$(comma)+rdseed \
+		    -overcommit cpu-pm=on \
+		    -d guest_errors$(comma)unimp$(comma)cpu_reset) \
 		-m $(MEM) \
 		-monitor unix:$(BUILDDIR)/qemu.mon$(comma)server$(comma)nowait \
 		-serial file:$(BUILDDIR)/serial.log \
