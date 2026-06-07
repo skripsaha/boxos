@@ -24,7 +24,7 @@ AR  = x86_64-elf-ar
 #                       and removes a whole class of subtle UB. Hunted
 #                       on 2026-04-29 (random page-fault to .text).
 CFLAGS = -nostdlib -fno-builtin -ffreestanding -mno-red-zone \
-         -fno-stack-protector -fno-ipa-ra \
+         -fno-stack-protector -fno-ipa-ra -fcf-protection=full \
          -Iinclude -I../../include -Wall -Wextra -O2 -Wno-unused-parameter
 
 SRCS = src/core/notify.c \

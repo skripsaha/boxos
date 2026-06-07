@@ -1198,6 +1198,46 @@ uint64_t *process_active_memtags(process_t *proc)
     return proc ? proc->active_memtags : 0;
 }
 
+/* ─── Phase 2K+ CET SSP accessors ────────────────────────────────── */
+
+/* Per-process user SSP region anchor. The SSP region sits just below
+ * VMM_USER_STACK_TOP, occupies 16 KiB (4 pages), and is followed
+ * (downward) by the data stack with a gap large enough that a stack
+ * overflow can't silently corrupt the SSP. Same per process —
+ * different vmm_context, no cross-process aliasing. */
+#define PROCESS_USER_SSP_REGION_SIZE  (4u * 4096u)
+#define PROCESS_USER_SSP_REGION_TOP   VMM_USER_STACK_TOP
+#define PROCESS_USER_SSP_REGION_BASE  (PROCESS_USER_SSP_REGION_TOP - PROCESS_USER_SSP_REGION_SIZE)
+
+uintptr_t process_user_ssp_va_for(process_t *proc)
+{
+    (void)proc;
+    return PROCESS_USER_SSP_REGION_BASE;
+}
+
+uintptr_t process_get_user_ssp_phys(process_t *proc)
+{
+    return proc ? proc->user_ssp_phys : 0;
+}
+
+uintptr_t process_get_user_ssp_va(process_t *proc)
+{
+    return proc ? proc->user_ssp_va : 0;
+}
+
+uint32_t process_get_user_ssp_size(process_t *proc)
+{
+    return proc ? proc->user_ssp_size : 0;
+}
+
+void process_set_user_ssp(process_t *proc, uintptr_t phys, uintptr_t va, uint32_t size)
+{
+    if (!proc) return;
+    proc->user_ssp_phys = phys;
+    proc->user_ssp_va   = va;
+    proc->user_ssp_size = size;
+}
+
 /* MemTag Phase 2C accessor — exposes proc->cabin (typed as opaque
  * void*) so memtag.c can locate the vmm_context_t* for PTE manipulation
  * without pulling process.h. NULL-safe. Caller casts to vmm_context_t*. */

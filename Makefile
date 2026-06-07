@@ -52,7 +52,8 @@ ASM_INCLUDE    = -I$(SRCDIR)/kernel/arch/x86-64/gdt/
 ASMFLAGS       =  -g -f bin
 ASMFLAGS_ELF   = -g -f elf64 $(ASM_INCLUDE)
 CFLAGS         = -Os -m64 -ffreestanding -nostdlib -mno-red-zone -mno-sse -mno-mmx -mno-avx \
-                 -mcmodel=kernel -fno-PIC -fno-stack-protector -Wall -Wextra -fno-omit-frame-pointer
+                 -mcmodel=kernel -fno-PIC -fno-stack-protector -Wall -Wextra -fno-omit-frame-pointer \
+                 -fcf-protection=full
 # Kernel directories first to ensure correct header resolution
 INCLUDE_DIRS   := src $(shell find src/kernel -type d) $(shell find src/lib -type d) $(shell find src/boot -type d) $(shell find src/include -type d) $(shell find src/userspace -type d)
 CFLAGS         += $(addprefix -I,$(INCLUDE_DIRS))

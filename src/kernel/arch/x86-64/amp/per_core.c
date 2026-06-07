@@ -443,6 +443,14 @@ void per_core_init_ap(uint8_t core_index, uint64_t stack_top) {
      * CR4.CET state + IA32_S_CET / IA32_U_CET. */
     vmm_cet_ap_probe();
 
+    /* Phase 2K+ — CET lifecycle AP enable. Programs CR4.CET +
+     * IA32_S_CET / IA32_U_CET on this AP if BSP brought CET up.
+     * Idempotent + safe to call when CET is dormant (no-op). */
+    {
+        extern void cet_lifecycle_init_ap(void);
+        cet_lifecycle_init_ap();
+    }
+
     /* Enable CR4.PCIDE on this AP if the BSP turned PCID on. Intel SDM
      * Vol 3A §4.10.4.1: CR4.PCIDE is per-logical-processor. Without
      * this, an AP running with PCIDE=0 will #GP the moment the scheduler

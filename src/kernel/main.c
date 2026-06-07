@@ -495,6 +495,19 @@ void kernel_main(void)
         apei_ghes_runtime_init();
         extern void ApeiGhesTest(void);
         ApeiGhesTest();
+
+        /* Phase 2K+ — CET shadow-stack + IBT lifecycle enable.
+         * Programs CR4.CET=1, IA32_S_CET/IA32_U_CET MSRs, and
+         * registers XSAVE components 11/12 so per-process SSP is
+         * saved + restored on context switch. Per-process SSP
+         * allocation is wired into process_create from inside this
+         * call's after-effects (cet_process_create gates on
+         * g_cpu_caps.has_shstk + CR4.CET=1). Safe to call on CPUs
+         * without CET (becomes a no-op + returns ERR_NOT_SUPPORTED). */
+        extern int cet_lifecycle_init_bsp(void);
+        (void)cet_lifecycle_init_bsp();
+        extern void CetLifecycleTest(void);
+        CetLifecycleTest();
     }
 
     /* TouchInit has now run inside guide_init — replay every EFI boot-
