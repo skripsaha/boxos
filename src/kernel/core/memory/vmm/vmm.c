@@ -492,6 +492,14 @@ void vmm_tme_ap_probe(void) { vmm_tme_probe_inner("AP"); }
 
 /* ─── Phase 2K — CET probe ─────────────────────────────────────────── */
 
+/* Pre-resolved Touch tag for #CP (vector 21) handler. Resolved in
+ * vmm_cet_probe (BSP, outside IRQ context) so idt.c's #CP handler
+ * does NOT have to call TouchTagIntern lazily (which takes registry
+ * locks — touch.h:230 forbids from IRQ context). Exposed via getter
+ * so idt.c stays IRQ-safe. */
+static TouchTag g_vmm_tag_cet_cp_fault = TOUCH_TAG_INVALID;
+uint16_t vmm_get_cet_cp_tag(void) { return (uint16_t)g_vmm_tag_cet_cp_fault; }
+
 static void vmm_cet_probe_inner(const char *who) {
     if (!g_cpu_caps.has_shstk && !g_cpu_caps.has_ibt) {
         debug_printf("[VMM/%s] CET not supported (no SHSTK/IBT) — Phase 2K dormant\n", who);
@@ -525,7 +533,16 @@ static void vmm_cet_probe_inner(const char *who) {
                  (unsigned long)u_cet);
 }
 
-void vmm_cet_probe(void)    { vmm_cet_probe_inner("BSP"); }
+void vmm_cet_probe(void) {
+    vmm_cet_probe_inner("BSP");
+    /* Pre-resolve #CP Touch tag for IRQ-safe publish from idt.c
+     * vector-21 handler. Done here (BSP, after MemTagInit so the
+     * cet:* reserved tags are interned) rather than at lazy first
+     * #CP fire — registry locks make TouchTagIntern non-IRQ-safe. */
+    g_vmm_tag_cet_cp_fault = TouchTagIntern("cet:fault:cp");
+    debug_printf("[VMM] CET Touch handle cached: cet:fault:cp=0x%x\n",
+                 (unsigned)g_vmm_tag_cet_cp_fault);
+}
 void vmm_cet_ap_probe(void) { vmm_cet_probe_inner("AP"); }
 
 typedef struct vmalloc_entry
