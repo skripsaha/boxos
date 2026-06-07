@@ -2724,7 +2724,10 @@ void vmm_init(void)
     debug_printf("[VMM] Higher-half mapped %zu large pages (%zu MB) at PML4[511]\n",
                  large_pages_mapped, large_pages_mapped * 2);
 
-    // Pull Map: map all physical RAM at PULL_MAP_BASE using 1GB or 2MB pages
+    // Pull Map: map all physical RAM at PULL_MAP_BASE using 1 GB or 2 MB
+    // pages. 1 GB pages collapse a 1 GiB span to a single PDPT leaf (no
+    // per-2 MiB PD walk, fewer TLB entries) — used whenever the CPU
+    // advertises PDPE1GB (CPUID.80000001H:EDX[26]).
     bool use_1gb_pages = g_cpu_caps.has_1gb_pages;
 
     uintptr_t pull_pdpt_phys = vmm_alloc_page_table();

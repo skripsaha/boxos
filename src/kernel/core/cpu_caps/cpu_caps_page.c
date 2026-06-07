@@ -25,6 +25,16 @@ void cpu_caps_page_init(void) {
     caps_page->has_tme = g_cpu_caps.has_tme;
     caps_page->tsc_freq_khz = 0;  // Will be filled after TSC calibration
 
+    kprintf("[CPU_CAPS] page published: waitpkg=%d invtsc=%d pku=%d pks=%d "
+            "lam=%d cet=%d tme=%d\n",
+            (int)caps_page->has_waitpkg,
+            (int)caps_page->has_invariant_tsc,
+            (int)caps_page->has_pku,
+            (int)caps_page->has_pks,
+            (int)caps_page->has_lam,
+            (int)caps_page->has_cet,
+            (int)caps_page->has_tme);
+
     /* Register as shared so vmm_destroy_context skips the pmm_free —
      * this page lives for the whole kernel session. */
     vmm_register_shared_phys(g_cpu_caps_page_phys);
