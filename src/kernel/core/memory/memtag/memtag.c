@@ -1460,7 +1460,10 @@ uint32_t MemRegionFromPte(uint64_t pte_value, uintptr_t phys) {
  *
  * Idempotent — safe to call from BSP after MemTagInit and from every
  * AP after cpu_intersect_features_ap (per_core_init_ap call site). */
-bool MemTagVerifyPteMetadataBits(void) {
+bool MemTagVerifyPteMetadataBits(void) { return vmm_verify_pte_metadata_bits_52_58(); }
+
+#if 0  /* dead — original impl moved to vmm.c (clean-slate audit) */
+bool MemTagVerifyPteMetadataBits_OLD(void) {
     extern uint8_t vmm_maxphyaddr;
 
     /* Bits 52-58 are "Ignored" only when MAXPHYADDR ≤ 52. On any future
@@ -1489,6 +1492,7 @@ bool MemTagVerifyPteMetadataBits(void) {
                  (int)cr4_pke, (int)cr4_pks, (int)cr4_cet);
     return true;
 }
+#endif /* dead — moved to vmm.c */
 
 /* Phase 2E originally implemented PAT MSR consistency probe + MTRR
  * audit here. The audit pass after Phase 2K moved them to vmm.c

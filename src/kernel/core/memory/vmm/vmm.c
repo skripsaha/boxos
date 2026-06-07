@@ -337,6 +337,31 @@ void vmm_dump_mtrr_layout(void) {
     }
 }
 
+/* ─── PTE bits 52-58 metadata-bit availability probe ──────────────── */
+
+bool vmm_verify_pte_metadata_bits_52_58(void) {
+    if (vmm_maxphyaddr > 52) {
+        debug_printf("[VMM] PTE-metadata-52-58 ABORT: MAXPHYADDR=%u > 52 — "
+                     "bits 52-58 are phys, NOT ignored\n",
+                     (unsigned)vmm_maxphyaddr);
+        return false;
+    }
+
+    uint64_t cr4;
+    __asm__ volatile("mov %%cr4, %0" : "=r"(cr4));
+    bool cr4_pke = ((cr4 >> 22) & 1u) != 0;
+    bool cr4_pks = ((cr4 >> 24) & 1u) != 0;
+    bool cr4_cet = ((cr4 >> 23) & 1u) != 0;
+
+    /* PKU (bits 62:59) / CET (bit 60) live OUTSIDE bits 52-58. Logged
+     * for telemetry — never causes ABORT on current silicon. */
+    debug_printf("[VMM] PTE-metadata-52-58 probe: MAXPHYADDR=%u "
+                 "CR4.PKE=%d CR4.PKS=%d CR4.CET=%d → bits 52-58 SAFE\n",
+                 (unsigned)vmm_maxphyaddr,
+                 (int)cr4_pke, (int)cr4_pks, (int)cr4_cet);
+    return true;
+}
+
 /* ─── Phase 2H — PKU / PKS bring-up ───────────────────────────────── */
 
 #define VMM_CR4_PKE_BIT   (1ULL << 22)   /* CR4.PKE — Intel SDM Vol 3A §2.5 */
