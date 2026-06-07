@@ -266,6 +266,21 @@ uint64_t     vmm_get_pat_msr_value(void);
 bool         vmm_verify_pat_msr(void);
 void         vmm_dump_mtrr_layout(void);
 
+/* PTE bits 52-58 metadata-bit availability probe.
+ *
+ * Generic CPU probe — NOT MemTag-specific (it happens to be MemTag's
+ * Phase 2D consumer of those bits, but the check would be the same for
+ * any future subsystem that wants to use bits 52-58). Verifies
+ *   MAXPHYADDR ≤ 52    so bits 52-58 aren't real phys-address bits
+ * and logs CR4.PKE / CR4.PKS / CR4.CET state for telemetry.
+ * Returns false on ABORT condition (MAXPHYADDR > 52).
+ *
+ * Originally added in memtag.c as MemTagVerifyPteMetadataBits; moved
+ * here in the second clean-slate audit because it's a pure CPU-state
+ * probe with no MemTag-specific state. Old name remains as a thin
+ * wrapper for source compatibility. */
+bool         vmm_verify_pte_metadata_bits_52_58(void);
+
 /* Phase 2H — Protection Keys (Intel SDM Vol 3A §4.6.2 / §4.6.3).
  * Bits 62:59 of every leaf PTE form a 4-bit PKEY. The same field is
  * checked against IA32_PKRU for user pages (U=1) and against IA32_PKRS
