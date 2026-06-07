@@ -173,6 +173,15 @@ static void SeedReservedTags(void) {
     MarkInternReserved("mce:migration:completed");
     MarkInternReserved("mce:migration:failed");
     MarkInternReserved("mce:migration:unmapped");
+    /* APEI/GHES runtime — firmware-side error delivery. Memory section
+     * events route through the same mce_migrate pipeline as MSR-bank
+     * #MC events; other sections (Processor / PCIe / Generic) publish
+     * their own tags so a userspace logger can subscribe selectively. */
+    MarkInternReserved("apei:ghes:ready");
+    MarkInternReserved("apei:memory:error");
+    MarkInternReserved("apei:processor:error");
+    MarkInternReserved("apei:pcie:error");
+    MarkInternReserved("apei:generic:error");
     /* Phase 2G — IOMMU lifecycle namespace. Auto-applied by the IOMMU
      * wrapper (iommu_map / iommu_device_attach) so subscribers can use
      * the bitmap inverted index to enumerate every DMA buffer routed

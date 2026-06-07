@@ -483,6 +483,18 @@ void kernel_main(void)
          * boxlib box/pku.h. */
         extern void PkuStampTest(void);
         PkuStampTest();
+
+        /* APEI/GHES runtime path — bridges firmware-delivered hardware
+         * errors (Memory ECC via SMI → GHES, PCIe AER via GHES, etc.)
+         * into the same mce_migrate + Touch pipeline that handles
+         * architectural #MC events. Per-source registration ran during
+         * acpi_parse_apei via the decode_ghes hook; this call only
+         * resolves Touch tags + arms the periodic poll. Safe to skip
+         * (becomes a no-op) when no GHES sources were discovered. */
+        extern void apei_ghes_runtime_init(void);
+        apei_ghes_runtime_init();
+        extern void ApeiGhesTest(void);
+        ApeiGhesTest();
     }
 
     /* TouchInit has now run inside guide_init — replay every EFI boot-
