@@ -476,6 +476,13 @@ void kernel_main(void)
          * this validates correctness without real silicon. */
         extern void McMigrationTest(void);
         McMigrationTest();
+        /* Phase 2H+ — tag-driven PKU PTE stamping. Verifies
+         * MemTagApply(rid, "pku:N") auto-stamps PTE bits 62:59 inside
+         * MemRegionAttachCabin + MemTagApplyPkey sweep on tag change.
+         * Userspace WRPKRU itself is unprivileged and tested via
+         * boxlib box/pku.h. */
+        extern void PkuStampTest(void);
+        PkuStampTest();
     }
 
     /* TouchInit has now run inside guide_init — replay every EFI boot-

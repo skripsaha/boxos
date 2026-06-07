@@ -312,6 +312,55 @@ uint32_t      MemRegionFromPte(uint64_t pte_value, uintptr_t phys);
 bool          MemTagVerifyPteMetadataBits(void);
 
 /* ═══════════════════════════════════════════════════════════════════
+ *  Phase 2H+ — Tag-driven PKU PTE stamping
+ *
+ *  Phase 2H wired CR4.PKE, XCR0.PKRU, XSAVE-driven per-process PKRU.
+ *  Phase 2H+ closes the loop: a `pku:N` tag on a region causes the
+ *  PTE.PKEY field (bits 62:59) to be stamped automatically inside
+ *  MemRegionAttachCabin, mirroring Phase 2D's StampPteRegion for the
+ *  region_id field (bits 52-58). Userspace WRPKRU then gates access
+ *  per-key; bits 62:59 select which PKRU pair applies to each leaf.
+ *
+ *  Policy decisions (set by AskUserQuestion 2026-06-07):
+ *    Q1 — tag-driven via MemTagApply(rid, "pku:N"); no explicit
+ *         SetPkey op. MemTagApplyPkey is a convenience wrapper.
+ *    Q2 — Sweep all attaches + cross-core TLB shootdown when a
+ *         `pku:N` tag is added or removed on a region with live
+ *         attaches (Phase 2C-style enforcement). MemTagSweepPkey.
+ *    Q3 — Refuse stamp when proposed PTE would carry both a non-zero
+ *         PKEY field AND the CET supv-SS bit (bit 60). Detected via
+ *         existing vmm_pte_pkey_cet_conflict().
+ *
+ *  Region carries AT MOST ONE pku:N tag — adding a second one is
+ *  treated as a replace (old cleared automatically by MemTagApplyPkey
+ *  before the new is set). 4 KiB leaves only this iteration; 2 MiB
+ *  leaves are accepted but stamping is a no-op (logged once per
+ *  attach) until a future iteration adds huge-page support.
+ * ═══════════════════════════════════════════════════════════════════ */
+
+/* Returns the region's effective PKEY (0..15) by scanning region.tag_ids
+ * for the first matching pku:N tag. Returns 0 if no pku tag present
+ * (default = "all keys allowed under PKRU=0"). Safe to call before
+ * MemTagInit (returns 0). */
+uint8_t       MemRegionEffectivePkey(uint32_t region_id);
+
+/* Convenience: clear any existing pku:N tag from the region and apply
+ * pku:<pkey>. Mirrors MemTagApply semantics. pkey must be 0..15.
+ * pkey == 0 with no existing tag is a no-op; pkey == 0 with an existing
+ * tag clears it (zero PKEY). */
+error_t       MemTagApplyPkey(uint32_t region_id, uint8_t pkey);
+
+/* Phase 2C-style enforcement: walk every attach of `region_id`, CAS
+ * PTE.PKEY bits 62:59 to `new_pkey`, shootdown per attach. Returns
+ * the number of attach records whose PTE range was successfully
+ * stamped (0 if region has no attaches or no PTE is present).
+ *
+ * Called automatically from MemTagApply / MemTagClear when the
+ * affected tag is a pku:N. Safe to call directly for tests or for
+ * out-of-band policy updates. */
+size_t        MemTagSweepPkey(uint32_t region_id, uint8_t new_pkey);
+
+/* ═══════════════════════════════════════════════════════════════════
  *  Phase 2E — PAT comprehensive + MTRR audit
  *
  *  Cache type tags (cache:wb / cache:wt / cache:uc / cache:uc- /

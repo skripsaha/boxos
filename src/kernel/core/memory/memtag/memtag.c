@@ -55,6 +55,23 @@ static MemRegionRegistry   g_region_registry;
 static MemTagBitmapIndex   g_bitmap_index;
 static bool                g_memtag_initialized = false;
 
+/* Phase 2H+ — pku:0..pku:15 tag ID cache. Populated lazily on first
+ * MemRegionEffectivePkey call (or eagerly post-SeedReservedTags via
+ * ResolvePkuTagIds). Without this cache, every attach would re-parse
+ * "pku:N" strings to look up tag IDs — overhead on a hot path. */
+#define MEMTAG_PKU_MAX_KEYS   16u
+static uint16_t            g_pku_tag_ids[MEMTAG_PKU_MAX_KEYS];
+static bool                g_pku_tag_ids_resolved = false;
+
+/* Forward decls — Phase 2H+ PKU stamping. Defined under the Phase 2H+
+ * block at the bottom of the PTE-manipulation section. MemRegionAttachCabin
+ * + MemTagApply / MemTagClear (which appear earlier in the file) reference
+ * these. */
+static int    PkuValueFromTagId(uint16_t tag_id);
+static size_t StampPtePkeyRange(vmm_context_t *ctx, uintptr_t va_base,
+                                 uint32_t pages, uint8_t pkey,
+                                 uint8_t page_class);
+
 bool MemTagIsInitialized(void) { return g_memtag_initialized; }
 
 MemTagRegistry    *MemTagGetRegistry(void)       { return &g_tag_registry; }
@@ -500,6 +517,15 @@ error_t MemTagApply(uint32_t region_id, const char *tag_str) {
     MemTagBitmapSet(&g_bitmap_index, tid, region_id);
     MemTagRegistryRefInc(&g_tag_registry, tid);
     PublishTagEvent("memtag:tag:applied", region_id, tid);
+
+    /* Phase 2H+ — if this apply added/changed a pku:N tag, sweep all
+     * attaches so live PTEs reflect the new policy immediately
+     * (Phase 2C-style enforcement). PkuValueFromTagId returns -1 for
+     * non-pku tags → no-op. Sweep is bounded; safe to call here. */
+    int pku_v = PkuValueFromTagId(tid);
+    if (pku_v >= 0) {
+        (void)MemTagSweepPkey(region_id, (uint8_t)pku_v);
+    }
     return OK;
 }
 
@@ -526,6 +552,15 @@ error_t MemTagClear(uint32_t region_id, const char *tag_str) {
         MemTagBitmapClear(&g_bitmap_index, tid, region_id);
         MemTagRegistryRefDec(&g_tag_registry, tid);
         PublishTagEvent("memtag:tag:cleared", region_id, tid);
+
+        /* Phase 2H+ — if a pku:N tag was cleared, sweep PTEs back to
+         * the new effective key (which may be 0 = no pku, or another
+         * pku tag still applied to the same region). */
+        int pku_v = PkuValueFromTagId(tid);
+        if (pku_v >= 0) {
+            uint8_t new_pkey = MemRegionEffectivePkey(region_id);
+            (void)MemTagSweepPkey(region_id, new_pkey);
+        }
     }
     return e;
 }
@@ -1090,6 +1125,15 @@ error_t MemRegionAttachCabin(uint32_t region_id, void *ctx,
          * with the same region_id. */
         StampPteRegion((vmm_context_t *)ctx, va_base, pages,
                         region_id, page_class);
+        /* Phase 2H+ — tag-driven PKU stamping. If region carries a
+         * pku:N tag, stamp PTE bits 62:59 with that key value. No-op
+         * when region has no pku tag (effective pkey = 0). Refuses
+         * gracefully if proposed PTE would conflict with CET supv-SS
+         * (bit 60) via vmm_pte_pkey_cet_conflict — attach itself still
+         * succeeds, the PTE keeps its existing PKEY field. */
+        uint8_t pkey = MemRegionEffectivePkey(region_id);
+        (void)StampPtePkeyRange((vmm_context_t *)ctx, va_base, pages,
+                                 pkey, page_class);
     }
     return e;
 }
@@ -1423,6 +1467,209 @@ size_t MemTagSweepGuard(uint16_t tag_id, bool guard_on) {
         process_ref_dec(proc);
     }
     return total;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+ *  Phase 2H+ — Tag-driven PKU PTE stamping
+ *
+ *  See memtag.h "Phase 2H+" block for the spec + policy citations.
+ *  Auto-stamp on attach + sweep on tag mutation. Refuses stamps that
+ *  would collide with CET supv-SS (bit 60) per the policy decision.
+ * ═══════════════════════════════════════════════════════════════════ */
+
+/* RELAXED telemetry — never load-bearing, used by tests + dump only. */
+static volatile uint64_t g_pku_stamp_count    = 0;
+static volatile uint64_t g_pku_conflict_count = 0;
+static volatile uint64_t g_pku_sweep_count    = 0;
+
+static void ResolvePkuTagIdsIfNeeded(void) {
+    if (g_pku_tag_ids_resolved) return;
+    /* Iterate pku:0..pku:15. The strings are reserved in SeedReservedTags
+     * so MemTagRegistryLookupStr returns a valid ID for each. */
+    static const char *const PKU_STRS[MEMTAG_PKU_MAX_KEYS] = {
+        "pku:0",  "pku:1",  "pku:2",  "pku:3",
+        "pku:4",  "pku:5",  "pku:6",  "pku:7",
+        "pku:8",  "pku:9",  "pku:10", "pku:11",
+        "pku:12", "pku:13", "pku:14", "pku:15",
+    };
+    for (uint32_t i = 0; i < MEMTAG_PKU_MAX_KEYS; i++) {
+        g_pku_tag_ids[i] = MemTagRegistryLookupStr(&g_tag_registry, PKU_STRS[i]);
+    }
+    __atomic_store_n(&g_pku_tag_ids_resolved, true, __ATOMIC_RELEASE);
+}
+
+/* tag_id → pkey value (0..15), or -1 if not a pku:N tag. O(16) — fits
+ * in one cache line. Used by RegionEffectivePkey + apply/clear hook. */
+static int PkuValueFromTagId(uint16_t tag_id) {
+    if (tag_id == MEMTAG_INVALID_TAG_ID) return -1;
+    ResolvePkuTagIdsIfNeeded();
+    for (uint32_t i = 0; i < MEMTAG_PKU_MAX_KEYS; i++) {
+        if (g_pku_tag_ids[i] == tag_id) return (int)i;
+    }
+    return -1;
+}
+
+/* Stamp PTE.PKEY bits 62:59 atomically. The CET conflict policy
+ * (vmm_pte_pkey_cet_conflict) is meaningful only when CR4.CET=1, where
+ * bit 60 reinterprets as the supervisor shadow-stack indicator. With
+ * CR4.CET=0 (BoxOS today — Phase 2K is observe-only), bit 60 IS part
+ * of the PKEY field, so stamping pkey ≥ 4 legitimately sets it. Read
+ * CR4.CET once per call and gate the conflict refusal accordingly.
+ *
+ * Returns true if any bit was actually toggled (false on idempotent
+ * stamp matching current value, on absent PTE, or on CET refusal). */
+static bool StampPtePkeyLeaf(vmm_context_t *ctx, uintptr_t va,
+                              uint8_t pkey, bool is_2m) {
+    uint8_t level = 0;
+    pte_t *pte = vmm_get_leaf_pte(ctx, va, &level);
+    if (!pte) return false;
+    if (is_2m  && level != 2) return false;
+    if (!is_2m && level != 1) return false;
+
+    /* Read CR4.CET once. CR4 bit 23 = CET enable. */
+    uint64_t cr4;
+    __asm__ volatile("mov %%cr4, %0" : "=r"(cr4));
+    bool cet_active = (cr4 & (1ULL << 23)) != 0;
+
+    uint64_t new_pkey_field = vmm_pte_encode_pkey(pkey);
+    pte_t old = __atomic_load_n(pte, __ATOMIC_ACQUIRE);
+    for (;;) {
+        pte_t new_val = (old & ~VMM_PTE_PKEY_MASK) | new_pkey_field;
+        /* Conflict only matters under CR4.CET=1: bit 60 then encodes
+         * the supv-SS indicator, NOT a PKEY bit. Without CET, the
+         * policy helper would falsely refuse pkey ∈ {4..7,12..15}. */
+        if (cet_active && vmm_pte_pkey_cet_conflict(new_val)) {
+            __atomic_fetch_add(&g_pku_conflict_count, 1, __ATOMIC_RELAXED);
+            return false;
+        }
+        if (new_val == old) return true;     /* already stamped */
+        if (__atomic_compare_exchange_n(pte, &old, new_val, false,
+                                         __ATOMIC_ACQ_REL,
+                                         __ATOMIC_ACQUIRE)) {
+            __atomic_fetch_add(&g_pku_stamp_count, 1, __ATOMIC_RELAXED);
+            return true;
+        }
+        /* old refreshed; loop. */
+    }
+}
+
+/* Walk every leaf covering [va_base, va_base + pages*4K) and stamp
+ * PKEY. Returns number of PTEs touched (toggle count, not idempotent
+ * matches). 2 MiB attaches: walks in 2 MiB steps; each PD-leaf stamped
+ * once. Used by AttachCabin auto-stamp + MemTagSweepPkey. */
+static size_t StampPtePkeyRange(vmm_context_t *ctx, uintptr_t va_base,
+                                 uint32_t pages, uint8_t pkey,
+                                 uint8_t page_class) {
+    if (!ctx || !pages) return 0;
+    bool is_2m = (page_class == MEMTAG_ATTACH_CLASS_2M);
+    uint32_t step = is_2m ? VMM_LARGE_PAGE_2M_PAGES : 1u;
+    size_t toggled = 0;
+    for (uint32_t p = 0; p < pages; p += step) {
+        uintptr_t va = va_base + (uint64_t)p * PMM_PAGE_SIZE;
+        if (StampPtePkeyLeaf(ctx, va, pkey, is_2m)) toggled++;
+    }
+    return toggled;
+}
+
+uint8_t MemRegionEffectivePkey(uint32_t region_id) {
+    if (!g_memtag_initialized) return 0;
+    uint16_t buf[MEMTAG_ENFORCE_ATTACHES_PER_REGION];   /* reuse budget */
+    size_t n = MemRegionRegistryListTags(&g_region_registry, region_id,
+                                          buf, sizeof(buf)/sizeof(buf[0]));
+    for (size_t i = 0; i < n; i++) {
+        int v = PkuValueFromTagId(buf[i]);
+        if (v >= 0) return (uint8_t)v;
+    }
+    return 0;
+}
+
+size_t MemTagSweepPkey(uint32_t region_id, uint8_t new_pkey) {
+    if (!g_memtag_initialized) return 0;
+    if (region_id == MEMTAG_INVALID_REGION_ID) return 0;
+    if (new_pkey > VMM_PTE_PKEY_MAX) return 0;
+
+    MemRegionAttach snap[MEMTAG_ENFORCE_ATTACHES_PER_REGION];
+    size_t n = MemRegionRegistrySnapshotAttachs(&g_region_registry,
+                                                  region_id, snap,
+                                                  MEMTAG_ENFORCE_ATTACHES_PER_REGION);
+    if (n == 0) return 0;
+
+    __atomic_fetch_add(&g_pku_sweep_count, 1, __ATOMIC_RELAXED);
+
+    size_t total = 0;
+    for (size_t i = 0; i < n; i++) {
+        MemRegionAttach *att = &snap[i];
+        if (!att->ctx) continue;
+        size_t s = StampPtePkeyRange((vmm_context_t *)att->ctx,
+                                      att->va_base, att->pages,
+                                      new_pkey, att->page_class);
+        if (s) {
+            vmm_shootdown_pages((vmm_context_t *)att->ctx,
+                                 att->va_base, (size_t)att->pages);
+            total += s;
+        }
+    }
+    return total;
+}
+
+error_t MemTagApplyPkey(uint32_t region_id, uint8_t pkey) {
+    if (!g_memtag_initialized) return ERR_NOT_INITIALIZED;
+    if (region_id == MEMTAG_INVALID_REGION_ID) return ERR_INVALID_ARGUMENT;
+    if (pkey >= MEMTAG_PKU_MAX_KEYS) return ERR_INVALID_ARGUMENT;
+
+    /* Find + clear any existing pku:N tag first so the region carries
+     * at most one. Walk region's tag list, drop any pku:* we find. */
+    uint16_t buf[MEMTAG_ENFORCE_ATTACHES_PER_REGION];
+    size_t   n = MemRegionRegistryListTags(&g_region_registry, region_id,
+                                            buf, sizeof(buf)/sizeof(buf[0]));
+    for (size_t i = 0; i < n; i++) {
+        int v = PkuValueFromTagId(buf[i]);
+        if (v < 0) continue;
+        if (v == (int)pkey) {
+            /* Already has the exact tag — sweep to enforce in case PTEs
+             * drifted (idempotent), then bail. */
+            (void)MemTagSweepPkey(region_id, pkey);
+            return OK;
+        }
+        /* Different pku:N — clear the old one. The MemTagClear path
+         * won't re-call sweep because we set the suppress flag via
+         * the SetPkey policy: actual stamp happens at the end below. */
+        (void)MemRegionRegistryRemoveTag(&g_region_registry, region_id, buf[i]);
+        MemTagBitmapClear(&g_bitmap_index, buf[i], region_id);
+        MemTagRegistryRefDec(&g_tag_registry, buf[i]);
+        PublishTagEvent("memtag:tag:cleared", region_id, buf[i]);
+    }
+
+    /* pkey==0 means "no pku tag" — the clears above already removed any
+     * prior pku tag; just sweep PTEs to clear PKEY bits. */
+    if (pkey == 0) {
+        (void)MemTagSweepPkey(region_id, 0);
+        return OK;
+    }
+
+    /* Apply the new pku:N tag — uses canonical MemTagApply path so
+     * tag-registry refcount + bitmap + Touch all stay coherent. */
+    char tag_buf[8];
+    /* "pku:" + 2-digit + NUL = 7 chars max */
+    const char *digits = "0123456789";
+    size_t pos = 0;
+    tag_buf[pos++] = 'p';
+    tag_buf[pos++] = 'k';
+    tag_buf[pos++] = 'u';
+    tag_buf[pos++] = ':';
+    if (pkey >= 10) {
+        tag_buf[pos++] = digits[pkey / 10];
+        tag_buf[pos++] = digits[pkey % 10];
+    } else {
+        tag_buf[pos++] = digits[pkey];
+    }
+    tag_buf[pos] = 0;
+
+    error_t e = MemTagApply(region_id, tag_buf);
+    if (e != OK) return e;
+    /* MemTagApply will trigger MemTagSweepPkey via the apply-hook (see
+     * MemTagApply body below). Caller gets the up-to-date PTE state. */
+    return OK;
 }
 
 /* ═══════════════════════════════════════════════════════════════════

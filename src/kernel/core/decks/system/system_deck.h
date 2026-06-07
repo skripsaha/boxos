@@ -150,6 +150,14 @@ error_t BrookOpsRegister(void);
 #define SYSTEM_OP_MEMTAG_CABIN_TAGS 0xA8 /* u32 pid -> tag_str list              */
 #define SYSTEM_OP_MEMTAG_CHECK     0xA9  /* (u32 pid)(u32 region_id) -> bool     */
 
+/* Phase 2H+ — tag-driven PKU stamping. APPLY_PKEY adds pku:<N> to the
+ * region (replacing any prior pku:* tag), auto-stamping PTE bits 62:59
+ * across every attach + cross-core TLB shootdown. Userspace WRPKRU then
+ * gates per-key access. Unprivileged: callers may stamp any region they
+ * know the region_id of — security comes from cabin's grant-set on the
+ * region's other tags. */
+#define SYSTEM_OP_MEMTAG_APPLY_PKEY 0xAA /* (u32 region_id)(u8 pkey)             */
+
 error_t MemTagOpsRegister(void);
 
 #endif /* SYSTEM_DECK_H */
