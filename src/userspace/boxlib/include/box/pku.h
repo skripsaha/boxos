@@ -36,8 +36,9 @@
  * Compatibility:
  *   - PKRU=0 (default) means "all keys allow all access" — programs that
  *     don't use PKU see no behavior change.
- *   - On hardware without PKU (CPUID.07H.0:ECX[3]=0), all functions
- *     return -ERR_NOT_SUPPORTED.
+ *   - PKU support is read from the kernel-populated cpu_caps page via
+ *     cpu_has_pku() (no syscall, no inline CPUID). On hardware without
+ *     PKU the functions return -ERR_NOT_IMPLEMENTED.
  */
 
 #define PKU_MAX_KEYS  16u

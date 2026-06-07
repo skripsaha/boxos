@@ -11,7 +11,7 @@
 #include "pvclock.h"      // pvclock_init_ap()
 #include "cpu_calibrate.h"// cpu_get_tsc_freq_khz()
 #include "pit.h"          // pit_get_uptime_us() — HPET-backed wall clock
-#include "cpu_caps_page.h"// cpu_caps_page_refresh_waitpkg()
+#include "cpu_caps_page.h"// cpu_caps_page_refresh_features()
 #include "memtag.h"       // MemTagVerifyPteMetadataBits() — Phase 2D M5
 #include "mce.h"          // mce_ap_init() — Phase 2F
 
@@ -312,13 +312,15 @@ void per_core_init_ap(uint8_t core_index, uint64_t stack_top) {
      * core-static structs, no CPU features yet. */
     cpu_intersect_features_ap();
 
-    /* Re-publish has_waitpkg into the userspace caps page so a UMWAIT
-     * caller running on this AP (or any later AP) sees the post-
-     * intersect value. On homogeneous CPUs the value is unchanged; on
-     * Intel hybrid (Alder/Raptor Lake) the bit may have flipped 1→0
-     * because an E-core lacks WAITPKG, and without this refresh
-     * userspace would read stale `1` and #UD on UMWAIT here. */
-    cpu_caps_page_refresh_waitpkg();
+    /* Re-publish post-intersect feature bits into the userspace caps
+     * page so a UMWAIT or RDPKRU/WRPKRU caller running on this AP (or
+     * any later AP) sees the post-intersect value. On homogeneous CPUs
+     * the bits are unchanged; on Intel hybrid (Alder/Raptor Lake) the
+     * has_waitpkg bit may have flipped 1→0 because an E-core lacks
+     * WAITPKG, and without this refresh userspace would read stale
+     * `1` and #UD here. Same logic covers has_pku for future hybrids
+     * that disable PKU on a core class. */
+    cpu_caps_page_refresh_features();
 
     /* MemTag Phase 2D M5 — verify PTE bits 52-58 are still "Ignored" on
      * THIS AP. On hybrid CPUs an AP may report different CR4.PKE/CR4.CET
