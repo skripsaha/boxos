@@ -269,22 +269,17 @@ void exception_handler(interrupt_frame_t *frame)
         bool     cp_enclave = (frame->error_code & 0x8000u) != 0;
         kprintf("[CET] #CP fired: type=%u enclave=%d RIP=0x%lx\n",
                 (unsigned)cp_type, (int)cp_enclave, frame->rip);
-        /* Touch publish via the pre-resolved cet:fault:cp tag (resolved
-         * lazily; we keep the publish lightweight to avoid IRQ-context
-         * concerns. extern resolves at first use). */
-        extern void TouchPublishIrqPair(TouchTag, TouchTag, const void *,
-                                         uint16_t, uint32_t, uint16_t);
-        extern TouchTag TouchTagIntern(const char *);
-        static TouchTag s_cp_tag = TOUCH_TAG_INVALID;
-        if (s_cp_tag == TOUCH_TAG_INVALID) {
-            s_cp_tag = TouchTagIntern("cet:fault:cp");
-        }
+        /* Touch publish via pre-resolved tag (resolved in vmm_cet_probe
+         * at BSP boot, outside IRQ context). TouchTagIntern in this
+         * handler would take registry locks → deadlock against any
+         * thread holding the Touch lock at the moment #CP fired. */
+        TouchTag cp_tag = vmm_get_cet_cp_tag();
         struct { uint64_t rip; uint16_t cp_type; uint8_t enclave; uint8_t pad; } ev = {
             .rip = frame->rip, .cp_type = cp_type,
             .enclave = cp_enclave ? 1u : 0u, .pad = 0,
         };
-        if (s_cp_tag != TOUCH_TAG_INVALID) {
-            TouchPublishIrqPair(s_cp_tag, TOUCH_TAG_INVALID,
+        if (cp_tag != TOUCH_TAG_INVALID) {
+            TouchPublishIrqPair(cp_tag, TOUCH_TAG_INVALID,
                                 &ev, (uint16_t)sizeof(ev), 0u, 0u);
         }
         /* Fall through to generic kill — Phase 2K is observe-only. */
