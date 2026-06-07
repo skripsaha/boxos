@@ -19,7 +19,7 @@ CC      = x86_64-elf-gcc
 #                fix the boxlib Makefile already carries — must be on every
 #                userspace binary that links libbox.a.
 CFLAGS = -nostdlib -ffreestanding -fno-builtin -mno-red-zone \
-         -fno-stack-protector -fno-pic -static -fno-ipa-ra \
+         -fno-stack-protector -fno-pic -static -fno-ipa-ra -fcf-protection=full \
          -Wall -Wextra -g \
          -I../boxlib/include \
          -I../../include

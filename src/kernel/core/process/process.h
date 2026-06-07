@@ -177,6 +177,20 @@ typedef struct process_t
 
     uint8_t           touch_cleaned; // set to 1 after TouchCleanupProcess runs once
 
+    /* Phase 2K+ — CET shadow stack per-process state. Populated by
+     * cet_process_create when g_cpu_caps.has_shstk + CR4.CET=1; left
+     * zero on CPUs without SHSTK or when CET is dormant. The user SSP
+     * page is mapped into the process's vmm_context with PTE bit 61
+     * (Intel SDM Vol 3A §4.5.1 — user shadow stack). user_ssp_va is
+     * the initial SSP value (top of the SSP region minus 8) — what
+     * jump_to_userspace writes into IA32_PL3_SSP before the iretq to
+     * Ring 3. After that first transition the kernel maintains SSP
+     * via the XSAVE CET_U component (XCR0 bit 12) without touching
+     * the MSR directly. */
+    uintptr_t         user_ssp_phys;
+    uintptr_t         user_ssp_va;
+    uint32_t          user_ssp_size;
+
     struct process_t *hash_next;    // hash table collision chain
     struct process_t *next;         // global process list (forward)
     struct process_t *prev;         // global process list (backward) — O(1) unlink in process_destroy
@@ -186,6 +200,18 @@ typedef struct process_t
 } process_t;
 
 _Static_assert(sizeof(process_t) < 4096, "Process structure must fit in one page");
+
+/* Phase 2K+ — CET SSP accessors. Get returns 0 when CET is dormant or
+ * the process predates the SSP wire-up. Set is used by cet_process_create
+ * / cet_process_destroy; not for general callers. user_ssp_va_for
+ * returns the canonical user VA for the per-process SSP region (fixed
+ * offset under the user stack). */
+uintptr_t process_get_user_ssp_phys(struct process_t *proc);
+uintptr_t process_get_user_ssp_va(struct process_t *proc);
+uint32_t  process_get_user_ssp_size(struct process_t *proc);
+void      process_set_user_ssp(struct process_t *proc, uintptr_t phys,
+                                uintptr_t va, uint32_t size);
+uintptr_t process_user_ssp_va_for(struct process_t *proc);
 
 void process_init(void);
 

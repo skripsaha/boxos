@@ -182,6 +182,13 @@ static void SeedReservedTags(void) {
     MarkInternReserved("apei:processor:error");
     MarkInternReserved("apei:pcie:error");
     MarkInternReserved("apei:generic:error");
+    /* Phase 2K+ — CET lifecycle. cet:fault:cp already reserved by
+     * Phase 2K. cet:enabled / shstk:enabled / ibt:enabled fire from
+     * cet_lifecycle_init_bsp after CR4.CET + IA32_S_CET/IA32_U_CET
+     * are programmed. */
+    MarkInternReserved("cet:enabled");
+    MarkInternReserved("shstk:enabled");
+    MarkInternReserved("ibt:enabled");
     /* Phase 2G — IOMMU lifecycle namespace. Auto-applied by the IOMMU
      * wrapper (iommu_map / iommu_device_attach) so subscribers can use
      * the bitmap inverted index to enumerate every DMA buffer routed

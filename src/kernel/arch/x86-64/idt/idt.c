@@ -297,6 +297,12 @@ void exception_handler(interrupt_frame_t *frame)
             TouchPublishIrqPair(cp_tag, TOUCH_TAG_INVALID,
                                 &ev, (uint16_t)sizeof(ev), 0u, 0u);
         }
+        /* Bump the cet_lifecycle stat counter (RELAXED — never load-
+         * bearing). Visible via `hw cet status`. */
+        {
+            extern void cet_lifecycle_record_cp_fault(void);
+            cet_lifecycle_record_cp_fault();
+        }
         /* Fall through to generic kill — Phase 2K is observe-only. */
     }
 
