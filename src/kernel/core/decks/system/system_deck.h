@@ -132,31 +132,10 @@ error_t BayOpsRegister(void);
  * SystemDeckRegister alongside Bay/Touch registration. */
 error_t BrookOpsRegister(void);
 
-/* MemTag — RAM-region tagging, TagFS-shaped. Read-only surface for Phase 1
- * lets userspace observe and query but not mutate (mutation requires the
- * security-policy layer planned for Phase 2). */
-#define SYSTEM_OP_MEMTAG_QUERY     0xA0  /* required+any+excluded -> region_ids */
-#define SYSTEM_OP_MEMTAG_INFO      0xA1  /* region_id -> {base, pages, tags...} */
-#define SYSTEM_OP_MEMTAG_LOOKUP    0xA2  /* phys_addr -> region_id              */
-#define SYSTEM_OP_MEMTAG_TAGS      0xA3  /* region_id -> list of tag strings    */
-#define SYSTEM_OP_MEMTAG_STATS     0xA4  /* global MemTagStats snapshot          */
-
-/* Phase 2A — enforcement infrastructure. SET_GUARD/GRANT/REVOKE gated
- * on the caller holding "system" tag-bit (TagFS auth); CABIN_TAGS /
- * CHECK_ACCESS are unprivileged observation. */
-#define SYSTEM_OP_MEMTAG_SET_GUARD 0xA5  /* tag_str + u8 on/off                  */
-#define SYSTEM_OP_MEMTAG_GRANT     0xA6  /* (u32 pid)(tag_str) -> grant cap      */
-#define SYSTEM_OP_MEMTAG_REVOKE    0xA7  /* (u32 pid)(tag_str) -> revoke cap     */
-#define SYSTEM_OP_MEMTAG_CABIN_TAGS 0xA8 /* u32 pid -> tag_str list              */
-#define SYSTEM_OP_MEMTAG_CHECK     0xA9  /* (u32 pid)(u32 region_id) -> bool     */
-
-/* Phase 2H+ — tag-driven PKU stamping. APPLY_PKEY adds pku:<N> to the
- * region (replacing any prior pku:* tag), auto-stamping PTE bits 62:59
- * across every attach + cross-core TLB shootdown. Userspace WRPKRU then
- * gates per-key access. Unprivileged: callers may stamp any region they
- * know the region_id of — security comes from cabin's grant-set on the
- * region's other tags. */
-#define SYSTEM_OP_MEMTAG_APPLY_PKEY 0xAA /* (u32 region_id)(u8 pkey)             */
+/* MemTag — RAM-region tagging, TagFS-shaped.
+ * Opcodes (SYSTEM_OP_MEMTAG_QUERY..APPLY_PKEY, 0xA0–0xAA) live in the
+ * shared header `src/include/boxos_decks.h` so kernel + boxlib see the
+ * same numeric values via a single source of truth. */
 
 error_t MemTagOpsRegister(void);
 

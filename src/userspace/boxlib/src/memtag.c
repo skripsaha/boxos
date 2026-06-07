@@ -2,14 +2,7 @@
 #include "box/core/manifest.h"
 #include "box/string.h"
 #include "box/error.h"
-#include "boxos_decks.h"
-
-/* Opcodes mirror src/kernel/core/decks/system/system_deck.h */
-#define SYSTEM_OP_MEMTAG_QUERY   0xA0
-#define SYSTEM_OP_MEMTAG_INFO    0xA1
-#define SYSTEM_OP_MEMTAG_LOOKUP  0xA2
-#define SYSTEM_OP_MEMTAG_TAGS    0xA3
-#define SYSTEM_OP_MEMTAG_STATS   0xA4
+#include "boxos_decks.h"  /* SYSTEM_OP_MEMTAG_* opcodes — single source */
 
 #define MEMTAG_QUERY_SECTION_SEP 0x1F
 
@@ -139,11 +132,7 @@ int mem_stats(mem_stats_t *out)
 }
 
 /* ─── Phase 2A — capabilities ───────────────────────────────────────── */
-#define SYSTEM_OP_MEMTAG_SET_GUARD  0xA5
-#define SYSTEM_OP_MEMTAG_GRANT      0xA6
-#define SYSTEM_OP_MEMTAG_REVOKE     0xA7
-#define SYSTEM_OP_MEMTAG_CABIN_TAGS 0xA8
-#define SYSTEM_OP_MEMTAG_CHECK      0xA9
+/* SYSTEM_OP_MEMTAG_* (SET_GUARD..CHECK) come from boxos_decks.h above. */
 
 int mem_set_guard(const char *tag_str, int on)
 {

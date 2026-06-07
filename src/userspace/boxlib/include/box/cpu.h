@@ -5,13 +5,23 @@
 
 #define CPU_CAPS_MAGIC  0x43505543
 
+/* MUST stay byte-identical to the kernel-side cpu_caps_page_t in
+ * src/kernel/core/cpu_caps/cpu_caps_page.h. The kernel allocates the
+ * page, fills it from g_cpu_caps, and maps it read-only at
+ * CABIN_CPU_CAPS_ADDR in every cabin. Adding a field here without
+ * updating the kernel side (or vice-versa) silently mis-aligns reads. */
 typedef struct PACKED {
     uint32_t magic;
     bool has_waitpkg;
     bool has_invariant_tsc;
     uint16_t _pad0;
     uint64_t tsc_freq_khz;      // Calibrated TSC frequency in kHz
-    uint8_t _reserved[4080];
+    /* Phase 2H+ — Intel PKU support published from g_cpu_caps after AP
+     * intersect. Userspace gates RDPKRU/WRPKRU on this byte instead of
+     * running CPUID itself. */
+    bool has_pku;
+    uint8_t _pad1[7];           // align next field to 8 bytes
+    uint8_t _reserved[4072];
 } cpu_caps_page_t;
 
 STATIC_ASSERT(sizeof(cpu_caps_page_t) == 4096, "CPU caps page must be 4096 bytes");
@@ -26,6 +36,16 @@ INLINE bool cpu_has_waitpkg(void) {
     }
 
     return caps->has_waitpkg;
+}
+
+/* True iff CPUID.07H.0:ECX[3] (PKU) is supported AND has been preserved
+ * through every AP intersect (so RDPKRU/WRPKRU is safe on any cabin
+ * scheduling decision). Returns false on systems without PKU and on
+ * cabins that started before the kernel published the caps page. */
+INLINE bool cpu_has_pku(void) {
+    volatile cpu_caps_page_t* caps = CPU_CAPS;
+    if (caps->magic != CPU_CAPS_MAGIC) return false;
+    return caps->has_pku;
 }
 
 // Get calibrated TSC frequency in kHz. Returns 0 if not available.

@@ -1,49 +1,17 @@
 #include "box/pku.h"
+#include "box/cpu.h"
 #include "box/core/manifest.h"
 #include "box/string.h"
 #include "box/error.h"
-#include "boxos_decks.h"
+#include "boxos_decks.h"  /* SYSTEM_OP_MEMTAG_APPLY_PKEY — single source */
 
-/* Mirror opcode from src/kernel/core/decks/system/system_deck.h */
-#define SYSTEM_OP_MEMTAG_APPLY_PKEY  0xAA
-
-/* ─── PKU detection via CPUID.07H.0:ECX[3] ───────────────────────── */
-/*
- * Linux/glibc convention is to wrap PKU support detection through the
- * kernel; BoxOS doesn't have a userspace cpuid syscall yet, so we
- * inline the CPUID query. The instruction is unprivileged. If PKU isn't
- * supported, RDPKRU/WRPKRU would #UD — we gate to avoid that.
- */
-static int g_pku_detected = -1;   /* -1=unknown, 0=no, 1=yes */
-
-static void cpuid_raw(uint32_t leaf, uint32_t subleaf,
-                       uint32_t *out_eax, uint32_t *out_ebx,
-                       uint32_t *out_ecx, uint32_t *out_edx) {
-    uint32_t a, b, c, d;
-    __asm__ volatile("cpuid"
-                     : "=a"(a), "=b"(b), "=c"(c), "=d"(d)
-                     : "a"(leaf), "c"(subleaf));
-    if (out_eax) *out_eax = a;
-    if (out_ebx) *out_ebx = b;
-    if (out_ecx) *out_ecx = c;
-    if (out_edx) *out_edx = d;
-}
-
-static int pku_supported(void) {
-    if (g_pku_detected >= 0) return g_pku_detected;
-    uint32_t max_leaf;
-    cpuid_raw(0, 0, &max_leaf, 0, 0, 0);
-    if (max_leaf < 7) { g_pku_detected = 0; return 0; }
-    uint32_t a = 0, b = 0, c = 0, d = 0;
-    cpuid_raw(7, 0, &a, &b, &c, &d);
-    g_pku_detected = ((c >> 3) & 1u) ? 1 : 0;
-    return g_pku_detected;
-}
-
-/* ─── RDPKRU / WRPKRU ─────────────────────────────────────────────── */
+/* PKU detection comes from the vDSO-shaped cpu_caps page (mapped at
+ * CABIN_CPU_CAPS_ADDR by the kernel for every cabin). cpu_has_pku()
+ * reads a single byte — no syscall, no inline CPUID, no AP-divergence
+ * surprises (the kernel refreshes that byte after every AP intersect). */
 
 uint32_t pku_read_pkru(void) {
-    if (!pku_supported()) return 0;
+    if (!cpu_has_pku()) return 0;
     uint32_t eax;
     uint32_t edx_dummy;
     /* RDPKRU = 0F 01 EE — ECX must be 0. EDX cleared on exit. */
@@ -54,7 +22,7 @@ uint32_t pku_read_pkru(void) {
 }
 
 void pku_write_pkru(uint32_t value) {
-    if (!pku_supported()) return;
+    if (!cpu_has_pku()) return;
     /* WRPKRU = 0F 01 EF — EAX=value, ECX=0, EDX=0 (else #GP). */
     __asm__ volatile(".byte 0x0F, 0x01, 0xEF"
                      :
@@ -66,7 +34,7 @@ void pku_write_pkru(uint32_t value) {
 
 int pku_set_rights(uint8_t pkey, int ad, int wd) {
     if (pkey >= PKU_MAX_KEYS) return -ERR_INVALID_ARGS;
-    if (!pku_supported()) return -ERR_NOT_IMPLEMENTED;
+    if (!cpu_has_pku()) return -ERR_NOT_IMPLEMENTED;
     uint32_t pkru = pku_read_pkru();
     uint32_t shift = (uint32_t)pkey * 2u;
     uint32_t mask  = 0x3u << shift;
@@ -78,7 +46,7 @@ int pku_set_rights(uint8_t pkey, int ad, int wd) {
 
 int pku_get_rights(uint8_t pkey, int *out_ad, int *out_wd) {
     if (pkey >= PKU_MAX_KEYS) return -ERR_INVALID_ARGS;
-    if (!pku_supported()) return -ERR_NOT_IMPLEMENTED;
+    if (!cpu_has_pku()) return -ERR_NOT_IMPLEMENTED;
     uint32_t pkru = pku_read_pkru();
     uint32_t shift = (uint32_t)pkey * 2u;
     if (out_ad) *out_ad = (int)((pkru >> shift) & 1u);

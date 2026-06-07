@@ -18,6 +18,7 @@ void cpu_caps_page_init(void) {
     caps_page->magic = CPU_CAPS_PAGE_MAGIC;
     caps_page->has_waitpkg = g_cpu_caps.has_waitpkg;
     caps_page->has_invariant_tsc = g_cpu_caps.has_invariant_tsc;
+    caps_page->has_pku = g_cpu_caps.has_pku;
     caps_page->tsc_freq_khz = 0;  // Will be filled after TSC calibration
 
     /* Register as shared so vmm_destroy_context skips the pmm_free —
@@ -32,16 +33,17 @@ void cpu_caps_page_set_tsc_freq(uint64_t freq_khz) {
     caps_page->tsc_freq_khz = freq_khz;
 }
 
-void cpu_caps_page_refresh_waitpkg(void) {
+void cpu_caps_page_refresh_features(void) {
     if (g_cpu_caps_page_phys == 0) return;
 
     /* RELEASE-store via __atomic so any userspace consumer that
-     * ACQUIRE-loads `has_waitpkg` (boxlib cpu_has_waitpkg) sees the
-     * post-intersect value coherently. The field is a single byte and
-     * already volatile in the userspace view; this barrier is for the
-     * benefit of the kernel-side writer's compiler. */
+     * ACQUIRE-loads these single-byte fields (boxlib cpu_has_*) sees
+     * the post-intersect values coherently. Each field is independently
+     * volatile in the userspace view; this barrier is for the benefit
+     * of the kernel-side writer's compiler. */
     cpu_caps_page_t* caps_page = (cpu_caps_page_t*)vmm_phys_to_virt(g_cpu_caps_page_phys);
     __atomic_store_n(&caps_page->has_waitpkg,
-                     g_cpu_caps.has_waitpkg,
-                     __ATOMIC_RELEASE);
+                     g_cpu_caps.has_waitpkg, __ATOMIC_RELEASE);
+    __atomic_store_n(&caps_page->has_pku,
+                     g_cpu_caps.has_pku,     __ATOMIC_RELEASE);
 }

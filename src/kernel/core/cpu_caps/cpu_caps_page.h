@@ -14,7 +14,14 @@ typedef struct __packed {
     bool has_invariant_tsc;     // Invariant TSC support
     uint16_t _pad0;             // Alignment padding
     uint64_t tsc_freq_khz;      // Calibrated TSC frequency in kHz (set after boot calibration)
-    uint8_t _reserved[4080];    // Reserved for future features
+    /* Phase 2H+ — feature bits published from g_cpu_caps after AP
+     * intersection, so userspace (boxlib) gates RDPKRU/WRPKRU on
+     * cpu_has_pku() instead of executing CPUID directly. Adding a
+     * boolean here is the BoxOS-native shape for "userspace needs to
+     * know a CPU feature" — no syscall round-trip, no inline cpuid. */
+    bool has_pku;               // CPUID.07H.0:ECX[3] (post-intersect)
+    uint8_t _pad1[7];           // align next field to 8 bytes
+    uint8_t _reserved[4072];    // Reserved for future features
 } cpu_caps_page_t;
 
 STATIC_ASSERT(sizeof(cpu_caps_page_t) == 4096, "CPU caps page must be exactly 4096 bytes");
@@ -24,14 +31,14 @@ extern uint64_t g_cpu_caps_page_phys;
 void cpu_caps_page_init(void);
 void cpu_caps_page_set_tsc_freq(uint64_t freq_khz);
 
-/* Re-publish g_cpu_caps.has_waitpkg into the userspace caps page.
+/* Re-publish post-intersect feature bits into the userspace caps page.
  *
  * MUST be called after cpu_intersect_features_ap() on every AP. The
- * initial cpu_caps_page_init() captures the BSP's has_waitpkg value.
- * On heterogeneous Intel hybrids (Alder/Raptor Lake P+E), the AP
- * intersection may flip the bit 1 → 0 because an E-core lacks
- * WAITPKG; without this refresh, userspace reads stale `1`, executes
- * UMWAIT on the E-core, and #UDs. */
-void cpu_caps_page_refresh_waitpkg(void);
+ * initial cpu_caps_page_init() captures the BSP's values; AP intersect
+ * may flip 1 → 0 on a heterogeneous CPU (Alder/Raptor Lake P+E without
+ * WAITPKG on E-cores; future Intel hybrid that disables PKU on a
+ * core class). Without this refresh, userspace reads the stale BSP
+ * value and #UDs on an E-core. */
+void cpu_caps_page_refresh_features(void);
 
 #endif // CPU_CAPS_PAGE_H
