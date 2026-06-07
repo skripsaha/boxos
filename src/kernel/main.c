@@ -231,6 +231,17 @@ void kernel_main(void)
     pmm_test_high_memory();
     MemTagStressTest();
 
+    /* Subsystem-specific tests (split out of memtag_test.c in the
+     * clean-slate audit so each test lives next to the code it covers). */
+    extern void VmmHelperTest(void);
+    extern void PmmPoisonTest(void);
+    extern void McePresenceTest(void);
+    extern void IommuPresenceTest(void);
+    VmmHelperTest();
+    PmmPoisonTest();
+    McePresenceTest();
+    IommuPresenceTest();
+
     debug_printf("[INIT] TSS Dynamic Stacks...\n");
     tss_setup_dynamic_stacks();
 

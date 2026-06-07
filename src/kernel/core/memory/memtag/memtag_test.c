@@ -581,12 +581,8 @@ void MemTagStressTest(void) {
         if (p14f) pmm_free(p14f, 1);
     }
 
-    /* ── Phase 14G: M5 boot probe — bits 52-58 SAFE on this CPU ──────── */
-    kprintf("[MEMTAG TEST] Phase 14G: M5 PTE-metadata probe\n");
-    {
-        bool m5 = MemTagVerifyPteMetadataBits();
-        MT_CHECK(m5, "M5 probe returns true (bits 52-58 SAFE on current CPU)");
-    }
+    /* Phase 14G's VMM probe (vmm_verify_pte_metadata_bits_52_58) moved
+     * to VmmHelperTest in vmm_test.c — it's a pure CPU-state probe. */
 
     /* ── Phase 14H: cache:* derived tags on boot-seeded regions (2E) ── */
     kprintf("[MEMTAG TEST] Phase 14H: derived cache tags on boot regions\n");
@@ -607,262 +603,61 @@ void MemTagStressTest(void) {
                  "purpose:kernel ∧ cache:wb finds kernel image region");
     }
 
-    /* ── Phase 14I: PAT MSR consistency probe (2E) ───────────────────── */
-    kprintf("[MEMTAG TEST] Phase 14I: PAT MSR consistency probe\n");
-    {
-        bool pat_ok = MemTagVerifyPatMsr();
-        MT_CHECK(pat_ok, "MemTagVerifyPatMsr returns true on BSP");
+    /* Phase 14I + 14J (vmm_verify_pat_msr, vmm_pte_cache_type_str,
+     * vmm_pte_pat_index) moved to VmmHelperTest in vmm_test.c — pure
+     * VMM helpers with no MemTag-specific state. */
 
-        uint64_t pat_msr = vmm_get_pat_msr_value();
-        MT_CHECK(pat_msr != 0,
-                 "vmm_get_pat_msr_value() non-zero (programmed by vmm_pat_init)");
+    /* Phase 14K's MCE + PMM helper checks moved to McePresenceTest and
+     * PmmPoisonTest respectively. The MemTag-side check that the
+     * `mce:poisoned` tag was correctly reserved during boot stays as
+     * a namespace presence check below. */
+    {
+        s_res = MemTagAnd("mce:poisoned");  /* must not panic on empty result */
+        MT_CHECK(MemTagResolveStr("mce:poisoned") != MEMTAG_INVALID_TAG_ID,
+                 "mce:poisoned reserved tag interned at boot");
     }
 
-    /* ── Phase 14J: vmm_pte_cache_type_str decoder (2E) ──────────────── */
-    kprintf("[MEMTAG TEST] Phase 14J: PTE→cache-type decoder\n");
+    /* Phase 14L's iommu_present / iommu_domain_id helper checks moved
+     * to IommuPresenceTest. MemTag-side reserved-namespace check stays. */
     {
-        /* PAT index 0 (no PWT, no PCD, no PAT) → PA0 = WB. */
-        uint64_t pte_wb = VMM_FLAG_PRESENT | VMM_FLAG_WRITABLE;
-        const char *c_wb = vmm_pte_cache_type_str(pte_wb, false);
-        MT_CHECK(c_wb && strcmp(c_wb, "cache:wb") == 0,
-                 "PTE with no cache flags → cache:wb (PAT[0]=WB)");
-
-        /* PAT index 3 (PCD=1, PWT=1, PAT=0) → PA3 = UC.
-         * Pattern used by vmm_map_mmio. */
-        uint64_t pte_uc = VMM_FLAG_PRESENT |
-                          VMM_FLAG_CACHE_DISABLE | VMM_FLAG_WRITE_THROUGH;
-        const char *c_uc = vmm_pte_cache_type_str(pte_uc, false);
-        MT_CHECK(c_uc && strcmp(c_uc, "cache:uc") == 0,
-                 "PTE PCD+PWT → cache:uc (PAT[3]=UC, vmm_map_mmio pattern)");
-
-        /* PAT index 6 (PCD=1, PAT=1, PWT=0) → PA6 = WC (vmm_pat_init programs).
-         * Pattern used by vmm_map_framebuffer. */
-        uint64_t pte_wc = VMM_FLAG_PRESENT |
-                          VMM_FLAG_CACHE_DISABLE | VMM_FLAG_PAT_BIT;
-        const char *c_wc = vmm_pte_cache_type_str(pte_wc, false);
-        MT_CHECK(c_wc && strcmp(c_wc, "cache:wc") == 0,
-                 "PTE PCD+PAT → cache:wc (PAT[6]=WC, vmm_map_framebuffer pattern)");
-
-        /* PAT index 1 (PWT=1, PCD=0, PAT=0) → PA1 = WT. */
-        uint64_t pte_wt = VMM_FLAG_PRESENT | VMM_FLAG_WRITE_THROUGH;
-        const char *c_wt = vmm_pte_cache_type_str(pte_wt, false);
-        MT_CHECK(c_wt && strcmp(c_wt, "cache:wt") == 0,
-                 "PTE PWT → cache:wt (PAT[1]=WT)");
-
-        /* vmm_pte_pat_index sanity — same flags should yield index 0..7. */
-        MT_CHECK(vmm_pte_pat_index(pte_wb, false) == 0, "PAT index decode = 0 (WB)");
-        MT_CHECK(vmm_pte_pat_index(pte_uc, false) == 3, "PAT index decode = 3 (UC)");
-        MT_CHECK(vmm_pte_pat_index(pte_wc, false) == 6, "PAT index decode = 6 (WC)");
+        MT_CHECK(MemTagResolveStr("iommu:ready") != MEMTAG_INVALID_TAG_ID,
+                 "iommu:ready reserved tag interned at boot");
+        MT_CHECK(MemTagResolveStr("iommu:dma:mapped") != MEMTAG_INVALID_TAG_ID,
+                 "iommu:dma:mapped reserved tag interned");
+        MT_CHECK(MemTagResolveStr("iommu:domain:attached") != MEMTAG_INVALID_TAG_ID,
+                 "iommu:domain:attached reserved tag interned");
     }
 
-    /* ── Phase 14K: MCE poison bitmap + tag + alloc skip (2F) ───────── */
-    kprintf("[MEMTAG TEST] Phase 14K: MCE poison bitmap + alloc retry\n");
+    /* Phase 14M/N/O/P's VMM encoder + helper checks moved to
+     * VmmHelperTest in vmm_test.c. MemTag's job here is to verify the
+     * RESERVED NAMESPACE was seeded correctly for each phase. */
+    kprintf("[MEMTAG TEST] Phase NS: hardware-derived reserved namespace\n");
     {
-        /* mce_init must have completed (called from main.c before this test). */
-        MT_CHECK(mce_is_initialized(),
-                 "MCE subsystem initialized on BSP");
-        MT_CHECK(mce_bank_count() > 0,
-                 "MCE reports at least one bank on this CPU");
+        /* Phase 2E cache:* */
+        MT_CHECK(MemTagResolveStr("cache:wb") != MEMTAG_INVALID_TAG_ID,
+                 "cache:wb interned");
+        MT_CHECK(MemTagResolveStr("cache:uc") != MEMTAG_INVALID_TAG_ID,
+                 "cache:uc interned");
+        MT_CHECK(MemTagResolveStr("cache:wc") != MEMTAG_INVALID_TAG_ID,
+                 "cache:wc interned");
+        MT_CHECK(MemTagResolveStr("cache:wt") != MEMTAG_INVALID_TAG_ID,
+                 "cache:wt interned");
 
-        /* Allocate two DMA32 pages, free the second one, then poison its
-         * phys. Re-allocation must skip the poisoned page and return
-         * the first (still-cached in the buddy free list). */
-        void *clean = pmm_alloc(1, PHYS_TAG_DMA32);
-        MT_CHECK(clean != NULL, "alloc fresh DMA32 page");
-        uintptr_t target_phys = (uintptr_t)clean;
-
-        /* Initial state: target is NOT poisoned. */
-        MT_CHECK(!pmm_is_poisoned(target_phys),
-                 "fresh phys is not poisoned");
-        size_t before = pmm_poisoned_page_count();
-
-        /* Poison the phys. pmm_set_poisoned is the API the MCE handler
-         * would call from IST context — exercise it directly here. */
-        pmm_set_poisoned(target_phys);
-        MT_CHECK(pmm_is_poisoned(target_phys),
-                 "pmm_set_poisoned marks phys");
-        MT_CHECK(pmm_poisoned_page_count() == before + 1,
-                 "pmm_poisoned_page_count incremented");
-
-        /* Apply mce:poisoned tag so userspace observers see the event. */
-        error_t mce_tag_err = MemTagApplyByPhys(target_phys, 1, "mce:poisoned");
-        MT_CHECK(mce_tag_err == OK, "MemTagApplyByPhys mce:poisoned ok");
-
-        /* Bitmap query: mce:poisoned should now return ≥1 region. */
-        s_res = MemTagAnd("mce:poisoned");
-        MT_CHECK(s_res.count >= 1,
-                 "MemTagAnd(mce:poisoned) finds the poisoned region");
-
-        /* Free the chunk and try to re-allocate. The buddy will likely
-         * hand back the SAME phys (LIFO free-list); _pmm_alloc_impl
-         * post-checks pmm_is_range_poisoned, frees the chunk, and
-         * retries. Result: returned addr must NOT equal target_phys
-         * (unless all alternative pages were exhausted, in which case
-         * we accept failure as a valid outcome — the test environment
-         * may not have spare DMA32 pages). */
-        pmm_free(clean, 1);
-
-        void *retry = pmm_alloc(1, PHYS_TAG_DMA32);
-        if (retry != NULL) {
-            MT_CHECK((uintptr_t)retry != target_phys,
-                     "post-poison alloc skips the poisoned phys");
-            pmm_free(retry, 1);
-        } else {
-            kprintf("[MEMTAG TEST]   note: DMA32 retry returned NULL (zone "
-                    "near-empty — skip-check still satisfied)\n");
-        }
-
-        /* Cleanup: we deliberately leave the poisoned bit set since the
-         * page is "permanently bad" semantics. pmm_free was called above
-         * for cleanliness, but the page is now bitmap-poisoned forever. */
-    }
-
-    /* ── Phase 14L: IOMMU MemTag/Touch surface (2G) ──────────────────── */
-    kprintf("[MEMTAG TEST] Phase 14L: IOMMU domain accessor + namespace\n");
-    {
-        /* iommu_present mirrors g_ops != NULL. On QEMU TCG without
-         * DMAR/IVRS this returns false; on real HW with VT-d or AMD-Vi
-         * firmware it returns true. Either is acceptable — the test
-         * verifies the API surface is wired, not that the IOMMU is
-         * active. */
-        bool present = iommu_present();
-        MT_CHECK(present == (iommu_get_ops() != NULL),
-                 "iommu_present matches g_ops state");
-
-        /* iommu_domain_id on NULL returns INVALID. */
-        MT_CHECK(iommu_domain_id(NULL) == 0xFFFFFFFFu,
-                 "iommu_domain_id(NULL) returns INVALID");
-
-        if (present) {
-            /* When an IOMMU is online, a fresh domain_alloc should
-             * succeed and report a valid ID. */
-            iommu_domain_t* dom = iommu_domain_alloc();
-            if (dom) {
-                uint32_t id = iommu_domain_id(dom);
-                MT_CHECK(id != 0xFFFFFFFFu,
-                         "fresh domain has valid id");
-                iommu_domain_free(dom);
-            } else {
-                kprintf("[MEMTAG TEST]   note: domain_alloc returned NULL "
-                        "(backend cap reached — OK)\n");
-            }
-        } else {
-            kprintf("[MEMTAG TEST]   note: no DMAR/IVRS — IOMMU "
-                    "subsystem dormant (OK on QEMU TCG)\n");
-        }
-
-        /* Reserved namespace check — iommu:ready is the gate event;
-         * by this point it has been published if iommu_init found a
-         * backend. iommu:dma:mapped is reserved but only fires from
-         * actual driver-side iommu_map calls. */
-        uint16_t ready_tid = MemTagResolveStr("iommu:ready");
-        MT_CHECK(ready_tid != MEMTAG_INVALID_TAG_ID,
-                 "iommu:ready tag interned (reserved namespace seeded)");
-    }
-
-    /* ── Phase 14M: PKU/PKS encoding + namespace (2H) ─────────────── */
-    kprintf("[MEMTAG TEST] Phase 14M: PKU/PKS PTE bits 62:59\n");
-    {
-        /* Encoder/decoder round-trip — pure functions, work regardless
-         * of has_pku at runtime. */
-        for (uint8_t k = 0; k <= VMM_PTE_PKEY_MAX; k++) {
-            uint64_t enc = vmm_pte_encode_pkey(k);
-            uint8_t  dec = vmm_pte_pkey(enc | VMM_FLAG_PRESENT);
-            MT_CHECK(dec == k, "vmm_pte_encode_pkey ↔ vmm_pte_pkey round-trip");
-            if (dec != k) break;
-        }
-
-        /* Reserved namespace: pku:0 and pku:15 must be interned. */
+        /* Phase 2H pku:* */
         MT_CHECK(MemTagResolveStr("pku:0")  != MEMTAG_INVALID_TAG_ID,
                  "pku:0 interned");
         MT_CHECK(MemTagResolveStr("pku:15") != MEMTAG_INVALID_TAG_ID,
                  "pku:15 interned");
         MT_CHECK(MemTagResolveStr("pku:fault:denied") != MEMTAG_INVALID_TAG_ID,
-                 "pku:fault:denied event tag interned");
+                 "pku:fault:denied interned");
 
-        /* If the CPU supports PKU, read_pkru should at least not #GP
-         * (CR4.PKE was set by vmm_pku_init). On non-PKU systems the
-         * helper returns 0 by gate. */
-        if (g_cpu_caps.has_pku) {
-            uint32_t pkru_now = vmm_read_pkru();
-            MT_CHECK(true,
-                     "RDPKRU executed without #GP (CR4.PKE active)");
-            /* No semantic assertion on the value — default is 0
-             * (everyone allowed) but firmware may have left a non-zero
-             * value. Just log. */
-            kprintf("[MEMTAG TEST]   PKRU snapshot: 0x%08x\n",
-                    (unsigned)pkru_now);
-        } else {
-            MT_CHECK(vmm_read_pkru() == 0,
-                     "vmm_read_pkru returns 0 on non-PKU CPU (gate)");
-            kprintf("[MEMTAG TEST]   note: CPU lacks PKU — RDPKRU "
-                    "path skipped\n");
-        }
-    }
-
-    /* ── Phase 14N: LAM substrate (2I) ───────────────────────────────── */
-    kprintf("[MEMTAG TEST] Phase 14N: LAM tag-bit helpers + CR3 mask\n");
-    {
-        /* LAM_U48 tag round-trip: 7-bit field at bits 62:56. */
-        for (uint8_t tag = 0; tag <= 0x7F; tag++) {
-            uint64_t base = 0x0000123456789000ULL;  /* canonical user VA */
-            uint64_t p    = vmm_user_ptr_set_tag_u48(base, tag);
-            MT_CHECK(vmm_user_ptr_get_tag_u48(p) == tag,
-                     "LAM_U48 tag round-trip");
-            if (vmm_user_ptr_get_tag_u48(p) != tag) break;
-        }
-
-        /* LAM_U57 tag round-trip: 6-bit field at bits 62:57. */
-        for (uint8_t tag = 0; tag <= 0x3F; tag++) {
-            uint64_t base = 0x0000123456789000ULL;
-            uint64_t p    = vmm_user_ptr_set_tag_u57(base, tag);
-            MT_CHECK(vmm_user_ptr_get_tag_u57(p) == tag,
-                     "LAM_U57 tag round-trip");
-            if (vmm_user_ptr_get_tag_u57(p) != tag) break;
-        }
-
-        /* CR3 LAM bits must not overlap PML4 phys (bits 51:12 per Intel
-         * SDM Vol 3A §4.5.4). Verify by construction: vmm_pte_addr_mask
-         * masks 51:12 only, never the LAM bits 62:48. */
-        MT_CHECK((vmm_pte_addr_mask & VMM_CR3_LAM_U48) == 0,
-                 "CR3.LAM_U48 outside PML4 phys mask");
-        MT_CHECK((vmm_pte_addr_mask & VMM_CR3_LAM_U57) == 0,
-                 "CR3.LAM_U57 outside PML4 phys mask");
-
-        /* Reserved namespace */
+        /* Phase 2I lam:* */
         MT_CHECK(MemTagResolveStr("lam:ready") != MEMTAG_INVALID_TAG_ID,
                  "lam:ready interned");
         MT_CHECK(MemTagResolveStr("lam:fault:tag") != MEMTAG_INVALID_TAG_ID,
                  "lam:fault:tag interned");
 
-        if (g_cpu_caps.has_lam) {
-            kprintf("[MEMTAG TEST]   LAM supported on this CPU\n");
-        } else {
-            kprintf("[MEMTAG TEST]   note: CPU lacks LAM — substrate "
-                    "still tested (pure helpers)\n");
-        }
-    }
-
-    /* ── Phase 14O: TME / TME-MK substrate (2J) ─────────────────────── */
-    kprintf("[MEMTAG TEST] Phase 14O: TME-MK KeyID encoding + namespace\n");
-    {
-        /* KeyID encoder round-trip — pure function, works regardless
-         * of has_tme. Treat MAXPHYADDR=42 + 4 KeyID bits as a fixed
-         * platform pattern for the test. */
-        uint64_t phys_base = 0x0000000ABCDEF000ULL;  /* page-aligned */
-        for (uint8_t keyid = 0; keyid <= 0xF; keyid++) {
-            uint64_t encoded = vmm_phys_with_keyid(phys_base, keyid, 4, 42);
-            /* The 4-bit window at bits 45:42 must hold the keyid. */
-            uint8_t recovered = (uint8_t)((encoded >> 42) & 0xF);
-            MT_CHECK(recovered == keyid,
-                     "vmm_phys_with_keyid round-trip");
-            /* Phys bits below the window must be untouched. */
-            MT_CHECK((encoded & ((1ULL << 42) - 1ULL)) ==
-                     (phys_base & ((1ULL << 42) - 1ULL)),
-                     "low phys bits preserved");
-        }
-
-        /* Reserved namespace */
+        /* Phase 2J tme:* */
         MT_CHECK(MemTagResolveStr("tme:ready") != MEMTAG_INVALID_TAG_ID,
                  "tme:ready interned");
         MT_CHECK(MemTagResolveStr("tme:mk_active") != MEMTAG_INVALID_TAG_ID,
@@ -872,58 +667,13 @@ void MemTagStressTest(void) {
         MT_CHECK(MemTagResolveStr("tme:keyid:15") != MEMTAG_INVALID_TAG_ID,
                  "tme:keyid:15 interned");
 
-        if (g_cpu_caps.has_tme) {
-            kprintf("[MEMTAG TEST]   TME supported on this CPU\n");
-        } else {
-            kprintf("[MEMTAG TEST]   note: CPU lacks TME — encoder "
-                    "still validated (pure)\n");
-        }
-    }
-
-    /* ── Phase 14P: CET shadow-stack encoding + namespace (2K) ────── */
-    kprintf("[MEMTAG TEST] Phase 14P: CET shadow-stack PTE bits 60/61\n");
-    {
-        /* PTE bit 60 (supervisor SS) round-trip. */
-        uint64_t base = VMM_FLAG_PRESENT | VMM_FLAG_WRITABLE;
-        uint64_t with_ss = vmm_pte_with_cet_supv_ss(base);
-        MT_CHECK((with_ss & VMM_PTE_CET_SS_SUPV) != 0,
-                 "vmm_pte_with_cet_supv_ss sets bit 60");
-        MT_CHECK(vmm_pte_is_supv_ss(with_ss),
-                 "vmm_pte_is_supv_ss detects bit 60");
-        MT_CHECK(!vmm_pte_is_supv_ss(base),
-                 "vmm_pte_is_supv_ss false on unstamped PTE");
-
-        /* Bit 60 must not overlap PML4 phys mask (Phase 2D region bits
-         * 52-58 either). Defensive: ensure encoding stays in CET's
-         * documented bit window. */
-        MT_CHECK((vmm_pte_addr_mask & VMM_PTE_CET_SS_SUPV) == 0,
-                 "CET SS bit 60 outside phys mask");
-        MT_CHECK((MEMTAG_PTE_REGION_MASK & VMM_PTE_CET_SS_SUPV) == 0,
-                 "CET SS bit 60 outside Phase 2D region bits");
-        /* NOTE: bit 60 is intentionally inside Phase 2H PKEY mask
-         * (bits 62:59). Intel SDM gives bit 60 two interpretations
-         * gated by CR4: PKEY field when CR4.PKE=1, supervisor SS when
-         * CR4.CET=1. Stamping both on the same page is a kernel-policy
-         * error — Phase 2K stamping callers must check the active
-         * feature mix before composing CET + PKU. */
-
-        /* Reserved namespace */
+        /* Phase 2K cet:* */
         MT_CHECK(MemTagResolveStr("cet:ready") != MEMTAG_INVALID_TAG_ID,
                  "cet:ready interned");
         MT_CHECK(MemTagResolveStr("cet:shstk:supervisor") != MEMTAG_INVALID_TAG_ID,
                  "cet:shstk:supervisor interned");
         MT_CHECK(MemTagResolveStr("cet:fault:cp") != MEMTAG_INVALID_TAG_ID,
                  "cet:fault:cp interned");
-
-        if (g_cpu_caps.has_shstk || g_cpu_caps.has_ibt) {
-            kprintf("[MEMTAG TEST]   CET supported on this CPU "
-                    "(SHSTK=%d IBT=%d)\n",
-                    (int)g_cpu_caps.has_shstk,
-                    (int)g_cpu_caps.has_ibt);
-        } else {
-            kprintf("[MEMTAG TEST]   note: CPU lacks CET — encoders "
-                    "still validated (pure)\n");
-        }
     }
 
     /* ── Phase 12: stress — 64 allocs × 8 tags ────────────────────── */
