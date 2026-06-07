@@ -148,6 +148,14 @@ static void SeedReservedTags(void) {
     MarkInternReserved("mce:fault:detected");
     MarkInternReserved("mce:fault:recovered");
     MarkInternReserved("mce:fault:fatal");
+    /* MCE page migration (mce_migrate.c) — phys → MemRegion attach
+     * chain → per-cabin PTE swap with TLB shootdown. Published from
+     * K-Core context (the worker runs via irq_defer, not on the IST
+     * stack — so TouchPublishId is OK; mce.c's IST-only tags above
+     * use TouchPublishIrqPair). */
+    MarkInternReserved("mce:migration:completed");
+    MarkInternReserved("mce:migration:failed");
+    MarkInternReserved("mce:migration:unmapped");
     /* Phase 2G — IOMMU lifecycle namespace. Auto-applied by the IOMMU
      * wrapper (iommu_map / iommu_device_attach) so subscribers can use
      * the bitmap inverted index to enumerate every DMA buffer routed
