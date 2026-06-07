@@ -458,6 +458,26 @@ void kernel_main(void)
      * live once Touch resolves tags. Until now they silently no-op'd. */
     MemTagEnableTouchPublish();
 
+    /* MCE page migration — Phase 2F shipped #MC bank decode + poison.
+     * mce_migrate adds: after poison, defer a worker that copies the
+     * affected page to a fresh phys + atomically swaps PTEs in every
+     * cabin that mapped the poisoned page. Initialization is gated on
+     * (a) MemTag being up so MemRegion reverse-map is queryable, and
+     * (b) irq_defer being up so the worker can be enqueued from #MC
+     * IST. Touch resolution happens here so the worker's publish path
+     * uses cached handles. */
+    {
+        extern void mce_migrate_init(void);
+        mce_migrate_init();
+        /* Kernel-side test: exercises the full migrate path
+         * synchronously (no irq_defer hop) so we can observe side
+         * effects on real vmm_context + MemRegion attaches.
+         * Real-HW MCE injection (APEI EINJ) is the integration test;
+         * this validates correctness without real silicon. */
+        extern void McMigrationTest(void);
+        McMigrationTest();
+    }
+
     /* TouchInit has now run inside guide_init — replay every EFI boot-
      * time event so late subscribers (userspace daemons, fleet inventory
      * tools) actually observe the state instead of losing it to the pre-

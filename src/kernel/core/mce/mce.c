@@ -12,6 +12,7 @@
  */
 
 #include "mce.h"
+#include "mce_migrate.h"
 #include "klib.h"
 #include "cpuid.h"
 #include "pmm.h"
@@ -264,6 +265,10 @@ static uintptr_t mce_extract_phys_page(uint64_t status, uint64_t addr) {
 bool mce_handle(interrupt_frame_t *frame) {
     bool any_fatal       = false;
     bool any_recovered   = false;
+    bool nested_consumed = false;     /* set if any bank's phys matched an
+                                       * in-flight migration on this CPU
+                                       * — the inner copy loop will see the
+                                       * abort flag and zero-fill the tail. */
     uint64_t mcg_status  = mce_rdmsr(MCE_MSR_MCG_STATUS);
     bool ripv            = (mcg_status & MCE_MCG_STATUS_RIPV) != 0;
 
@@ -294,12 +299,32 @@ bool mce_handle(interrupt_frame_t *frame) {
                      mce_sev_str(sev),
                      (unsigned long)poisoned_phys);
 
+        /* Nested-#MC notifier: if this CPU is in the middle of a
+         * mce_safe_page_copy and the bad phys matches the in-flight
+         * migration's source, signal the copy loop to abort + zero-fill.
+         * This must happen BEFORE we poison the page below so the abort
+         * flag is set while the copy is still running. The check is
+         * O(1) per-CPU. */
+        if (poisoned_phys != 0 && mce_migrate_note_nested(poisoned_phys)) {
+            nested_consumed = true;
+        }
+
         /* Mark the affected page poisoned for future allocations. Active
-         * mappings keep working until the owning process exits. */
+         * mappings keep working until the owning process exits OR until
+         * the deferred migration worker (queued below) swaps the PTE to
+         * a fresh phys page. */
         if (poisoned_phys != 0 &&
             (sev == MCE_SEV_UCR || sev == MCE_SEV_UC)) {
             pmm_set_poisoned(poisoned_phys);
             (void)MemTagApplyByPhys(poisoned_phys, 1, "mce:poisoned");
+
+            /* Queue a deferred migration. The actual copy + PTE swap +
+             * TLB shootdown runs in K-Core context via irq_defer (the
+             * #MC IST stack can't safely take pmm_alloc / region-bucket
+             * locks). Failure to queue (ring saturation) is non-fatal:
+             * the page stays poisoned in the PMM bitmap, so the owning
+             * process will eventually #PF on access and die cleanly. */
+            (void)mce_migrate_request(poisoned_phys, sev, status);
         }
 
         /* Touch payload — copied onto IRQ pocket inline. */
@@ -364,6 +389,14 @@ bool mce_handle(interrupt_frame_t *frame) {
      * STATUS, it must clear MCIP". Failing to do so blocks future #MC
      * delivery on this thread. */
     mce_wrmsr(MCE_MSR_MCG_STATUS, 0ULL);
+
+    /* Telemetry — visible in serial when DEBUG=on. nested_consumed=1
+     * tells operators that an in-flight migration was poisoned by a
+     * recursive #MC; the copy loop's zero-fill will keep the process
+     * alive but with partial data. */
+    if (nested_consumed) {
+        debug_printf("[MCE] nested #MC consumed by in-flight migration\n");
+    }
 
     if (any_fatal) return false;
     return any_recovered || !any_fatal;
