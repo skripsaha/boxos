@@ -418,6 +418,28 @@ static int SysMemTagCheck(const ManifestOp *op, Crate *crates,
 
 /* ─── Registration ──────────────────────────────────────────────────── */
 
+/* ─── SYSTEM_OP_MEMTAG_APPLY_PKEY ──────────────────────────────────── */
+/* params: [u32 region_id][u8 pkey 0..15]. No in_crate. */
+static int SysMemTagApplyPkey(const ManifestOp *op, Crate *crates,
+                               uint16_t crate_count, const OpContext *ctx) {
+    (void)crates;
+    (void)crate_count;
+    if (!ctx || !ctx->proc) return ERR_INVALID_ARGUMENT;
+    if (op->param_size < sizeof(uint32_t) + sizeof(uint8_t))
+        return ERR_INVALID_ARGUMENT;
+
+    uint32_t region_id;
+    uint8_t  pkey;
+    memcpy(&region_id, op->params, sizeof(uint32_t));
+    memcpy(&pkey, op->params + sizeof(uint32_t), sizeof(uint8_t));
+
+    /* MemTagApplyPkey clears any prior pku:* on the region, then applies
+     * pku:<pkey>. The apply path triggers MemTagSweepPkey across all
+     * attaches + cross-core TLB shootdown. pkey == 0 is shorthand for
+     * "no pku tag" — clears policy. */
+    return MemTagApplyPkey(region_id, pkey);
+}
+
 error_t MemTagOpsRegister(void) {
     struct {
         uint16_t    opcode;
@@ -435,6 +457,7 @@ error_t MemTagOpsRegister(void) {
         { SYSTEM_OP_MEMTAG_REVOKE,     SysMemTagRevoke,    OP_AUTH_APP, "system.memtag.revoke"     },
         { SYSTEM_OP_MEMTAG_CABIN_TAGS, SysMemTagCabinTags, OP_AUTH_APP, "system.memtag.cabin_tags" },
         { SYSTEM_OP_MEMTAG_CHECK,      SysMemTagCheck,     OP_AUTH_APP, "system.memtag.check"      },
+        { SYSTEM_OP_MEMTAG_APPLY_PKEY, SysMemTagApplyPkey, OP_AUTH_APP, "system.memtag.apply_pkey" },
     };
     for (size_t i = 0; i < sizeof(table) / sizeof(table[0]); i++) {
         error_t rc = OpRegistryRegister(OP_KIND(DECK_SYSTEM, table[i].opcode),
