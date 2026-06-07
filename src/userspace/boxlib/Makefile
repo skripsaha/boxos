@@ -45,6 +45,7 @@ SRCS = src/core/notify.c \
        src/brook.c \
        src/memtag.c \
        src/pku.c \
+       src/hw.c \
        src/debug.c \
        src/string.c \
        src/convert.c

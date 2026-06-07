@@ -50,4 +50,8 @@ error_t BrookOpsRegister(void);
 
 error_t MemTagOpsRegister(void);
 
+/* HW per-process real-HW state ops (LAM, future CET/TME context).
+ * Defined in hw_ops.c. */
+error_t HwOpsRegister(void);
+
 #endif /* SYSTEM_DECK_H */

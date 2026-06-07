@@ -19,6 +19,10 @@ void cpu_caps_page_init(void) {
     caps_page->has_waitpkg = g_cpu_caps.has_waitpkg;
     caps_page->has_invariant_tsc = g_cpu_caps.has_invariant_tsc;
     caps_page->has_pku = g_cpu_caps.has_pku;
+    caps_page->has_pks = g_cpu_caps.has_pks;
+    caps_page->has_lam = g_cpu_caps.has_lam;
+    caps_page->has_cet = g_cpu_caps.has_shstk || g_cpu_caps.has_ibt;
+    caps_page->has_tme = g_cpu_caps.has_tme;
     caps_page->tsc_freq_khz = 0;  // Will be filled after TSC calibration
 
     /* Register as shared so vmm_destroy_context skips the pmm_free —
@@ -46,4 +50,13 @@ void cpu_caps_page_refresh_features(void) {
                      g_cpu_caps.has_waitpkg, __ATOMIC_RELEASE);
     __atomic_store_n(&caps_page->has_pku,
                      g_cpu_caps.has_pku,     __ATOMIC_RELEASE);
+    __atomic_store_n(&caps_page->has_pks,
+                     g_cpu_caps.has_pks,     __ATOMIC_RELEASE);
+    __atomic_store_n(&caps_page->has_lam,
+                     g_cpu_caps.has_lam,     __ATOMIC_RELEASE);
+    __atomic_store_n(&caps_page->has_cet,
+                     g_cpu_caps.has_shstk || g_cpu_caps.has_ibt,
+                                              __ATOMIC_RELEASE);
+    __atomic_store_n(&caps_page->has_tme,
+                     g_cpu_caps.has_tme,     __ATOMIC_RELEASE);
 }

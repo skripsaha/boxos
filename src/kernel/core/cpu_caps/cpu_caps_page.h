@@ -14,13 +14,15 @@ typedef struct __packed {
     bool has_invariant_tsc;     // Invariant TSC support
     uint16_t _pad0;             // Alignment padding
     uint64_t tsc_freq_khz;      // Calibrated TSC frequency in kHz (set after boot calibration)
-    /* Phase 2H+ — feature bits published from g_cpu_caps after AP
-     * intersection, so userspace (boxlib) gates RDPKRU/WRPKRU on
-     * cpu_has_pku() instead of executing CPUID directly. Adding a
-     * boolean here is the BoxOS-native shape for "userspace needs to
-     * know a CPU feature" — no syscall round-trip, no inline cpuid. */
-    bool has_pku;               // CPUID.07H.0:ECX[3] (post-intersect)
-    uint8_t _pad1[7];           // align next field to 8 bytes
+    /* Real-HW feature bits published from g_cpu_caps after AP intersect.
+     * Userspace gates the corresponding ISA usage on these bytes — no
+     * syscall, no inline CPUID, no AP-divergence surprises. */
+    bool has_pku;               // CPUID.07H.0:ECX[3]
+    bool has_pks;               // CPUID.07H.0:ECX[31]
+    bool has_lam;               // CPUID.07H.1:EAX[26]
+    bool has_cet;               // CPUID.07H.0:ECX[7] (shadow stack) OR EDX[20] (IBT)
+    bool has_tme;               // CPUID.07H.0:ECX[13]
+    uint8_t _pad1[3];           // align next field to 8 bytes
     uint8_t _reserved[4072];    // Reserved for future features
 } cpu_caps_page_t;
 

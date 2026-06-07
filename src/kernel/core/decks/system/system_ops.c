@@ -1277,6 +1277,9 @@ error_t SystemDeckRegister(void)
     error_t memtag_rc = MemTagOpsRegister();
     if (memtag_rc != OK) return memtag_rc;
 
+    error_t hw_rc = HwOpsRegister();
+    if (hw_rc != OK) return hw_rc;
+
     debug_printf("[SystemDeck] registered %zu ops (full surface, gated)\n",
                  sizeof(table) / sizeof(table[0]));
     return OK;

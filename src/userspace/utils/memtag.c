@@ -13,6 +13,8 @@
 #include "box/string.h"
 #include "box/memtag.h"
 #include "box/system.h"
+#include "box/pku.h"
+#include "box/convert.h"
 
 static int parse_uint(const char *s, uint32_t *out)
 {
@@ -24,6 +26,49 @@ static int parse_uint(const char *s, uint32_t *out)
     }
     *out = v;
     return 0;
+}
+
+/* Accepts "0x..." hex or decimal. Returns 0 on success. */
+static int parse_u64(const char *s, uint64_t *out)
+{
+    if (!s || !*s) return -1;
+    uint64_t v = 0;
+    if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
+        s += 2;
+        if (!*s) return -1;
+        for (; *s; s++) {
+            uint64_t d;
+            if (*s >= '0' && *s <= '9')      d = (uint64_t)(*s - '0');
+            else if (*s >= 'a' && *s <= 'f') d = 10 + (uint64_t)(*s - 'a');
+            else if (*s >= 'A' && *s <= 'F') d = 10 + (uint64_t)(*s - 'A');
+            else return -1;
+            v = (v << 4) | d;
+        }
+    } else {
+        for (; *s; s++) {
+            if (*s < '0' || *s > '9') return -1;
+            v = v * 10 + (uint64_t)(*s - '0');
+        }
+    }
+    *out = v;
+    return 0;
+}
+
+/* Filter region's tags through prefix matching. `out_count` may be NULL. */
+static void print_tags_with_prefix(uint32_t rid, const char *prefix)
+{
+    char     buf[1024];
+    uint32_t n = 0;
+    if (mem_region_tags(rid, buf, sizeof(buf), &n) != 0) return;
+    size_t plen = strlen(prefix);
+    const char *cursor = buf;
+    for (uint32_t i = 0; i < n; i++) {
+        size_t tlen = strlen(cursor);
+        if (tlen >= plen && memcmp(cursor, prefix, plen) == 0) {
+            printf("    %s\n", cursor);
+        }
+        cursor += tlen + 1;
+    }
 }
 
 static void print_stats(void)
@@ -122,6 +167,94 @@ static void print_cabin(uint32_t pid)
     }
 }
 
+/* ─── Phase 2H+ PKU region stamping ────────────────────────────────── */
+
+static void do_pku_region(uint32_t rid, uint32_t pkey)
+{
+    if (pkey >= 16) {
+        printf("%colorpkey must be 0..15%color\n", COLOR_RED, COLOR_DEFAULT);
+        return;
+    }
+    int rc = pku_apply_region(rid, (uint8_t)pkey);
+    if (rc == 0) {
+        printf("applied pku:%u to region %u\n", pkey, rid);
+    } else {
+        printf("%colorpku-region failed (rc=%d)%color\n",
+               COLOR_RED, rc, COLOR_DEFAULT);
+    }
+}
+
+/* ─── dump-cache <phys> — show cache:* tags on the region covering phys ─ */
+
+static void do_dump_cache(uint64_t phys)
+{
+    uint32_t rid = mem_region_from_phys(phys);
+    if (rid == MEMTAG_INVALID_REGION_ID) {
+        printf("phys %p: no region covers this address\n",
+               (void *)(uintptr_t)phys);
+        return;
+    }
+    printf("phys %p → region %u\n", (void *)(uintptr_t)phys, rid);
+    printf("  cache tags:\n");
+    print_tags_with_prefix(rid, "cache:");
+}
+
+/* ─── dump-iommu — list regions tagged iommu:domain:* ──────────────── */
+
+static void do_dump_iommu(void)
+{
+    /* Query for the lifecycle marker — every domain mapping carries
+     * iommu:dma:mapped. We list each region's iommu:* tags. */
+    uint32_t ids[64];
+    const char *req[2] = { "iommu:dma:mapped", 0 };
+    int n = mem_query(req, 0, 0, ids, 64);
+    if (n < 0) {
+        printf("%coloriommu query failed (rc=%d)%color\n",
+               COLOR_RED, n, COLOR_DEFAULT);
+        return;
+    }
+    if (n == 0) {
+        println("no IOMMU-tagged regions (IOMMU dormant or no DMA)");
+        return;
+    }
+    printf("%u IOMMU-tagged region%s:\n", (unsigned)n, n == 1 ? "" : "s");
+    for (int i = 0; i < n; i++) {
+        mem_region_info_t info;
+        if (mem_region_info(ids[i], &info) != 0) continue;
+        printf("  region %u: phys=%p pages=%u\n",
+               ids[i], (void *)(uintptr_t)info.base_phys,
+               (unsigned)info.pages);
+        print_tags_with_prefix(ids[i], "iommu:");
+    }
+}
+
+/* ─── dump-mce — list mce:poisoned regions ─────────────────────────── */
+
+static void do_dump_mce(void)
+{
+    uint32_t ids[64];
+    const char *req[2] = { "mce:poisoned", 0 };
+    int n = mem_query(req, 0, 0, ids, 64);
+    if (n < 0) {
+        printf("%colormce query failed (rc=%d)%color\n",
+               COLOR_RED, n, COLOR_DEFAULT);
+        return;
+    }
+    if (n == 0) {
+        println("no poisoned pages (good)");
+        return;
+    }
+    printf("%u poisoned region%s:\n", (unsigned)n, n == 1 ? "" : "s");
+    for (int i = 0; i < n; i++) {
+        mem_region_info_t info;
+        if (mem_region_info(ids[i], &info) != 0) continue;
+        printf("  region %u: phys=%p pages=%u\n",
+               ids[i], (void *)(uintptr_t)info.base_phys,
+               (unsigned)info.pages);
+        print_tags_with_prefix(ids[i], "mce:");
+    }
+}
+
 static void print_check(uint32_t pid, uint32_t rid)
 {
     mem_check_t r;
@@ -197,6 +330,21 @@ int main(void)
         if (parse_uint(argv[2], &pid) != 0) { println("invalid pid"); exit(1); return 1; }
         if (parse_uint(argv[3], &rid) != 0) { println("invalid region_id"); exit(1); return 1; }
         print_check(pid, rid);
+    } else if (strcmp(cmd, "pku-region") == 0) {
+        if (argc < 4) { println("usage: memtag pku-region <region_id> <pkey>"); exit(1); return 1; }
+        uint32_t rid, pkey;
+        if (parse_uint(argv[2], &rid)  != 0) { println("invalid region_id"); exit(1); return 1; }
+        if (parse_uint(argv[3], &pkey) != 0) { println("invalid pkey"); exit(1); return 1; }
+        do_pku_region(rid, pkey);
+    } else if (strcmp(cmd, "dump-cache") == 0) {
+        if (argc < 3) { println("usage: memtag dump-cache <phys>"); exit(1); return 1; }
+        uint64_t phys;
+        if (parse_u64(argv[2], &phys) != 0) { println("invalid phys (use 0x... or decimal)"); exit(1); return 1; }
+        do_dump_cache(phys);
+    } else if (strcmp(cmd, "dump-iommu") == 0) {
+        do_dump_iommu();
+    } else if (strcmp(cmd, "dump-mce") == 0) {
+        do_dump_mce();
     } else {
         println("memtag commands:");
         println("  (no args)             — short summary");
@@ -209,6 +357,10 @@ int main(void)
         println("  revoke <pid> <tag>    — revoke capability            [system]");
         println("  cabin <pid>           — list cabin's held caps");
         println("  check <pid> <rid>     — access check");
+        println("  pku-region <rid> <k>  — stamp pku:k on region (Phase 2H+)");
+        println("  dump-cache <phys>     — show cache:* tags at phys");
+        println("  dump-iommu            — list iommu:domain:* regions");
+        println("  dump-mce              — list mce:poisoned regions");
         exit(1);
         return 1;
     }
