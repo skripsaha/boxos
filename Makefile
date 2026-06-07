@@ -130,7 +130,7 @@ DISPLAY_BIN = $(DISPLAY_DIR)/display.elf
 # Utility ELF binaries
 UTILS_DIR = $(USERSPACE_DIR)/utils
 UTIL_NAMES = help create show files tag untag name trash erase \
-             me info say reboot bye defrag fsck ipc_test memtag
+             me info say reboot bye defrag fsck ipc_test memtag hw
 UTIL_ELFS = $(addprefix $(UTILS_DIR)/,$(addsuffix .elf,$(UTIL_NAMES)))
 
 # ==== FINAL BINARIES ====
@@ -392,7 +392,8 @@ $(IMAGE): $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(SHELL_BIN) $(PROCA_BIN) $(
 		$(USERSPACE_DIR)/file.txt    "file,info,message,text" \
 		$(USERSPACE_DIR)/testbin.bin "binary, test:forerror, emptyfile" \
 		$(UTILS_DIR)/ipc_test.elf "utility" \
-		$(UTILS_DIR)/memtag.elf  "utility,memory,system"
+		$(UTILS_DIR)/memtag.elf  "utility,memory,system" \
+		$(UTILS_DIR)/hw.elf      "utility,system,hardware"
 	@echo "Disk image created: $(IMAGE)"
 
 $(FLOPPY_IMG): $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN)

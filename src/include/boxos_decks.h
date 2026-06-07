@@ -126,4 +126,13 @@
  * region's other tags. */
 #define SYSTEM_OP_MEMTAG_APPLY_PKEY 0xAA  /* (u32 region_id)(u8 pkey)           */
 
+/* ─── HW — real-HW per-process CPU state (0xB0 – 0xBF) ─────────────── */
+/* Per-process state knobs that don't fit MemTag's region-centric model.
+ * Each op acts on the CALLING process's VM context unless explicitly
+ * params-targeted. Unprivileged: a process can read or set its OWN
+ * state without elevation; cross-process mutation requires "system"
+ * (not implemented in this opcode range yet). */
+#define SYSTEM_OP_HW_LAM_GET        0xB0  /* () -> u8 lam_mode 0/1/2            */
+#define SYSTEM_OP_HW_LAM_SET        0xB1  /* (u8 lam_mode) — 0=NONE,1=U48,2=U57 */
+
 #endif // BOXOS_DECKS_H

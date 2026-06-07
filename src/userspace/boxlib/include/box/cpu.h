@@ -16,11 +16,15 @@ typedef struct PACKED {
     bool has_invariant_tsc;
     uint16_t _pad0;
     uint64_t tsc_freq_khz;      // Calibrated TSC frequency in kHz
-    /* Phase 2H+ — Intel PKU support published from g_cpu_caps after AP
-     * intersect. Userspace gates RDPKRU/WRPKRU on this byte instead of
-     * running CPUID itself. */
+    /* Real-HW feature bits published from g_cpu_caps after AP intersect.
+     * Userspace gates the corresponding ISA usage on these bytes — no
+     * syscall, no inline CPUID, no AP-divergence surprises. */
     bool has_pku;
-    uint8_t _pad1[7];           // align next field to 8 bytes
+    bool has_pks;
+    bool has_lam;
+    bool has_cet;               // shadow stack OR IBT
+    bool has_tme;
+    uint8_t _pad1[3];           // align next field to 8 bytes
     uint8_t _reserved[4072];
 } cpu_caps_page_t;
 
@@ -46,6 +50,26 @@ INLINE bool cpu_has_pku(void) {
     volatile cpu_caps_page_t* caps = CPU_CAPS;
     if (caps->magic != CPU_CAPS_MAGIC) return false;
     return caps->has_pku;
+}
+INLINE bool cpu_has_pks(void) {
+    volatile cpu_caps_page_t* caps = CPU_CAPS;
+    if (caps->magic != CPU_CAPS_MAGIC) return false;
+    return caps->has_pks;
+}
+INLINE bool cpu_has_lam(void) {
+    volatile cpu_caps_page_t* caps = CPU_CAPS;
+    if (caps->magic != CPU_CAPS_MAGIC) return false;
+    return caps->has_lam;
+}
+INLINE bool cpu_has_cet(void) {
+    volatile cpu_caps_page_t* caps = CPU_CAPS;
+    if (caps->magic != CPU_CAPS_MAGIC) return false;
+    return caps->has_cet;
+}
+INLINE bool cpu_has_tme(void) {
+    volatile cpu_caps_page_t* caps = CPU_CAPS;
+    if (caps->magic != CPU_CAPS_MAGIC) return false;
+    return caps->has_tme;
 }
 
 // Get calibrated TSC frequency in kHz. Returns 0 if not available.
