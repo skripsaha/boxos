@@ -1,4 +1,5 @@
 #include "acpi_internal.h"
+#include "apei_ghes_runtime.h"
 #include "klib.h"
 #include "vmm.h"
 #include "touch.h"
@@ -265,10 +266,34 @@ static void decode_ghes(uint8_t* entry, bool v2) {
     uint32_t records    = *(uint32_t*)(entry + 16);
     uint32_t max_sect   = *(uint32_t*)(entry + 20);
     ghes_notification_t* n = (ghes_notification_t*)(entry + 40);
+    /* Error Status Address GAS at offset 28..39, followed by the
+     * notification structure at 40 and finally an Error Status Block
+     * Length field at offset 68 (both GHES and GHESv2). We carry the
+     * Address.address field through to the runtime path so GHES
+     * processing knows where to read the GESB. */
+    uint64_t gesb_addr = *(uint64_t*)(entry + 28 + 4); /* GAS.Address @ off+4 */
+    uint32_t gesb_len  = *(uint32_t*)(entry + 68);
+    /* GHESv2 extends the entry with three 12-byte GAS blocks for the
+     * Read-Ack Register at offsets 72, 84 and two scalars at 96 + 104
+     * (preserve/write). v1 leaves those zero. */
+    uint64_t ack_addr = 0, ack_preserve = 0, ack_write = 0;
+    if (v2) {
+        ack_addr     = *(uint64_t*)(entry + 72 + 4);   /* GAS.Address */
+        ack_preserve = *(uint64_t*)(entry + 96);
+        ack_write    = *(uint64_t*)(entry + 104);
+    }
     debug_printf("[APEI]   GHES%s src=%u enabled=%u records=%u sections=%u "
-                 "notify=%s vector=%u poll=%u\n",
+                 "notify=%s vector=%u poll=%u gesb=0x%lx len=%u\n",
                  v2 ? "v2" : "", source_id, enabled, records, max_sect,
-                 ghes_notify_name(n->type), n->vector, n->poll_interval);
+                 ghes_notify_name(n->type), n->vector, n->poll_interval,
+                 (unsigned long)gesb_addr, gesb_len);
+
+    if (enabled) {
+        (void)apei_ghes_register_source(source_id, v2, n->type, n->vector,
+                                         n->poll_interval, gesb_addr,
+                                         gesb_len, ack_addr, ack_preserve,
+                                         ack_write);
+    }
 }
 
 static const char* hest_type_name(uint16_t t) {

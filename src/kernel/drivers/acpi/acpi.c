@@ -267,6 +267,17 @@ static void acpi_sci_handler(void) {
      * This also drops the SCI line so the IOAPIC can re-arm. */
     if (sts) outw((uint16_t)pm1a_evt, sts);
 
+    /* APEI/GHES SCI-notify path. Walks every HEST GHES source whose
+     * notify type == 3 (SCI), reads its Generic Error Status Block,
+     * routes Memory Error sections into mce_migrate_request and
+     * publishes Touch events for every other section. Production
+     * server firmware uses this delivery mode for SMI-correlated
+     * MCE events. */
+    {
+        extern uint32_t apei_ghes_sci_check(void);
+        (void)apei_ghes_sci_check();
+    }
+
     /* GPE0 / GPE1 drain. The status and enable blocks live back-to-back
      * inside each GPE block: STS at offset 0, EN at offset length/2.
      * Walk byte-by-byte, mask STS against EN so we only clear events we

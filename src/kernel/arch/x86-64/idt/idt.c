@@ -236,6 +236,21 @@ void exception_handler(interrupt_frame_t *frame)
 {
     atomic_fetch_add_u64(&exception_count, 1);
 
+    /* NMI (vector 2) — server-class firmware can deliver APEI/GHES
+     * notifications via NMI when a HEST source's notify type == 4. The
+     * GHES runtime walks its NMI-notify sources, defers GESB processing
+     * to K-Core via irq_defer, and returns true if any source had a
+     * pending block_status. We don't `return` after a consumed NMI —
+     * the kernel still needs to clear the NMI source on the LAPIC/PIC
+     * path (if any) and fall through to the standard NMI logging
+     * below for non-APEI NMI causes (watchdog, performance counters,
+     * etc.). */
+    if (frame->vector == 2) {
+        extern bool apei_ghes_nmi_check(void);
+        (void)apei_ghes_nmi_check();
+        /* fall through to generic NMI logging */
+    }
+
     /* Phase 2F — #MC (vector 18) routes to MCE subsystem. The handler
      * runs on the IST_MACHINE_CHECK stack (set by idt_init), walks every
      * IA32_MC<i>_STATUS bank, poisons phys pages, publishes Touch
@@ -659,6 +674,17 @@ void irq_handler(interrupt_frame_t *frame)
 
         /* Periodic scheduler parameter recalculation */
         scheduler_recalc_parameters();
+
+        /* APEI/GHES periodic poll — walks Polled-notify HEST sources
+         * whose TSC deadline has elapsed and processes their GESB.
+         * Cheap when nothing is due (per-source TSC compare in the
+         * runtime path; no work outside that). Routes firmware-side
+         * ECC events into the same poison + page-migration pipeline
+         * as #MC-delivered events. */
+        {
+            extern void apei_ghes_poll_tick(void);
+            apei_ghes_poll_tick();
+        }
 
         /* Periodic TSC recalibration tick. Cheap — just stamps a
          * timestamp + sets a pending flag every TSC_RECAL_INTERVAL_US.
