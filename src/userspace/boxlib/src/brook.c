@@ -28,13 +28,8 @@
 #include "box/cpu.h"
 #include "box/core/manifest.h"
 #include "box/core/pocket.h"
-#include "boxos_decks.h"
+#include "boxos_decks.h"  /* SYSTEM_OP_BROOK_* opcodes — single source */
 #include "arch/x86_64/cpu_wait.h"
-
-/* Mirror src/kernel/core/decks/system/system_deck.h */
-#define SYSTEM_OP_BROOK_OPEN       0x75
-#define SYSTEM_OP_BROOK_RELEASE    0x76
-#define SYSTEM_OP_BROOK_INFO       0x7A
 
 /* Shape limits — mirror kernel brook.h. Caller-side validation gives
  * better error reporting before crossing the syscall boundary. */

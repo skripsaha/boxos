@@ -8,18 +8,7 @@
 #include "box/string.h"
 #include "box/error.h"
 #include "arch/x86_64/cpu_wait.h"
-
-/* Opcodes must match system_deck.h */
-#define SYSTEM_OP_TOUCH_INTERN     0x58
-#define SYSTEM_OP_TOUCH_CLAIM      0x51
-#define SYSTEM_OP_TOUCH_RELEASE    0x52
-#define SYSTEM_OP_TOUCH_SEND       0x53
-#define SYSTEM_OP_TOUCH_AWAIT      0x54
-#define SYSTEM_OP_TOUCH_IRQ_RETURN 0x55
-#define SYSTEM_OP_TOUCH_REGISTER   0x56
-#define SYSTEM_OP_TOUCH_ACK        0x57
-
-#define DECK_SYSTEM 0xFF
+#include "boxos_decks.h"  /* DECK_SYSTEM + SYSTEM_OP_TOUCH_* — single source */
 
 TouchTagPair touch_intern(const char *tag)
 {

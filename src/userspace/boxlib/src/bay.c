@@ -2,12 +2,7 @@
 #include "box/core/manifest.h"
 #include "box/string.h"
 #include "box/error.h"
-#include "boxos_decks.h"
-
-/* Opcodes must mirror src/kernel/core/decks/system/system_deck.h */
-#define SYSTEM_OP_BAY_OPEN     0x70
-#define SYSTEM_OP_BAY_RELEASE  0x71
-#define SYSTEM_OP_BAY_SIZE     0x72
+#include "boxos_decks.h"  /* SYSTEM_OP_BAY_* opcodes — single source */
 
 void *bay_open(const char *tag, uint64_t size, uint32_t flags)
 {

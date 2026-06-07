@@ -12,21 +12,21 @@
 #include "box/core/result.h"
 #include "box/string.h"
 #include "box/error.h"
+#include "boxos_decks.h"  /* SYSTEM_OP_* opcodes — single source */
 
-#define SYS_PROC_SPAWN  0x01
-#define SYS_PROC_KILL   0x02
-#define SYS_PROC_INFO   0x03
-#define SYS_CTX_USE     0x04
-#define SYS_PROC_EXEC   0x06
-#define SYSTEM_OP_INFO  0x07
-#define SYSTEM_OP_EFI_INFO       0x60
-#define SYSTEM_OP_EFI_ESRT_GET   0x61
-#define SYSTEM_OP_EFI_VERIFY_PE  0x62
+/* SYSTEM_OP_* opcodes come from boxos_decks.h (included via box headers).
+ * Local aliases below keep call sites readable without redefining the
+ * numeric values. */
+#define SYS_PROC_SPAWN  SYSTEM_OP_PROC_SPAWN
+#define SYS_PROC_KILL   SYSTEM_OP_PROC_KILL
+#define SYS_PROC_INFO   SYSTEM_OP_PROC_INFO
+#define SYS_CTX_USE     SYSTEM_OP_CTX_USE
+#define SYS_PROC_EXEC   SYSTEM_OP_PROC_EXEC
+#define SYS_DEFRAG      SYSTEM_OP_DEFRAG_FILE
+#define SYS_FRAG_SCORE  SYSTEM_OP_FRAG_SCORE
 #define EFI_INFO_BLOB_SIZE       128u
 #define EFI_VERIFY_PE_OUT_SIZE   80u
 #define EFI_ESRT_ENTRY_SIZE      40u
-#define SYS_DEFRAG      0x18
-#define SYS_FRAG_SCORE  0x19
 #define SYS_TAG_ADD     0x20
 #define SYS_TAG_REMOVE  0x21
 #define SYS_TAG_CHECK   0x22

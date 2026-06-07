@@ -3,6 +3,7 @@
 #include "box/core/result.h"
 #include "box/string.h"
 #include "box/error.h"
+#include "boxos_decks.h"  /* SYSTEM_OP_MANIFEST_* opcodes — single source */
 
 /*
  * Userspace Manifest builder + submitter.
@@ -180,10 +181,6 @@ int ManifestSubmit(const Manifest *m,
  *  the POCKET_FLAG_MANIFEST_HANDLE submit path. See manifest.h for the
  *  workflow.
  * ========================================================================= */
-
-/* Mirror of kernel/core/decks/system/system_deck.h — keep in sync. */
-#define SYSTEM_OP_MANIFEST_COMPILE 0x80
-#define SYSTEM_OP_MANIFEST_RELEASE 0x81
 
 int ManifestCompileHandle(const Manifest *m, ManifestHandle *out_handle)
 {
