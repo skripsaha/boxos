@@ -61,10 +61,34 @@ void ap_entry_c(uint64_t core_index, uint64_t stack_top) {
     // K-Cores enter the guide loop — processes Pockets from MPSC queue.
     // App Cores idle until the scheduler assigns user processes.
     if (g_amp.cores[core_index].is_kcore) {
-        kcore_run_loop();  // never returns
+        /* See main.c BSP path for the activation-handshake rationale.
+         * On real-HW this flips S_CET.SH_STK_EN=1 for this CPU and
+         * JMPs into kcore_run_loop; on TCG it degrades to a direct
+         * call. K-Cores never context switch processes so the per-CPU
+         * PL0_SSP from cet_lifecycle_init_supervisor_ssp is the
+         * permanent supervisor SSP for this core. */
+        extern void cet_supv_shstk_activate_and_jump(void (*)(void));
+        cet_supv_shstk_activate_and_jump(kcore_run_loop);
+        /* unreachable */
     }
 
-    // App Core: enable interrupts and wait for scheduling
+    /* App Core idle hand-off, wrapped in the same SH_STK_EN activation
+     * pattern. The app_core_idle target is __noreturn (sti + hlt-loop);
+     * future LAPIC timer / IPI_WAKE interrupts wake it into the scheduler
+     * which then context-switches via task_switch_to whose SAVE/RESTORE
+     * macros consult ctx.pl0_ssp once g_cet_supv_active=1. */
+    extern void cet_supv_shstk_activate_and_jump(void (*)(void));
+    extern void app_core_idle_loop(void);
+    cet_supv_shstk_activate_and_jump(app_core_idle_loop);
+    /* unreachable */
+}
+
+/* App Core idle target — exposed as a non-static function so the
+ * activation handshake's JMP-through-register operand can resolve it.
+ * Marked noreturn because the only exit is via interrupt (which IRETQs
+ * directly back into the scheduler, not via RET into here). */
+__attribute__((noreturn))
+void app_core_idle_loop(void) {
     __asm__ volatile("sti");
     while (1) {
         __asm__ volatile("hlt");

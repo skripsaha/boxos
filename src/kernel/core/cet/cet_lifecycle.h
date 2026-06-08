@@ -133,6 +133,66 @@ error_t cet_lifecycle_init_supervisor_ssp(uint8_t core_idx);
  * future runtime CET disable; not called from any hot path. */
 void cet_lifecycle_release_supervisor_ssp(uint8_t core_idx);
 
+/* ─── Per-process kernel shadow stack ───
+ *
+ * cet_process_create_kernel_ssp allocates a 4 KiB supervisor SSP page
+ * for `proc`, marks the PTE with bit 60 (VMM_PTE_CET_SS_SUPV), writes
+ * the supervisor SSP token at the page top, and PRE-PUSHES `entry_rip`
+ * one slot below via WRSSQ. Sets proc->kernel_ssp_phys / kernel_ssp_va_top
+ * and proc->context.pl0_ssp = top - 8.
+ *
+ * Why pre-push? When task_restore_context first scheduling this process
+ * does `push entry_rip; RET`, the regular-stack pop gives entry_rip;
+ * the shadow-stack pop gives the value at PL0_SSP — which we made equal
+ * to entry_rip via the WRSSQ. Mismatch → #CP. The pre-push is the
+ * canonical "first frame" pattern (Linux uses the same shape for fork()
+ * shadow-stack hand-off).
+ *
+ * Returns OK on success; ERR_UNSUPPORTED when CET is dormant on this CPU
+ * (proc gets zero SSP fields and runs without per-process supv SHSTK —
+ * acceptable when SH_STK_EN is also off, fatal if it's on); ERR_NO_MEMORY
+ * on alloc failure.
+ *
+ * Must be called AFTER task_init_context (so entry_rip == ctx.rip) and
+ * AFTER cet_lifecycle_init_bsp / cet_lifecycle_init_supervisor_ssp on
+ * the calling CPU (so CR4.CET=1 + S_CET.WR_SHSTK_EN=1 for WRSSQ to work). */
+error_t cet_process_create_kernel_ssp(struct process_t *proc, uintptr_t entry_rip);
+
+/* Free the per-process kernel SSP page. Idempotent on a process with no
+ * allocated SSP. Mirrors cet_process_destroy semantics. */
+void cet_process_destroy_kernel_ssp(struct process_t *proc);
+
+/* ─── Activation handshake — last action before scheduler / idle ───
+ *
+ * Flips IA32_S_CET.SH_STK_EN = 1, sets g_cet_supv_active = 1, and JMPs
+ * to `target` without ever returning. Caller MUST be unable to return
+ * — there's no matching FAR CALL on the shadow stack for any return,
+ * so any RET that fires under SH_STK_EN=1 with an empty shadow stack
+ * crashes the kernel.
+ *
+ * The CALLer of this function is the LAST function on the current call
+ * chain whose CALL was made before SH_STK_EN flipped. That CALL didn't
+ * push to the shadow stack. So this function ABANDONS the call chain
+ * (no RET) and JMPs to a forever-running target.
+ *
+ * Target candidates:
+ *   - kcore_run_loop (BSP + AP K-Cores) — already noreturn
+ *   - app_core_idle_loop (AP App Cores) — must be noreturn
+ *
+ * Safe to call when CET is dormant — degrades to direct call into target
+ * (target is responsible for never returning either way).
+ *
+ * After return-via-jump:
+ *   - SH_STK_EN=1 globally for this CPU
+ *   - Every CALL/RET in `target`'s execution tracks IA32_PL0_SSP
+ *   - Context switches use SAVE/RESTORE_PL0_SSP to swap per-process SSP
+ *   - New processes created after this point MUST have kernel SSP
+ *     allocated via cet_process_create_kernel_ssp, else first
+ *     task_restore_context #CPs
+ */
+__attribute__((noreturn))
+void cet_supv_shstk_activate_and_jump(void (*target)(void));
+
 /* Per-process shadow-stack alloc. Called from process_create after the
  * user VA layout is fixed. Allocates a 4 KiB page from PMM, maps it
  * into the process's vmm_context with VMM_FLAG_PRESENT |

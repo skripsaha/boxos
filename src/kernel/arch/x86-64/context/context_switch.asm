@@ -27,10 +27,52 @@ section .text
 %define CTX_RFLAGS   152
 %define CTX_FPU      168
 %define CTX_FPU_INIT 176
+%define CTX_PL0_SSP  184             ; Per-process IA32_PL0_SSP snapshot
 
 ; Externals from fpu.c
 extern g_use_xsave
 extern g_xsave_mask
+
+; CET supervisor SHSTK activation flag (cet_lifecycle.c). Single byte:
+;   0 = CET supervisor shadow stack inactive (TCG, real-HW pre-activation,
+;       CPUs without SHSTK)
+;   1 = S_CET.SH_STK_EN=1 active on this boot — CALL/RET track PL0_SSP,
+;       context switches MUST swap PL0_SSP via WRMSR (0x6A4)
+;
+; All MSR-touching paths below gate on this flag: when 0, the SAVE/RESTORE
+; macros expand to one CMP + JE, no MSR access — zero TCG overhead and no
+; per-CPU divergence on heterogeneous (P-core + E-core) silicon.
+extern g_cet_supv_active
+
+; ─── PL0_SSP save/restore macros ─────────────────────────────────────
+;
+; SAVE_PL0_SSP rdi:
+;   if g_cet_supv_active: RDMSR IA32_PL0_SSP (0x6A4), store to [rdi+CTX_PL0_SSP]
+;   Clobbers: rax, rcx, rdx (caller saves before invoking)
+%macro SAVE_PL0_SSP 1
+    cmp byte [rel g_cet_supv_active], 0
+    je %%skip
+    mov ecx, 0x6A4
+    rdmsr
+    shl rdx, 32
+    or rax, rdx
+    mov [%1 + CTX_PL0_SSP], rax
+%%skip:
+%endmacro
+
+; RESTORE_PL0_SSP rdi:
+;   if g_cet_supv_active: load [rdi+CTX_PL0_SSP], WRMSR IA32_PL0_SSP
+;   Clobbers: rax, rcx, rdx
+%macro RESTORE_PL0_SSP 1
+    cmp byte [rel g_cet_supv_active], 0
+    je %%skip
+    mov ecx, 0x6A4
+    mov rax, [%1 + CTX_PL0_SSP]
+    mov rdx, rax
+    shr rdx, 32
+    wrmsr
+%%skip:
+%endmacro
 
 ;--------------------------------------------------------------
 ; task_save_context(ProcessContext* ctx)
@@ -100,6 +142,8 @@ task_save_context:
     mov byte [rdi + CTX_FPU_INIT], 1
 
 .save_fpu_done:
+    ; Save IA32_PL0_SSP — no-op when CET supervisor SHSTK is inactive.
+    SAVE_PL0_SSP rdi
     ret
 
 ;--------------------------------------------------------------
@@ -164,6 +208,11 @@ task_restore_context:
 
     mov rax, [rdi + CTX_RIP]
     push rax
+
+    ; Restore IA32_PL0_SSP BEFORE the final RAX restore — RESTORE_PL0_SSP
+    ; clobbers rax/rcx/rdx. After this WRMSR, the next RET pops the
+    ; supervisor shadow stack at the new ctx.pl0_ssp slot.
+    RESTORE_PL0_SSP rdi
 
     ; Restore rax and rdi last
     mov rax, [rdi + 0]
@@ -237,6 +286,8 @@ task_switch_to:
     mov byte [rdi + CTX_FPU_INIT], 1
 
 .switch_save_done:
+    ; Save OLD process's IA32_PL0_SSP into old ctx.
+    SAVE_PL0_SSP rdi
 
     ; --- Restore new context ---
     ; Restore FPU/SSE/AVX state first
@@ -294,6 +345,10 @@ task_switch_to:
 
     mov rax, [rsi + CTX_RIP]
     push rax
+
+    ; Restore NEW process's IA32_PL0_SSP before final scratch restore.
+    ; RESTORE_PL0_SSP clobbers rax/rcx/rdx; rsi still holds new ctx ptr.
+    RESTORE_PL0_SSP rsi
 
     ; Restore rax, rsi, rdi last
     mov rax, [rsi + 0]

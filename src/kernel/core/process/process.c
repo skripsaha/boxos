@@ -784,6 +784,7 @@ void process_destroy(process_t *proc)
      * leak the SSP PMM page since it's not in the heap/stack/code
      * tracking the destroyer walks). */
     cet_process_destroy(proc);
+    cet_process_destroy_kernel_ssp(proc);
 
     /* Final state set is COMPLETE — now safe to poison the magic. Any
      * sibling-core dereference past this point is a real bug we want to
@@ -946,6 +947,20 @@ int process_load_binary(process_t *proc, const void *binary_data, size_t size)
      * and below the region come for free — the VMM never auto-populates
      * the surrounding pages, so any walk into them faults cleanly. */
     (void)cet_process_create(proc);
+
+    /* Per-process supervisor SSP — backs task_save/restore_context's
+     * IA32_PL0_SSP swap when S_CET.SH_STK_EN=1. Pre-pushes the kernel
+     * entry RIP (= proc->context.rip set above) one slot below the
+     * supervisor token so the very first task_restore_context's RET
+     * pops a matching shadow-stack entry instead of underflowing.
+     *
+     * Idempotent + safe on CPUs without SHSTK + safe when CET is
+     * dormant (returns OK with zero SSP fields). Currently always
+     * called even when SH_STK_EN is OFF — the SSP page sits unused
+     * but doesn't hurt; the activation handshake later flips
+     * g_cet_supv_active=1 and only then does context_switch.asm
+     * consult ctx.pl0_ssp. */
+    (void)cet_process_create_kernel_ssp(proc, entry_point);
 
     debug_printf("[PROCESS] ASLR: PID %u heap=0x%lx stack=0x%lx buf=0x%lx ssp=0x%lx\n",
                  proc->pid, heap_start, stack_top, proc->aslr_buf_heap_base,

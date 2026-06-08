@@ -922,7 +922,15 @@ void kernel_main(void)
         }
 
         kprintf("[KERNEL] BSP entering K-Core guide loop...\n");
-        kcore_run_loop(); // never returns
+        /* Final step on BSP boot path: flip S_CET.SH_STK_EN=1 and JMP
+         * into kcore_run_loop without returning. The activation function
+         * is __noreturn because the current call chain has no matching
+         * pushes on the shadow stack (built up before SH_STK_EN was on),
+         * so any RET past activation would #CP. Dormant on TCG / CPUs
+         * without SHSTK — degrades to a direct kcore_run_loop call. */
+        extern void cet_supv_shstk_activate_and_jump(void (*)(void));
+        cet_supv_shstk_activate_and_jump(kcore_run_loop);
+        /* unreachable */
     }
 
     /* ----------------------------------------------------------------
