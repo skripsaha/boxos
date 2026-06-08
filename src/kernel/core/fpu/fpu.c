@@ -86,14 +86,23 @@ void enable_fpu(void) {
     // Step 2: CR4 bring-up — Intel SDM Vol 3A §2.5.
     asm volatile("mov %%cr4, %0" : "=r"(cr4));
 
-    /* 5-level paging (LA57) interlock. Intel SDM Vol 3A §4.5: if firmware
-     * already set CR4.LA57=1, page-walks expect 5 levels and our 4-level
-     * PML4 will #GP on first user-mode fault. We don't yet implement 5LP,
-     * so refuse to keep going rather than triple-fault later. */
-    if (cr4 & (1ULL << 12)) {
-        panic("[FPU] CR4.LA57 set by firmware — 5-level paging not supported "
-              "by this kernel. Disable LA57 in firmware/BIOS or run with 4-level.");
-    }
+    /* 5-level paging (LA57) interlock.
+     *
+     * The kernel now supports CR4.LA57 — vmm_init builds either a PML4
+     * (4-level) or PML5 (5-level) top-level table based on g_cpu_caps.has_la57
+     * and either inherits firmware's CR4.LA57=1 or performs a runtime
+     * transition (see vmm_la57.asm + vmm_init's LA57 dance block) before
+     * any user-mode fault can occur.
+     *
+     * On the BSP, this code runs BEFORE vmm_init builds the kernel context.
+     * If firmware left CR4.LA57=1, that's fine — vmm_init detects the bit
+     * and adopts 5-level natively. If firmware left CR4.LA57=0, vmm_init
+     * will set it via the runtime dance after kernel mappings are ready.
+     *
+     * On APs, vmm_pku_ap_init / per_core_init_ap propagate CR4.LA57 via the
+     * ap_trampoline's extra_cr4 mask before paging is enabled — by the time
+     * enable_fpu runs on an AP, CR4.LA57 already matches g_vmm_la57_active.
+     */
 
     cr4 |= (1ULL << 9);   // OSFXSR
     cr4 |= (1ULL << 10);  // OSXMMEXCPT

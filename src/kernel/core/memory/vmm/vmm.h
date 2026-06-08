@@ -81,6 +81,7 @@
 extern uint64_t vmm_pte_addr_mask;
 extern uint8_t vmm_maxphyaddr;
 
+#define VMM_PML5_INDEX(addr)    (((addr) >> 48) & 0x1FF)
 #define VMM_PML4_INDEX(addr)    (((addr) >> 39) & 0x1FF)
 #define VMM_PDPT_INDEX(addr)    (((addr) >> 30) & 0x1FF)
 #define VMM_PD_INDEX(addr)      (((addr) >> 21) & 0x1FF)
@@ -91,6 +92,22 @@ typedef uint64_t pte_t;
 typedef struct {
     pte_t entries[512];
 } __attribute__((aligned(4096))) page_table_t;
+
+/* 5-level paging (LA57) runtime mode.
+ *
+ * g_vmm_paging_levels is 4 (PML4 root) or 5 (PML5 root). Detected and
+ * potentially enabled in vmm_init based on g_cpu_caps.has_la57. When 5,
+ * every walker descends PML5 → PML4 → PDPT → PD → PT; when 4, walks
+ * start at PML4. Intel SDM Vol 3A §4.5 / AMD APM Vol 2 §5.3.5.
+ *
+ * Canonical-address rule under LA57: bits 63:57 must match bit 56
+ * (vs. bits 63:48 match bit 47 in 4-level).
+ *
+ * g_vmm_la57_active mirrors `g_vmm_paging_levels == 5` for fast bool
+ * checks and is published with __ATOMIC_RELEASE after CR4.LA57 is set,
+ * so APs reading it with __ATOMIC_ACQUIRE see a consistent snapshot. */
+extern int  g_vmm_paging_levels;
+extern bool g_vmm_la57_active;
 
 /* Phase 2I LAM mode — per-context opt-in. Stored on vmm_context_t so
  * vmm_build_cr3 can OR in the CR3.LAM_U48/U57 bits without per-call

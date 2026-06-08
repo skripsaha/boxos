@@ -673,7 +673,7 @@ else
 				-device ahci$(comma)id=ahci -device ide-hd$(comma)drive=disk0$(comma)bus=ahci.0, \
 				-drive format=raw$(comma)file=$<$(comma)index=0$(comma)media=disk)) \
 		$(if $(filter on,$(STRICT)), \
-		    -cpu max$(comma)+invtsc$(comma)+rdrand$(comma)+rdseed$(comma)-la57 \
+		    -cpu max$(comma)+invtsc$(comma)+rdrand$(comma)+rdseed \
 		    -overcommit cpu-pm=on \
 		    -d guest_errors$(comma)unimp$(comma)cpu_reset) \
 		-m $(MEM) \

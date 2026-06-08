@@ -16,6 +16,7 @@ global ap_trampoline_data
 %define DATA_OFFSET_CR3        (ap_trampoline_data - ap_trampoline_start)
 %define DATA_OFFSET_STACK      (ap_trampoline_data - ap_trampoline_start + 8)
 %define DATA_OFFSET_CORE_IDX   (ap_trampoline_data - ap_trampoline_start + 16)
+%define DATA_OFFSET_EXTRA_CR4  (ap_trampoline_data - ap_trampoline_start + 20)
 %define GDT_PTR_OFFSET         (ap_gdt_ptr - ap_trampoline_start)
 
 ap_trampoline_start:
@@ -64,6 +65,14 @@ ap_protected:
     ;                        deliver as #XF instead of #UD.
     mov eax, cr4
     or eax, (1 << 5)  | (1 << 7) | (1 << 9) | (1 << 10)
+    ; extra_cr4 mask (DATA_OFFSET_EXTRA_CR4) — set by amp_boot_aps to:
+    ;   bit 12 (LA57) when BSP enabled 5-level paging — must be set BEFORE
+    ;          CR0.PG=1 (Intel SDM §4.5: CR4.LA57 cannot change while
+    ;          paging is on).
+    ; OR it in defensively in 32-bit mode here, then continue with paging
+    ; enablement below. ebx must still hold 0x8000 for the data fetch.
+    mov ebx, 0x8000
+    or eax, [ebx + DATA_OFFSET_EXTRA_CR4]
     mov cr4, eax
 
     ; Load CR3 from data area using register arithmetic (avoids ABS warning)
@@ -133,8 +142,12 @@ ap_gdt_ptr:
 
 align 8
 ap_trampoline_data:
-    dq 0    ; +0:  CR3 (physical PML4 address)
+    dq 0    ; +0:  CR3 (physical PML4 / PML5 address)
     dq 0    ; +8:  AP stack top (virtual)
     db 0    ; +16: core_index
+    db 0    ; +17: padding
+    db 0    ; +18: padding
+    db 0    ; +19: padding
+    dd 0    ; +20: extra CR4 bits (LA57 when 5-level paging is active on BSP)
 
 ap_trampoline_end:

@@ -287,6 +287,16 @@ void amp_boot_aps(void)
         memcpy(data_area + 8, &stack_top, 8);
         // +16: core_index
         data_area[16] = c->core_index;
+        // +20: extra CR4 bits to OR into CR4 in the trampoline's 32-bit
+        // phase BEFORE CR0.PG=1. Currently only CR4.LA57 (bit 12) needs to
+        // be propagated — Intel SDM Vol 3A §4.5: CR4.LA57 cannot be modified
+        // while paging is enabled, and the BSP's chosen CR3 is a PML5 root
+        // when 5-level paging is active. Without LA57 set on the AP before
+        // CR0.PG=1, the AP would walk the PML5 as a PML4 and crash.
+        uint32_t extra_cr4 = __atomic_load_n(&g_vmm_la57_active, __ATOMIC_ACQUIRE)
+                                 ? (1u << 12)
+                                 : 0u;
+        memcpy(data_area + 20, &extra_cr4, 4);
 
         // Memory fence before SIPI
         mfence();
