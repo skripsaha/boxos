@@ -59,6 +59,23 @@ typedef struct
     // fpu_save/fpu_restore align this pointer to 64 bytes at runtime via fpu_align().
     uint8_t *fpu_state;
     bool fpu_initialized;
+    uint8_t _pad_ssp[7];               /* align pl0_ssp to 8 bytes */
+
+    /* CET — per-process supervisor SSP MSR snapshot (Intel SDM Vol 3D §17).
+     *
+     * Saved by task_save_context via RDMSR IA32_PL0_SSP (0x6A4); restored by
+     * task_restore_context via WRMSR IA32_PL0_SSP. Both ops are gated on
+     * `g_cet_supv_active` (1 byte global, set when S_CET.SH_STK_EN flips
+     * to 1); on TCG (no SHSTK) and on real-HW before the activation, the
+     * flag stays 0 and the asm path skips the MSR access — pl0_ssp is dead
+     * weight then, no boot-time cost.
+     *
+     * For new processes, cet_process_create_kernel_ssp allocates a 4 KiB
+     * supervisor SSP page, writes a supervisor token at the top, pre-pushes
+     * the kernel-entry RIP one slot below, and stores SSP=top-8 here so
+     * task_restore_context's first RET pops a matching shadow-stack entry.
+     */
+    uint64_t pl0_ssp;
 } ProcessContext;
 
 // These offsets must match context_switch.asm — if the struct layout changes,
@@ -68,6 +85,7 @@ _Static_assert(offsetof(ProcessContext, cs) == 136, "ProcessContext.cs offset mi
 _Static_assert(offsetof(ProcessContext, rflags) == 152, "ProcessContext.rflags offset mismatch with asm");
 _Static_assert(offsetof(ProcessContext, fpu_state) == 168, "ProcessContext.fpu_state offset mismatch with asm");
 _Static_assert(offsetof(ProcessContext, fpu_initialized) == 176, "ProcessContext.fpu_initialized offset mismatch with asm");
+_Static_assert(offsetof(ProcessContext, pl0_ssp) == 184, "ProcessContext.pl0_ssp offset mismatch with asm");
 
 typedef struct process_t
 {
@@ -190,6 +208,30 @@ typedef struct process_t
     uintptr_t         user_ssp_phys;
     uintptr_t         user_ssp_va;
     uint32_t          user_ssp_size;
+
+    /* Per-process supervisor shadow stack — backing for the process's
+     * kernel CALL/RET tracking when S_CET.SH_STK_EN=1. Each process gets
+     * its own 4 KiB kernel SSP page; context switches between processes
+     * swap IA32_PL0_SSP so process A's kernel CALLs don't pollute process
+     * B's shadow stack.
+     *
+     * Layout of the SSP page (kernel direct map, PTE bit 60 set):
+     *   [top - 0]    supervisor SSP token (Intel SDM Vol 1 §17.2.3):
+     *                 value = top | 0x1 (mode bit)
+     *   [top - 8]    pre-pushed kernel entry RIP — what task_restore_context's
+     *                 first RET pops off the shadow stack to match the regular-
+     *                 stack push (otherwise the brand-new process's first RET
+     *                 would #CP against an empty shadow stack).
+     *
+     * ProcessContext.pl0_ssp is initialised to (top - 8) so the very first
+     * task_restore_context's WRMSR IA32_PL0_SSP lands on the pre-pushed
+     * entry; subsequent CALL/RET pairs grow the stack inside the page.
+     *
+     * Zero on processes created before SHSTK activation, on CPUs without
+     * SHSTK, and on K-Core threads (kernel threads use per-CPU PL0_SSP
+     * from cet_lifecycle_init_supervisor_ssp). */
+    uintptr_t         kernel_ssp_phys;
+    uintptr_t         kernel_ssp_va_top;
 
     struct process_t *hash_next;    // hash table collision chain
     struct process_t *next;         // global process list (forward)

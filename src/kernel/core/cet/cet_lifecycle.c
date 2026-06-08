@@ -36,6 +36,41 @@
  *   bit 0      — 1 for supervisor token, 0 for user token */
 #define CET_SUPV_TOKEN_MODE_BIT     0x1ULL
 
+/* WRSSQ — Write 8 bytes to a supervisor-shadow-stack page.
+ *
+ * Intel SDM Vol 2 §WRSSQ: writes a 64-bit value to memory whose PTE has
+ * the supervisor-SS bit (60) set. CPL=0 + CR4.CET=1 +
+ * IA32_S_CET.WR_SHSTK_EN=1 required.
+ *
+ * Critical: a NORMAL store to a bit-60 page FAULTS — only WRSSQ /
+ * WRUSS / SETSSBSY / RSTORSSP are allowed write paths into shadow stack
+ * memory. The kernel must use this primitive when initialising supervisor
+ * SSP tokens and when pushing the first synthetic entry during the
+ * SH_STK_EN activation handshake.
+ *
+ * Why raw byte encoding: older binutils don't accept the `wrssq`
+ * mnemonic; raw bytes are portable. REX.W + 0F 38 F6 /r is the encoding;
+ * here we use a r/m memory operand with a register source. */
+static inline void cet_wrssq8(uint64_t val, uintptr_t addr) {
+    __asm__ volatile(
+        /* wrssq %rax, (%rbx) — REX.W=1, opcode 0F 38 F6 /r, ModR/M=03 */
+        "movq %0, %%rax\n\t"
+        "movq %1, %%rbx\n\t"
+        ".byte 0x48, 0x0f, 0x38, 0xf6, 0x03\n\t"  /* wrssq %rax, (%rbx) */
+        :
+        : "r"(val), "r"(addr)
+        : "rax", "rbx", "memory"
+    );
+}
+
+/* INVLPG — flush a single page's TLB entry on the current CPU. Needed
+ * after toggling PTE.bit60 so subsequent accesses see the new attribute
+ * (otherwise stale TLB would let normal stores succeed on a page now
+ * marked shadow-stack, or reject WRSSQ on a page seen as non-SS). */
+static inline void cet_invlpg(uintptr_t addr) {
+    __asm__ volatile("invlpg (%0)" :: "r"(addr) : "memory");
+}
+
 /* ─── IA32_S_CET / IA32_U_CET bits (Intel SDM Vol 3D §17.2.1) ─── */
 
 #define CET_MSR_SH_STK_EN        (1ULL <<  0)   /* Shadow Stack Enable */
@@ -87,6 +122,19 @@ static volatile bool g_shstk_active    = false;
 static volatile bool g_ibt_active      = false;
 static volatile bool g_xsave_cet_s     = false;
 static volatile bool g_xsave_cet_u     = false;
+
+/* Public flag — read from context_switch.asm SAVE_PL0_SSP / RESTORE_PL0_SSP
+ * macros. Set to 1 by cet_supv_shstk_activate_and_jump when S_CET.SH_STK_EN
+ * flips on (per BSP / per AP). Stays 0 in two cases that the asm path
+ * skips MSR access for:
+ *   - CPU lacks SHSTK (TCG, AMD Zen 1/2/3, pre-Tiger Lake Intel)
+ *   - has_shstk=true but activation hasn't run yet on this CPU
+ * Single byte + RELAXED-OR-ZERO semantics: asm does `cmp byte [..], 0` →
+ * no atomics needed, the read becomes consistent at the next context
+ * switch on this CPU which is always after the activation completes.
+ * 8-byte alignment leaves the surrounding 7 bytes safe for unrelated
+ * single-byte loads. */
+volatile uint8_t g_cet_supv_active __attribute__((aligned(8))) = 0;
 
 static volatile uint64_t g_stat_cp_faults  = 0;
 static volatile uint64_t g_stat_ssp_allocs = 0;
@@ -437,37 +485,29 @@ error_t cet_lifecycle_init_supervisor_ssp(uint8_t core_idx)
                                        CET_SUPV_IST_LEVELS);
     }
 
-    /* ─── Mark SSP pages with PTE bit 60 (VMM_PTE_CET_SS_SUPV) ───
+    /* ─── Write supervisor SSP tokens via WRSSQ ───
      *
-     * Intel SDM Vol 3A §4.5: a page accessed by CPU shadow-stack
-     * instructions (RDSSP, INCSSPQ, RSTORSSP, SETSSBSY, WRSS) requires
-     * its leaf PTE to have the supervisor-SS bit set. Without the bit,
-     * the very first shadow-stack micro-op faults with #PF instead of
-     * completing the SSP read/write.
+     * Token placement, ordering, and access path:
      *
-     * Why ISST page does NOT get the bit: the IA32_INTERRUPT_SSP_TABLE_ADDR
-     * page is plain kernel data — the CPU READS table entries via normal
-     * loads, not via shadow-stack instructions. */
-    vmm_context_t *kctx = vmm_get_kernel_context();
-    if (kctx) {
-        pte_t *p = vmm_get_or_create_pte(kctx, pl0_va);
-        if (p) *p |= VMM_PTE_CET_SS_SUPV;
-        for (int i = 0; i < CET_SUPV_IST_LEVELS; i++) {
-            p = vmm_get_or_create_pte(kctx, ist_va[i]);
-            if (p) *p |= VMM_PTE_CET_SS_SUPV;
-        }
-    }
-
-    /* ─── Write supervisor SSP tokens ───
+     *   1. Write the token via NORMAL store BEFORE the PTE flips to
+     *      shadow-stack. A normal store to a non-SS page is unrestricted;
+     *      a normal store to a bit-60 page faults (only WRSSQ/RSTORSSP
+     *      may write to shadow-stack memory per Intel SDM §17.2.1).
+     *      We exploit the pre-flip window so init works without depending
+     *      on WRSSQ availability at this stage.
      *
-     * Each SSP page reserves its top 8 bytes for a supervisor SSP token
-     * (Intel SDM Vol 1 §17.2.3). The token's value equals its own VA
-     * with the mode bit (bit 0) set. The CPU validates the token on
-     * RSTORSSP / SETSSBSY / interrupt delivery into supervisor mode.
+     *   2. Flip PTE bit 60 (VMM_PTE_CET_SS_SUPV) — Intel SDM Vol 3A §4.5
+     *      requires the supervisor-SS bit for any page consumed by
+     *      RDSSP/RSTORSSP/SETSSBSY/etc.
      *
-     * SSP value points AT the token (= top - 0) — push grows down, so the
-     * first interrupt push lands at top - 8 (the slot just below the
-     * token). The token itself stays unchanged on every push. */
+     *   3. INVLPG to drop any stale TLB entry from earlier kernel writes
+     *      (Pull Map zero-fill, etc.). Without the flush, a stale TLB
+     *      entry without bit 60 set could let a NORMAL store succeed
+     *      after the flip — defeating the protection.
+     *
+     * Token format (Intel SDM Vol 1 §17.2.3): bits 63:3 = SSP value
+     * (token's own VA, 8B-aligned), bit 0 = 1 (supervisor mode bit).
+     */
     uintptr_t pl0_top = pl0_va + (PMM_PAGE_SIZE - 8);
     *(volatile uint64_t *)pl0_top = (uint64_t)pl0_top | CET_SUPV_TOKEN_MODE_BIT;
 
@@ -476,6 +516,22 @@ error_t cet_lifecycle_init_supervisor_ssp(uint8_t core_idx)
         ist_top[i] = ist_va[i] + (PMM_PAGE_SIZE - 8);
         *(volatile uint64_t *)ist_top[i] =
             (uint64_t)ist_top[i] | CET_SUPV_TOKEN_MODE_BIT;
+    }
+
+    /* Flip PTE bit 60 for every SSP page (token already written above
+     * via the pre-flip normal-store window). The ISST page does NOT
+     * get the bit — the CPU reads it via normal loads, not via
+     * shadow-stack instructions. */
+    vmm_context_t *kctx = vmm_get_kernel_context();
+    if (kctx) {
+        pte_t *p = vmm_get_or_create_pte(kctx, pl0_va);
+        if (p) *p |= VMM_PTE_CET_SS_SUPV;
+        cet_invlpg(pl0_va);
+        for (int i = 0; i < CET_SUPV_IST_LEVELS; i++) {
+            p = vmm_get_or_create_pte(kctx, ist_va[i]);
+            if (p) *p |= VMM_PTE_CET_SS_SUPV;
+            cet_invlpg(ist_va[i]);
+        }
     }
 
     /* ─── Populate IA32_INTERRUPT_SSP_TABLE_ADDR table ───
@@ -551,4 +607,117 @@ void cet_lifecycle_release_supervisor_ssp(uint8_t core_idx)
         pc->ist_ssp_top_va[i] = 0;
     }
     pc->cet_supv_ready = false;
+}
+
+/* ─── Per-process kernel SSP ──────────────────────────────────────── */
+
+error_t cet_process_create_kernel_ssp(struct process_t *proc, uintptr_t entry_rip)
+{
+    if (!proc) return ERR_INVALID_ARGUMENT;
+    if (!g_cet_enabled || !g_cpu_caps.has_shstk) {
+        proc->kernel_ssp_phys = 0;
+        proc->kernel_ssp_va_top = 0;
+        proc->context.pl0_ssp = 0;
+        return OK;
+    }
+
+    void *phys = pmm_alloc_zero(1);
+    if (!phys) return ERR_NO_MEMORY;
+
+    uintptr_t va = (uintptr_t)vmm_phys_to_virt((uintptr_t)phys);
+    if (!va) {
+        pmm_free(phys, 1);
+        return ERR_NO_MEMORY;
+    }
+    uintptr_t top = va + (PMM_PAGE_SIZE - 8);
+
+    /* Pre-flip window: write supervisor token via NORMAL store before the
+     * PTE flips to bit-60 (shadow-stack-only). This avoids a WRSSQ
+     * dependency for the very first write. */
+    *(volatile uint64_t *)top = (uint64_t)top | CET_SUPV_TOKEN_MODE_BIT;
+
+    /* Flip PTE bit 60 + INVLPG so subsequent WRSSQ recognises the page
+     * as supervisor shadow stack. */
+    vmm_context_t *kctx = vmm_get_kernel_context();
+    if (kctx) {
+        pte_t *p = vmm_get_or_create_pte(kctx, va);
+        if (p) *p |= VMM_PTE_CET_SS_SUPV;
+        cet_invlpg(va);
+    }
+
+    /* WRSSQ the pre-pushed entry RIP one slot below the token. The very
+     * first task_restore_context for this process does
+     *   push entry_rip; RET
+     * RET pops entry_rip from the regular stack AND from the shadow
+     * stack at [top - 8] — we just wrote entry_rip there. Match → no
+     * #CP, process runs at entry_rip. */
+    cet_wrssq8((uint64_t)entry_rip, top - 8);
+
+    proc->kernel_ssp_phys   = (uintptr_t)phys;
+    proc->kernel_ssp_va_top = top;
+    proc->context.pl0_ssp   = top - 8;
+
+    debug_printf("[CET] proc=%u kernel SSP allocated: phys=0x%lx top=0x%lx "
+                 "pl0_ssp=0x%lx (entry_rip=0x%lx pre-pushed)\n",
+                 proc->pid, (unsigned long)(uintptr_t)phys,
+                 (unsigned long)top, (unsigned long)(top - 8),
+                 (unsigned long)entry_rip);
+    return OK;
+}
+
+void cet_process_destroy_kernel_ssp(struct process_t *proc)
+{
+    if (!proc) return;
+    if (!proc->kernel_ssp_phys) return;
+    pmm_free((void *)proc->kernel_ssp_phys, 1);
+    proc->kernel_ssp_phys = 0;
+    proc->kernel_ssp_va_top = 0;
+    proc->context.pl0_ssp = 0;
+}
+
+/* ─── SH_STK_EN activation handshake ──────────────────────────────── */
+
+__attribute__((noreturn))
+void cet_supv_shstk_activate_and_jump(void (*target)(void))
+{
+    /* Dormancy paths: TCG (no SHSTK), unsupported CPU, BSP refused
+     * activation. Direct-call the target — caller's contract says target
+     * never returns either way. */
+    if (!g_cet_enabled || !g_cpu_caps.has_shstk) {
+        target();
+        for (;;) __asm__ volatile("cli; hlt");
+    }
+
+    /* The activation MSR write must happen with no possibility of a
+     * RET firing on a shadow stack that has nothing matching. Order:
+     *
+     *   1. Mark g_cet_supv_active = 1 — any context switch that runs
+     *      during the brief window between here and the WRMSR below
+     *      will RESTORE_PL0_SSP based on ctx.pl0_ssp. That MSR write
+     *      lands on a CPU where SH_STK_EN is still 0, so the MSR
+     *      just updates IA32_PL0_SSP with no enforcement — harmless.
+     *      Once SH_STK_EN flips, future switches behave correctly.
+     *
+     *   2. WRMSR IA32_S_CET with SH_STK_EN OR-merged into the existing
+     *      policy. We RDMSR-then-OR-WRMSR rather than recomputing the
+     *      whole policy from scratch — preserves whatever bits any
+     *      future config tweak might have written between init_bsp
+     *      and now.
+     *
+     *   3. JMP target. JMP doesn't push to the shadow stack (unlike
+     *      CALL), so target starts with the per-CPU PL0_SSP at the
+     *      token slot — clean state. target's first CALL pushes one
+     *      below the token; subsequent CALL/RET balance. */
+    __asm__ volatile(
+        "movb $1, g_cet_supv_active(%%rip)\n\t"
+        "movl $0x6A2, %%ecx\n\t"           /* IA32_S_CET */
+        "rdmsr\n\t"
+        "orl  $1, %%eax\n\t"                /* SH_STK_EN = bit 0 */
+        "wrmsr\n\t"
+        "jmpq *%0\n\t"
+        :
+        : "r"(target)
+        : "rax", "rcx", "rdx", "memory"
+    );
+    __builtin_unreachable();
 }

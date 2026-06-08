@@ -170,16 +170,22 @@ static void per_core_gdt_set_tss(gdt_entry_t* gdt, tss_t* tss) {
     *entry6 = (base >> 32);
 }
 
-// Load GDT from descriptor pointer, then reload CS via far return and
-// all data segment registers.  Identical logic to gdt_load_asm() in gdt.c.
+// Load GDT from descriptor pointer, then reload CS via LJMP through
+// memory (NOT LRETQ — see gdt.c gdt_load_asm long comment for the
+// shadow-stack rationale). All data segment registers reloaded
+// afterwards.  Same shape as the BSP path in gdt.c.
 static void per_core_load_gdt(gdt_descriptor_t* desc) {
     __asm__ volatile (
         "lgdt (%0)\n\t"
-        "pushq %1\n\t"
+        "subq $16, %%rsp\n\t"
         "leaq 1f(%%rip), %%rax\n\t"
-        "pushq %%rax\n\t"
-        "lretq\n\t"
+        "movq %%rax, (%%rsp)\n\t"
+        "movw %w1, 8(%%rsp)\n\t"
+        /* REX.W + FF /5 ModR/M=2C SIB=24 — `ljmpq *(%rsp)`. See gdt.c
+         * for the byte-encoding rationale (binutils portability). */
+        ".byte 0x48, 0xff, 0x2c, 0x24\n\t"
         "1:\n\t"
+        "addq $16, %%rsp\n\t"
         "movw %w2, %%ax\n\t"
         "movw %%ax, %%ds\n\t"
         "movw %%ax, %%es\n\t"

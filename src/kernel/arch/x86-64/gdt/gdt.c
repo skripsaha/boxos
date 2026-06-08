@@ -7,13 +7,34 @@ static gdt_entry_t gdt[7];
 static gdt_descriptor_t gdt_desc;
 
 static void gdt_load_asm(uint64_t gdt_desc_addr) {
+    /*
+     * Reload CS via LJMP through memory (`ljmpq *m16:64`), NOT LRETQ.
+     *
+     * The classic `push CS; push label; lretq` pattern is forbidden under
+     * IA32_S_CET.SH_STK_EN=1: LRETQ pops CS+RIP from the shadow stack
+     * and #CPs when no matching FAR CALL pushed there. LJMP through a
+     * memory operand performs the same CS:RIP transfer without touching
+     * the shadow stack (CALL/RET semantics belong to near returns and
+     * far interrupt-frame returns; LJMP is treated as a tagged JMP).
+     *
+     * Layout of the 10-byte m16:64 operand on the stack:
+     *   [rsp + 0]  64-bit target RIP (offset)
+     *   [rsp + 8]  16-bit selector  (CS)
+     * 16-byte slot keeps RSP aligned and matches Intel SDM Vol 2
+     * Table 2-1 ModR/M decoding for `ljmp *m16:64`.
+     */
     asm volatile (
         "lgdt (%0)\n\t"
-        "pushq %1\n\t"
+        "subq $16, %%rsp\n\t"
         "leaq 1f(%%rip), %%rax\n\t"
-        "pushq %%rax\n\t"
-        "lretq\n\t"
+        "movq %%rax, (%%rsp)\n\t"
+        "movw %w1, 8(%%rsp)\n\t"
+        /* REX.W + FF /5 ModR/M=2C SIB=24 — `ljmpq *(%rsp)`. Older
+         * binutils don't accept `ljmpq` mnemonic for m16:64; raw bytes
+         * are portable across GAS versions. */
+        ".byte 0x48, 0xff, 0x2c, 0x24\n\t"
         "1:\n\t"
+        "addq $16, %%rsp\n\t"
         "movw %w2, %%ax\n\t"
         "movw %%ax, %%ds\n\t"
         "movw %%ax, %%es\n\t"
