@@ -83,7 +83,12 @@ global vmm_la57_runtime_enable
 ;   System V AMD64 ABI: RDI = pml5_phys
 ;
 ; pml5_phys MUST be < 4 GB. Caller asserts this; we re-check defensively.
+;
+; CET / IBT: called once from vmm_init via direct CALL. We add ENDBR64
+; at entry to keep the symbol IBT-safe in case anyone ever reaches us
+; through an indirect branch; NOP without CR4.CET=1.
 vmm_la57_runtime_enable:
+    endbr64
     pushfq
     cli
     push rbx

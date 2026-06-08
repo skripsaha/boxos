@@ -93,6 +93,12 @@ typedef struct {
      * via bits 11/12). */
     bool has_shstk;             // CPUID.07H.0:ECX[7]
     bool has_ibt;               // CPUID.07H.0:EDX[20]
+    /* PCONFIG instruction (Intel SDM Vol 2D PCONFIG, Vol 3D §16).
+     * TME and PCONFIG are co-introduced on Ice Lake-SP / Sapphire Rapids
+     * but enumerate independently per SDM. tme_init_bsp gates on BOTH
+     * bits so a hypothetical TME-yes / PCONFIG-no CPU doesn't #UD on
+     * the first MKTME_KEY_PROGRAM operand. */
+    bool has_pconfig;           // CPUID.07H.0:EDX[18]
     /* MONITOR/UMONITOR cacheline granularity — CPUID.05H. Intel SDM Vol 2A
      * UMONITOR: "The address range determined by the CPUID monitor leaf
      * function". EAX[15:0] = smallest line size, EBX[15:0] = largest.

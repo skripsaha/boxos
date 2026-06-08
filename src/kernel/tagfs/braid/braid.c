@@ -327,6 +327,14 @@ error_t BraidWriteBlock(uint64_t block_num, const void *data, const uint8_t *tag
     return result;
 }
 
+// Static scratch buffer for VerifyBlock + AutoHeal — both functions hold
+// g_braid_state.lock for their full duration, so a single BSS-resident
+// pool is mutually exclusive and avoids the catastrophic per-call stack
+// frame (uint8_t[BRAID_MAX_DISKS][BRAID_BLOCK_SIZE] = 32 KB > per-core
+// kernel stack). Located in .bss — zero runtime cost.
+static uint8_t  g_braid_verify_ref[BRAID_BLOCK_SIZE];
+static uint8_t  g_braid_verify_candidate[BRAID_BLOCK_SIZE];
+
 error_t BraidVerifyBlock(uint64_t block_num, bool *is_valid) {
     if (!g_braid_state.initialized || !is_valid)
         return ERR_NOT_INITIALIZED;
@@ -334,7 +342,12 @@ error_t BraidVerifyBlock(uint64_t block_num, bool *is_valid) {
     *is_valid = false;
 
     if (g_braid_state.active_disks < 2) {
-        // Cannot cross-verify with only one disk — read and accept if I/O succeeds
+        // Cannot cross-verify with only one disk — read and accept if I/O
+        // succeeds. BraidReadBlock takes g_braid_state.lock internally, so
+        // we must NOT hold it here (recursive spinlock = deadlock).
+        // 4 KiB on the kernel stack is well below the 8 KiB per-frame budget;
+        // the BSS pool is reserved for the multi-disk path where two 4 KiB
+        // buffers would otherwise blow the limit.
         uint8_t data[BRAID_BLOCK_SIZE];
         error_t result = BraidReadBlock(block_num, data, NULL);
         if (result == OK)
@@ -344,7 +357,6 @@ error_t BraidVerifyBlock(uint64_t block_num, bool *is_valid) {
 
     // Read from each available disk and compare checksums to detect corruption.
     // Agreement across at least two copies signals block integrity.
-    uint8_t ref_data[BRAID_BLOCK_SIZE];
     BoxHash ref_hash;
     bool ref_set = false;
     uint8_t agreements = 0;
@@ -355,14 +367,13 @@ error_t BraidVerifyBlock(uint64_t block_num, bool *is_valid) {
         if (!g_braid_state.disks[i].online)
             continue;
 
-        uint8_t candidate[BRAID_BLOCK_SIZE];
-        if (BraidReadFromDisk(i, block_num, candidate) != OK)
+        if (BraidReadFromDisk(i, block_num, g_braid_verify_candidate) != OK)
             continue;
 
-        BoxHash candidate_hash = BoxHashContent(candidate, BRAID_BLOCK_SIZE, &g_braid_state.hash_ctx);
+        BoxHash candidate_hash = BoxHashContent(g_braid_verify_candidate, BRAID_BLOCK_SIZE, &g_braid_state.hash_ctx);
 
         if (!ref_set) {
-            memcpy(ref_data, candidate, BRAID_BLOCK_SIZE);
+            memcpy(g_braid_verify_ref, g_braid_verify_candidate, BRAID_BLOCK_SIZE);
             ref_hash = candidate_hash;
             ref_set = true;
             agreements = 1;
@@ -504,14 +515,18 @@ error_t BraidWriteBlockTagged(uint64_t block_num, const void *data, const uint8_
 // Auto-healing from mirror (unique to Braid!)
 // Reads all available copies, selects the one agreed upon by majority (checksum consensus),
 // then re-writes the agreed copy to any disk that diverged.
+// BSS-resident scratch for AutoHeal — held under g_braid_state.lock,
+// mutually exclusive with VerifyBlock. Stack-frame replacement (see note
+// above g_braid_verify_ref).
+static uint8_t g_braid_heal_copies[BRAID_MAX_DISKS][BRAID_BLOCK_SIZE];
+
 error_t BraidAutoHeal(uint64_t block_num) {
     if (!g_braid_state.initialized)
         return ERR_NOT_INITIALIZED;
 
     spin_lock(&g_braid_state.lock);
 
-    // Gather one read per online disk
-    uint8_t copies[BRAID_MAX_DISKS][BRAID_BLOCK_SIZE];
+    // Gather one read per online disk into the BSS pool.
     BoxHash hashes[BRAID_MAX_DISKS];
     bool    readable[BRAID_MAX_DISKS];
 
@@ -520,8 +535,8 @@ error_t BraidAutoHeal(uint64_t block_num) {
     for (uint8_t i = 0; i < g_braid_state.disk_count; i++) {
         if (!g_braid_state.disks[i].online)
             continue;
-        if (BraidReadFromDisk(i, block_num, copies[i]) == OK) {
-            hashes[i] = BoxHashContent(copies[i], BRAID_BLOCK_SIZE, &g_braid_state.hash_ctx);
+        if (BraidReadFromDisk(i, block_num, g_braid_heal_copies[i]) == OK) {
+            hashes[i] = BoxHashContent(g_braid_heal_copies[i], BRAID_BLOCK_SIZE, &g_braid_state.hash_ctx);
             readable[i] = true;
         }
     }
@@ -555,7 +570,7 @@ error_t BraidAutoHeal(uint64_t block_num) {
         if (i == best_disk || !g_braid_state.disks[i].online)
             continue;
         if (!readable[i] || !BoxHashEqual(&hashes[i], &hashes[best_disk])) {
-            if (BraidWriteToDisk(i, block_num, copies[best_disk]) == OK)
+            if (BraidWriteToDisk(i, block_num, g_braid_heal_copies[best_disk]) == OK)
                 healed++;
         }
     }

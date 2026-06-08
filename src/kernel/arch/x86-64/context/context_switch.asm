@@ -75,11 +75,23 @@ extern g_cet_supv_active
 %endmacro
 
 ;--------------------------------------------------------------
+; CET / IBT note for task_* entries:
+;
+; Each of the four globals below is referenced from C scheduler code.
+; While today every call site is a direct call, the C compiler with
+; -fcf-protection=full emits ENDBR64 at every address-taken function
+; entry — we mirror that uniformly here so the symbol set is IBT-clean
+; under S_CET.ENDBR_EN=1. ENDBR64 is a multi-byte NOP without CET, so
+; the cost outside CET is exactly four bytes per entry.
+;--------------------------------------------------------------
+
+;--------------------------------------------------------------
 ; task_save_context(ProcessContext* ctx)
 ;   rdi = pointer to ProcessContext
 ;--------------------------------------------------------------
 global task_save_context
 task_save_context:
+    endbr64
     mov [rdi + 0],  rax
     mov [rdi + 8],  rbx
     mov [rdi + 16], rcx
@@ -152,6 +164,7 @@ task_save_context:
 ;--------------------------------------------------------------
 global task_restore_context
 task_restore_context:
+    endbr64
     ; Restore FPU/SSE/AVX state first (uses rcx, rax, rdx as scratch)
     cmp byte [rdi + CTX_FPU_INIT], 0
     je .skip_fpu_restore
@@ -226,6 +239,7 @@ task_restore_context:
 ;--------------------------------------------------------------
 global task_switch_to
 task_switch_to:
+    endbr64
     ; --- Save old context ---
     mov [rdi + 0],  rax
     mov [rdi + 8],  rbx
@@ -363,6 +377,7 @@ task_switch_to:
 ;--------------------------------------------------------------
 global task_init_context
 task_init_context:
+    endbr64
     xor rax, rax
     mov [rdi + 0],  rax
     mov [rdi + 8],  rax

@@ -33,8 +33,17 @@ global notify_entry
 
 ; =============================================================================
 ; notify_entry — SYSCALL landing pad
+;
+; CET / IBT note: SYSCALL itself does NOT set WAIT_FOR_ENDBRANCH per
+; Intel SDM Vol 3D §17.3.3 (the implicit set list excludes SYSCALL),
+; but the symbol's address is taken via `wrmsr_local(MSR_LSTAR,
+; (uint64_t)notify_entry)` and the C compiler under -fcf-protection=full
+; emits ENDBR64 at every address-taken C function. We mirror that in
+; asm: ENDBR64 here is defense-in-depth, matches Linux's
+; entry_SYSCALL_64 convention, and is a NOP when CET is off.
 ; =============================================================================
 notify_entry:
+    endbr64
     ; --- Switch to kernel stack ---
     swapgs                              ; GS now -> PerCpuData
     mov [gs:PERCPU_USER_RSP], rsp       ; save user RSP

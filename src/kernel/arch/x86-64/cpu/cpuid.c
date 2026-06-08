@@ -112,6 +112,14 @@ void cpu_detect_features(void) {
         g_cpu_caps.has_tme   = (ecx & (1u << 13)) != 0;
         g_cpu_caps.has_shstk = (ecx & (1u << 7))  != 0;
         g_cpu_caps.has_ibt   = (edx & (1u << 20)) != 0;
+        /* PCONFIG instruction presence — CPUID.07H.0:EDX[18]. Intel SDM
+         * Vol 2D PCONFIG: "#UD if CPUID.07H.0:EDX[18] = 0". TME and
+         * PCONFIG are co-introduced on Ice Lake-SP / Sapphire Rapids,
+         * but the SDM lets them enumerate independently. We gate
+         * tme_init_bsp on BOTH bits so a hypothetical TME-yes /
+         * PCONFIG-no CPU doesn't kernel-panic on the first MKTME key
+         * program. */
+        g_cpu_caps.has_pconfig = (edx & (1u << 18)) != 0;
         /* Phase 2I — Linear Address Masking lives in CPUID.7.1:EAX[26]
          * (subleaf 1, distinct from the canonical subleaf 0 above).
          * Probe only if subleaf 1 is reachable per CPUID.07H.0:EAX
@@ -478,6 +486,7 @@ void cpu_intersect_features_ap(void) {
         g_cpu_caps.has_tme   &= ((ecx & (1u << 13)) != 0);
         g_cpu_caps.has_shstk &= ((ecx & (1u << 7))  != 0);
         g_cpu_caps.has_ibt   &= ((edx & (1u << 20)) != 0);
+        g_cpu_caps.has_pconfig &= ((edx & (1u << 18)) != 0);
         if (eax >= 1) {
             uint32_t lam_eax, lam_ebx, lam_ecx, lam_edx;
             cpuid_count(CPUID_LEAF_EXT_FEATURES, 1,

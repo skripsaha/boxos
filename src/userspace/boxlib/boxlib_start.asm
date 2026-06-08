@@ -27,7 +27,20 @@ extern exit
 
 global _start
 
+; CET / IBT note:
+; The kernel reaches _start via IRETQ from ring 0, a cross-privilege return
+; that initializes the user-mode indirect-branch tracker per
+; IA32_U_CET.ENDBR_EN. With U_CET policy = SH_STK_EN|ENDBR_EN|NO_TRACK_EN
+; (cet_lifecycle.c), the tracker arrives in WAIT_FOR_ENDBRANCH on the very
+; first instruction at _start. Without ENDBR64 here, the process would #CP
+; before main() is reached. ENDBR64 is a NOP without CR4.CET=1, so the
+; non-CET path is unaffected.
+;
+; The same reasoning applies to any future userspace entry point (signal
+; trampoline, async-notify handler) — every cross-privilege landing pad
+; MUST begin with ENDBR64.
 _start:
+    endbr64
     xor rbp, rbp        ; clear base pointer so any stack trace stops here
     and rsp, -16        ; align RSP for the System V AMD64 ABI
 

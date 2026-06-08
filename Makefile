@@ -51,9 +51,86 @@ KERNEL_START_SECTOR = 17
 ASM_INCLUDE    = -I$(SRCDIR)/kernel/arch/x86-64/gdt/
 ASMFLAGS       =  -g -f bin
 ASMFLAGS_ELF   = -g -f elf64 $(ASM_INCLUDE)
+# ─── Kernel CFLAGS — production-grade real-HW hardening ────────────────────
+#
+# Core ABI:
+#   -Os                 minimize code size (kernel images are dd-cat'd onto
+#                       disk images, smaller is better)
+#   -m64                64-bit code generation
+#   -ffreestanding      no hosted-environment assumptions (no libc)
+#   -nostdlib           no linker stdlib startup
+#   -mno-red-zone       interrupt-safe: SysV red-zone overlaps IRQ frames
+#   -mno-sse -mno-mmx -mno-avx
+#                       kernel avoids SIMD; ISRs don't save SIMD state
+#   -mcmodel=kernel     RIP-relative within the high-half kernel image
+#   -fno-PIC            kernel linked at fixed VA, no PIC tables needed
+#   -fno-stack-protector
+#                       kernel has no __stack_chk_guard symbol; canaries
+#                       would link-fail
+#   -fno-omit-frame-pointer
+#                       reliable stack traces from panic/debug paths
+#   -fcf-protection=full
+#                       emit ENDBR64 at every address-taken function (IBT)
+#                       and shadow-stack-aware prologue/epilogue (SHSTK).
+#                       NOP without CR4.CET=1.
+#
+# Real-HW UB containment — every one of these closes a CLASS of UB that
+# would mis-compile silently. See Linux Makefile, https://lwn.net/Articles/342330
+# and CVE-2009-1897 (NULL-deref optimization bug):
+#   -fno-delete-null-pointer-checks
+#                       MUST: GCC otherwise treats post-deref NULL checks
+#                       as UB and removes them. Linux kernel forces this.
+#   -fno-strict-aliasing
+#                       MUST: kernel casts heavily between pointer types
+#                       (opaque void*, struct ↔ uint8_t*).
+#   -fwrapv             MUST: signed overflow → 2's-complement wrap
+#                       (well-defined) instead of UB → no GCC removal of
+#                       "impossible" bounds checks
+#   -fno-asynchronous-unwind-tables -fno-unwind-tables
+#                       no C++ EH machinery; saves ~10-20% of binary size
+#
+# Compile-time bug catching — promote latent bugs to build errors:
+#   -Werror=implicit-function-declaration
+#                       missing #include → silent ABI mismatch → kernel
+#                       memory corruption. Fail at compile.
+#   -Werror=incompatible-pointer-types
+#                       passing a void** where char** expected etc. silently
+#                       miscompiles on cross-arch. Fail at compile.
+#   -Werror=return-type
+#                       missing `return` in non-void → reads RAX garbage
+#   -Werror=int-conversion
+#                       int↔ptr cast without explicit (uintptr_t) cast
+#   -Wstack-usage=8192
+#                       warn at >8 KB stack frame; per-cpu/IST stacks are
+#                       16 KB so this leaves headroom for nested IRQs
+#
+# Real-HW security hardening (GCC ≥ 11 / ≥ 12):
+#   -fzero-call-used-regs=used
+#                       zero caller-saved regs on function return — no
+#                       data leak through register spill on context switch
+#                       or syscall return
+#   -mharden-sls=all    Straight-Line Speculation hardening: INT3 after
+#                       RET / indirect JMP — closes a Spectre-v1 cousin
+#                       on speculative execution past return
 CFLAGS         = -Os -m64 -ffreestanding -nostdlib -mno-red-zone -mno-sse -mno-mmx -mno-avx \
-                 -mcmodel=kernel -fno-PIC -fno-stack-protector -Wall -Wextra -fno-omit-frame-pointer \
-                 -fcf-protection=full
+                 -mcmodel=kernel -fno-PIC -fno-stack-protector \
+                 -fno-omit-frame-pointer -fcf-protection=full \
+                 -fno-delete-null-pointer-checks -fno-strict-aliasing -fwrapv \
+                 -fno-asynchronous-unwind-tables -fno-unwind-tables \
+                 -fzero-call-used-regs=used -mharden-sls=all \
+                 -Wall -Wextra \
+                 -Wno-type-limits \
+                 -Werror=implicit-function-declaration \
+                 -Werror=incompatible-pointer-types \
+                 -Werror=return-type \
+                 -Werror=int-conversion \
+                 -Wstack-usage=8192
+# -Wno-type-limits — defensive `if (core < MAX_CORES)` checks on uint8_t
+# values look "always true" to GCC because uint8_t maxes at 255 < 256.
+# We keep the checks as type-widening defence (amp_get_core_index could
+# return uint32_t in a future refactor) and accept the dead-by-type-system
+# branches as a feature, not a compromise. The other -W categories from
+# -Wextra remain enabled.
 # Kernel directories first to ensure correct header resolution
 INCLUDE_DIRS   := src $(shell find src/kernel -type d) $(shell find src/lib -type d) $(shell find src/boot -type d) $(shell find src/include -type d) $(shell find src/userspace -type d)
 CFLAGS         += $(addprefix -I,$(INCLUDE_DIRS))
@@ -62,7 +139,14 @@ CFLAGS         += $(addprefix -I,$(INCLUDE_DIRS))
 ifeq ($(DEBUG),on)
 CFLAGS += -DCONFIG_DEBUG_ENABLED=1 -DCONFIG_DEBUG_MODE=1
 endif
-LDFLAGS        = -g -T $(ENTRYDIR)/linker.ld -nostdlib -z max-page-size=0x1000 --oformat=binary
+# LDFLAGS — kernel link
+#   -z max-page-size=0x1000    align segments to page (kernel mappings)
+#   -z noexecstack             explicit no-exec stack (default but
+#                              explicit suppresses "missing .note.GNU-stack"
+#                              warnings on some asm objects)
+#   --oformat=binary           kernel.bin is dd'd directly onto the disk
+#                              image; no ELF wrapper at runtime
+LDFLAGS        = -g -T $(ENTRYDIR)/linker.ld -nostdlib -z max-page-size=0x1000 -z noexecstack --oformat=binary
 
 # ==== DIRECTORIES ====
 SRCDIR      = src
@@ -177,10 +261,20 @@ UEFI_CFLAGS_CLANG = -ffreestanding -nostdlib -nostdinc \
 # even when 'clang' is in PATH.  Only enable the clang path when lld-link exists.
 CLANG_AVAILABLE := $(shell command -v lld-link 2>/dev/null)
 
-.PHONY: all clean run run-bg run-stop debug info check-deps install-deps uefi usb
+.PHONY: all clean run run-bg run-stop debug info check-deps install-deps uefi usb check-endbr64
 
 # ==== MAIN TARGET ====
-all: check-deps $(IMAGE) $(KERNEL_ELF) $(FLOPPY_IMG) $(ISO) $(VBOX_VDI) uefi
+all: check-deps $(IMAGE) $(KERNEL_ELF) $(FLOPPY_IMG) $(ISO) $(VBOX_VDI) uefi check-endbr64
+
+# ==== CET / IBT POST-LINK AUDIT ====
+# Verifies every globally-visible function in the kernel ELF begins with
+# ENDBR64 (F3 0F 1E FA). Required for IBT under CR4.CET=1 +
+# IA32_S_CET.ENDBR_EN=1 — without ENDBR64 the first indirect-call to a
+# function would trigger #CP on Tiger Lake+ / Zen 4+ real silicon.
+# Runs after the kernel ELF exists and depends on `nm` + `objdump`
+# (already required by the toolchain). Fast (~1s).
+check-endbr64: $(KERNEL_ELF)
+	@./tools/check_endbr64.sh $(KERNEL_ELF)
 
 # ==== DEP CHECK ====
 check-deps:

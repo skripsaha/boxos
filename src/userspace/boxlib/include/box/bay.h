@@ -32,9 +32,39 @@
  * "audio:mix:left", etc.) so the surface stays uniform.
  */
 
-#define BAY_OPEN     0x00u   /* default — fail if tag missing */
-#define BAY_CREATE   0x01u   /* create if missing (size must be > 0) */
-#define BAY_RO       0x02u   /* read-only mapping */
+#define BAY_OPEN        0x00u   /* default — fail if tag missing */
+#define BAY_CREATE      0x01u   /* create if missing (size must be > 0) */
+#define BAY_RO          0x02u   /* read-only mapping */
+
+/* TME-MK Per-Bay encryption (Intel SDM Vol 3D Chap 16).
+ *
+ * Pass BAY_CREATE | BAY_ENCRYPTED to request that the kernel reserve
+ * a unique TME-MK KeyID, allocate backing pages, and map them with
+ * KeyID-bearing PTEs. The CPU transparently encrypts every store and
+ * decrypts every load using the key associated with that KeyID — DRAM
+ * contents become opaque without the key, defending against physical
+ * memory attacks (DMA dumps, cold boot, off-chip probes).
+ *
+ * Every other cabin opening the same tag with bay_open() receives a
+ * mapping with the SAME KeyID so cross-cabin reads return the expected
+ * plaintext. Opening an encrypted Bay without BAY_ENCRYPTED (or vice
+ * versa) returns NULL with ERR_INVALID_ARGUMENT.
+ *
+ * On the last bay_release across all cabins, the kernel re-keys the
+ * slot before returning it to the pool — a future Bay reusing the
+ * KeyID slot cannot decrypt this Bay's freed ciphertext.
+ *
+ * Returns NULL with ERR_UNSUPPORTED on hosts without TME-MK active
+ * (QEMU TCG, BIOS without TME-MK locked). Userspace should check the
+ * `hw tme` shell command or attempt the create and fall back to a
+ * non-encrypted Bay if needed.
+ *
+ * Encrypted Bays are 4 KiB-page-backed only (huge-page TME-MK is not
+ * yet supported by the kernel mapper); this is performance-equivalent
+ * to non-encrypted Bays below the 2 MiB threshold and a small penalty
+ * above it.
+ */
+#define BAY_ENCRYPTED   0x04u
 
 /* Open or create a Bay by tag. Returns a user-VA pointer mapped to the
  * shared physical pages, or NULL on failure (errno-style return value

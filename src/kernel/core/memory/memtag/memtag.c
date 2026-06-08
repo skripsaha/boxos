@@ -234,6 +234,11 @@ static void SeedReservedTags(void) {
     MarkInternReserved("tme:locked");
     MarkInternReserved("tme:active");
     MarkInternReserved("tme:mk_active");
+    /* Runtime TME pool lifecycle (tme.c). pool:ready fires after BSP
+     * SET_KEY_RANDOM sweep; rekey:failed flags a hardware-rejected
+     * PCONFIG on free (slot is removed from the pool). */
+    MarkInternReserved("tme:pool:ready");
+    MarkInternReserved("tme:keyid:rekey:failed");
     MarkInternReserved("tme:keyid:0");  MarkInternReserved("tme:keyid:1");
     MarkInternReserved("tme:keyid:2");  MarkInternReserved("tme:keyid:3");
     MarkInternReserved("tme:keyid:4");  MarkInternReserved("tme:keyid:5");

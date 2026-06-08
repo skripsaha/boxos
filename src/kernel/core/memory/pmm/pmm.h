@@ -143,4 +143,36 @@ void* _pmm_alloc_zero_impl(size_t pages, uint64_t zone_hint);
 
 #define pmm_alloc_zero(...)         _PMM_CAT(_pmm_alloc_zero_, _PMM_NARG(__VA_ARGS__))(__VA_ARGS__)
 
+/* ─── TME / TME-MK: KeyID-tagged allocations ─────────────────────────
+ *
+ * Returns a kernel virtual pointer to `pages` contiguous PMM-backed
+ * pages. The kernel's identity mapping still uses raw phys (= KeyID 0,
+ * platform-default encryption) — these allocations are intended to be
+ * RE-MAPPED into another address space (typically a user cabin via
+ * vmm_map_user_with_keyid) using the supplied KeyID. The kernel side
+ * normally does NOT touch these pages directly after allocation; the
+ * consumer (e.g. bay_open with BAY_FLAG_ENCRYPTED) owns the lifecycle.
+ *
+ *   pages : number of 4 KiB pages
+ *   keyid : the KeyID reserved via tme_keyid_alloc() that any user-side
+ *           mapping must use. KeyID 0 (platform default) is permitted
+ *           but degenerates to plain pmm_alloc_zero behavior.
+ *
+ * The function tags the allocated phys range with `tme:keyid:N` via
+ * MemTag so the Touch subscription model + diagnostic dumps see the
+ * KeyID association. Returns NULL on out-of-memory.
+ *
+ * Behavior when TME-MK is inactive (g_tme.mk_active == false): falls
+ * back to plain pmm_alloc_zero. Caller's caller (Bay etc.) is expected
+ * to gate the encrypted path on tme_keyid_alloc returning OK, so this
+ * fallback should only fire under a programmer error.
+ */
+void *pmm_alloc_with_keyid(size_t pages, uint16_t keyid);
+
+/* Inverse: untag and return pages to the buddy. Does NOT free the
+ * KeyID itself (that's tme_keyid_free); the caller manages KeyID
+ * lifecycle independently because one KeyID may govern multiple
+ * non-contiguous allocations. */
+void pmm_free_with_keyid(void *va, size_t pages, uint16_t keyid);
+
 #endif

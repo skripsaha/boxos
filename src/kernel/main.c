@@ -218,9 +218,18 @@ void kernel_main(void)
 
     /* Phase 2J — TME / TME-MK BSP probe (observe-only). Reads firmware-
      * locked MSRs to log the encryption state: TME on/off, MK enable,
-     * KeyID bit count. Per-region encryption (allocating with a
-     * specific KeyID) is the lifecycle follow-up. */
+     * KeyID bit count. */
     vmm_tme_probe();
+
+    /* TME pool init — runtime KeyID allocator on top of the probed
+     * MSR state. Programs every usable KeyID with SET_KEY_RANDOM so
+     * the per-region encryption pool is "warm" by the time any
+     * consumer (encrypted Bay etc.) asks. No-op when TME-MK is
+     * inactive (firmware didn't activate it, or hardware lacks it). */
+    {
+        extern error_t tme_init_bsp(void);
+        (void)tme_init_bsp();
+    }
 
     /* Phase 2K — CET (Control-flow Enforcement Technology) BSP probe.
      * Detects SHSTK + IBT, reads IA32_S_CET / IA32_U_CET when CR4.CET=1.
@@ -237,10 +246,12 @@ void kernel_main(void)
     extern void PmmPoisonTest(void);
     extern void McePresenceTest(void);
     extern void IommuPresenceTest(void);
+    extern void TmeRunTests(int *out_pass, int *out_fail);
     VmmHelperTest();
     PmmPoisonTest();
     McePresenceTest();
     IommuPresenceTest();
+    { int p = 0, f = 0; TmeRunTests(&p, &f); (void)p; (void)f; }
 
     debug_printf("[INIT] TSS Dynamic Stacks...\n");
     tss_setup_dynamic_stacks();

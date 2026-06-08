@@ -23,9 +23,19 @@ AR  = x86_64-elf-ar
 #                       the stack across every call costs almost nothing
 #                       and removes a whole class of subtle UB. Hunted
 #                       on 2026-04-29 (random page-fault to .text).
+# Real-HW hardening — see top-level Makefile CFLAGS for full rationale.
+# Userspace mirrors the kernel's UB-containment posture so libbox.a behaves
+# identically under -O2/-Os and the same security guarantees apply across
+# every shipped binary linked against it.
 CFLAGS = -nostdlib -fno-builtin -ffreestanding -mno-red-zone \
          -fno-stack-protector -fno-ipa-ra -fcf-protection=full \
-         -Iinclude -I../../include -Wall -Wextra -O2 -Wno-unused-parameter
+         -fno-delete-null-pointer-checks -fno-strict-aliasing -fwrapv \
+         -fno-asynchronous-unwind-tables -fno-unwind-tables \
+         -Iinclude -I../../include -Wall -Wextra -Wno-type-limits -O2 -Wno-unused-parameter \
+         -Werror=implicit-function-declaration \
+         -Werror=incompatible-pointer-types \
+         -Werror=return-type \
+         -Werror=int-conversion
 
 SRCS = src/core/notify.c \
        src/core/result.c \
