@@ -93,6 +93,46 @@ error_t cet_lifecycle_init_bsp(void);
  * CR4.CET=1 (would #UD on the first WRMSR to IA32_S_CET). Idempotent. */
 void cet_lifecycle_init_ap(void);
 
+/* Per-CPU supervisor shadow-stack infrastructure (PL0_SSP + ISST).
+ *
+ * Intel SDM Vol 3D §17.2.3 + §17.6: the supervisor shadow stack is
+ * loaded from IA32_PL0_SSP on interrupt delivery to CPL=0 with IST=0,
+ * and from IA32_INTERRUPT_SSP_TABLE_ADDR[i] when the interrupt's IST
+ * field is i (1..7). Both MSRs must hold valid SSP token addresses
+ * BEFORE S_CET.SH_STK_EN flips to 1, else the first kernel RET / IST
+ * delivery faults with #CP and the kernel triple-faults.
+ *
+ * This function:
+ *   1. Allocates a PL0_SSP page (4 KiB) per core.
+ *   2. Allocates an IA32_INTERRUPT_SSP_TABLE_ADDR backing page (4 KiB),
+ *      populates ISST[0]=PL0_SSP, ISST[1..5]=per-IST SSPs.
+ *   3. Allocates 5 per-IST SSP pages (one each for IST 1..5 — #DF / NMI /
+ *      #MC / #DB / #SS in BoxOS).
+ *   4. Sets the supervisor PTE.bit60 (VMM_PTE_CET_SS_SUPV) on every
+ *      SSP page so RDSSP/INCSSP recognise them as shadow-stack memory.
+ *   5. Writes the supervisor SSP token (SSP|0x1) at the top of each
+ *      SSP page (Intel SDM Vol 1 §17.2.3).
+ *   6. WRMSRs IA32_PL0_SSP + IA32_INTERRUPT_SSP_TABLE_ADDR.
+ *   7. Records the bookkeeping in PerCoreData[core_idx].
+ *
+ * S_CET.SH_STK_EN stays 0 — flipping it requires a kernel-wide audit of
+ * every assembly RET / IRET / LRET to ensure they pair with matching
+ * CALL / interrupt-frame-push on the shadow stack. The audit is a
+ * follow-up commit; until then this infrastructure is dormant but
+ * complete (one S_CET MSR rewrite is enough to activate).
+ *
+ * Returns OK on success. ERR_UNSUPPORTED when CET is dormant on this
+ * CPU (caller treats as no-op). ERR_NO_MEMORY on alloc failure (the
+ * core then runs with no supervisor SSP — S_CET.SH_STK_EN MUST stay 0
+ * for this core, else first kernel RET kills it). */
+error_t cet_lifecycle_init_supervisor_ssp(uint8_t core_idx);
+
+/* Teardown — frees all supervisor SSP pages allocated by
+ * cet_lifecycle_init_supervisor_ssp for `core_idx`. Idempotent on a
+ * core whose SSP was never allocated. Provided for completeness +
+ * future runtime CET disable; not called from any hot path. */
+void cet_lifecycle_release_supervisor_ssp(uint8_t core_idx);
+
 /* Per-process shadow-stack alloc. Called from process_create after the
  * user VA layout is fixed. Allocates a 4 KiB page from PMM, maps it
  * into the process's vmm_context with VMM_FLAG_PRESENT |
@@ -114,6 +154,27 @@ void cet_process_destroy(struct process_t *proc);
  * gate on this rather than on g_cpu_caps directly so a future runtime
  * disable still works. */
 bool cet_is_enabled(void);
+
+/* Program IA32_PL3_SSP with the per-process initial SSP value just
+ * before iretq drops to ring 3. The caller MUST hold interrupts off
+ * (CLI) — between the WRMSR and the iretq there must be no possibility
+ * of a context switch onto a different process. Called from process.c
+ * immediately before jump_to_userspace.
+ *
+ * No-op when:
+ *   - CET is dormant (g_cet_enabled=false / no SHSTK on the CPU)
+ *   - proc has no allocated SSP (proc->user_ssp_va == 0)
+ *
+ * After the iretq, the CPU's PL3_SSP is the user-mode SSP. The first
+ * CALL pushes its return address to *PL3_SSP--. Subsequent kernel ↔ user
+ * crossings save/restore PL3_SSP through XSAVE component 12 (CET_U)
+ * without further WRMSR — the XSAVE bitmap was opted into during BSP
+ * init via fpu_xsave_register_extension. */
+void cet_load_user_ssp_for_iretq(struct process_t *proc);
+
+/* Increments the #CP fault counter — called from idt.c paranoid vector
+ * handler. Visible via cet_lifecycle_dump / shell `hw cet status`. */
+void cet_lifecycle_record_cp_fault(void);
 
 /* Telemetry. */
 typedef struct {

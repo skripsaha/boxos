@@ -10,8 +10,16 @@
 
 #define EFER_SCE            (1ULL << 0)
 
-// SFMASK: clear IF, TF, DF on notify entry
-#define SFMASK_VALUE        ((1ULL << 9) | (1ULL << 8) | (1ULL << 10))
+/* SFMASK — RFLAGS bits cleared on SYSCALL entry (IA32_FMASK, 0xC0000084).
+ * See per_core.c for the long per-bit rationale. Keep this mask EXACTLY
+ * in sync with per_core.c:SFMASK_VALUE — the BSP programs the same MSR
+ * value via per_core_setup_notify_msrs after notify_init's bootstrap. */
+#define SFMASK_VALUE        ((1ULL <<  9) /* IF */ | \
+                             (1ULL <<  8) /* TF */ | \
+                             (1ULL << 10) /* DF */ | \
+                             (1ULL << 14) /* NT */ | \
+                             (1ULL << 16) /* RF */ | \
+                             (1ULL << 18) /* AC — SMAP defense */)
 
 static PerCpuData g_per_cpu __attribute__((aligned(16)));
 
