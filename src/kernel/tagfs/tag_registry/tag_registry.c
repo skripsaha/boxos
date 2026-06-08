@@ -382,6 +382,14 @@ bool tag_registry_is_dirty(void) {
     return g_registry_dirty;
 }
 
+/* BSS-resident scratch — TagRegistryBlock is exactly 4 KiB. Held
+ * under reg->lock for the duration of any load/flush, so a single
+ * shared buffer is mutually exclusive across both callers. Avoids
+ * 4 KiB+local-frame stack usage that exceeded the
+ * -Wstack-usage=8192 threshold and would compete with nested IRQ
+ * frames on per-cpu stacks. */
+static TagRegistryBlock g_tag_registry_load_blk;
+
 int tag_registry_flush(TagRegistry* reg) {
     if (!reg) return -1;
 
@@ -392,12 +400,15 @@ int tag_registry_flush(TagRegistry* reg) {
 
     spin_lock(&reg->lock);
 
-    TagRegistryBlock blk;
-    memset(&blk, 0, sizeof(blk));
-    blk.magic       = TAGFS_REGISTRY_MAGIC;
-    blk.next_block  = 0;
-    blk.entry_count = 0;
-    blk.used_bytes  = 0;
+    /* Shares the BSS scratch slot with tag_registry_load (both hold
+     * reg->lock for their full duration → mutually exclusive). Keeps
+     * the 4 KiB block off the kernel stack. */
+    TagRegistryBlock *blkp = &g_tag_registry_load_blk;
+    memset(blkp, 0, sizeof(*blkp));
+    blkp->magic       = TAGFS_REGISTRY_MAGIC;
+    blkp->next_block  = 0;
+    blkp->entry_count = 0;
+    blkp->used_bytes  = 0;
 
     uint32_t data_offset = 0;
 
@@ -419,23 +430,23 @@ int tag_registry_flush(TagRegistry* reg) {
                 return -1;
             }
 
-            blk.next_block = new_block;
-            int write_result = tagfs_write_block(current_block, &blk);
+            blkp->next_block = new_block;
+            int write_result = tagfs_write_block(current_block, blkp);
             if (write_result != 0) {
                 spin_unlock(&reg->lock);
                 return -1;
             }
 
             current_block = new_block;
-            memset(&blk, 0, sizeof(blk));
-            blk.magic      = TAGFS_REGISTRY_MAGIC;
-            blk.next_block = 0;
-            blk.entry_count = 0;
-            blk.used_bytes  = 0;
+            memset(blkp, 0, sizeof(*blkp));
+            blkp->magic      = TAGFS_REGISTRY_MAGIC;
+            blkp->next_block = 0;
+            blkp->entry_count = 0;
+            blkp->used_bytes  = 0;
             data_offset     = 0;
         }
 
-        uint8_t* p = blk.data + data_offset;
+        uint8_t* p = blkp->data + data_offset;
 
         *((uint16_t*)p) = entry->tag_id;
         p += sizeof(uint16_t);
@@ -454,11 +465,11 @@ int tag_registry_flush(TagRegistry* reg) {
         }
 
         data_offset += record_size;
-        blk.entry_count++;
-        blk.used_bytes = (uint16_t)data_offset;
+        blkp->entry_count++;
+        blkp->used_bytes = (uint16_t)data_offset;
     }
 
-    int write_result = tagfs_write_block(current_block, &blk);
+    int write_result = tagfs_write_block(current_block, blkp);
 
     if (write_result == 0) {
         g_registry_dirty = false;
@@ -477,26 +488,26 @@ int tag_registry_load(TagRegistry* reg, uint32_t first_block) {
 
     /* Read at least the first block (block 0 is valid in our layout) */
     while (1) {
-        TagRegistryBlock blk;
-        int read_result = tagfs_read_block(block_num, &blk);
+        TagRegistryBlock *blkp = &g_tag_registry_load_blk;
+        int read_result = tagfs_read_block(block_num, blkp);
         if (read_result != 0) {
             spin_unlock(&reg->lock);
             return -1;
         }
 
-        if (blk.magic != TAGFS_REGISTRY_MAGIC) {
+        if (blkp->magic != TAGFS_REGISTRY_MAGIC) {
             spin_unlock(&reg->lock);
             return -1;
         }
 
         uint32_t offset = 0;
-        for (uint16_t e = 0; e < blk.entry_count; e++) {
+        for (uint16_t e = 0; e < blkp->entry_count; e++) {
             if (offset + sizeof(uint16_t) + sizeof(uint8_t) + sizeof(uint8_t) + sizeof(uint16_t)
                     > TAGFS_REGISTRY_DATA_SIZE) {
                 break;
             }
 
-            uint8_t* p = blk.data + offset;
+            uint8_t* p = blkp->data + offset;
 
             uint16_t tag_id;
             memcpy(&tag_id, p, sizeof(uint16_t)); p += sizeof(uint16_t);
@@ -536,7 +547,7 @@ int tag_registry_load(TagRegistry* reg, uint32_t first_block) {
             offset += record_size;
         }
 
-        block_num = blk.next_block;
+        block_num = blkp->next_block;
         if (block_num == 0) break;  /* end of chain */
     }
 

@@ -99,6 +99,11 @@ typedef struct {
      * bits so a hypothetical TME-yes / PCONFIG-no CPU doesn't #UD on
      * the first MKTME_KEY_PROGRAM operand. */
     bool has_pconfig;           // CPUID.07H.0:EDX[18]
+    /* TDX (Intel Trust Domain Extensions) host capability — CPUID.21H
+     * subleaf 0 returns the "IntelTDX " vendor string when supported.
+     * Gates IA32_MKTME_KEYID_PARTITIONING (MSR 0x87) read in
+     * tme_init_bsp; reading 0x87 on non-TDX silicon #GP's. */
+    bool has_tdx;
     /* MONITOR/UMONITOR cacheline granularity — CPUID.05H. Intel SDM Vol 2A
      * UMONITOR: "The address range determined by the CPUID monitor leaf
      * function". EAX[15:0] = smallest line size, EBX[15:0] = largest.

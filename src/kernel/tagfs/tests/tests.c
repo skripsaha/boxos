@@ -125,10 +125,18 @@ static TestResult test_bcdc_init(void) {
     return TEST_PASS;
 }
 
+/* BSS pool shared by the test_bcdc_* functions below. TagFS_RunAllTests
+ * is single-threaded at boot, so a single set of buffers is safe across
+ * sequential test calls; keeps the per-function stack frame under the
+ * -Wstack-usage=8192 threshold. */
+static uint8_t  s_bcdc_input[4096];
+static uint8_t  s_bcdc_output[4096 + 24];
+static uint8_t  s_bcdc_decompressed[4096];
+
 static TestResult test_bcdc_compress_decompress_random(void) {
-    uint8_t input[4096];
-    uint8_t output[4096 + 24];  // header + data
-    uint8_t decompressed[4096];
+    uint8_t  *input         = s_bcdc_input;
+    uint8_t  *output        = s_bcdc_output;
+    uint8_t  *decompressed  = s_bcdc_decompressed;
     uint16_t output_size, decompressed_size;
 
     // Fill with random data (hard to compress)
@@ -152,9 +160,9 @@ static TestResult test_bcdc_compress_decompress_random(void) {
 }
 
 static TestResult test_bcdc_compress_decompress_zeros(void) {
-    uint8_t input[4096];
-    uint8_t output[4096 + 24];
-    uint8_t decompressed[4096];
+    uint8_t  *input         = s_bcdc_input;
+    uint8_t  *output        = s_bcdc_output;
+    uint8_t  *decompressed  = s_bcdc_decompressed;
     uint16_t output_size, decompressed_size;
 
     // Fill with zeros (easy to compress with RLE)
@@ -177,9 +185,9 @@ static TestResult test_bcdc_compress_decompress_zeros(void) {
 }
 
 static TestResult test_bcdc_compress_decompress_pattern(void) {
-    uint8_t input[4096];
-    uint8_t output[4096 + 24];
-    uint8_t decompressed[4096];
+    uint8_t  *input         = s_bcdc_input;
+    uint8_t  *output        = s_bcdc_output;
+    uint8_t  *decompressed  = s_bcdc_decompressed;
     uint16_t output_size, decompressed_size;
     
     // Fill with repeating pattern (RLE should work well)
@@ -204,9 +212,9 @@ static TestResult test_bcdc_compress_decompress_pattern(void) {
 }
 
 static TestResult test_bcdc_checksum_verification(void) {
-    uint8_t input[4096];
-    uint8_t output[4096 + 24];
-    uint8_t decompressed[4096];
+    uint8_t  *input         = s_bcdc_input;
+    uint8_t  *output        = s_bcdc_output;
+    uint8_t  *decompressed  = s_bcdc_decompressed;
     uint16_t output_size, decompressed_size;
     
     fill_random(input, 4096);
@@ -388,9 +396,9 @@ static TestResult test_stress_compression(void) {
     const uint32_t ITERATIONS = 20;  // Reduced from 100 for QEMU performance
 
     for (uint32_t i = 0; i < ITERATIONS; i++) {
-        uint8_t input[4096];
-        uint8_t output[4096 + 24];
-        uint8_t decompressed[4096];
+        uint8_t  *input        = s_bcdc_input;
+        uint8_t  *output       = s_bcdc_output;
+        uint8_t  *decompressed = s_bcdc_decompressed;
         uint16_t output_size, decompressed_size;
 
         // Alternate between random and zeros
@@ -803,14 +811,14 @@ error_t TagFS_RunAllTests(TestStats* stats) {
     stats->start_time = get_time_ms();
     
     // Define all tests
-    TestCase core_tests[] = {
+    static TestCase core_tests[] = {
         {"tagfs_init", test_tagfs_init, TEST_SKIP, 0, ""},
         {"tagfs_superblock", test_tagfs_superblock, TEST_SKIP, 0, ""},
         {"tagfs_create_file", test_tagfs_create_file, TEST_SKIP, 0, ""},
         {"tagfs_write_read", test_tagfs_write_read, TEST_SKIP, 0, ""},
     };
     
-    TestCase compression_tests[] = {
+    static TestCase compression_tests[] = {
         {"bcdc_init", test_bcdc_init, TEST_SKIP, 0, ""},
         {"bcdc_compress_decompress_random", test_bcdc_compress_decompress_random, TEST_SKIP, 0, ""},
         {"bcdc_compress_decompress_zeros", test_bcdc_compress_decompress_zeros, TEST_SKIP, 0, ""},
@@ -818,19 +826,19 @@ error_t TagFS_RunAllTests(TestStats* stats) {
         {"bcdc_checksum_verification", test_bcdc_checksum_verification, TEST_SKIP, 0, ""},
         {"bcdc_stats", test_bcdc_stats, TEST_SKIP, 0, ""},
     };
-    
-    TestCase journal_tests[] = {
+
+    static TestCase journal_tests[] = {
         {"diskbook_init", test_diskbook_init, TEST_SKIP, 0, ""},
         {"diskbook_checkpoint", test_diskbook_checkpoint, TEST_SKIP, 0, ""},
         {"diskbook_stats", test_diskbook_stats, TEST_SKIP, 0, ""},
     };
-    
-    TestCase snapshot_tests[] = {
+
+    static TestCase snapshot_tests[] = {
         {"snapshot_create", test_snapshot_create, TEST_SKIP, 0, ""},
         {"snapshot_list", test_snapshot_list, TEST_SKIP, 0, ""},
     };
-    
-    TestCase stress_tests[] = {
+
+    static TestCase stress_tests[] = {
         {"stress_many_files", test_stress_many_files, TEST_SKIP, 0, ""},
         {"stress_large_file", test_stress_large_file, TEST_SKIP, 0, ""},
         {"stress_compression", test_stress_compression, TEST_SKIP, 0, ""},
@@ -838,19 +846,19 @@ error_t TagFS_RunAllTests(TestStats* stats) {
         {"stress_concurrent_operations", test_stress_concurrent_operations, TEST_SKIP, 0, ""},
     };
 
-    TestCase braid_tests[] = {
+    static TestCase braid_tests[] = {
         {"braid_init", test_braid_init, TEST_SKIP, 0, ""},
         {"braid_add_disk", test_braid_add_disk, TEST_SKIP, 0, ""},
         {"braid_write_read", test_braid_write_read, TEST_SKIP, 0, ""},
     };
 
-    TestCase cow_tests[] = {
+    static TestCase cow_tests[] = {
         {"cow_snapshot_create", test_cow_snapshot_create, TEST_SKIP, 0, ""},
         {"cow_before_after_write", test_cow_before_after_write, TEST_SKIP, 0, ""},
         {"cow_redirect_reboot_survival", test_cow_redirect_reboot_survival, TEST_SKIP, 0, ""},
     };
 
-    TestCase boxhash_tests[] = {
+    static TestCase boxhash_tests[] = {
         {"boxhash_determinism", test_boxhash_determinism, TEST_SKIP, 0, ""},
         {"boxhash_seed_separation", test_boxhash_seed_separation, TEST_SKIP, 0, ""},
         {"boxhash_avalanche", test_boxhash_avalanche, TEST_SKIP, 0, ""},
@@ -858,13 +866,13 @@ error_t TagFS_RunAllTests(TestStats* stats) {
         {"boxhash_sizes", test_boxhash_sizes, TEST_SKIP, 0, ""},
     };
 
-    TestCase integrity_tests[] = {
+    static TestCase integrity_tests[] = {
         {"integrity_detects_mismatch", test_integrity_detects_mismatch, TEST_SKIP, 0, ""},
         {"integrity_persist_reload", test_integrity_persist_reload, TEST_SKIP, 0, ""},
     };
 
     // Run all test suites
-    TestCase* all_suites[] = {
+    static TestCase* all_suites[] = {
         core_tests, compression_tests, journal_tests, snapshot_tests, stress_tests, braid_tests, cow_tests, boxhash_tests, integrity_tests
     };
     uint32_t suite_sizes[] = {
@@ -922,7 +930,7 @@ error_t TagFS_RunSuite(const char* suite_name, TestStats* stats) {
     stats->start_time = get_time_ms();
 
     if (strcmp(suite_name, "core") == 0) {
-        TestCase core_tests[] = {
+        static TestCase core_tests[] = {
             {"tagfs_init", test_tagfs_init, TEST_SKIP, 0, ""},
             {"tagfs_superblock", test_tagfs_superblock, TEST_SKIP, 0, ""},
             {"tagfs_create_file", test_tagfs_create_file, TEST_SKIP, 0, ""},

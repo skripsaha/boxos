@@ -339,6 +339,19 @@ static int amdvi_map(iommu_domain_t* d, uint64_t iova, uint64_t phys,
     }
     return 0;
 }
+/* TME-MK aware map. AMD-Vi rev 4 "Cache Coherent Memory" mode uses the
+ * same SL-PTE phys-field layout as the CPU PTE — bits [51:12] hold the
+ * phys with the upper num_keyid_bits portion encoding the KeyID. The
+ * existing amdvi_map preserves all upper bits via `phys & ~0xFFF`, so
+ * we just route through it for non-identity domains. Identity domain
+ * is rejected: per-KeyID DMA only makes sense in a per-device domain. */
+static int amdvi_map_with_keyid(iommu_domain_t* d, uint64_t iova,
+                                  uint64_t phys_with_keyid, uint64_t sz,
+                                  uint32_t perm) {
+    if (!d || d->is_identity) return -1;
+    return amdvi_map(d, iova, phys_with_keyid, sz, perm);
+}
+
 static int amdvi_unmap(iommu_domain_t* d, uint64_t iova, uint64_t size) {
     if (!d || d->is_identity) return 0;
     uint64_t end = iova + size;
@@ -404,4 +417,5 @@ const iommu_ops_t amdvi_ops = {
     .unmap          = amdvi_unmap,
     .invalidate     = amdvi_invalidate,
     .domain_id      = amdvi_domain_id,
+    .map_with_keyid = amdvi_map_with_keyid,
 };

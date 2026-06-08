@@ -24,3 +24,12 @@ int hw_lam_set(hw_lam_mode_t mode) {
                    0, 0, 0,
                    30000, 0);
 }
+
+int hw_tme_state(hw_tme_state_t *out) {
+    if (!out) return -ERR_NULL_POINTER;
+    return MfCall1(DECK_SYSTEM, SYSTEM_OP_HW_TME_STATE,
+                   0, 0,
+                   0, 0,
+                   out, sizeof(*out), 0,
+                   30000, 0);
+}

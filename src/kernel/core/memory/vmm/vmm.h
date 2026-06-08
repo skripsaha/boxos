@@ -193,6 +193,14 @@ bool vmm_unmap_pages(vmm_context_t* ctx, uintptr_t virt_addr, size_t page_count)
 vmm_map_result_t vmm_map_page_with_keyid(vmm_context_t* ctx, uintptr_t virt_addr,
                                          uintptr_t phys_addr_with_keyid, uint64_t flags);
 
+/* 2 MiB huge-page variant for TME-MK. phys_addr_with_keyid must
+ * already encode KeyID in the upper bits (use tme_phys_with_keyid).
+ * The PDE phys field at bits [51:21] holds the 2 MiB-aligned phys plus
+ * KeyID in its upper portion. Behaves like vmm_map_huge_2m when MK is
+ * inactive. */
+bool vmm_map_huge_2m_with_keyid(vmm_context_t* ctx, uintptr_t virt_addr,
+                                 uintptr_t phys_addr_with_keyid, uint64_t flags);
+
 // Always applies VMM_FLAG_CACHE_DISABLE | VMM_FLAG_WRITE_THROUGH → UC mapping.
 // Returns virtual address, or NULL on failure.
 volatile void* vmm_map_mmio(uintptr_t phys_addr, size_t size, uint64_t flags);

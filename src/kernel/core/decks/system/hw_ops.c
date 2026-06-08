@@ -20,6 +20,7 @@
 #include "manifest_auth.h"
 #include "process.h"
 #include "vmm.h"
+#include "tme.h"
 #include "klib.h"
 #include "error.h"
 
@@ -42,6 +43,53 @@ static int SysHwLamGet(const ManifestOp *op, Crate *crates,
     int rc = vmm_user_buf_commit_out(ctx->proc->cabin,
                                       (uintptr_t)out->addr,
                                       kbuf, sizeof(uint8_t));
+    vmm_user_buf_free(kbuf);
+    return rc;
+}
+
+/* ─── SYSTEM_OP_HW_TME_STATE ───────────────────────────────────────── */
+typedef struct {
+    uint8_t   tme_active;
+    uint8_t   mk_active;
+    uint8_t   num_keyid_bits;
+    uint8_t   activated_alg;
+    uint16_t  max_keyid;
+    uint16_t  pool_programmed;
+    uint16_t  in_use;
+    uint16_t  per_proc_quota;
+    uint8_t   reduced_maxphyaddr;
+    uint8_t   _pad[3];
+    uint16_t  this_proc_held;
+} HwTmeState;
+
+static int SysHwTmeState(const ManifestOp *op, Crate *crates,
+                          uint16_t crate_count, const OpContext *ctx) {
+    (void)crate_count;
+    if (!ctx || !ctx->proc)                return ERR_INVALID_ARGUMENT;
+    if (op->out_crate == CRATE_INDEX_NONE) return ERR_INVALID_ARGUMENT;
+
+    Crate *out = &crates[op->out_crate];
+    if (out->size < sizeof(HwTmeState)) return ERR_INVALID_ARGUMENT;
+
+    HwTmeState *kbuf = (HwTmeState *)vmm_user_buf_alloc_out(out->size);
+    if (!kbuf) return ERR_NO_MEMORY;
+    memset(kbuf, 0, sizeof(*kbuf));
+
+    extern TmeState g_tme;
+    kbuf->tme_active        = (uint8_t)g_tme.tme_active;
+    kbuf->mk_active         = (uint8_t)g_tme.mk_active;
+    kbuf->num_keyid_bits    = g_tme.num_keyid_bits;
+    kbuf->activated_alg     = g_tme.activated_alg;
+    kbuf->max_keyid         = g_tme.max_keyid;
+    kbuf->pool_programmed   = (uint16_t)g_tme.pool_programmed;
+    kbuf->in_use            = (uint16_t)g_tme.in_use;
+    kbuf->per_proc_quota    = 8u;  /* TME_QUOTA_PER_PROC (bay.h) — keep in sync */
+    kbuf->reduced_maxphyaddr = g_tme.reduced_maxphyaddr;
+    kbuf->this_proc_held    = ctx->proc->tme_keyids_held;
+
+    int rc = vmm_user_buf_commit_out(ctx->proc->cabin,
+                                      (uintptr_t)out->addr,
+                                      kbuf, sizeof(*kbuf));
     vmm_user_buf_free(kbuf);
     return rc;
 }
@@ -73,8 +121,9 @@ error_t HwOpsRegister(void) {
         uint32_t    auth;
         const char *name;
     } table[] = {
-        { SYSTEM_OP_HW_LAM_GET, SysHwLamGet, OP_AUTH_APP, "system.hw.lam_get" },
-        { SYSTEM_OP_HW_LAM_SET, SysHwLamSet, OP_AUTH_APP, "system.hw.lam_set" },
+        { SYSTEM_OP_HW_LAM_GET,   SysHwLamGet,   OP_AUTH_APP, "system.hw.lam_get"   },
+        { SYSTEM_OP_HW_LAM_SET,   SysHwLamSet,   OP_AUTH_APP, "system.hw.lam_set"   },
+        { SYSTEM_OP_HW_TME_STATE, SysHwTmeState, OP_AUTH_APP, "system.hw.tme_state" },
     };
     for (size_t i = 0; i < sizeof(table) / sizeof(table[0]); i++) {
         error_t rc = OpRegistryRegister(OP_KIND(DECK_SYSTEM, table[i].opcode),

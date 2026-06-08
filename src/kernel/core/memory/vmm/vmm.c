@@ -3831,6 +3831,66 @@ int vmm_setup_null_trap(vmm_context_t *ctx)
  * so callers don't need to align separately.
  * ==================================================================== */
 
+/* TME-MK aware huge-page (2 MiB) map. Same algorithm as
+ * vmm_map_huge_2m but builds the PDE via vmm_make_pte_with_keyid so
+ * KeyID bits in the upper phys field survive masking. Used by
+ * encrypted Bay (BAY_CREATE | BAY_ENCRYPTED) when the requested size
+ * crosses the 2 MiB threshold.
+ *
+ * Per Intel SDM Vol 3D §16.3: 2 MiB PDE format under TME-MK is the
+ * same as 4 KiB PTE — phys field at bits [51:21] for 2 MiB pages,
+ * with KeyID embedded in the upper num_keyid_bits of that field.
+ *
+ * Behaves identically to vmm_map_huge_2m when MK is inactive
+ * (vmm_pte_addr_mask_with_keyid == vmm_pte_addr_mask). */
+bool vmm_map_huge_2m_with_keyid(vmm_context_t *ctx, uintptr_t virt_addr,
+                                 uintptr_t phys_addr_with_keyid, uint64_t flags)
+{
+    if (!ctx) return false;
+    if (virt_addr & VMM_LARGE_PAGE_2M_MASK) return false;
+    /* Strip KeyID for alignment check — the encryption-key bits sit
+     * above the phys-address bits and don't affect 2 MiB alignment. */
+    uintptr_t phys_strip = phys_addr_with_keyid & vmm_pte_addr_mask;
+    if (phys_strip & VMM_LARGE_PAGE_2M_MASK) return false;
+
+    spin_lock(&ctx->lock);
+
+    page_table_t *pd = vmm_get_or_create_table(ctx, virt_addr, 2);
+    if (!pd) {
+        spin_unlock(&ctx->lock);
+        return false;
+    }
+
+    uint32_t pd_idx  = VMM_PD_INDEX(virt_addr);
+    pte_t   *pde     = &pd->entries[pd_idx];
+    pte_t    new_pte = vmm_make_pte_with_keyid(phys_addr_with_keyid,
+                                                flags | VMM_FLAG_LARGE_PAGE);
+
+    pte_t expected = 0;
+    bool  won      = __atomic_compare_exchange_n(pde, &expected, new_pte,
+                                                 false,
+                                                 __ATOMIC_RELEASE,
+                                                 __ATOMIC_ACQUIRE);
+    if (!won) {
+        spin_unlock(&ctx->lock);
+        return false;
+    }
+
+    ctx->mapped_pages += VMM_LARGE_PAGE_2M_PAGES;
+    if (flags & VMM_FLAG_USER) {
+        ctx->user_pages += VMM_LARGE_PAGE_2M_PAGES;
+        atomic_fetch_add_u64((volatile uint64_t *)&global_stats.user_mapped_pages, VMM_LARGE_PAGE_2M_PAGES);
+        atomic_fetch_add_u64((volatile uint64_t *)&global_stats.total_mapped_pages, VMM_LARGE_PAGE_2M_PAGES);
+    } else {
+        ctx->kernel_pages += VMM_LARGE_PAGE_2M_PAGES;
+        atomic_fetch_add_u64((volatile uint64_t *)&global_stats.kernel_mapped_pages, VMM_LARGE_PAGE_2M_PAGES);
+        atomic_fetch_add_u64((volatile uint64_t *)&global_stats.total_mapped_pages, VMM_LARGE_PAGE_2M_PAGES);
+    }
+
+    spin_unlock(&ctx->lock);
+    return true;
+}
+
 bool vmm_map_huge_2m(vmm_context_t *ctx, uintptr_t virt_addr,
                      uintptr_t phys_addr, uint64_t flags)
 {

@@ -46,6 +46,14 @@ typedef struct iommu_ops {
                 uint64_t size, uint32_t perm);
     int  (*unmap)(iommu_domain_t*, uint64_t iova, uint64_t size);
     void (*invalidate)(iommu_domain_t*);
+    /* TME-MK aware map. phys carries KeyID in upper bits (see
+     * tme_phys_with_keyid). When the backend doesn't implement this
+     * (NULL slot), iommu_map_with_keyid falls back to ->map after
+     * stripping the KeyID — DMA buffers would see ciphertext, so the
+     * generic wrapper rejects KeyID != 0 in that fallback case. */
+    int  (*map_with_keyid)(iommu_domain_t*, uint64_t iova,
+                           uint64_t phys_with_keyid, uint64_t size,
+                           uint32_t perm);
     /* Phase 2G — opaque domain → integer ID accessor. Each backend's
      * struct iommu_domain hides the layout but exposes a stable uint32_t
      * id. Used by the iommu_map wrapper to derive `iommu:domain:N` tag
@@ -93,5 +101,49 @@ void            iommu_audit_dump(void);
  * by default; pass IOMMU_PERM_* bits to constrain. */
 void *iommu_dma_alloc(iommu_domain_t *domain, size_t pages, uint32_t perm);
 void  iommu_dma_free (iommu_domain_t *domain, void *phys, size_t pages);
+
+/* TME-MK aware DMA alloc — couples per-region encryption with device
+ * DMA. The IOMMU SL-PTE stores `phys | (keyid << reduced_MAXPHYADDR)`
+ * so that both the CPU's memory-encryption engine (via the user PTE
+ * with the same KeyID) AND the device's IOMMU-translated DMA reads
+ * decrypt with the same key — coherent plaintext on both sides.
+ *
+ * Per Intel VT-d Spec rev 3.4 §9.4.3 ("Second-Level Page-Table
+ * Entries with Memory Encryption"): the SL-PTE phys-address field
+ * holds bits [reduced_MAXPHYADDR-1 : 12]; upper bits up to raw
+ * MAXPHYADDR-1 carry the KeyID, same layout as CPU PTE. AMD-Vi rev 4
+ * uses the same encoding under "Cache Coherent Memory" mode.
+ *
+ *   keyid : reservation from tme_keyid_alloc(); MUST be > 0
+ *           (KeyID 0 = platform default; iommu_dma_alloc covers it
+ *            with the non-KeyID API for symmetry). 0 → NULL.
+ *   perm  : IOMMU_PERM_READ|WRITE etc.
+ *
+ * Returns the RAW physical address (matches iommu_dma_alloc's
+ * convention). Caller uses it as:
+ *   - IOVA written into device DMA descriptors. The IOMMU
+ *     translates IOVA→phys_with_keyid via the SL-PTE; the device
+ *     transparently observes plaintext that matches the CPU's view.
+ *   - input to tme_phys_with_keyid() when composing a CPU PTE via
+ *     vmm_map_page_with_keyid() for kernel-side access.
+ *
+ * Pages are zero-filled through a KeyID-bearing kernel temp slot so
+ * caller / device observes true zeros on first read (instead of
+ * ciphertext_K0(zeros) decrypted-with-Kuser = garbage).
+ *
+ * Returns NULL when IOMMU/TME-MK is unavailable or any sub-step
+ * fails. The KeyID itself is the caller's lifecycle responsibility
+ * (Bay code frees via tme_keyid_free on last release). */
+void *iommu_dma_alloc_with_keyid(iommu_domain_t *domain, size_t pages,
+                                  uint16_t keyid, uint32_t perm);
+void  iommu_dma_free_with_keyid (iommu_domain_t *domain, void *phys_with_keyid,
+                                  size_t pages, uint16_t keyid);
+
+/* Direct mapping form: caller already holds phys (raw) + keyid and
+ * wants IOMMU translation set up. Builds SL-PTE with KeyID. Falls
+ * through to ops->map when keyid==0. */
+int   iommu_map_with_keyid(iommu_domain_t *domain, uint64_t iova,
+                            uint64_t phys, uint64_t size, uint16_t keyid,
+                            uint32_t perm);
 
 #endif /* IOMMU_H */

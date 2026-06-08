@@ -78,6 +78,17 @@
  */
 #define BAY_ENCRYPTED   0x04u
 
+/* Per-process quota for BAY_CREATE | BAY_ENCRYPTED.
+ *
+ * The global TME-MK KeyID pool has N slots (typical 16-64 on shipping
+ * Intel silicon). Without a quota, a single misbehaving cabin could
+ * exhaust the pool and DoS every other cabin's encryption requests.
+ * 8 per cabin is enough for typical use (model weights, secret
+ * config, framebuffer, IPC scratch) while leaving headroom for
+ * concurrent processes. Counter lives on process_t.tme_keyids_held
+ * (process.h) and is enforced inside BayOpenInternal. */
+#define TME_QUOTA_PER_PROC  8u
+
 /* Mask of all defined flag bits — used by BayOpenInternal to reject
  * unknown bits before allocating anything. Keep in lock-step with the
  * BAY_* definitions above. */

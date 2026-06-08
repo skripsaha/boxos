@@ -501,6 +501,21 @@ static int vtd_map(iommu_domain_t* d, uint64_t iova, uint64_t phys,
     if (iova != phys) return -1;
     return vtd_identity_map(phys, size);
 }
+
+/* TME-MK aware map. phys_with_keyid carries the KeyID in upper bits
+ * (above the reduced MAXPHYADDR). Per Intel VT-d Spec rev 3.4 §9.4.3
+ * the SL-PTE phys-address field is bits [51:12] and the encryption
+ * engine reads KeyID from the same upper bits the CPU PTE uses —
+ * domain_slpt_map already preserves them via the `phys & ~0xFFF`
+ * extraction (no upper-bit clamp). For identity-domain maps we
+ * refuse: KeyID encryption only makes sense in a per-process / per-
+ * Bay domain where the device's KeyID matches the CPU's. */
+static int vtd_map_with_keyid(iommu_domain_t* d, uint64_t iova,
+                               uint64_t phys_with_keyid, uint64_t size,
+                               uint32_t perm) {
+    if (!d || d->is_identity) return -1;
+    return domain_slpt_map(d, iova, phys_with_keyid, size, perm);
+}
 static int vtd_unmap(iommu_domain_t* d, uint64_t iova, uint64_t size) {
     if (d && !d->is_identity) {
         /* Clear PTEs in domain's SLPT. */
@@ -544,4 +559,5 @@ const iommu_ops_t vtd_ops = {
     .unmap          = vtd_unmap,
     .invalidate     = vtd_invalidate,
     .domain_id      = vtd_domain_id,
+    .map_with_keyid = vtd_map_with_keyid,
 };

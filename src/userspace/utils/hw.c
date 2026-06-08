@@ -152,6 +152,55 @@ static void do_lam_set(const char *arg)
     }
 }
 
+/* ─── TME ─────────────────────────────────────────────────────────── */
+
+static const char *tme_alg_name(uint8_t alg)
+{
+    /* IA32_TME_ACTIVATE.ALGS_ENABLED bits [7:4] — algorithm field */
+    switch (alg) {
+        case 0:  return "AES-XTS-128";
+        case 1:  return "AES-XTS-128 + integrity";
+        case 2:  return "AES-XTS-256";
+        default: return "?";
+    }
+}
+
+static void do_tme(void)
+{
+    if (!cpu_has_tme()) {
+        println("TME not supported on this CPU");
+        return;
+    }
+    hw_tme_state_t s;
+    int rc = hw_tme_state(&s);
+    if (rc != 0) {
+        printf("%colorhw_tme_state failed (rc=%d)%color\n",
+               COLOR_RED, rc, COLOR_DEFAULT);
+        return;
+    }
+    printf("%colorTME / TME-MK state%color:\n", COLOR_CYAN, COLOR_DEFAULT);
+    printf("  TME enabled        : %s\n", yn(s.tme_active != 0));
+    printf("  TME-MK enabled     : %s\n", yn(s.mk_active != 0));
+    if (!s.mk_active) {
+        if (s.tme_active) {
+            println("  (TME baseline only — single platform key, no per-region pool)");
+        } else {
+            println("  (firmware did not activate TME — runtime pool dormant)");
+        }
+        return;
+    }
+    printf("  KeyID bit width    : %u\n", (unsigned)s.num_keyid_bits);
+    printf("  Reduced MAXPHYADDR : %u\n", (unsigned)s.reduced_maxphyaddr);
+    printf("  Encryption alg     : %s (IA32_TME_ACTIVATE.ALGS_ENABLED=%u)\n",
+           tme_alg_name(s.activated_alg), (unsigned)s.activated_alg);
+    printf("  Pool size (max id) : %u\n", (unsigned)s.max_keyid);
+    printf("  Programmed         : %u\n", (unsigned)s.pool_programmed);
+    printf("  In use             : %u\n", (unsigned)s.in_use);
+    printf("  Per-proc quota     : %u\n", (unsigned)s.per_proc_quota);
+    printf("  This proc held     : %u / %u\n",
+           (unsigned)s.this_proc_held, (unsigned)s.per_proc_quota);
+}
+
 static void print_help(void)
 {
     println("hw commands:");
@@ -161,6 +210,7 @@ static void print_help(void)
     println("  pku set <pkey> <ad> <wd>— write a single PKRU slot");
     println("  lam get                 — read this process's LAM mode");
     println("  lam set none|u48|u57    — set this process's LAM mode");
+    println("  tme                     — TME / TME-MK pool state + this proc usage");
 }
 
 int main(void)
@@ -204,6 +254,8 @@ int main(void)
         } else {
             print_help(); exit(1); return 1;
         }
+    } else if (strcmp(cmd, "tme") == 0) {
+        do_tme();
     } else if (strcmp(cmd, "lam") == 0) {
         if (argc < 3) { print_help(); exit(1); return 1; }
         const char *sub = argv[2];

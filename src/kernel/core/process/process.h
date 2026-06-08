@@ -172,6 +172,20 @@ typedef struct process_t
     spinlock_t  bay_lock;
     uint64_t    bay_va_next;
 
+    /* TME-MK per-process quota — count of currently-alive encrypted
+     * Bays this cabin CREATED (BAY_CREATE | BAY_ENCRYPTED). Protected
+     * by bay_lock. Incremented on bay create, decremented when the
+     * Bay's last ref drops (via creator pid lookup; pid-reuse race
+     * accepted as a minor accounting drift). Capped at
+     * TME_QUOTA_PER_PROC (bay.h) so a misbehaving cabin can't drain
+     * the global pool of N KeyIDs and DoS other cabins.
+     *
+     * The counter does NOT reset on process_destroy — if creator dies
+     * while its Bays survive elsewhere, the counter still drops when
+     * those Bays' last refs drop (pid lookup returns NULL, decrement
+     * is a no-op, but the proc is gone so quota is irrelevant). */
+    uint16_t    tme_keyids_held;
+
     /* Brook claim list — per-cabin head of BrookClaim chain. Same
      * lifecycle pattern as Bay: BrookCleanupProcess walks the list
      * during process_destroy, drops every BrookObject reference (peer
