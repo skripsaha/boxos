@@ -17,6 +17,7 @@
 #include "fpu.h"     /* fpu_xsave_register_extension — XCR0 RMW + xsave area resize */
 #include "cabin_layout.h"
 #include "acpi.h"
+#include "hypervisor.h"  /* hv_present, hv_vendor_name — LA57 dance gate */
 
 static vmm_context_t *kernel_context = NULL;
 static vmm_context_t *current_context = NULL;
@@ -37,6 +38,74 @@ static spinlock_t pcid_lock = {0};
 
 uint8_t vmm_maxphyaddr = 36;
 uint64_t vmm_pte_addr_mask = 0x0000000FFFFFF000ULL;
+
+/* 5-level paging (LA57) runtime state — see vmm.h for the contract.
+ * Defaults to 4-level; vmm_init upgrades to 5-level when the CPU advertises
+ * CPUID.07H.0:ECX[16] AND the runtime LA57 transition trampoline succeeds. */
+int  g_vmm_paging_levels = 4;
+bool g_vmm_la57_active   = false;
+
+/* Implemented in vmm_la57.asm — switches the calling CPU from 4-level to
+ * 5-level paging with CR3 = pml5_phys. pml5_phys MUST be < 4 GB. */
+extern void vmm_la57_runtime_enable(uint64_t pml5_phys);
+
+/* Return the PML4 backing `ctx`. Under 4-level paging, ctx->pml4 IS the
+ * PML4. Under 5-level, ctx->pml4 is the PML5 root and the kernel-shared
+ * PML4 is reachable via PML5[511] (any kernel VA's PML5 index is 511 since
+ * canonical sign-extension forces bits 56:48 = all 1 for kernel half).
+ *
+ * Returns NULL if the 5-level PML5[511] entry hasn't been populated yet —
+ * caller in vmm_init populates it on first kernel mapping via the walker.
+ *
+ * Used by the direct-poke sites (Pull Map root install, ctx-copy loops in
+ * create/destroy) that need an unambiguous PML4 handle rather than a walk
+ * by VA. */
+static inline page_table_t *vmm_kernel_pml4_of(vmm_context_t *ctx) {
+    if (g_vmm_paging_levels == 4) {
+        return ctx->pml4;
+    }
+    pte_t pml5_e = ctx->pml4->entries[511];
+    if (!(pml5_e & VMM_FLAG_PRESENT)) return NULL;
+    return (page_table_t *)vmm_phys_to_virt(vmm_pte_to_phys(pml5_e));
+}
+
+/* Walk PML5 → PML4 for `virt_addr` under 5-level paging. Returns the PML4
+ * for `virt_addr`'s PML5 index slot. Under 4-level this is a no-op
+ * returning ctx->pml4. With `create=true`, allocates a fresh PML4 + CAS-
+ * publishes it when the PML5 entry is empty; returns NULL on alloc fail.
+ *
+ * CAS-publish handles the cross-core race the existing 4-level walker
+ * already handles at PML4→PDPT level (vmm_get_or_create_table:1187+). */
+static page_table_t *vmm_walk_pml5_to_pml4(vmm_context_t *ctx,
+                                            uintptr_t virt_addr,
+                                            bool create) {
+    if (g_vmm_paging_levels == 4) {
+        return ctx->pml4;
+    }
+    uint32_t pml5_idx = VMM_PML5_INDEX(virt_addr);
+    pte_t *pml5_entry = &ctx->pml4->entries[pml5_idx];
+
+    if (!(*pml5_entry & VMM_FLAG_PRESENT)) {
+        if (!create) return NULL;
+        uintptr_t new_pml4_phys = vmm_alloc_page_table();
+        if (!new_pml4_phys) {
+            vmm_set_error("Failed to allocate PML4 under PML5");
+            return NULL;
+        }
+        pte_t new_entry = vmm_make_pte(new_pml4_phys,
+                                       VMM_FLAGS_KERNEL_RW | VMM_FLAG_USER);
+        pte_t expected = 0;
+        bool  won = __atomic_compare_exchange_n(pml5_entry, &expected,
+                                                 new_entry, false,
+                                                 __ATOMIC_RELEASE,
+                                                 __ATOMIC_ACQUIRE);
+        if (!won) {
+            pmm_free((void *)new_pml4_phys, 1);
+        }
+    }
+    uintptr_t pml4_phys = vmm_pte_to_phys(*pml5_entry);
+    return (page_table_t *)vmm_phys_to_virt(pml4_phys);
+}
 
 static uintptr_t kernel_heap_current = VMM_KERNEL_HEAP_BASE;
 static spinlock_t kernel_heap_lock = {0};
@@ -732,9 +801,12 @@ error_t vmm_set_user_lam(vmm_context_t *ctx, vmm_lam_mode_t mode) {
     if (!ctx) return ERR_NULL_POINTER;
     if (mode != VMM_LAM_NONE && !g_cpu_caps.has_lam) return ERR_UNSUPPORTED;
     if (mode > VMM_LAM_U57) return ERR_INVALID_ARGUMENT;
-    /* LAM_U57 requires 5-level paging which BoxOS doesn't enable
-     * (enable_fpu panics on CR4.LA57 set by firmware). Reject. */
-    if (mode == VMM_LAM_U57) return ERR_UNSUPPORTED;
+    /* LAM_U57 requires 5-level paging (Intel SDM Vol 3A §5.6 "Linear
+     * Address Masking"). Reject when the kernel booted 4-level. */
+    if (mode == VMM_LAM_U57 &&
+        !__atomic_load_n(&g_vmm_la57_active, __ATOMIC_ACQUIRE)) {
+        return ERR_UNSUPPORTED;
+    }
     ctx->lam_mode = (uint8_t)mode;
     return OK;
 }
@@ -1162,7 +1234,11 @@ page_table_t *vmm_get_or_create_table(vmm_context_t *ctx, uintptr_t virt_addr, i
     if (!ctx || !ctx->pml4)
         return NULL;
 
-    page_table_t *current_table = ctx->pml4;
+    /* Under 5-level paging, descend PML5 first to reach the PML4 for this
+     * VA's PML5 index. Under 4-level this is a no-op returning ctx->pml4
+     * directly. CAS-publishes a new PML4 if needed. */
+    page_table_t *current_table = vmm_walk_pml5_to_pml4(ctx, virt_addr, true);
+    if (!current_table) return NULL;
     uint32_t indices[4] = {
         VMM_PML4_INDEX(virt_addr),
         VMM_PDPT_INDEX(virt_addr),
@@ -1229,7 +1305,10 @@ static pte_t *vmm_get_pte_noalloc(vmm_context_t *ctx, uintptr_t virt_addr)
     uint32_t pd_idx = VMM_PD_INDEX(virt_addr);
     uint32_t pt_idx = VMM_PT_INDEX(virt_addr);
 
-    page_table_t *pml4 = ctx->pml4;
+    /* 5-level paging: descend PML5 → PML4 first. Returns NULL if PML5 slot
+     * empty (no PML4 allocated for this VA region). */
+    page_table_t *pml4 = vmm_walk_pml5_to_pml4(ctx, virt_addr, false);
+    if (!pml4) return NULL;
     pte_t pml4_entry = pml4->entries[pml4_idx];
     if (!(pml4_entry & VMM_FLAG_PRESENT))
         return NULL;
@@ -1291,7 +1370,10 @@ pte_t *vmm_get_leaf_pte(vmm_context_t *ctx, uintptr_t virt_addr,
     uint32_t pd_idx   = VMM_PD_INDEX(virt_addr);
     uint32_t pt_idx   = VMM_PT_INDEX(virt_addr);
 
-    pte_t pml4_entry = ctx->pml4->entries[pml4_idx];
+    /* 5-level: descend PML5 → PML4 first (no-op under 4-level). */
+    page_table_t *pml4_table = vmm_walk_pml5_to_pml4(ctx, virt_addr, false);
+    if (!pml4_table) return NULL;
+    pte_t pml4_entry = pml4_table->entries[pml4_idx];
     if (!(pml4_entry & VMM_FLAG_PRESENT)) return NULL;
 
     page_table_t *pdpt =
@@ -1369,36 +1451,29 @@ vmm_context_t *vmm_create_context(void)
     return ctx;
 }
 
-static void vmm_free_user_space_tables(vmm_context_t *ctx)
+/* Walk one PML4's user entries [0..pml4_entry_end), freeing PDPT/PD/PT
+ * structures and marking user data pages in the dedup bitmap for deferred
+ * pmm_free (Phase 1 of the two-phase teardown).
+ *
+ * Caller bounds:
+ *   • 4-level paging: invoked once with pml4=ctx->pml4, end=256 (user half;
+ *     entries 256..511 are kernel-shared).
+ *   • 5-level paging: invoked per non-NULL PML5[0..255] entry with end=512
+ *     (entire PML4 is user under 5-level; kernel sits under PML5[511] in a
+ *     separate PML4 that this function never touches).
+ *
+ * `pml4_top_idx_for_virt` is the PML5 (5-level) or 0 (4-level) index that
+ * names this PML4 in the linear-address space. Used only to compose the
+ * `is_identity_mapped` check for the (now dead in practice) pre-Pull-Map
+ * boot identity teardown path. */
+static void vmm_walk_free_pml4_user_(page_table_t *pml4, int pml4_entry_end,
+                                     uint8_t *freed_bitmap, bool has_dedup,
+                                     size_t dedup_total_pages,
+                                     uint64_t pml5_va_term)
 {
-    if (!ctx || !ctx->pml4)
-        return;
-
-    debug_printf("[VMM] Freeing user space tables for context CR3=0x%lx\n", ctx->pml4_phys);
-
-    // bitmap to detect duplicate PT entries pointing to the same physical page
-    // sized dynamically from pmm_get_mem_end() so all physical RAM is covered
-    uint64_t dedup_mem_end = pmm_get_mem_end();
-    size_t dedup_total_pages = dedup_mem_end / VMM_PAGE_SIZE;
-    size_t dedup_bitmap_size = (dedup_total_pages + 7) / 8;
-
-    uint8_t *freed_bitmap = kmalloc(dedup_bitmap_size);
-    bool has_dedup = (freed_bitmap != NULL);
-    if (!has_dedup)
+    for (int p4 = 0; p4 < pml4_entry_end; p4++)
     {
-        debug_printf("[VMM] WARNING: kmalloc(%zu) failed for dedup bitmap — skipping user page frees to avoid double-free\n", dedup_bitmap_size);
-    }
-    else
-    {
-        memset(freed_bitmap, 0, dedup_bitmap_size);
-    }
-    // When has_dedup is false we still walk the tables to free page-table
-    // structures but SKIP freeing data pages (pmm_free) to prevent
-    // double-free if two PTEs point to the same physical frame.
-
-    for (int p4 = 0; p4 < 256; p4++)
-    {
-        pte_t pml4_entry = ctx->pml4->entries[p4];
+        pte_t pml4_entry = pml4->entries[p4];
         if (!(pml4_entry & VMM_FLAG_PRESENT))
             continue;
 
@@ -1456,7 +1531,12 @@ static void vmm_free_user_space_tables(vmm_context_t *ctx)
 
                     uintptr_t phys = vmm_pte_to_phys(pt_entry);
 
-                    uintptr_t virt = (p4 * 512ULL * 1024 * 1024 * 1024) +
+                    /* Compose the linear-address term the boot-identity
+                     * check needs. Under 5-level we add the PML5 slot's
+                     * VA contribution (pml5_va_term, 256 TB per slot).
+                     * Under 4-level pml5_va_term is 0. */
+                    uintptr_t virt = pml5_va_term +
+                                     (p4 * 512ULL * 1024 * 1024 * 1024) +
                                      (p3 * 1024 * 1024 * 1024) +
                                      (p2 * 2 * 1024 * 1024) +
                                      (p1 * VMM_PAGE_SIZE);
@@ -1521,7 +1601,66 @@ static void vmm_free_user_space_tables(vmm_context_t *ctx)
         }
 
         vmm_free_page_table(pdpt_phys);
-        ctx->pml4->entries[p4] = 0;
+        pml4->entries[p4] = 0;
+    }
+}
+
+static void vmm_free_user_space_tables(vmm_context_t *ctx)
+{
+    if (!ctx || !ctx->pml4)
+        return;
+
+    debug_printf("[VMM] Freeing user space tables for context CR3=0x%lx (%d-level)\n",
+                 ctx->pml4_phys, g_vmm_paging_levels);
+
+    // bitmap to detect duplicate PT entries pointing to the same physical page
+    // sized dynamically from pmm_get_mem_end() so all physical RAM is covered
+    uint64_t dedup_mem_end = pmm_get_mem_end();
+    size_t dedup_total_pages = dedup_mem_end / VMM_PAGE_SIZE;
+    size_t dedup_bitmap_size = (dedup_total_pages + 7) / 8;
+
+    uint8_t *freed_bitmap = kmalloc(dedup_bitmap_size);
+    bool has_dedup = (freed_bitmap != NULL);
+    if (!has_dedup)
+    {
+        debug_printf("[VMM] WARNING: kmalloc(%zu) failed for dedup bitmap — skipping user page frees to avoid double-free\n", dedup_bitmap_size);
+    }
+    else
+    {
+        memset(freed_bitmap, 0, dedup_bitmap_size);
+    }
+    // When has_dedup is false we still walk the tables to free page-table
+    // structures but SKIP freeing data pages (pmm_free) to prevent
+    // double-free if two PTEs point to the same physical frame.
+
+    if (g_vmm_paging_levels == 4) {
+        /* 4-level: user-half = PML4[0..255]. Kernel-shared entries
+         * 256..511 are left alone (they reference the kernel PML4
+         * mirror shared across every cabin). */
+        vmm_walk_free_pml4_user_(ctx->pml4, 256,
+                                  freed_bitmap, has_dedup,
+                                  dedup_total_pages,
+                                  0ULL);
+    } else {
+        /* 5-level: user-half = PML5[0..255]; each non-NULL entry points
+         * to a PML4 whose ALL 512 entries are user (since kernel lives
+         * under PML5[511] in a separate PML4 mirror shared via the
+         * create_context copy loop). Walk each subtree, free its
+         * PML4 page, and zero the PML5 entry. */
+        for (int p5 = 0; p5 < 256; p5++) {
+            pte_t pml5_entry = ctx->pml4->entries[p5];
+            if (!(pml5_entry & VMM_FLAG_PRESENT)) continue;
+            uintptr_t pml4_phys_user = vmm_pte_to_phys(pml5_entry);
+            page_table_t *pml4_user =
+                (page_table_t *)vmm_phys_to_virt(pml4_phys_user);
+            uint64_t pml5_va_term = (uint64_t)p5 << 48;
+            vmm_walk_free_pml4_user_(pml4_user, 512,
+                                      freed_bitmap, has_dedup,
+                                      dedup_total_pages,
+                                      pml5_va_term);
+            vmm_free_page_table(pml4_phys_user);
+            ctx->pml4->entries[p5] = 0;
+        }
     }
 
     /* Phase 2: cross-core TLB shootdown. ALL online cores must drop any
@@ -2678,6 +2817,70 @@ void vmm_init(void)
     // detect MAXPHYADDR before creating any page tables to build the correct PTE mask
     vmm_init_maxphyaddr();
 
+    /* 5-level paging decision. Intel SDM Vol 3A §4.5 / AMD APM Vol 2 §5.3.5.
+     *
+     * Three paths:
+     *   (1) Firmware ALREADY set CR4.LA57=1 (UEFI on 5-level-capable
+     *       platforms sometimes does this when the OS option requests it):
+     *       adopt natively, no runtime transition.
+     *   (2) Bare-metal HW with CPUID LA57 + CR4.LA57=0: run the runtime
+     *       dance to enable CR4.LA57 + switch to a PML5 root. Safe per
+     *       Intel SDM on real silicon.
+     *   (3) Hypervisor environment (KVM, TCG, Hyper-V, ...) with CPUID LA57:
+     *       STAY 4-level. The runtime dance involves CR0.PG=0 + compat-mode
+     *       trampoline + far-jmp through a temp PML5; some hypervisors
+     *       (notably QEMU TCG) don't reliably emulate this sequence and
+     *       triple-fault. Real Intel/AMD silicon honours the dance per SDM
+     *       — production hardware will take path (2). */
+    {
+        uint64_t cr4_init;
+        asm volatile("mov %%cr4, %0" : "=r"(cr4_init));
+        bool firmware_la57 = (cr4_init & (1ULL << 12)) != 0;
+        if (firmware_la57) {
+            g_vmm_paging_levels = 5;
+            __atomic_store_n(&g_vmm_la57_active, true, __ATOMIC_RELEASE);
+            debug_printf("[VMM] LA57 already enabled by firmware — adopting "
+                         "5-level paging without runtime transition\n");
+        } else if (g_cpu_caps.has_la57 && !hv_present()) {
+            g_vmm_paging_levels = 5;
+            debug_printf("[VMM] CPU supports LA57 + bare-metal — will enable "
+                         "5-level paging via runtime CR0.PG dance\n");
+        } else if (g_cpu_caps.has_la57) {
+            /* Hypervisor advertises LA57 but the runtime dance triple-faults
+             * under QEMU TCG specifically on the compat→64-bit far-jmp after
+             * CR4.LA57=1 + CR3=PML5 + CR0.PG=1. Investigation (2026-06-08):
+             *
+             *   - Dance reaches PG=1 in 5-level mode successfully (slot read
+             *     via [ebp], DBG marker after `mov cr0, eax`).
+             *   - Crash is on the immediately-following `jmp far` regardless
+             *     of: m16:m32 vs m16:m64 operand form (REX.W is silently
+             *     ignored in compat mode per Intel SDM Vol 2A §2.2.1.2 and
+             *     AMD APM Vol 3 §1.7.1.6), low-PA vs high-VA target (so it
+             *     isn't sign-extension), or selector cache state.
+             *   - The dance is per Intel SDM Vol 3A §4.1.1 / §4.5 / §9.8.5.
+             *     Linux's head_64.S enables LA57 in 32-bit *protected* mode
+             *     (BEFORE entering IA-32e), not via a compat-submode dance
+             *     inside IA-32e — so this code path is rarely exercised on
+             *     real hardware or emulators.
+             *   - vmm_la57.asm is correct per spec; we still gate on bare-
+             *     metal to avoid TCG triple-fault. On real Sapphire Rapids /
+             *     Zen 4 silicon the dance should work (TCG-specific quirk).
+             *
+             * Note: hv_present()==true also covers KVM. KVM may pass the
+             * dance through to silicon and work, but without a real LA57
+             * KVM host to test, we stay conservative.
+             */
+            g_vmm_paging_levels = 4;
+            debug_printf("[VMM] CPU supports LA57 but running under %s — "
+                         "staying 4-level (runtime dance disabled under "
+                         "hypervisor; see vmm.c LA57-decision comment)\n",
+                         hv_vendor_name());
+        } else {
+            g_vmm_paging_levels = 4;
+            debug_printf("[VMM] LA57 not supported — using 4-level paging\n");
+        }
+    }
+
     spinlock_init(&kernel_heap_lock);
     spinlock_init(&vmalloc_lock);
     spinlock_init(&kernel_mmio_lock);
@@ -2786,11 +2989,23 @@ void vmm_init(void)
         }
     }
 
-    kernel_context->pml4->entries[PULL_MAP_PML4_INDEX] =
-        vmm_make_pte(pull_pdpt_phys, VMM_FLAG_PRESENT | VMM_FLAG_WRITABLE);
+    /* Pull Map root install. Under 5-level paging, ctx->pml4 is actually
+     * the PML5 root — we must descend through PML5[511] (PA of the kernel
+     * PML4 mirror, allocated implicitly by the prior vmm_get_or_create_table
+     * pass for higher-half) and write to PML4[272]. Under 4-level we write
+     * directly to PML4[272]. vmm_kernel_pml4_of returns the right page. */
+    {
+        page_table_t *kpml4 = vmm_kernel_pml4_of(kernel_context);
+        if (!kpml4) {
+            panic("vmm_init: kernel PML4 not yet allocated (no higher-half "
+                  "mapping created before Pull Map install?)");
+        }
+        kpml4->entries[PULL_MAP_PML4_INDEX] =
+            vmm_make_pte(pull_pdpt_phys, VMM_FLAG_PRESENT | VMM_FLAG_WRITABLE);
+    }
 
-    debug_printf("[VMM] Pull Map installed at PML4[%d] = 0x%lx\n",
-                 PULL_MAP_PML4_INDEX, pull_pdpt_phys);
+    debug_printf("[VMM] Pull Map installed at PML4[%d] = 0x%lx (%d-level)\n",
+                 PULL_MAP_PML4_INDEX, pull_pdpt_phys, g_vmm_paging_levels);
 
     debug_printf("[VMM] Kernel heap will be mapped on demand starting at 0x%p\n",
                  (void *)VMM_KERNEL_HEAP_BASE);
@@ -2803,6 +3018,80 @@ void vmm_init(void)
     // kernel_context was kmalloc'd at identity address — will be a dangling pointer after switch.
     uintptr_t saved_pml4_phys = kernel_context->pml4_phys;
     uintptr_t saved_ctx_phys = (uintptr_t)kernel_context;
+
+    /* LA57 runtime transition. Done BEFORE vmm_switch_context so the boot
+     * identity mapping (PA=VA for 0..4 GB stage2/tagboot tables) is still
+     * alive — the asm trampoline needs it to execute its low-PA aliased
+     * post-PG=0 code and to jump back to the high-VA kernel after PG=1.
+     *
+     * Skipped when firmware already enabled CR4.LA57 (g_vmm_la57_active set
+     * earlier in vmm_init) — no runtime flip needed in that case.
+     *
+     * The dance loads CR3 with a temporary PML5 that wraps the boot PML4
+     * via PML5[0] AND PML5[511] (so both identity and higher-half stay
+     * reachable). Immediately after the dance returns we mov-cr3 to the
+     * final kernel_context PML5 so subsequent code runs on the proper
+     * 5-level kernel tables.
+     *
+     * Phys-address constraints from the asm trampoline:
+     *   • temp PML5 phys < 4 GB (32-bit `mov cr3, ebx` in dance asm).
+     *   • final kernel PML5 phys < 4 GB (same constraint applies to the
+     *     AP trampoline, which loads it in 32-bit pre-paging code). */
+    if (g_vmm_paging_levels == 5 &&
+        !__atomic_load_n(&g_vmm_la57_active, __ATOMIC_ACQUIRE))
+    {
+        uint64_t boot_cr3;
+        asm volatile("mov %%cr3, %0" : "=r"(boot_cr3));
+        uint64_t boot_pml4_phys = boot_cr3 & ~0xFFFULL;
+
+        if (kernel_context->pml4_phys >= (1ULL << 32)) {
+            panic("LA57: kernel PML5 phys 0x%lx >= 4 GB — AP trampoline 32-bit "
+                  "CR3 load would truncate. PMM must serve <4 GB pages for the "
+                  "kernel context's top-level table.",
+                  (unsigned long)kernel_context->pml4_phys);
+        }
+
+        void *temp_pml5_p = pmm_alloc_zero(1);
+        if (!temp_pml5_p) panic("LA57: cannot allocate temp PML5 page");
+        uintptr_t temp_pml5_phys = (uintptr_t)temp_pml5_p;
+        if (temp_pml5_phys >= (1ULL << 32)) {
+            pmm_free(temp_pml5_p, 1);
+            panic("LA57: temp PML5 phys 0x%lx >= 4 GB — dance asm 32-bit "
+                  "CR3 load would truncate.",
+                  (unsigned long)temp_pml5_phys);
+        }
+        page_table_t *temp_pml5 = (page_table_t *)vmm_phys_to_virt(temp_pml5_phys);
+        /* Wrap the boot PML4 at both PML5[0] (so identity 0..4 GB stays
+         * reachable through PML5[0]→boot_PML4[0]→PDPT_identity) and
+         * PML5[511] (so higher-half kernel stays reachable through
+         * PML5[511]→boot_PML4[511]→PDPT_high). */
+        temp_pml5->entries[0]   = boot_pml4_phys | VMM_FLAG_PRESENT | VMM_FLAG_WRITABLE;
+        temp_pml5->entries[511] = boot_pml4_phys | VMM_FLAG_PRESENT | VMM_FLAG_WRITABLE;
+
+        debug_printf("[VMM] LA57 transition: boot_PML4=0x%lx temp_PML5=0x%lx "
+                     "kernel_PML5=0x%lx\n",
+                     (unsigned long)boot_pml4_phys,
+                     (unsigned long)temp_pml5_phys,
+                     (unsigned long)kernel_context->pml4_phys);
+
+        /* Execute the dance: CR0.PG=0 → CR4.LA57=1 → CR3=temp_PML5 → CR0.PG=1
+         * with a temporary 32-bit CS to bridge the compat-mode window. */
+        vmm_la57_runtime_enable(temp_pml5_phys);
+
+        /* Publish LA57 active state for AP trampoline + other consumers
+         * (per-AP CR4.LA57 propagation). Release-store synchronises with
+         * any subsequent acquire-load on APs. */
+        __atomic_store_n(&g_vmm_la57_active, true, __ATOMIC_RELEASE);
+
+        /* Switch CR3 from temp_PML5 to the final kernel PML5. PCID is not
+         * yet enabled so a plain CR3 write is fine. */
+        asm volatile("mov %0, %%cr3" : : "r"(kernel_context->pml4_phys) : "memory");
+
+        /* Release the temp PML5 page — it served its single-use purpose. */
+        pmm_free(temp_pml5_p, 1);
+
+        debug_printf("[VMM] LA57 active: CR4.LA57=1, kernel on 5-level paging\n");
+    }
 
     // Switch to new kernel page tables.
     // After this: identity mapping is GONE. Only higher-half + Pull Map exist.
@@ -2894,7 +3183,11 @@ void vmm_dump_page_tables(vmm_context_t *ctx, uintptr_t virt_addr)
     if (!ctx)
         return;
 
-    debug_printf("[VMM] Page table dump for virtual address 0x%p:\n", (void *)virt_addr);
+    debug_printf("[VMM] Page table dump for virtual address 0x%p (%d-level):\n",
+                 (void *)virt_addr, g_vmm_paging_levels);
+    if (g_vmm_paging_levels == 5) {
+        debug_printf("[VMM]   PML5 index: %d\n", VMM_PML5_INDEX(virt_addr));
+    }
     debug_printf("[VMM]   PML4 index: %d\n", VMM_PML4_INDEX(virt_addr));
     debug_printf("[VMM]   PDPT index: %d\n", VMM_PDPT_INDEX(virt_addr));
     debug_printf("[VMM]   PD index:   %d\n", VMM_PD_INDEX(virt_addr));
@@ -2902,14 +3195,29 @@ void vmm_dump_page_tables(vmm_context_t *ctx, uintptr_t virt_addr)
 
     spin_lock(&ctx->lock);
 
-    page_table_t *pml4 = ctx->pml4;
-    if (!pml4)
+    if (!ctx->pml4)
     {
-        debug_printf("[VMM]   PML4: NULL\n");
+        debug_printf("[VMM]   top table (PML%d): NULL\n", g_vmm_paging_levels);
         spin_unlock(&ctx->lock);
         return;
     }
 
+    /* 5-level: report PML5 entry + descend; under 4-level go straight to PML4. */
+    if (g_vmm_paging_levels == 5) {
+        pte_t pml5_entry = ctx->pml4->entries[VMM_PML5_INDEX(virt_addr)];
+        debug_printf("[VMM]   PML5 entry: 0x%016llx (present: %s)\n",
+                     (unsigned long long)pml5_entry,
+                     (pml5_entry & VMM_FLAG_PRESENT) ? "yes" : "no");
+        if (!(pml5_entry & VMM_FLAG_PRESENT)) {
+            spin_unlock(&ctx->lock);
+            return;
+        }
+    }
+    page_table_t *pml4 = vmm_walk_pml5_to_pml4(ctx, virt_addr, false);
+    if (!pml4) {
+        spin_unlock(&ctx->lock);
+        return;
+    }
     pte_t pml4_entry = pml4->entries[VMM_PML4_INDEX(virt_addr)];
     debug_printf("[VMM]   PML4 entry: 0x%016llx (present: %s)\n",
                  (unsigned long long)pml4_entry, (pml4_entry & VMM_FLAG_PRESENT) ? "yes" : "no");
@@ -3515,7 +3823,13 @@ bool vmm_unmap_huge_2m(vmm_context_t *ctx, uintptr_t virt_addr)
     uint32_t pdpt_idx = VMM_PDPT_INDEX(virt_addr);
     uint32_t pd_idx   = VMM_PD_INDEX(virt_addr);
 
-    pte_t pml4_e = ctx->pml4->entries[pml4_idx];
+    /* 5-level: descend PML5 → PML4 first. */
+    page_table_t *pml4_table = vmm_walk_pml5_to_pml4(ctx, virt_addr, false);
+    if (!pml4_table) {
+        spin_unlock(&ctx->lock);
+        return false;
+    }
+    pte_t pml4_e = pml4_table->entries[pml4_idx];
     if (!(pml4_e & VMM_FLAG_PRESENT)) {
         spin_unlock(&ctx->lock);
         return false;
@@ -3566,7 +3880,10 @@ uintptr_t vmm_virt_to_phys_huge_2m(vmm_context_t *ctx, uintptr_t virt_addr)
     uint32_t pdpt_idx = VMM_PDPT_INDEX(virt_addr);
     uint32_t pd_idx   = VMM_PD_INDEX(virt_addr);
 
-    pte_t pml4_e = ctx->pml4->entries[pml4_idx];
+    /* 5-level: descend PML5 → PML4 first. */
+    page_table_t *pml4_table = vmm_walk_pml5_to_pml4(ctx, virt_addr, false);
+    if (!pml4_table) return 0;
+    pte_t pml4_e = pml4_table->entries[pml4_idx];
     if (!(pml4_e & VMM_FLAG_PRESENT)) return 0;
     page_table_t *pdpt = (page_table_t *)vmm_phys_to_virt(vmm_pte_to_phys(pml4_e));
     pte_t pdpt_e = pdpt->entries[pdpt_idx];
