@@ -2196,7 +2196,12 @@ int tagfs_read(TagFSFileHandle *handle, void *buffer, uint64_t size)
     if (size > remaining)
         size = remaining;
 
-    uint8_t block_buf[TAGFS_BLOCK_SIZE];
+    /* Heap-alloc the per-call 4 KiB block scratch so the function
+     * frame stays under -Wstack-usage=8192. tagfs_read can run on
+     * per-cpu kernel stacks (16 KiB total); a 4 KiB stack frame +
+     * nested IRQ frame would eat half the budget. */
+    uint8_t *block_buf = (uint8_t *)kmalloc(TAGFS_BLOCK_SIZE);
+    if (!block_buf) return -1;
     uint8_t *out = (uint8_t *)buffer;
     uint64_t bytes_read = 0;
 
@@ -2247,6 +2252,7 @@ int tagfs_read(TagFSFileHandle *handle, void *buffer, uint64_t size)
     }
 
     handle->offset += bytes_read;
+    kfree(block_buf);
     return (int)bytes_read;
 }
 

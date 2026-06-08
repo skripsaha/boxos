@@ -649,68 +649,105 @@ static size_t ResolveTagStrs(const char *const *strs, uint16_t *out, size_t max)
     return n;
 }
 
-MemTagResult MemTagQueryAnd_(const char *const *tag_strs) {
-    MemTagResult r = { .count = 0 };
-    if (!g_memtag_initialized) return r;
+/* ─── Out-pointer query variants ────────────────────────────────────
+ *
+ * The return-by-value variants below spill the 2056-byte MemTagResult
+ * to a stack temporary at every call site. Code that calls them
+ * repeatedly (memtag_test.c MemTagStressTest is the worst offender)
+ * accumulates the temporaries into a >8 KiB frame that exceeds
+ * -Wstack-usage=8192 and competes with nested IRQ frames on the
+ * 16 KiB per-cpu kernel stacks.
+ *
+ * The _Into variants write into a caller-owned out-buffer. The
+ * existing return-by-value functions become thin wrappers for API
+ * compatibility — they're still safe to call from cold paths, but
+ * hot paths should switch to _Into. */
+
+void MemTagQueryAndInto_(const char *const *tag_strs, MemTagResult *out) {
+    if (!out) return;
+    out->count = 0;
+    if (!g_memtag_initialized) return;
 
     uint16_t ids[64];
     size_t n = ResolveTagStrs(tag_strs, ids, 64);
-    if (n == 0) return r;
-    /* If ANY required tag is unknown → AND is empty. */
+    if (n == 0) return;
     for (size_t i = 0; i < n; i++) {
-        if (ids[i] == MEMTAG_INVALID_TAG_ID) return r;
+        if (ids[i] == MEMTAG_INVALID_TAG_ID) return;
     }
-    r.count = MemTagBitmapQueryAnd(&g_bitmap_index, ids, (uint16_t)n,
-                                    r.region_ids,
-                                    sizeof(r.region_ids) / sizeof(r.region_ids[0]));
-    return r;
+    out->count = MemTagBitmapQueryAnd(&g_bitmap_index, ids, (uint16_t)n,
+                                       out->region_ids,
+                                       sizeof(out->region_ids) /
+                                       sizeof(out->region_ids[0]));
 }
 
-MemTagResult MemTagQueryOr_(const char *const *tag_strs) {
-    MemTagResult r = { .count = 0 };
-    if (!g_memtag_initialized) return r;
+void MemTagQueryOrInto_(const char *const *tag_strs, MemTagResult *out) {
+    if (!out) return;
+    out->count = 0;
+    if (!g_memtag_initialized) return;
 
     uint16_t ids[64];
     size_t n = ResolveTagStrs(tag_strs, ids, 64);
-    /* Unknown tags in OR-set are filtered (count toward nothing). */
     uint16_t known[64]; uint16_t kn = 0;
     for (size_t i = 0; i < n; i++)
         if (ids[i] != MEMTAG_INVALID_TAG_ID) known[kn++] = ids[i];
-    if (kn == 0) return r;
-    r.count = MemTagBitmapQueryOr(&g_bitmap_index, known, kn,
-                                   r.region_ids,
-                                   sizeof(r.region_ids) / sizeof(r.region_ids[0]));
-    return r;
+    if (kn == 0) return;
+    out->count = MemTagBitmapQueryOr(&g_bitmap_index, known, kn,
+                                      out->region_ids,
+                                      sizeof(out->region_ids) /
+                                      sizeof(out->region_ids[0]));
 }
 
-MemTagResult MemTagQueryMixed_(const char *const *required,
-                                const char *const *any,
-                                const char *const *excluded) {
-    MemTagResult r = { .count = 0 };
-    if (!g_memtag_initialized) return r;
+void MemTagQueryMixedInto_(const char *const *required,
+                            const char *const *any,
+                            const char *const *excluded,
+                            MemTagResult *out) {
+    if (!out) return;
+    out->count = 0;
+    if (!g_memtag_initialized) return;
 
     uint16_t req[64], an[64], ex[64];
     size_t nr = ResolveTagStrs(required, req, 64);
     size_t na = ResolveTagStrs(any,      an,  64);
     size_t ne = ResolveTagStrs(excluded, ex,  64);
 
-    /* Any unknown REQUIRED tag → empty result. */
     for (size_t i = 0; i < nr; i++)
-        if (req[i] == MEMTAG_INVALID_TAG_ID) return r;
+        if (req[i] == MEMTAG_INVALID_TAG_ID) return;
 
-    /* Filter unknowns from any/excluded. */
     uint16_t a2[64], e2[64]; uint16_t na2 = 0, ne2 = 0;
     for (size_t i = 0; i < na; i++)
         if (an[i] != MEMTAG_INVALID_TAG_ID) a2[na2++] = an[i];
     for (size_t i = 0; i < ne; i++)
         if (ex[i] != MEMTAG_INVALID_TAG_ID) e2[ne2++] = ex[i];
 
-    r.count = MemTagBitmapQueryMixed(&g_bitmap_index,
-                                      req, (uint16_t)nr,
-                                      a2,  na2,
-                                      e2,  ne2,
-                                      r.region_ids,
-                                      sizeof(r.region_ids)/sizeof(r.region_ids[0]));
+    out->count = MemTagBitmapQueryMixed(&g_bitmap_index,
+                                         req, (uint16_t)nr,
+                                         a2,  na2,
+                                         e2,  ne2,
+                                         out->region_ids,
+                                         sizeof(out->region_ids) /
+                                         sizeof(out->region_ids[0]));
+}
+
+/* Return-by-value compat shims — kept for source compat with callers
+ * that already use the MemTagAnd / MemTagOr macros. New code prefers
+ * the _Into variants above. */
+MemTagResult MemTagQueryAnd_(const char *const *tag_strs) {
+    MemTagResult r;
+    MemTagQueryAndInto_(tag_strs, &r);
+    return r;
+}
+
+MemTagResult MemTagQueryOr_(const char *const *tag_strs) {
+    MemTagResult r;
+    MemTagQueryOrInto_(tag_strs, &r);
+    return r;
+}
+
+MemTagResult MemTagQueryMixed_(const char *const *required,
+                                const char *const *any,
+                                const char *const *excluded) {
+    MemTagResult r;
+    MemTagQueryMixedInto_(required, any, excluded, &r);
     return r;
 }
 

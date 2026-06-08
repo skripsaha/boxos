@@ -130,6 +130,23 @@ MemTagResult  MemTagQueryMixed_(const char *const *required,
 #define MemTagAnd(...)  MemTagQueryAnd_((const char *const[]){__VA_ARGS__, NULL})
 #define MemTagOr(...)   MemTagQueryOr_((const char *const[]){__VA_ARGS__, NULL})
 
+/* Out-pointer variants — write MemTagResult into a caller-owned
+ * buffer. Avoids the 2056-byte stack temporary that the return-by-
+ * value variants spill at every call site. Hot paths (loops calling
+ * MemTagAnd repeatedly) MUST use these to keep frames under
+ * -Wstack-usage=8192. Cold paths can stay on the macro form above. */
+void MemTagQueryAndInto_(const char *const *tag_strs, MemTagResult *out);
+void MemTagQueryOrInto_(const char *const *tag_strs, MemTagResult *out);
+void MemTagQueryMixedInto_(const char *const *required,
+                            const char *const *any,
+                            const char *const *excluded,
+                            MemTagResult *out);
+
+#define MemTagAndInto(out, ...) \
+    MemTagQueryAndInto_((const char *const[]){__VA_ARGS__, NULL}, (out))
+#define MemTagOrInto(out, ...)  \
+    MemTagQueryOrInto_((const char *const[]){__VA_ARGS__, NULL}, (out))
+
 /* ─── PMM integration (called from pmm_alloc with string tag) ────── */
 
 /* Internal: allocate phys pages, optionally constrain to a zone tag prefix,

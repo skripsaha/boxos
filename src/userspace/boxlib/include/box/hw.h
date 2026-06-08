@@ -28,4 +28,24 @@ int hw_lam_get(void);
 /* Set the current process's LAM mode. Returns 0 on success or -ERR_*. */
 int hw_lam_set(hw_lam_mode_t mode);
 
+/* TME / TME-MK platform state snapshot. Userspace `hw tme` command
+ * dumps this. Fields mirror kernel TmeState (subset relevant to user
+ * diagnostics). */
+typedef struct {
+    uint8_t   tme_active;
+    uint8_t   mk_active;
+    uint8_t   num_keyid_bits;
+    uint8_t   activated_alg;
+    uint16_t  max_keyid;
+    uint16_t  pool_programmed;
+    uint16_t  in_use;
+    uint16_t  per_proc_quota;
+    uint8_t   reduced_maxphyaddr;
+    uint8_t   _pad[3];
+    uint16_t  this_proc_held;
+} hw_tme_state_t;
+
+/* Read the platform TME state. Returns 0 on success or -ERR_*. */
+int hw_tme_state(hw_tme_state_t *out);
+
 #endif /* BOX_HW_H */

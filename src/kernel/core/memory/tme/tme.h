@@ -128,7 +128,48 @@ uint64_t tme_phys_with_keyid(uint64_t phys, uint16_t keyid);
  * Identity when TME-MK is inactive. */
 uint64_t tme_phys_strip_keyid(uint64_t phys_with_keyid);
 
-/* Diagnostic dump — boot log + `hw tme` shell command (future). */
+/* Zero-fill phys pages via a temporary kernel mapping that bears the
+ * supplied KeyID. Used by consumers (encrypted Bay etc.) so the user
+ * mapping (also using KeyID) observes true zeros on first read —
+ * without this, the user would see ciphertext_K0(zeros) decrypted
+ * with their KeyID = defined-but-garbage bytes.
+ *
+ * Iterates page-by-page (4 KiB) or huge-page-by-huge-page (2 MiB)
+ * through a single locked kernel VA slot. Slow path (one map+memset+
+ * unmap per page) — called only at Bay create / similar lifecycle
+ * boundaries, not on the hot path.
+ *
+ * Returns OK on success; ERR_UNSUPPORTED when TME-MK is inactive
+ * (caller should fall back to plain pmm_alloc_zero / memset). */
+error_t tme_zero_pages_with_keyid(uintptr_t phys_base, size_t pages,
+                                   uint16_t keyid, bool huge_2m);
+
+/* Diagnostic dump — boot log + `hw tme` shell command. */
 void tme_dump_state(void);
+
+/* ─── DMA + TME-MK interaction (Intel TME-MK Spec §5) ───────────────
+ *
+ * A device DMA bypasses the CPU memory-encryption engine: the device
+ * sees the RAW ciphertext stored in DRAM, NOT the plaintext the CPU
+ * sees through its KeyID-bearing PTE. This makes encrypted-Bay-backed
+ * pages UNSAFE FOR DMA without IOMMU programming that:
+ *   1. Carries the same KeyID in the IOMMU's translation tables, OR
+ *   2. Provides a per-device decryption shim (Intel TDX has this for
+ *      "shared" pages; OS-managed TME-MK does not).
+ *
+ * BoxOS currently has VT-d / AMD-Vi drivers but does NOT yet expose
+ * a KeyID-aware DMA mapping path. Until that ships, callers MUST
+ * treat encrypted Bays as CPU-only and refuse to hand them to device
+ * drivers (NIC RX/TX, AHCI, NVMe, GPU framebuffers).
+ *
+ * The `tme_is_safe_for_dma(phys)` helper below is the gate: returns
+ * true ONLY if (a) MK is inactive (raw memory; baseline encryption
+ * is transparent to DMA), OR (b) the page has KeyID 0 (platform
+ * default key, also transparent to DMA because the platform key is
+ * shared with the IOMMU on TME-only hosts; UNSAFE under TDX which
+ * partitions KeyID 0 too — TODO when we add TDX support).
+ *
+ * Drivers wiring up DMA for a user-supplied buffer MUST check this. */
+bool tme_is_safe_for_dma(uintptr_t phys_with_keyid);
 
 #endif /* TME_H */

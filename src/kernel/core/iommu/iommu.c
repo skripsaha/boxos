@@ -4,6 +4,7 @@
 #include "touch.h"
 #include "memtag.h"  /* Phase 2G — auto-tag DMA-mapped phys with iommu:domain:N */
 #include "pmm.h"     /* PMM_PAGE_SIZE for page-count derivation */
+#include "tme.h"     /* TME-MK aware DMA — KeyID encoding */
 
 /*
  * IOMMU subsystem entry point. Picks a backend at boot:
@@ -177,6 +178,118 @@ void iommu_dma_free(iommu_domain_t *domain, void *phys, size_t pages) {
                           (uint64_t)pages * PMM_PAGE_SIZE);
     }
     pmm_free(phys, pages);
+}
+
+/* ─── TME-MK aware DMA path (Intel VT-d Spec rev 3.4 §9.4.3 /
+ * AMD-Vi rev 4 "Cache Coherent Memory" mode) ─────────────────────
+ *
+ * The SL-PTE (second-level page-table entry) in both vendors holds
+ * the same phys-address layout as a CPU PTE: bits [51:12] are the
+ * address field; under TME-MK the upper num_keyid_bits portion
+ * encodes the KeyID. When the IOMMU walks the SL-PTE for a DMA
+ * access, it submits the KeyID-bearing phys to the memory
+ * encryption engine — the device transparently sees plaintext that
+ * matches what the CPU sees through its KeyID-bearing CPU PTE.
+ *
+ * The map_with_keyid op (per-backend) is responsible for writing
+ * the full phys_with_keyid into the SL-PTE without stripping. When
+ * a backend doesn't yet implement it (NULL slot), the wrapper
+ * rejects KeyID != 0 to avoid silently routing DMA through a
+ * KeyID-0 mapping that would read ciphertext.
+ */
+int iommu_map_with_keyid(iommu_domain_t *domain, uint64_t iova,
+                          uint64_t phys, uint64_t size, uint16_t keyid,
+                          uint32_t perm) {
+    if (!g_ops) return 0;       /* dormant — driver-level DMA still works */
+    if (keyid == 0) {
+        /* KeyID 0 = platform default; the regular map path handles it. */
+        return iommu_map(domain, iova, phys, size, perm);
+    }
+    if (!g_tme.mk_active) {
+        /* Caller asked for KeyID-aware map but TME-MK isn't active.
+         * Reject — silently dropping the KeyID would route DMA
+         * through plaintext, breaking the caller's safety contract. */
+        return -1;
+    }
+    uint64_t phys_with_keyid = tme_phys_with_keyid(phys, keyid);
+
+    if (g_ops->map_with_keyid) {
+        int r = g_ops->map_with_keyid(domain, iova, phys_with_keyid,
+                                       size, perm);
+        if (r == 0 && size > 0) {
+            /* Same Touch + MemTag publish as the plain map path.
+             * The tag includes the KeyID so userspace observers can
+             * filter encrypted DMA buffers. */
+            char tag[40];
+            uint32_t did = iommu_domain_id(domain);
+            ksnprintf(tag, sizeof(tag), "iommu:domain:%u:keyid:%u",
+                      did, (unsigned)keyid);
+            uintptr_t phys_aligned = phys & ~(uintptr_t)(PMM_PAGE_SIZE - 1);
+            size_t pgs = (size + (phys - phys_aligned) + PMM_PAGE_SIZE - 1)
+                         / PMM_PAGE_SIZE;
+            (void)MemTagApplyByPhys(phys_aligned, pgs, tag);
+        }
+        return r;
+    }
+
+    /* Backend lacks KeyID-aware map. Refuse — silently calling ->map
+     * with the KeyID-stripped phys would expose ciphertext to the
+     * device. */
+    return -1;
+}
+
+void *iommu_dma_alloc_with_keyid(iommu_domain_t *domain, size_t pages,
+                                  uint16_t keyid, uint32_t perm) {
+    if (!pages || keyid == 0) return NULL;
+    if (!g_tme.mk_active) return NULL;
+    if (perm == 0) perm = IOMMU_PERM_READ | IOMMU_PERM_WRITE;
+
+    /* DMA32 zone — same constraint as iommu_dma_alloc. */
+    void *phys = pmm_alloc_with_keyid(pages, keyid);
+    if (!phys) return NULL;
+    (void)MemTagApplyByPhys((uintptr_t)phys, pages, "purpose:dma:encrypted");
+
+    /* Zero-fill via the KeyID-bearing kernel temp slot so device DMA
+     * reads see true zeros via K (not ciphertext_K0(zeros) decrypted
+     * with K which gives garbage). Cold-path cost: bounded by `pages`. */
+    error_t zrc = tme_zero_pages_with_keyid((uintptr_t)phys, pages,
+                                             keyid, false);
+    if (zrc != OK) {
+        pmm_free_with_keyid(phys, pages, keyid);
+        return NULL;
+    }
+
+    if (g_ops && g_ops->map && domain) {
+        int r = iommu_map_with_keyid(domain,
+                                      (uint64_t)(uintptr_t)phys,
+                                      (uint64_t)(uintptr_t)phys,
+                                      (uint64_t)pages * PMM_PAGE_SIZE,
+                                      keyid, perm);
+        if (r != 0) {
+            pmm_free_with_keyid(phys, pages, keyid);
+            return NULL;
+        }
+    }
+    /* Return the RAW phys — matches iommu_dma_alloc's convention so
+     * callers can:
+     *   - Use the returned address directly as IOVA in device DMA
+     *     descriptors (IOMMU translates raw→phys_with_keyid in its
+     *     SL-PTE → device sees KeyID-decrypted plaintext).
+     *   - Compose the KeyID-bearing phys via tme_phys_with_keyid()
+     *     when mapping into a CPU page table (vmm_map_page_with_keyid).
+     * Caller passes the same value back to iommu_dma_free_with_keyid. */
+    return phys;
+}
+
+void iommu_dma_free_with_keyid(iommu_domain_t *domain, void *phys,
+                                size_t pages, uint16_t keyid) {
+    if (!phys || !pages) return;
+
+    if (g_ops && g_ops->unmap && domain) {
+        (void)iommu_unmap(domain, (uint64_t)(uintptr_t)phys,
+                          (uint64_t)pages * PMM_PAGE_SIZE);
+    }
+    pmm_free_with_keyid(phys, pages, keyid);
 }
 
 void iommu_audit_dump(void) {

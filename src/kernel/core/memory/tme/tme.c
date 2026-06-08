@@ -29,6 +29,7 @@ TmeState g_tme = { 0 };
 #define TME_BITMAP_WORDS  (TME_MAX_KEYIDS / 64u)
 static uint64_t   g_tme_bitmap[TME_BITMAP_WORDS];
 static spinlock_t g_tme_lock;
+static spinlock_t g_tme_zero_lock;
 static bool       g_tme_initialized = false;
 
 /* Pre-resolved Touch tag IDs — intern once on init to avoid hitting
@@ -138,6 +139,7 @@ error_t tme_init_bsp(void) {
     if (g_tme_initialized) return OK;  /* idempotent */
 
     spinlock_init(&g_tme_lock);
+    spinlock_init(&g_tme_zero_lock);
     memset(g_tme_bitmap, 0xFF, sizeof(g_tme_bitmap));  /* all in-use by default */
     memset(&g_tme, 0, sizeof(g_tme));
 
@@ -205,6 +207,42 @@ error_t tme_init_bsp(void) {
     g_tme.max_keyid = mk_max_keys;
     if (g_tme.max_keyid > TME_MAX_KEYIDS - 1)
         g_tme.max_keyid = (uint16_t)(TME_MAX_KEYIDS - 1);
+
+    /* ─── TDX KeyID partitioning (Intel TDX Module Base Architecture
+     * Specification §16, "MKTME KeyID Partitioning") ─────────────────
+     * When TDX is active, firmware splits the KeyID space into:
+     *   "shared" range  (OS use via PCONFIG)  = KeyID 1..NUM_MKTME_KIDS
+     *   "private" range (TDX Module per-TD)   = KeyID NUM_MKTME_KIDS+1..MAX
+     * IA32_MKTME_KEYID_PARTITIONING (MSR 0x87):
+     *   bits [31:0]  = NUM_MKTME_KIDS    (OS-usable count)
+     *   bits [63:32] = NUM_TDX_PRIV_KIDS (TDX-reserved count)
+     *
+     * Reading MSR 0x87 on a non-TDX CPU #GP's, so the gate is the
+     * CPUID.21H-derived has_tdx flag (above). On properly-configured
+     * TDX firmware, mk_tme_max_keys (IA32_TME_CAPABILITY[50:36]) also
+     * reflects the OS-usable count — we clamp to the smaller of
+     * the two for defence-in-depth against firmware bugs. */
+    if (g_cpu_caps.has_tdx) {
+        uint32_t plo, phi;
+        __asm__ volatile("rdmsr" : "=a"(plo), "=d"(phi)
+                         : "c"(0x87U));
+        uint32_t num_mktme_kids = plo;
+        uint32_t num_tdx_priv   = phi;
+        if (num_mktme_kids > 0 && num_mktme_kids < g_tme.max_keyid) {
+            debug_printf("[TME] TDX KeyID partitioning: shared=%u "
+                         "tdx_private=%u → clamping pool max %u → %u\n",
+                         (unsigned)num_mktme_kids,
+                         (unsigned)num_tdx_priv,
+                         (unsigned)g_tme.max_keyid,
+                         (unsigned)num_mktme_kids);
+            g_tme.max_keyid = (uint16_t)num_mktme_kids;
+        } else {
+            debug_printf("[TME] TDX present but partitioning MSR shows "
+                         "shared=%u (>= pool max %u) — no clamp needed\n",
+                         (unsigned)num_mktme_kids,
+                         (unsigned)g_tme.max_keyid);
+        }
+    }
 
     /* Widen vmm_pte_addr_mask_with_keyid to cover KeyID bits. The
      * narrow vmm_pte_addr_mask strips at reduced MAXPHYADDR; for
@@ -357,6 +395,86 @@ uint64_t tme_phys_strip_keyid(uint64_t phys_with_keyid) {
     uint64_t mask = ((1ULL << g_tme.num_keyid_bits) - 1ULL)
                     << g_tme.reduced_maxphyaddr;
     return phys_with_keyid & ~mask;
+}
+
+/* ─── Zero-fill with KeyID-bearing kernel mapping ──────────────────── */
+
+/* Reserved kernel VA slot for TME zero-fill. Placed in the unused
+ * 0xFFFF_9000_0000_0000 region between VMM_KERNEL_BASE and
+ * PULL_MAP_BASE. 2 MiB span suffices for the largest single mapping
+ * (huge-page case). Serialized by g_tme_zero_lock — zero-fill is a
+ * cold path, contention is acceptable. */
+#define TME_ZERO_VA   0xFFFF900000000000ULL
+#define TME_ZERO_SIZE (2ULL * 1024ULL * 1024ULL)
+/* g_tme_zero_lock declared at top with the other static state. */
+
+error_t tme_zero_pages_with_keyid(uintptr_t phys_base, size_t pages,
+                                   uint16_t keyid, bool huge_2m)
+{
+    if (!g_tme.mk_active) return ERR_UNSUPPORTED;
+    if (pages == 0) return OK;
+    if (keyid == 0 || keyid > g_tme.max_keyid) return ERR_INVALID_ARGUMENT;
+
+    vmm_context_t *kctx = vmm_get_kernel_context();
+    if (!kctx) return ERR_NOT_INITIALIZED;
+
+    /* Single-page granularity: 4 KiB or 2 MiB. We iterate pages or
+     * huge-pages and map/zero/unmap one at a time. */
+    const size_t step_pages = huge_2m ? 512u : 1u;
+    const size_t step_bytes = huge_2m ? (2u * 1024u * 1024u) : 4096u;
+
+    spin_lock(&g_tme_zero_lock);
+
+    for (size_t i = 0; i < pages; i += step_pages) {
+        uintptr_t phys = phys_base + (uintptr_t)i * 4096u;
+        uintptr_t pa_keyid = tme_phys_with_keyid(phys, keyid);
+
+        bool mapped;
+        if (huge_2m) {
+            mapped = vmm_map_huge_2m_with_keyid(kctx, TME_ZERO_VA,
+                                                 pa_keyid, VMM_FLAGS_KERNEL_RW);
+        } else {
+            vmm_map_result_t r = vmm_map_page_with_keyid(kctx,
+                                                         TME_ZERO_VA,
+                                                         pa_keyid,
+                                                         VMM_FLAGS_KERNEL_RW);
+            mapped = r.success;
+        }
+        if (!mapped) {
+            spin_unlock(&g_tme_zero_lock);
+            return ERR_NO_MEMORY;
+        }
+
+        memset((void *)TME_ZERO_VA, 0, step_bytes);
+
+        if (huge_2m) {
+            vmm_unmap_huge_2m(kctx, TME_ZERO_VA);
+        } else {
+            vmm_unmap_page(kctx, TME_ZERO_VA);
+        }
+    }
+
+    spin_unlock(&g_tme_zero_lock);
+    return OK;
+}
+
+/* ─── DMA safety gate ──────────────────────────────────────────────── */
+
+bool tme_is_safe_for_dma(uintptr_t phys_with_keyid) {
+    /* If TME-MK is inactive every phys carries an implicit KeyID 0
+     * (platform default); DMA sees baseline-encrypted DRAM which is
+     * transparent to the device under TME-only operation. */
+    if (!g_tme.mk_active) return true;
+
+    if (g_tme.num_keyid_bits == 0 || g_tme.num_keyid_bits >= 64) return true;
+    uint64_t mask = ((1ULL << g_tme.num_keyid_bits) - 1ULL)
+                    << g_tme.reduced_maxphyaddr;
+    uint64_t keyid_bits = phys_with_keyid & mask;
+
+    /* KeyID 0 — platform default key. Safe for DMA on TME-only hosts;
+     * UNSAFE on TDX-partitioned hosts (private KeyID 0). BoxOS doesn't
+     * yet detect TDX explicitly; assume non-TDX for now. */
+    return keyid_bits == 0;
 }
 
 /* ─── Dump ─────────────────────────────────────────────────────────── */

@@ -132,6 +132,36 @@ void cpu_detect_features(void) {
         }
     }
 
+    /* ─── TDX-host detection — CPUID.21H ───────────────────────────
+     * Intel Trust Domain Extensions present a vendor string via
+     * CPUID.21H subleaf 0:
+     *   EBX:EDX:ECX = "IntelTDX " (12 bytes, little-endian per-reg)
+     * A non-TDX CPU returns 0 for these registers. CPUID.0H:EAX
+     * exposes the max basic leaf; CPUID.21H is reachable iff
+     * max_basic_leaf >= 0x21.
+     *
+     * Detecting TDX gates the IA32_MKTME_KEYID_PARTITIONING (MSR
+     * 0x87) read in tme_init_bsp — that MSR is TDX-architectural
+     * and #GP's on non-TDX silicon, so the gate is REQUIRED for
+     * real-HW safety. */
+    g_cpu_caps.has_tdx = false;
+    if (g_cpu_caps.max_basic_leaf >= 0x21) {
+        cpuid_count(0x21, 0, &eax, &ebx, &ecx, &edx);
+        /* "IntelTDX    " (12 bytes — 8 ASCII + 4 spaces) split EBX:EDX:ECX
+         * per Intel TDX Module Base Architecture Specification §3.5
+         * "CPUID Vendor String" + cross-verified against Linux source
+         * (arch/x86/coco/tdx/tdx.c #define TDX_IDENT "IntelTDX    ").
+         *
+         * Layout in memory: bytes 0..11 = 'I','n','t','e','l','T','D','X',
+         *                              ' ',' ',' ',' '
+         * EBX (LE uint32 of bytes 0..3 = 'I','n','t','e') = 0x65746E49
+         * EDX (LE uint32 of bytes 4..7 = 'l','T','D','X') = 0x5844546C
+         * ECX (LE uint32 of bytes 8..11 = ' '×4)          = 0x20202020 */
+        if (ebx == 0x65746E49u && edx == 0x5844546Cu && ecx == 0x20202020u) {
+            g_cpu_caps.has_tdx = true;
+        }
+    }
+
     // Query XSAVE area size and supported components (CPUID.0xD:0)
     if (g_cpu_caps.has_xsave && g_cpu_caps.max_basic_leaf >= CPUID_LEAF_XSAVE) {
         cpuid_count(CPUID_LEAF_XSAVE, 0, &eax, &ebx, &ecx, &edx);
@@ -487,6 +517,21 @@ void cpu_intersect_features_ap(void) {
         g_cpu_caps.has_shstk &= ((ecx & (1u << 7))  != 0);
         g_cpu_caps.has_ibt   &= ((edx & (1u << 20)) != 0);
         g_cpu_caps.has_pconfig &= ((edx & (1u << 18)) != 0);
+        /* TDX vendor string re-check on AP. A hybrid socket where
+         * some APs lack TDX would force the host-wide flag off — the
+         * MSR 0x87 read becomes unsafe even if the BSP supported it. */
+        if (g_cpu_caps.has_tdx) {
+            uint32_t tdx_eax, tdx_ebx, tdx_ecx, tdx_edx;
+            if (eax >= 0x21) {
+                cpuid_count(0x21, 0, &tdx_eax, &tdx_ebx, &tdx_ecx, &tdx_edx);
+                bool tdx_match = (tdx_ebx == 0x65746E49u &&
+                                  tdx_edx == 0x5844546Cu &&
+                                  tdx_ecx == 0x20202020u);
+                g_cpu_caps.has_tdx &= tdx_match;
+            } else {
+                g_cpu_caps.has_tdx = false;
+            }
+        }
         if (eax >= 1) {
             uint32_t lam_eax, lam_ebx, lam_ecx, lam_edx;
             cpuid_count(CPUID_LEAF_EXT_FEATURES, 1,

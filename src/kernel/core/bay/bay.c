@@ -255,11 +255,13 @@ static error_t bay_map_into_cabin(struct process_t *proc,
 
         bool ok;
         if (chunk_size == BAY_HUGE_SIZE) {
-            /* Huge-page TME-MK mapping is not yet supported by
-             * vmm_map_huge_2m — encrypted Bays therefore fall back to
-             * 4 KiB chunks at create time (see BayOpenInternal). This
-             * branch handles non-encrypted huge bays only. */
-            ok = vmm_map_huge_2m(proc->cabin, va, pa, vmm_flags);
+            if (encrypted) {
+                uint64_t pa_with_keyid = tme_phys_with_keyid(pa, tme_keyid);
+                ok = vmm_map_huge_2m_with_keyid(proc->cabin, va,
+                                                 pa_with_keyid, vmm_flags);
+            } else {
+                ok = vmm_map_huge_2m(proc->cabin, va, pa, vmm_flags);
+            }
         } else if (encrypted) {
             uint64_t pa_with_keyid = tme_phys_with_keyid(pa, tme_keyid);
             vmm_map_result_t r = vmm_map_page_with_keyid(proc->cabin, va,
@@ -493,12 +495,14 @@ static void bay_drop_ref_locked(BayBucket *b, BayObject *bay)
 {
     bay->ref_count--;
     if (bay->ref_count == 0) {
-        /* Snapshot keyid before unlinking — bay is freed below and we
-         * need to call tme_keyid_free after releasing all Bay state.
+        /* Snapshot keyid + creator pid before unlinking — bay is freed
+         * below and we need to call tme_keyid_free + adjust the
+         * creator's quota counter after releasing all Bay state.
          * tme_keyid_free issues PCONFIG SET_KEY_RANDOM to re-key the
          * slot before returning it to the pool, so a future Bay that
          * reuses this KeyID slot CANNOT decrypt the old ciphertext. */
         uint16_t released_keyid = bay->tme_keyid;
+        uint32_t creator_pid    = (uint32_t)bay->create_pid;
 
         bay_bucket_unlink_locked(b, bay);
         spin_unlock(&b->lock);
@@ -510,6 +514,19 @@ static void bay_drop_ref_locked(BayBucket *b, BayObject *bay)
 
         if (released_keyid != 0) {
             (void)tme_keyid_free(released_keyid);
+            /* Return the quota slot to the creator process IF still
+             * alive. process_find returns NULL when the creator is
+             * gone; in that case the quota counter is irrelevant
+             * (the proc is destroyed, future allocs go through a
+             * fresh proc with its own counter). PID-reuse race
+             * accepted as a minor accounting drift. */
+            process_t *creator = process_find(creator_pid);
+            if (creator) {
+                spin_lock(&creator->bay_lock);
+                if (creator->tme_keyids_held > 0)
+                    creator->tme_keyids_held--;
+                spin_unlock(&creator->bay_lock);
+            }
         }
         return;
     }
@@ -570,14 +587,32 @@ error_t BayOpenInternal(struct process_t *proc,
         }
         spin_unlock(&b->lock);
 
-        /* TME-MK encryption requested? Reserve a KeyID up front so we
-         * can fail fast before any PMM work. The KeyID is released on
-         * the unwind paths below. */
+        /* TME-MK encryption requested? Enforce per-process quota
+         * before touching any global state so a misbehaving cabin
+         * can't drain the global KeyID pool. The KeyID reservation
+         * + quota-counter increment happen as a single atomic step
+         * under proc->bay_lock so the quota is observed correctly
+         * under concurrent BayOpen calls from the same cabin. */
         uint16_t alloc_keyid = 0;
         if (flags & BAY_ENCRYPTED) {
             if (!g_tme.mk_active) return ERR_UNSUPPORTED;
+            spin_lock(&proc->bay_lock);
+            if (proc->tme_keyids_held >= TME_QUOTA_PER_PROC) {
+                spin_unlock(&proc->bay_lock);
+                return ERR_QUOTA_EXCEEDED;
+            }
+            /* Take a quota slot tentatively. If KeyID alloc fails
+             * below we roll back. */
+            proc->tme_keyids_held++;
+            spin_unlock(&proc->bay_lock);
+
             error_t krc = tme_keyid_alloc(&alloc_keyid);
-            if (krc != OK) return krc;
+            if (krc != OK) {
+                spin_lock(&proc->bay_lock);
+                if (proc->tme_keyids_held > 0) proc->tme_keyids_held--;
+                spin_unlock(&proc->bay_lock);
+                return krc;
+            }
         }
 
         /* Drop the lock while allocating phys pages — pmm_alloc may
@@ -589,42 +624,48 @@ error_t BayOpenInternal(struct process_t *proc,
         uint32_t  cc;
         uint64_t *chunks;
         error_t   rc;
-        if (flags & BAY_ENCRYPTED) {
-            /* TME-MK huge-page support requires vmm_map_huge_2m to
-             * accept a KeyID, which it does not yet. Until that path
-             * exists, force 4 KiB chunks for encrypted Bays. The
-             * downstream bay_alloc_chunks_4k helper would be ideal,
-             * but bay_alloc_chunks is the only entry — we override
-             * its class selection by clamping size to the 4K-only
-             * threshold below the 2 MB cutoff. */
-            rc = bay_alloc_chunks(requested_size, &cls, &cs, &cc, &chunks);
-            if (rc != OK) {
+        rc = bay_alloc_chunks(requested_size, &cls, &cs, &cc, &chunks);
+        if (rc != OK) {
+            if (alloc_keyid) {
                 (void)tme_keyid_free(alloc_keyid);
-                return rc;
+                spin_lock(&proc->bay_lock);
+                if (proc->tme_keyids_held > 0) proc->tme_keyids_held--;
+                spin_unlock(&proc->bay_lock);
             }
-            if (cls == BAY_PAGE_CLASS_2M) {
-                /* Roll back and force 4 KiB. bay_alloc_chunks is
-                 * page-class-monotonic; passing a smaller "size hint"
-                 * forces 4 KiB. We free the huge chunks and retry. */
-                for (uint32_t i = 0; i < cc; i++) {
-                    if (chunks[i]) pmm_free((void *)chunks[i], BAY_HUGE_PAGES);
-                }
-                kfree(chunks);
-                /* Re-allocate as 4 KiB by tricking the size-class
-                 * selector. Pages count stays the same to honour the
-                 * caller's size; we just use small pages. */
-                extern error_t bay_alloc_chunks_4k(uint64_t, uint16_t*,
-                                                    uint64_t*, uint32_t*,
-                                                    uint64_t**);
-                rc = bay_alloc_chunks_4k(requested_size, &cls, &cs, &cc, &chunks);
-                if (rc != OK) {
+            return rc;
+        }
+
+        /* For encrypted Bays, re-zero the pages via a kernel mapping
+         * that bears the chosen KeyID. pmm_alloc_zero zeroed via the
+         * identity map (KeyID 0); the user mapping uses KeyID N, so
+         * without this re-zero the user would observe garbage on
+         * first read (ciphertext_K0(zeros) decrypted with K_N).
+         * tme_zero_pages_with_keyid serialises through one kernel VA
+         * slot; the cost is N * (map + memset + unmap) which is cold-
+         * path and bounded by chunk_count. */
+        if (alloc_keyid) {
+            bool huge = (cls == BAY_PAGE_CLASS_2M);
+            for (uint32_t ci = 0; ci < cc; ci++) {
+                if (chunks[ci] == 0) continue;
+                error_t zrc = tme_zero_pages_with_keyid(
+                    (uintptr_t)chunks[ci],
+                    huge ? BAY_HUGE_PAGES : 1u,
+                    alloc_keyid, huge);
+                if (zrc != OK) {
+                    /* Zero-fill failed mid-way — unwind allocated
+                     * chunks and roll back KeyID + quota. */
+                    for (uint32_t k = 0; k < cc; k++) {
+                        if (chunks[k]) pmm_free((void *)chunks[k],
+                                                 huge ? BAY_HUGE_PAGES : 1);
+                    }
+                    kfree(chunks);
                     (void)tme_keyid_free(alloc_keyid);
-                    return rc;
+                    spin_lock(&proc->bay_lock);
+                    if (proc->tme_keyids_held > 0) proc->tme_keyids_held--;
+                    spin_unlock(&proc->bay_lock);
+                    return zrc;
                 }
             }
-        } else {
-            rc = bay_alloc_chunks(requested_size, &cls, &cs, &cc, &chunks);
-            if (rc != OK) return rc;
         }
 
         BayObject *fresh = (BayObject *)kmalloc(sizeof(BayObject));
@@ -634,7 +675,12 @@ error_t BayOpenInternal(struct process_t *proc,
                                          (cls == BAY_PAGE_CLASS_2M) ? BAY_HUGE_PAGES : 1);
             }
             kfree(chunks);
-            if (alloc_keyid) (void)tme_keyid_free(alloc_keyid);
+            if (alloc_keyid) {
+                (void)tme_keyid_free(alloc_keyid);
+                spin_lock(&proc->bay_lock);
+                if (proc->tme_keyids_held > 0) proc->tme_keyids_held--;
+                spin_unlock(&proc->bay_lock);
+            }
             return ERR_NO_MEMORY;
         }
         memset(fresh, 0, sizeof(*fresh));
@@ -653,10 +699,20 @@ error_t BayOpenInternal(struct process_t *proc,
         spin_lock(&b->lock);
         BayObject *winner = bay_bucket_find_locked(b, tag_id);
         if (winner) {
-            /* Lost the race — discard our fresh copy, use the winner's. */
+            /* Lost the race — discard our fresh copy, use the winner's.
+             * Our alloc_keyid was reserved tentatively; release it and
+             * give our quota slot back since the winner owns its own
+             * KeyID (or none, if the winner isn't encrypted). */
             spin_unlock(&b->lock);
             bay_free_chunks(fresh);
             kfree(fresh);
+            if (alloc_keyid) {
+                (void)tme_keyid_free(alloc_keyid);
+                spin_lock(&proc->bay_lock);
+                if (proc->tme_keyids_held > 0) proc->tme_keyids_held--;
+                spin_unlock(&proc->bay_lock);
+                alloc_keyid = 0;
+            }
             spin_lock(&b->lock);
             bay = bay_bucket_find_locked(b, tag_id);
             if (!bay) {
@@ -665,6 +721,16 @@ error_t BayOpenInternal(struct process_t *proc,
                  * cycles), but bail safely. */
                 spin_unlock(&b->lock);
                 return ERR_TAG_NOT_FOUND;
+            }
+            /* Re-validate encryption capability against the winner
+             * Bay we're now reusing. The earlier check ran against a
+             * Bay that no longer exists; encryption-mismatch must
+             * still be rejected on the actual winner. */
+            bool caller_wants_enc  = (flags & BAY_ENCRYPTED) != 0;
+            bool bay_is_encrypted  = (bay->tme_keyid != 0);
+            if (caller_wants_enc != bay_is_encrypted) {
+                spin_unlock(&b->lock);
+                return ERR_INVALID_ARGUMENT;
             }
         } else {
             fresh->bucket_next = b->head;

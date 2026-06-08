@@ -26,6 +26,11 @@ typedef enum {
     ERR_UNSUPPORTED = 17,
     ERR_VERSION_MISMATCH = 18,
     ERR_CHECKSUM = 19,
+    /* Per-resource quota limit reached (e.g. per-process TME-MK
+     * KeyID quota exhausted). Distinct from ERR_NO_MEMORY (global
+     * memory pressure) and ERR_BUSY (transient) — the caller can
+     * retry only after releasing existing resources. */
+    ERR_QUOTA_EXCEEDED = 20,
 
     // Memory Errors (100-199)
     ERR_NO_MEMORY = 100,

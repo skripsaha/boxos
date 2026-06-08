@@ -134,5 +134,6 @@
  * (not implemented in this opcode range yet). */
 #define SYSTEM_OP_HW_LAM_GET        0xB0  /* () -> u8 lam_mode 0/1/2            */
 #define SYSTEM_OP_HW_LAM_SET        0xB1  /* (u8 lam_mode) — 0=NONE,1=U48,2=U57 */
+#define SYSTEM_OP_HW_TME_STATE      0xB2  /* () -> struct hw_tme_state          */
 
 #endif // BOXOS_DECKS_H

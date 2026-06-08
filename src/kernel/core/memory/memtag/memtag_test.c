@@ -30,14 +30,23 @@ static MemTagResult s_res;  /* avoid 4 KB on kernel stack */
          else { fail++; kprintf("[MEMTAG TEST]   %[R]FAIL%[D]: " label "\n"); } \
     } while (0)
 
-static size_t CountAnd1(const char *a) {
+/* Helpers via the out-pointer variant — return-by-value of
+ * MemTagResult (2056 bytes) would spill to the caller's stack and
+ * accumulate the >8 KiB warning that triggered the -Wstack-usage
+ * cleanup. noinline keeps the MemTagResult temp on this function's
+ * frame, not the caller's. */
+static __attribute__((noinline)) size_t CountAnd1(const char *a) {
     const char *tags[2] = { a, NULL };
-    return MemTagQueryAnd_(tags).count;
+    static MemTagResult r;
+    MemTagQueryAndInto_(tags, &r);
+    return r.count;
 }
 
-static size_t CountAnd2(const char *a, const char *b) {
+static __attribute__((noinline)) size_t CountAnd2(const char *a, const char *b) {
     const char *tags[3] = { a, b, NULL };
-    return MemTagQueryAnd_(tags).count;
+    static MemTagResult r;
+    MemTagQueryAndInto_(tags, &r);
+    return r.count;
 }
 
 static bool ResultContainsRegionForPhys(MemTagResult *r, uintptr_t phys) {
@@ -121,7 +130,7 @@ void MemTagStressTest(void) {
     MT_CHECK(p4a && p4b, "p4a + p4b alloc");
 
     if (p4a && p4b) {
-        s_res = MemTagOr("test:or_x", "test:or_y");
+        MemTagOrInto(&s_res, "test:or_x", "test:or_y");
         MT_CHECK(s_res.count >= 2, "OR(or_x, or_y) count >= 2");
         MT_CHECK(ResultContainsRegionForPhys(&s_res, (uintptr_t)p4a),
                  "OR result contains p4a's region");
@@ -154,7 +163,7 @@ void MemTagStressTest(void) {
     const char *req[]  = { "test:shared2", NULL };
     const char *any_[] = { "test:a2", "test:b2", NULL };
     const char *exc[]  = { "test:excluded5", NULL };
-    s_res = MemTagQueryMixed_(req, any_, exc);
+    MemTagQueryMixedInto_(req, any_, exc, &s_res);
 
     /* p5a (shared2+a2) and p5b (shared2+b2) should match; p5c excluded */
     MT_CHECK(s_res.count >= 2, "mixed query count >= 2");
@@ -185,19 +194,19 @@ void MemTagStressTest(void) {
     /* ── Phase 7: zone-region seeding ──────────────────────────────── */
     kprintf("[MEMTAG TEST] Phase 7: boot-seeded zones queryable\n");
 
-    s_res = MemTagAnd("zone:dma32");
+    MemTagAndInto(&s_res, "zone:dma32");
     MT_CHECK(s_res.count >= 1, "AND(zone:dma32) finds boot-seeded zone");
 
-    s_res = MemTagAnd("zone:user");
+    MemTagAndInto(&s_res, "zone:user");
     /* zone:user may be absent on tiny memory configs; not a hard fail */
     if (s_res.count == 0) {
         kprintf("[MEMTAG TEST]   note: zone:user empty (small RAM config)\n");
     }
 
-    s_res = MemTagAnd("purpose:mmio");
+    MemTagAndInto(&s_res, "purpose:mmio");
     MT_CHECK(s_res.count >= 1, "AND(purpose:mmio) finds at least one MMIO region");
 
-    s_res = MemTagAnd("purpose:kernel");
+    MemTagAndInto(&s_res, "purpose:kernel");
     MT_CHECK(s_res.count >= 1, "AND(purpose:kernel) finds kernel image");
 
     /* ── Phase 8: query cache hit/miss ─────────────────────────────── */
@@ -229,7 +238,7 @@ void MemTagStressTest(void) {
     MemTagApply(rinv, "test:cache_inv_x");
 
     /* Re-query — should pick up the new region (cache invalidated) */
-    s_res = MemTagAnd("test:cache_inv_x");
+    MemTagAndInto(&s_res, "test:cache_inv_x");
     MT_CHECK(s_res.count >= 1,
              "post-mutation query sees new region (cache invalidated)");
     MT_CHECK(ResultContainsRegionForPhys(&s_res, (uintptr_t)pinv),
@@ -252,7 +261,7 @@ void MemTagStressTest(void) {
     MemTagApply(rbnd, "test:bnd_lo");
     MemTagApply(rbnd, "test:bnd_hi");
 
-    s_res = MemTagAnd("test:bnd_lo", "test:bnd_hi");
+    MemTagAndInto(&s_res, "test:bnd_lo", "test:bnd_hi");
     MT_CHECK(s_res.count >= 1, "AND(bnd_lo, bnd_hi) >= 1");
     MT_CHECK(ResultContainsRegionForPhys(&s_res, (uintptr_t)pbnd),
              "pbnd in AND(bnd_lo, bnd_hi) result");
@@ -588,17 +597,17 @@ void MemTagStressTest(void) {
     kprintf("[MEMTAG TEST] Phase 14H: derived cache tags on boot regions\n");
     {
         /* Zones carry cache:wb (Phase 2E SeedZoneRegions). */
-        s_res = MemTagAnd("zone:dma32", "cache:wb");
+        MemTagAndInto(&s_res, "zone:dma32", "cache:wb");
         MT_CHECK(s_res.count >= 1,
                  "zone:dma32 ∧ cache:wb finds boot zone region");
 
         /* MMIO E820 entries carry cache:uc (Phase 2E). */
-        s_res = MemTagAnd("purpose:mmio", "cache:uc");
+        MemTagAndInto(&s_res, "purpose:mmio", "cache:uc");
         MT_CHECK(s_res.count >= 1,
                  "purpose:mmio ∧ cache:uc finds MMIO region");
 
         /* Kernel image gets cache:wb. */
-        s_res = MemTagAnd("purpose:kernel", "cache:wb");
+        MemTagAndInto(&s_res, "purpose:kernel", "cache:wb");
         MT_CHECK(s_res.count >= 1,
                  "purpose:kernel ∧ cache:wb finds kernel image region");
     }
@@ -612,7 +621,7 @@ void MemTagStressTest(void) {
      * `mce:poisoned` tag was correctly reserved during boot stays as
      * a namespace presence check below. */
     {
-        s_res = MemTagAnd("mce:poisoned");  /* must not panic on empty result */
+        MemTagAndInto(&s_res, "mce:poisoned");  /* must not panic on empty result */
         MT_CHECK(MemTagResolveStr("mce:poisoned") != MEMTAG_INVALID_TAG_ID,
                  "mce:poisoned reserved tag interned at boot");
     }
@@ -708,7 +717,7 @@ void MemTagStressTest(void) {
         const char *all8[STRESS_TAGS + 1];
         for (size_t t = 0; t < STRESS_TAGS; t++) all8[t] = s_tag_strs[t];
         all8[STRESS_TAGS] = NULL;
-        s_res = MemTagQueryOr_(all8);
+        MemTagQueryOrInto_(all8, &s_res);
         MT_CHECK(s_res.count >= n_alloc,
                  "OR of all 8 stress tags covers all allocations");
     }
