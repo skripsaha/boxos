@@ -75,13 +75,30 @@ void CetLifecycleTest(void) {
 
     /* ── T4: canonical SSP VA anchor ───────────────────────────── */
     {
-        uintptr_t va = process_user_ssp_va_for(NULL);
+        uintptr_t va         = process_user_ssp_va_for(NULL);
+        uintptr_t guard_hi   = process_user_ssp_guard_hi_for(NULL);
+        uintptr_t guard_lo   = process_user_ssp_guard_lo_for(NULL);
         CET_CHECK(va != 0, "T4: SSP VA anchor non-zero");
         CET_CHECK(va < VMM_USER_STACK_TOP,
                   "T4: SSP VA anchor below VMM_USER_STACK_TOP");
-        uintptr_t expected_base = VMM_USER_STACK_TOP - (4u * 4096u);
-        CET_CHECK(va == expected_base,
-                  "T4: SSP VA anchor at stack-top - 16 KiB");
+        /* Layout invariants (process.c PROCESS_USER_SSP_*):
+         *   - SSP region is 4 pages (16 KiB).
+         *   - HI guard sits ABOVE the region (= VA + SIZE).
+         *   - LO guard sits BELOW the region (= VA - 4 KiB).
+         *   - 8 MiB slack separates region top from the max possible
+         *     ASLR-shifted user stack base.
+         * We assert structural relationships rather than absolute
+         * constants so the layout can change without churning this
+         * test — the relationships are what real-HW correctness depends
+         * on. */
+        CET_CHECK((va & 0xFFFu) == 0,
+                  "T4: SSP VA anchor page-aligned");
+        CET_CHECK(guard_hi == va + (4u * 4096u),
+                  "T4: HI guard at va + 16 KiB");
+        CET_CHECK(guard_lo == va - 0x1000ULL,
+                  "T4: LO guard at va - 4 KiB");
+        CET_CHECK(guard_hi + (8ULL * 1024ULL * 1024ULL) == VMM_USER_STACK_TOP,
+                  "T4: SSP region clear of max ASLR stack reach");
     }
 
     /* ── T5: stats sane ─────────────────────────────────────────── */

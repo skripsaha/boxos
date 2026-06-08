@@ -12,6 +12,7 @@
 #include "pocket_ring.h"
 #include "kring.h"
 #include "vmm.h"
+#include "uaccess.h"  /* UACCESS_USER_VA_MAX for SMAP-fault diagnostic */
 #include "atomics.h"
 #include "touch.h"   /* TouchTag types — Phase 2K #CP publish */
 #include "scheduler.h"
@@ -311,36 +312,67 @@ void exception_handler(interrupt_frame_t *frame)
         uint64_t fault_addr;
         __asm__ volatile("mov %%cr2, %0" : "=r"(fault_addr));
 
+        /* uaccess fixup — kernel-mode #PF whose RIP lies inside a
+         * copy_to/from_user / put_user / get_user inline asm region
+         * gets handled here, BEFORE the demand-paging path runs. The
+         * fixup table maps fault_rip → recovery_rip; we set
+         * frame->rip to the recovery label and IRET. The recovery
+         * code path executes CLAC + returns an error from the
+         * affected helper.
+         *
+         * Why before vmm_handle_page_fault: that path can mutate
+         * page-table state (demand-page-in, COW, etc.) which would
+         * be the wrong response for a SMAP-blocked user pointer.
+         * The fixup is the correct response: the user pointer is
+         * bad (or its page got unmapped under us), bubble the
+         * error to the syscall caller. */
+        if ((frame->cs & 3) == 0) {
+            extern uintptr_t uaccess_lookup_fixup(uintptr_t fault_rip);
+            uintptr_t fixup_rip = uaccess_lookup_fixup(frame->rip);
+            if (fixup_rip != 0) {
+                frame->rip = fixup_rip;
+                return;
+            }
+        }
+
         int result = vmm_handle_page_fault(fault_addr, frame->error_code);
         if (result == 0)
         {
             return;
         }
 
-        /* Unhandled kernel-mode PF — full register dump for the FIRST
-         * N occurrences, then a single throttle notice, then keep
-         * IRET-retrying. The previous "log once globally then
-         * silently swallow forever" hid every subsequent real bug
-         * (NULL deref, stack overflow) behind the first transient
-         * demand-paging miss. Limiting per-occurrence rather than
-         * boolean preserves diagnosability while still allowing
-         * transient demand-paging races to resolve through retry. */
+        /* Unhandled ring-0 #PF — fall through to KERNEL PANIC.
+         *
+         * Previously this branch logged + returned, which meant iretq
+         * resumed at the faulting RIP and immediately re-faulted. Under
+         * stress (UEFI 16c write_stress) the retry loop was indistinguishable
+         * from a silent system hang. Production demands fail-loud over
+         * fail-silent: every unhandled kernel #PF is a real bug (missing
+         * uaccess fixup, wild pointer, stack overflow past the guard) and
+         * must surface with full diagnostic context, not livelock.
+         *
+         * SMAP-candidate hint: ring-0 #PF on a user-half VA with P=1 is
+         * the canonical SMAP signature. The fixup table already missed
+         * (else we'd have redirected RIP earlier), so this is a forgotten
+         * STAC/CLAC bracket — adjacent kernel code dereferenced a user-
+         * mapped page with RFLAGS.AC=0 and CR4.SMAP=1. The panic block
+         * below dumps RFLAGS so the operator can read the AC bit. */
         if ((frame->cs & 3) == 0) {
-            static volatile uint32_t kpf_logged = 0;
-            uint32_t n = __atomic_add_fetch(&kpf_logged, 1u, __ATOMIC_RELAXED);
-            if (n <= 4) {
-                kprintf("\n[VMM] Unhandled kernel PF #%u at 0x%lx err=0x%lx\n",
-                        n, fault_addr, frame->error_code);
-                kprintf("[VMM]   RIP=0x%lx RSP=0x%lx CS=0x%lx\n",
-                        frame->rip, frame->rsp, frame->cs);
-                kprintf("[VMM]   RAX=0x%lx RBX=0x%lx RCX=0x%lx RDX=0x%lx\n",
-                        frame->rax, frame->rbx, frame->rcx, frame->rdx);
-                kprintf("[VMM]   RSI=0x%lx RDI=0x%lx RBP=0x%lx\n",
-                        frame->rsi, frame->rdi, frame->rbp);
-            } else if (n == 5) {
-                kprintf("[VMM] (further unhandled kernel PFs throttled)\n");
+            bool is_smap_candidate = (frame->error_code & 0x1ULL) &&
+                                     fault_addr < UACCESS_USER_VA_MAX;
+            kprintf("\n[VMM] Unhandled kernel #PF at 0x%lx err=0x%lx%s\n",
+                    fault_addr, frame->error_code,
+                    is_smap_candidate ? "  [SMAP candidate]" : "");
+            if (is_smap_candidate) {
+                kprintf("[VMM]   Kernel dereferenced user-mapped page via "
+                        "RIP 0x%lx without STAC/CLAC bracket.\n"
+                        "[VMM]   Wrap the access in copy_to/from_user / "
+                        "put_user / get_user, OR translate via "
+                        "vmm_translate_user_addr() first.\n",
+                        frame->rip);
             }
-            return;
+            /* Fall through to the kernel-panic block at the bottom of
+             * exception_handler — full GPR + stack trace + halt-all-cores. */
         }
     }
 

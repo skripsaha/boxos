@@ -37,6 +37,34 @@ typedef struct {
 
     // --- Kernel stack top for this core (boot stack or current process stack) ---
     uint64_t            kernel_stack_top;
+
+    /* CET — per-CPU supervisor shadow-stack infrastructure.
+     *
+     * Populated by cet_lifecycle_init_supervisor_ssp() during per-core
+     * init. Owns:
+     *   - PL0_SSP page (4 KiB) backing IA32_PL0_SSP. Used when an
+     *     interrupt/exception is delivered to CPL=0 with IST=0.
+     *   - IA32_INTERRUPT_SSP_TABLE_ADDR backing page (4 KiB; only the
+     *     first 8 × 8-byte entries are used) — one SSP per IST level.
+     *   - Per-IST supervisor SSP pages (4 KiB × 5) for the IST vectors
+     *     BoxOS uses (1=#DF, 2=NMI, 3=#MC, 4=#DB, 5=#SS).
+     *
+     * The MSRs IA32_PL0_SSP and IA32_INTERRUPT_SSP_TABLE_ADDR are written
+     * by cet_lifecycle_init_supervisor_ssp on every core that brings up
+     * CET. S_CET.SH_STK_EN stays 0 in this session — flipping it
+     * requires a kernel-wide assembly audit (LRETQ in per_core_load_gdt
+     * has no matching FAR CALL on the shadow stack; any code-injected
+     * CALL/RET asymmetry would #CP at first kernel return). The
+     * follow-up commit that audits assembly will flip the bit; until
+     * then this is dormant infrastructure ready to activate. */
+    uintptr_t           pl0_ssp_phys;          // PL0 SSP phys page (4 KiB)
+    uintptr_t           pl0_ssp_top_va;        // IA32_PL0_SSP value (token VA)
+    uintptr_t           isst_phys;             // ISST backing page phys
+    uintptr_t           isst_va;               // ISST kernel-VA (table[0..7])
+    uintptr_t           ist_ssp_phys[5];       // IST 1..5 SSP phys pages
+    uintptr_t           ist_ssp_top_va[5];     // IST 1..5 SSP token VAs
+    bool                cet_supv_ready;        // true after WRMSR's succeeded
+    uint8_t             _pad1[7];
 } __attribute__((aligned(64))) PerCoreData;
 
 extern PerCoreData g_per_core[MAX_CORES];

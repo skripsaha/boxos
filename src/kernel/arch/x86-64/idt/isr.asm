@@ -83,8 +83,14 @@ ISR_NOERROR 16          ; FPU error
 ISR_ERROR   17          ; Alignment check
 ISR_PARANOID_NOERROR 18 ; Machine check          — IST3
 ISR_NOERROR 19          ; SIMD exception
-ISR_NOERROR 20  ; Virtualization exception
-ISR_NOERROR 21  ; Reserved
+ISR_NOERROR 20  ; Virtualization exception (#VE)
+ISR_ERROR   21  ; Control-Protection Exception (#CP) — Intel SDM Vol 3A
+                ; Table 6-1: pushes a 15-bit type field + ENCL bit error
+                ; code. Treating it as NOERROR shifts the entire frame
+                ; by 8 bytes — every #CP would land on a corrupted frame
+                ; and triple-fault. CR4.CET=1 enables this delivery; on
+                ; QEMU TCG (no SHSTK/IBT) it stays dormant, on real silicon
+                ; (Tiger Lake+ / Zen 3+) any ROP/JOP attempt fires #CP.
 ISR_NOERROR 22  ; Reserved
 ISR_NOERROR 23  ; Reserved
 ISR_NOERROR 24  ; Reserved

@@ -26,6 +26,7 @@
 #include "tagfs.h"
 #include "per_core.h"
 #include "amp.h"
+#include "cet_lifecycle.h"  /* Phase 2K+ per-process shadow-stack hooks */
 
 typedef struct
 {
@@ -774,6 +775,16 @@ void process_destroy(process_t *proc)
      * future subsystem that registers attaches must implement its own
      * cleanup hook in this destroy chain. */
 
+    /* Phase 2K+ — release the per-process CET shadow-stack page if one
+     * was allocated. cet_process_destroy is idempotent on processes
+     * that never got an SSP (kernel-only / CET-dormant / alloc-failed)
+     * so it's safe to call unconditionally. Must run BEFORE
+     * vmm_destroy_context tears down the page tables — otherwise the
+     * SSP VA walk has nothing to unmap (vmm_destroy_context would
+     * leak the SSP PMM page since it's not in the heap/stack/code
+     * tracking the destroyer walks). */
+    cet_process_destroy(proc);
+
     /* Final state set is COMPLETE — now safe to poison the magic. Any
      * sibling-core dereference past this point is a real bug we want to
      * see, not a transient destroy-window race. */
@@ -925,8 +936,20 @@ int process_load_binary(process_t *proc, const void *binary_data, size_t size)
     proc->context.rip = entry_point;
     proc->context.rsp = stack_top;
 
-    debug_printf("[PROCESS] ASLR: PID %u heap=0x%lx stack=0x%lx buf=0x%lx\n",
-                 proc->pid, heap_start, stack_top, proc->aslr_buf_heap_base);
+    /* Phase 2K+ — allocate the per-process CET user shadow stack now
+     * that proc->cabin is fully populated and the user stack region is
+     * mapped. Fail-safe: if SSP allocation or mapping fails under
+     * memory pressure, cet_process_create stamps zero into proc->user_ssp_*
+     * and returns OK — the process runs without SHSTK protection rather
+     * than refusing to spawn. On CPUs without SHSTK (or with CET dormant)
+     * the call is a no-op by design. The 1-page unmapped guards above
+     * and below the region come for free — the VMM never auto-populates
+     * the surrounding pages, so any walk into them faults cleanly. */
+    (void)cet_process_create(proc);
+
+    debug_printf("[PROCESS] ASLR: PID %u heap=0x%lx stack=0x%lx buf=0x%lx ssp=0x%lx\n",
+                 proc->pid, heap_start, stack_top, proc->aslr_buf_heap_base,
+                 (unsigned long)proc->user_ssp_va);
 
     return 0;
 }
@@ -1200,19 +1223,60 @@ uint64_t *process_active_memtags(process_t *proc)
 
 /* ─── Phase 2K+ CET SSP accessors ────────────────────────────────── */
 
-/* Per-process user SSP region anchor. The SSP region sits just below
- * VMM_USER_STACK_TOP, occupies 16 KiB (4 pages), and is followed
- * (downward) by the data stack with a gap large enough that a stack
- * overflow can't silently corrupt the SSP. Same per process —
- * different vmm_context, no cross-process aliasing. */
-#define PROCESS_USER_SSP_REGION_SIZE  (4u * 4096u)
-#define PROCESS_USER_SSP_REGION_TOP   VMM_USER_STACK_TOP
-#define PROCESS_USER_SSP_REGION_BASE  (PROCESS_USER_SSP_REGION_TOP - PROCESS_USER_SSP_REGION_SIZE)
+/* Per-process user SSP region anchor.
+ *
+ * Layout BELOW the user stack region — never overlapping it under any
+ * ASLR offset:
+ *
+ *   high → 0x00007FFFFFFFE000   VMM_USER_STACK_TOP
+ *          ┊  aslr.stack_offset ∈ [0, ASLR_STACK_RANGE=8 MiB]
+ *          proc->aslr_stack_top
+ *          ┊  CONFIG_USER_STACK_TOTAL_PAGES (5 pages stack incl guard)
+ *          stack_data_base
+ *          ┊  ASLR_STACK_RANGE = 8 MiB worst-case slack
+ *          ┊  1-page guard (PRESENT=0) — catches stack overflow that
+ *          ┊                              tries to walk into the SSP
+ *          PROCESS_USER_SSP_REGION_TOP
+ *          ┊  PROCESS_USER_SSP_REGION_SIZE = 16 KiB (4 pages)
+ *          PROCESS_USER_SSP_REGION_BASE
+ *          ┊  1-page guard (PRESENT=0) — catches SSP overflow
+ *          PROCESS_USER_SSP_GUARD_LO_BASE
+ *
+ * The 8 MiB slack lifts SSP well clear of even the maximally-random
+ * stack so a wild stack-overflow has to traverse a permanently-
+ * unmapped 8 MiB band before reaching the SSP guard. Real exploit
+ * chains can't grow a stack 8 MiB without faulting first.
+ *
+ * Same constants for every process (anchored to VMM_USER_STACK_TOP
+ * which is shared) — different vmm_context, no cross-process aliasing
+ * since each process has its own PML4. */
+#define PROCESS_USER_SSP_REGION_SIZE       (4u * 4096u)
+#define PROCESS_USER_SSP_STACK_SLACK       (8ULL * 1024ULL * 1024ULL)
+#define PROCESS_USER_SSP_REGION_TOP        \
+    (VMM_USER_STACK_TOP - PROCESS_USER_SSP_STACK_SLACK)
+#define PROCESS_USER_SSP_REGION_BASE       \
+    (PROCESS_USER_SSP_REGION_TOP - PROCESS_USER_SSP_REGION_SIZE)
+#define PROCESS_USER_SSP_GUARD_HI_BASE     PROCESS_USER_SSP_REGION_TOP
+#define PROCESS_USER_SSP_GUARD_LO_BASE     (PROCESS_USER_SSP_REGION_BASE - 0x1000ULL)
 
 uintptr_t process_user_ssp_va_for(process_t *proc)
 {
     (void)proc;
+    /* Returns the BASE of the SSP region (lowest mapped page). The CET
+     * lifecycle uses base+SIZE-8 as the initial SSP register value. */
     return PROCESS_USER_SSP_REGION_BASE;
+}
+
+uintptr_t process_user_ssp_guard_lo_for(process_t *proc)
+{
+    (void)proc;
+    return PROCESS_USER_SSP_GUARD_LO_BASE;
+}
+
+uintptr_t process_user_ssp_guard_hi_for(process_t *proc)
+{
+    (void)proc;
+    return PROCESS_USER_SSP_GUARD_HI_BASE;
 }
 
 uintptr_t process_get_user_ssp_phys(process_t *proc)
@@ -1403,6 +1467,17 @@ void process_start_initial(process_t *proc)
             asm volatile("cli; hlt");
         }
     }
+
+    /* Phase 2K+ — prime IA32_PL3_SSP with this process's per-process
+     * shadow-stack pointer before iretq drops to ring 3. CLI is already
+     * in effect (line above this block) so there is no preemption
+     * window between the WRMSR and the iretq inside jump_to_userspace.
+     * No-op when CET is dormant or proc->user_ssp_va == 0. After this
+     * point the kernel never touches PL3_SSP directly — XSAVE component
+     * 12 (CET_U) saves and restores it on every context switch through
+     * fpu_save/fpu_restore (XCR0 bit 12 was set during BSP init via
+     * fpu_xsave_register_extension). */
+    cet_load_user_ssp_for_iretq(proc);
 
     jump_to_userspace(proc->context.rip, proc->context.rsp, proc->context.rflags);
 

@@ -212,6 +212,11 @@ uint32_t  process_get_user_ssp_size(struct process_t *proc);
 void      process_set_user_ssp(struct process_t *proc, uintptr_t phys,
                                 uintptr_t va, uint32_t size);
 uintptr_t process_user_ssp_va_for(struct process_t *proc);
+/* Guard-page VAs around the SSP region — see process.c for layout
+ * diagram. Returned values are fixed (same for every process); they're
+ * functions only to keep the constants out of the header. */
+uintptr_t process_user_ssp_guard_hi_for(struct process_t *proc);
+uintptr_t process_user_ssp_guard_lo_for(struct process_t *proc);
 
 void process_init(void);
 

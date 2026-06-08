@@ -82,7 +82,59 @@ void per_core_record_bsp_tsc_anchor(uint64_t now_us)
 
 #define EFER_SCE            (1ULL << 0)
 #define EFER_NXE            (1ULL << 11)
-#define SFMASK_VALUE        ((1ULL << 9) | (1ULL << 8) | (1ULL << 10))
+/* SFMASK — RFLAGS bits cleared on SYSCALL entry (IA32_FMASK, 0xC0000084).
+ *
+ * Mirror of notify.c:SFMASK_VALUE — keep them bit-for-bit identical:
+ * notify_init runs first (BSP bootstrap), then per_core_setup_notify_msrs
+ * reprograms the MSR on every core (BSP re-program is idempotent). Any
+ * divergence between the two values means a one-tick window on the BSP
+ * where the two masks differ, which would be invisible until the first
+ * cross-bit syscall after AP boot.
+ *
+ *   IF (bit  9) — interrupts must be off on entry; SYSCALL itself doesn't
+ *                 disable them, the mask does.
+ *   TF (bit  8) — clear trap flag; else every kernel insn would #DB.
+ *   DF (bit 10) — SysV ABI requires DF=0 at function entry; rep movsb
+ *                 in copy_to/from_user assumes ascending direction.
+ *   NT (bit 14) — long mode ignores nested-task semantics, but mask
+ *                 defensively so legacy IRET paths can't latch the flag.
+ *   RF (bit 16) — Resume Flag. User code setting RF=1 before SYSCALL
+ *                 would suppress the first kernel #DB after entry —
+ *                 a debugger-evasion path. Mask kills the bit so kernel
+ *                 #DB delivery is deterministic regardless of user state.
+ *   AC (bit 18) — Alignment Check / SMAP gate. Critical for production:
+ *                 - On Tiger Lake+ Intel and Zen 2+ AMD CR4.SMAP=1 is
+ *                   set by fpu_init, and any ring-0 access to a user-
+ *                   mapped page (PTE.U=1) faults with #PF.SMAP UNLESS
+ *                   RFLAGS.AC=1 (Intel SDM Vol 3A §4.6.1).
+ *                 - User code setting AC=1 before SYSCALL would let
+ *                   kernel code silently read/write through user pointers
+ *                   in arbitrary ring-0 paths — a textbook privilege-
+ *                   confusion attack. Masking AC ensures kernel starts
+ *                   every syscall with AC=0 and must explicitly STAC
+ *                   (via copy_to/from_user / put_user / get_user) for
+ *                   any legitimate user-buffer access.
+ *                 - The BoxOS audit (2026-06-08) confirmed every kernel
+ *                   path that touches user memory does so via the
+ *                   supervisor-aliased kernel VA returned by
+ *                   vmm_translate_user_addr (kernel-direct map at
+ *                   0xFFFF_8000_..., U=0) — SMAP enforcement is invisible
+ *                   on these paths. Any new direct user-VA dereference
+ *                   surfaces as a clean kernel #PF that idt.c's panic
+ *                   path catches with a "[SMAP candidate]" diagnostic.
+ *
+ * History: AC + RF were temporarily deferred after a UEFI STRICT 16c
+ * hang in early bisect. Root cause turned out to be the kernel-#PF
+ * livelock in idt.c (return-after-log on unhandled ring-0 #PF — same
+ * commit converts that to a clean panic), not SMAP enforcement itself.
+ * With the livelock fix in place, both bits go back into the mask.
+ */
+#define SFMASK_VALUE        ((1ULL <<  9) /* IF */ | \
+                             (1ULL <<  8) /* TF */ | \
+                             (1ULL << 10) /* DF */ | \
+                             (1ULL << 14) /* NT */ | \
+                             (1ULL << 16) /* RF */ | \
+                             (1ULL << 18) /* AC — SMAP defense */)
 
 static inline uint64_t rdmsr_pc(uint32_t msr) {
     uint32_t lo, hi;
@@ -449,6 +501,17 @@ void per_core_init_ap(uint8_t core_index, uint64_t stack_top) {
     {
         extern void cet_lifecycle_init_ap(void);
         cet_lifecycle_init_ap();
+    }
+
+    /* Per-CPU supervisor SSP infrastructure for this AP. Same alloc +
+     * MSR-program pattern as the BSP — see main.c's BSP call site for
+     * the long explanation. PL0_SSP / ISST stay dormant until
+     * S_CET.SH_STK_EN flips in a follow-up commit, but every core needs
+     * its own backing pages because the MSRs are per-logical-processor.
+     * Idempotent + safe when CET is dormant (returns ERR_UNSUPPORTED). */
+    {
+        extern error_t cet_lifecycle_init_supervisor_ssp(uint8_t);
+        (void)cet_lifecycle_init_supervisor_ssp(core_index);
     }
 
     /* Enable CR4.PCIDE on this AP if the BSP turned PCID on. Intel SDM

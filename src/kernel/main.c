@@ -496,6 +496,16 @@ void kernel_main(void)
         extern void ApeiGhesTest(void);
         ApeiGhesTest();
 
+        /* Sort the .uaccess_fixup table so the #PF handler can
+         * binary-search instead of linear-scan it. Must run before any
+         * user process spawns + before interrupts are unmasked at the
+         * LAPIC — both conditions hold at this point in main(). The
+         * call is idempotent (re-entry no-ops) and the lookup path
+         * falls back to linear scan if init didn't run, so no boot
+         * ordering dependency is fatal. */
+        extern void uaccess_init(void);
+        uaccess_init();
+
         /* Phase 2K+ — CET shadow-stack + IBT lifecycle enable.
          * Programs CR4.CET=1, IA32_S_CET/IA32_U_CET MSRs, and
          * registers XSAVE components 11/12 so per-process SSP is
@@ -506,6 +516,17 @@ void kernel_main(void)
          * without CET (becomes a no-op + returns ERR_NOT_SUPPORTED). */
         extern int cet_lifecycle_init_bsp(void);
         (void)cet_lifecycle_init_bsp();
+
+        /* Per-CPU supervisor SSP infrastructure for the BSP. Allocates
+         * PL0_SSP page + IA32_INTERRUPT_SSP_TABLE_ADDR + 5 per-IST SSP
+         * pages, writes the supervisor tokens, programs the MSRs. The
+         * S_CET.SH_STK_EN bit stays 0 — flipping it requires a kernel-
+         * wide CALL/RET pair audit that's a follow-up. The infrastructure
+         * is dormant until then, but the foundation is in place: a single
+         * IA32_S_CET write activates supervisor SHSTK at that point. */
+        extern error_t cet_lifecycle_init_supervisor_ssp(uint8_t);
+        (void)cet_lifecycle_init_supervisor_ssp(amp_get_core_index());
+
         extern void CetLifecycleTest(void);
         CetLifecycleTest();
     }
