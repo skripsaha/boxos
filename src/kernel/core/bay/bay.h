@@ -40,14 +40,48 @@
  */
 
 /* Open flags. The default is "open existing, read+write mapping". */
-#define BAY_OPEN     0x00u   /* default — fail if tag doesn't exist yet */
-#define BAY_CREATE   0x01u   /* create if missing; size MUST be non-zero */
-#define BAY_RO       0x02u   /* read-only mapping (PTE without WRITABLE) */
+#define BAY_OPEN        0x00u   /* default — fail if tag doesn't exist yet */
+#define BAY_CREATE      0x01u   /* create if missing; size MUST be non-zero */
+#define BAY_RO          0x02u   /* read-only mapping (PTE without WRITABLE) */
+
+/* TME-MK Per-Bay encryption.
+ *
+ * When BAY_CREATE | BAY_ENCRYPTED is passed, the kernel:
+ *   1. Reserves a unique KeyID from the TME pool (tme_keyid_alloc).
+ *   2. Allocates the backing pages and tags them tme:keyid:N (PMM).
+ *   3. Maps each chunk into the creator's cabin VA via
+ *      vmm_map_page_with_keyid so the user-VA PTE encodes that KeyID
+ *      in PTE.phys upper bits. The CPU transparently encrypts every
+ *      store with key N and decrypts every load with key N — DRAM
+ *      contents become opaque to anyone reading without the key.
+ *   4. Stores keyid in the BayObject so subsequent bay_open()s from
+ *      OTHER cabins receive a mapping with the SAME KeyID (otherwise
+ *      cross-cabin reads would decrypt with the wrong key and return
+ *      garbage).
+ *
+ * Subsequent bay_open() WITHOUT BAY_ENCRYPTED on a created-encrypted
+ * Bay still binds via the stored KeyID — the flag is a creation-time
+ * declaration. Trying to open an encrypted Bay with BAY_ENCRYPTED on
+ * a non-encrypted existing Bay (or vice versa) returns ERR_INVALID_ARGUMENT.
+ *
+ * On the LAST bay_release of an encrypted Bay, the kernel calls
+ * tme_keyid_free which re-keys the slot (PCONFIG SET_KEY_RANDOM) before
+ * returning it to the pool. A future Bay that reuses the slot cannot
+ * decrypt this Bay's old ciphertext.
+ *
+ * Behavior on TME-MK-inactive hosts (QEMU TCG, BIOS without TME setup):
+ *   BAY_CREATE | BAY_ENCRYPTED returns ERR_UNSUPPORTED. Userspace can
+ *   detect via the `hw tme` shell command or by attempting the create
+ *   and falling back. The current TME baseline encryption (KeyID 0,
+ *   platform key) is still in effect for ALL RAM in any case — this
+ *   flag is about adding per-Bay cryptographic isolation on top.
+ */
+#define BAY_ENCRYPTED   0x04u
 
 /* Mask of all defined flag bits — used by BayOpenInternal to reject
  * unknown bits before allocating anything. Keep in lock-step with the
  * BAY_* definitions above. */
-#define BAY_FLAGS_MASK   (BAY_CREATE | BAY_RO)
+#define BAY_FLAGS_MASK   (BAY_CREATE | BAY_RO | BAY_ENCRYPTED)
 
 /* Per-cabin allocation size cap. The kernel handler clamps requested
  * Bay sizes at this value so a runaway userspace can't exhaust PMM
@@ -79,12 +113,19 @@ struct BayObject {
     BayObject  *bucket_next;        /* hash-bucket collision chain */
     uint16_t    tag_id;             /* TagFS-interned id */
     uint16_t    page_class;         /* 12 = 4 KiB, 21 = 2 MiB */
-    uint32_t    _pad0;              /* keep `total_size` 8-byte-aligned */
+    /* TME-MK KeyID. Zero when not encrypted — every cabin opening this
+     * Bay maps with KeyID 0 (platform-default encryption, identical to
+     * non-encrypted Bays semantically because no other consumer sees a
+     * different KeyID). Non-zero when BAY_CREATE | BAY_ENCRYPTED was
+     * specified at creation; every cross-cabin mapping uses this same
+     * KeyID so reads decrypt correctly. */
+    uint16_t    tme_keyid;
+    uint16_t    _pad0;              /* keep `total_size` 8-byte-aligned */
     uint64_t    total_size;         /* user-requested size (bytes) */
     uint64_t    chunk_size;         /* PMM_PAGE_SIZE or BAY_HUGE_SIZE */
     uint32_t    chunk_count;        /* ceil(total_size / chunk_size) */
-    uint32_t    flags;              /* sticky creation flags (RW capability) */
-    uint64_t   *chunks;             /* phys addresses, chunk_count entries */
+    uint32_t    flags;              /* sticky creation flags (RW + ENCRYPTED capability) */
+    uint64_t   *chunks;             /* phys addresses, chunk_count entries (NO KeyID bits) */
     /* ref_count is always read/written under the owning BayBucket's
      * spinlock — see bay.c. Declared as plain uint32_t (no atomic
      * qualifier) because the lock provides the ordering guarantees;

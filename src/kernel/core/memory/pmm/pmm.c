@@ -4,6 +4,7 @@
 #include "buddy.h"
 #include "vmm.h"
 #include "memtag.h"
+#include "tme.h"
 #include "e820.h"
 #include "klib.h"
 #include "boxos_memory.h"
@@ -567,6 +568,48 @@ void* _pmm_alloc_zero_impl(size_t pages, uint64_t tags) {
         memset(virt, 0, pages * PMM_PAGE_SIZE);
     }
     return addr;
+}
+
+/* ─── TME / TME-MK: KeyID-tagged allocations ─────────────────────────
+ *
+ * pmm_alloc_with_keyid and pmm_free_with_keyid are thin convenience
+ * wrappers around pmm_alloc_zero / pmm_free. They DO NOT augment the
+ * returned phys with KeyID bits — that happens at MAP time (VMM) when
+ * the consumer creates a per-process PTE for these pages. The wrappers'
+ * only added job is to record the KeyID association as a MemTag
+ * (`tme:keyid:N`) so diagnostics (hw, memtag list) and Touch
+ * subscribers can see which KeyID governs each phys range.
+ *
+ * Falls back to plain pmm_alloc_zero when TME-MK is inactive — the
+ * caller is expected to gate on tme_keyid_alloc returning OK, so this
+ * path is for defensive correctness when MK was disabled mid-operation
+ * (e.g., firmware lock changed under us, which it cannot — but defense
+ * costs nothing).
+ */
+void *pmm_alloc_with_keyid(size_t pages, uint16_t keyid) {
+    void *phys = _pmm_alloc_zero_impl(pages, 0ULL);
+    if (!phys) return NULL;
+
+    /* Tag is purely diagnostic when MK is off. When MK is on, downstream
+     * vmm_map_*_with_keyid uses the KeyID directly (the tag here is
+     * still diagnostic — the encryption itself is driven by the PTE
+     * upper bits, not by this metadata). */
+    if (g_tme.mk_active && keyid > 0 && keyid <= g_tme.max_keyid) {
+        char tag[32];
+        ksnprintf(tag, sizeof(tag), "tme:keyid:%u", (unsigned)keyid);
+        (void)MemTagApplyByPhys((uintptr_t)phys, pages, tag);
+    }
+    return phys;
+}
+
+void pmm_free_with_keyid(void *phys, size_t pages, uint16_t keyid) {
+    /* The KeyID itself is freed independently via tme_keyid_free —
+     * a single KeyID may govern multiple non-contiguous allocations
+     * (e.g. several pages of an encrypted Bay). MemTagPmmFreed (called
+     * from pmm_free) destroys the per-range region; the tag string
+     * "tme:keyid:N" is purely metadata at this layer. */
+    (void)keyid;
+    pmm_free(phys, pages);
 }
 
 void pmm_free(void* addr, size_t pages) {

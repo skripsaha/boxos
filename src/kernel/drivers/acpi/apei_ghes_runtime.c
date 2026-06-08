@@ -238,8 +238,14 @@ error_t apei_ghes_register_source(uint16_t source_id, bool v2,
         g_source_count++;
     }
 
-    /* Map the GESB once. Read/write so we can W1C block_status to ack. */
-    void *gesb_va = vmm_map_mmio(gesb_phys, gesb_len, VMM_FLAGS_KERNEL_RW);
+    /* Map the GESB once. Read/write so we can W1C block_status to ack.
+     * vmm_map_mmio returns volatile void* (MMIO accesses must not be
+     * cached or reordered by the compiler); we store the address as
+     * plain void* in the slot and re-apply the volatile qualifier at
+     * every dereference site (see process_source_gesb / ghes_read_ack
+     * which cast to `volatile <type>*`). The explicit cast here makes
+     * the qualifier drop intentional rather than implicit. */
+    void *gesb_va = (void *)(uintptr_t)vmm_map_mmio(gesb_phys, gesb_len, VMM_FLAGS_KERNEL_RW);
     if (!gesb_va) {
         debug_printf("[APEI] GESB map failed for src=%u (phys=0x%lx len=%u)\n",
                      source_id, (unsigned long)gesb_phys, gesb_len);
@@ -381,7 +387,9 @@ static uint32_t process_entry(const apei_ghes_source_t *src,
 static void ghes_read_ack(const apei_ghes_source_t *src) {
     if (!(src->flags & SRC_V2)) return;
     if (src->read_ack_addr == 0) return;
-    void *va = vmm_map_mmio(src->read_ack_addr, 8, VMM_FLAGS_KERNEL_RW);
+    /* See comment in apei_ghes_register_runtime_source — intentional
+     * qualifier drop; volatile re-applied at dereference. */
+    void *va = (void *)(uintptr_t)vmm_map_mmio(src->read_ack_addr, 8, VMM_FLAGS_KERNEL_RW);
     if (!va) return;
     volatile uint64_t *reg = (volatile uint64_t *)va;
     uint64_t cur = *reg;

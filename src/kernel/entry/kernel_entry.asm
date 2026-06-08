@@ -97,7 +97,11 @@ _start:
     hlt
     jmp $
 
+; CET / IBT note: every global function below is uniformly prefixed with
+; ENDBR64 so the symbol set stays IBT-safe regardless of which call sites
+; choose direct vs indirect dispatch. NOP without CR4.CET=1.
 write_port:
+    endbr64
     mov dx, di
     mov al, sil
     out dx, al
@@ -105,6 +109,7 @@ write_port:
 
 ; RDI = port, returns RAX = byte read
 read_port:
+    endbr64
     mov dx, di
     in al, dx
     movzx eax, al
@@ -112,6 +117,7 @@ read_port:
 
 ; Returns RAX = GDT base address
 get_gdt_base:
+    endbr64
     sub rsp, 16
     sgdt [rsp]
     mov rax, [rsp + 2]  ; Skip limit (2 bytes), get base
@@ -120,6 +126,7 @@ get_gdt_base:
 
 ; RDI = pointer to GDT descriptor
 load_gdt:
+    endbr64
     lgdt [rdi]
 
     mov ax, 0x20        ; Kernel data segment
@@ -165,6 +172,7 @@ print_string_vga:
     ret
 
 clear_screen_vga:
+    endbr64
     push rdi
     push rcx
     push rax
@@ -181,6 +189,7 @@ clear_screen_vga:
     ret
 
 hide_cursor:
+    endbr64
     mov dx, 0x3D4
     mov al, 0x0E
     out dx, al

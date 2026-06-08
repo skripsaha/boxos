@@ -20,7 +20,13 @@ CC      = x86_64-elf-gcc
 #                userspace binary that links libbox.a.
 CFLAGS = -nostdlib -ffreestanding -fno-builtin -mno-red-zone \
          -fno-stack-protector -fno-pic -static -fno-ipa-ra -fcf-protection=full \
+         -fno-delete-null-pointer-checks -fno-strict-aliasing -fwrapv \
+         -fno-asynchronous-unwind-tables -fno-unwind-tables \
          -Wall -Wextra -g \
+         -Werror=implicit-function-declaration \
+         -Werror=incompatible-pointer-types \
+         -Werror=return-type \
+         -Werror=int-conversion \
          -I../boxlib/include \
          -I../../include
 

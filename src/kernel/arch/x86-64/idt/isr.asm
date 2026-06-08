@@ -7,8 +7,26 @@ extern irq_handler
 
 global isr_table
 
+; ──────────────────────────────────────────────────────────────────────────────
+; CET / IBT note (Intel SDM Vol 3D §17.3.4 — "Indirect Branch Tracking on
+; Interrupt / Exception Delivery"):
+;
+; When CR4.CET=1 and IA32_S_CET.ENDBR_EN=1, delivery of an exception or
+; interrupt sets the indirect-branch tracker to WAIT_FOR_ENDBRANCH. The
+; very first instruction at the IDT-target MUST be ENDBR64, else #CP fires
+; with error_code.endbranch_target=1 — the kernel would triple-fault on
+; the very first interrupt after S_CET.ENDBR_EN flips on.
+;
+; Every ISR / IRQ stub below begins with ENDBR64. Outside CET/IBT, ENDBR64
+; is a NOP (architectural — F3 0F 1E FA decoded as multi-byte NOP on pre-
+; CET silicon). The `jmp isr_common` is a relative branch and is NOT an
+; indirect transfer, so `isr_common` / `paranoid_isr_common` do not need
+; their own ENDBR64.
+; ──────────────────────────────────────────────────────────────────────────────
+
 %macro ISR_NOERROR 1
 isr%1:
+    endbr64
     push 0          ; Dummy error code
     push %1         ; Interrupt vector
     jmp isr_common
@@ -16,6 +34,7 @@ isr%1:
 
 %macro ISR_ERROR 1
 isr%1:
+    endbr64
     ; Error code already pushed by CPU, just add vector
     ; Stack now: error_code (from CPU)
     ; We need: vector, error_code
@@ -27,6 +46,7 @@ isr%1:
 
 %macro IRQ 2
 irq%1:
+    endbr64
     push 0          ; Dummy error code
     push %2         ; IRQ vector (32 + IRQ number)
     jmp isr_common
@@ -50,6 +70,7 @@ irq%1:
 ; (NMI handling considerations).
 %macro ISR_PARANOID_NOERROR 1
 isr%1:
+    endbr64
     push 0          ; Dummy error code
     push %1         ; Interrupt vector
     jmp paranoid_isr_common
@@ -57,6 +78,7 @@ isr%1:
 
 %macro ISR_PARANOID_ERROR 1
 isr%1:
+    endbr64
     xchg [rsp], rax
     push %1
     xchg [rsp+8], rax

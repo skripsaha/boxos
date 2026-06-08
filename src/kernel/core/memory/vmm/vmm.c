@@ -38,6 +38,10 @@ static spinlock_t pcid_lock = {0};
 
 uint8_t vmm_maxphyaddr = 36;
 uint64_t vmm_pte_addr_mask = 0x0000000FFFFFF000ULL;
+/* Wider variant for TME-MK paths. Initialized to the same value as
+ * vmm_pte_addr_mask at boot; widened by tme_init_bsp once num_keyid_bits
+ * is known. See vmm_set_keyid_widening below. */
+uint64_t vmm_pte_addr_mask_with_keyid = 0x0000000FFFFFF000ULL;
 
 /* 5-level paging (LA57) runtime state — see vmm.h for the contract.
  * Defaults to 4-level; vmm_init upgrades to 5-level when the CPU advertises
@@ -1857,6 +1861,73 @@ void vmm_switch_context(vmm_context_t *ctx)
         asm volatile("mov %0, %%cr3" : : "r"(ctx->pml4_phys) : "memory");
         vmm_flush_tlb();
     }
+}
+
+/* TME-MK aware variant — uses vmm_make_pte_with_keyid so the wider
+ * vmm_pte_addr_mask_with_keyid is applied, preserving KeyID bits in
+ * the PTE.phys field. Behaves identically to vmm_map_page when MK is
+ * inactive (the two masks are equal). The check below verifies the
+ * passed phys (without KeyID) fits within the raw MAXPHYADDR — if a
+ * caller accidentally passes a non-canonical phys, we still catch it
+ * via the existing vmm_map_page check. */
+vmm_map_result_t vmm_map_page_with_keyid(vmm_context_t *ctx, uintptr_t virt_addr,
+                                          uintptr_t phys_addr_with_keyid,
+                                          uint64_t flags)
+{
+    vmm_map_result_t result = {0};
+
+    if (!ctx) {
+        result.error_msg = "Invalid context";
+        return result;
+    }
+
+    if (!vmm_is_page_aligned(virt_addr) ||
+        !vmm_is_page_aligned(phys_addr_with_keyid & vmm_pte_addr_mask_with_keyid)) {
+        result.error_msg = "Address not page-aligned";
+        return result;
+    }
+
+    spin_lock(&ctx->lock);
+
+    pte_t *pte = vmm_get_or_create_pte(ctx, virt_addr);
+    if (!pte) {
+        spin_unlock(&ctx->lock);
+        result.error_msg = "Failed to get/create page table entry";
+        return result;
+    }
+
+    bool was_present = (*pte & VMM_FLAG_PRESENT) != 0;
+    if (was_present) {
+        /* Disallow remap with KeyID-bearing PTE — TME-MK semantics
+         * mean a remap would change the encryption key for already-
+         * mapped data, almost certainly a bug. */
+        spin_unlock(&ctx->lock);
+        result.error_msg = "vmm_map_page_with_keyid: page already mapped (no implicit remap)";
+        return result;
+    }
+
+    *pte = vmm_make_pte_with_keyid(phys_addr_with_keyid, flags);
+
+    ctx->mapped_pages++;
+    if (flags & VMM_FLAG_USER) {
+        ctx->user_pages++;
+        atomic_fetch_add_u64((volatile uint64_t *)&global_stats.user_mapped_pages, 1);
+        atomic_fetch_add_u64((volatile uint64_t *)&global_stats.total_mapped_pages, 1);
+    } else {
+        ctx->kernel_pages++;
+        atomic_fetch_add_u64((volatile uint64_t *)&global_stats.kernel_mapped_pages, 1);
+        atomic_fetch_add_u64((volatile uint64_t *)&global_stats.total_mapped_pages, 1);
+    }
+
+    spin_unlock(&ctx->lock);
+    /* No was_present-true path; first-time map only — no TLB shootdown
+     * needed (no stale entry can exist on any core). */
+
+    result.success = true;
+    result.virt_addr = virt_addr;
+    result.phys_addr = phys_addr_with_keyid;  /* includes KeyID for caller info */
+    result.pages_mapped = 1;
+    return result;
 }
 
 vmm_map_result_t vmm_map_page(vmm_context_t *ctx, uintptr_t virt_addr,

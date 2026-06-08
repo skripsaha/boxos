@@ -33,6 +33,11 @@ global jump_to_userspace
 ; pushed by iretq itself). The caller is responsible for handing in a
 ; 16-byte aligned user RSP — anything else is a caller bug.
 jump_to_userspace:
+    ; CET / IBT: declared `extern` in C and may be called via address
+    ; in future scheduler hooks. ENDBR64 keeps the symbol IBT-safe.
+    ; NOP without CR4.CET=1; required when S_CET.ENDBR_EN=1 if anyone
+    ; ever reaches us via an indirect branch.
+    endbr64
     cli
 
     mov ax, GDT_USER_DATA

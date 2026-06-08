@@ -75,10 +75,18 @@
 #define VMM_FLAGS_USER_RO       (VMM_FLAG_PRESENT | VMM_FLAG_USER)
 #define VMM_FLAGS_USER_CODE     (VMM_FLAG_PRESENT | VMM_FLAG_USER)
 
-// vmm_pte_addr_mask is runtime-calculated based on MAXPHYADDR (see vmm.c)
+// vmm_pte_addr_mask is runtime-calculated based on MAXPHYADDR (see vmm.c).
+//
+// vmm_pte_addr_mask_with_keyid is the WIDER mask that includes the
+// TME-MK KeyID-bit window (bits [raw_MAXPHYADDR-1 : reduced_MAXPHYADDR]
+// when MK is active). Used by the vmm_make_pte_with_keyid path so that
+// PTEs intended for encrypted-Bay etc. preserve KeyID bits. Equal to
+// vmm_pte_addr_mask when MK is inactive — TME paths degrade gracefully
+// to the same mask the rest of the kernel uses.
 #define VMM_PTE_FLAGS_MASK      0x8000000000000FFFULL
 
 extern uint64_t vmm_pte_addr_mask;
+extern uint64_t vmm_pte_addr_mask_with_keyid;
 extern uint8_t vmm_maxphyaddr;
 
 #define VMM_PML5_INDEX(addr)    (((addr) >> 48) & 0x1FF)
@@ -171,6 +179,19 @@ vmm_map_result_t vmm_map_pages(vmm_context_t* ctx, uintptr_t virt_addr,
                                uintptr_t phys_addr, size_t page_count, uint64_t flags);
 bool vmm_unmap_page(vmm_context_t* ctx, uintptr_t virt_addr);
 bool vmm_unmap_pages(vmm_context_t* ctx, uintptr_t virt_addr, size_t page_count);
+
+/* TME-MK aware map. phys_addr must already contain the KeyID bits in
+ * the upper part of the phys field (use tme_phys_with_keyid /
+ * vmm_phys_with_keyid to compose). Uses vmm_pte_addr_mask_with_keyid
+ * to preserve KeyID bits in PTE.phys. When MK is inactive, behaves
+ * identically to vmm_map_page (KeyID portion is zero).
+ *
+ * Per Intel SDM Vol 3D §16.3 the CPU reads the KeyID from the upper
+ * num_keyid_bits bits of PTE.phys at TLB-fill time; the same physical
+ * page accessed via a different KeyID yields a different plaintext
+ * (and reads are decrypted with the PTE's KeyID, not the writer's). */
+vmm_map_result_t vmm_map_page_with_keyid(vmm_context_t* ctx, uintptr_t virt_addr,
+                                         uintptr_t phys_addr_with_keyid, uint64_t flags);
 
 // Always applies VMM_FLAG_CACHE_DISABLE | VMM_FLAG_WRITE_THROUGH → UC mapping.
 // Returns virtual address, or NULL on failure.
@@ -587,6 +608,20 @@ static inline pte_t vmm_make_pte(uintptr_t phys_addr, uint64_t flags) {
 
     uintptr_t masked_phys = phys_addr & vmm_get_addr_mask();
     return masked_phys | (flags & VMM_PTE_FLAGS_MASK);
+}
+
+/* TME-MK aware PTE composer. Use this when phys_with_keyid already has
+ * the KeyID bits embedded in the upper part of the phys field (see
+ * vmm_phys_with_keyid / tme_phys_with_keyid). The narrow vmm_make_pte
+ * would strip those bits via vmm_pte_addr_mask; this variant uses the
+ * wider vmm_pte_addr_mask_with_keyid which covers bits up to the raw
+ * (pre-reduction) MAXPHYADDR.
+ *
+ * When TME-MK is inactive, vmm_pte_addr_mask_with_keyid == vmm_pte_addr_mask
+ * and the call is identical to vmm_make_pte. Safe to use uniformly. */
+static inline pte_t vmm_make_pte_with_keyid(uintptr_t phys_with_keyid, uint64_t flags) {
+    uintptr_t masked = phys_with_keyid & vmm_pte_addr_mask_with_keyid;
+    return masked | (flags & VMM_PTE_FLAGS_MASK);
 }
 
 // Pull Map: converts physical address to kernel-accessible virtual address.

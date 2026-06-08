@@ -33,6 +33,7 @@
 #include "tagfs.h"
 #include "tag_registry.h"
 #include "memtag.h"
+#include "tme.h"
 #include "atomics.h"
 #include "error.h"
 
@@ -126,17 +127,18 @@ static uint16_t bay_resolve_tag(const char *tag, bool intern_if_missing)
  * Note: chunks[] is sized to chunk_count; the caller must not assume
  * any larger capacity.
  * ───────────────────────────────────────────────────────────────────── */
-static error_t bay_alloc_chunks(uint64_t total_size,
-                                uint16_t *out_class,
-                                uint64_t *out_chunk_size,
-                                uint32_t *out_chunk_count,
-                                uint64_t **out_chunks)
+static error_t bay_alloc_chunks_internal(uint64_t total_size,
+                                          bool force_4k,
+                                          uint16_t *out_class,
+                                          uint64_t *out_chunk_size,
+                                          uint32_t *out_chunk_count,
+                                          uint64_t **out_chunks)
 {
     if (total_size == 0) return ERR_INVALID_ARGUMENT;
 
     uint16_t cls;
     uint64_t cs;
-    if (total_size >= BAY_HUGE_THRESHOLD) {
+    if (!force_4k && total_size >= BAY_HUGE_THRESHOLD) {
         cls = BAY_PAGE_CLASS_2M;
         cs  = BAY_HUGE_SIZE;
     } else {
@@ -192,6 +194,34 @@ static error_t bay_alloc_chunks(uint64_t total_size,
     return OK;
 }
 
+/* Default policy — 4 KiB or 2 MiB depending on size, fallback to 4 KiB
+ * on huge-page exhaustion. */
+static error_t bay_alloc_chunks(uint64_t total_size,
+                                uint16_t *out_class,
+                                uint64_t *out_chunk_size,
+                                uint32_t *out_chunk_count,
+                                uint64_t **out_chunks)
+{
+    return bay_alloc_chunks_internal(total_size, false,
+                                      out_class, out_chunk_size,
+                                      out_chunk_count, out_chunks);
+}
+
+/* Force 4 KiB chunks — used by encrypted (TME-MK) Bays until
+ * vmm_map_huge_2m supports KeyID-bearing PTEs. Exported by name so
+ * BayOpenInternal can request the 4 KiB-only allocation path
+ * explicitly. */
+error_t bay_alloc_chunks_4k(uint64_t total_size,
+                            uint16_t *out_class,
+                            uint64_t *out_chunk_size,
+                            uint32_t *out_chunk_count,
+                            uint64_t **out_chunks)
+{
+    return bay_alloc_chunks_internal(total_size, true,
+                                      out_class, out_chunk_size,
+                                      out_chunk_count, out_chunks);
+}
+
 /* Map every chunk into proc->cabin starting at user_va_base. Returns
  * the number of chunks mapped on success or 0 on failure (any partial
  * progress is rolled back internally before returning). */
@@ -200,7 +230,8 @@ static error_t bay_map_into_cabin(struct process_t *proc,
                                   uint64_t *chunks,
                                   uint32_t chunk_count,
                                   uint64_t chunk_size,
-                                  uint32_t flags)
+                                  uint32_t flags,
+                                  uint16_t tme_keyid)
 {
     if (!proc || !proc->cabin) return ERR_INVALID_ARGUMENT;
 
@@ -211,13 +242,29 @@ static error_t bay_map_into_cabin(struct process_t *proc,
     /* NX on all user mappings — Bay is data, not code. */
     vmm_flags |= VMM_FLAG_NO_EXECUTE;
 
+    /* For encrypted Bays, the per-cabin VA gets PTEs with the BAY's
+     * KeyID embedded in the upper phys bits. The CPU encrypts every
+     * store and decrypts every load using the key associated with that
+     * KeyID; two cabins opening the SAME encrypted Bay both map with
+     * the same KeyID and observe the same plaintext. */
+    const bool encrypted = (tme_keyid != 0);
+
     for (uint32_t i = 0; i < chunk_count; i++) {
         uint64_t va = user_va_base + (uint64_t)i * chunk_size;
         uint64_t pa = chunks[i];
 
         bool ok;
         if (chunk_size == BAY_HUGE_SIZE) {
+            /* Huge-page TME-MK mapping is not yet supported by
+             * vmm_map_huge_2m — encrypted Bays therefore fall back to
+             * 4 KiB chunks at create time (see BayOpenInternal). This
+             * branch handles non-encrypted huge bays only. */
             ok = vmm_map_huge_2m(proc->cabin, va, pa, vmm_flags);
+        } else if (encrypted) {
+            uint64_t pa_with_keyid = tme_phys_with_keyid(pa, tme_keyid);
+            vmm_map_result_t r = vmm_map_page_with_keyid(proc->cabin, va,
+                                                         pa_with_keyid, vmm_flags);
+            ok = r.success;
         } else {
             vmm_map_result_t r = vmm_map_page(proc->cabin, va, pa, vmm_flags);
             ok = r.success;
@@ -446,6 +493,13 @@ static void bay_drop_ref_locked(BayBucket *b, BayObject *bay)
 {
     bay->ref_count--;
     if (bay->ref_count == 0) {
+        /* Snapshot keyid before unlinking — bay is freed below and we
+         * need to call tme_keyid_free after releasing all Bay state.
+         * tme_keyid_free issues PCONFIG SET_KEY_RANDOM to re-key the
+         * slot before returning it to the pool, so a future Bay that
+         * reuses this KeyID slot CANNOT decrypt the old ciphertext. */
+        uint16_t released_keyid = bay->tme_keyid;
+
         bay_bucket_unlink_locked(b, bay);
         spin_unlock(&b->lock);
 
@@ -453,6 +507,10 @@ static void bay_drop_ref_locked(BayBucket *b, BayObject *bay)
         atomic_fetch_sub_u64(&g_stat_pages, bay_total_pages(bay));
         bay_free_chunks(bay);
         kfree(bay);
+
+        if (released_keyid != 0) {
+            (void)tme_keyid_free(released_keyid);
+        }
         return;
     }
     spin_unlock(&b->lock);
@@ -490,6 +548,17 @@ error_t BayOpenInternal(struct process_t *proc,
     /* Phase 1: see if the Bay already exists. */
     spin_lock(&b->lock);
     BayObject *bay = bay_bucket_find_locked(b, tag_id);
+    if (bay) {
+        /* Encryption capability must match between caller and existing
+         * Bay — mismatched maps would decrypt with the wrong key and
+         * silently return garbage. Gate explicitly. */
+        bool caller_wants_enc  = (flags & BAY_ENCRYPTED) != 0;
+        bool bay_is_encrypted  = (bay->tme_keyid != 0);
+        if (caller_wants_enc != bay_is_encrypted) {
+            spin_unlock(&b->lock);
+            return ERR_INVALID_ARGUMENT;
+        }
+    }
     if (!bay) {
         if (!wants_create) {
             spin_unlock(&b->lock);
@@ -501,6 +570,16 @@ error_t BayOpenInternal(struct process_t *proc,
         }
         spin_unlock(&b->lock);
 
+        /* TME-MK encryption requested? Reserve a KeyID up front so we
+         * can fail fast before any PMM work. The KeyID is released on
+         * the unwind paths below. */
+        uint16_t alloc_keyid = 0;
+        if (flags & BAY_ENCRYPTED) {
+            if (!g_tme.mk_active) return ERR_UNSUPPORTED;
+            error_t krc = tme_keyid_alloc(&alloc_keyid);
+            if (krc != OK) return krc;
+        }
+
         /* Drop the lock while allocating phys pages — pmm_alloc may
          * take its own locks and we don't want to hold the bucket
          * lock across that. We retry under the bucket lock to handle
@@ -509,8 +588,44 @@ error_t BayOpenInternal(struct process_t *proc,
         uint64_t  cs;
         uint32_t  cc;
         uint64_t *chunks;
-        error_t   rc = bay_alloc_chunks(requested_size, &cls, &cs, &cc, &chunks);
-        if (rc != OK) return rc;
+        error_t   rc;
+        if (flags & BAY_ENCRYPTED) {
+            /* TME-MK huge-page support requires vmm_map_huge_2m to
+             * accept a KeyID, which it does not yet. Until that path
+             * exists, force 4 KiB chunks for encrypted Bays. The
+             * downstream bay_alloc_chunks_4k helper would be ideal,
+             * but bay_alloc_chunks is the only entry — we override
+             * its class selection by clamping size to the 4K-only
+             * threshold below the 2 MB cutoff. */
+            rc = bay_alloc_chunks(requested_size, &cls, &cs, &cc, &chunks);
+            if (rc != OK) {
+                (void)tme_keyid_free(alloc_keyid);
+                return rc;
+            }
+            if (cls == BAY_PAGE_CLASS_2M) {
+                /* Roll back and force 4 KiB. bay_alloc_chunks is
+                 * page-class-monotonic; passing a smaller "size hint"
+                 * forces 4 KiB. We free the huge chunks and retry. */
+                for (uint32_t i = 0; i < cc; i++) {
+                    if (chunks[i]) pmm_free((void *)chunks[i], BAY_HUGE_PAGES);
+                }
+                kfree(chunks);
+                /* Re-allocate as 4 KiB by tricking the size-class
+                 * selector. Pages count stays the same to honour the
+                 * caller's size; we just use small pages. */
+                extern error_t bay_alloc_chunks_4k(uint64_t, uint16_t*,
+                                                    uint64_t*, uint32_t*,
+                                                    uint64_t**);
+                rc = bay_alloc_chunks_4k(requested_size, &cls, &cs, &cc, &chunks);
+                if (rc != OK) {
+                    (void)tme_keyid_free(alloc_keyid);
+                    return rc;
+                }
+            }
+        } else {
+            rc = bay_alloc_chunks(requested_size, &cls, &cs, &cc, &chunks);
+            if (rc != OK) return rc;
+        }
 
         BayObject *fresh = (BayObject *)kmalloc(sizeof(BayObject));
         if (!fresh) {
@@ -519,11 +634,13 @@ error_t BayOpenInternal(struct process_t *proc,
                                          (cls == BAY_PAGE_CLASS_2M) ? BAY_HUGE_PAGES : 1);
             }
             kfree(chunks);
+            if (alloc_keyid) (void)tme_keyid_free(alloc_keyid);
             return ERR_NO_MEMORY;
         }
         memset(fresh, 0, sizeof(*fresh));
         fresh->tag_id      = tag_id;
         fresh->page_class  = cls;
+        fresh->tme_keyid   = alloc_keyid;
         fresh->total_size  = (uint64_t)cc * cs;
         fresh->chunk_size  = cs;
         fresh->chunk_count = cc;
@@ -626,7 +743,8 @@ error_t BayOpenInternal(struct process_t *proc,
     }
 
     error_t rc = bay_map_into_cabin(proc, va, bay->chunks,
-                                    chunk_count, chunk_size, flags);
+                                    chunk_count, chunk_size, flags,
+                                    bay->tme_keyid);
     if (rc != OK) {
         kfree(claim);
         spin_lock(&b->lock);
