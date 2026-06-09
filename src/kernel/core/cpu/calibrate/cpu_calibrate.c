@@ -333,16 +333,38 @@ void cpu_calibrate_tsc(void) {
      * itself when no HPET is present. */
     uint64_t hpet_khz = hpet_measure_tsc_khz();
 
-    /* Method 4b: ACPI PM Timer measurement. Same algorithm as HPET but
-     * against the 3.579545 MHz PM Timer counter — useful when HPET is
-     * absent or broken (some pre-2010 server boards, some Bochs
-     * configs). Single sample is sufficient: the 24-bit width permits
-     * a clean 50 ms window with margin (24-bit wrap is ~14 s). */
+    /* Method 4b: ACPI PM Timer measurement. Multi-sample median, same
+     * shape as the HPET path — protects against a one-off host
+     * scheduler hiccup landing in any single window. Five 20 ms
+     * samples = 100 ms total; well below the PM timer's 24-bit
+     * (~14 s) wrap budget.
+     *
+     * Critical under QEMU TCG: PMT's lower poll rate (~3.6k MMIO
+     * reads/ms vs HPET's ~14k) gives less emulator-overhead bias
+     * than HPET under host contention, but a single 50 ms sample is
+     * still vulnerable to one large host-scheduler stall. Median-of-
+     * five evens that out — observed bias drops from ~2 % to <0.5 %
+     * under 16-core macOS host load. */
     uint64_t pmt_khz = 0;
     if (pmtimer_is_present()) {
-        uint64_t tsc_start = rdtsc_serialized();
-        pmtimer_busy_wait_us(50000ULL);
-        pmt_khz = (rdtsc_serialized() - tsc_start) / 50ULL;
+        uint64_t samples[HPET_TSC_SAMPLE_COUNT];
+        for (int i = 0; i < HPET_TSC_SAMPLE_COUNT; i++) {
+            uint64_t tsc_start = rdtsc_serialized();
+            pmtimer_busy_wait_us((uint64_t)HPET_TSC_SAMPLE_MS * 1000ULL);
+            uint64_t cycles = rdtsc_serialized() - tsc_start;
+            samples[i] = cycles / (uint64_t)HPET_TSC_SAMPLE_MS;
+        }
+        /* Insertion sort + median pick. */
+        for (int i = 1; i < HPET_TSC_SAMPLE_COUNT; i++) {
+            uint64_t v = samples[i];
+            int j = i - 1;
+            while (j >= 0 && samples[j] > v) {
+                samples[j + 1] = samples[j];
+                j--;
+            }
+            samples[j + 1] = v;
+        }
+        pmt_khz = samples[HPET_TSC_SAMPLE_COUNT / 2];
     }
 
     /* Method 5: PIT channel-0 measurement. Only runs when HPET isn't
@@ -380,7 +402,27 @@ void cpu_calibrate_tsc(void) {
      *   NO source produced even a 1 MHz reading — at that point
      *   nothing about timing is going to be correct, and a non-zero
      *   constant keeps division alive. */
-    struct { uint64_t khz; const char *name; } candidates[] = {
+    /* Source priority — strictly first-match-wins.
+     *
+     * Under QEMU TCG, every MMIO read traps into the emulator and
+     * pays an emulator-internal scheduling cost that scales with
+     * host load. HPET polls its 14.318 MHz main counter — the busy-
+     * wait loop issues ~14k MMIO reads per millisecond. PMT polls
+     * the 3.579545 MHz ACPI timer — only ~3.6k reads per millisecond.
+     * Under 16-core macOS host contention the HPET overhead biases
+     * its measurement HIGH by ~5-6 % (observed 1.057 GHz vs the
+     * true 1.000 GHz emulated rate), while PMT stays within 0.3 %.
+     * On real silicon both timers are nanosecond-precise hardware
+     * counters with no trap overhead, so HPET wins (faster wall-
+     * clock convergence for the same accuracy).
+     *
+     * The ordering below reflects this: TCG path prefers PMT over
+     * HPET; non-TCG path (real HW or KVM) keeps HPET first because
+     * pvclock/CPUID.15h cover the trusted-hypervisor case before we
+     * ever reach the measurement-based methods. */
+    const bool tcg = (hv_vendor() == HV_VENDOR_TCG);
+    typedef struct { uint64_t khz; const char *name; } tsc_cand_t;
+    tsc_cand_t candidates_real[] = {
         { pvclock_khz, "pvclock (kvmclock)"              },
         { hv_khz,      "hypervisor CPUID.40000010h"      },
         { hv_msr_khz,  "Hyper-V MSR_TSC_FREQUENCY"       },
@@ -390,7 +432,24 @@ void cpu_calibrate_tsc(void) {
         { pit_khz,     "PIT measurement"                 },
         { cpuid16_khz, "CPUID.16h (base freq fallback)"  },
     };
-    const int N = sizeof(candidates) / sizeof(candidates[0]);
+    /* TCG variant — PMT before HPET. CPUID-based methods come first
+     * as on real HW (trusted hypervisor → trusted measurement) so
+     * the only difference is the HPET ↔ PMT swap. */
+    tsc_cand_t candidates_tcg[] = {
+        { pvclock_khz, "pvclock (kvmclock)"              },
+        { hv_khz,      "hypervisor CPUID.40000010h"      },
+        { hv_msr_khz,  "Hyper-V MSR_TSC_FREQUENCY"       },
+        { cpuid15_khz, "CPUID.15h"                       },
+        { pmt_khz,     "PM Timer (ACPI) measurement"     },
+        { hpet_khz,    "HPET measurement"                },
+        { pit_khz,     "PIT measurement"                 },
+        { cpuid16_khz, "CPUID.16h (base freq fallback)"  },
+    };
+    /* Pick the right table per hypervisor. Both arrays have the
+     * same shape, so the iteration below works against either via
+     * an indirected pointer + count. */
+    tsc_cand_t *candidates = tcg ? candidates_tcg : candidates_real;
+    const int N = sizeof(candidates_real) / sizeof(candidates_real[0]);
     const char *source = NULL;
 
     /* Pass 1: strict. */
