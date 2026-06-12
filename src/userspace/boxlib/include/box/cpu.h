@@ -162,6 +162,45 @@ INLINE uint64_t cpu_tsc_to_ns(uint64_t ticks) {
     return (ticks * 1000000ULL) / khz;
 }
 
+/* ---------------------------------------------------------------------------
+ * WAITPKG user-mode wait primitives (Intel SDM Vol 2A UMONITOR/UMWAIT).
+ * Gate every use on cpu_has_waitpkg() — executing these without the
+ * feature raises #UD. Raw opcodes for assembler-version portability.
+ *
+ * umonitor() arms a hardware monitor on the cacheline of `addr` (line
+ * size from CPUID.05H). Any subsequent store to that line wakes a
+ * following umwait() immediately. Only WB memory triggers reliably.
+ *
+ * umwait(state, deadline_tsc): state 0 ⇒ C0.2 (deeper savings, slower
+ * wake), 1 ⇒ C0.1. Returns CF: 1 = OS time limit (IA32_UMWAIT_CONTROL)
+ * expired, 0 = monitored write / interrupt / TSC deadline. Callers must
+ * re-check their predicate after wake — spurious wakes are expected.
+ * --------------------------------------------------------------------------- */
+INLINE void umonitor(volatile void* addr) {
+    __asm__ volatile(
+        ".byte 0xf3, 0x0f, 0xae, 0xf0"
+        :
+        : "a"(addr)
+        : "memory"
+    );
+}
+
+INLINE int umwait(uint32_t state, uint64_t deadline_tsc) {
+    uint32_t eax = (uint32_t)deadline_tsc;
+    uint32_t edx = (uint32_t)(deadline_tsc >> 32);
+    uint8_t cf;
+
+    __asm__ volatile(
+        ".byte 0xf2, 0x0f, 0xae, 0xf0\n"
+        "setc %[cf]"
+        : [cf] "=r"(cf), "+d"(edx), "+a"(eax)
+        : "c"(state)
+        : "cc", "memory"
+    );
+
+    return cf;
+}
+
 #ifdef __cplusplus
 }
 #endif

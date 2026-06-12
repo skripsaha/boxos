@@ -16,8 +16,10 @@
 
 #include "box/print.h"
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <mutex>
 #include <new>
 #include <exception>
 #include <initializer_list>
@@ -533,6 +535,192 @@ void Phase5()
     printf("[CXX] PASS phase5: RTTI (dynamic_cast si/mi/diamond/access + typeid)\n");
 }
 
+// ── phase6 fixtures: <atomic> + <mutex> ────────────────────────────────
+
+struct Wide16 {
+    uint64_t lo;
+    uint64_t hi;
+    bool operator==(const Wide16 &) const = default;
+};
+static_assert(sizeof(Wide16) == 16);
+static_assert(std::atomic<Wide16>::is_always_lock_free);
+
+struct Odd12 {
+    uint32_t a, b, c;
+    bool operator==(const Odd12 &) const = default;
+};
+static_assert(sizeof(Odd12) == 12);
+static_assert(!std::atomic<Odd12>::is_always_lock_free);
+
+static_assert(std::atomic<int>::is_always_lock_free);
+static_assert(std::atomic_ref<int>::required_alignment == 4);
+static_assert(std::atomic<unsigned __int128>::is_always_lock_free);
+
+int g_once_runs = 0;
+std::once_flag g_once_flag;
+
+void Phase6()
+{
+    // atomic<int>: core ops + fetch family + operator sugar
+    std::atomic<int> ai{40};
+    Check(ai.load() == 40, "phase6 atomic load");
+    ai.store(2, std::memory_order_release);
+    Check(ai.load(std::memory_order_acquire) == 2, "phase6 store/load orders");
+    Check(ai.exchange(10) == 2 && ai.load() == 10, "phase6 exchange");
+    Check(ai.fetch_add(5) == 10 && ai.fetch_sub(3) == 15, "phase6 fetch add/sub");
+    Check((ai &= 0xC) == 12 && (ai |= 1) == 13 && (ai ^= 2) == 15,
+          "phase6 fetch bitwise sugar");
+    Check(++ai == 16 && ai++ == 16 && ai.load() == 17, "phase6 increments");
+
+    int expected = 0;
+    Check(!ai.compare_exchange_strong(expected, 1) && expected == 17,
+          "phase6 CAS failure updates expected");
+    Check(ai.compare_exchange_strong(expected, 42) && ai.load() == 42,
+          "phase6 CAS success");
+
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+
+    // volatile-qualified overloads
+    volatile std::atomic<int> vai{7};
+    vai.store(8);
+    Check(vai.load() == 8, "phase6 volatile atomic");
+
+    // atomic<bool> + atomic_flag
+    std::atomic<bool> ab{false};
+    Check(!ab.exchange(true) && ab.load(), "phase6 atomic<bool>");
+    std::atomic_flag flag;
+    Check(!flag.test() && !flag.test_and_set() && flag.test(),
+          "phase6 atomic_flag set");
+    flag.clear();
+    Check(!flag.test(), "phase6 atomic_flag clear");
+
+    // atomic<T*> scales by pointee
+    static int arr[8] = {};
+    std::atomic<int *> ap{arr};
+    Check(ap.fetch_add(2) == arr && ap.load() == arr + 2, "phase6 ptr fetch_add");
+    Check(++ap == arr + 3 && ap.fetch_sub(3) == arr + 3 && ap.load() == arr,
+          "phase6 ptr sugar");
+
+    // atomic<float> (C++20 floating fetch ops)
+    std::atomic<float> af{1.5f};
+    Check(af.fetch_add(2.5f) == 1.5f && af.load() == 4.0f, "phase6 float fetch_add");
+
+    // 16-byte lock-free path (cmpxchg16b via __atomic_*_16)
+    std::atomic<Wide16> aw{{1, 2}};
+    Check(aw.is_lock_free(), "phase6 16B is_lock_free");
+    Check(aw.load() == Wide16{1, 2}, "phase6 16B load");
+    aw.store({3, 4});
+    Wide16 wexp{0, 0};
+    Check(!aw.compare_exchange_strong(wexp, {9, 9}) && wexp == Wide16{3, 4},
+          "phase6 16B CAS failure");
+    Check(aw.compare_exchange_strong(wexp, {5, 6}) && aw.load() == Wide16{5, 6},
+          "phase6 16B CAS success");
+    Check(aw.exchange({7, 8}) == Wide16{5, 6}, "phase6 16B exchange");
+
+    std::atomic<unsigned __int128> a128{1};
+    unsigned __int128 big = (static_cast<unsigned __int128>(0xB0CE5ULL) << 64) | 1u;
+    a128.store(big);
+    Check(a128.load() == big, "phase6 int128 store/load");
+    Check(a128.fetch_add(1) == big, "phase6 int128 fetch_add");
+    Check((a128 += 1) == big + 2, "phase6 int128 add_fetch sugar");
+
+    // odd-size generic protocol (cabin-private lock pool)
+    std::atomic<Odd12> ao{{1, 2, 3}};
+    Check(!ao.is_lock_free(), "phase6 odd-size not lock-free");
+    ao.store({4, 5, 6});
+    Check(ao.load() == Odd12{4, 5, 6}, "phase6 odd-size store/load");
+    Odd12 oexp{4, 5, 6};
+    Check(ao.compare_exchange_strong(oexp, {7, 8, 9}) &&
+              ao.load() == Odd12{7, 8, 9},
+          "phase6 odd-size CAS");
+
+    // wait returns immediately when the value already differs; notify is
+    // a conformance no-op (address-monitor based wake)
+    std::atomic<int> awake{1};
+    awake.wait(0);
+    awake.notify_one();
+    awake.notify_all();
+    Check(awake.load() == 1, "phase6 wait fast-path");
+
+    // atomic_ref over a plain object
+    int plain = 5;
+    std::atomic_ref<int> ref(plain);
+    Check(ref.fetch_add(3) == 5 && plain == 8, "phase6 atomic_ref");
+
+    // free functions
+    std::atomic<int> afree{1};
+    std::atomic_store(&afree, 2);
+    Check(std::atomic_load(&afree) == 2 && std::atomic_fetch_add(&afree, 3) == 2,
+          "phase6 atomic free functions");
+
+    // mutex: exclusion observable through try_lock on one thread
+    std::mutex m;
+    m.lock();
+    Check(!m.try_lock(), "phase6 mutex try_lock while held");
+    m.unlock();
+    Check(m.try_lock(), "phase6 mutex try_lock after unlock");
+    m.unlock();
+
+    // recursive_mutex: re-entry by the owner
+    std::recursive_mutex rm;
+    rm.lock();
+    rm.lock();
+    Check(rm.try_lock(), "phase6 recursive re-entry");
+    rm.unlock();
+    rm.unlock();
+    rm.unlock();
+    Check(rm.try_lock(), "phase6 recursive released");
+    rm.unlock();
+
+    // RAII wrappers
+    {
+        std::lock_guard<std::mutex> g(m);
+        Check(!m.try_lock(), "phase6 lock_guard holds");
+    }
+    std::unique_lock<std::mutex> ul(m, std::defer_lock);
+    Check(!ul.owns_lock(), "phase6 unique_lock defer");
+    ul.lock();
+    Check(ul.owns_lock() && !m.try_lock(), "phase6 unique_lock lock");
+    std::unique_lock<std::mutex> ul2(std::move(ul));
+    Check(ul2.owns_lock() && !ul.owns_lock(), "phase6 unique_lock move");
+    ul2.unlock();
+
+    // lock algorithms + scoped_lock
+    std::mutex m2;
+    std::lock(m, m2);
+    Check(!m.try_lock() && !m2.try_lock(), "phase6 std::lock both");
+    m.unlock();
+    m2.unlock();
+    m2.lock();
+    Check(std::try_lock(m, m2) == 1, "phase6 try_lock failed index");
+    Check(m.try_lock(), "phase6 try_lock rollback released first");
+    m.unlock();
+    m2.unlock();
+    {
+        std::scoped_lock both(m, m2);
+        Check(!m.try_lock() && !m2.try_lock(), "phase6 scoped_lock holds both");
+    }
+    Check(m.try_lock() && m2.try_lock(), "phase6 scoped_lock released");
+    m.unlock();
+    m2.unlock();
+
+    // call_once: single execution; a throwing run leaves the flag passive
+    std::call_once(g_once_flag, [] { g_once_runs++; });
+    std::call_once(g_once_flag, [] { g_once_runs++; });
+    Check(g_once_runs == 1, "phase6 call_once single run");
+
+    std::once_flag throwing_flag;
+    int recovered_runs = 0;
+    try {
+        std::call_once(throwing_flag, [] { throw 7; });
+    } catch (int) {
+    }
+    std::call_once(throwing_flag, [&] { recovered_runs++; });
+    Check(recovered_runs == 1, "phase6 call_once retry after throw");
+
+    printf("[CXX] PASS phase6: atomic+mutex (16B cas/lock-pool/ref/wait + locks)\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -546,6 +734,7 @@ int main()
     Phase4a();
     Phase4b();
     Phase5();
+    Phase6();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
