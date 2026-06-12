@@ -1,0 +1,524 @@
+// boxcxx — <deque>
+// Block-map deque (the SGI shape): a map of fixed 512-byte blocks plus
+// {cur, first, last, node} iterators. O(1) push/pop at both ends with
+// stable references on end-insertion; middle insert/erase go through
+// the append+rotate path (<algorithm> is already in the tree).
+#ifndef BOXCXX_DEQUE
+#define BOXCXX_DEQUE
+
+#include <__bits/allocator_core>
+#include <__bits/iterator_core>
+#include <__bits/throw_helpers>
+#include <algorithm>
+#include <compare>
+#include <cstddef>
+#include <initializer_list>
+#include <type_traits>
+#include <utility>
+
+namespace std {
+
+namespace __deque {
+
+constexpr size_t BlockElems(size_t value_size) noexcept
+{
+    return value_size < 512 ? 512 / value_size : 1;
+}
+
+} // namespace __deque
+
+template <typename T, typename Alloc = allocator<T>>
+class deque {
+    static constexpr size_t kBlock = __deque::BlockElems(sizeof(T));
+
+    using ATraits = allocator_traits<Alloc>;
+    using MapAlloc = typename ATraits::template rebind_alloc<T *>;
+    using MapTraits = allocator_traits<MapAlloc>;
+
+public:
+    using value_type      = T;
+    using allocator_type  = Alloc;
+    using size_type       = size_t;
+    using difference_type = ptrdiff_t;
+    using reference       = T &;
+    using const_reference = const T &;
+
+    template <bool Const>
+    class Iter {
+        using Ref = conditional_t<Const, const T &, T &>;
+        using Ptr = conditional_t<Const, const T *, T *>;
+
+    public:
+        using iterator_category = random_access_iterator_tag;
+        using value_type        = T;
+        using difference_type   = ptrdiff_t;
+        using reference         = Ref;
+        using pointer           = Ptr;
+
+        Iter() noexcept : __cur(nullptr), __first(nullptr), __last(nullptr),
+                          __node(nullptr)
+        {
+        }
+        Iter(T *cur, T **node) noexcept
+            : __cur(cur), __first(*node), __last(*node + kBlock), __node(node)
+        {
+        }
+        template <bool C2>
+            requires(Const && !C2)
+        Iter(const Iter<C2> &o) noexcept
+            : __cur(o.__cur), __first(o.__first), __last(o.__last),
+              __node(o.__node)
+        {
+        }
+
+        Ref operator*() const { return *__cur; }
+        Ptr operator->() const { return __cur; }
+
+        Iter &operator++()
+        {
+            ++__cur;
+            if (__cur == __last) {
+                SetNode(__node + 1);
+                __cur = __first;
+            }
+            return *this;
+        }
+        Iter operator++(int)
+        {
+            Iter tmp = *this;
+            ++*this;
+            return tmp;
+        }
+        Iter &operator--()
+        {
+            if (__cur == __first) {
+                SetNode(__node - 1);
+                __cur = __last;
+            }
+            --__cur;
+            return *this;
+        }
+        Iter operator--(int)
+        {
+            Iter tmp = *this;
+            --*this;
+            return tmp;
+        }
+
+        Iter &operator+=(difference_type n)
+        {
+            difference_type offset = n + (__cur - __first);
+            if (offset >= 0 && offset < difference_type(kBlock)) {
+                __cur += n;
+            } else {
+                difference_type node_off =
+                    offset > 0
+                        ? offset / difference_type(kBlock)
+                        : -((-offset - 1) / difference_type(kBlock)) - 1;
+                SetNode(__node + node_off);
+                __cur = __first +
+                        (offset - node_off * difference_type(kBlock));
+            }
+            return *this;
+        }
+        Iter &operator-=(difference_type n) { return *this += -n; }
+        Iter operator+(difference_type n) const
+        {
+            Iter tmp = *this;
+            return tmp += n;
+        }
+        Iter operator-(difference_type n) const
+        {
+            Iter tmp = *this;
+            return tmp += -n;
+        }
+        Ref operator[](difference_type n) const { return *(*this + n); }
+
+        difference_type operator-(const Iter &rhs) const
+        {
+            return difference_type(kBlock) * (__node - rhs.__node) +
+                   (__cur - __first) - (rhs.__cur - rhs.__first);
+        }
+        bool operator==(const Iter &rhs) const noexcept
+        {
+            return __cur == rhs.__cur;
+        }
+        auto operator<=>(const Iter &rhs) const noexcept
+        {
+            if (auto c = __node <=> rhs.__node; c != 0) return c;
+            return __cur <=> rhs.__cur;
+        }
+
+        void SetNode(T **node) noexcept
+        {
+            __node  = node;
+            __first = *node;
+            __last  = *node + kBlock;
+        }
+
+        T *__cur;
+        T *__first;
+        T *__last;
+        T **__node;
+    };
+
+    using iterator               = Iter<false>;
+    using const_iterator         = Iter<true>;
+    using reverse_iterator       = std::reverse_iterator<iterator>;
+    using const_reverse_iterator = std::reverse_iterator<const_iterator>;
+
+    // ── lifecycle ───────────────────────────────────────────────────────
+
+    deque() { InitMap(0); }
+    explicit deque(const Alloc &a) : __alloc(a), __malloc(a) { InitMap(0); }
+    explicit deque(size_type count, const Alloc &a = Alloc())
+        : __alloc(a), __malloc(a)
+    {
+        InitMap(0);
+        for (; count > 0; --count) emplace_back();
+    }
+    deque(size_type count, const T &value, const Alloc &a = Alloc())
+        : __alloc(a), __malloc(a)
+    {
+        InitMap(0);
+        for (; count > 0; --count) push_back(value);
+    }
+    template <typename It>
+        requires(!is_integral_v<It>)
+    deque(It first, It last, const Alloc &a = Alloc()) : __alloc(a), __malloc(a)
+    {
+        InitMap(0);
+        for (; first != last; ++first) push_back(*first);
+    }
+    deque(initializer_list<T> il, const Alloc &a = Alloc())
+        : __alloc(a), __malloc(a)
+    {
+        InitMap(0);
+        for (const T &v : il) push_back(v);
+    }
+    deque(const deque &other)
+        : __alloc(ATraits::select_on_container_copy_construction(
+              other.__alloc)),
+          __malloc(other.__malloc)
+    {
+        InitMap(0);
+        for (const T &v : other) push_back(v);
+    }
+    deque(deque &&other) noexcept
+        : __alloc(std::move(other.__alloc)), __malloc(std::move(other.__malloc))
+    {
+        StealFrom(other);
+    }
+    ~deque() { Teardown(); }
+
+    deque &operator=(const deque &other)
+    {
+        if (this == &other) return *this;
+        clear();
+        for (const T &v : other) push_back(v);
+        return *this;
+    }
+    deque &operator=(deque &&other) noexcept
+    {
+        if (this == &other) return *this;
+        Teardown();
+        if constexpr (ATraits::propagate_on_container_move_assignment::value)
+            __alloc = std::move(other.__alloc);
+        StealFrom(other);
+        return *this;
+    }
+    deque &operator=(initializer_list<T> il)
+    {
+        clear();
+        for (const T &v : il) push_back(v);
+        return *this;
+    }
+
+    allocator_type get_allocator() const noexcept { return __alloc; }
+
+    // ── access / iterators ──────────────────────────────────────────────
+
+    reference operator[](size_type i) { return *(__start + difference_type(i)); }
+    const_reference operator[](size_type i) const
+    {
+        return *(__start + difference_type(i));
+    }
+    reference at(size_type i)
+    {
+        if (i >= size()) boxcxx::ThrowOutOfRange("deque::at");
+        return (*this)[i];
+    }
+    const_reference at(size_type i) const
+    {
+        if (i >= size()) boxcxx::ThrowOutOfRange("deque::at");
+        return (*this)[i];
+    }
+    reference front() { return *__start; }
+    const_reference front() const { return *__start; }
+    reference back() { return *(__finish - 1); }
+    const_reference back() const { return *(__finish - 1); }
+
+    iterator begin() noexcept { return __start; }
+    const_iterator begin() const noexcept { return const_iterator(__start); }
+    const_iterator cbegin() const noexcept { return begin(); }
+    iterator end() noexcept { return __finish; }
+    const_iterator end() const noexcept { return const_iterator(__finish); }
+    const_iterator cend() const noexcept { return end(); }
+    reverse_iterator rbegin() noexcept { return reverse_iterator(end()); }
+    reverse_iterator rend() noexcept { return reverse_iterator(begin()); }
+
+    [[nodiscard]] bool empty() const noexcept { return __start == __finish; }
+    size_type size() const noexcept
+    {
+        return size_type(const_iterator(__finish) - const_iterator(__start));
+    }
+    size_type max_size() const noexcept { return size_type(-1) / sizeof(T); }
+
+    // ── modifiers ───────────────────────────────────────────────────────
+
+    template <typename... Args>
+    reference emplace_back(Args &&...args)
+    {
+        if (__finish.__cur == __finish.__last - 1) {
+            // Block boundary ahead: secure the next map slot + block
+            // BEFORE constructing, so failure leaves us untouched.
+            ReserveBack();
+        }
+        ATraits::construct(__alloc, __finish.__cur,
+                           std::forward<Args>(args)...);
+        ++__finish;
+        return back();
+    }
+    template <typename... Args>
+    reference emplace_front(Args &&...args)
+    {
+        if (__start.__cur == __start.__first) ReserveFront();
+        iterator spot = __start;
+        --spot;
+        ATraits::construct(__alloc, spot.__cur, std::forward<Args>(args)...);
+        __start = spot;
+        return front();
+    }
+    void push_back(const T &v) { emplace_back(v); }
+    void push_back(T &&v) { emplace_back(std::move(v)); }
+    void push_front(const T &v) { emplace_front(v); }
+    void push_front(T &&v) { emplace_front(std::move(v)); }
+
+    void pop_back()
+    {
+        --__finish;
+        ATraits::destroy(__alloc, __finish.__cur);
+        ShrinkBack();
+    }
+    void pop_front()
+    {
+        ATraits::destroy(__alloc, __start.__cur);
+        ++__start;
+        ShrinkFront();
+    }
+
+    template <typename... Args>
+    iterator emplace(const_iterator where, Args &&...args)
+    {
+        difference_type pos = const_iterator(where) - const_iterator(__start);
+        emplace_back(std::forward<Args>(args)...);
+        iterator p = __start + pos;
+        std::rotate(p, __finish - 1, __finish);
+        return p;
+    }
+    iterator insert(const_iterator where, const T &v)
+    {
+        return emplace(where, v);
+    }
+    iterator insert(const_iterator where, T &&v)
+    {
+        return emplace(where, std::move(v));
+    }
+
+    iterator erase(const_iterator where)
+    {
+        difference_type pos = const_iterator(where) - const_iterator(__start);
+        iterator p          = __start + pos;
+        std::move(p + 1, __finish, p);
+        pop_back();
+        return __start + pos;
+    }
+    iterator erase(const_iterator first, const_iterator last)
+    {
+        difference_type pos = const_iterator(first) - const_iterator(__start);
+        difference_type n   = const_iterator(last) - const_iterator(first);
+        iterator p          = __start + pos;
+        std::move(p + n, __finish, p);
+        for (; n > 0; --n) pop_back();
+        return __start + pos;
+    }
+
+    void resize(size_type n)
+    {
+        while (size() > n) pop_back();
+        while (size() < n) emplace_back();
+    }
+    void resize(size_type n, const T &value)
+    {
+        while (size() > n) pop_back();
+        while (size() < n) push_back(value);
+    }
+
+    void clear() noexcept
+    {
+        while (!empty()) pop_back();
+    }
+
+    void swap(deque &other) noexcept
+    {
+        auto sw = [](auto &a, auto &b) {
+            auto t = a;
+            a      = b;
+            b      = t;
+        };
+        sw(__map, other.__map);
+        sw(__map_size, other.__map_size);
+        sw(__start, other.__start);
+        sw(__finish, other.__finish);
+    }
+
+private:
+    // ── map / block machinery ───────────────────────────────────────────
+
+    T *AllocBlock() { return ATraits::allocate(__alloc, kBlock); }
+    void FreeBlock(T *b) noexcept { ATraits::deallocate(__alloc, b, kBlock); }
+
+    void InitMap(size_type elems)
+    {
+        size_type blocks = elems / kBlock + 1;
+        __map_size       = blocks + 2 < 8 ? 8 : blocks + 2;
+        __map            = MapTraits::allocate(__malloc, __map_size);
+        for (size_type i = 0; i < __map_size; ++i) __map[i] = nullptr;
+        // Centre the initial block.
+        size_type mid = __map_size / 2;
+        __map[mid]    = AllocBlock();
+        __start       = iterator(__map[mid], __map + mid);
+        __finish      = __start;
+    }
+
+    void Teardown() noexcept
+    {
+        if (!__map) return;
+        clear();
+        for (size_type i = 0; i < __map_size; ++i)
+            if (__map[i]) FreeBlock(__map[i]);
+        MapTraits::deallocate(__malloc, __map, __map_size);
+        __map      = nullptr;
+        __map_size = 0;
+    }
+
+    void StealFrom(deque &other) noexcept
+    {
+        __map            = other.__map;
+        __map_size       = other.__map_size;
+        __start          = other.__start;
+        __finish         = other.__finish;
+        other.__map      = nullptr;
+        other.__map_size = 0;
+        other.__start    = iterator();
+        other.__finish   = iterator();
+    }
+
+    // Make sure *(finish.node + 1) exists.
+    void ReserveBack()
+    {
+        if (__finish.__node == __map + __map_size - 1) GrowMap(true);
+        T **next = __finish.__node + 1;
+        if (!*next) *next = AllocBlock();
+    }
+    void ReserveFront()
+    {
+        if (__start.__node == __map) GrowMap(false);
+        T **prev = __start.__node - 1;
+        if (!*prev) *prev = AllocBlock();
+    }
+
+    // Return spare edge blocks so ping-pong push/pop does not hoard.
+    void ShrinkBack() noexcept
+    {
+        T **spare = __finish.__node + 1;
+        if (spare < __map + __map_size && *spare) {
+            FreeBlock(*spare);
+            *spare = nullptr;
+        }
+    }
+    void ShrinkFront() noexcept
+    {
+        if (__start.__node > __map && *(__start.__node - 1)) {
+            FreeBlock(*(__start.__node - 1));
+            *(__start.__node - 1) = nullptr;
+        }
+    }
+
+    void GrowMap(bool at_back)
+    {
+        size_type used = size_type(__finish.__node - __start.__node) + 1;
+        size_type want = __map_size * 2;
+        T **fresh      = MapTraits::allocate(__malloc, want);
+        for (size_type i = 0; i < want; ++i) fresh[i] = nullptr;
+        // Recentre the used window, biased away from the growing edge.
+        size_type new_start =
+            (want - used) / 2 + (at_back ? 0 : (want - used) / 4);
+        for (size_type i = 0; i < used; ++i)
+            fresh[new_start + i] = __start.__node[i];
+        difference_type start_off  = __start.__cur - __start.__first;
+        difference_type finish_off = __finish.__cur - __finish.__first;
+        size_type finish_node      = size_type(__finish.__node - __start.__node);
+        MapTraits::deallocate(__malloc, __map, __map_size);
+        __map      = fresh;
+        __map_size = want;
+        __start    = iterator(fresh[new_start] + start_off, fresh + new_start);
+        __finish   = iterator(fresh[new_start + finish_node] + finish_off,
+                              fresh + new_start + finish_node);
+    }
+
+    T **__map            = nullptr;
+    size_type __map_size = 0;
+    iterator __start;
+    iterator __finish;
+    [[no_unique_address]] Alloc __alloc;
+    [[no_unique_address]] MapAlloc __malloc;
+};
+
+template <typename T, typename A>
+bool operator==(const deque<T, A> &a, const deque<T, A> &b)
+{
+    if (a.size() != b.size()) return false;
+    auto ia = a.begin();
+    auto ib = b.begin();
+    for (; ia != a.end(); ++ia, ++ib)
+        if (!(*ia == *ib)) return false;
+    return true;
+}
+
+template <typename T, typename A>
+void swap(deque<T, A> &a, deque<T, A> &b) noexcept
+{
+    a.swap(b);
+}
+
+template <typename T, typename A, typename V>
+typename deque<T, A>::size_type erase(deque<T, A> &d, const V &value)
+{
+    auto it = std::remove(d.begin(), d.end(), value);
+    auto n  = d.end() - it;
+    d.erase(it, d.end());
+    return typename deque<T, A>::size_type(n);
+}
+template <typename T, typename A, typename Pred>
+typename deque<T, A>::size_type erase_if(deque<T, A> &d, Pred pred)
+{
+    auto it = std::remove_if(d.begin(), d.end(), pred);
+    auto n  = d.end() - it;
+    d.erase(it, d.end());
+    return typename deque<T, A>::size_type(n);
+}
+
+} // namespace std
+
+#endif // BOXCXX_DEQUE

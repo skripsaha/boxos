@@ -182,8 +182,15 @@ struct integer_sequence {
 template <size_t... Is>
 using index_sequence = integer_sequence<size_t, Is...>;
 
+// GCC spells the sequence builtin __integer_pack, clang (host tooling,
+// native test harnesses, clangd) spells it __make_integer_seq.
+#if __has_builtin(__make_integer_seq)
+template <class T, T N>
+using make_integer_sequence = __make_integer_seq<integer_sequence, T, N>;
+#else
 template <class T, T N>
 using make_integer_sequence = integer_sequence<T, __integer_pack(N)...>;
+#endif
 
 template <size_t N>
 using make_index_sequence = make_integer_sequence<size_t, N>;

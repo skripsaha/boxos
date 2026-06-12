@@ -423,9 +423,87 @@ struct identity {
     using is_transparent = void;
 };
 
-// hash primary template — specialized by <string>/<string_view> and the
-// scalar specializations that land with unordered containers (Phase 7B).
+// hash primary template — string specializations live in
+// <string>/<string_view>; the scalar set is below.
 template <class T> struct hash;
+
+namespace __hash_impl {
+
+// Mix sourced from splitmix64 — integral identity hashing clusters
+// badly with power-of-two bucket counts.
+constexpr size_t Mix(size_t x) noexcept
+{
+    x ^= x >> 30;
+    x *= 0xbf58476d1ce4e5b9ull;
+    x ^= x >> 27;
+    x *= 0x94d049bb133111ebull;
+    x ^= x >> 31;
+    return x;
+}
+
+template <class T>
+struct ScalarHash {
+    size_t operator()(T v) const noexcept
+    {
+        return Mix(static_cast<size_t>(v));
+    }
+};
+
+} // namespace __hash_impl
+
+template <> struct hash<bool> : __hash_impl::ScalarHash<bool> {};
+template <> struct hash<char> : __hash_impl::ScalarHash<char> {};
+template <> struct hash<signed char> : __hash_impl::ScalarHash<signed char> {};
+template <> struct hash<unsigned char>
+    : __hash_impl::ScalarHash<unsigned char> {};
+template <> struct hash<char8_t> : __hash_impl::ScalarHash<char8_t> {};
+template <> struct hash<char16_t> : __hash_impl::ScalarHash<char16_t> {};
+template <> struct hash<char32_t> : __hash_impl::ScalarHash<char32_t> {};
+template <> struct hash<wchar_t> : __hash_impl::ScalarHash<wchar_t> {};
+template <> struct hash<short> : __hash_impl::ScalarHash<short> {};
+template <> struct hash<unsigned short>
+    : __hash_impl::ScalarHash<unsigned short> {};
+template <> struct hash<int> : __hash_impl::ScalarHash<int> {};
+template <> struct hash<unsigned int> : __hash_impl::ScalarHash<unsigned int> {};
+template <> struct hash<long> : __hash_impl::ScalarHash<long> {};
+template <> struct hash<unsigned long>
+    : __hash_impl::ScalarHash<unsigned long> {};
+template <> struct hash<long long> : __hash_impl::ScalarHash<long long> {};
+template <> struct hash<unsigned long long>
+    : __hash_impl::ScalarHash<unsigned long long> {};
+
+template <class T>
+struct hash<T *> {
+    size_t operator()(T *p) const noexcept
+    {
+        return __hash_impl::Mix(reinterpret_cast<size_t>(p));
+    }
+};
+template <>
+struct hash<decltype(nullptr)> {
+    size_t operator()(decltype(nullptr)) const noexcept { return 0; }
+};
+
+template <>
+struct hash<float> {
+    size_t operator()(float v) const noexcept
+    {
+        if (v == 0.0f) v = 0.0f; // canonicalise -0.0
+        unsigned int bits;
+        __builtin_memcpy(&bits, &v, sizeof(bits));
+        return __hash_impl::Mix(bits);
+    }
+};
+template <>
+struct hash<double> {
+    size_t operator()(double v) const noexcept
+    {
+        if (v == 0.0) v = 0.0;
+        size_t bits;
+        __builtin_memcpy(&bits, &v, sizeof(bits));
+        return __hash_impl::Mix(bits);
+    }
+};
 
 } // namespace std
 

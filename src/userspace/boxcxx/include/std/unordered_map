@@ -1,0 +1,327 @@
+// boxcxx — <unordered_map>
+// unordered_map / unordered_multimap over the chaining hash engine
+// (__bits/hash_table). Conforming bucket semantics; the robin-hood
+// table ships separately as box::flat_hash_map (owner decision).
+#ifndef BOXCXX_UNORDERED_MAP
+#define BOXCXX_UNORDERED_MAP
+
+#include <__bits/hash_table>
+#include <__bits/throw_helpers>
+#include <functional>
+#include <initializer_list>
+#include <tuple>
+#include <utility>
+
+namespace std {
+
+namespace __ht {
+
+template <typename Pair>
+struct SelectFirst {
+    const typename Pair::first_type &operator()(const Pair &p) const noexcept
+    {
+        return p.first;
+    }
+};
+
+} // namespace __ht
+
+template <typename Key, typename T, typename Hash = hash<Key>,
+          typename KeyEq = equal_to<Key>,
+          typename Alloc = allocator<pair<const Key, T>>>
+class unordered_map {
+    using TableT = __ht::Table<Key, pair<const Key, T>,
+                               __ht::SelectFirst<pair<const Key, T>>, Hash,
+                               KeyEq, Alloc>;
+
+public:
+    using key_type        = Key;
+    using mapped_type     = T;
+    using value_type      = pair<const Key, T>;
+    using size_type       = size_t;
+    using difference_type = ptrdiff_t;
+    using hasher          = Hash;
+    using key_equal       = KeyEq;
+    using allocator_type  = Alloc;
+    using iterator        = typename TableT::iterator;
+    using const_iterator  = typename TableT::const_iterator;
+    using local_iterator  = iterator;       // tracked simplification:
+    using const_local_iterator = const_iterator; // whole-table walk
+
+    unordered_map() = default;
+    explicit unordered_map(size_type buckets, const Hash &h = Hash(),
+                           const KeyEq &eq = KeyEq(),
+                           const Alloc &a  = Alloc())
+        : __t(buckets, h, eq, a)
+    {
+    }
+    template <typename It>
+    unordered_map(It first, It last, size_type buckets = 0,
+                  const Hash &h = Hash(), const KeyEq &eq = KeyEq(),
+                  const Alloc &a = Alloc())
+        : __t(buckets, h, eq, a)
+    {
+        insert(first, last);
+    }
+    unordered_map(initializer_list<value_type> il, size_type buckets = 0,
+                  const Hash &h = Hash(), const KeyEq &eq = KeyEq(),
+                  const Alloc &a = Alloc())
+        : __t(buckets, h, eq, a)
+    {
+        insert(il.begin(), il.end());
+    }
+    unordered_map(const unordered_map &) = default;
+    unordered_map(unordered_map &&) noexcept = default;
+    unordered_map &operator=(const unordered_map &) = default;
+    unordered_map &operator=(unordered_map &&) noexcept = default;
+
+    allocator_type get_allocator() const noexcept
+    {
+        return __t.get_allocator();
+    }
+
+    iterator begin() noexcept { return __t.begin(); }
+    const_iterator begin() const noexcept { return __t.begin(); }
+    const_iterator cbegin() const noexcept { return __t.begin(); }
+    iterator end() noexcept { return __t.end(); }
+    const_iterator end() const noexcept { return __t.end(); }
+    const_iterator cend() const noexcept { return __t.end(); }
+
+    [[nodiscard]] bool empty() const noexcept { return __t.empty(); }
+    size_type size() const noexcept { return __t.size(); }
+    size_type max_size() const noexcept { return __t.max_size(); }
+
+    // ── element access ──────────────────────────────────────────────────
+
+    T &operator[](const Key &key) { return try_emplace(key).first->second; }
+    T &operator[](Key &&key)
+    {
+        return try_emplace(std::move(key)).first->second;
+    }
+    T &at(const Key &key)
+    {
+        iterator it = find(key);
+        if (it == end()) boxcxx::ThrowOutOfRange("unordered_map::at");
+        return it->second;
+    }
+    const T &at(const Key &key) const
+    {
+        const_iterator it = find(key);
+        if (it == end()) boxcxx::ThrowOutOfRange("unordered_map::at");
+        return it->second;
+    }
+
+    // ── modifiers ───────────────────────────────────────────────────────
+
+    pair<iterator, bool> insert(const value_type &v)
+    {
+        return __t.EmplaceUnique(v);
+    }
+    pair<iterator, bool> insert(value_type &&v)
+    {
+        return __t.EmplaceUnique(std::move(v));
+    }
+    iterator insert(const_iterator, const value_type &v)
+    {
+        return insert(v).first;
+    }
+    template <typename It>
+    void insert(It first, It last)
+    {
+        for (; first != last; ++first) __t.EmplaceUnique(*first);
+    }
+    void insert(initializer_list<value_type> il)
+    {
+        insert(il.begin(), il.end());
+    }
+    template <typename... Args>
+    pair<iterator, bool> emplace(Args &&...args)
+    {
+        return __t.EmplaceUnique(std::forward<Args>(args)...);
+    }
+    template <typename... Args>
+    pair<iterator, bool> try_emplace(const Key &key, Args &&...args)
+    {
+        iterator hit = find(key);
+        if (hit != end()) return {hit, false};
+        return __t.EmplaceUnique(piecewise_construct, forward_as_tuple(key),
+                                 forward_as_tuple(std::forward<Args>(args)...));
+    }
+    template <typename... Args>
+    pair<iterator, bool> try_emplace(Key &&key, Args &&...args)
+    {
+        iterator hit = find(key);
+        if (hit != end()) return {hit, false};
+        return __t.EmplaceUnique(
+            piecewise_construct, forward_as_tuple(std::move(key)),
+            forward_as_tuple(std::forward<Args>(args)...));
+    }
+    template <typename M>
+    pair<iterator, bool> insert_or_assign(const Key &key, M &&obj)
+    {
+        auto [it, inserted] = try_emplace(key, std::forward<M>(obj));
+        if (!inserted) it->second = std::forward<M>(obj);
+        return {it, inserted};
+    }
+
+    iterator erase(const_iterator where) { return __t.Erase(where); }
+    iterator erase(iterator where) { return __t.Erase(where); }
+    size_type erase(const Key &key) { return __t.EraseKey(key); }
+    void clear() noexcept { __t.clear(); }
+    void swap(unordered_map &other) noexcept { __t.swap(other.__t); }
+
+    // ── lookup ──────────────────────────────────────────────────────────
+
+    iterator find(const Key &key) { return __t.Find(key); }
+    const_iterator find(const Key &key) const
+    {
+        return const_cast<unordered_map *>(this)->__t.Find(key);
+    }
+    size_type count(const Key &key) const
+    {
+        return const_cast<unordered_map *>(this)->__t.Count(key);
+    }
+    bool contains(const Key &key) const { return find(key) != end(); }
+    pair<iterator, iterator> equal_range(const Key &key)
+    {
+        return __t.EqualRange(key);
+    }
+
+    // ── bucket / hash policy ────────────────────────────────────────────
+
+    size_type bucket_count() const noexcept { return __t.bucket_count(); }
+    size_type bucket_size(size_type i) const noexcept
+    {
+        return __t.bucket_size(i);
+    }
+    size_type bucket(const Key &key) const { return __t.bucket(key); }
+    float load_factor() const noexcept { return __t.load_factor(); }
+    float max_load_factor() const noexcept { return __t.max_load_factor(); }
+    void max_load_factor(float lf) noexcept { __t.max_load_factor(lf); }
+    void rehash(size_type n) { __t.Rehash(n ? n : 8); }
+    void reserve(size_type n) { __t.Reserve(n); }
+    hasher hash_function() const { return __t.hash_function(); }
+    key_equal key_eq() const { return __t.key_eq(); }
+
+private:
+    TableT __t;
+};
+
+template <typename Key, typename T, typename Hash = hash<Key>,
+          typename KeyEq = equal_to<Key>,
+          typename Alloc = allocator<pair<const Key, T>>>
+class unordered_multimap {
+    using TableT = __ht::Table<Key, pair<const Key, T>,
+                               __ht::SelectFirst<pair<const Key, T>>, Hash,
+                               KeyEq, Alloc>;
+
+public:
+    using key_type       = Key;
+    using mapped_type    = T;
+    using value_type     = pair<const Key, T>;
+    using size_type      = size_t;
+    using hasher         = Hash;
+    using key_equal      = KeyEq;
+    using allocator_type = Alloc;
+    using iterator       = typename TableT::iterator;
+    using const_iterator = typename TableT::const_iterator;
+
+    unordered_multimap() = default;
+    unordered_multimap(initializer_list<value_type> il)
+    {
+        for (const value_type &v : il) __t.EmplaceMulti(v);
+    }
+    unordered_multimap(const unordered_multimap &) = default;
+    unordered_multimap(unordered_multimap &&) noexcept = default;
+    unordered_multimap &operator=(const unordered_multimap &) = default;
+    unordered_multimap &operator=(unordered_multimap &&) noexcept = default;
+
+    iterator begin() noexcept { return __t.begin(); }
+    const_iterator begin() const noexcept { return __t.begin(); }
+    iterator end() noexcept { return __t.end(); }
+    const_iterator end() const noexcept { return __t.end(); }
+    [[nodiscard]] bool empty() const noexcept { return __t.empty(); }
+    size_type size() const noexcept { return __t.size(); }
+
+    iterator insert(const value_type &v) { return __t.EmplaceMulti(v); }
+    iterator insert(value_type &&v)
+    {
+        return __t.EmplaceMulti(std::move(v));
+    }
+    template <typename... Args>
+    iterator emplace(Args &&...args)
+    {
+        return __t.EmplaceMulti(std::forward<Args>(args)...);
+    }
+    template <typename It>
+    void insert(It first, It last)
+    {
+        for (; first != last; ++first) __t.EmplaceMulti(*first);
+    }
+
+    iterator erase(const_iterator where) { return __t.Erase(where); }
+    size_type erase(const Key &key) { return __t.EraseKey(key); }
+    void clear() noexcept { __t.clear(); }
+    void swap(unordered_multimap &other) noexcept { __t.swap(other.__t); }
+
+    iterator find(const Key &key) { return __t.Find(key); }
+    size_type count(const Key &key) const
+    {
+        return const_cast<unordered_multimap *>(this)->__t.Count(key);
+    }
+    bool contains(const Key &key) const
+    {
+        return const_cast<unordered_multimap *>(this)->__t.Find(key) != end();
+    }
+    pair<iterator, iterator> equal_range(const Key &key)
+    {
+        return __t.EqualRange(key);
+    }
+
+    size_type bucket_count() const noexcept { return __t.bucket_count(); }
+    float load_factor() const noexcept { return __t.load_factor(); }
+    void rehash(size_type n) { __t.Rehash(n ? n : 8); }
+
+private:
+    TableT __t;
+};
+
+template <typename K, typename T, typename H, typename E, typename A>
+bool operator==(const unordered_map<K, T, H, E, A> &a,
+                const unordered_map<K, T, H, E, A> &b)
+{
+    if (a.size() != b.size()) return false;
+    for (const auto &kv : a) {
+        auto hit = b.find(kv.first);
+        if (hit == b.end() || !(hit->second == kv.second)) return false;
+    }
+    return true;
+}
+
+template <typename K, typename T, typename H, typename E, typename A>
+void swap(unordered_map<K, T, H, E, A> &a,
+          unordered_map<K, T, H, E, A> &b) noexcept
+{
+    a.swap(b);
+}
+
+template <typename K, typename T, typename H, typename E, typename A,
+          typename Pred>
+typename unordered_map<K, T, H, E, A>::size_type
+erase_if(unordered_map<K, T, H, E, A> &m, Pred pred)
+{
+    typename unordered_map<K, T, H, E, A>::size_type removed = 0;
+    for (auto it = m.begin(); it != m.end();) {
+        if (pred(*it)) {
+            it = m.erase(it);
+            ++removed;
+        } else {
+            ++it;
+        }
+    }
+    return removed;
+}
+
+} // namespace std
+
+#endif // BOXCXX_UNORDERED_MAP

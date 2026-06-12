@@ -1,0 +1,483 @@
+// boxcxx — <__bits/hash_table>
+// One separate-chaining hash table engine behind the four unordered
+// containers. Owner-approved design: fully conforming bucket semantics
+// (stable node pointers/references across rehash, real bucket API);
+// the robin-hood flat table arrives later as box::flat_hash_map.
+//
+// Buckets are a power-of-two array of singly-linked chain heads; every
+// node caches its full hash (rehash relinks without rehashing keys,
+// chain compares reject on hash before touching KeyEq). Multi-variants
+// insert adjacent to their equal range. erase(it) rescans one chain —
+// O(1) average under the load-factor ceiling.
+#ifndef BOXCXX_BITS_HASH_TABLE
+#define BOXCXX_BITS_HASH_TABLE
+
+#include <__bits/allocator_core>
+#include <__bits/iterator_core>
+#include <cstddef>
+#include <type_traits>
+#include <utility>
+
+namespace std {
+
+namespace __ht {
+
+struct NodeBase {
+    NodeBase *next;
+};
+
+template <typename V>
+struct Node : NodeBase {
+    size_t hash;
+    V value;
+};
+
+template <typename Key, typename Value, typename KeyOfValue, typename Hash,
+          typename KeyEq, typename Alloc>
+class Table {
+    using NodeT = Node<Value>;
+    using NodeAlloc =
+        typename allocator_traits<Alloc>::template rebind_alloc<NodeT>;
+    using NodeTraits = allocator_traits<NodeAlloc>;
+    using PtrAlloc =
+        typename allocator_traits<Alloc>::template rebind_alloc<NodeBase *>;
+    using PtrTraits = allocator_traits<PtrAlloc>;
+
+public:
+    using size_type = size_t;
+
+    template <bool Const>
+    class Iter {
+        using Ref = conditional_t<Const, const Value &, Value &>;
+        using Ptr = conditional_t<Const, const Value *, Value *>;
+
+    public:
+        using iterator_category = forward_iterator_tag;
+        using value_type        = Value;
+        using difference_type   = ptrdiff_t;
+        using reference         = Ref;
+        using pointer           = Ptr;
+
+        Iter() noexcept : __n(nullptr), __t(nullptr) {}
+        Iter(NodeBase *n, const Table *t) noexcept : __n(n), __t(t) {}
+        template <bool C2>
+            requires(Const && !C2)
+        Iter(const Iter<C2> &other) noexcept : __n(other.__n), __t(other.__t)
+        {
+        }
+
+        Ref operator*() const { return static_cast<NodeT *>(__n)->value; }
+        Ptr operator->() const
+        {
+            return __builtin_addressof(static_cast<NodeT *>(__n)->value);
+        }
+        Iter &operator++()
+        {
+            NodeBase *next = __n->next;
+            if (!next) {
+                size_t idx = __t->IndexOf(static_cast<NodeT *>(__n)->hash);
+                next       = __t->NextBucketHead(idx + 1);
+            }
+            __n = next;
+            return *this;
+        }
+        Iter operator++(int)
+        {
+            Iter tmp = *this;
+            ++*this;
+            return tmp;
+        }
+        bool operator==(const Iter &rhs) const noexcept
+        {
+            return __n == rhs.__n;
+        }
+
+        NodeBase *__n;
+        const Table *__t;
+    };
+
+    using iterator       = Iter<false>;
+    using const_iterator = Iter<true>;
+
+    // ── lifecycle ───────────────────────────────────────────────────────
+
+    Table() : Table(0, Hash(), KeyEq(), Alloc()) {}
+    Table(size_type buckets, const Hash &h, const KeyEq &eq, const Alloc &a)
+        : __hash(h), __eq(eq), __alloc(a), __palloc(a)
+    {
+        if (buckets) AllocateBuckets(RoundBuckets(buckets));
+    }
+    Table(const Table &other)
+        : __hash(other.__hash), __eq(other.__eq),
+          __alloc(NodeTraits::select_on_container_copy_construction(
+              other.__alloc)),
+          __palloc(other.__palloc)
+    {
+        CopyFrom(other);
+    }
+    Table(Table &&other) noexcept
+        : __hash(std::move(other.__hash)), __eq(std::move(other.__eq)),
+          __alloc(std::move(other.__alloc)),
+          __palloc(std::move(other.__palloc))
+    {
+        StealFrom(other);
+    }
+    ~Table()
+    {
+        clear();
+        DropBuckets();
+    }
+
+    Table &operator=(const Table &other)
+    {
+        if (this == &other) return *this;
+        clear();
+        __hash = other.__hash;
+        __eq   = other.__eq;
+        CopyFrom(other);
+        return *this;
+    }
+    Table &operator=(Table &&other) noexcept
+    {
+        if (this == &other) return *this;
+        clear();
+        DropBuckets();
+        __hash = std::move(other.__hash);
+        __eq   = std::move(other.__eq);
+        StealFrom(other);
+        return *this;
+    }
+
+    // ── observers ───────────────────────────────────────────────────────
+
+    iterator begin() noexcept { return {NextBucketHead(0), this}; }
+    const_iterator begin() const noexcept
+    {
+        return {const_cast<Table *>(this)->NextBucketHead(0), this};
+    }
+    iterator end() noexcept { return {nullptr, this}; }
+    const_iterator end() const noexcept { return {nullptr, this}; }
+
+    [[nodiscard]] bool empty() const noexcept { return __count == 0; }
+    size_type size() const noexcept { return __count; }
+    size_type max_size() const noexcept
+    {
+        return size_type(-1) / sizeof(NodeT);
+    }
+
+    size_type bucket_count() const noexcept { return __bucket_count; }
+    size_type bucket_size(size_type idx) const noexcept
+    {
+        size_type n = 0;
+        for (NodeBase *cur = __buckets ? __buckets[idx] : nullptr; cur;
+             cur = cur->next)
+            ++n;
+        return n;
+    }
+    template <typename K>
+    size_type bucket(const K &key) const
+    {
+        return IndexOf(__hash(key));
+    }
+    float load_factor() const noexcept
+    {
+        return __bucket_count == 0
+                   ? 0.0f
+                   : static_cast<float>(__count) /
+                         static_cast<float>(__bucket_count);
+    }
+    float max_load_factor() const noexcept { return __max_lf; }
+    void max_load_factor(float lf) noexcept
+    {
+        if (lf > 0.0f) __max_lf = lf;
+    }
+
+    Hash hash_function() const { return __hash; }
+    KeyEq key_eq() const { return __eq; }
+    Alloc get_allocator() const noexcept { return Alloc(__alloc); }
+
+    // ── lookup ──────────────────────────────────────────────────────────
+
+    template <typename K>
+    iterator Find(const K &key)
+    {
+        if (__count == 0) return end();
+        size_t h = __hash(key);
+        for (NodeBase *cur = __buckets[IndexOf(h)]; cur; cur = cur->next) {
+            NodeT *n = static_cast<NodeT *>(cur);
+            if (n->hash == h && __eq(KeyOfValue{}(n->value), key))
+                return {cur, this};
+        }
+        return end();
+    }
+    template <typename K>
+    size_type Count(const K &key)
+    {
+        size_type n = 0;
+        iterator it = Find(key);
+        while (it.__n &&
+               __eq(KeyOfValue{}(static_cast<NodeT *>(it.__n)->value), key)) {
+            ++n;
+            ++it;
+        }
+        return n;
+    }
+    // Multi equal range: nodes with equal keys are kept adjacent.
+    template <typename K>
+    pair<iterator, iterator> EqualRange(const K &key)
+    {
+        iterator first = Find(key);
+        if (!first.__n) return {end(), end()};
+        iterator last = first;
+        while (last.__n &&
+               __eq(KeyOfValue{}(static_cast<NodeT *>(last.__n)->value), key))
+            ++last;
+        return {first, last};
+    }
+
+    // ── modifiers ───────────────────────────────────────────────────────
+
+    template <typename... Args>
+    pair<iterator, bool> EmplaceUnique(Args &&...args)
+    {
+        NodeT *n = MakeNode(std::forward<Args>(args)...);
+        size_t h = __hash(KeyOfValue{}(n->value));
+        n->hash  = h;
+        if (__bucket_count) {
+            for (NodeBase *cur = __buckets[IndexOf(h)]; cur;
+                 cur = cur->next) {
+                NodeT *e = static_cast<NodeT *>(cur);
+                if (e->hash == h &&
+                    __eq(KeyOfValue{}(e->value), KeyOfValue{}(n->value))) {
+                    DropNode(n);
+                    return {iterator{cur, this}, false};
+                }
+            }
+        }
+        MaybeGrow();
+        size_t idx          = IndexOf(h);
+        n->next             = __buckets[idx];
+        __buckets[idx]      = n;
+        ++__count;
+        return {iterator{n, this}, true};
+    }
+
+    template <typename... Args>
+    iterator EmplaceMulti(Args &&...args)
+    {
+        NodeT *n = MakeNode(std::forward<Args>(args)...);
+        size_t h = __hash(KeyOfValue{}(n->value));
+        n->hash  = h;
+        MaybeGrow();
+        size_t idx = IndexOf(h);
+        // Keep equal keys adjacent: hook in front of the first equal
+        // node when one exists, else at the chain head.
+        NodeBase *prev = nullptr;
+        for (NodeBase *cur = __buckets[idx]; cur; cur = cur->next) {
+            NodeT *e = static_cast<NodeT *>(cur);
+            if (e->hash == h &&
+                __eq(KeyOfValue{}(e->value), KeyOfValue{}(n->value)))
+                break;
+            prev = cur;
+        }
+        if (prev) {
+            n->next    = prev->next;
+            prev->next = n;
+        } else {
+            n->next        = __buckets[idx];
+            __buckets[idx] = n;
+        }
+        ++__count;
+        return {n, this};
+    }
+
+    iterator Erase(const_iterator where)
+    {
+        NodeT *z    = static_cast<NodeT *>(where.__n);
+        iterator nx{where.__n, this};
+        ++nx;
+        size_t idx     = IndexOf(z->hash);
+        NodeBase **ref = &__buckets[idx];
+        while (*ref != z) ref = &(*ref)->next;
+        *ref = z->next;
+        DropNode(z);
+        --__count;
+        return nx;
+    }
+
+    template <typename K>
+    size_type EraseKey(const K &key)
+    {
+        size_type removed = 0;
+        iterator it       = Find(key);
+        while (it.__n &&
+               __eq(KeyOfValue{}(static_cast<NodeT *>(it.__n)->value), key)) {
+            it = Erase(it);
+            ++removed;
+        }
+        return removed;
+    }
+
+    void clear() noexcept
+    {
+        for (size_type i = 0; i < __bucket_count; ++i) {
+            NodeBase *cur = __buckets[i];
+            while (cur) {
+                NodeBase *next = cur->next;
+                DropNode(static_cast<NodeT *>(cur));
+                cur = next;
+            }
+            __buckets[i] = nullptr;
+        }
+        __count = 0;
+    }
+
+    void Rehash(size_type want_buckets)
+    {
+        size_type lf_floor = static_cast<size_type>(
+            static_cast<float>(__count) / __max_lf) + 1;
+        size_type target = RoundBuckets(
+            want_buckets > lf_floor ? want_buckets : lf_floor);
+        if (target == __bucket_count && __buckets) return;
+
+        NodeBase **old        = __buckets;
+        size_type old_buckets = __bucket_count;
+        AllocateBuckets(target);
+        for (size_type i = 0; i < old_buckets; ++i) {
+            NodeBase *cur = old[i];
+            while (cur) {
+                NodeBase *next = cur->next;
+                size_t idx = IndexOf(static_cast<NodeT *>(cur)->hash);
+                cur->next      = __buckets[idx];
+                __buckets[idx] = cur;
+                cur            = next;
+            }
+        }
+        if (old) PtrTraits::deallocate(__palloc, old, old_buckets);
+    }
+
+    void Reserve(size_type want)
+    {
+        Rehash(static_cast<size_type>(static_cast<float>(want) / __max_lf) +
+               1);
+    }
+
+    void swap(Table &other) noexcept
+    {
+        auto sw = [](auto &a, auto &b) {
+            auto t = a;
+            a      = b;
+            b      = t;
+        };
+        sw(__buckets, other.__buckets);
+        sw(__bucket_count, other.__bucket_count);
+        sw(__count, other.__count);
+        sw(__max_lf, other.__max_lf);
+        Hash ht      = __hash;
+        __hash       = other.__hash;
+        other.__hash = ht;
+        KeyEq et     = __eq;
+        __eq         = other.__eq;
+        other.__eq   = et;
+    }
+
+    size_t IndexOf(size_t hash) const noexcept
+    {
+        return hash & (__bucket_count - 1);
+    }
+    NodeBase *NextBucketHead(size_t from) const noexcept
+    {
+        for (size_t i = from; i < __bucket_count; ++i)
+            if (__buckets[i]) return __buckets[i];
+        return nullptr;
+    }
+
+private:
+    static size_type RoundBuckets(size_type want) noexcept
+    {
+        size_type n = 8;
+        while (n < want) n <<= 1;
+        return n;
+    }
+
+    void AllocateBuckets(size_type n)
+    {
+        __buckets = PtrTraits::allocate(__palloc, n);
+        for (size_type i = 0; i < n; ++i) __buckets[i] = nullptr;
+        __bucket_count = n;
+    }
+
+    void DropBuckets() noexcept
+    {
+        if (__buckets)
+            PtrTraits::deallocate(__palloc, __buckets, __bucket_count);
+        __buckets      = nullptr;
+        __bucket_count = 0;
+    }
+
+    void MaybeGrow()
+    {
+        if (!__buckets) {
+            AllocateBuckets(8);
+            return;
+        }
+        if (static_cast<float>(__count + 1) >
+            __max_lf * static_cast<float>(__bucket_count))
+            Rehash(__bucket_count * 2);
+    }
+
+    template <typename... Args>
+    NodeT *MakeNode(Args &&...args)
+    {
+        NodeT *n = NodeTraits::allocate(__alloc, 1);
+        try {
+            NodeTraits::construct(__alloc, __builtin_addressof(n->value),
+                                  std::forward<Args>(args)...);
+        } catch (...) {
+            NodeTraits::deallocate(__alloc, n, 1);
+            throw;
+        }
+        return n;
+    }
+
+    void DropNode(NodeT *n) noexcept
+    {
+        NodeTraits::destroy(__alloc, __builtin_addressof(n->value));
+        NodeTraits::deallocate(__alloc, n, 1);
+    }
+
+    void CopyFrom(const Table &other)
+    {
+        if (other.__count == 0) return;
+        AllocateBuckets(other.__bucket_count);
+        __max_lf = other.__max_lf;
+        for (const_iterator it = other.begin(); it != other.end(); ++it)
+            EmplaceMulti(*it);
+    }
+
+    void StealFrom(Table &other) noexcept
+    {
+        __buckets            = other.__buckets;
+        __bucket_count       = other.__bucket_count;
+        __count              = other.__count;
+        __max_lf             = other.__max_lf;
+        other.__buckets      = nullptr;
+        other.__bucket_count = 0;
+        other.__count        = 0;
+    }
+
+    NodeBase **__buckets    = nullptr;
+    size_type __bucket_count = 0;
+    size_type __count        = 0;
+    float __max_lf           = 1.0f;
+    [[no_unique_address]] Hash __hash;
+    [[no_unique_address]] KeyEq __eq;
+    [[no_unique_address]] NodeAlloc __alloc;
+    [[no_unique_address]] PtrAlloc __palloc;
+};
+
+} // namespace __ht
+
+} // namespace std
+
+#endif // BOXCXX_BITS_HASH_TABLE
