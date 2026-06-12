@@ -1,0 +1,354 @@
+// boxcxx — <mutex>
+//
+// std::mutex family over boxlib's umutex_t (box/sync.h) — the single
+// userspace lock primitive (TAS + PAUSE backoff + yield). One thread
+// per cabin today, so contention only materialises after the strands
+// epic; the API contract is already the multi-thread one.
+//
+// recursive_mutex ownership identity = __boxcxx_thread_id(): the
+// address of a thread_local anchor (src/runtime/mutex.cpp). Unique per
+// thread within a cabin, and automatically correct once strands land.
+// Mutexes are cabin-private — sharing one across cabins through a Bay
+// is outside the std contract (same stance as every libstdc++ build
+// without process-shared pthreads).
+//
+// Documented deviations until later phases:
+//   - try_lock_for/until + timed_mutex variants need <chrono> (Ф11).
+//   - Conforming implementations throw std::system_error on lock-
+//     protocol violations; boxcxx panics until <system_error> lands
+//     (Ф7A). The violating call sites are programming errors either way.
+#ifndef BOXCXX_MUTEX
+#define BOXCXX_MUTEX
+
+#include "box/sync.h"
+
+#include <atomic>
+#include <functional>
+#include <tuple>
+#include <type_traits>
+#include <utility>
+
+extern "C" void *__boxcxx_thread_id() noexcept;
+
+namespace boxcxx {
+[[noreturn]] void Panic(const char *msg);
+}
+
+namespace std {
+
+// ── mutex / recursive_mutex ─────────────────────────────────────────────
+
+class mutex {
+public:
+    constexpr mutex() noexcept : __m{0} {}
+    ~mutex() = default;
+    mutex(const mutex &) = delete;
+    mutex &operator=(const mutex &) = delete;
+
+    void lock() { umutex_lock(&__m); }
+    bool try_lock() noexcept { return umutex_trylock(&__m); }
+    void unlock() { umutex_unlock(&__m); }
+
+    using native_handle_type = umutex_t *;
+    native_handle_type native_handle() noexcept { return &__m; }
+
+private:
+    umutex_t __m;
+};
+
+class recursive_mutex {
+public:
+    recursive_mutex() noexcept : __m{0} {}
+    ~recursive_mutex() = default;
+    recursive_mutex(const recursive_mutex &) = delete;
+    recursive_mutex &operator=(const recursive_mutex &) = delete;
+
+    void lock()
+    {
+        void *self = __boxcxx_thread_id();
+        if (__owner.load(memory_order_relaxed) == self) {
+            ++__depth;
+            return;
+        }
+        umutex_lock(&__m);
+        __owner.store(self, memory_order_relaxed);
+        __depth = 1;
+    }
+
+    bool try_lock() noexcept
+    {
+        void *self = __boxcxx_thread_id();
+        if (__owner.load(memory_order_relaxed) == self) {
+            ++__depth;
+            return true;
+        }
+        if (!umutex_trylock(&__m)) return false;
+        __owner.store(self, memory_order_relaxed);
+        __depth = 1;
+        return true;
+    }
+
+    void unlock()
+    {
+        if (__owner.load(memory_order_relaxed) != __boxcxx_thread_id())
+            boxcxx::Panic("recursive_mutex::unlock: not owner");
+        if (--__depth == 0) {
+            __owner.store(nullptr, memory_order_relaxed);
+            umutex_unlock(&__m);
+        }
+    }
+
+    using native_handle_type = umutex_t *;
+    native_handle_type native_handle() noexcept { return &__m; }
+
+private:
+    umutex_t __m;
+    atomic<void *> __owner{nullptr};
+    unsigned __depth = 0;
+};
+
+// ── lock tags ───────────────────────────────────────────────────────────
+
+struct defer_lock_t {
+    explicit defer_lock_t() = default;
+};
+struct try_to_lock_t {
+    explicit try_to_lock_t() = default;
+};
+struct adopt_lock_t {
+    explicit adopt_lock_t() = default;
+};
+
+inline constexpr defer_lock_t  defer_lock{};
+inline constexpr try_to_lock_t try_to_lock{};
+inline constexpr adopt_lock_t  adopt_lock{};
+
+// ── lock_guard ──────────────────────────────────────────────────────────
+
+template <typename Mutex>
+class lock_guard {
+public:
+    using mutex_type = Mutex;
+
+    explicit lock_guard(mutex_type &m) : __m(m) { __m.lock(); }
+    lock_guard(mutex_type &m, adopt_lock_t) noexcept : __m(m) {}
+    ~lock_guard() { __m.unlock(); }
+
+    lock_guard(const lock_guard &) = delete;
+    lock_guard &operator=(const lock_guard &) = delete;
+
+private:
+    mutex_type &__m;
+};
+
+// ── unique_lock ─────────────────────────────────────────────────────────
+
+template <typename Mutex>
+class unique_lock {
+public:
+    using mutex_type = Mutex;
+
+    unique_lock() noexcept : __m(nullptr), __owns(false) {}
+    explicit unique_lock(mutex_type &m) : __m(&m), __owns(false)
+    {
+        __m->lock();
+        __owns = true;
+    }
+    unique_lock(mutex_type &m, defer_lock_t) noexcept
+        : __m(&m), __owns(false)
+    {
+    }
+    unique_lock(mutex_type &m, try_to_lock_t)
+        : __m(&m), __owns(m.try_lock())
+    {
+    }
+    unique_lock(mutex_type &m, adopt_lock_t) : __m(&m), __owns(true) {}
+
+    ~unique_lock()
+    {
+        if (__owns) __m->unlock();
+    }
+
+    unique_lock(const unique_lock &) = delete;
+    unique_lock &operator=(const unique_lock &) = delete;
+
+    unique_lock(unique_lock &&other) noexcept
+        : __m(other.__m), __owns(other.__owns)
+    {
+        other.__m    = nullptr;
+        other.__owns = false;
+    }
+    unique_lock &operator=(unique_lock &&other) noexcept
+    {
+        if (__owns) __m->unlock();
+        __m          = other.__m;
+        __owns       = other.__owns;
+        other.__m    = nullptr;
+        other.__owns = false;
+        return *this;
+    }
+
+    void lock()
+    {
+        if (!__m) boxcxx::Panic("unique_lock::lock: no mutex");
+        if (__owns) boxcxx::Panic("unique_lock::lock: already owns");
+        __m->lock();
+        __owns = true;
+    }
+
+    bool try_lock()
+    {
+        if (!__m) boxcxx::Panic("unique_lock::try_lock: no mutex");
+        if (__owns) boxcxx::Panic("unique_lock::try_lock: already owns");
+        __owns = __m->try_lock();
+        return __owns;
+    }
+
+    void unlock()
+    {
+        if (!__owns) boxcxx::Panic("unique_lock::unlock: does not own");
+        __m->unlock();
+        __owns = false;
+    }
+
+    void swap(unique_lock &other) noexcept
+    {
+        mutex_type *m = __m;
+        bool owns     = __owns;
+        __m           = other.__m;
+        __owns        = other.__owns;
+        other.__m     = m;
+        other.__owns  = owns;
+    }
+
+    mutex_type *release() noexcept
+    {
+        mutex_type *m = __m;
+        __m           = nullptr;
+        __owns        = false;
+        return m;
+    }
+
+    [[nodiscard]] bool owns_lock() const noexcept { return __owns; }
+    explicit operator bool() const noexcept { return __owns; }
+    mutex_type *mutex() const noexcept { return __m; }
+
+private:
+    mutex_type *__m;
+    bool __owns;
+};
+
+template <typename Mutex>
+inline void swap(unique_lock<Mutex> &a, unique_lock<Mutex> &b) noexcept
+{
+    a.swap(b);
+}
+
+// ── lock algorithms ([thread.lock.algorithm]) ───────────────────────────
+
+namespace __mutex_impl {
+
+inline int TryLockFrom(int) noexcept
+{
+    return -1;
+}
+
+template <typename L1, typename... Ls>
+int TryLockFrom(int idx, L1 &l1, Ls &...rest)
+{
+    if (!l1.try_lock()) return idx;
+    int failed = TryLockFrom(idx + 1, rest...);
+    if (failed != -1) l1.unlock();
+    return failed;
+}
+
+} // namespace __mutex_impl
+
+// Returns -1 on success, else the 0-based index of the lock that
+// failed; every previously acquired lock is released again.
+template <typename L1, typename L2, typename... Ls>
+int try_lock(L1 &l1, L2 &l2, Ls &...rest)
+{
+    return __mutex_impl::TryLockFrom(0, l1, l2, rest...);
+}
+
+// Deadlock-free multi-lock: block on the first, try the rest; on any
+// failure release everything and retry — no hold-and-wait, so two
+// callers locking overlapping sets in any order cannot deadlock.
+template <typename L1, typename L2, typename... Ls>
+void lock(L1 &l1, L2 &l2, Ls &...rest)
+{
+    for (;;) {
+        l1.lock();
+        int failed = __mutex_impl::TryLockFrom(1, l2, rest...);
+        if (failed == -1) return;
+        l1.unlock();
+        yield();
+    }
+}
+
+// ── scoped_lock ─────────────────────────────────────────────────────────
+
+template <typename... Mutexes>
+class scoped_lock {
+public:
+    explicit scoped_lock(Mutexes &...ms) : __ms(ms...)
+    {
+        if constexpr (sizeof...(Mutexes) == 1)
+            (ms.lock(), ...);
+        else if constexpr (sizeof...(Mutexes) > 1)
+            std::lock(ms...);
+    }
+    explicit scoped_lock(adopt_lock_t, Mutexes &...ms) : __ms(ms...) {}
+
+    ~scoped_lock()
+    {
+        apply([](Mutexes &...ms) { (ms.unlock(), ...); }, __ms);
+    }
+
+    scoped_lock(const scoped_lock &) = delete;
+    scoped_lock &operator=(const scoped_lock &) = delete;
+
+private:
+    tuple<Mutexes &...> __ms;
+};
+
+template <>
+class scoped_lock<> {
+public:
+    explicit scoped_lock() = default;
+    explicit scoped_lock(adopt_lock_t) {}
+    scoped_lock(const scoped_lock &) = delete;
+    scoped_lock &operator=(const scoped_lock &) = delete;
+};
+
+// ── call_once ([thread.once]) ───────────────────────────────────────────
+
+struct once_flag {
+    constexpr once_flag() noexcept = default;
+    once_flag(const once_flag &) = delete;
+    once_flag &operator=(const once_flag &) = delete;
+
+private:
+    mutex __m;
+    atomic<bool> __done{false};
+
+    template <typename Callable, typename... Args>
+    friend void call_once(once_flag &flag, Callable &&f, Args &&...args);
+};
+
+// An invocation that exits via exception leaves the flag passive — the
+// next call_once runs its callable ([thread.once.callonce]).
+template <typename Callable, typename... Args>
+void call_once(once_flag &flag, Callable &&f, Args &&...args)
+{
+    if (flag.__done.load(memory_order_acquire)) return;
+    lock_guard<mutex> guard(flag.__m);
+    if (flag.__done.load(memory_order_relaxed)) return;
+    invoke(forward<Callable>(f), forward<Args>(args)...);
+    flag.__done.store(true, memory_order_release);
+}
+
+} // namespace std
+
+#endif // BOXCXX_MUTEX

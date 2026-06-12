@@ -7,7 +7,6 @@
 #include "box/cpu.h"
 #include "box/string.h"
 #include "box/error.h"
-#include "arch/x86_64/cpu_wait.h"
 #include "boxos_decks.h"  /* DECK_SYSTEM + SYSTEM_OP_TOUCH_* — single source */
 
 TouchTagPair touch_intern(const char *tag)

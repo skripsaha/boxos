@@ -2,7 +2,6 @@
 #include "box/core/notify.h"
 #include "box/system.h"
 #include "box/cpu.h"
-#include "../arch/x86_64/cpu_wait.h"
 
 bool result_available(void) {
     ResultRing* rr = result_ring();
