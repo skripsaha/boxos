@@ -16,8 +16,11 @@
 
 #include "box/print.h"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
+#include <iterator>
+#include <ranges>
 #include <cstddef>
 #include <cstdint>
 #include <mutex>
@@ -907,6 +910,147 @@ void Phase7a()
     printf("[CXX] PASS phase7a: string/sv/vector/array/span + stdexcept/system_error\n");
 }
 
+// ── phase7b fixtures: algorithm + iterator + ranges-core ───────────────
+
+static_assert(std::random_access_iterator<int *>);
+static_assert(std::contiguous_iterator<int *>);
+static_assert(std::bidirectional_iterator<std::reverse_iterator<int *>>);
+static_assert(std::output_iterator<int *, int>);
+static_assert(std::ranges::contiguous_range<std::vector<int>>);
+static_assert(std::ranges::contiguous_range<int[5]>);
+static_assert(std::ranges::borrowed_range<std::string_view>);
+static_assert(std::ranges::view<std::span<int>>);
+static_assert(!std::ranges::view<std::vector<int>>);
+static_assert(std::is_same_v<std::ranges::iterator_t<std::vector<int>>, int *>);
+
+void Phase7b()
+{
+    // introsort + binary search over a worst-ish mix
+    std::vector<int> v;
+    for (int i = 0; i < 200; ++i) v.push_back((i * 37) % 101);
+    std::sort(v.begin(), v.end());
+    Check(std::is_sorted(v.begin(), v.end()), "phase7b sort");
+    Check(std::binary_search(v.begin(), v.end(), v[100]), "phase7b bsearch");
+    auto [lo, hi] = std::equal_range(v.begin(), v.end(), v[50]);
+    Check(lo != hi && std::all_of(lo, hi, [&](int x) { return x == *lo; }),
+          "phase7b equal_range");
+
+    // stable_sort keeps equal-key order (buffered path)
+    std::vector<std::pair<int, int>> sp;
+    for (int i = 0; i < 64; ++i) sp.push_back({i % 4, i});
+    std::stable_sort(sp.begin(), sp.end(),
+                     [](const auto &a, const auto &b) { return a.first < b.first; });
+    bool stable = true;
+    for (size_t i = 1; i < sp.size(); ++i)
+        if (sp[i - 1].first == sp[i].first && sp[i - 1].second > sp[i].second)
+            stable = false;
+    Check(stable && std::is_sorted(sp.begin(), sp.end(),
+                                   [](const auto &a, const auto &b) {
+                                       return a.first < b.first;
+                                   }),
+          "phase7b stable_sort stability");
+
+    // heap family
+    std::vector<int> h{3, 1, 4, 1, 5, 9, 2, 6};
+    std::make_heap(h.begin(), h.end());
+    Check(std::is_heap(h.begin(), h.end()), "phase7b make_heap");
+    h.push_back(42);
+    std::push_heap(h.begin(), h.end());
+    Check(h.front() == 42, "phase7b push_heap");
+    std::pop_heap(h.begin(), h.end());
+    h.pop_back();
+    std::sort_heap(h.begin(), h.end());
+    Check(std::is_sorted(h.begin(), h.end()), "phase7b sort_heap");
+
+    // nth_element + partial_sort
+    std::vector<int> ne;
+    for (int i = 0; i < 50; ++i) ne.push_back((i * 17) % 53);
+    std::nth_element(ne.begin(), ne.begin() + 10, ne.end());
+    bool nth_ok = true;
+    for (int i = 0; i < 10; ++i)
+        if (ne[i] > ne[10]) nth_ok = false;
+    for (size_t i = 11; i < ne.size(); ++i)
+        if (ne[i] < ne[10]) nth_ok = false;
+    Check(nth_ok, "phase7b nth_element");
+    std::partial_sort(ne.begin(), ne.begin() + 5, ne.end());
+    Check(std::is_sorted(ne.begin(), ne.begin() + 5) &&
+              ne[4] <= *std::min_element(ne.begin() + 5, ne.end()),
+          "phase7b partial_sort");
+
+    // rotate / remove / unique / reverse
+    std::vector<int> r{1, 2, 3, 4, 5};
+    std::rotate(r.begin(), r.begin() + 2, r.end());
+    Check(r == std::vector<int>{3, 4, 5, 1, 2}, "phase7b rotate");
+    std::vector<int> dup{1, 1, 2, 2, 2, 3, 1};
+    dup.erase(std::unique(dup.begin(), dup.end()), dup.end());
+    Check(dup == std::vector<int>{1, 2, 3, 1}, "phase7b unique+erase");
+    dup.erase(std::remove(dup.begin(), dup.end(), 1), dup.end());
+    Check(dup == std::vector<int>{2, 3}, "phase7b remove+erase");
+    std::reverse(r.begin(), r.end());
+    Check(r == std::vector<int>{2, 1, 5, 4, 3}, "phase7b reverse");
+
+    // set operations through back_inserter
+    std::vector<int> sa{1, 2, 3, 5}, sb{2, 3, 4}, out;
+    std::set_union(sa.begin(), sa.end(), sb.begin(), sb.end(),
+                   std::back_inserter(out));
+    Check(out == std::vector<int>{1, 2, 3, 4, 5}, "phase7b set_union");
+    out.clear();
+    std::set_intersection(sa.begin(), sa.end(), sb.begin(), sb.end(),
+                          std::back_inserter(out));
+    Check(out == std::vector<int>{2, 3}, "phase7b set_intersection");
+    Check(std::includes(sa.begin(), sa.end(), out.begin(), out.end()),
+          "phase7b includes");
+
+    // move_iterator drains the source strings
+    std::vector<std::string> msrc{"alpha", "beta"};
+    std::vector<std::string> mdst;
+    std::copy(std::make_move_iterator(msrc.begin()),
+              std::make_move_iterator(msrc.end()), std::back_inserter(mdst));
+    Check(mdst[1] == "beta" && msrc[0].empty(), "phase7b move_iterator");
+
+    // min/max/clamp + lexicographic three-way
+    Check(std::clamp(7, 1, 5) == 5 && std::max({1, 9, 4}) == 9 &&
+              std::min(3, 2) == 2,
+          "phase7b min/max/clamp");
+    Check(std::lexicographical_compare_three_way(sa.begin(), sa.end(),
+                                                 sb.begin(), sb.end()) < 0,
+          "phase7b lex three-way");
+
+    // vector::insert rotate path (range + count forms)
+    std::vector<int> vi{1, 2, 7, 8};
+    int mid[] = {3, 4, 5, 6};
+    vi.insert(vi.begin() + 2, mid, mid + 4);
+    Check(vi == std::vector<int>{1, 2, 3, 4, 5, 6, 7, 8},
+          "phase7b vector insert range");
+    vi.insert(vi.begin(), 2, 0);
+    Check(vi.size() == 10 && vi[0] == 0 && vi[1] == 0 && vi[2] == 1,
+          "phase7b vector insert count");
+
+    // string::replace single-pass paths: shrink, grow-in-place, realloc
+    std::string sr = "0123456789";
+    sr.replace(2, 5, "XY", 2); // shrink
+    Check(sr == "01XY789", "phase7b replace shrink");
+    sr.replace(2, 2, "ABCD", 4); // grow within capacity
+    Check(sr == "01ABCD789", "phase7b replace grow");
+    std::string big(30, 'q');
+    sr.replace(0, 2, big.data(), 30); // forces reallocation
+    Check(sr.size() == 37 && sr[29] == 'q' && sr.ends_with("ABCD789"),
+          "phase7b replace realloc");
+    std::string al = "abcdef";
+    al.replace(1, 2, al.data() + 3, 3); // self-alias with n != erased
+    Check(al == "adefdef", "phase7b replace self-alias");
+
+    // ranges CPOs over containers and C-arrays
+    int carr[3] = {7, 8, 9};
+    Check(std::ranges::size(carr) == 3 && *std::ranges::begin(carr) == 7,
+          "phase7b ranges CPO array");
+    Check(std::ranges::size(vi) == vi.size() &&
+              std::ranges::data(vi) == vi.data() && !std::ranges::empty(vi),
+          "phase7b ranges CPO vector");
+
+    printf("[CXX] PASS phase7b: algorithm/iterator/ranges-core\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -922,6 +1066,7 @@ int main()
     Phase5();
     Phase6();
     Phase7a();
+    Phase7b();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
