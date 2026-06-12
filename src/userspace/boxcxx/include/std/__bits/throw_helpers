@@ -1,0 +1,23 @@
+// boxcxx — <__bits/throw_helpers>
+// Out-of-line throwers (src/runtime/stdexcept.cpp). Containers and
+// strings call these instead of including <stdexcept> — that header
+// includes <string>, and the cycle has to break somewhere. Same scheme
+// libstdc++ uses (__throw_out_of_range et al).
+#ifndef BOXCXX_BITS_THROW_HELPERS
+#define BOXCXX_BITS_THROW_HELPERS
+
+namespace boxcxx {
+
+[[noreturn]] void ThrowInvalidArgument(const char *what);
+[[noreturn]] void ThrowDomainError(const char *what);
+[[noreturn]] void ThrowLengthError(const char *what);
+[[noreturn]] void ThrowOutOfRange(const char *what);
+[[noreturn]] void ThrowRangeError(const char *what);
+[[noreturn]] void ThrowOverflowError(const char *what);
+[[noreturn]] void ThrowUnderflowError(const char *what);
+[[noreturn]] void ThrowLogicError(const char *what);
+[[noreturn]] void ThrowRuntimeError(const char *what);
+
+} // namespace boxcxx
+
+#endif // BOXCXX_BITS_THROW_HELPERS

@@ -12,11 +12,11 @@
 // is outside the std contract (same stance as every libstdc++ build
 // without process-shared pthreads).
 //
-// Documented deviations until later phases:
-//   - try_lock_for/until + timed_mutex variants need <chrono> (Ф11).
-//   - Conforming implementations throw std::system_error on lock-
-//     protocol violations; boxcxx panics until <system_error> lands
-//     (Ф7A). The violating call sites are programming errors either way.
+// unique_lock protocol violations throw std::system_error with the
+// std-mandated errc codes. recursive_mutex::unlock by a non-owner is UB
+// per the standard — boxcxx panics there as a diagnostic.
+// Documented deviation: try_lock_for/until + timed_mutex variants need
+// <chrono> (Ф11).
 #ifndef BOXCXX_MUTEX
 #define BOXCXX_MUTEX
 
@@ -24,6 +24,7 @@
 
 #include <atomic>
 #include <functional>
+#include <system_error>
 #include <tuple>
 #include <type_traits>
 #include <utility>
@@ -190,23 +191,35 @@ public:
 
     void lock()
     {
-        if (!__m) boxcxx::Panic("unique_lock::lock: no mutex");
-        if (__owns) boxcxx::Panic("unique_lock::lock: already owns");
+        if (!__m)
+            throw system_error(make_error_code(errc::operation_not_permitted),
+                               "unique_lock::lock: no mutex");
+        if (__owns)
+            throw system_error(
+                make_error_code(errc::resource_deadlock_would_occur),
+                "unique_lock::lock");
         __m->lock();
         __owns = true;
     }
 
     bool try_lock()
     {
-        if (!__m) boxcxx::Panic("unique_lock::try_lock: no mutex");
-        if (__owns) boxcxx::Panic("unique_lock::try_lock: already owns");
+        if (!__m)
+            throw system_error(make_error_code(errc::operation_not_permitted),
+                               "unique_lock::try_lock: no mutex");
+        if (__owns)
+            throw system_error(
+                make_error_code(errc::resource_deadlock_would_occur),
+                "unique_lock::try_lock");
         __owns = __m->try_lock();
         return __owns;
     }
 
     void unlock()
     {
-        if (!__owns) boxcxx::Panic("unique_lock::unlock: does not own");
+        if (!__owns)
+            throw system_error(make_error_code(errc::operation_not_permitted),
+                               "unique_lock::unlock: does not own");
         __m->unlock();
         __owns = false;
     }

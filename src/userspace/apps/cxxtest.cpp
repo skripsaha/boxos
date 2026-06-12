@@ -16,6 +16,7 @@
 
 #include "box/print.h"
 
+#include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -23,8 +24,14 @@
 #include <new>
 #include <exception>
 #include <initializer_list>
+#include <span>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <system_error>
 #include <typeinfo>
 #include <unwind.h>
+#include <vector>
 
 namespace {
 
@@ -721,6 +728,185 @@ void Phase6()
     printf("[CXX] PASS phase6: atomic+mutex (16B cas/lock-pool/ref/wait + locks)\n");
 }
 
+// ── phase7a fixtures: strings + containers + exceptions ────────────────
+
+using namespace std::literals;
+
+static_assert("hello"sv.find("ll") == 2);
+static_assert("hello"sv.rfind('l') == 3);
+static_assert("hello"sv.substr(1, 3) == "ell"sv);
+static_assert("hello"sv.starts_with("he") && "hello"sv.ends_with("lo"));
+static_assert(("abc"sv <=> "abd"sv) < 0);
+static_assert(std::array{1, 2, 3}.size() == 3);
+static_assert(std::get<2>(std::array{1, 2, 3}) == 3);
+static_assert((std::array{1, 2} <=> std::array{1, 3}) < 0);
+
+struct MoveProbe {
+    int *dtors;
+    explicit MoveProbe(int *d) : dtors(d) {}
+    MoveProbe(MoveProbe &&o) noexcept : dtors(o.dtors) { o.dtors = nullptr; }
+    MoveProbe(const MoveProbe &) = default;
+    MoveProbe &operator=(MoveProbe &&o) noexcept
+    {
+        dtors   = o.dtors;
+        o.dtors = nullptr;
+        return *this;
+    }
+    ~MoveProbe()
+    {
+        if (dtors) (*dtors)++;
+    }
+};
+
+void Phase7a()
+{
+    // ── string: SSO boundary and heap migration ─────────────────────────
+    std::string s(15, 'x');
+    const char *obj = reinterpret_cast<const char *>(&s);
+    Check(s.capacity() == 15 && s.size() == 15, "phase7a sso capacity");
+    Check(s.data() >= obj && s.data() < obj + sizeof(s), "phase7a sso inline");
+    s.push_back('y');
+    Check(s.capacity() >= 16 &&
+              !(s.data() >= obj && s.data() < obj + sizeof(s)),
+          "phase7a sso→heap migration");
+    Check(s.size() == 16 && s[14] == 'x' && s.back() == 'y',
+          "phase7a content survives migration");
+
+    // ── string: editing surface ─────────────────────────────────────────
+    std::string t = "hello"s;
+    t += " world";
+    Check(t == "hello world", "phase7a append/+=");
+    t.insert(5, ",");
+    Check(t == "hello, world", "phase7a insert");
+    t.erase(5, 1);
+    Check(t == "hello world", "phase7a erase");
+    t.replace(0, 5, "bye");
+    Check(t == "bye world" && t.size() == 9, "phase7a replace");
+    Check(t.find("world") == 4 && t.rfind('o') == 5, "phase7a find via view");
+    Check(t.substr(4) == "world", "phase7a substr");
+    Check(("a"s + "b"s + 'c') == "abc", "phase7a operator+ chain");
+    Check(std::to_string(-1234) == "-1234" && std::to_string(98765u) == "98765",
+          "phase7a to_string");
+
+    std::string self = "abcdef";
+    self.append(self.data() + 1, 3); // self-aliased append
+    Check(self == "abcdefbcd", "phase7a self-aliased append");
+
+    std::string sso_a = "short";
+    std::string heap_b(40, 'z');
+    sso_a.swap(heap_b);
+    Check(sso_a.size() == 40 && heap_b == "short", "phase7a sso/heap swap");
+
+    // string_view interop both directions
+    std::string_view tv = t;
+    Check(tv.size() == t.size() && tv.contains("world"),
+          "phase7a string→view");
+    std::string from_view{"viewed"sv};
+    Check(from_view == "viewed", "phase7a view→string");
+
+    // ── exceptions: stdexcept hierarchy + length guard ──────────────────
+    bool caught_oor = false;
+    try {
+        (void)t.at(100);
+    } catch (const std::logic_error &e) { // out_of_range IS-A logic_error
+        caught_oor = e.what() != nullptr && e.what()[0] == 's';
+    }
+    Check(caught_oor, "phase7a at() → out_of_range → logic_error");
+
+    bool caught_len = false;
+    try {
+        t.reserve(SIZE_MAX); // beyond max_size() → length_error, no alloc
+    } catch (const std::length_error &) {
+        caught_len = true;
+    }
+    Check(caught_len, "phase7a reserve → length_error");
+
+    // ── system_error: unique_lock protocol violation ────────────────────
+    std::mutex pm;
+    std::unique_lock<std::mutex> ul(pm);
+    bool caught_se = false;
+    try {
+        ul.lock();
+    } catch (const std::system_error &e) {
+        caught_se = e.code() == std::errc::resource_deadlock_would_occur &&
+                    e.code().category() == std::generic_category() &&
+                    e.what() != nullptr;
+    }
+    Check(caught_se, "phase7a unique_lock → system_error");
+    Check(std::make_error_code(std::errc::timed_out).value() == 110,
+          "phase7a errc numbering");
+
+    // ── vector: growth, contiguity, editing ─────────────────────────────
+    std::vector<int> v;
+    for (int i = 0; i < 100; ++i) v.push_back(i);
+    Check(v.size() == 100 && v.capacity() >= 100 && v[99] == 99,
+          "phase7a vector growth");
+    Check(v.data()[50] == 50 && &v[51] == v.data() + 51,
+          "phase7a vector contiguity");
+    v.insert(v.begin() + 1, 777);
+    Check(v.size() == 101 && v[1] == 777 && v[2] == 1, "phase7a vector insert");
+    v.erase(v.begin() + 1);
+    Check(v[1] == 1 && v.size() == 100, "phase7a vector erase");
+    Check(std::erase_if(v, [](int x) { return x % 2 == 0; }) == 50 &&
+              v.size() == 50 && v[0] == 1,
+          "phase7a vector erase_if");
+
+    bool caught_vec_oor = false;
+    try {
+        (void)v.at(1000);
+    } catch (const std::out_of_range &) {
+        caught_vec_oor = true;
+    }
+    Check(caught_vec_oor, "phase7a vector::at → out_of_range");
+
+    // non-trivial elements: strings inside vector (dtors/moves on grow)
+    std::vector<std::string> vs;
+    for (int i = 0; i < 20; ++i)
+        vs.emplace_back("payload-with-some-length-" + std::to_string(i));
+    Check(vs.size() == 20 && vs[19].ends_with("-19"),
+          "phase7a vector<string>");
+    std::vector<std::string> vs2 = std::move(vs);
+    Check(vs2.size() == 20 && vs.empty(), "phase7a vector move");
+
+    // destructor accounting through scope exit + pop_back
+    int dtors = 0;
+    {
+        std::vector<MoveProbe> probes;
+        probes.emplace_back(&dtors);
+        probes.emplace_back(&dtors);
+        probes.emplace_back(&dtors); // growth relocations must NOT double-count
+        probes.pop_back();
+        Check(dtors == 1, "phase7a pop_back destroys one");
+    }
+    Check(dtors == 3, "phase7a scope destroys the rest");
+
+    // ── array + span ────────────────────────────────────────────────────
+    std::array<int, 4> ar{1, 2, 3, 4};
+    ar.fill(7);
+    Check(ar[0] == 7 && ar.back() == 7, "phase7a array fill");
+    std::array<int, 4> ar2{1, 1, 1, 1};
+    ar.swap(ar2);
+    Check(ar[0] == 1 && ar2[0] == 7, "phase7a array swap");
+
+    int raw[4] = {1, 2, 3, 4};
+    std::span sp(raw);
+    static_assert(decltype(sp)::extent == 4);
+    static_assert(sizeof(decltype(sp)) == sizeof(void *)); // static extent
+    Check(sp.size_bytes() == 16 && sp.front() == 1 && sp.back() == 4,
+          "phase7a span basics");
+    auto mid = sp.subspan(1, 2);
+    Check(mid.size() == 2 && mid[0] == 2 && mid[1] == 3, "phase7a subspan");
+    mid[0] = 9;
+    Check(raw[1] == 9, "phase7a span writes through");
+    auto bytes = std::as_bytes(sp);
+    Check(bytes.size() == 16, "phase7a as_bytes");
+    std::span<int> dynsp(v.data(), v.size());
+    Check(dynsp.size() == v.size() && dynsp.last(1)[0] == v.back(),
+          "phase7a dynamic span over vector");
+
+    printf("[CXX] PASS phase7a: string/sv/vector/array/span + stdexcept/system_error\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -735,6 +921,7 @@ int main()
     Phase4b();
     Phase5();
     Phase6();
+    Phase7a();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

@@ -1,0 +1,99 @@
+// boxcxx — <stdexcept>
+// Standard exception hierarchy. Messages live in a refcounted immutable
+// buffer (__bits/shared_cstring) so the copy constructors are noexcept
+// as [exception]/2 requires. Key functions (dtors/what) are anchored in
+// src/runtime/stdexcept.cpp.
+#ifndef BOXCXX_STDEXCEPT
+#define BOXCXX_STDEXCEPT
+
+#include <__bits/shared_cstring>
+#include <exception>
+#include <string>
+
+namespace std {
+
+class logic_error : public exception {
+public:
+    explicit logic_error(const string &what_arg)
+        : __msg(what_arg.c_str(), what_arg.size())
+    {
+    }
+    explicit logic_error(const char *what_arg)
+        : __msg(what_arg, char_traits<char>::length(what_arg))
+    {
+    }
+    logic_error(const logic_error &) noexcept = default;
+    logic_error &operator=(const logic_error &) noexcept = default;
+    ~logic_error() override;
+
+    const char *what() const noexcept override;
+
+private:
+    __shared_cstring __msg;
+};
+
+class domain_error : public logic_error {
+public:
+    using logic_error::logic_error;
+    ~domain_error() override;
+};
+
+class invalid_argument : public logic_error {
+public:
+    using logic_error::logic_error;
+    ~invalid_argument() override;
+};
+
+class length_error : public logic_error {
+public:
+    using logic_error::logic_error;
+    ~length_error() override;
+};
+
+class out_of_range : public logic_error {
+public:
+    using logic_error::logic_error;
+    ~out_of_range() override;
+};
+
+class runtime_error : public exception {
+public:
+    explicit runtime_error(const string &what_arg)
+        : __msg(what_arg.c_str(), what_arg.size())
+    {
+    }
+    explicit runtime_error(const char *what_arg)
+        : __msg(what_arg, char_traits<char>::length(what_arg))
+    {
+    }
+    runtime_error(const runtime_error &) noexcept = default;
+    runtime_error &operator=(const runtime_error &) noexcept = default;
+    ~runtime_error() override;
+
+    const char *what() const noexcept override;
+
+private:
+    __shared_cstring __msg;
+};
+
+class range_error : public runtime_error {
+public:
+    using runtime_error::runtime_error;
+    ~range_error() override;
+};
+
+class overflow_error : public runtime_error {
+public:
+    using runtime_error::runtime_error;
+    ~overflow_error() override;
+};
+
+class underflow_error : public runtime_error {
+public:
+    using runtime_error::runtime_error;
+    ~underflow_error() override;
+};
+
+} // namespace std
+
+#endif // BOXCXX_STDEXCEPT

@@ -1,0 +1,188 @@
+// boxcxx — <__bits/char_traits>
+// char_traits for the five character types. Shared by <string_view> and
+// <string>. The char specialization rides the GCC builtins (constexpr-
+// capable in constant evaluation); the generic base uses plain loops.
+// off_type/pos_type/state_type are deferred until iostream lands (Ф9B)
+// — tracked in the conformance leftovers.
+#ifndef BOXCXX_BITS_CHAR_TRAITS
+#define BOXCXX_BITS_CHAR_TRAITS
+
+#include <cstddef>
+#include <cstdint>
+
+namespace std {
+
+namespace __char_impl {
+
+template <typename C, typename I>
+struct TraitsBase {
+    using char_type = C;
+    using int_type  = I;
+
+    static constexpr void assign(char_type &dst, const char_type &src) noexcept
+    {
+        dst = src;
+    }
+    static constexpr bool eq(char_type a, char_type b) noexcept
+    {
+        return a == b;
+    }
+    static constexpr bool lt(char_type a, char_type b) noexcept
+    {
+        return a < b;
+    }
+
+    static constexpr int compare(const char_type *a, const char_type *b,
+                                 size_t n)
+    {
+        for (size_t i = 0; i < n; ++i) {
+            if (lt(a[i], b[i])) return -1;
+            if (lt(b[i], a[i])) return 1;
+        }
+        return 0;
+    }
+
+    static constexpr size_t length(const char_type *s)
+    {
+        size_t n = 0;
+        while (!eq(s[n], char_type())) ++n;
+        return n;
+    }
+
+    static constexpr const char_type *find(const char_type *s, size_t n,
+                                           const char_type &c)
+    {
+        for (size_t i = 0; i < n; ++i)
+            if (eq(s[i], c)) return s + i;
+        return nullptr;
+    }
+
+    static constexpr char_type *move(char_type *dst, const char_type *src,
+                                     size_t n)
+    {
+        if (dst == src || n == 0) return dst;
+        if (dst < src) {
+            for (size_t i = 0; i < n; ++i) dst[i] = src[i];
+        } else {
+            for (size_t i = n; i > 0; --i) dst[i - 1] = src[i - 1];
+        }
+        return dst;
+    }
+
+    static constexpr char_type *copy(char_type *dst, const char_type *src,
+                                     size_t n)
+    {
+        for (size_t i = 0; i < n; ++i) dst[i] = src[i];
+        return dst;
+    }
+
+    static constexpr char_type *assign(char_type *dst, size_t n, char_type c)
+    {
+        for (size_t i = 0; i < n; ++i) dst[i] = c;
+        return dst;
+    }
+
+    static constexpr int_type to_int_type(char_type c) noexcept
+    {
+        return static_cast<int_type>(c);
+    }
+    static constexpr char_type to_char_type(int_type i) noexcept
+    {
+        return static_cast<char_type>(i);
+    }
+    static constexpr bool eq_int_type(int_type a, int_type b) noexcept
+    {
+        return a == b;
+    }
+    static constexpr int_type not_eof(int_type i) noexcept
+    {
+        return eq_int_type(i, eof()) ? 0 : i;
+    }
+    static constexpr int_type eof() noexcept
+    {
+        return static_cast<int_type>(-1);
+    }
+};
+
+} // namespace __char_impl
+
+template <typename C>
+struct char_traits;
+
+template <>
+struct char_traits<char> : __char_impl::TraitsBase<char, int> {
+    // char compares as UNSIGNED ([char.traits.specializations.char]).
+    static constexpr bool lt(char a, char b) noexcept
+    {
+        return static_cast<unsigned char>(a) < static_cast<unsigned char>(b);
+    }
+    static constexpr int compare(const char *a, const char *b, size_t n)
+    {
+        return n == 0 ? 0 : __builtin_memcmp(a, b, n);
+    }
+    static constexpr size_t length(const char *s)
+    {
+        return __builtin_strlen(s);
+    }
+    // This toolchain lacks __builtin_char_memchr and casting the void*
+    // from __builtin_memchr is not constexpr until C++26 — split paths.
+    static constexpr const char *find(const char *s, size_t n, const char &c)
+    {
+        if (n == 0) return nullptr;
+        if (__builtin_is_constant_evaluated()) {
+            for (size_t i = 0; i < n; ++i)
+                if (s[i] == c) return s + i;
+            return nullptr;
+        }
+        return static_cast<const char *>(
+            __builtin_memchr(s, static_cast<unsigned char>(c), n));
+    }
+    static constexpr int to_int_type(char c) noexcept
+    {
+        return static_cast<unsigned char>(c);
+    }
+};
+
+template <>
+struct char_traits<wchar_t>
+    : __char_impl::TraitsBase<wchar_t, unsigned int> {
+    static constexpr unsigned int eof() noexcept { return 0xFFFFFFFFu; }
+    static constexpr unsigned int not_eof(unsigned int i) noexcept
+    {
+        return i == eof() ? 0 : i;
+    }
+};
+
+template <>
+struct char_traits<char8_t>
+    : __char_impl::TraitsBase<char8_t, unsigned int> {
+    static constexpr unsigned int eof() noexcept { return 0xFFFFFFFFu; }
+    static constexpr unsigned int not_eof(unsigned int i) noexcept
+    {
+        return i == eof() ? 0 : i;
+    }
+};
+
+template <>
+struct char_traits<char16_t>
+    : __char_impl::TraitsBase<char16_t, uint_least16_t> {
+    static constexpr uint_least16_t eof() noexcept { return 0xFFFFu; }
+    static constexpr uint_least16_t not_eof(uint_least16_t i) noexcept
+    {
+        return i == eof() ? 0 : i;
+    }
+};
+
+template <>
+struct char_traits<char32_t>
+    : __char_impl::TraitsBase<char32_t, uint_least32_t> {
+    static constexpr uint_least32_t eof() noexcept { return 0xFFFFFFFFu; }
+    static constexpr uint_least32_t not_eof(uint_least32_t i) noexcept
+    {
+        return i == eof() ? 0 : i;
+    }
+};
+
+} // namespace std
+
+#endif // BOXCXX_BITS_CHAR_TRAITS

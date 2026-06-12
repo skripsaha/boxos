@@ -1,0 +1,221 @@
+// boxcxx — <span>
+// Non-owning contiguous view. Static extents store no size at runtime
+// ([[no_unique_address]] empty carrier). The ranges-taking constructor
+// joins with ranges-core in Ф7B — pointer/array/std::array sources
+// cover today's callers.
+#ifndef BOXCXX_SPAN
+#define BOXCXX_SPAN
+
+#include <__bits/iterator_core>
+#include <__bits/throw_helpers>
+#include <array>
+#include <cstddef>
+#include <type_traits>
+
+namespace std {
+
+inline constexpr size_t dynamic_extent = size_t(-1);
+
+namespace __span_impl {
+
+template <size_t Extent>
+struct ExtentCarrier {
+    constexpr ExtentCarrier(size_t) noexcept {}
+    static constexpr size_t Get() noexcept { return Extent; }
+};
+
+template <>
+struct ExtentCarrier<dynamic_extent> {
+    constexpr ExtentCarrier(size_t n) noexcept : __n(n) {}
+    constexpr size_t Get() const noexcept { return __n; }
+    size_t __n;
+};
+
+} // namespace __span_impl
+
+template <typename T, size_t Extent = dynamic_extent>
+class span {
+public:
+    using element_type           = T;
+    using value_type             = remove_cv_t<T>;
+    using size_type              = size_t;
+    using difference_type        = ptrdiff_t;
+    using pointer                = T *;
+    using const_pointer          = const T *;
+    using reference              = T &;
+    using const_reference        = const T &;
+    using iterator               = T *;
+    using const_iterator         = const T *;
+    using reverse_iterator       = std::reverse_iterator<iterator>;
+    using const_reverse_iterator = std::reverse_iterator<const_iterator>;
+
+    static constexpr size_t extent = Extent;
+
+    // ── constructors ────────────────────────────────────────────────────
+
+    constexpr span() noexcept
+        requires(Extent == dynamic_extent || Extent == 0)
+        : __data(nullptr), __size(0)
+    {
+    }
+
+    constexpr span(pointer first, size_type count) : __data(first), __size(count)
+    {
+    }
+    constexpr span(pointer first, pointer last)
+        : __data(first), __size(static_cast<size_type>(last - first))
+    {
+    }
+
+    template <size_t N>
+        requires(Extent == dynamic_extent || Extent == N)
+    constexpr span(type_identity_t<T> (&arr)[N]) noexcept
+        : __data(arr), __size(N)
+    {
+    }
+    template <typename U, size_t N>
+        requires((Extent == dynamic_extent || Extent == N) &&
+                 is_convertible_v<U (*)[], T (*)[]>)
+    constexpr span(std::array<U, N> &arr) noexcept
+        : __data(arr.data()), __size(N)
+    {
+    }
+    template <typename U, size_t N>
+        requires((Extent == dynamic_extent || Extent == N) &&
+                 is_convertible_v<const U (*)[], T (*)[]>)
+    constexpr span(const std::array<U, N> &arr) noexcept
+        : __data(arr.data()), __size(N)
+    {
+    }
+
+    template <typename U, size_t E>
+        requires((Extent == dynamic_extent || E == dynamic_extent ||
+                  Extent == E) &&
+                 is_convertible_v<U (*)[], T (*)[]>)
+    constexpr span(const span<U, E> &other) noexcept
+        : __data(other.data()), __size(other.size())
+    {
+    }
+
+    constexpr span(const span &) noexcept = default;
+    constexpr span &operator=(const span &) noexcept = default;
+
+    // ── observers ───────────────────────────────────────────────────────
+
+    constexpr size_type size() const noexcept { return __size.Get(); }
+    constexpr size_type size_bytes() const noexcept
+    {
+        return size() * sizeof(T);
+    }
+    [[nodiscard]] constexpr bool empty() const noexcept { return size() == 0; }
+
+    // ── element access ──────────────────────────────────────────────────
+
+    constexpr reference operator[](size_type i) const { return __data[i]; }
+    constexpr reference at(size_type i) const
+    {
+        if (i >= size()) boxcxx::ThrowOutOfRange("span::at");
+        return __data[i];
+    }
+    constexpr reference front() const { return __data[0]; }
+    constexpr reference back() const { return __data[size() - 1]; }
+    constexpr pointer data() const noexcept { return __data; }
+
+    // ── iterators ───────────────────────────────────────────────────────
+
+    constexpr iterator begin() const noexcept { return __data; }
+    constexpr iterator end() const noexcept { return __data + size(); }
+    constexpr const_iterator cbegin() const noexcept { return __data; }
+    constexpr const_iterator cend() const noexcept { return __data + size(); }
+    constexpr reverse_iterator rbegin() const noexcept
+    {
+        return reverse_iterator(end());
+    }
+    constexpr reverse_iterator rend() const noexcept
+    {
+        return reverse_iterator(begin());
+    }
+
+    // ── subviews ────────────────────────────────────────────────────────
+
+    template <size_t Count>
+    constexpr span<T, Count> first() const
+    {
+        static_assert(Count != dynamic_extent);
+        return span<T, Count>(__data, Count);
+    }
+    constexpr span<T> first(size_type count) const
+    {
+        return span<T>(__data, count);
+    }
+
+    template <size_t Count>
+    constexpr span<T, Count> last() const
+    {
+        static_assert(Count != dynamic_extent);
+        return span<T, Count>(__data + (size() - Count), Count);
+    }
+    constexpr span<T> last(size_type count) const
+    {
+        return span<T>(__data + (size() - count), count);
+    }
+
+    template <size_t Offset, size_t Count = dynamic_extent>
+    constexpr auto subspan() const
+    {
+        constexpr size_t kResult =
+            Count != dynamic_extent
+                ? Count
+                : (Extent != dynamic_extent ? Extent - Offset
+                                            : dynamic_extent);
+        return span<T, kResult>(
+            __data + Offset,
+            Count != dynamic_extent ? Count : size() - Offset);
+    }
+    constexpr span<T> subspan(size_type offset,
+                              size_type count = dynamic_extent) const
+    {
+        return span<T>(__data + offset,
+                       count != dynamic_extent ? count : size() - offset);
+    }
+
+private:
+    pointer __data;
+    [[no_unique_address]] __span_impl::ExtentCarrier<Extent> __size;
+};
+
+template <typename T, size_t N>
+span(T (&)[N]) -> span<T, N>;
+template <typename T, size_t N>
+span(std::array<T, N> &) -> span<T, N>;
+template <typename T, size_t N>
+span(const std::array<T, N> &) -> span<const T, N>;
+template <typename T>
+span(T *, size_t) -> span<T>;
+template <typename T>
+span(T *, T *) -> span<T>;
+
+// ── byte views ──────────────────────────────────────────────────────────
+
+template <typename T, size_t E>
+auto as_bytes(span<T, E> s) noexcept
+{
+    constexpr size_t kBytes = E == dynamic_extent ? dynamic_extent
+                                                  : E * sizeof(T);
+    return span<const byte, kBytes>(
+        reinterpret_cast<const byte *>(s.data()), s.size_bytes());
+}
+
+template <typename T, size_t E>
+    requires(!is_const_v<T>)
+auto as_writable_bytes(span<T, E> s) noexcept
+{
+    constexpr size_t kBytes = E == dynamic_extent ? dynamic_extent
+                                                  : E * sizeof(T);
+    return span<byte, kBytes>(reinterpret_cast<byte *>(s.data()),
+                              s.size_bytes());
+}
+
+} // namespace std
+
+#endif // BOXCXX_SPAN
