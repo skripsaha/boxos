@@ -1,0 +1,239 @@
+// boxcxx — <unordered_set>
+// unordered_set / unordered_multiset over the chaining hash engine.
+#ifndef BOXCXX_UNORDERED_SET
+#define BOXCXX_UNORDERED_SET
+
+#include <__bits/hash_table>
+#include <functional>
+#include <initializer_list>
+#include <utility>
+
+namespace std {
+
+namespace __ht {
+
+struct SelectSelf {
+    template <typename V>
+    const V &operator()(const V &v) const noexcept
+    {
+        return v;
+    }
+};
+
+} // namespace __ht
+
+template <typename Key, typename Hash = hash<Key>,
+          typename KeyEq = equal_to<Key>, typename Alloc = allocator<Key>>
+class unordered_set {
+    using TableT = __ht::Table<Key, Key, __ht::SelectSelf, Hash, KeyEq, Alloc>;
+
+public:
+    using key_type       = Key;
+    using value_type     = Key;
+    using size_type      = size_t;
+    using hasher         = Hash;
+    using key_equal      = KeyEq;
+    using allocator_type = Alloc;
+    // set elements are immutable through iterators.
+    using iterator       = typename TableT::const_iterator;
+    using const_iterator = typename TableT::const_iterator;
+
+    unordered_set() = default;
+    explicit unordered_set(size_type buckets, const Hash &h = Hash(),
+                           const KeyEq &eq = KeyEq(),
+                           const Alloc &a  = Alloc())
+        : __t(buckets, h, eq, a)
+    {
+    }
+    template <typename It>
+    unordered_set(It first, It last) : __t()
+    {
+        insert(first, last);
+    }
+    unordered_set(initializer_list<Key> il) { insert(il.begin(), il.end()); }
+    unordered_set(const unordered_set &) = default;
+    unordered_set(unordered_set &&) noexcept = default;
+    unordered_set &operator=(const unordered_set &) = default;
+    unordered_set &operator=(unordered_set &&) noexcept = default;
+
+    iterator begin() const noexcept
+    {
+        return const_cast<unordered_set *>(this)->__t.begin();
+    }
+    iterator end() const noexcept
+    {
+        return const_cast<unordered_set *>(this)->__t.end();
+    }
+
+    [[nodiscard]] bool empty() const noexcept { return __t.empty(); }
+    size_type size() const noexcept { return __t.size(); }
+    size_type max_size() const noexcept { return __t.max_size(); }
+
+    pair<iterator, bool> insert(const Key &v)
+    {
+        auto [it, ok] = __t.EmplaceUnique(v);
+        return {iterator(it.__n, it.__t), ok};
+    }
+    pair<iterator, bool> insert(Key &&v)
+    {
+        auto [it, ok] = __t.EmplaceUnique(std::move(v));
+        return {iterator(it.__n, it.__t), ok};
+    }
+    template <typename It>
+    void insert(It first, It last)
+    {
+        for (; first != last; ++first) __t.EmplaceUnique(*first);
+    }
+    void insert(initializer_list<Key> il) { insert(il.begin(), il.end()); }
+    template <typename... Args>
+    pair<iterator, bool> emplace(Args &&...args)
+    {
+        auto [it, ok] = __t.EmplaceUnique(std::forward<Args>(args)...);
+        return {iterator(it.__n, it.__t), ok};
+    }
+
+    iterator erase(const_iterator where)
+    {
+        auto nx = __t.Erase(where);
+        return iterator(nx.__n, nx.__t);
+    }
+    size_type erase(const Key &key) { return __t.EraseKey(key); }
+    void clear() noexcept { __t.clear(); }
+    void swap(unordered_set &other) noexcept { __t.swap(other.__t); }
+
+    iterator find(const Key &key) const
+    {
+        auto it = const_cast<unordered_set *>(this)->__t.Find(key);
+        return iterator(it.__n, it.__t);
+    }
+    size_type count(const Key &key) const
+    {
+        return const_cast<unordered_set *>(this)->__t.Count(key);
+    }
+    bool contains(const Key &key) const { return find(key) != end(); }
+
+    size_type bucket_count() const noexcept { return __t.bucket_count(); }
+    size_type bucket(const Key &key) const { return __t.bucket(key); }
+    float load_factor() const noexcept { return __t.load_factor(); }
+    float max_load_factor() const noexcept { return __t.max_load_factor(); }
+    void max_load_factor(float lf) noexcept { __t.max_load_factor(lf); }
+    void rehash(size_type n) { __t.Rehash(n ? n : 8); }
+    void reserve(size_type n) { __t.Reserve(n); }
+    hasher hash_function() const { return __t.hash_function(); }
+    key_equal key_eq() const { return __t.key_eq(); }
+
+private:
+    TableT __t;
+};
+
+template <typename Key, typename Hash = hash<Key>,
+          typename KeyEq = equal_to<Key>, typename Alloc = allocator<Key>>
+class unordered_multiset {
+    using TableT = __ht::Table<Key, Key, __ht::SelectSelf, Hash, KeyEq, Alloc>;
+
+public:
+    using key_type       = Key;
+    using value_type     = Key;
+    using size_type      = size_t;
+    using iterator       = typename TableT::const_iterator;
+    using const_iterator = typename TableT::const_iterator;
+
+    unordered_multiset() = default;
+    unordered_multiset(initializer_list<Key> il)
+    {
+        for (const Key &k : il) __t.EmplaceMulti(k);
+    }
+    unordered_multiset(const unordered_multiset &) = default;
+    unordered_multiset(unordered_multiset &&) noexcept = default;
+    unordered_multiset &operator=(const unordered_multiset &) = default;
+    unordered_multiset &operator=(unordered_multiset &&) noexcept = default;
+
+    iterator begin() const noexcept
+    {
+        return const_cast<unordered_multiset *>(this)->__t.begin();
+    }
+    iterator end() const noexcept
+    {
+        return const_cast<unordered_multiset *>(this)->__t.end();
+    }
+    [[nodiscard]] bool empty() const noexcept { return __t.empty(); }
+    size_type size() const noexcept { return __t.size(); }
+
+    iterator insert(const Key &v)
+    {
+        auto it = __t.EmplaceMulti(v);
+        return iterator(it.__n, it.__t);
+    }
+    template <typename... Args>
+    iterator emplace(Args &&...args)
+    {
+        auto it = __t.EmplaceMulti(std::forward<Args>(args)...);
+        return iterator(it.__n, it.__t);
+    }
+
+    iterator erase(const_iterator where)
+    {
+        auto nx = __t.Erase(where);
+        return iterator(nx.__n, nx.__t);
+    }
+    size_type erase(const Key &key) { return __t.EraseKey(key); }
+    void clear() noexcept { __t.clear(); }
+
+    iterator find(const Key &key) const
+    {
+        auto it = const_cast<unordered_multiset *>(this)->__t.Find(key);
+        return iterator(it.__n, it.__t);
+    }
+    size_type count(const Key &key) const
+    {
+        return const_cast<unordered_multiset *>(this)->__t.Count(key);
+    }
+    bool contains(const Key &key) const { return find(key) != end(); }
+    pair<iterator, iterator> equal_range(const Key &key) const
+    {
+        auto [lo, hi] = const_cast<unordered_multiset *>(this)->__t.EqualRange(
+            key);
+        return {iterator(lo.__n, lo.__t), iterator(hi.__n, hi.__t)};
+    }
+
+    size_type bucket_count() const noexcept { return __t.bucket_count(); }
+
+private:
+    TableT __t;
+};
+
+template <typename K, typename H, typename E, typename A>
+bool operator==(const unordered_set<K, H, E, A> &a,
+                const unordered_set<K, H, E, A> &b)
+{
+    if (a.size() != b.size()) return false;
+    for (const auto &k : a)
+        if (!b.contains(k)) return false;
+    return true;
+}
+
+template <typename K, typename H, typename E, typename A>
+void swap(unordered_set<K, H, E, A> &a, unordered_set<K, H, E, A> &b) noexcept
+{
+    a.swap(b);
+}
+
+template <typename K, typename H, typename E, typename A, typename Pred>
+typename unordered_set<K, H, E, A>::size_type
+erase_if(unordered_set<K, H, E, A> &s, Pred pred)
+{
+    typename unordered_set<K, H, E, A>::size_type removed = 0;
+    for (auto it = s.begin(); it != s.end();) {
+        if (pred(*it)) {
+            it = s.erase(it);
+            ++removed;
+        } else {
+            ++it;
+        }
+    }
+    return removed;
+}
+
+} // namespace std
+
+#endif // BOXCXX_UNORDERED_SET

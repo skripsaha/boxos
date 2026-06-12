@@ -1,0 +1,404 @@
+// boxcxx — <map>
+// map / multimap over the shared red-black tree engine
+// (__bits/rb_tree). Deferred per the leftovers tracker: node_handle
+// extract/merge, ranges-taking members.
+#ifndef BOXCXX_MAP
+#define BOXCXX_MAP
+
+#include <__bits/rb_tree>
+#include <__bits/throw_helpers>
+#include <compare>
+#include <functional>
+#include <initializer_list>
+#include <tuple>
+#include <utility>
+
+namespace std {
+
+namespace __rb {
+
+template <typename Pair>
+struct SelectFirst {
+    const typename Pair::first_type &operator()(const Pair &p) const noexcept
+    {
+        return p.first;
+    }
+};
+
+} // namespace __rb
+
+template <typename Key, typename T, typename Comp = less<Key>,
+          typename Alloc = allocator<pair<const Key, T>>>
+class map {
+    using TreeT = __rb::Tree<Key, pair<const Key, T>,
+                             __rb::SelectFirst<pair<const Key, T>>, Comp,
+                             Alloc>;
+
+public:
+    using key_type        = Key;
+    using mapped_type     = T;
+    using value_type      = pair<const Key, T>;
+    using size_type       = size_t;
+    using difference_type = ptrdiff_t;
+    using key_compare     = Comp;
+    using allocator_type  = Alloc;
+    using reference       = value_type &;
+    using const_reference = const value_type &;
+    using iterator        = typename TreeT::iterator;
+    using const_iterator  = typename TreeT::const_iterator;
+    using reverse_iterator       = std::reverse_iterator<iterator>;
+    using const_reverse_iterator = std::reverse_iterator<const_iterator>;
+
+    class value_compare {
+        friend class map;
+        Comp __c;
+        value_compare(Comp c) : __c(c) {}
+
+    public:
+        bool operator()(const value_type &a, const value_type &b) const
+        {
+            return __c(a.first, b.first);
+        }
+    };
+
+    map() = default;
+    explicit map(const Comp &comp, const Alloc &a = Alloc()) : __t(comp, a) {}
+    template <typename It>
+    map(It first, It last, const Comp &comp = Comp(), const Alloc &a = Alloc())
+        : __t(comp, a)
+    {
+        insert(first, last);
+    }
+    map(initializer_list<value_type> il, const Comp &comp = Comp(),
+        const Alloc &a = Alloc())
+        : __t(comp, a)
+    {
+        insert(il.begin(), il.end());
+    }
+    map(const map &) = default;
+    map(map &&) noexcept = default;
+    map &operator=(const map &) = default;
+    map &operator=(map &&) noexcept = default;
+    map &operator=(initializer_list<value_type> il)
+    {
+        clear();
+        insert(il.begin(), il.end());
+        return *this;
+    }
+
+    allocator_type get_allocator() const noexcept
+    {
+        return __t.get_allocator();
+    }
+
+    iterator begin() noexcept { return __t.begin(); }
+    const_iterator begin() const noexcept { return __t.begin(); }
+    const_iterator cbegin() const noexcept { return __t.begin(); }
+    iterator end() noexcept { return __t.end(); }
+    const_iterator end() const noexcept { return __t.end(); }
+    const_iterator cend() const noexcept { return __t.end(); }
+    reverse_iterator rbegin() noexcept { return reverse_iterator(end()); }
+    reverse_iterator rend() noexcept { return reverse_iterator(begin()); }
+
+    [[nodiscard]] bool empty() const noexcept { return __t.empty(); }
+    size_type size() const noexcept { return __t.size(); }
+    size_type max_size() const noexcept { return __t.max_size(); }
+
+    // ── element access ──────────────────────────────────────────────────
+
+    T &operator[](const Key &key)
+    {
+        return try_emplace(key).first->second;
+    }
+    T &operator[](Key &&key)
+    {
+        return try_emplace(std::move(key)).first->second;
+    }
+    T &at(const Key &key)
+    {
+        iterator it = find(key);
+        if (it == end()) boxcxx::ThrowOutOfRange("map::at");
+        return it->second;
+    }
+    const T &at(const Key &key) const
+    {
+        const_iterator it = find(key);
+        if (it == end()) boxcxx::ThrowOutOfRange("map::at");
+        return it->second;
+    }
+
+    // ── modifiers ───────────────────────────────────────────────────────
+
+    pair<iterator, bool> insert(const value_type &v)
+    {
+        return __t.EmplaceUnique(v);
+    }
+    pair<iterator, bool> insert(value_type &&v)
+    {
+        return __t.EmplaceUnique(std::move(v));
+    }
+    template <typename P>
+        requires is_constructible_v<value_type, P &&>
+    pair<iterator, bool> insert(P &&v)
+    {
+        return __t.EmplaceUnique(std::forward<P>(v));
+    }
+    iterator insert(const_iterator, const value_type &v)
+    {
+        return insert(v).first; // hint accepted, not exploited (tracked)
+    }
+    template <typename It>
+    void insert(It first, It last)
+    {
+        for (; first != last; ++first) __t.EmplaceUnique(*first);
+    }
+    void insert(initializer_list<value_type> il)
+    {
+        insert(il.begin(), il.end());
+    }
+
+    template <typename... Args>
+    pair<iterator, bool> emplace(Args &&...args)
+    {
+        return __t.EmplaceUnique(std::forward<Args>(args)...);
+    }
+    template <typename... Args>
+    iterator emplace_hint(const_iterator, Args &&...args)
+    {
+        return __t.EmplaceUnique(std::forward<Args>(args)...).first;
+    }
+
+    template <typename... Args>
+    pair<iterator, bool> try_emplace(const Key &key, Args &&...args)
+    {
+        iterator hit = find(key);
+        if (hit != end()) return {hit, false};
+        return __t.EmplaceUnique(piecewise_construct, forward_as_tuple(key),
+                                 forward_as_tuple(std::forward<Args>(args)...));
+    }
+    template <typename... Args>
+    pair<iterator, bool> try_emplace(Key &&key, Args &&...args)
+    {
+        iterator hit = find(key);
+        if (hit != end()) return {hit, false};
+        return __t.EmplaceUnique(
+            piecewise_construct, forward_as_tuple(std::move(key)),
+            forward_as_tuple(std::forward<Args>(args)...));
+    }
+
+    template <typename M>
+    pair<iterator, bool> insert_or_assign(const Key &key, M &&obj)
+    {
+        auto [it, inserted] = try_emplace(key, std::forward<M>(obj));
+        if (!inserted) it->second = std::forward<M>(obj);
+        return {it, inserted};
+    }
+    template <typename M>
+    pair<iterator, bool> insert_or_assign(Key &&key, M &&obj)
+    {
+        auto [it, inserted] = try_emplace(std::move(key), std::forward<M>(obj));
+        if (!inserted) it->second = std::forward<M>(obj);
+        return {it, inserted};
+    }
+
+    iterator erase(const_iterator where) { return __t.Erase(where); }
+    iterator erase(iterator where) { return __t.Erase(where); }
+    iterator erase(const_iterator first, const_iterator last)
+    {
+        while (first != last) first = __t.Erase(first);
+        return iterator(first.__n);
+    }
+    size_type erase(const Key &key) { return __t.EraseKey(key); }
+
+    void clear() noexcept { __t.clear(); }
+    void swap(map &other) noexcept { __t.swap(other.__t); }
+
+    // ── lookup ──────────────────────────────────────────────────────────
+
+    iterator find(const Key &key) { return __t.Find(key); }
+    const_iterator find(const Key &key) const
+    {
+        return const_cast<map *>(this)->__t.Find(key);
+    }
+    size_type count(const Key &key) const
+    {
+        return const_cast<map *>(this)->__t.Count(key);
+    }
+    bool contains(const Key &key) const { return find(key) != end(); }
+    iterator lower_bound(const Key &key) { return __t.LowerBound(key); }
+    const_iterator lower_bound(const Key &key) const
+    {
+        return const_cast<map *>(this)->__t.LowerBound(key);
+    }
+    iterator upper_bound(const Key &key) { return __t.UpperBound(key); }
+    const_iterator upper_bound(const Key &key) const
+    {
+        return const_cast<map *>(this)->__t.UpperBound(key);
+    }
+    pair<iterator, iterator> equal_range(const Key &key)
+    {
+        return {lower_bound(key), upper_bound(key)};
+    }
+    pair<const_iterator, const_iterator> equal_range(const Key &key) const
+    {
+        return {lower_bound(key), upper_bound(key)};
+    }
+
+    key_compare key_comp() const { return __t.key_comp(); }
+    value_compare value_comp() const { return value_compare(__t.key_comp()); }
+
+private:
+    TreeT __t;
+};
+
+template <typename Key, typename T, typename Comp = less<Key>,
+          typename Alloc = allocator<pair<const Key, T>>>
+class multimap {
+    using TreeT = __rb::Tree<Key, pair<const Key, T>,
+                             __rb::SelectFirst<pair<const Key, T>>, Comp,
+                             Alloc>;
+
+public:
+    using key_type        = Key;
+    using mapped_type     = T;
+    using value_type      = pair<const Key, T>;
+    using size_type       = size_t;
+    using difference_type = ptrdiff_t;
+    using key_compare     = Comp;
+    using allocator_type  = Alloc;
+    using iterator        = typename TreeT::iterator;
+    using const_iterator  = typename TreeT::const_iterator;
+
+    multimap() = default;
+    explicit multimap(const Comp &comp, const Alloc &a = Alloc())
+        : __t(comp, a)
+    {
+    }
+    template <typename It>
+    multimap(It first, It last, const Comp &comp = Comp(),
+             const Alloc &a = Alloc())
+        : __t(comp, a)
+    {
+        insert(first, last);
+    }
+    multimap(initializer_list<value_type> il, const Comp &comp = Comp(),
+             const Alloc &a = Alloc())
+        : __t(comp, a)
+    {
+        insert(il.begin(), il.end());
+    }
+    multimap(const multimap &) = default;
+    multimap(multimap &&) noexcept = default;
+    multimap &operator=(const multimap &) = default;
+    multimap &operator=(multimap &&) noexcept = default;
+
+    iterator begin() noexcept { return __t.begin(); }
+    const_iterator begin() const noexcept { return __t.begin(); }
+    iterator end() noexcept { return __t.end(); }
+    const_iterator end() const noexcept { return __t.end(); }
+    [[nodiscard]] bool empty() const noexcept { return __t.empty(); }
+    size_type size() const noexcept { return __t.size(); }
+
+    iterator insert(const value_type &v) { return __t.EmplaceMulti(v); }
+    iterator insert(value_type &&v)
+    {
+        return __t.EmplaceMulti(std::move(v));
+    }
+    template <typename... Args>
+    iterator emplace(Args &&...args)
+    {
+        return __t.EmplaceMulti(std::forward<Args>(args)...);
+    }
+    template <typename It>
+    void insert(It first, It last)
+    {
+        for (; first != last; ++first) __t.EmplaceMulti(*first);
+    }
+    void insert(initializer_list<value_type> il)
+    {
+        insert(il.begin(), il.end());
+    }
+
+    iterator erase(const_iterator where) { return __t.Erase(where); }
+    size_type erase(const Key &key) { return __t.EraseKey(key); }
+    void clear() noexcept { __t.clear(); }
+    void swap(multimap &other) noexcept { __t.swap(other.__t); }
+
+    iterator find(const Key &key) { return __t.Find(key); }
+    size_type count(const Key &key) const
+    {
+        return const_cast<multimap *>(this)->__t.Count(key);
+    }
+    bool contains(const Key &key) const
+    {
+        return const_cast<multimap *>(this)->__t.Find(key) != end();
+    }
+    iterator lower_bound(const Key &key) { return __t.LowerBound(key); }
+    iterator upper_bound(const Key &key) { return __t.UpperBound(key); }
+    pair<iterator, iterator> equal_range(const Key &key)
+    {
+        return {__t.LowerBound(key), __t.UpperBound(key)};
+    }
+    key_compare key_comp() const { return __t.key_comp(); }
+
+private:
+    TreeT __t;
+};
+
+// ── comparisons / erasure ───────────────────────────────────────────────
+
+namespace __rb {
+
+template <typename M>
+bool MapEqual(const M &a, const M &b)
+{
+    if (a.size() != b.size()) return false;
+    auto ia = a.begin();
+    auto ib = b.begin();
+    for (; ia != a.end(); ++ia, ++ib)
+        if (!(*ia == *ib)) return false;
+    return true;
+}
+
+} // namespace __rb
+
+template <typename K, typename T, typename C, typename A>
+bool operator==(const map<K, T, C, A> &a, const map<K, T, C, A> &b)
+{
+    return __rb::MapEqual(a, b);
+}
+template <typename K, typename T, typename C, typename A>
+bool operator==(const multimap<K, T, C, A> &a, const multimap<K, T, C, A> &b)
+{
+    return __rb::MapEqual(a, b);
+}
+
+template <typename K, typename T, typename C, typename A>
+void swap(map<K, T, C, A> &a, map<K, T, C, A> &b) noexcept
+{
+    a.swap(b);
+}
+template <typename K, typename T, typename C, typename A>
+void swap(multimap<K, T, C, A> &a, multimap<K, T, C, A> &b) noexcept
+{
+    a.swap(b);
+}
+
+template <typename K, typename T, typename C, typename A, typename Pred>
+typename map<K, T, C, A>::size_type erase_if(map<K, T, C, A> &m, Pred pred)
+{
+    typename map<K, T, C, A>::size_type removed = 0;
+    for (auto it = m.begin(); it != m.end();) {
+        if (pred(*it)) {
+            it = m.erase(it);
+            ++removed;
+        } else {
+            ++it;
+        }
+    }
+    return removed;
+}
+
+} // namespace std
+
+#endif // BOXCXX_MAP

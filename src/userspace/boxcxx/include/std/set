@@ -1,0 +1,317 @@
+// boxcxx — <set>
+// set / multiset over the shared red-black tree engine.
+#ifndef BOXCXX_SET
+#define BOXCXX_SET
+
+#include <__bits/rb_tree>
+#include <compare>
+#include <functional>
+#include <initializer_list>
+#include <utility>
+
+namespace std {
+
+namespace __rb {
+
+struct SelectSelf {
+    template <typename V>
+    const V &operator()(const V &v) const noexcept
+    {
+        return v;
+    }
+};
+
+} // namespace __rb
+
+template <typename Key, typename Comp = less<Key>,
+          typename Alloc = allocator<Key>>
+class set {
+    using TreeT = __rb::Tree<Key, Key, __rb::SelectSelf, Comp, Alloc>;
+
+public:
+    using key_type        = Key;
+    using value_type      = Key;
+    using size_type       = size_t;
+    using difference_type = ptrdiff_t;
+    using key_compare     = Comp;
+    using value_compare   = Comp;
+    using allocator_type  = Alloc;
+    // set elements are immutable — both iterators are const.
+    using iterator        = typename TreeT::const_iterator;
+    using const_iterator  = typename TreeT::const_iterator;
+    using reverse_iterator       = std::reverse_iterator<iterator>;
+    using const_reverse_iterator = std::reverse_iterator<const_iterator>;
+
+    set() = default;
+    explicit set(const Comp &comp, const Alloc &a = Alloc()) : __t(comp, a) {}
+    template <typename It>
+    set(It first, It last, const Comp &comp = Comp(), const Alloc &a = Alloc())
+        : __t(comp, a)
+    {
+        insert(first, last);
+    }
+    set(initializer_list<Key> il, const Comp &comp = Comp(),
+        const Alloc &a = Alloc())
+        : __t(comp, a)
+    {
+        insert(il.begin(), il.end());
+    }
+    set(const set &) = default;
+    set(set &&) noexcept = default;
+    set &operator=(const set &) = default;
+    set &operator=(set &&) noexcept = default;
+    set &operator=(initializer_list<Key> il)
+    {
+        clear();
+        insert(il.begin(), il.end());
+        return *this;
+    }
+
+    allocator_type get_allocator() const noexcept
+    {
+        return __t.get_allocator();
+    }
+
+    iterator begin() const noexcept
+    {
+        return const_cast<set *>(this)->__t.begin();
+    }
+    iterator end() const noexcept { return const_cast<set *>(this)->__t.end(); }
+    const_iterator cbegin() const noexcept { return begin(); }
+    const_iterator cend() const noexcept { return end(); }
+    reverse_iterator rbegin() const noexcept
+    {
+        return reverse_iterator(end());
+    }
+    reverse_iterator rend() const noexcept
+    {
+        return reverse_iterator(begin());
+    }
+
+    [[nodiscard]] bool empty() const noexcept { return __t.empty(); }
+    size_type size() const noexcept { return __t.size(); }
+    size_type max_size() const noexcept { return __t.max_size(); }
+
+    pair<iterator, bool> insert(const Key &v)
+    {
+        auto [it, ok] = __t.EmplaceUnique(v);
+        return {iterator(it.__n), ok};
+    }
+    pair<iterator, bool> insert(Key &&v)
+    {
+        auto [it, ok] = __t.EmplaceUnique(std::move(v));
+        return {iterator(it.__n), ok};
+    }
+    iterator insert(const_iterator, const Key &v) { return insert(v).first; }
+    template <typename It>
+    void insert(It first, It last)
+    {
+        for (; first != last; ++first) __t.EmplaceUnique(*first);
+    }
+    void insert(initializer_list<Key> il) { insert(il.begin(), il.end()); }
+    template <typename... Args>
+    pair<iterator, bool> emplace(Args &&...args)
+    {
+        auto [it, ok] = __t.EmplaceUnique(std::forward<Args>(args)...);
+        return {iterator(it.__n), ok};
+    }
+
+    iterator erase(const_iterator where)
+    {
+        return iterator(__t.Erase(where).__n);
+    }
+    iterator erase(const_iterator first, const_iterator last)
+    {
+        while (first != last) first = const_iterator(__t.Erase(first).__n);
+        return iterator(first.__n);
+    }
+    size_type erase(const Key &key) { return __t.EraseKey(key); }
+    void clear() noexcept { __t.clear(); }
+    void swap(set &other) noexcept { __t.swap(other.__t); }
+
+    iterator find(const Key &key) const
+    {
+        return iterator(const_cast<set *>(this)->__t.Find(key).__n);
+    }
+    size_type count(const Key &key) const
+    {
+        return const_cast<set *>(this)->__t.Count(key);
+    }
+    bool contains(const Key &key) const { return find(key) != end(); }
+    iterator lower_bound(const Key &key) const
+    {
+        return iterator(const_cast<set *>(this)->__t.LowerBound(key).__n);
+    }
+    iterator upper_bound(const Key &key) const
+    {
+        return iterator(const_cast<set *>(this)->__t.UpperBound(key).__n);
+    }
+    pair<iterator, iterator> equal_range(const Key &key) const
+    {
+        return {lower_bound(key), upper_bound(key)};
+    }
+
+    key_compare key_comp() const { return __t.key_comp(); }
+    value_compare value_comp() const { return __t.key_comp(); }
+
+private:
+    TreeT __t;
+};
+
+template <typename Key, typename Comp = less<Key>,
+          typename Alloc = allocator<Key>>
+class multiset {
+    using TreeT = __rb::Tree<Key, Key, __rb::SelectSelf, Comp, Alloc>;
+
+public:
+    using key_type       = Key;
+    using value_type     = Key;
+    using size_type      = size_t;
+    using key_compare    = Comp;
+    using allocator_type = Alloc;
+    using iterator       = typename TreeT::const_iterator;
+    using const_iterator = typename TreeT::const_iterator;
+
+    multiset() = default;
+    explicit multiset(const Comp &comp, const Alloc &a = Alloc())
+        : __t(comp, a)
+    {
+    }
+    template <typename It>
+    multiset(It first, It last, const Comp &comp = Comp(),
+             const Alloc &a = Alloc())
+        : __t(comp, a)
+    {
+        insert(first, last);
+    }
+    multiset(initializer_list<Key> il, const Comp &comp = Comp(),
+             const Alloc &a = Alloc())
+        : __t(comp, a)
+    {
+        insert(il.begin(), il.end());
+    }
+    multiset(const multiset &) = default;
+    multiset(multiset &&) noexcept = default;
+    multiset &operator=(const multiset &) = default;
+    multiset &operator=(multiset &&) noexcept = default;
+
+    iterator begin() const noexcept
+    {
+        return const_cast<multiset *>(this)->__t.begin();
+    }
+    iterator end() const noexcept
+    {
+        return const_cast<multiset *>(this)->__t.end();
+    }
+    [[nodiscard]] bool empty() const noexcept { return __t.empty(); }
+    size_type size() const noexcept { return __t.size(); }
+
+    iterator insert(const Key &v)
+    {
+        return iterator(__t.EmplaceMulti(v).__n);
+    }
+    iterator insert(Key &&v)
+    {
+        return iterator(__t.EmplaceMulti(std::move(v)).__n);
+    }
+    template <typename It>
+    void insert(It first, It last)
+    {
+        for (; first != last; ++first) __t.EmplaceMulti(*first);
+    }
+    void insert(initializer_list<Key> il) { insert(il.begin(), il.end()); }
+    template <typename... Args>
+    iterator emplace(Args &&...args)
+    {
+        return iterator(__t.EmplaceMulti(std::forward<Args>(args)...).__n);
+    }
+
+    iterator erase(const_iterator where)
+    {
+        return iterator(__t.Erase(where).__n);
+    }
+    size_type erase(const Key &key) { return __t.EraseKey(key); }
+    void clear() noexcept { __t.clear(); }
+    void swap(multiset &other) noexcept { __t.swap(other.__t); }
+
+    iterator find(const Key &key) const
+    {
+        return iterator(const_cast<multiset *>(this)->__t.Find(key).__n);
+    }
+    size_type count(const Key &key) const
+    {
+        return const_cast<multiset *>(this)->__t.Count(key);
+    }
+    bool contains(const Key &key) const { return find(key) != end(); }
+    iterator lower_bound(const Key &key) const
+    {
+        return iterator(const_cast<multiset *>(this)->__t.LowerBound(key).__n);
+    }
+    iterator upper_bound(const Key &key) const
+    {
+        return iterator(const_cast<multiset *>(this)->__t.UpperBound(key).__n);
+    }
+    pair<iterator, iterator> equal_range(const Key &key) const
+    {
+        return {lower_bound(key), upper_bound(key)};
+    }
+    key_compare key_comp() const { return __t.key_comp(); }
+
+private:
+    TreeT __t;
+};
+
+namespace __rb {
+
+template <typename S>
+bool SetEqual(const S &a, const S &b)
+{
+    if (a.size() != b.size()) return false;
+    auto ia = a.begin();
+    auto ib = b.begin();
+    for (; ia != a.end(); ++ia, ++ib)
+        if (!(*ia == *ib)) return false;
+    return true;
+}
+
+} // namespace __rb
+
+template <typename K, typename C, typename A>
+bool operator==(const set<K, C, A> &a, const set<K, C, A> &b)
+{
+    return __rb::SetEqual(a, b);
+}
+template <typename K, typename C, typename A>
+bool operator==(const multiset<K, C, A> &a, const multiset<K, C, A> &b)
+{
+    return __rb::SetEqual(a, b);
+}
+template <typename K, typename C, typename A>
+void swap(set<K, C, A> &a, set<K, C, A> &b) noexcept
+{
+    a.swap(b);
+}
+template <typename K, typename C, typename A>
+void swap(multiset<K, C, A> &a, multiset<K, C, A> &b) noexcept
+{
+    a.swap(b);
+}
+
+template <typename K, typename C, typename A, typename Pred>
+typename set<K, C, A>::size_type erase_if(set<K, C, A> &s, Pred pred)
+{
+    typename set<K, C, A>::size_type removed = 0;
+    for (auto it = s.begin(); it != s.end();) {
+        if (pred(*it)) {
+            it = s.erase(it);
+            ++removed;
+        } else {
+            ++it;
+        }
+    }
+    return removed;
+}
+
+} // namespace std
+
+#endif // BOXCXX_SET

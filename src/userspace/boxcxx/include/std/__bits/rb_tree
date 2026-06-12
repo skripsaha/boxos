@@ -1,0 +1,694 @@
+// boxcxx — <__bits/rb_tree>
+// One red-black tree engine behind map/multimap/set/multiset.
+//
+// Layout follows the proven libstdc++ shape: a header node embedded in
+// the tree object whose parent points at the root, left at the
+// leftmost node (begin) and right at the rightmost; end() is the
+// header itself, which makes ++/-- total without null checks. The
+// header is flagged red while the root is black — the decrement
+// algorithm uses that to recognise the header without a flag byte.
+//
+// Rebalancing is the classic CLRS insert/erase fixup adapted to
+// null-leaves (no sentinel nil node): the erase fixup tracks the
+// parent of the possibly-null child explicitly.
+#ifndef BOXCXX_BITS_RB_TREE
+#define BOXCXX_BITS_RB_TREE
+
+#include <__bits/allocator_core>
+#include <__bits/iterator_core>
+#include <cstddef>
+#include <type_traits>
+#include <utility>
+
+namespace std {
+
+namespace __rb {
+
+struct NodeBase {
+    NodeBase *parent;
+    NodeBase *left;
+    NodeBase *right;
+    bool red;
+};
+
+inline NodeBase *Minimum(NodeBase *n) noexcept
+{
+    while (n->left) n = n->left;
+    return n;
+}
+inline NodeBase *Maximum(NodeBase *n) noexcept
+{
+    while (n->right) n = n->right;
+    return n;
+}
+
+// header recognition: the header is the only "red node whose
+// grandparent is itself" (header.parent = root, root.parent = header).
+inline NodeBase *Increment(NodeBase *n) noexcept
+{
+    if (n->right) {
+        return Minimum(n->right);
+    }
+    NodeBase *p = n->parent;
+    while (n == p->right) {
+        n = p;
+        p = p->parent;
+    }
+    // Single-node tree: n was the header already (n->right == root == p).
+    if (n->right == p) return n;
+    return p;
+}
+
+inline NodeBase *Decrement(NodeBase *n) noexcept
+{
+    if (n->red && n->parent->parent == n) return n->right; // header → max
+    if (n->left) return Maximum(n->left);
+    NodeBase *p = n->parent;
+    while (n == p->left) {
+        n = p;
+        p = p->parent;
+    }
+    return p;
+}
+
+inline void RotateLeft(NodeBase *x, NodeBase *&root)
+{
+    NodeBase *y = x->right;
+    x->right    = y->left;
+    if (y->left) y->left->parent = x;
+    y->parent = x->parent;
+    if (x == root)
+        root = y;
+    else if (x == x->parent->left)
+        x->parent->left = y;
+    else
+        x->parent->right = y;
+    y->left   = x;
+    x->parent = y;
+}
+
+inline void RotateRight(NodeBase *x, NodeBase *&root)
+{
+    NodeBase *y = x->left;
+    x->left     = y->right;
+    if (y->right) y->right->parent = x;
+    y->parent = x->parent;
+    if (x == root)
+        root = y;
+    else if (x == x->parent->right)
+        x->parent->right = y;
+    else
+        x->parent->left = y;
+    y->right  = x;
+    x->parent = y;
+}
+
+// Link `n` under `parent` on the given side, then restore the RB
+// invariants. `header` is the tree anchor (header.parent == root).
+inline void InsertAndFixup(bool insert_left, NodeBase *n, NodeBase *parent,
+                           NodeBase &header)
+{
+    NodeBase *&root = header.parent;
+
+    n->parent = parent;
+    n->left   = nullptr;
+    n->right  = nullptr;
+    n->red    = true;
+
+    if (insert_left) {
+        parent->left = n;
+        if (parent == &header) {
+            header.parent = n;
+            header.right  = n;
+        } else if (parent == header.left) {
+            header.left = n;
+        }
+    } else {
+        parent->right = n;
+        if (parent == header.right) header.right = n;
+    }
+
+    // CLRS insert fixup.
+    while (n != root && n->parent->red) {
+        NodeBase *gp = n->parent->parent;
+        if (n->parent == gp->left) {
+            NodeBase *uncle = gp->right;
+            if (uncle && uncle->red) {
+                n->parent->red = false;
+                uncle->red     = false;
+                gp->red        = true;
+                n              = gp;
+            } else {
+                if (n == n->parent->right) {
+                    n = n->parent;
+                    RotateLeft(n, root);
+                }
+                n->parent->red = false;
+                gp->red        = true;
+                RotateRight(gp, root);
+            }
+        } else {
+            NodeBase *uncle = gp->left;
+            if (uncle && uncle->red) {
+                n->parent->red = false;
+                uncle->red     = false;
+                gp->red        = true;
+                n              = gp;
+            } else {
+                if (n == n->parent->left) {
+                    n = n->parent;
+                    RotateRight(n, root);
+                }
+                n->parent->red = false;
+                gp->red        = true;
+                RotateLeft(gp, root);
+            }
+        }
+    }
+    root->red = false;
+}
+
+// Unlink `z` preserving the invariants; returns z for deallocation.
+// The libstdc++ rebalance-for-erase shape: swap z with its successor
+// when both children exist, then fix the double-black through (x, xp).
+inline NodeBase *EraseAndFixup(NodeBase *z, NodeBase &header)
+{
+    NodeBase *&root     = header.parent;
+    NodeBase *&leftmost = header.left;
+    NodeBase *&rightmost = header.right;
+
+    NodeBase *y  = z;
+    NodeBase *x  = nullptr;
+    NodeBase *xp = nullptr;
+
+    if (!y->left) {
+        x = y->right;
+    } else if (!y->right) {
+        x = y->left;
+    } else {
+        y = Minimum(z->right); // successor: no left child
+        x = y->right;
+    }
+
+    if (y != z) {
+        // Splice the successor into z's place (relink, no value moves).
+        z->left->parent = y;
+        y->left         = z->left;
+        if (y != z->right) {
+            xp = y->parent;
+            if (x) x->parent = y->parent;
+            y->parent->left = x;
+            y->right        = z->right;
+            z->right->parent = y;
+        } else {
+            xp = y;
+        }
+        if (root == z)
+            root = y;
+        else if (z->parent->left == z)
+            z->parent->left = y;
+        else
+            z->parent->right = y;
+        y->parent = z->parent;
+        bool tmp  = y->red;
+        y->red    = z->red;
+        z->red    = tmp;
+        y         = z; // y now points at the node to delete
+    } else {
+        xp = y->parent;
+        if (x) x->parent = y->parent;
+        if (root == z) {
+            root = x;
+        } else if (z->parent->left == z) {
+            z->parent->left = x;
+        } else {
+            z->parent->right = x;
+        }
+        if (leftmost == z)
+            leftmost = z->right ? Minimum(x) : z->parent;
+        if (rightmost == z)
+            rightmost = z->left ? Maximum(x) : z->parent;
+    }
+
+    if (!y->red) {
+        // Double-black fixup; x may be null, xp is its parent.
+        while (x != root && (!x || !x->red)) {
+            if (x == xp->left) {
+                NodeBase *w = xp->right;
+                if (w->red) {
+                    w->red  = false;
+                    xp->red = true;
+                    RotateLeft(xp, root);
+                    w = xp->right;
+                }
+                if ((!w->left || !w->left->red) &&
+                    (!w->right || !w->right->red)) {
+                    w->red = true;
+                    x      = xp;
+                    xp     = xp->parent;
+                } else {
+                    if (!w->right || !w->right->red) {
+                        if (w->left) w->left->red = false;
+                        w->red = true;
+                        RotateRight(w, root);
+                        w = xp->right;
+                    }
+                    w->red  = xp->red;
+                    xp->red = false;
+                    if (w->right) w->right->red = false;
+                    RotateLeft(xp, root);
+                    break;
+                }
+            } else {
+                NodeBase *w = xp->left;
+                if (w->red) {
+                    w->red  = false;
+                    xp->red = true;
+                    RotateRight(xp, root);
+                    w = xp->left;
+                }
+                if ((!w->right || !w->right->red) &&
+                    (!w->left || !w->left->red)) {
+                    w->red = true;
+                    x      = xp;
+                    xp     = xp->parent;
+                } else {
+                    if (!w->left || !w->left->red) {
+                        if (w->right) w->right->red = false;
+                        w->red = true;
+                        RotateLeft(w, root);
+                        w = xp->left;
+                    }
+                    w->red  = xp->red;
+                    xp->red = false;
+                    if (w->left) w->left->red = false;
+                    RotateRight(xp, root);
+                    break;
+                }
+            }
+        }
+        if (x) x->red = false;
+    }
+    return y;
+}
+
+template <typename V>
+struct Node : NodeBase {
+    V value;
+};
+
+// ── tree template ───────────────────────────────────────────────────────
+// KeyOfValue projects the comparison key out of the stored value
+// (identity for sets, .first for maps).
+
+template <typename Key, typename Value, typename KeyOfValue, typename Comp,
+          typename Alloc>
+class Tree {
+    using NodeT      = Node<Value>;
+    using NodeAlloc  = typename allocator_traits<Alloc>::template rebind_alloc<NodeT>;
+    using NodeTraits = allocator_traits<NodeAlloc>;
+
+public:
+    using key_type        = Key;
+    using value_type      = Value;
+    using size_type       = size_t;
+    using difference_type = ptrdiff_t;
+
+    template <bool Const>
+    class Iter {
+        using Ref = conditional_t<Const, const Value &, Value &>;
+        using Ptr = conditional_t<Const, const Value *, Value *>;
+
+    public:
+        using iterator_category = bidirectional_iterator_tag;
+        using value_type        = Value;
+        using difference_type   = ptrdiff_t;
+        using reference         = Ref;
+        using pointer           = Ptr;
+
+        Iter() noexcept : __n(nullptr) {}
+        explicit Iter(NodeBase *n) noexcept : __n(n) {}
+        // const_iterator from iterator
+        template <bool C2>
+            requires(Const && !C2)
+        Iter(const Iter<C2> &other) noexcept : __n(other.__n)
+        {
+        }
+
+        Ref operator*() const { return static_cast<NodeT *>(__n)->value; }
+        Ptr operator->() const
+        {
+            return __builtin_addressof(static_cast<NodeT *>(__n)->value);
+        }
+        Iter &operator++()
+        {
+            __n = Increment(__n);
+            return *this;
+        }
+        Iter operator++(int)
+        {
+            Iter tmp = *this;
+            __n      = Increment(__n);
+            return tmp;
+        }
+        Iter &operator--()
+        {
+            __n = Decrement(__n);
+            return *this;
+        }
+        Iter operator--(int)
+        {
+            Iter tmp = *this;
+            __n      = Decrement(__n);
+            return tmp;
+        }
+        bool operator==(const Iter &rhs) const noexcept
+        {
+            return __n == rhs.__n;
+        }
+
+        NodeBase *__n;
+    };
+
+    using iterator       = Iter<false>;
+    using const_iterator = Iter<true>;
+
+    // ── lifecycle ───────────────────────────────────────────────────────
+
+    Tree() : Tree(Comp(), Alloc()) {}
+    explicit Tree(const Comp &comp, const Alloc &a = Alloc())
+        : __comp(comp), __alloc(a)
+    {
+        ResetHeader();
+    }
+    Tree(const Tree &other)
+        : __comp(other.__comp),
+          __alloc(NodeTraits::select_on_container_copy_construction(
+              other.__alloc))
+    {
+        ResetHeader();
+        CopyFrom(other);
+    }
+    Tree(Tree &&other) noexcept : __comp(std::move(other.__comp)),
+                                  __alloc(std::move(other.__alloc))
+    {
+        StealFrom(other);
+    }
+    ~Tree() { clear(); }
+
+    Tree &operator=(const Tree &other)
+    {
+        if (this == &other) return *this;
+        clear();
+        if constexpr (NodeTraits::propagate_on_container_copy_assignment::
+                          value)
+            __alloc = other.__alloc;
+        __comp = other.__comp;
+        CopyFrom(other);
+        return *this;
+    }
+    Tree &operator=(Tree &&other) noexcept
+    {
+        if (this == &other) return *this;
+        clear();
+        if constexpr (NodeTraits::propagate_on_container_move_assignment::
+                          value)
+            __alloc = std::move(other.__alloc);
+        __comp = std::move(other.__comp);
+        StealFrom(other);
+        return *this;
+    }
+
+    // ── observers ───────────────────────────────────────────────────────
+
+    iterator begin() noexcept { return iterator(__header.left); }
+    const_iterator begin() const noexcept
+    {
+        return const_iterator(const_cast<NodeBase *>(__header.left));
+    }
+    iterator end() noexcept { return iterator(&__header); }
+    const_iterator end() const noexcept
+    {
+        return const_iterator(const_cast<NodeBase *>(&__header));
+    }
+
+    [[nodiscard]] bool empty() const noexcept { return __count == 0; }
+    size_type size() const noexcept { return __count; }
+    size_type max_size() const noexcept
+    {
+        return size_type(-1) / sizeof(NodeT);
+    }
+    Comp key_comp() const { return __comp; }
+    Alloc get_allocator() const noexcept { return Alloc(__alloc); }
+
+    // ── lookup ──────────────────────────────────────────────────────────
+
+    template <typename K>
+    iterator LowerBound(const K &key)
+    {
+        NodeBase *hit = &__header;
+        NodeBase *cur = __header.parent;
+        while (cur) {
+            if (!__comp(KeyOf(cur), key)) {
+                hit = cur;
+                cur = cur->left;
+            } else {
+                cur = cur->right;
+            }
+        }
+        return iterator(hit);
+    }
+    template <typename K>
+    iterator UpperBound(const K &key)
+    {
+        NodeBase *hit = &__header;
+        NodeBase *cur = __header.parent;
+        while (cur) {
+            if (__comp(key, KeyOf(cur))) {
+                hit = cur;
+                cur = cur->left;
+            } else {
+                cur = cur->right;
+            }
+        }
+        return iterator(hit);
+    }
+    template <typename K>
+    iterator Find(const K &key)
+    {
+        iterator hit = LowerBound(key);
+        if (hit.__n == &__header || __comp(key, KeyOf(hit.__n))) return end();
+        return hit;
+    }
+    template <typename K>
+    size_type Count(const K &key)
+    {
+        size_type n = 0;
+        for (iterator it = LowerBound(key);
+             it.__n != &__header && !__comp(key, KeyOf(it.__n)); ++it)
+            ++n;
+        return n;
+    }
+
+    // ── modifiers ───────────────────────────────────────────────────────
+
+    void clear() noexcept
+    {
+        DestroySubtree(__header.parent);
+        ResetHeader();
+    }
+
+    // Unique insert: returns {iterator, inserted?}.
+    template <typename... Args>
+    pair<iterator, bool> EmplaceUnique(Args &&...args)
+    {
+        NodeT *n = MakeNode(std::forward<Args>(args)...);
+        NodeBase *parent;
+        bool left;
+        if (FindUniquePos(KeyOfNode(n), parent, left)) {
+            InsertAndFixup(left, n, parent, __header);
+            ++__count;
+            return {iterator(n), true};
+        }
+        // Equivalent key exists — `parent` holds it.
+        DropNode(n);
+        return {iterator(parent), false};
+    }
+
+    template <typename... Args>
+    iterator EmplaceMulti(Args &&...args)
+    {
+        NodeT *n          = MakeNode(std::forward<Args>(args)...);
+        NodeBase *parent  = &__header;
+        NodeBase *cur     = __header.parent;
+        bool left         = true;
+        while (cur) {
+            parent = cur;
+            left   = __comp(KeyOfNode(n), KeyOf(cur));
+            cur    = left ? cur->left : cur->right;
+        }
+        InsertAndFixup(left || parent == &__header, n, parent, __header);
+        ++__count;
+        return iterator(n);
+    }
+
+    iterator Erase(const_iterator where)
+    {
+        NodeBase *z    = where.__n;
+        iterator after = iterator(Increment(z));
+        NodeBase *dead = EraseAndFixup(z, __header);
+        DropNode(static_cast<NodeT *>(dead));
+        --__count;
+        return after;
+    }
+
+    template <typename K>
+    size_type EraseKey(const K &key)
+    {
+        size_type removed = 0;
+        iterator it       = LowerBound(key);
+        while (it.__n != &__header && !__comp(key, KeyOf(it.__n))) {
+            it = Erase(it);
+            ++removed;
+        }
+        return removed;
+    }
+
+    void swap(Tree &other) noexcept
+    {
+        if constexpr (NodeTraits::propagate_on_container_swap::value) {
+            NodeAlloc tmp = __alloc;
+            __alloc       = other.__alloc;
+            other.__alloc = tmp;
+        }
+        Comp ctmp    = __comp;
+        __comp       = other.__comp;
+        other.__comp = ctmp;
+        NodeBase htmp;
+        size_type stmp = __count;
+        __count        = other.__count;
+        other.__count  = stmp;
+        // Swap header contents, then re-anchor root/limits at the new
+        // owners (root.parent and empty-tree limits point at the header
+        // ADDRESS, which does not move).
+        htmp           = __header;
+        __header       = other.__header;
+        other.__header = htmp;
+        ReAnchor();
+        other.ReAnchor();
+    }
+
+    Comp __comp;
+
+private:
+    static const Key &KeyOf(const NodeBase *n) noexcept
+    {
+        return KeyOfValue{}(static_cast<const NodeT *>(n)->value);
+    }
+    static const Key &KeyOfNode(const NodeT *n) noexcept
+    {
+        return KeyOfValue{}(n->value);
+    }
+
+    void ResetHeader() noexcept
+    {
+        __header.parent = nullptr;
+        __header.left   = &__header;
+        __header.right  = &__header;
+        __header.red    = true;
+        __count         = 0;
+    }
+
+    void ReAnchor() noexcept
+    {
+        if (__header.parent) {
+            __header.parent->parent = &__header;
+        } else {
+            __header.left  = &__header;
+            __header.right = &__header;
+        }
+    }
+
+    template <typename... Args>
+    NodeT *MakeNode(Args &&...args)
+    {
+        NodeT *n = NodeTraits::allocate(__alloc, 1);
+        try {
+            NodeTraits::construct(__alloc,
+                                  __builtin_addressof(n->value),
+                                  std::forward<Args>(args)...);
+        } catch (...) {
+            NodeTraits::deallocate(__alloc, n, 1);
+            throw;
+        }
+        return n;
+    }
+
+    void DropNode(NodeT *n) noexcept
+    {
+        NodeTraits::destroy(__alloc, __builtin_addressof(n->value));
+        NodeTraits::deallocate(__alloc, n, 1);
+    }
+
+    void DestroySubtree(NodeBase *n) noexcept
+    {
+        while (n) {
+            DestroySubtree(n->right);
+            NodeBase *next = n->left;
+            DropNode(static_cast<NodeT *>(n));
+            n = next;
+        }
+    }
+
+    // True → (parent, left) is a free unique slot; false → an
+    // equivalent key exists and `parent` points at its node.
+    template <typename K>
+    bool FindUniquePos(const K &key, NodeBase *&parent, bool &left)
+    {
+        parent         = &__header;
+        NodeBase *cur  = __header.parent;
+        bool went_left = true;
+        while (cur) {
+            parent    = cur;
+            went_left = __comp(key, KeyOf(cur));
+            cur       = went_left ? cur->left : cur->right;
+        }
+        left = went_left;
+        // The only candidate for an equivalent key is the in-order
+        // predecessor of the found slot.
+        NodeBase *pred = parent;
+        if (went_left) {
+            if (parent == &__header || parent == __header.left) return true;
+            pred = Decrement(parent);
+        }
+        if (!__comp(KeyOf(pred), key)) { // pred >= key ⇒ equivalent
+            parent = pred;
+            return false;
+        }
+        return true;
+    }
+
+    void CopyFrom(const Tree &other)
+    {
+        for (const_iterator it = other.begin(); it != other.end(); ++it)
+            EmplaceMulti(*it);
+    }
+
+    void StealFrom(Tree &other) noexcept
+    {
+        __header = other.__header;
+        __count  = other.__count;
+        ReAnchor();
+        other.ResetHeader();
+    }
+
+    NodeBase __header;
+    size_type __count = 0;
+    [[no_unique_address]] NodeAlloc __alloc;
+};
+
+} // namespace __rb
+
+} // namespace std
+
+#endif // BOXCXX_BITS_RB_TREE

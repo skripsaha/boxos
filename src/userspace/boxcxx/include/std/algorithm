@@ -566,20 +566,32 @@ constexpr Out reverse_copy(In first, In last, Out out)
     return out;
 }
 
-// Gries-Mills rotate: swap-walk, no temp buffer, single pass shape.
+// Gries-Mills rotate, fully iterative. The textbook tail-recursive
+// form blows the stack on the append-one-rotate pattern (recursion
+// depth n-1 with three fat iterators per frame — found the hard way as
+// a userspace #PF below the stack guard during deque::insert).
 template <typename It>
 constexpr It rotate(It first, It middle, It last)
 {
     if (first == middle) return last;
     if (middle == last) return first;
-    It write     = first;
-    It next_read = first;
-    for (It read = middle; read != last; ++write, ++read) {
-        if (write == next_read) next_read = read;
-        iter_swap(write, read);
+    It ret         = first;
+    bool ret_known = false;
+    while (first != middle && middle != last) {
+        It write     = first;
+        It next_read = first;
+        for (It read = middle; read != last; ++write, ++read) {
+            if (write == next_read) next_read = read;
+            iter_swap(write, read);
+        }
+        if (!ret_known) {
+            ret       = write;
+            ret_known = true;
+        }
+        first  = write;
+        middle = next_read;
     }
-    rotate(write, next_read, last);
-    return write;
+    return ret;
 }
 template <typename In, typename Out>
 constexpr Out rotate_copy(In first, In middle, In last, Out out)

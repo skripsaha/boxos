@@ -19,8 +19,14 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <deque>
 #include <iterator>
+#include <list>
+#include <map>
 #include <ranges>
+#include <set>
+#include <unordered_map>
+#include <unordered_set>
 #include <cstddef>
 #include <cstdint>
 #include <mutex>
@@ -1051,6 +1057,169 @@ void Phase7b()
     printf("[CXX] PASS phase7b: algorithm/iterator/ranges-core\n");
 }
 
+// ── phase7c fixtures: associative + unordered + deque + list ───────────
+
+void Phase7c()
+{
+    // map: RB-tree stress — modular permutation insert, ordered walk,
+    // erase half, re-verify order + bounds (rebalance both fixups)
+    std::map<int, int> m;
+    for (int i = 0; i < 200; ++i) m[(i * 73) % 199] = i;
+    Check(m.size() == 199, "phase7c map size");
+    int prev = -1;
+    bool ordered = true;
+    for (auto &kv : m) {
+        if (kv.first <= prev) ordered = false;
+        prev = kv.first;
+    }
+    Check(ordered, "phase7c map ordered walk");
+    for (int i = 0; i < 199; i += 2) m.erase(i);
+    prev    = -1;
+    ordered = true;
+    for (auto &kv : m) {
+        if (kv.first <= prev) ordered = false;
+        prev = kv.first;
+    }
+    Check(ordered && m.size() == 99 && !m.contains(2) && m.contains(3),
+          "phase7c map erase+order");
+    Check(m.lower_bound(4)->first == 5 && m.upper_bound(5)->first == 7,
+          "phase7c map bounds");
+    auto [ti, tok] = m.try_emplace(3, 999);
+    Check(!tok && ti->second != 999, "phase7c try_emplace existing");
+    m.insert_or_assign(3, 42);
+    Check(m.at(3) == 42, "phase7c insert_or_assign");
+    std::map<int, int> mc = m;
+    Check(mc == m, "phase7c map copy+equality");
+    std::map<int, int> mv = std::move(mc);
+    Check(mv.size() == m.size() && mc.empty(), "phase7c map move");
+    bool caught = false;
+    try {
+        (void)m.at(123456);
+    } catch (const std::out_of_range &) {
+        caught = true;
+    }
+    Check(caught, "phase7c map::at throws");
+
+    // set / multiset / multimap
+    std::set<std::string> s{"b", "a", "c", "a"};
+    Check(s.size() == 3 && *s.begin() == "a" && s.contains("c"),
+          "phase7c set basic");
+    std::multiset<int> ms{1, 2, 2, 3, 2};
+    Check(ms.count(2) == 3 && ms.size() == 5, "phase7c multiset count");
+    ms.erase(2);
+    Check(ms.size() == 2 && ms.count(2) == 0, "phase7c multiset erase key");
+    std::multimap<int, int> mm;
+    mm.emplace(1, 10);
+    mm.emplace(1, 20);
+    mm.emplace(0, 5);
+    auto [mlo, mhi] = mm.equal_range(1);
+    int spread      = 0;
+    for (auto it = mlo; it != mhi; ++it) ++spread;
+    Check(mm.count(1) == 2 && spread == 2 && mm.begin()->first == 0,
+          "phase7c multimap equal_range");
+
+    // unordered_map: growth across several rehashes + bucket sanity
+    std::unordered_map<std::string, int> um;
+    for (int i = 0; i < 300; ++i) um["k" + std::to_string(i)] = i;
+    Check(um.size() == 300, "phase7c umap size");
+    Check(um.load_factor() <= um.max_load_factor() + 0.01f,
+          "phase7c umap load factor");
+    bool all = true;
+    for (int i = 0; i < 300; ++i)
+        if (um.at("k" + std::to_string(i)) != i) all = false;
+    Check(all, "phase7c umap lookups after rehash");
+    size_t buckets = um.bucket_count();
+    um.rehash(buckets * 4);
+    Check(um.bucket_count() >= buckets * 4, "phase7c umap explicit rehash");
+    all = true;
+    for (int i = 0; i < 300; ++i)
+        if (!um.contains("k" + std::to_string(i))) all = false;
+    Check(all, "phase7c umap survives rehash");
+    Check(um.erase("k7") == 1 && !um.contains("k7"), "phase7c umap erase");
+    auto [ui, uok] = um.try_emplace("k9", 999);
+    Check(!uok && ui->second == 9, "phase7c umap try_emplace");
+    std::unordered_map<std::string, int> umc = um;
+    Check(umc == um, "phase7c umap copy+equality");
+
+    // unordered_set / multiset
+    std::unordered_set<int> us{5, 3, 5, 1};
+    Check(us.size() == 3 && us.contains(5) && !us.contains(2),
+          "phase7c uset dedup");
+    std::erase_if(us, [](int x) { return x < 4; });
+    Check(us.size() == 1 && us.contains(5), "phase7c uset erase_if");
+    std::unordered_multiset<int> ums{7, 7, 8};
+    auto [ulo, uhi] = ums.equal_range(7);
+    spread          = 0;
+    for (auto it = ulo; it != uhi; ++it) ++spread;
+    Check(ums.count(7) == 2 && spread == 2, "phase7c umultiset adjacency");
+
+    // deque: ping-pong over block boundaries forces map growth both ways
+    std::deque<int> d;
+    for (int i = 0; i < 2000; ++i) {
+        d.push_back(i);
+        d.push_front(-i);
+    }
+    Check(d.size() == 4000 && d.front() == -1999 && d.back() == 1999,
+          "phase7c deque growth both ends");
+    // index 1999 is push_front(-0), index 2000 is push_back(0)
+    Check(d[2000] == 0 && d[2001] == 1 && d.at(0) == -1999,
+          "phase7c deque indexing");
+    for (int i = 0; i < 1500; ++i) {
+        d.pop_front();
+        d.pop_back();
+    }
+    Check(d.size() == 1000 && d.front() == -499 && d.back() == 499,
+          "phase7c deque shrink");
+    Check(std::is_sorted(d.begin(), d.end()), "phase7c deque RA iterator");
+    d.insert(d.begin() + 5, 7777);
+    Check(d[5] == 7777 && d.size() == 1001, "phase7c deque insert");
+    d.erase(d.begin() + 5);
+    Check(d[5] == -494 && d.size() == 1000, "phase7c deque erase");
+    std::deque<int> dm = std::move(d);
+    Check(dm.size() == 1000 && dm.back() == 499, "phase7c deque move");
+
+    // list: splice/merge/sort (the 64-bin bottom-up path on 1000 nodes)
+    std::list<int> l{5, 1, 4, 2, 3};
+    l.sort();
+    prev    = 0;
+    ordered = true;
+    for (int x : l) {
+        if (x <= prev) ordered = false;
+        prev = x;
+    }
+    Check(ordered && l.front() == 1 && l.back() == 5, "phase7c list sort");
+    std::list<int> l2{0, 6};
+    l.merge(l2);
+    Check(l.size() == 7 && l2.empty() && l.front() == 0 && l.back() == 6,
+          "phase7c list merge");
+    l.remove_if([](int x) { return x % 2 == 0; });
+    Check(l.size() == 3, "phase7c list remove_if");
+    l.push_front(1);
+    l.unique();
+    Check(l.size() == 3, "phase7c list unique");
+    l.reverse();
+    Check(l.front() == 5 && l.back() == 1, "phase7c list reverse");
+    std::list<std::string> ls;
+    ls.emplace_back("b");
+    ls.emplace_front("a");
+    std::list<std::string> ls2;
+    ls2.splice(ls2.begin(), ls);
+    Check(ls.empty() && ls2.size() == 2 && ls2.front() == "a",
+          "phase7c list splice");
+    std::list<int> big;
+    for (int i = 999; i >= 0; --i) big.push_back(i);
+    big.sort();
+    prev    = -1;
+    ordered = true;
+    for (int x : big) {
+        if (x != prev + 1) ordered = false;
+        prev = x;
+    }
+    Check(ordered && big.size() == 1000, "phase7c list sort 1000");
+
+    printf("[CXX] PASS phase7c: map/set/unordered/deque/list\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -1067,6 +1236,7 @@ int main()
     Phase6();
     Phase7a();
     Phase7b();
+    Phase7c();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
