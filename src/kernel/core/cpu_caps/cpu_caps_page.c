@@ -23,6 +23,7 @@ void cpu_caps_page_init(void) {
     caps_page->has_lam = g_cpu_caps.has_lam;
     caps_page->has_cet = g_cpu_caps.has_shstk || g_cpu_caps.has_ibt;
     caps_page->has_tme = g_cpu_caps.has_tme;
+    caps_page->has_fsgsbase = g_cpu_caps.has_fsgsbase;
     caps_page->tsc_freq_khz = 0;  // Will be filled after TSC calibration
 
     kprintf("[CPU_CAPS] page published: waitpkg=%d invtsc=%d pku=%d pks=%d "
@@ -69,4 +70,6 @@ void cpu_caps_page_refresh_features(void) {
                                               __ATOMIC_RELEASE);
     __atomic_store_n(&caps_page->has_tme,
                      g_cpu_caps.has_tme,     __ATOMIC_RELEASE);
+    __atomic_store_n(&caps_page->has_fsgsbase,
+                     g_cpu_caps.has_fsgsbase, __ATOMIC_RELEASE);
 }

@@ -1,0 +1,491 @@
+// boxcxx — <utility>
+#ifndef BOXCXX_UTILITY
+#define BOXCXX_UTILITY
+
+#include <type_traits>
+#include <compare>
+#include <initializer_list>
+#include <cstddef>
+
+namespace std {
+
+// ── move / forward family ───────────────────────────────────────────────
+
+template <class T>
+[[nodiscard]] constexpr T &&forward(remove_reference_t<T> &t) noexcept
+{
+    return static_cast<T &&>(t);
+}
+
+template <class T>
+[[nodiscard]] constexpr T &&forward(remove_reference_t<T> &&t) noexcept
+{
+    static_assert(!is_lvalue_reference_v<T>,
+                  "std::forward must not turn an rvalue into an lvalue");
+    return static_cast<T &&>(t);
+}
+
+template <class T>
+[[nodiscard]] constexpr remove_reference_t<T> &&move(T &&t) noexcept
+{
+    return static_cast<remove_reference_t<T> &&>(t);
+}
+
+template <class T>
+[[nodiscard]] constexpr conditional_t<
+    !is_nothrow_move_constructible_v<T> && is_copy_constructible_v<T>,
+    const T &, T &&>
+move_if_noexcept(T &x) noexcept
+{
+    return move(x);
+}
+
+template <class T>
+constexpr add_const_t<T> &as_const(T &t) noexcept
+{
+    return t;
+}
+template <class T> void as_const(const T &&) = delete;
+
+// C++23 [forward]/6 — forward_like
+template <class T, class U>
+[[nodiscard]] constexpr auto &&forward_like(U &&x) noexcept
+{
+    constexpr bool kAddConst = is_const_v<remove_reference_t<T>>;
+    if constexpr (is_lvalue_reference_v<T &&>) {
+        if constexpr (kAddConst)
+            return as_const(x);
+        else
+            return static_cast<U &>(x);
+    } else {
+        if constexpr (kAddConst)
+            return move(as_const(x));
+        else
+            return move(x);
+    }
+}
+
+// ── swap (definitions for the declarations in <type_traits>) ───────────
+
+template <class T>
+constexpr enable_if_t<is_move_constructible<T>::value &&
+                      is_move_assignable<T>::value>
+swap(T &a, T &b) noexcept(is_nothrow_move_constructible<T>::value &&
+                          is_nothrow_move_assignable<T>::value)
+{
+    T tmp = move(a);
+    a     = move(b);
+    b     = move(tmp);
+}
+
+template <class T, size_t N>
+constexpr enable_if_t<is_swappable<T>::value>
+swap(T (&a)[N], T (&b)[N]) noexcept(is_nothrow_swappable_v<T>)
+{
+    for (size_t i = 0; i < N; ++i) swap(a[i], b[i]);
+}
+
+template <class T, class U = T>
+constexpr T exchange(T &obj, U &&new_value) noexcept(
+    is_nothrow_move_constructible_v<T> && is_nothrow_assignable_v<T &, U>)
+{
+    T old = move(obj);
+    obj   = forward<U>(new_value);
+    return old;
+}
+
+// ── to_underlying / unreachable ─────────────────────────────────────────
+
+template <class E>
+[[nodiscard]] constexpr underlying_type_t<E> to_underlying(E e) noexcept
+{
+    return static_cast<underlying_type_t<E>>(e);
+}
+
+[[noreturn]] inline void unreachable()
+{
+    __builtin_unreachable();
+}
+
+// ── safe integer comparisons ([utility.intcmp]) ─────────────────────────
+
+template <class T, class U>
+[[nodiscard]] constexpr bool cmp_equal(T t, U u) noexcept
+{
+    static_assert(is_integral_v<T> && is_integral_v<U>,
+                  "cmp_* require standard integer types");
+    if constexpr (is_signed_v<T> == is_signed_v<U>)
+        return t == u;
+    else if constexpr (is_signed_v<T>)
+        return t >= 0 && make_unsigned_t<T>(t) == u;
+    else
+        return u >= 0 && make_unsigned_t<U>(u) == t;
+}
+
+template <class T, class U>
+[[nodiscard]] constexpr bool cmp_not_equal(T t, U u) noexcept
+{
+    return !cmp_equal(t, u);
+}
+
+template <class T, class U>
+[[nodiscard]] constexpr bool cmp_less(T t, U u) noexcept
+{
+    static_assert(is_integral_v<T> && is_integral_v<U>,
+                  "cmp_* require standard integer types");
+    if constexpr (is_signed_v<T> == is_signed_v<U>)
+        return t < u;
+    else if constexpr (is_signed_v<T>)
+        return t < 0 || make_unsigned_t<T>(t) < u;
+    else
+        return u >= 0 && t < make_unsigned_t<U>(u);
+}
+
+template <class T, class U>
+[[nodiscard]] constexpr bool cmp_greater(T t, U u) noexcept
+{
+    return cmp_less(u, t);
+}
+
+template <class T, class U>
+[[nodiscard]] constexpr bool cmp_less_equal(T t, U u) noexcept
+{
+    return !cmp_less(u, t);
+}
+
+template <class T, class U>
+[[nodiscard]] constexpr bool cmp_greater_equal(T t, U u) noexcept
+{
+    return !cmp_less(t, u);
+}
+
+template <class R, class T>
+[[nodiscard]] constexpr bool in_range(T t) noexcept
+{
+    if constexpr (is_signed_v<R>) {
+        constexpr R kMax = R(make_unsigned_t<R>(-1) >> 1);
+        constexpr R kMin = R(-kMax - 1);
+        return cmp_greater_equal(t, kMin) && cmp_less_equal(t, kMax);
+    } else {
+        return cmp_greater_equal(t, R(0)) && cmp_less_equal(t, R(-1));
+    }
+}
+
+// ── integer_sequence ────────────────────────────────────────────────────
+
+template <class T, T... Is>
+struct integer_sequence {
+    using value_type = T;
+    static constexpr size_t size() noexcept { return sizeof...(Is); }
+};
+
+template <size_t... Is>
+using index_sequence = integer_sequence<size_t, Is...>;
+
+template <class T, T N>
+using make_integer_sequence = integer_sequence<T, __integer_pack(N)...>;
+
+template <size_t N>
+using make_index_sequence = make_integer_sequence<size_t, N>;
+
+template <class... T>
+using index_sequence_for = make_index_sequence<sizeof...(T)>;
+
+// ── in_place / piecewise tags ───────────────────────────────────────────
+
+struct in_place_t {
+    explicit in_place_t() = default;
+};
+inline constexpr in_place_t in_place{};
+
+template <class T>
+struct in_place_type_t {
+    explicit in_place_type_t() = default;
+};
+template <class T> inline constexpr in_place_type_t<T> in_place_type{};
+
+template <size_t I>
+struct in_place_index_t {
+    explicit in_place_index_t() = default;
+};
+template <size_t I> inline constexpr in_place_index_t<I> in_place_index{};
+
+struct piecewise_construct_t {
+    explicit piecewise_construct_t() = default;
+};
+inline constexpr piecewise_construct_t piecewise_construct{};
+
+template <class...> class tuple;   // <tuple>
+
+namespace __bits {
+// "T x = {};" valid — i.e. default construction is also implicit.
+template <class T>
+concept ImplicitlyDefaultConstructibleTest = requires {
+    [](const T &) {}({});
+};
+template <class T>
+inline constexpr bool ImplicitlyDefaultConstructible =
+    is_default_constructible_v<T> && ImplicitlyDefaultConstructibleTest<T>;
+} // namespace __bits
+
+// ── tuple protocol primaries (shared by pair/tuple/array) ───────────────
+
+template <class T> struct tuple_size;
+template <class T>
+struct tuple_size<const T>
+    : integral_constant<size_t, tuple_size<T>::value> {};
+template <class T>
+inline constexpr size_t tuple_size_v = tuple_size<T>::value;
+
+template <size_t I, class T> struct tuple_element;
+template <size_t I, class T>
+struct tuple_element<I, const T> {
+    using type = add_const_t<typename tuple_element<I, T>::type>;
+};
+template <size_t I, class T>
+using tuple_element_t = typename tuple_element<I, T>::type;
+
+// ── pair ────────────────────────────────────────────────────────────────
+
+template <class T1, class T2>
+struct pair {
+    using first_type  = T1;
+    using second_type = T2;
+
+    T1 first;
+    T2 second;
+
+    // default
+    explicit(!__bits::ImplicitlyDefaultConstructible<T1> ||
+             !__bits::ImplicitlyDefaultConstructible<T2>)
+        constexpr pair() requires(is_default_constructible_v<T1> &&
+                                  is_default_constructible_v<T2>)
+        : first(), second()
+    {
+    }
+
+    // (const T1&, const T2&)
+    explicit(!is_convertible_v<const T1 &, T1> ||
+             !is_convertible_v<const T2 &, T2>)
+        constexpr pair(const T1 &x, const T2 &y) requires(
+            is_copy_constructible_v<T1> && is_copy_constructible_v<T2>)
+        : first(x), second(y)
+    {
+    }
+
+    // (U1&&, U2&&)
+    template <class U1 = T1, class U2 = T2>
+        requires(is_constructible_v<T1, U1> && is_constructible_v<T2, U2>)
+    explicit(!is_convertible_v<U1, T1> || !is_convertible_v<U2, T2>)
+        constexpr pair(U1 &&x, U2 &&y)
+        : first(forward<U1>(x)), second(forward<U2>(y))
+    {
+    }
+
+    // from pair<U1, U2>& / const& / && / const&&
+    template <class U1, class U2>
+        requires(is_constructible_v<T1, U1 &> && is_constructible_v<T2, U2 &>)
+    explicit(!is_convertible_v<U1 &, T1> || !is_convertible_v<U2 &, T2>)
+        constexpr pair(pair<U1, U2> &p)
+        : first(p.first), second(p.second)
+    {
+    }
+
+    template <class U1, class U2>
+        requires(is_constructible_v<T1, const U1 &> &&
+                 is_constructible_v<T2, const U2 &>)
+    explicit(!is_convertible_v<const U1 &, T1> ||
+             !is_convertible_v<const U2 &, T2>)
+        constexpr pair(const pair<U1, U2> &p)
+        : first(p.first), second(p.second)
+    {
+    }
+
+    template <class U1, class U2>
+        requires(is_constructible_v<T1, U1> && is_constructible_v<T2, U2>)
+    explicit(!is_convertible_v<U1, T1> || !is_convertible_v<U2, T2>)
+        constexpr pair(pair<U1, U2> &&p)
+        : first(forward<U1>(p.first)), second(forward<U2>(p.second))
+    {
+    }
+
+    template <class U1, class U2>
+        requires(is_constructible_v<T1, const U1> &&
+                 is_constructible_v<T2, const U2>)
+    explicit(!is_convertible_v<const U1, T1> ||
+             !is_convertible_v<const U2, T2>)
+        constexpr pair(const pair<U1, U2> &&p)
+        : first(forward<const U1>(p.first)), second(forward<const U2>(p.second))
+    {
+    }
+
+    // piecewise — defined in <tuple>
+    template <class... Args1, class... Args2>
+    constexpr pair(piecewise_construct_t, tuple<Args1...> first_args,
+                   tuple<Args2...> second_args);
+
+    pair(const pair &) = default;
+    pair(pair &&)      = default;
+
+    constexpr pair &operator=(const pair &p) requires(
+        is_copy_assignable_v<T1> && is_copy_assignable_v<T2>)
+    {
+        first  = p.first;
+        second = p.second;
+        return *this;
+    }
+
+    constexpr pair &operator=(pair &&p) noexcept(
+        is_nothrow_move_assignable_v<T1> &&
+        is_nothrow_move_assignable_v<T2>) requires(is_move_assignable_v<T1> &&
+                                                   is_move_assignable_v<T2>)
+    {
+        first  = forward<T1>(p.first);
+        second = forward<T2>(p.second);
+        return *this;
+    }
+
+    template <class U1, class U2>
+        requires(is_assignable_v<T1 &, const U1 &> &&
+                 is_assignable_v<T2 &, const U2 &>)
+    constexpr pair &operator=(const pair<U1, U2> &p)
+    {
+        first  = p.first;
+        second = p.second;
+        return *this;
+    }
+
+    template <class U1, class U2>
+        requires(is_assignable_v<T1 &, U1> && is_assignable_v<T2 &, U2>)
+    constexpr pair &operator=(pair<U1, U2> &&p)
+    {
+        first  = forward<U1>(p.first);
+        second = forward<U2>(p.second);
+        return *this;
+    }
+
+    constexpr void swap(pair &p) noexcept(is_nothrow_swappable_v<T1> &&
+                                          is_nothrow_swappable_v<T2>)
+    {
+        using std::swap;
+        swap(first, p.first);
+        swap(second, p.second);
+    }
+};
+
+template <class T1, class T2>
+pair(T1, T2) -> pair<T1, T2>;
+
+template <class T1, class T2>
+[[nodiscard]] constexpr bool operator==(const pair<T1, T2> &a,
+                                        const pair<T1, T2> &b)
+{
+    return a.first == b.first && a.second == b.second;
+}
+
+template <class T1, class T2>
+[[nodiscard]] constexpr common_comparison_category_t<
+    compare_three_way_result_t<T1>, compare_three_way_result_t<T2>>
+operator<=>(const pair<T1, T2> &a, const pair<T1, T2> &b)
+{
+    if (auto c = compare_three_way{}(a.first, b.first); c != 0) return c;
+    return compare_three_way{}(a.second, b.second);
+}
+
+template <class T1, class T2>
+constexpr enable_if_t<is_swappable_v<T1> && is_swappable_v<T2>>
+swap(pair<T1, T2> &a, pair<T1, T2> &b) noexcept(noexcept(a.swap(b)))
+{
+    a.swap(b);
+}
+
+template <class T1, class T2>
+[[nodiscard]] constexpr pair<unwrap_ref_decay_t<T1>, unwrap_ref_decay_t<T2>>
+make_pair(T1 &&x, T2 &&y)
+{
+    return pair<unwrap_ref_decay_t<T1>, unwrap_ref_decay_t<T2>>(
+        forward<T1>(x), forward<T2>(y));
+}
+
+template <class T1, class T2>
+struct tuple_size<pair<T1, T2>> : integral_constant<size_t, 2> {};
+template <class T1, class T2>
+struct tuple_element<0, pair<T1, T2>> { using type = T1; };
+template <class T1, class T2>
+struct tuple_element<1, pair<T1, T2>> { using type = T2; };
+
+namespace __bits {
+template <size_t I> struct PairGet;
+template <> struct PairGet<0> {
+    template <class T1, class T2>
+    static constexpr T1 &Get(pair<T1, T2> &p) noexcept { return p.first; }
+    template <class T1, class T2>
+    static constexpr const T1 &Get(const pair<T1, T2> &p) noexcept
+    { return p.first; }
+    template <class T1, class T2>
+    static constexpr T1 &&Get(pair<T1, T2> &&p) noexcept
+    { return forward<T1>(p.first); }
+    template <class T1, class T2>
+    static constexpr const T1 &&Get(const pair<T1, T2> &&p) noexcept
+    { return forward<const T1>(p.first); }
+};
+template <> struct PairGet<1> {
+    template <class T1, class T2>
+    static constexpr T2 &Get(pair<T1, T2> &p) noexcept { return p.second; }
+    template <class T1, class T2>
+    static constexpr const T2 &Get(const pair<T1, T2> &p) noexcept
+    { return p.second; }
+    template <class T1, class T2>
+    static constexpr T2 &&Get(pair<T1, T2> &&p) noexcept
+    { return forward<T2>(p.second); }
+    template <class T1, class T2>
+    static constexpr const T2 &&Get(const pair<T1, T2> &&p) noexcept
+    { return forward<const T2>(p.second); }
+};
+} // namespace __bits
+
+template <size_t I, class T1, class T2>
+[[nodiscard]] constexpr tuple_element_t<I, pair<T1, T2>> &
+get(pair<T1, T2> &p) noexcept
+{
+    return __bits::PairGet<I>::Get(p);
+}
+template <size_t I, class T1, class T2>
+[[nodiscard]] constexpr const tuple_element_t<I, pair<T1, T2>> &
+get(const pair<T1, T2> &p) noexcept
+{
+    return __bits::PairGet<I>::Get(p);
+}
+template <size_t I, class T1, class T2>
+[[nodiscard]] constexpr tuple_element_t<I, pair<T1, T2>> &&
+get(pair<T1, T2> &&p) noexcept
+{
+    return __bits::PairGet<I>::Get(move(p));
+}
+template <size_t I, class T1, class T2>
+[[nodiscard]] constexpr const tuple_element_t<I, pair<T1, T2>> &&
+get(const pair<T1, T2> &&p) noexcept
+{
+    return __bits::PairGet<I>::Get(move(p));
+}
+
+template <class T, class U>
+[[nodiscard]] constexpr T &get(pair<T, U> &p) noexcept { return p.first; }
+template <class T, class U>
+[[nodiscard]] constexpr const T &get(const pair<T, U> &p) noexcept
+{ return p.first; }
+template <class T, class U>
+[[nodiscard]] constexpr T &&get(pair<T, U> &&p) noexcept
+{ return forward<T>(p.first); }
+template <class T, class U>
+[[nodiscard]] constexpr T &get(pair<U, T> &p) noexcept { return p.second; }
+template <class T, class U>
+[[nodiscard]] constexpr const T &get(const pair<U, T> &p) noexcept
+{ return p.second; }
+template <class T, class U>
+[[nodiscard]] constexpr T &&get(pair<U, T> &&p) noexcept
+{ return forward<T>(p.second); }
+
+} // namespace std
+
+#endif // BOXCXX_UTILITY

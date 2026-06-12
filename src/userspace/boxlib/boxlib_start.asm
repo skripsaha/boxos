@@ -24,6 +24,7 @@ section .text
 
 extern main
 extern exit
+extern __box_runtime_init
 
 global _start
 
@@ -43,6 +44,11 @@ _start:
     endbr64
     xor rbp, rbp        ; clear base pointer so any stack trace stops here
     and rsp, -16        ; align RSP for the System V AMD64 ABI
+
+    ; Run .init_array (global constructors; empty for pure-C binaries).
+    ; Must precede main per the Itanium C++ ABI; the matching fini pass
+    ; runs from exit() via __box_runtime_fini.
+    call __box_runtime_init
 
     xor rdi, rdi        ; argc = 0   (see header comment)
     xor rsi, rsi        ; argv = NULL

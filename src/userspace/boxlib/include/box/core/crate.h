@@ -1,6 +1,10 @@
 #ifndef BOX_CORE_CRATE_H
 #define BOX_CORE_CRATE_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include "box/types.h"
 #include "boxos_crate.h"
 
@@ -58,5 +62,9 @@ INLINE void CrateSetInOut(Crate *c, void *buf, uint64_t size, uint64_t capacity)
     c->_pad0    = 0;
     c->_pad1    = 0;
 }
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* BOX_CRATE_H */

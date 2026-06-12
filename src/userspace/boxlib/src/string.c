@@ -87,6 +87,37 @@ void* memset(void* ptr, int value, size_t n) {
     return ptr;
 }
 
+void* memmove(void* dest, const void* src, size_t n) {
+    if (!dest || !src || n == 0 || dest == src) return dest;
+    unsigned char *d = (unsigned char *)dest;
+    const unsigned char *s = (const unsigned char *)src;
+
+    if (d < s) {
+        /* Forward copy — same qword fast path as memcpy. */
+        if (((uintptr_t)d & 7) == ((uintptr_t)s & 7)) {
+            while (((uintptr_t)d & 7) && n > 0) { *d++ = *s++; n--; }
+            while (n >= 8) {
+                *(uint64_t *)d = *(const uint64_t *)s;
+                d += 8; s += 8; n -= 8;
+            }
+        }
+        while (n--) *d++ = *s++;
+    } else {
+        /* Backward copy from the top — safe for overlapping d > s. */
+        d += n;
+        s += n;
+        if (((uintptr_t)d & 7) == ((uintptr_t)s & 7)) {
+            while (((uintptr_t)d & 7) && n > 0) { *--d = *--s; n--; }
+            while (n >= 8) {
+                d -= 8; s -= 8; n -= 8;
+                *(uint64_t *)d = *(const uint64_t *)s;
+            }
+        }
+        while (n--) *--d = *--s;
+    }
+    return dest;
+}
+
 int memcmp(const void* s1, const void* s2, size_t n) {
     const unsigned char* p1 = (const unsigned char*)s1;
     const unsigned char* p2 = (const unsigned char*)s2;

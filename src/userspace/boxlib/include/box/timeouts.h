@@ -1,6 +1,10 @@
 #ifndef BOX_TIMEOUTS_H
 #define BOX_TIMEOUTS_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /*
  * box/timeouts.h — single source of truth for boxlib synchronous-syscall
  * timeouts (milliseconds).
@@ -36,5 +40,9 @@
 #define BOX_TIMEOUT_IPC_MS        5000u
 #define BOX_TIMEOUT_INPUT_MS      30000u
 #define BOX_TIMEOUT_KDBG_MS       60000u
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* BOX_TIMEOUTS_H */

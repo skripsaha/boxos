@@ -1,6 +1,10 @@
 #ifndef BOX_ERROR_H
 #define BOX_ERROR_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include "box/types.h"
 
 typedef uint32_t error_t;
@@ -91,5 +95,9 @@ typedef uint32_t error_t;
 
 #define IS_ERROR(err)   ((err) != OK)
 #define IS_SUCCESS(err) ((err) == OK)
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // BOX_ERROR_H

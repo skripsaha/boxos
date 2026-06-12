@@ -24,13 +24,14 @@
  *  right block and can't collide silently with an existing range.
  * ============================================================================ */
 
-/* ─── Process + info (0x01 – 0x07) ─────────────────────────────────── */
+/* ─── Process + info (0x01 – 0x0A) ─────────────────────────────────── */
 #define SYSTEM_OP_PROC_SPAWN        0x01
 #define SYSTEM_OP_PROC_KILL         0x02
 #define SYSTEM_OP_PROC_INFO         0x03
 #define SYSTEM_OP_CTX_USE           0x04
 #define SYSTEM_OP_PROC_EXEC         0x06
 #define SYSTEM_OP_INFO              0x07
+#define SYSTEM_OP_TLS_FSBASE        0x0A  /* set caller's FS base (C++ TLS) */
 
 /* ─── Buffer registry (0x10 – 0x14) ────────────────────────────────── */
 #define SYSTEM_OP_BUF_ALLOC         0x10

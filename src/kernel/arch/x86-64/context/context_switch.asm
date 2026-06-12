@@ -28,6 +28,7 @@ section .text
 %define CTX_FPU      168
 %define CTX_FPU_INIT 176
 %define CTX_PL0_SSP  184             ; Per-process IA32_PL0_SSP snapshot
+%define CTX_USER_FSBASE 192          ; Per-process user FS base (TLS thread pointer)
 
 ; Externals from fpu.c
 extern g_use_xsave
@@ -43,6 +44,17 @@ extern g_xsave_mask
 ; macros expand to one CMP + JE, no MSR access — zero TCG overhead and no
 ; per-CPU divergence on heterogeneous (P-core + E-core) silicon.
 extern g_cet_supv_active
+
+; User FS base (TLS) context-switch gates (fpu.c):
+;   g_fsgsbase_active  = 1 → CR4.FSGSBASE enabled on every online core;
+;                            use RDFSBASE/WRFSBASE (a few cycles).
+;   g_user_fsbase_used = 1 → some process programmed FS base via the
+;                            kernel op on a pre-FSGSBASE CPU; use MSR
+;                            0xC0000100. Both 0 → skip entirely, so
+;                            legacy configurations pay zero per-switch
+;                            cost until TLS is actually used.
+extern g_fsgsbase_active
+extern g_user_fsbase_used
 
 ; ─── PL0_SSP save/restore macros ─────────────────────────────────────
 ;
@@ -72,6 +84,51 @@ extern g_cet_supv_active
     shr rdx, 32
     wrmsr
 %%skip:
+%endmacro
+
+; ─── User FS base (TLS) save/restore macros ──────────────────────────
+;
+; SAVE_USER_FSBASE ctx:
+;   Capture the live user FS base into ctx.user_fsbase. ISRs never load
+;   FS, so the value observed here always belongs to the process being
+;   switched out. Clobbers: rax, rcx, rdx.
+%macro SAVE_USER_FSBASE 1
+    cmp byte [rel g_fsgsbase_active], 0
+    jne %%fast
+    cmp byte [rel g_user_fsbase_used], 0
+    je %%done
+    mov ecx, 0xC0000100              ; IA32_FS_BASE
+    rdmsr
+    shl rdx, 32
+    or rax, rdx
+    mov [%1 + CTX_USER_FSBASE], rax
+    jmp %%done
+%%fast:
+    rdfsbase rax
+    mov [%1 + CTX_USER_FSBASE], rax
+%%done:
+%endmacro
+
+; RESTORE_USER_FSBASE ctx:
+;   Load ctx.user_fsbase into the FS base. MUST run after the FS
+;   *selector* restore — `mov fs, ax` reloads the base from the GDT
+;   descriptor (= 0) on real silicon, wiping anything written earlier.
+;   Clobbers: rax, rcx, rdx.
+%macro RESTORE_USER_FSBASE 1
+    cmp byte [rel g_fsgsbase_active], 0
+    jne %%fast
+    cmp byte [rel g_user_fsbase_used], 0
+    je %%done
+    mov rax, [%1 + CTX_USER_FSBASE]
+    mov rdx, rax
+    shr rdx, 32
+    mov ecx, 0xC0000100              ; IA32_FS_BASE
+    wrmsr
+    jmp %%done
+%%fast:
+    mov rax, [%1 + CTX_USER_FSBASE]
+    wrfsbase rax
+%%done:
 %endmacro
 
 ;--------------------------------------------------------------
@@ -156,6 +213,8 @@ task_save_context:
 .save_fpu_done:
     ; Save IA32_PL0_SSP — no-op when CET supervisor SHSTK is inactive.
     SAVE_PL0_SSP rdi
+    ; Save the user FS base (TLS) — no-op until TLS is in use.
+    SAVE_USER_FSBASE rdi
     ret
 
 ;--------------------------------------------------------------
@@ -198,6 +257,11 @@ task_restore_context:
     mov gs, ax
     mov ax, [rdi + CTX_SS]
     mov ss, ax
+
+    ; Restore the user FS base AFTER the `mov fs, ax` above — the
+    ; selector load just zeroed the base. Clobbers rax/rcx/rdx (both
+    ; are restored below).
+    RESTORE_USER_FSBASE rdi
 
     mov rax, [rdi + CTX_RFLAGS]
     push rax
@@ -302,6 +366,8 @@ task_switch_to:
 .switch_save_done:
     ; Save OLD process's IA32_PL0_SSP into old ctx.
     SAVE_PL0_SSP rdi
+    ; Save OLD process's user FS base (TLS) into old ctx.
+    SAVE_USER_FSBASE rdi
 
     ; --- Restore new context ---
     ; Restore FPU/SSE/AVX state first
@@ -337,6 +403,11 @@ task_switch_to:
     mov gs, ax
     mov ax, [rsi + CTX_SS]
     mov ss, ax
+
+    ; Restore NEW process's user FS base AFTER the `mov fs, ax` above
+    ; (selector load zeroes the base). Clobbers rax/rcx/rdx — all three
+    ; are restored below.
+    RESTORE_USER_FSBASE rsi
 
     mov rax, [rsi + CTX_RFLAGS]
     push rax
@@ -400,6 +471,9 @@ task_init_context:
 
     mov rax, 0x202             ; IF flag set
     mov [rdi + CTX_RFLAGS], rax
+
+    xor rax, rax
+    mov [rdi + CTX_USER_FSBASE], rax   ; fresh context starts with no TLS
 
     mov ax, GDT_KERNEL_CODE
     mov [rdi + CTX_CS], ax

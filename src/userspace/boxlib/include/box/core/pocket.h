@@ -1,6 +1,10 @@
 #ifndef BOX_CORE_POCKET_H
 #define BOX_CORE_POCKET_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include "box/types.h"
 
 /*
@@ -128,5 +132,9 @@ INLINE bool pocket_ring_push(PocketRing* ring, const Pocket* p) {
     __atomic_store_n(&ring->hdr.tail, idx + 1, __ATOMIC_RELEASE);
     return true;
 }
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* BOX_CORE_POCKET_H */

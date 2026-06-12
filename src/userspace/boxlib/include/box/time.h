@@ -1,6 +1,10 @@
 #ifndef BOX_TIME_H
 #define BOX_TIME_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include "box/types.h"
 #include "box/error.h"
 
@@ -25,5 +29,9 @@ int time_uptime_ns(uint64_t* out_ns);
 int time_format(const time_t* t, char* buf, size_t buf_size);
 int64_t time_diff(const time_t* a, const time_t* b);
 void time_add_ms(const time_t* t, int64_t ms, time_t* out);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // BOX_TIME_H

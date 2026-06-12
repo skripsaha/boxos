@@ -17,7 +17,11 @@
 #define PACKED __attribute__((packed))
 #define INLINE static inline __attribute__((always_inline))
 
+#ifdef __cplusplus
+#define STATIC_ASSERT(expr, msg) static_assert(expr, msg)
+#else
 #define STATIC_ASSERT(expr, msg) _Static_assert(expr, msg)
+#endif
 
 #define OFFSETOF(type, member) __builtin_offsetof(type, member)
 

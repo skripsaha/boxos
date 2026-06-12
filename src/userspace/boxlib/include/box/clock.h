@@ -1,6 +1,10 @@
 #ifndef BOX_CLOCK_H
 #define BOX_CLOCK_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include "box/types.h"
 #include "box/error.h"
 
@@ -55,5 +59,9 @@ uint64_t clock_tsc_to_ns(uint64_t tsc_ticks);
 /* Throttle helper: returns true at most once every interval_us, using
  * the ClockBoard as the time source. Caller maintains last_us. */
 bool clock_throttle(uint64_t *last_us, uint64_t interval_us);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* BOX_CLOCK_H */

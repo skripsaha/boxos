@@ -1,6 +1,10 @@
 #ifndef BOX_BAY_H
 #define BOX_BAY_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include "box/types.h"
 #include "box/error.h"
 
@@ -80,5 +84,9 @@ int     bay_release(void *ptr);
 /* Query the Bay's user-visible size (in bytes). Returns 0 if ptr is
  * not a live claim. */
 uint64_t bay_size(void *ptr);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* BOX_BAY_H */

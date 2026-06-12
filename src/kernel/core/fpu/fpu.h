@@ -8,6 +8,12 @@ extern bool g_use_xsave;           // true if XSAVE/XRSTOR is available
 extern uint32_t g_xsave_area_size; // total XSAVE area size (0 = use FXSAVE 512)
 extern uint64_t g_xsave_mask;      // XCR0 mask for xsave/xrstor (EDX:EAX)
 
+// User FS base (TLS) context-switch gates — see fpu.c for semantics.
+// g_user_fsbase_used is flipped by the SET_FSBASE kernel op (MSR path
+// for pre-FSGSBASE CPUs); g_fsgsbase_active selects RDFSBASE/WRFSBASE.
+extern volatile uint8_t g_fsgsbase_active;
+extern volatile uint8_t g_user_fsbase_used;
+
 // Returns the FPU state buffer size needed (includes alignment padding).
 // Call only after enable_fpu().
 static inline uint32_t fpu_alloc_size(void) {

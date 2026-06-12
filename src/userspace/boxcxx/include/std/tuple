@@ -1,0 +1,495 @@
+// boxcxx — <tuple>
+#ifndef BOXCXX_TUPLE
+#define BOXCXX_TUPLE
+
+#include <type_traits>
+#include <utility>
+#include <functional>   // invoke (std::apply), reference_wrapper unwrap
+#include <compare>
+
+namespace std {
+
+namespace __bits {
+
+#if defined(__has_builtin) && __has_builtin(__type_pack_element)
+template <size_t I, class... Ts>
+using NthType = __type_pack_element<I, Ts...>;
+#else
+template <size_t I, class Head, class... Tail>
+struct NthTypeImpl : NthTypeImpl<I - 1, Tail...> {};
+template <class Head, class... Tail>
+struct NthTypeImpl<0, Head, Tail...> { using type = Head; };
+template <size_t I, class... Ts>
+using NthType = typename NthTypeImpl<I, Ts...>::type;
+#endif
+
+// One storage leaf per element; [[no_unique_address]] supplies EBO.
+template <size_t I, class T>
+struct TupleLeaf {
+    [[no_unique_address]] T value;
+
+    constexpr TupleLeaf() : value() {}
+    template <class U>
+        requires(!is_same_v<remove_cvref_t<U>, TupleLeaf>)
+    constexpr explicit TupleLeaf(U &&u) : value(forward<U>(u))
+    {
+    }
+    TupleLeaf(const TupleLeaf &) = default;
+    TupleLeaf(TupleLeaf &&)      = default;
+    TupleLeaf &operator=(const TupleLeaf &) = default;
+    TupleLeaf &operator=(TupleLeaf &&) = default;
+};
+
+template <class Seq, class... Ts> struct TupleBase;
+
+template <size_t... Is, class... Ts>
+struct TupleBase<index_sequence<Is...>, Ts...> : TupleLeaf<Is, Ts>... {
+    constexpr TupleBase() = default;
+
+    template <class... Us>
+        requires(sizeof...(Us) == sizeof...(Ts))
+    constexpr explicit TupleBase(Us &&...us)
+        : TupleLeaf<Is, Ts>(forward<Us>(us))...
+    {
+    }
+
+    TupleBase(const TupleBase &) = default;
+    TupleBase(TupleBase &&)      = default;
+    TupleBase &operator=(const TupleBase &) = default;
+    TupleBase &operator=(TupleBase &&) = default;
+};
+
+template <size_t I, class T>
+constexpr T &LeafGet(TupleLeaf<I, T> &leaf) noexcept
+{
+    return leaf.value;
+}
+template <size_t I, class T>
+constexpr const T &LeafGet(const TupleLeaf<I, T> &leaf) noexcept
+{
+    return leaf.value;
+}
+template <size_t I, class T>
+constexpr T &&LeafGet(TupleLeaf<I, T> &&leaf) noexcept
+{
+    return static_cast<T &&>(leaf.value);
+}
+template <size_t I, class T>
+constexpr const T &&LeafGet(const TupleLeaf<I, T> &&leaf) noexcept
+{
+    return static_cast<const T &&>(leaf.value);
+}
+
+} // namespace __bits
+
+template <class... Ts>
+class tuple : __bits::TupleBase<index_sequence_for<Ts...>, Ts...> {
+    using Base = __bits::TupleBase<index_sequence_for<Ts...>, Ts...>;
+
+    template <size_t I, class... Us>
+    friend constexpr tuple_element_t<I, tuple<Us...>> &get(tuple<Us...> &) noexcept;
+    template <size_t I, class... Us>
+    friend constexpr const tuple_element_t<I, tuple<Us...>> &
+    get(const tuple<Us...> &) noexcept;
+    template <size_t I, class... Us>
+    friend constexpr tuple_element_t<I, tuple<Us...>> &&
+    get(tuple<Us...> &&) noexcept;
+    template <size_t I, class... Us>
+    friend constexpr const tuple_element_t<I, tuple<Us...>> &&
+    get(const tuple<Us...> &&) noexcept;
+
+    template <class OtherTuple, size_t... Is>
+    constexpr tuple(OtherTuple &&other, index_sequence<Is...>)
+        : Base(get<Is>(forward<OtherTuple>(other))...)
+    {
+    }
+
+    template <class...> friend class tuple;
+
+public:
+    // default
+    explicit((... || !__bits::ImplicitlyDefaultConstructible<Ts>))
+        constexpr tuple() requires((... && is_default_constructible_v<Ts>))
+        : Base()
+    {
+    }
+
+    // direct (const Ts&...)
+    explicit((... || !is_convertible_v<const Ts &, Ts>))
+        constexpr tuple(const Ts &...args) requires(
+            sizeof...(Ts) >= 1 && (... && is_copy_constructible_v<Ts>))
+        : Base(args...)
+    {
+    }
+
+    // converting (Us&&...)
+    template <class... Us>
+        requires(sizeof...(Us) == sizeof...(Ts) && sizeof...(Ts) >= 1 &&
+                 (... && is_constructible_v<Ts, Us>))
+    explicit((... || !is_convertible_v<Us, Ts>))
+        constexpr tuple(Us &&...args)
+        : Base(forward<Us>(args)...)
+    {
+    }
+
+    // from tuple<Us...> lvalue / const lvalue / rvalue / const rvalue
+    template <class... Us>
+        requires(sizeof...(Us) == sizeof...(Ts) &&
+                 (... && is_constructible_v<Ts, Us &>))
+    explicit((... || !is_convertible_v<Us &, Ts>))
+        constexpr tuple(tuple<Us...> &other)
+        : tuple(other, index_sequence_for<Ts...>{})
+    {
+    }
+
+    template <class... Us>
+        requires(sizeof...(Us) == sizeof...(Ts) &&
+                 (... && is_constructible_v<Ts, const Us &>))
+    explicit((... || !is_convertible_v<const Us &, Ts>))
+        constexpr tuple(const tuple<Us...> &other)
+        : tuple(other, index_sequence_for<Ts...>{})
+    {
+    }
+
+    template <class... Us>
+        requires(sizeof...(Us) == sizeof...(Ts) &&
+                 (... && is_constructible_v<Ts, Us>))
+    explicit((... || !is_convertible_v<Us, Ts>))
+        constexpr tuple(tuple<Us...> &&other)
+        : tuple(move(other), index_sequence_for<Ts...>{})
+    {
+    }
+
+    template <class... Us>
+        requires(sizeof...(Us) == sizeof...(Ts) &&
+                 (... && is_constructible_v<Ts, const Us>))
+    explicit((... || !is_convertible_v<const Us, Ts>))
+        constexpr tuple(const tuple<Us...> &&other)
+        : tuple(move(other), index_sequence_for<Ts...>{})
+    {
+    }
+
+    // from pair (size-2 tuples)
+    template <class U1, class U2>
+        requires(sizeof...(Ts) == 2 &&
+                 is_constructible_v<__bits::NthType<0, Ts...>, const U1 &> &&
+                 is_constructible_v<__bits::NthType<1, Ts...>, const U2 &>)
+    constexpr tuple(const pair<U1, U2> &p) : Base(p.first, p.second)
+    {
+    }
+
+    template <class U1, class U2>
+        requires(sizeof...(Ts) == 2 &&
+                 is_constructible_v<__bits::NthType<0, Ts...>, U1> &&
+                 is_constructible_v<__bits::NthType<1, Ts...>, U2>)
+    constexpr tuple(pair<U1, U2> &&p)
+        : Base(forward<U1>(p.first), forward<U2>(p.second))
+    {
+    }
+
+    tuple(const tuple &) = default;
+    tuple(tuple &&)      = default;
+    tuple &operator=(const tuple &) = default;
+    tuple &operator=(tuple &&) = default;
+
+    template <class... Us>
+        requires(sizeof...(Us) == sizeof...(Ts) &&
+                 (... && is_assignable_v<Ts &, const Us &>))
+    constexpr tuple &operator=(const tuple<Us...> &other)
+    {
+        AssignFrom(other, index_sequence_for<Ts...>{});
+        return *this;
+    }
+
+    template <class... Us>
+        requires(sizeof...(Us) == sizeof...(Ts) &&
+                 (... && is_assignable_v<Ts &, Us>))
+    constexpr tuple &operator=(tuple<Us...> &&other)
+    {
+        AssignFrom(move(other), index_sequence_for<Ts...>{});
+        return *this;
+    }
+
+    constexpr void swap(tuple &other) noexcept(
+        (... && is_nothrow_swappable_v<Ts>))
+    {
+        SwapWith(other, index_sequence_for<Ts...>{});
+    }
+
+private:
+    template <class OtherTuple, size_t... Is>
+    constexpr void AssignFrom(OtherTuple &&other, index_sequence<Is...>)
+    {
+        ((__bits::LeafGet<Is>(static_cast<Base &>(*this)) =
+              get<Is>(forward<OtherTuple>(other))),
+         ...);
+    }
+
+    template <size_t... Is>
+    constexpr void SwapWith(tuple &other, index_sequence<Is...>)
+    {
+        using std::swap;
+        (swap(__bits::LeafGet<Is>(static_cast<Base &>(*this)),
+              __bits::LeafGet<Is>(static_cast<Base &>(other))),
+         ...);
+    }
+};
+
+template <>
+class tuple<> {
+public:
+    constexpr tuple() = default;
+    constexpr void swap(tuple &) noexcept {}
+};
+
+template <class... Us>
+tuple(Us...) -> tuple<Us...>;
+template <class T1, class T2>
+tuple(pair<T1, T2>) -> tuple<T1, T2>;
+
+// ── tuple protocol ──────────────────────────────────────────────────────
+
+template <class... Ts>
+struct tuple_size<tuple<Ts...>>
+    : integral_constant<size_t, sizeof...(Ts)> {};
+
+template <size_t I, class... Ts>
+struct tuple_element<I, tuple<Ts...>> {
+    static_assert(I < sizeof...(Ts), "tuple index out of range");
+    using type = __bits::NthType<I, Ts...>;
+};
+
+template <size_t I, class... Ts>
+[[nodiscard]] constexpr tuple_element_t<I, tuple<Ts...>> &
+get(tuple<Ts...> &t) noexcept
+{
+    return __bits::LeafGet<I, tuple_element_t<I, tuple<Ts...>>>(t);
+}
+template <size_t I, class... Ts>
+[[nodiscard]] constexpr const tuple_element_t<I, tuple<Ts...>> &
+get(const tuple<Ts...> &t) noexcept
+{
+    return __bits::LeafGet<I, tuple_element_t<I, tuple<Ts...>>>(t);
+}
+template <size_t I, class... Ts>
+[[nodiscard]] constexpr tuple_element_t<I, tuple<Ts...>> &&
+get(tuple<Ts...> &&t) noexcept
+{
+    return __bits::LeafGet<I, tuple_element_t<I, tuple<Ts...>>>(move(t));
+}
+template <size_t I, class... Ts>
+[[nodiscard]] constexpr const tuple_element_t<I, tuple<Ts...>> &&
+get(const tuple<Ts...> &&t) noexcept
+{
+    return __bits::LeafGet<I, tuple_element_t<I, tuple<Ts...>>>(move(t));
+}
+
+namespace __bits {
+template <class T, class... Ts>
+inline constexpr size_t TypeIndex = [] {
+    constexpr bool kMatch[] = {is_same_v<T, Ts>...};
+    size_t index = sizeof...(Ts);
+    size_t count = 0;
+    for (size_t i = 0; i < sizeof...(Ts); ++i) {
+        if (kMatch[i]) {
+            index = i;
+            ++count;
+        }
+    }
+    return count == 1 ? index : size_t(-1);
+}();
+} // namespace __bits
+
+template <class T, class... Ts>
+[[nodiscard]] constexpr T &get(tuple<Ts...> &t) noexcept
+{
+    static_assert(__bits::TypeIndex<T, Ts...> != size_t(-1),
+                  "get<T>: T must appear exactly once in the tuple");
+    return get<__bits::TypeIndex<T, Ts...>>(t);
+}
+template <class T, class... Ts>
+[[nodiscard]] constexpr const T &get(const tuple<Ts...> &t) noexcept
+{
+    static_assert(__bits::TypeIndex<T, Ts...> != size_t(-1),
+                  "get<T>: T must appear exactly once in the tuple");
+    return get<__bits::TypeIndex<T, Ts...>>(t);
+}
+template <class T, class... Ts>
+[[nodiscard]] constexpr T &&get(tuple<Ts...> &&t) noexcept
+{
+    static_assert(__bits::TypeIndex<T, Ts...> != size_t(-1),
+                  "get<T>: T must appear exactly once in the tuple");
+    return get<__bits::TypeIndex<T, Ts...>>(move(t));
+}
+template <class T, class... Ts>
+[[nodiscard]] constexpr const T &&get(const tuple<Ts...> &&t) noexcept
+{
+    static_assert(__bits::TypeIndex<T, Ts...> != size_t(-1),
+                  "get<T>: T must appear exactly once in the tuple");
+    return get<__bits::TypeIndex<T, Ts...>>(move(t));
+}
+
+// ── factories ───────────────────────────────────────────────────────────
+
+template <class... Ts>
+[[nodiscard]] constexpr tuple<unwrap_ref_decay_t<Ts>...> make_tuple(Ts &&...args)
+{
+    return tuple<unwrap_ref_decay_t<Ts>...>(forward<Ts>(args)...);
+}
+
+template <class... Ts>
+[[nodiscard]] constexpr tuple<Ts &...> tie(Ts &...args) noexcept
+{
+    return tuple<Ts &...>(args...);
+}
+
+template <class... Ts>
+[[nodiscard]] constexpr tuple<Ts &&...> forward_as_tuple(Ts &&...args) noexcept
+{
+    return tuple<Ts &&...>(forward<Ts>(args)...);
+}
+
+namespace __bits {
+struct IgnoreT {
+    template <class T>
+    constexpr const IgnoreT &operator=(T &&) const noexcept
+    {
+        return *this;
+    }
+};
+} // namespace __bits
+inline constexpr __bits::IgnoreT ignore{};
+
+// ── tuple_cat (accepts any tuple-like with std::get/tuple_size) ────────
+
+namespace __bits {
+template <class T1, class T2, size_t... I1, size_t... I2>
+constexpr auto Cat2(T1 &&a, T2 &&b, index_sequence<I1...>,
+                    index_sequence<I2...>)
+{
+    return tuple<tuple_element_t<I1, remove_cvref_t<T1>>...,
+                 tuple_element_t<I2, remove_cvref_t<T2>>...>(
+        get<I1>(forward<T1>(a))..., get<I2>(forward<T2>(b))...);
+}
+} // namespace __bits
+
+[[nodiscard]] constexpr tuple<> tuple_cat()
+{
+    return {};
+}
+
+template <class T1>
+[[nodiscard]] constexpr auto tuple_cat(T1 &&a)
+{
+    return __bits::Cat2(
+        forward<T1>(a), tuple<>{},
+        make_index_sequence<tuple_size_v<remove_cvref_t<T1>>>{},
+        index_sequence<>{});
+}
+
+template <class T1, class T2, class... Rest>
+[[nodiscard]] constexpr auto tuple_cat(T1 &&a, T2 &&b, Rest &&...rest)
+{
+    auto merged = __bits::Cat2(
+        forward<T1>(a), forward<T2>(b),
+        make_index_sequence<tuple_size_v<remove_cvref_t<T1>>>{},
+        make_index_sequence<tuple_size_v<remove_cvref_t<T2>>>{});
+    if constexpr (sizeof...(Rest) == 0)
+        return merged;
+    else
+        return tuple_cat(move(merged), forward<Rest>(rest)...);
+}
+
+// ── apply / make_from_tuple ─────────────────────────────────────────────
+
+namespace __bits {
+template <class F, class Tuple, size_t... Is>
+constexpr decltype(auto) ApplyImpl(F &&f, Tuple &&t, index_sequence<Is...>)
+{
+    return invoke(forward<F>(f), get<Is>(forward<Tuple>(t))...);
+}
+template <class T, class Tuple, size_t... Is>
+constexpr T MakeFromTupleImpl(Tuple &&t, index_sequence<Is...>)
+{
+    return T(get<Is>(forward<Tuple>(t))...);
+}
+} // namespace __bits
+
+template <class F, class Tuple>
+constexpr decltype(auto) apply(F &&f, Tuple &&t)
+{
+    return __bits::ApplyImpl(
+        forward<F>(f), forward<Tuple>(t),
+        make_index_sequence<tuple_size_v<remove_cvref_t<Tuple>>>{});
+}
+
+template <class T, class Tuple>
+[[nodiscard]] constexpr T make_from_tuple(Tuple &&t)
+{
+    return __bits::MakeFromTupleImpl<T>(
+        forward<Tuple>(t),
+        make_index_sequence<tuple_size_v<remove_cvref_t<Tuple>>>{});
+}
+
+// ── comparisons ─────────────────────────────────────────────────────────
+
+namespace __bits {
+template <class T, class U, size_t... Is>
+constexpr bool TupleEq(const T &a, const U &b, index_sequence<Is...>)
+{
+    return (... && (get<Is>(a) == get<Is>(b)));
+}
+template <class Cat, class T, class U>
+constexpr Cat TupleCmp(const T &, const U &, index_sequence<>)
+{
+    return Cat::equivalent;
+}
+template <class Cat, class T, class U, size_t I0, size_t... Is>
+constexpr Cat TupleCmp(const T &a, const U &b, index_sequence<I0, Is...>)
+{
+    if (Cat c = compare_three_way{}(get<I0>(a), get<I0>(b)); c != 0) return c;
+    return TupleCmp<Cat>(a, b, index_sequence<Is...>{});
+}
+} // namespace __bits
+
+template <class... Ts, class... Us>
+    requires(sizeof...(Ts) == sizeof...(Us))
+[[nodiscard]] constexpr bool operator==(const tuple<Ts...> &a,
+                                        const tuple<Us...> &b)
+{
+    return __bits::TupleEq(a, b, index_sequence_for<Ts...>{});
+}
+
+template <class... Ts, class... Us>
+    requires(sizeof...(Ts) == sizeof...(Us))
+[[nodiscard]] constexpr common_comparison_category_t<
+    compare_three_way_result_t<Ts, Us>...>
+operator<=>(const tuple<Ts...> &a, const tuple<Us...> &b)
+{
+    using Cat = common_comparison_category_t<
+        compare_three_way_result_t<Ts, Us>...>;
+    return __bits::TupleCmp<Cat>(a, b, index_sequence_for<Ts...>{});
+}
+
+template <class... Ts>
+constexpr enable_if_t<(... && is_swappable_v<Ts>)>
+swap(tuple<Ts...> &a, tuple<Ts...> &b) noexcept(noexcept(a.swap(b)))
+{
+    a.swap(b);
+}
+
+// ── pair's piecewise constructor (declared in <utility>) ───────────────
+
+template <class T1, class T2>
+template <class... Args1, class... Args2>
+constexpr pair<T1, T2>::pair(piecewise_construct_t,
+                             tuple<Args1...> first_args,
+                             tuple<Args2...> second_args)
+    : first(make_from_tuple<T1>(move(first_args))),
+      second(make_from_tuple<T2>(move(second_args)))
+{
+}
+
+} // namespace std
+
+#endif // BOXCXX_TUPLE

@@ -1,0 +1,104 @@
+// boxcxx — <new>
+#ifndef BOXCXX_NEW
+#define BOXCXX_NEW
+
+#include <cstddef>
+#include <exception>
+
+namespace std {
+
+struct nothrow_t {
+    explicit nothrow_t() = default;
+};
+extern const nothrow_t nothrow;
+
+enum class align_val_t : size_t {};
+
+struct destroying_delete_t {
+    explicit destroying_delete_t() = default;
+};
+inline constexpr destroying_delete_t destroying_delete{};
+
+class bad_alloc : public exception {
+public:
+    bad_alloc() noexcept = default;
+    ~bad_alloc() override;
+    const char *what() const noexcept override;
+};
+
+class bad_array_new_length : public bad_alloc {
+public:
+    bad_array_new_length() noexcept = default;
+    ~bad_array_new_length() override;
+    const char *what() const noexcept override;
+};
+
+using new_handler = void (*)();
+new_handler get_new_handler() noexcept;
+new_handler set_new_handler(new_handler handler) noexcept;
+
+template <class T>
+[[nodiscard]] constexpr T *launder(T *p) noexcept
+{
+    return __builtin_launder(p);
+}
+
+// x86-64: one cache line.
+inline constexpr size_t hardware_destructive_interference_size  = 64;
+inline constexpr size_t hardware_constructive_interference_size = 64;
+
+} // namespace std
+
+// ── Replaceable allocation functions (Itanium set) ─────────────────────
+// Until the unwinder lands (Phase 4B) the throwing forms terminate with a
+// diagnostic on exhaustion instead of throwing bad_alloc; the nothrow
+// forms already return nullptr. Aligned forms use boxcxx's own
+// over-allocate + back-pointer scheme — the compiler guarantees aligned
+// new is always paired with aligned delete, so boxlib free() never sees
+// an interior pointer.
+
+[[nodiscard]] void *operator new(std::size_t size);
+[[nodiscard]] void *operator new(std::size_t size, std::align_val_t align);
+[[nodiscard]] void *operator new(std::size_t size,
+                                 const std::nothrow_t &) noexcept;
+[[nodiscard]] void *operator new(std::size_t size, std::align_val_t align,
+                                 const std::nothrow_t &) noexcept;
+
+[[nodiscard]] void *operator new[](std::size_t size);
+[[nodiscard]] void *operator new[](std::size_t size, std::align_val_t align);
+[[nodiscard]] void *operator new[](std::size_t size,
+                                   const std::nothrow_t &) noexcept;
+[[nodiscard]] void *operator new[](std::size_t size, std::align_val_t align,
+                                   const std::nothrow_t &) noexcept;
+
+void operator delete(void *ptr) noexcept;
+void operator delete(void *ptr, std::size_t size) noexcept;
+void operator delete(void *ptr, std::align_val_t align) noexcept;
+void operator delete(void *ptr, std::size_t size,
+                     std::align_val_t align) noexcept;
+void operator delete(void *ptr, const std::nothrow_t &) noexcept;
+void operator delete(void *ptr, std::align_val_t align,
+                     const std::nothrow_t &) noexcept;
+
+void operator delete[](void *ptr) noexcept;
+void operator delete[](void *ptr, std::size_t size) noexcept;
+void operator delete[](void *ptr, std::align_val_t align) noexcept;
+void operator delete[](void *ptr, std::size_t size,
+                       std::align_val_t align) noexcept;
+void operator delete[](void *ptr, const std::nothrow_t &) noexcept;
+void operator delete[](void *ptr, std::align_val_t align,
+                       const std::nothrow_t &) noexcept;
+
+// Placement forms — non-allocating, never replaceable.
+[[nodiscard]] inline void *operator new(std::size_t, void *place) noexcept
+{
+    return place;
+}
+[[nodiscard]] inline void *operator new[](std::size_t, void *place) noexcept
+{
+    return place;
+}
+inline void operator delete(void *, void *) noexcept {}
+inline void operator delete[](void *, void *) noexcept {}
+
+#endif // BOXCXX_NEW

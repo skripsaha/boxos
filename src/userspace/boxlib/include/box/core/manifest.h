@@ -1,6 +1,10 @@
 #ifndef BOX_CORE_MANIFEST_H
 #define BOX_CORE_MANIFEST_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include "box/types.h"
 #include "box/core/notify.h"
 #include "box/core/result.h"
@@ -200,5 +204,9 @@ int ManifestSubmitHandleTimeout(ManifestHandle  handle,
 /* Release a compiled handle. Idempotent against stale (generation-bumped)
  * handles — returns OK. Caller MUST stop using the handle after release. */
 int ManifestReleaseHandle(ManifestHandle handle);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* BOX_MANIFEST_H */

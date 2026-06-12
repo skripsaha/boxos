@@ -1,6 +1,10 @@
 #ifndef SYSTEM_H
 #define SYSTEM_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include "box/types.h"
 #include "box/error.h"
 
@@ -53,6 +57,12 @@ int fragmentation(void);
 int perf_dump(void);
 
 void yield(void);
+
+/* TLS thread-pointer fallback for CPUs without FSGSBASE: asks the kernel
+ * to program this process's FS base (SYSTEM_OP_TLS_FSBASE). The value
+ * lands at the next context restore — call yield() afterwards before
+ * touching any thread_local. boxcxx tls_init is the intended caller. */
+int tls_set_fsbase(uint64_t base);
 
 /* =========================================================================
  *  EFI / Secure Boot / ESRT — userspace introspection
@@ -125,5 +135,9 @@ int efi_esrt_entry(uint32_t idx, efi_esrt_entry_t *out);
  * succeeded — `out->result` carries the verification verdict (== 0 means
  * the PE is trusted; != 0 means rejected). */
 int efi_verify_pe(const void *pe_buf, uint32_t pe_size, efi_verify_t *out);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // SYSTEM_H

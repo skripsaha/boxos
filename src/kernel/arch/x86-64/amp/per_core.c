@@ -380,6 +380,12 @@ void per_core_init_ap(uint8_t core_index, uint64_t stack_top) {
      * that disable PKU on a core class. */
     cpu_caps_page_refresh_features();
 
+    /* If THIS AP lost FSGSBASE in the intersect above (heterogeneous
+     * silicon), the context-switch fast path must not execute
+     * RDFSBASE/WRFSBASE anywhere — one core without CR4.FSGSBASE would
+     * #UD. One-way clear; runs before any user process exists. */
+    if (!g_cpu_caps.has_fsgsbase) g_fsgsbase_active = 0;
+
     /* MemTag Phase 2D M5 — verify PTE bits 52-58 are still "Ignored" on
      * THIS AP. On hybrid CPUs an AP may report different CR4.PKE/CR4.CET
      * state than the BSP; the probe logs the per-AP result. Failure

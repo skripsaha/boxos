@@ -1,6 +1,10 @@
 #ifndef BOX_PKU_H
 #define BOX_PKU_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include "box/types.h"
 #include "box/error.h"
 
@@ -62,5 +66,9 @@ int      pku_get_rights(uint8_t pkey, int *out_ad, int *out_wd);
  * existing pku:* tag (returns the region to "any-key" semantics).
  * Returns 0 on success or -ERR_*. */
 int      pku_apply_region(uint32_t region_id, uint8_t pkey);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* BOX_PKU_H */

@@ -27,10 +27,12 @@ AR  = x86_64-elf-ar
 # Userspace mirrors the kernel's UB-containment posture so libbox.a behaves
 # identically under -O2/-Os and the same security guarantees apply across
 # every shipped binary linked against it.
+# -fasynchronous-unwind-tables: C++ exceptions unwind THROUGH boxlib
+# frames (C++ callback under a boxlib C caller) — every frame needs CFI.
 CFLAGS = -nostdlib -fno-builtin -ffreestanding -mno-red-zone \
          -fno-stack-protector -fno-ipa-ra -fcf-protection=full \
          -fno-delete-null-pointer-checks -fno-strict-aliasing -fwrapv \
-         -fno-asynchronous-unwind-tables -fno-unwind-tables \
+         -fasynchronous-unwind-tables \
          -Iinclude -I../../include -Wall -Wextra -Wno-type-limits -O2 -Wno-unused-parameter \
          -Werror=implicit-function-declaration \
          -Werror=incompatible-pointer-types \
@@ -58,7 +60,8 @@ SRCS = src/core/notify.c \
        src/hw.c \
        src/debug.c \
        src/string.c \
-       src/convert.c
+       src/convert.c \
+       src/runtime_init.c
 OBJS = $(SRCS:.c=.o)
 
 all: libbox.a ../build/boxlib_start.o

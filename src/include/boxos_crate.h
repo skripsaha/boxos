@@ -55,7 +55,13 @@ typedef struct __packed {
     uint32_t _pad1;
 } Crate;
 
-_Static_assert(sizeof(Crate) == 40, "Crate descriptor must be 40 bytes");
+/* static_assert spelling: keyword in C23 and C++; shim for C11/C17. */
+#if !defined(__cplusplus) && !defined(static_assert) && \
+    (!defined(__STDC_VERSION__) || (__STDC_VERSION__ < 202311L))
+#define static_assert _Static_assert
+#endif
+
+static_assert(sizeof(Crate) == 40, "Crate descriptor must be 40 bytes");
 
 static inline bool CrateIsValid(const Crate *c)
 {
