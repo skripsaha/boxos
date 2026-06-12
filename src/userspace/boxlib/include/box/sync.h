@@ -6,6 +6,7 @@ extern "C" {
 #endif
 
 #include "box/defs.h"
+#include "box/types.h"   /* INLINE — sync.h must stand alone */
 
 // ---------------------------------------------------------------------------
 // Lightweight userspace mutex.

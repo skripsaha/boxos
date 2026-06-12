@@ -1,0 +1,544 @@
+// boxcxx — <vector>
+// Contiguous growable array: three-pointer layout, ×2 geometric growth,
+// strong exception guarantee on push_back/emplace_back (new element is
+// constructed in the fresh block BEFORE anything moves; relocation uses
+// move_if_noexcept), full allocator_traits propagation semantics.
+//
+// Known deviation (tracked in the epic leftovers): vector<bool> is NOT
+// the packed specialization — it instantiates the primary template with
+// byte-backed storage. Ranges-taking members join with Ф7B.
+#ifndef BOXCXX_VECTOR
+#define BOXCXX_VECTOR
+
+#include <__bits/allocator_core>
+#include <__bits/iterator_core>
+#include <__bits/throw_helpers>
+#include <compare>
+#include <cstddef>
+#include <initializer_list>
+#include <type_traits>
+#include <utility>
+
+namespace std {
+
+template <typename T, typename Alloc = allocator<T>>
+class vector {
+    using AllocTraits = allocator_traits<Alloc>;
+
+public:
+    using value_type             = T;
+    using allocator_type         = Alloc;
+    using size_type              = size_t;
+    using difference_type        = ptrdiff_t;
+    using reference              = T &;
+    using const_reference        = const T &;
+    using pointer                = typename AllocTraits::pointer;
+    using const_pointer          = typename AllocTraits::const_pointer;
+    using iterator               = T *;
+    using const_iterator         = const T *;
+    using reverse_iterator       = std::reverse_iterator<iterator>;
+    using const_reverse_iterator = std::reverse_iterator<const_iterator>;
+
+    // ── constructors ────────────────────────────────────────────────────
+
+    vector() noexcept(noexcept(Alloc())) = default;
+    explicit vector(const Alloc &a) noexcept : __alloc(a) {}
+
+    explicit vector(size_type count, const Alloc &a = Alloc()) : __alloc(a)
+    {
+        Grow(count);
+        for (; __size < count; ++__size)
+            AllocTraits::construct(__alloc, __begin + __size);
+    }
+    vector(size_type count, const T &value, const Alloc &a = Alloc())
+        : __alloc(a)
+    {
+        Grow(count);
+        for (; __size < count; ++__size)
+            AllocTraits::construct(__alloc, __begin + __size, value);
+    }
+
+    template <typename It>
+        requires(!is_integral_v<It>)
+    vector(It first, It last, const Alloc &a = Alloc()) : __alloc(a)
+    {
+        if constexpr (is_pointer_v<It>) {
+            Grow(static_cast<size_type>(last - first));
+        }
+        for (; first != last; ++first) emplace_back(*first);
+    }
+
+    vector(initializer_list<T> il, const Alloc &a = Alloc()) : __alloc(a)
+    {
+        Grow(il.size());
+        for (const T &v : il) {
+            AllocTraits::construct(__alloc, __begin + __size, v);
+            ++__size;
+        }
+    }
+
+    vector(const vector &other)
+        : __alloc(AllocTraits::select_on_container_copy_construction(
+              other.__alloc))
+    {
+        CopyFrom(other);
+    }
+    vector(const vector &other, const Alloc &a) : __alloc(a)
+    {
+        CopyFrom(other);
+    }
+
+    vector(vector &&other) noexcept
+        : __begin(other.__begin), __size(other.__size), __cap(other.__cap),
+          __alloc(std::move(other.__alloc))
+    {
+        other.__begin = nullptr;
+        other.__size  = 0;
+        other.__cap   = 0;
+    }
+    vector(vector &&other, const Alloc &a) : __alloc(a)
+    {
+        if (AllocTraits::is_always_equal::value || a == other.__alloc) {
+            __begin       = other.__begin;
+            __size        = other.__size;
+            __cap         = other.__cap;
+            other.__begin = nullptr;
+            other.__size  = 0;
+            other.__cap   = 0;
+        } else {
+            Grow(other.__size);
+            for (size_type i = 0; i < other.__size; ++i, ++__size)
+                AllocTraits::construct(__alloc, __begin + __size,
+                                       std::move(other.__begin[i]));
+        }
+    }
+
+    ~vector() { DestroyAll(); }
+
+    // ── assignment ──────────────────────────────────────────────────────
+
+    vector &operator=(const vector &other)
+    {
+        if (this == &other) return *this;
+        if constexpr (AllocTraits::propagate_on_container_copy_assignment::
+                          value) {
+            if (!(__alloc == other.__alloc)) {
+                DestroyAll();
+                __begin = nullptr;
+                __size = __cap = 0;
+            }
+            __alloc = other.__alloc;
+        }
+        assign(other.__begin, other.__begin + other.__size);
+        return *this;
+    }
+
+    vector &operator=(vector &&other) noexcept(
+        AllocTraits::propagate_on_container_move_assignment::value ||
+        AllocTraits::is_always_equal::value)
+    {
+        if (this == &other) return *this;
+        constexpr bool pocma =
+            AllocTraits::propagate_on_container_move_assignment::value;
+        if (pocma || AllocTraits::is_always_equal::value ||
+            __alloc == other.__alloc) {
+            DestroyAll();
+            if constexpr (pocma) __alloc = std::move(other.__alloc);
+            __begin       = other.__begin;
+            __size        = other.__size;
+            __cap         = other.__cap;
+            other.__begin = nullptr;
+            other.__size  = 0;
+            other.__cap   = 0;
+            return *this;
+        }
+        // Unequal allocators without propagation: element-wise move.
+        clear();
+        reserve(other.__size);
+        for (size_type i = 0; i < other.__size; ++i)
+            emplace_back(std::move(other.__begin[i]));
+        return *this;
+    }
+
+    vector &operator=(initializer_list<T> il)
+    {
+        assign(il.begin(), il.end());
+        return *this;
+    }
+
+    void assign(size_type count, const T &value)
+    {
+        clear();
+        reserve(count);
+        for (; __size < count; ++__size)
+            AllocTraits::construct(__alloc, __begin + __size, value);
+    }
+    template <typename It>
+        requires(!is_integral_v<It>)
+    void assign(It first, It last)
+    {
+        clear();
+        if constexpr (is_pointer_v<It>)
+            reserve(static_cast<size_type>(last - first));
+        for (; first != last; ++first) emplace_back(*first);
+    }
+    void assign(initializer_list<T> il) { assign(il.begin(), il.end()); }
+
+    allocator_type get_allocator() const noexcept { return __alloc; }
+
+    // ── element access ──────────────────────────────────────────────────
+
+    reference operator[](size_type i) { return __begin[i]; }
+    const_reference operator[](size_type i) const { return __begin[i]; }
+    reference at(size_type i)
+    {
+        if (i >= __size) boxcxx::ThrowOutOfRange("vector::at");
+        return __begin[i];
+    }
+    const_reference at(size_type i) const
+    {
+        if (i >= __size) boxcxx::ThrowOutOfRange("vector::at");
+        return __begin[i];
+    }
+    reference front() { return __begin[0]; }
+    const_reference front() const { return __begin[0]; }
+    reference back() { return __begin[__size - 1]; }
+    const_reference back() const { return __begin[__size - 1]; }
+    T *data() noexcept { return __begin; }
+    const T *data() const noexcept { return __begin; }
+
+    // ── iterators ───────────────────────────────────────────────────────
+
+    iterator begin() noexcept { return __begin; }
+    const_iterator begin() const noexcept { return __begin; }
+    const_iterator cbegin() const noexcept { return __begin; }
+    iterator end() noexcept { return __begin + __size; }
+    const_iterator end() const noexcept { return __begin + __size; }
+    const_iterator cend() const noexcept { return __begin + __size; }
+    reverse_iterator rbegin() noexcept { return reverse_iterator(end()); }
+    const_reverse_iterator rbegin() const noexcept
+    {
+        return const_reverse_iterator(end());
+    }
+    reverse_iterator rend() noexcept { return reverse_iterator(begin()); }
+    const_reverse_iterator rend() const noexcept
+    {
+        return const_reverse_iterator(begin());
+    }
+
+    // ── capacity ────────────────────────────────────────────────────────
+
+    [[nodiscard]] bool empty() const noexcept { return __size == 0; }
+    size_type size() const noexcept { return __size; }
+    size_type max_size() const noexcept
+    {
+        return AllocTraits::max_size(__alloc);
+    }
+    size_type capacity() const noexcept { return __cap; }
+
+    void reserve(size_type want)
+    {
+        if (want > __cap) Relocate(want);
+    }
+
+    void shrink_to_fit()
+    {
+        if (__size < __cap) Relocate(__size);
+    }
+
+    // ── modifiers ───────────────────────────────────────────────────────
+
+    void clear() noexcept
+    {
+        std::destroy(__begin, __begin + __size);
+        __size = 0;
+    }
+
+    void push_back(const T &value) { emplace_back(value); }
+    void push_back(T &&value) { emplace_back(std::move(value)); }
+
+    template <typename... Args>
+    reference emplace_back(Args &&...args)
+    {
+        if (__size == __cap) {
+            // Strong guarantee: build the new element in the fresh block
+            // first; only then relocate the old elements.
+            size_type want = GrownCapacity(__size + 1);
+            T *fresh       = AllocTraits::allocate(__alloc, want);
+            try {
+                AllocTraits::construct(__alloc, fresh + __size,
+                                       std::forward<Args>(args)...);
+            } catch (...) {
+                AllocTraits::deallocate(__alloc, fresh, want);
+                throw;
+            }
+            MoveInto(fresh);
+            ReplaceStorage(fresh, want, __size + 1);
+        } else {
+            AllocTraits::construct(__alloc, __begin + __size,
+                                   std::forward<Args>(args)...);
+            ++__size;
+        }
+        return __begin[__size - 1];
+    }
+
+    void pop_back()
+    {
+        --__size;
+        AllocTraits::destroy(__alloc, __begin + __size);
+    }
+
+    template <typename... Args>
+    iterator emplace(const_iterator where, Args &&...args)
+    {
+        size_type pos = static_cast<size_type>(where - __begin);
+        emplace_back(std::forward<Args>(args)...);
+        RotateLastInto(pos);
+        return __begin + pos;
+    }
+
+    iterator insert(const_iterator where, const T &value)
+    {
+        return emplace(where, value);
+    }
+    iterator insert(const_iterator where, T &&value)
+    {
+        return emplace(where, std::move(value));
+    }
+    iterator insert(const_iterator where, size_type count, const T &value)
+    {
+        size_type pos = static_cast<size_type>(where - __begin);
+        for (size_type i = 0; i < count; ++i) {
+            emplace_back(value);
+            RotateLastInto(pos + i);
+        }
+        return __begin + pos;
+    }
+    template <typename It>
+        requires(!is_integral_v<It>)
+    iterator insert(const_iterator where, It first, It last)
+    {
+        size_type pos = static_cast<size_type>(where - __begin);
+        size_type i   = pos;
+        for (; first != last; ++first, ++i) {
+            emplace_back(*first);
+            RotateLastInto(i);
+        }
+        return __begin + pos;
+    }
+    iterator insert(const_iterator where, initializer_list<T> il)
+    {
+        return insert(where, il.begin(), il.end());
+    }
+
+    iterator erase(const_iterator where)
+    {
+        return erase(where, where + 1);
+    }
+    iterator erase(const_iterator first, const_iterator last)
+    {
+        size_type pos = static_cast<size_type>(first - __begin);
+        size_type n   = static_cast<size_type>(last - first);
+        for (size_type i = pos; i + n < __size; ++i)
+            __begin[i] = std::move(__begin[i + n]);
+        std::destroy(__begin + (__size - n), __begin + __size);
+        __size -= n;
+        return __begin + pos;
+    }
+
+    void resize(size_type n)
+    {
+        if (n < __size) {
+            std::destroy(__begin + n, __begin + __size);
+            __size = n;
+            return;
+        }
+        reserve(n);
+        for (; __size < n; ++__size)
+            AllocTraits::construct(__alloc, __begin + __size);
+    }
+    void resize(size_type n, const T &value)
+    {
+        if (n < __size) {
+            std::destroy(__begin + n, __begin + __size);
+            __size = n;
+            return;
+        }
+        reserve(n);
+        for (; __size < n; ++__size)
+            AllocTraits::construct(__alloc, __begin + __size, value);
+    }
+
+    void swap(vector &other) noexcept
+    {
+        if constexpr (AllocTraits::propagate_on_container_swap::value) {
+            Alloc tmp     = __alloc;
+            __alloc       = other.__alloc;
+            other.__alloc = tmp;
+        }
+        T *b = __begin;
+        size_type s = __size, c = __cap;
+        __begin       = other.__begin;
+        __size        = other.__size;
+        __cap         = other.__cap;
+        other.__begin = b;
+        other.__size  = s;
+        other.__cap   = c;
+    }
+
+private:
+    // ── machinery ───────────────────────────────────────────────────────
+
+    void Grow(size_type want)
+    {
+        if (want == 0) return;
+        if (want > max_size()) boxcxx::ThrowLengthError("vector: too long");
+        __begin = AllocTraits::allocate(__alloc, want);
+        __cap   = want;
+    }
+
+    size_type GrownCapacity(size_type needed) const
+    {
+        if (needed > max_size()) boxcxx::ThrowLengthError("vector: too long");
+        size_type doubled = __cap * 2;
+        if (doubled < 4) doubled = 4;
+        return doubled > needed ? doubled : needed;
+    }
+
+    // Move/copy the current elements into `fresh` (move_if_noexcept —
+    // throwing moves degrade to copies so the source stays intact).
+    void MoveInto(T *fresh)
+    {
+        size_type done = 0;
+        try {
+            for (; done < __size; ++done)
+                AllocTraits::construct(__alloc, fresh + done,
+                                       std::move_if_noexcept(__begin[done]));
+        } catch (...) {
+            std::destroy(fresh, fresh + done);
+            throw;
+        }
+    }
+
+    void ReplaceStorage(T *fresh, size_type cap, size_type new_size) noexcept
+    {
+        std::destroy(__begin, __begin + __size);
+        if (__begin) AllocTraits::deallocate(__alloc, __begin, __cap);
+        __begin = fresh;
+        __cap   = cap;
+        __size  = new_size;
+    }
+
+    void Relocate(size_type want)
+    {
+        if (want > max_size()) boxcxx::ThrowLengthError("vector: too long");
+        if (want == 0) {
+            ReplaceStorage(nullptr, 0, 0);
+            return;
+        }
+        T *fresh = AllocTraits::allocate(__alloc, want);
+        try {
+            MoveInto(fresh);
+        } catch (...) {
+            AllocTraits::deallocate(__alloc, fresh, want);
+            throw;
+        }
+        ReplaceStorage(fresh, want, __size);
+    }
+
+    void CopyFrom(const vector &other)
+    {
+        Grow(other.__size);
+        for (size_type i = 0; i < other.__size; ++i, ++__size)
+            AllocTraits::construct(__alloc, __begin + __size,
+                                   other.__begin[i]);
+    }
+
+    void DestroyAll() noexcept
+    {
+        std::destroy(__begin, __begin + __size);
+        if (__begin) AllocTraits::deallocate(__alloc, __begin, __cap);
+    }
+
+    // Bubble the just-appended back() element down to index `pos`.
+    void RotateLastInto(size_type pos)
+    {
+        for (size_type i = __size - 1; i > pos; --i) {
+            T tmp           = std::move(__begin[i]);
+            __begin[i]      = std::move(__begin[i - 1]);
+            __begin[i - 1]  = std::move(tmp);
+        }
+    }
+
+    T *__begin       = nullptr;
+    size_type __size = 0;
+    size_type __cap  = 0;
+    [[no_unique_address]] Alloc __alloc;
+};
+
+// ── non-member operations ───────────────────────────────────────────────
+
+template <typename T, typename A>
+bool operator==(const vector<T, A> &a, const vector<T, A> &b)
+{
+    if (a.size() != b.size()) return false;
+    for (typename vector<T, A>::size_type i = 0; i < a.size(); ++i)
+        if (!(a[i] == b[i])) return false;
+    return true;
+}
+
+template <typename T, typename A>
+auto operator<=>(const vector<T, A> &a, const vector<T, A> &b)
+    -> decltype(a[0] <=> b[0])
+{
+    using Cat = decltype(a[0] <=> b[0]);
+    auto n    = a.size() < b.size() ? a.size() : b.size();
+    for (decltype(n) i = 0; i < n; ++i)
+        if (auto c = a[i] <=> b[i]; c != 0) return c;
+    return a.size() == b.size() ? Cat::equivalent
+           : a.size() < b.size() ? Cat::less
+                                 : Cat::greater;
+}
+
+template <typename T, typename A>
+void swap(vector<T, A> &a, vector<T, A> &b) noexcept
+{
+    a.swap(b);
+}
+
+// C++20 uniform erasure.
+template <typename T, typename A, typename V>
+typename vector<T, A>::size_type erase(vector<T, A> &v, const V &value)
+{
+    typename vector<T, A>::size_type w = 0, removed = 0;
+    for (typename vector<T, A>::size_type r = 0; r < v.size(); ++r) {
+        if (v[r] == value) {
+            ++removed;
+        } else {
+            if (w != r) v[w] = std::move(v[r]);
+            ++w;
+        }
+    }
+    v.resize(w);
+    return removed;
+}
+
+template <typename T, typename A, typename Pred>
+typename vector<T, A>::size_type erase_if(vector<T, A> &v, Pred pred)
+{
+    typename vector<T, A>::size_type w = 0, removed = 0;
+    for (typename vector<T, A>::size_type r = 0; r < v.size(); ++r) {
+        if (pred(v[r])) {
+            ++removed;
+        } else {
+            if (w != r) v[w] = std::move(v[r]);
+            ++w;
+        }
+    }
+    v.resize(w);
+    return removed;
+}
+
+} // namespace std
+
+#endif // BOXCXX_VECTOR

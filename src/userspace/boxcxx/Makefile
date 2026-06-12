@@ -34,6 +34,8 @@ SRCS = src/runtime/cxa_runtime.cpp \
        src/runtime/personality.cpp \
        src/runtime/atomic_support.cpp \
        src/runtime/mutex.cpp \
+       src/runtime/stdexcept.cpp \
+       src/runtime/system_error.cpp \
        src/tls/tls_init.cpp \
        src/unwind/dwarf_cfi.cpp \
        src/unwind/unwind_level1.cpp

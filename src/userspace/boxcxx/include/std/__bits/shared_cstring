@@ -1,0 +1,73 @@
+// boxcxx — <__bits/shared_cstring>
+// Immutable refcounted message buffer for <stdexcept>/<system_error>.
+// Exception copy constructors must be noexcept ([exception]/2) — copies
+// share the block and bump an atomic refcount. Allocation happens once,
+// in the throwing (non-noexcept) constructor; failure there throws
+// bad_alloc via the plain operator new, which is conforming.
+#ifndef BOXCXX_BITS_SHARED_CSTRING
+#define BOXCXX_BITS_SHARED_CSTRING
+
+#include <atomic>
+#include <cstddef>
+#include <new>
+
+namespace std {
+
+class __shared_cstring {
+    struct Header {
+        atomic<unsigned> refs;
+    };
+    // Layout: [Header][text bytes][NUL] in one allocation.
+    Header *__h = nullptr;
+
+    static char *TextOf(Header *h) noexcept
+    {
+        return reinterpret_cast<char *>(h) + sizeof(Header);
+    }
+
+public:
+    __shared_cstring(const char *s, size_t n)
+    {
+        void *raw = ::operator new(sizeof(Header) + n + 1);
+        __h       = ::new (raw) Header{atomic<unsigned>{1u}};
+        char *t   = TextOf(__h);
+        for (size_t i = 0; i < n; ++i) t[i] = s[i];
+        t[n] = '\0';
+    }
+
+    __shared_cstring(const __shared_cstring &other) noexcept : __h(other.__h)
+    {
+        if (__h) __h->refs.fetch_add(1, memory_order_relaxed);
+    }
+
+    __shared_cstring &operator=(const __shared_cstring &other) noexcept
+    {
+        if (__h != other.__h) {
+            Release();
+            __h = other.__h;
+            if (__h) __h->refs.fetch_add(1, memory_order_relaxed);
+        }
+        return *this;
+    }
+
+    ~__shared_cstring() { Release(); }
+
+    const char *c_str() const noexcept
+    {
+        return __h ? TextOf(__h) : "";
+    }
+
+private:
+    void Release() noexcept
+    {
+        if (__h && __h->refs.fetch_sub(1, memory_order_acq_rel) == 1) {
+            __h->~Header();
+            ::operator delete(static_cast<void *>(__h));
+        }
+        __h = nullptr;
+    }
+};
+
+} // namespace std
+
+#endif // BOXCXX_BITS_SHARED_CSTRING

@@ -1,0 +1,342 @@
+// boxcxx — <system_error>
+// error_code / error_condition / error_category machinery + the errc
+// enumeration (Linux errno numbering — the standard leaves values to
+// the implementation, and the Linux set is the de-facto convention).
+// Categories are constinit singletons in src/runtime/system_error.cpp.
+// Category identity is object identity, valid in BoxOS single static
+// images for the same reason typeinfo pointer-identity is.
+#ifndef BOXCXX_SYSTEM_ERROR
+#define BOXCXX_SYSTEM_ERROR
+
+#include <compare>
+#include <stdexcept>
+#include <type_traits>
+
+namespace std {
+
+class error_code;
+class error_condition;
+
+// ── errc ([system.error.syn]) ───────────────────────────────────────────
+
+enum class errc {
+    operation_not_permitted            = 1,   // EPERM
+    no_such_file_or_directory          = 2,   // ENOENT
+    no_such_process                    = 3,   // ESRCH
+    interrupted                        = 4,   // EINTR
+    io_error                           = 5,   // EIO
+    no_such_device_or_address          = 6,   // ENXIO
+    argument_list_too_long             = 7,   // E2BIG
+    executable_format_error            = 8,   // ENOEXEC
+    bad_file_descriptor                = 9,   // EBADF
+    no_child_process                   = 10,  // ECHILD
+    resource_unavailable_try_again     = 11,  // EAGAIN
+    not_enough_memory                  = 12,  // ENOMEM
+    permission_denied                  = 13,  // EACCES
+    bad_address                        = 14,  // EFAULT
+    device_or_resource_busy            = 16,  // EBUSY
+    file_exists                        = 17,  // EEXIST
+    cross_device_link                  = 18,  // EXDEV
+    no_such_device                     = 19,  // ENODEV
+    not_a_directory                    = 20,  // ENOTDIR
+    is_a_directory                     = 21,  // EISDIR
+    invalid_argument                   = 22,  // EINVAL
+    too_many_files_open_in_system      = 23,  // ENFILE
+    too_many_files_open                = 24,  // EMFILE
+    inappropriate_io_control_operation = 25,  // ENOTTY
+    file_too_large                     = 27,  // EFBIG
+    no_space_on_device                 = 28,  // ENOSPC
+    invalid_seek                       = 29,  // ESPIPE
+    read_only_file_system              = 30,  // EROFS
+    too_many_links                     = 31,  // EMLINK
+    broken_pipe                        = 32,  // EPIPE
+    argument_out_of_domain             = 33,  // EDOM
+    result_out_of_range                = 34,  // ERANGE
+    resource_deadlock_would_occur      = 35,  // EDEADLK
+    filename_too_long                  = 36,  // ENAMETOOLONG
+    no_lock_available                  = 37,  // ENOLCK
+    function_not_supported             = 38,  // ENOSYS
+    directory_not_empty                = 39,  // ENOTEMPTY
+    too_many_symbolic_link_levels      = 40,  // ELOOP
+    no_message                         = 42,  // ENOMSG
+    identifier_removed                 = 43,  // EIDRM
+    not_a_stream                       = 60,  // ENOSTR
+    no_message_available               = 61,  // ENODATA
+    stream_timeout                     = 62,  // ETIME
+    no_stream_resources                = 63,  // ENOSR
+    no_link                            = 67,  // ENOLINK
+    protocol_error                     = 71,  // EPROTO
+    bad_message                        = 74,  // EBADMSG
+    value_too_large                    = 75,  // EOVERFLOW
+    illegal_byte_sequence              = 84,  // EILSEQ
+    not_a_socket                       = 88,  // ENOTSOCK
+    destination_address_required       = 89,  // EDESTADDRREQ
+    message_size                       = 90,  // EMSGSIZE
+    wrong_protocol_type                = 91,  // EPROTOTYPE
+    no_protocol_option                 = 92,  // ENOPROTOOPT
+    protocol_not_supported             = 93,  // EPROTONOSUPPORT
+    not_supported                      = 95,  // ENOTSUP/EOPNOTSUPP
+    operation_not_supported            = 95,  // EOPNOTSUPP
+    address_family_not_supported       = 97,  // EAFNOSUPPORT
+    address_in_use                     = 98,  // EADDRINUSE
+    address_not_available              = 99,  // EADDRNOTAVAIL
+    network_down                       = 100, // ENETDOWN
+    network_unreachable                = 101, // ENETUNREACH
+    network_reset                      = 102, // ENETRESET
+    connection_aborted                 = 103, // ECONNABORTED
+    connection_reset                   = 104, // ECONNRESET
+    no_buffer_space                    = 105, // ENOBUFS
+    already_connected                  = 106, // EISCONN
+    not_connected                      = 107, // ENOTCONN
+    timed_out                          = 110, // ETIMEDOUT
+    connection_refused                 = 111, // ECONNREFUSED
+    host_unreachable                   = 113, // EHOSTUNREACH
+    connection_already_in_progress     = 114, // EALREADY
+    operation_in_progress              = 115, // EINPROGRESS
+    text_file_busy                     = 26,  // ETXTBSY
+    operation_canceled                 = 125, // ECANCELED
+    owner_dead                         = 130, // EOWNERDEAD
+    state_not_recoverable              = 131, // ENOTRECOVERABLE
+    operation_would_block              = 11,  // EWOULDBLOCK == EAGAIN
+};
+
+template <typename T>
+struct is_error_code_enum : false_type {};
+template <typename T>
+struct is_error_condition_enum : false_type {};
+template <>
+struct is_error_condition_enum<errc> : true_type {};
+template <typename T>
+inline constexpr bool is_error_code_enum_v = is_error_code_enum<T>::value;
+template <typename T>
+inline constexpr bool is_error_condition_enum_v =
+    is_error_condition_enum<T>::value;
+
+// ── error_category ──────────────────────────────────────────────────────
+
+class error_category {
+public:
+    constexpr error_category() noexcept = default;
+    virtual ~error_category();
+    error_category(const error_category &) = delete;
+    error_category &operator=(const error_category &) = delete;
+
+    virtual const char *name() const noexcept = 0;
+    virtual string message(int code) const   = 0;
+    virtual error_condition default_error_condition(int code) const noexcept;
+    virtual bool equivalent(int code,
+                            const error_condition &cond) const noexcept;
+    virtual bool equivalent(const error_code &ec, int cond) const noexcept;
+
+    bool operator==(const error_category &rhs) const noexcept
+    {
+        return this == &rhs;
+    }
+    strong_ordering operator<=>(const error_category &rhs) const noexcept
+    {
+        uintptr_t a = reinterpret_cast<uintptr_t>(this);
+        uintptr_t b = reinterpret_cast<uintptr_t>(&rhs);
+        return a < b    ? strong_ordering::less
+               : a > b  ? strong_ordering::greater
+                        : strong_ordering::equal;
+    }
+};
+
+const error_category &generic_category() noexcept;
+const error_category &system_category() noexcept;
+
+// ── error_code / error_condition ────────────────────────────────────────
+
+class error_code {
+public:
+    error_code() noexcept : __val(0), __cat(&system_category()) {}
+    error_code(int val, const error_category &cat) noexcept
+        : __val(val), __cat(&cat)
+    {
+    }
+    template <typename E>
+        requires is_error_code_enum_v<E>
+    error_code(E e) noexcept
+    {
+        *this = make_error_code(e);
+    }
+
+    void assign(int val, const error_category &cat) noexcept
+    {
+        __val = val;
+        __cat = &cat;
+    }
+    template <typename E>
+        requires is_error_code_enum_v<E>
+    error_code &operator=(E e) noexcept
+    {
+        return *this = make_error_code(e);
+    }
+    void clear() noexcept
+    {
+        __val = 0;
+        __cat = &system_category();
+    }
+
+    int value() const noexcept { return __val; }
+    const error_category &category() const noexcept { return *__cat; }
+    error_condition default_error_condition() const noexcept;
+    string message() const { return __cat->message(__val); }
+    explicit operator bool() const noexcept { return __val != 0; }
+
+private:
+    int __val;
+    const error_category *__cat;
+};
+
+class error_condition {
+public:
+    error_condition() noexcept : __val(0), __cat(&generic_category()) {}
+    error_condition(int val, const error_category &cat) noexcept
+        : __val(val), __cat(&cat)
+    {
+    }
+    template <typename E>
+        requires is_error_condition_enum_v<E>
+    error_condition(E e) noexcept
+    {
+        *this = make_error_condition(e);
+    }
+
+    void assign(int val, const error_category &cat) noexcept
+    {
+        __val = val;
+        __cat = &cat;
+    }
+    template <typename E>
+        requires is_error_condition_enum_v<E>
+    error_condition &operator=(E e) noexcept
+    {
+        return *this = make_error_condition(e);
+    }
+    void clear() noexcept
+    {
+        __val = 0;
+        __cat = &generic_category();
+    }
+
+    int value() const noexcept { return __val; }
+    const error_category &category() const noexcept { return *__cat; }
+    string message() const { return __cat->message(__val); }
+    explicit operator bool() const noexcept { return __val != 0; }
+
+private:
+    int __val;
+    const error_category *__cat;
+};
+
+inline error_code make_error_code(errc e) noexcept
+{
+    return error_code(static_cast<int>(e), generic_category());
+}
+inline error_condition make_error_condition(errc e) noexcept
+{
+    return error_condition(static_cast<int>(e), generic_category());
+}
+
+inline error_condition error_code::default_error_condition() const noexcept
+{
+    return __cat->default_error_condition(__val);
+}
+
+// ── comparisons ─────────────────────────────────────────────────────────
+
+inline bool operator==(const error_code &a, const error_code &b) noexcept
+{
+    return a.category() == b.category() && a.value() == b.value();
+}
+inline strong_ordering operator<=>(const error_code &a,
+                                   const error_code &b) noexcept
+{
+    if (auto c = a.category() <=> b.category(); c != 0) return c;
+    return a.value() <=> b.value();
+}
+inline bool operator==(const error_condition &a,
+                       const error_condition &b) noexcept
+{
+    return a.category() == b.category() && a.value() == b.value();
+}
+inline strong_ordering operator<=>(const error_condition &a,
+                                   const error_condition &b) noexcept
+{
+    if (auto c = a.category() <=> b.category(); c != 0) return c;
+    return a.value() <=> b.value();
+}
+inline bool operator==(const error_code &code,
+                       const error_condition &cond) noexcept
+{
+    return code.category().equivalent(code.value(), cond) ||
+           cond.category().equivalent(code, cond.value());
+}
+inline bool operator==(const error_condition &cond,
+                       const error_code &code) noexcept
+{
+    return code == cond;
+}
+
+// ── system_error ────────────────────────────────────────────────────────
+
+class system_error : public runtime_error {
+public:
+    system_error(error_code ec, const string &what_arg)
+        : runtime_error(Compose(ec, what_arg.c_str())), __ec(ec)
+    {
+    }
+    system_error(error_code ec, const char *what_arg)
+        : runtime_error(Compose(ec, what_arg)), __ec(ec)
+    {
+    }
+    explicit system_error(error_code ec)
+        : runtime_error(ec.message()), __ec(ec)
+    {
+    }
+    system_error(int val, const error_category &cat, const string &what_arg)
+        : system_error(error_code(val, cat), what_arg)
+    {
+    }
+    system_error(int val, const error_category &cat, const char *what_arg)
+        : system_error(error_code(val, cat), what_arg)
+    {
+    }
+    system_error(int val, const error_category &cat)
+        : system_error(error_code(val, cat))
+    {
+    }
+    ~system_error() override;
+
+    const error_code &code() const noexcept { return __ec; }
+
+private:
+    static string Compose(const error_code &ec, const char *what_arg)
+    {
+        string out(what_arg);
+        out.append(": ");
+        out.append(ec.message());
+        return out;
+    }
+
+    error_code __ec;
+};
+
+template <typename T>
+struct hash;
+template <>
+struct hash<error_code> {
+    size_t operator()(const error_code &ec) const noexcept
+    {
+        // Hash the salient fields, not the object bytes — the struct
+        // carries padding between value and category pointer.
+        size_t parts[2] = {static_cast<size_t>(ec.value()),
+                           reinterpret_cast<size_t>(&ec.category())};
+        return __fnv1a_bytes(parts, sizeof(parts));
+    }
+};
+
+} // namespace std
+
+#endif // BOXCXX_SYSTEM_ERROR

@@ -1,0 +1,1004 @@
+// boxcxx — <string>
+// basic_string with SSO, libstdc++ layout shape: data pointer + size +
+// union{heap capacity | inline buffer}. data() never branches; for char
+// the inline buffer holds 15 chars + NUL in a 32-byte object. The whole
+// find/compare family delegates to basic_string_view — one algorithm
+// set, two types.
+//
+// Deferred (tracked in the epic's leftovers): constexpr strings (needs
+// the compiler-blessed constexpr allocator), to_string for floating
+// point + the stoi/stof family (Ф9A <charconv>), getline/iostream
+// integration (Ф9B).
+#ifndef BOXCXX_STRING
+#define BOXCXX_STRING
+
+#include <__bits/allocator_core>
+#include <__bits/char_traits>
+#include <__bits/iterator_core>
+#include <__bits/throw_helpers>
+#include <compare>
+#include <cstddef>
+#include <cstdint>
+#include <initializer_list>
+#include <string_view>
+#include <type_traits>
+#include <utility>
+
+namespace std {
+
+template <typename C, typename Traits = char_traits<C>,
+          typename Alloc = allocator<C>>
+class basic_string {
+    using AllocTraits = allocator_traits<Alloc>;
+
+public:
+    using traits_type            = Traits;
+    using value_type             = C;
+    using allocator_type         = Alloc;
+    using size_type              = size_t;
+    using difference_type        = ptrdiff_t;
+    using reference              = C &;
+    using const_reference        = const C &;
+    using pointer                = C *;
+    using const_pointer          = const C *;
+    using iterator               = C *;
+    using const_iterator         = const C *;
+    using reverse_iterator       = std::reverse_iterator<iterator>;
+    using const_reverse_iterator = std::reverse_iterator<const_iterator>;
+
+    using __view = basic_string_view<C, Traits>;
+
+    static constexpr size_type npos = size_type(-1);
+
+private:
+    // 16 bytes of inline storage — 15 chars + NUL for char.
+    static constexpr size_type kSsoChars =
+        16 / sizeof(C) > 1 ? 16 / sizeof(C) - 1 : 1;
+
+    template <typename SV>
+    static constexpr bool IsViewLike =
+        is_convertible_v<const SV &, __view> &&
+        !is_convertible_v<const SV &, const C *>;
+
+public:
+    // ── constructors ────────────────────────────────────────────────────
+
+    basic_string() noexcept(noexcept(Alloc())) : basic_string(Alloc()) {}
+    explicit basic_string(const Alloc &a) noexcept : __alloc(a)
+    {
+        SetShort(0);
+    }
+
+    basic_string(size_type count, C ch, const Alloc &a = Alloc()) : __alloc(a)
+    {
+        InitFill(count, ch);
+    }
+    basic_string(const C *s, size_type n, const Alloc &a = Alloc())
+        : __alloc(a)
+    {
+        InitCopy(s, n);
+    }
+    basic_string(const C *s, const Alloc &a = Alloc()) : __alloc(a)
+    {
+        InitCopy(s, Traits::length(s));
+    }
+    basic_string(nullptr_t) = delete;
+
+    template <typename It>
+        requires(!is_integral_v<It>)
+    basic_string(It first, It last, const Alloc &a = Alloc()) : __alloc(a)
+    {
+        if constexpr (is_pointer_v<It>) {
+            InitCopy(first, static_cast<size_type>(last - first));
+        } else {
+            SetShort(0);
+            for (; first != last; ++first) push_back(*first);
+        }
+    }
+
+    basic_string(initializer_list<C> il, const Alloc &a = Alloc()) : __alloc(a)
+    {
+        InitCopy(il.begin(), il.size());
+    }
+
+    template <typename SV>
+        requires IsViewLike<SV>
+    explicit basic_string(const SV &t, const Alloc &a = Alloc()) : __alloc(a)
+    {
+        __view v(t);
+        InitCopy(v.data(), v.size());
+    }
+    template <typename SV>
+        requires IsViewLike<SV>
+    basic_string(const SV &t, size_type pos, size_type n,
+                 const Alloc &a = Alloc())
+        : __alloc(a)
+    {
+        __view v = __view(t).substr(pos, n);
+        InitCopy(v.data(), v.size());
+    }
+
+    basic_string(const basic_string &other)
+        : __alloc(AllocTraits::select_on_container_copy_construction(
+              other.__alloc))
+    {
+        InitCopy(other.__data, other.__size);
+    }
+    basic_string(const basic_string &other, const Alloc &a) : __alloc(a)
+    {
+        InitCopy(other.__data, other.__size);
+    }
+    basic_string(const basic_string &other, size_type pos,
+                 size_type n = npos, const Alloc &a = Alloc())
+        : __alloc(a)
+    {
+        __view v = __view(other).substr(pos, n);
+        InitCopy(v.data(), v.size());
+    }
+
+    basic_string(basic_string &&other) noexcept
+        : __alloc(std::move(other.__alloc))
+    {
+        StealFrom(other);
+    }
+    basic_string(basic_string &&other, const Alloc &a) : __alloc(a)
+    {
+        if (AllocTraits::is_always_equal::value || a == other.__alloc) {
+            StealFrom(other);
+        } else {
+            InitCopy(other.__data, other.__size);
+        }
+    }
+
+    ~basic_string() { DropStorage(); }
+
+    // ── assignment ──────────────────────────────────────────────────────
+
+    basic_string &operator=(const basic_string &other)
+    {
+        if (this == &other) return *this;
+        if constexpr (AllocTraits::propagate_on_container_copy_assignment::
+                          value) {
+            if (!(__alloc == other.__alloc)) {
+                DropStorage();
+                SetShort(0);
+                __alloc = other.__alloc;
+            } else {
+                __alloc = other.__alloc;
+            }
+        }
+        return assign(other.__data, other.__size);
+    }
+
+    basic_string &operator=(basic_string &&other) noexcept(
+        AllocTraits::propagate_on_container_move_assignment::value ||
+        AllocTraits::is_always_equal::value)
+    {
+        if (this == &other) return *this;
+        constexpr bool pocma =
+            AllocTraits::propagate_on_container_move_assignment::value;
+        if (pocma || AllocTraits::is_always_equal::value ||
+            __alloc == other.__alloc) {
+            DropStorage();
+            if constexpr (pocma) __alloc = std::move(other.__alloc);
+            StealFrom(other);
+            return *this;
+        }
+        return assign(other.__data, other.__size);
+    }
+
+    basic_string &operator=(const C *s) { return assign(s, Traits::length(s)); }
+    basic_string &operator=(C ch) { return assign(&ch, 1); }
+    basic_string &operator=(initializer_list<C> il)
+    {
+        return assign(il.begin(), il.size());
+    }
+    template <typename SV>
+        requires IsViewLike<SV>
+    basic_string &operator=(const SV &t)
+    {
+        __view v(t);
+        return assign(v.data(), v.size());
+    }
+    basic_string &operator=(nullptr_t) = delete;
+
+    basic_string &assign(const C *s, size_type n)
+    {
+        // s may alias *this (self-assign substrings) — Traits::move.
+        if (n > capacity()) {
+            basic_string tmp(s, n, __alloc);
+            swap(tmp);
+            return *this;
+        }
+        Traits::move(__data, s, n);
+        SetSize(n);
+        return *this;
+    }
+    basic_string &assign(const C *s) { return assign(s, Traits::length(s)); }
+    basic_string &assign(const basic_string &other)
+    {
+        return assign(other.__data, other.__size);
+    }
+    basic_string &assign(basic_string &&other) noexcept(
+        noexcept(declval<basic_string &>() = std::move(other)))
+    {
+        return *this = std::move(other);
+    }
+    basic_string &assign(size_type count, C ch)
+    {
+        if (count > capacity()) Reallocate(count, 0);
+        Traits::assign(__data, count, ch);
+        SetSize(count);
+        return *this;
+    }
+    basic_string &assign(initializer_list<C> il)
+    {
+        return assign(il.begin(), il.size());
+    }
+    template <typename SV>
+        requires IsViewLike<SV>
+    basic_string &assign(const SV &t)
+    {
+        __view v(t);
+        return assign(v.data(), v.size());
+    }
+
+    allocator_type get_allocator() const noexcept { return __alloc; }
+
+    // ── element access ──────────────────────────────────────────────────
+
+    reference operator[](size_type i) { return __data[i]; }
+    const_reference operator[](size_type i) const { return __data[i]; }
+    reference at(size_type i)
+    {
+        if (i >= __size) boxcxx::ThrowOutOfRange("string::at");
+        return __data[i];
+    }
+    const_reference at(size_type i) const
+    {
+        if (i >= __size) boxcxx::ThrowOutOfRange("string::at");
+        return __data[i];
+    }
+    reference front() { return __data[0]; }
+    const_reference front() const { return __data[0]; }
+    reference back() { return __data[__size - 1]; }
+    const_reference back() const { return __data[__size - 1]; }
+    C *data() noexcept { return __data; }
+    const C *data() const noexcept { return __data; }
+    const C *c_str() const noexcept { return __data; }
+    operator __view() const noexcept { return __view(__data, __size); }
+
+    // ── iterators ───────────────────────────────────────────────────────
+
+    iterator begin() noexcept { return __data; }
+    const_iterator begin() const noexcept { return __data; }
+    const_iterator cbegin() const noexcept { return __data; }
+    iterator end() noexcept { return __data + __size; }
+    const_iterator end() const noexcept { return __data + __size; }
+    const_iterator cend() const noexcept { return __data + __size; }
+    reverse_iterator rbegin() noexcept { return reverse_iterator(end()); }
+    const_reverse_iterator rbegin() const noexcept
+    {
+        return const_reverse_iterator(end());
+    }
+    reverse_iterator rend() noexcept { return reverse_iterator(begin()); }
+    const_reverse_iterator rend() const noexcept
+    {
+        return const_reverse_iterator(begin());
+    }
+
+    // ── capacity ────────────────────────────────────────────────────────
+
+    [[nodiscard]] bool empty() const noexcept { return __size == 0; }
+    size_type size() const noexcept { return __size; }
+    size_type length() const noexcept { return __size; }
+    size_type max_size() const noexcept
+    {
+        return (size_type(-1) / sizeof(C)) / 2;
+    }
+    size_type capacity() const noexcept
+    {
+        return IsLong() ? __cap : kSsoChars;
+    }
+
+    void reserve(size_type want)
+    {
+        if (want > capacity()) Reallocate(want, __size);
+    }
+
+    void shrink_to_fit()
+    {
+        if (!IsLong() || __size == __cap) return;
+        basic_string tmp(__data, __size, __alloc);
+        swap(tmp);
+    }
+
+    void clear() noexcept { SetSize(0); }
+
+    // ── modifiers ───────────────────────────────────────────────────────
+
+    void push_back(C ch)
+    {
+        if (__size == capacity()) Reallocate(GrownCapacity(__size + 1), __size);
+        Traits::assign(__data[__size], ch);
+        SetSize(__size + 1);
+    }
+
+    void pop_back() { SetSize(__size - 1); }
+
+    basic_string &append(const C *s, size_type n)
+    {
+        if (__size + n > capacity()) {
+            // s may point into *this — reallocation invalidates it.
+            size_type off  = SelfOffset(s);
+            Reallocate(GrownCapacity(__size + n), __size);
+            if (off != npos) s = __data + off;
+        }
+        Traits::copy(__data + __size, s, n);
+        SetSize(__size + n);
+        return *this;
+    }
+    basic_string &append(const C *s) { return append(s, Traits::length(s)); }
+    basic_string &append(const basic_string &other)
+    {
+        return append(other.__data, other.__size);
+    }
+    basic_string &append(const basic_string &other, size_type pos,
+                         size_type n = npos)
+    {
+        __view v = __view(other).substr(pos, n);
+        return append(v.data(), v.size());
+    }
+    basic_string &append(size_type count, C ch)
+    {
+        if (__size + count > capacity())
+            Reallocate(GrownCapacity(__size + count), __size);
+        Traits::assign(__data + __size, count, ch);
+        SetSize(__size + count);
+        return *this;
+    }
+    basic_string &append(initializer_list<C> il)
+    {
+        return append(il.begin(), il.size());
+    }
+    template <typename SV>
+        requires IsViewLike<SV>
+    basic_string &append(const SV &t)
+    {
+        __view v(t);
+        return append(v.data(), v.size());
+    }
+
+    basic_string &operator+=(const basic_string &other) { return append(other); }
+    basic_string &operator+=(const C *s) { return append(s); }
+    basic_string &operator+=(C ch)
+    {
+        push_back(ch);
+        return *this;
+    }
+    basic_string &operator+=(initializer_list<C> il) { return append(il); }
+    template <typename SV>
+        requires IsViewLike<SV>
+    basic_string &operator+=(const SV &t)
+    {
+        return append(t);
+    }
+
+    basic_string &insert(size_type pos, const C *s, size_type n)
+    {
+        if (pos > __size) boxcxx::ThrowOutOfRange("string::insert");
+        if (n == 0) return *this;
+        if (__size + n > capacity()) {
+            size_type off  = SelfOffset(s);
+            Reallocate(GrownCapacity(__size + n), __size);
+            if (off != npos) s = __data + off;
+        }
+        // If s points into the gap-shifted region, copy through a check:
+        // shift the tail first, then place from the (possibly moved) src.
+        size_type off = SelfOffset(s);
+        Traits::move(__data + pos + n, __data + pos, __size - pos);
+        if (off == npos) {
+            Traits::copy(__data + pos, s, n);
+        } else {
+            // Source inside *this: recompute around the shifted tail.
+            const C *src = __data + off;
+            if (off >= pos) src += n;
+            // The source may straddle the insertion point — copy in two
+            // pieces when it does.
+            if (off < pos && off + n > pos) {
+                size_type head = pos - off;
+                Traits::copy(__data + pos, __data + off, head);
+                Traits::copy(__data + pos + head, __data + pos + n,
+                             n - head);
+            } else {
+                Traits::copy(__data + pos, src, n);
+            }
+        }
+        SetSize(__size + n);
+        return *this;
+    }
+    basic_string &insert(size_type pos, const C *s)
+    {
+        return insert(pos, s, Traits::length(s));
+    }
+    basic_string &insert(size_type pos, const basic_string &other)
+    {
+        return insert(pos, other.__data, other.__size);
+    }
+    basic_string &insert(size_type pos, size_type count, C ch)
+    {
+        if (pos > __size) boxcxx::ThrowOutOfRange("string::insert");
+        if (count == 0) return *this;
+        if (__size + count > capacity())
+            Reallocate(GrownCapacity(__size + count), __size);
+        Traits::move(__data + pos + count, __data + pos, __size - pos);
+        Traits::assign(__data + pos, count, ch);
+        SetSize(__size + count);
+        return *this;
+    }
+    iterator insert(const_iterator where, C ch)
+    {
+        size_type pos = static_cast<size_type>(where - __data);
+        insert(pos, 1, ch);
+        return __data + pos;
+    }
+    template <typename SV>
+        requires IsViewLike<SV>
+    basic_string &insert(size_type pos, const SV &t)
+    {
+        __view v(t);
+        return insert(pos, v.data(), v.size());
+    }
+
+    basic_string &erase(size_type pos = 0, size_type count = npos)
+    {
+        if (pos > __size) boxcxx::ThrowOutOfRange("string::erase");
+        size_type n = count < __size - pos ? count : __size - pos;
+        Traits::move(__data + pos, __data + pos + n, __size - pos - n);
+        SetSize(__size - n);
+        return *this;
+    }
+    iterator erase(const_iterator where)
+    {
+        size_type pos = static_cast<size_type>(where - __data);
+        erase(pos, 1);
+        return __data + pos;
+    }
+    iterator erase(const_iterator first, const_iterator last)
+    {
+        size_type pos = static_cast<size_type>(first - __data);
+        erase(pos, static_cast<size_type>(last - first));
+        return __data + pos;
+    }
+
+    basic_string &replace(size_type pos, size_type count, const C *s,
+                          size_type n)
+    {
+        if (pos > __size) boxcxx::ThrowOutOfRange("string::replace");
+        size_type erased = count < __size - pos ? count : __size - pos;
+        // Generic, alias-safe: build the tail shift via erase+insert.
+        // (Replace is not on any hot path until Ф7B's algorithms.)
+        erase(pos, erased);
+        insert(pos, s, n);
+        return *this;
+    }
+    basic_string &replace(size_type pos, size_type count, const C *s)
+    {
+        return replace(pos, count, s, Traits::length(s));
+    }
+    basic_string &replace(size_type pos, size_type count,
+                          const basic_string &other)
+    {
+        return replace(pos, count, other.__data, other.__size);
+    }
+    basic_string &replace(size_type pos, size_type count, size_type n, C ch)
+    {
+        if (pos > __size) boxcxx::ThrowOutOfRange("string::replace");
+        size_type erased = count < __size - pos ? count : __size - pos;
+        erase(pos, erased);
+        insert(pos, n, ch);
+        return *this;
+    }
+    template <typename SV>
+        requires IsViewLike<SV>
+    basic_string &replace(size_type pos, size_type count, const SV &t)
+    {
+        __view v(t);
+        return replace(pos, count, v.data(), v.size());
+    }
+
+    void resize(size_type n, C ch)
+    {
+        if (n > __size) append(n - __size, ch);
+        else SetSize(n);
+    }
+    void resize(size_type n) { resize(n, C()); }
+
+    size_type copy(C *dst, size_type count, size_type pos = 0) const
+    {
+        return __view(*this).copy(dst, count, pos);
+    }
+
+    void swap(basic_string &other) noexcept
+    {
+        if (this == &other) return;
+        if constexpr (AllocTraits::propagate_on_container_swap::value) {
+            Alloc tmp    = __alloc;
+            __alloc      = other.__alloc;
+            other.__alloc = tmp;
+        }
+        // Three repr shapes: long/long is a plain member swap; any sso
+        // side moves bytes through a temp inline buffer.
+        bool l1 = IsLong(), l2 = other.IsLong();
+        C buf[kSsoChars + 1];
+        size_type s1 = __size, s2 = other.__size;
+        if (l1 && l2) {
+            C *d1 = __data;
+            size_type c1 = __cap;
+            __data = other.__data; __cap = other.__cap;
+            other.__data = d1; other.__cap = c1;
+        } else if (!l1 && !l2) {
+            Traits::copy(buf, __sso, s1 + 1);
+            Traits::copy(__sso, other.__sso, s2 + 1);
+            Traits::copy(other.__sso, buf, s1 + 1);
+        } else {
+            basic_string &lng = l1 ? *this : other;
+            basic_string &sso = l1 ? other : *this;
+            C *d = lng.__data;
+            size_type cap = lng.__cap;
+            Traits::copy(lng.__sso, sso.__sso, sso.__size + 1);
+            lng.__data = lng.__sso;
+            sso.__data = d;
+            sso.__cap  = cap;
+        }
+        __size       = s2;
+        other.__size = s1;
+    }
+
+    // ── search / comparison (delegated to string_view) ──────────────────
+
+    size_type find(__view v, size_type pos = 0) const noexcept
+    {
+        return __view(*this).find(v, pos);
+    }
+    size_type find(C c, size_type pos = 0) const noexcept
+    {
+        return __view(*this).find(c, pos);
+    }
+    size_type find(const C *s, size_type pos = 0) const
+    {
+        return __view(*this).find(s, pos);
+    }
+    size_type find(const C *s, size_type pos, size_type n) const
+    {
+        return __view(*this).find(s, pos, n);
+    }
+    size_type rfind(__view v, size_type pos = npos) const noexcept
+    {
+        return __view(*this).rfind(v, pos);
+    }
+    size_type rfind(C c, size_type pos = npos) const noexcept
+    {
+        return __view(*this).rfind(c, pos);
+    }
+    size_type rfind(const C *s, size_type pos = npos) const
+    {
+        return __view(*this).rfind(s, pos);
+    }
+    size_type find_first_of(__view v, size_type pos = 0) const noexcept
+    {
+        return __view(*this).find_first_of(v, pos);
+    }
+    size_type find_first_of(C c, size_type pos = 0) const noexcept
+    {
+        return __view(*this).find_first_of(c, pos);
+    }
+    size_type find_first_of(const C *s, size_type pos = 0) const
+    {
+        return __view(*this).find_first_of(s, pos);
+    }
+    size_type find_last_of(__view v, size_type pos = npos) const noexcept
+    {
+        return __view(*this).find_last_of(v, pos);
+    }
+    size_type find_last_of(C c, size_type pos = npos) const noexcept
+    {
+        return __view(*this).find_last_of(c, pos);
+    }
+    size_type find_last_of(const C *s, size_type pos = npos) const
+    {
+        return __view(*this).find_last_of(s, pos);
+    }
+    size_type find_first_not_of(__view v, size_type pos = 0) const noexcept
+    {
+        return __view(*this).find_first_not_of(v, pos);
+    }
+    size_type find_first_not_of(C c, size_type pos = 0) const noexcept
+    {
+        return __view(*this).find_first_not_of(c, pos);
+    }
+    size_type find_first_not_of(const C *s, size_type pos = 0) const
+    {
+        return __view(*this).find_first_not_of(s, pos);
+    }
+    size_type find_last_not_of(__view v, size_type pos = npos) const noexcept
+    {
+        return __view(*this).find_last_not_of(v, pos);
+    }
+    size_type find_last_not_of(C c, size_type pos = npos) const noexcept
+    {
+        return __view(*this).find_last_not_of(c, pos);
+    }
+    size_type find_last_not_of(const C *s, size_type pos = npos) const
+    {
+        return __view(*this).find_last_not_of(s, pos);
+    }
+
+    int compare(__view v) const noexcept { return __view(*this).compare(v); }
+    int compare(const C *s) const { return __view(*this).compare(s); }
+    int compare(const basic_string &other) const noexcept
+    {
+        return __view(*this).compare(__view(other));
+    }
+    int compare(size_type pos, size_type count, __view v) const
+    {
+        return __view(*this).compare(pos, count, v);
+    }
+
+    bool starts_with(__view v) const noexcept
+    {
+        return __view(*this).starts_with(v);
+    }
+    bool starts_with(C c) const noexcept
+    {
+        return __view(*this).starts_with(c);
+    }
+    bool starts_with(const C *s) const
+    {
+        return __view(*this).starts_with(s);
+    }
+    bool ends_with(__view v) const noexcept
+    {
+        return __view(*this).ends_with(v);
+    }
+    bool ends_with(C c) const noexcept { return __view(*this).ends_with(c); }
+    bool ends_with(const C *s) const { return __view(*this).ends_with(s); }
+    bool contains(__view v) const noexcept
+    {
+        return __view(*this).contains(v);
+    }
+    bool contains(C c) const noexcept { return __view(*this).contains(c); }
+    bool contains(const C *s) const { return __view(*this).contains(s); }
+
+    basic_string substr(size_type pos = 0, size_type count = npos) const
+    {
+        __view v = __view(*this).substr(pos, count);
+        return basic_string(v.data(), v.size(), __alloc);
+    }
+
+private:
+    // ── representation ──────────────────────────────────────────────────
+
+    bool IsLong() const noexcept { return __data != __sso; }
+
+    void SetShort(size_type n) noexcept
+    {
+        __data         = __sso;
+        __size         = n;
+        __sso[n]       = C();
+    }
+
+    void SetSize(size_type n) noexcept
+    {
+        __size     = n;
+        __data[n] = C();
+    }
+
+    void InitCopy(const C *s, size_type n)
+    {
+        if (n > max_size()) boxcxx::ThrowLengthError("string: too long");
+        if (n <= kSsoChars) {
+            __data = __sso;
+        } else {
+            __data = AllocTraits::allocate(__alloc, n + 1);
+            __cap  = n;
+        }
+        Traits::copy(__data, s, n);
+        SetSize(n);
+    }
+
+    void InitFill(size_type n, C ch)
+    {
+        if (n > max_size()) boxcxx::ThrowLengthError("string: too long");
+        if (n <= kSsoChars) {
+            __data = __sso;
+        } else {
+            __data = AllocTraits::allocate(__alloc, n + 1);
+            __cap  = n;
+        }
+        Traits::assign(__data, n, ch);
+        SetSize(n);
+    }
+
+    void StealFrom(basic_string &other) noexcept
+    {
+        if (other.IsLong()) {
+            __data = other.__data;
+            __size = other.__size;
+            __cap  = other.__cap;
+        } else {
+            __data = __sso;
+            __size = other.__size;
+            Traits::copy(__sso, other.__sso, other.__size + 1);
+        }
+        other.SetShort(0);
+    }
+
+    void DropStorage() noexcept
+    {
+        if (IsLong()) AllocTraits::deallocate(__alloc, __data, __cap + 1);
+    }
+
+    size_type GrownCapacity(size_type needed) const
+    {
+        if (needed > max_size()) boxcxx::ThrowLengthError("string: too long");
+        size_type doubled = capacity() * 2;
+        return doubled > needed ? doubled : needed;
+    }
+
+    // Keeps the first `keep` chars; gives at least `want` capacity.
+    void Reallocate(size_type want, size_type keep)
+    {
+        if (want > max_size()) boxcxx::ThrowLengthError("string: too long");
+        C *fresh = AllocTraits::allocate(__alloc, want + 1);
+        Traits::copy(fresh, __data, keep);
+        DropStorage();
+        __data = fresh;
+        __cap  = want;
+        SetSize(keep);
+    }
+
+    // npos when `s` points outside this string's buffer.
+    size_type SelfOffset(const C *s) const noexcept
+    {
+        if (s >= __data && s <= __data + __size)
+            return static_cast<size_type>(s - __data);
+        return npos;
+    }
+
+    C *__data;
+    size_type __size;
+    union {
+        size_type __cap;
+        C __sso[kSsoChars + 1];
+    };
+    [[no_unique_address]] Alloc __alloc;
+};
+
+// ── non-member operators ────────────────────────────────────────────────
+
+template <typename C, typename T, typename A>
+basic_string<C, T, A> operator+(const basic_string<C, T, A> &a,
+                                const basic_string<C, T, A> &b)
+{
+    basic_string<C, T, A> r;
+    r.reserve(a.size() + b.size());
+    r.append(a);
+    r.append(b);
+    return r;
+}
+template <typename C, typename T, typename A>
+basic_string<C, T, A> operator+(const basic_string<C, T, A> &a, const C *b)
+{
+    basic_string<C, T, A> r;
+    r.reserve(a.size() + T::length(b));
+    r.append(a);
+    r.append(b);
+    return r;
+}
+template <typename C, typename T, typename A>
+basic_string<C, T, A> operator+(const C *a, const basic_string<C, T, A> &b)
+{
+    basic_string<C, T, A> r;
+    r.reserve(T::length(a) + b.size());
+    r.append(a);
+    r.append(b);
+    return r;
+}
+template <typename C, typename T, typename A>
+basic_string<C, T, A> operator+(const basic_string<C, T, A> &a, C ch)
+{
+    basic_string<C, T, A> r(a);
+    r.push_back(ch);
+    return r;
+}
+template <typename C, typename T, typename A>
+basic_string<C, T, A> operator+(C ch, const basic_string<C, T, A> &b)
+{
+    basic_string<C, T, A> r(1, ch);
+    r.append(b);
+    return r;
+}
+template <typename C, typename T, typename A>
+basic_string<C, T, A> operator+(basic_string<C, T, A> &&a,
+                                const basic_string<C, T, A> &b)
+{
+    a.append(b);
+    return std::move(a);
+}
+template <typename C, typename T, typename A>
+basic_string<C, T, A> operator+(basic_string<C, T, A> &&a, const C *b)
+{
+    a.append(b);
+    return std::move(a);
+}
+template <typename C, typename T, typename A>
+basic_string<C, T, A> operator+(basic_string<C, T, A> &&a, C ch)
+{
+    a.push_back(ch);
+    return std::move(a);
+}
+
+template <typename C, typename T, typename A>
+bool operator==(const basic_string<C, T, A> &a,
+                const basic_string<C, T, A> &b) noexcept
+{
+    return basic_string_view<C, T>(a) == basic_string_view<C, T>(b);
+}
+template <typename C, typename T, typename A>
+bool operator==(const basic_string<C, T, A> &a, const C *b)
+{
+    return basic_string_view<C, T>(a) == basic_string_view<C, T>(b);
+}
+template <typename C, typename T, typename A>
+strong_ordering operator<=>(const basic_string<C, T, A> &a,
+                            const basic_string<C, T, A> &b) noexcept
+{
+    return basic_string_view<C, T>(a) <=> basic_string_view<C, T>(b);
+}
+template <typename C, typename T, typename A>
+strong_ordering operator<=>(const basic_string<C, T, A> &a, const C *b)
+{
+    return basic_string_view<C, T>(a) <=> basic_string_view<C, T>(b);
+}
+
+template <typename C, typename T, typename A>
+void swap(basic_string<C, T, A> &a, basic_string<C, T, A> &b) noexcept
+{
+    a.swap(b);
+}
+
+// C++20 uniform erasure.
+template <typename C, typename T, typename A, typename V>
+typename basic_string<C, T, A>::size_type erase(basic_string<C, T, A> &s,
+                                                const V &value)
+{
+    typename basic_string<C, T, A>::size_type removed = 0;
+    typename basic_string<C, T, A>::size_type w       = 0;
+    for (typename basic_string<C, T, A>::size_type r = 0; r < s.size(); ++r) {
+        if (s[r] == value) {
+            ++removed;
+        } else {
+            s[w++] = s[r];
+        }
+    }
+    s.resize(w);
+    return removed;
+}
+
+// ── aliases / literals / hashing / conversions ──────────────────────────
+
+using string    = basic_string<char>;
+using wstring   = basic_string<wchar_t>;
+using u8string  = basic_string<char8_t>;
+using u16string = basic_string<char16_t>;
+using u32string = basic_string<char32_t>;
+
+inline namespace literals {
+inline namespace string_literals {
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wliteral-suffix"
+
+inline string operator""s(const char *s, size_t n)
+{
+    return string(s, n);
+}
+inline wstring operator""s(const wchar_t *s, size_t n)
+{
+    return wstring(s, n);
+}
+inline u8string operator""s(const char8_t *s, size_t n)
+{
+    return u8string(s, n);
+}
+inline u16string operator""s(const char16_t *s, size_t n)
+{
+    return u16string(s, n);
+}
+inline u32string operator""s(const char32_t *s, size_t n)
+{
+    return u32string(s, n);
+}
+
+#pragma GCC diagnostic pop
+
+} // namespace string_literals
+} // namespace literals
+
+template <>
+struct hash<string> {
+    size_t operator()(const string &s) const noexcept
+    {
+        return __fnv1a_bytes(s.data(), s.size());
+    }
+};
+template <>
+struct hash<wstring> {
+    size_t operator()(const wstring &s) const noexcept
+    {
+        return __fnv1a_bytes(s.data(), s.size() * sizeof(wchar_t));
+    }
+};
+template <>
+struct hash<u8string> {
+    size_t operator()(const u8string &s) const noexcept
+    {
+        return __fnv1a_bytes(s.data(), s.size());
+    }
+};
+
+// Integer to_string family. Floating-point joins with Ф9A's <charconv>
+// (correct shortest-round-trip formatting needs Ryu — no half measures).
+
+namespace __string_impl {
+
+template <typename U>
+inline string UnsignedToString(U value)
+{
+    char digits[24];
+    size_t n = 0;
+    do {
+        digits[n++] = static_cast<char>('0' + value % 10u);
+        value /= 10u;
+    } while (value != 0);
+    string out;
+    out.reserve(n);
+    while (n > 0) out.push_back(digits[--n]);
+    return out;
+}
+
+template <typename S>
+inline string SignedToString(S value)
+{
+    using U = make_unsigned_t<S>;
+    U mag   = value < 0 ? U(0) - static_cast<U>(value) : static_cast<U>(value);
+    string out = UnsignedToString(mag);
+    if (value < 0) out.insert(0, 1, '-');
+    return out;
+}
+
+} // namespace __string_impl
+
+inline string to_string(int v) { return __string_impl::SignedToString(v); }
+inline string to_string(long v) { return __string_impl::SignedToString(v); }
+inline string to_string(long long v)
+{
+    return __string_impl::SignedToString(v);
+}
+inline string to_string(unsigned v)
+{
+    return __string_impl::UnsignedToString(v);
+}
+inline string to_string(unsigned long v)
+{
+    return __string_impl::UnsignedToString(v);
+}
+inline string to_string(unsigned long long v)
+{
+    return __string_impl::UnsignedToString(v);
+}
+
+} // namespace std
+
+#endif // BOXCXX_STRING
