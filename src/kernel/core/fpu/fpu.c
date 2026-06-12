@@ -70,6 +70,22 @@ bool fpu_xsave_register_extension(uint64_t xcr0_bit, const char *name) {
     return true;
 }
 
+/* User FS base (TLS) context-switch gates — consumed by context_switch.asm.
+ *
+ * g_fsgsbase_active: CR4.FSGSBASE is enabled on every online core, so the
+ *   switch path uses RDFSBASE/WRFSBASE (a few cycles). Set per-core in
+ *   enable_fpu from the (progressively intersected) g_cpu_caps; any AP
+ *   that loses the feature during cpu_intersect_features_ap clears it
+ *   again in per_core_init_ap — before any user process exists, so the
+ *   flag is final by first dispatch.
+ *
+ * g_user_fsbase_used: a process programmed its FS base via the kernel
+ *   SET_FSBASE op on a pre-FSGSBASE CPU → switch path falls back to MSR
+ *   0xC0000100. Stays 0 until TLS is actually used, keeping legacy
+ *   configurations at zero per-switch cost. */
+volatile uint8_t g_fsgsbase_active = 0;
+volatile uint8_t g_user_fsbase_used = 0;
+
 void enable_fpu(void) {
     uint64_t cr0, cr4;
 
@@ -117,6 +133,7 @@ void enable_fpu(void) {
 
     /* FSGSBASE (bit 16) — Intel SDM Vol 3A §2.5. */
     if (g_cpu_caps.has_fsgsbase) cr4 |= (1ULL << 16);
+    g_fsgsbase_active = g_cpu_caps.has_fsgsbase ? 1 : 0;
 
     cr4 |= (1ULL << 7);   // PGE
 

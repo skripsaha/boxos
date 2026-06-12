@@ -85,7 +85,13 @@ typedef struct __packed {
     uint8_t  params[];    /* variable-length inline parameters */
 } ManifestOp;
 
-_Static_assert(sizeof(ManifestOp) == 12, "ManifestOp header must be 12 bytes");
+/* static_assert spelling: keyword in C23 and C++; shim for C11/C17. */
+#if !defined(__cplusplus) && !defined(static_assert) && \
+    (!defined(__STDC_VERSION__) || (__STDC_VERSION__ < 202311L))
+#define static_assert _Static_assert
+#endif
+
+static_assert(sizeof(ManifestOp) == 12, "ManifestOp header must be 12 bytes");
 
 /*
  * Manifest header. Followed inline by op_count ManifestOp records (each
@@ -99,7 +105,7 @@ typedef struct __packed {
     uint32_t total_size;  /* total bytes (header + all ops) */
 } Manifest;
 
-_Static_assert(sizeof(Manifest) == 16, "Manifest header must be 16 bytes");
+static_assert(sizeof(Manifest) == 16, "Manifest header must be 16 bytes");
 
 #define MANIFEST_VERSION 1u
 

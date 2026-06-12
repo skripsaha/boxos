@@ -1,0 +1,36 @@
+// boxcxx — <exception>
+// Phase 1 surface: exception/bad_exception classes, terminate machinery,
+// uncaught_exceptions. exception_ptr / nested_exception / rethrow arrive
+// with the unwinder (Phase 4B).
+#ifndef BOXCXX_EXCEPTION
+#define BOXCXX_EXCEPTION
+
+namespace std {
+
+class exception {
+public:
+    exception() noexcept = default;
+    exception(const exception &) noexcept = default;
+    exception &operator=(const exception &) noexcept = default;
+    virtual ~exception();                       // key function → libboxcxx.a
+    virtual const char *what() const noexcept;
+};
+
+class bad_exception : public exception {
+public:
+    bad_exception() noexcept = default;
+    ~bad_exception() override;
+    const char *what() const noexcept override;
+};
+
+using terminate_handler = void (*)();
+
+terminate_handler set_terminate(terminate_handler handler) noexcept;
+terminate_handler get_terminate() noexcept;
+[[noreturn]] void terminate() noexcept;
+
+int uncaught_exceptions() noexcept;
+
+} // namespace std
+
+#endif // BOXCXX_EXCEPTION

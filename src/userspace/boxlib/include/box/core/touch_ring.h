@@ -1,6 +1,10 @@
 #ifndef BOX_CORE_TOUCH_RING_H
 #define BOX_CORE_TOUCH_RING_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include "box/types.h"
 
 /*
@@ -105,5 +109,9 @@ bool touch_ring_pop_slot(TouchSlot *slot_out);
  *   out[6] = last_pos
  *   out[7] = last_tail */
 void touch_ring_pop_stats(uint64_t out[8]);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* BOX_CORE_TOUCH_RING_H */

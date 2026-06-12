@@ -1,6 +1,10 @@
 #ifndef BOX_KEYBOARD_H
 #define BOX_KEYBOARD_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include "box/types.h"
 #include "box/error.h"
 
@@ -22,5 +26,9 @@ int kb_status(kb_status_t* status);
 
 int kb_getchar_timeout(uint32_t timeout_ms);
 int kb_getchar_ex(kb_char_t* out_char);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // BOX_KEYBOARD_H

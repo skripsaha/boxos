@@ -76,6 +76,19 @@ typedef struct
      * task_restore_context's first RET pops a matching shadow-stack entry.
      */
     uint64_t pl0_ssp;
+
+    /* Per-process user FS base — the TLS thread pointer (System V x86-64
+     * uses FS for thread-local storage). Userspace programs it via
+     * WRFSBASE (CR4.FSGSBASE=1) or the kernel SET_FSBASE op on older
+     * silicon; ISRs never touch FS, so the live value at context-switch
+     * time is always the owning process's.
+     *
+     * Saved/restored by context_switch.asm: RDFSBASE/WRFSBASE when
+     * g_fsgsbase_active=1, MSR 0xC0000100 when g_user_fsbase_used=1,
+     * skipped entirely otherwise (zero cost until TLS is used).
+     * CRITICAL restore order: the FS *selector* load (`mov fs, ax`)
+     * zeroes the base on real silicon — WRFSBASE must come after it. */
+    uint64_t user_fsbase;
 } ProcessContext;
 
 // These offsets must match context_switch.asm — if the struct layout changes,
@@ -86,6 +99,7 @@ _Static_assert(offsetof(ProcessContext, rflags) == 152, "ProcessContext.rflags o
 _Static_assert(offsetof(ProcessContext, fpu_state) == 168, "ProcessContext.fpu_state offset mismatch with asm");
 _Static_assert(offsetof(ProcessContext, fpu_initialized) == 176, "ProcessContext.fpu_initialized offset mismatch with asm");
 _Static_assert(offsetof(ProcessContext, pl0_ssp) == 184, "ProcessContext.pl0_ssp offset mismatch with asm");
+_Static_assert(offsetof(ProcessContext, user_fsbase) == 192, "ProcessContext.user_fsbase offset mismatch with asm");
 
 typedef struct process_t
 {

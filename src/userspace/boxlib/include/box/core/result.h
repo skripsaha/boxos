@@ -1,6 +1,10 @@
 #ifndef BOX_CORE_RESULT_H
 #define BOX_CORE_RESULT_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include "box/types.h"
 #include "box/error.h"
 #include "boxos_kctx.h"      /* KResultContext enum — shared with kernel */
@@ -115,5 +119,9 @@ bool result_wait_any(Result* out, uint32_t timeout_ms);
 //   out[4]=last_seq_seen, out[5]=last_expected, out[6]=last_pos, out[7]=last_tail
 void result_pop_stats(uint64_t out[8]);
 
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // BOX_RESULT_H

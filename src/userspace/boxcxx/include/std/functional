@@ -1,0 +1,432 @@
+// boxcxx — <functional> (phase-2 core: invoke, reference_wrapper,
+// transparent operator functors, identity). std::function, bind_front,
+// not_fn and the hash primary land with the container phases.
+#ifndef BOXCXX_FUNCTIONAL
+#define BOXCXX_FUNCTIONAL
+
+#include <type_traits>
+#include <utility>
+
+namespace std {
+
+template <class T> class reference_wrapper;
+
+// ── invoke / invoke_r ([func.invoke]) ───────────────────────────────────
+
+namespace __bits {
+
+template <class T> struct IsRefWrapper : false_type {};
+template <class T> struct IsRefWrapper<reference_wrapper<T>> : true_type {};
+
+template <class F, class... Args>
+constexpr decltype(auto) InvokeRt(F &&f, Args &&...args) noexcept(
+    is_nothrow_invocable_v<F, Args...>)
+{
+    using Fn = remove_cvref_t<F>;
+    if constexpr (is_member_function_pointer_v<Fn>) {
+        return [&]<class O, class... Rest>(
+                   O &&o, Rest &&...rest) constexpr -> decltype(auto) {
+            using OBare = remove_cvref_t<O>;
+            if constexpr (IsRefWrapper<OBare>::value)
+                return (o.get().*f)(forward<Rest>(rest)...);
+            else if constexpr (requires {
+                                   (static_cast<O &&>(o).*
+                                    f)(forward<Rest>(rest)...);
+                               })
+                return (static_cast<O &&>(o).*f)(forward<Rest>(rest)...);
+            else
+                return ((*static_cast<O &&>(o)).*f)(forward<Rest>(rest)...);
+        }(forward<Args>(args)...);
+    } else if constexpr (is_member_object_pointer_v<Fn>) {
+        static_assert(sizeof...(Args) == 1,
+                      "data-member pointer takes exactly one operand");
+        return [&]<class O>(O &&o) constexpr -> decltype(auto) {
+            using OBare = remove_cvref_t<O>;
+            if constexpr (IsRefWrapper<OBare>::value)
+                return o.get().*f;
+            else if constexpr (requires { static_cast<O &&>(o).*f; })
+                return static_cast<O &&>(o).*f;
+            else
+                return (*static_cast<O &&>(o)).*f;
+        }(forward<Args>(args)...);
+    } else {
+        return forward<F>(f)(forward<Args>(args)...);
+    }
+}
+
+} // namespace __bits
+
+template <class F, class... Args>
+    requires is_invocable_v<F, Args...>
+constexpr invoke_result_t<F, Args...>
+invoke(F &&f, Args &&...args) noexcept(is_nothrow_invocable_v<F, Args...>)
+{
+    return __bits::InvokeRt(forward<F>(f), forward<Args>(args)...);
+}
+
+template <class R, class F, class... Args>
+    requires is_invocable_r_v<R, F, Args...>
+constexpr R invoke_r(F &&f, Args &&...args) noexcept(
+    is_nothrow_invocable_r_v<R, F, Args...>)
+{
+    if constexpr (is_void_v<R>)
+        __bits::InvokeRt(forward<F>(f), forward<Args>(args)...);
+    else
+        return __bits::InvokeRt(forward<F>(f), forward<Args>(args)...);
+}
+
+// ── reference_wrapper ───────────────────────────────────────────────────
+
+template <class T>
+class reference_wrapper {
+    T *_target;
+
+    static constexpr T *Bind(T &t) noexcept { return __builtin_addressof(t); }
+    static void Bind(T &&) = delete;
+
+public:
+    using type = T;
+
+    template <class U>
+        requires(!is_same_v<remove_cvref_t<U>, reference_wrapper> &&
+                 requires { Bind(declval<U>()); })
+    constexpr reference_wrapper(U &&u) noexcept(
+        noexcept(Bind(declval<U>())))
+        : _target(Bind(forward<U>(u)))
+    {
+    }
+
+    reference_wrapper(const reference_wrapper &) = default;
+    reference_wrapper &operator=(const reference_wrapper &) = default;
+
+    constexpr operator T &() const noexcept { return *_target; }
+    [[nodiscard]] constexpr T &get() const noexcept { return *_target; }
+
+    template <class... Args>
+        requires is_invocable_v<T &, Args...>
+    constexpr invoke_result_t<T &, Args...> operator()(Args &&...args) const
+        noexcept(is_nothrow_invocable_v<T &, Args...>)
+    {
+        return __bits::InvokeRt(get(), forward<Args>(args)...);
+    }
+};
+
+template <class T>
+reference_wrapper(T &) -> reference_wrapper<T>;
+
+template <class T>
+[[nodiscard]] constexpr reference_wrapper<T> ref(T &t) noexcept
+{
+    return reference_wrapper<T>(t);
+}
+template <class T>
+[[nodiscard]] constexpr reference_wrapper<T>
+ref(reference_wrapper<T> t) noexcept
+{
+    return t;
+}
+template <class T> void ref(const T &&) = delete;
+
+template <class T>
+[[nodiscard]] constexpr reference_wrapper<const T> cref(const T &t) noexcept
+{
+    return reference_wrapper<const T>(t);
+}
+template <class T>
+[[nodiscard]] constexpr reference_wrapper<const T>
+cref(reference_wrapper<T> t) noexcept
+{
+    return reference_wrapper<const T>(t.get());
+}
+template <class T> void cref(const T &&) = delete;
+
+// ── transparent operator functors ───────────────────────────────────────
+
+template <class T = void>
+struct plus {
+    [[nodiscard]] constexpr T operator()(const T &a, const T &b) const
+    { return a + b; }
+};
+template <>
+struct plus<void> {
+    template <class A, class B>
+    [[nodiscard]] constexpr auto operator()(A &&a, B &&b) const
+        noexcept(noexcept(forward<A>(a) + forward<B>(b)))
+            -> decltype(forward<A>(a) + forward<B>(b))
+    { return forward<A>(a) + forward<B>(b); }
+    using is_transparent = void;
+};
+
+template <class T = void>
+struct minus {
+    [[nodiscard]] constexpr T operator()(const T &a, const T &b) const
+    { return a - b; }
+};
+template <>
+struct minus<void> {
+    template <class A, class B>
+    [[nodiscard]] constexpr auto operator()(A &&a, B &&b) const
+        noexcept(noexcept(forward<A>(a) - forward<B>(b)))
+            -> decltype(forward<A>(a) - forward<B>(b))
+    { return forward<A>(a) - forward<B>(b); }
+    using is_transparent = void;
+};
+
+template <class T = void>
+struct multiplies {
+    [[nodiscard]] constexpr T operator()(const T &a, const T &b) const
+    { return a * b; }
+};
+template <>
+struct multiplies<void> {
+    template <class A, class B>
+    [[nodiscard]] constexpr auto operator()(A &&a, B &&b) const
+        noexcept(noexcept(forward<A>(a) * forward<B>(b)))
+            -> decltype(forward<A>(a) * forward<B>(b))
+    { return forward<A>(a) * forward<B>(b); }
+    using is_transparent = void;
+};
+
+template <class T = void>
+struct divides {
+    [[nodiscard]] constexpr T operator()(const T &a, const T &b) const
+    { return a / b; }
+};
+template <>
+struct divides<void> {
+    template <class A, class B>
+    [[nodiscard]] constexpr auto operator()(A &&a, B &&b) const
+        noexcept(noexcept(forward<A>(a) / forward<B>(b)))
+            -> decltype(forward<A>(a) / forward<B>(b))
+    { return forward<A>(a) / forward<B>(b); }
+    using is_transparent = void;
+};
+
+template <class T = void>
+struct modulus {
+    [[nodiscard]] constexpr T operator()(const T &a, const T &b) const
+    { return a % b; }
+};
+template <>
+struct modulus<void> {
+    template <class A, class B>
+    [[nodiscard]] constexpr auto operator()(A &&a, B &&b) const
+        noexcept(noexcept(forward<A>(a) % forward<B>(b)))
+            -> decltype(forward<A>(a) % forward<B>(b))
+    { return forward<A>(a) % forward<B>(b); }
+    using is_transparent = void;
+};
+
+template <class T = void>
+struct negate {
+    [[nodiscard]] constexpr T operator()(const T &a) const { return -a; }
+};
+template <>
+struct negate<void> {
+    template <class A>
+    [[nodiscard]] constexpr auto operator()(A &&a) const
+        noexcept(noexcept(-forward<A>(a))) -> decltype(-forward<A>(a))
+    { return -forward<A>(a); }
+    using is_transparent = void;
+};
+
+template <class T = void>
+struct equal_to {
+    [[nodiscard]] constexpr bool operator()(const T &a, const T &b) const
+    { return a == b; }
+};
+template <>
+struct equal_to<void> {
+    template <class A, class B>
+    [[nodiscard]] constexpr auto operator()(A &&a, B &&b) const
+        noexcept(noexcept(forward<A>(a) == forward<B>(b)))
+            -> decltype(forward<A>(a) == forward<B>(b))
+    { return forward<A>(a) == forward<B>(b); }
+    using is_transparent = void;
+};
+
+template <class T = void>
+struct not_equal_to {
+    [[nodiscard]] constexpr bool operator()(const T &a, const T &b) const
+    { return a != b; }
+};
+template <>
+struct not_equal_to<void> {
+    template <class A, class B>
+    [[nodiscard]] constexpr auto operator()(A &&a, B &&b) const
+        noexcept(noexcept(forward<A>(a) != forward<B>(b)))
+            -> decltype(forward<A>(a) != forward<B>(b))
+    { return forward<A>(a) != forward<B>(b); }
+    using is_transparent = void;
+};
+
+template <class T = void>
+struct less {
+    [[nodiscard]] constexpr bool operator()(const T &a, const T &b) const
+    { return a < b; }
+};
+template <>
+struct less<void> {
+    template <class A, class B>
+    [[nodiscard]] constexpr auto operator()(A &&a, B &&b) const
+        noexcept(noexcept(forward<A>(a) < forward<B>(b)))
+            -> decltype(forward<A>(a) < forward<B>(b))
+    { return forward<A>(a) < forward<B>(b); }
+    using is_transparent = void;
+};
+
+template <class T = void>
+struct greater {
+    [[nodiscard]] constexpr bool operator()(const T &a, const T &b) const
+    { return a > b; }
+};
+template <>
+struct greater<void> {
+    template <class A, class B>
+    [[nodiscard]] constexpr auto operator()(A &&a, B &&b) const
+        noexcept(noexcept(forward<A>(a) > forward<B>(b)))
+            -> decltype(forward<A>(a) > forward<B>(b))
+    { return forward<A>(a) > forward<B>(b); }
+    using is_transparent = void;
+};
+
+template <class T = void>
+struct less_equal {
+    [[nodiscard]] constexpr bool operator()(const T &a, const T &b) const
+    { return a <= b; }
+};
+template <>
+struct less_equal<void> {
+    template <class A, class B>
+    [[nodiscard]] constexpr auto operator()(A &&a, B &&b) const
+        noexcept(noexcept(forward<A>(a) <= forward<B>(b)))
+            -> decltype(forward<A>(a) <= forward<B>(b))
+    { return forward<A>(a) <= forward<B>(b); }
+    using is_transparent = void;
+};
+
+template <class T = void>
+struct greater_equal {
+    [[nodiscard]] constexpr bool operator()(const T &a, const T &b) const
+    { return a >= b; }
+};
+template <>
+struct greater_equal<void> {
+    template <class A, class B>
+    [[nodiscard]] constexpr auto operator()(A &&a, B &&b) const
+        noexcept(noexcept(forward<A>(a) >= forward<B>(b)))
+            -> decltype(forward<A>(a) >= forward<B>(b))
+    { return forward<A>(a) >= forward<B>(b); }
+    using is_transparent = void;
+};
+
+template <class T = void>
+struct logical_and {
+    [[nodiscard]] constexpr bool operator()(const T &a, const T &b) const
+    { return a && b; }
+};
+template <>
+struct logical_and<void> {
+    template <class A, class B>
+    [[nodiscard]] constexpr auto operator()(A &&a, B &&b) const
+        -> decltype(forward<A>(a) && forward<B>(b))
+    { return forward<A>(a) && forward<B>(b); }
+    using is_transparent = void;
+};
+
+template <class T = void>
+struct logical_or {
+    [[nodiscard]] constexpr bool operator()(const T &a, const T &b) const
+    { return a || b; }
+};
+template <>
+struct logical_or<void> {
+    template <class A, class B>
+    [[nodiscard]] constexpr auto operator()(A &&a, B &&b) const
+        -> decltype(forward<A>(a) || forward<B>(b))
+    { return forward<A>(a) || forward<B>(b); }
+    using is_transparent = void;
+};
+
+template <class T = void>
+struct logical_not {
+    [[nodiscard]] constexpr bool operator()(const T &a) const { return !a; }
+};
+template <>
+struct logical_not<void> {
+    template <class A>
+    [[nodiscard]] constexpr auto operator()(A &&a) const
+        -> decltype(!forward<A>(a))
+    { return !forward<A>(a); }
+    using is_transparent = void;
+};
+
+template <class T = void>
+struct bit_and {
+    [[nodiscard]] constexpr T operator()(const T &a, const T &b) const
+    { return a & b; }
+};
+template <>
+struct bit_and<void> {
+    template <class A, class B>
+    [[nodiscard]] constexpr auto operator()(A &&a, B &&b) const
+        -> decltype(forward<A>(a) & forward<B>(b))
+    { return forward<A>(a) & forward<B>(b); }
+    using is_transparent = void;
+};
+
+template <class T = void>
+struct bit_or {
+    [[nodiscard]] constexpr T operator()(const T &a, const T &b) const
+    { return a | b; }
+};
+template <>
+struct bit_or<void> {
+    template <class A, class B>
+    [[nodiscard]] constexpr auto operator()(A &&a, B &&b) const
+        -> decltype(forward<A>(a) | forward<B>(b))
+    { return forward<A>(a) | forward<B>(b); }
+    using is_transparent = void;
+};
+
+template <class T = void>
+struct bit_xor {
+    [[nodiscard]] constexpr T operator()(const T &a, const T &b) const
+    { return a ^ b; }
+};
+template <>
+struct bit_xor<void> {
+    template <class A, class B>
+    [[nodiscard]] constexpr auto operator()(A &&a, B &&b) const
+        -> decltype(forward<A>(a) ^ forward<B>(b))
+    { return forward<A>(a) ^ forward<B>(b); }
+    using is_transparent = void;
+};
+
+template <class T = void>
+struct bit_not {
+    [[nodiscard]] constexpr T operator()(const T &a) const { return ~a; }
+};
+template <>
+struct bit_not<void> {
+    template <class A>
+    [[nodiscard]] constexpr auto operator()(A &&a) const
+        -> decltype(~forward<A>(a))
+    { return ~forward<A>(a); }
+    using is_transparent = void;
+};
+
+struct identity {
+    template <class T>
+    [[nodiscard]] constexpr T &&operator()(T &&t) const noexcept
+    { return forward<T>(t); }
+    using is_transparent = void;
+};
+
+// hash primary template — specialized by <string>/<string_view> and the
+// scalar specializations that land with unordered containers (Phase 7B).
+template <class T> struct hash;
+
+} // namespace std
+
+#endif // BOXCXX_FUNCTIONAL

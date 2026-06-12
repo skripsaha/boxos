@@ -1,6 +1,10 @@
 #ifndef BOX_SYNC_H
 #define BOX_SYNC_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include "box/defs.h"
 
 // ---------------------------------------------------------------------------
@@ -54,5 +58,9 @@ INLINE bool umutex_trylock(umutex_t *m) {
 INLINE void umutex_unlock(umutex_t *m) {
     __sync_lock_release(&m->locked);
 }
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // BOX_SYNC_H

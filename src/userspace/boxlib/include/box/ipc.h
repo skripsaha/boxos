@@ -1,6 +1,10 @@
 #ifndef BOX_IPC_H
 #define BOX_IPC_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include "box/types.h"
 #include "box/error.h"
 #include "box/core/result.h"
@@ -13,5 +17,9 @@ bool receive_wait(Result* out, uint32_t timeout_ms);
 
 int send_args(uint32_t target_pid, int argc, char** argv);
 int receive_args(int* argc, char argv[][64], int max_args);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // IPC_H

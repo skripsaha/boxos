@@ -20,10 +20,80 @@ SECTIONS
         *(.rodata .rodata.*)
     }
 
+    /* ── C++ EH metadata (read-only, lives with .rodata) ──────────────
+     * .eh_frame: DWARF CFI for the boxcxx unwinder. Bounded by
+     *   __eh_frame_start/__eh_frame_end — no PT_GNU_EH_FRAME needed,
+     *   the unwinder builds its own sorted FDE index at startup.
+     * .gcc_except_table: LSDA exception tables referenced from CFI. */
+    .eh_frame : ALIGN(8)
+    {
+        __eh_frame_start = .;
+        KEEP(*(.eh_frame .eh_frame.*))
+        __eh_frame_end = .;
+    }
+
+    .gcc_except_table : ALIGN(8)
+    {
+        KEEP(*(.gcc_except_table .gcc_except_table.*))
+    }
+
     .data : ALIGN(4096)
     {
         *(.data .data.*)
     }
+
+    /* ── C++ ctor/dtor arrays (writable segment — legacy .ctors input
+     * sections carry the W flag; keeping them next to .text would turn
+     * the code segment RWX and break W^X) ──────────────────────────────
+     * Empty for pure-C binaries — the start/end symbol pairs collapse
+     * and the runtime walkers fall through.
+     *
+     * This bare-metal GCC is built without initfini-array support and
+     * emits constructors into legacy .ctors/.dtors — fold those in here
+     * (SORT_BY_INIT_PRIORITY understands the inverted .ctors.NNNNN
+     * priority encoding). Cross-TU order is unspecified by C++, so
+     * forward execution of folded .ctors entries is conformant. With
+     * -fuse-cxa-atexit, .dtors stays empty (dtors go via __cxa_atexit).
+     * The runtime walks init forward and fini BACKWARD, matching the
+     * Itanium C++ ABI. */
+    .init_array : ALIGN(8)
+    {
+        __init_array_start = .;
+        KEEP(*(SORT_BY_INIT_PRIORITY(.init_array.*) SORT_BY_INIT_PRIORITY(.ctors.*)))
+        KEEP(*(.init_array .ctors))
+        __init_array_end = .;
+    }
+
+    .fini_array : ALIGN(8)
+    {
+        __fini_array_start = .;
+        KEEP(*(SORT_BY_INIT_PRIORITY(.fini_array.*) SORT_BY_INIT_PRIORITY(.dtors.*)))
+        KEEP(*(.fini_array .dtors))
+        __fini_array_end = .;
+    }
+
+    /* ── TLS template (local-exec model) ──────────────────────────────
+     * The kernel loader ignores PT_TLS; boxcxx tls_init reads these
+     * linker symbols instead, copies .tdata, zero-fills .tbss into a
+     * heap block and points FS at the TCB. .tbss is NOBITS and does
+     * NOT advance the location counter — only SIZEOF() is meaningful,
+     * never its addresses. ALIGN(64) matches the boxcxx TLS anchor's
+     * alignment cap (checked post-link). */
+    .tdata : ALIGN(64)
+    {
+        __tdata_start = .;
+        *(.tdata .tdata.*)
+        __tdata_end = .;
+    }
+
+    .tbss :
+    {
+        *(.tbss .tbss.*)
+        *(.tcommon)
+    }
+
+    __tdata_size = SIZEOF(.tdata);
+    __tbss_size  = SIZEOF(.tbss);
 
     .bss : ALIGN(4096)
     {
@@ -39,6 +109,5 @@ SECTIONS
     {
         *(.comment)
         *(.note*)
-        *(.eh_frame*)
     }
 }

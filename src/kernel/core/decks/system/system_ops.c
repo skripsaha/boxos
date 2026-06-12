@@ -42,6 +42,7 @@
 #include "pit.h"
 #include "cpu_calibrate.h"
 #include "cpuid.h"
+#include "fpu.h"   /* g_user_fsbase_used — TLS FS-base context-switch gate */
 
 #define MAX_BROADCAST_TARGETS  256u
 #define BROADCAST_TAG_MAX      64u
@@ -356,6 +357,48 @@ static int SysProcKill(const ManifestOp *op, Crate *crates, uint16_t crate_count
         }
     }
     process_ref_dec(target);
+    return OK;
+}
+
+/* SYSTEM_OP_TLS_FSBASE
+ *   params: [u64 fsbase] — user-canonical VA (0 clears).
+ *
+ * Fallback for CPUs without FSGSBASE, where ring-3 WRFSBASE #UDs: store
+ * the TLS thread pointer in ProcessContext and flip the MSR-restore gate.
+ * Deliberately NO direct WRMSR here — Manifest ops may execute on a
+ * K-Core, i.e. a different CPU than the caller; writing IA32_FS_BASE
+ * there would program the wrong core. The value materializes on the
+ * caller's next context restore — boxcxx follows the op with yield(),
+ * making that deterministic before any thread_local access. */
+static int SysTlsFsbase(const ManifestOp *op, Crate *crates,
+                        uint16_t crate_count, const OpContext *ctx)
+{
+    (void)crates;
+    (void)crate_count;
+    if (!ctx || !ctx->proc) return ERR_INVALID_ARGUMENT;
+    if (op->param_size < sizeof(uint64_t)) return ERR_INVALID_ARGUMENT;
+
+    uint64_t base;
+    memcpy(&base, op->params, sizeof(base));
+
+    /* User half + canonical only — a kernel-half FS base would let ring 3
+     * read kernel memory through fs: overrides on the next switch-in. */
+    if (base >= 0x0000800000000000ULL) return ERR_INVALID_ADDRESS;
+
+    ctx->proc->context.user_fsbase = base;
+    g_user_fsbase_used = 1;
+
+    /* Synchronous dispatch (the op runs on the caller's own core inside
+     * its syscall window — the iretq back skips task_restore_context):
+     * program the MSR right here so TLS is live on return. On the async
+     * K-Core path proc != current and the value lands at the caller's
+     * next context restore — guaranteed, because its pocket is only
+     * processed after the context was saved into the ready queue. */
+    if (process_get_current() == ctx->proc) {
+        uint32_t lo = (uint32_t)base;
+        uint32_t hi = (uint32_t)(base >> 32);
+        __asm__ volatile("wrmsr" :: "c"(0xC0000100u), "a"(lo), "d"(hi));
+    }
     return OK;
 }
 
@@ -1222,6 +1265,7 @@ error_t SystemDeckRegister(void)
         { SYSTEM_OP_PROC_SPAWN,   SysProcSpawn,   OP_AUTH_UTILITY,"system.proc.spawn" },
         { SYSTEM_OP_PROC_KILL,    SysProcKill,    OP_AUTH_NONE,   "system.proc.kill"  },
         { SYSTEM_OP_PROC_INFO,    SysProcInfo,    OP_AUTH_NONE,   "system.proc.info"  },
+        { SYSTEM_OP_TLS_FSBASE,   SysTlsFsbase,   OP_AUTH_NONE,   "system.tls.fsbase" },
         { SYSTEM_OP_PROC_EXEC,    SysProcExec,    OP_AUTH_UTILITY,"system.proc.exec"  },
         { SYSTEM_OP_INFO,         SysInfo,        OP_AUTH_NONE,   "system.info"       },
         /* Context, tags, buffers: app+. */

@@ -1,6 +1,10 @@
 #ifndef BOX_COLOR_H
 #define BOX_COLOR_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include "box/types.h"
 
 /*
@@ -147,5 +151,9 @@ void  set_color(Color fg);
 Color get_color(void);
 void  set_color_bg(Color bg);
 Color get_color_bg(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* BOX_COLOR_H */

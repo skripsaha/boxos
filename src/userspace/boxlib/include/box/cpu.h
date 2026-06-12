@@ -1,6 +1,10 @@
 #ifndef BOX_CPU_H
 #define BOX_CPU_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include "box/types.h"
 
 #define CPU_CAPS_MAGIC  0x43505543
@@ -24,7 +28,8 @@ typedef struct PACKED {
     bool has_lam;
     bool has_cet;               // shadow stack OR IBT
     bool has_tme;
-    uint8_t _pad1[3];           // align next field to 8 bytes
+    bool has_fsgsbase;          // ring-3 WRFSBASE/RDFSBASE usable (TLS)
+    uint8_t _pad1[2];           // align next field to 8 bytes
     uint8_t _reserved[4072];
 } cpu_caps_page_t;
 
@@ -70,6 +75,14 @@ INLINE bool cpu_has_tme(void) {
     volatile cpu_caps_page_t* caps = CPU_CAPS;
     if (caps->magic != CPU_CAPS_MAGIC) return false;
     return caps->has_tme;
+}
+/* True iff CR4.FSGSBASE=1 on every online core — boxcxx TLS init issues
+ * WRFSBASE directly when set; otherwise it falls back to the kernel
+ * SYSTEM_OP_TLS_FSBASE op (+yield to materialize the base). */
+INLINE bool cpu_has_fsgsbase(void) {
+    volatile cpu_caps_page_t* caps = CPU_CAPS;
+    if (caps->magic != CPU_CAPS_MAGIC) return false;
+    return caps->has_fsgsbase;
 }
 
 // Get calibrated TSC frequency in kHz. Returns 0 if not available.
@@ -148,5 +161,9 @@ INLINE uint64_t cpu_tsc_to_ns(uint64_t ticks) {
     if (khz == 0) return 0;
     return (ticks * 1000000ULL) / khz;
 }
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

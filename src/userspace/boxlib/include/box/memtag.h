@@ -1,6 +1,10 @@
 #ifndef BOX_MEMTAG_H
 #define BOX_MEMTAG_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include "box/types.h"
 #include "box/error.h"
 
@@ -102,5 +106,9 @@ int  mem_cabin_tags(uint32_t pid,
                      char *out_buf, uint32_t out_buf_size,
                      uint32_t *out_count);
 int  mem_check_access(uint32_t pid, uint32_t region_id, mem_check_t *out);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* BOX_MEMTAG_H */

@@ -1,6 +1,10 @@
 #ifndef BOX_PRINT_H
 #define BOX_PRINT_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include "box/defs.h"
 #include "box/color.h"
 
@@ -41,5 +45,9 @@ int input(const char* prompt, char* buffer, size_t max_len);
 
 void print_int(int num);
 void print_hex(uint32_t num);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // BOX_PRINT_H

@@ -1,6 +1,10 @@
 #ifndef BOX_CORE_CABIN_H
 #define BOX_CORE_CABIN_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include "box/types.h"
 
 /*
@@ -24,5 +28,9 @@ STATIC_ASSERT(sizeof(CabinInfo) == 48, "CabinInfo must be 48 bytes");
 INLINE CabinInfo* cabin_info(void) {
     return (CabinInfo*)CABIN_INFO_VADDR;
 }
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* BOX_CORE_CABIN_H */

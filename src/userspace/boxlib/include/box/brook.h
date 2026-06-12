@@ -1,6 +1,10 @@
 #ifndef BOX_BROOK_H
 #define BOX_BROOK_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include "box/types.h"
 #include "box/error.h"
 
@@ -129,5 +133,9 @@ uint32_t brook_frame_count(const Brook *b);
 /* Live counters — frames currently in ring / free slots remaining. */
 uint32_t brook_available(const Brook *b);
 uint32_t brook_free(const Brook *b);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* BOX_BROOK_H */

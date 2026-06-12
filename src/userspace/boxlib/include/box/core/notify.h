@@ -1,6 +1,10 @@
 #ifndef BOX_CORE_NOTIFY_H
 #define BOX_CORE_NOTIFY_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include "box/core/pocket.h"
 
 /*
@@ -21,5 +25,9 @@ int pocket_submit(Pocket* p);
 
 /* Yield: cooperative scheduler hint via a YIELD-flagged Pocket. */
 void yield(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* BOX_CORE_NOTIFY_H */

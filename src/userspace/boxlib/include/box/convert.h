@@ -1,6 +1,10 @@
 #ifndef BOX_CONVERT_H
 #define BOX_CONVERT_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include "box/defs.h"
 
 int to_int(const char* str);
@@ -34,5 +38,9 @@ bool is_hex_string(const char* str);
 
 char to_upper(char c);
 char to_lower(char c);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // BOX_CONVERT_H

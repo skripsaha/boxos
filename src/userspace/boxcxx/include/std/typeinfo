@@ -1,0 +1,81 @@
+// boxcxx — <typeinfo>
+// Itanium data layout: the compiler emits typeinfo OBJECTS with this
+// exact shape ([vptr][name]); the derived shapes live in cxxabi
+// (src/runtime/cxxabi_typeinfo.cpp). Pointer equality is the identity
+// test — BoxOS binaries are single static images, vague linkage merges
+// every duplicate.
+#ifndef BOXCXX_TYPEINFO
+#define BOXCXX_TYPEINFO
+
+#include <cstddef>
+#include <exception>
+
+namespace __cxxabiv1 {
+class __class_type_info;
+}
+
+namespace std {
+
+class type_info {
+public:
+    virtual ~type_info();
+
+    type_info(const type_info &) = delete;
+    type_info &operator=(const type_info &) = delete;
+
+    [[nodiscard]] constexpr bool operator==(const type_info &rhs) const noexcept
+    {
+        return this == &rhs;
+    }
+
+    [[nodiscard]] bool before(const type_info &rhs) const noexcept
+    {
+        return __name < rhs.__name;
+    }
+
+    [[nodiscard]] size_t hash_code() const noexcept
+    {
+        // FNV-1a over the mangled name — stable across runs.
+        size_t h = 14695981039346656037ull;
+        for (const char *p = __name; *p; ++p) {
+            h ^= size_t(static_cast<unsigned char>(*p));
+            h *= 1099511628211ull;
+        }
+        return h;
+    }
+
+    [[nodiscard]] const char *name() const noexcept { return __name; }
+
+protected:
+    const char *__name;
+
+    explicit type_info(const char *name) : __name(name) {}
+
+public:
+    // Internal EH machinery — reserved names, same publication model as
+    // libstdc++. __do_catch: does a handler of *this* type accept an
+    // exception of type `thrown`? May adjust *obj. __do_upcast: walk
+    // *this* class graph for `target` as a public unambiguous base.
+    virtual bool __do_catch(const type_info *thrown, void **obj,
+                            unsigned outer) const;
+    virtual bool __do_upcast(const __cxxabiv1::__class_type_info *target,
+                             void **obj) const;
+};
+
+class bad_cast : public exception {
+public:
+    bad_cast() noexcept = default;
+    ~bad_cast() override;
+    const char *what() const noexcept override;
+};
+
+class bad_typeid : public exception {
+public:
+    bad_typeid() noexcept = default;
+    ~bad_typeid() override;
+    const char *what() const noexcept override;
+};
+
+} // namespace std
+
+#endif // BOXCXX_TYPEINFO

@@ -1,0 +1,55 @@
+// boxcxx — <initializer_list>
+// The compiler constructs these objects directly: the layout MUST be
+// exactly { const E* array, size_t length } (GCC checks the shape, not
+// the member names).
+#ifndef BOXCXX_INITIALIZER_LIST
+#define BOXCXX_INITIALIZER_LIST
+
+#include <cstddef>
+
+namespace std {
+
+template <class E>
+class initializer_list {
+public:
+    using value_type      = E;
+    using reference       = const E &;
+    using const_reference = const E &;
+    using size_type       = size_t;
+    using iterator        = const E *;
+    using const_iterator  = const E *;
+
+private:
+    iterator  _items;
+    size_type _count;
+
+    // Called by the compiler only.
+    constexpr initializer_list(const_iterator items, size_type count) noexcept
+        : _items(items), _count(count) {}
+
+public:
+    constexpr initializer_list() noexcept : _items(nullptr), _count(0) {}
+
+    [[nodiscard]] constexpr size_type size() const noexcept { return _count; }
+    [[nodiscard]] constexpr const_iterator begin() const noexcept { return _items; }
+    [[nodiscard]] constexpr const_iterator end() const noexcept
+    {
+        return _items + _count;
+    }
+};
+
+template <class E>
+[[nodiscard]] constexpr const E *begin(initializer_list<E> il) noexcept
+{
+    return il.begin();
+}
+
+template <class E>
+[[nodiscard]] constexpr const E *end(initializer_list<E> il) noexcept
+{
+    return il.end();
+}
+
+} // namespace std
+
+#endif // BOXCXX_INITIALIZER_LIST

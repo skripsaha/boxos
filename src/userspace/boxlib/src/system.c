@@ -70,8 +70,23 @@ int proc_info(uint16_t pid, proc_info_t *info)
     return OK;
 }
 
+int tls_set_fsbase(uint64_t base)
+{
+    return MfCall1(DECK_SYSTEM, SYSTEM_OP_TLS_FSBASE,
+                   &base, sizeof(base),
+                   NULL, 0, NULL, 0, NULL,
+                   SYS_TIMEOUT_MS, NULL);
+}
+
+/* runtime_init.c — .fini_array + __cxa_finalize teardown (idempotent). */
+void __box_runtime_fini(void);
+
 void exit(uint32_t exit_code)
 {
+    /* Static destructors / atexit callbacks may still print — run them
+     * BEFORE the final io_flush so their output reaches the console. */
+    __box_runtime_fini();
+
     io_flush();
 
     CabinInfo *ci = cabin_info();

@@ -6,6 +6,7 @@
 
 # Cross-compiler toolchain - SAME on all platforms
 CC      = x86_64-elf-gcc
+CXX     = x86_64-elf-g++
 
 # Compiler flags
 # -fno-stack-protector: No libc in userspace, canary support unavailable
@@ -31,14 +32,38 @@ CFLAGS = -nostdlib -ffreestanding -fno-builtin -mno-red-zone \
          -I../boxlib/include \
          -I../../include
 
+# C++ flags — mirror CFLAGS hardening, plus the C++ language set.
+# -nostdinc++          : boxcxx provides ALL std headers (toolchain has none)
+# -fasynchronous-unwind-tables : DWARF CFI for the boxcxx unwinder
+# C-only -Werror=* diagnostics dropped (implicit-function-declaration,
+# incompatible-pointer-types, int-conversion are C-language options).
+CXXFLAGS = -std=gnu++23 -nostdinc++ -fexceptions -frtti \
+         -fuse-cxa-atexit \
+         -fasynchronous-unwind-tables \
+         -nostdlib -ffreestanding -fno-builtin -mno-red-zone \
+         -fno-stack-protector -fno-pic -static -fno-ipa-ra \
+         -fcf-protection=full \
+         -fno-delete-null-pointer-checks -fno-strict-aliasing -fwrapv \
+         -Wall -Wextra -g \
+         -Werror=return-type \
+         -I../boxcxx/include/std \
+         -I../boxcxx/include \
+         -I../boxlib/include \
+         -I../../include
+
 BOXLIB_DIR = ../boxlib
 LDFLAGS    = -nostdlib -static -T $(BOXLIB_DIR)/user.ld
+# C++ links force-pull tls_init.o out of libboxcxx.a (nothing references
+# it by symbol — it self-registers via .init_array, the classic archive
+# dead-pull trap).
+CXXLDFLAGS = $(LDFLAGS) -Wl,--undefined=__boxcxx_tls_bootstrap
 BOXLIB     = ../boxlib/libbox.a
+BOXCXX     = ../boxcxx/libboxcxx.a
 BOXLIB_START = ../build/boxlib_start.o
 
 .PHONY: all clean
 
-all: proca.elf procb.elf today.elf memtest.elf mtest.elf chain.elf decks.elf bench.elf touch_test.elf touch_stress.elf lifecycle.elf persist.elf write_stress.elf write_concurrent.elf write_observer.elf cow_test.elf anchor_test.elf bay_test.elf brook_test.elf htest.elf
+all: proca.elf procb.elf today.elf memtest.elf mtest.elf chain.elf decks.elf bench.elf touch_test.elf touch_stress.elf lifecycle.elf persist.elf write_stress.elf write_concurrent.elf write_observer.elf cow_test.elf anchor_test.elf bay_test.elf brook_test.elf htest.elf cxxtest.elf
 
 # ---- ELF binaries (stored in TagFS) ----
 proca.elf: $(BOXLIB_START) proca.o $(BOXLIB)
@@ -101,9 +126,24 @@ brook_test.elf: $(BOXLIB_START) brook_test.o $(BOXLIB)
 htest.elf: $(BOXLIB_START) htest.o $(BOXLIB)
 	$(CC) $(LDFLAGS) -o $@ $(BOXLIB_START) htest.o $(BOXLIB)
 
+# ---- C++ binaries (linked with the g++ driver) ----
+# Link order matters: libboxcxx.a BEFORE libbox.a (boxcxx pulls
+# _malloc_impl/printf from boxlib) and before any future libgcc so our
+# runtime symbols always win.
+cxxtest.elf: $(BOXLIB_START) cxxtest.o cxxtest_traits.o $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld
+	$(CXX) $(CXXLDFLAGS) -o $@ $(BOXLIB_START) cxxtest.o cxxtest_traits.o $(BOXCXX) $(BOXLIB)
+	@align=$$(x86_64-elf-readelf -lW $@ | awk '$$1=="TLS"{print $$NF}'); \
+	if [ -n "$$align" ] && [ $$((align)) -gt 64 ]; then \
+		echo "ERROR: $@ PT_TLS p_align=$$align > 64 — boxcxx tls_init layout contract broken (alignas(>64) thread_local?)"; \
+		exit 1; \
+	fi
+
 # ---- object files ----
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
+
+%.o: %.cpp
+	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 # ---- boxlib_start entry (shared with shell) ----
 $(BOXLIB_START): $(BOXLIB_DIR)/boxlib_start.asm

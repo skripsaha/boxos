@@ -1,6 +1,10 @@
 #ifndef BOX_HW_H
 #define BOX_HW_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include "box/types.h"
 #include "box/error.h"
 
@@ -47,5 +51,9 @@ typedef struct {
 
 /* Read the platform TME state. Returns 0 on success or -ERR_*. */
 int hw_tme_state(hw_tme_state_t *out);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* BOX_HW_H */

@@ -1,0 +1,54 @@
+// boxcxx — <source_location>
+// GCC's __builtin_source_location() returns a pointer to a structure it
+// expects to find as std::source_location::__impl with EXACTLY these
+// member names.
+#ifndef BOXCXX_SOURCE_LOCATION
+#define BOXCXX_SOURCE_LOCATION
+
+#include <cstdint>
+
+namespace std {
+
+struct source_location {
+    struct __impl {
+        const char *_M_file_name;
+        const char *_M_function_name;
+        unsigned    _M_line;
+        unsigned    _M_column;
+    };
+
+private:
+    const __impl *_loc = nullptr;
+
+public:
+    constexpr source_location() noexcept = default;
+
+    static consteval source_location
+    current(const void *loc = __builtin_source_location()) noexcept
+    {
+        source_location result;
+        result._loc = static_cast<const __impl *>(loc);
+        return result;
+    }
+
+    [[nodiscard]] constexpr uint_least32_t line() const noexcept
+    {
+        return _loc ? _loc->_M_line : 0u;
+    }
+    [[nodiscard]] constexpr uint_least32_t column() const noexcept
+    {
+        return _loc ? _loc->_M_column : 0u;
+    }
+    [[nodiscard]] constexpr const char *file_name() const noexcept
+    {
+        return _loc ? _loc->_M_file_name : "";
+    }
+    [[nodiscard]] constexpr const char *function_name() const noexcept
+    {
+        return _loc ? _loc->_M_function_name : "";
+    }
+};
+
+} // namespace std
+
+#endif // BOXCXX_SOURCE_LOCATION

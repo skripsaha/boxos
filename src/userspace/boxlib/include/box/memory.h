@@ -1,6 +1,10 @@
 #ifndef BOX_HEAP_H
 #define BOX_HEAP_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include "box/defs.h"
 #include "box/error.h"
 
@@ -97,5 +101,9 @@ typedef struct {
 
 // Snapshot current heap statistics (thread-safe)
 void heap_get_stats(heap_stats_t *out);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // BOX_HEAP_H

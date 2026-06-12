@@ -1,0 +1,233 @@
+// boxcxx — <concepts>
+#ifndef BOXCXX_CONCEPTS
+#define BOXCXX_CONCEPTS
+
+#include <type_traits>
+#include <compare>      // __cmp:: helper concepts shared with <=> machinery
+#include <utility>      // move, swap building blocks
+
+namespace std {
+
+// ── language-related concepts ───────────────────────────────────────────
+
+namespace __bits {
+template <class T, class U>
+concept SameHelper = is_same_v<T, U>;
+} // namespace __bits
+
+template <class T, class U>
+concept same_as = __bits::SameHelper<T, U> && __bits::SameHelper<U, T>;
+
+template <class Derived, class Base>
+concept derived_from =
+    is_base_of_v<Base, Derived> &&
+    is_convertible_v<const volatile Derived *, const volatile Base *>;
+
+template <class From, class To>
+concept convertible_to =
+    is_convertible_v<From, To> &&
+    requires { static_cast<To>(declval<From>()); };
+
+template <class T, class U>
+concept common_reference_with =
+    same_as<common_reference_t<T, U>, common_reference_t<U, T>> &&
+    convertible_to<T, common_reference_t<T, U>> &&
+    convertible_to<U, common_reference_t<T, U>>;
+
+template <class T, class U>
+concept common_with =
+    same_as<common_type_t<T, U>, common_type_t<U, T>> &&
+    requires {
+        static_cast<common_type_t<T, U>>(declval<T>());
+        static_cast<common_type_t<T, U>>(declval<U>());
+    } &&
+    common_reference_with<add_lvalue_reference_t<const T>,
+                          add_lvalue_reference_t<const U>> &&
+    common_reference_with<
+        add_lvalue_reference_t<common_type_t<T, U>>,
+        common_reference_t<add_lvalue_reference_t<const T>,
+                           add_lvalue_reference_t<const U>>>;
+
+template <class T>
+concept integral = is_integral_v<T>;
+template <class T>
+concept signed_integral = integral<T> && is_signed_v<T>;
+template <class T>
+concept unsigned_integral = integral<T> && !signed_integral<T>;
+template <class T>
+concept floating_point = is_floating_point_v<T>;
+
+template <class LHS, class RHS>
+concept assignable_from =
+    is_lvalue_reference_v<LHS> &&
+    common_reference_with<const remove_reference_t<LHS> &,
+                          const remove_reference_t<RHS> &> &&
+    requires(LHS lhs, RHS &&rhs) {
+        { lhs = static_cast<RHS &&>(rhs) } -> same_as<LHS>;
+    };
+
+template <class T>
+concept destructible = is_nothrow_destructible_v<T>;
+
+template <class T, class... Args>
+concept constructible_from = destructible<T> && is_constructible_v<T, Args...>;
+
+template <class T>
+concept default_initializable = constructible_from<T> && requires {
+    T{};
+    ::new T;
+};
+
+template <class T>
+concept move_constructible = constructible_from<T, T> && convertible_to<T, T>;
+
+template <class T>
+concept copy_constructible =
+    move_constructible<T> && constructible_from<T, T &> &&
+    convertible_to<T &, T> && constructible_from<T, const T &> &&
+    convertible_to<const T &, T> && constructible_from<T, const T> &&
+    convertible_to<const T, T>;
+
+// ── ranges::swap CPO ([concept.swappable]) ──────────────────────────────
+
+namespace ranges {
+namespace __swap_cpo {
+
+template <class T> void swap(T &, T &) = delete;   // poison pill
+
+template <class T, class U>
+concept HasAdlSwap =
+    (is_class_v<remove_cvref_t<T>> || is_enum_v<remove_cvref_t<T>> ||
+     is_class_v<remove_cvref_t<U>> || is_enum_v<remove_cvref_t<U>>) &&
+    requires(T &&t, U &&u) {
+        swap(static_cast<T &&>(t), static_cast<U &&>(u));
+    };
+
+struct Fn {
+    template <class T, class U>
+        requires HasAdlSwap<T, U>
+    constexpr void operator()(T &&t, U &&u) const
+        noexcept(noexcept(swap(static_cast<T &&>(t), static_cast<U &&>(u))))
+    {
+        swap(static_cast<T &&>(t), static_cast<U &&>(u));
+    }
+
+    template <class T, class U, size_t N>
+        requires(!HasAdlSwap<T (&)[N], U (&)[N]>) &&
+                requires(const Fn &fn, T &te, U &ue) { fn(te, ue); }
+    constexpr void operator()(T (&t)[N], U (&u)[N]) const
+        noexcept(noexcept((*this)(t[0], u[0])))
+    {
+        for (size_t i = 0; i < N; ++i) (*this)(t[i], u[i]);
+    }
+
+    template <class T>
+        requires(!HasAdlSwap<T &, T &>) && move_constructible<T> &&
+                assignable_from<T &, T>
+    constexpr void operator()(T &a, T &b) const
+        noexcept(is_nothrow_move_constructible_v<T> &&
+                 is_nothrow_move_assignable_v<T>)
+    {
+        T tmp(static_cast<T &&>(a));
+        a = static_cast<T &&>(b);
+        b = static_cast<T &&>(tmp);
+    }
+};
+
+} // namespace __swap_cpo
+
+inline namespace __cpos {
+inline constexpr __swap_cpo::Fn swap{};
+} // namespace __cpos
+} // namespace ranges
+
+template <class T>
+concept swappable = requires(T &a, T &b) { ranges::swap(a, b); };
+
+template <class T, class U>
+concept swappable_with =
+    common_reference_with<T, U> && requires(T &&t, U &&u) {
+        ranges::swap(static_cast<T &&>(t), static_cast<T &&>(t));
+        ranges::swap(static_cast<U &&>(u), static_cast<U &&>(u));
+        ranges::swap(static_cast<T &&>(t), static_cast<U &&>(u));
+        ranges::swap(static_cast<U &&>(u), static_cast<T &&>(t));
+    };
+
+// ── comparison concepts ─────────────────────────────────────────────────
+
+namespace __bits {
+template <class T>
+concept BooleanTestableImpl = convertible_to<T, bool>;
+template <class T>
+concept BooleanTestable = BooleanTestableImpl<T> && requires(T &&t) {
+    { !static_cast<T &&>(t) } -> BooleanTestableImpl;
+};
+} // namespace __bits
+
+template <class T>
+concept equality_comparable = __cmp::WeaklyEqCmpWith<T, T>;
+
+template <class T, class U>
+concept equality_comparable_with =
+    equality_comparable<T> && equality_comparable<U> &&
+    common_reference_with<const remove_reference_t<T> &,
+                          const remove_reference_t<U> &> &&
+    equality_comparable<common_reference_t<const remove_reference_t<T> &,
+                                           const remove_reference_t<U> &>> &&
+    __cmp::WeaklyEqCmpWith<T, U>;
+
+template <class T>
+concept totally_ordered =
+    equality_comparable<T> && __cmp::PartiallyOrderedWith<T, T>;
+
+template <class T, class U>
+concept totally_ordered_with =
+    totally_ordered<T> && totally_ordered<U> &&
+    equality_comparable_with<T, U> &&
+    totally_ordered<common_reference_t<const remove_reference_t<T> &,
+                                       const remove_reference_t<U> &>> &&
+    __cmp::PartiallyOrderedWith<T, U>;
+
+// ── object concepts ─────────────────────────────────────────────────────
+
+template <class T>
+concept movable = is_object_v<T> && move_constructible<T> &&
+                  assignable_from<T &, T> && swappable<T>;
+
+template <class T>
+concept copyable = copy_constructible<T> && movable<T> &&
+                   assignable_from<T &, T &> &&
+                   assignable_from<T &, const T &> &&
+                   assignable_from<T &, const T>;
+
+template <class T>
+concept semiregular = copyable<T> && default_initializable<T>;
+
+template <class T>
+concept regular = semiregular<T> && equality_comparable<T>;
+
+// ── callable concepts ───────────────────────────────────────────────────
+
+template <class F, class... Args>
+concept invocable = is_invocable_v<F, Args...>;
+
+template <class F, class... Args>
+concept regular_invocable = invocable<F, Args...>;
+
+template <class F, class... Args>
+concept predicate = regular_invocable<F, Args...> &&
+                    __bits::BooleanTestable<invoke_result_t<F, Args...>>;
+
+template <class R, class T, class U>
+concept relation = predicate<R, T, T> && predicate<R, U, U> &&
+                   predicate<R, T, U> && predicate<R, U, T>;
+
+template <class R, class T, class U>
+concept equivalence_relation = relation<R, T, U>;
+
+template <class R, class T, class U>
+concept strict_weak_order = relation<R, T, U>;
+
+} // namespace std
+
+#endif // BOXCXX_CONCEPTS

@@ -1,6 +1,10 @@
 #ifndef BOX_STORAGE_H
 #define BOX_STORAGE_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include "box/defs.h"
 
 #define FILE_FLAG_TRASHED  (1 << 1)
@@ -25,7 +29,13 @@ int query(const char* tags, uint32_t* file_ids, size_t max_files);
 int file_info(uint32_t file_id, file_info_t* info);
 int fread(uint32_t file_id, uint64_t offset, void* buffer, size_t size);
 int fwrite(uint32_t file_id, uint64_t offset, const void* buffer, size_t size);
+/* `delete` is a C++ keyword — C++ callers use file_delete(), bound to the
+ * same ELF symbol via asm label. C keeps the original name unchanged. */
+#ifdef __cplusplus
+int file_delete(uint32_t file_id) asm("delete");
+#else
 int delete(uint32_t file_id);
+#endif
 int file_rename(uint32_t file_id, const char* new_filename);
 
 int tag_add(uint32_t file_id, const char* tag);
@@ -60,5 +70,9 @@ int snap_list(uint32_t *out_ids, uint32_t max_ids, uint32_t *out_count);
  * generic "anchor" event (no per-tag fan-out).
  */
 int anchor(uint32_t file_id);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // BOX_STORAGE_H

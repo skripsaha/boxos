@@ -1,0 +1,164 @@
+// boxcxx — <bit>
+#ifndef BOXCXX_BIT
+#define BOXCXX_BIT
+
+#include <type_traits>
+#include <limits>
+
+namespace std {
+
+enum class endian {
+    little = __ORDER_LITTLE_ENDIAN__,
+    big    = __ORDER_BIG_ENDIAN__,
+    native = __BYTE_ORDER__,
+};
+
+template <class To, class From>
+    requires(sizeof(To) == sizeof(From) && is_trivially_copyable_v<To> &&
+             is_trivially_copyable_v<From>)
+[[nodiscard]] constexpr To bit_cast(const From &from) noexcept
+{
+    return __builtin_bit_cast(To, from);
+}
+
+namespace __bits {
+// [bit.pow.two]/[bit.count] operate on "unsigned integer types" only.
+template <class T>
+concept BitOperand =
+    is_integral_v<T> && is_unsigned_v<T> &&
+    !IsAnyOf<remove_cv_t<T>, bool, char, wchar_t, char8_t, char16_t,
+             char32_t>;
+} // namespace __bits
+
+template <class T>
+    requires is_integral_v<T>
+[[nodiscard]] constexpr T byteswap(T value) noexcept
+{
+    using U = make_unsigned_t<remove_cv_t<T>>;
+    if constexpr (sizeof(T) == 1)
+        return value;
+    else if constexpr (sizeof(T) == 2)
+        return T(U(__builtin_bswap16(U(value))));
+    else if constexpr (sizeof(T) == 4)
+        return T(U(__builtin_bswap32(U(value))));
+    else
+        return T(U(__builtin_bswap64(U(value))));
+}
+
+template <__bits::BitOperand T>
+[[nodiscard]] constexpr int popcount(T value) noexcept
+{
+#if defined(__has_builtin) && __has_builtin(__builtin_popcountg)
+    return __builtin_popcountg(value);
+#else
+    if constexpr (sizeof(T) <= sizeof(unsigned int))
+        return __builtin_popcount(value);
+    else if constexpr (sizeof(T) <= sizeof(unsigned long))
+        return __builtin_popcountl(value);
+    else
+        return __builtin_popcountll(value);
+#endif
+}
+
+template <__bits::BitOperand T>
+[[nodiscard]] constexpr int countl_zero(T value) noexcept
+{
+    constexpr int kDigits = numeric_limits<T>::digits;
+#if defined(__has_builtin) && __has_builtin(__builtin_clzg)
+    return __builtin_clzg(value, kDigits);
+#else
+    if (value == 0) return kDigits;
+    if constexpr (sizeof(T) <= sizeof(unsigned int))
+        return __builtin_clz(value) -
+               (numeric_limits<unsigned int>::digits - kDigits);
+    else if constexpr (sizeof(T) <= sizeof(unsigned long))
+        return __builtin_clzl(value) -
+               (numeric_limits<unsigned long>::digits - kDigits);
+    else
+        return __builtin_clzll(value) -
+               (numeric_limits<unsigned long long>::digits - kDigits);
+#endif
+}
+
+template <__bits::BitOperand T>
+[[nodiscard]] constexpr int countr_zero(T value) noexcept
+{
+    constexpr int kDigits = numeric_limits<T>::digits;
+#if defined(__has_builtin) && __has_builtin(__builtin_ctzg)
+    return __builtin_ctzg(value, kDigits);
+#else
+    if (value == 0) return kDigits;
+    if constexpr (sizeof(T) <= sizeof(unsigned int))
+        return __builtin_ctz(value);
+    else if constexpr (sizeof(T) <= sizeof(unsigned long))
+        return __builtin_ctzl(value);
+    else
+        return __builtin_ctzll(value);
+#endif
+}
+
+template <__bits::BitOperand T>
+[[nodiscard]] constexpr int countl_one(T value) noexcept
+{
+    return countl_zero(T(~value));
+}
+
+template <__bits::BitOperand T>
+[[nodiscard]] constexpr int countr_one(T value) noexcept
+{
+    return countr_zero(T(~value));
+}
+
+template <__bits::BitOperand T>
+[[nodiscard]] constexpr bool has_single_bit(T value) noexcept
+{
+    return value != 0 && (value & T(value - 1)) == 0;
+}
+
+template <__bits::BitOperand T>
+[[nodiscard]] constexpr int bit_width(T value) noexcept
+{
+    return numeric_limits<T>::digits - countl_zero(value);
+}
+
+template <__bits::BitOperand T>
+[[nodiscard]] constexpr T bit_floor(T value) noexcept
+{
+    if (value == 0) return 0;
+    return T(T(1) << (bit_width(value) - 1));
+}
+
+template <__bits::BitOperand T>
+[[nodiscard]] constexpr T bit_ceil(T value) noexcept
+{
+    if (value <= 1) return T(1);
+    // Precondition ([bit.pow.two]): the result is representable.
+    return T(T(1) << bit_width(T(value - 1)));
+}
+
+template <__bits::BitOperand T>
+[[nodiscard]] constexpr T rotr(T value, int shift) noexcept;
+
+template <__bits::BitOperand T>
+[[nodiscard]] constexpr T rotl(T value, int shift) noexcept
+{
+    constexpr int kDigits = numeric_limits<T>::digits;
+    int r = shift % kDigits;
+    if (r == 0) return value;
+    if (r < 0) return rotr(value, -shift);
+    return T(T(value << r) | T(value >> (kDigits - r)));
+}
+
+template <__bits::BitOperand T>
+[[nodiscard]] constexpr T rotr(T value, int shift) noexcept
+{
+    constexpr int kDigits = numeric_limits<T>::digits;
+    int r = shift % kDigits;
+    if (r == 0) return value;
+    if (r < 0) return rotl(value, -shift);
+    return T(T(value >> r) | T(value << (kDigits - r)));
+}
+
+} // namespace std
+
+#endif // BOXCXX_BIT

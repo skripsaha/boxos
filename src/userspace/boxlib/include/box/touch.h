@@ -1,6 +1,10 @@
 #ifndef BOX_TOUCH_H
 #define BOX_TOUCH_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include "box/types.h"
 #include "box/error.h"
 
@@ -197,5 +201,9 @@ void touch_await_stats(uint32_t out[7]);
        } _tp; })
 
 #define TOUCH_TAG_ID(str)  (touch_pair_choose(TOUCH_TAG_PAIR(str)))
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* BOX_TOUCH_H */

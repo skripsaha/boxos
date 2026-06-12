@@ -1,6 +1,10 @@
 #ifndef BOX_VGA_H
 #define BOX_VGA_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include "box/types.h"
 #include "box/error.h"
 #include "video_colors.h"
@@ -53,5 +57,9 @@ int vga_getdimensions(vga_dimensions_t* dims);
  * ========================================================================= */
 void vga_begin(void);
 int  vga_commit(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // BOX_VGA_H
