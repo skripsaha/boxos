@@ -475,11 +475,35 @@ public:
                           size_type n)
     {
         if (pos > __size) boxcxx::ThrowOutOfRange("string::replace");
-        size_type erased = count < __size - pos ? count : __size - pos;
-        // Generic, alias-safe: build the tail shift via erase+insert.
-        // (Replace is not on any hot path until Ф7B's algorithms.)
-        erase(pos, erased);
-        insert(pos, s, n);
+        size_type erased   = count < __size - pos ? count : __size - pos;
+        size_type new_size = __size - erased + n;
+
+        if (new_size > capacity()) {
+            // Fresh-buffer assembly: three copies, alias-safe by
+            // construction (the old buffer lives until DropStorage).
+            size_type want = GrownCapacity(new_size);
+            C *fresh       = AllocTraits::allocate(__alloc, want + 1);
+            Traits::copy(fresh, __data, pos);
+            Traits::copy(fresh + pos, s, n);
+            Traits::copy(fresh + pos + n, __data + pos + erased,
+                         __size - pos - erased);
+            DropStorage();
+            __data = fresh;
+            __cap  = want;
+            SetSize(new_size);
+            return *this;
+        }
+
+        // In-place single pass. A source aliasing *this while the tail
+        // shifts is the rare hard case — detour through a copy.
+        if (SelfOffset(s) != npos && n != erased) {
+            basic_string tmp(s, n, __alloc);
+            return replace(pos, count, tmp.data(), n);
+        }
+        Traits::move(__data + pos + n, __data + pos + erased,
+                     __size - pos - erased);
+        Traits::move(__data + pos, s, n);
+        SetSize(new_size);
         return *this;
     }
     basic_string &replace(size_type pos, size_type count, const C *s)

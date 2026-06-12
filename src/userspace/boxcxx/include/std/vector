@@ -13,6 +13,7 @@
 #include <__bits/allocator_core>
 #include <__bits/iterator_core>
 #include <__bits/throw_helpers>
+#include <algorithm>
 #include <compare>
 #include <cstddef>
 #include <initializer_list>
@@ -288,12 +289,15 @@ public:
         AllocTraits::destroy(__alloc, __begin + __size);
     }
 
+    // Append-then-rotate: build the new elements at the back (reusing
+    // emplace_back's strong-guarantee growth), then one O(n+k) rotate
+    // moves them into place.
     template <typename... Args>
     iterator emplace(const_iterator where, Args &&...args)
     {
         size_type pos = static_cast<size_type>(where - __begin);
         emplace_back(std::forward<Args>(args)...);
-        RotateLastInto(pos);
+        std::rotate(__begin + pos, __begin + (__size - 1), __begin + __size);
         return __begin + pos;
     }
 
@@ -308,10 +312,9 @@ public:
     iterator insert(const_iterator where, size_type count, const T &value)
     {
         size_type pos = static_cast<size_type>(where - __begin);
-        for (size_type i = 0; i < count; ++i) {
-            emplace_back(value);
-            RotateLastInto(pos + i);
-        }
+        size_type old = __size;
+        for (size_type i = 0; i < count; ++i) emplace_back(value);
+        std::rotate(__begin + pos, __begin + old, __begin + __size);
         return __begin + pos;
     }
     template <typename It>
@@ -319,11 +322,9 @@ public:
     iterator insert(const_iterator where, It first, It last)
     {
         size_type pos = static_cast<size_type>(where - __begin);
-        size_type i   = pos;
-        for (; first != last; ++first, ++i) {
-            emplace_back(*first);
-            RotateLastInto(i);
-        }
+        size_type old = __size;
+        for (; first != last; ++first) emplace_back(*first);
+        std::rotate(__begin + pos, __begin + old, __begin + __size);
         return __begin + pos;
     }
     iterator insert(const_iterator where, initializer_list<T> il)
@@ -458,16 +459,6 @@ private:
     {
         std::destroy(__begin, __begin + __size);
         if (__begin) AllocTraits::deallocate(__alloc, __begin, __cap);
-    }
-
-    // Bubble the just-appended back() element down to index `pos`.
-    void RotateLastInto(size_type pos)
-    {
-        for (size_type i = __size - 1; i > pos; --i) {
-            T tmp           = std::move(__begin[i]);
-            __begin[i]      = std::move(__begin[i - 1]);
-            __begin[i - 1]  = std::move(tmp);
-        }
     }
 
     T *__begin       = nullptr;

@@ -1,0 +1,426 @@
+// boxcxx — <iterator>
+// Grows __bits/iterator_core into the full header: C++20 iterator
+// concepts + associated-type aliases, move_iterator, the inserter
+// family, default/unreachable sentinels.
+//
+// Deferred (epic leftovers): counted_iterator, common_iterator,
+// ranges::iter_move/iter_swap CPOs (move_iterator is the classic
+// dereference-to-rvalue formulation), istream/ostream iterators (Ф9B).
+#ifndef BOXCXX_ITERATOR
+#define BOXCXX_ITERATOR
+
+#include <__bits/iterator_core>
+#include <concepts>
+#include <cstddef>
+#include <type_traits>
+#include <utility>
+
+namespace std {
+
+// ── associated types ([iterator.assoc.types]) ───────────────────────────
+
+namespace __iter_impl {
+
+template <typename I>
+concept HasTraitsDifference =
+    requires { typename iterator_traits<I>::difference_type; };
+template <typename I>
+concept HasTraitsValue = requires { typename iterator_traits<I>::value_type; };
+
+} // namespace __iter_impl
+
+template <typename I>
+    requires __iter_impl::HasTraitsDifference<I>
+using iter_difference_t = typename iterator_traits<I>::difference_type;
+
+template <typename I>
+    requires __iter_impl::HasTraitsValue<I>
+using iter_value_t = typename iterator_traits<I>::value_type;
+
+template <typename I>
+    requires requires(I &i) { *i; }
+using iter_reference_t = decltype(*declval<I &>());
+
+template <typename I>
+    requires requires(I &i) { *i; }
+using iter_rvalue_reference_t =
+    decltype(std::move(*declval<I &>()));
+
+// ── iterator concepts ([iterator.concepts]) ─────────────────────────────
+
+template <typename I>
+concept indirectly_readable = requires(const I i) {
+    typename iter_value_t<I>;
+    typename iter_reference_t<I>;
+    { *i } -> same_as<iter_reference_t<I>>;
+};
+
+template <typename Out, typename T>
+concept indirectly_writable = requires(Out &&o, T &&t) {
+    *o = std::forward<T>(t);
+};
+
+template <typename I>
+concept weakly_incrementable = movable<I> && requires(I i) {
+    typename iter_difference_t<I>;
+    requires signed_integral<iter_difference_t<I>>;
+    { ++i } -> same_as<I &>;
+    i++;
+};
+
+template <typename I>
+concept incrementable = regular<I> && weakly_incrementable<I> &&
+                        requires(I i) {
+                            { i++ } -> same_as<I>;
+                        };
+
+template <typename I>
+concept input_or_output_iterator = requires(I i) {
+    *i;
+} && weakly_incrementable<I>;
+
+template <typename S, typename I>
+concept sentinel_for = semiregular<S> && input_or_output_iterator<I> &&
+                       requires(const I &i, const S &s) {
+                           { i == s } -> convertible_to<bool>;
+                       };
+
+template <typename S, typename I>
+inline constexpr bool disable_sized_sentinel_for = false;
+
+template <typename S, typename I>
+concept sized_sentinel_for =
+    sentinel_for<S, I> &&
+    !disable_sized_sentinel_for<remove_cv_t<S>, remove_cv_t<I>> &&
+    requires(const I &i, const S &s) {
+        { s - i } -> same_as<iter_difference_t<I>>;
+        { i - s } -> same_as<iter_difference_t<I>>;
+    };
+
+namespace __iter_impl {
+
+template <typename I>
+concept HasCategory =
+    requires { typename iterator_traits<I>::iterator_category; };
+
+template <typename I, typename Tag>
+concept CategoryAtLeast =
+    HasCategory<I> &&
+    derived_from<typename iterator_traits<I>::iterator_category, Tag>;
+
+} // namespace __iter_impl
+
+template <typename I>
+concept input_iterator =
+    input_or_output_iterator<I> && indirectly_readable<I> &&
+    __iter_impl::CategoryAtLeast<I, input_iterator_tag>;
+
+template <typename I, typename T>
+concept output_iterator =
+    input_or_output_iterator<I> && indirectly_writable<I, T> &&
+    requires(I i, T &&t) { *i++ = std::forward<T>(t); };
+
+template <typename I>
+concept forward_iterator =
+    input_iterator<I> &&
+    __iter_impl::CategoryAtLeast<I, forward_iterator_tag> &&
+    incrementable<I> && sentinel_for<I, I>;
+
+template <typename I>
+concept bidirectional_iterator =
+    forward_iterator<I> &&
+    __iter_impl::CategoryAtLeast<I, bidirectional_iterator_tag> &&
+    requires(I i) {
+        { --i } -> same_as<I &>;
+        { i-- } -> same_as<I>;
+    };
+
+template <typename I>
+concept random_access_iterator =
+    bidirectional_iterator<I> &&
+    __iter_impl::CategoryAtLeast<I, random_access_iterator_tag> &&
+    totally_ordered<I> && sized_sentinel_for<I, I> &&
+    requires(I i, const I j, const iter_difference_t<I> n) {
+        { i += n } -> same_as<I &>;
+        { j + n } -> same_as<I>;
+        { n + j } -> same_as<I>;
+        { i -= n } -> same_as<I &>;
+        { j - n } -> same_as<I>;
+        { j[n] } -> same_as<iter_reference_t<I>>;
+    };
+
+template <typename I>
+concept contiguous_iterator =
+    random_access_iterator<I> && is_pointer_v<I>; // boxcxx: pointers ARE
+                                                  // the contiguous set
+                                                  // until to_address /
+                                                  // pointer_traits land
+                                                  // (Ф8)
+
+// ── sentinels ───────────────────────────────────────────────────────────
+
+struct default_sentinel_t {};
+inline constexpr default_sentinel_t default_sentinel{};
+
+struct unreachable_sentinel_t {
+    template <weakly_incrementable I>
+    friend constexpr bool operator==(unreachable_sentinel_t, const I &) noexcept
+    {
+        return false;
+    }
+};
+inline constexpr unreachable_sentinel_t unreachable_sentinel{};
+
+// ── move_iterator ([move.iterators]) ────────────────────────────────────
+
+template <typename It>
+class move_iterator {
+public:
+    using iterator_type     = It;
+    using iterator_category = typename iterator_traits<It>::iterator_category;
+    using value_type        = typename iterator_traits<It>::value_type;
+    using difference_type   = typename iterator_traits<It>::difference_type;
+    using pointer           = It;
+    using reference         = iter_rvalue_reference_t<It>;
+
+    constexpr move_iterator() : __cur() {}
+    constexpr explicit move_iterator(It it) : __cur(std::move(it)) {}
+    template <typename U>
+        requires(!is_same_v<U, It> && is_convertible_v<const U &, It>)
+    constexpr move_iterator(const move_iterator<U> &other)
+        : __cur(other.base())
+    {
+    }
+
+    constexpr const It &base() const & noexcept { return __cur; }
+    constexpr It base() && { return std::move(__cur); }
+
+    constexpr reference operator*() const { return std::move(*__cur); }
+    constexpr reference operator[](difference_type n) const
+    {
+        return std::move(__cur[n]);
+    }
+
+    constexpr move_iterator &operator++()
+    {
+        ++__cur;
+        return *this;
+    }
+    constexpr move_iterator operator++(int)
+    {
+        move_iterator tmp = *this;
+        ++__cur;
+        return tmp;
+    }
+    constexpr move_iterator &operator--()
+    {
+        --__cur;
+        return *this;
+    }
+    constexpr move_iterator operator--(int)
+    {
+        move_iterator tmp = *this;
+        --__cur;
+        return tmp;
+    }
+    constexpr move_iterator operator+(difference_type n) const
+    {
+        return move_iterator(__cur + n);
+    }
+    constexpr move_iterator operator-(difference_type n) const
+    {
+        return move_iterator(__cur - n);
+    }
+    constexpr move_iterator &operator+=(difference_type n)
+    {
+        __cur += n;
+        return *this;
+    }
+    constexpr move_iterator &operator-=(difference_type n)
+    {
+        __cur -= n;
+        return *this;
+    }
+
+private:
+    It __cur;
+};
+
+template <typename A, typename B>
+constexpr bool operator==(const move_iterator<A> &a, const move_iterator<B> &b)
+{
+    return a.base() == b.base();
+}
+template <typename A, typename B>
+constexpr bool operator!=(const move_iterator<A> &a, const move_iterator<B> &b)
+{
+    return !(a.base() == b.base());
+}
+template <typename A, typename B>
+constexpr bool operator<(const move_iterator<A> &a, const move_iterator<B> &b)
+{
+    return a.base() < b.base();
+}
+template <typename A, typename B>
+constexpr bool operator>(const move_iterator<A> &a, const move_iterator<B> &b)
+{
+    return b.base() < a.base();
+}
+template <typename A, typename B>
+constexpr bool operator<=(const move_iterator<A> &a, const move_iterator<B> &b)
+{
+    return !(b.base() < a.base());
+}
+template <typename A, typename B>
+constexpr bool operator>=(const move_iterator<A> &a, const move_iterator<B> &b)
+{
+    return !(a.base() < b.base());
+}
+template <typename A, typename B>
+constexpr auto operator-(const move_iterator<A> &a, const move_iterator<B> &b)
+    -> decltype(a.base() - b.base())
+{
+    return a.base() - b.base();
+}
+template <typename It>
+constexpr move_iterator<It> operator+(typename move_iterator<It>::difference_type n,
+                                      const move_iterator<It> &it)
+{
+    return it + n;
+}
+
+template <typename It>
+constexpr move_iterator<It> make_move_iterator(It it)
+{
+    return move_iterator<It>(std::move(it));
+}
+
+// ── inserters ([insert.iterators]) ──────────────────────────────────────
+
+template <typename Container>
+class back_insert_iterator {
+public:
+    using iterator_category = output_iterator_tag;
+    using value_type        = void;
+    using difference_type   = ptrdiff_t;
+    using pointer           = void;
+    using reference         = void;
+    using container_type    = Container;
+
+    constexpr explicit back_insert_iterator(Container &c)
+        : __c(__builtin_addressof(c))
+    {
+    }
+    constexpr back_insert_iterator &
+    operator=(const typename Container::value_type &value)
+    {
+        __c->push_back(value);
+        return *this;
+    }
+    constexpr back_insert_iterator &
+    operator=(typename Container::value_type &&value)
+    {
+        __c->push_back(std::move(value));
+        return *this;
+    }
+    constexpr back_insert_iterator &operator*() { return *this; }
+    constexpr back_insert_iterator &operator++() { return *this; }
+    constexpr back_insert_iterator operator++(int) { return *this; }
+
+private:
+    Container *__c;
+};
+
+template <typename Container>
+constexpr back_insert_iterator<Container> back_inserter(Container &c)
+{
+    return back_insert_iterator<Container>(c);
+}
+
+template <typename Container>
+class front_insert_iterator {
+public:
+    using iterator_category = output_iterator_tag;
+    using value_type        = void;
+    using difference_type   = ptrdiff_t;
+    using pointer           = void;
+    using reference         = void;
+    using container_type    = Container;
+
+    constexpr explicit front_insert_iterator(Container &c)
+        : __c(__builtin_addressof(c))
+    {
+    }
+    constexpr front_insert_iterator &
+    operator=(const typename Container::value_type &value)
+    {
+        __c->push_front(value);
+        return *this;
+    }
+    constexpr front_insert_iterator &
+    operator=(typename Container::value_type &&value)
+    {
+        __c->push_front(std::move(value));
+        return *this;
+    }
+    constexpr front_insert_iterator &operator*() { return *this; }
+    constexpr front_insert_iterator &operator++() { return *this; }
+    constexpr front_insert_iterator operator++(int) { return *this; }
+
+private:
+    Container *__c;
+};
+
+template <typename Container>
+constexpr front_insert_iterator<Container> front_inserter(Container &c)
+{
+    return front_insert_iterator<Container>(c);
+}
+
+template <typename Container>
+class insert_iterator {
+public:
+    using iterator_category = output_iterator_tag;
+    using value_type        = void;
+    using difference_type   = ptrdiff_t;
+    using pointer           = void;
+    using reference         = void;
+    using container_type    = Container;
+
+    constexpr insert_iterator(Container &c, typename Container::iterator it)
+        : __c(__builtin_addressof(c)), __it(it)
+    {
+    }
+    constexpr insert_iterator &
+    operator=(const typename Container::value_type &value)
+    {
+        __it = __c->insert(__it, value);
+        ++__it;
+        return *this;
+    }
+    constexpr insert_iterator &
+    operator=(typename Container::value_type &&value)
+    {
+        __it = __c->insert(__it, std::move(value));
+        ++__it;
+        return *this;
+    }
+    constexpr insert_iterator &operator*() { return *this; }
+    constexpr insert_iterator &operator++() { return *this; }
+    constexpr insert_iterator &operator++(int) { return *this; }
+
+private:
+    Container *__c;
+    typename Container::iterator __it;
+};
+
+template <typename Container>
+constexpr insert_iterator<Container> inserter(Container &c,
+                                              typename Container::iterator it)
+{
+    return insert_iterator<Container>(c, it);
+}
+
+} // namespace std
+
+#endif // BOXCXX_ITERATOR
