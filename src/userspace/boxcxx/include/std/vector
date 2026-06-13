@@ -22,6 +22,9 @@
 
 namespace std {
 
+template <typename T>
+struct hash; // primary lives in <functional>; specialized for vector<bool>
+
 template <typename T, typename Alloc = allocator<T>>
 class vector {
     using AllocTraits = allocator_traits<Alloc>;
@@ -529,6 +532,371 @@ typename vector<T, A>::size_type erase_if(vector<T, A> &v, Pred pred)
     v.resize(w);
     return removed;
 }
+
+// ── vector<bool> — packed bit specialization ([vector.bool]) ─────────────
+
+template <typename Alloc>
+class vector<bool, Alloc> {
+    using Word                    = size_t;
+    static constexpr size_t kBits = sizeof(Word) * 8;
+    using WAlloc =
+        typename allocator_traits<Alloc>::template rebind_alloc<Word>;
+    using WTraits = allocator_traits<WAlloc>;
+
+    Word                        *words_ = nullptr;
+    size_t                       size_  = 0; // in bits
+    size_t                       cap_   = 0; // in bits
+    [[no_unique_address]] WAlloc alloc_;
+
+    static size_t Words(size_t bits) { return (bits + kBits - 1) / kBits; }
+    bool GetBit(size_t i) const { return words_[i / kBits] >> (i % kBits) & 1u; }
+    void SetBit(size_t i, bool v)
+    {
+        Word m = Word(1) << (i % kBits);
+        if (v)
+            words_[i / kBits] |= m;
+        else
+            words_[i / kBits] &= ~m;
+    }
+
+public:
+    using value_type      = bool;
+    using size_type       = size_t;
+    using difference_type = ptrdiff_t;
+    using allocator_type  = Alloc;
+    using const_reference = bool;
+
+    class reference {
+        Word *w_;
+        Word  mask_;
+        friend class vector;
+        reference(Word *w, Word mask) noexcept : w_(w), mask_(mask) {}
+
+    public:
+        reference(const reference &) = default;
+        ~reference()                 = default;
+        constexpr operator bool() const noexcept { return *w_ & mask_; }
+        reference &operator=(bool x) noexcept
+        {
+            if (x)
+                *w_ |= mask_;
+            else
+                *w_ &= ~mask_;
+            return *this;
+        }
+        reference &operator=(const reference &o) noexcept
+        {
+            return *this = bool(o);
+        }
+        void flip() noexcept { *w_ ^= mask_; }
+        friend void swap(reference a, reference b) noexcept
+        {
+            bool t = a;
+            a      = bool(b);
+            b      = t;
+        }
+    };
+
+    class iterator {
+        Word  *base_ = nullptr;
+        size_t idx_  = 0;
+        friend class vector;
+        iterator(Word *b, size_t i) noexcept : base_(b), idx_(i) {}
+
+    public:
+        using iterator_category = random_access_iterator_tag;
+        using value_type        = bool;
+        using difference_type   = ptrdiff_t;
+        using reference         = vector::reference;
+        using pointer           = void;
+
+        iterator()              = default;
+        reference operator*() const noexcept
+        {
+            return reference(base_ + idx_ / kBits, Word(1) << (idx_ % kBits));
+        }
+        reference operator[](difference_type n) const noexcept
+        {
+            return *(*this + n);
+        }
+        iterator &operator++() noexcept
+        {
+            ++idx_;
+            return *this;
+        }
+        iterator operator++(int) noexcept
+        {
+            auto t = *this;
+            ++idx_;
+            return t;
+        }
+        iterator &operator--() noexcept
+        {
+            --idx_;
+            return *this;
+        }
+        iterator operator--(int) noexcept
+        {
+            auto t = *this;
+            --idx_;
+            return t;
+        }
+        iterator &operator+=(difference_type n) noexcept
+        {
+            idx_ += n;
+            return *this;
+        }
+        iterator &operator-=(difference_type n) noexcept
+        {
+            idx_ -= n;
+            return *this;
+        }
+        friend iterator operator+(iterator it, difference_type n) noexcept
+        {
+            it.idx_ += n;
+            return it;
+        }
+        friend iterator operator+(difference_type n, iterator it) noexcept
+        {
+            it.idx_ += n;
+            return it;
+        }
+        friend iterator operator-(iterator it, difference_type n) noexcept
+        {
+            it.idx_ -= n;
+            return it;
+        }
+        friend difference_type operator-(iterator a, iterator b) noexcept
+        {
+            return difference_type(a.idx_) - difference_type(b.idx_);
+        }
+        friend bool operator==(iterator a, iterator b) noexcept
+        {
+            return a.idx_ == b.idx_;
+        }
+        friend auto operator<=>(iterator a, iterator b) noexcept
+        {
+            return a.idx_ <=> b.idx_;
+        }
+    };
+    using const_iterator         = iterator;
+    using reverse_iterator       = std::reverse_iterator<iterator>;
+    using const_reverse_iterator = std::reverse_iterator<const_iterator>;
+
+    vector() noexcept = default;
+    explicit vector(const Alloc &a) noexcept : alloc_(a) {}
+    explicit vector(size_type n, const Alloc &a = Alloc()) : alloc_(a)
+    {
+        Grow(n);
+        size_ = n;
+        for (size_t w = 0; w < Words(n); ++w) words_[w] = 0;
+    }
+    vector(size_type n, bool v, const Alloc &a = Alloc()) : alloc_(a)
+    {
+        Grow(n);
+        size_      = n;
+        Word fill  = v ? Word(-1) : 0;
+        for (size_t w = 0; w < Words(n); ++w) words_[w] = fill;
+    }
+    template <class It>
+        requires requires(It i) { bool(*i); }
+    vector(It first, It last, const Alloc &a = Alloc()) : alloc_(a)
+    {
+        for (; first != last; ++first) push_back(bool(*first));
+    }
+    vector(initializer_list<bool> il, const Alloc &a = Alloc()) : alloc_(a)
+    {
+        Grow(il.size());
+        for (bool b : il) push_back(b);
+    }
+    vector(const vector &o)
+        : alloc_(WTraits::select_on_container_copy_construction(o.alloc_))
+    {
+        Grow(o.size_);
+        size_ = o.size_;
+        for (size_t w = 0; w < Words(size_); ++w) words_[w] = o.words_[w];
+    }
+    vector(vector &&o) noexcept
+        : words_(o.words_), size_(o.size_), cap_(o.cap_),
+          alloc_(static_cast<WAlloc &&>(o.alloc_))
+    {
+        o.words_ = nullptr;
+        o.size_ = o.cap_ = 0;
+    }
+    ~vector() { Free(); }
+
+    vector &operator=(const vector &o)
+    {
+        if (this == &o) return *this;
+        clear();
+        Reserve(o.size_);
+        size_ = o.size_;
+        for (size_t w = 0; w < Words(size_); ++w) words_[w] = o.words_[w];
+        return *this;
+    }
+    vector &operator=(vector &&o) noexcept
+    {
+        if (this == &o) return *this;
+        Free();
+        words_   = o.words_;
+        size_    = o.size_;
+        cap_     = o.cap_;
+        alloc_   = static_cast<WAlloc &&>(o.alloc_);
+        o.words_ = nullptr;
+        o.size_ = o.cap_ = 0;
+        return *this;
+    }
+    vector &operator=(initializer_list<bool> il)
+    {
+        clear();
+        for (bool b : il) push_back(b);
+        return *this;
+    }
+
+    reference       operator[](size_type i) { return *(begin() + i); }
+    const_reference operator[](size_type i) const { return GetBit(i); }
+    reference       at(size_type i)
+    {
+        if (i >= size_) boxcxx::ThrowOutOfRange("vector<bool>::at");
+        return (*this)[i];
+    }
+    const_reference at(size_type i) const
+    {
+        if (i >= size_) boxcxx::ThrowOutOfRange("vector<bool>::at");
+        return GetBit(i);
+    }
+    reference       front() { return (*this)[0]; }
+    const_reference front() const { return GetBit(0); }
+    reference       back() { return (*this)[size_ - 1]; }
+    const_reference back() const { return GetBit(size_ - 1); }
+
+    iterator       begin() noexcept { return iterator(words_, 0); }
+    iterator       end() noexcept { return iterator(words_, size_); }
+    const_iterator begin() const noexcept
+    {
+        return iterator(const_cast<Word *>(words_), 0);
+    }
+    const_iterator end() const noexcept
+    {
+        return iterator(const_cast<Word *>(words_), size_);
+    }
+    const_iterator   cbegin() const noexcept { return begin(); }
+    const_iterator   cend() const noexcept { return end(); }
+    reverse_iterator rbegin() noexcept { return reverse_iterator(end()); }
+    reverse_iterator rend() noexcept { return reverse_iterator(begin()); }
+
+    bool      empty() const noexcept { return size_ == 0; }
+    size_type size() const noexcept { return size_; }
+    size_type max_size() const noexcept { return size_type(-1) / 2; }
+    size_type capacity() const noexcept { return cap_; }
+    void      reserve(size_type n) { Reserve(n); }
+    void      shrink_to_fit()
+    {
+        if (Words(size_) < Words(cap_)) Realloc(size_);
+    }
+
+    void clear() noexcept { size_ = 0; }
+    void push_back(bool v)
+    {
+        if (size_ == cap_) Reserve(cap_ ? cap_ * 2 : kBits);
+        SetBit(size_, v);
+        ++size_;
+    }
+    void pop_back() { --size_; }
+    template <class... A>
+    reference emplace_back(A &&...a)
+    {
+        push_back(bool(static_cast<A &&>(a)...));
+        return back();
+    }
+    void resize(size_type n, bool v = false)
+    {
+        if (n > size_) {
+            Reserve(n);
+            for (size_t i = size_; i < n; ++i) SetBit(i, v);
+        }
+        size_ = n;
+    }
+    iterator insert(const_iterator pos, bool v)
+    {
+        size_t at = pos.idx_;
+        push_back(false);
+        for (size_t i = size_ - 1; i > at; --i) SetBit(i, GetBit(i - 1));
+        SetBit(at, v);
+        return begin() + at;
+    }
+    iterator erase(const_iterator pos)
+    {
+        size_t at = pos.idx_;
+        for (size_t i = at; i + 1 < size_; ++i) SetBit(i, GetBit(i + 1));
+        --size_;
+        return begin() + at;
+    }
+    void swap(vector &o) noexcept
+    {
+        Word  *tw = words_;
+        words_    = o.words_;
+        o.words_  = tw;
+        size_t ts = size_;
+        size_     = o.size_;
+        o.size_   = ts;
+        size_t tc = cap_;
+        cap_      = o.cap_;
+        o.cap_    = tc;
+    }
+    void flip() noexcept
+    {
+        for (size_t w = 0; w < Words(size_); ++w) words_[w] = ~words_[w];
+    }
+    static void flip(reference r) noexcept { r.flip(); }
+
+    allocator_type get_allocator() const noexcept
+    {
+        return allocator_type(alloc_);
+    }
+
+private:
+    void Grow(size_type n)
+    {
+        if (n == 0) return;
+        cap_   = Words(n) * kBits;
+        words_ = WTraits::allocate(alloc_, Words(cap_));
+    }
+    void Reserve(size_type n)
+    {
+        if (n <= cap_) return;
+        size_type nc = cap_ ? cap_ * 2 : kBits;
+        if (nc < n) nc = Words(n) * kBits;
+        Realloc(nc);
+    }
+    void Realloc(size_type new_cap_bits)
+    {
+        size_t nw  = Words(new_cap_bits ? new_cap_bits : 1);
+        Word  *nwo = WTraits::allocate(alloc_, nw);
+        for (size_t w = 0; w < Words(size_); ++w) nwo[w] = words_[w];
+        Free();
+        words_ = nwo;
+        cap_   = nw * kBits;
+    }
+    void Free()
+    {
+        if (words_) WTraits::deallocate(alloc_, words_, Words(cap_));
+        words_ = nullptr;
+        cap_   = 0;
+    }
+};
+
+template <typename Alloc>
+struct hash<vector<bool, Alloc>> {
+    size_t operator()(const vector<bool, Alloc> &v) const noexcept
+    {
+        size_t h = 1469598103934665603ull;
+        for (size_t i = 0; i < v.size(); ++i)
+            h ^= static_cast<size_t>(bool(v[i])) + 0x9e3779b9 + (h << 6) +
+                 (h >> 2);
+        return h;
+    }
+};
 
 } // namespace std
 

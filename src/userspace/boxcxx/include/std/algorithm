@@ -1328,6 +1328,161 @@ constexpr auto lexicographical_compare_three_way(In1 first1, In1 last1,
                                              compare_three_way{});
 }
 
+// ── stable_partition ─────────────────────────────────────────────────────
+
+template <class It, class Pred>
+constexpr It stable_partition(It first, It last, Pred pred)
+{
+    using T = typename iterator_traits<It>::value_type;
+    auto n  = std::distance(first, last);
+    if (n == 0) return first;
+
+    T *buf = static_cast<T *>(
+        ::operator new(static_cast<size_t>(n) * sizeof(T), nothrow));
+    if (buf) {
+        It     out = first;
+        size_t nb  = 0;
+        for (It it = first; it != last; ++it) {
+            if (pred(*it)) {
+                if (out != it) *out = static_cast<T &&>(*it);
+                ++out;
+            } else {
+                ::new (static_cast<void *>(buf + nb)) T(static_cast<T &&>(*it));
+                ++nb;
+            }
+        }
+        It ret = out;
+        for (size_t i = 0; i < nb; ++i) {
+            *out = static_cast<T &&>(buf[i]);
+            ++out;
+            buf[i].~T();
+        }
+        ::operator delete(buf);
+        return ret;
+    }
+
+    // No buffer: divide-and-conquer rotate, O(n log n), stable.
+    if (n == 1) return pred(*first) ? last : first;
+    It mid   = std::next(first, n / 2);
+    It left  = stable_partition(first, mid, pred);
+    It right = stable_partition(mid, last, pred);
+    return std::rotate(left, mid, right);
+}
+
+// ── is_permutation ───────────────────────────────────────────────────────
+
+namespace __algo {
+template <class It1, class It2, class Pred>
+constexpr bool IsPermImpl(It1 f1, It1 l1, It2 f2, It2 l2, Pred pred)
+{
+    for (; f1 != l1 && f2 != l2; ++f1, (void)++f2)
+        if (!pred(*f1, *f2)) break;
+    if (f1 == l1) return f2 == l2;
+    if (std::distance(f1, l1) != std::distance(f2, l2)) return false;
+    for (It1 i = f1; i != l1; ++i) {
+        bool seen = false;
+        for (It1 k = f1; k != i; ++k)
+            if (pred(*k, *i)) {
+                seen = true;
+                break;
+            }
+        if (seen) continue;
+        size_t c1 = 0;
+        for (It1 k = i; k != l1; ++k)
+            if (pred(*i, *k)) ++c1;
+        size_t c2 = 0;
+        for (It2 k = f2; k != l2; ++k)
+            if (pred(*i, *k)) ++c2;
+        if (c1 != c2) return false;
+    }
+    return true;
+}
+} // namespace __algo
+
+template <class It1, class It2, class Pred>
+constexpr bool is_permutation(It1 f1, It1 l1, It2 f2, Pred pred)
+{
+    It2 l2 = f2;
+    std::advance(l2, std::distance(f1, l1));
+    return __algo::IsPermImpl(f1, l1, f2, l2, pred);
+}
+template <class It1, class It2>
+constexpr bool is_permutation(It1 f1, It1 l1, It2 f2)
+{
+    return is_permutation(f1, l1, f2,
+                          [](auto &&a, auto &&b) { return a == b; });
+}
+template <class It1, class It2, class Pred>
+constexpr bool is_permutation(It1 f1, It1 l1, It2 f2, It2 l2, Pred pred)
+{
+    return __algo::IsPermImpl(f1, l1, f2, l2, pred);
+}
+template <class It1, class It2>
+constexpr bool is_permutation(It1 f1, It1 l1, It2 f2, It2 l2)
+{
+    return __algo::IsPermImpl(f1, l1, f2, l2,
+                              [](auto &&a, auto &&b) { return a == b; });
+}
+
+// ── next_permutation / prev_permutation ──────────────────────────────────
+
+template <class It, class Comp>
+constexpr bool next_permutation(It first, It last, Comp comp)
+{
+    if (first == last) return false;
+    It i = last;
+    if (first == --i) return false;
+    for (;;) {
+        It ip1 = i;
+        if (comp(*--i, *ip1)) {
+            It j = last;
+            while (!comp(*i, *--j))
+                ;
+            iter_swap(i, j);
+            reverse(ip1, last);
+            return true;
+        }
+        if (i == first) {
+            reverse(first, last);
+            return false;
+        }
+    }
+}
+template <class It>
+constexpr bool next_permutation(It first, It last)
+{
+    return next_permutation(first, last,
+                            [](auto &&a, auto &&b) { return a < b; });
+}
+template <class It, class Comp>
+constexpr bool prev_permutation(It first, It last, Comp comp)
+{
+    if (first == last) return false;
+    It i = last;
+    if (first == --i) return false;
+    for (;;) {
+        It ip1 = i;
+        if (comp(*ip1, *--i)) {
+            It j = last;
+            while (!comp(*--j, *i))
+                ;
+            iter_swap(i, j);
+            reverse(ip1, last);
+            return true;
+        }
+        if (i == first) {
+            reverse(first, last);
+            return false;
+        }
+    }
+}
+template <class It>
+constexpr bool prev_permutation(It first, It last)
+{
+    return prev_permutation(first, last,
+                            [](auto &&a, auto &&b) { return a < b; });
+}
+
 } // namespace std
 
 #endif // BOXCXX_ALGORITHM

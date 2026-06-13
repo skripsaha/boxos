@@ -382,6 +382,21 @@ public:
         sw(__finish, other.__finish);
     }
 
+    // Non-binding: release spare blocks the map still pins outside the live
+    // node range [start.node, finish.node]. The map array itself is kept.
+    void shrink_to_fit()
+    {
+        if (!__map) return;
+        T **sn = __start.__node;
+        T **fn = __finish.__node;
+        for (size_type i = 0; i < __map_size; ++i) {
+            if (__map[i] && (__map + i < sn || __map + i > fn)) {
+                FreeBlock(__map[i]);
+                __map[i] = nullptr;
+            }
+        }
+    }
+
 private:
     // ── map / block machinery ───────────────────────────────────────────
 

@@ -1861,6 +1861,60 @@ void Phase8d()
     printf("[CXX] PASS phase8d: exception_ptr/nested + make_shared arrays\n");
 }
 
+// ── phase8e: closed leftovers (vector<bool>/algorithm/deque/errc) ──────
+
+void Phase8e()
+{
+    // vector<bool> packed specialization
+    std::vector<bool> vb;
+    for (int i = 0; i < 200; ++i) vb.push_back(i % 2 == 0);
+    int ones = 0;
+    for (bool b : vb)
+        if (b) ++ones;
+    Check(ones == 100, "phase8e vector<bool> push/iterate");
+    vb[1] = true;
+    Check(vb[1], "phase8e vector<bool> proxy assign");
+    vb.flip();
+    int ones2 = 0;
+    for (size_t i = 0; i < vb.size(); ++i)
+        if (vb[i]) ++ones2;
+    Check(ones2 == 99, "phase8e vector<bool> flip");
+    Check(sizeof(std::vector<bool>) <= 40, "phase8e vector<bool> compact");
+
+    // stable_partition (stable order preserved)
+    std::vector<int> sp{1, 2, 3, 4, 5, 6, 7, 8};
+    auto it = std::stable_partition(sp.begin(), sp.end(),
+                                    [](int x) { return x % 2 == 0; });
+    Check(sp[0] == 2 && sp[1] == 4 && sp[2] == 6 && *it == 1,
+          "phase8e stable_partition");
+
+    // permutations
+    int arr[] = {1, 2, 3};
+    int n     = 0;
+    do {
+        ++n;
+    } while (std::next_permutation(arr, arr + 3));
+    Check(n == 6, "phase8e next_permutation count");
+    int chk[] = {3, 1, 2};
+    Check(std::is_permutation(arr, arr + 3, chk), "phase8e is_permutation");
+
+    // deque shrink_to_fit
+    std::deque<int> dq;
+    for (int i = 0; i < 1000; ++i) dq.push_back(i);
+    for (int i = 0; i < 900; ++i) dq.pop_front();
+    dq.shrink_to_fit();
+    Check(dq.size() == 100 && dq.front() == 900 && dq.back() == 999,
+          "phase8e deque shrink_to_fit");
+
+    // system_error message table
+    auto ec = std::make_error_code(std::errc::broken_pipe);
+    Check(ec.message().size() > 0 && ec.message()[0] == 'b',
+          "phase8e system_error message");
+
+    printf("[CXX] PASS phase8e: "
+           "vector<bool>/stable_partition/permutations/deque-shrink/errc\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -1883,6 +1937,7 @@ int main()
     Phase8b();
     Phase8c();
     Phase8d();
+    Phase8e();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
