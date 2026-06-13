@@ -20,13 +20,16 @@
 #include <array>
 #include <atomic>
 #include <deque>
+#include <expected>
 #include <iterator>
 #include <list>
 #include <map>
+#include <optional>
 #include <ranges>
 #include <set>
 #include <unordered_map>
 #include <unordered_set>
+#include <variant>
 #include <cstddef>
 #include <cstdint>
 #include <mutex>
@@ -1361,6 +1364,221 @@ void Phase7d()
            "span-ctor)\n");
 }
 
+// ── phase8a fixtures: optional / variant / expected ────────────────────
+
+int g_opt_dtors = 0;
+struct OptDtor {
+    int *d;
+    explicit OptDtor(int *p) : d(p) {}
+    OptDtor(const OptDtor &) = default;
+    OptDtor(OptDtor &&o) noexcept : d(o.d) { o.d = nullptr; }
+    ~OptDtor()
+    {
+        if (d) ++*d;
+    }
+};
+
+struct Boom {
+    int v;
+    Boom() : v(0) {}
+    explicit Boom(int) : v(0) { throw 42; } // throws while emplacing
+    Boom(const Boom &) = default;
+    Boom(Boom &&)      = default;
+};
+
+// compile-time proof that the three vocabulary types are constexpr-usable.
+constexpr int Phase8aConstexpr()
+{
+    std::optional<int> o;
+    o = 5;
+    auto t = o.transform([](int x) { return x * 2; }).value_or(0); // 10
+    std::expected<int, long> e{3};
+    e = std::unexpected<long>(7);
+    int eo = static_cast<int>(e.error_or(0)); // 7
+    std::variant<int, long, char> v;
+    v.emplace<1>(9L);
+    int vi = static_cast<int>(std::get<1>(v)); // 9
+    return t + eo + vi + static_cast<int>(v.index()); // 10+7+9+1 = 27
+}
+
+void Phase8a()
+{
+    using std::expected;
+    using std::optional;
+    using std::variant;
+
+    // ── optional ───────────────────────────────────────────────────────
+    static_assert(std::is_trivially_copyable_v<optional<int>>,
+                  "optional<int> trivially copyable");
+    static_assert(sizeof(optional<int>) == sizeof(int) * 2,
+                  "optional<int> compact");
+    static_assert(Phase8aConstexpr() == 27, "phase8a constexpr fold");
+
+    optional<int> e;
+    Check(!e && !e.has_value(), "phase8a optional empty");
+    Check(e.value_or(99) == 99, "phase8a optional value_or empty");
+
+    optional<int> o = 7;
+    Check(o && *o == 7 && o.value() == 7, "phase8a optional engaged");
+    o = 8;
+    Check(*o == 8, "phase8a optional assign value");
+    Check(o.emplace(11) == 11 && *o == 11, "phase8a optional emplace");
+
+    bool threw = false;
+    try {
+        (void)e.value();
+    } catch (const std::bad_optional_access &) {
+        threw = true;
+    }
+    Check(threw, "phase8a optional bad_optional_access");
+
+    // monadic chain
+    auto r = optional<int>{4}
+                 .and_then([](int x) -> optional<long> { return x + 1; })
+                 .transform([](long x) { return static_cast<int>(x * 2); })
+                 .or_else([] { return optional<int>{0}; });
+    Check(r && *r == 10, "phase8a optional monadic chain");
+    auto r2 = optional<int>{}.transform([](int x) { return x + 1; });
+    Check(!r2, "phase8a optional transform on empty");
+
+    // comparisons
+    Check(optional<int>{3} == optional<int>{3} && optional<int>{3} != e,
+          "phase8a optional ==");
+    Check(optional<int>{2} < optional<int>{5} && e < optional<int>{1},
+          "phase8a optional <");
+    Check(o == 11 && e == std::nullopt, "phase8a optional mixed compare");
+
+    // swap + dtor accounting
+    optional<int> a{1}, b;
+    a.swap(b);
+    Check(!a && b && *b == 1, "phase8a optional swap");
+
+    g_opt_dtors = 0;
+    {
+        optional<OptDtor> od{std::in_place, &g_opt_dtors};
+        od.reset();
+        Check(g_opt_dtors == 1 && !od, "phase8a optional reset destroys");
+        od.emplace(&g_opt_dtors);
+    } // dtor of engaged od → +1
+    Check(g_opt_dtors == 2, "phase8a optional scope dtor");
+    Check(std::make_optional<long>(5L).value() == 5,
+          "phase8a make_optional");
+
+    // ── expected ───────────────────────────────────────────────────────
+    static_assert(std::is_trivially_copyable_v<expected<int, int>>,
+                  "expected<int,int> trivially copyable");
+
+    expected<int, long> ev = 5;
+    Check(ev && *ev == 5 && ev.value() == 5, "phase8a expected value");
+    Check(ev.value_or(0) == 5 && ev.error_or(-1) == -1,
+          "phase8a expected value_or/error_or");
+
+    ev = std::unexpected<long>(7); // value → error switch
+    Check(!ev && ev.error() == 7, "phase8a expected error switch");
+    bool ethrew = false;
+    try {
+        (void)ev.value();
+    } catch (const std::bad_expected_access<long> &x) {
+        ethrew = (x.error() == 7);
+    }
+    Check(ethrew, "phase8a expected bad_expected_access carries error");
+
+    ev = 9; // error → value switch
+    Check(ev && *ev == 9, "phase8a expected value switch back");
+
+    auto et = expected<int, long>{4}
+                  .and_then([](int x) -> expected<long, long> { return x + 1; })
+                  .transform([](long x) { return static_cast<int>(x); })
+                  .or_else([](long) -> expected<int, long> { return 0; });
+    Check(et && *et == 5, "phase8a expected monadic chain");
+
+    auto eterr = expected<int, long>{std::unexpect, 3}.transform_error(
+        [](long x) { return static_cast<int>(x + 1); });
+    Check(!eterr && eterr.error() == 4, "phase8a expected transform_error");
+
+    expected<void, int> vexp;
+    Check(vexp.has_value(), "phase8a expected<void> value");
+    vexp = std::unexpected<int>(5);
+    Check(!vexp && vexp.error() == 5, "phase8a expected<void> error");
+    auto vexp2 = vexp.transform_error([](int x) { return x + 1; });
+    Check(!vexp2 && vexp2.error() == 6, "phase8a expected<void> transform_error");
+
+    Check((expected<int, long>{3} == expected<int, long>{3}),
+          "phase8a expected ==");
+    Check((ev == 9) && (vexp == std::unexpected<int>(5)),
+          "phase8a expected mixed compare");
+
+    // ── variant ────────────────────────────────────────────────────────
+    static_assert(std::is_trivially_copyable_v<variant<int, float, char>>,
+                  "variant trivially copyable");
+    static_assert(std::variant_size_v<variant<int, char, long>> == 3,
+                  "variant_size");
+
+    variant<int, double, char> var;
+    Check(var.index() == 0 && std::get<0>(var) == 0, "phase8a variant default");
+
+    var = 3.5;
+    Check(var.index() == 1 && std::holds_alternative<double>(var) &&
+              std::get<double>(var) == 3.5,
+          "phase8a variant converting assign (double)");
+
+    var = 'A';
+    Check(std::holds_alternative<char>(var) && std::get<char>(var) == 'A',
+          "phase8a variant converting assign (char)");
+    Check(*std::get_if<char>(&var) == 'A' && std::get_if<int>(&var) == nullptr,
+          "phase8a variant get_if");
+
+    bool gthrew = false;
+    try {
+        (void)std::get<int>(var);
+    } catch (const std::bad_variant_access &) {
+        gthrew = true;
+    }
+    Check(gthrew, "phase8a variant bad_variant_access");
+
+    // visit: single and two-variant
+    int vr = std::visit([](auto x) { return static_cast<int>(x); }, var); // 'A'
+    Check(vr == 65, "phase8a visit single");
+    variant<int, char> x1{2}, y1{'c'};
+    int vr2 = std::visit(
+        [](auto a2, auto b2) { return static_cast<int>(a2) + static_cast<int>(b2); },
+        x1, y1); // 2 + 99
+    Check(vr2 == 101, "phase8a visit two-variant");
+
+    // emplace, comparisons, swap
+    variant<int, char> c1{1}, c2{1};
+    Check(c1 == c2 && !(c1 < c2), "phase8a variant ==");
+    c2 = 'z';
+    Check(c1 < c2, "phase8a variant < by index");
+    c1.swap(c2);
+    Check(std::holds_alternative<char>(c1) && std::holds_alternative<int>(c2),
+          "phase8a variant swap differing index");
+
+    variant<std::monostate, int> mv;
+    Check(std::holds_alternative<std::monostate>(mv) && mv.index() == 0,
+          "phase8a monostate default");
+
+    // valueless_by_exception via throwing emplace
+    variant<int, Boom> vb;
+    bool bthrew = false;
+    try {
+        vb.emplace<1>(0);
+    } catch (int) {
+        bthrew = true;
+    }
+    Check(bthrew && vb.valueless_by_exception() &&
+              vb.index() == std::variant_npos,
+          "phase8a variant valueless_by_exception");
+
+    // hash smoke
+    Check(std::hash<variant<int, char>>{}(variant<int, char>{5}) != 0 &&
+              std::hash<std::monostate>{}(std::monostate{}) != 0,
+          "phase8a variant/monostate hash");
+
+    printf("[CXX] PASS phase8a: optional/variant/expected "
+           "(monadic/visit/valueless/trivial-copy)\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -1379,6 +1597,7 @@ int main()
     Phase7b();
     Phase7c();
     Phase7d();
+    Phase8a();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
