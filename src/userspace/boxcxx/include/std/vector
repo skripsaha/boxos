@@ -601,6 +601,7 @@ public:
         Word  *base_ = nullptr;
         size_t idx_  = 0;
         friend class vector;
+        friend class const_iterator;
         iterator(Word *b, size_t i) noexcept : base_(b), idx_(i) {}
 
     public:
@@ -679,7 +680,48 @@ public:
             return a.idx_ <=> b.idx_;
         }
     };
-    using const_iterator         = iterator;
+
+    // const_iterator dereferences to bool (const_reference) — a const
+    // vector<bool> must not be mutable through its iterator.
+    class const_iterator {
+        const Word *base_ = nullptr;
+        size_t      idx_  = 0;
+        friend class vector;
+        const_iterator(const Word *b, size_t i) noexcept : base_(b), idx_(i) {}
+
+    public:
+        using iterator_category = random_access_iterator_tag;
+        using value_type        = bool;
+        using difference_type   = ptrdiff_t;
+        using reference         = bool;
+        using pointer           = void;
+
+        const_iterator() = default;
+        const_iterator(const iterator &it) noexcept
+            : base_(it.base_), idx_(it.idx_)
+        {
+        }
+        bool operator*() const noexcept
+        {
+            return base_[idx_ / kBits] >> (idx_ % kBits) & 1u;
+        }
+        bool operator[](difference_type n) const noexcept { return *(*this + n); }
+        const_iterator &operator++() noexcept { ++idx_; return *this; }
+        const_iterator  operator++(int) noexcept { auto t = *this; ++idx_; return t; }
+        const_iterator &operator--() noexcept { --idx_; return *this; }
+        const_iterator  operator--(int) noexcept { auto t = *this; --idx_; return t; }
+        const_iterator &operator+=(difference_type n) noexcept { idx_ += n; return *this; }
+        const_iterator &operator-=(difference_type n) noexcept { idx_ -= n; return *this; }
+        friend const_iterator operator+(const_iterator it, difference_type n) noexcept { it.idx_ += n; return it; }
+        friend const_iterator operator+(difference_type n, const_iterator it) noexcept { it.idx_ += n; return it; }
+        friend const_iterator operator-(const_iterator it, difference_type n) noexcept { it.idx_ -= n; return it; }
+        friend difference_type operator-(const_iterator a, const_iterator b) noexcept
+        {
+            return difference_type(a.idx_) - difference_type(b.idx_);
+        }
+        friend bool operator==(const_iterator a, const_iterator b) noexcept { return a.idx_ == b.idx_; }
+        friend auto operator<=>(const_iterator a, const_iterator b) noexcept { return a.idx_ <=> b.idx_; }
+    };
     using reverse_iterator       = std::reverse_iterator<iterator>;
     using const_reverse_iterator = std::reverse_iterator<const_iterator>;
 
@@ -772,13 +814,10 @@ public:
 
     iterator       begin() noexcept { return iterator(words_, 0); }
     iterator       end() noexcept { return iterator(words_, size_); }
-    const_iterator begin() const noexcept
-    {
-        return iterator(const_cast<Word *>(words_), 0);
-    }
+    const_iterator begin() const noexcept { return const_iterator(words_, 0); }
     const_iterator end() const noexcept
     {
-        return iterator(const_cast<Word *>(words_), size_);
+        return const_iterator(words_, size_);
     }
     const_iterator   cbegin() const noexcept { return begin(); }
     const_iterator   cend() const noexcept { return end(); }
