@@ -1915,6 +1915,29 @@ void Phase8e()
            "vector<bool>/stable_partition/permutations/deque-shrink/errc\n");
 }
 
+// ── phase8f: unordered per-bucket local_iterator ───────────────────────
+
+void Phase8f()
+{
+    std::unordered_map<int, int> m;
+    for (int i = 0; i < 64; ++i) m[i] = i * 10;
+
+    size_t total      = 0;
+    bool   sizes_ok   = true;
+    for (size_t b = 0; b < m.bucket_count(); ++b) {
+        long n = 0;
+        for (auto it = m.begin(b); it != m.end(b); ++it) {
+            ++n;
+            ++total;
+        }
+        if (static_cast<size_t>(n) != m.bucket_size(b)) sizes_ok = false;
+    }
+    Check(total == 64, "phase8f local_iterator visits every element once");
+    Check(sizes_ok, "phase8f per-bucket count matches bucket_size");
+
+    printf("[CXX] PASS phase8f: unordered local_iterator (per-bucket)\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -1938,6 +1961,7 @@ int main()
     Phase8c();
     Phase8d();
     Phase8e();
+    Phase8f();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

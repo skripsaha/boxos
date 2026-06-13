@@ -45,8 +45,8 @@ public:
     using allocator_type  = Alloc;
     using iterator        = typename TableT::iterator;
     using const_iterator  = typename TableT::const_iterator;
-    using local_iterator  = iterator;       // tracked simplification:
-    using const_local_iterator = const_iterator; // whole-table walk
+    using local_iterator       = typename TableT::local_iterator;
+    using const_local_iterator = typename TableT::const_local_iterator;
 
     unordered_map() = default;
     explicit unordered_map(size_type buckets, const Hash &h = Hash(),
@@ -195,6 +195,12 @@ public:
         return __t.bucket_size(i);
     }
     size_type bucket(const Key &key) const { return __t.bucket(key); }
+    local_iterator       begin(size_type n) { return __t.begin(n); }
+    local_iterator       end(size_type n) { return __t.end(n); }
+    const_local_iterator begin(size_type n) const { return __t.begin(n); }
+    const_local_iterator end(size_type n) const { return __t.end(n); }
+    const_local_iterator cbegin(size_type n) const { return __t.begin(n); }
+    const_local_iterator cend(size_type n) const { return __t.end(n); }
     float load_factor() const noexcept { return __t.load_factor(); }
     float max_load_factor() const noexcept { return __t.max_load_factor(); }
     void max_load_factor(float lf) noexcept { __t.max_load_factor(lf); }
