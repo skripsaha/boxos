@@ -99,6 +99,76 @@ public:
     using iterator       = Iter<false>;
     using const_iterator = Iter<true>;
 
+    // Per-bucket iterator: walks one null-terminated bucket chain, never
+    // crossing into the next bucket (unlike the table-wide Iter).
+    template <bool Const>
+    class LocalIter {
+        using Ref = conditional_t<Const, const Value &, Value &>;
+        using Ptr = conditional_t<Const, const Value *, Value *>;
+
+    public:
+        using iterator_category = forward_iterator_tag;
+        using value_type        = Value;
+        using difference_type   = ptrdiff_t;
+        using reference         = Ref;
+        using pointer           = Ptr;
+
+        LocalIter() noexcept : __n(nullptr) {}
+        explicit LocalIter(NodeBase *n) noexcept : __n(n) {}
+        template <bool C2>
+            requires(Const && !C2)
+        LocalIter(const LocalIter<C2> &o) noexcept : __n(o.__n)
+        {
+        }
+
+        Ref operator*() const { return static_cast<NodeT *>(__n)->value; }
+        Ptr operator->() const
+        {
+            return __builtin_addressof(static_cast<NodeT *>(__n)->value);
+        }
+        LocalIter &operator++() noexcept
+        {
+            __n = __n->next;
+            return *this;
+        }
+        LocalIter operator++(int) noexcept
+        {
+            LocalIter t = *this;
+            __n         = __n->next;
+            return t;
+        }
+        bool operator==(const LocalIter &rhs) const noexcept
+        {
+            return __n == rhs.__n;
+        }
+
+        NodeBase *__n;
+    };
+    using local_iterator       = LocalIter<false>;
+    using const_local_iterator = LocalIter<true>;
+
+    local_iterator begin(size_type idx) noexcept
+    {
+        return local_iterator(__buckets ? __buckets[idx] : nullptr);
+    }
+    local_iterator       end(size_type) noexcept { return local_iterator(nullptr); }
+    const_local_iterator begin(size_type idx) const noexcept
+    {
+        return const_local_iterator(__buckets ? __buckets[idx] : nullptr);
+    }
+    const_local_iterator end(size_type) const noexcept
+    {
+        return const_local_iterator(nullptr);
+    }
+    const_local_iterator cbegin(size_type idx) const noexcept
+    {
+        return begin(idx);
+    }
+    const_local_iterator cend(size_type) const noexcept
+    {
+        return const_local_iterator(nullptr);
+    }
+
     // ── lifecycle ───────────────────────────────────────────────────────
 
     Table() : Table(0, Hash(), KeyEq(), Alloc()) {}
