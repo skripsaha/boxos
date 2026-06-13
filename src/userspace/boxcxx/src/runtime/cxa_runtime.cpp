@@ -109,6 +109,13 @@ const nothrow_t nothrow{};
 
 } // namespace std
 
+// Itanium ABI: emitted by the compiler at array-new sites whose element
+// count could overflow the allocation size (e.g. make_unique<T[]>(n)).
+extern "C" [[noreturn]] void __cxa_throw_bad_array_new_length()
+{
+    throw std::bad_array_new_length{};
+}
+
 // ── __cxa_atexit / __cxa_finalize ───────────────────────────────────────
 
 // Normally supplied by crtbegin.o; BoxOS binaries are fully static single

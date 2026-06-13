@@ -24,6 +24,7 @@
 #include <iterator>
 #include <list>
 #include <map>
+#include <memory>
 #include <optional>
 #include <ranges>
 #include <set>
@@ -1579,6 +1580,142 @@ void Phase8a()
            "(monadic/visit/valueless/trivial-copy)\n");
 }
 
+// ── phase8b fixtures: <memory> smart pointers ──────────────────────────
+
+int g_sp_dtor = 0;
+struct Res {
+    int v;
+    explicit Res(int x) : v(x) {}
+    ~Res() { ++g_sp_dtor; }
+};
+struct Node : std::enable_shared_from_this<Node> {
+    int id;
+    explicit Node(int i) : id(i) {}
+    std::shared_ptr<Node> me() { return shared_from_this(); }
+};
+struct SB {
+    virtual ~SB() {}
+    int b = 10;
+};
+struct SD : SB {
+    int d = 20;
+};
+struct ResDel {
+    int *n;
+    void operator()(Res *p) const
+    {
+        ++*n;
+        delete p;
+    }
+};
+
+void Phase8b()
+{
+    using std::make_shared;
+    using std::make_unique;
+    using std::shared_ptr;
+    using std::unique_ptr;
+    using std::weak_ptr;
+
+    static_assert(sizeof(unique_ptr<int>) == sizeof(int *),
+                  "unique_ptr pointer-sized");
+    static_assert(std::contiguous_iterator<std::vector<int>::iterator>,
+                  "vector iterator contiguous via to_address");
+
+    // unique_ptr
+    auto u = make_unique<int>(21);
+    Check(u && *u == 21, "phase8b unique_ptr make");
+    int *raw = u.release();
+    Check(!u && *raw == 21, "phase8b unique_ptr release");
+    delete raw;
+    auto ua = make_unique<int[]>(3);
+    ua[0] = 1;
+    ua[1] = 2;
+    ua[2] = 3;
+    Check(ua[2] == 3, "phase8b unique_ptr array");
+
+    g_sp_dtor = 0;
+    {
+        unique_ptr<Res> ur = make_unique<Res>(5);
+        Check(ur->v == 5, "phase8b unique_ptr custom type");
+    }
+    Check(g_sp_dtor == 1, "phase8b unique_ptr dtor");
+
+    // shared_ptr lifecycle + weak_ptr
+    g_sp_dtor = 0;
+    {
+        shared_ptr<Res> s1 = make_shared<Res>(9);
+        Check(s1.use_count() == 1, "phase8b shared use_count 1");
+        shared_ptr<Res> s2 = s1;
+        Check(s1.use_count() == 2 && s2->v == 9, "phase8b shared use_count 2");
+        weak_ptr<Res> w = s1;
+        Check(!w.expired() && w.use_count() == 2, "phase8b weak observes");
+        {
+            shared_ptr<Res> s3 = w.lock();
+            Check(s3 && s1.use_count() == 3, "phase8b weak lock");
+        }
+        Check(s1.use_count() == 2, "phase8b lock released");
+        s2.reset();
+        Check(s1.use_count() == 1 && g_sp_dtor == 0, "phase8b reset one");
+    }
+    Check(g_sp_dtor == 1, "phase8b shared all gone → dtor");
+
+    // weak after expiry
+    weak_ptr<Res> wexp;
+    {
+        auto t = make_shared<Res>(1);
+        wexp    = t;
+    }
+    Check(wexp.expired() && !wexp.lock(), "phase8b weak expired");
+
+    // enable_shared_from_this
+    {
+        auto n  = make_shared<Node>(42);
+        auto n2 = n->me();
+        Check(n2.get() == n.get() && n.use_count() == 2,
+              "phase8b shared_from_this");
+    }
+
+    // pointer casts
+    shared_ptr<SB> base = make_shared<SD>();
+    auto           der  = std::dynamic_pointer_cast<SD>(base);
+    Check(der && der->d == 20, "phase8b dynamic_pointer_cast");
+    auto base2 = std::static_pointer_cast<SB>(der);
+    Check(base2->b == 10 && base.use_count() == 3,
+          "phase8b static_pointer_cast shares");
+
+    // custom deleter + get_deleter
+    int dcount = 0;
+    g_sp_dtor  = 0;
+    {
+        shared_ptr<Res> cs(new Res(3), ResDel{&dcount});
+        auto           *gd = std::get_deleter<ResDel>(cs);
+        Check(gd != nullptr && gd->n == &dcount, "phase8b get_deleter");
+    }
+    Check(dcount == 1 && g_sp_dtor == 1, "phase8b custom deleter ran");
+
+    // unique → shared
+    shared_ptr<int> fromU = make_unique<int>(15);
+    Check(*fromU == 15, "phase8b unique→shared");
+
+    // aliasing ctor
+    auto            pr = make_shared<std::pair<int, int>>(7, 8);
+    shared_ptr<int> second(pr, &pr->second);
+    Check(*second == 8 && pr.use_count() == 2, "phase8b aliasing ctor");
+
+    // atomic<shared_ptr>
+    std::atomic<shared_ptr<int>> asp{make_shared<int>(100)};
+    Check(*asp.load() == 100, "phase8b atomic<shared_ptr> load");
+    asp.store(make_shared<int>(200));
+    Check(*asp.load() == 200, "phase8b atomic<shared_ptr> store");
+    auto old = asp.exchange(make_shared<int>(300));
+    Check(*old == 200 && *asp.load() == 300,
+          "phase8b atomic<shared_ptr> exchange");
+
+    printf("[CXX] PASS phase8b: memory "
+           "(unique/shared/weak/enable_shared/casts/atomic + to_address)\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -1598,6 +1735,7 @@ int main()
     Phase7c();
     Phase7d();
     Phase8a();
+    Phase8b();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

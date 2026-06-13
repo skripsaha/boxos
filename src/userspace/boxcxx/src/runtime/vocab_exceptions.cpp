@@ -12,6 +12,7 @@
  */
 
 #include <expected>
+#include <memory>
 #include <optional>
 #include <variant>
 
@@ -38,5 +39,9 @@ const char *bad_expected_access<void>::what() const noexcept
 {
     return "bad access to std::expected without expected value";
 }
+
+bad_weak_ptr::~bad_weak_ptr() = default;
+const char *bad_weak_ptr::what() const noexcept { return "bad_weak_ptr"; }
+void __throw_bad_weak_ptr() { throw bad_weak_ptr{}; }
 
 } // namespace std
