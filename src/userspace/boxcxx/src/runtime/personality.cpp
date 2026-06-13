@@ -238,7 +238,14 @@ __gxx_personality_v0(int version, _Unwind_Action actions,
 
     CxaExceptionView *view = native ? ViewOf(exc) : nullptr;
     const std::type_info *throw_type = view ? view->exceptionType : nullptr;
-    void *thrown_object = view ? static_cast<void *>(view + 1) : nullptr;
+    // A dependent exception (low class byte 0x01, used by
+    // rethrow_exception) carries no payload — its object is the primary
+    // exception, stashed in the referenceCount slot.
+    bool dependent      = native && (exception_class & 0xFFull) == 0x01;
+    void *thrown_object = !view ? nullptr
+                          : dependent
+                              ? reinterpret_cast<void *>(view->referenceCount)
+                              : static_cast<void *>(view + 1);
 
     LsdaScan scan;
     if (!ScanLsda(lsda, _Unwind_GetRegionStart(ctx), _Unwind_GetIP(ctx),

@@ -674,15 +674,93 @@ public:
     }
 };
 
-template <class T>
-inline constexpr bool IsUnboundedArray = false;
-template <class T>
-inline constexpr bool IsUnboundedArray<T[]> = true;
-
 // Tag for the internal "adopt an already-+1'd control block" constructor
 // (used by make_shared/allocate_shared). Lives here so those factories can
 // name it; users cannot reach __shared.
 struct AdoptTag {};
+
+// Array control block for make_shared<T[]> / allocate_shared<T[]>: header +
+// n elements in one allocation, aligned for the element type. Allocation
+// goes through the allocator rebound to an over-aligned Chunk so both
+// make_shared (allocator<Elem>) and allocate_shared (custom) get the right
+// alignment.
+template <class T, class Alloc>
+class CountedArray final : public CountedBase {
+public:
+    using Elem = remove_extent_t<T>;
+    static constexpr size_t kAlign =
+        alignof(CountedArray) > alignof(Elem) ? alignof(CountedArray)
+                                              : alignof(Elem);
+    struct alignas(kAlign) Chunk {
+        unsigned char b[kAlign];
+    };
+
+private:
+    [[no_unique_address]] Alloc alloc_;
+    size_t                      n_;
+
+    static constexpr size_t HdrSize()
+    {
+        return (sizeof(CountedArray) + alignof(Elem) - 1) & ~(alignof(Elem) - 1);
+    }
+
+public:
+    CountedArray(const Alloc &a, size_t n) noexcept : alloc_(a), n_(n) {}
+    Elem *Get() noexcept
+    {
+        return reinterpret_cast<Elem *>(reinterpret_cast<char *>(this) +
+                                        HdrSize());
+    }
+    static size_t Bytes(size_t n) { return HdrSize() + n * sizeof(Elem); }
+    static size_t Chunks(size_t bytes)
+    {
+        return (bytes + sizeof(Chunk) - 1) / sizeof(Chunk);
+    }
+    void Dispose() noexcept override
+    {
+        Elem *e = Get();
+        for (size_t i = n_; i-- > 0;) e[i].~Elem();
+    }
+    void DestroyBlock() noexcept override
+    {
+        using CA =
+            typename allocator_traits<Alloc>::template rebind_alloc<Chunk>;
+        CA     ca(alloc_);
+        size_t nch = Chunks(Bytes(n_));
+        this->~CountedArray();
+        allocator_traits<CA>::deallocate(ca, reinterpret_cast<Chunk *>(this),
+                                         nch);
+    }
+};
+
+template <class T, class Alloc, class Init>
+shared_ptr<T> MakeSharedArray(const Alloc &alloc, size_t n, Init init)
+{
+    using Block = CountedArray<T, Alloc>;
+    using Elem  = typename Block::Elem;
+    using CA = typename allocator_traits<Alloc>::template rebind_alloc<
+        typename Block::Chunk>;
+    CA     ca(alloc);
+    size_t nch = Block::Chunks(Block::Bytes(n));
+    auto  *raw = allocator_traits<CA>::allocate(ca, nch);
+    Block *b   = ::new (static_cast<void *>(raw)) Block(alloc, n);
+    Elem  *e   = b->Get();
+    size_t i   = 0;
+    try {
+        for (; i < n; ++i) init(e + i);
+    } catch (...) {
+        for (size_t j = i; j-- > 0;) e[j].~Elem();
+        b->~Block();
+        allocator_traits<CA>::deallocate(ca, raw, nch);
+        throw;
+    }
+    return shared_ptr<T>(AdoptTag{}, e, b);
+}
+
+template <class T>
+inline constexpr bool IsUnboundedArray = false;
+template <class T>
+inline constexpr bool IsUnboundedArray<T[]> = true;
 
 } // namespace __shared
 
@@ -1129,6 +1207,74 @@ shared_ptr<T> allocate_shared(const Alloc &a, A &&...args)
     shared_ptr<T> sp(__shared::AdoptTag{}, b->Get(), b);
     shared_ptr<T>::EnableShared(b->Get(), b->Get(), b);
     return sp;
+}
+
+// make_shared / allocate_shared — array forms -----------------------------
+
+template <class T>
+    requires __shared::IsUnboundedArray<T>
+shared_ptr<T> make_shared(size_t n)
+{
+    using E = remove_extent_t<T>;
+    return __shared::MakeSharedArray<T>(allocator<E>(), n,
+                                        [](E *p) { construct_at(p); });
+}
+template <class T>
+    requires __shared::IsUnboundedArray<T>
+shared_ptr<T> make_shared(size_t n, const remove_extent_t<T> &u)
+{
+    using E = remove_extent_t<T>;
+    return __shared::MakeSharedArray<T>(allocator<E>(), n,
+                                        [&](E *p) { construct_at(p, u); });
+}
+template <class T>
+    requires(is_array_v<T> && extent_v<T> != 0)
+shared_ptr<T> make_shared()
+{
+    using E = remove_extent_t<T>;
+    return __shared::MakeSharedArray<T>(allocator<E>(), extent_v<T>,
+                                        [](E *p) { construct_at(p); });
+}
+template <class T>
+    requires(is_array_v<T> && extent_v<T> != 0)
+shared_ptr<T> make_shared(const remove_extent_t<T> &u)
+{
+    using E = remove_extent_t<T>;
+    return __shared::MakeSharedArray<T>(allocator<E>(), extent_v<T>,
+                                        [&](E *p) { construct_at(p, u); });
+}
+template <class T>
+    requires __shared::IsUnboundedArray<T>
+shared_ptr<T> make_shared_for_overwrite(size_t n)
+{
+    using E = remove_extent_t<T>;
+    return __shared::MakeSharedArray<T>(
+        allocator<E>(), n, [](E *p) { ::new (static_cast<void *>(p)) E; });
+}
+template <class T>
+    requires(is_array_v<T> && extent_v<T> != 0)
+shared_ptr<T> make_shared_for_overwrite()
+{
+    using E = remove_extent_t<T>;
+    return __shared::MakeSharedArray<T>(
+        allocator<E>(), extent_v<T>,
+        [](E *p) { ::new (static_cast<void *>(p)) E; });
+}
+template <class T, class Alloc>
+    requires __shared::IsUnboundedArray<T>
+shared_ptr<T> allocate_shared(const Alloc &a, size_t n)
+{
+    using E = remove_extent_t<T>;
+    return __shared::MakeSharedArray<T>(a, n, [](E *p) { construct_at(p); });
+}
+template <class T, class Alloc>
+    requires __shared::IsUnboundedArray<T>
+shared_ptr<T> allocate_shared(const Alloc &a, size_t n,
+                              const remove_extent_t<T> &u)
+{
+    using E = remove_extent_t<T>;
+    return __shared::MakeSharedArray<T>(a, n,
+                                        [&](E *p) { construct_at(p, u); });
 }
 
 // ── pointer casts ────────────────────────────────────────────────────────
