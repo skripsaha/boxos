@@ -25,6 +25,7 @@
 #include <list>
 #include <map>
 #include <memory>
+#include <memory_resource>
 #include <optional>
 #include <ranges>
 #include <set>
@@ -45,6 +46,8 @@
 #include <typeinfo>
 #include <unwind.h>
 #include <vector>
+
+#include "box/cxx/bay_memory_resource.h"
 
 namespace {
 
@@ -1716,6 +1719,67 @@ void Phase8b()
            "(unique/shared/weak/enable_shared/casts/atomic + to_address)\n");
 }
 
+// ── phase8c fixtures: std::pmr + box::bay_memory_resource ───────────────
+
+void Phase8c()
+{
+    namespace pmr = std::pmr;
+
+    // monotonic_buffer_resource over a stack buffer
+    alignas(std::max_align_t) char buf[2048];
+    pmr::monotonic_buffer_resource mono{buf, sizeof(buf)};
+    pmr::vector<int>               v{&mono};
+    for (int i = 0; i < 60; ++i) v.push_back(i);
+    int s = 0;
+    for (int x : v) s += x;
+    Check(s == 60 * 59 / 2, "phase8c monotonic + pmr::vector");
+
+    // pool resource + nested pmr (vector of pmr::string) → allocator
+    // propagation must reach the inner string
+    pmr::unsynchronized_pool_resource pool{};
+    pmr::vector<pmr::string>          vs{&pool};
+    vs.emplace_back("hello");
+    vs.emplace_back("a-much-longer-string-that-heap-allocates");
+    Check(vs.size() == 2 && vs[0] == "hello", "phase8c pool + vector<string>");
+    Check(vs[1].get_allocator().resource() == &pool,
+          "phase8c uses-allocator propagation into nested string");
+
+    // null resource throws
+    bool caught = false;
+    try {
+        (void)pmr::null_memory_resource()->allocate(16);
+    } catch (const std::bad_alloc &) {
+        caught = true;
+    }
+    Check(caught, "phase8c null_memory_resource throws");
+
+    // default resource get/set round-trip
+    auto *before = pmr::get_default_resource();
+    auto *prev   = pmr::set_default_resource(&mono);
+    Check(pmr::get_default_resource() == &mono && prev == before,
+          "phase8c set_default_resource");
+    pmr::set_default_resource(before);
+    Check(pmr::get_default_resource() == before, "phase8c restore default");
+
+    // synchronized pool
+    pmr::synchronized_pool_resource spool{};
+    pmr::vector<int>                sv{&spool};
+    for (int i = 0; i < 200; ++i) sv.push_back(i);
+    Check(sv.size() == 200 && sv[199] == 199, "phase8c synchronized_pool");
+
+    // box::bay_memory_resource — pmr container built into a shared Bay
+    box::bay_memory_resource bay{"cxx:phase8c:bay", 1u << 20, BAY_CREATE};
+    pmr::vector<int>         bv{&bay};
+    for (int i = 0; i < 100; ++i) bv.push_back(i + 1);
+    int bs = 0;
+    for (int x : bv) bs += x;
+    Check(bs == 100 * 101 / 2 && bay.used() > 0,
+          "phase8c box::bay_memory_resource");
+
+    printf("[CXX] PASS phase8c: pmr "
+           "(memory_resource/polymorphic_allocator/monotonic/pool + bay)\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -1736,6 +1800,7 @@ int main()
     Phase7d();
     Phase8a();
     Phase8b();
+    Phase8c();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

@@ -37,6 +37,7 @@ SRCS = src/runtime/cxa_runtime.cpp \
        src/runtime/stdexcept.cpp \
        src/runtime/system_error.cpp \
        src/runtime/vocab_exceptions.cpp \
+       src/runtime/memory_resource.cpp \
        src/tls/tls_init.cpp \
        src/unwind/dwarf_cfi.cpp \
        src/unwind/unwind_level1.cpp
