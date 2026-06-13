@@ -10,6 +10,7 @@
 #define BOXCXX_ITERATOR
 
 #include <__bits/iterator_core>
+#include <__bits/pointer>
 #include <concepts>
 #include <cstddef>
 #include <type_traits>
@@ -149,13 +150,34 @@ concept random_access_iterator =
         { j[n] } -> same_as<iter_reference_t<I>>;
     };
 
+namespace __iter_impl {
+// ITER_CONCEPT(I): I::iterator_concept, else iterator_traits<I>::
+// iterator_concept, else iterator_traits<I>::iterator_category.
+template <class I>
+constexpr auto IterConceptHelper()
+{
+    if constexpr (requires { typename I::iterator_concept; })
+        return type_identity<typename I::iterator_concept>{};
+    else if constexpr (requires {
+                           typename iterator_traits<I>::iterator_concept;
+                       })
+        return type_identity<typename iterator_traits<I>::iterator_concept>{};
+    else
+        return type_identity<typename iterator_traits<I>::iterator_category>{};
+}
+template <class I>
+using IterConcept = typename decltype(IterConceptHelper<I>())::type;
+} // namespace __iter_impl
+
 template <typename I>
 concept contiguous_iterator =
-    random_access_iterator<I> && is_pointer_v<I>; // boxcxx: pointers ARE
-                                                  // the contiguous set
-                                                  // until to_address /
-                                                  // pointer_traits land
-                                                  // (Ф8)
+    random_access_iterator<I> &&
+    derived_from<__iter_impl::IterConcept<I>, contiguous_iterator_tag> &&
+    is_lvalue_reference_v<iter_reference_t<I>> &&
+    same_as<iter_value_t<I>, remove_cvref_t<iter_reference_t<I>>> &&
+    requires(const I &i) {
+        { std::to_address(i) } -> same_as<add_pointer_t<iter_reference_t<I>>>;
+    };
 
 // ── sentinels ───────────────────────────────────────────────────────────
 
