@@ -1,0 +1,656 @@
+// boxcxx — <memory_resource>  (C++23 std::pmr)
+//
+// memory_resource + polymorphic_allocator (with full uses-allocator
+// construction, incl. the pair piecewise rule so nested pmr containers
+// propagate their resource), the new_delete/null/default resources, the
+// monotonic buffer resource, and the (un)synchronized pool resources.
+// Global singletons + the default-resource pointer live in
+// src/runtime/memory_resource.cpp (constinit, like <system_error>).
+#ifndef BOXCXX_MEMORY_RESOURCE
+#define BOXCXX_MEMORY_RESOURCE
+
+#include <__bits/allocator_core>
+#include <cstddef>
+#include <new>
+#include <tuple>
+#include <type_traits>
+#include <utility>
+
+#include "box/sync.h" // umutex_t for synchronized_pool_resource
+
+namespace std::pmr {
+
+// ── memory_resource ──────────────────────────────────────────────────────
+
+class memory_resource {
+    static constexpr size_t kMaxAlign = alignof(max_align_t);
+
+public:
+    memory_resource()                        = default;
+    memory_resource(const memory_resource &) = default;
+    virtual ~memory_resource(); // key function — vocab runtime .cpp
+    memory_resource &operator=(const memory_resource &) = default;
+
+    [[nodiscard]] void *allocate(size_t bytes, size_t align = kMaxAlign)
+    {
+        return do_allocate(bytes, align);
+    }
+    void deallocate(void *p, size_t bytes, size_t align = kMaxAlign)
+    {
+        do_deallocate(p, bytes, align);
+    }
+    bool is_equal(const memory_resource &other) const noexcept
+    {
+        return do_is_equal(other);
+    }
+
+private:
+    virtual void *do_allocate(size_t bytes, size_t align)            = 0;
+    virtual void  do_deallocate(void *p, size_t bytes, size_t align) = 0;
+    virtual bool  do_is_equal(const memory_resource &other) const noexcept = 0;
+};
+
+inline bool operator==(const memory_resource &a,
+                       const memory_resource &b) noexcept
+{
+    return &a == &b || a.is_equal(b);
+}
+
+// ── global resources (defined in the runtime .cpp) ───────────────────────
+
+memory_resource *new_delete_resource() noexcept;
+memory_resource *null_memory_resource() noexcept;
+memory_resource *get_default_resource() noexcept;
+memory_resource *set_default_resource(memory_resource *r) noexcept;
+
+// ── polymorphic_allocator ────────────────────────────────────────────────
+
+template <class T = byte>
+class polymorphic_allocator {
+    memory_resource *res_;
+
+    // uses-allocator argument tuple for a member of type M ([allocator.uses]).
+    template <class M, class... A>
+    constexpr auto MemberArgs(A &&...a) const
+    {
+        if constexpr (!uses_allocator_v<M, polymorphic_allocator>)
+            return forward_as_tuple(static_cast<A &&>(a)...);
+        else if constexpr (is_constructible_v<M, allocator_arg_t,
+                                              polymorphic_allocator, A...>)
+            return tuple<allocator_arg_t, polymorphic_allocator, A &&...>(
+                allocator_arg, *this, static_cast<A &&>(a)...);
+        else
+            return forward_as_tuple(static_cast<A &&>(a)..., *this);
+    }
+
+public:
+    using value_type = T;
+
+    polymorphic_allocator() noexcept : res_(get_default_resource()) {}
+    polymorphic_allocator(memory_resource *r) noexcept : res_(r) {}
+    polymorphic_allocator(const polymorphic_allocator &) = default;
+    template <class U>
+    polymorphic_allocator(const polymorphic_allocator<U> &o) noexcept
+        : res_(o.resource())
+    {
+    }
+    polymorphic_allocator &operator=(const polymorphic_allocator &) = delete;
+
+    [[nodiscard]] T *allocate(size_t n)
+    {
+        if (n > size_t(-1) / sizeof(T)) throw bad_array_new_length{};
+        return static_cast<T *>(res_->allocate(n * sizeof(T), alignof(T)));
+    }
+    void deallocate(T *p, size_t n)
+    {
+        res_->deallocate(p, n * sizeof(T), alignof(T));
+    }
+
+    [[nodiscard]] void *allocate_bytes(size_t nbytes,
+                                       size_t align = alignof(max_align_t))
+    {
+        return res_->allocate(nbytes, align);
+    }
+    void deallocate_bytes(void *p, size_t nbytes,
+                          size_t align = alignof(max_align_t))
+    {
+        res_->deallocate(p, nbytes, align);
+    }
+    template <class U>
+    [[nodiscard]] U *allocate_object(size_t n = 1)
+    {
+        if (n > size_t(-1) / sizeof(U)) throw bad_array_new_length{};
+        return static_cast<U *>(allocate_bytes(n * sizeof(U), alignof(U)));
+    }
+    template <class U>
+    void deallocate_object(U *p, size_t n = 1)
+    {
+        deallocate_bytes(p, n * sizeof(U), alignof(U));
+    }
+    template <class U, class... A>
+    [[nodiscard]] U *new_object(A &&...args)
+    {
+        U *p = allocate_object<U>();
+        try {
+            construct(p, static_cast<A &&>(args)...);
+        } catch (...) {
+            deallocate_object(p);
+            throw;
+        }
+        return p;
+    }
+    template <class U>
+    void delete_object(U *p)
+    {
+        destroy(p);
+        deallocate_object(p);
+    }
+
+    // uses-allocator construction --------------------------------------
+    template <class U, class... A>
+    void construct(U *p, A &&...args)
+    {
+        if constexpr (!uses_allocator_v<U, polymorphic_allocator> &&
+                      is_constructible_v<U, A...>)
+            construct_at(p, static_cast<A &&>(args)...);
+        else if constexpr (uses_allocator_v<U, polymorphic_allocator> &&
+                           is_constructible_v<U, allocator_arg_t,
+                                              polymorphic_allocator, A...>)
+            construct_at(p, allocator_arg, *this, static_cast<A &&>(args)...);
+        else if constexpr (uses_allocator_v<U, polymorphic_allocator> &&
+                           is_constructible_v<U, A..., polymorphic_allocator>)
+            construct_at(p, static_cast<A &&>(args)..., *this);
+        else
+            construct_at(p, static_cast<A &&>(args)...); // best effort
+    }
+
+    // pair: propagate the allocator into each member ([allocator.uses]).
+    template <class T1, class T2, class Tup1, class Tup2>
+    void construct(pair<T1, T2> *p, piecewise_construct_t, Tup1 &&x, Tup2 &&y)
+    {
+        auto a1 = apply(
+            [this](auto &&...e) {
+                return MemberArgs<T1>(static_cast<decltype(e) &&>(e)...);
+            },
+            static_cast<Tup1 &&>(x));
+        auto a2 = apply(
+            [this](auto &&...e) {
+                return MemberArgs<T2>(static_cast<decltype(e) &&>(e)...);
+            },
+            static_cast<Tup2 &&>(y));
+        construct_at(p, piecewise_construct, static_cast<decltype(a1) &&>(a1),
+                     static_cast<decltype(a2) &&>(a2));
+    }
+    template <class T1, class T2>
+    void construct(pair<T1, T2> *p)
+    {
+        construct(p, piecewise_construct, tuple<>(), tuple<>());
+    }
+    template <class T1, class T2, class U, class V>
+    void construct(pair<T1, T2> *p, U &&u, V &&v)
+    {
+        construct(p, piecewise_construct,
+                  forward_as_tuple(static_cast<U &&>(u)),
+                  forward_as_tuple(static_cast<V &&>(v)));
+    }
+    template <class T1, class T2, class U, class V>
+    void construct(pair<T1, T2> *p, const pair<U, V> &pr)
+    {
+        construct(p, piecewise_construct, forward_as_tuple(pr.first),
+                  forward_as_tuple(pr.second));
+    }
+    template <class T1, class T2, class U, class V>
+    void construct(pair<T1, T2> *p, pair<U, V> &&pr)
+    {
+        construct(p, piecewise_construct,
+                  forward_as_tuple(static_cast<U &&>(pr.first)),
+                  forward_as_tuple(static_cast<V &&>(pr.second)));
+    }
+
+    template <class U>
+    void destroy(U *p)
+    {
+        p->~U();
+    }
+
+    polymorphic_allocator select_on_container_copy_construction() const
+    {
+        return polymorphic_allocator();
+    }
+    memory_resource *resource() const noexcept { return res_; }
+
+    template <class U>
+    friend bool operator==(const polymorphic_allocator &a,
+                           const polymorphic_allocator<U> &b) noexcept
+    {
+        return *a.resource() == *b.resource();
+    }
+    template <class U>
+    friend class polymorphic_allocator;
+};
+
+// ── monotonic_buffer_resource ────────────────────────────────────────────
+
+class monotonic_buffer_resource : public memory_resource {
+    struct Chunk {
+        Chunk *next;
+        size_t size;  // total bytes of this upstream allocation
+        size_t align; // alignment requested (for deallocate)
+    };
+    memory_resource *upstream_;
+    void            *cur_;       // bump pointer within the live region
+    size_t           avail_;    // bytes left in the live region
+    Chunk           *chunks_;   // upstream allocations to free on release
+    size_t           next_size_;// next geometric chunk size
+    void            *init_buf_; // user-provided initial buffer (never freed)
+    size_t           init_size_;
+
+    static size_t AlignUp(size_t n, size_t a)
+    {
+        return (n + a - 1) & ~(a - 1);
+    }
+
+public:
+    explicit monotonic_buffer_resource(memory_resource *up)
+        : upstream_(up), cur_(nullptr), avail_(0), chunks_(nullptr),
+          next_size_(128 * sizeof(void *)), init_buf_(nullptr), init_size_(0)
+    {
+    }
+    monotonic_buffer_resource(size_t initial_size, memory_resource *up)
+        : monotonic_buffer_resource(up)
+    {
+        if (initial_size) next_size_ = initial_size;
+    }
+    monotonic_buffer_resource(void *buffer, size_t buffer_size,
+                              memory_resource *up)
+        : upstream_(up), cur_(buffer), avail_(buffer_size), chunks_(nullptr),
+          next_size_(buffer_size ? buffer_size * 2 : 128 * sizeof(void *)),
+          init_buf_(buffer), init_size_(buffer_size)
+    {
+    }
+    monotonic_buffer_resource()
+        : monotonic_buffer_resource(new_delete_resource())
+    {
+    }
+    explicit monotonic_buffer_resource(size_t initial_size)
+        : monotonic_buffer_resource(initial_size, new_delete_resource())
+    {
+    }
+    monotonic_buffer_resource(void *buffer, size_t buffer_size)
+        : monotonic_buffer_resource(buffer, buffer_size, new_delete_resource())
+    {
+    }
+    monotonic_buffer_resource(const monotonic_buffer_resource &) = delete;
+    ~monotonic_buffer_resource() override { release(); }
+
+    monotonic_buffer_resource &
+    operator=(const monotonic_buffer_resource &) = delete;
+
+    void release()
+    {
+        Chunk *c = chunks_;
+        while (c) {
+            Chunk *next = c->next;
+            upstream_->deallocate(c, c->size, c->align);
+            c = next;
+        }
+        chunks_ = nullptr;
+        cur_    = init_buf_;
+        avail_  = init_size_;
+        next_size_ =
+            init_size_ ? init_size_ * 2 : 128 * sizeof(void *);
+    }
+    memory_resource *upstream_resource() const { return upstream_; }
+
+protected:
+    void *do_allocate(size_t bytes, size_t align) override
+    {
+        size_t pad = AlignUp(reinterpret_cast<size_t>(cur_), align) -
+                     reinterpret_cast<size_t>(cur_);
+        if (cur_ && bytes + pad <= avail_) {
+            void *p = static_cast<char *>(cur_) + pad;
+            cur_    = static_cast<char *>(p) + bytes;
+            avail_ -= bytes + pad;
+            return p;
+        }
+        // Grow: a fresh upstream chunk holding the header + this allocation,
+        // geometrically larger each time.
+        size_t want   = bytes + align + sizeof(Chunk);
+        size_t csize  = next_size_ > want ? next_size_ : want;
+        size_t calign = align > alignof(Chunk) ? align : alignof(Chunk);
+        void  *raw    = upstream_->allocate(csize, calign);
+        Chunk *c      = static_cast<Chunk *>(raw);
+        c->next       = chunks_;
+        c->size       = csize;
+        c->align      = calign;
+        chunks_       = c;
+        char  *region = static_cast<char *>(raw) + sizeof(Chunk);
+        size_t rsize  = csize - sizeof(Chunk);
+        size_t rpad   = AlignUp(reinterpret_cast<size_t>(region), align) -
+                      reinterpret_cast<size_t>(region);
+        void *p    = region + rpad;
+        cur_       = static_cast<char *>(p) + bytes;
+        avail_     = rsize - rpad - bytes;
+        next_size_ = csize * 2;
+        return p;
+    }
+    void do_deallocate(void *, size_t, size_t) override {} // monotonic: no-op
+    bool do_is_equal(const memory_resource &o) const noexcept override
+    {
+        return this == &o;
+    }
+};
+
+// ── pool resources ───────────────────────────────────────────────────────
+
+struct pool_options {
+    size_t max_blocks_per_chunk        = 0;
+    size_t largest_required_pool_block = 0;
+};
+
+namespace __pmr {
+
+// Shared engine for (un)synchronized_pool_resource. Geometric size classes
+// (16,32,...,kMaxBlock); each class a singly-linked free list carved from
+// upstream "slabs". Oversized requests go straight to upstream with a small
+// header so they can be returned.
+class PoolEngine {
+    static constexpr size_t kMinBlock = 16;
+    static constexpr size_t kClasses  = 8; // 16..2048
+    struct Node {
+        Node *next;
+    };
+    struct Slab {
+        Slab  *next;
+        size_t size;
+        size_t align;
+    };
+    struct OverHdr {
+        size_t size;
+        size_t align;
+    };
+
+    memory_resource *upstream_;
+    pool_options     opt_;
+    Node            *free_[kClasses] = {};
+    Slab            *slabs_          = nullptr;
+    size_t           blocks_per_     = 0;
+
+    static size_t ClassBytes(size_t i) { return kMinBlock << i; }
+    static size_t AlignUp(size_t n, size_t a) { return (n + a - 1) & ~(a - 1); }
+    size_t        MaxPoolBlock() const { return ClassBytes(kClasses - 1); }
+    int           ClassFor(size_t bytes) const
+    {
+        for (size_t i = 0; i < kClasses; ++i)
+            if (bytes <= ClassBytes(i)) return static_cast<int>(i);
+        return -1;
+    }
+
+public:
+    PoolEngine(memory_resource *up, const pool_options &o)
+        : upstream_(up), opt_(o)
+    {
+        blocks_per_ = opt_.max_blocks_per_chunk ? opt_.max_blocks_per_chunk
+                                                : 32;
+        if (blocks_per_ > 4096) blocks_per_ = 4096;
+    }
+    memory_resource *upstream() const { return upstream_; }
+
+    void *Allocate(size_t bytes, size_t align)
+    {
+        size_t need = bytes < align ? align : bytes;
+        int    cls  = (need <= MaxPoolBlock() && align <= need) ? ClassFor(need)
+                                                                : -1;
+        if (cls < 0) {
+            size_t total = AlignUp(sizeof(OverHdr), align) + bytes;
+            void  *raw   = upstream_->allocate(total, align);
+            auto  *h     = static_cast<OverHdr *>(raw);
+            h->size      = total;
+            h->align     = align;
+            return static_cast<char *>(raw) + AlignUp(sizeof(OverHdr), align);
+        }
+        if (!free_[cls]) Refill(cls);
+        Node *n    = free_[cls];
+        free_[cls] = n->next;
+        return n;
+    }
+    void Deallocate(void *p, size_t bytes, size_t align)
+    {
+        size_t need = bytes < align ? align : bytes;
+        int    cls  = (need <= MaxPoolBlock() && align <= need) ? ClassFor(need)
+                                                                : -1;
+        if (cls < 0) {
+            void *raw = static_cast<char *>(p) - AlignUp(sizeof(OverHdr), align);
+            auto *h   = static_cast<OverHdr *>(raw);
+            upstream_->deallocate(raw, h->size, h->align);
+            return;
+        }
+        Node *n    = static_cast<Node *>(p);
+        n->next    = free_[cls];
+        free_[cls] = n;
+    }
+    void Release()
+    {
+        Slab *s = slabs_;
+        while (s) {
+            Slab *next = s->next;
+            upstream_->deallocate(s, s->size, s->align);
+            s = next;
+        }
+        slabs_ = nullptr;
+        for (size_t i = 0; i < kClasses; ++i) free_[i] = nullptr;
+    }
+
+private:
+    void Refill(int cls)
+    {
+        size_t bsz   = ClassBytes(cls);
+        size_t align = bsz < alignof(max_align_t) ? bsz : alignof(max_align_t);
+        size_t hdr   = AlignUp(sizeof(Slab), align);
+        size_t total = hdr + bsz * blocks_per_;
+        void  *raw   = upstream_->allocate(total, align);
+        auto  *s     = static_cast<Slab *>(raw);
+        s->next      = slabs_;
+        s->size      = total;
+        s->align     = align;
+        slabs_       = s;
+        char *blk    = static_cast<char *>(raw) + hdr;
+        for (size_t i = 0; i < blocks_per_; ++i) {
+            Node *n    = reinterpret_cast<Node *>(blk + i * bsz);
+            n->next    = free_[cls];
+            free_[cls] = n;
+        }
+    }
+};
+
+} // namespace __pmr
+
+class unsynchronized_pool_resource : public memory_resource {
+    __pmr::PoolEngine eng_;
+
+public:
+    unsynchronized_pool_resource(const pool_options &opts,
+                                 memory_resource     *upstream)
+        : eng_(upstream, opts)
+    {
+    }
+    unsynchronized_pool_resource()
+        : unsynchronized_pool_resource({}, get_default_resource())
+    {
+    }
+    explicit unsynchronized_pool_resource(memory_resource *upstream)
+        : unsynchronized_pool_resource({}, upstream)
+    {
+    }
+    explicit unsynchronized_pool_resource(const pool_options &opts)
+        : unsynchronized_pool_resource(opts, get_default_resource())
+    {
+    }
+    unsynchronized_pool_resource(const unsynchronized_pool_resource &) = delete;
+    ~unsynchronized_pool_resource() override { eng_.Release(); }
+    unsynchronized_pool_resource &
+    operator=(const unsynchronized_pool_resource &) = delete;
+
+    void             release() { eng_.Release(); }
+    memory_resource *upstream_resource() const { return eng_.upstream(); }
+
+protected:
+    void *do_allocate(size_t bytes, size_t align) override
+    {
+        return eng_.Allocate(bytes, align);
+    }
+    void do_deallocate(void *p, size_t bytes, size_t align) override
+    {
+        eng_.Deallocate(p, bytes, align);
+    }
+    bool do_is_equal(const memory_resource &o) const noexcept override
+    {
+        return this == &o;
+    }
+};
+
+class synchronized_pool_resource : public memory_resource {
+    __pmr::PoolEngine eng_;
+    mutable umutex_t  mtx_;
+
+public:
+    synchronized_pool_resource(const pool_options &opts,
+                               memory_resource     *upstream)
+        : eng_(upstream, opts)
+    {
+        umutex_init(&mtx_);
+    }
+    synchronized_pool_resource()
+        : synchronized_pool_resource({}, get_default_resource())
+    {
+    }
+    explicit synchronized_pool_resource(memory_resource *upstream)
+        : synchronized_pool_resource({}, upstream)
+    {
+    }
+    explicit synchronized_pool_resource(const pool_options &opts)
+        : synchronized_pool_resource(opts, get_default_resource())
+    {
+    }
+    synchronized_pool_resource(const synchronized_pool_resource &) = delete;
+    ~synchronized_pool_resource() override { eng_.Release(); }
+    synchronized_pool_resource &
+    operator=(const synchronized_pool_resource &) = delete;
+
+    void release()
+    {
+        umutex_lock(&mtx_);
+        eng_.Release();
+        umutex_unlock(&mtx_);
+    }
+    memory_resource *upstream_resource() const { return eng_.upstream(); }
+
+protected:
+    void *do_allocate(size_t bytes, size_t align) override
+    {
+        umutex_lock(&mtx_);
+        void *p = eng_.Allocate(bytes, align);
+        umutex_unlock(&mtx_);
+        return p;
+    }
+    void do_deallocate(void *p, size_t bytes, size_t align) override
+    {
+        umutex_lock(&mtx_);
+        eng_.Deallocate(p, bytes, align);
+        umutex_unlock(&mtx_);
+    }
+    bool do_is_equal(const memory_resource &o) const noexcept override
+    {
+        return this == &o;
+    }
+};
+
+} // namespace std::pmr
+
+// ── pmr container aliases ([mem.res.aliases]) ────────────────────────────
+// Forward-declare the container templates so the aliases need no heavy
+// includes; the user pairs <memory_resource> with the container header.
+
+namespace std {
+
+template <class T>
+struct char_traits;
+template <class T, class A>
+class vector;
+template <class C, class Tr, class A>
+class basic_string;
+template <class C, class Tr>
+class basic_string_view;
+template <class T, class A>
+class deque;
+template <class T, class A>
+class list;
+template <class K, class C, class A>
+class set;
+template <class K, class C, class A>
+class multiset;
+template <class K, class V, class C, class A>
+class map;
+template <class K, class V, class C, class A>
+class multimap;
+template <class K, class H, class E, class A>
+class unordered_set;
+template <class K, class H, class E, class A>
+class unordered_multiset;
+template <class K, class V, class H, class E, class A>
+class unordered_map;
+template <class K, class V, class H, class E, class A>
+class unordered_multimap;
+template <class T>
+struct hash;
+template <class T>
+struct equal_to;
+template <class T>
+struct less;
+
+namespace pmr {
+
+template <class T>
+using vector = std::vector<T, polymorphic_allocator<T>>;
+template <class T>
+using deque = std::deque<T, polymorphic_allocator<T>>;
+template <class T>
+using list = std::list<T, polymorphic_allocator<T>>;
+
+using string =
+    std::basic_string<char, char_traits<char>, polymorphic_allocator<char>>;
+using u16string = std::basic_string<char16_t, char_traits<char16_t>,
+                                    polymorphic_allocator<char16_t>>;
+using u32string = std::basic_string<char32_t, char_traits<char32_t>,
+                                    polymorphic_allocator<char32_t>>;
+using wstring =
+    std::basic_string<wchar_t, char_traits<wchar_t>,
+                      polymorphic_allocator<wchar_t>>;
+
+template <class K, class C = less<K>>
+using set = std::set<K, C, polymorphic_allocator<K>>;
+template <class K, class C = less<K>>
+using multiset = std::multiset<K, C, polymorphic_allocator<K>>;
+template <class K, class V, class C = less<K>>
+using map = std::map<K, V, C, polymorphic_allocator<pair<const K, V>>>;
+template <class K, class V, class C = less<K>>
+using multimap = std::multimap<K, V, C, polymorphic_allocator<pair<const K, V>>>;
+
+template <class K, class H = hash<K>, class E = equal_to<K>>
+using unordered_set = std::unordered_set<K, H, E, polymorphic_allocator<K>>;
+template <class K, class H = hash<K>, class E = equal_to<K>>
+using unordered_multiset =
+    std::unordered_multiset<K, H, E, polymorphic_allocator<K>>;
+template <class K, class V, class H = hash<K>, class E = equal_to<K>>
+using unordered_map =
+    std::unordered_map<K, V, H, E, polymorphic_allocator<pair<const K, V>>>;
+template <class K, class V, class H = hash<K>, class E = equal_to<K>>
+using unordered_multimap =
+    std::unordered_multimap<K, V, H, E,
+                            polymorphic_allocator<pair<const K, V>>>;
+
+} // namespace pmr
+
+} // namespace std
+
+#endif // BOXCXX_MEMORY_RESOURCE
