@@ -295,6 +295,149 @@ constexpr move_iterator<It> make_move_iterator(It it)
     return move_iterator<It>(std::move(it));
 }
 
+// ── counted_iterator ([counted.iterator]) ───────────────────────────────
+// boxcxx: bounds a base iterator by a remaining count and compares equal
+// to default_sentinel once the count reaches zero — take_view leans on
+// this for bases that are neither sized nor random-access (filter_view,
+// the input-category transform_view). All five iterator_traits member
+// types are spelled out so iter_value_t / iter_difference_t resolve.
+
+template <typename I>
+class counted_iterator {
+public:
+    using iterator_type     = I;
+    using value_type        = iter_value_t<I>;
+    using difference_type   = iter_difference_t<I>;
+    using iterator_category = typename iterator_traits<I>::iterator_category;
+    using pointer           = void;
+    using reference         = iter_reference_t<I>;
+
+    constexpr counted_iterator() = default;
+    constexpr counted_iterator(I i, iter_difference_t<I> n)
+        : __cur(std::move(i)), __cnt(n)
+    {
+    }
+
+    constexpr const I &base() const &noexcept { return __cur; }
+    constexpr I base() && { return std::move(__cur); }
+    constexpr iter_difference_t<I> count() const noexcept { return __cnt; }
+
+    constexpr decltype(auto) operator*() { return *__cur; }
+    constexpr decltype(auto) operator*() const { return *__cur; }
+    constexpr decltype(auto) operator[](iter_difference_t<I> n) const
+        requires random_access_iterator<I>
+    {
+        return __cur[n];
+    }
+
+    constexpr counted_iterator &operator++()
+    {
+        ++__cur;
+        --__cnt;
+        return *this;
+    }
+    constexpr counted_iterator operator++(int)
+        requires forward_iterator<I>
+    {
+        counted_iterator tmp = *this;
+        ++*this;
+        return tmp;
+    }
+    constexpr counted_iterator &operator--()
+        requires bidirectional_iterator<I>
+    {
+        --__cur;
+        ++__cnt;
+        return *this;
+    }
+    constexpr counted_iterator operator--(int)
+        requires bidirectional_iterator<I>
+    {
+        counted_iterator tmp = *this;
+        --*this;
+        return tmp;
+    }
+
+    constexpr counted_iterator operator+(iter_difference_t<I> n) const
+        requires random_access_iterator<I>
+    {
+        return counted_iterator(__cur + n, __cnt - n);
+    }
+    friend constexpr counted_iterator operator+(iter_difference_t<I> n,
+                                                const counted_iterator &it)
+        requires random_access_iterator<I>
+    {
+        return it + n;
+    }
+    constexpr counted_iterator &operator+=(iter_difference_t<I> n)
+        requires random_access_iterator<I>
+    {
+        __cur += n;
+        __cnt -= n;
+        return *this;
+    }
+    constexpr counted_iterator operator-(iter_difference_t<I> n) const
+        requires random_access_iterator<I>
+    {
+        return counted_iterator(__cur - n, __cnt + n);
+    }
+    constexpr counted_iterator &operator-=(iter_difference_t<I> n)
+        requires random_access_iterator<I>
+    {
+        __cur -= n;
+        __cnt += n;
+        return *this;
+    }
+
+    template <typename I2>
+        requires common_with<I2, I>
+    friend constexpr iter_difference_t<I2>
+    operator-(const counted_iterator &a, const counted_iterator<I2> &b)
+    {
+        return b.count() - a.count();
+    }
+    friend constexpr iter_difference_t<I> operator-(const counted_iterator &a,
+                                                    default_sentinel_t)
+    {
+        return -a.__cnt;
+    }
+    friend constexpr iter_difference_t<I> operator-(default_sentinel_t,
+                                                    const counted_iterator &b)
+    {
+        return b.__cnt;
+    }
+
+    friend constexpr bool operator==(const counted_iterator &a,
+                                     default_sentinel_t) noexcept
+    {
+        return a.__cnt == 0;
+    }
+    template <typename I2>
+        requires common_with<I2, I>
+    friend constexpr bool operator==(const counted_iterator &a,
+                                     const counted_iterator<I2> &b)
+    {
+        return a.count() == b.count();
+    }
+    template <typename I2>
+        requires common_with<I2, I>
+    friend constexpr auto operator<=>(const counted_iterator &a,
+                                      const counted_iterator<I2> &b)
+    {
+        return b.count() <=> a.count(); // larger count = earlier position
+    }
+
+private:
+    I __cur                    = I();
+    iter_difference_t<I> __cnt = 0;
+};
+
+template <typename I>
+constexpr counted_iterator<I> make_counted_iterator(I i, iter_difference_t<I> n)
+{
+    return counted_iterator<I>(std::move(i), n);
+}
+
 // ── inserters ([insert.iterators]) ──────────────────────────────────────
 
 template <typename Container>
