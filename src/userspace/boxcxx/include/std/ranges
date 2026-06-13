@@ -270,4 +270,8 @@ inline constexpr bool enable_view<span<T, E>> =
 
 } // namespace std
 
+// The views layer (view_interface, subrange, ref/owning_view, the pipe
+// machinery, all/take/drop/filter/transform) builds on everything above.
+#include <__bits/ranges_views>
+
 #endif // BOXCXX_RANGES

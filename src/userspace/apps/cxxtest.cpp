@@ -1220,6 +1220,147 @@ void Phase7c()
     printf("[CXX] PASS phase7c: map/set/unordered/deque/list\n");
 }
 
+// ── phase7d fixtures: ranges views (Ф7B-3) ─────────────────────────────
+
+static_assert(std::ranges::view<std::ranges::ref_view<std::vector<int>>>);
+static_assert(
+    std::ranges::borrowed_range<std::ranges::ref_view<std::vector<int>>>);
+static_assert(std::is_same_v<std::views::all_t<std::vector<int> &>,
+                             std::ranges::ref_view<std::vector<int>>>);
+static_assert(std::is_same_v<std::views::all_t<std::vector<int>>,
+                             std::ranges::owning_view<std::vector<int>>>);
+static_assert(
+    std::ranges::range<std::ranges::take_view<std::ranges::ref_view<
+        std::vector<int>>>>);
+
+void Phase7d()
+{
+    auto sum = [](auto &&r) {
+        int s = 0;
+        for (auto &&x : r) s += static_cast<int>(x);
+        return s;
+    };
+    auto count = [](auto &&r) {
+        int n = 0;
+        for (auto &&x : r) {
+            (void)x;
+            ++n;
+        }
+        return n;
+    };
+
+    std::vector<int> v{1, 2, 3, 4, 5, 6}; // sum 21
+
+    // view_interface surface through ref_view
+    auto rf = std::ranges::ref_view(v);
+    Check(rf.size() == 6 && rf.front() == 1 && rf.back() == 6 && rf[2] == 3 &&
+              !rf.empty() && *rf.data() == 1,
+          "phase7d ref_view + view_interface");
+
+    // all: lvalue → ref_view, rvalue → owning_view (piped)
+    Check(sum(std::views::all(v)) == 21, "phase7d views::all lvalue");
+    Check(sum(std::vector<int>{10, 20} | std::views::all) == 30,
+          "phase7d owning_view over rvalue");
+
+    // subrange + structured bindings + next
+    std::ranges::subrange sr(v.begin(), v.end());
+    Check(sr.size() == 6 && !sr.empty(), "phase7d subrange size");
+    auto [sb, se] = sr;
+    Check(sb == v.begin() && se == v.end(), "phase7d subrange bindings");
+    auto sr2 = sr.next(2);
+    Check(sr2.size() == 4 && sum(sr2) == 18 && *sr2.begin() == 3,
+          "phase7d subrange next");
+
+    // take: clamp + size
+    auto tk = v | std::views::take(3);
+    Check(sum(tk) == 6 && count(tk) == 3 && tk.size() == 3, "phase7d take");
+    Check(count(v | std::views::take(100)) == 6, "phase7d take over-count");
+
+    // drop
+    auto dr = v | std::views::drop(4);
+    Check(sum(dr) == 11 && count(dr) == 2 && dr.size() == 2, "phase7d drop");
+    Check(count(v | std::views::drop(100)) == 0, "phase7d drop over-count");
+
+    // filter: forward sum + bidirectional decrement from the end
+    auto fl = v | std::views::filter([](int x) { return x % 2 == 0; });
+    Check(sum(fl) == 12 && count(fl) == 3, "phase7d filter even");
+    auto eit = fl.end();
+    --eit;
+    Check(*eit == 6, "phase7d filter bidirectional");
+
+    // transform
+    auto tr = v | std::views::transform([](int x) { return x * 2; });
+    Check(sum(tr) == 42 && count(tr) == 6, "phase7d transform");
+
+    // compositions (take over filter/transform exercises counted_iterator)
+    Check(sum(v | std::views::filter([](int x) { return x > 1; }) |
+              std::views::take(2)) == 5,
+          "phase7d filter|take");
+    Check(sum(v | std::views::transform([](int x) { return x + 1; }) |
+              std::views::take(3)) == 9,
+          "phase7d transform|take (counted)");
+    Check(sum(v | std::views::drop(1) |
+              std::views::filter([](int x) { return x < 5; })) == 9,
+          "phase7d drop|filter");
+    Check(sum(v | std::views::filter([](int x) { return x % 2 == 0; }) |
+              std::views::take(2)) == 6,
+          "phase7d filter|take (counted)");
+
+    // reusable composed closure applied to a range
+    auto pipe = std::views::transform([](int x) { return x * 10; }) |
+                std::views::take(2);
+    Check(sum(v | pipe) == 30, "phase7d reusable closure");
+
+    // span from a contiguous range — closes the ranges-ctor leftover
+    std::span<int> sp(v);
+    Check(sp.size() == 6 && sp[0] == 1 && sp.back() == 6,
+          "phase7d span from range");
+    std::span<const int> csp(v);
+    Check(csp.size() == 6 && csp[5] == 6, "phase7d span<const> from range");
+    std::vector<int> vm{7, 7, 7};
+    std::span<int> spm(vm);
+    spm[1] = 9;
+    Check(vm[1] == 9, "phase7d span writes through to range");
+
+    // ── non-random-access base (std::list): bounded drop, counted take,
+    //    non-common Sentinel paths in filter/transform, MovableBox assign ──
+    std::list<int> ll{1, 2, 3, 4, 5, 6};
+    Check(sum(ll | std::views::drop(2)) == 18 &&
+              count(ll | std::views::drop(2)) == 4,
+          "phase7d drop over list (bounded path)");
+    Check(count(ll | std::views::drop(100)) == 0, "phase7d drop list over-count");
+    Check(sum(ll | std::views::filter([](int x) { return x % 3 == 0; })) == 9,
+          "phase7d filter over list");
+    Check(sum(ll | std::views::transform([](int x) { return x + 10; })) == 81,
+          "phase7d transform over list");
+    Check(sum(ll | std::views::take(3)) == 6 &&
+              count(ll | std::views::take(3)) == 3,
+          "phase7d take over list (counted_iterator)");
+    // transform over a non-common base (take over list) → transform::Sentinel
+    Check(sum(ll | std::views::take(4) |
+              std::views::transform([](int x) { return x * 2; })) == 20,
+          "phase7d transform over non-common base (Sentinel)");
+    // filter over a non-common base (take over list) → filter::Sentinel
+    Check(sum(ll | std::views::take(5) |
+              std::views::filter([](int x) { return x % 2 == 1; })) == 9,
+          "phase7d filter over non-common base (Sentinel)");
+    std::ranges::subrange lsr(ll.begin(), ll.end());
+    Check(sum(lsr) == 21, "phase7d subrange over list");
+
+    // MovableBox move-assign: capturing lambda is non-assignable → the
+    // destroy+reconstruct path runs.
+    int thresh = 4;
+    auto pred = [thresh](int x) { return x > thresh; };
+    auto mvf  = ll | std::views::filter(pred);
+    auto mvf2 = ll | std::views::filter(pred);
+    mvf2 = std::move(mvf);
+    Check(sum(mvf2) == 11, "phase7d filter_view move-assign (MovableBox)");
+
+    printf("[CXX] PASS phase7d: ranges views "
+           "(view_interface/subrange/all/take/drop/filter/transform/pipe + "
+           "span-ctor)\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -1237,6 +1378,7 @@ int main()
     Phase7a();
     Phase7b();
     Phase7c();
+    Phase7d();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

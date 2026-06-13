@@ -10,6 +10,7 @@
 #include <__bits/throw_helpers>
 #include <array>
 #include <cstddef>
+#include <ranges>
 #include <type_traits>
 
 namespace std {
@@ -30,6 +31,16 @@ struct ExtentCarrier<dynamic_extent> {
     constexpr size_t Get() const noexcept { return __n; }
     size_t __n;
 };
+
+template <typename T>
+inline constexpr bool IsStdArray = false;
+template <typename T, size_t N>
+inline constexpr bool IsStdArray<array<T, N>> = true;
+
+template <typename T>
+inline constexpr bool IsSpan = false;
+template <typename T, size_t E>
+inline constexpr bool IsSpan<span<T, E>> = true;
 
 } // namespace __span_impl
 
@@ -94,6 +105,21 @@ public:
                  is_convertible_v<U (*)[], T (*)[]>)
     constexpr span(const span<U, E> &other) noexcept
         : __data(other.data()), __size(other.size())
+    {
+    }
+
+    // ranges-taking constructor ([span.cons]) — joins span with ranges-core
+    template <typename R>
+        requires(!__span_impl::IsSpan<remove_cvref_t<R>>) &&
+                (!__span_impl::IsStdArray<remove_cvref_t<R>>) &&
+                (!is_array_v<remove_cvref_t<R>>) &&
+                ranges::contiguous_range<R> && ranges::sized_range<R> &&
+                (ranges::borrowed_range<R> || is_const_v<T>) &&
+                is_convertible_v<
+                    remove_reference_t<ranges::range_reference_t<R>> (*)[],
+                    T (*)[]>
+    constexpr explicit(Extent != dynamic_extent) span(R &&r)
+        : __data(ranges::data(r)), __size(ranges::size(r))
     {
     }
 
