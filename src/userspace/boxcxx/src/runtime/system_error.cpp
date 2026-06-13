@@ -55,64 +55,10 @@ const char *GenericText(int code)
     case errc::operation_canceled:             return "operation canceled";
     case errc::owner_dead:                     return "owner dead";
     case errc::state_not_recoverable:          return "state not recoverable";
-    case errc::address_family_not_supported:   return "address family not supported by protocol";
-    case errc::address_in_use:                 return "address already in use";
-    case errc::address_not_available:          return "cannot assign requested address";
-    case errc::already_connected:              return "transport endpoint is already connected";
-    case errc::argument_list_too_long:         return "argument list too long";
-    case errc::argument_out_of_domain:         return "numerical argument out of domain";
-    case errc::bad_address:                    return "bad address";
-    case errc::bad_file_descriptor:            return "bad file descriptor";
-    case errc::bad_message:                    return "bad message";
-    case errc::broken_pipe:                    return "broken pipe";
-    case errc::connection_aborted:             return "software caused connection abort";
-    case errc::connection_already_in_progress: return "operation already in progress";
-    case errc::connection_refused:             return "connection refused";
-    case errc::connection_reset:               return "connection reset by peer";
-    case errc::cross_device_link:              return "invalid cross-device link";
-    case errc::destination_address_required:   return "destination address required";
-    case errc::directory_not_empty:            return "directory not empty";
-    case errc::executable_format_error:        return "exec format error";
-    case errc::file_too_large:                 return "file too large";
-    case errc::filename_too_long:              return "file name too long";
-    case errc::host_unreachable:               return "no route to host";
-    case errc::identifier_removed:             return "identifier removed";
-    case errc::illegal_byte_sequence:          return "invalid or incomplete multibyte or wide character";
-    case errc::inappropriate_io_control_operation: return "inappropriate ioctl for device";
-    case errc::interrupted:                    return "interrupted system call";
-    case errc::invalid_seek:                   return "illegal seek";
-    case errc::is_a_directory:                 return "is a directory";
-    case errc::message_size:                   return "message too long";
-    case errc::network_down:                   return "network is down";
-    case errc::network_reset:                  return "network dropped connection on reset";
-    case errc::network_unreachable:            return "network is unreachable";
-    case errc::no_buffer_space:                return "no buffer space available";
-    case errc::no_child_process:               return "no child processes";
-    case errc::no_link:                        return "link has been severed";
-    case errc::no_lock_available:              return "no locks available";
-    case errc::no_message:                     return "no message of desired type";
-    case errc::no_message_available:           return "no message available on the stream head read queue";
-    case errc::no_protocol_option:             return "protocol not available";
-    case errc::no_stream_resources:            return "out of streams resources";
-    case errc::no_such_device:                 return "no such device";
-    case errc::no_such_device_or_address:      return "no such device or address";
-    case errc::no_such_process:                return "no such process";
-    case errc::not_a_directory:                return "not a directory";
-    case errc::not_a_socket:                   return "socket operation on non-socket";
-    case errc::not_a_stream:                   return "device not a stream";
-    case errc::not_connected:                  return "transport endpoint is not connected";
-    case errc::operation_in_progress:          return "operation now in progress";
-    case errc::protocol_error:                 return "protocol error";
-    case errc::protocol_not_supported:         return "protocol not supported";
-    case errc::read_only_file_system:          return "read-only file system";
-    case errc::stream_timeout:                 return "timer expired";
-    case errc::text_file_busy:                 return "text file busy";
-    case errc::too_many_files_open:            return "too many open files";
-    case errc::too_many_files_open_in_system:  return "too many open files in system";
-    case errc::too_many_links:                 return "too many links";
-    case errc::too_many_symbolic_link_levels:  return "too many levels of symbolic links";
-    case errc::value_too_large:                return "value too large for defined data type";
-    case errc::wrong_protocol_type:            return "protocol wrong type for socket";
+    // BoxOS is not Unix: std::errc is a thin C++-conformance shim, the real
+    // error path is box/error.h. We name only the conditions BoxOS can
+    // actually surface; the Unix-only socket/network/STREAMS errc values
+    // fall to "generic error N" rather than cargo-culting Linux strings.
     default:                                   return nullptr;
     }
 }

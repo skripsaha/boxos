@@ -1906,9 +1906,9 @@ void Phase8e()
     Check(dq.size() == 100 && dq.front() == 900 && dq.back() == 999,
           "phase8e deque shrink_to_fit");
 
-    // system_error message table
-    auto ec = std::make_error_code(std::errc::broken_pipe);
-    Check(ec.message().size() > 0 && ec.message()[0] == 'b',
+    // system_error message (BoxOS-meaningful errc, not Unix socket/STREAMS)
+    auto ec = std::make_error_code(std::errc::invalid_argument);
+    Check(ec.message().size() > 0 && ec.message()[0] == 'i',
           "phase8e system_error message");
 
     printf("[CXX] PASS phase8e: "

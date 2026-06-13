@@ -351,8 +351,8 @@ struct pool_options {
 namespace __pmr {
 
 // Shared engine for (un)synchronized_pool_resource. Geometric size classes
-// (16,32,...,kMaxBlock); each class a singly-linked free list carved from
-// upstream "slabs". Oversized requests go straight to upstream with a small
+// (16,32,...,kMaxBlock); each class an available-cell list carved from
+// upstream cell-runs. Oversized requests go straight to upstream with a small
 // header so they can be returned.
 class PoolEngine {
     static constexpr size_t kMinBlock = 16;
@@ -360,8 +360,8 @@ class PoolEngine {
     struct Node {
         Node *next;
     };
-    struct Slab {
-        Slab  *next;
+    struct CellRun {
+        CellRun  *next;
         size_t size;
         size_t align;
     };
@@ -373,7 +373,7 @@ class PoolEngine {
     memory_resource *upstream_;
     pool_options     opt_;
     Node            *free_[kClasses] = {};
-    Slab            *slabs_          = nullptr;
+    CellRun            *runs_          = nullptr;
     size_t           blocks_per_     = 0;
 
     static size_t ClassBytes(size_t i) { return kMinBlock << i; }
@@ -431,13 +431,13 @@ public:
     }
     void Release()
     {
-        Slab *s = slabs_;
+        CellRun *s = runs_;
         while (s) {
-            Slab *next = s->next;
+            CellRun *next = s->next;
             upstream_->deallocate(s, s->size, s->align);
             s = next;
         }
-        slabs_ = nullptr;
+        runs_ = nullptr;
         for (size_t i = 0; i < kClasses; ++i) free_[i] = nullptr;
     }
 
@@ -446,14 +446,14 @@ private:
     {
         size_t bsz   = ClassBytes(cls);
         size_t align = bsz < alignof(max_align_t) ? bsz : alignof(max_align_t);
-        size_t hdr   = AlignUp(sizeof(Slab), align);
+        size_t hdr   = AlignUp(sizeof(CellRun), align);
         size_t total = hdr + bsz * blocks_per_;
         void  *raw   = upstream_->allocate(total, align);
-        auto  *s     = static_cast<Slab *>(raw);
-        s->next      = slabs_;
+        auto  *s     = static_cast<CellRun *>(raw);
+        s->next      = runs_;
         s->size      = total;
         s->align     = align;
-        slabs_       = s;
+        runs_       = s;
         char *blk    = static_cast<char *>(raw) + hdr;
         for (size_t i = 0; i < blocks_per_; ++i) {
             Node *n    = reinterpret_cast<Node *>(blk + i * bsz);
