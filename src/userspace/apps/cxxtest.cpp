@@ -1780,6 +1780,87 @@ void Phase8c()
            "(memory_resource/polymorphic_allocator/monotonic/pool + bay)\n");
 }
 
+// ── phase8d fixtures: exception_ptr / nested + make_shared arrays ───────
+
+void Phase8d()
+{
+    // make_shared arrays
+    auto a = std::make_shared<int[]>(5);
+    for (int i = 0; i < 5; ++i) a[i] = i;
+    Check(a[4] == 4 && a.use_count() == 1, "phase8d make_shared<int[]>(n)");
+    auto b = std::make_shared<int[]>(3, 9);
+    Check(b[0] == 9 && b[2] == 9, "phase8d make_shared<int[]>(n,u)");
+    auto c = std::make_shared<long[2]>(7);
+    Check(c[0] == 7 && c[1] == 7, "phase8d make_shared<T[N]>(u)");
+
+    // exception_ptr capture + rethrow
+    std::exception_ptr ep;
+    try {
+        throw std::runtime_error("captured");
+    } catch (...) {
+        ep = std::current_exception();
+    }
+    Check(static_cast<bool>(ep), "phase8d current_exception captures");
+    int rt = 0;
+    try {
+        std::rethrow_exception(ep);
+    } catch (const std::runtime_error &e) {
+        rt = (e.what()[0] == 'c');
+    }
+    Check(rt == 1, "phase8d rethrow_exception");
+
+    // make_exception_ptr
+    auto ep2     = std::make_exception_ptr(std::logic_error("le"));
+    bool got_le  = false;
+    try {
+        std::rethrow_exception(ep2);
+    } catch (const std::logic_error &) {
+        got_le = true;
+    }
+    Check(got_le, "phase8d make_exception_ptr");
+
+    // dependent-exception path: rethrow an exception_ptr while it is NOT the
+    // active one (the common case) — exercises __cxa_rethrow_primary
+    int dep = 0;
+    {
+        std::exception_ptr inner;
+        try {
+            throw 99;
+        } catch (...) {
+            inner = std::current_exception();
+        }
+        try {
+            std::rethrow_exception(inner);
+        } catch (int x) {
+            dep = x;
+        }
+    }
+    Check(dep == 99, "phase8d dependent rethrow");
+
+    // nested_exception
+    int nest_outer = 0, nest_inner = 0;
+    try {
+        try {
+            throw std::runtime_error("inner-err");
+        } catch (...) {
+            std::throw_with_nested(std::logic_error("outer-err"));
+        }
+    } catch (const std::logic_error &e) {
+        nest_outer = 1;
+        try {
+            std::rethrow_if_nested(e);
+        } catch (const std::runtime_error &) {
+            nest_inner = 1;
+        }
+    }
+    Check(nest_outer && nest_inner,
+          "phase8d throw_with_nested / rethrow_if_nested");
+
+    Check(std::uncaught_exceptions() == 0, "phase8d uncaught counter rests");
+
+    printf("[CXX] PASS phase8d: exception_ptr/nested + make_shared arrays\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -1801,6 +1882,7 @@ int main()
     Phase8a();
     Phase8b();
     Phase8c();
+    Phase8d();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

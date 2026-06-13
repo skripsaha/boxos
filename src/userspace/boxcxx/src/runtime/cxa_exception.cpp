@@ -42,6 +42,8 @@ namespace __cxxabiv1 {
 
 extern "C" void *__cxa_allocate_exception(size_t thrown_size) noexcept;
 extern "C" void __cxa_free_exception(void *thrown_object) noexcept;
+extern "C" void __cxa_increment_exception_refcount(void *obj) noexcept;
+extern "C" void __cxa_decrement_exception_refcount(void *obj) noexcept;
 
 // Itanium __cxa_exception with the refcount extension; the thrown object
 // immediately follows this header (unwindHeader is last on purpose).
@@ -96,6 +98,24 @@ void ExceptionCleanup(_Unwind_Reason_Code, _Unwind_Exception *exc)
     if (header->exceptionDestructor)
         header->exceptionDestructor(header + 1);
     __cxa_free_exception(header + 1);
+}
+
+// A dependent exception (rethrow_exception) reuses the CxaException layout
+// but carries no payload: the referenceCount slot holds the primary object
+// pointer and the low class byte is 0x01.
+constexpr uint64_t kDependentClass = kExceptionClass | 0x01ull;
+
+bool IsDependent(CxaException *h)
+{
+    return (h->unwindHeader.exception_class & 0xFFull) == 0x01;
+}
+
+void DependentCleanup(_Unwind_Reason_Code, _Unwind_Exception *exc)
+{
+    CxaException *dep     = FromUnwind(exc);
+    void         *primary = reinterpret_cast<void *>(dep->referenceCount);
+    __cxa_decrement_exception_refcount(primary);
+    free(dep);
 }
 
 } // namespace
@@ -207,12 +227,71 @@ extern "C" void __cxa_end_catch()
 
     if (--header->handlerCount == 0) {
         g_caught_stack = header->nextException;
-        if (--header->referenceCount == 0) {
+        if (IsDependent(header)) {
+            void *primary = reinterpret_cast<void *>(header->referenceCount);
+            __cxa_decrement_exception_refcount(primary);
+            free(header);
+        } else if (--header->referenceCount == 0) {
             if (header->exceptionDestructor)
                 header->exceptionDestructor(header + 1);
             __cxa_free_exception(header + 1);
         }
     }
+}
+
+// ── exception_ptr ABI ([propagation] — refcounted primary + dependent) ──
+
+extern "C" void __cxa_increment_exception_refcount(void *obj) noexcept
+{
+    if (!obj) return;
+    CxaException *h = static_cast<CxaException *>(obj) - 1;
+    __atomic_add_fetch(&h->referenceCount, 1, __ATOMIC_ACQ_REL);
+}
+
+extern "C" void __cxa_decrement_exception_refcount(void *obj) noexcept
+{
+    if (!obj) return;
+    CxaException *h = static_cast<CxaException *>(obj) - 1;
+    if (__atomic_sub_fetch(&h->referenceCount, 1, __ATOMIC_ACQ_REL) == 0) {
+        if (h->exceptionDestructor) h->exceptionDestructor(obj);
+        __cxa_free_exception(obj);
+    }
+}
+
+extern "C" void *__cxa_current_primary_exception() noexcept
+{
+    CxaException *header = g_caught_stack;
+    if (!header) return nullptr;
+    void *obj = IsDependent(header)
+                    ? reinterpret_cast<void *>(header->referenceCount)
+                    : static_cast<void *>(header + 1);
+    __cxa_increment_exception_refcount(obj);
+    return obj;
+}
+
+extern "C" [[noreturn]] void __cxa_rethrow_primary_exception(void *obj)
+{
+    if (!obj) std::terminate(); // rethrowing a null exception_ptr
+
+    CxaException *primary = static_cast<CxaException *>(obj) - 1;
+    CxaException *dep =
+        static_cast<CxaException *>(_malloc_impl(sizeof(CxaException)));
+    if (!dep)
+        boxcxx::Panic("__cxa_rethrow_primary_exception: out of memory");
+
+    __builtin_memset(dep, 0, sizeof(CxaException));
+    dep->referenceCount       = reinterpret_cast<size_t>(obj); // primary obj
+    dep->exceptionType        = primary->exceptionType;
+    dep->exceptionDestructor  = primary->exceptionDestructor;
+    __cxa_increment_exception_refcount(obj); // the dependent owns a ref
+    dep->unwindHeader.exception_class   = kDependentClass;
+    dep->unwindHeader.exception_cleanup = DependentCleanup;
+
+    g_uncaught_count++;
+    _Unwind_Reason_Code code = _Unwind_RaiseException(&dep->unwindHeader);
+
+    printf("[boxcxx] rethrow_primary failed (unwind code %d)\n", int(code));
+    std::terminate();
 }
 
 extern "C" [[noreturn]] void __cxa_rethrow()
