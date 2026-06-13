@@ -1,0 +1,100 @@
+// boxcxx — <__bits/enable_special>
+// Conditional deletion of the copy/move special members, shared by
+// <optional>/<variant>/<expected>.
+//
+// Four orthogonal single-axis bases: a host type multiply-inherits one
+// per axis, each deleting ONLY its own special member when the contained
+// type(s) cannot support it. The bases are empty (so they fold away under
+// EBO) and govern deleted-ness alone — conditional *triviality* is the job
+// of each vocabulary type's own storage chain, which sits in a separate
+// base group. Separating the two concerns keeps both regular.
+//
+// The Tag parameter makes the instantiation unique to the host type, so a
+// type never accidentally shares an enable base with an unrelated one.
+#ifndef BOXCXX_BITS_ENABLE_SPECIAL
+#define BOXCXX_BITS_ENABLE_SPECIAL
+
+namespace std::__bits {
+
+template <bool Allow, class Tag>
+struct EnCopyCtor {
+    EnCopyCtor()                              = default;
+    EnCopyCtor(const EnCopyCtor &)            = default;
+    EnCopyCtor(EnCopyCtor &&)                 = default;
+    EnCopyCtor &operator=(const EnCopyCtor &) = default;
+    EnCopyCtor &operator=(EnCopyCtor &&)      = default;
+};
+template <class Tag>
+struct EnCopyCtor<false, Tag> {
+    EnCopyCtor()                              = default;
+    EnCopyCtor(const EnCopyCtor &)            = delete;
+    EnCopyCtor(EnCopyCtor &&)                 = default;
+    EnCopyCtor &operator=(const EnCopyCtor &) = default;
+    EnCopyCtor &operator=(EnCopyCtor &&)      = default;
+};
+
+template <bool Allow, class Tag>
+struct EnMoveCtor {
+    EnMoveCtor()                              = default;
+    EnMoveCtor(const EnMoveCtor &)            = default;
+    EnMoveCtor(EnMoveCtor &&)                 = default;
+    EnMoveCtor &operator=(const EnMoveCtor &) = default;
+    EnMoveCtor &operator=(EnMoveCtor &&)      = default;
+};
+template <class Tag>
+struct EnMoveCtor<false, Tag> {
+    EnMoveCtor()                              = default;
+    EnMoveCtor(const EnMoveCtor &)            = default;
+    EnMoveCtor(EnMoveCtor &&)                 = delete;
+    EnMoveCtor &operator=(const EnMoveCtor &) = default;
+    EnMoveCtor &operator=(EnMoveCtor &&)      = default;
+};
+
+template <bool Allow, class Tag>
+struct EnCopyAssign {
+    EnCopyAssign()                                = default;
+    EnCopyAssign(const EnCopyAssign &)            = default;
+    EnCopyAssign(EnCopyAssign &&)                 = default;
+    EnCopyAssign &operator=(const EnCopyAssign &) = default;
+    EnCopyAssign &operator=(EnCopyAssign &&)      = default;
+};
+template <class Tag>
+struct EnCopyAssign<false, Tag> {
+    EnCopyAssign()                                = default;
+    EnCopyAssign(const EnCopyAssign &)            = default;
+    EnCopyAssign(EnCopyAssign &&)                 = default;
+    EnCopyAssign &operator=(const EnCopyAssign &) = delete;
+    EnCopyAssign &operator=(EnCopyAssign &&)      = default;
+};
+
+template <bool Allow, class Tag>
+struct EnMoveAssign {
+    EnMoveAssign()                                = default;
+    EnMoveAssign(const EnMoveAssign &)            = default;
+    EnMoveAssign(EnMoveAssign &&)                 = default;
+    EnMoveAssign &operator=(const EnMoveAssign &) = default;
+    EnMoveAssign &operator=(EnMoveAssign &&)      = default;
+};
+template <class Tag>
+struct EnMoveAssign<false, Tag> {
+    EnMoveAssign()                                = default;
+    EnMoveAssign(const EnMoveAssign &)            = default;
+    EnMoveAssign(EnMoveAssign &&)                 = default;
+    EnMoveAssign &operator=(const EnMoveAssign &) = default;
+    EnMoveAssign &operator=(EnMoveAssign &&)      = delete;
+};
+
+// Convenience: the four enable bases collapsed by the standard's four
+// support predicates. A host type derives from EnableSpecial<...> via the
+// individual axes below; this alias just documents the canonical argument
+// order used at every call site.
+template <bool CopyCtor, bool MoveCtor, bool CopyAssign, bool MoveAssign,
+          class Tag>
+struct EnableSpecial : EnCopyCtor<CopyCtor, Tag>,
+                       EnMoveCtor<MoveCtor, Tag>,
+                       EnCopyAssign<CopyAssign, Tag>,
+                       EnMoveAssign<MoveAssign, Tag> {};
+
+} // namespace std::__bits
+
+#endif // BOXCXX_BITS_ENABLE_SPECIAL
