@@ -586,6 +586,70 @@ constexpr insert_iterator<Container> inserter(Container &c,
     return insert_iterator<Container>(c, it);
 }
 
+// ── ranges::iter_move / iter_swap ([iterator.cust]) ──────────────────────
+
+namespace ranges {
+
+namespace __iter_move {
+void iter_move(); // poison pill — force ADL-only lookup of the customisation
+template <class I>
+concept HasAdl = requires(I &&i) { iter_move(static_cast<I &&>(i)); };
+
+struct Fn {
+    template <class I>
+    constexpr decltype(auto) operator()(I &&i) const
+    {
+        if constexpr (HasAdl<I>)
+            return iter_move(static_cast<I &&>(i));
+        else if constexpr (is_lvalue_reference_v<decltype(*static_cast<I &&>(
+                               i))>)
+            return static_cast<remove_reference_t<decltype(*static_cast<I &&>(
+                i))> &&>(*static_cast<I &&>(i));
+        else
+            return *static_cast<I &&>(i);
+    }
+};
+} // namespace __iter_move
+inline namespace __cpo {
+inline constexpr __iter_move::Fn iter_move{};
+}
+
+namespace __iter_swap {
+template <class T, class U>
+void iter_swap(T, U) = delete; // poison
+template <class A, class B>
+concept HasAdl = requires(A &&a, B &&b) {
+    iter_swap(static_cast<A &&>(a), static_cast<B &&>(b));
+};
+template <class A, class B>
+concept Readswap = indirectly_readable<remove_reference_t<A>> &&
+                   indirectly_readable<remove_reference_t<B>> &&
+                   swappable_with<iter_reference_t<remove_reference_t<A>>,
+                                  iter_reference_t<remove_reference_t<B>>>;
+
+struct Fn {
+    template <class A, class B>
+    constexpr void operator()(A &&a, B &&b) const
+    {
+        if constexpr (HasAdl<A, B>)
+            iter_swap(static_cast<A &&>(a), static_cast<B &&>(b));
+        else if constexpr (Readswap<A, B>)
+            ranges::swap(*static_cast<A &&>(a), *static_cast<B &&>(b));
+        else {
+            iter_value_t<remove_reference_t<A>> tmp =
+                ranges::iter_move(a);
+            *a = ranges::iter_move(b);
+            *b = static_cast<decltype(tmp) &&>(tmp);
+        }
+    }
+};
+} // namespace __iter_swap
+inline namespace __cpo {
+inline constexpr __iter_swap::Fn iter_swap{};
+}
+
+} // namespace ranges
+
 } // namespace std
 
 #endif // BOXCXX_ITERATOR
