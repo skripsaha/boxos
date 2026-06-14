@@ -1,0 +1,68 @@
+// boxcxx — <print>  (Ф9B-2: std::print / std::println over the BoxOS console)
+//
+// std::print / println format through <format> and write the bytes to the
+// console via boxlib's print_bytes (src/print.c) — the same VGA / display-
+// daemon path printf uses, with its colour state and UTF-8->'?' filtering.
+//
+// Deviations from the standard synopsis (documented; BoxOS has no <cstdio>
+// FILE*):
+//   * the FILE*-taking overloads and vprint_unicode/nonunicode(FILE*, ...)
+//     are not provided — there is no FILE*. The console-targeting forms below
+//     drop the stream argument.
+//   * unicode and nonunicode output coincide: the console renders ASCII and
+//     substitutes '?' for multi-byte UTF-8 (kernel font limitation), so there
+//     is no separate well-formed-UTF-8 transcoding step.
+//   * the format string is still consteval-checked (basic_format_string).
+#ifndef BOXCXX_PRINT
+#define BOXCXX_PRINT
+
+#include <cstddef>
+#include <format>
+#include <string>
+#include <string_view>
+
+// boxlib console byte writer — routes to VGA or the display daemon, applies
+// the current colour and the console's UTF-8->'?' filtering. Declared here so
+// <print> need not pull the C header into namespace std.
+extern "C" void print_bytes(const char *data, size_t len);
+
+namespace std {
+
+namespace __print {
+inline void ToConsole(string_view s)
+{
+    if (!s.empty()) print_bytes(s.data(), s.size());
+}
+} // namespace __print
+
+inline void vprint_nonunicode(string_view fmt, format_args args)
+{
+    const string s = vformat(fmt, args);
+    __print::ToConsole(string_view(s.data(), s.size()));
+}
+inline void vprint_unicode(string_view fmt, format_args args)
+{
+    vprint_nonunicode(fmt, args);
+}
+
+template <class... Args>
+void print(format_string<Args...> fmt, Args &&...args)
+{
+    vprint_unicode(fmt.get(), make_format_args(args...));
+}
+
+template <class... Args>
+void println(format_string<Args...> fmt, Args &&...args)
+{
+    // Format with the trailing newline in one buffer so a line is never split
+    // across two console flushes (and so it interleaves cleanly with printf).
+    string s = vformat(fmt.get(), make_format_args(args...));
+    s.push_back('\n');
+    __print::ToConsole(string_view(s.data(), s.size()));
+}
+
+inline void println() { print_bytes("\n", 1); }
+
+} // namespace std
+
+#endif // BOXCXX_PRINT

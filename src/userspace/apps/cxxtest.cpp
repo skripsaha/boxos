@@ -29,6 +29,7 @@
 #include <memory>
 #include <memory_resource>
 #include <optional>
+#include <print>
 #include <ranges>
 #include <set>
 #include <unordered_map>
@@ -2460,6 +2461,24 @@ void Phase9b()
            "(spec/formatters/dynamic/format_to/vformat)\n");
 }
 
+// ── phase9c: <print> (Ф9B-2) ───────────────────────────────────────────
+// std::print / println format via <format> and write through boxlib
+// print_bytes — the real VGA / display-daemon console path. The output
+// can't be read back in-process, so the three "[P9C]" lines below are
+// verified to appear verbatim in the STRICT-matrix serial logs.
+void Phase9c()
+{
+    std::print("[P9C]a={}", 1);
+    std::println(" b={:#x}", 255);  // -> [P9C]a=1 b=0xff
+    std::println("[P9C]{:>5}|{:<5}|{:.2f}", "hi", "yo",
+                 3.14159);  // -> [P9C]   hi|yo   |3.14
+    std::print("[P9C]");
+    std::println("multi={} {} {}", true, 'Z', 42);  // -> [P9C]multi=true Z 42
+    std::println();                                 // bare newline
+
+    printf("[CXX] PASS phase9c: <print> std::print/println -> console\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -2489,6 +2508,7 @@ int main()
     Phase9a3();
     Phase9a4();
     Phase9b();
+    Phase9c();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

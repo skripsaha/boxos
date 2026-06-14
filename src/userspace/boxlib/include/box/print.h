@@ -19,6 +19,12 @@ uint32_t io_get_display_pid(void);
 
 void print(const char* str);
 void println(const char* str);
+
+/* Write exactly `len` bytes to the console (not NUL-terminated). Same
+ * VGA/IPC routing, colour state and UTF-8->'?' filtering as print(); the
+ * byte-count form std::print and other length-carrying writers need. */
+void print_bytes(const char* data, size_t len);
+
 void clear(void);
 void io_flush(void);
 
