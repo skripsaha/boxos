@@ -45,7 +45,7 @@ extern "C" {
  * Peer death: when one side releases (or its cabin is destroyed), the
  * surviving peer's next blocking call returns:
  *   - writer: -ERR_PROCESS_TERMINATED  (reader gone — no further drain)
- *   - reader: -ERR_END_OF_FILE         (writer gone AND ring empty)
+ *   - reader: -ERR_STREAM_CLOSED       (writer gone AND ring empty)
  *   - reader: still OK while frames remain in the ring after writer
  *     left; the EOF marker fires only when the ring drains
  *
@@ -62,7 +62,7 @@ extern "C" {
 #define BROOK_READER     0x02u
 #define BROOK_CREATE     0x10u
 /* BROOK_STREAM — opt-in streaming semantics. Default (single-session)
- * mode: pop returns -ERR_END_OF_FILE on writer-leave (after draining
+ * mode: pop returns -ERR_STREAM_CLOSED on writer-leave (after draining
  * any remaining frames); push returns -ERR_PROCESS_TERMINATED on
  * reader-leave. That terminal signal is RACE-FREE via an atomic
  * compare-and-swap on the shared *_alive flag — once the survivor
@@ -119,7 +119,7 @@ int brook_push_timeout(Brook *b, const void *frame, uint32_t timeout_ms);
 /* Pop one frame_size-byte frame. Blocking on empty ring.
  * Returns:
  *   OK (0)                     — frame copied into `frame`
- *   -ERR_END_OF_FILE           — writer gone AND ring empty (clean EOS)
+ *   -ERR_STREAM_CLOSED         — writer gone AND ring empty (clean EOS)
  *   -ERR_INVALID_ARGUMENT      — NULL pointer / bad handle */
 int brook_pop(Brook *b, void *frame);
 

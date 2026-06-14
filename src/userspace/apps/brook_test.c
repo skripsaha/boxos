@@ -14,7 +14,7 @@
  *   T6  cross-cabin push/pop: child reader drains parent writer's
  *       output. Verifies user-VA-shared header + slot region.
  *   T7  peer-death: child writer pushes 4 frames then exits. Parent
- *       reader drains 4 frames OK, 5th pop returns -ERR_END_OF_FILE.
+ *       reader drains 4 frames OK, 5th pop returns -ERR_STREAM_CLOSED.
  *   T8  block writer / wake on pop: ring depth 4, parent writer pushes
  *       4, then pushes 1 more (block). Child reader pops 1 → parent
  *       wakes, 5th push completes.
@@ -272,7 +272,7 @@ static void run_parent_tests(void)
                 wait_child_exit((uint32_t)child);
                 int rc = brook_pop(r, frame);
                 brook_release(r);
-                if (ok && rc == -ERR_END_OF_FILE) pass(7);
+                if (ok && rc == -ERR_STREAM_CLOSED) pass(7);
                 else fail(7, "expected END_OF_FILE");
             }
         }
@@ -358,7 +358,7 @@ static void run_parent_tests(void)
 
             /* Reader's next pop sees empty + writer_alive=0 +
              * ever_attached=1 → CAS-freezes the session and returns EOF. */
-            if (ok && brook_pop(r, frame) != -ERR_END_OF_FILE) ok = 0;
+            if (ok && brook_pop(r, frame) != -ERR_STREAM_CLOSED) ok = 0;
 
             /* Race-closure check: new writer attach MUST fail. */
             Brook *w2 = brook_open(TAG_FROZEN, 8, 4, BROOK_WRITER);

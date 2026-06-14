@@ -443,7 +443,7 @@ static int brook_pop_core(Brook *b, void *frame,
             brook_load_acquire_u32(&h->writer_alive) == 0 &&
             brook_load_acquire_u32(&h->writer_ever_attached) != 0) {
             if (brook_cas_freeze_peer(&h->writer_alive)) {
-                return -ERR_END_OF_FILE;
+                return -ERR_STREAM_CLOSED;
             }
             continue;
         }

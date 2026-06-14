@@ -64,7 +64,7 @@
  *   - writer: full ring + reader_alive==0 + reader_ever_attached==1
  *             → -ERR_PROCESS_TERMINATED
  *   - reader: empty ring + writer_alive==0 + writer_ever_attached==1
- *             → -ERR_END_OF_FILE
+ *             → -ERR_STREAM_CLOSED
  *   - reader: frames still in ring after writer left → drain normally;
  *             EOF only on the empty re-check that follows.
  *
@@ -99,7 +99,7 @@
 #define BROOK_READER       0x02u
 #define BROOK_CREATE       0x10u
 /* BROOK_STREAM — opt-in streaming semantics. Default behaviour is
- * single-session: reader returns ERR_END_OF_FILE on writer-leave, writer
+ * single-session: reader returns ERR_STREAM_CLOSED on writer-leave, writer
  * returns ERR_PROCESS_TERMINATED on reader-leave; once that signal is
  * emitted, the Brook session is FROZEN — no further attaches succeed.
  * This eliminates the classic re-attach race (peer transition observed
