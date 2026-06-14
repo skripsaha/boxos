@@ -22,6 +22,7 @@
 #include <charconv>
 #include <deque>
 #include <expected>
+#include <format>
 #include <iterator>
 #include <list>
 #include <map>
@@ -2325,6 +2326,140 @@ void Phase9a4()
     printf("[CXX] PASS phase9a4: <charconv> float from_chars + stof/stod\n");
 }
 
+// ── phase9b: <format> (Ф9B-1) ──────────────────────────────────────────
+// Exhaustively host-validated against g++-15 std::vformat (198k spec×value
+// combos, 0 real diffs). This target phase confirms the same engine runs on
+// BoxOS under CET (the float path goes through the own Ryu in <charconv>),
+// and that the consteval format-string check accepts these strings.
+void Phase9b()
+{
+    auto feq = [](const std::string &got, std::string_view want) {
+        return std::string_view(got.data(), got.size()) == want;
+    };
+
+    // structure: auto / positional indexing, brace escapes, plain text
+    Check(feq(std::format("{} {} {}", 1, 2, 3), "1 2 3"), "phase9b auto idx");
+    Check(feq(std::format("{2} {1} {0}", 'a', 'b', 'c'), "c b a"),
+          "phase9b positional idx");
+    Check(feq(std::format("{{}}<{}>", 42), "{}<42>"), "phase9b brace escape");
+    Check(feq(std::format("no fields"), "no fields"), "phase9b literal");
+
+    // integers: base / sign / alt / fill+align / zero-pad / as-char
+    Check(feq(std::format("{:d}", -42), "-42"), "phase9b int dec");
+    Check(feq(std::format("{:#x}", 255), "0xff"), "phase9b int #x");
+    Check(feq(std::format("{:#010X}", 255), "0X000000FF"), "phase9b int #010X");
+    Check(feq(std::format("{:+}", 7), "+7"), "phase9b int +");
+    Check(feq(std::format("{: }", 7), " 7"), "phase9b int space-sign");
+    Check(feq(std::format("{:#b}", 5), "0b101"), "phase9b int #b");
+    Check(feq(std::format("{:o}", 64), "100"), "phase9b int oct");
+    Check(feq(std::format("{:*^7}", 42), "**42***"), "phase9b int center");
+    Check(feq(std::format("{:<6}", 42), "42    "), "phase9b int left");
+    Check(feq(std::format("{:>6}", 42), "    42"), "phase9b int right");
+    Check(feq(std::format("{:c}", 65), "A"), "phase9b int as char");
+    Check(feq(std::format("{:08}", -42), "-0000042"), "phase9b int zero+sign");
+    Check(feq(std::format("{}", -2147483647 - 1), "-2147483648"),
+          "phase9b INT_MIN");
+    Check(feq(std::format("{:x}", 0xFFFFFFFFFFFFFFFFull), "ffffffffffffffff"),
+          "phase9b u64 hex");
+
+    // floating-point: shortest / fixed / scientific / general / hex / inf / nan
+    Check(feq(std::format("{}", 3.14), "3.14"), "phase9b double shortest");
+    Check(feq(std::format("{:.2f}", 3.14159), "3.14"), "phase9b double .2f");
+    Check(feq(std::format("{:.3e}", 123456.0), "1.235e+05"), "phase9b double .3e");
+    Check(feq(std::format("{:g}", 0.0001), "0.0001"), "phase9b double g");
+    Check(feq(std::format("{:+.1f}", 2.5), "+2.5"), "phase9b double +.1f");
+    Check(feq(std::format("{:10.2f}", -3.5), "     -3.50"), "phase9b double width");
+    Check(feq(std::format("{:08.2f}", -3.5), "-0003.50"), "phase9b double zero");
+    Check(feq(std::format("{:.0f}", 2.5), "2"), "phase9b double half-even-down");
+    Check(feq(std::format("{:.0f}", 3.5), "4"), "phase9b double half-even-up");
+    Check(feq(std::format("{:e}", 0.0), "0.000000e+00"), "phase9b double 0 sci");
+    Check(feq(std::format("{:#.0f}", 5.0), "5."), "phase9b double # point");
+    Check(feq(std::format("{:#.3g}", 1.0), "1.00"), "phase9b double #g zeros");
+    Check(feq(std::format("{}", 1.0 / 0.0), "inf"), "phase9b inf");
+    Check(feq(std::format("{:+}", 1.0 / 0.0), "+inf"), "phase9b +inf");
+    Check(feq(std::format("{:F}", -1.0 / 0.0), "-INF"), "phase9b -INF");
+    Check(feq(std::format("{}", __builtin_nan("")), "nan"), "phase9b nan");
+    Check(feq(std::format("{}", -__builtin_nan("")), "-nan"), "phase9b -nan");
+    Check(feq(std::format("{:.2f}", 1.5f), "1.50"), "phase9b float .2f");
+
+    // strings + precision (truncation) + width
+    Check(feq(std::format("{}", "hello"), "hello"), "phase9b cstr");
+    Check(feq(std::format("{:.3}", "hello"), "hel"), "phase9b cstr precision");
+    Check(feq(std::format("{:>8}", "hi"), "      hi"), "phase9b cstr width");
+    Check(feq(std::format("{:*<6}", std::string("ab")), "ab****"),
+          "phase9b string fill");
+    {
+        std::string_view sv = "world";
+        Check(feq(std::format("[{:^9}]", sv), "[  world  ]"),
+              "phase9b sv center");
+    }
+
+    // char / bool
+    Check(feq(std::format("{}", 'Z'), "Z"), "phase9b char");
+    Check(feq(std::format("{:d}", 'A'), "65"), "phase9b char as int");
+    Check(feq(std::format("{}", true), "true"), "phase9b bool true");
+    Check(feq(std::format("{:d}", false), "0"), "phase9b bool as int");
+    Check(feq(std::format("{:>7}", false), "  false"), "phase9b bool align");
+
+    // pointer
+    Check(feq(std::format("{}", (void *)0), "0x0"), "phase9b ptr null");
+    Check(feq(std::format("{:p}", (const void *)0xdead), "0xdead"),
+          "phase9b ptr");
+
+    // dynamic width / precision (nested {})
+    Check(feq(std::format("{:{}}", 42, 6), "    42"), "phase9b dyn width");
+    Check(feq(std::format("{:.{}f}", 3.14159, 2), "3.14"), "phase9b dyn prec");
+    Check(feq(std::format("{:{}.{}f}", 2.5, 8, 3), "   2.500"),
+          "phase9b dyn both");
+    Check(feq(std::format("{0:{1}}", 7, 4), "   7"), "phase9b dyn manual");
+
+    // format_to into a back_insert_iterator<string>
+    {
+        std::string out;
+        std::format_to(std::back_inserter(out), "{}-{}", 1, 2);
+        Check(feq(out, "1-2"), "phase9b format_to back_inserter");
+    }
+    // format_to into a raw char buffer (output iterator == char*)
+    {
+        char  buf[16] = {};
+        auto *end     = std::format_to(buf, "{:04d}", 42);
+        *end          = '\0';
+        Check(std::string_view(buf) == "0042", "phase9b format_to char*");
+    }
+    // format_to_n truncates and reports the untruncated size
+    {
+        char buf[8]  = {};
+        auto r       = std::format_to_n(buf, 4, "{}", 1234567);
+        Check(r.size == 7 && std::string_view(buf, 4) == "1234",
+              "phase9b format_to_n");
+    }
+    // formatted_size
+    Check(std::formatted_size("{:6}", 42) == 6, "phase9b formatted_size");
+    Check(std::formatted_size("{}", 12345) == 5, "phase9b formatted_size2");
+
+    // vformat on a runtime string
+    {
+        int         a = 10, b = 20, c = 30;
+        std::string s =
+            std::vformat("{} + {} = {}", std::make_format_args(a, b, c));
+        Check(feq(s, "10 + 20 = 30"), "phase9b vformat");
+    }
+    // vformat throws format_error on a bad spec at runtime ('s' on int)
+    {
+        bool threw = false;
+        try {
+            int x = 5;
+            (void)std::vformat("{:s}", std::make_format_args(x));
+        } catch (const std::format_error &) {
+            threw = true;
+        }
+        Check(threw, "phase9b vformat throws on bad spec");
+    }
+
+    printf("[CXX] PASS phase9b: <format> "
+           "(spec/formatters/dynamic/format_to/vformat)\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -2353,6 +2488,7 @@ int main()
     Phase9a2();
     Phase9a3();
     Phase9a4();
+    Phase9b();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
