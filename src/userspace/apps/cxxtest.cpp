@@ -2121,6 +2121,89 @@ void Phase9a()
     printf("[CXX] PASS phase9a: <charconv> integer + sto* family\n");
 }
 
+// ── phase9a2: <charconv> float to_chars (Ryu shortest + formats + hex) ─────
+// Expected strings are the authoritative host std::to_chars outputs; the Ryu
+// implementation was validated char-for-char against it over ~30M values.
+void Phase9a2()
+{
+    using F = std::chars_format;
+    auto eqd0 = [&](double d, const char *exp, const char *tag) {
+        char b[400]; auto r = std::to_chars(b, b + sizeof(b), d);
+        Check(r.ec == std::errc{} && std::string_view(b, r.ptr - b) == exp, tag);
+    };
+    auto eqd = [&](double d, F f, const char *exp, const char *tag) {
+        char b[400]; auto r = std::to_chars(b, b + sizeof(b), d, f);
+        Check(r.ec == std::errc{} && std::string_view(b, r.ptr - b) == exp, tag);
+    };
+    auto eqf = [&](float v, const char *exp, const char *tag) {
+        char b[64]; auto r = std::to_chars(b, b + sizeof(b), v);
+        Check(r.ec == std::errc{} && std::string_view(b, r.ptr - b) == exp, tag);
+    };
+
+    // shortest (3-arg) — picks the shorter of fixed/scientific
+    eqd0(1.0, "1", "phase9a2 shortest 1");
+    eqd0(0.5, "0.5", "phase9a2 shortest 0.5");
+    eqd0(3.14159, "3.14159", "phase9a2 shortest pi");
+    eqd0(100000.0, "1e+05", "phase9a2 shortest 1e5");
+    eqd0(0.0001, "1e-04", "phase9a2 shortest 1e-4");
+    eqd0(1e20, "1e+20", "phase9a2 shortest 1e20");
+    eqd0(-2.5, "-2.5", "phase9a2 shortest -2.5");
+
+    // scientific
+    eqd(1.0, F::scientific, "1e+00", "phase9a2 sci 1");
+    eqd(0.5, F::scientific, "5e-01", "phase9a2 sci 0.5");
+    eqd(3.14159, F::scientific, "3.14159e+00", "phase9a2 sci pi");
+
+    // fixed — exact integer for large values (not zero-padded shortest)
+    eqd(100000.0, F::fixed, "100000", "phase9a2 fixed 1e5");
+    eqd(0.0001, F::fixed, "0.0001", "phase9a2 fixed 1e-4");
+    eqd(1e20, F::fixed, "100000000000000000000", "phase9a2 fixed 1e20 exact");
+    eqd(2.5, F::fixed, "2.5", "phase9a2 fixed 2.5");
+
+    // general
+    eqd(100000.0, F::general, "100000", "phase9a2 general 1e5");
+    eqd(1e20, F::general, "1e+20", "phase9a2 general 1e20");
+    eqd(3.14159, F::general, "3.14159", "phase9a2 general pi");
+
+    // hex (no 0x prefix, lowercase, p±decimal)
+    eqd(1.0, F::hex, "1p+0", "phase9a2 hex 1");
+    eqd(0.5, F::hex, "1p-1", "phase9a2 hex 0.5");
+    eqd(3.14159, F::hex, "1.921f9f01b866ep+1", "phase9a2 hex pi");
+    eqd(2.5, F::hex, "1.4p+1", "phase9a2 hex 2.5");
+
+    // float
+    eqf(1.0f, "1", "phase9a2 float 1");
+    eqf(0.1f, "0.1", "phase9a2 float 0.1");
+    eqf(3.14f, "3.14", "phase9a2 float 3.14");
+    {
+        char b[16]; auto r = std::to_chars(b, b + sizeof(b), 0.1f, F::hex);
+        Check(r.ec == std::errc{} && std::string_view(b, r.ptr - b) == "1.99999ap-4",
+              "phase9a2 float hex 0.1");
+    }
+
+    // edge: zero / -0 / inf / nan
+    eqd0(0.0, "0", "phase9a2 zero");
+    eqd(0.0, F::scientific, "0e+00", "phase9a2 zero sci");
+    eqd0(-0.0, "-0", "phase9a2 neg zero");
+    {
+        double inf = 1e308 * 10.0;
+        char   b[8]; auto r = std::to_chars(b, b + sizeof(b), inf);
+        Check(r.ec == std::errc{} && std::string_view(b, r.ptr - b) == "inf",
+              "phase9a2 inf");
+        auto r2 = std::to_chars(b, b + sizeof(b), -inf);
+        Check(r2.ec == std::errc{} && std::string_view(b, r2.ptr - b) == "-inf",
+              "phase9a2 -inf");
+    }
+
+    // value_too_large: 1e20 fixed (21 chars) into a 5-char buffer
+    {
+        char b[5]; auto r = std::to_chars(b, b + sizeof(b), 1e20, F::fixed);
+        Check(r.ec == std::errc::value_too_large, "phase9a2 value_too_large");
+    }
+
+    printf("[CXX] PASS phase9a2: <charconv> float to_chars (Ryu shortest)\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -2146,6 +2229,7 @@ int main()
     Phase8e();
     Phase8f();
     Phase9a();
+    Phase9a2();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

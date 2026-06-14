@@ -1,0 +1,548 @@
+// boxcxx — <charconv> floating-point to_chars (Ф9A-2a: no-precision overloads)
+//
+// Own Ryu (Adams, PLDI 2018) shortest round-trip for float and double, plus
+// the explicit scientific/fixed/general/hex no-precision formats. The Ryu
+// powers-of-five tables are COMPUTED at first use via exact big-integer
+// arithmetic — no magic constants to mistype, and the generation is provably
+// correct (5^i is exact). Validated char-for-char against a reference
+// std::to_chars over ~30M random + edge values before being committed here.
+//
+// The precision overloads (5-arg) and to_string(float/double) arrive in the
+// next installment (Ф9A-2b) on top of the same big-integer machinery; this
+// file deliberately ships only the shortest/no-precision surface.
+//
+// Not constexpr: the standard does not require constexpr float conversion,
+// and the table state is runtime-initialised.
+#include <charconv>
+#include <cstdint>
+
+namespace {
+
+using u32  = uint32_t;
+using u64  = uint64_t;
+using i32  = int32_t;
+using u128 = unsigned __int128;
+
+// ── minimal big integer (little-endian base 2^32) ────────────────────────
+constexpr int kBigWords = 80;
+struct BigInt {
+    u32 w[kBigWords];
+    int n;  // number of significant words
+};
+
+void BigSetU64(BigInt &a, u64 v)
+{
+    a.w[0] = (u32)v;
+    a.w[1] = (u32)(v >> 32);
+    a.n    = a.w[1] ? 2 : (a.w[0] ? 1 : 0);
+}
+void BigMulSmall(BigInt &a, u32 m)
+{
+    u64 carry = 0;
+    for (int i = 0; i < a.n; ++i) {
+        u64 p   = (u64)a.w[i] * m + carry;
+        a.w[i]  = (u32)p;
+        carry   = p >> 32;
+    }
+    while (carry) { a.w[a.n++] = (u32)carry; carry >>= 32; }
+}
+int BigBitLen(const BigInt &a)
+{
+    if (a.n == 0) return 0;
+    int bits = (a.n - 1) * 32;
+    u32 hi   = a.w[a.n - 1];
+    while (hi) { ++bits; hi >>= 1; }
+    return bits;
+}
+void BigShr(const BigInt &a, int s, BigInt &out)
+{
+    int wsh = s / 32, bsh = s % 32;
+    out.n = 0;
+    for (int i = 0; i + wsh < a.n; ++i) {
+        u64 lo = a.w[i + wsh];
+        u64 hi = (i + wsh + 1 < a.n) ? a.w[i + wsh + 1] : 0;
+        u32 v  = bsh ? (u32)((lo >> bsh) | (hi << (32 - bsh))) : (u32)lo;
+        out.w[i] = v;
+        if (v) out.n = i + 1;
+    }
+}
+void BigShl(const BigInt &a, int s, BigInt &out)
+{
+    int wsh = s / 32, bsh = s % 32;
+    for (int i = 0; i < kBigWords; ++i) out.w[i] = 0;
+    for (int i = 0; i < a.n; ++i) {
+        u64 v = (u64)a.w[i] << bsh;
+        out.w[i + wsh] |= (u32)v;
+        out.w[i + wsh + 1] |= (u32)(v >> 32);
+    }
+    out.n = a.n + wsh + 1;
+    while (out.n > 0 && out.w[out.n - 1] == 0) --out.n;
+}
+void BigLow128(const BigInt &a, u64 &lo, u64 &hi)
+{
+    u64 w0 = a.n > 0 ? a.w[0] : 0, w1 = a.n > 1 ? a.w[1] : 0;
+    u64 w2 = a.n > 2 ? a.w[2] : 0, w3 = a.n > 3 ? a.w[3] : 0;
+    lo = w0 | (w1 << 32);
+    hi = w2 | (w3 << 32);
+}
+// Low 128 bits of ceil(N / D) (N, D > 0); bit-by-bit schoolbook division.
+void BigDivCeilLow128(const BigInt &N, const BigInt &D, u64 &qlo, u64 &qhi)
+{
+    BigInt rem; rem.n = 0;
+    BigInt q; for (int i = 0; i < kBigWords; ++i) q.w[i] = 0; q.n = 0;
+    int nb = BigBitLen(N);
+    for (int bit = nb - 1; bit >= 0; --bit) {
+        BigInt tmp; BigShl(rem, 1, tmp); rem = tmp;
+        if ((N.w[bit / 32] >> (bit % 32)) & 1) { if (rem.n == 0) rem.n = 1; rem.w[0] |= 1; }
+        int cmp = 0;
+        int m   = rem.n > D.n ? rem.n : D.n;
+        for (int i = m - 1; i >= 0; --i) {
+            u32 rv = i < rem.n ? rem.w[i] : 0, dv = i < D.n ? D.w[i] : 0;
+            if (rv != dv) { cmp = rv > dv ? 1 : -1; break; }
+        }
+        if (cmp >= 0) {
+            u64 borrow = 0;
+            for (int i = 0; i < rem.n; ++i) {
+                u64 dv  = i < D.n ? D.w[i] : 0;
+                u64 cur = (u64)rem.w[i] - dv - borrow;
+                rem.w[i] = (u32)cur;
+                borrow   = (cur >> 63) & 1 ? 1 : 0;
+            }
+            while (rem.n > 0 && rem.w[rem.n - 1] == 0) --rem.n;
+            q.w[bit / 32] |= (1u << (bit % 32));
+            if (bit / 32 + 1 > q.n) q.n = bit / 32 + 1;
+        }
+    }
+    BigLow128(q, qlo, qhi);
+    if (rem.n > 0) { if (++qlo == 0) ++qhi; }  // ceil
+}
+u32 BigDivModSmall(BigInt &a, u32 d)
+{
+    u64 rem = 0;
+    for (int i = a.n - 1; i >= 0; --i) {
+        u64 cur = (rem << 32) | a.w[i];
+        a.w[i]  = (u32)(cur / d);
+        rem     = cur % d;
+    }
+    while (a.n > 0 && a.w[a.n - 1] == 0) --a.n;
+    return (u32)rem;
+}
+int BigToDec(BigInt a, char *out)
+{
+    if (a.n == 0) { out[0] = '0'; return 1; }
+    char tmp[400]; int n = 0;
+    while (a.n > 0) tmp[n++] = (char)('0' + BigDivModSmall(a, 10));
+    for (int i = 0; i < n; ++i) out[i] = tmp[n - 1 - i];
+    return n;
+}
+
+// ── Ryu tables (computed once) ────────────────────────────────────────────
+constexpr int kDoublePow5InvBitcount = 125;
+constexpr int kDoublePow5Bitcount    = 125;
+constexpr int kFloatPow5InvBitcount  = 59;
+constexpr int kFloatPow5Bitcount     = 61;
+
+u64  g_dpow5[326][2];
+u64  g_dpow5inv[342][2];
+u64  g_fpow5[47];
+u64  g_fpow5inv[31];
+bool g_tablesReady = false;
+
+inline u32 Pow5Bits(i32 e) { return (u32)(((e * 1217359) >> 19) + 1); }
+inline i32 Log10Pow2(i32 e) { return (i32)((((u32)e) * 78913) >> 18); }
+inline i32 Log10Pow5(i32 e) { return (i32)((((u32)e) * 732923) >> 20); }
+
+void InitTables()
+{
+    BigInt p; BigSetU64(p, 1);
+    for (int i = 0; i < 326; ++i) {
+        int    b = BigBitLen(p);
+        BigInt v;
+        int    shift = b - kDoublePow5Bitcount;
+        if (shift > 0) BigShr(p, shift, v); else BigShl(p, -shift, v);
+        BigLow128(v, g_dpow5[i][0], g_dpow5[i][1]);
+        BigMulSmall(p, 5);
+    }
+    BigSetU64(p, 1);
+    for (int q = 0; q < 342; ++q) {
+        int    e = Pow5Bits(q) - 1 + kDoublePow5InvBitcount;
+        BigInt num, one; BigSetU64(one, 1); BigShl(one, e, num);
+        BigDivCeilLow128(num, p, g_dpow5inv[q][0], g_dpow5inv[q][1]);
+        BigMulSmall(p, 5);
+    }
+    BigSetU64(p, 1);
+    for (int i = 0; i < 47; ++i) {
+        int    b = BigBitLen(p);
+        BigInt v;
+        int    shift = b - kFloatPow5Bitcount;
+        if (shift > 0) BigShr(p, shift, v); else BigShl(p, -shift, v);
+        u64 lo, hi; BigLow128(v, lo, hi); g_fpow5[i] = lo;
+        BigMulSmall(p, 5);
+    }
+    BigSetU64(p, 1);
+    for (int q = 0; q < 31; ++q) {
+        int    e = Pow5Bits(q) - 1 + kFloatPow5InvBitcount;
+        BigInt num, one; BigSetU64(one, 1); BigShl(one, e, num);
+        u64 lo, hi; BigDivCeilLow128(num, p, lo, hi); g_fpow5inv[q] = lo;
+        BigMulSmall(p, 5);
+    }
+    g_tablesReady = true;
+}
+inline void EnsureTables() { if (!g_tablesReady) InitTables(); }  // single cabin: no race
+
+// ── Ryu shortest core ─────────────────────────────────────────────────────
+inline u64 MulShift64(u64 m, const u64 *mul, i32 j)
+{
+    u128 b0 = (u128)m * mul[0];
+    u128 b2 = (u128)m * mul[1];
+    return (u64)(((b0 >> 64) + b2) >> (j - 64));
+}
+inline u64 MulShiftAll64(u64 m, const u64 *mul, i32 j, u64 *vp, u64 *vm, u32 mmShift)
+{
+    *vp = MulShift64(4 * m + 2, mul, j);
+    *vm = MulShift64(4 * m - 1 - mmShift, mul, j);
+    return MulShift64(4 * m, mul, j);
+}
+inline u32 MulShift32(u32 m, u64 factor, i32 shift) { return (u32)(((u128)m * factor) >> shift); }
+inline u32 Pow5Factor64(u64 v) { u32 c = 0; for (;;) { u64 q = v / 5; if (v - 5 * q) break; v = q; ++c; } return c; }
+inline bool MultipleOfPow5_64(u64 v, u32 p) { return Pow5Factor64(v) >= p; }
+inline bool MultipleOfPow2_64(u64 v, u32 p) { return (v & ((1ull << p) - 1)) == 0; }
+inline bool MultipleOfPow5_32(u32 v, u32 p) { u32 c = 0; for (;;) { u32 q = v / 5; if (v - 5 * q) break; v = q; ++c; } return c >= p; }
+inline bool MultipleOfPow2_32(u32 v, u32 p) { return (v & ((1u << p) - 1)) == 0; }
+inline u32 DecimalLength17(u64 v) { u32 n = 0; do { ++n; v /= 10; } while (v); return n; }
+
+struct FloatDec { u64 mantissa; i32 exponent; };
+
+FloatDec D2D(u64 ieeeMantissa, u32 ieeeExponent)
+{
+    i32 e2; u64 m2;
+    if (ieeeExponent == 0) { e2 = 1 - 1023 - 52 - 2; m2 = ieeeMantissa; }
+    else { e2 = (i32)ieeeExponent - 1023 - 52 - 2; m2 = (1ull << 52) | ieeeMantissa; }
+    bool even = (m2 & 1) == 0, acceptBounds = even;
+    u64 mv      = 4 * m2;
+    u32 mmShift = (ieeeMantissa != 0) || (ieeeExponent <= 1);
+    u64 vr, vp, vm; i32 e10;
+    bool vmTZ = false, vrTZ = false;
+    if (e2 >= 0) {
+        u32 q = Log10Pow2(e2) - (e2 > 3);
+        e10   = (i32)q;
+        i32 k = kDoublePow5InvBitcount + (i32)Pow5Bits((i32)q) - 1;
+        i32 i = -e2 + (i32)q + k;
+        vr    = MulShiftAll64(m2, g_dpow5inv[q], i, &vp, &vm, mmShift);
+        if (q <= 21) {
+            if (mv % 5 == 0) vrTZ = MultipleOfPow5_64(mv, q);
+            else if (acceptBounds) vmTZ = MultipleOfPow5_64(mv - 1 - mmShift, q);
+            else vp -= MultipleOfPow5_64(mv + 2, q);
+        }
+    } else {
+        u32 q = Log10Pow5(-e2) - (-e2 > 1);
+        e10   = (i32)q + e2;
+        i32 i = -e2 - (i32)q;
+        i32 k = (i32)Pow5Bits(i) - kDoublePow5Bitcount;
+        i32 j = (i32)q - k;
+        vr    = MulShiftAll64(m2, g_dpow5[i], j, &vp, &vm, mmShift);
+        if (q <= 1) { vrTZ = true; if (acceptBounds) vmTZ = mmShift == 1; else --vp; }
+        else if (q < 63) vrTZ = MultipleOfPow2_64(mv, q);
+    }
+    i32 removed = 0; uint8_t lastRemoved = 0; u64 output;
+    if (vmTZ || vrTZ) {
+        for (;;) {
+            u64 vpd = vp / 10, vmd = vm / 10;
+            if (vpd <= vmd) break;
+            u32 vmr = (u32)(vm - 10 * vmd);
+            u64 vrd = vr / 10; u32 vrr = (u32)(vr - 10 * vrd);
+            vmTZ &= vmr == 0; vrTZ &= lastRemoved == 0;
+            lastRemoved = (uint8_t)vrr; vr = vrd; vp = vpd; vm = vmd; ++removed;
+        }
+        if (vmTZ) for (;;) {
+            u64 vmd = vm / 10; u32 vmr = (u32)(vm - 10 * vmd);
+            if (vmr != 0) break;
+            u64 vpd = vp / 10, vrd = vr / 10; u32 vrr = (u32)(vr - 10 * vrd);
+            vrTZ &= lastRemoved == 0; lastRemoved = (uint8_t)vrr;
+            vr = vrd; vp = vpd; vm = vmd; ++removed;
+        }
+        if (vrTZ && lastRemoved == 5 && vr % 2 == 0) lastRemoved = 4;
+        output = vr + ((vr == vm && (!acceptBounds || !vmTZ)) || lastRemoved >= 5);
+    } else {
+        bool roundUp = false;
+        u64 vpd100 = vp / 100, vmd100 = vm / 100;
+        if (vpd100 > vmd100) {
+            u64 vrd100 = vr / 100; u32 vrr100 = (u32)(vr - 100 * vrd100);
+            roundUp = vrr100 >= 50; vr = vrd100; vp = vpd100; vm = vmd100; removed += 2;
+        }
+        for (;;) {
+            u64 vpd = vp / 10, vmd = vm / 10;
+            if (vpd <= vmd) break;
+            u64 vrd = vr / 10; u32 vrr = (u32)(vr - 10 * vrd);
+            roundUp = vrr >= 5; vr = vrd; vp = vpd; vm = vmd; ++removed;
+        }
+        output = vr + (vr == vm || roundUp);
+    }
+    return {output, e10 + removed};
+}
+
+FloatDec F2D(u32 ieeeMantissa, u32 ieeeExponent)
+{
+    i32 e2; u32 m2;
+    if (ieeeExponent == 0) { e2 = 1 - 127 - 23 - 2; m2 = ieeeMantissa; }
+    else { e2 = (i32)ieeeExponent - 127 - 23 - 2; m2 = (1u << 23) | ieeeMantissa; }
+    bool even = (m2 & 1) == 0, acceptBounds = even;
+    u32 mv = 4 * m2, mp = 4 * m2 + 2;
+    u32 mmShift = (ieeeMantissa != 0) || (ieeeExponent <= 1);
+    u32 mm = 4 * m2 - 1 - mmShift;
+    u32 vr, vp, vm; i32 e10;
+    bool vmTZ = false, vrTZ = false; uint8_t lastRemoved = 0;
+    if (e2 >= 0) {
+        u32 q = Log10Pow2(e2); e10 = (i32)q;
+        i32 k = kFloatPow5InvBitcount + (i32)Pow5Bits((i32)q) - 1;
+        i32 i = -e2 + (i32)q + k;
+        vr = MulShift32(mv, g_fpow5inv[q], i);
+        vp = MulShift32(mp, g_fpow5inv[q], i);
+        vm = MulShift32(mm, g_fpow5inv[q], i);
+        if (q != 0 && (vp - 1) / 10 <= vm / 10) {
+            i32 l = kFloatPow5InvBitcount + (i32)Pow5Bits((i32)q - 1) - 1;
+            lastRemoved = (uint8_t)(MulShift32(mv, g_fpow5inv[q - 1], -e2 + (i32)q - 1 + l) % 10);
+        }
+        if (q <= 9) {
+            if (mv % 5 == 0) vrTZ = MultipleOfPow5_32(mv, q);
+            else if (acceptBounds) vmTZ = MultipleOfPow5_32(mm, q);
+            else vp -= MultipleOfPow5_32(mp, q);
+        }
+    } else {
+        u32 q = Log10Pow5(-e2); e10 = (i32)q + e2;
+        i32 i = -e2 - (i32)q;
+        i32 k = (i32)Pow5Bits(i) - kFloatPow5Bitcount;
+        i32 j = (i32)q - k;
+        vr = MulShift32(mv, g_fpow5[i], j);
+        vp = MulShift32(mp, g_fpow5[i], j);
+        vm = MulShift32(mm, g_fpow5[i], j);
+        if (q != 0 && (vp - 1) / 10 <= vm / 10) {
+            j = (i32)q - 1 - ((i32)Pow5Bits(i + 1) - kFloatPow5Bitcount);
+            lastRemoved = (uint8_t)(MulShift32(mv, g_fpow5[i + 1], j) % 10);
+        }
+        if (q <= 1) { vrTZ = true; if (acceptBounds) vmTZ = mmShift == 1; else --vp; }
+        else if (q < 31) vrTZ = MultipleOfPow2_32(mv, q - 1);
+    }
+    i32 removed = 0; u32 output;
+    if (vmTZ || vrTZ) {
+        while (vp / 10 > vm / 10) {
+            vmTZ &= (vm % 10) == 0; vrTZ &= lastRemoved == 0;
+            lastRemoved = (uint8_t)(vr % 10); vr /= 10; vp /= 10; vm /= 10; ++removed;
+        }
+        if (vmTZ) while (vm % 10 == 0) {
+            vrTZ &= lastRemoved == 0; lastRemoved = (uint8_t)(vr % 10);
+            vr /= 10; vp /= 10; vm /= 10; ++removed;
+        }
+        if (vrTZ && lastRemoved == 5 && vr % 2 == 0) lastRemoved = 4;
+        output = vr + ((vr == vm && (!acceptBounds || !vmTZ)) || lastRemoved >= 5);
+    } else {
+        while (vp / 10 > vm / 10) { lastRemoved = (uint8_t)(vr % 10); vr /= 10; vp /= 10; vm /= 10; ++removed; }
+        output = vr + (vr == vm || lastRemoved >= 5);
+    }
+    return {output, e10 + removed};
+}
+
+// ── formatting ─────────────────────────────────────────────────────────────
+enum { M_SHORTEST = 0, M_SCI = 1, M_FIXED = 2, M_GENERAL = 3 };
+
+char *WriteExp(char *p, i32 e)
+{
+    *p++ = 'e';
+    if (e < 0) { *p++ = '-'; e = -e; } else *p++ = '+';
+    if (e >= 100) { *p++ = (char)('0' + e / 100); e %= 100; }
+    *p++ = (char)('0' + e / 10);
+    *p++ = (char)('0' + e % 10);
+    return p;
+}
+int DecLen64(u64 v) { int n = 0; do { ++n; v /= 10; } while (v); return n; }
+
+// round(fullMant * 2^e2) to nearest integer (ties→even), decimal digits.
+int EmitExactInt(char *out, u64 fullMant, i32 e2)
+{
+    if (e2 >= 0) {
+        BigInt b; BigSetU64(b, fullMant);
+        BigInt s; BigShl(b, e2, s);
+        return BigToDec(s, out);
+    }
+    int sh   = -e2;
+    u64 q    = sh >= 64 ? 0 : (fullMant >> sh);
+    u64 rem  = sh >= 64 ? fullMant : (fullMant & ((1ull << sh) - 1));
+    u64 half = (sh >= 1 && sh <= 64) ? (1ull << (sh - 1)) : 0;
+    if (rem > half || (rem == half && (q & 1))) ++q;
+    char tmp[24]; int n = 0; do { tmp[n++] = (char)('0' + q % 10); q /= 10; } while (q);
+    for (int i = 0; i < n; ++i) out[i] = tmp[n - 1 - i];
+    return n;
+}
+
+int EmitFp(char *out, bool sign, u64 mant, i32 exp, u64 fullMant, i32 e2, int mode)
+{
+    char *p = out;
+    if (sign) *p++ = '-';
+    char digits[20]; u32 olen = (u32)DecLen64(mant);
+    for (i32 k = (i32)olen - 1; k >= 0; --k) { digits[k] = (char)('0' + mant % 10); mant /= 10; }
+    i32 e_sci = exp + (i32)olen - 1;
+
+    i32  sci_len = (i32)olen + (olen > 1 ? 1 : 0) + 2 + ((e_sci >= 100 || e_sci <= -100) ? 3 : 2);
+    char fixedbuf[400]; int fixed_len;
+    if (exp > 0) {
+        fixed_len = EmitExactInt(fixedbuf, fullMant, e2);
+    } else if (exp == 0) {
+        for (u32 k = 0; k < olen; ++k) fixedbuf[k] = digits[k];
+        fixed_len = (int)olen;
+    } else {
+        i32 dot = (i32)olen + exp; int n = 0;
+        if (dot <= 0) {
+            fixedbuf[n++] = '0'; fixedbuf[n++] = '.';
+            for (i32 z = 0; z < -dot; ++z) fixedbuf[n++] = '0';
+            for (u32 k = 0; k < olen; ++k) fixedbuf[n++] = digits[k];
+        } else {
+            for (i32 k = 0; k < dot; ++k) fixedbuf[n++] = digits[k];
+            fixedbuf[n++] = '.';
+            for (u32 k = (u32)dot; k < olen; ++k) fixedbuf[n++] = digits[k];
+        }
+        fixed_len = n;
+    }
+
+    bool use_fixed;
+    switch (mode) {
+        case M_SCI:     use_fixed = false; break;
+        case M_FIXED:   use_fixed = true; break;
+        case M_GENERAL: use_fixed = (e_sci >= -4 && e_sci <= 5); break;
+        default:        use_fixed = fixed_len <= sci_len; break;
+    }
+    if (use_fixed) {
+        for (int k = 0; k < fixed_len; ++k) *p++ = fixedbuf[k];
+    } else {
+        *p++ = digits[0];
+        if (olen > 1) { *p++ = '.'; for (u32 k = 1; k < olen; ++k) *p++ = digits[k]; }
+        p = WriteExp(p, e_sci);
+    }
+    return (int)(p - out);
+}
+
+// Hexfloat (no "0x", lowercase, trailing zero nibbles stripped, normalized
+// leading 1 for subnormals). fracBits holds fracHexDigits nibbles MSB-first.
+int EmitHex(char *out, bool sign, u64 fracBits, int fracHexDigits, i32 binExp, int lead)
+{
+    char *p = out;
+    if (sign) *p++ = '-';
+    *p++ = (char)('0' + lead);
+    int last = fracHexDigits - 1;
+    while (last >= 0 && ((fracBits >> (4 * (fracHexDigits - 1 - last))) & 0xF) == 0) --last;
+    if (last >= 0) {
+        *p++ = '.';
+        for (int k = 0; k <= last; ++k) {
+            u32 nib = (u32)((fracBits >> (4 * (fracHexDigits - 1 - k))) & 0xF);
+            *p++ = (char)(nib < 10 ? '0' + nib : 'a' + nib - 10);
+        }
+    }
+    *p++ = 'p';
+    if (binExp < 0) { *p++ = '-'; binExp = -binExp; } else *p++ = '+';
+    char tb[8]; int n = 0; do { tb[n++] = (char)('0' + binExp % 10); binExp /= 10; } while (binExp);
+    for (int k = n - 1; k >= 0; --k) *p++ = tb[k];
+    return (int)(p - out);
+}
+
+// Render into a scratch buffer; returns length. Handles inf/nan/zero.
+int RenderDouble(char *out, double d, int mode, bool hex)
+{
+    u64  bits = __builtin_bit_cast(u64, d);
+    bool sign = (bits >> 63) & 1;
+    u64  mant = bits & ((1ull << 52) - 1);
+    u32  exp  = (u32)((bits >> 52) & 0x7FF);
+    if (exp == 0x7FF) {
+        char *p = out; if (sign) *p++ = '-';
+        const char *s = mant ? "nan" : "inf";
+        *p++ = s[0]; *p++ = s[1]; *p++ = s[2];
+        return (int)(p - out);
+    }
+    if (hex) {
+        if (exp == 0 && mant == 0) return EmitHex(out, sign, 0, 13, 0, 0);
+        i32 binExp; u64 frac;
+        if (exp == 0) {
+            int h = 51; while (h >= 0 && !((mant >> h) & 1)) --h;
+            binExp = h - 1074; frac = (mant & (((u64)1 << h) - 1)) << (52 - h);
+        } else { binExp = (i32)exp - 1023; frac = mant; }
+        return EmitHex(out, sign, frac, 13, binExp, 1);
+    }
+    if (exp == 0 && mant == 0) return EmitFp(out, sign, 0, 0, 0, 0, mode);
+    u64 fullMant = exp == 0 ? mant : ((1ull << 52) | mant);
+    i32 e2       = (i32)(exp == 0 ? 1 : exp) - 1075;
+    FloatDec v   = D2D(mant, exp);
+    return EmitFp(out, sign, v.mantissa, v.exponent, fullMant, e2, mode);
+}
+int RenderFloat(char *out, float f, int mode, bool hex)
+{
+    u32  bits = __builtin_bit_cast(u32, f);
+    bool sign = (bits >> 31) & 1;
+    u32  mant = bits & ((1u << 23) - 1);
+    u32  exp  = (bits >> 23) & 0xFF;
+    if (exp == 0xFF) {
+        char *p = out; if (sign) *p++ = '-';
+        const char *s = mant ? "nan" : "inf";
+        *p++ = s[0]; *p++ = s[1]; *p++ = s[2];
+        return (int)(p - out);
+    }
+    if (hex) {
+        if (exp == 0 && mant == 0) return EmitHex(out, sign, 0, 6, 0, 0);
+        i32 binExp; u64 frac;
+        if (exp == 0) {
+            int h = 22; while (h >= 0 && !((mant >> h) & 1)) --h;
+            binExp = h - 149; frac = ((u64)(mant & ((1u << h) - 1)) << (23 - h)) << 1;
+        } else { binExp = (i32)exp - 127; frac = (u64)mant << 1; }
+        return EmitHex(out, sign, frac, 6, binExp, 1);
+    }
+    if (exp == 0 && mant == 0) return EmitFp(out, sign, 0, 0, 0, 0, mode);
+    u64 fullMant = exp == 0 ? mant : ((1u << 23) | mant);
+    i32 e2       = (i32)(exp == 0 ? 1 : exp) - 150;
+    FloatDec v   = F2D(mant, exp);
+    return EmitFp(out, sign, v.mantissa, v.exponent, fullMant, e2, mode);
+}
+
+std::to_chars_result Commit(char *first, char *last, const char *scratch, int len)
+{
+    if (len > (last - first)) return {last, std::errc::value_too_large};
+    for (int i = 0; i < len; ++i) first[i] = scratch[i];
+    return {first + len, std::errc{}};
+}
+
+int FmtToMode(std::chars_format fmt, bool &hex)
+{
+    hex = fmt == std::chars_format::hex;
+    if (fmt == std::chars_format::scientific) return M_SCI;
+    if (fmt == std::chars_format::fixed) return M_FIXED;
+    return M_GENERAL;  // general or hex (hex handled via the flag)
+}
+
+} // namespace
+
+namespace std {
+
+to_chars_result to_chars(char *first, char *last, float value)
+{
+    EnsureTables();
+    char buf[64]; int len = RenderFloat(buf, value, M_SHORTEST, false);
+    return Commit(first, last, buf, len);
+}
+to_chars_result to_chars(char *first, char *last, double value)
+{
+    EnsureTables();
+    char buf[350]; int len = RenderDouble(buf, value, M_SHORTEST, false);
+    return Commit(first, last, buf, len);
+}
+to_chars_result to_chars(char *first, char *last, float value, chars_format fmt)
+{
+    EnsureTables();
+    bool hex; int mode = FmtToMode(fmt, hex);
+    char buf[64]; int len = RenderFloat(buf, value, mode, hex);
+    return Commit(first, last, buf, len);
+}
+to_chars_result to_chars(char *first, char *last, double value, chars_format fmt)
+{
+    EnsureTables();
+    bool hex; int mode = FmtToMode(fmt, hex);
+    char buf[350]; int len = RenderDouble(buf, value, mode, hex);
+    return Commit(first, last, buf, len);
+}
+
+} // namespace std

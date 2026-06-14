@@ -119,6 +119,15 @@ constexpr to_chars_result to_chars(char *first, char *last, T value,
 
 to_chars_result to_chars(char *, char *, bool, int = 10) = delete;
 
+// ── to_chars (floating-point) ───────────────────────────────────────────
+// Own Ryu shortest + the no-precision formats; defined in
+// src/runtime/charconv_float.cpp. The precision (5-arg) overloads and the
+// long double variants arrive in a later installment (Ф9A-2b / 9A-3).
+to_chars_result to_chars(char *first, char *last, float value);
+to_chars_result to_chars(char *first, char *last, double value);
+to_chars_result to_chars(char *first, char *last, float value, chars_format fmt);
+to_chars_result to_chars(char *first, char *last, double value, chars_format fmt);
+
 // ── from_chars (integer) ──────────────────────────────────────────────────
 
 template <class T>
