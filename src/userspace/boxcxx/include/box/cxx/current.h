@@ -27,6 +27,7 @@
 #include <string>
 #include <string_view>
 #include <type_traits>
+#include <utility>
 
 #include "box/current.h"
 
@@ -44,6 +45,8 @@ template <class T = std::byte>
 class current {
     static_assert(std::is_trivially_copyable_v<T>,
                   "box::current<T> stream item must be trivially copyable");
+    static_assert(sizeof(T) <= 65536,
+                  "box::current<T> item exceeds the Brook frame maximum (64 KiB)");
     Current *c_ = nullptr;
 
 public:
@@ -183,6 +186,20 @@ inline void println(byte_current &ch, std::format_string<Args...> fmt, Args &&..
 }
 
 inline void println(byte_current &ch) { ch.write("\n", 1); }
+
+// rvalue-channel overloads — allow one-shot temporaries, e.g.
+//   box::println(box::screen(), "hi");   box::print(box::log(), "{}", x);
+template <class... Args>
+inline void print(byte_current &&ch, std::format_string<Args...> fmt, Args &&...args)
+{
+    print(ch, fmt, std::forward<Args>(args)...);
+}
+template <class... Args>
+inline void println(byte_current &&ch, std::format_string<Args...> fmt, Args &&...args)
+{
+    println(ch, fmt, std::forward<Args>(args)...);
+}
+inline void println(byte_current &&ch) { println(ch); }
 
 } // namespace box
 

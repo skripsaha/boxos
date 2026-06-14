@@ -120,8 +120,11 @@ Current *current_open(const char *tag, uint32_t role, uint32_t item_size, uint32
 
         Brook *b;
         if (role == CURRENT_WRITE) {
-            uint32_t oflags = BROOK_WRITER | ((flags & CURRENT_CREATE) ? BROOK_CREATE : 0u);
-            b = brook_open(tag, frame_bytes, STREAM_FRAMES_DEFAULT, oflags);
+            /* The SPSC stream writer is always its own creator (a second
+             * writer gets ERR_BUSY), so creation is implicit — a stream
+             * writer needs no CURRENT_CREATE ceremony. */
+            b = brook_open(tag, frame_bytes, STREAM_FRAMES_DEFAULT,
+                           BROOK_WRITER | BROOK_CREATE);
         } else {
             /* Reader inherits the live stream's shape, then we verify it
              * matches the caller's expected item size. */

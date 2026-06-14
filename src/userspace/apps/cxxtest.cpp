@@ -2526,7 +2526,7 @@ void PhaseCurrent()
 
     // Typed framed stream, same-cabin writer + reader.
     {
-        box::current<Sample> w("cxx:current:stream", box::role::write, CURRENT_CREATE);
+        box::current<Sample> w("cxx:current:stream", box::role::write);  // writer auto-creates
         box::current<Sample> r("cxx:current:stream", box::role::read);
         Check(bool(w) && bool(r), "phaseCurrent stream open");
         bool put_ok = true;
@@ -2574,6 +2574,7 @@ void PhaseCurrent()
         box::println(lg, "[CURRENT-CXX] log via box::println n={}", 7);
         box::byte_current sc = box::screen();
         box::println(sc, "[CURRENT-CXX] screen ok");
+        box::println(box::log(), "[CURRENT-CXX] rvalue channel ok");  // rvalue-channel overload
         Check(bool(lg) && bool(sc), "phaseCurrent conventional channels");
     }
 
