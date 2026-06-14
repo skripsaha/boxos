@@ -2204,6 +2204,48 @@ void Phase9a2()
     printf("[CXX] PASS phase9a2: <charconv> float to_chars (Ryu shortest)\n");
 }
 
+// ── phase9a3: <charconv> float precision (5-arg) + to_string ───────────────
+// Expected strings are authoritative host std::to_chars / std::to_string
+// outputs; the big-integer precision path was validated char-for-char vs the
+// host over ~30M (decimal) + ~34M (hex) value/precision pairs.
+void Phase9a3()
+{
+    using F = std::chars_format;
+    auto eqp = [&](double d, F f, int prec, const char *exp, const char *tag) {
+        char b[400]; auto r = std::to_chars(b, b + sizeof(b), d, f, prec);
+        Check(r.ec == std::errc{} && std::string_view(b, r.ptr - b) == exp, tag);
+    };
+    // fixed
+    eqp(3.14159265358979, F::fixed, 2, "3.14", "phase9a3 fixed p2");
+    eqp(3.14159265358979, F::fixed, 0, "3", "phase9a3 fixed p0");
+    eqp(2.5, F::fixed, 4, "2.5000", "phase9a3 fixed trailing zeros");
+    eqp(1.0 / 3.0, F::fixed, 10, "0.3333333333", "phase9a3 fixed 1/3");
+    // scientific
+    eqp(3.14159265358979, F::scientific, 3, "3.142e+00", "phase9a3 sci p3 round");
+    eqp(0.0001, F::scientific, 2, "1.00e-04", "phase9a3 sci p2");
+    // general (%g: strips trailing zeros)
+    eqp(3.14159265358979, F::general, 3, "3.14", "phase9a3 general p3");
+    eqp(100000.0, F::general, 3, "1e+05", "phase9a3 general sci");
+    eqp(0.0001, F::general, 2, "0.0001", "phase9a3 general fixed");
+    // hex precision (no normalize; carry grows leading digit)
+    eqp(255.5, F::hex, 2, "1.ffp+7", "phase9a3 hex p2");
+    eqp(1.0, F::hex, 3, "1.000p+0", "phase9a3 hex p3 pad");
+    eqp(3.14159, F::hex, 0, "2p+1", "phase9a3 hex p0 carry");
+    // zero across formats
+    eqp(0.0, F::fixed, 3, "0.000", "phase9a3 zero fixed");
+    eqp(0.0, F::scientific, 2, "0.00e+00", "phase9a3 zero sci");
+    eqp(0.0, F::general, 4, "0", "phase9a3 zero general");
+
+    // to_string (fixed, 6 fractional digits)
+    Check(std::to_string(3.14159265358979) == "3.141593", "phase9a3 to_string pi");
+    Check(std::to_string(0.0) == "0.000000", "phase9a3 to_string 0");
+    Check(std::to_string(-2.5) == "-2.500000", "phase9a3 to_string -2.5");
+    Check(std::to_string(1.0 / 3.0) == "0.333333", "phase9a3 to_string 1/3");
+    Check(std::to_string(100.0f) == "100.000000", "phase9a3 to_string float");
+
+    printf("[CXX] PASS phase9a3: <charconv> float precision + to_string\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -2230,6 +2272,7 @@ int main()
     Phase8f();
     Phase9a();
     Phase9a2();
+    Phase9a3();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

@@ -1110,6 +1110,16 @@ inline string to_string(unsigned long long v)
     return __string_impl::UnsignedToString(v);
 }
 
+// Floating-point to_string ([string.conversions]): "as if by sprintf %f" —
+// fixed notation, 6 fractional digits — over <charconv>'s own Ryu/big-int.
+inline string to_string(double v)
+{
+    char buf[400];
+    to_chars_result r = to_chars(buf, buf + sizeof(buf), v, chars_format::fixed, 6);
+    return string(buf, static_cast<size_t>(r.ptr - buf));
+}
+inline string to_string(float v) { return to_string(static_cast<double>(v)); }
+
 // Integer sto* family ([string.conversions]). The stof/stod/stold
 // floating-point siblings arrive with Ф9A-2/9A-3 (own Ryu/Eisel-Lemire).
 

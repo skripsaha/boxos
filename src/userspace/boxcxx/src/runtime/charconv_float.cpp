@@ -24,7 +24,9 @@ using i32  = int32_t;
 using u128 = unsigned __int128;
 
 // ── minimal big integer (little-endian base 2^32) ────────────────────────
-constexpr int kBigWords = 80;
+// 140 words (~4480 bits) covers fullMant * 5^1074 for the smallest subnormal,
+// used by the exact-decimal precision path.
+constexpr int kBigWords = 140;
 struct BigInt {
     u32 w[kBigWords];
     int n;  // number of significant words
@@ -127,10 +129,19 @@ u32 BigDivModSmall(BigInt &a, u32 d)
     while (a.n > 0 && a.w[a.n - 1] == 0) --a.n;
     return (u32)rem;
 }
+void BigInc(BigInt &a)
+{
+    int i = 0;
+    for (;;) {
+        if (i >= a.n) { a.w[a.n++] = 1; break; }
+        if (a.w[i] != 0xFFFFFFFFu) { ++a.w[i]; break; }
+        a.w[i] = 0; ++i;
+    }
+}
 int BigToDec(BigInt a, char *out)
 {
     if (a.n == 0) { out[0] = '0'; return 1; }
-    char tmp[400]; int n = 0;
+    char tmp[1200]; int n = 0;
     while (a.n > 0) tmp[n++] = (char)('0' + BigDivModSmall(a, 10));
     for (int i = 0; i < n; ++i) out[i] = tmp[n - 1 - i];
     return n;
@@ -514,6 +525,146 @@ int FmtToMode(std::chars_format fmt, bool &hex)
     return M_GENERAL;  // general or hex (hex handled via the flag)
 }
 
+// ── precision (5-arg) path ─────────────────────────────────────────────────
+// |value| = bigN / 10^fracCount, an exact finite decimal (a binary fraction
+// is a finite decimal). round(value * 10^k) is then a plain big integer.
+void BuildBigN(u64 fullMant, i32 e2, BigInt &bigN, int &fracCount)
+{
+    if (e2 >= 0) { BigSetU64(bigN, fullMant); BigInt o; BigShl(bigN, e2, o); bigN = o; fracCount = 0; }
+    else { BigSetU64(bigN, fullMant); for (int i = 0; i < -e2; ++i) BigMulSmall(bigN, 5); fracCount = -e2; }
+}
+BigInt RoundScaled(BigInt bigN, int scale)  // round(bigN * 10^scale), ties→even
+{
+    if (scale >= 0) { for (int i = 0; i < scale; ++i) BigMulSmall(bigN, 10); return bigN; }
+    int k = -scale, rd = 0; bool rest = false;
+    for (int i = 0; i < k; ++i) { int d = (int)BigDivModSmall(bigN, 10); if (i == k - 1) rd = d; else if (d) rest = true; }
+    if (rd > 5 || (rd == 5 && (rest || (bigN.n > 0 && (bigN.w[0] & 1))))) BigInc(bigN);
+    return bigN;
+}
+int BigDecLen(BigInt a) { char t[1200]; return BigToDec(a, t); }
+
+int FmtFixedFromInt(char *out, bool sign, BigInt bigI, int p)
+{
+    char *q = out; if (sign) *q++ = '-';
+    char S[1200]; int M = BigToDec(bigI, S);
+    if (p == 0) { for (int i = 0; i < M; ++i) *q++ = S[i]; return (int)(q - out); }
+    if (M <= p) { *q++ = '0'; *q++ = '.'; for (int z = 0; z < p - M; ++z) *q++ = '0'; for (int i = 0; i < M; ++i) *q++ = S[i]; }
+    else { for (int i = 0; i < M - p; ++i) *q++ = S[i]; *q++ = '.'; for (int i = M - p; i < M; ++i) *q++ = S[i]; }
+    return (int)(q - out);
+}
+int FmtFixedP(char *out, bool sign, u64 fullMant, i32 e2, int p)
+{
+    BigInt bigN; int frac; BuildBigN(fullMant, e2, bigN, frac);
+    return FmtFixedFromInt(out, sign, RoundScaled(bigN, p - frac), p);
+}
+int FmtSciP(char *out, bool sign, u64 fullMant, i32 e2, int p)
+{
+    BigInt bigN; int frac; BuildBigN(fullMant, e2, bigN, frac);
+    int L = BigDecLen(bigN); i32 decExp = L - frac - 1;
+    char S[1200]; int M = BigToDec(RoundScaled(bigN, p - L + 1), S);
+    i32 X = decExp + (M - (p + 1));
+    char *q = out; if (sign) *q++ = '-';
+    *q++ = S[0];
+    if (p > 0) { *q++ = '.'; for (int i = 1; i <= p; ++i) *q++ = S[i]; }
+    return (int)(WriteExp(q, X) - out);
+}
+int FmtGeneralP(char *out, bool sign, u64 fullMant, i32 e2, int p)
+{
+    int P = p < 1 ? 1 : p;
+    BigInt bigN; int frac; BuildBigN(fullMant, e2, bigN, frac);
+    int L = BigDecLen(bigN); i32 decExp = L - frac - 1;
+    char S[1200]; int M = BigToDec(RoundScaled(bigN, P - L), S);
+    i32 X = decExp + (M - P);
+    char *q = out; if (sign) *q++ = '-';
+    if (X < -4 || X >= P) {
+        int fracEnd = P; while (fracEnd > 1 && S[fracEnd - 1] == '0') --fracEnd;
+        *q++ = S[0];
+        if (fracEnd > 1) { *q++ = '.'; for (int i = 1; i < fracEnd; ++i) *q++ = S[i]; }
+        q = WriteExp(q, X);
+    } else if (X >= 0) {
+        int intLen = X + 1;
+        if (intLen >= P) { for (int i = 0; i < P; ++i) *q++ = S[i]; for (int z = 0; z < intLen - P; ++z) *q++ = '0'; }
+        else { int fracEnd = P; while (fracEnd > intLen && S[fracEnd - 1] == '0') --fracEnd;
+               for (int i = 0; i < intLen; ++i) *q++ = S[i];
+               if (fracEnd > intLen) { *q++ = '.'; for (int i = intLen; i < fracEnd; ++i) *q++ = S[i]; } }
+    } else {
+        int fracEnd = P; while (fracEnd > 0 && S[fracEnd - 1] == '0') --fracEnd;
+        *q++ = '0';
+        if (fracEnd > 0) { *q++ = '.'; for (int z = 0; z < -X - 1; ++z) *q++ = '0'; for (int i = 0; i < fracEnd; ++i) *q++ = S[i]; }
+    }
+    return (int)(q - out);
+}
+int FmtZeroP(char *out, bool sign, int mode, int p)
+{
+    char *q = out; if (sign) *q++ = '-';
+    if (mode == M_GENERAL) { *q++ = '0'; return (int)(q - out); }
+    *q++ = '0';
+    if (p > 0) { *q++ = '.'; for (int i = 0; i < p; ++i) *q++ = '0'; }
+    if (mode == M_SCI) { *q++ = 'e'; *q++ = '+'; *q++ = '0'; *q++ = '0'; }
+    return (int)(q - out);
+}
+// Hex with precision does NOT normalize (subnormal keeps a leading 0; a
+// rounding carry just grows the leading digit 0→1 or 1→2) — unlike the
+// no-precision hex above.
+int FmtHexP(char *out, bool sign, int lead, i32 binExp, u64 frac, int fracBits, int p)
+{
+    char *q = out; if (sign) *q++ = '-';
+    int nibbles = fracBits / 4;  // 13 (double) or 6 (float, frac pre-shifted)
+    if (p < nibbles) {
+        int keepBits = 4 * p, shift = fracBits - keepBits;
+        u64 kept  = keepBits ? (frac >> shift) : 0;
+        u64 rmask = frac & ((shift >= 64) ? ~0ull : ((1ull << shift) - 1));
+        u64 half  = (shift >= 1) ? (1ull << (shift - 1)) : 0;
+        bool up = rmask > half || (rmask == half && (keepBits ? (kept & 1) : (lead & 1)));
+        if (up) { if (keepBits) { ++kept; if (kept == (1ull << keepBits)) { kept = 0; ++lead; } } else ++lead; }
+        *q++ = (char)('0' + lead);
+        if (p > 0) { *q++ = '.'; for (int k = 0; k < p; ++k) { u32 nib = (u32)((kept >> (4 * (p - 1 - k))) & 0xF); *q++ = (char)(nib < 10 ? '0' + nib : 'a' + nib - 10); } }
+    } else {
+        *q++ = (char)('0' + lead); *q++ = '.';
+        for (int k = 0; k < nibbles; ++k) { u32 nib = (u32)((frac >> (4 * (nibbles - 1 - k))) & 0xF); *q++ = (char)(nib < 10 ? '0' + nib : 'a' + nib - 10); }
+        for (int k = nibbles; k < p; ++k) *q++ = '0';
+    }
+    *q++ = 'p';
+    if (binExp < 0) { *q++ = '-'; binExp = -binExp; } else *q++ = '+';
+    char tb[8]; int n = 0; do { tb[n++] = (char)('0' + binExp % 10); binExp /= 10; } while (binExp);
+    for (int k = n - 1; k >= 0; --k) *q++ = tb[k];
+    return (int)(q - out);
+}
+int RenderPrecDouble(char *out, double d, int mode, bool hex, int prec)
+{
+    u64 bits = __builtin_bit_cast(u64, d); bool sign = (bits >> 63) & 1;
+    u64 mant = bits & ((1ull << 52) - 1); u32 exp = (u32)((bits >> 52) & 0x7FF);
+    if (exp == 0x7FF) { char *p = out; if (sign) *p++ = '-'; const char *s = mant ? "nan" : "inf"; *p++ = s[0]; *p++ = s[1]; *p++ = s[2]; return (int)(p - out); }
+    if (hex) {
+        int lead; i32 binExp; u64 frac;
+        if (exp == 0 && mant == 0) { lead = 0; binExp = 0; frac = 0; }
+        else { lead = exp ? 1 : 0; binExp = exp ? (i32)exp - 1023 : -1022; frac = mant; }
+        return FmtHexP(out, sign, lead, binExp, frac, 52, prec);
+    }
+    if (exp == 0 && mant == 0) return FmtZeroP(out, sign, mode, prec);
+    u64 fullMant = exp == 0 ? mant : ((1ull << 52) | mant); i32 e2 = (i32)(exp == 0 ? 1 : exp) - 1075;
+    if (mode == M_FIXED) return FmtFixedP(out, sign, fullMant, e2, prec);
+    if (mode == M_SCI) return FmtSciP(out, sign, fullMant, e2, prec);
+    return FmtGeneralP(out, sign, fullMant, e2, prec);
+}
+int RenderPrecFloat(char *out, float f, int mode, bool hex, int prec)
+{
+    u32 bits = __builtin_bit_cast(u32, f); bool sign = (bits >> 31) & 1;
+    u32 mant = bits & ((1u << 23) - 1); u32 exp = (bits >> 23) & 0xFF;
+    if (exp == 0xFF) { char *p = out; if (sign) *p++ = '-'; const char *s = mant ? "nan" : "inf"; *p++ = s[0]; *p++ = s[1]; *p++ = s[2]; return (int)(p - out); }
+    if (hex) {
+        int lead; i32 binExp; u64 frac;
+        if (exp == 0 && mant == 0) { lead = 0; binExp = 0; frac = 0; }
+        else { lead = exp ? 1 : 0; binExp = exp ? (i32)exp - 127 : -126; frac = (u64)mant << 1; }
+        return FmtHexP(out, sign, lead, binExp, frac, 24, prec);
+    }
+    if (exp == 0 && mant == 0) return FmtZeroP(out, sign, mode, prec);
+    u64 fullMant = exp == 0 ? mant : ((1u << 23) | mant); i32 e2 = (i32)(exp == 0 ? 1 : exp) - 150;
+    if (mode == M_FIXED) return FmtFixedP(out, sign, fullMant, e2, prec);
+    if (mode == M_SCI) return FmtSciP(out, sign, fullMant, e2, prec);
+    return FmtGeneralP(out, sign, fullMant, e2, prec);
+}
+
 } // namespace
 
 namespace std {
@@ -542,6 +693,28 @@ to_chars_result to_chars(char *first, char *last, double value, chars_format fmt
     EnsureTables();
     bool hex; int mode = FmtToMode(fmt, hex);
     char buf[350]; int len = RenderDouble(buf, value, mode, hex);
+    return Commit(first, last, buf, len);
+}
+
+// 5-arg precision overloads. The scratch bounds the practical precision
+// (~1900 chars: sign + up to ~309 integer digits + point + fractional);
+// outputs beyond it are reported as value_too_large by Commit.
+to_chars_result to_chars(char *first, char *last, float value, chars_format fmt, int precision)
+{
+    EnsureTables();
+    bool hex; int mode = FmtToMode(fmt, hex);
+    if (precision < 0) precision = 0;
+    if (precision > 1500) precision = 1500;
+    char buf[2048]; int len = RenderPrecFloat(buf, value, mode, hex, precision);
+    return Commit(first, last, buf, len);
+}
+to_chars_result to_chars(char *first, char *last, double value, chars_format fmt, int precision)
+{
+    EnsureTables();
+    bool hex; int mode = FmtToMode(fmt, hex);
+    if (precision < 0) precision = 0;
+    if (precision > 1500) precision = 1500;
+    char buf[2048]; int len = RenderPrecDouble(buf, value, mode, hex, precision);
     return Commit(first, last, buf, len);
 }
 
