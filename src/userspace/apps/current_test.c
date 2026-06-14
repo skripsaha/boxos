@@ -94,7 +94,7 @@ int main(void)
         const char *tag = "current:test:stream";
         unsigned want = CURRENT_CAP_FRAMED | CURRENT_CAP_BACKPRESSURE
                       | CURRENT_CAP_CLOSEABLE | CURRENT_CAP_WRITE;
-        Current *w = current_open(tag, CURRENT_WRITE, 16, CURRENT_CREATE);
+        Current *w = current_open(tag, CURRENT_WRITE, 16, 0);   /* stream writer auto-creates */
         Current *r = current_open(tag, CURRENT_READ, 16, 0);
         int ok = w != NULL && r != NULL
               && (current_caps(w) & want) == want
