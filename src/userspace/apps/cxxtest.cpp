@@ -51,6 +51,7 @@
 #include <vector>
 
 #include "box/cxx/bay_memory_resource.h"
+#include "box/cxx/current.h"
 
 // A user-defined formatter (exercised in phase9b) — drives the type-erased
 // handle / FmtThunk path: the engine reaches it through a function pointer,
@@ -2515,6 +2516,70 @@ void Phase9c()
     printf("[CXX] PASS phase9c: <print> std::print/println -> console\n");
 }
 
+// ── phaseCurrent: box::current (the C++ face of the BoxOS Current spine) ────
+// Exercises the typed C++ layer over box/current.h: a framed Brook stream
+// (put/take + honest CURRENT_CLOSED), a TagFS file round-trip, small-item
+// padding, and the conventional log/screen channels with box::println.
+void PhaseCurrent()
+{
+    struct Sample { int id; unsigned tag; };
+
+    // Typed framed stream, same-cabin writer + reader.
+    {
+        box::current<Sample> w("cxx:current:stream", box::role::write, CURRENT_CREATE);
+        box::current<Sample> r("cxx:current:stream", box::role::read);
+        Check(bool(w) && bool(r), "phaseCurrent stream open");
+        bool put_ok = true;
+        for (int i = 0; i < 3; i++) put_ok = put_ok && w.put(Sample{i, (unsigned)(i * 11)});
+        Check(put_ok, "phaseCurrent stream put");
+        bool take_ok = true;
+        for (int i = 0; i < 3; i++) {
+            Sample s{};
+            take_ok = take_ok && r.take(s) && s.id == i && s.tag == (unsigned)(i * 11);
+        }
+        Check(take_ok, "phaseCurrent stream take");
+        w.close();
+        Sample drained{};
+        Check(!r.take(drained), "phaseCurrent stream CURRENT_CLOSED");
+    }
+
+    // Byte channel over a TagFS file: write, then read back.
+    {
+        const char *msg = "current<byte> over TagFS";  // 24 bytes
+        box::byte_current fw = box::file("cxx_current.dat", box::role::write);
+        std::size_t n = fw ? fw.write(msg, 24) : 0;
+        Check(n == 24, "phaseCurrent file write");
+        fw = box::byte_current{};   // release writer (RAII)
+
+        box::byte_current fr = box::file("cxx_current.dat", box::role::read, 0);
+        char back[25] = {};
+        int  rn = fr ? fr.read(back, 24) : -1;
+        Check(rn == 24 && std::string_view(back, 24) == msg, "phaseCurrent file read");
+        Check((fr.caps() & CURRENT_CAP_SEEKABLE) != 0, "phaseCurrent file seekable");
+    }
+
+    // Small item (2 bytes) through the typed layer — exercises frame padding.
+    {
+        box::current<std::uint16_t> w("cxx:current:small", box::role::write, CURRENT_CREATE);
+        box::current<std::uint16_t> r("cxx:current:small", box::role::read);
+        bool          ok = bool(w) && bool(r) && w.put(0xC0DE);
+        std::uint16_t v  = 0;
+        ok = ok && r.take(v) && v == 0xC0DE;
+        Check(ok, "phaseCurrent small-item padding");
+    }
+
+    // Conventional channels + formatted output (serial-/console-verifiable).
+    {
+        box::byte_current lg = box::log();
+        box::println(lg, "[CURRENT-CXX] log via box::println n={}", 7);
+        box::byte_current sc = box::screen();
+        box::println(sc, "[CURRENT-CXX] screen ok");
+        Check(bool(lg) && bool(sc), "phaseCurrent conventional channels");
+    }
+
+    printf("[CXX] PASS phaseCurrent: box::current (stream/file/log/screen)\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -2545,6 +2610,7 @@ int main()
     Phase9a4();
     Phase9b();
     Phase9c();
+    PhaseCurrent();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

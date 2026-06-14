@@ -208,6 +208,7 @@ BAY_TEST_BIN     = $(APPS_DIR)/bay_test.elf
 HTEST_BIN        = $(APPS_DIR)/htest.elf
 BROOK_TEST_BIN   = $(APPS_DIR)/brook_test.elf
 CXXTEST_BIN      = $(APPS_DIR)/cxxtest.elf
+CURRENT_TEST_BIN = $(APPS_DIR)/current_test.elf
 
 # Display server ELF
 DISPLAY_DIR = $(USERSPACE_DIR)/display
@@ -371,7 +372,7 @@ $(SHELL_BIN): $(USERSPACE_DIR)/boxlib/libbox.a
 	@echo "Shell binary: $@ ($$(stat -f%z $@ 2>/dev/null || stat -c%s $@ 2>/dev/null) bytes)"
 
 # Build apps (proca, procb, today, memtest)
-$(PROCA_BIN) $(PROCB_BIN) $(TODAY_BIN) $(MEMTEST_BIN) $(MTEST_BIN) $(CHAIN_BIN) $(DECKS_BIN) $(BENCH_BIN) $(TOUCH_TEST_BIN) $(TOUCH_STRESS_BIN) $(LIFECYCLE_BIN) $(PERSIST_BIN) $(WRITE_STRESS_BIN) $(WRITE_CONC_BIN) $(WRITE_OBS_BIN) $(COW_TEST_BIN) $(ANCHOR_TEST_BIN) $(BAY_TEST_BIN) $(BROOK_TEST_BIN) $(HTEST_BIN) $(CXXTEST_BIN): $(USERSPACE_DIR)/boxlib/libbox.a $(USERSPACE_DIR)/boxcxx/libboxcxx.a
+$(PROCA_BIN) $(PROCB_BIN) $(TODAY_BIN) $(MEMTEST_BIN) $(MTEST_BIN) $(CHAIN_BIN) $(DECKS_BIN) $(BENCH_BIN) $(TOUCH_TEST_BIN) $(TOUCH_STRESS_BIN) $(LIFECYCLE_BIN) $(PERSIST_BIN) $(WRITE_STRESS_BIN) $(WRITE_CONC_BIN) $(WRITE_OBS_BIN) $(COW_TEST_BIN) $(ANCHOR_TEST_BIN) $(BAY_TEST_BIN) $(BROOK_TEST_BIN) $(CURRENT_TEST_BIN) $(HTEST_BIN) $(CXXTEST_BIN): $(USERSPACE_DIR)/boxlib/libbox.a $(USERSPACE_DIR)/boxcxx/libboxcxx.a
 	@echo "Building apps..."
 	@cd $(APPS_DIR) && $(MAKE)
 	@echo "proca.elf: $$(stat -f%z $(PROCA_BIN) 2>/dev/null || stat -c%s $(PROCA_BIN) 2>/dev/null) bytes"
@@ -440,7 +441,7 @@ $(KERNEL_ELF): $(KERNEL_ENTRY_OBJ) $(C_OBJS) $(ASM_OBJS) $(SHELL_EMBED)
 
 
 # ==== DISK IMAGES ====
-$(IMAGE): $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(SHELL_BIN) $(PROCA_BIN) $(PROCB_BIN) $(TODAY_BIN) $(MEMTEST_BIN) $(MTEST_BIN) $(CHAIN_BIN) $(DECKS_BIN) $(BENCH_BIN) $(TOUCH_TEST_BIN) $(TOUCH_STRESS_BIN) $(LIFECYCLE_BIN) $(PERSIST_BIN) $(WRITE_STRESS_BIN) $(WRITE_CONC_BIN) $(WRITE_OBS_BIN) $(COW_TEST_BIN) $(ANCHOR_TEST_BIN) $(BAY_TEST_BIN) $(BROOK_TEST_BIN) $(HTEST_BIN) $(CXXTEST_BIN) $(DISPLAY_BIN) $(UTIL_ELFS) $(TAGFS_TOOL)
+$(IMAGE): $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(SHELL_BIN) $(PROCA_BIN) $(PROCB_BIN) $(TODAY_BIN) $(MEMTEST_BIN) $(MTEST_BIN) $(CHAIN_BIN) $(DECKS_BIN) $(BENCH_BIN) $(TOUCH_TEST_BIN) $(TOUCH_STRESS_BIN) $(LIFECYCLE_BIN) $(PERSIST_BIN) $(WRITE_STRESS_BIN) $(WRITE_CONC_BIN) $(WRITE_OBS_BIN) $(COW_TEST_BIN) $(ANCHOR_TEST_BIN) $(BAY_TEST_BIN) $(BROOK_TEST_BIN) $(CURRENT_TEST_BIN) $(HTEST_BIN) $(CXXTEST_BIN) $(DISPLAY_BIN) $(UTIL_ELFS) $(TAGFS_TOOL)
 	@echo "Creating disk image (10MB)..."
 	@dd if=/dev/zero of=$@ bs=512 count=20480 status=none
 	@echo "  Writing Stage1 (sector 0, 512 bytes)..."
@@ -473,6 +474,7 @@ $(IMAGE): $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(SHELL_BIN) $(PROCA_BIN) $(
 		$(ANCHOR_TEST_BIN)   "app,utility,test" \
 		$(BAY_TEST_BIN)      "app,utility,test" \
 		$(BROOK_TEST_BIN)    "app,utility,test" \
+		$(CURRENT_TEST_BIN)  "app,utility,test" \
 		$(HTEST_BIN)         "app,utility,test" \
 		$(CXXTEST_BIN)       "app,utility,test,cxx" \
 		$(UTILS_DIR)/help.elf    "utility" \
