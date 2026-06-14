@@ -543,72 +543,104 @@ BigInt RoundScaled(BigInt bigN, int scale)  // round(bigN * 10^scale), ties→ev
 }
 int BigDecLen(BigInt a) { char t[1200]; return BigToDec(a, t); }
 
-int FmtFixedFromInt(char *out, bool sign, BigInt bigI, int p)
-{
-    char *q = out; if (sign) *q++ = '-';
-    char S[1200]; int M = BigToDec(bigI, S);
-    if (p == 0) { for (int i = 0; i < M; ++i) *q++ = S[i]; return (int)(q - out); }
-    if (M <= p) { *q++ = '0'; *q++ = '.'; for (int z = 0; z < p - M; ++z) *q++ = '0'; for (int i = 0; i < M; ++i) *q++ = S[i]; }
-    else { for (int i = 0; i < M - p; ++i) *q++ = S[i]; *q++ = '.'; for (int i = M - p; i < M; ++i) *q++ = S[i]; }
-    return (int)(q - out);
-}
-int FmtFixedP(char *out, bool sign, u64 fullMant, i32 e2, int p)
+// Bounded output cursor — every precision formatter writes through it straight
+// into the caller's [first, last). Trailing-zero runs are clamped to the
+// buffer, so an arbitrarily large precision can never overrun: it simply
+// reports overflow (→ value_too_large), the only correct limit being the
+// caller's own buffer. The big-integer work is bounded by the value's exact
+// decimal (≤ ~767 digits) — precision excess is emitted as zeros, never as a
+// scaled-up big integer.
+struct OutBuf {
+    char       *p;
+    char *const end;
+    bool        of = false;
+    void put(char c) { if (p < end) *p++ = c; else of = true; }
+    void zeros(long n) { while (n-- > 0) put('0'); }
+    void run(const char *s, int n) { for (int i = 0; i < n; ++i) put(s[i]); }
+};
+
+constexpr int kExactDigits = 800;  // bound on a value's exact significant digits
+
+void FmtFixedP(OutBuf &o, bool sign, u64 fullMant, i32 e2, int p)
 {
     BigInt bigN; int frac; BuildBigN(fullMant, e2, bigN, frac);
-    return FmtFixedFromInt(out, sign, RoundScaled(bigN, p - frac), p);
+    if (sign) o.put('-');
+    char S[kExactDigits];
+    if (p < frac) {  // fewer fractional digits than exact → round (divide, bounded)
+        int M = BigToDec(RoundScaled(bigN, p - frac), S);
+        if (p == 0) { o.run(S, M); return; }
+        if (M <= p) { o.put('0'); o.put('.'); o.zeros(p - M); o.run(S, M); }
+        else { o.run(S, M - p); o.put('.'); o.run(S + (M - p), p); }
+        return;
+    }
+    int M = BigToDec(bigN, S);  // exact digits + (p - frac) trailing zeros
+    int intLen = M - frac;
+    if (intLen <= 0) o.put('0'); else o.run(S, intLen);
+    if (p > 0) {
+        o.put('.');
+        if (intLen <= 0) { o.zeros(-intLen); o.run(S, M); }
+        else o.run(S + intLen, frac);
+        o.zeros((long)p - frac);
+    }
 }
-int FmtSciP(char *out, bool sign, u64 fullMant, i32 e2, int p)
+void FmtSciP(OutBuf &o, bool sign, u64 fullMant, i32 e2, int p)
 {
     BigInt bigN; int frac; BuildBigN(fullMant, e2, bigN, frac);
     int L = BigDecLen(bigN); i32 decExp = L - frac - 1;
-    char S[1200]; int M = BigToDec(RoundScaled(bigN, p - L + 1), S);
-    i32 X = decExp + (M - (p + 1));
-    char *q = out; if (sign) *q++ = '-';
-    *q++ = S[0];
-    if (p > 0) { *q++ = '.'; for (int i = 1; i <= p; ++i) *q++ = S[i]; }
-    return (int)(WriteExp(q, X) - out);
+    if (sign) o.put('-');
+    char S[kExactDigits]; i32 X;
+    if (p + 1 < L) {  // round to p+1 significant digits (divide, bounded)
+        int M = BigToDec(RoundScaled(bigN, p - L + 1), S);
+        X = decExp + (M - (p + 1));
+        o.put(S[0]);
+        if (p > 0) { o.put('.'); o.run(S + 1, p); }
+    } else {  // all L significant digits + (p+1-L) trailing zeros
+        BigToDec(bigN, S); X = decExp;
+        o.put(S[0]);
+        if (p > 0) { o.put('.'); o.run(S + 1, L - 1); o.zeros((long)p - (L - 1)); }
+    }
+    char e[16]; o.run(e, (int)(WriteExp(e, X) - e));
 }
-int FmtGeneralP(char *out, bool sign, u64 fullMant, i32 e2, int p)
+void FmtGeneralP(OutBuf &o, bool sign, u64 fullMant, i32 e2, int p)
 {
     int P = p < 1 ? 1 : p;
     BigInt bigN; int frac; BuildBigN(fullMant, e2, bigN, frac);
     int L = BigDecLen(bigN); i32 decExp = L - frac - 1;
-    char S[1200]; int M = BigToDec(RoundScaled(bigN, P - L), S);
-    i32 X = decExp + (M - P);
-    char *q = out; if (sign) *q++ = '-';
+    if (sign) o.put('-');
+    char S[kExactDigits]; int M, X, sig;
+    if (P < L) { M = BigToDec(RoundScaled(bigN, P - L), S); X = decExp + (M - P); sig = P; }
+    else { M = BigToDec(bigN, S); X = decExp; sig = M; }  // P>=L: trailing zeros would strip
     if (X < -4 || X >= P) {
-        int fracEnd = P; while (fracEnd > 1 && S[fracEnd - 1] == '0') --fracEnd;
-        *q++ = S[0];
-        if (fracEnd > 1) { *q++ = '.'; for (int i = 1; i < fracEnd; ++i) *q++ = S[i]; }
-        q = WriteExp(q, X);
+        int fracEnd = sig; while (fracEnd > 1 && S[fracEnd - 1] == '0') --fracEnd;
+        o.put(S[0]);
+        if (fracEnd > 1) { o.put('.'); o.run(S + 1, fracEnd - 1); }
+        char e[16]; o.run(e, (int)(WriteExp(e, X) - e));
     } else if (X >= 0) {
         int intLen = X + 1;
-        if (intLen >= P) { for (int i = 0; i < P; ++i) *q++ = S[i]; for (int z = 0; z < intLen - P; ++z) *q++ = '0'; }
-        else { int fracEnd = P; while (fracEnd > intLen && S[fracEnd - 1] == '0') --fracEnd;
-               for (int i = 0; i < intLen; ++i) *q++ = S[i];
-               if (fracEnd > intLen) { *q++ = '.'; for (int i = intLen; i < fracEnd; ++i) *q++ = S[i]; } }
+        if (intLen >= sig) { o.run(S, sig); o.zeros((long)intLen - sig); }
+        else { int fracEnd = sig; while (fracEnd > intLen && S[fracEnd - 1] == '0') --fracEnd;
+               o.run(S, intLen);
+               if (fracEnd > intLen) { o.put('.'); o.run(S + intLen, fracEnd - intLen); } }
     } else {
-        int fracEnd = P; while (fracEnd > 0 && S[fracEnd - 1] == '0') --fracEnd;
-        *q++ = '0';
-        if (fracEnd > 0) { *q++ = '.'; for (int z = 0; z < -X - 1; ++z) *q++ = '0'; for (int i = 0; i < fracEnd; ++i) *q++ = S[i]; }
+        int fracEnd = sig; while (fracEnd > 0 && S[fracEnd - 1] == '0') --fracEnd;
+        o.put('0');
+        if (fracEnd > 0) { o.put('.'); o.zeros(-X - 1); o.run(S, fracEnd); }
     }
-    return (int)(q - out);
 }
-int FmtZeroP(char *out, bool sign, int mode, int p)
+void FmtZeroP(OutBuf &o, bool sign, int mode, int p)
 {
-    char *q = out; if (sign) *q++ = '-';
-    if (mode == M_GENERAL) { *q++ = '0'; return (int)(q - out); }
-    *q++ = '0';
-    if (p > 0) { *q++ = '.'; for (int i = 0; i < p; ++i) *q++ = '0'; }
-    if (mode == M_SCI) { *q++ = 'e'; *q++ = '+'; *q++ = '0'; *q++ = '0'; }
-    return (int)(q - out);
+    if (sign) o.put('-');
+    if (mode == M_GENERAL) { o.put('0'); return; }
+    o.put('0');
+    if (p > 0) { o.put('.'); o.zeros(p); }
+    if (mode == M_SCI) o.run("e+00", 4);
 }
 // Hex with precision does NOT normalize (subnormal keeps a leading 0; a
 // rounding carry just grows the leading digit 0→1 or 1→2) — unlike the
 // no-precision hex above.
-int FmtHexP(char *out, bool sign, int lead, i32 binExp, u64 frac, int fracBits, int p)
+void FmtHexP(OutBuf &o, bool sign, int lead, i32 binExp, u64 frac, int fracBits, int p)
 {
-    char *q = out; if (sign) *q++ = '-';
+    if (sign) o.put('-');
     int nibbles = fracBits / 4;  // 13 (double) or 6 (float, frac pre-shifted)
     if (p < nibbles) {
         int keepBits = 4 * p, shift = fracBits - keepBits;
@@ -617,52 +649,51 @@ int FmtHexP(char *out, bool sign, int lead, i32 binExp, u64 frac, int fracBits, 
         u64 half  = (shift >= 1) ? (1ull << (shift - 1)) : 0;
         bool up = rmask > half || (rmask == half && (keepBits ? (kept & 1) : (lead & 1)));
         if (up) { if (keepBits) { ++kept; if (kept == (1ull << keepBits)) { kept = 0; ++lead; } } else ++lead; }
-        *q++ = (char)('0' + lead);
-        if (p > 0) { *q++ = '.'; for (int k = 0; k < p; ++k) { u32 nib = (u32)((kept >> (4 * (p - 1 - k))) & 0xF); *q++ = (char)(nib < 10 ? '0' + nib : 'a' + nib - 10); } }
+        o.put((char)('0' + lead));
+        if (p > 0) { o.put('.'); for (int k = 0; k < p; ++k) { u32 nib = (u32)((kept >> (4 * (p - 1 - k))) & 0xF); o.put((char)(nib < 10 ? '0' + nib : 'a' + nib - 10)); } }
     } else {
-        *q++ = (char)('0' + lead); *q++ = '.';
-        for (int k = 0; k < nibbles; ++k) { u32 nib = (u32)((frac >> (4 * (nibbles - 1 - k))) & 0xF); *q++ = (char)(nib < 10 ? '0' + nib : 'a' + nib - 10); }
-        for (int k = nibbles; k < p; ++k) *q++ = '0';
+        o.put((char)('0' + lead)); o.put('.');
+        for (int k = 0; k < nibbles; ++k) { u32 nib = (u32)((frac >> (4 * (nibbles - 1 - k))) & 0xF); o.put((char)(nib < 10 ? '0' + nib : 'a' + nib - 10)); }
+        o.zeros((long)p - nibbles);
     }
-    *q++ = 'p';
-    if (binExp < 0) { *q++ = '-'; binExp = -binExp; } else *q++ = '+';
+    o.put('p');
+    if (binExp < 0) { o.put('-'); binExp = -binExp; } else o.put('+');
     char tb[8]; int n = 0; do { tb[n++] = (char)('0' + binExp % 10); binExp /= 10; } while (binExp);
-    for (int k = n - 1; k >= 0; --k) *q++ = tb[k];
-    return (int)(q - out);
+    for (int k = n - 1; k >= 0; --k) o.put(tb[k]);
 }
-int RenderPrecDouble(char *out, double d, int mode, bool hex, int prec)
+void RenderPrecDouble(OutBuf &o, double d, int mode, bool hex, int prec)
 {
     u64 bits = __builtin_bit_cast(u64, d); bool sign = (bits >> 63) & 1;
     u64 mant = bits & ((1ull << 52) - 1); u32 exp = (u32)((bits >> 52) & 0x7FF);
-    if (exp == 0x7FF) { char *p = out; if (sign) *p++ = '-'; const char *s = mant ? "nan" : "inf"; *p++ = s[0]; *p++ = s[1]; *p++ = s[2]; return (int)(p - out); }
+    if (exp == 0x7FF) { if (sign) o.put('-'); o.run(mant ? "nan" : "inf", 3); return; }
     if (hex) {
         int lead; i32 binExp; u64 frac;
         if (exp == 0 && mant == 0) { lead = 0; binExp = 0; frac = 0; }
         else { lead = exp ? 1 : 0; binExp = exp ? (i32)exp - 1023 : -1022; frac = mant; }
-        return FmtHexP(out, sign, lead, binExp, frac, 52, prec);
+        FmtHexP(o, sign, lead, binExp, frac, 52, prec); return;
     }
-    if (exp == 0 && mant == 0) return FmtZeroP(out, sign, mode, prec);
+    if (exp == 0 && mant == 0) { FmtZeroP(o, sign, mode, prec); return; }
     u64 fullMant = exp == 0 ? mant : ((1ull << 52) | mant); i32 e2 = (i32)(exp == 0 ? 1 : exp) - 1075;
-    if (mode == M_FIXED) return FmtFixedP(out, sign, fullMant, e2, prec);
-    if (mode == M_SCI) return FmtSciP(out, sign, fullMant, e2, prec);
-    return FmtGeneralP(out, sign, fullMant, e2, prec);
+    if (mode == M_FIXED) FmtFixedP(o, sign, fullMant, e2, prec);
+    else if (mode == M_SCI) FmtSciP(o, sign, fullMant, e2, prec);
+    else FmtGeneralP(o, sign, fullMant, e2, prec);
 }
-int RenderPrecFloat(char *out, float f, int mode, bool hex, int prec)
+void RenderPrecFloat(OutBuf &o, float f, int mode, bool hex, int prec)
 {
     u32 bits = __builtin_bit_cast(u32, f); bool sign = (bits >> 31) & 1;
     u32 mant = bits & ((1u << 23) - 1); u32 exp = (bits >> 23) & 0xFF;
-    if (exp == 0xFF) { char *p = out; if (sign) *p++ = '-'; const char *s = mant ? "nan" : "inf"; *p++ = s[0]; *p++ = s[1]; *p++ = s[2]; return (int)(p - out); }
+    if (exp == 0xFF) { if (sign) o.put('-'); o.run(mant ? "nan" : "inf", 3); return; }
     if (hex) {
         int lead; i32 binExp; u64 frac;
         if (exp == 0 && mant == 0) { lead = 0; binExp = 0; frac = 0; }
         else { lead = exp ? 1 : 0; binExp = exp ? (i32)exp - 127 : -126; frac = (u64)mant << 1; }
-        return FmtHexP(out, sign, lead, binExp, frac, 24, prec);
+        FmtHexP(o, sign, lead, binExp, frac, 24, prec); return;
     }
-    if (exp == 0 && mant == 0) return FmtZeroP(out, sign, mode, prec);
+    if (exp == 0 && mant == 0) { FmtZeroP(o, sign, mode, prec); return; }
     u64 fullMant = exp == 0 ? mant : ((1u << 23) | mant); i32 e2 = (i32)(exp == 0 ? 1 : exp) - 150;
-    if (mode == M_FIXED) return FmtFixedP(out, sign, fullMant, e2, prec);
-    if (mode == M_SCI) return FmtSciP(out, sign, fullMant, e2, prec);
-    return FmtGeneralP(out, sign, fullMant, e2, prec);
+    if (mode == M_FIXED) FmtFixedP(o, sign, fullMant, e2, prec);
+    else if (mode == M_SCI) FmtSciP(o, sign, fullMant, e2, prec);
+    else FmtGeneralP(o, sign, fullMant, e2, prec);
 }
 
 // ── from_chars (decimal/hex → float/double, correctly rounded) ─────────────
@@ -849,21 +880,19 @@ to_chars_result to_chars(char *first, char *last, double value, chars_format fmt
 // outputs beyond it are reported as value_too_large by Commit.
 to_chars_result to_chars(char *first, char *last, float value, chars_format fmt, int precision)
 {
-    EnsureTables();
     bool hex; int mode = FmtToMode(fmt, hex);
     if (precision < 0) precision = 0;
-    if (precision > 1500) precision = 1500;
-    char buf[2048]; int len = RenderPrecFloat(buf, value, mode, hex, precision);
-    return Commit(first, last, buf, len);
+    OutBuf o{first, last};
+    RenderPrecFloat(o, value, mode, hex, precision);
+    return o.of ? to_chars_result{last, errc::value_too_large} : to_chars_result{o.p, errc{}};
 }
 to_chars_result to_chars(char *first, char *last, double value, chars_format fmt, int precision)
 {
-    EnsureTables();
     bool hex; int mode = FmtToMode(fmt, hex);
     if (precision < 0) precision = 0;
-    if (precision > 1500) precision = 1500;
-    char buf[2048]; int len = RenderPrecDouble(buf, value, mode, hex, precision);
-    return Commit(first, last, buf, len);
+    OutBuf o{first, last};
+    RenderPrecDouble(o, value, mode, hex, precision);
+    return o.of ? to_chars_result{last, errc::value_too_large} : to_chars_result{o.p, errc{}};
 }
 
 // ── from_chars (floating-point) ─────────────────────────────────────────────
