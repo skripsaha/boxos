@@ -127,6 +127,8 @@ to_chars_result to_chars(char *first, char *last, float value);
 to_chars_result to_chars(char *first, char *last, double value);
 to_chars_result to_chars(char *first, char *last, float value, chars_format fmt);
 to_chars_result to_chars(char *first, char *last, double value, chars_format fmt);
+to_chars_result to_chars(char *first, char *last, float value, chars_format fmt, int precision);
+to_chars_result to_chars(char *first, char *last, double value, chars_format fmt, int precision);
 
 // ── from_chars (integer) ──────────────────────────────────────────────────
 
