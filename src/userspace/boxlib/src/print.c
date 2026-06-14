@@ -189,6 +189,41 @@ static void emit_run(const char *bytes, int len, Color fg, Color bg)
  * upper bound on input length — the loop keeps consuming until the source
  * NUL. The chunk size is purely an internal staging optimisation.
  * =========================================================================== */
+/* Stream `len` bytes through the UTF-8 filter (ASCII pass-through; each
+ * multi-byte sequence collapses to one '?') into fixed-size chunks, handing
+ * each chunk to emit_run with the current colours. Shared by print() and
+ * print_bytes() so the filter lives in exactly one place. */
+static void emit_filtered(const char* data, size_t len)
+{
+    char   chunk[256];
+    size_t src = 0;
+    while (src < len) {
+        int chunk_pos = 0;
+        while (chunk_pos < (int)sizeof(chunk) && src < len) {
+            unsigned char b = (unsigned char)data[src];
+            if (b < 0x80) {
+                chunk[chunk_pos++] = (char)b;
+                src++;
+            } else {
+                chunk[chunk_pos++] = '?';
+                int seq;
+                if (b < 0xC2)      seq = 1;
+                else if (b < 0xE0) seq = 2;
+                else if (b < 0xF0) seq = 3;
+                else if (b < 0xF5) seq = 4;
+                else               seq = 1;
+                src++;
+                for (int k = 1; k < seq && src < len; k++) {
+                    if (((unsigned char)data[src] & 0xC0) != 0x80) break;
+                    src++;
+                }
+            }
+        }
+        if (chunk_pos == 0) break;
+        emit_run(chunk, chunk_pos, g_color_fg, g_color_bg);
+    }
+}
+
 void print(const char* str)
 {
     if (!str) return;
@@ -201,40 +236,19 @@ void print(const char* str)
     bool we_began = false;
     if (g_io_mode == IO_MODE_VGA) { vga_begin(); we_began = true; }
 
-    char chunk[256];
-    while (*str) {
-        /* Find how many input bytes we can safely consume so the filtered
-         * output stays within `chunk`. Worst case: every byte is multi-byte
-         * UTF-8 and emits one '?'. So consume up to sizeof(chunk) source
-         * bytes — guarantees output ≤ sizeof(chunk). */
-        int src_consumed = 0;
-        int chunk_pos    = 0;
-        while (chunk_pos < (int)sizeof(chunk) &&
-               src_consumed < (int)sizeof(chunk) && str[src_consumed] != '\0') {
-            unsigned char b = (unsigned char)str[src_consumed];
-            if (b < 0x80) {
-                chunk[chunk_pos++] = (char)b;
-                src_consumed++;
-            } else {
-                chunk[chunk_pos++] = '?';
-                int seq;
-                if (b < 0xC2)      seq = 1;
-                else if (b < 0xE0) seq = 2;
-                else if (b < 0xF0) seq = 3;
-                else if (b < 0xF5) seq = 4;
-                else               seq = 1;
-                src_consumed++;
-                for (int k = 1; k < seq; k++) {
-                    if (str[src_consumed] == '\0') break;
-                    if (((unsigned char)str[src_consumed] & 0xC0) != 0x80) break;
-                    src_consumed++;
-                }
-            }
-        }
-        if (chunk_pos == 0) break;
-        emit_run(chunk, chunk_pos, g_color_fg, g_color_bg);
-        str += src_consumed;
-    }
+    emit_filtered(str, strlen(str));
+
+    if (we_began) vga_commit();
+}
+
+void print_bytes(const char* data, size_t len)
+{
+    if (!data || len == 0) return;
+
+    bool we_began = false;
+    if (g_io_mode == IO_MODE_VGA) { vga_begin(); we_began = true; }
+
+    emit_filtered(data, len);
 
     if (we_began) vga_commit();
 }
