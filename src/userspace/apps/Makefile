@@ -63,7 +63,7 @@ BOXLIB_START = ../build/boxlib_start.o
 
 .PHONY: all clean
 
-all: proca.elf procb.elf today.elf memtest.elf mtest.elf chain.elf decks.elf bench.elf touch_test.elf touch_stress.elf lifecycle.elf persist.elf write_stress.elf write_concurrent.elf write_observer.elf cow_test.elf anchor_test.elf bay_test.elf brook_test.elf htest.elf cxxtest.elf
+all: proca.elf procb.elf today.elf memtest.elf mtest.elf chain.elf decks.elf bench.elf touch_test.elf touch_stress.elf lifecycle.elf persist.elf write_stress.elf write_concurrent.elf write_observer.elf cow_test.elf anchor_test.elf bay_test.elf brook_test.elf current_test.elf htest.elf cxxtest.elf
 
 # ---- ELF binaries (stored in TagFS) ----
 proca.elf: $(BOXLIB_START) proca.o $(BOXLIB)
@@ -122,6 +122,9 @@ bay_test.elf: $(BOXLIB_START) bay_test.o $(BOXLIB)
 
 brook_test.elf: $(BOXLIB_START) brook_test.o $(BOXLIB)
 	$(CC) $(LDFLAGS) -o $@ $(BOXLIB_START) brook_test.o $(BOXLIB)
+
+current_test.elf: $(BOXLIB_START) current_test.o $(BOXLIB)
+	$(CC) $(LDFLAGS) -o $@ $(BOXLIB_START) current_test.o $(BOXLIB)
 
 htest.elf: $(BOXLIB_START) htest.o $(BOXLIB)
 	$(CC) $(LDFLAGS) -o $@ $(BOXLIB_START) htest.o $(BOXLIB)

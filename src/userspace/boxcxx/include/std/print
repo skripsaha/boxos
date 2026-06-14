@@ -21,6 +21,8 @@
 #include <string>
 #include <string_view>
 
+#include "box/current.h"   // route console output through the Current spine
+
 // boxlib console byte writer — routes to VGA or the display daemon, applies
 // the current colour and the console's UTF-8->'?' filtering. Declared here so
 // <print> need not pull the C header into namespace std.
@@ -29,9 +31,19 @@ extern "C" void print_bytes(const char *data, size_t len);
 namespace std {
 
 namespace __print {
+// Route std::print's console output through the BoxOS Current spine. The
+// "screen" Current's backend IS print_bytes, so the emitted bytes are
+// identical to a direct call (STRICT serial logs stay byte-exact) — but the
+// console now has a single road: the screen Current channel. The handle is
+// opened once per process and lives for its lifetime; flushing stays with the
+// shared io_buf (exit() / 256-byte threshold), unchanged. Falls back to a
+// direct print_bytes if the channel can't be opened.
 inline void ToConsole(string_view s)
 {
-    if (!s.empty()) print_bytes(s.data(), s.size());
+    if (s.empty()) return;
+    static ::Current *screen = ::current_open("screen", CURRENT_WRITE, 0, 0);
+    if (screen) ::current_write(screen, s.data(), s.size());
+    else        print_bytes(s.data(), s.size());
 }
 } // namespace __print
 
