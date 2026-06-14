@@ -42,7 +42,7 @@ typedef uint32_t error_t;
 #define ERR_WRITE_FAILED        202
 #define ERR_DEVICE_NOT_READY    203
 #define ERR_DEVICE_ERROR        204
-#define ERR_END_OF_FILE         205
+#define ERR_STREAM_CLOSED       205
 #define ERR_DISK_FULL           206
 #define ERR_BAD_SECTOR          207
 

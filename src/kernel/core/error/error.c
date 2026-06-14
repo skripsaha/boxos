@@ -89,8 +89,8 @@ const char* ErrorString(error_t err) {
             return "Device not ready";
         case ERR_DEVICE_ERROR:
             return "Device error";
-        case ERR_END_OF_FILE:
-            return "End of file";
+        case ERR_STREAM_CLOSED:
+            return "Stream closed";
         case ERR_DISK_FULL:
             return "Disk full";
         case ERR_BAD_SECTOR:
