@@ -7,8 +7,9 @@
 //
 // Deferred (tracked in the epic's leftovers): constexpr strings (needs
 // the compiler-blessed constexpr allocator), to_string for floating
-// point + the stoi/stof family (Ф9A <charconv>), getline/iostream
-// integration (Ф9B).
+// point + the stof/stod family (Ф9A-2/9A-3, awaiting Ryu/Eisel-Lemire),
+// getline/iostream integration (Ф9B). The integer sto* family below is
+// wired on <charconv>.
 #ifndef BOXCXX_STRING
 #define BOXCXX_STRING
 
@@ -16,10 +17,12 @@
 #include <__bits/char_traits>
 #include <__bits/iterator_core>
 #include <__bits/throw_helpers>
+#include <charconv>
 #include <compare>
 #include <cstddef>
 #include <cstdint>
 #include <initializer_list>
+#include <limits>
 #include <string_view>
 #include <type_traits>
 #include <utility>
@@ -1002,6 +1005,90 @@ inline string SignedToString(S value)
     return out;
 }
 
+// The integer sto* family is specified "as if by strtol" ([string.conversions]),
+// which is more permissive than std::from_chars: it skips "C"-locale leading
+// whitespace, accepts an optional +/- sign, honours a 0x/0X prefix for base 16,
+// and auto-detects the base when base == 0. That permissive preamble lives here;
+// the magnitude itself is then read through std::from_chars (one digit-loop,
+// one overflow check). No conversion → invalid_argument; out of the target
+// range → out_of_range; on success *pos receives the consumed prefix length.
+
+inline bool IsSpaceC(char c)
+{
+    return c == ' ' || c == '\t' || c == '\n' || c == '\v' || c == '\f' ||
+           c == '\r';
+}
+
+inline bool IsHexDigit(char c)
+{
+    return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
+           (c >= 'A' && c <= 'F');
+}
+
+template <typename T>
+T ParseSto(const string &str, size_t *pos, int base, const char *fname)
+{
+    const char *const begin = str.c_str();
+    const char *const end   = begin + str.size();
+    const char       *p     = begin;
+
+    while (p != end && IsSpaceC(*p)) ++p;
+
+    bool neg = false;
+    if (p != end && (*p == '+' || *p == '-')) {
+        neg = (*p == '-');
+        ++p;
+    }
+
+    // Resolve the effective base and consume a "0x" prefix only when it is
+    // genuinely followed by a hex digit — matching strtol, which otherwise
+    // treats the leading '0' as the value and stops at 'x'.
+    int eff = base;
+    if (base == 0) {
+        if (p != end && *p == '0') {
+            if (end - p >= 3 && (p[1] == 'x' || p[1] == 'X') &&
+                IsHexDigit(p[2])) {
+                eff = 16;
+                p += 2;
+            } else {
+                eff = 8;  // leading '0' stays a digit; bare "0" parses to 0
+            }
+        } else {
+            eff = 10;
+        }
+    } else if (base == 16) {
+        if (end - p >= 3 && p[0] == '0' && (p[1] == 'x' || p[1] == 'X') &&
+            IsHexDigit(p[2])) {
+            p += 2;
+        }
+    }
+
+    unsigned long long mag = 0;
+    from_chars_result  r   = from_chars(p, end, mag, eff);
+    if (r.ec == errc::invalid_argument) boxcxx::ThrowInvalidArgument(fname);
+    if (r.ec == errc::result_out_of_range) boxcxx::ThrowOutOfRange(fname);
+
+    T value;
+    if constexpr (is_signed_v<T>) {
+        using UT                       = make_unsigned_t<T>;
+        const unsigned long long bound = neg
+            ? static_cast<unsigned long long>(numeric_limits<T>::max()) + 1ull
+            : static_cast<unsigned long long>(numeric_limits<T>::max());
+        if (mag > bound) boxcxx::ThrowOutOfRange(fname);
+        value = neg ? static_cast<T>(static_cast<UT>(0) - static_cast<UT>(mag))
+                    : static_cast<T>(mag);
+    } else {
+        if (mag > static_cast<unsigned long long>(numeric_limits<T>::max()))
+            boxcxx::ThrowOutOfRange(fname);
+        // strtoul-style: a leading '-' negates (wraps) within the target.
+        value = neg ? static_cast<T>(T(0) - static_cast<T>(mag))
+                    : static_cast<T>(mag);
+    }
+
+    if (pos) *pos = static_cast<size_t>(r.ptr - begin);
+    return value;
+}
+
 } // namespace __string_impl
 
 inline string to_string(int v) { return __string_impl::SignedToString(v); }
@@ -1021,6 +1108,32 @@ inline string to_string(unsigned long v)
 inline string to_string(unsigned long long v)
 {
     return __string_impl::UnsignedToString(v);
+}
+
+// Integer sto* family ([string.conversions]). The stof/stod/stold
+// floating-point siblings arrive with Ф9A-2/9A-3 (own Ryu/Eisel-Lemire).
+
+inline int stoi(const string &str, size_t *pos = nullptr, int base = 10)
+{
+    return __string_impl::ParseSto<int>(str, pos, base, "stoi");
+}
+inline long stol(const string &str, size_t *pos = nullptr, int base = 10)
+{
+    return __string_impl::ParseSto<long>(str, pos, base, "stol");
+}
+inline long long stoll(const string &str, size_t *pos = nullptr, int base = 10)
+{
+    return __string_impl::ParseSto<long long>(str, pos, base, "stoll");
+}
+inline unsigned long stoul(const string &str, size_t *pos = nullptr,
+                           int base = 10)
+{
+    return __string_impl::ParseSto<unsigned long>(str, pos, base, "stoul");
+}
+inline unsigned long long stoull(const string &str, size_t *pos = nullptr,
+                                 int base = 10)
+{
+    return __string_impl::ParseSto<unsigned long long>(str, pos, base, "stoull");
 }
 
 } // namespace std
