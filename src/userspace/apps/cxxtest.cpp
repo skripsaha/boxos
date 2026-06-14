@@ -52,6 +52,32 @@
 
 #include "box/cxx/bay_memory_resource.h"
 
+// A user-defined formatter (exercised in phase9b) — drives the type-erased
+// handle / FmtThunk path: the engine reaches it through a function pointer,
+// the user parse() consumes a custom 'v' flag, and format() recurses via
+// std::format_to(ctx.out(), ...). Must live at namespace scope to specialize
+// std::formatter.
+namespace cxxfmt {
+struct Point {
+    int x, y;
+};
+} // namespace cxxfmt
+template <> struct std::formatter<cxxfmt::Point> {
+    bool verbose = false;
+    constexpr auto parse(std::format_parse_context &pc)
+    {
+        auto it = pc.begin();
+        if (it != pc.end() && *it == 'v') { verbose = true; ++it; }
+        return it;
+    }
+    auto format(const cxxfmt::Point &p, std::format_context &ctx) const
+    {
+        return verbose
+                   ? std::format_to(ctx.out(), "Point(x={}, y={})", p.x, p.y)
+                   : std::format_to(ctx.out(), "({},{})", p.x, p.y);
+    }
+};
+
 namespace {
 
 int g_failures = 0;
@@ -2457,8 +2483,18 @@ void Phase9b()
         Check(threw, "phase9b vformat throws on bad spec");
     }
 
+    // user-defined formatter (type-erased handle / FmtThunk path, indirect
+    // call — relevant under CET/IBT; compiled with -fcf-protection=full)
+    Check(feq(std::format("{}", cxxfmt::Point{1, 2}), "(1,2)"),
+          "phase9b custom formatter default");
+    Check(feq(std::format("{:v}", cxxfmt::Point{3, 4}), "Point(x=3, y=4)"),
+          "phase9b custom formatter spec");
+    Check(feq(std::format("{} {:v}", cxxfmt::Point{1, 2}, cxxfmt::Point{5, 6}),
+              "(1,2) Point(x=5, y=6)"),
+          "phase9b custom formatter multi");
+
     printf("[CXX] PASS phase9b: <format> "
-           "(spec/formatters/dynamic/format_to/vformat)\n");
+           "(spec/formatters/dynamic/format_to/vformat/custom)\n");
 }
 
 // ── phase9c: <print> (Ф9B-2) ───────────────────────────────────────────
