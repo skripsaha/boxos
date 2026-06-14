@@ -1,0 +1,178 @@
+// boxcxx — <charconv>
+// Locale-independent primitive numeric conversion. This installment (Ф9A-1)
+// implements the integer to_chars/from_chars overloads; the floating-point
+// overloads (own Ryu shortest-round-trip formatting + Eisel-Lemire parsing)
+// arrive in Ф9A-2/9A-3 — chars_format is declared now because it is part of
+// the synopsis, but no integer overload references it.
+//
+// Integer to_chars/from_chars are constexpr in C++23 (P2291); the algorithms
+// here allocate nothing and are usable in constant expressions.
+//
+// Deliberately strict, exactly as the standard mandates and unlike the
+// strtol-shaped sto* family in <string>: no leading whitespace, no '+'
+// sign, no base prefix, no base-0 auto-detection.
+#ifndef BOXCXX_CHARCONV
+#define BOXCXX_CHARCONV
+
+#include <__bits/core_traits>  // __bits::IsAnyOf
+#include <__bits/errc>
+#include <cstddef>
+#include <limits>
+#include <type_traits>
+
+namespace std {
+
+// ── result types ([charconv.syn]) ───────────────────────────────────────
+
+struct to_chars_result {
+    char *ptr;
+    errc  ec;
+    friend bool operator==(const to_chars_result &,
+                           const to_chars_result &) = default;
+};
+
+struct from_chars_result {
+    const char *ptr;
+    errc        ec;
+    friend bool operator==(const from_chars_result &,
+                           const from_chars_result &) = default;
+};
+
+// Floating-point format selector — consumed by the FP overloads in a later
+// installment. Within the enum body the enumerators carry the underlying
+// type, so `fixed | scientific` is an ordinary integer bit-or.
+enum class chars_format {
+    scientific = 1,
+    fixed      = 2,
+    hex        = 4,
+    general    = fixed | scientific,
+};
+
+namespace __charconv {
+
+// charconv's integer set ([charconv.syn]): the standard signed/unsigned
+// integer types plus char. Excludes bool, wchar_t and the char8/16/32_t
+// family — matching the conforming surface and keeping make_unsigned in
+// well-trodden territory (no __int128).
+template <class T>
+inline constexpr bool IsInt = __bits::IsAnyOf<
+    remove_cv_t<T>, char, signed char, unsigned char, short, unsigned short,
+    int, unsigned int, long, unsigned long, long long, unsigned long long>;
+
+inline constexpr char kDigits[] = "0123456789abcdefghijklmnopqrstuvwxyz";
+
+// Decoded digit value of c, or -1 if c is not an alphanumeric digit. Case
+// folding for bases > 10 ('A'..'Z' == 'a'..'z'); the caller rejects values
+// that are >= base.
+constexpr int DigitValue(char c) noexcept
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'z') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'Z') return c - 'A' + 10;
+    return -1;
+}
+
+// Widest decimal-free case is a 64-bit magnitude in base 2 = 64 digits.
+inline constexpr int kMaxIntDigits = 64;
+
+} // namespace __charconv
+
+// ── to_chars (integer) ──────────────────────────────────────────────────
+
+template <class T>
+    requires __charconv::IsInt<T>
+constexpr to_chars_result to_chars(char *first, char *last, T value,
+                                   int base = 10)
+{
+    using U      = make_unsigned_t<remove_cv_t<T>>;
+    const unsigned b = static_cast<unsigned>(base);
+
+    bool neg = false;
+    U    mag;
+    if constexpr (is_signed_v<remove_cv_t<T>>) {
+        if (value < 0) {
+            neg = true;
+            mag = U(0) - static_cast<U>(value);  // two's-complement |value|
+        } else {
+            mag = static_cast<U>(value);
+        }
+    } else {
+        mag = static_cast<U>(value);
+    }
+
+    char  tmp[__charconv::kMaxIntDigits];
+    char *tp = tmp + sizeof(tmp);
+    do {
+        *--tp = __charconv::kDigits[mag % b];
+        mag /= b;
+    } while (mag != 0);
+
+    const ptrdiff_t ndigits = (tmp + sizeof(tmp)) - tp;
+    const ptrdiff_t total   = ndigits + (neg ? 1 : 0);
+    if (total > (last - first)) return {last, errc::value_too_large};
+
+    char *out = first;
+    if (neg) *out++ = '-';
+    while (tp != tmp + sizeof(tmp)) *out++ = *tp++;
+    return {out, errc{}};
+}
+
+to_chars_result to_chars(char *, char *, bool, int = 10) = delete;
+
+// ── from_chars (integer) ──────────────────────────────────────────────────
+
+template <class T>
+    requires __charconv::IsInt<T>
+constexpr from_chars_result from_chars(const char *first, const char *last,
+                                       T &value, int base = 10)
+{
+    using U                = make_unsigned_t<remove_cv_t<T>>;
+    constexpr bool kSigned = is_signed_v<remove_cv_t<T>>;
+    const unsigned b       = static_cast<unsigned>(base);
+
+    const char *p   = first;
+    bool        neg = false;
+    if constexpr (kSigned) {
+        if (p != last && *p == '-') {
+            neg = true;
+            ++p;
+        }
+    }
+
+    // Largest magnitude that fits the target: |max| for non-negative, and
+    // |min| (== max + 1 in two's complement) for a negative signed result.
+    U bound;
+    if constexpr (kSigned) {
+        bound = neg ? U(numeric_limits<T>::max()) + 1
+                    : U(numeric_limits<T>::max());
+    } else {
+        bound = numeric_limits<T>::max();
+    }
+
+    const char *digits_begin = p;
+    U           acc          = 0;
+    bool        overflow     = false;
+    while (p != last) {
+        const int d = __charconv::DigitValue(*p);
+        if (d < 0 || static_cast<unsigned>(d) >= b) break;
+        if (!overflow) {
+            if (acc > (bound - U(d)) / U(b)) overflow = true;
+            else acc = acc * U(b) + U(d);
+        }
+        ++p;
+    }
+
+    if (p == digits_begin) return {first, errc::invalid_argument};
+    if (overflow) return {p, errc::result_out_of_range};
+
+    if constexpr (kSigned) {
+        value = neg ? static_cast<T>(U(0) - acc) : static_cast<T>(acc);
+    } else {
+        value = static_cast<T>(acc);
+    }
+    return {p, errc{}};
+}
+
+} // namespace std
+
+#endif // BOXCXX_CHARCONV

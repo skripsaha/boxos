@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <charconv>
 #include <deque>
 #include <expected>
 #include <iterator>
@@ -1938,6 +1939,188 @@ void Phase8f()
     printf("[CXX] PASS phase8f: unordered local_iterator (per-bucket)\n");
 }
 
+// ── phase9a: <charconv> integer + sto* family ─────────────────────────────
+void Phase9a()
+{
+    char buf[64];
+
+    // to_chars: integer formatting
+    {
+        auto r = std::to_chars(buf, buf + sizeof(buf), 12345, 10);
+        Check(r.ec == std::errc{} &&
+                  std::string_view(buf, r.ptr - buf) == "12345",
+              "phase9a to_chars dec");
+    }
+    {
+        auto r = std::to_chars(buf, buf + sizeof(buf), -2147483647 - 1, 10);
+        Check(r.ec == std::errc{} &&
+                  std::string_view(buf, r.ptr - buf) == "-2147483648",
+              "phase9a to_chars INT_MIN");
+    }
+    {
+        auto r = std::to_chars(buf, buf + sizeof(buf), 0xDEADBEEFu, 16);
+        Check(r.ec == std::errc{} &&
+                  std::string_view(buf, r.ptr - buf) == "deadbeef",
+              "phase9a to_chars hex lowercase");
+    }
+    {
+        auto r = std::to_chars(buf, buf + sizeof(buf), 255u, 2);
+        Check(r.ec == std::errc{} &&
+                  std::string_view(buf, r.ptr - buf) == "11111111",
+              "phase9a to_chars base2");
+    }
+    {
+        auto r = std::to_chars(buf, buf + sizeof(buf), 35, 36);
+        Check(r.ec == std::errc{} && r.ptr == buf + 1 && buf[0] == 'z',
+              "phase9a to_chars base36");
+    }
+    {
+        auto r = std::to_chars(buf, buf + sizeof(buf), 0, 10);
+        Check(r.ec == std::errc{} && r.ptr == buf + 1 && buf[0] == '0',
+              "phase9a to_chars zero");
+    }
+    {
+        char small[3];
+        auto r = std::to_chars(small, small + 3, 12345, 10);
+        Check(r.ec == std::errc::value_too_large && r.ptr == small + 3,
+              "phase9a to_chars value_too_large");
+    }
+
+    // from_chars: integer parsing
+    {
+        int        v = 0;
+        const char s[] = "12345";
+        auto       r = std::from_chars(s, s + 5, v, 10);
+        Check(r.ec == std::errc{} && r.ptr == s + 5 && v == 12345,
+              "phase9a from_chars dec");
+    }
+    {
+        int        v = 0;
+        const char s[] = "-2147483648";
+        auto       r = std::from_chars(s, s + 11, v, 10);
+        Check(r.ec == std::errc{} && v == (-2147483647 - 1),
+              "phase9a from_chars INT_MIN");
+    }
+    {
+        unsigned   v = 0;
+        const char s[] = "DeadBeef";
+        auto       r = std::from_chars(s, s + 8, v, 16);
+        Check(r.ec == std::errc{} && v == 0xDEADBEEFu,
+              "phase9a from_chars hex case-insensitive");
+    }
+    {
+        int        v = 0;
+        const char s[] = "123abc";
+        auto       r = std::from_chars(s, s + 6, v, 10);
+        Check(r.ec == std::errc{} && r.ptr == s + 3 && v == 123,
+              "phase9a from_chars partial");
+    }
+    {
+        int        v = 7;
+        const char s[] = "zzz";
+        auto       r = std::from_chars(s, s + 3, v, 10);
+        Check(r.ec == std::errc::invalid_argument && r.ptr == s && v == 7,
+              "phase9a from_chars invalid");
+    }
+    {
+        int        v = 7;
+        const char s[] = "99999999999";
+        auto       r = std::from_chars(s, s + 11, v, 10);
+        Check(r.ec == std::errc::result_out_of_range && r.ptr == s + 11 &&
+                  v == 7,
+              "phase9a from_chars overflow");
+    }
+    {
+        unsigned   v = 7;
+        const char s[] = "-5";
+        auto       r = std::from_chars(s, s + 2, v, 10);
+        Check(r.ec == std::errc::invalid_argument && r.ptr == s && v == 7,
+              "phase9a from_chars unsigned rejects sign");
+    }
+
+    // to_chars/from_chars round-trip across bases
+    {
+        bool ok = true;
+        long long values[] = {0,
+                              1,
+                              -1,
+                              7,
+                              -7,
+                              1000000007LL,
+                              -1000000007LL,
+                              9223372036854775807LL,
+                              -9223372036854775807LL - 1};
+        int bases[] = {2, 8, 10, 16, 36};
+        for (long long val : values) {
+            for (int base : bases) {
+                char b[80];
+                auto w = std::to_chars(b, b + sizeof(b), val, base);
+                if (w.ec != std::errc{}) {
+                    ok = false;
+                    continue;
+                }
+                long long back = 0;
+                auto      rr   = std::from_chars(b, w.ptr, back, base);
+                if (rr.ec != std::errc{} || rr.ptr != w.ptr || back != val)
+                    ok = false;
+            }
+        }
+        Check(ok, "phase9a round-trip all bases");
+    }
+
+    // sto* family (strtol semantics)
+    {
+        size_t pos = 0;
+        Check(std::stoi("42") == 42, "phase9a stoi");
+        Check(std::stoi("-42") == -42, "phase9a stoi neg");
+        Check(std::stol("   123") == 123, "phase9a stol whitespace");
+        Check(std::stoll("+777") == 777, "phase9a stoll plus");
+        Check(std::stoi("123abc", &pos) == 123 && pos == 3, "phase9a stoi pos");
+        Check(std::stoi("0x1A", nullptr, 16) == 26, "phase9a stoi 0x prefix");
+        Check(std::stoi("0x1A", nullptr, 0) == 26, "phase9a stoi base0 hex");
+        Check(std::stoi("052", nullptr, 0) == 42, "phase9a stoi base0 octal");
+        Check(std::stoi("99", nullptr, 0) == 99, "phase9a stoi base0 dec");
+        pos = 99;
+        Check(std::stoi("0xZ", &pos, 0) == 0 && pos == 1,
+              "phase9a stoi 0x no-hexdigit");
+        Check(std::stoll("z", nullptr, 36) == 35, "phase9a stoll base36");
+        Check(std::stoul("-1") == static_cast<unsigned long>(-1),
+              "phase9a stoul negation wrap");
+        Check(std::stoull("18446744073709551615") == 18446744073709551615ULL,
+              "phase9a stoull ULLONG_MAX");
+    }
+    {
+        bool threw = false;
+        try {
+            std::stoi("abc");
+        } catch (const std::invalid_argument &) {
+            threw = true;
+        }
+        Check(threw, "phase9a stoi invalid_argument");
+        threw = false;
+        try {
+            std::stoi("2147483648");
+        } catch (const std::out_of_range &) {
+            threw = true;
+        }
+        Check(threw, "phase9a stoi out_of_range");
+        threw = false;
+        try {
+            std::stoull("99999999999999999999999");
+        } catch (const std::out_of_range &) {
+            threw = true;
+        }
+        Check(threw, "phase9a stoull out_of_range");
+    }
+    {
+        Check(std::stoll(std::to_string(-9223372036854775807LL - 1)) ==
+                  (-9223372036854775807LL - 1),
+              "phase9a to_string/stoll round-trip");
+    }
+
+    printf("[CXX] PASS phase9a: <charconv> integer + sto* family\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -1962,6 +2145,7 @@ int main()
     Phase8d();
     Phase8e();
     Phase8f();
+    Phase9a();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
