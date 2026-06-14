@@ -2246,6 +2246,85 @@ void Phase9a3()
     printf("[CXX] PASS phase9a3: <charconv> float precision + to_string\n");
 }
 
+// ── phase9a4: <charconv> float from_chars + stof/stod ──────────────────────
+void Phase9a4()
+{
+    using F = std::chars_format;
+    // round-trip: own to_chars → own from_chars must recover the exact value
+    auto rtd = [&](double d, const char *tag) {
+        char b[64]; auto w = std::to_chars(b, b + sizeof(b), d);
+        double v = 0; auto r = std::from_chars(b, w.ptr, v);
+        Check(r.ec == std::errc{} && r.ptr == w.ptr && v == d, tag);
+    };
+    double ds[] = {1.0, 0.5, 3.14159265358979, 1e20, 1e-20, 123456.789, -2.5,
+                   1e308, 5e-324, 2.2250738585072014e-308, 9007199254740993.0};
+    for (double d : ds) rtd(d, "phase9a4 round-trip double");
+    auto rtf = [&](float f, const char *tag) {
+        char b[64]; auto w = std::to_chars(b, b + sizeof(b), f);
+        float v = 0; auto r = std::from_chars(b, w.ptr, v);
+        Check(r.ec == std::errc{} && r.ptr == w.ptr && v == f, tag);
+    };
+    float fs[] = {1.0f, 0.1f, 3.14f, 1e20f, 1.4e-45f, 3.4028235e38f};
+    for (float f : fs) rtf(f, "phase9a4 round-trip float");
+
+    // known parses
+    {
+        double v = 0; const char s[] = "3.14159";
+        auto r = std::from_chars(s, s + 7, v);
+        Check(r.ec == std::errc{} && r.ptr == s + 7 && v == 3.14159,
+              "phase9a4 parse pi");
+    }
+    {
+        double v = 0; const char s[] = "1.5xyz";
+        auto r = std::from_chars(s, s + 6, v);
+        Check(r.ec == std::errc{} && r.ptr == s + 3 && v == 1.5,
+              "phase9a4 partial");
+    }
+    {
+        double v = 7; const char s[] = "abc";
+        auto r = std::from_chars(s, s + 3, v);
+        Check(r.ec == std::errc::invalid_argument && r.ptr == s && v == 7,
+              "phase9a4 invalid unmodified");
+    }
+    {
+        double v = 7; const char s[] = "1e309";  // overflow → value unmodified
+        auto r = std::from_chars(s, s + 5, v);
+        Check(r.ec == std::errc::result_out_of_range && v == 7,
+              "phase9a4 overflow unmodified");
+    }
+    {
+        double v = 0; const char s[] = "1.8p1";  // hex: 1.8_16 * 2^1 = 3.0
+        auto r = std::from_chars(s, s + 5, v, F::hex);
+        Check(r.ec == std::errc{} && v == 3.0, "phase9a4 hex");
+    }
+    {
+        double v = 0; const char s[] = "inf";
+        auto r = std::from_chars(s, s + 3, v);
+        Check(r.ec == std::errc{} && v > 1.7976931348623157e308, "phase9a4 inf");
+    }
+
+    // stof / stod (strtod preamble)
+    Check(std::stod("3.14") == 3.14, "phase9a4 stod");
+    Check(std::stod("   -2.5") == -2.5, "phase9a4 stod ws+sign");
+    Check(std::stof("3.14") == 3.14f, "phase9a4 stof");
+    Check(std::stod("0x1.8p1") == 3.0, "phase9a4 stod hex");
+    {
+        size_t pos = 0;
+        Check(std::stod("1.5e10abc", &pos) == 1.5e10 && pos == 6,
+              "phase9a4 stod pos");
+    }
+    {
+        bool threw = false;
+        try { std::stod("abc"); } catch (const std::invalid_argument &) { threw = true; }
+        Check(threw, "phase9a4 stod invalid_argument");
+        threw = false;
+        try { std::stod("1e400"); } catch (const std::out_of_range &) { threw = true; }
+        Check(threw, "phase9a4 stod out_of_range");
+    }
+
+    printf("[CXX] PASS phase9a4: <charconv> float from_chars + stof/stod\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -2273,6 +2352,7 @@ int main()
     Phase9a();
     Phase9a2();
     Phase9a3();
+    Phase9a4();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
