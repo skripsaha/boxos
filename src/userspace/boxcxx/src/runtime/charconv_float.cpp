@@ -24,9 +24,9 @@ using i32  = int32_t;
 using u128 = unsigned __int128;
 
 // ── minimal big integer (little-endian base 2^32) ────────────────────────
-// 140 words (~4480 bits) covers fullMant * 5^1074 for the smallest subnormal,
-// used by the exact-decimal precision path.
-constexpr int kBigWords = 140;
+// 160 words (~5120 bits) covers fullMant * 5^1074 (to_chars precision) and the
+// scaled numerator of long from_chars inputs.
+constexpr int kBigWords = 160;
 struct BigInt {
     u32 w[kBigWords];
     int n;  // number of significant words
@@ -665,6 +665,154 @@ int RenderPrecFloat(char *out, float f, int mode, bool hex, int prec)
     return FmtGeneralP(out, sign, fullMant, e2, prec);
 }
 
+// ── from_chars (decimal/hex → float/double, correctly rounded) ─────────────
+// Clinger fast-path for small double cases; otherwise exact big-integer
+// rounding of value = num/den to the nearest representable value (ties→even),
+// covering normal/subnormal/overflow/underflow.
+int BigCmpFull(const BigInt &a, const BigInt &b)
+{
+    if (a.n != b.n) return a.n > b.n ? 1 : -1;
+    for (int i = a.n - 1; i >= 0; --i)
+        if (a.w[i] != b.w[i]) return a.w[i] > b.w[i] ? 1 : -1;
+    return 0;
+}
+void BigSubFull(BigInt &a, const BigInt &b)  // a -= b, requires a >= b
+{
+    u64 borrow = 0;
+    for (int i = 0; i < a.n; ++i) {
+        u64 d = i < b.n ? b.w[i] : 0, c = (u64)a.w[i] - d - borrow;
+        a.w[i] = (u32)c; borrow = (c >> 63) & 1;
+    }
+    while (a.n > 0 && a.w[a.n - 1] == 0) --a.n;
+}
+u64 BigDivModFull(const BigInt &num, const BigInt &den, BigInt &rem)  // q (low64) + rem
+{
+    rem.n = 0;
+    BigInt q; for (int i = 0; i < kBigWords; ++i) q.w[i] = 0; q.n = 0;
+    for (int bit = BigBitLen(num) - 1; bit >= 0; --bit) {
+        BigInt t; BigShl(rem, 1, t); rem = t;
+        if ((num.w[bit / 32] >> (bit % 32)) & 1) { if (rem.n == 0) rem.n = 1; rem.w[0] |= 1; }
+        if (BigCmpFull(rem, den) >= 0) { BigSubFull(rem, den); q.w[bit / 32] |= (1u << (bit % 32)); if (bit / 32 + 1 > q.n) q.n = bit / 32 + 1; }
+    }
+    return (q.n > 0 ? q.w[0] : 0) | (q.n > 1 ? ((u64)q.w[1] << 32) : 0);
+}
+u64 RoundedQ(const BigInt &num, const BigInt &den, int shift)  // round(num*2^shift/den), ties→even
+{
+    BigInt sn, sd;
+    if (shift >= 0) { BigShl(num, shift, sn); sd = den; }
+    else { sn = num; BigShl(den, -shift, sd); }
+    BigInt rem; u64 q = BigDivModFull(sn, sd, rem);
+    BigInt rem2; BigShl(rem, 1, rem2); int c = BigCmpFull(rem2, sd);
+    if (c > 0 || (c == 0 && (q & 1))) ++q;
+    return q;
+}
+const double kPow10[23] = {1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11,
+                           1e12, 1e13, 1e14, 1e15, 1e16, 1e17, 1e18, 1e19, 1e20, 1e21, 1e22};
+u64 AssembleBits(bool neg, u64 ef, u64 mant, bool isFloat)
+{
+    return isFloat ? (((u64)neg << 31) | (ef << 23) | (mant & ((1u << 23) - 1)))
+                   : (((u64)neg << 63) | (ef << 52) | (mant & ((1ull << 52) - 1)));
+}
+void RoundToIeee(const BigInt &num, const BigInt &den, int P, int emin, int emax, u64 &ef, u64 &mant, bool &oor)
+{
+    int e2 = BigBitLen(num) - BigBitLen(den) - 1;
+    u64 q = RoundedQ(num, den, (P - 1) - e2); int g = 0;
+    while (q >= (1ull << P)) { ++e2; q = RoundedQ(num, den, (P - 1) - e2); if (++g > 6) break; }
+    while (q < (1ull << (P - 1))) { --e2; q = RoundedQ(num, den, (P - 1) - e2); if (++g > 6) break; }
+    if (e2 > emax) { oor = true; ef = (u64)(emax - emin + 2); mant = 0; return; }
+    if (e2 >= emin) { ef = (u64)(e2 - emin + 1); mant = q - (1ull << (P - 1)); return; }
+    int subShift = -emin + (P - 1);
+    u64 qs = RoundedQ(num, den, subShift);
+    if (qs == 0) { oor = true; ef = 0; mant = 0; return; }
+    if (qs >= (1ull << (P - 1))) { ef = 1; mant = qs - (1ull << (P - 1)); return; }
+    ef = 0; mant = qs;
+}
+u64 DigitsToBits(bool neg, const char *dig, int ndig, int E, bool isFloat, bool &oor)
+{
+    oor = false;
+    int i0 = 0; while (i0 < ndig && dig[i0] == '0') ++i0;
+    int hi = ndig; while (hi > i0 && dig[hi - 1] == '0') { --hi; ++E; }
+    if (hi - i0 == 0) return isFloat ? ((u64)neg << 31) : ((u64)neg << 63);
+    if (!isFloat && hi - i0 <= 15 && E >= -22 && E <= 22) {
+        u64 m = 0; for (int i = i0; i < hi; ++i) m = m * 10 + (dig[i] - '0');
+        double d = (double)m; d = E >= 0 ? d * kPow10[E] : d / kPow10[-E]; if (neg) d = -d;
+        return __builtin_bit_cast(u64, d);
+    }
+    BigInt num; BigSetU64(num, 0);
+    for (int i = i0; i < hi; ++i) {
+        BigMulSmall(num, 10);
+        u64 carry = (u64)(dig[i] - '0');
+        for (int k = 0; k < num.n && carry; ++k) { u64 s = (u64)num.w[k] + carry; num.w[k] = (u32)s; carry = s >> 32; }
+        if (carry) num.w[num.n++] = (u32)carry;
+    }
+    BigInt den; BigSetU64(den, 1);
+    if (E >= 0) { for (int i = 0; i < E; ++i) BigMulSmall(num, 10); }
+    else { for (int i = 0; i < -E; ++i) BigMulSmall(den, 10); }
+    u64 ef, mant; int P = isFloat ? 24 : 53, emin = isFloat ? -126 : -1022, emax = isFloat ? 127 : 1023;
+    RoundToIeee(num, den, P, emin, emax, ef, mant, oor);
+    return AssembleBits(neg, ef, mant, isFloat);
+}
+int HexVal(char c) { if (c >= '0' && c <= '9') return c - '0'; if (c >= 'a' && c <= 'f') return c - 'a' + 10; if (c >= 'A' && c <= 'F') return c - 'A' + 10; return -1; }
+bool CharIs(char c, char l) { return (c | 0x20) == l; }
+
+// Parse a float/double; returns consumed length, fills bits, sets ec (0/EINVAL=22/ERANGE=34).
+int ParseFp(const char *first, const char *last, int mode, bool hex, bool isFloat, u64 &bits, int &ec)
+{
+    int P = isFloat ? 24 : 53; u64 infExp = isFloat ? 255 : 2047, quiet = 1ull << (P - 2);
+    const char *p = first; bool neg = false;
+    if (p < last && *p == '-') { neg = true; ++p; }
+    if (p < last && CharIs(*p, 'i') && last - p >= 3 && CharIs(p[0], 'i') && CharIs(p[1], 'n') && CharIs(p[2], 'f')) {
+        const char *q = p + 3;
+        if (last - p >= 8 && CharIs(p[3], 'i') && CharIs(p[4], 'n') && CharIs(p[5], 'i') && CharIs(p[6], 't') && CharIs(p[7], 'y')) q = p + 8;
+        bits = AssembleBits(neg, infExp, 0, isFloat); ec = 0; return (int)(q - first);
+    }
+    if (p < last && CharIs(*p, 'n') && last - p >= 3 && CharIs(p[0], 'n') && CharIs(p[1], 'a') && CharIs(p[2], 'n')) {
+        bits = AssembleBits(neg, infExp, quiet, isFloat); ec = 0; return (int)(p + 3 - first);
+    }
+    if (hex) {
+        u64 hm = 0; int hbits = 0, binexp = 0; bool seenDot = false, any = false;
+        for (; p < last; ++p) {
+            if (*p == '.') { if (seenDot) break; seenDot = true; continue; }
+            int v = HexVal(*p); if (v < 0) break; any = true;
+            if (hbits < 60) { hm = (hm << 4) | v; hbits += 4; if (seenDot) binexp -= 4; }
+            else if (!seenDot) binexp += 4;
+        }
+        if (!any) { ec = 22; return 0; }
+        if (p < last && CharIs(*p, 'p')) { const char *ep = p + 1; bool en = false; if (ep < last && (*ep == '+' || *ep == '-')) { en = *ep == '-'; ++ep; } if (ep < last && *ep >= '0' && *ep <= '9') { int ev = 0; while (ep < last && *ep >= '0' && *ep <= '9') { ev = ev * 10 + (*ep - '0'); ++ep; } binexp += en ? -ev : ev; p = ep; } }
+        if (hm == 0) { bits = AssembleBits(neg, 0, 0, isFloat); ec = 0; return (int)(p - first); }
+        BigInt num; BigSetU64(num, hm); BigInt den; BigSetU64(den, 1);
+        if (binexp >= 0) { BigInt t; BigShl(num, binexp, t); num = t; } else { BigInt t; BigShl(den, -binexp, t); den = t; }
+        u64 ef, mant; bool oor = false;
+        RoundToIeee(num, den, P, isFloat ? -126 : -1022, isFloat ? 127 : 1023, ef, mant, oor);
+        bits = AssembleBits(neg, ef, mant, isFloat); ec = oor ? 34 : 0; return (int)(p - first);
+    }
+    char dig[1300]; int ndig = 0, E = 0; bool seenDot = false, any = false;
+    for (; p < last; ++p) {
+        if (*p == '.') { if (seenDot) break; seenDot = true; continue; }
+        if (*p < '0' || *p > '9') break;
+        any = true;
+        if (ndig < 1290) { dig[ndig++] = *p; if (seenDot) --E; }
+        else if (!seenDot) ++E;
+    }
+    if (!any) { ec = 22; return 0; }
+    const char *afterMant = p;
+    if (mode != M_FIXED && p < last && CharIs(*p, 'e')) {
+        const char *ep = p + 1; bool en = false; if (ep < last && (*ep == '+' || *ep == '-')) { en = *ep == '-'; ++ep; }
+        if (ep < last && *ep >= '0' && *ep <= '9') { long ev = 0; while (ep < last && *ep >= '0' && *ep <= '9') { if (ev < 100000) ev = ev * 10 + (*ep - '0'); ++ep; } E += (int)(en ? -ev : ev); p = ep; }
+        else if (mode == M_SCI) { ec = 22; return 0; }
+        else p = afterMant;
+    } else if (mode == M_SCI) { ec = 22; return 0; }
+    bool oor = false; bits = DigitsToBits(neg, dig, ndig, E, isFloat, oor);
+    ec = oor ? 34 : 0; return (int)(p - first);
+}
+int FmtToParseMode(std::chars_format fmt, bool &hex)
+{
+    hex = fmt == std::chars_format::hex;
+    if (fmt == std::chars_format::scientific) return M_SCI;
+    if (fmt == std::chars_format::fixed) return M_FIXED;
+    return M_GENERAL;
+}
+
 } // namespace
 
 namespace std {
@@ -716,6 +864,29 @@ to_chars_result to_chars(char *first, char *last, double value, chars_format fmt
     if (precision > 1500) precision = 1500;
     char buf[2048]; int len = RenderPrecDouble(buf, value, mode, hex, precision);
     return Commit(first, last, buf, len);
+}
+
+// ── from_chars (floating-point) ─────────────────────────────────────────────
+// value is written only on success; left unmodified on invalid_argument /
+// result_out_of_range, per [charconv.from.chars].
+static errc ParseEc(int ec)
+{
+    return ec == 22 ? errc::invalid_argument
+                    : ec == 34 ? errc::result_out_of_range : errc{};
+}
+from_chars_result from_chars(const char *first, const char *last, float &value, chars_format fmt)
+{
+    bool hex; int mode = FmtToParseMode(fmt, hex);
+    u64 bits; int ec; int n = ParseFp(first, last, mode, hex, true, bits, ec);
+    if (ec == 0) value = __builtin_bit_cast(float, (uint32_t)bits);
+    return {first + n, ParseEc(ec)};
+}
+from_chars_result from_chars(const char *first, const char *last, double &value, chars_format fmt)
+{
+    bool hex; int mode = FmtToParseMode(fmt, hex);
+    u64 bits; int ec; int n = ParseFp(first, last, mode, hex, false, bits, ec);
+    if (ec == 0) value = __builtin_bit_cast(double, bits);
+    return {first + n, ParseEc(ec)};
 }
 
 } // namespace std

@@ -184,6 +184,14 @@ constexpr from_chars_result from_chars(const char *first, const char *last,
     return {p, errc{}};
 }
 
+// ── from_chars (floating-point) ─────────────────────────────────────────
+// Clinger fast-path + exact big-integer rounding; defined in
+// src/runtime/charconv_float.cpp. value is left unmodified on error.
+from_chars_result from_chars(const char *first, const char *last, float &value,
+                             chars_format fmt = chars_format::general);
+from_chars_result from_chars(const char *first, const char *last, double &value,
+                             chars_format fmt = chars_format::general);
+
 } // namespace std
 
 #endif // BOXCXX_CHARCONV

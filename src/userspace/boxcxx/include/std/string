@@ -1146,6 +1146,51 @@ inline unsigned long long stoull(const string &str, size_t *pos = nullptr,
     return __string_impl::ParseSto<unsigned long long>(str, pos, base, "stoull");
 }
 
+// stof/stod ([string.conversions]): "as if by strtof/strtod" — the strtod
+// preamble (skip "C" whitespace, optional +/- sign, optional 0x hexfloat
+// prefix) over <charconv>'s own from_chars, which parses magnitude/inf/nan.
+namespace __string_impl {
+
+template <typename T>
+T ParseStof(const string &str, size_t *pos, const char *fname)
+{
+    const char *const begin = str.c_str();
+    const char *const end   = begin + str.size();
+    const char       *p     = begin;
+    while (p != end && IsSpaceC(*p)) ++p;
+
+    bool neg = false;
+    if (p != end && (*p == '+' || *p == '-')) {
+        neg = (*p == '-');
+        ++p;
+    }
+    chars_format fmt = chars_format::general;
+    if (end - p >= 3 && p[0] == '0' && (p[1] == 'x' || p[1] == 'X') &&
+        (IsHexDigit(p[2]) || p[2] == '.')) {
+        fmt = chars_format::hex;
+        p += 2;
+    }
+
+    T                 value{};
+    from_chars_result r = from_chars(p, end, value, fmt);
+    if (r.ec == errc::invalid_argument) boxcxx::ThrowInvalidArgument(fname);
+    if (r.ec == errc::result_out_of_range) boxcxx::ThrowOutOfRange(fname);
+    if (neg) value = -value;
+    if (pos) *pos = static_cast<size_t>(r.ptr - begin);
+    return value;
+}
+
+} // namespace __string_impl
+
+inline float stof(const string &str, size_t *pos = nullptr)
+{
+    return __string_impl::ParseStof<float>(str, pos, "stof");
+}
+inline double stod(const string &str, size_t *pos = nullptr)
+{
+    return __string_impl::ParseStof<double>(str, pos, "stod");
+}
+
 } // namespace std
 
 #endif // BOXCXX_STRING
