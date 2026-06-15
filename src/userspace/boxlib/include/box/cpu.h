@@ -47,6 +47,16 @@ INLINE bool cpu_has_waitpkg(void) {
     return caps->has_waitpkg;
 }
 
+/* True iff the TSC is invariant (rate fixed across P-/C-states) on every
+ * online core. Only then is RDTSC→ns conversion via the calibrated freq
+ * meaningful — boxcxx steady_clock gates its TSC path on this and falls
+ * back to the ClockBoard uptime when it is false. */
+INLINE bool cpu_has_invariant_tsc(void) {
+    volatile cpu_caps_page_t* caps = CPU_CAPS;
+    if (caps->magic != CPU_CAPS_MAGIC) return false;
+    return caps->has_invariant_tsc;
+}
+
 /* True iff CPUID.07H.0:ECX[3] (PKU) is supported AND has been preserved
  * through every AP intersect (so RDPKRU/WRPKRU is safe on any cabin
  * scheduling decision). Returns false on systems without PKU and on

@@ -46,6 +46,13 @@ uint64_t clock_uptime_ms(void);
  * unix is kept for interop where seconds are already enough. */
 uint64_t clock_unix_now(void);
 
+/* Wallclock as unix-epoch NANOSECONDS (microsecond resolution from the
+ * ClockBoard). Reads boot_unix_secs and uptime_us in a single board view
+ * so the second- and sub-second pieces are mutually consistent — a split
+ * across clock_unix_now()+clock_uptime_us() could straddle a tick. The
+ * backing for std::chrono::system_clock::now(). */
+uint64_t clock_unix_now_ns(void);
+
 /* Calendar form (BoxOS-native time_t). Computed in userspace from
  * boot_unix_secs + uptime_us — the kernel does NOT do calendar
  * arithmetic in the IRQ. */

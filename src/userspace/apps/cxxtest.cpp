@@ -20,6 +20,7 @@
 #include <array>
 #include <atomic>
 #include <charconv>
+#include <chrono>
 #include <cmath>
 #include <deque>
 #include <expected>
@@ -2644,6 +2645,177 @@ void Phase10()
     printf("[CXX] PASS phase10: <cmath> classical+special + box:: universal\n");
 }
 
+void Phase11()
+{
+    using namespace std::chrono;
+    using namespace std::chrono_literals;
+    using std::ratio;
+    using std::ratio_add;
+    using std::ratio_divide;
+    using std::ratio_less_v;
+    using std::ratio_multiply;
+    using std::milli;
+    using std::micro;
+    using std::nano;
+    using std::kilo;
+    using std::mega;
+
+    // ── <ratio> (compile-time) ──────────────────────────────────────────
+    static_assert(ratio<6, 4>::num == 3 && ratio<6, 4>::den == 2,
+                  "ratio reduce");
+    static_assert(ratio_add<milli, micro>::num == 1001 &&
+                      ratio_add<milli, micro>::den == 1000000,
+                  "ratio_add");
+    static_assert(ratio_multiply<ratio<2, 3>, ratio<3, 4>>::num == 1 &&
+                      ratio_multiply<ratio<2, 3>, ratio<3, 4>>::den == 2,
+                  "ratio_multiply");
+    static_assert(ratio_less_v<nano, micro>, "ratio_less");
+    static_assert(std::is_same_v<ratio_divide<mega, kilo>, kilo>,
+                  "ratio_divide");
+
+    // ── duration arithmetic & conversions ───────────────────────────────
+    Check((3s + 500ms).count() == 3500 &&
+              std::is_same_v<decltype(3s + 500ms), milliseconds>,
+          "phase11 duration add → ms");
+    Check(duration_cast<seconds>(milliseconds{3500}).count() == 3,
+          "phase11 duration_cast truncates");
+    Check(floor<seconds>(milliseconds{-1500}).count() == -2,
+          "phase11 floor negative");
+    Check(ceil<seconds>(milliseconds{1001}).count() == 2, "phase11 ceil");
+    Check(round<seconds>(milliseconds{2500}).count() == 2 &&
+              round<seconds>(milliseconds{3500}).count() == 4,
+          "phase11 round half-to-even");
+    Check(abs(seconds{-5}).count() == 5, "phase11 abs");
+    Check(duration_cast<minutes>(1h).count() == 60, "phase11 1h→min");
+    Check(nanoseconds{1000000000} == seconds{1}, "phase11 ns==s");
+    Check((1h - 30min) == 30min, "phase11 sub");
+
+    // ── steady_clock monotonicity ───────────────────────────────────────
+    {
+        auto t0 = steady_clock::now();
+        auto t1 = steady_clock::now();
+        Check(t1 >= t0, "phase11 steady monotone");
+        Check(t1.time_since_epoch().count() >= 0, "phase11 steady non-negative");
+        Check(steady_clock::is_steady, "phase11 steady is_steady");
+    }
+
+    // ── system_clock wall time ──────────────────────────────────────────
+    {
+        auto      now  = system_clock::now();
+        long long secs = system_clock::to_time_t(now);
+        Check(system_clock::to_time_t(system_clock::from_time_t(secs)) == secs,
+              "phase11 system_clock round-trip");
+        // QEMU exposes host RTC → expect a plausible 2020..2100 wall time.
+        Check(secs > 1577836800LL && secs < 4102444800LL,
+              "phase11 system_clock epoch plausible");
+        Check(!system_clock::is_steady, "phase11 system not steady");
+    }
+
+    // ── calendar round-trips & known facts ──────────────────────────────
+    Check((2024y / February / 29d).ok(), "phase11 2024 leap day ok");
+    Check(!(2023y / February / 29d).ok(), "phase11 2023 non-leap not ok");
+    Check(weekday{sys_days{2024y / January / 1d}} == Monday,
+          "phase11 2024-01-01 is Monday");
+    Check(weekday{sys_days{1970y / January / 1d}} == Thursday,
+          "phase11 epoch is Thursday");
+    {
+        auto rt = [](sys_days d) { return sys_days{year_month_day{d}} == d; };
+        Check(rt(sys_days{1970y / January / 1d}) &&
+                  rt(sys_days{2000y / March / 1d}) &&
+                  rt(sys_days{2024y / February / 29d}),
+              "phase11 ymd↔sys_days round-trip");
+    }
+    Check(unsigned((2024y / February / last).day()) == 29,
+          "phase11 last day Feb 2024");
+    Check(unsigned(year_month_day{sys_days{2024y / March / Friday[2]}}.day()) ==
+              8,
+          "phase11 2nd Friday Mar 2024");
+    Check(unsigned(
+              year_month_day{sys_days{2024y / March / Monday[last]}}.day()) ==
+              25,
+          "phase11 last Monday Mar 2024");
+
+    // ── hh_mm_ss decomposition ──────────────────────────────────────────
+    {
+        hh_mm_ss<seconds> a{3h + 25min + 45s};
+        Check(a.hours().count() == 3 && a.minutes().count() == 25 &&
+                  a.seconds().count() == 45,
+              "phase11 hh_mm_ss decompose");
+        hh_mm_ss<seconds> b{-(1h + 30min)};
+        Check(b.is_negative() && b.hours().count() == 1 &&
+                  b.minutes().count() == 30,
+              "phase11 hh_mm_ss negative");
+        hh_mm_ss<milliseconds> c{1h + 2min + 3s + 456ms};
+        Check(c.subseconds().count() == 456 &&
+                  hh_mm_ss<milliseconds>::fractional_width == 3,
+              "phase11 hh_mm_ss subseconds");
+        Check(make12(hours{13}) == hours{1} && make24(hours{1}, true) == hours{13},
+              "phase11 make12/make24");
+    }
+
+    // ── <format> integration (expected strings validated vs libstdc++) ──
+    Check(std::format("{}", 42s) == "42s", "phase11 fmt dur s");
+    Check(std::format("{}", 1500ms) == "1500ms", "phase11 fmt dur ms");
+    Check(std::format("{}", 7us) == "7us", "phase11 fmt dur us");
+    Check(std::format("{}", minutes{90}) == "90min", "phase11 fmt dur min");
+    Check(std::format("{}", hours{5}) == "5h", "phase11 fmt dur h");
+    Check(std::format("{}", days{3}) == "3d", "phase11 fmt dur d");
+    Check(std::format("{}", duration<long long, ratio<1, 3>>{2}) == "2[1/3]s",
+          "phase11 fmt dur custom");
+    Check(std::format("{}", day{8}) == "08", "phase11 fmt day");
+    Check(std::format("{}", month{3}) == "Mar", "phase11 fmt month");
+    Check(std::format("{}", year{2024}) == "2024", "phase11 fmt year");
+    Check(std::format("{}", weekday{1}) == "Mon", "phase11 fmt weekday");
+    Check(std::format("{:%F}", 2024y / March / 15d) == "2024-03-15",
+          "phase11 fmt %F");
+    Check(std::format("{:%Y-%m-%d}", 2024y / March / 15d) == "2024-03-15",
+          "phase11 fmt %Y-%m-%d");
+    Check(std::format("{:%D}", 2024y / March / 5d) == "03/05/24",
+          "phase11 fmt %D");
+    Check(std::format("{:%j}", 2024y / March / 1d) == "061", "phase11 fmt %j");
+    Check(std::format("{}", 2024y / January / 1d) == "2024-01-01",
+          "phase11 fmt ymd default");
+    Check(std::format("{:%a}", weekday{1}) == "Mon", "phase11 fmt %a");
+    Check(std::format("{:%A}", weekday{0}) == "Sunday", "phase11 fmt %A");
+    Check(std::format("{:%u}", weekday{0}) == "7", "phase11 fmt %u");
+    Check(std::format("{:%w}", weekday{0}) == "0", "phase11 fmt %w");
+    Check(std::format("{:%b}", month{12}) == "Dec", "phase11 fmt %b");
+    Check(std::format("{:%B}", month{7}) == "July", "phase11 fmt %B");
+    Check(std::format("{:%y}", year{2024}) == "24", "phase11 fmt %y");
+    Check(std::format("{:%T}", hh_mm_ss<seconds>{3h + 25min + 45s}) ==
+              "03:25:45",
+          "phase11 fmt %T");
+    Check(std::format("{:%R}", hh_mm_ss<seconds>{9h + 5min}) == "09:05",
+          "phase11 fmt %R");
+    Check(std::format("{:%H:%M:%S}",
+                      hh_mm_ss<seconds>{23h + 59min + 1s}) == "23:59:01",
+          "phase11 fmt %H:%M:%S");
+    Check(std::format("{:%T}",
+                      hh_mm_ss<milliseconds>{1h + 2min + 3s + 456ms}) ==
+              "01:02:03.456",
+          "phase11 fmt %T ms");
+    Check(std::format("{:%I %p}", hh_mm_ss<seconds>{13h}) == "01 PM",
+          "phase11 fmt %I %p");
+    Check(std::format("{:%F %T}", sys_seconds{seconds{1710474345}}) ==
+              "2024-03-15 03:45:45",
+          "phase11 fmt sys %F %T");
+    Check(std::format("{}", sys_seconds{seconds{1710474345}}) ==
+              "2024-03-15 03:45:45",
+          "phase11 fmt sys default");
+    Check(std::format("{}", time_point_cast<days>(
+                                sys_seconds{seconds{1710474345}})) ==
+              "2024-03-15",
+          "phase11 fmt sys_days");
+    Check(std::format("{:>12%F}", 2024y / March / 5d) == "  2024-03-05",
+          "phase11 fmt width right");
+    Check(std::format("{:<12%F}", 2024y / March / 5d) == "2024-03-05  ",
+          "phase11 fmt width left");
+    Check(std::format("{:*^14%F}", 2024y / March / 5d) == "**2024-03-05**",
+          "phase11 fmt width center fill");
+
+    printf("[CXX] PASS phase11: <chrono> + <ratio> (duration/clock/calendar/format)\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -2676,6 +2848,7 @@ int main()
     Phase9c();
     PhaseCurrent();
     Phase10();
+    Phase11();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

@@ -1,0 +1,179 @@
+// <ratio> — compile-time rational arithmetic ([ratio]).
+//
+// boxcxx freestanding implementation. Overflow in any ratio result is a
+// hard compile-time error (the offending arithmetic stops being a constant
+// expression), never silent wraparound. Intermediates use __int128 so the
+// full normalized intmax_t range is comparable without overflow.
+#ifndef BOXCXX_RATIO
+#define BOXCXX_RATIO
+
+#include <cstdint>
+#include <type_traits>
+
+namespace std {
+
+template <intmax_t Num, intmax_t Den = 1> struct ratio;
+
+namespace __ratio {
+
+constexpr intmax_t abs_(intmax_t x) noexcept { return x < 0 ? -x : x; }
+constexpr intmax_t sign_(intmax_t x) noexcept { return x < 0 ? -1 : 1; }
+
+// Euclid on absolute values. gcd_(0,0)==1 so ratio<0,1> is well-formed.
+constexpr intmax_t gcd_(intmax_t a, intmax_t b) noexcept
+{
+    a = abs_(a);
+    b = abs_(b);
+    while (b != 0) {
+        intmax_t t = a % b;
+        a          = b;
+        b          = t;
+    }
+    return a == 0 ? 1 : a;
+}
+
+constexpr __int128 abs128(__int128 x) noexcept { return x < 0 ? -x : x; }
+constexpr __int128 gcd128(__int128 a, __int128 b) noexcept
+{
+    a = abs128(a);
+    b = abs128(b);
+    while (b != 0) {
+        __int128 t = a % b;
+        a          = b;
+        b          = t;
+    }
+    return a == 0 ? 1 : a;
+}
+
+// Narrow a 128-bit intermediate to intmax_t, turning overflow into a
+// compile-time error: a thrown expression is not a constant expression, so
+// the enclosing `ratio<__ratio::narrow(...)>` fails to instantiate with a
+// diagnostic instead of wrapping silently.
+constexpr intmax_t narrow(__int128 v)
+{
+    return (v > (__int128)__INTMAX_MAX__ || v < -(__int128)__INTMAX_MAX__)
+               ? throw "ratio: overflow in arithmetic"
+               : (intmax_t)v;
+}
+
+} // namespace __ratio
+
+template <intmax_t Num, intmax_t Den> struct ratio {
+    static_assert(Den != 0, "ratio: denominator cannot be zero");
+    static_assert(Num >= -__INTMAX_MAX__, "ratio: numerator out of range");
+    static_assert(Den >= -__INTMAX_MAX__, "ratio: denominator out of range");
+
+private:
+    static constexpr intmax_t kG = __ratio::gcd_(Num, Den);
+
+public:
+    static constexpr intmax_t num =
+        __ratio::sign_(Num) * __ratio::sign_(Den) * (__ratio::abs_(Num) / kG);
+    static constexpr intmax_t den = __ratio::abs_(Den) / kG;
+
+    using type = ratio<num, den>;
+};
+
+template <intmax_t Num, intmax_t Den> constexpr intmax_t ratio<Num, Den>::num;
+template <intmax_t Num, intmax_t Den> constexpr intmax_t ratio<Num, Den>::den;
+
+// ── arithmetic ──────────────────────────────────────────────────────────
+namespace __ratio {
+
+template <class R1, class R2> struct multiply {
+private:
+    // Cross-cancel before multiplying to keep the __int128 product in range.
+    static constexpr intmax_t g1 = gcd_(R1::num, R2::den);
+    static constexpr intmax_t g2 = gcd_(R2::num, R1::den);
+
+public:
+    using type = ratio<narrow((__int128)(R1::num / g1) * (R2::num / g2)),
+                       narrow((__int128)(R1::den / g2) * (R2::den / g1))>;
+};
+
+template <class R1, class R2> struct add {
+private:
+    static constexpr intmax_t g    = gcd_(R1::den, R2::den);
+    static constexpr __int128  n128 = (__int128)R1::num * (R2::den / g) +
+                                     (__int128)R2::num * (R1::den / g);
+    static constexpr __int128  d128 = (__int128)(R1::den / g) * R2::den;
+    static constexpr __int128  gr   = gcd128(n128, d128);
+
+public:
+    using type = ratio<narrow(n128 / gr), narrow(d128 / gr)>;
+};
+
+} // namespace __ratio
+
+template <class R1, class R2>
+using ratio_multiply = typename __ratio::multiply<R1, R2>::type;
+
+template <class R1, class R2>
+using ratio_divide =
+    ratio_multiply<R1, ratio<R2::den, R2::num>>;
+
+template <class R1, class R2>
+using ratio_add = typename __ratio::add<R1, R2>::type;
+
+template <class R1, class R2>
+using ratio_subtract =
+    ratio_add<R1, ratio<-R2::num, R2::den>>;
+
+// ── comparisons (operands are normalized: coprime, den > 0) ──────────────
+template <class R1, class R2>
+struct ratio_equal
+    : bool_constant<R1::num == R2::num && R1::den == R2::den> {};
+
+template <class R1, class R2>
+struct ratio_not_equal : bool_constant<!ratio_equal<R1, R2>::value> {};
+
+template <class R1, class R2>
+struct ratio_less
+    : bool_constant<((__int128)R1::num * R2::den) <
+                    ((__int128)R2::num * R1::den)> {};
+
+template <class R1, class R2>
+struct ratio_less_equal : bool_constant<!ratio_less<R2, R1>::value> {};
+
+template <class R1, class R2>
+struct ratio_greater : bool_constant<ratio_less<R2, R1>::value> {};
+
+template <class R1, class R2>
+struct ratio_greater_equal : bool_constant<!ratio_less<R1, R2>::value> {};
+
+template <class R1, class R2>
+inline constexpr bool ratio_equal_v = ratio_equal<R1, R2>::value;
+template <class R1, class R2>
+inline constexpr bool ratio_not_equal_v = ratio_not_equal<R1, R2>::value;
+template <class R1, class R2>
+inline constexpr bool ratio_less_v = ratio_less<R1, R2>::value;
+template <class R1, class R2>
+inline constexpr bool ratio_less_equal_v = ratio_less_equal<R1, R2>::value;
+template <class R1, class R2>
+inline constexpr bool ratio_greater_v = ratio_greater<R1, R2>::value;
+template <class R1, class R2>
+inline constexpr bool ratio_greater_equal_v = ratio_greater_equal<R1, R2>::value;
+
+// ── SI typedefs ─────────────────────────────────────────────────────────
+// yocto/zepto/yotta/zetta require a >64-bit intmax_t and are omitted (as in
+// libstdc++ on this target).
+using atto  = ratio<1, 1000000000000000000LL>;
+using femto = ratio<1,    1000000000000000LL>;
+using pico  = ratio<1,       1000000000000LL>;
+using nano  = ratio<1,          1000000000LL>;
+using micro = ratio<1,             1000000LL>;
+using milli = ratio<1,                1000LL>;
+using centi = ratio<1,                 100LL>;
+using deci  = ratio<1,                  10LL>;
+using deca  = ratio<                 10LL, 1>;
+using hecto = ratio<                100LL, 1>;
+using kilo  = ratio<               1000LL, 1>;
+using mega  = ratio<            1000000LL, 1>;
+using giga  = ratio<         1000000000LL, 1>;
+using tera  = ratio<      1000000000000LL, 1>;
+using peta  = ratio<   1000000000000000LL, 1>;
+using exa   = ratio<1000000000000000000LL, 1>;
+
+} // namespace std
+
+#endif // BOXCXX_RATIO
