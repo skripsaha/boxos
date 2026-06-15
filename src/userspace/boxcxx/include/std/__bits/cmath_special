@@ -1,0 +1,822 @@
+// boxcxx — C++17 mathematical special functions (header-only, namespace std).
+// Included at the end of <cmath>. Validated vs host libstdc++ (relative).
+#ifndef BOXCXX_BITS_CMATH_SPECIAL
+#define BOXCXX_BITS_CMATH_SPECIAL
+
+namespace std {
+
+// ── beta(a,b) = Γ(a)Γ(b)/Γ(a+b) ───────────────────────────────────────────
+inline double beta(double a, double b) {
+    if (isnan(a) || isnan(b)) return kQNaN;
+    return exp(lgamma(a) + lgamma(b) - lgamma(a + b));
+}
+
+// ── Legendre polynomials P_n(x) ────────────────────────────────────────────
+inline double legendre(unsigned n, double x) {
+    if (n == 0) return 1.0;
+    double p0 = 1.0, p1 = x;
+    for (unsigned k = 1; k < n; ++k) {
+        double p2 = ((2.0 * k + 1.0) * x * p1 - k * p0) / (k + 1.0);
+        p0 = p1; p1 = p2;
+    }
+    return p1;
+}
+// ── Associated Legendre P_l^m(x) (no Condon-Shortley phase per [sf.cmath]) ──
+inline double assoc_legendre(unsigned l, unsigned m, double x) {
+    if (m > l) return 0.0;
+    double pmm = 1.0;
+    if (m > 0) {
+        double s = sqrt((1.0 - x) * (1.0 + x)), f = 1.0;
+        for (unsigned i = 1; i <= m; ++i) { pmm *= f * s; f += 2.0; }   // (2m−1)!!·(1−x²)^{m/2}
+    }
+    if (l == m) return pmm;
+    double pmp1 = x * (2.0 * m + 1.0) * pmm;
+    if (l == m + 1) return pmp1;
+    double pll = 0.0;
+    for (unsigned ll = m + 2; ll <= l; ++ll) {
+        pll = ((2.0 * ll - 1.0) * x * pmp1 - (ll + m - 1.0) * pmm) / (ll - m);
+        pmm = pmp1; pmp1 = pll;
+    }
+    return pll;
+}
+// ── Laguerre L_n(x) and associated L_n^m(x) ────────────────────────────────
+inline double laguerre(unsigned n, double x) {
+    if (n == 0) return 1.0;
+    double l0 = 1.0, l1 = 1.0 - x;
+    for (unsigned k = 1; k < n; ++k) {
+        double l2 = ((2.0 * k + 1.0 - x) * l1 - k * l0) / (k + 1.0);
+        l0 = l1; l1 = l2;
+    }
+    return l1;
+}
+inline double assoc_laguerre(unsigned n, unsigned m, double x) {
+    if (n == 0) return 1.0;
+    double l0 = 1.0, l1 = 1.0 + m - x;
+    for (unsigned k = 1; k < n; ++k) {
+        double l2 = ((2.0 * k + 1.0 + m - x) * l1 - (k + m) * l0) / (k + 1.0);
+        l0 = l1; l1 = l2;
+    }
+    return l1;
+}
+// ── Hermite H_n(x) (physicists') ───────────────────────────────────────────
+inline double hermite(unsigned n, double x) {
+    if (n == 0) return 1.0;
+    double h0 = 1.0, h1 = 2.0 * x;
+    for (unsigned k = 1; k < n; ++k) { double h2 = 2.0 * x * h1 - 2.0 * k * h0; h0 = h1; h1 = h2; }
+    return h1;
+}
+// ── Spherical-harmonic-normalized associated Legendre ──────────────────────
+inline double sph_legendre(unsigned l, unsigned m, double theta) {
+    if (m > l) return 0.0;
+    double x = cos(theta);
+    double plm = assoc_legendre(l, m, x);
+    double ratio = 1.0;
+    for (unsigned k = l - m + 1; k <= l + m; ++k) ratio /= (double)k;   // (l−m)!/(l+m)!
+    double norm = sqrt((2.0 * l + 1.0) / (4.0 * kPi) * ratio);
+    double cs = (m & 1u) ? -1.0 : 1.0;                                  // Condon-Shortley
+    return cs * norm * plm;
+}
+
+} // namespace std
+namespace std {
+// f/l forwarders for poly + beta
+inline float legendref(unsigned n,float x){return (float)legendre(n,(double)x);} inline long double legendrel(unsigned n,long double x){return (long double)legendre(n,(double)x);}
+inline float laguerref(unsigned n,float x){return (float)laguerre(n,(double)x);} inline long double laguerrel(unsigned n,long double x){return (long double)laguerre(n,(double)x);}
+inline float hermitef(unsigned n,float x){return (float)hermite(n,(double)x);} inline long double hermitel(unsigned n,long double x){return (long double)hermite(n,(double)x);}
+inline float assoc_legendref(unsigned l,unsigned m,float x){return (float)assoc_legendre(l,m,(double)x);} inline long double assoc_legendrel(unsigned l,unsigned m,long double x){return (long double)assoc_legendre(l,m,(double)x);}
+inline float assoc_laguerref(unsigned n,unsigned m,float x){return (float)assoc_laguerre(n,m,(double)x);} inline long double assoc_laguerrel(unsigned n,unsigned m,long double x){return (long double)assoc_laguerre(n,m,(double)x);}
+inline float sph_legendref(unsigned l,unsigned m,float th){return (float)sph_legendre(l,m,(double)th);} inline long double sph_legendrel(unsigned l,unsigned m,long double th){return (long double)sph_legendre(l,m,(double)th);}
+inline float betaf(float a,float b){return (float)beta((double)a,(double)b);} inline long double betal(long double a,long double b){return (long double)beta((double)a,(double)b);}
+} // namespace std
+namespace std {
+// ── RC(x,y) = RF(x,y,y) ──────────────────────────────────────────────────────
+// x ≥ 0, y > 0.  (Cauchy PV for y < 0 handled by callers.)
+static double carlson_RC(double x, double y) {
+    if (std::isnan(x) || std::isnan(y)) return kQNaN;
+    if (x < 0.0 || y <= 0.0) return kQNaN;
+    if (x == 0.0) return kPiOver2 / std::sqrt(y);
+
+    const double errtol = 3.5e-9;
+    double xn = x, yn = y;
+
+    for (int iter = 0; iter < 60; ++iter) {
+        double lam = 2.0 * std::sqrt(xn * yn) + yn;
+        xn = 0.25 * (xn + lam);
+        yn = 0.25 * (yn + lam);
+
+        double ave = (xn + 2.0 * yn) * (1.0 / 3.0);
+        double sdx = (ave - xn) / ave;
+        double sdy = (ave - yn) / ave;
+
+        if (std::fabs(sdx) < errtol && std::fabs(sdy) < errtol) {
+            double s = sdy * (sdx + 3.0 * sdy) * 0.25;
+            return (1.0 + s * (3.0/10.0 + s * (3.0/8.0 + s * (45.0/208.0
+                   + s * (105.0/512.0))))) / std::sqrt(ave);
+        }
+    }
+    return 1.0 / std::sqrt((xn + 2.0 * yn) * (1.0 / 3.0));
+}
+
+// ── RF(x,y,z) — symmetric integral of the first kind ─────────────────────────
+// x,y,z ≥ 0; at most one may be zero.
+static double carlson_RF(double x, double y, double z) {
+    if (std::isnan(x) || std::isnan(y) || std::isnan(z)) return kQNaN;
+    if (x < 0.0 || y < 0.0 || z < 0.0) return kQNaN;
+    int zeros = (x == 0.0) + (y == 0.0) + (z == 0.0);
+    if (zeros >= 2) return kInf;
+
+    const double errtol = 3.5e-9;
+    double xn = x, yn = y, zn = z;
+
+    for (int iter = 0; iter < 60; ++iter) {
+        double sx = std::sqrt(xn), sy = std::sqrt(yn), sz = std::sqrt(zn);
+        double lam = sx * sy + sx * sz + sy * sz;
+        xn = 0.25 * (xn + lam);
+        yn = 0.25 * (yn + lam);
+        zn = 0.25 * (zn + lam);
+
+        double ave = (xn + yn + zn) * (1.0 / 3.0);
+        double dx = (ave - xn) / ave;
+        double dy = (ave - yn) / ave;
+        double dz = (ave - zn) / ave;
+
+        if (std::fabs(dx) < errtol && std::fabs(dy) < errtol && std::fabs(dz) < errtol) {
+            // Carlson 1995 eq. (19):
+            double e2 = dx * dy - dz * dz;
+            double e3 = dx * dy * dz;
+            return (1.0 + e2 * (-1.0/10.0 + e2 * 3.0/44.0)
+                        + e3 / 14.0
+                        - e2 * e2 * 3.0/44.0
+                        + e2 * e3 * (-3.0/66.0)) / std::sqrt(ave);
+        }
+    }
+    return 1.0 / std::sqrt((xn + yn + zn) * (1.0 / 3.0));
+}
+
+// ── RD(x,y,z) — degenerate third kind ────────────────────────────────────────
+// x,y ≥ 0 (at most one zero), z > 0.
+static double carlson_RD(double x, double y, double z) {
+    if (std::isnan(x) || std::isnan(y) || std::isnan(z)) return kQNaN;
+    if (x < 0.0 || y < 0.0 || z <= 0.0) return kQNaN;
+    if (x == 0.0 && y == 0.0) return kInf;
+
+    const double errtol = 3.5e-9;
+    double xn = x, yn = y, zn = z;
+    double sum = 0.0, fac = 1.0;
+
+    for (int iter = 0; iter < 60; ++iter) {
+        double sx = std::sqrt(xn), sy = std::sqrt(yn), sz = std::sqrt(zn);
+        double lam = sx * sy + sx * sz + sy * sz;
+
+        sum += fac / (sz * (zn + lam));
+        fac *= 0.25;
+
+        xn = 0.25 * (xn + lam);
+        yn = 0.25 * (yn + lam);
+        zn = 0.25 * (zn + lam);
+
+        double ave = (xn + yn + 3.0 * zn) * 0.2;
+        double dx = (ave - xn) / ave;
+        double dy = (ave - yn) / ave;
+        double dz = (ave - zn) / ave;
+
+        if (std::fabs(dx) < errtol && std::fabs(dy) < errtol && std::fabs(dz) < errtol) {
+            // Carlson 1995 eq. (21):
+            double e2 = dx * dy - 6.0 * dz * dz;
+            double e3 = (3.0 * dx * dy - 8.0 * dz * dz) * dz;
+            double e4 = 3.0 * (dx * dy - dz * dz) * dz * dz;
+            double e5 = dx * dy * dz * dz * dz;
+            double poly = 1.0 + e2 * (-3.0/14.0) + e3 / 6.0
+                              + e2 * e2 * (9.0/88.0)
+                              - e4 * (45.0/66.0)
+                              + e2 * e3 * (-5.0/22.0)
+                              + e5 * (5.0/11.0)
+                              - e2 * e2 * e2 * (315.0/2288.0);
+            return 3.0 * sum + fac * poly / (ave * std::sqrt(ave));
+        }
+    }
+    return 3.0 * sum;
+}
+
+// ── RJ(x,y,z,p) — third kind ─────────────────────────────────────────────────
+// x,y,z ≥ 0 (at most one zero), p ≠ 0.
+// Carlson (1995) duplication formula with:
+//   alpha_n = p_n*(√x_n+√y_n+√z_n) + √(x_n*y_n*z_n)
+//   beta_n  = p_n*(p_n + lambda_n)²         ← squared lambda factor is critical
+//   sum term: 3 * 4^{-n} * RC(alpha_n², beta_n)
+//
+// For p < 0: p_n converges toward positive after ~log₄(lambda/|p|) steps (lambda > |p_n|
+// makes |p_{n+1}| < |p_n|/4). In each step the RC is evaluated via the Cauchy PV formula.
+static double carlson_RJ(double x, double y, double z, double p) {
+    if (std::isnan(x) || std::isnan(y) || std::isnan(z) || std::isnan(p)) return kQNaN;
+    if (x < 0.0 || y < 0.0 || z < 0.0) return kQNaN;
+    if (p == 0.0) return kInf;
+
+    const double errtol = 3.5e-9;
+    double xn = x, yn = y, zn = z, pn = p;
+    double sum = 0.0, fac = 1.0;
+
+    for (int iter = 0; iter < 60; ++iter) {
+        double sx = std::sqrt(xn), sy = std::sqrt(yn), sz = std::sqrt(zn);
+        double lam = sx * sy + sx * sz + sy * sz;
+
+        // alpha: real regardless of sign of pn (pn can be negative early on).
+        double alpha  = pn * (sx + sy + sz) + sx * sy * sz;
+        double alpha2 = alpha * alpha;  // always ≥ 0
+
+        // beta = pn*(pn + lam)²
+        double pn_plus_lam = pn + lam;
+        double beta = pn * pn_plus_lam * pn_plus_lam;
+
+        // Evaluate RC(alpha², beta) with correct handling of beta's sign.
+        double rc_term;
+        if (beta > 0.0) {
+            if (alpha2 == 0.0) {
+                // RC(0, beta>0) = pi/(2*sqrt(beta)).
+                rc_term = kPiOver2 / std::sqrt(beta);
+            } else {
+                rc_term = carlson_RC(alpha2, beta);
+            }
+        } else if (beta < 0.0) {
+            // Cauchy PV: RC(x, y<0) = sqrt(x/(x-y)) * RC(x-y, -y).
+            if (alpha2 == 0.0) {
+                // RC(0, beta<0): PV is 0 (Carlson 1987 §3, eq 5).
+                rc_term = 0.0;
+            } else {
+                double amb = alpha2 - beta;  // > alpha2 > 0
+                rc_term = std::sqrt(alpha2 / amb) * carlson_RC(amb, -beta);
+            }
+        } else {
+            // beta == 0: RC diverges unless alpha2 = 0 too (degenerate, measure zero).
+            rc_term = (alpha2 == 0.0) ? 0.0 : kInf;
+        }
+
+        sum += fac * 3.0 * rc_term;
+        fac *= 0.25;
+
+        xn = 0.25 * (xn + lam);
+        yn = 0.25 * (yn + lam);
+        zn = 0.25 * (zn + lam);
+        pn = 0.25 * (pn + lam);
+
+        double ave = (xn + yn + zn + 2.0 * pn) * 0.2;
+        double dx = (ave - xn) / ave;
+        double dy = (ave - yn) / ave;
+        double dz = (ave - zn) / ave;
+        double dp = (ave - pn) / ave;
+
+        if (std::fabs(dx) < errtol && std::fabs(dy) < errtol
+         && std::fabs(dz) < errtol && std::fabs(dp) < errtol) {
+            // Carlson 1995 eq. (22):
+            double xyz = dx * dy * dz;
+            double e2  = dx * dy + dx * dz + dy * dz - 3.0 * dp * dp;
+            double e3  = xyz + 2.0 * e2 * dp + 3.0 * dp * dp * (dx + dy + dz - dp);
+            double e4  = dp * (2.0 * xyz + dp * (e2 + 3.0 * dp * dp));
+            double e5  = xyz * dp * dp;
+            double poly = 1.0 + e2 * (-3.0/14.0) + e3 / 6.0
+                              + e2 * e2 * (9.0/88.0)
+                              - e4 * (45.0/66.0)
+                              + e3 * e2 * (-5.0/22.0)
+                              + e5 * (5.0/11.0)
+                              - e2 * e2 * e2 * (315.0/2288.0);
+            return sum + fac * poly / (ave * std::sqrt(ave));
+        }
+    }
+    return sum;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Six C++17 elliptic integrals via Carlson forms.
+// Modulus is k (not m = k²).  |k| ≤ 1 for real results.
+// φ in radians; period-reduction handles φ outside [−π/2, π/2].
+// ─────────────────────────────────────────────────────────────────────────────
+
+// K(k) = RF(0, 1−k², 1).
+inline double comp_ellint_1(double k) {
+    if (std::isnan(k)) return kQNaN;
+    double ak = std::fabs(k);
+    if (ak > 1.0) return kQNaN;
+    if (ak == 1.0) return kInf;
+    return carlson_RF(0.0, 1.0 - k * k, 1.0);
+}
+
+// E(k) = RF(0,1−k²,1) − (k²/3)·RD(0,1−k²,1).
+inline double comp_ellint_2(double k) {
+    if (std::isnan(k)) return kQNaN;
+    double ak = std::fabs(k);
+    if (ak > 1.0) return kQNaN;
+    if (ak == 1.0) return 1.0;
+    if (k == 0.0) return kPiOver2;
+    double k2 = k * k, kc2 = 1.0 - k2;
+    return carlson_RF(0.0, kc2, 1.0) - (k2 / 3.0) * carlson_RD(0.0, kc2, 1.0);
+}
+
+// Π(ν, k) = RF(0,1−k²,1) + (ν/3)·RJ(0,1−k²,1, 1−ν).
+inline double comp_ellint_3(double k, double nu) {
+    if (std::isnan(k) || std::isnan(nu)) return kQNaN;
+    double ak = std::fabs(k);
+    if (ak > 1.0) return kQNaN;
+    if (ak == 1.0) return kInf;
+    if (nu == 1.0) return kInf;
+    double k2 = k * k, kc2 = 1.0 - k2;
+    return carlson_RF(0.0, kc2, 1.0)
+         + (nu / 3.0) * carlson_RJ(0.0, kc2, 1.0, 1.0 - nu);
+}
+
+// F(φ, k) — reduce φ mod π, then sinφ · RF(cos²φ, 1−k²sin²φ, 1).
+// F(φ+nπ, k) = 2n·K(k) + F(φ, k).
+inline double ellint_1(double k, double phi) {
+    if (std::isnan(k) || std::isnan(phi)) return kQNaN;
+    if (std::fabs(k) > 1.0) return kQNaN;
+    if (std::isinf(phi)) return kQNaN;
+
+    double nd = std::floor((phi + kPiOver2) / kPi);
+    double phi_r = phi - nd * kPi;
+    double sgn = 1.0;
+    if (phi_r < 0.0) { phi_r = -phi_r; sgn = -1.0; }
+
+    double result;
+    if (phi_r >= kPiOver2) {
+        result = comp_ellint_1(k);
+    } else {
+        double s = std::sin(phi_r), c = std::cos(phi_r);
+        double k2s2 = k * k * s * s;
+        if (k2s2 > 1.0) return kQNaN;
+        result = s * carlson_RF(c * c, 1.0 - k2s2, 1.0);
+    }
+    result = sgn * result;
+    if (nd != 0.0) {
+        double K = comp_ellint_1(k);
+        if (std::isinf(K)) return std::copysign(kInf, phi);
+        result += 2.0 * nd * K;
+    }
+    return result;
+}
+
+// E(φ, k) — reduce φ mod π, then use sinφ·RF − (k²/3)sin³φ·RD.
+// E(φ+nπ, k) = 2n·E(k) + E(φ, k).
+inline double ellint_2(double k, double phi) {
+    if (std::isnan(k) || std::isnan(phi)) return kQNaN;
+    if (std::fabs(k) > 1.0) return kQNaN;
+    if (std::isinf(phi)) return kQNaN;
+
+    double nd = std::floor((phi + kPiOver2) / kPi);
+    double phi_r = phi - nd * kPi;
+    double sgn = 1.0;
+    if (phi_r < 0.0) { phi_r = -phi_r; sgn = -1.0; }
+
+    double result;
+    if (phi_r >= kPiOver2) {
+        result = comp_ellint_2(k);
+    } else {
+        double s = std::sin(phi_r), c = std::cos(phi_r);
+        double k2 = k * k, k2s2 = k2 * s * s;
+        if (k2s2 > 1.0) return kQNaN;
+        double c2 = c * c, nc2 = 1.0 - k2s2;
+        result = s * carlson_RF(c2, nc2, 1.0)
+               - (k2 / 3.0) * s * s * s * carlson_RD(c2, nc2, 1.0);
+    }
+    result = sgn * result;
+    if (nd != 0.0) result += 2.0 * nd * comp_ellint_2(k);
+    return result;
+}
+
+// Π(ν, φ, k) — reduce φ mod π, then sinφ·RF + (ν/3)sin³φ·RJ(…, 1−ν·sin²φ).
+// Π(ν, φ+nπ, k) = 2n·Π(ν,k) + Π(ν,φ,k).
+// Pole when 1 − ν·sin²φ = 0.
+inline double ellint_3(double k, double nu, double phi) {
+    if (std::isnan(k) || std::isnan(nu) || std::isnan(phi)) return kQNaN;
+    if (std::fabs(k) > 1.0) return kQNaN;
+    if (std::isinf(phi)) return kQNaN;
+
+    double nd = std::floor((phi + kPiOver2) / kPi);
+    double phi_r = phi - nd * kPi;
+    double sgn = 1.0;
+    if (phi_r < 0.0) { phi_r = -phi_r; sgn = -1.0; }
+
+    double result;
+    if (phi_r >= kPiOver2) {
+        result = comp_ellint_3(k, nu);
+    } else {
+        double s = std::sin(phi_r), c = std::cos(phi_r);
+        double k2 = k * k, k2s2 = k2 * s * s;
+        if (k2s2 > 1.0) return kQNaN;
+        double c2  = c * c;
+        double nc2 = 1.0 - k2s2;
+        double p   = 1.0 - nu * s * s;
+        if (p == 0.0) return kInf;
+        result = s * carlson_RF(c2, nc2, 1.0)
+               + (nu / 3.0) * s * s * s * carlson_RJ(c2, nc2, 1.0, p);
+    }
+    result = sgn * result;
+    if (nd != 0.0) {
+        double P = comp_ellint_3(k, nu);
+        if (std::isinf(P)) return std::copysign(kInf, phi);
+        result += 2.0 * nd * P;
+    }
+    return result;
+}
+
+// ── float overloads ──────────────────────────────────────────────────────────
+inline float comp_ellint_1(float k)
+    { return float(comp_ellint_1(double(k))); }
+inline float comp_ellint_2(float k)
+    { return float(comp_ellint_2(double(k))); }
+inline float comp_ellint_3(float k, float nu)
+    { return float(comp_ellint_3(double(k), double(nu))); }
+inline float ellint_1(float k, float phi)
+    { return float(ellint_1(double(k), double(phi))); }
+inline float ellint_2(float k, float phi)
+    { return float(ellint_2(double(k), double(phi))); }
+inline float ellint_3(float k, float nu, float phi)
+    { return float(ellint_3(double(k), double(nu), double(phi))); }
+
+} // namespace std (ellint)
+namespace std {
+// ── Borwein d-array for the n-term Chebyshev-accelerated Dirichlet eta ──────
+// d[0]=n; d[k]=d[k-1]+t[k] where t[k]=t[k-1]*(n+k-1)*(n-k+1)*4/((2k-1)*(2k))
+inline void build_borwein_d(int n, double *d) {
+    d[0] = (double)n;
+    double term = (double)n;
+    for (int k = 1; k <= n; ++k) {
+        term *= (double)(n + k - 1) * 4.0 * (double)(n - k + 1);
+        term /= (double)(2 * k - 1) * (double)(2 * k);
+        d[k] = d[k - 1] + term;
+    }
+}
+
+// ── riemann_zeta ────────────────────────────────────────────────────────────
+// s > 1 and 0 < s < 1: Borwein n=34 alternating-eta, η(s)/(1−2^{1−s}).
+// s < 0: functional equation ζ(s)=2^s·π^{s−1}·sin(πs/2)·Γ(1−s)·ζ(1−s).
+// Negative even integers (trivial zeros): return 0 exactly.
+// s=0: −½; s=1: +∞.
+inline double riemann_zeta(double s) {
+    if (std::isnan(s)) return s;
+
+    if (s < 0.0 && s == std::floor(s) && std::fmod(-s, 2.0) == 0.0)
+        return 0.0;
+
+    if (s == 0.0) return -0.5;
+    if (s == 1.0) return std::kInf;
+
+    if (s < 0.0) {
+        double t = 1.0 - s;
+        double sinval = std::sin(std::kPi * s * 0.5);
+        if (sinval == 0.0) return 0.0;
+        double factor = std::pow(2.0, s)
+                      * std::pow(std::kPi, s - 1.0)
+                      * sinval
+                      * std::tgamma(t);
+        return factor * std::riemann_zeta(t);
+    }
+
+    const int n = 34;
+    double d[n + 1];
+    build_borwein_d(n, d);
+    double dn = d[n];
+
+    double sum = 0.0, sign = 1.0;
+    for (int k = 0; k < n; ++k) {
+        sum += sign * (d[k] - dn) * std::pow((double)(k + 1), -s);
+        sign = -sign;
+    }
+    double eta = -sum / dn;
+    double denom = 1.0 - std::pow(2.0, 1.0 - s);
+    if (std::fabs(denom) < 1e-15) return std::kInf;
+    return eta / denom;
+}
+
+inline float riemann_zeta(float s) { return (float)riemann_zeta((double)s); }
+
+// ── expint helpers ──────────────────────────────────────────────────────────
+constexpr double kEulerGamma = 0.5772156649015328606065120900824;
+
+// E1(z) for z ≤ 1: alternating series -γ - ln(z) + Σ_{k≥1} (-1)^{k+1} z^k/(k·k!)
+// term recurrence: term_{k+1} = term_k · z·k / (k+1)²
+static double e1_series(double z) {
+    double term = z, sum = 0.0, sign = 1.0;
+    for (int k = 1; k <= 300; ++k) {
+        sum += sign * term;
+        sign = -sign;
+        term *= z * (double)k / ((double)(k + 1) * (double)(k + 1));
+        if (term < 1e-20 * std::fabs(sum) + 1e-308) break;
+    }
+    return -kEulerGamma - std::log(z) + sum;
+}
+
+// E1(z) for z > 1: even-contraction CF (A&S 5.1.22 contraction)
+// E1(z)·e^z = 1/(z+1 − 1²/(z+3 − 2²/(z+5 − ...)))
+// Modified Lentz: b_n=z+(2n-1), a_n=1 (n=1), -(n-1)² (n≥2)
+static double e1_cf(double z) {
+    const double tiny = 1e-300;
+    double f = tiny, C = f, D = 0.0;
+    for (int n = 1; n <= 300; ++n) {
+        double bn = z + (double)(2 * n - 1);
+        double an = (n == 1) ? 1.0 : -(double)((n - 1) * (n - 1));
+        D = bn + an * D; if (std::fabs(D) < tiny) D = tiny; D = 1.0 / D;
+        C = bn + an / C; if (std::fabs(C) < tiny) C = tiny;
+        double delta = C * D; f *= delta;
+        if (std::fabs(delta - 1.0) < 1e-17) break;
+    }
+    return std::exp(-z) * f;
+}
+
+// Ei(x) for 0 < x ≤ 40: convergent series γ + ln x + Σ_{k≥1} x^k/(k·k!)
+// (all terms positive; no cancellation; converges in ~x+20 iterations)
+static double ei_series(double x) {
+    double term = x, sum = 0.0;
+    for (int k = 1; k <= 300; ++k) {
+        sum += term;
+        term *= x * (double)k / ((double)(k + 1) * (double)(k + 1));
+        if (term < 1e-20 * sum + 1e-308) break;
+    }
+    return kEulerGamma + std::log(x) + sum;
+}
+
+// Ei(x) for x > 40: asymptotic (e^x/x)·Σ_{k≥0} k!/x^k, truncated at minimum term
+// Accurate to ≤ 5 ULP for x ≥ 40; gracefully divergent-truncated for smaller x.
+static double ei_asymptotic(double x) {
+    double sum = 1.0, term = 1.0, prev = 0.0;
+    for (int k = 1; k <= 300; ++k) {
+        term *= (double)k / x;
+        if (term > prev && k > 4) break;
+        sum += term; prev = term;
+        if (term < 1e-20 * sum) break;
+    }
+    return std::exp(x) / x * sum;
+}
+
+// ── expint: Ei(x) as defined by std::expint ────────────────────────────────
+// x > 0: Ei(x) = γ + ln x + Σ_{k≥1} x^k/(k·k!)
+// x < 0: Ei(x) = −E₁(−x)
+// x = 0: −∞
+inline double expint(double x) {
+    if (std::isnan(x)) return x;
+    if (x == 0.0) return -std::kInf;
+    if (std::isinf(x)) return (x > 0.0) ? std::kInf : 0.0;
+    if (x > 0.0) return (x <= 40.0) ? ei_series(x) : ei_asymptotic(x);
+    double z = -x;
+    return -(z <= 1.0 ? e1_series(z) : e1_cf(z));
+}
+
+inline float expint(float x) { return (float)expint((double)x); }
+
+} // namespace std (zeta)
+namespace std {
+inline float comp_ellint_1f(float k){return (float)comp_ellint_1((double)k);} inline long double comp_ellint_1l(long double k){return (long double)comp_ellint_1((double)k);}
+inline float comp_ellint_2f(float k){return (float)comp_ellint_2((double)k);} inline long double comp_ellint_2l(long double k){return (long double)comp_ellint_2((double)k);}
+inline float comp_ellint_3f(float k,float v){return (float)comp_ellint_3((double)k,(double)v);} inline long double comp_ellint_3l(long double k,long double v){return (long double)comp_ellint_3((double)k,(double)v);}
+inline float ellint_1f(float k,float p){return (float)ellint_1((double)k,(double)p);} inline long double ellint_1l(long double k,long double p){return (long double)ellint_1((double)k,(double)p);}
+inline float ellint_2f(float k,float p){return (float)ellint_2((double)k,(double)p);} inline long double ellint_2l(long double k,long double p){return (long double)ellint_2((double)k,(double)p);}
+inline float ellint_3f(float k,float v,float p){return (float)ellint_3((double)k,(double)v,(double)p);} inline long double ellint_3l(long double k,long double v,long double p){return (long double)ellint_3((double)k,(double)v,(double)p);}
+inline float riemann_zetaf(float s){return (float)riemann_zeta((double)s);} inline long double riemann_zetal(long double s){return (long double)riemann_zeta((double)s);}
+inline float expintf(float x){return (float)expint((double)x);} inline long double expintl(long double x){return (long double)expint((double)x);}
+} // namespace std (sf forwarders)
+namespace std {
+
+constexpr double kBesEps = 1e-17;
+constexpr double kBesAsym = 17.5;            // series→asymptotic seam
+
+// J_nu (sgn=-1) or I_nu (sgn=+1) ascending series — small/moderate x, any nu≥0.
+inline double bes_series(double nu, double x, double sgn) {
+    double hx = 0.5 * x;
+    double t  = pow(hx, nu) / tgamma(nu + 1.0);
+    double s = t, z = sgn * hx * hx;
+    for (int k = 1; k <= 2000; ++k) {
+        t *= z / (k * (nu + k));
+        s += t;
+        if (fabs(t) <= kBesEps * fabs(s)) break;
+    }
+    return s;
+}
+// Asymptotic J_nu, Y_nu for x ≫ nu (divergent series → stop at smallest term).
+inline void jy_asym(double nu, double x, double &J, double &Y) {
+    double mu = 4.0 * nu * nu;
+    double a = 1.0, P = 1.0, Q = 0.0, xp = 1.0, prev = kInf;
+    for (int k = 1; k <= 40; ++k) {
+        a *= (mu - (2 * k - 1) * (2 * k - 1)) / (k * 8.0);
+        xp *= x;
+        double term = a / xp;
+        if (fabs(term) > prev) break;            // asymptotic divergence guard
+        prev = fabs(term);
+        if (k & 1) Q += (((k - 1) / 2) & 1) ? -term : term;
+        else       P += ((k / 2) & 1) ? -term : term;
+        if (fabs(term) < kBesEps) break;
+    }
+    double chi = x - nu * kPiOver2 - kPiOver4;
+    double f = sqrt(2.0 / (kPi * x)), c = cos(chi), sn = sin(chi);
+    J = f * (P * c - Q * sn);
+    Y = f * (P * sn + Q * c);
+}
+// Asymptotic I_nu, K_nu for x ≫ nu.
+inline void ik_asym(double nu, double x, double &I, double &K) {
+    double mu = 4.0 * nu * nu;
+    double a = 1.0, sumK = 1.0, sumI = 1.0, xp = 1.0, prev = kInf;
+    for (int k = 1; k <= 40; ++k) {
+        a *= (mu - (2 * k - 1) * (2 * k - 1)) / (k * 8.0);
+        xp *= x;
+        double term = a / xp;
+        if (fabs(term) > prev) break;
+        prev = fabs(term);
+        sumK += term;
+        sumI += (k & 1) ? -term : term;
+        if (fabs(term) < kBesEps) break;
+    }
+    K = sqrt(kPi / (2.0 * x)) * exp(-x) * sumK;
+    I = exp(x) / sqrt(2.0 * kPi * x) * sumI;
+}
+// Integer-order small-x series (digamma form) for Y0,Y1,K0,K1.
+inline double Y0_small(double x) {
+    double hx = 0.5 * x, hx2 = hx * hx, term = 1.0, J = 1.0, acc = 0.0, H = 0.0;
+    for (int k = 1; k <= 300; ++k) {
+        term *= -hx2 / (double(k) * k); J += term;
+        H += 1.0 / k; acc += H * term;
+        if (fabs(term) < kBesEps * fabs(J)) break;
+    }
+    return (2.0 / kPi) * ((log(hx) + kEulerGamma) * J - acc);
+}
+inline double K0_small(double x) {
+    double hx = 0.5 * x, hx2 = hx * hx, term = 1.0, I = 1.0, acc = 0.0, H = 0.0;
+    for (int k = 1; k <= 300; ++k) {
+        term *= hx2 / (double(k) * k); I += term;
+        H += 1.0 / k; acc += H * term;
+        if (fabs(term) < kBesEps * fabs(I)) break;
+    }
+    return -(log(hx) + kEulerGamma) * I + acc;
+}
+inline double Y1_small(double x) {
+    double hx = 0.5 * x, hx2 = hx * hx;
+    double I1 = bes_series(1.0, x, -1.0);        // J_1
+    // -(2/(pi x)) + (2/pi)(ln hx)J1 - (1/pi) Σ_{k≥0} (H_k+H_{k+1})(-1)^k (hx)^{2k+1}/(k!(k+1)!)
+    double term = hx, acc = 0.0, Hk = 0.0, Hk1 = 1.0;   // k=0: H0=0,H1=1
+    for (int k = 0; k <= 300; ++k) {
+        acc += (Hk + Hk1) * term;
+        double next = -term * hx2 / ((k + 1.0) * (k + 2.0));
+        term = next; Hk += 1.0 / (k + 1.0); Hk1 += 1.0 / (k + 2.0);
+        if (fabs(term) < kBesEps * (fabs(acc) + 1e-300)) break;
+    }
+    return (2.0 / kPi) * (log(hx) + kEulerGamma) * I1 - (2.0 / (kPi * x)) - (1.0 / kPi) * acc;
+}
+inline double K1_small(double x) {
+    double hx = 0.5 * x, hx2 = hx * hx;
+    double I1 = bes_series(1.0, x, 1.0);
+    double term = hx, acc = 0.0, Hk = 0.0, Hk1 = 1.0;
+    for (int k = 0; k <= 300; ++k) {
+        acc += (Hk + Hk1) * term;
+        double next = term * hx2 / ((k + 1.0) * (k + 2.0));
+        term = next; Hk += 1.0 / (k + 1.0); Hk1 += 1.0 / (k + 2.0);
+        if (fabs(term) < kBesEps * (fabs(acc) + 1e-300)) break;
+    }
+    return 1.0 / x + (log(hx) + kEulerGamma) * I1 - 0.5 * acc;
+}
+
+// ── x≥8 helpers: μ=frac(ν) base via asymptotic (x≫μ<1) + recurrence ────────
+constexpr double kBesRecSeam = 8.0;
+inline double besJ_rec(double nu, double x) {                 // Miller downward
+    double mu = nu - floor(nu);
+    double Jm, Ym, Jm1, Ym1; jy_asym(mu, x, Jm, Ym); jy_asym(mu + 1.0, x, Jm1, Ym1);
+    int N = (int)floor(nu - mu + 0.5);
+    if (N == 0) return Jm;
+    int M = N + (int)x + (int)sqrt(40.0 * nu) + 30;           // M ≫ max(ν,x)
+    double jhi = 0.0, jc = 1e-280, Jnu_u = 0.0, Jmu_u = 0.0, Jmu1_u = 0.0;
+    for (int k = M; k >= 0; --k) {
+        if (k == N) Jnu_u = jc;
+        if (k == 1) Jmu1_u = jc;
+        if (k == 0) Jmu_u = jc;
+        double jl = (2.0 * (mu + k) / x) * jc - jhi; jhi = jc; jc = jl;
+        if (fabs(jc) > 1e250) { jc *= 1e-280; jhi *= 1e-280; Jnu_u *= 1e-280; Jmu_u *= 1e-280; Jmu1_u *= 1e-280; }
+    }
+    // normalize by the larger-magnitude fractional anchor (avoids ÷ near-zero)
+    double scale = (fabs(Jm) >= fabs(Jm1)) ? Jm / Jmu_u : Jm1 / Jmu1_u;
+    return Jnu_u * scale;
+}
+inline double besI_rec(double nu, double x) {                 // Miller downward (+)
+    double mu = nu - floor(nu);
+    double Im, Km; ik_asym(mu, x, Im, Km);
+    int N = (int)floor(nu - mu + 0.5);
+    if (N == 0) return Im;
+    int M = N + 25 + (int)sqrt(40.0 * nu);
+    double ihi = 0.0, ic = 1e-280, Inu_u = 0.0, Imu_u = 0.0;
+    for (int k = M; k >= 0; --k) {
+        if (k == N) Inu_u = ic;
+        if (k == 0) Imu_u = ic;
+        double il = (2.0 * (mu + k) / x) * ic + ihi; ihi = ic; ic = il;
+        if (fabs(ic) > 1e250) { ic *= 1e-280; ihi *= 1e-280; Inu_u *= 1e-280; Imu_u *= 1e-280; }
+    }
+    return Inu_u * (Im / Imu_u);
+}
+inline double besY_rec(double nu, double x) {                 // upward (stable)
+    double mu = nu - floor(nu); int N = (int)floor(nu - mu + 0.5);
+    double Jm, Ym; jy_asym(mu, x, Jm, Ym);
+    if (N == 0) return Ym;
+    double Jm1, Ym1; jy_asym(mu + 1.0, x, Jm1, Ym1);
+    double ym = Ym, yc = Ym1;
+    for (int k = 1; k < N; ++k) { double yn = (2.0 * (mu + k) / x) * yc - ym; ym = yc; yc = yn; }
+    return yc;
+}
+inline double besK_rec(double nu, double x) {                 // upward (+)
+    double mu = nu - floor(nu); int N = (int)floor(nu - mu + 0.5);
+    double Im, Km; ik_asym(mu, x, Im, Km);
+    if (N == 0) return Km;
+    double Im1, Km1; ik_asym(mu + 1.0, x, Im1, Km1);
+    double km = Km, kc = Km1;
+    for (int k = 1; k < N; ++k) { double kn = (2.0 * (mu + k) / x) * kc + km; km = kc; kc = kn; }
+    return kc;
+}
+// ── public cylindrical ─────────────────────────────────────────────────────
+inline double cyl_bessel_j(double nu, double x) {
+    if (isnan(nu) || isnan(x) || x < 0.0) return kQNaN;
+    if (x == 0.0) return nu == 0.0 ? 1.0 : 0.0;
+    // series while x≲ν (decaying, no cancellation); asymptotic for x≫ν.
+    if (x <= nu + 10.0) return bes_series(nu, x, -1.0);
+    return besJ_rec(nu, x);
+}
+inline double cyl_bessel_i(double nu, double x) {
+    if (isnan(nu) || isnan(x) || x < 0.0) return kQNaN;
+    if (x == 0.0) return nu == 0.0 ? 1.0 : 0.0;
+    if (x >= kBesRecSeam) return besI_rec(nu, x);
+    return bes_series(nu, x, 1.0);
+}
+inline double cyl_neumann(double nu, double x) {
+    if (isnan(nu) || isnan(x) || x < 0.0) return kQNaN;
+    if (x == 0.0) return -kInf;
+    if (x >= kBesRecSeam) return besY_rec(nu, x);
+    double n = floor(nu + 0.5);
+    if (fabs(nu - n) > 1e-7) {              // non-integer: reflection
+        double s = sin(nu * kPi);
+        return (bes_series(nu, x, -1.0) * cos(nu * kPi) - bes_series(-nu, x, -1.0)) / s;
+    }
+    int ni = (int)n;                        // integer: Y0,Y1 + upward recurrence
+    double y0 = Y0_small(x), y1 = Y1_small(x);
+    if (ni == 0) return y0;
+    if (ni == 1) return y1;
+    double ym = y0, yc = y1;
+    for (int k = 1; k < ni; ++k) { double yn = (2.0 * k / x) * yc - ym; ym = yc; yc = yn; }
+    return yc;
+}
+inline double cyl_bessel_k(double nu, double x) {
+    if (isnan(nu) || isnan(x) || x < 0.0) return kQNaN;
+    if (x == 0.0) return kInf;
+    if (x >= kBesRecSeam) return besK_rec(nu, x);
+    double n = floor(nu + 0.5);
+    if (fabs(nu - n) > 1e-7) {              // non-integer: reflection
+        double s = sin(nu * kPi);
+        return (kPi / (2.0 * s)) * (bes_series(-nu, x, 1.0) - bes_series(nu, x, 1.0));
+    }
+    int ni = (int)n;                        // integer: K0,K1 + upward recurrence
+    double k0 = K0_small(x), k1 = K1_small(x);
+    if (ni == 0) return k0;
+    if (ni == 1) return k1;
+    double km = k0, kc = k1;
+    for (int k = 1; k < ni; ++k) { double kn = (2.0 * k / x) * kc + km; km = kc; kc = kn; }
+    return kc;
+}
+// ── spherical ──────────────────────────────────────────────────────────────
+inline double sph_bessel(unsigned n, double x) {
+    if (isnan(x)) return kQNaN;
+    if (x == 0.0) return n == 0 ? 1.0 : 0.0;
+    if ((double)n <= x) {                   // upward recurrence stable for x≥n
+        double j0 = sin(x) / x, j1 = sin(x) / (x * x) - cos(x) / x;
+        if (n == 0) return j0;
+        if (n == 1) return j1;
+        double jm = j0, jc = j1;
+        for (unsigned k = 1; k < n; ++k) { double jn = (2.0 * k + 1.0) / x * jc - jm; jm = jc; jc = jn; }
+        return jc;
+    }
+    // x<n: downward (Miller) recurrence, normalize by true j_0
+    int M = (int)n + 15 + (int)sqrt(40.0 * n);
+    double jp1 = 0.0, jc = 1e-280, jn_u = 0.0;        // j_{M+1}=0, j_M=eps
+    for (int k = M; k >= 1; --k) {
+        double jm1 = (2.0 * k + 1.0) / x * jc - jp1;  // j_{k-1}
+        if (k == (int)n) jn_u = jc;                   // capture j_n
+        jp1 = jc; jc = jm1;
+        if (fabs(jc) > 1e250) { jc *= 1e-280; jp1 *= 1e-280; jn_u *= 1e-280; }
+    }
+    return jn_u * (sin(x) / x) / jc;                  // jc = j_0 (unnormalized)
+}
+inline double sph_neumann(unsigned n, double x) {
+    if (isnan(x)) return kQNaN;
+    if (x == 0.0) return -kInf;
+    double y0 = -cos(x) / x, y1 = -cos(x) / (x * x) - sin(x) / x;
+    if (n == 0) return y0;
+    if (n == 1) return y1;
+    double ym = y0, yc = y1;
+    for (unsigned k = 1; k < n; ++k) { double yn = (2.0 * k + 1.0) / x * yc - ym; ym = yc; yc = yn; }
+    return yc;
+}
+inline float cyl_bessel_j(float n, float x) { return float(cyl_bessel_j(double(n), double(x))); }
+inline float cyl_bessel_i(float n, float x) { return float(cyl_bessel_i(double(n), double(x))); }
+inline float cyl_neumann(float n, float x)  { return float(cyl_neumann(double(n), double(x))); }
+inline float cyl_bessel_k(float n, float x) { return float(cyl_bessel_k(double(n), double(x))); }
+inline float sph_bessel(unsigned n, float x) { return float(sph_bessel(n, double(x))); }
+inline float sph_neumann(unsigned n, float x){ return float(sph_neumann(n, double(x))); }
+
+inline float cyl_bessel_jf(float n,float x){return (float)cyl_bessel_j((double)n,(double)x);} inline long double cyl_bessel_jl(long double n,long double x){return (long double)cyl_bessel_j((double)n,(double)x);}
+inline float cyl_bessel_if(float n,float x){return (float)cyl_bessel_i((double)n,(double)x);} inline long double cyl_bessel_il(long double n,long double x){return (long double)cyl_bessel_i((double)n,(double)x);}
+inline float cyl_neumannf(float n,float x){return (float)cyl_neumann((double)n,(double)x);} inline long double cyl_neumannl(long double n,long double x){return (long double)cyl_neumann((double)n,(double)x);}
+inline float cyl_bessel_kf(float n,float x){return (float)cyl_bessel_k((double)n,(double)x);} inline long double cyl_bessel_kl(long double n,long double x){return (long double)cyl_bessel_k((double)n,(double)x);}
+inline float sph_besself(unsigned n,float x){return (float)sph_bessel(n,(double)x);} inline long double sph_bessell(unsigned n,long double x){return (long double)sph_bessel(n,(double)x);}
+inline float sph_neumannf(unsigned n,float x){return (float)sph_neumann(n,(double)x);} inline long double sph_neumannl(unsigned n,long double x){return (long double)sph_neumann(n,(double)x);}
+} // namespace std (bessel)
+// >>> AGENT-SPECIAL-APPEND <<<
+#endif
