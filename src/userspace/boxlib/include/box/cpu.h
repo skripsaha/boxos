@@ -29,7 +29,8 @@ typedef struct PACKED {
     bool has_cet;               // shadow stack OR IBT
     bool has_tme;
     bool has_fsgsbase;          // ring-3 WRFSBASE/RDFSBASE usable (TLS)
-    uint8_t _pad1[2];           // align next field to 8 bytes
+    bool has_rdrand;            // ring-3 RDRAND usable (random_device)
+    bool has_rdseed;            // ring-3 RDSEED usable
     uint8_t _reserved[4072];
 } cpu_caps_page_t;
 
@@ -93,6 +94,52 @@ INLINE bool cpu_has_fsgsbase(void) {
     volatile cpu_caps_page_t* caps = CPU_CAPS;
     if (caps->magic != CPU_CAPS_MAGIC) return false;
     return caps->has_fsgsbase;
+}
+
+/* True iff RDRAND (CPUID.01H:ECX[30]) / RDSEED (CPUID.07H.0:EBX[18]) are
+ * supported on every online core. Gate cpu_rdrand64/cpu_rdseed64 on these —
+ * executing the instruction without support raises #UD. Backs the on-chip
+ * entropy path of std::random_device. */
+INLINE bool cpu_has_rdrand(void) {
+    volatile cpu_caps_page_t* caps = CPU_CAPS;
+    if (caps->magic != CPU_CAPS_MAGIC) return false;
+    return caps->has_rdrand;
+}
+INLINE bool cpu_has_rdseed(void) {
+    volatile cpu_caps_page_t* caps = CPU_CAPS;
+    if (caps->magic != CPU_CAPS_MAGIC) return false;
+    return caps->has_rdseed;
+}
+
+/* Draw one 64-bit hardware random word. RDRAND/RDSEED set CF=1 on success;
+ * a transient 0 means the on-chip DRBG was momentarily drained, so retry a
+ * bounded number of times. Returns false if no word materialised. CALLER
+ * MUST gate on cpu_has_rdrand()/cpu_has_rdseed() — the raw instruction #UDs
+ * on CPUs without the feature. */
+INLINE bool cpu_rdrand64(uint64_t* out) {
+    for (int i = 0; i < 10; ++i) {
+        uint64_t v;
+        uint8_t  ok;
+        __asm__ volatile("rdrand %0\n\tsetc %1"
+                         : "=r"(v), "=qm"(ok)
+                         :
+                         : "cc");
+        if (ok) { *out = v; return true; }
+    }
+    return false;
+}
+INLINE bool cpu_rdseed64(uint64_t* out) {
+    for (int i = 0; i < 32; ++i) {
+        uint64_t v;
+        uint8_t  ok;
+        __asm__ volatile("rdseed %0\n\tsetc %1"
+                         : "=r"(v), "=qm"(ok)
+                         :
+                         : "cc");
+        if (ok) { *out = v; return true; }
+        __asm__ volatile("pause");
+    }
+    return false;
 }
 
 // Get calibrated TSC frequency in kHz. Returns 0 if not available.

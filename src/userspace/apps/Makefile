@@ -134,7 +134,7 @@ htest.elf: $(BOXLIB_START) htest.o $(BOXLIB)
 # _malloc_impl/printf from boxlib) and before any future libgcc so our
 # runtime symbols always win.
 cxxtest.elf: $(BOXLIB_START) cxxtest.o cxxtest_traits.o $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld
-	$(CXX) $(CXXLDFLAGS) -o $@ $(BOXLIB_START) cxxtest.o cxxtest_traits.o $(BOXCXX) $(BOXLIB)
+	$(CXX) $(CXXLDFLAGS) -o $@ $(BOXLIB_START) cxxtest.o cxxtest_traits.o $(BOXCXX) $(BOXLIB) -lgcc
 	@align=$$(x86_64-elf-readelf -lW $@ | awk '$$1=="TLS"{print $$NF}'); \
 	if [ -n "$$align" ] && [ $$((align)) -gt 64 ]; then \
 		echo "ERROR: $@ PT_TLS p_align=$$align > 64 — boxcxx tls_init layout contract broken (alignas(>64) thread_local?)"; \
