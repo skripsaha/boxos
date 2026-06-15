@@ -2838,6 +2838,9 @@ void Phase12()
     Check(EngNth(ranlux24_base{}, 10000) == 7937952ull, "phase12 ranlux24_base");
     Check(EngNth(ranlux24{}, 10000) == 9901578ull, "phase12 ranlux24");
     Check(EngNth(knuth_b{}, 10000) == 1112339016ull, "phase12 knuth_b");
+    Check(EngNth(independent_bits_engine<mt19937, 40, unsigned long long>{}, 1) ==
+              119014334198ull,
+          "phase12 independent_bits_engine");
 
     // ── engine reproducibility & discard ────────────────────────────────
     {
@@ -2901,6 +2904,8 @@ void Phase12()
               "phase12 normal mean");
         Check(near(mean_of(gamma_distribution<double>(2.0, 1.5), g, N), 3.0, 0.06),
               "phase12 gamma mean");
+        Check(near(mean_of(gamma_distribution<double>(0.5, 2.0), g, N), 1.0, 0.07),
+              "phase12 gamma a<1 mean");
         Check(near(mean_of(discrete_distribution<int>({1, 2, 3, 4}), g, N), 2.0, 0.05),
               "phase12 discrete mean");
     }
