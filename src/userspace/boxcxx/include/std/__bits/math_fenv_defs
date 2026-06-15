@@ -1,0 +1,28 @@
+// boxcxx — <cmath> constants & classification categories (shared by <cmath>).
+// BoxOS uses MATH_ERREXCEPT only (no errno) — IEEE-754 flags via MXCSR.
+#ifndef BOXCXX_BITS_MATH_FENV_DEFS
+#define BOXCXX_BITS_MATH_FENV_DEFS
+
+#define HUGE_VAL  (__builtin_huge_val())
+#define HUGE_VALF (__builtin_huge_valf())
+#define HUGE_VALL (__builtin_huge_vall())
+#define INFINITY  (__builtin_inff())
+#define NAN       (__builtin_nanf(""))
+
+#define FP_NAN       0
+#define FP_INFINITE  1
+#define FP_ZERO      2
+#define FP_SUBNORMAL 3
+#define FP_NORMAL    4
+
+#define FP_ILOGB0   (-2147483647 - 1)
+#define FP_ILOGBNAN (-2147483647 - 1)
+
+#define MATH_ERRNO     1
+#define MATH_ERREXCEPT 2
+#define math_errhandling MATH_ERREXCEPT
+
+#define FP_FAST_FMA  1
+#define FP_FAST_FMAF 1
+
+#endif

@@ -20,6 +20,7 @@
 #include <array>
 #include <atomic>
 #include <charconv>
+#include <cmath>
 #include <deque>
 #include <expected>
 #include <format>
@@ -52,6 +53,7 @@
 
 #include "box/cxx/bay_memory_resource.h"
 #include "box/cxx/current.h"
+#include "box/cxx/math.h"
 
 // A user-defined formatter (exercised in phase9b) — drives the type-erased
 // handle / FmtThunk path: the engine reaches it through a function pointer,
@@ -2581,6 +2583,67 @@ void PhaseCurrent()
     printf("[CXX] PASS phaseCurrent: box::current (stream/file/log/screen)\n");
 }
 
+// ── phase10: <cmath> (classical + C++17 special) + box:: universal layer ───
+void Phase10()
+{
+    auto eq = [](double a, double b, double tol) {
+        double d = std::fabs(a - b);
+        return d <= tol || d <= tol * std::fabs(b);
+    };
+    const double PI = 3.14159265358979311600;
+    // algebraic
+    Check(eq(std::sqrt(2.0), 1.4142135623730951, 1e-15), "sqrt2");
+    Check(eq(std::cbrt(27.0), 3.0, 1e-14), "cbrt27");
+    Check(std::floor(2.7) == 2.0 && std::ceil(2.1) == 3.0 && std::round(2.5) == 3.0 && std::trunc(-2.7) == -2.0, "round-family");
+    Check(eq(std::hypot(3.0, 4.0), 5.0, 1e-15) && std::fabs(-3.0) == 3.0, "hypot/fabs");
+    Check(eq(std::fmod(7.0, 3.0), 1.0, 1e-15) && eq(std::remainder(7.0, 3.0), 1.0, 1e-15), "fmod/remainder");
+    // exp / log
+    Check(eq(std::exp(1.0), 2.718281828459045, 1e-15), "exp1");
+    Check(eq(std::log(2.718281828459045), 1.0, 1e-15) && eq(std::log2(1024.0), 10.0, 1e-13) && eq(std::log10(1000.0), 3.0, 1e-13), "log family");
+    Check(eq(std::exp2(10.0), 1024.0, 1e-13) && eq(std::expm1(1e-6), 1.0000005e-6, 1e-9) && eq(std::log1p(1e-6), 9.999995e-7, 1e-9), "exp2/expm1/log1p");
+    // trig + inverse
+    Check(eq(std::sin(PI / 6), 0.5, 1e-15) && eq(std::cos(PI / 3), 0.5, 1e-15) && eq(std::tan(PI / 4), 1.0, 1e-14), "sin/cos/tan");
+    { double s = std::sin(1.3), c = std::cos(1.3); Check(eq(s * s + c * c, 1.0, 1e-15), "sin^2+cos^2"); }
+    Check(eq(std::atan(1.0), PI / 4, 1e-15) && eq(std::asin(1.0), PI / 2, 1e-12) && eq(std::atan2(1.0, 1.0), PI / 4, 1e-15), "inverse trig");
+    Check(eq(std::sin(1e7), 0.4205477931907825, 1e-9), "sin large-arg");
+    // hyperbolic
+    Check(eq(std::sinh(1.0), 1.1752011936438014, 1e-14) && eq(std::cosh(1.0), 1.5430806348152437, 1e-14) && eq(std::tanh(0.5), 0.46211715726000974, 1e-14), "sinh/cosh/tanh");
+    Check(eq(std::asinh(std::sinh(0.7)), 0.7, 1e-13) && eq(std::acosh(std::cosh(1.2)), 1.2, 1e-12) && eq(std::atanh(0.5), 0.5493061443340549, 1e-13), "inverse hyperbolic");
+    // pow
+    Check(eq(std::pow(2.0, 10.0), 1024.0, 1e-13) && eq(std::pow(2.0, 0.5), 1.4142135623730951, 1e-14) && eq(std::pow(27.0, 1.0 / 3.0), 3.0, 1e-12), "pow");
+    // erf / gamma
+    Check(eq(std::erf(1.0), 0.8427007929497149, 1e-12) && eq(std::erfc(1.0), 0.15729920705028513, 1e-11), "erf/erfc");
+    Check(eq(std::tgamma(5.0), 24.0, 1e-12) && eq(std::tgamma(0.5), 1.7724538509055159, 1e-12) && std::fabs(std::lgamma(1.0)) < 1e-12, "tgamma/lgamma");
+    // lock in double-double dd-log accuracy on real HW (audit-2): tgamma(20)=19!, pow large
+    Check(eq(std::tgamma(20.0), 121645100408832000.0, 1e-13) && eq(std::pow(7.0, 20.0), 79792266297612001.0, 1e-13), "tgamma/pow large (dd)");
+    Check(eq(std::erfc(2.0), 0.0046777349810472660, 1e-11) && eq(std::erfc(5.0), 1.5374597944280349e-12, 1e-10), "erfc moderate/large");
+    // classification
+    Check(std::isnan(std::nan("")) && std::isinf(HUGE_VAL) && std::signbit(-1.0) && std::isfinite(1.0) && !std::isnormal(0.0), "classification");
+    // manipulation
+    { int e; double m = std::frexp(12.0, &e); Check(eq(m, 0.75, 1e-15) && e == 4, "frexp"); }
+    Check(eq(std::ldexp(1.5, 4), 24.0, 0.0) && std::ilogb(12.0) == 3 && eq(std::fma(2.0, 3.0, 4.0), 10.0, 0.0), "ldexp/ilogb/fma");
+    Check(std::fmax(2.0, 3.0) == 3.0 && std::fmin(2.0, 3.0) == 2.0 && std::fdim(5.0, 2.0) == 3.0 && std::copysign(2.0, -1.0) == -2.0, "fmax/fmin/fdim/copysign");
+    // C++17 special — orthogonal polynomials + beta
+    Check(eq(std::legendre(2, 0.5), -0.125, 1e-13) && eq(std::laguerre(2, 1.0), -0.5, 1e-13) && eq(std::hermite(3, 1.0), -4.0, 1e-12), "legendre/laguerre/hermite");
+    Check(eq(std::beta(2.0, 3.0), 1.0 / 12.0, 1e-12) && eq(std::assoc_legendre(1, 1, 0.5), 0.8660254037844386, 1e-12), "beta/assoc_legendre");
+    // zeta / expint
+    Check(eq(std::riemann_zeta(2.0), 1.6449340668482264, 1e-12) && eq(std::riemann_zeta(-1.0), -1.0 / 12.0, 1e-11), "riemann_zeta");
+    Check(eq(std::expint(1.0), 1.8951178163559368, 1e-11), "expint");
+    // Bessel
+    Check(eq(std::cyl_bessel_j(0.0, 1.0), 0.7651976865579666, 1e-9) && eq(std::cyl_bessel_j(2.0, 5.0), 0.046565116277752214, 1e-7), "cyl_bessel_j");
+    Check(eq(std::cyl_neumann(0.0, 1.0), 0.08825696421567696, 1e-7) && eq(std::cyl_bessel_i(0.0, 1.0), 1.2660658777520084, 1e-9), "cyl_neumann/i");
+    Check(eq(std::cyl_bessel_k(0.0, 1.0), 0.42102443824070834, 1e-7) && eq(std::sph_bessel(1, 1.0), 0.30116867893975674, 1e-10), "cyl_bessel_k/sph_bessel");
+    // elliptic
+    Check(eq(std::comp_ellint_1(0.0), PI / 2, 1e-14) && eq(std::comp_ellint_2(0.0), PI / 2, 1e-14), "comp_ellint_1/2");
+    Check(eq(std::ellint_1(0.5, 1.0), 1.0373561200021773, 1e-11) && eq(std::comp_ellint_1(0.5), 1.6857503548125963, 1e-11), "ellint_1");
+    // box:: universal layer
+    Check(eq(box::log(8.0, 3.0), 1.8927892607143724, 1e-13) && eq(box::log(1000.0, 10.0), 3.0, 1e-12), "box::log(x,base)");
+    Check(eq(box::root(27.0, 3.0), 3.0, 1e-13) && eq(box::root(-32.0, 5.0), -2.0, 1e-13) && eq(box::root(16.0, 4.0), 2.0, 1e-13), "box::root");
+    Check(eq(box::round(3.14159, 2), 3.14, 1e-12) && eq(box::round(1234.5678, -2), 1200.0, 1e-12), "box::round(x,digits)");
+    Check(eq(box::sin(90.0, box::deg), 1.0, 1e-15) && eq(box::cos(180.0, box::deg), -1.0, 1e-15) && eq(box::atan2(1.0, 1.0, box::deg), 45.0, 1e-13), "box:: degree trig");
+    printf("[CXX] PASS phase10: <cmath> classical+special + box:: universal\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -2612,6 +2675,7 @@ int main()
     Phase9b();
     Phase9c();
     PhaseCurrent();
+    Phase10();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

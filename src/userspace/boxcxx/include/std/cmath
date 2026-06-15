@@ -1,0 +1,1007 @@
+// boxcxx — <cmath> : full classical surface + C++17 special math.
+// Header-only (namespace std); sqrt via inline sqrtsd/ss (no errno path,
+// works without -fno-math-errno). C++17 special fns in <__bits/cmath_special>.
+#ifndef BOXCXX_CMATH
+#define BOXCXX_CMATH
+#include <cstdint>
+#include <__bits/math_fenv_defs>
+#include <__bits/cmath_coeffs>
+// Everything here is transplanted verbatim into src/runtime/cmath*.cpp.
+
+namespace std {
+
+using u32 = uint32_t;
+using u64 = uint64_t;
+using i32 = int32_t;
+using i64 = int64_t;
+
+// ── bit casts ────────────────────────────────────────────────────────────
+inline u64    dbits(double x)  { return __builtin_bit_cast(u64, x); }
+inline double dfrom(u64 b)     { return __builtin_bit_cast(double, b); }
+inline u32    fbits(float x)   { return __builtin_bit_cast(u32, x); }
+inline float  ffrom(u32 b)     { return __builtin_bit_cast(float, b); }
+
+// ── constants (compile-time builtins, no libm) ─────────────────────────────
+constexpr double kInf   = __builtin_huge_val();
+constexpr double kQNaN  = __builtin_nan("");
+constexpr float  kInfF  = __builtin_huge_valf();
+constexpr float  kQNaNF = __builtin_nanf("");
+
+constexpr double kPi      = 3.14159265358979311599796346854;
+constexpr double kPiOver2 = 1.57079632679489655799898173427;
+constexpr double kPiOver4 = 0.785398163397448278999490867136;
+constexpr double kTwoOverPi = 0.636619772367581382432888403856;
+constexpr double kLn2     = 0.693147180559945309417232121458;
+constexpr double kLn2Hi   = 6.93147180369123816490e-01; // high 32 mantissa bits
+constexpr double kLn2Lo   = 1.90821492927058770002e-10;
+constexpr double kLog2e   = 1.44269504088896340735992468100;
+constexpr double kLn10    = 2.30258509299404568401799145468;
+constexpr double kLog10e  = 0.434294481903251827651128918917;
+
+// fpclassify categories (match <cmath> values we will define in the header)
+enum { FP_NAN_ = 0, FP_INFINITE_ = 1, FP_ZERO_ = 2, FP_SUBNORMAL_ = 3, FP_NORMAL_ = 4 };
+
+// ── classification (double) ────────────────────────────────────────────────
+inline bool isnan(double x)  { return (dbits(x) & 0x7fffffffffffffffULL) >  0x7ff0000000000000ULL; }
+inline bool isinf(double x)  { return (dbits(x) & 0x7fffffffffffffffULL) == 0x7ff0000000000000ULL; }
+inline bool isfinite(double x){return (dbits(x) & 0x7ff0000000000000ULL) != 0x7ff0000000000000ULL; }
+inline bool signbit(double x){ return (dbits(x) >> 63) != 0; }
+inline bool isnormal(double x){ u64 e = (dbits(x) >> 52) & 0x7ff; return e != 0 && e != 0x7ff; }
+inline int  fpclassify(double x) {
+    u64 b = dbits(x), e = (b >> 52) & 0x7ff, m = b & 0xfffffffffffffULL;
+    if (e == 0)     return m ? FP_SUBNORMAL_ : FP_ZERO_;
+    if (e == 0x7ff) return m ? FP_NAN_ : FP_INFINITE_;
+    return FP_NORMAL_;
+}
+// classification (float)
+inline bool isnan(float x)  { return (fbits(x) & 0x7fffffffU) >  0x7f800000U; }
+inline bool isinf(float x)  { return (fbits(x) & 0x7fffffffU) == 0x7f800000U; }
+inline bool isfinite(float x){return (fbits(x) & 0x7f800000U) != 0x7f800000U; }
+inline bool signbit(float x){ return (fbits(x) >> 31) != 0; }
+inline bool isnormal(float x){ u32 e = (fbits(x) >> 23) & 0xff; return e != 0 && e != 0xff; }
+inline int  fpclassify(float x) {
+    u32 b = fbits(x), e = (b >> 23) & 0xff, m = b & 0x7fffffU;
+    if (e == 0)    return m ? FP_SUBNORMAL_ : FP_ZERO_;
+    if (e == 0xff) return m ? FP_NAN_ : FP_INFINITE_;
+    return FP_NORMAL_;
+}
+
+// ── fabs / copysign (intrinsics → andpd / and-or; no libm) ─────────────────
+inline double fabs(double x)            { return __builtin_fabs(x); }
+inline float  fabs(float x)             { return __builtin_fabsf(x); }
+inline double copysign(double x,double y){ return __builtin_copysign(x, y); }
+inline float  copysign(float x,float y) { return __builtin_copysignf(x, y); }
+
+// ── sqrt (hardware sqrtsd/sqrtss; requires -fno-math-errno to inline) ──────
+inline double sqrt(double x) { double r; __asm__("sqrtsd %1,%0":"=x"(r):"x"(x)); return r; }
+inline float  sqrt(float x)  { float r; __asm__("sqrtss %1,%0":"=x"(r):"x"(x)); return r; }
+
+// ── trunc / floor / ceil / round (SSE2 bit-twiddling, no SSE4.1 roundsd) ───
+inline double trunc(double x) {
+    u64 b = dbits(x);
+    int e = int((b >> 52) & 0x7ff) - 1023;        // unbiased exponent
+    if (e < 0)  return dfrom(b & 0x8000000000000000ULL);          // |x|<1 → ±0
+    if (e >= 52) return x;                                         // integral / inf / nan
+    u64 mask = (1ULL << (52 - e)) - 1;
+    return dfrom(b & ~mask);
+}
+inline double floor(double x) {
+    double t = trunc(x);
+    return (t > x) ? t - 1.0 : t;                  // NaN: comparisons false → t
+}
+inline double ceil(double x) {
+    double t = trunc(x);
+    return (t < x) ? t + 1.0 : t;
+}
+inline double round(double x) {                    // round-half-away-from-zero
+    double t = trunc(x);
+    double d = x - t;                               // fractional part, |d|<1 (NaN→NaN)
+    if (d >= 0.5)  return t + 1.0;
+    if (d <= -0.5) return t - 1.0;
+    return t;                                        // inf: d=NaN → both false → t=inf
+}
+// float variants via exact double round-trip (double holds all float integers)
+inline float trunc(float x) { return float(trunc(double(x))); }
+inline float floor(float x) { return float(floor(double(x))); }
+inline float ceil(float x)  { return float(ceil(double(x))); }
+inline float round(float x) { return float(round(double(x))); }
+
+// ── nearbyint / rint : round to current mode (default RN-even) ─────────────
+// (x ± 2^52) ∓ 2^52 rounds per the active MXCSR mode and is exact for |x|<2^52.
+inline double rint(double x) {
+    u64 b = dbits(x);
+    if ((b & 0x7ff0000000000000ULL) >= (0x433ULL << 52)) return x; // |x|>=2^52 / nan / inf
+    static const double kTwo52 = 4503599627370496.0;
+    double a = fabs(x);
+    double r = (a + kTwo52) - kTwo52;
+    return copysign(r, x);
+}
+inline double nearbyint(double x) { return rint(x); }  // value identical; target suppresses inexact
+inline float  rint(float x)       { return float(rint(double(x))); }
+inline float  nearbyint(float x)  { return float(rint(double(x))); }
+
+// ── fmod : exact, shift-and-subtract (each step exact by Sterbenz) ─────────
+inline double fmod(double x, double y) {
+    if (isnan(x) || isnan(y) || isinf(x) || y == 0.0) return kQNaN;
+    if (isinf(y)) return x;
+    double r = fabs(x), dy = fabs(y);
+    if (r < dy) return x;
+    double d = dy;
+    while (d + d <= r) d += d;                      // largest dy*2^k ≤ r
+    for (;;) {
+        if (r >= d) r -= d;                         // exact: d/2 < r ≤ ... → Sterbenz
+        if (d == dy) break;
+        d *= 0.5;                                   // exact
+    }
+    return copysign(r, x);
+}
+inline float fmod(float x, float y) { return float(fmod(double(x), double(y))); }
+
+// ── remainder : round-to-nearest-even quotient ─────────────────────────────
+inline double remainder(double x, double y) {
+    if (isnan(x) || isnan(y) || isinf(x) || y == 0.0) return kQNaN;
+    if (isinf(y)) return x;
+    double ax = fabs(x), ay = fabs(y);
+    double r = fmod(ax, ay);                        // r in [0, ay)
+    double q2 = r + r;
+    if (q2 > ay) r -= ay;
+    else if (q2 == ay) {
+        double k = (ax - r) / ay;                   // exact integer quotient
+        if (fmod(k, 2.0) != 0.0) r -= ay;           // tie → even quotient
+    }
+    return signbit(x) ? -r : r;
+}
+inline float remainder(float x, float y) { return float(remainder(double(x), double(y))); }
+
+// ── two-product / two-sum (Dekker, FMA-free) — used by hypot/fma ───────────
+inline void two_sum(double a, double b, double &s, double &e) {
+    s = a + b;
+    double bb = s - a;
+    e = (a - (s - bb)) + (b - bb);
+}
+inline void split(double a, double &hi, double &lo) {
+    const double c = 134217729.0 * a;              // 2^27+1
+    hi = c - (c - a);
+    lo = a - hi;
+}
+inline void two_prod(double a, double b, double &p, double &e) {
+    p = a * b;
+    double ah, al, bh, bl;
+    split(a, ah, al);
+    split(b, bh, bl);
+    e = ((ah * bh - p) + ah * bl + al * bh) + al * bl;
+}
+
+// ── hypot : scaled + compensated dot product + corrected sqrt (≤1 ULP) ─────
+inline double hypot(double x, double y) {
+    if (isinf(x) || isinf(y)) return kInf;          // even if the other is NaN
+    if (isnan(x) || isnan(y)) return kQNaN;
+    double ax = fabs(x), ay = fabs(y);
+    if (ax < ay) { double t = ax; ax = ay; ay = t; }
+    if (ay == 0.0) return ax;
+    // scale by power of two to keep ax in a safe range (exact)
+    int ex = int((dbits(ax) >> 52) & 0x7ff);
+    int scale = 0;
+    if (ex >= 0x5ff) scale = -600;                  // big → scale down
+    else if (ex <= 0x1ff) scale = 600;              // small/subnormal → scale up
+    double s = (scale != 0) ? dfrom(u64(1023 + scale) << 52) : 1.0;
+    double si = (scale != 0) ? dfrom(u64(1023 - scale) << 52) : 1.0;
+    ax *= s; ay *= s;
+    // compensated ax^2 + ay^2
+    double p1, e1, p2, e2;
+    two_prod(ax, ax, p1, e1);
+    two_prod(ay, ay, p2, e2);
+    double sum, c;
+    two_sum(p1, p2, sum, c);
+    double err = c + e1 + e2;
+    double h = sqrt(sum);
+    // one Newton correction: h += (sum - h^2 + err)/(2h)
+    double hh, he;
+    two_prod(h, h, hh, he);
+    double res = h + (err + (sum - hh) - he) / (h + h);
+    return res * si;
+}
+inline float hypot(float x, float y) {
+    if (isinf(x) || isinf(y)) return kInfF;
+    if (isnan(x) || isnan(y)) return kQNaNF;
+    // double has >2*24 bits → x^2+y^2 exact, sqrt correctly rounded → ≤0.5 ULP
+    double dx = x, dy = y;
+    return float(sqrt(dx * dx + dy * dy));
+}
+
+// ── scalbn / ldexp : x * 2^n (musl staged-multiplier scheme, no libm) ──────
+inline double scalbn(double x, int n) {
+    if (n > 1023) { x *= 0x1p1023; n -= 1023;
+        if (n > 1023) { x *= 0x1p1023; n -= 1023; if (n > 1023) n = 1023; } }
+    else if (n < -1022) { x *= 0x1p-1022 * 0x1p53; n += 1022 - 53;
+        if (n < -1022) { x *= 0x1p-1022 * 0x1p53; n += 1022 - 53; if (n < -1022) n = -1022; } }
+    return x * dfrom((u64)(0x3ff + n) << 52);
+}
+inline double ldexp(double x, int n) { return scalbn(x, n); }
+inline float  scalbn(float x, int n) { return float(scalbn(double(x), n)); }
+inline float  ldexp(float x, int n)  { return float(scalbn(double(x), n)); }
+
+// ── e^r − 1 = Σ_{n≥1} rⁿ/n!  (reciprocal factorials; accurate for |r|<~0.7) ─
+inline double expm1_series(double r) {
+    return r * (1.0 + r * (0.5 + r * (1.0/6 + r * (1.0/24 + r * (1.0/120
+         + r * (1.0/720 + r * (1.0/5040 + r * (1.0/40320 + r * (1.0/362880
+         + r * (1.0/3628800 + r * (1.0/39916800 + r * (1.0/479001600
+         + r * (1.0/6227020800.0 + r * (1.0/87178291200.0 + r * (1.0/1307674368000.0
+         + r * (1.0/20922789888000.0))))))))))))))));
+}
+
+// ── exp : x = k·ln2 + r, e^x = 2^k·(1 + (e^r−1)); corr separated ───────────
+inline double exp(double x) {
+    if (isnan(x)) return x;
+    if (x > 709.782712893384) return kInf;          // overflow
+    if (x < -745.1332191019412) return 0.0;          // underflow → +0
+    int k = (int)rint(x * kLog2e);
+    double r = (x - k * kLn2Hi) - k * kLn2Lo;        // |r| ≤ ln2/2
+    return scalbn(1.0 + expm1_series(r), k);
+}
+inline float exp(float x) { return float(exp(double(x))); }
+
+// ── expm1 : e^x − 1 (direct series near 0 avoids 1+x cancellation) ─────────
+inline double expm1(double x) {
+    if (isnan(x)) return x;
+    if (x > 709.782712893384) return kInf;
+    if (x < -37.0) return -1.0;                      // e^x ≈ 0
+    if (fabs(x) < 0.6) return expm1_series(x);       // direct, no cancellation
+    return exp(x) - 1.0;
+}
+inline float expm1(float x) { return float(expm1(double(x))); }
+
+// ── exp2 : 2^x = 2^k · e^(r·ln2), r ∈ [−0.5,0.5] ───────────────────────────
+inline double exp2(double x) {
+    if (isnan(x)) return x;
+    if (x >= 1024.0) return kInf;
+    if (x <= -1075.0) return 0.0;
+    int k = (int)rint(x);
+    double r = (x - k) * kLn2;                        // |r·ln2| ≤ ln2/2
+    return scalbn(1.0 + expm1_series(r), k);
+}
+inline float exp2(float x) { return float(exp2(double(x))); }
+
+// ── log : x = 2^k·m, m∈[√½,√2]; log(m)=2f + 2f·s·T(s), f=(m−1)/(m+1), s=f² ─
+// T(s) = 1/3 + s/5 + s²/7 + …  — pure odd reciprocals.
+inline double atanh_tail(double s) {            // (atanh(f)/f − 1)/s, |s|≤0.03
+    return 1.0/3 + s * (1.0/5 + s * (1.0/7 + s * (1.0/9 + s * (1.0/11
+         + s * (1.0/13 + s * (1.0/15 + s * (1.0/17 + s * (1.0/19
+         + s * (1.0/21 + s * (1.0/23))))))))));
+}
+inline double log(double x) {
+    if (isnan(x)) return x;
+    if (x < 0.0) return kQNaN;
+    if (x == 0.0) return -kInf;
+    if (isinf(x)) return kInf;
+    u64 b = dbits(x);
+    int e = (int)((b >> 52) & 0x7ff);
+    int k = 0;
+    if (e == 0) { x *= 0x1p54; b = dbits(x); e = (int)((b >> 52) & 0x7ff); k -= 54; }
+    k += e - 1023;
+    double m = dfrom((b & 0x800fffffffffffffULL) | ((u64)1023 << 52));   // m∈[1,2)
+    if (m > 1.4142135623730951) { m *= 0.5; k++; }
+    double f = (m - 1.0) / (m + 1.0);
+    double s = f * f;
+    double logm = 2.0 * f + (2.0 * f) * (s * atanh_tail(s));
+    return k * kLn2Hi + (logm + k * kLn2Lo);
+}
+inline float log(float x) { return float(log(double(x))); }
+
+// ── log2 / log10 : reuse the m-reduction of log ────────────────────────────
+inline double log2(double x) {
+    if (isnan(x)) return x;
+    if (x < 0.0) return kQNaN;
+    if (x == 0.0) return -kInf;
+    if (isinf(x)) return kInf;
+    u64 b = dbits(x);
+    int e = (int)((b >> 52) & 0x7ff);
+    int k = 0;
+    if (e == 0) { x *= 0x1p54; b = dbits(x); e = (int)((b >> 52) & 0x7ff); k -= 54; }
+    k += e - 1023;
+    double m = dfrom((b & 0x800fffffffffffffULL) | ((u64)1023 << 52));
+    if (m > 1.4142135623730951) { m *= 0.5; k++; }
+    double f = (m - 1.0) / (m + 1.0);
+    double s = f * f;
+    double logm = 2.0 * f + (2.0 * f) * (s * atanh_tail(s));
+    return (double)k + logm * kLog2e;
+}
+inline float log2(float x) { return float(log2(double(x))); }
+
+inline double log10(double x) {
+    if (isnan(x)) return x;
+    if (x < 0.0) return kQNaN;
+    if (x == 0.0) return -kInf;
+    if (isinf(x)) return kInf;
+    u64 b = dbits(x);
+    int e = (int)((b >> 52) & 0x7ff);
+    int k = 0;
+    if (e == 0) { x *= 0x1p54; b = dbits(x); e = (int)((b >> 52) & 0x7ff); k -= 54; }
+    k += e - 1023;
+    double m = dfrom((b & 0x800fffffffffffffULL) | ((u64)1023 << 52));
+    if (m > 1.4142135623730951) { m *= 0.5; k++; }
+    double f = (m - 1.0) / (m + 1.0);
+    double s = f * f;
+    double logm = 2.0 * f + (2.0 * f) * (s * atanh_tail(s));
+    const double kLog10_2 = 0.30102999566398119521;
+    return (double)k * kLog10_2 + logm * kLog10e;
+}
+inline float log10(float x) { return float(log10(double(x))); }
+
+// ── log1p : log(1+x); f = x/(2+x) avoids 1+x cancellation for small x ──────
+inline double log1p(double x) {
+    if (isnan(x)) return x;
+    if (x < -1.0) return kQNaN;
+    if (x == -1.0) return -kInf;
+    if (isinf(x)) return kInf;
+    if (fabs(x) < 0.29) {
+        double f = x / (2.0 + x);
+        double s = f * f;
+        return 2.0 * f + (2.0 * f) * (s * atanh_tail(s));
+    }
+    return log(1.0 + x);
+}
+inline float log1p(float x) { return float(log1p(double(x))); }
+
+// ════════════════════════════════════════════════════════════════════════
+//  Trigonometric: argument reduction mod π/2 + minimax-free kernels.
+// ════════════════════════════════════════════════════════════════════════
+// π/2 split for medium-range Cody-Waite (each piece's low bits zeroed so
+// n·piece is exact for |n| < 2^20).  Source: fdlibm e_rem_pio2.c.
+constexpr double kInvPio2 = 6.36619772367581382433e-01;
+constexpr double kPio2_1  = 1.57079632673412561417e+00;
+constexpr double kPio2_2  = 6.07710050630396597660e-11;
+constexpr double kPio2_3  = 2.02226624879595063154e-21;
+constexpr double kPio2_3t = 8.47842766036889956997e-32;
+
+// 2/π in 24-bit words and π/2 in 24-bit chunks (Payne-Hanek). Source: fdlibm.
+inline const i32 kIpio2[] = {
+0xA2F983,0x6E4E44,0x1529FC,0x2757D1,0xF534DD,0xC0DB62,0x95993C,0x439041,0xFE5163,0xABDEBB,
+0xC561B7,0x246E3A,0x424DD2,0xE00649,0x2EEA09,0xD1921C,0xFE1DEB,0x1CB129,0xA73EE8,0x8235F5,
+0x2EBB44,0x84E99C,0x7026B4,0x5F7E41,0x3991D6,0x398353,0x39F49C,0x845F8B,0xBDF928,0x3B1FF8,
+0x97FFDE,0x05980F,0xEF2F11,0x8B5A0A,0x6D1F6D,0x367ECF,0x27CB09,0xB74F46,0x3F669E,0x5FEA2D,
+0x7527BA,0xC7EBE5,0xF17B3D,0x0739F7,0x8A5292,0xEA6BFB,0x5FB11F,0x8D5D08,0x560330,0x46FC7B,
+0x6BABF0,0xCFBC20,0x9AF436,0x1DA9E3,0x91615E,0xE61B08,0x659985,0x5F14A0,0x68408D,0xFFD880,
+0x4D7327,0x310606,0x1556CA,0x73A8C9,0x60E27B,0xC08C6B,
+};
+inline const double kPIo2[] = {
+1.57079625129699707031e+00,7.54978941586159635335e-08,5.39030252995776476554e-15,
+3.28200341580791294123e-22,1.27065575308067607349e-29,1.22933308981111328932e-36,
+2.73370053816464559624e-44,2.16741683877804819444e-51,
+};
+
+// Payne-Hanek core (fdlibm __kernel_rem_pio2, prec=2). x[]: nx 24-bit chunks
+// of |input| mantissa; e0: binary exponent of x[0]; y[] ← reduced (hi,lo).
+inline int kernel_rem_pio2(double *x, double *y, int e0, int nx) {
+    const double two24 = 16777216.0, twon24 = 5.9604644775390625e-08;
+    int jz, jx, jv, jp, jk, carry, n, iq[20], i, j, k, m, q0, ih;
+    double z, fw, f[20], fq[20], q[20];
+    jk = 4; jp = jk;
+    jx = nx - 1;
+    jv = (e0 - 3) / 24; if (jv < 0) jv = 0;
+    q0 = e0 - 24 * (jv + 1);
+    j = jv - jx; m = jx + jk;
+    for (i = 0; i <= m; i++, j++) f[i] = (j < 0) ? 0.0 : (double)kIpio2[j];
+    for (i = 0; i <= jk; i++) { for (j = 0, fw = 0.0; j <= jx; j++) fw += x[j] * f[jx + i - j]; q[i] = fw; }
+    jz = jk;
+recompute:
+    for (i = 0, j = jz, z = q[jz]; j > 0; i++, j--) {
+        fw = (double)(i32)(twon24 * z);
+        iq[i] = (i32)(z - two24 * fw);
+        z = q[j - 1] + fw;
+    }
+    z = scalbn(z, q0);
+    z -= 8.0 * floor(z * 0.125);
+    n = (i32)z; z -= (double)n;
+    ih = 0;
+    if (q0 > 0) { i = (iq[jz - 1] >> (24 - q0)); n += i; iq[jz - 1] -= i << (24 - q0); ih = iq[jz - 1] >> (23 - q0); }
+    else if (q0 == 0) ih = iq[jz - 1] >> 23;
+    else if (z >= 0.5) ih = 2;
+    if (ih > 0) {
+        n += 1; carry = 0;
+        for (i = 0; i < jz; i++) { j = iq[i]; if (carry == 0) { if (j != 0) { carry = 1; iq[i] = 0x1000000 - j; } } else iq[i] = 0xffffff - j; }
+        if (q0 > 0) { switch (q0) { case 1: iq[jz - 1] &= 0x7fffff; break; case 2: iq[jz - 1] &= 0x3fffff; break; } }
+        if (ih == 2) { z = 1.0 - z; if (carry != 0) z -= scalbn(1.0, q0); }
+    }
+    if (z == 0.0) {
+        j = 0; for (i = jz - 1; i >= jk; i--) j |= iq[i];
+        if (j == 0) {
+            for (k = 1; iq[jk - k] == 0; k++) {}
+            for (i = jz + 1; i <= jz + k; i++) {
+                f[jx + i] = (double)kIpio2[jv + i];
+                for (j = 0, fw = 0.0; j <= jx; j++) fw += x[j] * f[jx + i - j];
+                q[i] = fw;
+            }
+            jz += k; goto recompute;
+        }
+    }
+    if (z == 0.0) { jz--; q0 -= 24; while (iq[jz] == 0) { jz--; q0 -= 24; } }
+    else {
+        z = scalbn(z, -q0);
+        if (z >= two24) { fw = (double)(i32)(twon24 * z); iq[jz] = (i32)(z - two24 * fw); jz++; q0 += 24; iq[jz] = (i32)fw; }
+        else iq[jz] = (i32)z;
+    }
+    fw = scalbn(1.0, q0);
+    for (i = jz; i >= 0; i--) { q[i] = fw * (double)iq[i]; fw *= twon24; }
+    for (i = jz; i >= 0; i--) { for (fw = 0.0, k = 0; k <= jp && k <= jz - i; k++) fw += kPIo2[k] * q[i + k]; fq[jz - i] = fw; }
+    fw = 0.0; for (i = jz; i >= 0; i--) fw += fq[i];
+    y[0] = (ih == 0) ? fw : -fw;
+    fw = fq[0] - fw; for (i = 1; i <= jz; i++) fw += fq[i];
+    y[1] = (ih == 0) ? fw : -fw;
+    return n & 7;
+}
+
+// Reduce x mod π/2 → r∈[-π/4,π/4]; returns quadrant count n (low 2 bits used).
+inline int rem_pio2(double x, double &r, double &rt) {
+    double ax = fabs(x);
+    if (ax <= 0.7853981633974483) { r = x; rt = 0.0; return 0; }   // |x|≤π/4
+    if (ax < 1647099.0) {                                          // medium: Cody-Waite
+        double fn = rint(x * kInvPio2);                            // signed
+        double a  = x - fn * kPio2_1;                              // exact (|fn|<2^20)
+        double p2 = fn * kPio2_2,  r1 = a  - p2, t1 = (a  - r1) - p2;
+        double p3 = fn * kPio2_3,  r2 = r1 - p3, t2 = (r1 - r2) - p3;
+        double p4 = fn * kPio2_3t, r3 = r2 - p4, t3 = (r2 - r3) - p4;
+        r  = r3;
+        rt = t1 + t2 + t3;                                         // ~128-bit π/2 tail
+        return (int)fn & 3;                                        // quadrant (ok for fn<0)
+    }
+    if (!isfinite(x)) { r = kQNaN; rt = 0.0; return 0; }
+    // large: Payne-Hanek
+    u64 b = dbits(ax);
+    int e0 = (int)((b >> 52) & 0x7ff) - 1046;     // exponent of leading 24-bit chunk
+    double z = scalbn(ax, -e0);
+    double tx[3], ty[2];
+    for (int i = 0; i < 2; i++) { tx[i] = (double)(i32)z; z = (z - tx[i]) * 16777216.0; }
+    tx[2] = z;
+    int nx = 3; while (nx > 1 && tx[nx - 1] == 0.0) nx--;
+    int n = kernel_rem_pio2(tx, ty, e0, nx);
+    r = ty[0]; rt = ty[1];
+    if (signbit(x)) { r = -r; rt = -rt; return (4 - (n & 3)) & 3; }
+    return n & 3;
+}
+
+// kernels on |x|≤π/4 with reduction tail y (fdlibm tail structure, Taylor
+// reciprocal-factorial coefficients). iy!=0 ⇒ argument carries a low part y.
+inline double sin_kernel(double x, double y, int iy) {
+    double z = x * x;
+    double S1 = -1.0/6;
+    double r = 1.0/120 + z*(-1.0/5040 + z*(1.0/362880 + z*(-1.0/39916800
+             + z*(1.0/6227020800.0 + z*(-1.0/1307674368000.0 + z*(1.0/355687428096000.0
+             + z*(-1.0/121645100408832000.0)))))));
+    double v = z * x;
+    if (iy == 0) return x + v * (S1 + z * r);
+    return x - ((z * (0.5 * y - v * r) - y) - v * S1);
+}
+inline double cos_kernel(double x, double y) {
+    double z = x * x;
+    double r = z * (1.0/24 + z*(-1.0/720 + z*(1.0/40320 + z*(-1.0/3628800
+             + z*(1.0/479001600 + z*(-1.0/87178291200.0 + z*(1.0/20922789888000.0
+             + z*(-1.0/6402373705728000.0))))))));
+    double hz = 0.5 * z, w = 1.0 - hz;
+    return w + (((1.0 - w) - hz) + (z * r - x * y));
+}
+inline double sin(double x) {
+    if (!isfinite(x)) return isnan(x) ? x : kQNaN;
+    if (x == 0.0) return x;                          // sin(±0)=±0 (sign-preserving)
+    double r, rt; int n = rem_pio2(x, r, rt);
+    int iy = (rt != 0.0);
+    switch (n & 3) {
+        case 0:  return  sin_kernel(r, rt, iy);
+        case 1:  return  cos_kernel(r, rt);
+        case 2:  return -sin_kernel(r, rt, iy);
+        default: return -cos_kernel(r, rt);
+    }
+}
+inline double cos(double x) {
+    if (!isfinite(x)) return isnan(x) ? x : kQNaN;
+    double r, rt; int n = rem_pio2(x, r, rt);
+    int iy = (rt != 0.0);
+    switch (n & 3) {
+        case 0:  return  cos_kernel(r, rt);
+        case 1:  return -sin_kernel(r, rt, iy);
+        case 2:  return -cos_kernel(r, rt);
+        default: return  sin_kernel(r, rt, iy);
+    }
+}
+inline double tan(double x) {
+    if (!isfinite(x)) return isnan(x) ? x : kQNaN;
+    if (x == 0.0) return x;                          // tan(±0)=±0 (sign-preserving)
+    double r, rt; int n = rem_pio2(x, r, rt);
+    int iy = (rt != 0.0);
+    double sn = sin_kernel(r, rt, iy), cs = cos_kernel(r, rt);
+    return (n & 1) ? -cs / sn : sn / cs;
+}
+inline float sin(float x) { return float(sin(double(x))); }
+inline float cos(float x) { return float(cos(double(x))); }
+inline float tan(float x) { return float(tan(double(x))); }
+
+// ════════════════════════════════════════════════════════════════════════
+//  Inverse trigonometric.
+// ════════════════════════════════════════════════════════════════════════
+constexpr double kPiHi   = 3.14159265358979311600;
+constexpr double kPiLo   = 1.22464679914735320717e-16;
+constexpr double kPiO2Hi = 1.57079632679489655800;
+constexpr double kPiO2Lo = 6.12323399573676603587e-17;
+constexpr double kPiO4Hi = 0.78539816339744827900;
+constexpr double kPiO4Lo = 3.06161699786838301793e-17;
+
+inline double atan_poly(double s) {
+    double r = ATAN_C[ATAN_C_N - 1];
+    for (int i = ATAN_C_N - 2; i >= 0; --i) r = r * s + ATAN_C[i];
+    return r;
+}
+inline double asin_poly(double s) {
+    double r = ASIN_C[ASIN_C_N - 1];
+    for (int i = ASIN_C_N - 2; i >= 0; --i) r = r * s + ASIN_C[i];
+    return r;
+}
+inline double atan(double x) {
+    if (isnan(x)) return x;
+    double ax = fabs(x);
+    if (ax >= 0x1p66) return copysign(kPiO2Hi, x);
+    int base; double t;
+    if (ax <= 0.4142135623730950) { base = 0; t = ax; }
+    else if (ax <= 2.4142135623730951) { base = 1; t = (ax - 1.0) / (ax + 1.0); }
+    else { base = 2; t = -1.0 / ax; }
+    double s = t * t;
+    double poly = t + t * s * atan_poly(s);          // atan(t), |t|≤tan(π/8)
+    double res;
+    if (base == 0)      res = poly;
+    else if (base == 1) res = (kPiO4Hi + poly) + kPiO4Lo;
+    else                res = (kPiO2Hi + poly) + kPiO2Lo;
+    return copysign(res, x);
+}
+inline double asin(double x) {
+    if (isnan(x)) return x;
+    double ax = fabs(x);
+    if (ax > 1.0) return kQNaN;
+    if (ax == 1.0) return copysign(kPiO2Hi, x) + copysign(kPiO2Lo, x);
+    if (ax <= 0.5) { double s = ax * ax; return copysign(ax + ax * s * asin_poly(s), x); }
+    double t = (1.0 - ax) * 0.5, s = sqrt(t);         // asin(ax)=π/2−2·asin(√t)
+    double p = s + s * t * asin_poly(t);
+    double r = kPiO2Hi - (2.0 * p - kPiO2Lo);
+    return copysign(r, x);
+}
+inline double acos(double x) {
+    if (isnan(x)) return x;
+    double ax = fabs(x);
+    if (ax > 1.0) return kQNaN;
+    if (x == 1.0) return 0.0;
+    if (x == -1.0) return kPiHi + kPiLo;
+    if (ax <= 0.5) { double s = x * x; double r = x + x * s * asin_poly(s); return (kPiO2Hi - r) + kPiO2Lo; }
+    if (x > 0.5) { double t = (1.0 - x) * 0.5, s = sqrt(t); return 2.0 * (s + s * t * asin_poly(t)); }
+    double t = (1.0 + x) * 0.5, s = sqrt(t);          // acos(x)=π−2·asin(√((1+x)/2))
+    double p = s + s * t * asin_poly(t);
+    return kPiHi - (2.0 * p - kPiLo);
+}
+inline double atan2(double y, double x) {
+    if (isnan(x) || isnan(y)) return kQNaN;
+    if (isinf(x) && isinf(y)) {
+        double b = signbit(x) ? (3.0 * kPiO4Hi) : kPiO4Hi;   // ±3π/4 or ±π/4
+        return copysign(b, y);
+    }
+    if (isinf(x)) return signbit(x) ? copysign(kPiHi, y) : copysign(0.0, y);
+    if (isinf(y)) return copysign(kPiO2Hi, y);
+    if (x == 0.0) { return (y == 0.0) ? (signbit(x) ? copysign(kPiHi, y) : copysign(0.0, y))
+                                      : copysign(kPiO2Hi, y); }
+    if (y == 0.0) return signbit(x) ? copysign(kPiHi, y) : copysign(0.0, y);
+    double t = atan(fabs(y) / fabs(x));
+    if (signbit(x)) t = kPiHi - t + kPiLo;            // reflect into left half-plane
+    return copysign(t, y);
+}
+inline float asin(float x)  { return float(asin(double(x))); }
+inline float acos(float x)  { return float(acos(double(x))); }
+inline float atan(float x)  { return float(atan(double(x))); }
+inline float atan2(float y, float x) { return float(atan2(double(y), double(x))); }
+
+// ════════════════════════════════════════════════════════════════════════
+//  Double-double ln / exp primitives (shared by pow, tgamma).
+// ════════════════════════════════════════════════════════════════════════
+// ln(ax) as (hi,lo) ≈ ln(ax) to ~100 bits (ax > 0, finite, normal-or-sub).
+inline void log_dd(double ax, double &hi, double &lo) {
+    u64 b = dbits(ax);
+    int e = (int)((b >> 52) & 0x7ff), k = 0;
+    if (e == 0) { ax *= 0x1p54; b = dbits(ax); e = (int)((b >> 52) & 0x7ff); k -= 54; }
+    k += e - 1023;
+    double m = dfrom((b & 0x800fffffffffffffULL) | ((u64)1023 << 52));
+    if (m > 1.4142135623730951) { m *= 0.5; k++; }
+    double num = m - 1.0;                                   // exact (Sterbenz, m∈[½,2])
+    double den_hi, den_lo; two_sum(m, 1.0, den_hi, den_lo); // den = m+1 EXACT (dd)
+    double fhi = num / den_hi;
+    double ph, pe; two_prod(fhi, den_hi, ph, pe);
+    double flo = (num - ph - pe - fhi * den_lo) / den_hi;   // f = fhi + flo (dd)
+    // ln(m) = 2f·(1 + corr), corr = atanh(f)/f − 1 = s/3 + s²/5 + …, s=f².
+    // Full double-double chain (1/3 as dd-constant). NOTE: relies on round-to-
+    // nearest without FMA fusion — target has no -mfma, so Dekker stays exact.
+    double shi, sle; two_prod(fhi, fhi, shi, sle);
+    double slo = sle + 2.0 * fhi * flo;                     // s = f² (dd)
+    double R = 1.0/5 + shi*(1.0/7 + shi*(1.0/9 + shi*(1.0/11 + shi*(1.0/13
+             + shi*(1.0/15 + shi*(1.0/17 + shi*(1.0/19 + shi*(1.0/21))))))));
+    const double C3HI = 0.33333333333333331483, C3LO = 1.85037170770859410e-17;
+    double sR_h, sR_l; two_prod(shi, R, sR_h, sR_l); sR_l += slo * R;
+    double Qhi, Qlo; two_sum(C3HI, sR_h, Qhi, Qlo); Qlo += C3LO + sR_l;          // Q=1/3+s·R
+    double cr_h, cr_l; two_prod(shi, Qhi, cr_h, cr_l); cr_l += slo * Qhi + shi * Qlo; // corr=s·Q
+    double tfhi = 2.0 * fhi, tflo = 2.0 * flo;
+    double tc_h, tc_l; two_prod(tfhi, cr_h, tc_h, tc_l); tc_l += tfhi * cr_l + tflo * cr_h; // 2f·corr
+    double lmhi, lmlo; two_sum(tfhi, tc_h, lmhi, lmlo); lmlo += tflo + tc_l;     // ln(m) (dd)
+    double khi, klo; two_prod((double)k, KLN2_HI, khi, klo); klo += (double)k * KLN2_LO;
+    two_sum(khi, lmhi, hi, lo); lo += klo + lmlo;
+}
+// e^(hi+lo); the low part is folded into the small reduced argument.
+inline double exp_dd(double hi, double lo) {
+    if (hi > 709.782712893384) return kInf;
+    if (hi < -745.1332191019412) return 0.0;
+    int k = (int)rint(hi * kLog2e);
+    double r = ((hi - k * kLn2Hi) - k * kLn2Lo) + lo;
+    return scalbn(1.0 + expm1_series(r), k);
+}
+
+// ════════════════════════════════════════════════════════════════════════
+//  pow : |x|^y = e^(y·ln|x|) in double-double.
+// ════════════════════════════════════════════════════════════════════════
+inline double pow(double x, double y) {
+    if (y == 0.0) return 1.0;                          // pow(x,±0)=1 incl NaN
+    if (x == 1.0) return 1.0;                          // pow(1,y)=1 incl NaN
+    if (isnan(x) || isnan(y)) return kQNaN;
+    double ax = fabs(x);
+    bool yint = false, yodd = false;
+    if (!isinf(y)) { double ya = fabs(y), yt = trunc(ya); if (yt == ya) { yint = true; yodd = (fmod(yt, 2.0) == 1.0); } }
+    if (isinf(x)) {
+        if (signbit(x)) { if (y < 0) return yodd ? -0.0 : 0.0; return yodd ? -kInf : kInf; }
+        return (y < 0) ? 0.0 : kInf;
+    }
+    if (isinf(y)) {
+        if (ax == 1.0) return 1.0;
+        if (y > 0) return (ax > 1.0) ? kInf : 0.0;
+        return (ax > 1.0) ? 0.0 : kInf;
+    }
+    if (x == 0.0) { if (y < 0) return yodd ? copysign(kInf, x) : kInf; return yodd ? x : 0.0; }
+    if (signbit(x) && !yint) return kQNaN;
+    double lhi, llo; log_dd(ax, lhi, llo);             // ln|x| in dd
+    double phi, plo; two_prod(y, lhi, phi, plo); plo += y * llo;   // y·ln|x| in dd
+    double res = exp_dd(phi, plo);
+    return (signbit(x) && yodd) ? -res : res;
+}
+inline float pow(float x, float y) { return float(pow(double(x), double(y))); }
+
+// ════════════════════════════════════════════════════════════════════════
+//  Hyperbolic + inverse hyperbolic (composed from exp/log1p/expm1).
+// ════════════════════════════════════════════════════════════════════════
+inline double sinh(double x) {
+    if (!isfinite(x)) return x;                       // ±inf, nan
+    double a = fabs(x), h = signbit(x) ? -0.5 : 0.5;
+    if (a < 22.0) { double t = expm1(a); return h * (t + t / (t + 1.0)); }
+    if (a < 709.782712893384) return h * exp(a);
+    return h * 2.0 * (0.5 * exp(0.5 * a)) * exp(0.5 * a);   // avoid overflow mid-way
+}
+inline double cosh(double x) {
+    double a = fabs(x);
+    if (a < 22.0) { double t = expm1(a); return 1.0 + t * t / (2.0 * (1.0 + t)); }
+    if (a < 709.782712893384) return 0.5 * exp(a);
+    if (isinf(x)) return kInf;
+    double w = exp(0.5 * a); return (0.5 * w) * w;
+}
+inline double tanh(double x) {
+    if (isnan(x)) return x;
+    if (isinf(x)) return copysign(1.0, x);
+    double a = fabs(x), s = copysign(1.0, x);
+    if (a < 1e-10) return x;
+    if (a < 22.0) { double t = expm1(-2.0 * a); return s * (-t / (t + 2.0)); }
+    return s * 1.0;                                    // saturates to ±1
+}
+inline double asinh(double x) {
+    if (!isfinite(x)) return x;
+    double a = fabs(x), s = copysign(1.0, x);
+    if (a < 1e-8) return x;
+    if (a > 0x1p28) return s * (log(a) + kLn2);        // asinh≈ln(2x)
+    if (a > 2.0) return s * log(2.0 * a + 1.0 / (sqrt(a * a + 1.0) + a));
+    return s * log1p(a + a * a / (1.0 + sqrt(a * a + 1.0)));
+}
+inline double acosh(double x) {
+    if (isnan(x)) return x;
+    if (x < 1.0) return kQNaN;
+    if (x == 1.0) return 0.0;
+    if (isinf(x)) return x;
+    if (x > 0x1p28) return log(x) + kLn2;              // ≈ln(2x)
+    if (x > 2.0) return log(2.0 * x - 1.0 / (x + sqrt(x * x - 1.0)));
+    double t = x - 1.0;
+    return log1p(t + sqrt(2.0 * t + t * t));
+}
+inline double atanh(double x) {
+    if (isnan(x)) return x;
+    double a = fabs(x), s = copysign(1.0, x);
+    if (a > 1.0) return kQNaN;
+    if (a == 1.0) return copysign(kInf, x);
+    if (a < 1e-8) return x;
+    return s * 0.5 * log1p(2.0 * a / (1.0 - a));
+}
+inline float sinh(float x)  { return float(sinh(double(x))); }
+inline float cosh(float x)  { return float(cosh(double(x))); }
+inline float tanh(float x)  { return float(tanh(double(x))); }
+inline float asinh(float x) { return float(asinh(double(x))); }
+inline float acosh(float x) { return float(acosh(double(x))); }
+inline float atanh(float x) { return float(atanh(double(x))); }
+
+// ════════════════════════════════════════════════════════════════════════
+//  cbrt : bit-hack seed + Halley step (fdlibm s_cbrt). ≤1 ULP.
+// ════════════════════════════════════════════════════════════════════════
+inline double cbrt(double x) {
+    const u32 B1 = 715094163u, B2 = 696219795u;
+    const double C = 5.42857142857142815906e-01, D = -7.05306122448979611050e-01,
+                 E = 1.41428571428571436819e+00, F = 1.60714285714285720630e+00,
+                 G = 3.57142857142857150787e-01;
+    u64 b = dbits(x); u64 sign = b & 0x8000000000000000ULL;
+    u32 hx = (u32)((b & 0x7fffffffffffffffULL) >> 32);
+    if (hx >= 0x7ff00000) return x + x;               // inf / nan
+    if ((b & 0x7fffffffffffffffULL) == 0) return x;   // ±0
+    double ax = dfrom(b & 0x7fffffffffffffffULL);
+    double t;
+    if (hx < 0x00100000) {                            // subnormal
+        t = dfrom((u64)0x43500000u << 32); t *= ax;
+        u32 th = (u32)(dbits(t) >> 32);
+        t = dfrom((u64)(th / 3 + B2) << 32);
+    } else {
+        t = dfrom((u64)(hx / 3 + B1) << 32);
+    }
+    double r = t * t / ax, s = C + r * t;
+    t *= G + F / (s + E + D / s);
+    t = dfrom(((dbits(t) >> 32) + 1) << 32);           // chop to 20 bits + round
+    s = t * t; r = ax / s; double w = t + t; r = (r - t) / (w + r); t = t + t * r;
+    return dfrom(dbits(t) | sign);
+}
+inline float cbrt(float x) { return float(cbrt(double(x))); }
+
+// ════════════════════════════════════════════════════════════════════════
+//  erf / erfc : Taylor series (|x|<0.84) + Lentz continued fraction.
+// ════════════════════════════════════════════════════════════════════════
+inline double erf_poly(double s) {
+    double r = ERF_C[ERF_C_N - 1];
+    for (int i = ERF_C_N - 2; i >= 0; --i) r = r * s + ERF_C[i];
+    return r;                                          // erf(x)/x, s=x²
+}
+// erfc on [0.5,27] via scaled w(x)=x·e^{x²}·erfc(x) (smooth; two Chebyshev pieces,
+// Clenshaw) × e^{-x²} (dd). No cancellation → ≤6 ULP. e^{-x²}<2^-... for x≥27 → 0.
+inline double erfc_scaled(double x) {
+    double t, w, t2, b0 = 0.0, b1 = 0.0;
+    if (x < 6.0) {
+        t = (2.0 * x - 6.5) / 5.5;                      // [0.5,6] → [-1,1]
+        t2 = 2.0 * t;
+        for (int k = ERFC_W1_N - 1; k >= 1; --k) { double b = t2 * b0 - b1 + ERFC_W1[k]; b1 = b0; b0 = b; }
+        w = t * b0 - b1 + ERFC_W1[0];
+    } else {
+        t = (2.0 * x - 33.0) / 21.0;                    // [6,27] → [-1,1]
+        t2 = 2.0 * t;
+        for (int k = ERFC_W2_N - 1; k >= 1; --k) { double b = t2 * b0 - b1 + ERFC_W2[k]; b1 = b0; b0 = b; }
+        w = t * b0 - b1 + ERFC_W2[0];
+    }
+    double x2h, x2l; two_prod(x, x, x2h, x2l);
+    return exp_dd(-x2h, -x2l) * w / x;
+}
+inline double erf(double x) {
+    if (isnan(x)) return x;
+    if (isinf(x)) return copysign(1.0, x);
+    double a = fabs(x), r;
+    if (a < 0.5) r = a * erf_poly(a * a);
+    else if (a < 27.0) r = 1.0 - erfc_scaled(a);
+    else r = 1.0;
+    return copysign(r, x);
+}
+inline double erfc(double x) {
+    if (isnan(x)) return x;
+    if (isinf(x)) return signbit(x) ? 2.0 : 0.0;
+    if (x >= 0.0) {
+        if (x < 0.5)  return 1.0 - x * erf_poly(x * x);
+        if (x < 27.0) return erfc_scaled(x);
+        return 0.0;                                    // underflow
+    }
+    double a = -x;
+    if (a < 0.5)  return 1.0 + a * erf_poly(a * a);
+    if (a < 27.0) return 2.0 - erfc_scaled(a);
+    return 2.0;
+}
+inline float erf(float x)  { return float(erf(double(x))); }
+inline float erfc(float x) { return float(erfc(double(x))); }
+
+// ════════════════════════════════════════════════════════════════════════
+//  tgamma / lgamma : Lanczos approximation (g=7, n=9; Godfrey coefficients).
+// ════════════════════════════════════════════════════════════════════════
+// sin(π·x) accurate near integers: reduce to r=x−round(x) ∈ [−0.5,0.5].
+inline double sinpi(double x) {
+    double k = rint(x), r = x - k;                     // r exact for |x|<2^52
+    double s = sin(kPi * r);
+    return (fmod(k, 2.0) != 0.0) ? -s : s;             // sign flip on odd k
+}
+// Stirling series Σ B₂ₖ/((2k)(2k−1)x^(2k−1)); accurate for x ≥ 8 (no cancellation).
+inline double stirling_series(double x) {
+    double iv = 1.0 / x, iv2 = iv * iv;
+    return iv * (1.0/12 + iv2 * (-1.0/360 + iv2 * (1.0/1260 + iv2 * (-1.0/1680
+              + iv2 * (1.0/1188 + iv2 * (-691.0/360360 + iv2 * (1.0/156
+              + iv2 * (-3617.0/122400))))))));
+}
+// lnΓ(x) for x≥8 as double-double (hi,lo) via Stirling.
+inline void stirling_lngamma_dd(double x, double &hi, double &lo) {
+    const double kHalfLog2Pi = 0.918938533204672742;
+    double Lhi, Llo; log_dd(x, Lhi, Llo);
+    double ehi, elo; two_prod(x - 0.5, Lhi, ehi, elo); elo += (x - 0.5) * Llo;
+    double s1, s2; two_sum(ehi, -x, s1, s2);
+    double t1, t2; two_sum(s1, kHalfLog2Pi, t1, t2);
+    hi = t1; lo = t2 + s2 + elo + stirling_series(x);
+}
+// Γ via Stirling (x≥7) + upward recurrence for 0.5≤x<7 (no Lanczos cancellation).
+inline double tgamma(double x) {
+    if (isnan(x)) return x;
+    if (isinf(x)) return signbit(x) ? kQNaN : kInf;
+    if (x == 0.0) return copysign(kInf, x);
+    if (x < 0.0 && x == floor(x)) return kQNaN;        // negative integer poles
+    if (x < 0.5) return kPi / (sinpi(x) * tgamma(1.0 - x));   // reflection
+    double denom = 1.0, z = x;
+    while (z < 7.0) { denom *= z; z += 1.0; }          // Γ(x)=Γ(z)/∏, z≥7
+    double h, l; stirling_lngamma_dd(z, h, l);
+    return exp_dd(h, l) / denom;
+}
+inline double lgamma(double x) {
+    if (isnan(x)) return x;
+    if (isinf(x)) return kInf;
+    if (x == 0.0) return kInf;
+    if (x < 0.0 && x == floor(x)) return kInf;         // poles
+    if (x < 0.5) return log(kPi / fabs(sinpi(x))) - lgamma(1.0 - x);
+    double logd = 0.0, z = x;
+    while (z < 7.0) { logd += log(z); z += 1.0; }      // lnΓ(x)=lnΓ(z)−Σln
+    double h, l; stirling_lngamma_dd(z, h, l);
+    return (h + l) - logd;
+}
+inline float tgamma(float x) { return float(tgamma(double(x))); }
+inline float lgamma(float x) { return float(lgamma(double(x))); }
+
+// ════════════════════════════════════════════════════════════════════════
+//  FP manipulation, rounding-to-integer, fdim/fmax/fmin, software fma.
+// ════════════════════════════════════════════════════════════════════════
+inline double frexp(double x, int *e) {
+    u64 b = dbits(x); int ex = (int)((b >> 52) & 0x7ff);
+    if (ex == 0x7ff || x == 0.0) { *e = 0; return x; }
+    int add = 0;
+    if (ex == 0) { x *= 0x1p54; b = dbits(x); ex = (int)((b >> 52) & 0x7ff); add = -54; }
+    *e = ex - 1022 + add;
+    return dfrom((b & 0x800fffffffffffffULL) | ((u64)1022 << 52));
+}
+inline double modf(double x, double *ip) {
+    if (isinf(x)) { *ip = x; return copysign(0.0, x); }
+    double i = trunc(x); *ip = i;
+    return isnan(x) ? x : copysign(x - i, x);
+}
+inline int ilogb(double x) {
+    u64 b = dbits(x) & 0x7fffffffffffffffULL;
+    if (b == 0) return (-2147483647 - 1);                          // FP_ILOGB0
+    int e = (int)(b >> 52);
+    if (e == 0x7ff) return (b == 0x7ff0000000000000ULL) ? 2147483647 : (-2147483647 - 1);
+    if (e == 0) { int n = 0; u64 m = b; while (!(m & 0x0010000000000000ULL)) { m <<= 1; ++n; } return -1022 - n; }
+    return e - 1023;
+}
+inline double logb(double x) {
+    if (x == 0.0) return -kInf;
+    if (isinf(x)) return kInf;
+    if (isnan(x)) return x;
+    return (double)ilogb(x);
+}
+inline double scalbln(double x, long n) {
+    if (n > 100000) n = 100000; else if (n < -100000) n = -100000;
+    return scalbn(x, (int)n);
+}
+inline double nextafter(double x, double y) {
+    if (isnan(x) || isnan(y)) return x + y;
+    u64 ux = dbits(x), uy = dbits(y);
+    if (ux == uy) return y;
+    u64 ax = ux & 0x7fffffffffffffffULL, ay = uy & 0x7fffffffffffffffULL;
+    if (ax == 0) { if (ay == 0) return y; ux = (uy & 0x8000000000000000ULL) | 1; }
+    else if (ax > ay || ((ux ^ uy) & 0x8000000000000000ULL)) ux--;
+    else ux++;
+    return dfrom(ux);
+}
+inline double nexttoward(double x, double y) { return nextafter(x, y); }   // long double = double
+inline double remquo(double x, double y, int *quo) {
+    if (isnan(x) || isnan(y) || isinf(x) || y == 0.0) { *quo = 0; return kQNaN; }
+    if (isinf(y)) { *quo = 0; return x; }
+    double r = remainder(x, y);
+    double n = rint((x - r) / y);                                    // integer quotient (snap)
+    int iq = (int)fmod(fabs(n), 8.0);                                // low 3 bits suffice
+    *quo = (signbit(x) ^ signbit(y)) ? -iq : iq;
+    return r;
+}
+inline long      lround(double x)  { return (long)round(x); }
+inline long long llround(double x) { return (long long)round(x); }
+inline long      lrint(double x)   { return (long)rint(x); }
+inline long long llrint(double x)  { return (long long)rint(x); }
+inline double fdim(double x, double y) {
+    if (isnan(x) || isnan(y)) return kQNaN;
+    return (x > y) ? x - y : 0.0;
+}
+inline double fmax(double x, double y) {
+    if (isnan(x)) return y;
+    if (isnan(y)) return x;
+    if (x == y) return signbit(x) ? y : x;                           // fmax(+0,−0)=+0
+    return x < y ? y : x;
+}
+inline double fmin(double x, double y) {
+    if (isnan(x)) return y;
+    if (isnan(y)) return x;
+    if (x == y) return signbit(x) ? x : y;                           // fmin(+0,−0)=−0
+    return x < y ? x : y;
+}
+// fma : exact a·b via Dekker two_prod, then double-double sum with c (≤1 ULP, no -mfma).
+inline double fma(double a, double b, double c) {
+    if (!isfinite(a) || !isfinite(b) || !isfinite(c) || a == 0.0 || b == 0.0)
+        return a * b + c;                                            // inf/nan/zero edge cases
+    double p, e; two_prod(a, b, p, e);                              // a·b = p+e exact
+    double s, t; two_sum(p, c, s, t);                              // p+c = s+t exact
+    return s + (t + e);
+}
+inline float  frexp(float x, int *e)        { return float(frexp(double(x), e)); }
+inline float  modf(float x, float *ip)      { double i; float r = float(modf(double(x), &i)); *ip = (float)i; return r; }
+inline int    ilogb(float x)                { return ilogb(double(x)); }
+inline float  logb(float x)                 { return float(logb(double(x))); }
+inline float  scalbln(float x, long n)      { return float(scalbln(double(x), n)); }
+inline float  nextafter(float x, float y)   { return float(nextafter(double(x), double(y))); }
+inline float  remquo(float x, float y, int *q){ return float(remquo(double(x), double(y), q)); }
+inline long      lround(float x)  { return lround(double(x)); }
+inline long long llround(float x) { return llround(double(x)); }
+inline long      lrint(float x)   { return lrint(double(x)); }
+inline long long llrint(float x)  { return llrint(double(x)); }
+inline float  fdim(float x, float y) { return float(fdim(double(x), double(y))); }
+inline float  fmax(float x, float y) { return float(fmax(double(x), double(y))); }
+inline float  fmin(float x, float y) { return float(fmin(double(x), double(y))); }
+inline float  fma(float x, float y, float z) { return float(fma(double(x), double(y), double(z))); }
+
+// ── completeness: long double overloads + C-named (f,l) + comparisons ──────
+#define BXC1(fn) inline long double fn(long double x){return (long double)fn((double)x);} \
+  inline float fn##f(float x){return fn(x);} inline long double fn##l(long double x){return fn(x);}
+#define BXC2(fn) inline long double fn(long double a,long double b){return (long double)fn((double)a,(double)b);} \
+  inline float fn##f(float a,float b){return fn(a,b);} inline long double fn##l(long double a,long double b){return fn(a,b);}
+BXC1(sin) BXC1(cos) BXC1(tan) BXC1(asin) BXC1(acos) BXC1(atan)
+BXC1(sinh) BXC1(cosh) BXC1(tanh) BXC1(asinh) BXC1(acosh) BXC1(atanh)
+BXC1(exp) BXC1(exp2) BXC1(expm1) BXC1(log) BXC1(log2) BXC1(log10) BXC1(log1p)
+BXC1(sqrt) BXC1(cbrt) BXC1(erf) BXC1(erfc) BXC1(tgamma) BXC1(lgamma)
+BXC1(ceil) BXC1(floor) BXC1(trunc) BXC1(round) BXC1(nearbyint) BXC1(rint) BXC1(fabs) BXC1(logb)
+BXC2(atan2) BXC2(pow) BXC2(hypot) BXC2(fmod) BXC2(remainder)
+BXC2(fdim) BXC2(fmax) BXC2(fmin) BXC2(copysign) BXC2(nextafter)
+#undef BXC1
+#undef BXC2
+inline long double fma(long double a,long double b,long double c){return (long double)fma((double)a,(double)b,(double)c);}
+inline float fmaf(float a,float b,float c){return fma(a,b,c);}
+inline long double fmal(long double a,long double b,long double c){return fma(a,b,c);}
+inline long double scalbn(long double x,int n){return (long double)scalbn((double)x,n);}
+inline float scalbnf(float x,int n){return scalbn(x,n);} inline long double scalbnl(long double x,int n){return scalbn(x,n);}
+inline long double ldexp(long double x,int n){return (long double)ldexp((double)x,n);}
+inline float ldexpf(float x,int n){return ldexp(x,n);} inline long double ldexpl(long double x,int n){return ldexp(x,n);}
+inline long double scalbln(long double x,long n){return (long double)scalbln((double)x,n);}
+inline float scalblnf(float x,long n){return scalbln(x,n);} inline long double scalblnl(long double x,long n){return scalbln(x,n);}
+inline long double frexp(long double x,int*e){return (long double)frexp((double)x,e);}
+inline float frexpf(float x,int*e){return frexp(x,e);} inline long double frexpl(long double x,int*e){return frexp(x,e);}
+inline long double modf(long double x,long double*ip){double i;long double r=(long double)modf((double)x,&i);*ip=(long double)i;return r;}
+inline float modff(float x,float*ip){return modf(x,ip);} inline long double modfl(long double x,long double*ip){return modf(x,ip);}
+inline long double remquo(long double a,long double b,int*q){return (long double)remquo((double)a,(double)b,q);}
+inline float remquof(float a,float b,int*q){return remquo(a,b,q);} inline long double remquol(long double a,long double b,int*q){return remquo(a,b,q);}
+inline int ilogb(long double x){return ilogb((double)x);} inline int ilogbf(float x){return ilogb((double)x);} inline int ilogbl(long double x){return ilogb((double)x);}
+inline long lround(long double x){return lround((double)x);} inline long lroundf(float x){return lround((double)x);} inline long lroundl(long double x){return lround((double)x);}
+inline long long llround(long double x){return llround((double)x);} inline long long llroundf(float x){return llround((double)x);} inline long long llroundl(long double x){return llround((double)x);}
+inline long lrint(long double x){return lrint((double)x);} inline long lrintf(float x){return lrint((double)x);} inline long lrintl(long double x){return lrint((double)x);}
+inline long long llrint(long double x){return llrint((double)x);} inline long long llrintf(float x){return llrint((double)x);} inline long long llrintl(long double x){return llrint((double)x);}
+inline double nexttoward(double x,long double y){return nextafter(x,(double)y);}
+inline float nexttoward(float x,long double y){return (float)nextafter((double)x,(double)y);}
+inline long double nexttoward(long double x,long double y){return (long double)nextafter((double)x,(double)y);}
+inline float nexttowardf(float x,long double y){return nexttoward(x,y);} inline long double nexttowardl(long double x,long double y){return nexttoward(x,y);}
+// classification long double + abs + comparison macros
+inline bool isnan(long double x){return isnan((double)x);} inline bool isinf(long double x){return isinf((double)x);}
+inline bool isfinite(long double x){return isfinite((double)x);} inline bool isnormal(long double x){return isnormal((double)x);}
+inline bool signbit(long double x){return signbit((double)x);} inline int fpclassify(long double x){return fpclassify((double)x);}
+inline double abs(double x){return fabs(x);} inline float abs(float x){return fabs(x);} inline long double abs(long double x){return fabs(x);}
+inline double nan(const char*){return __builtin_nan("");} inline float nanf(const char*){return __builtin_nanf("");} inline long double nanl(const char*){return __builtin_nanl("");}
+inline bool isgreater(double x,double y){return __builtin_isgreater(x,y);}
+inline bool isgreaterequal(double x,double y){return __builtin_isgreaterequal(x,y);}
+inline bool isless(double x,double y){return __builtin_isless(x,y);}
+inline bool islessequal(double x,double y){return __builtin_islessequal(x,y);}
+inline bool islessgreater(double x,double y){return __builtin_islessgreater(x,y);}
+inline bool isunordered(double x,double y){return __builtin_isunordered(x,y);}
+
+} // namespace std
+#include <__bits/cmath_special>
+#endif
