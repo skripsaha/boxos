@@ -421,22 +421,47 @@ public:
 
     result_type operator()()
     {
-        // Assemble w bits from the base engine's range [0, R).
+        // [rand.adapt.ibits] generation algorithm (matches the standard /
+        // libstdc++): split the w output bits into n base draws of w/n or
+        // w/n+1 bits each, each draw range-limited by rejection.
         using EU = typename Engine::result_type;
-        const EU       r = EU(Engine::max() - Engine::min()) + EU(1);
-        result_type    out = 0;
-        size_t         got = 0;
-        int            ebits = (r == 0) ? numeric_limits<EU>::digits
-                                        : __rng::bit_width_of(EU(r - 1));
-        if (ebits == 0) ebits = 1;
-        while (got < w) {
-            EU          v    = EU(e_() - Engine::min());
-            size_t      take = (w - got < (size_t)ebits) ? (w - got) : (size_t)ebits;
-            result_type chunk = result_type(v) & __rng::wmask<UIntType>((int)take);
-            out |= chunk << got;
-            got += take;
+        using CT = common_type_t<EU, result_type>;
+        const EU r = (Engine::max() - Engine::min() < numeric_limits<EU>::max())
+                         ? EU(Engine::max() - Engine::min() + 1)
+                         : EU(0);
+        const unsigned edig = numeric_limits<EU>::digits;
+        const unsigned m    = r ? unsigned(__rng::bit_width_of(r) - 1) : edig;
+        const unsigned cdig = numeric_limits<CT>::digits;
+
+        unsigned n = 0, n0 = 0;
+        CT       s0 = 0, s1 = 0, y0 = 0, y1 = 0;
+        for (unsigned i = 0; i < 2; ++i) {
+            n                 = (w + m - 1) / m + i;
+            n0                = n - w % n;
+            const unsigned w0 = w / n;
+            s0 = 0; s1 = 0;
+            if (w0 < cdig) { s0 = CT(1) << w0; s1 = s0 << 1; }
+            y0 = 0; y1 = 0;
+            if (r) {
+                if (s0) y0 = s0 * (r / s0);
+                if (s1) y1 = s1 * (r / s1);
+                if (CT(r) - y0 <= y0 / n) break;
+            } else
+                break;
         }
-        return out & __rng::wmask<UIntType>((int)w);
+
+        result_type sum = 0;
+        for (unsigned k = 0; k < n0; ++k) {
+            CT u;
+            do { u = CT(EU(e_() - Engine::min())); } while (y0 && u >= y0);
+            sum = result_type(s0 * sum + (s0 ? u % s0 : u));
+        }
+        for (unsigned k = n0; k < n; ++k) {
+            CT u;
+            do { u = CT(EU(e_() - Engine::min())); } while (y1 && u >= y1);
+            sum = result_type(s1 * sum + (s1 ? u % s1 : u));
+        }
+        return sum;
     }
     void discard(unsigned long long z) { while (z--) (*this)(); }
     const Engine &base() const noexcept { return e_; }
