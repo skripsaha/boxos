@@ -1,0 +1,394 @@
+// __bits/chrono_format — std::formatter specializations for chrono types
+// ([time.format]). Included by <chrono> AFTER <format>. ASCII / "C"-locale
+// only (no localized names, no Unicode width). Invalid-value diagnostic
+// suffixes ("… is not a valid …") are NOT emitted — documented deviation.
+#ifndef BOXCXX_BITS_CHRONO_FORMAT
+#define BOXCXX_BITS_CHRONO_FORMAT
+
+#include <__bits/chrono_calendar>
+#include <format>
+#include <string>
+#include <string_view>
+#include <charconv>
+
+namespace std {
+namespace __chrono_fmt {
+
+inline constexpr const char *kMonAbbr[] = {"Jan", "Feb", "Mar", "Apr",
+                                           "May", "Jun", "Jul", "Aug",
+                                           "Sep", "Oct", "Nov", "Dec"};
+inline constexpr const char *kMonFull[] = {
+    "January", "February", "March",     "April",   "May",      "June",
+    "July",    "August",   "September", "October", "November", "December"};
+inline constexpr const char *kWdAbbr[] = {"Sun", "Mon", "Tue", "Wed",
+                                          "Thu", "Fri", "Sat"};
+inline constexpr const char *kWdFull[] = {"Sunday",    "Monday",   "Tuesday",
+                                          "Wednesday", "Thursday", "Friday",
+                                          "Saturday"};
+
+struct Parts {
+    bool      neg  = false;
+    long long year = 0;
+    unsigned  month = 1, day = 1;
+    long long h = 0, mi = 0, s = 0;
+    long long sub  = 0;
+    unsigned  subw = 0;
+    unsigned  wd   = 0; // 0 = Sunday
+    long long yday = 0;
+    bool      have_date = false;
+    bool      have_time = false;
+};
+
+inline void put_uint(string &o, unsigned long long v, int w)
+{
+    char b[24];
+    auto r = to_chars(b, b + sizeof b, v);
+    int  n = int(r.ptr - b);
+    for (int i = n; i < w; ++i) o.push_back('0');
+    o.append(b, size_t(n));
+}
+inline void put_uint_sp(string &o, unsigned long long v, int w)
+{
+    char b[24];
+    auto r = to_chars(b, b + sizeof b, v);
+    int  n = int(r.ptr - b);
+    for (int i = n; i < w; ++i) o.push_back(' ');
+    o.append(b, size_t(n));
+}
+inline void put_year(string &o, long long y)
+{
+    unsigned long long m = y < 0 ? (unsigned long long)(-y) : (unsigned long long)y;
+    if (y < 0) o.push_back('-');
+    put_uint(o, m, 4);
+}
+
+// Walk a chrono-format string, appending rendered fields to `o`.
+inline void render(string &o, string_view f, const Parts &p)
+{
+    const char *q = f.data();
+    const char *e = q + f.size();
+    while (q != e) {
+        char c = *q++;
+        if (c != '%') { o.push_back(c); continue; }
+        if (q == e) throw format_error("chrono format: trailing '%'");
+        char k = *q++;
+        unsigned long long ay =
+            (unsigned long long)(p.year < 0 ? -p.year : p.year);
+        switch (k) {
+        case 'Y': put_year(o, p.year); break;
+        case 'y': put_uint(o, ay % 100, 2); break;
+        case 'C': put_uint(o, ay / 100, 2); break;
+        case 'm': put_uint(o, p.month, 2); break;
+        case 'd': put_uint(o, p.day, 2); break;
+        case 'e': put_uint_sp(o, p.day, 2); break;
+        case 'H': put_uint(o, (unsigned long long)p.h, 2); break;
+        case 'I': {
+            long long          hh  = p.h % 24;
+            unsigned long long h12 = (hh % 12 == 0) ? 12 : (unsigned long long)(hh % 12);
+            put_uint(o, h12, 2);
+        } break;
+        case 'M': put_uint(o, (unsigned long long)p.mi, 2); break;
+        case 'S':
+            put_uint(o, (unsigned long long)p.s, 2);
+            if (p.subw) { o.push_back('.'); put_uint(o, (unsigned long long)p.sub, int(p.subw)); }
+            break;
+        case 'T':
+            put_uint(o, (unsigned long long)p.h, 2);
+            o.push_back(':');
+            put_uint(o, (unsigned long long)p.mi, 2);
+            o.push_back(':');
+            put_uint(o, (unsigned long long)p.s, 2);
+            if (p.subw) { o.push_back('.'); put_uint(o, (unsigned long long)p.sub, int(p.subw)); }
+            break;
+        case 'R':
+            put_uint(o, (unsigned long long)p.h, 2);
+            o.push_back(':');
+            put_uint(o, (unsigned long long)p.mi, 2);
+            break;
+        case 'F':
+            put_year(o, p.year);
+            o.push_back('-');
+            put_uint(o, p.month, 2);
+            o.push_back('-');
+            put_uint(o, p.day, 2);
+            break;
+        case 'D':
+            put_uint(o, p.month, 2);
+            o.push_back('/');
+            put_uint(o, p.day, 2);
+            o.push_back('/');
+            put_uint(o, ay % 100, 2);
+            break;
+        case 'j': put_uint(o, (unsigned long long)p.yday, 3); break;
+        case 'a': o.append(kWdAbbr[p.wd % 7]); break;
+        case 'A': o.append(kWdFull[p.wd % 7]); break;
+        case 'b':
+        case 'h': o.append(kMonAbbr[(p.month - 1) % 12]); break;
+        case 'B': o.append(kMonFull[(p.month - 1) % 12]); break;
+        case 'p': o.append((p.h % 24) < 12 ? "AM" : "PM"); break;
+        case 'u': put_uint(o, (unsigned long long)(p.wd == 0 ? 7 : p.wd), 1); break;
+        case 'w': put_uint(o, (unsigned long long)p.wd, 1); break;
+        case 'n': o.push_back('\n'); break;
+        case 't': o.push_back('\t'); break;
+        case '%': o.push_back('%'); break;
+        default: throw format_error("chrono format: unsupported conversion");
+        }
+    }
+}
+
+// Common parse for the chrono spec: [fill]align width(opt) .prec(opt) chars.
+// constexpr — the consteval format-string checker calls formatter::parse().
+constexpr const char *parse_spec(format_parse_context &pc, __format::StdSpec &s,
+                                 string_view &chrono)
+{
+    const char *p = pc.begin();
+    const char *e = pc.end();
+    if (p + 1 < e && __format::IsAlignChar(p[1]) && *p != '{' && *p != '}') {
+        s.fill  = *p;
+        s.align = __format::AlignOf(p[1]);
+        p += 2;
+    } else if (p != e && __format::IsAlignChar(*p)) {
+        s.align = __format::AlignOf(*p);
+        ++p;
+    }
+    if (p != e && __format::IsDigit(*p) && *p != '0') {
+        s.width = int(__format::ParseNumber(p, e));
+    } else if (p != e && *p == '{') {
+        s.width_id      = __format::ParseDynamicArgId(pc, p, e);
+        s.width_dynamic = true;
+        pc.check_dynamic_spec_integral(s.width_id);
+    }
+    if (p != e && *p == '.') {
+        ++p;
+        if (p != e && __format::IsDigit(*p))
+            s.precision = int(__format::ParseNumber(p, e));
+        else if (p != e && *p == '{') {
+            s.prec_id      = __format::ParseDynamicArgId(pc, p, e);
+            s.prec_dynamic = true;
+            pc.check_dynamic_spec_integral(s.prec_id);
+        } else
+            throw format_error("chrono format: missing precision");
+    }
+    const char *start = p;
+    while (p != e && *p != '}') ++p;
+    chrono = string_view(start, size_t(p - start));
+    return p;
+}
+
+inline void emit(format_context &ctx, const __format::StdSpec &s,
+                 const string &body)
+{
+    __format::FormatString(ctx, s, __format::EffectiveWidth(ctx, s), -1,
+                           string_view(body.data(), body.size()));
+}
+
+inline Parts date_parts(const chrono::year_month_day &ymd)
+{
+    Parts p;
+    p.have_date = true;
+    p.year      = (long long)int(ymd.year());
+    p.month     = unsigned(ymd.month());
+    p.day       = unsigned(ymd.day());
+    chrono::sys_days sd = ymd;
+    p.wd        = chrono::weekday(sd).c_encoding();
+    long long jan1 =
+        chrono::__detail::days_from_civil(int(ymd.year()), 1, 1);
+    p.yday = sd.time_since_epoch().count() - jan1 + 1;
+    return p;
+}
+
+template <class Duration>
+inline void fill_time(Parts &p, const chrono::hh_mm_ss<Duration> &hms)
+{
+    p.have_time = true;
+    p.neg       = hms.is_negative();
+    p.h         = hms.hours().count();
+    p.mi        = hms.minutes().count();
+    p.s         = hms.seconds().count();
+    p.subw      = chrono::hh_mm_ss<Duration>::fractional_width;
+    p.sub       = (long long)hms.subseconds().count();
+}
+
+// Shared base for every chrono formatter: parses [fill]align/width/.prec and
+// captures the %-conversion tail. Mirrors __format::StringSpecParser so each
+// formatter only defines format(). spec_/chrono_ are inherited.
+struct SpecParser {
+    __format::StdSpec spec_;
+    string_view       chrono_;
+    constexpr typename format_parse_context::iterator
+    parse(format_parse_context &pc)
+    {
+        const char *p = parse_spec(pc, spec_, chrono_);
+        pc.advance_to(p);
+        return p;
+    }
+};
+
+} // namespace __chrono_fmt
+
+// ── formatter<day/month/year/weekday> ───────────────────────────────────
+template <> struct formatter<chrono::day, char> : __chrono_fmt::SpecParser {
+    void format(const chrono::day &d, format_context &ctx) const
+    {
+        __chrono_fmt::Parts p;
+        p.day = unsigned(d);
+        string body;
+        __chrono_fmt::render(body, chrono_.empty() ? string_view("%d") : chrono_, p);
+        __chrono_fmt::emit(ctx, spec_, body);
+    }
+};
+
+template <> struct formatter<chrono::month, char> : __chrono_fmt::SpecParser {
+    void format(const chrono::month &m, format_context &ctx) const
+    {
+        __chrono_fmt::Parts p;
+        p.month = unsigned(m);
+        string body;
+        __chrono_fmt::render(body, chrono_.empty() ? string_view("%b") : chrono_, p);
+        __chrono_fmt::emit(ctx, spec_, body);
+    }
+};
+
+template <> struct formatter<chrono::year, char> : __chrono_fmt::SpecParser {
+    void format(const chrono::year &y, format_context &ctx) const
+    {
+        __chrono_fmt::Parts p;
+        p.year = (long long)int(y);
+        string body;
+        __chrono_fmt::render(body, chrono_.empty() ? string_view("%Y") : chrono_, p);
+        __chrono_fmt::emit(ctx, spec_, body);
+    }
+};
+
+template <> struct formatter<chrono::weekday, char> : __chrono_fmt::SpecParser {
+    void format(const chrono::weekday &w, format_context &ctx) const
+    {
+        __chrono_fmt::Parts p;
+        p.wd = w.c_encoding();
+        string body;
+        __chrono_fmt::render(body, chrono_.empty() ? string_view("%a") : chrono_, p);
+        __chrono_fmt::emit(ctx, spec_, body);
+    }
+};
+
+// ── formatter<year_month_day> ───────────────────────────────────────────
+template <>
+struct formatter<chrono::year_month_day, char> : __chrono_fmt::SpecParser {
+    void format(const chrono::year_month_day &ymd, format_context &ctx) const
+    {
+        __chrono_fmt::Parts p = __chrono_fmt::date_parts(ymd);
+        string body;
+        __chrono_fmt::render(body, chrono_.empty() ? string_view("%F") : chrono_, p);
+        __chrono_fmt::emit(ctx, spec_, body);
+    }
+};
+
+// ── formatter<hh_mm_ss<Duration>> ───────────────────────────────────────
+template <class Duration>
+struct formatter<chrono::hh_mm_ss<Duration>, char> : __chrono_fmt::SpecParser {
+    void format(const chrono::hh_mm_ss<Duration> &hms, format_context &ctx) const
+    {
+        __chrono_fmt::Parts p;
+        __chrono_fmt::fill_time(p, hms);
+        string body;
+        if (p.neg) body.push_back('-');
+        __chrono_fmt::render(body, chrono_.empty() ? string_view("%T") : chrono_, p);
+        __chrono_fmt::emit(ctx, spec_, body);
+    }
+};
+
+// ── formatter<sys_time<Duration>> ───────────────────────────────────────
+template <class Duration>
+struct formatter<chrono::sys_time<Duration>, char> : __chrono_fmt::SpecParser {
+    void format(const chrono::sys_time<Duration> &tp, format_context &ctx) const
+    {
+        using namespace chrono;
+        sys_days             sd  = floor<days>(tp);
+        year_month_day       ymd{sd};
+        __chrono_fmt::Parts  p   = __chrono_fmt::date_parts(ymd);
+        auto                 tod = tp - sd; // common_type duration since midnight
+        hh_mm_ss<decltype(tod)> hms{tod};
+        __chrono_fmt::fill_time(p, hms);
+        string_view deflt =
+            is_same_v<Duration, days> ? string_view("%F") : string_view("%F %T");
+        string body;
+        __chrono_fmt::render(body, chrono_.empty() ? deflt : chrono_, p);
+        __chrono_fmt::emit(ctx, spec_, body);
+    }
+};
+
+// ── formatter<duration<Rep,Period>> ─────────────────────────────────────
+namespace __chrono_fmt {
+
+template <class Period> inline string unit_suffix()
+{
+    using std::chrono::days;
+    using std::chrono::hours;
+    using std::chrono::minutes;
+    if constexpr (ratio_equal_v<Period, ratio<1>>) return "s";
+    else if constexpr (ratio_equal_v<Period, atto>) return "as";
+    else if constexpr (ratio_equal_v<Period, femto>) return "fs";
+    else if constexpr (ratio_equal_v<Period, pico>) return "ps";
+    else if constexpr (ratio_equal_v<Period, nano>) return "ns";
+    else if constexpr (ratio_equal_v<Period, micro>) return "us"; // ASCII (matches libstdc++ narrow output)
+    else if constexpr (ratio_equal_v<Period, milli>) return "ms";
+    else if constexpr (ratio_equal_v<Period, centi>) return "cs";
+    else if constexpr (ratio_equal_v<Period, deci>) return "ds";
+    else if constexpr (ratio_equal_v<Period, deca>) return "das";
+    else if constexpr (ratio_equal_v<Period, hecto>) return "hs";
+    else if constexpr (ratio_equal_v<Period, kilo>) return "ks";
+    else if constexpr (ratio_equal_v<Period, mega>) return "Ms";
+    else if constexpr (ratio_equal_v<Period, giga>) return "Gs";
+    else if constexpr (ratio_equal_v<Period, tera>) return "Ts";
+    else if constexpr (ratio_equal_v<Period, peta>) return "Ps";
+    else if constexpr (ratio_equal_v<Period, exa>) return "Es";
+    else if constexpr (ratio_equal_v<Period, ratio<60>>) return "min";
+    else if constexpr (ratio_equal_v<Period, ratio<3600>>) return "h";
+    else if constexpr (ratio_equal_v<Period, ratio<86400>>) return "d";
+    else {
+        string s = "[";
+        char   b[24];
+        auto   r = to_chars(b, b + sizeof b, Period::num);
+        s.append(b, size_t(r.ptr - b));
+        if (Period::den != 1) {
+            s.push_back('/');
+            auto r2 = to_chars(b, b + sizeof b, Period::den);
+            s.append(b, size_t(r2.ptr - b));
+        }
+        s += "]s";
+        return s;
+    }
+}
+
+} // namespace __chrono_fmt
+
+template <class Rep, class Period>
+struct formatter<chrono::duration<Rep, Period>, char> : __chrono_fmt::SpecParser {
+    void format(const chrono::duration<Rep, Period> &d, format_context &ctx) const
+    {
+        string body;
+        if (chrono_.empty()) {
+            char b[40];
+            if constexpr (chrono::treat_as_floating_point_v<Rep>) {
+                auto r = to_chars(b, b + sizeof b, double(d.count()));
+                body.append(b, size_t(r.ptr - b));
+            } else {
+                auto r = to_chars(b, b + sizeof b, d.count());
+                body.append(b, size_t(r.ptr - b));
+            }
+            body += __chrono_fmt::unit_suffix<typename chrono::duration<Rep, Period>::period>();
+        } else {
+            // Treat the duration as a time-of-day via hh_mm_ss.
+            chrono::hh_mm_ss<chrono::duration<Rep, Period>> hms{d};
+            __chrono_fmt::Parts p;
+            __chrono_fmt::fill_time(p, hms);
+            if (p.neg) body.push_back('-');
+            __chrono_fmt::render(body, chrono_, p);
+        }
+        __chrono_fmt::emit(ctx, spec_, body);
+    }
+};
+
+} // namespace std
+
+#endif // BOXCXX_BITS_CHRONO_FORMAT

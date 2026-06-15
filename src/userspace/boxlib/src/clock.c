@@ -61,6 +61,24 @@ uint64_t clock_unix_now(void)
     return 0;
 }
 
+uint64_t clock_unix_now_ns(void)
+{
+    const ClockBoardView *v = cb();
+    if (v->magic == CLOCKBOARD_MAGIC_USER && v->boot_unix_secs != 0) {
+        /* Single board view: boot_unix_secs is immutable post-boot and the
+         * kernel writes uptime_us as one 8-byte store, so reading both from
+         * the same snapshot keeps seconds and sub-seconds consistent. */
+        uint64_t us  = v->uptime_us;
+        uint64_t sec = v->boot_unix_secs + us / 1000000ULL;
+        uint64_t sub = us % 1000000ULL;            /* leftover microseconds */
+        return sec * 1000000000ULL + sub * 1000ULL;
+    }
+    /* Fallback: kernel seconds (no sub-second precision available). */
+    uint64_t secs = 0;
+    if (time_get_secs(&secs) == 0) return secs * 1000000000ULL;
+    return 0;
+}
+
 uint64_t clock_tsc_to_ns(uint64_t tsc_ticks)
 {
     const ClockBoardView *v = cb();

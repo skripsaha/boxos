@@ -1,0 +1,132 @@
+// __bits/chrono_clock — std::chrono clocks ([time.clock]). Included by <chrono>.
+//
+// Time sources are BoxOS-native (ClockBoard + RDTSC) via boxlib. We never
+// include <box/time.h> (whose global struct `time_t` would collide) and we
+// deliberately do NOT introduce a global/std `time_t`: system_clock::to_time_t
+// returns `long long` epoch-seconds. Documented deviation (no <ctime>).
+#ifndef BOXCXX_BITS_CHRONO_CLOCK
+#define BOXCXX_BITS_CHRONO_CLOCK
+
+#include <__bits/chrono_duration>
+#include <cstdint>
+#include <type_traits>
+
+#include "box/clock.h" // ClockBoard wall-clock: clock_unix_now_ns, clock_uptime_us, clock_tsc_to_ns
+#include "box/cpu.h"   // cpu_rdtsc, cpu_has_invariant_tsc
+
+namespace std {
+namespace chrono {
+
+// ── system_clock — wall clock, Unix epoch, nanosecond representation ─────
+struct system_clock {
+    using rep        = nanoseconds::rep;
+    using period     = nanoseconds::period;
+    using duration   = nanoseconds;
+    using time_point = chrono::time_point<system_clock>;
+    static constexpr bool is_steady = false;
+
+    static time_point now() noexcept
+    {
+        return time_point(
+            duration(static_cast<long long>(::clock_unix_now_ns())));
+    }
+
+    static long long to_time_t(const time_point &t) noexcept
+    {
+        return duration_cast<seconds>(t.time_since_epoch()).count();
+    }
+    static time_point from_time_t(long long t) noexcept
+    {
+        return time_point(duration_cast<duration>(seconds(t)));
+    }
+};
+
+// ── steady_clock — monotonic, epoch = boot ──────────────────────────────
+// Primary path: RDTSC scaled by the calibrated TSC frequency (true ns),
+// gated on an invariant TSC. Fallback: ClockBoard uptime (µs → ns).
+struct steady_clock {
+    using rep        = nanoseconds::rep;
+    using period     = nanoseconds::period;
+    using duration   = nanoseconds;
+    using time_point = chrono::time_point<steady_clock>;
+    static constexpr bool is_steady = true;
+
+    static time_point now() noexcept
+    {
+        if (::cpu_has_invariant_tsc()) {
+            uint64_t ns = ::clock_tsc_to_ns(::cpu_rdtsc());
+            if (ns != 0) // 0 ⇒ TSC freq uncalibrated → use uptime instead
+                return time_point(duration(static_cast<long long>(ns)));
+        }
+        uint64_t us = ::clock_uptime_us();
+        return time_point(duration(static_cast<long long>(us) * 1000LL));
+    }
+};
+
+using high_resolution_clock = steady_clock;
+
+// ── tag clocks (no timezone/leap-second database in BoxOS) ───────────────
+// local_t marks a calendar instant with no associated zone. utc/tai/gps/file
+// clocks expose the type surface but intentionally have no now() — calling it
+// is a compile error, which is correct without a tz/leap database.
+struct local_t {};
+
+struct utc_clock {
+    using rep        = system_clock::rep;
+    using period     = system_clock::period;
+    using duration   = chrono::duration<rep, period>;
+    using time_point = chrono::time_point<utc_clock>;
+    static constexpr bool is_steady = false;
+};
+struct tai_clock {
+    using rep        = system_clock::rep;
+    using period     = system_clock::period;
+    using duration   = chrono::duration<rep, period>;
+    using time_point = chrono::time_point<tai_clock>;
+    static constexpr bool is_steady = false;
+};
+struct gps_clock {
+    using rep        = system_clock::rep;
+    using period     = system_clock::period;
+    using duration   = chrono::duration<rep, period>;
+    using time_point = chrono::time_point<gps_clock>;
+    static constexpr bool is_steady = false;
+};
+struct file_clock {
+    using rep        = system_clock::rep;
+    using period     = system_clock::period;
+    using duration   = chrono::duration<rep, period>;
+    using time_point = chrono::time_point<file_clock>;
+    static constexpr bool is_steady = false;
+};
+
+// ── clock-tagged time_point aliases ─────────────────────────────────────
+template <class Duration> using sys_time = time_point<system_clock, Duration>;
+using sys_seconds = sys_time<seconds>;
+using sys_days    = sys_time<days>;
+
+template <class Duration> using local_time = time_point<local_t, Duration>;
+using local_seconds = local_time<seconds>;
+using local_days    = local_time<days>;
+
+template <class Duration> using utc_time = time_point<utc_clock, Duration>;
+using utc_seconds = utc_time<seconds>;
+template <class Duration> using tai_time = time_point<tai_clock, Duration>;
+using tai_seconds = tai_time<seconds>;
+template <class Duration> using gps_time = time_point<gps_clock, Duration>;
+using gps_seconds = gps_time<seconds>;
+template <class Duration> using file_time = time_point<file_clock, Duration>;
+
+// ── clock_cast — identity only (no cross-clock conversion table) ─────────
+template <class DestClock, class SourceClock, class Duration>
+    requires is_same_v<DestClock, SourceClock>
+constexpr time_point<DestClock, Duration>
+clock_cast(const time_point<SourceClock, Duration> &t)
+{
+    return t;
+}
+
+} // namespace chrono
+} // namespace std
+
+#endif // BOXCXX_BITS_CHRONO_CLOCK

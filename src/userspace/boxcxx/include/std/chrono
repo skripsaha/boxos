@@ -1,0 +1,16 @@
+// <chrono> — C++20 date and time library ([time]).
+//
+// boxcxx freestanding implementation. Scope: durations, time_points, the
+// system/steady/high_resolution clocks (BoxOS ClockBoard + RDTSC), the full
+// civil calendar, hh_mm_ss, and <format> integration. Out of scope (like
+// locale): time zones (zoned_time/tzdb), leap-second database, wide streams.
+#ifndef BOXCXX_CHRONO
+#define BOXCXX_CHRONO
+
+#include <ratio>
+#include <__bits/chrono_duration>
+#include <__bits/chrono_clock>
+#include <__bits/chrono_calendar>
+#include <__bits/chrono_format>
+
+#endif // BOXCXX_CHRONO
