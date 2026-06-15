@@ -29,6 +29,8 @@ typedef struct {
     bool has_smap;              // Supervisor Mode Access Prevention (CPUID.7.0:EBX[20])
     bool has_umip;              // User Mode Instruction Prevention (CPUID.7.0:ECX[2])
     bool has_fsgsbase;          // RDFSBASE/WRFSBASE/RDGSBASE/WRGSBASE (CPUID.7.0:EBX[0])
+    bool has_rdrand;            // RDRAND on-chip RNG (CPUID.1:ECX[30])
+    bool has_rdseed;            // RDSEED on-chip seed RNG (CPUID.7.0:EBX[18])
     bool has_la57;              // 5-level paging hardware support (CPUID.7.0:ECX[16])
     bool has_invpcid;           // INVPCID instruction (CPUID.7.0:EBX[10])
     bool has_nx;                // NX/XD bit support (CPUID.80000001h:EDX[20])

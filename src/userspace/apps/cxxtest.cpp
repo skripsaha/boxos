@@ -32,6 +32,7 @@
 #include <memory_resource>
 #include <optional>
 #include <print>
+#include <random>
 #include <ranges>
 #include <set>
 #include <unordered_map>
@@ -2816,6 +2817,120 @@ void Phase11()
     printf("[CXX] PASS phase11: <chrono> + <ratio> (duration/clock/calendar/format)\n");
 }
 
+template <class E>
+static unsigned long long EngNth(E e, int n)
+{
+    typename E::result_type v{};
+    for (int i = 0; i < n; ++i) v = e();
+    return static_cast<unsigned long long>(v);
+}
+
+void Phase12()
+{
+    using namespace std;
+
+    // ── engine known values ([rand.predef] conformance constants) ───────
+    Check(EngNth(minstd_rand0{}, 10000) == 1043618065ull, "phase12 minstd_rand0");
+    Check(EngNth(minstd_rand{}, 10000) == 399268537ull, "phase12 minstd_rand");
+    Check(EngNth(mt19937{}, 10000) == 4123659995ull, "phase12 mt19937");
+    Check(EngNth(mt19937_64{}, 10000) == 9981545732273789042ull,
+          "phase12 mt19937_64");
+    Check(EngNth(ranlux24_base{}, 10000) == 7937952ull, "phase12 ranlux24_base");
+    Check(EngNth(ranlux24{}, 10000) == 9901578ull, "phase12 ranlux24");
+    Check(EngNth(knuth_b{}, 10000) == 1112339016ull, "phase12 knuth_b");
+
+    // ── engine reproducibility & discard ────────────────────────────────
+    {
+        mt19937 a(777), b(777);
+        bool    same = true;
+        for (int i = 0; i < 50; ++i) if (a() != b()) same = false;
+        Check(same, "phase12 mt19937 reproducible");
+        mt19937 c(777), d(777);
+        c.discard(50);
+        for (int i = 0; i < 50; ++i) d();
+        Check(c() == d(), "phase12 discard == N draws");
+    }
+
+    // ── seed_seq seeding ────────────────────────────────────────────────
+    {
+        seed_seq ss{1, 2, 3, 4};
+        mt19937  a(ss), b(ss);
+        Check(a() == b() && a() == b(), "phase12 seed_seq reproducible");
+    }
+
+    // ── generate_canonical in [0,1) ─────────────────────────────────────
+    {
+        mt19937 g(99);
+        bool    ok = true;
+        for (int i = 0; i < 1000; ++i) {
+            double c = generate_canonical<double, 53>(g);
+            if (!(c >= 0.0 && c < 1.0)) ok = false;
+        }
+        Check(ok, "phase12 generate_canonical range");
+    }
+
+    // ── distribution statistical sanity (modest N for QEMU) ─────────────
+    auto mean_of = [](auto d, auto &g, int n) {
+        double s = 0;
+        for (int i = 0; i < n; ++i) s += static_cast<double>(d(g));
+        return s / n;
+    };
+    auto near = [](double a, double b, double tol) {
+        double diff = a - b;
+        if (diff < 0) diff = -diff;
+        double t = tol * (b < 0 ? -b : b);
+        if (t < tol) t = tol;
+        return diff <= t;
+    };
+    {
+        mt19937 g(2024);
+        const int N = 30000;
+        Check(near(mean_of(uniform_int_distribution<int>(1, 6), g, N), 3.5, 0.05),
+              "phase12 uniform_int mean");
+        Check(near(mean_of(uniform_real_distribution<double>(0, 1), g, N), 0.5, 0.05),
+              "phase12 uniform_real mean");
+        Check(near(mean_of(bernoulli_distribution(0.3), g, N), 0.3, 0.05),
+              "phase12 bernoulli mean");
+        Check(near(mean_of(binomial_distribution<int>(20, 0.4), g, N), 8.0, 0.05),
+              "phase12 binomial mean");
+        Check(near(mean_of(poisson_distribution<int>(4.0), g, N), 4.0, 0.05),
+              "phase12 poisson mean");
+        Check(near(mean_of(exponential_distribution<double>(1.5), g, N), 1.0 / 1.5, 0.05),
+              "phase12 exponential mean");
+        Check(near(mean_of(normal_distribution<double>(5.0, 2.0), g, N), 5.0, 0.05),
+              "phase12 normal mean");
+        Check(near(mean_of(gamma_distribution<double>(2.0, 1.5), g, N), 3.0, 0.06),
+              "phase12 gamma mean");
+        Check(near(mean_of(discrete_distribution<int>({1, 2, 3, 4}), g, N), 2.0, 0.05),
+              "phase12 discrete mean");
+    }
+
+    // ── distribution reproducibility ────────────────────────────────────
+    {
+        mt19937                       a(5), b(5);
+        normal_distribution<double>   da, db;
+        bool                          same = true;
+        for (int i = 0; i < 100; ++i) if (da(a) != db(b)) same = false;
+        Check(same, "phase12 normal reproducible");
+    }
+
+    // ── random_device ───────────────────────────────────────────────────
+    {
+        random_device rd;
+        unsigned      v0 = rd(), v1 = rd(), v2 = rd(), v3 = rd();
+        Check(!(v0 == v1 && v1 == v2 && v2 == v3),
+              "phase12 random_device varies");
+        double e = rd.entropy();
+        Check(e == 0.0 || e == 32.0, "phase12 random_device entropy");
+        // seed a PRNG from it — must run without trapping
+        mt19937 g(rd());
+        (void)g();
+        Check(true, "phase12 random_device seeds engine");
+    }
+
+    printf("[CXX] PASS phase12: <random> (engines/device/distributions)\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -2849,6 +2964,7 @@ int main()
     PhaseCurrent();
     Phase10();
     Phase11();
+    Phase12();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

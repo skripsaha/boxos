@@ -1,0 +1,13 @@
+// <random> — uniform random bit generators and distributions ([rand]).
+//
+// boxcxx freestanding implementation: engines (LCG, Mersenne Twister,
+// subtract-with-carry) + adaptors + predefined, seed_seq, generate_canonical,
+// random_device (RDRAND via cpu_caps, TSC-mixed fallback), and the full set of
+// distributions. Stream insert/extract operators are omitted (no <iostream>).
+#ifndef BOXCXX_RANDOM
+#define BOXCXX_RANDOM
+
+#include <__bits/random_engine>
+#include <__bits/random_dist>
+
+#endif // BOXCXX_RANDOM

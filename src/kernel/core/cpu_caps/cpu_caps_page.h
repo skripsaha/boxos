@@ -23,7 +23,8 @@ typedef struct __packed {
     bool has_cet;               // CPUID.07H.0:ECX[7] (shadow stack) OR EDX[20] (IBT)
     bool has_tme;               // CPUID.07H.0:ECX[13]
     bool has_fsgsbase;          // CPUID.07H.0:EBX[0] — ring-3 WRFSBASE ok (TLS)
-    uint8_t _pad1[2];           // align next field to 8 bytes
+    bool has_rdrand;            // CPUID.01H:ECX[30] — ring-3 RDRAND ok (random_device)
+    bool has_rdseed;            // CPUID.07H.0:EBX[18] — ring-3 RDSEED ok
     uint8_t _reserved[4072];    // Reserved for future features
 } cpu_caps_page_t;
 

@@ -1,0 +1,589 @@
+// __bits/random_engine — RNG engines, seed_seq, random_device,
+// generate_canonical ([rand.req], [rand.eng], [rand.device]). Included by
+// <random>; not standalone.
+#ifndef BOXCXX_BITS_RANDOM_ENGINE
+#define BOXCXX_BITS_RANDOM_ENGINE
+
+#include <cstdint>
+#include <cstddef>
+#include <limits>
+#include <type_traits>
+#include <initializer_list>
+#include <vector>
+#include <string>
+
+#include "box/cpu.h" // cpu_has_rdrand/cpu_rdrand64/cpu_rdtsc — random_device
+
+namespace std {
+
+// ── seed_seq ([rand.util.seedseq]) ───────────────────────────────────────
+class seed_seq {
+public:
+    using result_type = uint_least32_t;
+
+    seed_seq() noexcept = default;
+    template <class T>
+    seed_seq(initializer_list<T> il) : seed_seq(il.begin(), il.end()) {}
+    template <class InputIt> seed_seq(InputIt first, InputIt last)
+    {
+        for (; first != last; ++first)
+            v_.push_back(static_cast<result_type>(static_cast<uint32_t>(*first)));
+    }
+    seed_seq(const seed_seq &)            = delete;
+    seed_seq &operator=(const seed_seq &) = delete;
+
+    template <class RandomIt> void generate(RandomIt begin, RandomIt end) const
+    {
+        if (begin == end) return;
+        for (RandomIt it = begin; it != end; ++it) *it = 0x8b8b8b8bu;
+        const size_t n = static_cast<size_t>(end - begin);
+        const size_t s = v_.size();
+        const size_t t = (n >= 623) ? 11 : (n >= 68) ? 7
+                         : (n >= 39) ? 5 : (n >= 7)  ? 3 : (n - 1) / 2;
+        const size_t p = (n - t) / 2;
+        const size_t q = p + t;
+        const size_t m = (s + 1 > n) ? s + 1 : n;
+        auto T = [](uint32_t x) { return x ^ (x >> 27); };
+        for (size_t k = 0; k < m; ++k) {
+            uint32_t arg = static_cast<uint32_t>(begin[k % n]) ^
+                           static_cast<uint32_t>(begin[(k + p) % n]) ^
+                           static_cast<uint32_t>(begin[(k + n - 1) % n]);
+            uint32_t r1 = 1664525u * T(arg);
+            uint32_t r2 = r1 + static_cast<uint32_t>(
+                              k == 0 ? s
+                              : k <= s ? (k % n) + v_[k - 1]
+                                       : (k % n));
+            begin[(k + p) % n] = static_cast<result_type>(
+                static_cast<uint32_t>(begin[(k + p) % n]) + r1);
+            begin[(k + q) % n] = static_cast<result_type>(
+                static_cast<uint32_t>(begin[(k + q) % n]) + r2);
+            begin[k % n] = static_cast<result_type>(r2);
+        }
+        for (size_t k = m; k < m + n; ++k) {
+            uint32_t arg = static_cast<uint32_t>(begin[k % n]) +
+                           static_cast<uint32_t>(begin[(k + p) % n]) +
+                           static_cast<uint32_t>(begin[(k + n - 1) % n]);
+            uint32_t r3 = 1566083941u * T(arg);
+            uint32_t r4 = r3 - static_cast<uint32_t>(k % n);
+            begin[(k + p) % n] = static_cast<result_type>(
+                static_cast<uint32_t>(begin[(k + p) % n]) ^ r3);
+            begin[(k + q) % n] = static_cast<result_type>(
+                static_cast<uint32_t>(begin[(k + q) % n]) ^ r4);
+            begin[k % n] = static_cast<result_type>(r4);
+        }
+    }
+
+    size_t size() const noexcept { return v_.size(); }
+    template <class OutputIt> void param(OutputIt dest) const
+    {
+        for (auto x : v_) *dest++ = x;
+    }
+
+private:
+    vector<result_type> v_;
+};
+
+namespace __rng {
+
+// w-bit mask for a result type (handles w == digits and w < digits).
+template <class UInt> constexpr UInt wmask(int w)
+{
+    return (w == numeric_limits<UInt>::digits) ? ~UInt(0)
+                                               : ((UInt(1) << w) - UInt(1));
+}
+
+template <class UInt> constexpr int bit_width_of(UInt v)
+{
+    int n = 0;
+    while (v) { ++n; v >>= 1; }
+    return n;
+}
+
+} // namespace __rng
+
+// ── linear_congruential_engine ([rand.eng.lcong]) ────────────────────────
+template <class UIntType, UIntType a, UIntType c, UIntType m>
+class linear_congruential_engine {
+    static_assert(is_unsigned_v<UIntType>, "lcg: UIntType must be unsigned");
+
+public:
+    using result_type = UIntType;
+    static constexpr result_type multiplier   = a;
+    static constexpr result_type increment    = c;
+    static constexpr result_type modulus      = m;
+    static constexpr result_type default_seed = 1u;
+
+    static constexpr result_type min() { return c == 0u ? 1u : 0u; }
+    static constexpr result_type max() { return m - 1u; }
+
+    linear_congruential_engine() : linear_congruential_engine(default_seed) {}
+    explicit linear_congruential_engine(result_type s) { seed(s); }
+    explicit linear_congruential_engine(seed_seq &q) { seed(q); }
+
+    void seed(result_type s = default_seed)
+    {
+        if (m != 0u) s %= m;
+        if (c == 0u && s == 0u) s = 1u;
+        x_ = s;
+    }
+    void seed(seed_seq &q)
+    {
+        // gather ceil(b/32) words, b = bits needed for modulus
+        const int    b = m == 0u ? numeric_limits<UIntType>::digits
+                                 : __rng::bit_width_of(m);
+        const size_t k = static_cast<size_t>((b + 31) / 32);
+        uint_least32_t arr[(numeric_limits<UIntType>::digits + 31) / 32 + 1];
+        q.generate(arr, arr + k);
+        unsigned long long sum = 0, factor = 1;
+        for (size_t i = 0; i < k; ++i) {
+            sum += static_cast<unsigned long long>(arr[i]) * factor;
+            factor *= 0x100000000ull;
+        }
+        result_type s = m != 0u ? static_cast<result_type>(sum % m)
+                                : static_cast<result_type>(sum);
+        if (c == 0u && s == 0u) s = 1u;
+        x_ = s;
+    }
+
+    result_type operator()()
+    {
+        if (m == 0u) {
+            x_ = static_cast<result_type>(a * x_ + c);
+        } else {
+            x_ = static_cast<result_type>(
+                (static_cast<__uint128_t>(a) * x_ + c) % m);
+        }
+        return x_;
+    }
+    void discard(unsigned long long z)
+    {
+        while (z--) (*this)();
+    }
+
+    friend bool operator==(const linear_congruential_engine &l,
+                           const linear_congruential_engine &r)
+    {
+        return l.x_ == r.x_;
+    }
+
+private:
+    result_type x_{};
+};
+
+// ── mersenne_twister_engine ([rand.eng.mers]) ────────────────────────────
+template <class UIntType, size_t w, size_t n, size_t mm, size_t r, UIntType a,
+          size_t u, UIntType d, size_t s, UIntType b, size_t tt, UIntType c,
+          size_t l, UIntType f>
+class mersenne_twister_engine {
+    static_assert(is_unsigned_v<UIntType>, "mt: UIntType must be unsigned");
+
+public:
+    using result_type = UIntType;
+    static constexpr size_t      word_size                 = w;
+    static constexpr size_t      state_size                = n;
+    static constexpr size_t      shift_size                = mm;
+    static constexpr size_t      mask_bits                 = r;
+    static constexpr UIntType    xor_mask                  = a;
+    static constexpr size_t      tempering_u               = u;
+    static constexpr UIntType    tempering_d               = d;
+    static constexpr size_t      tempering_s               = s;
+    static constexpr UIntType    tempering_b               = b;
+    static constexpr size_t      tempering_t               = tt;
+    static constexpr UIntType    tempering_c               = c;
+    static constexpr size_t      tempering_l               = l;
+    static constexpr UIntType    initialization_multiplier = f;
+    static constexpr result_type default_seed              = 5489u;
+
+    static constexpr result_type min() { return 0; }
+    static constexpr result_type max() { return __rng::wmask<UIntType>((int)w); }
+
+    mersenne_twister_engine() : mersenne_twister_engine(default_seed) {}
+    explicit mersenne_twister_engine(result_type value) { seed(value); }
+    explicit mersenne_twister_engine(seed_seq &q) { seed(q); }
+
+    void seed(result_type value = default_seed)
+    {
+        const UIntType wm = __rng::wmask<UIntType>((int)w);
+        x_[0]             = value & wm;
+        for (size_t i = 1; i < n; ++i)
+            x_[i] = (f * (x_[i - 1] ^ (x_[i - 1] >> (w - 2))) + i) & wm;
+        idx_ = n;
+    }
+    void seed(seed_seq &q)
+    {
+        const UIntType wm = __rng::wmask<UIntType>((int)w);
+        const size_t   k  = (w + 31) / 32;
+        vector<uint_least32_t> arr(n * k);
+        q.generate(arr.begin(), arr.end());
+        for (size_t i = 0; i < n; ++i) {
+            UIntType sum = 0, factor = 1;
+            for (size_t j = 0; j < k; ++j) {
+                sum += static_cast<UIntType>(arr[k * i + j]) * factor;
+                factor = static_cast<UIntType>(factor * 0x100000000ull);
+            }
+            x_[i] = sum & wm;
+        }
+        idx_ = n;
+        // Avoid the all-zero absorbing state.
+        const UIntType upper = wm & ~((UIntType(1) << r) - 1);
+        bool           zero  = (x_[0] & upper) == 0;
+        for (size_t i = 1; zero && i < n; ++i)
+            if (x_[i] != 0) zero = false;
+        if (zero) x_[0] = UIntType(1) << (w - 1);
+    }
+
+    result_type operator()()
+    {
+        if (idx_ >= n) twist();
+        UIntType y = x_[idx_++];
+        y ^= (y >> u) & d;
+        y ^= (y << s) & b;
+        y ^= (y << tt) & c;
+        y ^= (y >> l);
+        return y & __rng::wmask<UIntType>((int)w);
+    }
+    void discard(unsigned long long z)
+    {
+        while (z--) (*this)();
+    }
+
+    friend bool operator==(const mersenne_twister_engine &lhs,
+                           const mersenne_twister_engine &rhs)
+    {
+        if (lhs.idx_ != rhs.idx_) return false;
+        for (size_t i = 0; i < n; ++i)
+            if (lhs.x_[i] != rhs.x_[i]) return false;
+        return true;
+    }
+
+private:
+    void twist()
+    {
+        const UIntType wm    = __rng::wmask<UIntType>((int)w);
+        const UIntType lower = (UIntType(1) << r) - 1;
+        const UIntType upper = wm & ~lower;
+        for (size_t k = 0; k < n; ++k) {
+            UIntType y  = (x_[k] & upper) | (x_[(k + 1) % n] & lower);
+            UIntType xv = x_[(k + mm) % n] ^ (y >> 1);
+            if (y & 1) xv ^= a;
+            x_[k] = xv & wm;
+        }
+        idx_ = 0;
+    }
+
+    UIntType x_[n]{};
+    size_t   idx_ = n;
+};
+
+// ── subtract_with_carry_engine ([rand.eng.sub]) ──────────────────────────
+template <class UIntType, size_t w, size_t s, size_t r>
+class subtract_with_carry_engine {
+    static_assert(is_unsigned_v<UIntType>, "swc: UIntType must be unsigned");
+
+public:
+    using result_type = UIntType;
+    static constexpr size_t      word_size    = w;
+    static constexpr size_t      short_lag    = s;
+    static constexpr size_t      long_lag     = r;
+    static constexpr result_type default_seed = 19780503u;
+
+    static constexpr result_type min() { return 0; }
+    static constexpr result_type max() { return __rng::wmask<UIntType>((int)w); }
+
+    subtract_with_carry_engine() : subtract_with_carry_engine(default_seed) {}
+    explicit subtract_with_carry_engine(result_type value) { seed(value); }
+    explicit subtract_with_carry_engine(seed_seq &q) { seed(q); }
+
+    void seed(result_type value = default_seed)
+    {
+        linear_congruential_engine<uint_least32_t, 40014u, 0u, 2147483563u> lcg(
+            value == 0u ? default_seed : value);
+        const UIntType wm = __rng::wmask<UIntType>((int)w);
+        const size_t   k  = (w + 31) / 32;
+        for (size_t i = 0; i < r; ++i) {
+            UIntType sum = 0, factor = 1;
+            for (size_t j = 0; j < k; ++j) {
+                sum += static_cast<UIntType>(lcg()) * factor;
+                factor = static_cast<UIntType>(factor * 0x100000000ull);
+            }
+            x_[i] = sum & wm;
+        }
+        carry_ = (x_[r - 1] == 0) ? 1 : 0;
+        idx_   = r;
+    }
+    void seed(seed_seq &q)
+    {
+        const UIntType wm = __rng::wmask<UIntType>((int)w);
+        const size_t   k  = (w + 31) / 32;
+        vector<uint_least32_t> arr(r * k);
+        q.generate(arr.begin(), arr.end());
+        for (size_t i = 0; i < r; ++i) {
+            UIntType sum = 0, factor = 1;
+            for (size_t j = 0; j < k; ++j) {
+                sum += static_cast<UIntType>(arr[k * i + j]) * factor;
+                factor = static_cast<UIntType>(factor * 0x100000000ull);
+            }
+            x_[i] = sum & wm;
+        }
+        carry_ = (x_[r - 1] == 0) ? 1 : 0;
+        idx_   = r;
+    }
+
+    result_type operator()()
+    {
+        if (idx_ >= r) idx_ = 0;
+        const UIntType wm = __rng::wmask<UIntType>((int)w);
+        size_t         ps = (idx_ < s) ? idx_ + r - s : idx_ - s;
+        long long      xi = static_cast<long long>(x_[ps]) -
+                       static_cast<long long>(x_[idx_]) -
+                       static_cast<long long>(carry_);
+        if (xi < 0) { xi += (static_cast<long long>(wm) + 1); carry_ = 1; }
+        else        { carry_ = 0; }
+        x_[idx_] = static_cast<UIntType>(xi) & wm;
+        return x_[idx_++];
+    }
+    void discard(unsigned long long z)
+    {
+        while (z--) (*this)();
+    }
+
+    friend bool operator==(const subtract_with_carry_engine &l,
+                           const subtract_with_carry_engine &r2)
+    {
+        if (l.idx_ != r2.idx_ || l.carry_ != r2.carry_) return false;
+        for (size_t i = 0; i < r; ++i)
+            if (l.x_[i] != r2.x_[i]) return false;
+        return true;
+    }
+
+private:
+    UIntType x_[r]{};
+    UIntType carry_ = 0;
+    size_t   idx_   = r;
+};
+
+// ── engine adaptors ([rand.adapt]) ───────────────────────────────────────
+template <class Engine, size_t p, size_t r> class discard_block_engine {
+public:
+    using result_type = typename Engine::result_type;
+    static constexpr size_t block_size = p;
+    static constexpr size_t used_block = r;
+
+    static constexpr result_type min() { return Engine::min(); }
+    static constexpr result_type max() { return Engine::max(); }
+
+    discard_block_engine() = default;
+    explicit discard_block_engine(const Engine &e) : e_(e) {}
+    explicit discard_block_engine(result_type s) : e_(s) {}
+    explicit discard_block_engine(seed_seq &q) : e_(q) {}
+
+    void seed() { e_.seed(); n_ = 0; }
+    void seed(result_type s) { e_.seed(s); n_ = 0; }
+    void seed(seed_seq &q) { e_.seed(q); n_ = 0; }
+
+    result_type operator()()
+    {
+        if (n_ >= static_cast<int>(r)) {
+            for (size_t i = r; i < p; ++i) e_();
+            n_ = 0;
+        }
+        ++n_;
+        return e_();
+    }
+    void discard(unsigned long long z) { while (z--) (*this)(); }
+    const Engine &base() const noexcept { return e_; }
+    friend bool   operator==(const discard_block_engine &a,
+                             const discard_block_engine &b)
+    {
+        return a.e_ == b.e_ && a.n_ == b.n_;
+    }
+
+private:
+    Engine e_{};
+    int    n_ = 0;
+};
+
+template <class Engine, size_t w, class UIntType>
+class independent_bits_engine {
+public:
+    using result_type = UIntType;
+    static constexpr result_type min() { return 0; }
+    static constexpr result_type max() { return __rng::wmask<UIntType>((int)w); }
+
+    independent_bits_engine() = default;
+    explicit independent_bits_engine(const Engine &e) : e_(e) {}
+    explicit independent_bits_engine(result_type s) : e_(s) {}
+    explicit independent_bits_engine(seed_seq &q) : e_(q) {}
+
+    void seed() { e_.seed(); }
+    void seed(result_type s) { e_.seed(s); }
+    void seed(seed_seq &q) { e_.seed(q); }
+
+    result_type operator()()
+    {
+        // Assemble w bits from the base engine's range [0, R).
+        using EU = typename Engine::result_type;
+        const EU       r = EU(Engine::max() - Engine::min()) + EU(1);
+        result_type    out = 0;
+        size_t         got = 0;
+        int            ebits = (r == 0) ? numeric_limits<EU>::digits
+                                        : __rng::bit_width_of(EU(r - 1));
+        if (ebits == 0) ebits = 1;
+        while (got < w) {
+            EU          v    = EU(e_() - Engine::min());
+            size_t      take = (w - got < (size_t)ebits) ? (w - got) : (size_t)ebits;
+            result_type chunk = result_type(v) & __rng::wmask<UIntType>((int)take);
+            out |= chunk << got;
+            got += take;
+        }
+        return out & __rng::wmask<UIntType>((int)w);
+    }
+    void discard(unsigned long long z) { while (z--) (*this)(); }
+    const Engine &base() const noexcept { return e_; }
+    friend bool   operator==(const independent_bits_engine &a,
+                             const independent_bits_engine &b)
+    {
+        return a.e_ == b.e_;
+    }
+
+private:
+    Engine e_{};
+};
+
+template <class Engine, size_t k> class shuffle_order_engine {
+public:
+    using result_type = typename Engine::result_type;
+    static constexpr size_t table_size = k;
+
+    static constexpr result_type min() { return Engine::min(); }
+    static constexpr result_type max() { return Engine::max(); }
+
+    shuffle_order_engine() { init(); }
+    explicit shuffle_order_engine(const Engine &e) : e_(e) { init(); }
+    explicit shuffle_order_engine(result_type s) : e_(s) { init(); }
+    explicit shuffle_order_engine(seed_seq &q) : e_(q) { init(); }
+
+    void seed() { e_.seed(); init(); }
+    void seed(result_type s) { e_.seed(s); init(); }
+    void seed(seed_seq &q) { e_.seed(q); init(); }
+
+    result_type operator()()
+    {
+        const result_type rng = Engine::max() - Engine::min() + 1;
+        size_t            j   = k * (static_cast<unsigned long long>(y_ - Engine::min())) / rng;
+        y_                    = v_[j];
+        v_[j]                 = e_();
+        return y_;
+    }
+    void discard(unsigned long long z) { while (z--) (*this)(); }
+    const Engine &base() const noexcept { return e_; }
+    friend bool   operator==(const shuffle_order_engine &a,
+                             const shuffle_order_engine &b)
+    {
+        if (!(a.e_ == b.e_) || a.y_ != b.y_) return false;
+        for (size_t i = 0; i < k; ++i)
+            if (a.v_[i] != b.v_[i]) return false;
+        return true;
+    }
+
+private:
+    void init()
+    {
+        for (size_t i = 0; i < k; ++i) v_[i] = e_();
+        y_ = e_();
+    }
+    Engine      e_{};
+    result_type v_[k]{};
+    result_type y_{};
+};
+
+// ── predefined engines ([rand.predef]) ───────────────────────────────────
+using minstd_rand0 =
+    linear_congruential_engine<uint_fast32_t, 16807u, 0u, 2147483647u>;
+using minstd_rand =
+    linear_congruential_engine<uint_fast32_t, 48271u, 0u, 2147483647u>;
+using mt19937 =
+    mersenne_twister_engine<uint_fast32_t, 32, 624, 397, 31, 0x9908b0dfu, 11,
+                            0xffffffffu, 7, 0x9d2c5680u, 15, 0xefc60000u, 18,
+                            1812433253u>;
+using mt19937_64 = mersenne_twister_engine<
+    uint_fast64_t, 64, 312, 156, 31, 0xb5026f5aa96619e9ull, 29,
+    0x5555555555555555ull, 17, 0x71d67fffeda60000ull, 37,
+    0xfff7eee000000000ull, 43, 6364136223846793005ull>;
+using ranlux24_base = subtract_with_carry_engine<uint_fast32_t, 24, 10, 24>;
+using ranlux48_base = subtract_with_carry_engine<uint_fast64_t, 48, 5, 12>;
+using ranlux24      = discard_block_engine<ranlux24_base, 223, 23>;
+using ranlux48      = discard_block_engine<ranlux48_base, 389, 11>;
+using knuth_b       = shuffle_order_engine<minstd_rand0, 256>;
+using default_random_engine = mt19937;
+
+// ── random_device ([rand.device]) ────────────────────────────────────────
+// On-chip RDRAND when published in cpu_caps; otherwise a TSC-mixed fallback
+// (non-cryptographic — entropy() reports 0 in that mode).
+class random_device {
+public:
+    using result_type = unsigned int;
+
+    static constexpr result_type min() { return 0; }
+    static constexpr result_type max()
+    {
+        return numeric_limits<result_type>::max();
+    }
+
+    random_device() = default;
+    explicit random_device(const string &) {}
+    random_device(const random_device &)            = delete;
+    random_device &operator=(const random_device &) = delete;
+
+    result_type operator()()
+    {
+        uint64_t v;
+        if (cpu_has_rdrand() && cpu_rdrand64(&v))
+            return static_cast<result_type>(v);
+        return tsc_mix();
+    }
+
+    double entropy() const noexcept { return cpu_has_rdrand() ? 32.0 : 0.0; }
+
+private:
+    static result_type tsc_mix()
+    {
+        uint64_t z = cpu_rdtsc();
+        z ^= z >> 30;
+        z *= 0xbf58476d1ce4e5b9ull;
+        z ^= z >> 27;
+        z *= 0x94d049bb133111ebull;
+        z ^= z >> 31;
+        return static_cast<result_type>(z);
+    }
+};
+
+// ── generate_canonical ([rand.util.canonical]) ──────────────────────────
+template <class RealType, size_t bits, class G>
+RealType generate_canonical(G &g)
+{
+    const size_t digits = static_cast<size_t>(numeric_limits<RealType>::digits);
+    const size_t B      = bits < digits ? bits : digits;
+    const long double R =
+        static_cast<long double>(g.max()) - static_cast<long double>(g.min()) + 1.0L;
+    long double twoB = 1.0L;
+    for (size_t i = 0; i < B; ++i) twoB *= 2.0L;
+    size_t      kk = 0;
+    long double Rk = 1.0L;
+    while (Rk < twoB) { Rk *= R; ++kk; }
+    if (kk == 0) kk = 1;
+    long double sum = 0.0L, factor = 1.0L;
+    for (size_t i = 0; i < kk; ++i) {
+        sum += (static_cast<long double>(g()) - static_cast<long double>(g.min())) *
+               factor;
+        factor *= R;
+    }
+    RealType result = static_cast<RealType>(sum / factor);
+    if (result >= RealType(1)) // clamp to the largest value < 1 (== nextafter(1,0))
+        result = RealType(1) - numeric_limits<RealType>::epsilon() / RealType(2);
+    return result;
+}
+
+} // namespace std
+
+#endif // BOXCXX_BITS_RANDOM_ENGINE

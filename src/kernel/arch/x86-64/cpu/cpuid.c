@@ -69,6 +69,8 @@ void cpu_detect_features(void) {
         // silicon leaves it 0. Used by hypervisor_detect() to decide whether
         // to probe leaf 0x40000000.
         g_cpu_caps.has_hypervisor = (ecx & (1u << 31)) != 0;
+        // ECX[30] RDRAND — Intel SDM Vol 2A (on-chip hardware RNG).
+        g_cpu_caps.has_rdrand = (ecx & (1u << 30)) != 0;
     }
 
     // Check structured extended features (CPUID.7.0). Intel SDM Vol 2A.
@@ -78,6 +80,8 @@ void cpu_detect_features(void) {
         g_cpu_caps.has_avx512   = (ebx & (1 << 16)) != 0;
         // EBX[0]  FSGSBASE   — Intel SDM Vol 3A §2.5 (CR4.FSGSBASE).
         g_cpu_caps.has_fsgsbase = (ebx & (1 << 0))  != 0;
+        // EBX[18] RDSEED     — Intel SDM Vol 2A (on-chip seed RNG).
+        g_cpu_caps.has_rdseed   = (ebx & (1 << 18)) != 0;
         g_cpu_caps.has_smep     = (ebx & (1 << 7))  != 0;
         // EBX[10] INVPCID    — Intel SDM Vol 3A §4.10.4.1.
         g_cpu_caps.has_invpcid  = (ebx & (1 << 10)) != 0;
@@ -481,6 +485,7 @@ void cpu_intersect_features_ap(void) {
          * one AP somehow ends up directly on bare silicon (impossible
          * under any sane hypervisor scheduler, but cheap). */
         g_cpu_caps.has_hypervisor &= ((ecx & (1u << 31)) != 0);
+        g_cpu_caps.has_rdrand  &= ((ecx & (1u << 30)) != 0);
     }
 
     if (g_cpu_caps.max_basic_leaf >= CPUID_LEAF_EXT_FEATURES) {
@@ -488,6 +493,7 @@ void cpu_intersect_features_ap(void) {
         g_cpu_caps.has_waitpkg  &= ((ecx & (1 << 5))  != 0);
         g_cpu_caps.has_avx512   &= ((ebx & (1 << 16)) != 0);
         g_cpu_caps.has_fsgsbase &= ((ebx & (1 << 0))  != 0);
+        g_cpu_caps.has_rdseed   &= ((ebx & (1 << 18)) != 0);
         g_cpu_caps.has_smep     &= ((ebx & (1 << 7))  != 0);
         g_cpu_caps.has_invpcid  &= ((ebx & (1 << 10)) != 0);
         g_cpu_caps.has_smap     &= ((ebx & (1 << 20)) != 0);

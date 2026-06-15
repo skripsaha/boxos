@@ -1,0 +1,1203 @@
+// __bits/random_dist — random number distributions ([rand.dist]).
+// Included by <random>; not standalone. Algorithms are correct textbook
+// methods (sequences are implementation-defined, not cross-impl-reproducible);
+// validated statistically. Stream insert/extract operators are omitted (no
+// <iostream> in BoxOS).
+#ifndef BOXCXX_BITS_RANDOM_DIST
+#define BOXCXX_BITS_RANDOM_DIST
+
+#include <__bits/random_engine>
+#include <cstdint>
+#include <limits>
+#include <type_traits>
+#include <initializer_list>
+#include <vector>
+#include <cmath>
+
+namespace std {
+namespace __rng {
+
+inline constexpr double kPi = 3.14159265358979311600;
+
+template <class G> inline double canon(G &g)
+{
+    return generate_canonical<double, numeric_limits<double>::digits>(g);
+}
+
+// Uniform value in [0, range] (inclusive) from any engine, unbiased.
+template <class G>
+inline unsigned long long bounded(G &g, unsigned long long range)
+{
+    using UR             = unsigned long long;
+    if (range == 0) return 0;
+    const UR gmin  = static_cast<UR>(g.min());
+    const UR gspan = static_cast<UR>(g.max()) - gmin; // engine span
+    if (gspan >= range) {
+        if (gspan == range) return static_cast<UR>(g()) - gmin;
+        const UR n       = range + 1; // range < gspan ≤ max ⇒ no overflow
+        const UR scaling = gspan / n;
+        const UR limit   = n * scaling;
+        UR       a;
+        do { a = static_cast<UR>(g()) - gmin; } while (a >= limit);
+        return a / scaling;
+    }
+    // gspan < range: assemble a wide value by base-(gspan+1) Horner + reject.
+    const UR    m = gspan + 1;
+    __uint128_t modulus = static_cast<__uint128_t>(range) + 1;
+    for (;;) {
+        __uint128_t prod = 1, acc = 0;
+        while (prod <= static_cast<__uint128_t>(range)) {
+            acc = acc * m + (static_cast<UR>(g()) - gmin);
+            prod *= m;
+        }
+        __uint128_t lim = prod - (prod % modulus);
+        if (acc < lim) return static_cast<UR>(acc % modulus);
+    }
+}
+
+template <class G> inline double normal01(G &g)
+{
+    double u1;
+    do { u1 = canon(g); } while (u1 <= 0.0);
+    double u2 = canon(g);
+    return std::sqrt(-2.0 * std::log(u1)) * std::cos(2.0 * kPi * u2);
+}
+
+template <class G> inline double gamma(G &g, double a, double b)
+{
+    if (a < 1.0) {
+        double u = canon(g);
+        return gamma(g, a + 1.0, b) * std::pow(u, 1.0 / a);
+    }
+    const double d = a - 1.0 / 3.0;
+    const double c = 1.0 / std::sqrt(9.0 * d);
+    for (;;) {
+        double x, v;
+        do { x = normal01(g); v = 1.0 + c * x; } while (v <= 0.0);
+        v        = v * v * v;
+        double u = canon(g);
+        if (u < 1.0 - 0.0331 * x * x * x * x) return d * v * b;
+        if (std::log(u) < 0.5 * x * x + d * (1.0 - v + std::log(v)))
+            return d * v * b;
+    }
+}
+
+} // namespace __rng
+
+// ── uniform_int_distribution ([rand.dist.uni.int]) ───────────────────────
+template <class IntType = int> class uniform_int_distribution {
+    static_assert(is_integral_v<IntType>, "uniform_int: integral required");
+
+public:
+    using result_type = IntType;
+    struct param_type {
+        using distribution_type = uniform_int_distribution;
+        explicit param_type(IntType aa = 0,
+                            IntType bb = numeric_limits<IntType>::max())
+            : a_(aa), b_(bb) {}
+        IntType a() const { return a_; }
+        IntType b() const { return b_; }
+        friend bool operator==(const param_type &x, const param_type &y)
+        {
+            return x.a_ == y.a_ && x.b_ == y.b_;
+        }
+        IntType a_, b_;
+    };
+
+    uniform_int_distribution() : uniform_int_distribution(0) {}
+    explicit uniform_int_distribution(
+        IntType a, IntType b = numeric_limits<IntType>::max())
+        : p_(a, b) {}
+    explicit uniform_int_distribution(const param_type &p) : p_(p) {}
+
+    void       reset() {}
+    result_type a() const { return p_.a(); }
+    result_type b() const { return p_.b(); }
+    param_type param() const { return p_; }
+    void       param(const param_type &p) { p_ = p; }
+    result_type min() const { return p_.a(); }
+    result_type max() const { return p_.b(); }
+
+    template <class G> result_type operator()(G &g) { return (*this)(g, p_); }
+    template <class G> result_type operator()(G &g, const param_type &p)
+    {
+        using UR = unsigned long long;
+        UR range = static_cast<UR>(p.b()) - static_cast<UR>(p.a());
+        return static_cast<result_type>(static_cast<UR>(p.a()) +
+                                        __rng::bounded(g, range));
+    }
+    friend bool operator==(const uniform_int_distribution &x,
+                           const uniform_int_distribution &y)
+    {
+        return x.p_ == y.p_;
+    }
+
+private:
+    param_type p_;
+};
+
+// ── uniform_real_distribution ([rand.dist.uni.real]) ─────────────────────
+template <class RealType = double> class uniform_real_distribution {
+public:
+    using result_type = RealType;
+    struct param_type {
+        using distribution_type = uniform_real_distribution;
+        explicit param_type(RealType aa = 0, RealType bb = 1) : a_(aa), b_(bb) {}
+        RealType a() const { return a_; }
+        RealType b() const { return b_; }
+        friend bool operator==(const param_type &x, const param_type &y)
+        {
+            return x.a_ == y.a_ && x.b_ == y.b_;
+        }
+        RealType a_, b_;
+    };
+
+    uniform_real_distribution() : uniform_real_distribution(0) {}
+    explicit uniform_real_distribution(RealType a, RealType b = 1) : p_(a, b) {}
+    explicit uniform_real_distribution(const param_type &p) : p_(p) {}
+
+    void        reset() {}
+    result_type a() const { return p_.a(); }
+    result_type b() const { return p_.b(); }
+    param_type  param() const { return p_; }
+    void        param(const param_type &p) { p_ = p; }
+    result_type min() const { return p_.a(); }
+    result_type max() const { return p_.b(); }
+
+    template <class G> result_type operator()(G &g) { return (*this)(g, p_); }
+    template <class G> result_type operator()(G &g, const param_type &p)
+    {
+        return p.a() + (p.b() - p.a()) *
+                           static_cast<result_type>(
+                               generate_canonical<result_type,
+                                                  numeric_limits<result_type>::digits>(g));
+    }
+    friend bool operator==(const uniform_real_distribution &x,
+                           const uniform_real_distribution &y)
+    {
+        return x.p_ == y.p_;
+    }
+
+private:
+    param_type p_;
+};
+
+// ── bernoulli_distribution ([rand.dist.bern.bernoulli]) ──────────────────
+class bernoulli_distribution {
+public:
+    using result_type = bool;
+    struct param_type {
+        using distribution_type = bernoulli_distribution;
+        explicit param_type(double pp = 0.5) : p_(pp) {}
+        double      p() const { return p_; }
+        friend bool operator==(const param_type &x, const param_type &y)
+        {
+            return x.p_ == y.p_;
+        }
+        double p_;
+    };
+
+    bernoulli_distribution() : bernoulli_distribution(0.5) {}
+    explicit bernoulli_distribution(double p) : p_(p) {}
+    explicit bernoulli_distribution(const param_type &p) : p_(p) {}
+
+    void        reset() {}
+    double      p() const { return p_.p(); }
+    param_type  param() const { return p_; }
+    void        param(const param_type &p) { p_ = p; }
+    result_type min() const { return false; }
+    result_type max() const { return true; }
+
+    template <class G> result_type operator()(G &g) { return (*this)(g, p_); }
+    template <class G> result_type operator()(G &g, const param_type &p)
+    {
+        return __rng::canon(g) < p.p();
+    }
+    friend bool operator==(const bernoulli_distribution &x,
+                           const bernoulli_distribution &y)
+    {
+        return x.p_ == y.p_;
+    }
+
+private:
+    param_type p_;
+};
+
+// ── geometric_distribution ([rand.dist.bern.geo]) ────────────────────────
+template <class IntType = int> class geometric_distribution {
+public:
+    using result_type = IntType;
+    struct param_type {
+        using distribution_type = geometric_distribution;
+        explicit param_type(double pp = 0.5) : p_(pp) {}
+        double      p() const { return p_; }
+        friend bool operator==(const param_type &x, const param_type &y)
+        {
+            return x.p_ == y.p_;
+        }
+        double p_;
+    };
+
+    geometric_distribution() : geometric_distribution(0.5) {}
+    explicit geometric_distribution(double p) : p_(p) {}
+    explicit geometric_distribution(const param_type &p) : p_(p) {}
+
+    void        reset() {}
+    double      p() const { return p_.p(); }
+    param_type  param() const { return p_; }
+    void        param(const param_type &p) { p_ = p; }
+    result_type min() const { return 0; }
+    result_type max() const { return numeric_limits<result_type>::max(); }
+
+    template <class G> result_type operator()(G &g) { return (*this)(g, p_); }
+    template <class G> result_type operator()(G &g, const param_type &p)
+    {
+        if (p.p() >= 1.0) return 0;
+        double u = 1.0 - __rng::canon(g);
+        return static_cast<result_type>(std::floor(std::log(u) /
+                                                   std::log(1.0 - p.p())));
+    }
+    friend bool operator==(const geometric_distribution &x,
+                           const geometric_distribution &y)
+    {
+        return x.p_ == y.p_;
+    }
+
+private:
+    param_type p_;
+};
+
+// ── poisson_distribution ([rand.dist.pois.poisson]) ──────────────────────
+template <class IntType = int> class poisson_distribution {
+public:
+    using result_type = IntType;
+    struct param_type {
+        using distribution_type = poisson_distribution;
+        explicit param_type(double m = 1.0) : mean_(m) {}
+        double      mean() const { return mean_; }
+        friend bool operator==(const param_type &x, const param_type &y)
+        {
+            return x.mean_ == y.mean_;
+        }
+        double mean_;
+    };
+
+    poisson_distribution() : poisson_distribution(1.0) {}
+    explicit poisson_distribution(double mean) : p_(mean) {}
+    explicit poisson_distribution(const param_type &p) : p_(p) {}
+
+    void        reset() {}
+    double      mean() const { return p_.mean(); }
+    param_type  param() const { return p_; }
+    void        param(const param_type &p) { p_ = p; }
+    result_type min() const { return 0; }
+    result_type max() const { return numeric_limits<result_type>::max(); }
+
+    template <class G> result_type operator()(G &g) { return (*this)(g, p_); }
+    template <class G> result_type operator()(G &g, const param_type &p)
+    {
+        const double lambda = p.mean();
+        if (lambda < 12.0) { // Knuth
+            const double L = std::exp(-lambda);
+            int          k = 0;
+            double       pp = 1.0;
+            do { ++k; pp *= __rng::canon(g); } while (pp > L);
+            return static_cast<result_type>(k - 1);
+        }
+        // Hörmann PTRS transformed rejection (λ ≥ 12).
+        const double b         = 0.931 + 2.53 * std::sqrt(lambda);
+        const double a         = -0.059 + 0.02483 * b;
+        const double inv_alpha = 1.1239 + 1.1328 / (b - 3.4);
+        const double vr        = 0.9277 - 3.6224 / (b - 2.0);
+        for (;;) {
+            double u  = __rng::canon(g) - 0.5;
+            double v  = __rng::canon(g);
+            double us = 0.5 - std::fabs(u);
+            double k  = std::floor((2.0 * a / us + b) * u + lambda + 0.43);
+            if (us >= 0.07 && v <= vr) return static_cast<result_type>(k);
+            if (k < 0.0 || (us < 0.013 && v > us)) continue;
+            if (std::log(v) + std::log(inv_alpha) - std::log(a / (us * us) + b) <=
+                -lambda + k * std::log(lambda) - std::lgamma(k + 1.0))
+                return static_cast<result_type>(k);
+        }
+    }
+    friend bool operator==(const poisson_distribution &x,
+                           const poisson_distribution &y)
+    {
+        return x.p_ == y.p_;
+    }
+
+private:
+    param_type p_;
+};
+
+// ── binomial_distribution ([rand.dist.bern.bin]) ─────────────────────────
+template <class IntType = int> class binomial_distribution {
+public:
+    using result_type = IntType;
+    struct param_type {
+        using distribution_type = binomial_distribution;
+        explicit param_type(IntType tt = 1, double pp = 0.5) : t_(tt), p_(pp) {}
+        IntType     t() const { return t_; }
+        double      p() const { return p_; }
+        friend bool operator==(const param_type &x, const param_type &y)
+        {
+            return x.t_ == y.t_ && x.p_ == y.p_;
+        }
+        IntType t_;
+        double  p_;
+    };
+
+    binomial_distribution() : binomial_distribution(1) {}
+    explicit binomial_distribution(IntType t, double p = 0.5) : p_(t, p) {}
+    explicit binomial_distribution(const param_type &p) : p_(p) {}
+
+    void        reset() {}
+    IntType     t() const { return p_.t(); }
+    double      p() const { return p_.p(); }
+    param_type  param() const { return p_; }
+    void        param(const param_type &p) { p_ = p; }
+    result_type min() const { return 0; }
+    result_type max() const { return p_.t(); }
+
+    template <class G> result_type operator()(G &g) { return (*this)(g, p_); }
+    template <class G> result_type operator()(G &g, const param_type &par)
+    {
+        const IntType t = par.t();
+        double        p = par.p();
+        if (t <= 0 || p <= 0.0) return 0;
+        if (p >= 1.0) return t;
+        const bool   flip = p > 0.5;
+        const double pp   = flip ? 1.0 - p : p;
+        IntType      x;
+        if (static_cast<double>(t) * pp < 30.0) { // BINV inversion
+            const double q = 1.0 - pp;
+            const double s = pp / q;
+            const double aa = (t + 1) * s;
+            double       r  = std::pow(q, static_cast<double>(t));
+            double       u  = __rng::canon(g);
+            x               = 0;
+            while (u > r && x < t) {
+                u -= r;
+                ++x;
+                r *= (aa / x - s);
+            }
+        } else { // count Bernoulli trials (correct; O(t))
+            x = 0;
+            for (IntType i = 0; i < t; ++i)
+                if (__rng::canon(g) < pp) ++x;
+        }
+        return flip ? t - x : x;
+    }
+    friend bool operator==(const binomial_distribution &x,
+                           const binomial_distribution &y)
+    {
+        return x.p_ == y.p_;
+    }
+
+private:
+    param_type p_;
+};
+
+// ── negative_binomial_distribution ([rand.dist.bern.negbin]) ─────────────
+template <class IntType = int> class negative_binomial_distribution {
+public:
+    using result_type = IntType;
+    struct param_type {
+        using distribution_type = negative_binomial_distribution;
+        explicit param_type(IntType kk = 1, double pp = 0.5) : k_(kk), p_(pp) {}
+        IntType     k() const { return k_; }
+        double      p() const { return p_; }
+        friend bool operator==(const param_type &x, const param_type &y)
+        {
+            return x.k_ == y.k_ && x.p_ == y.p_;
+        }
+        IntType k_;
+        double  p_;
+    };
+
+    negative_binomial_distribution() : negative_binomial_distribution(1) {}
+    explicit negative_binomial_distribution(IntType k, double p = 0.5)
+        : p_(k, p) {}
+    explicit negative_binomial_distribution(const param_type &p) : p_(p) {}
+
+    void        reset() {}
+    IntType     k() const { return p_.k(); }
+    double      p() const { return p_.p(); }
+    param_type  param() const { return p_; }
+    void        param(const param_type &p) { p_ = p; }
+    result_type min() const { return 0; }
+    result_type max() const { return numeric_limits<result_type>::max(); }
+
+    template <class G> result_type operator()(G &g) { return (*this)(g, p_); }
+    template <class G> result_type operator()(G &g, const param_type &par)
+    {
+        // Gamma–Poisson mixture (Pólya): λ ~ Γ(k, (1-p)/p), then Poisson(λ).
+        double               lambda = __rng::gamma(g, static_cast<double>(par.k()),
+                                     (1.0 - par.p()) / par.p());
+        poisson_distribution<IntType> pois(lambda);
+        return pois(g);
+    }
+    friend bool operator==(const negative_binomial_distribution &x,
+                           const negative_binomial_distribution &y)
+    {
+        return x.p_ == y.p_;
+    }
+
+private:
+    param_type p_;
+};
+
+// ── exponential_distribution ([rand.dist.pois.exp]) ──────────────────────
+template <class RealType = double> class exponential_distribution {
+public:
+    using result_type = RealType;
+    struct param_type {
+        using distribution_type = exponential_distribution;
+        explicit param_type(RealType l = 1) : lambda_(l) {}
+        RealType    lambda() const { return lambda_; }
+        friend bool operator==(const param_type &x, const param_type &y)
+        {
+            return x.lambda_ == y.lambda_;
+        }
+        RealType lambda_;
+    };
+
+    exponential_distribution() : exponential_distribution(1) {}
+    explicit exponential_distribution(RealType l) : p_(l) {}
+    explicit exponential_distribution(const param_type &p) : p_(p) {}
+
+    void        reset() {}
+    RealType    lambda() const { return p_.lambda(); }
+    param_type  param() const { return p_; }
+    void        param(const param_type &p) { p_ = p; }
+    result_type min() const { return 0; }
+    result_type max() const { return numeric_limits<result_type>::max(); }
+
+    template <class G> result_type operator()(G &g) { return (*this)(g, p_); }
+    template <class G> result_type operator()(G &g, const param_type &p)
+    {
+        return static_cast<result_type>(-std::log(1.0 - __rng::canon(g)) /
+                                        p.lambda());
+    }
+    friend bool operator==(const exponential_distribution &x,
+                           const exponential_distribution &y)
+    {
+        return x.p_ == y.p_;
+    }
+
+private:
+    param_type p_;
+};
+
+// ── gamma_distribution ([rand.dist.pois.gamma]) ──────────────────────────
+template <class RealType = double> class gamma_distribution {
+public:
+    using result_type = RealType;
+    struct param_type {
+        using distribution_type = gamma_distribution;
+        explicit param_type(RealType a = 1, RealType b = 1) : alpha_(a), beta_(b) {}
+        RealType    alpha() const { return alpha_; }
+        RealType    beta() const { return beta_; }
+        friend bool operator==(const param_type &x, const param_type &y)
+        {
+            return x.alpha_ == y.alpha_ && x.beta_ == y.beta_;
+        }
+        RealType alpha_, beta_;
+    };
+
+    gamma_distribution() : gamma_distribution(1) {}
+    explicit gamma_distribution(RealType a, RealType b = 1) : p_(a, b) {}
+    explicit gamma_distribution(const param_type &p) : p_(p) {}
+
+    void        reset() {}
+    RealType    alpha() const { return p_.alpha(); }
+    RealType    beta() const { return p_.beta(); }
+    param_type  param() const { return p_; }
+    void        param(const param_type &p) { p_ = p; }
+    result_type min() const { return 0; }
+    result_type max() const { return numeric_limits<result_type>::max(); }
+
+    template <class G> result_type operator()(G &g) { return (*this)(g, p_); }
+    template <class G> result_type operator()(G &g, const param_type &p)
+    {
+        return static_cast<result_type>(
+            __rng::gamma(g, static_cast<double>(p.alpha()),
+                         static_cast<double>(p.beta())));
+    }
+    friend bool operator==(const gamma_distribution &x,
+                           const gamma_distribution &y)
+    {
+        return x.p_ == y.p_;
+    }
+
+private:
+    param_type p_;
+};
+
+// ── weibull_distribution ([rand.dist.pois.weibull]) ──────────────────────
+template <class RealType = double> class weibull_distribution {
+public:
+    using result_type = RealType;
+    struct param_type {
+        using distribution_type = weibull_distribution;
+        explicit param_type(RealType a = 1, RealType b = 1) : a_(a), b_(b) {}
+        RealType    a() const { return a_; }
+        RealType    b() const { return b_; }
+        friend bool operator==(const param_type &x, const param_type &y)
+        {
+            return x.a_ == y.a_ && x.b_ == y.b_;
+        }
+        RealType a_, b_;
+    };
+
+    weibull_distribution() : weibull_distribution(1) {}
+    explicit weibull_distribution(RealType a, RealType b = 1) : p_(a, b) {}
+    explicit weibull_distribution(const param_type &p) : p_(p) {}
+
+    void        reset() {}
+    RealType    a() const { return p_.a(); }
+    RealType    b() const { return p_.b(); }
+    param_type  param() const { return p_; }
+    void        param(const param_type &p) { p_ = p; }
+    result_type min() const { return 0; }
+    result_type max() const { return numeric_limits<result_type>::max(); }
+
+    template <class G> result_type operator()(G &g) { return (*this)(g, p_); }
+    template <class G> result_type operator()(G &g, const param_type &p)
+    {
+        return static_cast<result_type>(
+            p.b() * std::pow(-std::log(1.0 - __rng::canon(g)), 1.0 / p.a()));
+    }
+    friend bool operator==(const weibull_distribution &x,
+                           const weibull_distribution &y)
+    {
+        return x.p_ == y.p_;
+    }
+
+private:
+    param_type p_;
+};
+
+// ── extreme_value_distribution ([rand.dist.pois.extreme]) ────────────────
+template <class RealType = double> class extreme_value_distribution {
+public:
+    using result_type = RealType;
+    struct param_type {
+        using distribution_type = extreme_value_distribution;
+        explicit param_type(RealType a = 0, RealType b = 1) : a_(a), b_(b) {}
+        RealType    a() const { return a_; }
+        RealType    b() const { return b_; }
+        friend bool operator==(const param_type &x, const param_type &y)
+        {
+            return x.a_ == y.a_ && x.b_ == y.b_;
+        }
+        RealType a_, b_;
+    };
+
+    extreme_value_distribution() : extreme_value_distribution(0) {}
+    explicit extreme_value_distribution(RealType a, RealType b = 1) : p_(a, b) {}
+    explicit extreme_value_distribution(const param_type &p) : p_(p) {}
+
+    void        reset() {}
+    RealType    a() const { return p_.a(); }
+    RealType    b() const { return p_.b(); }
+    param_type  param() const { return p_; }
+    void        param(const param_type &p) { p_ = p; }
+    result_type min() const { return -numeric_limits<result_type>::max(); }
+    result_type max() const { return numeric_limits<result_type>::max(); }
+
+    template <class G> result_type operator()(G &g) { return (*this)(g, p_); }
+    template <class G> result_type operator()(G &g, const param_type &p)
+    {
+        double u;
+        do { u = __rng::canon(g); } while (u <= 0.0);
+        return static_cast<result_type>(p.a() - p.b() * std::log(-std::log(u)));
+    }
+    friend bool operator==(const extreme_value_distribution &x,
+                           const extreme_value_distribution &y)
+    {
+        return x.p_ == y.p_;
+    }
+
+private:
+    param_type p_;
+};
+
+// ── normal_distribution ([rand.dist.norm.normal]) ────────────────────────
+template <class RealType = double> class normal_distribution {
+public:
+    using result_type = RealType;
+    struct param_type {
+        using distribution_type = normal_distribution;
+        explicit param_type(RealType m = 0, RealType s = 1) : mean_(m), stddev_(s) {}
+        RealType    mean() const { return mean_; }
+        RealType    stddev() const { return stddev_; }
+        friend bool operator==(const param_type &x, const param_type &y)
+        {
+            return x.mean_ == y.mean_ && x.stddev_ == y.stddev_;
+        }
+        RealType mean_, stddev_;
+    };
+
+    normal_distribution() : normal_distribution(0) {}
+    explicit normal_distribution(RealType m, RealType s = 1) : p_(m, s) {}
+    explicit normal_distribution(const param_type &p) : p_(p) {}
+
+    void        reset() { has_saved_ = false; }
+    RealType    mean() const { return p_.mean(); }
+    RealType    stddev() const { return p_.stddev(); }
+    param_type  param() const { return p_; }
+    void        param(const param_type &p) { p_ = p; }
+    result_type min() const { return -numeric_limits<result_type>::max(); }
+    result_type max() const { return numeric_limits<result_type>::max(); }
+
+    template <class G> result_type operator()(G &g) { return (*this)(g, p_); }
+    template <class G> result_type operator()(G &g, const param_type &p)
+    {
+        if (has_saved_) {
+            has_saved_ = false;
+            return static_cast<result_type>(saved_ * p.stddev() + p.mean());
+        }
+        double u, v, s;
+        do {
+            u = 2.0 * __rng::canon(g) - 1.0;
+            v = 2.0 * __rng::canon(g) - 1.0;
+            s = u * u + v * v;
+        } while (s >= 1.0 || s == 0.0);
+        double mul = std::sqrt(-2.0 * std::log(s) / s);
+        saved_     = v * mul;
+        has_saved_ = true;
+        return static_cast<result_type>(u * mul * p.stddev() + p.mean());
+    }
+    friend bool operator==(const normal_distribution &x,
+                           const normal_distribution &y)
+    {
+        return x.p_ == y.p_ && x.has_saved_ == y.has_saved_ &&
+               (!x.has_saved_ || x.saved_ == y.saved_);
+    }
+
+private:
+    param_type p_;
+    double     saved_     = 0.0;
+    bool       has_saved_ = false;
+};
+
+// ── lognormal_distribution ([rand.dist.norm.lognormal]) ──────────────────
+template <class RealType = double> class lognormal_distribution {
+public:
+    using result_type = RealType;
+    struct param_type {
+        using distribution_type = lognormal_distribution;
+        explicit param_type(RealType m = 0, RealType s = 1) : m_(m), s_(s) {}
+        RealType    m() const { return m_; }
+        RealType    s() const { return s_; }
+        friend bool operator==(const param_type &x, const param_type &y)
+        {
+            return x.m_ == y.m_ && x.s_ == y.s_;
+        }
+        RealType m_, s_;
+    };
+
+    lognormal_distribution() : lognormal_distribution(0) {}
+    explicit lognormal_distribution(RealType m, RealType s = 1) : p_(m, s), nd_() {}
+    explicit lognormal_distribution(const param_type &p) : p_(p), nd_() {}
+
+    void        reset() { nd_.reset(); }
+    RealType    m() const { return p_.m(); }
+    RealType    s() const { return p_.s(); }
+    param_type  param() const { return p_; }
+    void        param(const param_type &p) { p_ = p; }
+    result_type min() const { return 0; }
+    result_type max() const { return numeric_limits<result_type>::max(); }
+
+    template <class G> result_type operator()(G &g) { return (*this)(g, p_); }
+    template <class G> result_type operator()(G &g, const param_type &p)
+    {
+        typename normal_distribution<RealType>::param_type np(p.m(), p.s());
+        return static_cast<result_type>(std::exp(nd_(g, np)));
+    }
+    friend bool operator==(const lognormal_distribution &x,
+                           const lognormal_distribution &y)
+    {
+        return x.p_ == y.p_ && x.nd_ == y.nd_;
+    }
+
+private:
+    param_type                   p_;
+    normal_distribution<RealType> nd_;
+};
+
+// ── chi_squared_distribution ([rand.dist.norm.chisq]) ────────────────────
+template <class RealType = double> class chi_squared_distribution {
+public:
+    using result_type = RealType;
+    struct param_type {
+        using distribution_type = chi_squared_distribution;
+        explicit param_type(RealType n = 1) : n_(n) {}
+        RealType    n() const { return n_; }
+        friend bool operator==(const param_type &x, const param_type &y)
+        {
+            return x.n_ == y.n_;
+        }
+        RealType n_;
+    };
+
+    chi_squared_distribution() : chi_squared_distribution(1) {}
+    explicit chi_squared_distribution(RealType n) : p_(n) {}
+    explicit chi_squared_distribution(const param_type &p) : p_(p) {}
+
+    void        reset() {}
+    RealType    n() const { return p_.n(); }
+    param_type  param() const { return p_; }
+    void        param(const param_type &p) { p_ = p; }
+    result_type min() const { return 0; }
+    result_type max() const { return numeric_limits<result_type>::max(); }
+
+    template <class G> result_type operator()(G &g) { return (*this)(g, p_); }
+    template <class G> result_type operator()(G &g, const param_type &p)
+    {
+        return static_cast<result_type>(
+            __rng::gamma(g, static_cast<double>(p.n()) / 2.0, 2.0));
+    }
+    friend bool operator==(const chi_squared_distribution &x,
+                           const chi_squared_distribution &y)
+    {
+        return x.p_ == y.p_;
+    }
+
+private:
+    param_type p_;
+};
+
+// ── cauchy_distribution ([rand.dist.norm.cauchy]) ────────────────────────
+template <class RealType = double> class cauchy_distribution {
+public:
+    using result_type = RealType;
+    struct param_type {
+        using distribution_type = cauchy_distribution;
+        explicit param_type(RealType a = 0, RealType b = 1) : a_(a), b_(b) {}
+        RealType    a() const { return a_; }
+        RealType    b() const { return b_; }
+        friend bool operator==(const param_type &x, const param_type &y)
+        {
+            return x.a_ == y.a_ && x.b_ == y.b_;
+        }
+        RealType a_, b_;
+    };
+
+    cauchy_distribution() : cauchy_distribution(0) {}
+    explicit cauchy_distribution(RealType a, RealType b = 1) : p_(a, b) {}
+    explicit cauchy_distribution(const param_type &p) : p_(p) {}
+
+    void        reset() {}
+    RealType    a() const { return p_.a(); }
+    RealType    b() const { return p_.b(); }
+    param_type  param() const { return p_; }
+    void        param(const param_type &p) { p_ = p; }
+    result_type min() const { return -numeric_limits<result_type>::max(); }
+    result_type max() const { return numeric_limits<result_type>::max(); }
+
+    template <class G> result_type operator()(G &g) { return (*this)(g, p_); }
+    template <class G> result_type operator()(G &g, const param_type &p)
+    {
+        double u = __rng::canon(g);
+        return static_cast<result_type>(p.a() +
+                                        p.b() * std::tan(__rng::kPi * (u - 0.5)));
+    }
+    friend bool operator==(const cauchy_distribution &x,
+                           const cauchy_distribution &y)
+    {
+        return x.p_ == y.p_;
+    }
+
+private:
+    param_type p_;
+};
+
+// ── fisher_f_distribution ([rand.dist.norm.f]) ───────────────────────────
+template <class RealType = double> class fisher_f_distribution {
+public:
+    using result_type = RealType;
+    struct param_type {
+        using distribution_type = fisher_f_distribution;
+        explicit param_type(RealType m = 1, RealType n = 1) : m_(m), n_(n) {}
+        RealType    m() const { return m_; }
+        RealType    n() const { return n_; }
+        friend bool operator==(const param_type &x, const param_type &y)
+        {
+            return x.m_ == y.m_ && x.n_ == y.n_;
+        }
+        RealType m_, n_;
+    };
+
+    fisher_f_distribution() : fisher_f_distribution(1) {}
+    explicit fisher_f_distribution(RealType m, RealType n = 1) : p_(m, n) {}
+    explicit fisher_f_distribution(const param_type &p) : p_(p) {}
+
+    void        reset() {}
+    RealType    m() const { return p_.m(); }
+    RealType    n() const { return p_.n(); }
+    param_type  param() const { return p_; }
+    void        param(const param_type &p) { p_ = p; }
+    result_type min() const { return 0; }
+    result_type max() const { return numeric_limits<result_type>::max(); }
+
+    template <class G> result_type operator()(G &g) { return (*this)(g, p_); }
+    template <class G> result_type operator()(G &g, const param_type &p)
+    {
+        double m = static_cast<double>(p.m()), n = static_cast<double>(p.n());
+        double x = __rng::gamma(g, m / 2.0, 2.0) / m;
+        double y = __rng::gamma(g, n / 2.0, 2.0) / n;
+        return static_cast<result_type>(x / y);
+    }
+    friend bool operator==(const fisher_f_distribution &x,
+                           const fisher_f_distribution &y)
+    {
+        return x.p_ == y.p_;
+    }
+
+private:
+    param_type p_;
+};
+
+// ── student_t_distribution ([rand.dist.norm.t]) ──────────────────────────
+template <class RealType = double> class student_t_distribution {
+public:
+    using result_type = RealType;
+    struct param_type {
+        using distribution_type = student_t_distribution;
+        explicit param_type(RealType n = 1) : n_(n) {}
+        RealType    n() const { return n_; }
+        friend bool operator==(const param_type &x, const param_type &y)
+        {
+            return x.n_ == y.n_;
+        }
+        RealType n_;
+    };
+
+    student_t_distribution() : student_t_distribution(1) {}
+    explicit student_t_distribution(RealType n) : p_(n) {}
+    explicit student_t_distribution(const param_type &p) : p_(p) {}
+
+    void        reset() {}
+    RealType    n() const { return p_.n(); }
+    param_type  param() const { return p_; }
+    void        param(const param_type &p) { p_ = p; }
+    result_type min() const { return -numeric_limits<result_type>::max(); }
+    result_type max() const { return numeric_limits<result_type>::max(); }
+
+    template <class G> result_type operator()(G &g) { return (*this)(g, p_); }
+    template <class G> result_type operator()(G &g, const param_type &p)
+    {
+        double n = static_cast<double>(p.n());
+        double z = __rng::normal01(g);
+        double v = __rng::gamma(g, n / 2.0, 2.0); // chi-squared(n)
+        return static_cast<result_type>(z / std::sqrt(v / n));
+    }
+    friend bool operator==(const student_t_distribution &x,
+                           const student_t_distribution &y)
+    {
+        return x.p_ == y.p_;
+    }
+
+private:
+    param_type p_;
+};
+
+// ── discrete_distribution ([rand.dist.samp.discrete]) ────────────────────
+template <class IntType = int> class discrete_distribution {
+public:
+    using result_type = IntType;
+    struct param_type {
+        using distribution_type = discrete_distribution;
+        param_type() : probs_(1, 1.0) {}
+        template <class InputIt>
+        param_type(InputIt first, InputIt last) : probs_(first, last) { norm(); }
+        param_type(initializer_list<double> il) : probs_(il) { norm(); }
+        template <class UnaryOp>
+        param_type(size_t count, double xmin, double xmax, UnaryOp fw)
+        {
+            if (count == 0) { probs_.push_back(1.0); return; }
+            double delta = (xmax - xmin) / static_cast<double>(count);
+            for (size_t k = 0; k < count; ++k)
+                probs_.push_back(fw(xmin + delta * (k + 0.5)));
+            norm();
+        }
+        vector<double> probabilities() const { return probs_; }
+        friend bool    operator==(const param_type &x, const param_type &y)
+        {
+            return x.probs_ == y.probs_;
+        }
+        void norm()
+        {
+            if (probs_.empty()) { probs_.push_back(1.0); return; }
+            double s = 0.0;
+            for (double w : probs_) s += w;
+            if (s > 0.0)
+                for (double &w : probs_) w /= s;
+            cum_.assign(probs_.size(), 0.0);
+            double c = 0.0;
+            for (size_t i = 0; i < probs_.size(); ++i) { c += probs_[i]; cum_[i] = c; }
+        }
+        vector<double> probs_;
+        vector<double> cum_;
+    };
+
+    discrete_distribution() : p_() {}
+    template <class InputIt>
+    discrete_distribution(InputIt first, InputIt last) : p_(first, last) {}
+    discrete_distribution(initializer_list<double> il) : p_(il) {}
+    template <class UnaryOp>
+    discrete_distribution(size_t count, double xmin, double xmax, UnaryOp fw)
+        : p_(count, xmin, xmax, fw) {}
+    explicit discrete_distribution(const param_type &p) : p_(p) {}
+
+    void           reset() {}
+    vector<double> probabilities() const { return p_.probabilities(); }
+    param_type     param() const { return p_; }
+    void           param(const param_type &p) { p_ = p; }
+    result_type    min() const { return 0; }
+    result_type    max() const
+    {
+        return static_cast<result_type>(p_.probs_.size() - 1);
+    }
+
+    template <class G> result_type operator()(G &g) { return (*this)(g, p_); }
+    template <class G> result_type operator()(G &g, const param_type &p)
+    {
+        double u = __rng::canon(g);
+        for (size_t i = 0; i < p.cum_.size(); ++i)
+            if (u < p.cum_[i]) return static_cast<result_type>(i);
+        return static_cast<result_type>(p.cum_.size() - 1);
+    }
+    friend bool operator==(const discrete_distribution &x,
+                           const discrete_distribution &y)
+    {
+        return x.p_ == y.p_;
+    }
+
+private:
+    param_type p_;
+};
+
+// ── piecewise_constant_distribution ([rand.dist.samp.pconst]) ────────────
+template <class RealType = double> class piecewise_constant_distribution {
+public:
+    using result_type = RealType;
+    struct param_type {
+        using distribution_type = piecewise_constant_distribution;
+        param_type() : b_(2), w_(1, 1.0) { b_[0] = 0; b_[1] = 1; build(); }
+        template <class InputItB, class InputItW>
+        param_type(InputItB bf, InputItB bl, InputItW wf) : b_(bf, bl)
+        {
+            size_t n = b_.size() > 0 ? b_.size() - 1 : 0;
+            for (size_t i = 0; i < n; ++i) w_.push_back(*wf++);
+            build();
+        }
+        template <class UnaryOp>
+        param_type(initializer_list<RealType> bl, UnaryOp fw) : b_(bl)
+        {
+            for (size_t i = 0; i + 1 < b_.size(); ++i)
+                w_.push_back(fw((b_[i] + b_[i + 1]) / 2));
+            build();
+        }
+        template <class UnaryOp>
+        param_type(size_t nw, RealType xmin, RealType xmax, UnaryOp fw)
+        {
+            size_t   n     = nw == 0 ? 1 : nw;
+            RealType delta = (xmax - xmin) / static_cast<RealType>(n);
+            for (size_t i = 0; i <= n; ++i) b_.push_back(xmin + delta * i);
+            for (size_t i = 0; i < n; ++i)
+                w_.push_back(fw(xmin + delta * (i + RealType(0.5))));
+            build();
+        }
+        vector<RealType> intervals() const { return b_; }
+        vector<RealType> densities() const { return dens_; }
+        friend bool      operator==(const param_type &x, const param_type &y)
+        {
+            return x.b_ == y.b_ && x.w_ == y.w_;
+        }
+        void build()
+        {
+            if (b_.size() < 2) { b_ = {0, 1}; w_ = {1.0}; }
+            double s = 0.0;
+            for (double w : w_) s += w;
+            cum_.assign(w_.size(), 0.0);
+            dens_.assign(w_.size(), 0.0);
+            double c = 0.0;
+            for (size_t i = 0; i < w_.size(); ++i) {
+                double wn = s > 0.0 ? w_[i] / s : 0.0;
+                c += wn;
+                cum_[i]  = c;
+                double width = static_cast<double>(b_[i + 1] - b_[i]);
+                dens_[i] = width > 0.0 ? wn / width : 0.0;
+            }
+        }
+        vector<RealType> b_;
+        vector<double>   w_;
+        vector<double>   cum_;
+        vector<RealType> dens_;
+    };
+
+    piecewise_constant_distribution() : p_() {}
+    template <class InputItB, class InputItW>
+    piecewise_constant_distribution(InputItB bf, InputItB bl, InputItW wf)
+        : p_(bf, bl, wf) {}
+    template <class UnaryOp>
+    piecewise_constant_distribution(initializer_list<RealType> bl, UnaryOp fw)
+        : p_(bl, fw) {}
+    template <class UnaryOp>
+    piecewise_constant_distribution(size_t nw, RealType xmin, RealType xmax,
+                                    UnaryOp fw)
+        : p_(nw, xmin, xmax, fw) {}
+    explicit piecewise_constant_distribution(const param_type &p) : p_(p) {}
+
+    void             reset() {}
+    vector<RealType> intervals() const { return p_.intervals(); }
+    vector<RealType> densities() const { return p_.densities(); }
+    param_type       param() const { return p_; }
+    void             param(const param_type &p) { p_ = p; }
+    result_type      min() const { return p_.b_.front(); }
+    result_type      max() const { return p_.b_.back(); }
+
+    template <class G> result_type operator()(G &g) { return (*this)(g, p_); }
+    template <class G> result_type operator()(G &g, const param_type &p)
+    {
+        double u = __rng::canon(g);
+        size_t i = 0;
+        while (i + 1 < p.cum_.size() && u >= p.cum_[i]) ++i;
+        double within = __rng::canon(g);
+        return static_cast<result_type>(p.b_[i] +
+                                        within * (p.b_[i + 1] - p.b_[i]));
+    }
+    friend bool operator==(const piecewise_constant_distribution &x,
+                           const piecewise_constant_distribution &y)
+    {
+        return x.p_ == y.p_;
+    }
+
+private:
+    param_type p_;
+};
+
+// ── piecewise_linear_distribution ([rand.dist.samp.plinear]) ─────────────
+template <class RealType = double> class piecewise_linear_distribution {
+public:
+    using result_type = RealType;
+    struct param_type {
+        using distribution_type = piecewise_linear_distribution;
+        param_type() : b_(2), w_(2, 1.0) { b_[0] = 0; b_[1] = 1; build(); }
+        template <class InputItB, class InputItW>
+        param_type(InputItB bf, InputItB bl, InputItW wf) : b_(bf, bl)
+        {
+            for (size_t i = 0; i < b_.size(); ++i) w_.push_back(*wf++);
+            build();
+        }
+        template <class UnaryOp>
+        param_type(initializer_list<RealType> bl, UnaryOp fw) : b_(bl)
+        {
+            for (size_t i = 0; i < b_.size(); ++i) w_.push_back(fw(b_[i]));
+            build();
+        }
+        template <class UnaryOp>
+        param_type(size_t nw, RealType xmin, RealType xmax, UnaryOp fw)
+        {
+            size_t   n     = nw == 0 ? 1 : nw;
+            RealType delta = (xmax - xmin) / static_cast<RealType>(n);
+            for (size_t i = 0; i <= n; ++i) {
+                b_.push_back(xmin + delta * i);
+                w_.push_back(fw(xmin + delta * i));
+            }
+            build();
+        }
+        vector<RealType> intervals() const { return b_; }
+        vector<RealType> densities() const { return dens_; }
+        friend bool      operator==(const param_type &x, const param_type &y)
+        {
+            return x.b_ == y.b_ && x.w_ == y.w_;
+        }
+        void build()
+        {
+            if (b_.size() < 2) { b_ = {0, 1}; w_ = {1.0, 1.0}; }
+            // total area (trapezoids) for normalization
+            double area = 0.0;
+            for (size_t i = 0; i + 1 < b_.size(); ++i)
+                area += 0.5 * (w_[i] + w_[i + 1]) *
+                        static_cast<double>(b_[i + 1] - b_[i]);
+            dens_.assign(w_.size(), 0.0);
+            for (size_t i = 0; i < w_.size(); ++i)
+                dens_[i] = area > 0.0 ? w_[i] / area : 0.0;
+            cum_.assign(b_.size() - 1, 0.0);
+            double c = 0.0;
+            for (size_t i = 0; i + 1 < b_.size(); ++i) {
+                c += 0.5 * (dens_[i] + dens_[i + 1]) *
+                     static_cast<double>(b_[i + 1] - b_[i]);
+                cum_[i] = c;
+            }
+        }
+        vector<RealType> b_;
+        vector<double>   w_;
+        vector<double>   cum_;
+        vector<RealType> dens_;
+    };
+
+    piecewise_linear_distribution() : p_() {}
+    template <class InputItB, class InputItW>
+    piecewise_linear_distribution(InputItB bf, InputItB bl, InputItW wf)
+        : p_(bf, bl, wf) {}
+    template <class UnaryOp>
+    piecewise_linear_distribution(initializer_list<RealType> bl, UnaryOp fw)
+        : p_(bl, fw) {}
+    template <class UnaryOp>
+    piecewise_linear_distribution(size_t nw, RealType xmin, RealType xmax,
+                                  UnaryOp fw)
+        : p_(nw, xmin, xmax, fw) {}
+    explicit piecewise_linear_distribution(const param_type &p) : p_(p) {}
+
+    void             reset() {}
+    vector<RealType> intervals() const { return p_.intervals(); }
+    vector<RealType> densities() const { return p_.densities(); }
+    param_type       param() const { return p_; }
+    void             param(const param_type &p) { p_ = p; }
+    result_type      min() const { return p_.b_.front(); }
+    result_type      max() const { return p_.b_.back(); }
+
+    template <class G> result_type operator()(G &g) { return (*this)(g, p_); }
+    template <class G> result_type operator()(G &g, const param_type &p)
+    {
+        double u = __rng::canon(g);
+        size_t i = 0;
+        while (i + 1 < p.cum_.size() && u >= p.cum_[i]) ++i;
+        // invert the linear density over [b_i, b_{i+1}]
+        double x0 = static_cast<double>(p.b_[i]);
+        double x1 = static_cast<double>(p.b_[i + 1]);
+        double d0 = p.dens_[i], d1 = p.dens_[i + 1];
+        double cprev = (i == 0) ? 0.0 : p.cum_[i - 1];
+        double target = u - cprev; // area into this interval
+        double width  = x1 - x0;
+        // area(t) = d0*t + (d1-d0)/(2*width)*t^2 = target ; solve for t∈[0,width]
+        double aq = (d1 - d0) / (2.0 * width);
+        double t;
+        if (std::fabs(aq) < 1e-300)
+            t = d0 > 0.0 ? target / d0 : 0.0;
+        else {
+            double disc = d0 * d0 + 4.0 * aq * target;
+            if (disc < 0.0) disc = 0.0;
+            t = (-d0 + std::sqrt(disc)) / (2.0 * aq);
+        }
+        return static_cast<result_type>(x0 + t);
+    }
+    friend bool operator==(const piecewise_linear_distribution &x,
+                           const piecewise_linear_distribution &y)
+    {
+        return x.p_ == y.p_;
+    }
+
+private:
+    param_type p_;
+};
+
+} // namespace std
+
+#endif // BOXCXX_BITS_RANDOM_DIST
