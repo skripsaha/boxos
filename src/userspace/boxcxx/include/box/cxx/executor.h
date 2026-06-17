@@ -137,8 +137,14 @@ private:
     explicit task(handle_type __h) noexcept : _M_coro(__h) {}
 
     T _M_take() {
-        if (_M_coro.promise()._M_exc)
+        // Null-safe (mirrors task<void>): rethrow a stored exception first.
+        if (_M_coro && _M_coro.promise()._M_exc)
             std::rethrow_exception(_M_coro.promise()._M_exc);
+        // Precondition: result()/await_resume() run only on a completed task
+        // that returned a value (block_on/await_resume guarantee done()). A
+        // null or value-less task here is a caller contract violation — fail
+        // deterministically rather than move an unconstructed union member.
+        if (!_M_coro || !_M_coro.promise()._M_has) __builtin_trap();
         return std::move(_M_coro.promise()._M_value);
     }
 
@@ -219,6 +225,14 @@ public:
     executor(const executor&) = delete;
     executor& operator=(const executor&) = delete;
 
+    ~executor() {
+        // Safety net: reap detached frames spawned but never drained by run()
+        // (spawn() without run(), or an abnormal run() exit). run()'s own
+        // scope-guard normally clears _M_owned, so this is usually empty.
+        for (auto __h : _M_owned)
+            if (__h) __h.destroy();
+    }
+
     static executor* current() noexcept { return _S_current; }
 
     // Queue a coroutine to be resumed by the run-loop.
@@ -237,7 +251,22 @@ public:
 
     // Drive the loop until no coroutine is runnable or waiting.
     void run() {
-        executor* __prev = _S_current;
+        // Exception-safety: restore _S_current and reap detached frames on
+        // EVERY exit path. A non-noexcept allocation inside an awaiter's
+        // wait_on / _M_pump_waiters push_back (or a resumed/foreign frame) can
+        // throw bad_alloc straight out of resume(); without this guard
+        // _S_current would be left dangling (use-after-free for a stack-local
+        // executor) and _M_owned frames would leak permanently.
+        struct ScopeGuard {
+            executor* __ex;
+            executor* __prev;
+            ~ScopeGuard() {
+                for (auto __h : __ex->_M_owned)
+                    if (__h) __h.destroy();
+                __ex->_M_owned.clear();
+                _S_current = __prev;
+            }
+        } __guard{this, _S_current};
         _S_current = this;
         while (!_M_ready.empty() || !_M_waiting.empty()) {
             while (!_M_ready.empty()) {
@@ -247,11 +276,6 @@ public:
             }
             if (!_M_waiting.empty()) _M_pump_waiters();
         }
-        // Reap detached frames (all completed once the loop drains).
-        for (auto __h : _M_owned)
-            if (__h) __h.destroy();
-        _M_owned.clear();
-        _S_current = __prev;
     }
 
     // Run a single root task to completion and return its result.

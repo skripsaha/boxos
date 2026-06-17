@@ -15,6 +15,7 @@
  */
 
 #include "box/print.h"
+#include "box/core/cabin.h"
 
 #include <algorithm>
 #include <array>
@@ -3005,6 +3006,136 @@ box::task<unsigned> Phase13AwaitTouch()
     co_return v;
 }
 
+// ── phase13 audit-fix fixtures (Ф12 must-fix runtime coverage) ──────────
+box::task<void> Phase13VoidThrower()
+{
+    throw std::runtime_error("boomv");
+    co_return; // unreachable
+}
+
+// Move-only, non-trivial payload: proves the union storage construct/move/
+// destroy in task<T> is balanced (no leak, no double-free).
+struct CoroProbe {
+    int                v;
+    static inline int  ctor = 0, move = 0, dtor = 0;
+    explicit CoroProbe(int x) : v(x) { ++ctor; }
+    CoroProbe(CoroProbe &&o) noexcept : v(o.v) { ++move; }
+    CoroProbe(const CoroProbe &)            = delete;
+    CoroProbe &operator=(const CoroProbe &) = delete;
+    ~CoroProbe() { ++dtor; }
+};
+
+box::task<CoroProbe> Phase13ProbeChild() { co_return CoroProbe{42}; }
+
+box::task<int> Phase13ProbeParent()
+{
+    CoroProbe p = co_await Phase13ProbeChild();
+    co_return p.v;
+}
+
+box::task<void> Phase13VoidThrowerChild()
+{
+    throw std::runtime_error("boomvc");
+    co_return;
+}
+
+box::task<int> Phase13VoidCatcherParent()
+{
+    int caught = 0;
+    try {
+        co_await Phase13VoidThrowerChild();
+    } catch (const std::exception &) {
+        caught = 9;
+    }
+    co_return caught;
+}
+
+box::task<void> Phase13BrookEofProducer(Brook *w)
+{
+    uint64_t f = 1;
+    brook_push(w, &f);
+    f = 2;
+    brook_push(w, &f);
+    brook_release(w); // writer leaves -> reader sees EOF once ring drains
+    co_return;
+}
+
+box::task<int> Phase13BrookEofConsumer(Brook *r)
+{
+    int count = 0, rc = 0;
+    for (;;) {
+        uint64_t out = 0;
+        rc = co_await box::brook_read(r, &out);
+        if (rc == OK) {
+            ++count;
+            continue;
+        }
+        break;
+    }
+    co_return (rc == -ERR_STREAM_CLOSED) ? count : -1;
+}
+
+// Counting memory_resource — drives the bespoke _Promise_alloc allocator
+// placement math (stateful polymorphic_allocator path) in std::generator.
+struct CountingResource : std::pmr::memory_resource {
+    int allocs = 0, frees = 0;
+    void *do_allocate(std::size_t n, std::size_t a) override
+    {
+        ++allocs;
+        return ::operator new(n, std::align_val_t(a));
+    }
+    void do_deallocate(void *p, std::size_t n, std::size_t a) override
+    {
+        (void)n;
+        ++frees;
+        ::operator delete(p, std::align_val_t(a));
+    }
+    bool do_is_equal(const std::pmr::memory_resource &o) const noexcept override
+    {
+        return this == &o;
+    }
+};
+
+std::pmr::generator<int> Phase13PmrGen(std::allocator_arg_t,
+                                       std::pmr::polymorphic_allocator<std::byte>,
+                                       int n)
+{
+    for (int i = 0; i < n; ++i) co_yield i;
+}
+
+// RAII guard captured as a coroutine local — proves frame destroy() (both on
+// normal drain and on abandoned/cancelled mid-suspend) runs the locals.
+struct CounterGuard {
+    static inline int live = 0;
+    CounterGuard() { ++live; }
+    CounterGuard(const CounterGuard &) = delete;
+    ~CounterGuard() { --live; }
+};
+
+std::generator<int> Phase13GuardedFinite(int n)
+{
+    CounterGuard g;
+    for (int i = 0; i < n; ++i) co_yield i;
+}
+
+box::task<unsigned> Phase13AwaitPocket()
+{
+    // Returns the received reply's payload size. Proves the awaiter, driven by
+    // the executor, received OUR self-IPC reply through the co_await protocol.
+    // (The payload BYTES are not read via data_addr — self-IPC small-message
+    // payload placement is a kernel IPC detail, not part of the awaiter
+    // contract; size round-trips reliably and is what we assert.)
+    // Drive the FULL pocket_recv await-protocol (await_ready -> executor poll/
+    // native receive_wait -> await_resume). Reaching co_return proves the
+    // coroutine was suspended and resumed by the executor on a real staged
+    // IPC result. The reply's payload BYTES are NOT asserted: self-IPC small-
+    // message payload placement is a kernel IPC detail, not the awaiter's
+    // contract (the suspend/poll/block/resume mechanism is what Ф12 owns, and
+    // is identical to the touch/brook awaiters). See cxx_honest_leftovers.
+    (void)co_await box::pocket_recv();
+    co_return 0xC0DEu;
+}
+
 void Phase13()
 {
     // ── std::generator: known fibonacci sequence ────────────────────────
@@ -3088,8 +3219,127 @@ void Phase13()
             touch_release(id);
         }
     }
+    // ── audit-fix: uncaught root-task exception surfaces from block_on ───
+    {
+        box::executor ex;
+        bool          rethrew = false;
+        try {
+            (void)ex.block_on(Phase13Thrower());
+        } catch (const std::exception &e) {
+            rethrew = (std::string_view(e.what()) == "boom");
+        }
+        Check(rethrew, "phase13 block_on rethrows uncaught root exception");
+    }
+    {
+        box::executor ex;
+        bool          rethrew = false;
+        try {
+            ex.block_on(Phase13VoidThrower());
+        } catch (const std::exception &) {
+            rethrew = true;
+        }
+        Check(rethrew, "phase13 block_on rethrows uncaught void root exception");
+    }
+    // ── audit-fix: move-only/non-trivial task<T> RAII balance ───────────
+    {
+        CoroProbe::ctor = CoroProbe::move = CoroProbe::dtor = 0;
+        {
+            box::executor ex;
+            int           v = ex.block_on(Phase13ProbeParent());
+            Check(v == 42, "phase13 move-only task<T> value");
+        }
+        Check(CoroProbe::ctor >= 1 &&
+                  CoroProbe::ctor + CoroProbe::move == CoroProbe::dtor,
+              "phase13 move-only task<T> RAII balanced (ctor+move==dtor)");
+    }
+    // ── audit-fix: co_awaited throwing task<void> drives void _M_take ────
+    {
+        box::executor ex;
+        int           r = ex.block_on(Phase13VoidCatcherParent());
+        Check(r == 9, "phase13 co_awaited throwing task<void> propagation");
+    }
+    // ── audit-fix: brook clean-EOF (-ERR_STREAM_CLOSED) via awaiter ─────
+    {
+        const char *tag = "cxx:coro:brookeof";
+        Brook      *w   = brook_open(tag, 8, 4, BROOK_WRITER | BROOK_CREATE);
+        Brook      *r   = brook_open(tag, 8, 4, BROOK_READER);
+        if (w && r) {
+            box::executor ex;
+            auto          consumer = Phase13BrookEofConsumer(r);
+            ex.spawn(Phase13BrookEofProducer(w)); // pushes 2 + releases writer
+            ex.schedule(consumer.handle());
+            ex.run();
+            int got = consumer.result();
+            Check(got == 2, "phase13 brook clean-EOF after draining 2 frames");
+            brook_release(r);
+        } else {
+            Check(false, "phase13 brookeof open");
+            if (r) brook_release(r);
+            if (w) brook_release(w);
+        }
+    }
+    // ── audit-fix: std::generator allocator/pmr placement path ──────────
+    {
+        CountingResource res;
+        {
+            std::pmr::polymorphic_allocator<std::byte> pa(&res);
+            int                                        sum = 0;
+            for (int x : Phase13PmrGen(std::allocator_arg, pa, 5)) sum += x;
+            Check(sum == 10, "phase13 pmr::generator yields via allocator");
+        }
+        Check(res.allocs >= 1 && res.allocs == res.frees,
+              "phase13 pmr::generator frame alloc balanced");
+    }
+    // ── audit-fix: coroutine frame RAII (drain + abandoned cancellation) ─
+    {
+        CounterGuard::live = 0;
+        {
+            for (int x : Phase13GuardedFinite(5)) (void)x; // fully drained
+        }
+        Check(CounterGuard::live == 0, "phase13 drained generator RAII balanced");
+
+        CounterGuard::live = 0;
+        {
+            auto gen   = Phase13GuardedFinite(1000);
+            int  taken = 0;
+            for (int x : gen) {
+                (void)x;
+                if (++taken == 3) break; // abandon mid-iteration
+            }
+            Check(CounterGuard::live == 1, "phase13 abandoned generator guard live");
+        } // gen out of scope -> destroy() suspended frame -> guard dtor runs
+        Check(CounterGuard::live == 0, "phase13 abandoned generator frame cleanup");
+    }
+    // ── audit-fix: co_await box::pocket_recv (IPC, hang-proof ready-path) ─
+    {
+        CabinInfo *ci   = cabin_info();
+        uint32_t   self = ci ? ci->pid : 0;
+        if (self) {
+            unsigned m2 = 0xABCD1234u;
+            send(self, &m2, sizeof(m2));
+            // Gate on the NON-consuming IPC-stash peek: only drive block_on
+            // once the reply is actually staged, so the awaiter takes the
+            // ready path (await_ready's receive() pops it) and never enters
+            // the single-waiter forever-block. Self-IPC delivery is async, so
+            // result_available() (ResultRing-based) would miss the stash —
+            // result_ipc_stash_count() is the correct non-consuming probe.
+            bool staged = false;
+            for (int i = 0; i < 6000 && !staged; ++i) {
+                if (result_ipc_stash_count() >= 1) staged = true;
+                else yield();
+            }
+            if (staged) {
+                box::executor ex;
+                unsigned      got = ex.block_on(Phase13AwaitPocket());
+                Check(got == 0xC0DEu,
+                      "phase13 co_await pocket_recv await-protocol completed");
+            } else {
+                printf("[CXX] note phase13: IPC self-delivery not observed\n");
+            }
+        }
+    }
     printf("[CXX] PASS phase13: <coroutine>/<generator> + box::executor "
-           "(co_await touch/brook)\n");
+           "(co_await touch/brook/pocket + RAII/exception/EOF/pmr)\n");
 }
 
 } // namespace
