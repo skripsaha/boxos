@@ -22,6 +22,8 @@
 #include <charconv>
 #include <chrono>
 #include <cmath>
+#include <coroutine>
+#include <generator>
 #include <deque>
 #include <expected>
 #include <format>
@@ -55,6 +57,7 @@
 
 #include "box/cxx/bay_memory_resource.h"
 #include "box/cxx/current.h"
+#include "box/cxx/executor.h"
 #include "box/cxx/math.h"
 
 // A user-defined formatter (exercised in phase9b) — drives the type-erased
@@ -2936,6 +2939,159 @@ void Phase12()
     printf("[CXX] PASS phase12: <random> (engines/device/distributions)\n");
 }
 
+// ── phase13 fixtures: coroutines (<coroutine>/<generator> + box::executor) ─
+std::generator<int> Phase13Fib(int n)
+{
+    int a = 0, b = 1;
+    for (int i = 0; i < n; ++i) {
+        co_yield a;
+        int t = a + b;
+        a = b;
+        b = t;
+    }
+}
+
+std::generator<int> Phase13Nested()
+{
+    co_yield 1;
+    co_yield std::ranges::elements_of(Phase13Fib(4)); // 0,1,1,2
+    co_yield 99;
+}
+
+box::task<int> Phase13Child() { co_return 41; }
+
+box::task<int> Phase13Add()
+{
+    int v = co_await Phase13Child();
+    co_return v + 1;
+}
+
+box::task<int> Phase13Thrower()
+{
+    throw std::runtime_error("boom");
+    co_return 0; // unreachable — makes this a coroutine
+}
+
+box::task<int> Phase13Catcher()
+{
+    int caught = 0;
+    try {
+        co_await Phase13Thrower();
+    } catch (const std::exception &) {
+        caught = 7;
+    }
+    co_return caught;
+}
+
+box::task<void> Phase13BrookProducer(Brook *w)
+{
+    uint64_t f = 0xFEEDBEEFull;
+    brook_push(w, &f);
+    co_return;
+}
+
+box::task<uint64_t> Phase13BrookConsumer(Brook *r)
+{
+    uint64_t out = 0;
+    (void)co_await box::brook_read(r, &out);
+    co_return out;
+}
+
+box::task<unsigned> Phase13AwaitTouch()
+{
+    Touch t = co_await box::touch_event();
+    unsigned v = 0;
+    if (t.payload_len >= sizeof(v)) __builtin_memcpy(&v, t.payload, sizeof(v));
+    co_return v;
+}
+
+void Phase13()
+{
+    // ── std::generator: known fibonacci sequence ────────────────────────
+    {
+        int seq[16];
+        int n = 0;
+        for (int x : Phase13Fib(10)) {
+            if (n < 16) seq[n] = x;
+            ++n;
+        }
+        bool ok = (n == 10 && seq[0] == 0 && seq[1] == 1 && seq[2] == 1 &&
+                   seq[3] == 2 && seq[4] == 3 && seq[5] == 5 && seq[6] == 8 &&
+                   seq[7] == 13 && seq[8] == 21 && seq[9] == 34);
+        Check(ok, "phase13 generator fibonacci sequence");
+    }
+    // ── std::generator: nested co_yield ranges::elements_of ─────────────
+    {
+        int sum = 0, n = 0;
+        for (int x : Phase13Nested()) { // 1,0,1,1,2,99 -> 6 values, sum 104
+            sum += x;
+            ++n;
+        }
+        Check(n == 6 && sum == 104, "phase13 generator nested elements_of");
+    }
+    // ── <coroutine>: noop_coroutine + handle comparison ─────────────────
+    {
+        auto nc = std::noop_coroutine();
+        std::coroutine_handle<> h = nc;
+        Check(!nc.done() && h.address() != nullptr, "phase13 noop_coroutine");
+        std::coroutine_handle<> z = nullptr;
+        Check((h == h) && (z != h), "phase13 coroutine_handle compare");
+    }
+    // ── box::task<T>: composition (co_await child) returning a value ─────
+    {
+        box::executor ex;
+        int r = ex.block_on(Phase13Add());
+        Check(r == 42, "phase13 task compose co_await child");
+    }
+    // ── box::task<T>: exception propagation across co_await ──────────────
+    {
+        box::executor ex;
+        int r = ex.block_on(Phase13Catcher());
+        Check(r == 7, "phase13 task exception propagation");
+    }
+    // ── box::executor: Brook suspend -> producer fills -> resume ─────────
+    {
+        const char *tag = "cxx:coro:brook";
+        Brook *w = brook_open(tag, 8, 4, BROOK_WRITER | BROOK_CREATE);
+        Brook *r = brook_open(tag, 8, 4, BROOK_READER);
+        if (w && r) {
+            box::executor ex;
+            auto consumer = Phase13BrookConsumer(r);
+            ex.spawn(Phase13BrookProducer(w)); // queued first
+            ex.schedule(consumer.handle());    // LIFO: runs first, finds empty,
+                                               // suspends, then producer fills
+            ex.run();
+            uint64_t got = consumer.result();
+            Check(got == 0xFEEDBEEFull, "phase13 executor brook suspend/resume");
+        } else {
+            Check(false, "phase13 brook open");
+        }
+        if (r) brook_release(r);
+        if (w) brook_release(w);
+    }
+    // ── box::executor + co_await box::touch_event (guarded, no hang) ─────
+    {
+        TouchTagPair tp = touch_intern("cxx:coro:touch");
+        TouchTag     id = touch_pair_choose(tp);
+        if (id != TOUCH_TAG_INVALID) {
+            touch_claim(id, TOUCH_REST, 0, 0);
+            unsigned magic = 0xC0DECAFEu;
+            touch_send(tp, &magic, sizeof(magic), 0);
+            for (int i = 0; i < 2000 && !touch_available(); ++i) yield();
+            if (touch_available()) {
+                box::executor ex;
+                unsigned      got = ex.block_on(Phase13AwaitTouch());
+                Check(got == 0xC0DECAFEu, "phase13 co_await touch_event payload");
+            } else {
+                printf("[CXX] note phase13: touch self-delivery not observed\n");
+            }
+            touch_release(id);
+        }
+    }
+    printf("[CXX] PASS phase13: <coroutine>/<generator> + box::executor "
+           "(co_await touch/brook)\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -2970,6 +3126,7 @@ int main()
     Phase10();
     Phase11();
     Phase12();
+    Phase13();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

@@ -38,6 +38,7 @@ CFLAGS = -nostdlib -ffreestanding -fno-builtin -mno-red-zone \
 # C-only -Werror=* diagnostics dropped (implicit-function-declaration,
 # incompatible-pointer-types, int-conversion are C-language options).
 CXXFLAGS = -std=gnu++23 -nostdinc++ -fexceptions -frtti \
+         -fcoroutines \
          -fuse-cxa-atexit \
          -fasynchronous-unwind-tables \
          -nostdlib -ffreestanding -fno-builtin -mno-red-zone \
