@@ -26,6 +26,8 @@ template <typename C, typename Traits>
 class basic_string_view;
 template <typename T, size_t Extent>
 class span;
+template <typename T>
+class allocator;
 
 namespace ranges {
 
@@ -225,6 +227,22 @@ concept contiguous_range =
     };
 template <typename R, typename T>
 concept output_range = range<R> && output_iterator<iterator_t<R>, T>;
+
+// ── elements_of ([range.elementsof], C++23) ─────────────────────────────
+// Tags a range (plus an allocator) for recursive yielding by std::generator
+// (co_yield ranges::elements_of(inner)). allocator<byte> is the default;
+// std::allocator is forward-declared above — the complete type is only
+// needed where elements_of is actually instantiated (e.g. <generator>,
+// which pulls in <memory>).
+template <range _Range, typename _Allocator = allocator<byte>>
+struct elements_of {
+    [[no_unique_address]] _Range range;
+    [[no_unique_address]] _Allocator allocator = _Allocator();
+};
+
+template <typename _Range, typename _Allocator = allocator<byte>>
+elements_of(_Range &&, _Allocator = _Allocator())
+    -> elements_of<_Range &&, _Allocator>;
 
 template <typename R>
 concept common_range =

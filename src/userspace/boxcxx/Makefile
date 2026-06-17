@@ -15,6 +15,7 @@ ASM = nasm
 # -fuse-cxa-atexit: bare-metal g++ defaults to atexit()-based static-dtor
 # registration (boxlib has no atexit); we provide __cxa_atexit instead.
 CXXFLAGS = -std=gnu++23 -nostdinc++ -fexceptions -frtti \
+         -fcoroutines \
          -fuse-cxa-atexit \
          -fasynchronous-unwind-tables \
          -nostdlib -ffreestanding -fno-builtin -mno-red-zone \
