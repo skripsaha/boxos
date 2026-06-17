@@ -352,8 +352,10 @@ private:
     bool _M_got = false;
 };
 
-// co_await box::brook_read(b, frame) -> int  (OK, or -ERR_STREAM_CLOSED on
-// clean writer-leave EOF, or other negative error). `frame` must point to a
+// co_await box::brook_read(b, frame) -> int  (OK, or -ERR_STREAM_CLOSED once
+// the writer has left and the ring is drained, or other negative error —
+// this is BoxOS's race-free writer-leave terminal, not a Unix EOF). `frame`
+// must point to a
 // brook_frame_size(b)-byte buffer owned by the caller.
 class brook_read {
 public:

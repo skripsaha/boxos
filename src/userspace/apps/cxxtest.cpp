@@ -15,7 +15,6 @@
  */
 
 #include "box/print.h"
-#include "box/core/cabin.h"
 
 #include <algorithm>
 #include <array>
@@ -3118,24 +3117,6 @@ std::generator<int> Phase13GuardedFinite(int n)
     for (int i = 0; i < n; ++i) co_yield i;
 }
 
-box::task<unsigned> Phase13AwaitPocket()
-{
-    // Returns the received reply's payload size. Proves the awaiter, driven by
-    // the executor, received OUR self-IPC reply through the co_await protocol.
-    // (The payload BYTES are not read via data_addr — self-IPC small-message
-    // payload placement is a kernel IPC detail, not part of the awaiter
-    // contract; size round-trips reliably and is what we assert.)
-    // Drive the FULL pocket_recv await-protocol (await_ready -> executor poll/
-    // native receive_wait -> await_resume). Reaching co_return proves the
-    // coroutine was suspended and resumed by the executor on a real staged
-    // IPC result. The reply's payload BYTES are NOT asserted: self-IPC small-
-    // message payload placement is a kernel IPC detail, not the awaiter's
-    // contract (the suspend/poll/block/resume mechanism is what Ф12 owns, and
-    // is identical to the touch/brook awaiters). See cxx_honest_leftovers.
-    (void)co_await box::pocket_recv();
-    co_return 0xC0DEu;
-}
-
 void Phase13()
 {
     // ── std::generator: known fibonacci sequence ────────────────────────
@@ -3310,36 +3291,19 @@ void Phase13()
         } // gen out of scope -> destroy() suspended frame -> guard dtor runs
         Check(CounterGuard::live == 0, "phase13 abandoned generator frame cleanup");
     }
-    // ── audit-fix: co_await box::pocket_recv (IPC, hang-proof ready-path) ─
-    {
-        CabinInfo *ci   = cabin_info();
-        uint32_t   self = ci ? ci->pid : 0;
-        if (self) {
-            unsigned m2 = 0xABCD1234u;
-            send(self, &m2, sizeof(m2));
-            // Gate on the NON-consuming IPC-stash peek: only drive block_on
-            // once the reply is actually staged, so the awaiter takes the
-            // ready path (await_ready's receive() pops it) and never enters
-            // the single-waiter forever-block. Self-IPC delivery is async, so
-            // result_available() (ResultRing-based) would miss the stash —
-            // result_ipc_stash_count() is the correct non-consuming probe.
-            bool staged = false;
-            for (int i = 0; i < 6000 && !staged; ++i) {
-                if (result_ipc_stash_count() >= 1) staged = true;
-                else yield();
-            }
-            if (staged) {
-                box::executor ex;
-                unsigned      got = ex.block_on(Phase13AwaitPocket());
-                Check(got == 0xC0DEu,
-                      "phase13 co_await pocket_recv await-protocol completed");
-            } else {
-                printf("[CXX] note phase13: IPC self-delivery not observed\n");
-            }
-        }
-    }
+    // ── pocket_recv: NO independent runtime test here (honest).
+    //    box::pocket_recv's await machinery (await_ready->poll / wait_on /
+    //    _S_block native receive_wait / await_resume) is BYTE-IDENTICAL to the
+    //    brook_read and touch_event awaiters, both of which ARE runtime-proven
+    //    above (real Brook frame + real TouchRing self-delivery). The only
+    //    pocket-specific leaf is receive()/receive_wait(). send-to-self is
+    //    rejected by the kernel (ERR_ROUTE_SELF), and a real cross-cabin peer
+    //    fixture (proc_exec child) faulted on the routed crate VA under single
+    //    core — that belongs to the Ф16 box::message phase where a proper
+    //    cross-cabin IPC fixture exists. Validated-by-identity, runtime test
+    //    deferred — recorded in cxx_honest_leftovers (not claimed as covered).
     printf("[CXX] PASS phase13: <coroutine>/<generator> + box::executor "
-           "(co_await touch/brook/pocket + RAII/exception/EOF/pmr)\n");
+           "(co_await touch/brook + RAII/exception/drain/pmr)\n");
 }
 
 } // namespace
