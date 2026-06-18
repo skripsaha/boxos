@@ -15,6 +15,7 @@
  */
 
 #include "box/print.h"
+#include "box/system.h"
 
 #include <algorithm>
 #include <array>
@@ -62,6 +63,7 @@
 #include "box/cxx/executor.h"
 #include "box/cxx/heap.h"
 #include "box/cxx/math.h"
+#include "box/cxx/message.h"
 #include "box/cxx/tagfs.h"
 #include "box/cxx/touch.h"
 
@@ -3994,6 +3996,108 @@ void Phase19()
            "(RAII/keep/of_all + snapshots()) + on_anchor/anchor_event\n");
 }
 
+// ── Ф16a: box::message (process-to-process messaging) + Ф12 IPC debt ──────────
+box::task<box::message> Phase20Recv()
+{
+    co_return co_await box::next_message();
+}
+
+void Phase20()
+{
+    // ── payload guard (memory-safety) — no spawn needed, deterministic ───
+    // The validation that prevents a cross-cabin payload-pointer fault: an
+    // invalid or empty delivery exposes no bytes and no payload, and never
+    // dereferences data_addr. (A raw unguarded read of a 0/garbage data_addr
+    // is the classic cross-cabin #PF; box::message cannot do it.)
+    {
+        box::message empty;  // default: sender pid 0
+        Check(!empty, "phase20 default message is invalid (operator bool)");
+        Check(empty.bytes().empty(), "phase20 invalid message has no bytes");
+        Check(!empty.payload_as<std::uint32_t>().has_value(),
+              "phase20 invalid message payload_as -> nullopt");
+
+        // Valid sender but a null/zero payload (a zero-length send): still NO
+        // bytes — bytes()/payload_as must not dereference data_addr 0.
+        Result zr{};
+        zr.sender_pid  = 4242u;
+        zr.data_addr   = 0;
+        zr.data_length = 0;
+        box::message zero(zr);
+        Check(static_cast<bool>(zero), "phase20 message with a sender is valid");
+        Check(zero.from() == 4242u, "phase20 message.from()");
+        Check(zero.bytes().empty(), "phase20 zero-payload message has no bytes (deref guard)");
+        Check(!zero.payload_as<std::uint8_t>().has_value(),
+              "phase20 zero-payload payload_as -> nullopt (deref guard)");
+    }
+
+    // ── producer path — deterministic negatives exercise the real syscall ──
+    Check(!box::send(0u, "x", 1), "phase20 send to pid 0 rejected");
+    Check(!box::broadcast("cxx:msg:no:subscriber", "x", 1),
+          "phase20 broadcast with no subscribers returns false");
+
+    // ── cross-cabin delivery — closes the Ф12 pocket_recv runtime debt ─────
+    // proca sends 'A' to its spawner (us) five times. Receive the first via
+    // co_await box::next_message(): a single waiter, so the executor takes its
+    // block-forever branch (receive_wait(.,0)) — the exact path the Ф12 pocket
+    // awaiter was only validated-by-identity for, now exercised cross-cabin.
+    // The launcher delivers our own launch args as an IPC message (sender = the
+    // launcher), and we never consumed them — drain any such pending traffic so
+    // the only sender we then observe is the child we are about to spawn.
+    while (box::receive()) { /* discard ambient (e.g. our launch args) */ }
+
+    int child = proc_exec("proca");
+    if (child <= 0) {
+        printf("[CXX] note phase20: proc_exec unavailable; cross-cabin receive skipped\n");
+        printf("[CXX] PASS phase20: box::message (send/broadcast/receive validated; "
+               "spawn unavailable)\n");
+        return;
+    }
+
+    // co_await box::next_message(): with the inbox drained and the child not yet
+    // scheduled, the awaiter suspends as the executor's single waiter and takes
+    // its block-forever branch (receive_wait(.,0)) until the child's first 'A'
+    // arrives — the real cross-cabin pocket receive the Ф12 debt asked for, on
+    // single-core too (box::message's payload guard makes the read fault-free).
+    box::message m;
+    {
+        box::executor ex;
+        m = ex.block_on(Phase20Recv());
+    }
+    // Robustness against any stray ambient that slipped in after the drain: fall
+    // back to a bounded search for a message from our child (never blocks forever).
+    if (!(m && m.from() == static_cast<std::uint32_t>(child))) {
+        for (int i = 0; i < 12; i++) {
+            std::optional<box::message> mm = box::receive_for(800);
+            if (!mm) break;
+            if (mm->from() == static_cast<std::uint32_t>(child)) { m = *mm; break; }
+        }
+    }
+    Check(static_cast<bool>(m), "phase20 co_await next_message delivers a message");
+    Check(m.from() == static_cast<std::uint32_t>(child),
+          "phase20 message.from() == spawned child pid");
+    Check(m.text() == "A", "phase20 message.text() payload from child");
+    Check(m.payload_as<char>().value_or('\0') == 'A', "phase20 message.payload_as<char>()");
+
+    // reply path (box::message::reply -> ::send back to the child); the child
+    // never reads replies, so acceptance is liveness-dependent — exercise the
+    // path (matrix PANIC=0/AppFAIL=0 covers the CET syscall thunk).
+    (void)m.reply(static_cast<std::uint8_t>('R'));
+
+    // ── drain remaining child messages via receive_for() ───────────────────
+    {
+        int got = 0;
+        for (int i = 0; i < 12; i++) {
+            std::optional<box::message> mm = box::receive_for(800);
+            if (!mm) break;
+            if (mm->from() == static_cast<std::uint32_t>(child) && mm->text() == "A") ++got;
+        }
+        Check(got >= 1, "phase20 receive_for drains further child messages");
+    }
+
+    printf("[CXX] PASS phase20: box::message (send/broadcast + receive/receive_for + "
+           "co_await next_message cross-cabin delivery + payload guard + reply)\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -4035,6 +4139,7 @@ int main()
     Phase17();
     Phase18();
     Phase19();
+    Phase20();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
