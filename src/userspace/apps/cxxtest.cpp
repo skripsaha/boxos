@@ -66,6 +66,7 @@
 #include "box/cxx/math.h"
 #include "box/cxx/message.h"
 #include "box/cxx/process.h"
+#include "box/cxx/system.h"
 #include "box/cxx/tagfs.h"
 #include "box/cxx/touch.h"
 
@@ -4215,6 +4216,52 @@ void Phase22()
            "tag_scope (RAII process tag)\n");
 }
 
+// ── Ф16d: box::system (info/uptime/mem/cpu + control) + box::efi ──────────────
+void Phase23()
+{
+    // ── box::system::info() — machine snapshot, sanity invariants ────────
+    std::optional<box::system_info> si = box::system::info();
+    Check(si.has_value(), "phase23 system::info() returns a snapshot");
+    if (si) {
+        Check(si->version().substr(0, 5) == "BoxOS", "phase23 system version is BoxOS");
+        Check(si->total_memory() > 0, "phase23 total_memory > 0");
+        Check(si->used_memory() <= si->total_memory() && si->free_memory() <= si->total_memory(),
+              "phase23 memory accounting within total");
+        Check(si->cpu_total() >= 1 && si->cpu_total() <= 4096, "phase23 cpu_total sane");
+        Check(si->uptime() > std::chrono::nanoseconds(0), "phase23 uptime > 0 (chrono)");
+        Check(si->process_count() >= 1, "phase23 at least one live process");
+    }
+
+    // ── maintenance surfaces (non-destructive; exercise the path) ────────
+    (void)box::system::perf_dump();      // dumps perf counters to the log
+    (void)box::system::fragmentation();  // kernel-defined metric
+    // reboot()/shutdown() reset the whole machine — compile/link surface only,
+    // NEVER called from a test (it would reboot the VM).
+    volatile auto reboot_fn   = &box::system::reboot;
+    volatile auto shutdown_fn = &box::system::shutdown;
+    (void)reboot_fn;
+    (void)shutdown_fn;
+
+    // ── box::efi — firmware introspection (config-agnostic) ──────────────
+    std::optional<box::efi_status> efi = box::efi::info();
+    if (efi) {
+        std::vector<efi_esrt_entry_t> tbl = box::efi::esrt();
+        Check(tbl.size() == efi->esrt_count(), "phase23 efi::esrt() range matches esrt_count");
+        Check(!box::efi::esrt_entry(efi->esrt_count() + 1000u).has_value(),
+              "phase23 efi::esrt_entry out-of-range -> nullopt");
+    } else {
+        printf("[CXX] note phase23: efi::info() unavailable on this config\n");
+    }
+    // Garbage is never trusted by Secure Boot policy (BIOS: SB unavailable;
+    // UEFI/TCG: bad PE) — deterministic across every config.
+    const std::byte junk[16] = {};
+    Check(!box::efi::verified(std::span<const std::byte>(junk, sizeof(junk))),
+          "phase23 efi::verified(garbage) is false");
+
+    printf("[CXX] PASS phase23: box::system (info/uptime-chrono/mem/cpu + perf/frag + "
+           "reboot/shutdown surface) + box::efi (info/esrt range/verify_pe)\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -4259,6 +4306,7 @@ int main()
     Phase20();
     Phase21();
     Phase22();
+    Phase23();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
