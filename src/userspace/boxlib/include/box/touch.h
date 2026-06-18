@@ -180,6 +180,30 @@ bool touch_wait(Touch *out, uint32_t timeout_ms);
  * in display-like loops that mix TouchRing and ResultRing consumption. */
 bool touch_available(void);
 
+/* Tag-selective consume.
+ *
+ * The TouchRing is cabin-wide: the kernel delivery-filters (only tags this
+ * cabin claimed are pushed here), but touch_pop / touch_wait are FIFO across
+ * ALL claimed tags. A cabin with several distinct claims (e.g. one box::touch
+ * subscription per tag) needs to pull the NEXT event of ONE tag while leaving
+ * the others intact for their own consumers. These two calls do that: they
+ * hand back the first event whose tag_id == `tag`, parking each non-matching
+ * event in a small per-cabin stash so a later call for ITS tag still finds it
+ * (FIFO order within a tag is preserved — the stash is consulted before the
+ * ring). Pure userspace; no new kernel op.
+ *
+ * touch_try_pop_tag: non-blocking. Returns true if a matching event was
+ *   delivered into `*out`, false if none is currently available.
+ * touch_wait_tag:    blocks up to timeout_ms (0 = forever) for a matching
+ *   event; returns false on timeout (or, for a forever wait, only under a
+ *   flood of unconsumed other-tag events that fills the stash — drain your
+ *   claimed tags).
+ *
+ * Single-thread-per-cabin: the stash needs no locking (the cabin's sole
+ * execution context owns both the ring consumer and the stash). */
+bool touch_try_pop_tag(TouchTag tag, Touch *out);
+bool touch_wait_tag(TouchTag tag, Touch *out, uint32_t timeout_ms);
+
 /* Diagnostic: TouchRing consumer-side counters (mirror of touch_ring_pop_stats
  * for users that only see box/touch.h). */
 void touch_pop_stats(uint64_t out[8]);
