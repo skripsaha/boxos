@@ -56,6 +56,7 @@
 #include <vector>
 
 #include "box/cxx/bay_memory_resource.h"
+#include "box/cxx/brook.h"
 #include "box/cxx/current.h"
 #include "box/cxx/executor.h"
 #include "box/cxx/math.h"
@@ -3306,6 +3307,114 @@ void Phase13()
            "(co_await touch/brook + RAII/exception/drain/pmr)\n");
 }
 
+// ── phase14 fixtures (Ф13a box::brook<T> native C++ Brook layer) ────────────
+// A trivially-copyable, default-constructible 8-byte frame (the Brook minimum).
+struct BrookTick {
+    uint32_t seq;
+    uint32_t val;
+};
+
+// The "input_range" promise of box::brook<T>, verified at compile time.
+static_assert(std::ranges::input_range<box::brook<BrookTick>>,
+              "box::brook<T> must model std::ranges::input_range");
+
+box::task<void> Phase14Producer(box::brook<BrookTick> *w)
+{
+    co_await w->send(BrookTick{7, 0xBEEFu});
+    co_return;
+}
+
+box::task<uint32_t> Phase14Consumer(box::brook<BrookTick> *r)
+{
+    std::optional<BrookTick> t = co_await r->next();
+    co_return t ? t->val : 0u;
+}
+
+void Phase14()
+{
+    using B = box::brook<BrookTick>;
+
+    // ── open + shape + round-trip + counters + try/timeout (one peer pair) ──
+    {
+        const char *tag = "cxx:brook:io";
+        B           w   = B::writer(tag, 4);
+        B           r   = B::reader(tag);
+        if (w && r) {
+            Check(w.frame_size() == sizeof(BrookTick) && w.capacity() == 4,
+                  "phase14 brook shape (frame_size/capacity)");
+
+            // blocking round-trip of one frame
+            Check(w.push(BrookTick{1, 0xAAu}), "phase14 brook push");
+            BrookTick t{};
+            Check(r.pop(t) && t.seq == 1 && t.val == 0xAAu,
+                  "phase14 brook pop round-trip");
+
+            // live counters: push 2, observe, pop in FIFO order
+            Check(w.push(BrookTick{2, 2}) && w.push(BrookTick{3, 3}),
+                  "phase14 brook push two");
+            Check(r.available() == 2 && r.free() == 2,
+                  "phase14 brook counters after two");
+            Check(r.pop(t) && t.seq == 2, "phase14 brook FIFO order");
+            Check(r.available() == 1, "phase14 brook counters after pop");
+            Check(r.pop(t), "phase14 brook drain last");
+
+            // non-blocking: empty try_pop, then fill and try_push the full ring
+            Check(r.try_pop(t) == -ERR_WOULD_BLOCK, "phase14 brook try_pop empty");
+            Check(w.push(BrookTick{4, 4}) && w.push(BrookTick{5, 5}) &&
+                      w.push(BrookTick{6, 6}) && w.push(BrookTick{7, 7}),
+                  "phase14 brook fill ring");
+            Check(w.try_push(BrookTick{8, 8}) == -ERR_WOULD_BLOCK,
+                  "phase14 brook try_push full");
+
+            // bounded: drain, pop_for times out on empty, push_for succeeds
+            for (int i = 0; i < 4; ++i) Check(r.pop(t), "phase14 brook drain ring");
+            Check(r.pop_for(t, 10) == -ERR_TIMEOUT, "phase14 brook pop_for timeout");
+            Check(w.push_for(BrookTick{9, 9}, 10) == OK, "phase14 brook push_for ok");
+            Check(r.pop(t) && t.seq == 9, "phase14 brook push_for delivered");
+        } else {
+            Check(false, "phase14 brook io open");
+        }
+    }
+
+    // ── synchronous input_range: drains N frames, ends on writer-leave ──────
+    {
+        const char *tag = "cxx:brook:range";
+        B           r;
+        {
+            B w = B::writer(tag, 4);
+            r   = B::reader(tag);
+            for (uint32_t i = 0; i < 3; ++i) w.push(BrookTick{i, i * 10u});
+        } // writer leaves; non-stream => reader drains the 3 frames then terminal
+        int      n   = 0;
+        uint32_t sum = 0;
+        for (const BrookTick &t : r) {
+            sum += t.val;
+            ++n;
+        }
+        Check(n == 3 && sum == 30u, "phase14 brook input_range drains then ends");
+    }
+
+    // ── coroutine: consumer co_await next() suspends, producer send() fills ──
+    {
+        const char *tag = "cxx:brook:async";
+        B           w   = B::writer(tag, 4);
+        B           r   = B::reader(tag);
+        if (w && r) {
+            box::executor ex;
+            auto          consumer = Phase14Consumer(&r);
+            ex.spawn(Phase14Producer(&w)); // queued first
+            ex.schedule(consumer.handle()); // LIFO: runs first, finds empty, suspends
+            ex.run();
+            Check(consumer.result() == 0xBEEFu, "phase14 brook co_await next/send");
+        } else {
+            Check(false, "phase14 brook async open");
+        }
+    }
+
+    printf("[CXX] PASS phase14: box::brook<T> (roles/shape/counters/try/timeout "
+           "+ input_range + co_await next/send)\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -3341,6 +3450,7 @@ int main()
     Phase11();
     Phase12();
     Phase13();
+    Phase14();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
