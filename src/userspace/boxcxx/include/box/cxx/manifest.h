@@ -135,6 +135,12 @@ public:
                  std::uint16_t in_crate = no_crate, std::uint16_t out_crate = no_crate,
                  std::span<const std::byte> params = {}, std::uint16_t flags = 0) noexcept
     {
+        // param_size is a 16-bit ABI field — reject an oversized blob rather
+        // than silently truncating it into a wrong-sized op.
+        if (params.size() > 0xFFFFu) {
+            ok_ = false;
+            return *this;
+        }
         if (ManifestBuilderAddOp(&mb_, deck, opcode, flags, in_crate, out_crate,
                                  params.data(), static_cast<std::uint16_t>(params.size())) != 0)
             ok_ = false;
@@ -244,6 +250,10 @@ inline mf_call_result mf_call1(std::uint16_t deck, std::uint16_t opcode,
                                std::span<std::byte>       out     = {},
                                std::uint32_t              timeout_ms = 0) noexcept
 {
+    // ABI field widths: param_size is 16-bit, in/out sizes are 32-bit. Reject
+    // an oversized span rather than silently truncating into a wrong-sized call.
+    if (params.size() > 0xFFFFu || in.size() > 0xFFFFFFFFull || out.size() > 0xFFFFFFFFull)
+        return {-1, 0};
     std::uint32_t actual = 0;
     int           rc = MfCall1(deck, opcode,
                                params.data(), static_cast<std::uint16_t>(params.size()),

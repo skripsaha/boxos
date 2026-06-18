@@ -84,7 +84,7 @@ public:
     // error (e.g. the process has gone).
     std::optional<proc_info_t> info() const noexcept
     {
-        if (!pid_) return std::nullopt;
+        if (pid_ == 0 || pid_ > 0xFFFFu) return std::nullopt;  // proc_info pid is 16-bit
         proc_info_t i{};
         if (::proc_info(static_cast<std::uint16_t>(pid_), &i) != 0) return std::nullopt;
         return i;
@@ -115,9 +115,11 @@ public:
     tag_scope() noexcept = default;
     explicit tag_scope(const char *tag)
     {
-        if (tag && *tag && ::proc_tag_add(tag) == 0) {
-            tag_    = tag;
-            active_ = true;
+        if (tag && *tag) {
+            tag_ = tag;  // copy the name BEFORE registering, so a throw here
+                         // (bad_alloc) cannot orphan a kernel tag
+            if (::proc_tag_add(tag) == 0) active_ = true;
+            else tag_.clear();
         }
     }
     tag_scope(const tag_scope &)            = delete;
