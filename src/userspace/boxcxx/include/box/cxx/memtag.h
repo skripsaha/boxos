@@ -78,8 +78,11 @@ public:
     std::vector<std::string> tags() const
     {
         if (info_.tag_count == 0) return {};
-        const std::size_t cap =
-            sizeof(std::uint32_t) + (static_cast<std::size_t>(info_.tag_count) + 1) * 256;
+        // 256 B/tag is generous for "key:value" strings; clamp to the kernel's
+        // per-call ceiling (the SYSTEM_OP_MEMTAG_TAGS handler rejects a larger
+        // out buffer), so a high tag_count can't push the request past it.
+        std::size_t cap = sizeof(std::uint32_t) + (static_cast<std::size_t>(info_.tag_count) + 1) * 256;
+        if (cap > 16384) cap = 16384;
         std::vector<char> buf(cap);
         std::uint32_t count = 0;
         if (::mem_region_tags(id_, buf.data(), static_cast<std::uint32_t>(buf.size()), &count) != 0)

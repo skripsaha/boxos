@@ -16,13 +16,14 @@ extern "C" {
  * "key:value" tags. Userspace can:
  *   - QUERY for region_ids matching a tag set (AND/OR/EXCLUDED)
  *   - INFO a region_id back to its descriptor
- *   - LOOKUP a phys address to find the covering region
+ *   - LOOKUP a phys (or virt, in the caller's cabin) address to the region
  *   - TAGS list a region's tag strings
  *   - STATS read global counters
  *
- * Phase 1 is read-only — mutation (apply / clear / register) lands
- * with the cabin security policy in Phase 2. Until then user code can
- * only OBSERVE the kernel's tag state.
+ * Introspection (the calls above) is unprivileged. Capability mutation —
+ * set_guard / cabin_grant / cabin_revoke (below) — requires the caller to
+ * hold the TagFS "system" tag; apply_pkey (box/pku.h) stamps by region_id.
+ * The default registry is permissive (no guard ⇒ every access allowed).
  *
  * All operations are O(1) cache-hit / O(N words) cache-miss on the
  * kernel side. Cache invalidates implicitly via generation counter.

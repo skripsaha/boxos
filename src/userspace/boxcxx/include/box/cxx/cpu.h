@@ -91,8 +91,9 @@ inline wake monitor_wait(const volatile void* addr, std::uint64_t deadline,
 // On-chip entropy as a first-class generator: prefers RDSEED (seed-grade, the
 // NIST SP 800-90B entropy source) and falls back to RDRAND (the SP 800-90A
 // DRBG). 64-bit native (vs std::random_device's 32-bit), so a single draw
-// fills a 64-bit engine seed. Satisfies uniform_random_bit_generator, so it
-// drops straight into std::seed_seq, any engine's seed(), or a distribution.
+// fills a 64-bit engine seed. Models the uniform_random_bit_generator
+// requirements (result_type / static min()/max() / operator()), so it drops
+// straight into std::seed_seq, any engine's seed(), or a distribution.
 //
 // On a CPU exposing neither RDSEED nor RDRAND it degrades to a non-cryptographic
 // TSC mix: operator() stays a total function, but engaged() reports false and
