@@ -65,6 +65,7 @@
 #include "box/cxx/manifest.h"
 #include "box/cxx/math.h"
 #include "box/cxx/message.h"
+#include "box/cxx/process.h"
 #include "box/cxx/tagfs.h"
 #include "box/cxx/touch.h"
 
@@ -4168,6 +4169,52 @@ void Phase21()
            "compiled_manifest (prepared handle reuse) + mf_call1 (single-op)\n");
 }
 
+// ── Ф16c: box::this_process / box::process / box::cabin + box::tag_scope ──────
+void Phase22()
+{
+    // ── identity: this_process and cabin agree; layout populated ────────
+    std::uint32_t pid = box::this_process::pid();
+    Check(pid != 0, "phase22 this_process::pid non-zero");
+    Check(box::cabin::pid() == pid, "phase22 cabin::pid == this_process::pid");
+    Check(box::this_process::spawner() == box::cabin::spawner(), "phase22 spawner agrees");
+    Check(box::cabin::heap_base() != 0 && box::cabin::stack_top() != 0,
+          "phase22 cabin address-space layout populated");
+
+    // ── box::process::self() ────────────────────────────────────────────
+    box::process me = box::process::self();
+    Check(me && me.pid() == pid, "phase22 process::self() pid");
+    Check(me.info().has_value(), "phase22 process::self().info()");
+    Check(me.alive(), "phase22 process::self().alive()");
+
+    // ── self process tags (broadcast membership) ────────────────────────
+    Check(!box::this_process::has_tag("cxx:p22:tag"), "phase22 tag absent initially");
+    Check(box::this_process::add_tag("cxx:p22:tag"), "phase22 add_tag");
+    Check(box::this_process::has_tag("cxx:p22:tag"), "phase22 has_tag after add");
+    Check(box::this_process::remove_tag("cxx:p22:tag"), "phase22 remove_tag");
+    Check(!box::this_process::has_tag("cxx:p22:tag"), "phase22 tag gone after remove");
+
+    // ── box::tag_scope RAII (carry a process tag for a scope) ───────────
+    {
+        box::tag_scope ts("cxx:p22:scope");
+        Check(static_cast<bool>(ts), "phase22 tag_scope active");
+        Check(box::this_process::has_tag("cxx:p22:scope"), "phase22 tag present inside scope");
+    }
+    Check(!box::this_process::has_tag("cxx:p22:scope"),
+          "phase22 tag removed after scope (RAII)");
+
+    // ── box::process::spawn (a new cabin) ───────────────────────────────
+    box::process child = box::process::spawn("proca");
+    if (child) {
+        Check(child.pid() != 0 && child.pid() != pid, "phase22 process::spawn child pid");
+        while (box::receive()) { /* drain proca's messages to its spawner (us) */ }
+    } else {
+        printf("[CXX] note phase22: proc_exec unavailable; spawn check skipped\n");
+    }
+
+    printf("[CXX] PASS phase22: box::this_process/process/cabin (identity/info/spawn) + "
+           "tag_scope (RAII process tag)\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -4211,6 +4258,7 @@ int main()
     Phase19();
     Phase20();
     Phase21();
+    Phase22();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
