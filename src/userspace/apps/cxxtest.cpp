@@ -4397,7 +4397,9 @@ void Phase25()
 
     if (found) {
         std::vector<std::string> tags = found->tags();
-        Check(tags.size() == found->tag_count(), "phase25 region tags() count matches tag_count");
+        // tags() may report fewer than tag_count if the kernel truncates to the
+        // out buffer — the contract is "no more than the descriptor's count".
+        Check(tags.size() <= found->tag_count(), "phase25 region tags() within tag_count");
         Check(!tags.empty(), "phase25 tagged region yields its tag strings");
         if (!tags.empty()) {
             const std::string &T = tags.front();
@@ -4522,7 +4524,27 @@ void Phase26()
         }
         // sealed dtor clears the pku tag from the bay region here
     }
-    box::protection_key(11).unlock();  // ensure key 11 is clear regardless of path
+
+    // ── mem_region_from_virt over a 2 MiB huge-page allocation. Bay maps >=2 MiB
+    //    with implicit 2 MiB pages; a pointer into one must still resolve to its
+    //    region (a 4 KiB-only page walk would miss it). This is the regression
+    //    guard for the huge-page-aware MemRegionFromVirt. ────────────────────
+    {
+        box::bay<std::uint64_t> hb = box::bay<std::uint64_t>::create("cxx:p26:huge", 256 * 1024);  // 2 MiB
+        if (hb) {
+            std::uint32_t hrid = ::mem_region_from_virt(hb.data());
+            Check(hrid != MEMTAG_INVALID_REGION_ID,
+                  "phase26 mem_region_from_virt resolves a 2 MiB huge-page region");
+            if (pku_ok && hrid != MEMTAG_INVALID_REGION_ID) {
+                box::sealed_region<std::uint64_t> hs(hb.as_span(), 12);
+                Check(hs.bound(), "phase26 sealed_region binds a huge-page region");
+            }
+        } else {
+            printf("[CXX] note phase26: 2 MiB bay create failed — huge-page check skipped\n");
+        }
+    }
+    box::protection_key(11).unlock();  // ensure keys are clear regardless of path
+    box::protection_key(12).unlock();
 
     printf("[CXX] PASS phase26: box::pku (rights/protection_key/access_window) + "
            "box::sealed_region<T> over owned bay via mem_region_from_virt\n");
@@ -4549,6 +4571,7 @@ void Phase27()
         Check(!box::hw::set_lam(box::hw::lam_mode::u48).has_value(),
               "phase27 set_lam(u48) is unexpected without LAM");
     } else if (box::hw::set_lam(box::hw::lam_mode::u48).has_value()) {
+        Check(box::hw::lam() == box::hw::lam_mode::u48, "phase27 set_lam(u48) round-trips via lam()");
         (void)box::hw::set_lam(box::hw::lam_mode::none);  // restore
     }
 

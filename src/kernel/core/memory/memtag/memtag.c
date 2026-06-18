@@ -514,7 +514,22 @@ uint32_t MemRegionFromVirt(void *ctx, uintptr_t virt) {
     vmm_context_t *vctx = (vmm_context_t *)ctx;
     if (!vctx) vctx = vmm_get_current_context();
     if (!vctx) return MEMTAG_INVALID_REGION_ID;
-    uintptr_t phys = vmm_virt_to_phys(vctx, virt);
+
+    /* Resolve at the ACTUAL leaf level. vmm_virt_to_phys only finds 4 KiB PT
+     * leaves, but user heap and Bay are mapped with implicit 2 MiB pages — a
+     * pointer into any >=2 MiB allocation would otherwise miss. vmm_get_leaf_pte
+     * reports the leaf level (1/2/3 = 4K/2M/1G); mask the phys base per level
+     * and add the in-page offset so MemRegionFromPhys hits the right page. */
+    uint8_t level = 0;
+    pte_t *leaf = vmm_get_leaf_pte(vctx, virt, &level);
+    if (!leaf) return MEMTAG_INVALID_REGION_ID;
+    pte_t entry = __atomic_load_n(leaf, __ATOMIC_ACQUIRE);
+    if (!(entry & VMM_FLAG_PRESENT)) return MEMTAG_INVALID_REGION_ID;
+
+    uintptr_t page_size = (level == 3) ? (1ULL << 30)   /* 1 GiB PDPT leaf */
+                        : (level == 2) ? (1ULL << 21)   /* 2 MiB PD leaf   */
+                                       : (1ULL << 12);  /* 4 KiB PT leaf   */
+    uintptr_t phys = (vmm_pte_to_phys(entry) & ~(page_size - 1)) + (virt & (page_size - 1));
     if (!phys) return MEMTAG_INVALID_REGION_ID;
     return MemRegionFromPhys(phys);
 }

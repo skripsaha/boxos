@@ -108,8 +108,14 @@ public:
 
     ~access_window() { if (engaged_) restore(); }
 
+    // Move-constructible (disarms the source) so it can be returned by value —
+    // e.g. from sealed_region::reveal() — in any context, not only where
+    // guaranteed copy elision applies. Non-copyable; move-assign is needless.
+    access_window(access_window &&o) noexcept
+        : key_(o.key_), saved_(o.saved_), engaged_(o.engaged_) { o.engaged_ = false; }
     access_window(const access_window &)            = delete;
     access_window &operator=(const access_window &) = delete;
+    access_window &operator=(access_window &&)      = delete;
 
 private:
     void restore() noexcept
