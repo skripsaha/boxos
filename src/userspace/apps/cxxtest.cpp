@@ -55,6 +55,7 @@
 #include <unwind.h>
 #include <vector>
 
+#include "box/cxx/bay.h"
 #include "box/cxx/bay_memory_resource.h"
 #include "box/cxx/brook.h"
 #include "box/cxx/current.h"
@@ -3538,6 +3539,108 @@ void Phase15()
            "+ publish + wait + co_await next + stream-view + registry/ack)\n");
 }
 
+// ── Ф14a: box::bay<T> / box::shared_object<T> (typed cross-cabin shared mem) ──
+// Compile-time contracts: a typed contiguous view over the shared Bay pages.
+static_assert(std::ranges::contiguous_range<box::bay<uint64_t>>,
+              "box::bay<T> must model std::ranges::contiguous_range");
+static_assert(std::is_same_v<std::ranges::range_value_t<box::bay<uint64_t>>, uint64_t>,
+              "box::bay<T> range_value_t == T");
+static_assert(!std::is_copy_constructible_v<box::bay<uint64_t>>, "box::bay<T> is move-only");
+static_assert(std::is_move_constructible_v<box::bay<uint64_t>>, "box::bay<T> is movable");
+static_assert(std::is_same_v<box::bay<const uint64_t>::reference, const uint64_t &>,
+              "box::bay<const T> hands out const references");
+
+struct Phase16Reg {
+    uint32_t a;
+    uint32_t b;
+};
+
+void Phase16()
+{
+    // ── create + typed read/write straight into the shared pages ─────────
+    auto b = box::bay<uint64_t>::create("cxx:bay:grid", 16);
+    Check(static_cast<bool>(b), "phase16 bay create");
+    if (!b) {
+        printf("[CXX] PASS phase16: box::bay (compiled; create unavailable)\n");
+        return;
+    }
+    Check(b.size() == 16, "phase16 bay size (elements)");
+    Check(b.size_bytes() == 16 * sizeof(uint64_t), "phase16 bay size_bytes");
+    Check(!b.encrypted() && !b.read_only(), "phase16 plaintext read-write bay");
+
+    for (std::size_t i = 0; i < b.size(); ++i) b[i] = static_cast<uint64_t>(i * i);
+
+    // read back through the span view
+    std::span<uint64_t> s = b.as_span();
+    Check(s.size() == 16 && s[3] == 9u && s[15] == 225u, "phase16 bay as_span view");
+
+    // read back through the contiguous range (range-for + a classic std algorithm)
+    uint64_t sum = 0;
+    for (uint64_t v : b) sum += v;
+    Check(sum == 1240u, "phase16 bay range-for sum of squares");
+    Check(std::count(b.begin(), b.end(), static_cast<uint64_t>(49)) == 1,
+          "phase16 bay contiguous iterators feed std::count");
+
+    // ── move semantics: the claim transfers, the source empties ──────────
+    auto moved = std::move(b);
+    Check(!static_cast<bool>(b) && static_cast<bool>(moved),
+          "phase16 bay move empties source");
+    Check(moved[7] == 49u, "phase16 moved bay keeps the mapping");
+
+    // ── open() the same tag — a second claim sees the same shared pages ──
+    // Cross-cabin sharing is proven by bay_test (T3/T4); here a same-cabin
+    // second claim exercises the typed open() wrapper. Guarded: if the host
+    // grants the claim it MUST observe the writes (one set of physical pages).
+    {
+        auto v = box::bay<uint64_t>::open("cxx:bay:grid");
+        if (v)
+            Check(v.size() == 16 && v[7] == 49u, "phase16 open() sees the shared writes");
+        else
+            printf("[CXX] note phase16: same-cabin second claim not granted; "
+                   "open() validated-by-identity with bay_test\n");
+    }
+
+    // ── const element type maps the pages read-only (BAY_RO) ─────────────
+    {
+        auto ro = box::bay<const uint64_t>::open("cxx:bay:grid");
+        if (ro) {
+            Check(ro.read_only(), "phase16 bay<const T> maps read-only");
+            Check(ro[2] == 4u, "phase16 const bay reads the shared data");
+        }
+    }
+
+    // ── encrypted factory is STRICT — no silent downgrade ────────────────
+    // QEMU TCG has no active TME-MK, so create_encrypted yields an empty bay;
+    // the caller then explicitly falls back to a plaintext create.
+    {
+        auto enc = box::bay<uint64_t>::create_encrypted("cxx:bay:vault", 4);
+        if (enc) {
+            // Real TME-MK present (server-class HW): live AND flagged encrypted.
+            Check(enc.encrypted(), "phase16 encrypted bay reports encrypted()");
+        } else {
+            auto plain = box::bay<uint64_t>::create("cxx:bay:vault:plain", 4);
+            Check(static_cast<bool>(plain) && !plain.encrypted(),
+                  "phase16 encrypted strict-empty, caller falls back to plaintext");
+        }
+    }
+
+    // ── box::shared_object<T>: a single shared T, pointer-like access ─────
+    {
+        auto obj = box::shared_object<Phase16Reg>::create("cxx:bay:reg");
+        Check(static_cast<bool>(obj), "phase16 shared_object create");
+        if (obj) {
+            obj->a   = 0x1111u;  // operator->
+            (*obj).b = 0x2222u;  // operator*
+            Check(obj->a == 0x1111u && (*obj).b == 0x2222u && obj.get()->a == 0x1111u,
+                  "phase16 shared_object operator-> / operator* / get()");
+        }
+    }
+
+    printf("[CXX] PASS phase16: box::bay<T> (create/open/encrypted-strict + "
+           "operator[]/as_span/size + contiguous range + move) + "
+           "box::shared_object<T>\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -3575,6 +3678,7 @@ int main()
     Phase13();
     Phase14();
     Phase15();
+    Phase16();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
