@@ -132,7 +132,8 @@ struct BayObject {
      * KeyID so reads decrypt correctly. */
     uint16_t    tme_keyid;
     uint16_t    _pad0;              /* keep `total_size` 8-byte-aligned */
-    uint64_t    total_size;         /* user-requested size (bytes) */
+    uint64_t    total_size;         /* PHYSICAL mapped bytes = chunk_count*chunk_size (VA reserve + unmap) */
+    uint64_t    user_size;          /* LOGICAL bytes the creator requested — what bay_size() reports */
     uint64_t    chunk_size;         /* PMM_PAGE_SIZE or BAY_HUGE_SIZE */
     uint32_t    chunk_count;        /* ceil(total_size / chunk_size) */
     uint32_t    flags;              /* sticky creation flags (RW + ENCRYPTED capability) */
@@ -160,7 +161,6 @@ struct BayClaim {
     BayObject  *bay;                /* upstream BayObject */
     BayClaim   *proc_next;          /* process claim list link */
     uint64_t    user_va_base;       /* per-cabin VA window start */
-    uint64_t    user_va_size;       /* same as bay->total_size, rounded up */
     uint32_t    flags;              /* claim-specific flags (BAY_RO) */
     uint32_t    _pad;
     struct process_t *proc;         /* back-pointer for sanity check */

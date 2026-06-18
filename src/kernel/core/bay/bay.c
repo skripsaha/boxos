@@ -688,6 +688,7 @@ error_t BayOpenInternal(struct process_t *proc,
         fresh->page_class  = cls;
         fresh->tme_keyid   = alloc_keyid;
         fresh->total_size  = (uint64_t)cc * cs;
+        fresh->user_size   = requested_size;
         fresh->chunk_size  = cs;
         fresh->chunk_count = cc;
         fresh->chunks      = chunks;
@@ -769,6 +770,7 @@ error_t BayOpenInternal(struct process_t *proc,
     /* At this point we hold b->lock and `bay` points to a live BayObject. */
     bay->ref_count++;
     uint64_t total_size = bay->total_size;
+    uint64_t user_size  = bay->user_size;
     uint32_t chunk_count = bay->chunk_count;
     uint64_t chunk_size  = bay->chunk_size;
     spin_unlock(&b->lock);
@@ -793,7 +795,6 @@ error_t BayOpenInternal(struct process_t *proc,
     claim->bay          = bay;
     claim->proc         = proc;
     claim->user_va_base = va;
-    claim->user_va_size = total_size;
     claim->flags        = flags;
 
     /* Phase 2B M2 — enforce MemTag capabilities BEFORE mapping pages
@@ -837,7 +838,7 @@ error_t BayOpenInternal(struct process_t *proc,
     atomic_fetch_add_u64(&g_stat_claims, 1);
 
     *out_user_va     = va;
-    *out_actual_size = total_size;
+    *out_actual_size = user_size;
     return OK;
 }
 
@@ -878,7 +879,7 @@ error_t BayReleaseInternal(struct process_t *proc, uint64_t user_va)
 uint64_t BaySizeInternal(struct process_t *proc, uint64_t user_va)
 {
     BayClaim *c = bay_find_claim_by_va(proc, user_va);
-    return c ? c->user_va_size : 0;
+    return c ? c->bay->user_size : 0;
 }
 
 void BayCleanupProcess(struct process_t *proc)
