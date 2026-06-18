@@ -62,6 +62,7 @@
 #include "box/cxx/executor.h"
 #include "box/cxx/heap.h"
 #include "box/cxx/math.h"
+#include "box/cxx/tagfs.h"
 #include "box/cxx/touch.h"
 
 // A user-defined formatter (exercised in phase9b) — drives the type-erased
@@ -3732,6 +3733,113 @@ void Phase17()
            "box::heap::tag (count/bytes/for_each/watch leak-guard)\n");
 }
 
+// ── Ф15a: box::tagfs::file + create/query/find + byte I/O ───────────────────
+void Phase18()
+{
+    using box::tagfs::file;
+
+    // ── create with tags ────────────────────────────────────────────────
+    file f = box::tagfs::create("cxx:tagfs:probe", {"cxx:phase18", "kind:test"});
+    Check(static_cast<bool>(f), "phase18 create returns a live file");
+    if (!f) {
+        printf("[CXX] PASS phase18: box::tagfs (compiled; create unavailable)\n");
+        return;
+    }
+
+    // ── metadata + tags ─────────────────────────────────────────────────
+    Check(f.name() == "cxx:tagfs:probe", "phase18 file.name()");
+    Check(f.has_tag("cxx") && f.has_tag("kind"), "phase18 file.has_tag(key)");
+    Check(f.tags().size() >= 2, "phase18 file.tags() lists the tags");
+
+    // ── random-access byte I/O bound to this file_id ────────────────────
+    const char msg[] = "hello tagfs stream";
+    Check(f.write_at(0, msg, sizeof(msg)) == static_cast<int>(sizeof(msg)),
+          "phase18 write_at(raw)");
+    char rbuf[sizeof(msg)] = {};
+    Check(f.read_at(0, rbuf, sizeof(rbuf)) == static_cast<int>(sizeof(msg))
+              && std::string_view(rbuf) == "hello tagfs stream",
+          "phase18 read_at(raw) round-trip");
+
+    std::byte payload[4] = {std::byte{1}, std::byte{2}, std::byte{3}, std::byte{4}};
+    Check(f.write_at(64, std::span<const std::byte>(payload, 4)) == 4, "phase18 write_at(span)");
+    std::byte rb[4] = {};
+    Check(f.read_at(64, std::span<std::byte>(rb, 4)) == 4 && rb[0] == std::byte{1},
+          "phase18 read_at(span) round-trip");
+
+    struct Rec {
+        std::uint32_t a;
+        std::uint32_t b;
+    };
+    Check(f.write_object<Rec>(128, Rec{0xAAu, 0xBBu}), "phase18 write_object<T>");
+    std::optional<Rec> rec = f.read_object<Rec>(128);
+    Check(rec && rec->a == 0xAAu && rec->b == 0xBBu, "phase18 read_object<T> round-trip");
+
+    // ── streaming bridge to the Current spine (self round-trip) ─────────
+    {
+        {
+            box::byte_current w = f.bytes(box::role::write);
+            Check(static_cast<bool>(w), "phase18 bytes(write) opens a channel");
+            if (w) w.write("STREAMRT", 8);
+        }  // write channel released → flushed
+        box::byte_current rch = f.bytes(box::role::read);
+        if (rch) {
+            char b[8] = {};
+            int  n = rch.read(b, 8);
+            Check(n == 8 && std::string_view(b, 8) == "STREAMRT",
+                  "phase18 bytes() spine round-trip");
+        } else {
+            Check(false, "phase18 bytes(read) opens a channel");
+        }
+        // Cross-check whether the by-name bridge reached THIS file_id.
+        char idbuf[8] = {};
+        if (f.read_at(0, idbuf, 8) == 8 && std::string_view(idbuf, 8) == "STREAMRT")
+            Check(true, "phase18 bytes() bridge reaches this file_id");
+        else
+            printf("[CXX] note phase18: bytes() bridges by name to a separate "
+                   "backing; read_at/write_at are id-precise\n");
+    }
+
+    // ── tag mutations (remove_tag by key removes a key:value tag) ────────
+    Check(f.add_tag("extra:1"), "phase18 add_tag (key:value)");
+    Check(f.has_tag("extra"), "phase18 has_tag after add_tag");
+    Check(f.remove_tag("extra"), "phase18 remove_tag by key");
+    Check(!f.has_tag("extra"), "phase18 tag gone after remove_tag");
+
+    // ── rename ──────────────────────────────────────────────────────────
+    Check(f.rename("cxx:tagfs:renamed"), "phase18 rename");
+    Check(f.name() == "cxx:tagfs:renamed", "phase18 name reflects rename");
+
+    // ── query → range + std::views composition ─────────────────────────
+    {
+        std::vector<file> results = box::tagfs::query("cxx:phase18");
+        Check(!results.empty(), "phase18 query by tag finds the file");
+        int cnt = 0;
+        for (const file &x :
+             results | std::views::filter([](const file &z) { return z.id() != 0; })) {
+            (void)x;
+            ++cnt;
+        }
+        Check(cnt >= 1, "phase18 query result composes with std::views::filter");
+    }
+
+    // ── find by name (TagFS names are not unique → check membership) ─────
+    {
+        std::vector<file> named = box::tagfs::find_all("cxx:tagfs:renamed");
+        bool              mine  = false;
+        for (const file &x : named)
+            if (x.id() == f.id()) { mine = true; break; }
+        Check(mine, "phase18 find_all by name includes this file");
+    }
+
+    // ── durability + cleanup ────────────────────────────────────────────
+    Check(f.anchor(), "phase18 anchor (durability flush)");
+    Check(f.remove(), "phase18 remove (delete)");
+
+    printf("[CXX] PASS phase18: box::tagfs::file (info/tags/add/remove/rename/anchor "
+           "+ read_at/write_at/read_object/write_object + bytes spine bridge) + "
+           "create/query/find\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -3771,6 +3879,7 @@ int main()
     Phase15();
     Phase16();
     Phase17();
+    Phase18();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

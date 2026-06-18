@@ -1949,10 +1949,30 @@ int tagfs_remove_tag_string(uint32_t file_id, const char *key)
         return -1;
     if (!key)
         return -1;
-    uint16_t tag_id = tag_registry_lookup(g_state.registry, key, NULL);
-    if (tag_id == TAGFS_INVALID_TAG_ID)
+    /* Remove by key. The registry keys tags by (key,value), so a key-only
+     * registry lookup cannot identify a key:value tag — and a bare "key" tag
+     * created by another file would mis-resolve here. Instead drop the file's
+     * own tag(s) whose key matches, regardless of value (unset "color" drops
+     * "color:red" and a bare "color" alike). */
+    int count = tag_bitmap_tag_count_for_file(g_state.bitmap_index, file_id);
+    if (count <= 0)
         return -1;
-    return tagfs_remove_tag(file_id, tag_id);
+
+    uint16_t *file_tags = kmalloc(sizeof(uint16_t) * (uint32_t)count);
+    if (!file_tags)
+        return -1;
+
+    int actual  = tag_bitmap_tags_for_file(g_state.bitmap_index, file_id,
+                                           file_tags, (uint32_t)count);
+    int removed = 0;
+    for (int i = 0; i < actual; i++) {
+        const char *k = tag_registry_key(g_state.registry, file_tags[i]);
+        if (k && strcmp(k, key) == 0 && tagfs_remove_tag(file_id, file_tags[i]) == 0)
+            removed++;
+    }
+
+    kfree(file_tags);
+    return removed > 0 ? 0 : -1;
 }
 
 bool tagfs_has_tag_string(uint32_t file_id, const char *key, const char *value)
