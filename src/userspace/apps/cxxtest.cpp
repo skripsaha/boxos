@@ -62,6 +62,7 @@
 #include "box/cxx/current.h"
 #include "box/cxx/executor.h"
 #include "box/cxx/heap.h"
+#include "box/cxx/manifest.h"
 #include "box/cxx/math.h"
 #include "box/cxx/message.h"
 #include "box/cxx/tagfs.h"
@@ -4098,6 +4099,75 @@ void Phase20()
            "co_await next_message cross-cabin delivery + payload guard + reply)\n");
 }
 
+// ── Ф16b: box::manifest / box::crate / compiled_manifest / mf_call1 ───────────
+// Exercised against a read-only storage query (DECK_STORAGE, TAG_QUERY 0x01):
+// in == none lists every file; the kernel writes [u32 count][u32 ids...] into
+// the output crate. The image always holds files, so this is deterministic.
+void Phase21()
+{
+    constexpr std::uint16_t STORAGE_TAG_QUERY = 0x01;
+
+    // ── box::mf_call1 (single-op) ───────────────────────────────────────
+    std::byte               qout[1024];
+    box::mf_call_result     r = box::mf_call1(DECK_STORAGE, STORAGE_TAG_QUERY,
+                                              {}, {}, std::span<std::byte>(qout, sizeof(qout)));
+    Check(static_cast<bool>(r), "phase21 mf_call1 storage query rc OK");
+    Check(r.produced >= 4, "phase21 mf_call1 produced a count header");
+    if (!r) {
+        printf("[CXX] PASS phase21: box::manifest/crate/compiled_manifest/mf_call1 "
+               "(compiled; query unavailable)\n");
+        return;
+    }
+    std::uint32_t count1 = 0;
+    __builtin_memcpy(&count1, qout, 4);
+
+    // ── box::manifest + box::crate (the same query, built op-by-op) ─────
+    std::byte           mout[1024];
+    box::manifest<>     mf;
+    std::uint16_t       oc = mf.add(box::crate::output(std::span<std::byte>(mout, sizeof(mout))));
+    mf.op(DECK_STORAGE, STORAGE_TAG_QUERY, box::no_crate, oc);
+    Check(static_cast<bool>(mf), "phase21 manifest built without overflow");
+    box::mf_outcome o = mf.submit();
+    Check(static_cast<bool>(o), "phase21 manifest submit rc OK");
+    box::crate ocr = mf.crate_at(oc);
+    Check(ocr.size() >= 4, "phase21 manifest output crate produced a count");
+    std::uint32_t count2 = 0;
+    if (ocr.size() >= 4) __builtin_memcpy(&count2, mout, 4);
+    Check(count2 == count1, "phase21 manifest query count matches mf_call1");
+    Check(ocr.produced().size() == ocr.size(), "phase21 crate.produced() spans the written bytes");
+
+    // ── box::compiled_manifest (prepared statement, submit twice) ───────
+    {
+        box::compiled_manifest cm(mf);
+        if (cm) {
+            box::mf_outcome c1 = cm.submit(mf);
+            Check(static_cast<bool>(c1), "phase21 compiled_manifest submit #1 rc OK");
+            std::uint32_t cc = 0;
+            if (mf.crate_at(oc).size() >= 4) __builtin_memcpy(&cc, mout, 4);
+            Check(cc == count1, "phase21 compiled_manifest produced the same count");
+            box::mf_outcome c2 = cm.submit(mf);
+            Check(static_cast<bool>(c2), "phase21 compiled_manifest submit #2 (handle reuse) rc OK");
+        } else {
+            printf("[CXX] note phase21: ManifestCompileHandle unavailable; compiled path skipped\n");
+        }
+    }
+
+    // ── box::crate factory descriptors (no syscall; deterministic) ──────
+    {
+        std::uint32_t v = 0xABCD1234u;
+        box::crate    ci = box::crate::input_object(v);
+        Check(ci.kind() == CRATE_KIND_INPUT && ci.size() == sizeof(v),
+              "phase21 crate::input_object descriptor");
+        std::uint64_t ov = 0;
+        box::crate    co = box::crate::output_object(ov);
+        Check(co.kind() == CRATE_KIND_OUTPUT && co.capacity() == sizeof(ov) && co.size() == 0,
+              "phase21 crate::output_object descriptor");
+    }
+
+    printf("[CXX] PASS phase21: box::manifest/crate (fluent multi-op builder) + "
+           "compiled_manifest (prepared handle reuse) + mf_call1 (single-op)\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -4140,6 +4210,7 @@ int main()
     Phase18();
     Phase19();
     Phase20();
+    Phase21();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
