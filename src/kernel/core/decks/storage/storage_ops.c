@@ -982,6 +982,50 @@ static int ObjContextClear(const ManifestOp *op, Crate *crates, uint16_t crate_c
     return OK;
 }
 
+/* STORAGE_CONTEXT_GET  no params
+ *                      out_crate: [u32 count][ (u16 len)(char tag[len]) ]*
+ *
+ * The companion to CONTEXT_SET / CONTEXT_CLEAR — reports the calling
+ * process's current context tags ("key" or "key:value"), so a caller can
+ * snapshot the context, install its own, and restore the original on exit
+ * (correct nesting). tagfs_context_get_tags already formats each tag; we
+ * just length-prefix them into the crate. Tags that would overflow the
+ * caller's buffer are dropped (count reflects what was actually written). */
+static int ObjContextGet(const ManifestOp *op, Crate *crates, uint16_t crate_count,
+                         const OpContext *ctx)
+{
+    (void)op; (void)crate_count;
+    if (!ctx || !ctx->proc)               return ERR_INVALID_ARGUMENT;
+    if (op->out_crate == CRATE_INDEX_NONE) return ERR_INVALID_ARGUMENT;
+
+    Crate *out = &crates[op->out_crate];
+    if (out->capacity < 4) return ERR_BUFFER_TOO_SMALL;
+
+    uint8_t *kp = StorageCrateMap(out, ctx, out->capacity);
+    if (!kp) return ERR_INVALID_ADDRESS;
+
+    /* tagfs_context_get_tags returns pointers into a static per-slot buffer
+     * held only for the duration of the call — copy each out immediately. */
+    const char *ctx_tags[64];
+    int ccount = tagfs_context_get_tags(ctx->proc->pid, ctx_tags, 64);
+    if (ccount < 0) ccount = 0;
+
+    uint64_t pos     = 4;  /* reserve the leading count */
+    uint32_t written = 0;
+    for (int i = 0; i < ccount; i++) {
+        size_t l = strlen(ctx_tags[i]);
+        if (l > 0xFFFFu) l = 0xFFFFu;
+        if (pos + 2u + l > out->capacity) break;  /* no room — stop, report partial */
+        uint16_t l16 = (uint16_t)l;
+        memcpy(kp + pos, &l16, 2);          pos += 2;
+        memcpy(kp + pos, ctx_tags[i], l);   pos += l;
+        written++;
+    }
+    memcpy(kp, &written, 4);
+    out->size = pos;
+    return OK;
+}
+
 /* -------------------------------------------------------------------------
  * Snapshot ops — userspace surface for CoW snapshots.
  *
@@ -1146,6 +1190,7 @@ error_t StorageDeckRegister(void)
         /* Per-process context: app+. */
         { STORAGE_CONTEXT_SET,  ObjContextSet,   OP_AUTH_APP, "storage.ctx.set"  },
         { STORAGE_CONTEXT_CLEAR,ObjContextClear, OP_AUTH_APP, "storage.ctx.clear"},
+        { STORAGE_CONTEXT_GET,  ObjContextGet,   OP_AUTH_APP, "storage.ctx.get"  },
         /* Snapshot management: app+. */
         { STORAGE_SNAP_CREATE,  ObjSnapCreate,   OP_AUTH_APP, "storage.snap.create"},
         { STORAGE_SNAP_DELETE,  ObjSnapDelete,   OP_AUTH_APP, "storage.snap.delete"},

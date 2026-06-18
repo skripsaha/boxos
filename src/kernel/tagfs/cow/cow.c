@@ -10,10 +10,28 @@
 // Global state
 static CowState g_cow_state;
 
+// Monotonic snapshot-ID source. File-scope (not a function-local static) so the
+// on-disk restore path can seed it past every reloaded id — see below.
+static volatile uint32_t g_next_snapshot_id = 1;
+
 // Allocate new snapshot ID atomically
 static uint32_t CowAllocSnapshotId(void) {
-    static volatile uint32_t next_id = 1;
-    return __atomic_fetch_add(&next_id, 1, __ATOMIC_SEQ_CST);
+    return __atomic_fetch_add(&g_next_snapshot_id, 1, __ATOMIC_SEQ_CST);
+}
+
+// Seed the allocator past a restored snapshot id. Snapshots persist across
+// reboots (CowWriteManifest) and are reloaded with their original ids, but the
+// allocator restarts at 1 each boot — without this, a fresh CowAllocSnapshotId
+// would hand out an id that collides with a reloaded snapshot, and snap_delete
+// (which keys on id, first match) would then delete the WRONG snapshot. Bump
+// the counter to max(current, id+1) so ids stay globally unique.
+static void CowSeedSnapshotId(uint32_t id) {
+    uint32_t cur = __atomic_load_n(&g_next_snapshot_id, __ATOMIC_SEQ_CST);
+    while (id >= cur &&
+           !__atomic_compare_exchange_n(&g_next_snapshot_id, &cur, id + 1,
+                                        false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) {
+        /* cur was reloaded with the live value on failure — retry. */
+    }
 }
 
 // Write the in-memory snapshot list to the on-disk manifest block(s).
@@ -524,6 +542,9 @@ uint64_t TagFS_CowGetCheckpoint(void) {
 void TagFS_CowRestoreSnapshot(const CowSnapshot *snap) {
     if (!g_cow_state.initialized || !snap)
         return;
+
+    /* Keep the allocator ahead of every reloaded id (unique-id invariant). */
+    CowSeedSnapshotId(snap->snapshot_id);
 
     spin_lock(&g_cow_state.lock);
 

@@ -25,6 +25,7 @@
 #define STORAGE_OBJ_GET_INFO    0x0A
 #define STORAGE_CONTEXT_SET     0x10
 #define STORAGE_CONTEXT_CLEAR   0x11
+#define STORAGE_CONTEXT_GET     0x12
 #define STORAGE_SNAP_CREATE     0x20
 #define STORAGE_SNAP_DELETE     0x21
 #define STORAGE_SNAP_LIST       0x22
@@ -290,6 +291,41 @@ int context_clear(void)
                      NULL, 0, NULL, 0, NULL, 0, NULL,
                      STORAGE_TIMEOUT_MS, NULL);
     return rc == 0 ? 0 : -1;
+}
+
+int context_get(char out_tags[][64], uint32_t max_tags, uint32_t *out_count)
+{
+    if (!out_tags || !out_count || max_tags == 0) return -1;
+
+    /* Sized to the kernel maximum: 4 + 64 tags * (2 len + 63 chars + 1). */
+    uint8_t  buf[4 + 64 * 66];
+    uint32_t out_actual = 0;
+    int rc = MfCall1(DECK_STORAGE, STORAGE_CONTEXT_GET,
+                     NULL, 0,
+                     NULL, 0,
+                     buf, sizeof(buf), &out_actual,
+                     STORAGE_TIMEOUT_MS, NULL);
+    if (rc != 0 || out_actual < 4) return -1;
+
+    uint32_t count = 0;
+    memcpy(&count, buf, 4);
+
+    uint32_t pos     = 4;
+    uint32_t written = 0;
+    for (uint32_t i = 0; i < count && written < max_tags; i++) {
+        if (pos + 2 > out_actual) break;
+        uint16_t len = 0;
+        memcpy(&len, buf + pos, 2);
+        pos += 2;
+        if (pos + len > out_actual) break;
+        size_t copy = len < 63 ? len : 63;
+        memcpy(out_tags[written], buf + pos, copy);
+        out_tags[written][copy] = '\0';
+        pos += len;
+        written++;
+    }
+    *out_count = written;
+    return 0;
 }
 
 int find_file_by_name(const char *filename, uint32_t *file_ids,

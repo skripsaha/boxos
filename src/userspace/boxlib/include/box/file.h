@@ -43,6 +43,12 @@ int tag_remove(uint32_t file_id, const char* key);
 
 int context_set(const char* tag);
 int context_clear(void);
+/* context_get — report the calling process's current context tags
+ * ("key" or "key:value", each up to 63 chars + NUL) into the caller's
+ * fixed-width table. *out_count receives the number written (capped at
+ * max_tags). Use it to save the context before installing your own and
+ * restore it on exit. Returns 0 on success, -1 on error. */
+int context_get(char out_tags[][64], uint32_t max_tags, uint32_t* out_count);
 
 int find_file_by_name(const char* filename, uint32_t* file_ids, file_info_t* out_infos, size_t max);
 
