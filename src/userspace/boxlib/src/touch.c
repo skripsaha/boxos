@@ -5,6 +5,7 @@
 #include "box/core/notify.h"
 #include "box/core/pocket.h"
 #include "box/cpu.h"
+#include "box/clock.h"
 #include "box/string.h"
 #include "box/error.h"
 #include "boxos_decks.h"  /* DECK_SYSTEM + SYSTEM_OP_TOUCH_* — single source */
@@ -240,11 +241,26 @@ bool touch_wait(Touch *out, uint32_t timeout_ms)
  * touch_pop / touch_wait are cabin-wide FIFO. To let one tag's consumer pull
  * its next event while leaving the rest for theirs, non-matching events drain
  * into a bounded per-cabin stash; a later call for their tag finds them there
- * (checked before the ring, so per-tag FIFO order holds). When the stash is
- * full the drain stops and the surplus stays in the ring — never dropped; it
- * becomes reachable again as other tags' consumers free their stashed slots.
+ * (checked before the ring, so per-tag FIFO order holds).
+ *
+ * Overflow (stash exhausted == TOUCH_STASH_MAX unconsumed foreign-tag events,
+ * i.e. a cabin claiming tags it never drains):
+ *   - touch_try_pop_tag (non-blocking) NEVER sheds — it stops draining and
+ *     leaves the surplus in the ring, reachable once other consumers run.
+ *   - touch_wait_tag with a deadline NEVER sheds — it returns false early
+ *     (backpressure) so the caller can drain its other subscriptions and
+ *     retry, leaving every event intact.
+ *   - touch_wait_tag forever (timeout_ms == 0) sheds the surplus foreign
+ *     event. A forever wait is the sole waiter in a single-context cabin, so
+ *     those stashed events have no consumer that can run to drain them;
+ *     shedding preserves liveness instead of dead-spinning, and loses nothing
+ *     a consumer could have observed.
  * For realistic interleaving (a few actively-drained tags) the bound is never
- * approached. Single-thread-per-cabin → no locking. */
+ * approached.
+ *
+ * Locking: none — valid only while a cabin has a single execution context (the
+ * cooperative box::executor). When Strands (multiple contexts per cabin) land,
+ * concurrent touch_*_tag callers must synchronize the stash. */
 #define TOUCH_STASH_MAX 256
 static Touch    g_touch_stash[TOUCH_STASH_MAX];
 static uint32_t g_touch_stash_count;
@@ -278,16 +294,43 @@ bool touch_try_pop_tag(TouchTag tag, Touch *out)
 bool touch_wait_tag(TouchTag tag, Touch *out, uint32_t timeout_ms)
 {
     if (tag == TOUCH_TAG_INVALID || !out) return false;
+
+    /* Absolute deadline (clock_uptime_ms-relative, as in brook.c); 0 == forever.
+     * The loop re-arms the wait for the REMAINING budget after each non-matching
+     * wake, so a bounded wait honors its full timeout for our tag instead of
+     * spending it on the first interleaved foreign event. */
+    uint64_t deadline = timeout_ms ? clock_uptime_ms() + timeout_ms : 0;
+
     for (;;) {
         if (touch_try_pop_tag(tag, out)) return true;
-        /* Room must exist to park one non-matching wake before we pop one. */
-        if (g_touch_stash_count >= TOUCH_STASH_MAX) return false;
+
+        uint32_t slice = 0;  /* 0 == block until the next event (forever) */
+        if (timeout_ms) {
+            /* No-drop backpressure: with no room to park another non-matching
+             * wake, end the bounded wait so the caller can drain its other
+             * subscriptions and retry — every event stays intact. */
+            if (g_touch_stash_count >= TOUCH_STASH_MAX) return false;
+            uint64_t now = clock_uptime_ms();
+            if (now >= deadline) return false;            /* deadline elapsed */
+            uint64_t rem = deadline - now;
+            slice = rem > 0xFFFFFFFFu ? 0xFFFFFFFFu : (uint32_t)rem;
+            if (slice == 0) slice = 1;                    /* never pass 0 (=forever) with time left */
+        }
+
         Touch tmp;
-        if (!touch_wait(&tmp, timeout_ms)) return false;  /* timed out / none */
+        if (!touch_wait(&tmp, slice)) {
+            if (timeout_ms && clock_uptime_ms() >= deadline) return false;
+            continue;  /* slept the slice with no event; re-arm against the deadline */
+        }
         if (tmp.tag_id == tag) { *out = tmp; return true; }
-        g_touch_stash[g_touch_stash_count++] = tmp;
-        /* Bounded wait spends its one cycle here; forever loops until matched. */
-        if (timeout_ms != 0) return touch_try_pop_tag(tag, out);
+
+        if (g_touch_stash_count < TOUCH_STASH_MAX) {
+            g_touch_stash[g_touch_stash_count++] = tmp;  /* park for its own tag */
+        }
+        /* else: forever wait + full stash — shed tmp. The bounded path already
+         * returned above on a full stash, so this is only the sole-waiter case,
+         * whose stashed foreign events have no consumer that can run to drain
+         * them; shedding preserves liveness (see the overflow note above). */
     }
 }
 
