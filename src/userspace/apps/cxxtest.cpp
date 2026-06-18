@@ -63,6 +63,7 @@
 #include "box/cxx/current.h"
 #include "box/cxx/executor.h"
 #include "box/cxx/heap.h"
+#include "box/cxx/hw.h"
 #include "box/cxx/manifest.h"
 #include "box/cxx/math.h"
 #include "box/cxx/memtag.h"
@@ -4527,6 +4528,62 @@ void Phase26()
            "box::sealed_region<T> over owned bay via mem_region_from_virt\n");
 }
 
+void Phase27()
+{
+    // ── box::hw::lam — gates + current mode + the kernel-blocked paths ──────
+    Check(box::hw::lam_available() == box::cpu::has_lam(), "phase27 lam_available agrees with cpu gate");
+    Check(box::hw::tme_available() == box::cpu::has_tme(), "phase27 tme_available agrees with cpu gate");
+
+    {
+        box::hw::lam_mode m = box::hw::lam();
+        Check(m == box::hw::lam_mode::none || m == box::hw::lam_mode::u48 || m == box::hw::lam_mode::u57,
+              "phase27 lam() returns a valid mode");
+        if (!box::hw::lam_available())
+            Check(m == box::hw::lam_mode::none, "phase27 no LAM -> mode none");
+    }
+    // U57 needs 5-level paging BoxOS never enables -> always unexpected.
+    Check(!box::hw::set_lam(box::hw::lam_mode::u57).has_value(),
+          "phase27 set_lam(u57) is unexpected (no 5-level paging)");
+    // U48 on a CPU without LAM is unexpected; with LAM, exercise and restore.
+    if (!box::hw::lam_available()) {
+        Check(!box::hw::set_lam(box::hw::lam_mode::u48).has_value(),
+              "phase27 set_lam(u48) is unexpected without LAM");
+    } else if (box::hw::set_lam(box::hw::lam_mode::u48).has_value()) {
+        (void)box::hw::set_lam(box::hw::lam_mode::none);  // restore
+    }
+
+    // ── box::hw::tme — platform snapshot ───────────────────────────────────
+    if (std::optional<box::hw::tme_state> t = box::hw::tme()) {
+        // No TME platform -> TME cannot be active and holds no KeyIDs.
+        Check(box::hw::tme_available() || !t->active(),
+              "phase27 no TME platform -> tme not active");
+        if (!t->active()) Check(t->in_use() == 0, "phase27 inactive TME has no keyids in use");
+    } else {
+        printf("[CXX] note phase27: hw::tme() unavailable on this config\n");
+    }
+
+    // ── box::tagged_pointer<T> — LAM-U48 tag bit-math (HW-independent) ──────
+    static std::uint64_t storage = 0xA5A5A5A5A5A5A5A5ull;
+    const std::uintptr_t kTag = static_cast<std::uintptr_t>(0x7F) << 56;
+    box::tagged_pointer<std::uint64_t> tp(&storage, 0x5A);
+    Check(tp.tag() == 0x5A, "phase27 tagged_pointer stores the tag");
+    Check(tp.untagged() == &storage, "phase27 untagged() recovers the canonical pointer");
+    Check(*tp.untagged() == 0xA5A5A5A5A5A5A5A5ull, "phase27 untagged() is dereferenceable");
+    Check(tp.value() == ((reinterpret_cast<std::uintptr_t>(&storage) & ~kTag) |
+                         (static_cast<std::uintptr_t>(0x5A) << 56)),
+          "phase27 tagged value carries the tag in bits 62:56");
+    tp.retag(0x3C);
+    Check(tp.tag() == 0x3C && tp.untagged() == &storage, "phase27 retag keeps the address");
+    box::tagged_pointer<std::uint64_t> over(&storage, 0xFF);
+    Check(over.tag() == 0x7F, "phase27 tag clamps to 7 bits");
+    Check(static_cast<bool>(tp), "phase27 tagged_pointer to storage is truthy");
+    // NOTE: dereferencing get()/operator* requires LAM-U48 engaged (the address
+    // is non-canonical otherwise); not exercised here as LAM is off under TCG.
+
+    printf("[CXX] PASS phase27: box::hw (lam/set_lam-expected/tme_state) + "
+           "box::tagged_pointer<T> (LAM-U48 tag bits)\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -4575,6 +4632,7 @@ int main()
     Phase24();
     Phase25();
     Phase26();
+    Phase27();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
