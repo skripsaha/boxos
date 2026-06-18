@@ -158,6 +158,33 @@ static int SysMemTagLookup(const ManifestOp *op, Crate *crates,
     return OK;
 }
 
+/* ─── SYSTEM_OP_MEMTAG_LOOKUP_VIRT ──────────────────────────────────── */
+/* params: [u64 virt]; out_crate: u32 region_id. Resolves a virtual address
+ * in the CALLER's cabin (virt -> phys via the caller's page tables -> the
+ * covering region). This is the only userspace path from an owned pointer to
+ * its region_id — pku/sealed_region needs it to stamp a region it allocated. */
+static int SysMemTagLookupVirt(const ManifestOp *op, Crate *crates,
+                               uint16_t crate_count, const OpContext *ctx) {
+    (void)crate_count;
+    if (!ctx || !ctx->proc)                return ERR_INVALID_ARGUMENT;
+    if (op->out_crate == CRATE_INDEX_NONE) return ERR_INVALID_ARGUMENT;
+    if (op->param_size < sizeof(uint64_t)) return ERR_INVALID_ARGUMENT;
+
+    uint64_t virt;
+    memcpy(&virt, op->params, sizeof(uint64_t));
+    uint32_t region_id = MemRegionFromVirt(ctx->proc->cabin, (uintptr_t)virt);
+
+    Crate *out = &crates[op->out_crate];
+    if (out->capacity < sizeof(region_id)) return ERR_INVALID_ARGUMENT;
+
+    error_t cr = vmm_user_buf_commit_out(ctx->proc->cabin,
+                                          (uintptr_t)out->addr,
+                                          &region_id, sizeof(region_id));
+    if (cr != OK) return cr;
+    out->size = sizeof(region_id);
+    return OK;
+}
+
 /* ─── SYSTEM_OP_MEMTAG_TAGS ─────────────────────────────────────────── */
 static int SysMemTagTags(const ManifestOp *op, Crate *crates,
                          uint16_t crate_count, const OpContext *ctx) {
@@ -450,6 +477,7 @@ error_t MemTagOpsRegister(void) {
         { SYSTEM_OP_MEMTAG_QUERY,      SysMemTagQuery,     OP_AUTH_APP, "system.memtag.query"      },
         { SYSTEM_OP_MEMTAG_INFO,       SysMemTagInfo,      OP_AUTH_APP, "system.memtag.info"       },
         { SYSTEM_OP_MEMTAG_LOOKUP,     SysMemTagLookup,    OP_AUTH_APP, "system.memtag.lookup"     },
+        { SYSTEM_OP_MEMTAG_LOOKUP_VIRT, SysMemTagLookupVirt, OP_AUTH_APP, "system.memtag.lookup_virt" },
         { SYSTEM_OP_MEMTAG_TAGS,       SysMemTagTags,      OP_AUTH_APP, "system.memtag.tags"       },
         { SYSTEM_OP_MEMTAG_STATS,      SysMemTagStats,     OP_AUTH_APP, "system.memtag.stats"      },
         { SYSTEM_OP_MEMTAG_SET_GUARD,  SysMemTagSetGuard,  OP_AUTH_APP, "system.memtag.set_guard"  },

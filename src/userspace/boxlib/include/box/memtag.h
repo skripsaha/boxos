@@ -70,6 +70,12 @@ int      mem_region_info(uint32_t region_id, mem_region_info_t *out);
  * covers the address. */
 uint32_t mem_region_from_phys(uint64_t phys);
 
+/* Virt → region_id for an address in the CALLER's cabin (virt → phys via
+ * the caller's page tables → covering region). The only userspace path from
+ * an owned pointer to its region_id — pku stamping needs it. Returns
+ * MEMTAG_INVALID_REGION_ID if the address maps to no tagged region. */
+uint32_t mem_region_from_virt(const void *virt);
+
 /* List tag strings on a region. `out_buf` filled with NUL-separated
  * "key:value" strings; *out_count receives entry count. Returns 0
  * on success or -error. */

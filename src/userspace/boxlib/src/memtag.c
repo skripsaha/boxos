@@ -93,6 +93,21 @@ uint32_t mem_region_from_phys(uint64_t phys)
     return result;
 }
 
+uint32_t mem_region_from_virt(const void *virt)
+{
+    uint8_t  params[sizeof(uint64_t)];
+    uint64_t v = (uint64_t)(uintptr_t)virt;
+    uint32_t result = MEMTAG_INVALID_REGION_ID;
+    memcpy(params, &v, sizeof(uint64_t));
+    int rc = MfCall1(DECK_SYSTEM, SYSTEM_OP_MEMTAG_LOOKUP_VIRT,
+                     params, sizeof(params),
+                     0, 0,
+                     &result, sizeof(result), 0,
+                     30000, 0);
+    if (rc != 0) return MEMTAG_INVALID_REGION_ID;
+    return result;
+}
+
 int mem_region_tags(uint32_t region_id,
                     char *out_buf, uint32_t out_buf_size,
                     uint32_t *out_count)
