@@ -60,6 +60,7 @@
 #include "box/cxx/brook.h"
 #include "box/cxx/current.h"
 #include "box/cxx/executor.h"
+#include "box/cxx/heap.h"
 #include "box/cxx/math.h"
 #include "box/cxx/touch.h"
 
@@ -3641,6 +3642,96 @@ void Phase16()
            "box::shared_object<T>\n");
 }
 
+// ── Ф14b: box::tagged_resource + box::heap (per-tag heap accounting) ─────────
+void Phase17()
+{
+    // ── box::tagged_resource: a pmr resource tagging every allocation ────
+    {
+        box::tagged_resource res("cxx:heap:pmr");
+        std::pmr::vector<int> v(&res);
+        for (int i = 0; i < 100; ++i) v.push_back(i);
+        Check(v.size() == 100 && v[99] == 99, "phase17 tagged pmr vector data intact");
+        Check(box::heap::count("cxx:heap:pmr") >= 1,
+              "phase17 tagged_resource: pmr buffer accounted under the tag");
+
+        // over-aligned allocation routed through the resource (align 64 > 16)
+        struct alignas(64) Cache {
+            char c[64];
+        };
+        std::pmr::polymorphic_allocator<Cache> pa(&res);
+        Cache *cl = pa.allocate(1);
+        Check((reinterpret_cast<std::uintptr_t>(cl) % 64) == 0,
+              "phase17 tagged_resource honors over-alignment (>16)");
+        pa.deallocate(cl, 1);
+    }  // res outlives v (declared first); blocks freed at scope exit
+
+    // ── box::heap::stats snapshot ────────────────────────────────────────
+    {
+        heap_stats_t st = box::heap::stats();
+        Check(st.malloc_calls > 0 && st.total_allocated > 0, "phase17 heap::stats snapshot");
+    }
+
+    // ── box::heap::tag: count / bytes / for_each over a fresh tag ─────────
+    {
+        box::heap::tag probe("cxx:heap:probe");
+        Check(probe.count() == 0, "phase17 fresh tag has no live allocations");
+        void *a = malloc_tagged(64, "cxx:heap:probe");
+        void *b = malloc_tagged(128, "cxx:heap:probe");
+        Check(probe.count() == 2, "phase17 tag.count() after two tagged allocations");
+        Check(probe.bytes() >= 64 + 128, "phase17 tag.bytes() sums the tagged blocks");
+
+        std::size_t seen = 0, sum = 0;
+        probe.for_each([&](void *, std::size_t sz, const char *) { ++seen; sum += sz; });
+        Check(seen == 2 && sum >= 192, "phase17 tag.for_each visits each live block");
+
+        free(a);
+        Check(probe.count() == 1, "phase17 tag.count() decremented after free");
+        free(b);
+        Check(probe.count() == 0, "phase17 tag clean after all freed");
+    }
+
+    // ── box::heap::tag::watch(): RAII leak guard, baseline-relative ──────
+    {
+        box::heap::tag s("cxx:heap:scope");
+        void *pre = malloc_tagged(16, "cxx:heap:scope");  // live before the guard
+        {
+            auto g = s.watch();  // baseline excludes `pre`
+            void *x = malloc_tagged(32, "cxx:heap:scope");
+            void *y = malloc_tagged(32, "cxx:heap:scope");
+            Check(g.leaked() == 2, "phase17 watch() reports 2 allocations above baseline");
+            free(x);
+            Check(g.leaked() == 1, "phase17 watch() leaked count tracks frees");
+            free(y);
+            Check(g.leaked() == 0, "phase17 watch() clean once scope allocs freed");
+            // armed dtor, leaked()==0 → no report
+        }
+        free(pre);
+    }
+
+    // ── watch() dismiss: a deliberately-retained allocation is silenced ──
+    {
+        box::heap::tag s2("cxx:heap:retain");
+        auto  g    = s2.watch();
+        void *keep = malloc_tagged(16, "cxx:heap:retain");
+        Check(g.leaked() == 1, "phase17 watch() sees the retained allocation");
+        g.dismiss();  // expected retention — disarm the destructor report
+        free(keep);
+    }
+
+    // ── box::heap::for_each_tagged visits across tags ────────────────────
+    {
+        void       *t     = malloc_tagged(48, "cxx:heap:sweep");
+        std::size_t total = 0;
+        box::heap::for_each_tagged([&](void *, std::size_t, const char *) { ++total; });
+        Check(total >= 1, "phase17 for_each_tagged visits live tagged blocks");
+        free(t);
+    }
+
+    printf("[CXX] PASS phase17: box::tagged_resource (pmr, over-align) + "
+           "box::heap::stats/count/for_each/for_each_tagged + "
+           "box::heap::tag (count/bytes/for_each/watch leak-guard)\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -3679,6 +3770,7 @@ int main()
     Phase14();
     Phase15();
     Phase16();
+    Phase17();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
