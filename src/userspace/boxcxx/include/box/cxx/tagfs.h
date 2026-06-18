@@ -22,6 +22,13 @@
 //         for (auto& f : box::tagfs::query("video:cam0")
 //                        | std::views::filter([](auto& f){ return f.size() > 0; }))
 //
+//   * box::tagfs::context — a scoped, nesting-correct per-process tag filter
+//     (RAII restore of the previous context); box::tagfs::snapshot — an owning
+//     RAII handle on a CoW snapshot (auto-delete unless kept), with
+//     box::tagfs::snapshots() listing all ids; box::tagfs::on_anchor() — a
+//     box::touch subscription that delivers durability (anchor) events, read
+//     through box::tagfs::anchor_event.
+//
 // This is a box:: extension, not part of std. The byte-stream bridge resolves by
 // the file's NAME through the "file:" Current scheme; for I/O bound precisely to
 // this file_id use read_at / write_at. query() returns up to 255 files (the
@@ -37,10 +44,12 @@
 #include <string>
 #include <string_view>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 #include "box/file.h"
 #include "box/cxx/current.h"  // box::byte_current, box::role, box::file(), CURRENT_CREATE
+#include "box/cxx/touch.h"    // box::tag, box::event, box::subscription (anchor observer)
 
 namespace box {
 namespace tagfs {
@@ -233,6 +242,210 @@ inline std::vector<file> find_all(const char *name)
         for (int i = 0; i < n; ++i) out.emplace_back(ids[i]);
     }
     return out;
+}
+
+// ── context — a scoped per-process tag filter (RAII, nesting-correct) ──────
+// The context is a set of tags the kernel folds into every query/create this
+// process makes (it narrows what files you see and auto-tags what you create).
+// box::tagfs::context installs its tags on construction and *restores the
+// previous context* on destruction, so contexts nest correctly:
+//
+//     box::tagfs::context outer("project:alpha");      // sees alpha files
+//     {
+//         box::tagfs::context inner("stage:review");    // alpha AND review
+//     }                                                  // back to alpha-only
+//
+// Restoration is clear-then-reapply (not atomic) — correct for a cabin's single
+// line of execution. Move-only.
+class context {
+    std::vector<std::string> prior_;
+    bool                     active_ = false;
+
+    void _M_enter(std::initializer_list<const char *> tags)
+    {
+        prior_ = current();  // capture the existing context before changing it
+        for (const char *t : tags)
+            if (t && *t) ::context_set(t);
+        active_ = true;
+    }
+    void _M_restore()
+    {
+        ::context_clear();
+        for (const std::string &t : prior_) ::context_set(t.c_str());
+        active_ = false;
+    }
+
+public:
+    context() noexcept = default;
+    explicit context(const char *tag) { _M_enter({tag}); }
+    context(std::initializer_list<const char *> tags) { _M_enter(tags); }
+
+    context(const context &)            = delete;
+    context &operator=(const context &) = delete;
+    context(context &&o) noexcept : prior_(std::move(o.prior_)), active_(o.active_)
+    {
+        o.active_ = false;
+    }
+    context &operator=(context &&o) noexcept
+    {
+        if (this != &o) {
+            if (active_) _M_restore();
+            prior_    = std::move(o.prior_);
+            active_   = o.active_;
+            o.active_ = false;
+        }
+        return *this;
+    }
+    ~context() { if (active_) _M_restore(); }
+
+    explicit operator bool() const noexcept { return active_; }
+
+    // The tags in this process's context right now ("key" or "key:value"),
+    // freshly read from the kernel.
+    static std::vector<std::string> current()
+    {
+        std::vector<std::string> out;
+        char                     buf[64][64];
+        std::uint32_t            n = 0;
+        if (::context_get(buf, 64, &n) == 0) {
+            out.reserve(n);
+            for (std::uint32_t i = 0; i < n; ++i) out.emplace_back(buf[i]);
+        }
+        return out;
+    }
+};
+
+// ── snapshot — an owning RAII handle on a CoW snapshot ─────────────────────
+// snap_create freezes a copy-on-write view of one file (or the whole
+// filesystem) under a unique name; the snapshot's redirected blocks are
+// reclaimed at snap_delete. This handle deletes the snapshot when it goes out
+// of scope unless you keep() it. Move-only (like box::bay / box::brook).
+class snapshot {
+    std::uint32_t id_    = 0;
+    bool          owned_ = false;
+    std::string   name_;
+
+    snapshot(std::uint32_t id, const char *name) : id_(id), owned_(true), name_(name) {}
+
+public:
+    snapshot() noexcept = default;
+    snapshot(const snapshot &)            = delete;
+    snapshot &operator=(const snapshot &) = delete;
+    snapshot(snapshot &&o) noexcept
+        : id_(o.id_), owned_(o.owned_), name_(std::move(o.name_))
+    {
+        o.id_ = 0;
+        o.owned_ = false;
+    }
+    snapshot &operator=(snapshot &&o) noexcept
+    {
+        if (this != &o) {
+            if (owned_) ::snap_delete(id_);
+            id_      = o.id_;
+            owned_   = o.owned_;
+            name_    = std::move(o.name_);
+            o.id_    = 0;
+            o.owned_ = false;
+        }
+        return *this;
+    }
+    ~snapshot() { if (owned_) ::snap_delete(id_); }
+
+    // Factories — a snapshot needs a unique name (1..31 chars). Capture one
+    // file, or the whole filesystem (of_all). Returns an empty snapshot
+    // (operator bool == false) on failure, e.g. the name is already taken.
+    static snapshot of(std::uint32_t file_id, const char *name)
+    {
+        std::uint32_t sid = 0;
+        if (name && ::snap_create(name, file_id, &sid) == 0) return snapshot(sid, name);
+        return snapshot{};
+    }
+    static snapshot of(const file &f, const char *name) { return of(f.id(), name); }
+    static snapshot of_all(const char *name) { return of(0u, name); }
+
+    std::uint32_t    id() const noexcept { return id_; }
+    std::string_view name() const noexcept { return name_; }
+    explicit operator bool() const noexcept { return owned_; }
+
+    // Detach — the snapshot outlives this handle (no auto-delete). Returns the
+    // id so a caller can record it for a later box::tagfs::snapshots() scan.
+    std::uint32_t keep() noexcept
+    {
+        owned_ = false;
+        return id_;
+    }
+
+    // Delete now (idempotent); after this the handle is empty.
+    bool drop() noexcept
+    {
+        if (!owned_) return false;
+        bool ok = ::snap_delete(id_) == 0;
+        owned_  = false;
+        return ok;
+    }
+};
+
+// Every CoW snapshot id currently known to the filesystem.
+inline std::vector<std::uint32_t> snapshots()
+{
+    std::uint32_t              ids[64];
+    std::uint32_t              n = 0;
+    std::vector<std::uint32_t> out;
+    if (::snap_list(ids, 64, &n) == 0) {
+        out.reserve(n);
+        for (std::uint32_t i = 0; i < n; ++i) out.push_back(ids[i]);
+    }
+    return out;
+}
+
+// ── anchor observer — bridge durability events into box::touch ─────────────
+// anchor() (durability flush) publishes an ANCHOR event on the well-known
+// "anchor" tag, and for a specific file also on each of that file's tags. A
+// monitor subscribes with on_anchor() and reads the delivered box::event
+// through anchor_event to learn which file became durable.
+
+// The payload anchor() publishes — must match the kernel's ObjAnchor record.
+struct anchor_payload {
+    std::uint32_t file_id;  // 0 == whole-filesystem anchor
+    std::uint8_t  op;       // 2 == ANCHOR (1 == WRITE, on the same file tags)
+    std::uint8_t  _pad[3];
+    std::uint64_t now_us;
+};
+static_assert(sizeof(anchor_payload) == 16, "anchor_payload must match kernel layout");
+static_assert(offsetof(anchor_payload, file_id) == 0, "anchor_payload.file_id offset");
+static_assert(offsetof(anchor_payload, op) == 4, "anchor_payload.op offset");
+static_assert(offsetof(anchor_payload, now_us) == 8, "anchor_payload.now_us offset");
+
+// A typed view over a box::event delivered on the "anchor" tag (or a file tag).
+// Decodes once; file tags also carry WRITE events (op 1), so check is_anchor().
+class anchor_event {
+    std::uint32_t file_id_ = 0;
+    std::uint8_t  op_      = 0;
+    bool          valid_   = false;
+
+public:
+    anchor_event() noexcept = default;
+    explicit anchor_event(const box::event &e) noexcept
+    {
+        if (std::optional<anchor_payload> p = e.payload_as<anchor_payload>()) {
+            file_id_ = p->file_id;
+            op_      = p->op;
+            valid_   = true;
+        }
+    }
+
+    std::uint32_t file_id() const noexcept { return file_id_; }
+    std::uint8_t  op() const noexcept { return op_; }
+    bool whole_fs() const noexcept { return valid_ && file_id_ == 0; }
+    bool is_anchor() const noexcept { return valid_ && op_ == 2; }
+    explicit operator bool() const noexcept { return valid_; }
+};
+
+// Claim the "anchor" tag; poll() / wait() / co_await next() deliver each anchor
+// as a box::event you wrap in anchor_event. Returns a RAII box::subscription.
+inline box::subscription on_anchor(box::touch_mode m = box::touch_mode::rest)
+{
+    return box::subscription(box::tag("anchor"), m);
 }
 
 }  // namespace tagfs

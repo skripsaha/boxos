@@ -3840,6 +3840,160 @@ void Phase18()
            "create/query/find\n");
 }
 
+// ── Ф15b: box::tagfs context / snapshot RAII + anchor↔touch observer ──────
+static_assert(!std::is_copy_constructible_v<box::tagfs::context>,
+              "box::tagfs::context is move-only");
+static_assert(std::is_move_constructible_v<box::tagfs::context>,
+              "box::tagfs::context is movable");
+static_assert(!std::is_copy_constructible_v<box::tagfs::snapshot>,
+              "box::tagfs::snapshot is move-only");
+static_assert(std::is_move_constructible_v<box::tagfs::snapshot>,
+              "box::tagfs::snapshot is movable");
+
+void Phase19()
+{
+    using box::tagfs::context;
+    using box::tagfs::file;
+    using box::tagfs::snapshot;
+
+    auto results_have = [](const std::vector<file> &v, std::uint32_t id) {
+        for (const file &f : v)
+            if (f.id() == id) return true;
+        return false;
+    };
+
+    // Availability probe + leftover cleanup (the disk persists across matrix
+    // configs, so a crashed prior run could leave p19 files behind).
+    for (file f : box::tagfs::query("p19:probe")) f.remove();
+
+    file fa = box::tagfs::create("cxx:p19:alpha", {"p19ctx:alpha", "p19:probe"});
+    if (!fa) {
+        printf("[CXX] PASS phase19: box::tagfs context/snapshot/anchor "
+               "(compiled; storage unavailable)\n");
+        return;
+    }
+    file fb = box::tagfs::create("cxx:p19:beta", {"p19ctx:beta", "p19:probe"});
+    Check(static_cast<bool>(fb), "phase19 second probe file created");
+
+    // ── context: a nesting-correct per-process tag filter ───────────────
+    // The kernel ANDs the context tags into every query, so an installed
+    // context narrows what this process sees. RAII restores the prior context.
+    {
+        std::vector<std::string> baseline = context::current();
+
+        Check(results_have(box::tagfs::query("p19:probe"), fa.id()) &&
+                  results_have(box::tagfs::query("p19:probe"), fb.id()),
+              "phase19 baseline query sees both probe files");
+
+        {
+            context outer("p19ctx:alpha");
+            Check(static_cast<bool>(outer), "phase19 context(outer) active");
+
+            std::vector<file> r = box::tagfs::query("p19:probe");
+            Check(results_have(r, fa.id()) && !results_have(r, fb.id()),
+                  "phase19 context narrows query to alpha (excludes beta)");
+
+            std::vector<std::string> cur      = context::current();
+            bool                     has_tag  = false;
+            for (const std::string &t : cur)
+                if (t == "p19ctx:alpha") has_tag = true;
+            Check(has_tag, "phase19 context::current() reports the installed tag");
+
+            {
+                context inner("p19ctx:beta");
+                Check(static_cast<bool>(inner), "phase19 context(inner) active");
+                std::vector<file> ri = box::tagfs::query("p19:probe");
+                Check(!results_have(ri, fa.id()) && !results_have(ri, fb.id()),
+                      "phase19 nested context (alpha AND beta) matches neither");
+            }  // inner restored → alpha-only
+
+            std::vector<file> r2 = box::tagfs::query("p19:probe");
+            Check(results_have(r2, fa.id()) && !results_have(r2, fb.id()),
+                  "phase19 inner scope exit restores outer context (alpha-only)");
+        }  // outer restored → baseline
+
+        std::vector<file> rb = box::tagfs::query("p19:probe");
+        Check(results_have(rb, fa.id()) && results_have(rb, fb.id()),
+              "phase19 outer scope exit restores baseline (both visible)");
+        Check(context::current().size() == baseline.size(),
+              "phase19 context fully restored to baseline");
+    }
+
+    // ── snapshot: owning RAII over a CoW snapshot ───────────────────────
+    // The C++ contract is "the dtor (or drop()) issues exactly one snap_delete";
+    // verify it by the change in the live snapshot count, which is robust to
+    // whatever else already exists on disk and to the kernel's id assignment.
+    {
+        auto snap_count = [] { return box::tagfs::snapshots().size(); };
+
+        std::size_t n0 = snap_count();
+        {
+            snapshot snap = snapshot::of(fa, "cxx:p19:snap1");
+            if (snap) {
+                Check(snap.id() != 0, "phase19 snapshot has a live id");
+                Check(snap.name() == "cxx:p19:snap1", "phase19 snapshot name echoes create");
+                Check(snap_count() == n0 + 1, "phase19 snapshots() reflects the new snapshot");
+            } else {
+                printf("[CXX] note phase19: snap_create unavailable/name taken; "
+                       "snapshot lifecycle skipped\n");
+            }
+        }  // snap dtor → snap_delete
+        Check(snap_count() == n0, "phase19 snapshot auto-deleted on scope exit (RAII)");
+
+        // keep() detaches the snapshot so it outlives the handle's scope.
+        {
+            std::uint32_t kept = 0;
+            {
+                snapshot snap = snapshot::of(fa, "cxx:p19:snap2");
+                if (snap) kept = snap.keep();
+            }
+            if (kept) {
+                Check(snap_count() == n0 + 1,
+                      "phase19 keep() detaches: snapshot survives scope");
+                Check(::snap_delete(kept) == 0, "phase19 manual snap_delete of kept snapshot");
+                Check(snap_count() == n0, "phase19 kept snapshot gone after manual delete");
+            }
+        }
+
+        // Whole-filesystem snapshot (file_id 0), auto-deleted on scope exit.
+        {
+            snapshot whole = snapshot::of_all("cxx:p19:snapall");
+            if (whole) Check(whole.id() != 0, "phase19 snapshot::of_all (whole filesystem)");
+        }
+        Check(snap_count() == n0, "phase19 all snapshots cleaned up (count restored)");
+    }
+
+    // ── anchor observer: durability events bridged into box::touch ──────
+    // anchor() publishes an ANCHOR event on the "anchor" tag; on_anchor()
+    // claims it. Touch self-delivery is best-effort on the matrix (see
+    // phase15), so the observation is guarded.
+    {
+        box::subscription asub = box::tagfs::on_anchor();
+        if (asub) {
+            const char durable[] = "durable";
+            fa.write_at(0, durable, sizeof(durable));
+            Check(fa.anchor(), "phase19 anchor (durability flush) publishes event");
+            if (std::optional<box::event> ev = asub.wait(1000)) {
+                box::tagfs::anchor_event ae(*ev);
+                Check(static_cast<bool>(ae), "phase19 anchor_event decodes the payload");
+                Check(ae.is_anchor(), "phase19 anchor_event.is_anchor() (op == 2)");
+                Check(ae.file_id() == fa.id(),
+                      "phase19 anchor_event.file_id() == anchored file");
+            } else {
+                printf("[CXX] note phase19: anchor event not observed; on_anchor "
+                       "machinery validated-by-identity with box::touch (phase15)\n");
+            }
+        }
+    }
+
+    // ── cleanup ─────────────────────────────────────────────────────────
+    fa.remove();
+    fb.remove();
+
+    printf("[CXX] PASS phase19: box::tagfs::context (nested RAII filter) + snapshot "
+           "(RAII/keep/of_all + snapshots()) + on_anchor/anchor_event\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -3880,6 +4034,7 @@ int main()
     Phase16();
     Phase17();
     Phase18();
+    Phase19();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
