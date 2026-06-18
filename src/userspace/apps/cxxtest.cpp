@@ -65,6 +65,7 @@
 #include "box/cxx/heap.h"
 #include "box/cxx/manifest.h"
 #include "box/cxx/math.h"
+#include "box/cxx/memtag.h"
 #include "box/cxx/message.h"
 #include "box/cxx/process.h"
 #include "box/cxx/system.h"
@@ -4364,6 +4365,101 @@ void Phase24()
            "box::hardware_entropy (RDSEED/RDRAND URBG)\n");
 }
 
+void Phase25()
+{
+    // ── box::memtag::counters() — global registry snapshot, invariants ──────
+    std::optional<box::memtag::stats> st = box::memtag::counters();
+    Check(st.has_value(), "phase25 memtag::counters() returns a snapshot");
+    if (st) {
+        Check(st->region_active() >= 1, "phase25 at least one active region");
+        Check(st->region_active() <= st->region_slot_count(), "phase25 active <= slot_count");
+        Check(st->region_slot_count() <= st->region_slot_cap(), "phase25 slot_count <= slot_cap");
+        Check(st->tag_count() >= 1, "phase25 registry has seeded tags");
+    }
+
+    // ── find a tagged region by scanning the slot table (no hard-coded tag —
+    //    the kernel seeds zone tags at boot; we derive a real one at runtime).
+    //    Prefer one whose base is phys-mapped so the covering() lookup below
+    //    has a positive case; fall back to any tagged region otherwise. ───────
+    std::optional<box::memtag::region> found;          // tagged AND phys-mapped
+    std::optional<box::memtag::region> any_tagged;     // fallback: any tagged
+    std::uint32_t walk = st ? st->region_slot_count() : 0;
+    if (walk > 256) walk = 256;  // zones are seeded into low slots; bound the scan
+    for (std::uint32_t id = 0; id < walk && !found; ++id) {
+        std::optional<box::memtag::region> r = box::memtag::find(id);
+        if (!r || r->tag_count() == 0) continue;
+        if (!any_tagged) any_tagged = r;
+        if (box::memtag::covering(r->base_phys())) found = r;  // base resolves via id_by_page
+    }
+    if (!found) found = any_tagged;
+
+    if (found) {
+        std::vector<std::string> tags = found->tags();
+        Check(tags.size() == found->tag_count(), "phase25 region tags() count matches tag_count");
+        Check(!tags.empty(), "phase25 tagged region yields its tag strings");
+        if (!tags.empty()) {
+            const std::string &T = tags.front();
+            Check(found->has_tag(T), "phase25 region has_tag(its own tag)");
+            // covering(phys) returns the region that genuinely COVERS phys (the
+            // kernel keeps one owner per page in id_by_page, so an overlapped or
+            // non-phys region need not be the owner — assert range containment,
+            // not id identity). nullopt means the base isn't in the phys map.
+            std::optional<box::memtag::region> cov = box::memtag::covering(found->base_phys());
+            if (cov) {
+                std::uint64_t b = found->base_phys();
+                Check(b >= cov->base_phys() && b < cov->base_phys() + cov->size_bytes(),
+                      "phase25 covering(phys) returns a region covering that phys");
+            } else {
+                printf("[CXX] note phase25: tagged region base not phys-mapped — covering skipped\n");
+            }
+            // query by that tag must include this region, and every hit bears it.
+            std::vector<box::memtag::region> hits = box::memtag::query({T.c_str()});
+            bool contains_self = false, all_bear = true;
+            for (const auto &h : hits) {
+                if (h.id() == found->id()) contains_self = true;
+                if (!h.has_tag(T)) all_bear = false;
+            }
+            Check(!hits.empty() && contains_self, "phase25 query(tag) returns the tagged region");
+            Check(all_bear, "phase25 every query(tag) hit bears the tag");
+        }
+    } else {
+        printf("[CXX] note phase25: no tagged region in slot scan — query/region checks skipped\n");
+    }
+
+    // ── check_access: the default registry is permissive (no guard ⇒ allow) ─
+    std::uint32_t me = box::this_process::pid();
+    if (found)
+        Check(box::memtag::check_access(me, *found),
+              "phase25 default-permissive check_access is true");
+
+    // ── capability control round-trip on a TEST-ONLY tag. No real region
+    //    bears 'cxx:p25:*', so this can never perturb the live system, and we
+    //    revoke/clear afterwards. grant/set_guard need the "system" tag-bit, so
+    //    an unprivileged cabin simply gets a clean false (noted, not failed). ─
+    bool granted = box::memtag::grant(me, "cxx:p25:cap");
+    if (granted) {
+        std::vector<std::string> ct = box::memtag::cabin_tags(me);
+        bool has = false;
+        for (const auto &t : ct) if (t == "cxx:p25:cap") has = true;
+        Check(has, "phase25 grant reflected in cabin_tags");
+        Check(box::memtag::revoke(me, "cxx:p25:cap"), "phase25 revoke succeeds");
+        std::vector<std::string> ct2 = box::memtag::cabin_tags(me);
+        bool still = false;
+        for (const auto &t : ct2) if (t == "cxx:p25:cap") still = true;
+        Check(!still, "phase25 revoke removes the tag");
+    } else {
+        printf("[CXX] note phase25: memtag grant unprivileged on this cabin — round-trip skipped\n");
+    }
+    // Exercise set_guard's path on a test-only tag, then clear it (privilege-
+    // dependent return; reaching past here proves the path doesn't fault).
+    (void)box::memtag::set_guard("cxx:p25:guard", true);
+    (void)box::memtag::set_guard("cxx:p25:guard", false);
+    (void)box::memtag::cabin_tags(me);  // unprivileged read — always exercised
+
+    printf("[CXX] PASS phase25: box::memtag (query/region/tags/covering/stats + "
+           "guard/grant/revoke/cabin_tags/check_access)\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -4410,6 +4506,7 @@ int main()
     Phase22();
     Phase23();
     Phase24();
+    Phase25();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
