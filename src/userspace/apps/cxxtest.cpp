@@ -67,6 +67,7 @@
 #include "box/cxx/math.h"
 #include "box/cxx/memtag.h"
 #include "box/cxx/message.h"
+#include "box/cxx/pku.h"
 #include "box/cxx/process.h"
 #include "box/cxx/system.h"
 #include "box/cxx/tagfs.h"
@@ -4460,6 +4461,72 @@ void Phase25()
            "guard/grant/revoke/cabin_tags/check_access)\n");
 }
 
+void Phase26()
+{
+    const bool pku_ok = box::pku::available();
+
+    // ── mem_region_from_virt: resolve an OWNED allocation's region (the new
+    //    kernel virt→region primitive). PKU-independent — a pure MemTag lookup
+    //    over the bay's pages, which the kernel registers as a region. ─────────
+    box::bay<std::uint64_t> b = box::bay<std::uint64_t>::create("cxx:p26:sealed", 64);
+    std::uint32_t bay_region = MEMTAG_INVALID_REGION_ID;
+    if (b) {
+        bay_region = ::mem_region_from_virt(b.data());
+        Check(bay_region != MEMTAG_INVALID_REGION_ID,
+              "phase26 mem_region_from_virt resolves an owned bay's region");
+        if (bay_region != MEMTAG_INVALID_REGION_ID)
+            Check(box::memtag::find(bay_region).has_value(),
+                  "phase26 virt-resolved region_id is a live region");
+    } else {
+        printf("[CXX] note phase26: bay create failed — region/sealed checks skipped\n");
+    }
+
+    // ── protection_key rights round-trip + access_window RAII (PKRU register) ─
+    if (pku_ok) {
+        box::protection_key k(9);
+        Check(k.lock(), "phase26 protection_key.lock()");
+        { auto r = k.rights(); Check(r.access_disabled && !r.write_disabled, "phase26 lock -> AD only"); }
+        Check(k.read_only(), "phase26 protection_key.read_only()");
+        { auto r = k.rights(); Check(!r.access_disabled && r.write_disabled, "phase26 read_only -> WD only"); }
+        Check(k.unlock(), "phase26 protection_key.unlock()");
+        { auto r = k.rights(); Check(!r.access_disabled && !r.write_disabled, "phase26 unlock -> clear both"); }
+
+        k.lock();  // prior state = locked
+        {
+            box::access_window w(k);
+            Check(!box::pku::get_rights(9).access_disabled, "phase26 access_window opens the key");
+        }
+        Check(box::pku::get_rights(9).access_disabled, "phase26 access_window restores prior rights");
+        k.unlock();  // cleanup
+    } else {
+        printf("[CXX] note phase26: PKU unavailable — protection_key/access_window checks skipped\n");
+    }
+
+    // ── sealed_region<T> over the owned bay (W^X). On TCG the access *fault* is
+    //    not enforced, so the writes below never trap; we verify the binding and
+    //    the PKRU bit transitions (seal → reveal → re-seal), which DO round-trip. ─
+    if (b && pku_ok) {
+        box::sealed_region<std::uint64_t> sealed(b.as_span(), 11);
+        Check(sealed.bound(), "phase26 sealed_region binds the owned region");
+        if (sealed.bound()) {
+            Check(sealed.region() == bay_region, "phase26 sealed_region bound to the bay's region");
+            Check(box::pku::get_rights(11).access_disabled, "phase26 sealed_region is sealed by default");
+            {
+                box::access_window w = sealed.reveal();
+                Check(!box::pku::get_rights(11).access_disabled, "phase26 reveal() opens the region");
+                sealed.data()[0] = 0xC0FFEEull;  // write through the revealed window
+                Check(sealed.data()[0] == 0xC0FFEEull, "phase26 revealed region is writable");
+            }
+            Check(box::pku::get_rights(11).access_disabled, "phase26 region re-seals after the window");
+        }
+        // sealed dtor clears the pku tag from the bay region here
+    }
+    box::protection_key(11).unlock();  // ensure key 11 is clear regardless of path
+
+    printf("[CXX] PASS phase26: box::pku (rights/protection_key/access_window) + "
+           "box::sealed_region<T> over owned bay via mem_region_from_virt\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -4507,6 +4574,7 @@ int main()
     Phase23();
     Phase24();
     Phase25();
+    Phase26();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

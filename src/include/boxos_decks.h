@@ -126,6 +126,7 @@
  * know the region_id of — security comes from cabin's grant-set on the
  * region's other tags. */
 #define SYSTEM_OP_MEMTAG_APPLY_PKEY 0xAA  /* (u32 region_id)(u8 pkey)           */
+#define SYSTEM_OP_MEMTAG_LOOKUP_VIRT 0xAB /* (u64 virt) -> region_id (caller VM) */
 
 /* ─── HW — real-HW per-process CPU state (0xB0 – 0xBF) ─────────────── */
 /* Per-process state knobs that don't fit MemTag's region-centric model.
