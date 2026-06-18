@@ -24,6 +24,12 @@
 // subscriptions in one cabin stay independent. This is a box:: extension, not
 // std; the event terminal (a drained stream-view) is a chosen timeout, never a
 // Unix EOF.
+//
+// Do NOT mix box::subscription with the Ф12 whole-ring box::touch_event() in
+// the same cabin: touch_event() pops the cabin-wide ring with no tag stash, so
+// it can swallow an event a subscription was waiting for (and vice-versa, the
+// stash holds events touch_event() never inspects). Pick one consumption model
+// per cabin — the tag-filtered box::touch layer here, or the raw any-tag awaiter.
 #ifndef BOXCXX_BOX_TOUCH_H
 #define BOXCXX_BOX_TOUCH_H
 
@@ -92,6 +98,8 @@ public:
     {
         static_assert(std::is_trivially_copyable_v<T>,
                       "box::event::payload_as<T> requires a trivially copyable T");
+        static_assert(sizeof(T) <= BOXOS_TOUCH_PAYLOAD_MAX,
+                      "box::event::payload_as<T>: T exceeds the 96-byte Touch payload");
         if (t_.payload_len < sizeof(T)) return std::nullopt;
         T v;
         __builtin_memcpy(&v, t_.payload, sizeof(T));
@@ -111,6 +119,8 @@ inline bool publish(const tag &tg, const T &v, std::uint32_t after_ms = 0) noexc
 {
     static_assert(std::is_trivially_copyable_v<T>,
                   "box::publish(tag, T) requires a trivially copyable payload");
+    static_assert(sizeof(T) <= BOXOS_TOUCH_PAYLOAD_MAX,
+                  "box::publish(tag, T): T exceeds the 96-byte Touch payload");
     return publish(tg, &v, static_cast<std::uint32_t>(sizeof(T)), after_ms);
 }
 
