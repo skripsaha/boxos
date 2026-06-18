@@ -4154,6 +4154,24 @@ void Phase21()
         }
     }
 
+    // ── sticky-failure: overflow makes the builder refuse, not emit junk ─
+    {
+        box::manifest<64, 2> small;  // tiny: 2-crate table
+        std::byte            sb[8] = {};
+        small.add(box::crate::output(std::span<std::byte>(sb, sizeof(sb))));
+        small.add(box::crate::output(std::span<std::byte>(sb, sizeof(sb))));
+        Check(small.add(box::crate::output(std::span<std::byte>(sb, sizeof(sb)))) == box::no_crate,
+              "phase21 crate-table overflow returns no_crate");
+        Check(!small, "phase21 crate-table overflow sets the failure flag");
+        Check(!small.submit(), "phase21 overflowed manifest submit refuses");
+
+        std::vector<std::byte> huge(70000);  // > 0xFFFF param_size ABI limit
+        box::manifest<>        mf2;
+        mf2.op(DECK_STORAGE, STORAGE_TAG_QUERY, box::no_crate, box::no_crate,
+               std::span<const std::byte>(huge.data(), huge.size()));
+        Check(!mf2, "phase21 oversized op params (>64KB) set the failure flag");
+    }
+
     // ── box::crate factory descriptors (no syscall; deterministic) ──────
     {
         std::uint32_t v = 0xABCD1234u;
