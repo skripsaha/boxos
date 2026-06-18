@@ -59,6 +59,7 @@
 #include "box/cxx/bay.h"
 #include "box/cxx/bay_memory_resource.h"
 #include "box/cxx/brook.h"
+#include "box/cxx/cpu.h"
 #include "box/cxx/current.h"
 #include "box/cxx/executor.h"
 #include "box/cxx/heap.h"
@@ -4280,6 +4281,89 @@ void Phase23()
            "reboot/shutdown surface) + box::efi (info/esrt range/verify_pe)\n");
 }
 
+void Phase24()
+{
+    // ── box::cpu feature gates — cross-check against the system snapshot ─────
+    // The feature bits come from the same post-AP-intersect g_cpu_caps the
+    // kernel exposes to sysinfo, so the booleans must agree exactly. (The
+    // calibrated frequency is NOT cross-checked for equality: a periodic TSC
+    // recalibration publishes the new value to the static and to the cpu_caps
+    // page in separate stores, so the two reads can momentarily disagree on
+    // real hardware with thermal drift — only its >0 invariant is stable.)
+    std::optional<box::system_info> si = box::system::info();
+    if (si) {
+        Check(box::cpu::has_waitpkg() == si->waitpkg(),
+              "phase24 has_waitpkg agrees with system_info");
+        Check(box::cpu::has_invariant_tsc() == si->invariant_tsc(),
+              "phase24 has_invariant_tsc agrees with system_info");
+        if (box::cpu::has_invariant_tsc())
+            Check(box::cpu::tsc_freq_khz() > 0 && si->tsc_freq_khz() > 0,
+                  "phase24 invariant TSC has a calibrated freq on both surfaces");
+    }
+
+    // ── TSC reads are monotone across a measurement window ──────────────────
+    std::uint64_t t0 = box::cpu::tsc_now();
+    volatile std::uint64_t spin = 0;
+    for (int i = 0; i < 1000; ++i) spin += i;  // a little real work between reads
+    std::uint64_t t1 = box::cpu::tsc_end();
+    Check(t1 >= t0, "phase24 tsc_now/tsc_end monotone across a window");
+    if (box::cpu::has_invariant_tsc() && box::cpu::tsc_freq_khz() > 0)
+        Check(box::cpu::tsc_to_ns(box::cpu::ms_to_tsc(5)) > 0, "phase24 tsc_to_ns/ms_to_tsc round-trip");
+
+    // ── box::hardware_entropy — a real uniform_random_bit_generator ─────────
+    box::hardware_entropy g;
+    const bool engaged = box::hardware_entropy::engaged();
+    Check(g.entropy() == (engaged ? 64.0 : 0.0), "phase24 entropy() reports source width honestly");
+    {
+        // active_source() must agree with the underlying gates.
+        using src = box::hardware_entropy::source;
+        src s = box::hardware_entropy::active_source();
+        src want = box::cpu::has_rdseed() ? src::seed
+                 : box::cpu::has_rdrand() ? src::rand
+                                          : src::none;
+        Check(s == want, "phase24 active_source matches cpu gates");
+        Check((s != src::none) == engaged, "phase24 engaged() iff a HW source backs draws");
+    }
+    {
+        // Draws vary (HW source or the TSC fallback both advance).
+        std::uint64_t v[8];
+        for (auto &x : v) x = g();
+        bool all_same = true;
+        for (int i = 1; i < 8; ++i) if (v[i] != v[0]) { all_same = false; break; }
+        Check(!all_same, "phase24 hardware_entropy draws are not constant");
+    }
+    {
+        // Drives a distribution and seeds an engine — proves the URBG contract
+        // end-to-end through the real <random> code paths.
+        std::uniform_int_distribution<int> d(1, 6);
+        bool in_range = true;
+        for (int i = 0; i < 32; ++i) { int r = d(g); if (r < 1 || r > 6) { in_range = false; break; } }
+        Check(in_range, "phase24 hardware_entropy drives uniform_int_distribution");
+        std::mt19937_64 eng(g());
+        Check(eng() != eng(), "phase24 hardware_entropy seeds a 64-bit engine");
+    }
+    if (!engaged)
+        printf("[CXX] note phase24: no RDSEED/RDRAND on this config — hardware_entropy in TSC-fallback\n");
+
+    // ── box::cpu::monitor_wait — the WAITPKG user-mode wait ─────────────────
+    {
+        volatile std::uint32_t cell = 0;
+        std::uint64_t deadline = box::cpu::tsc_now() + box::cpu::ms_to_tsc(1);
+        box::cpu::wake w = box::cpu::monitor_wait(&cell, deadline);
+        if (box::cpu::monitor_supported()) {
+            // No other writer to the line, so we expect to wake on the deadline
+            // (an interrupt-driven 'written' is also fine) — never 'unavailable'.
+            Check(w != box::cpu::wake::unavailable, "phase24 monitor_wait engaged returns a real wake");
+        } else {
+            Check(w == box::cpu::wake::unavailable, "phase24 monitor_wait disengaged when WAITPKG absent");
+            printf("[CXX] note phase24: WAITPKG absent — monitor_wait reports unavailable\n");
+        }
+    }
+
+    printf("[CXX] PASS phase24: box::cpu (feature gates/tsc + monitor_wait WAITPKG) + "
+           "box::hardware_entropy (RDSEED/RDRAND URBG)\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -4325,6 +4409,7 @@ int main()
     Phase21();
     Phase22();
     Phase23();
+    Phase24();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
