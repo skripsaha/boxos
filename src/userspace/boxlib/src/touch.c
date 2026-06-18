@@ -235,6 +235,62 @@ bool touch_wait(Touch *out, uint32_t timeout_ms)
     return touch_wait_pause(out, timeout_ms);
 }
 
+/* ── Tag-selective consume (box::touch C++ layer, Ф13b) ──────────────────
+ *
+ * touch_pop / touch_wait are cabin-wide FIFO. To let one tag's consumer pull
+ * its next event while leaving the rest for theirs, non-matching events drain
+ * into a bounded per-cabin stash; a later call for their tag finds them there
+ * (checked before the ring, so per-tag FIFO order holds). When the stash is
+ * full the drain stops and the surplus stays in the ring — never dropped; it
+ * becomes reachable again as other tags' consumers free their stashed slots.
+ * For realistic interleaving (a few actively-drained tags) the bound is never
+ * approached. Single-thread-per-cabin → no locking. */
+#define TOUCH_STASH_MAX 256
+static Touch    g_touch_stash[TOUCH_STASH_MAX];
+static uint32_t g_touch_stash_count;
+
+static bool touch_stash_take(TouchTag tag, Touch *out)
+{
+    for (uint32_t i = 0; i < g_touch_stash_count; i++) {
+        if (g_touch_stash[i].tag_id == tag) {
+            *out = g_touch_stash[i];
+            for (uint32_t j = i; j + 1 < g_touch_stash_count; j++)
+                g_touch_stash[j] = g_touch_stash[j + 1];
+            g_touch_stash_count--;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool touch_try_pop_tag(TouchTag tag, Touch *out)
+{
+    if (tag == TOUCH_TAG_INVALID || !out) return false;
+    if (touch_stash_take(tag, out)) return true;
+    Touch tmp;
+    while (g_touch_stash_count < TOUCH_STASH_MAX && touch_pop(&tmp)) {
+        if (tmp.tag_id == tag) { *out = tmp; return true; }
+        g_touch_stash[g_touch_stash_count++] = tmp;  /* not ours — keep for its tag */
+    }
+    return false;
+}
+
+bool touch_wait_tag(TouchTag tag, Touch *out, uint32_t timeout_ms)
+{
+    if (tag == TOUCH_TAG_INVALID || !out) return false;
+    for (;;) {
+        if (touch_try_pop_tag(tag, out)) return true;
+        /* Room must exist to park one non-matching wake before we pop one. */
+        if (g_touch_stash_count >= TOUCH_STASH_MAX) return false;
+        Touch tmp;
+        if (!touch_wait(&tmp, timeout_ms)) return false;  /* timed out / none */
+        if (tmp.tag_id == tag) { *out = tmp; return true; }
+        g_touch_stash[g_touch_stash_count++] = tmp;
+        /* Bounded wait spends its one cycle here; forever loops until matched. */
+        if (timeout_ms != 0) return touch_try_pop_tag(tag, out);
+    }
+}
+
 int touch_await(TouchTag tag, Touch *out, uint32_t timeout_ms)
 {
     if (tag == TOUCH_TAG_INVALID || !out) return -ERR_INVALID_ARGS;
