@@ -47,6 +47,7 @@
 #include <shared_mutex>
 #include <latch>
 #include <barrier>
+#include <semaphore>
 #include <new>
 #include <exception>
 #include <initializer_list>
@@ -4998,6 +4999,60 @@ void Phase33()
            "arrive_and_drop + completion, reusable phases)\n");
 }
 
+// ── phase34: std::counting_semaphore + binary_semaphore (Ф19d) ───────────
+void Phase34()
+{
+    using namespace std::chrono;
+
+    // ── counting_semaphore ──────────────────────────────────────────────────
+    std::counting_semaphore<4> cs(2); // two permits available
+    Check(cs.try_acquire(), "phase34 counting_sem permit -> try_acquire true"); // 2->1
+    Check(cs.try_acquire(), "phase34 counting_sem second permit -> true");       // 1->0
+    Check(!cs.try_acquire(),
+          "phase34 counting_sem drained -> try_acquire false"); // 0
+    cs.release();                                                // 0->1
+    Check(cs.try_acquire(), "phase34 counting_sem permit after release -> true"); // 1->0
+
+    cs.release(2);  // 0->2
+    cs.acquire();   // 2->1 (permit available, no block)
+    cs.acquire();   // 1->0
+    Check(!cs.try_acquire(), "phase34 counting_sem drained after acquires");
+
+    // Empty semaphore: a timed acquire blocks to the deadline, then fails —
+    // the wait loop must burn the wall time it promised.
+    {
+        box::stopwatch sw;
+        bool got           = cs.try_acquire_for(milliseconds(15));
+        nanoseconds waited = sw.elapsed();
+        Check(!got, "phase34 counting_sem empty -> try_acquire_for false");
+        Check(waited >= milliseconds(12),
+              "phase34 counting_sem try_acquire_for waited to ~deadline");
+    }
+    // A permit makes the timed acquire succeed at once.
+    cs.release();
+    Check(cs.try_acquire_for(milliseconds(10)),
+          "phase34 counting_sem try_acquire_for with permit -> true");
+
+    Check(std::counting_semaphore<4>::max() == 4,
+          "phase34 counting_sem max() reflects LeastMaxValue");
+
+    // ── binary_semaphore ────────────────────────────────────────────────────
+    std::binary_semaphore bs(0); // starts unavailable
+    Check(!bs.try_acquire(), "phase34 binary_sem(0) -> try_acquire false");
+    bs.release();
+    Check(bs.try_acquire(), "phase34 binary_sem after release -> true");
+    Check(std::binary_semaphore::max() >= 1, "phase34 binary_sem max() >= 1");
+
+    // Hand-off pattern: release then acquire (no block on a single thread).
+    std::binary_semaphore handoff(0);
+    handoff.release();
+    handoff.acquire();
+    Check(true, "phase34 binary_sem release/acquire hand-off");
+
+    printf("[CXX] PASS phase34: std::counting_semaphore + binary_semaphore "
+           "(acquire/try_acquire/try_acquire_for-until/release deadline-spin)\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -5053,6 +5108,7 @@ int main()
     Phase31();
     Phase32();
     Phase33();
+    Phase34();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
