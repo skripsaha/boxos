@@ -4685,45 +4685,36 @@ void Phase29()
     box::key none(0, 0x48, 0);  // a scancode-only key (e.g. an arrow)
     Check(!none.has_char() && !none.printable(), "phase29 scancode-only key has no char");
 
-    kb_char_t kc{};
-    kc.ch = 'b';
-    kc.scancode = 0x30;
-    kc.flags = KB_MOD_ALT;
-    box::key kk = box::key::from_kb_char(kc);
-    Check(kk.ch() == 'b' && kk.scancode() == 0x30 && kk.alt() && !kk.shift(),
-          "phase29 from_kb_char decodes ch/scancode/mods");
-
-    // kb_event_t (the Touch payload) has a DIFFERENT field order than kb_char_t
-    // (scancode, ascii, mods) — verify the decoder reads the right fields.
+    // kb_event_t is the keyboard Touch payload {scancode, ascii, mods} — verify
+    // from_event reads the right fields (the order is not ch-first).
     kb_event_t ke{};
     ke.scancode = 0x10;
     ke.ascii = 'q';
     ke.mods = KB_MOD_CTRL;
     box::key ek = box::key::from_event(ke);
     Check(ek.ch() == 'q' && ek.scancode() == 0x10 && ek.ctrl() && !ek.alt(),
-          "phase29 from_event decodes the touch-payload field order");
+          "phase29 from_event decodes the keyboard Touch payload");
 
-    // ── key_input — non-blocking ring poll. No interactive input arrives in
-    //    the matrix, so a buffered key is unlikely; both outcomes are valid. ───
-    std::optional<std::uint32_t> avail = box::key_input::available();
-    Check(avail.has_value(), "phase29 key_input::available() queries the ring");
-    std::optional<box::key> got = box::key_input::try_get();  // never blocks
-    if (avail && *avail == 0)
-        Check(!got.has_value(), "phase29 try_get() empty when nothing buffered");
+    // ── box::keyboard — event-driven (Touch), NO polling. poll() peeks a
+    //    delivered event; wait(ms) blocks IN THE KERNEL (woken by the key event,
+    //    not a spin); co_await next() suspends on the executor. No interactive
+    //    input arrives in the matrix, so a key is unlikely — we exercise the
+    //    non-spinning bounded paths (results are input-dependent). ─────────────
+    box::key_stream kbd;
+    if (std::optional<box::key> p = kbd.poll())  // non-blocking event peek
+        Check(p->scancode() != 0 || p->has_char(), "phase29 polled key decodes");
+    std::optional<box::key> w = kbd.wait(5);  // efficient kernel block, <= 5 ms
+    if (w)
+        Check(w->scancode() != 0 || w->has_char(), "phase29 waited key decodes");
+    // co_await kbd.next() blocks until a key — build the awaiter (compiles +
+    // wires the executor) without awaiting it (would block with no input).
+    auto pending = kbd.next();
+    (void)pending;
+    box::subscription &stream = kbd.events();  // escape hatch to the Touch stream
+    (void)stream;
 
-    // ── keyboard_events — the Touch stream. wait(ms) blocks IN THE KERNEL and
-    //    returns nullopt within the window when no key comes: a real, bounded,
-    //    non-spinning timed read (the ring cannot do this). co_await next() is
-    //    covered by the box::touch coroutine tests. ───────────────────────────
-    box::subscription keys = box::keyboard_events();
-    if (std::optional<box::event> ev = keys.poll())  // non-blocking peek
-        (void)box::key::from_touch(*ev);
-    std::optional<box::event> waited = keys.wait(5);  // efficient kernel block, <= 5 ms
-    if (waited)
-        (void)box::key::from_touch(*waited);  // a key actually arrived (input-dependent)
-
-    printf("[CXX] PASS phase29: box::key (decode/modifiers) + box::key_input "
-           "(available/try_get ring poll) + box::keyboard_events (Touch wait/poll/next)\n");
+    printf("[CXX] PASS phase29: box::key (decode/modifiers) + box::key_stream "
+           "(Touch poll/wait/next — event-driven, no polling)\n");
 }
 
 void Phase30()
