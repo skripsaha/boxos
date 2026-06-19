@@ -4771,6 +4771,67 @@ void Phase30()
            "box::throttle (try_fire/ready/remaining)\n");
 }
 
+// ── phase31: std::timed_mutex + recursive_timed_mutex (Ф19a) ─────────────
+void Phase31()
+{
+    using namespace std::chrono;
+
+    // ── timed_mutex: basic ownership ────────────────────────────────────────
+    std::timed_mutex tm;
+    tm.lock();
+    Check(!tm.try_lock(), "phase31 timed_mutex held -> try_lock false");
+    tm.unlock();
+    Check(tm.try_lock(), "phase31 timed_mutex free -> try_lock true");
+    tm.unlock();
+
+    // A free mutex is acquired immediately by either timed form.
+    Check(tm.try_lock_for(milliseconds(10)), "phase31 try_lock_for free -> true");
+    tm.unlock();
+    Check(tm.try_lock_until(steady_clock::now() + milliseconds(10)),
+          "phase31 try_lock_until free -> true");
+    tm.unlock();
+
+    // Held mutex: the timed acquire blocks to the deadline, then fails. The
+    // deadline-spin must actually consume the wall time it promised — proving
+    // the loop ticks rather than returning early.
+    tm.lock();
+    {
+        box::stopwatch sw;
+        bool got = tm.try_lock_for(milliseconds(15));
+        nanoseconds waited = sw.elapsed();
+        Check(!got, "phase31 try_lock_for held -> false");
+        Check(waited >= milliseconds(12),
+              "phase31 try_lock_for held waited to ~deadline");
+    }
+    tm.unlock();
+
+    // ── unique_lock<timed_mutex>: timed interface forwards to the mutex ─────
+    {
+        std::unique_lock<std::timed_mutex> ul(tm, std::defer_lock);
+        Check(ul.try_lock_for(milliseconds(10)),
+              "phase31 unique_lock::try_lock_for acquires");
+        Check(ul.owns_lock(), "phase31 unique_lock owns after timed acquire");
+    }
+    Check(tm.try_lock(), "phase31 timed_mutex released by unique_lock dtor");
+    tm.unlock();
+
+    // ── recursive_timed_mutex: recursive ownership + timed re-entry ─────────
+    std::recursive_timed_mutex rtm;
+    rtm.lock();                                                  // depth 1
+    Check(rtm.try_lock(), "phase31 recursive_timed try_lock re-entry");  // depth 2
+    Check(rtm.try_lock_for(milliseconds(5)),
+          "phase31 recursive_timed try_lock_for re-entry");     // depth 3
+    rtm.unlock();
+    rtm.unlock();
+    rtm.unlock();                                                // back to depth 0
+    Check(rtm.try_lock_until(steady_clock::now() + milliseconds(5)),
+          "phase31 recursive_timed re-lockable after full unlock");
+    rtm.unlock();
+
+    printf("[CXX] PASS phase31: std::timed_mutex + recursive_timed_mutex "
+           "(try_lock_for/until deadline-spin) + unique_lock timed interface\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -4823,6 +4884,7 @@ int main()
     Phase28();
     Phase29();
     Phase30();
+    Phase31();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
