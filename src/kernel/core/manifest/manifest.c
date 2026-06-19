@@ -289,7 +289,7 @@ error_t ManifestCompile(struct process_t *owner,
         memcpy(raw, user_or_kernel, size);
     } else {
         if (!owner || !owner->cabin) return ERR_INVALID_ARGUMENT;
-        raw = (uint8_t *)vmm_user_buf_in(owner->cabin,
+        raw = (uint8_t *)vmm_user_buf_in(owner->cabin->vmm,
                                           (uintptr_t)user_or_kernel,
                                           (size_t)size);
         if (!raw) return ERR_INVALID_ADDRESS;

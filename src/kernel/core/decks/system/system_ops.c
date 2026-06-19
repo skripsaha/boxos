@@ -59,7 +59,7 @@ static const void *SysCrateRead(const Crate *c, const OpContext *ctx)
 {
     if (!c || c->size == 0)          return NULL;
     if (ctx && ctx->proc && ctx->proc->cabin) {
-        return vmm_translate_user_addr(ctx->proc->cabin,
+        return vmm_translate_user_addr(ctx->proc->cabin->vmm,
                                        (uintptr_t)c->addr, (size_t)c->size);
     }
     return (const void *)(uintptr_t)c->addr;
@@ -70,7 +70,7 @@ static void *SysCrateWrite(const Crate *c, const OpContext *ctx, uint64_t bytes)
     if (!c || bytes == 0)            return NULL;
     if (bytes > c->capacity)         return NULL;
     if (ctx && ctx->proc && ctx->proc->cabin) {
-        return vmm_translate_user_addr(ctx->proc->cabin,
+        return vmm_translate_user_addr(ctx->proc->cabin->vmm,
                                        (uintptr_t)c->addr, (size_t)bytes);
     }
     return (void *)(uintptr_t)c->addr;
@@ -275,7 +275,7 @@ static int SysProcSpawn(const ManifestOp *op, Crate *crates, uint16_t crate_coun
 
     process_t *new_proc = process_create(tags);
     if (!new_proc) return ERR_SPAWN_FAILED;
-    new_proc->spawner_pid = ctx->proc->pid;
+    new_proc->cabin->spawner_pid = ctx->proc->pid;
 
     const uint8_t *elf = (const uint8_t *)vmm_phys_to_virt(binary_phys);
     if (binary_size < 16 || elf[0] != 0x7F || elf[1] != 'E' ||
@@ -439,8 +439,8 @@ static int SysProcInfo(const ManifestOp *op, Crate *crates, uint16_t crate_count
     uint32_t state  = (uint32_t)target->state;
     int32_t  score  = target->score;
     uint32_t pad    = 0;
-    uint64_t cstart = target->code_start;
-    uint64_t csize  = target->code_size;
+    uint64_t cstart = target->cabin ? target->cabin->code_start : 0;
+    uint64_t csize  = target->cabin ? target->cabin->code_size  : 0;
 
     memcpy(kp +  0, &pid,    sizeof(uint32_t));
     memcpy(kp +  4, &state,  sizeof(uint32_t));
@@ -552,7 +552,7 @@ static int SysProcExec(const ManifestOp *op, Crate *crates, uint16_t crate_count
         pmm_free(phys, pages);
         return ERR_SPAWN_FAILED;
     }
-    new_proc->spawner_pid = ctx->proc->pid;
+    new_proc->cabin->spawner_pid = ctx->proc->pid;
 
     int load = process_load_binary(new_proc, virt, (size_t)file_size);
     pmm_free(phys, pages);
@@ -1058,7 +1058,7 @@ static int SysManifestCompile(const ManifestOp *op, Crate *crates,
     /* Publish handle into the user's out crate payload via page-walked
      * commit_out. The Crate descriptor itself (out->size) is mutated in
      * the staged kbuf and write-back by guide.c's commit-and-release. */
-    error_t commit_rc = vmm_user_buf_commit_out(ctx->proc->cabin,
+    error_t commit_rc = vmm_user_buf_commit_out(ctx->proc->cabin->vmm,
                                                  (uintptr_t)out->addr,
                                                  &handle,
                                                  sizeof(handle));
@@ -1085,7 +1085,7 @@ static int SysManifestRelease(const ManifestOp *op, Crate *crates,
     /* Read the handle out of the user payload. Single page by construction
      * (8 bytes), so vmm_translate_user_addr is safe. */
     ManifestHandle *src = (ManifestHandle *)vmm_translate_user_addr(
-        ctx->proc->cabin, (uintptr_t)in->addr, sizeof(ManifestHandle));
+        ctx->proc->cabin->vmm, (uintptr_t)in->addr, sizeof(ManifestHandle));
     if (!src) return ERR_INVALID_ADDRESS;
     ManifestHandle handle = *src;
 

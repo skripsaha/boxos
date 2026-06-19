@@ -231,19 +231,19 @@ static uint64_t touch_emit_payload(process_t *target, TouchTag tag_id,
     uint64_t total = sizeof(Touch) + plen;
     uint32_t pages = (uint32_t)((total + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE);
     uint64_t bytes = (uint64_t)pages * PMM_PAGE_SIZE;
-    uint64_t vaddr = __atomic_fetch_add(&target->buf_heap_next, bytes,
+    uint64_t vaddr = __atomic_fetch_add(&target->cabin->buf_heap_next, bytes,
                                         __ATOMIC_ACQ_REL);
 
     for (uint32_t i = 0; i < pages; i++) {
         void *page = pmm_alloc(1);
         if (!page) return 0;
         uint64_t va = vaddr + (i * PMM_PAGE_SIZE);
-        vmm_map_result_t r = vmm_map_page(target->cabin, va,
+        vmm_map_result_t r = vmm_map_page(target->cabin->vmm, va,
                                           (uint64_t)page, VMM_FLAGS_USER_RW);
         if (!r.success) { pmm_free(page, 1); return 0; }
     }
 
-    void *dst = vmm_translate_user_addr(target->cabin, vaddr, (size_t)total);
+    void *dst = vmm_translate_user_addr(target->cabin->vmm, vaddr, (size_t)total);
     if (!dst) return 0;
 
     Touch t = {
@@ -735,7 +735,7 @@ uint64_t TouchPublishIrqWraps(void)
 
 static TouchSub *find_proc_sub(process_t *proc, TouchTag tag_id)
 {
-    for (TouchSub *s = (TouchSub *)proc->subs_head; s; s = s->proc_next) {
+    for (TouchSub *s = (TouchSub *)proc->cabin->subs_head; s; s = s->proc_next) {
         if (s->tag_id == tag_id) return s;
     }
     return NULL;
@@ -751,7 +751,7 @@ error_t TouchClaimSet(process_t *proc, TouchTag tag_id, TouchMode mode,
     TouchBucket *b = touch_bucket_get_or_create(tag_id);
     if (!b) return ERR_NO_MEMORY;
 
-    spin_lock(&proc->subs_lock);
+    spin_lock(&proc->cabin->subs_lock);
     TouchSub *existing = find_proc_sub(proc, tag_id);
     if (existing) {
         /* Update in place — no list churn. */
@@ -769,10 +769,10 @@ error_t TouchClaimSet(process_t *proc, TouchTag tag_id, TouchMode mode,
         } else {
             existing->u._raw = 0;
         }
-        spin_unlock(&proc->subs_lock);
+        spin_unlock(&proc->cabin->subs_lock);
         return OK;
     }
-    spin_unlock(&proc->subs_lock);
+    spin_unlock(&proc->cabin->subs_lock);
 
     TouchSub *sub = (TouchSub *)kmalloc(sizeof(TouchSub));
     if (!sub) return ERR_NO_MEMORY;
@@ -799,12 +799,12 @@ error_t TouchClaimSet(process_t *proc, TouchTag tag_id, TouchMode mode,
     __atomic_add_fetch(&b->sub_count, 1, __ATOMIC_RELEASE);
     spin_unlock(&b->lock);
 
-    spin_lock(&proc->subs_lock);
+    spin_lock(&proc->cabin->subs_lock);
     /* Re-check duplicate — between our find_proc_sub and now, a concurrent
      * TouchClaimSet on the same (proc, tag_id) could have inserted. If so,
      * undo our bucket link to preserve the one-sub-per-(proc,tag) invariant. */
     if (find_proc_sub(proc, tag_id)) {
-        spin_unlock(&proc->subs_lock);
+        spin_unlock(&proc->cabin->subs_lock);
 
         spin_lock(&b->lock);
         if (sub->bucket_prev) sub->bucket_prev->bucket_next = sub->bucket_next;
@@ -818,12 +818,12 @@ error_t TouchClaimSet(process_t *proc, TouchTag tag_id, TouchMode mode,
         kfree(sub);
         return OK;
     }
-    sub->proc_next = (TouchSub *)proc->subs_head;
+    sub->proc_next = (TouchSub *)proc->cabin->subs_head;
     sub->proc_prev = NULL;
-    if (proc->subs_head)
-        ((TouchSub *)proc->subs_head)->proc_prev = sub;
-    proc->subs_head = sub;
-    spin_unlock(&proc->subs_lock);
+    if (proc->cabin->subs_head)
+        ((TouchSub *)proc->cabin->subs_head)->proc_prev = sub;
+    proc->cabin->subs_head = sub;
+    spin_unlock(&proc->cabin->subs_lock);
 
     __atomic_add_fetch(&g_total_subs, 1, __ATOMIC_RELEASE);
     return OK;
@@ -849,17 +849,17 @@ error_t TouchClaimClear(process_t *proc, TouchTag tag_id)
 {
     if (!proc) return ERR_NULL_POINTER;
 
-    spin_lock(&proc->subs_lock);
+    spin_lock(&proc->cabin->subs_lock);
     TouchSub *sub = find_proc_sub(proc, tag_id);
     if (!sub) {
-        spin_unlock(&proc->subs_lock);
+        spin_unlock(&proc->cabin->subs_lock);
         return ERR_TAG_NOT_FOUND;
     }
     if (sub->proc_prev) sub->proc_prev->proc_next = sub->proc_next;
-    else                proc->subs_head           = sub->proc_next;
+    else                proc->cabin->subs_head           = sub->proc_next;
     if (sub->proc_next) sub->proc_next->proc_prev = sub->proc_prev;
     sub->proc_next = sub->proc_prev = NULL;
-    spin_unlock(&proc->subs_lock);
+    spin_unlock(&proc->cabin->subs_lock);
 
     touch_sub_unlink_bucket(sub);
 
@@ -873,13 +873,13 @@ error_t TouchClaimClear(process_t *proc, TouchTag tag_id)
 error_t TouchClaimAck(process_t *proc, TouchTag tag_id)
 {
     if (!proc) return ERR_NULL_POINTER;
-    spin_lock(&proc->subs_lock);
+    spin_lock(&proc->cabin->subs_lock);
     TouchSub *sub = find_proc_sub(proc, tag_id);
-    if (!sub) { spin_unlock(&proc->subs_lock); return ERR_TAG_NOT_FOUND; }
+    if (!sub) { spin_unlock(&proc->cabin->subs_lock); return ERR_TAG_NOT_FOUND; }
     __atomic_store_n(&sub->has_pending, 0, __ATOMIC_RELEASE);
     sub->pending_plen = 0;
     TouchBucket *bcb = sub->bucket;
-    spin_unlock(&proc->subs_lock);
+    spin_unlock(&proc->cabin->subs_lock);
 
     /* Clear bucket-level LATCHED state so a subsequent first-of-cycle
      * publish establishes the new latched payload, and so a future
@@ -914,11 +914,11 @@ void TouchCleanupProcess(process_t *proc)
     proc->touch_cleaned = 1;
 
     /* Unlink every sub from its bucket so concurrent publishes stop seeing
-     * this process. Sub structs remain in proc->subs_head with proc_next
+     * this process. Sub structs remain in proc->cabin->subs_head with proc_next
      * pointers intact; the kfree happens in TouchFinalizeProcess only after
      * the process refcount falls to zero. */
     uint32_t unlinked = 0;
-    TouchSub *cur = (TouchSub *)proc->subs_head;
+    TouchSub *cur = (TouchSub *)proc->cabin->subs_head;
     while (cur) {
         if (cur->bucket) { touch_sub_unlink_bucket(cur); unlinked++; }
         if (cur->mode == TOUCH_REACT &&
@@ -950,8 +950,8 @@ void TouchCleanupProcess(process_t *proc)
 void TouchFinalizeProcess(process_t *proc)
 {
     if (!proc) return;
-    TouchSub *cur = (TouchSub *)proc->subs_head;
-    proc->subs_head = NULL;
+    TouchSub *cur = (TouchSub *)proc->cabin->subs_head;
+    proc->cabin->subs_head = NULL;
     while (cur) {
         TouchSub *next = cur->proc_next;
         kfree(cur);
@@ -976,10 +976,10 @@ void TouchIrqReturn(process_t *proc)
     spin_unlock(&proc->irq_lock);
 
     if (pending) {
-        spin_lock(&proc->subs_lock);
+        spin_lock(&proc->cabin->subs_lock);
         TouchSub *sub = find_proc_sub(proc, pending->tag_id);
         bool reuse = sub && sub->mode == TOUCH_INTERRUPT;
-        spin_unlock(&proc->subs_lock);
+        spin_unlock(&proc->cabin->subs_lock);
         if (reuse) {
             touch_interrupt_deliver(proc, sub, pending->tag_id,
                                     pending->plen > 0 ? pending->payload : NULL,

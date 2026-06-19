@@ -46,7 +46,7 @@ static int SysMemTagQuery(const ManifestOp *op, Crate *crates,
     if (out->capacity < sizeof(uint32_t)) return ERR_INVALID_ARGUMENT;
 
     /* Pull the spec into a kernel buffer — page-walk safe. */
-    char *spec_k = (char *)vmm_user_buf_in(ctx->proc->cabin,
+    char *spec_k = (char *)vmm_user_buf_in(ctx->proc->cabin->vmm,
                                             (uintptr_t)in->addr, in->size);
     if (!spec_k) return ERR_INVALID_ADDRESS;
 
@@ -98,7 +98,7 @@ static int SysMemTagQuery(const ManifestOp *op, Crate *crates,
     if (r.count > 0)
         memcpy(kbuf + sizeof(uint32_t), r.region_ids,
                r.count * sizeof(uint32_t));
-    error_t cr = vmm_user_buf_commit_out(ctx->proc->cabin,
+    error_t cr = vmm_user_buf_commit_out(ctx->proc->cabin->vmm,
                                           (uintptr_t)out->addr,
                                           kbuf, need_bytes);
     vmm_user_buf_free(kbuf);
@@ -127,7 +127,7 @@ static int SysMemTagInfo(const ManifestOp *op, Crate *crates,
     Crate *out = &crates[op->out_crate];
     if (out->capacity < sizeof(snap)) return ERR_INVALID_ARGUMENT;
 
-    error_t cr = vmm_user_buf_commit_out(ctx->proc->cabin,
+    error_t cr = vmm_user_buf_commit_out(ctx->proc->cabin->vmm,
                                           (uintptr_t)out->addr,
                                           &snap, sizeof(snap));
     if (cr != OK) return cr;
@@ -150,7 +150,7 @@ static int SysMemTagLookup(const ManifestOp *op, Crate *crates,
     Crate *out = &crates[op->out_crate];
     if (out->capacity < sizeof(region_id)) return ERR_INVALID_ARGUMENT;
 
-    error_t cr = vmm_user_buf_commit_out(ctx->proc->cabin,
+    error_t cr = vmm_user_buf_commit_out(ctx->proc->cabin->vmm,
                                           (uintptr_t)out->addr,
                                           &region_id, sizeof(region_id));
     if (cr != OK) return cr;
@@ -172,12 +172,12 @@ static int SysMemTagLookupVirt(const ManifestOp *op, Crate *crates,
 
     uint64_t virt;
     memcpy(&virt, op->params, sizeof(uint64_t));
-    uint32_t region_id = MemRegionFromVirt(ctx->proc->cabin, (uintptr_t)virt);
+    uint32_t region_id = MemRegionFromVirt(ctx->proc->cabin->vmm, (uintptr_t)virt);
 
     Crate *out = &crates[op->out_crate];
     if (out->capacity < sizeof(region_id)) return ERR_INVALID_ARGUMENT;
 
-    error_t cr = vmm_user_buf_commit_out(ctx->proc->cabin,
+    error_t cr = vmm_user_buf_commit_out(ctx->proc->cabin->vmm,
                                           (uintptr_t)out->addr,
                                           &region_id, sizeof(region_id));
     if (cr != OK) return cr;
@@ -231,7 +231,7 @@ static int SysMemTagTags(const ManifestOp *op, Crate *crates,
     memcpy(kbuf, &count, sizeof(uint32_t));
 
     size_t total = (size_t)(cursor - (char *)kbuf);
-    error_t cr = vmm_user_buf_commit_out(ctx->proc->cabin,
+    error_t cr = vmm_user_buf_commit_out(ctx->proc->cabin->vmm,
                                           (uintptr_t)out->addr,
                                           kbuf, total);
     vmm_user_buf_free(kbuf);
@@ -253,7 +253,7 @@ static int SysMemTagStats(const ManifestOp *op, Crate *crates,
     Crate *out = &crates[op->out_crate];
     if (out->capacity < sizeof(s)) return ERR_INVALID_ARGUMENT;
 
-    error_t cr = vmm_user_buf_commit_out(ctx->proc->cabin,
+    error_t cr = vmm_user_buf_commit_out(ctx->proc->cabin->vmm,
                                           (uintptr_t)out->addr,
                                           &s, sizeof(s));
     if (cr != OK) return cr;
@@ -284,7 +284,7 @@ static int SysMemTagSetGuard(const ManifestOp *op, Crate *crates,
     const Crate *in = &crates[op->in_crate];
     if (in->size == 0 || in->size > 128) return ERR_INVALID_ARGUMENT;
 
-    char *tag = (char *)vmm_user_buf_in(ctx->proc->cabin,
+    char *tag = (char *)vmm_user_buf_in(ctx->proc->cabin->vmm,
                                          (uintptr_t)in->addr, in->size);
     if (!tag) return ERR_INVALID_ADDRESS;
     /* Ensure NUL-terminated */
@@ -313,7 +313,7 @@ static int SysMemTagGrant(const ManifestOp *op, Crate *crates,
 
     const Crate *in = &crates[op->in_crate];
     if (in->size == 0 || in->size > 128) return ERR_INVALID_ARGUMENT;
-    char *tag = (char *)vmm_user_buf_in(ctx->proc->cabin,
+    char *tag = (char *)vmm_user_buf_in(ctx->proc->cabin->vmm,
                                          (uintptr_t)in->addr, in->size);
     if (!tag) return ERR_INVALID_ADDRESS;
     char tag_buf[129];
@@ -344,7 +344,7 @@ static int SysMemTagRevoke(const ManifestOp *op, Crate *crates,
 
     const Crate *in = &crates[op->in_crate];
     if (in->size == 0 || in->size > 128) return ERR_INVALID_ARGUMENT;
-    char *tag = (char *)vmm_user_buf_in(ctx->proc->cabin,
+    char *tag = (char *)vmm_user_buf_in(ctx->proc->cabin->vmm,
                                          (uintptr_t)in->addr, in->size);
     if (!tag) return ERR_INVALID_ADDRESS;
     char tag_buf[129];
@@ -402,7 +402,7 @@ static int SysMemTagCabinTags(const ManifestOp *op, Crate *crates,
     memcpy(kbuf, &count, sizeof(uint32_t));
 
     size_t total = (size_t)(cursor - (char *)kbuf);
-    error_t cr = vmm_user_buf_commit_out(ctx->proc->cabin,
+    error_t cr = vmm_user_buf_commit_out(ctx->proc->cabin->vmm,
                                           (uintptr_t)out->addr,
                                           kbuf, total);
     vmm_user_buf_free(kbuf);
@@ -435,7 +435,7 @@ static int SysMemTagCheck(const ManifestOp *op, Crate *crates,
     Crate *out = &crates[op->out_crate];
     if (out->capacity < sizeof(result)) return ERR_INVALID_ARGUMENT;
 
-    error_t cr = vmm_user_buf_commit_out(ctx->proc->cabin,
+    error_t cr = vmm_user_buf_commit_out(ctx->proc->cabin->vmm,
                                           (uintptr_t)out->addr,
                                           &result, sizeof(result));
     if (cr != OK) return cr;

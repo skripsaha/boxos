@@ -36,7 +36,7 @@ static const void *brook_crate_read(const Crate *c, const OpContext *ctx)
 {
     if (!c || c->size == 0) return NULL;
     if (ctx && ctx->proc && ctx->proc->cabin)
-        return vmm_translate_user_addr(ctx->proc->cabin,
+        return vmm_translate_user_addr(ctx->proc->cabin->vmm,
                                        (uintptr_t)c->addr, (size_t)c->size);
     return (const void *)(uintptr_t)c->addr;
 }
@@ -45,7 +45,7 @@ static void *brook_crate_write(Crate *c, const OpContext *ctx, size_t size)
 {
     if (!c || c->capacity < size) return NULL;
     if (ctx && ctx->proc && ctx->proc->cabin)
-        return vmm_translate_user_addr(ctx->proc->cabin,
+        return vmm_translate_user_addr(ctx->proc->cabin->vmm,
                                        (uintptr_t)c->addr, size);
     return (void *)(uintptr_t)c->addr;
 }

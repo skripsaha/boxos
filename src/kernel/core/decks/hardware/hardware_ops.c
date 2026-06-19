@@ -62,7 +62,7 @@ static void *HwCrateMap(const Crate *c, const OpContext *ctx, uint64_t bytes)
     if (!c || bytes == 0)            return NULL;
     if (bytes > c->capacity)         return NULL;
     if (ctx && ctx->proc && ctx->proc->cabin) {
-        return vmm_translate_user_addr(ctx->proc->cabin, (uintptr_t)c->addr, (size_t)bytes);
+        return vmm_translate_user_addr(ctx->proc->cabin->vmm, (uintptr_t)c->addr, (size_t)bytes);
     }
     return (void *)(uintptr_t)c->addr;
 }

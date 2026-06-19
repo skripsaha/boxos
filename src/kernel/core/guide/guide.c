@@ -148,7 +148,7 @@ static void guide_process_manifest_pocket(Pocket *pocket, process_t *proc)
 
         m_kbuf = (uint8_t *)grant.kbuf;
 
-        if (vmm_user_buf_in_into(proc->cabin, (uintptr_t)manifest_uaddr,
+        if (vmm_user_buf_in_into(proc->cabin->vmm, (uintptr_t)manifest_uaddr,
                                  (size_t)manifest_size, m_kbuf) != OK) {
             ManifestStageRelease(st, &grant);
             pocket->error_code = ERR_INVALID_ADDRESS;
@@ -162,7 +162,7 @@ static void guide_process_manifest_pocket(Pocket *pocket, process_t *proc)
      * at I/O completion. */
     Crate *crates_kp = NULL;
     if (crate_count > 0) {
-        rc = crate_stage_in(proc->cabin, crates_uaddr, crate_count, &crates_kp);
+        rc = crate_stage_in(proc->cabin->vmm, crates_uaddr, crate_count, &crates_kp);
         if (rc != OK) {
             if (cm_pinned) ManifestRelease(handle);
             if (st)        ManifestStageRelease(st, &grant);
@@ -242,7 +242,7 @@ static void guide_process_manifest_pocket(Pocket *pocket, process_t *proc)
      * for output crates) back to user memory and release the staged kbuf. */
     if (crates_kp) {
         crate_stage_commit_and_release(crates_kp, crate_count,
-                                        proc->cabin, crates_uaddr);
+                                        proc->cabin->vmm, crates_uaddr);
     }
 
     /* Release scratch + handle pin (both no-ops if respective mode was

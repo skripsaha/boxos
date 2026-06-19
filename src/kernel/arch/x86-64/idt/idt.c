@@ -388,7 +388,7 @@ void exception_handler(interrupt_frame_t *frame)
                     frame->vector, proc->pid);
             kprintf("[EXCEPTION] RIP=0x%lx RSP=0x%lx Error=0x%lx\n",
                     frame->rip, frame->rsp, frame->error_code);
-            kprintf("[EXCEPTION] TagBits: 0x%lx\n", proc->tag_bits);
+            kprintf("[EXCEPTION] TagBits: 0x%lx\n", proc->cabin ? proc->cabin->tag_bits : 0);
             /* Split-lock #AC hint: if userspace fired #AC with error_code==0
              * while BoxOS was supposed to clear TEST_CTL.bit29, the
              * configuration drifted (BIOS re-asserted bit29 mid-runtime
@@ -463,7 +463,7 @@ void exception_handler(interrupt_frame_t *frame)
             kprintf("================================================================\n");
             kprintf("KERNEL STACK OVERFLOW: Exception #%u recovered\n", frame->vector);
             kprintf("================================================================\n");
-            kprintf("  PID: %u  TagBits: 0x%lx\n", overflow_proc->pid, overflow_proc->tag_bits);
+            kprintf("  PID: %u  TagBits: 0x%lx\n", overflow_proc->pid, overflow_proc->cabin ? overflow_proc->cabin->tag_bits : 0);
             kprintf("  RSP: 0x%lx  RIP: 0x%lx\n", frame->rsp, frame->rip);
             if (overflow_proc->kernel_stack_guard_base)
             {

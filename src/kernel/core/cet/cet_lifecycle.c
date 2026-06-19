@@ -287,7 +287,7 @@ error_t cet_process_create(struct process_t *proc) {
     /* cabin must be ready — we map into the process's vmm_context.
      * Without one the process is structurally invalid; this is the
      * only condition that bubbles up an error (caller is buggy). */
-    vmm_context_t *ctx = (vmm_context_t *)proc->cabin;
+    vmm_context_t *ctx = proc->cabin ? proc->cabin->vmm : NULL;
     if (!ctx) return ERR_INVALID_STATE;
 
     /* Allocate a contiguous 16 KiB phys page run from the user zone.
@@ -358,7 +358,7 @@ void cet_process_destroy(struct process_t *proc) {
     if (!proc) return;
     uintptr_t phys = process_get_user_ssp_phys(proc);
     if (phys == 0) return;
-    vmm_context_t *ctx = (vmm_context_t *)proc->cabin;
+    vmm_context_t *ctx = proc->cabin ? proc->cabin->vmm : NULL;
     uintptr_t va = process_get_user_ssp_va(proc) & ~(uintptr_t)0xFFF;
     /* Recover the page base from the initial SSP value (top of page
      * minus 8) by masking. The base of the mapped range is

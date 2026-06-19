@@ -136,11 +136,11 @@ BufferAllocResult BufferRegistryAlloc(process_t *proc, uint64_t requested_size)
     g_buffers[slot].in_use    = true;
     spin_unlock(&g_buffers_lock);
 
-    uint64_t virt = proc->buf_heap_next;
-    vmm_map_result_t mr = vmm_map_pages(proc->cabin, virt, (uintptr_t)phys,
+    uint64_t virt = proc->cabin->buf_heap_next;
+    vmm_map_result_t mr = vmm_map_pages(proc->cabin->vmm, virt, (uintptr_t)phys,
                                         pages, VMM_FLAGS_USER_RW);
     if (mr.success) {
-        proc->buf_heap_next += pages * PMM_PAGE_SIZE;
+        proc->cabin->buf_heap_next += pages * PMM_PAGE_SIZE;
         spin_lock(&g_buffers_lock);
         g_buffers[slot].virt_addr = virt;
         spin_unlock(&g_buffers_lock);
@@ -187,7 +187,7 @@ error_t BufferRegistryFree(uint32_t owner_pid, uint64_t handle)
     if (virt != 0) {
         process_t *p = process_find(pid);
         if (p && p->cabin) {
-            vmm_unmap_pages(p->cabin, virt, pages);
+            vmm_unmap_pages(p->cabin->vmm, virt, pages);
         }
     }
     pmm_free(phys, pages);
@@ -243,17 +243,17 @@ error_t BufferRegistryResize(process_t *proc, uint64_t handle,
 
     uint64_t new_virt = old_virt;
     if (old_virt != 0) {
-        vmm_unmap_pages(proc->cabin, old_virt, old_pages);
+        vmm_unmap_pages(proc->cabin->vmm, old_virt, old_pages);
         if (new_pages <= old_pages) {
-            vmm_map_pages(proc->cabin, old_virt, (uintptr_t)new_phys,
+            vmm_map_pages(proc->cabin->vmm, old_virt, (uintptr_t)new_phys,
                           new_pages, VMM_FLAGS_USER_RW);
         } else {
-            new_virt = proc->buf_heap_next;
-            vmm_map_result_t mr = vmm_map_pages(proc->cabin, new_virt,
+            new_virt = proc->cabin->buf_heap_next;
+            vmm_map_result_t mr = vmm_map_pages(proc->cabin->vmm, new_virt,
                                                 (uintptr_t)new_phys, new_pages,
                                                 VMM_FLAGS_USER_RW);
             if (mr.success) {
-                proc->buf_heap_next += new_pages * PMM_PAGE_SIZE;
+                proc->cabin->buf_heap_next += new_pages * PMM_PAGE_SIZE;
             } else {
                 new_virt = 0;
             }
@@ -291,7 +291,7 @@ void BufferRegistryCleanupProcess(uint32_t pid)
         size_t   pages = g_buffers[i].size / PMM_PAGE_SIZE;
 
         if (virt != 0 && proc && proc->cabin) {
-            vmm_unmap_pages(proc->cabin, virt, pages);
+            vmm_unmap_pages(proc->cabin->vmm, virt, pages);
         }
         pmm_free(phys, pages);
         __sync_synchronize();

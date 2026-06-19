@@ -31,7 +31,7 @@ static int SysHwLamGet(const ManifestOp *op, Crate *crates,
     if (!ctx || !ctx->proc)               return ERR_INVALID_ARGUMENT;
     if (op->out_crate == CRATE_INDEX_NONE) return ERR_INVALID_ARGUMENT;
 
-    vmm_context_t *vmm = (vmm_context_t *)ctx->proc->cabin;
+    vmm_context_t *vmm = ctx->proc->cabin ? ctx->proc->cabin->vmm : NULL;
     uint8_t mode = vmm ? (uint8_t)vmm->lam_mode : 0u;
 
     Crate *out = &crates[op->out_crate];
@@ -40,7 +40,7 @@ static int SysHwLamGet(const ManifestOp *op, Crate *crates,
     uint8_t *kbuf = (uint8_t *)vmm_user_buf_alloc_out(out->size);
     if (!kbuf) return ERR_NO_MEMORY;
     kbuf[0] = mode;
-    int rc = vmm_user_buf_commit_out(ctx->proc->cabin,
+    int rc = vmm_user_buf_commit_out(ctx->proc->cabin->vmm,
                                       (uintptr_t)out->addr,
                                       kbuf, sizeof(uint8_t));
     vmm_user_buf_free(kbuf);
@@ -85,9 +85,9 @@ static int SysHwTmeState(const ManifestOp *op, Crate *crates,
     kbuf->in_use            = (uint16_t)g_tme.in_use;
     kbuf->per_proc_quota    = 8u;  /* TME_QUOTA_PER_PROC (bay.h) — keep in sync */
     kbuf->reduced_maxphyaddr = g_tme.reduced_maxphyaddr;
-    kbuf->this_proc_held    = ctx->proc->tme_keyids_held;
+    kbuf->this_proc_held    = ctx->proc->cabin ? ctx->proc->cabin->tme_keyids_held : 0;
 
-    int rc = vmm_user_buf_commit_out(ctx->proc->cabin,
+    int rc = vmm_user_buf_commit_out(ctx->proc->cabin->vmm,
                                       (uintptr_t)out->addr,
                                       kbuf, sizeof(*kbuf));
     vmm_user_buf_free(kbuf);
@@ -105,7 +105,7 @@ static int SysHwLamSet(const ManifestOp *op, Crate *crates,
     uint8_t mode = op->params[0];
     if (mode > (uint8_t)VMM_LAM_U57) return ERR_INVALID_ARGUMENT;
 
-    vmm_context_t *vmm = (vmm_context_t *)ctx->proc->cabin;
+    vmm_context_t *vmm = ctx->proc->cabin ? ctx->proc->cabin->vmm : NULL;
     if (!vmm) return ERR_INVALID_STATE;
 
     /* vmm_set_user_lam validates has_lam + 5-level paging requirements

@@ -315,7 +315,7 @@ static void brook_memtag_attach_all(struct process_t *proc,
     if (hdr_phys != 0) {
         uint32_t hdr_rid = MemRegionFromPhys((uintptr_t)hdr_phys);
         if (hdr_rid != MEMTAG_INVALID_REGION_ID) {
-            MemRegionAttachCabin(hdr_rid, (void *)proc->cabin,
+            MemRegionAttachCabin(hdr_rid, (void *)proc->cabin->vmm,
                                   va_header, 1,
                                   MEMTAG_ATTACH_CLASS_4K, att_flags);
         }
@@ -330,7 +330,7 @@ static void brook_memtag_attach_all(struct process_t *proc,
         uint64_t att_va = va_slots + (uint64_t)i * slot_cs;
         uint32_t rid    = MemRegionFromPhys((uintptr_t)slot_chunks[i]);
         if (rid != MEMTAG_INVALID_REGION_ID) {
-            MemRegionAttachCabin(rid, (void *)proc->cabin, att_va,
+            MemRegionAttachCabin(rid, (void *)proc->cabin->vmm, att_va,
                                   pages_per_chunk, pc, att_flags);
         }
     }
@@ -348,7 +348,7 @@ static void brook_memtag_detach_all(struct process_t *proc,
     if (hdr_phys != 0) {
         uint32_t hdr_rid = MemRegionFromPhys((uintptr_t)hdr_phys);
         if (hdr_rid != MEMTAG_INVALID_REGION_ID) {
-            MemRegionDetachCabin(hdr_rid, (void *)proc->cabin, va_header);
+            MemRegionDetachCabin(hdr_rid, (void *)proc->cabin->vmm, va_header);
         }
     }
     for (uint32_t i = 0; i < slot_cc; i++) {
@@ -356,7 +356,7 @@ static void brook_memtag_detach_all(struct process_t *proc,
         uint64_t att_va = va_slots + (uint64_t)i * slot_cs;
         uint32_t rid    = MemRegionFromPhys((uintptr_t)slot_chunks[i]);
         if (rid != MEMTAG_INVALID_REGION_ID) {
-            MemRegionDetachCabin(rid, (void *)proc->cabin, att_va);
+            MemRegionDetachCabin(rid, (void *)proc->cabin->vmm, att_va);
         }
     }
 }
@@ -381,17 +381,17 @@ static error_t brook_map_slots_into_cabin(struct process_t *proc,
 
         bool ok;
         if (chunk_size == BROOK_HUGE_SIZE) {
-            ok = vmm_map_huge_2m(proc->cabin, va, pa, vmm_flags);
+            ok = vmm_map_huge_2m(proc->cabin->vmm, va, pa, vmm_flags);
         } else {
-            vmm_map_result_t r = vmm_map_page(proc->cabin, va, pa, vmm_flags);
+            vmm_map_result_t r = vmm_map_page(proc->cabin->vmm, va, pa, vmm_flags);
             ok = r.success;
         }
 
         if (!ok) {
             for (uint32_t j = 0; j < i; j++) {
                 uint64_t uva = user_va_base + (uint64_t)j * chunk_size;
-                if (chunk_size == BROOK_HUGE_SIZE) vmm_unmap_huge_2m(proc->cabin, uva);
-                else                               vmm_unmap_page(proc->cabin, uva);
+                if (chunk_size == BROOK_HUGE_SIZE) vmm_unmap_huge_2m(proc->cabin->vmm, uva);
+                else                               vmm_unmap_page(proc->cabin->vmm, uva);
             }
             return ERR_NO_MEMORY;
         }
@@ -407,8 +407,8 @@ static void brook_unmap_slots_from_cabin(struct process_t *proc,
     if (!proc || !proc->cabin) return;
     for (uint32_t i = 0; i < chunk_count; i++) {
         uint64_t uva = user_va_base + (uint64_t)i * chunk_size;
-        if (chunk_size == BROOK_HUGE_SIZE) vmm_unmap_huge_2m(proc->cabin, uva);
-        else                               vmm_unmap_page(proc->cabin, uva);
+        if (chunk_size == BROOK_HUGE_SIZE) vmm_unmap_huge_2m(proc->cabin->vmm, uva);
+        else                               vmm_unmap_page(proc->cabin->vmm, uva);
     }
 }
 
@@ -419,7 +419,7 @@ static bool brook_map_header_into_cabin(struct process_t *proc,
 {
     if (!proc || !proc->cabin) return false;
     const uint64_t vmm_flags = VMM_FLAGS_USER_RW | VMM_FLAG_NO_EXECUTE;
-    vmm_map_result_t r = vmm_map_page(proc->cabin, user_va_header,
+    vmm_map_result_t r = vmm_map_page(proc->cabin->vmm, user_va_header,
                                       header_phys, vmm_flags);
     return r.success;
 }
@@ -428,7 +428,7 @@ static void brook_unmap_header_from_cabin(struct process_t *proc,
                                           uint64_t user_va_header)
 {
     if (!proc || !proc->cabin) return;
-    vmm_unmap_page(proc->cabin, user_va_header);
+    vmm_unmap_page(proc->cabin->vmm, user_va_header);
 }
 
 /* Free every backing chunk + the header page via PMM. */
@@ -469,10 +469,10 @@ static error_t brook_reserve_user_va(struct process_t *proc,
     if (!proc) return ERR_INVALID_ARGUMENT;
     if (slot_chunk_size < PMM_PAGE_SIZE) slot_chunk_size = PMM_PAGE_SIZE;
 
-    spin_lock(&proc->brook_lock);
+    spin_lock(&proc->cabin->brook_lock);
 
     /* Page-align cursor for the header. */
-    uint64_t cur = (proc->brook_va_next + (PMM_PAGE_SIZE - 1))
+    uint64_t cur = (proc->cabin->brook_va_next + (PMM_PAGE_SIZE - 1))
                    & ~(PMM_PAGE_SIZE - 1);
     uint64_t va_header = cur;
 
@@ -492,13 +492,13 @@ static error_t brook_reserve_user_va(struct process_t *proc,
         va_slots >= CABIN_BROOK_END ||
         slot_total_size > CABIN_BROOK_END - va_slots ||
         va_slots + slot_total_size < va_slots) {
-        spin_unlock(&proc->brook_lock);
+        spin_unlock(&proc->cabin->brook_lock);
         return ERR_NO_MEMORY;
     }
 
-    proc->brook_va_next = va_slots + slot_total_size;
+    proc->cabin->brook_va_next = va_slots + slot_total_size;
 
-    spin_unlock(&proc->brook_lock);
+    spin_unlock(&proc->cabin->brook_lock);
 
     *out_va_header = va_header;
     *out_va_slots  = va_slots;
@@ -506,37 +506,37 @@ static error_t brook_reserve_user_va(struct process_t *proc,
 }
 
 /* ─────────────────────────────────────────────────────────────────────
- * Claim list helpers — proc->brook_claims_head singly-linked.
+ * Claim list helpers — proc->cabin->brook_claims_head singly-linked.
  * Identical shape to Bay's claim list.
  * ───────────────────────────────────────────────────────────────────── */
 static bool brook_link_claim(struct process_t *proc, BrookClaim *claim)
 {
-    spin_lock(&proc->brook_lock);
+    spin_lock(&proc->cabin->brook_lock);
     if (proc->destroying) {
-        spin_unlock(&proc->brook_lock);
+        spin_unlock(&proc->cabin->brook_lock);
         return false;
     }
-    claim->proc_next = (BrookClaim *)proc->brook_claims_head;
-    proc->brook_claims_head = claim;
-    spin_unlock(&proc->brook_lock);
+    claim->proc_next = (BrookClaim *)proc->cabin->brook_claims_head;
+    proc->cabin->brook_claims_head = claim;
+    spin_unlock(&proc->cabin->brook_lock);
     return true;
 }
 
 static BrookClaim *brook_unlink_claim_by_va(struct process_t *proc,
                                             uint64_t user_va_header)
 {
-    spin_lock(&proc->brook_lock);
-    BrookClaim **p = (BrookClaim **)&proc->brook_claims_head;
+    spin_lock(&proc->cabin->brook_lock);
+    BrookClaim **p = (BrookClaim **)&proc->cabin->brook_claims_head;
     while (*p) {
         if ((*p)->user_va_header == user_va_header) {
             BrookClaim *hit = *p;
             *p = hit->proc_next;
-            spin_unlock(&proc->brook_lock);
+            spin_unlock(&proc->cabin->brook_lock);
             return hit;
         }
         p = &(*p)->proc_next;
     }
-    spin_unlock(&proc->brook_lock);
+    spin_unlock(&proc->cabin->brook_lock);
     return NULL;
 }
 
@@ -1022,10 +1022,10 @@ void BrookCleanupProcess(struct process_t *proc)
     /* Detach the claim list under brook_lock so concurrent open paths
      * (which check proc->destroying first) cannot race-link a new
      * claim after we walk past it. */
-    spin_lock(&proc->brook_lock);
-    BrookClaim *head = (BrookClaim *)proc->brook_claims_head;
-    proc->brook_claims_head = NULL;
-    spin_unlock(&proc->brook_lock);
+    spin_lock(&proc->cabin->brook_lock);
+    BrookClaim *head = (BrookClaim *)proc->cabin->brook_claims_head;
+    proc->cabin->brook_claims_head = NULL;
+    spin_unlock(&proc->cabin->brook_lock);
 
     while (head) {
         BrookClaim *next = head->proc_next;

@@ -30,7 +30,7 @@ static const void *crate_read(const Crate *c, const OpContext *ctx)
 {
     if (!c || c->size == 0) return NULL;
     if (ctx && ctx->proc && ctx->proc->cabin)
-        return vmm_translate_user_addr(ctx->proc->cabin,
+        return vmm_translate_user_addr(ctx->proc->cabin->vmm,
                                        (uintptr_t)c->addr, (size_t)c->size);
     return (const void *)(uintptr_t)c->addr;
 }
@@ -76,7 +76,7 @@ static int SysTouchIntern(const ManifestOp *op, Crate *crates,
     if (out->capacity < 4) return ERR_INVALID_ARGUMENT;
     void *dst = (void *)(uintptr_t)out->addr;
     if (ctx->proc->cabin)
-        dst = vmm_translate_user_addr(ctx->proc->cabin,
+        dst = vmm_translate_user_addr(ctx->proc->cabin->vmm,
                                       (uintptr_t)out->addr, 4);
     if (!dst) return ERR_INVALID_ADDRESS;
 
@@ -307,8 +307,8 @@ static int SysTouchAwait(const ManifestOp *op, Crate *crates,
      * undone, guide.c pushes a Result that result_pop_non_ipc filters
      * on error_code == 9 (see result.c:151), so the orphan never
      * surfaces as a stale reply to a subsequent ManifestSubmitFull. */
-    if (ctx->proc->touch_ring_phys) {
-        TouchRing *rr = (TouchRing *)vmm_phys_to_virt(ctx->proc->touch_ring_phys);
+    if (ctx->proc->cabin && ctx->proc->cabin->touch_ring_phys) {
+        TouchRing *rr = (TouchRing *)vmm_phys_to_virt(ctx->proc->cabin->touch_ring_phys);
         if (rr) {
             uint64_t tail = __atomic_load_n(&rr->hdr.tail, __ATOMIC_ACQUIRE);
             uint64_t head = __atomic_load_n(&rr->hdr.head, __ATOMIC_RELAXED);

@@ -69,7 +69,7 @@ static void *StorageCrateMap(const Crate *c, const OpContext *ctx, uint64_t byte
     if (!c || bytes == 0)            return NULL;
     if (bytes > c->capacity)         return NULL;
     if (ctx && ctx->proc && ctx->proc->cabin) {
-        return vmm_translate_user_addr(ctx->proc->cabin, (uintptr_t)c->addr, (size_t)bytes);
+        return vmm_translate_user_addr(ctx->proc->cabin->vmm, (uintptr_t)c->addr, (size_t)bytes);
     }
     return (void *)(uintptr_t)c->addr;
 }
@@ -79,7 +79,7 @@ static void *crate_in_buf(const Crate *src, const OpContext *ctx)
     if (!src || src->size == 0) return NULL;
     if (src->size > src->capacity) return NULL;
     if (ctx && ctx->proc && ctx->proc->cabin) {
-        return vmm_user_buf_in(ctx->proc->cabin, (uintptr_t)src->addr, (size_t)src->size);
+        return vmm_user_buf_in(ctx->proc->cabin->vmm, (uintptr_t)src->addr, (size_t)src->size);
     }
     /* No cabin (kernel-internal caller) — just snapshot the bytes so
      * cleanup is uniform. */
@@ -101,7 +101,7 @@ static int crate_out_commit(const Crate *out, const OpContext *ctx,
 {
     if (!out || !kbuf || bytes == 0) return 0;
     if (ctx && ctx->proc && ctx->proc->cabin) {
-        return vmm_user_buf_commit_out(ctx->proc->cabin, (uintptr_t)out->addr,
+        return vmm_user_buf_commit_out(ctx->proc->cabin->vmm, (uintptr_t)out->addr,
                                         kbuf, (size_t)bytes);
     }
     memcpy((void *)(uintptr_t)out->addr, kbuf, (size_t)bytes);
@@ -212,7 +212,7 @@ static void obj_read_finish(ObjReadAsyncCtx *ctx, error_t status, bool partial_o
      * If commit fails (e.g. user unmapped the page mid-flight) we still
      * report the byte count — the user's buffer is just left untouched. */
     if (reported > 0 && ctx->out_base && ctx->target && ctx->target->cabin) {
-        vmm_user_buf_commit_out(ctx->target->cabin, ctx->out_user_addr,
+        vmm_user_buf_commit_out(ctx->target->cabin->vmm, ctx->out_user_addr,
                                  ctx->out_base, (size_t)reported);
     }
 
@@ -227,7 +227,7 @@ static void obj_read_finish(ObjReadAsyncCtx *ctx, error_t status, bool partial_o
      * the dispatcher will NOT clean up after async-park. */
     if (ctx->crates_kbuf) {
         crate_stage_commit_and_release(ctx->crates_kbuf, ctx->crate_count,
-                                        ctx->target ? ctx->target->cabin : NULL,
+                                        (ctx->target && ctx->target->cabin) ? ctx->target->cabin->vmm : NULL,
                                         ctx->crates_uaddr);
     }
 

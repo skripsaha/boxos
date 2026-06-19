@@ -25,7 +25,7 @@ static const void *bay_crate_read(const Crate *c, const OpContext *ctx)
 {
     if (!c || c->size == 0) return NULL;
     if (ctx && ctx->proc && ctx->proc->cabin)
-        return vmm_translate_user_addr(ctx->proc->cabin,
+        return vmm_translate_user_addr(ctx->proc->cabin->vmm,
                                        (uintptr_t)c->addr, (size_t)c->size);
     return (const void *)(uintptr_t)c->addr;
 }
@@ -34,7 +34,7 @@ static void *bay_crate_write(Crate *c, const OpContext *ctx, size_t size)
 {
     if (!c || c->capacity < size) return NULL;
     if (ctx && ctx->proc && ctx->proc->cabin)
-        return vmm_translate_user_addr(ctx->proc->cabin,
+        return vmm_translate_user_addr(ctx->proc->cabin->vmm,
                                        (uintptr_t)c->addr, size);
     return (void *)(uintptr_t)c->addr;
 }
@@ -190,7 +190,7 @@ static int SysHeapPrefault(const ManifestOp *op, Crate *crates,
     for (uint64_t i = 0; i < chunks; i++) {
         uint64_t va = va_base + i * VMM_LARGE_PAGE_2M_SIZE;
         void *phys = pmm_alloc_zero(VMM_LARGE_PAGE_2M_PAGES);
-        if (phys && vmm_map_huge_2m(ctx->proc->cabin, va, (uintptr_t)phys,
+        if (phys && vmm_map_huge_2m(ctx->proc->cabin->vmm, va, (uintptr_t)phys,
                                     pte_flags)) {
             continue;
         }
@@ -199,7 +199,7 @@ static int SysHeapPrefault(const ManifestOp *op, Crate *crates,
         for (uint64_t j = 0; j < VMM_LARGE_PAGE_2M_PAGES; j++) {
             void *p = pmm_alloc_zero(1);
             if (!p) return ERR_NO_MEMORY;
-            vmm_map_result_t r = vmm_map_page(ctx->proc->cabin,
+            vmm_map_result_t r = vmm_map_page(ctx->proc->cabin->vmm,
                                               va + j * PMM_PAGE_SIZE,
                                               (uintptr_t)p, pte_flags);
             if (!r.success) {
