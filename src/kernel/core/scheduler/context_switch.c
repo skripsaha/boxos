@@ -63,14 +63,29 @@ void context_restore_to_frame(process_t* proc, interrupt_frame_t* frame) {
 
     ProcessContext* ctx = &proc->context;
 
-    /* Skip CR3 reload only on a true address-space match. Same caveat as
-     * context_restore above: ignore bit 63 (NOFLUSH) when comparing. */
+    /* Skip CR3 reload only on a true address-space match (ignore bit 63
+     * NOFLUSH when comparing). On an actual address-space CHANGE, load CR3
+     * WITHOUT NOFLUSH, even under PCID.
+     *
+     * Strands (P2): NOFLUSH preserves this core's TLB entries for the PCID
+     * being loaded across the switch — but that is only safe if THIS core
+     * last ran this address space AND no unmap of it has happened since,
+     * neither of which is tracked. With several strands sharing one cabin
+     * (one PCID) across cores, a strand can unmap a page on core A while core
+     * B still holds a NOFLUSH-preserved entry for it from an earlier stint;
+     * A's CR3-filtered shootdown skips B (B isn't current on the cabin then),
+     * so a NOFLUSH reload on B would resurrect the stale entry → use-after-
+     * unmap. (Latent even for a single strand that migrates B→A→B across an
+     * unmap.) Loading without NOFLUSH invalidates exactly this PCID's entries
+     * on this core (other cabins' entries survive), discarding any such stale
+     * entry. Two strands of ONE cabin switching on the SAME core hit the
+     * equal-CR3 branch above (no CR3 write) and keep the TLB — so the cost is
+     * only one per-PCID flush per cross-cabin switch, the price of safety. */
     uint64_t current_cr3;
     __asm__ volatile("mov %%cr3, %0" : "=r"(current_cr3));
     const uint64_t CR3_COMPARE_MASK = ~(1ULL << 63);
     if ((current_cr3 & CR3_COMPARE_MASK) != (ctx->cr3 & CR3_COMPARE_MASK)) {
         uint64_t new_cr3 = ctx->cr3 & CR3_COMPARE_MASK;
-        if (vmm_pcid_active()) new_cr3 |= (1ULL << 63);  // NOFLUSH
         __asm__ volatile("mov %0, %%cr3" : : "r"(new_cr3) : "memory");
     }
 
