@@ -591,6 +591,49 @@ static int SysProcExec(const ManifestOp *op, Crate *crates, uint16_t crate_count
 }
 
 /* =========================================================================
+ *  SYSTEM_OP_STRAND_SPAWN — spawn an additional strand in the caller's cabin
+ *
+ *  params: [u64 entry_va][u64 arg]   (16 bytes)
+ *  out crate (optional): u32 new strand pid
+ *
+ *  Creates a second+ execution context that shares the caller's address
+ *  space (CR3 / rings / tags / heap) — the kernel substrate for
+ *  std::thread.  The strand begins at entry_va with `arg` in rdi (System V
+ *  first argument); userspace passes a trampoline that runs the thread
+ *  function then terminates the strand.  OP_AUTH_APP: a cabin may always
+ *  spawn strands into itself (no new address space is created, unlike
+ *  proc.spawn), so this needs no elevated capability.
+ * ========================================================================= */
+static int SysStrandSpawn(const ManifestOp *op, Crate *crates, uint16_t crate_count,
+                          const OpContext *ctx)
+{
+    (void)crate_count;
+    if (!ctx || !ctx->proc || !ctx->proc->cabin) return ERR_INVALID_ARGUMENT;
+    if (op->param_size < 16) return ERR_INVALID_ARGUMENT;
+
+    uint64_t entry_va, arg;
+    memcpy(&entry_va, op->params,     sizeof(uint64_t));
+    memcpy(&arg,      op->params + 8, sizeof(uint64_t));
+
+    process_t *strand = strand_spawn(ctx->proc->cabin, (uintptr_t)entry_va, arg);
+    if (!strand) return ERR_SPAWN_FAILED;
+
+    if (op->out_crate != CRATE_INDEX_NONE) {
+        Crate *out = &crates[op->out_crate];
+        if (out->capacity >= sizeof(uint32_t)) {
+            void *kp = SysCrateWrite(out, ctx, sizeof(uint32_t));
+            if (kp) {
+                uint32_t pid = strand->pid;
+                memcpy(kp, &pid, sizeof(uint32_t));
+                out->size = sizeof(uint32_t);
+            }
+        }
+    }
+
+    return OK;
+}
+
+/* =========================================================================
  *  Context (use)
  * ========================================================================= */
 
@@ -1268,6 +1311,7 @@ error_t SystemDeckRegister(void)
         { SYSTEM_OP_PROC_INFO,    SysProcInfo,    OP_AUTH_NONE,   "system.proc.info"  },
         { SYSTEM_OP_TLS_FSBASE,   SysTlsFsbase,   OP_AUTH_NONE,   "system.tls.fsbase" },
         { SYSTEM_OP_PROC_EXEC,    SysProcExec,    OP_AUTH_UTILITY,"system.proc.exec"  },
+        { SYSTEM_OP_STRAND_SPAWN, SysStrandSpawn, OP_AUTH_APP,    "system.strand.spawn"},
         { SYSTEM_OP_INFO,         SysInfo,        OP_AUTH_NONE,   "system.info"       },
         /* Context, tags, buffers: app+. */
         { SYSTEM_OP_CTX_USE,      SysCtxUse,      OP_AUTH_APP,    "system.ctx.use"    },

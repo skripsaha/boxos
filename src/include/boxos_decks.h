@@ -143,5 +143,6 @@
  * SysAddrWake or by the timeout armed via TouchQueueWakeAfter. */
 #define SYSTEM_OP_ADDR_PARK         0xC0  /* (u64 va)(u64 expected)(u32 timeout_ms) */
 #define SYSTEM_OP_ADDR_WAKE         0xC1  /* (u64 va)(u32 count — 0 = all)         */
+#define SYSTEM_OP_STRAND_SPAWN      0xC2  /* (u64 entry_va)(u64 arg) -> out: u32 strand pid */
 
 #endif // BOXOS_DECKS_H

@@ -913,25 +913,53 @@ void TouchCleanupProcess(process_t *proc)
     if (proc->touch_cleaned) return;
     proc->touch_cleaned = 1;
 
-    /* Unlink every sub from its bucket so concurrent publishes stop seeing
-     * this process. Sub structs remain in proc->cabin->subs_head with proc_next
-     * pointers intact; the kfree happens in TouchFinalizeProcess only after
-     * the process refcount falls to zero. */
-    uint32_t unlinked = 0;
+    /* Subscriptions are keyed by sub->proc.  With multi-strand cabins the
+     * proc-list (cabin->subs_head) is shared by every strand, so we must
+     * splice out only THIS strand's subs under subs_lock — sibling strands
+     * mutate the same list concurrently via TouchClaimSet/Clear.  Only
+     * pointer surgery happens under subs_lock: the bucket unlink takes the
+     * bucket lock, and the established order is bucket→subs (TouchClaimSet),
+     * so taking the bucket lock here while holding subs_lock would invert it.
+     * We therefore detach first, unlock, then unlink buckets.  For a
+     * single-strand cabin every sub matches, so the end state is identical
+     * to the old wholesale teardown. */
+    TouchSub *mine = NULL;
+    spin_lock(&proc->cabin->subs_lock);
     TouchSub *cur = (TouchSub *)proc->cabin->subs_head;
     while (cur) {
-        if (cur->bucket) { touch_sub_unlink_bucket(cur); unlinked++; }
-        if (cur->mode == TOUCH_REACT &&
-            cur->u.manifest != MANIFEST_HANDLE_INVALID) {
-            ManifestRelease(cur->u.manifest);
-            cur->u.manifest = MANIFEST_HANDLE_INVALID;
+        TouchSub *pnext = cur->proc_next;
+        if (cur->proc == proc) {
+            if (cur->proc_prev) cur->proc_prev->proc_next = cur->proc_next;
+            else                proc->cabin->subs_head     = cur->proc_next;
+            if (cur->proc_next) cur->proc_next->proc_prev = cur->proc_prev;
+            cur->proc_prev = NULL;
+            cur->proc_next = mine;   /* reuse proc_next as the detached-list link */
+            mine = cur;
         }
-        cur = cur->proc_next;
+        cur = pnext;
+    }
+    spin_unlock(&proc->cabin->subs_lock);
+
+    /* Now unlink each detached sub from its bucket (publishers stop seeing
+     * this strand) and release REACT manifests.  Subs are NOT freed here —
+     * an in-flight publisher snapshot may still hold the pointer; it also
+     * holds a proc ref, so ref_count stays > 0 and TouchFinalizeProcess
+     * (which runs only at ref==0) does the kfree safely. */
+    uint32_t unlinked = 0;
+    for (TouchSub *s = mine; s; s = s->proc_next) {
+        if (s->bucket) { touch_sub_unlink_bucket(s); unlinked++; }
+        if (s->mode == TOUCH_REACT &&
+            s->u.manifest != MANIFEST_HANDLE_INVALID) {
+            ManifestRelease(s->u.manifest);
+            s->u.manifest = MANIFEST_HANDLE_INVALID;
+        }
     }
     if (unlinked > 0)
         __atomic_sub_fetch(&g_total_subs, unlinked, __ATOMIC_RELEASE);
 
-    /* Drain pending INTERRUPT-mode queue. */
+    proc->touch_detached_subs = mine;
+
+    /* Drain pending INTERRUPT-mode queue (per-strand). */
     spin_lock(&proc->irq_lock);
     TouchPending *p = (TouchPending *)proc->irq_pending_head;
     proc->irq_pending_head = NULL;
@@ -950,8 +978,12 @@ void TouchCleanupProcess(process_t *proc)
 void TouchFinalizeProcess(process_t *proc)
 {
     if (!proc) return;
-    TouchSub *cur = (TouchSub *)proc->cabin->subs_head;
-    proc->cabin->subs_head = NULL;
+    /* Free the subs TouchCleanupProcess detached for this strand.  Runs
+     * only at ref_count==0, so no publisher snapshot can still reference
+     * them.  Sibling strands' subs are untouched (they live on their own
+     * detached lists / the shared cabin list). */
+    TouchSub *cur = (TouchSub *)proc->touch_detached_subs;
+    proc->touch_detached_subs = NULL;
     while (cur) {
         TouchSub *next = cur->proc_next;
         kfree(cur);

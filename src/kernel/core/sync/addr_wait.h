@@ -12,7 +12,15 @@ struct process_t;
  * 256 L1 pointers, each pointing to a lazily-allocated slab of 256
  * AddrWaitBuckets. Bucket index = (phys >> 3) & 0xFFFF;
  * hi = index >> 8  selects L1 slab;
- * lo = index & 0xFF selects bucket within the slab. */
+ * lo = index & 0xFF selects bucket within the slab.
+ *
+ * REAL-HW CAVEAT: parker and waker must resolve the SAME physical address
+ * for the same user VA. That holds for strands sharing a cabin (one PTE)
+ * and for stable .bss/.data/heap pages. But a VA whose backing page can be
+ * remapped underneath it (CoW fork, MCE poison migration, Bay re-open)
+ * could hash parker and waker to different buckets and lose the wake until
+ * the park timeout fires. Callers using addr_park/addr_wake as a futex
+ * (std::atomic::wait) must keep the word on a pinned, non-migrating page. */
 
 #define ADDR_WAIT_L1_SIZE  256u
 #define ADDR_WAIT_L2_SIZE  256u

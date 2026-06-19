@@ -114,6 +114,9 @@ cabin_t *cabin_create(uint32_t pid, const char *tags)
     cabin->brook_claims_head = NULL;
     cabin->brook_va_next     = CABIN_BROOK_BASE;
 
+    spinlock_init(&cabin->hammock_lock);
+    cabin->hammock_va_next   = CABIN_HAMMOCK_BASE;
+
     aslr_offsets_t aslr   = aslr_generate();
     cabin->aslr_stack_top     = VMM_USER_STACK_TOP - aslr.stack_offset;
     cabin->aslr_heap_base     = CABIN_HEAP_BASE + aslr.heap_offset;
@@ -161,12 +164,47 @@ void cabin_destroy(cabin_t *cabin)
     if (!cabin)
         return;
 
+    /* Clear the MemTag bookkeeping on the shared IPC ring pages before
+     * vmm_destroy_context frees them.  These tags are CABIN-wide (every
+     * strand shares the rings), so the clear belongs here at last-strand
+     * teardown — NOT in per-strand process_destroy, where a non-last
+     * strand's exit would wrongly strip the tags from rings its siblings
+     * are still using.  Mirrors the apply in cabin_create. */
+    if (cabin->pocket_ring_phys) {
+        MemTagClearByPhys(cabin->pocket_ring_phys, "purpose:shared");
+        MemTagClearByPhys(cabin->pocket_ring_phys, "purpose:pocket-ring");
+    }
+    if (cabin->result_ring_phys) {
+        MemTagClearByPhys(cabin->result_ring_phys, "purpose:shared");
+        MemTagClearByPhys(cabin->result_ring_phys, "purpose:result-ring");
+    }
+    if (cabin->touch_ring_phys) {
+        MemTagClearByPhys(cabin->touch_ring_phys, "purpose:shared");
+        MemTagClearByPhys(cabin->touch_ring_phys, "purpose:touch-ring");
+    }
+
     if (cabin->tag_overflow_ids)
     {
         kfree(cabin->tag_overflow_ids);
         cabin->tag_overflow_ids      = NULL;
         cabin->tag_overflow_count    = 0;
         cabin->tag_overflow_capacity = 0;
+    }
+
+    /* Free retired overflow buffers (kept alive past each realloc so a
+     * lock-free reader never dereferenced freed memory — see
+     * TagOverflowRetired).  Safe to free now: cabin teardown means no
+     * strand survives to read them. */
+    {
+        TagOverflowRetired *r = cabin->tag_overflow_retired;
+        while (r)
+        {
+            TagOverflowRetired *next = r->next;
+            kfree(r->buf);
+            kfree(r);
+            r = next;
+        }
+        cabin->tag_overflow_retired = NULL;
     }
 
     if (cabin->vmm)

@@ -195,6 +195,34 @@
 #define CABIN_BROOK_END                0x00007F0000000000ULL
 #define CABIN_BROOK_SIZE               (CABIN_BROOK_END - CABIN_BROOK_BASE)
 
+/* Hammock window — per-cabin VA range for the stacks (and CET shadow
+ * stacks) of ADDITIONAL strands spawned via strand_spawn. The main
+ * strand keeps its top-of-AS stack (cabin->aslr_stack_top) and the fixed
+ * user-SSP region just below VMM_USER_STACK_TOP, completely unchanged.
+ *
+ * Anchored at CABIN_BROOK_END and capped ~60 GiB below the main strand's
+ * stack/SSP region near VMM_USER_STACK_TOP. The kernel bump-allocates one
+ * fixed-size SLOT per strand from this window via the per-cabin cursor
+ * cabin->hammock_va_next — the same idiom Bay/Brook use (bay_va_next /
+ * brook_va_next).
+ *
+ * Each slot is self-contained (low → high address):
+ *   [stack guard 1pg][user stack 16pg][mid guard 1pg][CET user SSP 4pg][hi guard 1pg]
+ * Guards are unmapped VA gaps — any access faults. The stack grows down
+ * from its top into the low guard; the CET shadow stack grows down into
+ * the mid guard. The stride is rounded up to CABIN_HAMMOCK_SLOT_SIZE so
+ * cursor stepping is clean and slots never overlap. 128 KiB/slot over a
+ * ~1 TiB window leaves room for far more strands than any cabin needs. */
+#define CABIN_HAMMOCK_BASE             CABIN_BROOK_END
+#define CABIN_HAMMOCK_END              0x00007FF000000000ULL
+#define CABIN_HAMMOCK_SIZE             (CABIN_HAMMOCK_END - CABIN_HAMMOCK_BASE)
+#define CABIN_HAMMOCK_SLOT_PAGES       32u
+#define CABIN_HAMMOCK_SLOT_SIZE        (CABIN_HAMMOCK_SLOT_PAGES * 0x1000ULL)
+/* Low guard occupies page 0 of the slot; the user stack starts at page 1.
+ * The CET-SSP page offset depends on CONFIG_USER_STACK_PAGES, so it is
+ * derived in process.c (where kernel_config.h is in scope), not here. */
+#define CABIN_HAMMOCK_STACK_PAGE_OFF   1u
+
 #define USER_CODE_ENTRY_POINT          CABIN_CODE_START_ADDR
 
 #endif /* CABIN_LAYOUT_H */

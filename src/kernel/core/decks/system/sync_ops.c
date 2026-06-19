@@ -103,11 +103,15 @@ static int SysAddrPark(const ManifestOp *op, Crate *crates,
     AddrWaitBucket *bucket = AddrWaitGetBucket(phys);
     if (!bucket) return ERR_NO_MEMORY;
 
+    /* Arm the entry UNDER the bucket lock — the lock that guards the chain
+     * it is about to join — so a concurrent SysAddrWake walking this bucket
+     * never observes a half-armed entry.  (Between the unlink above and this
+     * link the entry is in no chain, so wakers cannot reach it.)  Previously
+     * these stores sat outside the lock, correct only by statement order. */
+    spin_lock(&bucket->lock);
     entry->proc      = ctx->proc;
     entry->phys_addr = phys;
     entry->done      = 0;
-
-    spin_lock(&bucket->lock);
     AddrWaitLink(bucket, entry);
     spin_unlock(&bucket->lock);
 

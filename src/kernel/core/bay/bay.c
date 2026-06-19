@@ -884,24 +884,39 @@ uint64_t BaySizeInternal(struct process_t *proc, uint64_t user_va)
 
 void BayCleanupProcess(struct process_t *proc)
 {
-    if (!proc) return;
+    if (!proc || !proc->cabin) return;
 
-    /* Drain the claim list, releasing each. The list is owned by us
-     * once we set head to NULL — releases below cannot race with new
-     * opens because process_destroy already set proc->destroying. */
+    /* Splice out only THIS strand's claims (claim->proc == proc).  A Bay
+     * window belongs to the strand that opened it, so claims opened by
+     * sibling strands sharing the cabin stay mapped.  Pointer surgery runs
+     * under bay_lock; the heavy release (detach/unmap/drop_ref — which take
+     * the bucket lock) runs OUTSIDE bay_lock to preserve bay_lock →
+     * bucket-lock ordering.  For a single-strand cabin every claim matches,
+     * so this behaves exactly like the old wholesale drain.  New opens
+     * cannot race in: process_destroy already set proc->destroying. */
+    BayClaim *to_free = NULL;
     spin_lock(&proc->cabin->bay_lock);
-    BayClaim *head = (BayClaim *)proc->cabin->bay_claims_head;
-    proc->cabin->bay_claims_head = NULL;
+    BayClaim **pp = (BayClaim **)&proc->cabin->bay_claims_head;
+    while (*pp) {
+        BayClaim *c = *pp;
+        if (c->proc == proc) {
+            *pp = c->proc_next;
+            c->proc_next = to_free;
+            to_free = c;
+        } else {
+            pp = &c->proc_next;
+        }
+    }
     spin_unlock(&proc->cabin->bay_lock);
 
-    while (head) {
-        BayClaim *next = head->proc_next;
-        BayObject *bay = head->bay;
+    while (to_free) {
+        BayClaim *next = to_free->proc_next;
+        BayObject *bay = to_free->bay;
 
-        if (bay && proc->cabin) {
+        if (bay) {
             bay_memtag_detach_all(proc, bay->chunks, bay->chunk_count,
-                                   head->user_va_base, bay->chunk_size);
-            bay_unmap_from_cabin(proc, head->user_va_base,
+                                   to_free->user_va_base, bay->chunk_size);
+            bay_unmap_from_cabin(proc, to_free->user_va_base,
                                  bay->chunk_count, bay->chunk_size);
 
             BayBucket *b = &g_bay_buckets[bay_bucket_index(bay->tag_id)];
@@ -912,8 +927,8 @@ void BayCleanupProcess(struct process_t *proc)
             atomic_fetch_add_u64(&g_stat_releases, 1);
         }
 
-        kfree(head);
-        head = next;
+        kfree(to_free);
+        to_free = next;
     }
 }
 

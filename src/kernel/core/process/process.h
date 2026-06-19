@@ -152,8 +152,18 @@ typedef struct process_t
     void            *irq_pending_head;
     spinlock_t       irq_lock;
 
-    /* set to 1 after TouchCleanupProcess runs once (P4: move to cabin_t) */
+    /* set to 1 after TouchCleanupProcess runs once for THIS strand.
+     * Per-strand (not per-cabin): with multi-strand cabins each strand
+     * owns its own Touch subscriptions (keyed by sub->proc), so the guard
+     * and the teardown are per-strand. */
     uint8_t           touch_cleaned;
+
+    /* Head of this strand's Touch subscriptions after TouchCleanupProcess
+     * splices them off the shared cabin list (linked via TouchSub.proc_next).
+     * They are bucket-unlinked immediately but freed only in
+     * TouchFinalizeProcess once ref_count hits 0, so an in-flight publisher
+     * snapshot (which holds a proc ref) can never dereference a freed sub. */
+    void             *touch_detached_subs;
 
     /* Phase 2K+ — CET shadow stack per-process state. */
     uintptr_t         user_ssp_phys;
@@ -162,6 +172,17 @@ typedef struct process_t
 
     uintptr_t         kernel_ssp_phys;
     uintptr_t         kernel_ssp_va_top;
+
+    /* Strands (P4) — set only for a strand spawned via strand_spawn into an
+     * EXISTING cabin.  hammock_base is the base VA of this strand's slot in
+     * the cabin's hammock window (see cabin_layout.h); user_stack_phys is
+     * the PMM allocation backing its user stack, freed on strand exit.
+     * Both stay 0 for the main strand, whose stack lives at the top of the
+     * address space and is reclaimed by vmm_destroy_context at cabin
+     * teardown.  process_user_ssp_va_for derives the per-strand CET shadow
+     * stack VA from hammock_base so sibling strands never collide. */
+    uintptr_t         hammock_base;
+    uintptr_t         user_stack_phys;
 
     /* Embedded addr-wait entry — one per strand, lifetime = process lifetime.
      * SysAddrPark reuses this rather than stack-allocating to avoid
@@ -200,6 +221,15 @@ void process_init(void);
 
 process_t *process_create(const char *tags);
 void process_destroy(process_t *proc);
+
+/* strand_spawn — create an additional strand (execution context) inside an
+ * EXISTING cabin (shared address space / CR3 / rings / tags).  Allocates a
+ * fresh process_t with its own pid, kernel stack, register frame, and a
+ * user stack + CET shadow stack carved from the cabin's hammock window;
+ * starts it at entry_va with `arg` in rdi and enqueues it.  Increments
+ * cabin->strand_count so the cabin outlives the spawning strand.  Returns
+ * the new strand or NULL on failure (fully unwound). */
+process_t *strand_spawn(cabin_t *cabin, uintptr_t entry_va, uint64_t arg);
 
 int process_load_binary(process_t *proc, const void *binary_data, size_t size);
 
