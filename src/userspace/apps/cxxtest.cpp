@@ -4809,6 +4809,18 @@ void Phase31()
     }
     tm.unlock();
 
+    // try_lock_until against an absolute deadline must tick the same way.
+    tm.lock();
+    {
+        box::stopwatch sw;
+        bool got = tm.try_lock_until(steady_clock::now() + milliseconds(15));
+        nanoseconds waited = sw.elapsed();
+        Check(!got, "phase31 try_lock_until held -> false");
+        Check(waited >= milliseconds(12),
+              "phase31 try_lock_until held waited to ~deadline");
+    }
+    tm.unlock();
+
     // ── unique_lock<timed_mutex>: timed interface forwards to the mutex ─────
     {
         std::unique_lock<std::timed_mutex> ul(tm, std::defer_lock);
@@ -4893,6 +4905,16 @@ void Phase32()
         Check(waited >= milliseconds(12),
               "phase32 shared blocked-by-writer waited to ~deadline");
     }
+    // try_lock_shared_until against an absolute deadline ticks identically.
+    {
+        box::stopwatch sw;
+        bool got =
+            stm.try_lock_shared_until(steady_clock::now() + milliseconds(15));
+        nanoseconds waited = sw.elapsed();
+        Check(!got, "phase32 writer held -> try_lock_shared_until false");
+        Check(waited >= milliseconds(12),
+              "phase32 shared_until blocked-by-writer waited to ~deadline");
+    }
     // Writer-vs-writer: a second exclusive acquire also fails (short timeout).
     Check(!stm.try_lock_for(milliseconds(2)),
           "phase32 writer held -> second exclusive try_lock_for false");
@@ -4948,7 +4970,7 @@ void Phase33()
     lt.count_down(2);                // 2 -> 0
     Check(lt.try_wait(), "phase33 latch ready at zero");
     lt.wait();                       // counter == 0 -> returns at once
-    Check(true, "phase33 latch wait on zero does not block");
+    Check(lt.try_wait(), "phase33 latch still satisfied after wait() returns");
 
     std::latch lt1(1);
     lt1.arrive_and_wait();           // count_down(1) then wait -> immediate
@@ -4976,7 +4998,8 @@ void Phase33()
     Check(comps2 == 1, "phase33 barrier completes when arrivals reach expected");
     bar2.wait(std::move(tok2));      // phase advanced -> immediate
     bar2.wait(std::move(tok));       // stale token of the same phase -> immediate
-    Check(true, "phase33 barrier wait on a completed phase does not block");
+    Check(comps2 == 1,
+          "phase33 wait on a completed phase returns without re-running completion");
 
     // arrive_and_drop: subsequent phases expect one fewer arrival
     int comps3 = 0;
@@ -4989,10 +5012,14 @@ void Phase33()
     Check(comps3 == 2,
           "phase33 barrier arrive_and_drop lowered next-phase expected");
 
-    // default (empty) completion barrier compiles and runs
+    // default (empty) completion barrier: drive two phases and confirm the
+    // phase token advances (reusability is observable through the token).
     std::barrier<> b0(1);
-    b0.arrive_and_wait();
-    Check(true, "phase33 barrier<> default completion runs");
+    auto p0 = b0.arrive(); // phase 0 token
+    b0.wait(std::move(p0));
+    auto p1 = b0.arrive(); // phase 1 token — must differ if the barrier reused
+    b0.wait(std::move(p1));
+    Check(p0 != p1, "phase33 barrier<> default advances phase across reuses");
 
     printf("[CXX] PASS phase33: std::latch (count_down/try_wait/wait/"
            "arrive_and_wait) + std::barrier (arrive/wait/arrive_and_wait/"
@@ -5047,7 +5074,8 @@ void Phase34()
     std::binary_semaphore handoff(0);
     handoff.release();
     handoff.acquire();
-    Check(true, "phase34 binary_sem release/acquire hand-off");
+    Check(!handoff.try_acquire(),
+          "phase34 binary_sem permit consumed by hand-off acquire");
 
     printf("[CXX] PASS phase34: std::counting_semaphore + binary_semaphore "
            "(acquire/try_acquire/try_acquire_for-until/release deadline-spin)\n");

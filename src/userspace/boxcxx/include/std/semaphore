@@ -33,8 +33,9 @@ class counting_semaphore {
 public:
     static constexpr ptrdiff_t max() noexcept { return LeastMaxValue; }
 
-    constexpr explicit counting_semaphore(ptrdiff_t desired) noexcept
-        : __count(desired)
+    // Non-noexcept to match the synopsis: the narrow contract (0 <= desired
+    // <= max()) is left potentially-throwing by [thread.sema.cnt].
+    constexpr explicit counting_semaphore(ptrdiff_t desired) : __count(desired)
     {
     }
     ~counting_semaphore()                                     = default;
