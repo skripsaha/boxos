@@ -253,7 +253,10 @@ typedef enum {
     ERR_BRAID_MODE_INVALID = 1058,
     ERR_BRAID_REBUILD_FAILED = 1059,
 
-    ERR_MAX = 1099
+    /* Strand addr_park: *addr != expected at park time (no park performed). */
+    ERR_ADDR_VALUE_MISMATCH = 1100,
+
+    ERR_MAX = 1100
 } error_t;
 
 #define IS_ERROR(err) ((err) != OK)

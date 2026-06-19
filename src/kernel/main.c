@@ -247,11 +247,13 @@ void kernel_main(void)
     extern void McePresenceTest(void);
     extern void IommuPresenceTest(void);
     extern void TmeRunTests(int *out_pass, int *out_fail);
+    extern void AddrWaitSelfTest(void);
     VmmHelperTest();
     PmmPoisonTest();
     McePresenceTest();
     IommuPresenceTest();
     { int p = 0, f = 0; TmeRunTests(&p, &f); (void)p; (void)f; }
+    AddrWaitSelfTest();
 
     debug_printf("[INIT] TSS Dynamic Stacks...\n");
     tss_setup_dynamic_stacks();

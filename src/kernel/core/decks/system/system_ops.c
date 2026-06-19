@@ -43,6 +43,7 @@
 #include "cpu_calibrate.h"
 #include "cpuid.h"
 #include "fpu.h"   /* g_user_fsbase_used — TLS FS-base context-switch gate */
+#include "sync_ops.h"
 
 #define MAX_BROADCAST_TARGETS  256u
 #define BROADCAST_TAG_MAX      64u
@@ -1323,6 +1324,9 @@ error_t SystemDeckRegister(void)
 
     error_t hw_rc = HwOpsRegister();
     if (hw_rc != OK) return hw_rc;
+
+    error_t sync_rc = SyncOpsRegister();
+    if (sync_rc != OK) return sync_rc;
 
     debug_printf("[SystemDeck] registered %zu ops (full surface, gated)\n",
                  sizeof(table) / sizeof(table[0]));

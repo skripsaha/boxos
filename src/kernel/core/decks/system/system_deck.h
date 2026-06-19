@@ -54,4 +54,7 @@ error_t MemTagOpsRegister(void);
  * Defined in hw_ops.c. */
 error_t HwOpsRegister(void);
 
+/* Strand sync: addr_park / addr_wake. Defined in sync_ops.c. */
+error_t SyncOpsRegister(void);
+
 #endif /* SYSTEM_DECK_H */

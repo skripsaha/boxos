@@ -62,7 +62,8 @@ SRCS = src/core/notify.c \
        src/debug.c \
        src/string.c \
        src/convert.c \
-       src/runtime_init.c
+       src/runtime_init.c \
+       src/sync.c
 OBJS = $(SRCS:.c=.o)
 
 all: libbox.a ../build/boxlib_start.o

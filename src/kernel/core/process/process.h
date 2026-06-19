@@ -8,6 +8,7 @@
 #include "boxos_limits.h"
 #include "atomics.h"
 #include "cabin.h"
+#include "addr_wait.h"
 
 /*
  * Lock ordering:
@@ -161,6 +162,12 @@ typedef struct process_t
 
     uintptr_t         kernel_ssp_phys;
     uintptr_t         kernel_ssp_va_top;
+
+    /* Embedded addr-wait entry — one per strand, lifetime = process lifetime.
+     * SysAddrPark reuses this rather than stack-allocating to avoid
+     * use-after-return.  Zeroed by process_create's memset; linked=0 means
+     * not in any bucket chain. */
+    AddrWaitEntry     addr_wait_entry;
 
     struct process_t *hash_next;    // hash table collision chain
     struct process_t *next;         // global process list (forward)

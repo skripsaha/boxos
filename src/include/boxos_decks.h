@@ -138,4 +138,10 @@
 #define SYSTEM_OP_HW_LAM_SET        0xB1  /* (u8 lam_mode) — 0=NONE,1=U48,2=U57 */
 #define SYSTEM_OP_HW_TME_STATE      0xB2  /* () -> struct hw_tme_state          */
 
+/* ─── Strand sync — park/wake on address (0xC0 – 0xC1) ─────────────── */
+/* Substrate for std::atomic::wait / notify. Parked caller is resumed by
+ * SysAddrWake or by the timeout armed via TouchQueueWakeAfter. */
+#define SYSTEM_OP_ADDR_PARK         0xC0  /* (u64 va)(u64 expected)(u32 timeout_ms) */
+#define SYSTEM_OP_ADDR_WAKE         0xC1  /* (u64 va)(u32 count — 0 = all)         */
+
 #endif // BOXOS_DECKS_H
