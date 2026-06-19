@@ -1,0 +1,111 @@
+// boxcxx — <semaphore>
+//
+// std::counting_semaphore / binary_semaphore — a permit counter. acquire()
+// takes a permit, blocking until one exists; release() hands permits back.
+// The blocking acquire spins on __boxcxx_atomic_wait_cycle (WAITPKG
+// UMONITOR/UMWAIT on the counter word, else PAUSE budget then yield) — the
+// same substrate as atomic::wait; the release store is the implicit wake.
+//
+// Timed acquires use the <mutex> cooperative deadline-spin
+// (__mutex_impl::TimedBackoff: PAUSE budget then yield, re-checking a <chrono>
+// clock between steps) rather than the WAITPKG-capped wait, whose 50 ms cap
+// would overshoot the caller's deadline.
+//
+// One thread per cabin means no acquirer ever actually blocks today; the
+// contract is the multi-thread one and the spins upgrade to a kernel park
+// (acquire) / kernel timed-park (try_acquire_for/until) once strands land,
+// with no signature change.
+#ifndef BOXCXX_SEMAPHORE
+#define BOXCXX_SEMAPHORE
+
+#include <mutex> // atomic, <chrono> bits, __mutex_impl::TimedBackoff;
+                 // transitively __boxcxx_atomic_wait_cycle
+#include <cstddef>
+#include <cstdint>
+
+namespace std {
+
+template <ptrdiff_t LeastMaxValue = PTRDIFF_MAX>
+class counting_semaphore {
+    static_assert(LeastMaxValue >= 0,
+                  "counting_semaphore LeastMaxValue must be non-negative");
+
+public:
+    static constexpr ptrdiff_t max() noexcept { return LeastMaxValue; }
+
+    constexpr explicit counting_semaphore(ptrdiff_t desired) noexcept
+        : __count(desired)
+    {
+    }
+    ~counting_semaphore()                                     = default;
+    counting_semaphore(const counting_semaphore &)            = delete;
+    counting_semaphore &operator=(const counting_semaphore &) = delete;
+
+    // Preconditions ([thread.sema.cnt]): update >= 0 and update <= max() -
+    // counter. The store wakes any acquirer monitoring the counter cacheline.
+    void release(ptrdiff_t update = 1)
+    {
+        __count.fetch_add(update, memory_order_release);
+    }
+
+    [[nodiscard]] bool try_acquire() noexcept
+    {
+        ptrdiff_t old = __count.load(memory_order_relaxed);
+        while (old > 0) {
+            if (__count.compare_exchange_weak(old, old - 1,
+                                              memory_order_acquire,
+                                              memory_order_relaxed))
+                return true;
+        }
+        return false;
+    }
+
+    void acquire()
+    {
+        unsigned spin = 0;
+        for (;;) {
+            ptrdiff_t old = __count.load(memory_order_acquire);
+            if (old > 0) {
+                if (__count.compare_exchange_weak(old, old - 1,
+                                                  memory_order_acquire,
+                                                  memory_order_relaxed))
+                    return;
+            } else {
+                __boxcxx_atomic_wait_cycle(&__count, &spin);
+            }
+        }
+    }
+
+    template <typename Rep, typename Period>
+    bool try_acquire_for(const chrono::duration<Rep, Period> &rel)
+    {
+        return try_acquire_until(chrono::steady_clock::now() + rel);
+    }
+
+    template <typename Clock, typename Duration>
+    bool try_acquire_until(const chrono::time_point<Clock, Duration> &abs)
+    {
+        unsigned spin = 0;
+        for (;;) {
+            ptrdiff_t old = __count.load(memory_order_acquire);
+            if (old > 0) {
+                if (__count.compare_exchange_weak(old, old - 1,
+                                                  memory_order_acquire,
+                                                  memory_order_relaxed))
+                    return true;
+            } else {
+                if (Clock::now() >= abs) return false;
+                __mutex_impl::TimedBackoff(spin);
+            }
+        }
+    }
+
+private:
+    atomic<ptrdiff_t> __count;
+};
+
+using binary_semaphore = counting_semaphore<1>;
+
+} // namespace std
+
+#endif // BOXCXX_SEMAPHORE
