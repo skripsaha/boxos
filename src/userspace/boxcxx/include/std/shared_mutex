@@ -231,6 +231,12 @@ public:
         return __impl.try_lock_shared_until(abs);
     }
 
+    using native_handle_type = atomic<unsigned> *;
+    native_handle_type native_handle() noexcept
+    {
+        return __impl.native_handle();
+    }
+
 private:
     __shared_mutex_impl::state __impl;
 };

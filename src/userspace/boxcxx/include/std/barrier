@@ -1,22 +1,29 @@
 // boxcxx — <barrier>
 //
-// std::barrier — a reusable phase barrier. Each phase `expected` arrivals
-// drive the count to zero; the last arrival runs the completion function,
-// resets the count, and advances the phase, which releases everyone waiting
-// on that phase. wait() spins on __boxcxx_atomic_wait_cycle (WAITPKG
-// UMONITOR/UMWAIT on the phase word, else PAUSE budget then yield) — the same
-// substrate as atomic::wait; the phase store is the implicit wake.
+// std::barrier — a reusable phase barrier. Each phase, `expected` arrivals
+// drive the outstanding count to zero; the arrival that drains it runs the
+// completion function and, in ONE atomic store, both advances the phase and
+// reloads the count for the next phase. wait() spins on
+// __boxcxx_atomic_wait_cycle (WAITPKG UMONITOR/UMWAIT on the state word, else
+// PAUSE budget then yield) — the same substrate as atomic::wait.
 //
-// Flat single-word design rather than libstdc++'s scalability tree: correct
-// and cheap for one-thread-per-cabin BoxOS, and strand-upgrade-ready (the
-// spin becomes a kernel park, no signature change). arrive_and_drop lowers
-// the expected arrivals for every subsequent phase.
+// The phase and the outstanding count live PACKED in a single
+// atomic<uint64_t> (phase in the high 32 bits, count in the low 32). Packing
+// makes "advance phase + reload count" a single atomic store, so a thread
+// re-entering arrive() for the next phase can never observe an advanced phase
+// alongside a stale, not-yet-reset count — the classic flat-barrier reuse
+// race. Per-phase `expected` (lowered by arrive_and_drop) is a separate
+// atomic.
+//
+// One thread per cabin → no waiter blocks today; the spin upgrades to a
+// kernel park once strands land, with no signature change.
 #ifndef BOXCXX_BARRIER
 #define BOXCXX_BARRIER
 
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <type_traits>
 #include <utility>
 
 namespace std {
@@ -25,18 +32,40 @@ namespace __barrier_impl {
 struct EmptyCompletion {
     void operator()() noexcept {}
 };
+
+// state word: phase in the high 32 bits, outstanding count in the low 32.
+inline constexpr uint64_t Pack(uint32_t phase, uint32_t count) noexcept
+{
+    return (static_cast<uint64_t>(phase) << 32) | count;
+}
+inline constexpr uint32_t PhaseOf(uint64_t s) noexcept
+{
+    return static_cast<uint32_t>(s >> 32);
+}
+inline constexpr uint32_t CountOf(uint64_t s) noexcept
+{
+    return static_cast<uint32_t>(s);
+}
 } // namespace __barrier_impl
 
 template <typename CompletionFunction = __barrier_impl::EmptyCompletion>
 class barrier {
+    static_assert(is_nothrow_invocable_v<CompletionFunction &>,
+                  "barrier completion function must be nothrow-invocable "
+                  "([thread.barrier.class])");
+
 public:
     using arrival_token = unsigned; // a snapshot of the phase at arrival
 
-    static constexpr ptrdiff_t max() noexcept { return PTRDIFF_MAX; }
+    static constexpr ptrdiff_t max() noexcept
+    {
+        return static_cast<ptrdiff_t>(0xFFFFFFFFu); // 32-bit count field
+    }
 
-    explicit barrier(ptrdiff_t expected,
-                     CompletionFunction f = CompletionFunction())
-        : __expected(expected), __count(expected), __phase(0),
+    constexpr explicit barrier(ptrdiff_t expected,
+                               CompletionFunction f = CompletionFunction())
+        : __state(__barrier_impl::Pack(0, static_cast<uint32_t>(expected))),
+          __expected(static_cast<uint32_t>(expected)),
           __completion(std::move(f))
     {
     }
@@ -44,20 +73,37 @@ public:
     barrier(const barrier &)            = delete;
     barrier &operator=(const barrier &) = delete;
 
-    [[nodiscard]] arrival_token arrive(ptrdiff_t n = 1)
+    arrival_token arrive(ptrdiff_t n = 1)
     {
-        arrival_token phase = __phase.load(memory_order_relaxed);
-        // fetch_sub returns the prior value; prior - n == 0 ⇒ we drained it.
-        if (__count.fetch_sub(n, memory_order_acq_rel) - n == 0)
-            Complete(phase);
-        return phase;
+        uint32_t un = static_cast<uint32_t>(n);
+        uint64_t s  = __state.load(memory_order_acquire);
+        for (;;) {
+            uint32_t phase = __barrier_impl::PhaseOf(s);
+            uint32_t count = __barrier_impl::CountOf(s);
+            if (count == un) {
+                // We are the completing arrival: claim it by zeroing the count
+                // at the current phase, then complete + advance in one store.
+                if (__state.compare_exchange_weak(
+                        s, __barrier_impl::Pack(phase, 0),
+                        memory_order_acq_rel, memory_order_acquire)) {
+                    CompletePhase(phase);
+                    return phase;
+                }
+            } else if (__state.compare_exchange_weak(
+                           s, __barrier_impl::Pack(phase, count - un),
+                           memory_order_acq_rel, memory_order_acquire)) {
+                return phase;
+            }
+            // CAS failure reloaded s; retry.
+        }
     }
 
     void wait(arrival_token &&token) const
     {
         unsigned spin = 0;
-        while (__phase.load(memory_order_acquire) == token)
-            __boxcxx_atomic_wait_cycle(&__phase, &spin);
+        while (__barrier_impl::PhaseOf(__state.load(memory_order_acquire))
+               == token)
+            __boxcxx_atomic_wait_cycle(&__state, &spin);
     }
 
     void arrive_and_wait() { wait(arrive()); }
@@ -65,23 +111,31 @@ public:
     void arrive_and_drop()
     {
         // One fewer arrival is expected from the next phase onward; then we
-        // arrive for the current phase.
-        __expected.fetch_sub(1, memory_order_relaxed);
+        // arrive for the current phase. Correct single-threaded and whenever
+        // this thread completes its own phase (its release fetch_sub is
+        // sequenced before the acquire load in CompletePhase). Residual,
+        // deferred to the strands epic: if a *foreign* thread completes the
+        // phase concurrently with this drop, it may reload the next count from
+        // the pre-drop __expected (a separate word, no synchronizes-with edge)
+        // and over-provision it. Unreachable today — one thread per cabin.
+        __expected.fetch_sub(1, memory_order_release);
         (void)arrive(1);
     }
 
 private:
-    void Complete(arrival_token phase)
+    void CompletePhase(uint32_t phase)
     {
         __completion();
-        __count.store(__expected.load(memory_order_relaxed),
-                      memory_order_relaxed);
-        __phase.store(phase + 1, memory_order_release); // releases waiters
+        uint32_t next = __expected.load(memory_order_acquire);
+        // A single store advances the phase AND reloads the count: any
+        // next-phase arriver that observes the new phase necessarily observes
+        // the reset count (same word), and the store releases the waiters.
+        __state.store(__barrier_impl::Pack(phase + 1, next),
+                      memory_order_release);
     }
 
-    atomic<ptrdiff_t> __expected; // arrivals expected per phase (drop lowers)
-    atomic<ptrdiff_t> __count;    // arrivals still outstanding this phase
-    atomic<unsigned> __phase;
+    atomic<uint64_t> __state;    // (phase << 32) | outstanding count this phase
+    atomic<uint32_t> __expected; // arrivals expected per phase (drop lowers)
     [[no_unique_address]] CompletionFunction __completion;
 };
 

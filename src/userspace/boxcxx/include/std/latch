@@ -23,10 +23,10 @@ class latch {
 public:
     static constexpr ptrdiff_t max() noexcept { return PTRDIFF_MAX; }
 
-    constexpr explicit latch(ptrdiff_t expected) noexcept
-        : __counter(expected)
-    {
-    }
+    // Non-noexcept to match the synopsis: the narrow contract (0 <= expected
+    // <= max()) is left potentially-throwing by [thread.latch], so a hardened
+    // build may diagnose a violation.
+    constexpr explicit latch(ptrdiff_t expected) : __counter(expected) {}
     ~latch()                        = default;
     latch(const latch &)            = delete;
     latch &operator=(const latch &) = delete;
