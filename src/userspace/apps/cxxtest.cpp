@@ -65,6 +65,7 @@
 #include "box/cxx/executor.h"
 #include "box/cxx/heap.h"
 #include "box/cxx/hw.h"
+#include "box/cxx/keyboard.h"
 #include "box/cxx/manifest.h"
 #include "box/cxx/math.h"
 #include "box/cxx/memtag.h"
@@ -4665,6 +4666,60 @@ void Phase28()
            "box::styled (scoped) + box::vga::session (batch)\n");
 }
 
+void Phase29()
+{
+    // ── box::key value + decode logic (pure; the structured core) ──────────
+    box::key k('A', 0x1E, KB_MOD_SHIFT | KB_MOD_CTRL);
+    Check(k.ch() == 'A' && k.scancode() == 0x1E, "phase29 key ch/scancode");
+    Check(k.shift() && k.ctrl() && !k.alt(), "phase29 key modifiers decode");
+    Check(k.has_char() && k.printable(), "phase29 key has_char/printable");
+    Check(k.modifiers() == (KB_MOD_SHIFT | KB_MOD_CTRL), "phase29 key modifiers bitset");
+
+    box::key none(0, 0x48, 0);  // a scancode-only key (e.g. an arrow)
+    Check(!none.has_char() && !none.printable(), "phase29 scancode-only key has no char");
+
+    kb_char_t kc{};
+    kc.ch = 'b';
+    kc.scancode = 0x30;
+    kc.flags = KB_MOD_ALT;
+    box::key kk = box::key::from_kb_char(kc);
+    Check(kk.ch() == 'b' && kk.scancode() == 0x30 && kk.alt() && !kk.shift(),
+          "phase29 from_kb_char decodes ch/scancode/mods");
+
+    // kb_event_t (the Touch payload) has a DIFFERENT field order than kb_char_t
+    // (scancode, ascii, mods) — verify the decoder reads the right fields.
+    kb_event_t ke{};
+    ke.scancode = 0x10;
+    ke.ascii = 'q';
+    ke.mods = KB_MOD_CTRL;
+    box::key ek = box::key::from_event(ke);
+    Check(ek.ch() == 'q' && ek.scancode() == 0x10 && ek.ctrl() && !ek.alt(),
+          "phase29 from_event decodes the touch-payload field order");
+
+    // ── key_input — non-blocking introspection. There is no interactive input
+    //    during the matrix, so get_key()/co_await would block: those are
+    //    compile-surface only here; we exercise the non-blocking paths. ───────
+    std::optional<std::uint32_t> avail = box::key_input::available();
+    Check(avail.has_value(), "phase29 key_input::available() queries status");
+    std::optional<box::key> got = box::key_input::try_get();
+    if (avail && *avail == 0)
+        Check(!got.has_value(), "phase29 try_get() empty when nothing buffered");
+    // get_for with a short timeout must RETURN (never hang); its result is
+    // input-dependent, so it is drained, not asserted.
+    (void)box::key_input::get_for(std::chrono::milliseconds(5));
+    // get_key() blocks until a key — reference only (calling it would hang).
+    volatile auto blocking_fp = &box::key_input::get_key;
+    (void)blocking_fp;
+
+    // ── async Touch-backed key stream: claim + non-blocking poll (drain) ───
+    box::subscription keys = box::keyboard_events();
+    if (std::optional<box::event> ev = keys.poll())
+        (void)box::key::from_touch(*ev);  // decode path (input-dependent)
+
+    printf("[CXX] PASS phase29: box::key (decode/modifiers) + box::key_input "
+           "(available/try_get/get_for) + box::keyboard_events (async stream)\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -4715,6 +4770,7 @@ int main()
     Phase26();
     Phase27();
     Phase28();
+    Phase29();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
