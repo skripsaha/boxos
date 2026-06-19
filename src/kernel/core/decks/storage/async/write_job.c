@@ -527,7 +527,7 @@ static void wjob_finalize(WriteJob *j, int rc)
      * the kbuf. Cabin is target->cabin (already pinned via ref). */
     if (j->crates_kbuf) {
         crate_stage_commit_and_release(j->crates_kbuf, j->crate_count,
-                                        j->target ? j->target->cabin : NULL,
+                                        (j->target && j->target->cabin) ? j->target->cabin->vmm : NULL,
                                         j->crates_uaddr);
     }
 

@@ -131,7 +131,7 @@ bool UseContextMatches(const process_t *proc) {
     }
 
     uint64_t ctx_bits = __atomic_load_n(&g_use_context.context_bits, __ATOMIC_RELAXED);
-    if (ctx_bits && (proc->tag_bits & ctx_bits) != ctx_bits) {
+    if (ctx_bits && (proc->cabin->tag_bits & ctx_bits) != ctx_bits) {
         return false;
     }
 
@@ -151,15 +151,15 @@ bool UseContextMatches(const process_t *proc) {
     }
 
     ctx_bits = g_use_context.context_bits;
-    if (ctx_bits && (proc->tag_bits & ctx_bits) != ctx_bits) {
+    if (ctx_bits && (proc->cabin->tag_bits & ctx_bits) != ctx_bits) {
         spin_unlock(&g_context_lock);
         return false;
     }
 
     overflow_count = g_use_context.overflow_count;
     uint16_t *ctx_overflow_ids = g_use_context.overflow_ids;
-    uint16_t proc_overflow_count = __atomic_load_n(&proc->tag_overflow_count, __ATOMIC_ACQUIRE);
-    uint16_t *proc_overflow_ids = __atomic_load_n(&proc->tag_overflow_ids, __ATOMIC_ACQUIRE);
+    uint16_t proc_overflow_count = __atomic_load_n(&proc->cabin->tag_overflow_count, __ATOMIC_ACQUIRE);
+    uint16_t *proc_overflow_ids = __atomic_load_n(&proc->cabin->tag_overflow_ids, __ATOMIC_ACQUIRE);
 
     bool match = true;
     for (uint16_t j = 0; j < overflow_count && match; j++) {

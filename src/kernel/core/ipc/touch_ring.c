@@ -55,13 +55,13 @@ void KTouchRingInit(TouchRing *hdr)
 
 static TouchRing *ktr_hdr(process_t *proc)
 {
-    if (!proc || !proc->touch_ring_phys) return NULL;
-    return (TouchRing *)vmm_phys_to_virt(proc->touch_ring_phys);
+    if (!proc || !proc->cabin || !proc->cabin->touch_ring_phys) return NULL;
+    return (TouchRing *)vmm_phys_to_virt(proc->cabin->touch_ring_phys);
 }
 
 static TouchSlot *ktr_translate_slot(process_t *target, uintptr_t uvaddr)
 {
-    return (TouchSlot *)vmm_translate_user_addr(target->cabin, uvaddr,
+    return (TouchSlot *)vmm_translate_user_addr(target->cabin->vmm, uvaddr,
                                                 sizeof(TouchSlot));
 }
 
@@ -167,11 +167,11 @@ bool KTouchPush(process_t *target,
      *     realistic SMP (max ~64 K-Cores). */
     uintptr_t uvaddr_pre     = touch_ring_slot_uvaddr(rr, tail_snap);
     uintptr_t one_page_ahead = uvaddr_pre + 4096u;
-    if (vmm_ensure_user_page(target->cabin, uvaddr_pre, /*writable=*/true) != 0) {
+    if (vmm_ensure_user_page(target->cabin->vmm, uvaddr_pre, /*writable=*/true) != 0) {
         atomic_fetch_add_u64(&g_ktr_map_fail, 1);
         return false;
     }
-    (void)vmm_ensure_user_page(target->cabin, one_page_ahead, /*writable=*/true);
+    (void)vmm_ensure_user_page(target->cabin->vmm, one_page_ahead, /*writable=*/true);
 
     /* (3) Atomic reservation — MPSC linearisation point. Use ACQ_REL so
      *     all writes to the slot that follow are ordered AFTER this
@@ -189,7 +189,7 @@ bool KTouchPush(process_t *target,
     /* (5) Cross-page case — same handling as KResultPush. */
     uintptr_t uvaddr = touch_ring_slot_uvaddr(rr, pos);
     if (uvaddr != uvaddr_pre && uvaddr != one_page_ahead) {
-        if (vmm_ensure_user_page(target->cabin, uvaddr, /*writable=*/true) != 0) {
+        if (vmm_ensure_user_page(target->cabin->vmm, uvaddr, /*writable=*/true) != 0) {
             atomic_fetch_add_u64(&g_ktr_map_fail, 1);
             kprintf("[KTR] WARN: cross-page map failed at pos=%lu pid=%u — "
                     "publishing synthetic overflow slot\n",

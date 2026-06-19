@@ -949,7 +949,7 @@ void vmm_shootdown_pages(vmm_context_t *ctx, uintptr_t virt_addr, size_t page_co
         {
             scheduler_state_t *rs = scheduler_get_core(c);
             process_t *rp = rs->current_process; // snapshot, no lock needed
-            if (rp && rp->cabin && rp->cabin->pml4_phys == ctx->pml4_phys)
+            if (rp && rp->cabin && rp->cabin->vmm && rp->cabin->vmm->pml4_phys == ctx->pml4_phys)
             {
                 targets[target_count++] = c;
             }
@@ -4451,7 +4451,7 @@ int vmm_handle_page_fault(uintptr_t fault_addr, uint64_t error_code)
         process_t *pku_proc = process_get_current();
         uint32_t pku_pid = pku_proc ? pku_proc->pid : 0;
         uint8_t pkey = 0;
-        vmm_context_t *pku_ctx = pku_proc ? pku_proc->cabin : vmm_get_current_context();
+        vmm_context_t *pku_ctx = (pku_proc && pku_proc->cabin) ? pku_proc->cabin->vmm : vmm_get_current_context();
         if (pku_ctx) {
             uint8_t lvl = 0;
             pte_t *p = vmm_get_leaf_pte(pku_ctx, fault_addr & ~(VMM_PAGE_SIZE - 1), &lvl);
@@ -4510,7 +4510,7 @@ int vmm_handle_page_fault(uintptr_t fault_addr, uint64_t error_code)
      * back to whatever `current_context` says for kernel-mode faults. */
     vmm_context_t *ctx = NULL;
     if (user && current) {
-        ctx = current->cabin;
+        ctx = current->cabin ? current->cabin->vmm : NULL;
     }
     if (!ctx) {
         ctx = vmm_get_current_context();

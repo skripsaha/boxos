@@ -59,8 +59,8 @@ void KRingResultInit(ResultRing *hdr)
 
 static PocketRing *kring_pocket_hdr(process_t *proc)
 {
-    if (!proc || !proc->pocket_ring_phys) return NULL;
-    return (PocketRing *)vmm_phys_to_virt(proc->pocket_ring_phys);
+    if (!proc || !proc->cabin || !proc->cabin->pocket_ring_phys) return NULL;
+    return (PocketRing *)vmm_phys_to_virt(proc->cabin->pocket_ring_phys);
 }
 
 /* Reads of the producer-side cursor (tail) MUST use ACQUIRE so the
@@ -96,7 +96,7 @@ Pocket *KPocketPeek(process_t *proc)
     if (head == tail) return NULL;
 
     uintptr_t uvaddr = pocket_ring_slot_uvaddr(r, head);
-    return (Pocket *)vmm_translate_user_addr(proc->cabin, uvaddr, sizeof(Pocket));
+    return (Pocket *)vmm_translate_user_addr(proc->cabin->vmm, uvaddr, sizeof(Pocket));
 }
 
 void KPocketPop(process_t *proc)
@@ -118,8 +118,8 @@ void KPocketPop(process_t *proc)
 
 static ResultRing *kring_result_hdr(process_t *proc)
 {
-    if (!proc || !proc->result_ring_phys) return NULL;
-    return (ResultRing *)vmm_phys_to_virt(proc->result_ring_phys);
+    if (!proc || !proc->cabin || !proc->cabin->result_ring_phys) return NULL;
+    return (ResultRing *)vmm_phys_to_virt(proc->cabin->result_ring_phys);
 }
 
 /* Translate a target user vaddr to a writable kernel pointer for one
@@ -127,7 +127,7 @@ static ResultRing *kring_result_hdr(process_t *proc)
  * should be impossible barring catastrophic memory pressure). */
 static ResultSlot *kring_translate_slot(process_t *target, uintptr_t uvaddr)
 {
-    return (ResultSlot *)vmm_translate_user_addr(target->cabin, uvaddr,
+    return (ResultSlot *)vmm_translate_user_addr(target->cabin->vmm, uvaddr,
                                                   sizeof(ResultSlot));
 }
 
@@ -233,13 +233,13 @@ bool KResultPush(process_t *target, const Result *r)
      *     uvaddr_pre's page or its immediate 4 KiB successor. */
     uintptr_t uvaddr_pre     = result_ring_slot_uvaddr(rr, tail_snap);
     uintptr_t one_page_ahead = uvaddr_pre + 4096u;
-    if (vmm_ensure_user_page(target->cabin, uvaddr_pre, /*writable=*/true) != 0) {
+    if (vmm_ensure_user_page(target->cabin->vmm, uvaddr_pre, /*writable=*/true) != 0) {
         __atomic_add_fetch(&g_krp_premap_fail, 1, __ATOMIC_RELAXED);
         return false;
     }
     /* Best-effort pre-map of the next page — if it fails the historical
      * crosspg path below will re-attempt with a synthetic ERR if needed. */
-    (void)vmm_ensure_user_page(target->cabin, one_page_ahead, /*writable=*/true);
+    (void)vmm_ensure_user_page(target->cabin->vmm, one_page_ahead, /*writable=*/true);
 
     /* (3) Atomic reservation — MPSC linearisation point. Even with N
      *     concurrent K-Cores each gets a unique pos. Use ACQ_REL so the
@@ -257,7 +257,7 @@ bool KResultPush(process_t *target, const Result *r)
      *     as overflow so we publish a synthetic ERR (no strand). */
     uintptr_t uvaddr = result_ring_slot_uvaddr(rr, pos);
     if (uvaddr != uvaddr_pre && uvaddr != one_page_ahead) {
-        if (vmm_ensure_user_page(target->cabin, uvaddr, /*writable=*/true) != 0) {
+        if (vmm_ensure_user_page(target->cabin->vmm, uvaddr, /*writable=*/true) != 0) {
             __atomic_add_fetch(&g_krp_crosspg_fail, 1, __ATOMIC_RELAXED);
             kprintf("[KRP] WARN: cross-page map failed at pos=%lu pid=%u — "
                     "synthesizing ERR slot to avoid stranding the ring\n",

@@ -26,9 +26,9 @@ bool ManifestOpAuthorize(uint32_t op_kind, const OpContext *ctx)
     if (!w) return true;
 
     /* god overrides every restriction. */
-    if (p->tag_bits & w->god) return true;
+    if (p->cabin->tag_bits & w->god) return true;
     /* stopped processes can do nothing. */
-    if (p->tag_bits & w->stopped) return false;
+    if (p->cabin->tag_bits & w->stopped) return false;
 
     uint64_t allowed;
     switch (level) {
@@ -39,5 +39,5 @@ bool ManifestOpAuthorize(uint32_t op_kind, const OpContext *ctx)
     default:              return true;  /* unknown level — fail open */
     }
 
-    return (p->tag_bits & allowed) != 0;
+    return (p->cabin->tag_bits & allowed) != 0;
 }

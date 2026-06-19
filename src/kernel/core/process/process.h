@@ -7,6 +7,7 @@
 #include "boxos_magic.h"
 #include "boxos_limits.h"
 #include "atomics.h"
+#include "cabin.h"
 
 /*
  * Lock ordering:
@@ -24,7 +25,7 @@
 #define PROCESS_TAG_SIZE 256
 #define PROCESS_INVALID_PID 0
 
-// Fast O(1) role checks use proc->tag_bits AND g_well_known bitmasks from tagfs.h.
+// Fast O(1) role checks use proc->cabin->tag_bits AND g_well_known bitmasks from tagfs.h.
 
 struct process_t;
 
@@ -105,11 +106,10 @@ typedef struct process_t
 {
     uint32_t magic;
     uint32_t pid;
-    vmm_context_t *cabin;
-    uint64_t cabin_info_phys;
-    uint64_t pocket_ring_phys;
-    uint64_t result_ring_phys;
-    uint64_t touch_ring_phys;             /* kernel→user Touch event channel */
+
+    /* Pointer to the shared cabin (address space + IPC rings + Bay/Brook/Touch).
+     * NULL for the idle process.  All cabin-shared state lives in cabin_t. */
+    cabin_t *cabin;
 
     int32_t score;
     uint64_t last_run_time;
@@ -129,28 +129,6 @@ typedef struct process_t
     // Checked in scheduler_select_next() to prevent selecting doomed process.
     volatile uint8_t destroying;
 
-    uint64_t tag_bits;
-    uint16_t *tag_overflow_ids;
-    uint16_t tag_overflow_count;
-    uint16_t tag_overflow_capacity;
-
-    /* MemTag capabilities — per-cabin bit-mask of HELD MemTag tag_ids.
-     * Inline 1024 bits (covers tag_ids 0..1023). For larger tag_ids the
-     * mask is sparse — currently capped at 1024 (production-typical tag
-     * count is <500). Phase 2B PTE-bit enforcement reads this on every
-     * tag-checked access; Phase 2A uses it for soft `mem_check_access`.
-     *
-     * Mutation is atomic per uint64_t word (single-bit set/clear via
-     * __atomic_*). No spinlock needed for word-bounded ops. Cross-word
-     * batch ops (grant_many) take memtag_lock briefly.
-     *
-     * Default: all zeros. Guard-flagged regions (MEMTAG_FLAG_GUARD on
-     * tag_registry entry) require cabin to hold the tag bit to access. */
-    uint64_t active_memtags[16];   /* 1024 bits total */
-
-    uintptr_t code_start;
-    size_t code_size;
-
     ProcessContext context;
     void *kernel_stack;
     void *kernel_stack_top;
@@ -159,57 +137,9 @@ typedef struct process_t
     bool started;
     uint8_t home_core;              // App Core index for scheduling (RunQueue lives here)
     volatile uint8_t kcore_pending; // 1 = already in a K-Core queue, 0 = free (atomic CAS)
-    uint32_t spawner_pid;
-    uint64_t buf_heap_next; // next free virtual address for buffer mapping
-
-    // ASLR: per-process randomized addresses (set at creation time)
-    uint64_t aslr_heap_base;     // actual heap start (CABIN_HEAP_BASE + random)
-    uint64_t aslr_stack_top;     // actual stack top (USER_STACK_TOP - random)
-    uint64_t aslr_buf_heap_base; // actual buffer heap start
 
     volatile wait_reason_t wait_reason;
     uint64_t wait_start_time; // TSC timestamp when waiting (0 = not waiting)
-
-    /* Touch subscriber list — head of doubly-linked TouchSub chain. Each
-     * sub also lives on a TouchBucket's bucket list (publish-side index).
-     * subs_lock orders link/unlink between TouchClaimSet/Clear and the
-     * O(N_my_claims) walk in TouchCleanupProcess. */
-    void       *subs_head;
-    spinlock_t  subs_lock;
-
-    /* Bay claim list — per-cabin head of BayClaim chain. Walked by
-     * BayCleanupProcess at process_destroy to release every claim this
-     * cabin holds before vmm_destroy_context tears down the page tables.
-     * bay_va_next is a bump cursor inside CABIN_BAY_BASE..CABIN_BAY_END
-     * used to assign user-VA windows to incoming Bay maps. */
-    void       *bay_claims_head;
-    spinlock_t  bay_lock;
-    uint64_t    bay_va_next;
-
-    /* TME-MK per-process quota — count of currently-alive encrypted
-     * Bays this cabin CREATED (BAY_CREATE | BAY_ENCRYPTED). Protected
-     * by bay_lock. Incremented on bay create, decremented when the
-     * Bay's last ref drops (via creator pid lookup; pid-reuse race
-     * accepted as a minor accounting drift). Capped at
-     * TME_QUOTA_PER_PROC (bay.h) so a misbehaving cabin can't drain
-     * the global pool of N KeyIDs and DoS other cabins.
-     *
-     * The counter does NOT reset on process_destroy — if creator dies
-     * while its Bays survive elsewhere, the counter still drops when
-     * those Bays' last refs drop (pid lookup returns NULL, decrement
-     * is a no-op, but the proc is gone so quota is irrelevant). */
-    uint16_t    tme_keyids_held;
-
-    /* Brook claim list — per-cabin head of BrookClaim chain. Same
-     * lifecycle pattern as Bay: BrookCleanupProcess walks the list
-     * during process_destroy, drops every BrookObject reference (peer
-     * wakes with -ERR_BROKEN_PIPE), unmaps the per-claim VA windows.
-     * brook_va_next bump-allocates inside CABIN_BROOK_BASE..CABIN_BROOK_END.
-     * Held while linking/walking claims; no kernel allocation under this
-     * lock (Brook ops do PMM/VMM work without holding it). */
-    void       *brook_claims_head;
-    spinlock_t  brook_lock;
-    uint64_t    brook_va_next;
 
     uint64_t         irq_stack_top;
     uint64_t         irq_rip;
@@ -221,43 +151,14 @@ typedef struct process_t
     void            *irq_pending_head;
     spinlock_t       irq_lock;
 
-    uint8_t           touch_cleaned; // set to 1 after TouchCleanupProcess runs once
+    /* set to 1 after TouchCleanupProcess runs once (P4: move to cabin_t) */
+    uint8_t           touch_cleaned;
 
-    /* Phase 2K+ — CET shadow stack per-process state. Populated by
-     * cet_process_create when g_cpu_caps.has_shstk + CR4.CET=1; left
-     * zero on CPUs without SHSTK or when CET is dormant. The user SSP
-     * page is mapped into the process's vmm_context with PTE bit 61
-     * (Intel SDM Vol 3A §4.5.1 — user shadow stack). user_ssp_va is
-     * the initial SSP value (top of the SSP region minus 8) — what
-     * jump_to_userspace writes into IA32_PL3_SSP before the iretq to
-     * Ring 3. After that first transition the kernel maintains SSP
-     * via the XSAVE CET_U component (XCR0 bit 12) without touching
-     * the MSR directly. */
+    /* Phase 2K+ — CET shadow stack per-process state. */
     uintptr_t         user_ssp_phys;
     uintptr_t         user_ssp_va;
     uint32_t          user_ssp_size;
 
-    /* Per-process supervisor shadow stack — backing for the process's
-     * kernel CALL/RET tracking when S_CET.SH_STK_EN=1. Each process gets
-     * its own 4 KiB kernel SSP page; context switches between processes
-     * swap IA32_PL0_SSP so process A's kernel CALLs don't pollute process
-     * B's shadow stack.
-     *
-     * Layout of the SSP page (kernel direct map, PTE bit 60 set):
-     *   [top - 0]    supervisor SSP token (Intel SDM Vol 1 §17.2.3):
-     *                 value = top | 0x1 (mode bit)
-     *   [top - 8]    pre-pushed kernel entry RIP — what task_restore_context's
-     *                 first RET pops off the shadow stack to match the regular-
-     *                 stack push (otherwise the brand-new process's first RET
-     *                 would #CP against an empty shadow stack).
-     *
-     * ProcessContext.pl0_ssp is initialised to (top - 8) so the very first
-     * task_restore_context's WRMSR IA32_PL0_SSP lands on the pre-pushed
-     * entry; subsequent CALL/RET pairs grow the stack inside the page.
-     *
-     * Zero on processes created before SHSTK activation, on CPUs without
-     * SHSTK, and on K-Core threads (kernel threads use per-CPU PL0_SSP
-     * from cet_lifecycle_init_supervisor_ssp). */
     uintptr_t         kernel_ssp_phys;
     uintptr_t         kernel_ssp_va_top;
 
@@ -340,5 +241,8 @@ void process_list_validate(const char *caller);
 void process_cleanup_deferred(void);
 uint32_t process_cleanup_queue_size(void);
 void process_cleanup_queue_flush(void);
+
+uint64_t *process_active_memtags(process_t *proc);
+void *process_get_cabin(process_t *proc);
 
 #endif // PROCESS_H

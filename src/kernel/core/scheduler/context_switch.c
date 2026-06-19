@@ -51,7 +51,7 @@ void context_save_from_frame(process_t* proc, interrupt_frame_t* frame) {
     if (!proc->cabin) {
         return;
     }
-    ctx->cr3 = vmm_build_cr3(proc->cabin);
+    ctx->cr3 = vmm_build_cr3(proc->cabin->vmm);
 
     proc->started = true;
 }

@@ -28,7 +28,7 @@ uint64_t ipc_copy_to_heap(process_t *sender, process_t *target,
         return 0;
     }
 
-    void *src = vmm_translate_user_addr(sender->cabin, src_addr, length);
+    void *src = vmm_translate_user_addr(sender->cabin ? sender->cabin->vmm : NULL, src_addr, length);
     if (!src) return 0;
 
     uint32_t pages_needed = (length + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE;
@@ -38,7 +38,7 @@ uint64_t ipc_copy_to_heap(process_t *sender, process_t *target,
      * buf_heap_next; … buf_heap_next += …` was not safe: two senders on
      * different cores could read the same buf_heap_next, both write to
      * the same target_vaddr, and stomp each other's payload. */
-    uint64_t target_vaddr = __atomic_fetch_add(&target->buf_heap_next,
+    uint64_t target_vaddr = __atomic_fetch_add(&target->cabin->buf_heap_next,
                                                bytes_needed,
                                                __ATOMIC_ACQ_REL);
 
@@ -46,7 +46,7 @@ uint64_t ipc_copy_to_heap(process_t *sender, process_t *target,
         void *page = pmm_alloc(1);
         if (!page) return 0;
         uint64_t vaddr = target_vaddr + (i * PMM_PAGE_SIZE);
-        vmm_map_result_t ret = vmm_map_page(target->cabin, vaddr, (uint64_t)page,
+        vmm_map_result_t ret = vmm_map_page(target->cabin->vmm, vaddr, (uint64_t)page,
                                             VMM_FLAGS_USER_RW);
         if (!ret.success) {
             pmm_free(page, 1);
@@ -54,7 +54,7 @@ uint64_t ipc_copy_to_heap(process_t *sender, process_t *target,
         }
     }
 
-    void *dst = vmm_translate_user_addr(target->cabin, target_vaddr, length);
+    void *dst = vmm_translate_user_addr(target->cabin->vmm, target_vaddr, length);
     if (!dst) return 0;
 
     memcpy(dst, src, length);
