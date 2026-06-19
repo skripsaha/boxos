@@ -15,13 +15,22 @@
 // unique_lock protocol violations throw std::system_error with the
 // std-mandated errc codes. recursive_mutex::unlock by a non-owner is UB
 // per the standard — boxcxx panics there as a diagnostic.
-// Documented deviation: try_lock_for/until + timed_mutex variants need
-// <chrono> (Ф11).
+//
+// timed_mutex / recursive_timed_mutex add try_lock_for/try_lock_until as a
+// cooperative deadline-spin: umutex_trylock retried with a PAUSE budget
+// then yield, re-checking a <chrono> clock between steps. Precise to a
+// yield interval (no WAITPKG 50 ms cap, which would overshoot the caller's
+// deadline). One thread per cabin means no contention yet; the spin
+// upgrades to a kernel timed-park once strands land, with no API change.
+// Only the lightweight <chrono> duration/clock bits are pulled in — not the
+// calendar/format machinery — so <mutex> stays a cheap include.
 #ifndef BOXCXX_MUTEX
 #define BOXCXX_MUTEX
 
 #include "box/sync.h"
 
+#include <__bits/chrono_clock>
+#include <__bits/chrono_duration>
 #include <atomic>
 #include <functional>
 #include <system_error>
@@ -36,6 +45,24 @@ namespace boxcxx {
 }
 
 namespace std {
+
+// One backoff step for a timed-acquire loop: a short PAUSE budget, then a
+// cooperative yield. The caller re-checks its <chrono> deadline between
+// steps, so the wait is precise to a yield interval.
+namespace __mutex_impl {
+
+inline void TimedBackoff(unsigned &spin) noexcept
+{
+    constexpr unsigned kSpinBudget = 64;
+    if (spin++ < kSpinBudget)
+        __asm__ volatile("pause");
+    else {
+        spin = 0;
+        yield();
+    }
+}
+
+} // namespace __mutex_impl
 
 // ── mutex / recursive_mutex ─────────────────────────────────────────────
 
@@ -93,6 +120,120 @@ public:
     {
         if (__owner.load(memory_order_relaxed) != __boxcxx_thread_id())
             boxcxx::Panic("recursive_mutex::unlock: not owner");
+        if (--__depth == 0) {
+            __owner.store(nullptr, memory_order_relaxed);
+            umutex_unlock(&__m);
+        }
+    }
+
+    using native_handle_type = umutex_t *;
+    native_handle_type native_handle() noexcept { return &__m; }
+
+private:
+    umutex_t __m;
+    atomic<void *> __owner{nullptr};
+    unsigned __depth = 0;
+};
+
+// ── timed_mutex / recursive_timed_mutex ─────────────────────────────────
+
+class timed_mutex {
+public:
+    timed_mutex() noexcept : __m{0} {}
+    ~timed_mutex() = default;
+    timed_mutex(const timed_mutex &) = delete;
+    timed_mutex &operator=(const timed_mutex &) = delete;
+
+    void lock() { umutex_lock(&__m); }
+    bool try_lock() noexcept { return umutex_trylock(&__m); }
+    void unlock() { umutex_unlock(&__m); }
+
+    template <typename Rep, typename Period>
+    bool try_lock_for(const chrono::duration<Rep, Period> &rel)
+    {
+        return try_lock_until(chrono::steady_clock::now() + rel);
+    }
+
+    template <typename Clock, typename Duration>
+    bool try_lock_until(const chrono::time_point<Clock, Duration> &abs)
+    {
+        unsigned spin = 0;
+        for (;;) {
+            if (umutex_trylock(&__m)) return true;
+            if (Clock::now() >= abs) return false;
+            __mutex_impl::TimedBackoff(spin);
+        }
+    }
+
+    using native_handle_type = umutex_t *;
+    native_handle_type native_handle() noexcept { return &__m; }
+
+private:
+    umutex_t __m;
+};
+
+class recursive_timed_mutex {
+public:
+    recursive_timed_mutex() noexcept : __m{0} {}
+    ~recursive_timed_mutex() = default;
+    recursive_timed_mutex(const recursive_timed_mutex &) = delete;
+    recursive_timed_mutex &operator=(const recursive_timed_mutex &) = delete;
+
+    void lock()
+    {
+        void *self = __boxcxx_thread_id();
+        if (__owner.load(memory_order_relaxed) == self) {
+            ++__depth;
+            return;
+        }
+        umutex_lock(&__m);
+        __owner.store(self, memory_order_relaxed);
+        __depth = 1;
+    }
+
+    bool try_lock() noexcept
+    {
+        void *self = __boxcxx_thread_id();
+        if (__owner.load(memory_order_relaxed) == self) {
+            ++__depth;
+            return true;
+        }
+        if (!umutex_trylock(&__m)) return false;
+        __owner.store(self, memory_order_relaxed);
+        __depth = 1;
+        return true;
+    }
+
+    template <typename Rep, typename Period>
+    bool try_lock_for(const chrono::duration<Rep, Period> &rel)
+    {
+        return try_lock_until(chrono::steady_clock::now() + rel);
+    }
+
+    template <typename Clock, typename Duration>
+    bool try_lock_until(const chrono::time_point<Clock, Duration> &abs)
+    {
+        void *self = __boxcxx_thread_id();
+        if (__owner.load(memory_order_relaxed) == self) {
+            ++__depth;
+            return true;
+        }
+        unsigned spin = 0;
+        for (;;) {
+            if (umutex_trylock(&__m)) {
+                __owner.store(self, memory_order_relaxed);
+                __depth = 1;
+                return true;
+            }
+            if (Clock::now() >= abs) return false;
+            __mutex_impl::TimedBackoff(spin);
+        }
+    }
+
+    void unlock()
+    {
+        if (__owner.load(memory_order_relaxed) != __boxcxx_thread_id())
+            boxcxx::Panic("recursive_timed_mutex::unlock: not owner");
         if (--__depth == 0) {
             __owner.store(nullptr, memory_order_relaxed);
             umutex_unlock(&__m);
@@ -212,6 +353,34 @@ public:
                 make_error_code(errc::resource_deadlock_would_occur),
                 "unique_lock::try_lock");
         __owns = __m->try_lock();
+        return __owns;
+    }
+
+    template <typename Rep, typename Period>
+    bool try_lock_for(const chrono::duration<Rep, Period> &rel)
+    {
+        if (!__m)
+            throw system_error(make_error_code(errc::operation_not_permitted),
+                               "unique_lock::try_lock_for: no mutex");
+        if (__owns)
+            throw system_error(
+                make_error_code(errc::resource_deadlock_would_occur),
+                "unique_lock::try_lock_for");
+        __owns = __m->try_lock_for(rel);
+        return __owns;
+    }
+
+    template <typename Clock, typename Duration>
+    bool try_lock_until(const chrono::time_point<Clock, Duration> &abs)
+    {
+        if (!__m)
+            throw system_error(make_error_code(errc::operation_not_permitted),
+                               "unique_lock::try_lock_until: no mutex");
+        if (__owns)
+            throw system_error(
+                make_error_code(errc::resource_deadlock_would_occur),
+                "unique_lock::try_lock_until");
+        __owns = __m->try_lock_until(abs);
         return __owns;
     }
 
