@@ -61,13 +61,24 @@ int kb_getchar_ex(kb_char_t *out_char)
     return 0;
 }
 
-/* Keyboard touch payload layout: { uint8_t scancode, char ascii, uint8_t mods }
- * Published by kernel/drivers/keyboard/keyboard.c */
-typedef struct __attribute__((packed)) {
-    uint8_t scancode;
-    char    ascii;
-    uint8_t mods;
-} KbTouchPayload;
+int kb_getchar_ex_timeout(kb_char_t *out_char, uint32_t timeout_ms)
+{
+    if (!out_char) return -ERR_INVALID_ARGS;
+
+    uint8_t out[4] = {0};
+    int rc = MfCall1(DECK_HARDWARE, HW_KB_GETCHAR,
+                     NULL, 0, NULL, 0,
+                     out, sizeof(out), NULL,
+                     timeout_ms, NULL);
+    if (rc != 0) return rc < 0 ? rc : -rc;
+    if (out[3] != HW_KB_SUCCESS) return -ERR_TIMEOUT;  /* no key within window */
+
+    out_char->ch       = out[0];
+    out_char->scancode = out[1];
+    out_char->flags    = out[2];
+    out_char->reserved = 0;
+    return 0;
+}
 
 int kb_readline(char *buffer, size_t size, bool echo)
 {
@@ -96,9 +107,9 @@ int kb_readline(char *buffer, size_t size, bool echo)
 
         /* Payload is inline inside `t` (TouchRing copies it on pop) —
          * no separate cabin allocation, lifetime is the local `Touch t`. */
-        if (t.payload_len < sizeof(KbTouchPayload)) continue;
+        if (t.payload_len < sizeof(kb_event_t)) continue;
 
-        const KbTouchPayload *kp = (const KbTouchPayload *)t.payload;
+        const kb_event_t *kp = (const kb_event_t *)t.payload;
         char ch = kp->ascii;
         if (ch == 0) continue;
 
