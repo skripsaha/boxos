@@ -1,0 +1,395 @@
+// boxcxx — <shared_mutex>
+//
+// std::shared_mutex / shared_timed_mutex / shared_lock — a reader/writer
+// lock over a single atomic state word. No pthread_rwlock and no
+// condition_variable underneath (boxcxx has neither); the blocking paths
+// spin on __boxcxx_atomic_wait_cycle (WAITPKG UMONITOR/UMWAIT on the state
+// word, else PAUSE budget then yield) — the same substrate as atomic::wait.
+//
+// State word: the high bit (kWriteEntered) marks that a writer has entered —
+// it holds the lock exclusively, or it set the bit and is draining the
+// remaining readers. The low bits count shared owners. A writer that sets
+// the bit blocks new readers and then waits for existing readers to leave,
+// so a steady stream of readers cannot starve a writer.
+//
+// One thread per cabin means no contention materialises until the strands
+// epic; every path is its fast path today. The contract is already the
+// multi-thread one, and the indefinite spins upgrade to a kernel park —
+// the timed spins to a kernel timed-park — with no signature change.
+//
+// shared_timed_mutex's timed acquires use the cooperative deadline-spin from
+// <mutex> (__mutex_impl::TimedBackoff: PAUSE budget then yield, re-checking
+// a <chrono> clock between steps) rather than the WAITPKG-capped wait, whose
+// 50 ms cap would overshoot the caller's deadline.
+#ifndef BOXCXX_SHARED_MUTEX
+#define BOXCXX_SHARED_MUTEX
+
+#include <mutex> // atomic, <chrono> bits, __mutex_impl::TimedBackoff, lock
+                 // tags, system_error; transitively __boxcxx_atomic_wait_cycle
+
+namespace std {
+
+namespace __shared_mutex_impl {
+
+// High bit: a writer has entered. Low bits: count of shared owners.
+inline constexpr unsigned kWriteEntered = 1u << (sizeof(unsigned) * 8 - 1);
+inline constexpr unsigned kReaderMask   = kWriteEntered - 1;
+
+// The shared state + every operation, including the timed forms. Both
+// shared_mutex and shared_timed_mutex hold one of these and forward to it;
+// shared_mutex simply never exposes the timed members.
+class state {
+public:
+    constexpr state() noexcept : __s(0) {}
+    state(const state &)            = delete;
+    state &operator=(const state &) = delete;
+
+    // ── exclusive ────────────────────────────────────────────────────────
+    void lock()
+    {
+        unsigned s    = __s.load(memory_order_relaxed);
+        unsigned spin = 0;
+        for (;;) {
+            if (!(s & kWriteEntered)) {
+                if (__s.compare_exchange_weak(s, s | kWriteEntered,
+                                              memory_order_acquire,
+                                              memory_order_relaxed))
+                    break;
+            } else {
+                __boxcxx_atomic_wait_cycle(&__s, &spin);
+                s = __s.load(memory_order_relaxed);
+            }
+        }
+        // We own the writer bit; drain any readers still inside.
+        spin = 0;
+        while (__s.load(memory_order_acquire) & kReaderMask)
+            __boxcxx_atomic_wait_cycle(&__s, &spin);
+    }
+
+    bool try_lock() noexcept
+    {
+        unsigned expected = 0;
+        return __s.compare_exchange_strong(expected, kWriteEntered,
+                                           memory_order_acquire,
+                                           memory_order_relaxed);
+    }
+
+    void unlock() noexcept { __s.store(0, memory_order_release); }
+
+    // ── shared ───────────────────────────────────────────────────────────
+    void lock_shared()
+    {
+        unsigned s    = __s.load(memory_order_relaxed);
+        unsigned spin = 0;
+        for (;;) {
+            if (!(s & kWriteEntered) && (s & kReaderMask) != kReaderMask) {
+                if (__s.compare_exchange_weak(s, s + 1, memory_order_acquire,
+                                              memory_order_relaxed))
+                    break;
+            } else {
+                __boxcxx_atomic_wait_cycle(&__s, &spin);
+                s = __s.load(memory_order_relaxed);
+            }
+        }
+    }
+
+    bool try_lock_shared() noexcept
+    {
+        unsigned s = __s.load(memory_order_relaxed);
+        for (;;) {
+            if ((s & kWriteEntered) || (s & kReaderMask) == kReaderMask)
+                return false;
+            if (__s.compare_exchange_weak(s, s + 1, memory_order_acquire,
+                                          memory_order_relaxed))
+                return true;
+        }
+    }
+
+    void unlock_shared() noexcept { __s.fetch_sub(1, memory_order_release); }
+
+    // ── timed (shared_timed_mutex only) ───────────────────────────────────
+    template <typename Clock, typename Duration>
+    bool try_lock_until(const chrono::time_point<Clock, Duration> &abs)
+    {
+        unsigned s    = __s.load(memory_order_relaxed);
+        unsigned spin = 0;
+        // Acquire the writer bit by the deadline.
+        for (;;) {
+            if (!(s & kWriteEntered)) {
+                if (__s.compare_exchange_weak(s, s | kWriteEntered,
+                                              memory_order_acquire,
+                                              memory_order_relaxed))
+                    break;
+            } else {
+                if (Clock::now() >= abs) return false;
+                __mutex_impl::TimedBackoff(spin);
+                s = __s.load(memory_order_relaxed);
+            }
+        }
+        // Drain readers by the deadline; on timeout release the writer bit
+        // we set and report failure.
+        spin = 0;
+        while (__s.load(memory_order_acquire) & kReaderMask) {
+            if (Clock::now() >= abs) {
+                __s.fetch_and(~kWriteEntered, memory_order_release);
+                return false;
+            }
+            __mutex_impl::TimedBackoff(spin);
+        }
+        return true;
+    }
+
+    template <typename Clock, typename Duration>
+    bool try_lock_shared_until(const chrono::time_point<Clock, Duration> &abs)
+    {
+        unsigned s    = __s.load(memory_order_relaxed);
+        unsigned spin = 0;
+        for (;;) {
+            if (!(s & kWriteEntered) && (s & kReaderMask) != kReaderMask) {
+                if (__s.compare_exchange_weak(s, s + 1, memory_order_acquire,
+                                              memory_order_relaxed))
+                    return true;
+            } else {
+                if (Clock::now() >= abs) return false;
+                __mutex_impl::TimedBackoff(spin);
+                s = __s.load(memory_order_relaxed);
+            }
+        }
+    }
+
+    atomic<unsigned> *native_handle() noexcept { return &__s; }
+
+private:
+    atomic<unsigned> __s;
+};
+
+} // namespace __shared_mutex_impl
+
+// ── shared_mutex ─────────────────────────────────────────────────────────
+
+class shared_mutex {
+public:
+    shared_mutex()                                = default;
+    ~shared_mutex()                               = default;
+    shared_mutex(const shared_mutex &)            = delete;
+    shared_mutex &operator=(const shared_mutex &) = delete;
+
+    void lock() { __impl.lock(); }
+    bool try_lock() noexcept { return __impl.try_lock(); }
+    void unlock() noexcept { __impl.unlock(); }
+
+    void lock_shared() { __impl.lock_shared(); }
+    bool try_lock_shared() noexcept { return __impl.try_lock_shared(); }
+    void unlock_shared() noexcept { __impl.unlock_shared(); }
+
+    using native_handle_type = atomic<unsigned> *;
+    native_handle_type native_handle() noexcept
+    {
+        return __impl.native_handle();
+    }
+
+private:
+    __shared_mutex_impl::state __impl;
+};
+
+// ── shared_timed_mutex ───────────────────────────────────────────────────
+
+class shared_timed_mutex {
+public:
+    shared_timed_mutex()                                     = default;
+    ~shared_timed_mutex()                                    = default;
+    shared_timed_mutex(const shared_timed_mutex &)           = delete;
+    shared_timed_mutex &operator=(const shared_timed_mutex &) = delete;
+
+    void lock() { __impl.lock(); }
+    bool try_lock() noexcept { return __impl.try_lock(); }
+    void unlock() noexcept { __impl.unlock(); }
+
+    template <typename Rep, typename Period>
+    bool try_lock_for(const chrono::duration<Rep, Period> &rel)
+    {
+        return __impl.try_lock_until(chrono::steady_clock::now() + rel);
+    }
+    template <typename Clock, typename Duration>
+    bool try_lock_until(const chrono::time_point<Clock, Duration> &abs)
+    {
+        return __impl.try_lock_until(abs);
+    }
+
+    void lock_shared() { __impl.lock_shared(); }
+    bool try_lock_shared() noexcept { return __impl.try_lock_shared(); }
+    void unlock_shared() noexcept { __impl.unlock_shared(); }
+
+    template <typename Rep, typename Period>
+    bool try_lock_shared_for(const chrono::duration<Rep, Period> &rel)
+    {
+        return __impl.try_lock_shared_until(chrono::steady_clock::now() + rel);
+    }
+    template <typename Clock, typename Duration>
+    bool try_lock_shared_until(const chrono::time_point<Clock, Duration> &abs)
+    {
+        return __impl.try_lock_shared_until(abs);
+    }
+
+private:
+    __shared_mutex_impl::state __impl;
+};
+
+// ── shared_lock ([thread.lock.shared]) ───────────────────────────────────
+
+template <typename Mutex>
+class shared_lock {
+public:
+    using mutex_type = Mutex;
+
+    shared_lock() noexcept : __m(nullptr), __owns(false) {}
+
+    explicit shared_lock(mutex_type &m) : __m(&m), __owns(false)
+    {
+        __m->lock_shared();
+        __owns = true;
+    }
+    shared_lock(mutex_type &m, defer_lock_t) noexcept
+        : __m(&m), __owns(false)
+    {
+    }
+    shared_lock(mutex_type &m, try_to_lock_t)
+        : __m(&m), __owns(m.try_lock_shared())
+    {
+    }
+    shared_lock(mutex_type &m, adopt_lock_t) : __m(&m), __owns(true) {}
+
+    template <typename Clock, typename Duration>
+    shared_lock(mutex_type &m, const chrono::time_point<Clock, Duration> &abs)
+        : __m(&m), __owns(m.try_lock_shared_until(abs))
+    {
+    }
+    template <typename Rep, typename Period>
+    shared_lock(mutex_type &m, const chrono::duration<Rep, Period> &rel)
+        : __m(&m), __owns(m.try_lock_shared_for(rel))
+    {
+    }
+
+    ~shared_lock()
+    {
+        if (__owns) __m->unlock_shared();
+    }
+
+    shared_lock(const shared_lock &)            = delete;
+    shared_lock &operator=(const shared_lock &) = delete;
+
+    shared_lock(shared_lock &&other) noexcept
+        : __m(other.__m), __owns(other.__owns)
+    {
+        other.__m    = nullptr;
+        other.__owns = false;
+    }
+    shared_lock &operator=(shared_lock &&other) noexcept
+    {
+        if (__owns) __m->unlock_shared();
+        __m          = other.__m;
+        __owns       = other.__owns;
+        other.__m    = nullptr;
+        other.__owns = false;
+        return *this;
+    }
+
+    void lock()
+    {
+        if (!__m)
+            throw system_error(make_error_code(errc::operation_not_permitted),
+                               "shared_lock::lock: no mutex");
+        if (__owns)
+            throw system_error(
+                make_error_code(errc::resource_deadlock_would_occur),
+                "shared_lock::lock");
+        __m->lock_shared();
+        __owns = true;
+    }
+
+    bool try_lock()
+    {
+        if (!__m)
+            throw system_error(make_error_code(errc::operation_not_permitted),
+                               "shared_lock::try_lock: no mutex");
+        if (__owns)
+            throw system_error(
+                make_error_code(errc::resource_deadlock_would_occur),
+                "shared_lock::try_lock");
+        __owns = __m->try_lock_shared();
+        return __owns;
+    }
+
+    template <typename Rep, typename Period>
+    bool try_lock_for(const chrono::duration<Rep, Period> &rel)
+    {
+        if (!__m)
+            throw system_error(make_error_code(errc::operation_not_permitted),
+                               "shared_lock::try_lock_for: no mutex");
+        if (__owns)
+            throw system_error(
+                make_error_code(errc::resource_deadlock_would_occur),
+                "shared_lock::try_lock_for");
+        __owns = __m->try_lock_shared_for(rel);
+        return __owns;
+    }
+
+    template <typename Clock, typename Duration>
+    bool try_lock_until(const chrono::time_point<Clock, Duration> &abs)
+    {
+        if (!__m)
+            throw system_error(make_error_code(errc::operation_not_permitted),
+                               "shared_lock::try_lock_until: no mutex");
+        if (__owns)
+            throw system_error(
+                make_error_code(errc::resource_deadlock_would_occur),
+                "shared_lock::try_lock_until");
+        __owns = __m->try_lock_shared_until(abs);
+        return __owns;
+    }
+
+    void unlock()
+    {
+        if (!__owns)
+            throw system_error(make_error_code(errc::operation_not_permitted),
+                               "shared_lock::unlock: does not own");
+        __m->unlock_shared();
+        __owns = false;
+    }
+
+    void swap(shared_lock &other) noexcept
+    {
+        mutex_type *m = __m;
+        bool owns     = __owns;
+        __m           = other.__m;
+        __owns        = other.__owns;
+        other.__m     = m;
+        other.__owns  = owns;
+    }
+
+    mutex_type *release() noexcept
+    {
+        mutex_type *m = __m;
+        __m           = nullptr;
+        __owns        = false;
+        return m;
+    }
+
+    [[nodiscard]] bool owns_lock() const noexcept { return __owns; }
+    explicit operator bool() const noexcept { return __owns; }
+    mutex_type *mutex() const noexcept { return __m; }
+
+private:
+    mutex_type *__m;
+    bool __owns;
+};
+
+template <typename Mutex>
+inline void swap(shared_lock<Mutex> &a, shared_lock<Mutex> &b) noexcept
+{
+    a.swap(b);
+}
+
+} // namespace std
+
+#endif // BOXCXX_SHARED_MUTEX
