@@ -7,6 +7,7 @@
 #include "irqchip.h"
 #include "scheduler.h"   /* g_global_tick, g_timer_frequency */
 #include "touch.h"
+#include "kb_event.h"    /* kb_event_t + KB_MOD_* — shared keyboard ABI */
 
 /* Runtime repeat timing (calculated from ms based on timer frequency) */
 uint32_t g_kb_repeat_delay_ticks;
@@ -387,13 +388,13 @@ void keyboard_handle_scancode(uint8_t scancode)
         kb_push_chars(&ascii, 1);
         kb_arm_repeat(&ascii, 1, key, 0);
 
-        struct { uint8_t scancode; char ascii; uint8_t mods; } kb_ev = {
+        kb_event_t kb_ev = {
             .scancode = key,
             .ascii    = ascii,
             .mods     = (uint8_t)(
-                (__atomic_load_n(&kb_state.shift_pressed, __ATOMIC_RELAXED) ? 0x01 : 0) |
-                (__atomic_load_n(&kb_state.ctrl_pressed,  __ATOMIC_RELAXED) ? 0x02 : 0) |
-                (__atomic_load_n(&kb_state.alt_pressed,   __ATOMIC_RELAXED) ? 0x04 : 0)
+                (__atomic_load_n(&kb_state.shift_pressed, __ATOMIC_RELAXED) ? KB_MOD_SHIFT : 0) |
+                (__atomic_load_n(&kb_state.ctrl_pressed,  __ATOMIC_RELAXED) ? KB_MOD_CTRL : 0) |
+                (__atomic_load_n(&kb_state.alt_pressed,   __ATOMIC_RELAXED) ? KB_MOD_ALT : 0)
             ),
         };
         /* IRQ context (PS/2 IRQ1 / xHCI HID IRQ): defer the publish via
