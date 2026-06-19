@@ -74,6 +74,7 @@
 #include "box/cxx/process.h"
 #include "box/cxx/system.h"
 #include "box/cxx/tagfs.h"
+#include "box/cxx/timing.h"
 #include "box/cxx/touch.h"
 
 // A user-defined formatter (exercised in phase9b) — drives the type-erased
@@ -4720,6 +4721,60 @@ void Phase29()
            "(available/try_get/get_for) + box::keyboard_events (async stream)\n");
 }
 
+void Phase30()
+{
+    using namespace std::chrono;
+
+    // Burn real wall time until `sw` reads >= target, bounded so a stuck clock
+    // can't hang. steady_clock::now() is in-process (RDTSC / ClockBoard page
+    // read) and the PIT keeps ticking through a userspace spin, so this is
+    // cheap and converges.
+    auto spin_to = [](box::stopwatch &sw, nanoseconds target) -> bool {
+        volatile std::uint64_t junk = 0;
+        for (std::uint64_t i = 0; i < 100000000ull; ++i) {
+            if (sw.elapsed() >= target) return true;
+            junk += i;
+        }
+        (void)junk;
+        return false;
+    };
+
+    // ── box::stopwatch ──────────────────────────────────────────────────────
+    box::stopwatch sw;
+    Check(sw.elapsed() >= nanoseconds(0), "phase30 stopwatch elapsed non-negative");
+    Check(sw.elapsed_as<microseconds>() >= microseconds(0), "phase30 elapsed_as<> casts");
+
+    bool ticked = spin_to(sw, milliseconds(3));
+    if (ticked) {
+        nanoseconds before = sw.elapsed();
+        Check(before >= milliseconds(3), "phase30 stopwatch measures real elapsed time");
+        nanoseconds lap = sw.reset();
+        Check(lap >= milliseconds(3), "phase30 reset() returns the elapsed lap");
+        Check(sw.elapsed() < before, "phase30 reset() rewinds the origin (elapsed drops)");
+    } else {
+        printf("[CXX] note phase30: steady_clock did not advance within the spin cap\n");
+    }
+
+    // ── box::throttle ───────────────────────────────────────────────────────
+    box::throttle th(milliseconds(20));
+    Check(th.try_fire(), "phase30 throttle first try_fire fires");
+    Check(!th.try_fire(), "phase30 throttle immediate re-fire blocked");
+    Check(!th.ready(), "phase30 throttle not ready within interval");
+    if (ticked) {
+        box::stopwatch w;
+        (void)spin_to(w, milliseconds(25));  // wait out the 20 ms interval
+        Check(th.ready(), "phase30 throttle ready after interval elapses");
+        Check(th.try_fire(), "phase30 throttle fires again after the interval");
+    }
+    th.reset();
+    Check(th.try_fire(), "phase30 throttle reset() re-arms");
+    box::throttle always(nanoseconds(0));
+    Check(always.try_fire() && always.try_fire(), "phase30 throttle(0) always fires");
+
+    printf("[CXX] PASS phase30: box::stopwatch (elapsed/reset over steady_clock) + "
+           "box::throttle (try_fire/ready/remaining)\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -4771,6 +4826,7 @@ int main()
     Phase27();
     Phase28();
     Phase29();
+    Phase30();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
