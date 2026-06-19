@@ -44,6 +44,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <mutex>
+#include <shared_mutex>
 #include <new>
 #include <exception>
 #include <initializer_list>
@@ -4832,6 +4833,107 @@ void Phase31()
            "(try_lock_for/until deadline-spin) + unique_lock timed interface\n");
 }
 
+// ── phase32: std::shared_mutex + shared_timed_mutex + shared_lock (Ф19b) ──
+void Phase32()
+{
+    using namespace std::chrono;
+
+    // ── shared_mutex: reader/writer mutual exclusion ────────────────────────
+    std::shared_mutex sm;
+
+    Check(sm.try_lock(), "phase32 shared_mutex fresh -> exclusive try_lock true");
+    Check(!sm.try_lock_shared(), "phase32 writer held -> try_lock_shared false");
+    sm.unlock();
+
+    Check(sm.try_lock_shared(),
+          "phase32 shared_mutex fresh -> try_lock_shared true");
+    Check(!sm.try_lock(), "phase32 reader held -> exclusive try_lock false");
+    sm.unlock_shared();
+
+    Check(sm.try_lock(), "phase32 exclusive re-acquirable after reader leaves");
+    sm.unlock();
+
+    // ── shared_timed_mutex: timed acquires ──────────────────────────────────
+    std::shared_timed_mutex stm;
+
+    Check(stm.try_lock_for(milliseconds(10)),
+          "phase32 stm try_lock_for free -> true");
+    stm.unlock();
+    Check(stm.try_lock_shared_for(milliseconds(10)),
+          "phase32 stm try_lock_shared_for free -> true");
+    stm.unlock_shared();
+
+    // Reader held: a timed exclusive acquire takes the writer bit, cannot
+    // drain the reader, and backs off at the deadline — the drain loop must
+    // burn the wall time it promised.
+    stm.lock_shared();
+    {
+        box::stopwatch sw;
+        bool got           = stm.try_lock_for(milliseconds(15));
+        nanoseconds waited = sw.elapsed();
+        Check(!got, "phase32 reader held -> exclusive try_lock_for false");
+        Check(waited >= milliseconds(12),
+              "phase32 exclusive drain-readers waited to ~deadline");
+    }
+    stm.unlock_shared();
+    // The writer bit must have been released on back-off: exclusive is free.
+    Check(stm.try_lock(), "phase32 writer bit released after timed back-off");
+    stm.unlock();
+
+    // Writer held: a timed shared acquire blocks to the deadline, then fails.
+    stm.lock();
+    {
+        box::stopwatch sw;
+        bool got           = stm.try_lock_shared_for(milliseconds(15));
+        nanoseconds waited = sw.elapsed();
+        Check(!got, "phase32 writer held -> try_lock_shared_for false");
+        Check(waited >= milliseconds(12),
+              "phase32 shared blocked-by-writer waited to ~deadline");
+    }
+    // Writer-vs-writer: a second exclusive acquire also fails (short timeout).
+    Check(!stm.try_lock_for(milliseconds(2)),
+          "phase32 writer held -> second exclusive try_lock_for false");
+    stm.unlock();
+
+    // ── shared_lock RAII ────────────────────────────────────────────────────
+    {
+        std::shared_lock<std::shared_mutex> sl(sm);
+        Check(sl.owns_lock(),
+              "phase32 shared_lock acquires shared on construction");
+        Check(!sm.try_lock(),
+              "phase32 shared_lock holds shared -> exclusive try_lock false");
+    }
+    Check(sm.try_lock(), "phase32 shared_lock dtor released shared ownership");
+    sm.unlock();
+
+    {
+        std::shared_lock<std::shared_mutex> sl(sm, std::defer_lock);
+        Check(!sl.owns_lock(), "phase32 shared_lock defer_lock starts unowned");
+        sl.lock();
+        Check(sl.owns_lock(), "phase32 shared_lock::lock acquires");
+        std::shared_lock<std::shared_mutex> sl2(std::move(sl));
+        Check(sl2.owns_lock() && !sl.owns_lock(),
+              "phase32 shared_lock move transfers ownership");
+        sl2.unlock();
+        Check(!sl2.owns_lock(), "phase32 shared_lock::unlock releases");
+    }
+
+    // Timed shared_lock + unique_lock<shared_timed_mutex> exclusive interop.
+    {
+        std::shared_lock<std::shared_timed_mutex> sl(stm, milliseconds(10));
+        Check(sl.owns_lock(),
+              "phase32 timed shared_lock acquires within deadline");
+    }
+    {
+        std::unique_lock<std::shared_timed_mutex> ul(stm, std::defer_lock);
+        Check(ul.try_lock_for(milliseconds(10)),
+              "phase32 unique_lock<shared_timed_mutex> exclusive timed acquire");
+    }
+
+    printf("[CXX] PASS phase32: std::shared_mutex + shared_timed_mutex "
+           "(atomic reader/writer, timed deadline-spin) + shared_lock RAII\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -4885,6 +4987,7 @@ int main()
     Phase29();
     Phase30();
     Phase31();
+    Phase32();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
