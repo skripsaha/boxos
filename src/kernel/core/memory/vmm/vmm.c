@@ -948,7 +948,14 @@ void vmm_shootdown_pages(vmm_context_t *ctx, uintptr_t virt_addr, size_t page_co
         else
         {
             scheduler_state_t *rs = scheduler_get_core(c);
-            process_t *rp = rs->current_process; // snapshot, no lock needed
+            /* ACQUIRE-load the remote core's current strand: it is published
+             * under scheduler_lock before that core loads the new CR3, and
+             * "an unmap here shoots down every core running this cabin CR3"
+             * relies on (a) this ordered read and (b) the dispatch-path CR3
+             * load being NON-NOFLUSH (P2 fix).  If a future change ever
+             * reintroduces a NOFLUSH load on dispatch, an incoming sibling
+             * could miss this shootdown — keep that path flushing. */
+            process_t *rp = __atomic_load_n(&rs->current_process, __ATOMIC_ACQUIRE);
             if (rp && rp->cabin && rp->cabin->vmm && rp->cabin->vmm->pml4_phys == ctx->pml4_phys)
             {
                 targets[target_count++] = c;

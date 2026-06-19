@@ -15,6 +15,8 @@
 #include "per_core.h"
 #include "amp.h"
 #include "pit.h"
+#include "lapic.h"     /* lapic_send_ipi — directed reschedule IPI on cross-core enqueue */
+#include "irqchip.h"   /* IPI_WAKE_VECTOR */
 
 // ---------------------------------------------------------------------------
 // Dynamic Scheduler Parameters
@@ -464,6 +466,21 @@ error_t sched_enqueue(process_t *proc)
     }
     spin_unlock(&home->runqueue.lock);
 
+    /* Directed reschedule IPI: if the strand landed on a REMOTE core, kick
+     * that core so it leaves MWAIT/idle and re-enters schedule() at once,
+     * instead of waiting up to one LAPIC tick (≈10 ms) — or, if the core
+     * was parked, never re-checking after scheduler_unpark_core cleared the
+     * flag without a wake.  This is the same primitive SysAddrWake /
+     * touch_queue_fire_wake use.  Without it a strand_spawn'd worker can sit
+     * unscheduled while the spawner parks, hanging the cabin until a
+     * timeout. */
+    if (result == OK && g_amp.total_cores > 1)
+    {
+        uint8_t self = amp_get_core_index();
+        if (target_core != self && target_core < g_amp.total_cores)
+            lapic_send_ipi(g_amp.cores[target_core].lapic_id, IPI_WAKE_VECTOR);
+    }
+
     return result;
 }
 
@@ -504,6 +521,14 @@ error_t sched_enqueue_on(uint8_t core_idx, process_t *proc)
         result = OK;
     }
     spin_unlock(&target->runqueue.lock);
+
+    /* Directed reschedule IPI for a remote target core — see sched_enqueue. */
+    if (result == OK && g_amp.total_cores > 1)
+    {
+        uint8_t self = amp_get_core_index();
+        if (core_idx != self && core_idx < g_amp.total_cores)
+            lapic_send_ipi(g_amp.cores[core_idx].lapic_id, IPI_WAKE_VECTOR);
+    }
 
     return result;
 }

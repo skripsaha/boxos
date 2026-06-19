@@ -136,16 +136,21 @@ BufferAllocResult BufferRegistryAlloc(process_t *proc, uint64_t requested_size)
     g_buffers[slot].in_use    = true;
     spin_unlock(&g_buffers_lock);
 
-    uint64_t virt = proc->cabin->buf_heap_next;
+    /* Atomically reserve a unique VA range BEFORE mapping. A plain
+     * `virt = buf_heap_next; … buf_heap_next += size` races the atomic-FAA
+     * reservers (touch.c, system_deck.c) and sibling strands of the same
+     * cabin, handing two allocations the same VA. Mirrors system_deck.c. */
+    uint64_t virt = __atomic_fetch_add(&proc->cabin->buf_heap_next,
+                                       (uint64_t)pages * PMM_PAGE_SIZE,
+                                       __ATOMIC_ACQ_REL);
     vmm_map_result_t mr = vmm_map_pages(proc->cabin->vmm, virt, (uintptr_t)phys,
                                         pages, VMM_FLAGS_USER_RW);
     if (mr.success) {
-        proc->cabin->buf_heap_next += pages * PMM_PAGE_SIZE;
         spin_lock(&g_buffers_lock);
         g_buffers[slot].virt_addr = virt;
         spin_unlock(&g_buffers_lock);
     } else {
-        virt = 0;
+        virt = 0;   /* VA range abandoned (monotonic window, as the FAA sites) */
     }
 
     out.err         = OK;
@@ -248,13 +253,13 @@ error_t BufferRegistryResize(process_t *proc, uint64_t handle,
             vmm_map_pages(proc->cabin->vmm, old_virt, (uintptr_t)new_phys,
                           new_pages, VMM_FLAGS_USER_RW);
         } else {
-            new_virt = proc->cabin->buf_heap_next;
+            new_virt = __atomic_fetch_add(&proc->cabin->buf_heap_next,
+                                          (uint64_t)new_pages * PMM_PAGE_SIZE,
+                                          __ATOMIC_ACQ_REL);
             vmm_map_result_t mr = vmm_map_pages(proc->cabin->vmm, new_virt,
                                                 (uintptr_t)new_phys, new_pages,
                                                 VMM_FLAGS_USER_RW);
-            if (mr.success) {
-                proc->cabin->buf_heap_next += new_pages * PMM_PAGE_SIZE;
-            } else {
+            if (!mr.success) {
                 new_virt = 0;
             }
         }

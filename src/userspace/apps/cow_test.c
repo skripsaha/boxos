@@ -75,9 +75,13 @@ int main(void)
     }
     kdbg_print("[COW] live read returns post-CoW pattern B (OK)");
 
-    uint32_t ids[8];
+    /* Buffer sized well above the number of snapshots earlier boot phases
+     * (e.g. the box::tagfs::snapshot CXX tests) may leave in the global
+     * list — an 8-entry window could exclude our own snapshot and spuriously
+     * fail "snap not in list" depending on boot/test ordering (UEFI). */
+    uint32_t ids[64];
     uint32_t count = 0;
-    if (snap_list(ids, 8, &count) != 0) {
+    if (snap_list(ids, 64, &count) != 0) {
         kdbg_print("[COW] snap_list FAIL");
         snap_delete(snap_id);
         delete((uint32_t)fid);
@@ -112,7 +116,7 @@ int main(void)
 
     /* List again — snapshot should be gone. */
     count = 0;
-    snap_list(ids, 8, &count);
+    snap_list(ids, 64, &count);
     bool still_there = false;
     for (uint32_t i = 0; i < count; i++) if (ids[i] == snap_id) { still_there = true; break; }
     if (still_there) {

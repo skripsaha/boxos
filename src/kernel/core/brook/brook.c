@@ -1017,34 +1017,47 @@ error_t BrookReleaseInternal(struct process_t *proc, uint64_t user_va_header)
  * ───────────────────────────────────────────────────────────────────── */
 void BrookCleanupProcess(struct process_t *proc)
 {
-    if (!proc) return;
+    if (!proc || !proc->cabin) return;
 
-    /* Detach the claim list under brook_lock so concurrent open paths
-     * (which check proc->destroying first) cannot race-link a new
-     * claim after we walk past it. */
+    /* Splice out only THIS strand's claims (claim->proc == proc); claims
+     * held by sibling strands of the same cabin stay mapped and keep their
+     * peer-alive flags set.  Pointer surgery runs under brook_lock (so
+     * concurrent opens, which check proc->destroying first, cannot race-link
+     * past us); the heavy release runs outside it.  For a single-strand
+     * cabin every claim matches — identical to the old wholesale drain. */
+    BrookClaim *to_free = NULL;
     spin_lock(&proc->cabin->brook_lock);
-    BrookClaim *head = (BrookClaim *)proc->cabin->brook_claims_head;
-    proc->cabin->brook_claims_head = NULL;
+    BrookClaim **pp = (BrookClaim **)&proc->cabin->brook_claims_head;
+    while (*pp) {
+        BrookClaim *c = *pp;
+        if (c->proc == proc) {
+            *pp = c->proc_next;
+            c->proc_next = to_free;
+            to_free = c;
+        } else {
+            pp = &c->proc_next;
+        }
+    }
     spin_unlock(&proc->cabin->brook_lock);
 
-    while (head) {
-        BrookClaim *next = head->proc_next;
-        BrookObject *brook = head->brook;
+    while (to_free) {
+        BrookClaim *next = to_free->proc_next;
+        BrookObject *brook = to_free->brook;
 
-        if (brook && proc->cabin) {
-            brook_memtag_detach_all(proc, brook->header_phys, head->user_va_header,
+        if (brook) {
+            brook_memtag_detach_all(proc, brook->header_phys, to_free->user_va_header,
                                      brook->slot_chunks, brook->slot_chunk_count,
-                                     head->user_va_slots, brook->slot_chunk_size);
-            brook_unmap_slots_from_cabin(proc, head->user_va_slots,
+                                     to_free->user_va_slots, brook->slot_chunk_size);
+            brook_unmap_slots_from_cabin(proc, to_free->user_va_slots,
                                          brook->slot_chunk_count,
                                          brook->slot_chunk_size);
-            brook_unmap_header_from_cabin(proc, head->user_va_header);
+            brook_unmap_header_from_cabin(proc, to_free->user_va_header);
 
             BrookBucket *b = &g_brook_buckets[brook_bucket_index(brook->tag_id)];
             spin_lock(&b->lock);
 
             BrookHeader *kh = brook_kernel_header(brook);
-            if (head->role == BROOK_WRITER) {
+            if (to_free->role == BROOK_WRITER) {
                 uint32_t one = 1u;
                 __atomic_compare_exchange_n(&kh->writer_alive, &one, 0u,
                                             false, __ATOMIC_RELEASE,
@@ -1065,8 +1078,8 @@ void BrookCleanupProcess(struct process_t *proc)
             atomic_fetch_add_u64(&g_stat_releases, 1);
         }
 
-        kfree(head);
-        head = next;
+        kfree(to_free);
+        to_free = next;
     }
 }
 

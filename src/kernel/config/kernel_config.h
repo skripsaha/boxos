@@ -129,7 +129,11 @@
 
 /* Core parking. */
 #define CONFIG_SCHED_PARK_IDLE_TICKS    100
-#define CONFIG_SCHED_UNPARK_LOAD_THRESH 2
+/* Unpark a parked core from scheduler_recalc as soon as it holds ANY
+ * runnable task (was 2 — which let a single enqueued strand languish on a
+ * parked core until the enqueue-IPI; 1 is the defense-in-depth complement
+ * to the directed reschedule IPI in sched_enqueue). */
+#define CONFIG_SCHED_UNPARK_LOAD_THRESH 1
 
 /* Affinity: ticks since last run after which cache is considered cold. */
 #define CONFIG_SCHED_AFFINITY_WARM_TICKS 5

@@ -19,6 +19,17 @@
  * strand_count != process_t.ref_count — they track different lifetimes.
  */
 
+/* Retired (grown-past) tag-overflow buffers. On growth the old buffer is
+ * NOT freed — a lock-free reader (process_has_tag_id on the hot publish
+ * path) may still hold the pointer — it is chained here and freed only in
+ * cabin_destroy. Reallocs are rare and bounded (~7/cabin), so the retained
+ * memory is negligible. */
+typedef struct TagOverflowRetired
+{
+    uint16_t                  *buf;
+    struct TagOverflowRetired *next;
+} TagOverflowRetired;
+
 typedef struct cabin_t
 {
     vmm_context_t *vmm;
@@ -32,6 +43,7 @@ typedef struct cabin_t
     uint16_t *tag_overflow_ids;
     uint16_t  tag_overflow_count;
     uint16_t  tag_overflow_capacity;
+    TagOverflowRetired *tag_overflow_retired;  /* old buffers, freed at cabin_destroy */
 
     /* MemTag per-cabin capability bitmask — 1024 bits (tag_ids 0..1023). */
     uint64_t active_memtags[16];
@@ -61,6 +73,14 @@ typedef struct cabin_t
     void       *brook_claims_head;
     spinlock_t  brook_lock;
     uint64_t    brook_va_next;
+
+    /* Hammock cursor — bump-allocates one fixed-size VA slot per spawned
+     * strand for its user stack + CET shadow stack (see cabin_layout.h).
+     * The main strand does NOT consume a slot. Guarded by hammock_lock so
+     * concurrent strand_spawn from sibling strands never hand out the same
+     * VA. Mirrors bay_va_next / brook_va_next. */
+    uint64_t    hammock_va_next;
+    spinlock_t  hammock_lock;
 
     /*
      * strand_count: number of strands currently attached to this cabin.
