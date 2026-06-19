@@ -59,6 +59,7 @@
 #include "box/cxx/bay.h"
 #include "box/cxx/bay_memory_resource.h"
 #include "box/cxx/brook.h"
+#include "box/cxx/console.h"
 #include "box/cxx/cpu.h"
 #include "box/cxx/current.h"
 #include "box/cxx/executor.h"
@@ -4607,6 +4608,63 @@ void Phase27()
            "box::tagged_pointer<T> (LAM-U48 tag bits)\n");
 }
 
+void Phase28()
+{
+    // ── box::color value logic + the BoxOS palette ─────────────────────────
+    constexpr box::color red = box::color::rgb(0xE0, 0x40, 0x40);
+    static_assert(red.r() == 0xE0 && red.g() == 0x40 && red.b() == 0x40 && red.is_rgb());
+    Check(red == box::colors::red, "phase28 colors::red == rgb(0xE0,0x40,0x40)");
+    Check(box::colors::berry.r() == 0xE0 && box::colors::berry.g() == 0x4F && box::colors::berry.b() == 0x90,
+          "phase28 colors::berry RGB triple");
+    Check(box::color::use_default().is_default() && box::color::inherit().is_inherit(),
+          "phase28 default/inherit sentinels");
+    Check(box::colors::red.is_rgb() && !box::colors::red.is_default(), "phase28 rgb color is_rgb");
+
+    // ── std::formatter<box::color> — the VALUE as "#RRGGBB" (never escapes) ──
+    Check(std::format("{}", box::colors::red) == "#E04040", "phase28 format red -> #E04040");
+    Check(std::format("{}", box::colors::leaf) == "#60C030", "phase28 format leaf -> #60C030");
+    Check(std::format("{}", box::color::use_default()) == "default", "phase28 format default sentinel");
+    Check(std::format("{}", box::color::inherit()) == "inherit", "phase28 format inherit sentinel");
+    Check(std::format("fg={} bg={}", box::colors::amber, box::colors::black) == "fg=#FFB040 bg=#000000",
+          "phase28 format multiple colors");
+
+    // ── box::styled — scoped text color (set on entry, restore on exit). The
+    //    color STATE round-trips here; the on-screen rendering is display-side. ─
+    box::set_color(box::colors::white);  // known starting foreground
+    Check(box::current_color() == box::colors::white, "phase28 set_color/current_color round-trip");
+    {
+        box::styled s(box::colors::red);
+        Check(box::current_color() == box::colors::red, "phase28 styled sets fg in scope");
+    }
+    Check(box::current_color() == box::colors::white, "phase28 styled restores fg on exit");
+    {
+        box::styled s(box::colors::green, box::colors::black);
+        Check(box::current_color() == box::colors::green &&
+              box::current_background() == box::colors::black,
+              "phase28 styled(fg,bg) sets both");
+    }
+    Check(box::current_color() == box::colors::white, "phase28 styled(fg,bg) restores fg");
+
+    // ── box::vga — batch session + dimensions (text-mode; rendering display-
+    //    side). Non-destructive: no clear/scroll/visible text, just the batch
+    //    syscall path and introspection. ──────────────────────────────────────
+    box::vga::dimensions dim = box::vga::size();
+    (void)box::vga::cursor();
+    if (dim.rows > 0 && dim.cols > 0) {
+        {
+            box::vga::session s;  // ops batch into one Manifest
+            box::vga::set_color(box::colors::light_gray, box::colors::black);
+        }  // commit on scope exit
+        box::vga::session s2;
+        Check(s2.commit() == 0, "phase28 vga batch session commits");
+    } else {
+        printf("[CXX] note phase28: vga text mode unavailable on this config\n");
+    }
+
+    printf("[CXX] PASS phase28: box::color/colors + std::formatter<color> + "
+           "box::styled (scoped) + box::vga::session (batch)\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -4656,6 +4714,7 @@ int main()
     Phase25();
     Phase26();
     Phase27();
+    Phase28();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
