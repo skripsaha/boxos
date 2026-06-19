@@ -7,28 +7,18 @@ extern "C" {
 
 #include "box/types.h"
 #include "box/error.h"
+#include "kb_event.h"  /* KB_MOD_SHIFT/CTRL/ALT + kb_event_t — the shared
+                        * kernel/userspace ABI for a published keyboard event */
 
-/* Modifier bits carried in kb_char_t.flags / kb_event_t.mods. Mirror the
- * keyboard driver's event assembly (kernel/drivers/keyboard/keyboard.c). */
-#define KB_MOD_SHIFT  0x01u
-#define KB_MOD_CTRL   0x02u
-#define KB_MOD_ALT    0x04u
-
+/* A key read from the synchronous HW ring (HW_KB_GETCHAR). Userspace-only
+ * convenience layout (the op returns ch / scancode / flags as out[0..2]) —
+ * note the field order differs from kb_event_t (the Touch payload). */
 typedef struct {
     char    ch;
     uint8_t scancode;
     uint8_t flags;     /* KB_MOD_* */
     uint8_t reserved;
 } kb_char_t;
-
-/* The keyboard Touch payload, published by the kernel under the "keyboard"
- * tag (TOUCH_TAG_KEYBOARD). Field order differs from kb_char_t — scancode
- * first. Consumers of the async (Touch) key stream decode this. */
-typedef struct PACKED {
-    uint8_t scancode;
-    char    ascii;
-    uint8_t mods;      /* KB_MOD_* */
-} kb_event_t;
 
 typedef struct {
     uint32_t available;
