@@ -1,0 +1,65 @@
+// boxcxx — <latch>
+//
+// std::latch — a single-use down-counter. Participants count_down() and
+// wait() until it reaches zero; it never resets. wait() spins on
+// __boxcxx_atomic_wait_cycle (WAITPKG UMONITOR/UMWAIT on the counter word,
+// else PAUSE budget then yield) — the same substrate as atomic::wait. The
+// wake is implicit: the count_down store lands on the counter's cacheline
+// and every waiter re-checks its predicate.
+//
+// One thread per cabin means no waiter ever actually blocks today; the
+// contract is the multi-thread one and the spin upgrades to a kernel park
+// once strands land, with no signature change.
+#ifndef BOXCXX_LATCH
+#define BOXCXX_LATCH
+
+#include <atomic>
+#include <cstddef>
+#include <cstdint>
+
+namespace std {
+
+class latch {
+public:
+    static constexpr ptrdiff_t max() noexcept { return PTRDIFF_MAX; }
+
+    constexpr explicit latch(ptrdiff_t expected) noexcept
+        : __counter(expected)
+    {
+    }
+    ~latch()                        = default;
+    latch(const latch &)            = delete;
+    latch &operator=(const latch &) = delete;
+
+    // Preconditions ([thread.latch]): n >= 0 and n <= the current count.
+    // The store wakes any waiter monitoring the counter's cacheline.
+    void count_down(ptrdiff_t n = 1)
+    {
+        __counter.fetch_sub(n, memory_order_release);
+    }
+
+    [[nodiscard]] bool try_wait() const noexcept
+    {
+        return __counter.load(memory_order_acquire) == 0;
+    }
+
+    void wait() const
+    {
+        unsigned spin = 0;
+        while (__counter.load(memory_order_acquire) != 0)
+            __boxcxx_atomic_wait_cycle(&__counter, &spin);
+    }
+
+    void arrive_and_wait(ptrdiff_t n = 1)
+    {
+        count_down(n);
+        wait();
+    }
+
+private:
+    atomic<ptrdiff_t> __counter;
+};
+
+} // namespace std
+
+#endif // BOXCXX_LATCH

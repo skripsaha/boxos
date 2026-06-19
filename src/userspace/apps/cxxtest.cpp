@@ -45,6 +45,8 @@
 #include <cstdint>
 #include <mutex>
 #include <shared_mutex>
+#include <latch>
+#include <barrier>
 #include <new>
 #include <exception>
 #include <initializer_list>
@@ -4934,6 +4936,68 @@ void Phase32()
            "(atomic reader/writer, timed deadline-spin) + shared_lock RAII\n");
 }
 
+// ── phase33: std::latch + std::barrier (Ф19c) ────────────────────────────
+void Phase33()
+{
+    // ── std::latch ──────────────────────────────────────────────────────────
+    std::latch lt(3);
+    Check(!lt.try_wait(), "phase33 latch not ready before reaching zero");
+    lt.count_down();                 // 3 -> 2
+    Check(!lt.try_wait(), "phase33 latch still pending mid-count");
+    lt.count_down(2);                // 2 -> 0
+    Check(lt.try_wait(), "phase33 latch ready at zero");
+    lt.wait();                       // counter == 0 -> returns at once
+    Check(true, "phase33 latch wait on zero does not block");
+
+    std::latch lt1(1);
+    lt1.arrive_and_wait();           // count_down(1) then wait -> immediate
+    Check(lt1.try_wait(), "phase33 latch arrive_and_wait drains to zero");
+
+    std::latch lt0(0);
+    Check(lt0.try_wait(), "phase33 latch(0) starts satisfied");
+    lt0.wait();
+    Check(std::latch::max() > 0, "phase33 latch::max positive");
+
+    // ── std::barrier: reusable phases + completion ──────────────────────────
+    int comps = 0;
+    std::barrier bar(1, [&comps]() noexcept { ++comps; }); // CTAD on the lambda
+    bar.arrive_and_wait();           // phase 0 completes (single participant)
+    bar.arrive_and_wait();           // phase 1 completes
+    Check(comps == 2,
+          "phase33 barrier completion runs once per phase (reusable)");
+
+    // arrive(n): the arrival that drains the count completes the phase
+    int comps2 = 0;
+    std::barrier bar2(3, [&comps2]() noexcept { ++comps2; });
+    auto tok  = bar2.arrive(2);      // 3 -> 1, not yet complete
+    Check(comps2 == 0, "phase33 barrier not complete before all arrive");
+    auto tok2 = bar2.arrive(1);      // 1 -> 0, completes
+    Check(comps2 == 1, "phase33 barrier completes when arrivals reach expected");
+    bar2.wait(std::move(tok2));      // phase advanced -> immediate
+    bar2.wait(std::move(tok));       // stale token of the same phase -> immediate
+    Check(true, "phase33 barrier wait on a completed phase does not block");
+
+    // arrive_and_drop: subsequent phases expect one fewer arrival
+    int comps3 = 0;
+    std::barrier bar3(2, [&comps3]() noexcept { ++comps3; });
+    bar3.arrive_and_drop();          // expected 2->1; arrive 2->1 (not complete)
+    auto tok3 = bar3.arrive();       // 1 -> 0, completes phase 0
+    bar3.wait(std::move(tok3));
+    Check(comps3 == 1, "phase33 barrier arrive_and_drop completes current phase");
+    bar3.arrive_and_wait();          // next phase needs only 1 -> completes
+    Check(comps3 == 2,
+          "phase33 barrier arrive_and_drop lowered next-phase expected");
+
+    // default (empty) completion barrier compiles and runs
+    std::barrier<> b0(1);
+    b0.arrive_and_wait();
+    Check(true, "phase33 barrier<> default completion runs");
+
+    printf("[CXX] PASS phase33: std::latch (count_down/try_wait/wait/"
+           "arrive_and_wait) + std::barrier (arrive/wait/arrive_and_wait/"
+           "arrive_and_drop + completion, reusable phases)\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -4988,6 +5052,7 @@ int main()
     Phase30();
     Phase31();
     Phase32();
+    Phase33();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
