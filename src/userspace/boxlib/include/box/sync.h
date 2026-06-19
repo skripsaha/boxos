@@ -60,6 +60,27 @@ INLINE void umutex_unlock(umutex_t *m) {
     __sync_lock_release(&m->locked);
 }
 
+/* -------------------------------------------------------------------------
+ * addr_park / addr_wake — park/wake on a memory address.
+ *
+ * addr_park: atomically checks that *addr == expected, then parks the
+ * calling process until addr_wake is called for the same address or the
+ * timeout expires.  Returns:
+ *   OK                      — woken by addr_wake
+ *   ERR_TIMEOUT             — timeout elapsed before wake
+ *   ERR_ADDR_VALUE_MISMATCH — *addr != expected at park time (no sleep)
+ *   other                   — kernel error
+ * timeout_ms == 0 means wait forever.
+ *
+ * addr_wake: wake up to `count` processes parked on `addr`.
+ * count == 0 means wake all.
+ * ------------------------------------------------------------------------- */
+#include "box/error.h"  /* error_t, ERR_ADDR_VALUE_MISMATCH */
+
+error_t addr_park(const volatile void *addr, uint64_t expected,
+                  uint32_t timeout_ms);
+error_t addr_wake(const volatile void *addr, uint32_t count);
+
 #ifdef __cplusplus
 }
 #endif

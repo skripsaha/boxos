@@ -427,6 +427,9 @@ const char* ErrorString(error_t err) {
         case ERR_BRAID_REBUILD_FAILED:
             return "Braid rebuild failed";
 
+        case ERR_ADDR_VALUE_MISMATCH:
+            return "Address value mismatch (park skipped)";
+
         default:
             return "Unknown error code";
     }

@@ -1349,6 +1349,11 @@ static void process_cleanup_immediate(process_t *proc)
     cabin_ref_dec(proc->cabin);
     proc->cabin = NULL;
 
+    /* Unlink the embedded addr-wait entry if still in a bucket — a strand
+     * destroyed while parked must not leave a dangling pointer behind.
+     * Takes only the per-bucket spinlock (leaf lock; no other locks held). */
+    AddrWaitUnlinkIfLinked(&proc->addr_wait_entry);
+
     pid_free(proc->pid);
     proc->pid = PID_INVALID;
 

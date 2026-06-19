@@ -93,6 +93,9 @@ typedef uint32_t error_t;
 #define ERR_POCKET_FAILED       ERR_POCKET_PROCESSING_FAILED
 #define ERR_RESULT_INVALID      ERR_CORRUPTED
 
+/* Strand addr_park: *addr != expected at park time (no sleep occurred). */
+#define ERR_ADDR_VALUE_MISMATCH 1100
+
 #define IS_ERROR(err)   ((err) != OK)
 #define IS_SUCCESS(err) ((err) == OK)
 
