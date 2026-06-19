@@ -30,13 +30,12 @@ int kb_readline(char* buffer, size_t size, bool echo);
 int kb_status(kb_status_t* status);
 
 int kb_getchar_timeout(uint32_t timeout_ms);
-int kb_getchar_ex(kb_char_t* out_char);
 
-/* Like kb_getchar_ex but bounded by `timeout_ms` — the underlying op returns
- * scancode + modifiers on every read, so a timed read keeps the full event
- * (kb_getchar_timeout drops them). Returns 0 (filled), -ERR_TIMEOUT if no key
- * arrived within the window, or another -ERR_*. */
-int kb_getchar_ex_timeout(kb_char_t* out_char, uint32_t timeout_ms);
+/* Non-blocking structured read: fills out_char from the ring if a key is
+ * buffered, else returns -ERR_RESULT_INVALID immediately. The HW_KB_GETCHAR op
+ * does not block, so for a blocking / timed read use the "keyboard" Touch
+ * channel (touch_await), which waits in the kernel — see box::keyboard_events. */
+int kb_getchar_ex(kb_char_t* out_char);
 
 #ifdef __cplusplus
 }

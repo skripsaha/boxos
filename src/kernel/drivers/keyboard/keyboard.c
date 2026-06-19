@@ -422,10 +422,10 @@ void keyboard_timer_tick(void)
     kb_push_chars(kb_repeat.chars, kb_repeat.char_count);
 
     if (kb_repeat.char_count > 0 && kb_repeat.chars[0] != 0) {
-        struct { uint8_t scancode; char ascii; uint8_t mods; } kb_ev = {
+        kb_event_t kb_ev = {
             .scancode = kb_repeat.held_key,
             .ascii    = kb_repeat.chars[0],
-            .mods     = 0,
+            .mods     = 0,  /* repeat carries no modifier state */
         };
         /* PIT IRQ0 context — defer via static ring + irq_defer (same
          * rationale as the PS/2 IRQ1 site above). */

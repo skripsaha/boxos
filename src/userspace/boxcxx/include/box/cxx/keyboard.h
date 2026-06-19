@@ -7,24 +7,25 @@
 // Same device, two layers for two needs.
 //
 //   box::key         — one key event: ch() / scancode() / shift()/ctrl()/alt().
-//   box::key_input   — the synchronous reader: get_key() (blocking) / get_for()
-//                      (timed) / try_get() (non-blocking) / available().
-//   box::keyboard_events() — a Touch-backed async stream: co_await its
-//                      subscription's next(), decode with box::key::from_touch.
+//   box::key_input   — non-blocking reads of the HW key ring: available() /
+//                      try_get(). The ring does NOT block, so this only polls.
+//   box::keyboard_events() — the blocking / timed / async key stream (Touch):
+//                      the subscription waits in the kernel — sub.wait(ms),
+//                      co_await sub.next(), or sub.poll() — decode each event
+//                      with box::key::from_touch.
 //
 // This is a box:: extension, not part of std. A process picks ONE consumer —
-// the synchronous ring (box::key_input) OR the async Touch stream
-// (keyboard_events) — they are independent consumers of the same key stream.
+// the ring poller (box::key_input) OR the Touch stream (keyboard_events) — they
+// are independent consumers of the same key stream. "Wait for a key" lives only
+// on keyboard_events (the ring cannot block); key_input is poll-only.
 #ifndef BOXCXX_BOX_KEYBOARD_H
 #define BOXCXX_BOX_KEYBOARD_H
 
-#include <chrono>
 #include <cstdint>
 #include <optional>
 
-#include "box/error.h"      // ERR_TIMEOUT
-#include "box/keyboard.h"   // kb_char_t / kb_event_t / kb_status_t / kb_getchar_ex[_timeout] / kb_status + KB_MOD_*
-#include "box/cxx/touch.h"  // box::subscription / box::event / box::tag (async key stream)
+#include "box/keyboard.h"   // kb_char_t / kb_event_t / kb_status_t / kb_getchar_ex / kb_status + KB_MOD_*
+#include "box/cxx/touch.h"  // box::subscription / box::event / box::tag (the key stream)
 
 namespace box {
 
@@ -63,7 +64,10 @@ public:
     }
 };
 
-// ── box::key_input — the synchronous structured keyboard reader ─────────────
+// ── box::key_input — non-blocking reads of the HW key ring ──────────────────
+// The HW_KB_GETCHAR ring does not block (it returns "no data" at once on an
+// empty buffer), so this namespace only POLLS. For "wait for a key", use
+// box::keyboard_events() — the Touch channel waits in the kernel.
 namespace key_input {
 
 // Keys buffered and ready (0 if none); nullopt on a failed query.
@@ -74,45 +78,23 @@ inline std::optional<std::uint32_t> available() noexcept
     return s.available;
 }
 
-// Next key, waiting up to `timeout`; nullopt on timeout / error. The full event
-// (scancode + modifiers) is preserved (the timed op keeps them).
-inline std::optional<key> get_for(std::chrono::milliseconds timeout) noexcept
-{
-    const std::int64_t ms = timeout.count();
-    const std::uint32_t to = ms <= 0 ? 0u
-                           : ms > 0xFFFFFFFFLL ? 0xFFFFFFFFu
-                           : static_cast<std::uint32_t>(ms);
-    kb_char_t k{};
-    if (::kb_getchar_ex_timeout(&k, to) != 0) return std::nullopt;
-    return key::from_kb_char(k);
-}
-
-// Next key only if one is already buffered (never blocks); nullopt otherwise.
+// The next key if one is buffered, else nullopt — never blocks (one ring poll).
 inline std::optional<key> try_get() noexcept
 {
-    std::optional<std::uint32_t> n = available();
-    if (!n || *n == 0) return std::nullopt;
-    return get_for(std::chrono::milliseconds(1));  // a key is ready → returns at once
-}
-
-// Next key, blocking until one arrives (or a hard error). Loops over bounded
-// kernel waits — it never busy-spins, and a timeout alone is not "done".
-inline std::optional<key> get_key() noexcept
-{
-    for (;;) {
-        kb_char_t k{};
-        int rc = ::kb_getchar_ex_timeout(&k, 60000u);
-        if (rc == 0) return key::from_kb_char(k);
-        if (rc == -ERR_TIMEOUT) continue;  // no key yet — keep waiting
-        return std::nullopt;               // hard error
-    }
+    kb_char_t k{};
+    if (::kb_getchar_ex(&k) == 0) return key::from_kb_char(k);
+    return std::nullopt;
 }
 
 }  // namespace key_input
 
-// ── async — a Touch-backed key stream on the current box::executor ──────────
-// Subscribe to the kernel's "keyboard" Touch tag; co_await sub.next() yields a
-// box::event whose payload is a kb_event_t (decode with box::key::from_touch).
+// ── box::keyboard_events — the blocking / timed / async key stream (Touch) ──
+// Every key is also published under the kernel "keyboard" Touch tag; the
+// returned subscription WAITS in the kernel (no busy-poll). Use sub.wait(ms)
+// for a timed blocking read, `co_await sub.next()` on the current executor, or
+// sub.poll() for a non-blocking peek — decode each box::event with
+// box::key::from_touch. This is the "wait for a key" path; box::key_input only
+// polls the ring. A process should use one OR the other, not both at once.
 inline subscription keyboard_events() noexcept { return subscription(tag("keyboard")); }
 
 }  // namespace box

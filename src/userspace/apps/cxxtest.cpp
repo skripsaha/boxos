@@ -4659,6 +4659,12 @@ void Phase28()
         }  // commit on scope exit
         box::vga::session s2;
         Check(s2.commit() == 0, "phase28 vga batch session commits");
+        // color set/get round-trip (outside a session — getters resolve at once,
+        // a batched set would be deferred). box::color -> VGA attr -> back.
+        std::uint8_t want = color_to_vga_attr(box::colors::cyan.raw(), box::colors::black.raw());
+        box::vga::set_color(box::colors::cyan, box::colors::black);
+        Check(box::vga::color_attr() == want, "phase28 vga set_color/color_attr round-trip");
+        box::vga::set_color(box::colors::light_gray, box::colors::black);  // restore a sane default
     } else {
         printf("[CXX] note phase28: vga text mode unavailable on this config\n");
     }
@@ -4697,28 +4703,27 @@ void Phase29()
     Check(ek.ch() == 'q' && ek.scancode() == 0x10 && ek.ctrl() && !ek.alt(),
           "phase29 from_event decodes the touch-payload field order");
 
-    // ── key_input — non-blocking introspection. There is no interactive input
-    //    during the matrix, so get_key()/co_await would block: those are
-    //    compile-surface only here; we exercise the non-blocking paths. ───────
+    // ── key_input — non-blocking ring poll. No interactive input arrives in
+    //    the matrix, so a buffered key is unlikely; both outcomes are valid. ───
     std::optional<std::uint32_t> avail = box::key_input::available();
-    Check(avail.has_value(), "phase29 key_input::available() queries status");
-    std::optional<box::key> got = box::key_input::try_get();
+    Check(avail.has_value(), "phase29 key_input::available() queries the ring");
+    std::optional<box::key> got = box::key_input::try_get();  // never blocks
     if (avail && *avail == 0)
         Check(!got.has_value(), "phase29 try_get() empty when nothing buffered");
-    // get_for with a short timeout must RETURN (never hang); its result is
-    // input-dependent, so it is drained, not asserted.
-    (void)box::key_input::get_for(std::chrono::milliseconds(5));
-    // get_key() blocks until a key — reference only (calling it would hang).
-    volatile auto blocking_fp = &box::key_input::get_key;
-    (void)blocking_fp;
 
-    // ── async Touch-backed key stream: claim + non-blocking poll (drain) ───
+    // ── keyboard_events — the Touch stream. wait(ms) blocks IN THE KERNEL and
+    //    returns nullopt within the window when no key comes: a real, bounded,
+    //    non-spinning timed read (the ring cannot do this). co_await next() is
+    //    covered by the box::touch coroutine tests. ───────────────────────────
     box::subscription keys = box::keyboard_events();
-    if (std::optional<box::event> ev = keys.poll())
-        (void)box::key::from_touch(*ev);  // decode path (input-dependent)
+    if (std::optional<box::event> ev = keys.poll())  // non-blocking peek
+        (void)box::key::from_touch(*ev);
+    std::optional<box::event> waited = keys.wait(5);  // efficient kernel block, <= 5 ms
+    if (waited)
+        (void)box::key::from_touch(*waited);  // a key actually arrived (input-dependent)
 
     printf("[CXX] PASS phase29: box::key (decode/modifiers) + box::key_input "
-           "(available/try_get/get_for) + box::keyboard_events (async stream)\n");
+           "(available/try_get ring poll) + box::keyboard_events (Touch wait/poll/next)\n");
 }
 
 void Phase30()
@@ -4750,7 +4755,7 @@ void Phase30()
         Check(before >= milliseconds(3), "phase30 stopwatch measures real elapsed time");
         nanoseconds lap = sw.reset();
         Check(lap >= milliseconds(3), "phase30 reset() returns the elapsed lap");
-        Check(sw.elapsed() < before, "phase30 reset() rewinds the origin (elapsed drops)");
+        Check(sw.elapsed() < lap, "phase30 reset() rewinds the origin (post-reset elapsed << lap)");
     } else {
         printf("[CXX] note phase30: steady_clock did not advance within the spin cap\n");
     }
