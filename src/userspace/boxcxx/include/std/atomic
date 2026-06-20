@@ -13,6 +13,14 @@
 // timeout). notify_one / notify_all call __boxcxx_atomic_notify, which
 // bumps the version and wakes the waiters — no longer no-ops.
 //
+// DO NOT CONFUSE the two "notify"s. notify_one / notify_all here are the C++
+// standard's WAKE side of atomic::wait (mandated names — cannot be renamed).
+// They are NOT the BoxOS kernel `notify`: in BoxOS, `notify` / notify_entry is
+// the syscall entry gate ("a Cabin notifies the kernel"). Same word, different
+// layers, by coincidence. This C++ wake bottoms out in addr_wake, which is a
+// syscall and therefore enters the kernel through that `notify` gate — it RIDES
+// on the kernel notify, it does not duplicate or replace it.
+//
 // Cross-cabin (Bay) usage contract: lock-free objects only — the lock
 // pool is cabin-private, so non-lock-free atomics are coherent only
 // within one cabin.
