@@ -56,14 +56,17 @@ public:
                                               memory_order_relaxed))
                     break;
             } else {
-                __boxcxx_atomic_wait_cycle(&__s, &spin);
+                __boxcxx_atomic_wait_cycle(&__s, &s, sizeof(s), &spin);
                 s = __s.load(memory_order_relaxed);
             }
         }
         // We own the writer bit; drain any readers still inside.
         spin = 0;
-        while (__s.load(memory_order_acquire) & kReaderMask)
-            __boxcxx_atomic_wait_cycle(&__s, &spin);
+        for (;;) {
+            unsigned s = __s.load(memory_order_acquire);
+            if (!(s & kReaderMask)) break;
+            __boxcxx_atomic_wait_cycle(&__s, &s, sizeof(s), &spin);
+        }
     }
 
     bool try_lock() noexcept
@@ -74,7 +77,11 @@ public:
                                            memory_order_relaxed);
     }
 
-    void unlock() noexcept { __s.store(0, memory_order_release); }
+    void unlock() noexcept
+    {
+        __s.store(0, memory_order_release);
+        __boxcxx_atomic_notify(&__s, true);
+    }
 
     // ── shared ───────────────────────────────────────────────────────────
     void lock_shared()
@@ -87,7 +94,7 @@ public:
                                               memory_order_relaxed))
                     break;
             } else {
-                __boxcxx_atomic_wait_cycle(&__s, &spin);
+                __boxcxx_atomic_wait_cycle(&__s, &s, sizeof(s), &spin);
                 s = __s.load(memory_order_relaxed);
             }
         }
@@ -105,7 +112,11 @@ public:
         }
     }
 
-    void unlock_shared() noexcept { __s.fetch_sub(1, memory_order_release); }
+    void unlock_shared() noexcept
+    {
+        __s.fetch_sub(1, memory_order_release);
+        __boxcxx_atomic_notify(&__s, true);
+    }
 
     // ── timed (shared_timed_mutex only) ───────────────────────────────────
     template <typename Clock, typename Duration>

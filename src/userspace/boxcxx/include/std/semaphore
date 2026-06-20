@@ -47,6 +47,7 @@ public:
     void release(ptrdiff_t update = 1)
     {
         __count.fetch_add(update, memory_order_release);
+        __boxcxx_atomic_notify(&__count, true);
     }
 
     [[nodiscard]] bool try_acquire() noexcept
@@ -72,7 +73,7 @@ public:
                                                   memory_order_relaxed))
                     return;
             } else {
-                __boxcxx_atomic_wait_cycle(&__count, &spin);
+                __boxcxx_atomic_wait_cycle(&__count, &old, sizeof(old), &spin);
             }
         }
     }

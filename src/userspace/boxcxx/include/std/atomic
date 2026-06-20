@@ -6,12 +6,12 @@
 // (src/runtime/atomic_support.cpp); every other size goes through the
 // generic libatomic protocol backed by an address-hashed lock pool.
 //
-// wait/notify are address-monitor based: wait() loops over
-// load-compare + one __boxcxx_atomic_wait_cycle (UMONITOR/UMWAIT when
-// WAITPKG is present, PAUSE/yield otherwise). The notifying store
-// itself is the wake signal — a write to the monitored cacheline ends
-// UMWAIT, and the polling fallback re-checks on schedule. notify_one /
-// notify_all are therefore no-ops, kept for interface conformance.
+// wait/notify park on a per-pool version counter: wait() loops over
+// load-compare + one __boxcxx_atomic_wait_cycle, which bounded-spins
+// (UMONITOR/UMWAIT when WAITPKG is present, PAUSE otherwise) and then
+// parks the strand in the kernel until a matching notify (or a backstop
+// timeout). notify_one / notify_all call __boxcxx_atomic_notify, which
+// bumps the version and wakes the waiters — no longer no-ops.
 //
 // Cross-cabin (Bay) usage contract: lock-free objects only — the lock
 // pool is cabin-private, so non-lock-free atomics are coherent only
@@ -24,11 +24,14 @@
 #include <type_traits>
 
 extern "C" {
-// One wait cycle (UMWAIT or pause/yield) on `addr`'s cacheline; the
-// caller's loop re-checks its predicate after every return. spin_state
-// is the caller-owned PAUSE budget counter for the fallback path.
-void __boxcxx_atomic_wait_cycle(const volatile void *addr,
-                                unsigned *spin_state);
+// One park/wake cycle on `addr`'s version-pool. `observed` points to the
+// `width`-byte value the caller saw while its predicate still said "wait":
+// the cycle bounded-spins, then parks until a matching notify (or a backstop
+// timeout), after which the caller's loop re-checks its predicate.
+void __boxcxx_atomic_wait_cycle(const volatile void *addr, const void *observed,
+                                unsigned width, unsigned *spin_state);
+// Wake waiters parked for `addr` (bumps the version, wakes the whole pool).
+void __boxcxx_atomic_notify(const volatile void *addr, bool all);
 }
 
 namespace std {
@@ -175,7 +178,7 @@ inline void Wait(P *addr, T old, memory_order m) noexcept
         T cur = Load<P, T>(addr, m);
         ClearPadding(&cur);
         if (!SameRepresentation(cur, old)) return;
-        __boxcxx_atomic_wait_cycle(addr, &spin);
+        __boxcxx_atomic_wait_cycle(addr, &old, sizeof(T), &spin);
     }
 }
 
@@ -232,19 +235,25 @@ struct atomic_flag {
     void wait(bool old, memory_order m = memory_order_seq_cst) const noexcept
     {
         unsigned spin = 0;
-        while (test(m) == old) __boxcxx_atomic_wait_cycle(&__flag, &spin);
+        while (test(m) == old) {
+            unsigned char cur = __atomic_load_n(&__flag, __atomic_impl::Order(m));
+            __boxcxx_atomic_wait_cycle(&__flag, &cur, sizeof(__flag), &spin);
+        }
     }
     void wait(bool old, memory_order m = memory_order_seq_cst)
         const volatile noexcept
     {
         unsigned spin = 0;
-        while (test(m) == old) __boxcxx_atomic_wait_cycle(&__flag, &spin);
+        while (test(m) == old) {
+            unsigned char cur = __atomic_load_n(&__flag, __atomic_impl::Order(m));
+            __boxcxx_atomic_wait_cycle(&__flag, &cur, sizeof(__flag), &spin);
+        }
     }
 
-    void notify_one() noexcept {}
-    void notify_one() volatile noexcept {}
-    void notify_all() noexcept {}
-    void notify_all() volatile noexcept {}
+    void notify_one() noexcept { __boxcxx_atomic_notify(&__flag, false); }
+    void notify_one() volatile noexcept { __boxcxx_atomic_notify(&__flag, false); }
+    void notify_all() noexcept { __boxcxx_atomic_notify(&__flag, true); }
+    void notify_all() volatile noexcept { __boxcxx_atomic_notify(&__flag, true); }
 
     unsigned char __flag = 0;
 };
@@ -381,10 +390,10 @@ struct atomic : __atomic_impl::DifferenceType<T> {
         __atomic_impl::Wait<const volatile T, T>(&__v, old, m);
     }
 
-    void notify_one() noexcept {}
-    void notify_one() volatile noexcept {}
-    void notify_all() noexcept {}
-    void notify_all() volatile noexcept {}
+    void notify_one() noexcept { __boxcxx_atomic_notify(&__v, false); }
+    void notify_one() volatile noexcept { __boxcxx_atomic_notify(&__v, false); }
+    void notify_all() noexcept { __boxcxx_atomic_notify(&__v, true); }
+    void notify_all() volatile noexcept { __boxcxx_atomic_notify(&__v, true); }
 
     // ── integral extras ([atomics.types.int]) ──────────────────────────
     // NOTE: requires-constrained members replace the classic
@@ -640,19 +649,23 @@ struct atomic<T *> {
     void wait(T *old, memory_order m = memory_order_seq_cst) const noexcept
     {
         unsigned spin = 0;
-        while (load(m) == old) __boxcxx_atomic_wait_cycle(&__v, &spin);
+        T *obs = old;
+        while (load(m) == old)
+            __boxcxx_atomic_wait_cycle(&__v, &obs, sizeof(__v), &spin);
     }
     void wait(T *old,
               memory_order m = memory_order_seq_cst) const volatile noexcept
     {
         unsigned spin = 0;
-        while (load(m) == old) __boxcxx_atomic_wait_cycle(&__v, &spin);
+        T *obs = old;
+        while (load(m) == old)
+            __boxcxx_atomic_wait_cycle(&__v, &obs, sizeof(__v), &spin);
     }
 
-    void notify_one() noexcept {}
-    void notify_one() volatile noexcept {}
-    void notify_all() noexcept {}
-    void notify_all() volatile noexcept {}
+    void notify_one() noexcept { __boxcxx_atomic_notify(&__v, false); }
+    void notify_one() volatile noexcept { __boxcxx_atomic_notify(&__v, false); }
+    void notify_all() noexcept { __boxcxx_atomic_notify(&__v, true); }
+    void notify_all() volatile noexcept { __boxcxx_atomic_notify(&__v, true); }
 
     // Pointer arithmetic scales by the pointee ([atomics.types.pointer]).
     T *fetch_add(ptrdiff_t d, memory_order m = memory_order_seq_cst) noexcept
@@ -762,8 +775,8 @@ struct atomic_ref {
     {
         __atomic_impl::Wait<T, T>(__p, old, m);
     }
-    void notify_one() const noexcept {}
-    void notify_all() const noexcept {}
+    void notify_one() const noexcept { __boxcxx_atomic_notify(__p, false); }
+    void notify_all() const noexcept { __boxcxx_atomic_notify(__p, true); }
 
     // integral / floating extras, same constraint style as atomic<T>
     T fetch_add(T d, memory_order m = memory_order_seq_cst) const noexcept
@@ -898,10 +911,12 @@ struct atomic_ref<T *> {
     void wait(T *old, memory_order m = memory_order_seq_cst) const noexcept
     {
         unsigned spin = 0;
-        while (load(m) == old) __boxcxx_atomic_wait_cycle(__p, &spin);
+        T *obs = old;
+        while (load(m) == old)
+            __boxcxx_atomic_wait_cycle(__p, &obs, sizeof(*__p), &spin);
     }
-    void notify_one() const noexcept {}
-    void notify_all() const noexcept {}
+    void notify_one() const noexcept { __boxcxx_atomic_notify(__p, false); }
+    void notify_all() const noexcept { __boxcxx_atomic_notify(__p, true); }
 
     T *fetch_add(ptrdiff_t d,
                  memory_order m = memory_order_seq_cst) const noexcept

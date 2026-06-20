@@ -1,0 +1,35 @@
+// boxcxx — <thread> (Ф20a slice: this_thread::sleep_for/sleep_until only;
+// the std::thread class + get_id/yield/hardware_concurrency arrive in Ф20b).
+#ifndef BOXCXX_THREAD
+#define BOXCXX_THREAD
+#include <chrono>
+#include <cstdint>
+#include "box/sync.h"   // addr_park — a timed park IS the sleep
+namespace std {
+namespace this_thread {
+
+template <class Rep, class Period>
+inline void sleep_for(const chrono::duration<Rep, Period> &d)
+{
+    if (d <= chrono::duration<Rep, Period>::zero()) return;      // <=0 → no sleep
+    auto ms = chrono::ceil<chrono::milliseconds>(d).count();     // round UP (>= requested)
+    if (ms < 1) ms = 1;                                          // sub-ms positive → >=1ms
+    if (ms > 0xFFFFFFFFLL) ms = 0xFFFFFFFFLL;                    // clamp to addr_park u32
+    // Park on a private stack word nobody wakes → returns only on the timeout.
+    // expected == *word so SysAddrPark proceeds (no instant value-mismatch).
+    volatile uint64_t word = 0;
+    addr_park((const volatile void *)&word,
+              __atomic_load_n(&word, __ATOMIC_RELAXED), (uint32_t)ms);
+}
+
+template <class Clock, class Duration>
+inline void sleep_until(const chrono::time_point<Clock, Duration> &abs)
+{
+    auto now = Clock::now();
+    if (abs <= now) return;
+    sleep_for(abs - now);
+}
+
+} // namespace this_thread
+} // namespace std
+#endif // BOXCXX_THREAD

@@ -1,6 +1,10 @@
 #ifndef BOX_STRAND_H
 #define BOX_STRAND_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include "box/types.h"
 #include "box/error.h"
 
@@ -32,5 +36,9 @@ uint32_t strand_spawn(void (*fn)(void *arg), void *arg);
  * NOT run global static destructors or flush shared buffers — those belong
  * to the whole cabin and run when the last (main) strand exits. */
 void strand_exit(void) __attribute__((noreturn));
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* BOX_STRAND_H */

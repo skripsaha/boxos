@@ -16,6 +16,9 @@
 
 #include "box/print.h"
 #include "box/system.h"
+#include "box/strand.h"   // strand_spawn / strand_exit (phase35 sibling strand)
+#include "box/sync.h"     // addr_park / addr_wake (phase35 join)
+#include "box/cpu.h"      // cpu_has_fsgsbase (phase35 spawn guard)
 
 #include <algorithm>
 #include <array>
@@ -48,6 +51,7 @@
 #include <latch>
 #include <barrier>
 #include <semaphore>
+#include <thread>
 #include <new>
 #include <exception>
 #include <initializer_list>
@@ -5081,6 +5085,168 @@ void Phase34()
            "(acquire/try_acquire/try_acquire_for-until/release deadline-spin)\n");
 }
 
+// ── phase35: this_thread::sleep_for + real cross-strand park/wake (Ф20a) ──
+// std concurrency primitives now park in the kernel instead of busy-spinning.
+// Part 1 proves the timed park (sleep_for) with no strand. Parts 3-4 spawn a
+// sibling strand that drives latch / semaphore / atomic notify, so main really
+// parks and the worker really wakes it (strand:parked / strand:woken Touch).
+
+static volatile uint64_t g_p35_remaining; // worker decrements; main joins on it
+static std::latch       *g_p35_latch;     // count 1; worker count_down()s it
+static std::binary_semaphore g_p35_sem{0}; // worker release()s it
+static std::atomic<int> g_p35_at{0};      // worker store+notify; main wait()s
+static std::atomic<int> g_p35_pp{0};      // ping-pong counter (atomic notify)
+static constexpr int    kP35PingPong = 64; // lock-step hops in the wake proof
+
+// Park-join a single worker the strandtest way: re-read the live counter before
+// each park so a missed decrement returns ERR_ADDR_VALUE_MISMATCH at once;
+// bounded cycles so a genuine hang fails loudly instead of wedging the harness.
+static bool p35_join()
+{
+    uint32_t cycles = 0;
+    uint64_t cur;
+    while ((cur = __atomic_load_n(&g_p35_remaining, __ATOMIC_ACQUIRE)) != 0) {
+        if (++cycles > 80u) return false;
+        addr_park(&g_p35_remaining, cur, 200);
+    }
+    return true;
+}
+
+static void p35_latch_worker(void *)
+{
+    std::this_thread::sleep_for(std::chrono::milliseconds(10)); // let main reach the park
+    g_p35_latch->count_down();
+    __atomic_sub_fetch(&g_p35_remaining, 1u, __ATOMIC_RELEASE);
+    addr_wake(&g_p35_remaining, 0);
+    strand_exit();
+}
+
+static void p35_sem_worker(void *)
+{
+    std::this_thread::sleep_for(std::chrono::milliseconds(10)); // let main reach the park
+    g_p35_sem.release();
+    g_p35_at.store(42, std::memory_order_release);
+    g_p35_at.notify_one();
+    __atomic_sub_fetch(&g_p35_remaining, 1u, __ATOMIC_RELEASE);
+    addr_wake(&g_p35_remaining, 0);
+    strand_exit();
+}
+
+// Ping-pong worker: kP35PingPong lock-step hops with main, driven purely by
+// atomic notify_one. No artificial sleep — pure hops. If the C++ notify ->
+// addr_wake path did NOT really wake (progress only via the 100ms park
+// backstop), the hops would crawl on that timeout (>6s); Phase35's <3s bound
+// proves the wake is delivered by notify, not the timeout.
+static void p35_pp_worker(void *)
+{
+    for (int i = 0; i < kP35PingPong; i++) {
+        g_p35_pp.wait(2 * i, std::memory_order_acquire);   // block until main sets 2i+1
+        g_p35_pp.store(2 * i + 2, std::memory_order_release);
+        g_p35_pp.notify_one();
+    }
+    __atomic_sub_fetch(&g_p35_remaining, 1u, __ATOMIC_RELEASE);
+    addr_wake(&g_p35_remaining, 0);
+    strand_exit();
+}
+
+void Phase35()
+{
+    using namespace std::chrono;
+
+    // 1) Always: a real timed park. sleep_for(15ms) must burn >= 12ms of wall
+    //    time (kernel timed-park), and sleep_for(0) must return promptly.
+    {
+        box::stopwatch sw;
+        std::this_thread::sleep_for(milliseconds(15));
+        nanoseconds slept = sw.elapsed();
+        Check(slept >= milliseconds(12),
+              "phase35 sleep_for(15ms) parks at least ~12ms");
+
+        box::stopwatch sw0;
+        std::this_thread::sleep_for(milliseconds(0));
+        Check(sw0.elapsed() < milliseconds(5),
+              "phase35 sleep_for(0) returns immediately");
+    }
+
+    // 2) Sibling strands need FSGSBASE (per-strand TLS). Without it strand_spawn
+    //    refuses; the timed-park half above already passed, so SKIP the park/wake
+    //    halves cleanly rather than count a failure.
+    if (!cpu_has_fsgsbase()) {
+        printf("[CXX] note phase35: strands need FSGSBASE — skipping park/wake\n");
+        printf("[CXX] PASS phase35: this_thread::sleep_for "
+               "(park/wake skipped, no FSGSBASE)\n");
+        return;
+    }
+
+    // 3) Ping-pong wake proof: kP35PingPong lock-step hops driven purely by
+    //    atomic notify_one across a sibling strand. The version-pool park has a
+    //    100ms backstop, so a single-shot wait would pass even if notify were
+    //    dead (it would just time out and re-check). A long lock-step chain
+    //    cannot: were notify->addr_wake dead, the hops would crawl on the
+    //    backstop (>6s). Finishing well under it proves the wake is real. (It
+    //    cannot hang — the backstop guarantees progress, so a dead wake FAILS
+    //    the <3s bound loudly instead of wedging the harness.)
+    {
+        g_p35_pp.store(0, std::memory_order_relaxed);
+        g_p35_remaining = 1;
+        if (strand_spawn(p35_pp_worker, 0) == 0) {
+            printf("[CXX] note phase35: strand_spawn unavailable — skipping park/wake\n");
+            printf("[CXX] PASS phase35: this_thread::sleep_for "
+                   "(park/wake skipped, no strand)\n");
+            return;
+        }
+        box::stopwatch pp;
+        for (int i = 0; i < kP35PingPong; i++) {
+            g_p35_pp.store(2 * i + 1, std::memory_order_release);
+            g_p35_pp.notify_one();
+            g_p35_pp.wait(2 * i + 1, std::memory_order_acquire); // until worker sets 2i+2
+        }
+        nanoseconds took = pp.elapsed();
+        Check(g_p35_pp.load(std::memory_order_acquire) == 2 * kP35PingPong,
+              "phase35 ping-pong reached target (cross-strand atomic notify)");
+        Check(took < milliseconds(3000),
+              "phase35 ping-pong woken by notify, not the 100ms backstop");
+        Check(p35_join(), "phase35 ping-pong worker joined");
+    }
+
+    // 4) latch park -> wake across a sibling strand. Main parks in latch.wait();
+    //    the worker count_down()s, which notifies and wakes main.
+    {
+        std::latch latch(1);
+        g_p35_latch     = &latch;
+        g_p35_remaining = 1;
+        if (strand_spawn(p35_latch_worker, 0) == 0) {
+            printf("[CXX] note phase35: strand_spawn unavailable — skipping park/wake\n");
+            printf("[CXX] PASS phase35: this_thread::sleep_for "
+                   "(park/wake skipped, no strand)\n");
+            return;
+        }
+        latch.wait();
+        Check(latch.try_wait(), "phase35 latch reached zero (cross-strand wake)");
+        Check(p35_join(), "phase35 latch worker joined");
+    }
+
+    // 5) semaphore + atomic store/notify across a sibling strand. Main parks in
+    //    sem.acquire() and atomic wait(0); the worker release()s and notifies.
+    {
+        g_p35_remaining = 1;
+        if (strand_spawn(p35_sem_worker, 0) == 0) {
+            printf("[CXX] note phase35: strand_spawn unavailable — skipping park/wake\n");
+            printf("[CXX] PASS phase35: this_thread::sleep_for + latch "
+                   "(semaphore/atomic park/wake skipped, no strand)\n");
+            return;
+        }
+        g_p35_sem.acquire();
+        g_p35_at.wait(0, std::memory_order_acquire);
+        Check(g_p35_at.load(std::memory_order_acquire) == 42,
+              "phase35 atomic store+notify observed (cross-strand wake)");
+        Check(p35_join(), "phase35 semaphore worker joined");
+    }
+
+    printf("[CXX] PASS phase35: this_thread::sleep_for + latch/semaphore/atomic "
+           "real park->wake (sibling strand)\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -5137,6 +5303,7 @@ int main()
     Phase32();
     Phase33();
     Phase34();
+    Phase35();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
