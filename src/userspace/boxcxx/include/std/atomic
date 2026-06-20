@@ -25,11 +25,15 @@
 
 extern "C" {
 // One park/wake cycle on `addr`'s version-pool. `observed` points to the
-// `width`-byte value the caller saw while its predicate still said "wait":
-// the cycle bounded-spins, then parks until a matching notify (or a backstop
-// timeout), after which the caller's loop re-checks its predicate.
+// `width`-byte value the caller saw while its predicate still said "wait";
+// `mask` selects the bits that actually drive the predicate (so a co-packed
+// unrelated field — e.g. a barrier's count beside its phase — churning does not
+// spuriously end the park). Whole-value waiters pass mask = ~0. The cycle
+// bounded-spins, then parks until a matching notify (or a backstop timeout),
+// after which the caller's loop re-checks its predicate.
 void __boxcxx_atomic_wait_cycle(const volatile void *addr, const void *observed,
-                                unsigned width, unsigned *spin_state);
+                                unsigned width, unsigned long long mask,
+                                unsigned *spin_state);
 // Wake waiters parked for `addr` (bumps the version, wakes the whole pool).
 void __boxcxx_atomic_notify(const volatile void *addr, bool all);
 }
@@ -178,7 +182,7 @@ inline void Wait(P *addr, T old, memory_order m) noexcept
         T cur = Load<P, T>(addr, m);
         ClearPadding(&cur);
         if (!SameRepresentation(cur, old)) return;
-        __boxcxx_atomic_wait_cycle(addr, &old, sizeof(T), &spin);
+        __boxcxx_atomic_wait_cycle(addr, &old, sizeof(T), ~0ull, &spin);
     }
 }
 
@@ -237,7 +241,8 @@ struct atomic_flag {
         unsigned spin = 0;
         while (test(m) == old) {
             unsigned char cur = __atomic_load_n(&__flag, __atomic_impl::Order(m));
-            __boxcxx_atomic_wait_cycle(&__flag, &cur, sizeof(__flag), &spin);
+            __boxcxx_atomic_wait_cycle(&__flag, &cur, sizeof(__flag), ~0ull,
+                                       &spin);
         }
     }
     void wait(bool old, memory_order m = memory_order_seq_cst)
@@ -246,7 +251,8 @@ struct atomic_flag {
         unsigned spin = 0;
         while (test(m) == old) {
             unsigned char cur = __atomic_load_n(&__flag, __atomic_impl::Order(m));
-            __boxcxx_atomic_wait_cycle(&__flag, &cur, sizeof(__flag), &spin);
+            __boxcxx_atomic_wait_cycle(&__flag, &cur, sizeof(__flag), ~0ull,
+                                       &spin);
         }
     }
 
@@ -651,7 +657,7 @@ struct atomic<T *> {
         unsigned spin = 0;
         T *obs = old;
         while (load(m) == old)
-            __boxcxx_atomic_wait_cycle(&__v, &obs, sizeof(__v), &spin);
+            __boxcxx_atomic_wait_cycle(&__v, &obs, sizeof(__v), ~0ull, &spin);
     }
     void wait(T *old,
               memory_order m = memory_order_seq_cst) const volatile noexcept
@@ -659,7 +665,7 @@ struct atomic<T *> {
         unsigned spin = 0;
         T *obs = old;
         while (load(m) == old)
-            __boxcxx_atomic_wait_cycle(&__v, &obs, sizeof(__v), &spin);
+            __boxcxx_atomic_wait_cycle(&__v, &obs, sizeof(__v), ~0ull, &spin);
     }
 
     void notify_one() noexcept { __boxcxx_atomic_notify(&__v, false); }
@@ -913,7 +919,7 @@ struct atomic_ref<T *> {
         unsigned spin = 0;
         T *obs = old;
         while (load(m) == old)
-            __boxcxx_atomic_wait_cycle(__p, &obs, sizeof(*__p), &spin);
+            __boxcxx_atomic_wait_cycle(__p, &obs, sizeof(*__p), ~0ull, &spin);
     }
     void notify_one() const noexcept { __boxcxx_atomic_notify(__p, false); }
     void notify_all() const noexcept { __boxcxx_atomic_notify(__p, true); }

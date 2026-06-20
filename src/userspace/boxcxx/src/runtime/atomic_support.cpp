@@ -184,6 +184,33 @@ inline WaitPool *WaitPoolFor(const volatile void *addr)
 
 constexpr uint32_t kWaitBackstopMs = 100;    // defense-in-depth; never load-bearing
 
+// Predicate-proxy compare: did the bits the caller actually waits on change?
+// `mask` selects only those bits, so an unrelated field packed in the same word
+// (barrier's count beside its phase, shared_mutex's reader count beside the write
+// bit) churning under multi-strand contention does NOT spuriously end the park.
+// Callers watching the whole value pass mask = ~0. Widths the kernel cannot mask
+// (16-byte / odd-size atomics — always whole-value predicates) use a full memcmp.
+inline bool WaitWordChanged(const volatile void *addr, const void *observed,
+                            unsigned width, unsigned long long mask)
+{
+    switch (width) {
+    case 1:
+        return ((uint64_t)(*(const volatile uint8_t *)addr ^
+                           *(const uint8_t *)observed) & mask) != 0;
+    case 2:
+        return ((uint64_t)(*(const volatile uint16_t *)addr ^
+                           *(const uint16_t *)observed) & mask) != 0;
+    case 4:
+        return ((uint64_t)(*(const volatile uint32_t *)addr ^
+                           *(const uint32_t *)observed) & mask) != 0;
+    case 8:
+        return ((*(const volatile uint64_t *)addr ^
+                 *(const uint64_t *)observed) & mask) != 0;
+    default:
+        return __builtin_memcmp((const void *)addr, observed, width) != 0;
+    }
+}
+
 } // namespace
 
 extern "C" {
@@ -231,7 +258,8 @@ bool __atomic_is_lock_free(size_t size, const volatile void *mem)
 // ── atomic wait/notify machinery ────────────────────────────────────────
 
 void __boxcxx_atomic_wait_cycle(const volatile void *addr, const void *observed,
-                                unsigned width, unsigned *spin_state)
+                                unsigned width, unsigned long long mask,
+                                unsigned *spin_state)
 {
     // Phase 1 — bounded adaptive spin: dodge a syscall for very short waits.
     // (Same WAITPKG/PAUSE policy family as before; now a *prelude* to a real park.)
@@ -258,9 +286,11 @@ void __boxcxx_atomic_wait_cycle(const volatile void *addr, const void *observed,
     WaitPool *p = WaitPoolFor(addr);
     __atomic_fetch_add(&p->waiters, 1u, __ATOMIC_SEQ_CST);
     uint64_t v = __atomic_load_n(&p->ver, __ATOMIC_SEQ_CST);   // snapshot BEFORE re-check
-    // Predicate proxy: if the monitored word already changed, the caller's
-    // predicate may now hold — bail without parking.
-    if (__builtin_memcmp(const_cast<const void *>(addr), observed, width) != 0) {
+    // Predicate proxy: if the bits the caller waits on already changed, its
+    // predicate may now hold — bail without parking. `mask` keeps an unrelated
+    // co-packed field (barrier count beside phase, reader count beside the write
+    // bit) from spuriously ending the park under multi-strand contention.
+    if (WaitWordChanged(addr, observed, width, mask)) {
         __atomic_fetch_sub(&p->waiters, 1u, __ATOMIC_SEQ_CST);
         return;
     }

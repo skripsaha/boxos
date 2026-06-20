@@ -56,7 +56,10 @@ public:
                                               memory_order_relaxed))
                     break;
             } else {
-                __boxcxx_atomic_wait_cycle(&__s, &s, sizeof(s), &spin);
+                // Only the write bit drives this predicate; mask out the reader
+                // count so reader churn cannot spuriously end the park.
+                __boxcxx_atomic_wait_cycle(&__s, &s, sizeof(s), kWriteEntered,
+                                           &spin);
                 s = __s.load(memory_order_relaxed);
             }
         }
@@ -65,7 +68,8 @@ public:
         for (;;) {
             unsigned s = __s.load(memory_order_acquire);
             if (!(s & kReaderMask)) break;
-            __boxcxx_atomic_wait_cycle(&__s, &s, sizeof(s), &spin);
+            // Only the reader count drives this predicate; the write bit is ours.
+            __boxcxx_atomic_wait_cycle(&__s, &s, sizeof(s), kReaderMask, &spin);
         }
     }
 
@@ -94,7 +98,8 @@ public:
                                               memory_order_relaxed))
                     break;
             } else {
-                __boxcxx_atomic_wait_cycle(&__s, &s, sizeof(s), &spin);
+                // Predicate spans the write bit AND the reader count → watch all.
+                __boxcxx_atomic_wait_cycle(&__s, &s, sizeof(s), ~0ull, &spin);
                 s = __s.load(memory_order_relaxed);
             }
         }

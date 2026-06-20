@@ -104,7 +104,10 @@ public:
         uint64_t s;
         while (__barrier_impl::PhaseOf(s = __state.load(memory_order_acquire))
                == token)
-            __boxcxx_atomic_wait_cycle(&__state, &s, sizeof(s), &spin);
+            // Only the phase (high 32 bits) drives this predicate; mask out the
+            // count so same-phase arrivals churning it cannot end the park.
+            __boxcxx_atomic_wait_cycle(&__state, &s, sizeof(s),
+                                       0xFFFFFFFF00000000ull, &spin);
     }
 
     void arrive_and_wait() { wait(arrive()); }
