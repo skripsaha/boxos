@@ -880,15 +880,63 @@ static struct
     volatile uintptr_t addr;        // target address (0 = full flush)
     volatile uint32_t page_count;   // pages to invalidate (0 = full flush)
     volatile uint32_t pending_acks; // atomic countdown
+    volatile uint64_t generation;   // monotonic round id (see handler)
     volatile bool active;
 } __attribute__((aligned(64))) g_shootdown;
 
 static spinlock_t g_shootdown_lock;
 
+/* Monotonic shootdown round counter — mutated only under g_shootdown_lock. */
+static uint64_t g_shootdown_gen;
+
+/* Per-core "requested generation": shootdown_arm stamps each TARGET core's
+ * slot with the round's generation; the handler services a round exactly once
+ * and only if it is a target of the CURRENT generation. 0 = no request. */
+static volatile uint64_t g_core_shootdown_req[MAX_CORES];
+
+/* Arm the single global descriptor for a new round. Caller MUST hold
+ * g_shootdown_lock. Stamps a fresh generation, marks each target core, sets
+ * pending_acks + active, and fences — so all of it is globally visible before
+ * the caller sends the IPIs. Returns the generation (unused by callers today,
+ * handy for tracing). */
+static uint64_t shootdown_arm(const uint8_t *targets, uint8_t target_count,
+                              uintptr_t addr, uint32_t page_count)
+{
+    uint64_t gen = ++g_shootdown_gen;           /* never 0 (g_core_*_req zero = none) */
+    g_shootdown.addr       = addr;
+    g_shootdown.page_count = page_count;
+    g_shootdown.generation = gen;
+    atomic_store_u32(&g_shootdown.pending_acks, target_count);
+    g_shootdown.active = true;
+    for (uint8_t i = 0; i < target_count; i++)
+        __atomic_store_n(&g_core_shootdown_req[targets[i]], gen, __ATOMIC_RELAXED);
+    mfence();
+    return gen;
+}
+
 void vmm_tlb_shootdown_handler(void)
 {
     if (!g_shootdown.active)
         return;
+
+    /* Generation-gated, per-core idempotent ACK. The descriptor is ONE global
+     * slot reused by every round; without this gate a late or duplicated
+     * IPI_SHOOTDOWN from a PREVIOUS round — landing after a new holder armed
+     * the slot — could decrement the CURRENT round's pending_acks even though
+     * this core is not a target (or already ACKed). The sender would then
+     * return before a real target invalidated its TLB → stale TLB → use-after-
+     * unmap. Each round stamps its targets' g_core_shootdown_req[] with a
+     * monotonic generation; a core proceeds only if its slot equals the
+     * CURRENT generation, and claims it with a CAS so duplicate IPIs ACK at
+     * most once. */
+    uint8_t  me      = amp_get_core_index();
+    uint64_t cur_gen = __atomic_load_n(&g_shootdown.generation, __ATOMIC_ACQUIRE);
+    uint64_t my_req  = __atomic_load_n(&g_core_shootdown_req[me], __ATOMIC_RELAXED);
+    if (my_req != cur_gen)
+        return;   /* not a target of this round (stale IPI / not mine / done) */
+    if (!__atomic_compare_exchange_n(&g_core_shootdown_req[me], &my_req, 0,
+                                     false, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED))
+        return;   /* a duplicate IPI raced us — service exactly once */
 
     uintptr_t addr = g_shootdown.addr;
     uint32_t count = g_shootdown.page_count;
@@ -1000,11 +1048,9 @@ void vmm_shootdown_pages(vmm_context_t *ctx, uintptr_t virt_addr, size_t page_co
     while (!spin_trylock(&g_shootdown_lock))
         cpu_pause();
 
-    g_shootdown.addr = (page_count <= 64) ? virt_addr : 0;
-    g_shootdown.page_count = (page_count <= 64) ? (uint32_t)page_count : 0;
-    atomic_store_u32(&g_shootdown.pending_acks, target_count);
-    g_shootdown.active = true;
-    mfence();
+    shootdown_arm(targets, target_count,
+                  (page_count <= 64) ? virt_addr : 0,
+                  (page_count <= 64) ? (uint32_t)page_count : 0);
 
     for (uint8_t i = 0; i < target_count; i++)
     {
@@ -1105,11 +1151,7 @@ void vmm_shootdown_all_cores_full(void)
     while (!spin_trylock(&g_shootdown_lock))
         cpu_pause();
 
-    g_shootdown.addr = 0;          /* 0 ⇒ handler does full flush */
-    g_shootdown.page_count = 0;
-    atomic_store_u32(&g_shootdown.pending_acks, target_count);
-    g_shootdown.active = true;
-    mfence();
+    shootdown_arm(targets, target_count, 0, 0);   /* 0/0 ⇒ handler does full flush */
 
     for (uint8_t i = 0; i < target_count; i++) {
         lapic_send_ipi(g_amp.cores[targets[i]].lapic_id, IPI_SHOOTDOWN_VECTOR);

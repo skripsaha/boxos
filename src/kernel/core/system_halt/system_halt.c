@@ -95,6 +95,12 @@ static void halt_all_ap_cores(void)
         __atomic_store_n(&g_amp.cores[c].online, (uint8_t)0, __ATOMIC_RELEASE);
     }
 
+    /* Every AP is now in cli;hlt (online=0) and will never run again. If one
+     * was stopped while holding a process-subsystem lock (e.g. mid strand-
+     * reaper), reclaim those locks now so the shutdown walk below cannot spin
+     * on them forever. Safe precisely because no other core is alive to race. */
+    process_force_release_locks_for_shutdown();
+
     kprintf("[HALT] All AP cores stopped\n");
 }
 

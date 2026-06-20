@@ -1734,6 +1734,19 @@ static void process_cleanup_immediate(process_t *proc)
     kfree(proc);
 }
 
+/* Shutdown-only: forcibly reclaim the process-subsystem locks after every AP
+ * core is confirmed halted. If an AP was stopped (IPI_PANIC → cli;hlt) while
+ * holding process_lock — e.g. mid strand-reaper snapshot or process_destroy —
+ * it will never release it, and the BSP's shutdown walk (halt_terminate_all_
+ * processes → process_list_lock) would spin forever. system_halt calls this
+ * AFTER halt_all_ap_cores, where no other core is alive to touch a lock, so
+ * stealing them is safe. MUST NOT be called during normal operation. */
+void process_force_release_locks_for_shutdown(void)
+{
+    spin_force_release(&process_lock);
+    spin_force_release(&g_cleanup_queue.lock);
+}
+
 void process_cleanup_deferred(void)
 {
     uint32_t cleaned = 0;
