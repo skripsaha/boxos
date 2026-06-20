@@ -1096,7 +1096,14 @@ void vmm_shootdown_all_cores_full(void)
     if (target_count == 0)
         return;
 
-    spin_lock(&g_shootdown_lock);
+    /* Interruptible acquire — same deadlock avoidance as vmm_shootdown_pages:
+     * plain spin_lock would wait with IRQs off and a waiter could never ACK
+     * the current holder's shootdown that targets it. spin_trylock restores
+     * the caller's IRQ state between attempts so the waiter keeps servicing
+     * shootdown IPIs while spinning. See vmm_shootdown_pages for the full
+     * rationale. */
+    while (!spin_trylock(&g_shootdown_lock))
+        cpu_pause();
 
     g_shootdown.addr = 0;          /* 0 ⇒ handler does full flush */
     g_shootdown.page_count = 0;

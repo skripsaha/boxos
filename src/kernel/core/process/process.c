@@ -1786,10 +1786,12 @@ void process_reap_strands(void)
     {
         if (p->magic != PROCESS_MAGIC) continue;   /* listed ⇒ always live magic */
         if (p->hammock_base == 0)       continue;   /* spawned strands only */
-        if (p->destroying)              continue;   /* already mid-destroy */
-        /* Volatile state read is a hint; process_destroy re-checks "current
-         * on a core" authoritatively and bails (we retry next tick). */
-        process_state_t st = p->state;
+        /* destroying is written __ATOMIC_SEQ_CST in process_destroy; read it
+         * the same way (not a plain access) — a hint either way, since
+         * process_destroy re-checks "current on a core" authoritatively under
+         * the scheduler scan and bails (we retry next tick). */
+        if (__atomic_load_n(&p->destroying, __ATOMIC_ACQUIRE)) continue;
+        process_state_t st = __atomic_load_n(&p->state, __ATOMIC_ACQUIRE);
         if (st == PROC_DONE || st == PROC_CRASHED)
         {
             process_ref_inc(p);

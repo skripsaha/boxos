@@ -7,7 +7,7 @@
  * A strand spawned via strand_spawn carries its OWN IPC rings (Pocket /
  * Result / Touch) and its own result stashes so concurrent multi-strand
  * syscalls never share ring storage (the P4 → P5 data-race fix). The kernel
- * populates one StrandInfo per spawned strand inside that strand's Berth slot
+ * populates one StrandInfo per spawned strand inside that strand's Hammock slot
  * and points the strand's FS base at it. Userspace (boxlib strand_self.c)
  * reads FS base via RDFSBASE, validates `magic`, and routes ring access to
  * the per-strand VAs carried here.

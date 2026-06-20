@@ -61,7 +61,7 @@ void KTouchRingInit(TouchRing *hdr)
 static TouchRing *ktr_hdr(process_t *proc)
 {
     /* P5a: per-strand TouchRing (proc->touch_ring_phys); main strand aliases
-     * the cabin ring, spawned strand uses its own Berth-carved ring. Cabin
+     * the cabin ring, spawned strand uses its own Hammock-carved ring. Cabin
      * guard stays for the downstream proc->cabin->vmm deref. */
     if (!proc || !proc->cabin || !proc->touch_ring_phys) return NULL;
     return (TouchRing *)vmm_phys_to_virt(proc->touch_ring_phys);
@@ -179,7 +179,18 @@ bool KTouchPush(process_t *target,
         atomic_fetch_add_u64(&g_ktr_map_fail, 1);
         return false;
     }
-    (void)vmm_ensure_user_page(target->cabin->vmm, one_page_ahead, /*writable=*/true);
+    /* Pre-map the next page ONLY when it is still inside this ring's own slot
+     * region. The TouchRing is the LAST slot region in a P5a per-strand
+     * Hammock slot, so its final page is followed by an unmapped guard;
+     * pre-mapping past the region would fault that guard in and defeat it (no
+     * leak — the page is inside the teardown span — but it removes a guard).
+     * Pointless anyway: the reserved pos always resolves in-region via modulo,
+     * and the cross-page step below maps the actual page if needed. Harmless
+     * for the large cabin region. */
+    uint64_t slots_end = rr->hdr.slots_base + (uint64_t)cap * rr->hdr.slot_size;
+    if (one_page_ahead < slots_end) {
+        (void)vmm_ensure_user_page(target->cabin->vmm, one_page_ahead, /*writable=*/true);
+    }
 
     /* (3) Atomic reservation — MPSC linearisation point. Use ACQ_REL so
      *     all writes to the slot that follow are ordered AFTER this

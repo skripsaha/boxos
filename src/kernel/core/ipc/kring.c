@@ -71,7 +71,7 @@ static PocketRing *kring_pocket_hdr(process_t *proc)
 {
     /* P5a: route by the PER-STRAND ring (proc->pocket_ring_phys), which for
      * the main strand aliases the cabin ring and for a spawned strand is its
-     * own Berth-carved ring. The cabin guard stays because downstream paths
+     * own Hammock-carved ring. The cabin guard stays because downstream paths
      * (KPocketPeek translate) deref the shared proc->cabin->vmm. */
     if (!proc || !proc->cabin || !proc->pocket_ring_phys) return NULL;
     return (PocketRing *)vmm_phys_to_virt(proc->pocket_ring_phys);
@@ -252,9 +252,19 @@ bool KResultPush(process_t *target, const Result *r)
         __atomic_add_fetch(&g_krp_premap_fail, 1, __ATOMIC_RELAXED);
         return false;
     }
-    /* Best-effort pre-map of the next page — if it fails the historical
-     * crosspg path below will re-attempt with a synthetic ERR if needed. */
-    (void)vmm_ensure_user_page(target->cabin->vmm, one_page_ahead, /*writable=*/true);
+    /* Best-effort pre-map of the next page — ONLY when it is still inside
+     * this ring's own slot region. The small eager-mapped per-strand rings
+     * (P5a) end with an unmapped guard page; pre-mapping past the region would
+     * silently fault that guard in and defeat it. It is also pointless: the
+     * reserved `pos` always resolves (via modulo) to an in-region page, which
+     * the cross-page step below maps if it differs from uvaddr_pre. Harmless
+     * for the large lazily-mapped cabin region (the page-ahead is in-region
+     * except at the very end, where the wrap is handled the same way). If it
+     * fails, the crosspg path re-attempts with a synthetic ERR if needed. */
+    uint64_t slots_end = rr->hdr.slots_base + (uint64_t)cap * rr->hdr.slot_size;
+    if (one_page_ahead < slots_end) {
+        (void)vmm_ensure_user_page(target->cabin->vmm, one_page_ahead, /*writable=*/true);
+    }
 
     /* (3) Atomic reservation — MPSC linearisation point. Even with N
      *     concurrent K-Cores each gets a unique pos. Use ACQ_REL so the

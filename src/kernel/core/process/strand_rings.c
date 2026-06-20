@@ -121,8 +121,15 @@ static uintptr_t hammock_map_pages(vmm_context_t *vmm, uint64_t va_base, uint32_
             return 0;
         }
         uint64_t va = va_base + (uint64_t)i * VMM_PAGE_SIZE;
+        /* W^X: every page in a strand's slot — ring headers, ring slot
+         * regions, and the StrandInfo TLS block — is pure DATA, never code.
+         * Map NX, matching the fixed cabin slot regions (vmm_ensure_user_page
+         * / the #PF demand-map handler both set VMM_FLAG_NO_EXECUTE). Without
+         * this the per-strand pages would be writable+executable — a real-HW
+         * W^X hole (dormant on TCG, enforced on NX-capable silicon). */
         vmm_map_result_t m = vmm_map_pages(vmm, va, (uintptr_t)phys, 1,
-                                           VMM_FLAG_PRESENT | VMM_FLAG_WRITABLE | VMM_FLAG_USER);
+                                           VMM_FLAG_PRESENT | VMM_FLAG_WRITABLE |
+                                           VMM_FLAG_USER | VMM_FLAG_NO_EXECUTE);
         if (!m.success)
         {
             pmm_free(phys, 1);
