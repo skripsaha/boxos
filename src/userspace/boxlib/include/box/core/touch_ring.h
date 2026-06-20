@@ -6,6 +6,7 @@ extern "C" {
 #endif
 
 #include "box/types.h"
+#include "box/core/strand_self.h"   /* strand_rings() — per-strand ring routing (P5a) */
 
 /*
  * TouchRing — userspace mirror of the kernel's per-cabin Touch event ring.
@@ -77,7 +78,7 @@ STATIC_ASSERT(sizeof(TouchRing) == 4096,
               "TouchRing header page must be exactly one page");
 
 INLINE TouchRing *touch_ring(void) {
-    return (TouchRing *)TOUCH_RING_VADDR;
+    return (TouchRing *)(uintptr_t)strand_rings().touch_va;
 }
 
 INLINE bool touch_ring_is_empty(const TouchRing *r) {

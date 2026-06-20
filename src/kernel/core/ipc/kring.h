@@ -9,9 +9,14 @@
 typedef struct process_t process_t;
 
 /* Initialise a freshly-allocated ring header page. The caller owns the
- * physical page; this writes head=tail=0, slots_base, slot_size, etc. */
+ * physical page; this writes head=tail=0, slots_base, slot_size, etc.
+ * The plain forms use the fixed cabin slot region + full capacity (the main
+ * strand's rings); the *InitAt forms take an explicit per-strand slot-region
+ * VA and capacity (a Berth-carved spawned-strand ring — strand_berth.c). */
 void KRingPocketInit(PocketRing *hdr);
 void KRingResultInit(ResultRing *hdr);
+void KRingPocketInitAt(PocketRing *hdr, uint64_t slots_base, uint32_t slot_count_max);
+void KRingResultInitAt(ResultRing *hdr, uint64_t slots_base, uint32_t slot_count_max);
 
 /* Kernel-side PocketRing consumer.
  *   kpocket_peek  — returns kernel VA of head slot, or NULL if empty.

@@ -37,16 +37,21 @@
 #include "lapic.h"
 #include "irqchip.h"
 
-void KTouchRingInit(TouchRing *hdr)
+void KTouchRingInitAt(TouchRing *hdr, uint64_t slots_base, uint32_t slot_count_max)
 {
     if (!hdr) return;
     memset(hdr, 0, sizeof(*hdr));
     hdr->hdr.head           = 0;
     hdr->hdr.tail           = 0;
-    hdr->hdr.slots_base     = CABIN_TOUCH_SLOTS_BASE;
+    hdr->hdr.slots_base     = slots_base;
     hdr->hdr.slot_size      = TOUCH_SLOT_SIZE;
-    hdr->hdr.slot_count_max = (uint32_t)TOUCH_RING_SLOT_MAX;
+    hdr->hdr.slot_count_max = slot_count_max;
     hdr->hdr.magic          = TOUCH_RING_MAGIC;
+}
+
+void KTouchRingInit(TouchRing *hdr)
+{
+    KTouchRingInitAt(hdr, CABIN_TOUCH_SLOTS_BASE, (uint32_t)TOUCH_RING_SLOT_MAX);
 }
 
 /* ------------------------------------------------------------------------
@@ -55,8 +60,11 @@ void KTouchRingInit(TouchRing *hdr)
 
 static TouchRing *ktr_hdr(process_t *proc)
 {
-    if (!proc || !proc->cabin || !proc->cabin->touch_ring_phys) return NULL;
-    return (TouchRing *)vmm_phys_to_virt(proc->cabin->touch_ring_phys);
+    /* P5a: per-strand TouchRing (proc->touch_ring_phys); main strand aliases
+     * the cabin ring, spawned strand uses its own Berth-carved ring. Cabin
+     * guard stays for the downstream proc->cabin->vmm deref. */
+    if (!proc || !proc->cabin || !proc->touch_ring_phys) return NULL;
+    return (TouchRing *)vmm_phys_to_virt(proc->touch_ring_phys);
 }
 
 static TouchSlot *ktr_translate_slot(process_t *target, uintptr_t uvaddr)

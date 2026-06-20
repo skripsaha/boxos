@@ -162,8 +162,12 @@ static inline uintptr_t touch_ring_slot_uvaddr(const TouchRing *r, uint64_t idx)
 typedef struct process_t process_t;
 
 /* Initialise a freshly-allocated ring header page. The caller owns the
- * physical page; this writes head=tail=0, slots_base, slot_size, magic. */
+ * physical page; this writes head=tail=0, slots_base, slot_size, magic.
+ * The plain form uses the fixed cabin slot region + full capacity (the main
+ * strand's ring); KTouchRingInitAt takes an explicit per-strand slot-region
+ * VA and capacity (a Berth-carved spawned-strand ring — strand_berth.c). */
 void KTouchRingInit(TouchRing *hdr);
+void KTouchRingInitAt(TouchRing *hdr, uint64_t slots_base, uint32_t slot_count_max);
 
 /* MPSC producer entry point. Publishes a Touch event into `target`'s
  * TouchRing. The slot page is lazily mapped on demand (vmm_ensure_user_page

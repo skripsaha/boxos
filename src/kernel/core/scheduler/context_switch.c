@@ -13,6 +13,50 @@
  * have been removed. The scheduler dispatches exclusively via the IRQ
  * frame (`schedule(frame)`), so the pair below is the single live path. */
 
+/* ── User FS base (TLS) save/restore on the SCHEDULER frame path ──────────
+ *
+ * Strands P5a: each strand owns its own FS base (its StrandInfo / C++ TCB
+ * pointer). The asm SAVE/RESTORE_USER_FSBASE macros (context_switch.asm)
+ * only cover the task_* entries — NOT this frame path, which is the single
+ * live scheduler dispatch. Before P5a there was exactly one FS-base user per
+ * cabin so the register survived untouched across switches "by accident";
+ * with several strands per cabin, dispatching strand B must install B's FS
+ * base, or B would read strand A's TLS (and a fresh strand would never get
+ * its own). These helpers mirror the asm macros bit-for-bit:
+ *   g_fsgsbase_active → RDFSBASE/WRFSBASE (CR4.FSGSBASE guaranteed enabled)
+ *   else g_user_fsbase_used → MSR IA32_FS_BASE (0xC0000100)
+ *   else → skip (zero cost until TLS is used)
+ *
+ * SAFE from C on the frame path: iretq does NOT reload the FS *selector*, so
+ * the base written by wrfsbase persists into ring 3 (if it reloaded FS, the
+ * descriptor base 0 would wipe it — which is exactly why the asm RESTORE
+ * macro must run after the selector load, but the frame path has no such
+ * load, so ordering is moot here). ISRs never touch FS, so the value read by
+ * the save always belongs to the strand being switched out. */
+#define CTX_IA32_FS_BASE_MSR 0xC0000100u
+
+static inline void ctx_save_user_fsbase(ProcessContext* ctx) {
+    if (g_fsgsbase_active) {
+        uint64_t base;
+        __asm__ volatile("rdfsbase %0" : "=r"(base));
+        ctx->user_fsbase = base;
+    } else if (g_user_fsbase_used) {
+        uint32_t lo, hi;
+        __asm__ volatile("rdmsr" : "=a"(lo), "=d"(hi) : "c"(CTX_IA32_FS_BASE_MSR));
+        ctx->user_fsbase = ((uint64_t)hi << 32) | lo;
+    }
+}
+
+static inline void ctx_restore_user_fsbase(const ProcessContext* ctx) {
+    if (g_fsgsbase_active) {
+        __asm__ volatile("wrfsbase %0" : : "r"(ctx->user_fsbase));
+    } else if (g_user_fsbase_used) {
+        uint32_t lo = (uint32_t)ctx->user_fsbase;
+        uint32_t hi = (uint32_t)(ctx->user_fsbase >> 32);
+        __asm__ volatile("wrmsr" : : "c"(CTX_IA32_FS_BASE_MSR), "a"(lo), "d"(hi));
+    }
+}
+
 void context_save_from_frame(process_t* proc, interrupt_frame_t* frame) {
     if (!proc || !frame) {
         return;
@@ -25,6 +69,9 @@ void context_save_from_frame(process_t* proc, interrupt_frame_t* frame) {
         fpu_save(ctx->fpu_state);
         ctx->fpu_initialized = true;
     }
+
+    // Capture this strand's user FS base (TLS) before it is switched out.
+    ctx_save_user_fsbase(ctx);
 
     ctx->rax = frame->rax;
     ctx->rbx = frame->rbx;
@@ -114,4 +161,9 @@ void context_restore_to_frame(process_t* proc, interrupt_frame_t* frame) {
     if (ctx->fpu_initialized) {
         fpu_restore(ctx->fpu_state);
     }
+
+    // Install the incoming strand's user FS base (TLS). The frame path does
+    // not reload the FS selector, so this is the only place per-strand TLS is
+    // switched on the live scheduler dispatch.
+    ctx_restore_user_fsbase(ctx);
 }

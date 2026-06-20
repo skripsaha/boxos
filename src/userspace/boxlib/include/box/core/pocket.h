@@ -6,6 +6,7 @@ extern "C" {
 #endif
 
 #include "box/types.h"
+#include "box/core/strand_self.h"   /* strand_rings() — per-strand ring routing (P5a) */
 
 /*
  * Pocket — Manifest-only envelope (Phase 12). Byte-identical to the
@@ -75,7 +76,7 @@ typedef struct PACKED {
 STATIC_ASSERT(sizeof(PocketRing) == 4096, "PocketRing header must be one page");
 
 INLINE PocketRing* pocket_ring(void) {
-    return (PocketRing*)POCKET_RING_VADDR;
+    return (PocketRing*)(uintptr_t)strand_rings().pocket_va;
 }
 
 INLINE bool pocket_ring_is_empty(const PocketRing* ring) {

@@ -175,7 +175,7 @@ typedef struct process_t
 
     /* Strands (P4) — set only for a strand spawned via strand_spawn into an
      * EXISTING cabin.  hammock_base is the base VA of this strand's slot in
-     * the cabin's hammock window (see cabin_layout.h); user_stack_phys is
+     * the cabin's Hammock window (see cabin_layout.h); user_stack_phys is
      * the PMM allocation backing its user stack, freed on strand exit.
      * Both stay 0 for the main strand, whose stack lives at the top of the
      * address space and is reclaimed by vmm_destroy_context at cabin
@@ -183,6 +183,21 @@ typedef struct process_t
      * stack VA from hammock_base so sibling strands never collide. */
     uintptr_t         hammock_base;
     uintptr_t         user_stack_phys;
+
+    /* Per-strand IPC rings (P5a).  kring.c / touch_ring.c route by THESE
+     * (not by cabin->*_ring_phys), so concurrent multi-strand syscalls never
+     * share ring storage — the P4→P5 data-race fix.
+     *   Main strand : aliases cabin->{pocket,result,touch}_ring_phys (the
+     *                 fixed-VA rings) and strandinfo_phys == 0 (FS base 0).
+     *   Spawned     : its own header pages mapped into the Hammock slot by
+     *                 strand_rings_create, plus a StrandInfo TLS block whose
+     *                 VA becomes the strand's FS base.
+     * strandinfo_phys is the StrandInfo block's first physical page (0 for
+     * the main strand); strand_rings_destroy frees the rings/slots/StrandInfo. */
+    uint64_t          pocket_ring_phys;
+    uint64_t          result_ring_phys;
+    uint64_t          touch_ring_phys;
+    uint64_t          strandinfo_phys;
 
     /* Embedded addr-wait entry — one per strand, lifetime = process lifetime.
      * SysAddrPark reuses this rather than stack-allocating to avoid

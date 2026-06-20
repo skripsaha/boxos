@@ -17,8 +17,13 @@
  * Apps must not exceed alignas(64) on thread_local objects — the
  * cxxtest.elf link rule carries a readelf check for that.
  *
- * One thread of execution per cabin (BoxOS process model) — exactly one
- * TLS block for the process lifetime; freed by the kernel with the heap.
+ * One C++ TLS block per cabin: this bootstraps the MAIN strand only. Its FS
+ * base points at the C++ TCB here (on the heap). Strands spawned via
+ * strand_spawn (P5a) instead get a kernel-populated StrandInfo TLS block in
+ * the Hammock window as their FS base — boxlib (box/core/strand_self.c) tells
+ * the two apart by the FS base's VA range, so this C++ TLS and per-strand
+ * StrandInfo coexist on the same FS register without collision. The C++ TLS
+ * block lives for the process lifetime; freed by the kernel with the heap.
  */
 
 #include <cstdint>

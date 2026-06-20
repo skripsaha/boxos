@@ -29,28 +29,38 @@
 #include "lapic.h"
 #include "irqchip.h"
 
-void KRingPocketInit(PocketRing *hdr)
+void KRingPocketInitAt(PocketRing *hdr, uint64_t slots_base, uint32_t slot_count_max)
 {
     if (!hdr) return;
     memset(hdr, 0, sizeof(*hdr));
     hdr->hdr.head           = 0;
     hdr->hdr.tail           = 0;
-    hdr->hdr.slots_base     = CABIN_POCKET_SLOTS_BASE;
+    hdr->hdr.slots_base     = slots_base;
     hdr->hdr.slot_size      = POCKET_SLOT_SIZE;
-    hdr->hdr.slot_count_max = (uint32_t)POCKET_RING_SLOT_MAX;
+    hdr->hdr.slot_count_max = slot_count_max;
     hdr->hdr.magic          = POCKET_RING_MAGIC;
+}
+
+void KRingResultInitAt(ResultRing *hdr, uint64_t slots_base, uint32_t slot_count_max)
+{
+    if (!hdr) return;
+    memset(hdr, 0, sizeof(*hdr));
+    hdr->hdr.head           = 0;
+    hdr->hdr.tail           = 0;
+    hdr->hdr.slots_base     = slots_base;
+    hdr->hdr.slot_size      = RESULT_SLOT_SIZE;
+    hdr->hdr.slot_count_max = slot_count_max;
+    hdr->hdr.magic          = RESULT_RING_MAGIC;
+}
+
+void KRingPocketInit(PocketRing *hdr)
+{
+    KRingPocketInitAt(hdr, CABIN_POCKET_SLOTS_BASE, (uint32_t)POCKET_RING_SLOT_MAX);
 }
 
 void KRingResultInit(ResultRing *hdr)
 {
-    if (!hdr) return;
-    memset(hdr, 0, sizeof(*hdr));
-    hdr->hdr.head           = 0;
-    hdr->hdr.tail           = 0;
-    hdr->hdr.slots_base     = CABIN_RESULT_SLOTS_BASE;
-    hdr->hdr.slot_size      = RESULT_SLOT_SIZE;
-    hdr->hdr.slot_count_max = (uint32_t)RESULT_RING_SLOT_MAX;
-    hdr->hdr.magic          = RESULT_RING_MAGIC;
+    KRingResultInitAt(hdr, CABIN_RESULT_SLOTS_BASE, (uint32_t)RESULT_RING_SLOT_MAX);
 }
 
 /* -------------------------------------------------------------------------
@@ -59,8 +69,12 @@ void KRingResultInit(ResultRing *hdr)
 
 static PocketRing *kring_pocket_hdr(process_t *proc)
 {
-    if (!proc || !proc->cabin || !proc->cabin->pocket_ring_phys) return NULL;
-    return (PocketRing *)vmm_phys_to_virt(proc->cabin->pocket_ring_phys);
+    /* P5a: route by the PER-STRAND ring (proc->pocket_ring_phys), which for
+     * the main strand aliases the cabin ring and for a spawned strand is its
+     * own Berth-carved ring. The cabin guard stays because downstream paths
+     * (KPocketPeek translate) deref the shared proc->cabin->vmm. */
+    if (!proc || !proc->cabin || !proc->pocket_ring_phys) return NULL;
+    return (PocketRing *)vmm_phys_to_virt(proc->pocket_ring_phys);
 }
 
 /* Reads of the producer-side cursor (tail) MUST use ACQUIRE so the
@@ -118,8 +132,9 @@ void KPocketPop(process_t *proc)
 
 static ResultRing *kring_result_hdr(process_t *proc)
 {
-    if (!proc || !proc->cabin || !proc->cabin->result_ring_phys) return NULL;
-    return (ResultRing *)vmm_phys_to_virt(proc->cabin->result_ring_phys);
+    /* P5a: per-strand ResultRing (see kring_pocket_hdr). */
+    if (!proc || !proc->cabin || !proc->result_ring_phys) return NULL;
+    return (ResultRing *)vmm_phys_to_virt(proc->result_ring_phys);
 }
 
 /* Translate a target user vaddr to a writable kernel pointer for one
