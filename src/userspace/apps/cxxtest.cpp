@@ -19,6 +19,7 @@
 #include "box/strand.h"   // strand_spawn / strand_exit (phase35 sibling strand)
 #include "box/sync.h"     // addr_park / addr_wake (phase35 join)
 #include "box/cpu.h"      // cpu_has_fsgsbase (phase35 spawn guard)
+#include "box/cxx/tls_strand.h"  // __boxcxx_tls_strand_init + thread-storage hooks (phase36)
 
 #include <algorithm>
 #include <array>
@@ -5226,7 +5227,10 @@ void Phase35()
         nanoseconds took = pp.elapsed();
         Check(g_p35_pp.load(std::memory_order_acquire) == 2 * kP35PingPong,
               "phase35 ping-pong reached target (cross-strand atomic notify)");
-        Check(took < milliseconds(3000),
+        // Bound sits below the backstop-only floor (64 hops × 100ms = 6.4s on
+        // 4c, 12.8s on 1c) yet well above a healthy notify run → discriminates
+        // without flaking under host load.
+        Check(took < milliseconds(5000),
               "phase35 ping-pong woken by notify, not the 100ms backstop");
         Check(p35_join(), "phase35 ping-pong worker joined");
     }
@@ -5296,6 +5300,145 @@ void Phase35()
            "+ multi-strand barrier real park->wake (sibling strands)\n");
 }
 
+// ── phase36: per-strand thread_local FOUNDATION (Ф20b-1, raw strand_spawn) ──
+// Proves the three pieces of the per-strand TLS foundation WITHOUT std::thread:
+//   1. tdata copy   — a non-zero static-init thread_local reads its value in a
+//                     spawned strand (would be 0 if __boxcxx_tls_strand_init had
+//                     not copied .tdata into the strand's neg-TLS page).
+//   2. isolation    — each strand writes a distinct value into the SAME
+//                     thread_local and reads back exactly its own (no cross-talk,
+//                     and main's value is untouched).
+//   3. per-strand dtor — a thread_local with a non-trivial dtor runs that dtor
+//                     at strand exit (__boxcxx_thread_storage_exit), NOT at
+//                     process exit. This is the case the old process-global
+//                     thread-atexit registry got wrong.
+
+static constexpr uint32_t kP36Workers = 4;
+
+// (1)+(2): non-zero static init proves the tdata copy; per-strand storage gives
+// each worker its own cell.
+thread_local int g_p36_probe = 0xABCD;
+
+// (3): a thread_local with a non-trivial ctor/dtor. The dtor bumps a process-
+// global atomic so main can count how many strands ran their thread_local
+// destructors. One instance per strand (lives in that strand's neg-TLS).
+static std::atomic<int> g_p36_dtors{0};
+struct P36DtorProbe {
+    int marker = 0x600D;
+    ~P36DtorProbe() { g_p36_dtors.fetch_add(1, std::memory_order_release); }
+};
+thread_local P36DtorProbe g_p36_dtor_probe;
+
+static volatile uint64_t g_p36_remaining;             // workers decrement; main joins
+static volatile uint32_t g_p36_tdata_ok[kP36Workers]; // 1 iff worker saw 0xABCD
+static volatile uint32_t g_p36_readback[kP36Workers]; // worker's own-value read-back
+
+static void p36_worker(void *arg)
+{
+    uint32_t id = (uint32_t)(uintptr_t)arg;
+
+    // (1) Stand up THIS strand's neg-TLS first — must precede any thread_local
+    //     access. Then arm this strand's thread_local destructor list.
+    __boxcxx_tls_strand_init();
+    __boxcxx_thread_storage_enter();
+
+    // (1) tdata copied: the static initializer 0xABCD is present.
+    g_p36_tdata_ok[id] = (g_p36_probe == 0xABCD) ? 1u : 0u;
+
+    // (2) Write a per-strand distinct value, let workers overlap, read it back.
+    g_p36_probe = (int)(0x1000u + id);
+    std::this_thread::sleep_for(std::chrono::milliseconds(8)); // overlap window
+    g_p36_readback[id] = (uint32_t)g_p36_probe;
+
+    // (3) Use the dtor-probe so the compiler registers its destructor for THIS
+    //     strand (first-use guard lives in the strand's own neg-TLS).
+    __atomic_store_n(&g_p36_tdata_ok[id],
+                     g_p36_tdata_ok[id] & (g_p36_dtor_probe.marker == 0x600D ? 1u : 0u),
+                     __ATOMIC_RELAXED);
+
+    // (3) Run this strand's thread_local destructors now (→ g_p36_dtors++),
+    //     proving they fire at strand exit, not process exit.
+    __boxcxx_thread_storage_exit();
+
+    __atomic_sub_fetch(&g_p36_remaining, 1u, __ATOMIC_RELEASE);
+    addr_wake(&g_p36_remaining, 0);
+    strand_exit();
+}
+
+void Phase36()
+{
+    // Sibling strands need FSGSBASE (per-strand TLS via ring-3 RDFSBASE). Without
+    // it strand_spawn refuses — SKIP cleanly with a PASS, matching Phase35.
+    if (!cpu_has_fsgsbase()) {
+        printf("[CXX] note phase36: strands need FSGSBASE — skipping\n");
+        printf("[CXX] PASS phase36: per-strand thread_local (skipped, no FSGSBASE)\n");
+        return;
+    }
+
+    // Main strand's own thread_local cell — workers must never disturb it.
+    g_p36_probe = 0x5555;
+
+    g_p36_dtors.store(0, std::memory_order_relaxed);
+    for (uint32_t i = 0; i < kP36Workers; i++) {
+        g_p36_tdata_ok[i] = 0;
+        g_p36_readback[i] = 0;
+    }
+    g_p36_remaining = kP36Workers;
+
+    uint32_t spawned = 0;
+    for (uint32_t i = 0; i < kP36Workers; i++) {
+        if (strand_spawn(p36_worker, (void *)(uintptr_t)i) != 0)
+            spawned++;
+        else
+            break;
+    }
+    if (spawned == 0) {
+        printf("[CXX] note phase36: strand_spawn unavailable — skipping\n");
+        printf("[CXX] PASS phase36: per-strand thread_local (skipped, no strand)\n");
+        return;
+    }
+    if (spawned != kP36Workers) {
+        // A partial spawn would leave g_p36_remaining above the spawned count and
+        // hang the join — fail loudly instead.
+        printf("[CXX] FAIL phase36: only %u/%u workers spawned\n", spawned, kP36Workers);
+        g_failures++;
+        return;
+    }
+
+    // Bounded join (strandtest idiom: re-read live counter before each park).
+    uint32_t cycles = 0;
+    uint64_t cur;
+    while ((cur = __atomic_load_n(&g_p36_remaining, __ATOMIC_ACQUIRE)) != 0) {
+        if (++cycles > 80u) {
+            printf("[CXX] FAIL phase36: %u worker(s) stuck after %u cycles\n",
+                   (unsigned)cur, cycles);
+            g_failures++;
+            return;
+        }
+        addr_park(&g_p36_remaining, cur, 200);
+    }
+
+    // (1) every worker saw the copied .tdata init value (and the dtor-probe ctor).
+    for (uint32_t i = 0; i < kP36Workers; i++) {
+        Check(g_p36_tdata_ok[i] == 1u,
+              "phase36 worker thread_local .tdata initialized (per-strand neg-TLS)");
+    }
+    // (2) isolation: each worker read back exactly its own distinct value.
+    for (uint32_t i = 0; i < kP36Workers; i++) {
+        Check(g_p36_readback[i] == 0x1000u + i,
+              "phase36 worker thread_local read-back is its own value (no cross-talk)");
+    }
+    // (3) per-strand destructors all ran (one per worker), at strand exit.
+    Check(g_p36_dtors.load(std::memory_order_acquire) == (int)kP36Workers,
+          "phase36 per-strand thread_local destructors ran at strand exit");
+    // (2) main's thread_local cell was never touched by any worker.
+    Check(g_p36_probe == 0x5555,
+          "phase36 main thread_local untouched by worker strands");
+
+    printf("[CXX] PASS phase36: per-strand thread_local "
+           "(isolation + tdata-init + per-strand dtor)\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -5353,6 +5496,7 @@ int main()
     Phase33();
     Phase34();
     Phase35();
+    Phase36();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

@@ -221,7 +221,7 @@
  *   [guard 22]
  *   [Pocket hdr 23][Result hdr 24][Touch hdr 25][guard 26]
  *   [Pocket slots 27..30][Result slots 31..34][Touch slots 35..36][guard 37]
- *   [StrandInfo neg-TLS reserve 38 (unmapped P5a)][StrandInfo 39..42][guard 43]
+ *   [C++ neg-TLS page 38 (eager-mapped Ф20b)][StrandInfo 39..42][guard 43]
  * Guards are unmapped VA gaps — any access faults. The stack/SSP offsets are
  * BIT-FOR-BIT identical to the P4 layout (so process_strand_ssp_base math is
  * preserved); the ring/StrandInfo page offsets are derived and asserted in
