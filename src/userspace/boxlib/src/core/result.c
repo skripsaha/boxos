@@ -96,11 +96,21 @@ bool result_pop(Result* out) {
     return true;
 }
 
-/* Stash is a static-sized circular FIFO. The original 64-slot cap dropped
- * touches under multi-core stress (a 4000-event burst overflowed and lost
- * events that never made it back to the consumer). 8192 covers any realistic
- * burst without dynamic allocation, and drop-oldest semantics ensure stale
- * entries from prior calls don't accumulate to corrupt future replies. */
+/* Result stashes are per-STRAND, not per-process (P5a). Each strand consumes
+ * only its OWN ResultRing, so its ipc/non-ipc stashes must be private too —
+ * sharing one process-wide stash across concurrent strands would interleave
+ * and misroute replies (the same data race the per-strand rings fix).
+ *
+ *   - Main strand: a large static FIFO (8192 entries). The original 64-slot
+ *     cap dropped events under multi-core stress; 8192 covers any realistic
+ *     burst for the cabin's primary thread.
+ *   - Spawned strand: a 256-entry FIFO overlaid on its StrandInfo TLS block
+ *     (kernel zero-init'd). Smaller because a spawned strand makes near-serial
+ *     syscalls; drop-oldest semantics keep it self-healing under overflow.
+ *
+ * stash_view_t abstracts over the two backings so the push/shift logic is
+ * written once. Both are single-threaded per strand (a strand drains its own
+ * ring on its own core), so no locking is needed. */
 #define STASH_CAP 8192
 
 typedef struct {
@@ -113,31 +123,77 @@ typedef struct {
 static StashRing ipc_stash;
 static StashRing non_ipc_stash;
 
-static void stash_push(StashRing *s, const Result *entry) {
-    if (s->count >= STASH_CAP) {
+/* Per-strand stash overlaid on StrandInfo.{ipc,non_ipc}_stash bytes. */
+typedef struct {
+    Result   buf[STRAND_STASH_CAP];
+    uint32_t head;
+    uint32_t tail;
+    uint32_t count;
+    uint32_t _pad;
+} StrandStashRing;
+
+STATIC_ASSERT(sizeof(Result) == STRAND_STASH_ENTRY_SZ,
+              "Result stash entry size must match strand_info.h ABI");
+STATIC_ASSERT(sizeof(StrandStashRing) <= STRAND_STASH_BYTES,
+              "StrandStashRing must fit the StrandInfo stash reservation");
+
+/* Mutable view of whichever stash backs the calling strand. */
+typedef struct {
+    Result   *buf;
+    uint32_t  cap;
+    uint32_t *head;
+    uint32_t *tail;
+    uint32_t *count;
+} stash_view_t;
+
+static stash_view_t ipc_stash_view(void) {
+    StrandInfo *si = strand_info_or_null();
+    if (si) {
+        StrandStashRing *r = (StrandStashRing *)si->ipc_stash;
+        stash_view_t v = { r->buf, STRAND_STASH_CAP, &r->head, &r->tail, &r->count };
+        return v;
+    }
+    stash_view_t v = { ipc_stash.buf, STASH_CAP, &ipc_stash.head, &ipc_stash.tail, &ipc_stash.count };
+    return v;
+}
+
+static stash_view_t non_ipc_stash_view(void) {
+    StrandInfo *si = strand_info_or_null();
+    if (si) {
+        StrandStashRing *r = (StrandStashRing *)si->non_ipc_stash;
+        stash_view_t v = { r->buf, STRAND_STASH_CAP, &r->head, &r->tail, &r->count };
+        return v;
+    }
+    stash_view_t v = { non_ipc_stash.buf, STASH_CAP,
+                       &non_ipc_stash.head, &non_ipc_stash.tail, &non_ipc_stash.count };
+    return v;
+}
+
+static void stash_push_view(stash_view_t v, const Result *entry) {
+    if (*v.count >= v.cap) {
         /* Drop oldest to make room. Preserves FIFO order; loses the oldest
          * unconsumed entry, which is preferable to dropping the new one
          * that may be the actual reply the caller is waiting for. */
-        s->head = (s->head + 1) % STASH_CAP;
-        s->count--;
+        *v.head = (*v.head + 1) % v.cap;
+        (*v.count)--;
     }
-    s->buf[s->tail] = *entry;
-    s->tail = (s->tail + 1) % STASH_CAP;
-    s->count++;
+    v.buf[*v.tail] = *entry;
+    *v.tail = (*v.tail + 1) % v.cap;
+    (*v.count)++;
 }
 
-static bool stash_shift(StashRing *s, Result *out) {
-    if (s->count == 0) return false;
-    *out = s->buf[s->head];
-    s->head = (s->head + 1) % STASH_CAP;
-    s->count--;
+static bool stash_shift_view(stash_view_t v, Result *out) {
+    if (*v.count == 0) return false;
+    *out = v.buf[*v.head];
+    *v.head = (*v.head + 1) % v.cap;
+    (*v.count)--;
     return true;
 }
 
-static void ipc_stash_push(Result* entry)        { stash_push(&ipc_stash, entry); }
-static bool ipc_stash_shift(Result* out)         { return stash_shift(&ipc_stash, out); }
-static void non_ipc_stash_push(Result* entry)    { stash_push(&non_ipc_stash, entry); }
-static bool non_ipc_stash_shift(Result* out)     { return stash_shift(&non_ipc_stash, out); }
+static void ipc_stash_push(Result* entry)        { stash_push_view(ipc_stash_view(), entry); }
+static bool ipc_stash_shift(Result* out)         { return stash_shift_view(ipc_stash_view(), out); }
+static void non_ipc_stash_push(Result* entry)    { stash_push_view(non_ipc_stash_view(), entry); }
+static bool non_ipc_stash_shift(Result* out)     { return stash_shift_view(non_ipc_stash_view(), out); }
 
 bool result_pop_non_ipc(Result* out) {
     if (!out) return false;
@@ -199,11 +255,11 @@ bool result_pop_ipc(Result* out) {
 }
 
 uint32_t result_ipc_stash_count(void) {
-    return ipc_stash.count;
+    return *ipc_stash_view().count;
 }
 
 uint32_t result_non_ipc_stash_count(void) {
-    return non_ipc_stash.count;
+    return *non_ipc_stash_view().count;
 }
 
 /* result_pop_touch removed 2026-06-01: Touch events migrated to a

@@ -41,6 +41,7 @@ CFLAGS = -nostdlib -fno-builtin -ffreestanding -mno-red-zone \
 
 SRCS = src/core/notify.c \
        src/core/result.c \
+       src/core/strand_self.c \
        src/core/touch_ring.c \
        src/core/manifest.c \
        src/print.c \

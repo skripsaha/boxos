@@ -307,8 +307,8 @@ static int SysTouchAwait(const ManifestOp *op, Crate *crates,
      * undone, guide.c pushes a Result that result_pop_non_ipc filters
      * on error_code == 9 (see result.c:151), so the orphan never
      * surfaces as a stale reply to a subsequent ManifestSubmitFull. */
-    if (ctx->proc->cabin && ctx->proc->cabin->touch_ring_phys) {
-        TouchRing *rr = (TouchRing *)vmm_phys_to_virt(ctx->proc->cabin->touch_ring_phys);
+    if (ctx->proc->touch_ring_phys) {
+        TouchRing *rr = (TouchRing *)vmm_phys_to_virt(ctx->proc->touch_ring_phys);
         if (rr) {
             uint64_t tail = __atomic_load_n(&rr->hdr.tail, __ATOMIC_ACQUIRE);
             uint64_t head = __atomic_load_n(&rr->hdr.head, __ATOMIC_RELAXED);

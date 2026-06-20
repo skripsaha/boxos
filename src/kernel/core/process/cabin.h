@@ -35,6 +35,13 @@ typedef struct cabin_t
     vmm_context_t *vmm;
 
     uint64_t cabin_info_phys;
+    /* The MAIN strand's IPC rings (fixed low VAs 0x2000/0x3000/0x5000),
+     * allocated + mapped by vmm_create_cabin and reclaimed by
+     * vmm_destroy_context at cabin teardown. P5a: the main strand's
+     * process_t.{pocket,result,touch}_ring_phys ALIAS these; each spawned
+     * strand instead carries its OWN per-strand rings carved from the Berth
+     * window (strand_berth.c). kring.c / touch_ring.c route by the per-strand
+     * process_t fields, never these. */
     uint64_t pocket_ring_phys;
     uint64_t result_ring_phys;
     uint64_t touch_ring_phys;
@@ -75,10 +82,11 @@ typedef struct cabin_t
     uint64_t    brook_va_next;
 
     /* Hammock cursor — bump-allocates one fixed-size VA slot per spawned
-     * strand for its user stack + CET shadow stack (see cabin_layout.h).
-     * The main strand does NOT consume a slot. Guarded by hammock_lock so
-     * concurrent strand_spawn from sibling strands never hand out the same
-     * VA. Mirrors bay_va_next / brook_va_next. */
+     * strand for its user stack + CET shadow stack + per-strand IPC rings +
+     * StrandInfo TLS block (see cabin_layout.h + strand_rings.c). The main
+     * strand does NOT consume a slot. Guarded by hammock_lock so concurrent
+     * strand_spawn from sibling strands never hand out the same VA. Mirrors
+     * bay_va_next / brook_va_next. */
     uint64_t    hammock_va_next;
     spinlock_t  hammock_lock;
 

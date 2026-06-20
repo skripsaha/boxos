@@ -195,10 +195,14 @@
 #define CABIN_BROOK_END                0x00007F0000000000ULL
 #define CABIN_BROOK_SIZE               (CABIN_BROOK_END - CABIN_BROOK_BASE)
 
-/* Hammock window — per-cabin VA range for the stacks (and CET shadow
- * stacks) of ADDITIONAL strands spawned via strand_spawn. The main
- * strand keeps its top-of-AS stack (cabin->aslr_stack_top) and the fixed
- * user-SSP region just below VMM_USER_STACK_TOP, completely unchanged.
+/* Hammock window — per-cabin VA range for the SELF-CONTAINED slot of every
+ * ADDITIONAL strand spawned via strand_spawn. P4 introduced the Hammock as a
+ * per-strand stack + CET shadow stack; P5a extends the SAME slot (keeping the
+ * Hammock name) to also hold the strand's OWN IPC rings + StrandInfo TLS
+ * block — so one Hammock slot is now a strand's entire private footprint
+ * (one window, one cursor, one slot/strand). The main strand keeps its
+ * top-of-AS stack (cabin->aslr_stack_top), the fixed user-SSP region just
+ * below VMM_USER_STACK_TOP, and the fixed-VA cabin IPC rings, unchanged.
  *
  * Anchored at CABIN_BROOK_END and capped ~60 GiB below the main strand's
  * stack/SSP region near VMM_USER_STACK_TOP. The kernel bump-allocates one
@@ -206,21 +210,32 @@
  * cabin->hammock_va_next — the same idiom Bay/Brook use (bay_va_next /
  * brook_va_next).
  *
- * Each slot is self-contained (low → high address):
- *   [stack guard 1pg][user stack 16pg][mid guard 1pg][CET user SSP 4pg][hi guard 1pg]
- * Guards are unmapped VA gaps — any access faults. The stack grows down
- * from its top into the low guard; the CET shadow stack grows down into
- * the mid guard. The stride is rounded up to CABIN_HAMMOCK_SLOT_SIZE so
- * cursor stepping is clean and slots never overlap. 128 KiB/slot over a
+ * Each slot is self-contained (low → high address, page indices in []) — the
+ * P5a "balanced" geometry (per-strand rings sized for light workers AND
+ * moderate strand-servers; capacity is a memory/throughput knob in the ring
+ * header, never a correctness boundary — a full ring just back-pressures):
+ *   [guard 0]
+ *   [user stack 1..16]          (CONFIG_USER_STACK_PAGES, P4-identical)
+ *   [mid guard 17]
+ *   [CET user SSP 18..21]       (4 pages, P4-identical)
+ *   [guard 22]
+ *   [Pocket hdr 23][Result hdr 24][Touch hdr 25][guard 26]
+ *   [Pocket slots 27..30][Result slots 31..34][Touch slots 35..36][guard 37]
+ *   [StrandInfo neg-TLS reserve 38 (unmapped P5a)][StrandInfo 39..42][guard 43]
+ * Guards are unmapped VA gaps — any access faults. The stack/SSP offsets are
+ * BIT-FOR-BIT identical to the P4 layout (so process_strand_ssp_base math is
+ * preserved); the ring/StrandInfo page offsets are derived and asserted in
+ * strand_rings.c (where kernel_config.h is in scope). 256 KiB/slot over a
  * ~1 TiB window leaves room for far more strands than any cabin needs. */
 #define CABIN_HAMMOCK_BASE             CABIN_BROOK_END
 #define CABIN_HAMMOCK_END              0x00007FF000000000ULL
 #define CABIN_HAMMOCK_SIZE             (CABIN_HAMMOCK_END - CABIN_HAMMOCK_BASE)
-#define CABIN_HAMMOCK_SLOT_PAGES       32u
+#define CABIN_HAMMOCK_SLOT_PAGES       64u
 #define CABIN_HAMMOCK_SLOT_SIZE        (CABIN_HAMMOCK_SLOT_PAGES * 0x1000ULL)
 /* Low guard occupies page 0 of the slot; the user stack starts at page 1.
- * The CET-SSP page offset depends on CONFIG_USER_STACK_PAGES, so it is
- * derived in process.c (where kernel_config.h is in scope), not here. */
+ * The CET-SSP and ring/StrandInfo page offsets depend on
+ * CONFIG_USER_STACK_PAGES, so they are derived in process.c / strand_rings.c
+ * (where kernel_config.h is in scope), not here. */
 #define CABIN_HAMMOCK_STACK_PAGE_OFF   1u
 
 #define USER_CODE_ENTRY_POINT          CABIN_CODE_START_ADDR

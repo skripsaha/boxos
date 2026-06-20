@@ -8,6 +8,7 @@ extern "C" {
 #include "box/types.h"
 #include "box/error.h"
 #include "boxos_kctx.h"      /* KResultContext enum — shared with kernel */
+#include "box/core/strand_self.h"   /* strand_rings() — per-strand ring routing (P5a) */
 
 // Result: syscall response from kernel to userspace.
 // Data is NOT inline — data_addr points to cabin heap.
@@ -82,7 +83,7 @@ typedef struct PACKED {
 STATIC_ASSERT(sizeof(ResultRing) == 4096, "ResultRing header must be one page");
 
 INLINE ResultRing* result_ring(void) {
-    return (ResultRing*)RESULT_RING_VADDR;
+    return (ResultRing*)(uintptr_t)strand_rings().result_va;
 }
 
 INLINE bool result_ring_is_empty(const ResultRing* ring) {

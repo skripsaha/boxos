@@ -28,6 +28,7 @@
 #include "per_core.h"
 #include "amp.h"
 #include "cet_lifecycle.h"  /* Phase 2K+ per-process shadow-stack hooks */
+#include "strand_rings.h"   /* P5a per-strand IPC rings + StrandInfo TLS */
 
 typedef struct
 {
@@ -399,6 +400,14 @@ process_t *process_create(const char *tags)
     }
 
     proc->cabin = cabin;
+
+    /* P5a: the main strand's per-strand ring fields ALIAS the cabin's
+     * fixed-VA rings (kring.c / touch_ring.c route by proc->*_ring_phys).
+     * strandinfo_phys stays 0 → its FS base stays 0 / the C++ TCB, so boxlib
+     * falls back to the fixed cabin ring VAs for the main strand. */
+    proc->pocket_ring_phys = cabin->pocket_ring_phys;
+    proc->result_ring_phys = cabin->result_ring_phys;
+    proc->touch_ring_phys  = cabin->touch_ring_phys;
 
     process_init_strand_fields(proc);
     process_assign_home_core(proc);
@@ -836,6 +845,18 @@ process_t *strand_spawn(cabin_t *cabin, uintptr_t entry_va, uint64_t arg)
         debug_printf("[STRAND] ERROR: invalid entry VA 0x%lx\n", (unsigned long)entry_va);
         return NULL;
     }
+    /* P5a: spawned strands REQUIRE FSGSBASE. Per-strand TLS detection reads
+     * the FS base from ring 3 via RDFSBASE (an MSR-programmed FS base is not
+     * readable in ring 3), so a strand could not locate its own StrandInfo /
+     * rings without it. Refuse to spawn rather than hand back a strand that
+     * would route IPC through the cabin's shared rings. Real hardware always
+     * has FSGSBASE; both the STRICT matrix and `make run` enable it — only the
+     * bare qemu64 TCG model lacks it. */
+    if (!g_fsgsbase_active)
+    {
+        debug_printf("[STRAND] ERROR: strand_spawn requires FSGSBASE (per-strand TLS)\n");
+        return NULL;
+    }
     if (atomic_load_u32(&process_count) >= PROCESS_MAX_COUNT)
     {
         debug_printf("[STRAND] ERROR: process limit reached (%u)\n", PROCESS_MAX_COUNT);
@@ -972,6 +993,25 @@ process_t *strand_spawn(cabin_t *cabin, uintptr_t entry_va, uint64_t arg)
     (void)cet_process_create(proc);
     (void)cet_process_create_kernel_ssp(proc, entry_va);
 
+    /* P5a: carve this strand's OWN Pocket/Result/Touch rings + StrandInfo TLS
+     * from its Hammock slot and point its FS base at the StrandInfo. Without
+     * this the strand would route IPC through the cabin's shared rings (the
+     * P4 data race). On failure, unwind everything allocated so far. */
+    if (!strand_rings_create(proc))
+    {
+        debug_printf("[STRAND] ERROR: per-strand rings/TLS setup failed\n");
+        cet_process_destroy(proc);
+        cet_process_destroy_kernel_ssp(proc);
+        process_free_strand_stack(proc);
+        kfree(proc->context.fpu_state);
+        process_free_kernel_stack(proc);
+        cabin_ref_dec(cabin);
+        proc->cabin = NULL;
+        pid_free(proc->pid);
+        kfree(proc);
+        return NULL;
+    }
+
     proc->next         = NULL;
     proc->prev         = NULL;
     proc->ready_next   = NULL;
@@ -982,6 +1022,7 @@ process_t *strand_spawn(cabin_t *cabin, uintptr_t entry_va, uint64_t arg)
     if (process_count >= PROCESS_MAX_COUNT)
     {
         spin_unlock(&process_lock);
+        strand_rings_destroy(proc);
         cet_process_destroy(proc);
         cet_process_destroy_kernel_ssp(proc);
         process_free_strand_stack(proc);
@@ -1668,11 +1709,12 @@ static void process_cleanup_immediate(process_t *proc)
         proc->kernel_stack = NULL;
     }
 
-    /* Reclaim this strand's hammock user stack (no-op for the main strand)
-     * while the cabin's address space is still alive — must precede
-     * cabin_ref_dec, which may tear the cabin down.  The strand's CET
-     * shadow stacks were already unmapped in process_destroy via
-     * cet_process_destroy{,_kernel_ssp}. */
+    /* Reclaim this strand's per-strand IPC rings + StrandInfo and its hammock
+     * user stack (both no-ops for the main strand) while the cabin's address
+     * space is still alive — must precede cabin_ref_dec, which may tear the
+     * cabin down. The strand's CET shadow stacks were already unmapped in
+     * process_destroy via cet_process_destroy{,_kernel_ssp}. */
+    strand_rings_destroy(proc);
     process_free_strand_stack(proc);
 
     /* Drop the strand's reference to its cabin.  strand_count goes N→N-1;
