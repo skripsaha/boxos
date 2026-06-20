@@ -174,6 +174,72 @@ static int test2(void)
     return 0;
 }
 
+/* ---- test3: strand reaper — exited strands are reclaimed at runtime ------- */
+
+#define CHURN 100u   /* well below MAX_PROCESSES; proof is "count returns to base" */
+
+static volatile uint64_t g_churn_remaining;
+
+static void noop_worker(void *arg)
+{
+    (void)arg;
+    __atomic_sub_fetch(&g_churn_remaining, 1u, __ATOMIC_RELEASE);
+    addr_wake(&g_churn_remaining, 0);
+}
+
+static int test3(void)
+{
+    system_info_t si;
+    if (sysinfo(&si) != 0) {
+        printf("[STRAND] test3 SKIP: sysinfo unavailable\n");
+        return 0;
+    }
+
+    /* Let any test1/test2 corpses settle so the baseline is clean. */
+    for (int k = 0; k < 16; k++) yield();
+    if (sysinfo(&si) != 0) return 0;
+    uint32_t base = si.process_count;
+
+    /* Churn: spawn+join CHURN strands. Each exits → becomes a corpse the
+     * reaper must reclaim. Without a runtime reaper, process_count would climb
+     * to base+CHURN and stay there (and eventually exhaust the table). */
+    for (uint32_t r = 0; r < CHURN; r++) {
+        g_churn_remaining = 1;
+        uint32_t pid = strand_spawn(noop_worker, 0);
+        if (pid == 0) {
+            printf("[STRAND] FAIL test3: strand_spawn failed at round %u (table exhausted — reaper not reclaiming)\n", r);
+            return -1;
+        }
+        uint32_t cycles = 0; uint64_t cur;
+        while ((cur = __atomic_load_n(&g_churn_remaining, __ATOMIC_ACQUIRE)) != 0) {
+            if (++cycles > 80u) {
+                printf("[STRAND] FAIL test3: join stuck at round %u\n", r);
+                return -1;
+            }
+            addr_park(&g_churn_remaining, cur, 200);
+        }
+    }
+
+    /* process_count must return toward baseline — the CHURN exited strands
+     * were process_destroy'd by the reaper (process_count-- happens only
+     * there). A broken reaper leaves it pinned near base+CHURN. */
+    uint32_t cnt = base + CHURN;
+    for (uint32_t cyc = 0; cyc < 120u; cyc++) {
+        if (sysinfo(&si) == 0) cnt = si.process_count;
+        if (cnt <= base + 4u) break;
+        for (int k = 0; k < 4; k++) yield();
+    }
+    if (cnt > base + 4u) {
+        printf("[STRAND] FAIL test3: process_count stuck at %u (base %u, churned %u) — reaper not reclaiming\n",
+               cnt, base, CHURN);
+        return -1;
+    }
+
+    printf("[STRAND] test3 OK: %u spawn+join churn reclaimed (process_count base %u -> %u)\n",
+           CHURN, base, cnt);
+    return 0;
+}
+
 int main(void)
 {
     printf("[STRAND] strandtest start\n");
@@ -188,8 +254,9 @@ int main(void)
 
     if (test1() != 0) exit(1);
     if (test2() != 0) exit(1);
+    if (test3() != 0) exit(1);
 
-    printf("[STRAND] PASS: test1 + test2 (per-strand rings + TLS + park/wake)\n");
+    printf("[STRAND] PASS: test1 + test2 + test3 (per-strand rings + TLS + park/wake + reaper)\n");
     exit(0);
     return 0;
 }

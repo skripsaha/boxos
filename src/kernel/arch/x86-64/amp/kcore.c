@@ -231,6 +231,12 @@ void kcore_run_loop(void)
         irq_defer_pump(my_idx);
 
         if ((++loop_count % 10) == 0) {
+            /* P5b: reclaim exited strands (PROC_DONE/CRASHED zombies) before
+             * draining the cleanup queue, so a reaped strand's process_destroy
+             * → cleanup-queue enqueue is freed in this same tick. Without the
+             * reaper, std::thread-style strand churn would exhaust the process
+             * table. Serialised internally so multiple K-Cores cooperate. */
+            process_reap_strands();
             process_cleanup_deferred();
         }
 

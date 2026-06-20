@@ -294,6 +294,19 @@ void process_cleanup_deferred(void);
 uint32_t process_cleanup_queue_size(void);
 void process_cleanup_queue_flush(void);
 
+/* P5b strand reaper — runtime reclamation of exited strands.
+ *
+ * A strand that exits (strand_exit → PROC_DONE) or crashes (PROC_CRASHED)
+ * cannot destroy itself while running, so it lingers as a zombie holding its
+ * pid + process_count slot + per-strand rings. Without this, std::thread-style
+ * churn would exhaust the process table. process_reap_strands scans for
+ * exited SPAWNED strands (hammock_base != 0) that are no longer current on any
+ * core and process_destroy's them (feeding the existing deferred-cleanup
+ * queue). Called periodically from the K-Core run loop. Single-reaper-at-a-time
+ * (internal guard) so two cores never destroy the same zombie. Main-strand
+ * (app) corpses are left to shutdown teardown, unchanged from P4. */
+void process_reap_strands(void);
+
 uint64_t *process_active_memtags(process_t *proc);
 void *process_get_cabin(process_t *proc);
 

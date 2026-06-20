@@ -23,7 +23,16 @@ int execution_deck_handler(Pocket *pocket, process_t *proc)
     {
         // IPC: deliver Result to target process's ResultRing,
         // then deliver confirmation Result to sender's ResultRing.
-        process_t *target = process_find(target_pid);
+        //
+        // Pin the target with a reference across the push. P5a made the
+        // ResultRing strand-lifetime (a spawned strand's ring is freed by
+        // strand_rings_destroy at cleanup), and P5b adds a runtime strand
+        // reaper — so without a ref a concurrent reaper / process_destroy of
+        // a sibling target could unmap+free its ring pages out from under
+        // KResultPush (write into freed physical memory). The ref keeps both
+        // the struct AND its rings alive until process_ref_dec below, exactly
+        // as the storage / write-job / system IPC paths already do.
+        process_t *target = process_find_ref(target_pid);
         process_t *sender = proc;
 
         if (!target)
@@ -47,6 +56,7 @@ int execution_deck_handler(Pocket *pocket, process_t *proc)
         ipc_result.sender_pid  = pocket->pid;
         ipc_result.context     = KCTX_IPC;
         KResultPush(target, &ipc_result);
+        process_ref_dec(target);
 
         // Deliver confirmation Result to sender (sender_pid = 0 so result_pop_non_ipc finds it)
         if (sender)

@@ -983,8 +983,22 @@ void vmm_shootdown_pages(vmm_context_t *ctx, uintptr_t virt_addr, size_t page_co
     if (target_count == 0)
         return;
 
-    // Arm the shootdown descriptor and broadcast
-    spin_lock(&g_shootdown_lock);
+    // Arm the shootdown descriptor and broadcast.
+    //
+    // Acquire g_shootdown_lock with spin_trylock in a loop rather than
+    // spin_lock. Deadlock this avoids: plain spin_lock does `cli` then spins,
+    // so a core waiting to start ITS OWN shootdown would wait with interrupts
+    // OFF — and if the current holder's shootdown targets that core, it can
+    // never run the IPI handler to ACK, so the holder times out (KERNEL PANIC
+    // "TLB shootdown timeout"). spin_trylock restores the caller's IRQ state
+    // on each failed attempt (interrupts ON for the kernel/K-Core callers),
+    // so a waiter keeps servicing the holder's shootdown IPI while it spins,
+    // then ends up holding the lock with IRQs OFF exactly like spin_lock
+    // (matched by the spin_unlock below). Latent historically; the P5b strand
+    // reaper made runtime shootdowns frequent enough to surface it. The IPI
+    // handler (vmm_shootdown_ipi) takes no lock, so running it mid-spin is safe.
+    while (!spin_trylock(&g_shootdown_lock))
+        cpu_pause();
 
     g_shootdown.addr = (page_count <= 64) ? virt_addr : 0;
     g_shootdown.page_count = (page_count <= 64) ? (uint32_t)page_count : 0;
