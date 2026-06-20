@@ -101,9 +101,10 @@ public:
     void wait(arrival_token &&token) const
     {
         unsigned spin = 0;
-        while (__barrier_impl::PhaseOf(__state.load(memory_order_acquire))
+        uint64_t s;
+        while (__barrier_impl::PhaseOf(s = __state.load(memory_order_acquire))
                == token)
-            __boxcxx_atomic_wait_cycle(&__state, &spin);
+            __boxcxx_atomic_wait_cycle(&__state, &s, sizeof(s), &spin);
     }
 
     void arrive_and_wait() { wait(arrive()); }
@@ -132,6 +133,7 @@ private:
         // the reset count (same word), and the store releases the waiters.
         __state.store(__barrier_impl::Pack(phase + 1, next),
                       memory_order_release);
+        __boxcxx_atomic_notify(&__state, true);
     }
 
     atomic<uint64_t> __state;    // (phase << 32) | outstanding count this phase

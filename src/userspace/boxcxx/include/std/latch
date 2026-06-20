@@ -35,7 +35,8 @@ public:
     // The store wakes any waiter monitoring the counter's cacheline.
     void count_down(ptrdiff_t n = 1)
     {
-        __counter.fetch_sub(n, memory_order_release);
+        if (__counter.fetch_sub(n, memory_order_release) - n == 0)
+            __boxcxx_atomic_notify(&__counter, true);
     }
 
     [[nodiscard]] bool try_wait() const noexcept
@@ -46,8 +47,9 @@ public:
     void wait() const
     {
         unsigned spin = 0;
-        while (__counter.load(memory_order_acquire) != 0)
-            __boxcxx_atomic_wait_cycle(&__counter, &spin);
+        ptrdiff_t cur;
+        while ((cur = __counter.load(memory_order_acquire)) != 0)
+            __boxcxx_atomic_wait_cycle(&__counter, &cur, sizeof(cur), &spin);
     }
 
     void arrive_and_wait(ptrdiff_t n = 1)

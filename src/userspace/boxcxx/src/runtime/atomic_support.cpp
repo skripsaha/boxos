@@ -17,11 +17,14 @@
  *      only within one cabin (cross-cabin Bay contract = lock-free
  *      types only, see <atomic> header).
  *
- *   3. __boxcxx_atomic_wait_cycle — one wait cycle for atomic wait/
- *      notify: UMONITOR/UMWAIT on the value's cacheline when WAITPKG
- *      exists (same policy as Brook/Touch: C0.2, capped TSC deadline so
- *      a wake missed in the check→UMONITOR window drains within
- *      bounded time), PAUSE-budget + yield() otherwise.
+ *   3. __boxcxx_atomic_wait_cycle / __boxcxx_atomic_notify — atomic wait/
+ *      notify backed by a real kernel park on a per-pool version counter.
+ *      A waiter bounded-spins first (UMONITOR/UMWAIT on the value's
+ *      cacheline when WAITPKG exists, PAUSE budget otherwise), then parks
+ *      via addr_park on its pool's `ver`; a notifier bumps `ver` and calls
+ *      addr_wake. The value/width compare stays in userspace (memcmp), so
+ *      the kernel never compares variable widths. The pools are a cabin-
+ *      private hashed table (shared across strands via one CR3).
  */
 
 #include <cstddef>
@@ -161,6 +164,26 @@ struct PoolGuard {
     ~PoolGuard() { __atomic_store_n(lock, 0u, __ATOMIC_RELEASE); }
 };
 
+// ── park/wake version-pool ──────────────────────────────────────────────
+// Cabin-private (libboxcxx .bss, shared across strands via one CR3). A waiter
+// parks on its pool's 8-byte `ver`; a notifier bumps `ver` and wakes. Hashed,
+// so distinct addresses may share a pool — harmless (a woken waiter re-checks
+// its own predicate and re-parks). Separate from g_atomic_lock_pool above.
+constexpr unsigned kWaitPoolCount = 256;     // power of two
+struct alignas(64) WaitPool {                // one cacheline per pool (no false-share)
+    uint64_t ver;                            // bumped by notify; parked-on by wait
+    uint32_t waiters;                        // gate: skip addr_wake when zero
+};
+WaitPool g_wait_pools[kWaitPoolCount];       // .bss, zero-init
+
+inline WaitPool *WaitPoolFor(const volatile void *addr)
+{
+    uintptr_t a = reinterpret_cast<uintptr_t>(addr);
+    return &g_wait_pools[(a >> 4) & (kWaitPoolCount - 1)];
+}
+
+constexpr uint32_t kWaitBackstopMs = 100;    // defense-in-depth; never load-bearing
+
 } // namespace
 
 extern "C" {
@@ -207,28 +230,55 @@ bool __atomic_is_lock_free(size_t size, const volatile void *mem)
 
 // ── atomic wait/notify machinery ────────────────────────────────────────
 
-void __boxcxx_atomic_wait_cycle(const volatile void *addr,
-                                unsigned *spin_state)
+void __boxcxx_atomic_wait_cycle(const volatile void *addr, const void *observed,
+                                unsigned width, unsigned *spin_state)
 {
-    // Same policy family as Brook/Touch (see brook.c wait rationale):
-    // C0.2 for deeper savings; capped deadline so a store landing in the
-    // caller-check → UMONITOR window costs at most one cap period.
-    constexpr uint64_t kUmwaitCapMs = 50;
-
+    // Phase 1 — bounded adaptive spin: dodge a syscall for very short waits.
+    // (Same WAITPKG/PAUSE policy family as before; now a *prelude* to a real park.)
     if (cpu_has_waitpkg()) {
-        umonitor(const_cast<volatile void *>(addr));
-        uint64_t deadline_tsc = cpu_rdtsc() + cpu_ms_to_tsc(kUmwaitCapMs);
-        (void)umwait(0, deadline_tsc);
+        // Monitor the data word's cacheline; a notifier's store ends UMWAIT.
+        // umwait self-bounds at the cap — allow a couple of rounds, then park.
+        if (*spin_state < 2u) {
+            (*spin_state)++;
+            umonitor(const_cast<volatile void *>(addr));
+            uint64_t deadline = cpu_rdtsc() + cpu_ms_to_tsc(50);
+            (void)umwait(0, deadline);
+            return;                          // caller re-checks its predicate
+        }
+    } else {
+        constexpr unsigned kSpinBudget = 1u << 14;
+        if ((*spin_state)++ < kSpinBudget) {
+            __asm__ volatile("pause");
+            return;                          // caller re-checks its predicate
+        }
+    }
+
+    // Phase 2 — real kernel park on the version-pool.
+    *spin_state = 0;                         // post-wake: spin-recheck before re-parking
+    WaitPool *p = WaitPoolFor(addr);
+    __atomic_fetch_add(&p->waiters, 1u, __ATOMIC_SEQ_CST);
+    uint64_t v = __atomic_load_n(&p->ver, __ATOMIC_SEQ_CST);   // snapshot BEFORE re-check
+    // Predicate proxy: if the monitored word already changed, the caller's
+    // predicate may now hold — bail without parking.
+    if (__builtin_memcmp(const_cast<const void *>(addr), observed, width) != 0) {
+        __atomic_fetch_sub(&p->waiters, 1u, __ATOMIC_SEQ_CST);
         return;
     }
+    // Park until ver != v (a notify bumps it) or the backstop fires. The kernel's
+    // park-time pre-check compares *ver==v atomically; combined with snapshot-
+    // before-recheck this closes the notify-races-park window with no lost wakeup.
+    addr_park(&p->ver, v, kWaitBackstopMs);
+    __atomic_fetch_sub(&p->waiters, 1u, __ATOMIC_SEQ_CST);
+}
 
-    constexpr unsigned kSpinBudget = 1u << 14;
-    if ((*spin_state)++ < kSpinBudget) {
-        __asm__ volatile("pause");
-    } else {
-        *spin_state = 0;
-        yield();
-    }
+void __boxcxx_atomic_notify(const volatile void *addr, bool all)
+{
+    (void)all;   // address-hashed pool: both one and all wake the whole pool
+                 // (conformant — notify_one may unblock more than one waiter)
+    WaitPool *p = WaitPoolFor(addr);
+    __atomic_fetch_add(&p->ver, 1u, __ATOMIC_SEQ_CST);
+    if (__atomic_load_n(&p->waiters, __ATOMIC_SEQ_CST) != 0)
+        addr_wake(&p->ver, 0);               // count=0 = wake all parked on this ver
 }
 
 } // extern "C"
