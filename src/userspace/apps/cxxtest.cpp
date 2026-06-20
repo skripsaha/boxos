@@ -52,6 +52,7 @@
 #include <latch>
 #include <barrier>
 #include <semaphore>
+#include <stop_token>
 #include <thread>
 #include <new>
 #include <exception>
@@ -5679,6 +5680,216 @@ void Phase37()
            "(join/detach/args/thread_local/get_id/hw_concurrency/move)\n");
 }
 
+// ── phase38: <stop_token> + std::jthread ───────────────────────────────────────
+// Tier A is pure cooperative-cancel machinery (source/token/callback) with no
+// strand at all — always runs. Tier B drives real jthreads (a strand each) and is
+// FSGSBASE-guarded exactly like Phase37. The bug-prone bits proven here: a
+// callback fires exactly once on request_stop (no lost/double), a callback built
+// after the stop runs inline in its ctor, a self-destroying callback does not
+// hang, and a jthread auto request_stop+joins at scope exit.
+
+static std::atomic<int>      g_p38_cb_ran{0};       // (3) callback fired flag
+static std::atomic<int>      g_p38_jflag{0};        // (8) jthread body observed stop
+static std::atomic<int>      g_p38_plain{0};        // (9) plain-callable jthread ran
+static std::atomic<int>      g_p38_cb_count{0};     // (11) callback run count (==1)
+static std::atomic<uint32_t> g_p38_ready{0};        // (11) worker registered + parked
+
+void Phase38()
+{
+    // ── Tier A: cooperative-cancel machinery (no strand) ───────────────────────
+
+    // (1) basic source/token + request_stop is one-shot.
+    {
+        std::stop_source src;
+        std::stop_token  tok = src.get_token();
+        Check(src.stop_possible(), "phase38 fresh source stop_possible()");
+        Check(tok.stop_possible(), "phase38 token from source stop_possible()");
+        Check(!src.stop_requested(), "phase38 source not yet requested");
+        Check(!tok.stop_requested(), "phase38 token not yet requested");
+        Check(src.request_stop(), "phase38 first request_stop() returns true");
+        Check(!src.request_stop(), "phase38 second request_stop() returns false");
+        Check(src.stop_requested(), "phase38 source stop_requested() after request");
+        Check(tok.stop_requested(), "phase38 token sees the stop (shared state)");
+    }
+
+    // (2) nostopstate source: no state at all → nothing is possible.
+    {
+        std::stop_source none{std::nostopstate};
+        std::stop_token  tok = none.get_token();
+        Check(!none.stop_possible(), "phase38 nostopstate source !stop_possible()");
+        Check(!tok.stop_possible(), "phase38 nostopstate token !stop_possible()");
+        Check(!none.request_stop(), "phase38 nostopstate request_stop() == false");
+        Check(!tok.stop_requested(), "phase38 nostopstate token !stop_requested()");
+    }
+
+    // (3) callback runs when the stop is requested (registered before the stop).
+    {
+        g_p38_cb_ran.store(0, std::memory_order_relaxed);
+        std::stop_source src;
+        std::stop_callback cb(src.get_token(),
+                              [] { g_p38_cb_ran.fetch_add(1, std::memory_order_release); });
+        Check(g_p38_cb_ran.load(std::memory_order_acquire) == 0,
+              "phase38 callback does NOT run before request_stop");
+        src.request_stop();
+        Check(g_p38_cb_ran.load(std::memory_order_acquire) == 1,
+              "phase38 callback ran exactly once on request_stop");
+    }
+
+    // (4) callback constructed AFTER the stop already happened → runs inline in
+    //     the ctor (never registered).
+    {
+        g_p38_cb_ran.store(0, std::memory_order_relaxed);
+        std::stop_source src;
+        src.request_stop();
+        std::stop_callback cb(src.get_token(),
+                              [] { g_p38_cb_ran.fetch_add(1, std::memory_order_release); });
+        Check(g_p38_cb_ran.load(std::memory_order_acquire) == 1,
+              "phase38 callback built after stop runs immediately in ctor");
+    }
+
+    // (5) callback destroyed before any stop → never runs.
+    {
+        g_p38_cb_ran.store(0, std::memory_order_relaxed);
+        std::stop_source src;
+        {
+            std::stop_callback cb(src.get_token(),
+                                  [] { g_p38_cb_ran.fetch_add(1, std::memory_order_release); });
+        }   // cb unregisters here
+        src.request_stop();
+        Check(g_p38_cb_ran.load(std::memory_order_acquire) == 0,
+              "phase38 callback destroyed before stop never runs");
+    }
+
+    // (6) self-destroying callback: the body destroys the optional that holds the
+    //     callback (same strand, via request_stop). Must NOT hang and must run once.
+    {
+        g_p38_cb_ran.store(0, std::memory_order_relaxed);
+        std::stop_source              src;
+        std::optional<std::stop_callback<void (*)()>> holder;
+        static std::optional<std::stop_callback<void (*)()>> *s_holder;
+        s_holder = &holder;
+        holder.emplace(src.get_token(), +[] {
+            g_p38_cb_ran.fetch_add(1, std::memory_order_release);
+            s_holder->reset();   // destroy THIS callback from inside its own body
+        });
+        src.request_stop();      // drains → invokes → body resets holder (self-destroy)
+        Check(g_p38_cb_ran.load(std::memory_order_acquire) == 1,
+              "phase38 self-destroying callback ran once and did not hang");
+        Check(!holder.has_value(),
+              "phase38 self-destroying callback actually destroyed itself");
+    }
+
+    // (7) last stop_source dies without a stop → the token can no longer be stopped.
+    {
+        std::stop_token tok;
+        {
+            std::stop_source src;
+            tok = src.get_token();
+            Check(tok.stop_possible(), "phase38 token possible while source alive");
+        }   // last source gone, no request made
+        Check(!tok.stop_possible(),
+              "phase38 token !stop_possible() after last source dies w/o stop");
+        Check(!tok.stop_requested(), "phase38 abandoned token !stop_requested()");
+    }
+
+    // ── Tier B: real jthreads (a strand each) — FSGSBASE-guarded ────────────────
+    if (!cpu_has_fsgsbase()) {
+        printf("[CXX] note phase38: jthread strands need FSGSBASE — skipping Tier B\n");
+        printf("[CXX] PASS phase38: stop_token + jthread "
+               "(cooperative cancel; id=strand pid)\n");
+        return;
+    }
+
+    // A cooperative-cancel body polls its token and BACKS OFF with a 1 ms sleep
+    // (a timed kernel park) between checks — NOT a tight yield-spin. On a single
+    // App-Core boot the strands schedule cooperatively, so a strand that never
+    // blocks would starve main (which is mid-printf / mid-request_stop); the
+    // timed park is the BoxOS-native "wait for the flag" and lets main run.
+    using namespace std::chrono;
+
+    // (8) jthread auto request_stop + join on dtor: the body polls its token; scope
+    //     exit must request_stop + join, so the body must have observed the stop.
+    {
+        g_p38_jflag.store(0, std::memory_order_relaxed);
+        {
+            std::jthread j([](std::stop_token st) {
+                while (!st.stop_requested())
+                    std::this_thread::sleep_for(milliseconds(1));
+                g_p38_jflag.store(1, std::memory_order_release);
+            });
+            Check(j.joinable(), "phase38 jthread joinable while running");
+            Check(j.get_id() != std::jthread::id{}, "phase38 jthread has a live id");
+        }   // dtor: request_stop + join
+        Check(g_p38_jflag.load(std::memory_order_acquire) == 1,
+              "phase38 jthread dtor auto request_stop+join (body saw the stop)");
+    }
+
+    // (9) jthread with a PLAIN callable (no stop_token param) runs normally.
+    {
+        g_p38_plain.store(0, std::memory_order_relaxed);
+        {
+            std::jthread j([] { g_p38_plain.store(1, std::memory_order_release); });
+        }   // dtor joins (request_stop is a no-op the body ignores)
+        Check(g_p38_plain.load(std::memory_order_acquire) == 1,
+              "phase38 jthread with plain callable ran to completion");
+    }
+
+    // (10) explicit request_stop() exits the loop before scope end.
+    {
+        g_p38_jflag.store(0, std::memory_order_relaxed);
+        std::jthread j([](std::stop_token st) {
+            while (!st.stop_requested())
+                std::this_thread::sleep_for(milliseconds(1));
+            g_p38_jflag.store(2, std::memory_order_release);
+        });
+        Check(j.request_stop(), "phase38 explicit request_stop() returns true");
+        j.join();   // body observes the stop on its next wake, then exits
+        Check(g_p38_jflag.load(std::memory_order_acquire) == 2,
+              "phase38 explicit request_stop() let the body exit, join saw it");
+    }
+
+    // (11) bounded concurrent: a jthread registers a stop_callback against a
+    //      shared source + waits; main request_stop()s → the callback runs exactly
+    //      once (no double-run, no lost). The worker uses an EXTERNAL source (main's),
+    //      so it is launched with a plain callable that captures a token by value.
+    {
+        g_p38_cb_count.store(0, std::memory_order_relaxed);
+        g_p38_ready.store(0, std::memory_order_relaxed);
+        std::stop_source shared;
+        std::stop_token  wtok = shared.get_token();
+        {
+            std::jthread worker([wtok] {
+                std::stop_callback cb(wtok, [] {
+                    g_p38_cb_count.fetch_add(1, std::memory_order_release);
+                });
+                g_p38_ready.store(1, std::memory_order_release);   // registered
+                // Wait (timed park) until the callback has fired — bounded.
+                for (int cyc = 0; cyc < 500; cyc++) {
+                    if (g_p38_cb_count.load(std::memory_order_acquire) != 0) break;
+                    std::this_thread::sleep_for(milliseconds(1));
+                }
+            });
+
+            // Wait (timed park) until the worker has registered its callback.
+            for (int cyc = 0; cyc < 500 &&
+                              g_p38_ready.load(std::memory_order_acquire) == 0;
+                 cyc++)
+                std::this_thread::sleep_for(milliseconds(1));
+            Check(g_p38_ready.load(std::memory_order_acquire) == 1,
+                  "phase38 worker registered its stop_callback");
+
+            Check(shared.request_stop(),
+                  "phase38 main request_stop() drove the worker's callback");
+        }   // worker jthread dtor: request_stop (no-op, already) + join
+
+        Check(g_p38_cb_count.load(std::memory_order_acquire) == 1,
+              "phase38 concurrent stop_callback ran exactly once (no double/lost)");
+    }
+
+    printf("[CXX] PASS phase38: stop_token + jthread "
+           "(cooperative cancel; id=strand pid)\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -5738,6 +5949,7 @@ int main()
     Phase35();
     Phase36();
     Phase37();
+    Phase38();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
