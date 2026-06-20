@@ -12,7 +12,7 @@ typedef struct process_t process_t;
  * physical page; this writes head=tail=0, slots_base, slot_size, etc.
  * The plain forms use the fixed cabin slot region + full capacity (the main
  * strand's rings); the *InitAt forms take an explicit per-strand slot-region
- * VA and capacity (a Berth-carved spawned-strand ring — strand_berth.c). */
+ * VA and capacity (a Hammock-carved spawned-strand ring — strand_rings.c). */
 void KRingPocketInit(PocketRing *hdr);
 void KRingResultInit(ResultRing *hdr);
 void KRingPocketInitAt(PocketRing *hdr, uint64_t slots_base, uint32_t slot_count_max);

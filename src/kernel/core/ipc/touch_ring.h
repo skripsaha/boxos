@@ -165,7 +165,7 @@ typedef struct process_t process_t;
  * physical page; this writes head=tail=0, slots_base, slot_size, magic.
  * The plain form uses the fixed cabin slot region + full capacity (the main
  * strand's ring); KTouchRingInitAt takes an explicit per-strand slot-region
- * VA and capacity (a Berth-carved spawned-strand ring — strand_berth.c). */
+ * VA and capacity (a Hammock-carved spawned-strand ring — strand_rings.c). */
 void KTouchRingInit(TouchRing *hdr);
 void KTouchRingInitAt(TouchRing *hdr, uint64_t slots_base, uint32_t slot_count_max);
 

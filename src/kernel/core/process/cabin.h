@@ -39,8 +39,8 @@ typedef struct cabin_t
      * allocated + mapped by vmm_create_cabin and reclaimed by
      * vmm_destroy_context at cabin teardown. P5a: the main strand's
      * process_t.{pocket,result,touch}_ring_phys ALIAS these; each spawned
-     * strand instead carries its OWN per-strand rings carved from the Berth
-     * window (strand_berth.c). kring.c / touch_ring.c route by the per-strand
+     * strand instead carries its OWN per-strand rings carved from the Hammock
+     * window (strand_rings.c). kring.c / touch_ring.c route by the per-strand
      * process_t fields, never these. */
     uint64_t pocket_ring_phys;
     uint64_t result_ring_phys;
