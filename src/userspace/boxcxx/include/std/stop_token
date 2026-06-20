@@ -1,0 +1,400 @@
+// boxcxx — <stop_token>.
+//
+// stop_token = COOPERATIVE cancellation. There is NO forced kill (no
+// pthread_cancel, no signal, no errno): a stop request only flips a shared flag
+// and runs any registered stop_callbacks. The strand that was asked to stop runs
+// until IT observes stop_requested() and returns on its own. A jthread's id is
+// its strand pid (BoxOS-native identity), not an opaque token.
+//
+// The shared __stop_state is refcounted by hand (atomic<uint32_t> + new/delete,
+// acquire-release, the party whose decrement reaches 0 frees it) — the same
+// idiom std::thread's Join block uses, so token / source / callback owners never
+// free state another owner still reads. A separate `sources` count tracks the
+// live stop_sources and drives stop_possible(): once it hits 0 with no request
+// landed, no stop can ever arrive.
+//
+// The dtor of a stop_callback that was already popped-and-run by request_stop on
+// ANOTHER strand parks on a per-node atomic flag via atomic::wait (REAL kernel
+// park) until that callback finishes — condition_variable is absent until Ф20d,
+// so the wait rides on atomic::wait, not a cv.
+#ifndef BOXCXX_STOP_TOKEN
+#define BOXCXX_STOP_TOKEN
+
+#include <atomic>
+#include <mutex>
+#include <cstdint>
+#include <utility>
+#include <type_traits>
+
+#include "box/core/strand_self.h"   // strand_self — the running strand's pid
+
+namespace std {
+
+// ── shared stop state ────────────────────────────────────────────────────────
+
+// Type-erased callback node. One is embedded in every stop_callback<Cb> (via
+// private inheritance) and threaded onto __stop_state::head while registered.
+struct __stop_cb_base {
+    __stop_cb_base       *next = nullptr;
+    __stop_cb_base       *prev = nullptr;
+    void (*invoke)(__stop_cb_base *) = nullptr;  // → stop_callback<Cb>::__run
+    std::atomic<uint32_t> finished{0};  // 0 queued/running, 1 done — dtor waits here
+    uint32_t              running_tid = 0;  // strand that popped+runs it (under list_lock).
+                                             // 0 = never-popped sentinel; sound because
+                                             // strand_self() is always >= 1 (pid = index+1).
+    bool                  linked = false;   // canonical "on head list" (under list_lock)
+    bool                 *destroyed = nullptr;  // self-destroy back-channel (see below)
+};
+
+// The state shared by a stop_source, its tokens, and any stop_callbacks. Lives
+// until the last of those (refs) drops; `sources` separately counts the live
+// stop_sources so stop_possible() can answer "no stop can ever come" once the
+// last source is gone without a request.
+struct __stop_state {
+    std::atomic<uint32_t> refs;          // token+source+callback owners; 0 → delete this
+    std::atomic<uint32_t> sources;       // live stop_source count (drives stop_possible)
+    std::atomic<uint8_t>  requested{0};  // 0→1 exactly once, via CAS in request_stop
+    std::mutex            list_lock;     // guards head + node next/prev + running_tid
+    __stop_cb_base       *head = nullptr;
+
+    // A stop is still possible iff one already landed (its callbacks may still be
+    // pending) or at least one source could still raise it.
+    bool stop_possible() const noexcept
+    {
+        return requested.load(memory_order_acquire) != 0 ||
+               sources.load(memory_order_acquire) > 0;
+    }
+
+    void ref_inc() noexcept { refs.fetch_add(1u, memory_order_acq_rel); }
+    void ref_dec() noexcept
+    {
+        if (refs.fetch_sub(1u, memory_order_acq_rel) == 1u) delete this;
+    }
+    void source_inc() noexcept { sources.fetch_add(1u, memory_order_acq_rel); }
+    void source_dec() noexcept { sources.fetch_sub(1u, memory_order_acq_rel); }
+
+    // Flip 0→1 once; on the winning transition wake requested-waiters and drain
+    // the callback list, running each callback OUTSIDE list_lock (a callback may
+    // re-enter the registry, e.g. destroy itself). Returns true only for the
+    // thread that won the CAS.
+    bool request_stop() noexcept
+    {
+        uint8_t expected = 0;
+        if (!requested.compare_exchange_strong(expected, 1, memory_order_acq_rel))
+            return false;
+        requested.notify_all();   // wake stop_callback ctors / external waiters
+
+        for (;;) {
+            list_lock.lock();
+            __stop_cb_base *node = head;
+            if (node == nullptr) {
+                list_lock.unlock();
+                break;
+            }
+            // Pop head; mark it "no longer linked" so a racing dtor knows it was
+            // taken to be run rather than left for the dtor to unlink.
+            head = node->next;
+            if (head) head->prev = nullptr;
+            node->next   = nullptr;
+            node->prev   = nullptr;
+            node->linked = false;   // off the list ⇒ dtor must not unlink it
+            node->running_tid = strand_self();
+            list_lock.unlock();
+
+            // A callback may destroy its own stop_callback (same strand). Point a
+            // local flag at the node so that path can tell us "the node is gone,
+            // do NOT touch it after invoke" — otherwise the finished-store below
+            // is a use-after-free.
+            bool destroyed = false;
+            node->destroyed = &destroyed;
+
+            node->invoke(node);                              // run OUTSIDE the lock
+
+            if (!destroyed) {
+                node->destroyed = nullptr;
+                node->finished.store(1, memory_order_release);   // per-node done flag
+                node->finished.notify_all();                     // wake a waiting dtor
+            }
+        }
+        return true;
+    }
+};
+
+// ── stop_token ───────────────────────────────────────────────────────────────
+
+class stop_source;
+template <class Cb> class stop_callback;
+
+class stop_token {
+public:
+    stop_token() noexcept = default;
+
+    stop_token(const stop_token &o) noexcept : s_(o.s_)
+    {
+        if (s_) s_->ref_inc();
+    }
+    stop_token(stop_token &&o) noexcept : s_(o.s_) { o.s_ = nullptr; }
+
+    stop_token &operator=(const stop_token &o) noexcept
+    {
+        if (this != &o) {
+            if (o.s_) o.s_->ref_inc();
+            if (s_) s_->ref_dec();
+            s_ = o.s_;
+        }
+        return *this;
+    }
+    stop_token &operator=(stop_token &&o) noexcept
+    {
+        if (this != &o) {
+            if (s_) s_->ref_dec();
+            s_   = o.s_;
+            o.s_ = nullptr;
+        }
+        return *this;
+    }
+
+    ~stop_token()
+    {
+        if (s_) s_->ref_dec();
+    }
+
+    [[nodiscard]] bool stop_requested() const noexcept
+    {
+        return s_ && s_->requested.load(memory_order_acquire) != 0;
+    }
+    [[nodiscard]] bool stop_possible() const noexcept
+    {
+        return s_ && s_->stop_possible();
+    }
+
+    void swap(stop_token &o) noexcept { std::swap(s_, o.s_); }
+
+    friend bool operator==(const stop_token &a, const stop_token &b) noexcept
+    {
+        return a.s_ == b.s_;
+    }
+
+private:
+    friend class stop_source;
+    template <class Cb> friend class stop_callback;
+
+    explicit stop_token(__stop_state *s) noexcept : s_(s)
+    {
+        if (s_) s_->ref_inc();
+    }
+
+    __stop_state *s_ = nullptr;
+};
+
+inline void swap(stop_token &a, stop_token &b) noexcept { a.swap(b); }
+
+// ── nostopstate ──────────────────────────────────────────────────────────────
+
+struct nostopstate_t {
+    explicit nostopstate_t() = default;
+};
+inline constexpr nostopstate_t nostopstate{};
+
+// ── stop_source ──────────────────────────────────────────────────────────────
+
+class stop_source {
+public:
+    // A fresh source owns one ref (itself) and is the one live source.
+    stop_source() : s_(new __stop_state{/*refs*/ {1u}, /*sources*/ {1u}}) {}
+    explicit stop_source(nostopstate_t) noexcept : s_(nullptr) {}
+
+    stop_source(const stop_source &o) noexcept : s_(o.s_)
+    {
+        if (s_) {
+            s_->ref_inc();
+            s_->source_inc();
+        }
+    }
+    stop_source(stop_source &&o) noexcept : s_(o.s_) { o.s_ = nullptr; }
+
+    stop_source &operator=(const stop_source &o) noexcept
+    {
+        if (this != &o) {
+            if (o.s_) {
+                o.s_->ref_inc();
+                o.s_->source_inc();
+            }
+            __release();
+            s_ = o.s_;
+        }
+        return *this;
+    }
+    stop_source &operator=(stop_source &&o) noexcept
+    {
+        if (this != &o) {
+            __release();
+            s_   = o.s_;
+            o.s_ = nullptr;
+        }
+        return *this;
+    }
+
+    ~stop_source() { __release(); }
+
+    [[nodiscard]] stop_token get_token() const noexcept { return stop_token(s_); }
+
+    bool request_stop() noexcept { return s_ && s_->request_stop(); }
+
+    [[nodiscard]] bool stop_requested() const noexcept
+    {
+        return s_ && s_->requested.load(memory_order_acquire) != 0;
+    }
+    [[nodiscard]] bool stop_possible() const noexcept { return s_ != nullptr; }
+
+    void swap(stop_source &o) noexcept { std::swap(s_, o.s_); }
+
+    friend bool operator==(const stop_source &a, const stop_source &b) noexcept
+    {
+        return a.s_ == b.s_;
+    }
+
+private:
+    // Drop this source: one fewer live source, then one fewer ref (which may free).
+    void __release() noexcept
+    {
+        if (s_) {
+            s_->source_dec();
+            s_->ref_dec();
+            s_ = nullptr;
+        }
+    }
+
+    __stop_state *s_ = nullptr;
+};
+
+inline void swap(stop_source &a, stop_source &b) noexcept { a.swap(b); }
+
+// ── stop_callback ────────────────────────────────────────────────────────────
+//
+// Registers Cb against a token's state. The concurrency-critical part:
+//   ctor — if a stop already landed, run inline and DO NOT register; otherwise
+//          push under list_lock after a re-check (a stop can land between the
+//          first check and taking the lock).
+//   request_stop (other code) — pops each node under the lock, stamps
+//          running_tid + a `destroyed` back-channel, invokes OUTSIDE the lock,
+//          then (only if the callback did not self-destroy) sets the per-node
+//          finished flag and wakes a waiting dtor.
+//   dtor — under the lock, if still linked just unlink (never ran). Otherwise it
+//          was popped to run: read running_tid; if it ran on ANOTHER strand wait
+//          on the per-node finished flag (kernel park); if running_tid is THIS
+//          strand we are being destroyed from inside our own callback — set the
+//          `destroyed` flag so request_stop skips the post-invoke node writes and
+//          do NOT wait (it is our own caller mid-invoke → self-deadlock / UAF).
+template <class Cb>
+class stop_callback : private __stop_cb_base {
+public:
+    using callback_type = Cb;
+
+    template <class C>
+        requires constructible_from<Cb, C>
+    explicit stop_callback(const stop_token &t, C &&cb) noexcept(
+        is_nothrow_constructible_v<Cb, C>)
+        : cb_(std::forward<C>(cb)), s_(t.s_)
+    {
+        __attach();
+    }
+
+    template <class C>
+        requires constructible_from<Cb, C>
+    explicit stop_callback(stop_token &&t, C &&cb) noexcept(
+        is_nothrow_constructible_v<Cb, C>)
+        : cb_(std::forward<C>(cb)), s_(t.s_)
+    {
+        __attach();
+    }
+
+    ~stop_callback()
+    {
+        if (!s_) return;
+
+        s_->list_lock.lock();
+        if (linked) {
+            // Still on the list ⇒ request_stop never reached it. Just unlink.
+            __unlink();
+            s_->list_lock.unlock();
+        } else {
+            // Either never registered, or popped by request_stop to be run.
+            uint32_t who = running_tid;
+            s_->list_lock.unlock();
+            if (who != 0 && who != strand_self()) {
+                // Running on another strand: park until it sets finished.
+                while (finished.load(memory_order_acquire) == 0)
+                    finished.wait(0, memory_order_acquire);
+            } else if (who == strand_self() && destroyed) {
+                // Destroyed from inside our own callback (request_stop is still on
+                // this stack, mid-invoke). Tell it the node is gone so it does NOT
+                // touch finished after invoke returns — and we must NOT wait (the
+                // body that would set finished is our own caller → self-deadlock).
+                *destroyed = true;
+            }
+        }
+        s_->ref_dec();
+    }
+
+    stop_callback(const stop_callback &)            = delete;
+    stop_callback(stop_callback &&)                 = delete;
+    stop_callback &operator=(const stop_callback &) = delete;
+    stop_callback &operator=(stop_callback &&)      = delete;
+
+private:
+    static void __run(__stop_cb_base *b)
+    {
+        std::move(static_cast<stop_callback *>(b)->cb_)();
+    }
+
+    void __attach()
+    {
+        invoke = &__run;
+        if (!s_) return;
+        s_->ref_inc();   // hold the state alive for our whole lifetime
+
+        if (s_->requested.load(memory_order_acquire) != 0) {
+            // Already stopped → run now, never register.
+            std::move(cb_)();
+        } else if (s_->stop_possible()) {
+            s_->list_lock.lock();
+            if (s_->requested.load(memory_order_relaxed) != 0) {
+                // A stop landed between our load and taking the lock; its drain
+                // already passed (we were not on the list) → run inline.
+                s_->list_lock.unlock();
+                std::move(cb_)();
+            } else {
+                next = s_->head;
+                prev = nullptr;
+                if (s_->head) s_->head->prev = this;
+                s_->head = this;
+                linked   = true;
+                s_->list_lock.unlock();
+            }
+        }
+        // else: no source can ever raise a stop → leave unlinked, never runs.
+    }
+
+    // Unlink self from the list under list_lock; clear the linked flag.
+    void __unlink() noexcept
+    {
+        if (prev)
+            prev->next = next;
+        else
+            s_->head = next;
+        if (next) next->prev = prev;
+        next   = nullptr;
+        prev   = nullptr;
+        linked = false;
+    }
+
+    Cb            cb_;
+    __stop_state *s_ = nullptr;
+};
+
+template <class Cb>
+stop_callback(stop_token, Cb) -> stop_callback<Cb>;
+
+} // namespace std
+#endif // BOXCXX_STOP_TOKEN

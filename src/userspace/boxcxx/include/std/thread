@@ -16,6 +16,7 @@
 #include <tuple>          // decay-copied argument pack + std::apply
 #include <type_traits>    // decay_t / remove_cvref_t / is_same_v (ctor constraint)
 #include <utility>        // std::forward / std::move / std::swap
+#include <stop_token>     // std::jthread = std::thread + a stop_source (Ф20c)
 
 #include "box/sync.h"               // addr_park / addr_wake — a timed park IS the sleep
 #include "box/strand.h"             // strand_spawn / strand_exit — a thread is a strand
@@ -295,6 +296,105 @@ struct formatter<thread::id, char> : formatter<uint32_t, char> {
         return formatter<uint32_t, char>::format(v.pid_, ctx);
     }
 };
+
+// ── std::jthread ──────────────────────────────────────────────────────────────
+//
+// A jthread is a std::thread that owns a stop_source and auto-joins. Two things
+// differ from std::thread: (1) if the callable's first parameter accepts a
+// std::stop_token, the jthread feeds it its own token FIRST so the body can poll
+// stop_requested(); (2) its destructor (and a joinable move-assign) request_stop
+// then join instead of std::terminate — destroying a running jthread is the
+// normal, cooperative way to wind it down, NOT a programming error.
+//
+// Member order is deliberate: ssource_ is declared BEFORE t_ so it is fully
+// constructed when the ctor calls ssource_.get_token() to launch the thread, and
+// destroyed AFTER t_ — though the dtor body has already joined t_ by then.
+class jthread {
+public:
+    using id                = thread::id;
+    using native_handle_type = thread::native_handle_type;
+
+    jthread() noexcept = default;
+
+    // Launch f on a new strand. If f is invocable with a leading stop_token, pass
+    // this jthread's token first (cooperative-cancel entry); otherwise launch it
+    // like a plain std::thread. Constrained so it never shadows the move ctor.
+    template <class F, class... Args,
+              class = enable_if_t<!is_same_v<remove_cvref_t<F>, jthread>>>
+    explicit jthread(F &&f, Args &&...args)
+    {
+        if constexpr (is_invocable_v<decay_t<F>, stop_token, decay_t<Args>...>)
+            t_ = thread(forward<F>(f), ssource_.get_token(), forward<Args>(args)...);
+        else
+            t_ = thread(forward<F>(f), forward<Args>(args)...);
+    }
+
+    // [thread.jthread.cons]/13: a joinable jthread is wound down (request_stop +
+    // join), never std::terminate — this is the whole point of jthread.
+    ~jthread()
+    {
+        if (t_.joinable()) {
+            ssource_.request_stop();
+            t_.join();
+        }
+    }
+
+    jthread(const jthread &)            = delete;
+    jthread &operator=(const jthread &) = delete;
+
+    jthread(jthread &&other) noexcept
+        : ssource_(std::move(other.ssource_)), t_(std::move(other.t_))
+    {
+    }
+
+    // [thread.jthread.cons]/14: wind down our own running thread first (cooperative,
+    // not terminate), then steal both the source and the thread from `other`.
+    jthread &operator=(jthread &&other) noexcept
+    {
+        if (this != &other) {
+            if (t_.joinable()) {
+                ssource_.request_stop();
+                t_.join();
+            }
+            t_       = std::move(other.t_);
+            ssource_ = std::move(other.ssource_);
+        }
+        return *this;
+    }
+
+    void swap(jthread &other) noexcept
+    {
+        t_.swap(other.t_);
+        ssource_.swap(other.ssource_);
+    }
+
+    [[nodiscard]] bool joinable() const noexcept { return t_.joinable(); }
+    void               join() { t_.join(); }
+    void               detach() { t_.detach(); }
+    [[nodiscard]] id   get_id() const noexcept { return t_.get_id(); }
+    [[nodiscard]] native_handle_type native_handle() const noexcept
+    {
+        return t_.native_handle();
+    }
+
+    [[nodiscard]] stop_source get_stop_source() noexcept { return ssource_; }
+    [[nodiscard]] stop_token  get_stop_token() const noexcept
+    {
+        return ssource_.get_token();
+    }
+    bool request_stop() noexcept { return ssource_.request_stop(); }
+
+    [[nodiscard]] static unsigned hardware_concurrency() noexcept
+    {
+        return thread::hardware_concurrency();
+    }
+
+private:
+    stop_source ssource_{};   // declared first → valid token in the launch ctor
+    thread      t_{};
+};
+
+inline void swap(jthread &a, jthread &b) noexcept { a.swap(b); }
 
 } // namespace std
 #endif // BOXCXX_THREAD
