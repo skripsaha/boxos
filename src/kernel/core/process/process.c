@@ -1751,6 +1751,62 @@ void process_cleanup_deferred(void)
         debug_printf("[PROCESS] Deferred cleanup: freed %u processes\n", cleaned);
 }
 
+/* P5b strand reaper — single-reaper-at-a-time guard. A plain test-and-set:
+ * the first K-Core to claim it does the scan + destroys; others skip this
+ * tick. This serialises process_destroy across cores so two of them never
+ * unlink the same zombie (which would corrupt the global list). */
+static volatile uint8_t g_strand_reaping = 0;
+
+void process_reap_strands(void)
+{
+    if (__atomic_exchange_n(&g_strand_reaping, 1, __ATOMIC_ACQUIRE) != 0)
+        return;
+
+    /* Snapshot a bounded batch of reapable strand corpses UNDER the list lock,
+     * then destroy them after releasing it (process_destroy takes process_lock
+     * itself, so it must not be called while we hold it).
+     *
+     * Pin each snapshotted corpse with a reference while it sits in the batch:
+     * process_destroy's final process_ref_dec then drops the birth ref to 1
+     * (not 0 — no free yet), and OUR process_ref_dec below drops it to 0,
+     * enqueueing the real teardown. Holding the ref makes the batch pointer
+     * self-defending — it cannot be freed between snapshot and destroy
+     * regardless of any other process_destroy caller — so the reaper does not
+     * have to rely on the (currently true but fragile) "only the reaper
+     * destroys a listed strand at runtime" invariant. On the bail path
+     * (process_destroy declines a still-current corpse) the ref_dec returns it
+     * to 1 and it is retried next tick. */
+    process_t *batch[CONFIG_STRAND_REAP_BATCH];
+    uint32_t n = 0;
+
+    spin_lock(&process_lock);
+    for (process_t *p = process_list_head;
+         p && n < CONFIG_STRAND_REAP_BATCH;
+         p = p->next)
+    {
+        if (p->magic != PROCESS_MAGIC) continue;   /* listed ⇒ always live magic */
+        if (p->hammock_base == 0)       continue;   /* spawned strands only */
+        if (p->destroying)              continue;   /* already mid-destroy */
+        /* Volatile state read is a hint; process_destroy re-checks "current
+         * on a core" authoritatively and bails (we retry next tick). */
+        process_state_t st = p->state;
+        if (st == PROC_DONE || st == PROC_CRASHED)
+        {
+            process_ref_inc(p);
+            batch[n++] = p;
+        }
+    }
+    spin_unlock(&process_lock);
+
+    for (uint32_t i = 0; i < n; i++)
+    {
+        process_destroy(batch[i]);   /* unlink + hooks + ref_dec (→1 under our pin) */
+        process_ref_dec(batch[i]);   /* release pin → 0 triggers cleanup-queue teardown */
+    }
+
+    __atomic_store_n(&g_strand_reaping, 0, __ATOMIC_RELEASE);
+}
+
 uint32_t process_cleanup_queue_size(void)
 {
     spin_lock(&g_cleanup_queue.lock);

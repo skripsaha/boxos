@@ -156,6 +156,7 @@
 /* Process bookkeeping. */
 #define CONFIG_PROCESS_HASH_SIZE      256   /* power-of-two for mask hashing */
 #define CONFIG_PROCESS_CLEANUP_BATCH  8     /* drain at most N corpses per tick */
+#define CONFIG_STRAND_REAP_BATCH      16    /* P5b: reap at most N exited strands per tick */
 #define CONFIG_PROCESS_POISON_MAGIC   0xDEADDEADu
 #define CONFIG_IDLE_PID               0
 

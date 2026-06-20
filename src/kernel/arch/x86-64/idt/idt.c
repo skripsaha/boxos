@@ -806,6 +806,24 @@ static void sync_syscall_dispatch(process_t *proc, interrupt_frame_t *frame)
     ready_queue_push(&g_ready_queue, proc);
     process_set_state(proc, PROC_WAITING);
     guide();
+    /* P5b: single-core never runs kcore_run_loop, so the strand reaper +
+     * deferred cleanup must be driven from here (throttled). Without it,
+     * exited strands accumulate and std::thread-style churn exhausts the
+     * process table on uniprocessor. Cheap on 1c: vmm shootdown degrades to
+     * a local invlpg (total_cores <= 1), so no IPI round-trips.
+     *
+     * The reaper MAY select the calling proc: if this very syscall was a
+     * strand's own strand_exit, guide() above already flipped it to PROC_DONE,
+     * so it now matches the reaper's filter. That is safe — it is still
+     * current_process on this core, so process_destroy's is-running scan
+     * declines it (and the snapshot ref is released); it is reaped a later
+     * tick after schedule() switches away. */
+    static uint32_t reap_tick = 0;
+    if ((++reap_tick & 0x7u) == 0u)
+    {
+        process_reap_strands();
+        process_cleanup_deferred();
+    }
     schedule(frame);
 }
 
