@@ -19,9 +19,12 @@
  * The strand terminates automatically when fn returns (an internal
  * trampoline calls strand_exit); fn may also call strand_exit() itself.
  *
- * NOTE: malloc/free are not yet strand-safe, so until that lands, only the
- * spawning strand should allocate while children run, or callers must guard
- * the heap themselves.
+ * malloc/free ARE strand-safe: the boxlib heap serialises every allocation
+ * under a single process-wide lock (heap_lock, an atomic test-and-set umutex),
+ * so concurrent strands may allocate freely. That single lock does serialise
+ * allocations, so a malloc-bound multi-strand workload contends on it; per-
+ * strand heap arenas (to remove that contention) are a future scalability
+ * step, not a correctness requirement.
  */
 uint32_t strand_spawn(void (*fn)(void *arg), void *arg);
 

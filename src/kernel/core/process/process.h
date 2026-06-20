@@ -294,6 +294,11 @@ void process_cleanup_deferred(void);
 uint32_t process_cleanup_queue_size(void);
 void process_cleanup_queue_flush(void);
 
+/* Shutdown-only: reclaim process-subsystem locks after all AP cores are
+ * halted, so a dead lock-holder (e.g. an AP stopped mid strand-reaper) can't
+ * wedge the BSP's shutdown walk. See process.c — do NOT call in normal run. */
+void process_force_release_locks_for_shutdown(void);
+
 /* P5b strand reaper — runtime reclamation of exited strands.
  *
  * A strand that exits (strand_exit → PROC_DONE) or crashes (PROC_CRASHED)

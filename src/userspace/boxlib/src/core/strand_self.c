@@ -21,11 +21,28 @@ INLINE uint64_t strand_read_fsbase(void)
     return v;
 }
 
+/* FSGSBASE availability is a machine-uniform constant (CR4.FSGSBASE is enabled
+ * on every online core, or on none — see the kernel per_core init). Cache it
+ * process-wide so the hot ring accessors (pocket_ring/result_ring/touch_ring,
+ * which call strand_rings() → here on every access) don't re-read the CPU_CAPS
+ * page each time. -1 = unresolved, 0/1 = result; the first-call write is
+ * idempotent (always the same value) so the benign cross-strand race is safe.
+ * The PER-STRAND part below (the FS base read + Hammock-range test) genuinely
+ * CANNOT be cached in a process-wide static — every strand in the cabin shares
+ * this code and its statics — so it stays per-call: a register read plus two
+ * compares, which is the minimum needed to tell strands apart. */
+static int g_fsgsbase_cached = -1;
+
 StrandInfo *strand_info_or_null(void)
 {
     /* Spawned strands REQUIRE FSGSBASE; without it RDFSBASE would #UD and we
      * are necessarily the main strand. */
-    if (!cpu_has_fsgsbase())
+    int has = __atomic_load_n(&g_fsgsbase_cached, __ATOMIC_RELAXED);
+    if (has < 0) {
+        has = cpu_has_fsgsbase() ? 1 : 0;
+        __atomic_store_n(&g_fsgsbase_cached, has, __ATOMIC_RELAXED);
+    }
+    if (!has)
         return NULL;
 
     uint64_t fsb = strand_read_fsbase();
