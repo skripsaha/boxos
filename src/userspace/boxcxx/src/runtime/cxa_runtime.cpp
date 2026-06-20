@@ -6,9 +6,13 @@
  *   - __cxa_pure_virtual / __cxa_deleted_virtual
  *   - std::terminate machinery + key functions of <exception>/<new> classes
  *
- * Single thread of execution per cabin (BoxOS process model) — the guard
- * protocol still detects recursive initialization, which is the only
- * failure mode possible without threads.
+ * Multiple strands may share a cabin (strand_spawn). The static-dtor registry
+ * (__cxa_atexit) stays process-global — statics have process duration and are
+ * drained once at exit. thread_local destructors (__cxa_thread_atexit) are
+ * PER-STRAND: their registry head lives in each strand's own neg-TLS, so every
+ * strand drains exactly its own thread-storage objects with no lock. The
+ * function-local-static guards use an atomic in-progress byte so concurrent
+ * first-touch by two strands still runs the initializer exactly once.
  */
 
 #include <exception>
@@ -18,6 +22,9 @@
 
 #include "box/print.h"
 #include "box/system.h"
+#include "box/sync.h"               // yield() — guard loser back-off
+#include "box/cxx/tls_strand.h"     // __boxcxx_thread_storage_exit decl
+#include "box/core/strand_self.h"   // strand_self() — guard owner token
 
 extern "C" {
 void *_malloc_impl(size_t size);
@@ -158,49 +165,61 @@ extern "C" int __cxa_atexit(void (*fn)(void *), void *arg, void *dso)
     return 0;
 }
 
-// thread_local destructors — Itanium __cxa_thread_atexit. One thread per
-// cabin, so this is a second registry drained BEFORE the static one
-// ([basic.start.term]: thread storage duration ends first).
+// thread_local destructors — Itanium __cxa_thread_atexit. PER-STRAND: the list
+// head lives in this strand's own neg-TLS (zeroed by the kernel for a spawned
+// strand, by tls_init for main), so each strand owns an independent LIFO list
+// with zero locking. Nodes are heap-allocated (malloc is strand-safe). Drained
+// by __boxcxx_thread_storage_exit when the strand ends — for main strand, that
+// call sits in __cxa_finalize BEFORE the static dtors ([basic.start.term]:
+// thread storage duration ends before static storage duration).
 namespace {
-AtExitEntry *g_thread_entries = nullptr;
-size_t       g_thread_count   = 0;
-size_t       g_thread_cap     = 0;
+struct ThreadExitNode {
+    void (*fn)(void *);
+    void           *arg;
+    ThreadExitNode *next;
+};
 } // namespace
+
+static thread_local ThreadExitNode *g_thread_exit_head = nullptr;
 
 extern "C" int __cxa_thread_atexit(void (*fn)(void *), void *arg, void *dso)
 {
     (void)dso;
     if (!fn) return -1;
 
-    if (g_thread_count == g_thread_cap) {
-        size_t new_cap = g_thread_cap ? g_thread_cap * 2 : 16;
-        void *grown = realloc(g_thread_entries, new_cap * sizeof(AtExitEntry));
-        if (!grown) return -1;
-        g_thread_entries = static_cast<AtExitEntry *>(grown);
-        g_thread_cap     = new_cap;
-    }
+    auto *node = static_cast<ThreadExitNode *>(_malloc_impl(sizeof(ThreadExitNode)));
+    if (!node) return -1;
 
-    g_thread_entries[g_thread_count].fn  = fn;
-    g_thread_entries[g_thread_count].arg = arg;
-    g_thread_count++;
+    node->fn   = fn;
+    node->arg  = arg;
+    node->next = g_thread_exit_head;   // LIFO push onto this strand's head
+    g_thread_exit_head = node;
     return 0;
+}
+
+extern "C" void __boxcxx_thread_storage_exit(void)
+{
+    // Pop LIFO — reverse of registration order. A dtor that registers another
+    // thread_local re-pushes onto the head, so the loop re-reads it and the
+    // late registration is honoured before the list drains.
+    while (g_thread_exit_head) {
+        ThreadExitNode *node = g_thread_exit_head;
+        g_thread_exit_head   = node->next;
+        node->fn(node->arg);
+        free(node);
+    }
 }
 
 extern "C" void __cxa_finalize(void *dso)
 {
     (void)dso;   // NULL → run everything (only mode for static binaries)
 
-    // thread_local destructors first, then statics — both in reverse
-    // registration order. Handlers registered DURING finalize (a dtor
-    // constructing another static) land at the tail and are picked up
-    // because the loops re-read the counts.
-    while (g_thread_count > 0) {
-        AtExitEntry entry = g_thread_entries[--g_thread_count];
-        entry.fn(entry.arg);
-    }
-    free(g_thread_entries);
-    g_thread_entries = nullptr;
-    g_thread_cap     = 0;
+    // Main strand's thread_local destructors run first (thread storage duration
+    // ends before static), then the process-global statics in reverse
+    // registration order. Handlers registered DURING the static drain (a dtor
+    // constructing another static) land at the tail and are picked up because
+    // the loop re-reads the count.
+    __boxcxx_thread_storage_exit();
 
     while (g_atexit_count > 0) {
         AtExitEntry entry = g_atexit_entries[--g_atexit_count];
@@ -215,33 +234,73 @@ extern "C" void __cxa_finalize(void *dso)
 // ── Function-local static guards ────────────────────────────────────────
 //
 // Itanium ABI: 64-bit guard object; byte 0 = "initialized", the rest is
-// implementation-defined. Byte 1 = boxcxx "initialization in progress"
-// marker for recursion detection.
+// implementation-defined. The whole word is operated on atomically so a
+// concurrent first-touch by two strands resolves to exactly one initializer:
+//
+//   bit  0     (byte 0)    GUARD_DONE        — initialized (ABI-mandated byte)
+//   bit  8     (byte 1)    GUARD_BUSY        — an initializer is running
+//   bits 32-63 (bytes 4-7) owner strand id   — who is running it (recursion)
+//
+// The winner CASes BUSY|owner in one atomic op (no torn owner window). A loser
+// whose own strand id matches the owner is a genuine recursive re-entry (UB per
+// [stmt.dcl]) and panics; any other loser spins until DONE, or — if the
+// initializer threw (abort clears BUSY without setting DONE) — retries to become
+// the initializer itself. Single-thread behaviour is unchanged: the very first
+// acquire always wins the CAS, and self-recursion is still detected.
+
+namespace {
+constexpr uint64_t GUARD_DONE = 0x1ull;        // byte 0
+constexpr uint64_t GUARD_BUSY = 0x100ull;      // byte 1
+constexpr int      GUARD_OWNER_SHIFT = 32;
+
+inline uint64_t guard_owner_bits(uint32_t self)
+{
+    return static_cast<uint64_t>(self) << GUARD_OWNER_SHIFT;
+}
+} // namespace
 
 extern "C" int __cxa_guard_acquire(uint64_t *guard)
 {
-    unsigned char *bytes = reinterpret_cast<unsigned char *>(guard);
-    if (bytes[0]) return 0;          // already initialized
-    if (bytes[1]) {
-        // C++ [stmt.dcl]: recursive re-entry during initialization is UB —
-        // diagnose loudly instead of looping or corrupting.
-        boxcxx::Panic("recursive initialization of function-local static");
+    const uint32_t self = strand_self();   // distinct per strand; cabin pid for main
+
+    for (;;) {
+        uint64_t cur = __atomic_load_n(guard, __ATOMIC_ACQUIRE);
+        if (cur & GUARD_DONE)
+            return 0;                       // already initialized
+
+        if (cur & GUARD_BUSY) {
+            uint32_t owner = static_cast<uint32_t>(cur >> GUARD_OWNER_SHIFT);
+            if (owner == self) {
+                // Same strand re-entered its own in-progress init — real UB.
+                boxcxx::Panic("recursive initialization of function-local static");
+            }
+            // Another strand is initializing: back off and re-poll.
+            yield();
+            continue;
+        }
+
+        // Claim it: publish BUSY + owner in a single atomic step.
+        uint64_t want = GUARD_BUSY | guard_owner_bits(self);
+        if (__atomic_compare_exchange_n(guard, &cur, want, false,
+                                        __ATOMIC_ACQUIRE, __ATOMIC_ACQUIRE)) {
+            return 1;                       // we are the initializer
+        }
+        // Lost the race (cur reloaded) — loop and re-evaluate.
     }
-    bytes[1] = 1;
-    return 1;
 }
 
 extern "C" void __cxa_guard_release(uint64_t *guard)
 {
-    unsigned char *bytes = reinterpret_cast<unsigned char *>(guard);
-    bytes[0] = 1;
-    bytes[1] = 0;
+    // Initialized: clear BUSY/owner, set DONE. Release so the constructed object
+    // is visible to any strand that observes DONE.
+    __atomic_store_n(guard, GUARD_DONE, __ATOMIC_RELEASE);
 }
 
 extern "C" void __cxa_guard_abort(uint64_t *guard)
 {
-    unsigned char *bytes = reinterpret_cast<unsigned char *>(guard);
-    bytes[1] = 0;
+    // Initializer threw: clear BUSY/owner, leave DONE unset so a waiting strand
+    // re-attempts the initialization.
+    __atomic_store_n(guard, 0ull, __ATOMIC_RELEASE);
 }
 
 // ── Vtable trap entries ─────────────────────────────────────────────────
