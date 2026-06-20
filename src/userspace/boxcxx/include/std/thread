@@ -1,10 +1,28 @@
-// boxcxx — <thread> (Ф20a slice: this_thread::sleep_for/sleep_until only;
-// the std::thread class + get_id/yield/hardware_concurrency arrive in Ф20b).
+// boxcxx — <thread>.
+//
+// Ф20a slice: this_thread::sleep_for/sleep_until (a timed kernel park IS the
+// sleep). Ф20b-2: the std::thread class, thread::id, this_thread::get_id/yield
+// and hardware_concurrency — a thread is a strand (strand_spawn) in the caller's
+// cabin, joined via park/wake on a heap flag.
 #ifndef BOXCXX_THREAD
 #define BOXCXX_THREAD
 #include <chrono>
+#include <compare>
 #include <cstdint>
-#include "box/sync.h"   // addr_park — a timed park IS the sleep
+#include <exception>      // std::terminate (uncaught-in-thread, dtor/move-assign)
+#include <format>         // std::formatter<thread::id> (decimal pid)
+#include <functional>     // std::invoke, std::hash<thread::id>
+#include <system_error>   // std::system_error on a failed spawn / bad precondition
+#include <tuple>          // decay-copied argument pack + std::apply
+#include <type_traits>    // decay_t / remove_cvref_t / is_same_v (ctor constraint)
+#include <utility>        // std::forward / std::move / std::swap
+
+#include "box/sync.h"               // addr_park / addr_wake — a timed park IS the sleep
+#include "box/strand.h"             // strand_spawn / strand_exit — a thread is a strand
+#include "box/system.h"             // sysinfo / system_info_t (hardware_concurrency)
+#include "box/core/strand_self.h"   // strand_self — this_thread::get_id
+#include "box/cxx/tls_strand.h"     // per-strand thread_local bootstrap the trampoline drives
+
 namespace std {
 namespace this_thread {
 
@@ -31,5 +49,252 @@ inline void sleep_until(const chrono::time_point<Clock, Duration> &abs)
 }
 
 } // namespace this_thread
+
+// ── std::thread ──────────────────────────────────────────────────────────────
+//
+// A thread is a strand: strand_spawn runs the entry trampoline on a fresh strand
+// inside the caller's cabin (shared CR3/heap/code, own stack + scheduler state).
+// The whole observable state of a thread is its id (a strand pid); join/detach is
+// park/wake on a small heap "Join" flag shared between the thread object and the
+// strand's trampoline.
+class thread {
+public:
+    // ── thread::id ───────────────────────────────────────────────────────────
+    // A real, Touch-observable identity: the value IS the strand's kernel pid, so
+    // two ids compare equal iff they name the same kernel strand (unlike an opaque
+    // pthread_t, whose bit pattern carries no system meaning). pid_ == 0 is the
+    // "not a thread" id (default-constructed / after join / after detach / moved-
+    // from), and never collides with a live strand (kernel pids start at 1).
+    class id {
+    public:
+        id() noexcept = default;
+
+        friend bool operator==(id a, id b) noexcept { return a.pid_ == b.pid_; }
+        friend strong_ordering operator<=>(id a, id b) noexcept
+        {
+            return a.pid_ <=> b.pid_;
+        }
+
+    private:
+        friend class thread;
+        friend struct hash<id>;
+        template <class T, class CharT> friend struct formatter;
+        explicit id(uint32_t pid) noexcept : pid_(pid) {}
+        uint32_t pid_ = 0;
+    };
+
+    using native_handle_type = uint32_t;   // the strand pid
+
+    thread() noexcept = default;
+
+    // [thread.thread.constr]: decay-copy f + args into a heap closure, spawn a
+    // strand to run it. Constrained so it is never chosen as the move ctor.
+    template <class F, class... Args,
+              class = enable_if_t<!is_same_v<remove_cvref_t<F>, thread>>>
+    explicit thread(F &&f, Args &&...args)
+    {
+        using Tup = tuple<decay_t<F>, decay_t<Args>...>;
+        struct Closure {
+            Tup   call;
+            Join *j;
+        };
+        // refs == 2: this thread object + the trampoline. Whoever's fetch_sub
+        // hits 0 frees it, so neither frees memory the other still touches.
+        Join    *j = new Join{0, 2};
+        Closure *c;
+        try {
+            c = new Closure{Tup{forward<F>(f), forward<Args>(args)...}, j};
+        } catch (...) {
+            delete j;   // Closure alloc or an argument copy/move ctor threw
+            throw;
+        }
+
+        uint32_t pid = strand_spawn(&Trampoline<Closure>, c);
+        if (pid == 0) {
+            delete c;
+            delete j;
+            // BoxOS-native cause: the kernel had no strand slot / spawn refused.
+            // resource_unavailable_try_again is the standard mapping; the message
+            // names the real reason rather than pretending a POSIX EAGAIN.
+            throw system_error(make_error_code(errc::resource_unavailable_try_again),
+                               "std::thread: strand_spawn failed");
+        }
+        id_   = id{pid};
+        join_ = j;
+    }
+
+    thread(const thread &)            = delete;
+    thread &operator=(const thread &) = delete;
+
+    thread(thread &&other) noexcept : id_(other.id_), join_(other.join_)
+    {
+        other.id_   = id{};
+        other.join_ = nullptr;
+    }
+    thread &operator=(thread &&other) noexcept
+    {
+        if (this != &other) {
+            // [thread.thread.assign]: a joinable target is a programming error.
+            if (joinable()) terminate();
+            id_         = other.id_;
+            join_       = other.join_;
+            other.id_   = id{};
+            other.join_ = nullptr;
+        }
+        return *this;
+    }
+
+    // [thread.thread.destr]: destroying a still-joinable thread is std::terminate.
+    ~thread()
+    {
+        if (joinable()) terminate();
+    }
+
+    bool joinable() const noexcept { return id_.pid_ != 0; }
+    id   get_id() const noexcept { return id_; }
+    native_handle_type native_handle() const noexcept { return id_.pid_; }
+
+    // Wrap a strand pid as a thread::id (the id ctor is private; thread is its
+    // friend). Used by this_thread::get_id for the running strand.
+    static id MakeId(uint32_t pid) noexcept { return id{pid}; }
+
+    void join()
+    {
+        if (!joinable())
+            throw system_error(make_error_code(errc::invalid_argument),
+                               "std::thread::join: not joinable");
+        // Park on the flag until the trampoline signals completion. The version is
+        // re-read on every wake: a store we missed makes the next park return
+        // ERR_ADDR_VALUE_MISMATCH at once (lost-wake-safe); the bounded 100ms is a
+        // backstop, not the wake path.
+        for (;;) {
+            uint64_t s = __atomic_load_n(&join_->flag, __ATOMIC_ACQUIRE);
+            if (s == 1) break;
+            addr_park(&join_->flag, s, 100);
+        }
+        DropJoin();
+        id_ = id{};
+    }
+
+    void detach()
+    {
+        if (!joinable())
+            throw system_error(make_error_code(errc::invalid_argument),
+                               "std::thread::detach: not joinable");
+        // Drop our reference and walk away; the strand keeps running and its
+        // trampoline drops the other reference at exit. The P5b runtime reaper
+        // reclaims the finished kernel strand.
+        DropJoin();
+        id_ = id{};
+    }
+
+    void swap(thread &other) noexcept
+    {
+        std::swap(id_, other.id_);
+        std::swap(join_, other.join_);
+    }
+
+    // Reports the number of App-Cores (userspace-schedulable cores) — the count of
+    // threads that can make true forward progress in parallel. 0 if unknown.
+    static unsigned hardware_concurrency() noexcept
+    {
+        system_info_t si;
+        return sysinfo(&si) == 0 ? (unsigned)si.cpu_app_cores : 0u;
+    }
+
+private:
+    // The join rendezvous: a flag the trampoline sets to 1 at completion, and a
+    // refcount that keeps the block alive until BOTH parties are done with it.
+    struct Join {
+        uint64_t flag;   // 0 = running, 1 = finished (release-stored by trampoline)
+        uint32_t refs;   // 2 → 0; the party whose fetch_sub reaches 0 deletes it
+    };
+
+    // Drop this thread object's reference to the Join block; free it iff we are the
+    // last holder. The trampoline runs the symmetric drop, so exactly one side
+    // frees and never while the other still reads &flag.
+    void DropJoin() noexcept
+    {
+        if (__atomic_sub_fetch(&join_->refs, 1u, __ATOMIC_ACQ_REL) == 0)
+            delete join_;
+        join_ = nullptr;
+    }
+
+    // The strand entry point. Plain void(*)(void*) so strand_spawn can call it.
+    template <class Closure>
+    static void Trampoline(void *p)
+    {
+        auto *c = static_cast<Closure *>(p);
+        Join *j = c->j;
+
+        // CARRY: the kernel strand trampoline does NOT bootstrap C++ TLS, so do it
+        // here FIRST — before any thread_local in the user callable is touched —
+        // then arm this strand's thread_local destructor registry.
+        __boxcxx_tls_strand_init();
+        __boxcxx_thread_storage_enter();
+
+        // [thread.thread.constr]/5 + [basic.start.term]: an exception escaping the
+        // initial function OR a thread_local destructor calls std::terminate.
+        try {
+            apply(
+                [](auto &&...a) {
+                    invoke(static_cast<decltype(a)>(a)...);
+                },
+                std::move(c->call));
+            delete c;                 // payload (the decay-copied args) is done with
+            // Run this strand's thread_local destructors while its neg-TLS page is
+            // still mapped (thread storage ends with the strand — [basic.start.term]).
+            __boxcxx_thread_storage_exit();
+        } catch (...) {
+            terminate();
+        }
+
+        // Publish completion, then wake a joiner. The wake touches only &j->flag,
+        // which is alive because we still hold our reference — so a joiner that
+        // already freed its side cannot have freed j out from under this wake.
+        __atomic_store_n(&j->flag, 1ull, __ATOMIC_RELEASE);
+        addr_wake(&j->flag, 0);
+
+        // Drop the trampoline's reference; free iff we are the last holder.
+        if (__atomic_sub_fetch(&j->refs, 1u, __ATOMIC_ACQ_REL) == 0)
+            delete j;
+
+        strand_exit();                // noreturn — ends this strand
+    }
+
+    id    id_{};
+    Join *join_ = nullptr;
+};
+
+inline void swap(thread &a, thread &b) noexcept { a.swap(b); }
+
+namespace this_thread {
+
+inline thread::id get_id() noexcept { return thread::MakeId(strand_self()); }
+inline void       yield() noexcept { ::yield(); }
+
+} // namespace this_thread
+
+// hash<thread::id>: the identity is a uint32_t pid, so reuse its scalar hash —
+// equal ids (equal pids) hash equal, as required for use as a key.
+template <>
+struct hash<thread::id> {
+    size_t operator()(thread::id v) const noexcept
+    {
+        return hash<uint32_t>{}(v.pid_);
+    }
+};
+
+// formatter<thread::id>: print the pid in decimal. Inherits the integer spec
+// parser/state from formatter<uint32_t> (so width/fill/align all work) and just
+// feeds the pid through it.
+template <>
+struct formatter<thread::id, char> : formatter<uint32_t, char> {
+    auto format(thread::id v, format_context &ctx) const
+    {
+        return formatter<uint32_t, char>::format(v.pid_, ctx);
+    }
+};
+
 } // namespace std
 #endif // BOXCXX_THREAD

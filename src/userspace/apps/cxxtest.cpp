@@ -5227,10 +5227,15 @@ void Phase35()
         nanoseconds took = pp.elapsed();
         Check(g_p35_pp.load(std::memory_order_acquire) == 2 * kP35PingPong,
               "phase35 ping-pong reached target (cross-strand atomic notify)");
-        // Bound sits below the backstop-only floor (64 hops × 100ms = 6.4s on
-        // 4c, 12.8s on 1c) yet well above a healthy notify run → discriminates
+        // Backstop-only floor = hops×100ms: ~6.4s when the two strands run on
+        // separate cores, ~12.8s when they share one. Pick a bound below the
+        // applicable floor (so a dead wake fails loudly) but with headroom for a
+        // starved single core — core-conditional, so it discriminates on both
         // without flaking under host load.
-        Check(took < milliseconds(5000),
+        system_info_t si35{};
+        unsigned pp_cores = (sysinfo(&si35) == 0) ? si35.cpu_app_cores : 0u;
+        auto pp_bound = (pp_cores >= 2) ? milliseconds(5000) : milliseconds(11000);
+        Check(took < pp_bound,
               "phase35 ping-pong woken by notify, not the 100ms backstop");
         Check(p35_join(), "phase35 ping-pong worker joined");
     }
@@ -5439,6 +5444,241 @@ void Phase36()
            "(isolation + tdata-init + per-strand dtor)\n");
 }
 
+// ── phase37: std::thread (Ф20b-2) ────────────────────────────────────────────
+// The thread class on top of the per-strand foundation: run+join, decay-copied
+// args, thread_local INSIDE a std::thread (proves the entry trampoline drives
+// the tls_strand hooks — without them every thread_local reads 0 and no dtor
+// runs), detach + reaper reclaim, get_id/native_handle identity, hardware_
+// concurrency, and move. Every join is bounded (std::thread::join's own 100ms
+// backstop loop) and all thread bodies are trivial, so a healthy run cannot
+// wedge the harness. FSGSBASE-guarded exactly like Phase35/36.
+
+static std::atomic<int> g_p37_flag{0};   // (a) thread runs + join
+static std::atomic<long> g_p37_sum{0};   // (c) decay-copied (int,long)
+static std::atomic<int> g_p37_strlen{0}; // (c) decay-copied std::string by value
+
+// (b) thread_local INSIDE a std::thread. A distinct per-thread cell (isolation)
+// plus a thread_local whose dtor bumps a process-global atomic (proves the
+// trampoline runs __boxcxx_thread_storage_exit at thread end).
+static constexpr int kP37TlsThreads = 4;
+thread_local int g_p37_tls = 0x7777;            // main's cell — threads must not disturb
+static std::atomic<int> g_p37_tls_dtors{0};
+struct P37TlsProbe {
+    int marker = 0x37CD;
+    ~P37TlsProbe() { g_p37_tls_dtors.fetch_add(1, std::memory_order_release); }
+};
+thread_local P37TlsProbe g_p37_tls_probe;
+static volatile uint32_t g_p37_tls_ok[kP37TlsThreads];       // 1 iff own value read back
+static volatile uint32_t g_p37_tls_seen[kP37TlsThreads];     // value the thread read back
+
+// (d) detach + reaper churn.
+static constexpr uint32_t kP37Churn = 40;
+static std::atomic<uint32_t> g_p37_churn_done{0};
+
+void Phase37()
+{
+    using namespace std::chrono;
+
+    // A thread is a strand; strands need FSGSBASE (per-strand TLS via ring-3
+    // RDFSBASE). Without it strand_spawn refuses and std::thread's ctor would
+    // throw — SKIP cleanly with a PASS, matching Phase35/36.
+    if (!cpu_has_fsgsbase()) {
+        printf("[CXX] note phase37: strands need FSGSBASE — skipping\n");
+        printf("[CXX] PASS phase37: std::thread (skipped, no FSGSBASE)\n");
+        return;
+    }
+
+    // (a) thread runs, then join().
+    {
+        g_p37_flag.store(0, std::memory_order_relaxed);
+        std::thread t([] { g_p37_flag.store(1, std::memory_order_release); });
+        Check(t.joinable(), "phase37 thread joinable before join");
+        t.join();
+        Check(!t.joinable(), "phase37 thread not joinable after join");
+        Check(g_p37_flag.load(std::memory_order_acquire) == 1,
+              "phase37 thread ran its body (join saw the result)");
+    }
+
+    // (c) decay-copy of arguments: an (int, long) pack and a non-trivial
+    //     std::string passed BY VALUE (the closure owns its own copy).
+    {
+        g_p37_sum.store(0, std::memory_order_relaxed);
+        std::thread t(
+            [](int a, long b) {
+                g_p37_sum.store((long)a + b, std::memory_order_release);
+            },
+            7, 35L);
+        t.join();
+        Check(g_p37_sum.load(std::memory_order_acquire) == 42,
+              "phase37 args decay-copied into closure (7 + 35 == 42)");
+
+        g_p37_strlen.store(-1, std::memory_order_relaxed);
+        std::string msg = "box-thread";   // decay-copied; thread reads its own copy
+        std::thread t2(
+            [](std::string s) {
+                g_p37_strlen.store((int)s.size(), std::memory_order_release);
+            },
+            msg);
+        t2.join();
+        Check(g_p37_strlen.load(std::memory_order_acquire) == (int)msg.size(),
+              "phase37 std::string argument decay-copied by value");
+    }
+
+    // (b) thread_local INSIDE a std::thread. This is the proof the entry
+    //     trampoline wires __boxcxx_tls_strand_init / _storage_exit: each thread
+    //     gets its OWN thread_local cell (no cross-talk), and a thread_local with
+    //     a dtor runs that dtor at thread end (counted into g_p37_tls_dtors).
+    {
+        g_p37_tls = 0x4242;   // main's cell — must survive untouched
+        g_p37_tls_dtors.store(0, std::memory_order_relaxed);
+        for (int i = 0; i < kP37TlsThreads; i++) {
+            g_p37_tls_ok[i]   = 0;
+            g_p37_tls_seen[i] = 0;
+        }
+        std::thread ts[kP37TlsThreads];
+        for (int i = 0; i < kP37TlsThreads; i++) {
+            ts[i] = std::thread(
+                [](int id) {
+                    // Read the copied .tdata init (0x7777) before writing — would
+                    // be 0 if the trampoline had not run __boxcxx_tls_strand_init.
+                    bool tdata = (g_p37_tls == 0x7777);
+                    g_p37_tls  = 0x2000 + id;                 // this thread's own cell
+                    std::this_thread::sleep_for(milliseconds(8)); // overlap window
+                    uint32_t back = (uint32_t)g_p37_tls;
+                    g_p37_tls_seen[id] = back;
+                    // Touch the dtor-probe so its destructor is registered for this
+                    // thread (first-use guard lives in this strand's neg-TLS).
+                    bool probe = (g_p37_tls_probe.marker == 0x37CD);
+                    g_p37_tls_ok[id] =
+                        (tdata && probe && back == (uint32_t)(0x2000 + id)) ? 1u : 0u;
+                },
+                i);
+        }
+        for (int i = 0; i < kP37TlsThreads; i++) ts[i].join();
+
+        for (int i = 0; i < kP37TlsThreads; i++) {
+            Check(g_p37_tls_ok[i] == 1u,
+                  "phase37 thread_local in std::thread: tdata-init + own read-back");
+        }
+        Check(g_p37_tls_dtors.load(std::memory_order_acquire) == kP37TlsThreads,
+              "phase37 thread_local dtors ran at thread end (trampoline storage_exit)");
+        Check(g_p37_tls == 0x4242,
+              "phase37 main thread_local untouched by std::threads");
+    }
+
+    // (e) get_id / native_handle identity: ids of N threads + this_thread::get_id
+    //     are all distinct and non-default; native_handle == the live pid; after
+    //     join the id is default and native_handle is 0. Uses unordered_set, which
+    //     also exercises hash<thread::id>.
+    {
+        constexpr int kIdThreads = 4;
+        std::thread ids[kIdThreads];
+        std::unordered_set<std::thread::id> seen;
+        seen.insert(std::this_thread::get_id());   // the running strand's id
+        bool all_live_nonzero = true;
+        for (int i = 0; i < kIdThreads; i++) {
+            ids[i] = std::thread([] { std::this_thread::yield(); });
+            Check(ids[i].get_id() != std::thread::id{},
+                  "phase37 live thread get_id() is non-default");
+            if (ids[i].native_handle() == 0) all_live_nonzero = false;
+            seen.insert(ids[i].get_id());
+        }
+        Check(all_live_nonzero, "phase37 live native_handle() == pid (non-zero)");
+        // main + kIdThreads distinct identities (no pid collision).
+        Check((int)seen.size() == kIdThreads + 1,
+              "phase37 all thread ids distinct (incl this_thread, via hash<id>)");
+        for (int i = 0; i < kIdThreads; i++) {
+            ids[i].join();
+            Check(ids[i].get_id() == std::thread::id{},
+                  "phase37 get_id() is default after join");
+            Check(ids[i].native_handle() == 0,
+                  "phase37 native_handle() is 0 after join");
+        }
+        // formatter<thread::id> prints the pid decimal (smoke: non-empty, digits).
+        std::thread fmt([] {});
+        std::string fid = std::format("{}", fmt.get_id());
+        Check(!fid.empty() && fid[0] >= '1' && fid[0] <= '9',
+              "phase37 formatter<thread::id> prints decimal pid");
+        fmt.join();
+    }
+
+    // (g) move: a thread's identity transfers; the source becomes non-joinable.
+    {
+        std::thread a([] { std::this_thread::yield(); });
+        std::thread::id moved_id = a.get_id();
+        std::thread b = std::move(a);
+        Check(!a.joinable(), "phase37 moved-from thread not joinable");
+        Check(b.joinable(), "phase37 move-target thread joinable");
+        Check(b.get_id() == moved_id, "phase37 move transfers the id");
+        b.join();
+    }
+
+    // (f) hardware_concurrency reports the App-Core count: it must equal
+    //     sysinfo().cpu_app_cores (the contract), and be > 0 exactly when the
+    //     machine actually has App-Cores. On a single-K-Core boot (default
+    //     `make run`, 0 App-Cores) returning 0 is the correct "no parallel
+    //     progress possible" answer, not a failure.
+    {
+        unsigned hc = std::thread::hardware_concurrency();
+        system_info_t si;
+        if (sysinfo(&si) == 0) {
+            Check(hc == si.cpu_app_cores,
+                  "phase37 hardware_concurrency() == App-Core count");
+            if (si.cpu_app_cores > 0)
+                Check(hc > 0, "phase37 hardware_concurrency() > 0 when App-Cores exist");
+        } else {
+            Check(hc == 0, "phase37 hardware_concurrency() == 0 with no sysinfo");
+        }
+    }
+
+    // (d) detach + reaper: spawn+detach a churn of trivial threads; each bumps a
+    //     shared atomic then exits, becoming a corpse the P5b reaper reclaims.
+    //     Bounded-wait until ALL bumped AND process_count returns toward baseline
+    //     (strandtest test3 idiom — proves both detach and reaper).
+    {
+        system_info_t si;
+        bool have_sysinfo = (sysinfo(&si) == 0);
+        for (int k = 0; k < 16; k++) yield();           // let prior corpses settle
+        uint32_t base = (have_sysinfo && sysinfo(&si) == 0) ? si.process_count : 0;
+
+        g_p37_churn_done.store(0, std::memory_order_relaxed);
+        for (uint32_t i = 0; i < kP37Churn; i++) {
+            std::thread d(
+                [] { g_p37_churn_done.fetch_add(1, std::memory_order_release); });
+            d.detach();
+        }
+
+        // Wait for every detached thread to record completion (bounded). The
+        // detached strands run concurrently; we yield between polls to let them.
+        bool all_ran = false;
+        for (uint32_t cyc = 0; cyc < 200u && !all_ran; cyc++) {
+            if (g_p37_churn_done.load(std::memory_order_acquire) == kP37Churn)
+                all_ran = true;
+            else
+                for (int k = 0; k < 4; k++) yield();
+        }
+        Check(all_ran, "phase37 all detached threads ran to completion");
+
+        // process_count must return toward baseline — the reaper process_destroy'd
+        // the detached corpses (process_count-- happens only there). A broken
+        // reaper would leave it pinned near base + kP37Churn.
+        if (have_sysinfo) {
+            uint32_t cnt = base + kP37Churn;
+            for (uint32_t cyc = 0; cyc < 200u; cyc++) {
+                if (sysinfo(&si) == 0) cnt = si.process_count;
+                if (cnt <= base + 4u) break;
+                for (int k = 0; k < 4; k++) yield();
+            }
+            Check(cnt <= base + 4u,
+                  "phase37 detached strands reclaimed by reaper (process_count "
+                  "returned to baseline)");
+        }
+    }
+
+    printf("[CXX] PASS phase37: std::thread "
+           "(join/detach/args/thread_local/get_id/hw_concurrency/move)\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -5497,6 +5737,7 @@ int main()
     Phase34();
     Phase35();
     Phase36();
+    Phase37();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
