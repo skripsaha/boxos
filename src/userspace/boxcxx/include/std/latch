@@ -49,7 +49,8 @@ public:
         unsigned spin = 0;
         ptrdiff_t cur;
         while ((cur = __counter.load(memory_order_acquire)) != 0)
-            __boxcxx_atomic_wait_cycle(&__counter, &cur, sizeof(cur), &spin);
+            __boxcxx_atomic_wait_cycle(&__counter, &cur, sizeof(cur), ~0ull,
+                                       &spin);
     }
 
     void arrive_and_wait(ptrdiff_t n = 1)

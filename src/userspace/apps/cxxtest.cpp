@@ -5149,6 +5149,28 @@ static void p35_pp_worker(void *)
     strand_exit();
 }
 
+// Multi-strand barrier: main + spawned workers run kP35BarRounds phases. Each
+// round the count (low 32 of __state) churns toward 0 while early arrivers wait
+// on the phase (high 32) — the exact scenario the phase-mask makes park precisely
+// instead of busy-spinning. Validates barrier correctness across strands and runs
+// the masked compare under real contention. Workers gate on g_p35_bar_go until
+// main has built the barrier with the count matching how many actually spawned
+// (so a failed spawn can never deadlock on a count mismatch).
+static std::barrier<>   *g_p35_bar;
+static std::atomic<bool> g_p35_bar_go{false};
+static std::atomic<int>  g_p35_bar_done{0};
+static constexpr int     kP35BarRounds = 5;
+static void p35_bar_worker(void *)
+{
+    g_p35_bar_go.wait(false, std::memory_order_acquire); // until main builds barrier
+    for (int r = 0; r < kP35BarRounds; r++)
+        g_p35_bar->arrive_and_wait();
+    g_p35_bar_done.fetch_add(1, std::memory_order_release);
+    __atomic_sub_fetch(&g_p35_remaining, 1u, __ATOMIC_RELEASE);
+    addr_wake(&g_p35_remaining, 0);
+    strand_exit();
+}
+
 void Phase35()
 {
     using namespace std::chrono;
@@ -5243,8 +5265,35 @@ void Phase35()
         Check(p35_join(), "phase35 semaphore worker joined");
     }
 
+    // 6) Multi-strand barrier: main + workers run kP35BarRounds phases. The count
+    //    churns toward 0 every round while early arrivers park on the phase — the
+    //    masked predicate keeps them parked (not spinning) while the count moves.
+    //    Proves barrier is correct across strands and drives the masked compare
+    //    under real contention.
+    {
+        g_p35_bar_go.store(false, std::memory_order_relaxed);
+        g_p35_bar_done.store(0, std::memory_order_relaxed);
+        int workers = 0;
+        if (strand_spawn(p35_bar_worker, 0)) workers++;
+        if (strand_spawn(p35_bar_worker, 0)) workers++;
+        if (workers == 0) {
+            printf("[CXX] note phase35: no barrier worker spawned — skipping\n");
+        } else {
+            g_p35_remaining = (uint64_t)workers;
+            std::barrier<> bar(1 + workers);
+            g_p35_bar = &bar;
+            g_p35_bar_go.store(true, std::memory_order_release);
+            g_p35_bar_go.notify_all();         // release workers onto the barrier
+            for (int r = 0; r < kP35BarRounds; r++)
+                bar.arrive_and_wait();         // main participates each phase
+            Check(p35_join(), "phase35 barrier workers joined");
+            Check(g_p35_bar_done.load(std::memory_order_acquire) == workers,
+                  "phase35 barrier: all workers cleared all phases (cross-strand)");
+        }
+    }
+
     printf("[CXX] PASS phase35: this_thread::sleep_for + latch/semaphore/atomic "
-           "real park->wake (sibling strand)\n");
+           "+ multi-strand barrier real park->wake (sibling strands)\n");
 }
 
 } // namespace
