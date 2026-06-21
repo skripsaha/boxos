@@ -143,6 +143,7 @@
  * SysAddrWake or by the timeout armed via TouchQueueWakeAfter. */
 #define SYSTEM_OP_ADDR_PARK         0xC0  /* (u64 va)(u64 expected)(u32 timeout_ms) */
 #define SYSTEM_OP_ADDR_WAKE         0xC1  /* (u64 va)(u32 count — 0 = all)         */
-#define SYSTEM_OP_STRAND_SPAWN      0xC2  /* (u64 entry_va)(u64 arg) -> out: u32 strand pid */
+#define SYSTEM_OP_STRAND_SPAWN      0xC2  /* (u64 entry_va)(u64 arg)[(u8 joinable)] -> out: u32 strand pid */
+#define SYSTEM_OP_STRAND_RELEASE    0xC3  /* (u32 pid) — clear a joinable strand's reap-block so the reaper can reclaim it (std::thread join/detach); zombie-until-join keeps thread::id (=pid) unique while joinable */
 
 #endif // BOXOS_DECKS_H

@@ -843,7 +843,7 @@ int process_load_binary(process_t *proc, const void *binary_data, size_t size)
  *
  * Returns the new strand, or NULL on any failure (fully unwound).
  */
-process_t *strand_spawn(cabin_t *cabin, uintptr_t entry_va, uint64_t arg)
+process_t *strand_spawn(cabin_t *cabin, uintptr_t entry_va, uint64_t arg, bool joinable)
 {
     if (!cabin || !cabin->vmm)
     {
@@ -881,6 +881,10 @@ process_t *strand_spawn(cabin_t *cabin, uintptr_t entry_va, uint64_t arg)
     proc->magic    = PROCESS_MAGIC;
     proc->rq_prio  = -1;
     proc->rq_index = -1;
+    /* Zombie-until-join: a joinable strand (std::thread) must not be reaped on
+     * exit until join()/detach() releases it, so its pid (== thread::id) stays
+     * unique while the std::thread is joinable. Raw workers spawn joinable=0. */
+    proc->reap_blocked = joinable ? 1u : 0u;
 
     proc->pid = pid_alloc();
     if (proc->pid == PID_INVALID)
@@ -1828,6 +1832,13 @@ void process_reap_strands(void)
          * process_destroy re-checks "current on a core" authoritatively under
          * the scheduler scan and bails (we retry next tick). */
         if (__atomic_load_n(&p->destroying, __ATOMIC_ACQUIRE)) continue;
+        /* Zombie-until-join: a joinable std::thread strand (reap_blocked=1) is
+         * NOT reclaimed even after it exits — its pid (== thread::id) must stay
+         * reserved while the std::thread is still joinable, or a recycled pid
+         * would collide with the live id. join()/detach() clears the flag via
+         * SYSTEM_OP_STRAND_RELEASE, after which the next tick reaps it. Raw
+         * strand_spawn workers (reap_blocked=0) keep the eager-reap behavior. */
+        if (__atomic_load_n(&p->reap_blocked, __ATOMIC_ACQUIRE)) continue;
         process_state_t st = __atomic_load_n(&p->state, __ATOMIC_ACQUIRE);
         if (st == PROC_DONE || st == PROC_CRASHED)
         {

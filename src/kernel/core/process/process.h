@@ -184,6 +184,15 @@ typedef struct process_t
     uintptr_t         hammock_base;
     uintptr_t         user_stack_phys;
 
+    /* Zombie-until-join (std::thread conformance). When a strand is spawned
+     * JOINABLE (strand_spawn joinable=1, used by std::thread), this is 1 and the
+     * P5b reaper will NOT reclaim it on exit — it lingers as a zombie holding its
+     * pid, so thread::id (==pid) stays unique while the std::thread is joinable.
+     * SYSTEM_OP_STRAND_RELEASE (join()/detach()) clears it (SEQ_CST) → the reaper
+     * then reclaims it. 0 for raw strand_spawn workers (eager reap, as before)
+     * and the main strand. Zeroed by the spawn memset. */
+    volatile uint8_t  reap_blocked;
+
     /* Per-strand IPC rings (P5a).  kring.c / touch_ring.c route by THESE
      * (not by cabin->*_ring_phys), so concurrent multi-strand syscalls never
      * share ring storage — the P4→P5 data-race fix.
@@ -244,8 +253,12 @@ void process_destroy(process_t *proc);
  * user stack + CET shadow stack carved from the cabin's hammock window;
  * starts it at entry_va with `arg` in rdi and enqueues it.  Increments
  * cabin->strand_count so the cabin outlives the spawning strand.  Returns
- * the new strand or NULL on failure (fully unwound). */
-process_t *strand_spawn(cabin_t *cabin, uintptr_t entry_va, uint64_t arg);
+ * the new strand or NULL on failure (fully unwound).
+ *
+ * joinable=true (std::thread) sets reap_blocked so the strand becomes a zombie
+ * on exit (pid held) until SYSTEM_OP_STRAND_RELEASE; joinable=false (raw worker)
+ * keeps the eager-reap behavior. */
+process_t *strand_spawn(cabin_t *cabin, uintptr_t entry_va, uint64_t arg, bool joinable);
 
 int process_load_binary(process_t *proc, const void *binary_data, size_t size);
 

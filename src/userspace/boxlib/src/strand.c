@@ -38,7 +38,7 @@ static void strand_trampoline(void *p)
     strand_exit();
 }
 
-uint32_t strand_spawn(void (*fn)(void *arg), void *arg)
+static uint32_t strand_spawn_impl(void (*fn)(void *arg), void *arg, uint8_t joinable)
 {
     if (!fn) return 0;
 
@@ -47,9 +47,10 @@ uint32_t strand_spawn(void (*fn)(void *arg), void *arg)
     s->fn  = fn;
     s->arg = arg;
 
-    uint64_t params[2];
-    params[0] = (uint64_t)(uintptr_t)&strand_trampoline;  /* entry_va */
-    params[1] = (uint64_t)(uintptr_t)s;                   /* arg -> rdi  */
+    uint64_t params[3];
+    params[0] = (uint64_t)(uintptr_t)&strand_trampoline;  /* entry_va             */
+    params[1] = (uint64_t)(uintptr_t)s;                   /* arg -> rdi           */
+    params[2] = (uint64_t)joinable;                       /* 1 = zombie-until-join */
 
     uint32_t pid = 0;
     int rc = MfCall1(DECK_SYSTEM, SYSTEM_OP_STRAND_SPAWN,
@@ -64,6 +65,26 @@ uint32_t strand_spawn(void (*fn)(void *arg), void *arg)
         return 0;
     }
     return pid;
+}
+
+uint32_t strand_spawn(void (*fn)(void *arg), void *arg)
+{
+    return strand_spawn_impl(fn, arg, 0);   /* eager-reap worker (raw) */
+}
+
+uint32_t strand_spawn_joinable(void (*fn)(void *arg), void *arg)
+{
+    return strand_spawn_impl(fn, arg, 1);   /* zombie-until-join (std::thread) */
+}
+
+void strand_release(uint32_t pid)
+{
+    if (pid == 0) return;
+    uint32_t p = pid;
+    (void)MfCall1(DECK_SYSTEM, SYSTEM_OP_STRAND_RELEASE,
+                  &p, (uint16_t)sizeof(p),
+                  NULL, 0, NULL, 0, NULL,
+                  BOX_TIMEOUT_IPC_MS, NULL);
 }
 
 void strand_exit(void)

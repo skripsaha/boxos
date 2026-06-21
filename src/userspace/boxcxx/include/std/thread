@@ -110,7 +110,11 @@ public:
             throw;
         }
 
-        uint32_t pid = strand_spawn(&Trampoline<Closure>, c);
+        // Joinable spawn: the kernel keeps the finished strand as a zombie
+        // (pid reserved) until join()/detach() calls strand_release, so this
+        // thread's id (== the pid) stays unique while it is joinable — a
+        // recycled pid can never collide with a live thread::id.
+        uint32_t pid = strand_spawn_joinable(&Trampoline<Closure>, c);
         if (pid == 0) {
             delete c;
             delete j;
@@ -174,6 +178,10 @@ public:
             addr_park(&join_->flag, s, 100);
         }
         DropJoin();
+        // Release the zombie: the strand has exited and held its pid only so our
+        // id stayed unique. Now that we relinquish the id, let the reaper reclaim
+        // the pid. (The strand was spawned joinable; raw strands are not.)
+        strand_release(id_.pid_);
         id_ = id{};
     }
 
@@ -183,9 +191,11 @@ public:
             throw system_error(make_error_code(errc::invalid_argument),
                                "std::thread::detach: not joinable");
         // Drop our reference and walk away; the strand keeps running and its
-        // trampoline drops the other reference at exit. The P5b runtime reaper
-        // reclaims the finished kernel strand.
+        // trampoline drops the other reference at exit. Release the reap-block so
+        // the P5b reaper reclaims the strand when it finishes — we no longer hold
+        // its id, so the pid may be recycled.
         DropJoin();
+        strand_release(id_.pid_);
         id_ = id{};
     }
 
