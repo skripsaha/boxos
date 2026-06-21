@@ -2,21 +2,30 @@
  * sync_ops.c — SYSTEM_OP_ADDR_PARK / SYSTEM_OP_ADDR_WAKE handlers.
  *
  * These are the kernel substrate for std::atomic::wait / notify_one /
- * notify_all (to be wired from C++ once Strands exist).
+ * notify_all and (via __boxcxx_atomic_wait_cycle) every C++ blocking primitive.
  *
- * Park/wake result-delivery mirrors SysTouchAwait in touch_ops.c exactly:
- *   - park parks via process_set_state(PROC_WAITING) and returns
- *     ERR_WOULD_BLOCK — the identical signal that guide.c uses to know
- *     the caller is parked and its result will arrive later.
- *   - wake sets PROC_WAITING → PROC_WORKING and sends an IPI, exactly
- *     as touch_queue_fire_wake (touch_queue.c:105) does.
- *   - timeout is armed via TouchQueueWakeAfter — the same helper
- *     SysTouchAwait uses.
- *   - The lost-wakeup re-check after PROC_WAITING mirrors SysTouchAwait's
- *     TouchRing tail/head re-check (touch_ops.c:310-319): we re-load
- *     *phys and entry.done under ACQUIRE; if either signals "already
- *     woken", we undo the park and return ERR_ADDR_VALUE_MISMATCH so the
- *     caller retries immediately instead of sleeping forever.
+ * ASYNC-COMPLETION MODEL (the load-bearing invariant — see boxcxx audit):
+ * the parked caller blocks in boxlib result_wait() on ITS ResultRing, so a wake
+ * MUST write that same ResultRing or the caller never sees it. (The earlier
+ * design relied on guide.c's transient ERR_WOULD_BLOCK ack — but result_wait
+ * filters that ack out, so notify/addr_wake could not break the wait early and
+ * timed waits slept to their deadline. That was the Ф20d timed-wake bug.)
+ *
+ *   - park: register an AddrWaitEntry, arm a timeout reschedule, set PROC_WAITING,
+ *     and go ASYNC (set *async_owns_crates so guide does NOT push a reply) —
+ *     the completion arrives later, exactly like the write_job async path.
+ *   - EARLY WAKE (notify): addr_wake CLAIMS the entry (AddrWaitClaim: done 0->1 +
+ *     unlink, atomically under the bucket lock) and KResultPushes ONE OK Result,
+ *     then flips PROC_WAITING -> PROC_WORKING + IPI. result_wait returns at once.
+ *     addr_wake runs on the K-Core, so KResultPush (which touches the cabin VMM)
+ *     is safe there. The parker's step-6 lost-wakeup recheck can also CLAIM (when
+ *     the watched value already changed) and complete synchronously.
+ *   - TIMEOUT: armed via TouchQueueWakeAfter — a light, IRQ-safe reschedule
+ *     (PROC_WORKING + IPI; NO ResultRing/VMM work in the PIT tick). The
+ *     rescheduled caller's boxlib result_wait then ends via its own call_timeout
+ *     (ERR_TIMEOUT). Delivering the timeout Result from the timer IRQ was tried
+ *     and REVERTED: doing VMM work in interrupt context starved cores from
+ *     ACKing TLB shootdowns under 16-core load (shootdown-timeout panic).
  *
  * Lock ordering (never violated here):
  *   vmm translate (holds ctx->lock) completes BEFORE bucket lock is taken.
@@ -35,6 +44,9 @@
 #include "vmm.h"
 #include "touch.h"
 #include "touch_queue.h"
+#include "kring.h"        /* KResultPush — deliver the wake completion to ResultRing */
+#include "result.h"       /* Result */
+#include "boxos_kctx.h"   /* KCTX_GUIDE */
 #include "error.h"
 #include "klib.h"
 #include "atomics.h"
@@ -52,20 +64,16 @@
  *   1.  VA → phys translate (before taking any bucket lock).
  *   2.  Value pre-check: if *phys != expected → return immediately.
  *   3.  Register AddrWaitEntry under bucket lock.
- *   4.  Arm timeout via TouchQueueWakeAfter (same as SysTouchAwait line 272).
- *   5.  process_set_state(PROC_WAITING) (same as SysTouchAwait line 275).
- *   6.  Lost-wakeup re-check under ACQUIRE: reload *phys and entry.done;
- *       if either indicates "already woken", undo park (same discipline as
- *       SysTouchAwait lines 310-319 which reload tail and undo the park).
- *   7.  Return ERR_WOULD_BLOCK (same as SysTouchAwait line 321): guide.c
- *       uses this to know the caller is parked. When SysAddrWake fires,
- *       it flips PROC_WAITING→PROC_WORKING + IPI (touch_queue_fire_wake
- *       pattern), which is the IDENTICAL mechanism that delivers the
- *       parked SysTouchAwait caller's result: the scheduler reschedules
- *       the process, and the process's next result_pop sees a normal
- *       result because guide.c pushed one via KResultPush when it handled
- *       ERR_WOULD_BLOCK. No separate result ring write is needed here —
- *       the guide.c ERR_WOULD_BLOCK path already handles it.
+ *   4.  Arm an IRQ-safe timeout reschedule via TouchQueueWakeAfter (PROC_WORKING
+ *       + IPI on expiry; the caller's result_wait call_timeout yields ERR_TIMEOUT).
+ *   5.  process_set_state(PROC_WAITING).
+ *   6.  Lost-wakeup recheck under ACQUIRE (reload *phys + entry.done) with
+ *       claim arbitration — see the inline comment at step 6.
+ *   7.  Go ASYNC (set *async_owns_crates) and return ERR_WOULD_BLOCK so guide
+ *       pushes NO reply now. The early-wake completion is a real Result
+ *       KResultPushed onto this caller's ResultRing by SysAddrWake (on a notify),
+ *       which also flips PROC_WAITING -> PROC_WORKING + IPI. That Result is what
+ *       ends the caller's result_wait; the IPI alone would only resume a poll.
  * ------------------------------------------------------------------------- */
 static int SysAddrPark(const ManifestOp *op, Crate *crates,
                        uint16_t crate_count, const OpContext *ctx)
@@ -115,7 +123,12 @@ static int SysAddrPark(const ManifestOp *op, Crate *crates,
     AddrWaitLink(bucket, entry);
     spin_unlock(&bucket->lock);
 
-    /* Step 4: arm timeout (identical to SysTouchAwait line 266-273). */
+    /* Step 4: arm an IRQ-safe timeout reschedule (same helper SysTouchAwait
+     * uses). On expiry the PIT tick only flips PROC_WORKING + IPI — it does NO
+     * ResultRing/VMM work in interrupt context. The rescheduled caller's boxlib
+     * result_wait then ends via its own call_timeout (timeout_ms + margin) with
+     * ERR_TIMEOUT. Early wake is the event-driven path: addr_wake KResultPushes
+     * from the K-Core (see SysAddrWake). */
     if (timeout_ms > 0) {
         uint64_t delay = ((uint64_t)timeout_ms * SCHEDULER_DEFAULT_TICK_HZ)
                          / 1000ULL;
@@ -128,43 +141,54 @@ static int SysAddrPark(const ManifestOp *op, Crate *crates,
     /* Step 5: park (identical to SysTouchAwait line 275). */
     process_set_state(ctx->proc, PROC_WAITING);
 
-    /* Step 6: lost-wakeup re-check (mirrors SysTouchAwait lines 310-319).
+    /* Step 6: lost-wakeup recheck — async-completion arbitration.
      *
-     * SysTouchAwait re-checks the TouchRing tail/head under ACQUIRE after
-     * setting PROC_WAITING. We do the same for our two wake indicators:
-     *   - entry.done: SysAddrWake set it to 1 under bucket lock before
-     *     sending the IPI. If we see it here, the wake happened between
-     *     our step-3 registration and step-5 park — undo the park.
-     *   - *phys value changed: a writer modified the address between our
-     *     step-2 pre-check and now — the condition the caller wanted to
-     *     observe is already gone.
+     * addr_park is an ASYNC op: the caller blocks in boxlib result_wait() on
+     * its ResultRing, and the COMPLETION is a real Result pushed by whoever
+     * claims this entry (AddrWaitClaim: done 0->1 + unlink, atomically). The
+     * claim is the single arbitration point for the WAKE Result — exactly one of
+     * {addr_wake, this parker} claims+delivers it. (The timeout does NOT claim; it
+     * only reschedules, and result_wait's call_timeout then yields ERR_TIMEOUT.)
+     * Here the parker races a concurrent addr_wake after setting PROC_WAITING:
      *
-     * The ACQUIRE on entry.done pairs with SysAddrWake's RELEASE-store
-     * (via spin_unlock which is a barrier) on done=1 before the IPI.
-     * The ACQUIRE on *kaddr pairs with the writer's store (user-side
-     * atomic store is RELEASE by C++ rules). Either observation is
-     * sufficient to undo the park. */
-    uint8_t already_done = __atomic_load_n(&entry->done, __ATOMIC_ACQUIRE);
-    uint64_t recheck     = __atomic_load_n(kaddr, __ATOMIC_ACQUIRE);
+     *   (a) value already changed AND we win the claim: no addr_wake will
+     *       deliver, so complete SYNCHRONOUSLY — return a non-async error so
+     *       guide pushes it as our Result.
+     *   (b) a concurrent addr_wake already claimed us (done set), or we LOSE the
+     *       value-changed claim to one: that winner OWNS delivery — go ASYNC and
+     *       let its KResultPush end our result_wait.
+     *   (c) genuine park (value==expected, unclaimed): go ASYNC and block; a
+     *       future addr_wake claims+delivers, or the timeout reschedules us out.
+     *
+     * Going async means setting *async_owns_crates so guide does NOT push the
+     * transient ERR_WOULD_BLOCK ack as our reply — the real completion arrives
+     * later (mirrors the write_job async path). The ACQUIRE on *kaddr pairs
+     * with the writer's RELEASE store; the claim's bucket lock orders done. */
+    uint64_t recheck = __atomic_load_n(kaddr, __ATOMIC_ACQUIRE);
+    bool completed   = (__atomic_load_n(&entry->done, __ATOMIC_ACQUIRE) != 0);
 
-    if (already_done || recheck != expected) {
-        process_set_state(ctx->proc, PROC_WORKING);
-        /* Use AddrWaitUnlinkIfLinked: it re-derives the bucket (which may
-         * differ from `bucket` if phys_addr was changed above) and uses the
-         * linked flag as the guard — correct even if SysAddrWake beat us. */
-        AddrWaitUnlinkIfLinked(entry);
-        /* Publish outside bucket lock. */
-        if (already_done) {
-            struct __attribute__((packed)) { uint64_t phys; uint32_t pid; } ev;
-            ev.phys = (uint64_t)phys;
-            ev.pid  = ctx->proc->pid;
-            TouchPublish("strand:woken", &ev, sizeof(ev));
+    if (!completed && recheck != expected) {
+        if (AddrWaitClaim(entry)) {
+            /* (a) We own delivery — finish synchronously through guide. Our armed
+             * timeout is harmless if it later fires (PROC_WORKING reschedule of an
+             * already-running strand; at worst a benign spurious wake if re-parked). */
+            process_set_state(ctx->proc, PROC_WORKING);
+            return ERR_ADDR_VALUE_MISMATCH;
         }
-        return ERR_ADDR_VALUE_MISMATCH;
+        completed = true;   /* lost the claim — a waker owns delivery */
     }
 
-    /* Publish strand:parked outside the bucket lock (mirrors SysTouchAwait
-     * publishing behavior — no lock held at the point of TouchPublish). */
+    if (completed) {
+        /* (b) A concurrent addr_wake claimed us and will KResultPush the
+         * completion. Reschedule to WORKING and wait async for it to arrive. */
+        process_set_state(ctx->proc, PROC_WORKING);
+        if (ctx->async_owns_crates) *ctx->async_owns_crates = true;
+        return ERR_WOULD_BLOCK;
+    }
+
+    /* (c) Genuine park. The entry stays linked (done=0); a claimer unlinks it
+     * and delivers our completion Result. Publish strand:parked outside any
+     * lock (mirrors SysTouchAwait). */
     {
         struct __attribute__((packed)) { uint64_t phys; uint32_t pid; } ev;
         ev.phys = (uint64_t)phys;
@@ -172,12 +196,10 @@ static int SysAddrPark(const ManifestOp *op, Crate *crates,
         TouchPublish("strand:parked", &ev, sizeof(ev));
     }
 
-    /* Step 7: return ERR_WOULD_BLOCK — guide.c interprets this identically
-     * to SysTouchAwait's ERR_WOULD_BLOCK: it does not push a result now;
-     * instead it leaves the process in PROC_WAITING. When SysAddrWake fires
-     * and sets PROC_WORKING, the scheduler reschedules the process and
-     * guide.c's normal result path handles the continuation — the same
-     * mechanism as every SysTouchAwait wake-up. */
+    /* Step 7: go async and return ERR_WOULD_BLOCK. guide does NOT push a reply
+     * now (async_owns_crates set); the parked caller's result_wait blocks until
+     * addr_wake / the park-timeout KResultPushes the real completion. */
+    if (ctx->async_owns_crates) *ctx->async_owns_crates = true;
     return ERR_WOULD_BLOCK;
 }
 
@@ -210,24 +232,29 @@ static int SysAddrWake(const ManifestOp *op, Crate *crates,
     AddrWaitBucket *bucket = AddrWaitGetBucket(phys);
     if (!bucket) return OK;
 
-    /* Claim up to `count` entries under the lock.  We snapshot their proc
-     * pointers (ref-counted) and set done=1 so the parked strand's step-6
-     * re-check unlinks itself when it runs, rather than us unlinking here.
-     * This matches the touch-ring model where the parked side self-removes
-     * after it resumes, keeping the critical section short. */
+    /* Claim up to `count` entries under the lock. Claiming a waiter means
+     * setting done=1 AND unlinking it atomically (here, under this lock) — the
+     * claimer then OWNS that waiter's single completion Result. Unlinking on
+     * claim (rather than leaving the parked side to self-remove) is what makes
+     * a later claimer — a stale park-timeout, or a re-park — unable to match an
+     * already-completed waiter. We snapshot ref-counted proc pointers and
+     * deliver outside the lock to keep the critical section short. */
 #define ADDR_WAKE_MAX_BATCH  256u
     process_t *to_wake[ADDR_WAKE_MAX_BATCH];
     uint32_t   wake_count = 0;
 
     spin_lock(&bucket->lock);
-    for (AddrWaitEntry *e = bucket->head;
-         e && (count == 0 || wake_count < count) && wake_count < ADDR_WAKE_MAX_BATCH;
-         e = e->next)
+    AddrWaitEntry *e = bucket->head;
+    while (e && (count == 0 || wake_count < count) && wake_count < ADDR_WAKE_MAX_BATCH)
     {
-        if (e->done) continue;
-        e->done = 1;  /* claim — visible to parked strand's re-check */
-        process_ref_inc(e->proc);
-        to_wake[wake_count++] = e->proc;
+        AddrWaitEntry *next = e->next;   /* save: AddrWaitUnlink nulls e->next */
+        if (!e->done) {
+            e->done = 1;                 /* claim — we now own this waiter */
+            AddrWaitUnlink(bucket, e);   /* unlink under the same lock */
+            process_ref_inc(e->proc);
+            to_wake[wake_count++] = e->proc;
+        }
+        e = next;
     }
     spin_unlock(&bucket->lock);
 
@@ -237,12 +264,31 @@ static int SysAddrWake(const ManifestOp *op, Crate *crates,
     for (uint32_t i = 0; i < wake_count; i++) {
         process_t *target = to_wake[i];
 
-        if (!target->destroying && process_get_state(target) == PROC_WAITING) {
-            process_set_state(target, PROC_WORKING);
-            if (g_amp.total_cores > 1) {
-                uint8_t core = target->home_core;
-                if (core < g_amp.total_cores && core != amp_get_core_index()) {
-                    lapic_send_ipi(g_amp.cores[core].lapic_id, IPI_WAKE_VECTOR);
+        if (!target->destroying) {
+            /* We won the claim, so we OWN this waiter's completion: deliver
+             * exactly one Result onto its ResultRing — the channel its boxlib
+             * result_wait actually monitors. This is the Ф20d fix; the IPI
+             * alone only reschedules the waiter into a futile poll loop. Push
+             * BEFORE the state flip so the woken strand finds its Result the
+             * instant it is rescheduled (mirrors write_job wjob_finalize). */
+            Result r;
+            memset(&r, 0, sizeof(r));
+            r.error_code = OK;
+            r.sender_pid = 0;
+            r.context    = KCTX_GUIDE;
+            KResultPush(target, &r);
+
+            /* The target's armed timeout (TouchQueueWakeAfter) is left in place;
+             * if it fires later it only does a PROC_WORKING reschedule (no Result,
+             * no entry touch) — at worst a benign spurious wakeup for a re-parked
+             * strand, which re-checks its predicate. No IRQ-context cleanup. */
+            if (process_get_state(target) == PROC_WAITING) {
+                process_set_state(target, PROC_WORKING);
+                if (g_amp.total_cores > 1) {
+                    uint8_t core = target->home_core;
+                    if (core < g_amp.total_cores && core != amp_get_core_index()) {
+                        lapic_send_ipi(g_amp.cores[core].lapic_id, IPI_WAKE_VECTOR);
+                    }
                 }
             }
         }

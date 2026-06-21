@@ -193,6 +193,16 @@ run_config() {
     ts2_p=$(grep -cE      "\[STRESS S2\].*PASS"       build/serial.log)
     ts3_p=$(grep -cE      "\[STRESS S3\].*PASS"       build/serial.log)
 
+    # C++ runtime / Current / Strands / Manifest-handle suites. These run in
+    # BOTH the fast and full bursts but were previously NEITHER counted NOR
+    # gated, so a [CXX]/[CURRENT]/[STRAND]/[htest] FAIL passed the matrix green.
+    # strandtest legitimately prints "[STRAND] SKIP" when FSGSBASE is absent;
+    # accept PASS or SKIP as "ran to completion" and let app_fail catch FAIL.
+    cxx_p=$(grep -c       "\[CXX\] ALL PASS"          build/serial.log)
+    current_p=$(grep -c   "\[CURRENT\] ALL PASS"      build/serial.log)
+    strand_p=$(grep -cE   "\[STRAND\] (PASS|SKIP)"    build/serial.log)
+    htest_p=$(grep -c     "\[htest\] PASS"            build/serial.log)
+
     # Aggregate any negative-FAIL marker emitted by an app.
     # The prefix may have a sub-tag inside the brackets:
     #   [TT 6] FAIL: ...
@@ -201,10 +211,11 @@ run_config() {
     # so the pattern accepts "[KEY any-non-]]\]" followed by "FAIL" or "fail"
     # anywhere on the same line. Tightened to FAIL as a word so substrings
     # inside legitimate identifiers don't trip it.
-    app_fail=$(grep -cE  "\[(mtest|chain|COW|LIFECYCLE|WO|WC|WS|TT|decks|STRESS)[^]]*\].*(\\bFAIL\\b|\\bfail\\b)" build/serial.log)
+    app_fail=$(grep -cE  "\[(mtest|chain|COW|LIFECYCLE|WO|WC|WS|TT|decks|STRESS|CXX|CURRENT|STRAND|htest)[^]]*\].*(\\bFAIL\\b|\\bfail\\b)" build/serial.log)
 
     echo "  baseline: memtest=$mt/3 files=$fl/2 bench=$bn/2"
     echo "  apps:     mtest=$mtest_p chain=$chain_p cow=$cow_p lc=$lc_p wo=$wo_p wc=$wc_p ws=$ws_p tt=$tt_p decks=$decks_p ts=$ts1_p/$ts2_p/$ts3_p"
+    echo "  suites:   cxx=$cxx_p current=$current_p strand=$strand_p htest=$htest_p"
     echo "  negatives: PANIC=$pn ATRC=$at Unknown=$un AppFAIL=$app_fail TSC=~1GHz:$tsc_good/$bn"
 
     ok=1
@@ -229,6 +240,11 @@ run_config() {
     [ "$lc_p"    -lt 1 ] && ok=0
     [ "$wo_p"    -lt 1 ] && ok=0
     [ "$decks_p" -lt 1 ] && ok=0
+    # Unconditional — cxxtest/current_test/strandtest/htest run in fast AND full.
+    [ "$cxx_p"     -lt 1 ] && ok=0
+    [ "$current_p" -lt 1 ] && ok=0
+    [ "$strand_p"  -lt 1 ] && ok=0
+    [ "$htest_p"   -lt 1 ] && ok=0
     if [ "$MODE" != "fast" ]; then
         [ "$wc_p"    -lt 1 ] && ok=0
         [ "$ws_p"    -lt 1 ] && ok=0

@@ -210,6 +210,7 @@ typedef struct process_t
     struct process_t *prev;         // global process list (backward) — O(1) unlink in process_destroy
     struct process_t *ready_next;   // intrusive link for ReadyQueue
     struct process_t *cleanup_next; // intrusive link for process cleanup queue
+    atomic_u32_t      cleanup_enqueued; // one-shot 0->1 CAS guard: gates cleanup-queue enqueue (double-free defense). Zeroed by process_create's memset.
     volatile uint8_t  in_ready;     // CAS guard: 1 = currently enqueued in ReadyQueue
 } process_t;
 
