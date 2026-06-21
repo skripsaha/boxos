@@ -346,44 +346,27 @@ error_t SyncOpsRegister(void)
 }
 
 /* -------------------------------------------------------------------------
- * Kernel self-tests — single-strand safe (no concurrent waker needed).
- * Tests: (a) value-mismatch early-return; (b) link/unlink round-trip.
+ * Kernel self-tests — exercise the AddrWait bucket REGISTRY (link/unlink),
+ * which is safe to check single-strand at boot. The end-to-end behavior — the
+ * value pre-check, the actual park, and a concurrent wake breaking it early — is
+ * covered on REAL strands by strandtest (test1 park->wake, test4 timed-wake); a
+ * boot self-test cannot construct a second waker, so we do NOT fake it here.
+ * (A former "test (a)" re-implemented the value pre-check inline and asserted
+ * its own constants — a tautology that could never fail; removed.)
+ * Tests: (a) link/unlink round-trip; (b) idempotent double-unlink.
  * ------------------------------------------------------------------------- */
 void AddrWaitSelfTest(void)
 {
     kprintf("[ADDR_WAIT TEST] begin\n");
     int pass = 0, fail = 0;
 
-    /* Test (a): value-mismatch — park on an address where *addr != expected.
-     * SysAddrPark step 2 must return ERR_ADDR_VALUE_MISMATCH immediately,
-     * without entering PROC_WAITING. */
-    {
-        volatile uint64_t val = 42;
-        AddrWaitBucket *bucket = AddrWaitGetBucket((uintptr_t)&val);
-        if (!bucket) {
-            kprintf("[ADDR_WAIT TEST] SKIP: OOM getting bucket\n");
-        } else {
-            /* Simulate the value pre-check logic from SysAddrPark step 2. */
-            uint64_t actual = __atomic_load_n(&val, __ATOMIC_ACQUIRE);
-            uint64_t wrong_expected = 999;
-            if (actual != wrong_expected) {
-                /* Correct: would return ERR_ADDR_VALUE_MISMATCH */
-                kprintf("[ADDR_WAIT TEST] PASS (a): mismatch detected, no park\n");
-                pass++;
-            } else {
-                kprintf("[ADDR_WAIT TEST] FAIL (a): mismatch not detected\n");
-                fail++;
-            }
-        }
-    }
-
-    /* Test (b): bucket round-trip — link/unlink under lock, check linked flag. */
+    /* Test (a): bucket round-trip — link/unlink under lock, check linked flag. */
     {
         volatile uint64_t dummy = 0;
         uintptr_t phys_sim = (uintptr_t)&dummy;
         AddrWaitBucket *b = AddrWaitGetBucket(phys_sim);
         if (!b) {
-            kprintf("[ADDR_WAIT TEST] FAIL (b): bucket alloc failed\n");
+            kprintf("[ADDR_WAIT TEST] FAIL (a): bucket alloc failed\n");
             fail++;
         } else {
             AddrWaitEntry e;
@@ -402,17 +385,17 @@ void AddrWaitSelfTest(void)
             spin_unlock(&b->lock);
 
             if (found && empty) {
-                kprintf("[ADDR_WAIT TEST] PASS (b): link/unlink round-trip + linked flag\n");
+                kprintf("[ADDR_WAIT TEST] PASS (a): link/unlink round-trip + linked flag\n");
                 pass++;
             } else {
-                kprintf("[ADDR_WAIT TEST] FAIL (b): link/unlink broken (found=%d empty=%d)\n",
+                kprintf("[ADDR_WAIT TEST] FAIL (a): link/unlink broken (found=%d empty=%d)\n",
                         (int)found, (int)empty);
                 fail++;
             }
         }
     }
 
-    /* Test (c): AddrWaitUnlinkIfLinked — link via the locked path, then call
+    /* Test (b): AddrWaitUnlinkIfLinked — link via the locked path, then call
      * AddrWaitUnlinkIfLinked once (should unlink) and a second time (no-op).
      * Verifies: double-unlink is safe and linked toggles correctly. */
     {
@@ -420,7 +403,7 @@ void AddrWaitSelfTest(void)
         uintptr_t phys_sim2 = (uintptr_t)&dummy2 + 8; /* distinct address from (b) */
         AddrWaitBucket *b2 = AddrWaitGetBucket(phys_sim2);
         if (!b2) {
-            kprintf("[ADDR_WAIT TEST] FAIL (c): bucket alloc failed\n");
+            kprintf("[ADDR_WAIT TEST] FAIL (b): bucket alloc failed\n");
             fail++;
         } else {
             AddrWaitEntry e2;
@@ -444,10 +427,10 @@ void AddrWaitSelfTest(void)
             bool still_unlinked = (e2.linked == 0);
 
             if (unlinked_once && still_unlinked) {
-                kprintf("[ADDR_WAIT TEST] PASS (c): AddrWaitUnlinkIfLinked double-call safe\n");
+                kprintf("[ADDR_WAIT TEST] PASS (b): AddrWaitUnlinkIfLinked double-call safe\n");
                 pass++;
             } else {
-                kprintf("[ADDR_WAIT TEST] FAIL (c): AddrWaitUnlinkIfLinked broken "
+                kprintf("[ADDR_WAIT TEST] FAIL (b): AddrWaitUnlinkIfLinked broken "
                         "(unlinked_once=%d still_unlinked=%d)\n",
                         (int)unlinked_once, (int)still_unlinked);
                 fail++;
