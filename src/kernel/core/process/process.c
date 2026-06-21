@@ -682,6 +682,16 @@ void process_destroy(process_t *proc)
     cet_process_destroy(proc);
     cet_process_destroy_kernel_ssp(proc);
 
+    /* Unlink the embedded addr_wait_entry BEFORE the final ref_dec. Otherwise a
+     * concurrent SysAddrWake on a hash-colliding physical address could still
+     * find this entry, process_ref_inc the corpse (0->1) and process_ref_dec
+     * (1->0), and re-enqueue an already-cleanup-bound process_t — a double
+     * cleanup / double free that corrupts the cleanup queue and cabin refcount.
+     * Removing the waiter here makes it unreachable before the refcount can
+     * reach 0. (process_cleanup_immediate keeps an idempotent unlink as a
+     * belt-and-suspenders; AddrWaitUnlinkIfLinked is safe to call twice.) */
+    AddrWaitUnlinkIfLinked(&proc->addr_wait_entry);
+
     proc->magic = CONFIG_PROCESS_POISON_MAGIC;
 
     process_ref_dec(proc);
@@ -1642,6 +1652,20 @@ static bool cleanup_queue_enqueue(process_t *proc)
 {
     if (!proc)
         return false;
+
+    /* One-shot guard: a process_t must enter the cleanup queue at most once.
+     * The queue threads through the single proc->cleanup_next field, so a
+     * second enqueue of the same node would corrupt the list and drive a double
+     * process_cleanup_immediate (double kfree + double cabin_ref_dec). Win the
+     * 0->1 CAS to enqueue; a loser returns true ("already handled") so the
+     * caller does NOT fall back to process_cleanup_immediate. */
+    uint32_t expected = 0;
+    if (!__atomic_compare_exchange_n(&proc->cleanup_enqueued, &expected, 1u,
+                                     false, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) {
+        kprintf("[PROCESS] BUG: double cleanup-enqueue prevented for PID %u\n",
+                proc->pid);
+        return true;
+    }
 
     proc->cleanup_next = NULL;
 

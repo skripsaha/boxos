@@ -63,4 +63,12 @@ void AddrWaitUnlink(AddrWaitBucket *bucket, AddrWaitEntry *entry);
  * unlinks, and unlocks.  No-op if not linked.  Safe to call twice. */
 void AddrWaitUnlinkIfLinked(AddrWaitEntry *entry);
 
+/* Atomically claim a waiter: if it is still linked and not yet done, set
+ * done=1 AND unlink it (all under the bucket lock), then return true. Exactly
+ * one caller wins; that caller OWNS the wake and must deliver exactly one
+ * completion Result to entry->proc. Every other caller gets false. This is the
+ * single arbitration point shared by addr_wake and the parker's own lost-wakeup
+ * recheck — it makes "who delivers the wake Result" race-free. */
+bool AddrWaitClaim(AddrWaitEntry *entry);
+
 #endif /* ADDR_WAIT_H */

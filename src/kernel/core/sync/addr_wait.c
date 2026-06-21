@@ -89,3 +89,23 @@ void AddrWaitUnlinkIfLinked(AddrWaitEntry *entry)
     if (entry->linked) AddrWaitUnlink(bucket, entry);
     spin_unlock(&bucket->lock);
 }
+
+bool AddrWaitClaim(AddrWaitEntry *entry)
+{
+    /* Cheap unlocked pre-check: an already-unlinked entry can never be claimed,
+     * and avoiding the bucket lookup keeps the hot wake path lean. The locked
+     * re-check below is authoritative. */
+    if (!entry->linked) return false;
+    AddrWaitBucket *bucket = AddrWaitGetBucket(entry->phys_addr);
+    if (!bucket) return false;
+
+    bool won = false;
+    spin_lock(&bucket->lock);
+    if (entry->linked && !entry->done) {
+        entry->done = 1;            /* claim — exactly one winner */
+        AddrWaitUnlink(bucket, entry);
+        won = true;
+    }
+    spin_unlock(&bucket->lock);
+    return won;
+}

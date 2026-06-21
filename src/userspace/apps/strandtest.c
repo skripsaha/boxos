@@ -240,6 +240,61 @@ static int test3(void)
     return 0;
 }
 
+/* ---- test4: a timed park is broken EARLY by a concurrent wake (Ф20d fix) ---
+ * Pre-fix, a timed addr_park slept to its FULL deadline because addr_wake never
+ * wrote the channel result_wait monitors (it only rescheduled the waiter into a
+ * futile poll). Proof — host-timing independent AND race-free: main does ONE
+ * long (5 s) park whose watched value NEVER changes, so the ONLY thing that can
+ * end it before the deadline is a real wake delivering a completion Result. A
+ * worker wakes REPEATEDLY until main reports done, which closes the spawn-vs-park
+ * ordering window (an early wake that lands before main parks is a harmless
+ * no-op; the next one delivers). addr_park must return OK (woken), never
+ * ERR_TIMEOUT (slept to deadline) — that return value alone distinguishes the
+ * fix from the bug, with no wall-clock measurement to flake on. */
+
+static volatile uint64_t g_t4_flag;   /* park address; stays 0 — pure notify, no value change */
+static volatile uint64_t g_t4_done;   /* main sets it when its park returns; stops the waker  */
+
+static void wake_worker(void *arg)
+{
+    (void)arg;
+    uint32_t guard = 0;
+    while (__atomic_load_n(&g_t4_done, __ATOMIC_ACQUIRE) == 0) {
+        addr_wake(&g_t4_flag, 0);
+        if (++guard > 200000u) break;   /* never wedge the harness on a regression */
+        yield();
+    }
+}
+
+static int test4(void)
+{
+    g_t4_flag = 0;
+    g_t4_done = 0;
+
+    uint32_t pid = strand_spawn(wake_worker, 0);
+    if (pid == 0) {
+        printf("[STRAND] FAIL test4: strand_spawn returned 0\n");
+        return -1;
+    }
+
+    /* One long park on a value that never changes. OK proves a concurrent wake
+     * broke it early; ERR_TIMEOUT means the wake never reached result_wait. */
+    error_t rc = addr_park(&g_t4_flag, 0, 5000);
+    __atomic_store_n(&g_t4_done, 1u, __ATOMIC_RELEASE);
+
+    if (rc == ERR_TIMEOUT) {
+        printf("[STRAND] FAIL test4: 5s timed park slept to deadline — wake did not break it early (Ф20d bug)\n");
+        return -1;
+    }
+    if (rc != OK) {
+        printf("[STRAND] FAIL test4: addr_park returned %d (want OK)\n", (int)rc);
+        return -1;
+    }
+
+    printf("[STRAND] test4 OK: concurrent wake broke a 5s timed park early (addr_park returned OK)\n");
+    return 0;
+}
+
 int main(void)
 {
     printf("[STRAND] strandtest start\n");
@@ -255,8 +310,9 @@ int main(void)
     if (test1() != 0) exit(1);
     if (test2() != 0) exit(1);
     if (test3() != 0) exit(1);
+    if (test4() != 0) exit(1);
 
-    printf("[STRAND] PASS: test1 + test2 + test3 (per-strand rings + TLS + park/wake + reaper)\n");
+    printf("[STRAND] PASS: test1 + test2 + test3 + test4 (per-strand rings + TLS + park/wake + reaper + timed-wake)\n");
     exit(0);
     return 0;
 }
