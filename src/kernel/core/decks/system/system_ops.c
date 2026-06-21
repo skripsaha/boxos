@@ -615,7 +615,14 @@ static int SysStrandSpawn(const ManifestOp *op, Crate *crates, uint16_t crate_co
     memcpy(&entry_va, op->params,     sizeof(uint64_t));
     memcpy(&arg,      op->params + 8, sizeof(uint64_t));
 
-    process_t *strand = strand_spawn(ctx->proc->cabin, (uintptr_t)entry_va, arg);
+    /* Optional 3rd param: joinable (low byte of a u64). std::thread passes 1 so
+     * the strand is zombie-until-join (pid held until SYSTEM_OP_STRAND_RELEASE);
+     * a raw strand_spawn worker omits it (param_size==16) and spawns joinable=0
+     * (eager reap, as before). */
+    uint8_t joinable = (op->param_size >= 17) ? op->params[16] : 0u;
+
+    process_t *strand = strand_spawn(ctx->proc->cabin, (uintptr_t)entry_va, arg,
+                                     joinable != 0);
     if (!strand) return ERR_SPAWN_FAILED;
 
     if (op->out_crate != CRATE_INDEX_NONE) {
@@ -630,6 +637,37 @@ static int SysStrandSpawn(const ManifestOp *op, Crate *crates, uint16_t crate_co
         }
     }
 
+    return OK;
+}
+
+/* =========================================================================
+ *  SYSTEM_OP_STRAND_RELEASE — clear a joinable strand's reap-block so the P5b
+ *  reaper may reclaim it. Called by std::thread join()/detach() once the strand
+ *  is done being referenced as an id. Cabin-scoped: a cabin may release only its
+ *  OWN strands. Idempotent and safe on an unknown / already-released / non-
+ *  joinable pid (no-op) — so a benign double call or a race with the reaper
+ *  cannot corrupt anything.
+ * ========================================================================= */
+static int SysStrandRelease(const ManifestOp *op, Crate *crates, uint16_t crate_count,
+                            const OpContext *ctx)
+{
+    (void)crates; (void)crate_count;
+    if (!ctx || !ctx->proc || !ctx->proc->cabin) return ERR_INVALID_ARGUMENT;
+    if (op->param_size < sizeof(uint32_t))        return ERR_INVALID_ARGUMENT;
+
+    uint32_t pid;
+    memcpy(&pid, op->params, sizeof(uint32_t));
+
+    process_t *target = process_find_ref(pid);
+    if (!target) return OK;   /* already reaped / never existed — nothing to do */
+
+    /* Only release a strand of THIS cabin (a cabin cannot poke siblings'
+     * cabins' strands). Clearing reap_blocked lets the reaper reclaim it on the
+     * next tick (it is, or will become, PROC_DONE). */
+    if (target->cabin == ctx->proc->cabin)
+        __atomic_store_n(&target->reap_blocked, 0u, __ATOMIC_SEQ_CST);
+
+    process_ref_dec(target);
     return OK;
 }
 
@@ -1312,6 +1350,7 @@ error_t SystemDeckRegister(void)
         { SYSTEM_OP_TLS_FSBASE,   SysTlsFsbase,   OP_AUTH_NONE,   "system.tls.fsbase" },
         { SYSTEM_OP_PROC_EXEC,    SysProcExec,    OP_AUTH_UTILITY,"system.proc.exec"  },
         { SYSTEM_OP_STRAND_SPAWN, SysStrandSpawn, OP_AUTH_APP,    "system.strand.spawn"},
+        { SYSTEM_OP_STRAND_RELEASE, SysStrandRelease, OP_AUTH_APP, "system.strand.release"},
         { SYSTEM_OP_INFO,         SysInfo,        OP_AUTH_NONE,   "system.info"       },
         /* Context, tags, buffers: app+. */
         { SYSTEM_OP_CTX_USE,      SysCtxUse,      OP_AUTH_APP,    "system.ctx.use"    },

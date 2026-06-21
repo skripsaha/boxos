@@ -32,6 +32,20 @@ extern "C" {
  */
 uint32_t strand_spawn(void (*fn)(void *arg), void *arg);
 
+/* Like strand_spawn but JOINABLE: the kernel keeps the finished strand as a
+ * zombie (its pid reserved, not reclaimed by the reaper) until strand_release()
+ * is called. std::thread uses this so thread::id (== the strand pid) stays
+ * unique while the thread is joinable. The owner MUST eventually call
+ * strand_release(pid) (join/detach) or the zombie leaks its pid for the cabin's
+ * lifetime. Returns the new strand's pid (0 on failure). */
+uint32_t strand_spawn_joinable(void (*fn)(void *arg), void *arg);
+
+/* Release a joinable strand (spawned via strand_spawn_joinable): clears its
+ * reap-block so the reaper reclaims it. Called by std::thread join()/detach()
+ * once its id is no longer needed. Idempotent; a no-op on an unknown pid or a
+ * strand of another cabin. */
+void strand_release(uint32_t pid);
+
 /* Terminate the calling strand.  Does not return.  Unlike exit(), it does
  * NOT run global static destructors or flush shared buffers — those belong
  * to the whole cabin and run when the last (main) strand exits. */
