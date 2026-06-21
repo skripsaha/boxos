@@ -3,8 +3,10 @@
  * __cxa_allocate_exception / __cxa_throw / __cxa_begin_catch /
  * __cxa_end_catch / __cxa_rethrow (+ emergency pool for OOM throws).
  *
- * One thread per cabin — the "caught stack" and counters are plain
- * globals.
+ * Multiple strands may share one cabin (std::thread), so the Itanium
+ * __cxa_eh_globals — the caught-exception LIFO and the uncaught counter — are
+ * PER-STRAND thread_local (each strand owns its own in-flight exceptions, like
+ * libstdc++). The shared emergency OOM pool is claimed with an atomic test-and-set.
  */
 
 #include "cxxabi_typeinfo.h"
@@ -67,8 +69,14 @@ static_assert(sizeof(_Unwind_Exception) == 32, "unwind header ABI shape");
 
 namespace {
 
-CxaException *g_caught_stack   = nullptr;
-int           g_uncaught_count = 0;
+// Per-strand (Itanium __cxa_eh_globals are thread-local). Strands share one
+// cabin under std::thread, so plain globals would let a concurrent throw/catch
+// on a sibling strand corrupt this LIFO (use-after-free / double-free of a
+// foreign in-flight exception) and lose-update the counter. thread_local places
+// them in the per-strand neg-TLS (Ф20b-1); both are zero-init POD (.tbss), so
+// no dynamic init / __cxa_thread_atexit is involved.
+thread_local CxaException *g_caught_stack   = nullptr;
+thread_local int           g_uncaught_count = 0;
 
 // Emergency pool: enough for a bad_alloc cascade when the heap is gone.
 constexpr size_t kEmergencySlotPayload = 256;
@@ -130,10 +138,12 @@ extern "C" void *__cxa_allocate_exception(size_t thrown_size) noexcept
     void *raw = _malloc_impl(sizeof(CxaException) + thrown_size);
     if (!raw) {
         if (thrown_size <= kEmergencySlotPayload) {
+            // Shared pool across strands: claim a slot with an atomic
+            // test-and-set so two strands hitting OOM at once cannot grab the
+            // same slot and overlay two exception objects.
             for (auto &slot : g_emergency) {
-                if (!slot.used) {
-                    slot.used = true;
-                    raw       = slot.bytes;
+                if (!__atomic_exchange_n(&slot.used, true, __ATOMIC_ACQ_REL)) {
+                    raw = slot.bytes;
                     break;
                 }
             }
@@ -153,7 +163,7 @@ extern "C" void __cxa_free_exception(void *thrown_object) noexcept
     auto *header = static_cast<CxaException *>(thrown_object) - 1;
     for (auto &slot : g_emergency) {
         if (static_cast<void *>(slot.bytes) == static_cast<void *>(header)) {
-            slot.used = false;
+            __atomic_store_n(&slot.used, false, __ATOMIC_RELEASE);
             return;
         }
     }
