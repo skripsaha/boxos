@@ -111,8 +111,12 @@ uint64_t ReadEncoded(const uint8_t **p, uint8_t enc)
 
 // ── CIE parsing (with a tiny last-used cache: CIEs are shared) ─────────
 
-const uint8_t *g_cached_cie_ptr = nullptr;
-DwarfCie       g_cached_cie;
+// Per-strand (thread_local): this 1-entry CIE cache is mutable, and concurrent
+// unwinds from sibling strands (std::thread bodies throwing at once) would tear
+// it — a half-updated cached CIE hands back a wild pointer and faults. Per-strand
+// each unwind uses its own cache; zero-init (nullptr) is a clean miss on first use.
+thread_local const uint8_t *g_cached_cie_ptr = nullptr;
+thread_local DwarfCie       g_cached_cie;
 
 void ParseCie(const uint8_t *cie_start, DwarfCie *out)
 {
@@ -199,7 +203,12 @@ struct FdeIndexEntry {
 
 FdeIndexEntry *g_index       = nullptr;
 size_t         g_index_count = 0;
-bool           g_index_built = false;
+// Build-once guard for concurrent unwinds. g_index is mutated only during
+// BuildIndex; once built it is read-only, so concurrent IndexLookup binary
+// searches are safe. State: 0=unbuilt, 1=building, 2=built. First strand to
+// CAS 0->1 builds; others spin until 2. (A plain bool let two strands' first
+// throws build concurrently -> torn g_index -> wild pointer / crash.)
+int            g_index_state = 0;   // accessed via __atomic_* only
 
 void IndexAppend(const FdeIndexEntry &entry, size_t *cap)
 {
@@ -218,7 +227,6 @@ void IndexAppend(const FdeIndexEntry &entry, size_t *cap)
 
 void BuildIndex()
 {
-    g_index_built = true;
     size_t cap = 0;
 
     const uint8_t *p   = __eh_frame_start;
@@ -271,9 +279,26 @@ void BuildIndex()
     }
 }
 
+// Build the FDE index exactly once, safe across concurrent unwinds: the winner
+// of the 0->1 CAS builds; everyone else spins until it publishes (state 2). The
+// built index is read-only thereafter, so the binary search below races no one.
+void EnsureIndexBuilt()
+{
+    if (__atomic_load_n(&g_index_state, __ATOMIC_ACQUIRE) == 2) return;
+    int expected = 0;
+    if (__atomic_compare_exchange_n(&g_index_state, &expected, 1,
+                                    false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+        BuildIndex();
+        __atomic_store_n(&g_index_state, 2, __ATOMIC_RELEASE);   // publish
+    } else {
+        while (__atomic_load_n(&g_index_state, __ATOMIC_ACQUIRE) != 2)
+            __asm__ __volatile__("pause");
+    }
+}
+
 const FdeIndexEntry *IndexLookup(uint64_t pc)
 {
-    if (!g_index_built) BuildIndex();
+    EnsureIndexBuilt();
     size_t lo = 0;
     size_t hi = g_index_count;
     while (lo < hi) {

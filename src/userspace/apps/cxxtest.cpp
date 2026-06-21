@@ -5476,6 +5476,10 @@ static volatile uint32_t g_p37_tls_seen[kP37TlsThreads];     // value the thread
 static constexpr uint32_t kP37Churn = 40;
 static std::atomic<uint32_t> g_p37_churn_done{0};
 
+// (h) concurrent exceptions across strands (H1: per-strand __cxa_eh_globals).
+static constexpr int kP37ExcThreads = 4;
+static volatile uint32_t g_p37_exc_ok[kP37ExcThreads];
+
 void Phase37()
 {
     using namespace std::chrono;
@@ -5676,8 +5680,44 @@ void Phase37()
         }
     }
 
+    // (h) concurrent exceptions across strands (H1: per-strand __cxa_eh_globals).
+    //     Each of N threads throws+catches a UNIQUE int 200 times. Pre-fix, the
+    //     caught-exception LIFO and uncaught counter were plain shared globals,
+    //     so a sibling strand's in-flight throw could pop/observe THIS strand's
+    //     header — a wrong caught value, a non-zero uncaught count between throws,
+    //     or a use-after-free crash. Per-strand thread_local gives each strand
+    //     its own bookkeeping; the value/counter checks would fail (or the run
+    //     would crash) without the fix.
+    {
+        for (int i = 0; i < kP37ExcThreads; i++) g_p37_exc_ok[i] = 0;
+        std::thread ets[kP37ExcThreads];
+        for (int i = 0; i < kP37ExcThreads; i++) {
+            ets[i] = std::thread(
+                [](int id) {
+                    bool ok = true;
+                    for (int k = 0; k < 200; k++) {
+                        int want = id * 100000 + k;
+                        try {
+                            throw want;
+                        } catch (int got) {
+                            if (got != want) ok = false;
+                        }
+                        // Between throws THIS strand has no exception in flight.
+                        if (std::uncaught_exceptions() != 0) ok = false;
+                    }
+                    g_p37_exc_ok[id] = ok ? 1u : 0u;
+                },
+                i);
+        }
+        for (int i = 0; i < kP37ExcThreads; i++) ets[i].join();
+        bool all_exc = true;
+        for (int i = 0; i < kP37ExcThreads; i++)
+            if (g_p37_exc_ok[i] != 1u) all_exc = false;
+        Check(all_exc, "phase37 concurrent throw/catch isolated per strand (H1)");
+    }
+
     printf("[CXX] PASS phase37: std::thread "
-           "(join/detach/args/thread_local/get_id/hw_concurrency/move)\n");
+           "(join/detach/args/thread_local/get_id/hw_concurrency/move/exc)\n");
 }
 
 // ── phase38: <stop_token> + std::jthread ───────────────────────────────────────

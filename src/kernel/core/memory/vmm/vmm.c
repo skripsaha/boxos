@@ -4657,8 +4657,21 @@ int vmm_handle_page_fault(uintptr_t fault_addr, uint64_t error_code)
             vmm_map_result_t result = vmm_map_page(ctx, page_addr, (uintptr_t)phys, flags);
             if (!result.success)
             {
-                debug_printf("[VMM] ERROR: Failed to map user heap page at 0x%lx\n", page_addr);
+                /* Race tolerance (sibling strands share one cabin/CR3 and one
+                 * demand-paged heap): two strands first-touching the SAME heap
+                 * page on different cores both pass the unlocked vmm_is_mapped
+                 * probe, both pmm_alloc, both vmm_map_page. The loser's map is
+                 * rejected (the winner installed a different phys); free our
+                 * spare and report success if the page is now genuinely mapped —
+                 * the address is valid, just mapped by the sibling. Without this
+                 * the loser returned -1, which kills the faulting strand and
+                 * leaks its page. Mirrors vmm_ensure_user_page. */
                 pmm_free(phys, 1);
+                if (vmm_is_mapped(ctx, page_addr))
+                {
+                    return 0;
+                }
+                debug_printf("[VMM] ERROR: Failed to map user heap page at 0x%lx\n", page_addr);
                 return -1;
             }
 
