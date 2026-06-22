@@ -14,6 +14,16 @@
  * holder's frame is unreachable. */
 #include "klib.h"
 
+/* Hook drained by spin_lock() while it spins with IRQs disabled — see the
+ * declaration in klib.h. RELEASE on publish / ACQUIRE on read so the function
+ * pointer is visible to a peer core before it could be invoked. */
+static spin_wait_service_fn g_spin_wait_service = 0;
+
+void spin_set_wait_service(spin_wait_service_fn fn)
+{
+    __atomic_store_n(&g_spin_wait_service, fn, __ATOMIC_RELEASE);
+}
+
 void spinlock_init(spinlock_t *lock)
 {
     lock->locked = 0;
@@ -25,9 +35,22 @@ void spin_lock(spinlock_t *lock)
     uint64_t flags;
     asm volatile("pushfq; pop %0; cli" : "=r"(flags)::"memory");
 
-    while (__sync_lock_test_and_set(&lock->locked, 1))
+    if (__sync_lock_test_and_set(&lock->locked, 1))
     {
-        asm volatile("pause");
+        /* Contended. We spin with IRQs OFF, so a cross-core TLB shootdown
+         * targeting this core cannot be ACKed via its IPI vector until we
+         * acquire the lock and restore IRQs — stall long enough and the
+         * initiator times out and panics (the M1 real-HW deadlock). Drain
+         * shootdowns for this core inline each iteration; the serviced handler
+         * is lock-free, generation-gated and idempotent, so it composes with
+         * real IPI delivery and is safe to run while we still hold no lock. */
+        spin_wait_service_fn svc =
+            __atomic_load_n(&g_spin_wait_service, __ATOMIC_ACQUIRE);
+        do
+        {
+            if (svc) svc();
+            asm volatile("pause");
+        } while (__sync_lock_test_and_set(&lock->locked, 1));
     }
 
     lock->saved_flags = flags;

@@ -260,6 +260,11 @@ void vmm_shootdown_pages(vmm_context_t* ctx, uintptr_t virt_addr, size_t page_co
 // Called from IPI_SHOOTDOWN_VECTOR handler in idt.c.
 void vmm_tlb_shootdown_handler(void);
 
+// Registered as klib's spin_lock wait-service: a core spinning for a contended
+// spinlock (IRQs off) drains shootdowns targeting it inline, so an initiator
+// never times out waiting on a spinning target. Same idempotent handler.
+void vmm_tlb_shootdown_poll(void);
+
 // PCID (Process Context Identifiers) — zero-flush context switches
 bool vmm_pcid_active(void);
 uint64_t vmm_build_cr3(vmm_context_t* ctx);

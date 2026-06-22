@@ -962,6 +962,62 @@ void vmm_tlb_shootdown_handler(void)
     atomic_fetch_sub_u32(&g_shootdown.pending_acks, 1);
 }
 
+/* Service a pending cross-core TLB shootdown for THIS core from a NON-IPI
+ * context — the spin_lock() wait loop, which runs with IRQs disabled and could
+ * otherwise never ACK a shootdown that targets it (registered as klib's
+ * spin-wait service hook in vmm_init). Same idempotent, generation-gated
+ * handler the IPI vector runs: if the real IPI later fires too, the per-core
+ * request slot is already CAS-claimed, so the second pass is a no-op. */
+void vmm_tlb_shootdown_poll(void)
+{
+    vmm_tlb_shootdown_handler();
+}
+
+/* Wait for every target of the just-armed shootdown round to ACK, then return.
+ *
+ * The cure for the M1 real-HW deadlock lives in spin_lock(), not here: a core
+ * spinning for an unrelated spinlock services shootdowns inline (klib's
+ * wait-service hook → vmm_tlb_shootdown_poll), so a target that cannot take the
+ * IPI because it spins with IRQs off still ACKs. A target in any other IRQ-off
+ * section has the IPI queued in its LAPIC IRR (not lost) and ACKs the instant it
+ * re-enables interrupts. So in practice this loop spins only microseconds.
+ *
+ * The TSC-scaled ceiling (CONFIG_TLB_SHOOTDOWN_PANIC_MS) is therefore a genuine
+ * cross-core DEADLOCK DETECTOR, not a hair-trigger: nothing legitimate keeps a
+ * core from ACKing for seconds, so a trip is a real fault worth a panic
+ * (silently hanging here would be worse). It replaced a 100 ms budget that
+ * false-paniced whenever a target sat in a longer IRQ-off section. The
+ * spin-count backstop covers the one case the TSC ceiling cannot — a frozen TSC
+ * (then the elapsed test never grows) — so a broken clock still cannot wedge
+ * this IRQs-off loop forever. Caller holds g_shootdown_lock; `target_count`
+ * only labels the panic. */
+static void shootdown_wait_acks(uint8_t target_count, const char *what)
+{
+    uint64_t tsc_freq_mhz = cpu_get_tsc_freq_mhz();
+    if (tsc_freq_mhz < 100) tsc_freq_mhz = CONFIG_TLB_SHOOTDOWN_TSC_FALLBACK_MHZ;
+
+    const uint64_t panic_cycles = tsc_freq_mhz * 1000ULL * CONFIG_TLB_SHOOTDOWN_PANIC_MS;
+    uint64_t start_tsc = rdtsc();
+    uint64_t spins     = 0;
+
+    while (atomic_load_u32(&g_shootdown.pending_acks) != 0)
+    {
+        cpu_pause();
+        spins++;
+
+        if ((uint64_t)(rdtsc() - start_tsc) > panic_cycles ||
+            spins >= CONFIG_TLB_SHOOTDOWN_SPIN_BACKSTOP)
+        {
+            /* Re-load before declaring — the last ACK may have landed between
+             * the while-test and here. */
+            uint32_t remaining = atomic_load_u32(&g_shootdown.pending_acks);
+            if (remaining == 0) break;
+            panic("TLB shootdown timeout (%s): %u/%u cores did not ACK",
+                  what, remaining, target_count);
+        }
+    }
+}
+
 void vmm_shootdown_pages(vmm_context_t *ctx, uintptr_t virt_addr, size_t page_count)
 {
     // Single-core: local invalidation only
@@ -1057,42 +1113,7 @@ void vmm_shootdown_pages(vmm_context_t *ctx, uintptr_t virt_addr, size_t page_co
         lapic_send_ipi(g_amp.cores[targets[i]].lapic_id, IPI_SHOOTDOWN_VECTOR);
     }
 
-    /* Spin until all targets ACK with timeout.
-     *
-     * Two pre-existing bugs in this loop, exposed when more call-sites
-     * started using cross-core shootdown:
-     *   (1) `tsc_freq_mhz * 100` is 100 *microseconds*, not 100 ms as
-     *       the comment claimed — far too tight for the IPI round-trip
-     *       on a heavily-loaded BSP.
-     *   (2) If `cpu_get_tsc_freq_mhz()` hasn't completed calibration
-     *       (it returns 0), `timeout_cycles` is 0 and the very first
-     *       iteration trips the timeout while the ACKs are still
-     *       in-flight — observed as
-     *       "TLB shootdown timeout: 0 cores did not ACK (pending_acks=0, spins=1)".
-     *   (3) Timeout fired between the while-condition read and this
-     *       check — by the time we panic, ACKs may have arrived.
-     *       Re-load `pending_acks` and break gracefully if so. */
-    uint64_t tsc_freq_mhz = cpu_get_tsc_freq_mhz();
-    if (tsc_freq_mhz < 100) tsc_freq_mhz = 1000; /* fallback: assume 1 GHz */
-    uint64_t timeout_cycles = tsc_freq_mhz * 100000ULL; /* 100 ms */
-    uint64_t start_tsc = rdtsc();
-    uint32_t spins = 0;
-    const uint32_t max_spins = 10000000; // Safety limit
-
-    while (atomic_load_u32(&g_shootdown.pending_acks) != 0)
-    {
-        cpu_pause();
-        spins++;
-
-        // Check timeout (both by cycles and spin count)
-        if (spins >= max_spins || (rdtsc() - start_tsc) > timeout_cycles)
-        {
-            uint32_t remaining = atomic_load_u32(&g_shootdown.pending_acks);
-            if (remaining == 0) break; /* race: ACKs landed during timeout calc */
-            panic("TLB shootdown timeout: %u cores did not ACK (pending_acks=%u, spins=%u)",
-                  remaining, remaining, spins);
-        }
-    }
+    shootdown_wait_acks(target_count, "pages");
 
     g_shootdown.active = false;
     spin_unlock(&g_shootdown_lock);
@@ -1157,26 +1178,7 @@ void vmm_shootdown_all_cores_full(void)
         lapic_send_ipi(g_amp.cores[targets[i]].lapic_id, IPI_SHOOTDOWN_VECTOR);
     }
 
-    /* 100 ms timeout — NOT `tsc_freq_mhz * 100` (which is 100 µs and was
-     * the sibling bug previously fixed in vmm_shootdown_pages). Match the
-     * sibling path. */
-    uint64_t tsc_freq_mhz = cpu_get_tsc_freq_mhz();
-    if (tsc_freq_mhz < 100) tsc_freq_mhz = 1000;             /* fallback 1 GHz */
-    uint64_t timeout_cycles = tsc_freq_mhz * 100000ULL;      /* 100 ms */
-    uint64_t start_tsc = rdtsc();
-    uint32_t spins = 0;
-    const uint32_t max_spins = 10000000;
-
-    while (atomic_load_u32(&g_shootdown.pending_acks) != 0) {
-        cpu_pause();
-        spins++;
-        if (spins >= max_spins || (rdtsc() - start_tsc) > timeout_cycles) {
-            uint32_t remaining = atomic_load_u32(&g_shootdown.pending_acks);
-            if (remaining == 0) break;   /* ACKs landed during timeout calc */
-            panic("Full TLB shootdown timeout: %u/%u cores did not ACK",
-                  remaining, target_count);
-        }
-    }
+    shootdown_wait_acks(target_count, "full");
 
     g_shootdown.active = false;
     spin_unlock(&g_shootdown_lock);
@@ -3026,6 +3028,13 @@ void vmm_init(void)
     spinlock_init(&vmalloc_lock);
     spinlock_init(&kernel_mmio_lock);
     spinlock_init(&g_shootdown_lock);
+
+    /* From here on, a core spinning in spin_lock() with IRQs disabled drains
+     * cross-core TLB shootdowns that target it (instead of stalling until it
+     * acquires the lock — the M1 real-HW deadlock). Safe to arm this early: the
+     * poll is a no-op until a shootdown is actually in flight, and the
+     * descriptor lock above is now initialized. */
+    spin_set_wait_service(vmm_tlb_shootdown_poll);
 
     kernel_context = vmm_create_context();
     if (!kernel_context)
