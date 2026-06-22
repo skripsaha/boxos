@@ -313,17 +313,21 @@ void process_cleanup_queue_flush(void);
  * wedge the BSP's shutdown walk. See process.c — do NOT call in normal run. */
 void process_force_release_locks_for_shutdown(void);
 
-/* P5b strand reaper — runtime reclamation of exited strands.
+/* P5b strand reaper — runtime reclamation of exited strands AND processes.
  *
  * A strand that exits (strand_exit → PROC_DONE) or crashes (PROC_CRASHED)
  * cannot destroy itself while running, so it lingers as a zombie holding its
  * pid + process_count slot + per-strand rings. Without this, std::thread-style
- * churn would exhaust the process table. process_reap_strands scans for
- * exited SPAWNED strands (hammock_base != 0) that are no longer current on any
- * core and process_destroy's them (feeding the existing deferred-cleanup
- * queue). Called periodically from the K-Core run loop. Single-reaper-at-a-time
- * (internal guard) so two cores never destroy the same zombie. Main-strand
- * (app) corpses are left to shutdown teardown, unchanged from P4. */
+ * churn would exhaust the process table. process_reap_strands scans for exited
+ * corpses — both spawned strands (hammock_base != 0) AND full processes / main
+ * strands (hammock_base == 0, e.g. proc_exec children that called exit()) — that
+ * are no longer current on any core and process_destroy's them (feeding the
+ * existing deferred-cleanup queue; the last strand's reap also tears the cabin
+ * down via cabin_ref_dec). Called periodically from the K-Core run loop.
+ * Single-reaper-at-a-time (internal guard) so two cores never destroy the same
+ * zombie. (Joinable std::thread strands stay zombies until join/detach clears
+ * reap_blocked — their pid == thread::id must not recycle while a live handle
+ * holds it; full processes carry no such handle, so they reap eagerly.) */
 void process_reap_strands(void);
 
 uint64_t *process_active_memtags(process_t *proc);
