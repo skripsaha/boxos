@@ -42,6 +42,13 @@ extern "C" {
 void __boxcxx_atomic_wait_cycle(const volatile void *addr, const void *observed,
                                 unsigned width, unsigned long long mask,
                                 unsigned *spin_state);
+// Timed sibling: parks bounded by `timeout_ms` (the caller's remaining budget);
+// a notify wakes it early, otherwise it returns true when the budget elapsed.
+// Used by the timed primitives (counting_semaphore::try_acquire_*,
+// shared_timed_mutex::try_lock_*) to wait event-driven instead of spinning.
+bool __boxcxx_atomic_wait_until(const volatile void *addr, const void *observed,
+                                unsigned width, unsigned long long mask,
+                                unsigned timeout_ms, unsigned *spin_state);
 // Wake waiters parked for `addr` (bumps the version, wakes the whole pool).
 void __boxcxx_atomic_notify(const volatile void *addr, bool all);
 }

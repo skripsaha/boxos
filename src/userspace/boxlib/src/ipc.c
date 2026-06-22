@@ -92,37 +92,11 @@ bool receive(Result* out) {
 }
 
 // Wall-clock timeout via rdtsc
-static inline uint64_t ipc_rdtsc(void) {
-    uint32_t lo, hi;
-    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
-    return ((uint64_t)hi << 32) | lo;
-}
-
 bool receive_wait(Result* out, uint32_t timeout_ms) {
-    if (!out) return false;
-
-    if (result_pop_ipc(out)) return true;
-
-    uint64_t deadline = 0;
-    if (timeout_ms > 0) {
-        deadline = ipc_rdtsc() + cpu_ms_to_tsc(timeout_ms);
-    }
-
-    while (1) {
-        __sync_synchronize();
-
-        if (result_available() || result_ipc_stash_count() > 0) {
-            if (result_pop_ipc(out)) {
-                return true;
-            }
-        }
-
-        if (timeout_ms > 0 && ipc_rdtsc() >= deadline) {
-            return false;
-        }
-
-        yield();
-    }
+    // Event-driven IPC wait: UMWAIT on the ResultRing tail where WAITPKG exists
+    // (woken the instant a sender's KResultPush lands), cooperative-yield loop
+    // otherwise. Was a bare yield-poll. See result_wait_ipc (core/result.c).
+    return result_wait_ipc(out, timeout_ms);
 }
 
 int send_args(uint32_t target_pid, int argc, char** argv) {

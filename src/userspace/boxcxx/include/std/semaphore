@@ -97,8 +97,12 @@ public:
                                                   memory_order_relaxed))
                     return true;
             } else {
-                if (Clock::now() >= abs) return false;
-                __mutex_impl::TimedBackoff(spin);
+                // Event-driven timed park on the count word: a release()
+                // (notify) wakes us early, otherwise the budget elapses.
+                unsigned ms = __mutex_impl::RemainingMs(abs);
+                if (ms == 0) return false;
+                __boxcxx_atomic_wait_until(&__count, &old, sizeof(old), ~0ull,
+                                           ms, &spin);
             }
         }
     }

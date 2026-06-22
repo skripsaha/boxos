@@ -301,6 +301,54 @@ void __boxcxx_atomic_wait_cycle(const volatile void *addr, const void *observed,
     __atomic_fetch_sub(&p->waiters, 1u, __ATOMIC_SEQ_CST);
 }
 
+// Timed sibling of __boxcxx_atomic_wait_cycle. Same two-phase wait (bounded
+// spin → kernel park on the version-pool), but the park is bounded by the
+// caller's REMAINING budget instead of the never-load-bearing backstop, so a
+// timed wait is event-driven: a notify (ver bump + addr_wake) wakes it early —
+// the wake Result is delivered promptly by the kernel substrate — and otherwise
+// addr_park returns ERR_TIMEOUT exactly at the budget. Returns true iff the
+// budget elapsed with no wake; the caller's timed loop then stops if its
+// predicate still fails. timeout_ms == 0 ⇒ deadline already reached.
+// (Phase-1 spin never overshoots the remaining budget; the caller re-checks its
+// own <chrono> deadline between steps and supplies a fresh budget each call.)
+bool __boxcxx_atomic_wait_until(const volatile void *addr, const void *observed,
+                                unsigned width, unsigned long long mask,
+                                unsigned timeout_ms, unsigned *spin_state)
+{
+    if (timeout_ms == 0) return true;
+
+    // Phase 1 — bounded adaptive spin, clamped to the remaining budget.
+    if (cpu_has_waitpkg()) {
+        if (*spin_state < 2u) {
+            (*spin_state)++;
+            umonitor(const_cast<volatile void *>(addr));
+            unsigned spin_ms  = timeout_ms < 50u ? timeout_ms : 50u;
+            uint64_t deadline = cpu_rdtsc() + cpu_ms_to_tsc(spin_ms);
+            (void)umwait(0, deadline);
+            return false;                // caller re-checks predicate + its clock
+        }
+    } else {
+        constexpr unsigned kSpinBudget = 1u << 14;
+        if ((*spin_state)++ < kSpinBudget) {
+            __asm__ volatile("pause");
+            return false;
+        }
+    }
+
+    // Phase 2 — real kernel park on the version-pool, bounded by the budget.
+    *spin_state = 0;
+    WaitPool *p = WaitPoolFor(addr);
+    __atomic_fetch_add(&p->waiters, 1u, __ATOMIC_SEQ_CST);
+    uint64_t v = __atomic_load_n(&p->ver, __ATOMIC_SEQ_CST);
+    if (WaitWordChanged(addr, observed, width, mask)) {
+        __atomic_fetch_sub(&p->waiters, 1u, __ATOMIC_SEQ_CST);
+        return false;
+    }
+    error_t rc = addr_park(&p->ver, v, timeout_ms);
+    __atomic_fetch_sub(&p->waiters, 1u, __ATOMIC_SEQ_CST);
+    return rc == ERR_TIMEOUT;
+}
+
 void __boxcxx_atomic_notify(const volatile void *addr, bool all)
 {
     (void)all;   // address-hashed pool: both one and all wake the whole pool
