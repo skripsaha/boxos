@@ -81,6 +81,19 @@
 #define CONFIG_IRQ_DEFER_GROWTH_FACTOR       2U   // each new chunk = prev × this, up to MAX_CHUNK_CAPACITY
 #define CONFIG_IRQ_DEFER_PRODUCER_RETRIES    4    // bounded chunk-advance retries per irq_defer() call
 
+/* Cross-core TLB shootdown ACK wait (vmm.c shootdown_wait_acks). The M1 fix is
+ * in spin_lock(): a core spinning for an unrelated spinlock services shootdowns
+ * inline, so the initiator never waits on a spinning target. These only bound
+ * the genuine-deadlock detector.
+ *   PANIC_MS         — ceiling before declaring a real cross-core deadlock.
+ *                      Huge vs the us-scale IPI round-trip; a trip is a fault.
+ *   SPIN_BACKSTOP    — spin-count guard for a frozen TSC (then the TSC ceiling
+ *                      never grows); a broken clock still can't wedge the loop.
+ *   TSC_FALLBACK_MHZ — assumed core frequency before TSC calibration completes. */
+#define CONFIG_TLB_SHOOTDOWN_PANIC_MS         5000U
+#define CONFIG_TLB_SHOOTDOWN_SPIN_BACKSTOP    2000000000ULL
+#define CONFIG_TLB_SHOOTDOWN_TSC_FALLBACK_MHZ 1000ULL
+
 /* Static MPSC ring of slots used by TouchPublishIrqPair to hand off a
  * Touch event from IRQ context to a K-Core for the actual publish work.
  * Power-of-2. Capacity sized to hold a worst-case IRQ burst from a fast

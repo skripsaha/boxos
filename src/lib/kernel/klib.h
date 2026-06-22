@@ -106,6 +106,18 @@ void spin_unlock(spinlock_t* lock);
 bool spin_trylock(spinlock_t* lock);
 void spin_force_release(spinlock_t* lock);
 
+/* Service hook drained once per iteration while spin_lock() spins on a
+ * contended lock. spin_lock() keeps IRQs disabled across the whole wait, so a
+ * core wedged here cannot take an interrupt — including a cross-core TLB
+ * shootdown IPI that targets it. The shootdown initiator spins for that ACK
+ * and PANICS on timeout ("TLB shootdown timeout"); a core spinning here with
+ * IRQs off is exactly the real-HW deadlock that trips it. The VMM registers a
+ * hook that drains shootdowns for the current core inline (lock-free,
+ * generation-gated, idempotent — safe mid-spin). NULL until the VMM registers
+ * it; single-core boot has no shootdowns to service. */
+typedef void (*spin_wait_service_fn)(void);
+void spin_set_wait_service(spin_wait_service_fn fn);
+
 size_t strlen(const char* s);
 size_t strnlen(const char* s, size_t maxlen);
 char* strcpy(char* dest, const char* src);
