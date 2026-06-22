@@ -428,3 +428,59 @@ bool result_wait_any(Result* out, uint32_t timeout_ms) {
     }
 }
 
+/* IPC-filtered blocking wait. Event-driven where WAITPKG exists: UMONITOR the
+ * ResultRing tail and UMWAIT until a sender's KResultPush advances it. Without
+ * WAITPKG, fall back to a yield loop — a COOPERATIVE yield (not PAUSE), because
+ * the message producer may be a sibling strand on the same App-Core that must
+ * be scheduled for the message to ever arrive (PAUSE-spinning would livelock a
+ * single-App-Core cabin). Mirrors result_wait()'s WAITPKG/fallback split. */
+void yield(void);   /* boxlib (yield.c) — declared here to avoid pulling sync.h */
+
+static bool result_wait_ipc_umwait(Result* out, uint32_t timeout_ms) {
+    ResultRing* rr = result_ring();
+    volatile uint64_t *tail_addr = (volatile uint64_t *)
+        ((uintptr_t)rr + OFFSETOF(ResultRing, hdr.tail));
+    while (1) {
+        __sync_synchronize();
+        if (result_available() || result_ipc_stash_count() > 0) {
+            if (result_pop_ipc(out)) return true;
+        }
+        umonitor((volatile void*)tail_addr);
+        __sync_synchronize();
+        if (!result_available() && result_ipc_stash_count() == 0) {
+            uint64_t deadline_tsc;
+            if (timeout_ms == 0) {
+                deadline_tsc = 0xFFFFFFFFFFFFFFFFULL;
+            } else {
+                deadline_tsc = rdtsc() + cpu_ms_to_tsc(timeout_ms);
+            }
+            int wake_reason = umwait(0, deadline_tsc);
+            if (wake_reason == 1 && timeout_ms > 0) {
+                __sync_synchronize();
+                if (!result_available() && result_ipc_stash_count() == 0)
+                    return false;
+            }
+        }
+    }
+}
+
+static bool result_wait_ipc_yield(Result* out, uint32_t timeout_ms) {
+    uint64_t deadline = 0;
+    if (timeout_ms > 0) deadline = rdtsc() + cpu_ms_to_tsc(timeout_ms);
+    while (1) {
+        __sync_synchronize();
+        if (result_available() || result_ipc_stash_count() > 0) {
+            if (result_pop_ipc(out)) return true;
+        }
+        if (timeout_ms > 0 && rdtsc() >= deadline) return false;
+        yield();
+    }
+}
+
+bool result_wait_ipc(Result* out, uint32_t timeout_ms) {
+    if (!out) return false;
+    if (result_pop_ipc(out)) return true;
+    if (cpu_has_waitpkg()) return result_wait_ipc_umwait(out, timeout_ms);
+    return result_wait_ipc_yield(out, timeout_ms);
+}
+

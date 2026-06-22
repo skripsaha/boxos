@@ -61,6 +61,21 @@ inline void TimedBackoff(unsigned &spin) noexcept
     }
 }
 
+// Remaining time until `abs` as a millisecond budget for a timed kernel park
+// (__boxcxx_atomic_wait_until), clamped to [0, UINT32_MAX]. 0 ⇒ the deadline
+// has already passed; sub-millisecond remainders round up to 1 so the caller
+// still parks-with-budget rather than busy-looping the final fraction.
+template <typename Clock, typename Duration>
+inline unsigned RemainingMs(const chrono::time_point<Clock, Duration> &abs) noexcept
+{
+    auto now = Clock::now();
+    if (now >= abs) return 0;
+    auto ms = chrono::duration_cast<chrono::milliseconds>(abs - now).count();
+    if (ms <= 0) return 1;
+    if (ms > 0xFFFFFFFFLL) return 0xFFFFFFFFu;
+    return static_cast<unsigned>(ms);
+}
+
 } // namespace __mutex_impl
 
 // ── mutex / recursive_mutex ─────────────────────────────────────────────

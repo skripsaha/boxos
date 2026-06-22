@@ -115,6 +115,11 @@ bool result_pop_touch(Result* out);
 // For IPC servers (display daemon, etc.) that receive both IPC and kernel results.
 bool result_wait_any(Result* out, uint32_t timeout_ms);
 
+// Block until an IPC message arrives (or timeout). Event-driven: UMWAIT on the
+// ResultRing tail where WAITPKG exists (woken when a sender's KResultPush
+// advances tail), pause/yield fallback otherwise. Backs receive_wait().
+bool result_wait_ipc(Result* out, uint32_t timeout_ms);
+
 // Diagnostic: snapshot result_pop counters
 //   out[0]=calls, out[1]=empty(head==tail), out[2]=seq_mismatch, out[3]=success
 //   out[4]=last_seq_seen, out[5]=last_expected, out[6]=last_pos, out[7]=last_tail
