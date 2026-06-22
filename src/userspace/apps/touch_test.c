@@ -279,17 +279,27 @@ static void test4(void)
     int child = spawn_role(ROLE_DIE_CHILD);
     if (child < 0) { fail(4, "spawn failed"); touch_release(tag); return; }
 
-    Touch t;
-    int rc = touch_await(tag, &t, 3000);
-    if (rc != 0) { fail(4, "await timed out"); touch_release(tag); return; }
-
+    /* process:died is a BROADCAST stream — every subscriber sees every death.
+     * Under SMP a sibling test's child can die first and land in our ring ahead
+     * of ours, so we must FILTER by our own child's pid, not assume the first
+     * death is ours. (On 1c cooperative ordering hid this; on 16c it surfaced
+     * as the intermittent "wrong pid in payload".) A real consumer of a death
+     * broadcast filters the same way. Bounded by attempts + per-wait timeout. */
     bool pid_ok = false;
-    if (t.payload_len >= 4) {
-        uint32_t pid = 0;
-        memcpy(&pid, t.payload, 4);
-        pid_ok = (pid == (uint32_t)child);
+    bool delivered = false;
+    for (int tries = 0; tries < 16 && !pid_ok; tries++) {
+        Touch t;
+        if (touch_await(tag, &t, 3000) != 0) break;   /* no further death in budget */
+        delivered = true;
+        if (t.payload_len >= 4) {
+            uint32_t pid = 0;
+            memcpy(&pid, t.payload, 4);
+            if (pid == (uint32_t)child) pid_ok = true;
+        }
     }
-    if (pid_ok) pass(4); else fail(4, "wrong pid in payload");
+    if (pid_ok)         pass(4);
+    else if (!delivered) fail(4, "await timed out");
+    else                fail(4, "own child death not delivered");
     touch_release(tag);
 }
 
