@@ -329,9 +329,17 @@ void buddy_free(BuddyZone* zone, void* addr, size_t pages) {
 
     spin_lock(&zone->lock);
 
-    // Double-free check — panic with lock held to prevent corruption
-    if (!alloc_map_test(zone, idx)) {
-        panic("[BUDDY] Double free at phys=0x%lx pages=%lu order=%d", phys, pages, order);
+    // Double-free check — EVERY page in the block must currently be allocated.
+    // Scanning the whole range (not just the first page) also catches a mis-
+    // sized or partially-overlapping free, which would otherwise silently
+    // corrupt the free-lists by marking already-free pages free again and
+    // double-inserting their buddies. Panic with the lock held so no other core
+    // observes a half-updated map.
+    for (size_t i = 0; i < block_pages; i++) {
+        if (!alloc_map_test(zone, idx + i)) {
+            panic("[BUDDY] Double free at phys=0x%lx pages=%lu order=%d (page +%lu already free)",
+                  phys, pages, order, (unsigned long)i);
+        }
     }
 
     // Mark pages free

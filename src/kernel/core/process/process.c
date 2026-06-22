@@ -1826,7 +1826,16 @@ void process_reap_strands(void)
          p = p->next)
     {
         if (p->magic != PROCESS_MAGIC) continue;   /* listed ⇒ always live magic */
-        if (p->hammock_base == 0)       continue;   /* spawned strands only */
+        /* Reap exited full processes (main strand, hammock_base == 0) as well as
+         * spawned strands — every process is a strand of its cabin.  The main
+         * strand was previously skipped here, leaking its slot/pid/cabin-VMM
+         * forever once it exited (nothing else calls process_destroy on it at
+         * runtime).  Safe: the teardown chain already no-ops the strand-only
+         * steps for hammock_base == 0 (strand_rings_destroy / free_strand_stack)
+         * and cabin_ref_dec frees the cabin only as the LAST strand; and pid
+         * recycling is harmless — no caller addresses a process by a held pid
+         * past its death (SYS_PROC_KILL is self-only; death is observed via the
+         * process:died / strand:exited Touch events, never collected by pid). */
         /* destroying is written __ATOMIC_SEQ_CST in process_destroy; read it
          * the same way (not a plain access) — a hint either way, since
          * process_destroy re-checks "current on a core" authoritatively under

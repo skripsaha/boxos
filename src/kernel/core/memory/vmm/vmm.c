@@ -721,9 +721,10 @@ static error_t pcid_alloc_safe(uint16_t *out_pcid)
      * flushes this CPU's TLB. The pre-fix vmm_shootdown_pages(kernel,
      * 0, 0) was a no-op (count==0 → zero invlpgs, ACKs never decrement)
      * → stale PCID-tagged TLB on remote cores aliasing the recycled
-     * PCID's later PA. vmm_shootdown_all_cores_full() reloads CR3 on
-     * every core with NOFLUSH cleared, which per SDM §4.10.4.1
-     * invalidates every PCID partition.
+     * PCID's later PA. vmm_shootdown_all_cores_full() makes every core
+     * toggle CR4.PGE (see vmm_tlb_shootdown_handler), flushing all PCID
+     * partitions + globals — a CR3 reload alone would only invalidate the
+     * reloaded PCID (SDM §4.10.4.1), not the recycled one.
      *
      * pcid_lock is held across the broadcast so no sibling pcid_alloc
      * can hand out a recycled PCID before every core's TLB has been
@@ -881,6 +882,7 @@ static struct
     volatile uint32_t page_count;   // pages to invalidate (0 = full flush)
     volatile uint32_t pending_acks; // atomic countdown
     volatile uint64_t generation;   // monotonic round id (see handler)
+    volatile uintptr_t evict_pml4;  // teardown: PML4 phys every core must leave CR3 (0 = none)
     volatile bool active;
 } __attribute__((aligned(64))) g_shootdown;
 
@@ -900,11 +902,12 @@ static volatile uint64_t g_core_shootdown_req[MAX_CORES];
  * the caller sends the IPIs. Returns the generation (unused by callers today,
  * handy for tracing). */
 static uint64_t shootdown_arm(const uint8_t *targets, uint8_t target_count,
-                              uintptr_t addr, uint32_t page_count)
+                              uintptr_t addr, uint32_t page_count, uintptr_t evict_pml4)
 {
     uint64_t gen = ++g_shootdown_gen;           /* never 0 (g_core_*_req zero = none) */
     g_shootdown.addr       = addr;
     g_shootdown.page_count = page_count;
+    g_shootdown.evict_pml4 = evict_pml4;
     g_shootdown.generation = gen;
     atomic_store_u32(&g_shootdown.pending_acks, target_count);
     g_shootdown.active = true;
@@ -943,19 +946,53 @@ void vmm_tlb_shootdown_handler(void)
 
     if (addr == 0 || count == 0 || count > 64)
     {
-        /* Full TLB flush — must clear CR3 bit 63 (NOFLUSH) or the CPU
-         * keeps stale entries when PCID is on. See vmm_flush_tlb for
-         * the full story. */
-        uintptr_t cr3;
-        asm volatile("mov %%cr3, %0" : "=r"(cr3));
-        cr3 &= ~(1ULL << 63);
-        asm volatile("mov %0, %%cr3" : : "r"(cr3) : "memory");
+        /* Full TLB flush across ALL PCID partitions via a CR4.PGE toggle.
+         *
+         * A plain CR3 reload (even with NOFLUSH cleared) only invalidates the
+         * PCID named in the new CR3 (Intel SDM §4.10.4.1) — it leaves every
+         * OTHER PCID's entries cached. That is the wrong primitive for the
+         * caller that matters most here: vmm_shootdown_all_cores_full(), run
+         * when a cabin is torn down and its PCID released for reuse. The dying
+         * PCID is not any remote core's current CR3, so a CR3 reload there would
+         * not drop its entries; when pcid_alloc recycles that PCID to a new
+         * cabin, the stale entries alias the new mappings → the wild ".text #PF
+         * / RIP=0" corruption that surfaced once full processes began being
+         * reaped (and their contexts destroyed) at runtime. Toggling CR4.PGE
+         * flushes the entire TLB — all PCIDs and globals — which is exactly what
+         * "full shootdown on every core, irrespective of the context it runs"
+         * is documented to mean. Same instruction pair pcid_alloc uses locally. */
+        uintptr_t cr4;
+        asm volatile("mov %%cr4, %0" : "=r"(cr4));
+        asm volatile("mov %0, %%cr4" : : "r"(cr4 & ~(1ULL << 7)) : "memory");
+        asm volatile("mov %0, %%cr4" : : "r"(cr4) : "memory");
     }
     else
     {
         for (uint32_t i = 0; i < count; i++)
         {
             asm volatile("invlpg (%0)" : : "r"(addr + i * VMM_PAGE_SIZE) : "memory");
+        }
+    }
+
+    /* Teardown eviction. vmm_destroy_context is about to pmm_free the PML4 of
+     * the context it is tearing down; if THIS core's CR3 register still points
+     * at that PML4 (it was switched out of the dying process but has not yet
+     * loaded the incoming CR3 — the scheduler stores current_process=next
+     * before context_restore_to_frame reloads CR3), the freed page would back
+     * our address translation → the "CR3==CR2==freed PML4, err=0" kernel #PF.
+     * The flush above drops cached entries but does NOT move the CR3 register,
+     * so do it here: switch to the kernel address space. Because we ACK only
+     * after this, shootdown_wait_acks completing guarantees no core is left on
+     * the dying PML4 before it is freed. Compare PML4 phys only (mask off PCID
+     * + NOFLUSH/LAM). Harmless mid context-switch: context_restore_to_frame
+     * reloads the incoming CR3 unconditionally on an address-space change. */
+    if (g_shootdown.evict_pml4)
+    {
+        uintptr_t cur_cr3;
+        asm volatile("mov %%cr3, %0" : "=r"(cur_cr3));
+        if ((cur_cr3 & 0x000FFFFFFFFFF000ULL) == g_shootdown.evict_pml4)
+        {
+            asm volatile("mov %0, %%cr3" : : "r"(kernel_context->pml4_phys) : "memory");
         }
     }
 
@@ -1102,11 +1139,23 @@ void vmm_shootdown_pages(vmm_context_t *ctx, uintptr_t virt_addr, size_t page_co
     // reaper made runtime shootdowns frequent enough to surface it. The IPI
     // handler (vmm_shootdown_ipi) takes no lock, so running it mid-spin is safe.
     while (!spin_trylock(&g_shootdown_lock))
+    {
+        /* Drain our own pending shootdown while spinning for the lock. trylock
+         * keeps IRQs at the caller's level; a caller nested in an IRQs-off
+         * critical section (vmm_destroy_context holds ctx->lock across its full
+         * shootdown) would otherwise never take the IPI, so the current holder —
+         * blocked in shootdown_wait_acks waiting for THIS core to ACK — would
+         * deadlock into the shootdown-timeout panic. Servicing inline (the same
+         * idempotent, generation-gated handler the IPI runs; a later real IPI is
+         * a no-op) lets us ACK even with IRQs off. */
+        vmm_tlb_shootdown_poll();
         cpu_pause();
+    }
 
     shootdown_arm(targets, target_count,
                   (page_count <= 64) ? virt_addr : 0,
-                  (page_count <= 64) ? (uint32_t)page_count : 0);
+                  (page_count <= 64) ? (uint32_t)page_count : 0,
+                  0 /* no CR3 eviction — a live context is only being unmapped */);
 
     for (uint8_t i = 0; i < target_count; i++)
     {
@@ -1128,8 +1177,15 @@ void vmm_shootdown_pages(vmm_context_t *ctx, uintptr_t virt_addr, size_t page_co
  * entries (PCID cached) — those entries then alias whichever new
  * mapping receives the recycled PA, producing the unpredictable
  * ".text page-fault on user write" pattern reported in 2026-04-29
- * crash logs. */
-void vmm_shootdown_all_cores_full(void)
+ * crash logs.
+ *
+ * evict_pml4 (0 = none): when tearing down a context whose PML4 is about to be
+ * freed, every remote core still holding it in CR3 must switch to the kernel
+ * address space before we free the page (see the handler) — otherwise a core
+ * caught mid context-switch (current_process already advanced, CR3 not yet
+ * reloaded) translates through the freed PML4. Passing the dying PML4 here
+ * makes shootdown_wait_acks a true "no core is on this CR3 anymore" barrier. */
+static void vmm_shootdown_full_evict(uintptr_t evict_pml4)
 {
     if (!g_amp.multicore_active || g_amp.total_cores <= 1) {
         /* Single-core: just flush ourselves (clear NOFLUSH bit). */
@@ -1170,9 +1226,17 @@ void vmm_shootdown_all_cores_full(void)
      * shootdown IPIs while spinning. See vmm_shootdown_pages for the full
      * rationale. */
     while (!spin_trylock(&g_shootdown_lock))
+    {
+        /* Drain our own pending shootdown while spinning — see vmm_shootdown_pages.
+         * Critical here: vmm_destroy_context calls this from inside spin_lock(
+         * &ctx->lock) (IRQs off), and two K-Cores reaping exited full processes
+         * concurrently each hold their own ctx->lock; without inline servicing
+         * the lock loser never ACKs the winner → "TLB shootdown timeout (full)". */
+        vmm_tlb_shootdown_poll();
         cpu_pause();
+    }
 
-    shootdown_arm(targets, target_count, 0, 0);   /* 0/0 ⇒ handler does full flush */
+    shootdown_arm(targets, target_count, 0, 0, evict_pml4);   /* 0/0 ⇒ handler does full flush */
 
     for (uint8_t i = 0; i < target_count; i++) {
         lapic_send_ipi(g_amp.cores[targets[i]].lapic_id, IPI_SHOOTDOWN_VECTOR);
@@ -1182,6 +1246,15 @@ void vmm_shootdown_all_cores_full(void)
 
     g_shootdown.active = false;
     spin_unlock(&g_shootdown_lock);
+}
+
+/* Public entry — full flush on every core with NO CR3 eviction. For callers
+ * that are not freeing the PML4 a running core may hold (PCID rollover in
+ * pcid_alloc_safe, and any external caller). The teardown path in
+ * vmm_destroy_context calls vmm_shootdown_full_evict(pml4) directly. */
+void vmm_shootdown_all_cores_full(void)
+{
+    vmm_shootdown_full_evict(0);
 }
 
 void vmm_shootdown_page(vmm_context_t *ctx, uintptr_t virt_addr)
@@ -1633,36 +1706,50 @@ static void vmm_walk_free_pml4_user_(page_table_t *pml4, int pml4_entry_end,
                         continue;
                     }
 
-                    /* Phase 1 of the two-phase teardown: zero the PTE here
-                     * but DO NOT pmm_free the underlying page yet — only
-                     * mark it in the dedup bitmap. The actual frees happen
-                     * after a cross-core TLB shootdown so no AMP core can
-                     * still have cached translations to a PA that PMM is
-                     * about to hand out to a different cabin. */
-                    if (!is_identity_mapped && has_dedup)
-                    {
-                        size_t page_idx = phys / VMM_PAGE_SIZE;
-                        if (page_idx < dedup_total_pages)
-                        {
-                            size_t byte_idx = page_idx / 8;
-                            size_t bit_idx = page_idx % 8;
-                            if (!(freed_bitmap[byte_idx] & (1 << bit_idx)))
-                            {
-                                freed_bitmap[byte_idx] |= (1 << bit_idx);
-                                freed_pages++;
-                            }
-                        }
-                    }
-
+                    /* Free the data page NOW, inline with the walk. The Phase 0
+                     * quiesce already evicted every core off this address space
+                     * and flushed all TLBs, so the frame can return to PMM
+                     * immediately — there is no longer a second pass over all of
+                     * physical RAM (the old O(total-RAM) Phase 3 scan is gone;
+                     * teardown is now O(mapped-pages)). The dedup bitmap still
+                     * guards a frame aliased by more than one PTE in this cabin
+                     * (e.g. a CoW snapshot sharing pages with the live mapping):
+                     * free each unique frame exactly once. If the bitmap is
+                     * absent (kmalloc failed) we must NOT free — an un-deduped
+                     * double-free would corrupt the buddy — so the frame leaks,
+                     * a rare bounded fallback (same as the old has_dedup gate). */
                     if (!is_identity_mapped)
                     {
+                        bool do_free = has_dedup;
+                        if (has_dedup)
+                        {
+                            size_t page_idx = phys / VMM_PAGE_SIZE;
+                            if (page_idx >= dedup_total_pages)
+                            {
+                                do_free = false;   /* outside tracked RAM — don't risk it */
+                            }
+                            else
+                            {
+                                size_t byte_idx = page_idx / 8;
+                                size_t bit_idx  = page_idx % 8;
+                                if (freed_bitmap[byte_idx] & (1 << bit_idx))
+                                    do_free = false;            /* aliased — already freed */
+                                else
+                                    freed_bitmap[byte_idx] |= (1 << bit_idx);
+                            }
+                        }
+                        if (do_free)
+                        {
+                            pmm_free((void *)phys, 1);
+                            freed_pages++;
+                        }
                         pt->entries[p1] = 0;
                     }
                 }
 
                 if (freed_pages > 0)
                 {
-                    debug_printf("[VMM]   Marked %d data pages for deferred free\n", freed_pages);
+                    debug_printf("[VMM]   Freed %d data pages\n", freed_pages);
                 }
 
                 if (!skip_pt_free)
@@ -1688,6 +1775,27 @@ static void vmm_free_user_space_tables(vmm_context_t *ctx)
 
     debug_printf("[VMM] Freeing user space tables for context CR3=0x%lx (%d-level)\n",
                  ctx->pml4_phys, g_vmm_paging_levels);
+
+    /* Phase 0 — quiesce, BEFORE the walk frees any paging structure.
+     *
+     * The walk below frees PT/PD/PDPT pages inline (vmm_free_page_table →
+     * pmm_free), returning them to the allocator for immediate reuse. If any
+     * core still carries THIS context's PML4 in its CR3 register — e.g. one
+     * switched out of the now-dead process but not yet reloaded with the
+     * incoming CR3 (the scheduler advances current_process before context_
+     * restore_to_frame reloads CR3) — its hardware page-walk would then read
+     * freed-and-recycled paging structures, the "RIP=0 / CR3==CR2 #PF" wild
+     * fault that only appears once contexts are destroyed at RUNTIME (full
+     * processes reaped) rather than at shutdown. vmm_shootdown_full_evict
+     * flushes every core's TLB (all PCID partitions) AND moves any core still
+     * on this PML4 to the kernel address space, so on return no core references
+     * these tables. The dead process is already unschedulable (unlinked from
+     * the run list), so none can re-load this CR3 during the walk — making this
+     * single up-front barrier sufficient: nothing re-caches a dying context's
+     * entries between here and the data-page free, so no post-walk shootdown is
+     * needed. Runs under ctx->lock (IRQs off); the shootdown's trylock loop
+     * drains inline, so it does not deadlock. */
+    vmm_shootdown_full_evict(ctx->pml4_phys);
 
     // bitmap to detect duplicate PT entries pointing to the same physical page
     // sized dynamically from pmm_get_mem_end() so all physical RAM is covered
@@ -1739,45 +1847,13 @@ static void vmm_free_user_space_tables(vmm_context_t *ctx)
         }
     }
 
-    /* Phase 2: cross-core TLB shootdown. ALL online cores must drop any
-     * cached entries that referenced this cabin's user mappings (PCID
-     * caching means a CR3 swap alone does not flush them). Only after
-     * the shootdown completes is it safe to return the underlying
-     * physical pages to PMM — otherwise the next pmm_alloc on another
-     * core could hand the page to a different cabin while a stale TLB
-     * entry still maps it on a third core, causing the wild-write
-     * memory-corruption crash we hunted on 2026-04-29. */
-    vmm_shootdown_all_cores_full();
-
-    /* Phase 3: now safe to actually return the pages. */
+    /* The old Phase 2 (a second post-walk cross-core shootdown) and Phase 3 (a
+     * scan over ALL of installed RAM to bulk-free the marked frames) are both
+     * gone: the Phase 0 quiesce flushed every core and evicted them off this
+     * CR3, and the walk now frees each mapped data page inline. Teardown cost is
+     * O(mapped pages), not O(installed RAM). Only the dedup scratch remains. */
     if (freed_bitmap)
-    {
-        size_t freed_total = 0;
-        for (size_t pg = 0; pg < dedup_total_pages; pg++)
-        {
-            size_t byte_idx = pg / 8;
-            size_t bit_idx = pg % 8;
-            if (freed_bitmap[byte_idx] & (1 << bit_idx))
-            {
-                pmm_free((void *)(uintptr_t)(pg * VMM_PAGE_SIZE), 1);
-                freed_total++;
-            }
-        }
         kfree(freed_bitmap);
-        debug_printf("[VMM] User space tables: deferred-freed %zu data pages after TLB shootdown\n",
-                     freed_total);
-    }
-    else
-    {
-        /* No dedup bitmap: we did not collect any frees. Still flush
-         * locally so this CPU does not see stale entries. Clear bit 63
-         * (NOFLUSH) explicitly — see vmm_flush_tlb. */
-        uintptr_t cr3;
-        asm volatile("mov %%cr3, %0" : "=r"(cr3));
-        cr3 &= ~(1ULL << 63);
-        asm volatile("mov %0, %%cr3" : : "r"(cr3) : "memory");
-        debug_printf("[VMM] User space tables freed (no dedup bitmap, no data pages reclaimed)\n");
-    }
 
     debug_printf("[VMM] User space tables freed\n");
 }
