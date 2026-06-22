@@ -165,20 +165,45 @@ void ahci_irq_handler(void) {
         volatile ahci_port_regs_t* port = ahci_get_port_regs(i);
         uint32_t port_is = port->is;
 
-        /* The completion register depends on the command class: NCQ commands
-         * clear PxSACT on completion (PxCI clears early, when the FIS is
-         * sent), non-queued commands clear PxCI. Read issued_mask BEFORE the
-         * register: the submitter writes the register then issued_mask under a
-         * lock with IRQs off, so on x86 TSO a slot visible in the snapshot is
-         * also visible (still set) in the register read, and completed =
-         * snapshot & ~outstanding never falsely retires a just-armed slot. */
-        uint32_t snapshot    = __atomic_load_n(&state->issued_mask, __ATOMIC_ACQUIRE);
-        uint32_t outstanding = state->ncq
-            ? __atomic_load_n(&port->sact, __ATOMIC_ACQUIRE)
-            : __atomic_load_n(&port->ci,   __ATOMIC_ACQUIRE);
-        uint32_t completed   = snapshot & ~outstanding;
+        /* Clear PxIS FIRST (write-1-to-clear), BEFORE scanning for completed
+         * slots. AHCI completion-interrupt bits are per-FIS-type — DHRS for a
+         * plain Reg-D2H, SDBS for an NCQ Set-Device-Bits — NOT per-command, so
+         * several commands retiring close together collapse onto ONE bit. If
+         * PxIS were cleared only AFTER processing, a command that completes
+         * DURING this handler (the async-read state machine arms its next block
+         * inline from a retire callback, and under fast media that block
+         * finishes before we return) would have its shared status bit cleared
+         * with no fresh edge AND be absent from the one `completed` snapshot —
+         * so it would never be retired: its slot stays in issued_mask forever
+         * with a live callback, hanging the waiter. Clearing first means any
+         * late completion re-asserts a fresh PxIS edge -> a new MSI we service.
+         * The fatal-error check below uses the pre-clear `port_is` snapshot. */
+        port->is = port_is;
 
-        if (completed) {
+        /* Drain EVERY completed slot, re-reading the completion register on each
+         * pass. A retired slot's callback may arm the next command of a chained
+         * async op (multi-block read); that command can finish before we exit,
+         * so a single pass loses it. Loop until no issued slot is complete.
+         *
+         * Per pass read issued_mask BEFORE the completion register: the
+         * submitter writes the register then issued_mask (IRQs off), so on x86
+         * TSO a slot present in the snapshot is still set in the register read,
+         * and `snapshot & ~outstanding` never falsely retires a just-armed slot.
+         * NCQ commands clear PxSACT on completion (PxCI clears early when the
+         * FIS is sent); non-queued commands clear PxCI.
+         *
+         * AHCI_DRAIN_MAX bounds a pathological self-arming callback; legitimate
+         * chains drain in a handful of passes. If ever hit, slots left
+         * outstanding re-raise a fresh PxIS edge (cleared above) and the next
+         * MSI continues the drain — correctness holds either way. */
+        enum { AHCI_DRAIN_MAX = 4096 };
+        for (uint32_t pass = 0; pass < AHCI_DRAIN_MAX; pass++) {
+            uint32_t snapshot    = __atomic_load_n(&state->issued_mask, __ATOMIC_ACQUIRE);
+            uint32_t outstanding = state->ncq
+                ? __atomic_load_n(&port->sact, __ATOMIC_ACQUIRE)
+                : __atomic_load_n(&port->ci,   __ATOMIC_ACQUIRE);
+            uint32_t completed   = snapshot & ~outstanding;
+            if (!completed) break;
             __sync_fetch_and_or(&state->completed_slots, completed);
             __sync_fetch_and_and(&state->issued_mask, ~completed);
             ahci_retire_slots(state, i, completed, OK);
@@ -216,8 +241,6 @@ void ahci_irq_handler(void) {
                 irq_defer(ahci_deferred_recover, state);
             }
         }
-
-        port->is = port_is;
     }
 
     ahci_ctrl.hba_mem->is = is;
