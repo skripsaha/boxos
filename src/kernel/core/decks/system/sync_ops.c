@@ -248,7 +248,12 @@ static int SysAddrWake(const ManifestOp *op, Crate *crates,
     while (e && (count == 0 || wake_count < count) && wake_count < ADDR_WAKE_MAX_BATCH)
     {
         AddrWaitEntry *next = e->next;   /* save: AddrWaitUnlink nulls e->next */
-        if (!e->done) {
+        /* The bucket is a HASH of the physical address ((phys>>3)&0xFFFF), so a
+         * chain can hold waiters parked on DIFFERENT addresses that collide.
+         * Wake only waiters on THIS exact address — otherwise a colliding waiter
+         * consumes the (count==1) notify_one budget and the intended waiter
+         * misses its wake (lost wakeup for a mutex/semaphore handoff). */
+        if (!e->done && e->phys_addr == phys) {
             e->done = 1;                 /* claim — we now own this waiter */
             AddrWaitUnlink(bucket, e);   /* unlink under the same lock */
             process_ref_inc(e->proc);

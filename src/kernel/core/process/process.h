@@ -26,6 +26,10 @@
 #define PROCESS_TAG_SIZE 256
 #define PROCESS_INVALID_PID 0
 
+/* quiesce_core sentinel: strand was never dispatched on any core, so no core
+ * can be in its stack epilogue — it is immediately reapable. */
+#define QUIESCE_CORE_NONE 0xFFu
+
 // Fast O(1) role checks use proc->cabin->tag_bits AND g_well_known bitmasks from tagfs.h.
 
 struct process_t;
@@ -119,6 +123,15 @@ typedef struct process_t
     int8_t current_prio;            // Current scheduler priority level (set on enqueue)
     int8_t rq_prio;                 // Priority level in runqueue (-1 = not enqueued)
     int16_t rq_index;               // Index in queue (-1 = not enqueued)
+    /* Running-XOR-runqueue interlock: the core index this strand is currently
+     * dispatched on, or -1 if on no core. schedule() CAS-claims it before
+     * committing the strand as current_process and releases it on switch-out, so
+     * the SAME process_t can never run on two cores at once (which would tear its
+     * shared context via concurrent context_save/restore). Init -1 by
+     * process_init_strand_fields / idle_setup. int16_t holds every MAX_CORES
+     * (up to 256) index alongside the -1 sentinel — int8_t would alias core 255
+     * onto -1. */
+    volatile int16_t on_cpu;
 
     volatile process_state_t state;
     spinlock_t state_lock;
@@ -192,6 +205,20 @@ typedef struct process_t
      * then reclaims it. 0 for raw strand_spawn workers (eager reap, as before)
      * and the main strand. Zeroed by the spawn memset. */
     volatile uint8_t  reap_blocked;
+
+    /* Reap-vs-switch quiescence stamp. The scheduler runs on the dispatched
+     * strand's OWN kernel stack, and a switch only finishes at the iretq AFTER
+     * current_process has already moved to the incoming strand — so an exited
+     * strand is briefly off the run state yet still has the outgoing core in its
+     * stack epilogue. schedule() stamps quiesce_core (the core that last ran
+     * this strand) + quiesce_seq (that core's quiesce_seq at eviction) whenever
+     * it switches the strand out; the reaper must not free the strand until
+     * scheduler_get_core(quiesce_core)->quiesce_seq has advanced past quiesce_seq
+     * (that core has since dispatched again, hence left this stack). quiesce_core
+     * == QUIESCE_CORE_NONE means the strand was never dispatched → immediately
+     * reapable. Set to QUIESCE_CORE_NONE by process_init_strand_fields. */
+    uint8_t           quiesce_core;
+    uint64_t          quiesce_seq;
 
     /* Per-strand IPC rings (P5a).  kring.c / touch_ring.c route by THESE
      * (not by cabin->*_ring_phys), so concurrent multi-strand syscalls never

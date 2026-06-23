@@ -559,6 +559,47 @@ error_t sched_dequeue(process_t *proc)
     return OK;
 }
 
+/* Remove `proc` from whichever core's runqueue currently holds it, if any,
+ * keeping that core's tier counter consistent. process_destroy calls this so a
+ * torn-down strand is referenced by NO runqueue before it is freed: a dangling
+ * runqueue slot would otherwise dispatch a freed/recycled process_t (the
+ * strandtest recycle-race). sched_dequeue() only covers proc->home_core; this
+ * sweeps every core for the corpse case — process_destroy reaches a DONE strand
+ * whose PROC_CRASHED transition never ran sched_dequeue (old state != WORKING),
+ * and for the rare event a strand is enqueued off its home core.
+ *
+ * A process is in at most one runqueue (single rq_prio/rq_index), and
+ * runqueue_contains/runqueue_remove validate slot==proc, so the sweep removes it
+ * from the one holder and no-ops on every other core. The tier-counter
+ * decrement is gated on runqueue_contains() being true, so this never
+ * double-counts against sched_dequeue()'s home-core removal (which clears
+ * rq_prio/rq_index, making contains() false here). Each runqueue lock is taken
+ * alone — no nesting, no lock-order inversion. */
+void sched_dequeue_all_cores(process_t *proc)
+{
+    if (!proc || process_is_idle(proc) || !g_core_sched)
+        return;
+
+    for (uint32_t c = 0; c < g_sched_core_count; c++)
+    {
+        scheduler_state_t *s = &g_core_sched[c];
+        spin_lock(&s->runqueue.lock);
+        if (runqueue_contains(&s->runqueue, proc))
+        {
+            int prio = proc->current_prio;
+            runqueue_remove(&s->runqueue, proc);
+            if (prio >= 0 && prio < SCHED_PRIO_LEVELS)
+            {
+                if (prio == SCHED_PRIO_CONTEXT)
+                    __atomic_fetch_sub(&g_core_context_count[c], 1, __ATOMIC_RELAXED);
+                else
+                    __atomic_fetch_sub(&g_core_normal_count[c], 1, __ATOMIC_RELAXED);
+            }
+        }
+        spin_unlock(&s->runqueue.lock);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Process selection (per-core)
 // ---------------------------------------------------------------------------
@@ -761,6 +802,24 @@ void schedule(void *frame_ptr)
         return;
     }
 
+    /* Quiescence tick — bumped on EVERY schedule entry, BEFORE the parked
+     * early-return (a parked-but-still-ticking core must advance it too;
+     * is_parked does not mask the LAPIC timer). A strand switched out below
+     * stamps this value; the reaper frees its kernel stack only once this core's
+     * quiesce_seq EXCEEDS the stamp.
+     *
+     * Why "exceeds the stamp" ⇒ "this core has left the evicted strand's kernel
+     * stack": schedule() runs with IF=0 (cli above) all the way through to the
+     * iretq that returns from THIS dispatch, so the NEXT schedule() entry on this
+     * core — the one that bumps past the stamp — cannot begin until that iretq
+     * has retired. The iretq is exactly what moves the core off the outgoing
+     * strand's kernel stack (onto the incoming context's, or idle's on the
+     * parked/bail path). So the bump-before-parked-check is both necessary
+     * (else a core that evicts then parks would freeze its epoch and never let
+     * that corpse reap) and safe (the epoch only advances after the stack is
+     * left). See process.c strand_stack_in_use(). */
+    uint64_t my_qseq = __atomic_add_fetch(&s->quiesce_seq, 1, __ATOMIC_ACQ_REL);
+
     // Skip scheduling on parked cores
     if (__atomic_load_n(&s->is_parked, __ATOMIC_ACQUIRE)) {
         return;
@@ -786,7 +845,21 @@ void schedule(void *frame_ptr)
     {
         int prio = sched_determine_priority(current);
         spin_lock(&s->runqueue.lock);
-        if (!runqueue_contains(&s->runqueue, current))
+        /* Re-check state UNDER the runqueue lock before committing the enqueue.
+         * process_set_state's WORKING→non-WORKING transition takes THIS same
+         * runqueue lock for its sched_dequeue (on proc->home_core == this core
+         * for a running strand), so observing WORKING here is decisive: either
+         * the transition has not run yet (we enqueue; its later dequeue, under
+         * this lock, removes us) or it already ran (we see non-WORKING and skip).
+         * Without it, the unlocked state read in the `if` above races a
+         * concurrent exit/kill and can leave a DONE/CRASHED strand in the
+         * runqueue — which the runtime reaper then frees while a dangling slot
+         * still points at it, so a freed/recycled process_t gets dispatched
+         * (the strand-churn fault that runtime full-process reaping unmasked).
+         * Read state atomically — NOT process_get_state(), which takes
+         * state_lock and would invert the state_lock→runqueue_lock order. */
+        if (__atomic_load_n(&current->state, __ATOMIC_ACQUIRE) == PROC_WORKING &&
+            !runqueue_contains(&s->runqueue, current))
         {
             runqueue_enqueue(&s->runqueue, current, prio);
             current->current_prio = (int8_t)prio;
@@ -844,17 +917,62 @@ void schedule(void *frame_ptr)
      * scheduler_select_next will pick a fresh candidate next tick. */
     if (next && !process_is_idle(next) &&
         __atomic_load_n(&next->destroying, __ATOMIC_ACQUIRE)) {
-        /* Bail out to NULL — next IRQ tick will run scheduler again
-         * and pick a fresh candidate. NULL is a valid current_process
-         * value (treated as "no current task"). */
-        next = NULL;
+        /* Selected task is being destroyed — don't dispatch it. Fall back to
+         * THIS core's idle task for this tick, NOT to NULL: with next == NULL,
+         * context_restore_to_frame is a no-op, so the IRQ frame is left holding
+         * the OUTGOING `current` and the iretq would resume `current` here —
+         * while `current` was just re-enqueued above, leaving it both running
+         * AND in a runqueue (stealable → the same context dispatched on two
+         * cores). Running idle keeps the running-XOR-runqueue invariant; the
+         * next tick re-runs scheduler_select_next and picks a fresh candidate. */
+        next = idle_process_get();
+    }
+
+    /* Running-XOR-runqueue interlock: claim `next` exclusively before committing
+     * it as current_process. If another core still owns it (mid-eviction there —
+     * e.g. a strand transiently re-enqueued while still current), do NOT dispatch
+     * it here: two cores would then run context_save/restore over one shared
+     * proc->context and tear it (the strandtest UEFI-16c corruption). Fall back to
+     * idle; the next tick re-selects. The owner releases on_cpu below when it
+     * switches the strand out. on_cpu == me means a consecutive run (already
+     * ours) — keep it without re-claiming. */
+    if (next && !process_is_idle(next)) {
+        int16_t me8 = (int16_t)amp_get_core_index();
+        if (__atomic_load_n(&next->on_cpu, __ATOMIC_ACQUIRE) != me8) {
+            int16_t expect = -1;
+            if (!__atomic_compare_exchange_n(&next->on_cpu, &expect, me8,
+                                             false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+                /* Another core still owns `next` — averting double-dispatch. */
+                next = idle_process_get();
+            }
+        }
+    }
+
+    /* Stamp the outgoing strand for reap-vs-switch safety. It leaves the run
+     * state at the store below, but THIS core keeps executing on its kernel
+     * stack until the post-return iretq — so the reaper must hold off freeing
+     * it until this core's quiesce_seq advances past my_qseq (i.e. its next
+     * schedule(), which runs on `next`'s stack). The RELEASE store pairs with
+     * the reaper's ACQUIRE and is ordered before current_process=next, so any
+     * core that observes the strand no longer current also observes this stamp. */
+    if (current && current != next && !process_is_idle(current)) {
+        current->quiesce_core = amp_get_core_index();
+        __atomic_store_n(&current->quiesce_seq, my_qseq, __ATOMIC_RELEASE);
     }
     s->current_process = next;
+    /* Release the outgoing strand's dispatch claim AFTER current_process moves to
+     * `next`: once on_cpu is -1 the strand is no longer current_process on this
+     * core, so a core that then claims it dispatches it singly (no double). */
+    if (current && current != next && !process_is_idle(current)) {
+        __atomic_store_n(&current->on_cpu, (int16_t)-1, __ATOMIC_RELEASE);
+    }
     spin_unlock(&s->scheduler_lock);
 
     g_sched_stats.context_switches++;
 
-    // PROC_CREATED → PROC_WORKING
+    // PROC_CREATED → PROC_WORKING.  `next` is never NULL: scheduler_select_next
+    // returns the idle task when nothing is runnable, and the destroying-task
+    // re-check above also falls back to idle — so no NULL guard is needed here.
     if (process_get_state(next) == PROC_CREATED)
     {
         spin_lock(&next->state_lock);
