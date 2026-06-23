@@ -217,6 +217,9 @@ static void process_init_strand_fields(process_t *proc)
     proc->started       = false;
     proc->kcore_pending = 0;
     proc->touch_cleaned = 0;
+    proc->quiesce_core  = QUIESCE_CORE_NONE;   /* never dispatched yet */
+    proc->quiesce_seq   = 0;
+    proc->on_cpu        = -1;                  /* not dispatched on any core */
 
     proc->irq_stack_top    = 0;
     proc->irq_rip          = 0;
@@ -541,6 +544,26 @@ void process_set_state(process_t *proc, process_state_t new_state)
 
     spin_lock(&proc->state_lock);
     process_state_t old_state = proc->state;
+
+    /* Death is terminal. A wake (process_set_state PROC_WORKING) that races a
+     * strand's exit must NOT resurrect a DONE/CRASHED corpse: the WORKING
+     * transition runs sched_enqueue, putting a dead strand back on a runqueue.
+     * From there it is either dispatched with a stale context, or — because
+     * process_destroy's later PROC_CRASHED transition skips sched_dequeue for a
+     * non-WORKING old state — freed while still enqueued, leaving a dangling
+     * runqueue slot that dispatches the freed/recycled process_t. That is the
+     * strandtest UEFI-16c recycle-race (Facet A: stale strand context; Facet B:
+     * the freed kernel stack reused as an iret frame). The 13 wake sites
+     * (touch/kring/sync_ops/touch_ring) are best-effort and already tolerate a
+     * target that has gone away, so refusing the wake here is the correct
+     * no-op — there is no live strand left to run. */
+    if (new_state == PROC_WORKING &&
+        (old_state == PROC_DONE || old_state == PROC_CRASHED))
+    {
+        spin_unlock(&proc->state_lock);
+        return;
+    }
+
     proc->state = new_state;
 
     if (new_state == PROC_WORKING && old_state != PROC_WORKING)
@@ -649,6 +672,14 @@ void process_destroy(process_t *proc)
     spin_unlock(&process_lock);
 
     process_set_state(proc, PROC_CRASHED);
+
+    /* Referenced-nowhere invariant: guarantee no runqueue still points at this
+     * strand before anything frees it. The PROC_CRASHED transition above only
+     * dequeues from home_core when the old state was WORKING; a corpse reaped
+     * after exit (old state DONE) is not covered, nor is a strand enqueued off
+     * its home core. Sweeping every core closes the dangling-slot window that
+     * would otherwise dispatch the freed struct (the recycle-race). */
+    sched_dequeue_all_cores(proc);
 
     uint32_t cancelled = async_io_cancel_by_pid(proc->pid);
     if (cancelled > 0)
@@ -1792,6 +1823,38 @@ void process_cleanup_deferred(void)
         debug_printf("[PROCESS] Deferred cleanup: freed %u processes\n", cleaned);
 }
 
+/* True while some core may still be executing on `proc`'s kernel stack, so the
+ * reaper must not tear it down yet. Two cases:
+ *   (1) proc is still current_process on a core (not yet switched out);
+ *   (2) it WAS switched out, but the core that last ran it (quiesce_core) has
+ *       not dispatched again since — i.e. it is still in the post-(current_
+ *       process=next) iretq epilogue, executing on proc's kernel stack.
+ * The scheduler runs every ISR/syscall/fault on the running strand's OWN kernel
+ * stack (TSS.RSP0), and a switch only finishes at the iretq AFTER current_process
+ * has already moved on — so without this gate the reaper could free a kernel
+ * stack a core is mid-epilogue on (corrupting the iret frame → SMEP #PF). Loading
+ * current_process with ACQUIRE orders schedule()'s RELEASE eviction stamp, so a
+ * not-current observation always sees the matching (quiesce_core, quiesce_seq).
+ * QUIESCE_CORE_NONE ⇒ never dispatched ⇒ no stack in use. */
+static bool strand_stack_in_use(process_t *proc)
+{
+    for (uint8_t c = 0; c < g_amp.total_cores; c++)
+    {
+        scheduler_state_t *s = scheduler_get_core(c);
+        if (s && __atomic_load_n(&s->current_process, __ATOMIC_ACQUIRE) == proc)
+            return true;
+    }
+
+    uint8_t qc = proc->quiesce_core;
+    if (qc == QUIESCE_CORE_NONE)
+        return false;                  /* never ran — no core can be on its stack */
+    scheduler_state_t *qs = scheduler_get_core(qc);
+    if (!qs)
+        return false;
+    /* Not quiescent until quiesce_core has scheduled again past the stamp. */
+    return __atomic_load_n(&qs->quiesce_seq, __ATOMIC_ACQUIRE) <= proc->quiesce_seq;
+}
+
 /* P5b strand reaper — single-reaper-at-a-time guard. A plain test-and-set:
  * the first K-Core to claim it does the scan + destroys; others skip this
  * tick. This serialises process_destroy across cores so two of them never
@@ -1851,6 +1914,23 @@ void process_reap_strands(void)
         process_state_t st = __atomic_load_n(&p->state, __ATOMIC_ACQUIRE);
         if (st == PROC_DONE || st == PROC_CRASHED)
         {
+            /* Reap-vs-switch: skip a corpse whose kernel stack a core may still
+             * be executing on (current somewhere, or its last core not yet
+             * dispatched past the eviction). Retried next tick once quiescent —
+             * monotonic, so once safe it stays safe. */
+            if (strand_stack_in_use(p))
+                continue;
+            /* Referenced-nowhere: never free a strand still linked into a
+             * runqueue — its slot would dangle and later dispatch the freed/
+             * recycled process_t. A corpse should never BE enqueued
+             * (process_set_state refuses to resurrect a dead strand, and the
+             * schedule() re-enqueue re-checks WORKING under the runqueue lock),
+             * so this is a defense-in-depth assertion of the invariant; if it
+             * ever holds we just retry next tick. rq_prio/rq_index are -1
+             * exactly when not enqueued (maintained under each runqueue lock; an
+             * aligned scalar read is a safe conservative hint either way). */
+            if (p->rq_prio >= 0 || p->rq_index >= 0)
+                continue;
             process_ref_inc(p);
             batch[n++] = p;
         }

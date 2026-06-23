@@ -59,6 +59,13 @@ typedef struct {
     RunQueue    runqueue;
     _Atomic bool is_parked;            // Written by BSP recalc, read by AP timer IRQ — must be atomic
     uint32_t    idle_tick_count;       // Consecutive idle ticks
+    /* Quiescence sequence (reap-vs-switch safety). Bumped at the top of every
+     * schedule() on this core. An evicted strand stamps the value it saw; that
+     * strand's kernel stack is provably free once this counter has advanced
+     * past the stamp, because the next schedule() runs on the incoming strand's
+     * stack (post-iretq) — never the evicted one's. The reaper gates on it so a
+     * strand's stack is never freed while this core is still in its epilogue. */
+    volatile uint64_t quiesce_seq;
 } scheduler_state_t;
 
 // ============================================================================
@@ -103,6 +110,9 @@ int sched_determine_priority(process_t *proc);
 error_t sched_enqueue(process_t *proc);
 error_t sched_enqueue_on(uint8_t core_idx, process_t *proc);
 error_t sched_dequeue(process_t *proc);
+/* Remove proc from whichever core's runqueue holds it (referenced-nowhere
+ * guarantee before process_destroy frees it). See scheduler.c. */
+void sched_dequeue_all_cores(process_t *proc);
 
 scheduler_state_t *scheduler_get_state(void);
 scheduler_state_t *scheduler_get_core(uint8_t core_idx);

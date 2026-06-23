@@ -29,6 +29,7 @@ static void idle_setup(process_t* idle, uint8_t core_index) {
     idle->ref_count = 0;
     idle->score = -1000;
     idle->home_core = core_index;
+    idle->on_cpu = -1;            /* never claimed (schedule skips idle), kept consistent */
 
     spinlock_init(&idle->state_lock);
 
