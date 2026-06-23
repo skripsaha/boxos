@@ -269,7 +269,11 @@ static int SysTouchAwait(const ManifestOp *op, Crate *crates,
         if (delay == 0) delay = 1;
         uint64_t fire_at = __atomic_load_n(&g_global_tick, __ATOMIC_RELAXED)
                            + delay;
-        TouchQueueWakeAfter(ctx->proc->pid, fire_at);
+        /* wait_seq=0: touch_await registers no addr_wait entry, so the
+         * deferred SyncTimeoutDeliver's seq-gated claim always fails for it —
+         * only the in-IRQ reschedule (PROC_WORKING) applies. The await's own
+         * ring path then reports count=0 on the timeout. */
+        TouchQueueWakeAfter(ctx->proc->pid, fire_at, 0);
     }
 
     process_set_state(ctx->proc, PROC_WAITING);
