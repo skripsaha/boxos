@@ -1,0 +1,348 @@
+// boxcxx — <condition_variable>.
+//
+// std::condition_variable / condition_variable_any over the SAME event-driven
+// substrate as atomic::wait: each cv carries one atomic<uint32_t> SEQUENCE
+// counter and nothing else. wait() snapshots that counter UNDER the held lock,
+// releases the lock, then parks on the counter via __boxcxx_atomic_wait_cycle
+// (the version-pool park — WAITPKG UMONITOR/UMWAIT on the word when present,
+// PAUSE budget then a real kernel park otherwise). notify bumps the counter
+// (fetch_add, release) BEFORE waking the pool, so a notify that races a waiter
+// between its snapshot and its park is never lost: the snapshot load-compare is
+// the predicate authority, and the substrate's pool-version park-gate (a separate
+// counter the kernel compares atomically at park time) independently stops the
+// waiter sleeping through that notify — both advance on every notify.
+// This is event-driven, NOT polling — proven for the timed path by the
+// same fix the semaphore/atomic timed waits ride on (the notify writes the
+// result channel so a timed park returns EARLY, it does not burn its budget).
+//
+// notify_one may wake MORE than one parked waiter (the version pool is hashed by
+// address, so a wake touches every strand parked on that cacheline) — this is
+// fully conformant: [thread.condition] only requires that AT LEAST one waiting
+// thread is unblocked, and every waiter re-evaluates its predicate on return, so
+// a surplus wake just spins one extra predicate check.
+//
+// The notify-vs-destroy ordering guarantee ([thread.condition.condvarany] note)
+// is provided ONLY by condition_variable_any: its notify takes the internal
+// mutex (a shared_ptr<mutex> the waiter also holds across the park hand-off), so
+// a notifier cannot still be inside notify_* after the waiter has been released
+// and gone on to destroy the cv. Plain condition_variable, like every standard
+// library, leaves "no thread blocked at destruction" as the caller's
+// precondition (violating it is UB).
+#ifndef BOXCXX_CONDITION_VARIABLE
+#define BOXCXX_CONDITION_VARIABLE
+
+#include <atomic>
+#include <mutex>
+#include <chrono>
+#include <memory>
+#include <stop_token>
+#include <cstdint>
+
+// notify_all_at_thread_exit registers the wake on this strand's per-strand
+// thread_local destructor list (Itanium __cxa_thread_atexit, drained by
+// __boxcxx_thread_storage_exit when the strand ends). Forward-declared the same
+// way <mutex> forward-declares __boxcxx_thread_id — no extra include needed.
+extern "C" int __cxa_thread_atexit(void (*fn)(void *), void *arg, void *dso);
+
+namespace std {
+
+// ── cv_status ─────────────────────────────────────────────────────────────────
+
+enum class cv_status { no_timeout, timeout };
+
+// ── condition_variable ────────────────────────────────────────────────────────
+//
+// Waits with a unique_lock<mutex>. The ONLY state is __seq: a wait snapshots it
+// under the held lock, a notify bumps it before waking. Acquire on every load /
+// release on every fetch_add pairs the predicate publish (the store the woken
+// thread did under the lock) with the wake — the woken waiter that observes a
+// new __seq has happens-before visibility of everything the notifier wrote
+// before its fetch_add. seq_cst is not needed: there is exactly one shared
+// location and the lock already serialises the predicate.
+class condition_variable {
+public:
+    condition_variable() noexcept            = default;   // NOT constexpr per synopsis
+    ~condition_variable()                    = default;   // precondition: no waiter
+                                                          // blocked here, else UB
+    condition_variable(const condition_variable &)            = delete;
+    condition_variable &operator=(const condition_variable &) = delete;
+
+    using native_handle_type = atomic<uint32_t> *;
+    native_handle_type native_handle() noexcept { return &__seq; }
+
+    // Bump the sequence FIRST (so any waiter mid-snapshot already sees the new
+    // value and will not park), then wake the pool. `all == false` for one,
+    // true for all — but a one-wake may still release several parked strands
+    // (hashed pool); harmless, every waiter rechecks its predicate.
+    void notify_one() noexcept
+    {
+        __seq.fetch_add(1, memory_order_release);
+        __boxcxx_atomic_notify(&__seq, false);
+    }
+    void notify_all() noexcept
+    {
+        __seq.fetch_add(1, memory_order_release);
+        __boxcxx_atomic_notify(&__seq, true);
+    }
+
+    // The snapshot `s` is taken UNDER the held lock, so it captures the cv state
+    // at the moment the caller last evaluated its predicate. `s` is FIXED for the
+    // whole park loop — it is the "keep waiting" value (exactly like
+    // atomic_flag::wait's fixed `old`): the loop ends the instant __seq differs.
+    // lk.lock() is the LAST statement so the postcondition (lock re-held) holds
+    // even if the park were to unwind.
+    void wait(unique_lock<mutex> &lk)
+    {
+        uint32_t s = __seq.load(memory_order_acquire);   // snapshot under the lock
+        lk.unlock();
+        unsigned spin = 0;
+        while (__seq.load(memory_order_acquire) == s)
+            __boxcxx_atomic_wait_cycle(&__seq, &s, sizeof(s), ~0ull, &spin);
+        lk.lock();
+    }
+
+    // Predicate overload: the loop guards against spurious / surplus wakes. pred()
+    // is only ever evaluated while lk is held, so a throwing predicate propagates
+    // with lk held — the postcondition is satisfied with no try/catch.
+    template <class Predicate>
+    void wait(unique_lock<mutex> &lk, Predicate pred)
+    {
+        while (!pred())
+            wait(lk);
+    }
+
+    template <class Clock, class Duration>
+    cv_status wait_until(unique_lock<mutex>                       &lk,
+                         const chrono::time_point<Clock, Duration> &abs)
+    {
+        uint32_t s = __seq.load(memory_order_acquire);
+        lk.unlock();
+        unsigned spin = 0;
+        for (;;) {
+            if (__seq.load(memory_order_acquire) != s) {
+                lk.lock();
+                return cv_status::no_timeout;
+            }
+            // Event-driven timed park on __seq: a notify wakes us EARLY,
+            // otherwise the budget elapses and we report timeout.
+            unsigned ms = __mutex_impl::RemainingMs(abs);
+            if (ms == 0) {
+                lk.lock();
+                return cv_status::timeout;
+            }
+            __boxcxx_atomic_wait_until(&__seq, &s, sizeof(s), ~0ull, ms, &spin);
+        }
+    }
+
+    template <class Rep, class Period>
+    cv_status wait_for(unique_lock<mutex>                     &lk,
+                       const chrono::duration<Rep, Period> &rel)
+    {
+        return wait_until(lk, chrono::steady_clock::now() + rel);
+    }
+
+    template <class Clock, class Duration, class Predicate>
+    bool wait_until(unique_lock<mutex>                        &lk,
+                    const chrono::time_point<Clock, Duration> &abs,
+                    Predicate                                  pred)
+    {
+        while (!pred()) {
+            if (wait_until(lk, abs) == cv_status::timeout)
+                return pred();   // final post-deadline predicate check
+        }
+        return true;
+    }
+
+    template <class Rep, class Period, class Predicate>
+    bool wait_for(unique_lock<mutex>                  &lk,
+                  const chrono::duration<Rep, Period> &rel,
+                  Predicate                            pred)
+    {
+        return wait_until(lk, chrono::steady_clock::now() + rel, std::move(pred));
+    }
+
+private:
+    atomic<uint32_t> __seq{0};   // the sole state — wraparound is benign (the
+                                 // snapshot→park window is nanoseconds, the
+                                 // predicate recheck is final, and the version
+                                 // pool bumps its own counter per notify)
+};
+
+// ── condition_variable_any ────────────────────────────────────────────────────
+//
+// Waits with ANY Lockable. It layers a condition_variable behind a private
+// internal std::mutex (held via shared_ptr so a notifier keeps it alive even if
+// the cv object is concurrently destroyed). The hand-off is the classic one:
+// take the internal lock, drop the caller's external lock, wait on the inner cv
+// (which atomically drops+reparks+reacquires the internal lock), then release the
+// internal lock BEFORE re-taking the external one. notify takes the internal
+// lock too, which gives the notify-before-destroy guarantee for this class.
+class condition_variable_any {
+public:
+    // NOT noexcept: make_shared may throw bad_alloc.
+    condition_variable_any() : __mut(make_shared<mutex>()) {}
+    ~condition_variable_any() = default;
+
+    condition_variable_any(const condition_variable_any &)            = delete;
+    condition_variable_any &operator=(const condition_variable_any &) = delete;
+
+    // Hold the shared mutex while notifying: a waiter cannot be released and go
+    // on to destroy *this while a notifier is still inside here, because both
+    // sides serialise on this same mutex object (kept alive by the shared_ptr).
+    void notify_one() noexcept
+    {
+        shared_ptr<mutex> mut = __mut;
+        lock_guard<mutex>  g(*mut);
+        __cv.notify_one();
+    }
+    void notify_all() noexcept
+    {
+        shared_ptr<mutex> mut = __mut;
+        lock_guard<mutex>  g(*mut);
+        __cv.notify_all();
+    }
+
+    template <class Lock>
+    void wait(Lock &lock)
+    {
+        shared_ptr<mutex>  mut = __mut;       // keep the internal mutex alive
+        unique_lock<mutex> internal(*mut);    // take internal
+        lock.unlock();                        // release external while holding internal
+        __cv.wait(internal);                  // drops internal, parks, relocks internal
+        internal.unlock();                    // LOCK ORDER: drop internal BEFORE the
+        lock.lock();                          // external relock — never reorder these
+    }
+
+    template <class Lock, class Predicate>
+    void wait(Lock &lock, Predicate pred)
+    {
+        while (!pred())
+            wait(lock);
+    }
+
+    template <class Lock, class Clock, class Duration>
+    cv_status wait_until(Lock &lock, const chrono::time_point<Clock, Duration> &abs)
+    {
+        shared_ptr<mutex>  mut = __mut;
+        unique_lock<mutex> internal(*mut);
+        lock.unlock();
+        cv_status st = __cv.wait_until(internal, abs);
+        internal.unlock();                    // drop internal BEFORE external relock
+        lock.lock();
+        return st;
+    }
+
+    template <class Lock, class Rep, class Period>
+    cv_status wait_for(Lock &lock, const chrono::duration<Rep, Period> &rel)
+    {
+        return wait_until(lock, chrono::steady_clock::now() + rel);
+    }
+
+    template <class Lock, class Clock, class Duration, class Predicate>
+    bool wait_until(Lock &lock, const chrono::time_point<Clock, Duration> &abs,
+                    Predicate pred)
+    {
+        while (!pred()) {
+            if (wait_until(lock, abs) == cv_status::timeout)
+                return pred();
+        }
+        return true;
+    }
+
+    template <class Lock, class Rep, class Period, class Predicate>
+    bool wait_for(Lock &lock, const chrono::duration<Rep, Period> &rel,
+                  Predicate pred)
+    {
+        return wait_until(lock, chrono::steady_clock::now() + rel, std::move(pred));
+    }
+
+    // ── stop_token-aware overloads ([thread.condition.condvarany.intwait]) ────
+    //
+    // A stop request must wake the waiter even with no notify. Register a
+    // stop_callback whose body notify_all()s this cv; then loop on a predicate
+    // that is also satisfied by a pending stop. The callback's notify_all is safe
+    // mid-wait on another strand: it serialises on the shared internal mutex and
+    // bumps the seq the parked waiter is watching. The callback is destroyed
+    // (unregistered) by the RAII scope before we return.
+    template <class Lock, class Predicate>
+    bool wait(Lock &lock, stop_token stoken, Predicate pred)
+    {
+        if (stoken.stop_requested())
+            return pred();
+
+        stop_callback cb(stoken, [this] { this->notify_all(); });
+        while (!pred()) {
+            if (stoken.stop_requested())
+                return pred();
+            wait(lock);
+        }
+        return true;   // pred() became true (regardless of any stop)
+    }
+
+    template <class Lock, class Clock, class Duration, class Predicate>
+    bool wait_until(Lock &lock, stop_token stoken,
+                    const chrono::time_point<Clock, Duration> &abs, Predicate pred)
+    {
+        if (stoken.stop_requested())
+            return pred();
+
+        stop_callback cb(stoken, [this] { this->notify_all(); });
+        while (!pred()) {
+            if (stoken.stop_requested())
+                return pred();
+            if (wait_until(lock, abs) == cv_status::timeout)
+                return pred();
+        }
+        return true;
+    }
+
+    template <class Lock, class Rep, class Period, class Predicate>
+    bool wait_for(Lock &lock, stop_token stoken,
+                  const chrono::duration<Rep, Period> &rel, Predicate pred)
+    {
+        return wait_until(lock, std::move(stoken),
+                          chrono::steady_clock::now() + rel, std::move(pred));
+    }
+
+private:
+    condition_variable __cv;
+    shared_ptr<mutex>  __mut;   // internal lock, shared so a notifier outlives a
+                                // concurrent cv destruction
+};
+
+// ── notify_all_at_thread_exit ─────────────────────────────────────────────────
+//
+// Transfers ownership of `lk` to the calling strand: when this strand ends, its
+// thread_local destructor drain (Itanium __cxa_thread_atexit → released by
+// __boxcxx_thread_storage_exit) unlocks the mutex and then notify_all()s `cond`.
+// [thread.condition.nonmember]: callers must hold the lock and have arranged for
+// cond not to be destroyed first.
+//
+// HONEST CAVEAT: the wake fires during the strand-exit LIFO thread_local drain.
+// Its order relative to OTHER thread_local destructors of the same strand is
+// their registration order (this record is pushed when this function is called),
+// not a special "after everything" slot — same observable behaviour as a
+// libstdc++ build, and the only ordering the ABI thread-atexit list can give.
+inline void notify_all_at_thread_exit(condition_variable &cond,
+                                      unique_lock<mutex>  lk)
+{
+    struct __NotifyAtExit {
+        condition_variable *cv;
+        unique_lock<mutex>  lk;
+    };
+    auto *rec = new __NotifyAtExit{&cond, std::move(lk)};
+    auto  cb  = +[](void *p) {
+        auto *r = static_cast<__NotifyAtExit *>(p);
+        r->lk.unlock();
+        r->cv->notify_all();
+        delete r;
+    };
+    // -1 on malloc failure inside __cxa_thread_atexit. Run the wake inline then,
+    // so the unlock + notify contract still holds with no leak and no stuck lock.
+    if (__cxa_thread_atexit(cb, rec, nullptr) != 0)
+        cb(rec);
+}
+
+} // namespace std
+
+#endif // BOXCXX_CONDITION_VARIABLE

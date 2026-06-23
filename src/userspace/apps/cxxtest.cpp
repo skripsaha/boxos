@@ -53,6 +53,7 @@
 #include <barrier>
 #include <semaphore>
 #include <stop_token>
+#include <condition_variable>
 #include <thread>
 #include <new>
 #include <exception>
@@ -5930,6 +5931,428 @@ void Phase38()
            "(cooperative cancel; id=strand pid)\n");
 }
 
+// ── phase39: condition_variable / condition_variable_any (Ф20d-1) ──────────────
+// Proves the event-driven cv across sibling strands: a notify wakes a parked
+// waiter, notify_all wakes several, the predicate loop tolerates surplus
+// notifies, the stop_token-aware cv_any wakes on a stop request, and
+// notify_all_at_thread_exit fires at strand exit.
+//
+// ANTI-FLAKE CORE (host-invariant ratio). `cal` = wall time of a no-notifier
+// wait_for(kBudget): with the merged timeout fix the timed park rides its
+// deadline and returns at ≈ kBudget (the dead-wait floor). A notify-driven wake
+// returns far sooner, so the discriminator is "woken vs rode-the-deadline":
+// `t < cal/4` passes for a real event-driven wake and FAILS LOUDLY for a dead /
+// never-woken wait (which rides the whole kBudget). The ping-pong sub-test proves
+// it rigorously — N parks complete in ≪ N×backstop. Ratio-to-cal keeps the bound
+// host-invariant (no fixed-ms flake). `cal >= 0.6×kBudget` is the "the timed park
+// really waited the budget" floor.
+
+static constexpr int kP39Budget = 2000;        // ms: the timed dead-wait floor
+
+static std::mutex            g_p39_mtx;       // guards the predicate flags below
+static std::condition_variable g_p39_cv;      // cross-strand notify target
+static std::condition_variable_any g_p39_cva; // cv_any over std::mutex
+static bool                  g_p39_pred  = false;   // shared predicate flag
+static std::atomic<int>      g_p39_ready{0};   // waiters bump before parking
+static std::atomic<int>      g_p39_woke{0};    // waiters bump after waking
+static std::atomic<int>      g_p39_predcalls{0}; // predicate-eval count (sub-test 4)
+static volatile uint64_t     g_p39_remaining;  // workers decrement; main joins
+
+// Park-join workers the strandtest way (copy of p35_join): re-read the live
+// counter before each park, bounded cycles so a hang fails loudly.
+static bool p39_join()
+{
+    uint32_t cycles = 0;
+    uint64_t cur;
+    while ((cur = __atomic_load_n(&g_p39_remaining, __ATOMIC_ACQUIRE)) != 0) {
+        if (++cycles > 80u) return false;
+        addr_park(&g_p39_remaining, cur, 200);
+    }
+    return true;
+}
+
+// (2)/(6b) notify_one across a strand: sleep so main parks first, set the
+// predicate under the mutex, notify_one, then publish join.
+static void p39_notify_one_worker(void *)
+{
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    {
+        std::lock_guard<std::mutex> g(g_p39_mtx);
+        g_p39_pred = true;
+    }
+    g_p39_cv.notify_one();
+    __atomic_sub_fetch(&g_p39_remaining, 1u, __ATOMIC_RELEASE);
+    addr_wake(&g_p39_remaining, 0);
+    strand_exit();
+}
+
+// (3) two waiter strands: each bumps g_p39_ready before parking in wait(pred),
+// wakes on notify_all, bumps g_p39_woke.
+static void p39_waiter_worker(void *)
+{
+    std::unique_lock<std::mutex> lk(g_p39_mtx);
+    g_p39_ready.fetch_add(1, std::memory_order_release);
+    g_p39_cv.wait(lk, [] { return g_p39_pred; });
+    lk.unlock();
+    g_p39_woke.fetch_add(1, std::memory_order_release);
+    __atomic_sub_fetch(&g_p39_remaining, 1u, __ATOMIC_RELEASE);
+    addr_wake(&g_p39_remaining, 0);
+    strand_exit();
+}
+
+// (4) spurious tolerance: notify_one TWICE, set pred only on the 2nd; main must
+// not return from wait(pred) until pred is actually true.
+static void p39_spurious_worker(void *)
+{
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    g_p39_cv.notify_one();                       // 1st notify, predicate still false
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    {
+        std::lock_guard<std::mutex> g(g_p39_mtx);
+        g_p39_pred = true;
+    }
+    g_p39_cv.notify_one();                       // 2nd notify, predicate now true
+    __atomic_sub_fetch(&g_p39_remaining, 1u, __ATOMIC_RELEASE);
+    addr_wake(&g_p39_remaining, 0);
+    strand_exit();
+}
+
+// (5) condition_variable_any cross-strand wake.
+static void p39_cva_worker(void *)
+{
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    {
+        std::lock_guard<std::mutex> g(g_p39_mtx);
+        g_p39_pred = true;
+    }
+    g_p39_cva.notify_one();
+    __atomic_sub_fetch(&g_p39_remaining, 1u, __ATOMIC_RELEASE);
+    addr_wake(&g_p39_remaining, 0);
+    strand_exit();
+}
+
+// (7) notify_all_at_thread_exit: a strand takes the lock, hands it to the
+// exit-notifier, returns. notify_all_at_thread_exit registers on this strand's
+// thread_local exit list (__cxa_thread_atexit), which a RAW strand only drains
+// when it calls __boxcxx_thread_storage_exit — std::thread's trampoline does this
+// automatically, a raw strand_spawn does not. So this worker must stand up its
+// per-strand TLS (like p36_worker) and DRAIN it explicitly before strand_exit;
+// that drain runs the callback (unlock g_p39_mtx + cv.notify_all) which wakes
+// main. The join-signal is published AFTER the drain so main only returns once
+// the wake has fired.
+static void p39_atexit_worker(void *)
+{
+    __boxcxx_tls_strand_init();
+    __boxcxx_thread_storage_enter();
+
+    {
+        std::unique_lock<std::mutex> lk(g_p39_mtx);
+        g_p39_pred = true;                       // predicate set while holding lock
+        std::notify_all_at_thread_exit(g_p39_cv, std::move(lk));
+    }
+    __boxcxx_thread_storage_exit();              // runs the exit notifier (unlock + wake)
+
+    __atomic_sub_fetch(&g_p39_remaining, 1u, __ATOMIC_RELEASE);
+    addr_wake(&g_p39_remaining, 0);
+    strand_exit();
+}
+
+// (8) stop_token-aware cv_any: blocks in cva.wait(lock, stoken, false-pred) until
+// main requests the stop.
+static std::stop_source g_p39_ssrc;
+static void p39_stoptoken_worker(void *)
+{
+    std::unique_lock<std::mutex> lk(g_p39_mtx);
+    g_p39_ready.fetch_add(1, std::memory_order_release);
+    bool r = g_p39_cva.wait(lk, g_p39_ssrc.get_token(), [] { return g_p39_pred; });
+    lk.unlock();
+    // pred() stayed false → wait returns false (woken by the stop, not the pred).
+    g_p39_woke.store(r ? 2 : 1, std::memory_order_release);
+    __atomic_sub_fetch(&g_p39_remaining, 1u, __ATOMIC_RELEASE);
+    addr_wake(&g_p39_remaining, 0);
+    strand_exit();
+}
+
+// (PP) cv ping-pong — rigorous event-wake proof (the phase35 method, through a
+// condition_variable). kP39PingPong lockstep hops: each park is woken by the
+// peer's notify. A wake that rode the ~100ms backstop instead of the event would
+// cost ~100ms per hop (≈12.8s for 128 parks); a real notify wake is sub-ms. The
+// predicate guards both the lost-wake and the notify-before-park cases (an early
+// notify just makes the predicate already-true, no park), so the only thing that
+// can make this slow is a wake that is NOT event-driven.
+static constexpr int           kP39PingPong = 64;
+static int                     g_p39_pp = 0;   // turn counter, guarded by g_p39_mtx
+static std::condition_variable g_p39_ppcv;
+static void p39_pingpong_worker(void *)
+{
+    for (int i = 0; i < kP39PingPong; i++) {
+        std::unique_lock<std::mutex> lk(g_p39_mtx);
+        g_p39_ppcv.wait(lk, [i] { return g_p39_pp == 2 * i + 1; });
+        g_p39_pp = 2 * i + 2;
+        lk.unlock();
+        g_p39_ppcv.notify_one();
+    }
+    __atomic_sub_fetch(&g_p39_remaining, 1u, __ATOMIC_RELEASE);
+    addr_wake(&g_p39_remaining, 0);
+    strand_exit();
+}
+
+void Phase39()
+{
+    using namespace std::chrono;
+
+    // ── (1) ALWAYS-ON (no strands) ────────────────────────────────────────────
+    {
+        std::unique_lock<std::mutex> lk(g_p39_mtx);
+
+        Check(g_p39_cv.wait_for(lk, milliseconds(0), [] { return true; }),
+              "phase39 wait_for already-true predicate returns true immediately");
+
+        Check(g_p39_cv.wait_until(lk, steady_clock::now()) == std::cv_status::timeout,
+              "phase39 wait_until past deadline + false pred reports timeout");
+    }
+    {
+        // notify with no waiter must not hang and advances seq by 2.
+        auto *h = g_p39_cv.native_handle();
+        uint32_t before = h->load(std::memory_order_acquire);
+        g_p39_cv.notify_one();
+        g_p39_cv.notify_all();
+        Check(h->load(std::memory_order_acquire) == before + 2,
+              "phase39 notify_one/notify_all with no waiter advance seq, no hang");
+    }
+    {
+        // condition_variable_any + std::mutex, already-true predicate.
+        std::mutex m;
+        std::unique_lock<std::mutex> lk(m);
+        bool entered = false;
+        g_p39_cva.wait(lk, [&] { entered = true; return true; });
+        Check(entered && lk.owns_lock(),
+              "phase39 cv_any already-true predicate returns immediately, lock held");
+    }
+
+    // ── calibration: a wait_for(kP39Budget) that NEVER gets a notify ──────────
+    //    Its wall time is the dead-wait floor (≈ kP39Budget). A notify-driven
+    //    wake returns in ≈ one backstop ≪ cal, so cal/4 cleanly separates a real
+    //    event wake from a dead one.
+    nanoseconds cal;
+    {
+        std::unique_lock<std::mutex> lk(g_p39_mtx);
+        box::stopwatch sw;
+        std::cv_status st = g_p39_cv.wait_for(lk, milliseconds(kP39Budget));
+        cal = sw.elapsed();
+        Check(st == std::cv_status::timeout,
+              "phase39 calibration wait_for(kBudget) timed out (no notifier)");
+        Check(cal >= milliseconds(kP39Budget * 3 / 5),
+              "phase39 calibration: the timed park really waited (>= 0.6×budget)");
+    }
+    auto early = duration_cast<nanoseconds>(cal / 4);   // event-wake ceiling
+    auto half  = duration_cast<nanoseconds>(cal / 2);   // looser ceiling
+
+    // ── (2)..(8): cross-strand, need FSGSBASE (per-strand TLS) ────────────────
+    if (!cpu_has_fsgsbase()) {
+        printf("[CXX] note phase39: strands need FSGSBASE — skipping cross-strand\n");
+        printf("[CXX] PASS phase39: condition_variable / condition_variable_any "
+               "(always-on + timed; cross-strand skipped, no FSGSBASE)\n");
+        return;
+    }
+
+    // (2) notify_one event-wake ≪ cal.
+    {
+        g_p39_pred = false;
+        g_p39_remaining = 1;
+        if (strand_spawn(p39_notify_one_worker, 0) == 0) {
+            printf("[CXX] note phase39: strand_spawn unavailable — skipping\n");
+            printf("[CXX] PASS phase39: condition_variable / condition_variable_any "
+                   "(always-on + timed; cross-strand skipped, no strand)\n");
+            return;
+        }
+        std::unique_lock<std::mutex> lk(g_p39_mtx);
+        box::stopwatch sw;
+        g_p39_cv.wait(lk, [] { return g_p39_pred; });
+        nanoseconds t = sw.elapsed();
+        lk.unlock();
+        Check(t < early,
+              "phase39 cross-strand notify_one woke the waiter (< cal/4, event-driven)");
+        Check(p39_join(), "phase39 notify_one worker joined");
+    }
+
+    // (PP) cv ping-pong: rigorous proof the wake is the notify event, not the
+    // 100ms backstop (see the worker comment). Tight, core-conditional bound.
+    {
+        g_p39_pp        = 0;
+        g_p39_remaining = 1;
+        if (strand_spawn(p39_pingpong_worker, 0)) {
+            box::stopwatch sw;
+            for (int i = 0; i < kP39PingPong; i++) {
+                {
+                    std::lock_guard<std::mutex> g(g_p39_mtx);
+                    g_p39_pp = 2 * i + 1;
+                }
+                g_p39_ppcv.notify_one();
+                std::unique_lock<std::mutex> lk(g_p39_mtx);
+                g_p39_ppcv.wait(lk, [i] { return g_p39_pp == 2 * i + 2; });
+            }
+            nanoseconds   t = sw.elapsed();
+            system_info_t si{};
+            unsigned      cores = (sysinfo(&si) == 0) ? si.cpu_app_cores : 0u;
+            auto          bound = (cores >= 2) ? milliseconds(3000) : milliseconds(9000);
+            Check(t < bound,
+                  "phase39 cv ping-pong woken by notify, not the 100ms backstop");
+            Check(p39_join(), "phase39 ping-pong worker joined");
+        }
+    }
+
+    // (3) notify_all wakes 2 waiter strands.
+    {
+        g_p39_pred = false;
+        g_p39_ready.store(0, std::memory_order_relaxed);
+        g_p39_woke.store(0, std::memory_order_relaxed);
+        int workers = 0;
+        if (strand_spawn(p39_waiter_worker, 0)) workers++;
+        if (strand_spawn(p39_waiter_worker, 0)) workers++;
+        if (workers == 0) {
+            printf("[CXX] note phase39: no waiter strand — skipping notify_all\n");
+        } else {
+            g_p39_remaining = (uint64_t)workers;
+            // Spin-yield until both waiters have reached their park.
+            for (int cyc = 0; cyc < 5000 &&
+                              g_p39_ready.load(std::memory_order_acquire) < workers;
+                 cyc++)
+                std::this_thread::yield();
+            Check(g_p39_ready.load(std::memory_order_acquire) == workers,
+                  "phase39 both waiter strands reached the park");
+            box::stopwatch sw;
+            {
+                std::lock_guard<std::mutex> g(g_p39_mtx);
+                g_p39_pred = true;
+            }
+            g_p39_cv.notify_all();
+            Check(p39_join(), "phase39 notify_all woke both waiters (joined)");
+            nanoseconds t = sw.elapsed();
+            Check(g_p39_woke.load(std::memory_order_acquire) == workers,
+                  "phase39 notify_all: every waiter observed the predicate");
+            Check(t < half,
+                  "phase39 notify_all woke both waiters (< cal/2)");
+        }
+    }
+
+    // (4) predicate-loop spurious tolerance: 1st notify with pred false must NOT
+    //     return; only the 2nd (pred true) does. Track pred-eval count >= 2.
+    {
+        g_p39_pred = false;
+        g_p39_predcalls.store(0, std::memory_order_relaxed);
+        g_p39_remaining = 1;
+        if (strand_spawn(p39_spurious_worker, 0)) {
+            std::unique_lock<std::mutex> lk(g_p39_mtx);
+            g_p39_cv.wait(lk, [] {
+                g_p39_predcalls.fetch_add(1, std::memory_order_release);
+                return g_p39_pred;
+            });
+            bool got = g_p39_pred;
+            lk.unlock();
+            Check(got, "phase39 spurious-tolerant wait returned only when pred true");
+            Check(g_p39_predcalls.load(std::memory_order_acquire) >= 2,
+                  "phase39 predicate re-evaluated across a surplus notify (>= 2)");
+            Check(p39_join(), "phase39 spurious worker joined");
+        }
+    }
+
+    // (5) condition_variable_any cross-strand event-wake ≪ cal.
+    {
+        g_p39_pred = false;
+        g_p39_remaining = 1;
+        if (strand_spawn(p39_cva_worker, 0)) {
+            std::unique_lock<std::mutex> lk(g_p39_mtx);
+            box::stopwatch sw;
+            g_p39_cva.wait(lk, [] { return g_p39_pred; });
+            nanoseconds t = sw.elapsed();
+            lk.unlock();
+            Check(t < early,
+                  "phase39 cv_any cross-strand notify woke the waiter (< cal/4)");
+            Check(p39_join(), "phase39 cv_any worker joined");
+        }
+    }
+
+    // (6) wait_for timeout-vs-event discrimination.
+    {
+        // (6a) no notifier, false pred → returns false, elapsed ~ cal.
+        g_p39_pred = false;
+        std::unique_lock<std::mutex> lk(g_p39_mtx);
+        box::stopwatch sw;
+        bool r = g_p39_cv.wait_for(lk, milliseconds(kP39Budget),
+                                   [] { return g_p39_pred; });
+        nanoseconds t = sw.elapsed();
+        lk.unlock();
+        Check(!r, "phase39 wait_for(pred) times out → false when never notified");
+        Check(t >= milliseconds(kP39Budget * 3 / 5),
+              "phase39 wait_for(pred) timeout actually waited the budget");
+    }
+    {
+        // (6b) with notifier → returns true, elapsed < cal/4 (the notify shortened
+        //      a kBudget wait to ≈ one backstop — event-driven, not the timeout).
+        g_p39_pred = false;
+        g_p39_remaining = 1;
+        if (strand_spawn(p39_notify_one_worker, 0)) {
+            std::unique_lock<std::mutex> lk(g_p39_mtx);
+            box::stopwatch sw;
+            bool r = g_p39_cv.wait_for(lk, milliseconds(kP39Budget),
+                                       [] { return g_p39_pred; });
+            nanoseconds t = sw.elapsed();
+            lk.unlock();
+            Check(r, "phase39 wait_for(pred) returns true when notified");
+            Check(t < early,
+                  "phase39 wait_for(pred) woke on the notify, not the timeout (< cal/4)");
+            Check(p39_join(), "phase39 wait_for(pred) notifier joined");
+        }
+    }
+
+    // (7) notify_all_at_thread_exit end-to-end.
+    {
+        g_p39_pred = false;
+        g_p39_remaining = 1;
+        if (strand_spawn(p39_atexit_worker, 0)) {
+            std::unique_lock<std::mutex> lk(g_p39_mtx);
+            box::stopwatch sw;
+            g_p39_cv.wait(lk, [] { return g_p39_pred; });
+            nanoseconds t = sw.elapsed();
+            lk.unlock();
+            Check(t < half,
+                  "phase39 notify_all_at_thread_exit woke main at strand exit (< cal/2)");
+            Check(p39_join(), "phase39 notify_all_at_thread_exit worker joined");
+        }
+    }
+
+    // (8) stop_token-aware cv_any: a waiter blocks with a false predicate; a stop
+    //     request wakes it; it returns pred() == false.
+    {
+        g_p39_pred = false;
+        g_p39_ready.store(0, std::memory_order_relaxed);
+        g_p39_woke.store(0, std::memory_order_relaxed);
+        g_p39_remaining = 1;
+        if (strand_spawn(p39_stoptoken_worker, 0)) {
+            for (int cyc = 0; cyc < 5000 &&
+                              g_p39_ready.load(std::memory_order_acquire) == 0;
+                 cyc++)
+                std::this_thread::yield();
+            Check(g_p39_ready.load(std::memory_order_acquire) == 1,
+                  "phase39 stop_token waiter reached the park");
+            box::stopwatch sw;
+            Check(g_p39_ssrc.request_stop(),
+                  "phase39 request_stop() returns true (first request)");
+            Check(p39_join(), "phase39 stop_token waiter joined");
+            nanoseconds t = sw.elapsed();
+            Check(g_p39_woke.load(std::memory_order_acquire) == 1,
+                  "phase39 stop_token cv_any returned pred()==false on stop");
+            Check(t < half,
+                  "phase39 stop_token woke the waiter (< cal/2)");
+        }
+    }
+
+    printf("[CXX] PASS phase39: condition_variable / condition_variable_any "
+           "(cross-strand notify + timed event-driven + stop_token + "
+           "notify_all_at_thread_exit)\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -5990,6 +6413,7 @@ int main()
     Phase36();
     Phase37();
     Phase38();
+    Phase39();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
