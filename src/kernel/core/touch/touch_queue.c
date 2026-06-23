@@ -16,6 +16,8 @@
 #include "amp.h"
 #include "lapic.h"
 #include "irqchip.h"
+#include "irq_defer.h"   /* defer the WAKE delivery to a K-Core */
+#include "sync_ops.h"    /* SyncTimeoutDeliver */
 
 #define TQ_KIND_PUBLISH 0   /* deliver tag_id with payload via TouchPublishId */
 #define TQ_KIND_WAKE    1   /* wake target_pid: state -> PROC_WORKING + IPI   */
@@ -25,6 +27,7 @@ typedef struct TouchQueueNode {
     uint64_t fire_tick;
     uint32_t source_pid;
     uint32_t target_pid;
+    uint32_t wait_seq;  /* WAKE only: addr_wait_entry->seq this timeout was armed for */
     uint16_t tag_id;
     uint16_t flags;
     uint32_t plen;
@@ -50,6 +53,7 @@ static TouchQueueNode *touch_queue_alloc_node(const void *payload, uint32_t plen
     n->fire_tick  = 0;
     n->source_pid = 0;
     n->target_pid = 0;
+    n->wait_seq   = 0;
     n->tag_id     = 0;
     n->flags      = 0;
     n->plen       = 0;
@@ -92,22 +96,41 @@ void TouchQueueEnqueue(uint16_t tag_id, const void *payload, uint32_t plen,
     touch_queue_link(n);
 }
 
-void TouchQueueWakeAfter(uint32_t target_pid, uint64_t after_ticks)
+void TouchQueueWakeAfter(uint32_t target_pid, uint64_t after_ticks,
+                         uint32_t wait_seq)
 {
     TouchQueueNode *n = touch_queue_alloc_node(NULL, 0);
     if (!n) return;
     n->kind       = TQ_KIND_WAKE;
     n->target_pid = target_pid;
     n->fire_tick  = after_ticks;
+    n->wait_seq   = wait_seq;
     touch_queue_link(n);
 }
 
-static void touch_queue_fire_wake(uint32_t target_pid)
+/* A scheduled WAKE has expired (PIT-tick / interrupt context). Two parts:
+ *
+ *   1. The bare reschedule (PROC_WAITING -> PROC_WORKING + IPI) — done HERE, in
+ *      IRQ context. It is O(1), allocation-free, touches NO VMM, and is the
+ *      original, long-shipping timeout behavior. It makes the waiter runnable
+ *      immediately, which is what un-stalls a single-core box whose only
+ *      userspace strand is parked (the scheduler then runs the waiter, whose
+ *      userspace ticks drain the K-Core pump — idle context never pumps). It
+ *      also fully serves touch_await, which has no addr_wait entry to deliver
+ *      a Result to.
+ *
+ *   2. An allocation-free irq_defer post carrying (seq<<32 | pid).
+ *      SyncTimeoutDeliver then runs on a K-Core and, for a genuine addr_park
+ *      waiter whose entry->seq still matches, KResultPushes ERR_TIMEOUT (cabin
+ *      VMM — MUST be off the IRQ path: VMM work in the timer IRQ starved cores
+ *      of TLB-shootdown ACKs under 16-core load → shootdown-timeout panic). On
+ *      an irq_defer overflow the post is dropped and the boxlib +100 backstop
+ *      covers the missed Result; the reschedule in (1) already happened. */
+static void touch_queue_fire_wake(uint32_t target_pid, uint32_t wait_seq)
 {
     process_t *target = process_find_ref(target_pid);
     if (!target) return;
-    if (target->destroying) { process_ref_dec(target); return; }
-    if (process_get_state(target) == PROC_WAITING) {
+    if (!target->destroying && process_get_state(target) == PROC_WAITING) {
         process_set_state(target, PROC_WORKING);
         if (g_amp.total_cores > 1) {
             uint8_t core = target->home_core;
@@ -117,6 +140,14 @@ static void touch_queue_fire_wake(uint32_t target_pid)
         }
     }
     process_ref_dec(target);
+
+    /* wait_seq is >= 1 for an addr_park waiter (AddrWaitLink bumps it from 0);
+     * 0 is the touch_await sentinel — no addr_wait entry, no Result owed, so
+     * skip the deferred push entirely (the reschedule above already woke it). */
+    if (wait_seq != 0) {
+        uint64_t ctx = ((uint64_t)wait_seq << 32) | (uint64_t)target_pid;
+        irq_defer(SyncTimeoutDeliver, (void *)(uintptr_t)ctx);
+    }
 }
 
 void TouchQueueTick(uint64_t now)
@@ -144,7 +175,7 @@ void TouchQueueTick(uint64_t now)
         fire_list = n->next;
 
         if (n->kind == TQ_KIND_WAKE) {
-            touch_queue_fire_wake(n->target_pid);
+            touch_queue_fire_wake(n->target_pid, n->wait_seq);
         } else {
             TouchPublishId(n->tag_id, n->payload, n->plen,
                            n->source_pid, n->flags);

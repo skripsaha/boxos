@@ -30,6 +30,12 @@ typedef struct AddrWaitEntry {
     struct AddrWaitEntry *prev;
     struct process_t     *proc;
     uintptr_t             phys_addr;
+    uint32_t              seq;    /* bumped on every link — identifies THIS park.
+                                   * A park-timeout snapshots it at arm time and
+                                   * only claims if it still matches, so a stale
+                                   * timeout (its park was woken early and the
+                                   * strand re-parked, reusing this entry) can
+                                   * never inject ERR_TIMEOUT into the new wait. */
     uint8_t               done;   /* 1 = waker claimed this entry */
     uint8_t               linked; /* 1 = currently in a bucket chain */
 } AddrWaitEntry;
@@ -70,5 +76,12 @@ void AddrWaitUnlinkIfLinked(AddrWaitEntry *entry);
  * single arbitration point shared by addr_wake and the parker's own lost-wakeup
  * recheck — it makes "who delivers the wake Result" race-free. */
 bool AddrWaitClaim(AddrWaitEntry *entry);
+
+/* Like AddrWaitClaim, but only succeeds if entry->seq still equals `seq` (the
+ * value snapshotted when the park was armed). A stale park-timeout — whose park
+ * was already woken early and whose strand re-parked, bumping seq — fails the
+ * match and claims nothing. Exactly one of {addr_wake, the matching timeout,
+ * the parker's recheck} wins delivery. */
+bool AddrWaitClaimSeq(AddrWaitEntry *entry, uint32_t seq);
 
 #endif /* ADDR_WAIT_H */

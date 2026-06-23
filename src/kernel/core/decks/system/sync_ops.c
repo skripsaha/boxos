@@ -20,12 +20,19 @@
  *     addr_wake runs on the K-Core, so KResultPush (which touches the cabin VMM)
  *     is safe there. The parker's step-6 lost-wakeup recheck can also CLAIM (when
  *     the watched value already changed) and complete synchronously.
- *   - TIMEOUT: armed via TouchQueueWakeAfter — a light, IRQ-safe reschedule
- *     (PROC_WORKING + IPI; NO ResultRing/VMM work in the PIT tick). The
- *     rescheduled caller's boxlib result_wait then ends via its own call_timeout
- *     (ERR_TIMEOUT). Delivering the timeout Result from the timer IRQ was tried
- *     and REVERTED: doing VMM work in interrupt context starved cores from
- *     ACKing TLB shootdowns under 16-core load (shootdown-timeout panic).
+ *   - TIMEOUT: armed via TouchQueueWakeAfter. When the timer fires (PIT IRQ),
+ *     touch_queue_fire_wake posts an allocation-free irq_defer() — it does NO
+ *     ResultRing/VMM work in the PIT tick. The deferred SyncTimeoutDeliver then
+ *     runs on a K-Core: it CLAIMS the entry (arbitrating against a racing
+ *     addr_wake — exactly one delivers) and, on a win, KResultPushes ONE
+ *     ERR_TIMEOUT Result, so the caller's result_wait returns AT the deadline.
+ *     Delivering the timeout Result FROM the timer IRQ was tried and REVERTED:
+ *     doing VMM work in interrupt context starved cores from ACKing TLB
+ *     shootdowns under 16-core load (shootdown-timeout panic) — hence the
+ *     K-Core hand-off, where KResultPush (which touches the cabin VMM) is safe.
+ *     A claim LOSS means either addr_wake already delivered (do nothing) or the
+ *     waiter never registered an entry (a touch_await timeout) — in both cases
+ *     a bare PROC_WORKING reschedule + IPI is the right, idempotent fallback.
  *
  * Lock ordering (never violated here):
  *   vmm translate (holds ctx->lock) completes BEFORE bucket lock is taken.
@@ -55,6 +62,7 @@
 #include "irqchip.h"
 #include "scheduler.h"   /* g_global_tick, SCHEDULER_DEFAULT_TICK_HZ */
 #include "boxos_decks.h"
+#include "irq_defer.h"   /* SyncTimeoutDeliver runs as an irq_defer bottom-half */
 
 /* -------------------------------------------------------------------------
  * SysAddrPark — park the calling process until *addr != expected or woken.
@@ -120,22 +128,26 @@ static int SysAddrPark(const ManifestOp *op, Crate *crates,
     entry->proc      = ctx->proc;
     entry->phys_addr = phys;
     entry->done      = 0;
-    AddrWaitLink(bucket, entry);
+    AddrWaitLink(bucket, entry);   /* bumps entry->seq for THIS park */
+    uint32_t wait_seq = entry->seq;
     spin_unlock(&bucket->lock);
 
-    /* Step 4: arm an IRQ-safe timeout reschedule (same helper SysTouchAwait
-     * uses). On expiry the PIT tick only flips PROC_WORKING + IPI — it does NO
-     * ResultRing/VMM work in interrupt context. The rescheduled caller's boxlib
-     * result_wait then ends via its own call_timeout (timeout_ms + margin) with
-     * ERR_TIMEOUT. Early wake is the event-driven path: addr_wake KResultPushes
-     * from the K-Core (see SysAddrWake). */
+    /* Step 4: arm an IRQ-safe timeout (same helper SysTouchAwait uses), tagged
+     * with this park's wait_seq. On expiry the PIT tick reschedules us
+     * (PROC_WORKING + IPI, in-IRQ, no VMM) AND posts an allocation-free
+     * irq_defer; the deferred SyncTimeoutDeliver then runs on a K-Core and — only
+     * if entry->seq still equals wait_seq — KResultPushes ERR_TIMEOUT, so the
+     * caller's result_wait returns AT the deadline (the boxlib +100 margin is
+     * now a dormant backstop). Early wake takes the K-Core delivery path through
+     * addr_wake (see SysAddrWake); the seq-gated claim arbitrates which one
+     * delivers and stops a stale timeout from hitting a later re-park. */
     if (timeout_ms > 0) {
         uint64_t delay = ((uint64_t)timeout_ms * SCHEDULER_DEFAULT_TICK_HZ)
                          / 1000ULL;
         if (delay == 0) delay = 1;
         uint64_t fire_at = __atomic_load_n(&g_global_tick, __ATOMIC_RELAXED)
                            + delay;
-        TouchQueueWakeAfter(ctx->proc->pid, fire_at);
+        TouchQueueWakeAfter(ctx->proc->pid, fire_at, wait_seq);
     }
 
     /* Step 5: park (identical to SysTouchAwait line 275). */
@@ -146,10 +158,10 @@ static int SysAddrPark(const ManifestOp *op, Crate *crates,
      * addr_park is an ASYNC op: the caller blocks in boxlib result_wait() on
      * its ResultRing, and the COMPLETION is a real Result pushed by whoever
      * claims this entry (AddrWaitClaim: done 0->1 + unlink, atomically). The
-     * claim is the single arbitration point for the WAKE Result — exactly one of
-     * {addr_wake, this parker} claims+delivers it. (The timeout does NOT claim; it
-     * only reschedules, and result_wait's call_timeout then yields ERR_TIMEOUT.)
-     * Here the parker races a concurrent addr_wake after setting PROC_WAITING:
+     * claim is the single arbitration point — exactly one of {addr_wake (OK),
+     * the deferred timeout (ERR_TIMEOUT), this parker's recheck (OK)} claims and
+     * delivers the one completion Result. Here the parker races both a
+     * concurrent addr_wake and the timeout after setting PROC_WAITING:
      *
      *   (a) value already changed AND we win the claim: no addr_wake will
      *       deliver, so complete SYNCHRONOUSLY — return a non-async error so
@@ -169,9 +181,11 @@ static int SysAddrPark(const ManifestOp *op, Crate *crates,
 
     if (!completed && recheck != expected) {
         if (AddrWaitClaim(entry)) {
-            /* (a) We own delivery — finish synchronously through guide. Our armed
-             * timeout is harmless if it later fires (PROC_WORKING reschedule of an
-             * already-running strand; at worst a benign spurious wake if re-parked). */
+            /* (a) We own delivery — finish synchronously through guide. If our
+             * armed timeout later fires, SyncTimeoutDeliver finds the entry
+             * already claimed (AddrWaitClaim fails) and only does a bare
+             * PROC_WORKING reschedule — idempotent for an already-running
+             * strand (at worst a benign spurious wake if it re-parked). */
             process_set_state(ctx->proc, PROC_WORKING);
             return ERR_ADDR_VALUE_MISMATCH;
         }
@@ -284,9 +298,11 @@ static int SysAddrWake(const ManifestOp *op, Crate *crates,
             KResultPush(target, &r);
 
             /* The target's armed timeout (TouchQueueWakeAfter) is left in place;
-             * if it fires later it only does a PROC_WORKING reschedule (no Result,
-             * no entry touch) — at worst a benign spurious wakeup for a re-parked
-             * strand, which re-checks its predicate. No IRQ-context cleanup. */
+             * if it fires later, SyncTimeoutDeliver finds this entry already
+             * claimed (we won here) — AddrWaitClaim fails, so it only does a bare
+             * PROC_WORKING reschedule (no Result, no ERR_TIMEOUT). At worst a
+             * benign spurious wakeup for a re-parked strand, which re-checks its
+             * predicate. No IRQ-context cleanup. */
             if (process_get_state(target) == PROC_WAITING) {
                 process_set_state(target, PROC_WORKING);
                 if (g_amp.total_cores > 1) {
@@ -315,6 +331,72 @@ static int SysAddrWake(const ManifestOp *op, Crate *crates,
     }
 
     return OK;
+}
+
+/* -------------------------------------------------------------------------
+ * SyncTimeoutDeliver — irq_defer bottom-half for an expired park timeout.
+ *
+ * Posted by touch_queue_fire_wake (the PIT-tick WAKE path). ctx packs the wait
+ * seq in the high 32 bits and the target pid in the low 32 — a plain integer,
+ * NOT a pinned pointer, so an irq_defer overflow drop can never leak a ref (the
+ * boxlib +100 backstop then covers the dropped Result). The reschedule out of
+ * PROC_WAITING already happened in the IRQ (touch_queue_fire_wake); this runs on
+ * a K-Core via irq_defer_pump purely to deliver the Result, where KResultPush
+ * (cabin VMM) is safe — NEVER in IRQ context (the 16c shootdown-panic lesson).
+ *
+ * It is the timeout arm of the same claim arbitration SysAddrWake uses, seq-
+ * gated so a STALE timeout (its park was woken early and the strand re-parked,
+ * reusing this entry) can never inject ERR_TIMEOUT into the new wait:
+ *
+ *   - CLAIM WON (entry linked, not done, seq matches): this was a real
+ *     addr_park waiter whose deadline elapsed before any notify. We OWN
+ *     delivery — KResultPush ONE ERR_TIMEOUT onto its ResultRing (the channel
+ *     boxlib result_wait monitors). result_wait returns with ERR_TIMEOUT at the
+ *     deadline. A defensive re-flip handles the rare case the IRQ reschedule was
+ *     undone by a re-park before this push (harmless if already WORKING).
+ *   - CLAIM LOST: SysAddrWake already delivered an OK Result, OR the parker's
+ *     own recheck completed it, OR the strand re-parked (seq bumped), OR this is
+ *     a touch_await timeout (no linked entry). In every case the IRQ reschedule
+ *     already did the right thing and no Result is owed here — do nothing.
+ *
+ * The ref taken here (process_find_ref) is released at the end. If the pid no
+ * longer resolves (the process exited between the timer fire and this pump),
+ * the lookup returns NULL and we simply do nothing.
+ * ------------------------------------------------------------------------- */
+void SyncTimeoutDeliver(void *ctx)
+{
+    uint64_t packed = (uint64_t)(uintptr_t)ctx;
+    uint32_t pid      = (uint32_t)(packed & 0xFFFFFFFFu);
+    uint32_t wait_seq = (uint32_t)(packed >> 32);
+
+    process_t *target = process_find_ref(pid);
+    if (!target) return;
+
+    if (AddrWaitClaimSeq(&target->addr_wait_entry, wait_seq) &&
+        !target->destroying) {
+        /* We own this waiter's single completion — deliver ERR_TIMEOUT, the
+         * deadline Result the boxlib +100 backstop used to synthesise late.
+         * Push BEFORE any state flip so the woken strand finds its Result the
+         * instant it is rescheduled (mirrors SysAddrWake's OK-delivery tail). */
+        Result r;
+        memset(&r, 0, sizeof(r));
+        r.error_code = ERR_TIMEOUT;
+        r.sender_pid = 0;
+        r.context    = KCTX_GUIDE;
+        KResultPush(target, &r);
+
+        if (process_get_state(target) == PROC_WAITING) {
+            process_set_state(target, PROC_WORKING);
+            if (g_amp.total_cores > 1) {
+                uint8_t core = target->home_core;
+                if (core < g_amp.total_cores && core != amp_get_core_index()) {
+                    lapic_send_ipi(g_amp.cores[core].lapic_id, IPI_WAKE_VECTOR);
+                }
+            }
+        }
+    }
+
+    process_ref_dec(target);
 }
 
 /* -------------------------------------------------------------------------
@@ -377,6 +459,7 @@ void AddrWaitSelfTest(void)
             AddrWaitEntry e;
             e.done      = 0;
             e.linked    = 0;
+            e.seq       = 0;
             e.proc      = NULL;
             e.phys_addr = phys_sim;
             e.next      = NULL;
@@ -414,6 +497,7 @@ void AddrWaitSelfTest(void)
             AddrWaitEntry e2;
             e2.done      = 0;
             e2.linked    = 0;
+            e2.seq       = 0;
             e2.proc      = NULL;
             e2.phys_addr = phys_sim2;
             e2.next      = NULL;

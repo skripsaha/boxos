@@ -67,6 +67,7 @@ void AddrWaitLink(AddrWaitBucket *bucket, AddrWaitEntry *entry)
     entry->next   = bucket->head;
     if (bucket->head) bucket->head->prev = entry;
     bucket->head  = entry;
+    entry->seq++;          /* new park — invalidate any stale park-timeout */
     entry->linked = 1;
 }
 
@@ -102,6 +103,26 @@ bool AddrWaitClaim(AddrWaitEntry *entry)
     bool won = false;
     spin_lock(&bucket->lock);
     if (entry->linked && !entry->done) {
+        entry->done = 1;            /* claim — exactly one winner */
+        AddrWaitUnlink(bucket, entry);
+        won = true;
+    }
+    spin_unlock(&bucket->lock);
+    return won;
+}
+
+bool AddrWaitClaimSeq(AddrWaitEntry *entry, uint32_t seq)
+{
+    /* Same fast pre-check as AddrWaitClaim, plus the seq guard. The locked
+     * re-check (including seq, which is mutated only under the bucket lock in
+     * AddrWaitLink) is authoritative against a concurrent re-park. */
+    if (!entry->linked || entry->seq != seq) return false;
+    AddrWaitBucket *bucket = AddrWaitGetBucket(entry->phys_addr);
+    if (!bucket) return false;
+
+    bool won = false;
+    spin_lock(&bucket->lock);
+    if (entry->linked && !entry->done && entry->seq == seq) {
         entry->done = 1;            /* claim — exactly one winner */
         AddrWaitUnlink(bucket, entry);
         won = true;
