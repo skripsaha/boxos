@@ -6,6 +6,8 @@
 #define BOXCXX_COMPARE
 
 #include <type_traits>
+#include <bit>          // bit_cast for the IEEE strong/weak total orders (acyclic:
+                        // bit -> type_traits,limits; neither includes compare)
 
 namespace std {
 
@@ -350,6 +352,204 @@ using synth_three_way_result_t =
     decltype(SynthThreeWay{}(declval<const remove_reference_t<T> &>(),
                              declval<const remove_reference_t<U> &>()));
 } // namespace __cmp
+
+// ── [cmp.alg] ordering customization-point objects ──────────────────────
+// boxcxx deviation (documented): the ADL "user strong_order(E,F)" step of
+// [cmp.alg] is intentionally omitted (mirrors <ranges>' simplified CPO note).
+// boxcxx is a closed type set; user types customize via operator<=>, which
+// partial_order honors directly and the *_fallback CPOs consume via ==/<.
+namespace __cmp {
+
+// Fixed-width selector for the floating bit kernels. float/double ONLY:
+// long double is x86 80-bit in 16-byte storage with indeterminate padding,
+// so bit_cast is unsafe — strong/weak_order for long double are deferred to
+// Ф27 (partial_order(long double) still works through <=>; the *_fallback
+// CPOs remain available for explicit opt-in via ==/<).
+template <class T> struct FpBits;
+template <> struct FpBits<float> {
+    using S = __INT32_TYPE__;  using U = __UINT32_TYPE__;
+    static constexpr int kBits = 32;
+    static constexpr U kExp = 0x7F800000u, kMan = 0x007FFFFFu;
+};
+template <> struct FpBits<double> {
+    using S = __INT64_TYPE__;  using U = __UINT64_TYPE__;
+    static constexpr int kBits = 64;
+    static constexpr U kExp = 0x7FF0000000000000ull, kMan = 0x000FFFFFFFFFFFFFull;
+};
+template <class T>
+concept StrongFp =
+    is_same_v<remove_cv_t<T>, float> || is_same_v<remove_cv_t<T>, double>;
+
+// std::strong_order total order: signed bit_cast + sign-magnitude flip.
+//  -0<+0, -inf<everything<+inf, NaNs by sign then payload, every bit pattern
+//  distinct.
+template <class T>
+[[nodiscard]] constexpr strong_ordering StrongFpOrder(T a, T b) noexcept
+{
+    using S = typename FpBits<T>::S; using U = typename FpBits<T>::U;
+    constexpr int B = FpBits<T>::kBits;
+    S ia = bit_cast<S>(a), ib = bit_cast<S>(b);
+    ia ^= S(U(ia >> (B - 1)) >> 1);
+    ib ^= S(U(ib >> (B - 1)) >> 1);
+    return ia <=> ib;
+}
+
+// std::weak_order: WEAKER than strong. -0 equivalent +0; all same-sign NaNs
+//  equivalent; ordering is  -NaN < -inf < ... < +inf < +NaN.  Compare a
+//  NaN/sign tier first, then the sign-magnitude integer — NOT a single packed
+//  key (a packed key overflows for double: max-finite magnitude > NaN band).
+template <class T>
+[[nodiscard]] constexpr weak_ordering WeakFpOrder(T a, T b) noexcept
+{
+    using S = typename FpBits<T>::S; using U = typename FpBits<T>::U;
+    constexpr int B = FpBits<T>::kBits;
+    auto tier = [](T x) -> int {
+        U u = bit_cast<U>(x);
+        bool nan = ((u & FpBits<T>::kExp) == FpBits<T>::kExp) &&
+                   ((u & FpBits<T>::kMan) != 0);
+        if (!nan) return 0;
+        return (u >> (B - 1)) ? -1 : 1;       // -NaN below, +NaN above
+    };
+    int ta = tier(a), tb = tier(b);
+    if (ta != tb) return ta < tb ? weak_ordering::less : weak_ordering::greater;
+    if (ta != 0) return weak_ordering::equivalent;          // same-sign NaN
+    S ia = bit_cast<S>(a), ib = bit_cast<S>(b);
+    if ((bit_cast<U>(a) & (U(~U(0)) >> 1)) == 0) ia = 0;    // -0 ≡ +0
+    if ((bit_cast<U>(b) & (U(~U(0)) >> 1)) == 0) ib = 0;
+    ia ^= S(U(ia >> (B - 1)) >> 1);
+    ib ^= S(U(ib >> (B - 1)) >> 1);
+    if (ia < ib) return weak_ordering::less;
+    if (ia > ib) return weak_ordering::greater;
+    return weak_ordering::equivalent;
+}
+
+namespace __cpo {
+
+struct StrongOrder {
+    template <StrongFp T>
+    [[nodiscard]] constexpr strong_ordering operator()(T a, T b) const noexcept
+    { return StrongFpOrder<remove_cv_t<T>>(a, b); }
+
+    template <class T, class U>
+        requires(!StrongFp<T>) &&
+                (!is_same_v<remove_cv_t<remove_reference_t<T>>, long double>) &&
+                requires(const T &a, const U &b) {
+                    { a == b } -> BooleanLike; { a < b } -> BooleanLike;
+                }
+    [[nodiscard]] constexpr strong_ordering operator()(const T &a, const U &b) const
+        noexcept(noexcept(a == b) && noexcept(a < b))
+    {
+        return a == b ? strong_ordering::equal
+             : a < b  ? strong_ordering::less : strong_ordering::greater;
+    }
+};
+
+struct WeakOrder {
+    template <StrongFp T>
+    [[nodiscard]] constexpr weak_ordering operator()(T a, T b) const noexcept
+    { return WeakFpOrder<remove_cv_t<T>>(a, b); }
+
+    template <class T, class U>
+        requires(!StrongFp<T>) &&
+                (!is_same_v<remove_cv_t<remove_reference_t<T>>, long double>) &&
+                requires(const T &a, const U &b) {
+                    { a == b } -> BooleanLike; { a < b } -> BooleanLike;
+                }
+    [[nodiscard]] constexpr weak_ordering operator()(const T &a, const U &b) const
+        noexcept(noexcept(a == b) && noexcept(a < b))
+    {
+        return a == b ? weak_ordering::equivalent
+             : a < b  ? weak_ordering::less : weak_ordering::greater;
+    }
+};
+
+struct PartialOrder {
+    template <class T, class U>
+        requires requires(const T &a, const U &b) { a <=> b; }
+    [[nodiscard]] constexpr partial_ordering operator()(const T &a, const U &b) const
+        noexcept(noexcept(a <=> b))
+    { return a <=> b; }
+
+    template <class T, class U>
+        requires(!requires(const T &a, const U &b) { a <=> b; }) &&
+                requires(const T &a, const U &b) {
+                    { a == b } -> BooleanLike; { a < b } -> BooleanLike;
+                    { b < a } -> BooleanLike;
+                }
+    [[nodiscard]] constexpr partial_ordering operator()(const T &a, const U &b) const
+        noexcept(noexcept(a == b) && noexcept(a < b) && noexcept(b < a))
+    {
+        return a == b ? partial_ordering::equivalent
+             : a < b  ? partial_ordering::less
+             : b < a  ? partial_ordering::greater : partial_ordering::unordered;
+    }
+};
+
+struct CompareStrongFallback {
+    template <class T, class U>
+        requires requires(const T &a, const U &b) {
+            { a == b } -> BooleanLike; { a < b } -> BooleanLike;
+        }
+    [[nodiscard]] constexpr strong_ordering operator()(const T &a, const U &b) const
+        noexcept(noexcept(a == b) && noexcept(a < b))
+    {
+        // [cmp.alg]: prefer strong_order (e.g. the IEEE total order for
+        // float/double) and use ==/< only when it is unavailable (e.g. long
+        // double, which strong_order excludes — D2). strong_order never routes
+        // back here (its non-float branch inlines ==/<), so no recursion.
+        if constexpr (requires { StrongOrder{}(a, b); })
+            return StrongOrder{}(a, b);
+        else
+            return a == b ? strong_ordering::equal
+                 : a < b  ? strong_ordering::less : strong_ordering::greater;
+    }
+};
+
+struct CompareWeakFallback {
+    template <class T, class U>
+        requires requires(const T &a, const U &b) {
+            { a == b } -> BooleanLike; { a < b } -> BooleanLike;
+        }
+    [[nodiscard]] constexpr weak_ordering operator()(const T &a, const U &b) const
+        noexcept(noexcept(a == b) && noexcept(a < b))
+    {
+        if constexpr (requires { WeakOrder{}(a, b); })
+            return WeakOrder{}(a, b);
+        else
+            return a == b ? weak_ordering::equivalent
+                 : a < b  ? weak_ordering::less : weak_ordering::greater;
+    }
+};
+
+struct ComparePartialFallback {
+    template <class T, class U>
+        requires requires(const T &a, const U &b) {
+            { a == b } -> BooleanLike; { a < b } -> BooleanLike;
+            { b < a } -> BooleanLike;
+        }
+    [[nodiscard]] constexpr partial_ordering operator()(const T &a, const U &b) const
+        noexcept(noexcept(a == b) && noexcept(a < b) && noexcept(b < a))
+    {
+        if constexpr (requires { PartialOrder{}(a, b); })
+            return PartialOrder{}(a, b);
+        else
+            return a == b ? partial_ordering::equivalent
+                 : a < b  ? partial_ordering::less
+                 : b < a  ? partial_ordering::greater : partial_ordering::unordered;
+    }
+};
+
+} // namespace __cpo
+} // namespace __cmp
+
+inline namespace __cmp_cpo {
+inline constexpr __cmp::__cpo::StrongOrder            strong_order{};
+inline constexpr __cmp::__cpo::WeakOrder              weak_order{};
+inline constexpr __cmp::__cpo::PartialOrder           partial_order{};
+inline constexpr __cmp::__cpo::CompareStrongFallback  compare_strong_order_fallback{};
+inline constexpr __cmp::__cpo::CompareWeakFallback    compare_weak_order_fallback{};
+inline constexpr __cmp::__cpo::ComparePartialFallback compare_partial_order_fallback{};
+} // namespace __cmp_cpo
 
 } // namespace std
 
