@@ -3888,41 +3888,46 @@ void Phase18()
 {
     using box::tagfs::file;
 
-    // ── create with tags ────────────────────────────────────────────────
-    file f = box::tagfs::create("cxx:tagfs:probe", {"cxx:phase18", "kind:test"});
-    Check(static_cast<bool>(f), "phase18 create returns a live file");
-    if (!f) {
+    // ── create with tags (now box::result<file>) ────────────────────────
+    box::result<file> created = box::tagfs::create("cxx:tagfs:probe", {"cxx:phase18", "kind:test"});
+    Check(created.has_value(), "phase18 create returns a live file through box::result");
+    if (!created) {
         printf("[CXX] PASS phase18: box::tagfs (compiled; create unavailable)\n");
         return;
     }
+    file f = *created;
 
     // ── metadata + tags ─────────────────────────────────────────────────
     Check(f.name() == "cxx:tagfs:probe", "phase18 file.name()");
     Check(f.has_tag("cxx") && f.has_tag("kind"), "phase18 file.has_tag(key)");
     Check(f.tags().size() >= 2, "phase18 file.tags() lists the tags");
 
-    // ── random-access byte I/O bound to this file_id ────────────────────
+    // ── random-access byte I/O bound to this file_id (result<size_t>) ───
     const char msg[] = "hello tagfs stream";
-    Check(f.write_at(0, msg, sizeof(msg)) == static_cast<int>(sizeof(msg)),
-          "phase18 write_at(raw)");
+    box::result<std::size_t> wrote = f.write_at(0, msg, sizeof(msg));
+    Check(wrote.has_value() && *wrote == sizeof(msg), "phase18 write_at(raw) byte count");
     char rbuf[sizeof(msg)] = {};
-    Check(f.read_at(0, rbuf, sizeof(rbuf)) == static_cast<int>(sizeof(msg))
+    box::result<std::size_t> read = f.read_at(0, rbuf, sizeof(rbuf));
+    Check(read.has_value() && *read == sizeof(msg)
               && std::string_view(rbuf) == "hello tagfs stream",
-          "phase18 read_at(raw) round-trip");
+          "phase18 read_at(raw) round-trip + byte count");
 
     std::byte payload[4] = {std::byte{1}, std::byte{2}, std::byte{3}, std::byte{4}};
-    Check(f.write_at(64, std::span<const std::byte>(payload, 4)) == 4, "phase18 write_at(span)");
+    box::result<std::size_t> ws = f.write_at(64, std::span<const std::byte>(payload, 4));
+    Check(ws.has_value() && *ws == 4, "phase18 write_at(span) byte count");
     std::byte rb[4] = {};
-    Check(f.read_at(64, std::span<std::byte>(rb, 4)) == 4 && rb[0] == std::byte{1},
-          "phase18 read_at(span) round-trip");
+    box::result<std::size_t> rs = f.read_at(64, std::span<std::byte>(rb, 4));
+    Check(rs.has_value() && *rs == 4 && rb[0] == std::byte{1},
+          "phase18 read_at(span) round-trip + byte count");
 
     struct Rec {
         std::uint32_t a;
         std::uint32_t b;
     };
-    Check(f.write_object<Rec>(128, Rec{0xAAu, 0xBBu}), "phase18 write_object<T>");
-    std::optional<Rec> rec = f.read_object<Rec>(128);
-    Check(rec && rec->a == 0xAAu && rec->b == 0xBBu, "phase18 read_object<T> round-trip");
+    Check(f.write_object<Rec>(128, Rec{0xAAu, 0xBBu}).has_value(), "phase18 write_object<T>");
+    box::result<Rec> rec = f.read_object<Rec>(128);
+    Check(rec.has_value() && rec->a == 0xAAu && rec->b == 0xBBu,
+          "phase18 read_object<T> round-trip");
 
     // ── streaming bridge to the Current spine (self round-trip) ─────────
     {
@@ -3942,7 +3947,8 @@ void Phase18()
         }
         // Cross-check whether the by-name bridge reached THIS file_id.
         char idbuf[8] = {};
-        if (f.read_at(0, idbuf, 8) == 8 && std::string_view(idbuf, 8) == "STREAMRT")
+        box::result<std::size_t> idr = f.read_at(0, idbuf, 8);
+        if (idr.has_value() && *idr == 8 && std::string_view(idbuf, 8) == "STREAMRT")
             Check(true, "phase18 bytes() bridge reaches this file_id");
         else
             printf("[CXX] note phase18: bytes() bridges by name to a separate "
@@ -3950,13 +3956,13 @@ void Phase18()
     }
 
     // ── tag mutations (remove_tag by key removes a key:value tag) ────────
-    Check(f.add_tag("extra:1"), "phase18 add_tag (key:value)");
+    Check(f.add_tag("extra:1").has_value(), "phase18 add_tag (key:value)");
     Check(f.has_tag("extra"), "phase18 has_tag after add_tag");
-    Check(f.remove_tag("extra"), "phase18 remove_tag by key");
+    Check(f.remove_tag("extra").has_value(), "phase18 remove_tag by key");
     Check(!f.has_tag("extra"), "phase18 tag gone after remove_tag");
 
     // ── rename ──────────────────────────────────────────────────────────
-    Check(f.rename("cxx:tagfs:renamed"), "phase18 rename");
+    Check(f.rename("cxx:tagfs:renamed").has_value(), "phase18 rename");
     Check(f.name() == "cxx:tagfs:renamed", "phase18 name reflects rename");
 
     // ── query → range + std::views composition ─────────────────────────
@@ -3982,8 +3988,8 @@ void Phase18()
     }
 
     // ── durability + cleanup ────────────────────────────────────────────
-    Check(f.anchor(), "phase18 anchor (durability flush)");
-    Check(f.remove(), "phase18 remove (delete)");
+    Check(f.anchor().has_value(), "phase18 anchor (durability flush)");
+    Check(f.remove().has_value(), "phase18 remove (delete)");
 
     printf("[CXX] PASS phase18: box::tagfs::file (info/tags/add/remove/rename/anchor "
            "+ read_at/write_at/read_object/write_object + bytes spine bridge) + "
@@ -4014,16 +4020,18 @@ void Phase19()
 
     // Availability probe + leftover cleanup (the disk persists across matrix
     // configs, so a crashed prior run could leave p19 files behind).
-    for (file f : box::tagfs::query("p19:probe")) f.remove();
+    for (file f : box::tagfs::query("p19:probe")) (void)f.remove();
 
-    file fa = box::tagfs::create("cxx:p19:alpha", {"p19ctx:alpha", "p19:probe"});
-    if (!fa) {
+    box::result<file> created_a = box::tagfs::create("cxx:p19:alpha", {"p19ctx:alpha", "p19:probe"});
+    if (!created_a) {
         printf("[CXX] PASS phase19: box::tagfs context/snapshot/anchor "
                "(compiled; storage unavailable)\n");
         return;
     }
-    file fb = box::tagfs::create("cxx:p19:beta", {"p19ctx:beta", "p19:probe"});
-    Check(static_cast<bool>(fb), "phase19 second probe file created");
+    file              fa = *created_a;
+    box::result<file> created_b = box::tagfs::create("cxx:p19:beta", {"p19ctx:beta", "p19:probe"});
+    Check(created_b.has_value(), "phase19 second probe file created");
+    file fb = created_b ? *created_b : file{};
 
     // ── context: a nesting-correct per-process tag filter ───────────────
     // The kernel ANDs the context tags into every query, so an installed
@@ -4078,10 +4086,10 @@ void Phase19()
 
         std::size_t n0 = snap_count();
         {
-            snapshot snap = snapshot::of(fa, "cxx:p19:snap1");
+            box::result<snapshot> snap = snapshot::of(fa, "cxx:p19:snap1");
             if (snap) {
-                Check(snap.id() != 0, "phase19 snapshot has a live id");
-                Check(snap.name() == "cxx:p19:snap1", "phase19 snapshot name echoes create");
+                Check(snap->id() != 0, "phase19 snapshot has a live id");
+                Check(snap->name() == "cxx:p19:snap1", "phase19 snapshot name echoes create");
                 Check(snap_count() == n0 + 1, "phase19 snapshots() reflects the new snapshot");
             } else {
                 printf("[CXX] note phase19: snap_create unavailable/name taken; "
@@ -4094,8 +4102,8 @@ void Phase19()
         {
             std::uint32_t kept = 0;
             {
-                snapshot snap = snapshot::of(fa, "cxx:p19:snap2");
-                if (snap) kept = snap.keep();
+                box::result<snapshot> snap = snapshot::of(fa, "cxx:p19:snap2");
+                if (snap) kept = snap->keep();
             }
             if (kept) {
                 Check(snap_count() == n0 + 1,
@@ -4107,8 +4115,8 @@ void Phase19()
 
         // Whole-filesystem snapshot (file_id 0), auto-deleted on scope exit.
         {
-            snapshot whole = snapshot::of_all("cxx:p19:snapall");
-            if (whole) Check(whole.id() != 0, "phase19 snapshot::of_all (whole filesystem)");
+            box::result<snapshot> whole = snapshot::of_all("cxx:p19:snapall");
+            if (whole) Check(whole->id() != 0, "phase19 snapshot::of_all (whole filesystem)");
         }
         Check(snap_count() == n0, "phase19 all snapshots cleaned up (count restored)");
     }
@@ -4121,8 +4129,8 @@ void Phase19()
         box::subscription asub = box::tagfs::on_anchor();
         if (asub) {
             const char durable[] = "durable";
-            fa.write_at(0, durable, sizeof(durable));
-            Check(fa.anchor(), "phase19 anchor (durability flush) publishes event");
+            (void)fa.write_at(0, durable, sizeof(durable));
+            Check(fa.anchor().has_value(), "phase19 anchor (durability flush) publishes event");
             if (std::optional<box::event> ev = asub.wait(1000)) {
                 box::tagfs::anchor_event ae(*ev);
                 Check(static_cast<bool>(ae), "phase19 anchor_event decodes the payload");
@@ -4137,8 +4145,8 @@ void Phase19()
     }
 
     // ── cleanup ─────────────────────────────────────────────────────────
-    fa.remove();
-    fb.remove();
+    (void)fa.remove();
+    (void)fb.remove();
 
     printf("[CXX] PASS phase19: box::tagfs::context (nested RAII filter) + snapshot "
            "(RAII/keep/of_all + snapshots()) + on_anchor/anchor_event\n");
@@ -7903,9 +7911,85 @@ void Phase45()
         }
     }
 
+    // ── 4. TAGFS CAUSE-RECOVERY — the richest box:: surface ──────────────────
+    // box::tagfs scalar ops now carry the real kernel cause through box::result.
+
+    // create() with an invalid name. boxlib create() validates the name and
+    // returns -ERR_INVALID_ARGUMENT for an empty or over-long (>31) name, so the
+    // recovered cause is deterministically invalid_argument.
+    {
+        box::result<box::tagfs::file> bad = box::tagfs::create("", {"k:v"});
+        Check(!bad.has_value() && static_cast<bool>(bad.error()),
+              "phase45 tagfs::create(\"\") error arm carries a non-ok cause");
+        Check(bad.error().code() == box::errc::invalid_argument,
+              "phase45 tagfs::create(empty name) cause == invalid_argument");
+
+        box::result<box::tagfs::file> longname =
+            box::tagfs::create("this_name_is_definitely_longer_than_31_chars");
+        Check(!longname.has_value() && static_cast<bool>(longname.error()),
+              "phase45 tagfs::create(>31-char name) error arm carries a non-ok cause");
+        Check(longname.error().code() == box::errc::invalid_argument,
+              "phase45 tagfs::create(over-long name) cause == invalid_argument");
+    }
+
+    // info() on a bogus file_id: error arm with a recovered non-ok cause.
+    {
+        box::result<file_info_t> inf = box::tagfs::file(0xFFFFFFFEu).info();
+        Check(!inf.has_value() && static_cast<bool>(inf.error()),
+              "phase45 tagfs::file(bogus id).info() error arm carries a non-ok cause");
+    }
+
+    // find() of a name that cannot exist resolves to a clean, queryable
+    // file_not_found — BUT only when storage is reachable. A storage flake makes
+    // find() propagate the transport cause instead, so the exact-code claim is
+    // gated on a confirmed-working create (a storage-up probe); the non-ok cause
+    // arm is asserted unconditionally (find always fails with SOME non-ok cause).
+    {
+        box::result<box::tagfs::file> probe =
+            box::tagfs::create("cxx:p45:probe", {"cxx:phase45"});
+        box::result<box::tagfs::file> nf = box::tagfs::find("__no_such_file_zzz__");
+        Check(!nf.has_value() && static_cast<bool>(nf.error()),
+              "phase45 tagfs::find(missing) error arm carries a non-ok cause");
+        if (probe.has_value()) {
+            (void)probe->remove();  // storage confirmed up → the cause is deterministic
+            Check(nf.error().code() == box::errc::file_not_found,
+                  "phase45 tagfs::find(missing) cause == file_not_found (storage up)");
+        } else {
+            printf("[CXX] note phase45: storage unavailable — find(missing) "
+                   "exact-code (file_not_found) check skipped; non-ok cause asserted\n");
+        }
+    }
+
+    // HAPPY PATH through box::result: a real file round-trips cleanly and the
+    // byte count is exposed at every step (success is never collapsed).
+    {
+        box::result<box::tagfs::file> made =
+            box::tagfs::create("cxx:p45:happy", {"cxx:phase45"});
+        if (made.has_value()) {
+            box::tagfs::file        f = *made;
+            const char              text[] = "p45-result";
+            box::result<std::size_t> w = f.write_at(0, text, sizeof(text));
+            Check(w.has_value() && *w == sizeof(text),
+                  "phase45 tagfs write_at SUCCEEDS through result and exposes the byte count");
+
+            char                     back[sizeof(text)] = {};
+            box::result<std::size_t> r = f.read_at(0, back, sizeof(back));
+            Check(r.has_value() && *r == sizeof(text)
+                      && std::string_view(back) == "p45-result",
+                  "phase45 tagfs read_at value matches written bytes (count exposed)");
+
+            Check(f.remove().has_value(),
+                  "phase45 tagfs remove SUCCEEDS through status on the happy path");
+        } else {
+            printf("[CXX] note phase45: tagfs storage unavailable — happy-path "
+                   "round-trip skipped (cause-recovery arms still exercised)\n");
+        }
+    }
+
     printf("[CXX] PASS phase45: cause-recovery — typed-stream tri-state "
            "(item/closed-VALUE/error-arm) + scalar error arms carry the real "
-           "kernel cause + happy path flows through box::result\n");
+           "kernel cause (incl. tagfs create/info/find) + happy path flows "
+           "through box::result\n");
 }
 
 } // namespace
