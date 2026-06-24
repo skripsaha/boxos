@@ -80,10 +80,10 @@ extern "C" {
 
 typedef struct Brook Brook;
 
-/* Open or create a Brook. Returns NULL on failure (check box_last_error
- * if your runtime tracks it; the underlying kernel error is in errno-
- * style negative codes returned by the underlying syscall). flags MUST
- * contain exactly one of {BROOK_WRITER, BROOK_READER}. Add BROOK_CREATE
+/* Open or create a Brook. Returns NULL on failure. (BoxOS has no errno
+ * register; the typed cause is surfaced through the C++ box::result face,
+ * box/cxx/error.h — this raw C entry only signals NULL vs non-NULL.) flags
+ * MUST contain exactly one of {BROOK_WRITER, BROOK_READER}. Add BROOK_CREATE
  * to create the Brook if its tag is unbound; CREATE requires non-zero
  * frame_size and frame_count.
  *

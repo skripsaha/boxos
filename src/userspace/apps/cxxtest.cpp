@@ -74,6 +74,7 @@
 #include "box/cxx/console.h"
 #include "box/cxx/cpu.h"
 #include "box/cxx/current.h"
+#include "box/cxx/error.h"
 #include "box/cxx/executor.h"
 #include "box/cxx/heap.h"
 #include "box/cxx/hw.h"
@@ -7640,6 +7641,120 @@ void Phase43()
                "(1 App-Core — functional split; data race exercised on multi-core)\n");
 }
 
+// ── phase44 — Ф23a: native BoxOS error model (box::error / errc / result) ──
+// Foundation tests: the typed value, the boxlib cause-preservation contract
+// (box_fail / box_errno_of), the box::result bridges Ф23b's retrofit will use,
+// honest std::error_code interop, and a regression-lock on the errno-sharing
+// lie that used to live in system_error.cpp.
+
+// constexpr proofs — box::error is a literal (constexpr-usable) value.
+static_assert(box::error{}.ok(), "OK is ok");
+static_assert(!static_cast<bool>(box::error{}), "OK error is falsey");
+static_assert(box::error{box::errc::no_memory}.raw() == ERR_NO_MEMORY, "errc value via macro");
+static_assert(static_cast<::error_t>(box::errc::no_memory) != 12, "no_memory is NOT Linux ENOMEM");
+static_assert(box::error{box::errc::no_memory}.code() == box::errc::no_memory, "code round-trip");
+static_assert(static_cast<bool>(box::error{box::errc::timeout}), "an error is truthy");
+static_assert(box::error{ERR_TIMEOUT}.code() == box::errc::timeout, "error_t → errc");
+
+void Phase44()
+{
+    // ── box::error value semantics ──
+    box::error none;
+    Check(none.ok() && !static_cast<bool>(none), "phase44 default box::error is ok");
+    Check(none.code() == box::errc::ok && none.raw() == OK, "phase44 ok code/raw");
+
+    box::error nomem{box::errc::no_memory};
+    Check(static_cast<bool>(nomem) && !nomem.ok(), "phase44 error is truthy, not ok");
+    Check(nomem.code() == box::errc::no_memory && nomem.raw() == ERR_NO_MEMORY,
+          "phase44 errc/raw agree with box/error.h");
+    Check(nomem.message() == "out of memory", "phase44 message text");
+    Check(nomem.category_name() == "memory", "phase44 category by range");
+    Check(box::error{ERR_TIMEOUT}.category_name() == "core", "phase44 core range");
+    Check(box::error{ERR_FILE_NOT_FOUND}.category_name() == "storage", "phase44 storage range");
+    Check(box::error{ERR_SPAWN_FAILED}.category_name() == "process", "phase44 process range");
+
+    // equality + ordering on the typed value
+    Check(box::error{box::errc::io} == box::error{ERR_IO}, "phase44 error ==");
+    Check(box::error{box::errc::io} != nomem, "phase44 error !=");
+    Check((box::error{ERR_NO_MEMORY} <=> box::error{ERR_IO}) < 0, "phase44 error <=> orders by code");
+
+    // ── box_fail / box_errno_of: the cause-preservation contract ──
+    Check(box_fail(0) == 0, "phase44 box_fail(0)==0");
+    Check(box_fail(ERR_PROCESS_NOT_FOUND) == -400, "phase44 box_fail negates +error_t");
+    Check(box_fail(-(int)ERR_INVALID_ARGS) == -(int)ERR_INVALID_ARGS,
+          "phase44 box_fail keeps an already-negative transport error");
+    Check(box_errno_of(-400) == ERR_PROCESS_NOT_FOUND, "phase44 box_errno_of recovers magnitude");
+    Check(box_errno_of(0) == OK && box_errno_of(42) == OK, "phase44 box_errno_of(>=0)==OK");
+    Check(box_errno_of(box_fail(ERR_HEAP_EXHAUSTED)) == ERR_HEAP_EXHAUSTED,
+          "phase44 box_fail→box_errno_of round-trip");
+
+    // ── box::_detail bridges — exactly what Ф23b's retrofit consumes ──
+    // payload stub: >=0 is the value, <0 is -error_t
+    auto okv = box::_detail::from_ret<int>(42);
+    Check(okv && *okv == 42, "phase44 from_ret success carries payload");
+    auto errv = box::_detail::from_ret<int>(box_fail(ERR_PROCESS_NOT_FOUND));
+    Check(!errv && errv.error().code() == box::errc::process_not_found,
+          "phase44 from_ret recovers the real kernel cause end-to-end");
+    // 0/-error_t status stub
+    Check(box::_detail::from_status(0).has_value(), "phase44 from_status(0) success");
+    auto st = box::_detail::from_status(box_fail(ERR_NO_MEMORY));
+    Check(!st.has_value() && st.error().code() == box::errc::no_memory,
+          "phase44 from_status recovers cause");
+    // raw-error_t out-of-band stub
+    Check(box::_detail::from_err(OK).has_value(), "phase44 from_err(OK) success");
+    auto fe = box::_detail::from_err(ERR_TIMEOUT);
+    Check(!fe.has_value() && fe.error().code() == box::errc::timeout, "phase44 from_err cause");
+
+    // ── box::result / box::status ergonomics + monadic ops ──
+    box::result<int> r = 7;
+    Check(r && *r == 7 && r.value_or(0) == 7, "phase44 result success");
+    box::result<int> re = std::unexpected(box::error{box::errc::device_busy});
+    Check(!re && re.error().code() == box::errc::device_busy && re.value_or(-1) == -1,
+          "phase44 result error arm");
+    auto chained = re.and_then([](int v) { return box::result<int>{v + 1}; });
+    Check(!chained && chained.error().code() == box::errc::device_busy,
+          "phase44 and_then propagates the error untouched");
+    int recovered = re.or_else([](box::error e) {
+                          return box::result<int>{static_cast<int>(e.raw())};
+                      }).value_or(0);
+    Check(recovered == (int)ERR_DEVICE_BUSY, "phase44 or_else sees the typed cause");
+
+    box::status sok;
+    Check(sok.has_value(), "phase44 default status is success");
+    box::status sfail = std::unexpected(box::error{box::errc::busy});
+    Check(!sfail && sfail.error().code() == box::errc::busy, "phase44 status error arm");
+
+    // ── honest std::error_code interop (own numbering, never errno) ──
+    std::error_code ec = box::errc::no_memory;  // ADL → box::make_error_code
+    Check(ec.value() == (int)ERR_NO_MEMORY && ec.value() != 12,
+          "phase44 error_code keeps the box value (not Linux ENOMEM=12)");
+    Check(ec.category() == box::error_category(), "phase44 error_code uses the box category");
+    Check(std::string_view(ec.category().name()) == "box", "phase44 category name is 'box'");
+    Check(ec.message() == "out of memory", "phase44 error_code message via box category");
+    // default_error_condition is IDENTITY: a box code maps to itself, NOT generic
+    auto cond = ec.default_error_condition();
+    Check(cond.value() == (int)ERR_NO_MEMORY && cond.category() == box::error_category(),
+          "phase44 box default_error_condition is identity");
+    Check(cond.category() != std::generic_category(),
+          "phase44 box code is NOT reinterpreted as a Linux generic condition");
+    Check(box::to_error_code(nomem) == ec, "phase44 to_error_code bridges box::error");
+
+    // ── regression-lock: the system_error.cpp errno-sharing lie is gone ──
+    // ERR_TIMEOUT==7; it must NOT come back as the generic errno-7 (E2BIG).
+    auto syscond = std::system_category().default_error_condition(7);
+    Check(syscond.value() == 7 && syscond.category() == std::system_category(),
+          "phase44 system_category maps code to itself");
+    Check(syscond.category() != std::generic_category(),
+          "phase44 system error 7 is NOT remapped onto generic (E2BIG) — lie fixed");
+
+    // ── std::formatter<box::error> ──
+    Check(std::format("{}", nomem) == "memory:100 out of memory", "phase44 formatter");
+    Check(std::format("{:>20}", box::error{box::errc::ok}).size() == 20, "phase44 formatter width spec");
+
+    printf("[CXX] PASS phase44: box::error/errc/result + cause-preservation "
+           "contract + honest std interop + errno-lie regression\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -7705,6 +7820,7 @@ int main()
     Phase41();
     Phase42();
     Phase43();
+    Phase44();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

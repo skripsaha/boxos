@@ -5,6 +5,12 @@
 // Categories are constinit singletons in src/runtime/system_error.cpp.
 // Category identity is object identity, valid in BoxOS single static
 // images for the same reason typeinfo pointer-identity is.
+//
+// NOT the BoxOS error language: std::errc here is only the std-conformance
+// vocabulary. BoxOS's native errors are box::error / box::errc, carried in
+// box::result<T> (box/cxx/error.h) — those mirror the kernel's box/error.h
+// codes, never the Linux errno set. system_category does NOT remap its codes
+// onto generic_category (a BoxOS code is not an errno number).
 #ifndef BOXCXX_SYSTEM_ERROR
 #define BOXCXX_SYSTEM_ERROR
 
