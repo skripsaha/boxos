@@ -65,14 +65,22 @@ static CurrentBackend ResolveBackend(const char *tag, const char **name_out)
 
 Current *current_open(const char *tag, uint32_t role, uint32_t item_size, uint32_t flags)
 {
-    if (!tag) return NULL;
-    if (role != CURRENT_READ && role != CURRENT_WRITE) return NULL;
+    return current_open_ex(tag, role, item_size, flags, NULL);
+}
+
+Current *current_open_ex(const char *tag, uint32_t role, uint32_t item_size,
+                         uint32_t flags, error_t *out_err)
+{
+#define CUR_FAIL(err) do { if (out_err) *out_err = (err); return NULL; } while (0)
+
+    if (!tag) CUR_FAIL(ERR_INVALID_ARGUMENT);
+    if (role != CURRENT_READ && role != CURRENT_WRITE) CUR_FAIL(ERR_INVALID_ARGUMENT);
 
     const char    *name    = NULL;
     CurrentBackend  backend = ResolveBackend(tag, &name);
 
     Current *c = (Current *)malloc(sizeof(Current));
-    if (!c) return NULL;
+    if (!c) CUR_FAIL(ERR_NO_MEMORY);
     memset(c, 0, sizeof(*c));
     c->backend = backend;
     c->role    = role;
@@ -80,22 +88,25 @@ Current *current_open(const char *tag, uint32_t role, uint32_t item_size, uint32
 
     switch (backend) {
     case CurScreen:
-        if (role != CURRENT_WRITE) { free(c); return NULL; }
+        if (role != CURRENT_WRITE) { free(c); CUR_FAIL(ERR_INVALID_ARGUMENT); }
         c->caps = CURRENT_CAP_WRITE;
+        if (out_err) *out_err = OK;
         return c;
 
     case CurLog:
-        if (role != CURRENT_WRITE) { free(c); return NULL; }
+        if (role != CURRENT_WRITE) { free(c); CUR_FAIL(ERR_INVALID_ARGUMENT); }
         c->caps = CURRENT_CAP_WRITE;
+        if (out_err) *out_err = OK;
         return c;
 
     case CurKeyboard:
-        if (role != CURRENT_READ) { free(c); return NULL; }
+        if (role != CURRENT_READ) { free(c); CUR_FAIL(ERR_INVALID_ARGUMENT); }
         c->caps = CURRENT_CAP_READ;
+        if (out_err) *out_err = OK;
         return c;
 
     case CurFile: {
-        if (!name || name[0] == '\0') { free(c); return NULL; }
+        if (!name || name[0] == '\0') { free(c); CUR_FAIL(ERR_INVALID_ARGUMENT); }
         uint32_t    ids[4];
         file_info_t infos[4];
         int n = find_file_by_name(name, ids, infos, 4);
@@ -103,19 +114,21 @@ Current *current_open(const char *tag, uint32_t role, uint32_t item_size, uint32
             c->file_id = ids[0];
         } else if (role == CURRENT_WRITE && (flags & CURRENT_CREATE)) {
             int fid = create(name, "");
-            if (fid < 0) { free(c); return NULL; }
+            if (fid < 0) { free(c); CUR_FAIL(box_errno_of(fid)); }
             c->file_id = (uint32_t)fid;
         } else {
-            free(c); return NULL;   /* read of a missing file, or write w/o CREATE */
+            /* read of a missing file, or write w/o CREATE */
+            free(c); CUR_FAIL(ERR_FILE_NOT_FOUND);
         }
         c->file_pos = 0;
         c->caps = (role == CURRENT_WRITE ? CURRENT_CAP_WRITE : CURRENT_CAP_READ)
                 | CURRENT_CAP_SEEKABLE | CURRENT_CAP_CLOSEABLE;
+        if (out_err) *out_err = OK;
         return c;
     }
 
     case CurStream: {
-        if (item_size == 0 || item_size > BROOK_FRAME_MAX) { free(c); return NULL; }
+        if (item_size == 0 || item_size > BROOK_FRAME_MAX) { free(c); CUR_FAIL(ERR_INVALID_ARGUMENT); }
         uint32_t frame_bytes = item_size < BROOK_FRAME_MIN ? BROOK_FRAME_MIN : item_size;
 
         Brook *b;
@@ -131,11 +144,11 @@ Current *current_open(const char *tag, uint32_t role, uint32_t item_size, uint32
             b = brook_open(tag, 0, 0, BROOK_READER);
             if (b) frame_bytes = brook_frame_size(b);
         }
-        if (!b) { free(c); return NULL; }
+        if (!b) { free(c); CUR_FAIL(ERR_IO); }
 
         if (role == CURRENT_READ) {
             uint32_t want = item_size < BROOK_FRAME_MIN ? BROOK_FRAME_MIN : item_size;
-            if (frame_bytes != want) { brook_release(b); free(c); return NULL; }
+            if (frame_bytes != want) { brook_release(b); free(c); CUR_FAIL(ERR_INVALID_ARGUMENT); }
         }
 
         c->brook       = b;
@@ -143,17 +156,20 @@ Current *current_open(const char *tag, uint32_t role, uint32_t item_size, uint32
         c->frame_bytes = frame_bytes;
         if (frame_bytes != item_size) {
             c->frame_buf = (uint8_t *)malloc(frame_bytes);
-            if (!c->frame_buf) { brook_release(b); free(c); return NULL; }
+            if (!c->frame_buf) { brook_release(b); free(c); CUR_FAIL(ERR_NO_MEMORY); }
         }
         c->caps = (role == CURRENT_WRITE ? CURRENT_CAP_WRITE : CURRENT_CAP_READ)
                 | CURRENT_CAP_FRAMED | CURRENT_CAP_BACKPRESSURE | CURRENT_CAP_CLOSEABLE;
+        if (out_err) *out_err = OK;
         return c;
     }
 
     default:
         free(c);
-        return NULL;
+        CUR_FAIL(ERR_INVALID_ARGUMENT);
     }
+
+#undef CUR_FAIL
 }
 
 int current_close(Current *c)

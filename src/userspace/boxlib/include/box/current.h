@@ -92,6 +92,16 @@ typedef struct Current Current;
  * backing, unknown tag without CREATE, shape mismatch on a stream). */
 Current *current_open(const char *tag, uint32_t role, uint32_t item_size, uint32_t flags);
 
+/* Cause-surfacing twin of current_open. Identical behaviour, but on failure
+ * sets *out_err (when non-NULL) to the real error_t — bad role/tag or unknown
+ * tag without CREATE → ERR_INVALID_ARGUMENT, a missing file opened for read /
+ * written without CREATE → ERR_FILE_NOT_FOUND, the recovered cause when an
+ * underlying create() fails, ERR_NO_MEMORY on allocation failure, ERR_IO when
+ * a stream backing cannot be opened. On success sets *out_err to OK and
+ * returns the handle. current_open is the thin out_err == NULL shim. */
+Current *current_open_ex(const char *tag, uint32_t role, uint32_t item_size,
+                         uint32_t flags, error_t *out_err);
+
 /* Release this cabin's handle. For a stream WRITER this also closes the stream
  * (the reader observes CURRENT_CLOSED once it drains). The pointer is invalid
  * afterward. Returns OK or -ERR_*. Passing NULL is a no-op (OK). */
