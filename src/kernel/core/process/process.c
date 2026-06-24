@@ -731,8 +731,15 @@ void process_destroy(process_t *proc)
                  __builtin_offsetof(StrandPool, GenState));
             uint32_t expect = STRANDPOOL_PACK(proc->strand_pool_gen, STRANDPOOL_LIVE);
             uint32_t orphan = STRANDPOOL_PACK(proc->strand_pool_gen, STRANDPOOL_ORPHANED);
-            __atomic_compare_exchange_n(gs, &expect, orphan, false,
-                                        __ATOMIC_ACQ_REL, __ATOMIC_RELAXED);
+            bool stamped = __atomic_compare_exchange_n(gs, &expect, orphan, false,
+                                                       __ATOMIC_ACQ_REL, __ATOMIC_RELAXED);
+            if (stamped && proc->strand_pool_orphan_va) {
+                uintptr_t fph = vmm_virt_to_phys(proc->cabin->vmm,
+                                                  proc->strand_pool_orphan_va);
+                if (fph)
+                    __atomic_store_n((volatile uint32_t *)vmm_phys_to_virt(fph),
+                                     1u, __ATOMIC_RELEASE);
+            }
         }
     }
 
