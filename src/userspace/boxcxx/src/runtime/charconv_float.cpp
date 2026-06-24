@@ -24,9 +24,13 @@ using i32  = int32_t;
 using u128 = unsigned __int128;
 
 // ── minimal big integer (little-endian base 2^32) ────────────────────────
-// 160 words (~5120 bits) covers fullMant * 5^1074 (to_chars precision) and the
-// scaled numerator of long from_chars inputs.
-constexpr int kBigWords = 160;
+// 192 words (~6144 bits) covers fullMant * 5^1074 (to_chars precision) and the
+// 10^|E|-scaled denominator of a from_chars input at the subnormal boundary
+// (≈10^1613 ≈ 168 words for a 1290-significant-digit subnormal, plus the
+// RoundedQ shift). Every grow primitive ALSO saturates at kBigWords (see
+// BigMulSmall / BigShl / BigInc), so an out-of-range exponent that slips past
+// the magnitude pre-clamp in ParseFp can still never write past the array.
+constexpr int kBigWords = 192;
 struct BigInt {
     u32 w[kBigWords];
     int n;  // number of significant words
@@ -46,7 +50,7 @@ void BigMulSmall(BigInt &a, u32 m)
         a.w[i]  = (u32)p;
         carry   = p >> 32;
     }
-    while (carry) { a.w[a.n++] = (u32)carry; carry >>= 32; }
+    while (carry && a.n < kBigWords) { a.w[a.n++] = (u32)carry; carry >>= 32; }
 }
 int BigBitLen(const BigInt &a)
 {
@@ -73,11 +77,13 @@ void BigShl(const BigInt &a, int s, BigInt &out)
     int wsh = s / 32, bsh = s % 32;
     for (int i = 0; i < kBigWords; ++i) out.w[i] = 0;
     for (int i = 0; i < a.n; ++i) {
-        u64 v = (u64)a.w[i] << bsh;
-        out.w[i + wsh] |= (u32)v;
-        out.w[i + wsh + 1] |= (u32)(v >> 32);
+        u64 v  = (u64)a.w[i] << bsh;
+        int lo = i + wsh, hi = lo + 1;
+        if (lo >= 0 && lo < kBigWords) out.w[lo] |= (u32)v;          // saturate: a shift
+        if (hi >= 0 && hi < kBigWords) out.w[hi] |= (u32)(v >> 32);  // can never write OOB
     }
     out.n = a.n + wsh + 1;
+    if (out.n > kBigWords) out.n = kBigWords;
     while (out.n > 0 && out.w[out.n - 1] == 0) --out.n;
 }
 void BigLow128(const BigInt &a, u64 &lo, u64 &hi)
@@ -133,7 +139,7 @@ void BigInc(BigInt &a)
 {
     int i = 0;
     for (;;) {
-        if (i >= a.n) { a.w[a.n++] = 1; break; }
+        if (i >= a.n) { if (a.n < kBigWords) a.w[a.n++] = 1; break; }
         if (a.w[i] != 0xFFFFFFFFu) { ++a.w[i]; break; }
         a.w[i] = 0; ++i;
     }
@@ -774,7 +780,7 @@ u64 DigitsToBits(bool neg, const char *dig, int ndig, int E, bool isFloat, bool 
         BigMulSmall(num, 10);
         u64 carry = (u64)(dig[i] - '0');
         for (int k = 0; k < num.n && carry; ++k) { u64 s = (u64)num.w[k] + carry; num.w[k] = (u32)s; carry = s >> 32; }
-        if (carry) num.w[num.n++] = (u32)carry;
+        if (carry && num.n < kBigWords) num.w[num.n++] = (u32)carry;
     }
     BigInt den; BigSetU64(den, 1);
     if (E >= 0) { for (int i = 0; i < E; ++i) BigMulSmall(num, 10); }
@@ -790,6 +796,7 @@ bool CharIs(char c, char l) { return (c | 0x20) == l; }
 int ParseFp(const char *first, const char *last, int mode, bool hex, bool isFloat, u64 &bits, int &ec)
 {
     int P = isFloat ? 24 : 53; u64 infExp = isFloat ? 255 : 2047, quiet = 1ull << (P - 2);
+    constexpr long kExpAccumCap = 1L << 40;  // bound exponent accumulation: long-safe, far past any representable exponent
     const char *p = first; bool neg = false;
     if (p < last && *p == '-') { neg = true; ++p; }
     if (p < last && CharIs(*p, 'i') && last - p >= 3 && CharIs(p[0], 'i') && CharIs(p[1], 'n') && CharIs(p[2], 'f')) {
@@ -801,39 +808,75 @@ int ParseFp(const char *first, const char *last, int mode, bool hex, bool isFloa
         bits = AssembleBits(neg, infExp, quiet, isFloat); ec = 0; return (int)(p + 3 - first);
     }
     if (hex) {
-        u64 hm = 0; int hbits = 0, binexp = 0; bool seenDot = false, any = false;
+        u64 hm = 0; int hbits = 0; long binexp = 0; bool seenDot = false, any = false;
         for (; p < last; ++p) {
             if (*p == '.') { if (seenDot) break; seenDot = true; continue; }
             int v = HexVal(*p); if (v < 0) break; any = true;
             if (hbits < 60) { hm = (hm << 4) | v; hbits += 4; if (seenDot) binexp -= 4; }
-            else if (!seenDot) binexp += 4;
+            else if (!seenDot && binexp < kExpAccumCap) binexp += 4;
         }
         if (!any) { ec = 22; return 0; }
-        if (p < last && CharIs(*p, 'p')) { const char *ep = p + 1; bool en = false; if (ep < last && (*ep == '+' || *ep == '-')) { en = *ep == '-'; ++ep; } if (ep < last && *ep >= '0' && *ep <= '9') { int ev = 0; while (ep < last && *ep >= '0' && *ep <= '9') { ev = ev * 10 + (*ep - '0'); ++ep; } binexp += en ? -ev : ev; p = ep; } }
+        if (p < last && CharIs(*p, 'p')) {
+            const char *ep = p + 1; bool en = false;
+            if (ep < last && (*ep == '+' || *ep == '-')) { en = *ep == '-'; ++ep; }
+            if (ep < last && *ep >= '0' && *ep <= '9') {
+                long ev = 0;
+                while (ep < last && *ep >= '0' && *ep <= '9') { if (ev < kExpAccumCap) ev = ev * 10 + (*ep - '0'); ++ep; }
+                binexp += en ? -ev : ev; p = ep;
+            }
+        }
         if (hm == 0) { bits = AssembleBits(neg, 0, 0, isFloat); ec = 0; return (int)(p - first); }
+        // Ф22a: route a definitely-out-of-range magnitude to result_out_of_range
+        // BEFORE BigShl, which would otherwise shift binexp bits (binexp/32 words)
+        // into a fixed-size BigInt. value = hm * 2^binexp, with 1 <= hm < 2^60.
+        long maxBinExp = isFloat ? 130 : 1025;    // hm>=1 => |value| >= 2^binexp > MAX
+        long minBinExp = isFloat ? -211 : -1136;  // |value| <= 2^(binexp+60) <= min_subnormal/2 => rounds to 0
+        if (binexp >= maxBinExp || binexp <= minBinExp) {
+            bits = AssembleBits(neg, 0, 0, isFloat); ec = 34; return (int)(p - first);
+        }
         BigInt num; BigSetU64(num, hm); BigInt den; BigSetU64(den, 1);
-        if (binexp >= 0) { BigInt t; BigShl(num, binexp, t); num = t; } else { BigInt t; BigShl(den, -binexp, t); den = t; }
+        if (binexp >= 0) { BigInt t; BigShl(num, (int)binexp, t); num = t; } else { BigInt t; BigShl(den, (int)(-binexp), t); den = t; }
         u64 ef, mant; bool oor = false;
         RoundToIeee(num, den, P, isFloat ? -126 : -1022, isFloat ? 127 : 1023, ef, mant, oor);
         bits = AssembleBits(neg, ef, mant, isFloat); ec = oor ? 34 : 0; return (int)(p - first);
     }
-    char dig[1300]; int ndig = 0, E = 0; bool seenDot = false, any = false;
+    char dig[1300]; int ndig = 0; long E = 0; bool seenDot = false, any = false;
     for (; p < last; ++p) {
         if (*p == '.') { if (seenDot) break; seenDot = true; continue; }
         if (*p < '0' || *p > '9') break;
         any = true;
         if (ndig < 1290) { dig[ndig++] = *p; if (seenDot) --E; }
-        else if (!seenDot) ++E;
+        else if (!seenDot && E < kExpAccumCap) ++E;
     }
     if (!any) { ec = 22; return 0; }
     const char *afterMant = p;
     if (mode != M_FIXED && p < last && CharIs(*p, 'e')) {
         const char *ep = p + 1; bool en = false; if (ep < last && (*ep == '+' || *ep == '-')) { en = *ep == '-'; ++ep; }
-        if (ep < last && *ep >= '0' && *ep <= '9') { long ev = 0; while (ep < last && *ep >= '0' && *ep <= '9') { if (ev < 100000) ev = ev * 10 + (*ep - '0'); ++ep; } E += (int)(en ? -ev : ev); p = ep; }
+        if (ep < last && *ep >= '0' && *ep <= '9') { long ev = 0; while (ep < last && *ep >= '0' && *ep <= '9') { if (ev < kExpAccumCap) ev = ev * 10 + (*ep - '0'); ++ep; } E += en ? -ev : ev; p = ep; }
         else if (mode == M_SCI) { ec = 22; return 0; }
         else p = afterMant;
     } else if (mode == M_SCI) { ec = 22; return 0; }
-    bool oor = false; bits = DigitsToBits(neg, dig, ndig, E, isFloat, oor);
+    // Ф22a: route a definitely-out-of-range magnitude to result_out_of_range
+    // BEFORE the 10^|E| scaling in DigitsToBits, which would otherwise grow a
+    // fixed-size BigInt without bound. value = INT(dig) * 10^E; with nsig
+    // leading-zero-stripped digits, 10^(nsig-1+E) <= |value| < 10^(nsig+E).
+    {
+        int lead = 0; while (lead < ndig && dig[lead] == '0') ++lead;
+        int nsig = ndig - lead;
+        // nsig == 0 ⇒ all-zero significand (value is exactly 0): no over/underflow
+        // is possible, and DigitsToBits returns signed zero before it ever uses E,
+        // so skipping the pre-clamp (and its narrowing (int)E) here is correct.
+        if (nsig > 0) {
+            long g_lo = (long)(nsig - 1) + E;      // lower bound on log10|value|
+            long g_hi = (long)nsig + E;             // strict upper bound on log10|value|
+            long maxExp10 = isFloat ? 39 : 309;     // |value| >= 10^maxExp10 => overflow
+            long minExp10 = isFloat ? -46 : -324;   // |value| <  10^minExp10 => underflow to 0
+            if (g_lo >= maxExp10 || g_hi <= minExp10) {
+                bits = AssembleBits(neg, 0, 0, isFloat); ec = 34; return (int)(p - first);
+            }
+        }
+    }
+    bool oor = false; bits = DigitsToBits(neg, dig, ndig, (int)E, isFloat, oor);
     ec = oor ? 34 : 0; return (int)(p - first);
 }
 int FmtToParseMode(std::chars_format fmt, bool &hex)

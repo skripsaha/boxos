@@ -2388,6 +2388,69 @@ void Phase9a4()
         Check(threw, "phase9a4 stod out_of_range");
     }
 
+    // Ф22a: giant-exponent guards. These inputs previously grew a fixed-size
+    // BigInt on the stack without bound (write far OOB) from UNTRUSTED input,
+    // and this build has no -fstack-protector. Each must now report
+    // result_out_of_range, leave value unmodified, and consume the whole token.
+    {
+        double v = 11; const char s[] = "1e1000000";
+        auto r = std::from_chars(s, s + 9, v);
+        Check(r.ec == std::errc::result_out_of_range && v == 11 && r.ptr == s + 9,
+              "phase9a4 decimal giant +exp guarded");
+    }
+    {
+        double v = 11; const char s[] = "1e-1000000";
+        auto r = std::from_chars(s, s + 10, v);
+        Check(r.ec == std::errc::result_out_of_range && v == 11 && r.ptr == s + 10,
+              "phase9a4 decimal giant -exp guarded");
+    }
+    {
+        double v = 11; const char s[] = "1p2000000000";  // hex from_chars (no 0x prefix)
+        auto r = std::from_chars(s, s + 12, v, F::hex);
+        Check(r.ec == std::errc::result_out_of_range && v == 11 && r.ptr == s + 12,
+              "phase9a4 hex giant +p guarded");
+    }
+    {
+        double v = 11; const char s[] = "1p-2000000000";
+        auto r = std::from_chars(s, s + 13, v, F::hex);
+        Check(r.ec == std::errc::result_out_of_range && v == 11 && r.ptr == s + 13,
+              "phase9a4 hex giant -p guarded");
+    }
+    {
+        float v = 11; const char s[] = "1e100000";  // smaller float overflow threshold
+        auto r = std::from_chars(s, s + 8, v);
+        Check(r.ec == std::errc::result_out_of_range && v == 11.0f,
+              "phase9a4 float giant +exp guarded");
+    }
+    {
+        // The exact reported vector, through stod (which detects 0x then throws).
+        bool threw = false;
+        try { std::stod("0x1p2000000000"); } catch (const std::out_of_range &) { threw = true; }
+        Check(threw, "phase9a4 stod 0x1p2000000000 guarded");
+    }
+    // Near-boundary inputs must STILL parse correctly — the pre-clamp is
+    // conservative and must not capture any representable value.
+    {
+        double v = 0; const char s[] = "1e-323";  // tiny but representable subnormal
+        auto r = std::from_chars(s, s + 6, v);
+        Check(r.ec == std::errc{} && v > 0.0 && v < 1e-300,
+              "phase9a4 subnormal 1e-323 still parses");
+    }
+    {
+        double v = 7; const char s[] = "1e-330";  // genuinely underflows to zero
+        auto r = std::from_chars(s, s + 6, v);
+        Check(r.ec == std::errc::result_out_of_range && v == 7,
+              "phase9a4 1e-330 underflow unmodified");
+    }
+    {
+        // On the routed (out-of-range) path, ptr must still stop right after
+        // the numeric token, not consume trailing characters.
+        double v = 11; const char s[] = "1e1000000xyz";
+        auto r = std::from_chars(s, s + 12, v);
+        Check(r.ec == std::errc::result_out_of_range && v == 11 && r.ptr == s + 9,
+              "phase9a4 giant exp leaves trailing chars");
+    }
+
     printf("[CXX] PASS phase9a4: <charconv> float from_chars + stof/stod\n");
 }
 
