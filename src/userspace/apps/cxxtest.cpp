@@ -834,6 +834,24 @@ static_assert(std::is_same_v<decltype(std::declval<std::array<Cxx7Legacy, 1>>() 
                                       std::declval<std::array<Cxx7Legacy, 1>>()),
                              std::weak_ordering>);
 
+// Ф22c: stateful, non-always-equal allocator (POCMA off, POCCA on) that drives
+// deque's allocator-aware move/copy assignment paths.
+template <class T>
+struct StatefulAlloc {
+    int id = 0;
+    using value_type                             = T;
+    using propagate_on_container_move_assignment = std::false_type;
+    using propagate_on_container_copy_assignment = std::true_type;
+    using is_always_equal                        = std::false_type;
+    constexpr StatefulAlloc() = default;
+    constexpr explicit StatefulAlloc(int i) : id(i) {}
+    template <class U> constexpr StatefulAlloc(const StatefulAlloc<U> &o) : id(o.id) {}
+    T   *allocate(std::size_t n) { return static_cast<T *>(::operator new(n * sizeof(T))); }
+    void deallocate(T *p, std::size_t) noexcept { ::operator delete(p); }
+    template <class U>
+    constexpr bool operator==(const StatefulAlloc<U> &o) const { return id == o.id; }
+};
+
 struct MoveProbe {
     int *dtors;
     explicit MoveProbe(int *d) : dtors(d) {}
@@ -865,6 +883,19 @@ void Phase7a()
         Check((da <=> db) > 0, "phase7a deque<=> synth(legacy)");
         std::vector<int> n1{1, 2}, n2{1, 2, 3};   // normal-type regression
         Check((n1 <=> n2) < 0 && (n1 <=> n1) == 0, "phase7a vector<=> int regression");
+    }
+    {   // Ф22c: deque allocator-aware assignment (POCMA off, POCCA on, unequal)
+        using SA = StatefulAlloc<int>;
+        using DA = std::deque<int, SA>;
+        DA a({1, 2, 3}, SA(1));
+        DA b({9}, SA(2));
+        b = std::move(a);   // unequal allocators + POCMA=false → element-wise move (no UB)
+        Check(b.size() == 3 && b[0] == 1 && b[2] == 3 && b.get_allocator().id == 2,
+              "phase7a deque move-assign unequal-alloc (element-wise, keeps own alloc)");
+        DA c({7, 8}, SA(3));
+        c = b;              // unequal allocators + POCCA=true → free-old + propagate + copy
+        Check(c.size() == 3 && c[0] == 1 && c[2] == 3 && c.get_allocator().id == 2,
+              "phase7a deque copy-assign POCCA (propagates alloc)");
     }
 
     // ── string: SSO boundary and heap migration ─────────────────────────

@@ -214,17 +214,44 @@ public:
     deque &operator=(const deque &other)
     {
         if (this == &other) return *this;
-        clear();
+        if constexpr (ATraits::propagate_on_container_copy_assignment::value) {
+            if (!(__alloc == other.__alloc)) {
+                Teardown();   // free existing storage through the OLD allocator
+                __alloc  = other.__alloc;
+                __malloc = other.__malloc;
+                InitMap(0);   // fresh empty map under the propagated allocator
+            } else {
+                __alloc  = other.__alloc;
+                __malloc = other.__malloc;
+                clear();
+            }
+        } else {
+            clear();
+        }
         for (const T &v : other) push_back(v);
         return *this;
     }
-    deque &operator=(deque &&other) noexcept
+    deque &operator=(deque &&other) noexcept(
+        ATraits::propagate_on_container_move_assignment::value ||
+        ATraits::is_always_equal::value)
     {
         if (this == &other) return *this;
-        Teardown();
-        if constexpr (ATraits::propagate_on_container_move_assignment::value)
-            __alloc = std::move(other.__alloc);
-        StealFrom(other);
+        constexpr bool pocma =
+            ATraits::propagate_on_container_move_assignment::value;
+        if (pocma || ATraits::is_always_equal::value || __alloc == other.__alloc) {
+            Teardown();
+            if constexpr (pocma) {
+                __alloc  = std::move(other.__alloc);
+                __malloc = std::move(other.__malloc);
+            }
+            StealFrom(other);
+            return *this;
+        }
+        // Unequal allocators without propagation: element-wise move into our
+        // own storage. Stealing other's blocks would later free them through a
+        // different allocator — undefined behaviour.
+        clear();
+        for (T &v : other) push_back(std::move(v));
         return *this;
     }
     deque &operator=(initializer_list<T> il)
