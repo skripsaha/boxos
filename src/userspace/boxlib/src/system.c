@@ -44,7 +44,7 @@
 
 int proc_info(uint16_t pid, proc_info_t *info)
 {
-    if (!info) return ERR_INVALID_ARGS;
+    if (!info) return -ERR_INVALID_ARGUMENT;
 
     uint32_t pid32 = pid;
     uint8_t  out[256] = {0};
@@ -54,8 +54,8 @@ int proc_info(uint16_t pid, proc_info_t *info)
                      NULL, 0,
                      out, sizeof(out), &out_actual,
                      SYS_TIMEOUT_MS, NULL);
-    if (rc != 0) return rc;
-    if (out_actual < 32) return ERR_RESULT_INVALID;
+    if (rc != 0) return box_fail(rc);
+    if (out_actual < 32) return -ERR_INTERNAL;
 
     /* Layout: [u32 pid][u32 state][i32 score][u32 _pad][u64 cstart][u64 csize][char tags[]] */
     uint32_t blob_pid, state;
@@ -73,10 +73,11 @@ int proc_info(uint16_t pid, proc_info_t *info)
 
 int tls_set_fsbase(uint64_t base)
 {
-    return MfCall1(DECK_SYSTEM, SYSTEM_OP_TLS_FSBASE,
-                   &base, sizeof(base),
-                   NULL, 0, NULL, 0, NULL,
-                   SYS_TIMEOUT_MS, NULL);
+    int rc = MfCall1(DECK_SYSTEM, SYSTEM_OP_TLS_FSBASE,
+                     &base, sizeof(base),
+                     NULL, 0, NULL, 0, NULL,
+                     SYS_TIMEOUT_MS, NULL);
+    return box_fail(rc);
 }
 
 /* runtime_init.c — .fini_array + __cxa_finalize teardown (idempotent). */
@@ -135,9 +136,9 @@ void exit(uint32_t exit_code)
 
 int proc_exec(const char *filename)
 {
-    if (!filename || filename[0] == '\0') return -1;
+    if (!filename || filename[0] == '\0') return -ERR_INVALID_ARGUMENT;
     size_t name_len = strlen(filename);
-    if (name_len >= 64) return -1;
+    if (name_len >= 64) return -ERR_INVALID_ARGUMENT;
 
     uint32_t new_pid = 0;
     int rc = MfCall1(DECK_SYSTEM, SYS_PROC_EXEC,
@@ -145,7 +146,7 @@ int proc_exec(const char *filename)
                      filename, (uint32_t)name_len,
                      &new_pid, sizeof(new_pid), NULL,
                      SYS_TIMEOUT_MS, NULL);
-    if (rc != 0) return -1;
+    if (rc != 0) return box_fail(rc);
     return (int)new_pid;
 }
 
@@ -155,9 +156,9 @@ int proc_exec(const char *filename)
 
 static int proc_tag_op(const char *tag, uint16_t opcode, uint8_t *out_byte)
 {
-    if (!tag) return ERR_INVALID_ARGS;
+    if (!tag) return -ERR_INVALID_ARGUMENT;
     size_t tlen = strlen(tag);
-    if (tlen == 0 || tlen >= 64) return ERR_INVALID_ARGS;
+    if (tlen == 0 || tlen >= 64) return -ERR_INVALID_ARGUMENT;
 
     uint32_t my_pid = cabin_info()->pid;
     uint8_t out_storage = 0;
@@ -169,7 +170,7 @@ static int proc_tag_op(const char *tag, uint16_t opcode, uint8_t *out_byte)
                      NULL,
                      SYS_TIMEOUT_MS, NULL);
     if (out_byte) *out_byte = out_storage;
-    return rc;
+    return box_fail(rc);
 }
 
 int proc_tag_add(const char *tag)    { return proc_tag_op(tag, SYS_TAG_ADD,    NULL); }
@@ -177,10 +178,10 @@ int proc_tag_remove(const char *tag) { return proc_tag_op(tag, SYS_TAG_REMOVE, N
 
 int proc_tag_check(const char *tag, bool *has_tag)
 {
-    if (!tag || !has_tag) return ERR_INVALID_ARGS;
+    if (!tag || !has_tag) return -ERR_INVALID_ARGUMENT;
     uint8_t flag = 0;
     int rc = proc_tag_op(tag, SYS_TAG_CHECK, &flag);
-    if (rc != 0) return rc;
+    if (rc != 0) return box_fail(rc);
     *has_tag = (flag != 0);
     return OK;
 }
@@ -191,32 +192,34 @@ int proc_tag_check(const char *tag, bool *has_tag)
 
 int reboot(void)
 {
-    /* hw.system.reboot is noreturn; if the call returns we return -1. */
-    (void)MfCall1(DECK_HARDWARE, HW_SYSTEM_REBOOT,
-                  NULL, 0, NULL, 0, NULL, 0, NULL,
-                  SYS_TIMEOUT_MS, NULL);
-    return -1;
+    /* hw.system.reboot is noreturn on success; reaching the return is always
+     * a failure, so surface the real cause (or ERR_INTERNAL if the call came
+     * back OK yet the machine did not reboot). */
+    int rc = MfCall1(DECK_HARDWARE, HW_SYSTEM_REBOOT,
+                     NULL, 0, NULL, 0, NULL, 0, NULL,
+                     SYS_TIMEOUT_MS, NULL);
+    return rc != 0 ? box_fail(rc) : -ERR_INTERNAL;
 }
 
 int shutdown(void)
 {
-    (void)MfCall1(DECK_HARDWARE, HW_SYSTEM_SHUTDOWN,
-                  NULL, 0, NULL, 0, NULL, 0, NULL,
-                  SYS_TIMEOUT_MS, NULL);
-    return -1;
+    int rc = MfCall1(DECK_HARDWARE, HW_SYSTEM_SHUTDOWN,
+                     NULL, 0, NULL, 0, NULL, 0, NULL,
+                     SYS_TIMEOUT_MS, NULL);
+    return rc != 0 ? box_fail(rc) : -ERR_INTERNAL;
 }
 
 int sysinfo(system_info_t *info)
 {
-    if (!info) return -1;
+    if (!info) return -ERR_INVALID_ARGUMENT;
 
     uint8_t  blob[96] = {0};
     uint32_t got      = 0;
     int rc = MfCall1(DECK_SYSTEM, SYSTEM_OP_INFO,
                      NULL, 0, NULL, 0,
                      blob, sizeof(blob), &got, SYS_TIMEOUT_MS, NULL);
-    if (rc != 0)            return -1;
-    if (got < sizeof(blob)) return -1;
+    if (rc != 0)            return box_fail(rc);
+    if (got < sizeof(blob)) return -ERR_INTERNAL;
 
     memcpy(info->version, blob, 32);
     info->version[31] = '\0';
@@ -253,7 +256,8 @@ int defrag(uint32_t file_id, uint32_t target_block)
                      NULL, 0,
                      &score, sizeof(score), NULL,
                      SYS_TIMEOUT_MS, NULL);
-    return (rc != 0) ? -1 : (int)score;
+    if (rc != 0) return box_fail(rc);
+    return (int)score;
 }
 
 int fragmentation(void)
@@ -263,7 +267,7 @@ int fragmentation(void)
                      NULL, 0, NULL, 0,
                      out, sizeof(out), NULL,
                      SYS_TIMEOUT_MS, NULL);
-    if (rc != 0) return -1;
+    if (rc != 0) return box_fail(rc);
     uint32_t score = 0;
     memcpy(&score, out, 4);
     return (int)score;
@@ -271,9 +275,10 @@ int fragmentation(void)
 
 int perf_dump(void)
 {
-    return MfCall1(DECK_SYSTEM, SYS_PERF_DUMP,
-                   NULL, 0, NULL, 0, NULL, 0, NULL,
-                   SYS_TIMEOUT_MS, NULL);
+    int rc = MfCall1(DECK_SYSTEM, SYS_PERF_DUMP,
+                     NULL, 0, NULL, 0, NULL, 0, NULL,
+                     SYS_TIMEOUT_MS, NULL);
+    return box_fail(rc);
 }
 
 /* =========================================================================
@@ -282,14 +287,14 @@ int perf_dump(void)
 
 int efi_info(efi_info_t *out)
 {
-    if (!out) return -1;
+    if (!out) return -ERR_INVALID_ARGUMENT;
     uint8_t  blob[EFI_INFO_BLOB_SIZE] = {0};
     uint32_t got = 0;
     int rc = MfCall1(DECK_SYSTEM, SYSTEM_OP_EFI_INFO,
                      NULL, 0, NULL, 0,
                      blob, sizeof(blob), &got, SYS_TIMEOUT_MS, NULL);
-    if (rc != 0)            return -1;
-    if (got < sizeof(blob)) return -1;
+    if (rc != 0)            return box_fail(rc);
+    if (got < sizeof(blob)) return -ERR_INTERNAL;
 
     memcpy(&out->version,         blob + 0,  4);
     out->rt_available     = blob[4];
@@ -310,7 +315,7 @@ int efi_info(efi_info_t *out)
 
 int efi_esrt_entry(uint32_t idx, efi_esrt_entry_t *out)
 {
-    if (!out) return -1;
+    if (!out) return -ERR_INVALID_ARGUMENT;
     uint8_t  params[4];
     memcpy(params, &idx, 4);
     uint8_t  blob[EFI_ESRT_ENTRY_SIZE] = {0};
@@ -318,8 +323,8 @@ int efi_esrt_entry(uint32_t idx, efi_esrt_entry_t *out)
     int rc = MfCall1(DECK_SYSTEM, SYSTEM_OP_EFI_ESRT_GET,
                      NULL, 0, params, sizeof(params),
                      blob, sizeof(blob), &got, SYS_TIMEOUT_MS, NULL);
-    if (rc != 0)            return -1;
-    if (got < sizeof(blob)) return -1;
+    if (rc != 0)            return box_fail(rc);
+    if (got < sizeof(blob)) return -ERR_INTERNAL;
     memcpy(out->fw_class,                       blob + 0,  16);
     memcpy(&out->fw_type,                       blob + 16, 4);
     memcpy(&out->fw_version,                    blob + 20, 4);
@@ -332,14 +337,14 @@ int efi_esrt_entry(uint32_t idx, efi_esrt_entry_t *out)
 
 int efi_verify_pe(const void *pe_buf, uint32_t pe_size, efi_verify_t *out)
 {
-    if (!out || !pe_buf || pe_size == 0) return -1;
+    if (!out || !pe_buf || pe_size == 0) return -ERR_INVALID_ARGUMENT;
     uint8_t  blob[EFI_VERIFY_PE_OUT_SIZE] = {0};
     uint32_t got = 0;
     int rc = MfCall1(DECK_SYSTEM, SYSTEM_OP_EFI_VERIFY_PE,
                      pe_buf, pe_size, NULL, 0,
                      blob, sizeof(blob), &got, SYS_TIMEOUT_MS, NULL);
-    if (rc != 0)            return -1;
-    if (got < sizeof(blob)) return -1;
+    if (rc != 0)            return box_fail(rc);
+    if (got < sizeof(blob)) return -ERR_INTERNAL;
     uint32_t result_u32;
     uint32_t pe_size_u32;
     memcpy(&result_u32,  blob + 0,  4);

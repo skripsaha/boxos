@@ -37,7 +37,7 @@ static int ipc_submit_one_op(uint16_t opcode,
     Result r;
     int rc = ManifestSubmitFull((const Manifest *)mbuf, crates, crate_count,
                                 target_pid, &r, timeout_ms);
-    return rc;
+    return box_fail(rc);
 }
 
 int send(uint32_t target_pid, const void* data, uint16_t size) {
@@ -126,13 +126,13 @@ int receive_args(int* argc, char argv[][64], int max_args) {
     if (argc) *argc = 0;
 
     Result entry;
-    if (!receive_wait(&entry, 1000)) return -1;
+    if (!receive_wait(&entry, 1000)) return -ERR_TIMEOUT;
 
-    if (entry.data_addr == 0 || entry.data_length == 0) return -1;
+    if (entry.data_addr == 0 || entry.data_length == 0) return -ERR_INTERNAL;
     const char* buf = (const char*)(uintptr_t)entry.data_addr;
     uint32_t total = entry.data_length;
 
-    if (total < 2) return -1;
+    if (total < 2) return -ERR_INTERNAL;
 
     *argc = (uint8_t)buf[0];
     uint32_t pos = 1;

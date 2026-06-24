@@ -13,6 +13,7 @@
 #include "box/core/result.h"
 #include "box/string.h"
 #include "box/types.h"
+#include "box/error.h"
 
 #define STORAGE_TAG_QUERY       0x01
 #define STORAGE_TAG_SET         0x02
@@ -39,9 +40,9 @@
 
 int create(const char *filename, const char *tags)
 {
-    if (!filename || filename[0] == '\0') return -1;
+    if (!filename || filename[0] == '\0') return -ERR_INVALID_ARGUMENT;
     size_t fn_len = strlen(filename);
-    if (fn_len >= 32) return -1;
+    if (fn_len >= 32) return -ERR_INVALID_ARGUMENT;
 
     /* params: 32 bytes, NUL-padded filename. */
     uint8_t params[32] = {0};
@@ -61,13 +62,13 @@ int create(const char *filename, const char *tags)
                      in, in_size,
                      &file_id, sizeof(file_id), NULL,
                      STORAGE_TIMEOUT_MS, NULL);
-    if (rc != 0) return -1;
+    if (rc != 0) return box_fail(rc);
     return (int)file_id;
 }
 
 int query(const char *tags, uint32_t *file_ids, size_t max_files)
 {
-    if (!file_ids || max_files == 0) return -1;
+    if (!file_ids || max_files == 0) return -ERR_INVALID_ARGUMENT;
 
     /* out_crate: [u32 count][u32 ids[max_files]]. */
     uint32_t out_cap = (uint32_t)(4 + max_files * sizeof(uint32_t));
@@ -88,7 +89,7 @@ int query(const char *tags, uint32_t *file_ids, size_t max_files)
                      in, in_size,
                      out, out_cap, &out_actual,
                      STORAGE_TIMEOUT_MS, NULL);
-    if (rc != 0) return -1;
+    if (rc != 0) return box_fail(rc);
     if (out_actual < 4) return 0;
 
     uint32_t count;
@@ -106,7 +107,7 @@ int query(const char *tags, uint32_t *file_ids, size_t max_files)
 
 int file_info(uint32_t file_id, file_info_t *info)
 {
-    if (!info) return -1;
+    if (!info) return -ERR_INVALID_ARGUMENT;
 
     uint8_t  out[1024];
     uint32_t out_actual = 0;
@@ -115,8 +116,8 @@ int file_info(uint32_t file_id, file_info_t *info)
                      NULL, 0,
                      out, sizeof(out), &out_actual,
                      STORAGE_TIMEOUT_MS, NULL);
-    if (rc != 0) return -1;
-    if (out_actual < 20) return -1;
+    if (rc != 0) return box_fail(rc);
+    if (out_actual < 20) return -ERR_INTERNAL;
 
     memset(info, 0, sizeof(*info));
 
@@ -128,7 +129,7 @@ int file_info(uint32_t file_id, file_info_t *info)
     memcpy(&tag_count_raw, out + pos, 2); pos += 2;
     memcpy(&fn_len,        out + pos, 2); pos += 2;
 
-    if (pos + fn_len > out_actual) return -1;
+    if (pos + fn_len > out_actual) return -ERR_INTERNAL;
     size_t fn_copy = fn_len < sizeof(info->filename) - 1 ? fn_len
                                                           : sizeof(info->filename) - 1;
     memcpy(info->filename, out + pos, fn_copy);
@@ -166,7 +167,7 @@ int file_info(uint32_t file_id, file_info_t *info)
 
 int fread(uint32_t file_id, uint64_t offset, void *buffer, size_t size)
 {
-    if (!buffer || size == 0) return -1;
+    if (!buffer || size == 0) return -ERR_INVALID_ARGUMENT;
 
     /* params: [u32 file_id][u64 offset]. */
     uint8_t params[12];
@@ -179,13 +180,13 @@ int fread(uint32_t file_id, uint64_t offset, void *buffer, size_t size)
                      NULL, 0,
                      buffer, (uint32_t)size, &out_actual,
                      STORAGE_TIMEOUT_MS, NULL);
-    if (rc != 0) return -1;
+    if (rc != 0) return box_fail(rc);
     return (int)out_actual;
 }
 
 int fwrite(uint32_t file_id, uint64_t offset, const void *buffer, size_t size)
 {
-    if (!buffer || size == 0) return -1;
+    if (!buffer || size == 0) return -ERR_INVALID_ARGUMENT;
 
     /* params: [u32 file_id][u64 offset][u32 flags=0]. */
     uint8_t params[16];
@@ -201,7 +202,7 @@ int fwrite(uint32_t file_id, uint64_t offset, const void *buffer, size_t size)
                      buffer, (uint32_t)size,
                      out, sizeof(out), &out_actual,
                      STORAGE_TIMEOUT_MS, NULL);
-    if (rc != 0) return -1;
+    if (rc != 0) return box_fail(rc);
     if (out_actual < 8) return (int)size; /* op succeeded; assume full write */
 
     uint64_t bytes_written = 0;
@@ -215,9 +216,9 @@ int fwrite(uint32_t file_id, uint64_t offset, const void *buffer, size_t size)
 
 int file_rename(uint32_t file_id, const char *new_filename)
 {
-    if (!new_filename) return -1;
+    if (!new_filename) return -ERR_INVALID_ARGUMENT;
     size_t fn_len = strlen(new_filename);
-    if (fn_len == 0 || fn_len >= 64) return -1;
+    if (fn_len == 0 || fn_len >= 64) return -ERR_INVALID_ARGUMENT;
 
     /* params: [u32 file_id][u16 name_len][char name[name_len]]. */
     uint8_t params[6 + 64];
@@ -230,7 +231,7 @@ int file_rename(uint32_t file_id, const char *new_filename)
                      params, (uint16_t)(6 + fn_len),
                      NULL, 0, NULL, 0, NULL,
                      STORAGE_TIMEOUT_MS, NULL);
-    return rc == 0 ? 0 : -1;
+    return box_fail(rc);
 }
 
 int delete(uint32_t file_id)
@@ -239,7 +240,7 @@ int delete(uint32_t file_id)
                      &file_id, sizeof(file_id),
                      NULL, 0, NULL, 0, NULL,
                      STORAGE_TIMEOUT_MS, NULL);
-    return rc == 0 ? 0 : -1;
+    return box_fail(rc);
 }
 
 /* =========================================================================
@@ -248,41 +249,41 @@ int delete(uint32_t file_id)
 
 int tag_add(uint32_t file_id, const char *tag)
 {
-    if (!tag || tag[0] == '\0') return -1;
+    if (!tag || tag[0] == '\0') return -ERR_INVALID_ARGUMENT;
     size_t tag_len = strlen(tag);
-    if (tag_len >= 128) return -1;
+    if (tag_len >= 128) return -ERR_INVALID_ARGUMENT;
     int rc = MfCall1(DECK_STORAGE, STORAGE_TAG_SET,
                      &file_id, sizeof(file_id),
                      tag, (uint32_t)tag_len,
                      NULL, 0, NULL,
                      STORAGE_TIMEOUT_MS, NULL);
-    return rc == 0 ? 0 : -1;
+    return box_fail(rc);
 }
 
 int tag_remove(uint32_t file_id, const char *key)
 {
-    if (!key || key[0] == '\0') return -1;
+    if (!key || key[0] == '\0') return -ERR_INVALID_ARGUMENT;
     size_t kl = strlen(key);
-    if (kl >= 64) return -1;
+    if (kl >= 64) return -ERR_INVALID_ARGUMENT;
     int rc = MfCall1(DECK_STORAGE, STORAGE_TAG_UNSET,
                      &file_id, sizeof(file_id),
                      key, (uint32_t)kl,
                      NULL, 0, NULL,
                      STORAGE_TIMEOUT_MS, NULL);
-    return rc == 0 ? 0 : -1;
+    return box_fail(rc);
 }
 
 int context_set(const char *tag)
 {
-    if (!tag || tag[0] == '\0') return -1;
+    if (!tag || tag[0] == '\0') return -ERR_INVALID_ARGUMENT;
     size_t tl = strlen(tag);
-    if (tl >= 128) return -1;
+    if (tl >= 128) return -ERR_INVALID_ARGUMENT;
     int rc = MfCall1(DECK_STORAGE, STORAGE_CONTEXT_SET,
                      NULL, 0,
                      tag, (uint32_t)tl,
                      NULL, 0, NULL,
                      STORAGE_TIMEOUT_MS, NULL);
-    return rc == 0 ? 0 : -1;
+    return box_fail(rc);
 }
 
 int context_clear(void)
@@ -290,12 +291,12 @@ int context_clear(void)
     int rc = MfCall1(DECK_STORAGE, STORAGE_CONTEXT_CLEAR,
                      NULL, 0, NULL, 0, NULL, 0, NULL,
                      STORAGE_TIMEOUT_MS, NULL);
-    return rc == 0 ? 0 : -1;
+    return box_fail(rc);
 }
 
 int context_get(char out_tags[][64], uint32_t max_tags, uint32_t *out_count)
 {
-    if (!out_tags || !out_count || max_tags == 0) return -1;
+    if (!out_tags || !out_count || max_tags == 0) return -ERR_INVALID_ARGUMENT;
 
     /* Sized to the kernel maximum: 4 + 64 tags * (2 len + 63 chars + 1). */
     uint8_t  buf[4 + 64 * 66];
@@ -305,7 +306,8 @@ int context_get(char out_tags[][64], uint32_t max_tags, uint32_t *out_count)
                      NULL, 0,
                      buf, sizeof(buf), &out_actual,
                      STORAGE_TIMEOUT_MS, NULL);
-    if (rc != 0 || out_actual < 4) return -1;
+    if (rc != 0) return box_fail(rc);
+    if (out_actual < 4) return -ERR_INTERNAL;
 
     uint32_t count = 0;
     memcpy(&count, buf, 4);
@@ -333,7 +335,7 @@ int find_file_by_name(const char *filename, uint32_t *file_ids,
 {
     uint32_t all_files[256];
     int total = query(NULL, all_files, 256);
-    if (total < 0) return -1;
+    if (total < 0) return total;
     int match_count = 0;
     for (int i = 0; i < total && (size_t)match_count < max; i++) {
         file_info_t info;
@@ -354,9 +356,9 @@ int find_file_by_name(const char *filename, uint32_t *file_ids,
 
 int snap_create(const char *name, uint32_t file_id, uint32_t *out_snap_id)
 {
-    if (!name || !out_snap_id) return -1;
+    if (!name || !out_snap_id) return -ERR_INVALID_ARGUMENT;
     size_t name_len = strlen(name);
-    if (name_len == 0 || name_len > 31) return -1;
+    if (name_len == 0 || name_len > 31) return -ERR_INVALID_ARGUMENT;
 
     uint8_t params[5 + 32];
     memcpy(params,     &file_id, 4);
@@ -371,7 +373,8 @@ int snap_create(const char *name, uint32_t file_id, uint32_t *out_snap_id)
                      NULL, 0,
                      &out, sizeof(out), &out_actual,
                      STORAGE_TIMEOUT_MS, NULL);
-    if (rc != 0 || out_actual < 4) return -1;
+    if (rc != 0) return box_fail(rc);
+    if (out_actual < 4) return -ERR_INTERNAL;
     *out_snap_id = out;
     return 0;
 }
@@ -382,12 +385,12 @@ int snap_delete(uint32_t snap_id)
                      &snap_id, sizeof(snap_id),
                      NULL, 0, NULL, 0, NULL,
                      STORAGE_TIMEOUT_MS, NULL);
-    return rc == 0 ? 0 : -1;
+    return box_fail(rc);
 }
 
 int snap_list(uint32_t *out_ids, uint32_t max_ids, uint32_t *out_count)
 {
-    if (!out_ids || !out_count || max_ids == 0) return -1;
+    if (!out_ids || !out_count || max_ids == 0) return -ERR_INVALID_ARGUMENT;
     uint32_t buf_bytes = 4 + max_ids * 4;
     uint8_t buf[4 + 64 * 4];
     if (max_ids > 64) max_ids = 64;
@@ -399,7 +402,8 @@ int snap_list(uint32_t *out_ids, uint32_t max_ids, uint32_t *out_count)
                      NULL, 0,
                      buf, buf_bytes, &out_actual,
                      STORAGE_TIMEOUT_MS, NULL);
-    if (rc != 0 || out_actual < 4) return -1;
+    if (rc != 0) return box_fail(rc);
+    if (out_actual < 4) return -ERR_INTERNAL;
     uint32_t count;
     memcpy(&count, buf, 4);
     if (count > max_ids) count = max_ids;
@@ -418,5 +422,5 @@ int anchor(uint32_t file_id)
                      &file_id, sizeof(file_id),
                      NULL, 0, NULL, 0, NULL,
                      STORAGE_TIMEOUT_MS, NULL);
-    return rc == 0 ? 0 : -1;
+    return box_fail(rc);
 }

@@ -77,6 +77,14 @@ uint32_t mem_region_from_phys(uint64_t phys);
  * MEMTAG_INVALID_REGION_ID if the address maps to no tagged region. */
 uint32_t mem_region_from_virt(const void *virt);
 
+/* Cause-surfacing twins of the two lookups above. On success return OK and
+ * write the region_id (possibly MEMTAG_INVALID_REGION_ID when no region
+ * covers the address — a successful lookup with a sentinel answer) into
+ * *out_region_id. On a failed call return the real error_t and leave
+ * *out_region_id untouched. */
+error_t  mem_region_from_phys_ex(uint64_t phys, uint32_t *out_region_id);
+error_t  mem_region_from_virt_ex(const void *virt, uint32_t *out_region_id);
+
 /* List tag strings on a region. `out_buf` filled with NUL-separated
  * "key:value" strings; *out_count receives entry count. Returns 0
  * on success or -error. */
