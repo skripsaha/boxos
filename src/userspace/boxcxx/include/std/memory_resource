@@ -509,6 +509,19 @@ protected:
     }
 };
 
+namespace __pmr {
+// RAII lock for the synchronized pool: releases mtx_ even if upstream
+// allocation throws (e.g. bad_alloc), so the resource can never be left
+// permanently locked — which would deadlock every later allocate/deallocate.
+struct PoolLock {
+    umutex_t *m_;
+    explicit PoolLock(umutex_t *m) noexcept : m_(m) { umutex_lock(m_); }
+    ~PoolLock() { umutex_unlock(m_); }
+    PoolLock(const PoolLock &)            = delete;
+    PoolLock &operator=(const PoolLock &) = delete;
+};
+} // namespace __pmr
+
 class synchronized_pool_resource : public memory_resource {
     __pmr::PoolEngine eng_;
     mutable umutex_t  mtx_;
@@ -539,25 +552,21 @@ public:
 
     void release()
     {
-        umutex_lock(&mtx_);
+        __pmr::PoolLock g(&mtx_);
         eng_.Release();
-        umutex_unlock(&mtx_);
     }
     memory_resource *upstream_resource() const { return eng_.upstream(); }
 
 protected:
     void *do_allocate(size_t bytes, size_t align) override
     {
-        umutex_lock(&mtx_);
-        void *p = eng_.Allocate(bytes, align);
-        umutex_unlock(&mtx_);
-        return p;
+        __pmr::PoolLock g(&mtx_);
+        return eng_.Allocate(bytes, align);
     }
     void do_deallocate(void *p, size_t bytes, size_t align) override
     {
-        umutex_lock(&mtx_);
+        __pmr::PoolLock g(&mtx_);
         eng_.Deallocate(p, bytes, align);
-        umutex_unlock(&mtx_);
     }
     bool do_is_equal(const memory_resource &o) const noexcept override
     {
