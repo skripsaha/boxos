@@ -32,6 +32,7 @@
 
 #include "box/ipc.h"           // send / broadcast / receive / receive_wait + Result
 #include "box/cxx/executor.h"  // box::executor, __exec::waiter, wait_on (co_await)
+#include "box/cxx/error.h"     // box::status / box::error
 
 namespace box {
 
@@ -85,14 +86,18 @@ public:
         return v;
     }
 
-    // Reply to the sender (send a payload back to from()). false if this is not a
-    // real delivery or the sender is gone.
-    bool reply(const void *data, std::uint16_t n) const noexcept
+    // Reply to the sender (send a payload back to from()). Empty status on
+    // success; the error arm carries the cause — process_not_found when this is
+    // not a real delivery (no sender to reply to), or the recovered kernel
+    // error_t from the underlying send (e.g. process_terminated if the sender has
+    // since gone, result_ring_full).
+    status reply(const void *data, std::uint16_t n) const noexcept
     {
-        return r_.sender_pid != 0 && ::send(r_.sender_pid, data, n) == 0;
+        if (r_.sender_pid == 0) return std::unexpected(error{errc::process_not_found});
+        return _detail::from_status(::send(r_.sender_pid, data, n));
     }
     template <class T>
-    bool reply(const T &v) const noexcept
+    status reply(const T &v) const noexcept
     {
         static_assert(std::is_trivially_copyable_v<T>,
                       "box::message::reply(T) requires a trivially copyable payload");
@@ -102,32 +107,34 @@ public:
 };
 
 // ── producer side ───────────────────────────────────────────────────────────
-// Return true on accepted delivery. false collapses every route failure (pid 0 /
-// target gone / ring full / no broadcast subscribers) — the native rc is not
-// surfaced here (consistent with box::brook's friendly push/pop -> bool forms).
-inline bool send(std::uint32_t pid, const void *data, std::uint16_t n) noexcept
+// Empty box::status on accepted delivery. Every route failure now SURFACES its
+// real cause through the error arm instead of collapsing to false: the recovered
+// kernel error_t (invalid_argument for a bad pid, process_terminated /
+// process_not_found for a gone target, ring full, no broadcast subscribers) is
+// in .error().code().
+inline status send(std::uint32_t pid, const void *data, std::uint16_t n) noexcept
 {
-    return ::send(pid, data, n) == 0;
+    return _detail::from_status(::send(pid, data, n));
 }
 template <class T>
-inline bool send(std::uint32_t pid, const T &v) noexcept
+inline status send(std::uint32_t pid, const T &v) noexcept
 {
     static_assert(std::is_trivially_copyable_v<T>,
                   "box::send(pid, T) requires a trivially copyable payload");
     static_assert(sizeof(T) <= 0xFFFFu, "box::send payload exceeds 65535 bytes");
-    return ::send(pid, &v, static_cast<std::uint16_t>(sizeof(T))) == 0;
+    return _detail::from_status(::send(pid, &v, static_cast<std::uint16_t>(sizeof(T))));
 }
-inline bool broadcast(const char *tag, const void *data, std::uint16_t n) noexcept
+inline status broadcast(const char *tag, const void *data, std::uint16_t n) noexcept
 {
-    return ::broadcast(tag, data, n) == 0;
+    return _detail::from_status(::broadcast(tag, data, n));
 }
 template <class T>
-inline bool broadcast(const char *tag, const T &v) noexcept
+inline status broadcast(const char *tag, const T &v) noexcept
 {
     static_assert(std::is_trivially_copyable_v<T>,
                   "box::broadcast(tag, T) requires a trivially copyable payload");
     static_assert(sizeof(T) <= 0xFFFFu, "box::broadcast payload exceeds 65535 bytes");
-    return ::broadcast(tag, &v, static_cast<std::uint16_t>(sizeof(T))) == 0;
+    return _detail::from_status(::broadcast(tag, &v, static_cast<std::uint16_t>(sizeof(T))));
 }
 
 // ── consumer side ───────────────────────────────────────────────────────────

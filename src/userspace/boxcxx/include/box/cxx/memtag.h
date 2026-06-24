@@ -23,7 +23,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <initializer_list>
-#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -32,6 +31,7 @@
                         // mem_region_tags / mem_stats / mem_set_guard /
                         // mem_cabin_grant / mem_cabin_revoke / mem_cabin_tags /
                         // mem_check_access + the POD types & constants
+#include "box/cxx/error.h"  // box::status / box::result / box::error
 
 namespace box {
 namespace memtag {
@@ -120,19 +120,25 @@ public:
 
 // ── introspection (unprivileged) ────────────────────────────────────────────
 
-// One region by id; nullopt if the id names no live region.
-inline std::optional<region> find(std::uint32_t region_id)
+// One region by id; on success the view, otherwise the recovered cause in the
+// error arm (e.g. object_not_found when the id names no live region).
+inline result<region> find(std::uint32_t region_id)
 {
     mem_region_info_t info{};
-    if (::mem_region_info(region_id, &info) != 0) return std::nullopt;
+    int rc = ::mem_region_info(region_id, &info);
+    if (rc != 0) return std::unexpected(error{box_errno_of(rc)});
     return region(region_id, info);
 }
 
-// The region covering a physical address; nullopt if none does.
-inline std::optional<region> covering(std::uint64_t phys)
+// The region covering a physical address. The lossless twin separates the two
+// outcomes: a failed lookup surfaces its real cause, while a successful lookup
+// that no region covers is object_not_found (not folded into a transport error).
+inline result<region> covering(std::uint64_t phys)
 {
-    std::uint32_t id = ::mem_region_from_phys(phys);
-    if (id == MEMTAG_INVALID_REGION_ID) return std::nullopt;
+    std::uint32_t id = 0;
+    ::error_t e = ::mem_region_from_phys_ex(phys, &id);
+    if (e != OK) return std::unexpected(error{e});
+    if (id == MEMTAG_INVALID_REGION_ID) return std::unexpected(error{errc::object_not_found});
     return find(id);
 }
 
@@ -161,15 +167,17 @@ inline std::vector<region> query(std::initializer_list<const char *> required,
     if (n <= 0) return out;
     out.reserve(static_cast<std::size_t>(n));
     for (int i = 0; i < n; ++i)
-        if (std::optional<region> r = find(ids[i])) out.push_back(*r);
+        if (result<region> r = find(ids[i])) out.push_back(*r);
     return out;
 }
 
-// A snapshot of the global MemTag counters; nullopt on a failed call.
-inline std::optional<stats> counters()
+// A snapshot of the global MemTag counters; on success the view, otherwise the
+// recovered cause in the error arm.
+inline result<stats> counters()
 {
     mem_stats_t s{};
-    if (::mem_stats(&s) != 0) return std::nullopt;
+    int rc = ::mem_stats(&s);
+    if (rc != 0) return std::unexpected(error{box_errno_of(rc)});
     return stats(s);
 }
 
@@ -178,20 +186,26 @@ inline std::optional<stats> counters()
 // (denied) from an unprivileged cabin. Guarding a tag flips every region that
 // bears it into enforcement: only cabins granted that tag may then access it.
 
-// Flip a tag into (on) / out of (off) enforcement mode.
-inline bool set_guard(const char *tag, bool on)
+// Flip a tag into (on) / out of (off) enforcement mode. Empty status on success;
+// the error arm carries the cause — invalid_argument on a null tag, or the
+// recovered kernel error_t (e.g. access_denied from an unprivileged cabin).
+inline status set_guard(const char *tag, bool on)
 {
-    return tag && ::mem_set_guard(tag, on ? 1 : 0) == 0;
+    return tag ? _detail::from_status(::mem_set_guard(tag, on ? 1 : 0))
+               : std::unexpected(error{errc::invalid_argument});
 }
 
-// Grant / revoke a cabin's access to a guarded tag.
-inline bool grant(std::uint32_t pid, const char *tag)
+// Grant / revoke a cabin's access to a guarded tag. Empty status on success; the
+// error arm carries the cause (e.g. access_denied without the "system" tag-bit).
+inline status grant(std::uint32_t pid, const char *tag)
 {
-    return tag && ::mem_cabin_grant(pid, tag) == 0;
+    return tag ? _detail::from_status(::mem_cabin_grant(pid, tag))
+               : std::unexpected(error{errc::invalid_argument});
 }
-inline bool revoke(std::uint32_t pid, const char *tag)
+inline status revoke(std::uint32_t pid, const char *tag)
 {
-    return tag && ::mem_cabin_revoke(pid, tag) == 0;
+    return tag ? _detail::from_status(::mem_cabin_revoke(pid, tag))
+               : std::unexpected(error{errc::invalid_argument});
 }
 
 // The "key:value" capability tags granted to a cabin (unprivileged read).

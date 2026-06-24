@@ -10,10 +10,13 @@
 //                              format into one via <format>.
 //
 //   box::current<T>          — a typed framed stream (Brook-backed) of
-//                              trivially-copyable T. put()/take()/close(),
-//                              with the honest end-of-stream: take() returns
-//                              false once the writer closed and the stream
-//                              drained (CURRENT_CLOSED) — never a Unix EOF.
+//                              trivially-copyable T. put()/take()/close().
+//                              put() -> box::status (process_terminated when the
+//                              reader is gone, would_block on a full NONBLOCK
+//                              stream). take() -> box::result<bool>: a `false`
+//                              VALUE is the honest end-of-stream (writer closed +
+//                              drained, CURRENT_CLOSED) — never a Unix EOF — while
+//                              would_block / real faults land in the error arm.
 //
 // This is a box:: extension — not part of std. It is the BoxOS-native I/O
 // surface; std::print stays available and (after the spine landed) routes
@@ -30,6 +33,7 @@
 #include <utility>
 
 #include "box/current.h"
+#include "box/cxx/error.h"
 
 namespace box {
 
@@ -74,17 +78,31 @@ public:
     unsigned caps() const noexcept { return c_ ? current_caps(c_) : 0u; }
     Current *handle() const noexcept { return c_; }
 
-    // Append one item. Returns false if the reader is gone (CURRENT_NO_READER)
-    // or on error.
-    bool put(const T &v) noexcept
+    // Append one item. Empty status on success; the error arm carries the real
+    // cause: errc::process_terminated when the reader is gone (the honest Current
+    // name for the underlying peer-gone condition, CURRENT_NO_READER), would_block
+    // on a NONBLOCK + full stream, errc::invalid_argument on a closed handle.
+    status put(const T &v) noexcept
     {
-        return c_ && current_put(c_, &v) == static_cast<int>(sizeof(T));
+        if (!c_) return std::unexpected(error{errc::invalid_argument});
+        int rc = current_put(c_, &v);
+        if (rc == static_cast<int>(sizeof(T))) return {};
+        if (rc < 0) return std::unexpected(error{box_errno_of(rc)});
+        return std::unexpected(error{errc::io});  // partial / 0 — never on a framed put
     }
-    // Take one item. Returns false once the writer closed and the stream
-    // drained (CURRENT_CLOSED), or on error — the honest loop terminator.
-    bool take(T &out) noexcept
+    // Take one item — the honest stream tri-state. A `true` VALUE means an item
+    // was read; a `false` VALUE means the writer closed and the stream drained
+    // (CURRENT_CLOSED) — the non-error terminator, NEVER a Unix EOF. The error
+    // arm carries a real cause: would_block on a NONBLOCK + empty stream, or any
+    // other -ERR_*. Idiomatic drain: `while (auto r = s.take(v)) { if (!*r) break;
+    // use(v); }` stops on close and surfaces a fault.
+    result<bool> take(T &out) noexcept
     {
-        return c_ && current_take(c_, &out) == static_cast<int>(sizeof(T));
+        if (!c_) return std::unexpected(error{errc::invalid_argument});
+        int rc = current_take(c_, &out);
+        if (rc == static_cast<int>(sizeof(T))) return true;
+        if (rc == CURRENT_CLOSED) return false;
+        return std::unexpected(error{box_errno_of(rc)});
     }
     // Announce end-of-stream to the reader without releasing the handle.
     void close() noexcept { if (c_) current_close(c_); }
@@ -147,7 +165,13 @@ public:
     }
 
     void     flush() noexcept { if (c_) current_flush(c_); }
-    bool     seek(std::uint64_t off) noexcept { return c_ && current_seek(c_, off) == OK; }
+    // Move the byte cursor (seekable backings — file). Empty status on success;
+    // the error arm carries the cause (invalid_argument on a closed handle,
+    // invalid_operation when the backing is not seekable).
+    status   seek(std::uint64_t off) noexcept
+    {
+        return _detail::from_status(c_ ? current_seek(c_, off) : -ERR_INVALID_ARGUMENT);
+    }
     std::uint64_t tell() const noexcept { return c_ ? current_tell(c_) : 0u; }
 };
 
