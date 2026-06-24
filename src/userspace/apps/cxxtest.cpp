@@ -55,6 +55,7 @@
 #include <stop_token>
 #include <condition_variable>
 #include <thread>
+#include <future>
 #include <new>
 #include <exception>
 #include <initializer_list>
@@ -6353,6 +6354,572 @@ void Phase39()
            "notify_all_at_thread_exit)\n");
 }
 
+// ── phase40: <future> (Ф20d-2) ─────────────────────────────────────────────────
+// promise / future / shared_future + async (both policies) + deferred +
+// packaged_task + every future_errc, with the SAME host-invariant ratio
+// discipline phase39 uses. `cal` = wall time of a no-producer future::wait_for
+// that must time out; a real event-wake returns far under cal/4 (= `early`), so
+// the discriminator is "woken vs rode-the-deadline" — never a fixed-ms bound.
+// Cross-strand sub-tests skip→PASS without FSGSBASE (per-strand TLS), exactly
+// like phase35/39.
+
+static constexpr int kP40Budget = 2000;   // ms: the timed dead-wait floor
+
+static volatile uint64_t g_p40_remaining;  // workers decrement; main joins
+
+// Park-join workers the strandtest way (copy of p39_join): re-read the live
+// counter before each park, bounded cycles so a hang fails loudly.
+static bool p40_join()
+{
+    uint32_t cycles = 0;
+    uint64_t cur;
+    while ((cur = __atomic_load_n(&g_p40_remaining, __ATOMIC_ACQUIRE)) != 0) {
+        if (++cycles > 80u) return false;
+        addr_park(&g_p40_remaining, cur, 200);
+    }
+    return true;
+}
+
+// (13) future ping-pong: kP40PingPong lockstep hops, each a fresh single-shot
+// promise<void>/future<void> pair the peer waits on. Every promise is used EXACTLY
+// once (pre-created arrays — no re-arm, no aliasing, no concurrent move), so the
+// only thing that drives a hop is the peer's set_value→notify wake. A backstop
+// ride would cost ~100ms/hop (≈6.4s for 64 hops); finishing under the tight
+// core-conditional bound proves the wake is the event, not a timeout. Each hop:
+//   main  ping[i].set_value()  → worker  ping_fut[i].wait()  → worker pong[i].set_value()
+//   → main pong_fut[i].wait().
+static constexpr int          kP40PingPong = 64;
+static std::promise<void>    *g_p40_ping;       // [kP40PingPong] main → worker
+static std::future<void>     *g_p40_ping_fut;   // [kP40PingPong] worker waits here
+static std::promise<void>    *g_p40_pong;       // [kP40PingPong] worker → main
+
+static void p40_pingpong_worker(void *)
+{
+    __boxcxx_tls_strand_init();
+    __boxcxx_thread_storage_enter();
+    for (int i = 0; i < kP40PingPong; i++) {
+        g_p40_ping_fut[i].wait();   // block on main's ping[i]
+        g_p40_pong[i].set_value();  // wake main's pong_fut[i]
+    }
+    __boxcxx_thread_storage_exit();
+    __atomic_sub_fetch(&g_p40_remaining, 1u, __ATOMIC_RELEASE);
+    addr_wake(&g_p40_remaining, 0);
+    strand_exit();
+}
+
+// (11) async event-wake target.
+static int p40_async_value() { std::this_thread::sleep_for(std::chrono::milliseconds(10)); return 42; }
+// (12) async exception target.
+static int p40_async_throws() { throw std::runtime_error("boom"); }
+
+// (15) shared_future cross-strand waiters: each blocks in sf.wait() on a copy.
+static std::shared_future<int> *g_p40_sf;
+static std::atomic<int>         g_p40_sf_ready{0};
+static std::atomic<int>         g_p40_sf_got{0};
+static void p40_sf_waiter(void *)
+{
+    __boxcxx_tls_strand_init();
+    __boxcxx_thread_storage_enter();
+    std::shared_future<int> local = *g_p40_sf;   // a copy (ref_inc)
+    g_p40_sf_ready.fetch_add(1, std::memory_order_release);
+    local.wait();
+    if (local.get() == 77) g_p40_sf_got.fetch_add(1, std::memory_order_release);
+    __boxcxx_thread_storage_exit();
+    __atomic_sub_fetch(&g_p40_remaining, 1u, __ATOMIC_RELEASE);
+    addr_wake(&g_p40_remaining, 0);
+    strand_exit();
+}
+
+// (16) set_value_at_thread_exit raw-strand worker: stand up TLS, stash the value,
+// then drain thread storage (publishes + notifies), like p39_atexit_worker.
+static std::promise<int> *g_p40_atexit_prom;
+static void p40_atexit_worker(void *)
+{
+    __boxcxx_tls_strand_init();
+    __boxcxx_thread_storage_enter();
+    g_p40_atexit_prom->set_value_at_thread_exit(123);
+    __boxcxx_thread_storage_exit();             // runs the publish+notify
+    __atomic_sub_fetch(&g_p40_remaining, 1u, __ATOMIC_RELEASE);
+    addr_wake(&g_p40_remaining, 0);
+    strand_exit();
+}
+
+// (17) packaged_task run on a std::thread: the thread invokes pt, main get()s.
+static std::packaged_task<int(int, int)> *g_p40_pt;
+static void p40_pt_worker(void *)
+{
+    __boxcxx_tls_strand_init();
+    __boxcxx_thread_storage_enter();
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    (*g_p40_pt)(20, 22);
+    __boxcxx_thread_storage_exit();
+    __atomic_sub_fetch(&g_p40_remaining, 1u, __ATOMIC_RELEASE);
+    addr_wake(&g_p40_remaining, 0);
+    strand_exit();
+}
+
+void Phase40()
+{
+    using namespace std::chrono;
+
+    // ── ALWAYS-ON single-strand sub-tests (no FSGSBASE) ───────────────────────
+
+    // (1) promise<int>/future<int> round-trip.
+    {
+        std::promise<int> p;
+        std::future<int>  f = p.get_future();
+        Check(f.valid(), "phase40 future valid before get");
+        p.set_value(7);
+        Check(f.get() == 7, "phase40 promise<int>→future<int> round-trip");
+        Check(!f.valid(), "phase40 future invalid after get (single-use)");
+    }
+
+    // (2) exception propagation.
+    {
+        std::promise<int> p;
+        std::future<int>  f = p.get_future();
+        p.set_exception(
+            std::make_exception_ptr(std::runtime_error("x")));
+        bool threw = false;
+        try {
+            (void)f.get();
+        } catch (const std::runtime_error &e) {
+            threw = (std::string(e.what()) == "x");
+        }
+        Check(threw, "phase40 set_exception propagates through future::get");
+    }
+
+    // (3) future<void>.
+    {
+        std::promise<void> p;
+        std::future<void>  f = p.get_future();
+        p.set_value();
+        f.get();
+        Check(!f.valid(), "phase40 future<void> set_value()/get() then invalid");
+    }
+
+    // (4) future<int&>.
+    {
+        int               x = 99;
+        std::promise<int &> p;
+        std::future<int &>  f = p.get_future();
+        p.set_value(x);
+        Check(&f.get() == &x, "phase40 future<int&> returns the same object");
+    }
+
+    // (5) shared_future multi-wait.
+    {
+        std::promise<int>       p;
+        std::shared_future<int> sf = p.get_future().share();
+        std::shared_future<int> sf2 = sf;        // a copy
+        p.set_value(55);
+        Check(sf.get() == 55 && sf2.get() == 55,
+              "phase40 shared_future two copies both get the value");
+        Check(sf.get() == 55, "phase40 shared_future multiple get() calls OK");
+    }
+
+    // (6) wait() on ready returns immediately; wait_until(past) on not-ready
+    //     reports timeout.
+    {
+        std::promise<int> p;
+        std::future<int>  f = p.get_future();
+        p.set_value(1);
+        f.wait();   // already ready → returns at once
+        Check(f.get() == 1, "phase40 wait() on ready then get");
+
+        std::promise<int> p2;
+        std::future<int>  f2 = p2.get_future();
+        Check(f2.wait_until(steady_clock::now()) == std::future_status::timeout,
+              "phase40 wait_until(past) on not-ready → timeout");
+    }
+
+    // (7) packaged_task<int(int,int)>.
+    {
+        std::packaged_task<int(int, int)> pt([](int a, int b) { return a + b; });
+        Check(pt.valid(), "phase40 packaged_task valid after construction");
+        std::future<int> f = pt.get_future();
+        pt(3, 4);
+        Check(f.get() == 7, "phase40 packaged_task invoke → future sum");
+        pt.reset();
+        std::future<int> f2 = pt.get_future();
+        pt(10, 20);
+        Check(f2.get() == 30, "phase40 packaged_task reset() → fresh future");
+
+        std::packaged_task<int(int, int)> pt2;
+        pt.swap(pt2);
+        Check(pt2.valid() && !pt.valid(), "phase40 packaged_task swap");
+    }
+
+    // (8) deferred: ran==false before get; wait_for(0)==deferred AND still
+    //     ran==false; get() runs it on THIS strand.
+    {
+        std::atomic<bool> ran{false};
+        std::thread::id   body_id;
+        auto fut = std::async(std::launch::deferred, [&] {
+            ran.store(true, std::memory_order_release);
+            body_id = std::this_thread::get_id();
+            return 88;
+        });
+        Check(!ran.load(std::memory_order_acquire),
+              "phase40 deferred not run before get");
+        Check(fut.wait_for(milliseconds(0)) == std::future_status::deferred,
+              "phase40 deferred wait_for(0) reports deferred");
+        Check(!ran.load(std::memory_order_acquire),
+              "phase40 deferred wait_for did NOT run the function");
+        int v = fut.get();
+        Check(v == 88 && ran.load(std::memory_order_acquire),
+              "phase40 deferred get() runs the function and returns the value");
+        Check(body_id == std::this_thread::get_id(),
+              "phase40 deferred ran on the GET caller's strand");
+    }
+
+    // (9) all four future_errc + no_state single-use + category identity.
+    {
+        // 2nd get_future() → future_already_retrieved.
+        std::promise<int> p;
+        (void)p.get_future();
+        bool e1 = false;
+        try {
+            (void)p.get_future();
+        } catch (const std::future_error &e) {
+            e1 = (e.code() == std::make_error_code(
+                                  std::future_errc::future_already_retrieved));
+        }
+        Check(e1, "phase40 future_errc::future_already_retrieved on 2nd get_future");
+
+        // 2nd set_value → promise_already_satisfied.
+        std::promise<int> p2;
+        (void)p2.get_future();
+        p2.set_value(1);
+        bool e2 = false;
+        try {
+            p2.set_value(2);
+        } catch (const std::future_error &e) {
+            e2 = (e.code().value() ==
+                  (int)std::future_errc::promise_already_satisfied);
+        }
+        Check(e2, "phase40 future_errc::promise_already_satisfied on 2nd set_value");
+
+        // broken_promise: promise dies unset.
+        std::future<int> bf;
+        {
+            std::promise<int> bp;
+            bf = bp.get_future();
+        }
+        bool e3 = false;
+        try {
+            (void)bf.get();
+        } catch (const std::future_error &e) {
+            e3 = (e.code().value() == (int)std::future_errc::broken_promise);
+        }
+        Check(e3, "phase40 future_errc::broken_promise when promise abandoned");
+
+        // no_state: moved-from promise set_value.
+        std::promise<int> q;
+        std::promise<int> q2(std::move(q));
+        bool e4 = false;
+        try {
+            q.set_value(1);
+        } catch (const std::future_error &e) {
+            e4 = (e.code().value() == (int)std::future_errc::no_state);
+        }
+        Check(e4, "phase40 future_errc::no_state on moved-from promise set_value");
+
+        // single-use: future after get() → 2nd get() → no_state.
+        std::promise<int> r;
+        std::future<int>  rf = r.get_future();
+        r.set_value(5);
+        (void)rf.get();
+        bool e5 = false;
+        try {
+            (void)rf.get();
+        } catch (const std::future_error &e) {
+            e5 = (e.code().value() == (int)std::future_errc::no_state);
+        }
+        Check(e5, "phase40 future_errc::no_state on 2nd future::get (single-use)");
+
+        // fresh category, NOT generic/system.
+        Check(&std::future_category() != &std::generic_category() &&
+                  &std::future_category() != &std::system_category(),
+              "phase40 future_category is a distinct fresh category");
+        Check(std::string(std::future_category().name()) == "future",
+              "phase40 future_category().name() == \"future\"");
+    }
+
+    // (10) launch bitmask.
+    {
+        constexpr std::launch both = std::launch::async | std::launch::deferred;
+        Check((both & std::launch::async) == std::launch::async,
+              "phase40 launch bitmask: async|deferred contains async");
+        Check((both & std::launch::deferred) == std::launch::deferred,
+              "phase40 launch bitmask: async|deferred contains deferred");
+    }
+
+    // (10a) a throwing result ctor must NOT wedge the state: set_value with a
+    //       throwing copy leaves the promise UNSATISFIED (retryable), not a
+    //       satisfied-but-never-ready husk.
+    {
+        struct ThrowOnCopy {
+            int  v;
+            bool boom;
+            ThrowOnCopy(int x, bool b) : v(x), boom(b) {}
+            ThrowOnCopy(const ThrowOnCopy &o) : v(o.v), boom(o.boom)
+            {
+                if (boom) throw std::runtime_error("copy boom");
+            }
+            ThrowOnCopy(ThrowOnCopy &&) = default;   // noexcept move
+        };
+        std::promise<ThrowOnCopy> p;
+        std::future<ThrowOnCopy>  f = p.get_future();
+        ThrowOnCopy               bad(1, true);
+        bool                      threw = false;
+        try {
+            p.set_value(bad);   // copy throws BEFORE the gate is claimed
+        } catch (const std::runtime_error &) {
+            threw = true;
+        }
+        Check(threw, "phase40 set_value with a throwing copy propagates");
+        ThrowOnCopy good(42, false);
+        p.set_value(good);   // gate was NOT claimed → this must succeed (retry)
+        Check(f.get().v == 42,
+              "phase40 future usable after a throwing set_value (not wedged)");
+    }
+
+    // (10b) packaged_task::reset() abandons the old state with broken_promise — a
+    //       future retrieved before reset() gets broken_promise, not a hang.
+    {
+        std::packaged_task<int()> pt([] { return 5; });
+        std::future<int>          old = pt.get_future();
+        pt.reset();
+        bool bp = false;
+        try {
+            (void)old.get();
+        } catch (const std::future_error &e) {
+            bp = (e.code().value() == (int)std::future_errc::broken_promise);
+        }
+        Check(bp, "phase40 packaged_task::reset() gives the old future broken_promise");
+        std::future<int> nf = pt.get_future();
+        pt();
+        Check(nf.get() == 5, "phase40 packaged_task usable after reset()");
+    }
+
+    // ── calibration: a no-producer future::wait_for(kBudget) that MUST time out.
+    //    Its wall time is the dead-wait floor (≈ kBudget). early = cal/4 is the
+    //    event-wake ceiling; half = cal/2 a looser one.
+    nanoseconds cal;
+    {
+        std::promise<int> p;
+        std::future<int>  f = p.get_future();
+        box::stopwatch sw;
+        std::future_status st = f.wait_for(milliseconds(kP40Budget));
+        cal = sw.elapsed();
+        Check(st == std::future_status::timeout,
+              "phase40 calibration wait_for(kBudget) timed out (no producer)");
+        Check(cal >= milliseconds(kP40Budget * 3 / 5),
+              "phase40 calibration: the timed park really waited (>= 0.6×budget)");
+    }
+    auto early = duration_cast<nanoseconds>(cal / 4);   // event-wake ceiling
+    auto half  = duration_cast<nanoseconds>(cal / 2);   // looser ceiling
+
+    // ── (11)..(17): cross-strand, need FSGSBASE (per-strand TLS) ──────────────
+    if (!cpu_has_fsgsbase()) {
+        printf("[CXX] note phase40: strands need FSGSBASE — skipping cross-strand\n");
+        printf("[CXX] PASS phase40: <future> (always-on: promise/future/"
+               "shared_future + deferred + packaged_task + all future_errc; "
+               "cross-strand skipped, no FSGSBASE)\n");
+        return;
+    }
+
+    // (11) async(launch::async) event-wake: worker sleeps ~10ms then returns 42;
+    //      main get()==42 with elapsed < early (woken by set_value→notify). The
+    //      future dtor joins the worker exactly once — no hang.
+    {
+        box::stopwatch  sw;
+        std::future<int> f = std::async(std::launch::async, p40_async_value);
+        int v = f.get();
+        nanoseconds t = sw.elapsed();
+        Check(v == 42, "phase40 async(launch::async) returned the value");
+        Check(t < early,
+              "phase40 async worker woke main on completion (< cal/4, event-driven)");
+        // f's dtor (here, end of scope) joins the worker; reaching the next line
+        // proves no hang.
+    }
+    Check(true, "phase40 async future dtor joined the worker (no hang)");
+
+    // (12) async worker EXCEPTION cross-strand: rethrown on the MAIN strand —
+    //      exercises the STEP 1 atomic refcount + capture-then-publish ordering.
+    {
+        std::future<int> f = std::async(std::launch::async, p40_async_throws);
+        bool threw = false;
+        try {
+            (void)f.get();
+        } catch (const std::runtime_error &e) {
+            threw = (std::string(e.what()) == "boom");
+        }
+        Check(threw,
+              "phase40 async exception_ptr survived cross-strand rethrow on main");
+    }
+
+    // (13) FUTURE PING-PONG: kP40PingPong lockstep hops, each a fresh single-shot
+    //      promise<void> the peer waits on (see the worker comment). Pre-created
+    //      pairs → no re-arm race. Tight core-conditional bound like p39.
+    {
+        std::promise<void> ping[kP40PingPong];
+        std::future<void>  ping_fut[kP40PingPong];
+        std::promise<void> pong[kP40PingPong];
+        std::future<void>  pong_fut[kP40PingPong];
+        for (int i = 0; i < kP40PingPong; i++) {
+            ping_fut[i] = ping[i].get_future();   // worker waits on these
+            pong_fut[i] = pong[i].get_future();   // main waits on these
+        }
+        g_p40_ping     = ping;
+        g_p40_ping_fut = ping_fut;
+        g_p40_pong     = pong;
+        g_p40_remaining = 1;
+        if (strand_spawn(p40_pingpong_worker, 0)) {
+            box::stopwatch sw;
+            for (int i = 0; i < kP40PingPong; i++) {
+                ping[i].set_value();    // wake the worker's ping_fut[i]
+                pong_fut[i].wait();     // block on the worker's pong[i]
+            }
+            nanoseconds   t = sw.elapsed();
+            system_info_t si{};
+            unsigned      cores = (sysinfo(&si) == 0) ? si.cpu_app_cores : 0u;
+            auto          bound = (cores >= 2) ? milliseconds(3000)
+                                               : milliseconds(9000);
+            Check(t < bound,
+                  "phase40 future ping-pong woken by notify, not the backstop");
+            Check(p40_join(), "phase40 ping-pong worker joined");
+        }
+    }
+
+    // (14) wait_for event-vs-timeout discrimination.
+    {
+        // (14a) no producer → timeout, elapsed >= kBudget*3/5.
+        std::promise<int> p;
+        std::future<int>  f = p.get_future();
+        box::stopwatch sw;
+        std::future_status st = f.wait_for(milliseconds(kP40Budget));
+        nanoseconds t = sw.elapsed();
+        Check(st == std::future_status::timeout,
+              "phase40 wait_for(no producer) → timeout");
+        Check(t >= milliseconds(kP40Budget * 3 / 5),
+              "phase40 wait_for timeout actually waited the budget");
+    }
+    {
+        // (14b) producer set_value after ~10ms → wait_for(kBudget) → ready,
+        //       elapsed < early (event-driven exact-deadline).
+        auto fut = std::async(std::launch::async, [] {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            return 5;
+        });
+        box::stopwatch sw;
+        std::future_status st = fut.wait_for(milliseconds(kP40Budget));
+        nanoseconds t = sw.elapsed();
+        Check(st == std::future_status::ready,
+              "phase40 wait_for(producer) → ready");
+        Check(t < early,
+              "phase40 wait_for woke on set_value, not the timeout (< cal/4)");
+        Check(fut.get() == 5, "phase40 wait_for then get the produced value");
+    }
+
+    // (15) shared_future cross-strand multi-wait: 2 waiter strands each block in
+    //      sf.wait() on a copy; main set_value once; both wake (< half) and get
+    //      the same value.
+    {
+        std::promise<int>       p;
+        std::shared_future<int> sf = p.get_future().share();
+        g_p40_sf = &sf;
+        g_p40_sf_ready.store(0, std::memory_order_relaxed);
+        g_p40_sf_got.store(0, std::memory_order_relaxed);
+        int workers = 0;
+        if (strand_spawn(p40_sf_waiter, 0)) workers++;
+        if (strand_spawn(p40_sf_waiter, 0)) workers++;
+        if (workers == 0) {
+            printf("[CXX] note phase40: no shared_future waiter strand — skipping\n");
+        } else {
+            g_p40_remaining = (uint64_t)workers;
+            for (int cyc = 0; cyc < 5000 &&
+                              g_p40_sf_ready.load(std::memory_order_acquire) < workers;
+                 cyc++)
+                std::this_thread::yield();
+            Check(g_p40_sf_ready.load(std::memory_order_acquire) == workers,
+                  "phase40 shared_future waiters reached the park");
+            box::stopwatch sw;
+            p.set_value(77);
+            Check(p40_join(), "phase40 shared_future waiters joined");
+            nanoseconds t = sw.elapsed();
+            Check(g_p40_sf_got.load(std::memory_order_acquire) == workers,
+                  "phase40 every shared_future waiter got the value");
+            Check(t < half,
+                  "phase40 shared_future set_value woke both waiters (< cal/2)");
+        }
+    }
+
+    // (16) set_value_at_thread_exit end-to-end. A raw strand stands up TLS, calls
+    //      set_value_at_thread_exit, then drains thread storage (the publish).
+    {
+        std::promise<int> prom;
+        std::future<int>  f = prom.get_future();
+        g_p40_atexit_prom = &prom;
+        g_p40_remaining = 1;
+        if (strand_spawn(p40_atexit_worker, 0)) {
+            box::stopwatch sw;
+            int v = f.get();
+            nanoseconds t = sw.elapsed();
+            Check(v == 123,
+                  "phase40 set_value_at_thread_exit delivered the value");
+            Check(t < half,
+                  "phase40 set_value_at_thread_exit woke main at strand exit (< cal/2)");
+            Check(p40_join(), "phase40 set_value_at_thread_exit worker joined");
+        }
+    }
+
+    // (17) packaged_task on a std::thread: run the task on a thread, main get()
+    //      event-wakes < early.
+    {
+        std::packaged_task<int(int, int)> pt(
+            [](int a, int b) { return a * b; });
+        std::future<int> f = pt.get_future();
+        g_p40_pt = &pt;
+        g_p40_remaining = 1;
+        if (strand_spawn(p40_pt_worker, 0)) {
+            box::stopwatch sw;
+            int v = f.get();
+            nanoseconds t = sw.elapsed();
+            Check(v == 440, "phase40 packaged_task on a strand → future value");
+            Check(t < early,
+                  "phase40 packaged_task worker woke main on completion (< cal/4)");
+            Check(p40_join(), "phase40 packaged_task worker joined");
+        }
+    }
+
+    // (18) async future EARLY-DISCARD: drop the future WITHOUT get(). Per
+    //      [futures.async]/5 the destructor of the last shared-state owner BLOCKS
+    //      until the worker completes. The worker writes `done` to a stack local
+    //      and the dtor's join waits for it, so done==1 is guaranteed — a
+    //      non-blocking dtor would read 0 (worker still sleeping) and a worker that
+    //      held its own ref would self-join and HANG here. Host-invariant: this
+    //      asserts a value, not a wall-clock bound.
+    {
+        std::atomic<int> done{0};
+        {
+            std::future<void> f = std::async(std::launch::async, [&done] {
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+                done.store(1, std::memory_order_release);
+            });
+            (void)f;
+        }   // f's dtor blocks here until the worker set `done`
+        Check(done.load(std::memory_order_acquire) == 1,
+              "phase40 async future early-discard dtor blocked until worker done "
+              "(conformant [futures.async]/5, no self-join)");
+    }
+
+    printf("[CXX] PASS phase40: <future> (promise/future/shared_future + async "
+           "both policies + deferred + packaged_task + cross-strand event-wake + "
+           "all future_errc)\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -6414,6 +6981,7 @@ int main()
     Phase37();
     Phase38();
     Phase39();
+    Phase40();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

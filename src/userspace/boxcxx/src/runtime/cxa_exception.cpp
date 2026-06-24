@@ -241,7 +241,10 @@ extern "C" void __cxa_end_catch()
             void *primary = reinterpret_cast<void *>(header->referenceCount);
             __cxa_decrement_exception_refcount(primary);
             free(header);
-        } else if (--header->referenceCount == 0) {
+            // exception_ptr can be shared cross-strand (an async future captures
+            // one on the worker and rethrows on another strand): this decrement
+            // races the atomic exception_ptr ABI ops below, so it must be atomic.
+        } else if (__atomic_sub_fetch(&header->referenceCount, 1, __ATOMIC_ACQ_REL) == 0) {
             if (header->exceptionDestructor)
                 header->exceptionDestructor(header + 1);
             __cxa_free_exception(header + 1);
