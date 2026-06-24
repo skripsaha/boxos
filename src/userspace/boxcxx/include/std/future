@@ -1,0 +1,1587 @@
+// boxcxx — <future>.
+//
+// promise / future / shared_future / packaged_task / async over the SAME
+// event-driven substrate as condition_variable: every shared state carries one
+// atomic<uint32_t> __ready word and nothing more for the wake. The producer
+// stores the value/exception, then __ready.store(1, release) + an
+// __boxcxx_atomic_notify(&__ready, true); a waiter loops load-compare on __ready
+// and parks via __boxcxx_atomic_wait_cycle (the version-pool park — WAITPKG
+// UMONITOR/UMWAIT on the word when present, PAUSE budget then a real kernel park
+// otherwise). The acquire on the waiter's load pairs with the producer's release,
+// so a future that observes __ready==1 has happens-before visibility of the
+// stored result. A notify that races a waiter between its load and its park is
+// never lost: the load is the predicate authority, and the substrate's
+// pool-version park-gate independently stops the waiter sleeping through it.
+// This is event-driven, NOT polling — the timed path rides the same merged
+// timeout fix the cv/semaphore timed waits ride on (a notify returns a timed park
+// EARLY, it does not burn its budget; the deadline is exact, kernel b88b313).
+//
+// async(launch::async) launches a std::thread (NOT a raw strand_spawn): its
+// trampoline already stands up this strand's per-strand thread_local image and
+// its per-strand exception bookkeeping (__boxcxx_tls_strand_init /
+// __boxcxx_thread_storage_enter / exit) and the terminate-on-escape contract, so
+// async inherits all of it for free. The std::thread is moved INTO the shared
+// state; the LAST shared-state owner joins it exactly once in ref_dec (a
+// __join_owner CAS), which is the conformant ~future blocking-join of an async
+// future ([futures.async]/5 + /6). Plain (non-async) futures never arm a worker,
+// so their ref_dec join is a no-op.
+//
+// A worker that throws does NOT publish the exception from inside its catch
+// block: it captures the exception_ptr in the catch, LEAVES the catch (so the
+// strand's __cxa_end_catch runs while this strand is the sole refcount owner of
+// the exception object), and only THEN stores it and notifies. This is the
+// capture-then-publish ordering that, together with the atomic
+// __cxa_end_catch refcount, makes a cross-strand exception_ptr hand-off race-free.
+//
+// Cooperative, non-Unix: there is no futex naming/op, no errno table, no forced
+// kill. future_errc is an honest fresh enum with its own fresh category (NOT a
+// generic/system alias). A thread::id stays the strand pid. The substrate park
+// IS the wake — there is no polling or timeout backstop as the primary wake path.
+#ifndef BOXCXX_FUTURE
+#define BOXCXX_FUTURE
+
+#include <atomic>
+#include <mutex>
+#include <chrono>
+#include <memory>
+#include <exception>
+#include <system_error>
+#include <stdexcept>
+#include <thread>
+#include <functional>
+#include <tuple>
+#include <type_traits>
+#include <utility>
+#include <cstdint>
+#include <cstddef>
+#include <new>
+
+// set_value_at_thread_exit / set_exception_at_thread_exit / packaged_task::
+// make_ready_at_thread_exit defer the __ready publish to this strand's
+// thread_local destructor drain (Itanium __cxa_thread_atexit, run by
+// __boxcxx_thread_storage_exit when the strand ends) — forward-declared the same
+// way <condition_variable> declares it for notify_all_at_thread_exit.
+extern "C" int __cxa_thread_atexit(void (*fn)(void *), void *arg, void *dso);
+
+namespace std {
+
+// ── future_errc / future_category / future_error ───────────────────────────────
+//
+// An honest fresh enumeration with its own fresh category — NOT an alias of the
+// generic/system category, so &future_category() is distinct from both. The
+// category is a function-local static singleton (object identity is its identity,
+// valid in a single static image), so no extra .cpp TU is needed.
+
+enum class future_errc {
+    broken_promise            = 1,
+    future_already_retrieved  = 2,
+    promise_already_satisfied = 3,
+    no_state                  = 4
+};
+
+template <>
+struct is_error_code_enum<future_errc> : true_type {};
+
+namespace __future_impl {
+
+class FutureCategory final : public error_category {
+public:
+    const char *name() const noexcept override { return "future"; }
+
+    string message(int code) const override
+    {
+        switch (static_cast<future_errc>(code)) {
+        case future_errc::broken_promise:
+            return "broken promise: the producing strand abandoned the shared "
+                   "state before a result was set";
+        case future_errc::future_already_retrieved:
+            return "future already retrieved from this promise";
+        case future_errc::promise_already_satisfied:
+            return "promise already satisfied: a result was already set";
+        case future_errc::no_state:
+            return "no associated shared state";
+        default:
+            return "unknown future error";
+        }
+    }
+};
+
+} // namespace __future_impl
+
+inline const error_category &future_category() noexcept
+{
+    static __future_impl::FutureCategory __cat;
+    return __cat;
+}
+
+inline error_code make_error_code(future_errc e) noexcept
+{
+    return error_code(static_cast<int>(e), future_category());
+}
+inline error_condition make_error_condition(future_errc e) noexcept
+{
+    return error_condition(static_cast<int>(e), future_category());
+}
+
+// logic_error stores only a what() string, so future_error carries its own
+// error_code member and builds the logic_error base from the category message.
+class future_error : public logic_error {
+public:
+    explicit future_error(future_errc e)
+        : logic_error(future_category().message(static_cast<int>(e))),
+          __ec(make_error_code(e))
+    {
+    }
+    explicit future_error(error_code ec)
+        : logic_error(ec.message()), __ec(ec)
+    {
+    }
+
+    const error_code &code() const noexcept { return __ec; }
+
+private:
+    error_code __ec;
+};
+
+// ── future_status / launch ─────────────────────────────────────────────────────
+
+enum class future_status { ready, timeout, deferred };
+
+enum class launch { async = 1, deferred = 2 };
+
+// launch is a bitmask type ([futures.async]): launch::async | launch::deferred
+// must be well-formed. Provide the full set of bitmask operators.
+constexpr launch operator|(launch a, launch b) noexcept
+{
+    return static_cast<launch>(static_cast<int>(a) | static_cast<int>(b));
+}
+constexpr launch operator&(launch a, launch b) noexcept
+{
+    return static_cast<launch>(static_cast<int>(a) & static_cast<int>(b));
+}
+constexpr launch operator^(launch a, launch b) noexcept
+{
+    return static_cast<launch>(static_cast<int>(a) ^ static_cast<int>(b));
+}
+constexpr launch operator~(launch a) noexcept
+{
+    return static_cast<launch>(~static_cast<int>(a));
+}
+constexpr launch &operator|=(launch &a, launch b) noexcept { return a = a | b; }
+constexpr launch &operator&=(launch &a, launch b) noexcept { return a = a & b; }
+constexpr launch &operator^=(launch &a, launch b) noexcept { return a = a ^ b; }
+
+// ── shared state ────────────────────────────────────────────────────────────────
+//
+// Refcounted by hand exactly like __stop_state: __refs starts at 1, every owner
+// (promise/future/shared_future/packaged_task/the async worker) ref_inc()s, and
+// the party whose ref_dec() reaches 0 frees it. ref_dec joins the async worker
+// FIRST (if armed) — that is the conformant ~future blocking join — then deletes.
+// The value lives in the derived __future_state<T>, so the dtor is virtual.
+
+struct __future_state_base {
+    atomic<uint32_t> __refs{1};
+
+    // The wake word: 0 = result not yet published, 1 = published. Width 4, mask
+    // ~0 — the producer's release-store pairs with a waiter's acquire-load.
+    atomic<uint32_t> __ready{0};
+
+    // Single-set gate (CAS 0→1); the loser of set_value/set_exception throws
+    // promise_already_satisfied. SEPARATE from __ready: __satisfied flips when a
+    // producer claims the right to set, __ready flips when the value is visible
+    // and a waiter may proceed (the at_thread_exit paths set __satisfied now but
+    // publish __ready later).
+    atomic<uint8_t> __satisfied{0};
+
+    // get_future single-issue gate (CAS 0→1) — a 2nd get_future throws
+    // future_already_retrieved. This is NOT consulted by future::get()/wait():
+    // a future is single-use because get() nulls its own handle, not because of
+    // this shared flag.
+    atomic<uint8_t> __future_retrieved{0};
+
+    exception_ptr __eptr;
+    bool          __has_eptr = false;
+
+    // async-join: the worker std::thread is moved in here so the LAST owner joins
+    // it exactly once. __join_owner is the exactly-once CAS guard.
+    thread          __worker;
+    atomic<uint8_t> __join_owner{0};
+
+    // deferred: the lazy run, forced by the first get()/wait() on the GET caller's
+    // strand. __run_deferred is the type-erased runner (set by async's deferred
+    // path); __deferred_ran is the single-run CAS guard.
+    atomic<uint8_t> __deferred_ran{0};
+    void (*__run_deferred)(__future_state_base *) = nullptr;
+
+    virtual ~__future_state_base() = default;
+
+    void ref_inc() noexcept { __refs.fetch_add(1u, memory_order_acq_rel); }
+    void ref_dec() noexcept
+    {
+        if (__refs.fetch_sub(1u, memory_order_acq_rel) == 1u) {
+            __join_if_armed();   // conformant ~future blocking join (last owner)
+            delete this;
+        }
+    }
+
+    // Join the async worker exactly once. Only the owner that wins __join_owner
+    // (and finds a joinable worker) blocks here; everyone else returns at once.
+    // The last ref_dec may run on a different strand than async(); it observes the
+    // fully-written __worker because every cross-strand handle transfer passes
+    // through an acq_rel __refs RMW (the state is reachable only via ref_inc/dec).
+    void __join_if_armed()
+    {
+        uint8_t e = 0;
+        if (__join_owner.compare_exchange_strong(e, 1, memory_order_acq_rel) &&
+            __worker.joinable())
+            __worker.join();
+    }
+
+    // Claim the right to publish a result; the loser throws. Used by every
+    // set_value/set_exception entry (immediate and at_thread_exit).
+    void __claim_or_throw()
+    {
+        uint8_t e = 0;
+        if (!__satisfied.compare_exchange_strong(e, 1, memory_order_acq_rel))
+            throw future_error(future_errc::promise_already_satisfied);
+    }
+
+    // Make the stored result visible and wake every parked waiter.
+    void __publish() noexcept
+    {
+        __ready.store(1, memory_order_release);
+        __boxcxx_atomic_notify(&__ready, true);
+    }
+
+    // Store an exception and publish (immediate path). Precondition: caller won
+    // __claim_or_throw (or this is the abandon path, which CAS-guards itself).
+    void __set_exception(exception_ptr p) noexcept
+    {
+        __eptr     = std::move(p);
+        __has_eptr = true;
+        __publish();
+    }
+
+    bool __is_ready() const noexcept
+    {
+        return __ready.load(memory_order_acquire) != 0;
+    }
+
+    // Untimed wait: park on __ready until the producer publishes. Forces a
+    // deferred run first (the lazy result is produced on THIS strand).
+    void __wait()
+    {
+        __run_deferred_if_any();
+        unsigned spin = 0;
+        uint32_t zero = 0;
+        while (__ready.load(memory_order_acquire) == 0)
+            __boxcxx_atomic_wait_cycle(&__ready, &zero, sizeof(uint32_t), ~0ull,
+                                       &spin);
+    }
+
+    // Timed wait ([futures.state]): a not-yet-run deferred function reports
+    // future_status::deferred WITHOUT running it; otherwise park on __ready with
+    // the remaining budget — a publish wakes us early, the deadline is exact.
+    template <class Clock, class Duration>
+    future_status __wait_until(const chrono::time_point<Clock, Duration> &abs)
+    {
+        if (__run_deferred != nullptr &&
+            __deferred_ran.load(memory_order_acquire) == 0)
+            return future_status::deferred;
+
+        unsigned spin = 0;
+        uint32_t zero = 0;
+        for (;;) {
+            if (__ready.load(memory_order_acquire) != 0)
+                return future_status::ready;
+            unsigned ms = __mutex_impl::RemainingMs(abs);
+            if (ms == 0) return future_status::timeout;
+            __boxcxx_atomic_wait_until(&__ready, &zero, 4, ~0ull, ms, &spin);
+        }
+    }
+
+    // Force the deferred function exactly once, on the caller's strand.
+    void __run_deferred_if_any()
+    {
+        if (__run_deferred == nullptr) return;
+        uint8_t e = 0;
+        if (__deferred_ran.compare_exchange_strong(e, 1, memory_order_acq_rel))
+            __run_deferred(this);
+    }
+};
+
+// Value-carrying state. The value lives in an aligned buffer placement-new'd on
+// set and destroyed in the dtor (guarded by __has_value).
+template <class T>
+struct __future_state : __future_state_base {
+    alignas(T) unsigned char __buf[sizeof(T)];
+    bool __has_value = false;
+
+    ~__future_state() override
+    {
+        if (__has_value) __ptr()->~T();
+    }
+
+    T *__ptr() noexcept
+    {
+        return __builtin_launder(reinterpret_cast<T *>(&__buf[0]));
+    }
+
+    // Construct OFF TO THE SIDE first, then claim the single-set gate, then move
+    // into the shared buffer. A throwing copy/move of T therefore leaves the
+    // state UNCLAIMED (retryable, or broken_promise on abandon) instead of
+    // wedging a satisfied-but-never-ready state, and a losing 2nd set throws
+    // BEFORE the already-published buffer is touched ([futures.promise]). The one
+    // residual is a throwing MOVE of T after the claim — pathological, since all
+    // std result types are noexcept-move.
+    void __set_value(const T &v)
+    {
+        T tmp(v);
+        __claim_or_throw();
+        ::new (static_cast<void *>(&__buf[0])) T(std::move(tmp));
+        __has_value = true;
+        __publish();
+    }
+    void __set_value(T &&v)
+    {
+        T tmp(std::move(v));
+        __claim_or_throw();
+        ::new (static_cast<void *>(&__buf[0])) T(std::move(tmp));
+        __has_value = true;
+        __publish();
+    }
+
+    // at_thread_exit: construct + claim NOW (same construct-then-claim discipline
+    // as __set_value), publish later. The store happens-before the deferred
+    // __publish (same strand, sequenced), so the release in __publish carries it.
+    void __stash_value(const T &v)
+    {
+        T tmp(v);
+        __claim_or_throw();
+        ::new (static_cast<void *>(&__buf[0])) T(std::move(tmp));
+        __has_value = true;
+    }
+    void __stash_value(T &&v)
+    {
+        T tmp(std::move(v));
+        __claim_or_throw();
+        ::new (static_cast<void *>(&__buf[0])) T(std::move(tmp));
+        __has_value = true;
+    }
+
+    // Read out the value after a successful wait. future::get MOVES; shared_future
+    // returns a const reference.
+    T &&__take() { return std::move(*__ptr()); }
+    const T &__ref() { return *__ptr(); }
+};
+
+// Reference state: store the pointer.
+template <class T>
+struct __future_state<T &> : __future_state_base {
+    T *__p = nullptr;
+
+    void __set_value(T &v)
+    {
+        __claim_or_throw();
+        __p = __builtin_addressof(v);
+        __publish();
+    }
+    void __stash_value(T &v)
+    {
+        __claim_or_throw();
+        __p = __builtin_addressof(v);
+    }
+    T &__take() { return *__p; }
+    T &__ref() { return *__p; }
+};
+
+// void state: flag-only.
+template <>
+struct __future_state<void> : __future_state_base {
+    void __set_value()
+    {
+        __claim_or_throw();
+        __publish();
+    }
+    void __stash_value()
+    {
+        __claim_or_throw();
+    }
+};
+
+// Rethrow the stored exception if there is one, after a successful wait.
+inline void __rethrow_if_stored(__future_state_base *st)
+{
+    if (st->__has_eptr) rethrow_exception(st->__eptr);
+}
+
+// ── forward declarations ────────────────────────────────────────────────────────
+
+// Arm a deferred __ready publish on the calling strand's thread_local exit drain
+// (defined after the promise classes; declared here so they can call it).
+inline void __arm_thread_exit(__future_state_base *st);
+
+template <class T> class future;
+template <class T> class shared_future;
+template <class T> class promise;
+template <class> class packaged_task;
+
+// ── future<T> ─────────────────────────────────────────────────────────────────
+//
+// Single-use: get() waits, rethrows the stored exception or MOVES the value out,
+// then releases its own handle so a 2nd get()/wait() throws no_state. The
+// ctor-from-state is private and friended to its producers.
+
+template <class T>
+class future {
+public:
+    future() noexcept = default;
+
+    future(const future &)            = delete;
+    future &operator=(const future &) = delete;
+
+    future(future &&o) noexcept : __st(o.__st) { o.__st = nullptr; }
+    future &operator=(future &&o) noexcept
+    {
+        if (this != &o) {
+            __release();
+            __st   = o.__st;
+            o.__st = nullptr;
+        }
+        return *this;
+    }
+
+    ~future() { __release(); }
+
+    [[nodiscard]] bool valid() const noexcept { return __st != nullptr; }
+
+    T get()
+    {
+        if (!__st) throw future_error(future_errc::no_state);
+        __st->__wait();
+        // Detach the state from this future BEFORE handing the value out, so the
+        // future is single-use even if the move/rethrow below escapes.
+        __future_state<T> *st = static_cast<__future_state<T> *>(__st);
+        __st                  = nullptr;
+        struct Drop {
+            __future_state<T> *p;
+            ~Drop() { p->ref_dec(); }
+        } drop{st};
+        __rethrow_if_stored(st);
+        return st->__take();
+    }
+
+    void wait() const
+    {
+        if (!__st) throw future_error(future_errc::no_state);
+        __st->__wait();
+    }
+    template <class Rep, class Period>
+    future_status wait_for(const chrono::duration<Rep, Period> &rel) const
+    {
+        if (!__st) throw future_error(future_errc::no_state);
+        return __st->__wait_until(chrono::steady_clock::now() + rel);
+    }
+    template <class Clock, class Duration>
+    future_status wait_until(const chrono::time_point<Clock, Duration> &abs) const
+    {
+        if (!__st) throw future_error(future_errc::no_state);
+        return __st->__wait_until(abs);
+    }
+
+    shared_future<T> share() noexcept;
+
+private:
+    friend class promise<T>;
+    friend class shared_future<T>;
+    template <class> friend class packaged_task;
+    template <class F, class... A>
+    friend future<invoke_result_t<decay_t<F>, decay_t<A>...>> async(launch, F &&,
+                                                                    A &&...);
+
+    explicit future(__future_state<T> *st) noexcept : __st(st) {}
+
+    void __release() noexcept
+    {
+        if (__st) {
+            __st->ref_dec();
+            __st = nullptr;
+        }
+    }
+
+    __future_state_base *__st = nullptr;
+};
+
+template <class T>
+class future<T &> {
+public:
+    future() noexcept = default;
+    future(const future &)            = delete;
+    future &operator=(const future &) = delete;
+    future(future &&o) noexcept : __st(o.__st) { o.__st = nullptr; }
+    future &operator=(future &&o) noexcept
+    {
+        if (this != &o) {
+            __release();
+            __st   = o.__st;
+            o.__st = nullptr;
+        }
+        return *this;
+    }
+    ~future() { __release(); }
+
+    [[nodiscard]] bool valid() const noexcept { return __st != nullptr; }
+
+    T &get()
+    {
+        if (!__st) throw future_error(future_errc::no_state);
+        __st->__wait();
+        __future_state<T &> *st = static_cast<__future_state<T &> *>(__st);
+        __st                    = nullptr;
+        struct Drop {
+            __future_state<T &> *p;
+            ~Drop() { p->ref_dec(); }
+        } drop{st};
+        __rethrow_if_stored(st);
+        return st->__take();
+    }
+
+    void wait() const
+    {
+        if (!__st) throw future_error(future_errc::no_state);
+        __st->__wait();
+    }
+    template <class Rep, class Period>
+    future_status wait_for(const chrono::duration<Rep, Period> &rel) const
+    {
+        if (!__st) throw future_error(future_errc::no_state);
+        return __st->__wait_until(chrono::steady_clock::now() + rel);
+    }
+    template <class Clock, class Duration>
+    future_status wait_until(const chrono::time_point<Clock, Duration> &abs) const
+    {
+        if (!__st) throw future_error(future_errc::no_state);
+        return __st->__wait_until(abs);
+    }
+
+    shared_future<T &> share() noexcept;
+
+private:
+    friend class promise<T &>;
+    friend class shared_future<T &>;
+    template <class> friend class packaged_task;
+    explicit future(__future_state<T &> *st) noexcept : __st(st) {}
+
+    void __release() noexcept
+    {
+        if (__st) {
+            __st->ref_dec();
+            __st = nullptr;
+        }
+    }
+
+    __future_state_base *__st = nullptr;
+};
+
+template <>
+class future<void> {
+public:
+    future() noexcept = default;
+    future(const future &)            = delete;
+    future &operator=(const future &) = delete;
+    future(future &&o) noexcept : __st(o.__st) { o.__st = nullptr; }
+    future &operator=(future &&o) noexcept
+    {
+        if (this != &o) {
+            __release();
+            __st   = o.__st;
+            o.__st = nullptr;
+        }
+        return *this;
+    }
+    ~future() { __release(); }
+
+    [[nodiscard]] bool valid() const noexcept { return __st != nullptr; }
+
+    void get()
+    {
+        if (!__st) throw future_error(future_errc::no_state);
+        __st->__wait();
+        __future_state<void> *st = static_cast<__future_state<void> *>(__st);
+        __st                     = nullptr;
+        struct Drop {
+            __future_state<void> *p;
+            ~Drop() { p->ref_dec(); }
+        } drop{st};
+        __rethrow_if_stored(st);
+    }
+
+    void wait() const
+    {
+        if (!__st) throw future_error(future_errc::no_state);
+        __st->__wait();
+    }
+    template <class Rep, class Period>
+    future_status wait_for(const chrono::duration<Rep, Period> &rel) const
+    {
+        if (!__st) throw future_error(future_errc::no_state);
+        return __st->__wait_until(chrono::steady_clock::now() + rel);
+    }
+    template <class Clock, class Duration>
+    future_status wait_until(const chrono::time_point<Clock, Duration> &abs) const
+    {
+        if (!__st) throw future_error(future_errc::no_state);
+        return __st->__wait_until(abs);
+    }
+
+    shared_future<void> share() noexcept;
+
+private:
+    friend class promise<void>;
+    friend class shared_future<void>;
+    template <class> friend class packaged_task;
+    template <class F, class... A>
+    friend future<invoke_result_t<decay_t<F>, decay_t<A>...>> async(launch, F &&,
+                                                                    A &&...);
+
+    explicit future(__future_state<void> *st) noexcept : __st(st) {}
+
+    void __release() noexcept
+    {
+        if (__st) {
+            __st->ref_dec();
+            __st = nullptr;
+        }
+    }
+
+    __future_state_base *__st = nullptr;
+};
+
+// ── shared_future<T> ──────────────────────────────────────────────────────────
+//
+// Refcounted multi-retrieve: copies share the state (ref_inc), every copy may
+// get() repeatedly, the result is returned by const reference (T) / reference
+// (T&) / void. The state lives until the last copy drops.
+
+template <class T>
+class shared_future {
+public:
+    shared_future() noexcept = default;
+
+    shared_future(const shared_future &o) noexcept : __st(o.__st)
+    {
+        if (__st) __st->ref_inc();
+    }
+    shared_future(shared_future &&o) noexcept : __st(o.__st) { o.__st = nullptr; }
+
+    // From a future ([futures.unique.future]/share): steal the future's handle.
+    shared_future(future<T> &&f) noexcept : __st(f.__st) { f.__st = nullptr; }
+
+    shared_future &operator=(const shared_future &o) noexcept
+    {
+        if (this != &o) {
+            if (o.__st) o.__st->ref_inc();
+            __release();
+            __st = o.__st;
+        }
+        return *this;
+    }
+    shared_future &operator=(shared_future &&o) noexcept
+    {
+        if (this != &o) {
+            __release();
+            __st   = o.__st;
+            o.__st = nullptr;
+        }
+        return *this;
+    }
+
+    ~shared_future() { __release(); }
+
+    [[nodiscard]] bool valid() const noexcept { return __st != nullptr; }
+
+    const T &get() const
+    {
+        if (!__st) throw future_error(future_errc::no_state);
+        __st->__wait();
+        __rethrow_if_stored(__st);
+        return static_cast<__future_state<T> *>(__st)->__ref();
+    }
+
+    void wait() const
+    {
+        if (!__st) throw future_error(future_errc::no_state);
+        __st->__wait();
+    }
+    template <class Rep, class Period>
+    future_status wait_for(const chrono::duration<Rep, Period> &rel) const
+    {
+        if (!__st) throw future_error(future_errc::no_state);
+        return __st->__wait_until(chrono::steady_clock::now() + rel);
+    }
+    template <class Clock, class Duration>
+    future_status wait_until(const chrono::time_point<Clock, Duration> &abs) const
+    {
+        if (!__st) throw future_error(future_errc::no_state);
+        return __st->__wait_until(abs);
+    }
+
+private:
+    friend class future<T>;
+    explicit shared_future(__future_state_base *st) noexcept : __st(st) {}
+
+    void __release() noexcept
+    {
+        if (__st) {
+            __st->ref_dec();
+            __st = nullptr;
+        }
+    }
+
+    __future_state_base *__st = nullptr;
+};
+
+template <class T>
+class shared_future<T &> {
+public:
+    shared_future() noexcept = default;
+    shared_future(const shared_future &o) noexcept : __st(o.__st)
+    {
+        if (__st) __st->ref_inc();
+    }
+    shared_future(shared_future &&o) noexcept : __st(o.__st) { o.__st = nullptr; }
+    shared_future(future<T &> &&f) noexcept : __st(f.__st) { f.__st = nullptr; }
+
+    shared_future &operator=(const shared_future &o) noexcept
+    {
+        if (this != &o) {
+            if (o.__st) o.__st->ref_inc();
+            __release();
+            __st = o.__st;
+        }
+        return *this;
+    }
+    shared_future &operator=(shared_future &&o) noexcept
+    {
+        if (this != &o) {
+            __release();
+            __st   = o.__st;
+            o.__st = nullptr;
+        }
+        return *this;
+    }
+    ~shared_future() { __release(); }
+
+    [[nodiscard]] bool valid() const noexcept { return __st != nullptr; }
+
+    T &get() const
+    {
+        if (!__st) throw future_error(future_errc::no_state);
+        __st->__wait();
+        __rethrow_if_stored(__st);
+        return static_cast<__future_state<T &> *>(__st)->__ref();
+    }
+
+    void wait() const
+    {
+        if (!__st) throw future_error(future_errc::no_state);
+        __st->__wait();
+    }
+    template <class Rep, class Period>
+    future_status wait_for(const chrono::duration<Rep, Period> &rel) const
+    {
+        if (!__st) throw future_error(future_errc::no_state);
+        return __st->__wait_until(chrono::steady_clock::now() + rel);
+    }
+    template <class Clock, class Duration>
+    future_status wait_until(const chrono::time_point<Clock, Duration> &abs) const
+    {
+        if (!__st) throw future_error(future_errc::no_state);
+        return __st->__wait_until(abs);
+    }
+
+private:
+    friend class future<T &>;
+    explicit shared_future(__future_state_base *st) noexcept : __st(st) {}
+
+    void __release() noexcept
+    {
+        if (__st) {
+            __st->ref_dec();
+            __st = nullptr;
+        }
+    }
+
+    __future_state_base *__st = nullptr;
+};
+
+template <>
+class shared_future<void> {
+public:
+    shared_future() noexcept = default;
+    shared_future(const shared_future &o) noexcept : __st(o.__st)
+    {
+        if (__st) __st->ref_inc();
+    }
+    shared_future(shared_future &&o) noexcept : __st(o.__st) { o.__st = nullptr; }
+    shared_future(future<void> &&f) noexcept : __st(f.__st) { f.__st = nullptr; }
+
+    shared_future &operator=(const shared_future &o) noexcept
+    {
+        if (this != &o) {
+            if (o.__st) o.__st->ref_inc();
+            __release();
+            __st = o.__st;
+        }
+        return *this;
+    }
+    shared_future &operator=(shared_future &&o) noexcept
+    {
+        if (this != &o) {
+            __release();
+            __st   = o.__st;
+            o.__st = nullptr;
+        }
+        return *this;
+    }
+    ~shared_future() { __release(); }
+
+    [[nodiscard]] bool valid() const noexcept { return __st != nullptr; }
+
+    void get() const
+    {
+        if (!__st) throw future_error(future_errc::no_state);
+        __st->__wait();
+        __rethrow_if_stored(__st);
+    }
+
+    void wait() const
+    {
+        if (!__st) throw future_error(future_errc::no_state);
+        __st->__wait();
+    }
+    template <class Rep, class Period>
+    future_status wait_for(const chrono::duration<Rep, Period> &rel) const
+    {
+        if (!__st) throw future_error(future_errc::no_state);
+        return __st->__wait_until(chrono::steady_clock::now() + rel);
+    }
+    template <class Clock, class Duration>
+    future_status wait_until(const chrono::time_point<Clock, Duration> &abs) const
+    {
+        if (!__st) throw future_error(future_errc::no_state);
+        return __st->__wait_until(abs);
+    }
+
+private:
+    friend class future<void>;
+    explicit shared_future(__future_state_base *st) noexcept : __st(st) {}
+
+    void __release() noexcept
+    {
+        if (__st) {
+            __st->ref_dec();
+            __st = nullptr;
+        }
+    }
+
+    __future_state_base *__st = nullptr;
+};
+
+// future::share — move our handle into a shared_future (transfers the ref).
+template <class T>
+inline shared_future<T> future<T>::share() noexcept
+{
+    return shared_future<T>(std::move(*this));
+}
+template <class T>
+inline shared_future<T &> future<T &>::share() noexcept
+{
+    return shared_future<T &>(std::move(*this));
+}
+inline shared_future<void> future<void>::share() noexcept
+{
+    return shared_future<void>(std::move(*this));
+}
+
+// ── promise<T> ────────────────────────────────────────────────────────────────
+//
+// move-only producer. The ctor allocates a fresh state (refs=1); get_future hands
+// out a future (ref_inc) under a single-issue gate; set_value/set_exception
+// publish once; the dtor abandons (broken_promise) an unsatisfied state.
+//
+// uses_allocator support: the (allocator_arg_t, const Alloc&) ctors are accepted
+// for conformance but the allocator is a NO-OP — every state is global-new
+// allocated (consistent with the rest of boxcxx, which does not thread custom
+// allocators through its concurrency state). Documented deviation.
+
+template <class T>
+class promise {
+public:
+    promise() : __st(new __future_state<T>()) {}
+    template <class Alloc>
+    promise(allocator_arg_t, const Alloc &) : __st(new __future_state<T>())
+    {
+    }
+
+    promise(const promise &)            = delete;
+    promise &operator=(const promise &) = delete;
+
+    promise(promise &&o) noexcept : __st(o.__st) { o.__st = nullptr; }
+    promise &operator=(promise &&o) noexcept
+    {
+        if (this != &o) {
+            __abandon_and_release();
+            __st   = o.__st;
+            o.__st = nullptr;
+        }
+        return *this;
+    }
+
+    ~promise() { __abandon_and_release(); }
+
+    void swap(promise &o) noexcept { std::swap(__st, o.__st); }
+
+    future<T> get_future()
+    {
+        if (!__st) throw future_error(future_errc::no_state);
+        uint8_t e = 0;
+        if (!__st->__future_retrieved.compare_exchange_strong(e, 1,
+                                                              memory_order_acq_rel))
+            throw future_error(future_errc::future_already_retrieved);
+        __st->ref_inc();
+        return future<T>(__st);
+    }
+
+    void set_value(const T &v)
+    {
+        if (!__st) throw future_error(future_errc::no_state);
+        __st->__set_value(v);
+    }
+    void set_value(T &&v)
+    {
+        if (!__st) throw future_error(future_errc::no_state);
+        __st->__set_value(std::move(v));
+    }
+
+    void set_exception(exception_ptr p)
+    {
+        if (!__st) throw future_error(future_errc::no_state);
+        __st->__claim_or_throw();
+        __st->__set_exception(std::move(p));
+    }
+
+    // Claim + store NOW (a 2nd set throws immediately), publish at strand exit.
+    void set_value_at_thread_exit(const T &v)
+    {
+        if (!__st) throw future_error(future_errc::no_state);
+        __st->__stash_value(v);
+        __arm_thread_exit(__st);
+    }
+    void set_value_at_thread_exit(T &&v)
+    {
+        if (!__st) throw future_error(future_errc::no_state);
+        __st->__stash_value(std::move(v));
+        __arm_thread_exit(__st);
+    }
+    void set_exception_at_thread_exit(exception_ptr p)
+    {
+        if (!__st) throw future_error(future_errc::no_state);
+        __st->__claim_or_throw();
+        __st->__eptr     = std::move(p);
+        __st->__has_eptr = true;
+        __arm_thread_exit(__st);
+    }
+
+private:
+    void __abandon_and_release() noexcept
+    {
+        if (!__st) return;
+        // Unsatisfied at destruction ⇒ break the promise. CAS-guarded so it is a
+        // no-op if a producer already claimed (the claim's publish wins).
+        uint8_t e = 0;
+        if (__st->__satisfied.compare_exchange_strong(e, 1, memory_order_acq_rel))
+            __st->__set_exception(
+                make_exception_ptr(future_error(future_errc::broken_promise)));
+        __st->ref_dec();
+        __st = nullptr;
+    }
+
+    __future_state<T> *__st = nullptr;
+};
+
+template <class T>
+class promise<T &> {
+public:
+    promise() : __st(new __future_state<T &>()) {}
+    template <class Alloc>
+    promise(allocator_arg_t, const Alloc &) : __st(new __future_state<T &>())
+    {
+    }
+    promise(const promise &)            = delete;
+    promise &operator=(const promise &) = delete;
+    promise(promise &&o) noexcept : __st(o.__st) { o.__st = nullptr; }
+    promise &operator=(promise &&o) noexcept
+    {
+        if (this != &o) {
+            __abandon_and_release();
+            __st   = o.__st;
+            o.__st = nullptr;
+        }
+        return *this;
+    }
+    ~promise() { __abandon_and_release(); }
+
+    void swap(promise &o) noexcept { std::swap(__st, o.__st); }
+
+    future<T &> get_future()
+    {
+        if (!__st) throw future_error(future_errc::no_state);
+        uint8_t e = 0;
+        if (!__st->__future_retrieved.compare_exchange_strong(e, 1,
+                                                              memory_order_acq_rel))
+            throw future_error(future_errc::future_already_retrieved);
+        __st->ref_inc();
+        return future<T &>(__st);
+    }
+
+    void set_value(T &v)
+    {
+        if (!__st) throw future_error(future_errc::no_state);
+        __st->__set_value(v);
+    }
+    void set_exception(exception_ptr p)
+    {
+        if (!__st) throw future_error(future_errc::no_state);
+        __st->__claim_or_throw();
+        __st->__set_exception(std::move(p));
+    }
+    void set_value_at_thread_exit(T &v)
+    {
+        if (!__st) throw future_error(future_errc::no_state);
+        __st->__stash_value(v);
+        __arm_thread_exit(__st);
+    }
+    void set_exception_at_thread_exit(exception_ptr p)
+    {
+        if (!__st) throw future_error(future_errc::no_state);
+        __st->__claim_or_throw();
+        __st->__eptr     = std::move(p);
+        __st->__has_eptr = true;
+        __arm_thread_exit(__st);
+    }
+
+private:
+    void __abandon_and_release() noexcept
+    {
+        if (!__st) return;
+        uint8_t e = 0;
+        if (__st->__satisfied.compare_exchange_strong(e, 1, memory_order_acq_rel))
+            __st->__set_exception(
+                make_exception_ptr(future_error(future_errc::broken_promise)));
+        __st->ref_dec();
+        __st = nullptr;
+    }
+
+    __future_state<T &> *__st = nullptr;
+};
+
+template <>
+class promise<void> {
+public:
+    promise() : __st(new __future_state<void>()) {}
+    template <class Alloc>
+    promise(allocator_arg_t, const Alloc &) : __st(new __future_state<void>())
+    {
+    }
+    promise(const promise &)            = delete;
+    promise &operator=(const promise &) = delete;
+    promise(promise &&o) noexcept : __st(o.__st) { o.__st = nullptr; }
+    promise &operator=(promise &&o) noexcept
+    {
+        if (this != &o) {
+            __abandon_and_release();
+            __st   = o.__st;
+            o.__st = nullptr;
+        }
+        return *this;
+    }
+    ~promise() { __abandon_and_release(); }
+
+    void swap(promise &o) noexcept { std::swap(__st, o.__st); }
+
+    future<void> get_future()
+    {
+        if (!__st) throw future_error(future_errc::no_state);
+        uint8_t e = 0;
+        if (!__st->__future_retrieved.compare_exchange_strong(e, 1,
+                                                              memory_order_acq_rel))
+            throw future_error(future_errc::future_already_retrieved);
+        __st->ref_inc();
+        return future<void>(__st);
+    }
+
+    void set_value()
+    {
+        if (!__st) throw future_error(future_errc::no_state);
+        __st->__set_value();
+    }
+    void set_exception(exception_ptr p)
+    {
+        if (!__st) throw future_error(future_errc::no_state);
+        __st->__claim_or_throw();
+        __st->__set_exception(std::move(p));
+    }
+    void set_value_at_thread_exit()
+    {
+        if (!__st) throw future_error(future_errc::no_state);
+        __st->__stash_value();
+        __arm_thread_exit(__st);
+    }
+    void set_exception_at_thread_exit(exception_ptr p)
+    {
+        if (!__st) throw future_error(future_errc::no_state);
+        __st->__claim_or_throw();
+        __st->__eptr     = std::move(p);
+        __st->__has_eptr = true;
+        __arm_thread_exit(__st);
+    }
+
+private:
+    void __abandon_and_release() noexcept
+    {
+        if (!__st) return;
+        uint8_t e = 0;
+        if (__st->__satisfied.compare_exchange_strong(e, 1, memory_order_acq_rel))
+            __st->__set_exception(
+                make_exception_ptr(future_error(future_errc::broken_promise)));
+        __st->ref_dec();
+        __st = nullptr;
+    }
+
+    __future_state<void> *__st = nullptr;
+};
+
+template <class T>
+inline void swap(promise<T> &a, promise<T> &b) noexcept
+{
+    a.swap(b);
+}
+
+template <class T, class Alloc>
+struct uses_allocator<promise<T>, Alloc> : true_type {};
+
+// Arm a deferred __ready publish on this strand's thread_local exit drain. The
+// value/exception is already stashed; the callback publishes + notifies + drops
+// the ref the arm took. ref_inc keeps the state alive until the callback runs;
+// on __cxa_thread_atexit OOM (nonzero) run the publish inline so the result is
+// never lost and the ref is balanced.
+inline void __arm_thread_exit(__future_state_base *st)
+{
+    st->ref_inc();
+    auto cb = +[](void *p) {
+        auto *s = static_cast<__future_state_base *>(p);
+        s->__publish();
+        s->ref_dec();
+    };
+    if (__cxa_thread_atexit(cb, st, nullptr) != 0)
+        cb(st);
+}
+
+// ── packaged_task<R(A...)> ──────────────────────────────────────────────────────
+//
+// Hand-rolled type erasure (no std::function): a heap __callable_base with an
+// invoke + destroy vtable-by-pointer, holding the decay-copied callable. The
+// invoke runs f(args...) and publishes the value/exception into the state.
+
+// The erased callable carries two runners and a deleter. `invoke` runs the body
+// and PUBLISHES (operator()); `invoke_stash` runs the body and STASHES without
+// publishing (make_ready_at_thread_exit, which arms the publish for strand exit)
+// — one source of truth for the body, two publish disciplines. Both follow the
+// capture-then-publish ordering: an exception is captured inside the catch and
+// the state is only touched after the catch window has closed.
+template <class R, class... A>
+struct __pt_callable_base {
+    void (*invoke)(__pt_callable_base *, __future_state<R> *, A &&...)       = nullptr;
+    void (*invoke_stash)(__pt_callable_base *, __future_state<R> *, A &&...) = nullptr;
+    void (*destroy)(__pt_callable_base *)                                   = nullptr;
+};
+
+template <class F, class R, class... A>
+struct __pt_callable : __pt_callable_base<R, A...> {
+    F f;
+    explicit __pt_callable(F &&fn) : f(std::move(fn)) { __wire(); }
+    explicit __pt_callable(const F &fn) : f(fn) { __wire(); }
+
+    void __wire()
+    {
+        this->invoke       = &__do<false>;
+        this->invoke_stash = &__do<true>;
+        this->destroy      = &__do_destroy;
+    }
+
+    // Run f(args...), capture any exception, then either publish or stash both the
+    // value and the exception (the Stash flag selects which). The result is built
+    // in a local buffer so the success path also publishes/stashes only AFTER the
+    // catch window has closed.
+    template <bool Stash>
+    static void __do(__pt_callable_base<R, A...> *b, __future_state<R> *st,
+                     A &&...args)
+    {
+        auto         *self = static_cast<__pt_callable *>(b);
+        exception_ptr ep;
+        if constexpr (is_void_v<R>) {
+            bool ok = false;
+            try {
+                invoke(self->f, std::forward<A>(args)...);
+                ok = true;
+            } catch (...) {
+                ep = current_exception();
+            }
+            if (ok) {
+                if constexpr (Stash) st->__stash_value();
+                else st->__set_value();
+            } else {
+                st->__claim_or_throw();
+                if constexpr (Stash) {
+                    st->__eptr     = std::move(ep);
+                    st->__has_eptr = true;
+                } else
+                    st->__set_exception(std::move(ep));
+            }
+        } else {
+            alignas(R) unsigned char buf[sizeof(R)];
+            bool ok = false;
+            try {
+                ::new (static_cast<void *>(&buf[0]))
+                    R(invoke(self->f, std::forward<A>(args)...));
+                ok = true;
+            } catch (...) {
+                ep = current_exception();
+            }
+            if (ok) {
+                R *rp = __builtin_launder(reinterpret_cast<R *>(&buf[0]));
+                struct Drop {
+                    R *p;
+                    ~Drop() { p->~R(); }
+                } drop{rp};
+                if constexpr (Stash) st->__stash_value(std::move(*rp));
+                else st->__set_value(std::move(*rp));
+            } else {
+                st->__claim_or_throw();
+                if constexpr (Stash) {
+                    st->__eptr     = std::move(ep);
+                    st->__has_eptr = true;
+                } else
+                    st->__set_exception(std::move(ep));
+            }
+        }
+    }
+    static void __do_destroy(__pt_callable_base<R, A...> *b)
+    {
+        delete static_cast<__pt_callable *>(b);
+    }
+};
+
+template <class R, class... A>
+class packaged_task<R(A...)> {
+public:
+    packaged_task() noexcept = default;
+
+    template <class F, class = enable_if_t<
+                           !is_same_v<remove_cvref_t<F>, packaged_task>>>
+    explicit packaged_task(F &&f)
+    {
+        using FD = decay_t<F>;
+        __fn     = new __pt_callable<FD, R, A...>(std::forward<F>(f));
+        try {
+            __st = new __future_state<R>();
+        } catch (...) {
+            __fn->destroy(__fn);
+            throw;
+        }
+    }
+
+    packaged_task(const packaged_task &)            = delete;
+    packaged_task &operator=(const packaged_task &) = delete;
+
+    packaged_task(packaged_task &&o) noexcept : __fn(o.__fn), __st(o.__st)
+    {
+        o.__fn = nullptr;
+        o.__st = nullptr;
+    }
+    packaged_task &operator=(packaged_task &&o) noexcept
+    {
+        if (this != &o) {
+            __destroy();
+            __fn   = o.__fn;
+            __st   = o.__st;
+            o.__fn = nullptr;
+            o.__st = nullptr;
+        }
+        return *this;
+    }
+
+    ~packaged_task() { __destroy(); }
+
+    [[nodiscard]] bool valid() const noexcept
+    {
+        return __fn != nullptr && __st != nullptr;
+    }
+
+    void swap(packaged_task &o) noexcept
+    {
+        std::swap(__fn, o.__fn);
+        std::swap(__st, o.__st);
+    }
+
+    future<R> get_future()
+    {
+        if (!__st) throw future_error(future_errc::no_state);
+        uint8_t e = 0;
+        if (!__st->__future_retrieved.compare_exchange_strong(e, 1,
+                                                              memory_order_acq_rel))
+            throw future_error(future_errc::future_already_retrieved);
+        __st->ref_inc();
+        return future<R>(__st);
+    }
+
+    void operator()(A... args)
+    {
+        if (!__st) throw future_error(future_errc::no_state);
+        if (__st->__satisfied.load(memory_order_acquire) != 0)
+            throw future_error(future_errc::promise_already_satisfied);
+        __fn->invoke(__fn, __st, std::forward<A>(args)...);
+    }
+
+    // Run NOW into a stash, arm the __ready publish for this strand's exit. The
+    // single-set gate flips inside invoke_stash, so a 2nd call sees __satisfied.
+    void make_ready_at_thread_exit(A... args)
+    {
+        if (!__st) throw future_error(future_errc::no_state);
+        if (__st->__satisfied.load(memory_order_acquire) != 0)
+            throw future_error(future_errc::promise_already_satisfied);
+        __fn->invoke_stash(__fn, __st, std::forward<A>(args)...);
+        __arm_thread_exit(__st);
+    }
+
+    // Re-arm with a FRESH state, keeping the stored callable ([futures.task]).
+    void reset()
+    {
+        if (!__st) throw future_error(future_errc::no_state);
+        // [futures.task]: reset is "as if *this = packaged_task(move(f))". Allocate
+        // the fresh state FIRST (a throw then leaves *this unchanged), then abandon
+        // the old one with broken_promise if it was never satisfied — a future
+        // already retrieved from it must get broken_promise, not hang forever.
+        __future_state<R> *fresh = new __future_state<R>();
+        uint8_t e = 0;
+        if (__st->__satisfied.compare_exchange_strong(e, 1, memory_order_acq_rel))
+            __st->__set_exception(
+                make_exception_ptr(future_error(future_errc::broken_promise)));
+        __st->ref_dec();
+        __st = fresh;
+    }
+
+private:
+    void __destroy() noexcept
+    {
+        if (__st) {
+            // Abandon an unsatisfied state (broken_promise) — a packaged_task
+            // destroyed without being invoked breaks its promise.
+            uint8_t e = 0;
+            if (__st->__satisfied.compare_exchange_strong(e, 1,
+                                                          memory_order_acq_rel))
+                __st->__set_exception(make_exception_ptr(
+                    future_error(future_errc::broken_promise)));
+            __st->ref_dec();
+            __st = nullptr;
+        }
+        if (__fn) {
+            __fn->destroy(__fn);
+            __fn = nullptr;
+        }
+    }
+
+    __pt_callable_base<R, A...> *__fn = nullptr;
+    __future_state<R>           *__st = nullptr;
+};
+
+template <class R, class... A>
+inline void swap(packaged_task<R(A...)> &a, packaged_task<R(A...)> &b) noexcept
+{
+    a.swap(b);
+}
+
+// ── async ─────────────────────────────────────────────────────────────────────
+//
+// launch::async  — decay-copy f+args, spawn a std::thread that runs them and
+//                  publishes; the thread is stored in the state so the LAST owner
+//                  joins it (conformant ~future). The worker captures any
+//                  exception INSIDE its catch and publishes AFTER leaving the
+//                  catch (capture-then-publish, see file header).
+// launch::deferred — store the decay-copied callable+args in a heap holder on the
+//                  state; the first get()/wait() runs it lazily on the CALLER's
+//                  strand. wait_for/wait_until return future_status::deferred
+//                  WITHOUT running it.
+//
+// Both bits set, or the default policy, choose ASYNC ([futures.async]/3 leaves
+// this implementation-defined; async is the more useful default since it makes
+// real forward progress).
+
+namespace __future_impl {
+
+// Run the decay-copied tuple (callable first) and return the result.
+template <class R, class Tup>
+inline R RunTuple(Tup &t)
+{
+    return apply(
+        [](auto &&fn, auto &&...a) -> R {
+            return invoke(static_cast<decltype(fn)>(fn),
+                          static_cast<decltype(a)>(a)...);
+        },
+        t);
+}
+
+// async worker closure: owns the decay-copied tuple + a ref to the state.
+template <class R, class Tup>
+struct AsyncWorker {
+    Tup                __tup;
+    __future_state<R> *__st;
+
+    void operator()()
+    {
+        exception_ptr ep;
+        if constexpr (is_void_v<R>) {
+            bool ok = false;
+            try {
+                RunTuple<void>(__tup);
+                ok = true;
+            } catch (...) {
+                ep = current_exception();   // capture inside the catch
+            }
+            // out of the catch now (__cxa_end_catch ran on THIS strand) → publish
+            if (ok)
+                __st->__set_value();
+            else {
+                __st->__claim_or_throw();
+                __st->__set_exception(std::move(ep));
+            }
+        } else {
+            alignas(R) unsigned char buf[sizeof(R)];
+            bool ok = false;
+            try {
+                ::new (static_cast<void *>(&buf[0])) R(RunTuple<R>(__tup));
+                ok = true;
+            } catch (...) {
+                ep = current_exception();
+            }
+            if (ok) {
+                R *rp = __builtin_launder(reinterpret_cast<R *>(&buf[0]));
+                struct Drop {
+                    R *p;
+                    ~Drop() { p->~R(); }
+                } drop{rp};
+                __st->__set_value(std::move(*rp));
+            } else {
+                __st->__claim_or_throw();
+                __st->__set_exception(std::move(ep));
+            }
+        }
+        // The worker holds NO refcount of its own. The state is owned by the
+        // future side; the last future's ref_dec joins this worker (blocking
+        // until it has fully exited — the conformant ~future of an async future)
+        // and only then frees the state. A worker ref here would let the worker
+        // become the last owner and join ITSELF (deadlock). The writes above are
+        // safe precisely because that join cannot free the state until this
+        // strand has run to exit, which is strictly after every write.
+    }
+};
+
+// deferred holder: owns the decay-copied tuple, lives on the state, runs once.
+template <class R, class Tup>
+struct DeferredState : __future_state<R> {
+    Tup __tup;
+    explicit DeferredState(Tup &&t) : __tup(std::move(t))
+    {
+        this->__run_deferred = &Run;
+    }
+    static void Run(__future_state_base *base)
+    {
+        auto *self = static_cast<DeferredState *>(base);
+        if constexpr (is_void_v<R>) {
+            try {
+                RunTuple<void>(self->__tup);
+                self->__set_value();
+            } catch (...) {
+                exception_ptr ep = current_exception();
+                self->__claim_or_throw();
+                self->__set_exception(std::move(ep));
+            }
+        } else {
+            try {
+                self->__set_value(RunTuple<R>(self->__tup));
+            } catch (...) {
+                exception_ptr ep = current_exception();
+                self->__claim_or_throw();
+                self->__set_exception(std::move(ep));
+            }
+        }
+    }
+};
+
+} // namespace __future_impl
+
+template <class F, class... Args>
+[[nodiscard]] future<invoke_result_t<decay_t<F>, decay_t<Args>...>>
+async(launch policy, F &&f, Args &&...args)
+{
+    using R   = invoke_result_t<decay_t<F>, decay_t<Args>...>;
+    using Tup = tuple<decay_t<F>, decay_t<Args>...>;
+
+    const bool want_async =
+        (policy & launch::async) == launch::async ||
+        (policy & (launch::async | launch::deferred)) == launch{0};
+    // ↑ async bit set, OR neither bit set → async (so the default async|deferred,
+    //   both-bits, and an empty policy all run async). [futures.async]/3 leaves
+    //   both-bits and the empty policy implementation-defined; async makes real
+    //   forward progress, so it is the safe default.
+
+    if (want_async) {
+        // refs starts at 1 — that single ref is the returned future's. The worker
+        // holds NO ref of its own: the state is owned by the future side, and the
+        // last future's ref_dec joins the worker (blocking until it finishes — the
+        // conformant ~future of an async future) before freeing. See AsyncWorker.
+        __future_state<R> *st = new __future_state<R>();
+        try {
+            __future_impl::AsyncWorker<R, Tup> w{
+                Tup{forward<F>(f), forward<Args>(args)...}, st};
+            // Move the worker thread INTO the state so the last owner joins it.
+            thread worker(std::move(w));
+            st->__worker = std::move(worker);
+        } catch (...) {
+            // Spawn (or arg decay-copy) failed: no worker ran, so just free the
+            // state. Its __worker is still default-constructed, so the join in
+            // ref_dec is a no-op.
+            st->ref_dec();
+            throw;
+        }
+        return future<R>(st);
+    }
+
+    // deferred
+    using DS               = __future_impl::DeferredState<R, Tup>;
+    DS *st                 = new DS(Tup{forward<F>(f), forward<Args>(args)...});
+    return future<R>(st);
+}
+
+template <class F, class... Args>
+[[nodiscard]] future<invoke_result_t<decay_t<F>, decay_t<Args>...>>
+async(F &&f, Args &&...args)
+{
+    return async(launch::async | launch::deferred, forward<F>(f),
+                 forward<Args>(args)...);
+}
+
+} // namespace std
+
+#endif // BOXCXX_FUTURE
