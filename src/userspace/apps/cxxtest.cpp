@@ -84,6 +84,7 @@
 #include "box/cxx/message.h"
 #include "box/cxx/pku.h"
 #include "box/cxx/process.h"
+#include "box/cxx/strand.h"
 #include "box/cxx/system.h"
 #include "box/cxx/tagfs.h"
 #include "box/cxx/timing.h"
@@ -7164,6 +7165,360 @@ void Phase41()
            "(A1 correctness + A2 contention drop + A3 concurrent isolation + A4 orphan reclaim + A5 speedup)\n");
 }
 
+// ── Phase42 — box::strand / box::park / box::wake / box::strand_watch ─────────
+// Build-time guard: the lifecycle decoders MUST match the kernel payload widths.
+static_assert(sizeof(box::strand_spawned) == 8,  "box::strand_spawned layout");
+static_assert(sizeof(box::strand_exited)  == 8,  "box::strand_exited layout");
+static_assert(sizeof(box::strand_parked)  == 12, "box::strand_parked layout");
+static_assert(sizeof(box::strand_woken)   == 16, "box::strand_woken layout");
+
+// box::strand spawn/join target: set a flag the spawning strand verifies.
+static std::atomic<bool> g_p42_ran{false};
+
+// box::park/box::wake round-trip: main parks on this word until the sibling
+// stores a fresh value and wakes it. uint64_t because box::park is 8-byte-only.
+static std::atomic<std::uint64_t> g_p42_word{0};
+
+static void p42_run_worker(void *)
+{
+    g_p42_ran.store(true, std::memory_order_release);
+}
+
+static void p42_wake_worker(void *)
+{
+    // Publish a fresh value, then wake the parker. A park that already saw the
+    // store returns value_mismatch (no sleep); otherwise box::wake releases it.
+    g_p42_word.store(1, std::memory_order_release);
+    box::wake_all(g_p42_word);
+}
+
+// box::strand_watch (step 5): a worker that GENUINELY parks — emitting a
+// SYNCHRONOUS strand:parked inside the park syscall — until main wakes it (a
+// synchronous strand:woken inside the wake syscall). uint64_t because box::park
+// is 8-byte-only; the 5s backstop means it can never hang even if a wake were
+// ever missed (it re-reads the word and exits the loop).
+static std::atomic<std::uint64_t> g_p42_park{0};
+
+static void p42_park_worker(void *)
+{
+    while (g_p42_park.load(std::memory_order_acquire) == 0)
+        box::park(g_p42_park, std::uint64_t{0}, 5000);
+}
+
+void Phase42()
+{
+    // ── always-on (no FSGSBASE needed): pure-userspace API surface ───────────
+    // this_strand::id is the cabin pid on the main strand, and bridges losslessly
+    // to a std::thread::id naming the same kernel strand.
+    Check(box::this_strand::id().native() == box::this_process::pid(),
+          "phase42 this_strand::id == cabin pid (main strand)");
+    Check(std::thread::id(box::this_strand::id()) == std::this_thread::get_id(),
+          "phase42 box::strand::id -> std::thread::id bridge is lossless");
+
+    // box::park on a stack word: a mismatched expected returns instantly without
+    // sleeping, a matched expected times out (nobody wakes a private word).
+    {
+        std::atomic<std::uint64_t> w{7};
+        Check(box::park(w, std::uint64_t{1}, 50) == box::park_status::value_mismatch,
+              "phase42 box::park value_mismatch is instant (word != expected)");
+        Check(box::park(w, std::uint64_t{7}, 30) == box::park_status::timeout,
+              "phase42 box::park times out on an unwoken word");
+    }
+
+    box::this_strand::yield();  // cooperative yield returns
+
+    // ── sibling-strand half: needs FSGSBASE (per-strand TLS) ─────────────────
+    if (!cpu_has_fsgsbase()) {
+        printf("[CXX] note phase42: strands need FSGSBASE — skipping spawn/join/wake\n");
+        printf("[CXX] PASS phase42: box::park value-mismatch/timeout + id bridge "
+               "(spawn/join/wake skipped, no FSGSBASE)\n");
+        return;
+    }
+
+    // 1) box::strand spawn + join runs the callable.
+    {
+        g_p42_ran.store(false, std::memory_order_release);
+        box::strand s(p42_run_worker, nullptr);
+        Check(s.joinable(), "phase42 box::strand is joinable after spawn");
+        s.join();
+        Check(!s.joinable(), "phase42 box::strand not joinable after join");
+        Check(g_p42_ran.load(std::memory_order_acquire),
+              "phase42 box::strand ran its callable");
+    }
+
+    // 2) join-on-destroy: no explicit join — the destructor must join, so the
+    //    callable has completed once the inner scope ends.
+    {
+        g_p42_ran.store(false, std::memory_order_release);
+        {
+            box::strand s(p42_run_worker, nullptr);
+            Check(s.joinable(), "phase42 join-on-destroy strand is joinable");
+        }  // ~strand joins here
+        Check(g_p42_ran.load(std::memory_order_acquire),
+              "phase42 box::strand destructor joined (callable completed)");
+    }
+
+    // 3) move leaves the source not-joinable, the destination joinable.
+    {
+        g_p42_ran.store(false, std::memory_order_release);
+        box::strand src(p42_run_worker, nullptr);
+        box::strand dst(std::move(src));
+        Check(!src.joinable(), "phase42 moved-from box::strand is not joinable");
+        Check(dst.joinable(), "phase42 move destination box::strand is joinable");
+        dst.join();
+        Check(g_p42_ran.load(std::memory_order_acquire),
+              "phase42 moved box::strand ran its callable");
+    }
+
+    // 4) box::park / box::wake round-trip across a sibling strand. Park in a
+    //    lost-wake-safe loop (re-read the word every wake; a store we missed
+    //    makes the next park return value_mismatch at once). The 200ms backstop
+    //    is a safety net, not the wake path.
+    {
+        g_p42_word.store(0, std::memory_order_release);
+        box::strand waker(p42_wake_worker, nullptr);
+        Check(waker.get_id().native() != 0, "phase42 box::strand get_id().native() is a live pid");
+        for (;;) {
+            std::uint64_t v = g_p42_word.load(std::memory_order_acquire);
+            if (v == 1) break;
+            box::park(g_p42_word, v, 200);
+        }
+        Check(g_p42_word.load(std::memory_order_acquire) == 1,
+              "phase42 box::park woken by sibling box::wake (round-trip)");
+        waker.join();
+    }
+
+    // 5) box::strand_watch decodes real kernel lifecycle broadcasts. Subscribe
+    //    BEFORE spawning so no edge is missed, then assert ONLY on the SYNCHRONOUS
+    //    edges — strand:spawned (published inside the spawn syscall) and strand:
+    //    parked / strand:woken (published inside box::park / box::wake). We do NOT
+    //    hard-assert strand:exited: for a joinable strand it is published by the
+    //    K-Core reaper on a LATER, throttled tick (join() only clears the reap-
+    //    block), so asserting it would be a reaper-timing flake. It is observed
+    //    best-effort and only printed. The worker pid filters out the system-wide
+    //    broadcasts of every other cabin's strands.
+    {
+        box::strand_watch watch;
+        Check(static_cast<bool>(watch), "phase42 strand_watch claimed all four tags");
+
+        g_p42_park.store(0, std::memory_order_release);
+        box::strand worker(p42_park_worker, nullptr);
+        std::uint32_t worker_pid = worker.get_id().native();
+
+        bool saw_spawn = false, saw_parked = false, saw_woken = false, saw_exit = false;
+        auto drain = [&] {
+            while (auto e = watch.poll()) {
+                if (e->strand_pid() != worker_pid) continue;
+                switch (e->kind) {
+                case box::strand_event_kind::spawned: saw_spawn = true; break;
+                case box::strand_event_kind::parked:  saw_parked = true; break;
+                case box::strand_event_kind::woken:   saw_woken = true; break;
+                case box::strand_event_kind::exited:  saw_exit = true; break;
+                }
+            }
+        };
+
+        // Phase A: let the worker reach its park. A fresh strand is dispatched
+        // within a tick or two (normal scheduling, NOT the throttled reaper);
+        // sleep_for yields our core so it runs, poll() drains its edges. ≤64×4ms
+        // is the bounded backstop, not the wake path.
+        for (int i = 0; i < 64 && !(saw_spawn && saw_parked); i++) {
+            drain();
+            if (saw_spawn && saw_parked) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(4));
+        }
+        Check(saw_spawn, "phase42 strand_watch decoded strand:spawned for the worker");
+        Check(saw_parked, "phase42 strand_watch decoded strand:parked (worker genuinely parked)");
+
+        // Phase B: wake the parked worker. strand:woken fires inside the wake
+        // syscall — the worker is still parked (its 5s park backstop dwarfs the
+        // few ms between observing parked and waking), so the wake finds it.
+        g_p42_park.store(1, std::memory_order_release);
+        box::wake_all(g_p42_park);
+        for (int i = 0; i < 64 && !saw_woken; i++) {
+            drain();
+            if (saw_woken) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(4));
+        }
+        Check(saw_woken, "phase42 strand_watch decoded strand:woken (main woke the worker)");
+
+        worker.join();
+        drain();  // best-effort sweep — strand:exited is reaper-timed, not asserted
+        printf("[CXX] phase42 strand_watch: strand:exited %sobserved (reaper-timed, not asserted)\n",
+               saw_exit ? "" : "not yet ");
+    }
+
+    printf("[CXX] PASS phase42: box::strand spawn/join/dtor-join/move + "
+           "box::park-wake round-trip + strand_watch decode\n");
+}
+
+// ── Phase43 — concurrent per-strand Touch-stash isolation ─────────────────────
+// Proves the Ф21 substrate fix: two strands in ONE cabin consuming Touch
+// concurrently (touch_try_pop_tag) do NOT corrupt each other. Pre-fix the stash
+// was a process-global unlocked array — two strands draining it would tear its
+// count and misroute/lose/duplicate events nondeterministically. Per-strand
+// stashes make every invariant below hold deterministically.
+//
+// Each strand subscribes to its OWN distinct tag and drains ONLY that tag (each
+// strand has its own TouchRing; a per-strand subscription delivers into that
+// strand's ring — confirmed against the kernel touch delivery path). The two
+// distinct tags sidestep any same-tag multi-strand delivery question — the
+// MUST-PROVE here is stash isolation under concurrent touch_try_pop_tag, not
+// fan-out. On 1 App-Core the two workers interleave COOPERATIVELY (touch_try_
+// pop_tag has no preemption point), so the torn-count race is truly exercised
+// only across >=2 App-Cores (4c/16c — the STRICT matrix runs those); on 1c this
+// proves the functional per-strand split. HOST-TIMING-INVARIANT: all asserts are
+// on counts/values; the only time bounds are generous backstops, never the path.
+namespace {
+constexpr int      P43_N        = 64;      // events per tag
+constexpr int      P43_SPIN_CAP = 2000000; // per-worker drain backstop (iterations)
+
+// Per-tag payload: the seq plus a tag marker so a worker can prove it NEVER
+// received the other tag's event (cross-delivery == 0).
+struct P43Msg {
+    std::uint32_t seq;
+    std::uint32_t marker;  // 0xAAAA for tag A, 0xBBBB for tag B
+};
+
+constexpr std::uint32_t P43_MARK_A = 0xAAAAu;
+constexpr std::uint32_t P43_MARK_B = 0xBBBBu;
+
+// Worker results (written by the worker strand, read by main after join).
+struct P43Result {
+    std::atomic<bool>     ready{false};   // subscription claimed, safe to publish
+    std::atomic<int>      got{0};         // events received
+    std::atomic<bool>     fifo_ok{true};  // seqs arrived strictly 0,1,2,…
+    std::atomic<bool>     marker_ok{true};// every event carried the OWN marker
+    std::uint32_t         seqs[P43_N];    // received seqs in arrival order
+};
+
+P43Result g_p43_a;
+P43Result g_p43_b;
+
+// One worker body, parameterised by its tag name / marker / result slot. It
+// claims its subscription, signals ready, then bounded-drains ONLY its tag via
+// the per-strand stash path (subscription::poll -> touch_try_pop_tag) until it
+// has P43_N events or the backstop trips.
+static void p43_worker(const char *tag_name, std::uint32_t own_marker, P43Result *res)
+{
+    box::subscription sub{box::tag(tag_name)};  // braces: avoid the most-vexing-parse
+    if (!sub) {  // claim failed — leave ready false; main will see got != N and fail
+        return;
+    }
+    res->ready.store(true, std::memory_order_release);
+
+    int n = 0;
+    std::uint32_t expect_seq = 0;
+    for (long spins = 0; n < P43_N && spins < P43_SPIN_CAP; spins++) {
+        if (auto ev = sub.poll()) {
+            auto m = ev->payload_as<P43Msg>();
+            if (!m) {  // a malformed/short payload is never expected — fail loudly,
+                       // do NOT advance n (that would leave a hole in seqs[]).
+                res->marker_ok.store(false, std::memory_order_relaxed);
+                break;
+            }
+            if (m->marker != own_marker)
+                res->marker_ok.store(false, std::memory_order_relaxed);
+            if (m->seq != expect_seq)
+                res->fifo_ok.store(false, std::memory_order_relaxed);
+            res->seqs[n] = m->seq;
+            expect_seq++;
+            n++;
+            res->got.store(n, std::memory_order_release);
+        } else {
+            box::this_strand::yield();  // cooperative — let the publisher / sibling run
+        }
+    }
+}
+
+static void p43_worker_a(void *) { p43_worker("cxx:p43:A", P43_MARK_A, &g_p43_a); }
+static void p43_worker_b(void *) { p43_worker("cxx:p43:B", P43_MARK_B, &g_p43_b); }
+} // namespace
+
+void Phase43()
+{
+    // Spawned strands need FSGSBASE (per-strand TLS via ring-3 RDFSBASE). Without
+    // it strand_spawn refuses — SKIP cleanly with a PASS, matching Phase35/42.
+    if (!cpu_has_fsgsbase()) {
+        printf("[CXX] note phase43: strands need FSGSBASE — skipping concurrent stash\n");
+        printf("[CXX] PASS phase43: per-strand Touch stash isolation "
+               "(skipped, no FSGSBASE)\n");
+        return;
+    }
+
+    // Reset the result slots (std::atomic is not assignable, so reset fields).
+    for (P43Result *r : { &g_p43_a, &g_p43_b }) {
+        r->ready.store(false, std::memory_order_relaxed);
+        r->got.store(0, std::memory_order_relaxed);
+        r->fifo_ok.store(true, std::memory_order_relaxed);
+        r->marker_ok.store(true, std::memory_order_relaxed);
+    }
+
+    box::tag tA("cxx:p43:A");
+    box::tag tB("cxx:p43:B");
+    Check(tA && tB, "phase43 interned both distinct tags");
+
+    // Spawn the two consumers FIRST so each claims its tag before any publish —
+    // Touch is edge-delivered to subscribers present at publish time.
+    box::strand wa(p43_worker_a, nullptr);
+    box::strand wb(p43_worker_b, nullptr);
+
+    // Wait (bounded) until both workers have claimed their subscriptions.
+    bool both_ready = false;
+    for (int i = 0; i < 1000 && !both_ready; i++) {
+        both_ready = g_p43_a.ready.load(std::memory_order_acquire) &&
+                     g_p43_b.ready.load(std::memory_order_acquire);
+        if (!both_ready) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    Check(both_ready, "phase43 both worker strands claimed their tags");
+
+    // Publish N events to each tag, INTERLEAVED (A0,B0,A1,B1,…) so the two
+    // strands are draining concurrently. Each payload carries its monotonic seq.
+    for (std::uint32_t s = 0; s < (std::uint32_t)P43_N; s++) {
+        P43Msg a{ s, P43_MARK_A };
+        P43Msg b{ s, P43_MARK_B };
+        Check(box::publish(tA, a), "phase43 publish to tag A");
+        Check(box::publish(tB, b), "phase43 publish to tag B");
+    }
+
+    // Join both workers (their drain loops exit once each has N events). The
+    // join is bounded by the worker backstop, never an unbounded wait.
+    wa.join();
+    wb.join();
+
+    // ── Invariants — would fail nondeterministically under the OLD global stash,
+    //    hold deterministically with per-strand stashes ────────────────────────
+    int got_a = g_p43_a.got.load(std::memory_order_acquire);
+    int got_b = g_p43_b.got.load(std::memory_order_acquire);
+    Check(got_a == P43_N, "phase43 worker A received exactly N (no loss/dup)");
+    Check(got_b == P43_N, "phase43 worker B received exactly N (no loss/dup)");
+    Check(g_p43_a.marker_ok.load(std::memory_order_acquire),
+          "phase43 worker A saw ONLY tag-A events (zero cross-delivery)");
+    Check(g_p43_b.marker_ok.load(std::memory_order_acquire),
+          "phase43 worker B saw ONLY tag-B events (zero cross-delivery)");
+    Check(g_p43_a.fifo_ok.load(std::memory_order_acquire),
+          "phase43 worker A received seqs 0..N-1 in FIFO order");
+    Check(g_p43_b.fifo_ok.load(std::memory_order_acquire),
+          "phase43 worker B received seqs 0..N-1 in FIFO order");
+
+    // Explicit per-element seq verification (each tag's seqs are exactly 0..N-1).
+    bool seqs_a = (got_a == P43_N), seqs_b = (got_b == P43_N);
+    for (int i = 0; i < P43_N && i < got_a; i++) if (g_p43_a.seqs[i] != (std::uint32_t)i) seqs_a = false;
+    for (int i = 0; i < P43_N && i < got_b; i++) if (g_p43_b.seqs[i] != (std::uint32_t)i) seqs_b = false;
+    Check(seqs_a, "phase43 worker A seq stream == 0..N-1 exactly");
+    Check(seqs_b, "phase43 worker B seq stream == 0..N-1 exactly");
+
+    // Honest per-config banner: 1 App-Core = cooperative interleave (functional
+    // proof); >=2 App-Cores = the torn-count race is genuinely exercised.
+    unsigned p43_cores = box::strand::hardware_concurrency();
+    if (p43_cores >= 2)
+        printf("[CXX] PASS phase43: per-strand Touch stash isolation "
+               "(2 strands concurrent across %u App-Cores — race exercised)\n", p43_cores);
+    else
+        printf("[CXX] PASS phase43: per-strand Touch stash isolation "
+               "(1 App-Core — functional split; data race exercised on multi-core)\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -7227,6 +7582,8 @@ int main()
     Phase39();
     Phase40();
     Phase41();
+    Phase42();
+    Phase43();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

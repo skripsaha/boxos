@@ -65,6 +65,10 @@ typedef struct StrandInfo {
      * means "not yet claimed"; boxlib lazy-claims a slab slot on first malloc
      * and caches the pointer here for the lock-free fast path. */
     uint64_t strand_pool_ptr;
+    /* Ф21 — per-strand Touch tag-filter stash (boxlib touch.c); kernel
+     * zero-inits → 0 = not yet allocated; lazy-malloc'd on first tag-consume.
+     * Mirrors strand_pool_ptr. */
+    uint64_t touch_stash_ptr;
 } StrandInfo;
 
 #ifdef __cplusplus
@@ -82,7 +86,9 @@ STRAND_STATIC_ASSERT(__builtin_offsetof(StrandInfo, result_ring_va) == 40, "Stra
 STRAND_STATIC_ASSERT(__builtin_offsetof(StrandInfo, touch_ring_va)  == 48, "StrandInfo.touch_ring_va @48");
 STRAND_STATIC_ASSERT(__builtin_offsetof(StrandInfo, ipc_stash)      == 56, "StrandInfo.ipc_stash @56");
 STRAND_STATIC_ASSERT(__builtin_offsetof(StrandInfo, strand_pool_ptr) ==
-                     56 + 2u * STRAND_STASH_BYTES, "StrandInfo.strand_pool_ptr last");
+                     56 + 2u * STRAND_STASH_BYTES, "StrandInfo.strand_pool_ptr @ 56+2*STRAND_STASH_BYTES");
+STRAND_STATIC_ASSERT(__builtin_offsetof(StrandInfo, touch_stash_ptr) ==
+                     56 + 2u * STRAND_STASH_BYTES + 8u, "StrandInfo.touch_stash_ptr last");
 /* The whole block must fit the Hammock StrandInfo reservation (4 pages =
  * 16 KiB — see HAMMOCK_STRANDINFO_PAGES in strand_rings.c). */
 STRAND_STATIC_ASSERT(sizeof(StrandInfo) <= 4u * 4096u, "StrandInfo must fit 4 pages");

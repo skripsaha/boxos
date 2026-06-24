@@ -11,6 +11,7 @@
 #include "box/strand.h"
 #include "box/core/manifest.h"   /* MfCall1 */
 #include "box/memory.h"          /* malloc / free */
+#include "box/touch.h"           /* touch_stash_free_self */
 #include "box/system.h"          /* yield */
 #include "box/timeouts.h"        /* BOX_TIMEOUT_IPC_MS */
 #include "box/error.h"
@@ -94,6 +95,11 @@ void strand_exit(void)
      * generation is bumped here, so even if the kernel were to race the orphan
      * death-stamp it would miss; an orderly exit never leaves an ORPHANED slot. */
     strand_pool_flush_self();
+
+    /* Ф21 — release this strand's per-strand Touch tag-filter stash back to the
+     * cabin heap (order: flush pool → free stash → kill). Idempotent; a strand
+     * that never consumed a tag is a no-op. */
+    touch_stash_free_self();
 
     /* Terminate just this strand: SYS_PROC_KILL(target == 0) means self.
      * No __box_runtime_fini / io_flush / spawner-notify — those are exit()'s

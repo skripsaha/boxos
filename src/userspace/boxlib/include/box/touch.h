@@ -199,10 +199,20 @@ bool touch_available(void);
  *   flood of unconsumed other-tag events that fills the stash — drain your
  *   claimed tags).
  *
- * Single-thread-per-cabin: the stash needs no locking (the cabin's sole
- * execution context owns both the ring consumer and the stash). */
+ * Per-strand, no locking: the stash is private to the calling strand (Ф21),
+ * not shared across the cabin. touch_pop already routes per strand — each
+ * strand drains its OWN TouchRing — and each strand parks its non-matching
+ * events into its OWN stash (the main strand keeps the static stash; a spawned
+ * strand a heap one cached in its StrandInfo). A strand is the sole writer of
+ * its own stash, so two strands consuming Touch concurrently never share state
+ * and still need no lock. */
 bool touch_try_pop_tag(TouchTag tag, Touch *out);
 bool touch_wait_tag(TouchTag tag, Touch *out, uint32_t timeout_ms);
+
+/* Release the calling strand's per-strand Touch stash. Called from strand_exit
+ * for a spawned strand (mirrors strand_pool_flush_self); idempotent, and a
+ * no-op on the main strand or a strand that never consumed a tag. */
+void touch_stash_free_self(void);
 
 /* Diagnostic: TouchRing consumer-side counters (mirror of touch_ring_pop_stats
  * for users that only see box/touch.h). */
