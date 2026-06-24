@@ -15,6 +15,13 @@
 //         and typed read_object<T> / write_object<T>,
 //       - a streaming channel through the Current spine: bytes(role) →
 //         box::byte_current (write / read / read_line / seek).
+//     A fallible scalar operation hands back the REAL kernel cause through a
+//     box::result<T> / box::status (info / read_at / write_at / read_object /
+//     write_object return result; add_tag / remove_tag / rename / remove /
+//     anchor return status), instead of collapsing it to bool / -1 / nullopt.
+//     The derived accessors (name / size / flags / tags / has_tag / trashed)
+//     stay plain values: they read info() once and report a sensible neutral on
+//     the error arm. bytes(role) stays a stream (an open channel, not a scalar).
 //
 //   * box::tagfs::create(name, {tags…}) / query(tagspec) / all() / find(name) —
 //     creation and tag-query returning a range of files. Richer predicates
@@ -49,6 +56,7 @@
 
 #include "box/file.h"
 #include "box/cxx/current.h"  // box::byte_current, box::role, box::file(), CURRENT_CREATE
+#include "box/cxx/error.h"    // box::result / box::status / box::error / box_errno_of
 #include "box/cxx/touch.h"    // box::tag, box::event, box::subscription (anchor observer)
 
 namespace box {
@@ -80,14 +88,17 @@ public:
     std::uint32_t id() const noexcept { return id_; }
     explicit operator bool() const noexcept { return id_ != 0; }
 
-    // Full metadata snapshot (one syscall); nullopt on error. The convenience
-    // accessors below each take their own snapshot — call info() once if you
-    // need several fields.
-    std::optional<file_info_t> info() const
+    // Full metadata snapshot (one syscall). On success the descriptor; the error
+    // arm carries the recovered cause — invalid_argument for an empty handle, or
+    // the kernel error_t (e.g. object_not_found once the file is gone). The
+    // convenience accessors below each take their own snapshot — call info() once
+    // if you need several fields.
+    box::result<file_info_t> info() const
     {
-        if (!id_) return std::nullopt;
+        if (!id_) return std::unexpected(box::error{box::errc::invalid_argument});
         file_info_t inf{};
-        if (::file_info(id_, &inf) != 0) return std::nullopt;
+        int rc = ::file_info(id_, &inf);
+        if (rc != 0) return std::unexpected(box::error{box_errno_of(rc)});
         return inf;
     }
 
@@ -128,48 +139,83 @@ public:
         return false;
     }
 
-    // ── tag mutations & lifecycle (true on success) ──────────────────────
-    bool add_tag(const char *tag)        { return id_ && ::tag_add(id_, tag) == 0; }
-    bool remove_tag(const char *key)     { return id_ && ::tag_remove(id_, key) == 0; }
-    bool rename(const char *new_name)    { return id_ && ::file_rename(id_, new_name) == 0; }
-    bool remove()                        { return id_ && ::file_delete(id_) == 0; }
-    bool anchor()                        { return id_ && ::anchor(id_) == 0; }
+    // ── tag mutations & lifecycle ────────────────────────────────────────
+    // Empty status on success; the error arm carries the real kernel cause
+    // (invalid_argument for an empty handle, else the recovered error_t — e.g.
+    // tag_limit_exceeded, already_exists, object_not_found).
+    box::status add_tag(const char *tag)
+    {
+        return id_ ? box::_detail::from_status(::tag_add(id_, tag))
+                   : std::unexpected(box::error{box::errc::invalid_argument});
+    }
+    box::status remove_tag(const char *key)
+    {
+        return id_ ? box::_detail::from_status(::tag_remove(id_, key))
+                   : std::unexpected(box::error{box::errc::invalid_argument});
+    }
+    box::status rename(const char *new_name)
+    {
+        return id_ ? box::_detail::from_status(::file_rename(id_, new_name))
+                   : std::unexpected(box::error{box::errc::invalid_argument});
+    }
+    box::status remove()
+    {
+        return id_ ? box::_detail::from_status(::file_delete(id_))
+                   : std::unexpected(box::error{box::errc::invalid_argument});
+    }
+    box::status anchor()
+    {
+        return id_ ? box::_detail::from_status(::anchor(id_))
+                   : std::unexpected(box::error{box::errc::invalid_argument});
+    }
 
     // ── random-access byte I/O, bound to this file_id ────────────────────
-    // Return the byte count transferred, or -1 on error (the native fread/
-    // fwrite contract).
-    int read_at(std::uint64_t offset, void *p, std::size_t n) const
+    // On success the byte count transferred; the error arm carries the recovered
+    // cause (invalid_argument for an empty handle, else the native fread/fwrite
+    // error_t — e.g. out_of_range, io). The boxlib fread/fwrite hand back a count
+    // >= 0 or box_fail(rc) < 0, which from_ret turns into value-or-cause.
+    box::result<std::size_t> read_at(std::uint64_t offset, void *p, std::size_t n) const
     {
-        return id_ ? ::fread(id_, offset, p, n) : -1;
+        return box::_detail::from_ret<std::size_t>(
+            id_ ? ::fread(id_, offset, p, n) : -ERR_INVALID_ARGUMENT);
     }
-    int write_at(std::uint64_t offset, const void *p, std::size_t n)
+    box::result<std::size_t> write_at(std::uint64_t offset, const void *p, std::size_t n)
     {
-        return id_ ? ::fwrite(id_, offset, p, n) : -1;
+        return box::_detail::from_ret<std::size_t>(
+            id_ ? ::fwrite(id_, offset, p, n) : -ERR_INVALID_ARGUMENT);
     }
-    int read_at(std::uint64_t offset, std::span<std::byte> buf) const
+    box::result<std::size_t> read_at(std::uint64_t offset, std::span<std::byte> buf) const
     {
         return read_at(offset, buf.data(), buf.size());
     }
-    int write_at(std::uint64_t offset, std::span<const std::byte> buf)
+    box::result<std::size_t> write_at(std::uint64_t offset, std::span<const std::byte> buf)
     {
         return write_at(offset, buf.data(), buf.size());
     }
 
+    // Typed whole-object I/O. On success the T / empty status; the error arm
+    // carries the cause. A short transfer (the op succeeded but moved the wrong
+    // number of bytes) is reported as errc::io rather than a silent truncation.
     template <class T>
-    std::optional<T> read_object(std::uint64_t offset) const
+    box::result<T> read_object(std::uint64_t offset) const
     {
         static_assert(std::is_trivially_copyable_v<T>,
                       "read_object<T>: T must be trivially copyable");
         T v;
-        if (read_at(offset, &v, sizeof(T)) == static_cast<int>(sizeof(T))) return v;
-        return std::nullopt;
+        auto r = read_at(offset, &v, sizeof(T));
+        if (!r) return std::unexpected(r.error());
+        if (*r != sizeof(T)) return std::unexpected(box::error{box::errc::io});
+        return v;
     }
     template <class T>
-    bool write_object(std::uint64_t offset, const T &v)
+    box::status write_object(std::uint64_t offset, const T &v)
     {
         static_assert(std::is_trivially_copyable_v<T>,
                       "write_object<T>: T must be trivially copyable");
-        return write_at(offset, &v, sizeof(T)) == static_cast<int>(sizeof(T));
+        auto r = write_at(offset, &v, sizeof(T));
+        if (!r) return std::unexpected(r.error());
+        if (*r != sizeof(T)) return std::unexpected(box::error{box::errc::io});
+        return {};
     }
 
     // ── streaming byte channel through the Current spine ─────────────────
@@ -188,9 +234,12 @@ public:
 
 // ── creation ────────────────────────────────────────────────────────────
 // create(name, {"key:value", "bare", ...}) — the tag list is joined with the
-// comma separator the TagFS create expects. Returns an empty file (operator
-// bool == false) on failure.
-inline file create(const char *name, std::initializer_list<const char *> tags)
+// comma separator the TagFS create expects. On success a live file; the error
+// arm carries the recovered cause — invalid_argument for an empty/over-long
+// name (boxlib create() validates it), or the kernel error_t (e.g.
+// already_exists). The boxlib create returns a positive file_id, box_fail(rc)
+// < 0 on failure; id == 0 cannot happen → internal.
+inline box::result<file> create(const char *name, std::initializer_list<const char *> tags)
 {
     std::string spec;
     for (const char *t : tags) {
@@ -198,12 +247,16 @@ inline file create(const char *name, std::initializer_list<const char *> tags)
         spec += t;
     }
     int id = ::create(name, spec.c_str());
-    return id > 0 ? file(static_cast<std::uint32_t>(id)) : file{};
+    if (id > 0) return file(static_cast<std::uint32_t>(id));
+    return std::unexpected(
+        box::error{id < 0 ? box_errno_of(id) : static_cast<::error_t>(ERR_INTERNAL)});
 }
-inline file create(const char *name, const char *tagspec = "")
+inline box::result<file> create(const char *name, const char *tagspec = "")
 {
     int id = ::create(name, tagspec);
-    return id > 0 ? file(static_cast<std::uint32_t>(id)) : file{};
+    if (id > 0) return file(static_cast<std::uint32_t>(id));
+    return std::unexpected(
+        box::error{id < 0 ? box_errno_of(id) : static_cast<::error_t>(ERR_INTERNAL)});
 }
 
 // ── tag query → range of files ──────────────────────────────────────────
@@ -223,13 +276,18 @@ inline std::vector<file> query(const char *tagspec)
 inline std::vector<file> all() { return query(nullptr); }
 
 // ── lookup by name (TagFS names are not unique; find returns the first) ──
-inline std::optional<file> find(const char *name)
+// On success the first matching file; the error arm separates the two no-result
+// outcomes — a failed lookup (n < 0) surfaces its recovered cause, while a clean
+// "no file by that name" (n == 0) is file_not_found, a queryable cause rather
+// than a transport error. (To enumerate every match, use find_all.)
+inline box::result<file> find(const char *name)
 {
     std::uint32_t ids[8];
     file_info_t   infos[8];
     int           n = ::find_file_by_name(name, ids, infos, 8);
     if (n > 0) return file(ids[0]);
-    return std::nullopt;
+    if (n < 0) return std::unexpected(box::error{box_errno_of(n)});
+    return std::unexpected(box::error{box::errc::file_not_found});
 }
 inline std::vector<file> find_all(const char *name)
 {
@@ -352,16 +410,22 @@ public:
     ~snapshot() { if (owned_) ::snap_delete(id_); }
 
     // Factories — a snapshot needs a unique name (1..31 chars). Capture one
-    // file, or the whole filesystem (of_all). Returns an empty snapshot
-    // (operator bool == false) on failure, e.g. the name is already taken.
-    static snapshot of(std::uint32_t file_id, const char *name)
+    // file, or the whole filesystem (of_all). On success an owning snapshot; the
+    // error arm carries the recovered cause — invalid_argument for a null name,
+    // else the kernel error_t (e.g. already_exists when the name is taken).
+    static box::result<snapshot> of(std::uint32_t file_id, const char *name)
     {
+        if (!name) return std::unexpected(box::error{box::errc::invalid_argument});
         std::uint32_t sid = 0;
-        if (name && ::snap_create(name, file_id, &sid) == 0) return snapshot(sid, name);
-        return snapshot{};
+        int rc = ::snap_create(name, file_id, &sid);
+        if (rc != 0) return std::unexpected(box::error{box_errno_of(rc)});
+        return snapshot(sid, name);
     }
-    static snapshot of(const file &f, const char *name) { return of(f.id(), name); }
-    static snapshot of_all(const char *name) { return of(0u, name); }
+    static box::result<snapshot> of(const file &f, const char *name)
+    {
+        return of(f.id(), name);
+    }
+    static box::result<snapshot> of_all(const char *name) { return of(0u, name); }
 
     std::uint32_t    id() const noexcept { return id_; }
     std::string_view name() const noexcept { return name_; }
@@ -375,13 +439,16 @@ public:
         return id_;
     }
 
-    // Delete now (idempotent); after this the handle is empty.
-    bool drop() noexcept
+    // Delete now; after this the handle is empty. Empty status on success; the
+    // error arm carries the cause — invalid_operation when the handle owns no
+    // snapshot to drop, else the recovered snap_delete error_t. The snapshot is
+    // always disowned (no double snap_delete from a later dtor).
+    box::status drop() noexcept
     {
-        if (!owned_) return false;
-        bool ok = ::snap_delete(id_) == 0;
-        owned_  = false;
-        return ok;
+        if (!owned_) return std::unexpected(box::error{box::errc::invalid_operation});
+        int rc = ::snap_delete(id_);
+        owned_ = false;
+        return box::_detail::from_status(rc);
     }
 };
 
