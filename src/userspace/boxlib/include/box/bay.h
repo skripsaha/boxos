@@ -71,9 +71,11 @@ extern "C" {
 #define BAY_ENCRYPTED   0x04u
 
 /* Open or create a Bay by tag. Returns a user-VA pointer mapped to the
- * shared physical pages, or NULL on failure (errno-style return value
- * via box_last_error()). For BAY_CREATE size MUST be non-zero; for
- * BAY_OPEN size is informational (the existing Bay's size wins). */
+ * shared physical pages, or NULL on failure. (BoxOS has no errno register;
+ * the typed cause is surfaced through the C++ box::result face,
+ * box/cxx/error.h — this raw C entry only signals NULL vs non-NULL.) For
+ * BAY_CREATE size MUST be non-zero; for BAY_OPEN size is informational
+ * (the existing Bay's size wins). */
 void   *bay_open(const char *tag, uint64_t size, uint32_t flags);
 
 /* Release this cabin's claim on the Bay. Drops one ref; if the last

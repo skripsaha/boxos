@@ -99,6 +99,33 @@ typedef uint32_t error_t;
 #define IS_ERROR(err)   ((err) != OK)
 #define IS_SUCCESS(err) ((err) == OK)
 
+/* ── error-cause preservation (Ф23) ──────────────────────────────────────
+ * BoxOS keeps a failed call's real error_t in its RETURN VALUE — never in a
+ * system-wide errno register (that Unix idiom is deliberately absent). A
+ * boxlib syscall stub gets the cause back from MfCall1 in three dialects: 0
+ * on success, a POSITIVE error_t for a kernel-side error, and a NEGATIVE
+ * -ERR_* for a builder/submit (transport) failure. box_fail folds the two
+ * failure dialects into one negative form, so a stub reports failure as a
+ * value < 0 whose magnitude is the real error_t (the boxlib stubs are
+ * converted to this rule in Ф23b). The caller — plain C, or the C++
+ * box::result bridge — recovers the cause with box_errno_of.
+ *
+ * One rule across all of boxlib: a return  < 0  is failure with
+ * error_t == box_errno_of(ret); a return >= 0 is success (a payload or 0). */
+static inline int box_fail(int rc)
+{
+    /* 0 → 0 (caller maps to its own success); kernel +error_t → negate;
+     * transport -ERR_* → keep. Result is <= 0, and 0 only when rc == 0. */
+    return rc == 0 ? 0 : (rc > 0 ? -rc : rc);
+}
+
+static inline error_t box_errno_of(int ret)
+{
+    /* Recover the error_t a failing stub returned. ret >= 0 carries no
+     * cause. Widen before negating so INT_MIN cannot overflow. */
+    return ret >= 0 ? OK : (error_t)(-(long)ret);
+}
+
 #ifdef __cplusplus
 }
 #endif

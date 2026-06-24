@@ -85,9 +85,12 @@ public:
     }
     error_condition default_error_condition(int code) const noexcept override
     {
-        // BoxOS "system" errors share the errno numbering, so they map
-        // straight onto the generic conditions.
-        return error_condition(code, generic_category());
+        // BoxOS is not Unix: a system error value is NOT an errno number, so it
+        // must not be reinterpreted as a generic (POSIX) condition — e.g. 7 is
+        // ERR_TIMEOUT here, not E2BIG. Map each code to itself in this category.
+        // The native BoxOS error channel is box::error / box::error_category()
+        // (box/cxx/error.h); std::system_category stays a thin std shim.
+        return error_condition(code, system_category());
     }
 };
 
