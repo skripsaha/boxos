@@ -5769,21 +5769,24 @@ void Phase37()
 
         g_p37_churn_done.store(0, std::memory_order_relaxed);
         for (uint32_t i = 0; i < kP37Churn; i++) {
-            std::thread d(
-                [] { g_p37_churn_done.fetch_add(1, std::memory_order_release); });
+            std::thread d([] {
+                g_p37_churn_done.fetch_add(1, std::memory_order_release);
+                g_p37_churn_done.notify_one();   // wake the parked main strand
+            });
             d.detach();
         }
 
         // Wait for every detached thread to record completion (bounded). The
         // detached strands run concurrently; we yield between polls to let them.
-        bool all_ran = false;
-        for (uint32_t cyc = 0; cyc < 200u && !all_ran; cyc++) {
-            if (g_p37_churn_done.load(std::memory_order_acquire) == kP37Churn)
-                all_ran = true;
-            else
-                for (int k = 0; k < 4; k++) yield();
-        }
-        Check(all_ran, "phase37 all detached threads ran to completion");
+        // Event-driven (NOT a bounded poll): park on the counter until every
+        // detached strand records completion. Parking frees this App-Core so
+        // the workers actually make progress — correct, and removes the 16c-TCG
+        // timing flake the old bounded yield-spin (200 cycles) had.
+        uint32_t done;
+        while ((done = g_p37_churn_done.load(std::memory_order_acquire)) != kP37Churn)
+            g_p37_churn_done.wait(done, std::memory_order_acquire);
+        Check(g_p37_churn_done.load(std::memory_order_acquire) == kP37Churn,
+              "phase37 all detached threads ran to completion");
 
         // process_count must return toward baseline — the reaper process_destroy'd
         // the detached corpses (process_count-- happens only there). A broken
