@@ -102,6 +102,23 @@ typedef struct {
 // Snapshot current heap statistics (thread-safe)
 void heap_get_stats(heap_stats_t *out);
 
+// ---------------------------------------------------------------------------
+// StrandPool (Ф20e) — per-strand malloc/free magazine cache
+// ---------------------------------------------------------------------------
+
+// Flush the calling strand's StrandPool back to the global heap and release its
+// slab slot. Called at the top of strand_exit() for a spawned strand and at
+// exit() for the main strand, so an orderly death leaves no cached blocks held
+// out of the global heap (clean leak diagnostics). Idempotent; a strand that
+// never allocated is a no-op.
+void strand_pool_flush_self(void);
+
+// Self-test of the crash-orphan reclaim mechanism: stages a spare slab slot as a
+// crashed strand would (real cached blocks, slot ORPHANED) and runs the reclaim.
+// Returns 1 if every staged block returned to the global heap and the slot is
+// FREE again. Exercises the reclaim path deterministically, without a live fault.
+int strand_pool_test_orphan_reclaim(unsigned n_blocks);
+
 #ifdef __cplusplus
 }
 #endif

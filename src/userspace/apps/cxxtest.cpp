@@ -6920,6 +6920,216 @@ void Phase40()
            "all future_errc)\n");
 }
 
+// ── phase41: per-strand StrandPool malloc/free fast path (Ф20e) ─────────────────
+// The StrandPool layers a per-strand magazine cache under _malloc_impl/free so
+// concurrent malloc/free from many strands mostly skip the single global heap
+// lock — accelerating all C++ new/delete automatically. These checks are
+// host-invariant: A1 proves correctness (served block >= requested, tagged/oversize
+// bypass, double-free detection, realloc byte-preservation); A2 proves the cache
+// actually serves most requests WITHOUT the lock using the heap's own
+// malloc/free counters (incremented inside the lock — pure counter arithmetic, no
+// timing); A3 proves per-strand isolation across real std::threads; A4 exercises
+// the crash-orphan reclaim mechanism deterministically.
+
+// The eleven cache size classes (mirror StrandPoolClassSize in boxlib memory.c).
+static constexpr std::size_t kP41ClassSize[11] =
+    { 16, 32, 48, 64, 128, 256, 512, 1024, 2048, 4096, 8192 };
+
+// Fill `n` bytes of `p` with a position-dependent pattern keyed by `seed`, then
+// read it back; returns true iff every byte survives (proves the block really is
+// at least `n` bytes and nothing aliased it).
+static bool p41_sentinel_ok(void *p, std::size_t n, unsigned seed)
+{
+    auto *b = static_cast<unsigned char *>(p);
+    for (std::size_t i = 0; i < n; i++)
+        b[i] = static_cast<unsigned char>((i * 31u + seed * 7u + 0x5Au) & 0xFFu);
+    for (std::size_t i = 0; i < n; i++)
+        if (b[i] != static_cast<unsigned char>((i * 31u + seed * 7u + 0x5Au) & 0xFFu))
+            return false;
+    return true;
+}
+
+// A3 worker: churn every class with a per-thread sentinel verify before free.
+static std::atomic<int> g_p41_mismatch{0};
+static std::atomic<int> g_p41_null{0};
+static void p41_churn_worker(unsigned seed)
+{
+    constexpr int kIters = 500;
+    void *live[11];
+    for (int i = 0; i < 11; i++) live[i] = nullptr;
+    for (int it = 0; it < kIters; it++) {
+        int c = (it + seed) % 11;
+        std::size_t sz = kP41ClassSize[c];
+        if (live[c]) { free(live[c]); live[c] = nullptr; }
+        void *p = malloc(sz);
+        if (!p) { g_p41_null.fetch_add(1, std::memory_order_relaxed); continue; }
+        if (!p41_sentinel_ok(p, sz, seed))
+            g_p41_mismatch.fetch_add(1, std::memory_order_relaxed);
+        live[c] = p;
+    }
+    for (int i = 0; i < 11; i++) if (live[i]) free(live[i]);
+}
+
+void Phase41()
+{
+    // ── A1: correctness (always on, single strand) ────────────────────────────
+
+    // Every class: a freshly served block must hold a full ClassSize sentinel
+    // (proves served size >= requested), survive free+realloc, and recycle.
+    bool all_classes_ok = true;
+    for (int c = 0; c < 11; c++) {
+        std::size_t sz = kP41ClassSize[c];
+        void *p = malloc(sz);
+        if (!p || !p41_sentinel_ok(p, sz, static_cast<unsigned>(c + 1))) {
+            all_classes_ok = false;
+            if (p) free(p);
+            continue;
+        }
+        free(p);
+        // Pull it straight back (LIFO) and re-verify the full size.
+        void *q = malloc(sz);
+        if (!q || !p41_sentinel_ok(q, sz, static_cast<unsigned>(c + 99))) all_classes_ok = false;
+        if (q) free(q);
+    }
+    Check(all_classes_ok, "phase41 every size class: served block holds a full-size sentinel and recycles");
+
+    // A served block is at least as large as requested even for an odd size that
+    // floors up to a class (request 33 → 48-byte class → 48 writable bytes).
+    {
+        void *p = malloc(33);
+        bool ok = p && p41_sentinel_ok(p, 48, 5);   // 48 = class that 33 floors into
+        Check(ok, "phase41 odd request floors up: 33-byte ask yields >= 48 usable bytes");
+        if (p) free(p);
+    }
+
+    // realloc grow then shrink must preserve the existing bytes (auto-accelerated:
+    // realloc is unchanged and rides _malloc_impl/free).
+    {
+        const std::size_t n0 = 64;
+        auto *p = static_cast<unsigned char *>(malloc(n0));
+        Check(p != nullptr, "phase41 realloc seed alloc");
+        for (std::size_t i = 0; i < n0; i++) p[i] = static_cast<unsigned char>(i & 0xFF);
+        auto *g = static_cast<unsigned char *>(realloc(p, 256));
+        bool grow_ok = g != nullptr;
+        if (g) for (std::size_t i = 0; i < n0; i++)
+            if (g[i] != static_cast<unsigned char>(i & 0xFF)) grow_ok = false;
+        Check(grow_ok, "phase41 realloc grow preserves bytes");
+        auto *s = static_cast<unsigned char *>(realloc(g, 32));
+        bool shrink_ok = s != nullptr;
+        if (s) for (std::size_t i = 0; i < 32; i++)
+            if (s[i] != static_cast<unsigned char>(i & 0xFF)) shrink_ok = false;
+        Check(shrink_ok, "phase41 realloc shrink preserves bytes");
+        if (s) free(s);
+    }
+
+    // Double-free of a cached block is caught by the magazine scan.
+    {
+        void *p = malloc(64);
+        Check(p != nullptr, "phase41 double-free seed alloc");
+        free(p);
+        heap_last_error = OK;
+        free(p);   // p is cached (free=0); the magazine scan must reject it
+        Check(heap_last_error == ERR_INVALID_ADDRESS,
+              "phase41 double-free of a cached block -> ERR_INVALID_ADDRESS");
+    }
+
+    // Tagged allocations BYPASS the cache: a tagged block stays accounted under
+    // its tag and frees through the global path (tag subsystem untouched).
+    {
+        const char *kTag = "phase41:tagged";
+        std::size_t before = heap_count_tag(kTag);
+        void *p = malloc(64, kTag);
+        Check(p != nullptr, "phase41 tagged alloc");
+        Check(heap_count_tag(kTag) == before + 1,
+              "phase41 tagged alloc bypasses cache (accounted live under its tag)");
+        free(p);
+        Check(heap_count_tag(kTag) == before,
+              "phase41 tagged free returns to global path (tag count drops)");
+    }
+
+    // A request larger than the top class bypasses the cache and still works.
+    {
+        std::size_t big = 8192 + 4096;   // > STRAND_POOL_MAX_CLASS
+        auto *p = static_cast<unsigned char *>(malloc(big));
+        bool ok = p && p41_sentinel_ok(p, big, 11);
+        Check(ok, "phase41 oversize (> 8192) bypasses cache and serves correctly");
+        if (p) free(p);
+    }
+
+    // ── A2: contention drop — most requests served WITHOUT the global lock ─────
+    // Oracle = the heap's own malloc/free counters, bumped INSIDE the lock. Warm
+    // the class once, then run M tight malloc/free pairs; the cache should serve
+    // the vast majority lock-free, so the locked counters barely move. Pure
+    // counter arithmetic — no wall-clock dependence whatsoever.
+    {
+        constexpr int M = 1000;
+        // Warm up: a handful of pairs so the magazine is primed and steady-state.
+        for (int i = 0; i < 32; i++) { void *p = malloc(64); if (p) free(p); }
+
+        heap_stats_t before{};
+        heap_get_stats(&before);
+        for (int i = 0; i < M; i++) {
+            void *p = malloc(64);
+            if (p) free(p);
+        }
+        heap_stats_t after{};
+        heap_get_stats(&after);
+
+        std::uint32_t lock_mallocs = after.malloc_calls - before.malloc_calls;
+        std::uint32_t lock_frees   = after.free_calls   - before.free_calls;
+        // A pure global heap would log M of each (==1000). With a cap-8 magazine
+        // and batch-4 refill, steady-state churn touches the lock only on the
+        // rare refill/flush boundary — well under 40% (here ~0).
+        Check(lock_mallocs < 400,
+              "phase41 contention drop: >60% of mallocs served lock-free");
+        Check(lock_frees < 400,
+              "phase41 contention drop: >60% of frees served lock-free");
+    }
+
+    // ── A4: crash-orphan reclaim mechanism (deterministic, not a live fault) ───
+    // strand_pool_test_orphan_reclaim stages a spare slab slot exactly as a
+    // crashed strand would leave it (real cached blocks, slot ORPHANED) and runs
+    // the same reclaim the slow path uses, asserting every block returns to the
+    // global heap. This exercises the reclaim MECHANISM directly; a real strand
+    // fault driving the kernel ORPHANED-stamp is covered by the kernel/STRICT path.
+    Check(strand_pool_test_orphan_reclaim(6) == 1,
+          "phase41 crash-orphan reclaim returns every cached block to the heap");
+
+    // ── A3: concurrent per-strand isolation (FSGSBASE-gated) ──────────────────
+    // A3 is the ONLY part that needs FSGSBASE (it spawns real strands). When the
+    // CPU lacks it, A3 is skipped with a DISTINCT marker so a green run is never
+    // misread as "concurrent isolation proven" — the overall PASS below then
+    // scopes itself to the parts that actually ran (A1/A2/A4). BoxOS `make run`
+    // is qemu64 +fsgsbase, so A3 normally RUNS.
+    if (!cpu_has_fsgsbase()) {
+        printf("[CXX] phase41 A3 SKIP (no FSGSBASE — concurrent isolation not exercised here)\n");
+        printf("[CXX] PASS phase41: per-strand StrandPool "
+               "(A1 correctness + A2 contention drop + A4 orphan reclaim; A3 skipped)\n");
+        return;
+    }
+
+    {
+        g_p41_mismatch.store(0, std::memory_order_relaxed);
+        g_p41_null.store(0, std::memory_order_relaxed);
+        std::thread t0(p41_churn_worker, 1u);
+        std::thread t1(p41_churn_worker, 2u);
+        std::thread t2(p41_churn_worker, 3u);
+        std::thread t3(p41_churn_worker, 4u);
+        t0.join();
+        t1.join();
+        t2.join();
+        t3.join();
+        Check(g_p41_mismatch.load(std::memory_order_relaxed) == 0,
+              "phase41 concurrent churn: 0 sentinel mismatches (per-strand pool isolation)");
+        Check(g_p41_null.load(std::memory_order_relaxed) == 0,
+              "phase41 concurrent churn: 0 failed allocations across 4 strands");
+    }
+    printf("[CXX] phase41 A3 RAN (4 strands, concurrent per-strand isolation verified)\n");
+
+    printf("[CXX] PASS phase41: per-strand StrandPool "
+           "(A1 correctness + A2 contention drop + A3 concurrent isolation + A4 orphan reclaim)\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -6982,6 +7192,7 @@ int main()
     Phase38();
     Phase39();
     Phase40();
+    Phase41();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
