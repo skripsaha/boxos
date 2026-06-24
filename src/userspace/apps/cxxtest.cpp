@@ -824,6 +824,16 @@ static_assert(std::array{1, 2, 3}.size() == 3);
 static_assert(std::get<2>(std::array{1, 2, 3}) == 3);
 static_assert((std::array{1, 2} <=> std::array{1, 3}) < 0);
 
+// Ф22b synth-three-way: a legacy element with only < / == (no <=>).
+struct Cxx7Legacy {
+    int v;
+    constexpr bool operator==(const Cxx7Legacy &o) const { return v == o.v; }
+    constexpr bool operator<(const Cxx7Legacy &o) const { return v < o.v; }
+};
+static_assert(std::is_same_v<decltype(std::declval<std::array<Cxx7Legacy, 1>>() <=>
+                                      std::declval<std::array<Cxx7Legacy, 1>>()),
+                             std::weak_ordering>);
+
 struct MoveProbe {
     int *dtors;
     explicit MoveProbe(int *d) : dtors(d) {}
@@ -843,6 +853,20 @@ struct MoveProbe {
 
 void Phase7a()
 {
+    // ── Ф22b synth-three-way: container operator<=> with a legacy element
+    //    (only < / ==) must route through synth; normal types still work. ──
+    {
+        std::vector<Cxx7Legacy> va{{1}, {2}}, vb{{1}, {3}};
+        Check((va <=> vb) < 0 && (va <=> va) == 0 && (vb <=> va) > 0,
+              "phase7a vector<=> synth(legacy)");
+        std::list<Cxx7Legacy> la{{1}, {2}}, lb{{1}, {2}, {0}};
+        Check((la <=> lb) < 0 && (la <=> la) == 0, "phase7a list<=> synth(legacy)");
+        std::deque<Cxx7Legacy> da{{2}}, db{{1}};
+        Check((da <=> db) > 0, "phase7a deque<=> synth(legacy)");
+        std::vector<int> n1{1, 2}, n2{1, 2, 3};   // normal-type regression
+        Check((n1 <=> n2) < 0 && (n1 <=> n1) == 0, "phase7a vector<=> int regression");
+    }
+
     // ── string: SSO boundary and heap migration ─────────────────────────
     std::string s(15, 'x');
     const char *obj = reinterpret_cast<const char *>(&s);

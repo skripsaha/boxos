@@ -146,10 +146,11 @@ constexpr bool operator==(const array<T, N> &a, const array<T, N> &b)
 
 template <typename T, size_t N>
 constexpr auto operator<=>(const array<T, N> &a, const array<T, N> &b)
+    -> __cmp::synth_three_way_result_t<T>
 {
-    using Cat = decltype(a[0] <=> b[0]);
+    using Cat = __cmp::synth_three_way_result_t<T>;
     for (size_t i = 0; i < N; ++i)
-        if (auto c = a[i] <=> b[i]; c != 0) return c;
+        if (auto c = __cmp::SynthThreeWay{}(a[i], b[i]); c != 0) return c;
     return Cat::equivalent;
 }
 

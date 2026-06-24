@@ -527,6 +527,20 @@ bool operator==(const list<T, A> &a, const list<T, A> &b)
 }
 
 template <typename T, typename A>
+auto operator<=>(const list<T, A> &a, const list<T, A> &b)
+    -> __cmp::synth_three_way_result_t<T>
+{
+    using Cat = __cmp::synth_three_way_result_t<T>;
+    auto ia = a.begin();
+    auto ib = b.begin();
+    for (; ia != a.end() && ib != b.end(); ++ia, ++ib)
+        if (auto c = __cmp::SynthThreeWay{}(*ia, *ib); c != 0) return c;
+    return a.size() == b.size() ? Cat::equivalent
+           : a.size() < b.size() ? Cat::less
+                                 : Cat::greater;
+}
+
+template <typename T, typename A>
 void swap(list<T, A> &a, list<T, A> &b) noexcept
 {
     a.swap(b);

@@ -675,11 +675,13 @@ template <> struct SignedBySize<1> { using type = signed char; };
 template <> struct SignedBySize<2> { using type = short; };
 template <> struct SignedBySize<4> { using type = int; };
 template <> struct SignedBySize<8> { using type = long long; };
+template <> struct SignedBySize<16> { using type = __int128; };  // is_integral admits __int128
 template <size_t Size> struct UnsignedBySize;
 template <> struct UnsignedBySize<1> { using type = unsigned char; };
 template <> struct UnsignedBySize<2> { using type = unsigned short; };
 template <> struct UnsignedBySize<4> { using type = unsigned int; };
 template <> struct UnsignedBySize<8> { using type = unsigned long long; };
+template <> struct UnsignedBySize<16> { using type = unsigned __int128; };
 
 // Map T to its (un)signed counterpart, preserving cv. Standard integer
 // types map within the standard set; enums/char-likes map by width.

@@ -41,7 +41,13 @@ template <class T>
         return T(U(__builtin_bswap16(U(value))));
     else if constexpr (sizeof(T) == 4)
         return T(U(__builtin_bswap32(U(value))));
-    else
+    else if constexpr (sizeof(T) == 16) {
+        // No 64-bit-truncating bswap for 128-bit: swap each half, then the
+        // halves. (__builtin_bswap64 only sees 64 bits.)
+        unsigned long long lo = (unsigned long long)U(value);
+        unsigned long long hi = (unsigned long long)(U(value) >> 64);
+        return T((U(__builtin_bswap64(lo)) << 64) | U(__builtin_bswap64(hi)));
+    } else
         return T(U(__builtin_bswap64(U(value))));
 }
 
