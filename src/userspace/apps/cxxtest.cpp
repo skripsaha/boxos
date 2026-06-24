@@ -2686,17 +2686,22 @@ void PhaseCurrent()
         box::current<Sample> r("cxx:current:stream", box::role::read);
         Check(bool(w) && bool(r), "phaseCurrent stream open");
         bool put_ok = true;
-        for (int i = 0; i < 3; i++) put_ok = put_ok && w.put(Sample{i, (unsigned)(i * 11)});
+        for (int i = 0; i < 3; i++) put_ok = put_ok && w.put(Sample{i, (unsigned)(i * 11)}).has_value();
         Check(put_ok, "phaseCurrent stream put");
         bool take_ok = true;
         for (int i = 0; i < 3; i++) {
             Sample s{};
-            take_ok = take_ok && r.take(s) && s.id == i && s.tag == (unsigned)(i * 11);
+            box::result<bool> got = r.take(s);
+            take_ok = take_ok && got.has_value() && *got &&
+                      s.id == i && s.tag == (unsigned)(i * 11);
         }
         Check(take_ok, "phaseCurrent stream take");
         w.close();
         Sample drained{};
-        Check(!r.take(drained), "phaseCurrent stream CURRENT_CLOSED");
+        // After close+drain the take is the honest tri-state: a `false` VALUE
+        // (CURRENT_CLOSED), NOT an error arm.
+        box::result<bool> closed = r.take(drained);
+        Check(closed.has_value() && *closed == false, "phaseCurrent stream CURRENT_CLOSED");
     }
 
     // Byte channel over a TagFS file: write, then read back.
@@ -2718,9 +2723,10 @@ void PhaseCurrent()
     {
         box::current<std::uint16_t> w("cxx:current:small", box::role::write, CURRENT_CREATE);
         box::current<std::uint16_t> r("cxx:current:small", box::role::read);
-        bool          ok = bool(w) && bool(r) && w.put(0xC0DE);
+        bool          ok = bool(w) && bool(r) && w.put(0xC0DE).has_value();
         std::uint16_t v  = 0;
-        ok = ok && r.take(v) && v == 0xC0DE;
+        box::result<bool> got = r.take(v);
+        ok = ok && got.has_value() && *got && v == 0xC0DE;
         Check(ok, "phaseCurrent small-item padding");
     }
 
@@ -4173,9 +4179,12 @@ void Phase20()
     }
 
     // ── producer path — deterministic negatives exercise the real syscall ──
-    Check(!box::send(0u, "x", 1), "phase20 send to pid 0 rejected");
+    // send/broadcast now return box::status: failure is the error arm (operator
+    // bool false), and the real cause survives in .error().code().
+    box::status s0 = box::send(0u, "x", 1);
+    Check(!s0 && static_cast<bool>(s0.error()), "phase20 send to pid 0 rejected (cause surfaced)");
     Check(!box::broadcast("cxx:msg:no:subscriber", "x", 1),
-          "phase20 broadcast with no subscribers returns false");
+          "phase20 broadcast with no subscribers is an error status");
 
     // ── cross-cabin delivery — closes the Ф12 pocket_recv runtime debt ─────
     // proca sends 'A' to its spawner (us) five times. Receive the first via
@@ -4345,10 +4354,11 @@ void Phase22()
     Check(me.alive(), "phase22 process::self().alive()");
 
     // ── self process tags (broadcast membership) ────────────────────────
+    // add_tag/remove_tag now return box::status (empty == success).
     Check(!box::this_process::has_tag("cxx:p22:tag"), "phase22 tag absent initially");
-    Check(box::this_process::add_tag("cxx:p22:tag"), "phase22 add_tag");
+    Check(box::this_process::add_tag("cxx:p22:tag").has_value(), "phase22 add_tag");
     Check(box::this_process::has_tag("cxx:p22:tag"), "phase22 has_tag after add");
-    Check(box::this_process::remove_tag("cxx:p22:tag"), "phase22 remove_tag");
+    Check(box::this_process::remove_tag("cxx:p22:tag").has_value(), "phase22 remove_tag");
     Check(!box::this_process::has_tag("cxx:p22:tag"), "phase22 tag gone after remove");
 
     // ── box::tag_scope RAII (carry a process tag for a scope) ───────────
@@ -4360,13 +4370,14 @@ void Phase22()
     Check(!box::this_process::has_tag("cxx:p22:scope"),
           "phase22 tag removed after scope (RAII)");
 
-    // ── box::process::spawn (a new cabin) ───────────────────────────────
-    box::process child = box::process::spawn("proca");
+    // ── box::process::spawn (a new cabin) — now box::result<process> ────
+    box::result<box::process> child = box::process::spawn("proca");
     if (child) {
-        Check(child.pid() != 0 && child.pid() != pid, "phase22 process::spawn child pid");
+        Check(child->pid() != 0 && child->pid() != pid, "phase22 process::spawn child pid");
         while (box::receive()) { /* drain proca's messages to its spawner (us) */ }
     } else {
-        printf("[CXX] note phase22: proc_exec unavailable; spawn check skipped\n");
+        printf("[CXX] note phase22: proc_exec unavailable (%.*s); spawn check skipped\n",
+               (int)child.error().message().size(), child.error().message().data());
     }
 
     printf("[CXX] PASS phase22: box::this_process/process/cabin (identity/info/spawn) + "
@@ -4377,7 +4388,7 @@ void Phase22()
 void Phase23()
 {
     // ── box::system::info() — machine snapshot, sanity invariants ────────
-    std::optional<box::system_info> si = box::system::info();
+    box::result<box::system_info> si = box::system::info();
     Check(si.has_value(), "phase23 system::info() returns a snapshot");
     if (si) {
         Check(si->version().substr(0, 5) == "BoxOS", "phase23 system version is BoxOS");
@@ -4400,12 +4411,12 @@ void Phase23()
     (void)shutdown_fn;
 
     // ── box::efi — firmware introspection (config-agnostic) ──────────────
-    std::optional<box::efi_status> efi = box::efi::info();
+    box::result<box::efi_status> efi = box::efi::info();
     if (efi) {
         std::vector<efi_esrt_entry_t> tbl = box::efi::esrt();
         Check(tbl.size() == efi->esrt_count(), "phase23 efi::esrt() range matches esrt_count");
         Check(!box::efi::esrt_entry(efi->esrt_count() + 1000u).has_value(),
-              "phase23 efi::esrt_entry out-of-range -> nullopt");
+              "phase23 efi::esrt_entry out-of-range is an error arm");
     } else {
         printf("[CXX] note phase23: efi::info() unavailable on this config\n");
     }
@@ -4428,7 +4439,7 @@ void Phase24()
     // recalibration publishes the new value to the static and to the cpu_caps
     // page in separate stores, so the two reads can momentarily disagree on
     // real hardware with thermal drift — only its >0 invariant is stable.)
-    std::optional<box::system_info> si = box::system::info();
+    box::result<box::system_info> si = box::system::info();
     if (si) {
         Check(box::cpu::has_waitpkg() == si->waitpkg(),
               "phase24 has_waitpkg agrees with system_info");
@@ -4505,7 +4516,7 @@ void Phase24()
 void Phase25()
 {
     // ── box::memtag::counters() — global registry snapshot, invariants ──────
-    std::optional<box::memtag::stats> st = box::memtag::counters();
+    box::result<box::memtag::stats> st = box::memtag::counters();
     Check(st.has_value(), "phase25 memtag::counters() returns a snapshot");
     if (st) {
         Check(st->region_active() >= 1, "phase25 at least one active region");
@@ -4518,15 +4529,18 @@ void Phase25()
     //    the kernel seeds zone tags at boot; we derive a real one at runtime).
     //    Prefer one whose base is phys-mapped so the covering() lookup below
     //    has a positive case; fall back to any tagged region otherwise. ───────
+    // find()/covering() now return box::result<region>; the local accumulators
+    // stay std::optional (test bookkeeping — a "not found" is a normal skip, and
+    // region has no empty state of its own). Convert via has_value()/operator*.
     std::optional<box::memtag::region> found;          // tagged AND phys-mapped
     std::optional<box::memtag::region> any_tagged;     // fallback: any tagged
     std::uint32_t walk = st ? st->region_slot_count() : 0;
     if (walk > 256) walk = 256;  // zones are seeded into low slots; bound the scan
     for (std::uint32_t id = 0; id < walk && !found; ++id) {
-        std::optional<box::memtag::region> r = box::memtag::find(id);
+        box::result<box::memtag::region> r = box::memtag::find(id);
         if (!r || r->tag_count() == 0) continue;
-        if (!any_tagged) any_tagged = r;
-        if (box::memtag::covering(r->base_phys())) found = r;  // base resolves via id_by_page
+        if (!any_tagged) any_tagged = *r;
+        if (box::memtag::covering(r->base_phys())) found = *r;  // base resolves via id_by_page
     }
     if (!found) found = any_tagged;
 
@@ -4542,8 +4556,8 @@ void Phase25()
             // covering(phys) returns the region that genuinely COVERS phys (the
             // kernel keeps one owner per page in id_by_page, so an overlapped or
             // non-phys region need not be the owner — assert range containment,
-            // not id identity). nullopt means the base isn't in the phys map.
-            std::optional<box::memtag::region> cov = box::memtag::covering(found->base_phys());
+            // not id identity). An error arm means the base isn't in the phys map.
+            box::result<box::memtag::region> cov = box::memtag::covering(found->base_phys());
             if (cov) {
                 std::uint64_t b = found->base_phys();
                 Check(b >= cov->base_phys() && b < cov->base_phys() + cov->size_bytes(),
@@ -4575,13 +4589,14 @@ void Phase25()
     //    bears 'cxx:p25:*', so this can never perturb the live system, and we
     //    revoke/clear afterwards. grant/set_guard need the "system" tag-bit, so
     //    an unprivileged cabin simply gets a clean false (noted, not failed). ─
-    bool granted = box::memtag::grant(me, "cxx:p25:cap");
+    // grant/revoke/set_guard now return box::status (empty == success).
+    box::status granted = box::memtag::grant(me, "cxx:p25:cap");
     if (granted) {
         std::vector<std::string> ct = box::memtag::cabin_tags(me);
         bool has = false;
         for (const auto &t : ct) if (t == "cxx:p25:cap") has = true;
         Check(has, "phase25 grant reflected in cabin_tags");
-        Check(box::memtag::revoke(me, "cxx:p25:cap"), "phase25 revoke succeeds");
+        Check(box::memtag::revoke(me, "cxx:p25:cap").has_value(), "phase25 revoke succeeds");
         std::vector<std::string> ct2 = box::memtag::cabin_tags(me);
         bool still = false;
         for (const auto &t : ct2) if (t == "cxx:p25:cap") still = true;
@@ -7755,6 +7770,144 @@ void Phase44()
            "contract + honest std interop + errno-lie regression\n");
 }
 
+// Ф23b-2a — the retrofitted scalar surfaces now carry the REAL kernel cause all
+// the way to box::error (cause-recovery), and the typed stream is an honest
+// tri-state (item / closed-VALUE / error-arm). This is the proof the bool/-1/
+// nullopt collapse is gone, not just that the API compiles.
+void Phase45()
+{
+    struct Frame { int seq; unsigned mark; };
+
+    // ── 1. TYPED-STREAM TRI-STATE (deterministic) ───────────────────────────
+    // Same-cabin writer + reader on a Brook-backed tag (PhaseCurrent's pattern):
+    // write N, close, and the reader sees N `true` VALUES then a `false` VALUE —
+    // the honest CURRENT_CLOSED terminator, which must NOT be an error arm.
+    {
+        constexpr int N = 4;
+        box::current<Frame> w("cxx:p45:tri", box::role::write);  // writer auto-creates
+        box::current<Frame> r("cxx:p45:tri", box::role::read);
+        Check(bool(w) && bool(r), "phase45 tri-state stream open");
+
+        bool put_ok = true;
+        for (int i = 0; i < N; i++)
+            put_ok = put_ok && w.put(Frame{i, (unsigned)(i * 7)}).has_value();
+        Check(put_ok, "phase45 put returns empty status on success");
+
+        w.close();  // announce end-of-stream; the reader drains, then observes close
+
+        int got = 0;
+        bool items_ok = true, terminated_as_value = false;
+        for (int guard = 0; guard < N + 4; ++guard) {
+            Frame f{};
+            box::result<bool> take = r.take(f);
+            Check(take.has_value(), "phase45 take never spuriously faults before close");
+            if (!take.has_value()) break;
+            if (*take) {                       // an item
+                items_ok = items_ok && f.seq == got && f.mark == (unsigned)(got * 7);
+                ++got;
+            } else {                           // the CURRENT_CLOSED terminator
+                terminated_as_value = true;    // a VALUE(false), not an error arm
+                break;
+            }
+        }
+        Check(got == N && items_ok, "phase45 drains exactly N items in order");
+        Check(terminated_as_value,
+              "phase45 close terminator is a VALUE(false), NOT an error arm (honest, not EOF)");
+    }
+
+    // would_block on an empty NONBLOCK stream lands in the ERROR ARM with the
+    // recovered cause. Kept robust: a successful item is the only hard failure;
+    // when it IS an error arm the code must be would_block.
+    {
+        box::current<Frame> w("cxx:p45:wb", box::role::write);
+        box::current<Frame> r("cxx:p45:wb", box::role::read, CURRENT_NONBLOCK);
+        if (w && r) {
+            Frame f{};
+            box::result<bool> take = r.take(f);  // stream is empty, writer still open
+            Check(!(take.has_value() && *take == true),
+                  "phase45 empty NONBLOCK take is not a successful item");
+            if (!take.has_value())
+                Check(take.error().code() == box::errc::would_block,
+                      "phase45 empty NONBLOCK take error arm == would_block");
+            else
+                printf("[CXX] note phase45: NONBLOCK empty take returned a VALUE "
+                       "(%d) on this backing — would_block arm not exercised\n", (int)*take);
+        } else {
+            printf("[CXX] note phase45: NONBLOCK stream could not be opened — "
+                   "would_block case skipped\n");
+        }
+    }
+
+    // ── 2. SCALAR CAUSE-RECOVERY — every error arm carries a NON-OK box::error ─
+
+    // process::info() on a pid that names no live process: error arm, non-ok, and
+    // a plausible process-class cause.
+    {
+        box::result<proc_info_t> info = box::process(0xFFFEu).info();
+        Check(!info.has_value() && static_cast<bool>(info.error()),
+              "phase45 process(0xFFFE).info() error arm carries a non-ok cause");
+        box::errc c = info.error().code();
+        Check(c == box::errc::process_not_found || c == box::errc::invalid_pid ||
+                  c == box::errc::internal || c == box::errc::object_not_found,
+              "phase45 missing-process cause is a plausible process-class errc");
+    }
+
+    // spawn() of a binary that does not exist: error arm, non-ok cause.
+    {
+        box::result<box::process> sp = box::process::spawn("__no_such_binary_zzz__");
+        Check(!sp.has_value() && static_cast<bool>(sp.error()),
+              "phase45 spawn(nonexistent) error arm carries a non-ok cause");
+        box::errc c = sp.error().code();
+        Check(c == box::errc::spawn_failed || c == box::errc::file_not_found ||
+                  c == box::errc::object_not_found || c == box::errc::invalid_elf ||
+                  c == box::errc::internal,
+              "phase45 spawn-failure cause is a plausible process/storage errc");
+    }
+
+    // memtag::find() on a region id that names no live region: error arm, non-ok.
+    {
+        box::result<box::memtag::region> rg = box::memtag::find(0xFFFFFFFEu);
+        Check(!rg.has_value() && static_cast<bool>(rg.error()),
+              "phase45 memtag::find(bogus id) error arm carries a non-ok cause");
+    }
+
+    // send() to pid 0: error STATUS with a non-ok cause (a route error).
+    {
+        std::uint32_t payload = 0xABCD1234u;
+        box::status s = box::send(0u, payload);
+        Check(!s.has_value() && static_cast<bool>(s.error()),
+              "phase45 send(pid 0) error status carries a non-ok cause");
+    }
+
+    // ── 3. HAPPY PATH flows through result cleanly (success is not collapsed) ──
+    {
+        box::result<box::system_info> si = box::system::info();
+        Check(si.has_value(), "phase45 system::info() SUCCEEDS through box::result");
+        if (si)
+            Check(si->total_memory() > 0 && si->cpu_total() >= 1,
+                  "phase45 system::info() value is usable on the happy path");
+    }
+    {
+        // A valid byte channel: write succeeds, and seek() returns an empty status.
+        box::byte_current f = box::file("cxx_p45.dat", box::role::write);
+        if (f) {
+            Check(f.write("p45", 3) == 3, "phase45 valid channel write succeeds");
+            f = box::byte_current{};  // release writer (RAII)
+            box::byte_current fr = box::file("cxx_p45.dat", box::role::read, 0);
+            if (fr) {
+                box::status sk = fr.seek(0);
+                Check(sk.has_value(), "phase45 seek on a seekable file is an empty (success) status");
+            }
+        } else {
+            printf("[CXX] note phase45: file channel unavailable — seek success case skipped\n");
+        }
+    }
+
+    printf("[CXX] PASS phase45: cause-recovery — typed-stream tri-state "
+           "(item/closed-VALUE/error-arm) + scalar error arms carry the real "
+           "kernel cause + happy path flows through box::result\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -7821,6 +7974,7 @@ int main()
     Phase42();
     Phase43();
     Phase44();
+    Phase45();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

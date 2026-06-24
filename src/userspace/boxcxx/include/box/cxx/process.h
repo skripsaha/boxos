@@ -20,12 +20,12 @@
 #define BOXCXX_BOX_PROCESS_H
 
 #include <cstdint>
-#include <optional>
 #include <string>
 #include <utility>
 
 #include "box/system.h"       // proc_exec / proc_info / proc_tag_* / proc_info_t
 #include "box/core/cabin.h"   // CabinInfo + cabin_info()
+#include "box/cxx/error.h"    // box::status / box::result / box::error
 
 namespace box {
 
@@ -36,9 +36,20 @@ inline std::uint32_t pid() noexcept { return cabin_info()->pid; }
 inline std::uint32_t spawner() noexcept { return cabin_info()->spawner_pid; }  // launcher pid
 
 // Process tags decide broadcast membership (box::broadcast(tag, …) reaches every
-// process carrying that tag). These act on the calling process.
-inline bool add_tag(const char *tag) noexcept { return tag && ::proc_tag_add(tag) == 0; }
-inline bool remove_tag(const char *tag) noexcept { return tag && ::proc_tag_remove(tag) == 0; }
+// process carrying that tag). These act on the calling process. Empty status on
+// success; the error arm carries the real kernel cause (e.g. tag_limit_exceeded,
+// invalid_tag) instead of collapsing it to a bool.
+inline status add_tag(const char *tag) noexcept
+{
+    return tag ? _detail::from_status(::proc_tag_add(tag))
+               : std::unexpected(error{errc::invalid_argument});
+}
+inline status remove_tag(const char *tag) noexcept
+{
+    return tag ? _detail::from_status(::proc_tag_remove(tag))
+               : std::unexpected(error{errc::invalid_argument});
+}
+// has_tag stays a predicate: "not present" is a normal false, not a cause.
 inline bool has_tag(const char *tag) noexcept
 {
     bool h = false;
@@ -68,30 +79,41 @@ public:
     process() noexcept = default;
     explicit process(std::uint32_t pid) noexcept : pid_(pid) {}
 
-    // Spawn a program as a new cabin; empty handle (operator bool == false) on
-    // failure. Returns the child's pid handle.
-    static process spawn(const char *name) noexcept
+    // Spawn a program as a new cabin. On success a process handle for the child's
+    // pid; the error arm carries the real cause — the recovered kernel error_t
+    // (e.g. file_not_found for an unknown binary, process_limit_exceeded), or
+    // spawn_failed when the kernel returned no pid without naming a cause.
+    static result<process> spawn(const char *name) noexcept
     {
-        int p = name ? ::proc_exec(name) : -1;
-        return p > 0 ? process(static_cast<std::uint32_t>(p)) : process();
+        if (!name) return std::unexpected(error{errc::invalid_argument});
+        int p = ::proc_exec(name);
+        if (p > 0) return process(static_cast<std::uint32_t>(p));
+        return std::unexpected(error{p < 0 ? box_errno_of(p)
+                                           : static_cast<::error_t>(ERR_SPAWN_FAILED)});
     }
     static process self() noexcept { return process(this_process::pid()); }
 
     std::uint32_t pid() const noexcept { return pid_; }
     explicit operator bool() const noexcept { return pid_ != 0; }
 
-    // A snapshot of this process (pid / state / priority / memory); nullopt on
-    // error (e.g. the process has gone).
-    std::optional<proc_info_t> info() const noexcept
+    // A snapshot of this process (pid / state / priority). On success the
+    // descriptor; the error arm carries the cause — invalid_pid for an out-of-
+    // range handle, or the recovered kernel error_t (e.g. process_not_found once
+    // the process has gone).
+    result<proc_info_t> info() const noexcept
     {
-        if (pid_ == 0 || pid_ > 0xFFFFu) return std::nullopt;  // proc_info pid is 16-bit
+        if (pid_ == 0 || pid_ > 0xFFFFu)  // proc_info pid is 16-bit
+            return std::unexpected(error{errc::invalid_pid});
         proc_info_t i{};
-        if (::proc_info(static_cast<std::uint16_t>(pid_), &i) != 0) return std::nullopt;
+        int rc = ::proc_info(static_cast<std::uint16_t>(pid_), &i);
+        if (rc != 0) return std::unexpected(error{box_errno_of(rc)});
         return i;
     }
+    // Predicate: alive iff info() succeeds and the state is not terminated. "Gone"
+    // (info() in the error arm) reads as not-alive, never a thrown cause.
     bool alive() const noexcept
     {
-        std::optional<proc_info_t> i = info();
+        auto i = info();
         return i.has_value() && i->state != PROC_STATE_TERMINATED;
     }
 };

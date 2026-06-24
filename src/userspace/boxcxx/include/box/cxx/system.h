@@ -22,13 +22,13 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
-#include <optional>
 #include <span>
 #include <string_view>
 #include <vector>
 
 #include "box/system.h"  // sysinfo / reboot / shutdown / perf_dump / defrag /
                          // fragmentation / efi_* + the POD types & enums
+#include "box/cxx/error.h"  // box::status / box::result / box::error
 
 namespace box {
 
@@ -70,26 +70,38 @@ public:
 // ── box::system — info + maintenance + control ──────────────────────────────
 namespace system {
 
-// A snapshot of the machine; nullopt if the kernel call fails.
-inline std::optional<box::system_info> info() noexcept
+// A snapshot of the machine; on success the view, otherwise the recovered
+// kernel cause in the error arm.
+inline result<box::system_info> info() noexcept
 {
     system_info_t s{};
-    if (::sysinfo(&s) != 0) return std::nullopt;
+    int rc = ::sysinfo(&s);
+    if (rc != 0) return std::unexpected(error{box_errno_of(rc)});
     return box::system_info(s);
 }
 
-inline bool perf_dump() noexcept { return ::perf_dump() == 0; }       // dump perf counters to log
-inline int  fragmentation() noexcept { return ::fragmentation(); }    // kernel-defined fragmentation metric
-inline bool defrag(std::uint32_t file_id, std::uint32_t target_block) noexcept
+// Dump perf counters to the log. Empty status on success; the error arm carries
+// the cause.
+inline status perf_dump() noexcept { return _detail::from_status(::perf_dump()); }
+
+// The kernel-defined fragmentation metric (>= 0 on success); the error arm
+// carries the cause on a failed call.
+inline result<int> fragmentation() noexcept { return _detail::from_ret<int>(::fragmentation()); }
+
+// Defragment a file toward target_block. On success the kernel returns the
+// resulting fragmentation SCORE (>= 0) — surfaced as the value here; the error
+// arm carries the cause. (A nonzero score is a SUCCESS, not a failure: the old
+// `== 0` bool form wrongly read any nonzero score as failure.)
+inline result<int> defrag(std::uint32_t file_id, std::uint32_t target_block) noexcept
 {
-    return ::defrag(file_id, target_block) == 0;
+    return _detail::from_ret<int>(::defrag(file_id, target_block));
 }
 
 // reboot() / shutdown() act on the whole machine and return ONLY on failure
-// (on success control never comes back). A false return means the request
-// could not be issued (e.g. no ACPI path).
-inline bool reboot() noexcept { return ::reboot() == 0; }
-inline bool shutdown() noexcept { return ::shutdown() == 0; }
+// (on success control never comes back). The error arm then names the real
+// cause the request failed with (e.g. no ACPI path -> internal).
+inline status reboot() noexcept { return _detail::from_status(::reboot()); }
+inline status shutdown() noexcept { return _detail::from_status(::shutdown()); }
 
 }  // namespace system
 
@@ -118,31 +130,35 @@ public:
 // ── box::efi — firmware introspection ───────────────────────────────────────
 namespace efi {
 
-// Firmware state snapshot; nullopt if the kernel call fails.
-inline std::optional<box::efi_status> info() noexcept
+// Firmware state snapshot; on success the view, otherwise the recovered cause.
+inline result<box::efi_status> info() noexcept
 {
     efi_info_t e{};
-    if (::efi_info(&e) != 0) return std::nullopt;
+    int rc = ::efi_info(&e);
+    if (rc != 0) return std::unexpected(error{box_errno_of(rc)});
     return box::efi_status(e);
 }
 
-// One ESRT entry by index ([0, esrt_count)); nullopt on error.
-inline std::optional<efi_esrt_entry_t> esrt_entry(std::uint32_t idx) noexcept
+// One ESRT entry by index ([0, esrt_count)); on success the entry, otherwise the
+// recovered cause in the error arm.
+inline result<efi_esrt_entry_t> esrt_entry(std::uint32_t idx) noexcept
 {
     efi_esrt_entry_t en{};
-    if (::efi_esrt_entry(idx, &en) != 0) return std::nullopt;
+    int rc = ::efi_esrt_entry(idx, &en);
+    if (rc != 0) return std::unexpected(error{box_errno_of(rc)});
     return en;
 }
 
-// The whole EFI System Resource Table as a range (empty when unpublished).
+// The whole EFI System Resource Table as a range (empty when unpublished — a
+// valid answer, so this stays a collection rather than a result<vector>).
 inline std::vector<efi_esrt_entry_t> esrt()
 {
     std::vector<efi_esrt_entry_t> out;
-    std::optional<box::efi_status> st = info();
+    result<box::efi_status> st = info();
     if (!st) return out;
     out.reserve(st->esrt_count());
     for (std::uint32_t i = 0; i < st->esrt_count(); ++i)
-        if (std::optional<efi_esrt_entry_t> e = esrt_entry(i)) out.push_back(*e);
+        if (result<efi_esrt_entry_t> e = esrt_entry(i)) out.push_back(*e);
     return out;
 }
 
