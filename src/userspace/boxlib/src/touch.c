@@ -4,9 +4,11 @@
 #include "box/core/touch_ring.h"
 #include "box/core/notify.h"
 #include "box/core/pocket.h"
+#include "box/core/strand_self.h"  /* strand_info_or_null — per-strand stash selector */
 #include "box/cpu.h"
 #include "box/clock.h"
 #include "box/string.h"
+#include "box/memory.h"            /* malloc / free — per-strand stash heap-backing */
 #include "box/error.h"
 #include "boxos_decks.h"  /* DECK_SYSTEM + SYSTEM_OP_TOUCH_* — single source */
 
@@ -258,21 +260,61 @@ bool touch_wait(Touch *out, uint32_t timeout_ms)
  * For realistic interleaving (a few actively-drained tags) the bound is never
  * approached.
  *
- * Locking: none — valid only while a cabin has a single execution context (the
- * cooperative box::executor). When Strands (multiple contexts per cabin) land,
- * concurrent touch_*_tag callers must synchronize the stash. */
+ * Locking: none — but now CORRECT under multiple strands per cabin (Ф21). The
+ * stash is PER-STRAND, not per-cabin. touch_pop / touch_ring already route per
+ * strand (strand_rings().touch_va — each strand drains its OWN TouchRing); this
+ * stash is the symmetric completion. The MAIN strand keeps the static globals
+ * below (so the shell/keyboard consume path is byte-identical); a SPAWNED strand
+ * gets its own heap StrandTouchStash, lazily malloc'd and cached in its
+ * StrandInfo (mirrors strand_pool_ptr / the per-strand result stash). A strand
+ * is the single writer of its own stash, so no shared mutable state remains on
+ * the consume path — no lock. */
 #define TOUCH_STASH_MAX 256
 static Touch    g_touch_stash[TOUCH_STASH_MAX];
 static uint32_t g_touch_stash_count;
 
-static bool touch_stash_take(TouchTag tag, Touch *out)
+/* Read-only zero sentinel for the alloc-failure ("no-stash") view: a stash-less
+ * strand's view.count points here so the cap==0 degrade paths can read *count
+ * (always 0) without a NULL deref. CONTRACT: every `(*v.count)++` MUST be guarded
+ * by `*v.count < v.cap`; with cap==0 that guard is false, so the no-stash view
+ * never increments and this shared sentinel stays read-only. Preserve that. */
+static uint32_t g_touch_nostash_count;
+
+/* Heap-backed stash for a spawned strand (30724 B = 4 (count) + 256*120 — too big
+ * to inline in the ~4 KiB-spare StrandInfo, so the pointer is cached there). */
+typedef struct { uint32_t count; Touch entries[TOUCH_STASH_MAX]; } StrandTouchStash;
+
+/* A resolved view of the calling strand's stash: where its entries live, the
+ * count to update, and the cap (0 == "no stash", see touch_stash_self). */
+typedef struct { Touch *entries; uint32_t *count; uint32_t cap; } touch_stash_view_t;
+
+/* The calling strand's stash. Main → the static globals (byte-identical to the
+ * pre-Ф21 path). Spawned → its heap StrandTouchStash, lazily malloc'd + cached
+ * in StrandInfo. Alloc failure → {NULL,NULL,0} "no-stash" view: callers degrade
+ * to pure pass-through, never crash/corrupt. Single-writer per strand → no lock. */
+static touch_stash_view_t touch_stash_self(void)
 {
-    for (uint32_t i = 0; i < g_touch_stash_count; i++) {
-        if (g_touch_stash[i].tag_id == tag) {
-            *out = g_touch_stash[i];
-            for (uint32_t j = i; j + 1 < g_touch_stash_count; j++)
-                g_touch_stash[j] = g_touch_stash[j + 1];
-            g_touch_stash_count--;
+    StrandInfo *si = strand_info_or_null();
+    if (!si) { touch_stash_view_t v = { g_touch_stash, &g_touch_stash_count, TOUCH_STASH_MAX }; return v; }
+    StrandTouchStash *s = (StrandTouchStash *)(uintptr_t)si->touch_stash_ptr;
+    if (!s) {
+        s = (StrandTouchStash *)malloc(sizeof(StrandTouchStash));
+        if (!s) { touch_stash_view_t none = { NULL, &g_touch_nostash_count, 0 }; return none; }
+        s->count = 0;
+        si->touch_stash_ptr = (uint64_t)(uintptr_t)s;
+    }
+    touch_stash_view_t v = { s->entries, &s->count, TOUCH_STASH_MAX }; return v;
+}
+
+static bool touch_stash_take(touch_stash_view_t v, TouchTag tag, Touch *out)
+{
+    if (!v.entries) return false;
+    for (uint32_t i = 0; i < *v.count; i++) {
+        if (v.entries[i].tag_id == tag) {
+            *out = v.entries[i];
+            for (uint32_t j = i; j + 1 < *v.count; j++)
+                v.entries[j] = v.entries[j + 1];
+            (*v.count)--;
             return true;
         }
     }
@@ -282,11 +324,22 @@ static bool touch_stash_take(TouchTag tag, Touch *out)
 bool touch_try_pop_tag(TouchTag tag, Touch *out)
 {
     if (tag == TOUCH_TAG_INVALID || !out) return false;
-    if (touch_stash_take(tag, out)) return true;
+    touch_stash_view_t v = touch_stash_self();
+    if (touch_stash_take(v, tag, out)) return true;
     Touch tmp;
-    while (g_touch_stash_count < TOUCH_STASH_MAX && touch_pop(&tmp)) {
+    if (v.cap == 0) {
+        /* Alloc-failure (stash-less) strand: still make progress on its OWN tag
+         * by draining its ring; a foreign non-matching slot is dropped (it has
+         * no stash to park in). This mirrors the forever-wait shedding below —
+         * liveness-preserving, never corrupt. */
+        while (touch_pop(&tmp)) {
+            if (tmp.tag_id == tag) { *out = tmp; return true; }
+        }
+        return false;
+    }
+    while (*v.count < v.cap && touch_pop(&tmp)) {
         if (tmp.tag_id == tag) { *out = tmp; return true; }
-        g_touch_stash[g_touch_stash_count++] = tmp;  /* not ours — keep for its tag */
+        v.entries[(*v.count)++] = tmp;  /* not ours — keep for its tag */
     }
     return false;
 }
@@ -294,6 +347,8 @@ bool touch_try_pop_tag(TouchTag tag, Touch *out)
 bool touch_wait_tag(TouchTag tag, Touch *out, uint32_t timeout_ms)
 {
     if (tag == TOUCH_TAG_INVALID || !out) return false;
+
+    touch_stash_view_t v = touch_stash_self();
 
     /* Absolute deadline (clock_uptime_ms-relative, as in brook.c); 0 == forever.
      * The loop re-arms the wait for the REMAINING budget after each non-matching
@@ -308,8 +363,10 @@ bool touch_wait_tag(TouchTag tag, Touch *out, uint32_t timeout_ms)
         if (timeout_ms) {
             /* No-drop backpressure: with no room to park another non-matching
              * wake, end the bounded wait so the caller can drain its other
-             * subscriptions and retry — every event stays intact. */
-            if (g_touch_stash_count >= TOUCH_STASH_MAX) return false;
+             * subscriptions and retry — every event stays intact. A stash-less
+             * strand (cap == 0) always takes this branch == never parks foreign
+             * events, the correct degrade. */
+            if (*v.count >= v.cap) return false;
             uint64_t now = clock_uptime_ms();
             if (now >= deadline) return false;            /* deadline elapsed */
             uint64_t rem = deadline - now;
@@ -324,14 +381,30 @@ bool touch_wait_tag(TouchTag tag, Touch *out, uint32_t timeout_ms)
         }
         if (tmp.tag_id == tag) { *out = tmp; return true; }
 
-        if (g_touch_stash_count < TOUCH_STASH_MAX) {
-            g_touch_stash[g_touch_stash_count++] = tmp;  /* park for its own tag */
+        if (*v.count < v.cap) {
+            v.entries[(*v.count)++] = tmp;  /* park for its own tag */
         }
-        /* else: forever wait + full stash — shed tmp. The bounded path already
-         * returned above on a full stash, so this is only the sole-waiter case,
-         * whose stashed foreign events have no consumer that can run to drain
-         * them; shedding preserves liveness (see the overflow note above). */
+        /* else: forever wait + full stash (or stash-less strand) — shed tmp. The
+         * bounded path already returned above on a full stash, so this is only
+         * the sole-waiter case, whose stashed foreign events have no consumer
+         * that can run to drain them; shedding preserves liveness (see the
+         * overflow note above). */
     }
+}
+
+/* Free this strand's per-strand Touch stash at strand exit (mirrors
+ * strand_pool_flush_self). Idempotent; main strand / never-allocated strand are
+ * no-ops. A strand that crashes WITHOUT calling strand_exit leaks its stash until
+ * the cabin's heap is torn down. Unlike the StrandPool slab (which needs a kernel
+ * orphan-stamp because its cached blocks are kernel-bound live heap other strands
+ * must reclaim), this stash is a single self-contained malloc with NO kernel
+ * binding — cabin heap teardown reclaims it wholesale, so no orphan-stamp. */
+void touch_stash_free_self(void)
+{
+    StrandInfo *si = strand_info_or_null();
+    if (!si || si->touch_stash_ptr == 0) return;
+    free((void *)(uintptr_t)si->touch_stash_ptr);
+    si->touch_stash_ptr = 0;
 }
 
 int touch_await(TouchTag tag, Touch *out, uint32_t timeout_ms)
