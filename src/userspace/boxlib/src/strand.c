@@ -89,6 +89,12 @@ void strand_release(uint32_t pid)
 
 void strand_exit(void)
 {
+    /* Ф20e — return this strand's StrandPool cache to the global heap and free
+     * its slab slot BEFORE we ask the kernel to terminate the strand. The slot's
+     * generation is bumped here, so even if the kernel were to race the orphan
+     * death-stamp it would miss; an orderly exit never leaves an ORPHANED slot. */
+    strand_pool_flush_self();
+
     /* Terminate just this strand: SYS_PROC_KILL(target == 0) means self.
      * No __box_runtime_fini / io_flush / spawner-notify — those are exit()'s
      * job for the whole cabin and would wrongly run global teardown on a

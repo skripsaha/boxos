@@ -60,6 +60,11 @@ typedef struct StrandInfo {
      * StrandStashRing and uses them for ipc / non-ipc result buffering. */
     uint8_t  ipc_stash[STRAND_STASH_BYTES];
     uint8_t  non_ipc_stash[STRAND_STASH_BYTES];
+    /* Ф20e — this strand's claimed StrandPool slab slot (boxlib memory.c).
+     * Kernel zero-inits the whole block (strand_rings.c pmm_alloc_zero), so 0
+     * means "not yet claimed"; boxlib lazy-claims a slab slot on first malloc
+     * and caches the pointer here for the lock-free fast path. */
+    uint64_t strand_pool_ptr;
 } StrandInfo;
 
 #ifdef __cplusplus
@@ -76,6 +81,8 @@ STRAND_STATIC_ASSERT(__builtin_offsetof(StrandInfo, pocket_ring_va) == 32, "Stra
 STRAND_STATIC_ASSERT(__builtin_offsetof(StrandInfo, result_ring_va) == 40, "StrandInfo.result_ring_va @40");
 STRAND_STATIC_ASSERT(__builtin_offsetof(StrandInfo, touch_ring_va)  == 48, "StrandInfo.touch_ring_va @48");
 STRAND_STATIC_ASSERT(__builtin_offsetof(StrandInfo, ipc_stash)      == 56, "StrandInfo.ipc_stash @56");
+STRAND_STATIC_ASSERT(__builtin_offsetof(StrandInfo, strand_pool_ptr) ==
+                     56 + 2u * STRAND_STASH_BYTES, "StrandInfo.strand_pool_ptr last");
 /* The whole block must fit the Hammock StrandInfo reservation (4 pages =
  * 16 KiB — see HAMMOCK_STRANDINFO_PAGES in strand_rings.c). */
 STRAND_STATIC_ASSERT(sizeof(StrandInfo) <= 4u * 4096u, "StrandInfo must fit 4 pages");

@@ -9,8 +9,10 @@
 #include "box/core/notify.h"
 #include "box/core/cabin.h"
 #include "box/core/manifest.h"
+#include "box/core/strand_self.h"  /* strand_info_or_null / strand_self — pool selector */
 #include "box/print.h"
 #include "cabin_layout.h"
+#include "strand_pool_abi.h"       /* StrandPool layout (shared with kernel death-stamp) */
 
 /* Implicit 2 MiB heap pages.
  *
@@ -291,16 +293,328 @@ static void* alloc_locked(size_t size, uint8_t tag_id) {
 }
 
 // ---------------------------------------------------------------------------
+// StrandPool — per-strand magazine cache over the one global-locked heap
+//
+// Each strand owns one StrandPool (a private LIFO of free blocks per size
+// class). The fast path pops/pushes its own pool with NO lock — the same
+// single-writer-per-strand model as the per-strand result stash. A cached block
+// stays free=0 (the global heap still sees it LIVE); the magazine link is stored
+// in the block's payload first 8 bytes. The ONE global heap remains the source
+// of truth: refill calls alloc_locked N×, flush sets free=1 + one coalesce.
+// ---------------------------------------------------------------------------
+
+static const size_t   StrandPoolClassSize[STRAND_POOL_CLASS_COUNT] =
+    { 16, 32, 48, 64, 128, 256, 512, 1024, 2048, 4096, 8192 };
+static const uint16_t StrandPoolCapForClass[STRAND_POOL_CLASS_COUNT] =
+    {  8,  8,  8,  8,   8,   8,   4,    4,    2,    2,    1 };
+
+#define STRAND_POOL_REFILL_BATCH  4u
+#define STRAND_POOL_NO_CLASS      STRAND_POOL_CLASS_COUNT  /* "bypass the cache" */
+
+/* Cabin-persistent pool storage. The slab survives a strand's StrandInfo unmap
+ * on crash, so an orphaned slot's cached blocks are still reachable for reclaim.
+ * The slab IS the registry (linear scan, slow-path only — no linked list). The
+ * main strand uses a separate pool that can never be crash-orphaned. All slab
+ * fields are zero (FREE) at BSS init. */
+static StrandPool g_pool_slab[STRAND_POOL_SLAB_MAX];
+static StrandPool g_main_pool;
+
+/* Floor map: smallest class whose size >= n (so a served block is always at
+ * least as large as requested). n > 8192 → bypass to the locked global path. */
+static unsigned StrandPoolSizeToClass(size_t n) {
+    for (unsigned c = 0; c < STRAND_POOL_CLASS_COUNT; c++) {
+        if (StrandPoolClassSize[c] >= n) return c;
+    }
+    return STRAND_POOL_NO_CLASS;
+}
+
+/* Largest class whose size <= a freed block's actual size (s > 8192 → bypass).
+ * Pairs with the floor alloc map: a block grown for class c has size >=
+ * ClassSize[c], so it maps back to c or higher — never below its served class. */
+static unsigned StrandPoolClassFromBlockSize(size_t s) {
+    if (s > STRAND_POOL_MAX_CLASS) return STRAND_POOL_NO_CLASS;
+    unsigned cls = STRAND_POOL_NO_CLASS;
+    for (unsigned c = 0; c < STRAND_POOL_CLASS_COUNT; c++) {
+        if (StrandPoolClassSize[c] <= s) cls = c; else break;
+    }
+    return cls;
+}
+
+/* Tell the kernel which slot this strand bound, so process_destroy can stamp it
+ * ORPHANED if the strand crashes without flushing. Called AFTER the slot is
+ * written (page present → resolvable) and OUTSIDE heap_lock (it is an IPC call).
+ * Main strand never binds (its pool can't be crash-orphaned). */
+static void strand_pool_bind_kernel(StrandPool *pool, uint32_t gen) {
+    uint8_t params[12];
+    uint64_t va = (uint64_t)(uintptr_t)pool;
+    memcpy(params,     &va,  sizeof(uint64_t));
+    memcpy(params + 8, &gen, sizeof(uint32_t));
+    (void)MfCall1(DECK_SYSTEM, SYSTEM_OP_STRAND_POOL_BIND,
+                  params, sizeof(params),
+                  NULL, 0, NULL, 0, NULL,
+                  30000, NULL);
+}
+
+/* Reclaim every ORPHANED slab slot: flush its cached blocks back to the global
+ * heap (free=1), coalesce once, then mark the slot FREE at the next generation.
+ * Called only on the slow path, with heap_lock HELD. Bounded by the slab size. */
+static void reclaim_orphans_scan_locked(void) {
+    for (unsigned i = 0; i < STRAND_POOL_SLAB_MAX; i++) {
+        StrandPool *p = &g_pool_slab[i];
+        uint32_t word = __atomic_load_n(&p->GenState, __ATOMIC_ACQUIRE);
+        if (STRANDPOOL_STATE(word) != STRANDPOOL_ORPHANED) continue;
+
+        for (unsigned c = 0; c < STRAND_POOL_CLASS_COUNT; c++) {
+            /* Bound the walk by the recorded count (a hard cap <= CapForClass) and
+             * validate the block BEFORE following its payload link: a crashed
+             * strand may have corrupted its own cached block's link, so a wild or
+             * self-referential link must never fault this survivor (it holds
+             * heap_lock) nor loop forever. The plain load of the link is safe —
+             * the kernel published ORPHANED with a `lock cmpxchg` (x86-TSO orders
+             * it after the dead strand's retired link stores) and the ACQUIRE load
+             * of GenState above ordered us after that publication. */
+            unsigned guard = p->Counts[c];
+            void *node = p->Heads[c];
+            while (node && guard--) {
+                block_t *block = (block_t *)((uint8_t *)node - BLOCK_HDR_SIZE);
+                if (block->magic != HEAP_MAGIC) break;
+                void *next = *(void **)node;
+                if (!block->free) {
+                    block->free = 1;
+                    block->tag  = HEAP_TAG_NONE;
+                }
+                node = next;
+            }
+            p->Heads[c]  = NULL;
+            p->Counts[c] = 0;
+        }
+        coalesce_locked();
+        p->OwnerPid = 0;
+        __atomic_store_n(&p->GenState,
+                         STRANDPOOL_PACK(STRANDPOOL_GEN(word) + 1, STRANDPOOL_FREE),
+                         __ATOMIC_RELEASE);
+    }
+}
+
+/* Claim a slab slot for the calling strand. Spawned strands take a g_pool_slab
+ * slot and bind it to the kernel; the main strand takes g_main_pool (no bind).
+ * Returns NULL when the slab is full even after reclaiming orphans — the strand
+ * then runs uncached through the locked global path (correctness preserved). */
+static StrandPool *pool_claim(StrandInfo *si) {
+    if (!si) {
+        /* Main strand: its pool is process-lifetime, never crash-orphaned. This
+         * branch is reached ONLY by the main strand (the sole si==NULL context),
+         * so it is single-writer — no CAS is needed to claim g_main_pool. */
+        uint32_t word = __atomic_load_n(&g_main_pool.GenState, __ATOMIC_ACQUIRE);
+        if (STRANDPOOL_STATE(word) == STRANDPOOL_FREE) {
+            g_main_pool.OwnerPid = strand_self();
+            __atomic_store_n(&g_main_pool.GenState,
+                             STRANDPOOL_PACK(STRANDPOOL_GEN(word) + 1, STRANDPOOL_LIVE),
+                             __ATOMIC_RELEASE);
+        }
+        return &g_main_pool;
+    }
+
+    StrandPool *claimed = NULL;
+    uint32_t    claimed_gen = 0;
+
+    umutex_lock(&heap_lock);
+    for (int pass = 0; pass < 2 && !claimed; pass++) {
+        for (unsigned i = 0; i < STRAND_POOL_SLAB_MAX; i++) {
+            StrandPool *p = &g_pool_slab[i];
+            uint32_t word = __atomic_load_n(&p->GenState, __ATOMIC_RELAXED);
+            if (STRANDPOOL_STATE(word) != STRANDPOOL_FREE) continue;
+            uint32_t next = STRANDPOOL_PACK(STRANDPOOL_GEN(word) + 1, STRANDPOOL_LIVE);
+            if (__atomic_compare_exchange_n(&p->GenState, &word, next, false,
+                                            __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) {
+                p->OwnerPid = strand_self();
+                claimed     = p;
+                claimed_gen = STRANDPOOL_GEN(next);
+                break;
+            }
+        }
+        if (!claimed && pass == 0) reclaim_orphans_scan_locked();
+    }
+    umutex_unlock(&heap_lock);
+
+    if (claimed) {
+        /* Cache the pointer for the lock-free fast path, THEN bind to the kernel
+         * (the write guarantees the page is present so the kernel walk resolves). */
+        si->strand_pool_ptr = (uint64_t)(uintptr_t)claimed;
+        strand_pool_bind_kernel(claimed, claimed_gen);
+    }
+    return claimed;
+}
+
+/* The calling strand's pool, claiming one lazily on first use. Returns NULL only
+ * when a spawned strand cannot get a slot — its caller then uses the locked path.
+ * Single-writer per strand → no lock on this read. */
+static StrandPool *pool_self(void) {
+    StrandInfo *si = strand_info_or_null();
+    if (!si) {
+        if (__atomic_load_n(&g_main_pool.GenState, __ATOMIC_ACQUIRE) == 0)
+            return pool_claim(NULL);
+        return &g_main_pool;
+    }
+    if (si->strand_pool_ptr != 0)
+        return (StrandPool *)(uintptr_t)si->strand_pool_ptr;
+    return pool_claim(si);
+}
+
+/* Refill one class: pull STRAND_POOL_REFILL_BATCH blocks of ClassSize[c] from
+ * the global heap and push them onto the magazine. heap_lock HELD. */
+static void pool_refill_locked(StrandPool *pool, unsigned c) {
+    for (unsigned k = 0; k < STRAND_POOL_REFILL_BATCH; k++) {
+        void *payload = alloc_locked(StrandPoolClassSize[c], HEAP_TAG_NONE);
+        if (!payload) break;   /* heap exhausted — serve whatever we got */
+        *(void **)payload = pool->Heads[c];
+        pool->Heads[c]    = payload;
+        pool->Counts[c]++;
+    }
+}
+
+/* Flush up to `drop` blocks of class c back to the global heap (free=1). One
+ * coalesce afterward is the caller's job. heap_lock HELD. The walk is hard-bounded
+ * by Counts[c] and validates each block's magic BEFORE following its payload link,
+ * so a corrupted link can never fault under the lock or loop. */
+static void pool_flush_class_locked(StrandPool *pool, unsigned c, unsigned drop) {
+    unsigned guard = pool->Counts[c];
+    while (drop-- && guard-- && pool->Heads[c]) {
+        void *payload = pool->Heads[c];
+        block_t *block = (block_t *)((uint8_t *)payload - BLOCK_HDR_SIZE);
+        if (block->magic != HEAP_MAGIC) break;
+        pool->Heads[c] = *(void **)payload;
+        pool->Counts[c]--;
+        if (!block->free) {
+            block->free = 1;
+            block->tag  = HEAP_TAG_NONE;
+        }
+    }
+}
+
+/* Orderly flush of the calling strand's whole pool at strand/cabin exit. Drains
+ * every magazine to the global heap, coalesces once, then bumps the slot's
+ * generation to FREE — the bump makes the kernel death-stamp CAS miss, so no
+ * unbind syscall is needed. Idempotent: a strand with no pool is a no-op. */
+void strand_pool_flush_self(void) {
+    StrandInfo *si   = strand_info_or_null();
+    StrandPool *pool = si ? (StrandPool *)(uintptr_t)si->strand_pool_ptr : &g_main_pool;
+    if (!pool) return;
+    if (si && si->strand_pool_ptr == 0) return;
+    if (!si && __atomic_load_n(&g_main_pool.GenState, __ATOMIC_ACQUIRE) == 0) return;
+
+    umutex_lock(&heap_lock);
+    for (unsigned c = 0; c < STRAND_POOL_CLASS_COUNT; c++)
+        pool_flush_class_locked(pool, c, (unsigned)-1);
+    coalesce_locked();
+    uint32_t word = __atomic_load_n(&pool->GenState, __ATOMIC_RELAXED);
+    pool->OwnerPid = 0;
+    __atomic_store_n(&pool->GenState,
+                     STRANDPOOL_PACK(STRANDPOOL_GEN(word) + 1, STRANDPOOL_FREE),
+                     __ATOMIC_RELEASE);
+    umutex_unlock(&heap_lock);
+
+    if (si) si->strand_pool_ptr = 0;
+}
+
+/* Self-test of the crash-orphan reclaim MECHANISM (not a live fault). Stages a
+ * spare slab slot exactly as a crashed strand would leave it — real heap blocks
+ * cached in its magazines (free=0, magazine-linked) with the slot marked
+ * ORPHANED — then runs the same reclaim_orphans_scan_locked the slow path uses.
+ * Returns 1 if every staged block came back to the global heap and the slot is
+ * FREE again; 0 on any inconsistency. `n_blocks` is clamped to a class cap. */
+int strand_pool_test_orphan_reclaim(unsigned n_blocks) {
+    const unsigned c = 3;  /* the 64-byte class */
+    if (n_blocks == 0 || n_blocks > StrandPoolCapForClass[c]) return 0;
+
+    umutex_lock(&heap_lock);
+
+    /* Find a FREE spare slot near the top of the slab (away from live claims). */
+    StrandPool *slot = NULL;
+    for (int i = (int)STRAND_POOL_SLAB_MAX - 1; i >= 0; i--) {
+        if (STRANDPOOL_STATE(g_pool_slab[i].GenState) == STRANDPOOL_FREE) {
+            slot = &g_pool_slab[i];
+            break;
+        }
+    }
+    if (!slot) { umutex_unlock(&heap_lock); return 0; }
+
+    uint32_t gen = STRANDPOOL_GEN(slot->GenState);
+
+    /* Cache real blocks the way the fast path does: alloc from the global heap
+     * (free=0) and link through the payload. */
+    for (unsigned k = 0; k < n_blocks; k++) {
+        void *payload = alloc_locked(StrandPoolClassSize[c], HEAP_TAG_NONE);
+        if (!payload) break;
+        *(void **)payload = slot->Heads[c];
+        slot->Heads[c]    = payload;
+        slot->Counts[c]++;
+    }
+    unsigned staged = slot->Counts[c];
+
+    /* Count live blocks before reclaim, then stamp ORPHANED and reclaim. */
+    uint32_t live_before = 0;
+    for (block_t *b = free_list; b && b->magic == HEAP_MAGIC; b = b->next)
+        if (!b->free) live_before++;
+
+    slot->OwnerPid = 0;
+    __atomic_store_n(&slot->GenState,
+                     STRANDPOOL_PACK(gen, STRANDPOOL_ORPHANED), __ATOMIC_RELEASE);
+
+    reclaim_orphans_scan_locked();
+
+    uint32_t live_after = 0;
+    for (block_t *b = free_list; b && b->magic == HEAP_MAGIC; b = b->next)
+        if (!b->free) live_after++;
+
+    int ok = (STRANDPOOL_STATE(slot->GenState) == STRANDPOOL_FREE) &&
+             (slot->Heads[c] == NULL) && (slot->Counts[c] == 0) &&
+             (staged > 0) && (live_after + staged == live_before);
+
+    umutex_unlock(&heap_lock);
+    return ok;
+}
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
 void* _malloc_impl(size_t size) {
     if (size == 0) return NULL;
 
-    umutex_lock(&heap_lock);
-    void* ptr = alloc_locked(size, HEAP_TAG_NONE);
-    umutex_unlock(&heap_lock);
-    return ptr;
+    unsigned c = StrandPoolSizeToClass(size);
+    if (c == STRAND_POOL_NO_CLASS) {
+        umutex_lock(&heap_lock);
+        void* ptr = alloc_locked(size, HEAP_TAG_NONE);
+        umutex_unlock(&heap_lock);
+        return ptr;
+    }
+
+    StrandPool *pool = pool_self();
+    if (!pool) {
+        /* Graceful degrade: no slot available — serve from the locked heap. */
+        umutex_lock(&heap_lock);
+        void* ptr = alloc_locked(size, HEAP_TAG_NONE);
+        umutex_unlock(&heap_lock);
+        return ptr;
+    }
+
+    if (!pool->Heads[c]) {
+        umutex_lock(&heap_lock);
+        reclaim_orphans_scan_locked();
+        pool_refill_locked(pool, c);
+        umutex_unlock(&heap_lock);
+        if (!pool->Heads[c]) {
+            heap_last_error = ERR_HEAP_EXHAUSTED;
+            return NULL;
+        }
+    }
+
+    void *payload  = pool->Heads[c];
+    pool->Heads[c] = *(void **)payload;
+    pool->Counts[c]--;
+    heap_last_error = OK;
+    return payload;
 }
 
 void* malloc_tagged(size_t size, const char *tag) {
@@ -313,9 +627,9 @@ void* malloc_tagged(size_t size, const char *tag) {
     return ptr;
 }
 
-void free(void* ptr) {
-    if (!ptr) return;
-
+/* Return a block to the global heap under the lock — the slow path shared by
+ * free()'s global cases (corrupt/double-free/tagged/oversized/overflow). */
+static void free_global(void* ptr) {
     umutex_lock(&heap_lock);
 
     stat_free_calls++;
@@ -340,6 +654,53 @@ void free(void* ptr) {
 
     heap_last_error = OK;
     umutex_unlock(&heap_lock);
+}
+
+void free(void* ptr) {
+    if (!ptr) return;
+
+    block_t* block = (block_t*)((uint8_t*)ptr - BLOCK_HDR_SIZE);
+
+    /* A wild/corrupt pointer is caught here (magic is write-once); a genuinely
+     * free block (real double-free of a flushed block) and any tagged block go
+     * to the locked global path that owns those semantics. */
+    if (block->magic != HEAP_MAGIC) { free_global(ptr); return; }
+    if (block->free)                { free_global(ptr); return; }
+    if (block->tag != HEAP_TAG_NONE){ free_global(ptr); return; }
+
+    unsigned c = StrandPoolClassFromBlockSize(block->size);
+    if (c == STRAND_POOL_NO_CLASS) { free_global(ptr); return; }
+
+    StrandPool *pool = pool_self();
+    if (!pool) { free_global(ptr); return; }
+
+    /* Double-free of a still-cached block: scan this magazine (<= cap pointers).
+     * The global free() above cannot catch it because a cached block is free=0.
+     * Bound the scan by Counts[c] and validate each node's magic BEFORE following
+     * its payload link, so a corrupted cached link cannot fault or loop here. */
+    unsigned guard = pool->Counts[c];
+    for (void *node = pool->Heads[c]; node && guard--; ) {
+        if (node == ptr) {
+            heap_last_error = ERR_INVALID_ADDRESS;
+            return;
+        }
+        block_t *b = (block_t *)((uint8_t *)node - BLOCK_HDR_SIZE);
+        if (b->magic != HEAP_MAGIC) break;
+        node = *(void **)node;
+    }
+
+    if (pool->Counts[c] >= StrandPoolCapForClass[c]) {
+        umutex_lock(&heap_lock);
+        reclaim_orphans_scan_locked();
+        pool_flush_class_locked(pool, c, STRAND_POOL_REFILL_BATCH);
+        coalesce_locked();
+        umutex_unlock(&heap_lock);
+    }
+
+    *(void **)ptr  = pool->Heads[c];
+    pool->Heads[c] = ptr;
+    pool->Counts[c]++;
+    heap_last_error = OK;
 }
 
 void* calloc(size_t nmemb, size_t size) {

@@ -145,5 +145,6 @@
 #define SYSTEM_OP_ADDR_WAKE         0xC1  /* (u64 va)(u32 count — 0 = all)         */
 #define SYSTEM_OP_STRAND_SPAWN      0xC2  /* (u64 entry_va)(u64 arg)[(u8 joinable)] -> out: u32 strand pid */
 #define SYSTEM_OP_STRAND_RELEASE    0xC3  /* (u32 pid) — clear a joinable strand's reap-block so the reaper can reclaim it (std::thread join/detach); zombie-until-join keeps thread::id (=pid) unique while joinable */
+#define SYSTEM_OP_STRAND_POOL_BIND  0xC4  /* (u64 pool_va)(u32 gen) — bind this strand's StrandPool slab slot so process_destroy can ORPHANED-stamp it if the strand crashes without an orderly flush */
 
 #endif // BOXOS_DECKS_H

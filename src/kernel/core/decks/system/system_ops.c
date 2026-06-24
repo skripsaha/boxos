@@ -44,6 +44,9 @@
 #include "cpuid.h"
 #include "fpu.h"   /* g_user_fsbase_used — TLS FS-base context-switch gate */
 #include "sync_ops.h"
+#include "cabin.h"          /* cabin_t.vmm — for StrandPool bind virt->phys walk */
+#include "cabin_layout.h"   /* CABIN_USER_VA_CANONICAL_END — bind VA range check */
+#include "strand_pool_abi.h" /* StrandPool — _Alignof for the bind alignment check */
 
 #define MAX_BROADCAST_TARGETS  256u
 #define BROADCAST_TAG_MAX      64u
@@ -668,6 +671,55 @@ static int SysStrandRelease(const ManifestOp *op, Crate *crates, uint16_t crate_
         __atomic_store_n(&target->reap_blocked, 0u, __ATOMIC_SEQ_CST);
 
     process_ref_dec(target);
+    return OK;
+}
+
+/* =========================================================================
+ *  SYSTEM_OP_STRAND_POOL_BIND — register the caller strand's boxlib StrandPool
+ *  slab slot for crash-orphan reclaim (Ф20e).
+ *
+ *  params: [u64 pool_va][u32 gen]   (12 bytes)
+ *
+ *  boxlib calls this once, right after it claims a slab slot and writes the
+ *  slot (so the page is present and resolvable). We validate that the VA is in
+ *  the caller's user range, StrandPool-aligned, and currently mapped, then stash
+ *  the VA (not a phys) plus the bound generation on the process_t. process_destroy
+ *  RE-RESOLVES the VA through the live cabin page tables at death, so a page that
+ *  was unmapped/recycled between bind and death can never make us stamp a phys
+ *  that now belongs to a different cabin. There is no unbind op: an orderly flush
+ *  bumps the generation, which makes the death-stamp CAS miss. OP_AUTH_APP — a
+ *  strand only ever binds a pool inside its own cabin. */
+static int SysStrandPoolBind(const ManifestOp *op, Crate *crates, uint16_t crate_count,
+                             const OpContext *ctx)
+{
+    (void)crates; (void)crate_count;
+    if (!ctx || !ctx->proc || !ctx->proc->cabin || !ctx->proc->cabin->vmm)
+        return ERR_INVALID_ARGUMENT;
+    if (op->param_size < 12) return ERR_INVALID_ARGUMENT;
+
+    uint64_t pool_va;
+    uint32_t gen;
+    memcpy(&pool_va, op->params,     sizeof(uint64_t));
+    memcpy(&gen,     op->params + 8, sizeof(uint32_t));
+
+    /* The pool must live in the cabin's user address space (above the NULL trap,
+     * below the canonical user ceiling) — never a kernel VA. */
+    if (pool_va <= CABIN_NULL_TRAP_END || pool_va >= CABIN_USER_VA_CANONICAL_END)
+        return ERR_INVALID_ARGUMENT;
+
+    /* A real StrandPool node is at least StrandPool-aligned; reject any VA that
+     * cannot be one, so the death-stamp can never target a misaligned address. */
+    if (pool_va % _Alignof(StrandPool) != 0)
+        return ERR_INVALID_ARGUMENT;
+
+    /* Sanity: the VA must be mapped right now (boxlib wrote the slot before
+     * binding). We do NOT store the resulting phys — process_destroy re-resolves
+     * the VA at death so a recycled page can never be cross-cabin stamped. */
+    if (vmm_virt_to_phys(ctx->proc->cabin->vmm, (uintptr_t)pool_va) == 0)
+        return ERR_INVALID_ADDRESS;
+
+    ctx->proc->strand_pool_va  = pool_va;
+    ctx->proc->strand_pool_gen = gen;
     return OK;
 }
 
@@ -1351,6 +1403,7 @@ error_t SystemDeckRegister(void)
         { SYSTEM_OP_PROC_EXEC,    SysProcExec,    OP_AUTH_UTILITY,"system.proc.exec"  },
         { SYSTEM_OP_STRAND_SPAWN, SysStrandSpawn, OP_AUTH_APP,    "system.strand.spawn"},
         { SYSTEM_OP_STRAND_RELEASE, SysStrandRelease, OP_AUTH_APP, "system.strand.release"},
+        { SYSTEM_OP_STRAND_POOL_BIND, SysStrandPoolBind, OP_AUTH_APP, "system.strand.pool.bind"},
         { SYSTEM_OP_INFO,         SysInfo,        OP_AUTH_NONE,   "system.info"       },
         /* Context, tags, buffers: app+. */
         { SYSTEM_OP_CTX_USE,      SysCtxUse,      OP_AUTH_APP,    "system.ctx.use"    },

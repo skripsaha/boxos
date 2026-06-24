@@ -29,6 +29,7 @@
 #include "amp.h"
 #include "cet_lifecycle.h"  /* Phase 2K+ per-process shadow-stack hooks */
 #include "strand_rings.h"   /* P5a per-strand IPC rings + StrandInfo TLS */
+#include "strand_pool_abi.h" /* Ф20e StrandPool GenState offset + state enum */
 
 typedef struct
 {
@@ -704,6 +705,35 @@ void process_destroy(process_t *proc)
         ev.pid       = proc->pid;
         ev.cabin_pid = (proc->cabin ? proc->cabin->spawner_pid : 0);
         TouchPublish("strand:exited", &ev, sizeof(ev));
+    }
+
+    /* Ф20e — crash-orphan stamp. If this strand bound a StrandPool slot and died
+     * WITHOUT an orderly flush, the slot's GenState is still (bound_gen<<8|LIVE):
+     * the CAS succeeds and marks it ORPHANED so a surviving strand reclaims the
+     * cached blocks back to the global heap. An orderly exit (strand_pool_flush_
+     * self) bumped the generation first, so the expected word no longer matches
+     * and the CAS is a harmless no-op. One atomic, no lock, no allocation.
+     *
+     * We re-resolve the bound VA fresh from the live cabin page tables here
+     * instead of trusting a stored phys: if the pool's page were unmapped or
+     * recycled between bind and death, a stored phys could point at a page now
+     * owned by ANOTHER cabin and we would corrupt it. vmm_virt_to_phys walks the
+     * cabin's own tables (no active-CR3 requirement, valid from the reaper
+     * K-Core), and a 0 result — last-strand/cabin teardown already tore the
+     * mapping down — simply skips the stamp, which is harmless. */
+    _Static_assert(__builtin_offsetof(StrandPool, GenState) == 116,
+                   "kernel StrandPool GenState offset");
+    if (proc->strand_pool_va && proc->cabin) {
+        uintptr_t ph = vmm_virt_to_phys(proc->cabin->vmm, proc->strand_pool_va);
+        if (ph) {
+            volatile uint32_t *gs = (volatile uint32_t *)
+                ((uint8_t *)vmm_phys_to_virt(ph) +
+                 __builtin_offsetof(StrandPool, GenState));
+            uint32_t expect = STRANDPOOL_PACK(proc->strand_pool_gen, STRANDPOOL_LIVE);
+            uint32_t orphan = STRANDPOOL_PACK(proc->strand_pool_gen, STRANDPOOL_ORPHANED);
+            __atomic_compare_exchange_n(gs, &expect, orphan, false,
+                                        __ATOMIC_ACQ_REL, __ATOMIC_RELAXED);
+        }
     }
 
     BayCleanupProcess(proc);

@@ -12,6 +12,7 @@
 #include "box/core/result.h"
 #include "box/string.h"
 #include "box/error.h"
+#include "box/memory.h"   /* strand_pool_flush_self — main-pool flush at exit */
 #include "boxos_decks.h"  /* SYSTEM_OP_* opcodes — single source */
 
 /* SYSTEM_OP_* opcodes come from boxos_decks.h (included via box headers).
@@ -86,6 +87,11 @@ void exit(uint32_t exit_code)
     /* Static destructors / atexit callbacks may still print — run them
      * BEFORE the final io_flush so their output reaches the console. */
     __box_runtime_fini();
+
+    /* Ф20e — return the main strand's StrandPool cache to the global heap after
+     * all destructors have run (they may still free), so heap leak diagnostics
+     * see a quiesced heap with no blocks held out in the magazine. */
+    strand_pool_flush_self();
 
     io_flush();
 

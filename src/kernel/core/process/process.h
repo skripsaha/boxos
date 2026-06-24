@@ -235,6 +235,20 @@ typedef struct process_t
     uint64_t          touch_ring_phys;
     uint64_t          strandinfo_phys;
 
+    /* Ф20e — crash-orphan stamp target for this strand's boxlib StrandPool.
+     * Set when the strand binds its slab slot (SYSTEM_OP_STRAND_POOL_BIND):
+     * strand_pool_va is the user virtual address of its StrandPool node and
+     * strand_pool_gen the generation it bound at. We store the VA, NOT a phys:
+     * process_destroy re-resolves it through the live cabin page tables at death,
+     * so a page unmapped/recycled between bind and death can never make us stamp a
+     * phys that now belongs to another cabin. The CAS marks the node's GenState
+     * (gen<<8|LIVE)→(gen<<8|ORPHANED) so a surviving strand reclaims the cached
+     * blocks. An orderly flush bumps the generation first, so the CAS misses and
+     * the stamp is a no-op. Both 0 for the main strand and any strand that never
+     * claimed a pool. */
+    uint64_t          strand_pool_va;
+    uint32_t          strand_pool_gen;
+
     /* Embedded addr-wait entry — one per strand, lifetime = process lifetime.
      * SysAddrPark reuses this rather than stack-allocating to avoid
      * use-after-return.  Zeroed by process_create's memset; linked=0 means
