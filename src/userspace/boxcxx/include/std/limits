@@ -177,6 +177,11 @@ struct numeric_limits<long long> : __bits::IntegerLimits<long long> {};
 template <>
 struct numeric_limits<unsigned long long>
     : __bits::IntegerLimits<unsigned long long> {};
+template <>
+struct numeric_limits<__int128> : __bits::IntegerLimits<__int128> {};
+template <>
+struct numeric_limits<unsigned __int128>
+    : __bits::IntegerLimits<unsigned __int128> {};
 
 template <>
 struct numeric_limits<float> : __bits::FloatCommon {

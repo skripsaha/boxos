@@ -483,12 +483,12 @@ bool operator==(const vector<T, A> &a, const vector<T, A> &b)
 
 template <typename T, typename A>
 auto operator<=>(const vector<T, A> &a, const vector<T, A> &b)
-    -> decltype(a[0] <=> b[0])
+    -> __cmp::synth_three_way_result_t<T>
 {
-    using Cat = decltype(a[0] <=> b[0]);
+    using Cat = __cmp::synth_three_way_result_t<T>;
     auto n    = a.size() < b.size() ? a.size() : b.size();
     for (decltype(n) i = 0; i < n; ++i)
-        if (auto c = a[i] <=> b[i]; c != 0) return c;
+        if (auto c = __cmp::SynthThreeWay{}(a[i], b[i]); c != 0) return c;
     return a.size() == b.size() ? Cat::equivalent
            : a.size() < b.size() ? Cat::less
                                  : Cat::greater;

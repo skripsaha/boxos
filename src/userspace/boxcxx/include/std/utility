@@ -392,11 +392,11 @@ template <class T1, class T2>
 
 template <class T1, class T2>
 [[nodiscard]] constexpr common_comparison_category_t<
-    compare_three_way_result_t<T1>, compare_three_way_result_t<T2>>
+    __cmp::synth_three_way_result_t<T1>, __cmp::synth_three_way_result_t<T2>>
 operator<=>(const pair<T1, T2> &a, const pair<T1, T2> &b)
 {
-    if (auto c = compare_three_way{}(a.first, b.first); c != 0) return c;
-    return compare_three_way{}(a.second, b.second);
+    if (auto c = __cmp::SynthThreeWay{}(a.first, b.first); c != 0) return c;
+    return __cmp::SynthThreeWay{}(a.second, b.second);
 }
 
 template <class T1, class T2>

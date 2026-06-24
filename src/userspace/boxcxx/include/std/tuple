@@ -447,7 +447,7 @@ constexpr Cat TupleCmp(const T &, const U &, index_sequence<>)
 template <class Cat, class T, class U, size_t I0, size_t... Is>
 constexpr Cat TupleCmp(const T &a, const U &b, index_sequence<I0, Is...>)
 {
-    if (Cat c = compare_three_way{}(get<I0>(a), get<I0>(b)); c != 0) return c;
+    if (Cat c = __cmp::SynthThreeWay{}(get<I0>(a), get<I0>(b)); c != 0) return c;
     return TupleCmp<Cat>(a, b, index_sequence<Is...>{});
 }
 } // namespace __bits
@@ -463,11 +463,11 @@ template <class... Ts, class... Us>
 template <class... Ts, class... Us>
     requires(sizeof...(Ts) == sizeof...(Us))
 [[nodiscard]] constexpr common_comparison_category_t<
-    compare_three_way_result_t<Ts, Us>...>
+    __cmp::synth_three_way_result_t<Ts, Us>...>
 operator<=>(const tuple<Ts...> &a, const tuple<Us...> &b)
 {
     using Cat = common_comparison_category_t<
-        compare_three_way_result_t<Ts, Us>...>;
+        __cmp::synth_three_way_result_t<Ts, Us>...>;
     return __bits::TupleCmp<Cat>(a, b, index_sequence_for<Ts...>{});
 }
 

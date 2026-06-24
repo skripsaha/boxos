@@ -44,6 +44,9 @@ static_assert(is_enum_v<PlainEnum> && is_scoped_enum_v<ScopedEnum> &&
 static_assert(is_same_v<underlying_type_t<ScopedEnum>, short>);
 static_assert(is_same_v<make_unsigned_t<const int>, const unsigned int>);
 static_assert(is_same_v<make_signed_t<ScopedEnum>, short>);
+static_assert(is_same_v<make_unsigned_t<__int128>, unsigned __int128> &&
+              is_same_v<make_signed_t<unsigned __int128>, __int128> &&
+              is_same_v<make_unsigned_t<const __int128>, const unsigned __int128>);
 static_assert(is_same_v<remove_cvref_t<const int &&>, int>);
 static_assert(is_same_v<decay_t<int[4]>, int *> &&
               is_same_v<decay_t<int(int)>, int (*)(int)>);
@@ -88,6 +91,17 @@ static_assert(is_same_v<
 static_assert(three_way_comparable<int> && three_way_comparable_with<int, long>);
 static_assert(compare_three_way{}(1, 2) < 0);
 
+// synth-three-way (Ф22b): a legacy element with only < / == (no <=>).
+struct LegacyOrd {
+    int v;
+    constexpr bool operator==(const LegacyOrd &o) const { return v == o.v; }
+    constexpr bool operator<(const LegacyOrd &o) const { return v < o.v; }
+};
+static_assert(is_same_v<__cmp::synth_three_way_result_t<LegacyOrd>, weak_ordering>);
+static_assert(is_same_v<__cmp::synth_three_way_result_t<int>, strong_ordering>);
+static_assert(__cmp::SynthThreeWay{}(LegacyOrd{1}, LegacyOrd{2}) < 0 &&
+              __cmp::SynthThreeWay{}(LegacyOrd{2}, LegacyOrd{2}) == 0);
+
 // ── concepts / functional ───────────────────────────────────────────────
 
 static_assert(same_as<int, int> && !same_as<int, const int>);
@@ -130,6 +144,9 @@ static_assert(SumIdx(make_index_sequence<5>{}) == 10);
 constexpr pair<int, long> kPair{1, 2L};
 static_assert(kPair.first == 1 && get<1>(kPair) == 2 && get<int>(kPair) == 1);
 static_assert(pair<int, int>{1, 2} < pair<int, int>{1, 3});
+static_assert((pair<LegacyOrd, int>{{1}, 2} <=> pair<LegacyOrd, int>{{1}, 3}) < 0);
+static_assert(is_same_v<decltype(pair<LegacyOrd, int>{} <=> pair<LegacyOrd, int>{}),
+                        weak_ordering>);
 
 // ── tuple ───────────────────────────────────────────────────────────────
 
@@ -139,6 +156,8 @@ static_assert(tuple_size_v<decltype(kTuple)> == 3);
 static_assert(apply([](int a, char, long c) { return a + int(c); }, kTuple) == 4);
 static_assert(get<2>(tuple_cat(make_tuple(1, 2), make_tuple('a'))) == 'a');
 static_assert(tuple<int, int>{1, 2} < tuple<int, int>{1, 3});
+static_assert((tuple<LegacyOrd, int>{{1}, 2} <=> tuple<LegacyOrd, int>{{1}, 3}) < 0);
+static_assert(is_same_v<decltype(tuple<LegacyOrd>{} <=> tuple<LegacyOrd>{}), weak_ordering>);
 
 struct EmptyTag {};
 static_assert(sizeof(tuple<EmptyTag, int>) == sizeof(int));   // EBO via leaf
@@ -156,6 +175,21 @@ static_assert(byteswap<unsigned>(0x11223344u) == 0x44332211u);
 static_assert(popcount(0xFFu) == 8 && countl_zero(uint8_t(1)) == 7);
 static_assert(bit_ceil(100u) == 128u && bit_floor(100u) == 64u);
 static_assert(rotl(uint8_t(0x81), 1) == 0x03);
+// __int128 consistency (Ф22b): is_integral admits it ⇒ <limits> + <bit> must too.
+static_assert(numeric_limits<__int128>::is_specialized &&
+              numeric_limits<__int128>::digits == 127 &&
+              numeric_limits<__int128>::is_signed &&
+              numeric_limits<unsigned __int128>::digits == 128 &&
+              numeric_limits<unsigned __int128>::is_modulo);
+static_assert(numeric_limits<unsigned __int128>::max() == (unsigned __int128)-1);
+static_assert(countl_zero((unsigned __int128)1) == 127 &&
+              countr_zero((unsigned __int128)1) == 0);
+static_assert(bit_width((unsigned __int128)0) == 0 &&
+              bit_width((unsigned __int128)1) == 1);
+static_assert(rotl((unsigned __int128)1, 1) == (unsigned __int128)2);  // proves %128, not %0
+static_assert(popcount((unsigned __int128)-1) == 128);                 // 16-byte popcount
+static_assert(byteswap((unsigned __int128)1) ==
+              ((unsigned __int128)1 << 120));                          // 16-byte byteswap
 static_assert(numbers::pi > 3.14159 && numbers::pi < 3.1416);
 
 constexpr auto kHereLoc = source_location::current();
