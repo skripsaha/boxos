@@ -248,6 +248,7 @@ typedef struct process_t
      * claimed a pool. */
     uint64_t          strand_pool_va;
     uint32_t          strand_pool_gen;
+    uint64_t          strand_pool_orphan_va;
 
     /* Embedded addr-wait entry — one per strand, lifetime = process lifetime.
      * SysAddrPark reuses this rather than stack-allocating to avoid

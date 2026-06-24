@@ -319,6 +319,18 @@ static const uint16_t StrandPoolCapForClass[STRAND_POOL_CLASS_COUNT] =
 static StrandPool g_pool_slab[STRAND_POOL_SLAB_MAX];
 static StrandPool g_main_pool;
 
+/* Dirty flag: the kernel sets this to 1 (RELEASE) after a successful
+ * LIVE→ORPHANED CAS in process_destroy. 0/1 only — NOT a counter, so
+ * it can never underflow. CLEAR-BEFORE-SCAN: we zero it before walking
+ * so a concurrent kernel set during the scan leaves the flag at 1 and
+ * the NEXT slow-path call catches the new orphan. The slot stays
+ * ORPHANED in the slab, so no orphan is ever lost. */
+static volatile uint32_t g_strandpool_orphan_pending = 0;
+
+/* High-water mark: highest claimed slot index + 1. Updated under heap_lock
+ * in pool_claim. Bounds the reclaim scan to slots that were ever used. */
+static uint32_t g_pool_slab_hwm = 0;
+
 /* Floor map: smallest class whose size >= n (so a served block is always at
  * least as large as requested). n > 8192 → bypass to the locked global path. */
 static unsigned StrandPoolSizeToClass(size_t n) {
@@ -345,10 +357,12 @@ static unsigned StrandPoolClassFromBlockSize(size_t s) {
  * written (page present → resolvable) and OUTSIDE heap_lock (it is an IPC call).
  * Main strand never binds (its pool can't be crash-orphaned). */
 static void strand_pool_bind_kernel(StrandPool *pool, uint32_t gen) {
-    uint8_t params[12];
-    uint64_t va = (uint64_t)(uintptr_t)pool;
-    memcpy(params,     &va,  sizeof(uint64_t));
-    memcpy(params + 8, &gen, sizeof(uint32_t));
+    uint8_t params[20];
+    uint64_t va         = (uint64_t)(uintptr_t)pool;
+    uint64_t pending_va = (uint64_t)(uintptr_t)&g_strandpool_orphan_pending;
+    memcpy(params,      &va,         sizeof(uint64_t));
+    memcpy(params + 8,  &gen,        sizeof(uint32_t));
+    memcpy(params + 12, &pending_va, sizeof(uint64_t));
     (void)MfCall1(DECK_SYSTEM, SYSTEM_OP_STRAND_POOL_BIND,
                   params, sizeof(params),
                   NULL, 0, NULL, 0, NULL,
@@ -358,41 +372,41 @@ static void strand_pool_bind_kernel(StrandPool *pool, uint32_t gen) {
 /* Reclaim every ORPHANED slab slot: flush its cached blocks back to the global
  * heap (free=1), coalesce once, then mark the slot FREE at the next generation.
  * Called only on the slow path, with heap_lock HELD. Bounded by the slab size. */
+static void reclaim_one_orphan_slot_locked(StrandPool *p, uint32_t word) {
+    for (unsigned c = 0; c < STRAND_POOL_CLASS_COUNT; c++) {
+        unsigned guard = p->Counts[c];
+        void *node = p->Heads[c];
+        while (node && guard--) {
+            block_t *block = (block_t *)((uint8_t *)node - BLOCK_HDR_SIZE);
+            if (block->magic != HEAP_MAGIC) break;
+            void *next = *(void **)node;
+            if (!block->free) {
+                block->free = 1;
+                block->tag  = HEAP_TAG_NONE;
+            }
+            node = next;
+        }
+        p->Heads[c]  = NULL;
+        p->Counts[c] = 0;
+    }
+    coalesce_locked();
+    p->OwnerPid = 0;
+    __atomic_store_n(&p->GenState,
+                     STRANDPOOL_PACK(STRANDPOOL_GEN(word) + 1, STRANDPOOL_FREE),
+                     __ATOMIC_RELEASE);
+}
+
+/* Event-driven orphan sweep: the kernel sets g_strandpool_orphan_pending only on
+ * a real crash-stamp, so the common (no-crash) case skips the scan entirely. The
+ * scan is bounded by the high-water mark, not the full slab. heap_lock HELD. */
 static void reclaim_orphans_scan_locked(void) {
-    for (unsigned i = 0; i < STRAND_POOL_SLAB_MAX; i++) {
+    if (__atomic_load_n(&g_strandpool_orphan_pending, __ATOMIC_ACQUIRE) == 0) return;
+    __atomic_store_n(&g_strandpool_orphan_pending, 0, __ATOMIC_RELEASE);
+    for (unsigned i = 0; i < g_pool_slab_hwm; i++) {
         StrandPool *p = &g_pool_slab[i];
         uint32_t word = __atomic_load_n(&p->GenState, __ATOMIC_ACQUIRE);
         if (STRANDPOOL_STATE(word) != STRANDPOOL_ORPHANED) continue;
-
-        for (unsigned c = 0; c < STRAND_POOL_CLASS_COUNT; c++) {
-            /* Bound the walk by the recorded count (a hard cap <= CapForClass) and
-             * validate the block BEFORE following its payload link: a crashed
-             * strand may have corrupted its own cached block's link, so a wild or
-             * self-referential link must never fault this survivor (it holds
-             * heap_lock) nor loop forever. The plain load of the link is safe —
-             * the kernel published ORPHANED with a `lock cmpxchg` (x86-TSO orders
-             * it after the dead strand's retired link stores) and the ACQUIRE load
-             * of GenState above ordered us after that publication. */
-            unsigned guard = p->Counts[c];
-            void *node = p->Heads[c];
-            while (node && guard--) {
-                block_t *block = (block_t *)((uint8_t *)node - BLOCK_HDR_SIZE);
-                if (block->magic != HEAP_MAGIC) break;
-                void *next = *(void **)node;
-                if (!block->free) {
-                    block->free = 1;
-                    block->tag  = HEAP_TAG_NONE;
-                }
-                node = next;
-            }
-            p->Heads[c]  = NULL;
-            p->Counts[c] = 0;
-        }
-        coalesce_locked();
-        p->OwnerPid = 0;
-        __atomic_store_n(&p->GenState,
-                         STRANDPOOL_PACK(STRANDPOOL_GEN(word) + 1, STRANDPOOL_FREE),
-                         __ATOMIC_RELEASE);
+        reclaim_one_orphan_slot_locked(p, word);
     }
 }
 
@@ -430,10 +444,22 @@ static StrandPool *pool_claim(StrandInfo *si) {
                 p->OwnerPid = strand_self();
                 claimed     = p;
                 claimed_gen = STRANDPOOL_GEN(next);
+                if (i + 1 > g_pool_slab_hwm) g_pool_slab_hwm = i + 1;
                 break;
             }
         }
-        if (!claimed && pass == 0) reclaim_orphans_scan_locked();
+        if (!claimed && pass == 0) {
+            /* Slab full: force an unconditional walk [0, hwm) regardless of
+             * the dirty flag — robustness net for the vanishingly-unlikely
+             * case where a kernel flag-set was missed. */
+            for (unsigned j = 0; j < g_pool_slab_hwm; j++) {
+                StrandPool *p2 = &g_pool_slab[j];
+                uint32_t word2 = __atomic_load_n(&p2->GenState, __ATOMIC_ACQUIRE);
+                if (STRANDPOOL_STATE(word2) != STRANDPOOL_ORPHANED) continue;
+                reclaim_one_orphan_slot_locked(p2, word2);
+            }
+            __atomic_store_n(&g_strandpool_orphan_pending, 0, __ATOMIC_RELEASE);
+        }
     }
     umutex_unlock(&heap_lock);
 
@@ -561,6 +587,10 @@ int strand_pool_test_orphan_reclaim(unsigned n_blocks) {
     __atomic_store_n(&slot->GenState,
                      STRANDPOOL_PACK(gen, STRANDPOOL_ORPHANED), __ATOMIC_RELEASE);
 
+    /* Update HWM so the flag-gated scan covers this test slot. */
+    unsigned slot_idx = (unsigned)(slot - g_pool_slab);
+    if (slot_idx + 1 > g_pool_slab_hwm) g_pool_slab_hwm = slot_idx + 1;
+    __atomic_store_n(&g_strandpool_orphan_pending, 1, __ATOMIC_RELEASE);
     reclaim_orphans_scan_locked();
 
     uint32_t live_after = 0;

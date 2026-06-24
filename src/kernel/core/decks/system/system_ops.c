@@ -695,31 +695,32 @@ static int SysStrandPoolBind(const ManifestOp *op, Crate *crates, uint16_t crate
     (void)crates; (void)crate_count;
     if (!ctx || !ctx->proc || !ctx->proc->cabin || !ctx->proc->cabin->vmm)
         return ERR_INVALID_ARGUMENT;
-    if (op->param_size < 12) return ERR_INVALID_ARGUMENT;
+    if (op->param_size < 20) return ERR_INVALID_ARGUMENT;
 
     uint64_t pool_va;
     uint32_t gen;
-    memcpy(&pool_va, op->params,     sizeof(uint64_t));
-    memcpy(&gen,     op->params + 8, sizeof(uint32_t));
+    uint64_t orphan_pending_va;
+    memcpy(&pool_va,           op->params,      sizeof(uint64_t));
+    memcpy(&gen,               op->params + 8,  sizeof(uint32_t));
+    memcpy(&orphan_pending_va, op->params + 12, sizeof(uint64_t));
 
-    /* The pool must live in the cabin's user address space (above the NULL trap,
-     * below the canonical user ceiling) — never a kernel VA. */
     if (pool_va <= CABIN_NULL_TRAP_END || pool_va >= CABIN_USER_VA_CANONICAL_END)
         return ERR_INVALID_ARGUMENT;
-
-    /* A real StrandPool node is at least StrandPool-aligned; reject any VA that
-     * cannot be one, so the death-stamp can never target a misaligned address. */
     if (pool_va % _Alignof(StrandPool) != 0)
         return ERR_INVALID_ARGUMENT;
-
-    /* Sanity: the VA must be mapped right now (boxlib wrote the slot before
-     * binding). We do NOT store the resulting phys — process_destroy re-resolves
-     * the VA at death so a recycled page can never be cross-cabin stamped. */
     if (vmm_virt_to_phys(ctx->proc->cabin->vmm, (uintptr_t)pool_va) == 0)
         return ERR_INVALID_ADDRESS;
 
-    ctx->proc->strand_pool_va  = pool_va;
-    ctx->proc->strand_pool_gen = gen;
+    if (orphan_pending_va <= CABIN_NULL_TRAP_END || orphan_pending_va >= CABIN_USER_VA_CANONICAL_END)
+        return ERR_INVALID_ARGUMENT;
+    if (orphan_pending_va % 4 != 0)
+        return ERR_INVALID_ARGUMENT;
+    if (vmm_virt_to_phys(ctx->proc->cabin->vmm, (uintptr_t)orphan_pending_va) == 0)
+        return ERR_INVALID_ADDRESS;
+
+    ctx->proc->strand_pool_va         = pool_va;
+    ctx->proc->strand_pool_gen        = gen;
+    ctx->proc->strand_pool_orphan_va  = orphan_pending_va;
     return OK;
 }
 

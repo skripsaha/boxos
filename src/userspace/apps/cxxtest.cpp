@@ -7095,16 +7095,50 @@ void Phase41()
     Check(strand_pool_test_orphan_reclaim(6) == 1,
           "phase41 crash-orphan reclaim returns every cached block to the heap");
 
+    // ── A5: fast-path speedup measurement (host-invariant ratio) ──────────────
+    // t_fast = cycles for M tight malloc(64)/free pairs (magazine hot path, lock-free).
+    // t_lock = cycles for M tight malloc_tagged(64,tag)/free pairs (tagged bypasses
+    //          the magazine on both alloc and free → forced global locked path).
+    // Both measurements scale with host load; the RATIO is stable. We assert
+    // t_lock >= t_fast + t_fast/4 (fast-path at least ~1.25x faster than the
+    // forced-lock path). malloc_tagged adds a small tag-registry lookup overhead
+    // on top of the raw lock cost, so this is a conservative lower bound.
+    {
+        constexpr int M = 20000;
+        const char *kBench = "p41bench";
+        for (int i = 0; i < 32; i++) { void *p = malloc(64); if (p) free(p); }
+
+        uint64_t t0 = __builtin_ia32_rdtsc();
+        for (int i = 0; i < M; i++) {
+            void *p = malloc(64);
+            if (p) free(p);
+        }
+        uint64_t t1 = __builtin_ia32_rdtsc();
+
+        for (int i = 0; i < M; i++) {
+            void *p = malloc(64, kBench);
+            if (p) free(p);
+        }
+        uint64_t t2 = __builtin_ia32_rdtsc();
+
+        uint64_t t_fast = (t1 - t0) / (uint64_t)M;
+        uint64_t t_lock = (t2 - t1) / (uint64_t)M;
+        printf("[CXX] phase41 A5: fast-path %llu cycles/op  forced-lock %llu cycles/op\n",
+               (unsigned long long)t_fast, (unsigned long long)t_lock);
+        Check(t_lock >= t_fast + t_fast / 4,
+              "phase41 A5 fast-path at least 1.25x faster than forced-lock path");
+    }
+
     // ── A3: concurrent per-strand isolation (FSGSBASE-gated) ──────────────────
     // A3 is the ONLY part that needs FSGSBASE (it spawns real strands). When the
     // CPU lacks it, A3 is skipped with a DISTINCT marker so a green run is never
     // misread as "concurrent isolation proven" — the overall PASS below then
-    // scopes itself to the parts that actually ran (A1/A2/A4). BoxOS `make run`
+    // scopes itself to the parts that actually ran (A1/A2/A4/A5). BoxOS `make run`
     // is qemu64 +fsgsbase, so A3 normally RUNS.
     if (!cpu_has_fsgsbase()) {
         printf("[CXX] phase41 A3 SKIP (no FSGSBASE — concurrent isolation not exercised here)\n");
         printf("[CXX] PASS phase41: per-strand StrandPool "
-               "(A1 correctness + A2 contention drop + A4 orphan reclaim; A3 skipped)\n");
+               "(A1 correctness + A2 contention drop + A4 orphan reclaim + A5 speedup; A3 skipped)\n");
         return;
     }
 
@@ -7127,7 +7161,7 @@ void Phase41()
     printf("[CXX] phase41 A3 RAN (4 strands, concurrent per-strand isolation verified)\n");
 
     printf("[CXX] PASS phase41: per-strand StrandPool "
-           "(A1 correctness + A2 contention drop + A3 concurrent isolation + A4 orphan reclaim)\n");
+           "(A1 correctness + A2 contention drop + A3 concurrent isolation + A4 orphan reclaim + A5 speedup)\n");
 }
 
 } // namespace
