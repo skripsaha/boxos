@@ -211,6 +211,14 @@ static bool touch_wait_umwait(Touch *out, uint32_t timeout_ms)
     }
 }
 
+/* Cooperative pause/yield fallback (no WAITPKG). A sibling strand may be the
+ * Touch producer and share this App-Core, so a pure PAUSE-spin would starve it
+ * (it can never be scheduled while we hold the core). Pause a small budget, then
+ * yield — mirrors brook_wait_cycle and result_wait_ipc_yield so the no-WAITPKG
+ * path is single-core-safe, never a hard spin. */
+void yield(void);  /* boxlib (yield.c) — declared here to avoid pulling sync.h */
+#define TOUCH_SPIN_BUDGET 2048u
+
 static bool touch_wait_pause(Touch *out, uint32_t timeout_ms)
 {
     uint64_t deadline = 0;
@@ -218,12 +226,18 @@ static bool touch_wait_pause(Touch *out, uint32_t timeout_ms)
         deadline = touch_rdtsc() + cpu_ms_to_tsc(timeout_ms);
     }
 
+    uint32_t spin = 0;
     while (1) {
         __sync_synchronize();
         if (touch_pop(out)) return true;
 
         if (timeout_ms > 0 && touch_rdtsc() >= deadline) return false;
-        __asm__ volatile("pause");
+        if (++spin < TOUCH_SPIN_BUDGET) {
+            __asm__ volatile("pause");
+        } else {
+            spin = 0;
+            yield();
+        }
     }
 }
 

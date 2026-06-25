@@ -167,7 +167,8 @@ public:
     bool await_ready() noexcept { return (_M_got = ::receive(&_M_r)); }
     bool await_suspend(std::coroutine_handle<> __h)
     {
-        executor::current()->wait_on({__h, this, &_S_poll, &_S_block});
+        executor::current()->wait_on(__h, this, &_S_poll, &_S_block,
+                                     __exec::wait_domain::result);
         return true;
     }
     message await_resume() noexcept { return _M_got ? message(_M_r) : message(); }
@@ -189,6 +190,90 @@ private:
 };
 
 inline __message_awaiter next_message() noexcept { return __message_awaiter{}; }
+
+// ── co_await box::result_any() -> box::any_result ───────────────────────────
+// The ResultRing carries more than IPC into a strand: IPC messages (sender pid
+// != 0) AND kernel records (sender pid == 0 — a manifest reply / kernel result
+// from a VGA, storage or sync op this strand issued, or an addr_park
+// completion). An IPC server or the display daemon must consume ALL of them on
+// ONE await, not just IPC. result_any() is that await; like boxlib
+// result_wait_any it does NOT filter — it hands back the next raw record for
+// the caller to demux. This is EVENTS, not failures: it never yields a
+// box::error (a box::message reply path is where failures surface).
+class any_result {
+    Result r_{};
+
+public:
+    any_result() noexcept = default;
+    explicit any_result(const Result &r) noexcept : r_(r) {}
+
+    // A genuine record arrived (vs a spurious resume on a drained ring): a zero
+    // record carries no context, no sender and no payload.
+    bool valid() const noexcept
+    {
+        return r_.context != KCTX_NONE || r_.sender_pid != 0 || r_.data_addr != 0;
+    }
+    explicit operator bool() const noexcept { return valid(); }
+
+    // Demux faces — exactly one is meaningful per record.
+    bool          is_ipc() const noexcept { return r_.sender_pid != 0; }
+    bool          is_kernel() const noexcept { return r_.sender_pid == 0; }
+    std::uint32_t context() const noexcept { return r_.context; }      // KCTX_*
+    std::uint32_t error_code() const noexcept { return r_.error_code; }
+
+    // The IPC face — an EMPTY (invalid) message when this is a kernel record;
+    // reuses box::message's cross-cabin data_addr guard verbatim.
+    message       as_message() const noexcept { return message(r_); }
+    const Result &raw() const noexcept { return r_; }
+};
+
+// co_await box::result_any() — suspends on the current box::executor (Result
+// domain) until ANY ResultRing record lands. Spurious-safe: a stray resume
+// yields an invalid any_result, never a dereference.
+class __result_any_awaiter {
+public:
+    __result_any_awaiter() noexcept = default;
+
+    bool await_ready() noexcept { return (_M_got = _S_try(&_M_r)); }
+    bool await_suspend(std::coroutine_handle<> __h)
+    {
+        // accept_any: this block (result_wait_any) consumes ANY ResultRing
+        // record, so the executor prefers it as the collapsed-block
+        // representative — an IPC-only sibling block would strand a kernel
+        // record this awaiter is owed and hang it (Phase 3b contract).
+        executor::current()->wait_on(__h, this, &_S_poll, &_S_block,
+                                     __exec::wait_domain::result,
+                                     /*deadline_tsc=*/0, /*accept_any=*/true);
+        return true;
+    }
+    any_result await_resume() noexcept { return _M_got ? any_result(_M_r) : any_result(); }
+
+private:
+    // Non-blocking drain in result_wait_any's own order (ipc stash/ring ->
+    // non-ipc stash/ring -> bare ring). NOT result_wait_any(., 0): a 0 timeout
+    // there means "forever", which would hang the run-loop's poll sweep.
+    static bool _S_try(Result *__out)
+    {
+        if (result_pop_ipc(__out)) return true;
+        if (result_pop_non_ipc(__out)) return true;
+        return result_pop(__out);
+    }
+    static bool _S_poll(void *__s)
+    {
+        auto *__a = static_cast<__result_any_awaiter *>(__s);
+        return __a->_M_got || (__a->_M_got = _S_try(&__a->_M_r));
+    }
+    static void _S_block(void *__s, std::uint32_t __ms)
+    {
+        auto *__a = static_cast<__result_any_awaiter *>(__s);
+        if (!__a->_M_got) __a->_M_got = result_wait_any(&__a->_M_r, __ms);
+    }
+
+    Result _M_r{};
+    bool   _M_got = false;
+};
+
+inline __result_any_awaiter result_any() noexcept { return __result_any_awaiter{}; }
 
 }  // namespace box
 

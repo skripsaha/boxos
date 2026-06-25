@@ -8229,6 +8229,198 @@ void Phase47()
            ">2 GiB int64 byte-count bridge (from_ret64)\n");
 }
 
+// ── Phase48 — Ф24a executor wait-any (group-by-domain + min-deadline + result_any) ──
+// The headline fix: with >1 coroutine blocked the executor must NOT busy-yield —
+// it bounded-rotates native waits per domain, yielding once per rotation so a
+// same-core sibling producer can run (one App-Core), and caps the wait at the
+// earliest waiter deadline. (A) exercises the multi-waiter rotation with two
+// Touch coroutines fed by a sibling strand: Touch is the one async source a same-
+// cabin sibling can deliver (a Result needs a cross-cabin sender — send-to-self
+// is rejected — and a cross-strand Brook is its own substrate matter; both are
+// deferred exactly like phase13's pocket_recv). The Phase-3c rotation code is
+// identical across domains, so this validates the wait-any machinery.
+static volatile uint64_t g_p48_remaining;          // worker decrements; main joins
+static TouchTagPair      g_p48_tp;                 // touch tag the sibling sends on
+static constexpr unsigned g_p48_magic1 = 0x00C0DE48u;
+static constexpr unsigned g_p48_magic2 = 0x00BEE048u;
+
+// Bounded park-join (the p35_join idiom): a genuine hang fails loudly instead of
+// wedging the harness.
+static bool p48_join()
+{
+    uint32_t cycles = 0;
+    uint64_t cur;
+    while ((cur = __atomic_load_n(&g_p48_remaining, __ATOMIC_ACQUIRE)) != 0) {
+        if (++cycles > 80u) return false;
+        addr_park(&g_p48_remaining, cur, 200);
+    }
+    return true;
+}
+
+static void p48_producer(void *)
+{
+    // Sleep so the main strand reaches the rotation (both coroutines suspended)
+    // BEFORE either Touch is delivered — then deliver both to main's claimed ring.
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    unsigned m1 = g_p48_magic1, m2 = g_p48_magic2;
+    touch_send(g_p48_tp, &m1, sizeof(m1), 0);
+    touch_send(g_p48_tp, &m2, sizeof(m2), 0);
+    __atomic_sub_fetch(&g_p48_remaining, 1u, __ATOMIC_RELEASE);
+    addr_wake(&g_p48_remaining, 0);
+    strand_exit();
+}
+
+box::task<unsigned> P48AwaitTouch()
+{
+    Touch t = co_await box::touch_event();
+    unsigned v = 0;
+    if (t.payload_len >= sizeof(v)) __builtin_memcpy(&v, t.payload, sizeof(v));
+    co_return v;
+}
+
+// A minimal deadline-bearing awaiter (a stand-in for the Ф24b timer): never-ready
+// poll except once its absolute deadline passes; its block parks the budget the
+// executor computes. With a SINGLE such waiter the old size()==1 path would block
+// FOREVER (hang) — proving the Ф24a min-deadline plumbing revives the timeout.
+struct P48Timer {
+    std::chrono::steady_clock::time_point deadline;
+    uint64_t                              deadline_tsc;
+    explicit P48Timer(unsigned ms)
+        : deadline(std::chrono::steady_clock::now() + std::chrono::milliseconds(ms)),
+          deadline_tsc(cpu_rdtsc() + cpu_ms_to_tsc(ms)) {}
+
+    bool await_ready() const noexcept
+    {
+        return std::chrono::steady_clock::now() >= deadline;
+    }
+    bool await_suspend(std::coroutine_handle<> h)
+    {
+        // Domain is irrelevant for a lone waiter (Phase 3a ignores it); tag result.
+        box::executor::current()->wait_on(h, this, &_poll, &_block,
+                                          box::__exec::wait_domain::result, deadline_tsc);
+        return true;
+    }
+    void await_resume() const noexcept {}
+
+    static bool _poll(void *s)
+    {
+        auto *a = static_cast<P48Timer *>(s);
+        return std::chrono::steady_clock::now() >= a->deadline;
+    }
+    static void _block(void *, std::uint32_t ms)
+    {
+        // Park the executor-supplied budget on a never-changing word: returns on
+        // timeout, mirroring how a real timer consumes the capped block.
+        static volatile uint64_t dummy = 0;
+        addr_park(&dummy, 0, ms ? ms : 1);
+    }
+};
+
+box::task<void> P48AwaitTimer(unsigned ms)
+{
+    co_await P48Timer(ms);
+    co_return;
+}
+
+void Phase48()
+{
+    using namespace std::chrono;
+
+    // ── (A) multi-waiter wait-any: two coroutines each await the next Touch; a
+    //        sibling strand delivers two Touches WHILE the executor is blocked,
+    //        so the bounded rotation (not a busy-yield) must resume BOTH without
+    //        starving the same-core producer. ─────────────────────────────────
+    {
+        TouchTagPair tp = touch_intern("cxx:waitany:touch");
+        TouchTag     id = touch_pair_choose(tp);
+        bool         can = (id != TOUCH_TAG_INVALID) && cpu_has_fsgsbase();
+        if (can) {
+            touch_claim(id, TOUCH_REST, 0, 0);
+            Touch drain;
+            while (touch_pop(&drain)) { }  // clear stray touches: touch_event is unfiltered
+            g_p48_tp        = tp;
+            g_p48_remaining = 1;
+            if (strand_spawn(p48_producer, 0) != 0) {
+                box::executor ex;
+                auto          t1 = P48AwaitTouch();
+                auto          t2 = P48AwaitTouch();
+                ex.schedule(t1.handle());  // both run, find the TouchRing empty,
+                ex.schedule(t2.handle());  // suspend -> two Touch-domain waiters
+                box::stopwatch sw;
+                ex.run();                  // bounded rotation; sibling delivers 2
+                auto ms = duration_cast<milliseconds>(sw.elapsed());
+
+                unsigned g1 = t1.result(), g2 = t2.result();
+                bool both = (g1 == g_p48_magic1 && g2 == g_p48_magic2) ||
+                            (g1 == g_p48_magic2 && g2 == g_p48_magic1);
+                Check(both, "phase48 (A) wait-any resumed BOTH waiting coroutines");
+                // Honest no-spin signal: the sibling slept 20ms before delivering,
+                // so a genuine PARK makes run() take >= ~15ms. Busy-vs-park is not
+                // userspace-observable; this lower bound + dual delivery proves the
+                // executor blocked (not a vacuous instant return) and the rotation
+                // ran on one App-Core without starving the producer.
+                Check(ms >= milliseconds(15),
+                      "phase48 (A) executor parked, not vacuous (>=15ms)");
+                Check(p48_join(), "phase48 (A) sibling producer joined");
+            } else {
+                printf("[CXX] note phase48: strand_spawn unavailable — (A) skipped\n");
+            }
+            touch_release(id);
+        } else {
+            printf("[CXX] note phase48: touch/FSGSBASE unavailable — (A) skipped\n");
+        }
+    }
+
+    // ── (B) min-deadline revives the timeout: a single deadline-bearing waiter.
+    //        WITHOUT the Ф24a plumbing the size()==1 path blocks forever; WITH it
+    //        the budget caps the block at the deadline so it wakes ~on time. ──────
+    {
+        box::executor  ex;
+        box::stopwatch sw;
+        ex.block_on(P48AwaitTimer(30));
+        auto ms = duration_cast<milliseconds>(sw.elapsed());
+        Check(ms >= milliseconds(20) && ms < milliseconds(400),
+              "phase48 (B) min-deadline revives timeout (lone waiter wakes ~30ms, not forever)");
+    }
+
+    // ── (C) box::result_any() — any_result demux faces + spurious safety. A real
+    //        IPC+kernel runtime delivery is NOT producible same-strand (send-to-
+    //        self is ERR_ROUTE_SELF; a cross-cabin peer faults under 1c — the same
+    //        honest deferral as phase13's pocket_recv). The await machinery is
+    //        byte-identical to the touch/brook awaiters proven in (A), and the leaf
+    //        result_wait_any is exercised by the live display daemon. Here: value
+    //        semantics + the await_ready<->valid invariant (no hang). ────────────
+    {
+        Result k{};
+        k.context    = 7;  // a non-zero kernel context (KCTX_*), sender_pid == 0
+        k.sender_pid = 0;
+        box::any_result kr(k);
+        Check(kr && kr.is_kernel() && !kr.is_ipc() && kr.context() == 7u,
+              "phase48 (C) any_result kernel face");
+
+        Result m{};
+        m.sender_pid = 7;  // a genuine IPC delivery
+        box::any_result mr(m);
+        Check(mr && mr.is_ipc() && !mr.is_kernel() && mr.as_message().valid(),
+              "phase48 (C) any_result IPC face bridges to box::message");
+
+        box::any_result empty;
+        Check(!empty && !empty.valid(),
+              "phase48 (C) default any_result is invalid (spurious-resume safe)");
+
+        // Non-blocking await_ready drains nothing pending -> await_resume yields an
+        // invalid any_result; the invariant ready<->valid holds for any ring state.
+        box::__result_any_awaiter a;
+        bool            ready = a.await_ready();
+        box::any_result r     = a.await_resume();
+        Check(ready == static_cast<bool>(r),
+              "phase48 (C) result_any await_ready matches any_result validity");
+    }
+
+    printf("[CXX] PASS phase48: Ф24a executor wait-any "
+           "(multi-waiter bounded rotation + min-deadline revival + box::result_any)\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -8298,6 +8490,7 @@ int main()
     Phase45();
     Phase46();
     Phase47();
+    Phase48();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

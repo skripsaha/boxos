@@ -163,6 +163,18 @@ INLINE uint64_t cpu_ms_to_tsc(uint64_t ms) {
     return ms * freq_khz;
 }
 
+// Convert TSC cycles to whole milliseconds — the exact inverse of
+// cpu_ms_to_tsc, sharing its 1 GHz fallback. Truncates toward zero; callers
+// that must not collapse a sub-ms-but-positive wait to 0 (== "forever" in the
+// boxlib blocking-wait functions) floor the result to 1 themselves.
+INLINE uint64_t cpu_tsc_to_ms(uint64_t ticks) {
+    uint64_t freq_khz = cpu_get_tsc_freq_khz();
+    if (freq_khz == 0) {
+        freq_khz = 1000000;  // 1 GHz fallback (only if caps page not mapped)
+    }
+    return ticks / freq_khz;
+}
+
 /* ---------------------------------------------------------------------------
  * High-precision timing primitives (for benchmarking, not wall-clock).
  *
