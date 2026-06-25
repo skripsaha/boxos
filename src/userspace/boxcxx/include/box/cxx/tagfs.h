@@ -172,16 +172,17 @@ public:
     // ── random-access byte I/O, bound to this file_id ────────────────────
     // On success the byte count transferred; the error arm carries the recovered
     // cause (invalid_argument for an empty handle, else the native fread/fwrite
-    // error_t — e.g. out_of_range, io). The boxlib fread/fwrite hand back a count
-    // >= 0 or box_fail(rc) < 0, which from_ret turns into value-or-cause.
+    // error_t — e.g. out_of_range, io). The boxlib fread/fwrite hand back an
+    // int64 count >= 0 (up to 4 GiB) or box_fail(rc) < 0, which from_ret64 turns
+    // into value-or-cause without the count ever colliding with the cause sign.
     box::result<std::size_t> read_at(std::uint64_t offset, void *p, std::size_t n) const
     {
-        return box::_detail::from_ret<std::size_t>(
+        return box::_detail::from_ret64<std::size_t>(
             id_ ? ::fread(id_, offset, p, n) : -ERR_INVALID_ARGUMENT);
     }
     box::result<std::size_t> write_at(std::uint64_t offset, const void *p, std::size_t n)
     {
-        return box::_detail::from_ret<std::size_t>(
+        return box::_detail::from_ret64<std::size_t>(
             id_ ? ::fwrite(id_, offset, p, n) : -ERR_INVALID_ARGUMENT);
     }
     box::result<std::size_t> read_at(std::uint64_t offset, std::span<std::byte> buf) const

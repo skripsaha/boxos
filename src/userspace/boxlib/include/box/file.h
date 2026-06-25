@@ -27,8 +27,10 @@ typedef struct {
 int create(const char* filename, const char* tags);
 int query(const char* tags, uint32_t* file_ids, size_t max_files);
 int file_info(uint32_t file_id, file_info_t* info);
-int fread(uint32_t file_id, uint64_t offset, void* buffer, size_t size);
-int fwrite(uint32_t file_id, uint64_t offset, const void* buffer, size_t size);
+/* Return the byte count transferred (0..4 GiB, short-transfer: a request > 4 GiB
+ * is capped to one syscall — loop for more), or a negative -error_t on failure. */
+int64_t fread(uint32_t file_id, uint64_t offset, void* buffer, size_t size);
+int64_t fwrite(uint32_t file_id, uint64_t offset, const void* buffer, size_t size);
 /* `delete` is a C++ keyword — C++ callers use file_delete(), bound to the
  * same ELF symbol via asm label. C keeps the original name unchanged. */
 #ifdef __cplusplus

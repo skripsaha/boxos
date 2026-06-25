@@ -243,10 +243,14 @@ int current_write(Current *c, const void *data, size_t len)
     }
 
     case CurFile: {
-        int n = fwrite(c->file_id, c->file_pos, data, len);
+        /* current_write is an int-returning channel primitive; cap the request
+         * so the widened int64 fwrite count fits an int (short-write — callers
+         * loop) instead of truncating a 2-4 GiB count into a negative int. */
+        size_t  req = len > (size_t)INT32_MAX ? (size_t)INT32_MAX : len;
+        int64_t n   = fwrite(c->file_id, c->file_pos, data, req);
         if (n < 0) return -ERR_WRITE_FAILED;
         c->file_pos += (uint64_t)n;
-        return n;
+        return (int)n;
     }
 
     case CurStream: {
@@ -285,11 +289,12 @@ int current_read(Current *c, void *buf, size_t len)
     }
 
     case CurFile: {
-        int n = fread(c->file_id, c->file_pos, buf, len);
+        size_t  req = len > (size_t)INT32_MAX ? (size_t)INT32_MAX : len;
+        int64_t n   = fread(c->file_id, c->file_pos, buf, req);
         if (n < 0) return -ERR_READ_FAILED;
         if (n == 0) return CURRENT_CLOSED;     /* content exhausted */
         c->file_pos += (uint64_t)n;
-        return n;
+        return (int)n;
     }
 
     case CurStream: {
