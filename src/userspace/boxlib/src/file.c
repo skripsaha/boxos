@@ -165,9 +165,16 @@ int file_info(uint32_t file_id, file_info_t *info)
  *  READ / WRITE — single syscall, no chunking
  * ========================================================================= */
 
-int fread(uint32_t file_id, uint64_t offset, void *buffer, size_t size)
+/* fread / fwrite return the byte count transferred (0 .. 4 GiB) or a negative
+ * -error_t on failure. The STORAGE wire field is 32-bit, so a single call moves
+ * at most UINT32_MAX bytes; a larger request is capped (a short transfer — the
+ * caller loops for more) rather than silently wrapped. The int64 return keeps a
+ * 2..4 GiB count on the non-negative side, clear of the -error_t cause channel
+ * (every error_t <= 1100); the C++ box::result bridge is box::_detail::from_ret64. */
+int64_t fread(uint32_t file_id, uint64_t offset, void *buffer, size_t size)
 {
     if (!buffer || size == 0) return -ERR_INVALID_ARGUMENT;
+    uint32_t req = size > UINT32_MAX ? UINT32_MAX : (uint32_t)size;
 
     /* params: [u32 file_id][u64 offset]. */
     uint8_t params[12];
@@ -178,15 +185,16 @@ int fread(uint32_t file_id, uint64_t offset, void *buffer, size_t size)
     int rc = MfCall1(DECK_STORAGE, STORAGE_OBJ_READ,
                      params, sizeof(params),
                      NULL, 0,
-                     buffer, (uint32_t)size, &out_actual,
+                     buffer, req, &out_actual,
                      STORAGE_TIMEOUT_MS, NULL);
     if (rc != 0) return box_fail(rc);
-    return (int)out_actual;
+    return (int64_t)out_actual;            /* 0..req, always >= 0 */
 }
 
-int fwrite(uint32_t file_id, uint64_t offset, const void *buffer, size_t size)
+int64_t fwrite(uint32_t file_id, uint64_t offset, const void *buffer, size_t size)
 {
     if (!buffer || size == 0) return -ERR_INVALID_ARGUMENT;
+    uint32_t req = size > UINT32_MAX ? UINT32_MAX : (uint32_t)size;
 
     /* params: [u32 file_id][u64 offset][u32 flags=0]. */
     uint8_t params[16];
@@ -199,15 +207,15 @@ int fwrite(uint32_t file_id, uint64_t offset, const void *buffer, size_t size)
     uint32_t out_actual = 0;
     int rc = MfCall1(DECK_STORAGE, STORAGE_OBJ_WRITE,
                      params, sizeof(params),
-                     buffer, (uint32_t)size,
+                     buffer, req,
                      out, sizeof(out), &out_actual,
                      STORAGE_TIMEOUT_MS, NULL);
     if (rc != 0) return box_fail(rc);
-    if (out_actual < 8) return (int)size; /* op succeeded; assume full write */
+    if (out_actual < 8) return (int64_t)req; /* op succeeded; assume full write of the submitted crate */
 
     uint64_t bytes_written = 0;
     memcpy(&bytes_written, out, 8);
-    return (int)bytes_written;
+    return (int64_t)bytes_written;
 }
 
 /* =========================================================================

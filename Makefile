@@ -267,7 +267,7 @@ CLANG_AVAILABLE := $(shell command -v lld-link 2>/dev/null)
 .PHONY: all clean run run-bg run-stop debug info check-deps install-deps uefi usb check-endbr64
 
 # ==== MAIN TARGET ====
-all: check-deps $(IMAGE) $(KERNEL_ELF) $(FLOPPY_IMG) $(ISO) $(VBOX_VDI) uefi check-endbr64
+all: check-deps check-error-parity $(IMAGE) $(KERNEL_ELF) $(FLOPPY_IMG) $(ISO) $(VBOX_VDI) uefi check-endbr64
 
 # ==== CET / IBT POST-LINK AUDIT ====
 # Verifies every globally-visible function in the kernel ELF begins with
@@ -278,6 +278,15 @@ all: check-deps $(IMAGE) $(KERNEL_ELF) $(FLOPPY_IMG) $(ISO) $(VBOX_VDI) uefi che
 # (already required by the toolchain). Fast (~1s).
 check-endbr64: $(KERNEL_ELF)
 	@./tools/check_endbr64.sh $(KERNEL_ELF)
+
+# ==== ERROR-CODE PARITY GUARD (Ф23) ====
+# boxlib box/error.h is the single userspace source of truth for error codes
+# (one X-macro row → boxlib ERR_*, box::errc, box_error.cpp tables). This guard
+# enforces the one seam the X-macro cannot reach — the kernel boundary — so a
+# new kernel ERR_* cannot silently re-open the subset-drift Ф23 closed. Pure
+# source diff, instant; fails the build on any name/value mismatch.
+check-error-parity:
+	@./tools/check_error_parity.sh
 
 # ==== DEP CHECK ====
 check-deps:

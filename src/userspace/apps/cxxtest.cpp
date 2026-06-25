@@ -8104,6 +8104,131 @@ void Phase46()
            "last-errors with zero cross-strand clobber\n");
 }
 
+// Ф23 backlog: B-1 (full kernel-code sync, single-source X-macro table) +
+// B-2 (>2 GiB int64 byte-count bridge). Host-pure asserts always run; the
+// real-storage round-trip is gated on a confirmed create (storage-up probe).
+void Phase47()
+{
+    // ── B-1: the trigger code now names itself (was "box:941 error") ─────────
+    {
+        box::error e{box::errc::route_no_subscribers};
+        Check(e.raw() == 941u, "phase47 route_no_subscribers raw == 941");
+        Check(e.category_name() == std::string_view("routing"),
+              "phase47 941 category == routing (was the 'box' fallback)");
+        Check(e.message() == std::string_view("no subscribers for route"),
+              "phase47 941 carries its real message (was the 'error' fallback)");
+        Check(std::format("{}", e) == "routing:941 no subscribers for route",
+              "phase47 941 formats as 'routing:941 no subscribers for route' — box:941 bug dead");
+    }
+
+    // Every kernel range carries a faithful category + message — no code falls
+    // to the "box"/"unknown error code" default. First/last of each range.
+    {
+        struct CatCase { box::errc code; std::string_view cat; };
+        static const CatCase cats[] = {
+            {box::errc::unknown,                "core"},     {box::errc::quota_exceeded,        "core"},
+            {box::errc::no_memory,              "memory"},   {box::errc::pcid_exhausted,        "memory"},
+            {box::errc::io,                     "io"},       {box::errc::sector_write_failed,   "io"},
+            {box::errc::file_not_found,         "storage"},  {box::errc::self_heal_failed,      "storage"},
+            {box::errc::process_not_found,      "process"},  {box::errc::stack_alloc_failed,    "process"},
+            {box::errc::access_denied,          "security"}, {box::errc::sandbox_violation,     "security"},
+            {box::errc::hardware,               "hardware"}, {box::errc::cpu_error,             "hardware"},
+            {box::errc::acpi_not_found,         "acpi"},     {box::errc::acpi_fadt_not_found,   "acpi"},
+            {box::errc::tagfs_not_initialized,  "tagfs"},    {box::errc::tagfs_recovery_failed, "tagfs"},
+            {box::errc::pocket_ring_full,       "ipc"},      {box::errc::result_stash_full,     "ipc"},
+            {box::errc::route_target_full,      "routing"},  {box::errc::route_invalid_tag,     "routing"},
+            {box::errc::pocket_failed,          "ipc"},
+            {box::errc::scheduler_locked,       "scheduler"},{box::errc::work_steal_failed,     "scheduler"},
+            {box::errc::boot_info_invalid,      "boot"},     {box::errc::kernel_load_failed,    "boot"},
+            {box::errc::diskbook_not_initialized,"diskbook"},{box::errc::diskbook_read_failed,  "diskbook"},
+            {box::errc::cow_not_initialized,    "cow"},      {box::errc::cow_restore_failed,    "cow"},
+            {box::errc::dedup_not_initialized,  "dedup"},    {box::errc::dedup_register_failed, "dedup"},
+            {box::errc::self_heal_not_initialized,"selfheal"},{box::errc::self_heal_scrub_failed,"selfheal"},
+            {box::errc::boxhash_invalid_context,"boxhash"},  {box::errc::boxhash_key_not_set,   "boxhash"},
+            {box::errc::braid_not_initialized,  "braid"},    {box::errc::braid_rebuild_failed,  "braid"},
+            {box::errc::addr_value_mismatch,    "strand"},
+        };
+        bool cats_ok = true;
+        for (const CatCase &cc : cats) {
+            box::error e{cc.code};
+            cats_ok = cats_ok && e.category_name() == cc.cat
+                      && e.message() != std::string_view("unknown error code");
+        }
+        Check(cats_ok, "phase47 every kernel range carries a faithful category + named message");
+    }
+
+    // The ERR_POCKET_FAILED 906→950 fix, locked at compile time, and the
+    // single-source guarantee (box::errc values ARE the boxlib codes).
+    static_assert(ERR_POCKET_FAILED == 950,
+                  "phase47 ERR_POCKET_FAILED is the kernel's own 950 (no longer a 906 alias)");
+    static_assert(static_cast<error_t>(box::errc::pocket_failed) == 950 &&
+                  static_cast<error_t>(box::errc::pocket_processing_failed) == 906,
+                  "phase47 pocket_failed(950) is distinct from pocket_processing_failed(906)");
+    static_assert(static_cast<error_t>(box::errc::route_no_subscribers) == ERR_ROUTE_NO_SUBSCRIBERS &&
+                  static_cast<error_t>(box::errc::no_memory) == ERR_NO_MEMORY &&
+                  static_cast<error_t>(box::errc::braid_rebuild_failed) == ERR_BRAID_REBUILD_FAILED,
+                  "phase47 box::errc enumerators ARE the boxlib ERR_* codes (single source)");
+
+    // ── B-2: the int64 byte-count bridge ────────────────────────────────────
+    // 3e9 is the exact value that the old `int` bridge read as a NEGATIVE cause;
+    // from_ret64 carries it as a SUCCESS count.
+    {
+        auto big = box::_detail::from_ret64<std::size_t>(3000000000LL);
+        Check(big.has_value() && *big == 3000000000u,
+              "phase47 from_ret64 carries a 3e9 count as SUCCESS (the int bridge mis-read it as a cause)");
+        auto zero = box::_detail::from_ret64<std::size_t>(0);
+        Check(zero.has_value() && *zero == 0u, "phase47 from_ret64(0) is a zero-count success");
+        auto df = box::_detail::from_ret64<std::size_t>(box_fail(ERR_DISK_FULL));
+        Check(!df.has_value() && df.error().code() == box::errc::disk_full,
+              "phase47 from_ret64 recovers disk_full from box_fail(ERR_DISK_FULL)");
+        auto io = box::_detail::from_ret64<std::size_t>(-(int)ERR_IO);
+        Check(!io.has_value() && io.error().code() == box::errc::io,
+              "phase47 from_ret64 recovers io from a raw -ERR_IO");
+    }
+
+    // Real storage: the byte count survives the int64 bridge end-to-end. Gated
+    // on a confirmed create so a storage flake degrades to a note, never a FAIL.
+    {
+        box::result<box::tagfs::file> made =
+            box::tagfs::create("cxx:p47:wide", {"cxx:phase47"});
+        if (made.has_value()) {
+            box::tagfs::file f = *made;
+            unsigned char buf[512];
+            for (int i = 0; i < 512; i++) buf[i] = (unsigned char)(i & 0xFF);
+
+            box::result<std::size_t> w = f.write_at(0, buf, sizeof(buf));
+            Check(w.has_value() && *w == sizeof(buf),
+                  "phase47 write_at exposes the exact byte count through the int64 bridge");
+
+            unsigned char back[512] = {};
+            box::result<std::size_t> r = f.read_at(0, back, sizeof(back));
+            bool same = r.has_value() && *r == sizeof(buf);
+            for (int i = 0; same && i < 512; i++) same = back[i] == buf[i];
+            Check(same, "phase47 read_at count + content survive the int64 bridge");
+
+            // A struct larger than the object's bytes: the op must NOT silently
+            // succeed; read_object maps a short transfer to errc::io.
+            struct Big { unsigned char d[4096]; };
+            box::result<Big> sr = f.read_object<Big>(0);
+            Check(!sr.has_value(),
+                  "phase47 read_object of a 4 KiB struct over a 512-byte object does not succeed");
+            if (!sr.has_value() && sr.error().code() != box::errc::io)
+                printf("[CXX] note phase47: short read surfaced as '%s' (backend errored past-end "
+                       "rather than short-reading) — errc::io path not exercised\n",
+                       std::string(sr.error().message()).c_str());
+
+            (void)f.remove();
+        } else {
+            printf("[CXX] note phase47: tagfs storage unavailable — wide-bridge round-trip "
+                   "skipped (from_ret64 unit + B-1 table asserted unconditionally)\n");
+        }
+    }
+
+    printf("[CXX] PASS phase47: Ф23 backlog — full kernel-code sync via single-source "
+           "X-macro (941 names itself, every range categorized, POCKET_FAILED=950) + "
+           ">2 GiB int64 byte-count bridge (from_ret64)\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -8172,6 +8297,7 @@ int main()
     Phase44();
     Phase45();
     Phase46();
+    Phase47();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
