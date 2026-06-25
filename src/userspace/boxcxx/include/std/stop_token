@@ -201,7 +201,8 @@ inline constexpr nostopstate_t nostopstate{};
 class stop_source {
 public:
     // A fresh source owns one ref (itself) and is the one live source.
-    stop_source() : s_(new __stop_state{/*refs*/ {1u}, /*sources*/ {1u}}) {}
+    stop_source() : s_(new __stop_state{/*refs*/ {1u}, /*sources*/ {1u},
+                                        /*requested*/ {0u}, /*list_lock*/ {}}) {}
     explicit stop_source(nostopstate_t) noexcept : s_(nullptr) {}
 
     stop_source(const stop_source &o) noexcept : s_(o.s_)
