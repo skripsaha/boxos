@@ -72,7 +72,9 @@ static int       initialized  = 0;
 
 // ---- diagnostics ----------------------------------------------------------
 
-error_t  heap_last_error = OK;
+/* The main strand's / shared-fallback heap error cell. Internal linkage: the
+ * public API is heap_get_last_error() (per-strand), not this symbol. */
+static error_t  heap_last_error = OK;
 
 static uint32_t stat_malloc_calls = 0;
 static uint32_t stat_free_calls   = 0;
@@ -157,7 +159,7 @@ static int prefault_huge_locked(uintptr_t va_base, uint64_t size_2m_aligned) {
 
 // Core allocation logic. tag_id must already be resolved.
 // Called with heap_lock held. Returns payload pointer or NULL.
-static void* alloc_locked(size_t size, uint8_t tag_id) {
+static void* alloc_locked(size_t size, uint8_t tag_id, error_t *errcell) {
     if (!initialized) heap_init_locked();
 
     stat_malloc_calls++;
@@ -165,7 +167,7 @@ static void* alloc_locked(size_t size, uint8_t tag_id) {
     size_t orig_size = size;
     size = align_up(size, HEAP_ALIGN);
     if (size < orig_size) {
-        heap_last_error = ERR_NO_MEMORY;
+        *errcell = ERR_NO_MEMORY;
         return NULL;
     }
 
@@ -174,7 +176,7 @@ static void* alloc_locked(size_t size, uint8_t tag_id) {
     block_t* prev = NULL;
     while (curr) {
         if (curr->magic != HEAP_MAGIC) {
-            heap_last_error = ERR_CORRUPTED;
+            *errcell = ERR_CORRUPTED;
             break;
         }
         if (curr->free && curr->size >= size) {
@@ -190,7 +192,7 @@ static void* alloc_locked(size_t size, uint8_t tag_id) {
             }
             curr->free = 0;
             curr->tag  = tag_id;
-            heap_last_error = OK;
+            *errcell = OK;
             return (void*)((uint8_t*)curr + BLOCK_HDR_SIZE);
         }
         prev = curr;
@@ -200,7 +202,7 @@ static void* alloc_locked(size_t size, uint8_t tag_id) {
     // Grow the heap
     size_t total = BLOCK_HDR_SIZE + size;
     if (total < size) {
-        heap_last_error = ERR_NO_MEMORY;
+        *errcell = ERR_NO_MEMORY;
         return NULL;
     }
 
@@ -219,7 +221,7 @@ static void* alloc_locked(size_t size, uint8_t tag_id) {
         size_t    grow_total   = pad_size + huge_total;
 
         if (heap_current + grow_total > heap_max) {
-            heap_last_error = ERR_HEAP_EXHAUSTED;
+            *errcell = ERR_HEAP_EXHAUSTED;
             return NULL;
         }
 
@@ -245,7 +247,7 @@ static void* alloc_locked(size_t size, uint8_t tag_id) {
             /* Kernel could not back the region (PMM exhausted). Don't
              * roll back the padding block — it's a legitimate free
              * region that future small allocations can use. */
-            heap_last_error = ERR_NO_MEMORY;
+            *errcell = ERR_NO_MEMORY;
             return NULL;
         }
 
@@ -264,14 +266,14 @@ static void* alloc_locked(size_t size, uint8_t tag_id) {
             free_list = block;
         }
 
-        heap_last_error = OK;
+        *errcell = OK;
         return (void *)((uint8_t *)block + BLOCK_HDR_SIZE);
     }
 
     /* Sub-2 MB growth — existing 4 KB demand-paged path. */
     void* mem = sbrk_locked(total);
     if (!mem) {
-        heap_last_error = ERR_HEAP_EXHAUSTED;
+        *errcell = ERR_HEAP_EXHAUSTED;
         return NULL;
     }
 
@@ -288,7 +290,7 @@ static void* alloc_locked(size_t size, uint8_t tag_id) {
         free_list = block;
     }
 
-    heap_last_error = OK;
+    *errcell = OK;
     return (void*)((uint8_t*)block + BLOCK_HDR_SIZE);
 }
 
@@ -318,6 +320,40 @@ static const uint16_t StrandPoolCapForClass[STRAND_POOL_CLASS_COUNT] =
  * fields are zero (FREE) at BSS init. */
 static StrandPool g_pool_slab[STRAND_POOL_SLAB_MAX];
 static StrandPool g_main_pool;
+
+/* Per-strand heap last-error cells (Ф23c). The boxlib heap is shared by every
+ * strand in the cabin, but "the cause of MY last heap op" must NOT be: under
+ * spawned strands a single global cell is a race — one strand's success would
+ * clobber another strand's failure before it is read. Each strand owns the cell
+ * parallel to its StrandPool slab slot (same index → single-writer, no lock, no
+ * race); the main strand and any strand that could not claim a slot share
+ * heap_last_error. This stays entirely in userspace and never touches the
+ * kernel-shared StrandPool ABI (strand_pool_abi.h pins it to GenState only). */
+static error_t g_pool_last_error[STRAND_POOL_SLAB_MAX];
+
+/* The error cell owned by the strand whose pool is `pool`: main/NULL/uncached
+ * → the process-global cell; a claimed slab slot → its parallel per-strand
+ * cell. `pool - g_pool_slab` is the slot index (pool always points into the
+ * slab once the &g_main_pool case is excluded). */
+static inline error_t *heap_err_cell_for(StrandPool *pool) {
+    if (pool == NULL || pool == &g_main_pool) return &heap_last_error;
+    return &g_pool_last_error[pool - g_pool_slab];
+}
+
+/* The calling strand's last heap error (Ф23c). Read-only: it never claims a
+ * pool slot, so a pure query has no allocation side effect. A spawned strand
+ * that has touched the cached heap reads its own per-strand cell. NOTE the
+ * value is meaningful only AFTER this strand's first heap op: before that a
+ * spawned strand has no cell of its own and reads the bootstrap/main cell, and
+ * a strand that could not claim a slot (slab full) shares the main cell for as
+ * long as it runs — the same bounded degradation under which it also allocates
+ * uncached through the locked global path. */
+error_t heap_get_last_error(void) {
+    StrandInfo *si = strand_info_or_null();
+    if (si && si->strand_pool_ptr != 0)
+        return *heap_err_cell_for((StrandPool *)(uintptr_t)si->strand_pool_ptr);
+    return heap_last_error;
+}
 
 /* Dirty flag: the kernel sets this to 1 (RELEASE) after a successful
  * LIVE→ORPHANED CAS in process_destroy. 0/1 only — NOT a counter, so
@@ -442,6 +478,7 @@ static StrandPool *pool_claim(StrandInfo *si) {
             if (__atomic_compare_exchange_n(&p->GenState, &word, next, false,
                                             __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) {
                 p->OwnerPid = strand_self();
+                g_pool_last_error[i] = OK;  /* fresh slot starts with no error */
                 claimed     = p;
                 claimed_gen = STRANDPOOL_GEN(next);
                 if (i + 1 > g_pool_slab_hwm) g_pool_slab_hwm = i + 1;
@@ -490,8 +527,9 @@ static StrandPool *pool_self(void) {
 /* Refill one class: pull STRAND_POOL_REFILL_BATCH blocks of ClassSize[c] from
  * the global heap and push them onto the magazine. heap_lock HELD. */
 static void pool_refill_locked(StrandPool *pool, unsigned c) {
+    error_t *errcell = heap_err_cell_for(pool);
     for (unsigned k = 0; k < STRAND_POOL_REFILL_BATCH; k++) {
-        void *payload = alloc_locked(StrandPoolClassSize[c], HEAP_TAG_NONE);
+        void *payload = alloc_locked(StrandPoolClassSize[c], HEAP_TAG_NONE, errcell);
         if (!payload) break;   /* heap exhausted — serve whatever we got */
         *(void **)payload = pool->Heads[c];
         pool->Heads[c]    = payload;
@@ -569,8 +607,9 @@ int strand_pool_test_orphan_reclaim(unsigned n_blocks) {
 
     /* Cache real blocks the way the fast path does: alloc from the global heap
      * (free=0) and link through the payload. */
+    error_t staging_err = OK;
     for (unsigned k = 0; k < n_blocks; k++) {
-        void *payload = alloc_locked(StrandPoolClassSize[c], HEAP_TAG_NONE);
+        void *payload = alloc_locked(StrandPoolClassSize[c], HEAP_TAG_NONE, &staging_err);
         if (!payload) break;
         *(void **)payload = slot->Heads[c];
         slot->Heads[c]    = payload;
@@ -612,19 +651,20 @@ int strand_pool_test_orphan_reclaim(unsigned n_blocks) {
 void* _malloc_impl(size_t size) {
     if (size == 0) return NULL;
 
-    unsigned c = StrandPoolSizeToClass(size);
-    if (c == STRAND_POOL_NO_CLASS) {
-        umutex_lock(&heap_lock);
-        void* ptr = alloc_locked(size, HEAP_TAG_NONE);
-        umutex_unlock(&heap_lock);
-        return ptr;
-    }
+    /* Resolve this strand's pool (claiming one lazily) and its error cell up
+     * front: the cause of this call lands in the calling strand's OWN cell (or,
+     * only when the slab is full and no slot could be claimed, the shared
+     * fallback — see the banner above), so slot-holding strands never clobber
+     * each other. */
+    StrandPool *pool    = pool_self();
+    error_t    *errcell = heap_err_cell_for(pool);
 
-    StrandPool *pool = pool_self();
-    if (!pool) {
-        /* Graceful degrade: no slot available — serve from the locked heap. */
+    unsigned c = StrandPoolSizeToClass(size);
+    if (c == STRAND_POOL_NO_CLASS || !pool) {
+        /* Oversized request, or no slab slot available — serve from the locked
+         * global heap. alloc_locked records the cause in this strand's cell. */
         umutex_lock(&heap_lock);
-        void* ptr = alloc_locked(size, HEAP_TAG_NONE);
+        void* ptr = alloc_locked(size, HEAP_TAG_NONE, errcell);
         umutex_unlock(&heap_lock);
         return ptr;
     }
@@ -635,7 +675,7 @@ void* _malloc_impl(size_t size) {
         pool_refill_locked(pool, c);
         umutex_unlock(&heap_lock);
         if (!pool->Heads[c]) {
-            heap_last_error = ERR_HEAP_EXHAUSTED;
+            *errcell = ERR_HEAP_EXHAUSTED;
             return NULL;
         }
     }
@@ -643,16 +683,19 @@ void* _malloc_impl(size_t size) {
     void *payload  = pool->Heads[c];
     pool->Heads[c] = *(void **)payload;
     pool->Counts[c]--;
-    heap_last_error = OK;
+    *errcell = OK;
     return payload;
 }
 
 void* malloc_tagged(size_t size, const char *tag) {
     if (size == 0) return NULL;
 
+    /* pool_self() (which may claim a slot) is called BEFORE the heap lock —
+     * pool_claim takes the lock itself, so resolving it here avoids re-entry. */
+    error_t *errcell = heap_err_cell_for(pool_self());
     umutex_lock(&heap_lock);
     uint8_t tag_id = get_or_create_tag_locked(tag);
-    void* ptr = alloc_locked(size, tag_id);
+    void* ptr = alloc_locked(size, tag_id, errcell);
     umutex_unlock(&heap_lock);
     return ptr;
 }
@@ -660,6 +703,7 @@ void* malloc_tagged(size_t size, const char *tag) {
 /* Return a block to the global heap under the lock — the slow path shared by
  * free()'s global cases (corrupt/double-free/tagged/oversized/overflow). */
 static void free_global(void* ptr) {
+    error_t *errcell = heap_err_cell_for(pool_self());
     umutex_lock(&heap_lock);
 
     stat_free_calls++;
@@ -667,13 +711,13 @@ static void free_global(void* ptr) {
     block_t* block = (block_t*)((uint8_t*)ptr - BLOCK_HDR_SIZE);
 
     if (block->magic != HEAP_MAGIC) {
-        heap_last_error = ERR_CORRUPTED;
+        *errcell = ERR_CORRUPTED;
         umutex_unlock(&heap_lock);
         return;
     }
 
     if (block->free) {
-        heap_last_error = ERR_INVALID_ADDRESS;
+        *errcell = ERR_INVALID_ADDRESS;
         umutex_unlock(&heap_lock);
         return;
     }
@@ -682,7 +726,7 @@ static void free_global(void* ptr) {
     block->tag  = HEAP_TAG_NONE;
     coalesce_locked();
 
-    heap_last_error = OK;
+    *errcell = OK;
     umutex_unlock(&heap_lock);
 }
 
@@ -703,6 +747,7 @@ void free(void* ptr) {
 
     StrandPool *pool = pool_self();
     if (!pool) { free_global(ptr); return; }
+    error_t *errcell = heap_err_cell_for(pool);
 
     /* Double-free of a still-cached block: scan this magazine (<= cap pointers).
      * The global free() above cannot catch it because a cached block is free=0.
@@ -711,7 +756,7 @@ void free(void* ptr) {
     unsigned guard = pool->Counts[c];
     for (void *node = pool->Heads[c]; node && guard--; ) {
         if (node == ptr) {
-            heap_last_error = ERR_INVALID_ADDRESS;
+            *errcell = ERR_INVALID_ADDRESS;
             return;
         }
         block_t *b = (block_t *)((uint8_t *)node - BLOCK_HDR_SIZE);
@@ -730,7 +775,7 @@ void free(void* ptr) {
     *(void **)ptr  = pool->Heads[c];
     pool->Heads[c] = ptr;
     pool->Counts[c]++;
-    heap_last_error = OK;
+    *errcell = OK;
 }
 
 void* calloc(size_t nmemb, size_t size) {
@@ -738,7 +783,7 @@ void* calloc(size_t nmemb, size_t size) {
 
     size_t total = nmemb * size;
     if (total / nmemb != size) {
-        heap_last_error = ERR_NO_MEMORY;
+        *heap_err_cell_for(pool_self()) = ERR_NO_MEMORY;
         return NULL;
     }
 
@@ -756,11 +801,12 @@ void* realloc(void* ptr, size_t size) {
         return NULL;
     }
 
+    error_t *errcell = heap_err_cell_for(pool_self());
     umutex_lock(&heap_lock);
 
     block_t* block = (block_t*)((uint8_t*)ptr - BLOCK_HDR_SIZE);
     if (block->magic != HEAP_MAGIC) {
-        heap_last_error = ERR_CORRUPTED;
+        *errcell = ERR_CORRUPTED;
         umutex_unlock(&heap_lock);
         return NULL;
     }
@@ -779,7 +825,7 @@ void* realloc(void* ptr, size_t size) {
             block->size  = aligned;
             block->next  = split;
         }
-        heap_last_error = OK;
+        *errcell = OK;
         umutex_unlock(&heap_lock);
         return ptr;
     }
@@ -800,7 +846,7 @@ void* realloc(void* ptr, size_t size) {
                 block->size  = aligned;
                 block->next  = split;
             }
-            heap_last_error = OK;
+            *errcell = OK;
             umutex_unlock(&heap_lock);
             return ptr;
         }

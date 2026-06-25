@@ -7173,9 +7173,8 @@ void Phase41()
         void *p = malloc(64);
         Check(p != nullptr, "phase41 double-free seed alloc");
         free(p);
-        heap_last_error = OK;
         free(p);   // p is cached (free=0); the magazine scan must reject it
-        Check(heap_last_error == ERR_INVALID_ADDRESS,
+        Check(heap_get_last_error() == ERR_INVALID_ADDRESS,
               "phase41 double-free of a cached block -> ERR_INVALID_ADDRESS");
     }
 
@@ -7992,6 +7991,119 @@ void Phase45()
            "through box::result\n");
 }
 
+// ── phase46 — Ф23c: per-strand heap last-error isolation + box::heap result ──
+// The boxlib heap is shared, but "the cause of MY last heap op" is per-strand.
+// This proves (a) the box::heap fallible surface hands back the real cause, and
+// (b) a spawned strand and the main strand hold DIFFERENT last-errors at the
+// same instant, neither seeing the other's. A single shared cell (the pre-Ф23c
+// global) would have let the sibling's INVALID_ADDRESS overwrite the main
+// strand's NO_MEMORY before it was read — the cross-strand checks catch exactly
+// that.
+static std::atomic<int>           g_p46_worker_saw{-1};  // worker's own cause
+static std::atomic<std::uint64_t> g_p46_go{0};           // main -> worker: proceed
+static std::atomic<std::uint64_t> g_p46_done{0};         // worker -> main: error set
+
+static void p46_worker(void *)
+{
+    // Wait until main has armed its OWN error, so both are live at once
+    // (lost-wake-safe loop; the 5s backstop never fires on a healthy wake).
+    for (;;) {
+        if (g_p46_go.load(std::memory_order_acquire) == 1) break;
+        box::park(g_p46_go, std::uint64_t{0}, 5000);
+    }
+
+    // A deterministic, DISTINCT error on THIS strand: a cached double-free ->
+    // ERR_INVALID_ADDRESS, recorded in this strand's own per-strand cell.
+    void *wp = malloc(64);
+    free(wp);
+    free(wp);
+    g_p46_worker_saw.store(static_cast<int>(heap_get_last_error()),
+                           std::memory_order_release);
+
+    g_p46_done.store(1, std::memory_order_release);
+    box::wake_all(g_p46_done);
+}
+
+void Phase46()
+{
+    // ── always-on: the box::heap fallible surface on the calling strand ──────
+    auto z0 = box::heap::allocate(0);
+    Check(!z0 && z0.error().code() == box::errc::invalid_argument,
+          "phase46 box::heap::allocate(0) -> invalid_argument");
+
+    {
+        auto r = box::heap::allocate(64);
+        Check(r.has_value() && *r != nullptr, "phase46 box::heap::allocate success");
+        Check(box::heap::last_error().ok(), "phase46 last_error ok after success");
+        auto g = box::heap::reallocate(*r, 256);
+        Check(g.has_value() && *g != nullptr, "phase46 box::heap::reallocate grows");
+        if (g) free(*g);
+        auto z = box::heap::reallocate(nullptr, 0);
+        Check(z.has_value() && *z == nullptr,
+              "phase46 reallocate(,0) is a non-error nullptr value");
+    }
+
+    {
+        // Forced overflow: align_up(SIZE_MAX) wraps in alloc_locked -> NO_MEMORY,
+        // deterministically, and the result carries that real cause.
+        auto r = box::heap::allocate(~std::size_t{0});
+        Check(!r.has_value() && r.error().code() == box::errc::no_memory,
+              "phase46 allocate(SIZE_MAX) fails carrying the real cause");
+    }
+
+    // ── cross-strand isolation: needs FSGSBASE (per-strand pools) ────────────
+    if (!cpu_has_fsgsbase()) {
+        printf("[CXX] note phase46: strands need FSGSBASE — skipping cross-strand "
+               "isolation (single-strand surface verified)\n");
+        printf("[CXX] PASS phase46: per-strand heap last-error — box::heap fallible "
+               "surface carries the real cause (cross-strand skipped, no FSGSBASE)\n");
+        return;
+    }
+
+    g_p46_worker_saw.store(-1, std::memory_order_release);
+    g_p46_go.store(0, std::memory_order_release);
+    g_p46_done.store(0, std::memory_order_release);
+
+    // Spawn FIRST: the strand ctor may allocate on the main strand (resetting
+    // its cell). The worker parks until signalled, so it sets its error only
+    // after ours is armed below.
+    box::strand worker(p46_worker, nullptr);
+
+    // Arm main's DISTINCT error in its own cell, AFTER the spawn. park/wake are
+    // syscalls (no heap), so the cell stays put until we read it back.
+    void *cov = calloc(~std::size_t{0}, 2);
+    Check(cov == nullptr, "phase46 calloc overflow returns NULL");
+    Check(heap_get_last_error() == ERR_NO_MEMORY,
+          "phase46 main strand cell armed to ERR_NO_MEMORY");
+
+    g_p46_go.store(1, std::memory_order_release);
+    box::wake_all(g_p46_go);
+    for (;;) {
+        if (g_p46_done.load(std::memory_order_acquire) == 1) break;
+        box::park(g_p46_done, std::uint64_t{0}, 5000);
+    }
+
+    // THE proof: both errors live at once — the worker saw ITS OWN
+    // INVALID_ADDRESS and the main strand STILL reads ITS OWN NO_MEMORY.
+    Check(g_p46_worker_saw.load(std::memory_order_acquire) ==
+              static_cast<int>(ERR_INVALID_ADDRESS),
+          "phase46 spawned strand observed its OWN double-free cause");
+    Check(heap_get_last_error() == ERR_NO_MEMORY,
+          "phase46 main strand cell survived the sibling's error (isolation)");
+
+    // join() is lifecycle cleanup only — we deliberately make NO assertion about
+    // main's cell afterward: std::thread::join frees the shared Join block, and
+    // whichever strand wins that refcount race does a heap op that updates ITS
+    // OWN cell (on 16c that is often the main strand). That is the per-strand
+    // model working as intended, not a violation of it; the isolation proof is
+    // the two checks above, taken while ONLY the sibling had touched the heap.
+    worker.join();
+
+    printf("[CXX] PASS phase46: per-strand heap last-error — box::heap fallible "
+           "surface carries the real cause + spawned/main strands hold distinct "
+           "last-errors with zero cross-strand clobber\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -8059,6 +8171,7 @@ int main()
     Phase43();
     Phase44();
     Phase45();
+    Phase46();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
