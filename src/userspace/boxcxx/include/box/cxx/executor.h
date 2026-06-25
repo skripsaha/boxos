@@ -44,6 +44,7 @@
 #include <exception>
 #include <cstdint>
 #include <type_traits>
+#include <chrono>      // box::after / box::until timer awaiter (steady_clock deadline)
 
 #include <box/touch.h>
 #include <box/brook.h>
@@ -238,12 +239,42 @@ namespace __exec {
 // blocks (Phase 3a) trusting that IPI to break the wait; a non-ResultRing
 // source mis-tagged `result` would hang forever on a single App-Core. Touch and
 // Brook never forever-block (their producer may be a same-core sibling strand).
+//
+// `timer` and `join` (Ф24b) both block on a kernel addr_park, which RESCHEDULES
+// (PROC_WAITING, async) and is IPI-woken — so, like `result`, a lone timer/join
+// waiter forever-blocks safely on a single App-Core (its park does not idle the
+// core in place the way a Touch/Brook UMWAIT does). They differ in collapsibility:
+// `timer` co-collapses WITH `result` (one budget-capped block serves every timer,
+// since a budget sleep advances the one shared wall clock); `join` does NOT —
+// addr_wake delivers a Result only to an addr_park entry ARMED for the exact join
+// flag's phys address, so each join MUST arm its own block and can never be a
+// silent collapse passenger.
 enum class wait_domain : std::uint8_t {
     touch  = 0,   // TouchRing  — touch_pop / touch_wait              (no IPI on push)
     result = 1,   // ResultRing — receive / receive_wait / result_wait_any (KResultPush IPIs)
     brook  = 2,   // Brook      — brook_try_pop / brook_pop_timeout   (no IPI on push)
+    timer  = 3,   // pure-deadline addr_park   — reschedules + co-collapses WITH result
+    join   = 4,   // strand completion addr_park — reschedules, NOT collapsible (addr-conditional wake)
 };
-inline constexpr std::size_t wait_domain_count = 3;
+inline constexpr std::size_t wait_domain_count = 5;
+
+// ── wait-domain properties (Ф24b) ───────────────────────────────────────────
+// Lone-forever-safe on a single App-Core: the source reschedules (PROC_WAITING)
+// or is IPI-woken, so a lone waiter can block forever without starving a same-
+// core sibling. result (IPI), timer & join (addr_park reschedule) = yes; touch/
+// brook idle the core in-place (UMWAIT) and their producer may be a same-core
+// sibling = no.
+constexpr bool _S_reschedules(wait_domain __d) noexcept {
+    return __d == wait_domain::result || __d == wait_domain::timer
+        || __d == wait_domain::join;
+}
+// One armed block's observation satisfies EVERY waiter of this kind: result =
+// one ResultRing tail; timer = the shared wall clock (one budget sleep advances
+// all timers). join = NO — its wake is address-conditional (each join must arm
+// its own addr_park entry), so a join can never be a silent collapse passenger.
+constexpr bool _S_collapsible(wait_domain __d) noexcept {
+    return __d == wait_domain::result || __d == wait_domain::timer;
+}
 
 // A type-erased suspended-coroutine record. `poll` tries to complete the
 // awaitable (consuming the event into the awaiter's storage) and returns true
@@ -406,51 +437,75 @@ private:
         // wait this turn at the earliest waiter deadline (revives timeout_ms).
         const std::uint32_t __budget = _M_block_budget_ms();
 
-        // Phase 3a — a lone RESULT waiter forever-blocks safely: the ResultRing
-        // is IPI-woken, so even on a SINGLE App-Core a cross-core / cross-cabin
-        // producer breaks the wait, and a same-cabin result producer cannot
-        // exist (the kernel rejects send-to-self). Touch and Brook producers CAN
-        // be a same-core sibling strand, and a forever UMWAIT on one App-Core
-        // would starve it (the wait idles the core without rescheduling) — so a
-        // lone touch/brook waiter does NOT forever-block here; it falls through
-        // to the bounded+yield rotation (Phase 3c), which gives the sibling a
-        // scheduling point. (A deadline-bearing lone waiter passes its budget
-        // either way, so it still wakes ~on time.)
+        // Phase 3a — a lone waiter whose domain RESCHEDULES (result IPI-woken;
+        // timer/join addr_park-reschedule) forever-blocks safely; touch/brook
+        // fall through to 3c. The ResultRing is IPI-woken, so even on a SINGLE
+        // App-Core a cross-core / cross-cabin producer breaks the wait, and a
+        // same-cabin result producer cannot exist (the kernel rejects send-to-
+        // self); a timer/join addr_park is rescheduled (PROC_WAITING) and woken
+        // by its deadline / a sibling's addr_wake, so it too cannot starve a
+        // same-core sibling. Touch and Brook producers CAN be a same-core sibling
+        // strand, and a forever UMWAIT on one App-Core would starve it (the wait
+        // idles the core without rescheduling) — so a lone touch/brook waiter
+        // does NOT forever-block here; it falls through to the bounded+yield
+        // rotation (Phase 3c), which gives the sibling a scheduling point. (A
+        // deadline-bearing lone waiter passes its budget either way, so it still
+        // wakes ~on time.)
         if (_M_waiting.size() == 1 &&
-            _M_waiting[0]._M_domain == __exec::wait_domain::result) {
+            __exec::_S_reschedules(_M_waiting[0]._M_domain)) {
             _M_waiting[0]._M_block(_M_waiting[0]._M_self, __budget);
             return;
         }
 
-        // Phase 3b — collapsible single line. Only the Result domain is a
-        // single per-strand wait-line (one ResultRing tail): several coros
-        // awaiting it share one UMWAIT, so a single native block arms the
-        // monitor for all of them. Touch/Brook are PER-OBJECT lines (two
-        // Brooks = two cursors), so >1 of those must rotate (Phase 3c) — a
-        // collapse there would arm one line and miss the other's no-IPI store.
-        bool __collapsible = _M_waiting[0]._M_domain == __exec::wait_domain::result;
-        for (std::size_t __i = 1; __collapsible && __i < _M_waiting.size(); ++__i)
-            if (_M_waiting[__i]._M_domain != __exec::wait_domain::result)
-                __collapsible = false;
+        // Phase 3b — collapsible single observation. result AND timer co-collapse: one
+        // result_wait_any(budget) block wakes on a ResultRing KResultPush (IPI) OR after
+        // budget == the earliest timer deadline; the post-block sweep then routes the
+        // record to its result awaiter and observes every due timer. join is NOT
+        // collapsible and never reaches here. Touch/Brook are PER-OBJECT lines (two
+        // Brooks = two cursors), so >1 of those must rotate (Phase 3c) — a collapse
+        // there would arm one line and miss the other's no-IPI store.
+        bool __collapsible = true;
+        for (const auto& __w : _M_waiting)
+            if (!__exec::_S_collapsible(__w._M_domain)) { __collapsible = false; break; }
         if (__collapsible) {
-            // Result waiters share one wait-line but NOT one filter: an IPC-only
-            // block (receive_wait → result_wait_ipc) drains a kernel record into
-            // a stash and re-blocks, stranding it from a co-resident result_any.
-            // So the single armed block must be an accept-any one when present —
-            // result_wait_any returns on ANY record, handing control back to the
-            // pump, which then routes each record to the right awaiter's poll.
-            std::size_t __rep = 0;
+            // REP must serve EVERY collapsed member's wake:
+            //   1. accept_any RESULT (result_wait_any): returns on ANY record AND honours
+            //      budget — also the Ф24a accept_any contract (don't strand a kernel
+            //      record owed to a result_any sibling).
+            //   2. any RESULT (receive_wait/pocket_recv): IPI-woken on its record AND
+            //      honours budget, so it serves the timers too.
+            //   3. ALL timers (no result waiter): any timer — a budget sleep advancing
+            //      the shared clock.
+            // ORDER IS LOAD-BEARING: when a result waiter is present it MUST be the rep,
+            // NOT a timer. A timer rep sleeps the full budget and is NOT woken by an
+            // incoming IPI, so an IPC at t=2ms with a 500ms timer would wait the whole
+            // budget. A result rep is IPI-broken at t=2ms.
+            std::size_t __rep = _M_waiting.size();
             for (std::size_t __i = 0; __i < _M_waiting.size(); ++__i)
-                if (_M_waiting[__i]._M_accept_any) { __rep = __i; break; }
+                if (_M_waiting[__i]._M_domain == __exec::wait_domain::result &&
+                    _M_waiting[__i]._M_accept_any) { __rep = __i; break; }
+            if (__rep == _M_waiting.size())
+                for (std::size_t __i = 0; __i < _M_waiting.size(); ++__i)
+                    if (_M_waiting[__i]._M_domain == __exec::wait_domain::result) {
+                        __rep = __i; break;
+                    }
+            // __rep=0 is safe ONLY because _S_collapsible excludes join — a join would
+            // make __collapsible false, so slot 0 here is guaranteed result-or-timer.
+            if (__rep == _M_waiting.size()) __rep = 0;  // all timers — slot 0 is a timer
             _M_waiting[__rep]._M_block(_M_waiting[__rep]._M_self, __budget);
             return;
         }
 
-        // Phase 3c — waiters span >1 wait-line. No single UMWAIT covers them;
-        // rotate a BOUNDED native block per present domain, re-polling between
-        // slices. Never a pure busy-yield; never a lost wake (a no-IPI store
-        // during another domain's slice is caught by the post-slice sweep).
-        // The slice is capped by the budget so a deadline is still honoured.
+        // Phase 3c — waiters span >1 wait-line (and/or include a join, which is
+        // never collapsible). No single UMWAIT covers them; rotate a BOUNDED
+        // native block per present domain, re-polling between slices. Never a
+        // pure busy-yield; never a lost wake (a no-IPI store during another
+        // domain's slice is caught by the post-slice sweep). The slice is capped
+        // by the budget so a deadline is still honoured — but the cap is the
+        // EARLIEST deadline and __slice is computed ONCE, so a timer co-resident
+        // with earlier-rotated domains can fire late by up to (domains-before ×
+        // slice) of cumulative pre-roll. Bounded jitter, NOT a lost wake: the
+        // monotonic steady_clock poll observes the deadline on the next sweep.
         const std::uint32_t __slice =
             (__budget == 0 || __budget > _S_cross_slice_ms) ? _S_cross_slice_ms
                                                             : __budget;
@@ -466,13 +521,15 @@ private:
             if (_M_poll_sweep() && !_M_ready.empty())
                 return;  // delivered — let the run-loop resume the coroutine
         }
-        // Nothing fired this rotation. The per-domain blocks idle the core
-        // (UMWAIT) but do not reschedule, so on a SINGLE App-Core a sibling
+        // Nothing fired this rotation. A touch/brook slice idles the core in
+        // place (UMWAIT) WITHOUT rescheduling, so on a SINGLE App-Core a sibling
         // strand that must PRODUCE the awaited event shares this core and can
-        // never run while we hold it. Yield once per fruitless rotation to give
-        // the scheduler a chance to run it — on multi-core this is a cheap
-        // hand-off (the slices already supplied the idle), on one core it is
-        // what guarantees forward progress. Bounded, never a busy-spin.
+        // never run while we hold it. (A timer/join slice DOES reschedule — its
+        // addr_park frees the core — but a mixed rotation still holds the core
+        // across its touch/brook legs.) Yield once per fruitless rotation to give
+        // the scheduler a chance to run the producer — on multi-core a cheap
+        // hand-off (the slices already supplied the idle), on one core what
+        // guarantees forward progress. Bounded, never a busy-spin.
         yield();
     }
 
@@ -588,6 +645,79 @@ private:
     Result _M_r{};
     bool _M_got = false;
 };
+
+// ── co_await box::after(dur) / box::until(tp) -> void  (Ф24b timer) ──────────
+// A pure-deadline awaiter: suspend until the steady clock reaches an absolute
+// deadline. No event source — its native block is a private-word addr_park for
+// the executor-supplied budget (reschedules, returns on timeout). Tags
+// wait_domain::timer: lone-forever-safe AND co-collapsible with the result line.
+// The steady_clock time_point is the truth poll/await_ready test; the absolute
+// rdtsc deadline is derived at SUSPEND from now()+remaining (not at construction
+// — the awaiter may be co_awaited later), keeping it on the same clock the
+// executor's _M_block_budget_ms uses.
+class timer_await {
+public:
+    explicit timer_await(std::chrono::steady_clock::time_point __dl) noexcept
+        : _M_deadline(__dl) {}
+
+    bool await_ready() noexcept {
+        return std::chrono::steady_clock::now() >= _M_deadline;
+    }
+
+    bool await_suspend(std::coroutine_handle<> __h) {
+        std::uint64_t __dtsc;
+        auto __now = std::chrono::steady_clock::now();
+        if (_M_deadline > __now) {
+            auto __ms = std::chrono::ceil<std::chrono::milliseconds>(
+                            _M_deadline - __now).count();
+            if (__ms < 1) __ms = 1;
+            __dtsc = cpu_rdtsc() + cpu_ms_to_tsc(static_cast<std::uint64_t>(__ms));
+        } else {
+            __dtsc = cpu_rdtsc();   // already due — budget yields 1 (one short block)
+        }
+        executor::current()->wait_on(__h, this, &_S_poll, &_S_block,
+                                     __exec::wait_domain::timer, __dtsc);
+        return true;
+    }
+
+    void await_resume() const noexcept {}
+
+private:
+    static bool _S_poll(void* __s) {
+        return std::chrono::steady_clock::now()
+                   >= static_cast<timer_await*>(__s)->_M_deadline;
+    }
+    static void _S_block(void* /*__s*/, std::uint32_t __ms) {
+        // A private word nobody wakes → the park returns only on the timeout.
+        // Clamp a stray 0 budget to 1: 0 == "forever" to the kernel, wrong here.
+        volatile std::uint64_t __w = 0;
+        addr_park((const volatile void*)&__w, 0, __ms ? __ms : 1);
+    }
+
+    std::chrono::steady_clock::time_point _M_deadline;
+};
+
+// Suspend until `d` from now has elapsed. Non-positive → immediately ready (no
+// park); a sub-ms positive span rounds up so it waits at least the clock tick.
+template <class Rep, class Period>
+inline timer_await after(std::chrono::duration<Rep, Period> __d) noexcept {
+    auto __now = std::chrono::steady_clock::now();
+    if (__d <= std::chrono::duration<Rep, Period>::zero())
+        return timer_await{__now};               // non-positive → immediately ready
+    return timer_await{__now + std::chrono::ceil<std::chrono::steady_clock::duration>(__d)};
+}
+
+// Suspend until an absolute deadline. The steady_clock overload is exact; an
+// arbitrary-clock deadline is projected onto steady_clock by measuring the
+// remaining span on that clock and adding it to steady_clock::now().
+template <class Clock, class Duration>
+inline timer_await until(std::chrono::time_point<Clock, Duration> __tp) noexcept {
+    auto __rem = __tp - Clock::now();
+    return after(__rem);
+}
+inline timer_await until(std::chrono::steady_clock::time_point __tp) noexcept {
+    return timer_await{__tp};
+}
 
 }  // namespace box
 
