@@ -500,15 +500,14 @@ private:
         // never collapsible). No single UMWAIT covers them; rotate a BOUNDED
         // native block per present domain, re-polling between slices. Never a
         // pure busy-yield; never a lost wake (a no-IPI store during another
-        // domain's slice is caught by the post-slice sweep). The slice is capped
-        // by the budget so a deadline is still honoured — but the cap is the
-        // EARLIEST deadline and __slice is computed ONCE, so a timer co-resident
-        // with earlier-rotated domains can fire late by up to (domains-before ×
-        // slice) of cumulative pre-roll. Bounded jitter, NOT a lost wake: the
-        // monotonic steady_clock poll observes the deadline on the next sweep.
-        const std::uint32_t __slice =
-            (__budget == 0 || __budget > _S_cross_slice_ms) ? _S_cross_slice_ms
-                                                            : __budget;
+        // domain's slice is caught by the post-slice sweep). Each slice is
+        // RECOMPUTED right before its block as min(grain, time-to-earliest-
+        // deadline): wall-clock consumed by earlier domains shrinks the later
+        // slices, so the rotation never overshoots — the block straddling the
+        // deadline is sized to the EXACT remainder, and a timer co-resident with
+        // per-object waiters fires ~on its deadline rather than up to one grain
+        // late. (_M_block_budget_ms re-reads cpu_rdtsc each call: 0 == no deadline
+        // → full grain; a past-due deadline → 1, one short block then the poll.)
         for (std::size_t __d = 0; __d < __exec::wait_domain_count; ++__d) {
             const auto __dom = static_cast<__exec::wait_domain>(__d);
             // Representative of this domain (re-found each pass: a prior slice's
@@ -517,6 +516,11 @@ private:
             for (auto& __w : _M_waiting)
                 if (__w._M_domain == __dom) { __rep = &__w; break; }
             if (!__rep) continue;
+            // Live remaining-to-deadline, recomputed per domain so earlier legs'
+            // elapsed time tightens this slice (the deadline-precision fix).
+            const std::uint32_t __rem = _M_block_budget_ms();
+            const std::uint32_t __slice =
+                (__rem == 0 || __rem > _S_cross_slice_ms) ? _S_cross_slice_ms : __rem;
             __rep->_M_block(__rep->_M_self, __slice);
             if (_M_poll_sweep() && !_M_ready.empty())
                 return;  // delivered — let the run-loop resume the coroutine
