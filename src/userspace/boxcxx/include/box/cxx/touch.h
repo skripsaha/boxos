@@ -210,7 +210,12 @@ public:
         bool await_ready() noexcept { return (_M_got = touch_try_pop_tag(_M_tag, &_M_ev)); }
         bool await_suspend(std::coroutine_handle<> __h)
         {
-            executor::current()->wait_on({__h, this, &_S_poll, &_S_block});
+            // Explicit TOUCH domain: the brace-init form happened to default
+            // _M_domain to 0 (== touch) correctly, but relying on the enum's
+            // numeric value is fragile — name it, and silence the missing-
+            // initializer warning, like the box::brook awaiters.
+            executor::current()->wait_on(__h, this, &_S_poll, &_S_block,
+                                         __exec::wait_domain::touch);
             return true;
         }
         std::optional<event> await_resume() noexcept

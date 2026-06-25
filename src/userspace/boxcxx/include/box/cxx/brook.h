@@ -147,7 +147,11 @@ public:
         }
         bool await_suspend(std::coroutine_handle<> __h)
         {
-            executor::current()->wait_on({__h, this, &_S_poll, &_S_block});
+            // Tag the BROOK wait-domain: the brace-init form left _M_domain = 0 =
+            // touch, mis-grouping this waiter in the Ф24a wait-any rotation. Use
+            // the explicit overload (matching the free box::brook_read awaiter).
+            executor::current()->wait_on(__h, this, &_S_poll, &_S_block,
+                                         __exec::wait_domain::brook);
             return true;
         }
         // nullopt: the writer has left and the ring drained (or an error) — the
@@ -188,7 +192,11 @@ public:
         }
         bool await_suspend(std::coroutine_handle<> __h)
         {
-            executor::current()->wait_on({__h, this, &_S_poll, &_S_block});
+            // Tag the BROOK wait-domain: the brace-init form left _M_domain = 0 =
+            // touch, mis-grouping this waiter in the Ф24a wait-any rotation. Use
+            // the explicit overload (matching the free box::brook_read awaiter).
+            executor::current()->wait_on(__h, this, &_S_poll, &_S_block,
+                                         __exec::wait_domain::brook);
             return true;
         }
         // false: the reader has left (-ERR_PROCESS_TERMINATED) — no further drain.
