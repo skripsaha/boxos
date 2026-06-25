@@ -166,12 +166,19 @@ public:
         static bool _S_poll(void *__s)
         {
             auto *__a  = static_cast<read_awaiter *>(__s);
+            // Latch: once _S_block (or a prior poll) has delivered a frame /
+            // terminal, do NOT re-pop — the executor re-polls every waiter right
+            // after its native block (Phase 3c), and a re-pop would advance past
+            // the just-delivered frame (head already moved in _S_block) and
+            // clobber _M_rc to WOULD_BLOCK, losing it. Mirrors touch_event.
+            if (__a->_M_rc != -ERR_WOULD_BLOCK) return true;
             __a->_M_rc = brook_try_pop(__a->_M_b, &__a->_M_val);
             return __a->_M_rc != -ERR_WOULD_BLOCK;
         }
         static void _S_block(void *__s, std::uint32_t __ms)
         {
             auto *__a  = static_cast<read_awaiter *>(__s);
+            if (__a->_M_rc != -ERR_WOULD_BLOCK) return;  // already delivered — don't re-block
             __a->_M_rc = brook_pop_timeout(__a->_M_b, &__a->_M_val, __ms);
             if (__a->_M_rc == -ERR_TIMEOUT) __a->_M_rc = -ERR_WOULD_BLOCK;  // re-poll
         }
@@ -206,12 +213,18 @@ public:
         static bool _S_poll(void *__s)
         {
             auto *__a  = static_cast<write_awaiter *>(__s);
+            // Latch: once _S_block (or a prior poll) accepted the frame, do NOT
+            // re-push — the executor re-polls after its native block (Phase 3c),
+            // and a re-push would enqueue the SAME frame twice (a duplicate) or
+            // clobber a -ERR_PROCESS_TERMINATED terminal. Mirrors touch_event.
+            if (__a->_M_rc != -ERR_WOULD_BLOCK) return true;
             __a->_M_rc = brook_try_push(__a->_M_b, &__a->_M_val);
             return __a->_M_rc != -ERR_WOULD_BLOCK;
         }
         static void _S_block(void *__s, std::uint32_t __ms)
         {
             auto *__a  = static_cast<write_awaiter *>(__s);
+            if (__a->_M_rc != -ERR_WOULD_BLOCK) return;  // already accepted/terminal — don't re-block
             __a->_M_rc = brook_push_timeout(__a->_M_b, &__a->_M_val, __ms);
             if (__a->_M_rc == -ERR_TIMEOUT) __a->_M_rc = -ERR_WOULD_BLOCK;
         }

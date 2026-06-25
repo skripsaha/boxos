@@ -2672,6 +2672,48 @@ void Phase9c()
     printf("[CXX] PASS phase9c: <print> std::print/println -> console\n");
 }
 
+// ── phaseCurrent async fixtures: co_await box::current<T>::next() ───────────
+// Same-strand executor drain of the Current spine's coroutine read (Ф24c),
+// mirroring the Phase13 Brook suspend/resume idiom but through box::current<T>.
+struct CurSample { int id; unsigned tag; };
+
+box::task<void> CurrentAsyncProducer(box::current<CurSample> *w, unsigned k)
+{
+    for (unsigned i = 0; i < k; i++) w->put(CurSample{(int)i, i * 11u});
+    w->close();   // honest writer-leave terminal
+    co_return;
+}
+
+box::task<unsigned> CurrentAsyncConsumer(box::current<CurSample> *r)
+{
+    unsigned got = 0;
+    while (auto v = co_await r->next()) {  // nullopt at the stream terminal
+        if (v->id != (int)got || v->tag != got * 11u) break;
+        ++got;
+    }
+    co_return got;
+}
+
+// Small item (2-byte): the framed take stages through the per-handle frame_buf
+// repad (frame_bytes==8 > item_size==2). Drive it through the co_await + executor
+// re-arm path to cover the repad asynchronously (the sync path is covered below).
+box::task<void> CurrentAsyncU16Producer(box::current<std::uint16_t> *w, unsigned k)
+{
+    for (unsigned i = 0; i < k; i++) w->put(static_cast<std::uint16_t>(0x1000u + i));
+    w->close();
+    co_return;
+}
+
+box::task<unsigned> CurrentAsyncU16Consumer(box::current<std::uint16_t> *r)
+{
+    unsigned got = 0;
+    while (auto v = co_await r->next()) {
+        if (*v != static_cast<std::uint16_t>(0x1000u + got)) break;
+        ++got;
+    }
+    co_return got;
+}
+
 // ── phaseCurrent: box::current (the C++ face of the BoxOS Current spine) ────
 // Exercises the typed C++ layer over box/current.h: a framed Brook stream
 // (put/take + honest CURRENT_CLOSED), a TagFS file round-trip, small-item
@@ -2702,6 +2744,42 @@ void PhaseCurrent()
         // (CURRENT_CLOSED), NOT an error arm.
         box::result<bool> closed = r.take(drained);
         Check(closed.has_value() && *closed == false, "phaseCurrent stream CURRENT_CLOSED");
+    }
+
+    // Same-strand executor drain of co_await s.next() (Ф24c). The consumer
+    // suspends on the empty stream, the producer then fills K items + closes,
+    // and the loop ends via the nullopt terminal at exactly K (never K+1, never
+    // a hang) — the Brook suspend/resume idiom routed through the Current spine.
+    {
+        constexpr unsigned K = 4;
+        box::current<CurSample> w("cxx:current:async", box::role::write);  // writer auto-creates
+        box::current<CurSample> r("cxx:current:async", box::role::read);
+        Check(bool(w) && bool(r), "phaseCurrent async open");
+
+        box::executor ex;
+        auto consumer = CurrentAsyncConsumer(&r);
+        ex.spawn(CurrentAsyncProducer(&w, K));  // queued first
+        ex.schedule(consumer.handle());         // LIFO: consumer runs first, finds
+                                                // empty, suspends, then producer fills
+        ex.run();
+        unsigned got = consumer.result();
+        Check(got == K, "phaseCurrent async co_await next drain (terminal at K)");
+    }
+
+    // Same-strand async drain of a SMALL item (2-byte) typed stream — exercises
+    // the frame_buf repad through the co_await path + executor re-arm.
+    {
+        constexpr unsigned K = 3;
+        box::current<std::uint16_t> w("cxx:current:async16", box::role::write);
+        box::current<std::uint16_t> r("cxx:current:async16", box::role::read);
+        Check(bool(w) && bool(r), "phaseCurrent async16 open");
+
+        box::executor ex;
+        auto consumer = CurrentAsyncU16Consumer(&r);
+        ex.spawn(CurrentAsyncU16Producer(&w, K));
+        ex.schedule(consumer.handle());
+        ex.run();
+        Check(consumer.result() == K, "phaseCurrent async16 small-item co_await drain");
     }
 
     // Byte channel over a TagFS file: write, then read back.
@@ -8630,6 +8708,60 @@ void Phase49()
                "(co_await join skipped, no FSGSBASE)\n");
 }
 
+// ── phase50: deterministic proof of the executor block-then-repoll latch ──────
+// A brook/current reader whose frame arrives DURING its native _S_block hits the
+// executor's Phase-3c "block delivers, then re-poll the SAME waiter" path. Cross-
+// strand timing cannot reproduce this reliably (a spawned writer-strand bursts
+// rather than paces), so we prove it deterministically + host-independently with
+// a probe awaiter whose one-shot event is delivered ONLY by _S_block. The latch
+// in _S_poll (mirroring box::brook<T>/box::current<T> and box::touch/pocket)
+// reports the just-delivered event ready WITHOUT re-reading the consumed source —
+// remove it and the post-block re-poll would clobber the frame (lost forever).
+struct BlockDeliverProbe {
+    bool     _M_armed = false;          // _S_block delivered + consumed the one-shot event
+    unsigned _M_polls_after_block = 0;  // proves the executor re-polls post-block (the hazard site)
+    unsigned _M_value = 0;
+
+    bool await_ready() noexcept { return false; }   // suspend: "the event is not here yet"
+    bool await_suspend(std::coroutine_handle<> __h) {
+        box::executor::current()->wait_on(__h, this, &_S_poll, &_S_block,
+                                          box::__exec::wait_domain::brook);
+        return true;
+    }
+    unsigned await_resume() noexcept { return _M_value; }
+
+    static bool _S_poll(void* __s) {
+        auto* __p = static_cast<BlockDeliverProbe*>(__s);
+        if (__p->_M_armed) {            // LATCH: report ready from what _S_block consumed; do NOT re-read
+            __p->_M_polls_after_block++;
+            return true;
+        }
+        return false;                   // a one-shot event is never (re-)found by a bare poll
+    }
+    static void _S_block(void* __s, std::uint32_t) {
+        auto* __p = static_cast<BlockDeliverProbe*>(__s);
+        __p->_M_armed = true;           // the event "arrives" and is CONSUMED during the native block
+        __p->_M_value = 0xC0DEu;
+    }
+};
+
+box::task<unsigned> BlockDeliverConsumer(BlockDeliverProbe* __p) { co_return co_await *__p; }
+
+void Phase50()
+{
+    BlockDeliverProbe probe;
+    box::executor     ex;
+    unsigned got = ex.block_on(BlockDeliverConsumer(&probe));
+    // (a) the block-delivered event reached the coroutine — the latch delivered it;
+    // (b) the executor DID re-poll the waiter after its block (the exact clobber
+    //     site). Without the _S_poll latch, that re-poll re-reads the consumed
+    //     source and strands the coroutine — a real brook/current frame would be lost.
+    Check(got == 0xC0DEu, "phase50 block-delivered event reaches the coroutine (latch holds)");
+    Check(probe._M_polls_after_block >= 1,
+          "phase50 executor re-polls after block (the clobber site is exercised)");
+    printf("[CXX] PASS phase50: executor block-then-repoll latch (deterministic, host-independent)\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -8701,6 +8833,7 @@ int main()
     Phase47();
     Phase48();
     Phase49();
+    Phase50();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
