@@ -70,6 +70,9 @@
 #include "box/error.h"              // OK / ERR_TIMEOUT / ERR_ADDR_VALUE_MISMATCH
 #include "box/core/strand_self.h"   // strand_self — this_strand::id (main → cabin pid)
 #include "box/cxx/touch.h"          // box::tag / box::subscription / box::event
+#include "box/cxx/executor.h"       // box::executor / __exec::wait_domain (co_await join, Ф24b)
+#include <coroutine>                // std::coroutine_handle (completion() awaiter)
+#include <system_error>             // std::system_error on co_await of a non-joinable strand
 
 namespace box {
 
@@ -174,6 +177,58 @@ template <class T> inline bool wake_all(const std::atomic<T> &a) noexcept { retu
 inline bool wake_one(const volatile void *addr) noexcept { return wake(addr, 1); }
 inline bool wake_all(const volatile void *addr) noexcept { return wake(addr, 0); }
 
+// ── box::strand::completion() — the NON-CONSUMING join awaiter (Ф24b) ───────
+// co_await s.completion() suspends the awaiting coroutine until the strand
+// finishes. NON-consuming: the strand stays joinable, so ~strand (join-on-
+// destroy) performs the reap and a later co_await/join()/dtor is safe and
+// idempotent — that is the whole point of this surface. The awaiter arms its
+// OWN addr_park on the join flag (its wake is address-conditional — it can never
+// be a collapse passenger), tagged wait_domain::join. Lone-forever-safe:
+// addr_park reschedules and is IPI-woken by the trampoline's addr_wake at exit.
+// A genuinely-forever park (budget 0, strand still running) is not one literal
+// eternal block: boxlib caps result_wait at 30s, so a never-completing wait is a
+// silent 30s-period re-park — relevant only for real-HW reasoning, never a spin.
+class completion_await {
+public:
+    explicit completion_await(volatile std::uint64_t *__flag) noexcept
+        : _M_flag(__flag) {}
+
+    bool await_ready() {
+        if (!_M_flag)
+            throw std::system_error(
+                std::make_error_code(std::errc::invalid_argument),
+                "co_await box::strand::completion: not joinable");
+        return __atomic_load_n(_M_flag, __ATOMIC_ACQUIRE) == 1;
+    }
+
+    bool await_suspend(std::coroutine_handle<> __h) {
+        executor::current()->wait_on(__h, this, &_S_poll, &_S_block,
+                                     __exec::wait_domain::join);
+        return true;
+    }
+
+    // NON-consuming: nothing reaped here. ~strand / join() does the join.
+    void await_resume() const noexcept {}
+
+private:
+    static bool _S_poll(void *__s) {
+        auto *__a = static_cast<completion_await *>(__s);
+        return __atomic_load_n(__a->_M_flag, __ATOMIC_ACQUIRE) == 1;
+    }
+    static void _S_block(void *__s, std::uint32_t __ms) {
+        // Read the flag FRESH each call (hazard H4 — never cache `expected`): a
+        // store landing between poll and park makes addr_park return
+        // value_mismatch at once (lost-wake-safe). 0 budget == forever is correct
+        // for a lone join — it is IPI-woken by the trampoline's addr_wake.
+        auto *__a = static_cast<completion_await *>(__s);
+        std::uint64_t __s0 = __atomic_load_n(__a->_M_flag, __ATOMIC_ACQUIRE);
+        if (__s0 != 1)
+            addr_park(__a->_M_flag, __s0, __ms ? __ms : 0);
+    }
+
+    volatile std::uint64_t *_M_flag;
+};
+
 // ── box::strand ──────────────────────────────────────────────────────────────
 // An in-cabin execution context with std::thread semantics, except the destructor
 // JOINS a still-joinable strand instead of calling std::terminate (decision:
@@ -267,6 +322,20 @@ public:
     void join() { t_.join(); }
     // Still available: drop ownership and let the strand run on unsupervised.
     void detach() { t_.detach(); }
+
+    // Coroutine-native join: co_await s.completion() suspends the awaiting
+    // coroutine until this strand finishes (Ф24b). NON-consuming — the strand
+    // stays joinable, so ~strand / a later join() still performs the reap. A
+    // co_await on a non-joinable strand throws std::system_error(invalid_argument),
+    // consistent with join(). Const: it only reads the join flag's address.
+    // Lifetime contract (single-owner, like std::thread): `s` must outlive the
+    // suspended await — the awaiter holds the address of s's join flag for the
+    // whole park — and must NOT be concurrently joined/moved/destroyed from
+    // another strand while a coroutine awaits it.
+    completion_await completion() const noexcept
+    {
+        return completion_await{t_._M_completion_word()};
+    }
 
     void swap(strand &o) noexcept { t_.swap(o.t_); }
 

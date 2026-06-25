@@ -8278,47 +8278,12 @@ box::task<unsigned> P48AwaitTouch()
     co_return v;
 }
 
-// A minimal deadline-bearing awaiter (a stand-in for the Ф24b timer): never-ready
-// poll except once its absolute deadline passes; its block parks the budget the
-// executor computes. With a SINGLE such waiter the old size()==1 path would block
-// FOREVER (hang) — proving the Ф24a min-deadline plumbing revives the timeout.
-struct P48Timer {
-    std::chrono::steady_clock::time_point deadline;
-    uint64_t                              deadline_tsc;
-    explicit P48Timer(unsigned ms)
-        : deadline(std::chrono::steady_clock::now() + std::chrono::milliseconds(ms)),
-          deadline_tsc(cpu_rdtsc() + cpu_ms_to_tsc(ms)) {}
-
-    bool await_ready() const noexcept
-    {
-        return std::chrono::steady_clock::now() >= deadline;
-    }
-    bool await_suspend(std::coroutine_handle<> h)
-    {
-        // Domain is irrelevant for a lone waiter (Phase 3a ignores it); tag result.
-        box::executor::current()->wait_on(h, this, &_poll, &_block,
-                                          box::__exec::wait_domain::result, deadline_tsc);
-        return true;
-    }
-    void await_resume() const noexcept {}
-
-    static bool _poll(void *s)
-    {
-        auto *a = static_cast<P48Timer *>(s);
-        return std::chrono::steady_clock::now() >= a->deadline;
-    }
-    static void _block(void *, std::uint32_t ms)
-    {
-        // Park the executor-supplied budget on a never-changing word: returns on
-        // timeout, mirroring how a real timer consumes the capped block.
-        static volatile uint64_t dummy = 0;
-        addr_park(&dummy, 0, ms ? ms : 1);
-    }
-};
-
+// A lone Ф24b timer awaiter: with a SINGLE such waiter the old size()==1 path
+// would block FOREVER (hang) — the min-deadline plumbing revives the timeout
+// (Phase 3a generalized to wait_domain::timer).
 box::task<void> P48AwaitTimer(unsigned ms)
 {
-    co_await P48Timer(ms);
+    co_await box::after(std::chrono::milliseconds(ms));
     co_return;
 }
 
@@ -8421,6 +8386,250 @@ void Phase48()
            "(multi-waiter bounded rotation + min-deadline revival + box::result_any)\n");
 }
 
+// ── Phase49 — Ф24b co_await timer (box::after / box::until) + co_await join ──────
+// Two BoxOS-native coroutine awaiters over the cooperative executor, both riding
+// the existing addr_park substrate (no new kernel/boxlib code):
+//   box::after(d)/box::until(tp)  → suspend until a steady-clock deadline (a pure-
+//       deadline addr_park; wait_domain::timer — lone-forever-safe AND collapsible
+//       with the result line).
+//   box::strand::completion()     → suspend until a sibling strand finishes, arming
+//       its OWN addr_park on the strand's join flag (wait_domain::join — address-
+//       conditional wake, NOT collapsible). NON-consuming: the strand stays
+//       joinable, so ~strand / a later join() still reaps it.
+
+// (A)/(B)/(D)/(E) lone-or-mixed real timer.
+box::task<void> P49AwaitAfter(std::chrono::milliseconds d)
+{
+    co_await box::after(d);
+    co_return;
+}
+
+// (E) box::until with a sub-ms steady deadline: the awaiter rounds up to >=1ms.
+box::task<void> P49AwaitUntilSoon()
+{
+    co_await box::until(std::chrono::steady_clock::now() + std::chrono::microseconds(200));
+    co_return;
+}
+
+// (C)/(D)/(E) co_await a strand's completion. NON-consuming: records whether the
+// strand was STILL joinable the instant after the await resumed (the headline
+// fact — the reap stays with join()/the dtor, not the await).
+box::task<void> P49AwaitJoin(box::strand &s, volatile bool *still_joinable_out)
+{
+    co_await s.completion();
+    if (still_joinable_out) *still_joinable_out = s.joinable();
+    co_return;
+}
+
+// A strand body: sleep ~ms, then exit (the trampoline release-stores the join
+// flag and addr_wake's it — what the join awaiter parks on). Plain free function
+// so box::strand can spawn it.
+struct P49Sleeper {
+    unsigned ms;
+    void operator()() const { std::this_thread::sleep_for(std::chrono::milliseconds(ms)); }
+};
+
+// (B) timer + Touch mix: the Touch producer (same idiom as p48_producer).
+static volatile uint64_t g_p49_remaining;
+static TouchTagPair      g_p49_tp;
+static constexpr unsigned g_p49_magic = 0x00C0DE49u;
+
+static bool p49_join()
+{
+    uint32_t cycles = 0;
+    uint64_t cur;
+    while ((cur = __atomic_load_n(&g_p49_remaining, __ATOMIC_ACQUIRE)) != 0) {
+        if (++cycles > 80u) return false;
+        addr_park(&g_p49_remaining, cur, 200);
+    }
+    return true;
+}
+
+static void p49_touch_producer(void *)
+{
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    unsigned m = g_p49_magic;
+    touch_send(g_p49_tp, &m, sizeof(m), 0);
+    __atomic_sub_fetch(&g_p49_remaining, 1u, __ATOMIC_RELEASE);
+    addr_wake(&g_p49_remaining, 0);
+    strand_exit();
+}
+
+box::task<unsigned> P49AwaitTouch()
+{
+    Touch t = co_await box::touch_event();
+    unsigned v = 0;
+    if (t.payload_len >= sizeof(v)) __builtin_memcpy(&v, t.payload, sizeof(v));
+    co_return v;
+}
+
+void Phase49()
+{
+    using namespace std::chrono;
+
+    // ── (A) lone real timer: co_await box::after(30ms) on a lone executor wakes
+    //        ~on time (Phase 3a generalized to wait_domain::timer; a lone timer
+    //        addr_park reschedules + returns on its budget, never forever). ───────
+    {
+        box::executor  ex;
+        box::stopwatch sw;
+        ex.block_on(P49AwaitAfter(30ms));
+        auto ms = duration_cast<milliseconds>(sw.elapsed());
+        Check(ms >= milliseconds(20) && ms < milliseconds(400),
+              "phase49 (A) lone co_await box::after(30ms) wakes ~on time");
+    }
+
+    // ── (B) timer + Touch mix (Phase 3c with a timer present): one coro awaits a
+    //        Touch a sibling delivers at ~20ms, one coro awaits box::after(60ms).
+    //        Both must resume on ONE App-Core without a hang — the rotation gives
+    //        the same-core producer a scheduling point AND honours the timer. ─────
+    {
+        TouchTagPair tp = touch_intern("cxx:f24b:touch");
+        TouchTag     id = touch_pair_choose(tp);
+        bool         can = (id != TOUCH_TAG_INVALID) && cpu_has_fsgsbase();
+        if (can) {
+            touch_claim(id, TOUCH_REST, 0, 0);
+            Touch drain;
+            while (touch_pop(&drain)) { }  // clear stray touches (touch_event is unfiltered)
+            g_p49_tp        = tp;
+            g_p49_remaining = 1;
+            if (strand_spawn(p49_touch_producer, 0) != 0) {
+                box::executor ex;
+                auto          tt = P49AwaitTouch();
+                auto          tm = P49AwaitAfter(60ms);
+                ex.schedule(tt.handle());   // suspends -> a Touch-domain waiter
+                ex.schedule(tm.handle());   // suspends -> a timer-domain waiter
+                box::stopwatch sw;
+                ex.run();                   // Phase 3c: mixed domains, bounded rotation
+                auto ms = duration_cast<milliseconds>(sw.elapsed());
+
+                Check(tt.result() == g_p49_magic,
+                      "phase49 (B) timer+Touch mix resumed the Touch waiter");
+                // The timer (60ms) and the touch (~20ms) both fired; run() spans at
+                // least the longer wait — proving a genuine park, not a busy return.
+                Check(ms >= milliseconds(40),
+                      "phase49 (B) timer+Touch mix parked (>=40ms), both resumed, no hang");
+                Check(p49_join(), "phase49 (B) sibling Touch producer joined");
+            } else {
+                printf("[CXX] note phase49: strand_spawn unavailable — (B) skipped\n");
+            }
+            touch_release(id);
+        } else {
+            printf("[CXX] note phase49: touch/FSGSBASE unavailable — (B) skipped\n");
+        }
+    }
+
+    // ── (C) lone join (the fact-1/fact-2 headline): co_await s.completion() on a
+    //        lone executor suspends until the sibling strand exits (~20ms) — its
+    //        OWN addr_park, IPI-woken, never forever. NON-consuming: the strand is
+    //        STILL joinable the instant the await resumes; the explicit join()
+    //        after reaps it with no hang / no leak. ────────────────────────────────
+    if (cpu_has_fsgsbase()) {
+        box::strand   s(P49Sleeper{20});
+        volatile bool still = false;
+        box::executor ex;
+        box::stopwatch sw;
+        ex.block_on(P49AwaitJoin(s, &still));
+        auto ms = duration_cast<milliseconds>(sw.elapsed());
+
+        Check(ms >= milliseconds(10) && ms < milliseconds(400),
+              "phase49 (C) lone co_await completion() woke ~when the strand exited");
+        Check(still, "phase49 (C) strand STILL joinable right after the await (NON-consuming)");
+        Check(s.joinable(), "phase49 (C) strand still joinable at the call site too");
+        s.join();   // the reap the await deliberately did NOT do — must not hang
+        Check(!s.joinable(), "phase49 (C) explicit join() after a co_await reaps cleanly");
+    } else {
+        printf("[CXX] note phase49: FSGSBASE unavailable — (C) lone join skipped\n");
+    }
+
+    // ── (D) join + timer mix (NOT collapsible → Phase 3c): one coro awaits
+    //        box::after(40ms), one coro awaits a sibling strand's completion
+    //        (~20ms). join arms its OWN addr_park (it can never be a collapse
+    //        passenger), so both must resume on one App-Core, ~40ms, no hang. ──────
+    if (cpu_has_fsgsbase()) {
+        box::strand   s(P49Sleeper{20});
+        volatile bool still = false;
+        box::executor ex;
+        auto          tm = P49AwaitAfter(40ms);
+        auto          tj = P49AwaitJoin(s, &still);
+        ex.schedule(tm.handle());   // suspends -> a timer-domain waiter
+        ex.schedule(tj.handle());   // suspends -> a join-domain waiter
+        box::stopwatch sw;
+        ex.run();
+        auto ms = duration_cast<milliseconds>(sw.elapsed());
+
+        Check(still, "phase49 (D) join+timer mix resumed the join waiter (non-consuming)");
+        Check(ms >= milliseconds(30),
+              "phase49 (D) join+timer mix parked (>=30ms), both resumed, no hang");
+        s.join();
+        Check(!s.joinable(), "phase49 (D) strand reaped after the mixed await");
+    } else {
+        printf("[CXX] note phase49: FSGSBASE unavailable — (D) join+timer mix skipped\n");
+    }
+
+    // ── (E) value / error paths (no strand needed for the timer/throw parts). ─────
+    {
+        // box::after(0ms) is already-ready: await_ready() is true, so the coroutine
+        // never parks — a vacuous, instant completion.
+        {
+            box::executor  ex;
+            box::stopwatch sw;
+            ex.block_on(P49AwaitAfter(0ms));
+            Check(duration_cast<milliseconds>(sw.elapsed()) < milliseconds(100),
+                  "phase49 (E) box::after(0ms) completes inline without parking");
+        }
+        // A sub-ms positive steady deadline rounds up to >=1ms and returns promptly.
+        {
+            box::executor  ex;
+            box::stopwatch sw;
+            ex.block_on(P49AwaitUntilSoon());
+            Check(duration_cast<milliseconds>(sw.elapsed()) < milliseconds(150),
+                  "phase49 (E) box::until(steady + sub-ms) returns promptly");
+        }
+        // co_await on a non-joinable strand throws invalid_argument (consistent with
+        // box::strand::join()): a default-constructed strand has no join flag.
+        {
+            box::strand none;
+            bool        threw = false;
+            try {
+                box::executor ex;
+                ex.block_on(P49AwaitJoin(none, nullptr));
+            } catch (const std::system_error &e) {
+                threw = (e.code() == std::errc::invalid_argument);
+            }
+            Check(threw,
+                  "phase49 (E) co_await completion() on a non-joinable strand throws invalid_argument");
+        }
+        // Already-exited fast-path: spawn, sleep until the strand is surely done,
+        // then co_await — await_ready() sees flag==1 and resolves inline (no park).
+        if (cpu_has_fsgsbase()) {
+            box::strand   s(P49Sleeper{5});
+            std::this_thread::sleep_for(milliseconds(120));   // it has surely exited
+            volatile bool still = false;
+            box::executor ex;
+            box::stopwatch sw;
+            ex.block_on(P49AwaitJoin(s, &still));
+            Check(duration_cast<milliseconds>(sw.elapsed()) < milliseconds(100),
+                  "phase49 (E) already-exited strand: co_await completion() resolves inline");
+            Check(still, "phase49 (E) already-exited strand stays joinable after the await");
+            s.join();
+        } else {
+            printf("[CXX] note phase49: FSGSBASE unavailable — (E) already-exited fast-path skipped\n");
+        }
+    }
+
+    // Honest PASS: the entire co_await join surface (cases B/C/D + the already-
+    // exited fast-path) is FSGSBASE-gated, so annotate the skip when it did not
+    // run — never advertise the join awaiter on a machine that skipped it (house
+    // convention: phase36/37/40). The STRICT matrix runs -cpu max (FSGSBASE on).
+    if (cpu_has_fsgsbase())
+        printf("[CXX] PASS phase49: Ф24b co_await timer (box::after/box::until) + "
+               "co_await box::strand::completion() (non-consuming join)\n");
+    else
+        printf("[CXX] PASS phase49: Ф24b co_await timer (box::after/box::until) "
+               "(co_await join skipped, no FSGSBASE)\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -8491,6 +8700,7 @@ int main()
     Phase46();
     Phase47();
     Phase48();
+    Phase49();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
