@@ -513,6 +513,11 @@ uint32_t brook_frame_count(const Brook *b)
     return b ? b->frame_count : 0;
 }
 
+uint64_t brook_handle_header_va(const Brook *b)
+{
+    return b ? b->va_header : 0;
+}
+
 uint32_t brook_available(const Brook *b)
 {
     if (!b) return 0;
