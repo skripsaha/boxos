@@ -41,6 +41,7 @@
 #include <new>
 #include <type_traits>
 
+#include "box/cxx/error.h"
 #include "box/memory.h"
 #include "box/print.h"
 
@@ -108,6 +109,62 @@ inline heap_stats_t stats() noexcept
 
 // Number of live (allocated) blocks carrying `tag_name`.
 inline std::size_t count(const char *tag_name) noexcept { return heap_count_tag(tag_name); }
+
+// ── fallible allocation carrying the real cause (Ф23c) ──────────────────────
+// allocate / reallocate hand back a box::result: the pointer on success, or the
+// EXACT kernel cause on failure (heap exhausted, corruption, overflow, …). The
+// cause is this strand's own — heap_get_last_error() reads a per-strand cell, so
+// a sibling strand's concurrent success can never mask this call's failure.
+// These never throw; use them where bad_alloc is unwanted (operator new and
+// box::tagged_resource keep the throwing path). last_error() is the same cell as
+// a box::error, for a query between operations.
+
+// The calling strand's last heap-operation cause.
+inline error last_error() noexcept { return error{heap_get_last_error()}; }
+
+// Allocate `bytes` (must be > 0; 0 is rejected as invalid_argument — an empty
+// allocation has no pointer to hand back). On failure the result carries the
+// real cause.
+inline result<void *> allocate(std::size_t bytes)
+{
+    if (bytes == 0) return std::unexpected(error{errc::invalid_argument});
+    void *p = ::_malloc_impl(bytes);
+    if (p) return p;
+    ::error_t e = heap_get_last_error();
+    return std::unexpected(error{e != OK ? e : ERR_NO_MEMORY});
+}
+
+// Allocate `bytes` (> 0) accounted under `tag` (see box::tagged_resource).
+inline result<void *> allocate(std::size_t bytes, const char *tag)
+{
+    if (bytes == 0) return std::unexpected(error{errc::invalid_argument});
+    void *p = ::malloc_tagged(bytes, tag);
+    if (p) return p;
+    ::error_t e = heap_get_last_error();
+    return std::unexpected(error{e != OK ? e : ERR_NO_MEMORY});
+}
+
+// Resize `p` to `bytes`. bytes == 0 frees `p`: a clean free yields a nullptr
+// VALUE (a deallocation, not an error), but a free that detects a double-free
+// or corruption surfaces that cause. On a genuine resize failure the result
+// carries the cause and `p` is left untouched (the standard realloc contract).
+inline result<void *> reallocate(void *p, std::size_t bytes)
+{
+    if (bytes == 0) {
+        // A deallocation, not an allocation. free(nullptr) is a no-op that
+        // writes no cell, so don't read a stale cause for it; a real pointer
+        // that free flags (double-free / corruption) IS surfaced.
+        if (!p) return static_cast<void *>(nullptr);
+        ::free(p);
+        ::error_t e = heap_get_last_error();
+        if (e != OK) return std::unexpected(error{e});
+        return static_cast<void *>(nullptr);
+    }
+    void *q = ::realloc(p, bytes);
+    if (q) return q;
+    ::error_t e = heap_get_last_error();
+    return std::unexpected(error{e != OK ? e : ERR_NO_MEMORY});
+}
 
 // Visit every live block under `tag_name`. fn is called as fn(void* ptr,
 // std::size_t size, const char* tag_name) for each. ‼ Runs under the heap lock —

@@ -81,13 +81,19 @@ void heap_dump_tags(void);
 // BoxOS extensions: diagnostics and error reporting
 // ---------------------------------------------------------------------------
 
-// Last heap error (per-process, set on failure)
+// Last heap error of the CALLING STRAND (Ф23c). The boxlib heap is shared by
+// every strand in the cabin, but "the cause of MY last heap op" is per-strand:
+// once a strand has performed a heap operation it reads its OWN cell, so a
+// sibling's success can never mask this strand's failure. (Before a spawned
+// strand's first heap op, or for a strand that could not claim a pool slot when
+// the slab is full, the value comes from the shared main cell — see memory.c.)
+// The main strand has its own cell too. Returns:
 //   OK                  — no error
 //   ERR_CORRUPTED       — block magic mismatch (heap corruption detected)
 //   ERR_HEAP_EXHAUSTED  — sbrk failed (out of heap space)
 //   ERR_INVALID_ADDRESS — double-free or invalid pointer
 //   ERR_NO_MEMORY       — allocation overflow or zero-size
-extern error_t heap_last_error;
+error_t heap_get_last_error(void);
 
 typedef struct {
     size_t total_allocated;     // bytes currently allocated (in-use)
