@@ -24,9 +24,11 @@
 #ifndef BOXCXX_BOX_CURRENT_H
 #define BOXCXX_BOX_CURRENT_H
 
+#include <coroutine>
 #include <cstddef>
 #include <cstdint>
 #include <format>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <type_traits>
@@ -34,6 +36,7 @@
 
 #include "box/current.h"
 #include "box/cxx/error.h"
+#include "box/cxx/executor.h"  // box::executor, wait_on, __exec::wait_domain
 
 namespace box {
 
@@ -106,6 +109,71 @@ public:
     }
     // Announce end-of-stream to the reader without releasing the handle.
     void close() noexcept { if (c_) current_close(c_); }
+
+    // ── coroutine-native async read (suspends on the current box::executor) ──
+    // Mirrors box::brook<T>::read_awaiter but routes through the Current spine's
+    // framed-take primitives (honoring the small-item frame repad). The Brook
+    // wait-domain inherits the executor's lone-waiter mitigation (bounded slice
+    // + yield); a brace-init waiter would mis-tag domain=0=touch, so use the
+    // explicit 5-arg wait_on overload.
+    //
+    // PRECONDITION (SPSC, like Brook): at most ONE outstanding co_await next()
+    // per handle at a time (the awaiter stages through the handle-scoped
+    // frame_buf), and the current<T> must OUTLIVE the await and not be
+    // closed/released while it is in flight.
+    class read_awaiter {
+    public:
+        explicit read_awaiter(Current *c) noexcept : _M_c(c) {}
+
+        bool await_ready() noexcept
+        {
+            _M_rc = current_take_now(_M_c, &_M_val);
+            return _M_rc != -ERR_WOULD_BLOCK;   // ready on item / close / hard error
+        }
+        bool await_suspend(std::coroutine_handle<> __h)
+        {
+            executor::current()->wait_on(__h, this, &_S_poll, &_S_block,
+                                         __exec::wait_domain::brook);
+            return true;
+        }
+        // nullopt: writer closed + drained (CURRENT_CLOSED) OR error — the
+        // unified "no more frames" terminal, matching box::brook<T>::next().
+        std::optional<T> await_resume() noexcept
+        {
+            // Current framed success is the item SIZE (>0), NOT OK(0): copy
+            // take()'s `rc == sizeof(T)` test, never Brook's `rc == OK`.
+            if (_M_rc == static_cast<int>(sizeof(T))) return _M_val;
+            return std::nullopt;
+        }
+
+    private:
+        static bool _S_poll(void *__s)
+        {
+            auto *__a  = static_cast<read_awaiter *>(__s);
+            // Latch: do NOT re-pop once _S_block (or a prior poll) delivered a
+            // frame/terminal — the executor's Phase-3c re-polls every waiter
+            // right after its native block, and a re-pop would advance past the
+            // just-delivered frame (head already moved) and clobber _M_rc to
+            // WOULD_BLOCK, losing it. Mirrors touch_event/pocket_recv.
+            if (__a->_M_rc != -ERR_WOULD_BLOCK) return true;
+            __a->_M_rc = current_take_now(__a->_M_c, &__a->_M_val);
+            return __a->_M_rc != -ERR_WOULD_BLOCK;
+        }
+        static void _S_block(void *__s, std::uint32_t __ms)
+        {
+            auto *__a  = static_cast<read_awaiter *>(__s);
+            if (__a->_M_rc != -ERR_WOULD_BLOCK) return;  // already delivered — don't re-block
+            __a->_M_rc = current_take_for(__a->_M_c, &__a->_M_val, __ms);
+            if (__a->_M_rc == -ERR_TIMEOUT) __a->_M_rc = -ERR_WOULD_BLOCK;  // re-poll
+        }
+
+        Current *_M_c;
+        T        _M_val{};
+        int      _M_rc = -ERR_WOULD_BLOCK;
+    };
+
+    // co_await s.next() -> std::optional<T>  (nullopt at the stream terminal).
+    read_awaiter next() noexcept { return read_awaiter{c_}; }
 };
 
 // ---------------------------------------------------------------------------

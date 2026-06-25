@@ -139,6 +139,18 @@ int current_flush(Current *c);
 static inline int current_put(Current *c, const void *item);
 static inline int current_take(Current *c, void *item);
 
+/* Non-blocking framed take (decoupled from the open-time CURRENT_NONBLOCK flag).
+ * Returns item_size (>0) on success, CURRENT_CLOSED (0) at end-of-stream,
+ * -ERR_WOULD_BLOCK when the stream is empty, -ERR_INVALID_OPERATION for a
+ * non-framed / non-readable backing. Honors the small-item frame repad. */
+int current_take_now(Current *c, void *item);
+
+/* Bounded framed take. ms == 0 forever-blocks. Adds -ERR_TIMEOUT to the above
+ * on deadline expiry; CURRENT_CLOSED is still surfaced at the deadline boundary
+ * (the Brook writer-leave check precedes the timeout in the backing). Honors
+ * the small-item frame repad. */
+int current_take_for(Current *c, void *item, uint32_t ms);
+
 /* --------------------------------------------------------------------------
  * Random access (CURRENT_CAP_SEEKABLE backings — file). Sets the byte cursor
  * used by subsequent current_read / current_write.

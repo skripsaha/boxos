@@ -549,6 +549,20 @@ private:
 // with a native blocking wait. await_ready fast-paths an already-ready
 // event; otherwise await_suspend registers the (handle, poll, block) triple
 // with the current executor and suspends back into the run-loop.
+//
+// ‼ LATCH INVARIANT (load-bearing for every CONSUMING awaiter) ‼
+// Phase 3c blocks a waiter on its native wait, then re-polls EVERY waiter
+// (_M_pump_waiters → _M_poll_sweep). When `block` ITSELF delivers the event
+// (e.g. brook_pop_timeout pops a frame, touch_wait dequeues a Touch — the
+// source is one-shot/consumed), the immediately-following re-poll must NOT
+// re-read the now-empty source: that would discard the just-delivered event
+// (ring head already advanced) and strand the coroutine forever. So a
+// consuming awaiter's `poll` MUST LATCH — report "ready" from the value
+// `block` already delivered without re-consuming. touch_event/pocket_recv
+// latch via `_M_got`; box::brook<T>/box::current<T> latch on
+// `_M_rc != -ERR_WOULD_BLOCK`. A NON-consuming awaiter (timer/join: the
+// clock / a flag is re-readable) needs no latch. Phase50 in cxxtest proves
+// this contract deterministically.
 
 // co_await box::touch_event() -> Touch  (the next Touch published to this
 // cabin, of any tag). Tag-filtered subscription is the Ф13 box::touch layer.
@@ -606,11 +620,18 @@ public:
 private:
     static bool _S_poll(void* __s) {
         auto* __a = static_cast<brook_read*>(__s);
+        // Latch: once _S_block (or a prior poll) has delivered a frame/terminal,
+        // do NOT re-pop — the executor re-polls every waiter right after its
+        // native block (Phase 3c); a re-pop would advance past the just-delivered
+        // frame (head already moved in _S_block) and clobber _M_rc to WOULD_BLOCK,
+        // losing it. Mirrors touch_event/pocket_recv.
+        if (__a->_M_rc != -ERR_WOULD_BLOCK) return true;
         __a->_M_rc = brook_try_pop(__a->_M_b, __a->_M_frame);
         return __a->_M_rc != -ERR_WOULD_BLOCK;
     }
     static void _S_block(void* __s, uint32_t __ms) {
         auto* __a = static_cast<brook_read*>(__s);
+        if (__a->_M_rc != -ERR_WOULD_BLOCK) return;  // already delivered — don't re-block
         __a->_M_rc = brook_pop_timeout(__a->_M_b, __a->_M_frame, __ms);
         // A timeout just means "re-poll"; map it back to would-block.
         if (__a->_M_rc == -ERR_TIMEOUT) __a->_M_rc = -ERR_WOULD_BLOCK;

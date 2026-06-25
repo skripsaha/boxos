@@ -213,6 +213,27 @@ int current_release(Current *c)
  * Transfer
  * ------------------------------------------------------------------------ */
 
+/* Uniform-signature shims so one helper drives try / timeout / blocking pops. */
+static int cur_pop_try(Brook *b, void *f, uint32_t ms)   { (void)ms; return brook_try_pop(b, f); }
+static int cur_pop_block(Brook *b, void *f, uint32_t ms) { (void)ms; return brook_pop(b, f); }
+/* brook_pop_timeout already matches (Brook*, void*, uint32_t). */
+
+/* Shared CurStream framed-take core: stage through frame_buf when the logical
+ * item is smaller than the Brook frame, map the writer-leave terminal. */
+static int cur_stream_take(Current *c, void *item,
+                           int (*pop)(Brook *, void *, uint32_t), uint32_t ms)
+{
+    if (!c->brook) return CURRENT_CLOSED;              /* writer side already released it */
+    void *dst = c->frame_buf ? (void *)c->frame_buf : item;
+    int rc = pop(c->brook, dst, ms);
+    if (rc == 0) {
+        if (c->frame_buf) memcpy(item, c->frame_buf, c->item_size);
+        return (int)c->item_size;
+    }
+    if (rc == -ERR_STREAM_CLOSED) return CURRENT_CLOSED;
+    return rc;                                          /* -ERR_WOULD_BLOCK / -ERR_TIMEOUT / -ERR_* */
+}
+
 int current_write(Current *c, const void *data, size_t len)
 {
     if (!c) return -ERR_NULL_POINTER;
@@ -299,21 +320,31 @@ int current_read(Current *c, void *buf, size_t len)
 
     case CurStream: {
         if (len < c->item_size) return -ERR_BUFFER_TOO_SMALL;
-        void *dst = c->frame_buf ? (void *)c->frame_buf : buf;
-        int rc = (c->flags & CURRENT_NONBLOCK)
-               ? brook_try_pop(c->brook, dst)
-               : brook_pop(c->brook, dst);
-        if (rc == 0) {
-            if (c->frame_buf) memcpy(buf, c->frame_buf, c->item_size);
-            return (int)c->item_size;
-        }
-        if (rc == -ERR_STREAM_CLOSED) return CURRENT_CLOSED;
-        return rc;   /* -ERR_WOULD_BLOCK, -ERR_* */
+        return cur_stream_take(c, buf,
+                   (c->flags & CURRENT_NONBLOCK) ? cur_pop_try : cur_pop_block, 0);
     }
 
     default:
         return -ERR_INVALID_OPERATION;
     }
+}
+
+int current_take_now(Current *c, void *item)
+{
+    if (!c) return -ERR_NULL_POINTER;
+    if (!(c->caps & CURRENT_CAP_READ)) return -ERR_INVALID_OPERATION;
+    if (!item) return -ERR_INVALID_ARGUMENT;
+    if (c->backend == CurStream) return cur_stream_take(c, item, cur_pop_try, 0);
+    return -ERR_INVALID_OPERATION;   /* keyboard/file/screen/log are not framed streams */
+}
+
+int current_take_for(Current *c, void *item, uint32_t ms)
+{
+    if (!c) return -ERR_NULL_POINTER;
+    if (!(c->caps & CURRENT_CAP_READ)) return -ERR_INVALID_OPERATION;
+    if (!item) return -ERR_INVALID_ARGUMENT;
+    if (c->backend == CurStream) return cur_stream_take(c, item, brook_pop_timeout, ms);
+    return -ERR_INVALID_OPERATION;
 }
 
 int current_flush(Current *c)
