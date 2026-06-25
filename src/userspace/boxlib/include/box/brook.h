@@ -134,6 +134,9 @@ uint32_t brook_frame_count(const Brook *b);
 uint32_t brook_available(const Brook *b);
 uint32_t brook_free(const Brook *b);
 
+/* Introspection: the VA the kernel mapped this Brook's header at (diagnostics). */
+uint64_t brook_handle_header_va(const Brook *b);
+
 #ifdef __cplusplus
 }
 #endif
