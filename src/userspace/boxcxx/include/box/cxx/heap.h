@@ -131,7 +131,7 @@ inline result<void *> allocate(std::size_t bytes)
     void *p = ::_malloc_impl(bytes);
     if (p) return p;
     ::error_t e = heap_get_last_error();
-    return std::unexpected(error{e != OK ? e : ERR_NO_MEMORY});
+    return std::unexpected(error{e != OK ? e : static_cast<::error_t>(ERR_NO_MEMORY)});
 }
 
 // Allocate `bytes` (> 0) accounted under `tag` (see box::tagged_resource).
@@ -141,7 +141,7 @@ inline result<void *> allocate(std::size_t bytes, const char *tag)
     void *p = ::malloc_tagged(bytes, tag);
     if (p) return p;
     ::error_t e = heap_get_last_error();
-    return std::unexpected(error{e != OK ? e : ERR_NO_MEMORY});
+    return std::unexpected(error{e != OK ? e : static_cast<::error_t>(ERR_NO_MEMORY)});
 }
 
 // Resize `p` to `bytes`. bytes == 0 frees `p`: a clean free yields a nullptr
@@ -163,7 +163,7 @@ inline result<void *> reallocate(void *p, std::size_t bytes)
     void *q = ::realloc(p, bytes);
     if (q) return q;
     ::error_t e = heap_get_last_error();
-    return std::unexpected(error{e != OK ? e : ERR_NO_MEMORY});
+    return std::unexpected(error{e != OK ? e : static_cast<::error_t>(ERR_NO_MEMORY)});
 }
 
 // Visit every live block under `tag_name`. fn is called as fn(void* ptr,
