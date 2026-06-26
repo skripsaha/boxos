@@ -22,16 +22,20 @@
 #ifndef BOXCXX_BOX_MESSAGE_H
 #define BOXCXX_BOX_MESSAGE_H
 
+#include <array>
 #include <coroutine>
 #include <cstddef>
 #include <cstdint>
+#include <initializer_list>
+#include <iterator>
 #include <optional>
 #include <span>
 #include <string_view>
 #include <type_traits>
 
-#include "box/ipc.h"           // send / broadcast / receive / receive_wait + Result
-#include "box/cxx/executor.h"  // box::executor, __exec::waiter, wait_on (co_await)
+#include "box/ipc.h"           // send / broadcast / receive / receive_wait + Result + send_args / receive_args
+#include "box/cpu.h"           // cpu_rdtsc / cpu_ms_to_tsc (box::call deadline math)
+#include "box/cxx/executor.h"  // box::executor, __exec::waiter, wait_on, box::task (co_await)
 #include "box/cxx/error.h"     // box::status / box::error
 
 namespace box {
@@ -191,6 +195,104 @@ private:
 
 inline __message_awaiter next_message() noexcept { return __message_awaiter{}; }
 
+// ── box::call — send a request, await exactly ONE reply (the request/reply verb) ──
+// A coroutine: it sends the request, then suspends on the current box::executor
+// until the NEXT inbox record arrives or an optional deadline elapses. It is the
+// request/reply shape over the same per-strand inbox box::message uses — NOT a
+// Unix RPC: correlation is by strand-pid ARRIVAL, not a request id.
+//
+// Contract (the per-strand inbox is FIFO-shared — see box/cxx/line.h):
+//   * box::call consumes EXACTLY ONE record — the next one. It does not drain
+//     (which would discard a legitimately-queued earlier message) and does not
+//     filter (which would steal a record a sibling consumer is owed).
+//   * So keep at most ONE call in flight per strand and keep that strand's inbox
+//     quiescent for the call's duration; VALIDATE from() on the returned message
+//     (the callee replies via box::message::reply, i.e. ::send back to this
+//     strand's pid, so a correct reply carries from() == the callee's pid).
+//   * timeout_ms == 0 waits forever; otherwise an elapsed deadline with no reply
+//     resolves to the error arm errc::timeout. Calling your own strand pid is not
+//     a self-deadlock — the kernel rejects it as errc::route_self in the error arm.
+class __call_awaiter {
+public:
+    explicit __call_awaiter(std::uint64_t __deadline_tsc) noexcept
+        : _M_deadline_tsc(__deadline_tsc) {}
+
+    bool await_ready() noexcept { return (_M_got = ::receive(&_M_r)); }
+    bool await_suspend(std::coroutine_handle<> __h)
+    {
+        executor::current()->wait_on(__h, this, &_S_poll, &_S_block,
+                                     __exec::wait_domain::result, _M_deadline_tsc);
+        return true;
+    }
+    // A delivered record -> the reply; nullopt -> the deadline elapsed (timeout).
+    std::optional<message> await_resume() noexcept
+    {
+        return _M_got ? std::optional<message>(message(_M_r)) : std::nullopt;
+    }
+
+private:
+    static bool _S_poll(void *__s)
+    {
+        auto *__a = static_cast<__call_awaiter *>(__s);
+        // Latch (mirrors __message_awaiter): once _S_block delivered a record, do
+        // NOT re-receive — report it ready from _M_got.
+        if (__a->_M_got) return true;
+        if ((__a->_M_got = ::receive(&__a->_M_r))) return true;
+        // The budget block expired with no reply: a lone result waiter would
+        // otherwise re-block forever past its deadline. Report ready so
+        // await_resume yields the timeout (nullopt).
+        return __a->_M_deadline_tsc != 0 && cpu_rdtsc() >= __a->_M_deadline_tsc;
+    }
+    static void _S_block(void *__s, std::uint32_t __ms)
+    {
+        auto *__a = static_cast<__call_awaiter *>(__s);
+        if (!__a->_M_got) __a->_M_got = ::receive_wait(&__a->_M_r, __ms);
+    }
+
+    Result        _M_r{};
+    std::uint64_t _M_deadline_tsc;
+    bool          _M_got = false;
+};
+
+// Send `n` bytes at `data` to `pid`, then await one reply. `data` must remain
+// valid until the coroutine first runs (the internal send happens before the
+// first suspension — the standard coroutine pointer-parameter lifetime rule).
+inline task<result<message>> call(std::uint32_t pid, const void *data, std::uint16_t n,
+                                  std::uint32_t timeout_ms = 0) noexcept
+{
+    status __s = box::send(pid, data, n);
+    if (!__s) co_return std::unexpected(__s.error());
+    std::uint64_t __deadline =
+        timeout_ms ? cpu_rdtsc() + cpu_ms_to_tsc(static_cast<std::uint64_t>(timeout_ms)) : 0;
+    std::optional<message> __m = co_await __call_awaiter{__deadline};
+    if (!__m) co_return std::unexpected(error{errc::timeout});
+    co_return *__m;
+}
+// Typed request overload. `req` is taken BY VALUE — it is copied into the
+// coroutine frame, so it stays alive across the suspension even when the task is
+// stored and awaited later (auto t = call(...); ... co_await t;). A reference
+// parameter would dangle there: the internal send runs at first resume, by which
+// point a temporary request would be long destroyed (CppCoreGuidelines CP.53).
+// The `requires` excludes pointer requests so call(pid, ptr, len) cannot bind
+// here — it routes unambiguously to the const void* overload above instead of
+// silently shipping sizeof(void*) bytes of the pointer with len as the timeout.
+template <class Req>
+    requires (!std::is_pointer_v<Req>)
+inline task<result<message>> call(std::uint32_t pid, Req req,
+                                  std::uint32_t timeout_ms = 0) noexcept
+{
+    static_assert(std::is_trivially_copyable_v<Req>,
+                  "box::call(pid, Req) requires a trivially copyable request");
+    static_assert(sizeof(Req) <= 0xFFFFu, "box::call request exceeds 65535 bytes");
+    status __s = box::send(pid, &req, static_cast<std::uint16_t>(sizeof(Req)));
+    if (!__s) co_return std::unexpected(__s.error());
+    std::uint64_t __deadline =
+        timeout_ms ? cpu_rdtsc() + cpu_ms_to_tsc(static_cast<std::uint64_t>(timeout_ms)) : 0;
+    std::optional<message> __m = co_await __call_awaiter{__deadline};
+    if (!__m) co_return std::unexpected(error{errc::timeout});
+    co_return *__m;
+}
+
 // ── co_await box::result_any() -> box::any_result ───────────────────────────
 // The ResultRing carries more than IPC into a strand: IPC messages (sender pid
 // != 0) AND kernel records (sender pid == 0 — a manifest reply / kernel result
@@ -274,6 +376,134 @@ private:
 };
 
 inline __result_any_awaiter result_any() noexcept { return __result_any_awaiter{}; }
+
+// ── box::args<N> / box::send_args / box::receive_args — the argv face of IPC ──
+// The argv-style message: a fixed "[count][arg\0][arg\0]…" payload, the wire every
+// BoxOS utility speaks (its main() reads char argv[16][64]). box::args<N> is that
+// fixed value — NO heap, NUL-bounded views into fixed 64-byte cells — and the
+// default N == 16 matches every util. This is a box:: extension, not part of std.
+template <std::size_t N> class args;
+template <std::size_t N = 16> result<args<N>> receive_args() noexcept;
+
+template <std::size_t N = 16>
+class args {
+    static_assert(N >= 1, "box::args<N> needs at least one slot");
+
+public:
+    using value_type = std::string_view;
+
+    // The number of populated arguments (clamped into [0, N]).
+    std::size_t size() const noexcept
+    {
+        if (n_ <= 0) return 0u;
+        return static_cast<std::size_t>(n_) > N ? N : static_cast<std::size_t>(n_);
+    }
+    bool empty() const noexcept { return size() == 0; }
+
+    // The i-th argument as a NUL-bounded view into its fixed 64-byte cell. An
+    // out-of-range index is an empty view — never an out-of-bounds read.
+    std::string_view operator[](std::size_t i) const noexcept
+    {
+        if (i >= size()) return {};
+        const char *p   = raw_[i].data();
+        std::size_t len = 0;
+        while (len < raw_[i].size() && p[len] != '\0') ++len;
+        return std::string_view(p, len);
+    }
+    std::string_view front() const noexcept { return (*this)[0]; }
+    std::string_view back()  const noexcept
+    {
+        return size() ? (*this)[size() - 1] : std::string_view{};
+    }
+
+    // Range-for: a forward iterator yielding string_view BY VALUE (each view is
+    // synthesised on deref from the fixed cell).
+    class iterator {
+    public:
+        using iterator_category = std::forward_iterator_tag;
+        using value_type        = std::string_view;
+        using difference_type   = std::ptrdiff_t;
+        using reference         = std::string_view;
+        using pointer           = void;
+
+        iterator() noexcept = default;
+        iterator(const args *__a, std::size_t __i) noexcept : _M_a(__a), _M_i(__i) {}
+
+        std::string_view operator*() const noexcept { return (*_M_a)[_M_i]; }
+        iterator        &operator++() noexcept { ++_M_i; return *this; }
+        iterator         operator++(int) noexcept { iterator __t = *this; ++_M_i; return __t; }
+        friend bool operator==(const iterator &__x, const iterator &__y) noexcept
+        {
+            return __x._M_i == __y._M_i;
+        }
+
+    private:
+        const args *_M_a = nullptr;
+        std::size_t _M_i = 0;
+    };
+
+    iterator begin() const noexcept { return iterator(this, 0); }
+    iterator end()   const noexcept { return iterator(this, size()); }
+
+private:
+    template <std::size_t M> friend result<args<M>> receive_args() noexcept;
+
+    std::array<std::array<char, 64>, N> raw_{};
+    int                                 n_ = 0;
+};
+
+// Marshal the args into the "[count][arg\0]…" wire and route to `pid`. Empty
+// status on accepted delivery; the error arm carries the real send cause. Maps
+// the int return by the from_ret rule (a non-negative return is an accept, a
+// negative return is the -error_t cause — the value is discarded). Honors the
+// boxlib caps (<=127 args, the 240-byte wire ceiling): an arg past the ceiling is
+// dropped exactly as the C marshaller drops it. An argument containing an embedded
+// NUL is truncated at the first NUL (the argv wire is NUL-delimited).
+inline status send_args(std::uint32_t pid, std::span<const std::string_view> a) noexcept
+{
+    constexpr std::size_t kMaxArgs = 127;   // ipc.c caps the arg count at 127
+    constexpr std::size_t kScratch = 256;   // > ipc.c's 240-byte wire buffer
+    char        scratch[kScratch];
+    char       *argv[kMaxArgs];
+    std::size_t pos  = 0;
+    int         argc = 0;
+    for (std::size_t i = 0; i < a.size() && static_cast<std::size_t>(argc) < kMaxArgs; ++i) {
+        if (pos + 1 >= kScratch) break;             // no room left even for a NUL
+        std::size_t room = kScratch - 1 - pos;      // chars we can take (keep 1 for the NUL)
+        std::size_t len  = a[i].size() < room ? a[i].size() : room;
+        if (len) __builtin_memcpy(scratch + pos, a[i].data(), len);
+        scratch[pos + len] = '\0';
+        argv[argc++]       = scratch + pos;
+        pos               += len + 1;
+    }
+    int r = ::send_args(pid, argc, argv);
+    if (r < 0) return std::unexpected(error{box_errno_of(r)});
+    return {};
+}
+inline status send_args(std::uint32_t pid, std::initializer_list<std::string_view> a) noexcept
+{
+    return send_args(pid, std::span<const std::string_view>(a.begin(), a.size()));
+}
+
+// Receive the next "[count][arg\0]…" payload into a fixed args<N>. Fallible: the
+// error arm carries the recovered cause (errc::timeout when no message arrives in
+// the boxlib inbox wait, errc::internal on a malformed payload); the value arm is
+// the populated args. Calls straight through ::receive_args, preserving its
+// context-tag side effect. The boxlib inbox wait is bounded (~1000 ms, a C-layer
+// constant) — receive_args cannot block forever; a not-yet-arrived payload
+// surfaces as errc::timeout, never a hang.
+template <std::size_t N>
+inline result<args<N>> receive_args() noexcept
+{
+    args<N> out;
+    int r = ::receive_args(&out.n_,
+                           reinterpret_cast<char (*)[64]>(out.raw_.data()),
+                           static_cast<int>(N));
+    if (r < 0) return std::unexpected(error{box_errno_of(r)});
+    if (out.n_ < 0) out.n_ = 0;
+    if (out.n_ > static_cast<int>(N)) out.n_ = static_cast<int>(N);
+    return out;
+}
 
 }  // namespace box
 
