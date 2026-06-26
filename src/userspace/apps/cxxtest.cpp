@@ -79,6 +79,7 @@
 #include "box/cxx/heap.h"
 #include "box/cxx/hw.h"
 #include "box/cxx/keyboard.h"
+#include "box/cxx/line.h"
 #include "box/cxx/manifest.h"
 #include "box/cxx/math.h"
 #include "box/cxx/memtag.h"
@@ -8762,6 +8763,477 @@ void Phase50()
     printf("[CXX] PASS phase50: executor block-then-repoll latch (deterministic, host-independent)\n");
 }
 
+// ── phase51 — Ф25a: IPC coverage (box::line<T> / box::call / send_args/args) ───
+// box::line<T> is the typed face of process-to-process messaging; box::call is the
+// request/reply verb; box::send_args/receive_args/args<N> are the argv face. The
+// always-on block proves the structural surface deterministically (no peer); the
+// FSGSBASE-gated block proves the real cross-strand traffic — a send_args round-
+// trip with the 64-byte truncation, a box::line peer round-trip, co_await recv()
+// and co_await box::call with reply-correlation + timeout, the GROUP-flavor
+// broadcast delivery + self-exclusion, the CONCURRENT cross-strand routing +
+// correlation under load (exercising C1 per-strand rings; pids never cross), and
+// the recv()-alongside-timer latch proof (mirrors phase50's intent on the live IPC
+// path).
+
+// box::line<T> payload and box::call request/reply payload.
+struct P51Msg  { std::uint32_t seq; std::uint32_t tag; };
+struct P51Call { std::uint32_t token; std::uint32_t echo; };
+
+// The main strand's pid (== cabin pid) — sibling workers address their replies to
+// it. Captured by Phase51() before any spawn.
+static std::uint32_t g_p51_main_pid = 0;
+
+// Concurrent inbox-isolation (scenario 4): N workers each drain ONLY their own
+// pid-addressed traffic from their OWN ring; a barrier releases them with main so
+// the sends overlap the drains.
+static constexpr int P51_WORKERS = 3;
+static constexpr int P51_ISO_N   = 8;
+struct P51IsoResult {
+    std::atomic<int>  got{0};
+    std::atomic<bool> order_ok{true};   // seqs arrived strictly 0,1,2,…
+    std::atomic<bool> marker_ok{true};  // every record carried THIS worker's tag (no cross-delivery)
+    std::uint32_t     seqs[P51_ISO_N];
+};
+static P51IsoResult    g_p51_iso[P51_WORKERS];
+static std::barrier<> *g_p51_bar = nullptr;
+
+static void p51_iso_worker(int idx)
+{
+    g_p51_bar->arrive_and_wait();   // release with main — the burst overlaps this drain
+    P51IsoResult &res = g_p51_iso[idx];
+    box::line<P51Msg> in;           // unbound: recv reads THIS strand's own inbox (no peer filter)
+    std::uint32_t expect = 0;
+    int           n = 0;
+    box::stopwatch sw;              // wall-clock backstop so a missing record fails loudly, never hangs
+    while (n < P51_ISO_N && sw.elapsed() < std::chrono::milliseconds(2000)) {
+        std::optional<P51Msg> m = in.recv_for(50);
+        if (!m) continue;
+        if (m->tag != static_cast<std::uint32_t>(idx))
+            res.marker_ok.store(false, std::memory_order_relaxed);
+        if (m->seq != expect)
+            res.order_ok.store(false, std::memory_order_relaxed);
+        res.seqs[n] = m->seq;
+        ++expect;
+        ++n;
+        res.got.store(n, std::memory_order_release);
+    }
+}
+
+// scenario 1: receive_args round-trip target. Records argc + the three args back
+// for main to verify (including the 64-byte/arg truncation).
+struct P51ArgsResult {
+    std::atomic<int>  argc{-1};
+    std::atomic<bool> ok{false};
+    std::atomic<int>  len2{-1};
+    char              a0[64];
+    char              a1[64];
+    char              a2[64];
+};
+static P51ArgsResult g_p51_args;
+
+static void p51_args_worker(int)
+{
+    box::result<box::args<16>> r = box::receive_args<16>();
+    if (!r) { g_p51_args.argc.store(-2, std::memory_order_release); return; }
+    const box::args<16> &a = *r;
+    int n = static_cast<int>(a.size());
+    auto copy_out = [](char *dst, std::string_view v) {
+        std::size_t k = v.size() < 63 ? v.size() : 63;
+        for (std::size_t i = 0; i < k; ++i) dst[i] = v[i];
+        dst[k] = '\0';
+    };
+    if (n >= 1) copy_out(g_p51_args.a0, a[0]);
+    if (n >= 2) copy_out(g_p51_args.a1, a[1]);
+    if (n >= 3) { copy_out(g_p51_args.a2, a[2]); g_p51_args.len2.store(static_cast<int>(a[2].size()), std::memory_order_relaxed); }
+    g_p51_args.argc.store(n, std::memory_order_release);
+    g_p51_args.ok.store(true, std::memory_order_release);   // visible-before via the join
+}
+
+// scenario 2: box::line peer echo. Receives one P51Msg from main and sends a
+// transformed reply back along a line bound to main.
+static std::atomic<std::uint32_t> g_p51_echo_in{0};
+
+static void p51_line_echo_worker(int)
+{
+    box::line<P51Msg> in = box::line<P51Msg>::to(g_p51_main_pid);
+    std::optional<P51Msg> m = in.recv_for(3000);
+    if (m) {
+        g_p51_echo_in.store(m->seq, std::memory_order_release);
+        in.send(P51Msg{ m->seq + 1000u, static_cast<std::uint32_t>(m->tag ^ 0xFFu) });
+    }
+}
+
+// scenario 3 (reply-correlation) + scenario 4 (responder): a request/reply server.
+// Receives one message from main and replies with the token echoed — the reply's
+// from() is THIS strand's pid, which is what box::call correlates on.
+static void p51_call_server_worker(int)
+{
+    std::optional<box::message> req = box::receive_for(3000);
+    if (req && req->from() == g_p51_main_pid) {
+        std::optional<P51Call> rq = req->payload_as<P51Call>();
+        std::uint32_t tok = rq ? rq->token : 0u;
+        (void)req->reply(P51Call{ tok, tok ^ 0x51510000u });
+    }
+}
+
+// scenario 3 (co_await recv) + scenario 5 (latch): send one P51Msg to main after a
+// short delay, so main's executor receives it via the BLOCK path (not await_ready).
+static void p51_sender_worker(int)
+{
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    box::line<P51Msg>::to(g_p51_main_pid).send(P51Msg{ 0xD00Du, 0x55u });
+}
+
+// scenario 3 (timeout): a peer that stays ALIVE (so main's call-send succeeds) but
+// never replies, so the call rides its deadline to errc::timeout.
+static void p51_silent_worker(int)
+{
+    std::this_thread::sleep_for(std::chrono::milliseconds(400));
+}
+
+// scenario 2b: box::line<T>::on(tag) GROUP flavor. The worker JOINS the broadcast
+// group (carries the tag on its own strand process — proc_tag_add is self-scoped),
+// signals readiness, then recv's the broadcast from its own ring. Main (also a
+// member) broadcasts once and must NOT receive its own send — the kernel excludes
+// the broadcaster (SysBroadcast skips iter->pid == sender pid).
+static std::atomic<std::uint32_t> g_p51_grp_in{0};
+static std::atomic<bool>          g_p51_grp_ready{false};
+
+static void p51_group_worker(int)
+{
+    box::tag_scope member("p51:grp");   // join the broadcast group (self-scoped tag)
+    g_p51_grp_ready.store(static_cast<bool>(member), std::memory_order_release);
+    box::line<P51Msg>     in;           // unbound: recv reads THIS strand's own inbox
+    std::optional<P51Msg> m = in.recv_for(3000);
+    if (m) g_p51_grp_in.store(m->seq, std::memory_order_release);
+}
+
+// Helper coroutines driven on a box::executor.
+static box::task<box::result<box::message>>
+p51_call_coro(std::uint32_t pid, P51Call req, std::uint32_t timeout_ms)
+{
+    co_return co_await box::call(pid, req, timeout_ms);
+}
+static box::task<std::optional<P51Msg>> p51_recv_coro()
+{
+    box::line<P51Msg> in;   // unbound recv on this strand's inbox
+    co_return co_await in.recv();
+}
+static box::task<void> p51_timer_coro()
+{
+    co_await box::after(std::chrono::milliseconds(150));   // co-resident timer for the latch proof
+    co_return;
+}
+
+void Phase51()
+{
+    g_p51_main_pid = box::this_strand::id().native();   // main strand pid (== cabin pid)
+
+    // ── Block 0 — always-on, deterministic, no peer ─────────────────────────
+    // box::line<T> binding state + flavor accessors.
+    {
+        box::line<P51Msg> ub;
+        Check(!ub, "phase51 default box::line is unbound (operator bool false)");
+        Check(ub.peer() == 0 && ub.group() == nullptr, "phase51 unbound line has no peer/group");
+
+        box::line<P51Msg> pl = box::line<P51Msg>::to(4242u);
+        Check(static_cast<bool>(pl), "phase51 line::to(pid) is bound");
+        Check(pl.peer() == 4242u && pl.group() == nullptr, "phase51 line::to peer-flavor accessors");
+
+        box::line<P51Msg> gl = box::line<P51Msg>::on("cxx:p51:grp");
+        Check(static_cast<bool>(gl), "phase51 line::on(tag) is bound");
+        Check(gl.peer() == 0 && gl.group() != nullptr &&
+                  std::string_view(gl.group()) == "cxx:p51:grp",
+              "phase51 line::on group-flavor accessors");
+
+        // Real-cause negatives: an unbound line and a no-subscriber group surface
+        // the actual kernel cause through the status error arm.
+        box::status us = ub.send(P51Msg{ 1u, 2u });
+        Check(!us && us.error().code() == box::errc::invalid_argument,
+              "phase51 unbound line send -> invalid_argument");
+        box::status gs = gl.send(P51Msg{ 1u, 2u });
+        Check(!gs && gs.error().code() == box::errc::route_no_subscribers,
+              "phase51 line::on send with no subscribers -> route_no_subscribers");
+    }
+
+    // box::line<T> short-payload decode -> nullopt (the same box::message guard
+    // recv()/try_recv()/recv_for() use; deterministic, never dereferences).
+    {
+        std::uint16_t small = 0x1234u;
+        Result sr{};
+        sr.sender_pid  = 4242u;
+        sr.data_addr   = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(&small));
+        sr.data_length = sizeof(small);   // 2 bytes < sizeof(P51Msg) == 8
+        box::message sm(sr);
+        Check(!sm.payload_as<P51Msg>().has_value(),
+              "phase51 line<T> decode: short payload -> nullopt (the recv guard)");
+    }
+
+    // box::args<N> structural surface (default = empty; safe out-of-range).
+    {
+        box::args<16> a;
+        Check(a.size() == 0 && a.empty(), "phase51 default box::args<16> is empty");
+        Check(a[0].empty(), "phase51 out-of-range args index -> empty view (no OOB read)");
+        Check(a.front().empty() && a.back().empty(), "phase51 empty args front/back are empty views");
+        int count = 0;
+        for (std::string_view v : a) { (void)v; ++count; }
+        Check(count == 0, "phase51 range-for over empty args yields nothing");
+    }
+
+    // box::send_args marshal-path negatives (the full marshaller runs, then the
+    // real cause surfaces).
+    {
+        box::status e0 = box::send_args(4242u, {});
+        Check(!e0 && e0.error().code() == box::errc::invalid_argument,
+              "phase51 send_args with no args -> invalid_argument");
+        box::status e1 = box::send_args(0u, { "a", "bb", "ccc" });
+        Check(!e1 && e1.error().code() == box::errc::invalid_argument,
+              "phase51 send_args to pid 0 -> invalid_argument (marshal path exercised)");
+    }
+
+    // box::call producer-path negatives (the send fails first, so no peer needed):
+    // pid 0 -> invalid_argument, a non-existent pid -> process_not_found.
+    {
+        P51Call req{ 0x9u, 0u };
+        box::result<box::message> r0 = std::unexpected(box::error{box::errc::internal});
+        box::result<box::message> r1 = std::unexpected(box::error{box::errc::internal});
+        { box::executor ex; r0 = ex.block_on(p51_call_coro(0u, req, 100u)); }
+        Check(!r0 && r0.error().code() == box::errc::invalid_argument,
+              "phase51 box::call to pid 0 -> invalid_argument (send fails first)");
+        { box::executor ex; r1 = ex.block_on(p51_call_coro(0x7FFFFFFFu, req, 100u)); }
+        Check(!r1 && r1.error().code() == box::errc::process_not_found,
+              "phase51 box::call to a non-existent pid -> process_not_found");
+    }
+
+    // ── Block 1 — cross-strand peer / concurrent: needs FSGSBASE (per-strand TLS).
+    // Without it box::strand cannot spawn; skip cleanly with a PASS (matching the
+    // other strand phases) — Block 0 already exercised the structural surface.
+    if (!cpu_has_fsgsbase()) {
+        printf("[CXX] note phase51: strands need FSGSBASE — skipping peer/concurrent IPC\n");
+        printf("[CXX] PASS phase51: box::line / box::call / box::send_args / box::args "
+               "(structural; peer/concurrent skipped, no FSGSBASE)\n");
+        return;
+    }
+
+    // scenario 1: send_args -> receive_args round-trip + the 64-byte/arg truncation.
+    {
+        g_p51_args.argc.store(-1, std::memory_order_relaxed);
+        g_p51_args.ok.store(false, std::memory_order_relaxed);
+        g_p51_args.len2.store(-1, std::memory_order_relaxed);
+
+        box::strand w(p51_args_worker, 0);
+        std::uint32_t wpid = w.get_id().native();
+
+        char long_arg[71];                        // 70 chars: crosses the 63-char cell limit
+        for (int i = 0; i < 70; ++i) long_arg[i] = 'x';
+        long_arg[70] = '\0';
+        box::status ss = box::send_args(wpid, { "alpha", "beta", std::string_view(long_arg, 70) });
+        Check(static_cast<bool>(ss), "phase51 send_args accepted by a live peer strand");
+
+        w.join();   // bounded: the worker's receive_args has a finite inbox wait
+        Check(g_p51_args.ok.load(std::memory_order_acquire), "phase51 receive_args parsed the payload");
+        Check(g_p51_args.argc.load(std::memory_order_acquire) == 3, "phase51 receive_args argc == 3");
+        Check(std::string_view(g_p51_args.a0) == "alpha", "phase51 receive_args arg0 == \"alpha\"");
+        Check(std::string_view(g_p51_args.a1) == "beta", "phase51 receive_args arg1 == \"beta\"");
+        Check(g_p51_args.len2.load(std::memory_order_acquire) == 63,
+              "phase51 receive_args truncated the 70-char arg to 63 (64-byte cell)");
+        Check(std::string_view(g_p51_args.a2).size() == 63 &&
+                  std::string_view(g_p51_args.a2).find_first_not_of('x') == std::string_view::npos,
+              "phase51 receive_args arg2 is exactly 63 'x' (clean truncation)");
+    }
+
+    // scenario 2: box::line<T> peer round-trip (send / try_recv / recv_for).
+    {
+        while (box::receive()) { }   // main inbox quiescent
+        g_p51_echo_in.store(0, std::memory_order_relaxed);
+
+        box::strand w(p51_line_echo_worker, 0);
+        std::uint32_t wpid = w.get_id().native();
+        box::line<P51Msg> out = box::line<P51Msg>::to(wpid);
+
+        Check(!out.try_recv().has_value(), "phase51 line try_recv on an empty inbox -> nullopt");
+        box::status s = out.send(P51Msg{ 77u, 0xA5u });
+        Check(static_cast<bool>(s), "phase51 line<T>::send to a live peer accepted");
+
+        std::optional<P51Msg> reply = out.recv_for(3000);
+        w.join();
+        Check(reply.has_value(), "phase51 line<T>::recv_for got the echo reply");
+        Check(reply && reply->seq == 1077u && reply->tag == (0xA5u ^ 0xFFu),
+              "phase51 line<T> peer round-trip value correct");
+        Check(g_p51_echo_in.load(std::memory_order_acquire) == 77u,
+              "phase51 echo worker received the request seq");
+    }
+
+    // scenario 2b: box::line<T>::on(tag) GROUP flavor — positive delivery + recv +
+    // broadcaster self-exclusion. A worker joins the tag, main broadcasts once.
+    {
+        while (box::receive()) { }   // main inbox quiescent
+        g_p51_grp_in.store(0, std::memory_order_relaxed);
+        g_p51_grp_ready.store(false, std::memory_order_release);
+
+        box::strand   w(p51_group_worker, 0);
+        box::stopwatch sw;           // wait (bounded) until the worker carries the tag
+        while (!g_p51_grp_ready.load(std::memory_order_acquire) &&
+               sw.elapsed() < std::chrono::milliseconds(2000))
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        Check(g_p51_grp_ready.load(std::memory_order_acquire),
+              "phase51 line::on group member joined the tag");
+
+        box::tag_scope    main_member("p51:grp");                  // main also carries the tag
+        box::line<P51Msg> grp = box::line<P51Msg>::on("p51:grp");
+        box::status       gs  = grp.send(P51Msg{ 0x6060u, 0x6u });
+        Check(static_cast<bool>(gs), "phase51 line::on group send accepted (>=1 subscriber)");
+        Check(!grp.try_recv().has_value() && !box::receive().has_value(),
+              "phase51 line::on broadcaster does NOT receive its own group message (self-exclusion)");
+
+        w.join();
+        Check(g_p51_grp_in.load(std::memory_order_acquire) == 0x6060u,
+              "phase51 line::on group member received the broadcast");
+    }
+
+    // scenario 3a: co_await box::line<T>::recv() on the executor (block-path delivery).
+    {
+        while (box::receive()) { }
+        box::strand w(p51_sender_worker, 0);
+        std::optional<P51Msg> got;
+        { box::executor ex; got = ex.block_on(p51_recv_coro()); }
+        w.join();
+        Check(got.has_value(), "phase51 co_await line<T>::recv() delivered the worker's message");
+        Check(got && got->seq == 0xD00Du && got->tag == 0x55u,
+              "phase51 co_await line<T>::recv() value correct");
+    }
+
+    // scenario 3b: co_await box::call reply-correlation across two strands.
+    {
+        while (box::receive()) { }
+        box::strand w(p51_call_server_worker, 0);
+        std::uint32_t wpid = w.get_id().native();
+        P51Call creq{ 0xABCDu, 0u };
+        box::result<box::message> r = std::unexpected(box::error{box::errc::internal});
+        { box::executor ex; r = ex.block_on(p51_call_coro(wpid, creq, 3000u)); }
+        w.join();
+        Check(r.has_value(), "phase51 box::call got a reply (not timeout)");
+        Check(r && r->from() == wpid,
+              "phase51 box::call reply from() == callee strand pid (correlation)");
+        std::optional<P51Call> rp = r ? r->payload_as<P51Call>() : std::nullopt;
+        Check(rp && rp->token == creq.token && rp->echo == (creq.token ^ 0x51510000u),
+              "phase51 box::call reply payload echoes the request token");
+    }
+
+    // scenario 3c: co_await box::call timeout -> errc::timeout (send succeeds, no reply).
+    {
+        while (box::receive()) { }
+        box::strand w(p51_silent_worker, 0);
+        std::uint32_t wpid = w.get_id().native();
+        P51Call creq{ 0x1u, 0u };
+        box::result<box::message> r = std::unexpected(box::error{box::errc::internal});
+        { box::executor ex; r = ex.block_on(p51_call_coro(wpid, creq, 80u)); }
+        w.join();
+        Check(!r.has_value(), "phase51 box::call to a non-replying peer -> error arm");
+        Check(!r && r.error().code() == box::errc::timeout,
+              "phase51 box::call deadline surfaces errc::timeout");
+    }
+
+    // scenario 5: latch proof — co_await recv() ALONGSIDE a timer waiter. The
+    // worker sends DURING the executor's native block, so recv() is satisfied on
+    // the block-then-repoll path; the recv_awaiter's _M_got latch must keep the
+    // delivered message (a broken latch would re-receive an empty ring and drop
+    // it). Mirrors phase50's intent on the live IPC path.
+    {
+        while (box::receive()) { }
+        box::strand w(p51_sender_worker, 0);
+        std::optional<P51Msg> got;
+        {
+            box::executor ex;
+            ex.spawn(p51_timer_coro());            // co-resident timer => multi-waiter block path
+            got = ex.block_on(p51_recv_coro());    // recv is the root
+        }
+        w.join();
+        Check(got.has_value(),
+              "phase51 latch: recv()+timer delivered the block-arriving message (no drop on re-poll)");
+        Check(got && got->seq == 0xD00Du,
+              "phase51 latch: recv() value intact after block-then-repoll");
+    }
+
+    // scenario 4: CONCURRENT cross-strand traffic under TRUE parallelism (meaningful
+    // on bios16/uefi16, NOT a serialized 1c loop). N workers each drain ONLY their
+    // own pid-addressed traffic while main bursts interleaved; a barrier overlaps the
+    // sends with the drains. This exercises C1 per-strand ROUTING under load and
+    // GUARDS the C1 substrate invariant — the isolation itself is enforced BELOW box::
+    // line by per-strand rings (no box::line code path can cross), so a substrate
+    // regression would cross-deliver and trip marker_ok here. A call/reply pair (main
+    // <-> responder) correlates by strand-pid in the same window; a stopwatch bounds
+    // the whole block (no hang).
+    {
+        for (int i = 0; i < P51_WORKERS; ++i) {
+            g_p51_iso[i].got.store(0, std::memory_order_relaxed);
+            g_p51_iso[i].order_ok.store(true, std::memory_order_relaxed);
+            g_p51_iso[i].marker_ok.store(true, std::memory_order_relaxed);
+        }
+        while (box::receive()) { }   // main inbox quiescent for the call/reply
+
+        box::stopwatch  sw;
+        std::barrier<>  bar(1 + P51_WORKERS);
+        g_p51_bar = &bar;
+
+        box::strand iso[P51_WORKERS];
+        for (int i = 0; i < P51_WORKERS; ++i) iso[i] = box::strand(p51_iso_worker, i);
+        box::strand resp(p51_call_server_worker, 0);   // the call responder (outside the barrier)
+
+        std::uint32_t iso_pid[P51_WORKERS];
+        for (int i = 0; i < P51_WORKERS; ++i) iso_pid[i] = iso[i].get_id().native();
+        std::uint32_t resp_pid = resp.get_id().native();
+
+        bar.arrive_and_wait();   // release main + workers together (the burst overlaps the drains)
+
+        // Interleaved pid-addressed burst: worker i gets seqs 0..N-1 (tag == i).
+        for (std::uint32_t s = 0; s < static_cast<std::uint32_t>(P51_ISO_N); ++s)
+            for (int i = 0; i < P51_WORKERS; ++i)
+                (void)box::line<P51Msg>::to(iso_pid[i]).send(
+                    P51Msg{ s, static_cast<std::uint32_t>(i) });
+
+        // Concurrent call/reply across two strands (main's inbox holds only the reply).
+        P51Call creq{ 0xC0FFEEu, 0u };
+        box::result<box::message> cr = std::unexpected(box::error{box::errc::internal});
+        { box::executor ex; cr = ex.block_on(p51_call_coro(resp_pid, creq, 3000u)); }
+
+        for (int i = 0; i < P51_WORKERS; ++i) iso[i].join();
+        resp.join();
+        g_p51_bar = nullptr;   // workers joined — drop the now-dangling stack pointer
+
+        bool iso_ok = true;
+        for (int i = 0; i < P51_WORKERS; ++i) {
+            int got = g_p51_iso[i].got.load(std::memory_order_acquire);
+            if (got != P51_ISO_N) iso_ok = false;
+            if (!g_p51_iso[i].marker_ok.load(std::memory_order_acquire)) iso_ok = false;
+            if (!g_p51_iso[i].order_ok.load(std::memory_order_acquire)) iso_ok = false;
+            for (int s = 0; s < P51_ISO_N && s < got; ++s)
+                if (g_p51_iso[i].seqs[s] != static_cast<std::uint32_t>(s)) iso_ok = false;
+        }
+        Check(iso_ok,
+              "phase51 (concurrent) each worker drained exactly its own pid-addressed seqs in order under load (C1 per-strand routing)");
+        Check(cr && cr->from() == resp_pid,
+              "phase51 (concurrent) call/reply correlates via strand-pid");
+        std::optional<P51Call> crp = cr ? cr->payload_as<P51Call>() : std::nullopt;
+        Check(crp && crp->token == creq.token && crp->echo == (creq.token ^ 0x51510000u),
+              "phase51 (concurrent) reply payload echoes the request token");
+        Check(sw.elapsed() < std::chrono::seconds(10),
+              "phase51 (concurrent) completed under the watchdog bound (no hang)");
+
+        unsigned cores = box::strand::hardware_concurrency();
+        if (cores >= 2)
+            printf("[CXX] phase51 concurrent: %d workers across %u App-Cores (true cross-core routing + correlation)\n",
+                   P51_WORKERS, cores);
+        else
+            printf("[CXX] phase51 concurrent: %d workers on 1 App-Core (cooperative interleave)\n",
+                   P51_WORKERS);
+    }
+
+    printf("[CXX] PASS phase51: box::line<T> (to/on peer+group/send/try_recv/recv_for/co_await recv) "
+           "+ box::call (reply correlation + timeout) + box::send_args/receive_args/args "
+           "(round-trip + 64B truncation) + cross-strand pid-routing + correlation under load\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -8834,6 +9306,7 @@ int main()
     Phase48();
     Phase49();
     Phase50();
+    Phase51();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
