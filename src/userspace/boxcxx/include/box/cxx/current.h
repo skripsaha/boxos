@@ -45,6 +45,27 @@ enum class role : unsigned {
     write = CURRENT_WRITE,
 };
 
+// ── box::opening — the typed open-mode of a Current ─────────────────────────
+// The create/non-block intent you hand current_open, as a checked enum rather
+// than a bag of loose CURRENT_* ints (BoxOS keeps its own vocabulary — this is
+// the open *manifest*, not POSIX open(2) flags). Compose with operator|:
+//   box::current<T>("t", role::write, opening::create | opening::nonblock);
+// `none` is the blocking, must-already-exist default.
+enum class opening : unsigned {
+    none     = 0,
+    create   = CURRENT_CREATE,    // create the backing if absent (stream / file writer)
+    nonblock = CURRENT_NONBLOCK,  // put/take never block: would_block when full / empty
+};
+constexpr opening operator|(opening a, opening b) noexcept
+{
+    return static_cast<opening>(static_cast<unsigned>(a) | static_cast<unsigned>(b));
+}
+constexpr opening operator&(opening a, opening b) noexcept
+{
+    return static_cast<opening>(static_cast<unsigned>(a) & static_cast<unsigned>(b));
+}
+constexpr bool any(opening a) noexcept { return static_cast<unsigned>(a) != 0; }
+
 // ---------------------------------------------------------------------------
 // box::current<T> — typed framed stream (Brook-backed). Primary template.
 // ---------------------------------------------------------------------------
@@ -58,9 +79,10 @@ class current {
 
 public:
     current() noexcept = default;
-    current(const char *tag, role r, unsigned flags = 0) noexcept
+    current(const char *tag, role r, opening o = opening::none) noexcept
         : c_(current_open(tag, static_cast<std::uint32_t>(r),
-                          static_cast<std::uint32_t>(sizeof(T)), flags))
+                          static_cast<std::uint32_t>(sizeof(T)),
+                          static_cast<std::uint32_t>(o)))
     {
     }
     current(const current &)            = delete;
@@ -185,8 +207,9 @@ class current<std::byte> {
 
 public:
     current() noexcept = default;
-    current(const char *tag, role r, unsigned flags = 0) noexcept
-        : c_(current_open(tag, static_cast<std::uint32_t>(r), 0, flags))
+    current(const char *tag, role r, opening o = opening::none) noexcept
+        : c_(current_open(tag, static_cast<std::uint32_t>(r), 0,
+                          static_cast<std::uint32_t>(o)))
     {
     }
     current(const current &)            = delete;
@@ -219,6 +242,22 @@ public:
     // (CURRENT_CLOSED), or a negative -ERR_*.
     int read(void *p, std::size_t n) noexcept { return c_ ? current_read(c_, p, n) : -1; }
 
+    // Tri-state read — the honest byte-channel shape, mirroring current<T>::take().
+    // A value > 0 is the byte count; a value == 0 is end-of-stream (the writer
+    // closed and the channel drained, CURRENT_CLOSED) — NEVER a Unix EOF; the
+    // error arm carries the real cause: would_block on a NONBLOCK + empty channel,
+    // invalid_argument on a closed handle, or any other -ERR_*. Prefer this over
+    // read() when the channel is opened opening::nonblock and you must tell "no
+    // data right now" (would_block) apart from "stream finished" (value 0).
+    result<std::size_t> read_some(void *p, std::size_t n) noexcept
+    {
+        if (!c_) return std::unexpected(error{errc::invalid_argument});
+        int rc = current_read(c_, p, n);
+        if (rc > 0) return static_cast<std::size_t>(rc);
+        if (rc == CURRENT_CLOSED) return std::size_t{0};  // writer closed + drained
+        return std::unexpected(error{box_errno_of(rc)});
+    }
+
     // Read one line (keyboard: one edited line; file: up to `max` bytes).
     // Empty string at end / on error.
     std::string read_line(std::size_t max = 1024)
@@ -250,13 +289,13 @@ using byte_current = current<std::byte>;
 // ---------------------------------------------------------------------------
 inline byte_current screen()   { return byte_current("screen",   role::write); }
 inline byte_current log()      { return byte_current("log",      role::write); }
-inline byte_current keyboard() { return byte_current("keyboard", role::read); }
-inline byte_current file(const char *path, role r, unsigned flags = CURRENT_CREATE)
+inline byte_current keyboard(opening o = opening::none) { return byte_current("keyboard", role::read, o); }
+inline byte_current file(const char *path, role r, opening o = opening::create)
 {
     // path is the bare TagFS name; the "file:" scheme prefix is added here.
     std::string tag = "file:";
     tag += path;
-    return byte_current(tag.c_str(), r, flags);
+    return byte_current(tag.c_str(), r, o);
 }
 
 // ---------------------------------------------------------------------------

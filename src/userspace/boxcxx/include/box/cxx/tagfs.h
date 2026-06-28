@@ -228,7 +228,7 @@ public:
         auto i = info();
         if (!i) return {};
         std::string nm(field_view(i->filename, sizeof(i->filename)));
-        unsigned    fl = (r == box::role::write) ? CURRENT_CREATE : 0u;
+        box::opening fl = (r == box::role::write) ? box::opening::create : box::opening::none;
         return box::file(nm.c_str(), r, fl);
     }
 };
