@@ -36,10 +36,12 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <format>          // std::formatter<box::heap::stats>
 #include <memory>
 #include <memory_resource>
 #include <new>
 #include <type_traits>
+#include <utility>         // std::forward (box::heap::make)
 
 #include "box/cxx/error.h"
 #include "box/memory.h"
@@ -99,12 +101,52 @@ protected:
 
 namespace heap {
 
-// Snapshot of the whole-heap counters (thread-safe in the boxlib heap).
-inline heap_stats_t stats() noexcept
+// ── tag registry lookup (Ф25d) ──────────────────────────────────────────────
+// HEAP_TAG_NONE as a typed constant, plus lookup-WITHOUT-register (the query
+// twin of box::heap::tag's registering ctor) and the id→name reverse.
+inline constexpr std::uint8_t tag_none = HEAP_TAG_NONE;
+// The id of an ALREADY-registered tag, or tag_none if it was never registered —
+// does NOT create one (that is box::heap::tag's ctor / heap_register_tag).
+inline std::uint8_t tag_id(const char *name) noexcept { return heap_lookup_tag(name); }
+// The name interned for a tag id, or nullptr for tag_none / an unknown id.
+inline const char  *tag_name(std::uint8_t id) noexcept { return heap_tag_name(id); }
+
+// ── box::heap::stats — a typed view of the whole-heap counters (Ф25d) ────────
+// Mirrors box::memtag::stats: a value view with named accessors over the raw
+// heap_stats_t. A LIVE snapshot comes from box::heap::counters() — NOT from
+// default-constructing this view (a default stats is all-zero). The explicit POD
+// ctor lets callers (and tests) build a view over synthetic counters.
+class stats {
+    heap_stats_t s_{};
+
+public:
+    stats() noexcept = default;
+    explicit stats(const heap_stats_t &s) noexcept : s_(s) {}
+    const heap_stats_t &raw() const noexcept { return s_; }
+
+    std::size_t heap_bytes()   const noexcept { return s_.heap_used; }        // bytes sbrk'd
+    std::size_t in_use_bytes() const noexcept { return s_.total_allocated; }  // live (allocated)
+    std::size_t free_bytes()   const noexcept { return s_.total_free; }       // in free blocks
+    // heap_used minus what is accounted to live + free blocks (allocator
+    // bookkeeping overhead); saturating, never negative.
+    std::size_t overhead_bytes() const noexcept
+    {
+        std::size_t accounted = s_.total_allocated + s_.total_free;
+        return s_.heap_used > accounted ? s_.heap_used - accounted : 0;
+    }
+    std::uint32_t live_blocks()  const noexcept { return s_.alloc_count; }
+    std::uint32_t free_blocks()  const noexcept { return s_.free_count; }
+    std::uint32_t malloc_calls() const noexcept { return s_.malloc_calls; }
+    std::uint32_t free_calls()   const noexcept { return s_.free_calls; }
+};
+
+// Snapshot the whole-heap counters as a typed view (thread-safe in the boxlib
+// heap; infallible — heap_get_stats always fills the struct).
+inline stats counters() noexcept
 {
     heap_stats_t s{};
     heap_get_stats(&s);
-    return s;
+    return stats(s);
 }
 
 // Number of live (allocated) blocks carrying `tag_name`.
@@ -166,6 +208,49 @@ inline result<void *> reallocate(void *p, std::size_t bytes)
     return std::unexpected(error{e != OK ? e : static_cast<::error_t>(ERR_NO_MEMORY)});
 }
 
+// ── box::heap::make<T> — a typed, heap-tagged allocation (Ф25d) ──────────────
+// The typed counterpart of malloc_tagged: construct a T accounted under `tag`
+// and own it through box::heap::tagged<T> (a unique_ptr whose deleter runs the
+// destructor and frees the block). Returns box::result — the error arm carries
+// the real allocation cause (Ф23 doctrine), never a thrown bad_alloc, so it
+// composes with the fallible box::heap::allocate family. A constructor that
+// throws propagates (a T-construction failure is a different domain from an
+// allocation failure) after freeing the raw block.
+
+// Stateless deleter for a malloc_tagged block: ~T then free (free is tag-
+// agnostic — exactly what tagged_resource::do_deallocate does for this memory).
+struct tagged_deleter {
+    template <class T>
+    void operator()(T *p) const noexcept
+    {
+        if (p) { p->~T(); ::free(p); }
+    }
+};
+
+// An owning handle to a heap-tagged T (move-only, like std::unique_ptr).
+template <class T>
+using tagged = std::unique_ptr<T, tagged_deleter>;
+
+template <class T, class... Args>
+result<tagged<T>> make(const char *tag, Args &&...args)
+{
+    static_assert(alignof(T) <= alignof(std::max_align_t),
+                  "box::heap::make<T>: over-aligned T (alignof > 16) — malloc_tagged only "
+                  "guarantees max_align_t; use box::tagged_resource for over-aligned types");
+    void *raw = ::malloc_tagged(sizeof(T), tag);
+    if (!raw) {
+        ::error_t e = heap_get_last_error();
+        return std::unexpected(error{e != OK ? e : static_cast<::error_t>(ERR_NO_MEMORY)});
+    }
+    try {
+        T *obj = ::new (raw) T(std::forward<Args>(args)...);
+        return tagged<T>(obj);
+    } catch (...) {
+        ::free(raw);  // T's constructor threw: release the (un-constructed) storage, rethrow
+        throw;
+    }
+}
+
 // Visit every live block under `tag_name`. fn is called as fn(void* ptr,
 // std::size_t size, const char* tag_name) for each. ‼ Runs under the heap lock —
 // fn MUST NOT allocate, free, or query box::heap (see the file banner).
@@ -198,6 +283,12 @@ public:
     explicit tag(const char *name) noexcept : name_(name) { heap_register_tag(name); }
 
     const char *name() const noexcept { return name_; }
+
+    // This tag's registry id (heap::tag_none only if the registry was full when
+    // the ctor tried to register), and whether it is registered. The ctor
+    // registers, so registered() is normally true.
+    std::uint8_t id() const noexcept { return heap_lookup_tag(name_); }
+    bool         registered() const noexcept { return id() != tag_none; }
 
     // Live block count under this tag.
     std::size_t count() const noexcept { return heap_count_tag(name_); }
@@ -265,5 +356,21 @@ public:
 
 }  // namespace heap
 }  // namespace box
+
+// ── std::formatter<box::heap::stats> — one greppable line, no spec ───────────
+// Reads only the already-snapshotted POD copy — no for_each, no malloc/free, no
+// heap lock re-entry (the file banner's lock contract is respected).
+template <>
+struct std::formatter<box::heap::stats, char> {
+    constexpr auto parse(std::format_parse_context &ctx) { return ctx.begin(); }
+    auto format(const box::heap::stats &s, std::format_context &ctx) const
+    {
+        return std::format_to(
+            ctx.out(),
+            "heap used={} in_use={} free={} live={} freeblk={} mallocs={} frees={}",
+            s.heap_bytes(), s.in_use_bytes(), s.free_bytes(), s.live_blocks(),
+            s.free_blocks(), s.malloc_calls(), s.free_calls());
+    }
+};
 
 #endif  // BOXCXX_BOX_HEAP_H

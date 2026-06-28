@@ -22,9 +22,11 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <format>          // std::formatter<region> / <stats>
 #include <initializer_list>
 #include <string>
 #include <string_view>
+#include <utility>         // std::move (scoped_grant)
 #include <vector>
 
 #include "box/memtag.h"  // mem_query / mem_region_info / mem_region_from_phys /
@@ -32,6 +34,7 @@
                         // mem_cabin_grant / mem_cabin_revoke / mem_cabin_tags /
                         // mem_check_access + the POD types & constants
 #include "box/cxx/error.h"  // box::status / box::result / box::error
+#include "box/cxx/hw.h"     // box::hw::encrypted / keyid_of — region encryption delegates (one-way)
 
 namespace box {
 namespace memtag {
@@ -96,6 +99,16 @@ public:
             if (t == tag) return true;
         return false;
     }
+
+    // ── TME encryption (Ф25d) — a DERIVED view, not a per-region kernel fact ──
+    // There is no kernel "is this region encrypted" call; these delegate to the
+    // honest box::hw synthesis over the GLOBAL TME snapshot + this region's
+    // physical keyid lane (see box/cxx/hw.h). encrypted() is true iff TME is
+    // engaged platform-wide; keyid() is this region's TME-MK key (0 under plain
+    // TME / no TME). Each does one hw_tme_state read — introspection, not a hot
+    // path.
+    bool          encrypted() const noexcept { return box::hw::encrypted(); }
+    std::uint16_t keyid()     const noexcept { return box::hw::keyid_of(info_.base_phys); }
 };
 
 // ── box::memtag::stats — a snapshot of the global registry counters ─────────
@@ -231,7 +244,101 @@ inline bool check_access(std::uint32_t pid, const region &r)
     return check_access(pid, r.id());
 }
 
+// ── box::memtag::scoped_grant — a RAII capability lease (Ф25d) ───────────────
+// Owns a cabin's grant of one guarded tag: granted at construction (via the
+// grant_scope factory), revoked at destruction — but ONLY the grant THIS scope
+// made. If the cabin already held the tag, the scope is inert (held()==false)
+// and the destructor revokes nothing, so a pre-existing capability is never
+// clawed back. Move-only (a copy would double-revoke). There is intentionally
+// no scoped_guard twin: mem_set_guard has no read-back, so an honest RAII
+// restore of the prior guard state is impossible (deferred — see Ф25 notes).
+class scoped_grant {
+    std::uint32_t pid_{};
+    std::string   tag_;
+    bool          owned_{false};   // true iff THIS scope performed the grant
+
+    scoped_grant(std::uint32_t pid, std::string tag, bool owned) noexcept
+        : pid_(pid), tag_(std::move(tag)), owned_(owned) {}
+    friend result<scoped_grant> grant_scope(std::uint32_t, const char *);
+
+    void release() noexcept
+    {
+        if (owned_) { ::mem_cabin_revoke(pid_, tag_.c_str()); owned_ = false; }
+    }
+
+public:
+    scoped_grant(scoped_grant &&o) noexcept
+        : pid_(o.pid_), tag_(std::move(o.tag_)), owned_(o.owned_) { o.owned_ = false; }
+    scoped_grant &operator=(scoped_grant &&o) noexcept
+    {
+        if (this != &o) {
+            release();                 // give up our current lease before stealing o's
+            pid_     = o.pid_;
+            tag_     = std::move(o.tag_);
+            owned_   = o.owned_;
+            o.owned_ = false;
+        }
+        return *this;
+    }
+    scoped_grant(const scoped_grant &)            = delete;
+    scoped_grant &operator=(const scoped_grant &) = delete;
+    ~scoped_grant() { release(); }
+
+    std::uint32_t    pid() const noexcept { return pid_; }
+    std::string_view tag() const noexcept { return tag_; }
+    // True iff THIS scope granted the tag (false if the cabin already held it,
+    // in which case the destructor is a no-op).
+    bool held() const noexcept { return owned_; }
+};
+
+// Lease a grant of `tag` to cabin `pid` for the returned scope's lifetime. If the
+// cabin already holds the tag, the lease is inert (held()==false) and revokes
+// nothing on destruction. The error arm carries the cause — invalid_argument on
+// a null tag, or the kernel cause (e.g. access_denied without the "system"
+// tag-bit, like grant()).
+inline result<scoped_grant> grant_scope(std::uint32_t pid, const char *tag)
+{
+    if (!tag) return std::unexpected(error{errc::invalid_argument});
+    // Don't re-grant (and later wrongly revoke) a capability the cabin already
+    // holds — a pre-existing grant must survive this scope untouched.
+    for (const std::string &t : cabin_tags(pid))
+        if (t == tag) return scoped_grant(pid, std::string(tag), false);
+    int rc = ::mem_cabin_grant(pid, tag);
+    if (rc != 0) return std::unexpected(error{box_errno_of(rc)});
+    return scoped_grant(pid, std::string(tag), true);
+}
+
 }  // namespace memtag
 }  // namespace box
+
+// ── std::formatter<box::memtag::region> / <stats> — one greppable line, no spec
+// Pure POD reads — region prints tag_count() (the POD field), NEVER the tags()
+// syscall, so formatting never re-enters the kernel or takes a lock.
+template <>
+struct std::formatter<box::memtag::region, char> {
+    constexpr auto parse(std::format_parse_context &ctx) { return ctx.begin(); }
+    auto format(const box::memtag::region &r, std::format_context &ctx) const
+    {
+        return std::format_to(
+            ctx.out(),
+            "region id={} phys={:#x} virt={:#x} pages={} tags={} flags={:#x} gen={}",
+            r.id(), r.base_phys(), r.base_virt(), r.pages(),
+            static_cast<unsigned>(r.tag_count()), static_cast<unsigned>(r.flags()),
+            r.generation());
+    }
+};
+
+template <>
+struct std::formatter<box::memtag::stats, char> {
+    constexpr auto parse(std::format_parse_context &ctx) { return ctx.begin(); }
+    auto format(const box::memtag::stats &s, std::format_context &ctx) const
+    {
+        return std::format_to(
+            ctx.out(),
+            "memtag tags={} active={} slots={} cap={} reg_gen={} hits={} misses={}",
+            s.tag_count(), s.region_active(), s.region_slot_count(), s.region_slot_cap(),
+            s.registry_generation(), s.cache_hits(), s.cache_misses());
+    }
+};
 
 #endif  // BOXCXX_BOX_MEMTAG_H
