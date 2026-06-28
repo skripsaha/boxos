@@ -25,6 +25,15 @@
  * test is deterministic — the contiguous 3-frame block guarantees frame B is
  * two physical frames above frame A, so the frame after A is always the
  * spacer.
+ *
+ * The IPC section reuses the same NonContigPages helper for two cabins (a fake
+ * SENDER and a fake TARGET) and proves the system/IPC straddle fix: it plants
+ * a payload across the SENDER's seam and drives the converted ipc_copy_to_heap
+ * source leg (vmm_user_buf_in) and dest leg (vmm_user_buf_commit_out) plus the
+ * whole ipc_copy_to_heap end-to-end. CONTROL legs replay the legacy single-
+ * frame read/write and assert they pull/spill the foreign spacer; FIX legs
+ * assert both real frames carry the payload, spacer and guard intact. One
+ * "[CRATE-IO] SELFTEST PASS" covers storage + IPC.
  */
 
 #include "crate_io_selftest.h"
@@ -32,11 +41,13 @@
 #include "pmm.h"
 #include "boxos_crate.h"
 #include "op_registry.h"   /* OpContext */
+#include "system_deck.h"   /* ipc_copy_to_heap — the converted IPC leaf */
 #include "klib.h"
 
 #define CRATE_IO_SELFTEST_VA   0x0000000040000000ULL  /* 1 GiB: 3 free user pages */
 #define CRATE_IO_OVERFLOW      64u   /* bytes that overrun the A|B seam into B   */
 #define CRATE_IO_POISON        0x5Au /* even; the source pattern is always odd   */
+#define CRATE_IO_IPC_HEAP_OFF  0x0000000000100000ULL  /* target buf-heap VA, clear of A|B|guard */
 
 /* Straddle offsets: k bytes precede the seam in frame A, OVERFLOW bytes follow
  * it in frame B. Iterating k moves the seam across the payload. */
@@ -243,11 +254,124 @@ static bool run_k(NonContigPages *m, unsigned k)
 
 #undef FAILK
 
+#define FAILK(reason, k) do {                                                  \
+        kprintf("[CRATE-IO] SELFTEST FAIL: " reason " (k=%u)\n", (unsigned)(k)); \
+        return false;                                                          \
+    } while (0)
+
+/* IPC straddle proof across two non-contiguous cabins. The SENDER carries the
+ * planted payload across its A|B seam; the TARGET is where the delivered bytes
+ * land. Mirrors how the converted ipc_copy_to_heap reads the sender and writes
+ * the target — plus the function itself, end-to-end. */
+static bool run_ipc_k(NonContigPages *sender, NonContigPages *target, unsigned k)
+{
+    const unsigned  over   = CRATE_IO_OVERFLOW;
+    const unsigned  n      = k + over;                          /* straddling length */
+    const uintptr_t src_va = sender->base_va + VMM_PAGE_SIZE - k;
+    const uintptr_t dst_va = target->base_va + VMM_PAGE_SIZE - k;
+
+    /* Plant the IPC payload across the SENDER seam: k bytes in A's tail, over
+     * bytes in B's head; the sender spacer keeps POISON (distinct from the odd
+     * source pattern). */
+    memset(sender->page_a, CRATE_IO_POISON, VMM_PAGE_SIZE);
+    memset(sender->spacer, CRATE_IO_POISON, VMM_PAGE_SIZE);
+    memset(sender->page_b, CRATE_IO_POISON, VMM_PAGE_SIZE);
+    memset(sender->guard,  CRATE_IO_POISON, VMM_PAGE_SIZE);
+    memcpy(sender->page_a + (VMM_PAGE_SIZE - k), g_src, k);
+    memcpy(sender->page_b, g_src + k, over);
+
+    /* ---- SOURCE CONTROL — legacy single-frame read pulls the sender spacer
+     * instead of frame B (the old ipc_copy_to_heap source leg). ------------ */
+    void *legacy_src = vmm_translate_user_addr(sender->vmm, src_va, n);
+    if (!legacy_src) FAILK("ipc src control: translate returned NULL", k);
+    memset(g_dst, 0, n);
+    memcpy(g_dst, legacy_src, n);                       /* A tail then spacer */
+    if (memcmp(g_dst, g_src, k) != 0)
+        FAILK("ipc src control: frame A tail mis-read", k);
+    if (!all_bytes(g_dst + k, over, CRATE_IO_POISON))
+        FAILK("ipc src control: did not read the spacer (bug not reproduced)", k);
+
+    /* ---- SOURCE FIX — vmm_user_buf_in (converted source leg) page-walks both
+     * sender frames into the bounce buffer. ------------------------------- */
+    uint8_t *kbuf = (uint8_t *)vmm_user_buf_in(sender->vmm, src_va, n);
+    if (!kbuf) FAILK("ipc src fix: vmm_user_buf_in returned NULL", k);
+    if (memcmp(kbuf, g_src, n) != 0) {
+        vmm_user_buf_free(kbuf);
+        FAILK("ipc src fix: bounce mismatch across sender seam", k);
+    }
+
+    /* ---- DEST CONTROL — legacy single-frame write spills the bounce into the
+     * TARGET spacer, leaving frame B unwritten. -------------------------- */
+    memset(target->page_a, CRATE_IO_POISON, VMM_PAGE_SIZE);
+    memset(target->spacer, CRATE_IO_POISON, VMM_PAGE_SIZE);
+    memset(target->page_b, CRATE_IO_POISON, VMM_PAGE_SIZE);
+    memset(target->guard,  CRATE_IO_POISON, VMM_PAGE_SIZE);
+    void *legacy_dst = vmm_translate_user_addr(target->vmm, dst_va, n);
+    if (!legacy_dst) { vmm_user_buf_free(kbuf); FAILK("ipc dst control: translate returned NULL", k); }
+    memcpy(legacy_dst, kbuf, n);                        /* A tail then spacer */
+    if (memcmp(target->page_a + (VMM_PAGE_SIZE - k), g_src, k) != 0)
+        { vmm_user_buf_free(kbuf); FAILK("ipc dst control: frame A tail wrong", k); }
+    if (memcmp(target->spacer, g_src + k, over) != 0)
+        { vmm_user_buf_free(kbuf); FAILK("ipc dst control: spacer not corrupted (bug not reproduced)", k); }
+    if (!all_bytes(target->page_b, over, CRATE_IO_POISON))
+        { vmm_user_buf_free(kbuf); FAILK("ipc dst control: frame B was written (non-contiguity broke)", k); }
+
+    /* ---- DEST FIX — vmm_user_buf_commit_out (converted dest leg) delivers to
+     * BOTH target frames; spacer + guard untouched. --------------------- */
+    memset(target->page_a, CRATE_IO_POISON, VMM_PAGE_SIZE);
+    memset(target->spacer, CRATE_IO_POISON, VMM_PAGE_SIZE);
+    memset(target->page_b, CRATE_IO_POISON, VMM_PAGE_SIZE);
+    memset(target->guard,  CRATE_IO_POISON, VMM_PAGE_SIZE);
+    error_t wrc = vmm_user_buf_commit_out(target->vmm, dst_va, kbuf, n);
+    vmm_user_buf_free(kbuf);
+    if (wrc != OK) FAILK("ipc dst fix: commit_out returned error", k);
+    if (memcmp(target->page_a + (VMM_PAGE_SIZE - k), g_src, k) != 0)
+        FAILK("ipc dst fix: frame A tail wrong", k);
+    if (memcmp(target->page_b, g_src + k, over) != 0)
+        FAILK("ipc dst fix: frame B head not delivered", k);
+    if (!all_bytes(target->spacer, VMM_PAGE_SIZE, CRATE_IO_POISON))
+        FAILK("ipc dst fix: spacer was corrupted", k);
+    if (!all_bytes(target->guard, VMM_PAGE_SIZE, CRATE_IO_POISON))
+        FAILK("ipc dst fix: guard page overrun", k);
+
+    /* ---- END-TO-END — drive the converted ipc_copy_to_heap and read the
+     * delivered payload back through the target page tables. The function
+     * allocates + maps its own target frames at buf_heap_next; a correct
+     * page-walk delivers the full A+B payload. -------------------------- */
+    uint64_t tvaddr = ipc_copy_to_heap(sender->proc, target->proc, src_va, n);
+    if (tvaddr == 0) FAILK("ipc e2e: ipc_copy_to_heap returned 0", k);
+
+    memset(g_dst, 0, n);
+    if (vmm_user_buf_in_into(target->vmm, tvaddr, n, g_dst) != OK)
+        FAILK("ipc e2e: read-back translate failed", k);
+    if (memcmp(g_dst, g_src, n) != 0)
+        FAILK("ipc e2e: delivered payload mismatch across seam", k);
+    if (!all_bytes(sender->spacer, VMM_PAGE_SIZE, CRATE_IO_POISON))
+        FAILK("ipc e2e: sender spacer disturbed", k);
+    if (!all_bytes(sender->guard, VMM_PAGE_SIZE, CRATE_IO_POISON))
+        FAILK("ipc e2e: sender guard disturbed", k);
+
+    /* Free the frames ipc_copy_to_heap mapped into the target so each k
+     * iteration leaves no live mapping or leaked frame behind. */
+    uint32_t pages = (n + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE;
+    for (uint32_t i = 0; i < pages; i++) {
+        uintptr_t va   = tvaddr + (uintptr_t)i * PMM_PAGE_SIZE;
+        uintptr_t phys = vmm_virt_to_phys(target->vmm, va);
+        vmm_unmap_page(target->vmm, va);
+        if (phys) pmm_free((void *)phys, 1);
+    }
+
+    return true;
+}
+
+#undef FAILK
+
 error_t CrateIoSelfTest(void)
 {
     debug_printf("[CRATE-IO][selftest] starting\n");
     fill_src();
 
+    /* --- Storage: one non-contiguous mapping, fixed crate_read / crate_write. */
     NonContigPages map;
     if (!NonContigPagesSetup(&map, CRATE_IO_SELFTEST_VA)) {
         kprintf("[CRATE-IO] SELFTEST FAIL: non-contiguous mapping setup\n");
@@ -262,6 +386,31 @@ error_t CrateIoSelfTest(void)
     NonContigPagesTeardown(&map);
 
     if (!ok) return ERR_INTERNAL;   /* run_k already printed the FAIL line */
+
+    /* --- IPC: two non-contiguous cabins, ipc_copy_to_heap sender -> target. */
+    NonContigPages sender, target;
+    if (!NonContigPagesSetup(&sender, CRATE_IO_SELFTEST_VA)) {
+        kprintf("[CRATE-IO] SELFTEST FAIL: IPC sender mapping setup\n");
+        return ERR_INTERNAL;
+    }
+    if (!NonContigPagesSetup(&target, CRATE_IO_SELFTEST_VA)) {
+        NonContigPagesTeardown(&sender);
+        kprintf("[CRATE-IO] SELFTEST FAIL: IPC target mapping setup\n");
+        return ERR_INTERNAL;
+    }
+    /* ipc_copy_to_heap maps fresh payload pages at the target's buf_heap
+     * cursor; seat it clear of the A|B|guard window. */
+    target.cabin->buf_heap_next = (uint64_t)target.base_va + CRATE_IO_IPC_HEAP_OFF;
+
+    bool ipc_ok = true;
+    for (size_t i = 0; i < sizeof(CRATE_IO_K) / sizeof(CRATE_IO_K[0]); i++) {
+        if (!run_ipc_k(&sender, &target, CRATE_IO_K[i])) { ipc_ok = false; break; }
+    }
+
+    NonContigPagesTeardown(&target);
+    NonContigPagesTeardown(&sender);
+
+    if (!ipc_ok) return ERR_INTERNAL;   /* run_ipc_k already printed the FAIL */
 
     kprintf("[CRATE-IO] SELFTEST PASS\n");
     return OK;

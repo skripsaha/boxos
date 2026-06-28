@@ -23,6 +23,7 @@
 #include "manifest_stage.h"
 #include "boxos_manifest.h"
 #include "boxos_crate.h"
+#include "crate_io.h"
 #include "system_deck.h"
 #include "buffer_registry.h"
 #include "touch.h"
@@ -56,41 +57,26 @@
 #define CTX_USE_PARSE_BUF      512u
 
 /* -------------------------------------------------------------------------
- * Crate translation
+ * Crate I/O
+ *
+ * Fixed payloads move through crate_io.{h,c} (crate_read / crate_write) and
+ * variable payloads through crate_in_buf / crate_out_alloc / crate_out_commit.
+ * Each walks the user page table page-by-page, so a Crate whose payload
+ * crosses a page boundary is copied across every backing frame instead of
+ * being clipped to its first page (the vmm_translate_user_addr straddle bug).
  * ------------------------------------------------------------------------- */
 
-static const void *SysCrateRead(const Crate *c, const OpContext *ctx)
-{
-    if (!c || c->size == 0)          return NULL;
-    if (ctx && ctx->proc && ctx->proc->cabin) {
-        return vmm_translate_user_addr(ctx->proc->cabin->vmm,
-                                       (uintptr_t)c->addr, (size_t)c->size);
-    }
-    return (const void *)(uintptr_t)c->addr;
-}
-
-static void *SysCrateWrite(const Crate *c, const OpContext *ctx, uint64_t bytes)
-{
-    if (!c || bytes == 0)            return NULL;
-    if (bytes > c->capacity)         return NULL;
-    if (ctx && ctx->proc && ctx->proc->cabin) {
-        return vmm_translate_user_addr(ctx->proc->cabin->vmm,
-                                       (uintptr_t)c->addr, (size_t)bytes);
-    }
-    return (void *)(uintptr_t)c->addr;
-}
-
-/* Read a NUL-bounded copy of in_crate into a caller-supplied buffer.
- * Returns OK / ERR_INVALID_ARGUMENT. */
+/* Read a NUL-bounded copy of in_crate into a caller-supplied buffer via the
+ * page-walked crate_io snapshot. Returns OK / ERR_INVALID_ARGUMENT /
+ * ERR_INVALID_ADDRESS. */
 static error_t sys_crate_string(const Crate *c, const OpContext *ctx,
                                 char *dst, size_t dst_size)
 {
     if (!c || c->size == 0 || dst_size == 0) return ERR_INVALID_ARGUMENT;
-    const char *src = SysCrateRead(c, ctx);
-    if (!src) return ERR_INVALID_ADDRESS;
 
     size_t copy = c->size < dst_size - 1 ? c->size : dst_size - 1;
-    memcpy(dst, src, copy);
+    error_t rc = crate_read(c, ctx, dst, copy);
+    if (rc != OK) return rc;
     dst[copy] = '\0';
     if (dst[0] == '\0') return ERR_INVALID_ARGUMENT;
     return OK;
@@ -182,7 +168,15 @@ static int SysBroadcast(const ManifestOp *op, Crate *crates, uint16_t crate_coun
     if (op->in_crate != CRATE_INDEX_NONE) {
         src    = &crates[op->in_crate];
         length = (uint32_t)(src->size > UINT32_MAX ? UINT32_MAX : src->size);
-        if (length > 0 && !SysCrateRead(src, ctx)) return ERR_INVALID_ADDRESS;
+        /* Fail fast if the whole source range is unreadable, before fanning
+         * out to subscribers. ipc_copy_to_heap re-reads it per target; this
+         * page-walks the full range once so a bad address is ERR_INVALID_ADDRESS
+         * rather than a misleading "no subscribers". */
+        if (length > 0) {
+            void *probe = crate_in_buf(src, ctx);
+            if (!probe) return ERR_INVALID_ADDRESS;
+            crate_buf_free(probe);
+        }
     }
 
     /* Resolve the tag to its registry id once, outside the process-list
@@ -306,12 +300,8 @@ static int SysProcSpawn(const ManifestOp *op, Crate *crates, uint16_t crate_coun
     if (op->out_crate != CRATE_INDEX_NONE) {
         Crate *out = &crates[op->out_crate];
         if (out->capacity >= sizeof(uint32_t)) {
-            void *kp = SysCrateWrite(out, ctx, sizeof(uint32_t));
-            if (kp) {
-                uint32_t pid = new_proc->pid;
-                memcpy(kp, &pid, sizeof(uint32_t));
-                out->size = sizeof(uint32_t);
-            }
+            uint32_t pid = new_proc->pid;
+            (void)crate_write(out, ctx, &pid, sizeof(pid));
         }
     }
     return OK;
@@ -353,11 +343,7 @@ static int SysProcKill(const ManifestOp *op, Crate *crates, uint16_t crate_count
     if (op->out_crate != CRATE_INDEX_NONE) {
         Crate *out = &crates[op->out_crate];
         if (out->capacity >= sizeof(uint32_t)) {
-            void *kp = SysCrateWrite(out, ctx, sizeof(uint32_t));
-            if (kp) {
-                memcpy(kp, &target_pid, sizeof(uint32_t));
-                out->size = sizeof(uint32_t);
-            }
+            (void)crate_write(out, ctx, &target_pid, sizeof(uint32_t));
         }
     }
     process_ref_dec(target);
@@ -433,7 +419,12 @@ static int SysProcInfo(const ManifestOp *op, Crate *crates, uint16_t crate_count
         return ERR_BUFFER_TOO_SMALL;
     }
 
-    uint8_t *kp = SysCrateWrite(out, ctx, out->capacity);
+    /* out->capacity is attacker-controlled and unvalidated, and this op is
+     * unauthenticated — bound the kernel bounce to one page (the 32-byte
+     * header plus any realistic tag snapshot), never the claimed capacity, so
+     * a giant capacity can't force a giant kmalloc+memset. */
+    uint64_t alloc_sz = out->capacity > 4096u ? 4096u : out->capacity;
+    uint8_t *kp = crate_out_alloc(out, alloc_sz);
     if (!kp) {
         process_ref_dec(target);
         return ERR_INVALID_ADDRESS;
@@ -453,11 +444,16 @@ static int SysProcInfo(const ManifestOp *op, Crate *crates, uint16_t crate_count
     memcpy(kp + 16, &cstart, sizeof(uint64_t));
     memcpy(kp + 24, &csize,  sizeof(uint64_t));
 
-    size_t tag_room = out->capacity - 32;
-    size_t copied   = process_snapshot_tags(target, (char *)(kp + 32), tag_room);
-    out->size = 32 + copied;
-    if (out->size > out->capacity) out->size = out->capacity;
+    size_t   tag_room  = (size_t)alloc_sz - 32;
+    size_t   copied    = process_snapshot_tags(target, (char *)(kp + 32), tag_room);
+    uint64_t out_bytes = 32 + copied;
+    if (out_bytes > alloc_sz) out_bytes = alloc_sz;
+
+    int crc = crate_out_commit(out, ctx, kp, out_bytes);
+    crate_buf_free(kp);
     process_ref_dec(target);
+    if (crc != OK) return crc;
+    out->size = out_bytes;
     return OK;
 }
 
@@ -582,12 +578,8 @@ static int SysProcExec(const ManifestOp *op, Crate *crates, uint16_t crate_count
     if (op->out_crate != CRATE_INDEX_NONE) {
         Crate *out = &crates[op->out_crate];
         if (out->capacity >= sizeof(uint32_t)) {
-            void *kp = SysCrateWrite(out, ctx, sizeof(uint32_t));
-            if (kp) {
-                uint32_t new_pid = new_proc->pid;
-                memcpy(kp, &new_pid, sizeof(uint32_t));
-                out->size = sizeof(uint32_t);
-            }
+            uint32_t new_pid = new_proc->pid;
+            (void)crate_write(out, ctx, &new_pid, sizeof(new_pid));
         }
     }
     return OK;
@@ -631,12 +623,8 @@ static int SysStrandSpawn(const ManifestOp *op, Crate *crates, uint16_t crate_co
     if (op->out_crate != CRATE_INDEX_NONE) {
         Crate *out = &crates[op->out_crate];
         if (out->capacity >= sizeof(uint32_t)) {
-            void *kp = SysCrateWrite(out, ctx, sizeof(uint32_t));
-            if (kp) {
-                uint32_t pid = strand->pid;
-                memcpy(kp, &pid, sizeof(uint32_t));
-                out->size = sizeof(uint32_t);
-            }
+            uint32_t pid = strand->pid;
+            (void)crate_write(out, ctx, &pid, sizeof(pid));
         }
     }
 
@@ -773,9 +761,8 @@ static int SysCtxUse(const ManifestOp *op, Crate *crates, uint16_t crate_count,
         return OK;
     }
     if (src->size >= sizeof(input)) return ERR_INVALID_ARGUMENT;
-    const char *src_kp = SysCrateRead(src, ctx);
-    if (!src_kp) return ERR_INVALID_ADDRESS;
-    memcpy(input, src_kp, src->size);
+    error_t read_rc = crate_read(src, ctx, input, src->size);
+    if (read_rc != OK) return read_rc;
     input[src->size] = '\0';
 
     char     parsed[MAX_CTX_USE_TAGS][CTX_TAG_LENGTH];
@@ -818,14 +805,13 @@ static int SysBufAlloc(const ManifestOp *op, Crate *crates, uint16_t crate_count
 
     Crate *out = &crates[op->out_crate];
     if (out->capacity < 32) return ERR_BUFFER_TOO_SMALL;
-    uint8_t *kp = SysCrateWrite(out, ctx, 32);
-    if (!kp) return ERR_INVALID_ADDRESS;
 
-    memcpy(kp +  0, &r.handle,      sizeof(uint64_t));
-    memcpy(kp +  8, &r.phys_addr,   sizeof(uint64_t));
-    memcpy(kp + 16, &r.actual_size, sizeof(uint64_t));
-    memcpy(kp + 24, &r.virt_addr,   sizeof(uint64_t));
-    out->size = 32;
+    uint8_t blob[32];
+    memcpy(blob +  0, &r.handle,      sizeof(uint64_t));
+    memcpy(blob +  8, &r.phys_addr,   sizeof(uint64_t));
+    memcpy(blob + 16, &r.actual_size, sizeof(uint64_t));
+    memcpy(blob + 24, &r.virt_addr,   sizeof(uint64_t));
+    if (crate_write(out, ctx, blob, 32) != OK) return ERR_INVALID_ADDRESS;
     return OK;
 }
 
@@ -863,12 +849,10 @@ static int SysBufResize(const ManifestOp *op, Crate *crates, uint16_t crate_coun
     if (op->out_crate != CRATE_INDEX_NONE) {
         Crate *out = &crates[op->out_crate];
         if (out->capacity >= 16) {
-            uint8_t *kp = SysCrateWrite(out, ctx, 16);
-            if (kp) {
-                memcpy(kp,     &handle, sizeof(uint64_t));
-                memcpy(kp + 8, &actual, sizeof(uint64_t));
-                out->size = 16;
-            }
+            uint8_t blob[16];
+            memcpy(blob,     &handle, sizeof(uint64_t));
+            memcpy(blob + 8, &actual, sizeof(uint64_t));
+            (void)crate_write(out, ctx, blob, 16);
         }
     }
     return OK;
@@ -969,8 +953,8 @@ static int SysTagCheck(const ManifestOp *op, Crate *crates, uint16_t crate_count
     if (op->out_crate != CRATE_INDEX_NONE) {
         Crate *out = &crates[op->out_crate];
         if (out->capacity >= 1) {
-            uint8_t *kp = SysCrateWrite(out, ctx, 1);
-            if (kp) { kp[0] = has ? 1 : 0; out->size = 1; }
+            uint8_t v = has ? 1 : 0;
+            (void)crate_write(out, ctx, &v, 1);
         }
     }
     process_ref_dec(target);
@@ -1000,11 +984,7 @@ static int SysDefragFile(const ManifestOp *op, Crate *crates, uint16_t crate_cou
         Crate *out = &crates[op->out_crate];
         if (out->capacity >= sizeof(uint32_t)) {
             uint32_t score = tagfs_get_fragmentation_score();
-            void *kp = SysCrateWrite(out, ctx, sizeof(uint32_t));
-            if (kp) {
-                memcpy(kp, &score, sizeof(uint32_t));
-                out->size = sizeof(uint32_t);
-            }
+            (void)crate_write(out, ctx, &score, sizeof(uint32_t));
         }
     }
     return OK;
@@ -1035,12 +1015,11 @@ static int SysFragScore(const ManifestOp *op, Crate *crates, uint16_t crate_coun
         }
     }
 
-    uint8_t *kp = SysCrateWrite(out, ctx, 12);
-    if (!kp) return ERR_INVALID_ADDRESS;
-    memcpy(kp +  0, &score,        sizeof(uint32_t));
-    memcpy(kp +  4, &total_files,  sizeof(uint32_t));
-    memcpy(kp +  8, &total_gaps,   sizeof(uint32_t));
-    out->size = 12;
+    uint8_t blob[12];
+    memcpy(blob +  0, &score,        sizeof(uint32_t));
+    memcpy(blob +  4, &total_files,  sizeof(uint32_t));
+    memcpy(blob +  8, &total_gaps,   sizeof(uint32_t));
+    if (crate_write(out, ctx, blob, 12) != OK) return ERR_INVALID_ADDRESS;
     return OK;
 }
 
@@ -1079,16 +1058,15 @@ static int SysInfo(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     Crate *out = &crates[op->out_crate];
     if (out->capacity < SYSINFO_BLOB_SIZE) return ERR_BUFFER_TOO_SMALL;
 
-    uint8_t *kp = SysCrateWrite(out, ctx, SYSINFO_BLOB_SIZE);
-    if (!kp) return ERR_INVALID_ADDRESS;
+    uint8_t blob[SYSINFO_BLOB_SIZE];
 
     /* Version string. Pinned here for now (kernel_config.h has no version
      * macro yet); migrate to a single source when the version policy lands. */
     static const char kver[] = "BoxOS v0.2.0";
     size_t vlen = sizeof(kver) - 1;
     if (vlen > 31) vlen = 31;
-    memset(kp, 0, 32);
-    memcpy(kp, kver, vlen);
+    memset(blob, 0, 32);
+    memcpy(blob, kver, vlen);
 
     /* Memory in bytes — PMM tracks pages; convert with PAGE_SIZE. */
     uint64_t total_pages = (uint64_t)pmm_total_pages();
@@ -1111,22 +1089,22 @@ static int SysInfo(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     uint8_t inv_tsc      = g_cpu_caps.has_invariant_tsc ? 1 : 0;
     uint8_t waitpkg      = g_cpu_caps.has_waitpkg       ? 1 : 0;
 
-    memcpy(kp + 32, &uptime_ns, sizeof(uint64_t));
-    memcpy(kp + 40, &total_b,   sizeof(uint64_t));
-    memcpy(kp + 48, &used_b,    sizeof(uint64_t));
-    memcpy(kp + 56, &free_b,    sizeof(uint64_t));
-    memcpy(kp + 64, &tsc_khz,   sizeof(uint64_t));
-    memcpy(kp + 72, &cpu_total, sizeof(uint32_t));
-    memcpy(kp + 76, &cpu_k,     sizeof(uint32_t));
-    memcpy(kp + 80, &cpu_app,   sizeof(uint32_t));
-    memcpy(kp + 84, &proc_count,sizeof(uint32_t));
-    memcpy(kp + 88, &pit_hz,    sizeof(uint32_t));
-    kp[92] = mc_active;
-    kp[93] = inv_tsc;
-    kp[94] = waitpkg;
-    kp[95] = 0;
+    memcpy(blob + 32, &uptime_ns, sizeof(uint64_t));
+    memcpy(blob + 40, &total_b,   sizeof(uint64_t));
+    memcpy(blob + 48, &used_b,    sizeof(uint64_t));
+    memcpy(blob + 56, &free_b,    sizeof(uint64_t));
+    memcpy(blob + 64, &tsc_khz,   sizeof(uint64_t));
+    memcpy(blob + 72, &cpu_total, sizeof(uint32_t));
+    memcpy(blob + 76, &cpu_k,     sizeof(uint32_t));
+    memcpy(blob + 80, &cpu_app,   sizeof(uint32_t));
+    memcpy(blob + 84, &proc_count,sizeof(uint32_t));
+    memcpy(blob + 88, &pit_hz,    sizeof(uint32_t));
+    blob[92] = mc_active;
+    blob[93] = inv_tsc;
+    blob[94] = waitpkg;
+    blob[95] = 0;
 
-    out->size = SYSINFO_BLOB_SIZE;
+    if (crate_write(out, ctx, blob, SYSINFO_BLOB_SIZE) != OK) return ERR_INVALID_ADDRESS;
     return OK;
 }
 
@@ -1217,12 +1195,12 @@ static int SysManifestRelease(const ManifestOp *op, Crate *crates,
     if (!CrateIsValid(in))                       return ERR_INVALID_BUFFER_ID;
     if (in->size != sizeof(ManifestHandle))      return ERR_INVALID_ARGUMENT;
 
-    /* Read the handle out of the user payload. Single page by construction
-     * (8 bytes), so vmm_translate_user_addr is safe. */
-    ManifestHandle *src = (ManifestHandle *)vmm_translate_user_addr(
-        ctx->proc->cabin->vmm, (uintptr_t)in->addr, sizeof(ManifestHandle));
-    if (!src) return ERR_INVALID_ADDRESS;
-    ManifestHandle handle = *src;
+    /* Read the handle out of the user payload via the page-walked snapshot —
+     * an 8-byte read still straddles when it sits within 7 bytes of a page
+     * end, so the single-page map cannot be assumed safe. */
+    ManifestHandle handle;
+    error_t read_rc = crate_read(in, ctx, &handle, sizeof(handle));
+    if (read_rc != OK) return read_rc;
 
     /* Ownership check via Resolve (which pins the form, preventing concurrent
      * free during the verification). Balance with one Release. */
@@ -1261,9 +1239,8 @@ static int SysEfiInfo(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     if (op->out_crate == CRATE_INDEX_NONE) return ERR_INVALID_ARGUMENT;
     Crate *out = &crates[op->out_crate];
     if (out->capacity < EFI_INFO_BLOB_SIZE) return ERR_BUFFER_TOO_SMALL;
-    uint8_t *kp = SysCrateWrite(out, ctx, EFI_INFO_BLOB_SIZE);
-    if (!kp) return ERR_INVALID_ADDRESS;
-    memset(kp, 0, EFI_INFO_BLOB_SIZE);
+    uint8_t blob[EFI_INFO_BLOB_SIZE];
+    memset(blob, 0, EFI_INFO_BLOB_SIZE);
 
     EfiSecureBootState sb = {0};
     efi_secureboot_get_state(&sb);
@@ -1296,21 +1273,21 @@ static int SysEfiInfo(const ManifestOp *op, Crate *crates, uint16_t crate_count,
      *   +24  u32 cert_count_by_db[6]   (PK,KEK,db,dbx,dbt,dbr)
      *   +48  u32 hash_count_by_db[6]
      *   +72  56  reserved (zero) */
-    memcpy(kp + 0,  &version,        4);
-    kp[4]  = rt_available;
-    kp[5]  = esrt_available;
-    kp[6]  = sb_available;
-    kp[7]  = sb_enforced;
-    kp[8]  = sb_setup;
-    kp[9]  = sb_audit;
-    kp[10] = sb_deployed;
-    memcpy(kp + 12, &esrt_count,    4);
-    memcpy(kp + 16, &cert_count,    4);
-    memcpy(kp + 20, &hash_count,    4);
-    memcpy(kp + 24, sb.cert_count_by_db, 6 * 4);
-    memcpy(kp + 48, sb.hash_count_by_db, 6 * 4);
+    memcpy(blob + 0,  &version,        4);
+    blob[4]  = rt_available;
+    blob[5]  = esrt_available;
+    blob[6]  = sb_available;
+    blob[7]  = sb_enforced;
+    blob[8]  = sb_setup;
+    blob[9]  = sb_audit;
+    blob[10] = sb_deployed;
+    memcpy(blob + 12, &esrt_count,    4);
+    memcpy(blob + 16, &cert_count,    4);
+    memcpy(blob + 20, &hash_count,    4);
+    memcpy(blob + 24, sb.cert_count_by_db, 6 * 4);
+    memcpy(blob + 48, sb.hash_count_by_db, 6 * 4);
 
-    out->size = EFI_INFO_BLOB_SIZE;
+    if (crate_write(out, ctx, blob, EFI_INFO_BLOB_SIZE) != OK) return ERR_INVALID_ADDRESS;
     return OK;
 }
 
@@ -1332,10 +1309,8 @@ static int SysEfiEsrtGet(const ManifestOp *op, Crate *crates, uint16_t crate_cou
 
     Crate *out = &crates[op->out_crate];
     if (out->capacity < sizeof(EfiSystemResourceEntry)) return ERR_BUFFER_TOO_SMALL;
-    uint8_t *kp = SysCrateWrite(out, ctx, sizeof(EfiSystemResourceEntry));
-    if (!kp) return ERR_INVALID_ADDRESS;
-    memcpy(kp, e, sizeof(EfiSystemResourceEntry));
-    out->size = sizeof(EfiSystemResourceEntry);
+    if (crate_write(out, ctx, e, sizeof(EfiSystemResourceEntry)) != OK)
+        return ERR_INVALID_ADDRESS;
     return OK;
 }
 
@@ -1359,24 +1334,28 @@ static int SysEfiVerifyPe(const ManifestOp *op, Crate *crates, uint16_t crate_co
     if (in->size > (16u * 1024u * 1024u))  return ERR_INVALID_ARGUMENT;  /* 16 MB cap */
     if (out->capacity < EFI_VERIFY_PE_OUT_SIZE) return ERR_BUFFER_TOO_SMALL;
 
-    const uint8_t *pe = SysCrateRead(in, ctx);
+    /* Bounce the whole PE through a page-walked kernel buffer. The image is
+     * always multi-page, so the old single-page map fed efi_authenticode a
+     * pointer that read a foreign frame past the first page — wrong hashes
+     * and a stray-frame read. */
+    uint8_t *pe = crate_in_buf(in, ctx);
     if (!pe) return ERR_INVALID_ADDRESS;
 
     uint8_t pe_hash[32]     = {0};
     uint8_t signer_hash[32] = {0};
     EfiAuthenticodeResult r = efi_authenticode_verify_pe(
         pe, (uint32_t)in->size, pe_hash, signer_hash);
+    crate_buf_free(pe);
 
-    uint8_t *kp = SysCrateWrite(out, ctx, EFI_VERIFY_PE_OUT_SIZE);
-    if (!kp) return ERR_INVALID_ADDRESS;
-    memset(kp, 0, EFI_VERIFY_PE_OUT_SIZE);
+    uint8_t blob[EFI_VERIFY_PE_OUT_SIZE];
+    memset(blob, 0, EFI_VERIFY_PE_OUT_SIZE);
     uint32_t result = (uint32_t)r;
     uint32_t pe_size = (uint32_t)in->size;
-    memcpy(kp + 0, &result,      4);
-    memcpy(kp + 4, &pe_size,     4);
-    memcpy(kp + 8, pe_hash,      32);
-    memcpy(kp + 40, signer_hash, 32);
-    out->size = EFI_VERIFY_PE_OUT_SIZE;
+    memcpy(blob + 0, &result,      4);
+    memcpy(blob + 4, &pe_size,     4);
+    memcpy(blob + 8, pe_hash,      32);
+    memcpy(blob + 40, signer_hash, 32);
+    if (crate_write(out, ctx, blob, EFI_VERIFY_PE_OUT_SIZE) != OK) return ERR_INVALID_ADDRESS;
     return OK;
 }
 
