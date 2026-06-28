@@ -2,9 +2,10 @@
  * Storage Deck — Manifest-native handlers.
  *
  * Removes the 168/176-byte stack buffers that capped legacy OBJ_READ /
- * OBJ_WRITE at sub-200-byte payloads per syscall. Reads and writes now go
- * straight from / to a Crate of arbitrary capacity, translated once via
- * vmm_translate_user_addr. A 1-MiB read fits in one syscall.
+ * OBJ_WRITE at sub-200-byte payloads per syscall. Reads and writes now move
+ * to / from a Crate of arbitrary capacity through the page-walked crate_io
+ * primitives, so a payload that straddles a page boundary is copied across
+ * every backing frame. A 1-MiB read fits in one syscall.
  *
  * Phase 7 scope: OBJ_READ, OBJ_WRITE, OBJ_DELETE, OBJ_RENAME, OBJ_GET_INFO.
  * OBJ_CREATE, TAG_*, CONTEXT_* deferred — they need a separate pass because
@@ -25,6 +26,7 @@
 
 #include "klib.h"
 #include "crate_stage.h"
+#include "crate_io.h"
 #include "op_registry.h"
 #include "manifest_auth.h"
 #include "boxos_manifest.h"
@@ -48,70 +50,13 @@
 #define OBJ_WRITE_APPEND_FLAG (1u << 0)
 
 /* -------------------------------------------------------------------------
- * Crate translation
- *
- * StorageCrateMap is the legacy single-page fast path. Works only when
- * the requested bytes fit inside one phys page — used for parameter-
- * sized payloads (rename name, query result header, etc).
- *
- * For multi-page user payloads (read/write data crates) we bounce
- * through a kmalloc'd kernel buffer:
- *   crate_in_buf       — copy user → fresh kbuf (for input crates)
- *   crate_out_alloc    — allocate empty kbuf same size as crate
- *   crate_out_commit   — copy filled kbuf → user pages
- *   crate_buf_free     — release kbuf
- * Each helper handles arbitrary cross-page user ranges by walking the
- * user PT page-by-page.
+ * Crate I/O lives in crate_io.{h,c}: crate_read / crate_write move a fixed
+ * payload between a user Crate and a kernel buffer, and crate_in_buf /
+ * crate_out_alloc / crate_out_commit / crate_buf_free carry the variable-
+ * size bounce-buffer pattern. All page-walk the user range, so a Crate
+ * payload that straddles a page boundary is copied across every backing
+ * frame — the legacy single-page StorageCrateMap fast path is gone.
  * ------------------------------------------------------------------------- */
-
-static void *StorageCrateMap(const Crate *c, const OpContext *ctx, uint64_t bytes)
-{
-    if (!c || bytes == 0)            return NULL;
-    if (bytes > c->capacity)         return NULL;
-    if (ctx && ctx->proc && ctx->proc->cabin) {
-        return vmm_translate_user_addr(ctx->proc->cabin->vmm, (uintptr_t)c->addr, (size_t)bytes);
-    }
-    return (void *)(uintptr_t)c->addr;
-}
-
-static void *crate_in_buf(const Crate *src, const OpContext *ctx)
-{
-    if (!src || src->size == 0) return NULL;
-    if (src->size > src->capacity) return NULL;
-    if (ctx && ctx->proc && ctx->proc->cabin) {
-        return vmm_user_buf_in(ctx->proc->cabin->vmm, (uintptr_t)src->addr, (size_t)src->size);
-    }
-    /* No cabin (kernel-internal caller) — just snapshot the bytes so
-     * cleanup is uniform. */
-    void *kbuf = kmalloc((size_t)src->size);
-    if (!kbuf) return NULL;
-    memcpy(kbuf, (const void *)(uintptr_t)src->addr, (size_t)src->size);
-    return kbuf;
-}
-
-static void *crate_out_alloc(const Crate *out, uint64_t bytes)
-{
-    if (!out || bytes == 0) return NULL;
-    if (bytes > out->capacity) return NULL;
-    return vmm_user_buf_alloc_out((size_t)bytes);
-}
-
-static int crate_out_commit(const Crate *out, const OpContext *ctx,
-                             const void *kbuf, uint64_t bytes)
-{
-    if (!out || !kbuf || bytes == 0) return 0;
-    if (ctx && ctx->proc && ctx->proc->cabin) {
-        return vmm_user_buf_commit_out(ctx->proc->cabin->vmm, (uintptr_t)out->addr,
-                                        kbuf, (size_t)bytes);
-    }
-    memcpy((void *)(uintptr_t)out->addr, kbuf, (size_t)bytes);
-    return 0;
-}
-
-static void crate_buf_free(void *kbuf)
-{
-    if (kbuf) vmm_user_buf_free(kbuf);
-}
 
 /* -------------------------------------------------------------------------
  * Param accessors — alignment-safe.
@@ -413,7 +358,12 @@ static int ObjRead(const ManifestOp *op,
         return ERR_IO;
     }
     if (got > 0) {
-        crate_out_commit(out, ctx, kp, (uint64_t)got);
+        int crc = crate_out_commit(out, ctx, kp, (uint64_t)got);
+        if (crc != OK) {
+            crate_buf_free(kp);
+            out->size = 0;
+            return crc;
+        }
     }
     crate_buf_free(kp);
     out->size = (uint64_t)got;
@@ -449,14 +399,13 @@ static int ObjWrite(const ManifestOp *op,
     void *src_bounce = crate_in_buf(src, ctx);
     if (!src_bounce) return ERR_INVALID_ADDRESS;
 
-    /* Output stats crate (16 bytes) fits in a single page — direct map. */
+    /* Optional output stats crate [u64 bytes_written][u64 new_file_size].
+     * Written via crate_write (sync) / vmm_user_buf_commit_out (async) —
+     * both page-walk, so a stats crate that straddles a page is safe. */
     Crate *out_crate = NULL;
-    void  *out_kp    = NULL;
     if (op->out_crate != CRATE_INDEX_NONE) {
-        out_crate = &crates[op->out_crate];
-        if (out_crate->capacity >= 16) {
-            out_kp = StorageCrateMap(out_crate, ctx, 16);
-        }
+        Crate *o = &crates[op->out_crate];
+        if (o->capacity >= 16) out_crate = o;
     }
 
     /* Async write requires a K-Core to pump its IRQ-deferred completion
@@ -469,7 +418,7 @@ static int ObjWrite(const ManifestOp *op,
     if (ahci_is_initialized() && ctx && ctx->proc && g_amp.total_cores > 1) {
         int rc = ObjWriteAsync(file_id, offset, flags,
                                src_bounce, (uint32_t)src->size,
-                               out_crate, out_kp, ctx,
+                               out_crate, ctx,
                                crates, ctx->crate_count, ctx->crates_uaddr);
         if (rc == ERR_WOULD_BLOCK) {
             /* Async owns src_bounce AND the staged Crate[] kbuf now —
@@ -535,11 +484,15 @@ static int ObjWrite(const ManifestOp *op,
         }
     }
 
-    if (out_kp && out_crate && out_crate->capacity >= 16) {
+    if (out_crate) {
+        uint8_t stats[16];
         uint64_t bytes_written = (uint64_t)wrote;
-        memcpy((uint8_t *)out_kp + 0, &bytes_written, sizeof(uint64_t));
-        memcpy((uint8_t *)out_kp + 8, &final_size,    sizeof(uint64_t));
-        out_crate->size = 16;
+        memcpy(stats + 0, &bytes_written, sizeof(uint64_t));
+        memcpy(stats + 8, &final_size,    sizeof(uint64_t));
+        /* Best-effort: a commit failure (user unmapped the page mid-op)
+         * leaves the stats crate empty but does not fail the completed
+         * write — crate_write sets out_crate->size only on success. */
+        (void)crate_write(out_crate, ctx, stats, 16);
     }
     return OK;
 }
@@ -662,7 +615,7 @@ static int ObjGetInfo(const ManifestOp *op,
         return ERR_BUFFER_TOO_SMALL;
     }
 
-    uint8_t *kp = StorageCrateMap(out, ctx, need);
+    uint8_t *kp = crate_out_alloc(out, need);
     if (!kp) { tagfs_metadata_free(&md); return ERR_INVALID_ADDRESS; }
 
     uint64_t pos = 0;
@@ -684,8 +637,11 @@ static int ObjGetInfo(const ManifestOp *op,
         if (vl) { memcpy(kp + pos, v, vl); pos += vl; }
     }
 
-    out->size = pos;
+    int crc = crate_out_commit(out, ctx, kp, pos);
+    crate_buf_free(kp);
     tagfs_metadata_free(&md);
+    if (crc != OK) return crc;   /* fail closed: leave out->size unset */
+    out->size = pos;
     return OK;
 }
 
@@ -739,25 +695,24 @@ static int ObjQuery(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     TagFSState *state = tagfs_get_state();
     if (!state || !state->initialized) return ERR_NOT_INITIALIZED;
 
-    uint8_t *kp = StorageCrateMap(out, ctx, out->capacity);
-    if (!kp) return ERR_INVALID_ADDRESS;
-
-    uint32_t max_results = (uint32_t)((out->capacity - 4) / sizeof(uint32_t));
-    uint32_t *file_ids = (uint32_t *)(kp + 4);
-
-    /* Query string from in_crate, if any. */
+    /* Query string from in_crate, if any. Read it BEFORE allocating the
+     * output bounce buffer so an early return here cannot leak the kbuf. */
     char    qbuf[256];
     size_t  qlen = 0;
     if (op->in_crate != CRATE_INDEX_NONE) {
         Crate *src = &crates[op->in_crate];
         if (src->size > 0 && src->size < sizeof(qbuf)) {
-            const void *src_kp = StorageCrateMap(src, ctx, src->size);
-            if (!src_kp) return ERR_INVALID_ADDRESS;
-            memcpy(qbuf, src_kp, src->size);
+            if (crate_read(src, ctx, qbuf, src->size) != OK) return ERR_INVALID_ADDRESS;
             qlen = src->size;
             qbuf[qlen] = '\0';
         }
     }
+
+    uint8_t *kp = crate_out_alloc(out, out->capacity);
+    if (!kp) return ERR_INVALID_ADDRESS;
+
+    uint32_t max_results = (uint32_t)((out->capacity - 4) / sizeof(uint32_t));
+    uint32_t *file_ids = (uint32_t *)(kp + 4);
 
     const char *all_tags[32];
     char        tag_storage[32][32];
@@ -788,7 +743,11 @@ static int ObjQuery(const ManifestOp *op, Crate *crates, uint16_t crate_count,
 
     uint32_t cnt32 = (uint32_t)count;
     memcpy(kp, &cnt32, sizeof(uint32_t));
-    out->size = 4 + cnt32 * sizeof(uint32_t);
+    uint64_t out_bytes = 4 + (uint64_t)cnt32 * sizeof(uint32_t);
+    int crc = crate_out_commit(out, ctx, kp, out_bytes);
+    crate_buf_free(kp);
+    if (crc != OK) return crc;   /* fail closed: leave out->size unset */
+    out->size = out_bytes;
     return OK;
 }
 
@@ -804,11 +763,8 @@ static int ObjTagSet(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     Crate   *src     = &crates[op->in_crate];
     if (src->size == 0 || src->size > 127) return ERR_INVALID_ARGUMENT;
 
-    const void *src_kp = StorageCrateMap(src, ctx, src->size);
-    if (!src_kp) return ERR_INVALID_ADDRESS;
-
     char tag[128];
-    memcpy(tag, src_kp, src->size);
+    if (crate_read(src, ctx, tag, src->size) != OK) return ERR_INVALID_ADDRESS;
     tag[src->size] = '\0';
 
     char key[64], value[64];
@@ -833,11 +789,8 @@ static int ObjTagUnset(const ManifestOp *op, Crate *crates, uint16_t crate_count
     Crate   *src     = &crates[op->in_crate];
     if (src->size == 0 || src->size > 63) return ERR_INVALID_ARGUMENT;
 
-    const void *src_kp = StorageCrateMap(src, ctx, src->size);
-    if (!src_kp) return ERR_INVALID_ADDRESS;
-
     char key[64];
-    memcpy(key, src_kp, src->size);
+    if (crate_read(src, ctx, key, src->size) != OK) return ERR_INVALID_ADDRESS;
     key[src->size] = '\0';
 
     if (tagfs_remove_tag_string(file_id, key) != 0) {
@@ -871,9 +824,7 @@ static int ObjCreate(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     if (op->in_crate != CRATE_INDEX_NONE) {
         Crate *src = &crates[op->in_crate];
         if (src->size > 0 && src->size < sizeof(tag_buf)) {
-            const void *src_kp = StorageCrateMap(src, ctx, src->size);
-            if (!src_kp) return ERR_INVALID_ADDRESS;
-            memcpy(tag_buf, src_kp, src->size);
+            if (crate_read(src, ctx, tag_buf, src->size) != OK) return ERR_INVALID_ADDRESS;
             tlen = src->size;
             tag_buf[tlen] = '\0';
         }
@@ -923,11 +874,7 @@ static int ObjCreate(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     if (op->out_crate != CRATE_INDEX_NONE) {
         Crate *out = &crates[op->out_crate];
         if (out->capacity >= sizeof(uint32_t)) {
-            void *kp = StorageCrateMap(out, ctx, sizeof(uint32_t));
-            if (kp) {
-                memcpy(kp, &file_id, sizeof(uint32_t));
-                out->size = sizeof(uint32_t);
-            }
+            (void)crate_write(out, ctx, &file_id, sizeof(uint32_t));
         }
     }
     return OK;
@@ -944,11 +891,8 @@ static int ObjContextSet(const ManifestOp *op, Crate *crates, uint16_t crate_cou
     Crate *src = &crates[op->in_crate];
     if (src->size == 0 || src->size > 127) return ERR_INVALID_ARGUMENT;
 
-    const void *src_kp = StorageCrateMap(src, ctx, src->size);
-    if (!src_kp) return ERR_INVALID_ADDRESS;
-
     char tag[128];
-    memcpy(tag, src_kp, src->size);
+    if (crate_read(src, ctx, tag, src->size) != OK) return ERR_INVALID_ADDRESS;
     tag[src->size] = '\0';
 
     char key[64], value[64];
@@ -1001,7 +945,7 @@ static int ObjContextGet(const ManifestOp *op, Crate *crates, uint16_t crate_cou
     Crate *out = &crates[op->out_crate];
     if (out->capacity < 4) return ERR_BUFFER_TOO_SMALL;
 
-    uint8_t *kp = StorageCrateMap(out, ctx, out->capacity);
+    uint8_t *kp = crate_out_alloc(out, out->capacity);
     if (!kp) return ERR_INVALID_ADDRESS;
 
     /* tagfs_context_get_tags returns pointers into a static per-slot buffer
@@ -1022,6 +966,9 @@ static int ObjContextGet(const ManifestOp *op, Crate *crates, uint16_t crate_cou
         written++;
     }
     memcpy(kp, &written, 4);
+    int crc = crate_out_commit(out, ctx, kp, pos);
+    crate_buf_free(kp);
+    if (crc != OK) return crc;   /* fail closed: leave out->size unset */
     out->size = pos;
     return OK;
 }
@@ -1058,11 +1005,7 @@ static int ObjSnapCreate(const ManifestOp *op, Crate *crates, uint16_t crate_cou
     if (op->out_crate != CRATE_INDEX_NONE) {
         Crate *out = &crates[op->out_crate];
         if (out->capacity >= 4) {
-            void *kp = StorageCrateMap(out, ctx, 4);
-            if (kp) {
-                memcpy(kp, &snapshot_id, sizeof(uint32_t));
-                out->size = 4;
-            }
+            (void)crate_write(out, ctx, &snapshot_id, sizeof(uint32_t));
         }
     }
     return OK;
@@ -1094,11 +1037,10 @@ static int ObjSnapList(const ManifestOp *op, Crate *crates, uint16_t crate_count
     if (err != OK) return err;
 
     uint32_t bytes = 4 + count * 4;
-    void *kp = StorageCrateMap(out, ctx, bytes);
-    if (!kp) return ERR_INVALID_ADDRESS;
-    memcpy(kp, &count, 4);
-    if (count > 0) memcpy((uint8_t *)kp + 4, ids, count * 4);
-    out->size = bytes;
+    uint8_t blob[4 + 64 * 4];   /* count + up to max_ids (<= 64) ids */
+    memcpy(blob, &count, 4);
+    if (count > 0) memcpy(blob + 4, ids, count * 4);
+    if (crate_write(out, ctx, blob, bytes) != OK) return ERR_INVALID_ADDRESS;
     return OK;
 }
 

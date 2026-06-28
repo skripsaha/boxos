@@ -59,6 +59,7 @@
 #include "op_registry.h"
 #include "manifest.h"
 #include "manifest_selftest.h"
+#include "crate_io_selftest.h"
 #include "operations_deck.h"
 #include "hardware_deck.h"
 #include "system_deck.h"
@@ -573,6 +574,13 @@ void kernel_main(void)
     if (selftest_err != OK)
     {
         kprintf("[WARN] Manifest self-test failed: %s\n", ErrorString(selftest_err));
+    }
+
+    debug_printf("[INIT] crate_io straddle self-test...\n");
+    error_t crate_io_err = CrateIoSelfTest();
+    if (crate_io_err != OK)
+    {
+        kprintf("[WARN] crate_io self-test failed: %s\n", ErrorString(crate_io_err));
     }
 
     debug_printf("[INIT] Operations Deck register...\n");

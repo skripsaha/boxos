@@ -507,12 +507,22 @@ static void wjob_finalize(WriteJob *j, int rc)
         tagfs_free_blocks(j->alloc_block, j->alloc_count);
     }
 
-    /* Stat reporter (matches sync ObjWrite contract). */
+    /* Stat reporter (matches sync ObjWrite contract). out_crate points into
+     * the staged Crate[] kbuf; out_crate->addr is the user vaddr. Commit the
+     * 16 stats bytes through the page-walked path so a stats crate that
+     * straddles a page boundary is safe across the async boundary. j->target
+     * is pinned for the job's lifetime and commit_out walks the page tables
+     * physically (no target CR3 switch) — same model as the
+     * crate_stage_commit_and_release below. */
     uint64_t bytes_written = (rc == OK) ? j->bytes_done : 0;
     uint64_t final_size    = j->handle ? j->handle->file_size : 0;
-    if (j->out_crate && j->out_kp && j->out_crate->capacity >= 16) {
-        memcpy((uint8_t *)j->out_kp + 0, &bytes_written, sizeof(uint64_t));
-        memcpy((uint8_t *)j->out_kp + 8, &final_size,    sizeof(uint64_t));
+    if (j->out_crate && j->out_crate->capacity >= 16 &&
+        j->target && j->target->cabin) {
+        uint8_t stats[16];
+        memcpy(stats + 0, &bytes_written, sizeof(uint64_t));
+        memcpy(stats + 8, &final_size,    sizeof(uint64_t));
+        vmm_user_buf_commit_out(j->target->cabin->vmm,
+                                (uintptr_t)j->out_crate->addr, stats, 16);
         j->out_crate->size = 16;
     }
 
@@ -627,7 +637,6 @@ int ObjWriteAsync(uint32_t            file_id,
                   const void         *src_kp,
                   uint32_t            size,
                   Crate              *out_crate,
-                  void               *out_kp,
                   const struct OpContext *ctx,
                   Crate              *crates_kbuf,
                   uint16_t            crate_count,
@@ -666,7 +675,6 @@ int ObjWriteAsync(uint32_t            file_id,
     j->handle        = handle;
     j->ofe           = handle->ofe;
     j->out_crate     = out_crate;
-    j->out_kp        = out_kp;
     j->src_kp        = (const uint8_t *)src_kp;
     /* Caller (storage_ops ObjWrite) hands us a bounce buffer it allocated
      * via crate_in_buf; on a successful return WE own it and free at
