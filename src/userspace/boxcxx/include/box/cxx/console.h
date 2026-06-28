@@ -168,6 +168,10 @@ inline bool clear_to_eol(color bg = colors::black) noexcept
 {
     return vga_clear_to_eol(color_to_vga4(bg.raw())) == 0;
 }
+inline bool clear_line(std::uint8_t row, color bg = colors::black) noexcept
+{
+    return vga_clear_line(row, color_to_vga4(bg.raw())) == 0;
+}
 inline bool scroll_up(std::uint8_t lines, color fill = colors::black) noexcept
 {
     return vga_scroll_up(lines, color_to_vga4(fill.raw())) == 0;

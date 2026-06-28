@@ -90,6 +90,7 @@
 #include "box/cxx/system.h"
 #include "box/cxx/system_touch.h"
 #include "box/cxx/tagfs.h"
+#include "box/cxx/timeouts.h"
 #include "box/cxx/timing.h"
 #include "box/cxx/touch.h"
 
@@ -4060,9 +4061,9 @@ void Phase18()
 
     // ── find by name (TagFS names are not unique → check membership) ─────
     {
-        std::vector<file> named = box::tagfs::find_all("cxx:tagfs:renamed");
-        bool              mine  = false;
-        for (const file &x : named)
+        std::vector<box::tagfs::record> named = box::tagfs::find_all("cxx:tagfs:renamed");
+        bool                            mine  = false;
+        for (const box::tagfs::record &x : named)
             if (x.id() == f.id()) { mine = true; break; }
         Check(mine, "phase18 find_all by name includes this file");
     }
@@ -8026,7 +8027,7 @@ void Phase45()
     {
         box::result<box::tagfs::file> probe =
             box::tagfs::create("cxx:p45:probe", {"cxx:phase45"});
-        box::result<box::tagfs::file> nf = box::tagfs::find("__no_such_file_zzz__");
+        box::result<box::tagfs::record> nf = box::tagfs::find("__no_such_file_zzz__");
         Check(!nf.has_value() && static_cast<bool>(nf.error()),
               "phase45 tagfs::find(missing) error arm carries a non-ok cause");
         if (probe.has_value()) {
@@ -9833,6 +9834,131 @@ void Phase54()
            "(keyid_of/encrypted) + formatters\n");
 }
 
+// ── Ф25e: explicit snapshot model (record snapshot vs live handle) + typed
+//    tags + anchor_all + snapshot::adopt + vga::clear_line + chrono timeouts ──
+void Phase55()
+{
+    using box::tagfs::file;
+    using box::tagfs::record;
+
+    // Leftover cleanup — the disk persists across matrix configs, so a crashed
+    // prior run could leave p55 files behind.
+    for (auto f : box::tagfs::query("p55")) (void)f.remove();
+
+    box::result<file> made = box::tagfs::create("p55:recA", {"p55"});
+    if (!made) {
+        std::string_view why = made.error().message();
+        printf("[CXX] SKIP phase55: tagfs storage unavailable (create p55:recA: %.*s) "
+               "— record / typed-tag / anchor_all / snapshot::adopt checks skipped\n",
+               static_cast<int>(why.size()), why.data());
+    } else {
+        std::uint32_t A = made->id();
+
+        // (1) record — a metadata snapshot that does NOT re-read the kernel ──
+        box::result<record> r = box::tagfs::find("p55:recA");
+        Check(r && r->name() == "p55:recA", "phase55 find() hands back a record snapshot");
+        // Mutate behind the record's back through a separate live handle.
+        Check(box::tagfs::file(A).rename("p55:recB").has_value(),
+              "phase55 rename via a separate live handle");
+        Check(r && r->name() == "p55:recA",
+              "phase55 record.name() reads the captured snapshot, not the kernel");
+        Check(r && r->live().name() == "p55:recB", "phase55 record.live() is always-fresh");
+        Check(r && r->reread().has_value() && r->name() == "p55:recB",
+              "phase55 reread re-snapshots");
+        std::vector<file> q = box::tagfs::query("p55");
+        Check(!q.empty(), "phase55 query still hands back live file handles");
+
+        // (2) typed-tag round-trip ──────────────────────────────────────────
+        // The kernel adds an auto-label tag at create time, so this file already
+        // carries {auto-label, "p55"} and sits near the file_info 5-tag report
+        // cap. Each tag is therefore read back promptly (while the count is <= 5),
+        // so no proof depends on a later tag staying inside the 5-slot window.
+        file f = box::tagfs::file(A);
+        (void)f.add_tag("label:abc");  // non-numeric value, read back first
+        box::result<box::tagfs::tag> tl = f.tag_named("label");
+        Check(tl && !tl->as<int>() && tl->as<int>().error().code() == box::errc::invalid_argument,
+              "phase55 non-numeric value → as<int>() invalid_argument");
+        Check(f.add_tag("port", 8080u).has_value(), "phase55 add_tag<unsigned>(port, 8080)");
+        box::result<box::tagfs::tag> tp = f.tag_named("port");
+        Check(tp && tp->as<unsigned>() && tp->as<unsigned>().value() == 8080u,
+              "phase55 tag_named(port).as<unsigned>() == 8080");
+        Check(f.add_tag("on", true).has_value(), "phase55 add_tag<bool>(on, true)");
+        box::result<box::tagfs::tag> to = f.tag_named("on");
+        Check(to && to->as<bool>() && to->as<bool>().value() == true,
+              "phase55 tag_named(on).as<bool>() == true");
+        box::status big = f.add_tag("big", 100000000000ull);
+        Check(!big && big.error().code() == box::errc::buffer_too_small,
+              "phase55 over-capacity typed value → buffer_too_small (tag not added)");
+        box::result<box::tagfs::tag> ab = f.tag_named("absent");
+        Check(!ab && ab.error().code() == box::errc::tag_not_found,
+              "phase55 tag_named(absent) → tag_not_found");
+
+        // (3) anchor_all — whole-filesystem durability (storage confirmed up) ─
+        Check(box::tagfs::anchor_all().has_value(),
+              "phase55 anchor_all() whole-fs durability ok");
+
+        // (4) snapshot adopt + RAII drop ────────────────────────────────────
+        box::result<box::tagfs::snapshot> s = box::tagfs::snapshot::of(A, "p55snap");
+        if (!s) {
+            std::string why(s.error().message());
+            printf("[CXX] SKIP phase55: snapshot::of denied (%s) — adopt re-own "
+                   "round-trip skipped (adopt(0) arm still checked)\n", why.c_str());
+        } else {
+            std::uint32_t kept = s->keep();  // detach: the id outlives this handle
+            {
+                box::result<box::tagfs::snapshot> re =
+                    box::tagfs::snapshot::adopt(kept, "p55snap");
+                Check(re && re->id() == kept, "phase55 adopt re-owns the kept id");
+            }  // re's dtor → snap_delete(kept)
+            bool present = false;
+            for (std::uint32_t sid : box::tagfs::snapshots())
+                if (sid == kept) present = true;
+            Check(!present, "phase55 adopt's dtor snap_deleted the re-owned id");
+        }
+
+        // (1b) find_all enumerates past the former 8 stack-buffer cap ────────
+        // TagFS names are not unique; create N (> the old cap of 8) same-named
+        // files and confirm find_all returns every one (heap buffer, ceiling 255).
+        {
+            constexpr int N = 10;
+            int           created = 0;
+            for (int i = 0; i < N; ++i)
+                if (box::tagfs::create("p55:multi", {"p55"})) ++created;
+            if (created == N) {
+                std::size_t got = box::tagfs::find_all("p55:multi").size();
+                Check(got == static_cast<std::size_t>(N),
+                      "phase55 find_all returns all 10 same-named files (heap buffer > old 8-cap)");
+            } else {
+                printf("[CXX] note phase55: find_all bulk probe created %d/%d files — skipped\n",
+                       created, N);
+            }
+        }
+
+        // Cleanup the p55 files now the storage round-trips are done.
+        for (auto f2 : box::tagfs::query("p55")) (void)f2.remove();
+    }
+
+    // adopt(0) is a pure-logic guard (no syscall) — always checked.
+    box::result<box::tagfs::snapshot> z = box::tagfs::snapshot::adopt(0);
+    Check(!z && z.error().code() == box::errc::invalid_argument,
+          "phase55 adopt(0) → invalid_argument");
+
+    // (5) vga::clear_line — the physical clear is dormant on the serial log
+    //     (like every box::vga op); the syscall round-trip is what's checked.
+    Check(box::vga::clear_line(0, box::colors::black), "phase55 vga::clear_line syscall ok");
+
+    // (6) chrono timeouts — the C macros are the single source of truth; the
+    //     chrono type carries the unit, proven across units at compile time.
+    static_assert(box::timeouts::fast == std::chrono::milliseconds(BOX_TIMEOUT_FAST_MS));
+    static_assert(box::timeouts::storage == std::chrono::seconds(5));
+    static_assert(box::timeouts::kdbg == std::chrono::minutes(1));
+    Check(box::timeouts::input.count() == 30000, "phase55 input timeout == 30s");
+
+    printf("[CXX] PASS phase55: box::tagfs::record (captured snapshot vs live/reread) "
+           "+ typed tags (tag::as<T> / file::add_tag<T>) + anchor_all + "
+           "snapshot::adopt + vga::clear_line + box::timeouts (chrono)\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -9909,6 +10035,7 @@ int main()
     Phase52();
     Phase53();
     Phase54();
+    Phase55();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
