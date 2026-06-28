@@ -2792,7 +2792,7 @@ void PhaseCurrent()
         Check(n == 24, "phaseCurrent file write");
         fw = box::byte_current{};   // release writer (RAII)
 
-        box::byte_current fr = box::file("cxx_current.dat", box::role::read, 0);
+        box::byte_current fr = box::file("cxx_current.dat", box::role::read, box::opening::none);
         char back[25] = {};
         int  rn = fr ? fr.read(back, 24) : -1;
         Check(rn == 24 && std::string_view(back, 24) == msg, "phaseCurrent file read");
@@ -2801,7 +2801,7 @@ void PhaseCurrent()
 
     // Small item (2 bytes) through the typed layer — exercises frame padding.
     {
-        box::current<std::uint16_t> w("cxx:current:small", box::role::write, CURRENT_CREATE);
+        box::current<std::uint16_t> w("cxx:current:small", box::role::write, box::opening::create);
         box::current<std::uint16_t> r("cxx:current:small", box::role::read);
         bool          ok = bool(w) && bool(r) && w.put(0xC0DE).has_value();
         std::uint16_t v  = 0;
@@ -7907,7 +7907,7 @@ void Phase45()
     // when it IS an error arm the code must be would_block.
     {
         box::current<Frame> w("cxx:p45:wb", box::role::write);
-        box::current<Frame> r("cxx:p45:wb", box::role::read, CURRENT_NONBLOCK);
+        box::current<Frame> r("cxx:p45:wb", box::role::read, box::opening::nonblock);
         if (w && r) {
             Frame f{};
             box::result<bool> take = r.take(f);  // stream is empty, writer still open
@@ -7980,7 +7980,7 @@ void Phase45()
         if (f) {
             Check(f.write("p45", 3) == 3, "phase45 valid channel write succeeds");
             f = box::byte_current{};  // release writer (RAII)
-            box::byte_current fr = box::file("cxx_p45.dat", box::role::read, 0);
+            box::byte_current fr = box::file("cxx_p45.dat", box::role::read, box::opening::none);
             if (fr) {
                 box::status sk = fr.seek(0);
                 Check(sk.has_value(), "phase45 seek on a seekable file is an empty (success) status");
@@ -9416,6 +9416,245 @@ void Phase52()
            "(six typed payloads + live process:spawned)\n");
 }
 
+// ── Phase53 (Ф25c) — box::spawn_detached / this_strand::exit / strand_info /
+//    strand_watch::next + box::opening / read_some ────────────────────────────
+static std::atomic<int>           g_p53_ran{0};         // detached worker reached its body
+static std::atomic<int>           g_p53_tl_dtor{0};     // thread_local dtor ran (storage_exit)
+static std::atomic<int>           g_p53_after_exit{0};  // MUST stay 0: code after exit() is unreachable
+static std::atomic<int>           g_p53_do_exit{1};     // runtime-true, opaque to the optimizer
+static std::atomic<std::uint32_t> g_p53_self_pid{0};
+static std::atomic<int>           g_p53_self_main{-1};
+
+// A thread_local whose destructor bumps a global — proof that both the detached
+// trampoline AND this_strand::exit() run __boxcxx_thread_storage_exit (which raw
+// strand_exit would skip).
+struct P53TlGuard {
+    ~P53TlGuard() { g_p53_tl_dtor.fetch_add(1, std::memory_order_release); }
+};
+
+// Returns normally: the detached trampoline's epilogue must run the tl destructor.
+static void p53_detached_worker(int)
+{
+    thread_local P53TlGuard guard;
+    (void)&guard;   // ODR-use → constructs the thread_local (its dtor must run at exit)
+    g_p53_self_pid.store(box::this_strand::id().native(), std::memory_order_relaxed);
+    g_p53_self_main.store(box::this_strand::is_main() ? 1 : 0, std::memory_order_relaxed);
+    g_p53_ran.store(1, std::memory_order_release);
+}
+
+// Ends via this_strand::exit(): the tl destructor must STILL run, and the store
+// after exit() must NEVER execute. The exit() is behind a runtime-true condition
+// so the trailing store stays reachable in the compiler's CFG (no dead-code after
+// [[noreturn]] → keeps the zero-warning build) yet is never reached at runtime.
+static void p53_exit_worker(int)
+{
+    thread_local P53TlGuard guard;
+    (void)&guard;
+    g_p53_ran.store(1, std::memory_order_release);
+    if (g_p53_do_exit.load(std::memory_order_acquire))
+        box::this_strand::exit();   // [[noreturn]] — runs tl dtors, ends this strand
+    g_p53_after_exit.store(1, std::memory_order_release);   // unreachable at runtime
+}
+
+// Brief-sleep body: keeps the strand (and its pid) alive across the collection
+// window so a target pid cannot be reaped + recycled into a different strand mid-
+// collect (no pid-alias false match).
+static void p53_brief_worker(int)
+{
+    std::this_thread::sleep_for(std::chrono::milliseconds(60));
+}
+
+// Collect strand:spawned for the three target pids via co_await strand_watch::
+// next(), proving executor integration + the latch (no dropped/duplicated event).
+// a/b/c AND `sentinel` are published into the watch FIFO synchronously at spawn,
+// BEFORE this coroutine blocks, so every co_await resumes via await_ready (no
+// native block). The sentinel is spawned LAST, so observing it means all three
+// targets were already delivered — a guaranteed BOUNDED terminator: a genuinely
+// dropped target surfaces as matched < 3 (a clean fail), never a hang. guard_iters
+// caps ambient strand traffic so the loop can never spin unbounded.
+static box::task<int> p53_collect_spawned(box::strand_watch *w, std::uint32_t a,
+                                          std::uint32_t b, std::uint32_t c, std::uint32_t sentinel)
+{
+    const std::uint32_t want[3] = { a, b, c };
+    bool seen[3] = { false, false, false };
+    int  matched = 0, guard_iters = 0;
+    while (guard_iters < 256) {
+        std::optional<box::strand_touch> e = co_await w->next();
+        ++guard_iters;
+        if (!e || e->kind != box::strand_touch_kind::spawned) continue;
+        if (e->spawned.pid == sentinel) break;   // FIFO terminator — targets already passed
+        for (int i = 0; i < 3; ++i)
+            if (!seen[i] && e->spawned.pid == want[i]) { seen[i] = true; ++matched; break; }
+    }
+    co_return matched;
+}
+
+void Phase53()
+{
+    using box::opening;
+
+    // ── Block 0 — deterministic, no strands (always runs) ───────────────────
+
+    // 1) box::opening — the typed open-flag that replaces raw CURRENT_* ints.
+    {
+        Check(static_cast<unsigned>(opening::none) == 0u, "phase53 opening::none == 0");
+        Check(static_cast<unsigned>(opening::create)   == CURRENT_CREATE,
+              "phase53 opening::create maps to CURRENT_CREATE");
+        Check(static_cast<unsigned>(opening::nonblock) == CURRENT_NONBLOCK,
+              "phase53 opening::nonblock maps to CURRENT_NONBLOCK");
+        opening both = opening::create | opening::nonblock;
+        Check(static_cast<unsigned>(both) == (CURRENT_CREATE | CURRENT_NONBLOCK),
+              "phase53 opening| composes both bits");
+        Check(box::any(both & opening::nonblock) && box::any(both & opening::create),
+              "phase53 opening& tests a set bit");
+        Check(!box::any(opening::create & opening::nonblock),
+              "phase53 opening& of disjoint bits is none");
+    }
+
+    // 2) read_some — the byte-channel tri-state (value n / value 0 = CLOSED / error).
+    {
+        box::byte_current closed;   // default-constructed: no handle
+        auto rc = closed.read_some(nullptr, 0);
+        Check(!rc && rc.error().code() == box::errc::invalid_argument,
+              "phase53 read_some on a closed handle -> invalid_argument");
+
+        box::byte_current fw = box::file("cxx_p53.dat", box::role::write);   // opening::create default
+        if (fw) { const char m[] = "boxos53"; fw.write(m, 7); fw.flush(); }
+        box::byte_current fr = box::file("cxx_p53.dat", box::role::read, opening::none);
+        if (fr) {
+            char buf[16] = {};
+            auto r1 = fr.read_some(buf, sizeof(buf));
+            Check(r1 && *r1 == 7u && std::string_view(buf, 7) == "boxos53",
+                  "phase53 read_some returns the byte count (value > 0)");
+            auto r2 = fr.read_some(buf, sizeof(buf));
+            Check(r2 && *r2 == 0u,
+                  "phase53 read_some at end-of-stream -> value 0 (CLOSED, not an error)");
+        } else {
+            printf("[CXX] note phase53: file backing unavailable; read_some value/CLOSED skipped\n");
+        }
+        // The would_block arm (NONBLOCK + empty) shares the box_errno_of path proven
+        // for the framed stream in Phase45 — not re-exercised on the byte path here.
+    }
+
+    // 3) box::this_strand::info on the MAIN strand — total view, is_main == true.
+    {
+        Check(box::this_strand::is_main(), "phase53 main strand: is_main() == true");
+        box::strand_info si = box::this_strand::info();
+        Check(si.is_main && si.id.native() == box::this_process::pid(),
+              "phase53 main strand_info == {cabin/process pid, is_main}");
+    }
+
+    // ── Block 1 — strands: needs FSGSBASE (per-strand TLS), like phase51 ─────
+    if (!cpu_has_fsgsbase()) {
+        printf("[CXX] note phase53: strands need FSGSBASE — skipping spawn_detached / exit / watch::next\n");
+        printf("[CXX] PASS phase53: box::opening + read_some + strand_info(main) "
+               "(strand parts skipped, no FSGSBASE)\n");
+        return;
+    }
+
+    // 4) box::spawn_detached — a joinless strand runs, bootstraps C++ TLS, exits
+    //    clean, and runs its thread_local destructor (the detached epilogue);
+    //    its strand_info reports {own pid, not-main}; strand_watch sees it spawn.
+    {
+        g_p53_ran.store(0, std::memory_order_relaxed);
+        g_p53_tl_dtor.store(0, std::memory_order_relaxed);
+        g_p53_self_pid.store(0, std::memory_order_relaxed);
+        g_p53_self_main.store(-1, std::memory_order_relaxed);
+
+        box::strand_watch w;   // claim BEFORE the spawn so no edge is missed
+        box::strand::id did = box::spawn_detached(p53_detached_worker, 0);
+        Check(did.native() != 0, "phase53 spawn_detached returns a live strand id");
+
+        box::stopwatch sw;
+        while (g_p53_ran.load(std::memory_order_acquire) == 0 &&
+               sw.elapsed() < std::chrono::milliseconds(2000)) yield();
+        Check(g_p53_ran.load(std::memory_order_acquire) == 1, "phase53 detached strand ran its body");
+
+        for (int i = 0; i < 2000 && g_p53_tl_dtor.load(std::memory_order_acquire) == 0; ++i) yield();
+        Check(g_p53_tl_dtor.load(std::memory_order_acquire) == 1,
+              "phase53 detached strand ran its thread_local destructor (TLS epilogue)");
+
+        Check(g_p53_self_main.load(std::memory_order_acquire) == 0,
+              "phase53 detached strand: is_main() == false");
+        Check(g_p53_self_pid.load(std::memory_order_acquire) == did.native(),
+              "phase53 detached strand_info: id == the spawn_detached pid");
+
+        if (w) {
+            bool saw_spawn = false;
+            for (int i = 0; i < 4000 && !saw_spawn; ++i) {
+                for (auto e = w.poll(); e; e = w.poll())
+                    if (e->kind == box::strand_touch_kind::spawned && e->spawned.pid == did.native())
+                        { saw_spawn = true; break; }
+                if (!saw_spawn) yield();
+            }
+            Check(saw_spawn, "phase53 strand_watch observed the detached strand's strand:spawned");
+            bool saw_exit = false;   // reaper-timed — observe best-effort (like phase52 process:died)
+            for (int i = 0; i < 800 && !saw_exit; ++i) {
+                for (auto e = w.poll(); e; e = w.poll())
+                    if (e->kind == box::strand_touch_kind::exited && e->exited.pid == did.native())
+                        { saw_exit = true; break; }
+                if (!saw_exit) yield();
+            }
+            printf("[CXX] note phase53: detached strand:exited observed=%d (reaper-timed)\n", (int)saw_exit);
+        }
+    }
+
+    // 5) box::this_strand::exit() — SAFE on a detached strand: it runs the
+    //    thread_local destructors, the strand exits, the post-exit store NEVER
+    //    runs (noreturn), and there is NO joiner to hang (a bounded watchdog
+    //    fails loudly on any hang).
+    {
+        g_p53_ran.store(0, std::memory_order_relaxed);
+        g_p53_tl_dtor.store(0, std::memory_order_relaxed);
+        g_p53_after_exit.store(0, std::memory_order_relaxed);
+        g_p53_do_exit.store(1, std::memory_order_release);
+
+        box::strand::id eid = box::spawn_detached(p53_exit_worker, 0);
+        Check(eid.native() != 0, "phase53 spawn_detached(exit worker) is live");
+
+        box::stopwatch sw;
+        while (g_p53_ran.load(std::memory_order_acquire) == 0 &&
+               sw.elapsed() < std::chrono::milliseconds(2000)) yield();
+        Check(g_p53_ran.load(std::memory_order_acquire) == 1, "phase53 exit worker reached its body");
+
+        for (int i = 0; i < 2000 && g_p53_tl_dtor.load(std::memory_order_acquire) == 0; ++i) yield();
+        Check(g_p53_tl_dtor.load(std::memory_order_acquire) == 1,
+              "phase53 this_strand::exit() ran the thread_local destructor first");
+
+        for (int i = 0; i < 500; ++i) yield();   // ample time for any stray store to land
+        Check(g_p53_after_exit.load(std::memory_order_acquire) == 0,
+              "phase53 this_strand::exit() is noreturn (code after it never ran)");
+    }
+
+    // 6) strand_watch::next() async — co_await collects every concurrent spawn
+    //    through the executor with no dropped event (latch under parallelism;
+    //    on 16c the three detached strands make true parallel progress).
+    {
+        box::strand_watch w;
+        if (w) {
+            while (w.poll()) { }   // drain ambient strand events first
+            // Three targets + a sentinel spawned LAST (FIFO terminator); brief-sleep
+            // bodies keep the pids un-recycled across the collect.
+            box::strand::id a    = box::spawn_detached(p53_brief_worker, 0);
+            box::strand::id b    = box::spawn_detached(p53_brief_worker, 0);
+            box::strand::id c    = box::spawn_detached(p53_brief_worker, 0);
+            box::strand::id sent = box::spawn_detached(p53_brief_worker, 0);
+            Check(a.native() && b.native() && c.native() && sent.native(),
+                  "phase53 three detached strands (+ sentinel) spawned for watch::next");
+            box::executor ex;
+            int matched = ex.block_on(
+                p53_collect_spawned(&w, a.native(), b.native(), c.native(), sent.native()));
+            Check(matched == 3,
+                  "phase53 co_await strand_watch::next() collected all three spawns (no dropped event)");
+        } else {
+            printf("[CXX] note phase53: strand_watch could not claim tags; watch::next skipped\n");
+        }
+    }
+
+    printf("[CXX] PASS phase53: box::spawn_detached + this_strand::exit/info + "
+           "strand_watch::next + box::opening + read_some\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -9490,6 +9729,7 @@ int main()
     Phase50();
     Phase51();
     Phase52();
+    Phase53();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

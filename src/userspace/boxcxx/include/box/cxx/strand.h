@@ -73,6 +73,11 @@
 #include "box/cxx/executor.h"       // box::executor / __exec::wait_domain (co_await join, Ф24b)
 #include <coroutine>                // std::coroutine_handle (completion() awaiter)
 #include <system_error>             // std::system_error on co_await of a non-joinable strand
+#include <exception>                // std::terminate (detached trampoline / this_strand::exit)
+#include <tuple>                    // std::tuple / std::apply (box::spawn_detached decay-copy)
+
+#include "box/strand.h"             // strand_spawn / strand_exit — the detached substrate (C)
+#include "box/cxx/tls_strand.h"     // __boxcxx_tls_strand_init / thread_storage_enter / exit
 
 namespace box {
 
@@ -361,6 +366,90 @@ private:
 
 inline void swap(strand &a, strand &b) noexcept { a.swap(b); }
 
+// ── box::strand_info — a strand's identity view (Ф25c) ──────────────────────
+// The C++ face of the kernel StrandInfo control block, deliberately NARROW: a
+// strand's dog-tag, not the cabin's plumbing diagram. It carries only identity
+// (the strand pid, as a box::strand::id) and whether this is the cabin's
+// founding (main) strand — never the internal ring VAs / stash pointers the ABI
+// block also holds, which are kernel-private implementation detail.
+struct strand_info {
+    strand::id id;       // this strand's pid (main strand → cabin pid)
+    bool       is_main;  // true iff the cabin's first / founding strand
+};
+
+// ── box::spawn_detached — a fire-and-forget strand (Ф25c) ───────────────────
+namespace _strand_detail {
+// The detached strand entry: mirrors std::thread::Trampoline MINUS the Join
+// rendezvous (a fire-and-forget strand has no joiner, so there is no flag to
+// publish and nobody to wake). Bootstrap C++ TLS FIRST — the raw kernel
+// strand_spawn does NOT, unlike std::thread's joinable path — then run the
+// callable, then run this strand's thread_local destructors while its neg-TLS
+// page is still mapped, then strand_exit (boxlib frees the per-strand Touch
+// stash + StrandPool slab on the way out). An exception escaping the callable or
+// a thread_local destructor is std::terminate, exactly as [thread.thread.constr].
+//
+// Heap-closure lifetime (vs std::thread): we HOIST the decay-copied tuple onto
+// this frame and `delete c` BEFORE invoking, because the callable's blessed exit
+// is box::this_strand::exit() — a non-unwinding strand_exit. Freeing the heap
+// block only AFTER the callable returned (std::thread's order — it needs `c->j`
+// post-call) would LEAK the block whenever the callable exit()s. The hoisted
+// tuple lives in an inner scope so its args are destroyed BEFORE thread_storage_
+// exit on the normal path (same arg-then-tl-dtor order as std::thread). On the
+// exit() path the stack tuple is NOT unwound (its args' dtors are skipped — the
+// documented, irreducible cost of a non-unwinding exit), but the heap block is
+// already gone, so a spawn_detached→exit() loop leaks nothing per iteration for
+// the common trivially-destructible-args case.
+template <class Closure>
+inline void detached_trampoline(void *p)
+{
+    auto *c = static_cast<Closure *>(p);
+    __boxcxx_tls_strand_init();
+    __boxcxx_thread_storage_enter();
+    try {
+        {
+            auto call = std::move(c->call);   // hoist the tuple onto this frame
+            delete c;                          // free the heap closure NOW — survives this_strand::exit()
+            std::apply(
+                [](auto &&...a) { std::invoke(static_cast<decltype(a)>(a)...); },
+                std::move(call));
+        }                                      // `call` (the args) destroyed here, before the tl dtors
+        __boxcxx_thread_storage_exit();        // run this strand's thread_local dtors
+    } catch (...) {
+        std::terminate();
+    }
+    strand_exit();   // noreturn — ends this strand; boxlib frees its stash + slab
+}
+}  // namespace _strand_detail
+
+// Spawn a JOINLESS strand running f(args...) in the caller's cabin, decay-copying
+// f + args into the strand exactly as std::thread does. Unlike box::strand there
+// is no join handle and no heap Join block: the strand runs unsupervised and the
+// kernel reaper reclaims its pid when it exits. Returns the strand's pid as a
+// box::strand::id — an OBSERVATION handle (match it against strand_watch events),
+// valid until strand:exited, after which the reaper may recycle the pid; it is
+// NOT a control handle (you cannot join or signal through it). Throws
+// std::system_error if the kernel had no strand slot, mirroring std::thread.
+//
+// This is the substrate that makes box::this_strand::exit() safe: a detached
+// strand genuinely has no joiner, so an early strand_exit strands nobody.
+template <class F, class... Args>
+inline strand::id spawn_detached(F &&f, Args &&...args)
+{
+    using Tup = std::tuple<std::decay_t<F>, std::decay_t<Args>...>;
+    struct Closure { Tup call; };
+    // If a decay-copy of f/args throws, the new-expression frees its own storage
+    // and nothing else needs unwinding (no Join block, unlike std::thread).
+    Closure *c = new Closure{Tup{std::forward<F>(f), std::forward<Args>(args)...}};
+    std::uint32_t pid = strand_spawn(&_strand_detail::detached_trampoline<Closure>, c);
+    if (pid == 0) {
+        delete c;
+        throw std::system_error(
+            std::make_error_code(std::errc::resource_unavailable_try_again),
+            "box::spawn_detached: strand_spawn failed");
+    }
+    return strand::make_id(pid);
+}
+
 // ── box::this_strand — identity / yield for the running strand ──────────────
 // The strand-flavoured spelling of std::this_thread. id() of the main strand is
 // the cabin pid (a cabin's first strand has no separate pid). Scheduling stance
@@ -369,6 +458,56 @@ inline void swap(strand &a, strand &b) noexcept { a.swap(b); }
 namespace this_strand {
 inline strand::id id() noexcept { return strand::make_id(strand_self()); }
 inline void       yield() noexcept { ::yield(); }
+
+// True iff the caller is the cabin's MAIN strand. A spawned strand carries its
+// own kernel StrandInfo (its FS base); the main strand carries none — boxlib's
+// strand_info_or_null() is exactly that discriminator.
+inline bool is_main() noexcept { return strand_info_or_null() == nullptr; }
+
+// The running strand's identity view. TOTAL — never fails: on the main strand it
+// reports {cabin pid, is_main=true}; on a spawned strand {strand pid,
+// is_main=false}. (The kernel StrandInfo is absent on the main strand, so the
+// main view is synthesised from strand_self() + the is_main discriminator.)
+inline strand_info info() noexcept { return strand_info{id(), is_main()}; }
+
+// ── box::this_strand::exit — end the CALLING strand now (Ф25c) ──────────────
+// Terminate the running strand, FIRST running its C++ thread_local destructors
+// (which raw kernel strand_exit skips — boxlib's strand_exit still frees the
+// per-strand Touch stash and StrandPool slab). [[noreturn]].
+//
+// SHARP CONTRACT — valid only on a strand with NO joiner, i.e. one started by
+// box::spawn_detached:
+//   • On the MAIN strand this is a hard error (std::terminate). The main strand
+//     owns the cabin's global static destructors and shared-buffer flush, which
+//     run only when it returns from main() — bailing here would skip cabin
+//     teardown. End the main strand by returning from main(), never via exit().
+//   • From inside a JOINABLE box::strand / std::thread, exit() is UNDEFINED: that
+//     strand's join rendezvous (the flag a joiner parks on, plus its wake) lives
+//     in the std::thread trampoline tail, which this noreturn bypasses — the
+//     joiner would park forever. There is no Join back-reference to detect this
+//     at runtime, so it is a documented contract, not a guard. The blessed way
+//     to end a joinable strand is to RETURN from its function.
+// std deliberately offers no std::this_thread::exit() for exactly this hazard;
+// box::this_strand::exit() is the BoxOS extension for the detached case, where an
+// early strand_exit strands nobody.
+//
+// NON-UNWINDING: exit() runs this strand's thread_local destructors, but it does
+// NOT unwind the stack — automatic objects in the calling frames, AND a
+// spawn_detached closure's captured arguments, are NOT destroyed (the same
+// non-unwinding nature as POSIX pthread_exit). spawn_detached's heap closure
+// BLOCK is already reclaimed by the time the callable runs, so there is no
+// per-call block leak; but if your callable's captures own resources (a
+// std::string, a box::current, a shared_ptr), exit() leaks those resources.
+// Returning from the strand function is the fully-unwinding clean path — reach
+// for exit() only to bail early from a strand whose captures are trivially
+// destructible.
+[[noreturn]] inline void exit() noexcept
+{
+    if (is_main())
+        std::terminate();             // main strand: cabin teardown is return-from-main only
+    __boxcxx_thread_storage_exit();   // run this strand's thread_local dtors (raw strand_exit skips them)
+    strand_exit();                    // noreturn — boxlib frees the per-strand stash + slab
+}
 }  // namespace this_strand
 
 // ── strand lifecycle decoders ───────────────────────────────────────────────
@@ -517,7 +656,85 @@ public:
         }
     }
 
+    // ── co_await w.next() -> std::optional<strand_touch>  (async, Ф25c) ──────
+    // Executor-integrated async read of the next lifecycle event from ANY of the
+    // four strand:* tags, folding into the same coroutine watch-loop as every
+    // other box:: awaiter (box::subscription / brook / current). Because there is
+    // no kernel "wait on N tags" primitive, the native block is ONE bounded
+    // round-robin slice across the four tags (wait_round); the executor re-pumps
+    // it until an event lands. domain=touch: a strand:* Touch has no IPI on push
+    // and its producer may be a same-core sibling strand, so this must idle as a
+    // touch waiter, never a result one (a result-tagged lone forever-block would
+    // hang a single App-Core).
+    //
+    // LATCH invariant (hazard, mirrors touch/brook/current): once a poll or block
+    // has decoded an event into _M_ev, NEVER re-poll — the executor re-polls every
+    // waiter right after its native block, and a second drain would advance past
+    // the just-delivered event (the tag stash head already moved) and drop it.
+    //
+    // PRECONDITION: at most ONE outstanding co_await next() per watch at a time,
+    // and the strand_watch must OUTLIVE the await (the awaiter holds its address).
+    class next_awaiter {
+    public:
+        explicit next_awaiter(strand_watch *w) noexcept : _M_w(w) {}
+
+        bool await_ready() noexcept
+        {
+            _M_ev = _M_w->poll();   // latch the first ready event across the 4 tags
+            return _M_ev.has_value();
+        }
+        bool await_suspend(std::coroutine_handle<> __h)
+        {
+            executor::current()->wait_on(__h, this, &_S_poll, &_S_block,
+                                         __exec::wait_domain::touch);
+            return true;
+        }
+        std::optional<strand_touch> await_resume() noexcept { return _M_ev; }
+
+    private:
+        static bool _S_poll(void *__s)
+        {
+            auto *__a = static_cast<next_awaiter *>(__s);
+            if (__a->_M_ev) return true;   // LATCH: already delivered — do NOT re-drain
+            __a->_M_ev = __a->_M_w->poll();
+            return __a->_M_ev.has_value();
+        }
+        static void _S_block(void *__s, std::uint32_t __ms)
+        {
+            auto *__a = static_cast<next_awaiter *>(__s);
+            if (__a->_M_ev) return;        // already delivered — don't re-block
+            __a->_M_ev = __a->_M_w->wait_round(__ms);
+        }
+
+        strand_watch               *_M_w;
+        std::optional<strand_touch> _M_ev{};
+    };
+
+    // co_await w.next() -> std::optional<strand_touch>  (nullopt only on internal
+    // decode failure; lifecycle Touches do not close, so this is effectively a
+    // perpetual event source).
+    next_awaiter next() noexcept { return next_awaiter{this}; }
+
 private:
+    // ONE bounded round-robin pass across the four tags for the async next()
+    // awaiter's native block: split the executor's budget `ms` evenly over the
+    // four tags (a 0 budget — lone-forever — uses the same fixed per-tag step as
+    // wait(), and the executor re-pumps). Returns the first decoded event, or
+    // nullopt if the pass elapsed without one. Distinct from wait(), which LOOPS
+    // internally; this performs exactly one slice so it never holds the executor's
+    // pump hostage.
+    std::optional<strand_touch> wait_round(std::uint32_t ms) noexcept
+    {
+        constexpr std::uint32_t step = 16;
+        std::uint32_t slice = (ms == 0) ? step : (ms / 4);
+        if (slice == 0) slice = 1;
+        if (auto e = wait_one(spawned_, strand_touch_kind::spawned, slice)) return e;
+        if (auto e = wait_one(exited_,  strand_touch_kind::exited,  slice)) return e;
+        if (auto e = wait_one(parked_,  strand_touch_kind::parked,  slice)) return e;
+        if (auto e = wait_one(woken_,   strand_touch_kind::woken,   slice)) return e;
+        return std::nullopt;
+    }
+
     std::optional<strand_touch> decode_spawned(const touch &ev) noexcept
     {
         auto p = ev.payload_as<strand_spawned>();
@@ -574,8 +791,12 @@ private:
         return std::nullopt;
     }
 
-    // A filtered-out event must not consume the whole slice without a retry, so a
-    // dropped spawned/exited re-arms a fresh wait until the slice is spent.
+    // Wait up to one `slice` on a single tag and decode the next event of `kind`.
+    // Performs EXACTLY ONE sub.wait(slice): a filtered-out spawned/exited (a cabin
+    // the set_filter dropped) decodes to nullopt and is reported as "nothing this
+    // slice" — the retry, when wanted, is the caller's outer loop (wait()'s for(;;)
+    // re-arms across all four tags; wait_round deliberately does a single pass and
+    // lets the executor re-pump). No in-slice retry happens here.
     std::optional<strand_touch> wait_one(subscription &sub, strand_touch_kind kind,
                                          std::uint32_t slice) noexcept
     {
