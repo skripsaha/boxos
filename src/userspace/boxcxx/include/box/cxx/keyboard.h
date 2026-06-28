@@ -27,7 +27,7 @@
 #include <optional>
 
 #include "box/keyboard.h"   // kb_event_t + KB_MOD_* (the keyboard Touch payload)
-#include "box/cxx/touch.h"  // box::subscription / box::event / box::tag
+#include "box/cxx/touch.h"  // box::subscription / box::touch / box::tag
 
 namespace box {
 
@@ -57,8 +57,8 @@ public:
 
     // Decode the keyboard Touch payload {scancode, ascii, mods}.
     static key from_event(const kb_event_t &e) noexcept { return key(e.ascii, e.scancode, e.mods); }
-    // Decode a "keyboard" box::event (its payload is a kb_event_t).
-    static std::optional<key> from_touch(const event &ev) noexcept
+    // Decode a "keyboard" box::touch (its payload is a kb_event_t).
+    static std::optional<key> from_touch(const touch &ev) noexcept
     {
         if (std::optional<kb_event_t> e = ev.payload_as<kb_event_t>()) return from_event(*e);
         return std::nullopt;
@@ -82,14 +82,14 @@ public:
     // event (not a hardware poll).
     std::optional<key> poll() noexcept
     {
-        if (std::optional<event> ev = sub_.poll()) return key::from_touch(*ev);
+        if (std::optional<touch> ev = sub_.poll()) return key::from_touch(*ev);
         return std::nullopt;
     }
     // Block in the kernel for the next key, up to `timeout_ms` (0 == forever);
     // nullopt on timeout. Efficient — the kernel wakes us on the key event.
     std::optional<key> wait(std::uint32_t timeout_ms = 0) noexcept
     {
-        if (std::optional<event> ev = sub_.wait(timeout_ms)) return key::from_touch(*ev);
+        if (std::optional<touch> ev = sub_.wait(timeout_ms)) return key::from_touch(*ev);
         return std::nullopt;
     }
 
@@ -104,7 +104,7 @@ public:
         bool await_suspend(std::coroutine_handle<> h) { return inner_.await_suspend(h); }
         std::optional<key> await_resume() noexcept
         {
-            if (std::optional<event> ev = inner_.await_resume()) return key::from_touch(*ev);
+            if (std::optional<touch> ev = inner_.await_resume()) return key::from_touch(*ev);
             return std::nullopt;
         }
     };

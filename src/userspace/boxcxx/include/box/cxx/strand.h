@@ -69,7 +69,7 @@
 #include "box/sync.h"               // addr_park / addr_wake — the kernel park word
 #include "box/error.h"              // OK / ERR_TIMEOUT / ERR_ADDR_VALUE_MISMATCH
 #include "box/core/strand_self.h"   // strand_self — this_strand::id (main → cabin pid)
-#include "box/cxx/touch.h"          // box::tag / box::subscription / box::event
+#include "box/cxx/touch.h"          // box::tag / box::subscription / box::touch
 #include "box/cxx/executor.h"       // box::executor / __exec::wait_domain (co_await join, Ф24b)
 #include <coroutine>                // std::coroutine_handle (completion() awaiter)
 #include <system_error>             // std::system_error on co_await of a non-joinable strand
@@ -390,7 +390,7 @@ struct strand_exited {
 };
 
 // strand:parked — packed to 12 bytes, `{ phys, pid }`. MUST be packed: the kernel
-// emits a 12-byte payload and box::event::payload_as rejects a wider T.
+// emits a 12-byte payload and box::touch::payload_as rejects a wider T.
 struct __attribute__((packed)) strand_parked {
     std::uint64_t phys;  // physical frame the strand parked on
     std::uint32_t pid;   // the parking strand's kernel pid
@@ -409,13 +409,13 @@ static_assert(sizeof(strand_parked)  == 12, "strand_parked must be packed to 12 
 static_assert(sizeof(strand_woken)   == 16, "strand_woken must be packed to 16 bytes (kernel payload)");
 
 // ── box::strand_watch — observe the system-wide strand lifecycle ────────────
-enum class strand_event_kind { spawned, exited, parked, woken };
+enum class strand_touch_kind { spawned, exited, parked, woken };
 
 // One decoded lifecycle event, tagged by kind with the matching decoder in the
 // union. `source` is the publisher pid (the kernel). strand_pid() returns the
 // active member's strand pid regardless of kind.
-struct strand_event {
-    strand_event_kind kind;
+struct strand_touch {
+    strand_touch_kind kind;
     std::uint32_t     source;
     union {
         strand_spawned spawned;
@@ -427,10 +427,10 @@ struct strand_event {
     std::uint32_t strand_pid() const noexcept
     {
         switch (kind) {
-        case strand_event_kind::spawned: return spawned.pid;
-        case strand_event_kind::exited:  return exited.pid;
-        case strand_event_kind::parked:  return parked.pid;
-        case strand_event_kind::woken:   return woken.pid;
+        case strand_touch_kind::spawned: return spawned.pid;
+        case strand_touch_kind::exited:  return exited.pid;
+        case strand_touch_kind::parked:  return parked.pid;
+        case strand_touch_kind::woken:   return woken.pid;
         }
         return 0;
     }
@@ -485,7 +485,7 @@ public:
 
     // Non-blocking: the next strand event from any of the four tags, in a fixed
     // deterministic order (spawned, exited, parked, woken). nullopt if none.
-    std::optional<strand_event> poll() noexcept
+    std::optional<strand_touch> poll() noexcept
     {
         if (auto e = poll_spawned()) return e;
         if (auto e = poll_exited())  return e;
@@ -497,7 +497,7 @@ public:
     // Blocking: poll first, then round-robin a short bounded wait across the four
     // tags until one fires or ms elapses (ms == 0 blocks forever). May return
     // slightly after ms — this is a thin helper, not a precise multiplex.
-    std::optional<strand_event> wait(std::uint32_t ms = 0) noexcept
+    std::optional<strand_touch> wait(std::uint32_t ms = 0) noexcept
     {
         if (auto e = poll()) return e;
         constexpr std::uint32_t step = 16;  // per-tag round-robin slice
@@ -506,10 +506,10 @@ public:
             std::uint32_t slice = (ms == 0) ? step
                                             : ((ms - waited < step) ? (ms - waited) : step);
             if (slice == 0) slice = 1;
-            if (auto e = wait_one(spawned_, strand_event_kind::spawned, slice)) return e;
-            if (auto e = wait_one(exited_,  strand_event_kind::exited,  slice)) return e;
-            if (auto e = wait_one(parked_,  strand_event_kind::parked,  slice)) return e;
-            if (auto e = wait_one(woken_,   strand_event_kind::woken,   slice)) return e;
+            if (auto e = wait_one(spawned_, strand_touch_kind::spawned, slice)) return e;
+            if (auto e = wait_one(exited_,  strand_touch_kind::exited,  slice)) return e;
+            if (auto e = wait_one(parked_,  strand_touch_kind::parked,  slice)) return e;
+            if (auto e = wait_one(woken_,   strand_touch_kind::woken,   slice)) return e;
             if (ms != 0) {
                 waited += slice * 4;
                 if (waited >= ms) return std::nullopt;
@@ -518,57 +518,57 @@ public:
     }
 
 private:
-    std::optional<strand_event> decode_spawned(const event &ev) noexcept
+    std::optional<strand_touch> decode_spawned(const touch &ev) noexcept
     {
         auto p = ev.payload_as<strand_spawned>();
         if (!p) return std::nullopt;
         if (filter_ && p->cabin_pid != filter_) return std::nullopt;
-        strand_event e{strand_event_kind::spawned, ev.source(), {}};
+        strand_touch e{strand_touch_kind::spawned, ev.source(), {}};
         e.spawned = *p;
         return e;
     }
-    std::optional<strand_event> decode_exited(const event &ev) noexcept
+    std::optional<strand_touch> decode_exited(const touch &ev) noexcept
     {
         auto p = ev.payload_as<strand_exited>();
         if (!p) return std::nullopt;
         if (filter_ && p->cabin_pid != filter_) return std::nullopt;
-        strand_event e{strand_event_kind::exited, ev.source(), {}};
+        strand_touch e{strand_touch_kind::exited, ev.source(), {}};
         e.exited = *p;
         return e;
     }
-    std::optional<strand_event> decode_parked(const event &ev) noexcept
+    std::optional<strand_touch> decode_parked(const touch &ev) noexcept
     {
         auto p = ev.payload_as<strand_parked>();
         if (!p) return std::nullopt;
-        strand_event e{strand_event_kind::parked, ev.source(), {}};
+        strand_touch e{strand_touch_kind::parked, ev.source(), {}};
         e.parked = *p;
         return e;
     }
-    std::optional<strand_event> decode_woken(const event &ev) noexcept
+    std::optional<strand_touch> decode_woken(const touch &ev) noexcept
     {
         auto p = ev.payload_as<strand_woken>();
         if (!p) return std::nullopt;
-        strand_event e{strand_event_kind::woken, ev.source(), {}};
+        strand_touch e{strand_touch_kind::woken, ev.source(), {}};
         e.woken = *p;
         return e;
     }
 
-    std::optional<strand_event> poll_spawned() noexcept
+    std::optional<strand_touch> poll_spawned() noexcept
     {
         if (auto ev = spawned_.poll()) return decode_spawned(*ev);
         return std::nullopt;
     }
-    std::optional<strand_event> poll_exited() noexcept
+    std::optional<strand_touch> poll_exited() noexcept
     {
         if (auto ev = exited_.poll()) return decode_exited(*ev);
         return std::nullopt;
     }
-    std::optional<strand_event> poll_parked() noexcept
+    std::optional<strand_touch> poll_parked() noexcept
     {
         if (auto ev = parked_.poll()) return decode_parked(*ev);
         return std::nullopt;
     }
-    std::optional<strand_event> poll_woken() noexcept
+    std::optional<strand_touch> poll_woken() noexcept
     {
         if (auto ev = woken_.poll()) return decode_woken(*ev);
         return std::nullopt;
@@ -576,15 +576,15 @@ private:
 
     // A filtered-out event must not consume the whole slice without a retry, so a
     // dropped spawned/exited re-arms a fresh wait until the slice is spent.
-    std::optional<strand_event> wait_one(subscription &sub, strand_event_kind kind,
+    std::optional<strand_touch> wait_one(subscription &sub, strand_touch_kind kind,
                                          std::uint32_t slice) noexcept
     {
         if (auto ev = sub.wait(slice)) {
             switch (kind) {
-            case strand_event_kind::spawned: return decode_spawned(*ev);
-            case strand_event_kind::exited:  return decode_exited(*ev);
-            case strand_event_kind::parked:  return decode_parked(*ev);
-            case strand_event_kind::woken:   return decode_woken(*ev);
+            case strand_touch_kind::spawned: return decode_spawned(*ev);
+            case strand_touch_kind::exited:  return decode_exited(*ev);
+            case strand_touch_kind::parked:  return decode_parked(*ev);
+            case strand_touch_kind::woken:   return decode_woken(*ev);
             }
         }
         return std::nullopt;

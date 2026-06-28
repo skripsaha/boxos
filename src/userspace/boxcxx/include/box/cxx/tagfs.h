@@ -57,7 +57,7 @@
 #include "box/file.h"
 #include "box/cxx/current.h"  // box::byte_current, box::role, box::file(), CURRENT_CREATE
 #include "box/cxx/error.h"    // box::result / box::status / box::error / box_errno_of
-#include "box/cxx/touch.h"    // box::tag, box::event, box::subscription (anchor observer)
+#include "box/cxx/touch.h"    // box::tag, box::touch, box::subscription (anchor observer)
 
 namespace box {
 namespace tagfs {
@@ -469,7 +469,7 @@ inline std::vector<std::uint32_t> snapshots()
 // ── anchor observer — bridge durability events into box::touch ─────────────
 // anchor() (durability flush) publishes an ANCHOR event on the well-known
 // "anchor" tag, and for a specific file also on each of that file's tags. A
-// monitor subscribes with on_anchor() and reads the delivered box::event
+// monitor subscribes with on_anchor() and reads the delivered box::touch
 // through anchor_event to learn which file became durable.
 
 // The payload anchor() publishes — must match the kernel's ObjAnchor record.
@@ -484,7 +484,7 @@ static_assert(offsetof(anchor_payload, file_id) == 0, "anchor_payload.file_id of
 static_assert(offsetof(anchor_payload, op) == 4, "anchor_payload.op offset");
 static_assert(offsetof(anchor_payload, now_us) == 8, "anchor_payload.now_us offset");
 
-// A typed view over a box::event delivered on the "anchor" tag (or a file tag).
+// A typed view over a box::touch delivered on the "anchor" tag (or a file tag).
 // Decodes once; file tags also carry WRITE events (op 1), so check is_anchor().
 class anchor_event {
     std::uint32_t file_id_ = 0;
@@ -493,7 +493,7 @@ class anchor_event {
 
 public:
     anchor_event() noexcept = default;
-    explicit anchor_event(const box::event &e) noexcept
+    explicit anchor_event(const box::touch &e) noexcept
     {
         if (std::optional<anchor_payload> p = e.payload_as<anchor_payload>()) {
             file_id_ = p->file_id;
@@ -510,10 +510,10 @@ public:
 };
 
 // Claim the "anchor" tag; poll() / wait() / co_await next() deliver each anchor
-// as a box::event you wrap in anchor_event. Returns a RAII box::subscription.
-inline box::subscription on_anchor(box::touch_mode m = box::touch_mode::rest)
+// as a box::touch you wrap in anchor_event. Returns a RAII box::subscription.
+inline box::subscription on_anchor()
 {
-    return box::subscription(box::tag("anchor"), m);
+    return box::subscription(box::tag("anchor"));
 }
 
 }  // namespace tagfs

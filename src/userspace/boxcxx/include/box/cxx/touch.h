@@ -9,14 +9,14 @@
 //   box::subscription — a RAII claim on a tag (the consumer side); poll() /
 //                       wait() / co_await next() deliver the next event OF THAT
 //                       TAG, leaving other tags for their own subscribers.
-//   box::event        — a received Touch, with typed payload_as<T>() access.
+//   box::touch        — a received Touch, with typed payload_as<T>() access.
 //   box::publish(tag, v) / register_tag(tag, …) — the producer / policy side.
 //
 //   box::subscription sub("metric:tick"_tag);
 //   box::publish("metric:tick"_tag, Tick{...});
 //   if (auto ev = sub.poll())          handle(ev->payload_as<Tick>());
 //   auto ev = co_await sub.next();     // suspends on the current box::executor
-//   for (box::event e : sub) { ... }   // stream-view (set a drain timeout to end)
+//   for (box::touch e : sub) { ... }   // stream-view (set a drain timeout to end)
 //
 // Tag-filtered delivery rests on the boxlib touch_try_pop_tag / touch_wait_tag
 // stash: the TouchRing is cabin-wide FIFO, so non-matching events are parked
@@ -71,18 +71,56 @@ inline namespace literals {
 inline tag operator""_tag(const char *s, std::size_t) { return tag(s); }
 } // namespace literals
 
-// ── box::event — a received Touch with typed payload access ─────────────────
-class event {
+// ── box::tags — the catalog of canonical kernel Touch tags ──────────────────
+// Pre-printed luggage tags: grab the named handle off its hook instead of
+// hand-interning a string each time. Each accessor caches a process-lifetime
+// interned tag in a function-local static (lazy — interned on first call, once
+// the registry is up), so a hot loop never round-trips the registry. The
+// interned id is a process-global registry fact; each strand still makes its
+// own claim (a box::subscription) to actually receive the tag.
+namespace tags {
+inline const tag &keyboard()        { static const tag t{TOUCH_TAG_KEYBOARD};        return t; }
+inline const tag &process_died()    { static const tag t{TOUCH_TAG_PROCESS_DIED};    return t; }
+inline const tag &process_spawned() { static const tag t{TOUCH_TAG_PROCESS_SPAWNED}; return t; }
+inline const tag &system_shutdown() { static const tag t{TOUCH_TAG_SYSTEM_SHUTDOWN}; return t; }
+inline const tag &system_reboot()   { static const tag t{TOUCH_TAG_SYSTEM_REBOOT};   return t; }
+inline const tag &usb_connect()     { static const tag t{TOUCH_TAG_USB_CONNECT};     return t; }
+inline const tag &usb_disconnect()  { static const tag t{TOUCH_TAG_USB_DISCONNECT};  return t; }
+}  // namespace tags
+
+// ── box::provenance — which layer franked a Touch into the system ───────────
+// The postmark on the envelope. box::publish from userspace stamps `user`; the
+// kernel's own publishers stamp `kernel`; TagFS-originated touches carry `tagfs`.
+enum class provenance : std::uint16_t {
+    none   = 0,
+    kernel = TOUCH_FLAG_KERNEL,
+    user   = TOUCH_FLAG_USER,
+    tagfs  = TOUCH_FLAG_TAGFS,
+};
+
+// ── box::touch — a received Touch with typed payload access ─────────────────
+class touch {
     Touch t_{};
 
 public:
-    event() noexcept = default;
-    explicit event(const Touch &t) noexcept : t_(t) {}
+    touch() noexcept = default;
+    explicit touch(const Touch &t) noexcept : t_(t) {}
 
     TouchTag      tag_id() const noexcept { return t_.tag_id; }
     std::uint32_t source() const noexcept { return t_.source_pid; }
     std::uint64_t timestamp() const noexcept { return t_.timestamp_tsc; }
     const Touch  &raw() const noexcept { return t_; }
+
+    // Provenance — which layer franked this Touch into the system (Touch.flags).
+    std::uint16_t   flags() const noexcept { return t_.flags; }
+    box::provenance provenance() const noexcept
+    {
+        return static_cast<box::provenance>(
+            t_.flags & (TOUCH_FLAG_KERNEL | TOUCH_FLAG_USER | TOUCH_FLAG_TAGFS));
+    }
+    bool from_kernel() const noexcept { return (t_.flags & TOUCH_FLAG_KERNEL) != 0; }
+    bool from_user() const noexcept { return (t_.flags & TOUCH_FLAG_USER) != 0; }
+    bool from_tagfs() const noexcept { return (t_.flags & TOUCH_FLAG_TAGFS) != 0; }
 
     std::span<const std::byte> payload() const noexcept
     {
@@ -97,9 +135,9 @@ public:
     std::optional<T> payload_as() const noexcept
     {
         static_assert(std::is_trivially_copyable_v<T>,
-                      "box::event::payload_as<T> requires a trivially copyable T");
+                      "box::touch::payload_as<T> requires a trivially copyable T");
         static_assert(sizeof(T) <= BOXOS_TOUCH_PAYLOAD_MAX,
-                      "box::event::payload_as<T>: T exceeds the 96-byte Touch payload");
+                      "box::touch::payload_as<T>: T exceeds the 96-byte Touch payload");
         if (t_.payload_len < sizeof(T)) return std::nullopt;
         T v;
         __builtin_memcpy(&v, t_.payload, sizeof(T));
@@ -134,11 +172,6 @@ enum class touch_capability : unsigned {
     owners      = TOUCH_CAP_OWNERS,
     kernel_only = TOUCH_CAP_KERNEL_ONLY,
 };
-enum class touch_mode : unsigned {
-    rest      = TOUCH_REST,
-    react     = TOUCH_REACT,
-    interrupt = TOUCH_INTERRUPT,
-};
 
 // Register a tag's delivery policy / capability (the registry side).
 inline bool register_tag(const tag &tg, touch_policy pol, touch_capability cap) noexcept
@@ -147,6 +180,13 @@ inline bool register_tag(const tag &tg, touch_policy pol, touch_capability cap) 
                                 static_cast<TouchCapability>(cap)) == OK;
 }
 
+// Low-level escape hatch for a hand-rolled INTERRUPT-mode handler: signal the
+// kernel that the in-flight IRQ-mode upcall is done and any pending touches may
+// replay. You almost certainly want REST (box::subscription / co_await next())
+// instead — INTERRUPT mode is the Unix async-signal model this layer exists to
+// replace; this is here only for the rare expert hand-roll.
+inline bool touch_irq_return() noexcept { return ::touch_irq_return() == OK; }
+
 // ── box::subscription — RAII claim on a tag (the consumer side) ─────────────
 class subscription {
     TouchTag      id_       = TOUCH_TAG_INVALID;
@@ -154,11 +194,13 @@ class subscription {
 
 public:
     subscription() noexcept = default;
-    explicit subscription(const tag &tg, touch_mode m = touch_mode::rest) noexcept
+    // REST claim — the PULL model: poll() / wait() / co_await next() deliver the
+    // event to YOU. The kernel's PUSH model (run a manifest on every touch, via
+    // TOUCH_REACT) and INTERRUPT mode are deliberately not offered on this type.
+    explicit subscription(const tag &tg) noexcept
         : id_(tg.id())
     {
-        if (id_ != TOUCH_TAG_INVALID &&
-            touch_claim(id_, static_cast<TouchMode>(m), 0, 0) != OK)
+        if (id_ != TOUCH_TAG_INVALID && touch_claim(id_, TOUCH_REST, 0, 0) != OK)
             id_ = TOUCH_TAG_INVALID;
     }
     subscription(const subscription &)            = delete;
@@ -183,24 +225,24 @@ public:
     TouchTag id() const noexcept { return id_; }
 
     // Non-blocking: the next event of this tag, stash-aware. nullopt if none.
-    std::optional<event> poll() noexcept
+    std::optional<touch> poll() noexcept
     {
         Touch t;
-        if (id_ != TOUCH_TAG_INVALID && touch_try_pop_tag(id_, &t)) return event(t);
+        if (id_ != TOUCH_TAG_INVALID && touch_try_pop_tag(id_, &t)) return touch(t);
         return std::nullopt;
     }
     // Blocking: wait up to timeout_ms (0 == forever) for the next event of this
     // tag. nullopt on timeout.
-    std::optional<event> wait(std::uint32_t timeout_ms = 0) noexcept
+    std::optional<touch> wait(std::uint32_t timeout_ms = 0) noexcept
     {
         Touch t;
-        if (id_ != TOUCH_TAG_INVALID && touch_wait_tag(id_, &t, timeout_ms)) return event(t);
+        if (id_ != TOUCH_TAG_INVALID && touch_wait_tag(id_, &t, timeout_ms)) return touch(t);
         return std::nullopt;
     }
     // Acknowledge a latched/level event so the next edge can fire.
     bool ack() noexcept { return id_ != TOUCH_TAG_INVALID && touch_ack(id_) == OK; }
 
-    // ── coroutine-native: co_await sub.next() -> optional<event> ────────────
+    // ── coroutine-native: co_await sub.next() -> optional<touch> ────────────
     // Tag-filtered; suspends on the current box::executor (same mechanism as the
     // Ф12 / box::brook awaiters). nullopt only if the source never resolves.
     class next_awaiter {
@@ -218,9 +260,9 @@ public:
                                          __exec::wait_domain::touch);
             return true;
         }
-        std::optional<event> await_resume() noexcept
+        std::optional<touch> await_resume() noexcept
         {
-            if (_M_got) return event(_M_ev);
+            if (_M_got) return touch(_M_ev);
             return std::nullopt;
         }
 
@@ -255,10 +297,10 @@ public:
     public:
         using iterator_concept  = std::input_iterator_tag;
         using iterator_category = std::input_iterator_tag;
-        using value_type        = event;
+        using value_type        = touch;
         using difference_type   = std::ptrdiff_t;
-        using reference         = const event &;
-        using pointer           = const event *;
+        using reference         = const touch &;
+        using pointer           = const touch *;
 
         iterator() noexcept = default;
         explicit iterator(subscription *owner) : _M_owner(owner) { _M_advance(); }
@@ -282,7 +324,7 @@ public:
         }
 
         subscription *_M_owner = nullptr;  // nullptr == past-the-end
-        event         _M_ev{};
+        touch         _M_ev{};
     };
 
     iterator                begin() noexcept { return iterator{id_ != TOUCH_TAG_INVALID ? this : nullptr}; }
