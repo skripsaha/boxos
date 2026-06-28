@@ -45,7 +45,6 @@ typedef struct WriteJob {
     TagFSFileHandle  *handle;
     OpenFileEntry    *ofe;
     Crate            *out_crate;
-    void             *out_kp;
 
     /* ---- payload ---- */
     const uint8_t    *src_kp;            /* kernel pointer to user bytes */
@@ -104,7 +103,6 @@ int ObjWriteAsync(uint32_t           file_id,
                   const void        *src_kp,
                   uint32_t           size,
                   Crate             *out_crate,
-                  void              *out_kp,
                   const struct OpContext *ctx,
                   Crate             *crates_kbuf,   /* staged Crate[] ownership */
                   uint16_t           crate_count,
