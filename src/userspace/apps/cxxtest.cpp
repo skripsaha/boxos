@@ -3898,8 +3898,8 @@ void Phase17()
 
     // ── box::heap::stats snapshot ────────────────────────────────────────
     {
-        heap_stats_t st = box::heap::stats();
-        Check(st.malloc_calls > 0 && st.total_allocated > 0, "phase17 heap::stats snapshot");
+        box::heap::stats st = box::heap::counters();
+        Check(st.malloc_calls() > 0 && st.in_use_bytes() > 0, "phase17 heap::stats snapshot");
     }
 
     // ── box::heap::tag: count / bytes / for_each over a fresh tag ─────────
@@ -9655,6 +9655,184 @@ void Phase53()
            "strand_watch::next + box::opening + read_some\n");
 }
 
+// ── Phase54 (Ф25d) — box::heap (tag lookup / counters / make) + box::memtag
+//    (region encrypted/keyid + scoped_grant) + box::hw (keyid_of/encrypted)
+//    + formatters. Deterministic single-strand introspection — no race surface,
+//    so no concurrency hammer (honestly). TME/LAM are real-HW gated. ───────────
+struct P54Widget {
+    int v;
+    explicit P54Widget(int x) : v(x) {}
+};
+struct P54Boom {
+    P54Boom() { throw 42; }   // a throwing ctor — make<T> must free the storage + propagate
+};
+
+void Phase54()
+{
+    // ── 1) heap tag-registry lookup (D1) ────────────────────────────────────
+    {
+        Check(box::heap::tag_id("cxx:p54:never") == box::heap::tag_none,
+              "phase54 tag_id of an unregistered name -> tag_none");
+        box::heap::tag t("cxx:p54:look");
+        Check(t.registered() && t.id() != box::heap::tag_none,
+              "phase54 heap::tag ctor registers (id != tag_none)");
+        Check(box::heap::tag_id("cxx:p54:look") == t.id(),
+              "phase54 tag_id finds the registered tag (== tag.id())");
+        const char *nm = box::heap::tag_name(t.id());
+        Check(nm && std::string_view(nm) == "cxx:p54:look",
+              "phase54 tag_name round-trips the id -> name");
+    }
+
+    // ── 2) box::heap::make<T> + tagged deleter + leak watch (D3) ─────────────
+    {
+        box::heap::tag w("cxx:p54:make");
+        {
+            auto g = w.watch();
+            box::result<box::heap::tagged<P54Widget>> r =
+                box::heap::make<P54Widget>("cxx:p54:make", 7);
+            Check(r.has_value() && (*r)->v == 7, "phase54 make<T> constructs the object (value 7)");
+            Check(w.count() == 1, "phase54 make<T> allocation is accounted under its tag");
+            (void)g;   // its silent dtor (after r frees) confirms no leak
+        }
+        Check(w.count() == 0, "phase54 tagged<T> destructor freed the block (count back to 0)");
+    }
+    // A throwing constructor propagates AND leaves no leak under the tag.
+    {
+        box::heap::tag b("cxx:p54:boom");
+        bool threw = false;
+        try {
+            auto r = box::heap::make<P54Boom>("cxx:p54:boom");
+            (void)r;
+        } catch (...) {
+            threw = true;
+        }
+        Check(threw, "phase54 make<T> propagates a throwing constructor");
+        Check(b.count() == 0, "phase54 make<T> frees the storage when the ctor throws (no leak)");
+    }
+
+    // ── 3) box::heap::counters() live + the typed stats view (D2) ────────────
+    {
+        box::heap::stats s = box::heap::counters();
+        Check(s.malloc_calls() > 0 && s.in_use_bytes() > 0,
+              "phase54 heap::counters() reports a live, non-empty heap");
+    }
+
+    // ── 4) formatters — synthetic PODs, EXACT bytes (D6) ─────────────────────
+    {
+        heap_stats_t hs{};
+        hs.heap_used = 4096; hs.total_allocated = 1000; hs.total_free = 200;
+        hs.alloc_count = 5; hs.free_count = 2; hs.malloc_calls = 9; hs.free_calls = 4;
+        Check(std::format("{}", box::heap::stats(hs)) ==
+                  "heap used=4096 in_use=1000 free=200 live=5 freeblk=2 mallocs=9 frees=4",
+              "phase54 formatter<heap::stats> exact bytes");
+
+        hw_tme_state_t ts{};   // all-zero == no TME
+        Check(std::format("{}", box::hw::tme_state(ts)) ==
+                  "tme active=0 mk=0 keyid_bits=0 alg=0 max_keyid=0 in_use=0 rmpa=0 held=0",
+              "phase54 formatter<tme_state> exact bytes (dormant)");
+        ts.tme_active = 1; ts.mk_active = 1; ts.num_keyid_bits = 6; ts.activated_alg = 1;
+        ts.max_keyid = 63; ts.in_use = 3; ts.reduced_maxphyaddr = 46; ts.this_proc_held = 2;
+        Check(std::format("{}", box::hw::tme_state(ts)) ==
+                  "tme active=1 mk=1 keyid_bits=6 alg=1 max_keyid=63 in_use=3 rmpa=46 held=2",
+              "phase54 formatter<tme_state> exact bytes (active TME-MK)");
+
+        mem_region_info_t ri{};
+        ri.base_phys = 0x200000; ri.base_virt = 0xffff800000200000ull; ri.pages = 16;
+        ri.tag_count = 3; ri.flags = 0x5; ri.generation = 42;
+        Check(std::format("{}", box::memtag::region(7, ri)) ==
+                  "region id=7 phys=0x200000 virt=0xffff800000200000 pages=16 tags=3 flags=0x5 gen=42",
+              "phase54 formatter<region> exact bytes");
+
+        mem_stats_t ms{};
+        ms.tag_count = 11; ms.region_active = 8; ms.region_slot_count = 9; ms.region_slot_cap = 64;
+        ms.registry_generation = 100; ms.cache_hits = 70; ms.cache_misses = 30;
+        Check(std::format("{}", box::memtag::stats(ms)) ==
+                  "memtag tags=11 active=8 slots=9 cap=64 reg_gen=100 hits=70 misses=30",
+              "phase54 formatter<memtag::stats> exact bytes");
+    }
+
+    // ── 5) TME encryption synthesis + honest dormancy + region delegation (D4) ─
+    {
+        // Pure synthesis: keyid lives in phys bits [rmpa +: keyid_bits].
+        hw_tme_state_t mk{};
+        mk.tme_active = 1; mk.mk_active = 1; mk.num_keyid_bits = 6; mk.reduced_maxphyaddr = 46;
+        box::hw::tme_state mks(mk);
+        std::uint64_t      phys5 = static_cast<std::uint64_t>(5) << 46;
+        Check(box::hw::keyid_of(mks, phys5) == 5, "phase54 keyid_of synthesises the phys keyid (5)");
+        Check(box::hw::encrypted(mks), "phase54 encrypted(active TME) == true");
+
+        hw_tme_state_t off{};   // no TME
+        box::hw::tme_state offs(off);
+        Check(box::hw::keyid_of(offs, phys5) == 0, "phase54 keyid_of under no TME == 0");
+        Check(!box::hw::encrypted(offs), "phase54 encrypted(no TME) == false");
+
+        // region delegates to the SAME hw synthesis (wiring proof — both read the
+        // live snapshot, so they must agree).
+        mem_region_info_t ri2{};
+        ri2.base_phys = phys5;
+        box::memtag::region rr(3, ri2);
+        Check(rr.encrypted() == box::hw::encrypted(),
+              "phase54 region::encrypted() delegates to box::hw::encrypted()");
+        Check(rr.keyid() == box::hw::keyid_of(ri2.base_phys),
+              "phase54 region::keyid() delegates to box::hw::keyid_of(base_phys)");
+
+        // Live, gated: on a platform without TME (TCG) the answer is honestly
+        // dormant (encrypted false, keyid 0) — like the Ф17 LAM/TME tests.
+        if (!box::hw::tme_available()) {
+            Check(!box::hw::encrypted() && box::hw::keyid_of(0x100000) == 0,
+                  "phase54 no-TME platform: encrypted()==false, keyid_of()==0 (dormant)");
+        } else {
+            printf("[CXX] note phase54: TME present — encrypted()=%d (platform-dependent)\n",
+                   (int)box::hw::encrypted());
+        }
+    }
+
+    // ── 6) box::memtag::scoped_grant — RAII capability lease (D5) ────────────
+    // grant_scope needs the cabin to hold the TagFS "system" tag-bit. cxxtest
+    // runs unprivileged, so at runtime the factory takes its DENIAL path — which
+    // we assert is a clean error arm carrying a cause (the fallible contract).
+    // The RAII held/revoke/inert happy-path requires privilege; it is an explicit
+    // VISIBLE skip here (its move/dtor logic is instantiated at compile time),
+    // never a silent vacuous pass.
+    {
+        std::uint32_t me = box::this_process::pid();
+        const char   *T  = "cxx:p54:lease";
+        box::result<box::memtag::scoped_grant> sg = box::memtag::grant_scope(me, T);
+        if (sg) {
+            // Privileged cabin: the lease holds, is visible in cabin_tags, a
+            // second lease is inert, and the outer survives that inert one's drop.
+            Check(sg->held() && sg->pid() == me && sg->tag() == std::string_view(T),
+                  "phase54 scoped_grant holds (pid / tag / held)");
+            bool present = false;
+            for (const std::string &t : box::memtag::cabin_tags(me))
+                if (t == T) present = true;
+            Check(present, "phase54 scoped_grant: the leased tag is present in cabin_tags");
+            {
+                box::result<box::memtag::scoped_grant> sg2 = box::memtag::grant_scope(me, T);
+                Check(sg2 && !sg2->held(),
+                      "phase54 scoped_grant of an already-held tag is inert (held()==false)");
+            }
+            bool still = false;
+            for (const std::string &t : box::memtag::cabin_tags(me))
+                if (t == T) still = true;
+            Check(still, "phase54 inert scoped_grant revoked nothing (outer lease survives)");
+        } else {
+            // Unprivileged cabin: the factory must surface the denial as a clean
+            // error arm carrying a recovered cause — a genuine check, not a
+            // vacuous pass. The RAII happy-path is an explicit, visible skip.
+            std::string why(sg.error().message());
+            Check(!why.empty(), "phase54 grant_scope denial surfaces a recovered cause");
+            printf("[CXX] SKIP phase54: scoped_grant RAII happy-path needs the 'system' "
+                   "tag-bit (unprivileged cabin); denial surfaced cleanly: %s\n", why.c_str());
+        }
+        // outer sg leaves scope here: if it held, the lease is revoked cleanly.
+    }
+
+    printf("[CXX] PASS phase54: box::heap (tag_id/tag_name/counters/make/tagged) + "
+           "box::memtag (region encrypted/keyid + scoped_grant) + box::hw "
+           "(keyid_of/encrypted) + formatters\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -9730,6 +9908,7 @@ int main()
     Phase51();
     Phase52();
     Phase53();
+    Phase54();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

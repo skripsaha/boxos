@@ -20,6 +20,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <expected>
+#include <format>     // std::formatter<box::hw::tme_state>
 #include <optional>
 
 #include "box/cpu.h"  // cpu_has_lam / cpu_has_tme
@@ -88,6 +89,45 @@ inline std::optional<tme_state> tme() noexcept
     return tme_state(s);
 }
 
+// ── TME encryption synthesis (Ф25d) ─────────────────────────────────────────
+// There is NO kernel "is region X encrypted" call — TME state is a GLOBAL
+// platform snapshot. These synthesise the per-address answer HONESTLY from that
+// snapshot plus the physical-address keyid lane the platform itself encodes:
+//   • !active           → not encrypted, keyid 0.
+//   • active, plain TME → encrypted with the platform key, keyid 0.
+//   • active, TME-MK    → encrypted; keyid = phys bits [reduced_maxphyaddr +:
+//                         num_keyid_bits] (the lane TME-MK steals from the phys
+//                         address space — up to 15 bits, hence uint16_t).
+// This is a DERIVED view, never a per-region kernel fact — name it as such.
+
+// Encrypted iff TME is engaged: plain TME encrypts all RAM; under TME-MK the
+// keyid only selects WHICH key, the page is still encrypted.
+inline bool encrypted(const tme_state &s) noexcept { return s.active(); }
+
+// The TME-MK keyid encoded in `phys` (0 under plain TME / no TME / a malformed
+// snapshot). The guards also keep the shifts in-range (rmpa < 64, kb <= 15).
+inline std::uint16_t keyid_of(const tme_state &s, std::uint64_t phys) noexcept
+{
+    const unsigned kb   = s.keyid_bits();
+    const unsigned rmpa = s.reduced_maxphyaddr();
+    if (!s.active() || !s.mk_active() || kb == 0 || kb > 15 || rmpa == 0 || rmpa >= 64)
+        return 0;
+    return static_cast<std::uint16_t>((phys >> rmpa) & ((1u << kb) - 1u));
+}
+
+// Convenience: fetch the current platform TME snapshot once and answer for the
+// caller. Both report the dormant answer (false / 0) when TME is unavailable.
+inline bool encrypted() noexcept
+{
+    auto s = tme();
+    return s && encrypted(*s);
+}
+inline std::uint16_t keyid_of(std::uint64_t phys) noexcept
+{
+    auto s = tme();
+    return s ? keyid_of(*s, phys) : static_cast<std::uint16_t>(0);
+}
+
 }  // namespace hw
 
 // ── box::tagged_pointer<T> — a LAM-U48 tagged pointer ───────────────────────
@@ -133,5 +173,22 @@ public:
 };
 
 }  // namespace box
+
+// ── std::formatter<box::hw::tme_state> — one greppable line, no spec ─────────
+template <>
+struct std::formatter<box::hw::tme_state, char> {
+    constexpr auto parse(std::format_parse_context &ctx) { return ctx.begin(); }
+    auto format(const box::hw::tme_state &s, std::format_context &ctx) const
+    {
+        return std::format_to(
+            ctx.out(),
+            "tme active={} mk={} keyid_bits={} alg={} max_keyid={} in_use={} rmpa={} held={}",
+            static_cast<unsigned>(s.active()), static_cast<unsigned>(s.mk_active()),
+            static_cast<unsigned>(s.keyid_bits()), static_cast<unsigned>(s.algorithm()),
+            static_cast<unsigned>(s.max_keyid()), static_cast<unsigned>(s.in_use()),
+            static_cast<unsigned>(s.reduced_maxphyaddr()),
+            static_cast<unsigned>(s.this_proc_held()));
+    }
+};
 
 #endif  // BOXCXX_BOX_HW_H
