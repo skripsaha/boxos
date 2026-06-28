@@ -88,6 +88,7 @@
 #include "box/cxx/process.h"
 #include "box/cxx/strand.h"
 #include "box/cxx/system.h"
+#include "box/cxx/system_touch.h"
 #include "box/cxx/tagfs.h"
 #include "box/cxx/timing.h"
 #include "box/cxx/touch.h"
@@ -3655,7 +3656,7 @@ static_assert(std::ranges::input_range<box::subscription>,
 
 box::task<unsigned> Phase15AwaitTag(box::subscription *s)
 {
-    std::optional<box::event> ev = co_await s->next();
+    std::optional<box::touch> ev = co_await s->next();
     co_return ev ? ev->payload_as<unsigned>().value_or(0u) : 0u;
 }
 
@@ -3697,7 +3698,7 @@ void Phase15()
 
     // ── wait() + event + payload_as<T> + tag-filtering ──────────────────
     {
-        std::optional<box::event> ev = sub.wait(1000);
+        std::optional<box::touch> ev = sub.wait(1000);
         Check(ev.has_value(), "phase15 subscription.wait delivers event");
         if (ev) {
             Check(ev->tag_id() == sub.id(), "phase15 event tag-filtered to subscription");
@@ -3719,8 +3720,8 @@ void Phase15()
         if (sa && sb) {
             box::publish(tA, static_cast<uint32_t>(0xA1A1u));
             box::publish(tB, static_cast<uint32_t>(0xB2B2u));
-            std::optional<box::event> a = sa.wait(1000);
-            std::optional<box::event> b = sb.wait(1000);
+            std::optional<box::touch> a = sa.wait(1000);
+            std::optional<box::touch> b = sb.wait(1000);
             Check(a && a->payload_as<uint32_t>().value_or(0u) == 0xA1A1u,
                   "phase15 multi-tag: subscription A receives only A");
             Check(b && b->payload_as<uint32_t>().value_or(0u) == 0xB2B2u,
@@ -3748,7 +3749,7 @@ void Phase15()
         box::publish(tg, static_cast<unsigned>(702u));
         int      n    = 0;
         unsigned last = 0;
-        for (box::event e : sub) {
+        for (box::touch e : sub) {
             if (std::optional<unsigned> v = e.payload_as<unsigned>()) last = *v;
             ++n;
         } // ends when wait(300ms) finds nothing more
@@ -3766,7 +3767,7 @@ void Phase15()
         (void)sub.ack();
     }
 
-    printf("[CXX] PASS phase15: box::touch (tag/_tag/subscription/event/payload_as "
+    printf("[CXX] PASS phase15: box::touch (tag/_tag/subscription/touch-record/payload_as "
            "+ publish + wait + co_await next + stream-view + registry/ack)\n");
 }
 
@@ -4210,7 +4211,7 @@ void Phase19()
             const char durable[] = "durable";
             (void)fa.write_at(0, durable, sizeof(durable));
             Check(fa.anchor().has_value(), "phase19 anchor (durability flush) publishes event");
-            if (std::optional<box::event> ev = asub.wait(1000)) {
+            if (std::optional<box::touch> ev = asub.wait(1000)) {
                 box::tagfs::anchor_event ae(*ev);
                 Check(static_cast<bool>(ae), "phase19 anchor_event decodes the payload");
                 Check(ae.is_anchor(), "phase19 anchor_event.is_anchor() (op == 2)");
@@ -7533,10 +7534,10 @@ void Phase42()
             while (auto e = watch.poll()) {
                 if (e->strand_pid() != worker_pid) continue;
                 switch (e->kind) {
-                case box::strand_event_kind::spawned: saw_spawn = true; break;
-                case box::strand_event_kind::parked:  saw_parked = true; break;
-                case box::strand_event_kind::woken:   saw_woken = true; break;
-                case box::strand_event_kind::exited:  saw_exit = true; break;
+                case box::strand_touch_kind::spawned: saw_spawn = true; break;
+                case box::strand_touch_kind::parked:  saw_parked = true; break;
+                case box::strand_touch_kind::woken:   saw_woken = true; break;
+                case box::strand_touch_kind::exited:  saw_exit = true; break;
                 }
             }
         };
@@ -9234,6 +9235,187 @@ void Phase51()
            "(round-trip + 64B truncation) + cross-strand pid-routing + correlation under load\n");
 }
 
+// ── Ф25b: box::tags + box::provenance + box::system_watch ────────────────────
+void Phase52()
+{
+    using namespace box::literals;
+
+    // ── 1) box::tags:: — cached canonical handles, identity-stable ───────────
+    Check(box::tags::process_died().id()    != TOUCH_TAG_INVALID &&
+              box::tags::process_spawned().id() != TOUCH_TAG_INVALID &&
+              box::tags::system_shutdown().id() != TOUCH_TAG_INVALID &&
+              box::tags::system_reboot().id()   != TOUCH_TAG_INVALID &&
+              box::tags::usb_connect().id()     != TOUCH_TAG_INVALID &&
+              box::tags::usb_disconnect().id()  != TOUCH_TAG_INVALID,
+          "phase52 box::tags:: interns all six system tags");
+    Check(box::tags::process_died().id() == box::tags::process_died().id(),
+          "phase52 box::tags:: handle is identity-stable (cached, no re-intern)");
+
+    // ── 2) box::provenance — a self-published touch is franked USER ──────────
+    {
+        box::tag          tg = "cxx:prov:demo"_tag;
+        box::subscription sub(tg);
+        if (sub) {
+            Check(box::publish(tg, static_cast<std::uint32_t>(0xC0FFEEu)),
+                  "phase52 provenance: publish to a user tag succeeds");
+            bool seen = false;
+            for (int i = 0; i < 8000 && !(seen = touch_available()); ++i) yield();
+            if (seen) {
+                if (auto ev = sub.wait(1000)) {
+                    Check(ev->from_user(), "phase52 self-published touch is from_user()");
+                    Check(!ev->from_kernel(), "phase52 self-published touch is not from_kernel()");
+                    Check(ev->provenance() == box::provenance::user, "phase52 provenance() == user");
+                    Check(ev->flags() == TOUCH_FLAG_USER, "phase52 flags() == TOUCH_FLAG_USER");
+                }
+            } else {
+                printf("[CXX] note phase52: provenance self-delivery not observed (skipped)\n");
+            }
+        }
+    }
+
+    // ── 3) box::system_watch decodes all six typed payloads (self-published) ─
+    // Sentinel field values let the tally ignore any concurrent REAL kernel
+    // broadcast from another cabin. Self-publishing system:shutdown / system:
+    // reboot is INERT — it only notifies subscribers, it does not halt.
+    {
+        box::system_watch watch;
+        Check(static_cast<bool>(watch), "phase52 system_watch claims all six system tags");
+        if (watch) {
+            box::process_died    d{};
+            d.pid = 0x4321u;
+            d.exit_code = -7;
+            box::process_spawned s{};
+            s.pid = 0x5151u;
+            s.parent_pid = 0x6262u;
+            box::system_halt h{};
+            h.reason = 0x7777u;
+            h.grace_ms = 0x0099u;
+            box::usb_device u{};
+            u.port = 0x05u;
+            u.speed = 0x02u;
+            u.vendor_id = 0x1D6Bu;
+            u.product_id = 0x0003u;
+
+            // Assert the publishes SUCCEED — the six kernel tags are TOUCH_CAP_OPEN
+            // today, so a denied publish (e.g. if they are ever hardened to
+            // KERNEL_ONLY) must FAIL here loudly, never silently skip the decode.
+            Check(box::publish(box::tags::process_died(), d) &&
+                      box::publish(box::tags::process_spawned(), s) &&
+                      box::publish(box::tags::system_shutdown(), h) &&
+                      box::publish(box::tags::system_reboot(), h) &&
+                      box::publish(box::tags::usb_connect(), u) &&
+                      box::publish(box::tags::usb_disconnect(), u),
+                  "phase52 self-publish to all six system tags succeeds");
+
+            bool any = false;
+            for (int i = 0; i < 8000 && !(any = touch_available()); ++i) yield();
+            if (any) {
+                bool gd = false, gs = false, gsh = false, grb = false, guc = false, gud = false;
+                auto all = [&] { return gd && gs && gsh && grb && guc && gud; };
+                for (int i = 0; i < 8000 && !all(); ++i) {
+                    for (auto e = watch.poll(); e; e = watch.poll()) {
+                        switch (e->kind) {
+                        case box::system_touch_kind::process_died:
+                            if (e->died.pid == 0x4321u && e->died.exit_code == -7) gd = true;
+                            break;
+                        case box::system_touch_kind::process_spawned:
+                            if (e->spawned.pid == 0x5151u && e->spawned.parent_pid == 0x6262u) gs = true;
+                            break;
+                        case box::system_touch_kind::shutdown:
+                            if (e->halt.reason == 0x7777u && e->halt.grace_ms == 0x0099u) gsh = true;
+                            break;
+                        case box::system_touch_kind::reboot:
+                            if (e->halt.reason == 0x7777u && e->halt.grace_ms == 0x0099u) grb = true;
+                            break;
+                        case box::system_touch_kind::usb_connect:
+                            if (e->usb.vendor_id == 0x1D6Bu && e->usb.product_id == 0x0003u) guc = true;
+                            break;
+                        case box::system_touch_kind::usb_disconnect:
+                            if (e->usb.port == 0x05u) gud = true;
+                            break;
+                        }
+                    }
+                    if (!all()) yield();
+                }
+                Check(gd, "phase52 system_watch decoded process_died (pid + exit_code)");
+                Check(gs, "phase52 system_watch decoded process_spawned (pid + parent)");
+                Check(gsh, "phase52 system_watch decoded system shutdown (reason + grace)");
+                Check(grb, "phase52 system_watch decoded system reboot (reason + grace)");
+                Check(guc, "phase52 system_watch decoded usb_connect (vid + pid)");
+                Check(gud, "phase52 system_watch decoded usb_disconnect (port)");
+            } else {
+                printf("[CXX] note phase52: system self-delivery not observed; decode skipped\n");
+            }
+        }
+    }
+
+    // ── 4) wait() on an idle watch returns within a bounded time (no hang) ───
+    // The honest invariant is BOUNDED return, not silence: a real ambient kernel
+    // event may arrive (returns early) or not (returns on the round-robin bound);
+    // either way the fan-in must never block forever.
+    {
+        box::system_watch idle;
+        if (idle) {
+            while (idle.poll()) { /* drain ambient first */ }
+            box::stopwatch sw;
+            auto           e  = idle.wait(60);
+            auto           ms = sw.elapsed_as<std::chrono::milliseconds>().count();
+            (void)e;
+            Check(ms < 1500, "phase52 system_watch.wait(60) returns within a bounded time");
+        }
+    }
+
+    // ── 5) live kernel edge: process:spawned fires inside the spawn syscall ──
+    // Claim BEFORE spawning so no edge is missed. process:spawned is published
+    // synchronously by the spawn syscall (assert it); process:died is reaper-
+    // timed (observe best-effort, print only — asserting it would be a flake).
+    {
+        box::system_watch watch;
+        if (watch) {
+            std::uint32_t             me    = box::this_process::pid();
+            box::result<box::process> child = box::process::spawn("proca");
+            if (child) {
+                std::uint32_t cpid = child->pid();
+                bool          saw  = false;
+                for (int i = 0; i < 4000 && !saw; ++i) {
+                    for (auto e = watch.poll(); e; e = watch.poll()) {
+                        if (e->kind == box::system_touch_kind::process_spawned &&
+                            e->spawned.pid == cpid) {
+                            Check(e->spawned.parent_pid == me,
+                                  "phase52 live process:spawned parent_pid == us");
+                            Check(e->source == 0, "phase52 live process:spawned is kernel-origin (source pid 0)");
+                            saw = true;
+                            break;
+                        }
+                    }
+                    if (!saw) yield();
+                }
+                Check(saw, "phase52 system_watch observed live process:spawned (pid match)");
+                while (box::receive()) { /* drain proca's messages to its spawner (us) */ }
+
+                bool died = false;
+                for (int i = 0; i < 400 && !died; ++i) {
+                    for (auto e = watch.poll(); e; e = watch.poll()) {
+                        if (e->kind == box::system_touch_kind::process_died && e->died.pid == cpid) {
+                            died = true;
+                            break;
+                        }
+                    }
+                    if (!died) yield();
+                }
+                printf("[CXX] note phase52: live process:died observed=%d (reaper-timed, best-effort)\n",
+                       (int)died);
+            } else {
+                printf("[CXX] note phase52: proc_exec unavailable (%.*s); live spawn edge skipped\n",
+                       (int)child.error().message().size(), child.error().message().data());
+            }
+        }
+    }
+
+    printf("[CXX] PASS phase52: box::tags + box::provenance + box::system_watch "
+           "(six typed payloads + live process:spawned)\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -9307,6 +9489,7 @@ int main()
     Phase49();
     Phase50();
     Phase51();
+    Phase52();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
