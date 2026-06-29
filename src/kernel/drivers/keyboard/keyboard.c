@@ -663,6 +663,11 @@ char* keyboard_readline(void)
 
 int keyboard_readline_async(char* buf, int max)
 {
+    /* No room even for the NUL terminator: writing would do memcpy((size_t)-1)
+     * (len = max-1 = -1) and buf[-1]. Report not-ready; the line stays buffered. */
+    if (max <= 0)
+        return 0;
+
     while (keyboard_has_input()) {
         char c = keyboard_getchar();
         if (c != 0) {

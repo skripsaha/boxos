@@ -15,7 +15,7 @@
 #include "boxos_manifest.h"
 #include "boxos_crate.h"
 #include "hardware_deck.h"
-#include "vmm.h"
+#include "crate_io.h"
 #include "process.h"
 #include "video.h"
 #include "pit.h"
@@ -51,20 +51,6 @@ static inline void HwVgaMirrorChar(char ch)
 #else
     (void)ch;
 #endif
-}
-
-/* -------------------------------------------------------------------------
- * Crate translation
- * ------------------------------------------------------------------------- */
-
-static void *HwCrateMap(const Crate *c, const OpContext *ctx, uint64_t bytes)
-{
-    if (!c || bytes == 0)            return NULL;
-    if (bytes > c->capacity)         return NULL;
-    if (ctx && ctx->proc && ctx->proc->cabin) {
-        return vmm_translate_user_addr(ctx->proc->cabin->vmm, (uintptr_t)c->addr, (size_t)bytes);
-    }
-    return (void *)(uintptr_t)c->addr;
 }
 
 static bool hw_irq_is_valid(uint8_t irq)
@@ -124,8 +110,21 @@ static int HwVgaPutString(const ManifestOp *op, Crate *crates, uint16_t crate_co
     uint8_t flags = op->params[1];
 
     Crate *str_crate = &crates[op->in_crate];
-    const char *str = HwCrateMap(str_crate, ctx, str_crate->size);
-    if (!str) return ERR_INVALID_ADDRESS;
+    /* Snapshot the user string BEFORE taking the console lock, so user memory
+     * is page-walked (and any page straddle handled) outside the lock.
+     *
+     * str_crate->size is attacker-controlled and this op is OP_AUTH_NONE, so
+     * snapshot at most one page — a console line is a screenful, never the
+     * gigabytes a caller could claim. CrateIsValid (manifest_exec) already
+     * guarantees size <= capacity, so `want` is always a safe read length. */
+    uint64_t want = str_crate->size < 4096u ? str_crate->size : 4096u;
+    if (want == 0) return ERR_INVALID_ADDRESS;
+    char *str = kmalloc((size_t)want);
+    if (!str) return ERR_NO_MEMORY;
+    if (crate_read(str_crate, ctx, str, want) != OK) {
+        kfree(str);
+        return ERR_INVALID_ADDRESS;
+    }
 
     /* Hold the console lock around the whole VGA + serial-mirror run.
      * The framebuffer and cursor are global state; without serialisation
@@ -139,7 +138,7 @@ static int HwVgaPutString(const ManifestOp *op, Crate *crates, uint16_t crate_co
 
     uint64_t chars_written = 0;
     VideoBatchBegin();
-    for (uint64_t i = 0; i < str_crate->size; i++) {
+    for (uint64_t i = 0; i < want; i++) {
         char c = str[i];
         if (c == '\0') break;
         VideoPrintChar(c, color);
@@ -161,15 +160,15 @@ static int HwVgaPutString(const ManifestOp *op, Crate *crates, uint16_t crate_co
     if (op->out_crate != CRATE_INDEX_NONE) {
         Crate *out = &crates[op->out_crate];
         if (out->capacity >= 3) {
-            uint8_t *out_kp = HwCrateMap(out, ctx, 3);
-            if (out_kp) {
-                out_kp[0] = (uint8_t)(chars_written > 255 ? 255 : chars_written);
-                out_kp[1] = (uint8_t)VideoGetCursorY();
-                out_kp[2] = (uint8_t)VideoGetCursorX();
-                out->size = 3;
-            }
+            uint8_t blob[3];
+            blob[0] = (uint8_t)(chars_written > 255 ? 255 : chars_written);
+            blob[1] = (uint8_t)VideoGetCursorY();
+            blob[2] = (uint8_t)VideoGetCursorX();
+            (void)crate_write(out, ctx, blob, 3);
         }
     }
+
+    kfree(str);
     return OK;
 }
 
@@ -225,12 +224,10 @@ static int HwVgaGetCursor(const ManifestOp *op, Crate *crates, uint16_t crate_co
     Crate *out = &crates[op->out_crate];
     if (out->capacity < 2) return ERR_BUFFER_TOO_SMALL;
 
-    uint8_t *kp = HwCrateMap(out, ctx, 2);
-    if (!kp) return ERR_INVALID_ADDRESS;
-
-    kp[0] = (uint8_t)VideoGetCursorY();
-    kp[1] = (uint8_t)VideoGetCursorX();
-    out->size = 2;
+    uint8_t blob[2];
+    blob[0] = (uint8_t)VideoGetCursorY();
+    blob[1] = (uint8_t)VideoGetCursorX();
+    if (crate_write(out, ctx, blob, 2) != OK) return ERR_INVALID_ADDRESS;
     return OK;
 }
 
@@ -249,12 +246,10 @@ static int HwVgaSetCursor(const ManifestOp *op, Crate *crates, uint16_t crate_co
     if (op->out_crate != CRATE_INDEX_NONE) {
         Crate *out = &crates[op->out_crate];
         if (out->capacity >= 2) {
-            uint8_t *kp = HwCrateMap(out, ctx, 2);
-            if (kp) {
-                kp[0] = (uint8_t)VideoGetCursorY();
-                kp[1] = (uint8_t)VideoGetCursorX();
-                out->size = 2;
-            }
+            uint8_t blob[2];
+            blob[0] = (uint8_t)VideoGetCursorY();
+            blob[1] = (uint8_t)VideoGetCursorX();
+            (void)crate_write(out, ctx, blob, 2);
         }
     }
     return OK;
@@ -275,8 +270,7 @@ static int HwVgaSetColor(const ManifestOp *op, Crate *crates, uint16_t crate_cou
     if (op->out_crate != CRATE_INDEX_NONE) {
         Crate *out = &crates[op->out_crate];
         if (out->capacity >= 1) {
-            uint8_t *kp = HwCrateMap(out, ctx, 1);
-            if (kp) { kp[0] = old_color; out->size = 1; }
+            (void)crate_write(out, ctx, &old_color, 1);
         }
     }
     return OK;
@@ -291,11 +285,8 @@ static int HwVgaGetColor(const ManifestOp *op, Crate *crates, uint16_t crate_cou
     Crate *out = &crates[op->out_crate];
     if (out->capacity < 1) return ERR_BUFFER_TOO_SMALL;
 
-    uint8_t *kp = HwCrateMap(out, ctx, 1);
-    if (!kp) return ERR_INVALID_ADDRESS;
-
-    kp[0] = VideoGetColor();
-    out->size = 1;
+    uint8_t color = VideoGetColor();
+    if (crate_write(out, ctx, &color, 1) != OK) return ERR_INVALID_ADDRESS;
     return OK;
 }
 
@@ -318,19 +309,17 @@ static int HwVgaNewline(const ManifestOp *op, Crate *crates, uint16_t crate_coun
     console_lock_acquire();
     VideoPrintNewline();
     HwVgaMirrorChar('\n');
+    uint8_t blob[2];
+    blob[0] = (uint8_t)VideoGetCursorY();
+    blob[1] = (uint8_t)VideoGetCursorX();
+    console_lock_release();
 
     if (op->out_crate != CRATE_INDEX_NONE) {
         Crate *out = &crates[op->out_crate];
         if (out->capacity >= 2) {
-            uint8_t *kp = HwCrateMap(out, ctx, 2);
-            if (kp) {
-                kp[0] = (uint8_t)VideoGetCursorY();
-                kp[1] = (uint8_t)VideoGetCursorX();
-                out->size = 2;
-            }
+            (void)crate_write(out, ctx, blob, 2);
         }
     }
-    console_lock_release();
     return OK;
 }
 
@@ -343,12 +332,10 @@ static int HwVgaGetDimensions(const ManifestOp *op, Crate *crates, uint16_t crat
     Crate *out = &crates[op->out_crate];
     if (out->capacity < 2) return ERR_BUFFER_TOO_SMALL;
 
-    uint8_t *kp = HwCrateMap(out, ctx, 2);
-    if (!kp) return ERR_INVALID_ADDRESS;
-
-    kp[0] = (uint8_t)VideoGetCols();
-    kp[1] = (uint8_t)VideoGetRows();
-    out->size = 2;
+    uint8_t blob[2];
+    blob[0] = (uint8_t)VideoGetCols();
+    blob[1] = (uint8_t)VideoGetRows();
+    if (crate_write(out, ctx, blob, 2) != OK) return ERR_INVALID_ADDRESS;
     return OK;
 }
 
@@ -364,12 +351,8 @@ static int HwTimerGetTicks(const ManifestOp *op, Crate *crates, uint16_t crate_c
     Crate *out = &crates[op->out_crate];
     if (out->capacity < sizeof(uint64_t)) return ERR_BUFFER_TOO_SMALL;
 
-    void *kp = HwCrateMap(out, ctx, sizeof(uint64_t));
-    if (!kp) return ERR_INVALID_ADDRESS;
-
     uint64_t ticks = pit_get_ticks();
-    memcpy(kp, &ticks, sizeof(uint64_t));
-    out->size = sizeof(uint64_t);
+    if (crate_write(out, ctx, &ticks, sizeof(uint64_t)) != OK) return ERR_INVALID_ADDRESS;
     return OK;
 }
 
@@ -381,17 +364,13 @@ static int HwTimerGetMs(const ManifestOp *op, Crate *crates, uint16_t crate_coun
     Crate *out = &crates[op->out_crate];
     if (out->capacity < sizeof(uint64_t)) return ERR_BUFFER_TOO_SMALL;
 
-    void *kp = HwCrateMap(out, ctx, sizeof(uint64_t));
-    if (!kp) return ERR_INVALID_ADDRESS;
-
     /* Use the dedicated monotonic uptime counter (advanced per-tick by
      * 1_000_000/freq µs) instead of deriving from `ticks * 1000 / freq`,
      * which is NOT monotonic when the scheduler reprograms the PIT under
      * load. The old derivation produced backwards-jumps causing S1's
      * "elapsed=0xFFFFFFFFFFFF…" underflow. */
     uint64_t ms = pit_get_uptime_ms();
-    memcpy(kp, &ms, sizeof(uint64_t));
-    out->size = sizeof(uint64_t);
+    if (crate_write(out, ctx, &ms, sizeof(uint64_t)) != OK) return ERR_INVALID_ADDRESS;
     return OK;
 }
 
@@ -404,11 +383,7 @@ static int HwTimerGetFreq(const ManifestOp *op, Crate *crates, uint16_t crate_co
     if (out->capacity < sizeof(uint32_t)) return ERR_BUFFER_TOO_SMALL;
 
     uint32_t freq = pit_get_frequency();
-    void *kp = HwCrateMap(out, ctx, sizeof(uint32_t));
-    if (!kp) return ERR_INVALID_ADDRESS;
-
-    memcpy(kp, &freq, sizeof(uint32_t));
-    out->size = sizeof(uint32_t);
+    if (crate_write(out, ctx, &freq, sizeof(uint32_t)) != OK) return ERR_INVALID_ADDRESS;
     return OK;
 }
 
@@ -424,12 +399,8 @@ static int HwRtcGetUnix64(const ManifestOp *op, Crate *crates, uint16_t crate_co
     Crate *out = &crates[op->out_crate];
     if (out->capacity < sizeof(uint64_t)) return ERR_BUFFER_TOO_SMALL;
 
-    void *kp = HwCrateMap(out, ctx, sizeof(uint64_t));
-    if (!kp) return ERR_INVALID_ADDRESS;
-
     uint64_t secs = rtc_get_unix64();
-    memcpy(kp, &secs, sizeof(uint64_t));
-    out->size = sizeof(uint64_t);
+    if (crate_write(out, ctx, &secs, sizeof(uint64_t)) != OK) return ERR_INVALID_ADDRESS;
     return OK;
 }
 
@@ -442,13 +413,9 @@ static int HwRtcGetTime(const ManifestOp *op, Crate *crates, uint16_t crate_coun
     Crate *out = &crates[op->out_crate];
     if (out->capacity < sizeof(time_t)) return ERR_BUFFER_TOO_SMALL;
 
-    void *kp = HwCrateMap(out, ctx, sizeof(time_t));
-    if (!kp) return ERR_INVALID_ADDRESS;
-
     time_t t;
     rtc_get_boxtime(&t);
-    memcpy(kp, &t, sizeof(time_t));
-    out->size = sizeof(time_t);
+    if (crate_write(out, ctx, &t, sizeof(time_t)) != OK) return ERR_INVALID_ADDRESS;
     return OK;
 }
 
@@ -461,12 +428,8 @@ static int HwRtcGetUptime(const ManifestOp *op, Crate *crates, uint16_t crate_co
     Crate *out = &crates[op->out_crate];
     if (out->capacity < sizeof(uint64_t)) return ERR_BUFFER_TOO_SMALL;
 
-    void *kp = HwCrateMap(out, ctx, sizeof(uint64_t));
-    if (!kp) return ERR_INVALID_ADDRESS;
-
     uint64_t ns = rtc_get_uptime_ns();
-    memcpy(kp, &ns, sizeof(uint64_t));
-    out->size = sizeof(uint64_t);
+    if (crate_write(out, ctx, &ns, sizeof(uint64_t)) != OK) return ERR_INVALID_ADDRESS;
     return OK;
 }
 
@@ -485,11 +448,8 @@ static int HwPortInb(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     Crate *out = &crates[op->out_crate];
     if (out->capacity < 1) return ERR_BUFFER_TOO_SMALL;
 
-    uint8_t *kp = HwCrateMap(out, ctx, 1);
-    if (!kp) return ERR_INVALID_ADDRESS;
-
-    kp[0] = inb(port);
-    out->size = 1;
+    uint8_t value = inb(port);
+    if (crate_write(out, ctx, &value, 1) != OK) return ERR_INVALID_ADDRESS;
     return OK;
 }
 
@@ -517,10 +477,7 @@ static int HwPortInw(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     if (out->capacity < sizeof(uint16_t)) return ERR_BUFFER_TOO_SMALL;
 
     uint16_t value = inw(port);
-    void *kp = HwCrateMap(out, ctx, sizeof(uint16_t));
-    if (!kp) return ERR_INVALID_ADDRESS;
-    memcpy(kp, &value, sizeof(uint16_t));
-    out->size = sizeof(uint16_t);
+    if (crate_write(out, ctx, &value, sizeof(uint16_t)) != OK) return ERR_INVALID_ADDRESS;
     return OK;
 }
 
@@ -549,10 +506,7 @@ static int HwPortInl(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     if (out->capacity < sizeof(uint32_t)) return ERR_BUFFER_TOO_SMALL;
 
     uint32_t value = inl(port);
-    void *kp = HwCrateMap(out, ctx, sizeof(uint32_t));
-    if (!kp) return ERR_INVALID_ADDRESS;
-    memcpy(kp, &value, sizeof(uint32_t));
-    out->size = sizeof(uint32_t);
+    if (crate_write(out, ctx, &value, sizeof(uint32_t)) != OK) return ERR_INVALID_ADDRESS;
     return OK;
 }
 
@@ -615,10 +569,7 @@ static int HwIrqGetIsr(const ManifestOp *op, Crate *crates, uint16_t crate_count
     if (out->capacity < sizeof(uint32_t)) return ERR_BUFFER_TOO_SMALL;
 
     uint32_t isr = irqchip_get_isr();
-    void *kp = HwCrateMap(out, ctx, sizeof(uint32_t));
-    if (!kp) return ERR_INVALID_ADDRESS;
-    memcpy(kp, &isr, sizeof(uint32_t));
-    out->size = sizeof(uint32_t);
+    if (crate_write(out, ctx, &isr, sizeof(uint32_t)) != OK) return ERR_INVALID_ADDRESS;
     return OK;
 }
 
@@ -631,10 +582,7 @@ static int HwIrqGetIrr(const ManifestOp *op, Crate *crates, uint16_t crate_count
     if (out->capacity < sizeof(uint32_t)) return ERR_BUFFER_TOO_SMALL;
 
     uint32_t irr = irqchip_get_irr();
-    void *kp = HwCrateMap(out, ctx, sizeof(uint32_t));
-    if (!kp) return ERR_INVALID_ADDRESS;
-    memcpy(kp, &irr, sizeof(uint32_t));
-    out->size = sizeof(uint32_t);
+    if (crate_write(out, ctx, &irr, sizeof(uint32_t)) != OK) return ERR_INVALID_ADDRESS;
     return OK;
 }
 
@@ -667,18 +615,16 @@ static int HwDiskInfo(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     Crate *out = &crates[op->out_crate];
     if (out->capacity < 77) return ERR_BUFFER_TOO_SMALL;
 
-    uint8_t *kp = HwCrateMap(out, ctx, 77);
-    if (!kp) return ERR_INVALID_ADDRESS;
-
     uint8_t       is_master = op->params[0];
     ATADevice    *dev       = is_master ? &ata_primary_master : &ata_primary_slave;
 
-    kp[0] = (uint8_t)dev->exists;
-    memcpy(kp + 1,  dev->model,  40);
-    memcpy(kp + 41, dev->serial, 20);
-    memcpy(kp + 61, &dev->total_sectors, sizeof(uint64_t));
-    memcpy(kp + 69, &dev->size_mb,       sizeof(uint64_t));
-    out->size = 77;
+    uint8_t blob[77];
+    blob[0] = (uint8_t)dev->exists;
+    memcpy(blob + 1,  dev->model,  40);
+    memcpy(blob + 41, dev->serial, 20);
+    memcpy(blob + 61, &dev->total_sectors, sizeof(uint64_t));
+    memcpy(blob + 69, &dev->size_mb,       sizeof(uint64_t));
+    if (crate_write(out, ctx, blob, 77) != OK) return ERR_INVALID_ADDRESS;
     return OK;
 }
 
@@ -714,12 +660,11 @@ static int HwKbGetChar(const ManifestOp *op, Crate *crates, uint16_t crate_count
     Crate *out = &crates[op->out_crate];
     if (out->capacity < 4) return ERR_BUFFER_TOO_SMALL;
 
-    uint8_t *kp = HwCrateMap(out, ctx, 4);
-    if (!kp) return ERR_INVALID_ADDRESS;
+    uint8_t blob[4];
 
     if (!keyboard_has_input()) {
-        kp[0] = 0; kp[1] = 0; kp[2] = 0; kp[3] = HW_KB_NO_DATA;
-        out->size = 4;
+        blob[0] = 0; blob[1] = 0; blob[2] = 0; blob[3] = HW_KB_NO_DATA;
+        if (crate_write(out, ctx, blob, 4) != OK) return ERR_INVALID_ADDRESS;
         return OK;
     }
 
@@ -732,11 +677,11 @@ static int HwKbGetChar(const ManifestOp *op, Crate *crates, uint16_t crate_count
     if (__atomic_load_n(&kbs->ctrl_pressed,  __ATOMIC_RELAXED)) mods |= 0x02;
     if (__atomic_load_n(&kbs->alt_pressed,   __ATOMIC_RELAXED)) mods |= 0x04;
 
-    kp[0] = (uint8_t)ch;
-    kp[1] = __atomic_load_n(&kbs->last_keycode, __ATOMIC_RELAXED);
-    kp[2] = mods;
-    kp[3] = HW_KB_SUCCESS;
-    out->size = 4;
+    blob[0] = (uint8_t)ch;
+    blob[1] = __atomic_load_n(&kbs->last_keycode, __ATOMIC_RELAXED);
+    blob[2] = mods;
+    blob[3] = HW_KB_SUCCESS;
+    if (crate_write(out, ctx, blob, 4) != OK) return ERR_INVALID_ADDRESS;
     return OK;
 }
 
@@ -760,30 +705,51 @@ static int HwKbReadLine(const ManifestOp *op, Crate *crates, uint16_t crate_coun
 
     keyboard_set_echo(echo_mode != 0);
 
-    uint8_t *kp = HwCrateMap(out, ctx, out->capacity);
+    /* out->capacity is attacker-controlled and this op is OP_AUTH_NONE, so the
+     * kernel bounce is bounded to the head region this op actually produces —
+     * a 4-byte length, the clamped line, and one NUL (<= ~64 KiB) — never the
+     * claimed capacity, which could be gigabytes. The trailing status byte
+     * lives at the ABI's last slot (out->addr + capacity - 1) and is committed
+     * separately below. */
+    uint64_t head_size = 4 + (uint64_t)max_length + 1;
+    uint8_t *kp = crate_out_alloc(out, head_size);
     if (!kp) return ERR_INVALID_ADDRESS;
 
+    /* crate_out_alloc zero-fills the bounce, so the length field and the line's
+     * NUL terminator are already 0; readline fills the line slot at +4. */
     char *line_dst = (char *)(kp + 4);
-    for (uint16_t i = 0; i < (uint16_t)(max_length + 1) && (uint64_t)(4u + i) < out->capacity; i++) {
-        line_dst[i] = 0;
-    }
-
     int ready = keyboard_readline_async(line_dst, max_length);
+
+    uint8_t  status;
+    uint64_t head_bytes;
     if (ready) {
         size_t len = 0;
         while (len < max_length && line_dst[len] != '\0') len++;
         uint32_t len32 = (uint32_t)len;
         memcpy(kp, &len32, sizeof(uint32_t));
-        kp[out->capacity - 1] = HW_KB_SUCCESS;
-        out->size = 4 + len + 1;
-        return OK;
+        status     = HW_KB_SUCCESS;
+        head_bytes = 4 + (uint64_t)len + 1;
+    } else {
+        status     = HW_KB_WOULD_BLOCK;
+        head_bytes = 5;
     }
 
-    uint32_t zero = 0;
-    memcpy(kp, &zero, sizeof(uint32_t));
-    kp[out->capacity - 1] = HW_KB_WOULD_BLOCK;
-    out->size = 5;
-    return ERR_WOULD_BLOCK;
+    /* Commit the head region (length + line + NUL) at offset 0 (out->addr). */
+    int crc = crate_out_commit(out, ctx, kp, head_bytes);
+    crate_buf_free(kp);
+    if (crc != OK) return ERR_INVALID_ADDRESS;
+
+    /* Stamp the single status byte at its ABI slot, out->addr + capacity - 1,
+     * which the head commit does not cover. crate_write targets offset 0, so
+     * retarget a one-byte view of the crate at that exact address — same
+     * page-walked write (and no-cabin memcpy) path as the head commit. */
+    Crate status_slot    = *out;
+    status_slot.addr     = out->addr + out->capacity - 1;
+    status_slot.capacity = 1;
+    if (crate_write(&status_slot, ctx, &status, 1) != OK) return ERR_INVALID_ADDRESS;
+
+    out->size = head_bytes;
+    return ready ? OK : ERR_WOULD_BLOCK;
 }
 
 /* HW_KEYBOARD_STATUS  out_crate:[u32 available][u32 buffer_size] */
@@ -798,12 +764,10 @@ static int HwKbStatus(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     uint32_t available = keyboard_available();
     uint32_t buf_size  = KEYBOARD_LINE_BUFFER_SIZE;
 
-    uint8_t *kp = HwCrateMap(out, ctx, 8);
-    if (!kp) return ERR_INVALID_ADDRESS;
-
-    memcpy(kp,     &available, sizeof(uint32_t));
-    memcpy(kp + 4, &buf_size,  sizeof(uint32_t));
-    out->size = 8;
+    uint8_t blob[8];
+    memcpy(blob,     &available, sizeof(uint32_t));
+    memcpy(blob + 4, &buf_size,  sizeof(uint32_t));
+    if (crate_write(out, ctx, blob, 8) != OK) return ERR_INVALID_ADDRESS;
     return OK;
 }
 
@@ -886,10 +850,7 @@ static int HwUsbPortStatus(const ManifestOp *op, Crate *crates, uint16_t crate_c
     if (out->capacity < sizeof(uint32_t)) return ERR_BUFFER_TOO_SMALL;
     uint32_t portsc = xhci_get_port_status(c, port);
 
-    void *kp = HwCrateMap(out, ctx, sizeof(uint32_t));
-    if (!kp) return ERR_INVALID_ADDRESS;
-    memcpy(kp, &portsc, sizeof(uint32_t));
-    out->size = sizeof(uint32_t);
+    if (crate_write(out, ctx, &portsc, sizeof(uint32_t)) != OK) return ERR_INVALID_ADDRESS;
     return OK;
 }
 
@@ -920,14 +881,12 @@ static int HwUsbPortQuery(const ManifestOp *op, Crate *crates, uint16_t crate_co
 
     Crate *out = &crates[op->out_crate];
     if (out->capacity < 4) return ERR_BUFFER_TOO_SMALL;
-    uint8_t *kp = HwCrateMap(out, ctx, 4);
-    if (!kp) return ERR_INVALID_ADDRESS;
-
-    kp[0] = c->max_ports;
-    kp[1] = c->max_slots;
-    kp[2] = c->irq_line;
-    kp[3] = c->use_polling ? 1 : 0;
-    out->size = 4;
+    uint8_t blob[4];
+    blob[0] = c->max_ports;
+    blob[1] = c->max_slots;
+    blob[2] = c->irq_line;
+    blob[3] = c->use_polling ? 1 : 0;
+    if (crate_write(out, ctx, blob, 4) != OK) return ERR_INVALID_ADDRESS;
     return OK;
 }
 
@@ -963,13 +922,11 @@ static int HwUsbGetInfo(const ManifestOp *op, Crate *crates, uint16_t crate_coun
 
     Crate *out = &crates[op->out_crate];
     if (out->capacity < 3) return ERR_BUFFER_TOO_SMALL;
-    uint8_t *kp = HwCrateMap(out, ctx, 3);
-    if (!kp) return ERR_INVALID_ADDRESS;
-
-    kp[0] = slot->slot_id;
-    kp[1] = slot->port_num;
-    kp[2] = slot->state;
-    out->size = 3;
+    uint8_t blob[3];
+    blob[0] = slot->slot_id;
+    blob[1] = slot->port_num;
+    blob[2] = slot->state;
+    if (crate_write(out, ctx, blob, 3) != OK) return ERR_INVALID_ADDRESS;
     return OK;
 }
 
@@ -988,13 +945,9 @@ static int HwDebugPrint(const ManifestOp *op, Crate *crates, uint16_t crate_coun
     uint64_t bytes = c->size < 256 ? c->size : 256;
     if (bytes == 0) return ERR_INVALID_ARGUMENT;
 
-    const char *src = HwCrateMap(c, ctx, bytes);
-    if (!src) return ERR_INVALID_ADDRESS;
-
     char buf[257];
-    uint64_t copy = bytes < 256 ? bytes : 256;
-    memcpy(buf, src, copy);
-    buf[copy] = '\0';
+    if (crate_read(c, ctx, buf, bytes) != OK) return ERR_INVALID_ADDRESS;
+    buf[bytes] = '\0';
 
     uint32_t pid = (ctx && ctx->proc) ? ctx->proc->pid : 0;
     kprintf("[%u] %s\n", pid, buf);
