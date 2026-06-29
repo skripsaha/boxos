@@ -14,8 +14,10 @@
  * BrookReleaseInternal / BrookCleanupProcess. No additional syscalls
  * are needed for blocking.
  *
- * Crate convention follows bay_ops.c / touch_ops.c so the helpers
- * (read/write/string translation) stay uniform across the System Deck.
+ * Crate convention follows bay_ops.c / touch_ops.c: the tag in_crate is
+ * read and fixed-size outputs are written through the page-walking
+ * crate_io API, so a payload that straddles a page boundary is copied
+ * correctly across the whole System Deck.
  */
 
 #include "system_deck.h"
@@ -23,41 +25,26 @@
 #include "op_registry.h"
 #include "boxos_manifest.h"
 #include "boxos_crate.h"
+#include "crate_io.h"
 #include "manifest_auth.h"
 #include "process.h"
-#include "vmm.h"
 #include "klib.h"
 #include "error.h"
 
 /* ─────────────────────────────────────────────────────────────────────
- * Crate helpers — same pattern as bay_ops/touch_ops.
+ * Tag string read — page-walked snapshot of the in_crate tag into a
+ * bounded stack buffer via crate_io. A tag that straddles a page
+ * boundary is copied across every backing frame; the read is capped at
+ * the buffer size, so an attacker-set in_crate size can neither overflow
+ * the buffer nor drive an oversized allocation.
  * ───────────────────────────────────────────────────────────────────── */
-static const void *brook_crate_read(const Crate *c, const OpContext *ctx)
-{
-    if (!c || c->size == 0) return NULL;
-    if (ctx && ctx->proc && ctx->proc->cabin)
-        return vmm_translate_user_addr(ctx->proc->cabin->vmm,
-                                       (uintptr_t)c->addr, (size_t)c->size);
-    return (const void *)(uintptr_t)c->addr;
-}
-
-static void *brook_crate_write(Crate *c, const OpContext *ctx, size_t size)
-{
-    if (!c || c->capacity < size) return NULL;
-    if (ctx && ctx->proc && ctx->proc->cabin)
-        return vmm_translate_user_addr(ctx->proc->cabin->vmm,
-                                       (uintptr_t)c->addr, size);
-    return (void *)(uintptr_t)c->addr;
-}
-
 static error_t brook_crate_string(const Crate *c, const OpContext *ctx,
                                   char *dst, size_t dst_size)
 {
     if (!c || c->size == 0 || dst_size == 0) return ERR_INVALID_ARGUMENT;
-    const char *src = brook_crate_read(c, ctx);
-    if (!src) return ERR_INVALID_ADDRESS;
     size_t copy = c->size < dst_size - 1 ? c->size : dst_size - 1;
-    memcpy(dst, src, copy);
+    error_t rc = crate_read(c, ctx, dst, copy);
+    if (rc != OK) return rc;
     dst[copy] = '\0';
     if (dst[0] == '\0') return ERR_INVALID_ARGUMENT;
     return OK;
@@ -95,17 +82,17 @@ static int SysBrookOpen(const ManifestOp *op, Crate *crates,
                            &va_header, &va_slots, &out_fs, &out_fc);
     if (rc != OK) return rc;
 
+    uint8_t blob[24];
+    memcpy(blob,      &va_header, sizeof(uint64_t));
+    memcpy(blob + 8,  &va_slots,  sizeof(uint64_t));
+    memcpy(blob + 16, &out_fs,    sizeof(uint32_t));
+    memcpy(blob + 20, &out_fc,    sizeof(uint32_t));
+
     Crate *out = &crates[op->out_crate];
-    uint8_t *dst = (uint8_t *)brook_crate_write(out, ctx, 24);
-    if (!dst) {
+    if (crate_write(out, ctx, blob, 24) != OK) {
         BrookReleaseInternal(ctx->proc, va_header);
         return ERR_INVALID_ADDRESS;
     }
-    memcpy(dst,      &va_header, sizeof(uint64_t));
-    memcpy(dst + 8,  &va_slots,  sizeof(uint64_t));
-    memcpy(dst + 16, &out_fs,    sizeof(uint32_t));
-    memcpy(dst + 20, &out_fc,    sizeof(uint32_t));
-    out->size = 24;
     return OK;
 }
 
@@ -140,13 +127,8 @@ static int SysBrookInfo(const ManifestOp *op, Crate *crates,
     BrookStatsSnapshot(snap);
 
     Crate *out = &crates[op->out_crate];
-    uint8_t *dst = (uint8_t *)brook_crate_write(out, ctx, 32);
-    if (!dst) return ERR_INVALID_ADDRESS;
-    memcpy(dst,      &snap[0], sizeof(uint64_t));
-    memcpy(dst + 8,  &snap[1], sizeof(uint64_t));
-    memcpy(dst + 16, &snap[2], sizeof(uint64_t));
-    memcpy(dst + 24, &snap[3], sizeof(uint64_t));
-    out->size = 32;
+    if (crate_write(out, ctx, snap, sizeof(snap)) != OK)
+        return ERR_INVALID_ADDRESS;
     return OK;
 }
 
