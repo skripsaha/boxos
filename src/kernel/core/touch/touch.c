@@ -12,6 +12,7 @@
 #include "tagfs.h"
 #include "atomics.h"
 #include "amp.h"
+#include "per_core.h"
 #include "kcore.h"
 #include "lapic.h"
 #include "irqchip.h"
@@ -44,6 +45,13 @@ static volatile uint64_t g_touch_subscribers_visited;
 static volatile uint64_t g_touch_delivered;
 static volatile uint64_t g_touch_emit_fail;
 static volatile uint64_t g_touch_push_fail;
+
+/* Per-core REACT-delivery nesting depth — bounds synchronous recursion
+ * (touch_react_deliver → ManifestExecute → publish → touch_react_deliver).
+ * Per-core is exact: kernel ops run to completion on one core's stack
+ * (syscalls IF=0; scheduler switches only outside REACT chains). */
+static uint32_t          g_react_depth[CONFIG_MAX_CORES];
+static volatile uint64_t g_react_depth_drops;
 
 void TouchStatsSnapshot(uint64_t out[5])
 {
@@ -369,9 +377,36 @@ static void touch_react_deliver(process_t *proc, TouchSub *sub,
 {
     if (sub->u.manifest == MANIFEST_HANDLE_INVALID) return;
 
+    uint8_t  core  = amp_get_core_index();
+    uint32_t depth = __atomic_add_fetch(&g_react_depth[core], 1, __ATOMIC_RELAXED);
+
+    /* Bound synchronous REACT recursion by ACTUAL kernel-stack headroom on
+     * THIS core — frame-size AND stack-size proof. floor/top describe the
+     * stack currently in use (set together on every dispatch). rsp in
+     * (floor, top] confirms we're on that stack; otherwise (stale/unknown
+     * geometry, e.g. pre-userspace boot stack) fall back to the depth count. */
+    uint64_t rsp;
+    __asm__ volatile("mov %%rsp, %0" : "=r"(rsp));
+    uint64_t top   = per_core_current_kstack_top();
+    uint64_t floor = per_core_current_kstack_floor();
+    bool drop;
+    if (top != 0 && floor != 0 && rsp > floor && rsp <= top) {
+        drop = (rsp - floor) < CONFIG_TOUCH_REACT_STACK_MARGIN;
+    } else {
+        drop = (depth > CONFIG_TOUCH_REACT_DEPTH_MAX);
+    }
+    if (drop) {
+        __atomic_sub_fetch(&g_react_depth[core], 1, __ATOMIC_RELAXED);
+        uint64_t n = __atomic_add_fetch(&g_react_depth_drops, 1, __ATOMIC_RELAXED);
+        if ((n & (n - 1)) == 0)   /* power-of-2 throttle */
+            debug_printf("[TOUCH] REACT guard drop on core %u (drops=%lu)\n",
+                         (unsigned)core, (unsigned long)n);
+        return;
+    }
+
     uint64_t vaddr = touch_emit_payload(proc, tag_id, flags, source_pid,
                                         kpayload, plen);
-    if (vaddr == 0) return;
+    if (vaddr == 0) goto out_dec;
 
     /*
      * Stage the Crate descriptor in a kmalloc'd buffer so async-capable
@@ -394,7 +429,7 @@ static void touch_react_deliver(process_t *proc, TouchSub *sub,
      */
     uint64_t total = sizeof(Touch) + plen;
     Crate *crates_kbuf = (Crate *)kmalloc(sizeof(Crate));
-    if (!crates_kbuf) return;
+    if (!crates_kbuf) goto out_dec;
     *crates_kbuf = (Crate){
         .magic    = CRATE_MAGIC,
         .flags    = 0,
@@ -423,6 +458,9 @@ static void touch_react_deliver(process_t *proc, TouchSub *sub,
         kfree(crates_kbuf);
     }
     /* else: handler kfrees via crate_stage_commit_and_release at I/O completion. */
+
+out_dec:
+    __atomic_sub_fetch(&g_react_depth[core], 1, __ATOMIC_RELAXED);
 }
 
 /* ────────────────────────────────────────────────────────────────────────

@@ -33,8 +33,9 @@ static void idle_setup(process_t* idle, uint8_t core_index) {
 
     spinlock_init(&idle->state_lock);
 
-    // 2 pages: 1 guard (unmapped) + 1 data
-    void* stack_phys = pmm_alloc(2);
+    // CONFIG_KERNEL_STACK_TOTAL_PAGES: 1 guard (unmapped) + CONFIG_KERNEL_STACK_PAGES
+    // data — same geometry as every other kernel stack so REACT headroom is uniform.
+    void* stack_phys = pmm_alloc(CONFIG_KERNEL_STACK_TOTAL_PAGES);
     if (!stack_phys) {
         kprintf("[IDLE] FATAL: Failed to allocate idle stack for core %u\n", core_index);
         while (1) { asm volatile("cli; hlt"); }
@@ -54,7 +55,7 @@ static void idle_setup(process_t* idle, uint8_t core_index) {
 
     idle->kernel_stack_guard_base = stack_virt;
     idle->kernel_stack = (void*)((uintptr_t)stack_virt + CONFIG_PAGE_SIZE);
-    idle->kernel_stack_top = (void*)((uintptr_t)idle->kernel_stack + CONFIG_PAGE_SIZE);
+    idle->kernel_stack_top = (void*)((uintptr_t)idle->kernel_stack + CONFIG_KERNEL_STACK_PAGES * CONFIG_PAGE_SIZE);
 
     idle->context.rip = (uint64_t)idle_loop;
     idle->context.rsp = (uint64_t)idle->kernel_stack_top;

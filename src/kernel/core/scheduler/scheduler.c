@@ -894,10 +894,12 @@ void schedule(void *frame_ptr)
         }
     }
 
-    // Set kernel stack
-    if (!process_is_idle(next) && next->kernel_stack_top)
+    // Set kernel stack (top + floor) for THIS core — including idle, so the
+    // REACT headroom guard reads the correct geometry while idle runs.
+    if (next->kernel_stack_top)
     {
-        per_core_set_kernel_rsp((uint64_t)next->kernel_stack_top);
+        per_core_set_kernel_rsp((uint64_t)next->kernel_stack_top,
+                                (uint64_t)next->kernel_stack);
     }
 
     // Switch

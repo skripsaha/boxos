@@ -38,6 +38,12 @@ typedef struct {
     // --- Kernel stack top for this core (boot stack or current process stack) ---
     uint64_t            kernel_stack_top;
 
+    // --- Low limit (floor) of the kernel stack this core is running on:
+    //     lowest safe RSP = guard_base + 1 page. Set together with
+    //     kernel_stack_top on every dispatch. Used by the REACT headroom guard
+    //     to bound recursion by ACTUAL remaining stack on ANY stack size. ---
+    uint64_t            kernel_stack_floor;
+
     /* CET — per-CPU supervisor shadow-stack infrastructure.
      *
      * Populated by cet_lifecycle_init_supervisor_ssp() during per-core
@@ -82,9 +88,37 @@ void per_core_init_ap(uint8_t core_index, uint64_t stack_top);
 
 // Update kernel RSP for current core.
 // Sets both TSS.rsp0 (for INT/exception from ring 3) and
-// PerCpuData.kernel_rsp (for SYSCALL via swapgs).
+// PerCpuData.kernel_rsp (for SYSCALL via swapgs), and records the stack
+// floor (low limit) so the REACT headroom guard can measure real headroom.
 // Replaces separate tss_set_rsp0() + notify_set_kernel_rsp() calls.
-void per_core_set_kernel_rsp(uint64_t rsp);
+void per_core_set_kernel_rsp(uint64_t top, uint64_t floor);
+
+/* Top of the kernel stack THIS core is currently executing on, read lock-free
+ * from PerCpuData.kernel_rsp (gs:0). per_core_set_kernel_rsp keeps this equal
+ * to the live stack top on every dispatch; on K-cores it is the fixed K-core
+ * stack top set once at init. Returns 0 before per-core GS is live so callers
+ * treat that as "geometry unknown". Same GS validity as amp_get_core_index(). */
+static inline uint64_t per_core_current_kstack_top(void) {
+    if (!__atomic_load_n(&g_per_core_active, __ATOMIC_ACQUIRE)) return 0;
+    uint64_t top;
+    __asm__ volatile("mov %%gs:%c1, %0"
+                     : "=r"(top)
+                     : "i"(__builtin_offsetof(PerCpuData, kernel_rsp)));
+    return top;
+}
+
+/* Low limit (floor) of the kernel stack THIS core is currently executing on,
+ * read lock-free from PerCoreData.kernel_stack_floor. Returns 0 before per-core
+ * GS is live (or when not recorded) so callers treat that as "geometry unknown".
+ * Same GS validity as amp_get_core_index() / per_core_current_kstack_top(). */
+static inline uint64_t per_core_current_kstack_floor(void) {
+    if (!__atomic_load_n(&g_per_core_active, __ATOMIC_ACQUIRE)) return 0;
+    uint64_t floor;
+    __asm__ volatile("mov %%gs:%c1, %0"
+                     : "=r"(floor)
+                     : "i"(__builtin_offsetof(PerCoreData, kernel_stack_floor)));
+    return floor;
+}
 
 /* Capture the BSP's TSC value + current uptime in microseconds as the
  * anchor for per-AP TSC sync. Called from kernel_main after

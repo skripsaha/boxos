@@ -1613,7 +1613,8 @@ void process_start_initial(process_t *proc)
 
     asm volatile("cli");
 
-    per_core_set_kernel_rsp((uint64_t)proc->kernel_stack_top);
+    per_core_set_kernel_rsp((uint64_t)proc->kernel_stack_top,
+                            (uint64_t)proc->kernel_stack);
 
     uint64_t target_cr3 = proc->context.cr3;
     if (vmm_pcid_active())
