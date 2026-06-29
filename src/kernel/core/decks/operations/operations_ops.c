@@ -3,12 +3,25 @@
  *
  * Each op cleanly separates INPUT and OUTPUT through Crates. There is no
  * "single buffer with packed args" cargo cult: parameters live in op->params
- * and never overlap data buffers. Sizes are bounded only by Crate.capacity
- * (which is itself runtime, never compile-time).
+ * and never overlap data buffers.
  *
  * Two-input ops (CMP, FIND, XOR-with-key) carry the second buffer via a
  * crate index encoded in op->params. ManifestOp's two crate slots (in/out)
  * cover the common case; params encode anything beyond that.
+ *
+ * Buffers move through the page-walked crate_io primitives (crate_in_buf /
+ * crate_out_alloc / crate_out_commit, plus crate_read / crate_write for fixed
+ * scalars). A Crate payload that straddles a page boundary is copied across
+ * every backing frame instead of being clipped to its first page — the
+ * vmm_translate_user_addr straddle bug that silently corrupted every >4 KiB
+ * transform. Inputs are snapshotted into kernel buffers and each transform
+ * runs kernel->kernel, which also makes the in-place-looking ops (MOVE / XOR /
+ * BIT_SWAP) overlap-safe for free.
+ *
+ * Every op here is OP_AUTH_APP, and Crate.size / Crate.capacity are
+ * attacker-controlled (CrateIsValid bounds neither), so each snapshot and each
+ * output allocation is capped to OPS_MAX_BYTES — an unbounded crate_in_buf /
+ * crate_out_alloc of a claimed size would be a kmalloc DoS.
  */
 
 #include "klib.h"
@@ -16,32 +29,24 @@
 #include "manifest_auth.h"
 #include "boxos_manifest.h"
 #include "boxos_crate.h"
+#include "crate_io.h"
 #include "operations_deck.h"
 #include "vmm.h"
+#include "pmm.h"
 #include "process.h"
 
-/* -------------------------------------------------------------------------
- * Crate access helpers — uniform translation for kernel and user pointers.
- *
- * When ctx->proc is set, the Crate.addr is a user vaddr in proc->cabin and is
- * translated through the VMM. When ctx->proc is NULL (kernel self-tests, or
- * future kernel-issued manifests), Crate.addr is taken as a direct kernel
- * pointer. Returning NULL means the caller must abort with ERR_INVALID_ADDRESS.
- * ------------------------------------------------------------------------- */
+/*
+ * Operations ceiling. The legacy single-page map effectively capped every op
+ * at one page (4 KiB), so no real workload ever moved more; 1 MiB is far past
+ * any genuine buffer transform yet small enough that an attacker-sized crate
+ * cannot exhaust the kernel heap. Applied to every crate_in_buf snapshot and
+ * crate_out_alloc output below.
+ */
+#define OPS_MAX_BYTES (1u << 20)   /* 1 MiB */
 
-static void *OpCrateMap(const Crate *c, const OpContext *ctx, uint64_t bytes)
+static vmm_context_t *op_vmm(const OpContext *ctx)
 {
-    if (!c || bytes == 0)            return NULL;
-    if (bytes > c->capacity)         return NULL;
-    if (ctx && ctx->proc && ctx->proc->cabin) {
-        return vmm_translate_user_addr(ctx->proc->cabin->vmm, (uintptr_t)c->addr, (size_t)bytes);
-    }
-    return (void *)(uintptr_t)c->addr;
-}
-
-static const void *OpCrateMapRead(const Crate *c, const OpContext *ctx)
-{
-    return OpCrateMap(c, ctx, c->size);
+    return (ctx && ctx->proc && ctx->proc->cabin) ? ctx->proc->cabin->vmm : NULL;
 }
 
 /* -------------------------------------------------------------------------
@@ -61,12 +66,17 @@ static int OpBufMove(const ManifestOp *op,
     Crate *src = &crates[op->in_crate];
     Crate *dst = &crates[op->out_crate];
     if (src->size > dst->capacity) return ERR_BUFFER_TOO_SMALL;
+    if (src->size > OPS_MAX_BYTES) return ERR_BUFFER_TOO_SMALL;
 
-    const void *src_kp = OpCrateMapRead(src, ctx);
-    void       *dst_kp = OpCrateMap(dst, ctx, src->size);
-    if (!src_kp || !dst_kp) return ERR_INVALID_ADDRESS;
+    /* Snapshot the source into a kernel buffer, then commit that buffer to the
+     * destination: src/dst may overlap in user space but the bounce is its own
+     * allocation, so the copy is overlap-safe. */
+    void *kbuf = crate_in_buf(src, ctx);
+    if (!kbuf) return ERR_INVALID_ADDRESS;
 
-    memmove(dst_kp, src_kp, (size_t)src->size);
+    int rc = crate_out_commit(dst, ctx, kbuf, src->size);
+    crate_buf_free(kbuf);
+    if (rc != OK) return rc;          /* fail closed: dst->size left unchanged */
     dst->size = src->size;
     return OK;
 }
@@ -85,14 +95,33 @@ static int OpBufFill(const ManifestOp *op,
     if (op->out_crate == CRATE_INDEX_NONE) return ERR_INVALID_ARGUMENT;
     if (op->param_size < 1)                 return ERR_INVALID_ARGUMENT;
 
-    Crate  *dst       = &crates[op->out_crate];
-    uint8_t fill_byte = op->params[0];
+    Crate   *dst       = &crates[op->out_crate];
+    uint8_t  fill_byte = op->params[0];
+    uint64_t n         = dst->capacity;
+    if (n == 0) return ERR_INVALID_ADDRESS;   /* legacy mapped capacity==0 -> NULL */
+    if (n > OPS_MAX_BYTES) return ERR_BUFFER_TOO_SMALL;   /* bound fill CPU like other ops */
 
-    void *dst_kp = OpCrateMap(dst, ctx, dst->capacity);
-    if (!dst_kp) return ERR_INVALID_ADDRESS;
-
-    memset(dst_kp, fill_byte, (size_t)dst->capacity);
-    dst->size = dst->capacity;
+    vmm_context_t *vmm = op_vmm(ctx);
+    if (vmm) {
+        /* One page of the fill byte committed across the user output in
+         * page-sized chunks: kernel memory stays a single page no matter how
+         * large dst->capacity is (it is attacker-controlled and unbounded), so
+         * a giant capacity cannot force a giant kmalloc+memset. */
+        uint8_t *page = kmalloc(PMM_PAGE_SIZE);
+        if (!page) return ERR_NO_MEMORY;
+        memset(page, fill_byte, PMM_PAGE_SIZE);
+        for (uint64_t off = 0; off < n; off += PMM_PAGE_SIZE) {
+            uint64_t chunk = n - off;
+            if (chunk > PMM_PAGE_SIZE) chunk = PMM_PAGE_SIZE;
+            error_t rc = vmm_user_buf_commit_out(vmm, (uintptr_t)dst->addr + off,
+                                                 page, (size_t)chunk);
+            if (rc != OK) { kfree(page); return rc; }   /* fail closed */
+        }
+        kfree(page);
+    } else {
+        memset((void *)(uintptr_t)dst->addr, fill_byte, (size_t)n);
+    }
+    dst->size = n;
     return OK;
 }
 
@@ -114,20 +143,27 @@ static int OpBufXor(const ManifestOp *op,
 
     uint32_t key_len = *(const uint32_t *)op->params;
     if (key_len == 0)                         return ERR_INVALID_ARGUMENT;
-    if (op->param_size < 4 + key_len)         return ERR_INVALID_ARGUMENT;
+    if ((uint64_t)4 + key_len > op->param_size) return ERR_INVALID_ARGUMENT; /* no u32 wrap */
     const uint8_t *key = op->params + 4;
 
     Crate *src = &crates[op->in_crate];
     Crate *dst = &crates[op->out_crate];
     if (src->size > dst->capacity) return ERR_BUFFER_TOO_SMALL;
+    if (src->size > OPS_MAX_BYTES) return ERR_BUFFER_TOO_SMALL;
 
-    const uint8_t *src_kp = OpCrateMapRead(src, ctx);
-    uint8_t       *dst_kp = OpCrateMap(dst, ctx, src->size);
-    if (!src_kp || !dst_kp) return ERR_INVALID_ADDRESS;
+    uint8_t *in = crate_in_buf(src, ctx);
+    if (!in) return ERR_INVALID_ADDRESS;
+    uint8_t *out = crate_out_alloc(dst, src->size);
+    if (!out) { crate_buf_free(in); return ERR_INVALID_ADDRESS; }
 
     for (uint64_t i = 0; i < src->size; i++) {
-        dst_kp[i] = src_kp[i] ^ key[i % key_len];
+        out[i] = in[i] ^ key[i % key_len];
     }
+
+    int rc = crate_out_commit(dst, ctx, out, src->size);
+    crate_buf_free(in);
+    crate_buf_free(out);
+    if (rc != OK) return rc;
     dst->size = src->size;
     return OK;
 }
@@ -148,20 +184,21 @@ static int OpBufHash(const ManifestOp *op,
     }
     Crate *src = &crates[op->in_crate];
     Crate *dst = &crates[op->out_crate];
-    if (dst->capacity < 4) return ERR_BUFFER_TOO_SMALL;
+    if (dst->capacity < 4)        return ERR_BUFFER_TOO_SMALL;
+    if (src->size > OPS_MAX_BYTES) return ERR_BUFFER_TOO_SMALL;
 
-    const uint8_t *src_kp = OpCrateMapRead(src, ctx);
-    void          *dst_kp = OpCrateMap(dst, ctx, 4);
-    if (!src_kp || !dst_kp) return ERR_INVALID_ADDRESS;
+    uint8_t *in = crate_in_buf(src, ctx);
+    if (!in) return ERR_INVALID_ADDRESS;
 
     uint32_t hash = 0;
     for (uint64_t i = 0; i < src->size; i++) {
-        hash += src_kp[i];
+        hash += in[i];
         hash = (hash << 5) | (hash >> 27);
     }
-    *(uint32_t *)dst_kp = hash;
-    dst->size = 4;
-    return OK;
+    crate_buf_free(in);
+
+    /* 4-byte result -> stack scalar; crate_write sets dst->size on success. */
+    return crate_write(dst, ctx, &hash, 4);
 }
 
 /* -------------------------------------------------------------------------
@@ -187,22 +224,25 @@ static int OpBufCmp(const ManifestOp *op,
     Crate *b = &crates[b_idx];
     Crate *r = &crates[op->out_crate];
     if (r->capacity < 4) return ERR_BUFFER_TOO_SMALL;
+    if (a->size > OPS_MAX_BYTES || b->size > OPS_MAX_BYTES) return ERR_BUFFER_TOO_SMALL;
 
-    const uint8_t *a_kp = OpCrateMapRead(a, ctx);
-    const uint8_t *b_kp = OpCrateMapRead(b, ctx);
-    void          *r_kp = OpCrateMap(r, ctx, 4);
-    if (!a_kp || !b_kp || !r_kp) return ERR_INVALID_ADDRESS;
+    /* Two inputs -> two snapshots. */
+    uint8_t *a_kp = crate_in_buf(a, ctx);
+    if (!a_kp) return ERR_INVALID_ADDRESS;
+    uint8_t *b_kp = crate_in_buf(b, ctx);
+    if (!b_kp) { crate_buf_free(a_kp); return ERR_INVALID_ADDRESS; }
 
     uint64_t cmp_len = (a->size < b->size) ? a->size : b->size;
     int      cmp     = memcmp(a_kp, b_kp, (size_t)cmp_len);
     int32_t  result;
-    if (cmp != 0)            result = (cmp < 0) ? -1 : 1;
+    if (cmp != 0)                result = (cmp < 0) ? -1 : 1;
     else if (a->size != b->size) result = (a->size < b->size) ? -1 : 1;
-    else                          result = 0;
+    else                         result = 0;
 
-    *(int32_t *)r_kp = result;
-    r->size = 4;
-    return OK;
+    int rc = crate_write(r, ctx, &result, 4);
+    crate_buf_free(a_kp);
+    crate_buf_free(b_kp);
+    return rc;
 }
 
 /* -------------------------------------------------------------------------
@@ -224,16 +264,16 @@ static int OpBufFind(const ManifestOp *op,
 
     uint32_t pattern_len = *(const uint32_t *)op->params;
     if (pattern_len == 0)                     return ERR_INVALID_ARGUMENT;
-    if (op->param_size < 4 + pattern_len)     return ERR_INVALID_ARGUMENT;
+    if ((uint64_t)4 + pattern_len > op->param_size) return ERR_INVALID_ARGUMENT; /* no u32 wrap */
     const uint8_t *pattern = op->params + 4;
 
     Crate *hay = &crates[op->in_crate];
     Crate *out = &crates[op->out_crate];
-    if (out->capacity < 4) return ERR_BUFFER_TOO_SMALL;
+    if (out->capacity < 4)         return ERR_BUFFER_TOO_SMALL;
+    if (hay->size > OPS_MAX_BYTES) return ERR_BUFFER_TOO_SMALL;
 
-    const uint8_t *hay_kp = OpCrateMapRead(hay, ctx);
-    void          *out_kp = OpCrateMap(out, ctx, 4);
-    if (!hay_kp || !out_kp) return ERR_INVALID_ADDRESS;
+    uint8_t *hay_kp = crate_in_buf(hay, ctx);
+    if (!hay_kp) return ERR_INVALID_ADDRESS;
 
     uint32_t found = 0xFFFFFFFFu;
     if (hay->size >= pattern_len) {
@@ -245,9 +285,9 @@ static int OpBufFind(const ManifestOp *op,
             }
         }
     }
-    *(uint32_t *)out_kp = found;
-    out->size = 4;
-    return OK;
+    crate_buf_free(hay_kp);
+
+    return crate_write(out, ctx, &found, 4);
 }
 
 /* -------------------------------------------------------------------------
@@ -267,27 +307,43 @@ static int OpBufPack(const ManifestOp *op,
     }
     Crate *src = &crates[op->in_crate];
     Crate *dst = &crates[op->out_crate];
+    if (src->size > OPS_MAX_BYTES) return ERR_BUFFER_TOO_SMALL;
 
-    const uint8_t *src_kp = OpCrateMapRead(src, ctx);
-    uint8_t       *dst_kp = OpCrateMap(dst, ctx, dst->capacity);
-    if (!src_kp || !dst_kp) return ERR_INVALID_ADDRESS;
+    uint8_t *in = crate_in_buf(src, ctx);
+    if (!in) return ERR_INVALID_ADDRESS;
 
-    uint64_t out = 0;
-    uint64_t i   = 0;
+    /* Worst-case RLE output is two bytes per input byte; src->size is already
+     * bounded, so the bounce is at most 2*OPS_MAX. Allocate the smaller of the
+     * real worst case and the claimed capacity (==0 -> ERR_INVALID_ADDRESS,
+     * matching the legacy capacity map). */
+    uint64_t worst   = src->size * 2;
+    uint64_t out_cap = (worst < dst->capacity) ? worst : dst->capacity;
+    uint8_t *out = crate_out_alloc(dst, out_cap);
+    if (!out) { crate_buf_free(in); return ERR_INVALID_ADDRESS; }
+
+    uint64_t o = 0;
+    uint64_t i = 0;
     while (i < src->size) {
-        uint8_t  byte  = src_kp[i];
+        uint8_t  byte  = in[i];
         uint64_t count = 1;
-        while (i + count < src->size && count < 255 && src_kp[i + count] == byte) count++;
+        while (i + count < src->size && count < 255 && in[i + count] == byte) count++;
 
-        if (out + 2 > dst->capacity) {
+        if (o + 2 > out_cap) {
+            crate_buf_free(in);
+            crate_buf_free(out);
             dst->size = 0;
             return ERR_BUFFER_TOO_SMALL;
         }
-        dst_kp[out++] = (uint8_t)count;
-        dst_kp[out++] = byte;
+        out[o++] = (uint8_t)count;
+        out[o++] = byte;
         i += count;
     }
-    dst->size = out;
+
+    int rc = crate_out_commit(dst, ctx, out, o);
+    crate_buf_free(in);
+    crate_buf_free(out);
+    if (rc != OK) return rc;
+    dst->size = o;
     return OK;
 }
 
@@ -307,24 +363,44 @@ static int OpBufUnpack(const ManifestOp *op,
     }
     Crate *src = &crates[op->in_crate];
     Crate *dst = &crates[op->out_crate];
-    if (src->size % 2 != 0) return ERR_INVALID_ARGUMENT;
+    if (src->size % 2 != 0)        return ERR_INVALID_ARGUMENT;
+    if (src->size > OPS_MAX_BYTES) return ERR_BUFFER_TOO_SMALL;
 
-    const uint8_t *src_kp = OpCrateMapRead(src, ctx);
-    uint8_t       *dst_kp = OpCrateMap(dst, ctx, dst->capacity);
-    if (!src_kp || !dst_kp) return ERR_INVALID_ADDRESS;
+    uint8_t *in = crate_in_buf(src, ctx);
+    if (!in) return ERR_INVALID_ADDRESS;
 
-    uint64_t out = 0;
-    for (uint64_t i = 0; i + 1 < src->size; i += 2) {
-        uint8_t count = src_kp[i];
-        uint8_t byte  = src_kp[i + 1];
-        if (out + count > dst->capacity) {
-            dst->size = 0;
-            return ERR_BUFFER_TOO_SMALL;
-        }
-        memset(dst_kp + out, byte, count);
-        out += count;
+    /* Legacy mapped the whole output capacity up front as an address gate. */
+    if (dst->capacity == 0) { crate_buf_free(in); return ERR_INVALID_ADDRESS; }
+
+    /* Decompressed length is the sum of the run counts. A single [count] byte
+     * amplifies up to 255x, so resolve the exact size BEFORE allocating and
+     * reject if it would exceed the user capacity (legacy ERR_BUFFER_TOO_SMALL)
+     * or the operations ceiling (an unbounded kmalloc DoS otherwise). */
+    uint64_t total = 0;
+    for (uint64_t i = 0; i + 1 < src->size; i += 2) total += in[i];
+    if (total > dst->capacity || total > OPS_MAX_BYTES) {
+        crate_buf_free(in);
+        dst->size = 0;
+        return ERR_BUFFER_TOO_SMALL;
     }
-    dst->size = out;
+    if (total == 0) { crate_buf_free(in); dst->size = 0; return OK; }
+
+    uint8_t *out = crate_out_alloc(dst, total);
+    if (!out) { crate_buf_free(in); return ERR_INVALID_ADDRESS; }
+
+    uint64_t o = 0;
+    for (uint64_t i = 0; i + 1 < src->size; i += 2) {
+        uint8_t count = in[i];
+        uint8_t byte  = in[i + 1];
+        memset(out + o, byte, count);
+        o += count;
+    }
+
+    int rc = crate_out_commit(dst, ctx, out, o);
+    crate_buf_free(in);
+    crate_buf_free(out);
+    if (rc != OK) return rc;
+    dst->size = o;
     return OK;
 }
 
@@ -348,34 +424,48 @@ static int OpBitSwap(const ManifestOp *op,
     Crate  *dst  = &crates[op->out_crate];
     uint8_t mode = op->params[0];
     if (src->size > dst->capacity) return ERR_BUFFER_TOO_SMALL;
+    if (src->size > OPS_MAX_BYTES) return ERR_BUFFER_TOO_SMALL;
 
-    const uint8_t *src_kp = OpCrateMapRead(src, ctx);
-    uint8_t       *dst_kp = OpCrateMap(dst, ctx, src->size);
-    if (!src_kp || !dst_kp) return ERR_INVALID_ADDRESS;
+    uint8_t *in = crate_in_buf(src, ctx);
+    if (!in) return ERR_INVALID_ADDRESS;
+    uint8_t *out = crate_out_alloc(dst, src->size);
+    if (!out) { crate_buf_free(in); return ERR_INVALID_ADDRESS; }
 
+    if (mode > 2) {
+        crate_buf_free(in);
+        crate_buf_free(out);
+        return ERR_INVALID_ARGUMENT;
+    }
+
+    /* Seed with a straight copy so any trailing bytes that do not fill a whole
+     * element pass through from the source — never leak uninitialised heap. */
     uint64_t n = src->size;
+    memcpy(out, in, (size_t)n);
     if (mode == 0) {
         for (uint64_t i = 0; i + 1 < n; i += 2) {
-            dst_kp[i]     = src_kp[i + 1];
-            dst_kp[i + 1] = src_kp[i];
+            out[i]     = in[i + 1];
+            out[i + 1] = in[i];
         }
     } else if (mode == 1) {
         for (uint64_t i = 0; i + 3 < n; i += 4) {
-            dst_kp[i]     = src_kp[i + 3];
-            dst_kp[i + 1] = src_kp[i + 2];
-            dst_kp[i + 2] = src_kp[i + 1];
-            dst_kp[i + 3] = src_kp[i];
+            out[i]     = in[i + 3];
+            out[i + 1] = in[i + 2];
+            out[i + 2] = in[i + 1];
+            out[i + 3] = in[i];
         }
-    } else if (mode == 2) {
+    } else {   /* mode == 2 */
         for (uint64_t i = 0; i + 7 < n; i += 8) {
             for (int j = 0; j < 4; j++) {
-                dst_kp[i + j]     = src_kp[i + 7 - j];
-                dst_kp[i + 7 - j] = src_kp[i + j];
+                out[i + j]     = in[i + 7 - j];
+                out[i + 7 - j] = in[i + j];
             }
         }
-    } else {
-        return ERR_INVALID_ARGUMENT;
     }
+
+    int rc = crate_out_commit(dst, ctx, out, n);
+    crate_buf_free(in);
+    crate_buf_free(out);
+    if (rc != OK) return rc;
     dst->size = n;
     return OK;
 }
@@ -401,21 +491,36 @@ static int OpValAdd(const ManifestOp *op,
 
     Crate *target = &crates[op->out_crate];
     if (type_size != 1 && type_size != 2 && type_size != 4)  return ERR_INVALID_ARGUMENT;
-    if (offset + type_size > target->size)                    return ERR_OUT_OF_RANGE;
+    if ((uint64_t)offset + type_size > target->size)         return ERR_OUT_OF_RANGE; /* no u32 wrap */
 
-    uint8_t *kp = OpCrateMap(target, ctx, offset + type_size);
-    if (!kp) return ERR_INVALID_ADDRESS;
+    /* In-place read-modify-write of just the type_size bytes at offset, page-
+     * walked so an offset past the first page lands on the right frame. */
+    uintptr_t      at  = (uintptr_t)target->addr + offset;
+    vmm_context_t *vmm = op_vmm(ctx);
+
+    uint8_t scalar[4];
+    if (vmm) {
+        if (vmm_user_buf_in_into(vmm, at, type_size, scalar) != OK) return ERR_INVALID_ADDRESS;
+    } else {
+        memcpy(scalar, (const void *)at, type_size);
+    }
 
     if (type_size == 1) {
-        kp[offset] = (uint8_t)((int8_t)kp[offset] + (int8_t)delta);
+        int8_t v;  memcpy(&v, scalar, 1);
+        v = (int8_t)(v + (int8_t)delta);            memcpy(scalar, &v, 1);
     } else if (type_size == 2) {
-        uint16_t v = *(uint16_t *)(kp + offset);
-        v = (uint16_t)((int16_t)v + (int16_t)delta);
-        *(uint16_t *)(kp + offset) = v;
+        uint16_t v; memcpy(&v, scalar, 2);
+        v = (uint16_t)((int16_t)v + (int16_t)delta); memcpy(scalar, &v, 2);
     } else {
-        uint32_t v = *(uint32_t *)(kp + offset);
-        v = (uint32_t)((int32_t)v + delta);
-        *(uint32_t *)(kp + offset) = v;
+        uint32_t v; memcpy(&v, scalar, 4);
+        v = (uint32_t)((int32_t)v + delta);          memcpy(scalar, &v, 4);
+    }
+
+    if (vmm) {
+        error_t rc = vmm_user_buf_commit_out(vmm, at, scalar, type_size);
+        if (rc != OK) return rc;
+    } else {
+        memcpy((void *)at, scalar, type_size);
     }
     return OK;
 }
