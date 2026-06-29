@@ -30,6 +30,11 @@
  * with payload {file_id, op=2, ...}. No POSIX equivalent — fsync()
  * returns silently and offers no notification side-channel. */
 #define STORAGE_OBJ_ANCHOR      0x23
+/* snap.info — structured per-snapshot record by id. params = [u32 snap_id].
+ * out_crate = [u32 id][u32 parent_file_id][u64 created_time][u32 file_count]
+ *             [u64 total_size][u8 flags][char name[32]]. Gives the name-by-id
+ * lookup SNAP_LIST (ids only) lacks, enabling deterministic snapshot cleanup. */
+#define STORAGE_SNAP_INFO       0x24
 
 void    storage_deck_init(void);
 error_t StorageDeckRegister(void);

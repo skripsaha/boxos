@@ -81,8 +81,10 @@ inline std::string_view field_view(const char *p, std::size_t cap) noexcept
 struct tag {
     std::string key;
     std::string value;
-    bool        system = false;  // kernel tag type; presently always false (the
-                                 // file_info serializer carries no type byte yet)
+    bool        system = false;  // true iff this tag is the bare reserved-vocabulary
+                                 // key the kernel stamps system at mount; a
+                                 // value-bearing key (e.g. "system:foo") is never
+                                 // system, nor is an auto-label / user tag
 
     // Read the value as an integer (or bool) — the typed inverse of file's
     // add_tag<T>. On success the parsed T; the error arm carries the cause —
@@ -603,16 +605,35 @@ public:
     static box::result<snapshot> of_all(const char *name) { return of(0u, name); }
 
     // Re-own an existing snapshot id (the inverse of keep()) — one from
-    // snapshots() or a prior keep() — so its lifetime returns to RAII. Ownership
-    // is handed across (keep → adopt), not duplicated: adopting an id another
-    // handle still owns lets both dtors snap_delete it (the second is a harmless
-    // no-op, but the contract is single-owner). The name is caller-supplied
-    // cosmetic: the C API has no name-by-id lookup. id == 0 → invalid_argument.
-    static box::result<snapshot> adopt(std::uint32_t id, const char *name = "")
+    // snapshots() / snapshots_named() or a prior keep() — so its lifetime returns
+    // to RAII. Ownership is handed across (keep → adopt), not duplicated: adopting
+    // an id another handle still owns lets both dtors snap_delete it (the second
+    // is a harmless no-op, but the contract is single-owner). This overload takes
+    // a caller-supplied cosmetic name; the adopt(id) overload fills the real name
+    // from snap_info. id == 0 → invalid_argument.
+    static box::result<snapshot> adopt(std::uint32_t id, const char *name)
     {
         if (id == 0) return std::unexpected(box::error{box::errc::invalid_argument});
         return snapshot(id, name ? name : "");
     }
+    // Self-naming adopt — re-own an id and fill name_ from the kernel via
+    // snap_info (the deterministic counterpart to the cosmetic-name overload).
+    // id == 0 → invalid_argument; an unknown id → snap_info's recovered cause
+    // (snapshot_not_found).
+    static box::result<snapshot> adopt(std::uint32_t id)
+    {
+        if (id == 0) return std::unexpected(box::error{box::errc::invalid_argument});
+        snap_info_t si{};
+        int rc = ::snap_info(id, &si);
+        if (rc != 0) return std::unexpected(box::error{box_errno_of(rc)});
+        return snapshot(id, si.name);
+    }
+    // Re-own the snapshot named `name` — the deterministic-cleanup primitive.
+    // Scans snapshots_named() for a name match and hands back an OWNING handle
+    // whose dtor snap_deletes it. snapshot_not_found when no snapshot carries the
+    // name; invalid_argument for a null name. (Defined out-of-line below, once
+    // snapshots_named() is in scope.)
+    static box::result<snapshot> reclaim(const char *name);
 
     std::uint32_t    id() const noexcept { return id_; }
     std::string_view name() const noexcept { return name_; }
@@ -639,6 +660,19 @@ public:
     }
 };
 
+// A snapshot's metadata by id — the structured record snap_info() returns, with
+// the name the ids-only snapshots() can't give. created_unix is the kernel's
+// creation time in unix seconds (kernel rtc_get_unix64, NOT microseconds);
+// parent_file_id is 0 for a whole-filesystem snapshot.
+struct snapshot_info {
+    std::uint32_t id;
+    std::string   name;
+    std::uint64_t created_unix;
+    std::uint32_t parent_file_id;
+    std::uint32_t file_count;
+    std::uint64_t total_size;
+};
+
 // Every CoW snapshot id currently known to the filesystem.
 inline std::vector<std::uint32_t> snapshots()
 {
@@ -650,6 +684,39 @@ inline std::vector<std::uint32_t> snapshots()
         for (std::uint32_t i = 0; i < n; ++i) out.push_back(ids[i]);
     }
     return out;
+}
+
+// Every CoW snapshot with its full metadata (name included) — snap_list for the
+// ids, then snap_info per id. An id that fails snap_info (e.g. deleted between
+// the two calls) is skipped, so the result honestly reflects what is still
+// resolvable rather than carrying a half-filled entry.
+inline std::vector<snapshot_info> snapshots_named()
+{
+    std::vector<snapshot_info> out;
+    std::uint32_t              ids[64];
+    std::uint32_t              n = 0;
+    if (::snap_list(ids, 64, &n) != 0) return out;
+    out.reserve(n);
+    for (std::uint32_t i = 0; i < n; ++i) {
+        snap_info_t si{};
+        if (::snap_info(ids[i], &si) != 0) continue;  // skip a vanished id
+        out.push_back(snapshot_info{si.id,
+                                    std::string(field_view(si.name, sizeof(si.name))),
+                                    si.created_time,
+                                    si.parent_file_id,
+                                    si.file_count,
+                                    si.total_size});
+    }
+    return out;
+}
+
+inline box::result<snapshot> snapshot::reclaim(const char *name)
+{
+    if (!name) return std::unexpected(box::error{box::errc::invalid_argument});
+    for (const snapshot_info &si : snapshots_named())
+        if (si.name == name)
+            return snapshot(si.id, si.name.c_str());
+    return std::unexpected(box::error{box::errc::snapshot_not_found});
 }
 
 // Flush the whole filesystem to durable storage — the whole-FS counterpart of

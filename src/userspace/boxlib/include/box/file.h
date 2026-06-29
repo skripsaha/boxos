@@ -61,6 +61,20 @@ int snap_create(const char *name, uint32_t file_id, uint32_t *out_snap_id);
 int snap_delete(uint32_t snap_id);
 int snap_list(uint32_t *out_ids, uint32_t max_ids, uint32_t *out_count);
 
+/* Structured per-snapshot record by id — the name-by-id lookup snap_list (ids
+ * only) lacks, the basis for resolving a snapshot by name. */
+typedef struct {
+    uint32_t id;
+    uint32_t parent_file_id;
+    uint64_t created_time;
+    uint32_t file_count;
+    uint64_t total_size;
+    uint8_t  flags;
+    char     name[32];
+} snap_info_t;
+
+int snap_info(uint32_t snap_id, snap_info_t *out);
+
 /*
  * anchor() — durability primitive. Forces all in-memory metadata to
  * disk and flushes the disk cache. Returns when persisted.
