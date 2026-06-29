@@ -24,6 +24,13 @@
 #define TAGFS_INVALID_TAG_ID        0xFFFF
 #define TAGFS_MAX_TAG_ID            0xFFFE
 
+// TagRegistryEntry.flags bits.
+//   HAS_VALUE — entry carries a value (bit 0; persisted, value-presence).
+//   SYSTEM    — entry is a reserved-vocabulary key, stamped at every mount
+//               (bit 1; re-derived, never the reason for a disk write).
+#define TAGFS_TAG_FLAG_HAS_VALUE    0x01
+#define TAGFS_TAG_FLAG_SYSTEM       0x02
+
 // File flags
 #define TAGFS_FILE_ACTIVE           (1 << 0)
 #define TAGFS_FILE_TRASHED          (1 << 1)

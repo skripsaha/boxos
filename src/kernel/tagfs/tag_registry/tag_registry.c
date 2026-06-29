@@ -153,7 +153,7 @@ static uint16_t intern_with_id_unlocked(TagRegistry* reg, uint16_t tag_id,
     entry->value = copy_string(value);
     if (value && !entry->value) { kfree(entry->key); kfree(entry); return TAGFS_INVALID_TAG_ID; }
 
-    entry->flags  = (value != NULL) ? 1 : 0;
+    entry->flags  = (value != NULL) ? TAGFS_TAG_FLAG_HAS_VALUE : 0;
     entry->tag_id = tag_id;
 
     TagRegistryNode* node = kmalloc(sizeof(TagRegistryNode));
@@ -209,7 +209,7 @@ static uint16_t intern_unlocked(TagRegistry* reg, const char* key, const char* v
         return TAGFS_INVALID_TAG_ID;
     }
 
-    entry->flags  = (value != NULL) ? 1 : 0;
+    entry->flags  = (value != NULL) ? TAGFS_TAG_FLAG_HAS_VALUE : 0;
     entry->tag_id = reg->next_id;
 
     TagRegistryNode* node = kmalloc(sizeof(TagRegistryNode));
@@ -376,6 +376,28 @@ TagKeyGroup* tag_registry_key_group(TagRegistry* reg, const char* key) {
     }
     spin_unlock(&reg->lock);
     return group;
+}
+
+// Stamp an entry as a reserved-vocabulary (system) tag. Idempotent OR of the
+// SYSTEM bit; deliberately does NOT raise g_registry_dirty — the bit is
+// re-derived from TagFsReservedKeys at every mount, so it must never be the
+// reason for a disk flush.
+void tag_registry_mark_system(TagRegistry* reg, uint16_t tag_id) {
+    if (!reg || tag_id == TAGFS_INVALID_TAG_ID) return;
+    spin_lock(&reg->lock);
+    if (tag_id < reg->next_id && reg->by_id[tag_id])
+        reg->by_id[tag_id]->flags |= TAGFS_TAG_FLAG_SYSTEM;
+    spin_unlock(&reg->lock);
+}
+
+bool tag_registry_is_system(TagRegistry* reg, uint16_t tag_id) {
+    if (!reg || tag_id == TAGFS_INVALID_TAG_ID) return false;
+    spin_lock(&reg->lock);
+    bool is_sys = false;
+    if (tag_id < reg->next_id && reg->by_id[tag_id])
+        is_sys = (reg->by_id[tag_id]->flags & TAGFS_TAG_FLAG_SYSTEM) != 0;
+    spin_unlock(&reg->lock);
+    return is_sys;
 }
 
 bool tag_registry_is_dirty(void) {

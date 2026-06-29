@@ -9959,6 +9959,95 @@ void Phase55()
            "snapshot::adopt + vga::clear_line + box::timeouts (chrono)\n");
 }
 
+void Phase56()
+{
+    using box::tagfs::file;
+
+    // SL-1 (system-tag classification) + SL-2 (snapshot name-by-id) honesty.
+    // The matrix shares one disk across its 4 configs, so this is cleanup-first
+    // and re-runnable: a leaked p56snap is reclaimed, and leftover p56 files are
+    // swept. p56sys carries an explicit "p56" tag purely so query() finds it for
+    // the sweep; its reserved "system" tag blocks ObjDelete, so it is stripped
+    // first (also covers a crash between the add and the final sweep).
+    auto sweep = [] {
+        for (auto victim : box::tagfs::query("p56")) {
+            (void)victim.remove_tag("system");  // 'system' tag blocks delete
+            (void)victim.remove();
+        }
+    };
+    (void)box::tagfs::snapshot::reclaim("p56snap");  // drop a leaked snapshot
+    sweep();
+
+    box::result<file> made = box::tagfs::create("p56sys", {"p56"});
+    if (!made) {
+        std::string_view why = made.error().message();
+        printf("[CXX] SKIP phase56: tagfs storage unavailable (create p56sys: %.*s) "
+               "— system-tag classification + snapshot name-by-id checks skipped\n",
+               static_cast<int>(why.size()), why.data());
+        return;
+    }
+    file f = *made;
+
+    // ── SL-1 discriminator: reserved vocabulary, not provenance ─────────────
+    // f now carries {p56sys (auto-label), p56}; add a bare reserved key and a
+    // user value-tag → 4 tags, inside the 5-tag report cap. The auto-label is
+    // kernel-generated yet NOT system — that is the model-A-over-provenance proof.
+    box::status sys_added  = f.add_tag("system");      // bare reserved key
+    box::status zone_added = f.add_tag("zone:east");   // user value-tag
+    if (!sys_added || !zone_added) {
+        box::error       e   = !sys_added ? sys_added.error() : zone_added.error();
+        std::string_view why = e.message();
+        printf("[CXX] SKIP phase56: tag add denied (%.*s) — SL-1 discriminator skipped\n",
+               static_cast<int>(why.size()), why.data());
+    } else {
+        box::result<box::tagfs::tag> ts = f.tag_named("system");
+        Check(ts && ts->system == true,
+              "phase56 bare reserved key 'system' is classified system");
+        box::result<box::tagfs::tag> tz = f.tag_named("zone");
+        Check(tz && tz->system == false,
+              "phase56 user value-tag 'zone:east' is not system");
+        box::result<box::tagfs::tag> ta = f.tag_named("p56sys");
+        Check(ta && ta->system == false,
+              "phase56 auto-label 'p56sys' is not system (reserved-vocabulary model, not provenance)");
+    }
+
+    // ── SL-2: snapshot name-by-id + deterministic reclaim ────────────────────
+    box::result<box::tagfs::snapshot> s = box::tagfs::snapshot::of(f, "p56snap");
+    if (!s) {
+        std::string why(s.error().message());
+        printf("[CXX] SKIP phase56: snapshot::of denied (%s) — SL-2 name-by-id / reclaim skipped\n",
+               why.c_str());
+    } else {
+        std::uint32_t sid = s->keep();  // detach: simulate a leaked snapshot
+
+        bool named_match = false;
+        for (const box::tagfs::snapshot_info &si : box::tagfs::snapshots_named())
+            if (si.id == sid && si.name == "p56snap") named_match = true;
+        Check(named_match,
+              "phase56 snapshots_named() reports id + name for the leaked snapshot");
+
+        {
+            box::result<box::tagfs::snapshot> re = box::tagfs::snapshot::reclaim("p56snap");
+            Check(re && re->id() == sid,
+                  "phase56 reclaim(\"p56snap\") re-owns the leaked snapshot by name");
+        }  // re's owning dtor → snap_delete(sid)
+
+        bool still_present = false;
+        for (std::uint32_t id : box::tagfs::snapshots())
+            if (id == sid) still_present = true;
+        Check(!still_present, "phase56 reclaim's RAII drop removed the snapshot");
+
+        box::result<box::tagfs::snapshot> none = box::tagfs::snapshot::reclaim("p56nope");
+        Check(!none && none.error().code() == box::errc::snapshot_not_found,
+              "phase56 reclaim(\"p56nope\") -> snapshot_not_found");
+    }
+
+    sweep();  // clean the p56 files (strip 'system' first so delete is allowed)
+
+    printf("[CXX] PASS phase56: TagFS substrate honesty — system-tag classification "
+           "(reserved vocabulary) + snapshot name-by-id (snap_info) + deterministic reclaim\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -10036,6 +10125,7 @@ int main()
     Phase53();
     Phase54();
     Phase55();
+    Phase56();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

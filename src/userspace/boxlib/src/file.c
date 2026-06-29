@@ -31,6 +31,7 @@
 #define STORAGE_SNAP_DELETE     0x21
 #define STORAGE_SNAP_LIST       0x22
 #define STORAGE_OBJ_ANCHOR      0x23
+#define STORAGE_SNAP_INFO       0x24
 
 #define STORAGE_TIMEOUT_MS      5000u
 
@@ -139,10 +140,11 @@ int file_info(uint32_t file_id, file_info_t *info)
     info->tag_count = (uint8_t)(tag_count_raw > 5 ? 5 : tag_count_raw);
 
     for (uint16_t i = 0; i < tag_count_raw; i++) {
-        if (pos + 4 > out_actual) break;
+        if (pos + 5 > out_actual) break;
         uint16_t kl = 0, vl = 0;
         memcpy(&kl, out + pos, 2); pos += 2;
         memcpy(&vl, out + pos, 2); pos += 2;
+        uint8_t type = out[pos]; pos += 1;   /* 1 = system, 0 = user */
         if (pos + kl + vl > out_actual) break;
 
         if (i < 5) {
@@ -154,7 +156,7 @@ int file_info(uint32_t file_id, file_info_t *info)
             info->tags[i].key[kc] = '\0';
             memcpy(info->tags[i].value, out + pos + kl,  vc);
             info->tags[i].value[vc] = '\0';
-            info->tags[i].type = 0;
+            info->tags[i].type = type;
         }
         pos += kl + vl;
     }
@@ -417,6 +419,35 @@ int snap_list(uint32_t *out_ids, uint32_t max_ids, uint32_t *out_count)
     if (count > max_ids) count = max_ids;
     memcpy(out_ids, buf + 4, count * 4);
     *out_count = count;
+    return 0;
+}
+
+int snap_info(uint32_t snap_id, snap_info_t *out)
+{
+    if (!out) return -ERR_INVALID_ARGUMENT;
+
+    /* [u32 id][u32 parent_file_id][u64 created_time][u32 file_count]
+     * [u64 total_size][u8 flags][char name[32]] = 61 bytes. */
+    uint8_t  buf[61];
+    uint32_t out_actual = 0;
+    int rc = MfCall1(DECK_STORAGE, STORAGE_SNAP_INFO,
+                     &snap_id, sizeof(snap_id),
+                     NULL, 0,
+                     buf, sizeof(buf), &out_actual,
+                     STORAGE_TIMEOUT_MS, NULL);
+    if (rc != 0) return box_fail(rc);
+    if (out_actual < sizeof(buf)) return -ERR_INTERNAL;
+
+    memset(out, 0, sizeof(*out));
+    size_t pos = 0;
+    memcpy(&out->id,             buf + pos, 4); pos += 4;
+    memcpy(&out->parent_file_id, buf + pos, 4); pos += 4;
+    memcpy(&out->created_time,   buf + pos, 8); pos += 8;
+    memcpy(&out->file_count,     buf + pos, 4); pos += 4;
+    memcpy(&out->total_size,     buf + pos, 8); pos += 8;
+    out->flags = buf[pos]; pos += 1;
+    memcpy(out->name, buf + pos, 32);
+    out->name[sizeof(out->name) - 1] = '\0';
     return 0;
 }
 

@@ -569,7 +569,8 @@ static int ObjRename(const ManifestOp *op,
  *   [u16 filename_len]
  *   [char filename[filename_len]]
  *   for each tag:
- *     [u16 key_len][u16 val_len][char key[key_len]][char val[val_len]]
+ *     [u16 key_len][u16 val_len][u8 type][char key[key_len]][char val[val_len]]
+ *       type: 1 = system (reserved-vocabulary tag), 0 = user.
  *
  * out_crate.size is set to the total bytes written. No truncation: if the
  * crate is too small, we return ERR_BUFFER_TOO_SMALL with size unchanged.
@@ -607,7 +608,7 @@ static int ObjGetInfo(const ManifestOp *op,
         const char *v = state ? tag_registry_value(state->registry, md.tag_ids[i]) : NULL;
         uint16_t kl = k ? (uint16_t)strlen(k) : 0;
         uint16_t vl = v ? (uint16_t)strlen(v) : 0;
-        need += 2u + 2u + kl + vl;
+        need += 2u + 2u + 1u + kl + vl;   /* +1: per-tag type byte */
     }
 
     if (need > out->capacity) {
@@ -633,6 +634,7 @@ static int ObjGetInfo(const ManifestOp *op,
         uint16_t vl = v ? (uint16_t)strlen(v) : 0;
         memcpy(kp + pos, &kl, 2); pos += 2;
         memcpy(kp + pos, &vl, 2); pos += 2;
+        kp[pos++] = (state && tag_registry_is_system(state->registry, md.tag_ids[i])) ? 1 : 0;
         if (kl) { memcpy(kp + pos, k, kl); pos += kl; }
         if (vl) { memcpy(kp + pos, v, vl); pos += vl; }
     }
@@ -1044,6 +1046,46 @@ static int ObjSnapList(const ManifestOp *op, Crate *crates, uint16_t crate_count
     return OK;
 }
 
+/* STORAGE_SNAP_INFO  params: [u32 snapshot_id]
+ *                    out_crate: [u32 id][u32 parent_file_id][u64 created_time]
+ *                               [u32 file_count][u64 total_size][u8 flags]
+ *                               [char name[32]]  (61 bytes)
+ *
+ * The structured counterpart to SNAP_LIST (ids only) — carries the snapshot's
+ * name so userspace can resolve a snapshot by name for deterministic cleanup.
+ * The record is a fixed 61 bytes, so it ships through crate_write of a stack
+ * blob rather than a capacity-sized bounce buffer. */
+static int ObjSnapInfo(const ManifestOp *op, Crate *crates, uint16_t crate_count,
+                        const OpContext *ctx)
+{
+    (void)crate_count;
+    if (op->param_size < 4)                return ERR_INVALID_ARGUMENT;
+    if (op->out_crate == CRATE_INDEX_NONE) return ERR_INVALID_ARGUMENT;
+
+    uint32_t snapshot_id = param_u32(op, 0);
+
+    CowSnapshot cs;
+    error_t err = TagFS_SnapshotInfo(snapshot_id, &cs);
+    if (err != OK) return (int)err;   /* ERR_SNAPSHOT_NOT_FOUND for an unknown id */
+
+    uint32_t need = 4u + 4u + 8u + 4u + 8u + 1u + 32u;   /* 61 bytes */
+    Crate   *out  = &crates[op->out_crate];
+    if (out->capacity < need) return ERR_BUFFER_TOO_SMALL;
+
+    uint8_t  blob[61];
+    uint32_t pos = 0;
+    memcpy(blob + pos, &cs.snapshot_id,    4); pos += 4;
+    memcpy(blob + pos, &cs.parent_file_id, 4); pos += 4;
+    memcpy(blob + pos, &cs.created_time,   8); pos += 8;
+    memcpy(blob + pos, &cs.file_count,     4); pos += 4;
+    memcpy(blob + pos, &cs.total_size,     8); pos += 8;
+    blob[pos++] = cs.flags;
+    memcpy(blob + pos, cs.name, 32); pos += 32;
+
+    if (crate_write(out, ctx, blob, pos) != OK) return ERR_INVALID_ADDRESS;
+    return OK;
+}
+
 /* -------------------------------------------------------------------------
  * STORAGE_OBJ_ANCHOR — durability primitive.
  *
@@ -1137,6 +1179,7 @@ error_t StorageDeckRegister(void)
         { STORAGE_SNAP_CREATE,  ObjSnapCreate,   OP_AUTH_APP, "storage.snap.create"},
         { STORAGE_SNAP_DELETE,  ObjSnapDelete,   OP_AUTH_APP, "storage.snap.delete"},
         { STORAGE_SNAP_LIST,    ObjSnapList,     OP_AUTH_APP, "storage.snap.list"  },
+        { STORAGE_SNAP_INFO,    ObjSnapInfo,     OP_AUTH_APP, "storage.snap.info"  },
         { STORAGE_OBJ_ANCHOR,   ObjAnchor,       OP_AUTH_APP, "storage.anchor"     },
     };
 

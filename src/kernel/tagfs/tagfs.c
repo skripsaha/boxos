@@ -920,6 +920,15 @@ static void register_well_known(uint64_t *field, TagRegistry *reg, const char *k
     *field = (tid != TAGFS_INVALID_TAG_ID && tid < 64) ? (1ULL << tid) : 0;
 }
 
+// The reserved-key vocabulary. A tag is "system" iff it is the bare (value=NULL)
+// registry entry for one of these keys; a value-bearing tag like "system:foo" is
+// a distinct entry and stays a user tag. Mirrors the format-time intern order
+// (deterministic ids 0-11) and is re-stamped at every mount below.
+static const char *const TagFsReservedKeys[] = {
+    "system", "utility", "app",     "god",      "stopped",  "bypass",
+    "network", "trashed", "hidden", "autostart", "snapshot", "name",
+};
+
 void tagfs_init_well_known_tags(void)
 {
     memset(&g_well_known, 0, sizeof(g_well_known));
@@ -937,6 +946,15 @@ void tagfs_init_well_known_tags(void)
     register_well_known(&g_wk.network, reg, "network");
     register_well_known(&g_wk.trashed, reg, "trashed");
     register_well_known(&g_wk.hidden, reg, "hidden");
+
+    // Stamp the reserved vocabulary as system tags. Runs after tag_registry_load,
+    // so it self-heals over whatever flags the disk carried; mark_system sets no
+    // dirty flag, so this re-derivation never forces a write.
+    for (size_t i = 0; i < sizeof(TagFsReservedKeys) / sizeof(TagFsReservedKeys[0]); i++) {
+        uint16_t tid = tag_registry_lookup(reg, TagFsReservedKeys[i], NULL);
+        if (tid != TAGFS_INVALID_TAG_ID)
+            tag_registry_mark_system(reg, tid);
+    }
 }
 
 // ----------------------------------------------------------------------------
