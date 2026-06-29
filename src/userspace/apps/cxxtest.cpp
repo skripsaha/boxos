@@ -86,6 +86,7 @@
 #include "box/cxx/message.h"
 #include "box/cxx/pku.h"
 #include "box/cxx/process.h"
+#include "box/cxx/reflex.h"
 #include "box/cxx/strand.h"
 #include "box/cxx/system.h"
 #include "box/cxx/system_touch.h"
@@ -10048,6 +10049,158 @@ void Phase56()
            "(reserved vocabulary) + snapshot name-by-id (snap_info) + deterministic reclaim\n");
 }
 
+// phase57 — box::reflex (TOUCH_REACT manifest RAII). The kernel runs a stored
+// manifest in-kernel on every touch of a tag — BoxOS's non-Unix replacement for
+// an async-signal handler. App-private "cxxreflex:*" tags throughout, so a sink
+// firing UNAMBIGUOUSLY proves the kernel ran the stored manifest. after_ms is 0
+// in every send (the after_ms>0 PIT path is a separate deferred hazard).
+void Phase57()
+{
+    // SYSTEM_OP_TOUCH_SEND params for a forward to `to`: [u16 full][u16 bare][u32 after=0].
+    auto send_params = [](const box::tag &to, std::byte p[8]) {
+        std::uint16_t f = to.pair().full, b = to.pair().bare;
+        std::uint32_t after = 0;
+        __builtin_memcpy(p + 0, &f, 2);
+        __builtin_memcpy(p + 2, &b, 2);
+        __builtin_memcpy(p + 4, &after, 4);
+    };
+
+    // ── step6 — A(REACT) forwards to B(REST): the non-Unix proof ──────────────
+    // A reflex on A stores a one-op manifest SEND→B. Touching A makes the kernel
+    // run that manifest, which fires B. B is app-private and only the manifest
+    // writes it, so B firing can only mean the kernel executed the stored manifest.
+    {
+        box::tag A("cxxreflex:trig");   // REACT trigger
+        box::tag B("cxxreflex:sink");   // REST sink
+        Check(A.id() != TOUCH_TAG_INVALID && B.id() != TOUCH_TAG_INVALID,
+              "phase57 step6 tags interned");
+
+        box::manifest<> prog;
+        std::byte pB[8];
+        send_params(B, pB);
+        prog.op(DECK_SYSTEM, SYSTEM_OP_TOUCH_SEND, box::no_crate, box::no_crate,
+                std::span<const std::byte>(pB, 8));
+        box::compiled_manifest card(prog);
+        Check((bool)card, "phase57 step6 manifest compiled");
+
+        box::subscription subB(B);
+        Check((bool)subB, "phase57 step6 subscribed to sink B");
+
+        box::reflex rx(A, std::move(card));
+        Check((bool)rx, "phase57 step6 reflex bound to A (REACT)");
+        Check((bool)rx.manifest(), "phase57 step6 reflex retains the compiled manifest");
+
+        Check(box::publish(A, (std::uint32_t)0xBEEF),
+              "phase57 step6 publish(A) accepted");
+
+        if (auto ev = subB.wait(1000)) {
+            Check(ev->tag_id() == B.id(),
+                  "phase57 step6 kernel ran the stored manifest on touch(A) -> B fired");
+            Check(ev->from_user(),
+                  "phase57 step6 B-forward carries TOUCH_FLAG_USER (reflex owner is source)");
+        } else {
+            Check(false, "phase57 step6 B must fire (kernel REACT manifest)");
+        }
+    }
+
+    // ── step7 — positive recursion-guard exploit (the missing Bug2 test) ──────
+    // A self-cycling manifest: op0 SEND→B (observable), op1 SEND→A (re-trigger).
+    // One ignition runs the WHOLE recursion synchronously in-kernel; the per-core
+    // stack-headroom guard (Ф26b a44e4e8) caps the depth and DROPS further re-
+    // triggers instead of triple-faulting. g_react_depth_drops is not userspace-
+    // observable, so the guard is proven INDIRECTLY: the manifest ran (fan >= 1)
+    // + the recursion was bounded (fan finite, the drain terminates) + the system
+    // survived (a subsequent syscall still works).
+    {
+        box::tag A("cxxreflex:cyc");    // REACT self-cycle
+        box::tag B("cxxreflex:csink");  // REST observable
+        Check(A.id() != TOUCH_TAG_INVALID && B.id() != TOUCH_TAG_INVALID,
+              "phase57 step7 tags interned");
+
+        box::manifest<> prog;
+        std::byte pB[8], pA[8];
+        send_params(B, pB);  // op0 — observable forward to B
+        send_params(A, pA);  // op1 — self re-trigger of A
+        prog.op(DECK_SYSTEM, SYSTEM_OP_TOUCH_SEND, box::no_crate, box::no_crate,
+                std::span<const std::byte>(pB, 8));
+        prog.op(DECK_SYSTEM, SYSTEM_OP_TOUCH_SEND, box::no_crate, box::no_crate,
+                std::span<const std::byte>(pA, 8));
+        box::compiled_manifest card(prog);
+        Check((bool)card, "phase57 step7 cyclic manifest compiled");
+
+        box::subscription subB(B);
+        Check((bool)subB, "phase57 step7 subscribed to sink B");
+
+        box::reflex rx(A, std::move(card));
+        Check((bool)rx, "phase57 step7 self-cycle reflex bound to A");
+
+        Check(box::publish(A, (std::uint32_t)1), "phase57 step7 single ignition");
+
+        // Drain the queued B-events with a HARD CEILING so this can never hang.
+        int fan = 0;
+        subB.set_drain_timeout(200);
+        for (box::touch e : subB) {
+            (void)e;
+            if (++fan >= 4096) break;
+        }
+        Check(fan >= 1, "phase57 step7 kernel ran the cyclic manifest at least once");
+        Check(fan < 4096,
+              "phase57 step7 self-cycle BOUNDED by stack-headroom guard (no triple-fault)");
+
+        Check(box::tag("cxxreflex:alive").id() != TOUCH_TAG_INVALID,
+              "phase57 step7 system live after bounded recursion");
+    }
+
+    // ── step8 — concurrent teardown-vs-publish UAF exercise (16c stress) ──────
+    // A publisher strand hammers publish(A) while the main strand churns reflex
+    // bind/unbind on A, racing TouchClaimSet (ctor) / TouchClaimClear (dtor)
+    // against the publisher's Phase-2 delivery across cores — the per-TouchSub
+    // refcount path fixed in Ф26b 98757b5. The sink is unclaimed throwaway:
+    // SURVIVAL is the assertion. The bounded loops + the join + the ALL PASS gate
+    // are the watchdog. The cross-core race needs a real sibling strand (per-strand
+    // TLS = FSGSBASE); without it the churn runs alone — single-core cannot exhibit
+    // the cross-core UAF anyway, so this is harmless on 1c and real stress on 16c.
+    {
+        box::tag A("cxxreflex:race");
+        box::tag sink("cxxreflex:rsink");  // throwaway, unclaimed
+        Check(A.id() != TOUCH_TAG_INVALID && sink.id() != TOUCH_TAG_INVALID,
+              "phase57 step8 tags interned");
+
+        std::atomic<bool> stop{false};
+        int               bound = 0;  // count REAL binds — proves the churn isn't vacuous
+        {
+            std::optional<box::strand> publisher;
+            if (cpu_has_fsgsbase()) {
+                publisher.emplace([&] {
+                    for (std::uint32_t i = 0; i < 4000 && !stop.load(std::memory_order_relaxed); ++i)
+                        box::publish(A, i);
+                });
+            }
+
+            for (int k = 0; k < 256; ++k) {
+                box::manifest<> c;
+                std::byte ps[8];
+                send_params(sink, ps);
+                c.op(DECK_SYSTEM, SYSTEM_OP_TOUCH_SEND, box::no_crate, box::no_crate,
+                     std::span<const std::byte>(ps, 8));
+                box::compiled_manifest cm(c);
+                box::reflex rx(A, std::move(cm));  // ctor claim / dtor release race
+                if (rx) ++bound;
+            }
+            stop.store(true, std::memory_order_relaxed);
+        }  // publisher (if spawned) joins on scope exit
+
+        Check(bound >= 1,
+              "phase57 step8 >=1 REACT claim/release cycle actually bound "
+              "(the teardown-vs-publish window is exercised, not vacuously skipped)");
+        Check(box::tag("cxxreflex:rlive").id() != TOUCH_TAG_INVALID,
+              "phase57 step8 system live after concurrent claim/release vs publish hammer");
+    }
+
+    printf("[CXX] PASS phase57: box::reflex — TOUCH_REACT manifest RAII "
+           "(in-kernel reaction + bounded self-cycle + concurrent claim/release vs publish)\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -10126,6 +10279,7 @@ int main()
     Phase54();
     Phase55();
     Phase56();
+    Phase57();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
