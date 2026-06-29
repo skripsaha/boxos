@@ -171,13 +171,6 @@ typedef struct process_t
      * and the teardown are per-strand. */
     uint8_t           touch_cleaned;
 
-    /* Head of this strand's Touch subscriptions after TouchCleanupProcess
-     * splices them off the shared cabin list (linked via TouchSub.proc_next).
-     * They are bucket-unlinked immediately but freed only in
-     * TouchFinalizeProcess once ref_count hits 0, so an in-flight publisher
-     * snapshot (which holds a proc ref) can never dereference a freed sub. */
-    void             *touch_detached_subs;
-
     /* Phase 2K+ — CET shadow stack per-process state. */
     uintptr_t         user_ssp_phys;
     uintptr_t         user_ssp_va;

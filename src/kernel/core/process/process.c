@@ -1774,10 +1774,6 @@ static void process_cleanup_immediate(process_t *proc)
     if (!proc)
         return;
 
-    /* Free sub structs that TouchCleanupProcess (in process_destroy) unlinked
-     * from buckets but left allocated.  Reads proc->cabin->subs_head. */
-    TouchFinalizeProcess(proc);
-
     if (proc->context.fpu_state)
     {
         kfree(proc->context.fpu_state);

@@ -115,7 +115,7 @@ cabin_t *cabin_create(uint32_t pid, const char *tags);
 /*
  * cabin_destroy — release all shared resources owned by this cabin.
  *
- * Calls TouchFinalizeProcess, vmm_destroy_context, frees tag_overflow_ids.
+ * Calls vmm_destroy_context, frees tag_overflow_ids.
  * Takes NO global locks.  Must be called only when strand_count == 0.
  */
 void cabin_destroy(cabin_t *cabin);

@@ -463,6 +463,20 @@ out_dec:
     __atomic_sub_fetch(&g_react_depth[core], 1, __ATOMIC_RELAXED);
 }
 
+/* Drop one reference on a TouchSub and free it on the last drop. The base ref
+ * is held by proc-list membership (TouchClaimSet); each in-flight publisher
+ * snapshot holds one more (TouchPublishId). Callers MUST already have unlinked
+ * the sub from its bucket and proc list and released+zeroed its REACT manifest
+ * before dropping the base ref; the manifest check here is a backstop for any
+ * path that didn't. No touch lock may be held when calling this. */
+static void touch_sub_release(TouchSub *sub)
+{
+    if (__atomic_sub_fetch(&sub->ref, 1, __ATOMIC_ACQ_REL) != 0) return;
+    if (sub->mode == TOUCH_REACT && sub->u.manifest != MANIFEST_HANDLE_INVALID)
+        ManifestRelease(sub->u.manifest);
+    kfree(sub);
+}
+
 /* ────────────────────────────────────────────────────────────────────────
  * Snapshot-then-deliver publish.
  *
@@ -472,10 +486,11 @@ out_dec:
  * Step 3: deliver each entry, release proc ref.
  *
  * The copy in step 1 is small (mode + manifest_or_irq + has_pending_ptr +
- * proc*). After we release the bucket lock, TouchCleanupProcess on a
- * concurrent core may unlink the sub and stop further publish observation,
- * but the held proc ref keeps the sub struct live (kfree happens only in
- * TouchFinalizeProcess after ref_count == 0).
+ * proc*). Under the bucket lock we take BOTH a proc ref (protects e->proc in
+ * Phase 2) and a sub ref (protects e->sub). After we release the lock a
+ * concurrent owner-drop path may unlink the sub and try to free it, but the
+ * sub ref we hold keeps it alive until Phase 2 delivery finishes and we call
+ * touch_sub_release.
  * ──────────────────────────────────────────────────────────────────────── */
 
 typedef struct {
@@ -616,6 +631,7 @@ void TouchPublishId(TouchTag tag_id, const void *kpayload, uint32_t plen,
         }
 
         process_ref_inc(s->proc);
+        __atomic_add_fetch(&s->ref, 1, __ATOMIC_RELAXED);
         snap[snap_n].proc = s->proc;
         snap[snap_n].sub  = s;
         snap[snap_n].mode = s->mode;
@@ -640,7 +656,10 @@ void TouchPublishId(TouchTag tag_id, const void *kpayload, uint32_t plen,
         }
     }
 
-    for (uint32_t i = 0; i < snap_n; i++) process_ref_dec(snap[i].proc);
+    for (uint32_t i = 0; i < snap_n; i++) {
+        touch_sub_release(snap[i].sub);
+        process_ref_dec(snap[i].proc);
+    }
     if (snap != stack) kfree(snap);
 }
 
@@ -835,6 +854,9 @@ error_t TouchClaimSet(process_t *proc, TouchTag tag_id, TouchMode mode,
         sub->u.irq.handler_addr = handler_addr;
         sub->u.irq.stack_top    = stack_top;
     }
+    /* Base reference. Set before the sub becomes visible on the bucket list so
+     * any publisher snapshot increments from a live count of at least 1. */
+    __atomic_store_n(&sub->ref, 1, __ATOMIC_RELAXED);
 
     /* Link into bucket (publish visibility) and into proc list. Bucket lock
      * acquired BEFORE proc lock — established ordering, never reversed. */
@@ -847,10 +869,19 @@ error_t TouchClaimSet(process_t *proc, TouchTag tag_id, TouchMode mode,
     spin_unlock(&b->lock);
 
     spin_lock(&proc->cabin->subs_lock);
-    /* Re-check duplicate — between our find_proc_sub and now, a concurrent
-     * TouchClaimSet on the same (proc, tag_id) could have inserted. If so,
-     * undo our bucket link to preserve the one-sub-per-(proc,tag) invariant. */
-    if (find_proc_sub(proc, tag_id)) {
+    /* Re-check under the proc lock before linking into the proc list:
+     *  (a) duplicate — a concurrent TouchClaimSet on the same (proc, tag_id)
+     *      may have inserted; or
+     *  (b) teardown — TouchCleanupProcess already set touch_cleaned and walked
+     *      the proc list, missing this sub (bucket-linked above but not yet
+     *      proc-linked). Linking now would orphan it: touch_cleaned latches so
+     *      cleanup never runs again, and at process_destroy the bucket would
+     *      still hold a sub with a dangling sub->proc → cross-core UAF on the
+     *      freed process_t (+ leak). subs_lock serialises this read against
+     *      cleanup's splice: if the walk could miss us, its touch_cleaned store
+     *      (before its subs_lock) is visible here (after ours).
+     * Either case: undo our bucket link and drop the base ref. */
+    if (proc->touch_cleaned || find_proc_sub(proc, tag_id)) {
         spin_unlock(&proc->cabin->subs_lock);
 
         spin_lock(&b->lock);
@@ -860,9 +891,11 @@ error_t TouchClaimSet(process_t *proc, TouchTag tag_id, TouchMode mode,
         __atomic_sub_fetch(&b->sub_count, 1, __ATOMIC_RELEASE);
         spin_unlock(&b->lock);
 
-        if (mode == TOUCH_REACT && sub->u.manifest != MANIFEST_HANDLE_INVALID)
+        if (mode == TOUCH_REACT && sub->u.manifest != MANIFEST_HANDLE_INVALID) {
             ManifestRelease(sub->u.manifest);
-        kfree(sub);
+            sub->u.manifest = MANIFEST_HANDLE_INVALID;
+        }
+        touch_sub_release(sub);
         return OK;
     }
     sub->proc_next = (TouchSub *)proc->cabin->subs_head;
@@ -910,9 +943,11 @@ error_t TouchClaimClear(process_t *proc, TouchTag tag_id)
 
     touch_sub_unlink_bucket(sub);
 
-    if (sub->mode == TOUCH_REACT && sub->u.manifest != MANIFEST_HANDLE_INVALID)
+    if (sub->mode == TOUCH_REACT && sub->u.manifest != MANIFEST_HANDLE_INVALID) {
         ManifestRelease(sub->u.manifest);
-    kfree(sub);
+        sub->u.manifest = MANIFEST_HANDLE_INVALID;
+    }
+    touch_sub_release(sub);
     __atomic_sub_fetch(&g_total_subs, 1, __ATOMIC_RELEASE);
     return OK;
 }
@@ -988,23 +1023,25 @@ void TouchCleanupProcess(process_t *proc)
     spin_unlock(&proc->cabin->subs_lock);
 
     /* Now unlink each detached sub from its bucket (publishers stop seeing
-     * this strand) and release REACT manifests.  Subs are NOT freed here —
-     * an in-flight publisher snapshot may still hold the pointer; it also
-     * holds a proc ref, so ref_count stays > 0 and TouchFinalizeProcess
-     * (which runs only at ref==0) does the kfree safely. */
+     * this strand), release its REACT manifest, then drop the base ref.  The
+     * sub is freed here unless an in-flight publisher snapshot still holds a
+     * ref — that publisher frees it on completion via touch_sub_release.
+     * Capture proc_next before the release: touch_sub_release may free s. */
     uint32_t unlinked = 0;
-    for (TouchSub *s = mine; s; s = s->proc_next) {
+    TouchSub *s = mine;
+    while (s) {
+        TouchSub *nx = s->proc_next;
         if (s->bucket) { touch_sub_unlink_bucket(s); unlinked++; }
         if (s->mode == TOUCH_REACT &&
             s->u.manifest != MANIFEST_HANDLE_INVALID) {
             ManifestRelease(s->u.manifest);
             s->u.manifest = MANIFEST_HANDLE_INVALID;
         }
+        touch_sub_release(s);
+        s = nx;
     }
     if (unlinked > 0)
         __atomic_sub_fetch(&g_total_subs, unlinked, __ATOMIC_RELEASE);
-
-    proc->touch_detached_subs = mine;
 
     /* Drain pending INTERRUPT-mode queue (per-strand). */
     spin_lock(&proc->irq_lock);
@@ -1020,22 +1057,6 @@ void TouchCleanupProcess(process_t *proc)
     /* Notify subscribers — runs the new O(N_subs_for_process_died) path. */
     struct { uint32_t pid; int32_t exit; } died = { proc->pid, 0 };
     TouchPublish("process:died", &died, sizeof(died));
-}
-
-void TouchFinalizeProcess(process_t *proc)
-{
-    if (!proc) return;
-    /* Free the subs TouchCleanupProcess detached for this strand.  Runs
-     * only at ref_count==0, so no publisher snapshot can still reference
-     * them.  Sibling strands' subs are untouched (they live on their own
-     * detached lists / the shared cabin list). */
-    TouchSub *cur = (TouchSub *)proc->touch_detached_subs;
-    proc->touch_detached_subs = NULL;
-    while (cur) {
-        TouchSub *next = cur->proc_next;
-        kfree(cur);
-        cur = next;
-    }
 }
 
 void TouchIrqReturn(process_t *proc)

@@ -83,10 +83,14 @@ typedef struct TouchPending {
  *   - bucket->head (publish walks this; ordered LIFO by subscribe time)
  *   - proc->subs_head (process cleanup walks this for O(N_my_claims) tear-down)
  *
- * Allocated by TouchClaimSet; freed only after the owning process drops to
- * ref_count==0 (so concurrent publishers walking the bucket list never
- * dereference a dead sub). TouchCleanupProcess unlinks subs from buckets
- * at process_destroy time; the kfree happens later in process_cleanup_immediate.
+ * Allocated by TouchClaimSet with ref==1 — the base reference, owned by
+ * proc-list membership. Each in-flight TouchPublishId snapshot takes one extra
+ * ref under the bucket lock and drops it after delivery, so a publisher can
+ * dereference the sub outside the lock without UAF. Whoever drops the last ref
+ * (an owner-drop path or a lagging publisher) frees it via touch_sub_release.
+ * Owner-drop paths (TouchClaimClear, the TouchClaimSet dup-undo,
+ * TouchCleanupProcess) unlink the sub from its bucket and proc list first, then
+ * drop the base ref.
  */
 typedef struct TouchSub {
     struct TouchSub *bucket_next;
@@ -95,6 +99,10 @@ typedef struct TouchSub {
     struct TouchSub *proc_prev;
     struct process_t *proc;
     struct TouchBucket *bucket;
+    /* Lifetime refcount mirroring process_t.ref_count: base ref = 1 held by
+     * proc-list membership, +1 per in-flight publisher snapshot. Freed by
+     * touch_sub_release when it reaches 0. */
+    atomic_u32_t ref;
     uint16_t   tag_id;
     uint8_t    mode;          /* TouchMode */
     uint8_t    has_pending;   /* LATCHED: 1 = pending slot occupied */
@@ -259,15 +267,11 @@ error_t TouchClaimClear(struct process_t *proc, TouchTag tag_id);
 /* LATCHED ack — clear the pending slot for proc's claim on tag_id. */
 error_t TouchClaimAck(struct process_t *proc, TouchTag tag_id);
 
-/* Tear down all of proc's subscriptions. Idempotent. Unlinks from buckets
- * immediately; sub structs are freed by TouchFinalizeProcess after ref_count
- * drops to 0. */
+/* Tear down all of proc's subscriptions. Idempotent. Unlinks each sub from its
+ * bucket and proc list, then drops the base ref via touch_sub_release — the sub
+ * is freed here unless a concurrent publisher still holds a snapshot ref, in
+ * which case that publisher frees it on completion. */
 void   TouchCleanupProcess(struct process_t *proc);
-
-/* Free per-proc TouchSub list. MUST be called only after ref_count == 0
- * (i.e. from process_cleanup_immediate) so no publisher still holds a
- * pointer to any of these subs. */
-void   TouchFinalizeProcess(struct process_t *proc);
 
 /* INTERRUPT mode return path. */
 void   TouchIrqReturn(struct process_t *proc);
