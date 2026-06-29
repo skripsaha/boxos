@@ -84,6 +84,15 @@ _Static_assert(sizeof(ResultSlot) == 32,
                "ResultSlot must match RESULT_SLOT_SIZE for cabin layout");
 _Static_assert(sizeof(ResultSlot) == RESULT_SLOT_SIZE,
                "ResultSlot stride mismatch with cabin_layout.h");
+/* Straddle-safety geometry (Crate-boundary straddle hardening 7/7):
+ * result_ring_slot_uvaddr translates exactly sizeof(ResultSlot) at
+ * slots_base + (idx % cap) * RESULT_SLOT_SIZE. The stride divides the page and
+ * the slot base is page-aligned, so a slot never crosses a page boundary (the
+ * runtime per-strand base is checked in KRingResultInitAt). */
+_Static_assert(4096 % RESULT_SLOT_SIZE == 0,
+               "RESULT_SLOT_SIZE must divide a 4 KiB page");
+_Static_assert((CABIN_RESULT_SLOTS_BASE & 0xFFFULL) == 0,
+               "CABIN_RESULT_SLOTS_BASE must be page-aligned");
 
 typedef struct __packed {
     ResultRingHeader hdr;

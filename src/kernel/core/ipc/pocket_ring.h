@@ -74,6 +74,19 @@ typedef struct __packed {
 _Static_assert(sizeof(PocketRing) == 4096,
                "PocketRing header page must be exactly one page");
 
+/* Straddle-safety geometry (Crate-boundary straddle hardening 7/7).
+ * pocket_ring_slot_uvaddr returns slots_base + (idx % cap) * POCKET_SLOT_SIZE
+ * and the kernel translates exactly sizeof(Pocket) there. That single
+ * translation can never cross a 4 KiB page boundary because the stride equals
+ * the struct size, POCKET_SLOT_SIZE divides the page, and the slot base is
+ * page-aligned (the runtime per-strand base is checked in KRingPocketInitAt). */
+_Static_assert(sizeof(Pocket) == POCKET_SLOT_SIZE,
+               "Pocket must match POCKET_SLOT_SIZE so a slot never straddles a page");
+_Static_assert(4096 % POCKET_SLOT_SIZE == 0,
+               "POCKET_SLOT_SIZE must divide a 4 KiB page");
+_Static_assert((CABIN_POCKET_SLOTS_BASE & 0xFFFULL) == 0,
+               "CABIN_POCKET_SLOTS_BASE must be page-aligned");
+
 /* ---- Inline accessors (callable from kernel where slots_base is *user* VA
  *      mapped into the current cabin; otherwise use the kring helpers below) */
 

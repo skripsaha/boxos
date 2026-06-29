@@ -40,6 +40,12 @@
 void KTouchRingInitAt(TouchRing *hdr, uint64_t slots_base, uint32_t slot_count_max)
 {
     if (!hdr) return;
+    /* Straddle invariant: the per-strand Hammock slots_base (runtime VA, not
+     * the page-aligned cabin_layout.h constant) must be page-aligned or a
+     * 128-byte TouchSlot translation could cross a page boundary. */
+    if (slots_base & (VMM_PAGE_SIZE - 1))
+        panic("ring slots_base 0x%lx not page-aligned - straddle invariant broken",
+              (unsigned long)slots_base);
     memset(hdr, 0, sizeof(*hdr));
     hdr->hdr.head           = 0;
     hdr->hdr.tail           = 0;

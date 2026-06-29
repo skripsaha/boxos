@@ -3951,9 +3951,24 @@ void *vmm_translate_user_addr(vmm_context_t *ctx, uintptr_t user_vaddr, size_t s
 
     if (page_start != page_end)
     {
-        // Range crosses page boundary — only translate first page's portion.
-        // Caller must handle multi-page data in chunks.
-        size = VMM_PAGE_SIZE - (user_vaddr & VMM_PAGE_OFFSET_MASK);
+        // Fail-closed backstop. A range that crosses a page boundary cannot be
+        // served by a single-page translation: silently truncating it (the old
+        // behaviour) corrupted a foreign frame whenever the next VA was backed
+        // by a non-adjacent physical page. Refuse instead. Page-walking callers
+        // (crate_read/crate_write, vmm_user_buf_*) chunk per page and never
+        // reach here; the IPC/Touch ring slot accessors are straddle-safe by
+        // geometry (slot size divides the page, slot base is page-aligned).
+        /* Fail-closed backstop: refuse a page-crossing range instead of the old
+         * silent truncation that corrupted a foreign frame. Page-walking callers
+         * (crate_read/write, vmm_user_buf_*) chunk per page, and the ring slot
+         * accessors are straddle-safe by geometry, so no production caller reaches
+         * here. Coverage is proven by the per-subsystem audits plus CrateIoSelfTest
+         * (which intentionally trips this path to verify the backstop returns NULL).
+         * Canary is debug-gated: quiet on release, and NOT a production tripwire
+         * precisely because the selftest deliberately exercises it. */
+        debug_printf("[VMM] straddle-reject: vaddr=0x%lx size=%zu crosses a page boundary; use crate_read/crate_write or vmm_user_buf_* (page-walked)\n",
+                     (unsigned long)user_vaddr, size);
+        return NULL;
     }
 
     // Check that the page is user-accessible (not just present)
