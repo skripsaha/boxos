@@ -153,6 +153,12 @@
 #define RESULT_RING_SLOT_MAX           (CABIN_RESULT_SLOTS_SIZE / RESULT_SLOT_SIZE)  /* 32768 */
 #define TOUCH_RING_SLOT_MAX            (CABIN_TOUCH_SLOTS_SIZE / TOUCH_SLOT_SIZE)    /* 8192 */
 
+/* Straddle-safety geometry (slot size divides the page, slot base is
+ * page-aligned) is locked with _Static_assert in the kernel ring headers
+ * (pocket_ring.h / result_ring.h / touch_ring.h). It cannot live here because
+ * cabin_layout.h is also included by C++ userspace (box/types.h), where the C
+ * keyword _Static_assert is not available. */
+
 /* Ring header magic comes from boxos_magic.h — POCKET_RING_MAGIC / RESULT_RING_MAGIC. */
 
 /* Nominal base addresses (actual per-process addresses are ASLR randomized). */

@@ -32,6 +32,13 @@
 void KRingPocketInitAt(PocketRing *hdr, uint64_t slots_base, uint32_t slot_count_max)
 {
     if (!hdr) return;
+    /* Straddle invariant: every slot translation must stay inside one page,
+     * which requires the per-strand Hammock slots_base (a runtime VA, not the
+     * page-aligned cabin_layout.h constant) to be page-aligned. Geometry
+     * proves the per-slot translation is straddle-safe only on top of this. */
+    if (slots_base & (VMM_PAGE_SIZE - 1))
+        panic("ring slots_base 0x%lx not page-aligned - straddle invariant broken",
+              (unsigned long)slots_base);
     memset(hdr, 0, sizeof(*hdr));
     hdr->hdr.head           = 0;
     hdr->hdr.tail           = 0;
@@ -44,6 +51,9 @@ void KRingPocketInitAt(PocketRing *hdr, uint64_t slots_base, uint32_t slot_count
 void KRingResultInitAt(ResultRing *hdr, uint64_t slots_base, uint32_t slot_count_max)
 {
     if (!hdr) return;
+    if (slots_base & (VMM_PAGE_SIZE - 1))
+        panic("ring slots_base 0x%lx not page-aligned - straddle invariant broken",
+              (unsigned long)slots_base);
     memset(hdr, 0, sizeof(*hdr));
     hdr->hdr.head           = 0;
     hdr->hdr.tail           = 0;

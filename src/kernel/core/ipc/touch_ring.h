@@ -118,6 +118,15 @@ _Static_assert(sizeof(TouchSlot) == TOUCH_SLOT_SIZE,
                "TouchSlot stride mismatch with cabin_layout.h TOUCH_SLOT_SIZE");
 _Static_assert((TOUCH_SLOT_SIZE & (TOUCH_SLOT_SIZE - 1)) == 0,
                "TOUCH_SLOT_SIZE must be power-of-2 for clean modulo");
+/* Straddle-safety geometry (Crate-boundary straddle hardening 7/7):
+ * touch_ring_slot_uvaddr translates exactly sizeof(TouchSlot) at
+ * slots_base + (idx % cap) * TOUCH_SLOT_SIZE. The stride divides the page and
+ * the slot base is page-aligned, so a slot never crosses a page boundary (the
+ * runtime per-strand base is checked in KTouchRingInitAt). */
+_Static_assert(4096 % TOUCH_SLOT_SIZE == 0,
+               "TOUCH_SLOT_SIZE must divide a 4 KiB page");
+_Static_assert((CABIN_TOUCH_SLOTS_BASE & 0xFFFULL) == 0,
+               "CABIN_TOUCH_SLOTS_BASE must be page-aligned");
 _Static_assert(__builtin_offsetof(TouchSlot, seq) ==
                TOUCH_SLOT_SIZE - sizeof(uint64_t),
                "TouchSlot.seq must be the LAST field (consumer reads metadata + payload first)");
