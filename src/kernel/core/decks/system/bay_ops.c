@@ -11,6 +11,7 @@
 #include "op_registry.h"
 #include "boxos_manifest.h"
 #include "boxos_crate.h"
+#include "crate_io.h"
 #include "manifest_auth.h"
 #include "process.h"
 #include "vmm.h"
@@ -19,34 +20,20 @@
 #include "error.h"
 
 /* ─────────────────────────────────────────────────────────────────────
- * Crate helpers — mirror touch_ops.c so the lookup is centralized.
+ * Tag string read — page-walked snapshot of the in_crate tag into a
+ * bounded stack buffer via crate_io. A tag whose bytes straddle a page
+ * boundary is copied across every backing frame (the old single-page
+ * vmm_translate_user_addr clipped it). The read is capped at the buffer
+ * size, so an attacker-set in_crate size can neither overflow the buffer
+ * nor drive an oversized allocation.
  * ───────────────────────────────────────────────────────────────────── */
-static const void *bay_crate_read(const Crate *c, const OpContext *ctx)
-{
-    if (!c || c->size == 0) return NULL;
-    if (ctx && ctx->proc && ctx->proc->cabin)
-        return vmm_translate_user_addr(ctx->proc->cabin->vmm,
-                                       (uintptr_t)c->addr, (size_t)c->size);
-    return (const void *)(uintptr_t)c->addr;
-}
-
-static void *bay_crate_write(Crate *c, const OpContext *ctx, size_t size)
-{
-    if (!c || c->capacity < size) return NULL;
-    if (ctx && ctx->proc && ctx->proc->cabin)
-        return vmm_translate_user_addr(ctx->proc->cabin->vmm,
-                                       (uintptr_t)c->addr, size);
-    return (void *)(uintptr_t)c->addr;
-}
-
 static error_t bay_crate_string(const Crate *c, const OpContext *ctx,
                                 char *dst, size_t dst_size)
 {
     if (!c || c->size == 0 || dst_size == 0) return ERR_INVALID_ARGUMENT;
-    const char *src = bay_crate_read(c, ctx);
-    if (!src) return ERR_INVALID_ADDRESS;
     size_t copy = c->size < dst_size - 1 ? c->size : dst_size - 1;
-    memcpy(dst, src, copy);
+    error_t rc = crate_read(c, ctx, dst, copy);
+    if (rc != OK) return rc;
     dst[copy] = '\0';
     if (dst[0] == '\0') return ERR_INVALID_ARGUMENT;
     return OK;
@@ -88,16 +75,16 @@ static int SysBayOpen(const ManifestOp *op, Crate *crates,
     rc = BayOpenInternal(ctx->proc, tag, size, flags, &user_va, &actual_size);
     if (rc != OK) return rc;
 
+    uint8_t blob[16];
+    memcpy(blob,     &user_va,     sizeof(uint64_t));
+    memcpy(blob + 8, &actual_size, sizeof(uint64_t));
+
     Crate *out = &crates[op->out_crate];
-    uint8_t *dst = (uint8_t *)bay_crate_write(out, ctx, 16);
-    if (!dst) {
+    if (crate_write(out, ctx, blob, 16) != OK) {
         /* Caller's out_crate is unwritable — roll back the open. */
         BayReleaseInternal(ctx->proc, user_va);
         return ERR_INVALID_ADDRESS;
     }
-    memcpy(dst,     &user_va,     sizeof(uint64_t));
-    memcpy(dst + 8, &actual_size, sizeof(uint64_t));
-    out->size = 16;
     return OK;
 }
 
@@ -135,10 +122,8 @@ static int SysBaySize(const ManifestOp *op, Crate *crates,
     uint64_t size = BaySizeInternal(ctx->proc, user_va);
 
     Crate *out = &crates[op->out_crate];
-    uint8_t *dst = (uint8_t *)bay_crate_write(out, ctx, 8);
-    if (!dst) return ERR_INVALID_ADDRESS;
-    memcpy(dst, &size, sizeof(uint64_t));
-    out->size = 8;
+    if (crate_write(out, ctx, &size, sizeof(uint64_t)) != OK)
+        return ERR_INVALID_ADDRESS;
     return OK;
 }
 
