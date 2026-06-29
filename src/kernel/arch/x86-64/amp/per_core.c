@@ -334,6 +334,9 @@ void per_core_init_bsp(void) {
 
     // Inherit current kernel stack from the static TSS
     pc->kernel_stack_top = pc->tss.rsp0;
+    // kernel_stack_floor stays 0 (memset above): selects the REACT depth-count
+    // fallback for the pre-userspace boot stack only. The first process to run
+    // records a precise floor via per_core_set_kernel_rsp before any REACT can fire.
 
     // Point TSS descriptor in per-core GDT to THIS core's TSS.
     // Must set access = 0x89 (available), not 0x8B (busy from prior ltr).
@@ -419,6 +422,15 @@ void per_core_init_ap(uint8_t core_index, uint64_t stack_top) {
     pc->lapic_id         = g_amp.cores[core_index].lapic_id;
     pc->is_kcore         = g_amp.cores[core_index].is_kcore;
     pc->kernel_stack_top = stack_top;
+    // AP stack is CONFIG_KERNEL_STACK_TOTAL_PAGES (one guard page at the base).
+    // stack_top carries a 16-byte ABI-alignment slack (amp.c), so round it up to
+    // the page boundary before subtracting the data pages — yields the EXACT
+    // floor (guard_base + 1 page), matching the process/idle paths so the REACT
+    // guard never treats the unmapped guard page as usable headroom.
+    uint64_t stack_top_page = (stack_top + CONFIG_PAGE_SIZE - 1) &
+                              ~((uint64_t)CONFIG_PAGE_SIZE - 1);
+    pc->kernel_stack_floor = stack_top_page -
+                             (uint64_t)CONFIG_KERNEL_STACK_PAGES * CONFIG_PAGE_SIZE;
 
     // Program the per-cpu GS base NOW — before per_core_alloc_ist() below,
     // which calls vmm_shootdown_page() -> amp_get_core_index(). On an AP
@@ -645,17 +657,20 @@ void per_core_init_ap(uint8_t core_index, uint64_t stack_top) {
             pc->is_kcore ? "[K-Core]" : "[App Core]");
 }
 
-void per_core_set_kernel_rsp(uint64_t rsp) {
+void per_core_set_kernel_rsp(uint64_t top, uint64_t floor) {
     if (!__atomic_load_n(&g_per_core_active, __ATOMIC_ACQUIRE)) {
-        // Early boot: use static BSP TSS + PerCpuData
-        tss_set_rsp0(rsp);
-        notify_set_kernel_rsp(rsp);
+        // Early boot: use static BSP TSS + PerCpuData. floor is not recorded
+        // here — the REACT headroom guard's reader is gated off before
+        // g_per_core_active, so the boot stack uses the depth-count fallback.
+        tss_set_rsp0(top);
+        notify_set_kernel_rsp(top);
         return;
     }
 
     uint8_t idx = amp_get_core_index();
     PerCoreData* pc = &g_per_core[idx];
-    pc->tss.rsp0         = rsp;
-    pc->notify.kernel_rsp = rsp;
-    pc->kernel_stack_top  = rsp;
+    pc->tss.rsp0           = top;
+    pc->notify.kernel_rsp  = top;
+    pc->kernel_stack_top   = top;
+    pc->kernel_stack_floor = floor;
 }

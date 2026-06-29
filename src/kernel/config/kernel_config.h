@@ -100,6 +100,29 @@
  * key-repeat + USB hot-plug + ACPI GPE storm without dropping events;
  * actual drop is silent (circular overwrite) by design. */
 #define CONFIG_TOUCH_IRQ_RING_SIZE           64U
+
+/* GEOMETRY-UNKNOWN FALLBACK bound for synchronous REACT-delivery nesting on one
+ * core's kernel stack (touch_react_deliver → ManifestExecute → op publishes →
+ * touch_react_deliver …). The PRIMARY guard is real per-core stack headroom
+ * (CONFIG_TOUCH_REACT_STACK_MARGIN below); this depth count only applies when
+ * the per-core stack geometry isn't recorded yet (early boot / boot stack).
+ * Beyond this the delivery is dropped (graceful, never panic) to prevent
+ * unbounded kernel-stack recursion / triple-fault. 16 KiB stack
+ * (CONFIG_KERNEL_STACK_PAGES=4) ÷ ≈2.5 KiB per level ⇒ 4 keeps ~3 KiB margin. */
+#define CONFIG_TOUCH_REACT_DEPTH_MAX 4U
+/* Min kernel-stack headroom (bytes) that must remain BELOW the current RSP for
+ * a REACT delivery to proceed. Must exceed the max stack growth between two
+ * consecutive touch_react_deliver checks — one full level (ManifestExecute +
+ * deepest publishing op ~2.2 KiB [SysAddrWake] + TouchPublishId ~1.7 KiB incl.
+ * inlined deliver_one + TouchSnap[64]) ≈ 4 KiB, plus a nested IRQ/#exception
+ * buffer ≈ 2 KiB (K-cores run REACT with IF=1) ⇒ ~6 KiB + slack. */
+#define CONFIG_TOUCH_REACT_STACK_MARGIN 8192U
+/* The depth-count fallback (used only when per-core stack geometry isn't yet
+ * recorded) must fit even the smallest REACT-capable kernel stack: depth levels
+ * × ~2.5 KiB per level ≤ the usable data area. */
+_Static_assert(CONFIG_KERNEL_STACK_PAGES * CONFIG_PAGE_SIZE >=
+               CONFIG_TOUCH_REACT_DEPTH_MAX * 2560,
+               "REACT depth-count fallback must fit the smallest REACT-capable kernel stack");
 #define CONFIG_ASYNC_IO_QUEUE_TIMEOUT_MS 5000 // 5s timeout for pending I/O in queue
 #define CONFIG_ASYNC_IO_BGND_SERVE_INTERVAL 8 // dequeue 1 BGND per N DATA dequeues
 #define CONFIG_FRIEND_ZONE_CACHE_MAX_PAGES 64 // max pages cached per Friend zone
