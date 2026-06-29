@@ -243,10 +243,15 @@ static uint64_t touch_emit_payload(process_t *target, TouchTag tag_id,
         if (!r.success) { pmm_free(page, 1); return 0; }
     }
 
-    void *dst = vmm_translate_user_addr(target->cabin->vmm, vaddr, (size_t)total);
-    if (!dst) return 0;
-
-    Touch t = {
+    /* Write the record through the page-walked primitive rather than
+     * single-page-translating the whole `total` range. pmm_alloc hands out
+     * non-contiguous frames, so a record that crosses a page boundary
+     * (sizeof(Touch) + plen exceeding the bytes left in the first frame) would,
+     * under the old vmm_translate_user_addr + memcpy, spill the payload tail
+     * into whatever physical frame followed the first — not the second mapped
+     * page. commit_out walks each page, delivering the header and payload to
+     * their real frames regardless of plen or base alignment. */
+    Touch hdr = {
         .tag_id        = tag_id,
         .flags         = flags,
         .source_pid    = source_pid,
@@ -255,9 +260,13 @@ static uint64_t touch_emit_payload(process_t *target, TouchTag tag_id,
         .timestamp_tsc = rdtsc(),
         .reserved      = 0,
     };
-    memcpy(dst, &t, sizeof(Touch));
-    if (plen > 0 && kpayload)
-        memcpy((uint8_t *)dst + sizeof(Touch), kpayload, plen);
+    if (vmm_user_buf_commit_out(target->cabin->vmm, vaddr,
+                                &hdr, sizeof(Touch)) != OK)
+        return 0;
+    if (plen > 0 && kpayload &&
+        vmm_user_buf_commit_out(target->cabin->vmm, vaddr + sizeof(Touch),
+                                kpayload, plen) != OK)
+        return 0;
     return vaddr;
 }
 

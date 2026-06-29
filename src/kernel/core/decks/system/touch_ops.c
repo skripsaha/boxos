@@ -6,6 +6,7 @@
 #include "manifest_auth.h"
 #include "boxos_manifest.h"
 #include "boxos_crate.h"
+#include "crate_io.h"
 #include "kresult.h"
 #include "kring.h"
 #include "result.h"
@@ -26,23 +27,17 @@
  * userspace calls ONCE per tag at process init to obtain the handle.
  * ──────────────────────────────────────────────────────────────────────── */
 
-static const void *crate_read(const Crate *c, const OpContext *ctx)
-{
-    if (!c || c->size == 0) return NULL;
-    if (ctx && ctx->proc && ctx->proc->cabin)
-        return vmm_translate_user_addr(ctx->proc->cabin->vmm,
-                                       (uintptr_t)c->addr, (size_t)c->size);
-    return (const void *)(uintptr_t)c->addr;
-}
-
+/* Read a NUL-bounded copy of the tag string into a caller stack buffer via
+ * the page-walked crate_io snapshot. A tag whose bytes straddle a page
+ * boundary is copied across every backing frame instead of being clipped to
+ * its first page (the vmm_translate_user_addr straddle bug). */
 static error_t crate_string(const Crate *c, const OpContext *ctx,
                             char *dst, size_t dst_size)
 {
     if (!c || c->size == 0 || dst_size == 0) return ERR_INVALID_ARGUMENT;
-    const char *src = crate_read(c, ctx);
-    if (!src) return ERR_INVALID_ADDRESS;
     size_t copy = c->size < dst_size - 1 ? c->size : dst_size - 1;
-    memcpy(dst, src, copy);
+    error_t rc = crate_read(c, ctx, dst, copy);
+    if (rc != OK) return rc;
     dst[copy] = '\0';
     if (dst[0] == '\0') return ERR_INVALID_ARGUMENT;
     return OK;
@@ -74,16 +69,11 @@ static int SysTouchIntern(const ManifestOp *op, Crate *crates,
 
     Crate *out = &crates[op->out_crate];
     if (out->capacity < 4) return ERR_INVALID_ARGUMENT;
-    void *dst = (void *)(uintptr_t)out->addr;
-    if (ctx->proc->cabin)
-        dst = vmm_translate_user_addr(ctx->proc->cabin->vmm,
-                                      (uintptr_t)out->addr, 4);
-    if (!dst) return ERR_INVALID_ADDRESS;
 
-    uint16_t buf[2] = { full, bare };
-    memcpy(dst, buf, sizeof(buf));
-    out->size = 4;
-    return OK;
+    /* Page-walked write of the two handle ids; crate_write sets out->size = 4
+     * on success and fails closed (ERR_INVALID_ADDRESS) on a bad address. */
+    uint16_t blob[2] = { full, bare };
+    return crate_write(out, ctx, blob, sizeof(blob));
 }
 
 /* Pull a TouchTag from params[0..1]. */
@@ -167,14 +157,24 @@ static int SysTouchSend(const ManifestOp *op, Crate *crates,
     if (full_id == TOUCH_TAG_INVALID && bare_id == TOUCH_TAG_INVALID)
         return ERR_INVALID_ARGUMENT;
 
+    /* Bounded snapshot of the payload into a stack buffer. The page-walked
+     * crate_read copies a straddling payload across every backing frame, and
+     * the BOXOS_TOUCH_PAYLOAD_MAX (96) cap closes a DoS: src->size is
+     * attacker-controlled up to UINT32_MAX and every consumer reads at most 96
+     * bytes (TouchPublishPair / TouchQueueEnqueue truncate), so an unbounded
+     * size must never drive the downstream kmalloc/copy. */
+    uint8_t     payload_buf[BOXOS_TOUCH_PAYLOAD_MAX];
     const void *payload = NULL;
     uint32_t    plen    = 0;
     if (op->in_crate != CRATE_INDEX_NONE) {
         Crate *src = &crates[op->in_crate];
         if (src->size > 0) {
-            payload = crate_read(src, ctx);
-            if (!payload) return ERR_INVALID_ADDRESS;
-            plen = (uint32_t)(src->size > UINT32_MAX ? UINT32_MAX : src->size);
+            uint64_t n = src->size < BOXOS_TOUCH_PAYLOAD_MAX
+                         ? src->size : BOXOS_TOUCH_PAYLOAD_MAX;
+            error_t rc = crate_read(src, ctx, payload_buf, n);
+            if (rc != OK) return rc;
+            payload = payload_buf;
+            plen    = (uint32_t)n;
         }
     }
 
