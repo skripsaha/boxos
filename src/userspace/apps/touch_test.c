@@ -8,6 +8,10 @@
 #include "box/core/result.h"
 #include "box/string.h"
 #include "box/error.h"
+#include "box/core/manifest.h"   /* MfCall1 — raw kill-other for the killed case */
+#include "boxos_decks.h"         /* DECK_SYSTEM, SYSTEM_OP_PROC_KILL */
+#include "box/timeouts.h"        /* BOX_TIMEOUT_IPC_MS */
+#include "proc_exit.h"           /* PROC_EXIT_KILLED — shared exit disposition */
 
 #define TAG_PING    "test:ping"
 #define TAG_BCAST   "test:bcast"
@@ -18,6 +22,7 @@
 #define TAG_LEVEL   "test:level"
 #define TAG_OWNERS  "test:owners"
 #define TAG_REACT   "test:react"
+#define TAG_BURST   "test:burst"
 
 #define ROLE_PING_SENDER    1
 #define ROLE_BCAST_LISTEN   2
@@ -27,6 +32,20 @@
 #define ROLE_NO_TAG_SEND    6
 #define ROLE_HAS_TAG_SEND   7
 #define ROLE_REACT_SEND     8
+#define ROLE_DIE_CODE       9
+#define ROLE_LOOP_FOREVER   10
+#define ROLE_DIE_INDEXED    11
+
+/* Clean self-exit code asserted by test12 — arbitrary non-zero, sign bit clear
+ * so it stays a valid >= 0 disposition that never collides with -1/-2. */
+#define EXIT_CLEAN_CODE     0x42
+
+/* TT 14 concurrent race detector — N children, each exits with a DISTINCT code
+ * CONCURRENT_BASE_CODE + i. Every code is a small positive int (sign bit clear),
+ * so it survives SysProcKill's [0, INT32_MAX] disposition mask byte-for-byte and
+ * can never be confused with a negative sentinel (-1 killed / -2 crashed). */
+#define CONCURRENT_CHILDREN   8
+#define CONCURRENT_BASE_CODE  0x100
 
 static int g_passed = 0;
 static int g_total  = 0;
@@ -59,6 +78,18 @@ static int spawn_role(uint8_t role)
     if (child < 0) return child;
     uint8_t pkt[2] = { ROLE_MAGIC, role };
     send((uint32_t)child, pkt, 2);
+    return child;
+}
+
+/* Like spawn_role but appends a 4-byte exit code to the role packet — the
+ * ROLE_DIE_INDEXED child reads it back and exits with exactly that value. */
+static int spawn_role_code(uint8_t role, uint32_t code)
+{
+    int child = proc_exec("touch_test");
+    if (child < 0) return child;
+    uint8_t pkt[6] = { ROLE_MAGIC, role };
+    memcpy(pkt + 2, &code, sizeof(code));
+    send((uint32_t)child, pkt, sizeof(pkt));
     return child;
 }
 
@@ -180,6 +211,45 @@ static void role_react_send(uint32_t parent_pid)
     for (volatile int i = 0; i < 80000; i++) {}
     touch_send(TOUCH_TAG_PAIR(TAG_REACT), "data", 4, 0);
     exit(0);
+}
+
+/* Clean exit carrying a known non-zero code — test12 reads it back off
+ * process:died. exit() routes EXIT_CLEAN_CODE through SysProcKill's self-exit
+ * disposition. */
+static void role_die_code(uint32_t parent_pid)
+{
+    (void)parent_pid;
+    exit(EXIT_CLEAN_CODE);
+}
+
+/* Alive-and-looping victim for the killed case. It signals readiness, then
+ * yields forever and NEVER self-exits, so the only process:died for its pid is
+ * the parent's PROC_KILL (PROC_EXIT_KILLED) — deterministic. yield() each turn
+ * keeps a cooperative single core handing the CPU back to the parent. */
+static void role_loop_forever(uint32_t parent_pid)
+{
+    uint8_t ready = 1;
+    send(parent_pid, &ready, 1);
+    for (;;) yield();
+}
+
+/* TT 14 child: subscribe to the burst tag, tell the parent we're armed, then
+ * block until the parent's single broadcast releases EVERY child at once. The
+ * synchronized release makes all N exits hit the cross-core reaper in one burst
+ * (max contention on the touch_cleaned claim) while every child is still alive
+ * holding a DISTINCT pid — pid recycling (the allocator hands back the lowest
+ * free index immediately) can't fold two children onto one pid. Then exit with
+ * the per-child code handed in at spawn. */
+static void role_die_indexed(uint32_t parent_pid, uint32_t code)
+{
+    TouchTag burst = TOUCH_TAG_ID(TAG_BURST);
+    touch_claim(burst, TOUCH_REST, 0, 0);
+    uint8_t ready = 1;
+    send(parent_pid, &ready, 1);
+    Touch t;
+    touch_await(burst, &t, 30000);
+    touch_release(burst);
+    exit(code);
 }
 
 /* ---------- T1: REST round-trip ---------- */
@@ -510,6 +580,219 @@ static void test11(void)
     else fail(11, "LATCHED ordering or ack failed");
 }
 
+/* await_died_code — claim must already be active; spin (filtering by `pid`, a
+ * broadcast stream) for that pid's process:died and hand back its exit_code.
+ * Returns true on a matching death, false on timeout-with-no-match. */
+static bool await_died_code(TouchTag tag, uint32_t pid, int32_t *out_code,
+                            bool *out_delivered)
+{
+    *out_delivered = false;
+    for (int tries = 0; tries < 16; tries++) {
+        Touch t;
+        if (touch_await(tag, &t, 3000) != 0) break;
+        *out_delivered = true;
+        if (t.payload_len >= sizeof(TouchProcessDied)) {
+            TouchProcessDied died;
+            memcpy(&died, t.payload, sizeof(died));
+            if (died.pid == pid) { *out_code = died.exit_code; return true; }
+        }
+    }
+    return false;
+}
+
+/* ---------- T12: clean exit carries its code ---------- */
+static void test12(void)
+{
+    drain_state();
+
+    TouchTag tag = TOUCH_TAG_ID(TAG_PDIED);
+    touch_claim(tag, TOUCH_REST, 0, 0);
+
+    int child = spawn_role(ROLE_DIE_CODE);
+    if (child < 0) { fail(12, "spawn failed"); touch_release(tag); return; }
+
+    int32_t code = 0;
+    bool delivered = false;
+    bool matched = await_died_code(tag, (uint32_t)child, &code, &delivered);
+
+    if (matched && code == EXIT_CLEAN_CODE) pass(12);
+    else if (!delivered)  fail(12, "await timed out");
+    else if (!matched)    fail(12, "own child death not delivered");
+    else                  fail(12, "clean exit_code mismatch");
+    touch_release(tag);
+}
+
+/* ---------- T13: kill-other reports PROC_EXIT_KILLED ---------- */
+static void test13(void)
+{
+    drain_state();
+
+    TouchTag tag = TOUCH_TAG_ID(TAG_PDIED);
+    touch_claim(tag, TOUCH_REST, 0, 0);
+
+    int child = spawn_role(ROLE_LOOP_FOREVER);
+    if (child < 0) { fail(13, "spawn failed"); touch_release(tag); return; }
+
+    /* Wait for the victim to confirm it is alive and looping, so the kill lands
+     * on a running process rather than racing its startup. */
+    bool ready = false;
+    Result r;
+    for (int t = 0; t < 30 && !ready; t++) {
+        if (receive_wait(&r, 200)) {
+            if (r.sender_pid == (uint32_t)child &&
+                r.data_length >= 1 && r.data_addr != 0 &&
+                *(const uint8_t *)(uintptr_t)r.data_addr == 1) ready = true;
+        }
+    }
+    if (!ready) { fail(13, "loop child not ready"); touch_release(tag); return; }
+
+    /* No boxlib helper exists for kill-other (deliberately), so issue the raw
+     * Manifest call: SYSTEM_OP_PROC_KILL with a non-zero target pid. The kernel
+     * forces PROC_EXIT_KILLED for a kill-other regardless of any param code. */
+    uint32_t target = (uint32_t)child;
+    int kill_rc = MfCall1(DECK_SYSTEM, SYSTEM_OP_PROC_KILL,
+                          &target, (uint16_t)sizeof(target),
+                          NULL, 0, NULL, 0, NULL,
+                          BOX_TIMEOUT_IPC_MS, NULL);
+    if (kill_rc != 0) { fail(13, "PROC_KILL failed"); touch_release(tag); return; }
+
+    int32_t code = 0;
+    bool delivered = false;
+    bool matched = await_died_code(tag, (uint32_t)child, &code, &delivered);
+
+    if (matched && code == PROC_EXIT_KILLED) pass(13);
+    else if (!delivered)  fail(13, "await timed out");
+    else if (!matched)    fail(13, "killed child death not delivered");
+    else                  fail(13, "killed exit_code mismatch");
+    touch_release(tag);
+}
+
+/* PROC_EXIT_CRASHED (-2) has no dedicated positive test. It is published only
+ * when process_destroy is the FIRST cleanup of a strand — a genuine fault or
+ * kernel-forced teardown (the kill and self-exit paths clean touch first and win
+ * the disposition). The only userspace trigger is a child faulting on purpose,
+ * which routes through the IDT handler and spews a full [EXCEPTION] register dump
+ * into every boot log — noise that mimics a real crash. T13 already proves a
+ * NEGATIVE sentinel survives the compute -> TouchPublish snapshot -> ring ->
+ * payload round-trip, and T14 below proves -2 never appears as a MISLABEL of a
+ * clean exit under the cross-core reaper race. So -2 is covered, not faked. */
+
+/* ---------- T14: concurrent exit-code integrity under the reaper race --------
+ *
+ * Proves the SMP fix: a clean exit must publish its TRUE code even when the
+ * self-exit path (SysProcKill, one K-Core) and the reaper (process_destroy,
+ * another K-Core) reach TouchCleanupProcess for the same proc at once. Before
+ * the fix the loser could double-publish or stamp PROC_EXIT_CRASHED (-2) over a
+ * clean code. The window only opens under real cross-core parallelism, so this
+ * is a no-op-correct pass on 1c and a genuine detector on bios16/uefi16.
+ *
+ * N children each carry a UNIQUE code (CONCURRENT_BASE_CODE + i). process:died
+ * is claimed BEFORE the first spawn (a claim that postdates a death misses it);
+ * all N are spawned and armed on a burst tag, then a single broadcast releases
+ * them together so the deaths hit the reaper as one simultaneous burst. Every
+ * delivered death is matched by pid against the expected set: a mislabel (-2), a
+ * code swapped between children, a duplicate, or a missing death FAILs with the
+ * offending pid named. Bounded by a per-death watchdog — a death that never
+ * arrives FAILs rather than hangs. */
+static void test14(void)
+{
+    drain_state();
+
+    TouchTag tag = TOUCH_TAG_ID(TAG_PDIED);
+    touch_claim(tag, TOUCH_REST, 0, 0);
+
+    uint32_t pid[CONCURRENT_CHILDREN];
+    int32_t  want[CONCURRENT_CHILDREN];
+    int32_t  got[CONCURRENT_CHILDREN];
+    bool     armed[CONCURRENT_CHILDREN];
+    bool     seen[CONCURRENT_CHILDREN];
+
+    for (int i = 0; i < CONCURRENT_CHILDREN; i++) {
+        want[i]  = CONCURRENT_BASE_CODE + i;
+        got[i]   = 0;
+        armed[i] = false;
+        seen[i]  = false;
+        int child = spawn_role_code(ROLE_DIE_INDEXED, (uint32_t)want[i]);
+        if (child < 0) { fail(14, "spawn shortfall"); touch_release(tag); return; }
+        pid[i] = (uint32_t)child;
+    }
+
+    /* Barrier: wait until every child has claimed the burst tag and reported
+     * armed. Only then is the broadcast guaranteed to reach all N, and all N
+     * pids are simultaneously live (hence distinct). */
+    int armed_count = 0;
+    Result r;
+    for (int t = 0; t < 80 && armed_count < CONCURRENT_CHILDREN; t++) {
+        if (!receive_wait(&r, 200)) continue;
+        if (r.data_length < 1 || r.data_addr == 0) continue;
+        if (*(const uint8_t *)(uintptr_t)r.data_addr != 1) continue;
+        for (int i = 0; i < CONCURRENT_CHILDREN; i++) {
+            if (r.sender_pid == pid[i] && !armed[i]) {
+                armed[i] = true; armed_count++; break;
+            }
+        }
+    }
+    if (armed_count != CONCURRENT_CHILDREN) {
+        fail(14, "children did not all arm");
+        touch_release(tag);
+        return;
+    }
+
+    /* Release every child with one broadcast — a synchronized burst of exits. */
+    if (touch_send(TOUCH_TAG_PAIR(TAG_BURST), "go", 2, 0) < 0) {
+        fail(14, "burst broadcast failed");
+        touch_release(tag);
+        return;
+    }
+
+    /* Collect. Each death is matched by pid into our set; deaths for pids we
+     * don't own are ignored. The loop ends when all N are in (success) or a
+     * touch_await times out (a death never came — FAIL, not hang). Stopping the
+     * instant remaining hits 0 means a later recycle of a child's pid can't be
+     * mistaken for a duplicate. The iteration cap is a hard backstop. */
+    int remaining = CONCURRENT_CHILDREN;
+    bool dup = false;
+    uint32_t dup_pid = 0;
+    for (int tries = 0; tries < CONCURRENT_CHILDREN * 8 && remaining > 0; tries++) {
+        Touch t;
+        if (touch_await(tag, &t, 3000) != 0) break;
+        if (t.payload_len < sizeof(TouchProcessDied)) continue;
+        TouchProcessDied died;
+        memcpy(&died, t.payload, sizeof(died));
+        for (int i = 0; i < CONCURRENT_CHILDREN; i++) {
+            if (died.pid != pid[i]) continue;
+            if (seen[i]) { dup = true; dup_pid = died.pid; }
+            else { seen[i] = true; got[i] = died.exit_code; remaining--; }
+            break;
+        }
+    }
+
+    if (dup) {
+        kdbg_print("[TT 14] FAIL: pid %u death published more than once", dup_pid);
+        g_total++;
+        touch_release(tag);
+        return;
+    }
+    for (int i = 0; i < CONCURRENT_CHILDREN; i++) {
+        if (!seen[i]) {
+            kdbg_print("[TT 14] FAIL: pid %u death never delivered (want %d)",
+                       pid[i], (int)want[i]);
+            g_total++;
+            touch_release(tag);
+            return;
+        }
+        if (got[i] != want[i]) {
+            kdbg_print("[TT 14] FAIL: pid %u got code %d want %d (mislabel/swap)",
+                       pid[i], (int)got[i], (int)want[i]);
+            g_total++;
+            touch_release(tag);
+            return;
+        }
+    }
+    pass(14);
+    touch_release(tag);
+}
+
 /* ---------- main ---------- */
 int main(void)
 {
@@ -519,6 +802,7 @@ int main(void)
         Result r;
         bool found_role = false;
         uint8_t role = 0;
+        uint32_t role_code = 0;
 
         for (int attempt = 0; attempt < 2 && !found_role; attempt++) {
             if (!receive_wait(&r, 200)) break;
@@ -526,6 +810,8 @@ int main(void)
                 const uint8_t *buf = (const uint8_t *)(uintptr_t)r.data_addr;
                 if (buf[0] == ROLE_MAGIC) {
                     role = buf[1];
+                    if (r.data_length >= 6)
+                        memcpy(&role_code, buf + 2, sizeof(role_code));
                     found_role = true;
                 }
             }
@@ -541,6 +827,9 @@ int main(void)
             case ROLE_NO_TAG_SEND:   role_no_tag_send(ci->spawner_pid);   break;
             case ROLE_HAS_TAG_SEND:  role_has_tag_send(ci->spawner_pid);  break;
             case ROLE_REACT_SEND:    role_react_send(ci->spawner_pid);    break;
+            case ROLE_DIE_CODE:      role_die_code(ci->spawner_pid);      break;
+            case ROLE_LOOP_FOREVER:  role_loop_forever(ci->spawner_pid);  break;
+            case ROLE_DIE_INDEXED:   role_die_indexed(ci->spawner_pid, role_code); break;
             default: break;
             }
             exit(0);
@@ -562,6 +851,9 @@ int main(void)
     test9();
     test10();
     test11();
+    test12();
+    test13();
+    test14();
 
     kdbg_print("[TT SUMMARY] %d/%d passed", g_passed, g_total);
     return 0;

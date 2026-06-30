@@ -102,8 +102,12 @@ void exit(uint32_t exit_code)
         send(ci->spawner_pid, msg, 2);
     }
 
-    /* params:[u32 target_pid] — 0 means self exit. */
-    uint32_t target = 0;
+    /* params:[u32 target_pid][i32 exit_code] — target 0 means self exit; the
+     * code rides into SysProcKill's self-exit disposition so process:died
+     * carries the real exit code (masked to [0, INT32_MAX] kernel-side). */
+    struct __attribute__((packed)) { uint32_t target; int32_t code; } kill_param = {
+        0, (int32_t)exit_code
+    };
 
     /* Retry SYS_PROC_KILL — the syscall is supposed to be terminal but a
      * transient kernel-side failure (ring full mid-burst, deck dispatcher
@@ -116,7 +120,7 @@ void exit(uint32_t exit_code)
     int kill_rc = -1;
     for (int attempt = 0; attempt < 3 && kill_rc != 0; attempt++) {
         kill_rc = MfCall1(DECK_SYSTEM, SYS_PROC_KILL,
-                          &target, sizeof(target),
+                          &kill_param, sizeof(kill_param),
                           NULL, 0, NULL, 0, NULL,
                           SYS_TIMEOUT_MS, NULL);
         if (kill_rc != 0) yield();

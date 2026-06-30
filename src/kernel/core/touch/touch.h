@@ -267,11 +267,15 @@ error_t TouchClaimClear(struct process_t *proc, TouchTag tag_id);
 /* LATCHED ack — clear the pending slot for proc's claim on tag_id. */
 error_t TouchClaimAck(struct process_t *proc, TouchTag tag_id);
 
-/* Tear down all of proc's subscriptions. Idempotent. Unlinks each sub from its
+/* Tear down all of proc's subscriptions, then publish process:died carrying
+ * `exit_code` (the disposition — see proc_exit.h: >=0 clean / -1 killed /
+ * -2 crashed). Idempotent on `proc->touch_cleaned`: only the FIRST call for a
+ * strand publishes and decides the code; later calls no-op, so whichever
+ * death-site cleans first sets the disposition. Unlinks each sub from its
  * bucket and proc list, then drops the base ref via touch_sub_release — the sub
  * is freed here unless a concurrent publisher still holds a snapshot ref, in
  * which case that publisher frees it on completion. */
-void   TouchCleanupProcess(struct process_t *proc);
+void   TouchCleanupProcess(struct process_t *proc, int32_t exit_code);
 
 /* INTERRUPT mode return path. */
 void   TouchIrqReturn(struct process_t *proc);
