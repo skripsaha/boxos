@@ -35,6 +35,7 @@
 #define ROLE_DIE_CODE       9
 #define ROLE_LOOP_FOREVER   10
 #define ROLE_DIE_INDEXED    11
+#define ROLE_TAG_REPORT     12
 
 /* Clean self-exit code asserted by test12 — arbitrary non-zero, sign bit clear
  * so it stays a valid >= 0 disposition that never collides with -1/-2. */
@@ -90,6 +91,18 @@ static int spawn_role_code(uint8_t role, uint32_t code)
     uint8_t pkt[6] = { ROLE_MAGIC, role };
     memcpy(pkt + 2, &code, sizeof(code));
     send((uint32_t)child, pkt, sizeof(pkt));
+    return child;
+}
+
+/* Like spawn_role but launches the child through proc_exec_tagged, so the kernel
+ * folds `tags` (a caller augment) into the child's tag set on top of the file's
+ * own tags — the union path T16 verifies. */
+static int spawn_role_tagged(uint8_t role, const char *tags)
+{
+    int child = proc_exec_tagged("touch_test", tags);
+    if (child < 0) return child;
+    uint8_t pkt[2] = { ROLE_MAGIC, role };
+    send((uint32_t)child, pkt, 2);
     return child;
 }
 
@@ -250,6 +263,19 @@ static void role_die_indexed(uint32_t parent_pid, uint32_t code)
     touch_await(burst, &t, 30000);
     touch_release(burst);
     exit(code);
+}
+
+/* T16 child: report which of its two expected tags landed. "spawn:aug" is the
+ * caller augment proc_exec_tagged folded in; "touch_test" is the file's own
+ * name-stem tag. Both present proves child = file-tags ∪ caller-tags. */
+static void role_tag_report(uint32_t parent_pid)
+{
+    bool has_aug = false, has_file = false;
+    proc_tag_check("spawn:aug", &has_aug);
+    proc_tag_check("touch_test", &has_file);
+    uint8_t msg[3] = { 0xAA, (uint8_t)(has_aug ? 1 : 0), (uint8_t)(has_file ? 1 : 0) };
+    send(parent_pid, msg, sizeof(msg));
+    exit(0);
 }
 
 /* ---------- T1: REST round-trip ---------- */
@@ -646,9 +672,10 @@ static void test13(void)
     }
     if (!ready) { fail(13, "loop child not ready"); touch_release(tag); return; }
 
-    /* No boxlib helper exists for kill-other (deliberately), so issue the raw
-     * Manifest call: SYSTEM_OP_PROC_KILL with a non-zero target pid. The kernel
-     * forces PROC_EXIT_KILLED for a kill-other regardless of any param code. */
+    /* T15 covers the boxlib proc_kill() helper; here we deliberately keep the raw
+     * Manifest wire — SYSTEM_OP_PROC_KILL with a non-zero target pid — so the
+     * kernel kill-other path is proven independent of any userspace wrapper. The
+     * kernel forces PROC_EXIT_KILLED for a kill-other regardless of any param code. */
     uint32_t target = (uint32_t)child;
     int kill_rc = MfCall1(DECK_SYSTEM, SYSTEM_OP_PROC_KILL,
                           &target, (uint16_t)sizeof(target),
@@ -793,6 +820,158 @@ static void test14(void)
     touch_release(tag);
 }
 
+/* ---------- T15: boxlib proc_kill() kills by pid; death carries KILLED ---------- */
+static void test15(void)
+{
+    drain_state();
+
+    TouchTag tag = TOUCH_TAG_ID(TAG_PDIED);
+    touch_claim(tag, TOUCH_REST, 0, 0);
+
+    int child = spawn_role(ROLE_LOOP_FOREVER);
+    if (child < 0) { fail(15, "spawn failed"); touch_release(tag); return; }
+
+    /* Wait for the victim to confirm it is alive and looping so proc_kill lands
+     * on a running process rather than racing its startup. */
+    bool ready = false;
+    Result r;
+    for (int t = 0; t < 30 && !ready; t++) {
+        if (receive_wait(&r, 200)) {
+            if (r.sender_pid == (uint32_t)child &&
+                r.data_length >= 1 && r.data_addr != 0 &&
+                *(const uint8_t *)(uintptr_t)r.data_addr == 1) ready = true;
+        }
+    }
+    if (!ready) { fail(15, "loop child not ready"); touch_release(tag); return; }
+
+    /* The path under test: the boxlib proc_kill() wrapper, kill-other by pid. */
+    if (proc_kill((uint32_t)child) != OK) {
+        fail(15, "proc_kill returned error");
+        touch_release(tag);
+        return;
+    }
+
+    int32_t code = 0;
+    bool delivered = false;
+    bool matched = await_died_code(tag, (uint32_t)child, &code, &delivered);
+    touch_release(tag);
+    if (!matched && !delivered) { fail(15, "await timed out");                return; }
+    if (!matched)               { fail(15, "killed child death not delivered"); return; }
+    if (code != PROC_EXIT_KILLED) { fail(15, "killed exit_code mismatch");    return; }
+
+    /* Locally deterministic guards (no child needed): proc_kill must refuse
+     * self-targeting. pid 0 is the kernel's self-exit form and our own pid is
+     * exit()'s job — both come back ERR_INVALID_ARGUMENT and leave us running. */
+    if (proc_kill(0) != -ERR_INVALID_ARGUMENT) {
+        fail(15, "proc_kill(0) not rejected"); return;
+    }
+    if (proc_kill(cabin_info()->pid) != -ERR_INVALID_ARGUMENT) {
+        fail(15, "proc_kill(self) not rejected"); return;
+    }
+    /* Still executing here — self never died. */
+    pass(15);
+}
+
+/* ---------- T16: child = file ∪ caller tags; reserved augment is denied ------- */
+static void test16(void)
+{
+    drain_state();
+
+    /* Union proof: "spawn" is neither reserved nor a tag the touch_test file
+     * carries, so a child reporting "spawn:aug" present alongside its own
+     * "touch_test" name tag proves the caller augment crossed PROC_EXEC. */
+    int child = spawn_role_tagged(ROLE_TAG_REPORT, "spawn:aug");
+    if (child < 0) { fail(16, "tagged spawn failed"); return; }
+
+    bool got = false;
+    uint8_t has_aug = 0, has_file = 0;
+    Result r;
+    for (int t = 0; t < 30 && !got; t++) {
+        if (!receive_wait(&r, 200)) continue;
+        if (r.sender_pid != (uint32_t)child) continue;
+        if (r.data_length < 3 || r.data_addr == 0) continue;
+        const uint8_t *b = (const uint8_t *)(uintptr_t)r.data_addr;
+        if (b[0] != 0xAA) continue;               /* skip the 0xFE exit sentinel */
+        has_aug = b[1]; has_file = b[2]; got = true;
+    }
+    if (!got)      { fail(16, "tag report not received");           return; }
+    if (!has_aug)  { fail(16, "caller augment tag missing on child"); return; }
+    if (!has_file) { fail(16, "file name tag missing on child");    return; }
+
+    /* Reserved-key augment must be refused wholesale — the child is never
+     * created, so no privilege can leak in. god + system both gate. */
+    if (proc_exec_tagged("touch_test", "god") != -ERR_ACCESS_DENIED) {
+        fail(16, "reserved 'god' augment not denied"); return;
+    }
+    if (proc_exec_tagged("touch_test", "system") != -ERR_ACCESS_DENIED) {
+        fail(16, "reserved 'system' augment not denied"); return;
+    }
+    pass(16);
+}
+
+/* Raw proc.spawn wire — no boxlib wrapper exists for it (spawn stays
+ * kernel-internal), so issue the Manifest call directly like T13's raw kill.
+ * params = [u64 binary_phys][u64 binary_size]; binary_phys = 0x1000 is page-
+ * aligned, non-zero and < 4GiB, so it clears SysProcSpawn's early checks while
+ * never being dereferenced on a gated reject (the gate fires pre-binary).
+ *
+ * Sign note: this is a RAW MfCall1, so a kernel-side error comes back as a
+ * POSITIVE error_t (box/error.h: positive = kernel error, negative = transport).
+ * That is why the comparisons below use +ERR_ACCESS_DENIED, unlike the
+ * box_fail-wrapped boxlib stubs (T16) which return the negated -ERR_*. */
+static int proc_spawn_raw(const char *tags)
+{
+    uint8_t params[16];
+    uint64_t binary_phys = 0x1000;
+    uint64_t binary_size = 64;
+    memcpy(params, &binary_phys, sizeof(binary_phys));
+    memcpy(params + 8, &binary_size, sizeof(binary_size));
+    return MfCall1(DECK_SYSTEM, SYSTEM_OP_PROC_SPAWN,
+                   params, (uint16_t)sizeof(params),
+                   tags, (uint32_t)strlen(tags),
+                   NULL, 0, NULL,
+                   BOX_TIMEOUT_IPC_MS, NULL);
+}
+
+/* ---------- T17: proc.spawn child auth-level subset of spawner; no escalation -
+ *
+ * touch_test runs as "app,utility,test" (has utility, lacks system). The
+ * proc.spawn tag gate must let it grant a utility child but deny a system
+ * child — otherwise a utility process could mint a system-privileged child
+ * (utility->system escalation; a phys address for the forged ELF is leaked via
+ * the app-level MEMTAG_INFO base_phys field). The gate runs BEFORE
+ * process_create and before the binary is read, so the reject branch is
+ * deterministic and dereferences nothing.
+ *
+ * We assert on "system", not "god": a well-known tag confers its auth bit only
+ * when its registry id is < 64, and god/bypass/network are used by no file in
+ * the image, so they intern past id 63 and carry a zero auth bit — they are
+ * unrepresentable and therefore harmless (a spawned child cannot gain the
+ * privilege either, by the same 64-bit mask). "system" is used by system files,
+ * so it is representable and is the real, grantable escalation the gate must
+ * stop. (The well-known id>=64 zero-bit defect is a pre-existing TagFS bug,
+ * tracked as its own fix; once it lands a god assertion can be added here.) */
+static void test17(void)
+{
+    drain_state();
+
+    /* REJECT (pre-binary, deterministic): a utility spawner cannot grant the
+     * system privilege it does not itself hold — denied at the SYSTEM auth
+     * level the caller cannot reach. */
+    if (proc_spawn_raw("system") != ERR_ACCESS_DENIED) {
+        fail(17, "proc.spawn system not denied"); return;
+    }
+
+    /* ALLOW (not over-rejected): utility is within the spawner's own reach, so
+     * the gate passes and the op proceeds to fail on the dummy ELF blob
+     * (INVALID_ELF / SPAWN_FAILED). Anything but ACCESS_DENIED proves the gate
+     * let it through regardless of what 0x1000 happens to contain. */
+    if (proc_spawn_raw("utility") == ERR_ACCESS_DENIED) {
+        fail(17, "proc.spawn utility over-rejected"); return;
+    }
+    pass(17);
+}
+
 /* ---------- main ---------- */
 int main(void)
 {
@@ -830,6 +1009,7 @@ int main(void)
             case ROLE_DIE_CODE:      role_die_code(ci->spawner_pid);      break;
             case ROLE_LOOP_FOREVER:  role_loop_forever(ci->spawner_pid);  break;
             case ROLE_DIE_INDEXED:   role_die_indexed(ci->spawner_pid, role_code); break;
+            case ROLE_TAG_REPORT:    role_tag_report(ci->spawner_pid);    break;
             default: break;
             }
             exit(0);
@@ -854,6 +1034,9 @@ int main(void)
     test12();
     test13();
     test14();
+    test15();
+    test16();
+    test17();
 
     kdbg_print("[TT SUMMARY] %d/%d passed", g_passed, g_total);
     return 0;

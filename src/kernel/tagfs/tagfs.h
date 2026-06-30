@@ -445,6 +445,8 @@ int  tagfs_add_tag_string(uint32_t file_id, const char* key, const char* value);
 int  tagfs_remove_tag_string(uint32_t file_id, const char* key);
 bool tagfs_has_tag_string(uint32_t file_id, const char* key, const char* value);
 
+bool tagfs_key_is_reserved(const char *key);
+
 int  tagfs_query_files(const char* query_strings[], uint32_t count,
                        uint32_t* out_file_ids, uint32_t max_results);
 int  tagfs_list_all_files(uint32_t* out_file_ids, uint32_t max_results);

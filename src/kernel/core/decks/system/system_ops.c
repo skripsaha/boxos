@@ -246,6 +246,79 @@ static int SysBroadcast(const ManifestOp *op, Crate *crates, uint16_t crate_coun
  *  Process lifecycle
  * ========================================================================= */
 
+/* allowed-tag mask per auth level — MUST mirror ManifestOpAuthorize (manifest_auth.c). */
+static uint64_t auth_allowed_mask(const WellKnownTags *w, uint32_t level)
+{
+    switch (level) {
+    case OP_AUTH_APP:     return w->app | w->utility | w->system | w->bypass;
+    case OP_AUTH_UTILITY: return w->utility | w->system | w->bypass;
+    case OP_AUTH_SYSTEM:  return w->system | w->bypass;
+    case OP_AUTH_NETWORK: return w->network | w->system | w->bypass;
+    default:              return 0;
+    }
+}
+
+/* bare key -> its WellKnownTags privilege bit (0 if not a privilege tag). */
+static uint64_t well_known_bit_for_key(const WellKnownTags *w, const char *key)
+{
+    if (strcmp(key, "god")     == 0) return w->god;
+    if (strcmp(key, "system")  == 0) return w->system;
+    if (strcmp(key, "utility") == 0) return w->utility;
+    if (strcmp(key, "app")     == 0) return w->app;
+    if (strcmp(key, "bypass")  == 0) return w->bypass;
+    if (strcmp(key, "network") == 0) return w->network;
+    if (strcmp(key, "stopped") == 0) return w->stopped;
+    return 0;
+}
+
+/* A spawned child must not gain any auth privilege the spawner itself lacks
+ * (child auth-level ⊆ spawner auth-level). god grants anything. stopped is the
+ * child's own self-freeze, not an escalation, so it is allowed.
+ *
+ * This gates only the auth-privilege keys — unlike the PROC_EXEC merge path,
+ * which rejects every reserved key. The asymmetry is deliberate: a spawn tag
+ * set is wholly caller-supplied (there is no trusted file-tag base to protect),
+ * and the non-auth reserved keys (name/autostart/snapshot/trashed/hidden) confer
+ * no op-authority — none appear in any auth mask — so they are not escalations. */
+static error_t proc_spawn_authorize_tags(const char *tags, const process_t *spawner)
+{
+    WellKnownTags *w = tagfs_get_well_known_tags();
+    if (!w) return OK;                          /* boot/selftest: no untrusted caller */
+    uint64_t caller = spawner->cabin->tag_bits;
+    if (caller & w->god) return OK;             /* god may grant anything */
+
+    uint64_t requested = 0;
+    const char *p = tags;
+    while (*p) {
+        const char *comma = strchr(p, ',');
+        size_t tlen = comma ? (size_t)(comma - p) : strlen(p);
+        if (tlen == 0) { if (!comma) break; p = comma + 1; continue; }
+        char key[PROCESS_TAG_SIZE];
+        if (tlen >= sizeof(key)) return ERR_INVALID_ARGUMENT;
+        size_t klen = tlen;
+        for (size_t i = 0; i < tlen; i++) { if (p[i] == ':') { klen = i; break; } }
+        memcpy(key, p, klen); key[klen] = '\0';
+        requested |= well_known_bit_for_key(w, key);
+        if (!comma) break;
+        p = comma + 1;
+    }
+    if (requested == 0) return OK;              /* nothing privileged requested */
+    if (requested & w->god) return ERR_ACCESS_DENIED;  /* only god grants god */
+
+    const uint32_t levels[] = { OP_AUTH_APP, OP_AUTH_UTILITY, OP_AUTH_SYSTEM, OP_AUTH_NETWORK };
+    for (size_t i = 0; i < sizeof(levels)/sizeof(levels[0]); i++) {
+        uint64_t mask = auth_allowed_mask(w, levels[i]);
+        if ((requested & mask) && !(caller & mask)) return ERR_ACCESS_DENIED;  /* amplification */
+    }
+    return OK;
+}
+
+/* SysProcSpawn loads a process from a caller-supplied physical-address ELF blob
+ * with caller-supplied tags. proc_spawn_authorize_tags gates those tags so a
+ * spawned child can never gain an auth privilege the spawner itself lacks
+ * (child auth-level ⊆ spawner auth-level; god may grant anything). Without this
+ * a utility caller could spawn a "god" child (a phys address is obtainable via
+ * the app-level MEMTAG_INFO base_phys field), i.e. utility→god escalation. */
 /* SYSTEM_OP_PROC_SPAWN
  *   params:  [u64 binary_phys][u64 binary_size]
  *   in_crate: tags string (NUL-bounded)
@@ -271,6 +344,11 @@ static int SysProcSpawn(const ManifestOp *op, Crate *crates, uint16_t crate_coun
     char tags[PROCESS_TAG_SIZE];
     error_t srcrc = sys_crate_string(&crates[op->in_crate], ctx, tags, sizeof(tags));
     if (srcrc != OK) return srcrc;
+
+    /* Gate the child's tags BEFORE creating it or reading the binary: a denied
+     * spawn must create no process and dereference no caller memory. */
+    error_t gate = proc_spawn_authorize_tags(tags, ctx->proc);
+    if (gate != OK) return gate;
 
     process_t *new_proc = process_create(tags);
     if (!new_proc) return ERR_SPAWN_FAILED;
@@ -485,8 +563,62 @@ static int SysProcInfo(const ManifestOp *op, Crate *crates, uint16_t crate_count
     return OK;
 }
 
+/* True iff comma-delimited `list` already contains exactly `token` (element-exact,
+ * so "app" never matches inside "apple" or "touch_test"). */
+static bool tag_list_contains(const char *list, const char *token)
+{
+    size_t tlen = strlen(token);
+    const char *p = list;
+    while (*p) {
+        const char *comma = strchr(p, ',');
+        size_t elen = comma ? (size_t)(comma - p) : strlen(p);
+        if (elen == tlen && memcmp(p, token, tlen) == 0) return true;
+        if (!comma) break;
+        p = comma + 1;
+    }
+    return false;
+}
+
+/* Merge caller `augment` (comma-list) into `dst` (file-tags, already built).
+ * Per token: reject if its KEY (before ':') is reserved -> ERR_ACCESS_DENIED;
+ * skip if already present (dedup); else append ",token" or ERR_INVALID_ARGUMENT
+ * on cap overflow. file-tags are never the casualty (trusted, built first). */
+static error_t proc_exec_merge_augment(char *dst, size_t dst_size, const char *augment)
+{
+    const char *p = augment;
+    while (*p) {
+        const char *comma = strchr(p, ',');
+        size_t tlen = comma ? (size_t)(comma - p) : strlen(p);
+        if (tlen == 0) { if (!comma) break; p = comma + 1; continue; } /* skip empty token */
+
+        char token[PROCESS_TAG_SIZE];
+        if (tlen >= sizeof(token)) return ERR_INVALID_ARGUMENT;
+        memcpy(token, p, tlen); token[tlen] = '\0';
+
+        /* key = token up to ':' (value-bearing tags like "k:v") */
+        char key[PROCESS_TAG_SIZE];
+        const char *colon = strchr(token, ':');
+        size_t klen = colon ? (size_t)(colon - token) : tlen;
+        memcpy(key, token, klen); key[klen] = '\0';
+
+        if (tagfs_key_is_reserved(key)) return ERR_ACCESS_DENIED;  /* fail-closed: no escalation */
+
+        if (!tag_list_contains(dst, token)) {
+            size_t cur = strlen(dst);
+            size_t need = cur + (cur ? 1 : 0) + tlen + 1; /* comma + token + NUL */
+            if (need > dst_size) return ERR_INVALID_ARGUMENT;
+            if (cur) dst[cur++] = ',';
+            memcpy(dst + cur, token, tlen); dst[cur + tlen] = '\0';
+        }
+        if (!comma) break;
+        p = comma + 1;
+    }
+    return OK;
+}
+
 /* SYSTEM_OP_PROC_EXEC
  *   in_crate: filename
+ *   params (optional): caller-tag augment (comma-list); child = file-tags ∪ augment
  *   out_crate (optional): u32 new_pid */
 static int SysProcExec(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                        const OpContext *ctx)
@@ -500,6 +632,17 @@ static int SysProcExec(const ManifestOp *op, Crate *crates, uint16_t crate_count
     char filename[64];
     error_t srcrc = sys_crate_string(&crates[op->in_crate], ctx, filename, sizeof(filename));
     if (srcrc != OK) return srcrc;
+
+    /* Optional caller-tag augment rides in op->params (NUL-free, length-bounded).
+     * Empty (param_size == 0) leaves augment "" so the merge below is a no-op and
+     * this path stays byte-identical to a plain proc_exec. */
+    char augment[PROCESS_TAG_SIZE];
+    augment[0] = '\0';
+    if (op->param_size > 0) {
+        if (op->param_size >= sizeof(augment)) return ERR_INVALID_ARGUMENT;
+        memcpy(augment, op->params, op->param_size);
+        augment[op->param_size] = '\0';
+    }
 
     /* Locate the file by tag-name + executable tag. */
     #define EXEC_SCAN_MAX 256
@@ -550,6 +693,12 @@ static int SysProcExec(const ManifestOp *op, Crate *crates, uint16_t crate_count
     kfree(file_ids);
 
     if (found_id == 0) return ERR_FILE_NOT_FOUND;
+
+    /* Fold the caller augment into found_tags BEFORE any binary I/O, so a
+     * reserved/oversize augment costs zero disk reads and never spawns an
+     * orphan. found_tags is already NUL-terminated by the build loop above. */
+    error_t arc = proc_exec_merge_augment(found_tags, sizeof(found_tags), augment);
+    if (arc != OK) return arc;
 
     TagFSMetadata exec_meta;
     if (tagfs_get_metadata(found_id, &exec_meta) != 0) return ERR_FILE_NOT_FOUND;
