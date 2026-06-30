@@ -60,6 +60,7 @@
 #include "manifest.h"
 #include "manifest_selftest.h"
 #include "crate_io_selftest.h"
+#include "auth_decouple_selftest.h"
 #include "operations_deck.h"
 #include "hardware_deck.h"
 #include "system_deck.h"
@@ -581,6 +582,13 @@ void kernel_main(void)
     if (crate_io_err != OK)
     {
         kprintf("[WARN] crate_io self-test failed: %s\n", ErrorString(crate_io_err));
+    }
+
+    debug_printf("[INIT] auth-decouple self-test...\n");
+    error_t authdec_err = AuthDecoupleSelfTest();
+    if (authdec_err != OK)
+    {
+        kprintf("[WARN] auth-decouple self-test failed: %s\n", ErrorString(authdec_err));
     }
 
     debug_printf("[INIT] Operations Deck register...\n");

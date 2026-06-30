@@ -20,6 +20,7 @@
 #include "klib.h"
 #include "op_registry.h"
 #include "manifest_auth.h"
+#include "auth_tags.h"
 #include "manifest_stage.h"
 #include "boxos_manifest.h"
 #include "boxos_crate.h"
@@ -246,31 +247,6 @@ static int SysBroadcast(const ManifestOp *op, Crate *crates, uint16_t crate_coun
  *  Process lifecycle
  * ========================================================================= */
 
-/* allowed-tag mask per auth level — MUST mirror ManifestOpAuthorize (manifest_auth.c). */
-static uint64_t auth_allowed_mask(const WellKnownTags *w, uint32_t level)
-{
-    switch (level) {
-    case OP_AUTH_APP:     return w->app | w->utility | w->system | w->bypass;
-    case OP_AUTH_UTILITY: return w->utility | w->system | w->bypass;
-    case OP_AUTH_SYSTEM:  return w->system | w->bypass;
-    case OP_AUTH_NETWORK: return w->network | w->system | w->bypass;
-    default:              return 0;
-    }
-}
-
-/* bare key -> its WellKnownTags privilege bit (0 if not a privilege tag). */
-static uint64_t well_known_bit_for_key(const WellKnownTags *w, const char *key)
-{
-    if (strcmp(key, "god")     == 0) return w->god;
-    if (strcmp(key, "system")  == 0) return w->system;
-    if (strcmp(key, "utility") == 0) return w->utility;
-    if (strcmp(key, "app")     == 0) return w->app;
-    if (strcmp(key, "bypass")  == 0) return w->bypass;
-    if (strcmp(key, "network") == 0) return w->network;
-    if (strcmp(key, "stopped") == 0) return w->stopped;
-    return 0;
-}
-
 /* A spawned child must not gain any auth privilege the spawner itself lacks
  * (child auth-level ⊆ spawner auth-level). god grants anything. stopped is the
  * child's own self-freeze, not an escalation, so it is allowed.
@@ -279,15 +255,17 @@ static uint64_t well_known_bit_for_key(const WellKnownTags *w, const char *key)
  * which rejects every reserved key. The asymmetry is deliberate: a spawn tag
  * set is wholly caller-supplied (there is no trusted file-tag base to protect),
  * and the non-auth reserved keys (name/autostart/snapshot/trashed/hidden) confer
- * no op-authority — none appear in any auth mask — so they are not escalations. */
+ * no op-authority — none appear in any auth mask — so they are not escalations.
+ *
+ * Authority is the FIXED auth_bits (auth_tags.h) on both sides, so the subset
+ * check no longer depends on the privilege tags interning below registry id 64.
+ * The colon-split key keeps "god:foo" detected as a god request. */
 static error_t proc_spawn_authorize_tags(const char *tags, const process_t *spawner)
 {
-    WellKnownTags *w = tagfs_get_well_known_tags();
-    if (!w) return OK;                          /* boot/selftest: no untrusted caller */
-    uint64_t caller = spawner->cabin->tag_bits;
-    if (caller & w->god) return OK;             /* god may grant anything */
+    uint32_t caller = spawner->cabin->auth_bits;
+    if (caller & AUTH_TAG_GOD) return OK;       /* god may grant anything */
 
-    uint64_t requested = 0;
+    uint32_t requested = 0;
     const char *p = tags;
     while (*p) {
         const char *comma = strchr(p, ',');
@@ -298,16 +276,16 @@ static error_t proc_spawn_authorize_tags(const char *tags, const process_t *spaw
         size_t klen = tlen;
         for (size_t i = 0; i < tlen; i++) { if (p[i] == ':') { klen = i; break; } }
         memcpy(key, p, klen); key[klen] = '\0';
-        requested |= well_known_bit_for_key(w, key);
+        requested |= auth_bit_for_key(key);
         if (!comma) break;
         p = comma + 1;
     }
     if (requested == 0) return OK;              /* nothing privileged requested */
-    if (requested & w->god) return ERR_ACCESS_DENIED;  /* only god grants god */
+    if (requested & AUTH_TAG_GOD) return ERR_ACCESS_DENIED;  /* only god grants god */
 
     const uint32_t levels[] = { OP_AUTH_APP, OP_AUTH_UTILITY, OP_AUTH_SYSTEM, OP_AUTH_NETWORK };
     for (size_t i = 0; i < sizeof(levels)/sizeof(levels[0]); i++) {
-        uint64_t mask = auth_allowed_mask(w, levels[i]);
+        uint32_t mask = auth_mask_for_level(levels[i]);
         if ((requested & mask) && !(caller & mask)) return ERR_ACCESS_DENIED;  /* amplification */
     }
     return OK;

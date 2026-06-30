@@ -1,5 +1,6 @@
 #include "process.h"
 #include "cabin.h"
+#include "auth_tags.h"
 #include "klib.h"
 #include "kernel_config.h"
 #include "pmm.h"
@@ -1557,6 +1558,12 @@ int process_add_tag(process_t *proc, const char *tag)
     }
 
     int ret = process_set_tag_bit(proc, tid);
+    /* Mirror the fixed auth bit for a bare auth key (no-op for any other key),
+     * but only once membership actually took — keeps auth_bits ⟺ membership exact
+     * even on the (prod-unreachable) id>=64 overflow-alloc failure path.
+     * RELAXED, matching tag_bits; serialized by process_lock. */
+    if (ret == 0 && !value[0])
+        __atomic_or_fetch(&proc->cabin->auth_bits, auth_bit_for_key(key), __ATOMIC_RELAXED);
     spin_unlock(&process_lock);
     return ret;
 }
@@ -1579,6 +1586,10 @@ int process_remove_tag(process_t *proc, const char *tag)
 
     spin_lock(&process_lock);
     int ret = process_clear_tag_bit(proc, tid);
+    /* Drop the fixed auth bit when the bare auth key is removed (no-op
+     * otherwise). RELAXED, matching tag_bits; serialized by process_lock. */
+    if (!value[0])
+        __atomic_and_fetch(&proc->cabin->auth_bits, ~auth_bit_for_key(key), __ATOMIC_RELAXED);
     spin_unlock(&process_lock);
     return ret;
 }
