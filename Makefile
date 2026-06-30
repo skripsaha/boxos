@@ -321,17 +321,20 @@ $(BUILDDIR):
 
 # Cross-platform build for create_tagfs (host tool, not target)
 # Store OS signature to detect when to rebuild
-TAGFS_OS_SIGNATURE = $(BUILDDIR)/.tagfs_host_os
+# OS-specific signature path: switching host OS picks a new (absent) file, which
+# its recipe creates fresh, re-triggering the tool compile below — so the cross-
+# platform rebuild is handled by prerequisites, not an in-body guard.
+TAGFS_OS_SIGNATURE = $(BUILDDIR)/.tagfs_host_os.$(UNAME_S).$(UNAME_M)
 
-$(TAGFS_TOOL): tools/create_tagfs.c $(TAGFS_OS_SIGNATURE) | $(BUILDDIR)
-	@if [ ! -f "$(TAGFS_TOOL)" ] || [ "$$(cat $(TAGFS_OS_SIGNATURE) 2>/dev/null)" != "$(UNAME_S):$(UNAME_M)" ]; then \
-		echo "OS changed or first build - compiling TagFS tool for $(UNAME_S) ($(UNAME_M))..."; \
-		$(CC_HOST) -o $@ $< -Wall -Wextra; \
-		echo "$(UNAME_S):$(UNAME_M)" > $(TAGFS_OS_SIGNATURE); \
-		echo "TagFS tool built: $@"; \
-	else \
-		echo "TagFS tool already built for $(UNAME_S), skipping..."; \
-	fi
+# Prerequisites — the .c source, the shared reserved-vocabulary header, and the
+# OS signature — decide WHEN this recipe runs, so the compile is unconditional.
+# No in-body skip guard: that previously kept a stale tool after a
+# create_tagfs.c / tagfs_reserved.h edit, which silently formats a divergent
+# on-disk tag-id layout (the new kernel then panics: reserved vocab not 0..11).
+$(TAGFS_TOOL): tools/create_tagfs.c $(SRCDIR)/include/tagfs_reserved.h $(TAGFS_OS_SIGNATURE) | $(BUILDDIR)
+	@echo "Compiling TagFS tool for $(UNAME_S) ($(UNAME_M))..."
+	@$(CC_HOST) -I$(SRCDIR)/include -o $@ $< -Wall -Wextra
+	@echo "TagFS tool built: $@"
 
 # Create OS signature file on first build
 $(TAGFS_OS_SIGNATURE): | $(BUILDDIR)
