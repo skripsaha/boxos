@@ -42,7 +42,9 @@ typedef struct {
 
 int proc_info(uint16_t pid, proc_info_t* info);
 void exit(uint32_t exit_code);
-int proc_exec(const char* filename);
+int proc_exec(const char* filename);                          /* unchanged ABI */
+int proc_exec_tagged(const char* filename, const char* tags); /* NEW: child = file-tags ∪ caller-tags */
+int proc_kill(uint32_t pid);                                  /* NEW: kill another process by pid */
 
 int proc_tag_add(const char* tag);
 int proc_tag_remove(const char* tag);

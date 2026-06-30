@@ -38,6 +38,11 @@
 
 #define SYS_TIMEOUT_MS  5000u
 
+/* Upper bound on a caller-supplied tag augment for proc_exec_tagged. Mirrors
+ * the kernel PROCESS_TAG_SIZE (256) — the child's tag string can hold at most
+ * that many bytes — and fits inside the 256-byte MfCall1 param region. */
+#define PROC_EXEC_TAGS_MAX 256
+
 /* =========================================================================
  *  Process lifecycle
  * ========================================================================= */
@@ -138,20 +143,40 @@ void exit(uint32_t exit_code)
     }
 }
 
-int proc_exec(const char *filename)
+int proc_exec_tagged(const char *filename, const char *tags)
 {
     if (!filename || filename[0] == '\0') return -ERR_INVALID_ARGUMENT;
     size_t name_len = strlen(filename);
     if (name_len >= 64) return -ERR_INVALID_ARGUMENT;
 
+    const void *pbuf = NULL; uint16_t psize = 0;
+    if (tags && tags[0]) {
+        size_t tlen = strlen(tags);
+        if (tlen >= PROC_EXEC_TAGS_MAX) return -ERR_INVALID_ARGUMENT;
+        pbuf = tags; psize = (uint16_t)tlen;   /* strlen, no NUL — kernel bounds + NUL-terminates */
+    }
     uint32_t new_pid = 0;
     int rc = MfCall1(DECK_SYSTEM, SYS_PROC_EXEC,
-                     NULL, 0,
-                     filename, (uint32_t)name_len,
+                     pbuf, psize,                  /* params = caller-tag augment */
+                     filename, (uint32_t)name_len, /* in_crate = filename (unchanged) */
                      &new_pid, sizeof(new_pid), NULL,
                      SYS_TIMEOUT_MS, NULL);
     if (rc != 0) return box_fail(rc);
     return (int)new_pid;
+}
+
+int proc_exec(const char *filename) { return proc_exec_tagged(filename, NULL); }
+
+int proc_kill(uint32_t pid)
+{
+    if (pid == 0)                 return -ERR_INVALID_ARGUMENT; /* 0 == self-exit in kernel; use exit() */
+    if (pid == cabin_info()->pid) return -ERR_INVALID_ARGUMENT; /* self-termination is exit()'s job */
+    uint32_t target = pid;                                      /* 4-byte form -> kill-other -> PROC_EXIT_KILLED */
+    int rc = MfCall1(DECK_SYSTEM, SYS_PROC_KILL,
+                     &target, (uint16_t)sizeof(target),
+                     NULL, 0, NULL, 0, NULL,
+                     SYS_TIMEOUT_MS, NULL);
+    return box_fail(rc);
 }
 
 /* =========================================================================

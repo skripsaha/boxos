@@ -929,6 +929,18 @@ static const char *const TagFsReservedKeys[] = {
     "network", "trashed", "hidden", "autostart", "snapshot", "name",
 };
 
+/* True iff `key` is one of the reserved kernel-owned tag keys (TagFsReservedKeys[]).
+ * String compare on the bare key, so it catches both "system" and "system:foo"
+ * (callers split key at ':' before calling). Works regardless of registry/mount
+ * state — the reserved vocabulary is a compile-time constant. */
+bool tagfs_key_is_reserved(const char *key)
+{
+    if (!key) return false;
+    for (size_t i = 0; i < sizeof(TagFsReservedKeys) / sizeof(TagFsReservedKeys[0]); i++)
+        if (strcmp(key, TagFsReservedKeys[i]) == 0) return true;
+    return false;
+}
+
 void tagfs_init_well_known_tags(void)
 {
     memset(&g_well_known, 0, sizeof(g_well_known));
