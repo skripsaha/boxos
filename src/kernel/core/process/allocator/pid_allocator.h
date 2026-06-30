@@ -15,6 +15,7 @@ void pid_allocator_init(void);
 uint32_t pid_alloc(void);
 void pid_free(uint32_t pid);
 bool pid_validate(uint32_t pid);
+uint32_t pid_generation(uint32_t pid);  /* generation[pid-1] under allocator-lock; 0 if invalid */
 uint32_t pid_allocated_count(void);
 
 #endif // PID_ALLOCATOR_H

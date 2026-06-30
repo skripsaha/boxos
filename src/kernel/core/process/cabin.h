@@ -72,6 +72,12 @@ typedef struct cabin_t
     uint64_t buf_heap_next;
 
     uint32_t spawner_pid;
+    /* Generation of spawner_pid captured at spawn time. A bare pid is not a
+     * stable identity — pids recycle — so "own child" authority compares this
+     * snapshot against the spawner's live generation; a later process that
+     * inherits a dead spawner's pid carries a different generation and so
+     * inherits no authority. Zeroed by cabin_create's memset. */
+    uint32_t spawner_gen;
 
     /* Touch subscriber list. */
     void       *subs_head;

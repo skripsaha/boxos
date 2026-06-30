@@ -36,6 +36,7 @@
 #include "vmm.h"
 #include "pmm.h"
 #include "process.h"
+#include "pid_allocator.h"  /* pid_generation — own-child authority defeats pid-reuse */
 #include "tagfs.h"
 #include "use_context.h"
 #include "perf_trace.h"
@@ -247,9 +248,9 @@ static int SysBroadcast(const ManifestOp *op, Crate *crates, uint16_t crate_coun
  *  Process lifecycle
  * ========================================================================= */
 
-/* A spawned child must not gain any auth privilege the spawner itself lacks
- * (child auth-level ⊆ spawner auth-level). god grants anything. stopped is the
- * child's own self-freeze, not an escalation, so it is allowed.
+/* Shared grant gate for spawn-tags and tag.add: the granter must not confer any
+ * auth privilege it does not itself hold (granted auth-level ⊆ granter auth-level).
+ * god grants anything. stopped is a self-freeze, not an escalation, so it passes.
  *
  * This gates only the auth-privilege keys — unlike the PROC_EXEC merge path,
  * which rejects every reserved key. The asymmetry is deliberate: a spawn tag
@@ -260,7 +261,7 @@ static int SysBroadcast(const ManifestOp *op, Crate *crates, uint16_t crate_coun
  * Authority is the FIXED auth_bits (auth_tags.h) on both sides, so the subset
  * check no longer depends on the privilege tags interning below registry id 64.
  * The colon-split key keeps "god:foo" detected as a god request. */
-static error_t proc_spawn_authorize_tags(const char *tags, const process_t *spawner)
+static error_t proc_authorize_tag_grant(const char *tags, const process_t *spawner)
 {
     uint32_t caller = spawner->cabin->auth_bits;
     if (caller & AUTH_TAG_GOD) return OK;       /* god may grant anything */
@@ -291,8 +292,97 @@ static error_t proc_spawn_authorize_tags(const char *tags, const process_t *spaw
     return OK;
 }
 
+/* Authority to MUTATE (kill/tag) a target: self ∨ system-ensign (god|system|
+ * bypass) ∨ the exact child this caller launched. "Own child" is (spawner_pid,
+ * spawner_gen) — a pid alone is not identity (pids recycle), so a later process
+ * inheriting a dead spawner's pid must NOT inherit authority. Parentless procs
+ * (autostart/init, spawner_pid==0) are reachable only via the system ensign. */
+static bool proc_has_authority_over(const process_t *caller, const process_t *target)
+{
+    if (!caller || !target) return false;
+    if (caller->pid == target->pid) return true;
+    uint32_t cb = caller->cabin ? caller->cabin->auth_bits : 0;
+    if (auth_level_permits(cb, OP_AUTH_SYSTEM)) return true;
+    const cabin_t *tc = target->cabin;
+    if (tc && tc->spawner_pid != PROCESS_INVALID_PID &&
+        tc->spawner_pid == caller->pid &&
+        tc->spawner_gen == pid_generation(caller->pid))
+        return true;
+    return false;
+}
+
+/* Boot self-test for proc_has_authority_over. Synthetic process_t/cabin_t on the
+ * stack drive the predicate directly (it is static here). caller.pid is the top
+ * pid index, which boot never allocates — its generation is a stable snapshot for
+ * the run, so the match/stale pair reads one deterministic pid_generation value. */
+error_t ProcAuthSelfTest(void)
+{
+    process_t caller, target;
+    cabin_t   caller_cabin, target_cabin;
+    memset(&caller, 0, sizeof(caller));
+    memset(&target, 0, sizeof(target));
+    memset(&caller_cabin, 0, sizeof(caller_cabin));
+    memset(&target_cabin, 0, sizeof(target_cabin));
+    caller.cabin = &caller_cabin;
+    target.cabin = &target_cabin;
+
+    caller.pid = PID_MAX_COUNT;                       /* index PID_MAX_COUNT-1, unallocated at boot */
+    uint32_t caller_gen = pid_generation(caller.pid);
+
+    /* self: same pid is permitted at any auth level (self-exit needs this). */
+    target.pid = caller.pid;
+    if (!proc_has_authority_over(&caller, &target)) {
+        kprintf("[PROCAUTH] FAIL: self denied\n");
+        return ERR_INTERNAL;
+    }
+
+    target.pid = caller.pid - 1;                      /* a distinct, foreign pid */
+
+    /* foreign: no spawner link, caller holds no authority -> denied. */
+    caller_cabin.auth_bits   = 0;
+    target_cabin.spawner_pid  = PROCESS_INVALID_PID;
+    target_cabin.spawner_gen  = 0;
+    if (proc_has_authority_over(&caller, &target)) {
+        kprintf("[PROCAUTH] FAIL: foreign permitted\n");
+        return ERR_INTERNAL;
+    }
+
+    /* own child: target records (caller.pid, caller's live generation). */
+    target_cabin.spawner_pid = caller.pid;
+    target_cabin.spawner_gen = caller_gen;
+    if (!proc_has_authority_over(&caller, &target)) {
+        kprintf("[PROCAUTH] FAIL: own child denied\n");
+        return ERR_INTERNAL;
+    }
+
+    /* stale child: spawner_pid matches but the generation cannot — proves a
+     * recycled pid does not inherit a dead spawner's authority. */
+    target_cabin.spawner_gen = caller_gen ^ 0xFFFFu;
+    if (proc_has_authority_over(&caller, &target)) {
+        kprintf("[PROCAUTH] FAIL: stale child permitted (pid-reuse hole)\n");
+        return ERR_INTERNAL;
+    }
+
+    /* system ensign: god (and system) reach a foreign target with no link. */
+    target_cabin.spawner_pid = PROCESS_INVALID_PID;
+    target_cabin.spawner_gen = 0;
+    caller_cabin.auth_bits   = AUTH_TAG_GOD;
+    if (!proc_has_authority_over(&caller, &target)) {
+        kprintf("[PROCAUTH] FAIL: god over foreign denied\n");
+        return ERR_INTERNAL;
+    }
+    caller_cabin.auth_bits = AUTH_TAG_SYSTEM;
+    if (!proc_has_authority_over(&caller, &target)) {
+        kprintf("[PROCAUTH] FAIL: system over foreign denied\n");
+        return ERR_INTERNAL;
+    }
+
+    kprintf("[PROCAUTH] PASS\n");
+    return OK;
+}
+
 /* SysProcSpawn loads a process from a caller-supplied physical-address ELF blob
- * with caller-supplied tags. proc_spawn_authorize_tags gates those tags so a
+ * with caller-supplied tags. proc_authorize_tag_grant gates those tags so a
  * spawned child can never gain an auth privilege the spawner itself lacks
  * (child auth-level ⊆ spawner auth-level; god may grant anything). Without this
  * a utility caller could spawn a "god" child (a phys address is obtainable via
@@ -325,12 +415,13 @@ static int SysProcSpawn(const ManifestOp *op, Crate *crates, uint16_t crate_coun
 
     /* Gate the child's tags BEFORE creating it or reading the binary: a denied
      * spawn must create no process and dereference no caller memory. */
-    error_t gate = proc_spawn_authorize_tags(tags, ctx->proc);
+    error_t gate = proc_authorize_tag_grant(tags, ctx->proc);
     if (gate != OK) return gate;
 
     process_t *new_proc = process_create(tags);
     if (!new_proc) return ERR_SPAWN_FAILED;
     new_proc->cabin->spawner_pid = ctx->proc->pid;
+    new_proc->cabin->spawner_gen = pid_generation(ctx->proc->pid);
 
     const uint8_t *elf = (const uint8_t *)vmm_phys_to_virt(binary_phys);
     if (binary_size < 16 || elf[0] != 0x7F || elf[1] != 'E' ||
@@ -399,6 +490,15 @@ static int SysProcKill(const ManifestOp *op, Crate *crates, uint16_t crate_count
      * mid-flight. */
     process_t *target = process_find_ref(target_pid);
     if (!target) return ERR_PROCESS_NOT_FOUND;
+
+    /* Internal gate (the op stays OP_AUTH_NONE so every process can self-exit):
+     * killing ANOTHER process needs authority over it — self-exit always passes
+     * (caller->pid == target->pid), a foreign kill needs god/system or the exact
+     * child this caller spawned. Without it any app could kill any process. */
+    if (!proc_has_authority_over(ctx->proc, target)) {
+        process_ref_dec(target);
+        return ERR_ACCESS_DENIED;
+    }
 
     /* Publish process:died with the CORRECT disposition and claim the cleanup
      * BEFORE process_set_state exposes this proc to the reaper. If we marked it
@@ -708,6 +808,7 @@ static int SysProcExec(const ManifestOp *op, Crate *crates, uint16_t crate_count
         return ERR_SPAWN_FAILED;
     }
     new_proc->cabin->spawner_pid = ctx->proc->pid;
+    new_proc->cabin->spawner_gen = pid_generation(ctx->proc->pid);
 
     int load = process_load_binary(new_proc, virt, (size_t)file_size);
     pmm_free(phys, pages);
@@ -1055,6 +1156,22 @@ static int SysTagAdd(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     error_t rc = sys_tag_target(op, crates, ctx, &target, tag, sizeof(tag));
     if (rc != OK) return rc;
 
+    /* Mutating another process's tags needs authority over it (self / god|system
+     * / own child); without this any app could freeze or de-privilege any
+     * process by pid. */
+    if (!proc_has_authority_over(ctx->proc, target)) {
+        process_ref_dec(target);
+        return ERR_ACCESS_DENIED;
+    }
+    /* And the granted tag must not exceed the CALLER's own authority — reuse the
+     * spawn grant gate so an app cannot self-grant "god"/"system" (escalation).
+     * Non-privilege tags (auth bit 0) and "stopped" pass freely. */
+    error_t grant = proc_authorize_tag_grant(tag, ctx->proc);
+    if (grant != OK) {
+        process_ref_dec(target);
+        return grant;
+    }
+
     int result = OK;
     if (process_has_tag(target, tag)) {
         result = ERR_ALREADY_EXISTS;
@@ -1078,6 +1195,13 @@ static int SysTagRemove(const ManifestOp *op, Crate *crates, uint16_t crate_coun
     char tag[64];
     error_t rc = sys_tag_target(op, crates, ctx, &target, tag, sizeof(tag));
     if (rc != OK) return rc;
+
+    /* Same authority gate as tag.add: only self / god|system / own-child may
+     * strip a target's tags (no grant gate — dropping a tag never escalates). */
+    if (!proc_has_authority_over(ctx->proc, target)) {
+        process_ref_dec(target);
+        return ERR_ACCESS_DENIED;
+    }
 
     int result = OK;
     if (!process_has_tag(target, tag)) {

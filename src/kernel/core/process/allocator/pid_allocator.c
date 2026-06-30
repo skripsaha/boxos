@@ -176,6 +176,32 @@ bool pid_validate(uint32_t pid)
     return allocated;
 }
 
+uint32_t pid_generation(uint32_t pid)
+{
+    if (pid == PID_INVALID)
+    {
+        return 0;
+    }
+
+    uint32_t index = pid - 1;
+
+    if (index >= PID_MAX_COUNT)
+    {
+        return 0;
+    }
+
+    spin_lock(&g_allocator.lock);
+
+    // Generation counter for this slot — bumped on every pid_alloc, never reset
+    // on free, so a recycled pid always reads a different generation than it had
+    // in a previous life. The bitmap (allocated or not) is irrelevant here.
+    uint32_t generation = g_allocator.generation[index];
+
+    spin_unlock(&g_allocator.lock);
+
+    return generation;
+}
+
 uint32_t pid_allocated_count(void)
 {
     spin_lock(&g_allocator.lock);
