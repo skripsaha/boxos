@@ -32,6 +32,10 @@ uint64_t ipc_copy_to_heap(process_t *sender, process_t *target,
 /* Register Manifest-native System Deck ops. Defined in system_ops.c. */
 error_t SystemDeckRegister(void);
 
+/* Boot self-test for the proc-mutation authority predicate (kill/tag gate).
+ * Defined in system_ops.c next to the static proc_has_authority_over it drives. */
+error_t ProcAuthSelfTest(void);
+
 /* Register Touch ops. Defined in touch_ops.c. Called from SystemDeckRegister. */
 error_t TouchOpsRegister(void);
 

@@ -977,6 +977,80 @@ static void test17(void)
     pass(17);
 }
 
+/* ---------- T18: self tag-add cannot self-grant a privilege (no escalation) ---
+ *
+ * tag.add now reuses the spawn grant gate: adding the "god" auth key to our own
+ * process is an escalation app/utility cannot make, so it is denied — AND the
+ * denial leaves no residue (the tag must not be present after). proc_tag_add is
+ * a box_fail-wrapped wrapper, so a kernel error comes back NEGATED. */
+static void test18(void)
+{
+    if (proc_tag_add("god") != -ERR_ACCESS_DENIED) {
+        fail(18, "self-grant 'god' not denied"); return;
+    }
+    bool has = true;
+    if (proc_tag_check("god", &has) != OK) { fail(18, "tag_check failed"); return; }
+    if (has) { fail(18, "'god' leaked onto self despite denial"); return; }
+    pass(18);
+}
+
+/* ---------- T19: non-privileged self tag-add stays free (no over-gate) -------
+ *
+ * The new authority + grant gates must not restrict an ordinary self tag. "test"
+ * is no auth key, so the grant gate's requested-mask is 0 and the add proceeds.
+ * (test8 already adds+removes this key, so it is absent here -> a clean add.) */
+static void test19(void)
+{
+    if (proc_tag_add(TAG_OWNERS) != OK) {
+        fail(19, "non-priv self tag rejected"); return;
+    }
+    proc_tag_remove(TAG_OWNERS);   /* leave the tag set as we found it */
+    pass(19);
+}
+
+/* ---------- T20: PROC_KILL authority gate denies killing a foreign process ----
+ *
+ * We run as app,utility,test (no system/god). Our spawner — the shell, tagged
+ * "system" — is the ideal foreign target: alive and waiting on our exit, never
+ * our child, and over which we hold no authority, so the kill MUST be denied and
+ * the shell MUST survive (a wrong success would take down the whole session).
+ * Raw Manifest wire -> POSITIVE error_t (cf. T13/T17). The spawner_pid==0 guard
+ * keeps a target of 0 (= kernel self-exit form) from ever self-harming. */
+static void test20(void)
+{
+    uint32_t parent = cabin_info()->spawner_pid;
+    if (parent == 0) { fail(20, "no spawner to test authority against"); return; }
+
+    uint32_t target = parent;
+    int kill_rc = MfCall1(DECK_SYSTEM, SYSTEM_OP_PROC_KILL,
+                          &target, (uint16_t)sizeof(target),
+                          NULL, 0, NULL, 0, NULL,
+                          BOX_TIMEOUT_IPC_MS, NULL);
+    if (kill_rc != ERR_ACCESS_DENIED) { fail(20, "kill of foreign parent not denied"); return; }
+    pass(20);
+}
+
+/* ---------- T21: TAG_ADD authority gate denies tagging a foreign process ------
+ *
+ * Adding "stopped" to our (alive) parent would freeze it — a cross-process
+ * mutation we have no authority for, so the kernel denies it before any tag is
+ * applied. params = [u32 target_pid], in_crate = tag string. Raw wire ->
+ * POSITIVE error_t. */
+static void test21(void)
+{
+    uint32_t parent = cabin_info()->spawner_pid;
+    if (parent == 0) { fail(21, "no spawner to test authority against"); return; }
+
+    const char *tag = "stopped";
+    int rc = MfCall1(DECK_SYSTEM, SYSTEM_OP_TAG_ADD,
+                     &parent, (uint16_t)sizeof(parent),
+                     tag, (uint32_t)strlen(tag),
+                     NULL, 0, NULL,
+                     BOX_TIMEOUT_IPC_MS, NULL);
+    if (rc != ERR_ACCESS_DENIED) { fail(21, "tag-add on foreign parent not denied"); return; }
+    pass(21);
+}
+
 /* ---------- main ---------- */
 int main(void)
 {
@@ -1042,6 +1116,10 @@ int main(void)
     test15();
     test16();
     test17();
+    test18();
+    test19();
+    test20();
+    test21();
 
     kdbg_print("[TT SUMMARY] %d/%d passed", g_passed, g_total);
     return 0;

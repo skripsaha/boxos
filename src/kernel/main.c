@@ -591,6 +591,13 @@ void kernel_main(void)
         kprintf("[WARN] auth-decouple self-test failed: %s\n", ErrorString(authdec_err));
     }
 
+    debug_printf("[INIT] proc-authority self-test...\n");
+    error_t procauth_err = ProcAuthSelfTest();
+    if (procauth_err != OK)
+    {
+        kprintf("[WARN] proc-authority self-test failed: %s\n", ErrorString(procauth_err));
+    }
+
     debug_printf("[INIT] Operations Deck register...\n");
     error_t ops_reg_err = OperationsDeckRegister();
     if (ops_reg_err != OK)
