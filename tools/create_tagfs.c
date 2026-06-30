@@ -19,6 +19,8 @@
 #include <string.h>
 #include <time.h>
 
+#include "tagfs_reserved.h"  /* shared reserved-tag vocabulary (-I src/include) */
+
 /* ====================================================================
  * Constants — must match kernel's tagfs.h and boxos_magic.h
  * ==================================================================== */
@@ -182,6 +184,18 @@ static uint16_t intern_tag(const char* key, const char* value) {
     return id;
 }
 
+/* Intern the reserved vocabulary first so it claims tag_ids 0..11 — the same
+ * on-disk ID contract the kernel's format-seed produces. The kernel restores
+ * each tag at its stored id (tag_registry.c intern_with_id_unlocked), so the
+ * auth-privilege keys (god/stopped/bypass/network) land at ids < 64 and their
+ * (1ULL<<id) masks are non-zero. Reserved keys that a file also carries dedup
+ * back onto these low ids; genuinely new file tags start at id 12. */
+static void seed_reserved_tags(void) {
+#define X(k) (void)intern_tag(k, NULL);
+    TAGFS_RESERVED_KEYS(X)
+#undef X
+}
+
 /* Extract filename stem: "kernel.bin" → "kernel", "files.elf" → "files" */
 static void extract_stem(const char* filename, char* stem, size_t stem_size) {
     const char* base = strrchr(filename, '/');
@@ -336,7 +350,9 @@ static int build_registry_block(TagRegistryBlock* blk) {
 
         uint8_t* p = blk->data + offset;
 
-        /* tag_id (uint16_t) — ignored by kernel but write it anyway */
+        /* tag_id (uint16_t) — the kernel RESTORES the tag at this exact id on
+         * load (tag_registry.c intern_with_id_unlocked), so the intern order
+         * above IS the on-disk ID contract, not a throwaway field. */
         memcpy(p, &g_tags[i].tag_id, 2); p += 2;
         /* flags (uint8_t) */
         *p++ = flags;
@@ -520,6 +536,10 @@ int main(int argc, char* argv[]) {
         files = calloc(file_count, sizeof(FileInfo));
         if (!files) { fprintf(stderr, "calloc failed\n"); fclose(disk); return 1; }
     }
+
+    /* Claim ids 0..11 for the reserved vocabulary BEFORE any file tag is
+     * interned, so the kernel's privilege masks are representable on mount. */
+    seed_reserved_tags();
 
     uint32_t next_block = 3;  /* blocks 0,1,2 reserved */
     int kernel_file_index = -1;

@@ -943,14 +943,13 @@ static int proc_spawn_raw(const char *tags)
  * process_create and before the binary is read, so the reject branch is
  * deterministic and dereferences nothing.
  *
- * We assert on "system", not "god": a well-known tag confers its auth bit only
- * when its registry id is < 64, and god/bypass/network are used by no file in
- * the image, so they intern past id 63 and carry a zero auth bit — they are
- * unrepresentable and therefore harmless (a spawned child cannot gain the
- * privilege either, by the same 64-bit mask). "system" is used by system files,
- * so it is representable and is the real, grantable escalation the gate must
- * stop. (The well-known id>=64 zero-bit defect is a pre-existing TagFS bug,
- * tracked as its own fix; once it lands a god assertion can be added here.) */
+ * The rule is child auth-level subset of spawner: a utility caller may grant
+ * what it itself holds (utility) but nothing above it (system) and nothing it
+ * could never legitimately hold (god — only god grants god). We assert both the
+ * "system" and "god" rejects: the reserved-seed fix now seeds the privilege
+ * vocabulary at ids 0..11, so every well-known tag is representable (< 64) and
+ * its auth bit is live — "god" is no longer a silently-zero mask, so the gate
+ * really evaluates it and the escalation it must stop is the real one. */
 static void test17(void)
 {
     drain_state();
@@ -960,6 +959,12 @@ static void test17(void)
      * level the caller cannot reach. */
     if (proc_spawn_raw("system") != ERR_ACCESS_DENIED) {
         fail(17, "proc.spawn system not denied"); return;
+    }
+
+    /* god is representable post reserved-seed fix, so "only god grants god"
+     * (system_ops.c) is live: a utility spawner is denied. */
+    if (proc_spawn_raw("god") != ERR_ACCESS_DENIED) {
+        fail(17, "proc.spawn god not denied"); return;
     }
 
     /* ALLOW (not over-rejected): utility is within the spawner's own reach, so

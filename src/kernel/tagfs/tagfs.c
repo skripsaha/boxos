@@ -1,4 +1,5 @@
 #include "tagfs.h"
+#include "tagfs_reserved.h"
 #include "tag_registry/tag_registry.h"
 #include "tag_bitmap/tag_bitmap.h"
 #include "file_table/file_table.h"
@@ -813,19 +814,12 @@ error_t tagfs_format(uint32_t total_blocks) {
         return ERR_TAGFS_METADATA_ERROR;
     }
 
-    // Intern in fixed order so IDs are deterministic (0-based sequential)
-    tag_registry_intern(tmp_reg, "system",    NULL);
-    tag_registry_intern(tmp_reg, "utility",   NULL);
-    tag_registry_intern(tmp_reg, "app",       NULL);
-    tag_registry_intern(tmp_reg, "god",       NULL);
-    tag_registry_intern(tmp_reg, "stopped",   NULL);
-    tag_registry_intern(tmp_reg, "bypass",    NULL);
-    tag_registry_intern(tmp_reg, "network",   NULL);
-    tag_registry_intern(tmp_reg, "trashed",   NULL);
-    tag_registry_intern(tmp_reg, "hidden",    NULL);
-    tag_registry_intern(tmp_reg, "autostart", NULL);
-    tag_registry_intern(tmp_reg, "snapshot",  NULL);
-    tag_registry_intern(tmp_reg, "name",      NULL);
+    // Intern in fixed order so IDs are deterministic (0-based sequential).
+    // Same vocabulary + order as the host mkfs tool — tagfs_reserved.h is the
+    // single source, so the on-disk ID contract cannot drift between them.
+#define X(k) tag_registry_intern(tmp_reg, k, NULL);
+    TAGFS_RESERVED_KEYS(X)
+#undef X
 
     // Use the tmp registry as g_state.registry so flush writes to block 0
     g_state.registry = tmp_reg;
@@ -923,11 +917,15 @@ static void register_well_known(uint64_t *field, TagRegistry *reg, const char *k
 // The reserved-key vocabulary. A tag is "system" iff it is the bare (value=NULL)
 // registry entry for one of these keys; a value-bearing tag like "system:foo" is
 // a distinct entry and stays a user tag. Mirrors the format-time intern order
-// (deterministic ids 0-11) and is re-stamped at every mount below.
+// (deterministic ids 0-11) and is re-stamped at every mount below. Built from
+// the same tagfs_reserved.h source as the format-seed, so the list cannot drift.
 static const char *const TagFsReservedKeys[] = {
-    "system", "utility", "app",     "god",      "stopped",  "bypass",
-    "network", "trashed", "hidden", "autostart", "snapshot", "name",
+#define X(k) k,
+    TAGFS_RESERVED_KEYS(X)
+#undef X
 };
+_Static_assert(sizeof(TagFsReservedKeys) / sizeof(TagFsReservedKeys[0]) == TAGFS_RESERVED_COUNT,
+               "reserved-key drift");
 
 /* True iff `key` is one of the reserved kernel-owned tag keys (TagFsReservedKeys[]).
  * String compare on the bare key, so it catches both "system" and "system:foo"
@@ -967,6 +965,23 @@ void tagfs_init_well_known_tags(void)
         if (tid != TAGFS_INVALID_TAG_ID)
             tag_registry_mark_system(reg, tid);
     }
+
+    // Fail-closed defense: every auth-privilege tag must intern below id 64, or
+    // its (1ULL<<id) mask is 0 and the privilege silently dies — god-override
+    // (manifest_auth.c) goes dead and the stopped-deny check fails OPEN. A zero
+    // here means the on-disk reserved vocabulary was not seeded at ids 0..11
+    // (e.g. an image built by a mkfs that skipped the seed). panic() prints via
+    // kprintf, so the cause reaches COM1 / serial.log and real hardware.
+    if (!g_wk.system || !g_wk.utility || !g_wk.app || !g_wk.god ||
+        !g_wk.stopped || !g_wk.bypass || !g_wk.network) {
+        panic("[TagFS] privilege tags unrepresentable (id>=64): "
+              "sys=%d util=%d app=%d god=%d stop=%d byp=%d net=%d — reserved vocab not seeded 0..11",
+              g_wk.system != 0, g_wk.utility != 0, g_wk.app != 0, g_wk.god != 0,
+              g_wk.stopped != 0, g_wk.bypass != 0, g_wk.network != 0);
+    }
+    kprintf("[TagFS] privilege tags ok: god=id%u stopped=id%u bypass=id%u network=id%u\n",
+            (unsigned)__builtin_ctzll(g_wk.god),    (unsigned)__builtin_ctzll(g_wk.stopped),
+            (unsigned)__builtin_ctzll(g_wk.bypass), (unsigned)__builtin_ctzll(g_wk.network));
 }
 
 // ----------------------------------------------------------------------------
