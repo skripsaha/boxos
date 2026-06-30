@@ -22,6 +22,7 @@
 #include "cabin_info.h"
 #include "notify.h"
 #include "touch.h"
+#include "proc_exit.h"
 #include "bay.h"
 #include "brook.h"
 #include "tagfs.h"
@@ -695,7 +696,11 @@ void process_destroy(process_t *proc)
      * strand), not here: a non-last strand's exit must not strip tags
      * from rings its siblings still use. */
 
-    TouchCleanupProcess(proc);
+    /* Genuine-fault / kernel-forced teardown. When this is the FIRST cleanup
+     * (a real crash) it publishes process:died with PROC_EXIT_CRASHED; when a
+     * SysProcKill already cleaned this strand (kill or self-exit), the call
+     * no-ops on touch_cleaned and that earlier disposition stands. */
+    TouchCleanupProcess(proc, PROC_EXIT_CRASHED);
 
     /* strand:exited — pairs with strand:spawned.  Fires on every strand
      * exit (main or spawned).  Cabin teardown itself happens later, when

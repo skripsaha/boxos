@@ -31,6 +31,7 @@
 #include "result_ring.h"
 #include "kring.h"
 #include "kresult.h"
+#include "proc_exit.h"
 #include "vmm.h"
 #include "pmm.h"
 #include "process.h"
@@ -308,8 +309,14 @@ static int SysProcSpawn(const ManifestOp *op, Crate *crates, uint16_t crate_coun
 }
 
 /* SYSTEM_OP_PROC_KILL
- *   params:  [u32 target_pid]   (0 == self exit)
- *   out_crate (optional): u32 killed_pid */
+ *   params:  [u32 target_pid]            (0 == self exit; 4-byte form, code 0)
+ *            [u32 target_pid][i32 code]  (optional 8-byte form; `code` is the
+ *                                         self-exit disposition, ignored when
+ *                                         killing another process)
+ *   out_crate (optional): u32 killed_pid
+ *
+ * exit_code semantics (proc_exit.h): a self-exit publishes `code` masked to
+ * [0, INT32_MAX]; killing another process forces PROC_EXIT_KILLED (-1). */
 static int SysProcKill(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                        const OpContext *ctx)
 {
@@ -319,6 +326,13 @@ static int SysProcKill(const ManifestOp *op, Crate *crates, uint16_t crate_count
 
     uint32_t target_pid;
     memcpy(&target_pid, op->params, sizeof(uint32_t));
+
+    /* Optional 8-byte form carries the self-exit code after the pid; the
+     * 4-byte form (and any kill-other) defaults it to a clean 0. */
+    int32_t exit_code = 0;
+    if (op->param_size >= sizeof(uint32_t) + sizeof(int32_t))
+        memcpy(&exit_code, (const uint8_t *)op->params + sizeof(uint32_t),
+               sizeof(int32_t));
 
     bool self_exit = (target_pid == 0);
     if (self_exit) target_pid = ctx->proc->pid;
@@ -330,13 +344,27 @@ static int SysProcKill(const ManifestOp *op, Crate *crates, uint16_t crate_count
     process_t *target = process_find_ref(target_pid);
     if (!target) return ERR_PROCESS_NOT_FOUND;
 
+    /* Publish process:died with the CORRECT disposition and claim the cleanup
+     * BEFORE process_set_state exposes this proc to the reaper. If we marked it
+     * PROC_DONE/CRASHED first, the reaper's process_destroy (another K-Core)
+     * could win the touch_cleaned claim in that window and publish
+     * PROC_EXIT_CRASHED for an intentional exit/kill. TouchCleanupProcess reads
+     * no proc state and `target` is pinned (process_find_ref above), so claiming
+     * first is safe; the claim-guard in TouchClaimSet (touch_cleaned check under
+     * subs_lock) already blocks any sub the still-running target might race in.
+     * TouchCleanupProcess is idempotent on touch_cleaned, so the later
+     * process_destroy call no-ops and this disposition stands.
+     *
+     * Disposition (proc_exit.h): a self-exit publishes the caller's code with
+     * the sign bit cleared so it can never look like a negative sentinel; a
+     * kill-other forces PROC_EXIT_KILLED — the victim never chose a code, so
+     * any param code is ignored. */
+    TouchCleanupProcess(target,
+                        self_exit ? (int32_t)(exit_code & 0x7FFFFFFF)
+                                  : PROC_EXIT_KILLED);
+
     process_set_state(target, self_exit ? PROC_DONE : PROC_CRASHED);
     __sync_synchronize();
-
-    /* Publish process.died and release touch claims before the process
-     * disappears.  TouchCleanupProcess is idempotent (sets claim_table=NULL
-     * after the first call) so the later process_destroy call is safe. */
-    TouchCleanupProcess(target);
 
     BufferRegistryCleanupProcess(target_pid);
 

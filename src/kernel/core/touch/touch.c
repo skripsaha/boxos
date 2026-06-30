@@ -881,7 +881,8 @@ error_t TouchClaimSet(process_t *proc, TouchTag tag_id, TouchMode mode,
      *      cleanup's splice: if the walk could miss us, its touch_cleaned store
      *      (before its subs_lock) is visible here (after ours).
      * Either case: undo our bucket link and drop the base ref. */
-    if (proc->touch_cleaned || find_proc_sub(proc, tag_id)) {
+    if (__atomic_load_n(&proc->touch_cleaned, __ATOMIC_ACQUIRE) ||
+        find_proc_sub(proc, tag_id)) {
         spin_unlock(&proc->cabin->subs_lock);
 
         spin_lock(&b->lock);
@@ -989,11 +990,17 @@ error_t TouchClaimAck(process_t *proc, TouchTag tag_id)
     return OK;
 }
 
-void TouchCleanupProcess(process_t *proc)
+void TouchCleanupProcess(process_t *proc, int32_t exit_code)
 {
     if (!proc) return;
-    if (proc->touch_cleaned) return;
-    proc->touch_cleaned = 1;
+    /* Exactly-once claim. The two death-sites can reach here on different
+     * K-Cores at once (SysProcKill on one, the reaper's process_destroy on
+     * another); a plain check-then-store let both pass and double-publish
+     * process:died with conflicting exit codes (and a data race on the byte).
+     * The atomic exchange makes exactly one caller the winner. ACQ_REL is
+     * strictly stronger than the prior plain store, so the touch_cleaned read
+     * in TouchClaimSet (serialised by subs_lock) keeps its happens-before. */
+    if (__atomic_exchange_n(&proc->touch_cleaned, 1, __ATOMIC_ACQ_REL)) return;
 
     /* Subscriptions are keyed by sub->proc.  With multi-strand cabins the
      * proc-list (cabin->subs_head) is shared by every strand, so we must
@@ -1054,8 +1061,14 @@ void TouchCleanupProcess(process_t *proc)
         p = next;
     }
 
-    /* Notify subscribers — runs the new O(N_subs_for_process_died) path. */
-    struct { uint32_t pid; int32_t exit; } died = { proc->pid, 0 };
+    /* Notify subscribers — runs the new O(N_subs_for_process_died) path.
+     * exit_code carries the disposition (proc_exit.h); it is snapshotted into
+     * the immutable Touch payload by TouchPublish on this same core, so
+     * cross-core subscribers read the ring copy, never a live field. */
+    struct { uint32_t pid; int32_t exit; } died = { proc->pid, exit_code };
+    _Static_assert(sizeof(died) == 8,
+                   "process:died wire payload must stay 8 bytes "
+                   "(matches box/touch.h TouchProcessDied)");
     TouchPublish("process:died", &died, sizeof(died));
 }
 
