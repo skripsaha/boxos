@@ -65,13 +65,14 @@ typedef int (*OpHandler)(const ManifestOp *op,
                          const OpContext  *ctx);
 
 /*
- * security_mask is a bitfield of process-tag requirements.
- * The Manifest compiler ANDs it against process->tag_bits during compile;
- * any bit set in security_mask must also be set in tag_bits. 0 means "any".
+ * security_mask is an OP_AUTH_* authorization LEVEL (0..4, see manifest_auth.h),
+ * NOT a tag bitfield. At dispatch time ManifestOpAuthorize maps the level to the
+ * fixed auth bits (auth_tags.h) it requires and checks them against the
+ * initiator cabin's auth_bits. OP_AUTH_NONE (0) means "any".
  */
 typedef struct OpRegistration {
     uint32_t       op_kind;       /* OP_KIND(deck, opcode) — primary key */
-    uint32_t       security_mask; /* required tag bits, 0 = no restriction */
+    uint32_t       security_mask; /* OP_AUTH_* level (0..4), 0 = no restriction */
     OpHandler      handler;       /* dispatch target */
     const char    *name;          /* "storage.read" for tracing/debug */
 } OpRegistration;

@@ -333,17 +333,12 @@ typedef struct {
     spinlock_t       lock;
 } TagFSState;
 
-// Well-known system tag bitmasks (populated by tagfs_init_well_known_tags).
-// Each field stores (1ULL << tag_id) for O(1) process tag_bits checks.
-// Zero means the tag was not found in registry.
+// trashed/hidden membership masks (populated by tagfs_init_well_known_tags).
+// Each field stores (1ULL << tag_id) for the file-listing post-filter; zero
+// means the tag was not found in the registry. These are membership filters,
+// NOT security. The 7 auth-privilege tags moved to cabin_t.auth_bits (fixed
+// bits, auth_tags.h) and no longer depend on the registry id.
 typedef struct {
-    uint64_t system;
-    uint64_t utility;
-    uint64_t app;
-    uint64_t god;
-    uint64_t stopped;
-    uint64_t bypass;
-    uint64_t network;
     uint64_t trashed;
     uint64_t hidden;
 } WellKnownTags;

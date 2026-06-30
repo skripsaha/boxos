@@ -47,6 +47,13 @@ typedef struct cabin_t
     uint64_t touch_ring_phys;
 
     uint64_t tag_bits;
+
+    /* Fixed op-authority bitmask (auth_tags.h, NOT keyed by registry id).
+     * Holds AUTH_TAG_X iff this cabin carries the bare auth key X. Kept in sync
+     * with tag_bits at the three mutation points via auth_bit_for_key; read by
+     * the manifest gate and the spawn gate. */
+    uint32_t auth_bits;
+
     uint16_t *tag_overflow_ids;
     uint16_t  tag_overflow_count;
     uint16_t  tag_overflow_capacity;

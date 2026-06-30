@@ -796,8 +796,10 @@ error_t tagfs_format(uint32_t total_blocks) {
         return ERR_TAGFS_METADATA_ERROR;
     }
 
-    // Pre-intern well-known tags so they get low IDs (< 64) and
-    // register_well_known() can build correct (1ULL << tag_id) bitmasks.
+    // Pre-intern the reserved vocabulary so it gets deterministic low IDs: the
+    // on-disk id contract (tagfs_reserved.h) and the trashed/hidden membership
+    // masks (register_well_known, 1ULL<<tag_id) both rely on it. The auth tags
+    // no longer need a low id — their authority is the fixed cabin auth_bits.
     // g_state.superblock must have block_bitmap_sector and tag_registry_block
     // set before tag_registry_flush (it uses tagfs_get_state() internally).
     memcpy(&g_state.superblock, &sb, sizeof(TagFSSuperblock));
@@ -927,6 +929,18 @@ static const char *const TagFsReservedKeys[] = {
 _Static_assert(sizeof(TagFsReservedKeys) / sizeof(TagFsReservedKeys[0]) == TAGFS_RESERVED_COUNT,
                "reserved-key drift");
 
+/* The auth-privilege keys in TAGFS_AUTH_KEYS order. The fixed auth bit
+ * AUTH_TAG_X (auth_tags.h) is 1u<<position here; cabin sync resolves it from the
+ * key string. tagfs_init_well_known_tags asserts these are the exact prefix of
+ * TagFsReservedKeys[] so the two vocabularies cannot silently diverge. */
+static const char *const AuthReservedKeys[] = {
+#define X(id, key) key,
+    TAGFS_AUTH_KEYS(X)
+#undef X
+};
+_Static_assert(sizeof(AuthReservedKeys) / sizeof(AuthReservedKeys[0]) == TAGFS_AUTH_COUNT,
+               "auth-key drift");
+
 /* True iff `key` is one of the reserved kernel-owned tag keys (TagFsReservedKeys[]).
  * String compare on the bare key, so it catches both "system" and "system:foo"
  * (callers split key at ':' before calling). Works regardless of registry/mount
@@ -947,13 +961,10 @@ void tagfs_init_well_known_tags(void)
         return;
     TagRegistry *reg = fs->registry;
 
-    register_well_known(&g_wk.system, reg, "system");
-    register_well_known(&g_wk.utility, reg, "utility");
-    register_well_known(&g_wk.app, reg, "app");
-    register_well_known(&g_wk.god, reg, "god");
-    register_well_known(&g_wk.stopped, reg, "stopped");
-    register_well_known(&g_wk.bypass, reg, "bypass");
-    register_well_known(&g_wk.network, reg, "network");
+    /* trashed/hidden are membership filters for file listing (not security), so
+     * they stay keyed by the registry id (1ULL<<tag_id). The 7 auth-privilege
+     * tags are no longer registered here — their op-authority is the FIXED
+     * cabin_t.auth_bits (auth_tags.h), independent of the registry id. */
     register_well_known(&g_wk.trashed, reg, "trashed");
     register_well_known(&g_wk.hidden, reg, "hidden");
 
@@ -966,22 +977,16 @@ void tagfs_init_well_known_tags(void)
             tag_registry_mark_system(reg, tid);
     }
 
-    // Fail-closed defense: every auth-privilege tag must intern below id 64, or
-    // its (1ULL<<id) mask is 0 and the privilege silently dies — god-override
-    // (manifest_auth.c) goes dead and the stopped-deny check fails OPEN. A zero
-    // here means the on-disk reserved vocabulary was not seeded at ids 0..11
-    // (e.g. an image built by a mkfs that skipped the seed). panic() prints via
-    // kprintf, so the cause reaches COM1 / serial.log and real hardware.
-    if (!g_wk.system || !g_wk.utility || !g_wk.app || !g_wk.god ||
-        !g_wk.stopped || !g_wk.bypass || !g_wk.network) {
-        panic("[TagFS] privilege tags unrepresentable (id>=64): "
-              "sys=%d util=%d app=%d god=%d stop=%d byp=%d net=%d — reserved vocab not seeded 0..11",
-              g_wk.system != 0, g_wk.utility != 0, g_wk.app != 0, g_wk.god != 0,
-              g_wk.stopped != 0, g_wk.bypass != 0, g_wk.network != 0);
+    /* Vocabulary-drift guard: the fixed auth bit AUTH_TAG_X (auth_tags.h) is
+     * 1u<<position in TAGFS_AUTH_KEYS, while cabin sync resolves that bit from
+     * the key string. This is only coherent if the auth keys are exactly the
+     * prefix of the reserved vocabulary. A mismatch means one list was
+     * reordered without the other — fail closed rather than mis-grant. */
+    for (size_t i = 0; i < TAGFS_AUTH_COUNT; i++) {
+        if (strcmp(AuthReservedKeys[i], TagFsReservedKeys[i]) != 0)
+            panic("auth/reserved vocab drift at index %u: auth='%s' reserved='%s'",
+                  (unsigned)i, AuthReservedKeys[i], TagFsReservedKeys[i]);
     }
-    kprintf("[TagFS] privilege tags ok: god=id%u stopped=id%u bypass=id%u network=id%u\n",
-            (unsigned)__builtin_ctzll(g_wk.god),    (unsigned)__builtin_ctzll(g_wk.stopped),
-            (unsigned)__builtin_ctzll(g_wk.bypass), (unsigned)__builtin_ctzll(g_wk.network));
 }
 
 // ----------------------------------------------------------------------------
