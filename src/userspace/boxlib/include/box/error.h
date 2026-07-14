@@ -122,6 +122,8 @@ typedef uint32_t error_t;
     X(TAG_OVERFLOW_FAILED,           tag_overflow_failed,           412,  "tag overflow allocation failed","process") \
     X(FPU_INIT_FAILED,               fpu_init_failed,               413,  "fpu initialization failed",     "process") \
     X(STACK_ALLOC_FAILED,            stack_alloc_failed,            414,  "stack allocation failed",       "process") \
+    X(PROCESS_KILLED,                process_killed,                415,  "process killed",                "process") \
+    X(PROCESS_CRASHED,               process_crashed,               416,  "process crashed",               "process") \
     /* Security (500-506) */ \
     X(ACCESS_DENIED,                 access_denied,                 500,  "access denied",                 "security") \
     X(PERMISSION_DENIED,             permission_denied,             501,  "permission denied",             "security") \

@@ -112,6 +112,14 @@ typedef struct process_t
     uint32_t magic;
     uint32_t pid;
 
+    /* PID-allocator generation for this pid slot, snapshotted at creation
+     * (pid_generation(pid)). The (pid, generation) pair is the canonical
+     * process identity: a recycled pid always carries a different generation
+     * than it did in a previous life, so a supervisor that matches a death by
+     * (pid, generation) never mistakes a recycled pid for the dead one. Rides
+     * in process:died (TouchProcessDied.generation). Set once, never changes. */
+    uint32_t generation;
+
     /* Pointer to the shared cabin (address space + IPC rings + Bay/Brook/Touch).
      * NULL for the idle process.  All cabin-shared state lives in cabin_t. */
     cabin_t *cabin;

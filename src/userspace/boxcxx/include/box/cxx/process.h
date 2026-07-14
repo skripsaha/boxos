@@ -83,11 +83,22 @@ public:
     // pid; the error arm carries the real cause — the recovered kernel error_t
     // (e.g. file_not_found for an unknown binary, process_limit_exceeded), or
     // spawn_failed when the kernel returned no pid without naming a cause.
-    static result<process> spawn(const char *name) noexcept
+    //
+    // out_gen (optional) receives the child's pid-allocator generation — the
+    // second half of its canonical (pid, generation) identity, used by
+    // box::child to match a death to the exact incarnation. 0 on failure or if
+    // the kernel reported no generation; existing spawn(name) callers ignore it.
+    static result<process> spawn(const char *name,
+                                 std::uint32_t *out_gen = nullptr) noexcept
     {
+        if (out_gen) *out_gen = 0;
         if (!name) return std::unexpected(error{errc::invalid_argument});
-        int p = ::proc_exec(name);
-        if (p > 0) return process(static_cast<std::uint32_t>(p));
+        std::uint32_t gen = 0;
+        int p = ::proc_exec_gen(name, nullptr, &gen);
+        if (p > 0) {
+            if (out_gen) *out_gen = gen;
+            return process(static_cast<std::uint32_t>(p));
+        }
         return std::unexpected(error{p < 0 ? box_errno_of(p)
                                            : static_cast<::error_t>(ERR_SPAWN_FAILED)});
     }

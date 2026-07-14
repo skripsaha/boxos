@@ -8,7 +8,8 @@
 //
 //   box::process_died / process_spawned / system_halt / usb_device
 //                       — the four kernel payload shapes (aliases of the C
-//                         structs in box/touch.h; sized to the 8-byte emit).
+//                         structs in box/touch.h; process_died is 12 bytes
+//                         (pid, exit_code, generation), the other three 8).
 //   box::system_touch   — one decoded event: a kind, the publisher pid, and the
 //                         matching payload in the union; pid() is the subject.
 //   box::system_watch   — a RAII multiplexer holding one box::subscription per
@@ -47,13 +48,16 @@ namespace box {
 // Aliases, not redefinitions: the packed structs already live in box/touch.h
 // (single source of truth, kept in lock-step with the kernel's TouchPublish
 // call sites). usb_device serves BOTH connect and disconnect (one C struct).
-using process_died    = ::TouchProcessDied;     // { uint32_t pid;   int32_t  exit_code }
+using process_died    = ::TouchProcessDied;     // { u32 pid; i32 exit_code; u32 generation }
 using process_spawned = ::TouchProcessSpawned;  // { uint32_t pid;   uint32_t parent_pid }
 using system_halt     = ::TouchSystemHalt;      // { uint32_t reason; uint32_t grace_ms }
 using usb_device      = ::TouchUsbConnect;      // { u8 port, speed; u16 vendor_id, product_id }
 
-static_assert(sizeof(process_died) == 8 && sizeof(process_spawned) == 8 &&
-                  sizeof(system_halt) == 8 && sizeof(usb_device) == 8,
+static_assert(sizeof(process_died) == 12,
+              "box::process_died must match the kernel's 12-byte process:died emit "
+              "(pid@0, exit_code@4, generation@8)");
+static_assert(sizeof(process_spawned) == 8 && sizeof(system_halt) == 8 &&
+                  sizeof(usb_device) == 8,
               "box system payloads must match the kernel's 8-byte Touch emit");
 
 // ── box::system_touch — one decoded system lifecycle event ──────────────────

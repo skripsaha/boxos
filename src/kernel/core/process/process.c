@@ -395,6 +395,7 @@ process_t *process_create(const char *tags)
         kfree(proc);
         return NULL;
     }
+    proc->generation = pid_generation(proc->pid);
 
     cabin_t *cabin = cabin_create(proc->pid, tags);
     if (!cabin)
@@ -967,6 +968,7 @@ process_t *strand_spawn(cabin_t *cabin, uintptr_t entry_va, uint64_t arg, bool j
         kfree(proc);
         return NULL;
     }
+    proc->generation = pid_generation(proc->pid);
 
     /* Share the existing cabin — strand_count++ keeps it alive until this
      * strand (and every sibling) exits.  From here on, every failure path

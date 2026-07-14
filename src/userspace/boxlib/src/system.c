@@ -143,8 +143,9 @@ void exit(uint32_t exit_code)
     }
 }
 
-int proc_exec_tagged(const char *filename, const char *tags)
+int proc_exec_gen(const char *filename, const char *tags, uint32_t *out_gen)
 {
+    if (out_gen) *out_gen = 0;
     if (!filename || filename[0] == '\0') return -ERR_INVALID_ARGUMENT;
     size_t name_len = strlen(filename);
     if (name_len >= 64) return -ERR_INVALID_ARGUMENT;
@@ -155,14 +156,26 @@ int proc_exec_tagged(const char *filename, const char *tags)
         if (tlen >= PROC_EXEC_TAGS_MAX) return -ERR_INVALID_ARGUMENT;
         pbuf = tags; psize = (uint16_t)tlen;   /* strlen, no NUL — kernel bounds + NUL-terminates */
     }
-    uint32_t new_pid = 0;
+    /* 8-byte out: the kernel writes {pid, generation} when the crate fits both.
+     * out_actual tells us whether the generation half actually arrived. */
+    uint32_t out_blob[2] = { 0, 0 };
+    uint32_t out_actual = 0;
     int rc = MfCall1(DECK_SYSTEM, SYS_PROC_EXEC,
                      pbuf, psize,                  /* params = caller-tag augment */
                      filename, (uint32_t)name_len, /* in_crate = filename (unchanged) */
-                     &new_pid, sizeof(new_pid), NULL,
+                     out_blob, sizeof(out_blob), &out_actual,
                      SYS_TIMEOUT_MS, NULL);
     if (rc != 0) return box_fail(rc);
-    return (int)new_pid;
+    if (out_gen) *out_gen = (out_actual >= 8) ? out_blob[1] : 0;
+    return (int)out_blob[0];
+}
+
+/* proc_exec_tagged / proc_exec are the generation-agnostic spellings: the wire
+ * is identical (the kernel still pid-gates the 8-byte out), they just discard
+ * the generation. Existing callers keep their int-pid return unchanged. */
+int proc_exec_tagged(const char *filename, const char *tags)
+{
+    return proc_exec_gen(filename, tags, NULL);
 }
 
 int proc_exec(const char *filename) { return proc_exec_tagged(filename, NULL); }
