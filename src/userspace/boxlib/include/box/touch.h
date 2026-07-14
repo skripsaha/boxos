@@ -107,9 +107,18 @@ typedef struct __attribute__((packed)) {
 STATIC_ASSERT(sizeof(Touch) == 120, "Touch must be 120 bytes (24 hdr + 96 payload)");
 
 typedef struct __attribute__((packed)) {
-    uint32_t pid;
-    int32_t  exit_code;
+    uint32_t pid;          /* @0 — the dead process's pid                       */
+    int32_t  exit_code;    /* @4 — disposition (proc_exit.h): >=0 / -1 / -2     */
+    uint32_t generation;   /* @8 — pid-allocator generation of THIS incarnation.
+                            *      A recycled pid reads a different generation,
+                            *      so (pid, generation) names the exact death.
+                            *      16-bit value widened to u32 (future-proof;
+                            *      generation wrap at 2^16 reuses = accepted LOW). */
 } TouchProcessDied;
+
+STATIC_ASSERT(sizeof(TouchProcessDied) == 12,
+              "TouchProcessDied must be 12 bytes (pid@0, exit_code@4, generation@8) "
+              "— pid/exit_code offsets are frozen for all existing readers");
 
 typedef struct __attribute__((packed)) {
     uint32_t pid;

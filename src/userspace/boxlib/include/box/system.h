@@ -43,8 +43,14 @@ typedef struct {
 int proc_info(uint16_t pid, proc_info_t* info);
 void exit(uint32_t exit_code);
 int proc_exec(const char* filename);                          /* unchanged ABI */
-int proc_exec_tagged(const char* filename, const char* tags); /* NEW: child = file-tags ∪ caller-tags */
-int proc_kill(uint32_t pid);                                  /* NEW: kill another process by pid */
+int proc_exec_tagged(const char* filename, const char* tags); /* child = file-tags ∪ caller-tags */
+/* Like proc_exec_tagged, but also reports the child's pid-allocator generation
+ * (the second half of its canonical (pid, generation) identity) via *out_gen,
+ * so a supervisor can later match the child's process:died to the exact
+ * incarnation. Returns the pid (>0) or -err; *out_gen is 0 on any failure or if
+ * the kernel did not report a generation. */
+int proc_exec_gen(const char* filename, const char* tags, uint32_t* out_gen);
+int proc_kill(uint32_t pid);                                  /* kill another process by pid */
 
 int proc_tag_add(const char* tag);
 int proc_tag_remove(const char* tag);

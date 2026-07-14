@@ -817,6 +817,13 @@ static int SysProcExec(const ManifestOp *op, Crate *crates, uint16_t crate_count
         return ERR_SPAWN_FAILED;
     }
 
+    /* Snapshot the child's identity BEFORE process_set_state exposes it to the
+     * scheduler/reaper: once PROC_WORKING the child may exit and be reaped on
+     * another core, turning new_proc into a dangling read. The spawned event and
+     * the out-crate below both use these locals, never new_proc, post-WORKING. */
+    uint32_t child_pid = new_proc->pid;
+    uint32_t child_gen = new_proc->generation;
+
     __sync_synchronize();
     process_set_state(new_proc, PROC_WORKING);
 
@@ -827,15 +834,20 @@ static int SysProcExec(const ManifestOp *op, Crate *crates, uint16_t crate_count
         struct __attribute__((packed)) {
             uint32_t pid;
             uint32_t parent_pid;
-        } ev = { new_proc->pid, ctx->proc->pid };
+        } ev = { child_pid, ctx->proc->pid };
         TouchPublish("process:spawned", &ev, sizeof(ev));
     }
 
+    /* Out crate is capacity-gated: an 8-byte reader (proc_exec_gen) receives
+     * {pid, generation}; a legacy 4-byte reader (proc_exec / proc_exec_tagged)
+     * receives just the pid. Both stay correct. */
     if (op->out_crate != CRATE_INDEX_NONE) {
         Crate *out = &crates[op->out_crate];
-        if (out->capacity >= sizeof(uint32_t)) {
-            uint32_t new_pid = new_proc->pid;
-            (void)crate_write(out, ctx, &new_pid, sizeof(new_pid));
+        if (out->capacity >= 8) {
+            uint32_t blob[2] = { child_pid, child_gen };
+            (void)crate_write(out, ctx, blob, 8);
+        } else if (out->capacity >= 4) {
+            (void)crate_write(out, ctx, &child_pid, 4);
         }
     }
     return OK;

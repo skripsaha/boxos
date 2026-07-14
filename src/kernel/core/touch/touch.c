@@ -1065,10 +1065,19 @@ void TouchCleanupProcess(process_t *proc, int32_t exit_code)
      * exit_code carries the disposition (proc_exit.h); it is snapshotted into
      * the immutable Touch payload by TouchPublish on this same core, so
      * cross-core subscribers read the ring copy, never a live field. */
-    struct { uint32_t pid; int32_t exit; } died = { proc->pid, exit_code };
-    _Static_assert(sizeof(died) == 8,
-                   "process:died wire payload must stay 8 bytes "
-                   "(matches box/touch.h TouchProcessDied)");
+    /* generation rides alongside pid+exit so a supervisor can match a death to
+     * the exact incarnation (pid, generation) and drop the stale death of a
+     * recycled pid. Read AFTER the touch_cleaned claim above — generation is
+     * set once at creation and never changes, so this neither races nor weakens
+     * the exactly-once death-publish. */
+    struct __attribute__((packed)) {
+        uint32_t pid;
+        int32_t  exit;
+        uint32_t gen;
+    } died = { proc->pid, exit_code, proc->generation };
+    _Static_assert(sizeof(died) == 12,
+                   "process:died wire payload must stay 12 bytes "
+                   "(box/touch.h TouchProcessDied: pid@0, exit_code@4, generation@8)");
     TouchPublish("process:died", &died, sizeof(died));
 }
 

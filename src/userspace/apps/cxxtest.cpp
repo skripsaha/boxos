@@ -71,6 +71,7 @@
 #include "box/cxx/bay.h"
 #include "box/cxx/bay_memory_resource.h"
 #include "box/cxx/brook.h"
+#include "box/cxx/child.h"
 #include "box/cxx/console.h"
 #include "box/cxx/cpu.h"
 #include "box/cxx/current.h"
@@ -10201,6 +10202,206 @@ void Phase57()
            "(in-kernel reaction + bounded self-cycle + concurrent claim/release vs publish)\n");
 }
 
+// ── Phase58 (Ф26d-3) — box::child: RAII child-process supervisor ──────────────
+// Proves box::child over the strand-local death station: clean exit, co_await
+// exited(), disposition caching, detach-without-kill, kill->KILLED, bounded
+// wait-timeout, and the variant-B clincher — two children's deaths demultiplexed
+// to the right pid from ONE process:died claim. Every assert is non-vacuous on a
+// config where spawn works (and FAILS if box::child is broken); where proc_exec
+// is unavailable the whole phase is a documented skip.
+
+// scenario 2: await a child's exit on a box::executor (the FOREVER awaiter).
+static box::task<box::result<int>> p58_await_exit(box::child *c)
+{
+    co_return co_await c->exited();
+}
+
+void Phase58()
+{
+    auto drain_inbox = [] { while (box::receive()) { } };  // proca/procb send to spawner
+
+    // Availability probe — if proc_exec is unavailable here, skip non-vacuously.
+    {
+        box::result<box::child> probe = box::child::spawn("proca");
+        if (!probe) {
+            printf("[CXX] note phase58: proc_exec unavailable (%.*s); box::child skipped\n",
+                   (int)probe.error().message().size(), probe.error().message().data());
+            printf("[CXX] PASS phase58: box::child (spawn unavailable on this config — skipped)\n");
+            return;
+        }
+        box::result<int> pr = probe->wait();   // reap the probe so it never lingers
+        Check(pr.has_value() && *pr == 0, "phase58 probe proca clean wait");
+        drain_inbox();
+    }
+
+    // 1. clean exit — wait() yields the success code 0.
+    {
+        box::result<box::child> c = box::child::spawn("proca");
+        Check(c.has_value(), "phase58.1 spawn proca");
+        if (c) {
+            box::result<int> r = c->wait();
+            Check(r.has_value() && *r == 0, "phase58.1 proca clean exit -> *r == 0");
+        }
+        drain_inbox();
+    }
+
+    // 2. co_await exited() on a fresh procb, driven by an executor.
+    {
+        box::result<box::child> c = box::child::spawn("procb");
+        Check(c.has_value(), "phase58.2 spawn procb");
+        if (c) {
+            box::executor       ex;
+            box::result<int>    r = ex.block_on(p58_await_exit(&*c));
+            Check(r.has_value() && *r == 0, "phase58.2 co_await exited() procb -> *r == 0");
+        }
+        drain_inbox();
+    }
+
+    // 3. double wait / cache — re-waiting a reaped child returns the cache.
+    {
+        box::result<box::child> c = box::child::spawn("proca");
+        Check(c.has_value(), "phase58.3 spawn proca");
+        if (c) {
+            box::result<int> r1 = c->wait();
+            Check(r1.has_value() && *r1 == 0, "phase58.3 first wait -> 0");
+            box::result<int> r2 = c->wait();   // cached — no block, same answer
+            Check(r2.has_value() && *r2 == 0, "phase58.3 second wait -> 0 (cached)");
+        }
+        drain_inbox();
+    }
+
+    // 4. detach does NOT kill and does NOT hang.
+    {
+        std::uint32_t detached_pid = 0;
+        {
+            box::result<box::child> c = box::child::spawn("proca");
+            Check(c.has_value(), "phase58.4 spawn proca");
+            if (c) detached_pid = c->pid();
+        }  // ~child here → DETACH (no kill, no wait)
+        if (detached_pid != 0) {
+            box::process p(detached_pid);
+            Check(p.alive(), "phase58.4 detached child still alive (dtor did not kill it)");
+            // It runs to completion on its own; the phase proceeds (no hang).
+            box::stopwatch sw;
+            while (p.alive() && sw.elapsed() < std::chrono::milliseconds(2000)) {
+                drain_inbox();
+                yield();
+            }
+            Check(!p.alive(), "phase58.4 detached child finished on its own (no hang)");
+        }
+        drain_inbox();
+    }
+
+    // 5. kill() -> the child's disposition is process_killed.
+    {
+        box::result<box::child> c = box::child::spawn("childspin");
+        Check(c.has_value(), "phase58.5 spawn childspin");
+        if (c) {
+            box::status k = c->kill();
+            Check(k.has_value(), "phase58.5 kill() reports success");
+            box::result<int> r = c->wait();
+            Check(!r.has_value() && r.error().code() == box::errc::process_killed,
+                  "phase58.5 killed child -> errc::process_killed");
+        }
+    }
+
+    // 6. bounded wait on an eternal child -> errc::timeout (chosen deadline, not EOF).
+    {
+        box::result<box::child> c = box::child::spawn("childspin");
+        Check(c.has_value(), "phase58.6 spawn childspin");
+        if (c) {
+            box::result<int> r = c->wait(50);
+            Check(!r.has_value() && r.error().code() == box::errc::timeout,
+                  "phase58.6 wait(50) on eternal child -> errc::timeout");
+            (void)c->kill();   // cleanup
+            (void)c->wait();   // reap so the station entry retires
+        }
+    }
+
+    // 7. multi-child demux — the variant-B proof. Two children, two DIFFERENT
+    //    dispositions, routed to the right pid from ONE process:died claim.
+    {
+        box::result<box::child> a = box::child::spawn("proca");      // exits clean 0
+        box::result<box::child> b = box::child::spawn("childspin");  // we kill it
+        Check(a.has_value() && b.has_value(), "phase58.7 spawn proca + childspin");
+        if (a && b) {
+            box::status k = b->kill();
+            Check(k.has_value(), "phase58.7 kill childspin");
+            box::result<int> ra = a->wait();
+            box::result<int> rb = b->wait();
+            Check(ra.has_value() && *ra == 0,
+                  "phase58.7 proca death routed by pid -> clean 0");
+            Check(!rb.has_value() && rb.error().code() == box::errc::process_killed,
+                  "phase58.7 childspin death routed by pid -> process_killed (demux)");
+        }
+        drain_inbox();
+    }
+
+    // 8. pid-reuse regression (the Ф26d-3 audit blocker) — a recycled pid must NOT
+    //    inherit the stale death of its predecessor. pid_alloc hands out the LOWEST
+    //    free pid, so to ARM the aliasing deterministically we retry: spawn a fast
+    //    child A, detach it (its death stays unclaimed in the ring), let the kernel
+    //    reap it (freeing its pid), then spawn an eternal B. If B lands on a LOWER
+    //    pid that churn freed elsewhere, we PIN B (holding that pid) and retry —
+    //    this provably converges, since each miss permanently removes one lower
+    //    free pid. Once B reuses A's pid, (Y)'s (pid, generation) match drops A's
+    //    stale death (OLD generation); the bare-pid bug would misroute A's exit 0
+    //    to the eternal B (or hang). Honest skip-note only if spawn is unavailable.
+    {
+        std::vector<box::child> pins;   // eternal children pinning lower pids
+        bool armed = false, reap_failed = false, spawn_failed = false;
+        for (int attempt = 0; attempt < 40 && !armed; ++attempt) {
+            box::result<box::child> a = box::child::spawn("proca");
+            if (!a) { spawn_failed = true; break; }
+            std::uint32_t a_pid = a->pid();
+            { box::child gone = std::move(*a); }   // DETACH A: slot leaves the
+                                                   // station, but A's death still
+                                                   // sits unclaimed in the ring
+
+            // Reap-wait via proc_info — a DIFFERENT ring, so it never drains the
+            // station's process:died claim; A's death stays buffered for B below.
+            // Wait for proc_info to no longer FIND a_pid (process reaped, pid freed
+            // for reuse): alive() is not enough — it flips at TERMINATED, before the
+            // reaper frees the pid, which would make B miss a_pid.
+            box::process   pa(a_pid);
+            box::stopwatch sw;
+            while (pa.info().has_value() && sw.elapsed() < std::chrono::milliseconds(2000)) yield();
+            if (pa.info().has_value()) { reap_failed = true; break; }
+
+            box::result<box::child> b = box::child::spawn("childspin");  // eternal
+            if (!b) { spawn_failed = true; break; }
+            if (b->pid() == a_pid) {
+                // Aliasing armed: A's stale death (a_pid, genA) is in the ring, B is
+                // (a_pid, genB) and eternal. (Y) drops the stale death (generation
+                // mismatch) -> B.wait times out; the bare-pid bug would hand back
+                // A's clean exit 0.
+                armed = true;
+                printf("[CXX] note phase58.8: armed pid-reuse at pid %u "
+                       "(A's stale death must be dropped by generation)\n",
+                       (unsigned)a_pid);
+                box::result<int> r = b->wait(200);
+                Check(!r.has_value() && r.error().code() == box::errc::timeout,
+                      "phase58.8 stale death of A NOT misrouted to recycled-pid B");
+                (void)b->kill();
+                (void)b->wait();
+            } else {
+                pins.push_back(std::move(*b));   // pin the lower pid, retry
+            }
+            drain_inbox();
+        }
+        if (!armed)
+            printf("[CXX] note phase58.8: pid-reuse not armed (%s) — skipped\n",
+                   spawn_failed ? "spawn unavailable"
+                                : reap_failed ? "child not reaped in time"
+                                              : "no reuse in 40 attempts");
+        for (auto &p : pins) { (void)p.kill(); (void)p.wait(); }   // release pins
+        drain_inbox();
+    }
+
+    printf("[CXX] PASS phase58: box::child — RAII child supervisor "
+           "(clean/co_await/cache/detach/kill/timeout/pid-demux/pid-reuse)\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -10280,6 +10481,7 @@ int main()
     Phase55();
     Phase56();
     Phase57();
+    Phase58();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
