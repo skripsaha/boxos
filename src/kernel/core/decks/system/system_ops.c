@@ -292,15 +292,23 @@ static error_t proc_authorize_tag_grant(const char *tags, const process_t *spawn
     return OK;
 }
 
-/* Authority to MUTATE (kill/tag) a target: self ∨ system-ensign (god|system|
- * bypass) ∨ the exact child this caller launched. "Own child" is (spawner_pid,
- * spawner_gen) — a pid alone is not identity (pids recycle), so a later process
- * inheriting a dead spawner's pid must NOT inherit authority. Parentless procs
- * (autostart/init, spawner_pid==0) are reachable only via the system ensign. */
+/* Authority to MUTATE (kill/tag) a target: self ∨ same cabin (one trust domain,
+ * shared address space) ∨ system-ensign (god|system|bypass) ∨ the exact child
+ * this caller launched. "Own child" is (spawner_pid, spawner_gen) — a pid alone
+ * is not identity (pids recycle), so a later process inheriting a dead spawner's
+ * pid must NOT inherit authority. Parentless procs (autostart/init,
+ * spawner_pid==0) are reachable only via the system ensign. */
 static bool proc_has_authority_over(const process_t *caller, const process_t *target)
 {
     if (!caller || !target) return false;
     if (caller->pid == target->pid) return true;
+    /* Same cabin = one trust domain: sibling strands share this address space
+     * and can already read/write each other's memory, so tagging or killing a
+     * cabin-mate is an in-domain act — and is what lets a spawned strand run
+     * box::tag_scope (its pid is not the cabin-main pid boxlib addresses). Guard
+     * NULL so cabin-less procs don't alias; foreign targets keep a distinct
+     * cabin_t and fall through. Cf. the same rule in SysStrandRelease. */
+    if (caller->cabin && caller->cabin == target->cabin) return true;
     uint32_t cb = caller->cabin ? caller->cabin->auth_bits : 0;
     if (auth_level_permits(cb, OP_AUTH_SYSTEM)) return true;
     const cabin_t *tc = target->cabin;
@@ -346,6 +354,18 @@ error_t ProcAuthSelfTest(void)
         kprintf("[PROCAUTH] FAIL: foreign permitted\n");
         return ERR_INTERNAL;
     }
+
+    /* same cabin: the SAME foreign pid, now sharing the caller's cabin_t, is one
+     * trust domain — authority holds with no privilege and no spawner link (the
+     * box::tag_scope-from-a-strand case). Only the same-cabin clause can grant
+     * here (self fails: pids differ; ensign fails: auth_bits==0; own-child fails:
+     * no spawner link), so an ALLOW proves that clause is live and unmasked. */
+    target.cabin = &caller_cabin;
+    if (!proc_has_authority_over(&caller, &target)) {
+        kprintf("[PROCAUTH] FAIL: same-cabin denied\n");
+        return ERR_INTERNAL;
+    }
+    target.cabin = &target_cabin;
 
     /* own child: target records (caller.pid, caller's live generation). */
     target_cabin.spawner_pid = caller.pid;
@@ -493,8 +513,9 @@ static int SysProcKill(const ManifestOp *op, Crate *crates, uint16_t crate_count
 
     /* Internal gate (the op stays OP_AUTH_NONE so every process can self-exit):
      * killing ANOTHER process needs authority over it — self-exit always passes
-     * (caller->pid == target->pid), a foreign kill needs god/system or the exact
-     * child this caller spawned. Without it any app could kill any process. */
+     * (caller->pid == target->pid); beyond self, a kill needs a same-cabin
+     * sibling, the god/system ensign, or the exact child this caller spawned.
+     * Without it any app could kill any process. */
     if (!proc_has_authority_over(ctx->proc, target)) {
         process_ref_dec(target);
         return ERR_ACCESS_DENIED;
@@ -1168,9 +1189,9 @@ static int SysTagAdd(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     error_t rc = sys_tag_target(op, crates, ctx, &target, tag, sizeof(tag));
     if (rc != OK) return rc;
 
-    /* Mutating another process's tags needs authority over it (self / god|system
-     * / own child); without this any app could freeze or de-privilege any
-     * process by pid. */
+    /* Mutating another process's tags needs authority over it (self / same-cabin
+     * / god|system / own child); without this any app could freeze or
+     * de-privilege any process by pid. */
     if (!proc_has_authority_over(ctx->proc, target)) {
         process_ref_dec(target);
         return ERR_ACCESS_DENIED;
@@ -1208,8 +1229,9 @@ static int SysTagRemove(const ManifestOp *op, Crate *crates, uint16_t crate_coun
     error_t rc = sys_tag_target(op, crates, ctx, &target, tag, sizeof(tag));
     if (rc != OK) return rc;
 
-    /* Same authority gate as tag.add: only self / god|system / own-child may
-     * strip a target's tags (no grant gate — dropping a tag never escalates). */
+    /* Same authority gate as tag.add: only self / same-cabin / god|system /
+     * own-child may strip a target's tags (no grant gate — dropping a tag never
+     * escalates). */
     if (!proc_has_authority_over(ctx->proc, target)) {
         process_ref_dec(target);
         return ERR_ACCESS_DENIED;
