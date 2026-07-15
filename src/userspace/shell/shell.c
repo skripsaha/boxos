@@ -160,9 +160,12 @@ void ShellUpdatePrompt(void)
  *
  * Used between user-visible operations so the next receive_wait inside
  * readline / executor never pulls a stale message left behind by:
- *   - a child process that posted its 0xFE exit sentinel late
  *   - a duplicate display-daemon PING reply during discovery
  *   - kernel-broadcast Touches the shell isn't subscribed to
+ *
+ * A spawned child sends the shell NOTHING on exit — its death is observed on
+ * the process:died TouchRing, a separate ring — so this only clears stray
+ * ResultRing traffic (display PING residue, stray broadcasts).
  *
  * Previously inlined at six call sites; centralised so a future change
  * (e.g. logging dropped traffic) edits one place.

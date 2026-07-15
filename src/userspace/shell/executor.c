@@ -2,7 +2,8 @@
  * executor.c — BoxOS shell command executor
  *
  * Built-in commands are looked up in g_commands[].
- * External commands are spawned via proc_exec() and tracked via IPC.
+ * External commands are spawned via proc_exec_gen(); args ship over IPC and the
+ * child's exit is observed on the kernel's process:died Touch event.
  */
 
 #include "executor.h"
@@ -11,6 +12,8 @@
 #include "box/string.h"
 #include "box/system.h"
 #include "box/ipc.h"
+#include "box/touch.h"
+#include "box/debug.h"
 #include "box/core/result.h"
 #include "box/print.h"
 
@@ -32,9 +35,36 @@ const ShellCommand g_commands[] = {
  * External command execution
  * ========================================================================= */
 
+/* The shell's single standing process:died claim. Interned + claimed once
+ * (lazily, on the first external command) and held for the shell's life:
+ * process:died is a tag-multicast on the TouchRing — a separate ring from the
+ * keyboard/args/display ResultRing — so this claim never disturbs input or IPC.
+ * A child's exit (clean OR crash) is observed here, never via a send from the
+ * child. */
+static TouchTag g_pdied       = TOUCH_TAG_INVALID;
+static bool     g_pdied_ready = false;
+
+static void ensure_death_watch(void)
+{
+    if (g_pdied_ready) return;
+    g_pdied = touch_pair_choose(touch_intern(TOUCH_TAG_PROCESS_DIED));
+    if (g_pdied != TOUCH_TAG_INVALID && touch_claim(g_pdied, TOUCH_REST, 0, 0) == OK)
+        g_pdied_ready = true;
+}
+
 static int RunExternal(const char *name, ParsedCommand *cmd)
 {
-    int pid = proc_exec(name);
+    /* Claim BEFORE the first spawn so a child that dies immediately can never
+     * beat us to its own death event, then drop any stale/foreign deaths
+     * banked on the TouchRing so the wait below only sees this child's. */
+    ensure_death_watch();
+    if (g_pdied_ready) {
+        Touch drain;
+        while (touch_try_pop_tag(g_pdied, &drain)) { }
+    }
+
+    uint32_t gen = 0;
+    int pid = proc_exec_gen(name, NULL, &gen);
     if (pid <= 0) return -1;
 
     /* Build args + context tags into IPC buffer. SHELL_ARGS_BUF_MAX
@@ -84,44 +114,28 @@ static int RunExternal(const char *name, ParsedCommand *cmd)
 
     send((uint32_t)pid, buf, (uint16_t)pos);
 
-    /* Fast path: child may have exited during send's result_wait. The
-     * non-blocking receive() here is intentional — we only want the
-     * sentinel if it's already there; otherwise fall through to the
-     * polling wait below. */
-    {
-        Result early;
-        if (receive(&early)) {
-            if (early.data_length >= 1 && early.data_addr != 0 &&
-                *(uint8_t *)(uintptr_t)early.data_addr == SHELL_EXIT_SENTINEL) {
-                ShellDrainStaleIpc();
-                return 0;
-            }
-        }
+    if (!g_pdied_ready) {
+        /* Cannot-happen: the registry rejected our claim. Rather than block on
+         * a child we cannot observe, run it detached and stay responsive. */
+        kdbg_print("[shell] process:died claim unavailable; running '%s' detached", name);
+        ShellDrainStaleIpc();
+        return 0;
     }
 
-    /* Wait for child exit sentinel */
-    Result entry;
-    int idle_iters = 0;
-
-    while (1) {
-        if (receive_wait(&entry, SHELL_CHILD_POLL_MS)) {
-            if (entry.data_length >= 1 && entry.data_addr != 0 &&
-                *(uint8_t *)(uintptr_t)entry.data_addr == SHELL_EXIT_SENTINEL)
-                break;
-            idle_iters = 0;
-        } else {
-            idle_iters++;
-            if (idle_iters >= SHELL_CHILD_DEAD_ITERS) {
-                idle_iters = 0;
-                proc_info_t info;
-                if (proc_info((uint16_t)pid, &info) != OK ||
-                    info.state >= PROC_STATE_TERMINATED)
-                    break;
-            }
-        }
+    /* Park forever on THIS child's death, matched by its canonical (pid,
+     * generation) so a recycled pid's foreign death cannot wake us early.
+     * process:died fires on clean exit AND crash, so there is no lost-death
+     * case to poll around — an unfired death would be a kernel-substrate bug. */
+    for (;;) {
+        Touch t;
+        if (!touch_wait_tag(g_pdied, &t, 0)) continue;
+        if (t.payload_len < sizeof(TouchProcessDied)) continue;
+        TouchProcessDied d;
+        memcpy(&d, t.payload, sizeof d);
+        if (d.pid == (uint32_t)pid && (gen == 0 || d.generation == gen)) break;
     }
 
-    /* Drain leftover IPC (late exit sentinels, stray broadcasts). */
+    /* Drain stray ResultRing residue (display PING replies, stray broadcasts). */
     ShellDrainStaleIpc();
 
     return 0;
