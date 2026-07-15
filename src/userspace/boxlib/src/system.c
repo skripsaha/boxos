@@ -7,7 +7,6 @@
 #include "box/core/notify.h"
 #include "box/core/cabin.h"
 #include "box/debug.h"
-#include "box/ipc.h"
 #include "box/print.h"
 #include "box/core/result.h"
 #include "box/string.h"
@@ -101,15 +100,11 @@ void exit(uint32_t exit_code)
 
     io_flush();
 
-    CabinInfo *ci = cabin_info();
-    if (ci->spawner_pid != 0) {
-        uint8_t msg[2] = { 0xFE, (uint8_t)(exit_code & 0xFF) };
-        send(ci->spawner_pid, msg, 2);
-    }
-
     /* params:[u32 target_pid][i32 exit_code] — target 0 means self exit; the
      * code rides into SysProcKill's self-exit disposition so process:died
-     * carries the real exit code (masked to [0, INT32_MAX] kernel-side). */
+     * carries the real exit code (masked to [0, INT32_MAX] kernel-side). This
+     * is the ONLY exit signal now: observers watch the process:died Touch
+     * (which also fires on crash), so exit() sends the spawner nothing. */
     struct __attribute__((packed)) { uint32_t target; int32_t code; } kill_param = {
         0, (int32_t)exit_code
     };

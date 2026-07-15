@@ -272,7 +272,7 @@ CLANG_AVAILABLE := $(shell command -v lld-link 2>/dev/null)
 .PHONY: all clean run run-bg run-stop debug info check-deps install-deps uefi usb check-endbr64
 
 # ==== MAIN TARGET ====
-all: check-deps check-error-parity $(IMAGE) $(KERNEL_ELF) $(FLOPPY_IMG) $(ISO) $(VBOX_VDI) uefi check-endbr64
+all: check-deps check-error-parity check-no-exit-sentinel $(IMAGE) $(KERNEL_ELF) $(FLOPPY_IMG) $(ISO) $(VBOX_VDI) uefi check-endbr64
 
 # ==== CET / IBT POST-LINK AUDIT ====
 # Verifies every globally-visible function in the kernel ELF begins with
@@ -292,6 +292,15 @@ check-endbr64: $(KERNEL_ELF)
 # source diff, instant; fails the build on any name/value mismatch.
 check-error-parity:
 	@./tools/check_error_parity.sh
+
+# ==== EXIT-SENTINEL DRIFT GUARD (Ф26d) ====
+# The legacy 0xFE child-exit IPC sentinel is deleted — a child's exit is now
+# observed on the kernel's process:died Touch (clean exit AND crash, carrying
+# (pid, generation) on a ring separate from keyboard/args IPC). This guard fails
+# the build if the sentinel is reintroduced in userspace. Pure source grep,
+# instant.
+check-no-exit-sentinel:
+	@./tools/check_no_exit_sentinel.sh
 
 # ==== DEP CHECK ====
 check-deps:

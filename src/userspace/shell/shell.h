@@ -15,10 +15,6 @@
 #define SHELL_ARGS_BUF_MAX      240     /* IPC send() limit for args */
 #define SHELL_ERROR_MAX         256     /* error message buffer */
 
-#define SHELL_CHILD_POLL_MS     100     /* child wait poll interval */
-#define SHELL_CHILD_DEAD_ITERS  10      /* polls before liveness check (1 sec) */
-#define SHELL_EXIT_SENTINEL     0xFE    /* child exit IPC marker */
-
 /* =========================================================================
  * Types
  * ========================================================================= */
@@ -56,8 +52,8 @@ ShellState *ShellGetState(void);
 void        ShellUpdatePrompt(void);
 
 /* Drop everything sitting in the IPC mailbox. Use between operations
- * that could otherwise consume a leftover Result (child exit sentinel,
- * late display PING reply, stray kernel Touch). See shell.c for the
+ * that could otherwise consume a leftover Result (a late display PING
+ * reply, stray kernel Touch). See shell.c for the
  * historical "first-command-no-op" race this guards against. */
 void        ShellDrainStaleIpc(void);
 

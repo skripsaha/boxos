@@ -331,11 +331,9 @@ static void test2(void)
     bool ok_c1 = false, ok_c2 = false;
     uint8_t va = 0, vb = 0;
     /* 60×500ms = 30s — matches the listener's own touch_await timeout.
-     * Capture ONLY the first packet from each child. After `send(ok)` the
-     * child runs `exit()` which posts a [0xFE, exit_code] sentinel to its
-     * spawner — overwriting va/vb on a slow ok-loop iteration would convert
-     * the legitimate ok=1 into the unrelated 0xFE byte. The first packet is
-     * the one we care about. */
+     * Each listener sends exactly ONE `ok` packet and nothing on exit (its
+     * death rides process:died, a separate ring), so the first packet from
+     * each child is the one and only one we care about. */
     for (int t = 0; t < 60 && !(ok_c1 && ok_c2); t++) {
         if (receive_wait(&r, 500)) {
             if (r.data_length < 1 || r.data_addr == 0) continue;
@@ -891,7 +889,7 @@ static void test16(void)
         if (r.sender_pid != (uint32_t)child) continue;
         if (r.data_length < 3 || r.data_addr == 0) continue;
         const uint8_t *b = (const uint8_t *)(uintptr_t)r.data_addr;
-        if (b[0] != 0xAA) continue;               /* skip the 0xFE exit sentinel */
+        if (b[0] != 0xAA) continue;               /* 0xAA = tag-report opcode; guard payload shape */
         has_aug = b[1]; has_file = b[2]; got = true;
     }
     if (!got)      { fail(16, "tag report not received");           return; }
