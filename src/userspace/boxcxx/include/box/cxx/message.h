@@ -358,7 +358,17 @@ private:
     {
         if (result_pop_ipc(__out)) return true;
         if (result_pop_non_ipc(__out)) return true;
-        return result_pop(__out);
+        // Ф26e full isolation: the bare-ring fallback must not hand back an
+        // isolated ferry (KCTX_STORAGE) completion — result_pop_ipc/_non_ipc
+        // above already divert it, and result_wait_any (the _S_block twin) does
+        // too, but this raw pop could still surface one that arrived in between.
+        // Route it to the ferry station so result_any never steals a box::ferry's
+        // reply, mirroring result_wait_any.
+        if (result_pop(__out)) {
+            if (__out->context == KCTX_STORAGE) { result_restash(__out); return false; }
+            return true;
+        }
+        return false;
     }
     static bool _S_poll(void *__s)
     {

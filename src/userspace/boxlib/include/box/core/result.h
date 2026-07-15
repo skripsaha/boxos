@@ -120,6 +120,17 @@ bool result_wait_any(Result* out, uint32_t timeout_ms);
 // advances tail), pause/yield fallback otherwise. Backs receive_wait().
 bool result_wait_ipc(Result* out, uint32_t timeout_ms);
 
+/* Ф26e — box::ferry (async file I/O) completion channel. Storage completions
+ * carry KCTX_STORAGE and are FULLY ISOLATED: every other ResultRing consumer
+ * routes them out into a per-strand ferry stash, and they are returned ONLY by
+ * result_pop_ferry / result_wait_ferry. result_restash routes one non-ferry
+ * record back to its own consumer; result_ferry_stash_count backs the wait
+ * loop's non-allocating readiness probe. Backs box::ferry (box/cxx/ferry.h). */
+bool result_pop_ferry(Result* out);
+bool result_wait_ferry(Result* out, uint32_t timeout_ms);
+void result_restash(const Result* r);
+uint32_t result_ferry_stash_count(void);
+
 // Diagnostic: snapshot result_pop counters
 //   out[0]=calls, out[1]=empty(head==tail), out[2]=seq_mismatch, out[3]=success
 //   out[4]=last_seq_seen, out[5]=last_expected, out[6]=last_pos, out[7]=last_tail

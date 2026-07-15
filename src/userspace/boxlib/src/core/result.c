@@ -2,6 +2,7 @@
 #include "box/core/notify.h"
 #include "box/system.h"
 #include "box/cpu.h"
+#include "box/memory.h"   /* malloc / free — per-strand ferry stash heap backing (Ф26e) */
 
 bool result_available(void) {
     ResultRing* rr = result_ring();
@@ -195,6 +196,62 @@ static bool ipc_stash_shift(Result* out)         { return stash_shift_view(ipc_s
 static void non_ipc_stash_push(Result* entry)    { stash_push_view(non_ipc_stash_view(), entry); }
 static bool non_ipc_stash_shift(Result* out)     { return stash_shift_view(non_ipc_stash_view(), out); }
 
+/* Ф26e — ferry (async file I/O, box::ferry) completion stash. FULLY ISOLATED:
+ * a KCTX_STORAGE record is routed here by every other ResultRing consumer
+ * (result_pop_non_ipc / result_pop_ipc / result_wait_any / orphan-drain) and
+ * handed out ONLY by result_pop_ferry, so no synchronous fread, result_any, or
+ * IPC receive can ever steal a ferry completion. Main strand → a large static
+ * ring; spawned strand → a heap ring lazily malloc'd and cached in
+ * StrandInfo.ferry_stash_ptr (mirrors touch_stash_ptr — opt-in, so a strand
+ * that never issues a ferry op pays nothing). */
+static StashRing ferry_stash;
+
+static stash_view_t ferry_stash_view(void) {
+    StrandInfo *si = strand_info_or_null();
+    if (si) {
+        StrandStashRing *r = (StrandStashRing *)(uintptr_t)si->ferry_stash_ptr;
+        if (!r) {
+            r = (StrandStashRing *)malloc(sizeof(StrandStashRing));
+            if (r) {
+                r->head = r->tail = r->count = 0;
+                si->ferry_stash_ptr = (uint64_t)(uintptr_t)r;
+            }
+        }
+        if (r) {
+            stash_view_t v = { r->buf, STRAND_STASH_CAP, &r->head, &r->tail, &r->count };
+            return v;
+        }
+        /* malloc failed (extreme OOM on a spawned strand) — a NULL view makes
+         * push/shift no-ops; the completion is dropped like any stash overflow. */
+        stash_view_t v = { NULL, 0, NULL, NULL, NULL };
+        return v;
+    }
+    stash_view_t v = { ferry_stash.buf, STASH_CAP,
+                       &ferry_stash.head, &ferry_stash.tail, &ferry_stash.count };
+    return v;
+}
+
+static void ferry_stash_push(Result* entry) {
+    stash_view_t v = ferry_stash_view();
+    if (!v.buf) return;                       /* spawned-strand OOM — self-healing drop */
+    stash_push_view(v, entry);
+}
+static bool ferry_stash_shift(Result* out) {
+    stash_view_t v = ferry_stash_view();
+    if (!v.buf) return false;
+    return stash_shift_view(v, out);
+}
+
+/* Non-allocating count probe for the ferry blocking-wait loop. */
+uint32_t result_ferry_stash_count(void) {
+    StrandInfo *si = strand_info_or_null();
+    if (si) {
+        StrandStashRing *r = (StrandStashRing *)(uintptr_t)si->ferry_stash_ptr;
+        return r ? r->count : 0;
+    }
+    return ferry_stash.count;
+}
+
 bool result_pop_non_ipc(Result* out) {
     if (!out) return false;
     /* Skip ERR_WOULD_BLOCK entries — these are transient kernel acks for
@@ -210,6 +267,13 @@ bool result_pop_non_ipc(Result* out) {
     while (result_pop(&entry)) {
         if (entry.sender_pid != 0) {
             ipc_stash_push(&entry);
+            continue;
+        }
+        /* Ф26e: a ferry (KCTX_STORAGE) completion is NEVER a synchronous reply.
+         * Route it to the isolated ferry stash so this sync/result_any consumer
+         * can never steal it, then keep scanning for our real reply. */
+        if (entry.context == KCTX_STORAGE) {
+            ferry_stash_push(&entry);
             continue;
         }
         /* Post-2026-06-01 TouchRing migration: KCTX_TOUCH no longer
@@ -240,6 +304,11 @@ bool result_pop_ipc(Result* out) {
             *out = entry;
             return true;
         }
+        /* Ф26e: isolate ferry completions (see result_pop_non_ipc). */
+        if (entry.context == KCTX_STORAGE) {
+            ferry_stash_push(&entry);
+            continue;
+        }
         /* Post-2026-06-01: Touch events come via TouchRing, not
          * ResultRing. The defensive filter here drops any leftover
          * KCTX_TOUCH-tagged entry that might still arrive from a
@@ -252,6 +321,45 @@ bool result_pop_ipc(Result* out) {
         non_ipc_stash_push(&entry);
     }
     return false;
+}
+
+/* Ф26e — result_pop_ferry: the box::ferry station's non-blocking drain.
+ * Mirror of result_pop_ipc, storage axis. Returns the next KCTX_STORAGE
+ * completion from the ferry stash or the ring; routes every non-ferry record
+ * it passes to that record's own consumer (IPC → ipc_stash, plain kernel reply
+ * → non_ipc_stash) so nothing a sibling awaiter is owed is ever stranded. */
+bool result_pop_ferry(Result* out) {
+    if (!out) return false;
+    if (ferry_stash_shift(out)) return true;
+
+    Result entry;
+    while (result_pop(&entry)) {
+        if (entry.context == KCTX_STORAGE) {     /* our ferry completion */
+            *out = entry;
+            return true;
+        }
+        if (entry.sender_pid != 0) {             /* IPC → receiver */
+            ipc_stash_push(&entry);
+            continue;
+        }
+        if (entry.context == KCTX_TOUCH) continue;
+        if (entry.error_code == 9 /* ERR_WOULD_BLOCK */) continue;
+        non_ipc_stash_push(&entry);              /* KCTX_GUIDE → sync / result_any */
+    }
+    return false;
+}
+
+/* Ф26e — result_restash: route ONE non-ferry record back to the stash its real
+ * consumer drains. Used by result_wait_ferry after its consume-any block pops a
+ * record the ferry station does not own. */
+void result_restash(const Result* r) {
+    if (!r) return;
+    Result e = *r;
+    if (e.context == KCTX_STORAGE) { ferry_stash_push(&e); return; }   /* defensive */
+    if (e.context == KCTX_TOUCH)   return;                             /* migrated out — drop */
+    if (e.error_code == 9 /* ERR_WOULD_BLOCK */) return;              /* async-park ack — drop */
+    if (e.sender_pid != 0) { ipc_stash_push(&e); return; }            /* IPC → receiver */
+    non_ipc_stash_push(&e);                                            /* plain kernel reply */
 }
 
 uint32_t result_ipc_stash_count(void) {
@@ -296,6 +404,13 @@ void result_drain_orphan_replies(void) {
     while (result_pop(&entry)) {
         if (entry.sender_pid != 0) {
             ipc_stash_push(&entry);
+            continue;
+        }
+        /* Ф26e: a ferry completion is NOT an orphan — it belongs to a still-live
+         * box::ferry awaiter. Preserve it in the isolated ferry stash instead of
+         * dropping it (this drain runs first in every synchronous submit). */
+        if (entry.context == KCTX_STORAGE) {
+            ferry_stash_push(&entry);
             continue;
         }
         /* Post-2026-06-01: KCTX_TOUCH no longer arrives here. Any
@@ -408,7 +523,21 @@ bool result_wait_any(Result* out, uint32_t timeout_ms) {
     if (!out) return false;
     if (result_pop_ipc(out))     return true;
     if (result_pop_non_ipc(out)) return true;
-    if (result_pop(out))         return true;
+    /* Ф26e: the bare-ring pops below can surface a ferry (KCTX_STORAGE) record —
+     * route it to the isolated ferry stash and return false. The false hands
+     * control back to the executor's poll sweep so the box::ferry sibling that
+     * owns this completion can collect it; without it a lone storage completion
+     * would never break this block and the ferry would hang. result_pop_ipc /
+     * result_pop_non_ipc above already divert storage, so this is the only
+     * remaining raw path. */
+    {
+        Result e;
+        if (result_pop(&e)) {
+            if (e.context == KCTX_STORAGE) { ferry_stash_push(&e); return false; }
+            *out = e;
+            return true;
+        }
+    }
 
     uint64_t deadline = 0;
     if (timeout_ms > 0) {
@@ -419,7 +548,12 @@ bool result_wait_any(Result* out, uint32_t timeout_ms) {
         __sync_synchronize();
 
         if (result_available()) {
-            if (result_pop(out)) return true;
+            Result e;
+            if (result_pop(&e)) {
+                if (e.context == KCTX_STORAGE) { ferry_stash_push(&e); return false; }
+                *out = e;
+                return true;
+            }
         }
 
         if (timeout_ms > 0 && rdtsc() >= deadline) return false;
@@ -482,5 +616,74 @@ bool result_wait_ipc(Result* out, uint32_t timeout_ms) {
     if (result_pop_ipc(out)) return true;
     if (cpu_has_waitpkg()) return result_wait_ipc_umwait(out, timeout_ms);
     return result_wait_ipc_yield(out, timeout_ms);
+}
+
+/* ===========================================================================
+ * Ф26e — result_wait_ferry: the box::ferry station's consume-any BLOCK.
+ *
+ * Mirrors result_wait_ipc but pops RAW (result_pop) so it can SEE the isolated
+ * KCTX_STORAGE records, and returns after ONE record of ANY kind so the
+ * executor's post-block poll sweep runs and every sibling awaiter is serviced
+ * (the accept_any contract). A ferry record is handed to the caller; a
+ * non-ferry record is routed to its own stash and the call returns false (a
+ * sibling has work → let the sweep run); a genuinely empty ring blocks on the
+ * ResultRing tail (UMWAIT / cooperative yield) until a KResultPush advances it.
+ * =========================================================================== */
+static bool result_wait_ferry_umwait(Result* out, uint32_t timeout_ms) {
+    ResultRing* rr = result_ring();
+    volatile uint64_t *tail_addr = (volatile uint64_t *)
+        ((uintptr_t)rr + OFFSETOF(ResultRing, hdr.tail));
+    while (1) {
+        __sync_synchronize();
+        if (ferry_stash_shift(out)) return true;
+        if (result_available()) {
+            Result e;
+            if (result_pop(&e)) {
+                if (e.context == KCTX_STORAGE) { *out = e; return true; }
+                result_restash(&e);
+                return false;   /* handed a sibling its record — yield to poll sweep */
+            }
+            /* seq not yet released by the producer — fall through to UMWAIT
+             * rather than busy-return. */
+        }
+        umonitor((volatile void*)tail_addr);
+        __sync_synchronize();
+        if (!result_available() && result_ferry_stash_count() == 0) {
+            uint64_t deadline_tsc = (timeout_ms == 0)
+                ? 0xFFFFFFFFFFFFFFFFULL
+                : rdtsc() + cpu_ms_to_tsc(timeout_ms);
+            int wake_reason = umwait(0, deadline_tsc);
+            if (wake_reason == 1 && timeout_ms > 0) {
+                __sync_synchronize();
+                if (!result_available() && result_ferry_stash_count() == 0) return false;
+            }
+        }
+    }
+}
+
+static bool result_wait_ferry_yield(Result* out, uint32_t timeout_ms) {
+    uint64_t deadline = 0;
+    if (timeout_ms > 0) deadline = rdtsc() + cpu_ms_to_tsc(timeout_ms);
+    while (1) {
+        __sync_synchronize();
+        if (ferry_stash_shift(out)) return true;
+        if (result_available()) {
+            Result e;
+            if (result_pop(&e)) {
+                if (e.context == KCTX_STORAGE) { *out = e; return true; }
+                result_restash(&e);
+                return false;
+            }
+        }
+        if (timeout_ms > 0 && rdtsc() >= deadline) return false;
+        yield();
+    }
+}
+
+bool result_wait_ferry(Result* out, uint32_t timeout_ms) {
+    if (!out) return false;
+    if (ferry_stash_shift(out)) return true;
+    if (cpu_has_waitpkg()) return result_wait_ferry_umwait(out, timeout_ms);
+    return result_wait_ferry_yield(out, timeout_ms);
 }
 

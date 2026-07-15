@@ -25,6 +25,12 @@ typedef enum {
     KCTX_GUIDE  = 7,
     KCTX_FRIEND = 8,
     KCTX_TOUCH  = 9,
+    KCTX_STORAGE = 10,   /* async file-I/O completion (box::ferry) — carries a
+                          * per-strand correlation waybill in Result.data_addr.
+                          * Stamped ONLY when the storage op requested one
+                          * (waybill != 0); synchronous fread/fwrite keep
+                          * KCTX_GUIDE. Fully isolated: boxlib routes these to
+                          * the ferry stash so no other consumer ever sees one. */
 } KResultContext;
 
 #endif /* BOXOS_KCTX_H */
