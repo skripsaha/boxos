@@ -53,6 +53,7 @@ typedef struct WriteJob {
     uint64_t          total_bytes;
     uint64_t          bytes_done;
     uint32_t          flags;
+    uint64_t          waybill;           /* Ф26e: ferry correlation token (0 = sync/no-token) */
 
     /* ---- in-flight chunk ---- */
     uint32_t          if_disk_block;
@@ -106,6 +107,7 @@ int ObjWriteAsync(uint32_t           file_id,
                   const struct OpContext *ctx,
                   Crate             *crates_kbuf,   /* staged Crate[] ownership */
                   uint16_t           crate_count,
-                  uint64_t           crates_uaddr);
+                  uint64_t           crates_uaddr,
+                  uint64_t           waybill);       /* Ф26e: ferry token (0 = none) */
 
 #endif /* WRITE_JOB_H */

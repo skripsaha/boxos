@@ -546,7 +546,11 @@ static void wjob_finalize(WriteJob *j, int rc)
     r.error_code  = (rc == OK) ? OK : (uint32_t)ERR_IO;
     r.data_length = (uint32_t)bytes_written;
     r.sender_pid  = 0;
-    r.context     = KCTX_GUIDE;
+    /* Ф26e: a waybilled (box::ferry) write echoes its correlation token in
+     * data_addr and flies the KCTX_STORAGE flag so boxlib routes it to the
+     * ferry station; a plain write keeps KCTX_GUIDE / data_addr==0. */
+    if (j->waybill) { r.context = KCTX_STORAGE; r.data_addr = j->waybill; }
+    else            { r.context = KCTX_GUIDE; }
 
     if (j->target) {
         KResultPush(j->target, &r);
@@ -640,7 +644,8 @@ int ObjWriteAsync(uint32_t            file_id,
                   const struct OpContext *ctx,
                   Crate              *crates_kbuf,
                   uint16_t            crate_count,
-                  uint64_t            crates_uaddr)
+                  uint64_t            crates_uaddr,
+                  uint64_t            waybill)
 {
     if (!ctx || !ctx->proc || !src_kp || size == 0) return ERR_INVALID_ARGUMENT;
 
@@ -681,6 +686,7 @@ int ObjWriteAsync(uint32_t            file_id,
      * W_DONE. Marker: src_bounce == src_kp says "we own this". */
     j->src_bounce    = (void *)src_kp;
     j->flags         = flags;
+    j->waybill       = waybill;
     j->dma_phys      = dma_phys;
     j->dma_virt      = dma_virt;
 

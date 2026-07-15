@@ -66,6 +66,9 @@
 #include "box/cxx/touch.h"    // box::tag, box::touch, box::subscription (anchor observer)
 
 namespace box {
+
+class ferry;  // box/cxx/ferry.h — returned by file::read_async / write_async (co_await-able)
+
 namespace tagfs {
 
 // Read a NUL-terminated fixed-width char field without overrunning it (TagFS
@@ -282,6 +285,18 @@ public:
     {
         return write_at(offset, buf.data(), buf.size());
     }
+
+    // ── async byte I/O — submit now, co_await the returned box::ferry ────────
+    // read_async / write_async submit a storage op WITHOUT blocking and hand back
+    // a box::ferry you co_await on a box::executor for the byte count (or cause).
+    // Several may be in flight at once; each resumes when ITS completion lands.
+    // The DATA buffer must outlive the co_await (the kernel DMAs into it). Defined
+    // out-of-line in box/cxx/ferry.h — include it to use these (keeps <coroutine>
+    // out of this header). An empty handle yields a ready invalid_argument ferry.
+    box::ferry read_async(std::uint64_t offset, void *p, std::size_t n) const;
+    box::ferry write_async(std::uint64_t offset, const void *p, std::size_t n) const;
+    box::ferry read_async(std::uint64_t offset, std::span<std::byte> buf) const;
+    box::ferry write_async(std::uint64_t offset, std::span<const std::byte> buf) const;
 
     // Typed whole-object I/O. On success the T / empty status; the error arm
     // carries the cause. A short transfer (the op succeeded but moved the wrong

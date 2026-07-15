@@ -69,6 +69,14 @@ typedef struct StrandInfo {
      * zero-inits → 0 = not yet allocated; lazy-malloc'd on first tag-consume.
      * Mirrors strand_pool_ptr. */
     uint64_t touch_stash_ptr;
+    /* Ф26e — per-strand async file-I/O (box::ferry) completion stash
+     * (boxlib result.c); kernel zero-inits → 0 = not yet allocated;
+     * lazy-malloc'd on first KCTX_STORAGE record routed on this strand.
+     * A lazy pointer (not an inline reservation like ipc_stash) because
+     * ferry I/O is opt-in — a strand that never issues a ferry op pays
+     * nothing, and a third inline STRAND_STASH_BYTES block would overflow
+     * the 4-page StrandInfo reservation. Mirrors touch_stash_ptr. */
+    uint64_t ferry_stash_ptr;
 } StrandInfo;
 
 #ifdef __cplusplus
@@ -88,7 +96,9 @@ STRAND_STATIC_ASSERT(__builtin_offsetof(StrandInfo, ipc_stash)      == 56, "Stra
 STRAND_STATIC_ASSERT(__builtin_offsetof(StrandInfo, strand_pool_ptr) ==
                      56 + 2u * STRAND_STASH_BYTES, "StrandInfo.strand_pool_ptr @ 56+2*STRAND_STASH_BYTES");
 STRAND_STATIC_ASSERT(__builtin_offsetof(StrandInfo, touch_stash_ptr) ==
-                     56 + 2u * STRAND_STASH_BYTES + 8u, "StrandInfo.touch_stash_ptr last");
+                     56 + 2u * STRAND_STASH_BYTES + 8u, "StrandInfo.touch_stash_ptr");
+STRAND_STATIC_ASSERT(__builtin_offsetof(StrandInfo, ferry_stash_ptr) ==
+                     56 + 2u * STRAND_STASH_BYTES + 16u, "StrandInfo.ferry_stash_ptr last");
 /* The whole block must fit the Hammock StrandInfo reservation (4 pages =
  * 16 KiB — see HAMMOCK_STRANDINFO_PAGES in strand_rings.c). */
 STRAND_STATIC_ASSERT(sizeof(StrandInfo) <= 4u * 4096u, "StrandInfo must fit 4 pages");

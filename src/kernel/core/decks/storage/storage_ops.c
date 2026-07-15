@@ -121,6 +121,7 @@ typedef struct {
     uint64_t         total_bytes;
     uint64_t         bytes_done;
     uint64_t         start_offset;
+    uint64_t         waybill;       /* Ф26e: ferry correlation token (0 = sync/no-token) */
     void            *dma_phys;
     void            *dma_virt;
     uint32_t         in_flight_off_in_blk;
@@ -151,7 +152,12 @@ static void obj_read_finish(ObjReadAsyncCtx *ctx, error_t status, bool partial_o
     r.error_code  = (status == OK) ? OK : ERR_IO;
     r.data_length = (uint32_t)reported;
     r.sender_pid  = 0;
-    r.context     = KCTX_GUIDE;
+    /* Ф26e: a waybilled (box::ferry) read echoes its correlation token in
+     * data_addr and flies the KCTX_STORAGE flag so boxlib routes it to the
+     * ferry station and nothing else. A plain (waybill==0) read keeps
+     * KCTX_GUIDE / data_addr==0 — byte-identical to the pre-ferry substrate. */
+    if (ctx->waybill) { r.context = KCTX_STORAGE; r.data_addr = ctx->waybill; }
+    else              { r.context = KCTX_GUIDE; }
 
     /* Commit bounce buffer back into user pages BEFORE waking caller.
      * If commit fails (e.g. user unmapped the page mid-flight) we still
@@ -247,6 +253,57 @@ static void obj_read_step(ObjReadAsyncCtx *ctx)
     }
 }
 
+/* Ф26e — deliver a box::ferry completion for a storage op that ran on the
+ * SYNCHRONOUS fallback (single core, EOF read, or an allocation failure that
+ * declined the async state machine). Without this the guide dispatcher would
+ * push the op's ordinary KCTX_GUIDE self-Result, which carries no waybill, so
+ * the ferry awaiter would match nothing and hang forever.
+ *
+ * Mirrors the async finaliser: flush the staged Crate[] descriptors back to
+ * user memory and free the kbuf (the dispatcher will NOT, because we claim the
+ * async-owner flag), publish a KCTX_STORAGE Result carrying the waybill + byte
+ * count, and return ERR_WOULD_BLOCK so guide_process_manifest_pocket takes its
+ * async-park branch (skips the crate commit + the KCTX_GUIDE push). The caller
+ * was NOT parked — it ran synchronously and stays PROC_WORKING, consuming this
+ * completion from its own ResultRing via the ferry poll. Descriptor write-back
+ * precedes the KResultPush so a ferry that frees its submission block on
+ * completion cannot race it (no UAF). */
+static int storage_sync_ferry_finalize(const OpContext *ctx, Crate *crates,
+                                       error_t err, uint64_t bytes,
+                                       uint64_t waybill)
+{
+    if (crates && ctx->crate_count > 0 && ctx->proc && ctx->proc->cabin) {
+        crate_stage_commit_and_release(crates, ctx->crate_count,
+                                       ctx->proc->cabin->vmm, ctx->crates_uaddr);
+    }
+
+    Result r;
+    memset(&r, 0, sizeof(r));
+    r.error_code  = (uint32_t)err;
+    r.data_length = (uint32_t)bytes;
+    r.data_addr   = waybill;
+    r.sender_pid  = 0;
+    r.context     = KCTX_STORAGE;
+    KResultPush(ctx->proc, &r);
+
+    if (ctx->async_owns_crates) *ctx->async_owns_crates = true;
+    return ERR_WOULD_BLOCK;
+}
+
+/* Ф26e — fail a storage op on the channel its submitter listens on. A waybilled
+ * (box::ferry) op MUST answer on KCTX_STORAGE even from an early-error exit, or
+ * its awaiter — which only ever collects KCTX_STORAGE records — waits for a
+ * completion that never comes and hangs (the dispatcher would deliver the raw
+ * code as a KCTX_GUIDE reply, which the ferry isolation routes away). A plain
+ * (waybill==0) op returns the code for the ordinary KCTX_GUIDE push. */
+static int storage_op_fail(const OpContext *ctx, Crate *crates,
+                           error_t err, uint64_t waybill)
+{
+    if (waybill != 0)
+        return storage_sync_ferry_finalize(ctx, crates, err, 0, waybill);
+    return (int)err;
+}
+
 static int ObjRead(const ManifestOp *op,
                    Crate            *crates,
                    uint16_t          crate_count,
@@ -258,19 +315,23 @@ static int ObjRead(const ManifestOp *op,
 
     uint32_t file_id = param_u32(op, 0);
     uint64_t offset  = param_u64(op, 4);
+    /* Ф26e: optional trailing correlation waybill (box::ferry). Absent for a
+     * synchronous read (param_size 12) → 0 → plain KCTX_GUIDE completion. */
+    uint64_t waybill = (op->param_size >= 20) ? param_u64(op, 12) : 0;
     Crate   *out     = &crates[op->out_crate];
-    if (out->capacity == 0) return ERR_BUFFER_TOO_SMALL;
+    if (out->capacity == 0)
+        return storage_op_fail(ctx, crates, ERR_BUFFER_TOO_SMALL, waybill);
 
     /* Bounce buffer for multi-page user payloads. tagfs_read fills kp,
      * we copy back to user pages at the end. The kernel address is one
      * contiguous allocation regardless of how the user pages map. */
     void *kp = crate_out_alloc(out, out->capacity);
-    if (!kp) return ERR_INVALID_ADDRESS;
+    if (!kp) return storage_op_fail(ctx, crates, ERR_INVALID_ADDRESS, waybill);
 
     TagFSFileHandle *handle = tagfs_open(file_id, TAGFS_HANDLE_READ);
     if (!handle) {
         crate_buf_free(kp);
-        return ERR_FILE_NOT_FOUND;
+        return storage_op_fail(ctx, crates, ERR_FILE_NOT_FOUND, waybill);
     }
 
     handle->offset = offset;
@@ -309,6 +370,7 @@ static int ObjRead(const ManifestOp *op,
                         async_ctx->total_bytes   = to_read;
                         async_ctx->bytes_done    = 0;
                         async_ctx->start_offset  = offset;
+                        async_ctx->waybill       = waybill;
                         async_ctx->dma_phys      = dma_phys;
                         async_ctx->dma_virt      = dma_virt;
                         /* CrateStage ownership transfer: the dispatcher
@@ -352,22 +414,30 @@ static int ObjRead(const ManifestOp *op,
     int got = tagfs_read(handle, kp, out->capacity);
     tagfs_close(handle);
 
+    error_t  sync_err   = OK;
+    uint64_t sync_bytes = 0;
     if (got < 0) {
-        crate_buf_free(kp);
+        sync_err  = ERR_IO;
         out->size = 0;
-        return ERR_IO;
-    }
-    if (got > 0) {
+    } else if (got > 0) {
         int crc = crate_out_commit(out, ctx, kp, (uint64_t)got);
         if (crc != OK) {
-            crate_buf_free(kp);
+            sync_err  = (error_t)crc;
             out->size = 0;
-            return crc;
+        } else {
+            sync_bytes = (uint64_t)got;
+            out->size  = (uint64_t)got;
         }
+    } else {
+        out->size = 0;   /* EOF read: 0 bytes, success */
     }
     crate_buf_free(kp);
-    out->size = (uint64_t)got;
-    return OK;
+
+    /* Ф26e: a ferry read that fell through to sync must still be answered on
+     * the KCTX_STORAGE channel or its awaiter hangs (single-core / EOF-read). */
+    if (waybill != 0)
+        return storage_sync_ferry_finalize(ctx, crates, sync_err, sync_bytes, waybill);
+    return (sync_err == OK) ? OK : (int)sync_err;
 }
 
 /* -------------------------------------------------------------------------
@@ -387,9 +457,13 @@ static int ObjWrite(const ManifestOp *op,
     uint32_t file_id = param_u32(op, 0);
     uint64_t offset  = param_u64(op, 4);
     uint32_t flags   = param_u32(op, 12);
+    /* Ф26e: optional trailing correlation waybill (box::ferry). Absent for a
+     * synchronous write (param_size 16) → 0 → plain KCTX_GUIDE completion. */
+    uint64_t waybill = (op->param_size >= 24) ? param_u64(op, 16) : 0;
 
     Crate *src = &crates[op->in_crate];
-    if (src->size == 0) return ERR_INVALID_ARGUMENT;
+    if (src->size == 0)
+        return storage_op_fail(ctx, crates, ERR_INVALID_ARGUMENT, waybill);
 
     /* Bounce-buffer the input crate. Multi-page user buffers are common
      * (any write over 4 KiB) and vmm_translate_user_addr cannot span
@@ -397,7 +471,7 @@ static int ObjWrite(const ManifestOp *op,
      * path takes ownership of src_bounce on a successful submit and
      * frees it from W_DONE; otherwise we free here. */
     void *src_bounce = crate_in_buf(src, ctx);
-    if (!src_bounce) return ERR_INVALID_ADDRESS;
+    if (!src_bounce) return storage_op_fail(ctx, crates, ERR_INVALID_ADDRESS, waybill);
 
     /* Optional output stats crate [u64 bytes_written][u64 new_file_size].
      * Written via crate_write (sync) / vmm_user_buf_commit_out (async) —
@@ -419,7 +493,8 @@ static int ObjWrite(const ManifestOp *op,
         int rc = ObjWriteAsync(file_id, offset, flags,
                                src_bounce, (uint32_t)src->size,
                                out_crate, ctx,
-                               crates, ctx->crate_count, ctx->crates_uaddr);
+                               crates, ctx->crate_count, ctx->crates_uaddr,
+                               waybill);
         if (rc == ERR_WOULD_BLOCK) {
             /* Async owns src_bounce AND the staged Crate[] kbuf now —
              * wjob_finalize frees both at W_DONE. */
@@ -432,7 +507,7 @@ static int ObjWrite(const ManifestOp *op,
     TagFSFileHandle *handle = tagfs_open(file_id, TAGFS_HANDLE_WRITE);
     if (!handle) {
         crate_buf_free(src_bounce);
-        return ERR_FILE_NOT_FOUND;
+        return storage_op_fail(ctx, crates, ERR_FILE_NOT_FOUND, waybill);
     }
 
     if (flags & OBJ_WRITE_APPEND_FLAG) {
@@ -449,7 +524,11 @@ static int ObjWrite(const ManifestOp *op,
     tagfs_close(handle);
     crate_buf_free(src_bounce);
 
-    if (wrote < 0) return ERR_IO;
+    if (wrote < 0) {
+        if (waybill != 0)
+            return storage_sync_ferry_finalize(ctx, crates, ERR_IO, 0, waybill);
+        return ERR_IO;
+    }
 
     /* WROTE fan-out — same 32-byte payload as write_job.c::w_publish so
      * a tag listener (write_observer, etc.) gets identical layout on
@@ -494,6 +573,11 @@ static int ObjWrite(const ManifestOp *op,
          * write — crate_write sets out_crate->size only on success. */
         (void)crate_write(out_crate, ctx, stats, 16);
     }
+
+    /* Ф26e: answer a ferry write on the KCTX_STORAGE channel — the async
+     * path was declined (single core / alloc-fail) and fell through here. */
+    if (waybill != 0)
+        return storage_sync_ferry_finalize(ctx, crates, OK, (uint64_t)wrote, waybill);
     return OK;
 }
 

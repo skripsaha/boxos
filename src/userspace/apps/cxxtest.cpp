@@ -72,6 +72,7 @@
 #include "box/cxx/bay_memory_resource.h"
 #include "box/cxx/brook.h"
 #include "box/cxx/child.h"
+#include "box/cxx/ferry.h"
 #include "box/cxx/console.h"
 #include "box/cxx/cpu.h"
 #include "box/cxx/current.h"
@@ -10402,6 +10403,216 @@ void Phase58()
            "(clean/co_await/cache/detach/kill/timeout/pid-demux/pid-reuse)\n");
 }
 
+// ── Phase59 (Ф26e) — box::ferry: co_await async file I/O over the waybill demux ─
+// Proves the async storage substrate end-to-end: a single read round-trips; N
+// reads submitted in REVERSE offset order each resume with THEIR own block (the
+// waybill demux clincher — a FIFO/address-keyed scheme would misroute and fail);
+// read+write interleave without cross-routing; an EOF read exercises the kernel
+// SYNC-FALLBACK token delivery (0 bytes, never a hang); a dropped ferry's
+// completion is reaped by the station, not misrouted onto a live one; and a
+// synchronous read_at interleaved with a ferry stays byte-identical (full
+// isolation). Non-vacuous where storage works; a documented skip otherwise.
+
+// A sibling task: co_await one ferry into an out-slot (simultaneous-waiter demux).
+static box::task<void> p59_await_into(box::ferry *f, box::result<std::size_t> *out)
+{
+    *out = co_await *f;
+    co_return;
+}
+// Single-await driver for executor::block_on.
+static box::task<box::result<std::size_t>> p59_await(box::ferry *f)
+{
+    co_return co_await *f;
+}
+
+void Phase59()
+{
+    constexpr std::size_t CH = 512;                         // per-block chunk
+    auto fill = [](std::byte *b, std::size_t n, std::byte v) {
+        for (std::size_t i = 0; i < n; ++i) b[i] = v;
+    };
+    auto all_eq = [](const std::byte *b, std::size_t n, std::byte v) {
+        for (std::size_t i = 0; i < n; ++i) if (b[i] != v) return false;
+        return true;
+    };
+    auto pat = [](int i) { return static_cast<std::byte>(0xA0 + i); };
+
+    // Availability probe — create (or reopen) a scratch file.
+    box::result<box::tagfs::file> ff = box::tagfs::create("ferrytest");
+    if (!ff) {
+        box::result<box::tagfs::record> rec = box::tagfs::find("ferrytest");
+        if (rec) ff = rec->live();
+    }
+    if (!ff) {
+        printf("[CXX] note phase59: tagfs create/find unavailable (%.*s); box::ferry skipped\n",
+               (int)ff.error().message().size(), ff.error().message().data());
+        printf("[CXX] PASS phase59: box::ferry (storage unavailable on this config — skipped)\n");
+        return;
+    }
+    box::tagfs::file f = *ff;
+
+    // Seed 4 blocks {0..3} with distinct patterns (synchronous writes).
+    {
+        bool wok = true;
+        std::byte wb[CH];
+        for (int i = 0; i < 4; ++i) {
+            fill(wb, CH, pat(i));
+            box::result<std::size_t> w =
+                f.write_at((std::uint64_t)i * CH, std::span<const std::byte>(wb, CH));
+            if (!w || *w != CH) wok = false;
+        }
+        Check(wok, "phase59 setup: 4 block patterns written");
+        if (!wok) {
+            printf("[CXX] PASS phase59: box::ferry (write setup failed — skipped)\n");
+            return;
+        }
+    }
+
+    // 1. single read_async round-trips block 0.
+    {
+        std::byte rb[CH];
+        fill(rb, CH, std::byte{0});
+        box::ferry fr = f.read_async(0, std::span<std::byte>(rb, CH));
+        box::executor ex;
+        box::result<std::size_t> r = ex.block_on(p59_await(&fr));
+        Check(r.has_value() && *r == CH && all_eq(rb, CH, pat(0)),
+              "phase59.1 single read_async round-trips block 0");
+    }
+
+    // 2. out-of-order demux — 4 reads submitted in REVERSE order, awaited as
+    //    simultaneous sibling tasks; each must resume with ITS OWN block.
+    {
+        std::byte rb[4][CH];
+        for (int i = 0; i < 4; ++i) fill(rb[i], CH, std::byte{0});
+        box::ferry f3 = f.read_async(3 * CH, std::span<std::byte>(rb[3], CH));
+        box::ferry f0 = f.read_async(0 * CH, std::span<std::byte>(rb[0], CH));
+        box::ferry f2 = f.read_async(2 * CH, std::span<std::byte>(rb[2], CH));
+        box::ferry f1 = f.read_async(1 * CH, std::span<std::byte>(rb[1], CH));
+        printf("[CXX] note phase59.2: armed 4 out-of-order ferries (reverse submit)\n");
+        box::result<std::size_t> o0, o1, o2, o3;
+        {
+            box::executor ex;
+            ex.spawn(p59_await_into(&f3, &o3));
+            ex.spawn(p59_await_into(&f0, &o0));
+            ex.spawn(p59_await_into(&f2, &o2));
+            ex.spawn(p59_await_into(&f1, &o1));
+            ex.run();
+        }
+        int correct = 0;
+        if (o0.has_value() && *o0 == CH && all_eq(rb[0], CH, pat(0))) correct++;
+        if (o1.has_value() && *o1 == CH && all_eq(rb[1], CH, pat(1))) correct++;
+        if (o2.has_value() && *o2 == CH && all_eq(rb[2], CH, pat(2))) correct++;
+        if (o3.has_value() && *o3 == CH && all_eq(rb[3], CH, pat(3))) correct++;
+        Check(correct == 4, "phase59.2 out-of-order demux: each co_await got ITS block");
+    }
+
+    // 3. mixed read+write interleave — 2 writes (blocks 4,5) + 2 reads (blocks 0,1)
+    //    concurrent; then confirm the writes landed at the right offsets.
+    {
+        std::byte w4[CH], w5[CH], r0[CH], r1[CH];
+        fill(w4, CH, std::byte{0xB4}); fill(w5, CH, std::byte{0xB5});
+        fill(r0, CH, std::byte{0});    fill(r1, CH, std::byte{0});
+        box::ferry fw4 = f.write_async(4 * CH, std::span<const std::byte>(w4, CH));
+        box::ferry fr0 = f.read_async (0 * CH, std::span<std::byte>(r0, CH));
+        box::ferry fw5 = f.write_async(5 * CH, std::span<const std::byte>(w5, CH));
+        box::ferry fr1 = f.read_async (1 * CH, std::span<std::byte>(r1, CH));
+        box::result<std::size_t> ow4, ow5, or0, or1;
+        {
+            box::executor ex;
+            ex.spawn(p59_await_into(&fw4, &ow4));
+            ex.spawn(p59_await_into(&fr0, &or0));
+            ex.spawn(p59_await_into(&fw5, &ow5));
+            ex.spawn(p59_await_into(&fr1, &or1));
+            ex.run();
+        }
+        bool ok = ow4.has_value() && *ow4 == CH && ow5.has_value() && *ow5 == CH
+               && or0.has_value() && *or0 == CH && all_eq(r0, CH, pat(0))
+               && or1.has_value() && *or1 == CH && all_eq(r1, CH, pat(1));
+        // No cross-routing: the writes must be at 4*CH and 5*CH, not swapped.
+        std::byte v4[CH], v5[CH];
+        box::result<std::size_t> rv4 = f.read_at(4 * CH, std::span<std::byte>(v4, CH));
+        box::result<std::size_t> rv5 = f.read_at(5 * CH, std::span<std::byte>(v5, CH));
+        ok = ok && rv4.has_value() && all_eq(v4, CH, std::byte{0xB4})
+                && rv5.has_value() && all_eq(v5, CH, std::byte{0xB5});
+        Check(ok, "phase59.3 mixed read+write interleave, writes landed at right offsets");
+    }
+
+    // 4. EOF read — offset past end forces the kernel SYNC-FALLBACK token path.
+    //    0 bytes, success (proves the fallback delivers the completion, not a hang).
+    {
+        std::byte rb[CH];
+        box::ferry fe = f.read_async((std::uint64_t)100 * CH, std::span<std::byte>(rb, CH));
+        box::executor ex;
+        box::result<std::size_t> r = ex.block_on(p59_await(&fe));
+        Check(r.has_value() && *r == 0,
+              "phase59.4 EOF read_async via sync-fallback -> 0 bytes (no hang)");
+    }
+
+    // 5. detach safety — a ferry dropped un-awaited has its completion reaped by
+    //    the station (not misrouted); a normal ferry after it stays correct. The
+    //    dropped op's buffer is kept alive for the kernel DMA (caller contract).
+    {
+        std::byte junk[CH];
+        fill(junk, CH, std::byte{0});
+        { box::ferry dropped = f.read_async(2 * CH, std::span<std::byte>(junk, CH)); }  // ~ferry = DETACH
+        std::byte rb[CH];
+        fill(rb, CH, std::byte{0});
+        box::ferry fr = f.read_async(1 * CH, std::span<std::byte>(rb, CH));
+        box::executor ex;
+        box::result<std::size_t> r = ex.block_on(p59_await(&fr));
+        Check(r.has_value() && *r == CH && all_eq(rb, CH, pat(1)),
+              "phase59.5 detach safety: live ferry unaffected by a dropped one");
+    }
+
+    // 6. sync path unregressed — a synchronous read_at issued WHILE a ferry is in
+    //    flight must return its own bytes, and must not steal the ferry's reply.
+    {
+        std::byte sb[CH], ab[CH];
+        fill(sb, CH, std::byte{0}); fill(ab, CH, std::byte{0});
+        box::ferry fa = f.read_async(3 * CH, std::span<std::byte>(ab, CH));
+        box::result<std::size_t> sr = f.read_at(0, std::span<std::byte>(sb, CH));  // SYNC, in flight
+        box::executor ex;
+        box::result<std::size_t> ar = ex.block_on(p59_await(&fa));
+        Check(sr.has_value() && *sr == CH && all_eq(sb, CH, pat(0)),
+              "phase59.6 sync read_at unregressed (interleaved with a live ferry)");
+        Check(ar.has_value() && *ar == CH && all_eq(ab, CH, pat(3)),
+              "phase59.6 ferry reply not stolen by the interleaved sync read");
+    }
+
+    // 7. error-path completions land on the ferry channel — never a KCTX_GUIDE
+    //    hang. Every EARLY-error exit of a waybilled storage op must still answer
+    //    on KCTX_STORAGE, or its co_await (which only collects KCTX_STORAGE) waits
+    //    forever. Covers file-not-found (a stale id) and the zero-length read/
+    //    write early returns; each must RESUME with an error, not deadlock.
+    {
+        std::byte rb[CH];
+        fill(rb, CH, std::byte{0});
+
+        box::tagfs::file missing{0xDEADBEEFu};             // never a real file id
+        box::ferry fnf = missing.read_async(0, std::span<std::byte>(rb, CH));
+        box::executor ex;
+        box::result<std::size_t> rnf = ex.block_on(p59_await(&fnf));
+        Check(!rnf.has_value(),
+              "phase59.7 ferry read of a missing file resumes with an error (no hang)");
+
+        box::ferry fzr = f.read_async(0, std::span<std::byte>(rb, std::size_t{0}));
+        box::executor ex2;
+        box::result<std::size_t> rzr = ex2.block_on(p59_await(&fzr));
+        Check(!rzr.has_value(),
+              "phase59.7 zero-length ferry read resumes with an error (no hang)");
+
+        box::ferry fzw = f.write_async(0, std::span<const std::byte>(rb, std::size_t{0}));
+        box::executor ex3;
+        box::result<std::size_t> rzw = ex3.block_on(p59_await(&fzw));
+        Check(!rzw.has_value(),
+              "phase59.7 zero-length ferry write resumes with an error (no hang)");
+    }
+
+    printf("[CXX] PASS phase59: box::ferry — co_await async file I/O "
+           "(single/out-of-order demux/mixed r+w/EOF sync-fallback/detach/"
+           "sync-isolation/error-path completions)\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -10482,6 +10693,7 @@ int main()
     Phase56();
     Phase57();
     Phase58();
+    Phase59();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
