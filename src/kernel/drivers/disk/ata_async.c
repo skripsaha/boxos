@@ -56,6 +56,7 @@
 #include "idt.h"
 #include "irqchip.h"
 #include "touch.h"
+#include "storage_completion.h"   /* never-drop K-Core recovery node */
 
 /* ---------------------------------------------------------------------
  *  BMIDE register layout (Intel BMIDE Rev 1.0 §3).
@@ -112,6 +113,13 @@ typedef struct AtaCmd {
     volatile error_t  sync_rc;
     uint64_t       submit_tsc;
 
+    /* Set to 1 (under cmd_lock) by whoever classifies this cmd's completion —
+     * the IRQ handler OR the watchdog's TIER-1 reconcile. It is the arbiter
+     * that keeps the periodic watchdog scan from mis-judging a just-completed
+     * cmd (in_flight still points at it until its bottom-half runs) as a fresh
+     * wedge: the scan only ever acts on an UN-reconciled in_flight cmd. */
+    volatile uint8_t  reconciled;
+
     struct AtaCmd *next;
 } AtaCmd;
 
@@ -156,6 +164,18 @@ typedef struct AtaAsyncCh {
     volatile uint64_t  landing_clobber;   /* invariant tripwire — must stay 0 */
     volatile uint8_t   clobber_warned;    /* one-shot: loud print on first clobber */
     AtaErrEv           err_ev;            /* staged for deferred error publish */
+
+    /* Ф26 BMIDE watchdog. On a genuine wedge the PIT-tick scan CASes
+     * `recovering` 0->1 (coalescing repeat detections into one) and posts
+     * `recover_node` to a K-Core via StorageCompletionPush — never-drop and
+     * allocation-free, exactly as AHCI defers COMRESET — because
+     * ata_channel_soft_reset busy-waits BSY for up to 2 s, far too long for the
+     * tick's IRQ context. While recovering, the IRQ handler / scan / submit all
+     * stand off the channel. run = ata_recover_worker, ctx = this channel; set
+     * once in bmide_init_channel. */
+    uint8_t            ch_idx;
+    volatile uint32_t  recovering;
+    StorageCompletion  recover_node;
 } AtaAsyncCh;
 
 static AtaAsyncCh g_ata_async[ATA_CHANNEL_COUNT];
@@ -454,6 +474,60 @@ static void ata_complete_deferred(void *ctx) {
 }
 
 /* ---------------------------------------------------------------------
+ *  Shared completion body — classify + retire the in-flight cmd.
+ *
+ *  Caller holds cmd_lock and has already established, under that lock, that
+ *  aa->in_flight is non-NULL, un-reconciled, and its INTRQ is asserted
+ *  (`bmsr` is that same snapshot, IRQ bit set). Invoked identically by the
+ *  raw IRQ handler and by the watchdog's TIER-1 lost-INTRQ reconcile, so a
+ *  completion is retired by exactly one of them (whoever W1Cs the engine
+ *  first clears BMISR.IRQ; the other then reads it clear and no-ops).
+ *
+ *  For a SYNC cmd it stamps the never-drop `landing` slot and returns NULL.
+ *  For an ASYNC cmd it returns the cmd so the caller can irq_defer it AFTER
+ *  releasing cmd_lock (never nest cmd_lock -> irq_defer's ring lock).
+ * ------------------------------------------------------------------ */
+static AtaCmd *bmide_complete_locked(AtaAsyncCh *aa, uint8_t bmsr) {
+    AtaCmd *cmd = aa->in_flight;
+
+    /* ATA-7 §6.2.5: reading STATUS clears the drive-side IRQ latch. */
+    uint8_t st = ata_read_status(cmd->drive_idx);
+
+    error_t rc = OK;
+    if (st == 0xFF)                          rc = ERR_DEVICE_NOT_READY;
+    else if (st & ATA_SR_ERR)                rc = ERR_IO;
+    else if (st & ATA_SR_DF)                 rc = ERR_IO;
+    else if (bmsr & BMISR_ERROR)             rc = ERR_IO;
+
+    /* W1C the BMIDE latches and stop the engine (also clears BMICR.Start,
+     * the manual-clear some controllers need for BMISR.Active) — required
+     * before the next kick can re-program BMICR/BMIDT per Intel BMIDE §3.1. */
+    bmide_engine_stop(aa);
+    mfence();
+
+    cmd->sync_rc = rc;
+    __atomic_store_n(&cmd->reconciled, 1u, __ATOMIC_RELAXED);
+
+    /* SYNC cmds (all live traffic): stamp the per-channel landing slot — a
+     * live spinner claims it (XCHG) and runs the bottom-half itself, so this
+     * can NEVER be dropped. The ≤1-in-flight invariant guarantees landing is
+     * NULL here (the prior completion was claimed before its next cmd could be
+     * kicked); a non-NULL means the invariant broke upstream — count it, never
+     * overwrite (that would strand a live spinner). RELEASE publishes sync_rc
+     * to the claimer's ACQUIRE. in_flight stays set: the read-staging page is
+     * copied out in ata_run_completion before the next kick. ASYNC fire-and-
+     * forget cmds (no spinner) keep riding irq_defer, drained on a K-Core. */
+    if (cmd->is_sync_wait) {
+        if (__atomic_load_n(&aa->landing, __ATOMIC_RELAXED) != NULL)
+            atomic_fetch_add_u64(&aa->landing_clobber, 1);
+        else
+            __atomic_store_n(&aa->landing, cmd, __ATOMIC_RELEASE);
+        return NULL;
+    }
+    return cmd;   /* async — caller irq_defers after unlocking */
+}
+
+/* ---------------------------------------------------------------------
  *  IRQ handler — checks each channel for BMIDE-asserted completion
  * ------------------------------------------------------------------ */
 static void ata_channel_irq_process(uint8_t ch_idx) {
@@ -466,6 +540,14 @@ static void ata_channel_irq_process(uint8_t ch_idx) {
      * fired while the lock was held locally). */
     spin_lock(&aa->cmd_lock);
 
+    /* A K-Core is SRST-recovering this channel: BMISR reads are meaningless
+     * mid-reset and the drive's INTRQ is masked (nIEN=1), so any edge that
+     * reaches here is stale. Stand off entirely. */
+    if (__atomic_load_n(&aa->recovering, __ATOMIC_RELAXED)) {
+        spin_unlock(&aa->cmd_lock);
+        return;
+    }
+
     uint8_t bmsr = inb(aa->bmide_base + BMIDE_REG_STATUS);
     if (!(bmsr & BMISR_IRQ)) {
         atomic_fetch_add_u64(&aa->spurious_irqs, 1);
@@ -474,8 +556,10 @@ static void ata_channel_irq_process(uint8_t ch_idx) {
     }
 
     AtaCmd *cmd = aa->in_flight;
-    if (!cmd) {
-        /* IRQ but nothing in flight — clear drive latch + BMISR + stop
+    if (!cmd || __atomic_load_n(&cmd->reconciled, __ATOMIC_RELAXED)) {
+        /* IRQ but nothing outstanding to retire (idle channel, or the
+         * watchdog already reconciled this cmd and its bottom-half has yet
+         * to move in_flight along) — clear drive latch + BMISR + stop
          * engine, then drop the line. */
         if (g_ata_channels[ch_idx].present) {
             (void)inb(g_ata_channels[ch_idx].cmd_base + ATA_REG_STATUS);
@@ -486,48 +570,161 @@ static void ata_channel_irq_process(uint8_t ch_idx) {
         return;
     }
 
-    /* ATA-7 §6.2.5: reading STATUS clears the drive-side IRQ latch. */
-    uint8_t st = ata_read_status(cmd->drive_idx);
-
-    error_t rc = OK;
-    if (st == 0xFF)                          rc = ERR_DEVICE_NOT_READY;
-    else if (st & ATA_SR_ERR)                rc = ERR_IO;
-    else if (st & ATA_SR_DF)                 rc = ERR_IO;
-    else if (bmsr & BMISR_ERROR)             rc = ERR_IO;
-
-    /* W1C the BMIDE latches and stop the engine — required before the
-     * next kick can re-program BMICR/BMIDT per Intel BMIDE §3.1. */
-    bmide_engine_stop(aa);
-    mfence();
-
-    cmd->sync_rc = rc;
-
-    /* Deliver the completion. SYNC cmds (all live traffic): stamp the
-     * per-channel landing slot — a live spinner claims it (XCHG) and runs
-     * the bottom-half itself, so this can NEVER be dropped. The ≤1-in-flight
-     * invariant guarantees landing is NULL here (the prior completion was
-     * claimed before its next cmd could be kicked); a non-NULL means the
-     * invariant broke upstream — count it, never overwrite (that would
-     * strand a live spinner). RELEASE publishes sync_rc to the claimer's
-     * ACQUIRE. in_flight stays set: the read-staging page is copied out in
-     * ata_run_completion before the next kick. ASYNC fire-and-forget cmds
-     * (no spinner) keep riding irq_defer, drained on a K-Core. */
-    if (cmd->is_sync_wait) {
-        if (__atomic_load_n(&aa->landing, __ATOMIC_RELAXED) != NULL)
-            atomic_fetch_add_u64(&aa->landing_clobber, 1);
-        else
-            __atomic_store_n(&aa->landing, cmd, __ATOMIC_RELEASE);
-        spin_unlock(&aa->cmd_lock);
-    } else {
-        spin_unlock(&aa->cmd_lock);
-        irq_defer(ata_complete_deferred, cmd);
-    }
+    AtaCmd *defer = bmide_complete_locked(aa, bmsr);
+    spin_unlock(&aa->cmd_lock);
+    if (defer) irq_defer(ata_complete_deferred, defer);
 }
 
 static void ata_irq_handler(void) {
     if (!__atomic_load_n(&g_ata_async_ready, __ATOMIC_ACQUIRE)) return;
     for (uint8_t ch = 0; ch < ATA_CHANNEL_COUNT; ch++) {
         ata_channel_irq_process(ch);
+    }
+}
+
+/* ---------------------------------------------------------------------
+ *  Watchdog — K-Core SRST recovery of a genuinely wedged channel.
+ *
+ *  Posted by bmide_watchdog_scan via the channel's never-drop recover_node;
+ *  runs on a K-Core pump (StorageCompletionPump) where the up-to-2 s BSY wait
+ *  in ata_channel_soft_reset is affordable. `recovering` is already 1 (the
+ *  scan CAS'd it) and gates the IRQ handler / scan / submit off this channel
+ *  for the duration.
+ *
+ *  Stack-cmd lifetime is the delicate part. The wedged sync cmd lives on its
+ *  waiter's stack; the waiter spins until it observes cmd->done. If any other
+ *  actor (a late IRQ, this worker) could still touch the cmd after the waiter
+ *  returns, that is a use-after-free. The 2026-05-28 audit note flagged exactly
+ *  this and proposed heap+refcount for every I/O; we avoid that hot-path cost
+ *  with strict ORDERING instead: SRST silences the drive (nIEN held =1) so no
+ *  late INTRQ can reference the cmd, we NULL in_flight and re-arm the channel,
+ *  and only THEN — last of all — publish the wedged cmd's failure. The instant
+ *  its waiter observes done, no live reference to the stack frame survives.
+ * ------------------------------------------------------------------ */
+static void ata_recover_worker(void *ctx) {
+    AtaAsyncCh *aa     = (AtaAsyncCh *)ctx;
+    uint8_t     ch_idx = aa->ch_idx;
+
+    /* Belt-and-suspenders: the drive may have completed between the scan
+     * flagging the wedge and this worker being pumped. If its INTRQ is now
+     * latched, reconcile normally and skip the reset — no spurious ERR_IO. */
+    spin_lock(&aa->cmd_lock);
+    uint8_t bmsr = inb(aa->bmide_base + BMIDE_REG_STATUS);
+    AtaCmd *cmd  = aa->in_flight;
+    if (cmd && !__atomic_load_n(&cmd->reconciled, __ATOMIC_RELAXED) &&
+        (bmsr & BMISR_IRQ)) {
+        AtaCmd *defer = bmide_complete_locked(aa, bmsr);
+        __atomic_store_n(&aa->recovering, 0u, __ATOMIC_RELEASE);
+        spin_unlock(&aa->cmd_lock);
+        if (defer) irq_defer(ata_complete_deferred, defer);
+        return;
+    }
+    spin_unlock(&aa->cmd_lock);
+
+    /* Genuine wedge. SRST with nIEN held =1 throughout silences the drive's
+     * INTRQ, so the wedged command can raise no further interrupt. */
+    ata_channel_soft_reset(ch_idx);
+
+    /* Retire the wedged cmd out of flight and re-launch the innocent queue
+     * (the "re-launch waiting ships" recovery: commands queued behind the
+     * wedged one were never issued to the drive, so a reset makes them
+     * runnable again — failing them would spuriously punish untouched I/O).
+     * All under one lock hold so a concurrent submit either lands in the queue
+     * we re-kick from or is serialised behind recovering being cleared. */
+    spin_lock(&aa->cmd_lock);
+    AtaCmd *wedged = aa->in_flight;
+    aa->in_flight  = NULL;
+    __atomic_store_n(&aa->landing, NULL, __ATOMIC_RELAXED); /* no completion landed */
+    ata_set_nien(ch_idx, false);            /* SRST left nIEN=1; re-arm the IRQ path */
+    AtaCmd *next = queue_pop_head(aa);
+    aa->in_flight = next;
+    if (next) bmide_kick(aa, next);
+    __atomic_store_n(&aa->recovering, 0u, __ATOMIC_RELEASE);
+    spin_unlock(&aa->cmd_lock);
+
+    /* Publish the wedged cmd's failure LAST — in_flight no longer points at it
+     * and the drive is silenced+re-armed, so its (stack) storage is dead to
+     * every other actor the instant its waiter observes done. */
+    if (wedged) {
+        wedged->sync_rc = ERR_IO;
+        atomic_fetch_add_u64(&aa->cmds_failed, 1);
+        aa->err_ev = (AtaErrEv){ .drive = wedged->drive_idx, .is_write = wedged->is_write,
+                                 .count = wedged->count, .rc = ERR_IO, .lba = wedged->lba };
+        irq_defer(ata_err_worker, aa);      /* best-effort telemetry, off this path */
+        if (wedged->cb) {
+            wedged->cb(wedged->drive_idx, ERR_IO, wedged->cb_ctx);
+        }
+        if (wedged->is_sync_wait) {
+            __atomic_store_n(&wedged->done, 1u, __ATOMIC_RELEASE);
+        } else {
+            kfree(wedged);
+        }
+    }
+}
+
+/* ---------------------------------------------------------------------
+ *  Watchdog scan — BSP PIT tick, one glance per channel (see ata_async.h).
+ *
+ *  Three tiers, all triggered by hardware fact, never by a clock — except the
+ *  single software-unobservable case (TIER 2b), where a liveness-of-last-resort
+ *  bound (CONFIG_ATA_LIVENESS_MS) is the only possible signal. Uses spin_trylock
+ *  so the tick is never blocked behind a cross-core submit/complete; a skipped
+ *  channel is simply re-examined next tick.
+ * ------------------------------------------------------------------ */
+void bmide_watchdog_scan(void) {
+    if (!__atomic_load_n(&g_ata_async_ready, __ATOMIC_ACQUIRE)) return;
+    /* The IRQ+landing path (and thus any wedge to recover) only exists
+     * multi-core; single-core drives the polled fallback with its own bound. */
+    if (g_amp.total_cores < 2) return;
+
+    uint64_t now          = rdtsc();
+    uint64_t liveness_tsc  = cpu_ms_to_tsc(CONFIG_ATA_LIVENESS_MS);
+
+    for (uint8_t ch = 0; ch < ATA_CHANNEL_COUNT; ch++) {
+        AtaAsyncCh *aa = &g_ata_async[ch];
+        if (!aa->enabled) continue;
+        if (__atomic_load_n(&aa->recovering, __ATOMIC_ACQUIRE)) continue;
+        /* Cheap unlocked idle early-out — the common case. Re-checked under
+         * the lock; a just-submitted cmd read as NULL here has a fresh
+         * submit_tsc and is not overdue anyway. */
+        if (!__atomic_load_n(&aa->in_flight, __ATOMIC_RELAXED)) continue;
+
+        if (!spin_trylock(&aa->cmd_lock)) continue;   /* never stall the tick */
+
+        AtaCmd *cmd = aa->in_flight;
+        if (!cmd || __atomic_load_n(&cmd->reconciled, __ATOMIC_RELAXED)) {
+            spin_unlock(&aa->cmd_lock);
+            continue;
+        }
+
+        uint8_t bmsr = inb(aa->bmide_base + BMIDE_REG_STATUS);
+
+        /* TIER 1 — lost INTRQ: the drive latched its interrupt (BMISR.IRQ) but
+         * the CPU IRQ never ran (edge dropped / misrouted on legacy IDE).
+         * Retire it now via the same body the IRQ handler uses. Pure event. */
+        if (bmsr & BMISR_IRQ) {
+            AtaCmd *defer = bmide_complete_locked(aa, bmsr);
+            spin_unlock(&aa->cmd_lock);
+            if (defer) irq_defer(ata_complete_deferred, defer);
+            continue;
+        }
+
+        /* No interrupt latched. Alternate Status (ctrl_reg) does NOT clear the
+         * drive INTRQ latch, unlike the primary STATUS — safe to snoop. */
+        uint8_t alt = inb(g_ata_channels[ch].ctrl_reg);
+        bool wedge = false;
+        if (alt == 0xFF)                                wedge = true;  /* 2a device gone */
+        else if (!(bmsr & BMISR_ACTIVE))                wedge = true;  /* 2a engine quit, no INTRQ */
+        else if (now - cmd->submit_tsc > liveness_tsc)  wedge = true;  /* 2b frozen engine */
+
+        if (wedge && __sync_bool_compare_and_swap(&aa->recovering, 0u, 1u)) {
+            spin_unlock(&aa->cmd_lock);
+            /* Never-drop, allocation-free hand-off to a K-Core SRST — the
+             * up-to-2 s reset cannot run in this IRQ (PIT) context. */
+            StorageCompletionPush(&aa->recover_node);
+        } else {
+            spin_unlock(&aa->cmd_lock);
+        }
     }
 }
 
@@ -544,7 +741,10 @@ static error_t submit_internal(AtaCmd *cmd) {
         spin_unlock(&aa->cmd_lock);
         return ERR_BUSY;
     }
-    if (aa->in_flight) {
+    /* Queue (never kick) while a K-Core is SRST-recovering the channel: the
+     * recover worker re-launches the queue head itself once the reset settles,
+     * so kicking onto a mid-reset drive is structurally excluded. */
+    if (aa->in_flight || __atomic_load_n(&aa->recovering, __ATOMIC_RELAXED)) {
         queue_push_tail(aa, cmd);
         atomic_fetch_add_u64(&aa->cmds_submitted, 1);
         spin_unlock(&aa->cmd_lock);
@@ -738,6 +938,14 @@ static void bmide_init_channel(uint8_t ch_idx) {
     aa->wait_tail    = NULL;
     aa->queue_depth  = 0;
 
+    /* Watchdog SRST-recovery seam: node points back at this channel and runs
+     * ata_recover_worker on a K-Core when bmide_watchdog_scan posts it. */
+    aa->ch_idx           = ch_idx;
+    aa->recovering       = 0;
+    aa->recover_node.run  = ata_recover_worker;
+    aa->recover_node.ctx  = aa;
+    aa->recover_node.next = NULL;
+
     /* Stale-handover scrub: stop engine, W1C error/IRQ. */
     bmide_engine_stop(aa);
 
@@ -867,4 +1075,93 @@ uint32_t ata_async_queue_depth(uint8_t channel) {
     uint32_t d = aa->queue_depth + (aa->in_flight ? 1u : 0u);
     spin_unlock(&aa->cmd_lock);
     return d;
+}
+
+/* ---------------------------------------------------------------------
+ *  Boot self-test — TIER-1 (lost-INTRQ) reconcile, on the real BMIDE engine.
+ *
+ *  The watchdog's most valuable recovery is TIER 1: a completion the drive DID
+ *  signal (BMISR.IRQ latched) but whose CPU interrupt was dropped/misrouted —
+ *  the classic legacy-IDE INTRQ loss. We reproduce it exactly and safely: mask
+ *  the channel's IOAPIC pin (so a genuine 1-sector read completes with the
+ *  interrupt latched in BMISR but never delivered to a core), then drive the
+ *  scan ourselves and confirm it retires the command with the data read back.
+ *
+ *  Safe by construction: read-only (LBA 0), the stack cmd is retired under
+ *  cmd_lock BEFORE the pin is re-enabled (no late edge can touch this frame),
+ *  and the wait is bounded — a broken watchdog FAILS loudly here, never hangs.
+ *  The SRST tiers (2a/2b) require a genuinely wedged drive and are reachable
+ *  only on real PATA hardware. Multi-core + BMIDE only; skips otherwise.
+ * ------------------------------------------------------------------ */
+error_t bmide_watchdog_selftest(void) {
+    if (g_amp.total_cores < 2) {
+        kprintf("[BMIDE-WD] TIER-1 self-test skipped (single-core)\n");
+        return OK;
+    }
+    uint8_t drive = 0xFF;
+    for (uint8_t d = 0; d < ATA_DRIVE_COUNT; d++) {
+        if (ata_async_usable(d)) { drive = d; break; }
+    }
+    if (drive == 0xFF || !async_path_viable()) {
+        kprintf("[BMIDE-WD] TIER-1 self-test skipped (no BMIDE async drive)\n");
+        return OK;
+    }
+
+    uint8_t     ch  = drive_channel(drive);
+    AtaAsyncCh *aa  = &g_ata_async[ch];
+    uint8_t     gsi = g_ata_channels[ch].irq_gsi;
+
+    void *buf = kmalloc(ATA_SECTOR_SIZE);
+    if (!buf) { kprintf("[BMIDE-WD] TIER-1 self-test skipped (no mem)\n"); return OK; }
+
+    AtaCmd cmd;
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.drive_idx    = drive;
+    cmd.channel      = ch;
+    cmd.lba          = 0;                 /* boot sector — read-only, non-destructive */
+    cmd.count        = 1;
+    cmd.is_write     = false;
+    cmd.user_buf     = buf;
+    cmd.is_sync_wait = true;
+    cmd.sync_rc      = OK;
+
+    /* Simulate a dropped IDE INTRQ: mask the channel's IOAPIC pin. The drive
+     * still asserts INTRQ on completion (latched in BMISR.IRQ), but no CPU
+     * interrupt runs — so only the watchdog can retire the command. */
+    irqchip_disable_irq(gsi);
+
+    error_t sub = submit_internal(&cmd);
+    bool ok = false;
+    if (sub == OK) {
+        uint64_t deadline = rdtsc() + cpu_ms_to_tsc(3000);
+        while (rdtsc() < deadline) {
+            bmide_watchdog_scan();                 /* TIER-1 → stamps `landing` */
+            AtaCmd *c = __atomic_exchange_n(&aa->landing, NULL, __ATOMIC_ACQ_REL);
+            if (c) ata_run_completion(aa, c);
+            if (__atomic_load_n(&cmd.done, __ATOMIC_ACQUIRE)) {
+                ok = (cmd.sync_rc == OK);
+                break;
+            }
+            cpu_pause();
+        }
+    }
+
+    /* Retire any residue BEFORE re-enabling the pin, so a late edge cannot
+     * dereference this stack frame after we return. */
+    if (!ok) {
+        spin_lock(&aa->cmd_lock);
+        if (aa->in_flight == &cmd) { bmide_engine_stop(aa); aa->in_flight = NULL; }
+        __atomic_store_n(&aa->landing, NULL, __ATOMIC_RELAXED);
+        spin_unlock(&aa->cmd_lock);
+    }
+    irqchip_enable_irq(gsi);
+    kfree(buf);
+
+    if (ok) {
+        kprintf("[BMIDE-WD] TIER-1 lost-INTRQ reconcile PASS\n");
+        return OK;
+    }
+    kprintf("[BMIDE-WD] TIER-1 lost-INTRQ reconcile FAIL (sub=%d rc=%d)\n",
+            (int)sub, (int)cmd.sync_rc);
+    return ERR_IO;
 }

@@ -88,6 +88,26 @@ error_t ata_submit_write_async(uint8_t drive_idx, uint64_t lba,
 int ata_dma_sync(uint8_t drive_idx, uint64_t lba, uint16_t count,
                  bool is_write, void *buf);
 
+/* BMIDE completion watchdog — a safety BACKSTOP, not the delivery path. Glanced
+ * at once per PIT tick on the BSP (idt.c), mutually exclusive with the BMIDE
+ * IRQ handler (both need the channel's irqsave cmd_lock). Recovers, purely by
+ * hardware event, the failure modes a lost/misrouted legacy IDE INTRQ leaves
+ * behind: a latched-but-undelivered interrupt (TIER 1, reconciled inline via
+ * the same `landing` seam the IRQ uses), an engine that quit or a device that
+ * vanished with no interrupt at all, and — only for a DMA engine frozen with
+ * ACTIVE stuck (the one software-unobservable case) — a liveness-of-last-resort
+ * bound (TIER 2). A genuine wedge is failed ERR_IO + SRST-recovered on a K-Core
+ * (never-drop), so a lost completion can never hang a BMIDE sync waiter forever.
+ * No-op unless multi-core BMIDE async I/O is actually in flight. */
+void bmide_watchdog_scan(void);
+
+/* Boot self-test — proves the watchdog's TIER-1 lost-INTRQ reconcile on the
+ * real BMIDE engine by masking a channel's IOAPIC pin so a genuine completion
+ * latches BMISR.IRQ with no CPU IRQ, then confirming the scan retires it.
+ * Read-only, bounded, multi-core + BMIDE only (skips gracefully otherwise).
+ * Emits "[BMIDE-WD] TIER-1 ... PASS/FAIL" for the phase matrix to assert. */
+error_t bmide_watchdog_selftest(void);
+
 /* Stats accessors (boot/diag prints, debug commands). */
 uint64_t ata_async_cmds_submitted(uint8_t channel);
 uint64_t ata_async_cmds_completed(uint8_t channel);

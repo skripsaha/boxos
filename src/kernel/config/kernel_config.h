@@ -73,6 +73,17 @@
 #define CONFIG_ATA_SECTOR_SIZE 512 // Hardware constant
 #define CONFIG_ATA_MAX_RETRIES 3
 
+/* BMIDE watchdog liveness-of-last-resort bound (bmide_watchdog_scan TIER 2b).
+ * NOT an I/O deadline: the watchdog recovers every OTHER wedge purely by
+ * hardware event (latched INTRQ, engine-gone-idle, 0xFF device-gone). The one
+ * software-unobservable case — a DMA engine frozen mid-transfer with ACTIVE
+ * stuck =1, no INTRQ, no error — is indistinguishable from a healthy in-flight
+ * transfer without a clock. Every BMIDE command is <=ATA_ASYNC_MAX_SECTORS
+ * (4 KB), so a healthy transfer completes in <1 ms even at MWDMA0; a command
+ * whose engine still claims ACTIVE after this bound (5000x margin) is a frozen
+ * drive -> SRST. Bounds hardware silence, never I/O duration. */
+#define CONFIG_ATA_LIVENESS_MS 5000
+
 #define CONFIG_ASYNC_DISPATCH_INTERVAL_MS 1
 #define CONFIG_DMA_TIMEOUT_CHECK_INTERVAL_MS 100
 

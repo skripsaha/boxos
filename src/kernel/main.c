@@ -724,6 +724,16 @@ void kernel_main(void)
     kprintf("========================================\n\n");
 #endif
 
+    /* Ф26 BMIDE watchdog TIER-1 proof: mask a channel's IOAPIC pin so a real
+     * disk completion latches BMISR.IRQ with no CPU IRQ, then verify
+     * bmide_watchdog_scan recovers the "lost interrupt". Everything it needs is
+     * up by here (multi-core, irq_defer, BMIDE); skips cleanly on single-core
+     * or when AHCI owns block I/O. */
+    {
+        extern error_t bmide_watchdog_selftest(void);
+        (void)bmide_watchdog_selftest();
+    }
+
 #if CONFIG_START_USERSPACE
     kprintf("Starting userspace...\n");
     kprintf("\n");

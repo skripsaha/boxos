@@ -746,6 +746,17 @@ void irq_handler(interrupt_frame_t *frame)
          * AHCI MSI targets; no-op unless multi-core async I/O is in flight. */
         ahci_watchdog_scan();
 
+        /* Ф26 BMIDE — the legacy-PATA analogue: reconcile a lost IDE INTRQ from
+         * the channel's BMISR latch, and fail + SRST-recover a genuinely wedged
+         * channel so a dropped completion cannot hang a BMIDE sync waiter
+         * forever. Same BSP-only tick (both need the disk's irqsave locks); the
+         * SRST itself is deferred to a K-Core. No-op unless multi-core BMIDE
+         * async I/O is in flight (dormant whenever AHCI owns block I/O). */
+        {
+            extern void bmide_watchdog_scan(void);
+            bmide_watchdog_scan();
+        }
+
         /* Single-core mode: drain irq_defer here, when the PIT IRQ
          * interrupted USERSPACE code.
          *

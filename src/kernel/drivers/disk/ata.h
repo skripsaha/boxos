@@ -149,4 +149,10 @@ int  ata_program_lba(uint8_t drive_idx, uint64_t lba, uint16_t count,
                      uint8_t cmd28, uint8_t cmd48);
 int  ata_set_xfer_mode(uint8_t drive_idx, uint8_t mode_byte);
 
+/* ATA-7 §9.2 software reset of one channel (SRST pulse with nIEN held =1
+ * throughout, so the drive's INTRQ is silenced before/during/after). Exposed
+ * for the BMIDE watchdog's K-Core recovery path (ata_recover_worker); busy-
+ * waits BSY up to 2 s, so it is only ever called off IRQ/PIT context. */
+void ata_channel_soft_reset(uint8_t channel);
+
 #endif /* ATA_H */
