@@ -694,6 +694,12 @@ void kernel_main(void)
     debug_printf("[INIT] Keyboard...\n");
     keyboard_init();
 
+    /* COM1 serial console: route inbound serial bytes into the keyboard input
+     * ring so a host-side console (headless QEMU/Bochs, or a real serial line)
+     * can drive the shell. Must follow keyboard_init (fills the same ring). */
+    debug_printf("[INIT] Serial console (COM1 RX)...\n");
+    serial_console_init();
+
     debug_printf("[INIT] USB xHCI Driver...\n");
     int xhci_result = xhci_init();
     if (xhci_result == 0)

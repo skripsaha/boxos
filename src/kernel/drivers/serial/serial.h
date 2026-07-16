@@ -18,4 +18,9 @@ void serial_print(const char* str);
  * the middle. `\n` is expanded to `\r\n`. Used by VGA put-string mirror. */
 void serial_write(const char *bytes, size_t len);
 
+/* Enable the COM1 receive path: wire IRQ4 to drain inbound bytes into the
+ * keyboard input ring, giving a host-side serial console that drives the
+ * shell. Call once, AFTER keyboard_init. */
+void serial_console_init(void);
+
 #endif // SERIAL_H
