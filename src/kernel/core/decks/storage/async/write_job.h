@@ -6,6 +6,7 @@
 #include "tagfs.h"
 #include "boxos_crate.h"
 #include "process.h"
+#include "storage_completion.h"   /* embedded never-drop MPSC node (cq_node) */
 
 /*
  * WriteJob — async ObjWrite state machine.
@@ -84,7 +85,14 @@ typedef struct WriteJob {
 
     /* ---- state machine ---- */
     _Atomic int       state;
-    uint8_t           home_kcore;
+
+    /* ---- never-drop completion node (Ф26 M4) ----
+     * Embedded MPSC link. The AHCI completion IRQ and the token handoff
+     * post this job to the drain core via StorageCompletionPush with zero
+     * allocation, so a continuation can never be dropped. run = wjob_pump,
+     * ctx = this job; set once in ObjWriteAsync. Distinct from next_pending
+     * (the token-wait list). */
+    StorageCompletion cq_node;
 
     /* ---- CrateStage handoff (async-safe Crate descriptor staging) ----
      * Dispatcher allocated the Crate[] kbuf via crate_stage_in and points

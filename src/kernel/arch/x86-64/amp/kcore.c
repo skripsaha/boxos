@@ -11,7 +11,7 @@
 #include "irq_defer.h"
 #include "error.h"
 #include "kring.h"  /* KPocketIsEmpty for re-arm after pending clear */
-#include "write_cont_queue.h"  /* Async write state-machine continuations */
+#include "storage_completion.h"  /* Never-drop MPSC: async storage continuations */
 
 KCorePocketQueue *g_kcore_queues = NULL;
 
@@ -218,11 +218,14 @@ void kcore_run_loop(void)
             kcore_process_entry(proc);
         }
 
-        /* Drain async-write continuations on this K-Core. State-machine
-         * transitions that came back from an AHCI IRQ live here; running
-         * them inside the same loop body keeps cache-locality with the
-         * pocket pump and avoids an extra IPI round-trip. */
-        WriteContPump(my_idx);
+        /* Drain async storage completions on this K-Core (never-drop MPSC).
+         * Read + write state-machine steps that came back from an AHCI IRQ,
+         * plus port-recovery COMRESETs, land here; running them in the same
+         * loop body keeps cache-locality with the pocket pump. Single-
+         * consumer: each K-Core drains only its own queue. All completions
+         * route to the drain core, so non-drain queues are a one-load
+         * early-out. */
+        StorageCompletionPump(my_idx);
 
         /* Universal IRQ-defer drain — runs SCI/GPE/AHCI bottom-halves
          * that the IRQ stowed away with irq_defer(). Same K-Core
@@ -250,14 +253,21 @@ void kcore_run_loop(void)
          * window: disable interrupts, re-check the queue, and HLT only while
          * it is still empty. STI;HLT is atomic — the one-instruction STI
          * interrupt shadow defers delivery until after HLT executes — so an IPI
-         * that arrived under CLI wakes us the instant we sleep. Work fed by
-         * device IRQs (write-cont, irq-defer) wakes HLT via its own interrupt,
-         * so it needs no re-check here.
+         * that arrived under CLI wakes us the instant we sleep.
+         *
+         * Storage async completions ARE re-checked (StorageCompletionPending):
+         * their never-drop node can be posted cross-core (an App-Core token
+         * handoff), which also sends IPI_WAKE — and the re-check closes the
+         * post-pump / pre-CLI window so a completion that landed there is never
+         * left queued across a HLT (AHCI port recovery rides the same storage
+         * queue, so it is covered too). Other irq-defer work (SCI/GPE/ATA) is
+         * fed by its own device IRQ, which wakes HLT directly, so it needs no
+         * re-check.
          *
          * (Before the K-Core timer was masked, the 100 Hz tick papered over
          * this race by waking every 10 ms; this is the proper fix.) */
         __asm__ volatile("cli");
-        if (kcore_queue_depth(my_idx) != 0) {
+        if (kcore_queue_depth(my_idx) != 0 || StorageCompletionPending(my_idx)) {
             __asm__ volatile("sti");        /* raced submit — loop, don't sleep */
         } else {
             __asm__ volatile("sti; hlt");   /* atomic arm-and-sleep */

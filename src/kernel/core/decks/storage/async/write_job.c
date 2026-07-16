@@ -27,7 +27,7 @@
  */
 
 #include "write_job.h"
-#include "write_cont_queue.h"
+#include "storage_completion.h"
 #include "crate_stage.h"
 #include "tagfs.h"
 #include "ahci.h"
@@ -484,7 +484,7 @@ static bool w_release_token(WriteJob *j)
     WriteJob *next = token_release_handoff(j);
     if (next) {
         atomic_store_u32((volatile uint32_t *)&next->state, W_LOCATE);
-        WriteContEnqueue(wjob_pump, next);
+        StorageCompletionPush(&next->cq_node);   /* never-drop; routes to drain core */
     }
     atomic_store_u32((volatile uint32_t *)&j->state, W_DONE);
     return true;
@@ -498,7 +498,7 @@ static void wjob_finalize(WriteJob *j, int rc)
         WriteJob *next = token_release_handoff(j);
         if (next) {
             atomic_store_u32((volatile uint32_t *)&next->state, W_LOCATE);
-            WriteContEnqueue(wjob_pump, next);
+            StorageCompletionPush(&next->cq_node);   /* never-drop; routes to drain core */
         }
     }
 
@@ -597,14 +597,11 @@ static void wjob_pump(void *job_)
  * the read populated DMA with the (redirected) old content, ready for
  * the user-bytes overlay.
  *
- * Runs in AHCI completion IRQ context. The old emergency-finalize
- * fallback (kmalloc / pmm_free / tagfs_close / kfree from IRQ) is
- * gone — WriteContEnqueue now delegates to irq_defer, which is
- * allocation-free on the producer side and cannot fail. If irq_defer
- * exhausts its overflow chain (extreme burst beyond pre-allocated
- * headroom), the slot is silently dropped and the writer process
- * will time out and retry. That graceful drop is preferable to the
- * old deadlock-prone in-IRQ cleanup path. */
+ * Runs in AHCI completion IRQ context. It only stashes status and posts
+ * the job's embedded completion node (StorageCompletionPush) to the drain
+ * core — no allocation, no lock, and NEVER dropped: the node lives inside
+ * the WriteJob, so there is no slot to run out of. The heavy half (memcpy /
+ * finalize / next-block) runs later in the K-Core pump. */
 static void wjob_cow_read_complete(uint8_t port, uint8_t slot,
                                     error_t status, void *ctx)
 {
@@ -616,7 +613,7 @@ static void wjob_cow_read_complete(uint8_t port, uint8_t slot,
     } else {
         atomic_store_u32((volatile uint32_t *)&j->state, W_DMA_FILL);
     }
-    (void)WriteContEnqueue(wjob_pump, j);  /* irq_defer; cannot fail */
+    StorageCompletionPush(&j->cq_node);   /* never-drop; heavy half on the K-Core pump */
 }
 
 /* IRQ callback. Lean — only stash status + defer continuation. See
@@ -628,7 +625,7 @@ static void wjob_ahci_complete(uint8_t port, uint8_t slot,
     WriteJob *j = (WriteJob *)ctx;
     j->if_status = status;
     atomic_store_u32((volatile uint32_t *)&j->state, W_AHCI_DONE);
-    (void)WriteContEnqueue(wjob_pump, j);  /* irq_defer; cannot fail */
+    StorageCompletionPush(&j->cq_node);   /* never-drop; heavy half on the K-Core pump */
 }
 
 /* =========================================================================
@@ -697,7 +694,12 @@ int ObjWriteAsync(uint32_t            file_id,
     }
     j->total_bytes   = size;
     j->bytes_done    = 0;
-    j->home_kcore    = amp_get_core_index();
+
+    /* Never-drop completion node: the AHCI IRQ / token handoff posts this
+     * job to the drain core with no allocation. Set once, reused across
+     * every enqueue of this job. */
+    j->cq_node.run   = wjob_pump;
+    j->cq_node.ctx   = j;
 
     /* CrateStage ownership transfer from dispatcher. After we return
      * ERR_WOULD_BLOCK below (via process_set_state PROC_WAITING), the
@@ -716,15 +718,15 @@ int ObjWriteAsync(uint32_t            file_id,
 
     if (token_try_claim(j)) {
         atomic_store_u32((volatile uint32_t *)&j->state, W_LOCATE);
-        /* Run the first pump synchronously in this syscall (thread) context.
-         * The initial kick is NOT an IRQ bottom-half: routing it through
-         * WriteContEnqueue/irq_defer enqueues to the current core's ring,
-         * which is drained only by that core's K-Core pump loop. The syscall
-         * runs on an App Core (or the single-core BSP, which never pumps at
-         * all), so the job would strand and the caller would wait forever.
-         * Thread context can safely take every lock the state machine needs;
-         * it pumps until it parks at W_AHCI_SUBMIT (yield to the AHCI IRQ,
-         * which correctly defers its continuation to a pumped K-Core). */
+        /* Run the first pump synchronously in this syscall (thread) context,
+         * not as a posted continuation: thread context can safely take every
+         * lock the state machine needs and skips a queue round-trip on the
+         * common path. It pumps until it parks at W_AHCI_SUBMIT (yield to the
+         * AHCI IRQ, whose completion posts the job's never-drop node to the
+         * drain core). Any continuation the machine posts from here — e.g. a
+         * token handoff on an early-error exit — goes through
+         * StorageCompletionPush, which routes to the drain core (never the
+         * calling App Core), so it cannot strand. */
         wjob_pump(j);
     } else {
         atomic_store_u32((volatile uint32_t *)&j->state, W_TOKEN_WAIT);

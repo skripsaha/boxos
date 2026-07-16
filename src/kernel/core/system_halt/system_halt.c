@@ -15,7 +15,7 @@
 #include "xhci.h"
 #include "xhci_port.h"
 #include "touch.h"
-#include "write_cont_queue.h"
+#include "storage_completion.h"
 #include "ahci.h"
 #include "amp.h"
 
@@ -29,26 +29,48 @@ static void halt_delay_ms(uint32_t ms)
 }
 
 /*
- * Drain in-flight async storage I/O before we kill cores. Two targets:
- *   1. Per-K-Core WriteContQueue — state-machine continuations posted
- *      by the AHCI IRQ that haven't been pumped yet.
- *   2. AHCI port command issue (CI/SACT) — commands the controller is
+ * Drain in-flight async storage I/O before we kill cores. Three targets:
+ *   1. Per-core irq_defer rings — SCI/GPE/ATA/AHCI-recovery bottom-halves.
+ *   2. The never-drop storage completion queue — read/write state-machine
+ *      continuations posted by the AHCI IRQ that haven't been consumed yet
+ *      (a pending WRITE completion still owes its tagfs commit, so this
+ *      must drain before we cut power or data is lost).
+ *   3. AHCI port command issue (CI/SACT) — commands the controller is
  *      still executing.
- * We poll both until they're idle or the timeout elapses. Other cores
- * are still live at this point (cli not yet executed) so their guide
- * loops keep pumping continuations naturally.
+ * We poll all until idle or the timeout elapses. Other cores are still
+ * live at this point (cli not yet executed) so their guide loops keep
+ * pumping continuations naturally.
  */
 static void halt_drain_async_writes(void)
 {
     kprintf("[HALT] Draining async writes...\n");
+    uint8_t  me       = amp_get_core_index();
     uint64_t deadline = rdtsc() + cpu_ms_to_tsc(3000);
     while (rdtsc() < deadline) {
         bool any = false;
 
-        /* Check pending continuations via the irq_defer accessor —
-         * the old WriteContQueue global is gone. */
+        /* Pump THIS core's own queues before polling. system_halt runs in
+         * guide-loop context on whichever K-Core picked up the reboot/poweroff
+         * pocket — and that can be the BSP, which is the SOLE consumer of the
+         * never-drop storage completion queue (all completions route there).
+         * While we spin here the BSP is no longer in kcore_run_loop, so nothing
+         * else can drain its queue: a completion that lands during the drain
+         * (interrupts are still on before the cli below) would be held forever
+         * and its write's tagfs-commit continuation lost. Draining our own
+         * index each pass is a valid single-consumer pump (me == this core) and
+         * a harmless empty early-out on a non-drain core; other cores keep
+         * pumping their own queues from their guide loops. irq_defer is
+         * multi-consumer, but our own ring is likewise stranded here, so pump
+         * it too. */
+        StorageCompletionPump(me);
+        irq_defer_pump(me);
+
+        /* Pending irq_defer bottom-halves AND unconsumed never-drop storage
+         * completions, across all cores. StorageCompletionOutstanding is
+         * counter-based, so it is safe to poll from this (possibly non-owning)
+         * core while the drain core keeps pumping. */
         for (uint8_t i = 0; i < g_amp.total_cores; i++) {
-            if (irq_defer_pending(i) > 0) {
+            if (irq_defer_pending(i) > 0 || StorageCompletionOutstanding(i)) {
                 any = true;
                 break;
             }
