@@ -153,6 +153,19 @@ if [ -n "$KEYMAP_PATH" ]; then
     printf 'keyboard: keymap="%s", type=mf\n' "$KEYMAP_PATH" >>"$OUT"
 fi
 
+# ---- Serial COM1 (optional) ----
+# Wire COM1 so BoxOS's kernel log (TX) and serial console (RX, see
+# serial_console_init) reach the host. BOCHS_COM1_MODE picks the Bochs backend:
+#   file           TX only -> a log file (BOCHS_COM1_DEV = path)
+#   socket-server  bidirectional TCP; Bochs listens, a client drives the shell
+#                  (BOCHS_COM1_DEV = host:port) — this is the headless console
+# Left unset by default (interactive `make run EMU=bochs` uses the GUI keyboard).
+if [ -n "${BOCHS_COM1_MODE:-}" ]; then
+    printf 'com1: enabled=1, mode=%s, dev=%s\n' \
+        "$BOCHS_COM1_MODE" \
+        "${BOCHS_COM1_DEV:?BOCHS_COM1_DEV is required when BOCHS_COM1_MODE is set}" >>"$OUT"
+fi
+
 if [ "$GDB" = "on" ]; then
     cat >>"$OUT" <<'EOF'
 

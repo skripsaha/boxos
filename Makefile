@@ -275,7 +275,7 @@ UEFI_CFLAGS_CLANG = -ffreestanding -nostdlib -nostdinc \
 # even when 'clang' is in PATH.  Only enable the clang path when lld-link exists.
 CLANG_AVAILABLE := $(shell command -v lld-link 2>/dev/null)
 
-.PHONY: all clean run run-bg run-stop debug info check-deps install-deps uefi usb check-endbr64
+.PHONY: all clean run run-bg run-stop bochs-bg bochs-stop debug info check-deps install-deps uefi usb check-endbr64
 
 # ==== MAIN TARGET ====
 all: check-deps check-error-parity check-no-exit-sentinel $(IMAGE) $(KERNEL_ELF) $(FLOPPY_IMG) $(ISO) $(VBOX_VDI) uefi check-endbr64
@@ -970,6 +970,44 @@ run-stop:
 	else \
 		echo "[run-stop] no pidfile at $(BUILDDIR)/qemu.pid"; \
 	fi
+
+# Headless Bochs with COM1 on a TCP socket — drive the shell entirely over the
+# serial console (kernel serial_console_init), no GUI. Bochs blocks until a
+# client connects, then boots; connect + interact via tools/serial-console.py.
+# Bochs is single-CPU here (homebrew build has no --enable-smp), so the multi-
+# core BMIDE watchdog stays dormant — this target is for headless shell access
+# and log capture, not SMP tests (use QEMU run-bg for those).
+BOCHS_SERIAL_PORT ?= 14400
+bochs-bg: $(IMAGE)
+	@command -v $(BOCHS) >/dev/null || \
+	    (echo "ERROR: bochs not found. Install: brew install bochs / apt install bochs"; exit 1)
+	@if [ -z "$(BOCHS_BIOS)" ] || [ -z "$(BOCHS_VGABIOS)" ]; then \
+	    echo "ERROR: Bochs BIOS/VGABIOS not found in: $(BOCHS_DATA_DIRS)"; exit 1; fi
+	@$(MAKE) --no-print-directory bochs-stop >/dev/null 2>&1 || true
+	@rm -f build/boxos.img.lock $(BUILDDIR)/bochs_serial.out
+	@BOCHS_RC="$(BOCHS_RC)" IMAGE="$<" CORES="1" MEM="$(MEM)" \
+	  BOCHS_CPU="$(BOCHS_CPU)" BOCHS_IPS="$(BOCHS_IPS)" \
+	  BOCHS_DISP_LIB="nogui" BOCHS_DATA_DIRS="$(BOCHS_DATA_DIRS)" \
+	  BOCHS_BIOS="$(BOCHS_BIOS)" BOCHS_VGABIOS="$(BOCHS_VGABIOS)" \
+	  BOCHS_LOG="$(BOCHS_LOG)" \
+	  BOCHS_COM1_MODE="socket-server" BOCHS_COM1_DEV="127.0.0.1:$(BOCHS_SERIAL_PORT)" \
+	  bash tools/make_bochsrc.sh
+	@( $(BOCHS) -q -unlock -f $(BOCHS_RC) >$(BUILDDIR)/bochs_serial.out 2>&1 & \
+	   echo $$! >$(BUILDDIR)/bochs.pid )
+	@echo "=== BoxOS Bochs (headless, COM1 -> tcp:127.0.0.1:$(BOCHS_SERIAL_PORT)) ==="
+	@echo "  pid=$$(cat $(BUILDDIR)/bochs.pid) (waiting for a serial client, then boots)"
+	@echo "  Run cmds : python3 tools/serial-console.py 127.0.0.1:$(BOCHS_SERIAL_PORT) files help"
+	@echo "  Live     : python3 tools/serial-console.py 127.0.0.1:$(BOCHS_SERIAL_PORT)"
+	@echo "  Stop     : make bochs-stop"
+
+bochs-stop:
+	@if [ -f $(BUILDDIR)/bochs.pid ]; then \
+	    PID=$$(cat $(BUILDDIR)/bochs.pid); \
+	    kill $$PID 2>/dev/null && echo "[bochs-stop] killed pid=$$PID"; \
+	    sleep 0.3; kill -0 $$PID 2>/dev/null && kill -9 $$PID 2>/dev/null; \
+	    rm -f $(BUILDDIR)/bochs.pid; \
+	else echo "[bochs-stop] no pidfile"; fi
+	@rm -f build/boxos.img.lock
 
 clean:
 	@echo "Cleaning build..."
