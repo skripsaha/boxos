@@ -140,6 +140,18 @@ static inline void ahci_retire_slots(ahci_port_t* state, uint8_t port_idx,
     }
 }
 
+/* Claim-checked retire arbitration (Ф26 M1). issued_mask is the single arbiter
+ * of which async slots are still ours to retire. A retiring actor offers a
+ * `candidate` set and gets back only the bits its own atomic transition actually
+ * cleared (1->0); it must retire ONLY those. With one retire actor (the BSP MSI
+ * handler) this is a plain wrapper — won always equals candidate. It becomes
+ * load-bearing once ahci_watchdog_scan can also retire from the PIT tick: two
+ * actors that decide the same slot completed in the same instant then retire it
+ * exactly once, and only the winner reads/clears cb[slot]. */
+static inline uint32_t ahci_claim(ahci_port_t* state, uint32_t candidate) {
+    return __sync_fetch_and_and(&state->issued_mask, ~candidate) & candidate;
+}
+
 void ahci_irq_handler(void) {
     // Called from the IRQ dispatcher with interrupts disabled. Do NOT cli/sti
     // or send EOI here — the dispatcher EOIs after this returns.
@@ -204,9 +216,14 @@ void ahci_irq_handler(void) {
                 : __atomic_load_n(&port->ci,   __ATOMIC_ACQUIRE);
             uint32_t completed   = snapshot & ~outstanding;
             if (!completed) break;
-            __sync_fetch_and_or(&state->completed_slots, completed);
-            __sync_fetch_and_and(&state->issued_mask, ~completed);
-            ahci_retire_slots(state, i, completed, OK);
+            /* Claim-checked retire: clear our candidates from issued_mask and
+             * retire ONLY the bits we actually won, so a concurrent watchdog
+             * retire (Ф26 M1) can never double-fire a slot. Single actor today
+             * => won == completed (behaviour-identical). */
+            uint32_t won = ahci_claim(state, completed);
+            if (!won) continue;
+            __sync_fetch_and_or(&state->completed_slots, won);
+            ahci_retire_slots(state, i, won, OK);
         }
 
         /* Fatal port errors (TFES/HBFS/IFS). On a task-file error the failing
@@ -223,8 +240,8 @@ void ahci_irq_handler(void) {
 
             uint32_t stuck = __atomic_load_n(&state->issued_mask, __ATOMIC_ACQUIRE);
             if (stuck) {
-                __sync_fetch_and_and(&state->issued_mask, ~stuck);
-                ahci_retire_slots(state, i, stuck, ERR_IO);
+                uint32_t won = ahci_claim(state, stuck);
+                if (won) ahci_retire_slots(state, i, won, ERR_IO);
             }
 
             /* The HBA halts PxCMD.ST on a fatal error, so without a restart
@@ -244,6 +261,105 @@ void ahci_irq_handler(void) {
     }
 
     ahci_ctrl.hba_mem->is = is;
+}
+
+/* Ф26 M1 — AHCI async-completion watchdog: a safety BACKSTOP, not the delivery
+ * path. The MSI edge remains the normal completion mechanism; this scan is the
+ * harbour-master's overdue-ship register, glanced at once per PIT tick on the
+ * BSP — the same core the AHCI MSI targets, so this scan and ahci_irq_handler
+ * are mutually exclusive, and ahci_claim keeps retire correct even if MSI
+ * routing is ever spread across cores. It NEVER writes PxIS (the MSI handler
+ * owns that W1C); it only READS the PxSACT/PxCI completion level.
+ *
+ *   TIER 1 — lost-edge reconcile. Re-read the completion LEVEL (PxSACT for NCQ,
+ *     PxCI otherwise — AHCI 1.3.1 §5.5.3 / §5.3.x). A slot whose level bit has
+ *     already cleared completed on the device but its MSI edge was lost or
+ *     coalesced; retire it as SUCCESS. A merely-lost interrupt then costs one
+ *     tick of latency, never an I/O failure or a port reset. (A TFES-failed NCQ
+ *     tag keeps its PxSACT bit set, so Tier 1 never mistakes a failure for
+ *     success — that case falls to Tier 2 / the MSI TFES path.)
+ *
+ *   TIER 2 — genuine wedge. A slot still outstanding past CONFIG_AHCI_IO_TIMEOUT_MS
+ *     is a device that stopped both signalling and completing. Fail every
+ *     in-flight slot ERR_IO (as the TFES path does — a port that stopped
+ *     completing one 4 KiB command has stopped completing all) and hand a
+ *     COMRESET to a K-Core via irq_defer, so slots return to the pool instead of
+ *     leaking until ahci_alloc_slot wedges the port.
+ *
+ * Gated on multi-core: async I/O only exists when total_cores > 1 (single core
+ * takes the synchronous path with its own bounded poll), and COMRESET recovery
+ * needs a K-Core pump that only exists there. */
+void ahci_watchdog_scan(void) {
+    if (!ahci_ctrl.initialized || g_amp.total_cores <= 1) return;
+
+    uint64_t now         = rdtsc();
+    uint64_t overdue_tsc = cpu_ms_to_tsc(CONFIG_AHCI_IO_TIMEOUT_MS);
+
+    for (uint8_t i = 0; i < AHCI_MAX_PORTS; i++) {
+        ahci_port_t* state = &ahci_ctrl.ports[i];
+        if (!state->active) continue;
+
+        uint32_t snapshot = __atomic_load_n(&state->issued_mask, __ATOMIC_ACQUIRE);
+        if (snapshot == 0) continue;   /* free early-out — the common (idle) case */
+
+        volatile ahci_port_regs_t* regs = ahci_get_port_regs(i);
+
+        /* A pending fatal error (task-file error, host-bus / interface fatal)
+         * means a command may have completed WITH an error — and on a non-NCQ
+         * port PxCI can clear on error, so a bare completion-level check could
+         * mis-read a failure as success. When an error is pending, skip Tier-1
+         * and treat the port as wedged (Tier-2): fail its slots ERR_IO +
+         * COMRESET. This doubles as the backstop for a LOST *error* MSI — PxIS
+         * stays set until a handler clears it, and COMRESET's PxIS W1C clears it
+         * (ahci_port_comreset). Mirrors ahci_irq_handler's fatal-bit test. */
+        uint32_t pxis = __atomic_load_n(&regs->is, __ATOMIC_ACQUIRE);
+        bool port_error = (pxis & (AHCI_PIS_TFES | AHCI_PIS_HBFS | AHCI_PIS_IFS)) != 0;
+
+        /* TIER 1 — reconcile a lost completion edge against the register level,
+         * on a HEALTHY port only (a failed command is left to Tier-2). */
+        if (!port_error) {
+            uint32_t outstanding = state->ncq
+                ? __atomic_load_n(&regs->sact, __ATOMIC_ACQUIRE)
+                : __atomic_load_n(&regs->ci,   __ATOMIC_ACQUIRE);
+            uint32_t completed = snapshot & ~outstanding;
+            if (completed) {
+                uint32_t won = ahci_claim(state, completed);
+                if (won) {
+                    __sync_fetch_and_or(&state->completed_slots, won);
+                    debug_printf("[AHCI] watchdog: reconciled lost completion, port %u slots 0x%08x\n",
+                                 i, won);
+                    ahci_retire_slots(state, i, won, OK);
+                }
+            }
+        }
+
+        /* TIER 2 — genuine wedge: any in-flight slot past the deadline. Read
+         * submit_tsc + claim under the lock, consistent with ahci_arm_slot's
+         * timestamp+issued_mask write, so a slot re-armed since the snapshot
+         * (fresh submit_tsc) is never mis-failed (ABA-safe). issued_mask is
+         * stable under the lock: the only other writers are the BSP MSI handler
+         * (serialized with this BSP tick) and a cross-core arm (blocked on the
+         * lock). */
+        spin_lock(&state->lock);
+        uint32_t still   = __atomic_load_n(&state->issued_mask, __ATOMIC_ACQUIRE);
+        uint32_t overdue = 0;
+        for (uint32_t m = still; m; m &= m - 1) {
+            uint8_t s = (uint8_t)__builtin_ctz(m);
+            if (now - state->submit_tsc[s] > overdue_tsc) overdue |= (1U << s);
+        }
+        uint32_t won = (overdue || port_error) ? ahci_claim(state, still) : 0;
+        spin_unlock(&state->lock);
+
+        if (won) {
+            __atomic_store_n(&state->stats.last_error_tsc, now, __ATOMIC_RELAXED);
+            debug_printf("[AHCI] watchdog: port %u %s — failing slots 0x%08x + COMRESET\n",
+                         i, port_error ? "fatal-error (lost MSI)" : "wedged past timeout", won);
+            ahci_retire_slots(state, i, won, ERR_IO);
+            if (__sync_bool_compare_and_swap(&state->recovering, 0, 1)) {
+                irq_defer(ahci_deferred_recover, state);
+            }
+        }
+    }
 }
 
 void ahci_port_enable_irq(uint8_t port_num) {
@@ -431,6 +547,12 @@ void ahci_arm_slot(uint8_t port_num, uint8_t slot) {
         regs->sact = (1U << slot);
     }
     regs->ci = (1U << slot);
+    /* Ф26 M1: stamp the submit timestamp under the lock, right where the slot
+     * enters issued_mask, so ahci_watchdog_scan's overdue check reads a
+     * submit_tsc consistent with the arming (no torn arm-vs-scan). Only the
+     * async path calls ahci_arm_slot, so only async slots get a submit_tsc —
+     * exactly the set the watchdog scans. */
+    port->submit_tsc[slot] = rdtsc();
     __sync_fetch_and_or(&port->issued_mask, (1U << slot));
     spin_unlock(&port->lock);
 }

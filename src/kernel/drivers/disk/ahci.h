@@ -435,6 +435,13 @@ void ahci_init_irq(void);
 void ahci_port_enable_irq(uint8_t port_num);
 void ahci_irq_handler(void);
 
+/* Ф26 M1 — periodic async-completion watchdog (backstop for a lost/coalesced
+ * completion MSI or a wedged device). Call once per PIT tick on the BSP.
+ * Tier 1 reconciles a lost edge from the PxSACT/PxCI level (retires as success);
+ * Tier 2 fails a genuinely wedged port's slots + defers a COMRESET. No-op on a
+ * single core (async I/O disabled there). */
+void ahci_watchdog_scan(void);
+
 int ahci_alloc_slot(uint8_t port_num);
 void ahci_free_slot(uint8_t port_num, uint8_t slot);
 bool ahci_can_submit_port(uint8_t port_num);

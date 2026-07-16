@@ -135,6 +135,14 @@ _Static_assert(CONFIG_KERNEL_STACK_PAGES * CONFIG_PAGE_SIZE >=
 #define CONFIG_AHCI_MAX_RETRIES 3
 #define CONFIG_AHCI_MAX_COMRESET_ATTEMPTS 3
 #define CONFIG_AHCI_CMD_TIMEOUT_MS 2000
+/* Ф26 M1 — async-completion watchdog deadline. A safety BACKSTOP, not the
+ * delivery path: the MSI edge is the normal completion signal and Tier-1
+ * lost-edge reconcile recovers a merely-lost interrupt every PIT tick, so this
+ * bound is reached ONLY by a genuinely non-completing command. 30 s matches the
+ * industry-standard disk command deadline (Linux SD_TIMEOUT) — generous enough
+ * never to false-positive on a drive in multi-second internal error recovery,
+ * bounded so a wedge recovers instead of hanging a waiter forever. */
+#define CONFIG_AHCI_IO_TIMEOUT_MS 30000
 #define CONFIG_AHCI_MAX_PORTS 32
 #define CONFIG_AHCI_MAX_SLOTS 32
 
