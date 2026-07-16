@@ -207,7 +207,7 @@ int ata_set_xfer_mode(uint8_t drive_idx, uint8_t mode_byte) {
  *  is silent before, during, and after reset — there is no window in
  *  which a stale IRQ could escape to the IOAPIC.
  * ------------------------------------------------------------------ */
-static void ata_channel_soft_reset(uint8_t channel) {
+void ata_channel_soft_reset(uint8_t channel) {
     AtaChannel* ch = &g_ata_channels[channel];
     if (!ch->present) return;
 
