@@ -1165,3 +1165,112 @@ error_t bmide_watchdog_selftest(void) {
             (int)sub, (int)cmd.sync_rc);
     return ERR_IO;
 }
+
+/* ---------------------------------------------------------------------
+ *  On-demand diagnostic — TIER-2 wedge -> K-Core SRST recovery, end-to-end.
+ *
+ *  QEMU's PIIX IDE completes reliably and cannot be made to hang, so the
+ *  genuine-wedge path (bmide_watchdog_scan TIER-2 -> ata_recover_worker) has no
+ *  natural trigger. This drives it deterministically: install an in-flight cmd
+ *  for which NO DMA was ever issued — the drive will never signal, an exact
+ *  "engine idle, no INTRQ" wedge — then let the real scan detect it (TIER-2a)
+ *  and post SRST recovery to a K-Core, and assert the worker (a) failed the
+ *  wedged cmd ERR_IO and (b) left the channel usable (a real read succeeds).
+ *
+ *  This SRSTs the boot drive, so it is compiled in only under WEDGETEST=on and
+ *  never runs on a production boot. Safe: read-only, channel-quiescent guard,
+ *  bounded wait, and the fake cmd's stack lifetime is covered by the worker's
+ *  publish-done-last ordering (no DMA was issued, so nothing else references it).
+ * ------------------------------------------------------------------ */
+#if CONFIG_BMIDE_WEDGE_SELFTEST
+error_t bmide_wedge_selftest(void) {
+    if (g_amp.total_cores < 2) {
+        kprintf("[BMIDE-WD] TIER-2 self-test skipped (single-core)\n");
+        return OK;
+    }
+    uint8_t drive = 0xFF;
+    for (uint8_t d = 0; d < ATA_DRIVE_COUNT; d++) {
+        if (ata_async_usable(d)) { drive = d; break; }
+    }
+    if (drive == 0xFF || !async_path_viable()) {
+        kprintf("[BMIDE-WD] TIER-2 self-test skipped (no BMIDE async drive)\n");
+        return OK;
+    }
+
+    uint8_t     ch  = drive_channel(drive);
+    AtaAsyncCh *aa  = &g_ata_async[ch];
+    void *vbuf = kmalloc(ATA_SECTOR_SIZE);
+    if (!vbuf) { kprintf("[BMIDE-WD] TIER-2 self-test skipped (no mem)\n"); return OK; }
+
+    AtaCmd fake;
+    memset(&fake, 0, sizeof(fake));
+    fake.drive_idx    = drive;
+    fake.channel      = ch;
+    fake.lba          = 0;
+    fake.count        = 1;
+    fake.is_write     = false;
+    fake.user_buf     = vbuf;
+    fake.is_sync_wait = true;
+    fake.sync_rc      = OK;
+    fake.submit_tsc   = rdtsc();
+
+    /* Install as in-flight WITHOUT issuing DMA — a wedge the drive never ends.
+     * Only on a quiescent channel (no live traffic to disturb). */
+    spin_lock(&aa->cmd_lock);
+    bool installed = (aa->in_flight == NULL && !aa->recovering);
+    if (installed) aa->in_flight = &fake;
+    spin_unlock(&aa->cmd_lock);
+    if (!installed) {
+        kfree(vbuf);
+        kprintf("[BMIDE-WD] TIER-2 self-test skipped (channel busy)\n");
+        return OK;
+    }
+
+    /* Real detection path: the scan sees engine-idle-without-INTRQ (TIER-2a),
+     * CASes recovering, and posts SRST recovery to the drain core's queue. */
+    bmide_watchdog_scan();
+
+    /* Bounded wait for ata_recover_worker to SRST + fail `fake` ERR_IO. The
+     * recovery node is posted to the BSP drain queue, but at this boot stage the
+     * BSP has not yet entered kcore_run_loop, so nothing drains it — we pump it
+     * here ourselves (single-consumer safe: this runs on the BSP, which owns the
+     * queue). This exercises the real push+pump+worker chain, not a direct call. */
+    bool worker_ok = false;
+    uint64_t deadline = rdtsc() + cpu_ms_to_tsc(6000);
+    while (rdtsc() < deadline) {
+        StorageCompletionPump(g_amp.bsp_index);
+        if (__atomic_load_n(&fake.done, __ATOMIC_ACQUIRE)) {
+            worker_ok = (fake.sync_rc == ERR_IO);
+            break;
+        }
+        cpu_pause();
+    }
+
+    /* Safety net: if the worker never completed (a regression), the fake would
+     * be left in-flight with recovering stuck — its stack frame is about to die.
+     * Undo it so boot continues cleanly and nothing dereferences a dead frame. */
+    if (!worker_ok) {
+        spin_lock(&aa->cmd_lock);
+        if (aa->in_flight == &fake) { bmide_engine_stop(aa); aa->in_flight = NULL; }
+        __atomic_store_n(&aa->landing, NULL, __ATOMIC_RELAXED);
+        __atomic_store_n(&aa->recovering, 0u, __ATOMIC_RELEASE);
+        spin_unlock(&aa->cmd_lock);
+    }
+
+    /* Prove the channel recovered: a real read must now succeed (exercises the
+     * same submit -> kick -> complete path the worker's queue re-launch uses). */
+    bool recovered = worker_ok && (ata_dma_sync(drive, 0, 1, false, vbuf) == 0);
+
+    kfree(vbuf);
+
+    if (worker_ok && recovered) {
+        kprintf("[BMIDE-WD] TIER-2 wedge->SRST recover PASS "
+                "(cmd failed ERR_IO + channel re-usable)\n");
+        return OK;
+    }
+    kprintf("[BMIDE-WD] TIER-2 wedge->SRST recover FAIL "
+            "(worker_ok=%d done=%d rc=%d recovered=%d)\n",
+            (int)worker_ok, (int)fake.done, (int)fake.sync_rc, (int)recovered);
+    return ERR_IO;
+}
+#endif /* CONFIG_BMIDE_WEDGE_SELFTEST */

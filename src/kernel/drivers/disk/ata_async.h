@@ -108,6 +108,12 @@ void bmide_watchdog_scan(void);
  * Emits "[BMIDE-WD] TIER-1 ... PASS/FAIL" for the phase matrix to assert. */
 error_t bmide_watchdog_selftest(void);
 
+/* On-demand diagnostic (WEDGETEST=on only) — drives a synthetic wedge through
+ * the real scan -> K-Core SRST recovery worker and asserts the wedged cmd fails
+ * ERR_IO + the channel comes back. SRSTs the boot drive, so it is NOT part of a
+ * normal boot. Emits "[BMIDE-WD] TIER-2 ... PASS/FAIL". */
+error_t bmide_wedge_selftest(void);
+
 /* Stats accessors (boot/diag prints, debug commands). */
 uint64_t ata_async_cmds_submitted(uint8_t channel);
 uint64_t ata_async_cmds_completed(uint8_t channel);

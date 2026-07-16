@@ -734,6 +734,16 @@ void kernel_main(void)
         (void)bmide_watchdog_selftest();
     }
 
+#if CONFIG_BMIDE_WEDGE_SELFTEST
+    /* On-demand TIER-2 proof (WEDGETEST=on): drives a synthetic wedge through
+     * the real scan -> K-Core SRST recovery. SRSTs the boot drive — never in a
+     * production build. */
+    {
+        extern error_t bmide_wedge_selftest(void);
+        (void)bmide_wedge_selftest();
+    }
+#endif
+
 #if CONFIG_START_USERSPACE
     kprintf("Starting userspace...\n");
     kprintf("\n");
