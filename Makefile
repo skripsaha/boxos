@@ -139,6 +139,12 @@ CFLAGS         += $(addprefix -I,$(INCLUDE_DIRS))
 ifeq ($(DEBUG),on)
 CFLAGS += -DCONFIG_DEBUG_ENABLED=1 -DCONFIG_DEBUG_MODE=1
 endif
+# On-demand BMIDE watchdog TIER-2 (wedge->SRST) diagnostic. Off unless requested
+# (it SRSTs the boot drive) — `make WEDGETEST=on` for a verification build.
+WEDGETEST ?= off
+ifeq ($(WEDGETEST),on)
+CFLAGS += -DCONFIG_BMIDE_WEDGE_SELFTEST=1
+endif
 # LDFLAGS — kernel link
 #   -z max-page-size=0x1000    align segments to page (kernel mappings)
 #   -z noexecstack             explicit no-exec stack (default but

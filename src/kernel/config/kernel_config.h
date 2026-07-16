@@ -84,6 +84,13 @@
  * drive -> SRST. Bounds hardware silence, never I/O duration. */
 #define CONFIG_ATA_LIVENESS_MS 5000
 
+/* On-demand BMIDE watchdog TIER-2 diagnostic (bmide_wedge_selftest). OFF by
+ * default: it drives a real SRST of the boot drive, which must never run on a
+ * production boot. Enable for a verification build with `make WEDGETEST=on`. */
+#ifndef CONFIG_BMIDE_WEDGE_SELFTEST
+#define CONFIG_BMIDE_WEDGE_SELFTEST 0
+#endif
+
 #define CONFIG_ASYNC_DISPATCH_INTERVAL_MS 1
 #define CONFIG_DMA_TIMEOUT_CHECK_INTERVAL_MS 100
 
