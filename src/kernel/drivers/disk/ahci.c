@@ -12,7 +12,6 @@
 #include "boxos_memory.h"
 #include "idt.h"
 #include "amp.h"
-#include "irq_defer.h"
 
 #define AHCI_TIMEOUT_MS CONFIG_AHCI_CMD_TIMEOUT_MS
 
@@ -110,7 +109,8 @@ static int ahci_port_start(ahci_port_t* port) {
 }
 
 /* K-Core bottom-half: full port recovery (COMRESET) after a fatal error.
- * Dispatched via irq_defer because COMRESET busy-waits for hundreds of ms,
+ * Posted to a K-Core via the port's embedded never-drop recovery node
+ * (StorageCompletionPush) because COMRESET busy-waits for hundreds of ms,
  * far too long for interrupt context. The IRQ path already failed the
  * port's outstanding async slots with ERR_IO before scheduling this. */
 static void ahci_deferred_recover(void* ctx) {
@@ -246,8 +246,9 @@ void ahci_irq_handler(void) {
 
             /* The HBA halts PxCMD.ST on a fatal error, so without a restart
              * every later command on this port would stall. COMRESET busy-
-             * waits, so hand it to a K-Core via irq_defer (allocation-free,
-             * IRQ-safe). The CAS coalesces a storm of error IRQs into one. */
+             * waits, so post it to a K-Core via the port's never-drop
+             * recovery node (allocation-free, IRQ-safe, undroppable). The CAS
+             * coalesces a storm of error IRQs into one post. */
             /* Only multi-core schedules deferred recovery: the COMRESET runs
              * on a K-Core pump loop, which exists only when total_cores > 1.
              * On a single core async I/O is disabled and the sync path
@@ -255,7 +256,7 @@ void ahci_irq_handler(void) {
              * to a ring nothing drains. */
             if (g_amp.total_cores > 1 &&
                 __sync_bool_compare_and_swap(&state->recovering, 0, 1)) {
-                irq_defer(ahci_deferred_recover, state);
+                StorageCompletionPush(&state->recover_node);   /* never-drop */
             }
         }
     }
@@ -282,9 +283,9 @@ void ahci_irq_handler(void) {
  *   TIER 2 — genuine wedge. A slot still outstanding past CONFIG_AHCI_IO_TIMEOUT_MS
  *     is a device that stopped both signalling and completing. Fail every
  *     in-flight slot ERR_IO (as the TFES path does — a port that stopped
- *     completing one 4 KiB command has stopped completing all) and hand a
- *     COMRESET to a K-Core via irq_defer, so slots return to the pool instead of
- *     leaking until ahci_alloc_slot wedges the port.
+ *     completing one 4 KiB command has stopped completing all) and post a
+ *     COMRESET to a K-Core via the port's never-drop recovery node, so slots
+ *     return to the pool instead of leaking until ahci_alloc_slot wedges the port.
  *
  * Gated on multi-core: async I/O only exists when total_cores > 1 (single core
  * takes the synchronous path with its own bounded poll), and COMRESET recovery
@@ -356,7 +357,7 @@ void ahci_watchdog_scan(void) {
                          i, port_error ? "fatal-error (lost MSI)" : "wedged past timeout", won);
             ahci_retire_slots(state, i, won, ERR_IO);
             if (__sync_bool_compare_and_swap(&state->recovering, 0, 1)) {
-                irq_defer(ahci_deferred_recover, state);
+                StorageCompletionPush(&state->recover_node);   /* never-drop */
             }
         }
     }
@@ -642,6 +643,13 @@ static int ahci_port_init(uint8_t port_num) {
     port->port_num = port_num;
     port->regs = ahci_get_port_regs(port_num);
     spinlock_init(&port->lock);
+
+    /* Never-drop recovery node: COMRESET is posted through this embedded
+     * node (StorageCompletionPush), so a wedged-port recovery can never be
+     * dropped for want of a defer slot. */
+    port->recover_node.run = ahci_deferred_recover;
+    port->recover_node.ctx = port;
+
     port->status = AHCI_PORT_FAILED;
 
     volatile ahci_port_regs_t* regs = port->regs;

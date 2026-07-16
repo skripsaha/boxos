@@ -42,7 +42,7 @@
 #include "kring.h"
 #include "kresult.h"
 #include "write_job.h"
-#include "write_cont_queue.h"   /* WriteContEnqueue — defer read completion to a K-Core pump (Ф26 M2) */
+#include "storage_completion.h"   /* StorageCompletionPush — never-drop read completion (Ф26 M2/M4) */
 #include "ata.h"
 #include "touch.h"
 #include "cow.h"
@@ -137,7 +137,11 @@ typedef struct {
     Crate           *crates_kbuf;
     uint64_t         crates_uaddr;
     uint16_t         crate_count;
-    uint16_t         _pad[3];
+
+    /* Never-drop completion node (Ф26 M4): the AHCI IRQ posts this read to
+     * the drain core with zero allocation, so a completion can never be
+     * dropped. run = obj_read_pump, ctx = this ctx; set once at alloc. */
+    StorageCompletion cq_node;
 } ObjReadAsyncCtx;
 
 static void obj_read_step(ObjReadAsyncCtx *ctx);
@@ -190,15 +194,14 @@ static void obj_read_finish(ObjReadAsyncCtx *ctx, error_t status, bool partial_o
     kfree(ctx);
 }
 
-/* Ф26 M2 — IRQ callback, LEAN. Runs in raw AHCI completion IRQ context. Stashes
- * the retire status and defers the heavy half (memcpy out of DMA, page-walked
+/* Ф26 M2/M4 — IRQ callback, LEAN. Runs in raw AHCI completion IRQ context. Stashes
+ * the retire status and posts the heavy half (memcpy out of DMA, page-walked
  * commit, pmm/vmm free, tagfs_close, crate-stage release, KResultPush, kfree, and
- * re-arming the next block) to a K-Core pump via irq_defer — which is
- * allocation-free on the producer side and cannot fail. Doing that work HERE is
- * the exact "no allocation / no thread-context locks from IRQ" violation that
- * write_cont_queue.c documents as the root cause of the 2026-05-17 random-hang
- * class; the write path (wjob_ahci_complete) was rebuilt to defer, and the read
- * path now matches it. */
+ * re-arming the next block) to the drain core's K-Core pump via the ctx's
+ * embedded never-drop node. Doing that work HERE is the exact "no allocation /
+ * no thread-context locks from IRQ" violation diagnosed as the root of the
+ * 2026-05-17 random-hang class; the write path (wjob_ahci_complete) posts the
+ * same way. The node lives inside the ctx, so the post can never be dropped. */
 static void obj_read_async_complete(uint8_t port, uint8_t slot,
                                      error_t status, void *ctx_)
 {
@@ -206,11 +209,11 @@ static void obj_read_async_complete(uint8_t port, uint8_t slot,
     (void)slot;
     ObjReadAsyncCtx *ctx = (ObjReadAsyncCtx *)ctx_;
     ctx->if_status = status;
-    (void)WriteContEnqueue(obj_read_pump, ctx);   /* irq_defer; cannot fail */
+    StorageCompletionPush(&ctx->cq_node);   /* never-drop; heavy half on the K-Core pump */
 }
 
 /* Ф26 M2 — K-Core pump: the heavy half of a read completion, drained by the same
- * irq_defer loop that pumps write jobs (kcore_run_loop). Safe to take locks /
+ * StorageCompletionPump loop that pumps write jobs (kcore_run_loop). Safe to take locks /
  * alloc / free / page-walk here (pump context, not IRQ). Applies the just-read
  * chunk, advances the cursor, and either finalizes or arms the next block. */
 static void obj_read_pump(void *ctx_)
@@ -410,6 +413,11 @@ static int ObjRead(const ManifestOp *op,
                         async_ctx->crates_uaddr  = ctx->crates_uaddr;
                         async_ctx->crate_count   = ctx->crate_count;
 
+                        /* Never-drop completion node: set before the first
+                         * submit so the AHCI IRQ can post it with no alloc. */
+                        async_ctx->cq_node.run   = obj_read_pump;
+                        async_ctx->cq_node.ctx   = async_ctx;
+
                         /* Park BEFORE the first submit — if the IRQ
                          * fires before we set WAITING, KResultPush's
                          * "if state==WAITING flip to WORKING" is a
@@ -509,8 +517,8 @@ static int ObjWrite(const ManifestOp *op,
 
     /* Async write requires a K-Core to pump its IRQ-deferred completion
      * continuations (write completion does heavy work — alloc / DiskBook /
-     * CoW — that cannot run in IRQ context, so it is deferred via irq_defer
-     * and drained by kcore_run_loop). That loop only exists in multi-core
+     * CoW — that cannot run in IRQ context, so it is posted to the never-drop
+     * storage completion queue and drained by kcore_run_loop). That loop only exists in multi-core
      * mode; on a single core the BSP runs userspace and never pumps, so the
      * job would strand. Use the sync path there — it is correct and has no
      * benefit to lose (one core does everything regardless). */

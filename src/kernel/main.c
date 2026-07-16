@@ -44,7 +44,7 @@
 #include "amp.h"
 #include "per_core.h"
 #include "kcore.h"
-#include "write_cont_queue.h"
+#include "storage_completion.h"
 #include "lapic.h"
 #include "per_core.h"
 #include "idle.h"
@@ -598,6 +598,13 @@ void kernel_main(void)
         kprintf("[WARN] proc-authority self-test failed: %s\n", ErrorString(procauth_err));
     }
 
+    debug_printf("[INIT] storage-completion never-drop self-test...\n");
+    error_t scq_err = StorageCompletionSelfTest();
+    if (scq_err != OK)
+    {
+        kprintf("[WARN] storage-completion self-test failed: %s\n", ErrorString(scq_err));
+    }
+
     debug_printf("[INIT] Operations Deck register...\n");
     error_t ops_reg_err = OperationsDeckRegister();
     if (ops_reg_err != OK)
@@ -626,8 +633,8 @@ void kernel_main(void)
         debug_printf("[INIT] K-Core Queues...\n");
         kcore_init();
 
-        debug_printf("[INIT] Write Continuation Queues...\n");
-        WriteContQueueInit();
+        debug_printf("[INIT] Storage completion queues (never-drop MPSC)...\n");
+        StorageCompletionInit();
 
         debug_printf("[INIT] Syscall Mode: ASYNC...\n");
         idt_set_syscall_mode(true);
