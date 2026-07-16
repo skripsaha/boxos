@@ -2167,7 +2167,16 @@ int tagfs_list_all_files(uint32_t *out_file_ids, uint32_t max_results)
         return 0;
 
     uint32_t found = 0;
+    /* Snapshot the scan bound under g_state.lock. create bumps next_file_id
+     * under this lock, so a lock-free read here can observe a stale pre-
+     * increment value (x86-TSO store buffer / no acquire) and truncate the scan
+     * below a just-created fid — hiding a file whose create() already returned
+     * to the caller (the cross-core half of write_concurrent "file not found").
+     * Snapshot then release so the per-fid file_table locking below stays
+     * unnested. */
+    spin_lock(&g_state.lock);
     uint32_t max_id = g_state.superblock.next_file_id;
+    spin_unlock(&g_state.lock);
 
     for (uint32_t fid = 1; fid < max_id && found < max_results; fid++)
     {

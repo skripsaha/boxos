@@ -754,6 +754,15 @@ void process_destroy(process_t *proc)
 
     BrookCleanupProcess(proc);
 
+    /* Destroy this pid's TagFS query-context so its context tags cannot leak
+     * into a process that later recycles the pid. tagfs_context_destroy was
+     * defined but never called — the leaked per-pid tags made ObjQuery merge a
+     * recycled child's stale context and route it through the FILTERED query,
+     * hiding a file it should have found (the write_concurrent "file not found"
+     * -> torn-slice failure, reproducible even single-core). Idempotent no-op
+     * for the common case of a process that never set a context. */
+    tagfs_context_destroy(proc->pid);
+
     cet_process_destroy(proc);
     cet_process_destroy_kernel_ssp(proc);
 
