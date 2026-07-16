@@ -42,6 +42,7 @@
 #include "kring.h"
 #include "kresult.h"
 #include "write_job.h"
+#include "write_cont_queue.h"   /* WriteContEnqueue — defer read completion to a K-Core pump (Ф26 M2) */
 #include "ata.h"
 #include "touch.h"
 #include "cow.h"
@@ -126,6 +127,7 @@ typedef struct {
     void            *dma_virt;
     uint32_t         in_flight_off_in_blk;
     uint32_t         in_flight_chunk;
+    error_t          if_status;      /* Ф26 M2: AHCI IRQ stashes status here; obj_read_pump reads it */
 
     /* CrateStage handoff: ownership of the staged Crate[] buffer transfers
      * from the dispatcher to this async context the moment ObjRead returns
@@ -142,6 +144,7 @@ static void obj_read_step(ObjReadAsyncCtx *ctx);
 static void obj_read_finish(ObjReadAsyncCtx *ctx, error_t status, bool partial_ok);
 static void obj_read_async_complete(uint8_t port, uint8_t slot,
                                      error_t status, void *ctx_);
+static void obj_read_pump(void *ctx_);   /* Ф26 M2: K-Core half of a read completion */
 
 static void obj_read_finish(ObjReadAsyncCtx *ctx, error_t status, bool partial_ok)
 {
@@ -187,19 +190,41 @@ static void obj_read_finish(ObjReadAsyncCtx *ctx, error_t status, bool partial_o
     kfree(ctx);
 }
 
+/* Ф26 M2 — IRQ callback, LEAN. Runs in raw AHCI completion IRQ context. Stashes
+ * the retire status and defers the heavy half (memcpy out of DMA, page-walked
+ * commit, pmm/vmm free, tagfs_close, crate-stage release, KResultPush, kfree, and
+ * re-arming the next block) to a K-Core pump via irq_defer — which is
+ * allocation-free on the producer side and cannot fail. Doing that work HERE is
+ * the exact "no allocation / no thread-context locks from IRQ" violation that
+ * write_cont_queue.c documents as the root cause of the 2026-05-17 random-hang
+ * class; the write path (wjob_ahci_complete) was rebuilt to defer, and the read
+ * path now matches it. */
 static void obj_read_async_complete(uint8_t port, uint8_t slot,
                                      error_t status, void *ctx_)
 {
     (void)port;
     (void)slot;
     ObjReadAsyncCtx *ctx = (ObjReadAsyncCtx *)ctx_;
+    ctx->if_status = status;
+    (void)WriteContEnqueue(obj_read_pump, ctx);   /* irq_defer; cannot fail */
+}
 
-    if (status != OK) {
+/* Ф26 M2 — K-Core pump: the heavy half of a read completion, drained by the same
+ * irq_defer loop that pumps write jobs (kcore_run_loop). Safe to take locks /
+ * alloc / free / page-walk here (pump context, not IRQ). Applies the just-read
+ * chunk, advances the cursor, and either finalizes or arms the next block. */
+static void obj_read_pump(void *ctx_)
+{
+    ObjReadAsyncCtx *ctx = (ObjReadAsyncCtx *)ctx_;
+
+    if (ctx->if_status != OK) {
         obj_read_finish(ctx, ERR_IO, /*partial_ok=*/false);
         return;
     }
 
-    /* Apply this chunk. */
+    /* Apply this chunk out of the reusable DMA page. The next block is armed
+     * only AFTER this copy (both in pump context), so the device cannot
+     * overwrite the page between completion and copy. */
     memcpy(ctx->out_base + ctx->bytes_done,
            (uint8_t *)ctx->dma_virt + ctx->in_flight_off_in_blk,
            ctx->in_flight_chunk);
@@ -210,7 +235,7 @@ static void obj_read_async_complete(uint8_t port, uint8_t slot,
         return;
     }
 
-    /* More to do — fire the next block. */
+    /* More to do — arm the next block (now in pump context, not IRQ). */
     obj_read_step(ctx);
 }
 
