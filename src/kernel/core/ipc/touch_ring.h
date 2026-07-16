@@ -38,7 +38,7 @@
  * Producer model — MPSC
  * ---------------------
  * Multiple K-Cores can land in KTouchPush concurrently for the same
- * target (Touch publishes from acpi_touch_deferred, ata_complete_deferred,
+ * target (Touch publishes from acpi_touch_deferred, ata_err_worker,
  * the irq-defer keyboard/xhci fan-out, plus synchronous storage_ops
  * paths — all racing for one cabin's ring).
  *
