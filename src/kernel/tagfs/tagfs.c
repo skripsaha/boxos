@@ -2348,11 +2348,14 @@ int tagfs_write(TagFSFileHandle *handle, const void *buffer, uint64_t size)
      * for the lock.
      *
      * Break the cycle by trylocking with the IRQ window open between
-     * attempts. Each failed trylock restores RFLAGS (re-enabling IRQs),
-     * so the pending BMIDE IRQ can fire and queue ata_complete_deferred
-     * onto the BSP's irq_defer ring; the pump on this very iteration
-     * drains it; the holder's cmd.done flips; the holder releases.
-     * Uncontended fast path is unchanged — trylock succeeds first try. */
+     * attempts. Each failed trylock restores RFLAGS (re-enabling IRQs), so
+     * the pending BMIDE IRQ can fire on the BSP and stamp the holder's
+     * `landing` slot; the holder (spinning in ata_dma_sync) claims it, runs
+     * its completion, flips cmd.done, and releases. Opening the IRQ window is
+     * the load-bearing part; the irq_defer_pump below is now vestigial for
+     * BMIDE (the holder self-drains via landing) but harmless — it still
+     * drains this core's other deferred work. Uncontended fast path is
+     * unchanged — trylock succeeds first try. */
     if (handle->ofe)
     {
         if (!spin_trylock(&handle->ofe->write_lock)) {

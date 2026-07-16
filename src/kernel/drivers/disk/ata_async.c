@@ -115,6 +115,18 @@ typedef struct AtaCmd {
     struct AtaCmd *next;
 } AtaCmd;
 
+/* Staged error info for the deferred (K-Core) Touch publish — see
+ * ata_run_completion / ata_err_worker. Kept off the completing spinner
+ * because that spinner may hold tagfs write_lock, and TouchPublish takes
+ * subscriber locks (a REACT subscriber can take write_lock → inversion). */
+typedef struct AtaErrEv {
+    uint8_t  drive;
+    bool     is_write;
+    uint16_t count;
+    error_t  rc;
+    uint64_t lba;
+} AtaErrEv;
+
 typedef struct AtaAsyncCh {
     bool        enabled;
     uint16_t    bmide_base;
@@ -133,6 +145,17 @@ typedef struct AtaAsyncCh {
     volatile uint64_t cmds_completed;
     volatile uint64_t cmds_failed;
     volatile uint64_t spurious_irqs;
+
+    /* Ф26 landing — per-channel single-slot NEVER-DROP completion mailbox
+     * for the SYNC path. The IRQ stamps the completed cmd here (RELEASE);
+     * the waiting spinner claims it (ACQ_REL XCHG) and runs the bottom-half
+     * itself, so a sync BMIDE completion can never be dropped the way
+     * irq_defer could. ≤1 in-flight per channel ⇒ one slot suffices; the
+     * async fire-and-forget path (no spinner) still rides irq_defer. */
+    AtaCmd   *volatile landing;
+    volatile uint64_t  landing_clobber;   /* invariant tripwire — must stay 0 */
+    volatile uint8_t   clobber_warned;    /* one-shot: loud print on first clobber */
+    AtaErrEv           err_ev;            /* staged for deferred error publish */
 } AtaAsyncCh;
 
 static AtaAsyncCh g_ata_async[ATA_CHANNEL_COUNT];
@@ -371,34 +394,41 @@ static void touch_publish_error(uint8_t drive_idx, error_t status,
     TouchPublish("storage:ata:error", &ev, sizeof(ev));
 }
 
-static void ata_complete_deferred(void *ctx) {
-    AtaCmd *cmd = (AtaCmd *)ctx;
-    if (!cmd) return;
+/* Deferred error publish: runs on a K-Core (irq_defer), so it never holds
+ * tagfs write_lock and TouchPublish's subscriber locks are order-safe. */
+static void ata_err_worker(void *ctx) {
+    AtaAsyncCh *aa = (AtaAsyncCh *)ctx;
+    AtaErrEv e = aa->err_ev;   /* snapshot */
+    touch_publish_error(e.drive, e.rc, e.lba, e.count, e.is_write);
+}
 
-    AtaAsyncCh *aa = &g_ata_async[cmd->channel];
-
-    /* Read path: copy DMA staging into the caller's buffer. The staging
-     * page is only safe to read between IRQ and "next kick" — the kick
-     * is sequenced below under cmd_lock, so this memcpy must precede it. */
+/* Shared completion bottom-half. Invoked by the SYNC-path spinner (via a
+ * landing claim) AND by the ASYNC-path irq_defer trampoline. Straight-line,
+ * never blocks: memcpy-out, kick the next queued cmd, then signal the
+ * spinner (sync) or fire the callback + free (async). Because the sync
+ * caller may run this while holding tagfs write_lock, the error Touch
+ * publish is DEFERRED to a K-Core (ata_err_worker) — the actual I/O error
+ * is still returned to the caller via cmd->sync_rc regardless. */
+static void ata_run_completion(AtaAsyncCh *aa, AtaCmd *cmd) {
+    /* Read path: copy DMA staging into the caller's buffer BEFORE the next
+     * kick reuses the shared staging page. */
     if (!cmd->is_write && cmd->sync_rc == OK && cmd->user_buf) {
         memcpy(cmd->user_buf, aa->buf_virt, (uint32_t)cmd->count * ATA_SECTOR_SIZE);
     }
 
-    /* Pull the next queued cmd and kick the engine on it. Holding
-     * cmd_lock across the BMIDE register writes prevents an in-flight
-     * IRQ-side completion (next cmd may complete very fast on an SSD)
-     * from racing on the same registers. */
+    /* Pull the next queued cmd and kick the engine on it. cmd_lock serialises
+     * the BMIDE register writes against a fast next-completion IRQ. */
     spin_lock(&aa->cmd_lock);
     AtaCmd *next = queue_pop_head(aa);
     aa->in_flight = next;
     if (next) bmide_kick(aa, next);
     spin_unlock(&aa->cmd_lock);
 
-    /* Now run the completed cmd's bottom-half. */
     if (cmd->sync_rc != OK) {
         atomic_fetch_add_u64(&aa->cmds_failed, 1);
-        touch_publish_error(cmd->drive_idx, cmd->sync_rc,
-                            cmd->lba, cmd->count, cmd->is_write);
+        aa->err_ev = (AtaErrEv){ .drive = cmd->drive_idx, .is_write = cmd->is_write,
+                                 .count = cmd->count, .rc = cmd->sync_rc, .lba = cmd->lba };
+        irq_defer(ata_err_worker, aa);   /* best-effort telemetry, off the spinner */
     }
     atomic_fetch_add_u64(&aa->cmds_completed, 1);
 
@@ -407,12 +437,20 @@ static void ata_complete_deferred(void *ctx) {
     }
 
     if (cmd->is_sync_wait) {
-        /* Caller owns the cmd struct (stack-allocated). Just publish
-         * done; sti;hlt loop will wake on the next IRQ tick. */
+        /* Caller owns the stack cmd. Publish done; the spinner returns. */
         __atomic_store_n(&cmd->done, 1u, __ATOMIC_RELEASE);
     } else {
         kfree(cmd);
     }
+}
+
+/* irq_defer trampoline for the async fire-and-forget path (no spinner).
+ * Kept so the async submit API stays a working seam for a future
+ * IDE-only user-async backend; the live (sync) path uses landing. */
+static void ata_complete_deferred(void *ctx) {
+    AtaCmd *cmd = (AtaCmd *)ctx;
+    if (!cmd) return;
+    ata_run_completion(&g_ata_async[cmd->channel], cmd);
 }
 
 /* ---------------------------------------------------------------------
@@ -463,11 +501,27 @@ static void ata_channel_irq_process(uint8_t ch_idx) {
     mfence();
 
     cmd->sync_rc = rc;
-    spin_unlock(&aa->cmd_lock);
 
-    /* Defer the heavy bottom-half (memcpy + cb + Touch publish + kfree)
-     * to K-Core context. The IDT dispatcher EOIs on return. */
-    irq_defer(ata_complete_deferred, cmd);
+    /* Deliver the completion. SYNC cmds (all live traffic): stamp the
+     * per-channel landing slot — a live spinner claims it (XCHG) and runs
+     * the bottom-half itself, so this can NEVER be dropped. The ≤1-in-flight
+     * invariant guarantees landing is NULL here (the prior completion was
+     * claimed before its next cmd could be kicked); a non-NULL means the
+     * invariant broke upstream — count it, never overwrite (that would
+     * strand a live spinner). RELEASE publishes sync_rc to the claimer's
+     * ACQUIRE. in_flight stays set: the read-staging page is copied out in
+     * ata_run_completion before the next kick. ASYNC fire-and-forget cmds
+     * (no spinner) keep riding irq_defer, drained on a K-Core. */
+    if (cmd->is_sync_wait) {
+        if (__atomic_load_n(&aa->landing, __ATOMIC_RELAXED) != NULL)
+            atomic_fetch_add_u64(&aa->landing_clobber, 1);
+        else
+            __atomic_store_n(&aa->landing, cmd, __ATOMIC_RELEASE);
+        spin_unlock(&aa->cmd_lock);
+    } else {
+        spin_unlock(&aa->cmd_lock);
+        irq_defer(ata_complete_deferred, cmd);
+    }
 }
 
 static void ata_irq_handler(void) {
@@ -604,33 +658,42 @@ int ata_dma_sync(uint8_t drive_idx, uint64_t lba, uint16_t count,
         return ATA_ERR_DRIVE_FAULT;
     }
 
-    /* Wait loop. sti once and spin-pause — HLT would only wake on an
-     * IRQ targeting THIS core, but the BMIDE IRQ is routed point-to-
-     * point to the BSP via the IO-APIC; a K-Core caller would HLT
-     * forever waiting for an IRQ that never arrives on its LAPIC.
+    /* Wait loop. sti once and spin-pause — HLT would only wake on an IRQ
+     * targeting THIS core, but the BMIDE IRQ is routed point-to-point to the
+     * BSP via the IO-APIC; a K-Core caller would HLT forever. sti keeps IF=1
+     * so the IRQ can reach the BSP and stamp `landing`.
      *
-     * Pump BOTH the local ring AND the BSP's ring. The BMIDE completion
-     * is irq_defer'd onto whichever core received the IRQ — for legacy
-     * GSI 14 routing that is the BSP. Now that irq_defer is MPMC, the
-     * caller drains it directly without waiting for the BSP to fall out
-     * of whatever it's doing (a critical fix for the case where the BSP
-     * itself is spinning on a lock held by this caller — the textbook
-     * BMIDE × OFE write_lock deadlock).
+     * Never-drop delivery: the completion IRQ stamps this channel's `landing`
+     * slot (the sync path no longer rides irq_defer), and we CLAIM it here via
+     * an ACQ_REL XCHG and run the bottom-half ourselves. Because the lock-
+     * holder drains its own completion, a BSP stuck spinning on a lock this
+     * caller holds can never strand it — the textbook BMIDE × write_lock
+     * deadlock is structurally impossible, with one atomic word instead of an
+     * MPMC ring. The claimed `c` may be ANOTHER waiter's cmd on this channel
+     * (we drain whatever landed, not necessarily our own) — correct and
+     * necessary, exactly what the old irq_defer_pump(bsp) did.
      *
-     * No deadline / no timeout return: the stack-allocated `cmd` becomes
-     * invalid the moment this function returns, but the IRQ-deferred
-     * completion holds a pointer to it and may not have run yet. The
-     * canonical recovery for a wedged BMIDE channel is a watchdog-
-     * driven SRST reset (future work); until that lands, sync I/O
-     * blocks until the drive answers. Healthy drives complete in <1 ms
-     * so this is not observable in production. */
-    uint8_t self_core = amp_get_core_index();
-    uint8_t bsp_core  = g_amp.bsp_index;
+     * No deadline / no timeout: the stack `cmd` is valid until we observe
+     * done; a wedged drive spins forever (orthogonal — the SRST watchdog is a
+     * separate follow-up, and `landing` is the seam it will reuse). Healthy
+     * drives complete in <1 ms. */
+    AtaAsyncCh *aa = &g_ata_async[cmd.channel];
     asm volatile("sti" ::: "memory");
     while (!__atomic_load_n(&cmd.done, __ATOMIC_ACQUIRE)) {
-        irq_defer_pump(self_core);
-        if (bsp_core != self_core) irq_defer_pump(bsp_core);
+        AtaCmd *c = __atomic_exchange_n(&aa->landing, NULL, __ATOMIC_ACQ_REL);
+        if (c) ata_run_completion(aa, c);
         cpu_pause();
+    }
+
+    /* Tripwire: landing_clobber must be 0 (≤1-in-flight guarantees landing is
+     * NULL at every stamp). Print once, loudly, if it ever fired — a clobber
+     * means a completion was lost upstream (and its spinner hung). */
+    if (__atomic_load_n(&aa->landing_clobber, __ATOMIC_RELAXED) != 0 &&
+        __atomic_exchange_n(&aa->clobber_warned, 1u, __ATOMIC_ACQ_REL) == 0) {
+        kprintf("[ATA] BUG: landing_clobber=%llu on channel %u — "
+                "the <=1-in-flight invariant broke\n",
+                (unsigned long long)__atomic_load_n(&aa->landing_clobber, __ATOMIC_RELAXED),
+                (unsigned)cmd.channel);
     }
 
     if (cmd.sync_rc == OK)                   return 0;
