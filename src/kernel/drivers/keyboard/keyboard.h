@@ -48,6 +48,10 @@ typedef struct {
 void keyboard_init(void);
 void keyboard_handle_scancode(uint8_t scancode);
 
+/* Feed characters from an external input source (the COM1 serial console)
+ * into the keyboard input ring, delivered to the shell as if typed. */
+void keyboard_inject(const char *chars, uint32_t count);
+
 int      keyboard_has_input(void);
 char     keyboard_getchar(void);
 char     keyboard_getchar_blocking(void);

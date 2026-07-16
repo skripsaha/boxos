@@ -94,6 +94,33 @@ static void kb_push_chars(const char* chars, uint8_t count)
     spin_unlock(&kb_lock);
 }
 
+/* Public: feed characters from an external input source (the COM1 serial
+ * console — see serial_console_init) into the SAME ring the PS/2 keyboard
+ * fills, so keyboard_readline delivers them to the shell exactly as typed
+ * keys. IRQ-safe: kb_push_chars takes the irqsave kb_lock. */
+void keyboard_inject(const char *chars, uint32_t count)
+{
+    for (uint32_t i = 0; i < count; i++) {
+        char c = chars[i];
+
+        /* Feed the legacy char ring (keyboard_getchar / keyboard_readline_async
+         * consumers). */
+        kb_push_chars(&c, 1);
+
+        /* AND publish the "keyboard" Touch event — this is the path the display
+         * daemon's readline (touch_await on TOUCH_TAG_KEYBOARD) actually
+         * consumes, so a real keypress and an injected byte are indistinguish-
+         * able to the shell. Deferred (IRQ-safe) publish is mandatory:
+         * keyboard_inject runs in the COM1 IRQ handler, same as the PS/2 site
+         * above — a direct TouchPublish would take TagFS registry locks with
+         * IF=0 (the irq_defer deadlock pattern). scancode=0: synthetic key. */
+        kb_event_t kb_ev = { .scancode = 0, .ascii = c, .mods = 0 };
+        TouchTag full = __atomic_load_n(&g_kbd_touch_full, __ATOMIC_ACQUIRE);
+        TouchTag bare = __atomic_load_n(&g_kbd_touch_bare, __ATOMIC_ACQUIRE);
+        TouchPublishIrqPair(full, bare, &kb_ev, sizeof(kb_ev), 0, TOUCH_FLAG_KERNEL);
+    }
+}
+
 /* Translate a bare scancode to ASCII with correct CapsLock+Shift behaviour.
    For letters: CapsLock XOR Shift → uppercase.
    For symbols: only Shift matters; CapsLock is ignored. */
