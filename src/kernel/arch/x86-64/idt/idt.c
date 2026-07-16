@@ -739,6 +739,13 @@ void irq_handler(interrupt_frame_t *frame)
         /* xHCI events handled via IRQ; poll only as fallback */
         xhci_poll_events();
 
+        /* Ф26 M1 — AHCI async-completion watchdog (safety backstop). Reconciles
+         * a lost/coalesced completion MSI from the port's PxSACT/PxCI level, and
+         * fails + COMRESETs a genuinely wedged port so a lost completion cannot
+         * hang a waiter forever. BSP-only (this is IRQ0) — the same core the
+         * AHCI MSI targets; no-op unless multi-core async I/O is in flight. */
+        ahci_watchdog_scan();
+
         /* Single-core mode: drain irq_defer here, when the PIT IRQ
          * interrupted USERSPACE code.
          *

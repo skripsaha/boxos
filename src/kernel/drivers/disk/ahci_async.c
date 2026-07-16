@@ -39,7 +39,8 @@ error_t ahci_submit_read_async(uint8_t port, uint64_t lba,
     __atomic_fetch_add(&port_state->stats.cmd_count, 1, __ATOMIC_RELAXED);
     port_state->event_id[slot]   = 0;  /* reserved for stage 2 (per-request id) */
     port_state->pid[slot]        = 0;  /* set by storage_ops in stage 2 */
-    port_state->submit_tsc[slot] = rdtsc();
+    /* Ф26 M1: submit_tsc is now stamped inside ahci_arm_slot, under port->lock,
+     * consistent with the issued_mask bit the completion watchdog reads. */
 
     /* Install the callback BEFORE arming so the IRQ never observes a
      * completed slot with a NULL cb. ahci_arm_slot programs PxSACT/PxCI
@@ -90,7 +91,7 @@ error_t ahci_submit_write_async(uint8_t port, uint64_t lba,
     __atomic_fetch_add(&port_state->stats.cmd_count, 1, __ATOMIC_RELAXED);
     port_state->event_id[slot]   = 0;
     port_state->pid[slot]        = 0;
-    port_state->submit_tsc[slot] = rdtsc();
+    /* Ф26 M1: submit_tsc now stamped in ahci_arm_slot (see read-path note). */
 
     /* Same ordering as the read path: cb installed before arming. */
     port_state->cb[slot]     = cb;
