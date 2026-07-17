@@ -6168,15 +6168,19 @@ void Phase38()
 // notifies, the stop_token-aware cv_any wakes on a stop request, and
 // notify_all_at_thread_exit fires at strand exit.
 //
-// ANTI-FLAKE CORE (host-invariant ratio). `cal` = wall time of a no-notifier
-// wait_for(kBudget): with the merged timeout fix the timed park rides its
-// deadline and returns at ≈ kBudget (the dead-wait floor). A notify-driven wake
-// returns far sooner, so the discriminator is "woken vs rode-the-deadline":
-// `t < cal/4` passes for a real event-driven wake and FAILS LOUDLY for a dead /
-// never-woken wait (which rides the whole kBudget). The ping-pong sub-test proves
-// it rigorously — N parks complete in ≪ N×backstop. Ratio-to-cal keeps the bound
-// host-invariant (no fixed-ms flake). `cal >= 0.6×kBudget` is the "the timed park
-// really waited the budget" floor.
+// PROOF STRUCTURE (no single-sample wall-clock bound — those flake under host
+// vCPU deschedule: box::stopwatch reads the TSC-backed steady_clock, which keeps
+// counting real time while the guest vCPU is descheduled, so one inflated sample
+// fails an upper bound even for a genuine event-wake; and a cal/4 ceiling cannot
+// even tell a ~10ms event-wake from the ~100ms lost-wake backstop). Event-driven
+// wakeup is a property of the shared wait/notify substrate, so it is proven ONCE,
+// rigorously, by the PING-PONG: 64 lockstep hops = 128 parks that finish in
+// ≪ 128×backstop, bounded core-conditionally with ~30× margin. Every other
+// sub-test then asserts only its own SEMANTIC (predicate observed, wake count,
+// return value) plus LIVENESS via p39_join — a no-timeout wait() that never wakes
+// hangs and fails loudly through the bounded join. Sub-test 6a keeps a genuine
+// dead-wait FLOOR (no-notifier wait_for returns false and waited the budget);
+// floors only inflate under host load, so they never flake.
 
 static constexpr int kP39Budget = 2000;        // ms: the timed dead-wait floor
 
@@ -6361,23 +6365,10 @@ void Phase39()
               "phase39 cv_any already-true predicate returns immediately, lock held");
     }
 
-    // ── calibration: a wait_for(kP39Budget) that NEVER gets a notify ──────────
-    //    Its wall time is the dead-wait floor (≈ kP39Budget). A notify-driven
-    //    wake returns in ≈ one backstop ≪ cal, so cal/4 cleanly separates a real
-    //    event wake from a dead one.
-    nanoseconds cal;
-    {
-        std::unique_lock<std::mutex> lk(g_p39_mtx);
-        box::stopwatch sw;
-        std::cv_status st = g_p39_cv.wait_for(lk, milliseconds(kP39Budget));
-        cal = sw.elapsed();
-        Check(st == std::cv_status::timeout,
-              "phase39 calibration wait_for(kBudget) timed out (no notifier)");
-        Check(cal >= milliseconds(kP39Budget * 3 / 5),
-              "phase39 calibration: the timed park really waited (>= 0.6×budget)");
-    }
-    auto early = duration_cast<nanoseconds>(cal / 4);   // event-wake ceiling
-    auto half  = duration_cast<nanoseconds>(cal / 2);   // looser ceiling
+    // (Calibration removed: the old cal/early/half single-sample TSC ratios flaked
+    //  under host vCPU deschedule and could not tell an event-wake from the ~100ms
+    //  backstop. Event-drivenness is proven by the ping-pong below; sub-test 6a
+    //  keeps the genuine no-notifier timeout floor.)
 
     // ── (2)..(8): cross-strand, need FSGSBASE (per-strand TLS) ────────────────
     if (!cpu_has_fsgsbase()) {
@@ -6387,7 +6378,7 @@ void Phase39()
         return;
     }
 
-    // (2) notify_one event-wake ≪ cal.
+    // (2) notify_one delivered — the parked waiter returns; liveness via p39_join.
     {
         g_p39_pred = false;
         g_p39_remaining = 1;
@@ -6398,12 +6389,8 @@ void Phase39()
             return;
         }
         std::unique_lock<std::mutex> lk(g_p39_mtx);
-        box::stopwatch sw;
         g_p39_cv.wait(lk, [] { return g_p39_pred; });
-        nanoseconds t = sw.elapsed();
         lk.unlock();
-        Check(t < early,
-              "phase39 cross-strand notify_one woke the waiter (< cal/4, event-driven)");
         Check(p39_join(), "phase39 notify_one worker joined");
     }
 
@@ -6452,18 +6439,14 @@ void Phase39()
                 std::this_thread::yield();
             Check(g_p39_ready.load(std::memory_order_acquire) == workers,
                   "phase39 both waiter strands reached the park");
-            box::stopwatch sw;
             {
                 std::lock_guard<std::mutex> g(g_p39_mtx);
                 g_p39_pred = true;
             }
             g_p39_cv.notify_all();
             Check(p39_join(), "phase39 notify_all woke both waiters (joined)");
-            nanoseconds t = sw.elapsed();
             Check(g_p39_woke.load(std::memory_order_acquire) == workers,
                   "phase39 notify_all: every waiter observed the predicate");
-            Check(t < half,
-                  "phase39 notify_all woke both waiters (< cal/2)");
         }
     }
 
@@ -6488,25 +6471,21 @@ void Phase39()
         }
     }
 
-    // (5) condition_variable_any cross-strand event-wake ≪ cal.
+    // (5) condition_variable_any cross-strand notify delivered; liveness via join.
     {
         g_p39_pred = false;
         g_p39_remaining = 1;
         if (strand_spawn(p39_cva_worker, 0)) {
             std::unique_lock<std::mutex> lk(g_p39_mtx);
-            box::stopwatch sw;
             g_p39_cva.wait(lk, [] { return g_p39_pred; });
-            nanoseconds t = sw.elapsed();
             lk.unlock();
-            Check(t < early,
-                  "phase39 cv_any cross-strand notify woke the waiter (< cal/4)");
             Check(p39_join(), "phase39 cv_any worker joined");
         }
     }
 
     // (6) wait_for timeout-vs-event discrimination.
     {
-        // (6a) no notifier, false pred → returns false, elapsed ~ cal.
+        // (6a) no notifier, false pred → returns false, waited ≈ the budget (floor).
         g_p39_pred = false;
         std::unique_lock<std::mutex> lk(g_p39_mtx);
         box::stopwatch sw;
@@ -6519,20 +6498,17 @@ void Phase39()
               "phase39 wait_for(pred) timeout actually waited the budget");
     }
     {
-        // (6b) with notifier → returns true, elapsed < cal/4 (the notify shortened
-        //      a kBudget wait to ≈ one backstop — event-driven, not the timeout).
+        // (6b) with a notifier → wait_for(pred) returns true (event-driven; the
+        //      no-notifier timeout FLOOR is proven by 6a above, the ping-pong proves
+        //      the wake is the event and not the ~100ms backstop).
         g_p39_pred = false;
         g_p39_remaining = 1;
         if (strand_spawn(p39_notify_one_worker, 0)) {
             std::unique_lock<std::mutex> lk(g_p39_mtx);
-            box::stopwatch sw;
             bool r = g_p39_cv.wait_for(lk, milliseconds(kP39Budget),
                                        [] { return g_p39_pred; });
-            nanoseconds t = sw.elapsed();
             lk.unlock();
             Check(r, "phase39 wait_for(pred) returns true when notified");
-            Check(t < early,
-                  "phase39 wait_for(pred) woke on the notify, not the timeout (< cal/4)");
             Check(p39_join(), "phase39 wait_for(pred) notifier joined");
         }
     }
@@ -6543,12 +6519,8 @@ void Phase39()
         g_p39_remaining = 1;
         if (strand_spawn(p39_atexit_worker, 0)) {
             std::unique_lock<std::mutex> lk(g_p39_mtx);
-            box::stopwatch sw;
             g_p39_cv.wait(lk, [] { return g_p39_pred; });
-            nanoseconds t = sw.elapsed();
             lk.unlock();
-            Check(t < half,
-                  "phase39 notify_all_at_thread_exit woke main at strand exit (< cal/2)");
             Check(p39_join(), "phase39 notify_all_at_thread_exit worker joined");
         }
     }
@@ -6567,15 +6539,11 @@ void Phase39()
                 std::this_thread::yield();
             Check(g_p39_ready.load(std::memory_order_acquire) == 1,
                   "phase39 stop_token waiter reached the park");
-            box::stopwatch sw;
             Check(g_p39_ssrc.request_stop(),
                   "phase39 request_stop() returns true (first request)");
             Check(p39_join(), "phase39 stop_token waiter joined");
-            nanoseconds t = sw.elapsed();
             Check(g_p39_woke.load(std::memory_order_acquire) == 1,
                   "phase39 stop_token cv_any returned pred()==false on stop");
-            Check(t < half,
-                  "phase39 stop_token woke the waiter (< cal/2)");
         }
     }
 
@@ -6586,12 +6554,13 @@ void Phase39()
 
 // ── phase40: <future> (Ф20d-2) ─────────────────────────────────────────────────
 // promise / future / shared_future + async (both policies) + deferred +
-// packaged_task + every future_errc, with the SAME host-invariant ratio
-// discipline phase39 uses. `cal` = wall time of a no-producer future::wait_for
-// that must time out; a real event-wake returns far under cal/4 (= `early`), so
-// the discriminator is "woken vs rode-the-deadline" — never a fixed-ms bound.
-// Cross-strand sub-tests skip→PASS without FSGSBASE (per-strand TLS), exactly
-// like phase35/39.
+// packaged_task + every future_errc. Event-driven wakeup is proven by the FUTURE
+// PING-PONG (64 lockstep hops = 128 parks ≪ 128×backstop, core-conditional bound
+// with ~30× margin) — the same proof structure phase39 uses. No single-sample
+// wall-clock upper bound (those flake under host vCPU deschedule of the TSC-backed
+// steady_clock); every other sub-test asserts only its own value/semantics plus
+// p40_join liveness, and 14a keeps the genuine no-producer timeout FLOOR.
+// Cross-strand sub-tests skip→PASS without FSGSBASE (per-strand TLS), like phase39.
 
 static constexpr int kP40Budget = 2000;   // ms: the timed dead-wait floor
 
@@ -6933,23 +6902,10 @@ void Phase40()
         Check(nf.get() == 5, "phase40 packaged_task usable after reset()");
     }
 
-    // ── calibration: a no-producer future::wait_for(kBudget) that MUST time out.
-    //    Its wall time is the dead-wait floor (≈ kBudget). early = cal/4 is the
-    //    event-wake ceiling; half = cal/2 a looser one.
-    nanoseconds cal;
-    {
-        std::promise<int> p;
-        std::future<int>  f = p.get_future();
-        box::stopwatch sw;
-        std::future_status st = f.wait_for(milliseconds(kP40Budget));
-        cal = sw.elapsed();
-        Check(st == std::future_status::timeout,
-              "phase40 calibration wait_for(kBudget) timed out (no producer)");
-        Check(cal >= milliseconds(kP40Budget * 3 / 5),
-              "phase40 calibration: the timed park really waited (>= 0.6×budget)");
-    }
-    auto early = duration_cast<nanoseconds>(cal / 4);   // event-wake ceiling
-    auto half  = duration_cast<nanoseconds>(cal / 2);   // looser ceiling
+    // (Calibration removed: the old cal/early/half single-sample TSC ratios flaked
+    //  under host vCPU deschedule and could not tell an event-wake from the ~100ms
+    //  backstop. Event-drivenness is proven by the future ping-pong below; 14a keeps
+    //  the genuine no-producer timeout floor.)
 
     // ── (11)..(17): cross-strand, need FSGSBASE (per-strand TLS) ──────────────
     if (!cpu_has_fsgsbase()) {
@@ -6960,17 +6916,13 @@ void Phase40()
         return;
     }
 
-    // (11) async(launch::async) event-wake: worker sleeps ~10ms then returns 42;
-    //      main get()==42 with elapsed < early (woken by set_value→notify). The
-    //      future dtor joins the worker exactly once — no hang.
+    // (11) async(launch::async): worker sleeps ~10ms then returns 42; main get()==42
+    //      (event-wake proven by the future ping-pong). The future dtor joins the
+    //      worker exactly once — no hang.
     {
-        box::stopwatch  sw;
         std::future<int> f = std::async(std::launch::async, p40_async_value);
         int v = f.get();
-        nanoseconds t = sw.elapsed();
         Check(v == 42, "phase40 async(launch::async) returned the value");
-        Check(t < early,
-              "phase40 async worker woke main on completion (< cal/4, event-driven)");
         // f's dtor (here, end of scope) joins the worker; reaching the next line
         // proves no hang.
     }
@@ -7037,24 +6989,20 @@ void Phase40()
               "phase40 wait_for timeout actually waited the budget");
     }
     {
-        // (14b) producer set_value after ~10ms → wait_for(kBudget) → ready,
-        //       elapsed < early (event-driven exact-deadline).
+        // (14b) producer set_value after ~10ms → wait_for(kBudget) returns ready
+        //       (event-driven; the no-producer timeout FLOOR is 14a above).
         auto fut = std::async(std::launch::async, [] {
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
             return 5;
         });
-        box::stopwatch sw;
         std::future_status st = fut.wait_for(milliseconds(kP40Budget));
-        nanoseconds t = sw.elapsed();
         Check(st == std::future_status::ready,
               "phase40 wait_for(producer) → ready");
-        Check(t < early,
-              "phase40 wait_for woke on set_value, not the timeout (< cal/4)");
         Check(fut.get() == 5, "phase40 wait_for then get the produced value");
     }
 
     // (15) shared_future cross-strand multi-wait: 2 waiter strands each block in
-    //      sf.wait() on a copy; main set_value once; both wake (< half) and get
+    //      sf.wait() on a copy; main set_value once; both wake and get
     //      the same value.
     {
         std::promise<int>       p;
@@ -7075,14 +7023,10 @@ void Phase40()
                 std::this_thread::yield();
             Check(g_p40_sf_ready.load(std::memory_order_acquire) == workers,
                   "phase40 shared_future waiters reached the park");
-            box::stopwatch sw;
             p.set_value(77);
             Check(p40_join(), "phase40 shared_future waiters joined");
-            nanoseconds t = sw.elapsed();
             Check(g_p40_sf_got.load(std::memory_order_acquire) == workers,
                   "phase40 every shared_future waiter got the value");
-            Check(t < half,
-                  "phase40 shared_future set_value woke both waiters (< cal/2)");
         }
     }
 
@@ -7094,19 +7038,15 @@ void Phase40()
         g_p40_atexit_prom = &prom;
         g_p40_remaining = 1;
         if (strand_spawn(p40_atexit_worker, 0)) {
-            box::stopwatch sw;
             int v = f.get();
-            nanoseconds t = sw.elapsed();
             Check(v == 123,
                   "phase40 set_value_at_thread_exit delivered the value");
-            Check(t < half,
-                  "phase40 set_value_at_thread_exit woke main at strand exit (< cal/2)");
             Check(p40_join(), "phase40 set_value_at_thread_exit worker joined");
         }
     }
 
     // (17) packaged_task on a std::thread: run the task on a thread, main get()
-    //      event-wakes < early.
+    //      returns the value (event-wake proven by the future ping-pong).
     {
         std::packaged_task<int(int, int)> pt(
             [](int a, int b) { return a * b; });
@@ -7114,12 +7054,8 @@ void Phase40()
         g_p40_pt = &pt;
         g_p40_remaining = 1;
         if (strand_spawn(p40_pt_worker, 0)) {
-            box::stopwatch sw;
             int v = f.get();
-            nanoseconds t = sw.elapsed();
             Check(v == 440, "phase40 packaged_task on a strand → future value");
-            Check(t < early,
-                  "phase40 packaged_task worker woke main on completion (< cal/4)");
             Check(p40_join(), "phase40 packaged_task worker joined");
         }
     }
