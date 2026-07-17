@@ -6188,7 +6188,9 @@ static std::mutex            g_p39_mtx;       // guards the predicate flags belo
 static std::condition_variable g_p39_cv;      // cross-strand notify target
 static std::condition_variable_any g_p39_cva; // cv_any over std::mutex
 static bool                  g_p39_pred  = false;   // shared predicate flag
-static std::atomic<int>      g_p39_ready{0};   // waiters bump before parking
+static volatile uint64_t     g_p39_ready;      // waiters bump before parking; the
+                                               // readiness gate parks event-driven
+                                               // (addr_park/addr_wake, like g_p39_remaining)
 static std::atomic<int>      g_p39_woke{0};    // waiters bump after waking
 static std::atomic<int>      g_p39_predcalls{0}; // predicate-eval count (sub-test 4)
 static volatile uint64_t     g_p39_remaining;  // workers decrement; main joins
@@ -6226,7 +6228,8 @@ static void p39_notify_one_worker(void *)
 static void p39_waiter_worker(void *)
 {
     std::unique_lock<std::mutex> lk(g_p39_mtx);
-    g_p39_ready.fetch_add(1, std::memory_order_release);
+    __atomic_add_fetch(&g_p39_ready, 1u, __ATOMIC_RELEASE);
+    addr_wake(&g_p39_ready, 0);
     g_p39_cv.wait(lk, [] { return g_p39_pred; });
     lk.unlock();
     g_p39_woke.fetch_add(1, std::memory_order_release);
@@ -6298,7 +6301,8 @@ static std::stop_source g_p39_ssrc;
 static void p39_stoptoken_worker(void *)
 {
     std::unique_lock<std::mutex> lk(g_p39_mtx);
-    g_p39_ready.fetch_add(1, std::memory_order_release);
+    __atomic_add_fetch(&g_p39_ready, 1u, __ATOMIC_RELEASE);
+    addr_wake(&g_p39_ready, 0);
     bool r = g_p39_cva.wait(lk, g_p39_ssrc.get_token(), [] { return g_p39_pred; });
     lk.unlock();
     // pred() stayed false → wait returns false (woken by the stop, not the pred).
@@ -6423,7 +6427,7 @@ void Phase39()
     // (3) notify_all wakes 2 waiter strands.
     {
         g_p39_pred = false;
-        g_p39_ready.store(0, std::memory_order_relaxed);
+        __atomic_store_n(&g_p39_ready, 0u, __ATOMIC_RELAXED);
         g_p39_woke.store(0, std::memory_order_relaxed);
         int workers = 0;
         if (strand_spawn(p39_waiter_worker, 0)) workers++;
@@ -6432,12 +6436,16 @@ void Phase39()
             printf("[CXX] note phase39: no waiter strand — skipping notify_all\n");
         } else {
             g_p39_remaining = (uint64_t)workers;
-            // Spin-yield until both waiters have reached their park.
-            for (int cyc = 0; cyc < 5000 &&
-                              g_p39_ready.load(std::memory_order_acquire) < workers;
-                 cyc++)
-                std::this_thread::yield();
-            Check(g_p39_ready.load(std::memory_order_acquire) == workers,
+            // Event-driven wait until both waiters reach their park (bounded join
+            // pattern: worker addr_wakes on each bump; the 200ms re-check is a
+            // lost-wake backstop, and >80 cycles falls through to a loud Check).
+            uint32_t rcyc = 0; uint64_t rdy;
+            while ((rdy = __atomic_load_n(&g_p39_ready, __ATOMIC_ACQUIRE))
+                   < (uint64_t)workers) {
+                if (++rcyc > 80u) break;
+                addr_park(&g_p39_ready, rdy, 200);
+            }
+            Check(__atomic_load_n(&g_p39_ready, __ATOMIC_ACQUIRE) == (uint64_t)workers,
                   "phase39 both waiter strands reached the park");
             {
                 std::lock_guard<std::mutex> g(g_p39_mtx);
@@ -6529,15 +6537,16 @@ void Phase39()
     //     request wakes it; it returns pred() == false.
     {
         g_p39_pred = false;
-        g_p39_ready.store(0, std::memory_order_relaxed);
+        __atomic_store_n(&g_p39_ready, 0u, __ATOMIC_RELAXED);
         g_p39_woke.store(0, std::memory_order_relaxed);
         g_p39_remaining = 1;
         if (strand_spawn(p39_stoptoken_worker, 0)) {
-            for (int cyc = 0; cyc < 5000 &&
-                              g_p39_ready.load(std::memory_order_acquire) == 0;
-                 cyc++)
-                std::this_thread::yield();
-            Check(g_p39_ready.load(std::memory_order_acquire) == 1,
+            uint32_t rcyc = 0; uint64_t rdy;
+            while ((rdy = __atomic_load_n(&g_p39_ready, __ATOMIC_ACQUIRE)) == 0) {
+                if (++rcyc > 80u) break;
+                addr_park(&g_p39_ready, rdy, 200);
+            }
+            Check(__atomic_load_n(&g_p39_ready, __ATOMIC_ACQUIRE) == 1,
                   "phase39 stop_token waiter reached the park");
             Check(g_p39_ssrc.request_stop(),
                   "phase39 request_stop() returns true (first request)");
@@ -6613,14 +6622,15 @@ static int p40_async_throws() { throw std::runtime_error("boom"); }
 
 // (15) shared_future cross-strand waiters: each blocks in sf.wait() on a copy.
 static std::shared_future<int> *g_p40_sf;
-static std::atomic<int>         g_p40_sf_ready{0};
+static volatile uint64_t        g_p40_sf_ready;   // event-driven readiness gate
 static std::atomic<int>         g_p40_sf_got{0};
 static void p40_sf_waiter(void *)
 {
     __boxcxx_tls_strand_init();
     __boxcxx_thread_storage_enter();
     std::shared_future<int> local = *g_p40_sf;   // a copy (ref_inc)
-    g_p40_sf_ready.fetch_add(1, std::memory_order_release);
+    __atomic_add_fetch(&g_p40_sf_ready, 1u, __ATOMIC_RELEASE);
+    addr_wake(&g_p40_sf_ready, 0);
     local.wait();
     if (local.get() == 77) g_p40_sf_got.fetch_add(1, std::memory_order_release);
     __boxcxx_thread_storage_exit();
@@ -7008,7 +7018,7 @@ void Phase40()
         std::promise<int>       p;
         std::shared_future<int> sf = p.get_future().share();
         g_p40_sf = &sf;
-        g_p40_sf_ready.store(0, std::memory_order_relaxed);
+        __atomic_store_n(&g_p40_sf_ready, 0u, __ATOMIC_RELAXED);
         g_p40_sf_got.store(0, std::memory_order_relaxed);
         int workers = 0;
         if (strand_spawn(p40_sf_waiter, 0)) workers++;
@@ -7017,11 +7027,13 @@ void Phase40()
             printf("[CXX] note phase40: no shared_future waiter strand — skipping\n");
         } else {
             g_p40_remaining = (uint64_t)workers;
-            for (int cyc = 0; cyc < 5000 &&
-                              g_p40_sf_ready.load(std::memory_order_acquire) < workers;
-                 cyc++)
-                std::this_thread::yield();
-            Check(g_p40_sf_ready.load(std::memory_order_acquire) == workers,
+            uint32_t rcyc = 0; uint64_t rdy;
+            while ((rdy = __atomic_load_n(&g_p40_sf_ready, __ATOMIC_ACQUIRE))
+                   < (uint64_t)workers) {
+                if (++rcyc > 80u) break;
+                addr_park(&g_p40_sf_ready, rdy, 200);
+            }
+            Check(__atomic_load_n(&g_p40_sf_ready, __ATOMIC_ACQUIRE) == (uint64_t)workers,
                   "phase40 shared_future waiters reached the park");
             p.set_value(77);
             Check(p40_join(), "phase40 shared_future waiters joined");
