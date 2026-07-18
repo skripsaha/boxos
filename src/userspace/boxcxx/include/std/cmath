@@ -952,13 +952,10 @@ inline float  fmin(float x, float y) { return float(fmin(double(x), double(y)));
 inline float  fma(float x, float y, float z) { return float(fma(double(x), double(y), double(z))); }
 
 // ── completeness: long double overloads + C-named (f,l) + comparisons ──────
-#define BXC1(fn) inline long double fn(long double x){return (long double)fn((double)x);} \
-  inline float fn##f(float x){return fn(x);} inline long double fn##l(long double x){return fn(x);}
-// Kept narrowed-to-double for Ф27d2: erf/erfc/tgamma/lgamma. asin/acos, the
-// hyperbolics + inverse hyperbolics, expm1/cbrt/pow/hypot/fma are genuine 80-bit
-// compositions of the x87 primaries, defined at the end of this namespace (Ф27d1b).
-BXC1(erf) BXC1(erfc) BXC1(tgamma) BXC1(lgamma)
-#undef BXC1
+// erf/erfc/tgamma/lgamma long double are genuine 80-bit, defined at the end of
+// this namespace (Ф27d2); asin/acos, the hyperbolics + inverse hyperbolics,
+// expm1/cbrt/pow/hypot/fma are the composed 80-bit primaries (Ф27d1b). No
+// classical <cmath> function stays narrowed to double.
 // ════════════════════════════════════════════════════════════════════════
 //  long double = 80-bit x87: genuine hardware implementations (Ф27d1a).
 //  Layout: mantissa = bits[63:0] (bit 63 = explicit integer bit), exponent =
@@ -1411,6 +1408,230 @@ inline long double cbrtl(long double x){ return cbrt(x); }    inline float cbrtf
 inline long double hypotl(long double x, long double y){ return hypot(x, y); }  inline float hypotf(float x, float y){ return (float)hypot((long double)x, (long double)y); }
 inline long double powl(long double x, long double y){ return pow(x, y); }      inline float powf(float x, float y){ return (float)pow((long double)x, (long double)y); }
 inline long double fmal(long double a, long double b, long double c){ return fma(a, b, c); }  inline float fmaf(float a, float b, float c){ return (float)fma((long double)a, (long double)b, (long double)c); }
+
+// ════════════════════════════════════════════════════════════════════════
+//  erf / erfc / tgamma / lgamma at genuine 80-bit (Ф27d2).
+//  The main paths are transcendental-free: exp/log are built here in software
+//  double-double (poly + fscale + bit-ops), so QEMU/Bochs/real-HW all compute
+//  them at true 80-bit. Only gamma/lgamma reflection (x<0.5, via sinpi_l→fsin,
+//  and lgamma's log) rides the x87 transcendental microcode — genuine 80-bit on
+//  Bochs/real-HW, host-double on QEMU. Errno-free like every other path here.
+// ════════════════════════════════════════════════════════════════════════
+
+// ── Dekker double-double primitives at 64-bit-mantissa width (FMA-free) ────
+inline void two_sum_l(long double a, long double b, long double &s, long double &e){
+    s = a + b;
+    long double bb = s - a;
+    e = (a - (s - bb)) + (b - bb);
+}
+inline void split_l(long double a, long double &hi, long double &lo){
+    const long double SPLIT = 4294967297.0L;         // 2^32 + 1 splits a 64-bit mantissa
+    long double c = SPLIT * a;
+    hi = c - (c - a);
+    lo = a - hi;
+}
+inline void two_prod_l(long double a, long double b, long double &p, long double &e){
+    p = a * b;
+    long double ah, al, bh, bl;
+    split_l(a, ah, al);
+    split_l(b, bh, bl);
+    e = ((ah * bh - p) + ah * bl + al * bh) + al * bl;
+}
+
+// ── e^r − 1 = Σ_{m≥1} rⁿ/m!  (accurate for |r| ≤ ln2/2) ────────────────────
+inline long double expm1_series_l(long double r){
+    const long double c[] = {                        // c[n] = 1/(n+1)!, expm1 = r·Σ c[n]·rⁿ
+        1.0L, 1.0L/2.0L, 1.0L/6.0L, 1.0L/24.0L, 1.0L/120.0L, 1.0L/720.0L,
+        1.0L/5040.0L, 1.0L/40320.0L, 1.0L/362880.0L, 1.0L/3628800.0L,
+        1.0L/39916800.0L, 1.0L/479001600.0L, 1.0L/6227020800.0L,
+        1.0L/87178291200.0L, 1.0L/1307674368000.0L, 1.0L/20922789888000.0L,
+    };
+    long double p = c[15];
+    for (int i = 14; i >= 0; --i) p = p * r + c[i];
+    return r * p;
+}
+// e^(hi+lo) in double-double — no x87 transcendental (poly + fscale only).
+inline long double exp_l_dd(long double hi, long double lo){
+    if (hi >  11356.5L) return kInfL;                 // 2^16384 overflow
+    if (hi < -11399.5L) return 0.0L;                  // below smallest subnormal
+    int k = (int)rint(hi * kLog2eL);
+    long double kf = (long double)k;
+    long double r = ((hi - kf * KLN2HI_L) - kf * KLN2LO_L) + lo;   // Cody-Waite
+    return scalbn(1.0L + expm1_series_l(r), k);
+}
+// ln(z) as (hi,lo) ≈ 100+ bits, z>0 finite normal (all callers pass z ≥ 0.5).
+inline void log_l_dd(long double z, long double &hi, long double &lo){
+    unsigned __int128 b = ldbits(z);
+    int k = (int)((b >> 64) & 0x7FFFu) - 16383;
+    unsigned __int128 mbits = (b & ((((unsigned __int128)1) << 64) - 1))
+                            | (((unsigned __int128)16383) << 64);        // m ∈ [1,2)
+    long double m = __builtin_bit_cast(long double, mbits);
+    if (m > 1.414213562373095048801689L){ m *= 0.5L; k++; }             // fold into [√½,√2]
+    long double num = m - 1.0L;                        // exact (Sterbenz)
+    long double den_hi, den_lo; two_sum_l(m, 1.0L, den_hi, den_lo);      // m+1 exact
+    long double fhi = num / den_hi;
+    long double ph, pe; two_prod_l(fhi, den_hi, ph, pe);
+    long double flo = (num - ph - pe - fhi * den_lo) / den_hi;          // f = (m−1)/(m+1) dd
+    long double shi, sle; two_prod_l(fhi, fhi, shi, sle);
+    long double slo = sle + 2.0L * fhi * flo;                           // s = f² dd
+    const long double odd[] = {                        // atanh tail 1/(2j+1), j=2..13
+        1.0L/5.0L, 1.0L/7.0L, 1.0L/9.0L, 1.0L/11.0L, 1.0L/13.0L, 1.0L/15.0L,
+        1.0L/17.0L, 1.0L/19.0L, 1.0L/21.0L, 1.0L/23.0L, 1.0L/25.0L, 1.0L/27.0L,
+    };
+    long double R = odd[11];
+    for (int i = 10; i >= 0; --i) R = R * shi + odd[i];
+    long double sR_h, sR_l; two_prod_l(shi, R, sR_h, sR_l); sR_l += slo * R;
+    long double Qhi, Qlo; two_sum_l(C3_HI_L, sR_h, Qhi, Qlo); Qlo += C3_LO_L + sR_l;  // 1/3+s·R
+    long double cr_h, cr_l; two_prod_l(shi, Qhi, cr_h, cr_l); cr_l += slo * Qhi + shi * Qlo; // s·Q
+    long double tfhi = 2.0L * fhi, tflo = 2.0L * flo;
+    long double tc_h, tc_l; two_prod_l(tfhi, cr_h, tc_h, tc_l); tc_l += tfhi * cr_l + tflo * cr_h;
+    long double lmhi, lmlo; two_sum_l(tfhi, tc_h, lmhi, lmlo); lmlo += tflo + tc_l;   // ln(m) dd
+    long double khi, klo; two_prod_l((long double)k, KLN2DD_HI_L, khi, klo); klo += (long double)k * KLN2DD_LO_L;
+    two_sum_l(khi, lmhi, hi, lo); lo += klo + lmlo;    // normalized ln2 dd: lo stays ~2^-62
+}
+
+// ── erf / erfc (long double) ───────────────────────────────────────────────
+inline long double erf_poly_l(long double s){         // erf(x)/x, s = x²
+    long double r = ERF_C_L[ERF_C_L_N - 1];
+    for (int i = ERF_C_L_N - 2; i >= 0; --i) r = r * s + ERF_C_L[i];
+    return r;
+}
+// erfc(a) for a ≥ 0.5, via scaled w(a)=a·e^{a²}·erfc(a): two Chebyshev pieces
+// then an asymptotic tail (the 80-bit range reaches far past double's a<27).
+inline long double erfc_pos_l(long double a){
+    if (a >= 107.0L) return 0.0L;                      // e^{−a²} underflows 80-bit
+    long double x2h, x2l; two_prod_l(a, a, x2h, x2l);
+    long double E = exp_l_dd(-x2h, -x2l);
+    long double w;
+    if (a < 6.0L){                                     // [0.5,6] Clenshaw
+        long double t = (2.0L * a - 6.5L) / 5.5L, t2 = 2.0L * t, b0 = 0.0L, b1 = 0.0L;
+        for (int k = ERFC_W1_L_N - 1; k >= 1; --k){ long double bb = t2 * b0 - b1 + ERFC_W1_L[k]; b1 = b0; b0 = bb; }
+        w = t * b0 - b1 + ERFC_W1_L[0];
+    } else if (a < 12.0L){                             // [6,12] Clenshaw
+        long double t = (2.0L * a - 18.0L) / 6.0L, t2 = 2.0L * t, b0 = 0.0L, b1 = 0.0L;
+        for (int k = ERFC_W2_L_N - 1; k >= 1; --k){ long double bb = t2 * b0 - b1 + ERFC_W2_L[k]; b1 = b0; b0 = bb; }
+        w = t * b0 - b1 + ERFC_W2_L[0];
+    } else {                                           // a ≥ 12: w = (1/√π)·Σ(−1)^k(2k−1)!!/(2a²)^k
+        long double u = 1.0L / (2.0L * x2h), S = 1.0L, term = 1.0L;
+        for (int k = 1; k < 160; ++k){
+            term *= -(long double)(2 * k - 1) * u;
+            S += term;
+            if (fabs(term) < 0x1p-66L) break;
+        }
+        w = S * INV_SQRTPI_L;
+    }
+    return E * (w / a);
+}
+inline long double erf(long double x){
+    if (isnan(x)) return x;
+    if (isinf(x)) return copysign(1.0L, x);
+    long double a = fabs(x), r;
+    if (a < 0.5L)      r = a * erf_poly_l(a * a);
+    else if (a < 6.5L) r = 1.0L - erfc_pos_l(a);
+    else               r = 1.0L;                       // erfc(a) < ½ ULP(1) here
+    return copysign(r, x);
+}
+inline long double erfc(long double x){
+    if (isnan(x)) return x;
+    if (isinf(x)) return signbit(x) ? 2.0L : 0.0L;
+    long double a = fabs(x);
+    if (a < 0.5L){
+        long double t = a * erf_poly_l(a * a);
+        return signbit(x) ? 1.0L + t : 1.0L - t;
+    }
+    long double e = erfc_pos_l(a);
+    return signbit(x) ? 2.0L - e : e;                  // erfc(−a) = 2 − erfc(a)
+}
+
+// ── tgamma / lgamma (long double) ──────────────────────────────────────────
+// sin(π·x) accurate near integers: r = x−round(x) ∈ [−½,½] (fsin — reflection only).
+inline long double sinpi_l(long double x){
+    long double k = rint(x), r = x - k;
+    long double s = sin(kPiL * r);
+    return (fmod(k, 2.0L) != 0.0L) ? -s : s;
+}
+// Stirling tail Σ B₂ₖ/((2k)(2k−1)z^{2k−1}); z ≥ 11 → last term ~ 2^-69.
+inline long double stirling_series_l(long double z){
+    long double iv = 1.0L / z, iv2 = iv * iv;
+    long double s = STIRL_L[STIRL_L_N - 1];
+    for (int i = STIRL_L_N - 2; i >= 0; --i) s = s * iv2 + STIRL_L[i];
+    return iv * s;
+}
+// lnΓ(z) as double-double for z ≥ 11 (no cancellation; the ½ln2π tail is dd).
+inline void stirling_lngamma_l_dd(long double z, long double &hi, long double &lo){
+    long double Lhi, Llo; log_l_dd(z, Lhi, Llo);
+    long double ehi, elo; two_prod_l(z - 0.5L, Lhi, ehi, elo); elo += (z - 0.5L) * Llo;
+    long double s1, s2; two_sum_l(ehi, -z, s1, s2);
+    long double t1, t2; two_sum_l(s1, KHALFLOG2PI_HI_L, t1, t2);
+    hi = t1;
+    lo = t2 + s2 + elo + KHALFLOG2PI_LO_L + stirling_series_l(z);
+}
+inline long double tgamma(long double x){
+    if (isnan(x)) return x;
+    if (isinf(x)) return signbit(x) ? kQNaNL : kInfL;
+    if (x == 0.0L) return copysign(kInfL, x);
+    if (x < 0.0L && x == floor(x)) return kQNaNL;      // negative-integer poles
+    if (x < 0.5L) return kPiL / (sinpi_l(x) * tgamma(1.0L - x));   // reflection
+    // z → ≥11 and denom = Π z_i, both carried in double-double so z += 1 and denom *= z
+    // stay exact for non-representable x (a plain recurrence drifts several ULP).
+    long double zh = x, zl = 0.0L, dh = 1.0L, dl = 0.0L;
+    while (zh < 11.0L){
+        long double ph, pe; two_prod_l(dh, zh, ph, pe); // denom *= (zh+zl)
+        pe += dh * zl + dl * zh;
+        two_sum_l(ph, pe, dh, dl);
+        long double s, e; two_sum_l(zh, 1.0L, s, e);    // z += 1 (dd)
+        two_sum_l(s, e + zl, zh, zl);
+    }
+    long double h, l; stirling_lngamma_l_dd(zh, h, l);
+    if (zl != 0.0L){                                    // lnΓ(zh+zl) = lnΓ(zh) + ψ(zh)·zl
+        long double a, b; log_l_dd(zh, a, b);
+        long double iv = 1.0L / zh;
+        long double psi = (a + b) - 0.5L * iv - iv * iv / 12.0L;
+        l += psi * zl;
+    }
+    long double g = exp_l_dd(h, l);                     // Γ(zh+zl); caps x≳1755 → +Inf
+    if (!isfinite(g) || dl == 0.0L) return g / dh;      // overflow, or exactly-representable denom
+    long double q0 = g / dh;                            // g / (dh+dl) in double-double
+    long double ph, pe; two_prod_l(q0, dh, ph, pe);
+    long double r = ((g - ph) - pe) - q0 * dl;
+    return q0 + r / dh;
+}
+inline long double lgamma(long double x){
+    if (isnan(x)) return x;
+    if (isinf(x)) return kInfL;
+    if (x == 0.0L) return kInfL;
+    if (x < 0.0L && x == floor(x)) return kInfL;        // poles
+    if (x < 0.5L) return log(kPiL / fabs(sinpi_l(x))) - lgamma(1.0L - x);   // reflection
+    // lnΓ(x) = lnΓ(z) − Σ ln(z_i), z pushed to ≥11. z is carried in double-double so
+    // z += 1 is EXACT: a plain z+=1 rounds for non-representable x (0.6, 0.9, …) and the
+    // digamma·drift blows the small-x result up to tens of ULP. Σ is a renormalized dd
+    // so the cancellation (both sides ~lnΓ(11)) keeps a few ULP instead of collapsing.
+    long double zh = x, zl = 0.0L, sh = 0.0L, sl = 0.0L;
+    while (zh < 11.0L){
+        long double lh, ll; log_l_dd(zh, lh, ll);       // ln(zh+zl) = ln(zh) + zl/zh
+        long double t1, t2; two_sum_l(sh, lh, t1, t2);
+        t2 += sl + ll + zl / zh;
+        two_sum_l(t1, t2, sh, sl);
+        long double s, e; two_sum_l(zh, 1.0L, s, e);     // z += 1 in double-double
+        two_sum_l(s, e + zl, zh, zl);
+    }
+    long double h, l; stirling_lngamma_l_dd(zh, h, l);
+    if (zl != 0.0L){                                     // lnΓ(zh+zl) = lnΓ(zh) + ψ(zh)·zl
+        long double a, b; log_l_dd(zh, a, b);
+        long double iv = 1.0L / zh;
+        long double psi = (a + b) - 0.5L * iv - iv * iv / 12.0L;   // digamma asymptotic
+        l += psi * zl;
+    }
+    long double r1, r2; two_sum_l(h, -sh, r1, r2);       // (h,l) − (sh,sl) in double-double
+    r2 += l - sl;
+    return r1 + r2;
+}
+
+// C-named (f / l) triples over the genuine 80-bit primaries.
+inline float erff(float x){ return (float)erf((long double)x); }         inline long double erfl(long double x){ return erf(x); }
+inline float erfcf(float x){ return (float)erfc((long double)x); }       inline long double erfcl(long double x){ return erfc(x); }
+inline float tgammaf(float x){ return (float)tgamma((long double)x); }   inline long double tgammal(long double x){ return tgamma(x); }
+inline float lgammaf(float x){ return (float)lgamma((long double)x); }   inline long double lgammal(long double x){ return lgamma(x); }
 
 } // namespace std
 #include <__bits/cmath_special>
