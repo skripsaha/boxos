@@ -24,13 +24,15 @@ using i32  = int32_t;
 using u128 = unsigned __int128;
 
 // ── minimal big integer (little-endian base 2^32) ────────────────────────
-// 192 words (~6144 bits) covers fullMant * 5^1074 (to_chars precision) and the
-// 10^|E|-scaled denominator of a from_chars input at the subnormal boundary
-// (≈10^1613 ≈ 168 words for a 1290-significant-digit subnormal, plus the
-// RoundedQ shift). Every grow primitive ALSO saturates at kBigWords (see
-// BigMulSmall / BigShl / BigInc), so an out-of-range exponent that slips past
-// the magnitude pre-clamp in ParseFp can still never write past the array.
-constexpr int kBigWords = 192;
+// 576 words (~18432 bits) is sized for the long double (80-bit x87) surface,
+// whose exact-decimal machinery dwarfs float/double: Dragon4 scales M by up to
+// 2^16446 (≈514 words) and the from_chars subnormal path shifts by 16445 bits.
+// The float/double paths only ever touch ≤168 words (their magnitude pre-clamp
+// bounds the operands), so the larger array is byte-for-byte inert for them.
+// Every grow primitive ALSO saturates at kBigWords (see BigMulSmall / BigShl /
+// BigInc / BigDivMod128), so an out-of-range exponent that slips past the
+// magnitude pre-clamp in ParseFp / ParseFpLd can still never write past the array.
+constexpr int kBigWords = 576;
 struct BigInt {
     u32 w[kBigWords];
     int n;  // number of significant words
@@ -41,6 +43,11 @@ void BigSetU64(BigInt &a, u64 v)
     a.w[0] = (u32)v;
     a.w[1] = (u32)(v >> 32);
     a.n    = a.w[1] ? 2 : (a.w[0] ? 1 : 0);
+}
+void BigSetU128(BigInt &a, u128 v)
+{
+    for (int i = 0; i < 4; ++i) { a.w[i] = (u32)v; v >>= 32; }
+    a.n = 4; while (a.n > 0 && a.w[a.n - 1] == 0) --a.n;
 }
 void BigMulSmall(BigInt &a, u32 m)
 {
@@ -654,7 +661,11 @@ void FmtHexP(OutBuf &o, bool sign, int lead, i32 binExp, u64 frac, int fracBits,
         u64 rmask = frac & ((shift >= 64) ? ~0ull : ((1ull << shift) - 1));
         u64 half  = (shift >= 1) ? (1ull << (shift - 1)) : 0;
         bool up = rmask > half || (rmask == half && (keepBits ? (kept & 1) : (lead & 1)));
-        if (up) { if (keepBits) { ++kept; if (kept == (1ull << keepBits)) { kept = 0; ++lead; } } else ++lead; }
+        // keepBits==64 (only reachable at LD hex precision=16) makes 1ull<<keepBits
+        // undefined, so detect the carry via wraparound instead.
+        if (up) { if (keepBits >= 64) { if (++kept == 0) ++lead; }
+                  else if (keepBits) { if (++kept == (1ull << keepBits)) { kept = 0; ++lead; } }
+                  else ++lead; }
         o.put((char)('0' + lead));
         if (p > 0) { o.put('.'); for (int k = 0; k < p; ++k) { u32 nib = (u32)((kept >> (4 * (p - 1 - k))) & 0xF); o.put((char)(nib < 10 ? '0' + nib : 'a' + nib - 10)); } }
     } else {
@@ -722,6 +733,17 @@ void BigSubFull(BigInt &a, const BigInt &b)  // a -= b, requires a >= b
     }
     while (a.n > 0 && a.w[a.n - 1] == 0) --a.n;
 }
+void BigAddFull(const BigInt &a, const BigInt &b, BigInt &out)  // out = a + b
+{
+    int m = a.n > b.n ? a.n : b.n; u64 carry = 0;
+    for (int i = 0; i < m; ++i) {
+        u64 s = (u64)(i < a.n ? a.w[i] : 0) + (i < b.n ? b.w[i] : 0) + carry;
+        out.w[i] = (u32)s; carry = s >> 32;
+    }
+    out.n = m;
+    if (carry && out.n < kBigWords) out.w[out.n++] = (u32)carry;
+    while (out.n > 0 && out.w[out.n - 1] == 0) --out.n;
+}
 u64 BigDivModFull(const BigInt &num, const BigInt &den, BigInt &rem)  // q (low64) + rem
 {
     rem.n = 0;
@@ -741,6 +763,28 @@ u64 RoundedQ(const BigInt &num, const BigInt &den, int shift)  // round(num*2^sh
     BigInt rem; u64 q = BigDivModFull(sn, sd, rem);
     BigInt rem2; BigShl(rem, 1, rem2); int c = BigCmpFull(rem2, sd);
     if (c > 0 || (c == 0 && (q & 1))) ++q;
+    return q;
+}
+// 128-bit quotient of num/den + remainder — like BigDivModFull but keeps the
+// low 128 quotient bits (long double's transient q reaches ~2^65, so a u64
+// quotient truncates). BigDivModFull is left untouched for the float/double path.
+void BigDivMod128(const BigInt &num, const BigInt &den, u128 &q, BigInt &rem)
+{
+    rem.n = 0; q = 0;
+    for (int bit = BigBitLen(num) - 1; bit >= 0; --bit) {
+        BigInt t; BigShl(rem, 1, t); rem = t;
+        if ((num.w[bit / 32] >> (bit % 32)) & 1) { if (rem.n == 0) rem.n = 1; rem.w[0] |= 1; }
+        if (BigCmpFull(rem, den) >= 0) { BigSubFull(rem, den); if (bit < 128) q |= ((u128)1 << bit); }
+    }
+}
+u128 RoundedQ128(const BigInt &num, const BigInt &den, int shift)  // round(num*2^shift/den), ties→even
+{
+    BigInt sn, sd;
+    if (shift >= 0) { BigShl(num, shift, sn); sd = den; }
+    else { sn = num; BigShl(den, -shift, sd); }
+    u128 q; BigInt rem; BigDivMod128(sn, sd, q, rem);
+    BigInt rem2; BigShl(rem, 1, rem2); int c = BigCmpFull(rem2, sd);
+    if (c > 0 || (c == 0 && (u64)(q & 1))) ++q;
     return q;
 }
 const double kPow10[23] = {1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11,
@@ -887,6 +931,440 @@ int FmtToParseMode(std::chars_format fmt, bool &hex)
     return M_GENERAL;
 }
 
+// ════════════════════════════════════════════════════════════════════════════
+// long double (80-bit x87 extended). Ф27b. Own tableless Dragon4 shortest, a
+// denominator-based precision renderer (never materializes M·5^-e2), and a
+// P=64 parser with 128-bit transient quotients. Reuses the BigInt substrate.
+// x87 layout: bytes 0-7 = 64-bit significand M (bit63 = explicit integer bit),
+// bytes 8-9 = se (bit15 sign, bits0-14 = 15-bit biased exponent).
+// ════════════════════════════════════════════════════════════════════════════
+constexpr int kLdSigDigits = 11536;  // ⌈bits of M·5^16445⌉ in decimal (exact digits of the smallest subnormal)
+constexpr int kLdIntDigits = 4944;   // decimal digits of the largest integer value (LDBL_MAX ≈ 10^4932)
+
+void DecomposeLd(long double x, bool &sign, unsigned &exp, u64 &M, i32 &e2)
+{
+    unsigned __int128 bits = __builtin_bit_cast(unsigned __int128, x);
+    M    = (u64)bits;
+    unsigned se = (unsigned)(uint16_t)(bits >> 64);
+    sign = se >> 15;
+    exp  = se & 0x7FFF;
+    e2   = (i32)(exp == 0 ? 1 : exp) - 16383 - 63;   // value = M · 2^e2
+}
+
+// Dragon4 (Steele & White FPP2 / Burger-Dubois free-format) shortest: emits the
+// fewest decimal digits that round-trip. R,S,M+,M- are scaled by 2 (×4 at the
+// lower boundary where the ulp halves); accept-bounds inclusive iff M is even.
+void LdDragonShortest(u64 M, i32 e2, bool boundary, char *digits, int &ndig, int &e10)
+{
+    BigInt R, S, Mp, Mm, tmp;
+    BigSetU64(R, M);
+    bool even = (M & 1) == 0;
+    if (e2 >= 0) {
+        if (!boundary) { BigShl(R, e2 + 1, tmp); R = tmp; BigSetU64(S, 2);
+                         BigSetU64(Mp, 1); BigShl(Mp, e2, tmp); Mp = tmp; Mm = Mp; }
+        else { BigShl(R, e2 + 2, tmp); R = tmp; BigSetU64(S, 4);
+               BigSetU64(Mp, 1); BigShl(Mp, e2 + 1, tmp); Mp = tmp;
+               BigSetU64(Mm, 1); BigShl(Mm, e2, tmp); Mm = tmp; }
+    } else {
+        int ne = -e2;
+        if (!boundary) { BigShl(R, 1, tmp); R = tmp; BigSetU64(S, 1); BigShl(S, ne + 1, tmp); S = tmp;
+                         BigSetU64(Mp, 1); BigSetU64(Mm, 1); }
+        else { BigShl(R, 2, tmp); R = tmp; BigSetU64(S, 1); BigShl(S, ne + 2, tmp); S = tmp;
+               BigSetU64(Mp, 2); BigSetU64(Mm, 1); }
+    }
+    i32 bitDiff = BigBitLen(R) - BigBitLen(S);
+    i32 k = (i32)(((int64_t)bitDiff * 30103) / 100000);
+    if (k >= 0) { for (i32 i = 0; i < k; ++i) BigMulSmall(S, 10); }
+    else { for (i32 i = 0; i < -k; ++i) { BigMulSmall(R, 10); BigMulSmall(Mp, 10); BigMulSmall(Mm, 10); } }
+    for (;;) { BigInt s10 = S; BigMulSmall(s10, 10); if (BigCmpFull(R, s10) < 0) break; BigMulSmall(S, 10); ++k; }
+    while (BigCmpFull(R, S) < 0) { BigMulSmall(R, 10); BigMulSmall(Mp, 10); BigMulSmall(Mm, 10); --k; }
+    int decimal_point = k + 1;
+    ndig = 0;
+    for (;;) {
+        int d = 0; while (BigCmpFull(R, S) >= 0) { BigSubFull(R, S); ++d; }
+        bool inMinus = even ? (BigCmpFull(R, Mm) <= 0) : (BigCmpFull(R, Mm) < 0);
+        BigInt sum; BigAddFull(R, Mp, sum); int cp = BigCmpFull(sum, S);
+        bool inPlus = even ? (cp >= 0) : (cp > 0);
+        if (!inMinus && !inPlus) {
+            digits[ndig++] = (char)('0' + d);
+            BigMulSmall(R, 10); BigMulSmall(Mp, 10); BigMulSmall(Mm, 10);
+        } else if (inMinus && inPlus) {
+            BigInt r2; BigShl(R, 1, r2); int c = BigCmpFull(r2, S);
+            if (c > 0 || (c == 0 && (d & 1))) ++d;
+            digits[ndig++] = (char)('0' + d); break;
+        } else if (inPlus) { ++d; digits[ndig++] = (char)('0' + d); break; }
+        else { digits[ndig++] = (char)('0' + d); break; }
+    }
+    if (digits[ndig - 1] > '9') {   // round-up carried the last digit past '9'
+        int i = ndig - 1;
+        for (;;) {
+            if (digits[i] != ('9' + 1)) break;
+            digits[i] = '0'; if (i == 0) { digits[0] = '1'; ++decimal_point; ndig = 1; break; }
+            --i; ++digits[i];
+        }
+    }
+    while (ndig > 1 && digits[ndig - 1] == '0') --ndig;
+    e10 = decimal_point - ndig;
+}
+
+void WriteExpLd(OutBuf &o, i32 e)   // like WriteExp, but up to 4 exponent digits (LD reaches ±4932)
+{
+    o.put('e');
+    if (e < 0) { o.put('-'); e = -e; } else o.put('+');
+    if (e >= 1000) { o.put((char)('0' + e / 1000)); e %= 1000; o.put((char)('0' + e / 100)); e %= 100; }
+    else if (e >= 100) { o.put((char)('0' + e / 100)); e %= 100; }
+    o.put((char)('0' + e / 10));
+    o.put((char)('0' + e % 10));
+}
+bool RoundUpArr(char *sig, int n)   // +1 ULP into sig[0..n); true if it carried out (result = 1e^…)
+{
+    int i = n - 1;
+    for (;;) {
+        if (sig[i] != '9') { ++sig[i]; return false; }
+        sig[i] = '0'; if (i == 0) { sig[0] = '1'; return true; } --i;
+    }
+}
+int BigEmitDecimal(BigInt a, char *out)   // full decimal of a (thousands of digits) — BigToDec's tmp[1200] is too small
+{
+    if (a.n == 0) { out[0] = '0'; return 1; }
+    char rev[kLdIntDigits]; int n = 0;
+    while (a.n > 0 && n < kLdIntDigits) rev[n++] = (char)('0' + BigDivModSmall(a, 10));
+    for (int i = 0; i < n; ++i) out[i] = rev[n - 1 - i];
+    return n;
+}
+int EmitExactIntLd(char *out, u64 M, i32 e2)   // round(M·2^e2) as decimal digits, ties→even
+{
+    if (e2 >= 0) { BigInt b; BigSetU64(b, M); BigInt s; BigShl(b, e2, s); return BigEmitDecimal(s, out); }
+    int sh   = -e2;
+    u64 q    = sh >= 64 ? 0 : (M >> sh);
+    u64 rem  = sh >= 64 ? M : (M & ((1ull << sh) - 1));
+    u64 half = (sh >= 1 && sh <= 64) ? (1ull << (sh - 1)) : 0;
+    if (rem > half || (rem == half && (q & 1))) ++q;
+    char tmp[24]; int n = 0; do { tmp[n++] = (char)('0' + q % 10); q /= 10; } while (q);
+    for (int i = 0; i < n; ++i) out[i] = tmp[n - 1 - i];
+    return n;
+}
+i32 LdDecExp(u64 M, i32 e2)   // floor(log10(M·2^e2)) exactly
+{
+    BigInt num, den, t;
+    BigSetU64(num, M);
+    if (e2 >= 0) { BigShl(num, e2, t); num = t; BigSetU64(den, 1); }
+    else { BigSetU64(den, 1); BigShl(den, -e2, t); den = t; }
+    i32 d = (i32)(((int64_t)(BigBitLen(num) - BigBitLen(den)) * 30103) / 100000);
+    if (d >= 0) { for (i32 i = 0; i < d; ++i) BigMulSmall(den, 10); }
+    else { for (i32 i = 0; i < -d; ++i) BigMulSmall(num, 10); }
+    for (;;) { BigInt d10 = den; BigMulSmall(d10, 10); if (BigCmpFull(num, d10) < 0) break; BigMulSmall(den, 10); ++d; }
+    while (BigCmpFull(num, den) < 0) { BigMulSmall(num, 10); --d; }
+    return d;
+}
+void LdGenSigDigits(u64 M, i32 e2, int wantSig, char *out, int cap, i32 &decExp, bool &roundTail);
+
+// shortest digit string → fixed / scientific / general, matching EmitFp's selection.
+void EmitFpLd(OutBuf &o, bool sign, const char *digits, int ndig, i32 e10, int mode, u64 M, i32 e2)
+{
+    i32 e_sci = e10 + ndig - 1;
+    i32 ea = e_sci < 0 ? -e_sci : e_sci;
+    int expDig = ea >= 1000 ? 4 : ea >= 100 ? 3 : 2;
+    long sci_len = ndig + (ndig > 1 ? 1 : 0) + 2 + expDig;
+    char intbuf[kLdIntDigits]; int intlen = 0;
+    long fixed_len;
+    if (e10 >= 0) { intlen = EmitExactIntLd(intbuf, M, e2); fixed_len = intlen; }
+    else { i32 dot = ndig + e10; fixed_len = dot <= 0 ? (2 + (-(long)dot) + ndig) : (ndig + 1); }
+    bool use_fixed;
+    switch (mode) {
+        case M_SCI:     use_fixed = false; break;
+        case M_FIXED:   use_fixed = true; break;
+        case M_GENERAL: use_fixed = (e_sci >= -4 && e_sci <= 5); break;
+        default:        use_fixed = fixed_len <= sci_len; break;
+    }
+    if (sign) o.put('-');
+    if (use_fixed) {
+        if (e10 >= 0) o.run(intbuf, intlen);
+        else {
+            i32 dot = ndig + e10;
+            if (dot <= 0) { o.put('0'); o.put('.'); o.zeros(-dot); o.run(digits, ndig); }
+            else { o.run(digits, dot); o.put('.'); o.run(digits + dot, ndig - dot); }
+        }
+    } else {
+        o.put(digits[0]);
+        if (ndig > 1) { o.put('.'); o.run(digits + 1, ndig - 1); }
+        WriteExpLd(o, e_sci);
+    }
+}
+void FmtSciPLd(OutBuf &o, bool sign, u64 M, i32 e2, int p)
+{
+    char S[kLdSigDigits];
+    int gen = (long)p + 1 < kLdSigDigits ? p + 1 : kLdSigDigits;
+    i32 X; bool rt; LdGenSigDigits(M, e2, gen, S, kLdSigDigits, X, rt);
+    if (rt && RoundUpArr(S, gen)) ++X;
+    if (sign) o.put('-');
+    o.put(S[0]);
+    if (p > 0) { o.put('.'); int fromS = gen - 1 < p ? gen - 1 : p; o.run(S + 1, fromS); o.zeros((long)p - fromS); }
+    WriteExpLd(o, X);
+}
+void FmtFixedPLd(OutBuf &o, bool sign, u64 M, i32 e2, int p)
+{
+    i32 decExp = LdDecExp(M, e2);
+    long want = (long)decExp + p + 1;
+    if (sign) o.put('-');
+    if (want <= 0) {   // value < 10^-p: rounds to 0 or a single 1 at the 10^-p place
+        BigInt num, den, t; BigSetU64(num, M); BigSetU64(den, 1);
+        int sh = e2 + 1;
+        if (sh >= 0) { BigShl(num, sh, t); num = t; } else { BigShl(den, -sh, t); den = t; }
+        for (int i = 0; i < p; ++i) BigMulSmall(num, 10);
+        bool up = BigCmpFull(num, den) > 0;   // 2·value > 10^-p (exact half → even → down)
+        if (p == 0) { o.put(up ? '1' : '0'); return; }
+        o.put('0'); o.put('.');
+        if (up) { o.zeros((long)p - 1); o.put('1'); } else o.zeros(p);
+        return;
+    }
+    char S[kLdSigDigits];
+    int gen = want < kLdSigDigits ? (int)want : kLdSigDigits;
+    i32 X; bool rt; LdGenSigDigits(M, e2, gen, S, kLdSigDigits, X, rt);
+    if (rt && RoundUpArr(S, gen)) ++X;
+    int intLen = X >= 0 ? X + 1 : 0;
+    if (intLen <= 0) o.put('0');
+    else if (intLen <= gen) o.run(S, intLen);
+    else { o.run(S, gen); o.zeros((long)intLen - gen); }
+    if (p > 0) {
+        o.put('.');
+        if (X >= 0) {
+            int fracStart = X + 1, avail = gen - fracStart; if (avail < 0) avail = 0;
+            int emit = avail < p ? avail : p;
+            o.run(S + fracStart, emit); o.zeros((long)p - emit);
+        } else {
+            long lead = -(long)X - 1;
+            if (lead >= p) o.zeros(p);
+            else { o.zeros(lead); int emit = gen < (p - lead) ? gen : (int)(p - lead);
+                   o.run(S, emit); o.zeros((long)p - lead - emit); }
+        }
+    }
+}
+void FmtGeneralPLd(OutBuf &o, bool sign, u64 M, i32 e2, int p)
+{
+    int P = p < 1 ? 1 : p;
+    if (P > kLdSigDigits) P = kLdSigDigits;
+    char S[kLdSigDigits];
+    i32 X; bool rt; LdGenSigDigits(M, e2, P, S, kLdSigDigits, X, rt);
+    int sig = P;
+    if (rt && RoundUpArr(S, sig)) ++X;
+    if (sign) o.put('-');
+    if (X < -4 || X >= P) {
+        int fracEnd = sig; while (fracEnd > 1 && S[fracEnd - 1] == '0') --fracEnd;
+        o.put(S[0]); if (fracEnd > 1) { o.put('.'); o.run(S + 1, fracEnd - 1); }
+        WriteExpLd(o, X);
+    } else if (X >= 0) {
+        int intLen = X + 1;
+        if (intLen >= sig) { o.run(S, sig); o.zeros((long)intLen - sig); }
+        else { int fracEnd = sig; while (fracEnd > intLen && S[fracEnd - 1] == '0') --fracEnd;
+               o.run(S, intLen);
+               if (fracEnd > intLen) { o.put('.'); o.run(S + intLen, fracEnd - intLen); } }
+    } else {
+        int fracEnd = sig; while (fracEnd > 0 && S[fracEnd - 1] == '0') --fracEnd;
+        o.put('0');
+        if (fracEnd > 0) { o.put('.'); o.zeros(-(long)X - 1); o.run(S, fracEnd); }
+    }
+}
+// value = M·2^e2 = num/den. Streams up to min(wantSig,cap) significant digits from
+// the first nonzero (MSB-first) into out; decExp = power of ten of out[0]; roundTail
+// = round-half-even decision at digit #(wantSig+1). Big-ints stay ≤ ~514 words: it
+// never materializes M·5^-e2, only the intrinsic 2^-e2 denominator.
+void LdGenSigDigits(u64 M, i32 e2, int wantSig, char *out, int cap, i32 &decExp, bool &roundTail)
+{
+    roundTail = false;
+    BigInt num, den, t;
+    BigSetU64(num, M);
+    if (e2 >= 0) { BigShl(num, e2, t); num = t; BigSetU64(den, 1); }
+    else { BigSetU64(den, 1); BigShl(den, -e2, t); den = t; }
+    i32 bitDiff = BigBitLen(num) - BigBitLen(den);
+    decExp = (i32)(((int64_t)bitDiff * 30103) / 100000);
+    if (decExp >= 0) { for (i32 i = 0; i < decExp; ++i) BigMulSmall(den, 10); }
+    else { for (i32 i = 0; i < -decExp; ++i) BigMulSmall(num, 10); }
+    for (;;) { BigInt d10 = den; BigMulSmall(d10, 10); if (BigCmpFull(num, d10) < 0) break; BigMulSmall(den, 10); ++decExp; }
+    while (BigCmpFull(num, den) < 0) { BigMulSmall(num, 10); --decExp; }
+    int want = wantSig < cap ? wantSig : cap;
+    if (want < 1) want = 1;
+    int k = 0;
+    for (; k < want; ++k) {
+        if (num.n == 0) { for (int j = k; j < want; ++j) out[j] = '0'; break; }
+        int d = 0; while (BigCmpFull(num, den) >= 0) { BigSubFull(num, den); ++d; }
+        out[k] = (char)('0' + d);
+        BigMulSmall(num, 10);
+    }
+    int dnext = 0; while (BigCmpFull(num, den) >= 0) { BigSubFull(num, den); ++dnext; }
+    bool tail = num.n != 0;
+    if (dnext > 5) roundTail = true;
+    else if (dnext == 5) roundTail = tail || ((out[want - 1] - '0') & 1);
+}
+void RenderLd(OutBuf &o, long double x, int mode, bool hex)
+{
+    bool sign; unsigned exp; u64 M; i32 e2; DecomposeLd(x, sign, exp, M, e2);
+    if (exp == 0x7FFF) {   // x87 inf = mant == 0x8000000000000000; nan otherwise
+        if (sign) o.put('-');
+        o.run(M != 0x8000000000000000ull ? "nan" : "inf", 3); return;
+    }
+    if (exp == 0 && M == 0) {
+        char b[24];
+        int len = hex ? EmitHex(b, sign, 0, 16, 0, 0) : EmitFp(b, sign, 0, 0, 0, 0, mode);
+        o.run(b, len); return;
+    }
+    if (hex) {
+        char b[48]; i32 binExp; u64 frac;
+        if (exp == 0) {   // subnormal: normalize to a leading 1
+            int h = 62; while (h >= 0 && !((M >> h) & 1)) --h;
+            binExp = h - 16445; frac = h ? ((M & ((((u64)1) << h) - 1)) << (64 - h)) : 0;
+        } else { binExp = (i32)exp - 16383; frac = (M & 0x7FFFFFFFFFFFFFFFull) << 1; }
+        int len = EmitHex(b, sign, frac, 16, binExp, 1);
+        o.run(b, len); return;
+    }
+    bool boundary = (M == 0x8000000000000000ull) && (exp > 1);
+    char digits[24]; int ndig, e10;
+    LdDragonShortest(M, e2, boundary, digits, ndig, e10);
+    EmitFpLd(o, sign, digits, ndig, e10, mode, M, e2);
+}
+
+// ── from_chars (decimal/hex → 80-bit, correctly rounded) ────────────────────
+u128 AssembleBitsLd(bool neg, unsigned expField, u64 mant)
+{
+    return ((u128)(((neg ? 0x8000u : 0u) | expField)) << 64) | mant;
+}
+// P=64, emin=-16382, emax=16383. num/den is already exact (the guard digit/bit
+// in DigitsToBitsLd/ParseFpLd folds the dropped tail), so ties→even is exact.
+void RoundToIeeeLd(const BigInt &num, const BigInt &den, u64 &mant, unsigned &expField, bool &oor)
+{
+    oor = false;
+    i32 e2 = BigBitLen(num) - BigBitLen(den) - 1;
+    u128 q = RoundedQ128(num, den, 63 - e2);
+    int g = 0;
+    while (q >= ((u128)1 << 64)) { ++e2; q = RoundedQ128(num, den, 63 - e2); if (++g > 6) break; }
+    while (q < ((u128)1 << 63)) { --e2; q = RoundedQ128(num, den, 63 - e2); if (++g > 6) break; }
+    if (e2 > 16383) { oor = true; expField = 0x7FFF; mant = 0; return; }
+    if (e2 >= -16382) { expField = (unsigned)(e2 + 16383); mant = (u64)q; return; }  // keep the explicit J bit
+    u128 qs = RoundedQ128(num, den, 16445);
+    if (qs == 0) { oor = true; expField = 0; mant = 0; return; }   // underflow to zero
+    if (qs >= ((u128)1 << 63)) { expField = 1; mant = (u64)qs; }
+    else { expField = 0; mant = (u64)qs; }
+}
+// digits MSB-first ('0'..'9'), value = INT(dig[0..ndig)) · 10^E, sticky = whether
+// anything nonzero was dropped past the kept window. Ф27b REFINEMENT 1: the sticky
+// enters as a low GUARD DIGIT (never BigInc), so a just-below-midpoint input with a
+// >1290-digit tail stays strictly below and rounds down.
+void DigitsToBitsLd(bool neg, const char *dig, int ndig, long E, bool sticky,
+                    u64 &mant, unsigned &expField, bool &oor)
+{
+    (void)neg;
+    int i0 = 0; while (i0 < ndig && dig[i0] == '0') ++i0;
+    int hi = ndig; while (hi > i0 && dig[hi - 1] == '0') { --hi; ++E; }
+    if (hi - i0 == 0 && !sticky) { expField = 0; mant = 0; oor = false; return; }
+    BigInt num; BigSetU64(num, 0);
+    for (int i = i0; i < hi; ++i) {
+        BigMulSmall(num, 10);
+        u64 carry = (u64)(dig[i] - '0');
+        for (int k = 0; k < num.n && carry; ++k) { u64 s = (u64)num.w[k] + carry; num.w[k] = (u32)s; carry = s >> 32; }
+        if (carry && num.n < kBigWords) num.w[num.n++] = (u32)carry;
+    }
+    // REFINEMENT 3 (for the end-of-phase host oracle): random sampling will NOT hit the
+    // hard cases — the oracle must CONSTRUCT subnormal binary-midpoints ±ε with >1290
+    // decimal digits and hex inputs with >64 significant bits to exercise this guard.
+    BigMulSmall(num, 10); if (sticky) { if (num.n == 0) num.n = 1; num.w[0] |= 1; } E -= 1;   // guard digit
+    BigInt den; BigSetU64(den, 1);
+    if (E >= 0) { for (long i = 0; i < E; ++i) BigMulSmall(num, 10); }
+    else { for (long i = 0; i < -E; ++i) BigMulSmall(den, 10); }
+    RoundToIeeeLd(num, den, mant, expField, oor);
+}
+// Parse a long double; returns consumed length, fills bits (u128), ec (0/22/34).
+int ParseFpLd(const char *first, const char *last, int mode, bool hex, u128 &bits, int &ec)
+{
+    constexpr long kExpAccumCap = 1L << 40;
+    const char *p = first; bool neg = false;
+    if (p < last && *p == '-') { neg = true; ++p; }
+    if (p < last && CharIs(*p, 'i') && last - p >= 3 && CharIs(p[0], 'i') && CharIs(p[1], 'n') && CharIs(p[2], 'f')) {
+        const char *q = p + 3;
+        if (last - p >= 8 && CharIs(p[3], 'i') && CharIs(p[4], 'n') && CharIs(p[5], 'i') && CharIs(p[6], 't') && CharIs(p[7], 'y')) q = p + 8;
+        bits = AssembleBitsLd(neg, 0x7FFF, 0x8000000000000000ull); ec = 0; return (int)(q - first);
+    }
+    if (p < last && CharIs(*p, 'n') && last - p >= 3 && CharIs(p[0], 'n') && CharIs(p[1], 'a') && CharIs(p[2], 'n')) {
+        bits = AssembleBitsLd(neg, 0x7FFF, 0xC000000000000000ull); ec = 0; return (int)(p + 3 - first);
+    }
+    if (hex) {
+        u128 hm = 0; int hbits = 0; long binexp = 0;
+        bool seenDot = false, any = false, sticky = false, seenNZ = false;
+        for (; p < last; ++p) {
+            if (*p == '.') { if (seenDot) break; seenDot = true; continue; }
+            int v = HexVal(*p); if (v < 0) break; any = true;
+            if (!seenNZ && v == 0) { if (seenDot) binexp -= 4; continue; }   // skip leading zero nibbles
+            seenNZ = true;
+            // REFINEMENT 2: capture ≥64 significant bits (here 120) + guard, rest → sticky
+            if (hbits < 120) { hm = (hm << 4) | (unsigned)v; hbits += 4; if (seenDot) binexp -= 4; }
+            else { if (v != 0) sticky = true; if (!seenDot && binexp < kExpAccumCap) binexp += 4; }
+        }
+        if (!any) { ec = 22; return 0; }
+        if (p < last && CharIs(*p, 'p')) {
+            const char *ep = p + 1; bool en = false;
+            if (ep < last && (*ep == '+' || *ep == '-')) { en = *ep == '-'; ++ep; }
+            if (ep < last && *ep >= '0' && *ep <= '9') {
+                long ev = 0;
+                while (ep < last && *ep >= '0' && *ep <= '9') { if (ev < kExpAccumCap) ev = ev * 10 + (*ep - '0'); ++ep; }
+                binexp += en ? -ev : ev; p = ep;
+            }
+        }
+        if (!seenNZ) { bits = AssembleBitsLd(neg, 0, 0); ec = 0; return (int)(p - first); }
+        // pre-clamp (value = hm·2^binexp, hm has ≤120 significant bits): definite over/underflow
+        if (binexp >= 16384 || binexp <= -16566) { bits = AssembleBitsLd(neg, 0, 0); ec = 34; return (int)(p - first); }
+        hm = (hm << 1) | (sticky ? 1u : 0u); binexp -= 1;   // REFINEMENT 1: guard bit
+        BigInt num; BigSetU128(num, hm); BigInt den; BigSetU64(den, 1); BigInt t;
+        if (binexp >= 0) { BigShl(num, (int)binexp, t); num = t; } else { BigShl(den, (int)(-binexp), t); den = t; }
+        u64 mant; unsigned ef; bool oor = false;
+        RoundToIeeeLd(num, den, mant, ef, oor);
+        bits = AssembleBitsLd(neg, ef, mant); ec = oor ? 34 : 0; return (int)(p - first);
+    }
+    // decimal. Leading zeros are skipped (not stored) so the 1290-digit window holds
+    // significant digits — otherwise an LD subnormal like 0.<1290 zeros>… mis-rounds.
+    char dig[1300]; int ndig = 0; long E = 0;
+    bool seenDot = false, any = false, sticky = false, seenNZ = false;
+    for (; p < last; ++p) {
+        if (*p == '.') { if (seenDot) break; seenDot = true; continue; }
+        if (*p < '0' || *p > '9') break;
+        any = true;
+        if (!seenNZ && *p == '0') { if (seenDot) --E; continue; }
+        seenNZ = true;
+        if (ndig < 1290) { dig[ndig++] = *p; if (seenDot) --E; }
+        else { if (*p != '0') sticky = true; if (!seenDot && E < kExpAccumCap) ++E; }
+    }
+    if (!any) { ec = 22; return 0; }
+    const char *afterMant = p;
+    if (mode != M_FIXED && p < last && CharIs(*p, 'e')) {
+        const char *ep = p + 1; bool en = false; if (ep < last && (*ep == '+' || *ep == '-')) { en = *ep == '-'; ++ep; }
+        if (ep < last && *ep >= '0' && *ep <= '9') { long ev = 0; while (ep < last && *ep >= '0' && *ep <= '9') { if (ev < kExpAccumCap) ev = ev * 10 + (*ep - '0'); ++ep; } E += en ? -ev : ev; p = ep; }
+        else if (mode == M_SCI) { ec = 22; return 0; }
+        else p = afterMant;
+    } else if (mode == M_SCI) { ec = 22; return 0; }
+    if (!seenNZ) { bits = AssembleBitsLd(neg, 0, 0); ec = 0; return (int)(p - first); }   // signed zero
+    // pre-clamp (value = INT(dig)·10^E, nsig = ndig significant digits): 10^(nsig-1+E) ≤ |v| < 10^(nsig+E)
+    {
+        long g_lo = (long)(ndig - 1) + E, g_hi = (long)ndig + E;
+        if (g_lo >= 4933 || g_hi <= -4951) { bits = AssembleBitsLd(neg, 0, 0); ec = 34; return (int)(p - first); }
+    }
+    u64 mant; unsigned ef; bool oor = false;
+    DigitsToBitsLd(neg, dig, ndig, E, sticky, mant, ef, oor);
+    bits = AssembleBitsLd(neg, ef, mant); ec = oor ? 34 : 0; return (int)(p - first);
+}
+void RenderPrecLd(OutBuf &o, long double x, int mode, bool hex, int prec)
+{
+    bool sign; unsigned exp; u64 M; i32 e2; DecomposeLd(x, sign, exp, M, e2);
+    if (exp == 0x7FFF) { if (sign) o.put('-'); o.run(M != 0x8000000000000000ull ? "nan" : "inf", 3); return; }
+    if (hex) {
+        int lead; i32 binExp; u64 frac;
+        if (exp == 0 && M == 0) { lead = 0; binExp = 0; frac = 0; }
+        else { lead = (int)((M >> 63) & 1); binExp = exp ? (i32)exp - 16383 : -16382; frac = (M & 0x7FFFFFFFFFFFFFFFull) << 1; }
+        FmtHexP(o, sign, lead, binExp, frac, 64, prec); return;
+    }
+    if (exp == 0 && M == 0) { FmtZeroP(o, sign, mode, prec); return; }
+    if (mode == M_FIXED) FmtFixedPLd(o, sign, M, e2, prec);
+    else if (mode == M_SCI) FmtSciPLd(o, sign, M, e2, prec);
+    else FmtGeneralPLd(o, sign, M, e2, prec);
+}
+
 } // namespace
 
 namespace std {
@@ -958,6 +1436,38 @@ from_chars_result from_chars(const char *first, const char *last, double &value,
     bool hex; int mode = FmtToParseMode(fmt, hex);
     u64 bits; int ec; int n = ParseFp(first, last, mode, hex, false, bits, ec);
     if (ec == 0) value = __builtin_bit_cast(double, bits);
+    return {first + n, ParseEc(ec)};
+}
+
+// ── long double (Ф27b) ──────────────────────────────────────────────────────
+// Tableless Dragon4 / big-int precision renderer — no Ryu table dependency, so
+// no EnsureTables(). Everything writes through OutBuf into [first, last).
+to_chars_result to_chars(char *first, char *last, long double value)
+{
+    OutBuf o{first, last};
+    RenderLd(o, value, M_SHORTEST, false);
+    return o.of ? to_chars_result{last, errc::value_too_large} : to_chars_result{o.p, errc{}};
+}
+to_chars_result to_chars(char *first, char *last, long double value, chars_format fmt)
+{
+    bool hex; int mode = FmtToMode(fmt, hex);
+    OutBuf o{first, last};
+    RenderLd(o, value, mode, hex);
+    return o.of ? to_chars_result{last, errc::value_too_large} : to_chars_result{o.p, errc{}};
+}
+to_chars_result to_chars(char *first, char *last, long double value, chars_format fmt, int precision)
+{
+    bool hex; int mode = FmtToMode(fmt, hex);
+    if (precision < 0) precision = 0;
+    OutBuf o{first, last};
+    RenderPrecLd(o, value, mode, hex, precision);
+    return o.of ? to_chars_result{last, errc::value_too_large} : to_chars_result{o.p, errc{}};
+}
+from_chars_result from_chars(const char *first, const char *last, long double &value, chars_format fmt)
+{
+    bool hex; int mode = FmtToParseMode(fmt, hex);
+    u128 bits; int ec; int n = ParseFpLd(first, last, mode, hex, bits, ec);
+    if (ec == 0) value = __builtin_bit_cast(long double, bits);
     return {first + n, ParseEc(ec)};
 }
 

@@ -10625,6 +10625,116 @@ void Phase60()
     printf("[CXX] PASS phase60: strong_order/weak_order long double (x87 80-bit)\n");
 }
 
+// ── Phase61 (Ф27b) — <charconv> long double (80-bit x87): to_chars/from_chars ─
+void Phase61()
+{
+    using F = std::chars_format;
+    // low 80 meaningful bits (padding bytes 10-15 are never compared)
+    auto bits = [](long double v) -> unsigned __int128 {
+        return __builtin_bit_cast(unsigned __int128, v) & ((((unsigned __int128)1) << 80) - 1);
+    };
+    auto rt = [&](long double x, const char *tag) {
+        char b[64]; auto r = std::to_chars(b, b + sizeof(b), x);
+        long double y{}; auto q = std::from_chars(b, r.ptr, y);
+        Check(r.ec == std::errc{} && q.ec == std::errc{} && q.ptr == r.ptr && bits(x) == bits(y), tag);
+    };
+    const long double inf = __builtin_infl();
+    const long double qnan = __builtin_nanl("");
+
+    // bit-exact round-trip over normals, subnormals, boundaries, signed zero
+    rt(1.0L, "phase61 rt 1");
+    rt(-1.0L, "phase61 rt -1");
+    rt(3.0L, "phase61 rt 3");
+    rt(0.5L, "phase61 rt 0.5");
+    rt(__LDBL_MIN__, "phase61 rt LDBL_MIN");
+    rt(__LDBL_MAX__, "phase61 rt LDBL_MAX");
+    rt(__LDBL_DENORM_MIN__, "phase61 rt LDBL_DENORM_MIN");
+    rt(0.0L, "phase61 rt +0");
+    rt(-0.0L, "phase61 rt -0");
+    rt(1e-4932L, "phase61 rt 1e-4932 (subnormal)");
+    rt(1e4932L, "phase61 rt 1e4932");
+    rt(3.141592653589793238L, "phase61 rt pi");
+
+    // specials
+    {
+        char b[8]; auto r = std::to_chars(b, b + sizeof(b), inf);
+        Check(r.ec == std::errc{} && std::string_view(b, r.ptr - b) == "inf", "phase61 to_chars inf");
+        auto r2 = std::to_chars(b, b + sizeof(b), -inf);
+        Check(r2.ec == std::errc{} && std::string_view(b, r2.ptr - b) == "-inf", "phase61 to_chars -inf");
+        auto r3 = std::to_chars(b, b + sizeof(b), qnan);
+        Check(r3.ec == std::errc{} && std::string_view(b, r3.ptr - b) == "nan", "phase61 to_chars nan");
+        long double y{};
+        const char si[] = "inf", sni[] = "-inf", sn[] = "nan";
+        auto p1 = std::from_chars(si, si + 3, y);
+        Check(p1.ec == std::errc{} && __builtin_isinf(y) && y > 0, "phase61 from_chars inf");
+        auto p2 = std::from_chars(sni, sni + 4, y);
+        Check(p2.ec == std::errc{} && __builtin_isinf(y) && y < 0, "phase61 from_chars -inf");
+        auto p3 = std::from_chars(sn, sn + 3, y);
+        Check(p3.ec == std::errc{} && __builtin_isnan(y), "phase61 from_chars nan");
+    }
+
+    // shortest strings for the extremes
+    {
+        char b[64]; auto r = std::to_chars(b, b + sizeof(b), __LDBL_DENORM_MIN__);
+        Check(r.ec == std::errc{} && std::string_view(b, r.ptr - b) == "4e-4951", "phase61 shortest DENORM_MIN");
+        auto r2 = std::to_chars(b, b + sizeof(b), __LDBL_MAX__);
+        Check(r2.ec == std::errc{} && std::string_view(b, r2.ptr - b) == "1.189731495357231765e+4932",
+              "phase61 shortest LDBL_MAX");
+    }
+
+    // hex
+    {
+        char b[64];
+        auto h1 = std::to_chars(b, b + sizeof(b), 1.0L, F::hex);
+        Check(h1.ec == std::errc{} && std::string_view(b, h1.ptr - b) == "1p+0", "phase61 hex 1");
+        auto h2 = std::to_chars(b, b + sizeof(b), 3.0L, F::hex);
+        Check(h2.ec == std::errc{} && std::string_view(b, h2.ptr - b) == "1.8p+1", "phase61 hex 3");
+        auto h3 = std::to_chars(b, b + sizeof(b), __LDBL_DENORM_MIN__, F::hex);
+        Check(h3.ec == std::errc{} && std::string_view(b, h3.ptr - b) == "1p-16445", "phase61 hex DENORM_MIN");
+        long double y{};
+        auto p = std::from_chars(b, h3.ptr, y, F::hex);
+        Check(p.ec == std::errc{} && bits(y) == bits(__LDBL_DENORM_MIN__), "phase61 hex round-trip DENORM_MIN");
+    }
+
+    // one precision case per mode — each round-trips because ≥21 significant digits are emitted
+    {
+        long double x = 3.141592653589793238L;
+        auto prt = [&](F f, int prec, const char *tag) {
+            char b[64]; auto r = std::to_chars(b, b + sizeof(b), x, f, prec);
+            long double y{}; auto q = std::from_chars(b, r.ptr, y, f);
+            Check(r.ec == std::errc{} && q.ec == std::errc{} && bits(y) == bits(x), tag);
+        };
+        prt(F::fixed, 20, "phase61 fixed,20 round-trip");
+        prt(F::scientific, 30, "phase61 scientific,30 round-trip");
+        prt(F::general, 21, "phase61 general,21 round-trip");
+    }
+
+    // to_string / stold
+    {
+        Check(std::to_string(3.14159L) == "3.141590", "phase61 to_string 3.14159L");
+        size_t pos = 0;
+        long double v = std::stold("3.14159", &pos);
+        Check(bits(v) == bits(3.14159L) && pos == 7, "phase61 stold 3.14159");
+        bool threw = false;
+        try { std::stold("1e99999"); } catch (const std::out_of_range &) { threw = true; }
+        Check(threw, "phase61 stold overflow → out_of_range");
+        threw = false;
+        try { std::stold("xyz"); } catch (const std::invalid_argument &) { threw = true; }
+        Check(threw, "phase61 stold junk → invalid_argument");
+    }
+
+    // stack probe: huge precision must not fault the 64KB stack's guard page
+    {
+        static char big[10240];
+        auto s1 = std::to_chars(big, big + sizeof(big), __LDBL_DENORM_MIN__, F::scientific, 5000);
+        Check(s1.ec == std::errc{} && (s1.ptr - big) > 5000, "phase61 stack probe sci,5000");
+        auto s2 = std::to_chars(big, big + sizeof(big), __LDBL_MAX__, F::fixed, 4000);
+        Check(s2.ec == std::errc{} && (s2.ptr - big) > 8900, "phase61 stack probe fixed,4000");
+    }
+
+    printf("[CXX] PASS phase61: <charconv> long double\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -10707,6 +10817,7 @@ int main()
     Phase58();
     Phase59();
     Phase60();
+    Phase61();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
