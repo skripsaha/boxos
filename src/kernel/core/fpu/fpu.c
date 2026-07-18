@@ -194,7 +194,9 @@ void fpu_init_state(uint8_t* raw) {
     uint32_t size = g_use_xsave ? g_xsave_area_size : 512;
     memset(p, 0, size);
 
-    // FCW at offset 0: 0x037F = all exceptions masked, double precision, round-to-nearest
+    // FCW at offset 0: 0x037F = all exceptions masked, 64-bit extended precision
+    // (PC=11b, full 80-bit mantissa — NOT 53-bit double 0x027F), round-to-nearest.
+    // Load-bearing for x87 long double: forcing 0x027F would silently halve precision.
     p[0] = 0x7F;
     p[1] = 0x03;
     // MXCSR at offset 24: 0x1F80 = all SSE exceptions masked, round-to-nearest
