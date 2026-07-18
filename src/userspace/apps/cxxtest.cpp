@@ -24,15 +24,18 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <bit>
 #include <charconv>
 #include <chrono>
 #include <cmath>
+#include <compare>
 #include <coroutine>
 #include <generator>
 #include <deque>
 #include <expected>
 #include <format>
 #include <iterator>
+#include <limits>
 #include <list>
 #include <map>
 #include <memory>
@@ -10561,6 +10564,67 @@ void Phase59()
            "sync-isolation/error-path completions)\n");
 }
 
+// ── phase60: strong_order / weak_order for x87 80-bit long double (Ф27a) ──
+// Runs the IEEE-totalOrder kernel on REAL x87 (fldt/fstpt + the andl padding
+// mask). The cxxtest_traits.cpp static_asserts exercise only the host
+// constant-evaluator, so the value asserts are re-checked here on target.
+void Phase60()
+{
+    using std::strong_order;
+    using std::weak_order;
+    using std::bit_cast;
+    const long double inf  = std::numeric_limits<long double>::infinity();
+    const long double pnan = __builtin_nanl("");
+    const long double nnan = -__builtin_nanl("");
+
+    // strong_order — full IEEE total order over the 80-bit encodings.
+    Check(strong_order(-0.0L, +0.0L) < 0 && strong_order(+0.0L, -0.0L) > 0,
+          "phase60 strong -0 < +0");
+    Check(strong_order(1.0L, 1.0L) == 0 && strong_order(1.0L, 2.0L) < 0 &&
+          strong_order(2.0L, 1.0L) > 0, "phase60 strong 1 < 2");
+    Check(strong_order(nnan, -inf) < 0 && strong_order(-inf, inf) < 0 &&
+          strong_order(inf, pnan) < 0,
+          "phase60 strong -NaN < -inf < +inf < +NaN");
+    Check(strong_order(__LDBL_DENORM_MIN__, __LDBL_MIN__) < 0 &&
+          strong_order(__LDBL_MIN__, 1.0L) < 0,
+          "phase60 strong denorm < min-normal < 1");
+
+    // weak_order — -0 ≡ +0 (fold), same-sign NaN equivalent, NaN tiers by sign.
+    Check(weak_order(-0.0L, +0.0L) == 0, "phase60 weak -0 == +0");
+    Check(weak_order(1.0L, 2.0L) < 0 && weak_order(2.0L, 1.0L) > 0 &&
+          weak_order(1.0L, 1.0L) == 0, "phase60 weak 1 < 2");
+    Check(weak_order(nnan, -inf) < 0 && weak_order(inf, pnan) < 0,
+          "phase60 weak -NaN < -inf, +inf < +NaN");
+
+    // Concrete strictly-ascending chain executed on x87 — falsifiable: the P1
+    // sign-flip bug (or any wrong ordering) breaks a consecutive `< 0`.
+    const long double asc[] = {
+        -inf, -2.0L, -1.0L, -__LDBL_MIN__, -__LDBL_DENORM_MIN__,
+        -0.0L, +0.0L, __LDBL_DENORM_MIN__, __LDBL_MIN__, 1.0L, 2.0L, inf,
+    };
+    bool asc_ok = true;
+    for (unsigned i = 0; i + 1 < sizeof(asc) / sizeof(asc[0]); ++i)
+        if (!(strong_order(asc[i], asc[i + 1]) < 0)) asc_ok = false;
+    Check(asc_ok, "phase60 strong_order strictly ascends -inf..-0<+0..+inf");
+
+    // Non-canonical x87 patterns (pseudo-denormal E=0/J=1, unnormal E=3/J=0,
+    // pseudo-NaN E=max/J=0) via runtime-only bit_cast<long double>. FLD/FST m80
+    // never raise #IA (Intel SDM) → cannot trap on real x87; each sorts by its
+    // exponent class (below 1.0, or above every finite for E=max) — a concrete,
+    // falsifiable position robust to whether the x87 load renormalizes.
+    const long double pseudo_denorm =
+        bit_cast<long double>((unsigned __int128)0x8000000000000000ull);
+    const long double unnormal =
+        bit_cast<long double>(((unsigned __int128)0x0003u << 64) | 0x4000000000000000ull);
+    const long double pseudo_nan =
+        bit_cast<long double>(((unsigned __int128)0x7FFFu << 64) | 0x4000000000000001ull);
+    Check(strong_order(pseudo_denorm, 1.0L) < 0 && strong_order(unnormal, 1.0L) < 0 &&
+          strong_order(2.0L, pseudo_nan) < 0,
+          "phase60 non-canonical x87 patterns order by exponent class (no trap)");
+
+    printf("[CXX] PASS phase60: strong_order/weak_order long double (x87 80-bit)\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -10642,6 +10706,7 @@ int main()
     Phase57();
     Phase58();
     Phase59();
+    Phase60();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

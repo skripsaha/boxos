@@ -138,11 +138,28 @@ static_assert(weak_order(1.0, 2.0) < 0 && weak_order(2.0, 1.0) > 0 && weak_order
 static_assert(partial_order(kPNan, 1.0) == partial_ordering::unordered);
 static_assert(partial_order(1.0, kPNan) == partial_ordering::unordered);
 static_assert(partial_order(1.0, 2.0) < 0 && partial_order(1.0, 1.0) == 0);
-// long double — partial works; strong/weak deferred; fallback opt-in works
+// long double (x87 80-bit) — Ф27a: strong/weak now full IEEE totalOrder
+inline constexpr long double kInfL = numeric_limits<long double>::infinity();
 static_assert(partial_order(1.0L, 2.0L) < 0);
-static_assert(compare_strong_order_fallback(1.0L, 2.0L) < 0);   // long double: via ==/<
-// fallback CPOs route to the sibling ordering CPO for float/double ([cmp.alg],
-// matches libstdc++): IEEE total order for strong, NaN-equivalent for weak.
+static_assert(strong_order(-0.0L, +0.0L) < 0 && strong_order(+0.0L, -0.0L) > 0);
+static_assert(strong_order(1.0L, 1.0L) == 0 && strong_order(1.0L, 2.0L) < 0);
+static_assert(strong_order(-kInfL, kInfL) < 0);
+static_assert(strong_order(kInfL, __builtin_nanl("")) < 0);          // +inf < +NaN
+static_assert(strong_order(-__builtin_nanl(""), -kInfL) < 0);        // -NaN < -inf
+static_assert(strong_order(__LDBL_MIN__, 1.0L) < 0);
+static_assert(strong_order(__LDBL_DENORM_MIN__, __LDBL_MIN__) < 0);  // denorm < min-normal
+static_assert(weak_order(-0.0L, +0.0L) == 0);
+static_assert(weak_order(1.0L, 2.0L) < 0 && weak_order(2.0L, 1.0L) > 0 && weak_order(1.0L, 1.0L) == 0);
+static_assert(weak_order(__builtin_nanl(""), __builtin_nanl("")) == 0);  // same-sign NaN equiv
+static_assert(weak_order(-__builtin_nanl(""), -kInfL) < 0 && weak_order(kInfL, __builtin_nanl("")) < 0);
+static_assert(is_same_v<decltype(strong_order(1.0L, 2.0L)), strong_ordering>);
+static_assert(is_same_v<decltype(weak_order(1.0L, 2.0L)), weak_ordering>);
+static_assert(noexcept(strong_order(1.0L, 2.0L)) && noexcept(weak_order(1.0L, 2.0L)));
+// fallback CPOs route to the sibling ordering CPO ([cmp.alg], matches libstdc++):
+// IEEE total order for strong, NaN-equivalent for weak — now incl. long double.
+static_assert(compare_strong_order_fallback(1.0L, 2.0L) < 0);
+static_assert(compare_strong_order_fallback(-0.0L, +0.0L) < 0); // total order, not "equal"
+static_assert(compare_weak_order_fallback(-0.0L, +0.0L) == 0);  // -0 ≡ +0
 static_assert(compare_strong_order_fallback(-0.0, +0.0) < 0);   // not "equal"
 static_assert(compare_weak_order_fallback(kPNan, kPNan) == 0);  // same-sign NaN equiv
 // fallbacks + CPO->fallback on a strong-only legacy type (==, < only)
@@ -156,12 +173,11 @@ static_assert(strong_order(LegacyOrd{1}, LegacyOrd{2}) < 0 &&
               partial_order(LegacyOrd{1}, LegacyOrd{2}) < 0);
 static_assert(noexcept(strong_order(1.0, 2.0)) && noexcept(weak_order(1.0, 2.0)));
 static_assert(noexcept(strong_order(1, 2)) && noexcept(partial_order(1.0, 2.0)));
-// long-double exclusion: detect via dependent-operand concept (a literal
-// !requires{strong_order(1.0L,2.0L)} would hard-error under GCC — pitfall P6).
+// Ф27a: long double is now a first-class strong/weak_order type (x87 80-bit).
 template <class T> concept HasStrongOrder = requires(T a, T b) { strong_order(a, b); };
 template <class T> concept HasWeakOrder   = requires(T a, T b) { weak_order(a, b); };
 static_assert(HasStrongOrder<double> && HasStrongOrder<float> && HasStrongOrder<int>);
-static_assert(!HasStrongOrder<long double> && !HasWeakOrder<long double>);
+static_assert(HasStrongOrder<long double> && HasWeakOrder<long double>);
 
 // ── concepts / functional ───────────────────────────────────────────────
 

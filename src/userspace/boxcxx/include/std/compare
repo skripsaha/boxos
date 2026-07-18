@@ -360,11 +360,9 @@ using synth_three_way_result_t =
 // partial_order honors directly and the *_fallback CPOs consume via ==/<.
 namespace __cmp {
 
-// Fixed-width selector for the floating bit kernels. float/double ONLY:
-// long double is x86 80-bit in 16-byte storage with indeterminate padding,
-// so bit_cast is unsafe — strong/weak_order for long double are deferred to
-// Ф27 (partial_order(long double) still works through <=>; the *_fallback
-// CPOs remain available for explicit opt-in via ==/<).
+// Fixed-width selector for the float/double bit kernels. long double (x87
+// 80-bit in a 16-byte slot, 6 indeterminate padding bytes) is NOT bit_cast
+// whole — its kernel (LdKey below) reads only the 10 meaningful bytes.
 template <class T> struct FpBits;
 template <> struct FpBits<float> {
     using S = __INT32_TYPE__;  using U = __UINT32_TYPE__;
@@ -378,7 +376,30 @@ template <> struct FpBits<double> {
 };
 template <class T>
 concept StrongFp =
-    is_same_v<remove_cv_t<T>, float> || is_same_v<remove_cv_t<T>, double>;
+    is_same_v<remove_cv_t<T>, float> || is_same_v<remove_cv_t<T>, double> ||
+    is_same_v<remove_cv_t<T>, long double>;
+
+// x87 80-bit long double total-order key. Reads ONLY the 10 meaningful bytes
+// of the 16-byte slot (padding bytes 10-15 are never touched): mant = bytes
+// 0-7 (bit 63 = explicit integer bit J), se = bytes 8-9 (bit 15 = sign, bits
+// 0-14 = 15-bit biased exponent). (exp<<64)|mant is monotone in real value
+// (denorm exp 0 → normal → inf exp 0x7FFF/mant=J-bit → NaN mant!=J-bit) and
+// injective over every bit pattern incl. x87 pseudo-encodings; sign at bit 127
+// plus the sign-magnitude flip yields the IEEE totalOrder. weak_zero folds -0
+// onto +0 for weak_order.
+[[nodiscard]] constexpr __int128 LdKey(long double x, bool weak_zero) noexcept
+{
+    unsigned __int128 bits = bit_cast<unsigned __int128>(x);
+    __UINT64_TYPE__ mant = (__UINT64_TYPE__)bits;
+    unsigned se = (unsigned)(__UINT16_TYPE__)(bits >> 64);
+    bool sign = se >> 15;
+    unsigned exp = se & 0x7FFFu;
+    __int128 mag = ((__int128)exp << 64) | (__int128)(unsigned __int128)mant;
+    if (weak_zero && mag == 0) sign = false;                 // -0 ≡ +0
+    __int128 ia = ((__int128)(sign ? 1 : 0) << 127) | mag;
+    ia ^= (__int128)((unsigned __int128)(ia >> 127) >> 1);   // sign-mag → monotone
+    return ia;
+}
 
 // std::strong_order total order: signed bit_cast + sign-magnitude flip.
 //  -0<+0, -inf<everything<+inf, NaNs by sign then payload, every bit pattern
@@ -386,12 +407,16 @@ concept StrongFp =
 template <class T>
 [[nodiscard]] constexpr strong_ordering StrongFpOrder(T a, T b) noexcept
 {
-    using S = typename FpBits<T>::S; using U = typename FpBits<T>::U;
-    constexpr int B = FpBits<T>::kBits;
-    S ia = bit_cast<S>(a), ib = bit_cast<S>(b);
-    ia ^= S(U(ia >> (B - 1)) >> 1);
-    ib ^= S(U(ib >> (B - 1)) >> 1);
-    return ia <=> ib;
+    if constexpr (is_same_v<remove_cv_t<T>, long double>) {
+        return LdKey(a, false) <=> LdKey(b, false);
+    } else {
+        using S = typename FpBits<T>::S; using U = typename FpBits<T>::U;
+        constexpr int B = FpBits<T>::kBits;
+        S ia = bit_cast<S>(a), ib = bit_cast<S>(b);
+        ia ^= S(U(ia >> (B - 1)) >> 1);
+        ib ^= S(U(ib >> (B - 1)) >> 1);
+        return ia <=> ib;
+    }
 }
 
 // std::weak_order: WEAKER than strong. -0 equivalent +0; all same-sign NaNs
@@ -401,26 +426,45 @@ template <class T>
 template <class T>
 [[nodiscard]] constexpr weak_ordering WeakFpOrder(T a, T b) noexcept
 {
-    using S = typename FpBits<T>::S; using U = typename FpBits<T>::U;
-    constexpr int B = FpBits<T>::kBits;
-    auto tier = [](T x) -> int {
-        U u = bit_cast<U>(x);
-        bool nan = ((u & FpBits<T>::kExp) == FpBits<T>::kExp) &&
-                   ((u & FpBits<T>::kMan) != 0);
-        if (!nan) return 0;
-        return (u >> (B - 1)) ? -1 : 1;       // -NaN below, +NaN above
-    };
-    int ta = tier(a), tb = tier(b);
-    if (ta != tb) return ta < tb ? weak_ordering::less : weak_ordering::greater;
-    if (ta != 0) return weak_ordering::equivalent;          // same-sign NaN
-    S ia = bit_cast<S>(a), ib = bit_cast<S>(b);
-    if ((bit_cast<U>(a) & (U(~U(0)) >> 1)) == 0) ia = 0;    // -0 ≡ +0
-    if ((bit_cast<U>(b) & (U(~U(0)) >> 1)) == 0) ib = 0;
-    ia ^= S(U(ia >> (B - 1)) >> 1);
-    ib ^= S(U(ib >> (B - 1)) >> 1);
-    if (ia < ib) return weak_ordering::less;
-    if (ia > ib) return weak_ordering::greater;
-    return weak_ordering::equivalent;
+    if constexpr (is_same_v<remove_cv_t<T>, long double>) {
+        auto nan_sign = [](long double x) -> int {
+            unsigned __int128 bits = bit_cast<unsigned __int128>(x);
+            __UINT64_TYPE__ mant = (__UINT64_TYPE__)bits;
+            unsigned se = (unsigned)(__UINT16_TYPE__)(bits >> 64);
+            bool nan = ((se & 0x7FFFu) == 0x7FFFu) &&
+                       (mant != 0x8000000000000000ull);   // x87 inf mant = J-bit only
+            if (!nan) return 0;
+            return (se >> 15) ? -1 : 1;                    // -NaN below, +NaN above
+        };
+        int ta = nan_sign(a), tb = nan_sign(b);
+        if (ta != tb) return ta < tb ? weak_ordering::less : weak_ordering::greater;
+        if (ta != 0) return weak_ordering::equivalent;     // same-sign NaN
+        __int128 ka = LdKey(a, true), kb = LdKey(b, true);
+        if (ka < kb) return weak_ordering::less;
+        if (ka > kb) return weak_ordering::greater;
+        return weak_ordering::equivalent;
+    } else {
+        using S = typename FpBits<T>::S; using U = typename FpBits<T>::U;
+        constexpr int B = FpBits<T>::kBits;
+        auto tier = [](T x) -> int {
+            U u = bit_cast<U>(x);
+            bool nan = ((u & FpBits<T>::kExp) == FpBits<T>::kExp) &&
+                       ((u & FpBits<T>::kMan) != 0);
+            if (!nan) return 0;
+            return (u >> (B - 1)) ? -1 : 1;       // -NaN below, +NaN above
+        };
+        int ta = tier(a), tb = tier(b);
+        if (ta != tb) return ta < tb ? weak_ordering::less : weak_ordering::greater;
+        if (ta != 0) return weak_ordering::equivalent;          // same-sign NaN
+        S ia = bit_cast<S>(a), ib = bit_cast<S>(b);
+        if ((bit_cast<U>(a) & (U(~U(0)) >> 1)) == 0) ia = 0;    // -0 ≡ +0
+        if ((bit_cast<U>(b) & (U(~U(0)) >> 1)) == 0) ib = 0;
+        ia ^= S(U(ia >> (B - 1)) >> 1);
+        ib ^= S(U(ib >> (B - 1)) >> 1);
+        if (ia < ib) return weak_ordering::less;
+        if (ia > ib) return weak_ordering::greater;
+        return weak_ordering::equivalent;
+    }
 }
 
 namespace __cpo {
@@ -432,7 +476,6 @@ struct StrongOrder {
 
     template <class T, class U>
         requires(!StrongFp<T>) &&
-                (!is_same_v<remove_cv_t<remove_reference_t<T>>, long double>) &&
                 requires(const T &a, const U &b) {
                     { a == b } -> BooleanLike; { a < b } -> BooleanLike;
                 }
@@ -451,7 +494,6 @@ struct WeakOrder {
 
     template <class T, class U>
         requires(!StrongFp<T>) &&
-                (!is_same_v<remove_cv_t<remove_reference_t<T>>, long double>) &&
                 requires(const T &a, const U &b) {
                     { a == b } -> BooleanLike; { a < b } -> BooleanLike;
                 }
@@ -493,10 +535,10 @@ struct CompareStrongFallback {
     [[nodiscard]] constexpr strong_ordering operator()(const T &a, const U &b) const
         noexcept(noexcept(a == b) && noexcept(a < b))
     {
-        // [cmp.alg]: prefer strong_order (e.g. the IEEE total order for
-        // float/double) and use ==/< only when it is unavailable (e.g. long
-        // double, which strong_order excludes — D2). strong_order never routes
-        // back here (its non-float branch inlines ==/<), so no recursion.
+        // [cmp.alg]: prefer strong_order (the IEEE total order for float/
+        // double/long double) and use ==/< only when it is unavailable (a
+        // user type with ==/< but no <=>). strong_order never routes back
+        // here (float paths inline; long double routes to LdKey), no recursion.
         if constexpr (requires { StrongOrder{}(a, b); })
             return StrongOrder{}(a, b);
         else
