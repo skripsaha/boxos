@@ -10925,6 +10925,125 @@ void Phase63()
     printf("[CXX] PASS phase63: <cmath> long double x87 direct\n");
 }
 
+// ── Phase64 (Ф27d1b) — <cmath> long double: composed elementary functions ─
+void Phase64()
+{
+    const long double infL  = __builtin_infl();
+    const long double qnanL = __builtin_nanl("");
+    // full-precision 80-bit baked constants — the target compiler rounds each
+    // literal to 80-bit (host LD width is irrelevant to a compile-time literal).
+    const long double piL     = 3.14159265358979323846264338327950288L;
+    const long double halfPiL = 1.57079632679489661923132169163975144L;
+    const long double cosh1   = 1.54308063481524377847790562075706168L;   // cosh 1
+    const long double tanh1   = 0.761594155955764888119458282604793590L;  // tanh 1
+    const long double acosh2  = 1.31695789692481670862504634730796845L;   // acosh 2
+
+    // Transcendental-routed fns are host-double precision on QEMU, full 80-bit
+    // on real HW — accept both with a relative bound well above double's ULP.
+    auto near = [](long double a, long double b, long double rel) -> bool {
+        long double d = std::fabsl(a - b), m = std::fabsl(b);
+        if (m < 1.0L) m = 1.0L;
+        return d <= rel * m;
+    };
+    const long double tol = 0x1p-49L;                    // ~8× double ULP
+
+    // ── 1) fma: DECISIVE genuine 80-bit (QEMU-valid; only ·,+,− internally) ──
+    // (1+2^-32)² − 1 = 2^-31 + 2^-64 exactly; a rounded a*b+c loses the 2^-64.
+    {
+        long double r = std::fmal(1.0L + 0x1p-32L, 1.0L + 0x1p-32L, -1.0L);
+        Check(r == 0x1p-31L + 0x1p-64L, "phase64 fmal exact 80-bit (2^-31+2^-64)");
+        Check(r != (1.0L + 0x1p-32L) * (1.0L + 0x1p-32L) - 1.0L,
+              "phase64 fmal != rounded a*b+c (true fused op)");
+        Check(std::fmal(2.0L, 3.0L, 4.0L) == 10.0L, "phase64 fmal(2,3,4)=10");
+        Check(std::isnan(std::fmal(infL, 0.0L, 1.0L)), "phase64 fmal(inf,0,1)=NaN");
+    }
+
+    // ── 2) hypot: DECISIVE genuine 80-bit (fsqrt + arithmetic only) ──
+    {
+        Check(std::hypotl(3.0L, 4.0L) == 5.0L, "phase64 hypotl(3,4)=5 exact");
+        // sqrt(1+2^-52) rounds to 1+2^-53 in 80-bit — a bit a double cannot hold.
+        long double r = std::hypotl(1.0L, 0x1p-26L);
+        Check(r == 1.0L + 0x1p-53L, "phase64 hypotl(1,2^-26)=1+2^-53 (sub-double bit)");
+        Check(r != (long double)(double)r, "phase64 hypotl result has sub-double bits");
+        char b1[64]; auto q1 = std::to_chars(b1, b1 + sizeof(b1), r);
+        char b2[64]; auto q2 = std::to_chars(b2, b2 + sizeof(b2), (long double)(double)r);
+        Check(q1.ec == std::errc{} && q2.ec == std::errc{} &&
+                  std::string_view(b1, q1.ptr - b1) != std::string_view(b2, q2.ptr - b2),
+              "phase64 hypotl to_chars not double-narrowed");
+        Check(std::isinf(std::hypotl(infL, qnanL)), "phase64 hypotl(inf,nan)=inf");
+        Check(std::hypotl(0.0L, 0.0L) == 0.0L, "phase64 hypotl(0,0)=0");
+    }
+
+    // ── 3) pow edge table [c.math.pow], evaluated in the mandated order ──
+    Check(std::powl(qnanL, 0.0L) == 1.0L,       "phase64 powl(NaN,0)=1");
+    Check(std::powl(2.0L, 0.0L) == 1.0L,        "phase64 powl(2,0)=1");
+    Check(std::powl(1.0L, infL) == 1.0L,        "phase64 powl(1,inf)=1");
+    Check(std::powl(2.0L, 10.0L) == 1024.0L,    "phase64 powl(2,10)=1024");
+    Check(std::powl(-2.0L, 3.0L) == -8.0L,      "phase64 powl(-2,3)=-8");
+    Check(std::isnan(std::powl(-2.0L, 0.5L)),   "phase64 powl(-2,0.5)=NaN");
+    Check(std::powl(0.0L, -1.0L) == infL,       "phase64 powl(+0,-1)=+inf");
+    { long double r = std::powl(-0.0L, -3.0L);
+      Check(std::isinf(r) && std::signbit(r),   "phase64 powl(-0,-3)=-inf"); }
+    Check(std::powl(infL, 0.5L) == infL,        "phase64 powl(inf,0.5)=+inf");
+    Check(std::powl(0.5L, -infL) == infL,       "phase64 powl(0.5,-inf)=+inf");
+    Check(near(std::powl(2.0L, 0.5L), std::sqrtl(2.0L), tol), "phase64 powl(2,0.5)~sqrt2");
+
+    // ── 4) asin / acos ──
+    Check(near(std::asinl(1.0L), halfPiL, tol),  "phase64 asinl(1)=pi/2");
+    Check(near(std::acosl(-1.0L), piL, tol),     "phase64 acosl(-1)=pi");
+    Check(std::asinl(0.0L) == 0.0L && !std::signbit(std::asinl(0.0L)), "phase64 asinl(+0)=+0");
+    Check(std::signbit(std::asinl(-0.0L)),       "phase64 asinl(-0)=-0");
+    Check(std::acosl(1.0L) == 0.0L,              "phase64 acosl(1)=0");
+    Check(std::isnan(std::asinl(2.0L)),          "phase64 asinl(2)=NaN");
+    Check(std::isnan(std::acosl(-2.0L)),         "phase64 acosl(-2)=NaN");
+
+    // ── 5) hyperbolics ──
+    Check(std::sinhl(0.0L) == 0.0L && !std::signbit(std::sinhl(0.0L)), "phase64 sinhl(+0)=+0");
+    Check(std::signbit(std::sinhl(-0.0L)),       "phase64 sinhl(-0)=-0");
+    Check(std::coshl(0.0L) == 1.0L,              "phase64 coshl(0)=1");
+    Check(std::coshl(-infL) == infL && std::coshl(infL) == infL, "phase64 coshl(+-inf)=+inf");
+    Check(std::tanhl(infL) == 1.0L && std::tanhl(-infL) == -1.0L, "phase64 tanhl(+-inf)=+-1");
+    Check(std::tanhl(0.0L) == 0.0L && !std::signbit(std::tanhl(0.0L)), "phase64 tanhl(+0)=+0");
+    Check(near(std::coshl(1.0L), cosh1, tol),    "phase64 coshl(1)~baked");
+    Check(near(std::tanhl(1.0L), tanh1, tol),    "phase64 tanhl(1)~baked");
+    // sinh small-arg: the cubic term x^3/6 survives (a raw (e^x-e^-x)/2 cancels it)
+    { long double x = 0x1p-20L, d = std::sinhl(x) - x;   // ~ x^3/6 = 2^-60/6
+      Check(std::sinhl(x) > x && d > 0x1p-64L && d < 0x1p-61L,
+            "phase64 sinhl(2^-20) keeps cubic term"); }
+
+    // ── 6) inverse hyperbolics ──
+    Check(std::acoshl(1.0L) == 0.0L,             "phase64 acoshl(1)=0");
+    Check(std::atanhl(0.0L) == 0.0L && !std::signbit(std::atanhl(0.0L)), "phase64 atanhl(+0)=+0");
+    Check(std::atanhl(1.0L) == infL,             "phase64 atanhl(1)=+inf");
+    { long double r = std::atanhl(-1.0L);
+      Check(std::isinf(r) && std::signbit(r),    "phase64 atanhl(-1)=-inf"); }
+    Check(std::isnan(std::acoshl(0.5L)),         "phase64 acoshl(0.5)=NaN");
+    Check(std::isnan(std::atanhl(2.0L)),         "phase64 atanhl(2)=NaN");
+    Check(std::asinhl(-2.0L) == -std::asinhl(2.0L), "phase64 asinhl odd symmetry");
+    Check(std::asinhl(0.0L) == 0.0L && !std::signbit(std::asinhl(0.0L)), "phase64 asinhl(+0)=+0");
+    Check(near(std::acoshl(2.0L), acosh2, tol),  "phase64 acoshl(2)~baked");
+
+    // ── 7) cbrt (odd; real root for negatives) — Newton refines to full 80-bit ──
+    Check(std::cbrtl(27.0L) == 3.0L,             "phase64 cbrtl(27)=3");
+    Check(std::cbrtl(-8.0L) == -2.0L,            "phase64 cbrtl(-8)=-2");
+    Check(std::cbrtl(1000.0L) == 10.0L,          "phase64 cbrtl(1000)=10");
+    Check(std::cbrtl(0.0L) == 0.0L && !std::signbit(std::cbrtl(0.0L)), "phase64 cbrtl(+0)=+0");
+    Check(std::signbit(std::cbrtl(-0.0L)),       "phase64 cbrtl(-0)=-0");
+    Check(std::cbrtl(infL) == infL && std::cbrtl(-infL) == -infL, "phase64 cbrtl(+-inf)=+-inf");
+
+    // ── 8) expm1 ──
+    Check(std::expm1l(0.0L) == 0.0L && !std::signbit(std::expm1l(0.0L)), "phase64 expm1l(+0)=+0");
+    Check(std::signbit(std::expm1l(-0.0L)),      "phase64 expm1l(-0)=-0");
+    Check(std::expm1l(-1000.0L) == -1.0L,        "phase64 expm1l(-1000)=-1");
+    Check(std::expm1l(infL) == infL,             "phase64 expm1l(+inf)=+inf");
+    // small-arg: the quadratic term x^2/2 survives (a raw exp(x)-1 cancels it)
+    { long double x = 0x1p-30L, d = std::expm1l(x) - x;  // ~ x^2/2 = 2^-61
+      Check(std::expm1l(x) > x && near(d, 0x1p-61L, 0x1p-6L),
+            "phase64 expm1l(2^-30) keeps quadratic term"); }
+
+    printf("[CXX] PASS phase64: <cmath> long double composed\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -11010,6 +11129,7 @@ int main()
     Phase61();
     Phase62();
     Phase63();
+    Phase64();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
