@@ -10820,6 +10820,111 @@ void Phase62()
     printf("[CXX] PASS phase62: <format> long double full precision\n");
 }
 
+// ── Phase63 (Ф27d1a) — <cmath> long double (80-bit x87): direct HW functions ─
+void Phase63()
+{
+    auto bits80 = [](long double v) -> unsigned __int128 {
+        return __builtin_bit_cast(unsigned __int128, v) & ((((unsigned __int128)1) << 80) - 1);
+    };
+    auto sig_digits = [](const char *p, const char *e) -> int {
+        int n = 0; bool started = false;
+        for (const char *q = p; q < e; ++q) {
+            char c = *q;
+            if (c == 'e' || c == 'E' || c == 'p' || c == 'P') break;
+            if (c >= '0' && c <= '9') { if (c != '0') started = true; if (started) ++n; }
+        }
+        return n;
+    };
+    const long double infL = __builtin_infl();
+    const long double piL  = 3.14159265358979323846264338327950288L;
+    const long double eps  = 0x1p-63L;                    // LDBL_EPSILON = 2^-63
+
+    // 1) hardware-exact integers
+    Check(std::sqrtl(4.0L) == 2.0L,      "phase63 sqrtl(4)=2");
+    Check(std::log2l(0x1p+40L) == 40.0L, "phase63 log2l(2^40)=40");
+    Check(std::expl(0.0L) == 1.0L,       "phase63 expl(0)=1");
+    Check(std::truncl(2.5L) == 2.0L,     "phase63 truncl(2.5)=2");
+    Check(std::ceill(-2.5L) == -2.0L,    "phase63 ceill(-2.5)=-2");
+    Check(std::roundl(2.5L) == 3.0L,     "phase63 roundl(2.5)=3");
+
+    // 2) genuinely 80-bit, not silently double.
+    long double s2 = std::sqrtl(2.0L);
+    // fsqrt is IEEE correctly-rounded → bit-identical on QEMU / Bochs / real HW.
+    Check(bits80(s2) == (((unsigned __int128)0x3FFFu << 64) | (unsigned __int128)0xB504F333F9DE6484ull),
+          "phase63 sqrtl(2) bit-exact 80-bit");
+    Check(s2 != (long double)std::sqrt(2.0), "phase63 sqrtl(2) != double sqrt(2)");
+    { char b[64]; auto r = std::to_chars(b, b + sizeof(b), s2);
+      Check(r.ec == std::errc{} && sig_digits(b, r.ptr) >= 19, "phase63 sqrtl(2) >=19 sig digits"); }
+    // sin/cos/tan are DIRECT hardware ops (fsin/fcos/fptan issued on the 80-bit
+    // operand — confirmed in disassembly, never a narrowed double call). Their
+    // genuine 80-bit *output* needs an 80-bit FPU (real HW / Bochs); QEMU degrades
+    // fsin/fcos/fptan to host double, so verify CORRECTNESS here — the 80-bit path
+    // itself is locked bit-exactly by sqrtl(2)/nextafterl/classification/log2l above.
+    Check(std::sinl(0.0L) == 0.0L && !std::signbit(std::sinl(0.0L)), "phase63 sinl(+0)=+0");
+    Check(std::signbit(std::sinl(-0.0L)), "phase63 sinl(-0)=-0");
+    Check(std::cosl(0.0L) == 1.0L, "phase63 cosl(0)=1");
+    Check(std::fabsl(std::sinl(piL / 6.0L) - 0.5L) < 1e-15L, "phase63 sinl(pi/6)~0.5");
+    Check(std::fabsl(std::cosl(piL / 3.0L) - 0.5L) < 1e-15L, "phase63 cosl(pi/3)~0.5");
+    Check(std::fabsl(std::tanl(piL / 4.0L) - 1.0L) < 1e-14L, "phase63 tanl(pi/4)~1");
+    { long double a = 0.7L, s = std::sinl(a), c = std::cosl(a);
+      Check(std::fabsl(s * s + c * c - 1.0L) < 1e-15L, "phase63 sin^2+cos^2=1"); }
+
+    // 3) decisive ULP: nextafterl(1,2)−1 == 2^-63 (double would be 2^-52)
+    Check(std::nextafterl(1.0L, 2.0L) - 1.0L == eps, "phase63 nextafterl ulp = 2^-63");
+
+    // 4) accuracy vs baked 80-bit constants — genuinely 80-bit (error ≪ double 2^-52).
+    // Direct constant checks, not a log∘exp round-trip: fyl2x accuracy varies with
+    // the argument on the emulated FPUs (Bochs ~290 ULP at log2(e), <2 ULP elsewhere),
+    // so a round-trip would gate on the worst FPU's transcendental, not on 80-bit-ness.
+    const long double kEL   = 2.718281828459045235360287471352662498L;   // e
+    const long double kLn2L = 0.693147180559945309417232121458176568L;   // ln 2
+    Check(std::fabsl(std::expl(1.0L) - kEL)   < 32 * eps,                  "phase63 expl(1)~e");
+    Check(std::fabsl(std::logl(2.0L) - kLn2L) < 32 * eps,                  "phase63 logl(2)~ln2");
+    Check(std::fabsl(std::atan2l(1.0L, 1.0L) * 4.0L - piL) < 8 * eps * piL, "phase63 4*atan2(1,1)~pi");
+
+    // 5) specials — NaN via isnan, never ==
+    Check(std::isnan(std::sqrtl(-1.0L)), "phase63 sqrtl(-1)=NaN");
+    Check(std::isnan(std::logl(-1.0L)),  "phase63 logl(-1)=NaN");
+    { long double l0 = std::logl(0.0L);
+      Check(std::isinf(l0) && std::signbit(l0), "phase63 logl(0)=-inf"); }
+    Check(std::isnan(std::sinl(infL)),   "phase63 sinl(inf)=NaN");
+    Check(std::signbit(std::copysignl(2.0L, -0.0L)) && std::fabsl(std::copysignl(2.0L, -0.0L)) == 2.0L,
+          "phase63 copysignl sign from -0");
+    Check(std::fmodl(5.0L, 3.0L) == 2.0L, "phase63 fmodl(5,3)=2");
+
+    // 6) classification fix: 2^1030 is a finite long double (old narrowing → wrongly inf)
+    { long double big = 0x1p+1030L;
+      Check(std::isinf(big) == false && std::isfinite(big) == true,
+            "phase63 isinf(2^1030)=false (classification fix)"); }
+
+    // 7) coverage — every remaining direct primitive (forces x87 codegen + sanity)
+    Check(std::fabsl(std::tanl(std::atanl(1.0L)) - 1.0L) < 1e-13L, "phase63 tan(atan(1))~1");
+    Check(std::exp2l(10.0L) == 1024.0L, "phase63 exp2l(10)=1024");
+    Check(std::fabsl(std::log10l(1000.0L) - 3.0L) < 16 * eps, "phase63 log10l(1000)~3");
+    Check(std::log1pl(0.0L) == 0.0L, "phase63 log1pl(0)=0");
+    Check(std::floorl(-2.5L) == -3.0L, "phase63 floorl(-2.5)=-3");
+    Check(std::rintl(2.5L) == 2.0L, "phase63 rintl(2.5)=2 (even)");
+    Check(std::nearbyintl(3.5L) == 4.0L, "phase63 nearbyintl(3.5)=4 (even)");
+    Check(std::logbl(8.0L) == 3.0L, "phase63 logbl(8)=3");
+    Check(std::ilogbl(8.0L) == 3 && std::ilogbl(0.0L) == FP_ILOGB0, "phase63 ilogbl");
+    { int e = 0; long double m = std::frexpl(12.0L, &e); Check(m == 0.75L && e == 4, "phase63 frexpl(12)=0.75,4"); }
+    Check(std::scalbnl(1.0L, 10) == 1024.0L && std::ldexpl(3.0L, 4) == 48.0L &&
+          std::scalblnl(1.0L, 5L) == 32.0L, "phase63 scalbnl/ldexpl/scalblnl");
+    Check(std::fdiml(5.0L, 2.0L) == 3.0L && std::fdiml(2.0L, 5.0L) == 0.0L, "phase63 fdiml");
+    Check(std::fmaxl(-1.0L, 2.0L) == 2.0L && std::fminl(-1.0L, 2.0L) == -1.0L, "phase63 fmaxl/fminl");
+    Check(std::remainderl(5.0L, 3.0L) == -1.0L, "phase63 remainderl(5,3)=-1");
+    { int q = 0; long double r = std::remquol(5.0L, 3.0L, &q); Check(r == -1.0L && (q & 7) == 2, "phase63 remquol(5,3)"); }
+    { long double ip = 0; long double fr = std::modfl(3.75L, &ip); Check(ip == 3.0L && std::fabsl(fr - 0.75L) < eps, "phase63 modfl(3.75)"); }
+    Check(std::fpclassify(0.0L) == FP_ZERO && std::fpclassify(1.0L) == FP_NORMAL &&
+          std::fpclassify(infL) == FP_INFINITE && std::fpclassify(__builtin_nanl("")) == FP_NAN,
+          "phase63 fpclassify LD");
+    Check(std::sqrtf(4.0f) == 2.0f && std::sinf(0.0f) == 0.0f && std::truncf(2.9f) == 2.0f,
+          "phase63 float C-names route through 80-bit");
+    Check(std::nexttowardl(1.0L, 2.0L) - 1.0L == eps, "phase63 nexttowardl ulp");
+
+    printf("[CXX] PASS phase63: <cmath> long double x87 direct\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -10904,6 +11009,7 @@ int main()
     Phase60();
     Phase61();
     Phase62();
+    Phase63();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
