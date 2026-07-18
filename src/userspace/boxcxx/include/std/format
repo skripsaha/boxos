@@ -18,7 +18,6 @@
 //   * field width is measured in code units (ASCII); no Unicode grapheme /
 //     East-Asian-width estimation.
 //   * range / tuple formatting (formatter<vector<T>> &c.) is a later phase.
-//   * long double is formatted at double precision (no 80-bit to_chars yet).
 #ifndef BOXCXX_FORMAT
 #define BOXCXX_FORMAT
 
@@ -70,6 +69,7 @@ enum class ArgKind : unsigned char {
     ULongLong,
     Float,
     Double,
+    LongDouble,
     CString,
     SVString,
     Pointer,
@@ -151,8 +151,8 @@ template <class T> constexpr ArgKind MapKind() noexcept
             return sizeof(U) <= sizeof(unsigned) ? ArgKind::UInt
                                                  : ArgKind::ULongLong;
     } else if constexpr (is_same_v<U, float>) return ArgKind::Float;
-    else if constexpr (is_same_v<U, double> || is_same_v<U, long double>)
-        return ArgKind::Double;  // long double narrowed to double
+    else if constexpr (is_same_v<U, double>) return ArgKind::Double;
+    else if constexpr (is_same_v<U, long double>) return ArgKind::LongDouble;
     else if constexpr (is_same_v<U, nullptr_t>) return ArgKind::Pointer;
     else if constexpr (is_pointer_v<U>) {
         using P = remove_cv_t<remove_pointer_t<U>>;
@@ -401,6 +401,7 @@ private:
         unsigned long long ull;
         float              f;
         double             d;
+        long double        ld;
         const char        *cs;
         string_view        sv;
         const void        *pv;
@@ -633,8 +634,11 @@ void FormatFloatCore(format_context &ctx, const StdSpec &spec, int width,
     string    heapbuf;
     char     *buf = stackbuf;
     ptrdiff_t cap = ptrdiff_t(sizeof(stackbuf));
-    const size_t need =
-        size_t(340) + (precision > 0 ? size_t(precision) : size_t(0));
+    size_t base = 340;
+    if constexpr (is_same_v<F, long double>)
+        if (type == 'f' || type == 'F')
+            base = size_t(numeric_limits<F>::max_exponent10) + 34;  // 4932+34
+    const size_t need = base + (precision > 0 ? size_t(precision) : size_t(0));
     if (need > size_t(cap)) {
         heapbuf.resize(need);  // throws bad_alloc/length_error if absurd
         buf = heapbuf.data();
@@ -913,7 +917,7 @@ template <> struct formatter<char, char> {
     }
 };
 
-// floating-point (float / double / long double — the last narrowed)
+// floating-point (float / double / long double)
 template <class T>
     requires is_floating_point_v<T>
 struct formatter<T, char> {
@@ -935,12 +939,8 @@ struct formatter<T, char> {
     {
         const int width = __format::EffectiveWidth(ctx, spec_);
         const int prec  = __format::EffectivePrecision(ctx, spec_);
-        if constexpr (is_same_v<remove_cv_t<T>, long double>)
-            __format::FormatFloatCore<double>(ctx, spec_, width, prec,
-                                              double(value), spec_.type);
-        else
-            __format::FormatFloatCore<T>(ctx, spec_, width, prec, value,
-                                         spec_.type);
+        __format::FormatFloatCore<T>(ctx, spec_, width, prec, value,
+                                     spec_.type);
     }
 };
 
@@ -1108,6 +1108,12 @@ void basic_format_arg<Context>::__format_to(
         f.format(v_.d, fc);
         break;
     }
+    case K::LongDouble: {
+        formatter<long double, char> f;
+        pc.advance_to(f.parse(pc));
+        f.format(v_.ld, fc);
+        break;
+    }
     case K::CString: {
         formatter<const char *, char> f;
         pc.advance_to(f.parse(pc));
@@ -1148,6 +1154,7 @@ decltype(auto) basic_format_arg<Context>::__visit(Visitor &&vis) const
     case K::ULongLong: return vis(v_.ull);
     case K::Float: return vis(v_.f);
     case K::Double: return vis(v_.d);
+    case K::LongDouble: return vis(v_.ld);
     case K::CString: return vis(v_.cs);
     case K::SVString: return vis(v_.sv);
     case K::Pointer: return vis(v_.pv);
@@ -1197,6 +1204,7 @@ basic_format_arg<Context> basic_format_arg<Context>::__make(T &v)
     else if constexpr (kind == K::ULongLong) a.v_.ull = (unsigned long long)v;
     else if constexpr (kind == K::Float) a.v_.f = float(v);
     else if constexpr (kind == K::Double) a.v_.d = double(v);
+    else if constexpr (kind == K::LongDouble) a.v_.ld = (long double)v;
     else if constexpr (kind == K::CString) a.v_.cs = v;  // array/ptr decays
     else if constexpr (kind == K::SVString) a.v_.sv = string_view(v);
     else if constexpr (kind == K::Pointer) {

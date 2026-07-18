@@ -10735,6 +10735,91 @@ void Phase61()
     printf("[CXX] PASS phase61: <charconv> long double\n");
 }
 
+// ── Phase62 (Ф27c) — <format> long double (80-bit x87): full precision ─
+void Phase62()
+{
+    using F = std::chars_format;
+    const long double x = 3.14159265358979323846L;  // 21 significant digits
+
+    // The direct-to_chars references every assertion is measured against —
+    // std::format must render byte-for-byte the same, i.e. never narrow to
+    // double. Buffers sized generously; the LDBL_MAX case has its own below.
+    auto shortest = [](long double v) -> std::string {
+        char b[64];
+        auto r = std::to_chars(b, b + sizeof(b), v);
+        return std::string(b, size_t(r.ptr - b));
+    };
+    auto tc = [](long double v, F f, int prec) -> std::string {
+        char b[128];
+        auto r = std::to_chars(b, b + sizeof(b), v, f, prec);
+        return std::string(b, size_t(r.ptr - b));
+    };
+    auto tchex = [](long double v) -> std::string {
+        char b[64];
+        auto r = std::to_chars(b, b + sizeof(b), v, F::hex);
+        return std::string(b, size_t(r.ptr - b));
+    };
+
+    // default {} — shortest round-trip at full LD precision, never narrowed
+    Check(std::format("{}", x) == shortest(x) &&
+              std::format("{}", x) != std::format("{}", (double)x),
+          "phase62 {} full-precision (not double-narrowed)");
+
+    // fixed
+    Check(std::format("{:.20Lf}", x) == tc(x, F::fixed, 20) &&
+              std::format("{:.20Lf}", x) != std::format("{:.20f}", (double)x),
+          "phase62 {:.20Lf} fixed");
+
+    // scientific
+    Check(std::format("{:.21Le}", x) == tc(x, F::scientific, 21),
+          "phase62 {:.21Le} scientific");
+
+    // general — explicit .21 (default 6 digits would be vacuous vs double's 17)
+    Check(std::format("{:.21Lg}", x) == tc(x, F::general, 21) &&
+              std::format("{:.21Lg}", x) != std::format("{:.21g}", (double)x),
+          "phase62 {:.21Lg} general");
+
+    // hex — 16 mantissa nibbles vs double's 13
+    Check(std::format("{:La}", x) == tchex(x) &&
+              std::format("{:La}", x) != std::format("{:a}", (double)x),
+          "phase62 {:La} hex");
+
+    // the L flag is cosmetic — LD precision comes from the argument TYPE
+    Check(std::format("{:.20Lf}", x) == std::format("{:.20f}", x),
+          "phase62 L flag cosmetic (type drives precision)");
+
+    // width / fill applied to the shortest form
+    {
+        std::string s    = shortest(x);
+        std::string want = std::string(30 - s.size(), ' ') + s;
+        Check(std::format("{:>30}", x) == want, "phase62 {:>30} width/fill");
+    }
+
+    // '#' forces a decimal point
+    Check(std::format("{:#.0Lf}", x) == "3.", "phase62 {:#.0Lf} forces point");
+
+    // upper 'E' scientific
+    Check(std::format("{:.2LE}", x) == "3.14E+00", "phase62 {:.2LE} upper sci");
+
+    // 'F' == 'f' for a finite value
+    Check(std::format("{:.20LF}", x) == std::format("{:.20Lf}", x),
+          "phase62 {:LF} == {:Lf} finite");
+
+    // LDBL_MAX fixed — the big-buffer guard. On the un-grown base (340) the
+    // fixed expansion silently truncates well below 4900 chars; this passes
+    // only once FormatFloatCore's `need` grows to LDBL_MAX_10_EXP + 34.
+    {
+        long double  m = (long double)__LDBL_MAX__;
+        std::string  s = std::format("{:Lf}", m);
+        static char  big[10240];
+        auto         r = std::to_chars(big, big + sizeof(big), m, F::fixed, 6);
+        Check(s == std::string(big, size_t(r.ptr - big)) && s.size() > 4900,
+              "phase62 {:Lf} LDBL_MAX big-buffer (need formula)");
+    }
+
+    printf("[CXX] PASS phase62: <format> long double full precision\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -10818,6 +10903,7 @@ int main()
     Phase59();
     Phase60();
     Phase61();
+    Phase62();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
