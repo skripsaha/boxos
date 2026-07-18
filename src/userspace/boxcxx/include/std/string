@@ -1119,6 +1119,12 @@ inline string to_string(double v)
     return string(buf, static_cast<size_t>(r.ptr - buf));
 }
 inline string to_string(float v) { return to_string(static_cast<double>(v)); }
+inline string to_string(long double v)
+{
+    char buf[4952];   // LDBL_MAX in fixed,6 ≈ 4933 integer digits + ".000000"
+    to_chars_result r = to_chars(buf, buf + sizeof(buf), v, chars_format::fixed, 6);
+    return string(buf, static_cast<size_t>(r.ptr - buf));
+}
 
 // Integer sto* family ([string.conversions]). The stof/stod/stold
 // floating-point siblings arrive with Ф9A-2/9A-3 (own Ryu/Eisel-Lemire).
@@ -1189,6 +1195,10 @@ inline float stof(const string &str, size_t *pos = nullptr)
 inline double stod(const string &str, size_t *pos = nullptr)
 {
     return __string_impl::ParseStof<double>(str, pos, "stod");
+}
+inline long double stold(const string &str, size_t *pos = nullptr)
+{
+    return __string_impl::ParseStof<long double>(str, pos, "stold");
 }
 
 } // namespace std
