@@ -11044,6 +11044,219 @@ void Phase64()
     printf("[CXX] PASS phase64: <cmath> long double composed\n");
 }
 
+// ── Phase65 (Ф27d2) — <cmath> long double special: erf/erfc/tgamma/lgamma ─
+void Phase65()
+{
+    const long double infL  = __builtin_infl();
+    const long double qnanL = __builtin_nanl("");
+    const long double subd  = 4 * 0x1p-63L;              // ~4 ULP baked-value tolerance
+    const long double reflTol = 0x1p-49L;                // reflection: 80-bit on Bochs, loose on QEMU
+
+    auto sig_digits = [](const char *p, const char *e) -> int {
+        int n = 0; bool started = false;
+        for (const char *q = p; q < e; ++q) {
+            char c = *q;
+            if (c == 'e' || c == 'E' || c == 'p' || c == 'P') break;
+            if (c >= '0' && c <= '9') { if (c != '0') started = true; if (started) ++n; }
+        }
+        return n;
+    };
+    auto near = [](long double a, long double b, long double rel) -> bool {
+        long double d = std::fabsl(a - b), m = std::fabsl(b);
+        if (m < 1.0L) m = 1.0L;
+        return d <= rel * m;
+    };
+    // exact ULP distance |r−o| / ulp(o) at 80-bit (the LD field is not IEEE-monotone
+    // across exponent boundaries, so subtract in value-space, not bit-space).
+    auto ulps = [](long double r, long double o) -> long double {
+        if (r == o) return 0.0L;
+        if (std::isnan(r) || std::isnan(o)) return 1e30L;
+        if (o == 0.0L) return std::fabsl(r) / 0x1p-16445L;
+        long double u = std::ldexpl(1.0L, std::ilogbl(o) - 63);
+        return std::fabsl(r - o) / u;
+    };
+
+    struct OraclePt { long double x, o; };               // o = correctly-rounded 80-bit reference
+    static const OraclePt kErf[] = {
+        { 0.1000000000000000000000000L, 0.1124629160182848922047891L },
+        { 0.2500000000000000000000000L, 0.2763263901682369329850683L },
+        { 0.4000000000000000000000000L, 0.4283923550466684551088164L },
+        { 0.4990000000000000000000000L, 0.5196206559894684606584045L },
+        { 0.5000000000000000000000000L, 0.5204998778130465376827467L },
+        { 0.7500000000000000000000000L, 0.7111556336535151315989378L },
+        { 1.000000000000000000000000L, 0.8427007929497148693412206L },
+        { 1.500000000000000000000000L, 0.9661051464753107270669763L },
+        { 2.000000000000000000000000L, 0.9953222650189527341620693L },
+        { 3.000000000000000000000000L, 0.9999779095030014145586272L },
+        { 4.000000000000000000000000L, 0.9999999845827420997199811L },
+        { 5.000000000000000000000000L, 0.9999999999984625402055720L },
+        { 6.000000000000000000000000L, 0.9999999999999999784802633L },
+        { -0.5000000000000000000000000L, -0.5204998778130465376827467L },
+        { -2.000000000000000000000000L, -0.9953222650189527341620693L },
+        { -4.000000000000000000000000L, -0.9999999845827420997199811L },
+    };
+    static const OraclePt kErfc[] = {
+        { 0.5000000000000000000000000L, 0.4795001221869534623172533L },
+        { 0.7500000000000000000000000L, 0.2888443663464848684010622L },
+        { 1.000000000000000000000000L, 0.1572992070502851306587794L },
+        { 1.500000000000000000000000L, 0.03389485352468927293302374L },
+        { 2.000000000000000000000000L, 0.004677734981047265837930744L },
+        { 3.000000000000000000000000L, 0.00002209049699858544137277613L },
+        { 4.000000000000000000000000L, 1.541725790028001885215967e-8L },
+        { 5.000000000000000000000000L, 1.537459794428034850188343e-12L },
+        { 6.000000000000000000000000L, 2.151973671249891311659335e-17L },
+        { 7.000000000000000000000000L, 4.183825607779414398614010e-23L },
+        { 8.000000000000000000000000L, 1.122429717298292707996789e-29L },
+        { 10.00000000000000000000000L, 2.088487583762544757000786e-45L },
+        { 12.00000000000000000000000L, 1.356261169205904212780306e-64L },
+        { 15.00000000000000000000000L, 7.212994172451206666565067e-100L },
+        { 20.00000000000000000000000L, 5.395865611607900928934999e-176L },
+        { 30.00000000000000000000000L, 2.564656203756111600033397e-393L },
+        { 40.00000000000000000000000L, 1.896961059966276509268278e-697L },
+        { 50.00000000000000000000000L, 2.070920778841656048448448e-1088L },
+        { -0.3000000000000000000000000L, 1.328626759459127427650095L },
+        { -1.000000000000000000000000L, 1.842700792949714869341221L },
+        { -3.000000000000000000000000L, 1.999977909503001414558627L },
+    };
+    static const OraclePt kTgam[] = {                    // 0.9/1.1/4.4/7.3/10.9/0.51 = non-representable stressors
+        { 0.6000000000000000000000000L, 1.489192248812817102344584L },
+        { 0.7500000000000000000000000L, 1.225416702465177645129098L },
+        { 0.9000000000000000000000000L, 1.068628702119319354914799L },
+        { 1.000000000000000000000000L, 1.000000000000000000000000L },
+        { 1.100000000000000000000000L, 0.9513507698668731836205070L },
+        { 1.500000000000000000000000L, 0.8862269254527580136490837L },
+        { 2.500000000000000000000000L, 1.329340388179137020473626L },
+        { 3.000000000000000000000000L, 2.000000000000000000000000L },
+        { 4.000000000000000000000000L, 6.000000000000000000000000L },
+        { 4.400000000000000000000000L, 10.13610185115513210528956L },
+        { 5.500000000000000000000000L, 52.34277778455352018114901L },
+        { 7.000000000000000000000000L, 720.0000000000000000000000L },
+        { 7.300000000000000000000000L, 1271.423633663909273480982L },
+        { 10.00000000000000000000000L, 362880.0000000000000000000L },
+        { 10.90000000000000000000000L, 2869690.268017083124829523L },
+        { 11.00000000000000000000000L, 3628800.000000000000000000L },
+        { 15.00000000000000000000000L, 87178291200.00000000000000L },
+        { 20.00000000000000000000000L, 121645100408832000.0000000L },
+        { 25.00000000000000000000000L, 620448401733239439360000.0L },
+        { 30.00000000000000000000000L, 8.841761993739701954543616e+30L },
+        { 0.5100000000000000000000000L, 1.738415068463864014145204L },
+        { -0.5000000000000000000000000L, -3.544907701811032054596335L },
+        { -1.500000000000000000000000L, 2.363271801207354703064223L },
+        { -2.500000000000000000000000L, -0.9453087204829418812256893L },
+        { -3.500000000000000000000000L, 0.2700882058522691089216255L },
+    };
+    static const OraclePt kLgam[] = {                    // roots x=1,2 excluded; 0.51/4.4/7.3/10.9 = non-representable
+        { 0.5100000000000000000000000L, 0.5529738179298007399106158L },
+        { 0.6000000000000000000000000L, 0.3982338580692348995834474L },
+        { 0.7500000000000000000000000L, 0.2032809514312953714814330L },
+        { 1.500000000000000000000000L, -0.1207822376352452223455184L },
+        { 2.500000000000000000000000L, 0.2846828704729191596324947L },
+        { 3.000000000000000000000000L, 0.6931471805599453094172321L },
+        { 4.000000000000000000000000L, 1.791759469228055000812477L },
+        { 4.400000000000000000000000L, 2.316103491424857273261808L },
+        { 5.000000000000000000000000L, 3.178053830347945619646942L },
+        { 7.300000000000000000000000L, 7.147892523022249033109746L },
+        { 8.000000000000000000000000L, 8.525161361065414300165531L },
+        { 10.90000000000000000000000L, 14.86971466136042312999966L },
+        { 11.00000000000000000000000L, 15.10441257307551529522571L },
+        { 15.00000000000000000000000L, 25.19122118273868150009343L },
+        { 20.00000000000000000000000L, 39.33988418719949403622465L },
+        { 50.00000000000000000000000L, 144.5657439463448860089184L },
+        { 100.0000000000000000000000L, 359.1342053695753987760440L },
+        { -0.5000000000000000000000000L, 1.265512123484645396488946L },
+        { -1.500000000000000000000000L, 0.8600470153764810145109327L },
+        { -2.500000000000000000000000L, -0.05624371649767405067259453L },
+        { -3.500000000000000000000000L, -1.309006684993042046360715L },
+    };
+    const long double kErf05    = 0.5204998778130465376827467L;
+    const long double kErf3     = 0.9999779095030014145586272L;
+    const long double kErfc1    = 0.1572992070502851306587794L;
+    const long double kErfc8    = 1.122429717298292707996789e-29L;
+    const long double kErfc20   = 5.395865611607900928934999e-176L;
+    const long double kErfc40   = 1.896961059966276509268278e-697L;
+    const long double kSqrtPi   = 1.772453850905516027298167L;      // tgamma(0.5)
+    const long double kTg55     = 52.34277778455352018114901L;
+    const long double kHalfLnPi = 0.5723649429247000870717137L;     // lgamma(0.5)
+    const long double kLg50     = 144.5657439463448860089184L;
+    const long double kTgNeg05  = -3.544907701811032054596335L;     // -2 sqrt(pi)
+    const long double kLgNeg05  = 1.265512123484645396488946L;
+
+    // ── 1) specials — transcendental-free, hold everywhere ──
+    Check(std::erfl(0.0L) == 0.0L && !std::signbit(std::erfl(0.0L)), "phase65 erfl(+0)=+0");
+    Check(std::signbit(std::erfl(-0.0L)),        "phase65 erfl(-0)=-0");
+    Check(std::erfl(infL) == 1.0L,               "phase65 erfl(inf)=1");
+    Check(std::erfl(-infL) == -1.0L,             "phase65 erfl(-inf)=-1");
+    Check(std::isnan(std::erfl(qnanL)),          "phase65 erfl(NaN)=NaN");
+    Check(std::erfcl(infL) == 0.0L,              "phase65 erfcl(inf)=0");
+    Check(std::erfcl(-infL) == 2.0L,             "phase65 erfcl(-inf)=2");
+    Check(std::erfcl(0.0L) == 1.0L,              "phase65 erfcl(0)=1");
+    Check(near(std::tgammal(1.0L), 1.0L, subd),  "phase65 tgammal(1)=1");
+    Check(std::isinf(std::tgammal(0.0L)) && !std::signbit(std::tgammal(0.0L)), "phase65 tgammal(+0)=+inf");
+    { long double r = std::tgammal(-0.0L); Check(std::isinf(r) && std::signbit(r), "phase65 tgammal(-0)=-inf"); }
+    Check(std::isnan(std::tgammal(-3.0L)),       "phase65 tgammal(-3)=NaN");
+    Check(std::isnan(std::tgammal(-infL)),       "phase65 tgammal(-inf)=NaN");
+    Check(std::tgammal(infL) == infL,            "phase65 tgammal(inf)=inf");
+    Check(std::tgammal(1800.0L) == infL,         "phase65 tgammal(1800)=inf");
+    Check(std::fabsl(std::lgammal(1.0L)) < 8 * 0x1p-63L, "phase65 lgammal(1)=0");
+    Check(std::fabsl(std::lgammal(2.0L)) < 8 * 0x1p-63L, "phase65 lgammal(2)=0");
+    Check(std::lgammal(0.0L) == infL,            "phase65 lgammal(0)=+inf");
+    Check(std::lgammal(-2.0L) == infL,           "phase65 lgammal(-2)=+inf");
+    Check(std::isinf(std::lgammal(infL)),        "phase65 lgammal(inf)=+inf");
+
+    // ── 2) decisive genuine-80-bit on QEMU (main paths are transcendental-free) ──
+    Check(near(std::erfl(0.5L), kErf05, subd),   "phase65 erfl(0.5) ~ baked 80-bit");
+    Check(near(std::erfl(3.0L), kErf3, subd),    "phase65 erfl(3) ~ baked 80-bit");
+    Check(std::erfl(0.5L) != (long double)(double)std::erfl(0.5L), "phase65 erfl(0.5) sub-double bits");
+    { char b[64]; auto r = std::to_chars(b, b + sizeof(b), std::erfl(0.5L));
+      Check(r.ec == std::errc{} && sig_digits(b, r.ptr) >= 19, "phase65 erfl(0.5) >=19 sig digits"); }
+    Check(near(std::erfcl(1.0L), kErfc1, subd),  "phase65 erfcl(1) [W1] ~ baked 80-bit");
+    Check(near(std::erfcl(8.0L), kErfc8, subd),  "phase65 erfcl(8) [W2] ~ baked 80-bit");
+    Check(near(std::erfcl(20.0L), kErfc20, 8 * 0x1p-63L), "phase65 erfcl(20) [asymptotic] ~ baked");
+    Check(near(std::erfcl(40.0L), kErfc40, 8 * 0x1p-63L), "phase65 erfcl(40) [asymptotic] ~ baked");
+    Check(std::erfcl(8.0L) != (long double)(double)std::erfcl(8.0L), "phase65 erfcl(8) sub-double bits");
+    Check(near(std::tgammal(0.5L), kSqrtPi, subd), "phase65 tgammal(0.5)=sqrt(pi) ~ baked");
+    Check(near(std::tgammal(5.5L), kTg55, 8 * 0x1p-63L), "phase65 tgammal(5.5) ~ baked (dd-lnGamma)");
+    Check(near(std::tgammal(20.0L), 121645100408832000.0L, 8 * 0x1p-63L), "phase65 tgammal(20)=19! ~ baked");
+    Check(std::tgammal(0.5L) != (long double)(double)std::tgammal(0.5L), "phase65 tgammal(0.5) sub-double bits");
+    Check(near(std::lgammal(0.5L), kHalfLnPi, subd), "phase65 lgammal(0.5)=0.5 ln pi ~ baked");
+    Check(near(std::lgammal(50.0L), kLg50, 8 * 0x1p-63L), "phase65 lgammal(50) ~ baked");
+
+    // ── 3) reflection — genuine 80-bit on Bochs/real-HW (fsin/fyl2x); loose on QEMU ──
+    Check(near(std::tgammal(-0.5L), kTgNeg05, reflTol), "phase65 tgammal(-0.5)=-2sqrt(pi) (80-bit on Bochs)");
+    Check(near(std::lgammal(-0.5L), kLgNeg05, reflTol), "phase65 lgammal(-0.5) (80-bit on Bochs)");
+
+    // ── 4) precision guard (runtime) — a truncated coeff → ~100 ULP → sweep fails ──
+    Check(std::ERF_C_L[0] != (long double)(double)std::ERF_C_L[0], "phase65 ERF_C_L[0] sub-double bits");
+    Check(std::erfl(0.5L) != (long double)(double)std::erfl(0.5L),  "phase65 erfl(0.5) sub-double (guard)");
+
+    // ── 5) oracle sweep — max ULP vs correctly-rounded 80-bit reference ──
+    long double maxErf = 0, maxErfc = 0, maxTg = 0, maxLg = 0;
+    bool tgReflOk = true, lgReflOk = true;
+    for (auto &p : kErf)  { long double u = ulps(std::erfl(p.x), p.o);  if (u > maxErf)  maxErf  = u; }
+    for (auto &p : kErfc) { long double u = ulps(std::erfcl(p.x), p.o); if (u > maxErfc) maxErfc = u; }
+    for (auto &p : kTgam) {                              // positive: main path; negative: reflection
+        long double r = std::tgammal(p.x);
+        if (p.x > 0.0L) { long double u = ulps(r, p.o); if (u > maxTg) maxTg = u; }
+        else if (!near(r, p.o, reflTol)) tgReflOk = false;
+    }
+    for (auto &p : kLgam) {
+        long double r = std::lgammal(p.x);
+        if (p.x > 0.0L) { long double u = ulps(r, p.o); if (u > maxLg) maxLg = u; }
+        else if (!near(r, p.o, reflTol)) lgReflOk = false;
+    }
+    // main paths (incl. non-representable stressors 0.9/1.1/4.4/7.3/10.9/0.51) hold a few ULP
+    Check(maxErf  <= 8.0L, "phase65 erf sweep <=8 ULP");
+    Check(maxErfc <= 8.0L, "phase65 erfc sweep <=8 ULP");
+    Check(maxTg   <= 8.0L, "phase65 tgamma main-path sweep <=8 ULP");
+    Check(maxLg   <= 8.0L, "phase65 lgamma main-path sweep <=8 ULP");
+    Check(tgReflOk, "phase65 tgamma reflection sweep (80-bit on Bochs, loose on QEMU)");
+    Check(lgReflOk, "phase65 lgamma reflection sweep (80-bit on Bochs, loose on QEMU)");
+    // achieved max-ULP surfaced for regression visibility (deterministic; ×100)
+    printf("[CXX] phase65 maxUlp(x100) erf=%d erfc=%d tgamma=%d lgamma=%d\n",
+           (int)(maxErf * 100), (int)(maxErfc * 100), (int)(maxTg * 100), (int)(maxLg * 100));
+    printf("[CXX] PASS phase65: <cmath> long double special\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -11130,6 +11343,7 @@ int main()
     Phase62();
     Phase63();
     Phase64();
+    Phase65();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
