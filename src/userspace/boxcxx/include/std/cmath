@@ -956,43 +956,318 @@ inline float  fma(float x, float y, float z) { return float(fma(double(x), doubl
   inline float fn##f(float x){return fn(x);} inline long double fn##l(long double x){return fn(x);}
 #define BXC2(fn) inline long double fn(long double a,long double b){return (long double)fn((double)a,(double)b);} \
   inline float fn##f(float a,float b){return fn(a,b);} inline long double fn##l(long double a,long double b){return fn(a,b);}
-BXC1(sin) BXC1(cos) BXC1(tan) BXC1(asin) BXC1(acos) BXC1(atan)
+// Kept narrowed-to-double for later subphases (Ф27d1b: asin/acos/hyperbolics/
+// cbrt/pow/hypot/fma; Ф27d2: expm1/erf/erfc/tgamma/lgamma). Everything else is
+// a genuine 80-bit x87 primary defined below.
+BXC1(asin) BXC1(acos)
 BXC1(sinh) BXC1(cosh) BXC1(tanh) BXC1(asinh) BXC1(acosh) BXC1(atanh)
-BXC1(exp) BXC1(exp2) BXC1(expm1) BXC1(log) BXC1(log2) BXC1(log10) BXC1(log1p)
-BXC1(sqrt) BXC1(cbrt) BXC1(erf) BXC1(erfc) BXC1(tgamma) BXC1(lgamma)
-BXC1(ceil) BXC1(floor) BXC1(trunc) BXC1(round) BXC1(nearbyint) BXC1(rint) BXC1(fabs) BXC1(logb)
-BXC2(atan2) BXC2(pow) BXC2(hypot) BXC2(fmod) BXC2(remainder)
-BXC2(fdim) BXC2(fmax) BXC2(fmin) BXC2(copysign) BXC2(nextafter)
+BXC1(expm1)
+BXC1(cbrt) BXC1(erf) BXC1(erfc) BXC1(tgamma) BXC1(lgamma)
+BXC2(pow) BXC2(hypot)
 #undef BXC1
 #undef BXC2
 inline long double fma(long double a,long double b,long double c){return (long double)fma((double)a,(double)b,(double)c);}
 inline float fmaf(float a,float b,float c){return fma(a,b,c);}
 inline long double fmal(long double a,long double b,long double c){return fma(a,b,c);}
-inline long double scalbn(long double x,int n){return (long double)scalbn((double)x,n);}
-inline float scalbnf(float x,int n){return scalbn(x,n);} inline long double scalbnl(long double x,int n){return scalbn(x,n);}
-inline long double ldexp(long double x,int n){return (long double)ldexp((double)x,n);}
-inline float ldexpf(float x,int n){return ldexp(x,n);} inline long double ldexpl(long double x,int n){return ldexp(x,n);}
-inline long double scalbln(long double x,long n){return (long double)scalbln((double)x,n);}
-inline float scalblnf(float x,long n){return scalbln(x,n);} inline long double scalblnl(long double x,long n){return scalbln(x,n);}
-inline long double frexp(long double x,int*e){return (long double)frexp((double)x,e);}
-inline float frexpf(float x,int*e){return frexp(x,e);} inline long double frexpl(long double x,int*e){return frexp(x,e);}
-inline long double modf(long double x,long double*ip){double i;long double r=(long double)modf((double)x,&i);*ip=(long double)i;return r;}
-inline float modff(float x,float*ip){return modf(x,ip);} inline long double modfl(long double x,long double*ip){return modf(x,ip);}
-inline long double remquo(long double a,long double b,int*q){return (long double)remquo((double)a,(double)b,q);}
-inline float remquof(float a,float b,int*q){return remquo(a,b,q);} inline long double remquol(long double a,long double b,int*q){return remquo(a,b,q);}
-inline int ilogb(long double x){return ilogb((double)x);} inline int ilogbf(float x){return ilogb((double)x);} inline int ilogbl(long double x){return ilogb((double)x);}
-inline long lround(long double x){return lround((double)x);} inline long lroundf(float x){return lround((double)x);} inline long lroundl(long double x){return lround((double)x);}
-inline long long llround(long double x){return llround((double)x);} inline long long llroundf(float x){return llround((double)x);} inline long long llroundl(long double x){return llround((double)x);}
-inline long lrint(long double x){return lrint((double)x);} inline long lrintf(float x){return lrint((double)x);} inline long lrintl(long double x){return lrint((double)x);}
-inline long long llrint(long double x){return llrint((double)x);} inline long long llrintf(float x){return llrint((double)x);} inline long long llrintl(long double x){return llrint((double)x);}
-inline double nexttoward(double x,long double y){return nextafter(x,(double)y);}
-inline float nexttoward(float x,long double y){return (float)nextafter((double)x,(double)y);}
-inline long double nexttoward(long double x,long double y){return (long double)nextafter((double)x,(double)y);}
-inline float nexttowardf(float x,long double y){return nexttoward(x,y);} inline long double nexttowardl(long double x,long double y){return nexttoward(x,y);}
-// classification long double + abs + comparison macros
-inline bool isnan(long double x){return isnan((double)x);} inline bool isinf(long double x){return isinf((double)x);}
-inline bool isfinite(long double x){return isfinite((double)x);} inline bool isnormal(long double x){return isnormal((double)x);}
-inline bool signbit(long double x){return signbit((double)x);} inline int fpclassify(long double x){return fpclassify((double)x);}
+// ════════════════════════════════════════════════════════════════════════
+//  long double = 80-bit x87: genuine hardware implementations (Ф27d1a).
+//  Layout: mantissa = bits[63:0] (bit 63 = explicit integer bit), exponent =
+//  bits[78:64] (15-bit, bias 16383), sign = bit 79, bits[127:80] = padding
+//  (masked). Errno-free like the double paths: return kQNaNL/kInfL/signed-zero
+//  directly, never set errno, never raise. float/double overloads unchanged.
+// ════════════════════════════════════════════════════════════════════════
+inline unsigned __int128 ldbits(long double x){ return __builtin_bit_cast(unsigned __int128, x); }
+inline unsigned ld_exp(long double x){ return (unsigned)(uint16_t)(ldbits(x) >> 64) & 0x7FFFu; }
+inline u64      ld_man(long double x){ return (u64)ldbits(x); }
+
+inline bool signbit(long double x){ return ((ldbits(x) >> 79) & 1) != 0; }
+inline bool isnan(long double x){ return ld_exp(x) == 0x7FFF && (ld_man(x) & 0x7FFFFFFFFFFFFFFFull) != 0; }
+inline bool isinf(long double x){ return ld_exp(x) == 0x7FFF && ld_man(x) == 0x8000000000000000ull; }
+inline bool isfinite(long double x){ return ld_exp(x) != 0x7FFF; }
+inline bool isnormal(long double x){ unsigned e = ld_exp(x); return e != 0 && e != 0x7FFF; }
+inline int  fpclassify(long double x){
+    unsigned e = ld_exp(x); u64 m = ld_man(x);
+    if (e == 0x7FFF) return (m & 0x7FFFFFFFFFFFFFFFull) ? FP_NAN_ : FP_INFINITE_;
+    if (e == 0)      return (m == 0) ? FP_ZERO_ : FP_SUBNORMAL_;
+    return FP_NORMAL_;
+}
+
+constexpr long double kInfL   = __builtin_infl();
+constexpr long double kQNaNL  = __builtin_nanl("");
+constexpr long double kTwoPiL = 6.283185307179586476925286766559005768L;
+constexpr long double kLog2eL = 1.442695040888963407359924681001892137L;
+
+// x87 control word: bits[11:10] = rounding control (00 nearest, 01 down, 10 up, 11 trunc).
+inline uint16_t x87_getcw(){ uint16_t cw; __asm__ volatile("fnstcw %0" : "=m"(cw)); return cw; }
+inline void     x87_setcw(uint16_t cw){ __asm__ volatile("fldcw %0" :: "m"(cw)); }
+
+// ── direct x87 ops (each sequence is stack-balanced: every push is popped) ──
+inline long double fabs(long double x){ long double r; __asm__("fabs" : "=t"(r) : "0"(x)); return r; }
+inline long double sqrt(long double x){ long double r; __asm__("fsqrt" : "=t"(r) : "0"(x)); return r; }
+inline long double copysign(long double x, long double y){
+    unsigned __int128 s = (unsigned __int128)1 << 79;
+    return __builtin_bit_cast(long double, (ldbits(x) & ~s) | (ldbits(y) & s));
+}
+
+// frndint under an explicit rounding control; control word saved/restored.
+inline long double x87_round_mode(long double x, uint16_t rc){
+    uint16_t cw = x87_getcw();
+    uint16_t nw = (uint16_t)((cw & ~0x0C00u) | ((unsigned)rc << 10));
+    long double r;
+    __asm__ volatile("fldcw %[nw]\n\t"
+                     "frndint\n\t"
+                     "fldcw %[cw]"
+                     : "=t"(r) : "0"(x), [nw]"m"(nw), [cw]"m"(cw));
+    return r;
+}
+inline long double trunc(long double x){ return isfinite(x) ? x87_round_mode(x, 3) : x; }
+inline long double floor(long double x){ return isfinite(x) ? x87_round_mode(x, 1) : x; }
+inline long double ceil (long double x){ return isfinite(x) ? x87_round_mode(x, 2) : x; }
+inline long double rint (long double x){ if (!isfinite(x)) return x; long double r; __asm__("frndint" : "=t"(r) : "0"(x)); return r; }
+inline long double nearbyint(long double x){ return rint(x); }   // no fetestexcept in boxcxx: identical to rint
+inline long double round(long double x){                         // round half away from zero
+    if (!isfinite(x)) return x;
+    long double t = trunc(x), d = x - t;
+    if (d >=  0.5L) return t + 1.0L;
+    if (d <= -0.5L) return t - 1.0L;
+    return t;
+}
+
+inline long double scalbn(long double x, int n){
+    if (!isfinite(x) || x == 0.0L) return x;
+    long double ln = (long double)n, r;
+    __asm__("fscale\n\tfstp %%st(1)" : "=t"(r) : "0"(x), "u"(ln));
+    return r;
+}
+inline long double ldexp(long double x, int n){ return scalbn(x, n); }
+inline long double scalbln(long double x, long n){
+    int ni = (n > 100000) ? 100000 : (n < -100000 ? -100000 : (int)n);
+    return scalbn(x, ni);
+}
+
+inline long double logb(long double x){
+    if (x == 0.0L) return -kInfL;
+    if (isinf(x))  return kInfL;
+    if (isnan(x))  return x;
+    long double e; __asm__("fxtract\n\tfstp %%st(0)" : "=t"(e) : "0"(x) : "st(1)");
+    return e;                                             // fxtract: st0=significand, st1=exponent
+}
+inline int ilogb(long double x){
+    unsigned e = ld_exp(x); u64 m = ld_man(x);
+    if (e == 0){
+        if (m == 0) return FP_ILOGB0;
+        int n = 0; while (!(m & 0x8000000000000000ull)) { m <<= 1; ++n; }
+        return -16382 - n;                               // subnormal
+    }
+    if (e == 0x7FFF) return (m & 0x7FFFFFFFFFFFFFFFull) ? FP_ILOGBNAN : 2147483647;   // NaN : Inf
+    return (int)e - 16383;
+}
+inline long double frexp(long double x, int *e){
+    if (!isfinite(x) || x == 0.0L) { *e = 0; return x; }
+    long double sig, expo;
+    __asm__("fxtract" : "=t"(sig), "=u"(expo) : "0"(x));
+    *e = (int)expo + 1;
+    return sig * 0.5L;                                    // sig∈[1,2) → m∈[0.5,1)
+}
+
+inline long double exp2(long double x){
+    if (isnan(x)) return x;
+    if (isinf(x)) return signbit(x) ? 0.0L : kInfL;
+    if (x >=  16384.0L) return kInfL;                     // 2^16384 overflows to +Inf
+    if (x <= -16446.0L) return 0.0L;                      // below smallest subnormal
+    long double n = rint(x), f = x - n, p;               // f ∈ [-0.5, 0.5]
+    __asm__("f2xm1\n\tfld1\n\tfaddp" : "=t"(p) : "0"(f) : "st(1)");         // p = 2^f
+    long double r;
+    __asm__("fscale\n\tfstp %%st(1)" : "=t"(r) : "0"(p), "u"(n));           // r = 2^f · 2^n
+    return r;
+}
+inline long double exp(long double x){
+    if (isnan(x)) return x;
+    if (isinf(x)) return signbit(x) ? 0.0L : kInfL;
+    return exp2(x * kLog2eL);                             // e^x = 2^(x·log2 e)
+}
+
+inline long double log2(long double x){                  // fyl2x: st1·log2(st0)
+    if (isnan(x)) return x;
+    long double r; __asm__("fld1\n\tfxch\n\tfyl2x"   : "=t"(r) : "0"(x) : "st(1)"); return r;
+}
+inline long double log(long double x){
+    if (isnan(x)) return x;
+    long double r; __asm__("fldln2\n\tfxch\n\tfyl2x" : "=t"(r) : "0"(x) : "st(1)"); return r;
+}
+inline long double log10(long double x){
+    if (isnan(x)) return x;
+    long double r; __asm__("fldlg2\n\tfxch\n\tfyl2x" : "=t"(r) : "0"(x) : "st(1)"); return r;
+}
+inline long double log1p(long double x){
+    if (isnan(x)) return x;
+    if (fabs(x) < 0.29L){                                 // fyl2xp1 needs |x| < 1−√½
+        long double r; __asm__("fldln2\n\tfxch\n\tfyl2xp1" : "=t"(r) : "0"(x) : "st(1)"); return r;
+    }
+    return log(1.0L + x);
+}
+
+inline long double atan(long double x){                  // fpatan: atan(st1/st0) = atan(x/1)
+    long double r; __asm__("fld1\n\tfpatan" : "=t"(r) : "0"(x) : "st(1)"); return r;
+}
+inline long double atan2(long double y, long double x){  // atan(st1/st0) = atan(y/x)
+    long double r; __asm__("fpatan" : "=t"(r) : "0"(x), "u"(y)); return r;
+}
+
+// |x|≥2^63 is out of fsin/fcos/fptan range: reduce mod 2π (fprem1 → [-π,π]).
+inline long double x87_reduce_2pi(long double x){
+    long double r;
+    __asm__("1:\n\tfprem1\n\tfnstsw %%ax\n\ttestb $0x04, %%ah\n\tjnz 1b\n\tfstp %%st(1)"
+            : "=t"(r) : "0"(x), "u"(kTwoPiL) : "ax", "cc");
+    return r;
+}
+inline long double sin(long double x){
+    if (isnan(x)) return x;
+    if (isinf(x)) return kQNaNL;
+    if (fabs(x) >= 0x1p63L) x = x87_reduce_2pi(x);        // large-arg accuracy bounded by x87 π (documented)
+    long double r; __asm__("fsin" : "=t"(r) : "0"(x)); return r;
+}
+inline long double cos(long double x){
+    if (isnan(x)) return x;
+    if (isinf(x)) return kQNaNL;
+    if (fabs(x) >= 0x1p63L) x = x87_reduce_2pi(x);
+    long double r; __asm__("fcos" : "=t"(r) : "0"(x)); return r;
+}
+inline long double tan(long double x){
+    if (isnan(x)) return x;
+    if (isinf(x)) return kQNaNL;
+    if (fabs(x) >= 0x1p63L) x = x87_reduce_2pi(x);
+    long double r; __asm__("fptan\n\tfstp %%st(0)" : "=t"(r) : "0"(x) : "st(1)"); return r;   // fptan pushes 1.0
+}
+
+inline long double fmod(long double x, long double y){
+    if (isnan(x) || isnan(y) || isinf(x) || y == 0.0L) return kQNaNL;
+    if (isinf(y)) return x;
+    long double r;
+    __asm__("1:\n\tfprem\n\tfnstsw %%ax\n\ttestb $0x04, %%ah\n\tjnz 1b\n\tfstp %%st(1)"
+            : "=t"(r) : "0"(x), "u"(y) : "ax", "cc");
+    return r;
+}
+inline long double remainder(long double x, long double y){
+    if (isnan(x) || isnan(y) || isinf(x) || y == 0.0L) return kQNaNL;
+    if (isinf(y)) return x;
+    long double r;
+    __asm__("1:\n\tfprem1\n\tfnstsw %%ax\n\ttestb $0x04, %%ah\n\tjnz 1b\n\tfstp %%st(1)"
+            : "=t"(r) : "0"(x), "u"(y) : "ax", "cc");
+    return r;
+}
+inline long double remquo(long double x, long double y, int *quo){
+    if (isnan(x) || isnan(y) || isinf(x) || y == 0.0L) { *quo = 0; return kQNaNL; }
+    if (isinf(y)) { *quo = 0; return x; }
+    long double r = remainder(x, y);                     // IEEE remainder via fprem1
+    long double n = rint((x - r) / y);                   // exact integer quotient (snap)
+    int iq = (int)fmod(fabs(n), 8.0L);                   // low 3 quotient bits
+    *quo = (signbit(x) ^ signbit(y)) ? -iq : iq;
+    return r;
+}
+
+inline long double fdim(long double x, long double y){
+    if (isnan(x) || isnan(y)) return kQNaNL;
+    return (x > y) ? x - y : 0.0L;
+}
+inline long double fmax(long double x, long double y){
+    if (isnan(x)) return y;
+    if (isnan(y)) return x;
+    if (x == y) return signbit(x) ? y : x;               // fmax(+0,−0)=+0
+    return x < y ? y : x;
+}
+inline long double fmin(long double x, long double y){
+    if (isnan(x)) return y;
+    if (isnan(y)) return x;
+    if (x == y) return signbit(x) ? x : y;               // fmin(+0,−0)=−0
+    return x < y ? x : y;
+}
+
+inline long double nextafter(long double x, long double y){
+    if (isnan(x) || isnan(y)) return x + y;
+    if (x == y) return y;
+    unsigned __int128 bx = ldbits(x);
+    unsigned se = (unsigned)(uint16_t)(bx >> 64);
+    bool xneg = (se >> 15) != 0;
+    unsigned exp = se & 0x7FFFu;
+    u64 frac = (u64)bx & 0x7FFFFFFFFFFFFFFFull;
+    if (exp == 0 && frac == 0){                           // ±0 → smallest subnormal toward y
+        unsigned __int128 res = ((unsigned __int128)(signbit(y) ? 0x8000u : 0u) << 64) | 1u;
+        return __builtin_bit_cast(long double, res);
+    }
+    bool up = xneg ? (y < x) : (y > x);                   // move away from zero?
+    if (up){                                              // carry across the explicit integer bit
+        if (frac == 0x7FFFFFFFFFFFFFFFull){ frac = 0; ++exp; } else ++frac;
+    } else {
+        if (frac == 0){ frac = 0x7FFFFFFFFFFFFFFFull; --exp; } else --frac;
+    }
+    u64 nm = ((exp != 0) ? ((u64)1 << 63) : 0ull) | frac;
+    unsigned nse = (xneg ? 0x8000u : 0u) | (exp & 0x7FFFu);
+    unsigned __int128 res = ((unsigned __int128)nse << 64) | nm;
+    return __builtin_bit_cast(long double, res);
+}
+inline long double nexttoward(long double x, long double y){ return nextafter(x, y); }
+
+inline long double modf(long double x, long double *ip){
+    if (isinf(x)) { *ip = x; return copysign(0.0L, x); }
+    long double i = trunc(x); *ip = i;
+    return isnan(x) ? x : copysign(x - i, x);
+}
+
+// ── C-named (f / l) wrappers over the 80-bit primaries ─────────────────────
+inline float fabsf(float x){ return (float)fabs((long double)x); }              inline long double fabsl(long double x){ return fabs(x); }
+inline float sqrtf(float x){ return (float)sqrt((long double)x); }              inline long double sqrtl(long double x){ return sqrt(x); }
+inline float sinf(float x){ return (float)sin((long double)x); }                inline long double sinl(long double x){ return sin(x); }
+inline float cosf(float x){ return (float)cos((long double)x); }                inline long double cosl(long double x){ return cos(x); }
+inline float tanf(float x){ return (float)tan((long double)x); }                inline long double tanl(long double x){ return tan(x); }
+inline float atanf(float x){ return (float)atan((long double)x); }              inline long double atanl(long double x){ return atan(x); }
+inline float expf(float x){ return (float)exp((long double)x); }                inline long double expl(long double x){ return exp(x); }
+inline float exp2f(float x){ return (float)exp2((long double)x); }              inline long double exp2l(long double x){ return exp2(x); }
+inline float logf(float x){ return (float)log((long double)x); }               inline long double logl(long double x){ return log(x); }
+inline float log2f(float x){ return (float)log2((long double)x); }             inline long double log2l(long double x){ return log2(x); }
+inline float log10f(float x){ return (float)log10((long double)x); }           inline long double log10l(long double x){ return log10(x); }
+inline float log1pf(float x){ return (float)log1p((long double)x); }           inline long double log1pl(long double x){ return log1p(x); }
+inline float ceilf(float x){ return (float)ceil((long double)x); }             inline long double ceill(long double x){ return ceil(x); }
+inline float floorf(float x){ return (float)floor((long double)x); }           inline long double floorl(long double x){ return floor(x); }
+inline float truncf(float x){ return (float)trunc((long double)x); }           inline long double truncl(long double x){ return trunc(x); }
+inline float roundf(float x){ return (float)round((long double)x); }           inline long double roundl(long double x){ return round(x); }
+inline float nearbyintf(float x){ return (float)nearbyint((long double)x); }    inline long double nearbyintl(long double x){ return nearbyint(x); }
+inline float rintf(float x){ return (float)rint((long double)x); }             inline long double rintl(long double x){ return rint(x); }
+inline float logbf(float x){ return (float)logb((long double)x); }             inline long double logbl(long double x){ return logb(x); }
+inline float atan2f(float y, float x){ return (float)atan2((long double)y,(long double)x); }              inline long double atan2l(long double y,long double x){ return atan2(y,x); }
+inline float fmodf(float x, float y){ return (float)fmod((long double)x,(long double)y); }                inline long double fmodl(long double x,long double y){ return fmod(x,y); }
+inline float remainderf(float x, float y){ return (float)remainder((long double)x,(long double)y); }      inline long double remainderl(long double x,long double y){ return remainder(x,y); }
+inline float fdimf(float x, float y){ return (float)fdim((long double)x,(long double)y); }                inline long double fdiml(long double x,long double y){ return fdim(x,y); }
+inline float fmaxf(float x, float y){ return (float)fmax((long double)x,(long double)y); }                inline long double fmaxl(long double x,long double y){ return fmax(x,y); }
+inline float fminf(float x, float y){ return (float)fmin((long double)x,(long double)y); }                inline long double fminl(long double x,long double y){ return fmin(x,y); }
+inline float copysignf(float x, float y){ return (float)copysign((long double)x,(long double)y); }        inline long double copysignl(long double x,long double y){ return copysign(x,y); }
+inline float nextafterf(float x, float y){ return (float)nextafter((long double)x,(long double)y); }      inline long double nextafterl(long double x,long double y){ return nextafter(x,y); }
+
+inline float scalbnf(float x, int n){ return (float)scalbn((long double)x, n); }    inline long double scalbnl(long double x, int n){ return scalbn(x, n); }
+inline float ldexpf(float x, int n){ return (float)scalbn((long double)x, n); }     inline long double ldexpl(long double x, int n){ return scalbn(x, n); }
+inline float scalblnf(float x, long n){ return (float)scalbln((long double)x, n); } inline long double scalblnl(long double x, long n){ return scalbln(x, n); }
+inline float frexpf(float x, int *e){ return (float)frexp((long double)x, e); }     inline long double frexpl(long double x, int *e){ return frexp(x, e); }
+inline float modff(float x, float *ip){ long double i; float r = (float)modf((long double)x, &i); *ip = (float)i; return r; }  inline long double modfl(long double x, long double *ip){ return modf(x, ip); }
+inline float remquof(float x, float y, int *q){ return (float)remquo((long double)x,(long double)y,q); }  inline long double remquol(long double x,long double y,int *q){ return remquo(x,y,q); }
+inline int   ilogbf(float x){ return ilogb((double)x); }   inline int ilogbl(long double x){ return ilogb(x); }
+inline long lround(long double x){ return (long)round(x); } inline long lroundf(float x){ return (long)round((long double)x); } inline long lroundl(long double x){ return (long)round(x); }
+inline long long llround(long double x){ return (long long)round(x); } inline long long llroundf(float x){ return (long long)round((long double)x); } inline long long llroundl(long double x){ return (long long)round(x); }
+inline long lrint(long double x){ return (long)rint(x); } inline long lrintf(float x){ return (long)rint((long double)x); } inline long lrintl(long double x){ return (long)rint(x); }
+inline long long llrint(long double x){ return (long long)rint(x); } inline long long llrintf(float x){ return (long long)rint((long double)x); } inline long long llrintl(long double x){ return (long long)rint(x); }
+inline double nexttoward(double x, long double y){       // step a double one ULP toward the true LD y
+    if (isnan(x) || isnan(y)) return x + (double)y;
+    long double lx = (long double)x;
+    if (lx == y) return (double)y;
+    return nextafter(x, (lx < y) ? kInf : -kInf);
+}
+inline float nexttoward(float x, long double y){
+    if (isnan(x) || isnan(y)) return x + (float)y;
+    long double lx = (long double)x;
+    if (lx == y) return (float)y;
+    return nextafter(x, (lx < y) ? kInfF : -kInfF);
+}
+inline float nexttowardf(float x, long double y){ return nexttoward(x, y); }
+inline long double nexttowardl(long double x, long double y){ return nexttoward(x, y); }
 inline double abs(double x){return fabs(x);} inline float abs(float x){return fabs(x);} inline long double abs(long double x){return fabs(x);}
 inline double nan(const char*){return __builtin_nan("");} inline float nanf(const char*){return __builtin_nanf("");} inline long double nanl(const char*){return __builtin_nanl("");}
 inline bool isgreater(double x,double y){return __builtin_isgreater(x,y);}
