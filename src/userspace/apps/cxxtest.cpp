@@ -11861,6 +11861,59 @@ unsigned CrStream1p(const char *name, unsigned long long seed, unsigned long lon
                name, hx, hr, xsum, rsum);
     return (xok && rok) ? 0u : 1u;
 }
+// Generic 2-arg (arg1,arg2) CR harness (atan2: arg1=y,arg2=x; pow: arg1=x,arg2=y).
+struct CrVec2 { unsigned long long a1m; unsigned short a1se;
+                unsigned long long a2m; unsigned short a2se;
+                unsigned long long rm;  unsigned short rse; };
+unsigned CrSweep2(const char *name, const CrVec2 *v, unsigned n,
+                  long double (*fn)(long double, long double)){
+    unsigned long long maxulp = 0; unsigned nonCR = 0, wi = 0;
+    unsigned long long gm = 0; unsigned short gse = 0;
+    for (unsigned i = 0; i < n; ++i){
+        long double a1 = CrLdFromBits(v[i].a1m, v[i].a1se), a2 = CrLdFromBits(v[i].a2m, v[i].a2se);
+        unsigned long long rm; unsigned short rse; CrLdToBits(fn(a1, a2), rm, rse);
+        unsigned long long d = CrUlp(rm, rse, v[i].rm, v[i].rse);
+        if (d){ nonCR++; if (d > maxulp){ maxulp = d; wi = i; gm = rm; gse = rse; } }
+    }
+    printf("[CXX] %s: swept=%u max-ULP=%llu non-CR=%u\n", name, n, maxulp, nonCR);
+    if (nonCR)
+        printf("[CXX]   worst: a1=0x%016llX/%04X a2=0x%016llX/%04X got=0x%016llX/%04X want=0x%016llX/%04X\n",
+               v[wi].a1m, v[wi].a1se, v[wi].a2m, v[wi].a2se, gm, gse, v[wi].rm, v[wi].rse);
+    return nonCR;
+}
+void CrChecksum2(unsigned long long seed, int e1lo, int e1hi, int e2lo, int e2hi,
+                 int sign1, int sign2, unsigned long long n, long double (*fn)(long double, long double),
+                 unsigned long long &hx, unsigned long long &hr){
+    unsigned long long s = seed;
+    unsigned sp1 = (unsigned)(e1hi - e1lo + 1), sp2 = (unsigned)(e2hi - e2lo + 1);
+    hx = 1469598103934665603ULL; hr = 1469598103934665603ULL;
+    for (unsigned long long i = 0; i < n; ++i){
+        unsigned long long a = CrNext(s); s = a; unsigned long long b = CrNext(s); s = b;
+        unsigned long long c = CrNext(s); s = c; unsigned long long d = CrNext(s); s = d;
+        int E1 = e1lo + (int)(a % sp1);
+        unsigned short s1e = (unsigned short)(((sign1 ? ((a >> 40) & 1ULL) : 0ULL) << 15) |
+                                              (unsigned short)((16383 + E1) & 0x7FFF));
+        unsigned long long m1 = b | (1ULL << 63);
+        int E2 = e2lo + (int)(c % sp2);
+        unsigned short s2e = (unsigned short)(((sign2 ? ((c >> 40) & 1ULL) : 0ULL) << 15) |
+                                              (unsigned short)((16383 + E2) & 0x7FFF));
+        unsigned long long m2 = d | (1ULL << 63);
+        hx = CrFold(CrFold(CrFold(CrFold(hx, m1), s1e), m2), s2e);
+        unsigned long long rm; unsigned short rse;
+        CrLdToBits(fn(CrLdFromBits(m1, s1e), CrLdFromBits(m2, s2e)), rm, rse);
+        hr = CrFold(CrFold(hr, rm), rse);
+    }
+}
+unsigned CrStream2(const char *name, unsigned long long seed, int e1lo, int e1hi, int e2lo, int e2hi,
+                   int sign1, int sign2, unsigned long long n, unsigned long long xsum, unsigned long long rsum,
+                   long double (*fn)(long double, long double)){
+    unsigned long long hx, hr; CrChecksum2(seed, e1lo, e1hi, e2lo, e2hi, sign1, sign2, n, fn, hx, hr);
+    bool xok = (hx == xsum), rok = (hr == rsum);
+    printf("[CXX] %s stream: N=%llu xSum=%s rSum=%s\n", name, n, xok?"MATCH":"MISMATCH", rok?"MATCH":"MISMATCH");
+    if (!xok || !rok)
+        printf("[CXX]   %s got xSum=0x%016llX rSum=0x%016llX want 0x%016llX 0x%016llX\n", name, hx, hr, xsum, rsum);
+    return (xok && rok) ? 0u : 1u;
+}
 void Phase66(){
     unsigned f = 0;
     f += CrSweep("phase66 exp2", kExp2Vec, kExp2VecN, [](long double x){ return std::exp2(x); });
@@ -12178,6 +12231,37 @@ void Phase79(){
         printf("[CXX] PASS phase79: cbrt correctly-rounded 80-bit dd "
                "(MPFR-verified: %u baked, %llu streamed, 0 non-CR)\n", kCbrtVecN, kCbrtN);
 }
+// ── Phase80 (Ф27k) — atan2(y,x) correctly-rounded 80-bit (last x87 removed) ──
+// Quadrant + dd atan(|y|/|x|); replaces the x87 fpatan — cmath is now fully
+// software 80-bit. Baked hard-class (all quadrants, |y|≈|x|, near-axis) + a
+// deterministic 2-arg N=20000 stream. Axis/±0/±Inf via explicit Checks.
+#include "cr_atan2_vectors.h"
+#include "cr_atan2_checksums.h"
+void Phase80(){
+    unsigned f = 0;
+    f += CrSweep2("phase80 atan2", kAtan2Vec, kAtan2VecN, [](long double y, long double x){ return std::atan2(y, x); });
+    f += CrStream2("phase80 atan2", kAtan2Seed, kAtan2E1lo, kAtan2E1hi, kAtan2E2lo, kAtan2E2hi,
+                   kAtan2Sign1, kAtan2Sign2, kAtan2N, kAtan2XSum, kAtan2RSum,
+                   [](long double y, long double x){ return std::atan2(y, x); });
+    Check(std::atan2(0.0L, 1.0L) == 0.0L && !std::signbit(std::atan2(0.0L, 1.0L)), "phase80 atan2(+0,+x)=+0");
+    Check(std::atan2(-0.0L, 1.0L) == 0.0L && std::signbit(std::atan2(-0.0L, 1.0L)), "phase80 atan2(-0,+x)=-0");
+    Check(std::atan2(0.0L, -1.0L) > 3.1415L, "phase80 atan2(+0,-x)=+pi");
+    Check(std::atan2(-0.0L, -1.0L) < -3.1415L, "phase80 atan2(-0,-x)=-pi");
+    Check(std::atan2(1.0L, 0.0L) > 1.5707L && std::atan2(1.0L, 0.0L) < 1.5709L, "phase80 atan2(+y,0)=+pi/2");
+    Check(std::atan2(-1.0L, 0.0L) < -1.5707L, "phase80 atan2(-y,0)=-pi/2");
+    Check(std::atan2(1.0L, 1.0L) > 0.7853L && std::atan2(1.0L, 1.0L) < 0.7854L, "phase80 atan2(1,1)=pi/4");
+    Check(std::atan2(__builtin_infl(), __builtin_infl()) > 0.7853L &&
+          std::atan2(__builtin_infl(), __builtin_infl()) < 0.7854L, "phase80 atan2(inf,inf)=pi/4");
+    Check(std::atan2(__builtin_infl(), -__builtin_infl()) > 2.356L, "phase80 atan2(inf,-inf)=3pi/4");
+    Check(std::atan2(1.0L, __builtin_infl()) == 0.0L, "phase80 atan2(y,+inf)=0");
+    Check(std::atan2(1.0L, -__builtin_infl()) > 3.1415L, "phase80 atan2(y,-inf)=pi");
+    Check(std::isnan(std::atan2(__builtin_nanl(""), 1.0L)), "phase80 atan2(NaN,x)=NaN");
+    Check(f == 0, "phase80 atan2 correctly-rounded 80-bit (0 non-CR vs MPFR)");
+    if (f == 0)
+        printf("[CXX] PASS phase80: atan2 correctly-rounded 80-bit dd "
+               "(MPFR-verified: %u baked, %llu streamed, 0 non-CR) — last x87 fpatan removed\n",
+               kAtan2VecN, kAtan2N);
+}
 
 } // namespace
 
@@ -12280,6 +12364,7 @@ int main()
     Phase77();
     Phase78();
     Phase79();
+    Phase80();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
