@@ -1749,11 +1749,54 @@ inline bool isunordered(double x,double y){return __builtin_isunordered(x,y);}
 //  are genuine 80-bit everywhere. Errno-free: NaN/±Inf/signed-zero returned
 //  directly. float/double overloads are the untouched double-precision paths.
 // ════════════════════════════════════════════════════════════════════════
-inline long double asin(long double x){                  // |x|>1: (1-x)(1+x)<0 → NaN
-    return atan2(x, sqrt((1.0L - x) * (1.0L + x)));
+// ── correctly-rounded inverse trig (software double-double, 80-bit) ──────────
+// asin/acos in dd on the CR atan kernel. |x| ≤ √½ uses asin(x)=atan(x/√(1−x²))
+// directly; nearer ±1 (where that quotient blows up) it range-reduces through
+// asin(√((1−|x|)/2)). NO x87 fpatan ⇒ genuine 80-bit.
+inline constexpr long double KSQRT1_2_L = 0.70710678118654752440084436210485L;  // √½
+// asin of a dd argument on [0,√½] as dd: asin(a)=atan(a/√(1−a²)); the quotient
+// stays in [0,1] so it feeds atan_reduced_dd directly.
+inline LdDd asin_small_dd(LdDd a){
+    LdDd a2 = dd_mul_ld(a, a);
+    LdDd w  = sqrt_dd(dd_add_ld(LdDd{1.0L, 0.0L}, LdDd{-a2.hi, -a2.lo}));   // √(1−a²)
+    return atan_reduced_dd(dd_div_ld(a, w));                                // atan(a/√(1−a²))
+}
+inline long double asin(long double x){
+    if (isnan(x)) return x;
+    long double a = fabs(x);
+    if (a > 1.0L)     return kQNaNL;                     // domain
+    if (a < 0x1p-32L) return x;                          // asin(x)=x (odd; ±0)
+    LdDd res;
+    if (a <= KSQRT1_2_L)
+        res = asin_small_dd(LdDd{a, 0.0L});
+    else {                                               // π/2 − 2·asin(√((1−a)/2))
+        long double sh, sl; two_sum_l(1.0L, -a, sh, sl); // 1−a (exact dd)
+        LdDd as = asin_small_dd(sqrt_dd(LdDd{sh * 0.5L, sl * 0.5L}));
+        LdDd hp{ld_from_bits_l(kHalfPiHiM, kHalfPiHiS), ld_from_bits_l(kHalfPiLoM, kHalfPiLoS)};
+        res = dd_add_ld(hp, LdDd{-(as.hi + as.hi), -(as.lo + as.lo)});
+    }
+    long double v = res.hi + res.lo;
+    return signbit(x) ? -v : v;
 }
 inline long double acos(long double x){
-    return atan2(sqrt((1.0L - x) * (1.0L + x)), x);
+    if (isnan(x)) return x;
+    long double a = fabs(x);
+    if (a > 1.0L) return kQNaNL;                         // domain
+    LdDd hp{ld_from_bits_l(kHalfPiHiM, kHalfPiHiS), ld_from_bits_l(kHalfPiLoM, kHalfPiLoS)};
+    LdDd res;
+    if (a <= KSQRT1_2_L){                                // π/2 ∓ asin(|x|)
+        LdDd as = asin_small_dd(LdDd{a, 0.0L});
+        res = signbit(x) ? dd_add_ld(hp, as) : dd_add_ld(hp, LdDd{-as.hi, -as.lo});
+    } else {                                             // 2·asin(√((1−|x|)/2)) [x>0]; π − that [x<0]
+        long double sh, sl; two_sum_l(1.0L, -a, sh, sl); // 1−|x| (exact dd)
+        LdDd as = asin_small_dd(sqrt_dd(LdDd{sh * 0.5L, sl * 0.5L}));
+        LdDd twoas{as.hi + as.hi, as.lo + as.lo};
+        if (signbit(x)){                                 // x<0: π − 2·asin(t)
+            LdDd pi{hp.hi + hp.hi, hp.lo + hp.lo};
+            res = dd_add_ld(pi, LdDd{-twoas.hi, -twoas.lo});
+        } else res = twoas;
+    }
+    return res.hi + res.lo;
 }
 // Correctly round the exact real a+b+c (three long doubles, a leading) to the
 // 64-bit mantissa in ONE rounding. The small-x expm1 series needs a third word:
@@ -1912,13 +1955,25 @@ inline long double hypot(long double x, long double y){
     long double rx = ax / m, ry = ay / m;
     return m * sqrt(rx * rx + ry * ry);                  // genuine 80-bit (fsqrt + arithmetic)
 }
+// ── correctly-rounded cbrt (software double-double, 80-bit) ──────────────────
+// Reduce a=|x|=m·2^(3k+j) (j∈{0,1,2}, m·2^j ∈ [1,8)); cbrt(a)=2^k·cbrt(m·2^j),
+// the bracket ∈ [1,2) so one dd Halley step reaches ~127 bits with no y⁴
+// overflow, then RN64·2^k (exact) = RN(cbrt). Perfect cubes stay exact.
 inline long double cbrt(long double x){
     if (x == 0.0L || isinf(x) || isnan(x)) return x;     // ±0, ±Inf, NaN
     long double s = copysign(1.0L, x), a = fabs(x);
-    long double y = exp2(log2(a) / 3.0L);                // seed a^(1/3)
-    y = y - (y * y * y - a) / (3.0L * y * y);            // Newton refine to full 80-bit
-    y = y - (y * y * y - a) / (3.0L * y * y);
-    return s * y;
+    int e = ilogb(a), k = e / 3, j = e - 3 * k;
+    if (j < 0){ j += 3; --k; }                           // force j∈{0,1,2}
+    (void)j;
+    long double mm = scalbn(a, -3 * k);                  // mm ∈ [1,8), cbrt(mm)∈[1,2)
+    long double y = exp2(log2(mm) * (1.0L / 3.0L));      // ~64-bit seed (CR exp2/log2)
+    LdDd Y{y, 0.0L};
+    LdDd y3 = dd_mul_ld(dd_mul_ld(Y, Y), Y);             // y³
+    LdDd M{mm, 0.0L};
+    LdDd num = dd_mul_ld(Y, dd_add_ld(y3, dd_add_ld(M, M)));   // y·(y³+2·mm)
+    LdDd den = dd_add_ld(dd_add_ld(y3, y3), M);               // 2y³+mm
+    LdDd r = dd_div_ld(num, den);                        // Halley → ~127 bits
+    return s * scalbn(r.hi + r.lo, k);                   // ·2^k exact, with sign
 }
 inline bool ld_is_integer(long double x){ return isfinite(x) && trunc(x) == x; }
 inline bool ld_is_odd_integer(long double x){
