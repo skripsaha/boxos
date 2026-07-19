@@ -1107,6 +1107,15 @@ inline LdDd dd_div_ld(LdDd a, LdDd b){               // renormalized dd / dd (3-
     LdDd out; two_sum_l(s, e + q3, out.hi, out.lo); return out;
 }
 // e^t for |t.hi| ≤ ln2/2 ≈ 0.347 via dd Taylor Σ tᵏ/k! — reaches ~2^-128.
+// √x for a positive dd argument x, returned as dd (~127 bits): one Heron step
+// r ← r₀ + (x − r₀²)/(2r₀) from the fsqrt seed r₀ doubles its ~64-bit accuracy.
+inline LdDd sqrt_dd(LdDd x){
+    if (x.hi <= 0.0L) return LdDd{0.0L, 0.0L};
+    long double r0 = sqrt(x.hi);                          // correctly-rounded 64-bit seed
+    LdDd r0sq = dd_mul_ld(LdDd{r0, 0.0L}, LdDd{r0, 0.0L});
+    LdDd corr = dd_div_ld(dd_add_ld(x, LdDd{-r0sq.hi, -r0sq.lo}), LdDd{r0 + r0, 0.0L});
+    return dd_add_ld(LdDd{r0, 0.0L}, corr);
+}
 inline LdDd exp_series_dd(LdDd t){
     LdDd sum{1.0L, 0.0L}, term{1.0L, 0.0L};
     for (int k = 1; k <= 30; ++k){
@@ -1205,6 +1214,24 @@ inline LdDd log_dd_core_l(long double x){
     LdDd lm = dd_mul_ld(twof, P);                        // ln(m) = 2f·P
     LdDd kl = dd_mul_ld(LdDd{(long double)k, 0.0L}, LdDd{KLN2DD_HI_L, KLN2DD_LO_L}); // k·ln2
     return dd_add_ld(kl, lm);                            // ln(x) = k·ln2 + ln(m)
+}
+// ln(x) as dd for a positive dd argument x whose leading word x.hi is a normal
+// (the inverse-hyperbolic callers always feed x.hi ≥ 1). Generalises
+// log_dd_core_l to carry x.lo through the m = x·2⁻ᵏ reduction.
+inline LdDd log_dd_core_dd(LdDd x){
+    int k = (int)ld_exp(x.hi) - 16383;
+    LdDd m{scalbn(x.hi, -k), scalbn(x.lo, -k)};          // m = x·2⁻ᵏ ∈ [1,2)+tiny (exact)
+    if (m.hi > 1.414213562373095048801689L){ m.hi *= 0.5L; m.lo *= 0.5L; k++; }  // fold [√½,√2)
+    LdDd f = dd_div_ld(dd_add_ld(m, LdDd{-1.0L, 0.0L}), dd_add_ld(m, LdDd{1.0L, 0.0L}));
+    LdDd s = dd_mul_ld(f, f);
+    LdDd P = dd_div_ld(LdDd{1.0L, 0.0L}, LdDd{55.0L, 0.0L});          // c₂₇ = 1/55
+    for (int j = 26; j >= 0; --j){
+        P = dd_mul_ld(P, s);
+        P = dd_add_ld(P, dd_div_ld(LdDd{1.0L, 0.0L}, LdDd{(long double)(2*j+1), 0.0L}));
+    }
+    LdDd lm = dd_mul_ld(LdDd{f.hi + f.hi, f.lo + f.lo}, P);           // ln(m) = 2f·P
+    LdDd kl = dd_mul_ld(LdDd{(long double)k, 0.0L}, LdDd{KLN2DD_HI_L, KLN2DD_LO_L});
+    return dd_add_ld(kl, lm);                            // k·ln2 + ln(m)
 }
 inline long double log(long double x){
     if (isnan(x))  return x;
@@ -1833,22 +1860,49 @@ inline long double tanh(long double x){
     LdDd r = dd_div_ld(w, dd_add_ld(w, LdDd{2.0L, 0.0L}));// tanh = w/(w+2)
     return copysign(r.hi + r.lo, x);
 }
+// ── correctly-rounded inverse hyperbolic (software double-double, 80-bit) ────
+// asinh(x)=ln(x+√(x²+1)), acosh(x)=ln(x+√(x²−1)), atanh(x)=½ln((1+x)/(1−x)), each
+// evaluated in dd on the CR log core (log_dd_core_dd) then rounded once. For
+// |x| ≤ 2⁸¹⁹⁰ the argument keeps a genuine √(x²±1); past that x² would overflow,
+// so asinh/acosh fall back to the CR asymptote ln(2|x|)=ln2+ln|x| (the dropped
+// 1/(4x²) is far below ½ ULP). NO x87 transcendentals ⇒ genuine 80-bit.
 inline long double asinh(long double x){
-    if (!isfinite(x)) return x;                           // ±Inf→±Inf, NaN→NaN
-    long double a = fabs(x), r;
-    if (a >= 0x1p32L) r = log(a) + kLn2L;                // ≈ ln(2|x|), overflow-safe
-    else r = log1p(a + a * a / (1.0L + sqrt(1.0L + a * a)));
-    return copysign(r, x);                               // odd: asinh(±0)=±0
+    if (!isfinite(x)) return x;                          // ±Inf→±Inf, NaN→NaN
+    long double a = fabs(x);
+    if (a < 0x1p-32L) return x;                          // asinh(x)=x (odd; keeps ±0)
+    LdDd r;
+    if (a > 0x1p8190L)                                   // huge: ln(2a)=ln2+ln(a)
+        r = dd_add_ld(LdDd{KLN2DD_HI_L, KLN2DD_LO_L}, log_dd_core_l(a));
+    else {
+        LdDd a2 = dd_mul_ld(LdDd{a, 0.0L}, LdDd{a, 0.0L});
+        r = log_dd_core_dd(dd_add_ld(LdDd{a, 0.0L}, sqrt_dd(dd_add_ld(a2, LdDd{1.0L, 0.0L}))));
+    }
+    return copysign(r.hi + r.lo, x);
 }
 inline long double acosh(long double x){
     if (isnan(x)) return x;
-    if (x < 1.0L) return kQNaNL;                          // domain (covers x<-1 too)
-    return log(x + sqrt((x - 1.0L) * (x + 1.0L)));        // acosh(1)=0, +Inf→+Inf
+    if (x < 1.0L)  return kQNaNL;                        // domain (covers x<−1)
+    if (x == 1.0L) return 0.0L;                          // acosh(1)=+0
+    if (isinf(x))  return kInfL;                         // acosh(+Inf)=+Inf
+    LdDd r;
+    if (x > 0x1p8190L)                                   // huge: ln(2x)=ln2+ln(x)
+        r = dd_add_ld(LdDd{KLN2DD_HI_L, KLN2DD_LO_L}, log_dd_core_l(x));
+    else {
+        LdDd x2 = dd_mul_ld(LdDd{x, 0.0L}, LdDd{x, 0.0L});
+        r = log_dd_core_dd(dd_add_ld(LdDd{x, 0.0L}, sqrt_dd(dd_add_ld(x2, LdDd{-1.0L, 0.0L}))));
+    }
+    return r.hi + r.lo;
 }
 inline long double atanh(long double x){
     if (isnan(x)) return x;
-    if (fabs(x) > 1.0L) return kQNaNL;                    // domain
-    return 0.5L * log1p(2.0L * x / (1.0L - x));           // ±1→±Inf, ±0→±0
+    long double a = fabs(x);
+    if (a > 1.0L)  return kQNaNL;                        // domain
+    if (a == 1.0L) return copysign(kInfL, x);            // atanh(±1)=±Inf
+    if (a < 0x1p-32L) return x;                          // atanh(x)=x (odd; keeps ±0)
+    LdDd num; two_sum_l(1.0L,  a, num.hi, num.lo);       // 1+a (exact dd)
+    LdDd den; two_sum_l(1.0L, -a, den.hi, den.lo);       // 1−a (exact dd)
+    LdDd r = log_dd_core_dd(dd_div_ld(num, den));        // ln((1+a)/(1−a))
+    return copysign(0.5L * (r.hi + r.lo), x);            // ½·ln (0.5 exact ⇒ CR preserved)
 }
 inline long double hypot(long double x, long double y){
     if (isinf(x) || isinf(y)) return kInfL;              // +Inf even if the other is NaN
