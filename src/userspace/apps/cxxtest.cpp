@@ -11991,6 +11991,38 @@ void Phase72(){
         printf("[CXX] PASS phase72: sin correctly-rounded 80-bit dd "
                "(MPFR-verified: %u baked, %llu streamed, 0 non-CR)\n", kSinVecN, kSinN);
 }
+// ── Phase73/74 (Ф27f) — cos/tan correctly-rounded 80-bit (reuse sin's reducer) ─
+#include "cr_cos_vectors.h"
+#include "cr_cos_checksums.h"
+void Phase73(){
+    unsigned f = 0;
+    f += CrSweep("phase73 cos", kCosVec, kCosVecN, [](long double x){ return std::cos(x); });
+    f += CrStream("phase73 cos", kCosSeed, kCosElo, kCosEhi, kCosN, kCosXSum, kCosRSum,
+                  [](long double x){ return std::cos(x); });
+    Check(std::cos(0.0L) == 1.0L && std::cos(-0.0L) == 1.0L, "phase73 cos(±0)==1");
+    Check(std::isnan(std::cos(__builtin_infl())),  "phase73 cos(+Inf)==NaN");
+    Check(std::isnan(std::cos(__builtin_nanl(""))),"phase73 cos(NaN)==NaN");
+    Check(f == 0, "phase73 cos correctly-rounded 80-bit (0 non-CR vs MPFR)");
+    if (f == 0)
+        printf("[CXX] PASS phase73: cos correctly-rounded 80-bit dd "
+               "(MPFR-verified: %u baked, %llu streamed, 0 non-CR)\n", kCosVecN, kCosN);
+}
+#include "cr_tan_vectors.h"
+#include "cr_tan_checksums.h"
+void Phase74(){
+    unsigned f = 0;
+    f += CrSweep("phase74 tan", kTanVec, kTanVecN, [](long double x){ return std::tan(x); });
+    f += CrStream("phase74 tan", kTanSeed, kTanElo, kTanEhi, kTanN, kTanXSum, kTanRSum,
+                  [](long double x){ return std::tan(x); });
+    Check(std::tan(0.0L) == 0.0L && !std::signbit(std::tan(0.0L)), "phase74 tan(+0)==+0");
+    Check(std::tan(-0.0L) == 0.0L && std::signbit(std::tan(-0.0L)), "phase74 tan(-0)==-0");
+    Check(std::isnan(std::tan(__builtin_infl())),  "phase74 tan(+Inf)==NaN");
+    Check(std::isnan(std::tan(__builtin_nanl(""))),"phase74 tan(NaN)==NaN");
+    Check(f == 0, "phase74 tan correctly-rounded 80-bit (0 non-CR vs MPFR)");
+    if (f == 0)
+        printf("[CXX] PASS phase74: tan correctly-rounded 80-bit dd "
+               "(MPFR-verified: %u baked, %llu streamed, 0 non-CR)\n", kTanVecN, kTanN);
+}
 
 } // namespace
 
@@ -12086,6 +12118,8 @@ int main()
     Phase70();
     Phase71();
     Phase72();
+    Phase73();
+    Phase74();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
