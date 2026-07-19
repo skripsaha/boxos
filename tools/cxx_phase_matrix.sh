@@ -59,7 +59,11 @@ for cfg in $CONFIGS; do
     done
 
     hit=0
-    for i in $(seq 1 240); do
+    # 450s post-shell budget: the correctly-rounded cmath suite (Phase66+) runs
+    # tens of thousands of software-dd evals per function; on 16c-TCG the full
+    # run legitimately takes minutes and grows with each CR phase. Still breaks
+    # out immediately on PANIC/EXCEPTION/FAILURES, so genuine faults fail fast.
+    for i in $(seq 1 900); do
         [ "$(grep -cE "$MARKER" build/serial.log 2>/dev/null)" -ge 1 ] && { hit=1; break; }
         grep -qE 'PANIC|\[EXCEPTION\]|\[CXX\] TOTAL FAILURES' build/serial.log 2>/dev/null && break
         sleep 0.5
