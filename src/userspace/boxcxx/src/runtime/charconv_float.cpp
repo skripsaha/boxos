@@ -16,6 +16,15 @@
 #include <charconv>
 #include <cstdint>
 
+// from_chars(long double)'s exact-midpoint path (see kLdHeapWords) allocates a
+// bounded big-integer scratch on the boxlib heap. malloc/free are strand-safe
+// (the boxlib heap serialises every allocation) and malloc returns null (never
+// throws) on exhaustion, so from_chars degrades to the stack path, never throws.
+extern "C" {
+void *_malloc_impl(__SIZE_TYPE__ size);
+void  free(void *ptr);
+}
+
 namespace {
 
 using u32  = uint32_t;
@@ -1276,6 +1285,151 @@ void DigitsToBitsLd(bool neg, const char *dig, int ndig, long E, bool sticky,
     else { for (long i = 0; i < -E; ++i) BigMulSmall(den, 10); }
     RoundToIeeeLd(num, den, mant, expField, oor);
 }
+// ── heap big-integer (runtime capacity) for from_chars(long double) ──────────
+// Used ONLY when a decimal input carries MORE than 1290 significant digits, so an
+// EXACT subnormal binary midpoint (up to ~11515 digits) rounds half-even instead
+// of being folded into the sticky bit and rounded up. float/double and the
+// ≤1290-digit long-double fast path never allocate — they stay on the stack.
+// Bounded: at most kLdSigDigits kept digits ⇒ ≤ ~1720 words, so kLdHeapWords is a
+// hard ceiling the ops saturate at (proven, never reached); every allocation is
+// freed on every exit path; malloc failure degrades to the stack path.
+constexpr int kLdHeapWords = 1920;
+struct HBig { u32 *w; int n; int cap; };
+void HBigSetU64(HBig &a, u64 v) {
+    a.w[0] = (u32)v; a.w[1] = (u32)(v >> 32);
+    a.n = a.w[1] ? 2 : (a.w[0] ? 1 : 0);
+}
+void HBigAssign(HBig &d, const HBig &s) { for (int i = 0; i < s.n; ++i) d.w[i] = s.w[i]; d.n = s.n; }
+void HBigMulSmall(HBig &a, u32 m) {
+    u64 carry = 0;
+    for (int i = 0; i < a.n; ++i) { u64 p = (u64)a.w[i] * m + carry; a.w[i] = (u32)p; carry = p >> 32; }
+    while (carry && a.n < a.cap) { a.w[a.n++] = (u32)carry; carry >>= 32; }
+}
+int HBigBitLen(const HBig &a) {
+    if (a.n == 0) return 0;
+    int bits = (a.n - 1) * 32; u32 hi = a.w[a.n - 1];
+    while (hi) { ++bits; hi >>= 1; }
+    return bits;
+}
+void HBigShl(const HBig &a, int s, HBig &out) {
+    int wsh = s / 32, bsh = s % 32;
+    for (int i = 0; i < out.cap; ++i) out.w[i] = 0;
+    for (int i = 0; i < a.n; ++i) {
+        u64 v = (u64)a.w[i] << bsh; int lo = i + wsh, hi = lo + 1;
+        if (lo >= 0 && lo < out.cap) out.w[lo] |= (u32)v;          // saturate at cap:
+        if (hi >= 0 && hi < out.cap) out.w[hi] |= (u32)(v >> 32);  // can never write OOB
+    }
+    out.n = a.n + wsh + 1; if (out.n > out.cap) out.n = out.cap;
+    while (out.n > 0 && out.w[out.n - 1] == 0) --out.n;
+}
+void HBigShl1(HBig &a) {  // a <<= 1, in place
+    u32 carry = 0;
+    for (int i = 0; i < a.n; ++i) { u32 nc = a.w[i] >> 31; a.w[i] = (a.w[i] << 1) | carry; carry = nc; }
+    if (carry && a.n < a.cap) a.w[a.n++] = carry;
+}
+int HBigCmp(const HBig &a, const HBig &b) {
+    if (a.n != b.n) return a.n > b.n ? 1 : -1;
+    for (int i = a.n - 1; i >= 0; --i) if (a.w[i] != b.w[i]) return a.w[i] > b.w[i] ? 1 : -1;
+    return 0;
+}
+void HBigSub(HBig &a, const HBig &b) {  // a -= b, requires a >= b
+    u64 borrow = 0;
+    for (int i = 0; i < a.n; ++i) { u64 d = i < b.n ? b.w[i] : 0, c = (u64)a.w[i] - d - borrow; a.w[i] = (u32)c; borrow = (c >> 63) & 1; }
+    while (a.n > 0 && a.w[a.n - 1] == 0) --a.n;
+}
+void HBigDivMod128(const HBig &num, const HBig &den, u128 &q, HBig &rem) {  // low128 q + rem
+    rem.n = 0; q = 0;
+    for (int bit = HBigBitLen(num) - 1; bit >= 0; --bit) {
+        HBigShl1(rem);   // no-op when rem.n==0 and does NOT touch rem.w[0] (unlike the
+        // zero-filling stack BigShl), so on the empty→nonempty step below rem.w[0]
+        // must be explicitly zeroed — otherwise the |=1 ORs into a stale heap word.
+        if ((num.w[bit / 32] >> (bit % 32)) & 1) { if (rem.n == 0) { rem.w[0] = 0; rem.n = 1; } rem.w[0] |= 1; }
+        if (HBigCmp(rem, den) >= 0) { HBigSub(rem, den); if (bit < 128) q |= ((u128)1 << bit); }
+    }
+}
+u128 HBigRoundedQ128(const HBig &num, const HBig &den, int shift, HBig &sn, HBig &sd, HBig &rem, HBig &rem2) {
+    if (shift >= 0) { HBigShl(num, shift, sn); HBigAssign(sd, den); }
+    else { HBigAssign(sn, num); HBigShl(den, -shift, sd); }
+    u128 q; HBigDivMod128(sn, sd, q, rem);
+    HBigAssign(rem2, rem); HBigShl1(rem2); int c = HBigCmp(rem2, sd);
+    if (c > 0 || (c == 0 && (u64)(q & 1))) ++q;
+    return q;
+}
+// Mirror of RoundToIeeeLd on heap big-ints (P=64, emin=-16382, emax=16383).
+void HBigRoundToIeeeLd(const HBig &num, const HBig &den, HBig &sn, HBig &sd, HBig &rem, HBig &rem2,
+                       u64 &mant, unsigned &expField, bool &oor) {
+    oor = false;
+    i32 e2 = HBigBitLen(num) - HBigBitLen(den) - 1;
+    u128 q = HBigRoundedQ128(num, den, 63 - e2, sn, sd, rem, rem2);
+    int g = 0;
+    while (q >= ((u128)1 << 64)) { ++e2; q = HBigRoundedQ128(num, den, 63 - e2, sn, sd, rem, rem2); if (++g > 6) break; }
+    while (q < ((u128)1 << 63)) { --e2; q = HBigRoundedQ128(num, den, 63 - e2, sn, sd, rem, rem2); if (++g > 6) break; }
+    if (e2 > 16383) { oor = true; expField = 0x7FFF; mant = 0; return; }
+    if (e2 >= -16382) { expField = (unsigned)(e2 + 16383); mant = (u64)q; return; }
+    u128 qs = HBigRoundedQ128(num, den, 16445, sn, sd, rem, rem2);
+    if (qs == 0) { oor = true; expField = 0; mant = 0; return; }
+    if (qs >= ((u128)1 << 63)) { expField = 1; mant = (u64)qs; }
+    else { expField = 0; mant = (u64)qs; }
+}
+// Round INT(dig[0..ndig))·10^E to 80-bit exactly via heap big-ints (guard digit
+// folds the sticky tail, identical to DigitsToBitsLd). Returns false iff the
+// scratch allocation failed (caller falls back to the sticky stack path).
+bool DigitsToBitsLdHeap(const char *dig, int ndig, long E, bool sticky,
+                        u64 &mant, unsigned &expField, bool &oor) {
+    u32 *blk = (u32 *)_malloc_impl(sizeof(u32) * 6 * kLdHeapWords);
+    if (!blk) return false;
+    HBig num {blk + 0 * kLdHeapWords, 0, kLdHeapWords};
+    HBig den {blk + 1 * kLdHeapWords, 0, kLdHeapWords};
+    HBig sn  {blk + 2 * kLdHeapWords, 0, kLdHeapWords};
+    HBig sd  {blk + 3 * kLdHeapWords, 0, kLdHeapWords};
+    HBig rem {blk + 4 * kLdHeapWords, 0, kLdHeapWords};
+    HBig rem2{blk + 5 * kLdHeapWords, 0, kLdHeapWords};
+    int i0 = 0; while (i0 < ndig && dig[i0] == '0') ++i0;
+    int hi = ndig; while (hi > i0 && dig[hi - 1] == '0') { --hi; ++E; }
+    if (hi - i0 == 0 && !sticky) { expField = 0; mant = 0; oor = false; free(blk); return true; }
+    HBigSetU64(num, 0);
+    for (int i = i0; i < hi; ++i) {
+        HBigMulSmall(num, 10);
+        u64 carry = (u64)(dig[i] - '0');
+        for (int k = 0; k < num.n && carry; ++k) { u64 s = (u64)num.w[k] + carry; num.w[k] = (u32)s; carry = s >> 32; }
+        if (carry && num.n < num.cap) num.w[num.n++] = (u32)carry;
+    }
+    HBigMulSmall(num, 10); if (sticky) { if (num.n == 0) num.n = 1; num.w[0] |= 1; } E -= 1;  // guard digit
+    HBigSetU64(den, 1);
+    if (E >= 0) { for (long i = 0; i < E; ++i) HBigMulSmall(num, 10); }
+    else { for (long i = 0; i < -E; ++i) HBigMulSmall(den, 10); }
+    HBigRoundToIeeeLd(num, den, sn, sd, rem, rem2, mant, expField, oor);
+    free(blk);
+    return true;
+}
+// Exact heap path for a decimal mantissa [ms,me) that carries >1290 significant
+// digits. Re-scans keeping up to kLdSigDigits digits (every exact midpoint
+// terminates within that) and folds the rest into sticky. Returns false only if
+// a buffer could not be allocated (caller falls back to the sticky stack path).
+bool ParseLdDecimalHeap(const char *ms, const char *me, long expVal, bool neg, u128 &bits, int &ec)
+{
+    char *dig = (char *)_malloc_impl((__SIZE_TYPE__)kLdSigDigits);
+    if (!dig) return false;
+    int ndig = 0; long E = 0; bool seenDot = false, sticky = false, seenNZ = false;
+    for (const char *q = ms; q < me; ++q) {
+        if (*q == '.') { seenDot = true; continue; }
+        if (*q < '0' || *q > '9') break;
+        if (!seenNZ && *q == '0') { if (seenDot) --E; continue; }
+        seenNZ = true;
+        if (ndig < kLdSigDigits) { dig[ndig++] = *q; if (seenDot) --E; }
+        else { if (*q != '0') sticky = true; if (!seenDot && E < (1L << 40)) ++E; }
+    }
+    E += expVal;
+    if (!seenNZ) { bits = AssembleBitsLd(neg, 0, 0); ec = 0; free(dig); return true; }
+    { long g_lo = (long)(ndig - 1) + E, g_hi = (long)ndig + E;
+      if (g_lo >= 4933 || g_hi <= -4951) { bits = AssembleBitsLd(neg, 0, 0); ec = 34; free(dig); return true; } }
+    u64 mant; unsigned ef; bool oor = false;
+    bool ok = DigitsToBitsLdHeap(dig, ndig, E, sticky, mant, ef, oor);
+    free(dig);
+    if (!ok) return false;
+    bits = AssembleBitsLd(neg, ef, mant); ec = oor ? 34 : 0;
+    return true;
+}
 // Parse a long double; returns consumed length, fills bits (u128), ec (0/22/34).
 int ParseFpLd(const char *first, const char *last, int mode, bool hex, u128 &bits, int &ec)
 {
@@ -1325,7 +1479,8 @@ int ParseFpLd(const char *first, const char *last, int mode, bool hex, u128 &bit
     // decimal. Leading zeros are skipped (not stored) so the 1290-digit window holds
     // significant digits — otherwise an LD subnormal like 0.<1290 zeros>… mis-rounds.
     char dig[1300]; int ndig = 0; long E = 0;
-    bool seenDot = false, any = false, sticky = false, seenNZ = false;
+    bool seenDot = false, any = false, sticky = false, seenNZ = false, over1290 = false;
+    const char *mantStart = p;   // replayed by the >1290-digit exact heap re-scan
     for (; p < last; ++p) {
         if (*p == '.') { if (seenDot) break; seenDot = true; continue; }
         if (*p < '0' || *p > '9') break;
@@ -1333,13 +1488,14 @@ int ParseFpLd(const char *first, const char *last, int mode, bool hex, u128 &bit
         if (!seenNZ && *p == '0') { if (seenDot) --E; continue; }
         seenNZ = true;
         if (ndig < 1290) { dig[ndig++] = *p; if (seenDot) --E; }
-        else { if (*p != '0') sticky = true; if (!seenDot && E < kExpAccumCap) ++E; }
+        else { if (*p != '0') sticky = true; if (!seenDot && E < kExpAccumCap) ++E; over1290 = true; }
     }
     if (!any) { ec = 22; return 0; }
     const char *afterMant = p;
+    long expVal = 0;   // signed exponent suffix, replayed by the heap re-scan
     if (mode != M_FIXED && p < last && CharIs(*p, 'e')) {
         const char *ep = p + 1; bool en = false; if (ep < last && (*ep == '+' || *ep == '-')) { en = *ep == '-'; ++ep; }
-        if (ep < last && *ep >= '0' && *ep <= '9') { long ev = 0; while (ep < last && *ep >= '0' && *ep <= '9') { if (ev < kExpAccumCap) ev = ev * 10 + (*ep - '0'); ++ep; } E += en ? -ev : ev; p = ep; }
+        if (ep < last && *ep >= '0' && *ep <= '9') { long ev = 0; while (ep < last && *ep >= '0' && *ep <= '9') { if (ev < kExpAccumCap) ev = ev * 10 + (*ep - '0'); ++ep; } expVal = en ? -ev : ev; E += expVal; p = ep; }
         else if (mode == M_SCI) { ec = 22; return 0; }
         else p = afterMant;
     } else if (mode == M_SCI) { ec = 22; return 0; }
@@ -1348,6 +1504,14 @@ int ParseFpLd(const char *first, const char *last, int mode, bool hex, u128 &bit
     {
         long g_lo = (long)(ndig - 1) + E, g_hi = (long)ndig + E;
         if (g_lo >= 4933 || g_hi <= -4951) { bits = AssembleBitsLd(neg, 0, 0); ec = 34; return (int)(p - first); }
+    }
+    // >1290 significant digits: an exact subnormal midpoint needs every digit, so
+    // round it on the heap. Falls through to the stack path if allocation fails.
+    if (over1290) {
+        u128 hbits; int hec;
+        if (ParseLdDecimalHeap(mantStart, afterMant, expVal, neg, hbits, hec)) {
+            bits = hbits; ec = hec; return (int)(p - first);
+        }
     }
     u64 mant; unsigned ef; bool oor = false;
     DigitsToBitsLd(neg, dig, ndig, E, sticky, mant, ef, oor);
