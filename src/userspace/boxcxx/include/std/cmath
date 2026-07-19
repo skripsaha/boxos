@@ -1288,11 +1288,179 @@ inline long double x87_reduce_2pi(long double x){
             : "=t"(r) : "0"(x), "u"(kTwoPiL) : "ax", "cc");
     return r;
 }
+// ── correctly-rounded sin(long double) (software, genuine 80-bit) ───────────
+// Reduce x = N·(π/2) + r, r∈[−π/4,π/4]; q = N mod 4 selects ±sin(r)/±cos(r):
+// q=0→sin, 1→cos, 2→−sin, 3→−cos. The reduction is correctly-rounded-grade —
+// Cody-Waite (π/2 in 6 chunks, each carrying 32 mantissa bits so N·chunk is
+// exact for |N|<2^20) for π/4≤|x|<2^20; exact integer Payne-Hanek (multiply the
+// 64-bit mantissa by a 17024-bit 2/π table, extract the fractional window by the
+// exponent) for larger |x| up to LDBL_MAX. sin(r)/cos(r) are dd Taylor series
+// (~127 bits). NO x87 fsin/fcos/fprem — only faithful fadd/fmul/fsub/fdiv/
+// fscale/frndint plus exact integer ops — so QEMU-TCG/Bochs/real-HW all compute
+// at true 80-bit. Correctly rounds hi+lo to the 64-bit mantissa (0 ULP vs MPFR).
+inline constexpr long double KPIO2_HI_L  =  0x1.921FB54442D1846Ap+0L;   // π/2 dd hi
+inline constexpr long double KPIO2_LO_L  = -0x1.D9CCEBA3F91F1976p-66L;  // π/2 dd lo
+inline constexpr long double KPIO4_L     =  0x1.921FB54442D1846Ap-1L;   // π/4 (rounded)
+inline constexpr long double KTWO_O_PI_L =  0x1.45F306DC9C882A54p-1L;   // 2/π (rounded)
+// π/2 in 6 chunks, each with only its top 32 mantissa bits (low 32 zero) so
+// (long double)N · chunk is exact for |N|<2^20 (Cody-Waite medium range).
+inline constexpr long double KCW_PIO2[6] = {
+    0x1.921FB544p+0L,   0x1.0B4611A6p-34L,  0x1.3198A2Ep-69L,
+    0x1.B839A252p-104L, 0x1.27044532p-142L, 0x1.E63A0104p-174L,
+};
+// 2/π fractional bits, 64-bit words big-endian: 2/π = Σ_j W[j]·2^(−64(j+1)).
+// 266 words (17024 bits) cover the full long-double exponent range (LDBL_MAX ≈
+// 2^16384) for exact Payne-Hanek. Source: high-precision MPFR.
+inline constexpr unsigned long long KTWO_O_PI_BITS[266] = {
+  0xA2F9836E4E441529ULL, 0xFC2757D1F534DDC0ULL, 0xDB6295993C439041ULL, 0xFE5163ABDEBBC561ULL, 0xB7246E3A424DD2E0ULL, 0x06492EEA09D1921CULL,
+  0xFE1DEB1CB129A73EULL, 0xE88235F52EBB4484ULL, 0xE99C7026B45F7E41ULL, 0x3991D639835339F4ULL, 0x9C845F8BBDF9283BULL, 0x1FF897FFDE05980FULL,
+  0xEF2F118B5A0A6D1FULL, 0x6D367ECF27CB09B7ULL, 0x4F463F669E5FEA2DULL, 0x7527BAC7EBE5F17BULL, 0x3D0739F78A5292EAULL, 0x6BFB5FB11F8D5D08ULL,
+  0x56033046FC7B6BABULL, 0xF0CFBC209AF4361DULL, 0xA9E391615EE61B08ULL, 0x6599855F14A06840ULL, 0x8DFFD8804D732731ULL, 0x06061556CA73A8C9ULL,
+  0x60E27BC08C6B47C4ULL, 0x19C367CDDCE8092AULL, 0x8359C4768B961CA6ULL, 0xDDAF44D15719053EULL, 0xA5FF07053F7E33E8ULL, 0x32C2DE4F98327DBBULL,
+  0xC33D26EF6B1E5EF8ULL, 0x9F3A1F35CAF27F1DULL, 0x87F121907C7C246AULL, 0xFA6ED5772D30433BULL, 0x15C614B59D19C3C2ULL, 0xC4AD414D2C5D000CULL,
+  0x467D862D71E39AC6ULL, 0x9B0062337CD2B497ULL, 0xA7B4D55537F63ED7ULL, 0x1810A3FC764D2A9DULL, 0x64ABD770F87C6357ULL, 0xB07AE715175649C0ULL,
+  0xD9D63B3884A7CB23ULL, 0x24778AD623545AB9ULL, 0x1F001B0AF1DFCE19ULL, 0xFF319F6A1E666157ULL, 0x9947FBACD87F7EB7ULL, 0x652289E83260BFE6ULL,
+  0xCDC4EF09366CD43FULL, 0x5DD7DE16DE3B5892ULL, 0x9BDE2822D2E88628ULL, 0x4D58E232CAC616E3ULL, 0x08CB7DE050C017A7ULL, 0x1DF35BE01834132EULL,
+  0x6212830148835B8EULL, 0xF57FB0ADF2E91E43ULL, 0x4A48D36710D8DDAAULL, 0x425FAECE616AA428ULL, 0x0AB499D3F2A6067FULL, 0x775C83C2A3883C61ULL,
+  0x78738A5A8CAFBDD7ULL, 0x6F63A62DCBBFF4EFULL, 0x818D67C12645CA55ULL, 0x36D9CAD2A8288D61ULL, 0xC277C9121426049BULL, 0x4612C459C444C5C8ULL,
+  0x91B24DF31700AD43ULL, 0xD4E5492910D5FDFCULL, 0xBE00CC941EEECE70ULL, 0xF53E1380F1ECC3E7ULL, 0xB328F8C79405933EULL, 0x71C1B3092EF3450BULL,
+  0x9C12887B20AB9FB5ULL, 0x2EC292472F327B6DULL, 0x550C90A7721FE76BULL, 0x96CB314A1679E279ULL, 0x4189DFF49794E884ULL, 0xE6E29731996BED88ULL,
+  0x365F5F0EFDBBB49AULL, 0x486CA46742727132ULL, 0x5D8DB8159F09E5BCULL, 0x25318D3974F71C05ULL, 0x30010C0D68084B58ULL, 0xEE2C90AA4702E774ULL,
+  0x24D6BDA67DF77248ULL, 0x6EEF169FA6948EF6ULL, 0x91B45153D1F20ACFULL, 0x3398207E4BF56863ULL, 0xB25F3EDD035D407FULL, 0x8985295255C06437ULL,
+  0x10D86D324832754CULL, 0x5BD4714E6E5445C1ULL, 0x090B69F52AD56614ULL, 0x9D072750045DDB3BULL, 0xB4C576EA17F9877DULL, 0x6B49BA271D296996ULL,
+  0xACCCC65414AD6AE2ULL, 0x9089D98850722CBEULL, 0xA4049407777030F3ULL, 0x27FC00A871EA49C2ULL, 0x663DE06483DD9797ULL, 0x3FA3FD94438C860DULL,
+  0xDE41319D39928C70ULL, 0xDDE7B7173BDF082BULL, 0x3715A0805C93805AULL, 0x921110D8E80FAF80ULL, 0x6C4BFFDB0F903876ULL, 0x185915A562BBCB61ULL,
+  0xB989C7BD401004F2ULL, 0xD2277549F6B6EBBBULL, 0x22DBAA140A2F2689ULL, 0x768364333B091A94ULL, 0x0EAA3A51C2A31DAEULL, 0xEDAF12265C4DC26DULL,
+  0x9C7A2D9756C0833FULL, 0x03F6F0098C402B99ULL, 0x316D07B43915200CULL, 0x5BC3D8C492F54BADULL, 0xC6A5CA4ECD37A736ULL, 0xA9E69492AB6842DDULL,
+  0xDE6319EF8C76528BULL, 0x6837DBFCABA1AE31ULL, 0x15DFA1AE00DAFB0CULL, 0x664D64B705ED3065ULL, 0x29BF56573AFF47B9ULL, 0xF96AF3BE75DF9328ULL,
+  0x3080ABF68C6615CBULL, 0x040622FA1DE4D9A4ULL, 0xB33D8F1B5709CD36ULL, 0xE9424EA4BE13B523ULL, 0x331AAAF0A8654FA5ULL, 0xC1D20F3F0BCD785BULL,
+  0x76F923048B7B7217ULL, 0x8953A6C6E26E6F00ULL, 0xEBEF584A9BB7DAC4ULL, 0xBA66AACFCF761D02ULL, 0xD12DF1B1C1998C77ULL, 0xADC3DA4886A05DF7ULL,
+  0xF480C62FF0AC9AECULL, 0xDDBC5C3F6DDED01FULL, 0xC790B6DB2A3A25A3ULL, 0x9AAF009353AD0457ULL, 0xB6B42D297E804BA7ULL, 0x07DA0EAA76A1597BULL,
+  0x2A12162DB7DCFDE5ULL, 0xFAFEDB89FDBE896CULL, 0x76E4FCA90670803EULL, 0x156E85FF87FD073EULL, 0x2833676186182AEAULL, 0xBD4DAFE7B36E6D8FULL,
+  0x3967955BBF3148D7ULL, 0x8416DF30432DC735ULL, 0x6125CE70C9B8CB30ULL, 0xFD6CBFA200A4E46CULL, 0x05A0DD5A476F21D2ULL, 0x1262845CB9496170ULL,
+  0xE0566B0152993755ULL, 0x50B7D51EC4F1335FULL, 0x6E13E4305DA92E85ULL, 0xC3B21D3632A1A4B7ULL, 0x08D4B1EA21F716E4ULL, 0x698F77FF2780030CULL,
+  0x2D408DA0CD4F99A5ULL, 0x20D3A2B30A5D2F42ULL, 0xF9B4CBDA11D0BE7DULL, 0xC1DB9BBD17AB81A2ULL, 0xCA5C6A0817552E55ULL, 0x0027F0147F8607E1ULL,
+  0x640B148D4196DEBEULL, 0x872AFDDAB6256B34ULL, 0x897BFEF3059EBFB9ULL, 0x4F6A68A82A4A5AC4ULL, 0x4FBCF82D985AD795ULL, 0xC7F48D4D0DA63A20ULL,
+  0x5F57A4B13F149538ULL, 0x800120CC86DD71B6ULL, 0xDEC9F560BF11654DULL, 0x6B0701ACB08CD0C0ULL, 0xB24855510EFB1EC3ULL, 0x72953B06A33540C0ULL,
+  0x7BDC06CC45E0FA29ULL, 0x4EC8CAD641F3E8DEULL, 0x647CD8649B31BED9ULL, 0xC397A4D45877C5E3ULL, 0x6913DAF03C3ABA46ULL, 0x18465F7555F5BDD2ULL,
+  0xC6926E5D2EACED44ULL, 0x0E423E1C87C461E9ULL, 0xFD29F3D6E7CA7C22ULL, 0x35916FC5E0088DD7ULL, 0xFFE26A6EC6FDB0C1ULL, 0x0893745D7CB2AD6BULL,
+  0x9D6ECD7B723E6A11ULL, 0xC6A9CFF7DF7329BAULL, 0xC9B55100B70DB2E2ULL, 0x24BA74607DE58AD8ULL, 0x742C150D0C188194ULL, 0x667E162901767A9FULL,
+  0xBEFDFDEF4556367EULL, 0xD913D9ECB9BA8BFCULL, 0x97C427A831C36EF1ULL, 0x36C59456A8D8B5A8ULL, 0xB40ECCCF2D891234ULL, 0x576F89562CE3CE99ULL,
+  0xB920D6AA5E6B9C2AULL, 0x3ECC5F114A0BFDFBULL, 0xF4E16D3B8E2C86E2ULL, 0x84D4E9A9B4FCD1EEULL, 0xEFC9352E61392F44ULL, 0x2138C8D91B0AFC81ULL,
+  0x6A4AFBD81C2F84B4ULL, 0x538C994ECC2254DCULL, 0x552AD6C6C096190BULL, 0xB8701A649569605AULL, 0x26EE523F0F117F11ULL, 0xB5F4F5CBFC2DBC34ULL,
+  0xEEBC34CC5DE8605EULL, 0xDD9B8E67EF3392B8ULL, 0x17C99B5861BC57E1ULL, 0xC68351103ED84871ULL, 0xDDDD1C2DA118AF46ULL, 0x2C21D7F359987AD9ULL,
+  0xC0549EFA864FFC06ULL, 0x56AE79E536228922ULL, 0xAD38DC9367AAE855ULL, 0x3826829BE7CAA40DULL, 0x51B133990ED7A948ULL, 0x0569F0B265A7887FULL,
+  0x974C8836D1F9B392ULL, 0x214A827B21CF98DCULL, 0x9F405547DC3A74E1ULL, 0x42EB67DF9DFE5FD4ULL, 0x5EA4677B7AACBAA2ULL, 0xF65523882B55BA41ULL,
+  0x086E59862A218347ULL, 0x39E6E389D49EE540ULL, 0xFB49E956FFCA0F1CULL, 0x8A59C52BFA94C5C1ULL, 0xD3CFC50FAE5ADB86ULL, 0xC5476243853B8621ULL,
+  0x94792C8761107B4CULL, 0x2A1A2C8012BF4390ULL, 0x2688893C78E4C4A8ULL, 0x7BDBE5C23AC4EAF4ULL, 0x268A67F7BF920D2BULL, 0xA365B1933D0B7CBDULL,
+  0xDC51A463DD27DDE1ULL, 0x6919949A9529A828ULL, 0xCE68B4ED09209F44ULL, 0xCA984E638270237CULL, 0x7E32B90F8EF5A7E7ULL, 0x561408F1212A9DB5ULL,
+  0x4D7E6F5119A5ABF9ULL, 0xB5D6DF8261DD9602ULL, 0x36169F3AC4A1A283ULL, 0x6DED727A8D39A9B8ULL, 0x825C326B5B2746EDULL, 0x34007700D255F4FCULL,
+  0x4D59018071E0E13FULL, 0x89B295F364A8F1AEULL, 0xA74B38FC4CEAB2BBULL, 0x47270BABC3A734BAULL, 0x6052DD34F8563AEBULL, 0x7E8A31BB365895B7ULL,
+  0x47F7A994C3AAD392ULL, 0x251E7F3ED8974EBBULL,
+};
+// dd sin(r)/cos(r) on |r|≤π/4 via Taylor (odd/even); 24 terms → below 2^−128.
+inline LdDd sin_series_dd(LdDd r){
+    LdDd s = r, x = r, r2 = dd_mul_ld(r, r);
+    for (int k = 1; k < 24; ++k){
+        x = dd_mul_ld(x, r2);
+        x = dd_div_ld(x, LdDd{(long double)((2*k)*(2*k+1)), 0.0L});
+        x = LdDd{-x.hi, -x.lo};
+        s = dd_add_ld(s, x);
+    }
+    return s;
+}
+inline LdDd cos_series_dd(LdDd r){
+    LdDd s{1.0L, 0.0L}, x{1.0L, 0.0L}, r2 = dd_mul_ld(r, r);
+    for (int k = 1; k < 24; ++k){
+        x = dd_mul_ld(x, r2);
+        x = dd_div_ld(x, LdDd{(long double)((2*k-1)*(2*k)), 0.0L});
+        x = LdDd{-x.hi, -x.lo};
+        s = dd_add_ld(s, x);
+    }
+    return s;
+}
+// Add the 128-bit `prod` into the 256-bit accumulator S at bit offset `shift`
+// (bits below 0 or ≥256 discarded). Carries ripple upward (exact, integer).
+inline void sin_add_shifted_128(unsigned long long S[4], unsigned __int128 prod, int shift){
+    if (shift <= -128 || shift >= 256) return;
+    if (shift < 0){ prod >>= (unsigned)(-shift); shift = 0; }
+    unsigned long long p0 = (unsigned long long)prod, p1 = (unsigned long long)(prod >> 64);
+    int word = shift >> 6, off = shift & 63;
+    unsigned long long w[3]; int cnt;
+    if (off == 0){ w[0] = p0; w[1] = p1; cnt = 2; }
+    else { w[0] = p0 << off; w[1] = (p1 << off) | (p0 >> (64 - off)); w[2] = p1 >> (64 - off); cnt = 3; }
+    for (int t = 0; t < cnt; ++t){
+        unsigned long long v = w[t]; int wi = word + t;
+        while (v && wi < 4){
+            unsigned __int128 sum = (unsigned __int128)S[wi] + v;
+            S[wi] = (unsigned long long)sum;
+            v = (unsigned long long)(sum >> 64);
+            ++wi;
+        }
+    }
+}
+// Exact integer Payne-Hanek: ax finite, π/4≤|ax|. Returns quadrant q=N mod 4;
+// sets r (dd) = ax − N·(π/2), |r|≤π/4. Multiplies the 64-bit mantissa by the
+// windowed 2/π table into a 256-bit fixed-point accumulator (scaled 2^192):
+// top 2 integer bits give N, the 128-bit fraction gives r (× π/2 in dd).
+inline int sin_reduce_ph(long double ax, LdDd &r){
+    unsigned __int128 b = ldbits(ax);
+    int E = (int)((b >> 64) & 0x7FFFu);
+    unsigned long long m = (unsigned long long)b;         // 64-bit mantissa, bit63 set
+    int p = E - 16446;
+    int jc = p / 64;                                       // C truncating division
+    int jlo = jc - 3; if (jlo < 0) jlo = 0;
+    int jhi = jc + 8; if (jhi > 265) jhi = 265;
+    unsigned long long S[4] = {0, 0, 0, 0};               // 256-bit, S[0]=LSB
+    for (int j = jlo; j <= jhi; ++j){
+        unsigned __int128 prod = (unsigned __int128)m * KTWO_O_PI_BITS[j];
+        sin_add_shifted_128(S, prod, p + 192 - 64 * (j + 1));
+    }
+    unsigned intpart = (unsigned)(S[3] & 3ull);
+    unsigned __int128 hi128 = ((unsigned __int128)S[2] << 64) | S[1];   // top 128 frac bits
+    __int128 sf = (__int128)hi128;                        // signed: f = sf·2^-128 ∈ [−½,½)
+    int N = (int)intpart + (sf < 0 ? 1 : 0);
+    long long shhi = (long long)(sf >> 64);
+    unsigned long long shlo = (unsigned long long)sf;
+    long double fh = scalbn((long double)shhi, -64);
+    long double fl = scalbn((long double)shlo, -128);
+    LdDd f = dd_add_ld(LdDd{fh, 0.0L}, LdDd{fl, 0.0L});
+    r = dd_mul_ld(f, LdDd{KPIO2_HI_L, KPIO2_LO_L});       // r = f·(π/2)
+    return N & 3;
+}
+// Cody-Waite: π/4≤ax<2^20. N=rint(ax·2/π); r=ax−N·(π/2) accumulated in dd via
+// the 6-chunk π/2 (each N·chunk exact). Returns quadrant q=N mod 4.
+inline int sin_reduce_cw(long double ax, LdDd &r){
+    long double Nf = rint(ax * KTWO_O_PI_L);
+    int N = (int)Nf;
+    LdDd acc{ax, 0.0L};
+    for (int i = 0; i < 6; ++i){
+        long double prod = Nf * KCW_PIO2[i];              // exact (|N|<2^20, chunk 32-bit)
+        acc = dd_add_ld(acc, LdDd{-prod, 0.0L});
+    }
+    r = acc;
+    return N & 3;
+}
 inline long double sin(long double x){
     if (isnan(x)) return x;
     if (isinf(x)) return kQNaNL;
-    if (fabs(x) >= 0x1p63L) x = x87_reduce_2pi(x);        // large-arg accuracy bounded by x87 π (documented)
-    long double r; __asm__("fsin" : "=t"(r) : "0"(x)); return r;
+    if (x == 0.0L) return x;                              // sin(±0)=±0 (sign-preserving)
+    bool neg = signbit(x);
+    long double ax = fabs(x);
+    if (ax <= 0x1p-32L) return x;                         // |x| tiny: sin(x)=x (CR), preserves sign/subnormal
+    LdDd r; int q;
+    if (ax <= KPIO4_L){ r = LdDd{ax, 0.0L}; q = 0; }
+    else if (ax < 0x1p20L) q = sin_reduce_cw(ax, r);
+    else                   q = sin_reduce_ph(ax, r);
+    LdDd s;
+    switch (q){
+        case 0:  s = sin_series_dd(r); break;
+        case 1:  s = cos_series_dd(r); break;
+        case 2:  s = sin_series_dd(r); s = LdDd{-s.hi, -s.lo}; break;
+        default: s = cos_series_dd(r); s = LdDd{-s.hi, -s.lo}; break;
+    }
+    long double v = s.hi + s.lo;                          // correctly round to 64-bit
+    return neg ? -v : v;
 }
 inline long double cos(long double x){
     if (isnan(x)) return x;
