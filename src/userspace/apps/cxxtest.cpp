@@ -11968,6 +11968,30 @@ void Phase71(){
                "(MPFR-verified: %u baked, %llu streamed, 0 non-CR)\n", kExpm1VecN, kExpm1N);
 }
 
+// ── Phase72 (Ф27f) — sin(long double) correctly-rounded 80-bit ──────────────
+// Software argument reduction (Cody-Waite dd for |x|<2^20, exact integer
+// Payne-Hanek beyond, up to LDBL_MAX) + dd Taylor kernels — NO x87 fsin/fprem.
+// Baked hard-class (x, MPFR-CR-ref) vectors (near k·π/2 where sin/cos vanish,
+// near π/4, tiny, Cody-Waite + Payne-Hanek bands) + a deterministic signed
+// N=20000 pure-int stream FNV-checksummed against MPFR on the host.
+#include "cr_sin_vectors.h"
+#include "cr_sin_checksums.h"
+void Phase72(){
+    unsigned f = 0;
+    f += CrSweep("phase72 sin", kSinVec, kSinVecN, [](long double x){ return std::sin(x); });
+    f += CrStream("phase72 sin", kSinSeed, kSinElo, kSinEhi, kSinN, kSinXSum, kSinRSum,
+                  [](long double x){ return std::sin(x); });
+    Check(std::sin(0.0L) == 0.0L && !std::signbit(std::sin(0.0L)), "phase72 sin(+0)==+0");
+    Check(std::sin(-0.0L) == 0.0L && std::signbit(std::sin(-0.0L)), "phase72 sin(-0)==-0");
+    Check(std::isnan(std::sin(__builtin_infl())),  "phase72 sin(+Inf)==NaN");
+    Check(std::isnan(std::sin(-__builtin_infl())), "phase72 sin(-Inf)==NaN");
+    Check(std::isnan(std::sin(__builtin_nanl(""))),"phase72 sin(NaN)==NaN");
+    Check(f == 0, "phase72 sin correctly-rounded 80-bit (0 non-CR vs MPFR)");
+    if (f == 0)
+        printf("[CXX] PASS phase72: sin correctly-rounded 80-bit dd "
+               "(MPFR-verified: %u baked, %llu streamed, 0 non-CR)\n", kSinVecN, kSinN);
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -12061,6 +12085,7 @@ int main()
     Phase69();
     Phase70();
     Phase71();
+    Phase72();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
