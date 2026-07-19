@@ -1161,6 +1161,18 @@ inline long double exp(long double x){
     LdDd X = dd_mul_ld(LdDd{x, 0.0L}, LdDd{KLOG2E_DD_HI_L, KLOG2E_DD_LO_L});  // x·log2 e (dd)
     return exp2_dd_core(X.hi, X.lo);                     // e^x = 2^(x·log2 e)
 }
+// e^x = 2ⁿ·M with M (dd) = 2^f ∈ [√½,√2] and n = round(x·log2 e). Returns the
+// bounded mantissa M and n separately so callers (cosh/sinh/tanh) can factor out
+// the dominant exponent before combining e^x with e^{−x} — avoids intermediate
+// overflow and lets the ±e^{−x} term sink below the ~127-bit dd floor cleanly.
+inline LdDd exp_reduce_dd(long double x, int &n){
+    LdDd X = dd_mul_ld(LdDd{x, 0.0L}, LdDd{KLOG2E_DD_HI_L, KLOG2E_DD_LO_L});
+    long double nn = rint(X.hi);
+    long double fh, fl; two_sum_l(X.hi - nn, X.lo, fh, fl);   // f = (X−n) (dd, |f| ≤ 0.5)
+    LdDd t = dd_mul_ld(LdDd{fh, fl}, LdDd{KLN2DD_HI_L, KLN2DD_LO_L});   // t = f·ln2
+    n = (int)nn;
+    return exp_series_dd(t);                                  // 2^f (dd, ~127 bits)
+}
 
 // ── correctly-rounded natural-log core (software double-double, 80-bit) ─────
 // x = m·2^k, m∈[√½,√2); ln(x) = k·ln2 + ln(m), ln(m) = 2·atanh(f),
@@ -1772,30 +1784,54 @@ inline long double expm1(long double x){
     LdDd r = dd_add_ld(E, LdDd{-1.0L, 0.0L});            // e^x − 1 in dd, −1 captured exactly
     return r.hi + r.lo;                                  // correctly round to 64-bit
 }
+// ── correctly-rounded hyperbolic functions (software double-double, 80-bit) ──
+// Factor out the dominant exponent: e^a = 2^na·Ma, e^{−a} = 2^nb·Mb (Ma,Mb the
+// bounded dd mantissas from exp_reduce_dd, na ≥ nb for a ≥ 0), then
+//   cosh(a) = 2^(na−1)·(Ma + 2^(nb−na)·Mb),  sinh(a) = 2^(na−1)·(Ma − 2^(nb−na)·Mb).
+// The bracket B ∈ ~[0.7,1.5] is a dd; RN64(B)·2^(na−1) = RN(result) because
+// rounding commutes with scaling by a power of two for normal results. The two
+// leading mantissas differ by < a factor of 2, so Ma−Mb cancels exactly
+// (Sterbenz) — sinh needs no separate small-x path down to the 2⁻³² floor where
+// sinh(x)=x. NO x87 fsinh/f2xm1 — only faithful arithmetic ⇒ genuine 80-bit.
 inline long double cosh(long double x){
     if (isnan(x)) return x;
     long double a = fabs(x);
-    if (isinf(a)) return kInfL;                           // cosh(±inf)=+inf
-    long double e = exp(a);                               // exp saturates to +Inf on overflow
-    return 0.5L * (e + 1.0L / e);                         // cosh(±0)=1
+    if (a > 11400.0L) return kInfL;                       // cosh(±inf)/overflow → +inf
+    int na, nb;
+    LdDd Ma = exp_reduce_dd(a, na);                       // e^a  = 2^na·Ma
+    LdDd Mb = exp_reduce_dd(-a, nb);                      // e^-a = 2^nb·Mb  (na ≥ nb)
+    int d = nb - na;                                      // ≤ 0
+    LdDd sm = (d <= -130) ? LdDd{0.0L, 0.0L}
+                          : LdDd{scalbn(Mb.hi, d), scalbn(Mb.lo, d)};
+    LdDd B = dd_add_ld(Ma, sm);                           // Ma + 2^d·Mb ∈ ~[1,1.5]
+    return scalbn(B.hi + B.lo, na - 1);                   // CR; scalbn overflows → +Inf
 }
 inline long double sinh(long double x){
     if (!isfinite(x)) return x;                           // ±Inf→±Inf, NaN→NaN
-    if (fabs(x) < 1.0L){                                  // expm1 form: cancellation-free near 0
-        long double t = expm1(x);
-        return 0.5L * (t + t / (1.0L + t));               // sinh(±0)=±0
-    }
-    long double a = fabs(x), e = exp(a);
-    long double r = 0.5L * (e - 1.0L / e);
-    return signbit(x) ? -r : r;
+    long double a = fabs(x);
+    if (a < 0x1p-32L) return x;                           // sinh(x)=x (odd; keeps ±0 sign)
+    if (a > 11400.0L) return copysign(kInfL, x);          // overflow → ±inf
+    int na, nb;
+    LdDd Ma = exp_reduce_dd(a, na);                       // e^a  = 2^na·Ma
+    LdDd Mb = exp_reduce_dd(-a, nb);                      // e^-a = 2^nb·Mb  (na ≥ nb)
+    int d = nb - na;
+    LdDd sm = (d <= -130) ? LdDd{0.0L, 0.0L}
+                          : LdDd{scalbn(Mb.hi, d), scalbn(Mb.lo, d)};
+    LdDd B = dd_add_ld(Ma, LdDd{-sm.hi, -sm.lo});         // Ma − 2^d·Mb (leading cancel exact)
+    return copysign(scalbn(B.hi + B.lo, na - 1), x);
 }
 inline long double tanh(long double x){
     if (isnan(x)) return x;
-    if (isinf(x)) return copysign(1.0L, x);              // tanh(±inf)=±1
+    if (isinf(x)) return copysign(1.0L, x);               // tanh(±inf)=±1
     long double a = fabs(x);
-    if (a >= 24.0L) return copysign(1.0L, x);            // 1-tanh < 2^-65 → saturates to ±1
-    long double s = expm1(2.0L * a);
-    return copysign(s / (s + 2.0L), x);                  // tanh(±0)=±0
+    if (a < 0x1p-32L) return x;                           // tanh(x)=x (odd; keeps ±0 sign)
+    if (a >= 24.0L) return copysign(1.0L, x);             // 1−tanh < ½ulp(1) → ±1
+    int n;
+    LdDd M = exp_reduce_dd(2.0L * a, n);                  // e^{2a} = 2^n·M
+    LdDd E{scalbn(M.hi, n), scalbn(M.lo, n)};             // e^{2a} (dd; 2a<48 ⇒ no overflow)
+    LdDd w = dd_add_ld(E, LdDd{-1.0L, 0.0L});             // expm1(2a) = e^{2a}−1
+    LdDd r = dd_div_ld(w, dd_add_ld(w, LdDd{2.0L, 0.0L}));// tanh = w/(w+2)
+    return copysign(r.hi + r.lo, x);
 }
 inline long double asinh(long double x){
     if (!isfinite(x)) return x;                           // ±Inf→±Inf, NaN→NaN

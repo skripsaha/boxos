@@ -12040,6 +12040,47 @@ void Phase75(){
         printf("[CXX] PASS phase75: atan correctly-rounded 80-bit dd "
                "(MPFR-verified: %u baked, %llu streamed, 0 non-CR)\n", kAtanVecN, kAtanN);
 }
+// ── Phase76 (Ф27g) — sinh/cosh/tanh correctly-rounded 80-bit ────────────────
+// The hyperbolic family rebuilt on the dd exp reducer (exp_reduce_dd): factor
+// out the dominant exponent, combine e^a and e^{−a} in double-double, round once
+// — NO x87 fsinh/f2xm1. Baked hard-class (x, MPFR-CR-ref) vectors (tiny |x| at
+// the 2⁻³² identity floor, integers, the tanh saturation shoulder ~24, the
+// cosh/sinh overflow shoulder near LDBL_MAX) + deterministic N=20000 streams.
+#include "cr_cosh_vectors.h"
+#include "cr_cosh_checksums.h"
+#include "cr_sinh_vectors.h"
+#include "cr_sinh_checksums.h"
+#include "cr_tanh_vectors.h"
+#include "cr_tanh_checksums.h"
+void Phase76(){
+    unsigned f = 0;
+    f += CrSweep("phase76 cosh", kCoshVec, kCoshVecN, [](long double x){ return std::cosh(x); });
+    f += CrSweep("phase76 sinh", kSinhVec, kSinhVecN, [](long double x){ return std::sinh(x); });
+    f += CrSweep("phase76 tanh", kTanhVec, kTanhVecN, [](long double x){ return std::tanh(x); });
+    f += CrStream("phase76 cosh", kCoshSeed, kCoshElo, kCoshEhi, kCoshN, kCoshXSum, kCoshRSum,
+                  [](long double x){ return std::cosh(x); });
+    f += CrStream("phase76 sinh", kSinhSeed, kSinhElo, kSinhEhi, kSinhN, kSinhXSum, kSinhRSum,
+                  [](long double x){ return std::sinh(x); });
+    f += CrStream("phase76 tanh", kTanhSeed, kTanhElo, kTanhEhi, kTanhN, kTanhXSum, kTanhRSum,
+                  [](long double x){ return std::tanh(x); });
+    Check(std::cosh(0.0L) == 1.0L && std::cosh(-0.0L) == 1.0L, "phase76 cosh(±0)==1");
+    Check(std::sinh(0.0L) == 0.0L && !std::signbit(std::sinh(0.0L)), "phase76 sinh(+0)==+0");
+    Check(std::sinh(-0.0L) == 0.0L && std::signbit(std::sinh(-0.0L)), "phase76 sinh(-0)==-0");
+    Check(std::tanh(0.0L) == 0.0L && !std::signbit(std::tanh(0.0L)), "phase76 tanh(+0)==+0");
+    Check(std::tanh(-0.0L) == 0.0L && std::signbit(std::tanh(-0.0L)), "phase76 tanh(-0)==-0");
+    Check(std::cosh(__builtin_infl()) == __builtin_infl() && std::cosh(-__builtin_infl()) == __builtin_infl(),
+          "phase76 cosh(±Inf)==+Inf");
+    Check(std::sinh(__builtin_infl()) == __builtin_infl() && std::sinh(-__builtin_infl()) == -__builtin_infl(),
+          "phase76 sinh(±Inf)==±Inf");
+    Check(std::tanh(__builtin_infl()) == 1.0L && std::tanh(-__builtin_infl()) == -1.0L, "phase76 tanh(±Inf)==±1");
+    Check(std::isnan(std::cosh(__builtin_nanl(""))) && std::isnan(std::sinh(__builtin_nanl(""))) &&
+          std::isnan(std::tanh(__builtin_nanl(""))), "phase76 hyper(NaN)==NaN");
+    Check(f == 0, "phase76 sinh/cosh/tanh correctly-rounded 80-bit (0 non-CR vs MPFR)");
+    if (f == 0)
+        printf("[CXX] PASS phase76: sinh/cosh/tanh correctly-rounded 80-bit dd "
+               "(MPFR-verified: %u+%u+%u baked, 3×%llu streamed, 0 non-CR)\n",
+               kCoshVecN, kSinhVecN, kTanhVecN, kCoshN);
+}
 
 } // namespace
 
@@ -12138,6 +12179,7 @@ int main()
     Phase73();
     Phase74();
     Phase75();
+    Phase76();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
