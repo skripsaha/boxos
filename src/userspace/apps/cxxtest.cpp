@@ -11714,6 +11714,103 @@ void Phase65()
     printf("[CXX] PASS phase65: <cmath> long double special\n");
 }
 
+// ── Phase66 (de-risk) — exp2/exp correctly-rounded 80-bit: MPFR-verified ────
+// Iterates baked (x, MPFR-correctly-rounded ref) 80-bit vectors — systematic
+// grids (near 0, near overflow/underflow, near integers/halves, the subnormal
+// region) plus seeded-random breadth. For each x the software double-double
+// exp2/exp result bits must equal the MPFR reference bits exactly (0 ULP).
+#include "cr_exp_vectors.h"
+#include "cr_exp_checksums.h"
+
+inline long double CrLdFromBits(unsigned long long mant, unsigned short se){
+    unsigned __int128 b = ((unsigned __int128)se << 64) | mant;
+    return __builtin_bit_cast(long double, b);
+}
+inline void CrLdToBits(long double v, unsigned long long &mant, unsigned short &se){
+    unsigned __int128 b = __builtin_bit_cast(unsigned __int128, v);
+    mant = (unsigned long long)b;
+    se   = (unsigned short)(b >> 64);
+}
+inline unsigned long long CrUlp(unsigned long long am, unsigned short ase,
+                                unsigned long long bm, unsigned short bse){
+    auto key = [](unsigned long long m, unsigned short s) -> __int128 {
+        unsigned __int128 mag = ((unsigned __int128)(s & 0x7FFF) << 64) | m;
+        return ((s >> 15) & 1) ? -(__int128)mag : (__int128)mag;
+    };
+    __int128 d = key(am, ase) - key(bm, bse);
+    unsigned __int128 mag = d < 0 ? (unsigned __int128)(-d) : (unsigned __int128)d;
+    return mag > 0xFFFFFFFFFFFFFFFFULL ? 0xFFFFFFFFFFFFFFFFULL : (unsigned long long)mag;
+}
+unsigned CrSweep(const char *name, const CrVec *v, unsigned n, long double (*fn)(long double)){
+    unsigned long long maxulp = 0; unsigned nonCR = 0, wi = 0;
+    unsigned long long gm = 0; unsigned short gse = 0;
+    for (unsigned i = 0; i < n; ++i){
+        long double x = CrLdFromBits(v[i].xm, v[i].xse);
+        unsigned long long rm; unsigned short rse; CrLdToBits(fn(x), rm, rse);
+        unsigned long long d = CrUlp(rm, rse, v[i].rm, v[i].rse);
+        if (d){ nonCR++; if (d > maxulp){ maxulp = d; wi = i; gm = rm; gse = rse; } }
+    }
+    printf("[CXX] phase66 %s: swept=%u max-ULP=%llu non-CR=%u\n", name, n, maxulp, nonCR);
+    if (nonCR)
+        printf("[CXX]   worst x: xm=0x%016llX xse=0x%04X  got=0x%016llX/0x%04X want=0x%016llX/0x%04X\n",
+               v[wi].xm, v[wi].xse, gm, gse, v[wi].rm, v[wi].rse);
+    return nonCR;
+}
+// ≥100k breadth: a deterministic pure-integer x stream (xorshift64 + bit
+// assembly) reproduced bit-identically on the host, which baked FNV-1a
+// checksums of the MPFR-correctly-rounded results. The guest folds ITS own
+// exp2/exp result bits; a matching rSum proves every one of kCrN results is
+// bit-identical to MPFR (0 non-CR). xSum proves guest/host generate the same x.
+inline unsigned long long CrNext(unsigned long long &s){
+    s ^= s << 13; s ^= s >> 7; s ^= s << 17; return s;
+}
+inline unsigned long long CrFold(unsigned long long h, unsigned long long v){
+    return (h ^ v) * 1099511628211ULL;
+}
+void CrChecksum(unsigned long long seed, int elo, int ehi, unsigned long long n,
+                long double (*fn)(long double),
+                unsigned long long &hx, unsigned long long &hr){
+    unsigned long long s = seed;
+    unsigned span = (unsigned)(ehi - elo + 1);
+    hx = 1469598103934665603ULL; hr = 1469598103934665603ULL;
+    for (unsigned long long i = 0; i < n; ++i){
+        unsigned long long a = CrNext(s); s = a;
+        unsigned long long b = CrNext(s); s = b;
+        int E = elo + (int)(a % span);
+        unsigned short se = (unsigned short)((((a >> 40) & 1ULL) << 15) | (unsigned short)((16383 + E) & 0x7FFF));
+        unsigned long long mant = b | (1ULL << 63);
+        hx = CrFold(CrFold(hx, mant), se);
+        unsigned long long rm; unsigned short rse; CrLdToBits(fn(CrLdFromBits(mant, se)), rm, rse);
+        hr = CrFold(CrFold(hr, rm), rse);
+    }
+}
+unsigned CrStream(const char *name, unsigned long long seed, int elo, int ehi,
+                  unsigned long long xsum, unsigned long long rsum, long double (*fn)(long double)){
+    unsigned long long hx, hr;
+    CrChecksum(seed, elo, ehi, kCrN, fn, hx, hr);
+    bool xok = (hx == xsum), rok = (hr == rsum);
+    printf("[CXX] phase66 %s stream: N=%llu xSum=%s rSum=%s\n", name, kCrN,
+           xok ? "MATCH" : "MISMATCH", rok ? "MATCH" : "MISMATCH");
+    if (!xok || !rok)
+        printf("[CXX]   %s got xSum=0x%016llX rSum=0x%016llX want xSum=0x%016llX rSum=0x%016llX\n",
+               name, hx, hr, xsum, rsum);
+    return (xok && rok) ? 0u : 1u;
+}
+void Phase66(){
+    unsigned f = 0;
+    f += CrSweep("exp2", kExp2Vec, kExp2VecN, [](long double x){ return std::exp2(x); });
+    f += CrSweep("exp",  kExpVec,  kExpVecN,  [](long double x){ return std::exp(x); });
+    f += CrStream("exp2", 0x2545F4914F6CDD1DULL, -25, 14, kExp2XSum, kExp2RSum,
+                  [](long double x){ return std::exp2(x); });
+    f += CrStream("exp",  0x9E3779B97F4A7C15ULL, -25, 13, kExpXSum, kExpRSum,
+                  [](long double x){ return std::exp(x); });
+    Check(f == 0, "phase66 exp2/exp correctly-rounded 80-bit (0 non-CR vs MPFR)");
+    if (f == 0)
+        printf("[CXX] PASS phase66: exp2/exp correctly-rounded 80-bit dd "
+               "(MPFR-verified: %u+%u baked, %llu+%llu streamed, 0 non-CR)\n",
+               kExp2VecN, kExpVecN, kCrN, kCrN);
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -11801,6 +11898,7 @@ int main()
     Phase63();
     Phase64();
     Phase65();
+    Phase66();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

@@ -1058,21 +1058,108 @@ inline long double frexp(long double x, int *e){
     return sig * 0.5L;                                    // sig∈[1,2) → m∈[0.5,1)
 }
 
+// ── correctly-rounded 2^x / e^x (software double-double, genuine 80-bit) ────
+// The x87 f2xm1 transcendental is neither correctly rounded nor faithful on
+// QEMU-TCG (it degrades to host-double there). This path uses ONLY faithful
+// 80-bit fadd/fmul/fsub/fdiv/fscale/frndint, carries ~127 bits in a
+// double-double, and correctly rounds to the 64-bit mantissa (0 ULP vs the
+// true value, verified against MPFR). two_sum_l/split_l/two_prod_l are the
+// Dekker primitives, reused by the Ф27d2 erf/gamma paths further below.
+struct LdDd { long double hi, lo; };
+
+inline void two_sum_l(long double a, long double b, long double &s, long double &e){
+    s = a + b;
+    long double bb = s - a;
+    e = (a - (s - bb)) + (b - bb);
+}
+inline void split_l(long double a, long double &hi, long double &lo){
+    const long double SPLIT = 4294967297.0L;         // 2^32 + 1 splits a 64-bit mantissa
+    long double c = SPLIT * a;
+    hi = c - (c - a);
+    lo = a - hi;
+}
+inline void two_prod_l(long double a, long double b, long double &p, long double &e){
+    p = a * b;
+    long double ah, al, bh, bl;
+    split_l(a, ah, al);
+    split_l(b, bh, bl);
+    e = ((ah * bh - p) + ah * bl + al * bh) + al * bl;
+}
+inline LdDd dd_add_ld(LdDd a, LdDd b){               // renormalized dd + dd
+    long double s, e; two_sum_l(a.hi, b.hi, s, e);
+    e = e + (a.lo + b.lo);
+    LdDd r; two_sum_l(s, e, r.hi, r.lo); return r;
+}
+inline LdDd dd_mul_ld(LdDd a, LdDd b){               // renormalized dd · dd
+    long double p, e; two_prod_l(a.hi, b.hi, p, e);
+    e = e + (a.hi * b.lo + a.lo * b.hi);
+    LdDd r; two_sum_l(p, e, r.hi, r.lo); return r;
+}
+inline LdDd dd_div_ld(LdDd a, LdDd b){               // renormalized dd / dd (3-term)
+    long double q1 = a.hi / b.hi;
+    LdDd p1 = dd_mul_ld(b, LdDd{q1, 0.0L});
+    LdDd r  = dd_add_ld(a, LdDd{-p1.hi, -p1.lo});
+    long double q2 = r.hi / b.hi;
+    LdDd p2 = dd_mul_ld(b, LdDd{q2, 0.0L});
+    LdDd r2 = dd_add_ld(r, LdDd{-p2.hi, -p2.lo});
+    long double q3 = r2.hi / b.hi;
+    long double s, e; two_sum_l(q1, q2, s, e);
+    LdDd out; two_sum_l(s, e + q3, out.hi, out.lo); return out;
+}
+// e^t for |t.hi| ≤ ln2/2 ≈ 0.347 via dd Taylor Σ tᵏ/k! — reaches ~2^-128.
+inline LdDd exp_series_dd(LdDd t){
+    LdDd sum{1.0L, 0.0L}, term{1.0L, 0.0L};
+    for (int k = 1; k <= 30; ++k){
+        term = dd_mul_ld(term, t);
+        term = dd_div_ld(term, LdDd{(long double)k, 0.0L});
+        sum  = dd_add_ld(sum, term);
+    }
+    return sum;
+}
+// Round the dd 2^f, scaled by 2ⁿ, to a subnormal / smallest-normal result
+// (result exponent ≤ −16382, ULP = δ = 2^−16445) in ONE rounding — the RN64
+// significand then scalbn would double-round (only 1 dropped bit at the
+// −16383 exponent, below the 2-bit floor the odd-rounding theorem needs).
+inline long double round_dd_to_subnormal_l(long double eh, long double el, int n){
+    int m = n + 16445;
+    long double P = scalbn(eh, m), Q = scalbn(el, m);    // exact: P+Q = 2^f · 2^(n+16445)
+    long double s, e; two_sum_l(P, Q, s, e);             // P+Q = s + e (e exact)
+    long double si = rint(s);                            // nearest integer to s
+    long double r = s - si;                              // in [−0.5, 0.5], exact
+    long double frac = r + e;                            // fraction deciding the round
+    long double K = si;
+    if      (frac >  0.5L) K = si + 1.0L;
+    else if (frac < -0.5L) K = si - 1.0L;
+    else if (frac ==  0.5L){ long double h = si * 0.5L; if (h != rint(h)) K = si + 1.0L; }  // tie→even
+    else if (frac == -0.5L){ long double h = si * 0.5L; if (h != rint(h)) K = si - 1.0L; }
+    return scalbn(K, -16445);
+}
+// 2^(Xhi+Xlo) for a double-double exponent argument (Xlo=0 for the plain 2^x,
+// nonzero for e^x = 2^(x·log2 e)). Correctly rounded to 80-bit.
+inline long double exp2_dd_core(long double Xhi, long double Xlo){
+    if (Xhi >=  16384.0L) return kInfL;                  // 2^16384 overflows to +Inf
+    if (Xhi <= -16446.0L) return 0.0L;                   // below smallest subnormal → +0
+    long double n = rint(Xhi);
+    long double fh, fl; two_sum_l(Xhi - n, Xlo, fh, fl); // f = (Xhi−n)+Xlo, |f| ≤ 0.5 (dd)
+    LdDd t = dd_mul_ld(LdDd{fh, fl}, LdDd{KLN2DD_HI_L, KLN2DD_LO_L});   // t = f·ln2
+    LdDd e = exp_series_dd(t);                           // 2^f as dd (~127 bits)
+    int ni = (int)n;
+    if (ni <= -16382) return round_dd_to_subnormal_l(e.hi, e.lo, ni);  // subnormal path
+    return scalbn(e.hi + e.lo, ni);                      // normal: RN64(2^f) · 2ⁿ (exact scalbn)
+}
+
 inline long double exp2(long double x){
     if (isnan(x)) return x;
     if (isinf(x)) return signbit(x) ? 0.0L : kInfL;
-    if (x >=  16384.0L) return kInfL;                     // 2^16384 overflows to +Inf
-    if (x <= -16446.0L) return 0.0L;                      // below smallest subnormal
-    long double n = rint(x), f = x - n, p;               // f ∈ [-0.5, 0.5]
-    __asm__("f2xm1\n\tfld1\n\tfaddp" : "=t"(p) : "0"(f) : "st(1)");         // p = 2^f
-    long double r;
-    __asm__("fscale\n\tfstp %%st(1)" : "=t"(r) : "0"(p), "u"(n));           // r = 2^f · 2^n
-    return r;
+    return exp2_dd_core(x, 0.0L);
 }
 inline long double exp(long double x){
     if (isnan(x)) return x;
     if (isinf(x)) return signbit(x) ? 0.0L : kInfL;
-    return exp2(x * kLog2eL);                             // e^x = 2^(x·log2 e)
+    if (x >  12000.0L) return kInfL;                     // e^x overflows well below here
+    if (x < -12000.0L) return 0.0L;                      // e^x underflows to +0 below here
+    LdDd X = dd_mul_ld(LdDd{x, 0.0L}, LdDd{KLOG2E_DD_HI_L, KLOG2E_DD_LO_L});  // x·log2 e (dd)
+    return exp2_dd_core(X.hi, X.lo);                     // e^x = 2^(x·log2 e)
 }
 
 inline long double log2(long double x){                  // fyl2x: st1·log2(st0)
@@ -1418,25 +1505,8 @@ inline long double fmal(long double a, long double b, long double c){ return fma
 //  Bochs/real-HW, host-double on QEMU. Errno-free like every other path here.
 // ════════════════════════════════════════════════════════════════════════
 
-// ── Dekker double-double primitives at 64-bit-mantissa width (FMA-free) ────
-inline void two_sum_l(long double a, long double b, long double &s, long double &e){
-    s = a + b;
-    long double bb = s - a;
-    e = (a - (s - bb)) + (b - bb);
-}
-inline void split_l(long double a, long double &hi, long double &lo){
-    const long double SPLIT = 4294967297.0L;         // 2^32 + 1 splits a 64-bit mantissa
-    long double c = SPLIT * a;
-    hi = c - (c - a);
-    lo = a - hi;
-}
-inline void two_prod_l(long double a, long double b, long double &p, long double &e){
-    p = a * b;
-    long double ah, al, bh, bl;
-    split_l(a, ah, al);
-    split_l(b, bh, bl);
-    e = ((ah * bh - p) + ah * bl + al * bh) + al * bl;
-}
+// Dekker double-double primitives two_sum_l/split_l/two_prod_l are defined
+// with the correctly-rounded exp2/exp core above and reused here.
 
 // ── e^r − 1 = Σ_{m≥1} rⁿ/m!  (accurate for |r| ≤ ln2/2) ────────────────────
 inline long double expm1_series_l(long double r){
