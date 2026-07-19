@@ -12288,6 +12288,35 @@ void Phase81(){
         printf("[CXX] PASS phase81: pow correctly-rounded 80-bit dd "
                "(MPFR-verified: %u baked, %llu streamed, 0 non-CR)\n", kPowVecN, kPowN);
 }
+// ── Phase82 (Ф27m) — erf/erfc/tgamma/lgamma correctly-rounded 80-bit ────────
+#include "cr_erf_vectors.h"
+#include "cr_erf_checksums.h"
+#include "cr_erfc_vectors.h"
+#include "cr_erfc_checksums.h"
+#include "cr_tgamma_vectors.h"
+#include "cr_tgamma_checksums.h"
+#include "cr_lgamma_vectors.h"
+#include "cr_lgamma_checksums.h"
+void Phase82(){
+    unsigned f = 0;
+    f += CrSweep("phase82 erf", kErfVec, kErfVecN, [](long double x){ return std::erf(x); });
+    f += CrSweep("phase82 erfc", kErfcVec, kErfcVecN, [](long double x){ return std::erfc(x); });
+    f += CrSweep("phase82 tgamma", kTgammaVec, kTgammaVecN, [](long double x){ return std::tgamma(x); });
+    f += CrSweep("phase82 lgamma", kLgammaVec, kLgammaVecN, [](long double x){ return std::lgamma(x); });
+    f += CrStream("phase82 erf", kErfSeed, kErfElo, kErfEhi, kErfN, kErfXSum, kErfRSum,
+                  [](long double x){ return std::erf(x); });
+    f += CrStream("phase82 erfc", kErfcSeed, kErfcElo, kErfcEhi, kErfcN, kErfcXSum, kErfcRSum,
+                  [](long double x){ return std::erfc(x); });
+    f += CrStreamPos("phase82 tgamma", kTgammaSeed, kTgammaElo, kTgammaEhi, kTgammaN, kTgammaXSum, kTgammaRSum,
+                     [](long double x){ return std::tgamma(x); });
+    f += CrStreamPos("phase82 lgamma", kLgammaSeed, kLgammaElo, kLgammaEhi, kLgammaN, kLgammaXSum, kLgammaRSum,
+                     [](long double x){ return std::lgamma(x); });
+    Check(f == 0, "phase82 erf/erfc/tgamma/lgamma correctly-rounded 80-bit (0 non-CR vs MPFR)");
+    if (f == 0)
+        printf("[CXX] PASS phase82: erf/erfc/tgamma/lgamma correctly-rounded 80-bit dd "
+               "(MPFR-verified: %u+%u+%u+%u baked, 4×%llu streamed, 0 non-CR)\n",
+               kErfVecN, kErfcVecN, kTgammaVecN, kLgammaVecN, kErfN);
+}
 
 } // namespace
 
@@ -12392,6 +12421,7 @@ int main()
     Phase79();
     Phase80();
     Phase81();
+    Phase82();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
