@@ -12081,6 +12081,49 @@ void Phase76(){
                "(MPFR-verified: %u+%u+%u baked, 3×%llu streamed, 0 non-CR)\n",
                kCoshVecN, kSinhVecN, kTanhVecN, kCoshN);
 }
+// ── Phase77 (Ф27h) — asinh/acosh/atanh correctly-rounded 80-bit ─────────────
+// The inverse-hyperbolic family rebuilt on the dd log core (log_dd_core_dd) +
+// dd sqrt (sqrt_dd): ln of a genuine √(x²±1) dd argument, rounded once — NO x87
+// transcendentals. Baked hard-class vectors (tiny |x| identity floor, the x→1⁺
+// acosh shoulder, the |x|→1⁻ atanh pole, the 2⁸¹⁹⁰ overflow-safe branch) +
+// deterministic N=20000 streams (asinh signed, acosh x≥1, atanh |x|<1).
+#include "cr_asinh_vectors.h"
+#include "cr_asinh_checksums.h"
+#include "cr_acosh_vectors.h"
+#include "cr_acosh_checksums.h"
+#include "cr_atanh_vectors.h"
+#include "cr_atanh_checksums.h"
+void Phase77(){
+    unsigned f = 0;
+    f += CrSweep("phase77 asinh", kAsinhVec, kAsinhVecN, [](long double x){ return std::asinh(x); });
+    f += CrSweep("phase77 acosh", kAcoshVec, kAcoshVecN, [](long double x){ return std::acosh(x); });
+    f += CrSweep("phase77 atanh", kAtanhVec, kAtanhVecN, [](long double x){ return std::atanh(x); });
+    f += CrStream   ("phase77 asinh", kAsinhSeed, kAsinhElo, kAsinhEhi, kAsinhN, kAsinhXSum, kAsinhRSum,
+                     [](long double x){ return std::asinh(x); });
+    f += CrStreamPos("phase77 acosh", kAcoshSeed, kAcoshElo, kAcoshEhi, kAcoshN, kAcoshXSum, kAcoshRSum,
+                     [](long double x){ return std::acosh(x); });
+    f += CrStream   ("phase77 atanh", kAtanhSeed, kAtanhElo, kAtanhEhi, kAtanhN, kAtanhXSum, kAtanhRSum,
+                     [](long double x){ return std::atanh(x); });
+    Check(std::asinh(0.0L) == 0.0L && !std::signbit(std::asinh(0.0L)), "phase77 asinh(+0)==+0");
+    Check(std::asinh(-0.0L) == 0.0L && std::signbit(std::asinh(-0.0L)), "phase77 asinh(-0)==-0");
+    Check(std::acosh(1.0L) == 0.0L, "phase77 acosh(1)==0");
+    Check(std::isnan(std::acosh(0.5L)), "phase77 acosh(<1)==NaN");
+    Check(std::atanh(0.0L) == 0.0L && !std::signbit(std::atanh(0.0L)), "phase77 atanh(+0)==+0");
+    Check(std::atanh(-0.0L) == 0.0L && std::signbit(std::atanh(-0.0L)), "phase77 atanh(-0)==-0");
+    Check(std::atanh(1.0L) == __builtin_infl() && std::atanh(-1.0L) == -__builtin_infl(),
+          "phase77 atanh(±1)==±Inf");
+    Check(std::isnan(std::atanh(1.5L)), "phase77 atanh(|x|>1)==NaN");
+    Check(std::asinh(__builtin_infl()) == __builtin_infl() &&
+          std::asinh(-__builtin_infl()) == -__builtin_infl(), "phase77 asinh(±Inf)==±Inf");
+    Check(std::acosh(__builtin_infl()) == __builtin_infl(), "phase77 acosh(+Inf)==+Inf");
+    Check(std::isnan(std::asinh(__builtin_nanl(""))) && std::isnan(std::acosh(__builtin_nanl(""))) &&
+          std::isnan(std::atanh(__builtin_nanl(""))), "phase77 invhyper(NaN)==NaN");
+    Check(f == 0, "phase77 asinh/acosh/atanh correctly-rounded 80-bit (0 non-CR vs MPFR)");
+    if (f == 0)
+        printf("[CXX] PASS phase77: asinh/acosh/atanh correctly-rounded 80-bit dd "
+               "(MPFR-verified: %u+%u+%u baked, 3×%llu streamed, 0 non-CR)\n",
+               kAsinhVecN, kAcoshVecN, kAtanhVecN, kAsinhN);
+}
 
 } // namespace
 
@@ -12180,6 +12223,7 @@ int main()
     Phase74();
     Phase75();
     Phase76();
+    Phase77();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
