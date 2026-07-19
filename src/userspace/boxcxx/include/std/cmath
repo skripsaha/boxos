@@ -1382,8 +1382,44 @@ inline long double atan(long double x){
     long double v = res.hi + res.lo;
     return sgn ? -v : v;
 }
-inline long double atan2(long double y, long double x){  // atan(st1/st0) = atan(y/x)
-    long double r; __asm__("fpatan" : "=t"(r) : "0"(x), "u"(y)); return r;
+// atan(a) for a ≥ 0 as dd: a ≤ 1 via the breakpoint kernel; a > 1 via
+// π/2 − atan(1/a) so the series argument stays small (fast + accurate).
+inline LdDd atan_dd(LdDd a){
+    if (a.hi < 1.0L || (a.hi == 1.0L && a.lo <= 0.0L))
+        return atan_reduced_dd(a);
+    LdDd t = atan_reduced_dd(dd_div_ld(LdDd{1.0L, 0.0L}, a));     // atan(1/a), 1/a∈(0,1)
+    LdDd hp{ld_from_bits_l(kHalfPiHiM, kHalfPiHiS), ld_from_bits_l(kHalfPiLoM, kHalfPiLoS)};
+    return dd_add_ld(hp, LdDd{-t.hi, -t.lo});                     // π/2 − atan(1/a)
+}
+// ── correctly-rounded atan2(y,x) (software double-double, 80-bit) ────────────
+// Quadrant from the sign bits; magnitude atan(|y|/|x|) ∈ [0,π/2] in dd, x<0
+// reflects to π−·, sign of y applied last. Axis / ±0 / ±Inf per IEEE Annex F.
+// NO x87 fpatan — the LAST x87 transcendental removed from cmath ⇒ all of cmath
+// is now genuine software 80-bit.
+inline long double atan2(long double y, long double x){
+    if (isnan(x) || isnan(y)) return kQNaNL;
+    LdDd hp{ld_from_bits_l(kHalfPiHiM, kHalfPiHiS), ld_from_bits_l(kHalfPiLoM, kHalfPiLoS)};
+    LdDd piL{hp.hi + hp.hi, hp.lo + hp.lo};              // π (dd)
+    long double halfpi = hp.hi + hp.lo, pi = piL.hi + piL.lo;
+    bool sy = signbit(y), sx = signbit(x);
+    if (isinf(x) && isinf(y)){                           // ±π/4 (x>0) or ±3π/4 (x<0)
+        LdDd quarter{hp.hi * 0.5L, hp.lo * 0.5L};        // π/4 = π/2·½ (exact)
+        LdDd v = sx ? dd_add_ld(hp, quarter) : quarter;  // 3π/4 ; π/4
+        long double q = v.hi + v.lo; return sy ? -q : q;
+    }
+    if (isinf(y)) return sy ? -halfpi : halfpi;          // |y|=inf, x finite → ±π/2
+    if (isinf(x)){ long double r = sx ? pi : 0.0L; return sy ? -r : r; } // x=±inf → ±π/±0
+    if (y == 0.0L){ long double r = sx ? pi : 0.0L; return sy ? -r : r; } // y=±0 → ±0/±π
+    if (x == 0.0L) return sy ? -halfpi : halfpi;         // x=±0, y≠0 → ±π/2
+    long double v;
+    int ey = ilogb(fabs(y)), ex = ilogb(fabs(x));
+    if (ey - ex > 130) v = halfpi;                       // |y|≫|x| → π/2 (below ½ULP)
+    else {
+        LdDd t = atan_dd(dd_div_ld(LdDd{fabs(y), 0.0L}, LdDd{fabs(x), 0.0L}));  // atan(|y|/|x|)
+        LdDd res = sx ? dd_add_ld(piL, LdDd{-t.hi, -t.lo}) : t;                 // x<0: π−t
+        v = res.hi + res.lo;
+    }
+    return sy ? -v : v;
 }
 
 // |x|≥2^63 is out of fsin/fcos/fptan range: reduce mod 2π (fprem1 → [-π,π]).
