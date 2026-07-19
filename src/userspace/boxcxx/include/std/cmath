@@ -2015,6 +2015,24 @@ inline bool ld_is_integer(long double x){ return isfinite(x) && trunc(x) == x; }
 inline bool ld_is_odd_integer(long double x){
     return ld_is_integer(x) && fmod(fabs(x), 2.0L) == 1.0L;
 }
+// b^n for integer n via dd binary exponentiation (each product ~127 bits) —
+// far more accurate than 2^(n·log2 b) for exact integer powers (the transcendental
+// path loses ~1 ULP on x², x³, …). ok=false on over/underflow (a subnormal or
+// non-finite result), so the caller falls back to the dd exp2 path which rounds
+// those regimes correctly. b > 0 finite.
+inline long double pow_int_dd(long double b, long n, bool &ok){
+    unsigned long m = n < 0 ? (unsigned long)(-(long long)n) : (unsigned long)n;   // |n|
+    LdDd r{1.0L, 0.0L}, base{b, 0.0L};
+    while (m){
+        if (m & 1) r = dd_mul_ld(r, base);
+        m >>= 1;
+        if (m) base = dd_mul_ld(base, base);
+    }
+    if (n < 0) r = dd_div_ld(LdDd{1.0L, 0.0L}, r);        // b^n = 1/b^|n| (dd)
+    long double v = r.hi + r.lo;
+    ok = isfinite(v) && v != 0.0L && (int)ld_exp(v) > 1;  // finite normal ⇒ single-rounded CR
+    return v;
+}
 inline long double pow(long double x, long double y){
     if (y == 0.0L) return 1.0L;                          // 1: pow(x,±0)=1 incl x=NaN
     if (x == 1.0L) return 1.0L;                          // 2: pow(1,y)=1 incl y=NaN/Inf
@@ -2038,10 +2056,25 @@ inline long double pow(long double x, long double y){
     }
     if (signbit(x)){                                     // 7: x < 0, finite, nonzero
         if (!ld_is_integer(y)) return kQNaNL;
-        long double r = exp2(y * log2(-x));
+        long double r; bool ok = false;
+        if (fabs(y) < 0x1p63L) r = pow_int_dd(-x, (long)y, ok);   // |x|^n via dd
+        if (!ok){                                         // over/underflow → dd exp2
+            LdDd L = dd_mul_ld(log_dd_core_l(-x), LdDd{KLOG2E_DD_HI_L, KLOG2E_DD_LO_L});
+            LdDd P = dd_mul_ld(LdDd{y, 0.0L}, L);
+            r = exp2_dd_core(P.hi, P.lo);
+        }
         return ld_is_odd_integer(y) ? -r : r;
     }
-    return exp2(y * log2(x));                            // 8: x > 0; over/underflow → +Inf/+0
+    // 8: x > 0 finite. Integer y → dd binary exponentiation (exact powers stay
+    // exact); otherwise 2^(y·log2 x) fully in dd, correctly rounded. Both handle
+    // over/underflow of the exponent → +Inf/+0.
+    if (ld_is_integer(y) && fabs(y) < 0x1p63L){
+        long double r; bool ok; r = pow_int_dd(x, (long)y, ok);
+        if (ok) return r;
+    }
+    LdDd L = dd_mul_ld(log_dd_core_l(x), LdDd{KLOG2E_DD_HI_L, KLOG2E_DD_LO_L});       // log2(x) dd
+    LdDd P = dd_mul_ld(LdDd{y, 0.0L}, L);                // y·log2(x) dd
+    return exp2_dd_core(P.hi, P.lo);
 }
 // fma : exact fused a·b+c via Veltkamp/Dekker at 64-bit-mantissa width (no -mfma).
 inline long double fma(long double a, long double b, long double c){

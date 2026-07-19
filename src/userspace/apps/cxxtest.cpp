@@ -11752,7 +11752,7 @@ unsigned CrSweep(const char *name, const CrVec *v, unsigned n, long double (*fn)
     }
     printf("[CXX] %s: swept=%u max-ULP=%llu non-CR=%u\n", name, n, maxulp, nonCR);
     if (nonCR)
-        printf("[CXX]   worst x: xm=0x%016llX xse=0x%04X  got=0x%016llX/0x%04X want=0x%016llX/0x%04X\n",
+        printf("[CXX]   worst x: xm=0x%llX xse=0x%X  got=0x%llX/0x%X want=0x%llX/0x%X\n",
                v[wi].xm, v[wi].xse, gm, gse, v[wi].rm, v[wi].rse);
     return nonCR;
 }
@@ -11793,7 +11793,7 @@ unsigned CrStream(const char *name, unsigned long long seed, int elo, int ehi,
     printf("[CXX] %s stream: N=%llu xSum=%s rSum=%s\n", name, n,
            xok ? "MATCH" : "MISMATCH", rok ? "MATCH" : "MISMATCH");
     if (!xok || !rok)
-        printf("[CXX]   %s got xSum=0x%016llX rSum=0x%016llX want xSum=0x%016llX rSum=0x%016llX\n",
+        printf("[CXX]   %s got xSum=0x%llX rSum=0x%llX want xSum=0x%llX rSum=0x%llX\n",
                name, hx, hr, xsum, rsum);
     return (xok && rok) ? 0u : 1u;
 }
@@ -11825,7 +11825,7 @@ unsigned CrStreamPos(const char *name, unsigned long long seed, int elo, int ehi
     printf("[CXX] %s stream: N=%llu xSum=%s rSum=%s\n", name, n,
            xok ? "MATCH" : "MISMATCH", rok ? "MATCH" : "MISMATCH");
     if (!xok || !rok)
-        printf("[CXX]   %s got xSum=0x%016llX rSum=0x%016llX want xSum=0x%016llX rSum=0x%016llX\n",
+        printf("[CXX]   %s got xSum=0x%llX rSum=0x%llX want xSum=0x%llX rSum=0x%llX\n",
                name, hx, hr, xsum, rsum);
     return (xok && rok) ? 0u : 1u;
 }
@@ -11857,7 +11857,7 @@ unsigned CrStream1p(const char *name, unsigned long long seed, unsigned long lon
     printf("[CXX] %s stream: N=%llu xSum=%s rSum=%s\n", name, n,
            xok ? "MATCH" : "MISMATCH", rok ? "MATCH" : "MISMATCH");
     if (!xok || !rok)
-        printf("[CXX]   %s got xSum=0x%016llX rSum=0x%016llX want xSum=0x%016llX rSum=0x%016llX\n",
+        printf("[CXX]   %s got xSum=0x%llX rSum=0x%llX want xSum=0x%llX rSum=0x%llX\n",
                name, hx, hr, xsum, rsum);
     return (xok && rok) ? 0u : 1u;
 }
@@ -11877,7 +11877,7 @@ unsigned CrSweep2(const char *name, const CrVec2 *v, unsigned n,
     }
     printf("[CXX] %s: swept=%u max-ULP=%llu non-CR=%u\n", name, n, maxulp, nonCR);
     if (nonCR)
-        printf("[CXX]   worst: a1=0x%016llX/%04X a2=0x%016llX/%04X got=0x%016llX/%04X want=0x%016llX/%04X\n",
+        printf("[CXX]   worst: a1=0x%llX/%X a2=0x%llX/%X got=0x%llX/%X want=0x%llX/%X\n",
                v[wi].a1m, v[wi].a1se, v[wi].a2m, v[wi].a2se, gm, gse, v[wi].rm, v[wi].rse);
     return nonCR;
 }
@@ -11911,7 +11911,7 @@ unsigned CrStream2(const char *name, unsigned long long seed, int e1lo, int e1hi
     bool xok = (hx == xsum), rok = (hr == rsum);
     printf("[CXX] %s stream: N=%llu xSum=%s rSum=%s\n", name, n, xok?"MATCH":"MISMATCH", rok?"MATCH":"MISMATCH");
     if (!xok || !rok)
-        printf("[CXX]   %s got xSum=0x%016llX rSum=0x%016llX want 0x%016llX 0x%016llX\n", name, hx, hr, xsum, rsum);
+        printf("[CXX]   %s got xSum=0x%llX rSum=0x%llX want 0x%llX 0x%llX\n", name, hx, hr, xsum, rsum);
     return (xok && rok) ? 0u : 1u;
 }
 void Phase66(){
@@ -12262,6 +12262,32 @@ void Phase80(){
                "(MPFR-verified: %u baked, %llu streamed, 0 non-CR) — last x87 fpatan removed\n",
                kAtan2VecN, kAtan2N);
 }
+// ── Phase81 (Ф27l) — pow(x,y) correctly-rounded 80-bit ──────────────────────
+// 2^(y·log2 x) fully in dd on the CR log/exp2 cores. Baked hard-class (exact
+// powers, x→1 hard-to-round, integer/half-integer y, common bases) + a
+// deterministic 2-arg N=20000 stream (x>0, y signed). Edge table via Checks.
+#include "cr_pow_vectors.h"
+#include "cr_pow_checksums.h"
+void Phase81(){
+    unsigned f = 0;
+    f += CrSweep2("phase81 pow", kPowVec, kPowVecN, [](long double x, long double y){ return std::pow(x, y); });
+    f += CrStream2("phase81 pow", kPowSeed, kPowE1lo, kPowE1hi, kPowE2lo, kPowE2hi,
+                   kPowSign1, kPowSign2, kPowN, kPowXSum, kPowRSum,
+                   [](long double x, long double y){ return std::pow(x, y); });
+    Check(std::pow(2.0L, 10.0L) == 1024.0L && std::pow(10.0L, 3.0L) == 1000.0L, "phase81 pow exact powers");
+    Check(std::pow(4.0L, 0.5L) == 2.0L && std::pow(9.0L, 0.5L) == 3.0L, "phase81 pow sqrt exact");
+    Check(std::pow(-2.0L, 3.0L) == -8.0L && std::pow(-2.0L, 2.0L) == 4.0L, "phase81 pow neg-base int-exp");
+    Check(std::isnan(std::pow(-2.0L, 0.5L)), "phase81 pow(neg,non-int)=NaN");
+    Check(std::pow(1.0L, __builtin_infl()) == 1.0L && std::pow(3.0L, 0.0L) == 1.0L, "phase81 pow(1,y)=pow(x,0)=1");
+    Check(std::pow(0.0L, 2.0L) == 0.0L && std::pow(0.0L, -1.0L) == __builtin_infl(), "phase81 pow(0,y)");
+    Check(std::pow(2.0L, __builtin_infl()) == __builtin_infl() && std::pow(2.0L, -__builtin_infl()) == 0.0L,
+          "phase81 pow(x,+-inf)");
+    Check(std::isnan(std::pow(__builtin_nanl(""), 2.0L)), "phase81 pow(NaN,y)=NaN");
+    Check(f == 0, "phase81 pow correctly-rounded 80-bit (0 non-CR vs MPFR)");
+    if (f == 0)
+        printf("[CXX] PASS phase81: pow correctly-rounded 80-bit dd "
+               "(MPFR-verified: %u baked, %llu streamed, 0 non-CR)\n", kPowVecN, kPowN);
+}
 
 } // namespace
 
@@ -12365,6 +12391,7 @@ int main()
     Phase78();
     Phase79();
     Phase80();
+    Phase81();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
