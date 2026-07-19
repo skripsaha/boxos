@@ -12023,6 +12023,23 @@ void Phase74(){
         printf("[CXX] PASS phase74: tan correctly-rounded 80-bit dd "
                "(MPFR-verified: %u baked, %llu streamed, 0 non-CR)\n", kTanVecN, kTanN);
 }
+// ── Phase75 (Ф27f) — atan(long double) correctly-rounded 80-bit ──────────────
+#include "cr_atan_vectors.h"
+#include "cr_atan_checksums.h"
+void Phase75(){
+    unsigned f = 0;
+    f += CrSweep("phase75 atan", kAtanVec, kAtanVecN, [](long double x){ return std::atan(x); });
+    f += CrStream("phase75 atan", kAtanSeed, kAtanElo, kAtanEhi, kAtanN, kAtanXSum, kAtanRSum,
+                  [](long double x){ return std::atan(x); });
+    Check(std::atan(0.0L) == 0.0L && !std::signbit(std::atan(0.0L)), "phase75 atan(+0)==+0");
+    Check(std::atan(-0.0L) == 0.0L && std::signbit(std::atan(-0.0L)), "phase75 atan(-0)==-0");
+    Check(std::atan(__builtin_infl()) > 1.5L && std::atan(-__builtin_infl()) < -1.5L, "phase75 atan(±Inf)==±π/2");
+    Check(std::isnan(std::atan(__builtin_nanl(""))), "phase75 atan(NaN)==NaN");
+    Check(f == 0, "phase75 atan correctly-rounded 80-bit (0 non-CR vs MPFR)");
+    if (f == 0)
+        printf("[CXX] PASS phase75: atan correctly-rounded 80-bit dd "
+               "(MPFR-verified: %u baked, %llu streamed, 0 non-CR)\n", kAtanVecN, kAtanN);
+}
 
 } // namespace
 
@@ -12120,6 +12137,7 @@ int main()
     Phase72();
     Phase73();
     Phase74();
+    Phase75();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

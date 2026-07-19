@@ -1274,8 +1274,74 @@ inline long double log1p(long double x){
     return v0;                                           // correctly round to 64-bit
 }
 
-inline long double atan(long double x){                  // fpatan: atan(st1/st0) = atan(x/1)
-    long double r; __asm__("fld1\n\tfpatan" : "=t"(r) : "0"(x) : "st(1)"); return r;
+inline long double ld_from_bits_l(unsigned long long m, unsigned short se){
+    return __builtin_bit_cast(long double, ((unsigned __int128)se << 64) | (unsigned __int128)m);
+}
+// atan(long double) correctly-rounded: breakpoint reduction c=i/16 with atan(c)
+// as dd constants + dd Taylor for the residual; NO x87 fpatan. atan saturates so
+// no large-arg reduction is needed. 0 ULP vs MPFR over the verified sweep.
+inline constexpr unsigned long long kAtanHiM[17] = {
+    0x0000000000000000ull,0xFFAADDB967EF4E37ull,0xFEADD4D5617B6E33ull,0xBDCBDA5E72D81134ull,
+    0xFADBAFC96406EB15ull,0x9B13B9B83F5E5E6Aull,0xB7B0CA0F26F78474ull,0xD327761E611FE5B6ull,
+    0xED63382B0DDA7B45ull,0x832BF4A6D9867E2Aull,0x8F005D5EF7F59F9Bull,0x9A2F80E671BDDA20ull,
+    0xA4BC7D1934F70924ull,0xAEAC4C38B4D8C080ull,0xB8053E2BC2319E74ull,0xC0CE85B8AC526641ull,
+    0xC90FDAA22168C235ull };
+inline constexpr unsigned short kAtanHiS[17] = {
+    0x0000,0x3FFA,0x3FFB,0x3FFC,0x3FFC,0x3FFD,0x3FFD,0x3FFD,0x3FFD,
+    0x3FFE,0x3FFE,0x3FFE,0x3FFE,0x3FFE,0x3FFE,0x3FFE,0x3FFE };
+inline constexpr unsigned long long kAtanLoM[17] = {
+    0x0000000000000000ull,0xD361B48FC747CABBull,0xDDA19D8305DDC422ull,0xF6169F103938E90Full,
+    0xDB8F3DEBEF442FCBull,0xE9512D9CB6143360ull,0xEAB9BDBA460376FAull,0x84F92BD2003CE26Dull,
+    0xDFC88BD978751A07ull,0x96D41396C34A2B82ull,0xB906BC2CCB886E8Full,0x844DF1C4409FE77Aull,
+    0xCD43F9522BED64F7ull,0xA392F179F2903850ull,0xD3496AB7BD6EEF0Bull,0xEC453A7722DA0BB6ull,
+    0xECE675D1FC8F8CBBull };
+inline constexpr unsigned short kAtanLoS[17] = {
+    0x0000,0xBFB8,0xBFB9,0x3FBB,0x3FBB,0xBFBB,0xBFBC,0x3FBC,0x3FBC,
+    0x3FBD,0x3FBD,0x3FBD,0x3FBB,0x3FBB,0xBFBC,0xBFBD,0xBFBC };
+inline constexpr unsigned long long kHalfPiHiM = 0xC90FDAA22168C235ull, kHalfPiLoM = 0xECE675D1FC8F8CBBull;
+inline constexpr unsigned short     kHalfPiHiS = 0x3FFF,               kHalfPiLoS = 0xBFBD;
+inline LdDd atan_series_dd(LdDd r){                       // r·Σ_j (−1)^j r^{2j}/(2j+1)
+    LdDd s = dd_mul_ld(r, r);
+    LdDd P = dd_div_ld(LdDd{1.0L, 0.0L}, LdDd{31.0L, 0.0L}); P.hi = -P.hi; P.lo = -P.lo;
+    for (int j = 14; j >= 0; --j){
+        P = dd_mul_ld(P, s);
+        LdDd c = dd_div_ld(LdDd{1.0L, 0.0L}, LdDd{(long double)(2*j+1), 0.0L});
+        if (j & 1){ c.hi = -c.hi; c.lo = -c.lo; }
+        P = dd_add_ld(P, c);
+    }
+    return dd_mul_ld(r, P);
+}
+inline LdDd atan_reduced_dd(LdDd a){                      // atan(a), a∈[0,1] as dd
+    int idx = (int)rint(a.hi * 16.0L);
+    if (idx < 0) idx = 0; else if (idx > 16) idx = 16;
+    long double c = (long double)idx * 0.0625L;
+    LdDd num = dd_add_ld(a, LdDd{-c, 0.0L});
+    LdDd den = dd_add_ld(LdDd{1.0L, 0.0L}, dd_mul_ld(LdDd{c, 0.0L}, a));
+    LdDd r   = dd_div_ld(num, den);
+    LdDd ar  = atan_series_dd(r);
+    LdDd ac{ld_from_bits_l(kAtanHiM[idx], kAtanHiS[idx]), ld_from_bits_l(kAtanLoM[idx], kAtanLoS[idx])};
+    return dd_add_ld(ac, ar);
+}
+inline long double atan(long double x){
+    if (isnan(x)) return x;
+    LdDd half_pi{ld_from_bits_l(kHalfPiHiM, kHalfPiHiS), ld_from_bits_l(kHalfPiLoM, kHalfPiLoS)};
+    if (isinf(x)) return signbit(x) ? -(half_pi.hi + half_pi.lo) : (half_pi.hi + half_pi.lo);
+    if (x == 0.0L) return x;
+    bool sgn = signbit(x);
+    long double a = fabs(x);
+    LdDd res;
+    if (a > 1.0L){                                        // atan(a) = π/2 − atan(1/a)
+        int k = (int)ld_exp(a) - 16383;
+        long double m = scalbn(a, -k);
+        LdDd invm = dd_div_ld(LdDd{1.0L, 0.0L}, LdDd{m, 0.0L});
+        LdDd inv{scalbn(invm.hi, -k), scalbn(invm.lo, -k)};
+        LdDd t = atan_reduced_dd(inv);
+        res = dd_add_ld(half_pi, LdDd{-t.hi, -t.lo});
+    } else {
+        res = atan_reduced_dd(LdDd{a, 0.0L});
+    }
+    long double v = res.hi + res.lo;
+    return sgn ? -v : v;
 }
 inline long double atan2(long double y, long double x){  // atan(st1/st0) = atan(y/x)
     long double r; __asm__("fpatan" : "=t"(r) : "0"(x), "u"(y)); return r;
