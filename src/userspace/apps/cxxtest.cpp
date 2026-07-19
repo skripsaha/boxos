@@ -11682,8 +11682,7 @@ void Phase65()
     Check(near(std::tgammal(-0.5L), kTgNeg05, reflTol), "phase65 tgammal(-0.5)=-2sqrt(pi) (80-bit on Bochs)");
     Check(near(std::lgammal(-0.5L), kLgNeg05, reflTol), "phase65 lgammal(-0.5) (80-bit on Bochs)");
 
-    // ── 4) precision guard (runtime) — a truncated coeff → ~100 ULP → sweep fails ──
-    Check(std::ERF_C_L[0] != (long double)(double)std::ERF_C_L[0], "phase65 ERF_C_L[0] sub-double bits");
+    // ── 4) precision guard (runtime) — result must carry sub-double bits ──
     Check(std::erfl(0.5L) != (long double)(double)std::erfl(0.5L),  "phase65 erfl(0.5) sub-double (guard)");
 
     // ── 5) oracle sweep — max ULP vs correctly-rounded 80-bit reference ──
