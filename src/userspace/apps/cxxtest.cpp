@@ -12124,6 +12124,60 @@ void Phase77(){
                "(MPFR-verified: %u+%u+%u baked, 3×%llu streamed, 0 non-CR)\n",
                kAsinhVecN, kAcoshVecN, kAtanhVecN, kAsinhN);
 }
+// ── Phase78 (Ф27i) — asin/acos correctly-rounded 80-bit ─────────────────────
+// Inverse trig on the dd atan kernel (asin_small_dd = atan(a/√(1−a²)) + range
+// reduction through √((1−|x|)/2) near ±1). NO x87 fpatan. Baked hard-class
+// vectors (|x|→1⁻ endpoints, √½ split, identity floor, exact fractions) + a
+// deterministic signed N=20000 stream over (−1,1).
+#include "cr_asin_vectors.h"
+#include "cr_asin_checksums.h"
+#include "cr_acos_vectors.h"
+#include "cr_acos_checksums.h"
+void Phase78(){
+    unsigned f = 0;
+    f += CrSweep("phase78 asin", kAsinVec, kAsinVecN, [](long double x){ return std::asin(x); });
+    f += CrSweep("phase78 acos", kAcosVec, kAcosVecN, [](long double x){ return std::acos(x); });
+    f += CrStream("phase78 asin", kAsinSeed, kAsinElo, kAsinEhi, kAsinN, kAsinXSum, kAsinRSum,
+                  [](long double x){ return std::asin(x); });
+    f += CrStream("phase78 acos", kAcosSeed, kAcosElo, kAcosEhi, kAcosN, kAcosXSum, kAcosRSum,
+                  [](long double x){ return std::acos(x); });
+    Check(std::asin(0.0L) == 0.0L && !std::signbit(std::asin(0.0L)), "phase78 asin(+0)==+0");
+    Check(std::asin(-0.0L) == 0.0L && std::signbit(std::asin(-0.0L)), "phase78 asin(-0)==-0");
+    Check(std::asin(1.0L) > 1.5707L && std::asin(1.0L) < 1.5709L, "phase78 asin(1)==π/2");
+    Check(std::acos(1.0L) == 0.0L, "phase78 acos(1)==0");
+    Check(std::acos(-1.0L) > 3.1415L && std::acos(-1.0L) < 3.1417L, "phase78 acos(-1)==π");
+    Check(std::acos(0.0L) > 1.5707L && std::acos(0.0L) < 1.5709L, "phase78 acos(0)==π/2");
+    Check(std::isnan(std::asin(1.5L)) && std::isnan(std::acos(1.5L)), "phase78 asin/acos(|x|>1)==NaN");
+    Check(std::isnan(std::asin(__builtin_nanl(""))) && std::isnan(std::acos(__builtin_nanl(""))),
+          "phase78 asin/acos(NaN)==NaN");
+    Check(f == 0, "phase78 asin/acos correctly-rounded 80-bit (0 non-CR vs MPFR)");
+    if (f == 0)
+        printf("[CXX] PASS phase78: asin/acos correctly-rounded 80-bit dd "
+               "(MPFR-verified: %u+%u baked, 2×%llu streamed, 0 non-CR)\n", kAsinVecN, kAcosVecN, kAsinN);
+}
+// ── Phase79 (Ф27j) — cbrt correctly-rounded 80-bit ──────────────────────────
+// Exponent-reduce to [1,8) then one dd Halley step, RN64·2^k exact. NO x87.
+// Baked hard-class (perfect cubes exact, the 2^(3k+j) boundaries, tiny/huge
+// magnitudes) + a deterministic signed N=20000 stream.
+#include "cr_cbrt_vectors.h"
+#include "cr_cbrt_checksums.h"
+void Phase79(){
+    unsigned f = 0;
+    f += CrSweep("phase79 cbrt", kCbrtVec, kCbrtVecN, [](long double x){ return std::cbrt(x); });
+    f += CrStream("phase79 cbrt", kCbrtSeed, kCbrtElo, kCbrtEhi, kCbrtN, kCbrtXSum, kCbrtRSum,
+                  [](long double x){ return std::cbrt(x); });
+    Check(std::cbrt(0.0L) == 0.0L && !std::signbit(std::cbrt(0.0L)), "phase79 cbrt(+0)==+0");
+    Check(std::cbrt(-0.0L) == 0.0L && std::signbit(std::cbrt(-0.0L)), "phase79 cbrt(-0)==-0");
+    Check(std::cbrt(8.0L) == 2.0L && std::cbrt(-27.0L) == -3.0L && std::cbrt(1000.0L) == 10.0L,
+          "phase79 cbrt perfect cubes exact");
+    Check(std::cbrt(__builtin_infl()) == __builtin_infl() &&
+          std::cbrt(-__builtin_infl()) == -__builtin_infl(), "phase79 cbrt(±Inf)==±Inf");
+    Check(std::isnan(std::cbrt(__builtin_nanl(""))), "phase79 cbrt(NaN)==NaN");
+    Check(f == 0, "phase79 cbrt correctly-rounded 80-bit (0 non-CR vs MPFR)");
+    if (f == 0)
+        printf("[CXX] PASS phase79: cbrt correctly-rounded 80-bit dd "
+               "(MPFR-verified: %u baked, %llu streamed, 0 non-CR)\n", kCbrtVecN, kCbrtN);
+}
 
 } // namespace
 
@@ -12224,6 +12278,8 @@ int main()
     Phase75();
     Phase76();
     Phase77();
+    Phase78();
+    Phase79();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
