@@ -154,6 +154,10 @@ htest.elf: $(BOXLIB_START) htest.o $(BOXLIB)
 # runtime symbols always win.
 cxxtest.elf: $(BOXLIB_START) cxxtest.o cxxtest_traits.o $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld
 	$(CXX) $(CXXLDFLAGS) -o $@ $(BOXLIB_START) cxxtest.o cxxtest_traits.o $(BOXCXX) $(BOXLIB) -lgcc
+	@# Drop .debug_* (keeps .symtab for backtraces): the correctly-rounded cmath
+	@# suite bakes tens of thousands of MPFR-reference vectors, whose -g debug info
+	@# bloats the ELF ~10x and overflows the 16 MB TagFS image. Mirrors shell.elf.
+	@x86_64-elf-objcopy --strip-debug $@
 	@align=$$(x86_64-elf-readelf -lW $@ | awk '$$1=="TLS"{print $$NF}'); \
 	if [ -n "$$align" ] && [ $$((align)) -gt 64 ]; then \
 		echo "ERROR: $@ PT_TLS p_align=$$align > 64 — boxcxx tls_init layout contract broken (alignas(>64) thread_local?)"; \
