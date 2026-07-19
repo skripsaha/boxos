@@ -982,7 +982,6 @@ inline int  fpclassify(long double x){
 constexpr long double kInfL   = __builtin_infl();
 constexpr long double kQNaNL  = __builtin_nanl("");
 constexpr long double kTwoPiL = 6.283185307179586476925286766559005768L;
-constexpr long double kLog2eL = 1.442695040888963407359924681001892137L;
 constexpr long double kLn2L   = 0.693147180559945309417232121458176568L;
 
 // x87 control word: bits[11:10] = rounding control (00 nearest, 01 down, 10 up, 11 trunc).
