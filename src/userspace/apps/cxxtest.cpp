@@ -11750,7 +11750,7 @@ unsigned CrSweep(const char *name, const CrVec *v, unsigned n, long double (*fn)
         unsigned long long d = CrUlp(rm, rse, v[i].rm, v[i].rse);
         if (d){ nonCR++; if (d > maxulp){ maxulp = d; wi = i; gm = rm; gse = rse; } }
     }
-    printf("[CXX] phase66 %s: swept=%u max-ULP=%llu non-CR=%u\n", name, n, maxulp, nonCR);
+    printf("[CXX] %s: swept=%u max-ULP=%llu non-CR=%u\n", name, n, maxulp, nonCR);
     if (nonCR)
         printf("[CXX]   worst x: xm=0x%016llX xse=0x%04X  got=0x%016llX/0x%04X want=0x%016llX/0x%04X\n",
                v[wi].xm, v[wi].xse, gm, gse, v[wi].rm, v[wi].rse);
@@ -11785,11 +11785,76 @@ void CrChecksum(unsigned long long seed, int elo, int ehi, unsigned long long n,
     }
 }
 unsigned CrStream(const char *name, unsigned long long seed, int elo, int ehi,
-                  unsigned long long xsum, unsigned long long rsum, long double (*fn)(long double)){
+                  unsigned long long n, unsigned long long xsum, unsigned long long rsum,
+                  long double (*fn)(long double)){
     unsigned long long hx, hr;
-    CrChecksum(seed, elo, ehi, kCrN, fn, hx, hr);
+    CrChecksum(seed, elo, ehi, n, fn, hx, hr);
     bool xok = (hx == xsum), rok = (hr == rsum);
-    printf("[CXX] phase66 %s stream: N=%llu xSum=%s rSum=%s\n", name, kCrN,
+    printf("[CXX] %s stream: N=%llu xSum=%s rSum=%s\n", name, n,
+           xok ? "MATCH" : "MISMATCH", rok ? "MATCH" : "MISMATCH");
+    if (!xok || !rok)
+        printf("[CXX]   %s got xSum=0x%016llX rSum=0x%016llX want xSum=0x%016llX rSum=0x%016llX\n",
+               name, hx, hr, xsum, rsum);
+    return (xok && rok) ? 0u : 1u;
+}
+// Positive-x stream (sign forced 0): the log/log2/log10 domain is x>0. Mirrors
+// stream_pos in gen_all.py exactly (same xorshift/E/se/mant assembly).
+void CrChecksumPos(unsigned long long seed, int elo, int ehi, unsigned long long n,
+                   long double (*fn)(long double),
+                   unsigned long long &hx, unsigned long long &hr){
+    unsigned long long s = seed;
+    unsigned span = (unsigned)(ehi - elo + 1);
+    hx = 1469598103934665603ULL; hr = 1469598103934665603ULL;
+    for (unsigned long long i = 0; i < n; ++i){
+        unsigned long long a = CrNext(s); s = a;
+        unsigned long long b = CrNext(s); s = b;
+        int E = elo + (int)(a % span);
+        unsigned short se = (unsigned short)((16383 + E) & 0x7FFF);   // sign 0 -> x>0
+        unsigned long long mant = b | (1ULL << 63);
+        hx = CrFold(CrFold(hx, mant), se);
+        unsigned long long rm; unsigned short rse; CrLdToBits(fn(CrLdFromBits(mant, se)), rm, rse);
+        hr = CrFold(CrFold(hr, rm), rse);
+    }
+}
+unsigned CrStreamPos(const char *name, unsigned long long seed, int elo, int ehi,
+                     unsigned long long n, unsigned long long xsum, unsigned long long rsum,
+                     long double (*fn)(long double)){
+    unsigned long long hx, hr;
+    CrChecksumPos(seed, elo, ehi, n, fn, hx, hr);
+    bool xok = (hx == xsum), rok = (hr == rsum);
+    printf("[CXX] %s stream: N=%llu xSum=%s rSum=%s\n", name, n,
+           xok ? "MATCH" : "MISMATCH", rok ? "MATCH" : "MISMATCH");
+    if (!xok || !rok)
+        printf("[CXX]   %s got xSum=0x%016llX rSum=0x%016llX want xSum=0x%016llX rSum=0x%016llX\n",
+               name, hx, hr, xsum, rsum);
+    return (xok && rok) ? 0u : 1u;
+}
+// x>-1 stream for log1p: negative only when |x|<1 (ebias<=16382). Mirrors
+// stream_1p in gen_all.py exactly.
+void CrChecksum1p(unsigned long long seed, unsigned long long n,
+                  long double (*fn)(long double),
+                  unsigned long long &hx, unsigned long long &hr){
+    unsigned long long s = seed;
+    hx = 1469598103934665603ULL; hr = 1469598103934665603ULL;
+    for (unsigned long long i = 0; i < n; ++i){
+        unsigned long long a = CrNext(s); s = a;
+        unsigned long long b = CrNext(s); s = b;
+        unsigned ebias = 1u + (unsigned)(a % 32766ULL);
+        unsigned sgn = (unsigned)((a >> 40) & 1ULL);
+        if (sgn && ebias > 16382u) sgn = 0;                      // negative only when x>-1
+        unsigned short se = (unsigned short)((sgn << 15) | ebias);
+        unsigned long long mant = b | (1ULL << 63);
+        hx = CrFold(CrFold(hx, mant), se);
+        unsigned long long rm; unsigned short rse; CrLdToBits(fn(CrLdFromBits(mant, se)), rm, rse);
+        hr = CrFold(CrFold(hr, rm), rse);
+    }
+}
+unsigned CrStream1p(const char *name, unsigned long long seed, unsigned long long n,
+                    unsigned long long xsum, unsigned long long rsum, long double (*fn)(long double)){
+    unsigned long long hx, hr;
+    CrChecksum1p(seed, n, fn, hx, hr);
+    bool xok = (hx == xsum), rok = (hr == rsum);
+    printf("[CXX] %s stream: N=%llu xSum=%s rSum=%s\n", name, n,
            xok ? "MATCH" : "MISMATCH", rok ? "MATCH" : "MISMATCH");
     if (!xok || !rok)
         printf("[CXX]   %s got xSum=0x%016llX rSum=0x%016llX want xSum=0x%016llX rSum=0x%016llX\n",
@@ -11798,17 +11863,109 @@ unsigned CrStream(const char *name, unsigned long long seed, int elo, int ehi,
 }
 void Phase66(){
     unsigned f = 0;
-    f += CrSweep("exp2", kExp2Vec, kExp2VecN, [](long double x){ return std::exp2(x); });
-    f += CrSweep("exp",  kExpVec,  kExpVecN,  [](long double x){ return std::exp(x); });
-    f += CrStream("exp2", 0x2545F4914F6CDD1DULL, -25, 14, kExp2XSum, kExp2RSum,
+    f += CrSweep("phase66 exp2", kExp2Vec, kExp2VecN, [](long double x){ return std::exp2(x); });
+    f += CrSweep("phase66 exp",  kExpVec,  kExpVecN,  [](long double x){ return std::exp(x); });
+    f += CrStream("phase66 exp2", 0x2545F4914F6CDD1DULL, -25, 14, kCrN, kExp2XSum, kExp2RSum,
                   [](long double x){ return std::exp2(x); });
-    f += CrStream("exp",  0x9E3779B97F4A7C15ULL, -25, 13, kExpXSum, kExpRSum,
+    f += CrStream("phase66 exp",  0x9E3779B97F4A7C15ULL, -25, 13, kCrN, kExpXSum, kExpRSum,
                   [](long double x){ return std::exp(x); });
     Check(f == 0, "phase66 exp2/exp correctly-rounded 80-bit (0 non-CR vs MPFR)");
     if (f == 0)
         printf("[CXX] PASS phase66: exp2/exp correctly-rounded 80-bit dd "
                "(MPFR-verified: %u+%u baked, %llu+%llu streamed, 0 non-CR)\n",
                kExp2VecN, kExpVecN, kCrN, kCrN);
+}
+
+// ── Phases 67–71 (Ф27e) — log/log2/log10/log1p/expm1 correctly-rounded 80-bit.
+// Software double-double (no x87 fyl2x/fyl2xp1/f2xm1), MPFR-verified 0 non-CR:
+// baked hard-class (x, MPFR-CR-ref) vectors + a deterministic N=20000 pure-int
+// stream FNV-checksummed against MPFR on the host. log/log2/log10 share one
+// log_dd_core_l reduction (<cmath>); the streams are domain-restricted.
+#include "cr_log_vectors.h"
+#include "cr_log_checksums.h"
+void Phase67(){
+    unsigned f = 0;
+    f += CrSweep("phase67 log", kLogVec, kLogVecN, [](long double x){ return std::log(x); });
+    f += CrStreamPos("phase67 log", kLogSeed, kLogElo, kLogEhi, kLogN, kLogXSum, kLogRSum,
+                     [](long double x){ return std::log(x); });
+    Check(std::log(1.0L) == 0.0L && !std::signbit(std::log(1.0L)), "phase67 log(1)==+0");
+    Check(std::log(0.0L) == -__builtin_infl(), "phase67 log(0)==-Inf");
+    Check(std::isnan(std::log(-1.0L)), "phase67 log(-1)==NaN");
+    Check(std::log(__builtin_infl()) == __builtin_infl(), "phase67 log(+Inf)==+Inf");
+    Check(std::isnan(std::log(__builtin_nanl(""))), "phase67 log(NaN)==NaN");
+    Check(f == 0, "phase67 log correctly-rounded 80-bit (0 non-CR vs MPFR)");
+    if (f == 0)
+        printf("[CXX] PASS phase67: log correctly-rounded 80-bit dd "
+               "(MPFR-verified: %u baked, %llu streamed, 0 non-CR)\n", kLogVecN, kLogN);
+}
+#include "cr_log2_vectors.h"
+#include "cr_log2_checksums.h"
+void Phase68(){
+    unsigned f = 0;
+    f += CrSweep("phase68 log2", kLog2Vec, kLog2VecN, [](long double x){ return std::log2(x); });
+    f += CrStreamPos("phase68 log2", kLog2Seed, kLog2Elo, kLog2Ehi, kLog2N, kLog2XSum, kLog2RSum,
+                     [](long double x){ return std::log2(x); });
+    Check(std::log2(1.0L) == 0.0L && !std::signbit(std::log2(1.0L)), "phase68 log2(1)==+0");
+    Check(std::log2(8.0L) == 3.0L, "phase68 log2(8)==3 exact");
+    Check(std::log2(0.0L) == -__builtin_infl(), "phase68 log2(0)==-Inf");
+    Check(std::isnan(std::log2(-1.0L)), "phase68 log2(-1)==NaN");
+    Check(std::log2(__builtin_infl()) == __builtin_infl(), "phase68 log2(+Inf)==+Inf");
+    Check(f == 0, "phase68 log2 correctly-rounded 80-bit (0 non-CR vs MPFR)");
+    if (f == 0)
+        printf("[CXX] PASS phase68: log2 correctly-rounded 80-bit dd "
+               "(MPFR-verified: %u baked, %llu streamed, 0 non-CR)\n", kLog2VecN, kLog2N);
+}
+#include "cr_log10_vectors.h"
+#include "cr_log10_checksums.h"
+void Phase69(){
+    unsigned f = 0;
+    f += CrSweep("phase69 log10", kLog10Vec, kLog10VecN, [](long double x){ return std::log10(x); });
+    f += CrStreamPos("phase69 log10", kLog10Seed, kLog10Elo, kLog10Ehi, kLog10N, kLog10XSum, kLog10RSum,
+                     [](long double x){ return std::log10(x); });
+    Check(std::log10(1.0L) == 0.0L && !std::signbit(std::log10(1.0L)), "phase69 log10(1)==+0");
+    Check(std::log10(1000.0L) == 3.0L, "phase69 log10(1000)==3 exact");
+    Check(std::log10(0.0L) == -__builtin_infl(), "phase69 log10(0)==-Inf");
+    Check(std::isnan(std::log10(-1.0L)), "phase69 log10(-1)==NaN");
+    Check(std::log10(__builtin_infl()) == __builtin_infl(), "phase69 log10(+Inf)==+Inf");
+    Check(f == 0, "phase69 log10 correctly-rounded 80-bit (0 non-CR vs MPFR)");
+    if (f == 0)
+        printf("[CXX] PASS phase69: log10 correctly-rounded 80-bit dd "
+               "(MPFR-verified: %u baked, %llu streamed, 0 non-CR)\n", kLog10VecN, kLog10N);
+}
+#include "cr_log1p_vectors.h"
+#include "cr_log1p_checksums.h"
+void Phase70(){
+    unsigned f = 0;
+    f += CrSweep("phase70 log1p", kLog1pVec, kLog1pVecN, [](long double x){ return std::log1p(x); });
+    f += CrStream1p("phase70 log1p", kLog1pSeed, kLog1pN, kLog1pXSum, kLog1pRSum,
+                    [](long double x){ return std::log1p(x); });
+    Check(std::log1p(0.0L) == 0.0L && !std::signbit(std::log1p(0.0L)), "phase70 log1p(+0)==+0");
+    Check(std::log1p(-0.0L) == 0.0L && std::signbit(std::log1p(-0.0L)), "phase70 log1p(-0)==-0");
+    Check(std::log1p(-1.0L) == -__builtin_infl(), "phase70 log1p(-1)==-Inf");
+    Check(std::isnan(std::log1p(-2.0L)), "phase70 log1p(-2)==NaN");
+    Check(std::log1p(__builtin_infl()) == __builtin_infl(), "phase70 log1p(+Inf)==+Inf");
+    Check(std::isnan(std::log1p(__builtin_nanl(""))), "phase70 log1p(NaN)==NaN");
+    Check(f == 0, "phase70 log1p correctly-rounded 80-bit (0 non-CR vs MPFR)");
+    if (f == 0)
+        printf("[CXX] PASS phase70: log1p correctly-rounded 80-bit dd "
+               "(MPFR-verified: %u baked, %llu streamed, 0 non-CR)\n", kLog1pVecN, kLog1pN);
+}
+#include "cr_expm1_vectors.h"
+#include "cr_expm1_checksums.h"
+void Phase71(){
+    unsigned f = 0;
+    f += CrSweep("phase71 expm1", kExpm1Vec, kExpm1VecN, [](long double x){ return std::expm1(x); });
+    f += CrStream("phase71 expm1", kExpm1Seed, kExpm1Elo, kExpm1Ehi, kExpm1N, kExpm1XSum, kExpm1RSum,
+                  [](long double x){ return std::expm1(x); });
+    Check(std::expm1(0.0L) == 0.0L && !std::signbit(std::expm1(0.0L)), "phase71 expm1(+0)==+0");
+    Check(std::expm1(-0.0L) == 0.0L && std::signbit(std::expm1(-0.0L)), "phase71 expm1(-0)==-0");
+    Check(std::expm1(-__builtin_infl()) == -1.0L, "phase71 expm1(-Inf)==-1");
+    Check(std::expm1(__builtin_infl()) == __builtin_infl(), "phase71 expm1(+Inf)==+Inf");
+    Check(std::isnan(std::expm1(__builtin_nanl(""))), "phase71 expm1(NaN)==NaN");
+    Check(f == 0, "phase71 expm1 correctly-rounded 80-bit (0 non-CR vs MPFR)");
+    if (f == 0)
+        printf("[CXX] PASS phase71: expm1 correctly-rounded 80-bit dd "
+               "(MPFR-verified: %u baked, %llu streamed, 0 non-CR)\n", kExpm1VecN, kExpm1N);
 }
 
 } // namespace
@@ -11899,6 +12056,11 @@ int main()
     Phase64();
     Phase65();
     Phase66();
+    Phase67();
+    Phase68();
+    Phase69();
+    Phase70();
+    Phase71();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
