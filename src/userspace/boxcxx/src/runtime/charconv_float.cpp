@@ -24,15 +24,19 @@ using i32  = int32_t;
 using u128 = unsigned __int128;
 
 // ── minimal big integer (little-endian base 2^32) ────────────────────────
-// 576 words (~18432 bits) is sized for the long double (80-bit x87) surface,
-// whose exact-decimal machinery dwarfs float/double: Dragon4 scales M by up to
-// 2^16446 (≈514 words) and the from_chars subnormal path shifts by 16445 bits.
-// The float/double paths only ever touch ≤168 words (their magnitude pre-clamp
-// bounds the operands), so the larger array is byte-for-byte inert for them.
-// Every grow primitive ALSO saturates at kBigWords (see BigMulSmall / BigShl /
-// BigInc / BigDivMod128), so an out-of-range exponent that slips past the
-// magnitude pre-clamp in ParseFp / ParseFpLd can still never write past the array.
-constexpr int kBigWords = 576;
+// 720 words (~23040 bits) is sized for the long double (80-bit x87) surface,
+// whose exact-decimal machinery dwarfs float/double. The binding case is
+// from_chars of a subnormal at the parser's 1290-digit cap: it builds
+// den = 10^~6241 (~648 words) and shifts num by up to ~16507 bits (~651 words),
+// so the original Dragon4-only sizing of 576 silently saturated and misrounded
+// those inputs; 720 holds the ~651-word worst case with margin. Dragon4
+// (to_chars) scales M by up to 2^16446 (≈514 words). The float/double paths
+// only ever touch ≤168 words (their magnitude pre-clamp bounds the operands),
+// so the larger array is byte-for-byte inert for them. Every grow primitive
+// ALSO saturates at kBigWords (see BigMulSmall / BigShl / BigInc / BigDivMod128),
+// so an out-of-range exponent that slips past the magnitude pre-clamp in
+// ParseFp / ParseFpLd can still never write past the array.
+constexpr int kBigWords = 720;
 struct BigInt {
     u32 w[kBigWords];
     int n;  // number of significant words
