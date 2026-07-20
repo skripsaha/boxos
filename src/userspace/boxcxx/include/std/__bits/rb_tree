@@ -510,16 +510,27 @@ public:
     template <typename... Args>
     pair<iterator, bool> EmplaceUnique(Args &&...args)
     {
-        NodeT *n               = MakeNode(std::forward<Args>(args)...);
-        pair<iterator, bool> r = ReinsertUnique(n);
-        if (!r.second) DropNode(n); // equivalent key exists — discard
-        return r;
+        NodeT *n = MakeNode(std::forward<Args>(args)...);
+        try {
+            pair<iterator, bool> r = ReinsertUnique(n);
+            if (!r.second) DropNode(n); // equivalent key exists — discard
+            return r;
+        } catch (...) {
+            DropNode(n); // comparator threw — strong guarantee, no leak
+            throw;
+        }
     }
 
     template <typename... Args>
     iterator EmplaceMulti(Args &&...args)
     {
-        return ReinsertMulti(MakeNode(std::forward<Args>(args)...));
+        NodeT *n = MakeNode(std::forward<Args>(args)...);
+        try {
+            return ReinsertMulti(n);
+        } catch (...) {
+            DropNode(n);
+            throw;
+        }
     }
 
     // ── node_handle / merge primitives (Ф28a) ───────────────────────────
