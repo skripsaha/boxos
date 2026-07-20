@@ -1,0 +1,646 @@
+// boxcxx — <__bits/ranges_algo_fold>
+// Ф29b-1, second file: the ranges:: fold family ([alg.fold], C++23), min/max/
+// minmax/*_element/clamp ([alg.min.max]), is_sorted/is_sorted_until +
+// lower_bound/upper_bound/equal_range/binary_search ([alg.sorted]/[alg.binary.
+// search]), and lexicographical_compare ([alg.lex.comparison]). Included by
+// <algorithm> right AFTER <__bits/ranges_algo>, whose result-type aggregates
+// (min_max_result, in_value_result) this file consumes.
+#ifndef BOXCXX_BITS_RANGES_ALGO_FOLD
+#define BOXCXX_BITS_RANGES_ALGO_FOLD
+
+#include <functional>
+#include <initializer_list>
+#include <optional>
+#include <ranges>
+#include <utility>
+
+namespace std {
+namespace ranges {
+
+// ════════════════════════════════════════════════════════════════════════
+// fold family ([alg.fold], C++23 / P2322)
+// ════════════════════════════════════════════════════════════════════════
+
+namespace __algo {
+
+// The standard's exposition-only indirectly-binary-left-foldable, spelled out.
+template <class F, class T, class I, class U>
+concept LeftFoldableImpl =
+    movable<T> && movable<U> && convertible_to<T, U> &&
+    invocable<F &, U, iter_reference_t<I>> &&
+    assignable_from<U &, invoke_result_t<F &, U, iter_reference_t<I>>>;
+
+template <class F, class T, class I>
+concept LeftFoldable =
+    copy_constructible<F> && indirectly_readable<I> &&
+    invocable<F &, T, iter_reference_t<I>> &&
+    convertible_to<invoke_result_t<F &, T, iter_reference_t<I>>,
+                   decay_t<invoke_result_t<F &, T, iter_reference_t<I>>>> &&
+    LeftFoldableImpl<F, T, I,
+                     decay_t<invoke_result_t<F &, T, iter_reference_t<I>>>>;
+
+// flipped<F>: operator() declared, never defined — used only in the
+// unevaluated concept checks below (invocable / invoke_result_t), never
+// ODR-used. Same declared-not-defined idiom as projected::operator*.
+template <class F>
+struct Flipped {
+    F f;
+    template <class T, class U>
+        requires invocable<F &, U, T>
+    invoke_result_t<F &, U, T> operator()(T &&, U &&);
+};
+
+template <class F, class T, class I>
+concept RightFoldable = LeftFoldable<Flipped<F>, T, I>;
+
+} // namespace __algo
+
+struct FoldLeftWithIter {
+    template <input_iterator I, sentinel_for<I> S, class T,
+              __algo::LeftFoldable<T, I> F>
+    constexpr auto operator()(I first, S last, T init, F f) const
+    {
+        using U = decay_t<invoke_result_t<F &, T, iter_reference_t<I>>>;
+        if (first == last)
+            return in_value_result<I, U>{std::move(first), U(std::move(init))};
+        U accum = std::invoke(f, std::move(init), *first);
+        for (++first; first != last; ++first)
+            accum = std::invoke(f, std::move(accum), *first);
+        return in_value_result<I, U>{std::move(first), std::move(accum)};
+    }
+    template <input_range R, class T, __algo::LeftFoldable<T, iterator_t<R>> F>
+    constexpr in_value_result<borrowed_iterator_t<R>,
+                              decay_t<invoke_result_t<F &, T, range_reference_t<R>>>>
+    operator()(R &&r, T init, F f) const
+    {
+        return (*this)(ranges::begin(r), ranges::end(r), std::move(init),
+                       std::move(f));
+    }
+};
+inline constexpr FoldLeftWithIter fold_left_with_iter{};
+template <class I, class T>
+using fold_left_with_iter_result = in_value_result<I, T>;
+
+struct FoldLeft {
+    template <input_iterator I, sentinel_for<I> S, class T,
+              __algo::LeftFoldable<T, I> F>
+    constexpr auto operator()(I first, S last, T init, F f) const
+    {
+        return fold_left_with_iter(std::move(first), std::move(last),
+                                   std::move(init), std::move(f))
+            .value;
+    }
+    template <input_range R, class T, __algo::LeftFoldable<T, iterator_t<R>> F>
+    constexpr auto operator()(R &&r, T init, F f) const
+    {
+        return fold_left_with_iter(ranges::begin(r), ranges::end(r),
+                                   std::move(init), std::move(f))
+            .value;
+    }
+};
+inline constexpr FoldLeft fold_left{};
+
+struct FoldLeftFirstWithIter {
+    template <input_iterator I, sentinel_for<I> S,
+              __algo::LeftFoldable<iter_value_t<I>, I> F>
+        requires constructible_from<iter_value_t<I>, iter_reference_t<I>>
+    constexpr auto operator()(I first, S last, F f) const
+    {
+        using U =
+            decay_t<invoke_result_t<F &, iter_value_t<I>, iter_reference_t<I>>>;
+        using Ret = in_value_result<I, optional<U>>;
+        if (first == last) return Ret{std::move(first), optional<U>()};
+        optional<U> accum(in_place, *first);
+        for (++first; first != last; ++first)
+            *accum = std::invoke(f, std::move(*accum), *first);
+        return Ret{std::move(first), std::move(accum)};
+    }
+    template <input_range R,
+              __algo::LeftFoldable<range_value_t<R>, iterator_t<R>> F>
+        requires constructible_from<range_value_t<R>, range_reference_t<R>>
+    constexpr in_value_result<
+        borrowed_iterator_t<R>,
+        optional<decay_t<invoke_result_t<F &, range_value_t<R>, range_reference_t<R>>>>>
+    operator()(R &&r, F f) const
+    {
+        return (*this)(ranges::begin(r), ranges::end(r), std::move(f));
+    }
+};
+inline constexpr FoldLeftFirstWithIter fold_left_first_with_iter{};
+template <class I, class T>
+using fold_left_first_with_iter_result = in_value_result<I, T>;
+
+struct FoldLeftFirst {
+    template <input_iterator I, sentinel_for<I> S,
+              __algo::LeftFoldable<iter_value_t<I>, I> F>
+        requires constructible_from<iter_value_t<I>, iter_reference_t<I>>
+    constexpr auto operator()(I first, S last, F f) const
+    {
+        return fold_left_first_with_iter(std::move(first), std::move(last),
+                                         std::move(f))
+            .value;
+    }
+    template <input_range R,
+              __algo::LeftFoldable<range_value_t<R>, iterator_t<R>> F>
+        requires constructible_from<range_value_t<R>, range_reference_t<R>>
+    constexpr auto operator()(R &&r, F f) const
+    {
+        return fold_left_first_with_iter(ranges::begin(r), ranges::end(r),
+                                         std::move(f))
+            .value;
+    }
+};
+inline constexpr FoldLeftFirst fold_left_first{};
+
+struct FoldRight {
+    template <bidirectional_iterator I, sentinel_for<I> S, class T,
+              __algo::RightFoldable<T, I> F>
+    constexpr auto operator()(I first, S last, T init, F f) const
+    {
+        using U = decay_t<invoke_result_t<F &, iter_reference_t<I>, T>>;
+        if (first == last) return U(std::move(init));
+        I tail  = ranges::next(first, std::move(last));
+        U accum = std::invoke(f, *--tail, std::move(init));
+        while (first != tail) accum = std::invoke(f, *--tail, std::move(accum));
+        return accum;
+    }
+    template <bidirectional_range R, class T,
+              __algo::RightFoldable<T, iterator_t<R>> F>
+    constexpr auto operator()(R &&r, T init, F f) const
+    {
+        return (*this)(ranges::begin(r), ranges::end(r), std::move(init),
+                       std::move(f));
+    }
+};
+inline constexpr FoldRight fold_right{};
+
+struct FoldRightLast {
+    template <bidirectional_iterator I, sentinel_for<I> S,
+              __algo::RightFoldable<iter_value_t<I>, I> F>
+        requires constructible_from<iter_value_t<I>, iter_reference_t<I>>
+    constexpr auto operator()(I first, S last, F f) const
+    {
+        using U = decay_t<
+            invoke_result_t<F &, iter_reference_t<I>, iter_value_t<I>>>;
+        if (first == last) return optional<U>();
+        I tail = ranges::prev(ranges::next(first, std::move(last)));
+        return optional<U>(in_place,
+                           fold_right(std::move(first), tail,
+                                      iter_value_t<I>(*tail), std::move(f)));
+    }
+    template <bidirectional_range R,
+              __algo::RightFoldable<range_value_t<R>, iterator_t<R>> F>
+        requires constructible_from<range_value_t<R>, range_reference_t<R>>
+    constexpr auto operator()(R &&r, F f) const
+    {
+        return (*this)(ranges::begin(r), ranges::end(r), std::move(f));
+    }
+};
+inline constexpr FoldRightLast fold_right_last{};
+
+// ════════════════════════════════════════════════════════════════════════
+// min / max / minmax + *_element + clamp ([alg.min.max])
+// The *_element niebloids are defined FIRST: min/max/minmax's
+// initializer_list overloads delegate to them.
+// ════════════════════════════════════════════════════════════════════════
+
+struct MinElement {
+    template <forward_iterator I, sentinel_for<I> S, class Proj = identity,
+              indirect_strict_weak_order<projected<I, Proj>> Comp = ranges::less>
+    constexpr I operator()(I first, S last, Comp comp = {}, Proj proj = {}) const
+    {
+        if (first == last) return first;
+        I smallest = first;
+        while (++first != last)
+            if (std::invoke(comp, std::invoke(proj, *first),
+                            std::invoke(proj, *smallest)))
+                smallest = first;
+        return smallest;
+    }
+    template <forward_range R, class Proj = identity,
+              indirect_strict_weak_order<projected<iterator_t<R>, Proj>> Comp =
+                  ranges::less>
+    constexpr borrowed_iterator_t<R> operator()(R &&r, Comp comp = {},
+                                                Proj proj = {}) const
+    {
+        return (*this)(ranges::begin(r), ranges::end(r), std::move(comp),
+                       std::move(proj));
+    }
+};
+inline constexpr MinElement min_element{};
+
+struct MaxElement {
+    template <forward_iterator I, sentinel_for<I> S, class Proj = identity,
+              indirect_strict_weak_order<projected<I, Proj>> Comp = ranges::less>
+    constexpr I operator()(I first, S last, Comp comp = {}, Proj proj = {}) const
+    {
+        if (first == last) return first;
+        I largest = first;
+        // Leftmost maximum: strict `largest < *first` — ties do NOT advance.
+        while (++first != last)
+            if (std::invoke(comp, std::invoke(proj, *largest),
+                            std::invoke(proj, *first)))
+                largest = first;
+        return largest;
+    }
+    template <forward_range R, class Proj = identity,
+              indirect_strict_weak_order<projected<iterator_t<R>, Proj>> Comp =
+                  ranges::less>
+    constexpr borrowed_iterator_t<R> operator()(R &&r, Comp comp = {},
+                                                Proj proj = {}) const
+    {
+        return (*this)(ranges::begin(r), ranges::end(r), std::move(comp),
+                       std::move(proj));
+    }
+};
+inline constexpr MaxElement max_element{};
+
+template <class I>
+using minmax_element_result = min_max_result<I>;
+
+struct MinmaxElement {
+    template <forward_iterator I, sentinel_for<I> S, class Proj = identity,
+              indirect_strict_weak_order<projected<I, Proj>> Comp = ranges::less>
+    constexpr minmax_element_result<I> operator()(I first, S last,
+                                                  Comp comp = {},
+                                                  Proj proj = {}) const
+    {
+        if (first == last) return {first, first};
+        I mn = first, mx = first;
+        while (++first != last) {
+            // min = FIRST smallest (strict); max = LAST largest (non-strict,
+            // `!(*first < *mx)` advances on ties too — the [alg.min.max]
+            // asymmetry vs max_element, which keeps the leftmost max).
+            if (std::invoke(comp, std::invoke(proj, *first),
+                            std::invoke(proj, *mn)))
+                mn = first;
+            if (!std::invoke(comp, std::invoke(proj, *first),
+                             std::invoke(proj, *mx)))
+                mx = first;
+        }
+        return {mn, mx};
+    }
+    template <forward_range R, class Proj = identity,
+              indirect_strict_weak_order<projected<iterator_t<R>, Proj>> Comp =
+                  ranges::less>
+    constexpr minmax_element_result<borrowed_iterator_t<R>>
+    operator()(R &&r, Comp comp = {}, Proj proj = {}) const
+    {
+        return (*this)(ranges::begin(r), ranges::end(r), std::move(comp),
+                       std::move(proj));
+    }
+};
+inline constexpr MinmaxElement minmax_element{};
+
+struct Min {
+    template <class T, class Proj = identity,
+              indirect_strict_weak_order<projected<const T *, Proj>> Comp =
+                  ranges::less>
+    constexpr const T &operator()(const T &a, const T &b, Comp comp = {},
+                                  Proj proj = {}) const
+    {
+        // min favors `a` on ties: pick b only when b < a strictly.
+        return std::invoke(comp, std::invoke(proj, b), std::invoke(proj, a)) ? b
+                                                                             : a;
+    }
+    template <copyable T, class Proj = identity,
+              indirect_strict_weak_order<projected<const T *, Proj>> Comp =
+                  ranges::less>
+    constexpr T operator()(initializer_list<T> r, Comp comp = {},
+                           Proj proj = {}) const
+    {
+        return *min_element(r, std::move(comp), std::move(proj));
+    }
+    template <input_range R, class Proj = identity,
+              indirect_strict_weak_order<projected<iterator_t<R>, Proj>> Comp =
+                  ranges::less>
+        requires indirectly_copyable_storable<iterator_t<R>, range_value_t<R> *>
+    constexpr range_value_t<R> operator()(R &&r, Comp comp = {},
+                                          Proj proj = {}) const
+    {
+        auto first = ranges::begin(r);
+        auto last  = ranges::end(r);
+        range_value_t<R> result(*first);
+        while (++first != last)
+            if (std::invoke(comp, std::invoke(proj, *first),
+                            std::invoke(proj, result)))
+                result = *first;
+        return result;
+    }
+};
+inline constexpr Min min{};
+
+struct Max {
+    template <class T, class Proj = identity,
+              indirect_strict_weak_order<projected<const T *, Proj>> Comp =
+                  ranges::less>
+    constexpr const T &operator()(const T &a, const T &b, Comp comp = {},
+                                  Proj proj = {}) const
+    {
+        // max returns the FIRST argument on ties ([alg.min.max]): comp(a,b) is
+        // false when a and b are equivalent, so this yields a.
+        return std::invoke(comp, std::invoke(proj, a), std::invoke(proj, b)) ? b
+                                                                             : a;
+    }
+    template <copyable T, class Proj = identity,
+              indirect_strict_weak_order<projected<const T *, Proj>> Comp =
+                  ranges::less>
+    constexpr T operator()(initializer_list<T> r, Comp comp = {},
+                           Proj proj = {}) const
+    {
+        return *max_element(r, std::move(comp), std::move(proj));
+    }
+    template <input_range R, class Proj = identity,
+              indirect_strict_weak_order<projected<iterator_t<R>, Proj>> Comp =
+                  ranges::less>
+        requires indirectly_copyable_storable<iterator_t<R>, range_value_t<R> *>
+    constexpr range_value_t<R> operator()(R &&r, Comp comp = {},
+                                          Proj proj = {}) const
+    {
+        auto first = ranges::begin(r);
+        auto last  = ranges::end(r);
+        range_value_t<R> result(*first);
+        while (++first != last)
+            // leftmost maximum ([alg.min.max]: "leftmost element when several
+            // are equivalent to the largest"): advance only when result is
+            // STRICTLY less than *first, so an equivalent later element does
+            // not displace the earlier one.
+            if (std::invoke(comp, std::invoke(proj, result),
+                            std::invoke(proj, *first)))
+                result = *first;
+        return result;
+    }
+};
+inline constexpr Max max{};
+
+struct Minmax {
+    template <class T, class Proj = identity,
+              indirect_strict_weak_order<projected<const T *, Proj>> Comp =
+                  ranges::less>
+    constexpr min_max_result<const T &>
+    operator()(const T &a, const T &b, Comp comp = {}, Proj proj = {}) const
+    {
+        if (std::invoke(comp, std::invoke(proj, b), std::invoke(proj, a)))
+            return {b, a};
+        return {a, b};
+    }
+    template <copyable T, class Proj = identity,
+              indirect_strict_weak_order<projected<const T *, Proj>> Comp =
+                  ranges::less>
+    constexpr min_max_result<T> operator()(initializer_list<T> r,
+                                           Comp comp = {}, Proj proj = {}) const
+    {
+        auto res = minmax_element(r, std::move(comp), std::move(proj));
+        return {*res.min, *res.max};
+    }
+    template <input_range R, class Proj = identity,
+              indirect_strict_weak_order<projected<iterator_t<R>, Proj>> Comp =
+                  ranges::less>
+        requires indirectly_copyable_storable<iterator_t<R>, range_value_t<R> *>
+    constexpr min_max_result<range_value_t<R>>
+    operator()(R &&r, Comp comp = {}, Proj proj = {}) const
+    {
+        auto res = minmax_element(r, std::move(comp), std::move(proj));
+        return {range_value_t<R>(*res.min), range_value_t<R>(*res.max)};
+    }
+};
+inline constexpr Minmax minmax{};
+
+struct Clamp {
+    template <class T, class Proj = identity,
+              indirect_strict_weak_order<projected<const T *, Proj>> Comp =
+                  ranges::less>
+    constexpr const T &operator()(const T &v, const T &lo, const T &hi,
+                                  Comp comp = {}, Proj proj = {}) const
+    {
+        auto &&pv = std::invoke(proj, v);
+        if (std::invoke(comp, pv, std::invoke(proj, lo))) return lo;
+        if (std::invoke(comp, std::invoke(proj, hi), pv)) return hi;
+        return v;
+    }
+};
+inline constexpr Clamp clamp{};
+
+// ════════════════════════════════════════════════════════════════════════
+// is_sorted / is_sorted_until + binary search ([alg.sorted]/[alg.binary.search])
+// ════════════════════════════════════════════════════════════════════════
+
+struct IsSortedUntil {
+    template <forward_iterator I, sentinel_for<I> S, class Proj = identity,
+              indirect_strict_weak_order<projected<I, Proj>> Comp = ranges::less>
+    constexpr I operator()(I first, S last, Comp comp = {}, Proj proj = {}) const
+    {
+        if (first == last) return first;
+        I next = first;
+        while (++next != last) {
+            if (std::invoke(comp, std::invoke(proj, *next),
+                            std::invoke(proj, *first)))
+                return next;
+            first = next;
+        }
+        return next;
+    }
+    template <forward_range R, class Proj = identity,
+              indirect_strict_weak_order<projected<iterator_t<R>, Proj>> Comp =
+                  ranges::less>
+    constexpr borrowed_iterator_t<R> operator()(R &&r, Comp comp = {},
+                                                Proj proj = {}) const
+    {
+        return (*this)(ranges::begin(r), ranges::end(r), std::move(comp),
+                       std::move(proj));
+    }
+};
+inline constexpr IsSortedUntil is_sorted_until{};
+
+struct IsSorted {
+    template <forward_iterator I, sentinel_for<I> S, class Proj = identity,
+              indirect_strict_weak_order<projected<I, Proj>> Comp = ranges::less>
+    constexpr bool operator()(I first, S last, Comp comp = {},
+                              Proj proj = {}) const
+    {
+        return is_sorted_until(std::move(first), last, std::move(comp),
+                               std::move(proj)) == last;
+    }
+    template <forward_range R, class Proj = identity,
+              indirect_strict_weak_order<projected<iterator_t<R>, Proj>> Comp =
+                  ranges::less>
+    constexpr bool operator()(R &&r, Comp comp = {}, Proj proj = {}) const
+    {
+        return (*this)(ranges::begin(r), ranges::end(r), std::move(comp),
+                       std::move(proj));
+    }
+};
+inline constexpr IsSorted is_sorted{};
+
+struct LowerBound {
+    template <forward_iterator I, sentinel_for<I> S,
+              class T = projected_value_t<I, identity>, class Proj = identity,
+              indirect_strict_weak_order<const T *, projected<I, Proj>> Comp =
+                  ranges::less>
+    constexpr I operator()(I first, S last, const T &value, Comp comp = {},
+                           Proj proj = {}) const
+    {
+        auto len = ranges::distance(first, last);
+        while (len > 0) {
+            auto half = len / 2;
+            I mid     = ranges::next(first, half);
+            if (std::invoke(comp, std::invoke(proj, *mid), value)) {
+                first = std::move(mid);
+                ++first;
+                len -= half + 1;
+            } else
+                len = half;
+        }
+        return first;
+    }
+    template <forward_range R,
+              class T = projected_value_t<iterator_t<R>, identity>,
+              class Proj = identity,
+              indirect_strict_weak_order<const T *, projected<iterator_t<R>,
+                                                              Proj>> Comp =
+                  ranges::less>
+    constexpr borrowed_iterator_t<R> operator()(R &&r, const T &value,
+                                                Comp comp = {},
+                                                Proj proj = {}) const
+    {
+        return (*this)(ranges::begin(r), ranges::end(r), value, std::move(comp),
+                       std::move(proj));
+    }
+};
+inline constexpr LowerBound lower_bound{};
+
+struct UpperBound {
+    template <forward_iterator I, sentinel_for<I> S,
+              class T = projected_value_t<I, identity>, class Proj = identity,
+              indirect_strict_weak_order<const T *, projected<I, Proj>> Comp =
+                  ranges::less>
+    constexpr I operator()(I first, S last, const T &value, Comp comp = {},
+                           Proj proj = {}) const
+    {
+        auto len = ranges::distance(first, last);
+        while (len > 0) {
+            auto half = len / 2;
+            I mid     = ranges::next(first, half);
+            if (std::invoke(comp, value, std::invoke(proj, *mid)))
+                len = half;
+            else {
+                first = std::move(mid);
+                ++first;
+                len -= half + 1;
+            }
+        }
+        return first;
+    }
+    template <forward_range R,
+              class T = projected_value_t<iterator_t<R>, identity>,
+              class Proj = identity,
+              indirect_strict_weak_order<const T *, projected<iterator_t<R>,
+                                                              Proj>> Comp =
+                  ranges::less>
+    constexpr borrowed_iterator_t<R> operator()(R &&r, const T &value,
+                                                Comp comp = {},
+                                                Proj proj = {}) const
+    {
+        return (*this)(ranges::begin(r), ranges::end(r), value, std::move(comp),
+                       std::move(proj));
+    }
+};
+inline constexpr UpperBound upper_bound{};
+
+struct EqualRange {
+    template <forward_iterator I, sentinel_for<I> S,
+              class T = projected_value_t<I, identity>, class Proj = identity,
+              indirect_strict_weak_order<const T *, projected<I, Proj>> Comp =
+                  ranges::less>
+    constexpr subrange<I> operator()(I first, S last, const T &value,
+                                     Comp comp = {}, Proj proj = {}) const
+    {
+        I lo = lower_bound(first, last, value, comp, proj);
+        I hi = upper_bound(lo, std::move(last), value, comp, proj);
+        return {std::move(lo), std::move(hi)};
+    }
+    template <forward_range R,
+              class T = projected_value_t<iterator_t<R>, identity>,
+              class Proj = identity,
+              indirect_strict_weak_order<const T *, projected<iterator_t<R>,
+                                                              Proj>> Comp =
+                  ranges::less>
+    constexpr borrowed_subrange_t<R> operator()(R &&r, const T &value,
+                                                Comp comp = {},
+                                                Proj proj = {}) const
+    {
+        return (*this)(ranges::begin(r), ranges::end(r), value, std::move(comp),
+                       std::move(proj));
+    }
+};
+inline constexpr EqualRange equal_range{};
+
+struct BinarySearch {
+    template <forward_iterator I, sentinel_for<I> S,
+              class T = projected_value_t<I, identity>, class Proj = identity,
+              indirect_strict_weak_order<const T *, projected<I, Proj>> Comp =
+                  ranges::less>
+    constexpr bool operator()(I first, S last, const T &value, Comp comp = {},
+                              Proj proj = {}) const
+    {
+        I lo = lower_bound(std::move(first), last, value, comp, proj);
+        return lo != last &&
+               !std::invoke(comp, value, std::invoke(proj, *lo));
+    }
+    template <forward_range R,
+              class T = projected_value_t<iterator_t<R>, identity>,
+              class Proj = identity,
+              indirect_strict_weak_order<const T *, projected<iterator_t<R>,
+                                                              Proj>> Comp =
+                  ranges::less>
+    constexpr bool operator()(R &&r, const T &value, Comp comp = {},
+                              Proj proj = {}) const
+    {
+        return (*this)(ranges::begin(r), ranges::end(r), value, std::move(comp),
+                       std::move(proj));
+    }
+};
+inline constexpr BinarySearch binary_search{};
+
+// ════════════════════════════════════════════════════════════════════════
+// lexicographical_compare ([alg.lex.comparison])
+// ════════════════════════════════════════════════════════════════════════
+
+struct LexicographicalCompare {
+    template <input_iterator I1, sentinel_for<I1> S1, input_iterator I2,
+              sentinel_for<I2> S2, class Proj1 = identity, class Proj2 = identity,
+              indirect_strict_weak_order<projected<I1, Proj1>,
+                                         projected<I2, Proj2>> Comp = ranges::less>
+    constexpr bool operator()(I1 first1, S1 last1, I2 first2, S2 last2,
+                              Comp comp = {}, Proj1 proj1 = {},
+                              Proj2 proj2 = {}) const
+    {
+        for (; first1 != last1 && first2 != last2; ++first1, ++first2) {
+            if (std::invoke(comp, std::invoke(proj1, *first1),
+                            std::invoke(proj2, *first2)))
+                return true;
+            if (std::invoke(comp, std::invoke(proj2, *first2),
+                            std::invoke(proj1, *first1)))
+                return false;
+        }
+        return first1 == last1 && first2 != last2;
+    }
+    template <input_range R1, input_range R2, class Proj1 = identity,
+              class Proj2 = identity,
+              indirect_strict_weak_order<projected<iterator_t<R1>, Proj1>,
+                                         projected<iterator_t<R2>, Proj2>> Comp =
+                  ranges::less>
+    constexpr bool operator()(R1 &&r1, R2 &&r2, Comp comp = {},
+                              Proj1 proj1 = {}, Proj2 proj2 = {}) const
+    {
+        return (*this)(ranges::begin(r1), ranges::end(r1), ranges::begin(r2),
+                       ranges::end(r2), std::move(comp), std::move(proj1),
+                       std::move(proj2));
+    }
+};
+inline constexpr LexicographicalCompare lexicographical_compare{};
+
+} // namespace ranges
+} // namespace std
+
+#endif // BOXCXX_BITS_RANGES_ALGO_FOLD

@@ -1485,4 +1485,10 @@ constexpr bool prev_permutation(It first, It last)
 
 } // namespace std
 
+// The ranges:: constrained algorithms ([algorithms.results] + the niebloids)
+// build on everything above plus the Ф29a indirect-callable foundation.
+// ranges_algo_fold is second — it consumes result-types from ranges_algo.
+#include <__bits/ranges_algo>
+#include <__bits/ranges_algo_fold>
+
 #endif // BOXCXX_ALGORITHM

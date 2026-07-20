@@ -698,6 +698,128 @@ inline namespace __cpo {
 inline constexpr __iter_swap::Fn iter_swap{};
 }
 
+// ── ranges::advance / next / prev / distance ([range.iter.op]) ───────────
+// Niebloids over raw (iterator, sentinel/count) pairs — the ranges algorithms
+// (and fold_right / find_last, which must walk a sentinel down to a real I
+// via next(first,last)) build on these. The range-taking distance(R&&)
+// overload is deliberately omitted here: it needs the range concepts that
+// live in <ranges> (which includes THIS header, not the reverse) — spell
+// distance(begin(r), end(r)) instead.
+
+struct Advance {
+    template <input_or_output_iterator I>
+    constexpr void operator()(I &i, iter_difference_t<I> n) const
+    {
+        if constexpr (random_access_iterator<I>)
+            i += n;
+        else if constexpr (bidirectional_iterator<I>) {
+            for (; n > 0; --n) ++i;
+            for (; n < 0; ++n) --i;
+        } else
+            for (; n > 0; --n) ++i;
+    }
+    template <input_or_output_iterator I, sentinel_for<I> S>
+    constexpr void operator()(I &i, S bound) const
+    {
+        if constexpr (assignable_from<I &, S>)
+            i = std::move(bound);
+        else if constexpr (sized_sentinel_for<S, I>)
+            (*this)(i, bound - i);
+        else
+            while (i != bound) ++i;
+    }
+    template <input_or_output_iterator I, sentinel_for<I> S>
+    constexpr iter_difference_t<I> operator()(I &i, iter_difference_t<I> n,
+                                              S bound) const
+    {
+        if constexpr (sized_sentinel_for<S, I>) {
+            auto m = bound - i; // signed steps remaining to bound
+            // |n| >= |m| ⇒ equivalent to advance(i, bound) (covers m == 0,
+            // where any n is a no-op — guarding on m's sign would wrongly
+            // exclude m == 0 with n < 0 and overshoot past bound).
+            if ((n >= 0 && n >= m) || (n < 0 && n <= m)) {
+                (*this)(i, std::move(bound));
+                return n - m;
+            }
+            (*this)(i, n);
+            return 0;
+        } else if constexpr (bidirectional_iterator<I>) {
+            for (; n > 0 && i != bound; --n) ++i;
+            for (; n < 0 && i != bound; ++n) --i;
+            return n;
+        } else {
+            for (; n > 0 && i != bound; --n) ++i;
+            return n;
+        }
+    }
+};
+inline constexpr Advance advance{};
+
+struct Next {
+    template <input_or_output_iterator I>
+    constexpr I operator()(I x) const
+    {
+        ++x;
+        return x;
+    }
+    template <input_or_output_iterator I>
+    constexpr I operator()(I x, iter_difference_t<I> n) const
+    {
+        advance(x, n);
+        return x;
+    }
+    template <input_or_output_iterator I, sentinel_for<I> S>
+    constexpr I operator()(I x, S bound) const
+    {
+        advance(x, std::move(bound));
+        return x;
+    }
+    template <input_or_output_iterator I, sentinel_for<I> S>
+    constexpr I operator()(I x, iter_difference_t<I> n, S bound) const
+    {
+        advance(x, n, std::move(bound));
+        return x;
+    }
+};
+inline constexpr Next next{};
+
+struct Prev {
+    template <bidirectional_iterator I>
+    constexpr I operator()(I x) const
+    {
+        --x;
+        return x;
+    }
+    template <bidirectional_iterator I>
+    constexpr I operator()(I x, iter_difference_t<I> n) const
+    {
+        advance(x, -n);
+        return x;
+    }
+    template <bidirectional_iterator I>
+    constexpr I operator()(I x, iter_difference_t<I> n, I bound) const
+    {
+        advance(x, -n, bound);
+        return x;
+    }
+};
+inline constexpr Prev prev{};
+
+struct Distance {
+    template <input_or_output_iterator I, sentinel_for<I> S>
+    constexpr iter_difference_t<I> operator()(I first, S last) const
+    {
+        if constexpr (sized_sentinel_for<S, I>)
+            return last - first;
+        else {
+            iter_difference_t<I> n = 0;
+            for (; first != last; ++first) ++n;
+            return n;
+        }
+    }
+};
+inline constexpr Distance distance{};
+
 } // namespace ranges
 
 // ════════════════════════════════════════════════════════════════════════
@@ -811,6 +933,15 @@ struct projected : __iter_impl::ProjectedDiff<I> {
     using value_type = remove_cvref_t<indirect_result_t<Proj &, I>>;
     indirect_result_t<Proj &, I> operator*() const; // declared, never defined
 };
+
+// The value-type projection default that the ranges algorithms spell as
+// `class T = projected_value_t<I, Proj>` (find/count/lower_bound/…). Projects
+// the VALUE type by lvalue (iter_value_t<I>&), NOT iter_reference_t<I> — the
+// two coincide for every non-proxy iterator but differ for proxy iterators,
+// and the value-based form is the one [projected] / LWG 3859 mandate.
+template <indirectly_readable I, indirectly_regular_unary_invocable<I> Proj>
+using projected_value_t =
+    remove_cvref_t<invoke_result_t<Proj &, iter_value_t<I> &>>;
 
 namespace __iter_impl {
 template <typename I, typename Proj>

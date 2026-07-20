@@ -13654,6 +13654,184 @@ void Phase87()
            "dangling/borrowed_iterator_t/borrowed_subrange_t\n");
 }
 
+// ── phase88 fixture: proves equal()'s sized short-circuit skips the pred ──
+struct P88CountingEqual {
+    static inline int calls = 0;
+    bool operator()(int a, int b) const
+    {
+        ++calls;
+        return a == b;
+    }
+};
+
+static_assert(std::same_as<decltype(std::ranges::find), const std::ranges::Find>);
+static_assert(std::convertible_to<std::ranges::in_in_result<int *, int *>,
+                                  std::ranges::in_in_result<std::ranges::dangling,
+                                                            std::ranges::dangling>>);
+static_assert(std::same_as<decltype(std::ranges::find(std::declval<std::vector<int>>(), 1)),
+                           std::ranges::dangling>);
+static_assert(std::same_as<decltype(std::ranges::search(std::declval<std::vector<int>>(),
+                                                        std::declval<std::vector<int> &>())),
+                           std::ranges::dangling>);
+static_assert(std::same_as<decltype(std::ranges::min_element(std::declval<std::vector<int>>())),
+                           std::ranges::dangling>);
+static_assert(std::same_as<decltype(std::ranges::equal_range(std::declval<std::vector<int>>(), 1)),
+                           std::ranges::dangling>);
+
+void Phase88()
+{
+    namespace rg = std::ranges;
+    std::vector<int> v{5, 2, 8, 1, 9, 3};
+    std::vector<Point> pts{{3, 1}, {1, 2}, {2, 3}};
+    std::list<int> lst{1, 2, 3, 4, 5};
+
+    // all_of / any_of / none_of + dual (range and iterator,sentinel) form.
+    Check(rg::all_of(v, [](int x) { return x > 0; }), "phase88 all_of range");
+    Check(rg::all_of(v.begin(), v.end(), [](int x) { return x > 0; }), "phase88 all_of iter");
+    Check(rg::any_of(v, [](int x) { return x == 8; }), "phase88 any_of");
+    Check(rg::none_of(v, [](int x) { return x > 100; }), "phase88 none_of");
+
+    // for_each (result .in) + for_each_n (iterator-only).
+    int sum   = 0;
+    auto fres = rg::for_each(v, [&](int x) { sum += x; });
+    Check(sum == 28 && fres.in == v.end(), "phase88 for_each");
+    sum = 0;
+    rg::for_each_n(v.begin(), 3, [&](int x) { sum += x; });
+    Check(sum == 15, "phase88 for_each_n");
+
+    // count / count_if.
+    Check(rg::count(lst, 3) == 1, "phase88 count");
+    Check(rg::count_if(v, [](int x) { return x % 2 == 0; }) == 2, "phase88 count_if");
+
+    // projection (member pointer) + find family.
+    Check(rg::find(pts, 2, &Point::x) == pts.begin() + 2, "phase88 find proj member");
+    Check(rg::find(v, 8) == v.begin() + 2, "phase88 find range");
+    Check(rg::find(v.begin(), v.end(), 8) == v.begin() + 2, "phase88 find iter form");
+    Check(rg::find_if(v, [](int x) { return x > 5; }) == v.begin() + 2, "phase88 find_if");
+    Check(rg::find_if_not(v, [](int x) { return x < 5; }) == v.begin(), "phase88 find_if_not");
+
+    // mismatch (structured binding).
+    std::vector<int> a1{1, 2, 3, 9}, a2{1, 2, 3, 4};
+    auto [mm1, mm2] = rg::mismatch(a1, a2);
+    Check(mm1 == a1.begin() + 3 && mm2 == a2.begin() + 3, "phase88 mismatch");
+
+    // equal + sized short-circuit proven (0 pred calls on length mismatch).
+    Check(rg::equal(a1, a1), "phase88 equal same");
+    Check(!rg::equal(a1, a2), "phase88 equal diff content");
+    P88CountingEqual::calls = 0;
+    std::vector<int> s1{1, 2, 3}, s2{1, 2};
+    Check(!rg::equal(s1, s2, P88CountingEqual{}), "phase88 equal length mismatch false");
+    Check(P88CountingEqual::calls == 0, "phase88 equal sized short-circuit skips pred");
+
+    // find_last (subrange = [last-match, end)).
+    std::vector<int> dups{1, 3, 2, 3, 4, 3, 5};
+    auto fl = rg::find_last(dups, 3);
+    Check(fl.begin() == dups.begin() + 5 && !fl.empty(), "phase88 find_last picks last");
+    Check(rg::find_last(dups, 99).empty(), "phase88 find_last miss empty");
+
+    // find_end / find_first_of / adjacent_find.
+    std::vector<int> hay{1, 2, 3, 1, 2, 3}, needle{1, 2};
+    Check(rg::find_end(hay, needle).begin() == hay.begin() + 3, "phase88 find_end last");
+    std::vector<int> of{7, 8, 2, 9}, setv{2, 8};
+    Check(rg::find_first_of(of, setv) == of.begin() + 1, "phase88 find_first_of");
+    std::vector<int> adj{1, 2, 2, 3};
+    Check(rg::adjacent_find(adj) == adj.begin() + 1, "phase88 adjacent_find");
+
+    // search / search_n.
+    auto sr = rg::search(hay, needle);
+    Check(sr.begin() == hay.begin() && sr.end() == hay.begin() + 2, "phase88 search");
+    std::vector<int> runs{1, 4, 4, 4, 2};
+    Check(rg::search_n(runs, 3, 4).begin() == runs.begin() + 1, "phase88 search_n");
+
+    // contains / contains_subrange / starts_with / ends_with.
+    Check(rg::contains(v, 9) && !rg::contains(v, 100), "phase88 contains");
+    Check(rg::contains_subrange(hay, needle), "phase88 contains_subrange");
+    Check(rg::starts_with(hay, needle), "phase88 starts_with");
+    std::vector<int> tail{2, 3};
+    Check(rg::ends_with(hay, tail), "phase88 ends_with");
+    Check(!rg::starts_with(hay, tail), "phase88 starts_with false");
+
+    // min / max / minmax / clamp.
+    Check(rg::min(3, 7) == 3 && rg::max(3, 7) == 7, "phase88 min/max 2-arg");
+    Check(rg::min({4, 1, 7, 2}) == 1, "phase88 min ilist");
+    Check(rg::max(v) == 9, "phase88 max range");
+    auto mm = rg::minmax(v);
+    Check(mm.min == 1 && mm.max == 9, "phase88 minmax range");
+    Check(rg::clamp(15, 0, 10) == 10 && rg::clamp(-5, 0, 10) == 0 &&
+              rg::clamp(5, 0, 10) == 5,
+          "phase88 clamp");
+
+    // *_element + the last-max / leftmost-max asymmetry.
+    Check(rg::min_element(v) == v.begin() + 3, "phase88 min_element");
+    Check(rg::max_element(v) == v.begin() + 4, "phase88 max_element");
+    Check(rg::min_element(pts, {}, &Point::y) == pts.begin(), "phase88 min_element proj");
+    std::vector<int> tie{3, 1, 3};
+    auto mme = rg::minmax_element(tie);
+    Check(mme.min == tie.begin() + 1 && mme.max == tie.begin() + 2,
+          "phase88 minmax_element last-max");
+    Check(rg::max_element(tie) == tie.begin(), "phase88 max_element leftmost-max");
+    std::vector<Point> mxtie{{5, 10}, {5, 20}};
+    Check(rg::max(mxtie, {}, &Point::x).y == 10, "phase88 max range leftmost on tie");
+
+    // is_sorted + binary search on a sorted range.
+    std::vector<int> srt{1, 2, 2, 2, 4, 5};
+    Check(rg::is_sorted(srt) && !rg::is_sorted(v), "phase88 is_sorted");
+    Check(rg::is_sorted_until(v) == v.begin() + 1, "phase88 is_sorted_until");
+    Check(rg::lower_bound(srt, 2) == srt.begin() + 1, "phase88 lower_bound");
+    Check(rg::upper_bound(srt, 2) == srt.begin() + 4, "phase88 upper_bound");
+    auto er = rg::equal_range(srt, 2);
+    Check(er.begin() == srt.begin() + 1 && er.end() == srt.begin() + 4, "phase88 equal_range");
+    Check(rg::binary_search(srt, 4) && !rg::binary_search(srt, 3), "phase88 binary_search");
+
+    // lexicographical_compare.
+    Check(rg::lexicographical_compare(std::vector<int>{1, 2, 3}, std::vector<int>{1, 2, 4}),
+          "phase88 lex less");
+    Check(!rg::lexicographical_compare(std::vector<int>{1, 2, 4}, std::vector<int>{1, 2, 3}),
+          "phase88 lex not-less");
+
+    // fold family — direction distinguished by non-commutative minus.
+    std::vector<int> fr{1, 2, 3, 4};
+    Check(rg::fold_left(v, 0, std::plus<>{}) == 28, "phase88 fold_left sum");
+    Check(rg::fold_left(fr, 0, std::minus<>{}) == -10, "phase88 fold_left minus");
+    Check(rg::fold_right(fr, 0, std::minus<>{}) == -2, "phase88 fold_right minus");
+    auto flf = rg::fold_left_first(fr, std::plus<>{});
+    Check(flf.has_value() && *flf == 10, "phase88 fold_left_first");
+    Check(!rg::fold_left_first(std::vector<int>{}, std::plus<>{}).has_value(),
+          "phase88 fold_left_first empty");
+    auto frl = rg::fold_right_last(fr, std::plus<>{});
+    Check(frl.has_value() && *frl == 10, "phase88 fold_right_last");
+    Check(!rg::fold_right_last(std::vector<int>{}, std::plus<>{}).has_value(),
+          "phase88 fold_right_last empty");
+    auto fli = rg::fold_left_with_iter(fr, 0, std::plus<>{});
+    Check(fli.in == fr.end() && fli.value == 10, "phase88 fold_left_with_iter");
+
+    // sentinel-distinct forms (counted_iterator + default_sentinel; no <numeric>).
+    Check(rg::fold_left(std::counted_iterator(lst.begin(), 3), std::default_sentinel, 0,
+                        std::plus<>{}) == 6,
+          "phase88 fold sentinel form");
+
+    // range.iter.op niebloids (new public API).
+    auto it = lst.begin();
+    rg::advance(it, 2);
+    Check(*it == 3, "phase88 ranges::advance");
+    Check(*rg::next(lst.begin(), 4) == 5, "phase88 ranges::next");
+    Check(*rg::prev(lst.end(), 2) == 4, "phase88 ranges::prev");
+    Check(rg::distance(lst.begin(), lst.end()) == 5, "phase88 ranges::distance");
+    Check(rg::distance(std::counted_iterator(lst.begin(), 3), std::default_sentinel) == 3,
+          "phase88 distance sentinel");
+    // advance(i, n<0, bound) with i already AT bound (m==0) must be a no-op,
+    // not overshoot past bound — random-access iterator exercises the
+    // sized-sentinel branch. Same via the public prev(i, n, bound).
+    std::vector<int> av{1, 2, 3};
+    auto ab = av.begin();
+    rg::advance(ab, -3, av.begin());
+    Check(ab == av.begin(), "phase88 advance neg-at-bound no overshoot");
+    Check(rg::prev(av.begin(), 3, av.begin()) == av.begin(), "phase88 prev clamped at bound");
+
+    printf("[CXX] PASS phase88: ranges non-modifying/search + fold + "
+           "min/max/binary-search/lex + range.iter.op\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -13763,6 +13941,7 @@ int main()
     Phase85();
     Phase86();
     Phase87();
+    Phase88();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

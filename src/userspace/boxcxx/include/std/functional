@@ -449,6 +449,20 @@ struct less {
     using is_transparent = void;
 };
 
+// ── ranges::equal_to ([range.cmp]) ──────────────────────────────────────
+// Default comparison for the ranges find/count/mismatch/equal/search/… family
+// (Ф29b). Mirrors ranges::less minus the pointer-total-order branch —
+// pointer equality needs no special case.
+struct equal_to {
+    template <class T, class U>
+        requires equality_comparable_with<T, U>
+    constexpr bool operator()(T &&t, U &&u) const
+    {
+        return std::forward<T>(t) == std::forward<U>(u);
+    }
+    using is_transparent = void;
+};
+
 } // namespace ranges
 
 // Gating concepts for heterogeneous lookup ([container.requirements] the
