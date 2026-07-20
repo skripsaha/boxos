@@ -1,11 +1,11 @@
 // boxcxx — <map>
 // map / multimap over the shared red-black tree engine
-// (__bits/rb_tree). Deferred per the leftovers tracker: node_handle
-// extract/merge, ranges-taking members.
+// (__bits/rb_tree). node_handle extract/insert(node)/merge shipped Ф28a.
 #ifndef BOXCXX_MAP
 #define BOXCXX_MAP
 
 #include <__bits/rb_tree>
+#include <__bits/node_handle>
 #include <__bits/throw_helpers>
 #include <compare>
 #include <functional>
@@ -26,6 +26,10 @@ struct SelectFirst {
 };
 
 } // namespace __rb
+
+// multimap named by map::merge below (defined later in this header).
+template <typename Key, typename T, typename Comp, typename Alloc>
+class multimap;
 
 template <typename Key, typename T, typename Comp = less<Key>,
           typename Alloc = allocator<pair<const Key, T>>>
@@ -48,6 +52,9 @@ public:
     using const_iterator  = typename TreeT::const_iterator;
     using reverse_iterator       = std::reverse_iterator<iterator>;
     using const_reverse_iterator = std::reverse_iterator<const_iterator>;
+    using node_type = __node::NodeHandle<Key, value_type, typename TreeT::NodeType,
+                                         typename TreeT::NodeAllocType>;
+    using insert_return_type = __node::NodeInsertReturn<iterator, node_type>;
 
     class value_compare {
         friend class map;
@@ -213,6 +220,55 @@ public:
     void clear() noexcept { __t.clear(); }
     void swap(map &other) noexcept { __t.swap(other.__t); }
 
+    // ── node handle / merge (Ф28a) ──────────────────────────────────────
+
+    node_type extract(const_iterator pos)
+    {
+        return node_type(__t.ExtractNode(pos), __t.GetNodeAlloc());
+    }
+    node_type extract(const Key &key)
+    {
+        iterator it = find(key);
+        if (it == end()) return node_type();
+        return extract(const_iterator(it));
+    }
+    insert_return_type insert(node_type &&nh)
+    {
+        if (nh.empty()) return {end(), false, node_type()};
+        auto [it, ok] = __t.ReinsertUnique(nh.__Ptr());
+        if (ok) nh.__Disown();
+        return {it, ok, std::move(nh)};
+    }
+    iterator insert(const_iterator, node_type &&nh)
+    {
+        // hint accepted, not exploited; on collision nh retains the node.
+        if (nh.empty()) return end();
+        auto [it, ok] = __t.ReinsertUnique(nh.__Ptr());
+        if (ok) nh.__Disown();
+        return it;
+    }
+    template <typename C2>
+    void merge(map<Key, T, C2, Alloc> &source)
+    {
+        __t.MergeUnique(source.__Tree());
+    }
+    template <typename C2>
+    void merge(map<Key, T, C2, Alloc> &&source)
+    {
+        __t.MergeUnique(source.__Tree());
+    }
+    template <typename C2>
+    void merge(multimap<Key, T, C2, Alloc> &source)
+    {
+        __t.MergeUnique(source.__Tree());
+    }
+    template <typename C2>
+    void merge(multimap<Key, T, C2, Alloc> &&source)
+    {
+        __t.MergeUnique(source.__Tree());
+    }
+    TreeT &__Tree() noexcept { return __t; }
+
     // ── lookup ──────────────────────────────────────────────────────────
 
     iterator find(const Key &key) { return __t.Find(key); }
@@ -266,8 +322,26 @@ public:
     using difference_type = ptrdiff_t;
     using key_compare     = Comp;
     using allocator_type  = Alloc;
+    using reference       = value_type &;
+    using const_reference = const value_type &;
     using iterator        = typename TreeT::iterator;
     using const_iterator  = typename TreeT::const_iterator;
+    using reverse_iterator       = std::reverse_iterator<iterator>;
+    using const_reverse_iterator = std::reverse_iterator<const_iterator>;
+    using node_type = __node::NodeHandle<Key, value_type, typename TreeT::NodeType,
+                                         typename TreeT::NodeAllocType>;
+
+    class value_compare {
+        friend class multimap;
+        Comp __c;
+        value_compare(Comp c) : __c(c) {}
+
+    public:
+        bool operator()(const value_type &a, const value_type &b) const
+        {
+            return __c(a.first, b.first);
+        }
+    };
 
     multimap() = default;
     explicit multimap(const Comp &comp, const Alloc &a = Alloc())
@@ -291,21 +365,53 @@ public:
     multimap(multimap &&) noexcept = default;
     multimap &operator=(const multimap &) = default;
     multimap &operator=(multimap &&) noexcept = default;
+    multimap &operator=(initializer_list<value_type> il)
+    {
+        clear();
+        insert(il.begin(), il.end());
+        return *this;
+    }
+
+    allocator_type get_allocator() const noexcept
+    {
+        return __t.get_allocator();
+    }
 
     iterator begin() noexcept { return __t.begin(); }
     const_iterator begin() const noexcept { return __t.begin(); }
+    const_iterator cbegin() const noexcept { return __t.begin(); }
     iterator end() noexcept { return __t.end(); }
     const_iterator end() const noexcept { return __t.end(); }
+    const_iterator cend() const noexcept { return __t.end(); }
+    reverse_iterator rbegin() noexcept { return reverse_iterator(end()); }
+    reverse_iterator rend() noexcept { return reverse_iterator(begin()); }
+
     [[nodiscard]] bool empty() const noexcept { return __t.empty(); }
     size_type size() const noexcept { return __t.size(); }
+    size_type max_size() const noexcept { return __t.max_size(); }
 
     iterator insert(const value_type &v) { return __t.EmplaceMulti(v); }
     iterator insert(value_type &&v)
     {
         return __t.EmplaceMulti(std::move(v));
     }
+    template <typename P>
+        requires is_constructible_v<value_type, P &&>
+    iterator insert(P &&v)
+    {
+        return __t.EmplaceMulti(std::forward<P>(v));
+    }
+    iterator insert(const_iterator, const value_type &v)
+    {
+        return __t.EmplaceMulti(v); // hint accepted, not exploited
+    }
     template <typename... Args>
     iterator emplace(Args &&...args)
+    {
+        return __t.EmplaceMulti(std::forward<Args>(args)...);
+    }
+    template <typename... Args>
+    iterator emplace_hint(const_iterator, Args &&...args)
     {
         return __t.EmplaceMulti(std::forward<Args>(args)...);
     }
@@ -320,11 +426,66 @@ public:
     }
 
     iterator erase(const_iterator where) { return __t.Erase(where); }
+    iterator erase(iterator where) { return __t.Erase(where); }
+    iterator erase(const_iterator first, const_iterator last)
+    {
+        while (first != last) first = __t.Erase(first);
+        return iterator(first.__n);
+    }
     size_type erase(const Key &key) { return __t.EraseKey(key); }
     void clear() noexcept { __t.clear(); }
     void swap(multimap &other) noexcept { __t.swap(other.__t); }
 
+    // ── node handle / merge (Ф28a) ──────────────────────────────────────
+
+    node_type extract(const_iterator pos)
+    {
+        return node_type(__t.ExtractNode(pos), __t.GetNodeAlloc());
+    }
+    node_type extract(const Key &key)
+    {
+        iterator it = __t.Find(key);
+        if (it == end()) return node_type();
+        return extract(const_iterator(it));
+    }
+    iterator insert(node_type &&nh)
+    {
+        if (nh.empty()) return end();
+        iterator it = __t.ReinsertMulti(nh.__Ptr());
+        nh.__Disown();
+        return it;
+    }
+    iterator insert(const_iterator, node_type &&nh)
+    {
+        return insert(std::move(nh));
+    }
+    template <typename C2>
+    void merge(map<Key, T, C2, Alloc> &source)
+    {
+        __t.MergeMulti(source.__Tree());
+    }
+    template <typename C2>
+    void merge(map<Key, T, C2, Alloc> &&source)
+    {
+        __t.MergeMulti(source.__Tree());
+    }
+    template <typename C2>
+    void merge(multimap<Key, T, C2, Alloc> &source)
+    {
+        __t.MergeMulti(source.__Tree());
+    }
+    template <typename C2>
+    void merge(multimap<Key, T, C2, Alloc> &&source)
+    {
+        __t.MergeMulti(source.__Tree());
+    }
+    TreeT &__Tree() noexcept { return __t; }
+
     iterator find(const Key &key) { return __t.Find(key); }
+    const_iterator find(const Key &key) const
+    {
+        return const_cast<multimap *>(this)->__t.Find(key);
+    }
     size_type count(const Key &key) const
     {
         return const_cast<multimap *>(this)->__t.Count(key);
@@ -334,12 +495,25 @@ public:
         return const_cast<multimap *>(this)->__t.Find(key) != end();
     }
     iterator lower_bound(const Key &key) { return __t.LowerBound(key); }
+    const_iterator lower_bound(const Key &key) const
+    {
+        return const_cast<multimap *>(this)->__t.LowerBound(key);
+    }
     iterator upper_bound(const Key &key) { return __t.UpperBound(key); }
+    const_iterator upper_bound(const Key &key) const
+    {
+        return const_cast<multimap *>(this)->__t.UpperBound(key);
+    }
     pair<iterator, iterator> equal_range(const Key &key)
     {
         return {__t.LowerBound(key), __t.UpperBound(key)};
     }
+    pair<const_iterator, const_iterator> equal_range(const Key &key) const
+    {
+        return {lower_bound(key), upper_bound(key)};
+    }
     key_compare key_comp() const { return __t.key_comp(); }
+    value_compare value_comp() const { return value_compare(__t.key_comp()); }
 
 private:
     TreeT __t;
@@ -388,6 +562,22 @@ template <typename K, typename T, typename C, typename A, typename Pred>
 typename map<K, T, C, A>::size_type erase_if(map<K, T, C, A> &m, Pred pred)
 {
     typename map<K, T, C, A>::size_type removed = 0;
+    for (auto it = m.begin(); it != m.end();) {
+        if (pred(*it)) {
+            it = m.erase(it);
+            ++removed;
+        } else {
+            ++it;
+        }
+    }
+    return removed;
+}
+
+template <typename K, typename T, typename C, typename A, typename Pred>
+typename multimap<K, T, C, A>::size_type
+erase_if(multimap<K, T, C, A> &m, Pred pred)
+{
+    typename multimap<K, T, C, A>::size_type removed = 0;
     for (auto it = m.begin(); it != m.end();) {
         if (pred(*it)) {
             it = m.erase(it);
