@@ -4,6 +4,7 @@
 #ifndef BOXCXX_FUNCTIONAL
 #define BOXCXX_FUNCTIONAL
 
+#include <concepts>
 #include <type_traits>
 #include <utility>
 
@@ -422,6 +423,33 @@ struct identity {
     { return forward<T>(t); }
     using is_transparent = void;
 };
+
+// ── ranges::less ([range.cmp]) ──────────────────────────────────────────
+// The constrained comparison object that is the default predicate for the
+// ranges algorithms and for the sortable/mergeable concepts (<iterator>).
+// Unlike std::less it requires totally_ordered_with of the two operands and
+// routes raw-pointer operands through std::less<common_type> — a bare
+// operator< across unrelated pointers is unspecified, std::less<T*> is the
+// standard's total-order hook.
+namespace ranges {
+
+struct less {
+    template <class T, class U>
+        requires totally_ordered_with<T, U>
+    constexpr bool operator()(T &&a, U &&b) const
+    {
+        if constexpr (is_pointer_v<remove_reference_t<T>> &&
+                      is_pointer_v<remove_reference_t<U>>)
+            return std::less<common_type_t<remove_reference_t<T>,
+                                           remove_reference_t<U>>>{}(
+                std::forward<T>(a), std::forward<U>(b));
+        else
+            return std::forward<T>(a) < std::forward<U>(b);
+    }
+    using is_transparent = void;
+};
+
+} // namespace ranges
 
 // Gating concepts for heterogeneous lookup ([container.requirements] the
 // Compare/Hash+KeyEqual "is_transparent" opt-in). Associative containers use
