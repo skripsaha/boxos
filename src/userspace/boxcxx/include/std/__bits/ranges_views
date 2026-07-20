@@ -1119,6 +1119,104 @@ inline constexpr Transform transform{};
 
 } // namespace views
 
+// ── common_view ([range.common]) ────────────────────────────────────────
+// Turns a non-common view (iterator ≠ sentinel) into a common_range by
+// wrapping both ends in common_iterator — unless the base is already
+// random-access + sized, in which case begin()+size() gives a genuine common
+// iterator pair with no wrapping cost.
+
+template <view V>
+    requires(!common_range<V>) && copyable<iterator_t<V>>
+class common_view : public view_interface<common_view<V>> {
+    V __base = V();
+
+public:
+    common_view()
+        requires default_initializable<V>
+    = default;
+    constexpr explicit common_view(V base) : __base(std::move(base)) {}
+
+    constexpr V base() const &
+        requires copy_constructible<V>
+    {
+        return __base;
+    }
+    constexpr V base() && { return std::move(__base); }
+
+    constexpr auto begin()
+    {
+        if constexpr (random_access_range<V> && sized_range<V>)
+            return ranges::begin(__base);
+        else
+            return common_iterator<iterator_t<V>, sentinel_t<V>>(
+                ranges::begin(__base));
+    }
+    constexpr auto begin() const
+        requires range<const V>
+    {
+        if constexpr (random_access_range<const V> && sized_range<const V>)
+            return ranges::begin(__base);
+        else
+            return common_iterator<iterator_t<const V>, sentinel_t<const V>>(
+                ranges::begin(__base));
+    }
+    constexpr auto end()
+    {
+        if constexpr (random_access_range<V> && sized_range<V>)
+            return ranges::begin(__base) + ranges::size(__base);
+        else
+            return common_iterator<iterator_t<V>, sentinel_t<V>>(
+                ranges::end(__base));
+    }
+    constexpr auto end() const
+        requires range<const V>
+    {
+        if constexpr (random_access_range<const V> && sized_range<const V>)
+            return ranges::begin(__base) + ranges::size(__base);
+        else
+            return common_iterator<iterator_t<const V>, sentinel_t<const V>>(
+                ranges::end(__base));
+    }
+
+    constexpr auto size()
+        requires sized_range<V>
+    {
+        return ranges::size(__base);
+    }
+    constexpr auto size() const
+        requires sized_range<const V>
+    {
+        return ranges::size(__base);
+    }
+};
+
+template <typename R>
+common_view(R &&) -> common_view<views::all_t<R>>;
+
+// common_iterator only holds a COPY of the base's iterator/sentinel, never a
+// back-pointer to the view, so borrowed-ness propagates from the base.
+template <typename T>
+inline constexpr bool enable_borrowed_range<common_view<T>> =
+    enable_borrowed_range<T>;
+
+namespace views {
+
+struct Common : RangeAdaptorClosureBase {
+    template <viewable_range R>
+        requires common_range<R> || requires { common_view(declval<R>()); }
+    constexpr auto operator()(R &&r) const
+    {
+        if constexpr (common_range<R>)
+            return views::all(std::forward<R>(r));
+        else
+            return common_view(std::forward<R>(r));
+    }
+};
+
+inline constexpr Common common{};
+
+} // namespace views
+
 // subrange's get lives in std::ranges so structured-binding ADL — which
 // searches only the class's own namespace — finds it.
 template <size_t Index, typename I, typename S, subrange_kind K>

@@ -13533,6 +13533,127 @@ void Phase86()
            "erase(first,last), insert(P&&), const equal_range\n");
 }
 
+// ── phase87 fixtures: negative controls for the indirect-callable concepts ──
+struct VoidReturner {
+    void operator()(int) const {}
+};
+struct StringOnlyLess {
+    bool operator()(const char *, const char *) const; // decl-only, unevaluated
+};
+
+// projected + indirect_result_t + the indirect-callable concepts (accept the
+// right callables, REJECT the wrong ones).
+static_assert(std::indirectly_readable<std::projected<int *, std::identity>>);
+static_assert(std::same_as<std::iter_value_t<std::projected<int *, std::identity>>, int>);
+static_assert(std::same_as<std::iter_reference_t<std::projected<int *, std::identity>>, int &>);
+static_assert(std::indirectly_regular_unary_invocable<std::identity, int *>);
+static_assert(std::indirect_unary_predicate<decltype([](int x) { return x > 0; }),
+                                            std::projected<int *, std::identity>>);
+static_assert(!std::indirect_unary_predicate<VoidReturner, std::projected<int *, std::identity>>);
+static_assert(std::indirect_binary_predicate<std::ranges::less,
+                                             std::projected<int *, std::identity>,
+                                             std::projected<int *, std::identity>>);
+static_assert(std::same_as<std::indirect_result_t<std::identity &, int *>, int &>);
+
+// indirect movement / copy / swap / compare.
+static_assert(std::indirectly_movable<int *, int *>);
+static_assert(std::indirectly_movable_storable<int *, int *>);
+static_assert(std::indirectly_copyable_storable<int *, int *>);
+static_assert(!std::indirectly_writable<const int *, int>);
+static_assert(std::indirectly_swappable<int *>);
+static_assert(!std::indirectly_swappable<const int *>);
+static_assert(std::indirectly_comparable<int *, int *, std::ranges::less>);
+
+// algorithm-requirement concepts.
+static_assert(std::permutable<int *>);
+static_assert(!std::permutable<const int *>);         // forward, but not movable_storable
+static_assert(std::sortable<int *>);
+static_assert(!std::sortable<int *, StringOnlyLess>); // comparator/type mismatch
+static_assert(std::mergeable<int *, int *, int *>);
+
+// common_iterator over a genuinely distinct iterator/sentinel pair. list's
+// iterator is bidirectional, so counted_iterator over it is sized-but-not-RA —
+// forcing common_view down the real common_iterator-wrapping path (not the
+// random-access fast path).
+using P87CI = std::common_iterator<std::counted_iterator<std::list<int>::iterator>,
+                                   std::default_sentinel_t>;
+static_assert(!std::same_as<std::counted_iterator<std::list<int>::iterator>,
+                            std::default_sentinel_t>);
+static_assert(std::input_iterator<P87CI>);
+static_assert(std::same_as<std::iterator_traits<P87CI>::iterator_concept,
+                           std::forward_iterator_tag>);
+static_assert(std::same_as<std::iterator_traits<P87CI>::value_type, int>);
+static_assert(std::same_as<std::iterator_traits<P87CI>::difference_type, std::ptrdiff_t>);
+static_assert(std::same_as<std::iterator_traits<P87CI>::pointer, int *>);
+
+using P87Sub = std::ranges::subrange<std::counted_iterator<std::list<int>::iterator>,
+                                     std::default_sentinel_t>;
+static_assert(!std::ranges::common_range<P87Sub>);
+static_assert(std::ranges::common_range<decltype(std::views::common(std::declval<P87Sub &>()))>);
+static_assert(std::same_as<std::ranges::borrowed_iterator_t<std::vector<int> &>,
+                           std::vector<int>::iterator>);
+static_assert(std::same_as<std::ranges::borrowed_iterator_t<std::vector<int>>,
+                           std::ranges::dangling>);
+static_assert(std::same_as<std::ranges::borrowed_subrange_t<std::vector<int>>,
+                           std::ranges::dangling>);
+
+void Phase87()
+{
+    std::list<int> lst{1, 2, 3, 4, 5};
+
+    // projected with a real (non-identity) projection and a member-object
+    // pointer (exercises invoke's data-member path through projected).
+    std::vector<Point> pts{{3, 1}, {1, 2}, {2, 3}};
+    auto proj_x = [](Point &p) -> int & { return p.x; };
+    using P87PI = std::projected<std::vector<Point>::iterator, decltype(proj_x)>;
+    static_assert(std::same_as<std::iter_value_t<P87PI>, int>);
+    Check(std::invoke(proj_x, pts[0]) == 3, "phase87 projection sanity");
+    using P87PMember = std::projected<std::vector<Point>::iterator, int Point::*>;
+    static_assert(std::same_as<std::iter_value_t<P87PMember>, int>);
+
+    // common_iterator: build from I and from S, deref, ->, ++, both == overloads.
+    P87CI a(std::counted_iterator(lst.begin(), 3));
+    P87CI end_marker(std::default_sentinel);
+    Check(*a == 1, "phase87 common_iterator deref from I-state");
+    Check(a.operator->() && *a.operator->() == 1, "phase87 common_iterator arrow");
+    Check(!(a == end_marker), "phase87 common_iterator I != S before exhaustion");
+    ++a;
+    ++a;
+    ++a;
+    Check(a == end_marker, "phase87 common_iterator reaches sentinel after count exhausted");
+
+    // Distinct counted_iterators (different remaining count) must compare
+    // unequal — proves the equality_comparable_with overload (real __it==__it),
+    // not the weaker "both real -> true" overload, is selected.
+    P87CI b(std::counted_iterator(lst.begin(), 3));
+    P87CI c(std::counted_iterator(lst.begin(), 1));
+    Check(!(b == c), "phase87 common_iterator distinct positions compare unequal");
+    P87CI d(std::counted_iterator(lst.begin(), 3));
+    Check(b == d, "phase87 common_iterator identical positions compare equal");
+
+    // views::common over the (counted_iterator, default_sentinel) subrange:
+    // range-for + manual sum (boxcxx has no <numeric>/std::accumulate yet).
+    P87Sub sub(std::counted_iterator(lst.begin(), 4), std::default_sentinel);
+    auto cv  = std::views::common(sub);
+    int sum  = 0;
+    int n    = 0;
+    for (int x : cv) {
+        sum += x;
+        ++n;
+    }
+    Check(sum == 10 && n == 4, "phase87 views::common range-for over distinct I/S pair");
+
+    // dangling: default-constructible and absorbs any arguments (inert marker).
+    std::ranges::dangling dd;
+    std::ranges::dangling dd2(42, "ignored");
+    (void)dd;
+    (void)dd2;
+
+    printf("[CXX] PASS phase87: projected/indirect_result_t + indirect-callable & "
+           "algorithm-requirement concepts + common_iterator + views::common + "
+           "dangling/borrowed_iterator_t/borrowed_subrange_t\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -13641,6 +13762,7 @@ int main()
     Phase84();
     Phase85();
     Phase86();
+    Phase87();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
