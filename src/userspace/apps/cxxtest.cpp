@@ -12355,6 +12355,17 @@ struct P83ThrowComp {
     }
 };
 
+// Hash that throws on a chosen call — the hash engine computes the hash
+// first in a merge step, so this is a deterministic pre-extract throw
+// point for the unordered basic-guarantee test (Ф28b).
+struct P84ThrowHash {
+    std::size_t operator()(int x) const
+    {
+        if (++g_p83_cmp_calls == g_p83_cmp_trip) throw 42;
+        return static_cast<std::size_t>(x);
+    }
+};
+
 // ── phase83: node_handle extract/insert(node)/merge — RB-backed assoc ──
 //    (Ф28a). Covers map/multimap/set/multiset. Hand-computed expected
 //    values; multi-target merges drain the source, unique-target merges
@@ -12561,6 +12572,272 @@ void Phase83()
            "map/multimap/set/multiset\n");
 }
 
+// ── phase84: node_handle extract/insert(node)/merge — hash-backed assoc ──
+//    (Ф28b). unordered_map/multimap/set/multiset. Also proves the node is
+//    re-hashed with the TARGET's hasher on merge, and the hash engine's
+//    merge basic guarantee under a throwing hash.
+void Phase84()
+{
+    // node_type differs from the rb-tree containers (distinct engine) but
+    // is Hash/KeyEq-independent, so unordered_map/unordered_multimap share
+    // one node_type — the basis for cross-container merge.
+    static_assert(!std::is_same_v<std::map<int, int>::node_type,
+                                  std::unordered_map<int, int>::node_type>);
+    static_assert(
+        std::is_same_v<std::unordered_map<int, int>::node_type,
+                       std::unordered_multimap<int, int, P84ThrowHash,
+                                               std::equal_to<int>>::node_type>);
+    static_assert(
+        !std::is_copy_constructible_v<std::unordered_map<int, int>::node_type>);
+
+    // extract → mutate key AND mapped → reinsert (unordered_map).
+    {
+        std::unordered_map<int, int> m{{1, 10}, {2, 20}, {5, 50}};
+        auto nh = m.extract(5);
+        Check(m.size() == 2 && !nh.empty() && nh.key() == 5 &&
+                  nh.mapped() == 50,
+              "phase84 umap extract owns value");
+        nh.key()    = 100;
+        nh.mapped() = 500;
+        auto r      = m.insert(std::move(nh));
+        Check(r.inserted && r.position->first == 100 &&
+                  r.position->second == 500 && r.node.empty() &&
+                  m.at(100) == 500,
+              "phase84 umap reinsert honours mutated key/mapped");
+    }
+
+    // insert(node) collision keeps node; hinted keeps it too; extract miss.
+    {
+        std::unordered_map<int, int> m{{1, 10}, {2, 20}};
+        auto nh = m.extract(1);
+        m.insert({1, 999});
+        auto r = m.insert(std::move(nh));
+        Check(!r.inserted && r.position->second == 999 && r.node.key() == 1 &&
+                  r.node.mapped() == 10 && m.at(1) == 999,
+              "phase84 umap insert(node) collision keeps node");
+        auto nh2 = m.extract(2);
+        m.insert({2, 888});
+        auto it = m.insert(m.begin(), std::move(nh2));
+        Check(it->second == 888 && !nh2.empty() && nh2.mapped() == 20,
+              "phase84 umap hinted insert(node) retains node on collision");
+        Check(m.extract(777).empty(), "phase84 umap extract(missing)=empty");
+    }
+
+    // node_type::swap() — member and the ADL free function — was never
+    // exercised anywhere (rb-tree phase83 nor here): both non-empty, one
+    // side empty either direction, and both empty (no-op).
+    {
+        std::unordered_map<int, int> ma{{1, 10}}, mb{{2, 20}};
+        auto nhA = ma.extract(1);
+        auto nhB = mb.extract(2);
+        nhA.swap(nhB);
+        Check(nhA.key() == 2 && nhA.mapped() == 20 && nhB.key() == 1 &&
+                  nhB.mapped() == 10,
+              "phase84 umap node swap(): both non-empty exchange values");
+        std::unordered_map<int, int>::node_type empty1;
+        swap(nhA, empty1); // ADL free function, non-empty <-> empty
+        Check(empty1.key() == 2 && empty1.mapped() == 20 && nhA.empty(),
+              "phase84 umap node swap(): ADL free function, non-empty<->empty");
+        std::unordered_map<int, int>::node_type empty2, empty3;
+        empty2.swap(empty3); // both genuinely empty (never touched)
+        Check(empty2.empty() && empty3.empty(),
+              "phase84 umap node swap(): both-empty is a no-op");
+    }
+
+    // operator=(initializer_list) — unordered_map/unordered_set lacked this
+    // standard-mandated member while unordered_multimap/unordered_multiset
+    // (completed by this same phase) already have it; without it, plain
+    // `m = {...}` only compiled via an implicit-conversion detour through
+    // the converting constructor + move-assign, which silently requires
+    // Hash/KeyEq to be default-constructible even though the standard's
+    // direct clear()+insert() form does not.
+    {
+        std::unordered_map<int, int> m{{1, 1}};
+        m = {{2, 2}, {3, 3}};
+        Check(m.size() == 2 && !m.contains(1) && m.at(2) == 2 && m.at(3) == 3,
+              "phase84 umap operator=(initializer_list) replaces contents");
+        std::unordered_set<int> s{1};
+        s = {2, 3};
+        Check(s.size() == 2 && !s.contains(1) && s.contains(2) && s.contains(3),
+              "phase84 uset operator=(initializer_list) replaces contents");
+    }
+
+    // merge unordered_map←unordered_map: collision stays in source.
+    {
+        std::unordered_map<int, int> a{{1, 1}, {2, 2}, {3, 3}};
+        std::unordered_map<int, int> b{{2, 200}, {4, 4}};
+        a.merge(b);
+        Check(a.size() == 4 && a.at(2) == 2 && a.at(4) == 4 && b.size() == 1 &&
+                  b.at(2) == 200,
+              "phase84 merge umap<-umap keeps collisions in source");
+    }
+
+    // merge unordered_multimap←unordered_map: multi target drains source.
+    {
+        std::unordered_multimap<int, int> mm{{1, 1}, {1, 2}, {3, 3}};
+        std::unordered_map<int, int> m{{1, 100}, {5, 5}};
+        mm.merge(m);
+        Check(mm.size() == 5 && mm.count(1) == 3 && m.empty(),
+              "phase84 merge umultimap<-umap drains source");
+    }
+
+    // cross-Hash merge: the source is re-hashed with the TARGET's hasher
+    // (dst key 100 does not overlap src keys 0..19, so all transfer, and
+    // every lookup below goes through dst's std::hash — proving the rehash).
+    {
+        std::unordered_map<int, int> dst{{100, 1000}};
+        std::unordered_map<int, int, P84ThrowHash> src; // disarmed alt hash
+        for (int i = 0; i < 20; ++i) src.emplace(i, i * 10);
+        dst.merge(src);
+        bool ok = dst.size() == 21 && src.empty() && dst.at(100) == 1000;
+        for (int i = 0; i < 20; ++i)
+            if (dst.at(i) != i * 10) ok = false;
+        Check(ok, "phase84 cross-hash merge rehashes with target hasher");
+    }
+
+    // unordered_set extract → value() mutate → reinsert into another set.
+    {
+        std::unordered_set<int> s1{7, 8, 9}, s2;
+        auto nh = s1.extract(8);
+        Check(s1.size() == 2 && nh.value() == 8,
+              "phase84 uset extract exposes value()");
+        nh.value() = 80;
+        auto r     = s2.insert(std::move(nh));
+        Check(r.inserted && *r.position == 80 && s2.contains(80),
+              "phase84 uset reinsert honours mutated value");
+    }
+
+    // unordered_set insert(node) collision keeps node (map already covers
+    // this above; set never did — same ReinsertUnique path, different
+    // container wrapper around insert_return_type).
+    {
+        std::unordered_set<int> s1{7, 8, 9}, s2{80};
+        auto nh    = s1.extract(8);
+        nh.value() = 80; // now collides with s2's existing 80
+        auto r     = s2.insert(std::move(nh));
+        Check(!r.inserted && !r.node.empty() && r.node.value() == 80,
+              "phase84 uset insert(node) collision keeps node");
+        Check(s2.size() == 1 && s2.contains(80),
+              "phase84 uset insert(node) collision: target untouched");
+    }
+
+    // merge uset←umultiset (collisions stay) + umultiset←uset (drains).
+    {
+        std::unordered_set<int> sa{1, 2, 3};
+        std::unordered_multiset<int> sb{2, 2, 4};
+        sa.merge(sb);
+        Check(sa.size() == 4 && sa.count(4) == 1 && sb.size() == 2 &&
+                  sb.count(2) == 2,
+              "phase84 merge uset<-umultiset collisions stay in source");
+        std::unordered_multiset<int> mset{5, 5};
+        std::unordered_set<int> ss{5, 6};
+        mset.merge(ss);
+        Check(mset.size() == 4 && mset.count(5) == 3 && ss.empty(),
+              "phase84 merge umultiset<-uset drains source");
+    }
+
+    // self-merge is a no-op (no hang, no loss).
+    {
+        std::unordered_multiset<int> ms{5, 5, 7};
+        ms.merge(ms);
+        Check(ms.size() == 3 && ms.count(5) == 2,
+              "phase84 umultiset self-merge no-op");
+        std::unordered_map<int, int> m{{1, 10}};
+        m.merge(m);
+        Check(m.size() == 1 && m.at(1) == 10, "phase84 umap self-merge no-op");
+    }
+
+    // throwing hash during a multi-merge: no element lost, nothing leaks.
+    {
+        int live0 = g_p83_live;
+        {
+            std::unordered_multiset<int, P84ThrowHash, std::equal_to<int>,
+                                    P83CountAlloc<int>>
+                dst, src;
+            for (int i = 0; i < 6; ++i) dst.insert(i);
+            for (int i = 6; i < 12; ++i) src.insert(i);
+            std::size_t total = dst.size() + src.size();
+            g_p83_cmp_calls   = 0;
+            g_p83_cmp_trip    = 1; // throw on the first merge hash
+            bool threw        = false;
+            try {
+                dst.merge(src);
+            } catch (int) {
+                threw = true;
+            }
+            g_p83_cmp_trip = 1 << 30; // disarm
+            Check(threw && dst.size() + src.size() == total,
+                  "phase84 throwing-hash merge loses no element");
+        }
+        Check(g_p83_live == live0,
+              "phase84 throwing-hash merge leaks nothing");
+    }
+
+    // Same, but the throw fires MID-merge instead of on the very first
+    // element: trip=1 alone cannot distinguish "nothing moved yet" from
+    // "some elements already migrated, then the Nth throws" — this proves
+    // the already-migrated prefix stays correctly in dst and the rest
+    // (including the throwing element) stays correctly in src.
+    {
+        int live0 = g_p83_live;
+        {
+            std::unordered_multiset<int, P84ThrowHash, std::equal_to<int>,
+                                    P83CountAlloc<int>>
+                dst, src;
+            for (int i = 0; i < 6; ++i) dst.insert(i);
+            for (int i = 6; i < 12; ++i) src.insert(i);
+            std::size_t total = dst.size() + src.size();
+            g_p83_cmp_calls   = 0;
+            g_p83_cmp_trip    = 4; // 3 elements already migrated, 4th throws
+            bool threw        = false;
+            try {
+                dst.merge(src);
+            } catch (int) {
+                threw = true;
+            }
+            g_p83_cmp_trip    = 1 << 30; // disarm
+            bool partitionOk  = true;
+            for (int k = 0; k < 12; ++k) {
+                bool inDst = dst.count(k) != 0;
+                bool inSrc = src.count(k) != 0;
+                if (inDst == inSrc) partitionOk = false; // both or neither -> corruption
+            }
+            Check(threw && dst.size() + src.size() == total && partitionOk,
+                  "phase84 throwing-hash merge mid-transfer: every key stays in exactly one container");
+        }
+        Check(g_p83_live == live0,
+              "phase84 throwing-hash merge mid-transfer: leaks nothing");
+    }
+
+    // strong guarantee: a throwing hash on a single-element insert leaks
+    // nothing (the freshly-built node is freed on the exception path).
+    {
+        int live0 = g_p83_live;
+        {
+            std::unordered_set<int, P84ThrowHash, std::equal_to<int>,
+                               P83CountAlloc<int>>
+                s;
+            s.insert(1);
+            g_p83_cmp_calls = 0;
+            g_p83_cmp_trip  = 1; // throw on the next insert's hash
+            bool threw      = false;
+            try {
+                s.insert(2);
+            } catch (int) {
+                threw = true;
+            }
+            g_p83_cmp_trip = 1 << 30;
+            Check(threw && s.size() == 1 && s.contains(1),
+                  "phase84 throwing-hash insert strong guarantee");
+        }
+        Check(g_p83_live == live0,
+              "phase84 throwing-hash insert leaks nothing");
+    }
+
+    printf("[CXX] PASS phase84: node_handle extract/insert(node)/merge — "
+           "unordered_map/multimap/set/multiset\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -12666,6 +12943,7 @@ int main()
     Phase81();
     Phase82();
     Phase83();
+    Phase84();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

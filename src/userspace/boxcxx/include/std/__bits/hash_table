@@ -45,6 +45,9 @@ class Table {
 
 public:
     using size_type = size_t;
+    // node_handle needs the concrete node type and its rebound allocator.
+    using NodeType      = NodeT;
+    using NodeAllocType = NodeAlloc;
 
     template <bool Const>
     class Iter {
@@ -311,6 +314,48 @@ public:
     pair<iterator, bool> EmplaceUnique(Args &&...args)
     {
         NodeT *n = MakeNode(std::forward<Args>(args)...);
+        try {
+            pair<iterator, bool> r = ReinsertUnique(n);
+            if (!r.second) DropNode(n); // equal key present — discard
+            return r;
+        } catch (...) {
+            DropNode(n); // hash/eq/grow threw — strong guarantee, no leak
+            throw;
+        }
+    }
+
+    template <typename... Args>
+    iterator EmplaceMulti(Args &&...args)
+    {
+        NodeT *n = MakeNode(std::forward<Args>(args)...);
+        try {
+            return ReinsertMulti(n);
+        } catch (...) {
+            DropNode(n);
+            throw;
+        }
+    }
+
+    // ── node_handle / merge primitives (Ф28b) ───────────────────────────
+    const NodeAlloc &GetNodeAlloc() const noexcept { return __alloc; }
+
+    // Unlink `pos` from its bucket chain and hand back ownership WITHOUT
+    // destroying the value (contrast Erase, which then DropNodes).
+    NodeT *ExtractNode(const_iterator pos) noexcept
+    {
+        NodeT *z       = static_cast<NodeT *>(pos.__n);
+        NodeBase **ref = &__buckets[IndexOf(z->hash)];
+        while (*ref != z) ref = &(*ref)->next;
+        *ref = z->next;
+        --__count;
+        return z;
+    }
+
+    // Link an already-constructed node with unique semantics, re-hashing
+    // its key with THIS table's hasher (the node may arrive from a table
+    // that used a different Hash). On collision `n` is left untouched.
+    pair<iterator, bool> ReinsertUnique(NodeT *n)
+    {
         size_t h = __hash(KeyOfValue{}(n->value));
         n->hash  = h;
         if (__bucket_count) {
@@ -318,38 +363,25 @@ public:
                  cur = cur->next) {
                 NodeT *e = static_cast<NodeT *>(cur);
                 if (e->hash == h &&
-                    __eq(KeyOfValue{}(e->value), KeyOfValue{}(n->value))) {
-                    DropNode(n);
+                    __eq(KeyOfValue{}(e->value), KeyOfValue{}(n->value)))
                     return {iterator{cur, this}, false};
-                }
             }
         }
         MaybeGrow();
-        size_t idx          = IndexOf(h);
-        n->next             = __buckets[idx];
-        __buckets[idx]      = n;
+        size_t idx     = IndexOf(h);
+        n->next        = __buckets[idx];
+        __buckets[idx] = n;
         ++__count;
         return {iterator{n, this}, true};
     }
 
-    template <typename... Args>
-    iterator EmplaceMulti(Args &&...args)
+    iterator ReinsertMulti(NodeT *n)
     {
-        NodeT *n = MakeNode(std::forward<Args>(args)...);
         size_t h = __hash(KeyOfValue{}(n->value));
         n->hash  = h;
         MaybeGrow();
-        size_t idx = IndexOf(h);
-        // Keep equal keys adjacent: hook in front of the first equal
-        // node when one exists, else at the chain head.
-        NodeBase *prev = nullptr;
-        for (NodeBase *cur = __buckets[idx]; cur; cur = cur->next) {
-            NodeT *e = static_cast<NodeT *>(cur);
-            if (e->hash == h &&
-                __eq(KeyOfValue{}(e->value), KeyOfValue{}(n->value)))
-                break;
-            prev = cur;
-        }
+        size_t idx     = IndexOf(h);
+        NodeBase *prev = FindMultiSlot(idx, h, KeyOfValue{}(n->value));
         if (prev) {
             n->next    = prev->next;
             prev->next = n;
@@ -359,6 +391,74 @@ public:
         }
         ++__count;
         return {n, this};
+    }
+
+    // Merge every element of `src` (a Table with identical
+    // Key/Value/KeyOfValue/Alloc, possibly a different Hash/KeyEq) into
+    // *this using only src's PUBLIC surface (begin/end/ExtractNode) — no
+    // friend needed. Throwing work (hash / eq / grow) runs BEFORE the
+    // noexcept extract+link, so a throwing hash or eq leaves src intact
+    // (basic guarantee). Self-merge is a no-op.
+    template <typename SrcTable>
+    void MergeUnique(SrcTable &src)
+    {
+        if (static_cast<const void *>(this) == static_cast<const void *>(&src))
+            return;
+        for (auto it = src.begin(); it != src.end();) {
+            auto next = it;
+            ++next;
+            NodeT *n     = static_cast<NodeT *>(it.__n);
+            size_t h     = __hash(KeyOfValue{}(n->value));
+            bool present = false;
+            if (__bucket_count)
+                for (NodeBase *cur = __buckets[IndexOf(h)]; cur;
+                     cur = cur->next) {
+                    NodeT *e = static_cast<NodeT *>(cur);
+                    if (e->hash == h &&
+                        __eq(KeyOfValue{}(e->value), KeyOfValue{}(n->value))) {
+                        present = true;
+                        break;
+                    }
+                }
+            if (!present) {
+                MaybeGrow();
+                size_t idx = IndexOf(h);
+                src.ExtractNode(it);
+                n->hash        = h;
+                n->next        = __buckets[idx];
+                __buckets[idx] = n;
+                ++__count;
+            }
+            it = next;
+        }
+    }
+
+    // Multi target never rejects — unconditional transfer.
+    template <typename SrcTable>
+    void MergeMulti(SrcTable &src)
+    {
+        if (static_cast<const void *>(this) == static_cast<const void *>(&src))
+            return;
+        for (auto it = src.begin(); it != src.end();) {
+            auto next = it;
+            ++next;
+            NodeT *n = static_cast<NodeT *>(it.__n);
+            size_t h = __hash(KeyOfValue{}(n->value));
+            MaybeGrow();
+            size_t idx     = IndexOf(h);
+            NodeBase *prev = FindMultiSlot(idx, h, KeyOfValue{}(n->value));
+            src.ExtractNode(it);
+            n->hash = h;
+            if (prev) {
+                n->next    = prev->next;
+                prev->next = n;
+            } else {
+                n->next        = __buckets[idx];
+                __buckets[idx] = n;
+            }
+            ++__count;
+            it = next;
+        }
     }
 
     iterator Erase(const_iterator where)
@@ -494,6 +594,21 @@ private:
         if (static_cast<float>(__count + 1) >
             __max_lf * static_cast<float>(__bucket_count))
             Rehash(__bucket_count * 2);
+    }
+
+    // Returns the node after which an element with `key` (hash `h`) links
+    // to sit at the front of its equal-key run in bucket `idx` — null to
+    // link at the chain head. Shared by ReinsertMulti and MergeMulti.
+    template <typename K>
+    NodeBase *FindMultiSlot(size_t idx, size_t h, const K &key)
+    {
+        NodeBase *prev = nullptr;
+        for (NodeBase *cur = __buckets[idx]; cur; cur = cur->next) {
+            NodeT *e = static_cast<NodeT *>(cur);
+            if (e->hash == h && __eq(KeyOfValue{}(e->value), key)) break;
+            prev = cur;
+        }
+        return prev;
     }
 
     template <typename... Args>
