@@ -120,6 +120,11 @@ public:
         auto nx = __t.Erase(where);
         return iterator(nx.__n, nx.__t);
     }
+    iterator erase(const_iterator first, const_iterator last)
+    {
+        while (first != last) first = __t.Erase(first);
+        return iterator(first.__n, first.__t);
+    }
     size_type erase(const Key &key) { return __t.EraseKey(key); }
     template <typename K>
         requires(__detail::TransparentHashEq<Hash, KeyEq> &&
@@ -371,6 +376,11 @@ public:
         auto nx = __t.Erase(where);
         return iterator(nx.__n, nx.__t);
     }
+    iterator erase(const_iterator first, const_iterator last)
+    {
+        while (first != last) first = __t.Erase(first);
+        return iterator(first.__n, first.__t);
+    }
     size_type erase(const Key &key) { return __t.EraseKey(key); }
     template <typename K>
         requires(__detail::TransparentHashEq<Hash, KeyEq> &&
@@ -539,6 +549,30 @@ erase_if(unordered_set<K, H, E, A> &s, Pred pred)
         }
     }
     return removed;
+}
+
+// Equal iff same size and, for every distinct value, its equal-range in `a`
+// is a permutation of its equal-range in `b` — for a multiset that is just
+// "same multiplicity", but phrased via RangeIsPermutation to share the
+// exact conforming [unord.req] wording/shape with the multimap overload.
+template <typename K, typename H, typename E, typename A>
+bool operator==(const unordered_multiset<K, H, E, A> &a,
+                const unordered_multiset<K, H, E, A> &b)
+{
+    if (a.size() != b.size()) return false;
+    for (auto it = a.begin(); it != a.end();) {
+        auto ra = a.equal_range(*it);
+        auto rb = b.equal_range(*it);
+        size_t na = 0;
+        for (auto x = ra.first; x != ra.second; ++x) ++na;
+        size_t nb = 0;
+        for (auto x = rb.first; x != rb.second; ++x) ++nb;
+        if (na != nb) return false;
+        if (!__ht::RangeIsPermutation(ra.first, ra.second, rb.first, rb.second))
+            return false;
+        it = ra.second;
+    }
+    return true;
 }
 
 template <typename K, typename H, typename E, typename A>

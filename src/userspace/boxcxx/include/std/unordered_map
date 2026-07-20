@@ -137,6 +137,12 @@ public:
     {
         return __t.EmplaceUnique(std::move(v));
     }
+    template <typename P>
+        requires is_constructible_v<value_type, P &&>
+    pair<iterator, bool> insert(P &&v)
+    {
+        return __t.EmplaceUnique(std::forward<P>(v));
+    }
     iterator insert(const_iterator, const value_type &v)
     {
         return insert(v).first;
@@ -182,6 +188,11 @@ public:
 
     iterator erase(const_iterator where) { return __t.Erase(where); }
     iterator erase(iterator where) { return __t.Erase(where); }
+    iterator erase(const_iterator first, const_iterator last)
+    {
+        while (first != last) first = __t.Erase(first);
+        return iterator(first.__n, first.__t);
+    }
     size_type erase(const Key &key) { return __t.EraseKey(key); }
     template <typename K>
         requires(__detail::TransparentHashEq<Hash, KeyEq> &&
@@ -268,10 +279,12 @@ public:
     {
         return __t.EqualRange(key);
     }
+    pair<const_iterator, const_iterator> equal_range(const Key &key) const
+    {
+        return const_cast<unordered_map *>(this)->__t.EqualRange(key);
+    }
 
     // ── heterogeneous lookup (C++23, transparent Hash+KeyEq only) ───────
-    // Note: unordered_map's equal_range has no const overload (pre-existing
-    // gap in this header, mirrored here — not this phase's concern).
 
     template <typename K>
         requires __detail::TransparentHashEq<Hash, KeyEq>
@@ -296,6 +309,12 @@ public:
     pair<iterator, iterator> equal_range(const K &key)
     {
         return __t.EqualRange(key);
+    }
+    template <typename K>
+        requires __detail::TransparentHashEq<Hash, KeyEq>
+    pair<const_iterator, const_iterator> equal_range(const K &key) const
+    {
+        return const_cast<unordered_map *>(this)->__t.EqualRange(key);
     }
 
     // ── bucket / hash policy ────────────────────────────────────────────
@@ -402,6 +421,12 @@ public:
 
     iterator insert(const value_type &v) { return __t.EmplaceMulti(v); }
     iterator insert(value_type &&v) { return __t.EmplaceMulti(std::move(v)); }
+    template <typename P>
+        requires is_constructible_v<value_type, P &&>
+    iterator insert(P &&v)
+    {
+        return __t.EmplaceMulti(std::forward<P>(v));
+    }
     iterator insert(const_iterator, const value_type &v)
     {
         return __t.EmplaceMulti(v); // hint accepted, not exploited
@@ -428,6 +453,11 @@ public:
 
     iterator erase(const_iterator where) { return __t.Erase(where); }
     iterator erase(iterator where) { return __t.Erase(where); }
+    iterator erase(const_iterator first, const_iterator last)
+    {
+        while (first != last) first = __t.Erase(first);
+        return iterator(first.__n, first.__t);
+    }
     size_type erase(const Key &key) { return __t.EraseKey(key); }
     template <typename K>
         requires(__detail::TransparentHashEq<Hash, KeyEq> &&
@@ -614,6 +644,30 @@ erase_if(unordered_map<K, T, H, E, A> &m, Pred pred)
         }
     }
     return removed;
+}
+
+// Equal iff same size and, for every key, the equal-range in `a` is a
+// permutation (by element operator==) of the equal-range in `b` — a
+// multimap group is all-same-key, so this reduces to a multiset compare of
+// the mapped values, which is the conforming [unord.req] semantics.
+template <typename K, typename T, typename H, typename E, typename A>
+bool operator==(const unordered_multimap<K, T, H, E, A> &a,
+                const unordered_multimap<K, T, H, E, A> &b)
+{
+    if (a.size() != b.size()) return false;
+    for (auto it = a.begin(); it != a.end();) {
+        auto ra = a.equal_range(it->first);
+        auto rb = b.equal_range(it->first);
+        size_t na = 0;
+        for (auto x = ra.first; x != ra.second; ++x) ++na;
+        size_t nb = 0;
+        for (auto x = rb.first; x != rb.second; ++x) ++nb;
+        if (na != nb) return false;
+        if (!__ht::RangeIsPermutation(ra.first, ra.second, rb.first, rb.second))
+            return false;
+        it = ra.second;
+    }
+    return true;
 }
 
 template <typename K, typename T, typename H, typename E, typename A>
