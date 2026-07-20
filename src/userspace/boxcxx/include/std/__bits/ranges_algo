@@ -1,0 +1,878 @@
+// boxcxx — <__bits/ranges_algo>
+// Ф29b-1: the ranges:: constrained algorithm result-type aggregates
+// ([algorithms.results]) and the read-oriented [alg.nonmodifying] niebloids
+// (find/count/mismatch/equal/search/… + their (iterator,sentinel) and (range)
+// overloads with projections). Pulled in at the END of <algorithm> so the
+// classic std:: algorithms, the range concepts, and the Ф29a indirect-callable
+// foundation are all already in scope.
+//
+// The fold family + min/max + sorted/binary-search + lexicographical_compare
+// live in the sibling <__bits/ranges_algo_fold> (included right after this one)
+// because a single b1 file would exceed the project's split threshold; that
+// file DEPENDS on the result-types defined here.
+#ifndef BOXCXX_BITS_RANGES_ALGO
+#define BOXCXX_BITS_RANGES_ALGO
+
+#include <functional>
+#include <ranges>
+#include <utility>
+
+namespace std {
+namespace ranges {
+
+// ── algorithm result aggregates ([algorithms.results]) ───────────────────
+// Every member is [[no_unique_address]]; every struct gets a const& and an &&
+// converting operator. Those converters are the mechanism that lets a
+// (range) overload declared to return e.g.
+//   in_in_result<borrowed_iterator_t<R1>, borrowed_iterator_t<R2>>
+// simply `return (*this)(begin, end, ...);` (whose static type is
+// in_in_result<I1,I2>) and have each dangling-prone slot degrade to `dangling`
+// independently, with no manual branching in any algorithm body.
+
+template <class I, class F>
+struct in_fun_result {
+    [[no_unique_address]] I in;
+    [[no_unique_address]] F fun;
+
+    template <class I2, class F2>
+        requires convertible_to<const I &, I2> && convertible_to<const F &, F2>
+    constexpr operator in_fun_result<I2, F2>() const &
+    {
+        return {in, fun};
+    }
+    template <class I2, class F2>
+        requires convertible_to<I, I2> && convertible_to<F, F2>
+    constexpr operator in_fun_result<I2, F2>() &&
+    {
+        return {std::move(in), std::move(fun)};
+    }
+};
+
+template <class I1, class I2>
+struct in_in_result {
+    [[no_unique_address]] I1 in1;
+    [[no_unique_address]] I2 in2;
+
+    template <class II1, class II2>
+        requires convertible_to<const I1 &, II1> && convertible_to<const I2 &, II2>
+    constexpr operator in_in_result<II1, II2>() const &
+    {
+        return {in1, in2};
+    }
+    template <class II1, class II2>
+        requires convertible_to<I1, II1> && convertible_to<I2, II2>
+    constexpr operator in_in_result<II1, II2>() &&
+    {
+        return {std::move(in1), std::move(in2)};
+    }
+};
+
+template <class I, class O>
+struct in_out_result {
+    [[no_unique_address]] I in;
+    [[no_unique_address]] O out;
+
+    template <class I2, class O2>
+        requires convertible_to<const I &, I2> && convertible_to<const O &, O2>
+    constexpr operator in_out_result<I2, O2>() const &
+    {
+        return {in, out};
+    }
+    template <class I2, class O2>
+        requires convertible_to<I, I2> && convertible_to<O, O2>
+    constexpr operator in_out_result<I2, O2>() &&
+    {
+        return {std::move(in), std::move(out)};
+    }
+};
+
+template <class I1, class I2, class O>
+struct in_in_out_result {
+    [[no_unique_address]] I1 in1;
+    [[no_unique_address]] I2 in2;
+    [[no_unique_address]] O out;
+
+    template <class II1, class II2, class OO>
+        requires convertible_to<const I1 &, II1> && convertible_to<const I2 &, II2> &&
+                 convertible_to<const O &, OO>
+    constexpr operator in_in_out_result<II1, II2, OO>() const &
+    {
+        return {in1, in2, out};
+    }
+    template <class II1, class II2, class OO>
+        requires convertible_to<I1, II1> && convertible_to<I2, II2> &&
+                 convertible_to<O, OO>
+    constexpr operator in_in_out_result<II1, II2, OO>() &&
+    {
+        return {std::move(in1), std::move(in2), std::move(out)};
+    }
+};
+
+template <class I, class O1, class O2>
+struct in_out_out_result {
+    [[no_unique_address]] I in;
+    [[no_unique_address]] O1 out1;
+    [[no_unique_address]] O2 out2;
+
+    template <class I2, class OO1, class OO2>
+        requires convertible_to<const I &, I2> && convertible_to<const O1 &, OO1> &&
+                 convertible_to<const O2 &, OO2>
+    constexpr operator in_out_out_result<I2, OO1, OO2>() const &
+    {
+        return {in, out1, out2};
+    }
+    template <class I2, class OO1, class OO2>
+        requires convertible_to<I, I2> && convertible_to<O1, OO1> &&
+                 convertible_to<O2, OO2>
+    constexpr operator in_out_out_result<I2, OO1, OO2>() &&
+    {
+        return {std::move(in), std::move(out1), std::move(out2)};
+    }
+};
+
+template <class T>
+struct min_max_result {
+    [[no_unique_address]] T min;
+    [[no_unique_address]] T max;
+
+    template <class T2>
+        requires convertible_to<const T &, T2>
+    constexpr operator min_max_result<T2>() const &
+    {
+        return {min, max};
+    }
+    template <class T2>
+        requires convertible_to<T, T2>
+    constexpr operator min_max_result<T2>() &&
+    {
+        return {std::move(min), std::move(max)};
+    }
+};
+
+template <class I>
+struct in_found_result {
+    [[no_unique_address]] I in;
+    bool found;
+
+    template <class I2>
+        requires convertible_to<const I &, I2>
+    constexpr operator in_found_result<I2>() const &
+    {
+        return {in, found};
+    }
+    template <class I2>
+        requires convertible_to<I, I2>
+    constexpr operator in_found_result<I2>() &&
+    {
+        return {std::move(in), found};
+    }
+};
+
+template <class I, class T>
+struct in_value_result {
+    [[no_unique_address]] I in;
+    [[no_unique_address]] T value;
+
+    template <class I2, class T2>
+        requires convertible_to<const I &, I2> && convertible_to<const T &, T2>
+    constexpr operator in_value_result<I2, T2>() const &
+    {
+        return {in, value};
+    }
+    template <class I2, class T2>
+        requires convertible_to<I, I2> && convertible_to<T, T2>
+    constexpr operator in_value_result<I2, T2>() &&
+    {
+        return {std::move(in), std::move(value)};
+    }
+};
+
+template <class O, class T>
+struct out_value_result {
+    [[no_unique_address]] O out;
+    [[no_unique_address]] T value;
+
+    template <class O2, class T2>
+        requires convertible_to<const O &, O2> && convertible_to<const T &, T2>
+    constexpr operator out_value_result<O2, T2>() const &
+    {
+        return {out, value};
+    }
+    template <class O2, class T2>
+        requires convertible_to<O, O2> && convertible_to<T, T2>
+    constexpr operator out_value_result<O2, T2>() &&
+    {
+        return {std::move(out), std::move(value)};
+    }
+};
+
+// ── [alg.nonmodifying] niebloids ─────────────────────────────────────────
+// (find / find_if / count / mismatch / equal / search / … — appended below.)
+
+struct AllOf {
+    template <input_iterator I, sentinel_for<I> S, class Proj = identity,
+              indirect_unary_predicate<projected<I, Proj>> Pred>
+    constexpr bool operator()(I first, S last, Pred pred, Proj proj = {}) const
+    {
+        for (; first != last; ++first)
+            if (!std::invoke(pred, std::invoke(proj, *first))) return false;
+        return true;
+    }
+    template <input_range R, class Proj = identity,
+              indirect_unary_predicate<projected<iterator_t<R>, Proj>> Pred>
+    constexpr bool operator()(R &&r, Pred pred, Proj proj = {}) const
+    {
+        return (*this)(ranges::begin(r), ranges::end(r), std::move(pred),
+                       std::move(proj));
+    }
+};
+inline constexpr AllOf all_of{};
+
+struct AnyOf {
+    template <input_iterator I, sentinel_for<I> S, class Proj = identity,
+              indirect_unary_predicate<projected<I, Proj>> Pred>
+    constexpr bool operator()(I first, S last, Pred pred, Proj proj = {}) const
+    {
+        for (; first != last; ++first)
+            if (std::invoke(pred, std::invoke(proj, *first))) return true;
+        return false;
+    }
+    template <input_range R, class Proj = identity,
+              indirect_unary_predicate<projected<iterator_t<R>, Proj>> Pred>
+    constexpr bool operator()(R &&r, Pred pred, Proj proj = {}) const
+    {
+        return (*this)(ranges::begin(r), ranges::end(r), std::move(pred),
+                       std::move(proj));
+    }
+};
+inline constexpr AnyOf any_of{};
+
+struct NoneOf {
+    template <input_iterator I, sentinel_for<I> S, class Proj = identity,
+              indirect_unary_predicate<projected<I, Proj>> Pred>
+    constexpr bool operator()(I first, S last, Pred pred, Proj proj = {}) const
+    {
+        for (; first != last; ++first)
+            if (std::invoke(pred, std::invoke(proj, *first))) return false;
+        return true;
+    }
+    template <input_range R, class Proj = identity,
+              indirect_unary_predicate<projected<iterator_t<R>, Proj>> Pred>
+    constexpr bool operator()(R &&r, Pred pred, Proj proj = {}) const
+    {
+        return (*this)(ranges::begin(r), ranges::end(r), std::move(pred),
+                       std::move(proj));
+    }
+};
+inline constexpr NoneOf none_of{};
+
+struct ForEach {
+    template <input_iterator I, sentinel_for<I> S, class Proj = identity,
+              indirectly_unary_invocable<projected<I, Proj>> Fun>
+    constexpr in_fun_result<I, Fun> operator()(I first, S last, Fun f,
+                                               Proj proj = {}) const
+    {
+        for (; first != last; ++first) std::invoke(f, std::invoke(proj, *first));
+        return {std::move(first), std::move(f)};
+    }
+    template <input_range R, class Proj = identity,
+              indirectly_unary_invocable<projected<iterator_t<R>, Proj>> Fun>
+    constexpr in_fun_result<borrowed_iterator_t<R>, Fun>
+    operator()(R &&r, Fun f, Proj proj = {}) const
+    {
+        return (*this)(ranges::begin(r), ranges::end(r), std::move(f),
+                       std::move(proj));
+    }
+};
+inline constexpr ForEach for_each{};
+template <class I, class F>
+using for_each_result = in_fun_result<I, F>;
+
+struct ForEachN {
+    template <input_iterator I, class Proj = identity,
+              indirectly_unary_invocable<projected<I, Proj>> Fun>
+    constexpr in_fun_result<I, Fun> operator()(I first, iter_difference_t<I> n,
+                                               Fun f, Proj proj = {}) const
+    {
+        for (; n > 0; --n, ++first) std::invoke(f, std::invoke(proj, *first));
+        return {std::move(first), std::move(f)};
+    }
+};
+inline constexpr ForEachN for_each_n{};
+template <class I, class F>
+using for_each_n_result = in_fun_result<I, F>;
+
+struct Count {
+    template <input_iterator I, sentinel_for<I> S, class Proj = identity,
+              class T = projected_value_t<I, Proj>>
+        requires indirect_binary_predicate<ranges::equal_to, projected<I, Proj>,
+                                           const T *>
+    constexpr iter_difference_t<I> operator()(I first, S last, const T &value,
+                                              Proj proj = {}) const
+    {
+        iter_difference_t<I> n = 0;
+        for (; first != last; ++first)
+            if (std::invoke(proj, *first) == value) ++n;
+        return n;
+    }
+    template <input_range R, class Proj = identity,
+              class T = projected_value_t<iterator_t<R>, Proj>>
+        requires indirect_binary_predicate<ranges::equal_to,
+                                           projected<iterator_t<R>, Proj>,
+                                           const T *>
+    constexpr range_difference_t<R> operator()(R &&r, const T &value,
+                                               Proj proj = {}) const
+    {
+        return (*this)(ranges::begin(r), ranges::end(r), value, std::move(proj));
+    }
+};
+inline constexpr Count count{};
+
+struct CountIf {
+    template <input_iterator I, sentinel_for<I> S, class Proj = identity,
+              indirect_unary_predicate<projected<I, Proj>> Pred>
+    constexpr iter_difference_t<I> operator()(I first, S last, Pred pred,
+                                              Proj proj = {}) const
+    {
+        iter_difference_t<I> n = 0;
+        for (; first != last; ++first)
+            if (std::invoke(pred, std::invoke(proj, *first))) ++n;
+        return n;
+    }
+    template <input_range R, class Proj = identity,
+              indirect_unary_predicate<projected<iterator_t<R>, Proj>> Pred>
+    constexpr range_difference_t<R> operator()(R &&r, Pred pred,
+                                               Proj proj = {}) const
+    {
+        return (*this)(ranges::begin(r), ranges::end(r), std::move(pred),
+                       std::move(proj));
+    }
+};
+inline constexpr CountIf count_if{};
+
+struct Mismatch {
+    template <input_iterator I1, sentinel_for<I1> S1, input_iterator I2,
+              sentinel_for<I2> S2, class Proj1 = identity, class Proj2 = identity,
+              indirect_binary_predicate<projected<I1, Proj1>,
+                                        projected<I2, Proj2>> Pred = ranges::equal_to>
+    constexpr in_in_result<I1, I2>
+    operator()(I1 first1, S1 last1, I2 first2, S2 last2, Pred pred = {},
+              Proj1 proj1 = {}, Proj2 proj2 = {}) const
+    {
+        for (; first1 != last1 && first2 != last2; ++first1, ++first2)
+            if (!std::invoke(pred, std::invoke(proj1, *first1),
+                             std::invoke(proj2, *first2)))
+                break;
+        return {std::move(first1), std::move(first2)};
+    }
+    template <input_range R1, input_range R2, class Proj1 = identity,
+              class Proj2 = identity,
+              indirect_binary_predicate<projected<iterator_t<R1>, Proj1>,
+                                        projected<iterator_t<R2>, Proj2>> Pred =
+                  ranges::equal_to>
+    constexpr in_in_result<borrowed_iterator_t<R1>, borrowed_iterator_t<R2>>
+    operator()(R1 &&r1, R2 &&r2, Pred pred = {}, Proj1 proj1 = {},
+              Proj2 proj2 = {}) const
+    {
+        return (*this)(ranges::begin(r1), ranges::end(r1), ranges::begin(r2),
+                       ranges::end(r2), std::move(pred), std::move(proj1),
+                       std::move(proj2));
+    }
+};
+inline constexpr Mismatch mismatch{};
+template <class I1, class I2>
+using mismatch_result = in_in_result<I1, I2>;
+
+struct Equal {
+    template <input_iterator I1, sentinel_for<I1> S1, input_iterator I2,
+              sentinel_for<I2> S2, class Proj1 = identity, class Proj2 = identity,
+              indirect_binary_predicate<projected<I1, Proj1>,
+                                        projected<I2, Proj2>> Pred = ranges::equal_to>
+    constexpr bool operator()(I1 first1, S1 last1, I2 first2, S2 last2,
+                              Pred pred = {}, Proj1 proj1 = {},
+                              Proj2 proj2 = {}) const
+    {
+        if constexpr (sized_sentinel_for<S1, I1> && sized_sentinel_for<S2, I2>) {
+            if ((last1 - first1) != (last2 - first2)) return false;
+        }
+        for (; first1 != last1 && first2 != last2; ++first1, ++first2)
+            if (!std::invoke(pred, std::invoke(proj1, *first1),
+                             std::invoke(proj2, *first2)))
+                return false;
+        return first1 == last1 && first2 == last2;
+    }
+    template <input_range R1, input_range R2, class Proj1 = identity,
+              class Proj2 = identity,
+              indirect_binary_predicate<projected<iterator_t<R1>, Proj1>,
+                                        projected<iterator_t<R2>, Proj2>> Pred =
+                  ranges::equal_to>
+    constexpr bool operator()(R1 &&r1, R2 &&r2, Pred pred = {}, Proj1 proj1 = {},
+                              Proj2 proj2 = {}) const
+    {
+        return (*this)(ranges::begin(r1), ranges::end(r1), ranges::begin(r2),
+                       ranges::end(r2), std::move(pred), std::move(proj1),
+                       std::move(proj2));
+    }
+};
+inline constexpr Equal equal{};
+
+struct Find {
+    template <input_iterator I, sentinel_for<I> S, class Proj = identity,
+              class T = projected_value_t<I, Proj>>
+        requires indirect_binary_predicate<ranges::equal_to, projected<I, Proj>,
+                                           const T *>
+    constexpr I operator()(I first, S last, const T &value, Proj proj = {}) const
+    {
+        for (; first != last; ++first)
+            if (std::invoke(proj, *first) == value) return first;
+        return first;
+    }
+    template <input_range R, class Proj = identity,
+              class T = projected_value_t<iterator_t<R>, Proj>>
+        requires indirect_binary_predicate<ranges::equal_to,
+                                           projected<iterator_t<R>, Proj>,
+                                           const T *>
+    constexpr borrowed_iterator_t<R> operator()(R &&r, const T &value,
+                                                Proj proj = {}) const
+    {
+        return (*this)(ranges::begin(r), ranges::end(r), value, std::move(proj));
+    }
+};
+inline constexpr Find find{};
+
+struct FindIf {
+    template <input_iterator I, sentinel_for<I> S, class Proj = identity,
+              indirect_unary_predicate<projected<I, Proj>> Pred>
+    constexpr I operator()(I first, S last, Pred pred, Proj proj = {}) const
+    {
+        for (; first != last; ++first)
+            if (std::invoke(pred, std::invoke(proj, *first))) return first;
+        return first;
+    }
+    template <input_range R, class Proj = identity,
+              indirect_unary_predicate<projected<iterator_t<R>, Proj>> Pred>
+    constexpr borrowed_iterator_t<R> operator()(R &&r, Pred pred,
+                                                Proj proj = {}) const
+    {
+        return (*this)(ranges::begin(r), ranges::end(r), std::move(pred),
+                       std::move(proj));
+    }
+};
+inline constexpr FindIf find_if{};
+
+struct FindIfNot {
+    template <input_iterator I, sentinel_for<I> S, class Proj = identity,
+              indirect_unary_predicate<projected<I, Proj>> Pred>
+    constexpr I operator()(I first, S last, Pred pred, Proj proj = {}) const
+    {
+        for (; first != last; ++first)
+            if (!std::invoke(pred, std::invoke(proj, *first))) return first;
+        return first;
+    }
+    template <input_range R, class Proj = identity,
+              indirect_unary_predicate<projected<iterator_t<R>, Proj>> Pred>
+    constexpr borrowed_iterator_t<R> operator()(R &&r, Pred pred,
+                                                Proj proj = {}) const
+    {
+        return (*this)(ranges::begin(r), ranges::end(r), std::move(pred),
+                       std::move(proj));
+    }
+};
+inline constexpr FindIfNot find_if_not{};
+
+struct FindLast {
+    template <forward_iterator I, sentinel_for<I> S, class Proj = identity,
+              class T = projected_value_t<I, Proj>>
+        requires indirect_binary_predicate<ranges::equal_to, projected<I, Proj>,
+                                           const T *>
+    constexpr subrange<I> operator()(I first, S last, const T &value,
+                                     Proj proj = {}) const
+    {
+        I found        = first;
+        bool has_match = false;
+        for (; first != last; ++first)
+            if (std::invoke(proj, *first) == value) {
+                found     = first;
+                has_match = true;
+            }
+        return has_match ? subrange<I>{found, first} : subrange<I>{first, first};
+    }
+    template <forward_range R, class Proj = identity,
+              class T = projected_value_t<iterator_t<R>, Proj>>
+        requires indirect_binary_predicate<ranges::equal_to,
+                                           projected<iterator_t<R>, Proj>,
+                                           const T *>
+    constexpr borrowed_subrange_t<R> operator()(R &&r, const T &value,
+                                                Proj proj = {}) const
+    {
+        return (*this)(ranges::begin(r), ranges::end(r), value, std::move(proj));
+    }
+};
+inline constexpr FindLast find_last{};
+
+struct FindLastIf {
+    template <forward_iterator I, sentinel_for<I> S, class Proj = identity,
+              indirect_unary_predicate<projected<I, Proj>> Pred>
+    constexpr subrange<I> operator()(I first, S last, Pred pred,
+                                     Proj proj = {}) const
+    {
+        I found        = first;
+        bool has_match = false;
+        for (; first != last; ++first)
+            if (std::invoke(pred, std::invoke(proj, *first))) {
+                found     = first;
+                has_match = true;
+            }
+        return has_match ? subrange<I>{found, first} : subrange<I>{first, first};
+    }
+    template <forward_range R, class Proj = identity,
+              indirect_unary_predicate<projected<iterator_t<R>, Proj>> Pred>
+    constexpr borrowed_subrange_t<R> operator()(R &&r, Pred pred,
+                                                Proj proj = {}) const
+    {
+        return (*this)(ranges::begin(r), ranges::end(r), std::move(pred),
+                       std::move(proj));
+    }
+};
+inline constexpr FindLastIf find_last_if{};
+
+struct FindLastIfNot {
+    template <forward_iterator I, sentinel_for<I> S, class Proj = identity,
+              indirect_unary_predicate<projected<I, Proj>> Pred>
+    constexpr subrange<I> operator()(I first, S last, Pred pred,
+                                     Proj proj = {}) const
+    {
+        I found        = first;
+        bool has_match = false;
+        for (; first != last; ++first)
+            if (!std::invoke(pred, std::invoke(proj, *first))) {
+                found     = first;
+                has_match = true;
+            }
+        return has_match ? subrange<I>{found, first} : subrange<I>{first, first};
+    }
+    template <forward_range R, class Proj = identity,
+              indirect_unary_predicate<projected<iterator_t<R>, Proj>> Pred>
+    constexpr borrowed_subrange_t<R> operator()(R &&r, Pred pred,
+                                                Proj proj = {}) const
+    {
+        return (*this)(ranges::begin(r), ranges::end(r), std::move(pred),
+                       std::move(proj));
+    }
+};
+inline constexpr FindLastIfNot find_last_if_not{};
+
+struct FindEnd {
+    template <forward_iterator I1, sentinel_for<I1> S1, forward_iterator I2,
+              sentinel_for<I2> S2, class Proj1 = identity, class Proj2 = identity,
+              indirect_binary_predicate<projected<I1, Proj1>,
+                                        projected<I2, Proj2>> Pred = ranges::equal_to>
+    constexpr subrange<I1>
+    operator()(I1 first1, S1 last1, I2 first2, S2 last2, Pred pred = {},
+              Proj1 proj1 = {}, Proj2 proj2 = {}) const
+    {
+        if (first2 == last2) {
+            I1 e = ranges::next(first1, last1);
+            return {e, e};
+        }
+        I1 result_first = first1;
+        I1 result_last  = first1;
+        bool found       = false;
+        for (;;) {
+            I1 hay = first1;
+            for (I2 needle = first2;; ++hay, ++needle) {
+                if (needle == last2) {
+                    result_first = first1;
+                    result_last  = hay;
+                    found        = true;
+                    break;
+                }
+                if (hay == last1) {
+                    I1 e = ranges::next(first1, last1);
+                    return found ? subrange<I1>{result_first, result_last}
+                                 : subrange<I1>{e, e};
+                }
+                if (!std::invoke(pred, std::invoke(proj1, *hay),
+                                 std::invoke(proj2, *needle)))
+                    break;
+            }
+            ++first1;
+        }
+    }
+    template <forward_range R1, forward_range R2, class Proj1 = identity,
+              class Proj2 = identity,
+              indirect_binary_predicate<projected<iterator_t<R1>, Proj1>,
+                                        projected<iterator_t<R2>, Proj2>> Pred =
+                  ranges::equal_to>
+    constexpr borrowed_subrange_t<R1>
+    operator()(R1 &&r1, R2 &&r2, Pred pred = {}, Proj1 proj1 = {},
+              Proj2 proj2 = {}) const
+    {
+        return (*this)(ranges::begin(r1), ranges::end(r1), ranges::begin(r2),
+                       ranges::end(r2), std::move(pred), std::move(proj1),
+                       std::move(proj2));
+    }
+};
+inline constexpr FindEnd find_end{};
+
+struct FindFirstOf {
+    template <input_iterator I1, sentinel_for<I1> S1, forward_iterator I2,
+              sentinel_for<I2> S2, class Proj1 = identity, class Proj2 = identity,
+              indirect_binary_predicate<projected<I1, Proj1>,
+                                        projected<I2, Proj2>> Pred = ranges::equal_to>
+    constexpr I1 operator()(I1 first1, S1 last1, I2 first2, S2 last2,
+                            Pred pred = {}, Proj1 proj1 = {},
+                            Proj2 proj2 = {}) const
+    {
+        for (; first1 != last1; ++first1)
+            for (I2 it2 = first2; it2 != last2; ++it2)
+                if (std::invoke(pred, std::invoke(proj1, *first1),
+                                std::invoke(proj2, *it2)))
+                    return first1;
+        return first1;
+    }
+    template <input_range R1, forward_range R2, class Proj1 = identity,
+              class Proj2 = identity,
+              indirect_binary_predicate<projected<iterator_t<R1>, Proj1>,
+                                        projected<iterator_t<R2>, Proj2>> Pred =
+                  ranges::equal_to>
+    constexpr borrowed_iterator_t<R1> operator()(R1 &&r1, R2 &&r2,
+                                                 Pred pred = {},
+                                                 Proj1 proj1 = {},
+                                                 Proj2 proj2 = {}) const
+    {
+        return (*this)(ranges::begin(r1), ranges::end(r1), ranges::begin(r2),
+                       ranges::end(r2), std::move(pred), std::move(proj1),
+                       std::move(proj2));
+    }
+};
+inline constexpr FindFirstOf find_first_of{};
+
+struct AdjacentFind {
+    template <forward_iterator I, sentinel_for<I> S, class Proj = identity,
+              indirect_binary_predicate<projected<I, Proj>, projected<I, Proj>>
+                  Pred = ranges::equal_to>
+    constexpr I operator()(I first, S last, Pred pred = {}, Proj proj = {}) const
+    {
+        if (first == last) return first;
+        I next = first;
+        for (++next; next != last; ++first, ++next)
+            if (std::invoke(pred, std::invoke(proj, *first),
+                            std::invoke(proj, *next)))
+                return first;
+        return next;
+    }
+    template <forward_range R, class Proj = identity,
+              indirect_binary_predicate<projected<iterator_t<R>, Proj>,
+                                        projected<iterator_t<R>, Proj>> Pred =
+                  ranges::equal_to>
+    constexpr borrowed_iterator_t<R> operator()(R &&r, Pred pred = {},
+                                                Proj proj = {}) const
+    {
+        return (*this)(ranges::begin(r), ranges::end(r), std::move(pred),
+                       std::move(proj));
+    }
+};
+inline constexpr AdjacentFind adjacent_find{};
+
+struct Search {
+    template <forward_iterator I1, sentinel_for<I1> S1, forward_iterator I2,
+              sentinel_for<I2> S2, class Proj1 = identity, class Proj2 = identity,
+              indirect_binary_predicate<projected<I1, Proj1>,
+                                        projected<I2, Proj2>> Pred = ranges::equal_to>
+    constexpr subrange<I1>
+    operator()(I1 first1, S1 last1, I2 first2, S2 last2, Pred pred = {},
+              Proj1 proj1 = {}, Proj2 proj2 = {}) const
+    {
+        if (first2 == last2) return {first1, first1};
+        for (;;) {
+            I1 hay = first1;
+            for (I2 needle = first2;; ++hay, ++needle) {
+                if (needle == last2) return {first1, hay};
+                if (hay == last1) {
+                    I1 e = ranges::next(first1, last1);
+                    return {e, e};
+                }
+                if (!std::invoke(pred, std::invoke(proj1, *hay),
+                                 std::invoke(proj2, *needle)))
+                    break;
+            }
+            ++first1;
+        }
+    }
+    template <forward_range R1, forward_range R2, class Proj1 = identity,
+              class Proj2 = identity,
+              indirect_binary_predicate<projected<iterator_t<R1>, Proj1>,
+                                        projected<iterator_t<R2>, Proj2>> Pred =
+                  ranges::equal_to>
+    constexpr borrowed_subrange_t<R1>
+    operator()(R1 &&r1, R2 &&r2, Pred pred = {}, Proj1 proj1 = {},
+              Proj2 proj2 = {}) const
+    {
+        return (*this)(ranges::begin(r1), ranges::end(r1), ranges::begin(r2),
+                       ranges::end(r2), std::move(pred), std::move(proj1),
+                       std::move(proj2));
+    }
+};
+inline constexpr Search search{};
+
+struct SearchN {
+    template <forward_iterator I, sentinel_for<I> S, class Proj = identity,
+              class T = projected_value_t<I, Proj>,
+              indirect_binary_predicate<projected<I, Proj>, const T *> Pred =
+                  ranges::equal_to>
+    constexpr subrange<I> operator()(I first, S last, iter_difference_t<I> count,
+                                     const T &value, Pred pred = {},
+                                     Proj proj = {}) const
+    {
+        if (count <= 0) return {first, first};
+        for (; first != last; ++first) {
+            if (!std::invoke(pred, std::invoke(proj, *first), value)) continue;
+            I start                   = first;
+            iter_difference_t<I> seen = 1;
+            for (;;) {
+                if (seen == count) {
+                    I stop = first;
+                    ++stop;
+                    return {start, stop};
+                }
+                ++first;
+                if (first == last) return {first, first};
+                if (!std::invoke(pred, std::invoke(proj, *first), value)) break;
+                ++seen;
+            }
+        }
+        return {first, first};
+    }
+    template <forward_range R, class Proj = identity,
+              class T = projected_value_t<iterator_t<R>, Proj>,
+              indirect_binary_predicate<projected<iterator_t<R>, Proj>,
+                                        const T *> Pred = ranges::equal_to>
+    constexpr borrowed_subrange_t<R> operator()(R &&r, range_difference_t<R> count,
+                                                const T &value, Pred pred = {},
+                                                Proj proj = {}) const
+    {
+        return (*this)(ranges::begin(r), ranges::end(r), count, value,
+                       std::move(pred), std::move(proj));
+    }
+};
+inline constexpr SearchN search_n{};
+
+struct Contains {
+    template <input_iterator I, sentinel_for<I> S, class Proj = identity,
+              class T = projected_value_t<I, Proj>>
+        requires indirect_binary_predicate<ranges::equal_to, projected<I, Proj>,
+                                           const T *>
+    constexpr bool operator()(I first, S last, const T &value,
+                              Proj proj = {}) const
+    {
+        return find(first, last, value, std::move(proj)) != last;
+    }
+    template <input_range R, class Proj = identity,
+              class T = projected_value_t<iterator_t<R>, Proj>>
+        requires indirect_binary_predicate<ranges::equal_to,
+                                           projected<iterator_t<R>, Proj>,
+                                           const T *>
+    constexpr bool operator()(R &&r, const T &value, Proj proj = {}) const
+    {
+        return (*this)(ranges::begin(r), ranges::end(r), value, std::move(proj));
+    }
+};
+inline constexpr Contains contains{};
+
+struct ContainsSubrange {
+    template <forward_iterator I1, sentinel_for<I1> S1, forward_iterator I2,
+              sentinel_for<I2> S2, class Proj1 = identity, class Proj2 = identity,
+              indirect_binary_predicate<projected<I1, Proj1>,
+                                        projected<I2, Proj2>> Pred = ranges::equal_to>
+    constexpr bool operator()(I1 first1, S1 last1, I2 first2, S2 last2,
+                              Pred pred = {}, Proj1 proj1 = {},
+                              Proj2 proj2 = {}) const
+    {
+        return first2 == last2 ||
+               !search(first1, last1, first2, last2, std::move(pred),
+                      std::move(proj1), std::move(proj2))
+                    .empty();
+    }
+    template <forward_range R1, forward_range R2, class Proj1 = identity,
+              class Proj2 = identity,
+              indirect_binary_predicate<projected<iterator_t<R1>, Proj1>,
+                                        projected<iterator_t<R2>, Proj2>> Pred =
+                  ranges::equal_to>
+    constexpr bool operator()(R1 &&r1, R2 &&r2, Pred pred = {}, Proj1 proj1 = {},
+                              Proj2 proj2 = {}) const
+    {
+        return (*this)(ranges::begin(r1), ranges::end(r1), ranges::begin(r2),
+                       ranges::end(r2), std::move(pred), std::move(proj1),
+                       std::move(proj2));
+    }
+};
+inline constexpr ContainsSubrange contains_subrange{};
+
+struct StartsWith {
+    template <input_iterator I1, sentinel_for<I1> S1, input_iterator I2,
+              sentinel_for<I2> S2, class Proj1 = identity, class Proj2 = identity,
+              indirect_binary_predicate<projected<I1, Proj1>,
+                                        projected<I2, Proj2>> Pred = ranges::equal_to>
+    constexpr bool operator()(I1 first1, S1 last1, I2 first2, S2 last2,
+                              Pred pred = {}, Proj1 proj1 = {},
+                              Proj2 proj2 = {}) const
+    {
+        return mismatch(std::move(first1), last1, std::move(first2), last2,
+                        std::move(pred), std::move(proj1), std::move(proj2))
+                   .in2 == last2;
+    }
+    template <input_range R1, input_range R2, class Proj1 = identity,
+              class Proj2 = identity,
+              indirect_binary_predicate<projected<iterator_t<R1>, Proj1>,
+                                        projected<iterator_t<R2>, Proj2>> Pred =
+                  ranges::equal_to>
+    constexpr bool operator()(R1 &&r1, R2 &&r2, Pred pred = {}, Proj1 proj1 = {},
+                              Proj2 proj2 = {}) const
+    {
+        return (*this)(ranges::begin(r1), ranges::end(r1), ranges::begin(r2),
+                       ranges::end(r2), std::move(pred), std::move(proj1),
+                       std::move(proj2));
+    }
+};
+inline constexpr StartsWith starts_with{};
+
+struct EndsWith {
+    template <input_iterator I1, sentinel_for<I1> S1, input_iterator I2,
+              sentinel_for<I2> S2, class Proj1 = identity, class Proj2 = identity,
+              indirect_binary_predicate<projected<I1, Proj1>,
+                                        projected<I2, Proj2>> Pred = ranges::equal_to>
+        requires(forward_iterator<I1> || sized_sentinel_for<S1, I1>) &&
+                (forward_iterator<I2> || sized_sentinel_for<S2, I2>)
+    constexpr bool operator()(I1 first1, S1 last1, I2 first2, S2 last2,
+                              Pred pred = {}, Proj1 proj1 = {},
+                              Proj2 proj2 = {}) const
+    {
+        auto n1 = ranges::distance(first1, last1);
+        auto n2 = ranges::distance(first2, last2);
+        if (n2 > n1) return false;
+        I1 tail = ranges::next(first1, n1 - n2);
+        return equal(std::move(tail), last1, std::move(first2), last2,
+                    std::move(pred), std::move(proj1), std::move(proj2));
+    }
+    template <input_range R1, input_range R2, class Proj1 = identity,
+              class Proj2 = identity,
+              indirect_binary_predicate<projected<iterator_t<R1>, Proj1>,
+                                        projected<iterator_t<R2>, Proj2>> Pred =
+                  ranges::equal_to>
+        requires(forward_range<R1> || sized_range<R1>) &&
+                (forward_range<R2> || sized_range<R2>)
+    constexpr bool operator()(R1 &&r1, R2 &&r2, Pred pred = {}, Proj1 proj1 = {},
+                              Proj2 proj2 = {}) const
+    {
+        return (*this)(ranges::begin(r1), ranges::end(r1), ranges::begin(r2),
+                       ranges::end(r2), std::move(pred), std::move(proj1),
+                       std::move(proj2));
+    }
+};
+inline constexpr EndsWith ends_with{};
+
+} // namespace ranges
+} // namespace std
+
+#endif // BOXCXX_BITS_RANGES_ALGO
