@@ -32,6 +32,34 @@ struct Node : NodeBase {
     V value;
 };
 
+// Multiset-equality of two equal-length forward ranges via operator==. O(n^2)
+// over the group size — fine for a hash equal-range (short). Lives here (not
+// in unordered_map/unordered_set) so both headers reach it without an ODR
+// clash or an include-order dependency — both transitively include this one.
+template <typename It>
+bool RangeIsPermutation(It a0, It a1, It b0, It b1)
+{
+    // Current callers already establish equal length before calling in (so
+    // a0==a1 implies b0==b1 for them), but an empty `a` must not vacuously
+    // report equal against a non-empty `b` for any future caller that
+    // doesn't hold that invariant.
+    if (a0 == a1) return b0 == b1;
+    for (It i = a0; i != a1; ++i) {
+        bool seen = false;
+        for (It k = a0; k != i; ++k)
+            if (*k == *i) { seen = true; break; }
+        if (seen) continue; // count each distinct value once
+        size_t ca = 0;
+        for (It k = a0; k != a1; ++k)
+            if (*k == *i) ++ca;
+        size_t cb = 0;
+        for (It k = b0; k != b1; ++k)
+            if (*k == *i) ++cb;
+        if (ca != cb) return false;
+    }
+    return true;
+}
+
 template <typename Key, typename Value, typename KeyOfValue, typename Hash,
           typename KeyEq, typename Alloc>
 class Table {

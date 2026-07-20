@@ -13189,6 +13189,350 @@ void Phase85()
            "extract/erase\n");
 }
 
+// ── phase86: unordered_multimap/multiset operator==, erase(first,last) on
+//    all four unordered containers, unordered_map/multimap insert(P&&),
+//    const equal_range on unordered_map (Ф28d).
+void Phase86()
+{
+    // operator==: same pairs in different insertion order (incl. an
+    // equal-key group) compare equal; a group's values permuted still
+    // compare equal; a changed value or a different multiplicity within a
+    // group compares unequal.
+    {
+        std::unordered_multimap<int, int> a;
+        a.insert({2, 200});
+        a.insert({1, 10});
+        a.insert({1, 20});
+        a.insert({3, 300});
+
+        std::unordered_multimap<int, int> b;
+        b.insert({1, 20});
+        b.insert({3, 300});
+        b.insert({1, 10});
+        b.insert({2, 200});
+        Check(a == b,
+              "phase86 umultimap operator== true, same pairs different "
+              "insertion order");
+
+        auto c            = b;
+        c.find(2)->second = 999;
+        Check(a != c,
+              "phase86 umultimap operator== false after changing a mapped "
+              "value");
+
+        std::unordered_multimap<int, int> d;
+        d.insert({1, 20});
+        d.insert({1, 10});
+        d.insert({3, 300});
+        d.insert({2, 200});
+        Check(a == d,
+              "phase86 umultimap operator== true, group values permuted");
+
+        std::unordered_multimap<int, int> e;
+        e.insert({1, 10});
+        e.insert({1, 10});
+        std::unordered_multimap<int, int> f;
+        f.insert({1, 10});
+        f.insert({1, 20});
+        Check(e != f,
+              "phase86 umultimap operator== false, different multiplicities "
+              "within a group");
+
+        // `a` and `b` above were built by inserting key=1's two values in
+        // opposite order. ReinsertMulti/FindMultiSlot always prepend a new
+        // same-key node to the front of the existing run, so the physical
+        // layout of the key=1 group is a GENUINE reversal, not merely two
+        // insertion orders that happen to land the same way — confirm that
+        // directly rather than trust it as a comment.
+        {
+            auto ra   = a.equal_range(1);
+            auto rb   = b.equal_range(1);
+            int a0    = ra.first->second;
+            int a1    = std::next(ra.first)->second;
+            int b0    = rb.first->second;
+            int b1    = std::next(rb.first)->second;
+            Check(a0 != a1 && a0 == b1 && a1 == b0,
+                  "phase86 umultimap operator==: key=1 groups in a/b are a "
+                  "genuine physical reversal, not accidentally identical "
+                  "order");
+        }
+
+        std::unordered_multimap<int, int> g;
+        g.insert({1, 10});
+        g.insert({1, 20});
+        std::unordered_multimap<int, int> h;
+        h.insert({1, 20});
+        h.insert({1, 30});
+        Check(g != h,
+              "phase86 umultimap operator== false, equal multiplicities but "
+              "different values within the group");
+
+        std::unordered_multimap<int, int> i1;
+        i1.insert({1, 10});
+        i1.insert({2, 20});
+        std::unordered_multimap<int, int> i2;
+        i2.insert({1, 10});
+        i2.insert({1, 999});
+        Check(i1.size() == i2.size() && i1 != i2,
+              "phase86 umultimap operator== false, a key present in one "
+              "container is absent in the other despite equal total size "
+              "(compensated by a duplicate elsewhere)");
+
+        Check(a == a, "phase86 umultimap operator== self-comparison true");
+        std::unordered_multimap<int, int> empty1, empty2;
+        Check(empty1 == empty2,
+              "phase86 umultimap operator== empty == empty true");
+        Check(empty1 != a,
+              "phase86 umultimap operator== empty != non-empty");
+    }
+
+    // Same battery for unordered_multiset.
+    {
+        std::unordered_multiset<int> a{1, 1, 2};
+        std::unordered_multiset<int> b;
+        b.insert(2);
+        b.insert(1);
+        b.insert(1);
+        Check(a == b,
+              "phase86 umultiset operator== true, same multiset different "
+              "insertion order");
+
+        std::unordered_multiset<int> c{1, 2, 2};
+        Check(a != c,
+              "phase86 umultiset operator== false, different multiplicities");
+    }
+
+    // Hash collisions: a Hash mapping every key to the SAME bucket and the
+    // SAME cached hash value (so Find/FindMultiSlot can only tell keys
+    // apart via KeyEq, never the hash fast-reject) must not let a key's
+    // equal_range group smear across a neighboring key's run.
+    {
+        struct AllCollideHash {
+            size_t operator()(int) const noexcept { return 0; }
+        };
+        using MM = std::unordered_multimap<int, int, AllCollideHash>;
+        MM a;
+        a.insert({5, 1});
+        a.insert({7, 1});
+        a.insert({5, 2});
+        a.insert({7, 2});
+        a.insert({9, 1});
+
+        auto r5   = a.equal_range(5);
+        size_t n5 = 0;
+        for (auto x = r5.first; x != r5.second; ++x) {
+            Check(x->first == 5,
+                  "phase86 hash-collision equal_range group element has the "
+                  "expected key");
+            ++n5;
+        }
+        Check(n5 == 2,
+              "phase86 hash-collision equal_range group has the expected "
+              "multiplicity despite a full bucket collision");
+
+        MM b;
+        b.insert({9, 1});
+        b.insert({7, 2});
+        b.insert({7, 1});
+        b.insert({5, 2});
+        b.insert({5, 1});
+        Check(a == b,
+              "phase86 hash-collision operator== true across reordered "
+              "inserts despite every key sharing one bucket/hash");
+
+        MM c = b;
+        c.find(9)->second = 42;
+        Check(a != c,
+              "phase86 hash-collision operator== false after mutating one "
+              "value under full bucket collision");
+    }
+
+    // erase(first, last) on all four unordered containers: empty range is
+    // a no-op, a mid-range sub-range that genuinely spans >=2 buckets
+    // (asserted via bucket(), not assumed) leaves exact survivors and
+    // returns the right iterator, and erasing to end() empties the
+    // container and returns end().
+    {
+        std::unordered_map<int, int> m;
+        for (int i = 0; i < 20; ++i) m.insert({i, i * 10});
+
+        auto noop_it  = m.begin();
+        auto noop_ret = m.erase(noop_it, noop_it);
+        Check(noop_ret == noop_it && m.size() == 20,
+              "phase86 unordered_map erase(first,last) empty range is a "
+              "no-op");
+
+        auto first  = m.begin();
+        auto second = first;
+        ++second;
+        auto third = second;
+        ++third;
+        int erased_k0  = first->first;
+        int erased_k1  = second->first;
+        int boundary_k = third->first;
+        Check(m.bucket(erased_k0) != m.bucket(erased_k1),
+              "phase86 unordered_map erase(first,last) sub-range genuinely "
+              "spans >=2 buckets");
+
+        auto ret = m.erase(first, third);
+        Check(m.size() == 18,
+              "phase86 unordered_map erase(first,last) leaves exact "
+              "survivor count");
+        Check(!m.contains(erased_k0) && !m.contains(erased_k1),
+              "phase86 unordered_map erase(first,last) removes exactly the "
+              "sub-range");
+        Check(ret->first == boundary_k,
+              "phase86 unordered_map erase(first,last) returns iterator to "
+              "next survivor");
+
+        auto endRet = m.erase(m.begin(), m.end());
+        Check(endRet == m.end() && m.empty(),
+              "phase86 unordered_map erase(first,last) to end() empties the "
+              "container and returns end()");
+    }
+    {
+        std::unordered_multimap<int, int> m;
+        for (int i = 0; i < 20; ++i) m.insert({i, i * 10});
+
+        auto noop_it  = m.begin();
+        auto noop_ret = m.erase(noop_it, noop_it);
+        Check(noop_ret == noop_it && m.size() == 20,
+              "phase86 unordered_multimap erase(first,last) empty range is "
+              "a no-op");
+
+        auto first  = m.begin();
+        auto second = first;
+        ++second;
+        auto third = second;
+        ++third;
+        int erased_k0  = first->first;
+        int erased_k1  = second->first;
+        int boundary_k = third->first;
+        Check(m.bucket(erased_k0) != m.bucket(erased_k1),
+              "phase86 unordered_multimap erase(first,last) sub-range "
+              "genuinely spans >=2 buckets");
+
+        auto ret = m.erase(first, third);
+        Check(m.size() == 18,
+              "phase86 unordered_multimap erase(first,last) leaves exact "
+              "survivor count");
+        Check(!m.contains(erased_k0) && !m.contains(erased_k1),
+              "phase86 unordered_multimap erase(first,last) removes exactly "
+              "the sub-range");
+        Check(ret->first == boundary_k,
+              "phase86 unordered_multimap erase(first,last) returns "
+              "iterator to next survivor");
+
+        auto endRet = m.erase(m.begin(), m.end());
+        Check(endRet == m.end() && m.empty(),
+              "phase86 unordered_multimap erase(first,last) to end() "
+              "empties the container and returns end()");
+    }
+    {
+        std::unordered_set<int> s;
+        for (int i = 0; i < 20; ++i) s.insert(i);
+
+        auto noop_it  = s.begin();
+        auto noop_ret = s.erase(noop_it, noop_it);
+        Check(noop_ret == noop_it && s.size() == 20,
+              "phase86 unordered_set erase(first,last) empty range is a "
+              "no-op");
+
+        auto first  = s.begin();
+        auto second = first;
+        ++second;
+        auto third = second;
+        ++third;
+        int erased_k0  = *first;
+        int erased_k1  = *second;
+        int boundary_k = *third;
+        Check(s.bucket(erased_k0) != s.bucket(erased_k1),
+              "phase86 unordered_set erase(first,last) sub-range genuinely "
+              "spans >=2 buckets");
+
+        auto ret = s.erase(first, third);
+        Check(s.size() == 18,
+              "phase86 unordered_set erase(first,last) leaves exact "
+              "survivor count");
+        Check(!s.contains(erased_k0) && !s.contains(erased_k1),
+              "phase86 unordered_set erase(first,last) removes exactly the "
+              "sub-range");
+        Check(ret != s.end() && *ret == boundary_k,
+              "phase86 unordered_set erase(first,last) returns iterator to "
+              "next survivor");
+
+        auto endRet = s.erase(s.begin(), s.end());
+        Check(endRet == s.end() && s.empty(),
+              "phase86 unordered_set erase(first,last) to end() empties the "
+              "container and returns end()");
+    }
+    {
+        std::unordered_multiset<int> s;
+        for (int i = 0; i < 20; ++i) s.insert(i);
+
+        auto noop_it  = s.begin();
+        auto noop_ret = s.erase(noop_it, noop_it);
+        Check(noop_ret == noop_it && s.size() == 20,
+              "phase86 unordered_multiset erase(first,last) empty range is "
+              "a no-op");
+
+        auto first  = s.begin();
+        auto second = first;
+        ++second;
+        auto third = second;
+        ++third;
+        int erased_k0  = *first;
+        int erased_k1  = *second;
+        int boundary_k = *third;
+        Check(s.bucket(erased_k0) != s.bucket(erased_k1),
+              "phase86 unordered_multiset erase(first,last) sub-range "
+              "genuinely spans >=2 buckets");
+
+        auto ret = s.erase(first, third);
+        Check(s.size() == 18,
+              "phase86 unordered_multiset erase(first,last) leaves exact "
+              "survivor count");
+        Check(!s.contains(erased_k0) && !s.contains(erased_k1),
+              "phase86 unordered_multiset erase(first,last) removes exactly "
+              "the sub-range");
+        Check(ret != s.end() && *ret == boundary_k,
+              "phase86 unordered_multiset erase(first,last) returns "
+              "iterator to next survivor");
+
+        auto endRet = s.erase(s.begin(), s.end());
+        Check(endRet == s.end() && s.empty(),
+              "phase86 unordered_multiset erase(first,last) to end() "
+              "empties the container and returns end()");
+    }
+
+    // insert(P&&) on unordered_map: pair<int,string> is convertible-but-not
+    // -exactly pair<const int,string> — must bind the template, not fail.
+    {
+        std::unordered_map<int, std::string> m;
+        auto [it, inserted] = m.insert(std::pair<int, std::string>{1, "x"});
+        Check(inserted && it->first == 1 && it->second == "x",
+              "phase86 unordered_map insert(P&&) accepts pair<int,string>");
+
+        using VT               = std::unordered_map<int, std::string>::value_type;
+        auto [it2, inserted2] = m.insert(VT{2, "y"});
+        Check(inserted2 && it2->first == 2 && it2->second == "y",
+              "phase86 unordered_map insert(value_type&&) exact type still "
+              "resolves unambiguously alongside the new insert(P&&) "
+              "template");
+    }
+
+    // const equal_range on unordered_map (previously had no const overload).
+    {
+        const std::unordered_map<int, int> cm{{1, 100}, {2, 200}};
+        auto [lo, hi] = cm.equal_range(2);
+        Check(lo != hi && lo->first == 2 && lo->second == 200,
+              "phase86 unordered_map const equal_range finds the element");
+    }
+
+    printf("[CXX] PASS phase86: unordered multi-container operator==, "
+           "erase(first,last), insert(P&&), const equal_range\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -13296,6 +13640,7 @@ int main()
     Phase83();
     Phase84();
     Phase85();
+    Phase86();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
