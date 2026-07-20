@@ -423,6 +423,21 @@ struct identity {
     using is_transparent = void;
 };
 
+// Gating concepts for heterogeneous lookup ([container.requirements] the
+// Compare/Hash+KeyEqual "is_transparent" opt-in). Associative containers use
+// these to constrain their template<class K> find/count/.../extract/erase
+// overloads so a non-transparent comparator never enables them.
+namespace __detail {
+
+template <class C>
+concept TransparentComparator = requires { typename C::is_transparent; };
+
+template <class H, class E>
+concept TransparentHashEq =
+    requires { typename H::is_transparent; typename E::is_transparent; };
+
+} // namespace __detail
+
 // hash primary template — string specializations live in
 // <string>/<string_view>; the scalar set is below.
 template <class T> struct hash;

@@ -12838,6 +12838,357 @@ void Phase84()
            "unordered_map/multimap/set/multiset\n");
 }
 
+// Ф28c heterogeneous lookup fixtures: CountedKey's explicit int-constructor
+// increments a global counter, so a heterogeneous find/count/... call that
+// leaves the counter at 0 proves no CountedKey temporary was built — the
+// transparent comparator/hash path ran, not the "convert then const
+// key_type&" path. CountedLess/CountedHash/CountedEq compare or hash a
+// CountedKey against a bare int directly, never materialising one.
+int g_p85_key_ctors = 0;
+
+struct CountedKey {
+    int v;
+    CountedKey() = default;
+    explicit CountedKey(int x) : v(x) { ++g_p85_key_ctors; }
+};
+
+struct CountedLess {
+    using is_transparent = void;
+    bool operator()(const CountedKey &a, const CountedKey &b) const noexcept
+    {
+        return a.v < b.v;
+    }
+    bool operator()(const CountedKey &a, int b) const noexcept { return a.v < b; }
+    bool operator()(int a, const CountedKey &b) const noexcept { return a < b.v; }
+};
+
+struct CountedHash {
+    using is_transparent = void;
+    std::size_t operator()(const CountedKey &k) const noexcept
+    {
+        return static_cast<std::size_t>(k.v);
+    }
+    std::size_t operator()(int k) const noexcept
+    {
+        return static_cast<std::size_t>(k);
+    }
+};
+
+struct CountedEq {
+    using is_transparent = void;
+    bool operator()(const CountedKey &a, const CountedKey &b) const noexcept
+    {
+        return a.v == b.v;
+    }
+    bool operator()(const CountedKey &a, int b) const noexcept { return a.v == b; }
+    bool operator()(int a, const CountedKey &b) const noexcept { return a == b.v; }
+};
+
+// ── phase85: heterogeneous lookup (is_transparent) + C++23 transparent
+//    extract/erase — map/multimap/set/multiset/unordered_* (Ф28c).
+void Phase85()
+{
+    // The gate itself: transparent marker present/absent drives the concept,
+    // independent of any container.
+    static_assert(std::__detail::TransparentComparator<std::less<>>);
+    static_assert(!std::__detail::TransparentComparator<std::less<int>>);
+    static_assert(std::__detail::TransparentComparator<CountedLess>);
+    static_assert(std::__detail::TransparentHashEq<CountedHash, CountedEq>);
+    static_assert(
+        !std::__detail::TransparentHashEq<std::hash<int>, std::equal_to<int>>);
+    // AND-semantics: BOTH hash and eq must be transparent — a mixed pair is
+    // NOT transparent (would spuriously pass under a buggy OR / hash-only gate).
+    static_assert(
+        !std::__detail::TransparentHashEq<CountedHash, std::equal_to<int>>);
+    static_assert(!std::__detail::TransparentHashEq<std::hash<int>, CountedEq>);
+
+    // map: heterogeneous find/count/contains/lower_bound/upper_bound/
+    // equal_range build ZERO CountedKey temporaries.
+    {
+        std::map<CountedKey, int, CountedLess> m;
+        m.emplace(CountedKey(1), 10);
+        m.emplace(CountedKey(2), 20);
+        m.emplace(CountedKey(5), 50);
+        g_p85_key_ctors = 0;
+
+        auto it          = m.find(5);
+        bool found_ok    = it != m.end() && it->second == 50;
+        std::size_t cnt  = m.count(5);
+        bool contains_ok = m.contains(5);
+        auto lo          = m.lower_bound(5);
+        auto hi          = m.upper_bound(5);
+        auto [elo, ehi]  = m.equal_range(5);
+        bool bounds_ok = lo == elo && hi == ehi && lo->first.v == 5 &&
+                         hi == m.end();
+        Check(found_ok && cnt == 1 && contains_ok && bounds_ok,
+              "phase85 map heterogeneous find/count/contains/bounds/equal_range "
+              "correct");
+        Check(g_p85_key_ctors == 0,
+              "phase85 map heterogeneous lookup builds no CountedKey temporary");
+
+        const auto &cm  = m;
+        auto crange     = cm.equal_range(2);
+        bool const_ok   = cm.find(2) != cm.end() && cm.lower_bound(2) != cm.end() &&
+                        cm.upper_bound(2) != cm.end() && crange.first != crange.second;
+        Check(const_ok, "phase85 map const heterogeneous overloads correct");
+
+        g_p85_key_ctors = 0;
+        auto nh         = m.extract(2);
+        Check(!nh.empty() && nh.key().v == 2 && nh.mapped() == 20 &&
+                  m.size() == 2 && g_p85_key_ctors == 0,
+              "phase85 map extract(K&&) heterogeneous hit, no temporary");
+        Check(m.extract(999).empty(),
+              "phase85 map extract(K&&) heterogeneous miss = empty");
+        std::size_t erased = m.erase(5);
+        Check(erased == 1 && m.size() == 1 && !m.contains(5),
+              "phase85 map erase(K&&) heterogeneous removes the right key");
+
+        // An iterator argument must bind extract(const_iterator)/
+        // erase(const_iterator), never the heterogeneous K&& overload — the
+        // !is_convertible guard makes K&& non-viable for an iterator (m={1}).
+        auto nh1 = m.extract(m.find(1));
+        Check(nh1.key().v == 1 && m.empty(),
+              "phase85 map extract(iterator) selects the position overload");
+        m.insert(std::move(nh1));
+        m.erase(m.begin());
+        Check(m.empty(),
+              "phase85 map erase(iterator) selects the position overload");
+    }
+
+    // multimap: heterogeneous count/equal_range across an equal-key run,
+    // plus extract/erase.
+    {
+        std::multimap<CountedKey, int, CountedLess> mm;
+        mm.emplace(CountedKey(3), 30);
+        mm.emplace(CountedKey(3), 31);
+        mm.emplace(CountedKey(7), 70);
+        g_p85_key_ctors = 0;
+
+        Check(mm.count(3) == 2 && mm.contains(3) && !mm.contains(4),
+              "phase85 multimap heterogeneous count/contains correct");
+        auto [lo, hi] = mm.equal_range(3);
+        int seen      = 0;
+        for (auto it = lo; it != hi; ++it) ++seen;
+        Check(seen == 2,
+              "phase85 multimap heterogeneous equal_range spans both 3's");
+        Check(g_p85_key_ctors == 0,
+              "phase85 multimap heterogeneous lookup builds no CountedKey "
+              "temporary");
+
+        auto nh = mm.extract(7);
+        Check(!nh.empty() && nh.key().v == 7 && mm.size() == 2,
+              "phase85 multimap extract(K&&) heterogeneous hit");
+        Check(mm.extract(999).empty(),
+              "phase85 multimap extract(K&&) heterogeneous miss");
+        Check(mm.erase(3) == 2 && mm.empty(),
+              "phase85 multimap erase(K&&) heterogeneous removes both 3's");
+    }
+
+    // set: heterogeneous find/count/contains/bounds/equal_range + extract/
+    // erase.
+    {
+        std::set<CountedKey, CountedLess> s;
+        s.emplace(CountedKey(1));
+        s.emplace(CountedKey(2));
+        s.emplace(CountedKey(5));
+        g_p85_key_ctors = 0;
+
+        bool ok = s.find(5) != s.end() && s.count(5) == 1 && s.contains(5) &&
+                  s.lower_bound(5) != s.end() && s.upper_bound(5) == s.end();
+        auto [lo, hi] = s.equal_range(5);
+        ok            = ok && lo != hi;
+        Check(ok,
+              "phase85 set heterogeneous find/count/contains/bounds/equal_range "
+              "correct");
+        Check(g_p85_key_ctors == 0,
+              "phase85 set heterogeneous lookup builds no CountedKey temporary");
+
+        auto nh = s.extract(2);
+        Check(!nh.empty() && nh.value().v == 2 && s.size() == 2,
+              "phase85 set extract(K&&) heterogeneous hit");
+        Check(s.extract(999).empty(),
+              "phase85 set extract(K&&) heterogeneous miss");
+        Check(s.erase(5) == 1 && s.size() == 1,
+              "phase85 set erase(K&&) heterogeneous");
+    }
+
+    // multiset: heterogeneous count/equal_range over a duplicate run + erase.
+    {
+        std::multiset<CountedKey, CountedLess> ms;
+        ms.emplace(CountedKey(4));
+        ms.emplace(CountedKey(4));
+        ms.emplace(CountedKey(9));
+        g_p85_key_ctors = 0;
+
+        Check(ms.count(4) == 2 && ms.contains(4),
+              "phase85 multiset heterogeneous count/contains correct");
+        auto [lo, hi] = ms.equal_range(4);
+        int seen      = 0;
+        for (auto it = lo; it != hi; ++it) ++seen;
+        Check(seen == 2,
+              "phase85 multiset heterogeneous equal_range spans both 4's");
+        Check(g_p85_key_ctors == 0,
+              "phase85 multiset heterogeneous lookup builds no CountedKey "
+              "temporary");
+
+        auto nh = ms.extract(9);
+        Check(!nh.empty() && nh.value().v == 9 && ms.size() == 2,
+              "phase85 multiset extract(K&&) heterogeneous hit");
+        Check(ms.erase(4) == 2 && ms.empty(),
+              "phase85 multiset erase(K&&) heterogeneous removes both 4's");
+    }
+
+    // unordered_map: heterogeneous find/count/contains/equal_range build
+    // ZERO CountedKey temporaries; bucket() is checked separately since the
+    // exact-key cross-check deliberately builds one.
+    {
+        std::unordered_map<CountedKey, int, CountedHash, CountedEq> m;
+        m.emplace(CountedKey(1), 10);
+        m.emplace(CountedKey(2), 20);
+        m.emplace(CountedKey(5), 50);
+        g_p85_key_ctors = 0;
+
+        auto it           = m.find(5);
+        bool found_ok     = it != m.end() && it->second == 50;
+        std::size_t cnt   = m.count(5);
+        bool contains_ok  = m.contains(5);
+        auto range        = m.equal_range(5);
+        bool range_ok     = range.first != range.second &&
+                        range.first->first.v == 5;
+        std::size_t bucket_het = m.bucket(5);
+        Check(found_ok && cnt == 1 && contains_ok && range_ok,
+              "phase85 umap heterogeneous find/count/contains/equal_range "
+              "correct");
+        Check(g_p85_key_ctors == 0,
+              "phase85 umap heterogeneous lookup (incl. bucket) builds no "
+              "CountedKey temporary");
+
+        std::size_t bucket_exact = m.bucket(CountedKey(5));
+        Check(bucket_het == bucket_exact,
+              "phase85 umap heterogeneous bucket() agrees with exact-key "
+              "bucket()");
+
+        g_p85_key_ctors = 0;
+        auto nh         = m.extract(2);
+        Check(!nh.empty() && nh.key().v == 2 && nh.mapped() == 20 &&
+                  m.size() == 2 && g_p85_key_ctors == 0,
+              "phase85 umap extract(K&&) heterogeneous hit, no temporary");
+        Check(m.extract(999).empty(),
+              "phase85 umap extract(K&&) heterogeneous miss");
+        std::size_t erased = m.erase(5);
+        Check(erased == 1 && m.size() == 1 && !m.contains(5),
+              "phase85 umap erase(K&&) heterogeneous removes the right key");
+    }
+
+    // unordered_multimap: heterogeneous count/equal_range across an
+    // equal-key run + extract/erase.
+    {
+        std::unordered_multimap<CountedKey, int, CountedHash, CountedEq> mm;
+        mm.emplace(CountedKey(3), 30);
+        mm.emplace(CountedKey(3), 31);
+        mm.emplace(CountedKey(7), 70);
+        g_p85_key_ctors = 0;
+
+        Check(mm.count(3) == 2 && mm.contains(3) && !mm.contains(4),
+              "phase85 umultimap heterogeneous count/contains correct");
+        auto range = mm.equal_range(3);
+        int seen   = 0;
+        for (auto it = range.first; it != range.second; ++it) ++seen;
+        Check(seen == 2,
+              "phase85 umultimap heterogeneous equal_range spans both 3's");
+        Check(g_p85_key_ctors == 0,
+              "phase85 umultimap heterogeneous lookup builds no CountedKey "
+              "temporary");
+
+        auto nh = mm.extract(7);
+        Check(!nh.empty() && nh.key().v == 7 && mm.size() == 2,
+              "phase85 umultimap extract(K&&) heterogeneous hit");
+        Check(mm.extract(999).empty(),
+              "phase85 umultimap extract(K&&) heterogeneous miss");
+        Check(mm.erase(3) == 2 && mm.empty(),
+              "phase85 umultimap erase(K&&) heterogeneous removes both 3's");
+    }
+
+    // unordered_set: heterogeneous find/count/contains/equal_range + extract/
+    // erase.
+    {
+        std::unordered_set<CountedKey, CountedHash, CountedEq> s;
+        s.emplace(CountedKey(1));
+        s.emplace(CountedKey(2));
+        s.emplace(CountedKey(5));
+        g_p85_key_ctors = 0;
+
+        bool ok    = s.find(5) != s.end() && s.count(5) == 1 && s.contains(5);
+        auto range = s.equal_range(5);
+        ok         = ok && range.first != range.second;
+        std::size_t bucket_het = s.bucket(5);
+        Check(ok,
+              "phase85 uset heterogeneous find/count/contains/equal_range "
+              "correct");
+        Check(g_p85_key_ctors == 0,
+              "phase85 uset heterogeneous lookup (incl. bucket) builds no "
+              "CountedKey temporary");
+
+        std::size_t bucket_exact = s.bucket(CountedKey(5));
+        Check(bucket_het == bucket_exact,
+              "phase85 uset heterogeneous bucket() agrees with exact-key "
+              "bucket()");
+
+        auto nh = s.extract(2);
+        Check(!nh.empty() && nh.value().v == 2 && s.size() == 2,
+              "phase85 uset extract(K&&) heterogeneous hit");
+        Check(s.extract(999).empty(),
+              "phase85 uset extract(K&&) heterogeneous miss");
+        Check(s.erase(5) == 1 && s.size() == 1,
+              "phase85 uset erase(K&&) heterogeneous");
+    }
+
+    // unordered_multiset: heterogeneous count/equal_range over a duplicate
+    // run + extract/erase.
+    {
+        std::unordered_multiset<CountedKey, CountedHash, CountedEq> ms;
+        ms.emplace(CountedKey(4));
+        ms.emplace(CountedKey(4));
+        ms.emplace(CountedKey(9));
+        g_p85_key_ctors = 0;
+
+        Check(ms.count(4) == 2 && ms.contains(4),
+              "phase85 umultiset heterogeneous count/contains correct");
+        auto range = ms.equal_range(4);
+        int seen   = 0;
+        for (auto it = range.first; it != range.second; ++it) ++seen;
+        Check(seen == 2,
+              "phase85 umultiset heterogeneous equal_range spans both 4's");
+        Check(g_p85_key_ctors == 0,
+              "phase85 umultiset heterogeneous lookup builds no CountedKey "
+              "temporary");
+
+        auto nh = ms.extract(9);
+        Check(!nh.empty() && nh.value().v == 9 && ms.size() == 2,
+              "phase85 umultiset extract(K&&) heterogeneous hit");
+        Check(ms.erase(4) == 2 && ms.empty(),
+              "phase85 umultiset erase(K&&) heterogeneous removes both 4's");
+    }
+
+    // regression: non-transparent comparator/hash — exact-key overloads are
+    // still the only path (no ambiguity introduced by the new templates).
+    {
+        std::map<int, int> plain{{1, 10}, {2, 20}};
+        Check(plain.find(2) != plain.end() && plain.count(1) == 1 &&
+                  plain.contains(2) && plain.erase(1) == 1 && plain.size() == 1,
+              "phase85 non-transparent map exact-key path unaffected");
+        std::unordered_map<int, int> uplain{{1, 10}, {2, 20}};
+        Check(uplain.find(2) != uplain.end() && uplain.count(1) == 1 &&
+                  uplain.contains(2) && uplain.erase(1) == 1 &&
+                  uplain.size() == 1,
+              "phase85 non-transparent unordered_map exact-key path "
+              "unaffected");
+    }
+
+    printf("[CXX] PASS phase85: heterogeneous lookup + transparent "
+           "extract/erase\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -12944,6 +13295,7 @@ int main()
     Phase82();
     Phase83();
     Phase84();
+    Phase85();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

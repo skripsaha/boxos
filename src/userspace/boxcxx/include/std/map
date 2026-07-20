@@ -216,6 +216,14 @@ public:
         return iterator(first.__n);
     }
     size_type erase(const Key &key) { return __t.EraseKey(key); }
+    template <typename K>
+        requires(__detail::TransparentComparator<Comp> &&
+                 !is_convertible_v<K &&, iterator> &&
+                 !is_convertible_v<K &&, const_iterator>)
+    size_type erase(K &&x)
+    {
+        return __t.EraseKey(std::forward<K>(x));
+    }
 
     void clear() noexcept { __t.clear(); }
     void swap(map &other) noexcept { __t.swap(other.__t); }
@@ -229,6 +237,16 @@ public:
     node_type extract(const Key &key)
     {
         iterator it = find(key);
+        if (it == end()) return node_type();
+        return extract(const_iterator(it));
+    }
+    template <typename K>
+        requires(__detail::TransparentComparator<Comp> &&
+                 !is_convertible_v<K &&, iterator> &&
+                 !is_convertible_v<K &&, const_iterator>)
+    node_type extract(K &&x)
+    {
+        iterator it = find(x);
         if (it == end()) return node_type();
         return extract(const_iterator(it));
     }
@@ -296,6 +314,57 @@ public:
         return {lower_bound(key), upper_bound(key)};
     }
     pair<const_iterator, const_iterator> equal_range(const Key &key) const
+    {
+        return {lower_bound(key), upper_bound(key)};
+    }
+
+    // ── heterogeneous lookup (C++23, transparent Comp only) ─────────────
+
+    template <typename K>
+        requires __detail::TransparentComparator<Comp>
+    iterator find(const K &key) { return __t.Find(key); }
+    template <typename K>
+        requires __detail::TransparentComparator<Comp>
+    const_iterator find(const K &key) const
+    {
+        return const_cast<map *>(this)->__t.Find(key);
+    }
+    template <typename K>
+        requires __detail::TransparentComparator<Comp>
+    size_type count(const K &key) const
+    {
+        return const_cast<map *>(this)->__t.Count(key);
+    }
+    template <typename K>
+        requires __detail::TransparentComparator<Comp>
+    bool contains(const K &key) const { return find(key) != end(); }
+    template <typename K>
+        requires __detail::TransparentComparator<Comp>
+    iterator lower_bound(const K &key) { return __t.LowerBound(key); }
+    template <typename K>
+        requires __detail::TransparentComparator<Comp>
+    const_iterator lower_bound(const K &key) const
+    {
+        return const_cast<map *>(this)->__t.LowerBound(key);
+    }
+    template <typename K>
+        requires __detail::TransparentComparator<Comp>
+    iterator upper_bound(const K &key) { return __t.UpperBound(key); }
+    template <typename K>
+        requires __detail::TransparentComparator<Comp>
+    const_iterator upper_bound(const K &key) const
+    {
+        return const_cast<map *>(this)->__t.UpperBound(key);
+    }
+    template <typename K>
+        requires __detail::TransparentComparator<Comp>
+    pair<iterator, iterator> equal_range(const K &key)
+    {
+        return {lower_bound(key), upper_bound(key)};
+    }
+    template <typename K>
+        requires __detail::TransparentComparator<Comp>
+    pair<const_iterator, const_iterator> equal_range(const K &key) const
     {
         return {lower_bound(key), upper_bound(key)};
     }
@@ -433,6 +502,14 @@ public:
         return iterator(first.__n);
     }
     size_type erase(const Key &key) { return __t.EraseKey(key); }
+    template <typename K>
+        requires(__detail::TransparentComparator<Comp> &&
+                 !is_convertible_v<K &&, iterator> &&
+                 !is_convertible_v<K &&, const_iterator>)
+    size_type erase(K &&x)
+    {
+        return __t.EraseKey(std::forward<K>(x));
+    }
     void clear() noexcept { __t.clear(); }
     void swap(multimap &other) noexcept { __t.swap(other.__t); }
 
@@ -445,6 +522,16 @@ public:
     node_type extract(const Key &key)
     {
         iterator it = __t.Find(key);
+        if (it == end()) return node_type();
+        return extract(const_iterator(it));
+    }
+    template <typename K>
+        requires(__detail::TransparentComparator<Comp> &&
+                 !is_convertible_v<K &&, iterator> &&
+                 !is_convertible_v<K &&, const_iterator>)
+    node_type extract(K &&x)
+    {
+        iterator it = __t.Find(x);
         if (it == end()) return node_type();
         return extract(const_iterator(it));
     }
@@ -512,6 +599,61 @@ public:
     {
         return {lower_bound(key), upper_bound(key)};
     }
+
+    // ── heterogeneous lookup (C++23, transparent Comp only) ─────────────
+
+    template <typename K>
+        requires __detail::TransparentComparator<Comp>
+    iterator find(const K &key) { return __t.Find(key); }
+    template <typename K>
+        requires __detail::TransparentComparator<Comp>
+    const_iterator find(const K &key) const
+    {
+        return const_cast<multimap *>(this)->__t.Find(key);
+    }
+    template <typename K>
+        requires __detail::TransparentComparator<Comp>
+    size_type count(const K &key) const
+    {
+        return const_cast<multimap *>(this)->__t.Count(key);
+    }
+    template <typename K>
+        requires __detail::TransparentComparator<Comp>
+    bool contains(const K &key) const
+    {
+        return const_cast<multimap *>(this)->__t.Find(key) != end();
+    }
+    template <typename K>
+        requires __detail::TransparentComparator<Comp>
+    iterator lower_bound(const K &key) { return __t.LowerBound(key); }
+    template <typename K>
+        requires __detail::TransparentComparator<Comp>
+    const_iterator lower_bound(const K &key) const
+    {
+        return const_cast<multimap *>(this)->__t.LowerBound(key);
+    }
+    template <typename K>
+        requires __detail::TransparentComparator<Comp>
+    iterator upper_bound(const K &key) { return __t.UpperBound(key); }
+    template <typename K>
+        requires __detail::TransparentComparator<Comp>
+    const_iterator upper_bound(const K &key) const
+    {
+        return const_cast<multimap *>(this)->__t.UpperBound(key);
+    }
+    template <typename K>
+        requires __detail::TransparentComparator<Comp>
+    pair<iterator, iterator> equal_range(const K &key)
+    {
+        return {__t.LowerBound(key), __t.UpperBound(key)};
+    }
+    template <typename K>
+        requires __detail::TransparentComparator<Comp>
+    pair<const_iterator, const_iterator> equal_range(const K &key) const
+    {
+        return {lower_bound(key), upper_bound(key)};
+    }
+
     key_compare key_comp() const { return __t.key_comp(); }
     value_compare value_comp() const { return value_compare(__t.key_comp()); }
 

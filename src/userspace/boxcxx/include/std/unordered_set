@@ -121,6 +121,14 @@ public:
         return iterator(nx.__n, nx.__t);
     }
     size_type erase(const Key &key) { return __t.EraseKey(key); }
+    template <typename K>
+        requires(__detail::TransparentHashEq<Hash, KeyEq> &&
+                 !is_convertible_v<K &&, iterator> &&
+                 !is_convertible_v<K &&, const_iterator>)
+    size_type erase(K &&x)
+    {
+        return __t.EraseKey(std::forward<K>(x));
+    }
     void clear() noexcept { __t.clear(); }
     void swap(unordered_set &other) noexcept { __t.swap(other.__t); }
 
@@ -133,6 +141,16 @@ public:
     node_type extract(const Key &key)
     {
         iterator it = find(key);
+        if (it == end()) return node_type();
+        return extract(it);
+    }
+    template <typename K>
+        requires(__detail::TransparentHashEq<Hash, KeyEq> &&
+                 !is_convertible_v<K &&, iterator> &&
+                 !is_convertible_v<K &&, const_iterator>)
+    node_type extract(K &&x)
+    {
+        iterator it = find(x);
         if (it == end()) return node_type();
         return extract(it);
     }
@@ -188,12 +206,41 @@ public:
         return {iterator(lo.__n, lo.__t), iterator(hi.__n, hi.__t)};
     }
 
+    // ── heterogeneous lookup (C++23, transparent Hash+KeyEq only) ───────
+
+    template <typename K>
+        requires __detail::TransparentHashEq<Hash, KeyEq>
+    iterator find(const K &key) const
+    {
+        auto it = const_cast<unordered_set *>(this)->__t.Find(key);
+        return iterator(it.__n, it.__t);
+    }
+    template <typename K>
+        requires __detail::TransparentHashEq<Hash, KeyEq>
+    size_type count(const K &key) const
+    {
+        return const_cast<unordered_set *>(this)->__t.Count(key);
+    }
+    template <typename K>
+        requires __detail::TransparentHashEq<Hash, KeyEq>
+    bool contains(const K &key) const { return find(key) != end(); }
+    template <typename K>
+        requires __detail::TransparentHashEq<Hash, KeyEq>
+    pair<iterator, iterator> equal_range(const K &key) const
+    {
+        auto [lo, hi] = const_cast<unordered_set *>(this)->__t.EqualRange(key);
+        return {iterator(lo.__n, lo.__t), iterator(hi.__n, hi.__t)};
+    }
+
     size_type bucket_count() const noexcept { return __t.bucket_count(); }
     size_type bucket_size(size_type i) const noexcept
     {
         return __t.bucket_size(i);
     }
     size_type bucket(const Key &key) const { return __t.bucket(key); }
+    template <typename K>
+        requires __detail::TransparentHashEq<Hash, KeyEq>
+    size_type bucket(const K &key) const { return __t.bucket(key); }
     local_iterator       begin(size_type n) { return __t.cbegin(n); }
     local_iterator       end(size_type n) { return __t.cend(n); }
     const_local_iterator begin(size_type n) const { return __t.cbegin(n); }
@@ -325,6 +372,14 @@ public:
         return iterator(nx.__n, nx.__t);
     }
     size_type erase(const Key &key) { return __t.EraseKey(key); }
+    template <typename K>
+        requires(__detail::TransparentHashEq<Hash, KeyEq> &&
+                 !is_convertible_v<K &&, iterator> &&
+                 !is_convertible_v<K &&, const_iterator>)
+    size_type erase(K &&x)
+    {
+        return __t.EraseKey(std::forward<K>(x));
+    }
     void clear() noexcept { __t.clear(); }
     void swap(unordered_multiset &other) noexcept { __t.swap(other.__t); }
 
@@ -337,6 +392,16 @@ public:
     node_type extract(const Key &key)
     {
         iterator it = find(key);
+        if (it == end()) return node_type();
+        return extract(it);
+    }
+    template <typename K>
+        requires(__detail::TransparentHashEq<Hash, KeyEq> &&
+                 !is_convertible_v<K &&, iterator> &&
+                 !is_convertible_v<K &&, const_iterator>)
+    node_type extract(K &&x)
+    {
+        iterator it = find(x);
         if (it == end()) return node_type();
         return extract(it);
     }
@@ -390,12 +455,42 @@ public:
         return {iterator(lo.__n, lo.__t), iterator(hi.__n, hi.__t)};
     }
 
+    // ── heterogeneous lookup (C++23, transparent Hash+KeyEq only) ───────
+
+    template <typename K>
+        requires __detail::TransparentHashEq<Hash, KeyEq>
+    iterator find(const K &key) const
+    {
+        auto it = const_cast<unordered_multiset *>(this)->__t.Find(key);
+        return iterator(it.__n, it.__t);
+    }
+    template <typename K>
+        requires __detail::TransparentHashEq<Hash, KeyEq>
+    size_type count(const K &key) const
+    {
+        return const_cast<unordered_multiset *>(this)->__t.Count(key);
+    }
+    template <typename K>
+        requires __detail::TransparentHashEq<Hash, KeyEq>
+    bool contains(const K &key) const { return find(key) != end(); }
+    template <typename K>
+        requires __detail::TransparentHashEq<Hash, KeyEq>
+    pair<iterator, iterator> equal_range(const K &key) const
+    {
+        auto [lo, hi] =
+            const_cast<unordered_multiset *>(this)->__t.EqualRange(key);
+        return {iterator(lo.__n, lo.__t), iterator(hi.__n, hi.__t)};
+    }
+
     size_type bucket_count() const noexcept { return __t.bucket_count(); }
     size_type bucket_size(size_type i) const noexcept
     {
         return __t.bucket_size(i);
     }
     size_type bucket(const Key &key) const { return __t.bucket(key); }
+    template <typename K>
+        requires __detail::TransparentHashEq<Hash, KeyEq>
+    size_type bucket(const K &key) const { return __t.bucket(key); }
     local_iterator       begin(size_type n) { return __t.cbegin(n); }
     local_iterator       end(size_type n) { return __t.cend(n); }
     const_local_iterator begin(size_type n) const { return __t.cbegin(n); }
