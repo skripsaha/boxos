@@ -12317,6 +12317,250 @@ void Phase82(){
                kErfVecN, kErfcVecN, kTgammaVecN, kLgammaVecN, kErfN);
 }
 
+// Ф28a merge exception-safety fixtures: a net-live-allocation counter and
+// a comparator that throws on a chosen call — together they prove the merge
+// basic guarantee (no element lost, no leak) when the comparator throws.
+int g_p83_live      = 0;
+int g_p83_cmp_calls = 0;
+int g_p83_cmp_trip  = 1 << 30; // disarmed by default
+
+template <class T>
+struct P83CountAlloc {
+    using value_type = T;
+    P83CountAlloc()  = default;
+    template <class U>
+    P83CountAlloc(const P83CountAlloc<U> &) noexcept {}
+    T *allocate(std::size_t n)
+    {
+        g_p83_live += static_cast<int>(n);
+        return static_cast<T *>(::operator new(n * sizeof(T)));
+    }
+    void deallocate(T *p, std::size_t n) noexcept
+    {
+        g_p83_live -= static_cast<int>(n);
+        ::operator delete(p);
+    }
+    template <class U>
+    bool operator==(const P83CountAlloc<U> &) const noexcept
+    {
+        return true;
+    }
+};
+
+struct P83ThrowComp {
+    bool operator()(int a, int b) const
+    {
+        if (++g_p83_cmp_calls == g_p83_cmp_trip) throw 42;
+        return a < b;
+    }
+};
+
+// ── phase83: node_handle extract/insert(node)/merge — RB-backed assoc ──
+//    (Ф28a). Covers map/multimap/set/multiset. Hand-computed expected
+//    values; multi-target merges drain the source, unique-target merges
+//    leave colliding keys in the source.
+void Phase83()
+{
+    // node_type is move-only and comparator-independent (so map/multimap
+    // and set/multiset share one node_type — the basis for cross-sibling
+    // merge).
+    static_assert(!std::is_copy_constructible_v<std::map<int, int>::node_type>);
+    static_assert(std::is_move_constructible_v<std::map<int, int>::node_type>);
+    static_assert(
+        std::is_same_v<std::map<int, int>::node_type,
+                       std::multimap<int, int, std::greater<int>>::node_type>);
+    static_assert(
+        std::is_same_v<std::set<int>::node_type,
+                       std::multiset<int, std::greater<int>>::node_type>);
+
+    // extract → mutate key AND mapped → reinsert (map, unique).
+    {
+        std::map<int, int> m{{1, 10}, {2, 20}, {5, 50}};
+        auto nh = m.extract(5);
+        Check(m.size() == 2 && !nh.empty() && bool(nh) && nh.key() == 5 &&
+                  nh.mapped() == 50,
+              "phase83 map extract removes node, handle owns value");
+        nh.key()    = 100;
+        nh.mapped() = 500;
+        auto r      = m.insert(std::move(nh));
+        Check(r.inserted && r.position->first == 100 &&
+                  r.position->second == 500 && r.node.empty() &&
+                  m.size() == 3 && m.at(100) == 500,
+              "phase83 map reinsert honours mutated key/mapped");
+    }
+
+    // insert(node) collision returns the node unconsumed; target untouched.
+    {
+        std::map<int, int> m{{1, 10}, {2, 20}};
+        auto nh = m.extract(1);
+        m.insert({1, 999});
+        auto r = m.insert(std::move(nh));
+        Check(!r.inserted && r.position->second == 999 && !r.node.empty() &&
+                  r.node.key() == 1 && r.node.mapped() == 10 && m.at(1) == 999,
+              "phase83 map insert(node) collision keeps node, target intact");
+    }
+
+    // extract of an absent key → empty handle (both overloads).
+    {
+        std::map<int, int> m{{1, 10}};
+        Check(m.extract(777).empty(), "phase83 map extract(missing)=empty");
+    }
+
+    // hinted insert(node): collision leaves nh owning (unlike insert_return).
+    {
+        std::map<int, int> m{{3, 30}};
+        auto nh = m.extract(3);
+        m.insert({3, 999});
+        auto it = m.insert(m.begin(), std::move(nh));
+        Check(it->second == 999 && !nh.empty() && nh.key() == 3 &&
+                  nh.mapped() == 30,
+              "phase83 map hinted insert(node) retains node on collision");
+    }
+
+    // merge map←map: colliding keys stay in source; target wins.
+    {
+        std::map<int, int> a{{1, 1}, {2, 2}, {3, 3}};
+        std::map<int, int> b{{2, 200}, {4, 4}};
+        a.merge(b);
+        Check(a.size() == 4 && a.at(2) == 2 && a.at(4) == 4 && b.size() == 1 &&
+                  b.at(2) == 200 && b.count(4) == 0,
+              "phase83 merge map<-map keeps collisions in source");
+    }
+
+    // merge multimap←map: multi target never rejects → source fully drained.
+    {
+        std::multimap<int, int> mm{{1, 1}, {1, 2}, {3, 3}};
+        std::map<int, int> m{{1, 100}, {5, 5}};
+        mm.merge(m);
+        Check(mm.size() == 5 && mm.count(1) == 3 && m.empty(),
+              "phase83 merge multimap<-map drains source");
+    }
+
+    // merge map←multimap: first duplicate transfers, rest collide back.
+    {
+        std::map<int, int> tgt{{9, 9}};
+        std::multimap<int, int> src{{1, 10}, {1, 20}, {2, 2}};
+        tgt.merge(src);
+        Check(tgt.size() == 3 && tgt.at(1) == 10 && tgt.at(2) == 2 &&
+                  src.size() == 1 && src.count(1) == 1 &&
+                  src.begin()->second == 20,
+              "phase83 merge map<-multimap transfers one of equal keys");
+    }
+
+    // merge set←multiset: both equal 2's collide against set's single 2.
+    {
+        std::set<int> sa{1, 2, 3};
+        std::multiset<int> sb{2, 2, 4};
+        sa.merge(sb);
+        Check(sa.size() == 4 && sa.count(4) == 1 && sb.size() == 2 &&
+                  sb.count(2) == 2 && sb.count(4) == 0,
+              "phase83 merge set<-multiset collisions stay in source");
+    }
+
+    // merge multiset←set: multi target drains the set.
+    {
+        std::multiset<int> mset{5, 5};
+        std::set<int> ss{5, 6};
+        mset.merge(ss);
+        Check(mset.size() == 4 && mset.count(5) == 3 && mset.count(6) == 1 &&
+                  ss.empty(),
+              "phase83 merge multiset<-set drains source");
+    }
+
+    // set extract → value() mutate → reinsert into a different set.
+    {
+        std::set<int> s1{7, 8, 9}, s2;
+        auto nh = s1.extract(8);
+        Check(s1.size() == 2 && nh.value() == 8,
+              "phase83 set extract exposes value()");
+        nh.value() = 80;
+        auto r     = s2.insert(std::move(nh));
+        Check(r.inserted && *r.position == 80 && s2.contains(80) &&
+                  s2.size() == 1,
+              "phase83 set reinsert honours mutated value");
+    }
+
+    // node_handle default/empty/bool + member swap + ADL swap.
+    {
+        std::map<int, int>::node_type e;
+        Check(e.empty() && !bool(e), "phase83 default node handle is empty");
+        std::map<int, int> m1{{1, 10}}, m2{{2, 20}};
+        auto n1 = m1.extract(1);
+        auto n2 = m2.extract(2);
+        n1.swap(n2);
+        Check(n1.key() == 2 && n1.mapped() == 20 && n2.key() == 1 &&
+                  n2.mapped() == 10,
+              "phase83 node handle member swap");
+        swap(n1, n2); // ADL → std::__node::swap
+        Check(n1.key() == 1 && n2.key() == 2, "phase83 node handle ADL swap");
+    }
+
+    // stateful, non-propagating allocator: round-trips through the handle;
+    // move-assign into an empty handle adopts the source allocator.
+    {
+        using SA = StatefulAlloc<std::pair<const int, int>>;
+        std::map<int, int, std::less<int>, SA> sm(std::less<int>(), SA(7));
+        sm.insert({1, 10});
+        auto nh = sm.extract(1);
+        Check(nh.get_allocator().id == 7,
+              "phase83 stateful allocator round-trips through node handle");
+        std::map<int, int, std::less<int>, SA>::node_type h2;
+        h2 = std::move(nh);
+        Check(!h2.empty() && nh.empty() && h2.get_allocator().id == 7,
+              "phase83 node handle move-assign adopts source allocator");
+        sm.insert(std::move(h2));
+        Check(sm.size() == 1 && sm.at(1) == 10,
+              "phase83 stateful reinsert into same-id container");
+    }
+
+    // self-merge is a no-op (LWG 3577) — would spin forever pre-fix on a
+    // duplicate key; here it must simply leave the container unchanged.
+    {
+        std::multiset<int> ms{5, 5, 7};
+        ms.merge(ms);
+        Check(ms.size() == 3 && ms.count(5) == 2 && ms.count(7) == 1,
+              "phase83 multiset self-merge no-op (no hang)");
+        std::multimap<int, int> mm{{3, 30}, {3, 31}};
+        mm.merge(mm);
+        Check(mm.size() == 2 && mm.count(3) == 2,
+              "phase83 multimap self-merge no-op (no hang)");
+        std::set<int> s{1, 2, 3};
+        s.merge(s);
+        Check(s.size() == 3, "phase83 set self-merge no-op");
+        std::map<int, int> mp{{1, 10}, {2, 20}};
+        mp.merge(mp);
+        Check(mp.size() == 2 && mp.at(1) == 10, "phase83 map self-merge no-op");
+    }
+
+    // throwing comparator during a multi-merge: the element being placed
+    // must stay in the source (basic guarantee) and nothing may leak.
+    {
+        int live0 = g_p83_live;
+        {
+            std::multiset<int, P83ThrowComp, P83CountAlloc<int>> dst, src;
+            for (int i = 0; i < 6; ++i) dst.insert(i * 2);     // 0..10 even
+            for (int i = 0; i < 6; ++i) src.insert(i * 2 + 1); // 1..11 odd
+            std::size_t total = dst.size() + src.size();
+            g_p83_cmp_calls   = 0;
+            g_p83_cmp_trip    = 1; // throw on the first merge comparison
+            bool threw        = false;
+            try {
+                dst.merge(src);
+            } catch (int) {
+                threw = true;
+            }
+            g_p83_cmp_trip = 1 << 30; // disarm
+            Check(threw && dst.size() + src.size() == total,
+                  "phase83 throwing-comparator merge loses no element");
+        }
+        Check(g_p83_live == live0,
+              "phase83 throwing-comparator merge leaks nothing");
+    }
+
+    printf("[CXX] PASS phase83: node_handle extract/insert(node)/merge — "
+           "map/multimap/set/multiset\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -12421,6 +12665,7 @@ int main()
     Phase80();
     Phase81();
     Phase82();
+    Phase83();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

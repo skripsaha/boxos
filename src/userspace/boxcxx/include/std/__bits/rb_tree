@@ -308,11 +308,19 @@ class Tree {
     using NodeAlloc  = typename allocator_traits<Alloc>::template rebind_alloc<NodeT>;
     using NodeTraits = allocator_traits<NodeAlloc>;
 
+    // MergeUnique/MergeMulti reach a same-shape, different-Comp
+    // instantiation's private __header/__count.
+    template <typename, typename, typename, typename, typename>
+    friend class Tree;
+
 public:
     using key_type        = Key;
     using value_type      = Value;
     using size_type       = size_t;
     using difference_type = ptrdiff_t;
+    // node_handle needs the concrete node type and its rebound allocator.
+    using NodeType      = NodeT;
+    using NodeAllocType = NodeAlloc;
 
     template <bool Const>
     class Iter {
@@ -502,7 +510,35 @@ public:
     template <typename... Args>
     pair<iterator, bool> EmplaceUnique(Args &&...args)
     {
-        NodeT *n = MakeNode(std::forward<Args>(args)...);
+        NodeT *n               = MakeNode(std::forward<Args>(args)...);
+        pair<iterator, bool> r = ReinsertUnique(n);
+        if (!r.second) DropNode(n); // equivalent key exists — discard
+        return r;
+    }
+
+    template <typename... Args>
+    iterator EmplaceMulti(Args &&...args)
+    {
+        return ReinsertMulti(MakeNode(std::forward<Args>(args)...));
+    }
+
+    // ── node_handle / merge primitives (Ф28a) ───────────────────────────
+    const NodeAlloc &GetNodeAlloc() const noexcept { return __alloc; }
+
+    // Unlinks `pos` and hands back ownership WITHOUT destroying the value
+    // or freeing storage (contrast Erase, which then DropNodes). Pure
+    // pointer surgery — no comparator call, hence noexcept.
+    NodeT *ExtractNode(const_iterator pos) noexcept
+    {
+        NodeBase *node = EraseAndFixup(pos.__n, __header);
+        --__count;
+        return static_cast<NodeT *>(node);
+    }
+
+    // Links an already-constructed, currently-unowned node with unique
+    // semantics. On collision `n` is left untouched — the caller keeps it.
+    pair<iterator, bool> ReinsertUnique(NodeT *n)
+    {
         NodeBase *parent;
         bool left;
         if (FindUniquePos(KeyOfNode(n), parent, left)) {
@@ -510,26 +546,73 @@ public:
             ++__count;
             return {iterator(n), true};
         }
-        // Equivalent key exists — `parent` holds it.
-        DropNode(n);
         return {iterator(parent), false};
     }
 
-    template <typename... Args>
-    iterator EmplaceMulti(Args &&...args)
+    iterator ReinsertMulti(NodeT *n)
     {
-        NodeT *n          = MakeNode(std::forward<Args>(args)...);
-        NodeBase *parent  = &__header;
-        NodeBase *cur     = __header.parent;
-        bool left         = true;
-        while (cur) {
-            parent = cur;
-            left   = __comp(KeyOfNode(n), KeyOf(cur));
-            cur    = left ? cur->left : cur->right;
-        }
-        InsertAndFixup(left || parent == &__header, n, parent, __header);
+        NodeBase *parent;
+        bool left;
+        FindMultiPos(KeyOfNode(n), parent, left);
+        InsertAndFixup(left, n, parent, __header);
         ++__count;
         return iterator(n);
+    }
+
+    // Splice every element of `src` (a Tree with identical
+    // Key/Value/KeyOfValue/Alloc, possibly a different Comp) into *this
+    // using *this's comparator. `next` is captured before EraseAndFixup —
+    // the same pattern Erase already relies on; the two-children splice
+    // relinks the successor into the extracted slot, so the captured
+    // `next` stays a valid node. Unique target: a key already present
+    // here is left in `src`. Precondition (unchecked): equal allocators.
+    template <typename SrcTree>
+    void MergeUnique(SrcTree &src)
+    {
+        // Self-merge is a no-op (LWG 3577); the guard also spares the walk
+        // below from resting on FindUniquePos reflexivity.
+        if (static_cast<const void *>(this) == static_cast<const void *>(&src))
+            return;
+        NodeBase *cur = src.__header.left;
+        while (cur != &src.__header) {
+            NodeBase *next = Increment(cur);
+            NodeBase *parent;
+            bool left;
+            if (FindUniquePos(KeyOfNode(static_cast<NodeT *>(cur)), parent,
+                              left)) {
+                EraseAndFixup(cur, src.__header);
+                --src.__count;
+                InsertAndFixup(left, cur, parent, __header);
+                ++__count;
+            }
+            cur = next;
+        }
+    }
+
+    // Multi target never rejects — unconditional splice.
+    template <typename SrcTree>
+    void MergeMulti(SrcTree &src)
+    {
+        // Self-merge is a no-op (LWG 3577) — and without this guard the
+        // reinsert would relink `next` inside the very tree we iterate,
+        // spinning forever on any duplicate key.
+        if (static_cast<const void *>(this) == static_cast<const void *>(&src))
+            return;
+        NodeBase *cur = src.__header.left;
+        while (cur != &src.__header) {
+            NodeBase *next = Increment(cur);
+            // Locate the slot in *this BEFORE detaching `cur` from src, so
+            // a throwing comparator leaves both containers intact (basic
+            // guarantee); the extract + link below are noexcept.
+            NodeBase *parent;
+            bool left;
+            FindMultiPos(KeyOfNode(static_cast<NodeT *>(cur)), parent, left);
+            EraseAndFixup(cur, src.__header);
+            --src.__count;
+            InsertAndFixup(left, cur, parent, __header);
+            ++__count;
+            cur = next;
+        }
     }
 
     iterator Erase(const_iterator where)
@@ -666,6 +749,22 @@ private:
             return false;
         }
         return true;
+    }
+
+    // Descends to the multi-insert slot: (parent, left) is where a node
+    // with `key` links to sit at the back of its equal-key run. `left` is
+    // true for an empty tree, so InsertAndFixup roots the first node.
+    template <typename K>
+    void FindMultiPos(const K &key, NodeBase *&parent, bool &left)
+    {
+        parent        = &__header;
+        NodeBase *cur = __header.parent;
+        left          = true;
+        while (cur) {
+            parent = cur;
+            left   = __comp(key, KeyOf(cur));
+            cur    = left ? cur->left : cur->right;
+        }
     }
 
     void CopyFrom(const Tree &other)

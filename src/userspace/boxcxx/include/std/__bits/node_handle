@@ -1,0 +1,242 @@
+// boxcxx — <__bits/node_handle>
+// Move-only node handle behind map/multimap/set/multiset
+// extract/insert(node)/merge. One NodeHandleBase carries the owned-node
+// lifetime; NodeHandle adds the map-flavoured key()/mapped() (primary
+// template) or the set-flavoured value() (partial specialisation on
+// Value == Key — which is exactly how __rb::Tree is instantiated for
+// set/multiset, so the discriminator can never misfire).
+//
+// The node_type does NOT depend on the container's comparator: it is
+// computed purely from <Key, Value, Alloc>, so map<K,T,C1,A> and
+// multimap<K,T,C2,A> share one node_type — which is what makes merge
+// across a unique/multi sibling (and across differing comparators) work.
+#ifndef BOXCXX_BITS_NODE_HANDLE
+#define BOXCXX_BITS_NODE_HANDLE
+
+#include <__bits/allocator_core>
+#include <new>
+#include <utility>
+
+namespace std {
+
+namespace __node {
+
+// Value/NodeT/NodeAlloc are the engine's stored value, concrete node and
+// rebound node allocator. The handle stores the NodeAlloc (not the
+// container's Alloc) so extract/reinsert never rebind on the hot path;
+// get_allocator() rebinds back to allocator_type only when asked.
+template <typename Value, typename NodeT, typename NodeAlloc>
+class NodeHandleBase {
+protected:
+    using NodeTraits = allocator_traits<NodeAlloc>;
+
+    // Trivial-lifetime union: its own ctor/dtor construct/destroy nothing
+    // — the engaged NodeAlloc is placement-new'd and explicitly destroyed
+    // by NodeHandleBase itself, engaged iff __ptr != nullptr.
+    union Storage {
+        constexpr Storage() noexcept {}
+        ~Storage() {}
+        NodeAlloc alloc;
+    };
+
+    constexpr NodeHandleBase() noexcept : __ptr(nullptr) {}
+
+    // Container-facing adopt: `p` is the already-unlinked node (see
+    // Tree::ExtractNode / Table::ExtractNode). Guarding on `p` keeps the
+    // "allocator engaged iff __ptr" invariant self-enforcing even if ever
+    // handed null.
+    NodeHandleBase(NodeT *p, const NodeAlloc &a) noexcept : __ptr(p)
+    {
+        if (p) ::new (__builtin_addressof(__storage.alloc)) NodeAlloc(a);
+    }
+
+    NodeHandleBase(NodeHandleBase &&other) noexcept : __ptr(other.__ptr)
+    {
+        if (__ptr) {
+            ::new (__builtin_addressof(__storage.alloc))
+                NodeAlloc(std::move(other.__storage.alloc));
+            other.__storage.alloc.~NodeAlloc();
+            other.__ptr = nullptr;
+        }
+    }
+
+    // Three-way branch on (empty(), other.empty()). Per
+    // [container.node.assign] a non-empty target frees its current node
+    // BEFORE adopting the source's; the allocator is move-assigned only
+    // when propagate_on_container_move_assignment is set (otherwise the
+    // precondition get_allocator() == other.get_allocator() holds and we
+    // keep ours). Self-move-assignment is out of contract.
+    NodeHandleBase &operator=(NodeHandleBase &&other) noexcept
+    {
+        if (empty()) {
+            if (!other.empty()) {
+                ::new (__builtin_addressof(__storage.alloc))
+                    NodeAlloc(std::move(other.__storage.alloc));
+                other.__storage.alloc.~NodeAlloc();
+                __ptr       = other.__ptr;
+                other.__ptr = nullptr;
+            }
+        } else if (other.empty()) {
+            FreeOwned();
+            __storage.alloc.~NodeAlloc();
+            __ptr = nullptr;
+        } else {
+            FreeOwned();
+            if constexpr (NodeTraits::propagate_on_container_move_assignment::
+                              value)
+                __storage.alloc = std::move(other.__storage.alloc);
+            other.__storage.alloc.~NodeAlloc();
+            __ptr       = other.__ptr;
+            other.__ptr = nullptr;
+        }
+        return *this;
+    }
+
+    ~NodeHandleBase()
+    {
+        if (__ptr) {
+            FreeOwned();
+            __storage.alloc.~NodeAlloc();
+        }
+    }
+
+    // Symmetric swap: the two engaged/disengaged branches are literal
+    // mirror images (no self-recursion).
+    void SwapImpl(NodeHandleBase &other) noexcept
+    {
+        if (empty()) {
+            if (!other.empty()) {
+                ::new (__builtin_addressof(__storage.alloc))
+                    NodeAlloc(std::move(other.__storage.alloc));
+                other.__storage.alloc.~NodeAlloc();
+                __ptr       = other.__ptr;
+                other.__ptr = nullptr;
+            }
+        } else if (other.empty()) {
+            ::new (__builtin_addressof(other.__storage.alloc))
+                NodeAlloc(std::move(__storage.alloc));
+            __storage.alloc.~NodeAlloc();
+            other.__ptr = __ptr;
+            __ptr       = nullptr;
+        } else {
+            NodeT *ptmp = __ptr;
+            __ptr       = other.__ptr;
+            other.__ptr = ptmp;
+            if constexpr (NodeTraits::propagate_on_container_swap::value) {
+                NodeAlloc atmp        = std::move(__storage.alloc);
+                __storage.alloc       = std::move(other.__storage.alloc);
+                other.__storage.alloc = std::move(atmp);
+            }
+        }
+    }
+
+public:
+    using allocator_type = typename NodeTraits::template rebind_alloc<Value>;
+
+    NodeHandleBase(const NodeHandleBase &)            = delete;
+    NodeHandleBase &operator=(const NodeHandleBase &) = delete;
+
+    [[nodiscard]] bool empty() const noexcept { return __ptr == nullptr; }
+    explicit operator bool() const noexcept { return __ptr != nullptr; }
+
+    allocator_type get_allocator() const noexcept
+    {
+        return allocator_type(__storage.alloc);
+    }
+
+    // Container-facing escape hatch — public, __-prefixed, no friend
+    // (mirrors Iter::__n reached directly, the existing boxcxx idiom).
+    NodeT *__Ptr() const noexcept { return __ptr; }
+
+    // Empties the handle after its node was spliced into a tree/table
+    // (ReinsertUnique/ReinsertMulti success path): disengages the stored
+    // allocator WITHOUT destroying the element or deallocating storage —
+    // the engine now owns the node.
+    void __Disown() noexcept
+    {
+        if (__ptr) {
+            __storage.alloc.~NodeAlloc();
+            __ptr = nullptr;
+        }
+    }
+
+private:
+    void FreeOwned() noexcept
+    {
+        NodeTraits::destroy(__storage.alloc,
+                            __builtin_addressof(__ptr->value));
+        NodeTraits::deallocate(__storage.alloc, __ptr, 1);
+    }
+
+    NodeT  *__ptr;
+    Storage __storage;
+};
+
+// Primary template — map/multimap flavour (Value == pair<const Key, T>).
+template <typename Key, typename Value, typename NodeT, typename NodeAlloc>
+class NodeHandle : public NodeHandleBase<Value, NodeT, NodeAlloc> {
+    using Base = NodeHandleBase<Value, NodeT, NodeAlloc>;
+
+public:
+    constexpr NodeHandle() noexcept              = default;
+    NodeHandle(NodeHandle &&) noexcept            = default;
+    NodeHandle &operator=(NodeHandle &&) noexcept = default;
+    ~NodeHandle()                                 = default;
+
+    NodeHandle(NodeT *p, const NodeAlloc &a) noexcept : Base(p, a) {}
+
+    using key_type    = Key;
+    using mapped_type = typename Value::second_type;
+
+    // Modifying the extracted key is explicitly permitted
+    // ([container.node]); the reinsert path re-reads the key from the
+    // node, so a mutation before insert is honoured.
+    key_type &key() const noexcept
+    {
+        return const_cast<key_type &>(this->__Ptr()->value.first);
+    }
+    mapped_type &mapped() const noexcept { return this->__Ptr()->value.second; }
+
+    void swap(NodeHandle &other) noexcept { this->SwapImpl(other); }
+};
+
+// Partial specialisation — set/multiset flavour (Value == Key exactly).
+template <typename Key, typename NodeT, typename NodeAlloc>
+class NodeHandle<Key, Key, NodeT, NodeAlloc>
+    : public NodeHandleBase<Key, NodeT, NodeAlloc> {
+    using Base = NodeHandleBase<Key, NodeT, NodeAlloc>;
+
+public:
+    constexpr NodeHandle() noexcept              = default;
+    NodeHandle(NodeHandle &&) noexcept            = default;
+    NodeHandle &operator=(NodeHandle &&) noexcept = default;
+    ~NodeHandle()                                 = default;
+
+    NodeHandle(NodeT *p, const NodeAlloc &a) noexcept : Base(p, a) {}
+
+    using value_type = Key;
+    value_type &value() const noexcept { return this->__Ptr()->value; }
+
+    void swap(NodeHandle &other) noexcept { this->SwapImpl(other); }
+};
+
+template <typename Key, typename Value, typename NodeT, typename NodeAlloc>
+void swap(NodeHandle<Key, Value, NodeT, NodeAlloc> &a,
+          NodeHandle<Key, Value, NodeT, NodeAlloc> &b) noexcept
+{
+    a.swap(b);
+}
+
+// insert(node_type&&) result for the unique containers.
+template <typename Iterator, typename NodeTypeT>
+struct NodeInsertReturn {
+    Iterator  position{};
+    bool      inserted = false;
+    NodeTypeT node;
+};
+
+} // namespace __node
+
+} // namespace std
+
+#endif // BOXCXX_BITS_NODE_HANDLE

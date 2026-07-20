@@ -1,9 +1,11 @@
 // boxcxx — <set>
 // set / multiset over the shared red-black tree engine.
+// node_handle extract/insert(node)/merge shipped Ф28a.
 #ifndef BOXCXX_SET
 #define BOXCXX_SET
 
 #include <__bits/rb_tree>
+#include <__bits/node_handle>
 #include <compare>
 #include <functional>
 #include <initializer_list>
@@ -23,6 +25,10 @@ struct SelectSelf {
 
 } // namespace __rb
 
+// multiset named by set::merge below (defined later in this header).
+template <typename Key, typename Comp, typename Alloc>
+class multiset;
+
 template <typename Key, typename Comp = less<Key>,
           typename Alloc = allocator<Key>>
 class set {
@@ -41,6 +47,9 @@ public:
     using const_iterator  = typename TreeT::const_iterator;
     using reverse_iterator       = std::reverse_iterator<iterator>;
     using const_reverse_iterator = std::reverse_iterator<const_iterator>;
+    using node_type = __node::NodeHandle<Key, Key, typename TreeT::NodeType,
+                                         typename TreeT::NodeAllocType>;
+    using insert_return_type = __node::NodeInsertReturn<iterator, node_type>;
 
     set() = default;
     explicit set(const Comp &comp, const Alloc &a = Alloc()) : __t(comp, a) {}
@@ -129,6 +138,55 @@ public:
     void clear() noexcept { __t.clear(); }
     void swap(set &other) noexcept { __t.swap(other.__t); }
 
+    // ── node handle / merge (Ф28a) ──────────────────────────────────────
+
+    node_type extract(const_iterator pos)
+    {
+        return node_type(__t.ExtractNode(pos), __t.GetNodeAlloc());
+    }
+    node_type extract(const Key &key)
+    {
+        iterator it = find(key);
+        if (it == end()) return node_type();
+        return extract(it);
+    }
+    insert_return_type insert(node_type &&nh)
+    {
+        if (nh.empty()) return {end(), false, node_type()};
+        auto [it, ok] = __t.ReinsertUnique(nh.__Ptr());
+        if (ok) nh.__Disown();
+        return {iterator(it.__n), ok, std::move(nh)};
+    }
+    iterator insert(const_iterator, node_type &&nh)
+    {
+        // hint accepted, not exploited; on collision nh retains the node.
+        if (nh.empty()) return end();
+        auto [it, ok] = __t.ReinsertUnique(nh.__Ptr());
+        if (ok) nh.__Disown();
+        return iterator(it.__n);
+    }
+    template <typename C2>
+    void merge(set<Key, C2, Alloc> &source)
+    {
+        __t.MergeUnique(source.__Tree());
+    }
+    template <typename C2>
+    void merge(set<Key, C2, Alloc> &&source)
+    {
+        __t.MergeUnique(source.__Tree());
+    }
+    template <typename C2>
+    void merge(multiset<Key, C2, Alloc> &source)
+    {
+        __t.MergeUnique(source.__Tree());
+    }
+    template <typename C2>
+    void merge(multiset<Key, C2, Alloc> &&source)
+    {
+        __t.MergeUnique(source.__Tree());
+    }
+    TreeT &__Tree() noexcept { return __t; }
+
     iterator find(const Key &key) const
     {
         return iterator(const_cast<set *>(this)->__t.Find(key).__n);
@@ -164,13 +222,21 @@ class multiset {
     using TreeT = __rb::Tree<Key, Key, __rb::SelectSelf, Comp, Alloc>;
 
 public:
-    using key_type       = Key;
-    using value_type     = Key;
-    using size_type      = size_t;
-    using key_compare    = Comp;
-    using allocator_type = Alloc;
-    using iterator       = typename TreeT::const_iterator;
-    using const_iterator = typename TreeT::const_iterator;
+    using key_type        = Key;
+    using value_type      = Key;
+    using size_type       = size_t;
+    using difference_type = ptrdiff_t;
+    using key_compare     = Comp;
+    using value_compare   = Comp;
+    using allocator_type  = Alloc;
+    using reference       = const value_type &;
+    using const_reference = const value_type &;
+    using iterator        = typename TreeT::const_iterator;
+    using const_iterator  = typename TreeT::const_iterator;
+    using reverse_iterator       = std::reverse_iterator<iterator>;
+    using const_reverse_iterator = std::reverse_iterator<const_iterator>;
+    using node_type = __node::NodeHandle<Key, Key, typename TreeT::NodeType,
+                                         typename TreeT::NodeAllocType>;
 
     multiset() = default;
     explicit multiset(const Comp &comp, const Alloc &a = Alloc())
@@ -194,6 +260,17 @@ public:
     multiset(multiset &&) noexcept = default;
     multiset &operator=(const multiset &) = default;
     multiset &operator=(multiset &&) noexcept = default;
+    multiset &operator=(initializer_list<Key> il)
+    {
+        clear();
+        insert(il.begin(), il.end());
+        return *this;
+    }
+
+    allocator_type get_allocator() const noexcept
+    {
+        return __t.get_allocator();
+    }
 
     iterator begin() const noexcept
     {
@@ -203,8 +280,17 @@ public:
     {
         return const_cast<multiset *>(this)->__t.end();
     }
+    const_iterator cbegin() const noexcept { return begin(); }
+    const_iterator cend() const noexcept { return end(); }
+    reverse_iterator rbegin() const noexcept
+    {
+        return reverse_iterator(end());
+    }
+    reverse_iterator rend() const noexcept { return reverse_iterator(begin()); }
+
     [[nodiscard]] bool empty() const noexcept { return __t.empty(); }
     size_type size() const noexcept { return __t.size(); }
+    size_type max_size() const noexcept { return __t.max_size(); }
 
     iterator insert(const Key &v)
     {
@@ -213,6 +299,10 @@ public:
     iterator insert(Key &&v)
     {
         return iterator(__t.EmplaceMulti(std::move(v)).__n);
+    }
+    iterator insert(const_iterator, const Key &v)
+    {
+        return iterator(__t.EmplaceMulti(v).__n); // hint accepted, not exploited
     }
     template <typename It>
     void insert(It first, It last)
@@ -225,14 +315,69 @@ public:
     {
         return iterator(__t.EmplaceMulti(std::forward<Args>(args)...).__n);
     }
+    template <typename... Args>
+    iterator emplace_hint(const_iterator, Args &&...args)
+    {
+        return iterator(__t.EmplaceMulti(std::forward<Args>(args)...).__n);
+    }
 
     iterator erase(const_iterator where)
     {
         return iterator(__t.Erase(where).__n);
     }
+    iterator erase(const_iterator first, const_iterator last)
+    {
+        while (first != last) first = const_iterator(__t.Erase(first).__n);
+        return iterator(first.__n);
+    }
     size_type erase(const Key &key) { return __t.EraseKey(key); }
     void clear() noexcept { __t.clear(); }
     void swap(multiset &other) noexcept { __t.swap(other.__t); }
+
+    // ── node handle / merge (Ф28a) ──────────────────────────────────────
+
+    node_type extract(const_iterator pos)
+    {
+        return node_type(__t.ExtractNode(pos), __t.GetNodeAlloc());
+    }
+    node_type extract(const Key &key)
+    {
+        iterator it = find(key);
+        if (it == end()) return node_type();
+        return extract(it);
+    }
+    iterator insert(node_type &&nh)
+    {
+        if (nh.empty()) return end();
+        auto it = __t.ReinsertMulti(nh.__Ptr());
+        nh.__Disown();
+        return iterator(it.__n);
+    }
+    iterator insert(const_iterator, node_type &&nh)
+    {
+        return insert(std::move(nh));
+    }
+    template <typename C2>
+    void merge(set<Key, C2, Alloc> &source)
+    {
+        __t.MergeMulti(source.__Tree());
+    }
+    template <typename C2>
+    void merge(set<Key, C2, Alloc> &&source)
+    {
+        __t.MergeMulti(source.__Tree());
+    }
+    template <typename C2>
+    void merge(multiset<Key, C2, Alloc> &source)
+    {
+        __t.MergeMulti(source.__Tree());
+    }
+    template <typename C2>
+    void merge(multiset<Key, C2, Alloc> &&source)
+    {
+        __t.MergeMulti(source.__Tree());
+    }
+    TreeT &__Tree() noexcept { return __t; }
 
     iterator find(const Key &key) const
     {
@@ -256,6 +401,7 @@ public:
         return {lower_bound(key), upper_bound(key)};
     }
     key_compare key_comp() const { return __t.key_comp(); }
+    value_compare value_comp() const { return __t.key_comp(); }
 
 private:
     TreeT __t;
@@ -301,6 +447,21 @@ template <typename K, typename C, typename A, typename Pred>
 typename set<K, C, A>::size_type erase_if(set<K, C, A> &s, Pred pred)
 {
     typename set<K, C, A>::size_type removed = 0;
+    for (auto it = s.begin(); it != s.end();) {
+        if (pred(*it)) {
+            it = s.erase(it);
+            ++removed;
+        } else {
+            ++it;
+        }
+    }
+    return removed;
+}
+
+template <typename K, typename C, typename A, typename Pred>
+typename multiset<K, C, A>::size_type erase_if(multiset<K, C, A> &s, Pred pred)
+{
+    typename multiset<K, C, A>::size_type removed = 0;
     for (auto it = s.begin(); it != s.end();) {
         if (pred(*it)) {
             it = s.erase(it);
