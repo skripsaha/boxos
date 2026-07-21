@@ -14611,6 +14611,267 @@ void Phase92()
            "bidirectional/default_sentinel/const)\n");
 }
 
+// MED-3 regression helper: is views::join_with callable with these argument
+// types? A NAMED concept keeps the detection out of a block-scope requires-
+// expression, which this GCC mis-diagnoses as a hard error for a 0-viable-
+// candidate overload set (same quirk noted for the const-begin probe).
+template <typename R, typename P>
+concept JoinWithCallable = requires(R &r, P &p) { std::views::join_with(r, p); };
+
+void Phase93()
+{
+    namespace rg = std::ranges;
+    namespace vw = std::views;
+
+    // ── join_view: basic flatten ──────────────────────────────────────────
+    std::vector<std::vector<int>> vv1{{1, 2, 3}, {4, 5}, {6}};
+    auto                            j1 = vv1 | vw::join;
+    std::vector<int>                j1Out;
+    for (int x : j1) j1Out.push_back(x);
+    Check((j1Out == std::vector<int>{1, 2, 3, 4, 5, 6}), "phase93 join basic flatten");
+
+    // ── join_view: forward multi-pass (iterate twice) ────────────────────
+    std::vector<std::vector<int>> vv2{{1, 2}, {3}, {4, 5, 6}};
+    auto                            j2 = vv2 | vw::join;
+    static_assert(rg::forward_range<decltype(j2)>,
+                  "phase93 join over vector<vector<int>> must be forward_range");
+    std::vector<int> j2First, j2Second;
+    for (int x : j2) j2First.push_back(x);
+    for (int x : j2) j2Second.push_back(x);
+    Check(j2First == j2Second, "phase93 join forward multi-pass identical sequences");
+    Check((j2First == std::vector<int>{1, 2, 3, 4, 5, 6}), "phase93 join multi-pass content");
+
+    // ── join_view: empty inner ranges interspersed are skipped ───────────
+    std::vector<std::vector<int>> vv3{{1, 2}, {}, {3}, {}, {}, {4, 5}};
+    auto                            j3 = vv3 | vw::join;
+    std::vector<int>                j3Out;
+    for (int x : j3) j3Out.push_back(x);
+    Check((j3Out == std::vector<int>{1, 2, 3, 4, 5}), "phase93 join skips empty inner ranges");
+
+    // ── join_view: all-empty inner / fully-empty outer ────────────────────
+    std::vector<std::vector<int>> vv4{{}, {}, {}};
+    auto                            j4 = vv4 | vw::join;
+    Check(j4.begin() == j4.end(), "phase93 join all-empty-inner begin==end");
+    std::vector<std::vector<int>> vv4b;
+    auto                            j4b = vv4b | vw::join;
+    Check(j4b.begin() == j4b.end(), "phase93 join fully-empty-outer begin==end");
+
+    // ── join_view: bidirectional reverse, empty inner near boundary ──────
+    std::vector<std::vector<int>> vv5{{1, 2}, {}, {3}, {4, 5, 6}, {}, {7}};
+    auto                            j5 = vv5 | vw::join;
+    static_assert(rg::bidirectional_range<decltype(j5)>,
+                  "phase93 join over vector<vector<int>> must be bidirectional_range");
+    std::vector<int> j5Fwd;
+    for (int x : j5) j5Fwd.push_back(x);
+    std::vector<int> j5Bwd;
+    auto             j5It = j5.end();
+    while (j5It != j5.begin()) {
+        --j5It;
+        j5Bwd.push_back(*j5It);
+    }
+    std::vector<int> j5FwdReversed(j5Fwd.size());
+    for (size_t i = 0; i < j5Fwd.size(); ++i) j5FwdReversed[i] = j5Fwd[j5Fwd.size() - 1 - i];
+    Check(j5Bwd == j5FwdReversed,
+          "phase93 join bidirectional reverse matches reversed forward sequence");
+
+    // ── join_view: prvalue inner range (view-level NonPropagatingCache) ──
+    auto j6 = vw::iota(0, 5) | vw::transform([](int n) { return vw::iota(0, n); }) | vw::join;
+    static_assert(rg::input_range<decltype(j6)>,
+                  "phase93 join over prvalue-inner transform must at least be input_range");
+    static_assert(!rg::forward_range<decltype(j6)>,
+                  "phase93 join over prvalue-inner transform must be capped at input");
+    std::vector<int> j6Out;
+    for (int x : j6) j6Out.push_back(x);
+    Check((j6Out == std::vector<int>{0, 0, 1, 0, 1, 2, 0, 1, 2, 3}),
+          "phase93 join prvalue-inner flatten (view-level NonPropagatingCache)");
+
+    // ── join_view: copy after partial iteration starts fresh (risk #4) ───
+    auto j7 = vw::iota(0, 4) | vw::transform([](int n) { return vw::iota(0, n); }) | vw::join;
+    static_assert(!rg::forward_range<decltype(j7)>,
+                  "phase93 join copy-test source must be !forward_range to exercise the cache");
+    auto it7 = j7.begin();
+    ++it7; // partially advances j7's shared outer_/inner_ cache
+    auto              j7Copy = j7;
+    std::vector<int> j7CopyOut;
+    for (int x : j7Copy) j7CopyOut.push_back(x);
+    Check((j7CopyOut == std::vector<int>{0, 0, 1, 0, 1, 2}),
+          "phase93 join copy after partial iteration starts fresh (NonPropagatingCache)");
+
+    // ── join_with_view: standard's own example ────────────────────────────
+    std::vector<std::string> jw8{"the", "quick", "brown", "fox"};
+    auto                       j8 = jw8 | vw::join_with('-');
+    std::string                j8Out;
+    for (char c : j8) j8Out.push_back(c);
+    Check(j8Out == "the-quick-brown-fox", "phase93 join_with standard example");
+
+    // ── join_with_view: multi-char range delimiter ────────────────────────
+    std::vector<std::string> jw9{"aa", "bb", "cc"};
+    auto                       j9 = jw9 | vw::join_with(std::string_view(", "));
+    std::string                j9Out;
+    for (char c : j9) j9Out.push_back(c);
+    Check(j9Out == "aa, bb, cc", "phase93 join_with multi-char range delimiter");
+
+    // ── join_with_view: empty delimiter pattern ───────────────────────────
+    std::vector<std::string> jw10{"ab", "cd", "ef"};
+    auto                       j10 = jw10 | vw::join_with(std::string_view(""));
+    std::string                j10Out;
+    for (char c : j10) j10Out.push_back(c);
+    Check(j10Out == "abcdef", "phase93 join_with empty delimiter pattern");
+
+    // ── join_with_view: empty inner ⇒ double delimiter (NOT a bug) ────────
+    std::vector<std::string> jw11{"a", "", "b"};
+    auto                       j11 = jw11 | vw::join_with('-');
+    std::string                j11Out;
+    for (char c : j11) j11Out.push_back(c);
+    Check(j11Out == "a--b", "phase93 join_with empty inner produces double delimiter");
+
+    // ── join_with_view: empty first inner ⇒ leading delimiter ─────────────
+    std::vector<std::string> jw12{"", "ab"};
+    auto                       j12 = jw12 | vw::join_with('-');
+    std::string                j12Out;
+    for (char c : j12) j12Out.push_back(c);
+    Check(j12Out == "-ab", "phase93 join_with empty first inner produces leading delimiter");
+
+    // ── join_with_view: bidirectional reverse, empty inner near boundary ─
+    std::vector<std::string> jw13{"a", "", "bb", "c"};
+    auto                       j13 = jw13 | vw::join_with('-');
+    static_assert(rg::bidirectional_range<decltype(j13)>,
+                  "phase93 join_with over vector<string> must be bidirectional_range");
+    std::string j13Fwd;
+    for (char c : j13) j13Fwd.push_back(c);
+    Check(j13Fwd == "a--bb-c", "phase93 join_with forward content (empty inner near boundary)");
+    std::string j13Bwd;
+    auto        it13 = j13.end();
+    while (it13 != j13.begin()) {
+        --it13;
+        j13Bwd.push_back(*it13);
+    }
+    std::string j13BwdReversed(j13Bwd.size(), '\0');
+    for (size_t i = 0; i < j13Bwd.size(); ++i) j13BwdReversed[i] = j13Bwd[j13Bwd.size() - 1 - i];
+    Check(j13BwdReversed == j13Fwd, "phase93 join_with bidirectional reverse matches forward");
+
+    // ── join_with_view: all four views::join_with call shapes agree ──────
+    std::vector<std::string> jw14{"x", "y"};
+    std::string_view          delim14(":");
+    auto                       j14a = jw14 | vw::join_with(':');
+    auto                       j14b = jw14 | vw::join_with(delim14);
+    auto                       j14c = vw::join_with(jw14, ':');
+    auto                       j14d = vw::join_with(jw14, delim14);
+    auto collectStr = [](auto &&r) {
+        std::string s;
+        for (char c : r) s.push_back(c);
+        return s;
+    };
+    Check(collectStr(j14a) == "x:y" && collectStr(j14b) == "x:y" && collectStr(j14c) == "x:y" &&
+              collectStr(j14d) == "x:y",
+          "phase93 join_with all four call shapes (pipe/direct x element/range) agree");
+
+    // ── const-iteration via begin() const / end() const ───────────────────
+    std::vector<std::vector<int>> vv15{{1, 2}, {3, 4, 5}};
+    const auto                      j15 = vv15 | vw::join;
+    std::vector<int>                j15Out;
+    for (int x : j15) j15Out.push_back(x);
+    Check((j15Out == std::vector<int>{1, 2, 3, 4, 5}), "phase93 join const-view iteration");
+
+    std::vector<std::string> jw15{"p", "q"};
+    const auto                 j15w = jw15 | vw::join_with('+');
+    std::string                 j15wOut;
+    for (char c : j15w) j15wOut.push_back(c);
+    Check(j15wOut == "p+q", "phase93 join_with const-view iteration");
+
+    auto j15np = vw::iota(0, 3) | vw::transform([](int n) { return vw::iota(0, n); }) | vw::join;
+    static_assert(!rg::range<const decltype(j15np)>,
+                  "phase93 prvalue-inner join_view must lack begin() const");
+
+    // ── non-trivial common_reference_t for join_with's reference ─────────
+    static_assert(std::same_as<std::common_reference_t<char &, const char &>, const char &>,
+                  "phase93 sanity: common_reference_t<char&,const char&> == const char&");
+    std::vector<std::string> jw16{"ab", "cd"};
+    std::string_view          delim16("-");
+    auto                       j16 = jw16 | vw::join_with(delim16);
+    std::string                j16Out;
+    for (char c : j16) j16Out.push_back(c);
+    Check(j16Out == "ab-cd", "phase93 join_with non-trivial common_reference content");
+
+    // ── CRIT-1 regression (audit): a piped join_with whose delimiter is an
+    //    OWNING range (vector/string), stored in a variable and iterated in a
+    //    LATER statement, must not dangle. Requires RangeAdaptorPartial's rvalue
+    //    overload to move the delimiter into an owning_view. ────────────────────
+    std::vector<std::vector<int>> vvc1{{1, 2}, {3}, {4, 5}};
+    std::vector<int>              sepOwning{-1, -2};
+    auto                          jc1 = vvc1 | vw::join_with(sepOwning); // partial owns a copy
+    std::vector<int>              jc1Out;
+    for (int x : jc1) jc1Out.push_back(x); // used in a later full-expression
+    Check((jc1Out == std::vector<int>{1, 2, -1, -2, 3, -1, -2, 4, 5}),
+          "phase93 CRIT-1 join_with owning-range delimiter (piped, stored) no dangle");
+    auto             jc1b = vvc1 | vw::join_with(std::vector<int>{-9}); // prvalue delimiter
+    std::vector<int> jc1bOut;
+    for (int x : jc1b) jc1bOut.push_back(x);
+    Check((jc1bOut == std::vector<int>{1, 2, -9, 3, -9, 4, 5}),
+          "phase93 CRIT-1 join_with rvalue owning-range delimiter no dangle");
+
+    // ── CRIT-2 regression (audit): take() over a NON-sized base with count >=
+    //    length must stop at the base end, not overrun it. join and filter are
+    //    both non-sized; take must bound either. ────────────────────────────────
+    std::vector<std::vector<int>> vvc2{{1, 2}, {3, 4}};
+    auto                          jc2 = vvc2 | vw::join | vw::take(100);
+    std::vector<int>              jc2Out;
+    for (int x : jc2) jc2Out.push_back(x);
+    Check((jc2Out == std::vector<int>{1, 2, 3, 4}),
+          "phase93 CRIT-2 join|take(n>len) bounded at base end (no overrun)");
+    std::vector<int> vc2b{1, 2, 3, 4, 5};
+    auto             jc2b = vc2b | vw::filter([](int v) { return v % 2 == 1; }) | vw::take(50);
+    std::vector<int> jc2bOut;
+    for (int x : jc2b) jc2bOut.push_back(x);
+    Check((jc2bOut == std::vector<int>{1, 3, 5}),
+          "phase93 CRIT-2 filter|take(n>len) bounded (non-sized base)");
+    auto             jc2c = vc2b | vw::filter([](int v) { return v > 0; }) | vw::take(3);
+    std::vector<int> jc2cOut;
+    for (int x : jc2c) jc2cOut.push_back(x);
+    Check((jc2cOut == std::vector<int>{1, 2, 3}), "phase93 CRIT-2 filter|take(n<len) exact count");
+
+    // ── MED-3 regression (audit): views::join_with is SFINAE-friendly — an
+    //    incompatible inner/pattern pair is removed from the overload set rather
+    //    than hard-erroring in the body. ───────────────────────────────────────
+    static_assert(!JoinWithCallable<std::vector<int>, std::vector<std::string>>,
+                  "phase93 MED-3 join_with(int-range, string-range) must be SFINAE-rejected");
+    static_assert(JoinWithCallable<std::vector<std::string>, std::string_view>,
+                  "phase93 MED-3 join_with(string-range, string_view) stays callable");
+
+    // ── join_with reverse traversal over leading / consecutive / trailing empty
+    //    inner ranges (audit-suggested; the operator-- state machine's worst
+    //    case). Collect the reverse walk, re-reverse it, compare to forward. ────
+    std::vector<std::string> jwEmp{"", "a", "", "", "b", ""};
+    auto                     jwE = jwEmp | vw::join_with('-');
+    static_assert(rg::bidirectional_range<decltype(jwE)>,
+                  "phase93 join_with over vector<string>+char must be bidirectional");
+    std::string jwEFwd;
+    for (char c : jwE) jwEFwd.push_back(c);
+    Check(jwEFwd == "-a---b-", "phase93 join_with empty-boundary forward content");
+    std::string jwERev;
+    auto        itE = jwE.end();
+    while (itE != jwE.begin()) {
+        --itE;
+        jwERev.push_back(*itE);
+    }
+    std::string jwERevReversed(jwERev.rbegin(), jwERev.rend());
+    Check(jwERevReversed == jwEFwd,
+          "phase93 join_with reverse over leading/consecutive/trailing empties matches forward");
+
+    // ── join_with view copy iterates independently from its own begin ─────────
+    std::vector<std::string> jwCp{"aa", "bb"};
+    auto                     jwC1 = jwCp | vw::join_with('.');
+    auto                     jwC1it = jwC1.begin();
+    ++jwC1it; // advance the original mid-iteration
+    auto        jwC2 = jwC1; // copy the view
+    std::string jwC2Out;
+    for (char c : jwC2) jwC2Out.push_back(c);
+    Check(jwC2Out == "aa.bb", "phase93 join_with view copy iterates fresh from begin");
+
+    printf("[CXX] PASS phase93: ranges::join_view / join_with_view "
+           "(satisfy/operator--/NonPropagatingCache/concatable + audit regressions)\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -14725,6 +14986,7 @@ int main()
     Phase90();
     Phase91();
     Phase92();
+    Phase93();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

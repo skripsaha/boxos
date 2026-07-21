@@ -333,6 +333,12 @@ using borrowed_subrange_t =
 #include <__bits/ranges_adjacent>
 #include <__bits/ranges_cartesian>
 
+// join/join_with (Ф29e-1): join_view flattens a range of ranges; join_with
+// additionally splices a delimiter between the flattened elements. Both
+// reuse the NonPropagatingCache substrate defined in ranges_join.
+#include <__bits/ranges_join>
+#include <__bits/ranges_join_with>
+
 // ── range access const/rvalue aliases ([range.access], C++23) ───────────
 // const_iterator_t / const_sentinel_t / range_const_reference_t live here
 // (not in <iterator>) because they lean on ranges::iterator_t / sentinel_t.
