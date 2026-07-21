@@ -319,4 +319,26 @@ using borrowed_subrange_t =
 } // namespace ranges
 } // namespace std
 
+// The range factories (empty/single/iota/repeat) and the simple adaptors
+// (reverse/as_const/as_rvalue/counted) build on the views layer above.
+// Order matters: the adaptor chunk references empty_view from the factory.
+#include <__bits/ranges_factory>
+#include <__bits/ranges_adaptor_simple>
+
+// ── range access const/rvalue aliases ([range.access], C++23) ───────────
+// const_iterator_t / const_sentinel_t / range_const_reference_t live here
+// (not in <iterator>) because they lean on ranges::iterator_t / sentinel_t.
+namespace std {
+namespace ranges {
+
+template <range R>
+using const_iterator_t = const_iterator<iterator_t<R>>;
+template <range R>
+using const_sentinel_t = const_sentinel<sentinel_t<R>>;
+template <range R>
+using range_const_reference_t = iter_const_reference_t<iterator_t<R>>;
+
+} // namespace ranges
+} // namespace std
+
 #endif // BOXCXX_RANGES

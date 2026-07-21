@@ -1,0 +1,321 @@
+// boxcxx — <__bits/ranges_adaptor_simple>
+// The "simple" range adaptors that pair with the factories: reverse_view,
+// as_const_view, as_rvalue_view and the views::counted utility. Pulled in by
+// <ranges> AFTER <__bits/ranges_views> and <__bits/ranges_factory>, so
+// view_interface / subrange / ref_view / empty_view / views::all are already
+// in scope (order-dependent, like the ranges_algo_* chunks).
+//
+// boxcxx notes (documented, safe for the closed type set):
+//   • views::counted returns a subrange for a contiguous iterator too (the
+//     standard's span form is avoided so <ranges> stays free of <span>).
+//   • reverse_view recomputes begin() (no non-propagating cache) — as
+//     filter_view already does; correctness intact, amortised-O(1) not held
+//     for non-random-access bases.
+//   • views::reverse / views::as_const drop the subrange<reverse_iterator>
+//     and span/ref-view fast-paths (perf/return-type only; correctness intact).
+#ifndef BOXCXX_BITS_RANGES_ADAPTOR_SIMPLE
+#define BOXCXX_BITS_RANGES_ADAPTOR_SIMPLE
+
+#include <compare>
+#include <concepts>
+#include <cstddef>
+#include <iterator>
+#include <type_traits>
+#include <utility>
+
+namespace std {
+namespace ranges {
+
+// ── constant_range ([range.refinements], C++23) ─────────────────────────
+
+template <typename T>
+concept constant_range =
+    input_range<T> && __iter_impl::ConstantIterator<iterator_t<T>>;
+
+// ── reverse_view ([range.reverse]) ──────────────────────────────────────
+
+template <view V>
+    requires bidirectional_range<V>
+class reverse_view : public view_interface<reverse_view<V>> {
+    V __base = V();
+
+    // begin() materialises the reversed head each call (no non-propagating
+    // cache); the common-range fast path is O(1), otherwise it walks once.
+    static constexpr auto __Tail(V &b)
+    {
+        if constexpr (common_range<V>)
+            return ranges::end(b);
+        else
+            return ranges::next(ranges::begin(b), ranges::end(b));
+    }
+
+public:
+    reverse_view()
+        requires default_initializable<V>
+    = default;
+    constexpr explicit reverse_view(V base) : __base(std::move(base)) {}
+
+    constexpr V base() const &
+        requires copy_constructible<V>
+    {
+        return __base;
+    }
+    constexpr V base() && { return std::move(__base); }
+
+    constexpr reverse_iterator<iterator_t<V>> begin()
+    {
+        return make_reverse_iterator(__Tail(__base));
+    }
+    constexpr auto begin() const
+        requires common_range<const V>
+    {
+        return make_reverse_iterator(ranges::end(__base));
+    }
+    constexpr reverse_iterator<iterator_t<V>> end()
+    {
+        return make_reverse_iterator(ranges::begin(__base));
+    }
+    constexpr auto end() const
+        requires common_range<const V>
+    {
+        return make_reverse_iterator(ranges::begin(__base));
+    }
+
+    constexpr auto size()
+        requires sized_range<V>
+    {
+        return ranges::size(__base);
+    }
+    constexpr auto size() const
+        requires sized_range<const V>
+    {
+        return ranges::size(__base);
+    }
+};
+
+template <typename R>
+reverse_view(R &&) -> reverse_view<views::all_t<R>>;
+
+template <typename T>
+inline constexpr bool enable_borrowed_range<reverse_view<T>> =
+    enable_borrowed_range<T>;
+
+namespace __views_detail {
+template <typename T>
+inline constexpr bool IsReverseView = false;
+template <typename V>
+inline constexpr bool IsReverseView<reverse_view<V>> = true;
+} // namespace __views_detail
+
+namespace views {
+struct Reverse : RangeAdaptorClosureBase {
+    template <viewable_range R>
+    constexpr auto operator()(R &&r) const
+    {
+        if constexpr (__views_detail::IsReverseView<remove_cvref_t<R>>)
+            return std::forward<R>(r).base();
+        else
+            return reverse_view(std::forward<R>(r));
+    }
+};
+inline constexpr Reverse reverse{};
+} // namespace views
+
+// ── as_rvalue_view ([range.as.rvalue]) ──────────────────────────────────
+
+template <view V>
+    requires input_range<V>
+class as_rvalue_view : public view_interface<as_rvalue_view<V>> {
+    V __base = V();
+
+public:
+    as_rvalue_view()
+        requires default_initializable<V>
+    = default;
+    constexpr explicit as_rvalue_view(V base) : __base(std::move(base)) {}
+
+    constexpr V base() const &
+        requires copy_constructible<V>
+    {
+        return __base;
+    }
+    constexpr V base() && { return std::move(__base); }
+
+    constexpr auto begin() { return move_iterator(ranges::begin(__base)); }
+    constexpr auto begin() const
+        requires range<const V>
+    {
+        return move_iterator(ranges::begin(__base));
+    }
+    constexpr auto end()
+    {
+        if constexpr (common_range<V>)
+            return move_iterator(ranges::end(__base));
+        else
+            return move_sentinel(ranges::end(__base));
+    }
+    constexpr auto end() const
+        requires range<const V>
+    {
+        if constexpr (common_range<const V>)
+            return move_iterator(ranges::end(__base));
+        else
+            return move_sentinel(ranges::end(__base));
+    }
+
+    constexpr auto size()
+        requires sized_range<V>
+    {
+        return ranges::size(__base);
+    }
+    constexpr auto size() const
+        requires sized_range<const V>
+    {
+        return ranges::size(__base);
+    }
+};
+
+template <typename R>
+as_rvalue_view(R &&) -> as_rvalue_view<views::all_t<R>>;
+
+template <typename T>
+inline constexpr bool enable_borrowed_range<as_rvalue_view<T>> =
+    enable_borrowed_range<T>;
+
+namespace views {
+struct AsRvalue : RangeAdaptorClosureBase {
+    template <viewable_range R>
+    constexpr auto operator()(R &&r) const
+    {
+        if constexpr (same_as<iter_rvalue_reference_t<iterator_t<R>>,
+                              range_reference_t<R>>)
+            return views::all(std::forward<R>(r));
+        else
+            return as_rvalue_view(std::forward<R>(r));
+    }
+};
+inline constexpr AsRvalue as_rvalue{};
+} // namespace views
+
+// ── as_const_view ([range.as.const]) ────────────────────────────────────
+
+template <view V>
+    requires input_range<V>
+class as_const_view : public view_interface<as_const_view<V>> {
+    V __base = V();
+
+public:
+    as_const_view()
+        requires default_initializable<V>
+    = default;
+    constexpr explicit as_const_view(V base) : __base(std::move(base)) {}
+
+    constexpr V base() const &
+        requires copy_constructible<V>
+    {
+        return __base;
+    }
+    constexpr V base() && { return std::move(__base); }
+
+    constexpr auto begin()
+    {
+        return make_const_iterator(ranges::begin(__base));
+    }
+    constexpr auto begin() const
+        requires range<const V>
+    {
+        return make_const_iterator(ranges::begin(__base));
+    }
+    constexpr auto end() { return make_const_sentinel(ranges::end(__base)); }
+    constexpr auto end() const
+        requires range<const V>
+    {
+        return make_const_sentinel(ranges::end(__base));
+    }
+
+    constexpr auto size()
+        requires sized_range<V>
+    {
+        return ranges::size(__base);
+    }
+    constexpr auto size() const
+        requires sized_range<const V>
+    {
+        return ranges::size(__base);
+    }
+};
+
+template <typename R>
+as_const_view(R &&) -> as_const_view<views::all_t<R>>;
+
+template <typename T>
+inline constexpr bool enable_borrowed_range<as_const_view<T>> =
+    enable_borrowed_range<T>;
+
+namespace __views_detail {
+template <typename T>
+inline constexpr bool IsEmptyView = false;
+template <typename X>
+inline constexpr bool IsEmptyView<empty_view<X>> = true;
+template <typename X>
+struct EmptyViewElem;
+template <typename X>
+struct EmptyViewElem<empty_view<X>> {
+    using type = X;
+};
+} // namespace __views_detail
+
+namespace views {
+struct AsConst : RangeAdaptorClosureBase {
+    template <viewable_range R>
+    constexpr auto operator()(R &&r) const
+    {
+        using U = all_t<R>;
+        using T = remove_cvref_t<R>;
+        if constexpr (constant_range<U>) {
+            return views::all(std::forward<R>(r));
+        } else if constexpr (__views_detail::IsEmptyView<T>) {
+            return empty_view<
+                const typename __views_detail::EmptyViewElem<T>::type>{};
+        } else if constexpr (is_lvalue_reference_v<R> &&
+                             constant_range<const T> && !view<T>) {
+            return ref_view(static_cast<const T &>(r));
+        } else {
+            return as_const_view(std::forward<R>(r));
+        }
+    }
+};
+inline constexpr AsConst as_const{};
+} // namespace views
+
+// ── views::counted ([range.counted]) ────────────────────────────────────
+// A utility (not a pipeable closure): counted(i, n) yields a sized view of
+// the first n elements. boxcxx returns a subrange in every case — including
+// the contiguous one the standard hands to std::span — so <ranges> keeps no
+// dependency on <span>.
+
+namespace views {
+struct Counted {
+    template <input_or_output_iterator It, typename Diff>
+        requires convertible_to<Diff, iter_difference_t<It>>
+    constexpr auto operator()(It it, Diff n) const
+    {
+        using D = iter_difference_t<It>;
+        if constexpr (contiguous_iterator<It> || random_access_iterator<It>)
+            return subrange(it, it + static_cast<D>(n));
+        else
+            return subrange(
+                counted_iterator<It>(std::move(it), static_cast<D>(n)),
+                default_sentinel);
+    }
+};
+inline constexpr Counted counted{};
+} // namespace views
+
+} // namespace ranges
+
+namespace views = ranges::views;
+
+} // namespace std
+
+#endif // BOXCXX_BITS_RANGES_ADAPTOR_SIMPLE

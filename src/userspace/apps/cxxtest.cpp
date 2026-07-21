@@ -14119,6 +14119,123 @@ void Phase89()
            "permutation + sample/shuffle\n");
 }
 
+// Ф29c — range factories + simple adaptors (empty/single/iota/repeat +
+// reverse/as_const/as_rvalue/counted) + the incrementable_traits root-fix
+// and the C++23 const-iterators machinery underneath them.
+void Phase90()
+{
+    namespace rg = std::ranges;
+    namespace vw = std::views;
+    auto veq     = [](const std::vector<int> &a, std::initializer_list<int> b) {
+        return a.size() == b.size() &&
+               std::equal(a.begin(), a.end(), b.begin());
+    };
+    auto collect = [](auto &&r) {
+        std::vector<int> out;
+        for (auto &&x : r) out.push_back(static_cast<int>(x));
+        return out;
+    };
+
+    // ── incrementable_traits / iter_difference_t root-fix ────────────────
+    static_assert(std::weakly_incrementable<int>);
+    static_assert(std::weakly_incrementable<unsigned>);
+    static_assert(!std::input_or_output_iterator<int>);
+    static_assert(std::same_as<std::iter_difference_t<int>, int>);
+    static_assert(std::same_as<std::incrementable_traits<int *>::difference_type,
+                               std::ptrdiff_t>);
+    Check(std::weakly_incrementable<long>, "phase90 root-fix weakly_incrementable");
+
+    // ── empty_view ───────────────────────────────────────────────────────
+    rg::empty_view<int> ev;
+    Check(ev.size() == 0 && ev.begin() == ev.end() && ev.empty(),
+          "phase90 empty_view");
+    static_assert(rg::borrowed_range<rg::empty_view<int>>);
+    Check(collect(vw::empty<int>).empty(), "phase90 views::empty");
+
+    // ── single_view ──────────────────────────────────────────────────────
+    rg::single_view<int> sv(42);
+    Check(sv.size() == 1 && *sv.begin() == 42, "phase90 single_view value");
+    Check(veq(collect(vw::single(7)), {7}), "phase90 views::single");
+    rg::single_view<int> svi(std::in_place, 5);
+    Check(*svi.begin() == 5, "phase90 single_view in_place");
+
+    // ── iota_view ─────────────────────────────────────────────────────────
+    static_assert(rg::random_access_range<decltype(vw::iota(0, 5))>);
+    static_assert(rg::borrowed_range<rg::iota_view<int, int>>);
+    Check(veq(collect(vw::iota(0, 5)), {0, 1, 2, 3, 4}), "phase90 iota bounded");
+    auto ios = vw::iota(3, 10);
+    Check(rg::size(ios) == 7, "phase90 iota size");
+    Check(veq(collect(vw::iota(-3, 3)), {-3, -2, -1, 0, 1, 2}),
+          "phase90 iota negative");
+    Check(veq(collect(vw::iota(1) | vw::take(4)), {1, 2, 3, 4}),
+          "phase90 iota unbounded | take");
+    auto io = vw::iota(10, 15);
+    Check(io.begin()[2] == 12, "phase90 iota random-access index");
+    Check((io.end() - io.begin()) == 5, "phase90 iota iterator distance");
+    Check(veq(collect(vw::iota(0, 5) | vw::reverse), {4, 3, 2, 1, 0}),
+          "phase90 iota | reverse");
+    Check(veq(collect(vw::iota(0, 6) |
+                      vw::filter([](int x) { return x % 2 == 0; })),
+              {0, 2, 4}),
+          "phase90 iota | filter");
+
+    // ── repeat_view ───────────────────────────────────────────────────────
+    static_assert(rg::random_access_range<decltype(vw::repeat(1, 5))>);
+    Check(veq(collect(vw::repeat(9, 4)), {9, 9, 9, 9}), "phase90 repeat bounded");
+    auto reps = vw::repeat(1, 100);
+    Check(rg::size(reps) == 100, "phase90 repeat size");
+    Check(veq(collect(vw::repeat(5) | vw::take(3)), {5, 5, 5}),
+          "phase90 repeat unbounded | take");
+
+    // ── reverse_view ──────────────────────────────────────────────────────
+    std::vector<int> rvv{1, 2, 3, 4};
+    Check(veq(collect(rvv | vw::reverse), {4, 3, 2, 1}), "phase90 reverse vector");
+    Check(veq(collect(rvv | vw::reverse | vw::reverse), {1, 2, 3, 4}),
+          "phase90 reverse | reverse unwrap");
+
+    // ── as_const_view (forced: rvalue non-constant view) ──────────────────
+    std::vector<int> acv{10, 20, 30};
+    auto cv2 = vw::all(acv) | vw::as_const;
+    static_assert(
+        std::is_const_v<std::remove_reference_t<decltype(*cv2.begin())>>);
+    Check(veq(collect(cv2), {10, 20, 30}), "phase90 as_const_view values");
+    Check(cv2.begin()[1] == 20, "phase90 as_const_view random-access");
+    Check(rg::constant_range<decltype(cv2)>, "phase90 as_const constant_range");
+    // const_sentinel over a NON-iterator sentinel must collapse to S itself
+    // (regression lock: a naive conditional_t hard-errors here); exercise it
+    // through as_const over a non-common range (take over filter → default
+    // sentinel).
+    static_assert(std::same_as<std::const_sentinel<std::default_sentinel_t>,
+                               std::default_sentinel_t>);
+    static_assert(std::three_way_comparable<std::basic_const_iterator<int *>>);
+    std::vector<int> ncv{1, 2, 3, 4, 5, 6};
+    auto             ncc = ncv | vw::filter([](int x) { return x % 2 == 0; }) |
+               vw::take(2) | vw::as_const;
+    Check(veq(collect(ncc), {2, 4}), "phase90 as_const over non-common range");
+
+    // ── as_rvalue_view ────────────────────────────────────────────────────
+    std::vector<std::string> arv{"aa", "bb", "cc"};
+    std::vector<std::string>  moved;
+    for (auto &&s : arv | vw::as_rvalue) moved.push_back(std::move(s));
+    Check(moved.size() == 3 && moved[0] == "aa" && moved[2] == "cc",
+          "phase90 as_rvalue moves out");
+
+    // ── views::counted ────────────────────────────────────────────────────
+    int  carr[] = {5, 6, 7, 8, 9};
+    auto cn     = vw::counted(carr, 3); // contiguous → subrange
+    Check(cn.size() == 3 && veq(collect(cn), {5, 6, 7}),
+          "phase90 counted contiguous");
+    std::vector<int> cvv{1, 2, 3, 4};
+    auto             cn2 = vw::counted(cvv.begin() + 1, 2); // random-access
+    Check(veq(collect(cn2), {2, 3}), "phase90 counted random-access");
+    std::list<int> cl{11, 12, 13, 14};
+    auto           cn3 = vw::counted(cl.begin(), 2); // bidi → counted_iterator
+    Check(veq(collect(cn3), {11, 12}), "phase90 counted non-random-access");
+
+    printf("[CXX] PASS phase90: ranges factory/simple views "
+           "(empty/single/iota/repeat/reverse/as_const/as_rvalue/counted)\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -14230,6 +14347,7 @@ int main()
     Phase87();
     Phase88();
     Phase89();
+    Phase90();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

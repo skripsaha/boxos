@@ -12,6 +12,7 @@
 
 #include <__bits/iterator_core>
 #include <__bits/pointer>
+#include <compare>
 #include <concepts>
 #include <cstddef>
 #include <functional>
@@ -20,6 +21,42 @@
 #include <utility>
 
 namespace std {
+
+// ── incrementable_traits ([incrementable.traits]) ───────────────────────
+// Supplies difference_type for weakly_incrementable when the type is not a
+// full iterator carrying iterator_traits — most importantly bare integral
+// values, so iota_view<int> can satisfy weakly_incrementable<int> (whose
+// difference type is otherwise ill-formed under the iterator_traits-only
+// resolution below). Shape mirrors the standard's constrained partial
+// specializations; `<const I>` is preferred over the constrained `<T>`
+// forms by partial-ordering, so a cv-qualified type resolves once.
+template <typename>
+struct incrementable_traits {};
+
+template <typename T>
+    requires is_object_v<T>
+struct incrementable_traits<T *> {
+    using difference_type = ptrdiff_t;
+};
+
+template <typename I>
+struct incrementable_traits<const I> : incrementable_traits<I> {};
+
+template <typename T>
+    requires requires { typename T::difference_type; }
+struct incrementable_traits<T> {
+    using difference_type = typename T::difference_type;
+};
+
+template <typename T>
+    requires(!requires { typename T::difference_type; }) &&
+            requires(const T &a, const T &b) {
+                { a - b } -> integral;
+            }
+struct incrementable_traits<T> {
+    using difference_type =
+        make_signed_t<decltype(declval<T>() - declval<T>())>;
+};
 
 // ── associated types ([iterator.assoc.types]) ───────────────────────────
 
@@ -30,12 +67,31 @@ concept HasTraitsDifference =
     requires { typename iterator_traits<I>::difference_type; };
 template <typename I>
 concept HasTraitsValue = requires { typename iterator_traits<I>::value_type; };
+template <typename I>
+concept HasIncrementableDiff =
+    requires { typename incrementable_traits<remove_cvref_t<I>>::difference_type; };
+
+// iter_difference_t resolution ([iterator.traits]): a genuine iterator
+// carries iterator_traits::difference_type (pointer spec, or a type whose
+// five member typedefs synthesised the traits) — use it verbatim, keeping
+// every existing result unchanged. Only when that is absent (a bare
+// incrementable such as int) do we consult incrementable_traits.
+template <typename I>
+auto DiffTypeOf()
+{
+    if constexpr (HasTraitsDifference<I>)
+        return type_identity<typename iterator_traits<I>::difference_type>{};
+    else
+        return type_identity<
+            typename incrementable_traits<remove_cvref_t<I>>::difference_type>{};
+}
 
 } // namespace __iter_impl
 
 template <typename I>
-    requires __iter_impl::HasTraitsDifference<I>
-using iter_difference_t = typename iterator_traits<I>::difference_type;
+    requires(__iter_impl::HasTraitsDifference<I> ||
+             __iter_impl::HasIncrementableDiff<I>)
+using iter_difference_t = typename decltype(__iter_impl::DiffTypeOf<I>())::type;
 
 template <typename I>
     requires __iter_impl::HasTraitsValue<I>
@@ -331,6 +387,56 @@ template <typename It>
 constexpr move_iterator<It> make_move_iterator(It it)
 {
     return move_iterator<It>(std::move(it));
+}
+
+// ── move_sentinel ([move.sentinel]) ─────────────────────────────────────
+// The sentinel companion to move_iterator: wraps an underlying sentinel so
+// a move_iterator can be bounded by a non-iterator end (as_rvalue_view over
+// a non-common range hands one of these back from end()).
+
+template <semiregular S>
+class move_sentinel {
+public:
+    constexpr move_sentinel() = default;
+    constexpr explicit move_sentinel(S s) : __last(std::move(s)) {}
+    template <typename S2>
+        requires convertible_to<const S2 &, S>
+    constexpr move_sentinel(const move_sentinel<S2> &s) : __last(s.base())
+    {
+    }
+    template <typename S2>
+        requires assignable_from<S &, const S2 &>
+    constexpr move_sentinel &operator=(const move_sentinel<S2> &s)
+    {
+        __last = s.base();
+        return *this;
+    }
+
+    constexpr S base() const { return __last; }
+
+private:
+    S __last = S();
+};
+
+template <typename I, typename S>
+    requires sentinel_for<S, I>
+constexpr bool operator==(const move_iterator<I> &i, const move_sentinel<S> &s)
+{
+    return i.base() == s.base();
+}
+template <typename I, typename S>
+    requires sized_sentinel_for<S, I>
+constexpr iter_difference_t<I> operator-(const move_sentinel<S> &s,
+                                         const move_iterator<I> &i)
+{
+    return s.base() - i.base();
+}
+template <typename I, typename S>
+    requires sized_sentinel_for<S, I>
+constexpr iter_difference_t<I> operator-(const move_iterator<I> &i,
+                                         const move_sentinel<S> &s)
+{
+    return i.base() - s.base();
 }
 
 // ── counted_iterator ([counted.iterator]) ───────────────────────────────
@@ -1320,6 +1426,288 @@ public:
     using pointer         = typename Pointer<I>::type;
     using reference       = iter_reference_t<I>;
 };
+
+// ── const-iterators ([const.iterators], C++23) ───────────────────────────
+// basic_const_iterator wraps an iterator so its reference becomes a const
+// view of the element (iter_const_reference_t) — the substrate views::as_const
+// / as_const_view lean on. const_iterator/const_sentinel collapse to the
+// underlying type when it is already a constant iterator (no wrapping cost).
+
+template <indirectly_readable It>
+using iter_const_reference_t =
+    common_reference_t<const iter_value_t<It> &&, iter_reference_t<It>>;
+
+namespace __iter_impl {
+
+template <typename I>
+concept ConstantIterator =
+    input_iterator<I> &&
+    same_as<iter_const_reference_t<I>, iter_reference_t<I>>;
+
+// iterator_category is a member of basic_const_iterator only when the base
+// is a forward iterator ([const.iterators.types]); a base carries it in.
+template <typename I>
+struct BccCategory {};
+template <forward_iterator I>
+struct BccCategory<I> {
+    using iterator_category = typename iterator_traits<I>::iterator_category;
+};
+
+} // namespace __iter_impl
+
+template <input_iterator Iterator>
+class basic_const_iterator : public __iter_impl::BccCategory<Iterator> {
+    Iterator __cur = Iterator();
+
+    using __RvalRef =
+        common_reference_t<const iter_value_t<Iterator> &&,
+                           iter_rvalue_reference_t<Iterator>>;
+
+public:
+    using iterator_concept = conditional_t<
+        contiguous_iterator<Iterator>, contiguous_iterator_tag,
+        conditional_t<
+            random_access_iterator<Iterator>, random_access_iterator_tag,
+            conditional_t<bidirectional_iterator<Iterator>,
+                          bidirectional_iterator_tag,
+                          conditional_t<forward_iterator<Iterator>,
+                                        forward_iterator_tag,
+                                        input_iterator_tag>>>>;
+    using value_type      = iter_value_t<Iterator>;
+    using difference_type = iter_difference_t<Iterator>;
+    using reference       = iter_const_reference_t<Iterator>;
+
+    basic_const_iterator()
+        requires default_initializable<Iterator>
+    = default;
+    constexpr basic_const_iterator(Iterator current) : __cur(std::move(current))
+    {
+    }
+    template <convertible_to<Iterator> U>
+    constexpr basic_const_iterator(basic_const_iterator<U> current)
+        : __cur(std::move(current.base()))
+    {
+    }
+    template <typename T>
+        requires(!same_as<remove_cvref_t<T>, basic_const_iterator>) &&
+                convertible_to<T, Iterator>
+    constexpr basic_const_iterator(T &&current)
+        : __cur(std::forward<T>(current))
+    {
+    }
+
+    constexpr const Iterator &base() const & noexcept { return __cur; }
+    constexpr Iterator base() && { return std::move(__cur); }
+
+    constexpr reference operator*() const
+    {
+        return static_cast<reference>(*__cur);
+    }
+    constexpr const auto *operator->() const
+        requires is_lvalue_reference_v<iter_reference_t<Iterator>> &&
+                 same_as<remove_cvref_t<iter_reference_t<Iterator>>, value_type>
+    {
+        if constexpr (contiguous_iterator<Iterator>)
+            return std::to_address(__cur);
+        else
+            return __builtin_addressof(static_cast<reference>(*__cur));
+    }
+
+    constexpr basic_const_iterator &operator++()
+    {
+        ++__cur;
+        return *this;
+    }
+    constexpr void operator++(int) { ++__cur; }
+    constexpr basic_const_iterator operator++(int)
+        requires forward_iterator<Iterator>
+    {
+        auto t = *this;
+        ++__cur;
+        return t;
+    }
+    constexpr basic_const_iterator &operator--()
+        requires bidirectional_iterator<Iterator>
+    {
+        --__cur;
+        return *this;
+    }
+    constexpr basic_const_iterator operator--(int)
+        requires bidirectional_iterator<Iterator>
+    {
+        auto t = *this;
+        --__cur;
+        return t;
+    }
+
+    constexpr basic_const_iterator &operator+=(difference_type n)
+        requires random_access_iterator<Iterator>
+    {
+        __cur += n;
+        return *this;
+    }
+    constexpr basic_const_iterator &operator-=(difference_type n)
+        requires random_access_iterator<Iterator>
+    {
+        __cur -= n;
+        return *this;
+    }
+    constexpr reference operator[](difference_type n) const
+        requires random_access_iterator<Iterator>
+    {
+        return static_cast<reference>(__cur[n]);
+    }
+
+    // comparisons with the underlying sentinel (bounds a const range). The
+    // same-type case is handled by the homogeneous friends below; the
+    // !same_as guard is written FIRST so that when S is basic_const_iterator
+    // the conjunction short-circuits before sized_sentinel_for<S, Iterator>
+    // is ever evaluated — otherwise that satisfaction check recurses on
+    // itself (it looks for exactly these operators).
+    template <typename S>
+        requires(!same_as<S, basic_const_iterator>) && sentinel_for<S, Iterator>
+    constexpr bool operator==(const S &s) const
+    {
+        return __cur == s;
+    }
+    template <typename S>
+        requires(!same_as<S, basic_const_iterator>) &&
+                sized_sentinel_for<S, Iterator>
+    constexpr difference_type operator-(const S &s) const
+    {
+        return __cur - s;
+    }
+    template <typename S>
+        requires(!same_as<S, basic_const_iterator>) &&
+                sized_sentinel_for<S, Iterator>
+    friend constexpr difference_type operator-(const S &s,
+                                               const basic_const_iterator &i)
+    {
+        return s - i.__cur;
+    }
+
+    // homogeneous ordering (a common const range compares two of these).
+    friend constexpr bool operator==(const basic_const_iterator &a,
+                                     const basic_const_iterator &b)
+        requires equality_comparable<Iterator>
+    {
+        return a.__cur == b.__cur;
+    }
+    friend constexpr bool operator<(const basic_const_iterator &a,
+                                    const basic_const_iterator &b)
+        requires random_access_iterator<Iterator>
+    {
+        return a.__cur < b.__cur;
+    }
+    friend constexpr bool operator>(const basic_const_iterator &a,
+                                    const basic_const_iterator &b)
+        requires random_access_iterator<Iterator>
+    {
+        return a.__cur > b.__cur;
+    }
+    friend constexpr bool operator<=(const basic_const_iterator &a,
+                                     const basic_const_iterator &b)
+        requires random_access_iterator<Iterator>
+    {
+        return a.__cur <= b.__cur;
+    }
+    friend constexpr bool operator>=(const basic_const_iterator &a,
+                                     const basic_const_iterator &b)
+        requires random_access_iterator<Iterator>
+    {
+        return a.__cur >= b.__cur;
+    }
+    friend constexpr auto operator<=>(const basic_const_iterator &a,
+                                      const basic_const_iterator &b)
+        requires random_access_iterator<Iterator> &&
+                 three_way_comparable<Iterator>
+    {
+        return a.__cur <=> b.__cur;
+    }
+
+    friend constexpr basic_const_iterator operator+(basic_const_iterator i,
+                                                    difference_type n)
+        requires random_access_iterator<Iterator>
+    {
+        return basic_const_iterator(i.__cur + n);
+    }
+    friend constexpr basic_const_iterator operator+(difference_type n,
+                                                    basic_const_iterator i)
+        requires random_access_iterator<Iterator>
+    {
+        return basic_const_iterator(i.__cur + n);
+    }
+    friend constexpr basic_const_iterator operator-(basic_const_iterator i,
+                                                    difference_type n)
+        requires random_access_iterator<Iterator>
+    {
+        return basic_const_iterator(i.__cur - n);
+    }
+    friend constexpr difference_type operator-(const basic_const_iterator &a,
+                                               const basic_const_iterator &b)
+        requires sized_sentinel_for<Iterator, Iterator>
+    {
+        return a.__cur - b.__cur;
+    }
+
+    friend constexpr __RvalRef iter_move(const basic_const_iterator &i) noexcept(
+        noexcept(static_cast<__RvalRef>(ranges::iter_move(i.__cur))))
+    {
+        return static_cast<__RvalRef>(ranges::iter_move(i.__cur));
+    }
+};
+
+// boxcxx keys its category concepts on iterator_traits, so spell the five
+// member types out (the class itself omits pointer / a non-forward category
+// per the standard). iterator_concept comes from the member above.
+template <input_iterator I>
+struct iterator_traits<basic_const_iterator<I>> {
+    using iterator_concept =
+        typename basic_const_iterator<I>::iterator_concept;
+    using iterator_category =
+        conditional_t<forward_iterator<I>,
+                      typename iterator_traits<I>::iterator_category,
+                      input_iterator_tag>;
+    using value_type      = iter_value_t<I>;
+    using difference_type = iter_difference_t<I>;
+    using pointer         = void;
+    using reference       = iter_const_reference_t<I>;
+};
+
+template <input_iterator I>
+using const_iterator =
+    conditional_t<__iter_impl::ConstantIterator<I>, I, basic_const_iterator<I>>;
+
+namespace __iter_impl {
+// const_sentinel must be S itself when S is not an input_iterator. A bare
+// conditional_t would eagerly form const_iterator<S> — a *constrained* alias
+// — for the false branch too, hard-erroring on the constraint instead of
+// yielding S. Defer it to the specialization so it is only formed when S
+// really is an input_iterator.
+template <semiregular S>
+struct ConstSentinelT {
+    using type = S;
+};
+template <semiregular S>
+    requires input_iterator<S>
+struct ConstSentinelT<S> {
+    using type = const_iterator<S>;
+};
+} // namespace __iter_impl
+
+template <semiregular S>
+using const_sentinel = typename __iter_impl::ConstSentinelT<S>::type;
+
+template <input_iterator I>
+constexpr const_iterator<I> make_const_iterator(I it)
+{
+    return it;
+}
+template <semiregular S>
+constexpr const_sentinel<S> make_const_sentinel(S s)
+{
+    return s;
+}
 
 } // namespace std
 
