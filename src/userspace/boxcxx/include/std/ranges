@@ -331,6 +331,7 @@ using borrowed_subrange_t =
 #include <__bits/ranges_elements>
 #include <__bits/ranges_zip>
 #include <__bits/ranges_adjacent>
+#include <__bits/ranges_cartesian>
 
 // ── range access const/rvalue aliases ([range.access], C++23) ───────────
 // const_iterator_t / const_sentinel_t / range_const_reference_t live here
