@@ -59,11 +59,14 @@ for cfg in $CONFIGS; do
     done
 
     hit=0
-    # 450s post-shell budget: the correctly-rounded cmath suite (Phase66+) runs
+    # 600s post-shell budget: the correctly-rounded cmath suite (Phase66+) runs
     # tens of thousands of software-dd evals per function; on 16c-TCG the full
-    # run legitimately takes minutes and grows with each CR phase. Still breaks
-    # out immediately on PANIC/EXCEPTION/FAILURES, so genuine faults fail fast.
-    for i in $(seq 1 900); do
+    # run legitimately takes minutes and grows with each CR/ranges phase. The
+    # single-core UEFI config is the slowest and was periodically tripping the
+    # old 450s ceiling (marker=0 bad=0, a runner-budget timeout, not a code
+    # flake). Still breaks out immediately on PANIC/EXCEPTION/FAILURES, so
+    # genuine faults fail fast.
+    for i in $(seq 1 1200); do
         [ "$(grep -cE "$MARKER" build/serial.log 2>/dev/null)" -ge 1 ] && { hit=1; break; }
         grep -qE 'PANIC|\[EXCEPTION\]|\[CXX\] TOTAL FAILURES' build/serial.log 2>/dev/null && break
         sleep 0.5
