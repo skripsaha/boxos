@@ -339,6 +339,12 @@ using borrowed_subrange_t =
 #include <__bits/ranges_join>
 #include <__bits/ranges_join_with>
 
+// split/lazy_split (Ф29e-2): split_view yields eager subrange pieces;
+// lazy_split_view yields lazily-materialized inner-view pieces. Both reuse
+// MaybeConst/SimpleView from ranges_views and NonPropagatingCache/PresentIf
+// from ranges_join.
+#include <__bits/ranges_split>
+
 // ── range access const/rvalue aliases ([range.access], C++23) ───────────
 // const_iterator_t / const_sentinel_t / range_const_reference_t live here
 // (not in <iterator>) because they lean on ranges::iterator_t / sentinel_t.

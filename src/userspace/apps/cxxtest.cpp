@@ -14872,6 +14872,248 @@ void Phase93()
            "(satisfy/operator--/NonPropagatingCache/concatable + audit regressions)\n");
 }
 
+// Phase94 fixture (Ф29e-2 test 14): a genuinely input-only range — its
+// iterator has NO operator==(I,I), only operator==(I,Sentinel), so
+// forward_iterator<I> (and hence forward_range) provably fails regardless of
+// iterator_category. Models an istream-like single-pass source since boxcxx
+// has no istream_view yet.
+struct P94InputSentinel {};
+
+struct P94InputIter {
+    const char             *p = nullptr;
+    using value_type        = char;
+    using difference_type   = std::ptrdiff_t;
+    using iterator_concept  = std::input_iterator_tag;
+    using iterator_category = std::input_iterator_tag;
+    using reference         = const char &;
+    using pointer           = void;
+
+    P94InputIter() = default;
+    explicit P94InputIter(const char *q) : p(q) {}
+    const char &operator*() const { return *p; }
+    P94InputIter &operator++() { ++p; return *this; }
+    void operator++(int) { ++p; }
+    friend bool operator==(const P94InputIter &i, P94InputSentinel) { return *i.p == '\0'; }
+};
+
+struct P94InputRange {
+    const char *data;
+    explicit P94InputRange(const char *s) : data(s) {}
+    P94InputIter begin() const { return P94InputIter(data); }
+    P94InputSentinel end() const { return P94InputSentinel{}; }
+};
+static_assert(!std::ranges::forward_range<P94InputRange>, "phase94 fixture must genuinely be input-only");
+
+// MED-3 regression helpers: NAMED concepts keep the detection out of a
+// block-scope requires-expression, which this GCC mis-diagnoses as a hard
+// error for a 0-viable-candidate overload set (same JoinWithCallable quirk).
+template <typename R, typename P>
+concept SplitCallable = requires(R &r, P &p) { std::views::split(r, p); };
+template <typename R, typename P>
+concept LazySplitCallable = requires(R &r, P &p) { std::views::lazy_split(r, p); };
+
+void Phase94()
+{
+    namespace rg = std::ranges;
+    namespace vw = std::views;
+
+    auto collect = [](auto &&piece) {
+        std::string s;
+        for (char c : piece) s.push_back(c);
+        return s;
+    };
+
+    // ── split_view: basic single-char delimiter ──────────────────────────
+    std::string p1 = "a b";
+    auto                       sv1 = vw::split(p1, ' ');
+    std::vector<std::string> sv1Out;
+    for (auto piece : sv1) sv1Out.push_back(collect(piece));
+    Check((sv1Out == std::vector<std::string>{"a", "b"}), "phase94 split basic single-char delimiter");
+
+    // ── split_view: leading empty piece ───────────────────────────────────
+    std::string p2 = " a b";
+    std::vector<std::string> sv2Out;
+    for (auto piece : vw::split(p2, ' ')) sv2Out.push_back(collect(piece));
+    Check((sv2Out == std::vector<std::string>{"", "a", "b"}), "phase94 split leading empty piece");
+
+    // ── split_view: trailing empty piece (CRIT-1's highest-value assertion,
+    //    operator++'s 3-level if/else nesting — see [range.split.iterator]) ─
+    std::string p3 = "a b ";
+    std::vector<std::string> sv3Out;
+    for (auto piece : vw::split(p3, ' ')) sv3Out.push_back(collect(piece));
+    Check((sv3Out == std::vector<std::string>{"a", "b", ""}),
+          "phase94 CRIT-1 split trailing empty piece (operator++ nesting)");
+
+    // ── split_view: consecutive delimiters -> middle empty piece ──────────
+    std::string p4 = "a  b";
+    std::vector<std::string> sv4Out;
+    for (auto piece : vw::split(p4, ' ')) sv4Out.push_back(collect(piece));
+    Check((sv4Out == std::vector<std::string>{"a", "", "b"}), "phase94 split consecutive delimiters, middle empty");
+
+    // ── split_view: all-delimiter string -> all-empty pieces ─────────────
+    std::string p5 = "   ";
+    std::vector<std::string> sv5Out;
+    for (auto piece : vw::split(p5, ' ')) sv5Out.push_back(collect(piece));
+    Check((sv5Out == std::vector<std::string>{"", "", "", ""}), "phase94 split all-delimiter string, N+1 empties");
+
+    // ── split_view: no match -> whole range as one piece ──────────────────
+    std::string p6 = "abc";
+    std::vector<std::string> sv6Out;
+    for (auto piece : vw::split(p6, ',')) sv6Out.push_back(collect(piece));
+    Check((sv6Out == std::vector<std::string>{"abc"}), "phase94 split no match, whole range one piece");
+
+    // ── split_view: empty range -> zero pieces (LWG 4017 New/unadopted;
+    //    matches current real-world libstdc++/libc++ behavior, NOT one
+    //    empty piece — do not "fix" this into one-empty-piece) ────────────
+    std::string p7 = "";
+    auto        sv7 = vw::split(p7, ' ');
+    Check(sv7.begin() == sv7.end(), "phase94 split empty range, zero pieces (LWG 4017 unadopted)");
+
+    // ── split_view: empty pattern -> each element its own subrange ────────
+    std::string      p8 = "abc";
+    std::string_view emptyPattern;
+    std::vector<std::string> sv8Out;
+    for (auto piece : vw::split(p8, emptyPattern)) sv8Out.push_back(collect(piece));
+    Check((sv8Out == std::vector<std::string>{"a", "b", "c"}), "phase94 HIGH-2 split empty pattern");
+
+    // ── split_view: multi-element pattern + adversarial leftmost-match
+    //    (confirms naive substring search, not KMP) ────────────────────────
+    std::string p9a = "aXXbXXc";
+    std::vector<std::string> sv9aOut;
+    for (auto piece : vw::split(p9a, std::string_view("XX"))) sv9aOut.push_back(collect(piece));
+    Check((sv9aOut == std::vector<std::string>{"a", "b", "c"}), "phase94 split multi-char pattern");
+
+    std::string p9b = "aXXbXXXc";
+    std::vector<std::string> sv9bOut;
+    for (auto piece : vw::split(p9b, std::string_view("XX"))) sv9bOut.push_back(collect(piece));
+    Check((sv9bOut == std::vector<std::string>{"a", "b", "Xc"}),
+          "phase94 split multi-char pattern, naive leftmost-match adversarial (non-KMP)");
+
+    // ── split_view: standard's own canonical example, string_view round-trip
+    //    (boxcxx's string_view has no C++23 range-constructor overload —
+    //    pre-existing, unrelated gap — so build it from begin()/end() instead) ─
+    std::string p10 = "the quick brown fox";
+    std::vector<std::string> sv10Out;
+    for (auto word : vw::split(p10, ' ')) sv10Out.push_back(std::string(word.begin(), word.end()));
+    Check((sv10Out == std::vector<std::string>{"the", "quick", "brown", "fox"}),
+          "phase94 split canonical example via string_view round-trip");
+
+    // ── lazy_split_view: basic, forward source ─────────────────────────────
+    std::string p11   = "the quick brown";
+    auto        lsv11 = vw::lazy_split(p11, ' ');
+    // boxcxx keys forward_range on iterator_category (CategoryAtLeast), not
+    // ITER_CONCEPT dispatch — lazy_split_view's outer-iterator is
+    // UNCONDITIONALLY input_iterator_tag for iterator_category (the
+    // standard's own choice, since operator* returns a value). Real
+    // libc++/libstdc++ present this as forward_range via iterator_concept
+    // dispatch; boxcxx does not dispatch on iterator_concept here, so it
+    // stays input_range. Permanent, not a gap — do not "fix" in Ф29f.
+    static_assert(rg::input_range<decltype(lsv11)>);
+    static_assert(!rg::forward_range<decltype(lsv11)>);
+    std::vector<std::string> lsv11Out;
+    for (auto word : lsv11) lsv11Out.push_back(collect(word));
+    Check((lsv11Out == std::vector<std::string>{"the", "quick", "brown"}), "phase94 lazy_split basic forward source");
+
+    // ── lazy_split_view: inner-segment forward-ness + independent
+    //    multi-pass over the SAME word ──────────────────────────────────────
+    auto lsv12Word = *lsv11.begin();
+    static_assert(rg::forward_range<decltype(lsv12Word)>,
+                  "phase94 lazy_split inner value_type must be forward_range for forward V");
+    std::string lsv12W1, lsv12W2;
+    for (char c : lsv12Word) lsv12W1.push_back(c);
+    for (char c : lsv12Word) lsv12W2.push_back(c);
+    Check(lsv12W1 == lsv12W2, "phase94 lazy_split inner word independent multi-pass");
+
+    // ── lazy_split_view: trailing delimiter (forward source) ──────────────
+    std::string p13 = "a b ";
+    std::vector<std::string> lsv13Out;
+    for (auto word : vw::lazy_split(p13, ' ')) lsv13Out.push_back(collect(word));
+    Check((lsv13Out == std::vector<std::string>{"a", "b", ""}),
+          "phase94 lazy_split trailing delimiter (forward V)");
+
+    // ── lazy_split_view: genuinely input-only source + tiny-range
+    //    (single-element) delimiter — CRIT-2's specific risk ────────────────
+    P94InputRange p14a("ab cd ef");
+    auto          lsv14a = vw::lazy_split(p14a, ' ');
+    static_assert(!rg::forward_range<decltype(lsv14a)>,
+                  "phase94 lazy_split over input-only source must stay input_range");
+    std::vector<std::string> lsv14aOut;
+    for (auto word : lsv14a) lsv14aOut.push_back(collect(word));
+    Check((lsv14aOut == std::vector<std::string>{"ab", "cd", "ef"}), "phase94 lazy_split input-only source, plain");
+
+    P94InputRange p14b("ab ");
+    auto          lsv14b = vw::lazy_split(p14b, ' ');
+    std::vector<std::string> lsv14bOut;
+    for (auto word : lsv14b) lsv14bOut.push_back(collect(word));
+    Check((lsv14bOut == std::vector<std::string>{"ab", ""}),
+          "phase94 CRIT-2 lazy_split input-only trailing delimiter (2 words, not 1)");
+
+    // ── lazy_split_view: general (non-tiny) multi-element pattern branch ──
+    std::string p15a = "abXcdXef";
+    std::vector<std::string> lsv15aOut;
+    for (auto word : vw::lazy_split(p15a, std::string_view("X"))) lsv15aOut.push_back(collect(word));
+    Check((lsv15aOut == std::vector<std::string>{"ab", "cd", "ef"}),
+          "phase94 lazy_split general branch (range pattern forces mismatch-based path)");
+
+    std::string p15b = "aXXbXXXc";
+    std::vector<std::string> lsv15bOut;
+    for (auto word : vw::lazy_split(p15b, std::string_view("XX"))) lsv15bOut.push_back(collect(word));
+    Check((lsv15bOut == std::vector<std::string>{"a", "b", "Xc"}),
+          "phase94 lazy_split general branch adversarial, agrees with eager split_view");
+
+    // ── composed adaptor: split | transform, + owning pattern argument
+    //    (Ф29e-1 CRIT-1-style rvalue-forwarding regression coverage) ───────
+    std::vector<long long> p16Lens;
+    for (auto len : p1 | vw::split(' ') |
+                         vw::transform([](auto piece) { return rg::distance(piece.begin(), piece.end()); }))
+        p16Lens.push_back(len);
+    Check((p16Lens == std::vector<long long>{1, 1}), "phase94 split composed with transform (piece lengths)");
+
+    std::vector<int> ownedPattern{9, 9};
+    std::vector<int> p16Src{1, 2, 9, 9, 3};
+    auto              p16Owning = p16Src | vw::split(ownedPattern); // partial owns a copy
+    std::vector<int> p16OwningOut;
+    for (auto piece : p16Owning)
+        for (int x : piece) p16OwningOut.push_back(x); // used in a later full-expression
+    Check((p16OwningOut == std::vector<int>{1, 2, 3}),
+          "phase94 CRIT-1 split owning-range pattern (piped, stored) no dangle");
+
+    // ── const-iteration: lazy_split_view (begin() const / end() const,
+    //    LWG 3592/3599 conjuncts). split_view has NO const begin()/end() in
+    //    the real standard's own synopsis — not tested here. ────────────────
+    const auto p17Const = p11 | vw::lazy_split(' ');
+    std::vector<std::string> p17Out;
+    for (auto word : p17Const) p17Out.push_back(collect(word));
+    Check((p17Out == std::vector<std::string>{"the", "quick", "brown"}), "phase94 lazy_split const-view iteration");
+
+    // ── static_asserts: value_type, SFINAE-friendliness, iterator category ─
+    static_assert(std::same_as<rg::range_value_t<decltype(sv1)>, rg::subrange<rg::iterator_t<std::string>>>,
+                  "phase94 split_view value_type must be subrange<iterator_t<V>>");
+    // split_view/lazy_split_view compare V's and Pattern's ELEMENTS directly
+    // (indirectly_comparable<iterator_t<V>,iterator_t<Pattern>>) — unlike
+    // join_with (which compares V's REFERENCE, a range-of-ranges, against
+    // Pattern). The meaningful positive/negative pairs are element-type
+    // compatibility, not "range-of-ranges vs range" shape.
+    static_assert(!SplitCallable<std::vector<int>, std::vector<std::string>>,
+                  "phase94 split(int-range, string-range) must be SFINAE-rejected (elements incomparable)");
+    static_assert(SplitCallable<std::string, std::string_view>,
+                  "phase94 split(string, string_view) stays callable (char elements comparable)");
+    static_assert(!LazySplitCallable<std::vector<int>, std::vector<std::string>>,
+                  "phase94 lazy_split(int-range, string-range) must be SFINAE-rejected");
+    static_assert(LazySplitCallable<std::string, std::string_view>,
+                  "phase94 lazy_split(string, string_view) stays callable");
+    static_assert(std::input_iterator<rg::iterator_t<decltype(sv1)>> &&
+                      !std::forward_iterator<rg::iterator_t<decltype(sv1)>>,
+                  "phase94 MED-2 split_view::Iterator is unconditionally input_iterator_tag in boxcxx");
+
+    // begin() called twice on the same instance must agree (no cache to go stale)
+    auto sv1b = vw::split(p1, ' ');
+    Check(sv1b.begin() == sv1b.begin(), "phase94 HIGH-3 split begin() twice yields equal iterators");
+
+    printf("[CXX] PASS phase94: ranges::split_view / lazy_split_view "
+           "(FindNext/operator++ state machines + tiny-range vs general branch + input-only V)\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -14987,6 +15229,7 @@ int main()
     Phase91();
     Phase92();
     Phase93();
+    Phase94();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
