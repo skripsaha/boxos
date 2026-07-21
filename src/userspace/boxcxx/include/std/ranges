@@ -325,6 +325,13 @@ using borrowed_subrange_t =
 #include <__bits/ranges_factory>
 #include <__bits/ranges_adaptor_simple>
 
+// elements/zip/adjacent (Ф29d-1): tuple-slice + enumerate, then the
+// multi-range zip/zip_transform, then adjacent/adjacent_transform (which
+// reuses TupleTransform and zip_transform's N==0 case from ranges_zip).
+#include <__bits/ranges_elements>
+#include <__bits/ranges_zip>
+#include <__bits/ranges_adjacent>
+
 // ── range access const/rvalue aliases ([range.access], C++23) ───────────
 // const_iterator_t / const_sentinel_t / range_const_reference_t live here
 // (not in <iterator>) because they lean on ranges::iterator_t / sentinel_t.

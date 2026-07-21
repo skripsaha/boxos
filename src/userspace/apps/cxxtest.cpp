@@ -14236,6 +14236,203 @@ void Phase90()
            "(empty/single/iota/repeat/reverse/as_const/as_rvalue/counted)\n");
 }
 
+void Phase91()
+{
+    namespace rg = std::ranges;
+    namespace vw = std::views;
+
+    // ── views::elements / keys / values ──────────────────────────────────
+    std::vector<std::pair<int, const char *>> pv{{1, "one"}, {2, "two"}, {3, "three"}};
+
+    auto kv   = pv | vw::keys;
+    int  ksum = 0;
+    for (int k : kv) ksum += k;
+    Check(ksum == 6, "phase91 keys pipe sum");
+
+    auto vv       = pv | vw::values;
+    bool valuesOk = true;
+    int  vi       = 0;
+    for (const char *s : vv) {
+        if (std::string_view(s) != std::string_view(pv[static_cast<size_t>(vi)].second))
+            valuesOk = false;
+        ++vi;
+    }
+    Check(valuesOk && vi == 3, "phase91 values pipe content");
+
+    auto kvDirect = vw::elements<0>(pv);
+    Check(kvDirect.size() == 3 && *kvDirect.begin() == 1, "phase91 elements<0> direct form");
+
+    using PairView = rg::ref_view<std::vector<std::pair<int, const char *>>>;
+    static_assert(std::is_same_v<rg::keys_view<PairView>, rg::elements_view<PairView, 0>>);
+    static_assert(std::is_same_v<rg::values_view<PairView>, rg::elements_view<PairView, 1>>);
+
+    // ── views::enumerate ──────────────────────────────────────────────────
+    std::vector<char> letters{'a', 'b', 'c'};
+    int               idx  = 0;
+    bool              enOk = true;
+    for (auto &&[i, c] : letters | vw::enumerate) {
+        if (i != idx || c != letters[static_cast<size_t>(idx)]) enOk = false;
+        ++idx;
+    }
+    Check(enOk && idx == 3, "phase91 enumerate index+element (pipe)");
+
+    // Non-common range (take over a bidirectional-only list yields a
+    // counted_iterator/default_sentinel pair, not a common_range) exercises
+    // enumerate's Sentinel path instead of its common-range Iterator path.
+    std::list<char> letterList{'x', 'y', 'z', 'w'};
+    auto            takenList = letterList | vw::take(3);
+    static_assert(!rg::common_range<decltype(takenList)>);
+    int  idx2  = 0;
+    bool enOk2 = true;
+    for (auto &&[i, c] : vw::enumerate(takenList)) {
+        if (i != idx2) enOk2 = false;
+        ++idx2;
+    }
+    Check(enOk2 && idx2 == 3, "phase91 enumerate over non-common range (direct form)");
+
+    // ── views::zip ────────────────────────────────────────────────────────
+    std::vector<int> za{1, 2, 3, 4, 5};
+    std::vector<int> zb{10, 20, 30};
+
+    auto z2 = vw::zip(za, zb);
+    Check(z2.size() == 3, "phase91 zip size (2-way, shortest)");
+    int  zCnt = 0;
+    bool zOk  = true;
+    for (auto &&t : z2) {
+        if (std::get<0>(t) != za[static_cast<size_t>(zCnt)] ||
+            std::get<1>(t) != zb[static_cast<size_t>(zCnt)])
+            zOk = false;
+        ++zCnt;
+    }
+    Check(zOk && zCnt == 3, "phase91 zip stops at shortest (2-way)");
+
+    std::vector<int> zc{100, 200, 300, 400};
+    auto             z3 = vw::zip(za, zb, zc);
+    Check(z3.size() == 3, "phase91 zip size (3-way, shortest)");
+    int cnt3 = 0;
+    for (auto &&t : z3) {
+        (void)t;
+        ++cnt3;
+    }
+    Check(cnt3 == 3, "phase91 zip stops at shortest (3-way)");
+
+    auto zBegin = z2.begin();
+    auto zEnd   = z2.end();
+    Check(zEnd - zBegin == 3, "phase91 zip end()-begin() (random-access)");
+    Check(std::get<0>(zBegin[1]) == 2 && std::get<1>(zBegin[1]) == 20,
+          "phase91 zip operator[] (random-access)");
+
+    // ── views::zip_transform ──────────────────────────────────────────────
+    auto             zt = vw::zip_transform([](int x, int y) { return x + y; }, za, zb);
+    std::vector<int> ztCollected;
+    for (int v : zt) ztCollected.push_back(v);
+    Check(ztCollected.size() == 3 && ztCollected[0] == 11 && ztCollected[1] == 22 &&
+              ztCollected[2] == 33,
+          "phase91 zip_transform sum + shortest length");
+
+    // ── views::adjacent / pairwise ─────────────────────────────────────────
+    std::vector<int> adjV{1, 3, 6, 10, 15};
+
+    auto pw = adjV | vw::pairwise;
+    Check(pw.size() == 4, "phase91 pairwise size == n-1");
+    int  pwCnt = 0;
+    bool pwOk  = true;
+    for (auto &&[a, b] : pw) {
+        if (a != adjV[static_cast<size_t>(pwCnt)] || b != adjV[static_cast<size_t>(pwCnt) + 1])
+            pwOk = false;
+        ++pwCnt;
+    }
+    Check(pwOk && pwCnt == 4, "phase91 pairwise windows (pipe form)");
+
+    auto adj2Direct = vw::adjacent<2>(adjV);
+    Check(adj2Direct.size() == pw.size(), "phase91 adjacent<2> direct form matches pairwise");
+
+    auto adj3 = vw::adjacent<3>(adjV);
+    Check(adj3.size() == 3, "phase91 adjacent<3> size == n-2");
+    int  adj3Cnt = 0;
+    bool adj3Ok  = true;
+    for (auto &&[a, b, c] : adj3) {
+        if (a != adjV[static_cast<size_t>(adj3Cnt)] ||
+            b != adjV[static_cast<size_t>(adj3Cnt) + 1] ||
+            c != adjV[static_cast<size_t>(adj3Cnt) + 2])
+            adj3Ok = false;
+        ++adj3Cnt;
+    }
+    Check(adj3Ok && adj3Cnt == 3, "phase91 adjacent<3> windows (direct form)");
+
+    std::vector<int> shortV{1, 2};
+    auto             adjShort = shortV | vw::adjacent<3>;
+    Check(adjShort.begin() == adjShort.end() && adjShort.size() == 0,
+          "phase91 adjacent shorter-than-N is empty");
+
+    // ── views::adjacent_transform / pairwise_transform ────────────────────
+    auto             diffs = adjV | vw::pairwise_transform([](int a, int b) { return b - a; });
+    std::vector<int> diffsCollected;
+    for (int d : diffs) diffsCollected.push_back(d);
+    Check(diffsCollected.size() == 4 && diffsCollected[0] == 2 && diffsCollected[1] == 3 &&
+              diffsCollected[2] == 4 && diffsCollected[3] == 5,
+          "phase91 pairwise_transform differences");
+
+    auto sums3 =
+        vw::adjacent_transform<3>(adjV, [](int a, int b, int c) { return a + b + c; });
+    std::vector<int> sums3Collected;
+    for (int s : sums3) sums3Collected.push_back(s);
+    Check(sums3Collected.size() == 3 && sums3Collected[0] == 10 && sums3Collected[1] == 19 &&
+              sums3Collected[2] == 31,
+          "phase91 adjacent_transform<3> sums");
+
+    // ── const-range paths (exercises the <Const> half of each view) ──────
+    const std::vector<int> cza{1, 2, 3};
+    const std::vector<int> czb{10, 20, 30};
+    auto                   zConst   = vw::zip(cza, czb);
+    int                    constCnt = 0;
+    for (auto &&t : zConst) {
+        (void)t;
+        ++constCnt;
+    }
+    Check(constCnt == 3, "phase91 zip over const ranges");
+
+    const std::vector<int> cAdjV{1, 3, 6, 10};
+    auto                   pwConst    = cAdjV | vw::pairwise;
+    int                    pwConstCnt = 0;
+    for (auto &&t : pwConst) {
+        (void)t;
+        ++pwConstCnt;
+    }
+    Check(pwConstCnt == 3, "phase91 pairwise over const range");
+
+    const std::vector<std::pair<int, const char *>> cpv{{1, "a"}, {2, "b"}};
+    auto                                             keysConst    = cpv | vw::keys;
+    int                                               keysConstCnt = 0;
+    for (int k : keysConst) {
+        (void)k;
+        ++keysConstCnt;
+    }
+    Check(keysConstCnt == 2, "phase91 keys over const range");
+
+    // ── regression locks (audit fixes) ───────────────────────────────────
+    // HIGH-1: adjacent value_type must be tuple<T,...> — a prior RepeatedTuple
+    // bug collapsed the value type to tuple<T&&,...>, which breaks value
+    // materialization (masked at iteration because reference stays tuple<T&,…>).
+    static_assert(std::is_same_v<rg::range_value_t<decltype(pw)>, std::tuple<int, int>>,
+                  "adjacent value_type regression (HIGH-1)");
+    static_assert(std::is_same_v<rg::range_value_t<decltype(adj3)>, std::tuple<int, int, int>>,
+                  "adjacent<3> value_type regression (HIGH-1)");
+    rg::range_value_t<decltype(pw)> firstWindow = *pw.begin();
+    Check(std::get<0>(firstWindow) == 1 && std::get<1>(firstWindow) == 3,
+          "phase91 adjacent value_type materialization (HIGH-1)");
+    static_assert(std::is_same_v<rg::range_value_t<decltype(z2)>, std::tuple<int, int>>,
+                  "zip value_type regression");
+    // enumerate iterator exposes the standard-named index() accessor (not pos()).
+    auto enIt = (letters | vw::enumerate).begin();
+    Check(enIt.index() == 0, "phase91 enumerate iterator index() accessor");
+    // adjacent_transform_view exposes base() (LWG 3848/3947).
+    Check(sums3.base().size() == adjV.size(), "phase91 adjacent_transform base()");
+
+    printf("[CXX] PASS phase91: ranges tuple/multi-range views "
+           "(elements/keys/values/enumerate/zip/zip_transform/adjacent/adjacent_transform)\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -14348,6 +14545,7 @@ int main()
     Phase88();
     Phase89();
     Phase90();
+    Phase91();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
