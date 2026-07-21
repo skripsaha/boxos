@@ -1,0 +1,632 @@
+// boxcxx — <__bits/ranges_zip>
+// [range.zip] + [range.zip.transform], Ф29d-1. Pulled in by <ranges> after
+// <__bits/ranges_elements>; adjacent_view/adjacent_transform_view (the next
+// chunk) reuse TupleTransform/TupleForEach and zip_transform_view from here.
+//
+// boxcxx note: zip_view::size() cannot call ranges::min (it lives in
+// <__bits/ranges_algo_fold>, pulled in only by <algorithm> AFTER <ranges> is
+// fully parsed — a qualified name used inside a template is bound at the
+// template's point of definition, so it would be undeclared there). A local
+// MinOfPack replaces it; see the report for detail.
+#ifndef BOXCXX_BITS_RANGES_ZIP
+#define BOXCXX_BITS_RANGES_ZIP
+
+#include <compare>
+#include <concepts>
+#include <cstddef>
+#include <functional>
+#include <iterator>
+#include <tuple>
+#include <type_traits>
+#include <utility>
+
+namespace std {
+namespace ranges {
+
+namespace __views_detail {
+
+template <typename F, typename Tuple>
+constexpr auto TupleTransform(F &&f, Tuple &&t)
+{
+    return apply(
+        [&]<typename... Ts>(Ts &&...e) {
+            return tuple<invoke_result_t<F &, Ts>...>(invoke(f, std::forward<Ts>(e))...);
+        },
+        std::forward<Tuple>(t));
+}
+template <typename F, typename Tuple>
+constexpr void TupleForEach(F &&f, Tuple &&t)
+{
+    apply([&]<typename... Ts>(Ts &&...e) { (invoke(f, std::forward<Ts>(e)), ...); },
+          std::forward<Tuple>(t));
+}
+
+// Plain min, used by zip_view::size() (ranges::min is unreachable here — see
+// the file header).
+template <typename T>
+constexpr T MinOfPack(T v)
+{
+    return v;
+}
+template <typename T, typename... Rest>
+constexpr T MinOfPack(T v, Rest... rest)
+{
+    T m = MinOfPack(rest...);
+    return v < m ? v : m;
+}
+
+// Min-by-absolute-value, sign preserved — [range.zip.iterator]'s operator-.
+// Absolute value is computed in the unsigned domain before any negation, so
+// negating T's minimum representable value never overflows.
+template <typename T>
+constexpr T MinAbsPack(T v)
+{
+    return v;
+}
+template <typename T, typename... Rest>
+constexpr T MinAbsPack(T v, Rest... rest)
+{
+    T best          = MinAbsPack(rest...);
+    using U         = make_unsigned_t<T>;
+    U vAbs          = v < T(0) ? static_cast<U>(0) - static_cast<U>(v) : static_cast<U>(v);
+    U bestAbs       = best < T(0) ? static_cast<U>(0) - static_cast<U>(best) : static_cast<U>(best);
+    return vAbs < bestAbs ? v : best;
+}
+
+} // namespace __views_detail
+
+// ── zip_view ([range.zip]) ────────────────────────────────────────────────
+
+template <typename... Views>
+    requires(view<Views> && ...) && (input_range<Views> && ...) && (sizeof...(Views) >= 1)
+class zip_view : public view_interface<zip_view<Views...>> {
+    tuple<Views...> __views;
+
+    template <bool Const>
+    static constexpr bool AllForward = (forward_range<__views_detail::MaybeConst<Const, Views>> && ...);
+    template <bool Const>
+    static constexpr bool AllBidirectional =
+        (bidirectional_range<__views_detail::MaybeConst<Const, Views>> && ...);
+    template <bool Const>
+    static constexpr bool AllRandomAccess =
+        (random_access_range<__views_detail::MaybeConst<Const, Views>> && ...);
+
+    static constexpr bool ZipIsCommon =
+        (sizeof...(Views) == 1 && (common_range<Views> && ...)) ||
+        (!(bidirectional_range<Views> && ...) && (common_range<Views> && ...)) ||
+        ((random_access_range<Views> && ...) && (sized_range<Views> && ...));
+
+    template <bool Const>
+    struct Iterator {
+        tuple<iterator_t<__views_detail::MaybeConst<Const, Views>>...> __current;
+
+        using iterator_concept =
+            conditional_t<AllRandomAccess<Const>, random_access_iterator_tag,
+                          conditional_t<AllBidirectional<Const>, bidirectional_iterator_tag,
+                                        conditional_t<AllForward<Const>, forward_iterator_tag,
+                                                      input_iterator_tag>>>;
+        // operator* always materializes a fresh tuple of references, never a
+        // stable reference itself, so the legacy category never rises above
+        // input — matches [range.zip.iterator] exactly (present-or-not is
+        // moot once the value is pinned to input_iterator_tag either way).
+        using iterator_category = input_iterator_tag;
+        using value_type = tuple<range_value_t<__views_detail::MaybeConst<Const, Views>>...>;
+        using difference_type =
+            common_type_t<range_difference_t<__views_detail::MaybeConst<Const, Views>>...>;
+        using reference = tuple<range_reference_t<__views_detail::MaybeConst<Const, Views>>...>;
+        using pointer    = void;
+
+        Iterator() = default;
+        constexpr explicit Iterator(
+            tuple<iterator_t<__views_detail::MaybeConst<Const, Views>>...> current)
+            : __current(std::move(current))
+        {
+        }
+        constexpr Iterator(Iterator<!Const> i)
+            requires Const &&
+                     (convertible_to<iterator_t<Views>,
+                                     iterator_t<__views_detail::MaybeConst<Const, Views>>> &&
+                      ...)
+            : __current(std::move(i.__current))
+        {
+        }
+
+        constexpr reference operator*() const
+        {
+            return __views_detail::TupleTransform(
+                [](auto &i) -> decltype(auto) { return *i; }, __current);
+        }
+        constexpr reference operator[](difference_type n) const
+            requires AllRandomAccess<Const>
+        {
+            return __views_detail::TupleTransform(
+                [n](auto &i) -> decltype(auto) {
+                    return i[static_cast<iter_difference_t<remove_reference_t<decltype(i)>>>(n)];
+                },
+                __current);
+        }
+
+        constexpr Iterator &operator++()
+        {
+            __views_detail::TupleForEach([](auto &i) { ++i; }, __current);
+            return *this;
+        }
+        constexpr void operator++(int) { ++*this; }
+        constexpr Iterator operator++(int)
+            requires AllForward<Const>
+        {
+            auto t = *this;
+            ++*this;
+            return t;
+        }
+        constexpr Iterator &operator--()
+            requires AllBidirectional<Const>
+        {
+            __views_detail::TupleForEach([](auto &i) { --i; }, __current);
+            return *this;
+        }
+        constexpr Iterator operator--(int)
+            requires AllBidirectional<Const>
+        {
+            auto t = *this;
+            --*this;
+            return t;
+        }
+
+        constexpr Iterator &operator+=(difference_type n)
+            requires AllRandomAccess<Const>
+        {
+            __views_detail::TupleForEach(
+                [n](auto &i) {
+                    i += static_cast<iter_difference_t<remove_reference_t<decltype(i)>>>(n);
+                },
+                __current);
+            return *this;
+        }
+        constexpr Iterator &operator-=(difference_type n)
+            requires AllRandomAccess<Const>
+        {
+            return *this += -n;
+        }
+
+        friend constexpr Iterator operator+(Iterator i, difference_type n)
+            requires AllRandomAccess<Const>
+        {
+            i += n;
+            return i;
+        }
+        friend constexpr Iterator operator+(difference_type n, Iterator i)
+            requires AllRandomAccess<Const>
+        {
+            i += n;
+            return i;
+        }
+        friend constexpr Iterator operator-(Iterator i, difference_type n)
+            requires AllRandomAccess<Const>
+        {
+            i -= n;
+            return i;
+        }
+        friend constexpr difference_type operator-(const Iterator &a, const Iterator &b)
+            requires(sized_sentinel_for<iterator_t<__views_detail::MaybeConst<Const, Views>>,
+                                        iterator_t<__views_detail::MaybeConst<Const, Views>>> &&
+                     ...)
+        {
+            return [&]<size_t... Is>(index_sequence<Is...>) {
+                return __views_detail::MinAbsPack(static_cast<difference_type>(
+                    get<Is>(a.__current) - get<Is>(b.__current))...);
+            }(index_sequence_for<Views...>{});
+        }
+
+        friend constexpr bool operator==(const Iterator &a, const Iterator &b)
+            requires(equality_comparable<iterator_t<__views_detail::MaybeConst<Const, Views>>> &&
+                     ...)
+        {
+            if constexpr (AllBidirectional<Const>) {
+                return a.__current == b.__current;
+            } else {
+                return [&]<size_t... Is>(index_sequence<Is...>) {
+                    return (... || (get<Is>(a.__current) == get<Is>(b.__current)));
+                }(index_sequence_for<Views...>{});
+            }
+        }
+
+        friend constexpr auto iter_move(const Iterator &i)
+        {
+            return __views_detail::TupleTransform(ranges::iter_move, i.__current);
+        }
+        friend constexpr void iter_swap(const Iterator &a, const Iterator &b)
+            requires(indirectly_swappable<iterator_t<__views_detail::MaybeConst<Const, Views>>> &&
+                     ...)
+        {
+            [&]<size_t... Is>(index_sequence<Is...>) {
+                (ranges::iter_swap(get<Is>(a.__current), get<Is>(b.__current)), ...);
+            }(index_sequence_for<Views...>{});
+        }
+    };
+
+    template <bool Const>
+    struct Sentinel {
+        tuple<sentinel_t<__views_detail::MaybeConst<Const, Views>>...> __end;
+
+        Sentinel() = default;
+        constexpr explicit Sentinel(
+            tuple<sentinel_t<__views_detail::MaybeConst<Const, Views>>...> end)
+            : __end(std::move(end))
+        {
+        }
+        constexpr Sentinel(Sentinel<!Const> s)
+            requires Const &&
+                     (convertible_to<sentinel_t<Views>,
+                                     sentinel_t<__views_detail::MaybeConst<Const, Views>>> &&
+                      ...)
+            : __end(std::move(s.__end))
+        {
+        }
+
+        template <bool OtherConst>
+            requires(sentinel_for<sentinel_t<__views_detail::MaybeConst<Const, Views>>,
+                                  iterator_t<__views_detail::MaybeConst<OtherConst, Views>>> &&
+                     ...)
+        friend constexpr bool operator==(const Iterator<OtherConst> &i, const Sentinel &s)
+        {
+            return [&]<size_t... Is>(index_sequence<Is...>) {
+                return (... || (get<Is>(i.__current) == get<Is>(s.__end)));
+            }(index_sequence_for<Views...>{});
+        }
+        template <bool OtherConst>
+            requires(sized_sentinel_for<sentinel_t<__views_detail::MaybeConst<Const, Views>>,
+                                        iterator_t<__views_detail::MaybeConst<OtherConst, Views>>> &&
+                     ...)
+        friend constexpr common_type_t<
+            range_difference_t<__views_detail::MaybeConst<OtherConst, Views>>...>
+        operator-(const Iterator<OtherConst> &i, const Sentinel &s)
+        {
+            using Diff = common_type_t<range_difference_t<__views_detail::MaybeConst<OtherConst, Views>>...>;
+            return [&]<size_t... Is>(index_sequence<Is...>) {
+                return __views_detail::MinAbsPack(
+                    static_cast<Diff>(get<Is>(i.__current) - get<Is>(s.__end))...);
+            }(index_sequence_for<Views...>{});
+        }
+        template <bool OtherConst>
+            requires(sized_sentinel_for<sentinel_t<__views_detail::MaybeConst<Const, Views>>,
+                                        iterator_t<__views_detail::MaybeConst<OtherConst, Views>>> &&
+                     ...)
+        friend constexpr common_type_t<
+            range_difference_t<__views_detail::MaybeConst<OtherConst, Views>>...>
+        operator-(const Sentinel &s, const Iterator<OtherConst> &i)
+        {
+            return -(i - s);
+        }
+    };
+
+public:
+    zip_view()
+        requires(default_initializable<Views> && ...)
+    = default;
+    constexpr explicit zip_view(Views... views) : __views(std::move(views)...) {}
+
+    constexpr Iterator<false> begin()
+    {
+        return Iterator<false>(__views_detail::TupleTransform(ranges::begin, __views));
+    }
+    constexpr Iterator<true> begin() const
+        requires(range<const Views> && ...)
+    {
+        return Iterator<true>(__views_detail::TupleTransform(ranges::begin, __views));
+    }
+
+    constexpr auto end()
+    {
+        if constexpr (!ZipIsCommon)
+            return Sentinel<false>(__views_detail::TupleTransform(ranges::end, __views));
+        else if constexpr (AllRandomAccess<false>)
+            return begin() + static_cast<typename Iterator<false>::difference_type>(size());
+        else
+            return Iterator<false>(__views_detail::TupleTransform(ranges::end, __views));
+    }
+    constexpr auto end() const
+        requires(range<const Views> && ...)
+    {
+        if constexpr (!ZipIsCommon)
+            return Sentinel<true>(__views_detail::TupleTransform(ranges::end, __views));
+        else if constexpr (AllRandomAccess<true>)
+            return begin() + static_cast<typename Iterator<true>::difference_type>(size());
+        else
+            return Iterator<true>(__views_detail::TupleTransform(ranges::end, __views));
+    }
+
+    constexpr auto size()
+        requires(sized_range<Views> && ...)
+    {
+        return apply(
+            [](auto... sizes) {
+                using CT = make_unsigned_t<common_type_t<decltype(sizes)...>>;
+                return __views_detail::MinOfPack(CT(sizes)...);
+            },
+            __views_detail::TupleTransform([](auto &v) { return ranges::size(v); }, __views));
+    }
+    constexpr auto size() const
+        requires(sized_range<const Views> && ...)
+    {
+        return apply(
+            [](auto... sizes) {
+                using CT = make_unsigned_t<common_type_t<decltype(sizes)...>>;
+                return __views_detail::MinOfPack(CT(sizes)...);
+            },
+            __views_detail::TupleTransform([](auto &v) { return ranges::size(v); }, __views));
+    }
+};
+
+template <typename... Views>
+inline constexpr bool enable_borrowed_range<zip_view<Views...>> =
+    (enable_borrowed_range<Views> && ...);
+
+namespace views {
+
+struct Zip {
+    constexpr auto operator()() const { return views::empty<tuple<>>; }
+    template <viewable_range... Rs>
+        requires(sizeof...(Rs) >= 1)
+    constexpr auto operator()(Rs &&...rs) const
+    {
+        return zip_view<all_t<Rs>...>(all(std::forward<Rs>(rs))...);
+    }
+};
+inline constexpr Zip zip{};
+
+} // namespace views
+
+// ── zip_transform_view ([range.zip.transform]) ───────────────────────────
+
+template <typename F, typename... Views>
+    requires(view<Views> && ...) && (input_range<Views> && ...) && (sizeof...(Views) >= 1) &&
+            move_constructible<F> && is_object_v<F> &&
+            regular_invocable<F &, range_reference_t<Views>...> &&
+            __iter_impl::CanReference<invoke_result_t<F &, range_reference_t<Views>...>>
+class zip_transform_view : public view_interface<zip_transform_view<F, Views...>> {
+    __views_detail::MovableBox<F> __fn;
+    zip_view<Views...> __zip;
+
+    template <bool Const>
+    struct Iterator {
+        using __ZipView = __views_detail::MaybeConst<Const, zip_view<Views...>>;
+        using __ZipIter = iterator_t<__ZipView>;
+        using __InnerCat = typename iterator_traits<__ZipIter>::iterator_category;
+
+        __views_detail::MaybeConst<Const, zip_transform_view> *__parent = nullptr;
+        __ZipIter __inner                                             = __ZipIter();
+
+        using iterator_concept = typename __ZipIter::iterator_concept;
+        using value_type = remove_cvref_t<invoke_result_t<
+            __views_detail::MaybeConst<Const, F> &,
+            range_reference_t<__views_detail::MaybeConst<Const, Views>>...>>;
+        using difference_type = range_difference_t<__ZipView>;
+        using reference = invoke_result_t<
+            __views_detail::MaybeConst<Const, F> &,
+            range_reference_t<__views_detail::MaybeConst<Const, Views>>...>;
+        using pointer = void;
+        // Mirrors transform_view: caps at input unless the invoke result is a
+        // genuine lvalue reference, in which case it rides the inner zip
+        // iterator's own (legacy) category.
+        using iterator_category = conditional_t<
+            !is_lvalue_reference_v<reference>, input_iterator_tag,
+            conditional_t<
+                derived_from<__InnerCat, random_access_iterator_tag>, random_access_iterator_tag,
+                conditional_t<derived_from<__InnerCat, bidirectional_iterator_tag>,
+                              bidirectional_iterator_tag,
+                              conditional_t<derived_from<__InnerCat, forward_iterator_tag>,
+                                            forward_iterator_tag, input_iterator_tag>>>>;
+
+        Iterator() = default;
+        constexpr Iterator(__views_detail::MaybeConst<Const, zip_transform_view> &parent,
+                           __ZipIter inner)
+            : __parent(__builtin_addressof(parent)), __inner(std::move(inner))
+        {
+        }
+        constexpr Iterator(Iterator<!Const> i)
+            requires Const && convertible_to<iterator_t<zip_view<Views...>>, __ZipIter>
+            : __parent(i.__parent), __inner(std::move(i.__inner))
+        {
+        }
+
+        constexpr decltype(auto) operator*() const
+        {
+            return apply(
+                [&](auto &&...refs) -> decltype(auto) {
+                    return invoke(*__parent->__fn, static_cast<decltype(refs)>(refs)...);
+                },
+                *__inner);
+        }
+        constexpr decltype(auto) operator[](difference_type n) const
+            requires random_access_range<__ZipView>
+        {
+            return apply(
+                [&](auto &&...refs) -> decltype(auto) {
+                    return invoke(*__parent->__fn, static_cast<decltype(refs)>(refs)...);
+                },
+                __inner[n]);
+        }
+
+        constexpr Iterator &operator++()
+        {
+            ++__inner;
+            return *this;
+        }
+        constexpr void operator++(int) { ++__inner; }
+        constexpr Iterator operator++(int)
+            requires forward_range<__ZipView>
+        {
+            auto t = *this;
+            ++__inner;
+            return t;
+        }
+        constexpr Iterator &operator--()
+            requires bidirectional_range<__ZipView>
+        {
+            --__inner;
+            return *this;
+        }
+        constexpr Iterator operator--(int)
+            requires bidirectional_range<__ZipView>
+        {
+            auto t = *this;
+            --__inner;
+            return t;
+        }
+        constexpr Iterator &operator+=(difference_type n)
+            requires random_access_range<__ZipView>
+        {
+            __inner += n;
+            return *this;
+        }
+        constexpr Iterator &operator-=(difference_type n)
+            requires random_access_range<__ZipView>
+        {
+            __inner -= n;
+            return *this;
+        }
+
+        friend constexpr Iterator operator+(Iterator i, difference_type n)
+            requires random_access_range<__ZipView>
+        {
+            i += n;
+            return i;
+        }
+        friend constexpr Iterator operator+(difference_type n, Iterator i)
+            requires random_access_range<__ZipView>
+        {
+            i += n;
+            return i;
+        }
+        friend constexpr Iterator operator-(Iterator i, difference_type n)
+            requires random_access_range<__ZipView>
+        {
+            i -= n;
+            return i;
+        }
+        friend constexpr difference_type operator-(const Iterator &a, const Iterator &b)
+            requires sized_sentinel_for<__ZipIter, __ZipIter>
+        {
+            return a.__inner - b.__inner;
+        }
+
+        friend constexpr bool operator==(const Iterator &a, const Iterator &b)
+            requires equality_comparable<__ZipIter>
+        {
+            return a.__inner == b.__inner;
+        }
+    };
+
+    template <bool Const>
+    struct Sentinel {
+        using __ZipSent = sentinel_t<__views_detail::MaybeConst<Const, zip_view<Views...>>>;
+        __ZipSent __inner = __ZipSent();
+
+        Sentinel() = default;
+        constexpr explicit Sentinel(__ZipSent inner) : __inner(std::move(inner)) {}
+        constexpr Sentinel(Sentinel<!Const> s)
+            requires Const && convertible_to<sentinel_t<zip_view<Views...>>, __ZipSent>
+            : __inner(std::move(s.__inner))
+        {
+        }
+
+        template <bool OtherConst>
+            requires sentinel_for<
+                __ZipSent, iterator_t<__views_detail::MaybeConst<OtherConst, zip_view<Views...>>>>
+        friend constexpr bool operator==(const Iterator<OtherConst> &i, const Sentinel &s)
+        {
+            return i.__inner == s.__inner;
+        }
+        template <bool OtherConst>
+            requires sized_sentinel_for<
+                __ZipSent, iterator_t<__views_detail::MaybeConst<OtherConst, zip_view<Views...>>>>
+        friend constexpr range_difference_t<__views_detail::MaybeConst<OtherConst, zip_view<Views...>>>
+        operator-(const Iterator<OtherConst> &i, const Sentinel &s)
+        {
+            return i.__inner - s.__inner;
+        }
+        template <bool OtherConst>
+            requires sized_sentinel_for<
+                __ZipSent, iterator_t<__views_detail::MaybeConst<OtherConst, zip_view<Views...>>>>
+        friend constexpr range_difference_t<__views_detail::MaybeConst<OtherConst, zip_view<Views...>>>
+        operator-(const Sentinel &s, const Iterator<OtherConst> &i)
+        {
+            return s.__inner - i.__inner;
+        }
+    };
+
+public:
+    zip_transform_view()
+        requires default_initializable<F> && default_initializable<zip_view<Views...>>
+    = default;
+    constexpr explicit zip_transform_view(F fn, Views... views)
+        : __fn(std::move(fn)), __zip(std::move(views)...)
+    {
+    }
+
+    constexpr Iterator<false> begin() { return Iterator<false>(*this, __zip.begin()); }
+    constexpr Iterator<true> begin() const
+        requires range<const zip_view<Views...>> &&
+                 regular_invocable<const F &, range_reference_t<const Views>...>
+    {
+        return Iterator<true>(*this, __zip.begin());
+    }
+
+    constexpr auto end()
+    {
+        if constexpr (common_range<zip_view<Views...>>)
+            return Iterator<false>(*this, __zip.end());
+        else
+            return Sentinel<false>(__zip.end());
+    }
+    constexpr auto end() const
+        requires range<const zip_view<Views...>> &&
+                 regular_invocable<const F &, range_reference_t<const Views>...>
+    {
+        if constexpr (common_range<const zip_view<Views...>>)
+            return Iterator<true>(*this, __zip.end());
+        else
+            return Sentinel<true>(__zip.end());
+    }
+
+    constexpr auto size()
+        requires sized_range<zip_view<Views...>>
+    {
+        return __zip.size();
+    }
+    constexpr auto size() const
+        requires sized_range<const zip_view<Views...>>
+    {
+        return __zip.size();
+    }
+};
+
+namespace views {
+
+struct ZipTransform {
+    template <typename F>
+        requires regular_invocable<decay_t<F> &>
+    constexpr auto operator()(F &&) const
+    {
+        return views::empty<decay_t<invoke_result_t<decay_t<F> &>>>;
+    }
+    template <typename F, viewable_range... Rs>
+        requires(sizeof...(Rs) >= 1)
+    constexpr auto operator()(F &&f, Rs &&...rs) const
+    {
+        return zip_transform_view<decay_t<F>, all_t<Rs>...>(std::forward<F>(f),
+                                                             all(std::forward<Rs>(rs))...);
+    }
+};
+inline constexpr ZipTransform zip_transform{};
+
+} // namespace views
+
+} // namespace ranges
+
+namespace views = ranges::views;
+
+} // namespace std
+
+#endif // BOXCXX_BITS_RANGES_ZIP

@@ -1,0 +1,631 @@
+// boxcxx — <__bits/ranges_adjacent>
+// [range.adjacent] + [range.adjacent.transform], Ф29d-1. Pulled in by
+// <ranges> after <__bits/ranges_zip> — reuses TupleTransform and
+// zip_transform's N==0 degenerate case from there.
+#ifndef BOXCXX_BITS_RANGES_ADJACENT
+#define BOXCXX_BITS_RANGES_ADJACENT
+
+#include <array>
+#include <compare>
+#include <concepts>
+#include <cstddef>
+#include <functional>
+#include <iterator>
+#include <tuple>
+#include <type_traits>
+#include <utility>
+
+namespace std {
+namespace ranges {
+
+namespace __views_detail {
+
+// Repeat T (a value OR reference type) verbatim N times into a tuple, at the
+// TYPE level — replaces GCC's array-of-references-based __unarize, which is
+// ill-formed for reference T. AlwaysT<T,Is> discards the index and yields T
+// unchanged. A decltype((void(Is), declval<T>())) form would be wrong: declval
+// yields an xvalue, so decltype collapses a value type T to T&& — poisoning
+// value_type (range_value_t is never a reference) into tuple<T&&,...>.
+template <typename T, size_t>
+using AlwaysT = T;
+template <typename T, size_t... Is>
+auto RepeatedTuple(index_sequence<Is...>) -> tuple<AlwaysT<T, Is>...>;
+template <typename T, size_t N>
+using RepeatTupleT = decltype(RepeatedTuple<T>(make_index_sequence<N>{}));
+
+template <typename F, typename T, size_t... Is>
+auto RepeatInvoke(index_sequence<Is...>)
+    -> invoke_result_t<F, decltype((void(Is), declval<T>()))...>;
+template <typename F, typename T, size_t N>
+using InvokeResultRepeated = decltype(RepeatInvoke<F, T>(make_index_sequence<N>{}));
+template <typename F, typename T, size_t N>
+concept InvocableRepeated = requires { typename InvokeResultRepeated<F, T, N>; };
+
+} // namespace __views_detail
+
+// ── adjacent_view ([range.adjacent]) ──────────────────────────────────────
+
+template <typename V, size_t N>
+    requires view<V> && forward_range<V> && (N > 0)
+class adjacent_view : public view_interface<adjacent_view<V, N>> {
+    V __base = V();
+
+    template <bool Const>
+    struct Iterator {
+        using Base = __views_detail::MaybeConst<Const, V>;
+
+        array<iterator_t<Base>, N> __current = array<iterator_t<Base>, N>();
+
+        using iterator_concept =
+            conditional_t<random_access_range<Base>, random_access_iterator_tag,
+                          conditional_t<bidirectional_range<Base>, bidirectional_iterator_tag,
+                                        forward_iterator_tag>>;
+        // operator* always materializes a fresh tuple — never a stable
+        // reference — so the legacy category never rises above input.
+        using iterator_category = input_iterator_tag;
+        using value_type      = __views_detail::RepeatTupleT<range_value_t<Base>, N>;
+        using difference_type = range_difference_t<Base>;
+        using reference        = __views_detail::RepeatTupleT<range_reference_t<Base>, N>;
+        using pointer           = void;
+
+        Iterator() = default;
+        constexpr Iterator(Iterator<!Const> i)
+            requires Const && convertible_to<iterator_t<V>, iterator_t<Base>>
+        {
+            for (size_t j = 0; j < N; ++j) __current[j] = std::move(i.__current[j]);
+        }
+
+    private:
+        struct AsSentinelTag {};
+
+        // Forward-fill: window starting at first, clamped by last — a base
+        // shorter than N naturally yields __current all == last (begin==end).
+        constexpr Iterator(iterator_t<Base> first, sentinel_t<Base> last)
+        {
+            for (size_t i = 0; i < N; ++i) {
+                __current[i] = first;
+                if (i + 1 != N) ranges::advance(first, 1, last);
+            }
+        }
+        // Backward-fill: the end position — window ending at last, walked
+        // back to at most first. Forward-only bases just repeat last (there
+        // is no meaningful "window" to walk back without operator--).
+        constexpr Iterator(AsSentinelTag, iterator_t<Base> first, iterator_t<Base> last)
+        {
+            if constexpr (!bidirectional_range<Base>) {
+                for (size_t i = 0; i < N; ++i) __current[i] = last;
+            } else {
+                for (size_t i = 0; i < N; ++i) {
+                    __current[N - 1 - i] = last;
+                    if (i + 1 != N) ranges::advance(last, -1, first);
+                }
+            }
+        }
+
+        friend class adjacent_view;
+
+    public:
+        constexpr reference operator*() const
+        {
+            return __views_detail::TupleTransform(
+                [](auto &i) -> decltype(auto) { return *i; }, __current);
+        }
+        constexpr reference operator[](difference_type n) const
+            requires random_access_range<Base>
+        {
+            return __views_detail::TupleTransform(
+                [n](auto &i) -> decltype(auto) { return i[n]; }, __current);
+        }
+
+        constexpr Iterator &operator++()
+        {
+            for (auto &i : __current) ++i;
+            return *this;
+        }
+        constexpr Iterator operator++(int)
+        {
+            auto t = *this;
+            ++*this;
+            return t;
+        }
+        constexpr Iterator &operator--()
+            requires bidirectional_range<Base>
+        {
+            for (auto &i : __current) --i;
+            return *this;
+        }
+        constexpr Iterator operator--(int)
+            requires bidirectional_range<Base>
+        {
+            auto t = *this;
+            --*this;
+            return t;
+        }
+        constexpr Iterator &operator+=(difference_type n)
+            requires random_access_range<Base>
+        {
+            for (auto &i : __current) i += n;
+            return *this;
+        }
+        constexpr Iterator &operator-=(difference_type n)
+            requires random_access_range<Base>
+        {
+            for (auto &i : __current) i -= n;
+            return *this;
+        }
+
+        friend constexpr Iterator operator+(Iterator i, difference_type n)
+            requires random_access_range<Base>
+        {
+            i += n;
+            return i;
+        }
+        friend constexpr Iterator operator+(difference_type n, Iterator i)
+            requires random_access_range<Base>
+        {
+            i += n;
+            return i;
+        }
+        friend constexpr Iterator operator-(Iterator i, difference_type n)
+            requires random_access_range<Base>
+        {
+            i -= n;
+            return i;
+        }
+        friend constexpr difference_type operator-(const Iterator &a, const Iterator &b)
+            requires sized_sentinel_for<iterator_t<Base>, iterator_t<Base>>
+        {
+            return a.__current.back() - b.__current.back();
+        }
+
+        friend constexpr bool operator==(const Iterator &a, const Iterator &b)
+        {
+            return a.__current.back() == b.__current.back();
+        }
+        friend constexpr bool operator<(const Iterator &a, const Iterator &b)
+            requires random_access_range<Base>
+        {
+            return a.__current.back() < b.__current.back();
+        }
+        friend constexpr bool operator>(const Iterator &a, const Iterator &b)
+            requires random_access_range<Base>
+        {
+            return b < a;
+        }
+        friend constexpr bool operator<=(const Iterator &a, const Iterator &b)
+            requires random_access_range<Base>
+        {
+            return !(b < a);
+        }
+        friend constexpr bool operator>=(const Iterator &a, const Iterator &b)
+            requires random_access_range<Base>
+        {
+            return !(a < b);
+        }
+        friend constexpr auto operator<=>(const Iterator &a, const Iterator &b)
+            requires random_access_range<Base> && three_way_comparable<iterator_t<Base>>
+        {
+            return a.__current.back() <=> b.__current.back();
+        }
+
+        friend constexpr auto iter_move(const Iterator &i)
+        {
+            return __views_detail::TupleTransform(ranges::iter_move, i.__current);
+        }
+        friend constexpr void iter_swap(const Iterator &a, const Iterator &b)
+            requires indirectly_swappable<iterator_t<Base>>
+        {
+            [&]<size_t... Is>(index_sequence<Is...>) {
+                (ranges::iter_swap(a.__current[Is], b.__current[Is]), ...);
+            }(make_index_sequence<N>{});
+        }
+    };
+
+    template <bool Const>
+    struct Sentinel {
+        using Base                = __views_detail::MaybeConst<Const, V>;
+        sentinel_t<Base> __end = sentinel_t<Base>();
+
+        Sentinel() = default;
+        constexpr explicit Sentinel(sentinel_t<Base> end) : __end(std::move(end)) {}
+        constexpr Sentinel(Sentinel<!Const> s)
+            requires Const && convertible_to<sentinel_t<V>, sentinel_t<Base>>
+            : __end(std::move(s.__end))
+        {
+        }
+
+        template <bool OtherConst>
+            requires sentinel_for<sentinel_t<Base>,
+                                  iterator_t<__views_detail::MaybeConst<OtherConst, V>>>
+        friend constexpr bool operator==(const Iterator<OtherConst> &i, const Sentinel &s)
+        {
+            return i.__current.back() == s.__end;
+        }
+        template <bool OtherConst>
+            requires sized_sentinel_for<sentinel_t<Base>,
+                                        iterator_t<__views_detail::MaybeConst<OtherConst, V>>>
+        friend constexpr range_difference_t<__views_detail::MaybeConst<OtherConst, V>>
+        operator-(const Iterator<OtherConst> &i, const Sentinel &s)
+        {
+            return i.__current.back() - s.__end;
+        }
+        template <bool OtherConst>
+            requires sized_sentinel_for<sentinel_t<Base>,
+                                        iterator_t<__views_detail::MaybeConst<OtherConst, V>>>
+        friend constexpr range_difference_t<__views_detail::MaybeConst<OtherConst, V>>
+        operator-(const Sentinel &s, const Iterator<OtherConst> &i)
+        {
+            return s.__end - i.__current.back();
+        }
+    };
+
+public:
+    adjacent_view()
+        requires default_initializable<V>
+    = default;
+    constexpr explicit adjacent_view(V base) : __base(std::move(base)) {}
+
+    constexpr V base() const &
+        requires copy_constructible<V>
+    {
+        return __base;
+    }
+    constexpr V base() && { return std::move(__base); }
+
+    constexpr Iterator<false> begin()
+    {
+        return Iterator<false>(ranges::begin(__base), ranges::end(__base));
+    }
+    constexpr Iterator<true> begin() const
+        requires range<const V>
+    {
+        return Iterator<true>(ranges::begin(__base), ranges::end(__base));
+    }
+
+    constexpr auto end()
+    {
+        if constexpr (common_range<V>)
+            return Iterator<false>(typename Iterator<false>::AsSentinelTag{}, ranges::begin(__base),
+                                   ranges::end(__base));
+        else
+            return Sentinel<false>(ranges::end(__base));
+    }
+    constexpr auto end() const
+        requires range<const V>
+    {
+        if constexpr (common_range<const V>)
+            return Iterator<true>(typename Iterator<true>::AsSentinelTag{}, ranges::begin(__base),
+                                  ranges::end(__base));
+        else
+            return Sentinel<true>(ranges::end(__base));
+    }
+
+    constexpr auto size()
+        requires sized_range<V>
+    {
+        auto sz = ranges::size(__base);
+        auto n  = static_cast<decltype(sz)>(N - 1);
+        return sz - (sz < n ? sz : n);
+    }
+    constexpr auto size() const
+        requires sized_range<const V>
+    {
+        auto sz = ranges::size(__base);
+        auto n  = static_cast<decltype(sz)>(N - 1);
+        return sz - (sz < n ? sz : n);
+    }
+};
+
+template <typename T, size_t N>
+inline constexpr bool enable_borrowed_range<adjacent_view<T, N>> = enable_borrowed_range<T>;
+
+namespace views {
+
+template <size_t N>
+struct Adjacent : RangeAdaptorClosureBase {
+    template <viewable_range R>
+    constexpr auto operator()(R &&r) const
+    {
+        if constexpr (N == 0)
+            return views::empty<tuple<>>;
+        else
+            return adjacent_view<all_t<R>, N>(all(std::forward<R>(r)));
+    }
+};
+template <size_t N>
+inline constexpr Adjacent<N> adjacent{};
+
+inline constexpr auto pairwise = adjacent<2>;
+
+} // namespace views
+
+// ── adjacent_transform_view ([range.adjacent.transform]) ─────────────────
+
+template <typename V, typename F, size_t N>
+    requires view<V> && forward_range<V> && (N > 0) && move_constructible<F> && is_object_v<F> &&
+            __views_detail::InvocableRepeated<F &, range_reference_t<V>, N> &&
+            __iter_impl::CanReference<
+                __views_detail::InvokeResultRepeated<F &, range_reference_t<V>, N>>
+class adjacent_transform_view : public view_interface<adjacent_transform_view<V, F, N>> {
+    __views_detail::MovableBox<F> __fn;
+    adjacent_view<V, N> __inner;
+
+    template <bool Const>
+    struct Iterator {
+        using __InnerView = __views_detail::MaybeConst<Const, adjacent_view<V, N>>;
+        using __InnerIter = iterator_t<__InnerView>;
+        using __InnerCat   = typename iterator_traits<__InnerIter>::iterator_category;
+
+        __views_detail::MaybeConst<Const, adjacent_transform_view> *__parent = nullptr;
+        __InnerIter __inner                                                = __InnerIter();
+
+        using iterator_concept = typename __InnerIter::iterator_concept;
+        using value_type       = remove_cvref_t<__views_detail::InvokeResultRepeated<
+            __views_detail::MaybeConst<Const, F> &,
+            range_reference_t<__views_detail::MaybeConst<Const, V>>, N>>;
+        using difference_type = range_difference_t<__InnerView>;
+        using reference        = __views_detail::InvokeResultRepeated<
+            __views_detail::MaybeConst<Const, F> &,
+            range_reference_t<__views_detail::MaybeConst<Const, V>>, N>;
+        using pointer = void;
+        // Mirrors zip_transform_view: caps at input unless the invoke result
+        // is a genuine lvalue reference, in which case it rides the inner
+        // adjacent iterator's own (legacy) category.
+        using iterator_category = conditional_t<
+            !is_lvalue_reference_v<reference>, input_iterator_tag,
+            conditional_t<
+                derived_from<__InnerCat, random_access_iterator_tag>, random_access_iterator_tag,
+                conditional_t<derived_from<__InnerCat, bidirectional_iterator_tag>,
+                              bidirectional_iterator_tag,
+                              conditional_t<derived_from<__InnerCat, forward_iterator_tag>,
+                                            forward_iterator_tag, input_iterator_tag>>>>;
+
+        Iterator() = default;
+        constexpr Iterator(__views_detail::MaybeConst<Const, adjacent_transform_view> &parent,
+                           __InnerIter inner)
+            : __parent(__builtin_addressof(parent)), __inner(std::move(inner))
+        {
+        }
+        constexpr Iterator(Iterator<!Const> i)
+            requires Const && convertible_to<iterator_t<adjacent_view<V, N>>, __InnerIter>
+            : __parent(i.__parent), __inner(std::move(i.__inner))
+        {
+        }
+
+        constexpr decltype(auto) operator*() const
+        {
+            return apply(
+                [&](auto &&...refs) -> decltype(auto) {
+                    return invoke(*__parent->__fn, static_cast<decltype(refs)>(refs)...);
+                },
+                *__inner);
+        }
+        constexpr decltype(auto) operator[](difference_type n) const
+            requires random_access_range<__InnerView>
+        {
+            return apply(
+                [&](auto &&...refs) -> decltype(auto) {
+                    return invoke(*__parent->__fn, static_cast<decltype(refs)>(refs)...);
+                },
+                __inner[n]);
+        }
+
+        constexpr Iterator &operator++()
+        {
+            ++__inner;
+            return *this;
+        }
+        constexpr Iterator operator++(int)
+        {
+            auto t = *this;
+            ++__inner;
+            return t;
+        }
+        constexpr Iterator &operator--()
+            requires bidirectional_range<__InnerView>
+        {
+            --__inner;
+            return *this;
+        }
+        constexpr Iterator operator--(int)
+            requires bidirectional_range<__InnerView>
+        {
+            auto t = *this;
+            --__inner;
+            return t;
+        }
+        constexpr Iterator &operator+=(difference_type n)
+            requires random_access_range<__InnerView>
+        {
+            __inner += n;
+            return *this;
+        }
+        constexpr Iterator &operator-=(difference_type n)
+            requires random_access_range<__InnerView>
+        {
+            __inner -= n;
+            return *this;
+        }
+
+        friend constexpr Iterator operator+(Iterator i, difference_type n)
+            requires random_access_range<__InnerView>
+        {
+            i += n;
+            return i;
+        }
+        friend constexpr Iterator operator+(difference_type n, Iterator i)
+            requires random_access_range<__InnerView>
+        {
+            i += n;
+            return i;
+        }
+        friend constexpr Iterator operator-(Iterator i, difference_type n)
+            requires random_access_range<__InnerView>
+        {
+            i -= n;
+            return i;
+        }
+        friend constexpr difference_type operator-(const Iterator &a, const Iterator &b)
+            requires sized_sentinel_for<__InnerIter, __InnerIter>
+        {
+            return a.__inner - b.__inner;
+        }
+
+        friend constexpr bool operator==(const Iterator &a, const Iterator &b)
+        {
+            return a.__inner == b.__inner;
+        }
+        friend constexpr bool operator<(const Iterator &a, const Iterator &b)
+            requires random_access_range<__InnerView>
+        {
+            return a.__inner < b.__inner;
+        }
+        friend constexpr bool operator>(const Iterator &a, const Iterator &b)
+            requires random_access_range<__InnerView>
+        {
+            return b.__inner < a.__inner;
+        }
+        friend constexpr bool operator<=(const Iterator &a, const Iterator &b)
+            requires random_access_range<__InnerView>
+        {
+            return !(b.__inner < a.__inner);
+        }
+        friend constexpr bool operator>=(const Iterator &a, const Iterator &b)
+            requires random_access_range<__InnerView>
+        {
+            return !(a.__inner < b.__inner);
+        }
+        friend constexpr auto operator<=>(const Iterator &a, const Iterator &b)
+            requires random_access_range<__InnerView> && three_way_comparable<__InnerIter>
+        {
+            return a.__inner <=> b.__inner;
+        }
+    };
+
+    template <bool Const>
+    struct Sentinel {
+        using __InnerSent = sentinel_t<__views_detail::MaybeConst<Const, adjacent_view<V, N>>>;
+        __InnerSent __inner = __InnerSent();
+
+        Sentinel() = default;
+        constexpr explicit Sentinel(__InnerSent inner) : __inner(std::move(inner)) {}
+        constexpr Sentinel(Sentinel<!Const> s)
+            requires Const && convertible_to<sentinel_t<adjacent_view<V, N>>, __InnerSent>
+            : __inner(std::move(s.__inner))
+        {
+        }
+
+        template <bool OtherConst>
+            requires sentinel_for<
+                __InnerSent, iterator_t<__views_detail::MaybeConst<OtherConst, adjacent_view<V, N>>>>
+        friend constexpr bool operator==(const Iterator<OtherConst> &i, const Sentinel &s)
+        {
+            return i.__inner == s.__inner;
+        }
+        template <bool OtherConst>
+            requires sized_sentinel_for<
+                __InnerSent, iterator_t<__views_detail::MaybeConst<OtherConst, adjacent_view<V, N>>>>
+        friend constexpr range_difference_t<__views_detail::MaybeConst<OtherConst, adjacent_view<V, N>>>
+        operator-(const Iterator<OtherConst> &i, const Sentinel &s)
+        {
+            return i.__inner - s.__inner;
+        }
+        template <bool OtherConst>
+            requires sized_sentinel_for<
+                __InnerSent, iterator_t<__views_detail::MaybeConst<OtherConst, adjacent_view<V, N>>>>
+        friend constexpr range_difference_t<__views_detail::MaybeConst<OtherConst, adjacent_view<V, N>>>
+        operator-(const Sentinel &s, const Iterator<OtherConst> &i)
+        {
+            return s.__inner - i.__inner;
+        }
+    };
+
+public:
+    adjacent_transform_view()
+        requires default_initializable<F> && default_initializable<adjacent_view<V, N>>
+    = default;
+    constexpr explicit adjacent_transform_view(V base, F fn)
+        : __fn(std::move(fn)), __inner(std::move(base))
+    {
+    }
+
+    // LWG 3848/3947: adjacent_transform_view must expose base().
+    constexpr V base() const &
+        requires copy_constructible<V>
+    {
+        return __inner.base();
+    }
+    constexpr V base() && { return std::move(__inner).base(); }
+
+    constexpr auto begin() { return Iterator<false>(*this, __inner.begin()); }
+    constexpr auto begin() const
+        requires range<const adjacent_view<V, N>> &&
+                 __views_detail::InvocableRepeated<const F &, range_reference_t<const V>, N>
+    {
+        return Iterator<true>(*this, __inner.begin());
+    }
+
+    constexpr auto end()
+    {
+        if constexpr (common_range<adjacent_view<V, N>>)
+            return Iterator<false>(*this, __inner.end());
+        else
+            return Sentinel<false>(__inner.end());
+    }
+    constexpr auto end() const
+        requires range<const adjacent_view<V, N>> &&
+                 __views_detail::InvocableRepeated<const F &, range_reference_t<const V>, N>
+    {
+        if constexpr (common_range<const adjacent_view<V, N>>)
+            return Iterator<true>(*this, __inner.end());
+        else
+            return Sentinel<true>(__inner.end());
+    }
+
+    constexpr auto size()
+        requires sized_range<adjacent_view<V, N>>
+    {
+        return __inner.size();
+    }
+    constexpr auto size() const
+        requires sized_range<const adjacent_view<V, N>>
+    {
+        return __inner.size();
+    }
+};
+
+namespace views {
+
+template <size_t N>
+struct AdjacentTransform {
+    template <viewable_range R, typename F>
+    constexpr auto operator()(R &&r, F &&f) const
+    {
+        if constexpr (N == 0)
+            return views::zip_transform(std::forward<F>(f));
+        else
+            return adjacent_transform_view<all_t<R>, remove_cvref_t<F>, N>(
+                all(std::forward<R>(r)), std::forward<F>(f));
+    }
+    template <typename F>
+        requires(!viewable_range<remove_cvref_t<F>>)
+    constexpr auto operator()(F &&f) const
+    {
+        return RangeAdaptorPartial<AdjacentTransform, remove_cvref_t<F>>(AdjacentTransform{},
+                                                                          std::forward<F>(f));
+    }
+};
+template <size_t N>
+inline constexpr AdjacentTransform<N> adjacent_transform{};
+
+inline constexpr auto pairwise_transform = adjacent_transform<2>;
+
+} // namespace views
+
+} // namespace ranges
+
+namespace views = ranges::views;
+
+} // namespace std
+
+#endif // BOXCXX_BITS_RANGES_ADJACENT

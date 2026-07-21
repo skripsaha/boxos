@@ -19,6 +19,7 @@
 #include <functional>
 #include <iterator>
 #include <new>
+#include <tuple>
 #include <type_traits>
 #include <utility>
 
@@ -97,6 +98,12 @@ public:
 private:
     T __val;
 };
+
+// MaybeConst<Const,T>: T under a const-qualified view, T otherwise — every
+// const-dual iterator (elements/enumerate/zip/adjacent) picks its Base with
+// this.
+template <bool Const, typename T>
+using MaybeConst = conditional_t<Const, const T, T>;
 
 // FUN trick: binds only to lvalues that convert to R& (ref_view ctor).
 template <typename R>
