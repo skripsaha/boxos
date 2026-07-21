@@ -1,0 +1,467 @@
+// boxcxx — <__bits/ranges_join_with>
+// [range.join.with], Ф29e-1. Pulled in by <ranges> after <__bits/ranges_join>
+// — reuses NonPropagatingCache, AsLvalue, PresentIf, SimpleView and HasArrow
+// from there.
+//
+// boxcxx notes:
+//   • The gating concept is `concatable` (LWG 4074), not the older
+//     compatible-joinable-ranges — the Concatable chain below is the
+//     verbatim current-draft translation.
+//   • join_with_view's own outer_it_/inner_ caches are stored unconditionally
+//     (same space-only simplification as join_view's outer_/inner_).
+//   • iterator_category follows join_view's own adaptation: always declared,
+//     collapsing to input_iterator_tag when the standard's gate is unmet —
+//     see the header comment in ranges_join for why boxcxx's iterator_traits
+//     needs this.
+#ifndef BOXCXX_BITS_RANGES_JOIN_WITH
+#define BOXCXX_BITS_RANGES_JOIN_WITH
+
+#include <concepts>
+#include <cstddef>
+#include <iterator>
+#include <type_traits>
+#include <utility>
+#include <variant>
+
+namespace std {
+namespace ranges {
+
+namespace __views_detail {
+
+// concat-reference-t / concat-value-t / concat-rvalue-reference-t
+// ([range.concat.view]) — the common types every joined-together range must
+// agree on. RvalRefOf spells out what would be range_rvalue_reference_t (a
+// range-level alias boxcxx's <ranges> does not define); it is
+// iter_rvalue_reference_t of the range's own iterator, matching the
+// cartesian/zip precedent for filling this exact substrate gap.
+template <typename... Rs>
+using ConcatReferenceT = common_reference_t<range_reference_t<Rs>...>;
+template <typename... Rs>
+using ConcatValueT = common_type_t<range_value_t<Rs>...>;
+template <typename X>
+using RvalRefOf = iter_rvalue_reference_t<iterator_t<X>>;
+template <typename... Rs>
+using ConcatRvalueReferenceT = common_reference_t<RvalRefOf<Rs>...>;
+
+template <typename Ref, typename RRef, typename It>
+concept ConcatIndirectlyReadableImpl = requires(const It it) {
+    { *it } -> convertible_to<Ref>;
+    { ranges::iter_move(it) } -> convertible_to<RRef>;
+};
+
+template <typename... Rs>
+concept ConcatIndirectlyReadable =
+    common_reference_with<ConcatReferenceT<Rs...> &&, ConcatValueT<Rs...> &> &&
+    common_reference_with<ConcatReferenceT<Rs...> &&, ConcatRvalueReferenceT<Rs...> &&> &&
+    common_reference_with<ConcatRvalueReferenceT<Rs...> &&, const ConcatValueT<Rs...> &> &&
+    (ConcatIndirectlyReadableImpl<ConcatReferenceT<Rs...>, ConcatRvalueReferenceT<Rs...>,
+                                  iterator_t<Rs>> &&
+     ...);
+
+// concatable ([range.concat.view], LWG 4074) — the gate join_with_view uses
+// on <range_reference_t<V>, Pattern>, superseding the older
+// compatible-joinable-ranges wording.
+template <typename... Rs>
+concept Concatable = requires {
+    typename ConcatReferenceT<Rs...>;
+    typename ConcatValueT<Rs...>;
+    typename ConcatRvalueReferenceT<Rs...>;
+} && ConcatIndirectlyReadable<Rs...>;
+
+// bidirectional-common ([range.join.with.view]) — local exposition concept.
+template <typename R>
+concept BidirectionalCommon = bidirectional_range<R> && common_range<R>;
+
+} // namespace __views_detail
+
+// ── join_with_view ([range.join.with]) ──────────────────────────────────
+
+template <input_range V, forward_range Pattern>
+    requires view<V> && input_range<range_reference_t<V>> && view<Pattern> &&
+             __views_detail::Concatable<range_reference_t<V>, Pattern>
+class join_with_view : public view_interface<join_with_view<V, Pattern>> {
+    using InnerRng = range_reference_t<V>;
+
+    template <bool Const>
+    struct Iterator;
+    template <bool Const>
+    struct Sentinel;
+
+    V __base = V();
+    __views_detail::NonPropagatingCache<iterator_t<V>> __outerIt;
+    __views_detail::NonPropagatingCache<remove_cvref_t<InnerRng>> __inner;
+    Pattern __pattern = Pattern();
+
+public:
+    join_with_view()
+        requires default_initializable<V> && default_initializable<Pattern>
+    = default;
+    constexpr explicit join_with_view(V base, Pattern pattern)
+        : __base(std::move(base)), __pattern(std::move(pattern))
+    {
+    }
+
+    template <input_range R>
+        requires constructible_from<V, views::all_t<R>> &&
+                 constructible_from<Pattern, single_view<range_value_t<InnerRng>>>
+    constexpr explicit join_with_view(R &&r, range_value_t<InnerRng> e)
+        : __base(views::all(std::forward<R>(r))), __pattern(views::single(std::move(e)))
+    {
+    }
+
+    constexpr V base() const &
+        requires copy_constructible<V>
+    {
+        return __base;
+    }
+    constexpr V base() && { return std::move(__base); }
+
+    constexpr auto begin()
+    {
+        if constexpr (forward_range<V>) {
+            constexpr bool use_const = __views_detail::SimpleView<V> &&
+                                       is_reference_v<InnerRng> &&
+                                       __views_detail::SimpleView<Pattern>;
+            return Iterator<use_const>(*this, ranges::begin(__base));
+        } else {
+            __outerIt = ranges::begin(__base);
+            return Iterator<false>(*this);
+        }
+    }
+    constexpr auto begin() const
+        requires forward_range<const V> && forward_range<const Pattern> &&
+                 is_reference_v<range_reference_t<const V>> &&
+                 input_range<range_reference_t<const V>> &&
+                 __views_detail::Concatable<range_reference_t<const V>, const Pattern>
+    {
+        return Iterator<true>(*this, ranges::begin(__base));
+    }
+
+    constexpr auto end()
+    {
+        if constexpr (forward_range<V> && is_reference_v<InnerRng> && forward_range<InnerRng> &&
+                      common_range<V> && common_range<InnerRng>)
+            return Iterator<__views_detail::SimpleView<V> && __views_detail::SimpleView<Pattern>>(
+                *this, ranges::end(__base));
+        else
+            return Sentinel<__views_detail::SimpleView<V> && __views_detail::SimpleView<Pattern>>(
+                *this);
+    }
+    constexpr auto end() const
+        requires forward_range<const V> && forward_range<const Pattern> &&
+                 is_reference_v<range_reference_t<const V>> &&
+                 input_range<range_reference_t<const V>> &&
+                 __views_detail::Concatable<range_reference_t<const V>, const Pattern>
+    {
+        using InnerConstRng = range_reference_t<const V>;
+        if constexpr (forward_range<InnerConstRng> && common_range<const V> &&
+                      common_range<InnerConstRng>)
+            return Iterator<true>(*this, ranges::end(__base));
+        else
+            return Sentinel<true>(*this);
+    }
+};
+
+template <typename R, typename P>
+join_with_view(R &&, P &&) -> join_with_view<views::all_t<R>, views::all_t<P>>;
+
+template <input_range R>
+join_with_view(R &&, range_value_t<range_reference_t<R>>)
+    -> join_with_view<views::all_t<R>, single_view<range_value_t<range_reference_t<R>>>>;
+
+// ── join_with_view::Iterator ([range.join.with.iterator]) ──────────────
+
+template <input_range V, forward_range Pattern>
+    requires view<V> && input_range<range_reference_t<V>> && view<Pattern> &&
+             __views_detail::Concatable<range_reference_t<V>, Pattern>
+template <bool Const>
+struct join_with_view<V, Pattern>::Iterator {
+    using Parent      = __views_detail::MaybeConst<Const, join_with_view>;
+    using Base        = __views_detail::MaybeConst<Const, V>;
+    using InnerBase   = range_reference_t<Base>;
+    using PatternBase = __views_detail::MaybeConst<Const, Pattern>;
+    using OuterIter   = iterator_t<Base>;
+    using InnerIter   = iterator_t<InnerBase>;
+    using PatternIter = iterator_t<PatternBase>;
+
+    static constexpr bool RefIsGlvalue = is_reference_v<InnerBase>;
+
+    Parent *__parent = nullptr;
+    [[no_unique_address]] __views_detail::PresentIf<forward_range<Base>, OuterIter> __outerIt;
+    variant<PatternIter, InnerIter> __innerIt;
+
+    using OuterCat   = typename iterator_traits<OuterIter>::iterator_category;
+    using InnerCat   = typename iterator_traits<InnerIter>::iterator_category;
+    using PatternCat = typename iterator_traits<PatternIter>::iterator_category;
+
+    using iterator_concept = conditional_t<
+        RefIsGlvalue && bidirectional_range<Base> && __views_detail::BidirectionalCommon<InnerBase> &&
+            __views_detail::BidirectionalCommon<PatternBase>,
+        bidirectional_iterator_tag,
+        conditional_t<RefIsGlvalue && forward_range<Base> && forward_range<InnerBase>,
+                      forward_iterator_tag, input_iterator_tag>>;
+    using iterator_category = conditional_t<
+        !(RefIsGlvalue && forward_range<Base> && forward_range<InnerBase>), input_iterator_tag,
+        conditional_t<
+            !is_reference_v<common_reference_t<iter_reference_t<InnerIter>, iter_reference_t<PatternIter>>>,
+            input_iterator_tag,
+            conditional_t<derived_from<OuterCat, bidirectional_iterator_tag> &&
+                              derived_from<InnerCat, bidirectional_iterator_tag> &&
+                              derived_from<PatternCat, bidirectional_iterator_tag> &&
+                              common_range<InnerBase> && common_range<PatternBase>,
+                          bidirectional_iterator_tag,
+                          conditional_t<derived_from<OuterCat, forward_iterator_tag> &&
+                                            derived_from<InnerCat, forward_iterator_tag> &&
+                                            derived_from<PatternCat, forward_iterator_tag>,
+                                        forward_iterator_tag, input_iterator_tag>>>>;
+    using value_type = common_type_t<iter_value_t<InnerIter>, iter_value_t<PatternIter>>;
+    using difference_type = common_type_t<iter_difference_t<OuterIter>, iter_difference_t<InnerIter>,
+                                          iter_difference_t<PatternIter>>;
+    using pointer   = void;
+    // Not part of the standard's own synopsis (its operator* is decltype(auto),
+    // deduced from a local inside the function body) — but boxcxx's
+    // iterator_traits only synthesises when ALL FIVE typedefs are present
+    // together (see ranges_join's header comment), so this is required for
+    // indirectly_readable/input_iterator to hold at all.
+    using reference = common_reference_t<iter_reference_t<InnerIter>, iter_reference_t<PatternIter>>;
+
+    Iterator() = default;
+    constexpr Iterator(Iterator<!Const> i)
+        requires Const && convertible_to<iterator_t<V>, OuterIter> &&
+                 convertible_to<iterator_t<InnerRng>, InnerIter> &&
+                 convertible_to<iterator_t<Pattern>, PatternIter>
+        : __parent(i.__parent)
+    {
+        if constexpr (forward_range<Base>) __outerIt.__value = std::move(i.__outerIt.__value);
+        if (i.__innerIt.index() == 0)
+            __innerIt.template emplace<0>(get<0>(std::move(i.__innerIt)));
+        else
+            __innerIt.template emplace<1>(get<1>(std::move(i.__innerIt)));
+    }
+
+    constexpr OuterIter &Outer()
+    {
+        if constexpr (forward_range<Base>)
+            return __outerIt.__value;
+        else
+            return *__parent->__outerIt;
+    }
+    constexpr const OuterIter &Outer() const
+    {
+        if constexpr (forward_range<Base>)
+            return __outerIt.__value;
+        else
+            return *__parent->__outerIt;
+    }
+
+    constexpr decltype(auto) operator*() const
+    {
+        using Reference = common_reference_t<iter_reference_t<InnerIter>, iter_reference_t<PatternIter>>;
+        return visit([](auto &it) -> Reference { return *it; }, __innerIt);
+    }
+
+    constexpr Iterator &operator++()
+    {
+        visit([](auto &it) { ++it; }, __innerIt);
+        Satisfy();
+        return *this;
+    }
+    constexpr void operator++(int) { ++*this; }
+    constexpr Iterator operator++(int)
+        requires RefIsGlvalue && forward_iterator<OuterIter> && forward_iterator<InnerIter>
+    {
+        auto tmp = *this;
+        ++*this;
+        return tmp;
+    }
+
+    constexpr Iterator &operator--()
+        requires RefIsGlvalue && bidirectional_range<Base> &&
+                 __views_detail::BidirectionalCommon<InnerBase> &&
+                 __views_detail::BidirectionalCommon<PatternBase>
+    {
+        if (__outerIt.__value == ranges::end(__parent->__base)) {
+            auto &&inner = *--__outerIt.__value;
+            __innerIt.template emplace<1>(ranges::end(inner));
+        }
+        while (true) {
+            if (__innerIt.index() == 0) {
+                auto &it = get<0>(__innerIt);
+                if (it == ranges::begin(__parent->__pattern)) {
+                    auto &&inner = *--__outerIt.__value;
+                    __innerIt.template emplace<1>(ranges::end(inner));
+                } else {
+                    break;
+                }
+            } else {
+                auto &it     = get<1>(__innerIt);
+                auto &&inner = *__outerIt.__value;
+                if (it == ranges::begin(inner)) {
+                    __innerIt.template emplace<0>(ranges::end(__parent->__pattern));
+                } else {
+                    break;
+                }
+            }
+        }
+        visit([](auto &it) { --it; }, __innerIt);
+        return *this;
+    }
+    constexpr Iterator operator--(int)
+        requires RefIsGlvalue && bidirectional_range<Base> &&
+                 __views_detail::BidirectionalCommon<InnerBase> &&
+                 __views_detail::BidirectionalCommon<PatternBase>
+    {
+        auto tmp = *this;
+        --*this;
+        return tmp;
+    }
+
+    friend constexpr bool operator==(const Iterator &x, const Iterator &y)
+        requires RefIsGlvalue && forward_range<Base> && equality_comparable<InnerIter>
+    {
+        return x.__outerIt.__value == y.__outerIt.__value && x.__innerIt == y.__innerIt;
+    }
+
+    friend constexpr decltype(auto) iter_move(const Iterator &x)
+    {
+        using RvalueReference =
+            common_reference_t<iter_rvalue_reference_t<InnerIter>, iter_rvalue_reference_t<PatternIter>>;
+        return visit<RvalueReference>(ranges::iter_move, x.__innerIt);
+    }
+    friend constexpr void iter_swap(const Iterator &x, const Iterator &y)
+        requires indirectly_swappable<InnerIter, PatternIter>
+    {
+        visit(ranges::iter_swap, x.__innerIt, y.__innerIt);
+    }
+
+private:
+    constexpr Iterator(Parent &parent, OuterIter outer)
+        requires forward_range<Base>
+        : __parent(__builtin_addressof(parent)), __outerIt(std::move(outer))
+    {
+        Init();
+    }
+    constexpr explicit Iterator(Parent &parent)
+        requires(!forward_range<Base>)
+        : __parent(__builtin_addressof(parent))
+    {
+        Init();
+    }
+
+    constexpr void Init()
+    {
+        if (Outer() != ranges::end(__parent->__base)) {
+            __innerIt.template emplace<1>(ranges::begin(UpdateInner()));
+            Satisfy();
+        }
+    }
+
+    constexpr auto &UpdateInner()
+    {
+        if constexpr (RefIsGlvalue)
+            return __views_detail::AsLvalue(*Outer());
+        else
+            return __parent->__inner.EmplaceDeref(Outer());
+    }
+    constexpr auto &GetInner()
+    {
+        if constexpr (RefIsGlvalue)
+            return __views_detail::AsLvalue(*Outer());
+        else
+            return *__parent->__inner;
+    }
+
+    constexpr void Satisfy()
+    {
+        while (true) {
+            if (__innerIt.index() == 0) {
+                if (get<0>(__innerIt) != ranges::end(__parent->__pattern)) break;
+                __innerIt.template emplace<1>(ranges::begin(UpdateInner()));
+            } else {
+                if (get<1>(__innerIt) != ranges::end(GetInner())) break;
+                if (++Outer() == ranges::end(__parent->__base)) {
+                    if constexpr (RefIsGlvalue) __innerIt.template emplace<0>();
+                    break;
+                }
+                __innerIt.template emplace<0>(ranges::begin(__parent->__pattern));
+            }
+        }
+    }
+
+    friend class join_with_view;
+};
+
+// ── join_with_view::Sentinel ([range.join.with.sentinel]) ──────────────
+
+template <input_range V, forward_range Pattern>
+    requires view<V> && input_range<range_reference_t<V>> && view<Pattern> &&
+             __views_detail::Concatable<range_reference_t<V>, Pattern>
+template <bool Const>
+struct join_with_view<V, Pattern>::Sentinel {
+    using Base = __views_detail::MaybeConst<Const, V>;
+
+    sentinel_t<Base> __end = sentinel_t<Base>();
+
+    Sentinel() = default;
+    constexpr Sentinel(Sentinel<!Const> s)
+        requires Const && convertible_to<sentinel_t<V>, sentinel_t<Base>>
+        : __end(std::move(s.__end))
+    {
+    }
+
+    template <bool OtherConst>
+        requires sentinel_for<sentinel_t<Base>, iterator_t<__views_detail::MaybeConst<OtherConst, V>>>
+    friend constexpr bool operator==(const Iterator<OtherConst> &x, const Sentinel &y)
+    {
+        return x.Outer() == y.__end;
+    }
+
+private:
+    constexpr explicit Sentinel(__views_detail::MaybeConst<Const, join_with_view> &parent)
+        : __end(ranges::end(parent.__base))
+    {
+    }
+
+    friend class join_with_view;
+};
+
+namespace views {
+
+struct JoinWith {
+    template <viewable_range R, viewable_range P>
+        requires input_range<all_t<R>> && input_range<range_reference_t<all_t<R>>> &&
+                 forward_range<all_t<P>> &&
+                 __views_detail::Concatable<range_reference_t<all_t<R>>, all_t<P>>
+    constexpr auto operator()(R &&r, P &&pattern) const
+    {
+        return join_with_view<all_t<R>, all_t<P>>(all(std::forward<R>(r)),
+                                                   all(std::forward<P>(pattern)));
+    }
+    template <viewable_range R>
+        requires input_range<all_t<R>> && input_range<range_reference_t<all_t<R>>> &&
+                 __views_detail::Concatable<
+                     range_reference_t<all_t<R>>,
+                     single_view<range_value_t<range_reference_t<all_t<R>>>>>
+    constexpr auto operator()(R &&r, range_value_t<range_reference_t<all_t<R>>> e) const
+    {
+        return join_with_view<all_t<R>, single_view<range_value_t<range_reference_t<all_t<R>>>>>(
+            all(std::forward<R>(r)), views::single(std::move(e)));
+    }
+    template <typename P>
+    constexpr auto operator()(P &&pattern) const
+    {
+        return RangeAdaptorPartial<JoinWith, remove_cvref_t<P>>(JoinWith{}, std::forward<P>(pattern));
+    }
+};
+
+inline constexpr JoinWith join_with{};
+
+} // namespace views
+
+} // namespace ranges
+
+namespace views = ranges::views;
+
+} // namespace std
+
+#endif // BOXCXX_BITS_RANGES_JOIN_WITH

@@ -471,10 +471,20 @@ struct RangeAdaptorPartial : RangeAdaptorClosureBase {
         : __ad(std::move(a)), __arg(std::move(g))
     {
     }
+    // Ref-qualified so an rvalue (temporary) partial MOVES its stored argument
+    // into the adaptor: a range-valued __arg then reaches views::all as an
+    // rvalue and is wrapped in an owning_view, not a dangling ref_view into the
+    // closure temporary. join_with is the first adaptor to bind a range payload,
+    // so this latent [range.adaptor.object] requirement first bites here.
     template <typename R>
-    constexpr auto operator()(R &&r) const
+    constexpr auto operator()(R &&r) const &
     {
         return __ad(std::forward<R>(r), __arg);
+    }
+    template <typename R>
+    constexpr auto operator()(R &&r) &&
+    {
+        return std::move(__ad)(std::forward<R>(r), std::move(__arg));
     }
 };
 
@@ -486,10 +496,19 @@ struct RangeAdaptorComposed : RangeAdaptorClosureBase {
         : __c(std::move(c)), __d(std::move(d))
     {
     }
+    // Same rvalue-forwarding discipline as RangeAdaptorPartial: an rvalue
+    // composed closure moves its captured sub-closures, so a range-valued
+    // payload buried in either half (e.g. views::join_with(vec) | views::reverse)
+    // is owned rather than left dangling into the composed temporary.
     template <typename R>
-    constexpr auto operator()(R &&r) const
+    constexpr auto operator()(R &&r) const &
     {
         return __d(__c(std::forward<R>(r)));
+    }
+    template <typename R>
+    constexpr auto operator()(R &&r) &&
+    {
+        return std::move(__d)(std::move(__c)(std::forward<R>(r)));
     }
 };
 
@@ -542,6 +561,26 @@ class take_view : public view_interface<take_view<V>> {
     V __base                      = V();
     range_difference_t<V> __count = 0;
 
+    // For a base that is neither sized nor random-access, take() cannot
+    // precompute an offset end, and __MakeBegin hands out a counted_iterator
+    // carrying the raw (uncapped) count — so end() must ALSO stop the walk at
+    // the base's own end, or a count past the base length runs off it (heap
+    // overflow). This bespoke sentinel compares equal to a counted_iterator on
+    // EITHER count exhaustion or the iterator reaching the base end
+    // ([range.take.sentinel]); default_sentinel alone only checks the count.
+    template <typename S>
+    struct Sentinel {
+        S __end = S();
+        Sentinel() = default;
+        constexpr explicit Sentinel(S end) : __end(std::move(end)) {}
+        constexpr S base() const { return __end; }
+        template <typename I>
+        friend constexpr bool operator==(const counted_iterator<I> &y, const Sentinel &x)
+        {
+            return y.count() == 0 || y.base() == x.__end;
+        }
+    };
+
     template <typename Base>
     static constexpr auto __MakeBegin(Base &b, range_difference_t<V> count)
     {
@@ -563,8 +602,15 @@ class take_view : public view_interface<take_view<V>> {
         if constexpr (sized_range<Base> && random_access_range<Base>) {
             auto sz = static_cast<range_difference_t<V>>(ranges::size(b));
             return ranges::begin(b) + (count < sz ? count : sz);
-        } else {
+        } else if constexpr (sized_range<Base>) {
+            // Sized but not random-access: __MakeBegin already capped the count
+            // to the size, so the counted_iterator reaches count()==0 exactly at
+            // the base end — default_sentinel is bounded and correct here.
             return default_sentinel;
+        } else {
+            // Non-sized: the begin count is uncapped, so the end must carry the
+            // base end to bound the walk (see Sentinel above).
+            return Sentinel<sentinel_t<Base>>(ranges::end(b));
         }
     }
 

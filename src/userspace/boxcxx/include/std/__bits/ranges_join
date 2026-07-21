@@ -1,0 +1,411 @@
+// boxcxx — <__bits/ranges_join>
+// [range.join], Ф29e-1. Pulled in by <ranges> after <__bits/ranges_cartesian>.
+//
+// boxcxx notes (documented, safe for the closed type set):
+//   • join_view's own outer_/inner_ caches (present-only-if in the standard)
+//     are stored unconditionally here: NonPropagatingCache starts disengaged
+//     by default, so dropping the "present only if" clause costs nothing but
+//     a little space and keeps the member layout simple.
+//   • iterator_category is genuinely conditionally-declared per the standard
+//     (absent, not "= input_iterator_tag", when its gate is unmet). boxcxx's
+//     iterator_traits (__bits/iterator_core) only synthesises a type's
+//     traits when ALL FIVE of iterator_category/value_type/difference_type/
+//     pointer/reference are present together — there is no C++17-iterator
+//     fallback path like real libstdc++/MSVC. Omitting the member here would
+//     silently break indirectly_readable (iter_value_t needs
+//     iterator_traits<I>::value_type) and hence input_range itself for every
+//     prvalue-inner join. So — like every other boxcxx view (filter,
+//     transform, zip, cartesian) — the member is ALWAYS declared, with its
+//     value collapsing to input_iterator_tag when the standard's gate is
+//     unmet. Externally identical via CategoryAtLeast (forward_range and
+//     bidirectional_range are still correctly capped either way).
+#ifndef BOXCXX_BITS_RANGES_JOIN
+#define BOXCXX_BITS_RANGES_JOIN
+
+#include <concepts>
+#include <cstddef>
+#include <iterator>
+#include <optional>
+#include <type_traits>
+#include <utility>
+
+namespace std {
+namespace ranges {
+
+namespace __views_detail {
+
+// simple-view ([range.utility.helpers]) — non-const and const share the same
+// iterator/sentinel types, so a non-const begin() can safely hand back a
+// const-flavoured iterator without a caller ever noticing the difference.
+template <typename R>
+concept SimpleView = view<R> && range<const R> &&
+                      same_as<iterator_t<R>, iterator_t<const R>> &&
+                      same_as<sentinel_t<R>, sentinel_t<const R>>;
+
+// has-arrow ([range.utility.helpers]) — distinct from CommonIterHasArrow in
+// <iterator>, which adds a third proxy-construction disjunct for a different
+// purpose (common_iterator's synthetic operator->).
+template <typename I>
+concept HasArrow = input_iterator<I> &&
+                    (is_pointer_v<I> || requires(const I i) { i.operator->(); });
+
+// as-lvalue: forces an xvalue/prvalue expression into an lvalue.
+// ranges::begin/end require an lvalue argument, but range_reference_t<Base>
+// may legally be T&& (views::as_rvalue, move_iterator), so *it can yield an
+// xvalue that needs this cast before it can be handed to begin()/end().
+template <typename T>
+constexpr T &AsLvalue(T &&t) noexcept
+{
+    return static_cast<T &>(t);
+}
+
+// PresentIf<Present,T> — conditional-member helper for a data member that
+// the standard specifies as "present only if <condition>". Mirrors
+// SubrangeSize<Store> in ranges_views exactly: the primary template is the
+// empty/absent case, the <true,T> specialization holds the real value.
+template <bool Present, typename T>
+struct PresentIf {
+    constexpr PresentIf() = default;
+    constexpr PresentIf(T) noexcept {}
+};
+template <typename T>
+struct PresentIf<true, T> {
+    T __value{};
+    constexpr PresentIf() = default;
+    constexpr PresentIf(T v) noexcept(is_nothrow_move_constructible_v<T>)
+        : __value(std::move(v))
+    {
+    }
+};
+
+// non-propagating-cache ([range.nonprop.cache]) — behaves exactly like
+// optional<T> except copies/moves never carry the cached value along; only
+// EmplaceDeref (the boxcxx spelling of emplace-deref) refills it.
+template <typename T>
+    requires is_object_v<T>
+class NonPropagatingCache : public optional<T> {
+public:
+    // Inherit only optional's value-assignment (needed by `cache = *outerIt`),
+    // NOT its converting constructors: pulling in `optional(U&&)` would let a
+    // value convert to a NonPropagatingCache and make `cache = scalar` ambiguous
+    // against the copy/move-assign below. join only ever default-constructs the
+    // cache and fills it via EmplaceDeref/emplace, so the value ctors are unused.
+    using optional<T>::operator=;
+
+    constexpr NonPropagatingCache() = default;
+    constexpr NonPropagatingCache(const NonPropagatingCache &) noexcept : optional<T>() {}
+    constexpr NonPropagatingCache(NonPropagatingCache &&o) noexcept : optional<T>() { o.reset(); }
+    constexpr NonPropagatingCache &operator=(const NonPropagatingCache &o) noexcept
+    {
+        if (__builtin_addressof(o) != this) this->reset();
+        return *this;
+    }
+    constexpr NonPropagatingCache &operator=(NonPropagatingCache &&o) noexcept
+    {
+        this->reset();
+        o.reset();
+        return *this;
+    }
+
+    template <typename I>
+    constexpr T &EmplaceDeref(const I &i)
+    {
+        return this->emplace(*i);
+    }
+};
+
+} // namespace __views_detail
+
+// ── join_view ([range.join]) ────────────────────────────────────────────
+
+template <input_range V>
+    requires view<V> && input_range<range_reference_t<V>>
+class join_view : public view_interface<join_view<V>> {
+    using InnerRng = range_reference_t<V>;
+
+    template <bool Const>
+    struct Iterator;
+    template <bool Const>
+    struct Sentinel;
+
+    V __base = V();
+    __views_detail::NonPropagatingCache<iterator_t<V>> __outer;
+    __views_detail::NonPropagatingCache<remove_cvref_t<InnerRng>> __inner;
+
+public:
+    join_view()
+        requires default_initializable<V>
+    = default;
+    constexpr explicit join_view(V base) : __base(std::move(base)) {}
+
+    constexpr V base() const &
+        requires copy_constructible<V>
+    {
+        return __base;
+    }
+    constexpr V base() && { return std::move(__base); }
+
+    constexpr auto begin()
+    {
+        if constexpr (forward_range<V>) {
+            constexpr bool use_const =
+                __views_detail::SimpleView<V> && is_reference_v<InnerRng>;
+            return Iterator<use_const>(*this, ranges::begin(__base));
+        } else {
+            __outer = ranges::begin(__base);
+            return Iterator<false>(*this);
+        }
+    }
+    constexpr auto begin() const
+        requires forward_range<const V> &&
+                 is_reference_v<range_reference_t<const V>> &&
+                 input_range<range_reference_t<const V>>
+    {
+        return Iterator<true>(*this, ranges::begin(__base));
+    }
+
+    constexpr auto end()
+    {
+        if constexpr (forward_range<V> && is_reference_v<InnerRng> &&
+                      forward_range<InnerRng> && common_range<V> &&
+                      common_range<InnerRng>)
+            return Iterator<__views_detail::SimpleView<V>>(*this, ranges::end(__base));
+        else
+            return Sentinel<__views_detail::SimpleView<V>>(*this);
+    }
+    constexpr auto end() const
+        requires forward_range<const V> &&
+                 is_reference_v<range_reference_t<const V>> &&
+                 input_range<range_reference_t<const V>>
+    {
+        if constexpr (forward_range<range_reference_t<const V>> &&
+                      common_range<const V> &&
+                      common_range<range_reference_t<const V>>)
+            return Iterator<true>(*this, ranges::end(__base));
+        else
+            return Sentinel<true>(*this);
+    }
+};
+
+template <typename R>
+explicit join_view(R &&) -> join_view<views::all_t<R>>;
+
+// ── join_view::Iterator ([range.join.iterator]) ────────────────────────
+
+template <input_range V>
+    requires view<V> && input_range<range_reference_t<V>>
+template <bool Const>
+struct join_view<V>::Iterator {
+    using Parent    = __views_detail::MaybeConst<Const, join_view>;
+    using Base      = __views_detail::MaybeConst<Const, V>;
+    using InnerBase = range_reference_t<Base>;
+    using OuterIter = iterator_t<Base>;
+    using InnerIter = iterator_t<InnerBase>;
+
+    static constexpr bool RefIsGlvalue = is_reference_v<InnerBase>;
+
+    Parent *__parent = nullptr;
+    [[no_unique_address]] __views_detail::PresentIf<forward_range<Base>, OuterIter> __outer;
+    optional<InnerIter> __inner;
+
+    using OuterCat = typename iterator_traits<OuterIter>::iterator_category;
+    using InnerCat = typename iterator_traits<InnerIter>::iterator_category;
+
+    using iterator_concept = conditional_t<
+        RefIsGlvalue && bidirectional_range<Base> && bidirectional_range<InnerBase> &&
+            common_range<InnerBase>,
+        bidirectional_iterator_tag,
+        conditional_t<RefIsGlvalue && forward_range<Base> && forward_range<InnerBase>,
+                      forward_iterator_tag, input_iterator_tag>>;
+    using iterator_category = conditional_t<
+        !(RefIsGlvalue && forward_range<Base> && forward_range<InnerBase>), input_iterator_tag,
+        conditional_t<derived_from<OuterCat, bidirectional_iterator_tag> &&
+                          derived_from<InnerCat, bidirectional_iterator_tag> &&
+                          common_range<InnerBase>,
+                      bidirectional_iterator_tag,
+                      conditional_t<derived_from<OuterCat, forward_iterator_tag> &&
+                                        derived_from<InnerCat, forward_iterator_tag>,
+                                    forward_iterator_tag, input_iterator_tag>>>;
+    using value_type      = range_value_t<InnerBase>;
+    using difference_type = common_type_t<range_difference_t<Base>, range_difference_t<InnerBase>>;
+    using pointer         = void;
+    using reference       = range_reference_t<InnerBase>;
+
+    Iterator() = default;
+    constexpr Iterator(Iterator<!Const> i)
+        requires Const && convertible_to<iterator_t<V>, OuterIter> &&
+                 convertible_to<iterator_t<InnerRng>, InnerIter>
+        : __parent(i.__parent), __inner(std::move(i.__inner))
+    {
+        if constexpr (forward_range<Base>) __outer.__value = std::move(i.__outer.__value);
+    }
+
+    constexpr OuterIter &Outer()
+    {
+        if constexpr (forward_range<Base>)
+            return __outer.__value;
+        else
+            return *__parent->__outer;
+    }
+    constexpr const OuterIter &Outer() const
+    {
+        if constexpr (forward_range<Base>)
+            return __outer.__value;
+        else
+            return *__parent->__outer;
+    }
+
+    constexpr decltype(auto) operator*() const { return **__inner; }
+    constexpr InnerIter operator->() const
+        requires __views_detail::HasArrow<InnerIter> && copyable<InnerIter>
+    {
+        return *__inner;
+    }
+
+    constexpr Iterator &operator++()
+    {
+        if constexpr (RefIsGlvalue) {
+            if (++*__inner == ranges::end(__views_detail::AsLvalue(*Outer()))) {
+                ++Outer();
+                Satisfy();
+            }
+        } else {
+            if (++*__inner == ranges::end(__views_detail::AsLvalue(*__parent->__inner))) {
+                ++Outer();
+                Satisfy();
+            }
+        }
+        return *this;
+    }
+    constexpr void operator++(int) { ++*this; }
+    constexpr Iterator operator++(int)
+        requires RefIsGlvalue && forward_range<Base> && forward_range<InnerBase>
+    {
+        auto tmp = *this;
+        ++*this;
+        return tmp;
+    }
+
+    constexpr Iterator &operator--()
+        requires RefIsGlvalue && bidirectional_range<Base> && bidirectional_range<InnerBase> &&
+                 common_range<InnerBase>
+    {
+        if (__outer.__value == ranges::end(__parent->__base))
+            __inner = ranges::end(__views_detail::AsLvalue(*--__outer.__value));
+        while (*__inner == ranges::begin(__views_detail::AsLvalue(*__outer.__value)))
+            *__inner = ranges::end(__views_detail::AsLvalue(*--__outer.__value));
+        --*__inner;
+        return *this;
+    }
+    constexpr Iterator operator--(int)
+        requires RefIsGlvalue && bidirectional_range<Base> && bidirectional_range<InnerBase> &&
+                 common_range<InnerBase>
+    {
+        auto tmp = *this;
+        --*this;
+        return tmp;
+    }
+
+    friend constexpr bool operator==(const Iterator &x, const Iterator &y)
+        requires RefIsGlvalue && forward_range<Base> && equality_comparable<iterator_t<InnerBase>>
+    {
+        return x.__outer.__value == y.__outer.__value && x.__inner == y.__inner;
+    }
+
+    friend constexpr decltype(auto) iter_move(const Iterator &i)
+    {
+        return ranges::iter_move(*i.__inner);
+    }
+    friend constexpr void iter_swap(const Iterator &x, const Iterator &y)
+        requires indirectly_swappable<InnerIter>
+    {
+        ranges::iter_swap(*x.__inner, *y.__inner);
+    }
+
+private:
+    constexpr Iterator(Parent &parent, OuterIter outer)
+        requires forward_range<Base>
+        : __parent(__builtin_addressof(parent)), __outer(std::move(outer))
+    {
+        Satisfy();
+    }
+    constexpr explicit Iterator(Parent &parent)
+        requires(!forward_range<Base>)
+        : __parent(__builtin_addressof(parent))
+    {
+        Satisfy();
+    }
+
+    constexpr void Satisfy()
+    {
+        auto UpdateInner = [this](const OuterIter &x) -> decltype(auto) {
+            if constexpr (RefIsGlvalue)
+                return *x;
+            else
+                return __parent->__inner.EmplaceDeref(x);
+        };
+        for (; Outer() != ranges::end(__parent->__base); ++Outer()) {
+            decltype(auto) inner = UpdateInner(Outer());
+            __inner               = ranges::begin(inner);
+            if (*__inner != ranges::end(inner)) return;
+        }
+        if constexpr (RefIsGlvalue) __inner.reset();
+    }
+
+    friend class join_view;
+};
+
+// ── join_view::Sentinel ([range.join.sentinel]) ────────────────────────
+
+template <input_range V>
+    requires view<V> && input_range<range_reference_t<V>>
+template <bool Const>
+struct join_view<V>::Sentinel {
+    using Base = __views_detail::MaybeConst<Const, V>;
+
+    sentinel_t<Base> __end = sentinel_t<Base>();
+
+    Sentinel() = default;
+    constexpr Sentinel(Sentinel<!Const> s)
+        requires Const && convertible_to<sentinel_t<V>, sentinel_t<Base>>
+        : __end(std::move(s.__end))
+    {
+    }
+
+    template <bool OtherConst>
+        requires sentinel_for<sentinel_t<Base>, iterator_t<__views_detail::MaybeConst<OtherConst, V>>>
+    friend constexpr bool operator==(const Iterator<OtherConst> &x, const Sentinel &y)
+    {
+        return x.Outer() == y.__end;
+    }
+
+private:
+    constexpr explicit Sentinel(__views_detail::MaybeConst<Const, join_view> &parent)
+        : __end(ranges::end(parent.__base))
+    {
+    }
+
+    friend class join_view;
+};
+
+namespace views {
+
+struct Join : RangeAdaptorClosureBase {
+    template <viewable_range R>
+    constexpr auto operator()(R &&r) const
+    {
+        return join_view<all_t<R>>(all(std::forward<R>(r)));
+    }
+};
+
+inline constexpr Join join{};
+
+} // namespace views
+
+} // namespace ranges
+
+namespace views = ranges::views;
+
+} // namespace std
+
+#endif // BOXCXX_BITS_RANGES_JOIN
