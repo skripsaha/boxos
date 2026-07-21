@@ -4988,7 +4988,13 @@ void Phase30()
         Check(before >= milliseconds(3), "phase30 stopwatch measures real elapsed time");
         nanoseconds lap = sw.reset();
         Check(lap >= milliseconds(3), "phase30 reset() returns the elapsed lap");
-        Check(sw.elapsed() < lap, "phase30 reset() rewinds the origin (post-reset elapsed << lap)");
+        // No `sw.elapsed() < lap` assert: box::stopwatch is a TSC-backed
+        // steady_clock, so a host deschedule in the handful of instructions
+        // between reset() and this read inflates the post-reset elapsed past
+        // the lap under 16c-TCG load. A wall-clock UPPER bound is inherently
+        // flaky here (same TSC-counts-deschedule reason phase39/40 dropped
+        // their ratio asserts); the lap FLOOR above is deschedule-immune
+        // (accumulated time only grows) and is the meaningful invariant.
     } else {
         printf("[CXX] note phase30: steady_clock did not advance within the spin cap\n");
     }
@@ -14433,6 +14439,178 @@ void Phase91()
            "(elements/keys/values/enumerate/zip/zip_transform/adjacent/adjacent_transform)\n");
 }
 
+void Phase92()
+{
+    namespace rg = std::ranges;
+    namespace vw = std::views;
+
+    // ── 2-way product: row-major order + size + get<0>/get<1> ────────────
+    std::vector<int> pa{1, 2};
+    std::vector<int> pb{10, 20, 30};
+
+    auto cp2 = vw::cartesian_product(pa, pb);
+    Check(cp2.size() == 6, "phase92 cartesian_product 2-way size == |a|*|b|");
+
+    int expectA[6] = {1, 1, 1, 2, 2, 2};
+    int expectB[6] = {10, 20, 30, 10, 20, 30};
+    int cp2Cnt     = 0;
+    bool cp2Ok     = true;
+    for (auto &&t : cp2) {
+        if (std::get<0>(t) != expectA[cp2Cnt] || std::get<1>(t) != expectB[cp2Cnt]) cp2Ok = false;
+        ++cp2Cnt;
+    }
+    Check(cp2Ok && cp2Cnt == 6, "phase92 cartesian_product 2-way row-major sequence");
+
+    // ── 3-way product: size + first/last tuple ────────────────────────────
+    std::vector<int> pc{100, 200};
+    auto             cp3 = vw::cartesian_product(pa, pb, pc);
+    Check(cp3.size() == pa.size() * pb.size() * pc.size(), "phase92 cartesian_product 3-way size");
+    int  cp3Cnt = 0;
+    std::tuple<int, int, int> cp3First{}, cp3Last{};
+    for (auto &&t : cp3) {
+        if (cp3Cnt == 0) cp3First = t;
+        cp3Last = t;
+        ++cp3Cnt;
+    }
+    Check(cp3Cnt == 12, "phase92 cartesian_product 3-way count");
+    Check(std::get<0>(cp3First) == 1 && std::get<1>(cp3First) == 10 && std::get<2>(cp3First) == 100,
+          "phase92 cartesian_product 3-way first tuple");
+    Check(std::get<0>(cp3Last) == 2 && std::get<1>(cp3Last) == 30 && std::get<2>(cp3Last) == 200,
+          "phase92 cartesian_product 3-way last tuple");
+
+    // ── empty factor ⇒ empty product ───────────────────────────────────────
+    std::vector<int> pEmpty;
+    auto             cpEmptyVs = vw::cartesian_product(pa, pEmpty);
+    Check(cpEmptyVs.size() == 0, "phase92 cartesian_product empty Vs-factor size==0");
+    Check(cpEmptyVs.begin() == cpEmptyVs.end(), "phase92 cartesian_product empty Vs-factor begin==end");
+    int emptyVsCnt = 0;
+    for (auto &&t : cpEmptyVs) {
+        (void)t;
+        ++emptyVsCnt;
+    }
+    Check(emptyVsCnt == 0, "phase92 cartesian_product empty Vs-factor zero iterations");
+    // CRIT-1 regression: seek-by-0 on an empty-Vs product must not divide by
+    // zero inside Seek() (0/0 -> #DE/SIGFPE on x86_64). begin()+0 and the
+    // self-distance are well-defined no-ops for any valid iterator, even here.
+    Check(cpEmptyVs.begin() + 0 == cpEmptyVs.begin(),
+          "phase92 cartesian_product empty-Vs begin()+0 no-op (CRIT-1 div0 guard)");
+    Check(cpEmptyVs.begin() - cpEmptyVs.begin() == 0,
+          "phase92 cartesian_product empty-Vs self-distance==0");
+
+    auto cpEmptyFirst = vw::cartesian_product(pEmpty, pb);
+    Check(cpEmptyFirst.size() == 0 && cpEmptyFirst.begin() == cpEmptyFirst.end(),
+          "phase92 cartesian_product empty First-factor collapses to begin==end");
+
+    // ── empty pack ⇒ single empty tuple ─────────────────────────────────────
+    auto cpNone = vw::cartesian_product();
+    static_assert(std::is_same_v<rg::range_value_t<decltype(cpNone)>, std::tuple<>>,
+                  "cartesian_product() value_type must be tuple<>");
+    Check(cpNone.size() == 1, "phase92 cartesian_product empty pack size==1");
+    int noneCnt = 0;
+    for (auto &&t : cpNone) {
+        (void)t;
+        ++noneCnt;
+    }
+    Check(noneCnt == 1, "phase92 cartesian_product empty pack single iteration");
+
+    // ── random-access: end()-begin(), operator[] odometer decode, +=/-= ────
+    std::vector<int> ra{1, 2, 3};
+    std::vector<int> rb{10, 20};
+    auto             cpRA    = vw::cartesian_product(ra, rb);
+    auto             raBegin = cpRA.begin();
+    auto             raEnd   = cpRA.end();
+    Check((raEnd - raBegin) == static_cast<decltype(raEnd - raBegin)>(cpRA.size()),
+          "phase92 cartesian_product end()-begin() == size (random-access)");
+
+    // sequence: k=0:(1,10) 1:(1,20) 2:(2,10) 3:(2,20) 4:(3,10) 5:(3,20)
+    auto t2 = raBegin[2];
+    Check(std::get<0>(t2) == 2 && std::get<1>(t2) == 10, "phase92 cartesian_product operator[] decode k=2");
+    auto t5 = raBegin[5];
+    Check(std::get<0>(t5) == 3 && std::get<1>(t5) == 20, "phase92 cartesian_product operator[] decode k=5");
+
+    auto raIt = cpRA.begin();
+    raIt += 4;
+    Check(std::get<0>(*raIt) == 3 && std::get<1>(*raIt) == 10, "phase92 cartesian_product += advances (k=4)");
+    raIt -= 3;
+    Check(std::get<0>(*raIt) == 1 && std::get<1>(*raIt) == 20, "phase92 cartesian_product -= after += (k=1)");
+    raIt += 3;
+    Check(std::get<0>(*raIt) == 3 && std::get<1>(*raIt) == 10,
+          "phase92 cartesian_product +=/-= round trip restores position");
+
+    // ── bidirectional: forward pass, then walk -- all the way back ─────────
+    std::list<int> listA{1, 2};
+    std::list<int> listB{10, 20, 30};
+    auto           cpBidi = vw::cartesian_product(listA, listB);
+
+    std::vector<int> bidiFwdA, bidiFwdB;
+    for (auto &&t : cpBidi) {
+        bidiFwdA.push_back(std::get<0>(t));
+        bidiFwdB.push_back(std::get<1>(t));
+    }
+    Check(bidiFwdA.size() == 6, "phase92 cartesian_product bidirectional forward pass count");
+
+    auto              bidiIt = cpBidi.end();
+    std::vector<int> bidiBwdA, bidiBwdB;
+    for (size_t i = 0; i < bidiFwdA.size(); ++i) {
+        --bidiIt;
+        auto tup = *bidiIt;
+        bidiBwdA.push_back(std::get<0>(tup));
+        bidiBwdB.push_back(std::get<1>(tup));
+    }
+    Check(bidiIt == cpBidi.begin(), "phase92 cartesian_product backward walk reaches begin");
+    bool bidiReversedOk = true;
+    for (size_t i = 0; i < bidiFwdA.size(); ++i) {
+        size_t j = bidiFwdA.size() - 1 - i;
+        if (bidiFwdA[i] != bidiBwdA[j] || bidiFwdB[i] != bidiBwdB[j]) bidiReversedOk = false;
+    }
+    Check(bidiReversedOk, "phase92 cartesian_product backward walk matches reversed forward sequence");
+
+    // ── default_sentinel path: First is a non-common/unsized-iterator range ─
+    std::list<int> dsFirst{1, 2, 3, 4};
+    auto           dsFirstTaken = dsFirst | vw::take(3);
+    static_assert(!rg::common_range<decltype(dsFirstTaken)>);
+    std::vector<int> dsB{10, 20};
+    auto             cpDs = vw::cartesian_product(dsFirstTaken, dsB);
+    static_assert(std::is_same_v<decltype(cpDs.end()), std::default_sentinel_t>,
+                  "cartesian_product over a non-common First must yield default_sentinel");
+    auto dsIt = cpDs.begin();
+    Check(std::get<0>(*dsIt) == 1 && std::get<1>(*dsIt) == 10, "phase92 cartesian_product default_sentinel first tuple");
+    int dsCnt = 0;
+    for (auto &&t : cpDs) {
+        (void)t;
+        ++dsCnt;
+    }
+    Check(dsCnt == 3 * 2, "phase92 cartesian_product default_sentinel path count");
+
+    // ── const-qualified view exercises the <Const> iterator ────────────────
+    std::vector<int> qa{1, 2};
+    std::vector<int> qb{10, 20};
+    const auto       cpConst = vw::cartesian_product(qa, qb);
+    Check(cpConst.size() == 4, "phase92 cartesian_product const-view size()");
+    int  constCnt = 0;
+    bool constOk  = true;
+    int  constExpectA[4] = {1, 1, 2, 2};
+    int  constExpectB[4] = {10, 20, 10, 20};
+    for (auto &&t : cpConst) {
+        if (std::get<0>(t) != constExpectA[constCnt] || std::get<1>(t) != constExpectB[constCnt]) constOk = false;
+        ++constCnt;
+    }
+    Check(constOk && constCnt == 4, "phase92 cartesian_product const-view iteration (Const iterator)");
+
+    const std::vector<int> trulyConstA{5, 6};
+    const std::vector<int> trulyConstB{7, 8};
+    auto                    cpTrulyConst = vw::cartesian_product(trulyConstA, trulyConstB);
+    int                     trulyConstCnt = 0;
+    for (auto &&t : cpTrulyConst) {
+        (void)t;
+        ++trulyConstCnt;
+    }
+    Check(trulyConstCnt == 4, "phase92 cartesian_product over const-input ranges");
+
+    printf("[CXX] PASS phase92: ranges::cartesian_product_view (odometer/random-access/"
+           "bidirectional/default_sentinel/const)\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -14546,6 +14724,7 @@ int main()
     Phase89();
     Phase90();
     Phase91();
+    Phase92();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

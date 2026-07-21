@@ -1,0 +1,440 @@
+// boxcxx — <__bits/ranges_cartesian>
+// [range.cartesian], Ф29d-2. Pulled in by <ranges> after
+// <__bits/ranges_adjacent> — reuses TupleTransform from ranges_zip,
+// MaybeConst from ranges_views, views::single from ranges_factory and
+// IotaDiffT (ranges_factory) for the iterator's difference_type.
+//
+// boxcxx note: difference_type widens the dims' common_type one size class
+// up via IotaDiffT (the same idiom iota_view uses) — up to __int128 for a
+// 64-bit dimension, so += / distance stay exact for any product of realistic
+// sizes. size() returns the unsigned 64-bit range-size type (matching each
+// dim's own size type), so — unlike difference_type — it truncates for a
+// product whose element count reaches 2^64; no real range set gets there.
+#ifndef BOXCXX_BITS_RANGES_CARTESIAN
+#define BOXCXX_BITS_RANGES_CARTESIAN
+
+#include <compare>
+#include <concepts>
+#include <cstddef>
+#include <iterator>
+#include <tuple>
+#include <type_traits>
+#include <utility>
+
+namespace std {
+namespace ranges {
+
+namespace __views_detail {
+
+// A dimension can serve as the FIRST factor's real end() only when its own
+// end is either the common iterator type, or reachable in O(1) as
+// begin()+size() — [range.cartesian] calls this cartesian-common-arg.
+template <typename R>
+concept CartesianCommonArg = common_range<R> || (sized_range<R> && random_access_range<R>);
+
+template <typename R>
+constexpr auto CartesianCommonArgEnd(R &r)
+{
+    if constexpr (common_range<R>)
+        return ranges::end(r);
+    else if constexpr (sized_range<R> && random_access_range<R>)
+        return ranges::begin(r) + static_cast<range_difference_t<R>>(ranges::size(r));
+    else
+        return ranges::end(r);
+}
+
+} // namespace __views_detail
+
+// ── cartesian_product_view ([range.cartesian]) ────────────────────────────
+// First is walked once (input_range, never rewound); every Vs is rewound
+// repeatedly by the odometer (forward_range). The two are kept syntactically
+// separate everywhere below — a uniform fold across "First and all Vs"
+// would silently upgrade First's requirement past input_range.
+
+template <typename First, typename... Vs>
+    requires input_range<First> && (forward_range<Vs> && ...) && view<First> &&
+             (view<Vs> && ...)
+class cartesian_product_view : public view_interface<cartesian_product_view<First, Vs...>> {
+    tuple<First, Vs...> __bases;
+
+    template <bool Const>
+    static constexpr bool IsForward =
+        forward_range<__views_detail::MaybeConst<Const, First>> &&
+        (forward_range<__views_detail::MaybeConst<Const, Vs>> && ...);
+
+    template <bool Const>
+    static constexpr bool IsBidirectional =
+        bidirectional_range<__views_detail::MaybeConst<Const, First>> &&
+        (... && (bidirectional_range<__views_detail::MaybeConst<Const, Vs>> &&
+                 __views_detail::CartesianCommonArg<__views_detail::MaybeConst<Const, Vs>>));
+
+    template <bool Const>
+    static constexpr bool IsRandomAccess =
+        random_access_range<__views_detail::MaybeConst<Const, First>> &&
+        (... && (random_access_range<__views_detail::MaybeConst<Const, Vs>> &&
+                 sized_range<__views_detail::MaybeConst<Const, Vs>>));
+
+    template <bool Const>
+    static constexpr bool IsSizedSentinel =
+        sized_sentinel_for<iterator_t<__views_detail::MaybeConst<Const, First>>,
+                           iterator_t<__views_detail::MaybeConst<Const, First>>> &&
+        (... && (sized_range<__views_detail::MaybeConst<Const, Vs>> &&
+                 sized_sentinel_for<iterator_t<__views_detail::MaybeConst<Const, Vs>>,
+                                    iterator_t<__views_detail::MaybeConst<Const, Vs>>>));
+
+    template <bool Const>
+    struct Iterator {
+        using __First = __views_detail::MaybeConst<Const, First>;
+
+        __views_detail::MaybeConst<Const, cartesian_product_view> *__parent = nullptr;
+        tuple<iterator_t<__First>, iterator_t<__views_detail::MaybeConst<Const, Vs>>...> __current;
+
+        using iterator_concept =
+            conditional_t<IsRandomAccess<Const>, random_access_iterator_tag,
+                          conditional_t<IsBidirectional<Const>, bidirectional_iterator_tag,
+                                        conditional_t<IsForward<Const>, forward_iterator_tag,
+                                                      input_iterator_tag>>>;
+        // operator* always materializes a fresh tuple, never a stable
+        // reference, so the legacy category never rises above input.
+        using iterator_category = input_iterator_tag;
+        using value_type = tuple<range_value_t<__First>, range_value_t<__views_detail::MaybeConst<Const, Vs>>...>;
+        using reference =
+            tuple<range_reference_t<__First>, range_reference_t<__views_detail::MaybeConst<Const, Vs>>...>;
+        using pointer = void;
+        using difference_type = __views_detail::IotaDiffT<
+            common_type_t<range_difference_t<__First>, range_difference_t<__views_detail::MaybeConst<Const, Vs>>...>>;
+
+        Iterator() = default;
+        constexpr Iterator(Iterator<!Const> i)
+            requires Const && convertible_to<iterator_t<First>, iterator_t<__First>> &&
+                     (convertible_to<iterator_t<Vs>, iterator_t<__views_detail::MaybeConst<Const, Vs>>> && ...)
+            : __parent(i.__parent), __current(std::move(i.__current))
+        {
+        }
+
+        constexpr reference operator*() const
+        {
+            return __views_detail::TupleTransform(
+                [](auto &it) -> decltype(auto) { return *it; }, __current);
+        }
+        constexpr reference operator[](difference_type n) const
+            requires IsRandomAccess<Const>
+        {
+            Iterator tmp = *this;
+            tmp += n;
+            return *tmp;
+        }
+
+        constexpr Iterator &operator++()
+        {
+            Next();
+            return *this;
+        }
+        constexpr void operator++(int) { Next(); }
+        constexpr Iterator operator++(int)
+            requires IsForward<Const>
+        {
+            auto tmp = *this;
+            Next();
+            return tmp;
+        }
+        constexpr Iterator &operator--()
+            requires IsBidirectional<Const>
+        {
+            Prev();
+            return *this;
+        }
+        constexpr Iterator operator--(int)
+            requires IsBidirectional<Const>
+        {
+            auto tmp = *this;
+            Prev();
+            return tmp;
+        }
+
+        constexpr Iterator &operator+=(difference_type n)
+            requires IsRandomAccess<Const>
+        {
+            Seek(n);
+            return *this;
+        }
+        constexpr Iterator &operator-=(difference_type n)
+            requires IsRandomAccess<Const>
+        {
+            using U = make_unsigned_t<difference_type>;
+            Seek(static_cast<difference_type>(static_cast<U>(0) - static_cast<U>(n)));
+            return *this;
+        }
+
+        friend constexpr Iterator operator+(Iterator i, difference_type n)
+            requires IsRandomAccess<Const>
+        {
+            i += n;
+            return i;
+        }
+        friend constexpr Iterator operator+(difference_type n, Iterator i)
+            requires IsRandomAccess<Const>
+        {
+            i += n;
+            return i;
+        }
+        friend constexpr Iterator operator-(Iterator i, difference_type n)
+            requires IsRandomAccess<Const>
+        {
+            i -= n;
+            return i;
+        }
+        friend constexpr difference_type operator-(const Iterator &x, const Iterator &y)
+            requires IsSizedSentinel<Const>
+        {
+            return x.DistanceFrom(y);
+        }
+
+        friend constexpr bool operator==(const Iterator &x, const Iterator &y)
+            requires equality_comparable<iterator_t<__First>> &&
+                     (equality_comparable<iterator_t<__views_detail::MaybeConst<Const, Vs>>> && ...)
+        {
+            return x.__current == y.__current;
+        }
+        friend constexpr bool operator==(const Iterator &x, default_sentinel_t)
+        {
+            return [&]<size_t... Is>(index_sequence<Is...>) {
+                return (... || (get<Is>(x.__current) == ranges::end(get<Is>(x.__parent->__bases))));
+            }(make_index_sequence<sizeof...(Vs) + 1>{});
+        }
+
+        // [range.cartesian.iterator]/24: gated on all-random-access (every
+        // factor random_access_range) — NOT sized, NOT three_way_comparable.
+        // tuple's operator<=> synthesises via SynthThreeWay, so a totally_-
+        // ordered-but-not-three_way element iterator still works.
+        friend constexpr auto operator<=>(const Iterator &x, const Iterator &y)
+            requires(random_access_range<__First> &&
+                     (random_access_range<__views_detail::MaybeConst<Const, Vs>> && ...))
+        {
+            return x.__current <=> y.__current;
+        }
+
+        friend constexpr auto iter_move(const Iterator &i)
+        {
+            return __views_detail::TupleTransform(ranges::iter_move, i.__current);
+        }
+        friend constexpr void iter_swap(const Iterator &x, const Iterator &y)
+            requires indirectly_swappable<iterator_t<__First>> &&
+                     (indirectly_swappable<iterator_t<__views_detail::MaybeConst<Const, Vs>>> && ...)
+        {
+            [&]<size_t... Is>(index_sequence<Is...>) {
+                (ranges::iter_swap(get<Is>(x.__current), get<Is>(y.__current)), ...);
+            }(make_index_sequence<sizeof...(Vs) + 1>{});
+        }
+
+    private:
+        constexpr Iterator(__views_detail::MaybeConst<Const, cartesian_product_view> &parent,
+                           tuple<iterator_t<__First>, iterator_t<__views_detail::MaybeConst<Const, Vs>>...> current)
+            : __parent(__builtin_addressof(parent)), __current(std::move(current))
+        {
+        }
+
+        // The odometer. Tuple index 0 is First (outermost, never wraps);
+        // indices 1..sizeof...(Vs) are the Vs (innermost = highest index,
+        // wraps on every step). Next() carries from the innermost dim
+        // upward; the recursion bottoms out at N==0 with a plain ++, no
+        // wrap check — reaching First's own end is the only end state.
+        template <size_t N = sizeof...(Vs)>
+        constexpr void Next()
+        {
+            auto &it = get<N>(__current);
+            ++it;
+            if constexpr (N > 0) {
+                if (it == ranges::end(get<N>(__parent->__bases))) {
+                    it = ranges::begin(get<N>(__parent->__bases));
+                    Next<N - 1>();
+                }
+            }
+        }
+        template <size_t N = sizeof...(Vs)>
+        constexpr void Prev()
+        {
+            auto &it = get<N>(__current);
+            if constexpr (N > 0) {
+                if (it == ranges::begin(get<N>(__parent->__bases))) {
+                    it = __views_detail::CartesianCommonArgEnd(get<N>(__parent->__bases));
+                    Prev<N - 1>();
+                }
+            }
+            --it;
+        }
+
+        // O(1) random-access seek: decompose the linear offset `carry` into
+        // per-dim deltas via floor-division by each Vs's size, processing
+        // from the innermost dim backward; First absorbs whatever carry is
+        // left once every Vs digit has been reduced into [0, size).
+        template <size_t N = sizeof...(Vs)>
+        constexpr void Seek(difference_type carry)
+        {
+            if constexpr (N == 0) {
+                auto &it = get<0>(__current);
+                it += static_cast<iter_difference_t<remove_reference_t<decltype(it)>>>(carry);
+            } else if (carry != 0) {
+                // carry == 0 is a no-op (it + 0 == it), and MUST be short-
+                // circuited before the division: an empty Vs dim has size 0,
+                // so `total / dimSize` would be 0/0 — UB, and a #DE/SIGFPE on
+                // real x86_64. ranges::advance(it, 0) hits exactly this path.
+                auto &it       = get<N>(__current);
+                auto  dimBegin = ranges::begin(get<N>(__parent->__bases));
+                auto  dimSize  = static_cast<difference_type>(ranges::size(get<N>(__parent->__bases)));
+                auto  local    = static_cast<difference_type>(it - dimBegin);
+                auto  total    = local + carry;
+                auto  quotient  = total / dimSize;
+                auto  remainder = total % dimSize;
+                if (remainder < 0) {
+                    --quotient;
+                    remainder += dimSize;
+                }
+                it = dimBegin + static_cast<iter_difference_t<remove_reference_t<decltype(it)>>>(remainder);
+                Seek<N - 1>(quotient);
+            }
+        }
+
+        // Mixed-radix distance: weight(last Vs) = 1, weight(dim) =
+        // size(next dim) * weight(next dim), weight(First) = product of
+        // every Vs size. distance = sum over dims of (x[dim]-y[dim]) *
+        // weight(dim); First's own size never enters the formula.
+        template <size_t N = sizeof...(Vs)>
+        constexpr difference_type DistanceFrom(const Iterator &y, difference_type weight = 1) const
+        {
+            auto term = static_cast<difference_type>(get<N>(__current) - get<N>(y.__current)) * weight;
+            if constexpr (N == 0) {
+                return term;
+            } else {
+                auto nextWeight = weight * static_cast<difference_type>(ranges::size(get<N>(__parent->__bases)));
+                return term + DistanceFrom<N - 1>(y, nextWeight);
+            }
+        }
+
+        friend class cartesian_product_view;
+    };
+
+    // end()'s First-component is the real common-arg end UNLESS some other
+    // (non-First) dim is empty — then the whole product is empty, so the
+    // First-component must equal begin()'s (ranges::begin), matching
+    // [range.cartesian.view]'s end() exactly. First's own emptiness never
+    // needs checking: CartesianCommonArgEnd already collapses to begin()
+    // when First itself is empty, and probing First's emptiness separately
+    // would touch its (possibly single-pass) begin() an extra time.
+    constexpr tuple<iterator_t<First>, iterator_t<Vs>...> MakeEndTuple()
+    {
+        bool anyRestEmpty = [&]<size_t... Is>(index_sequence<Is...>) {
+            return (... || ranges::empty(get<Is + 1>(__bases)));
+        }(make_index_sequence<sizeof...(Vs)>{});
+        auto firstEnd = anyRestEmpty ? ranges::begin(get<0>(__bases))
+                                     : __views_detail::CartesianCommonArgEnd(get<0>(__bases));
+        return [&]<size_t... Is>(index_sequence<Is...>) {
+            return tuple<iterator_t<First>, iterator_t<Vs>...>(firstEnd,
+                                                               ranges::begin(get<Is + 1>(__bases))...);
+        }(make_index_sequence<sizeof...(Vs)>{});
+    }
+    constexpr tuple<iterator_t<const First>, iterator_t<const Vs>...> MakeEndTupleConst() const
+    {
+        bool anyRestEmpty = [&]<size_t... Is>(index_sequence<Is...>) {
+            return (... || ranges::empty(get<Is + 1>(__bases)));
+        }(make_index_sequence<sizeof...(Vs)>{});
+        auto firstEnd = anyRestEmpty ? ranges::begin(get<0>(__bases))
+                                     : __views_detail::CartesianCommonArgEnd(get<0>(__bases));
+        return [&]<size_t... Is>(index_sequence<Is...>) {
+            return tuple<iterator_t<const First>, iterator_t<const Vs>...>(
+                firstEnd, ranges::begin(get<Is + 1>(__bases))...);
+        }(make_index_sequence<sizeof...(Vs)>{});
+    }
+
+public:
+    cartesian_product_view()
+        requires default_initializable<First> && (default_initializable<Vs> && ...)
+    = default;
+    constexpr explicit cartesian_product_view(First first, Vs... rest)
+        : __bases(std::move(first), std::move(rest)...)
+    {
+    }
+
+    constexpr tuple<First, Vs...> base() const &
+        requires copy_constructible<First> && (copy_constructible<Vs> && ...)
+    {
+        return __bases;
+    }
+    constexpr tuple<First, Vs...> base() && { return std::move(__bases); }
+
+    constexpr Iterator<false> begin()
+    {
+        return Iterator<false>(*this, __views_detail::TupleTransform(
+                                          [](auto &r) { return ranges::begin(r); }, __bases));
+    }
+    constexpr Iterator<true> begin() const
+        requires range<const First> && (range<const Vs> && ...)
+    {
+        return Iterator<true>(*this, __views_detail::TupleTransform(
+                                         [](auto &r) { return ranges::begin(r); }, __bases));
+    }
+
+    constexpr auto end()
+    {
+        if constexpr (__views_detail::CartesianCommonArg<First>)
+            return Iterator<false>(*this, MakeEndTuple());
+        else
+            return default_sentinel;
+    }
+    constexpr auto end() const
+        requires range<const First> && (range<const Vs> && ...)
+    {
+        if constexpr (__views_detail::CartesianCommonArg<const First>)
+            return Iterator<true>(*this, MakeEndTupleConst());
+        else
+            return default_sentinel;
+    }
+
+    constexpr auto size()
+        requires sized_range<First> && (sized_range<Vs> && ...)
+    {
+        return apply(
+            [](auto... sizes) {
+                using CT = make_unsigned_t<common_type_t<decltype(sizes)...>>;
+                CT product = 1;
+                ((product *= static_cast<CT>(sizes)), ...);
+                return product;
+            },
+            __views_detail::TupleTransform([](auto &r) { return ranges::size(r); }, __bases));
+    }
+    constexpr auto size() const
+        requires sized_range<const First> && (sized_range<const Vs> && ...)
+    {
+        return apply(
+            [](auto... sizes) {
+                using CT = make_unsigned_t<common_type_t<decltype(sizes)...>>;
+                CT product = 1;
+                ((product *= static_cast<CT>(sizes)), ...);
+                return product;
+            },
+            __views_detail::TupleTransform([](auto &r) { return ranges::size(r); }, __bases));
+    }
+};
+
+namespace views {
+
+struct CartesianProduct {
+    constexpr auto operator()() const { return views::single(tuple<>()); }
+    template <viewable_range... Rs>
+        requires(sizeof...(Rs) >= 1)
+    constexpr auto operator()(Rs &&...rs) const
+    {
+        return cartesian_product_view<all_t<Rs>...>(all(std::forward<Rs>(rs))...);
+    }
+};
+inline constexpr CartesianProduct cartesian_product{};
+
+} // namespace views
+
+} // namespace ranges
+
+namespace views = ranges::views;
+
+} // namespace std
+
+#endif // BOXCXX_BITS_RANGES_CARTESIAN
