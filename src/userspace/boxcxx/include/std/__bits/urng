@@ -1,0 +1,30 @@
+// boxcxx — <__bits/urng>
+// The uniform_random_bit_generator concept ([rand.req.urng]). Its standard home
+// is <random>, but ranges::sample / ranges::shuffle (in <algorithm> via
+// <__bits/ranges_algo_mut>) also constrain on it, and pulling the full <random>
+// — engines + the 1200-line distribution set — into <algorithm> would be an
+// unwanted coupling. So the concept lives in this tiny shared header, included
+// both by <__bits/random_engine> (so <random> exposes it) and by the ranges
+// modifying-algorithm file. Needs only <concepts>.
+#ifndef BOXCXX_BITS_URNG
+#define BOXCXX_BITS_URNG
+
+#include <concepts>
+
+namespace std {
+
+// [rand.req.urng]: a uniform random bit generator g is an invocable whose
+// operator() yields an unsigned integer, with static min()/max() bounding a
+// non-empty range that every result lies within.
+template <class G>
+concept uniform_random_bit_generator =
+    invocable<G &> && unsigned_integral<invoke_result_t<G &>> &&
+    requires {
+        { G::min() } -> same_as<invoke_result_t<G &>>;
+        { G::max() } -> same_as<invoke_result_t<G &>>;
+        requires bool_constant<(G::min() < G::max())>::value;
+    };
+
+} // namespace std
+
+#endif // BOXCXX_BITS_URNG

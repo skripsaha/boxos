@@ -13832,6 +13832,293 @@ void Phase88()
            "min/max/binary-search/lex + range.iter.op\n");
 }
 
+// Phase89 fixtures (Ф29b-2): a forward-only and an input-only iterator so the
+// forward `shift_right` leapfrog and the reservoir `sample` branches — the ones
+// std::list/std::vector never reach — get real runtime coverage.
+struct P89Fwd {
+    int                    *p = nullptr;
+    using value_type        = int;
+    using difference_type   = std::ptrdiff_t;
+    using iterator_category = std::forward_iterator_tag;
+    using iterator_concept  = std::forward_iterator_tag;
+    using reference         = int &;
+    using pointer           = int *;
+    P89Fwd()                = default;
+    explicit P89Fwd(int *q) : p(q) {}
+    int    &operator*() const { return *p; }
+    P89Fwd &operator++() { ++p; return *this; }
+    P89Fwd  operator++(int) { auto t = *this; ++p; return t; }
+    bool    operator==(const P89Fwd &) const = default;
+};
+struct P89In {
+    int                    *p = nullptr;
+    using value_type        = int;
+    using difference_type   = std::ptrdiff_t;
+    using iterator_category = std::input_iterator_tag;
+    using iterator_concept  = std::input_iterator_tag;
+    using reference         = int &;
+    using pointer           = int *;
+    P89In()                 = default;
+    explicit P89In(int *q) : p(q) {}
+    int   &operator*() const { return *p; }
+    P89In &operator++() { ++p; return *this; }
+    void   operator++(int) { ++p; }
+    bool   operator==(const P89In &) const = default;
+};
+
+void Phase89()
+{
+    namespace rg = std::ranges;
+    auto veq     = [](const std::vector<int> &a, std::initializer_list<int> b) {
+        return a.size() == b.size() &&
+               std::equal(a.begin(), a.end(), b.begin());
+    };
+
+    // ── copy / move / swap_ranges ────────────────────────────────────────
+    std::vector<int> v{5, 3, 8, 1, 9, 2, 7};
+    std::vector<int> w(v.size(), 0);
+    auto             cr = rg::copy(v, w.begin());
+    Check(cr.in == v.end() && cr.out == w.end() && veq(w, {5, 3, 8, 1, 9, 2, 7}),
+          "phase89 copy result + values");
+    std::vector<int> ci;
+    rg::copy_if(v, std::back_inserter(ci), [](int x) { return x > 4; });
+    Check(veq(ci, {5, 8, 9, 7}), "phase89 copy_if");
+    std::vector<int> cb(5, 0), cbsrc{1, 2, 3, 4, 5};
+    auto             cbr = rg::copy_backward(cbsrc, cb.end());
+    Check(cbr.out == cb.begin() && veq(cb, {1, 2, 3, 4, 5}),
+          "phase89 copy_backward");
+    std::vector<int> mv{1, 2, 3}, md(3, 0);
+    rg::move(mv, md.begin());
+    Check(veq(md, {1, 2, 3}), "phase89 move");
+    std::vector<int> sa{1, 2, 3}, sb{4, 5, 6};
+    rg::swap_ranges(sa, sb);
+    Check(veq(sa, {4, 5, 6}) && veq(sb, {1, 2, 3}), "phase89 swap_ranges");
+
+    // ── transform (unary + binary) ───────────────────────────────────────
+    std::vector<int> t1{1, 2, 3}, to(3, 0);
+    rg::transform(t1, to.begin(), [](int x) { return x * x; });
+    Check(veq(to, {1, 4, 9}), "phase89 transform unary");
+    std::vector<int> ta{1, 2, 3}, tb{10, 20, 30}, tc(3, 0);
+    rg::transform(ta, tb, tc.begin(), [](int a, int b) { return a + b; });
+    Check(veq(tc, {11, 22, 33}), "phase89 transform binary");
+
+    // ── replace / fill / generate ────────────────────────────────────────
+    std::vector<int> rp{1, 2, 1, 3, 1};
+    rg::replace(rp, 1, 9);
+    Check(veq(rp, {9, 2, 9, 3, 9}), "phase89 replace");
+    std::vector<int> rpi{1, 2, 3, 4};
+    rg::replace_if(rpi, [](int x) { return x % 2 == 0; }, 0);
+    Check(veq(rpi, {1, 0, 3, 0}), "phase89 replace_if");
+    std::vector<int> rc(4, -1), rcs{1, 2, 1, 3};
+    rg::replace_copy(rcs, rc.begin(), 1, 7);
+    Check(veq(rc, {7, 2, 7, 3}), "phase89 replace_copy");
+    std::vector<int> fl(4, 0);
+    rg::fill(fl, 5);
+    Check(veq(fl, {5, 5, 5, 5}), "phase89 fill");
+    std::vector<int> gn(3, 0);
+    int              seq = 0;
+    rg::generate(gn, [&seq] { return ++seq; });
+    Check(veq(gn, {1, 2, 3}), "phase89 generate");
+
+    // ── remove / unique (in-place → subrange) ────────────────────────────
+    std::vector<int> rm{1, 2, 3, 2, 4, 2, 5};
+    auto             rmr = rg::remove(rm, 2);
+    Check(rmr.begin() == rm.begin() + 4 && rmr.end() == rm.end(),
+          "phase89 remove subrange");
+    Check(rm[0] == 1 && rm[1] == 3 && rm[2] == 4 && rm[3] == 5,
+          "phase89 remove compaction");
+    std::vector<int> rif{1, 2, 3, 4, 5, 6};
+    auto ri = rg::remove_if(rif, [](int x) { return x % 2 == 0; });
+    Check(ri.begin() == rif.begin() + 3 && rif[0] == 1 && rif[1] == 3 &&
+              rif[2] == 5,
+          "phase89 remove_if");
+    std::vector<int> rco;
+    rg::remove_copy(std::vector<int>{1, 2, 2, 3, 2}, std::back_inserter(rco), 2);
+    Check(veq(rco, {1, 3}), "phase89 remove_copy");
+    std::vector<int> uq{1, 1, 2, 3, 3, 3, 4};
+    auto             uqr = rg::unique(uq);
+    Check(uqr.begin() == uq.begin() + 4 && uq[0] == 1 && uq[1] == 2 &&
+              uq[2] == 3 && uq[3] == 4,
+          "phase89 unique");
+    std::vector<int> uco;
+    rg::unique_copy(std::vector<int>{1, 1, 2, 2, 2, 3},
+                    std::back_inserter(uco));
+    Check(veq(uco, {1, 2, 3}), "phase89 unique_copy");
+
+    // ── reverse / rotate / rotate_copy ───────────────────────────────────
+    std::vector<int> rv{1, 2, 3, 4, 5};
+    rg::reverse(rv);
+    Check(veq(rv, {5, 4, 3, 2, 1}), "phase89 reverse");
+    std::vector<int> ro{1, 2, 3, 4, 5};
+    auto             ror = rg::rotate(ro, ro.begin() + 2);
+    Check(ror.begin() == ro.begin() + 3 && veq(ro, {3, 4, 5, 1, 2}),
+          "phase89 rotate");
+    std::vector<int> rcsrc{1, 2, 3, 4, 5}, rcdst(5, 0);
+    rg::rotate_copy(rcsrc, rcsrc.begin() + 2, rcdst.begin());
+    Check(veq(rcdst, {3, 4, 5, 1, 2}), "phase89 rotate_copy");
+
+    // ── shift_left / shift_right (bidirectional + FORWARD leapfrog) ───────
+    std::vector<int> sl{1, 2, 3, 4, 5};
+    auto             slr = rg::shift_left(sl, 2);
+    Check(slr.begin() == sl.begin() && slr.end() == sl.begin() + 3 &&
+              sl[0] == 3 && sl[1] == 4 && sl[2] == 5,
+          "phase89 shift_left");
+    std::vector<int> sr2{1, 2, 3, 4, 5};
+    auto             sr2r = rg::shift_right(sr2, 2);
+    Check(sr2r.begin() == sr2.begin() + 2 && sr2r.end() == sr2.end() &&
+              sr2[2] == 1 && sr2[3] == 2 && sr2[4] == 3,
+          "phase89 shift_right bidirectional");
+    int  fb[7] = {1, 2, 3, 4, 5, 6, 7};
+    auto fsr   = rg::shift_right(P89Fwd{fb}, P89Fwd{fb + 7}, 3);
+    Check(fsr.begin() == P89Fwd{fb + 3} && fb[3] == 1 && fb[4] == 2 &&
+              fb[5] == 3 && fb[6] == 4,
+          "phase89 shift_right forward leapfrog");
+
+    // ── sample / shuffle (RNG invariants) ────────────────────────────────
+    std::mt19937     g(20260721u);
+    std::vector<int> pool{1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
+    std::vector<int> smp(4, -1);
+    auto             se = rg::sample(pool, smp.begin(), 4, g);
+    Check(se == smp.begin() + 4, "phase89 sample forward returns out+n");
+    Check(rg::is_sorted(rg::subrange(smp.begin(), se)),
+          "phase89 sample forward preserves order");
+    int              ib[10] = {10, 20, 30, 40, 50, 60, 70, 80, 90, 100};
+    std::vector<int> rsm(4, -1);
+    auto rse  = rg::sample(P89In{ib}, P89In{ib + 10}, rsm.begin(), 4, g);
+    bool allin = rse == rsm.begin() + 4;
+    for (auto it = rsm.begin(); it != rse; ++it) {
+        bool found = false;
+        for (int x : ib)
+            if (*it == x) found = true;
+        allin = allin && found;
+    }
+    Check(allin, "phase89 sample reservoir subset + count");
+    std::vector<int> shf{1, 2, 3, 4, 5, 6, 7, 8};
+    std::vector<int> ref = shf;
+    rg::shuffle(shf, g);
+    std::sort(shf.begin(), shf.end());
+    Check(shf == ref, "phase89 shuffle is a permutation");
+
+    // ── partition family ─────────────────────────────────────────────────
+    std::vector<int> pt{1, 2, 3, 4, 5, 6};
+    auto             ptr = rg::partition(pt, [](int x) { return x % 2 == 0; });
+    Check(rg::all_of(rg::subrange(pt.begin(), ptr.begin()),
+                     [](int x) { return x % 2 == 0; }) &&
+              rg::all_of(rg::subrange(ptr.begin(), pt.end()),
+                         [](int x) { return x % 2 == 1; }),
+          "phase89 partition");
+    Check(rg::is_partitioned(pt, [](int x) { return x % 2 == 0; }),
+          "phase89 is_partitioned");
+    std::vector<int> sp{1, 2, 3, 4, 5, 6};
+    auto spr = rg::stable_partition(sp, [](int x) { return x % 2 == 0; });
+    Check(spr.begin() == sp.begin() + 3 && veq(sp, {2, 4, 6, 1, 3, 5}),
+          "phase89 stable_partition keeps order");
+    std::vector<int> pp{0, 0, 0, 1, 1, 1};
+    Check(rg::partition_point(pp, [](int x) { return x == 0; }) ==
+              pp.begin() + 3,
+          "phase89 partition_point");
+    std::vector<int> pcT, pcF;
+    rg::partition_copy(std::vector<int>{1, 2, 3, 4, 5},
+                       std::back_inserter(pcT), std::back_inserter(pcF),
+                       [](int x) { return x % 2 == 0; });
+    Check(veq(pcT, {2, 4}) && veq(pcF, {1, 3, 5}), "phase89 partition_copy");
+
+    // ── sort family (comparators + projections) ──────────────────────────
+    std::vector<int> so{5, 3, 8, 1, 9, 2, 7};
+    rg::sort(so);
+    Check(veq(so, {1, 2, 3, 5, 7, 8, 9}), "phase89 sort");
+    std::vector<int> sg{5, 3, 8, 1};
+    rg::sort(sg, rg::greater{});
+    Check(veq(sg, {8, 5, 3, 1}), "phase89 sort greater");
+    std::vector<Point> pj{{3, 1}, {1, 2}, {2, 3}};
+    rg::sort(pj, {}, &Point::x);
+    Check(pj[0].x == 1 && pj[1].x == 2 && pj[2].x == 3,
+          "phase89 sort by projection");
+    std::vector<int> ss{5, 3, 8, 1, 9};
+    rg::stable_sort(ss);
+    Check(veq(ss, {1, 3, 5, 8, 9}), "phase89 stable_sort");
+    std::vector<int> psq{5, 3, 8, 1, 9, 2, 7};
+    rg::partial_sort(psq, psq.begin() + 3);
+    Check(psq[0] == 1 && psq[1] == 2 && psq[2] == 3, "phase89 partial_sort");
+    std::vector<int> psc(3, 0);
+    rg::partial_sort_copy(std::vector<int>{5, 3, 8, 1, 9, 2, 7}, psc);
+    Check(veq(psc, {1, 2, 3}), "phase89 partial_sort_copy");
+    std::vector<int> ne{5, 3, 8, 1, 9, 2, 7};
+    rg::nth_element(ne, ne.begin() + 3);
+    Check(ne[3] == 5 &&
+              rg::all_of(rg::subrange(ne.begin(), ne.begin() + 3),
+                         [&](int x) { return x <= 5; }),
+          "phase89 nth_element");
+
+    // ── heap family ──────────────────────────────────────────────────────
+    std::vector<int> hp{3, 1, 4, 1, 5, 9, 2, 6};
+    rg::make_heap(hp);
+    Check(rg::is_heap(hp) && hp.front() == 9, "phase89 make_heap/is_heap");
+    hp.push_back(10);
+    rg::push_heap(hp);
+    Check(rg::is_heap(hp) && hp.front() == 10, "phase89 push_heap");
+    rg::pop_heap(hp);
+    Check(hp.back() == 10, "phase89 pop_heap moves max to back");
+    std::vector<int> sh{3, 1, 4, 1, 5};
+    rg::make_heap(sh);
+    rg::sort_heap(sh);
+    Check(veq(sh, {1, 1, 3, 4, 5}), "phase89 sort_heap");
+    std::vector<int> hu{9, 5, 4, 1, 8}; // heap breaks at index 4 (8 > parent 5)
+    Check(rg::is_heap_until(hu) == hu.begin() + 4, "phase89 is_heap_until");
+
+    // ── permutation generators ───────────────────────────────────────────
+    std::vector<int> pm{1, 2, 3};
+    auto             pmr = rg::next_permutation(pm);
+    Check(pmr.found && pmr.in == pm.end() && veq(pm, {1, 3, 2}),
+          "phase89 next_permutation");
+    std::vector<int> pmd{1, 2, 3};
+    auto             pmp = rg::prev_permutation(pmd);
+    Check(!pmp.found && veq(pmd, {3, 2, 1}),
+          "phase89 prev_permutation wraps");
+
+    // ── merge + set operations (in_in_out / in_out returns) ───────────────
+    std::vector<int> ma{1, 3, 5, 7}, mb{2, 3, 6, 8}, mo(8, 0);
+    auto             mr = rg::merge(ma, mb, mo.begin());
+    Check(mr.in1 == ma.end() && mr.in2 == mb.end() && mr.out == mo.end() &&
+              veq(mo, {1, 2, 3, 3, 5, 6, 7, 8}),
+          "phase89 merge result + values");
+    std::vector<int> im{1, 4, 6, 2, 3, 5};
+    rg::inplace_merge(im, im.begin() + 3);
+    Check(veq(im, {1, 2, 3, 4, 5, 6}), "phase89 inplace_merge");
+    std::vector<int> A{1, 2, 3, 4, 5}, B{3, 4, 5, 6, 7};
+    Check(rg::includes(A, std::vector<int>{2, 4}) &&
+              !rg::includes(A, std::vector<int>{2, 6}),
+          "phase89 includes");
+    std::vector<int> uo(10, 0);
+    auto uor = rg::set_union(A, B, uo.begin());
+    Check(uor.out == uo.begin() + 7 &&
+              std::equal(uo.begin(), uor.out,
+                         std::initializer_list<int>{1, 2, 3, 4, 5, 6, 7}.begin()),
+          "phase89 set_union");
+    std::vector<int> io(10, 0);
+    auto ior = rg::set_intersection(A, B, io.begin());
+    Check(ior.in1 == A.end() && ior.in2 == B.end() &&
+              ior.out == io.begin() + 3 &&
+              std::equal(io.begin(), ior.out,
+                         std::initializer_list<int>{3, 4, 5}.begin()),
+          "phase89 set_intersection (both ins at end)");
+    std::vector<int> dof(10, 0);
+    auto dor = rg::set_difference(A, B, dof.begin());
+    Check(dor.in == A.end() && dor.out == dof.begin() + 2 &&
+              std::equal(dof.begin(), dor.out,
+                         std::initializer_list<int>{1, 2}.begin()),
+          "phase89 set_difference");
+    std::vector<int> syo(10, 0);
+    auto syr = rg::set_symmetric_difference(A, B, syo.begin());
+    Check(syr.out == syo.begin() + 4 &&
+              std::equal(syo.begin(), syr.out,
+                         std::initializer_list<int>{1, 2, 6, 7}.begin()),
+          "phase89 set_symmetric_difference");
+
+    printf("[CXX] PASS phase89: ranges modifying/partition/sort/heap/set/"
+           "permutation + sample/shuffle\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -13942,6 +14229,7 @@ int main()
     Phase86();
     Phase87();
     Phase88();
+    Phase89();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

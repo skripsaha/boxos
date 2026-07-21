@@ -8,9 +8,9 @@
 //                  rotate-merge, O(n·log²n) but still stable.
 //   nth_element  — depth-limited quickselect, heap-partial_sort fallback.
 //
-// Deferred (epic leftovers): ranges:: constrained algorithm overloads,
-// sample/shuffle (need <random>, Ф11), stable_partition,
-// is_permutation/next_permutation.
+// The classic std:: algorithms live in this file; the ranges:: constrained
+// overloads (with projections, sentinels and dangling-safe result types) are
+// appended from the <__bits/ranges_algo*> files at the very end.
 #ifndef BOXCXX_ALGORITHM
 #define BOXCXX_ALGORITHM
 
@@ -1486,9 +1486,14 @@ constexpr bool prev_permutation(It first, It last)
 } // namespace std
 
 // The ranges:: constrained algorithms ([algorithms.results] + the niebloids)
-// build on everything above plus the Ф29a indirect-callable foundation.
-// ranges_algo_fold is second — it consumes result-types from ranges_algo.
-#include <__bits/ranges_algo>
-#include <__bits/ranges_algo_fold>
+// build on everything above plus the Ф29a indirect-callable foundation. Order
+// matters: ranges_algo defines the result-type aggregates; _fold and _mut
+// consume them; _sort/_set reuse ranges::copy/move and __algo::SortComp from
+// _mut/_sort and delegate the heavy reordering to the classic engines above.
+#include <__bits/ranges_algo>       // result-types + [alg.nonmodifying]  (Ф29b-1)
+#include <__bits/ranges_algo_fold>  // fold + min/max + binary-search + lex (Ф29b-1)
+#include <__bits/ranges_algo_mut>   // [alg.modifying] + sample/shuffle    (Ф29b-2)
+#include <__bits/ranges_algo_sort>  // partition/sort/heap/permutation     (Ф29b-2)
+#include <__bits/ranges_algo_set>   // merge + set operations              (Ф29b-2)
 
 #endif // BOXCXX_ALGORITHM

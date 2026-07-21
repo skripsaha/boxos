@@ -1,0 +1,527 @@
+// boxcxx — <__bits/ranges_algo_sort>
+// Ф29b-2, second file: the ranges:: constrained PARTITIONING ([alg.partitions]),
+// SORTING ([alg.sort]), HEAP ([alg.heap.operations]) and PERMUTATION-generator
+// ([alg.permutation.generators]) niebloids. Pulled in by <algorithm> after
+// <__bits/ranges_algo_mut>.
+//
+// The heavy reordering engines already live, tested, in <algorithm> (introsort
+// `sort`, merge-based `stable_sort`, quickselect `nth_element`, the heap
+// primitives, `stable_partition`, the permutation generators). Rather than
+// duplicate several hundred lines of tricky code, those niebloids materialise
+// the sentinel into an iterator (`ranges::next`, O(1) for the sized ranges these
+// require) and delegate to the classic algorithm through a projection-composed
+// comparator/predicate. The classic calls are spelled `std::sort`, `std::…`
+// (i.e. ::std::), never unqualified — an unqualified `sort` here would re-enter
+// this very niebloid. partition_point / is_partitioned / partition_copy /
+// partial_sort_copy carry no matching classic return shape and are direct.
+#ifndef BOXCXX_BITS_RANGES_ALGO_SORT
+#define BOXCXX_BITS_RANGES_ALGO_SORT
+
+#include <functional>
+#include <ranges>
+#include <utility>
+
+namespace std {
+namespace ranges {
+
+// ── result-type aliases ([algorithms.results]) ───────────────────────────
+template <class I, class O1, class O2>
+using partition_copy_result = in_out_out_result<I, O1, O2>;
+template <class I, class O> using partial_sort_copy_result = in_out_result<I, O>;
+template <class I> using next_permutation_result = in_found_result<I>;
+template <class I> using prev_permutation_result = in_found_result<I>;
+
+// ════════════════════════════════════════════════════════════════════════
+// partitioning ([alg.partitions])
+// ════════════════════════════════════════════════════════════════════════
+
+struct IsPartitioned {
+    template <input_iterator I, sentinel_for<I> S, class Proj = identity,
+              indirect_unary_predicate<projected<I, Proj>> Pred>
+    constexpr bool operator()(I first, S last, Pred pred, Proj proj = {}) const
+    {
+        for (; first != last; ++first)
+            if (!std::invoke(pred, std::invoke(proj, *first))) break;
+        for (; first != last; ++first)
+            if (std::invoke(pred, std::invoke(proj, *first))) return false;
+        return true;
+    }
+    template <input_range R, class Proj = identity,
+              indirect_unary_predicate<projected<iterator_t<R>, Proj>> Pred>
+    constexpr bool operator()(R &&r, Pred pred, Proj proj = {}) const
+    {
+        return (*this)(ranges::begin(r), ranges::end(r), std::move(pred),
+                       std::move(proj));
+    }
+};
+inline constexpr IsPartitioned is_partitioned{};
+
+struct Partition {
+    template <permutable I, sentinel_for<I> S, class Proj = identity,
+              indirect_unary_predicate<projected<I, Proj>> Pred>
+    constexpr subrange<I> operator()(I first, S last, Pred pred,
+                                     Proj proj = {}) const
+    {
+        I last_it = ranges::next(first, last);
+        auto p    = [&](auto &&x) -> bool {
+            return std::invoke(pred, std::invoke(proj, static_cast<decltype(x)>(x)));
+        };
+        I pp = std::partition(std::move(first), last_it, p);
+        return {std::move(pp), std::move(last_it)};
+    }
+    template <forward_range R, class Proj = identity,
+              indirect_unary_predicate<projected<iterator_t<R>, Proj>> Pred>
+        requires permutable<iterator_t<R>>
+    constexpr borrowed_subrange_t<R> operator()(R &&r, Pred pred,
+                                                Proj proj = {}) const
+    {
+        return (*this)(ranges::begin(r), ranges::end(r), std::move(pred),
+                       std::move(proj));
+    }
+};
+inline constexpr Partition partition{};
+
+struct StablePartition {
+    template <bidirectional_iterator I, sentinel_for<I> S, class Proj = identity,
+              indirect_unary_predicate<projected<I, Proj>> Pred>
+        requires permutable<I>
+    // Not constexpr: C++23 ranges::stable_partition is not constexpr (P2562 is
+    // C++26) and it delegates to std::stable_partition, whose stability buffer
+    // uses non-constexpr operator new.
+    subrange<I> operator()(I first, S last, Pred pred, Proj proj = {}) const
+    {
+        I last_it = ranges::next(first, last);
+        auto p    = [&](auto &&x) -> bool {
+            return std::invoke(pred, std::invoke(proj, static_cast<decltype(x)>(x)));
+        };
+        I pp = std::stable_partition(std::move(first), last_it, p);
+        return {std::move(pp), std::move(last_it)};
+    }
+    template <bidirectional_range R, class Proj = identity,
+              indirect_unary_predicate<projected<iterator_t<R>, Proj>> Pred>
+        requires permutable<iterator_t<R>>
+    borrowed_subrange_t<R> operator()(R &&r, Pred pred, Proj proj = {}) const
+    {
+        return (*this)(ranges::begin(r), ranges::end(r), std::move(pred),
+                       std::move(proj));
+    }
+};
+inline constexpr StablePartition stable_partition{};
+
+struct PartitionPoint {
+    template <forward_iterator I, sentinel_for<I> S, class Proj = identity,
+              indirect_unary_predicate<projected<I, Proj>> Pred>
+    constexpr I operator()(I first, S last, Pred pred, Proj proj = {}) const
+    {
+        auto len = ranges::distance(first, last);
+        while (len > 0) {
+            auto half = len / 2;
+            I mid     = ranges::next(first, half);
+            if (std::invoke(pred, std::invoke(proj, *mid))) {
+                first = std::move(mid);
+                ++first;
+                len -= half + 1;
+            } else
+                len = half;
+        }
+        return first;
+    }
+    template <forward_range R, class Proj = identity,
+              indirect_unary_predicate<projected<iterator_t<R>, Proj>> Pred>
+    constexpr borrowed_iterator_t<R> operator()(R &&r, Pred pred,
+                                                Proj proj = {}) const
+    {
+        return (*this)(ranges::begin(r), ranges::end(r), std::move(pred),
+                       std::move(proj));
+    }
+};
+inline constexpr PartitionPoint partition_point{};
+
+struct PartitionCopy {
+    template <input_iterator I, sentinel_for<I> S, weakly_incrementable O1,
+              weakly_incrementable O2, class Proj = identity,
+              indirect_unary_predicate<projected<I, Proj>> Pred>
+        requires indirectly_copyable<I, O1> && indirectly_copyable<I, O2>
+    constexpr partition_copy_result<I, O1, O2>
+    operator()(I first, S last, O1 out_true, O2 out_false, Pred pred,
+               Proj proj = {}) const
+    {
+        for (; first != last; ++first) {
+            if (std::invoke(pred, std::invoke(proj, *first))) {
+                *out_true = *first;
+                ++out_true;
+            } else {
+                *out_false = *first;
+                ++out_false;
+            }
+        }
+        return {std::move(first), std::move(out_true), std::move(out_false)};
+    }
+    template <input_range R, weakly_incrementable O1, weakly_incrementable O2,
+              class Proj = identity,
+              indirect_unary_predicate<projected<iterator_t<R>, Proj>> Pred>
+        requires indirectly_copyable<iterator_t<R>, O1> &&
+                 indirectly_copyable<iterator_t<R>, O2>
+    constexpr partition_copy_result<borrowed_iterator_t<R>, O1, O2>
+    operator()(R &&r, O1 out_true, O2 out_false, Pred pred,
+               Proj proj = {}) const
+    {
+        return (*this)(ranges::begin(r), ranges::end(r), std::move(out_true),
+                       std::move(out_false), std::move(pred), std::move(proj));
+    }
+};
+inline constexpr PartitionCopy partition_copy{};
+
+// ════════════════════════════════════════════════════════════════════════
+// sorting ([alg.sort]) — delegate to the classic engines
+// ════════════════════════════════════════════════════════════════════════
+
+namespace __algo {
+// The composed comparator: `comp` after applying `proj` to each side. Captured
+// by reference; alive for the whole delegated call.
+template <class Comp, class Proj>
+constexpr auto SortComp(Comp &comp, Proj &proj)
+{
+    return [&comp, &proj](auto &&a, auto &&b) -> bool {
+        return std::invoke(comp, std::invoke(proj, static_cast<decltype(a)>(a)),
+                           std::invoke(proj, static_cast<decltype(b)>(b)));
+    };
+}
+} // namespace __algo
+
+struct Sort {
+    template <random_access_iterator I, sentinel_for<I> S,
+              class Comp = ranges::less, class Proj = identity>
+        requires sortable<I, Comp, Proj>
+    constexpr I operator()(I first, S last, Comp comp = {}, Proj proj = {}) const
+    {
+        I last_it = ranges::next(first, last);
+        std::sort(std::move(first), last_it, __algo::SortComp(comp, proj));
+        return last_it;
+    }
+    template <random_access_range R, class Comp = ranges::less,
+              class Proj = identity>
+        requires sortable<iterator_t<R>, Comp, Proj>
+    constexpr borrowed_iterator_t<R> operator()(R &&r, Comp comp = {},
+                                                Proj proj = {}) const
+    {
+        return (*this)(ranges::begin(r), ranges::end(r), std::move(comp),
+                       std::move(proj));
+    }
+};
+inline constexpr Sort sort{};
+
+struct StableSort {
+    template <random_access_iterator I, sentinel_for<I> S,
+              class Comp = ranges::less, class Proj = identity>
+        requires sortable<I, Comp, Proj>
+    // Not constexpr: C++23 does not make ranges::stable_sort constexpr (P2562
+    // is C++26), and it delegates to the non-constexpr classic std::stable_sort
+    // (its temp-buffer allocation is not constant-evaluable).
+    I operator()(I first, S last, Comp comp = {}, Proj proj = {}) const
+    {
+        I last_it = ranges::next(first, last);
+        std::stable_sort(std::move(first), last_it, __algo::SortComp(comp, proj));
+        return last_it;
+    }
+    template <random_access_range R, class Comp = ranges::less,
+              class Proj = identity>
+        requires sortable<iterator_t<R>, Comp, Proj>
+    borrowed_iterator_t<R> operator()(R &&r, Comp comp = {},
+                                      Proj proj = {}) const
+    {
+        return (*this)(ranges::begin(r), ranges::end(r), std::move(comp),
+                       std::move(proj));
+    }
+};
+inline constexpr StableSort stable_sort{};
+
+struct PartialSort {
+    template <random_access_iterator I, sentinel_for<I> S,
+              class Comp = ranges::less, class Proj = identity>
+        requires sortable<I, Comp, Proj>
+    constexpr I operator()(I first, I middle, S last, Comp comp = {},
+                           Proj proj = {}) const
+    {
+        I last_it = ranges::next(first, last);
+        std::partial_sort(std::move(first), std::move(middle), last_it,
+                          __algo::SortComp(comp, proj));
+        return last_it;
+    }
+    template <random_access_range R, class Comp = ranges::less,
+              class Proj = identity>
+        requires sortable<iterator_t<R>, Comp, Proj>
+    constexpr borrowed_iterator_t<R> operator()(R &&r, iterator_t<R> middle,
+                                                Comp comp = {},
+                                                Proj proj = {}) const
+    {
+        return (*this)(ranges::begin(r), std::move(middle), ranges::end(r),
+                       std::move(comp), std::move(proj));
+    }
+};
+inline constexpr PartialSort partial_sort{};
+
+struct NthElement {
+    template <random_access_iterator I, sentinel_for<I> S,
+              class Comp = ranges::less, class Proj = identity>
+        requires sortable<I, Comp, Proj>
+    constexpr I operator()(I first, I nth, S last, Comp comp = {},
+                           Proj proj = {}) const
+    {
+        I last_it = ranges::next(first, last);
+        std::nth_element(std::move(first), std::move(nth), last_it,
+                        __algo::SortComp(comp, proj));
+        return last_it;
+    }
+    template <random_access_range R, class Comp = ranges::less,
+              class Proj = identity>
+        requires sortable<iterator_t<R>, Comp, Proj>
+    constexpr borrowed_iterator_t<R> operator()(R &&r, iterator_t<R> nth,
+                                                Comp comp = {},
+                                                Proj proj = {}) const
+    {
+        return (*this)(ranges::begin(r), std::move(nth), ranges::end(r),
+                       std::move(comp), std::move(proj));
+    }
+};
+inline constexpr NthElement nth_element{};
+
+struct PartialSortCopy {
+    template <input_iterator I1, sentinel_for<I1> S1,
+              random_access_iterator I2, sentinel_for<I2> S2,
+              class Comp = ranges::less, class Proj1 = identity,
+              class Proj2 = identity>
+        requires indirectly_copyable<I1, I2> && sortable<I2, Comp, Proj2> &&
+                 indirect_strict_weak_order<Comp, projected<I1, Proj1>,
+                                            projected<I2, Proj2>>
+    constexpr partial_sort_copy_result<I1, I2>
+    operator()(I1 first, S1 last, I2 result_first, S2 result_last,
+               Comp comp = {}, Proj1 proj1 = {}, Proj2 proj2 = {}) const
+    {
+        if (result_first == result_last)
+            return {ranges::next(std::move(first), std::move(last)),
+                    std::move(result_first)};
+        auto comp_out = __algo::SortComp(comp, proj2);
+        I2 r          = result_first;
+        for (; first != last && r != result_last; ++first, ++r) *r = *first;
+        std::make_heap(result_first, r, comp_out);
+        for (; first != last; ++first)
+            if (std::invoke(comp, std::invoke(proj1, *first),
+                            std::invoke(proj2, *result_first))) {
+                std::pop_heap(result_first, r, comp_out);
+                *ranges::prev(r) = *first;
+                std::push_heap(result_first, r, comp_out);
+            }
+        std::sort_heap(result_first, r, comp_out);
+        return {std::move(first), std::move(r)};
+    }
+    template <input_range R1, random_access_range R2, class Comp = ranges::less,
+              class Proj1 = identity, class Proj2 = identity>
+        requires indirectly_copyable<iterator_t<R1>, iterator_t<R2>> &&
+                 sortable<iterator_t<R2>, Comp, Proj2> &&
+                 indirect_strict_weak_order<Comp, projected<iterator_t<R1>, Proj1>,
+                                            projected<iterator_t<R2>, Proj2>>
+    constexpr partial_sort_copy_result<borrowed_iterator_t<R1>,
+                                       borrowed_iterator_t<R2>>
+    operator()(R1 &&r, R2 &&result_r, Comp comp = {}, Proj1 proj1 = {},
+               Proj2 proj2 = {}) const
+    {
+        return (*this)(ranges::begin(r), ranges::end(r),
+                       ranges::begin(result_r), ranges::end(result_r),
+                       std::move(comp), std::move(proj1), std::move(proj2));
+    }
+};
+inline constexpr PartialSortCopy partial_sort_copy{};
+
+// ════════════════════════════════════════════════════════════════════════
+// heap operations ([alg.heap.operations]) — delegate to the classic engines
+// ════════════════════════════════════════════════════════════════════════
+
+struct MakeHeap {
+    template <random_access_iterator I, sentinel_for<I> S,
+              class Comp = ranges::less, class Proj = identity>
+        requires sortable<I, Comp, Proj>
+    constexpr I operator()(I first, S last, Comp comp = {}, Proj proj = {}) const
+    {
+        I last_it = ranges::next(first, last);
+        std::make_heap(std::move(first), last_it, __algo::SortComp(comp, proj));
+        return last_it;
+    }
+    template <random_access_range R, class Comp = ranges::less,
+              class Proj = identity>
+        requires sortable<iterator_t<R>, Comp, Proj>
+    constexpr borrowed_iterator_t<R> operator()(R &&r, Comp comp = {},
+                                                Proj proj = {}) const
+    {
+        return (*this)(ranges::begin(r), ranges::end(r), std::move(comp),
+                       std::move(proj));
+    }
+};
+inline constexpr MakeHeap make_heap{};
+
+struct PushHeap {
+    template <random_access_iterator I, sentinel_for<I> S,
+              class Comp = ranges::less, class Proj = identity>
+        requires sortable<I, Comp, Proj>
+    constexpr I operator()(I first, S last, Comp comp = {}, Proj proj = {}) const
+    {
+        I last_it = ranges::next(first, last);
+        std::push_heap(std::move(first), last_it, __algo::SortComp(comp, proj));
+        return last_it;
+    }
+    template <random_access_range R, class Comp = ranges::less,
+              class Proj = identity>
+        requires sortable<iterator_t<R>, Comp, Proj>
+    constexpr borrowed_iterator_t<R> operator()(R &&r, Comp comp = {},
+                                                Proj proj = {}) const
+    {
+        return (*this)(ranges::begin(r), ranges::end(r), std::move(comp),
+                       std::move(proj));
+    }
+};
+inline constexpr PushHeap push_heap{};
+
+struct PopHeap {
+    template <random_access_iterator I, sentinel_for<I> S,
+              class Comp = ranges::less, class Proj = identity>
+        requires sortable<I, Comp, Proj>
+    constexpr I operator()(I first, S last, Comp comp = {}, Proj proj = {}) const
+    {
+        I last_it = ranges::next(first, last);
+        std::pop_heap(std::move(first), last_it, __algo::SortComp(comp, proj));
+        return last_it;
+    }
+    template <random_access_range R, class Comp = ranges::less,
+              class Proj = identity>
+        requires sortable<iterator_t<R>, Comp, Proj>
+    constexpr borrowed_iterator_t<R> operator()(R &&r, Comp comp = {},
+                                                Proj proj = {}) const
+    {
+        return (*this)(ranges::begin(r), ranges::end(r), std::move(comp),
+                       std::move(proj));
+    }
+};
+inline constexpr PopHeap pop_heap{};
+
+struct SortHeap {
+    template <random_access_iterator I, sentinel_for<I> S,
+              class Comp = ranges::less, class Proj = identity>
+        requires sortable<I, Comp, Proj>
+    constexpr I operator()(I first, S last, Comp comp = {}, Proj proj = {}) const
+    {
+        I last_it = ranges::next(first, last);
+        std::sort_heap(std::move(first), last_it, __algo::SortComp(comp, proj));
+        return last_it;
+    }
+    template <random_access_range R, class Comp = ranges::less,
+              class Proj = identity>
+        requires sortable<iterator_t<R>, Comp, Proj>
+    constexpr borrowed_iterator_t<R> operator()(R &&r, Comp comp = {},
+                                                Proj proj = {}) const
+    {
+        return (*this)(ranges::begin(r), ranges::end(r), std::move(comp),
+                       std::move(proj));
+    }
+};
+inline constexpr SortHeap sort_heap{};
+
+struct IsHeap {
+    template <random_access_iterator I, sentinel_for<I> S, class Proj = identity,
+              indirect_strict_weak_order<projected<I, Proj>> Comp = ranges::less>
+    constexpr bool operator()(I first, S last, Comp comp = {},
+                              Proj proj = {}) const
+    {
+        I last_it = ranges::next(first, last);
+        return std::is_heap(std::move(first), last_it,
+                           __algo::SortComp(comp, proj));
+    }
+    template <random_access_range R, class Proj = identity,
+              indirect_strict_weak_order<projected<iterator_t<R>, Proj>> Comp =
+                  ranges::less>
+    constexpr bool operator()(R &&r, Comp comp = {}, Proj proj = {}) const
+    {
+        return (*this)(ranges::begin(r), ranges::end(r), std::move(comp),
+                       std::move(proj));
+    }
+};
+inline constexpr IsHeap is_heap{};
+
+struct IsHeapUntil {
+    template <random_access_iterator I, sentinel_for<I> S, class Proj = identity,
+              indirect_strict_weak_order<projected<I, Proj>> Comp = ranges::less>
+    constexpr I operator()(I first, S last, Comp comp = {}, Proj proj = {}) const
+    {
+        I last_it = ranges::next(first, last);
+        return std::is_heap_until(std::move(first), last_it,
+                                 __algo::SortComp(comp, proj));
+    }
+    template <random_access_range R, class Proj = identity,
+              indirect_strict_weak_order<projected<iterator_t<R>, Proj>> Comp =
+                  ranges::less>
+    constexpr borrowed_iterator_t<R> operator()(R &&r, Comp comp = {},
+                                                Proj proj = {}) const
+    {
+        return (*this)(ranges::begin(r), ranges::end(r), std::move(comp),
+                       std::move(proj));
+    }
+};
+inline constexpr IsHeapUntil is_heap_until{};
+
+// ════════════════════════════════════════════════════════════════════════
+// permutation generators ([alg.permutation.generators])
+// ════════════════════════════════════════════════════════════════════════
+
+struct NextPermutation {
+    template <bidirectional_iterator I, sentinel_for<I> S,
+              class Comp = ranges::less, class Proj = identity>
+        requires sortable<I, Comp, Proj>
+    constexpr next_permutation_result<I> operator()(I first, S last,
+                                                    Comp comp = {},
+                                                    Proj proj = {}) const
+    {
+        I last_it   = ranges::next(first, last);
+        bool found  = std::next_permutation(std::move(first), last_it,
+                                            __algo::SortComp(comp, proj));
+        return {std::move(last_it), found};
+    }
+    template <bidirectional_range R, class Comp = ranges::less,
+              class Proj = identity>
+        requires sortable<iterator_t<R>, Comp, Proj>
+    constexpr next_permutation_result<borrowed_iterator_t<R>>
+    operator()(R &&r, Comp comp = {}, Proj proj = {}) const
+    {
+        return (*this)(ranges::begin(r), ranges::end(r), std::move(comp),
+                       std::move(proj));
+    }
+};
+inline constexpr NextPermutation next_permutation{};
+
+struct PrevPermutation {
+    template <bidirectional_iterator I, sentinel_for<I> S,
+              class Comp = ranges::less, class Proj = identity>
+        requires sortable<I, Comp, Proj>
+    constexpr prev_permutation_result<I> operator()(I first, S last,
+                                                    Comp comp = {},
+                                                    Proj proj = {}) const
+    {
+        I last_it   = ranges::next(first, last);
+        bool found  = std::prev_permutation(std::move(first), last_it,
+                                            __algo::SortComp(comp, proj));
+        return {std::move(last_it), found};
+    }
+    template <bidirectional_range R, class Comp = ranges::less,
+              class Proj = identity>
+        requires sortable<iterator_t<R>, Comp, Proj>
+    constexpr prev_permutation_result<borrowed_iterator_t<R>>
+    operator()(R &&r, Comp comp = {}, Proj proj = {}) const
+    {
+        return (*this)(ranges::begin(r), ranges::end(r), std::move(comp),
+                       std::move(proj));
+    }
+};
+inline constexpr PrevPermutation prev_permutation{};
+
+} // namespace ranges
+} // namespace std
+
+#endif // BOXCXX_BITS_RANGES_ALGO_SORT

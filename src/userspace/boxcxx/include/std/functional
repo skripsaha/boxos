@@ -463,6 +463,50 @@ struct equal_to {
     using is_transparent = void;
 };
 
+// The remaining [range.cmp] objects. greater/less_equal/greater_equal are
+// expressed through ranges::less so they inherit its pointer-total-order
+// routing; not_equal_to negates ranges::equal_to. (Ф29b-2 — the natural
+// comparators to hand the sorting / set / heap algorithms.)
+struct not_equal_to {
+    template <class T, class U>
+        requires equality_comparable_with<T, U>
+    constexpr bool operator()(T &&t, U &&u) const
+    {
+        return !equal_to{}(std::forward<T>(t), std::forward<U>(u));
+    }
+    using is_transparent = void;
+};
+
+struct greater {
+    template <class T, class U>
+        requires totally_ordered_with<T, U>
+    constexpr bool operator()(T &&t, U &&u) const
+    {
+        return less{}(std::forward<U>(u), std::forward<T>(t));
+    }
+    using is_transparent = void;
+};
+
+struct less_equal {
+    template <class T, class U>
+        requires totally_ordered_with<T, U>
+    constexpr bool operator()(T &&t, U &&u) const
+    {
+        return !less{}(std::forward<U>(u), std::forward<T>(t));
+    }
+    using is_transparent = void;
+};
+
+struct greater_equal {
+    template <class T, class U>
+        requires totally_ordered_with<T, U>
+    constexpr bool operator()(T &&t, U &&u) const
+    {
+        return !less{}(std::forward<T>(t), std::forward<U>(u));
+    }
+    using is_transparent = void;
+};
+
 } // namespace ranges
 
 // Gating concepts for heterogeneous lookup ([container.requirements] the
