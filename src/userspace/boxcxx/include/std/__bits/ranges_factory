@@ -1,0 +1,568 @@
+// boxcxx — <__bits/ranges_factory>
+// Range factories ([range.factories]): empty_view, single_view, iota_view,
+// repeat_view and the views::empty/single/iota/repeat objects. Pulled in by
+// <ranges> AFTER <__bits/ranges_views>, so view_interface, MovableBox and
+// subrange are already in scope (order-dependent, like the ranges_algo_*
+// chunks pulled in by <algorithm>).
+//
+// boxcxx notes (documented, safe for the closed type set):
+//   • IOTA-DIFF-T is realised over builtin integers only: for a 64-bit W it
+//     is __int128; a boundless signed-integer-class type is not provided.
+//   • iota / repeat iterators carry a real-strength iterator_category (the
+//     boxcxx range concepts key on iterator_category, not iterator_concept —
+//     the same convention transform_view already follows).
+#ifndef BOXCXX_BITS_RANGES_FACTORY
+#define BOXCXX_BITS_RANGES_FACTORY
+
+#include <compare>
+#include <concepts>
+#include <cstddef>
+#include <iterator>
+#include <type_traits>
+#include <utility>
+
+namespace std {
+namespace ranges {
+
+// ── empty_view ([range.empty.view]) ─────────────────────────────────────
+
+template <typename T>
+    requires is_object_v<T>
+class empty_view : public view_interface<empty_view<T>> {
+public:
+    static constexpr T *begin() noexcept { return nullptr; }
+    static constexpr T *end() noexcept { return nullptr; }
+    static constexpr T *data() noexcept { return nullptr; }
+    static constexpr size_t size() noexcept { return 0; }
+    static constexpr bool empty() noexcept { return true; }
+};
+
+template <typename T>
+inline constexpr bool enable_borrowed_range<empty_view<T>> = true;
+
+namespace views {
+template <typename T>
+inline constexpr empty_view<T> empty{};
+} // namespace views
+
+// ── single_view ([range.single.view]) ───────────────────────────────────
+
+template <copy_constructible T>
+    requires is_object_v<T>
+class single_view : public view_interface<single_view<T>> {
+    __views_detail::MovableBox<T> __value;
+
+public:
+    single_view()
+        requires default_initializable<T>
+    = default;
+    constexpr explicit single_view(const T &t) : __value(t) {}
+    constexpr explicit single_view(T &&t) : __value(std::move(t)) {}
+    template <typename... Args>
+        requires constructible_from<T, Args...>
+    constexpr explicit single_view(in_place_t, Args &&...args)
+        : __value(in_place, std::forward<Args>(args)...)
+    {
+    }
+
+    constexpr T *begin() noexcept { return data(); }
+    constexpr const T *begin() const noexcept { return data(); }
+    constexpr T *end() noexcept { return data() + 1; }
+    constexpr const T *end() const noexcept { return data() + 1; }
+    static constexpr size_t size() noexcept { return 1; }
+    constexpr T *data() noexcept { return __value.operator->(); }
+    constexpr const T *data() const noexcept { return __value.operator->(); }
+};
+
+template <typename T>
+single_view(T) -> single_view<T>;
+
+namespace views {
+struct Single {
+    template <typename T>
+    constexpr auto operator()(T &&t) const
+    {
+        return single_view<decay_t<T>>(std::forward<T>(t));
+    }
+};
+inline constexpr Single single{};
+} // namespace views
+
+// ── iota_view ([range.iota]) ────────────────────────────────────────────
+
+namespace __views_detail {
+
+// IOTA-DIFF-T(W): a signed type strictly wider than W, so the full span
+// (max − min, even for unsigned W) is representable. __int128 covers 64-bit
+// W; a non-integral W falls back to its iter_difference_t.
+template <typename W>
+constexpr auto IotaDiffTFn()
+{
+    if constexpr (is_integral_v<W>) {
+        if constexpr (sizeof(W) < sizeof(short))
+            return type_identity<short>{};
+        else if constexpr (sizeof(W) < sizeof(int))
+            return type_identity<int>{};
+        else if constexpr (sizeof(W) < sizeof(long long))
+            return type_identity<long long>{};
+        else
+            return type_identity<__int128>{};
+    } else {
+        return type_identity<iter_difference_t<W>>{};
+    }
+}
+template <typename W>
+using IotaDiffT = typename decltype(IotaDiffTFn<W>())::type;
+
+// is-integer-like ([iterator.concept.winc]) — the builtin integrals except
+// bool (bool is excluded from the integer-class/integer-like family).
+template <typename T>
+concept IotaIntegerLike = is_integral_v<T> && !same_as<remove_cv_t<T>, bool>;
+template <typename T>
+concept IotaSignedIntegerLike = IotaIntegerLike<T> && is_signed_v<T>;
+
+template <typename W>
+concept IotaDecrementable = incrementable<W> && requires(W w) {
+    { --w } -> same_as<W &>;
+    { w-- } -> same_as<W>;
+};
+template <typename W>
+concept IotaAdvanceable =
+    IotaDecrementable<W> && totally_ordered<W> &&
+    requires(W w, const W cw, const IotaDiffT<W> n) {
+        { w += n } -> same_as<W &>;
+        { w -= n } -> same_as<W &>;
+        W(cw + n);
+        W(n + cw);
+        W(cw - n);
+        { cw - cw } -> convertible_to<IotaDiffT<W>>;
+    };
+
+template <typename W, typename Bound>
+concept IotaBound = same_as<Bound, unreachable_sentinel_t> ||
+                    requires(const W &w, const Bound &b) {
+                        { w == b } -> convertible_to<bool>;
+                    };
+
+} // namespace __views_detail
+
+template <weakly_incrementable W, semiregular Bound = unreachable_sentinel_t>
+    requires __views_detail::IotaBound<W, Bound> && copyable<W>
+class iota_view : public view_interface<iota_view<W, Bound>> {
+    struct Iterator;
+    struct Sentinel;
+
+    W __value    = W();
+    Bound __bound = Bound();
+
+public:
+    iota_view()
+        requires default_initializable<W>
+    = default;
+    constexpr explicit iota_view(W value) : __value(std::move(value)) {}
+    constexpr iota_view(type_identity_t<W> value, type_identity_t<Bound> bound)
+        : __value(std::move(value)), __bound(std::move(bound))
+    {
+    }
+
+    constexpr Iterator begin() const { return Iterator{__value}; }
+    constexpr auto end() const
+    {
+        if constexpr (same_as<Bound, unreachable_sentinel_t>)
+            return unreachable_sentinel;
+        else
+            return Sentinel{__bound};
+    }
+    constexpr Iterator end() const
+        requires same_as<W, Bound>
+    {
+        return Iterator{__bound};
+    }
+
+    constexpr auto size() const
+        requires(same_as<W, Bound> && __views_detail::IotaAdvanceable<W>) ||
+                (__views_detail::IotaIntegerLike<W> &&
+                 __views_detail::IotaIntegerLike<Bound>)
+    {
+        using D  = __views_detail::IotaDiffT<W>;
+        using UT = make_unsigned_t<D>;
+        if constexpr (__views_detail::IotaIntegerLike<W> &&
+                      __views_detail::IotaIntegerLike<Bound>)
+            return static_cast<UT>(static_cast<D>(__bound) -
+                                   static_cast<D>(__value));
+        else
+            return static_cast<UT>(static_cast<D>(__bound - __value));
+    }
+};
+
+template <weakly_incrementable W, semiregular Bound>
+    requires __views_detail::IotaBound<W, Bound> && copyable<W>
+struct iota_view<W, Bound>::Iterator {
+    using iterator_concept = conditional_t<
+        __views_detail::IotaAdvanceable<W>, random_access_iterator_tag,
+        conditional_t<__views_detail::IotaDecrementable<W>,
+                      bidirectional_iterator_tag,
+                      conditional_t<incrementable<W>, forward_iterator_tag,
+                                    input_iterator_tag>>>;
+    using iterator_category = iterator_concept;
+    using value_type        = W;
+    using difference_type   = __views_detail::IotaDiffT<W>;
+    using pointer           = void;
+    using reference         = W;
+
+    W __value = W();
+
+    Iterator()
+        requires default_initializable<W>
+    = default;
+    constexpr explicit Iterator(W value) : __value(std::move(value)) {}
+
+    constexpr W operator*() const
+        noexcept(is_nothrow_copy_constructible_v<W>)
+    {
+        return __value;
+    }
+
+    constexpr Iterator &operator++()
+    {
+        ++__value;
+        return *this;
+    }
+    constexpr void operator++(int) { ++__value; }
+    constexpr Iterator operator++(int)
+        requires incrementable<W>
+    {
+        auto t = *this;
+        ++__value;
+        return t;
+    }
+    constexpr Iterator &operator--()
+        requires __views_detail::IotaDecrementable<W>
+    {
+        --__value;
+        return *this;
+    }
+    constexpr Iterator operator--(int)
+        requires __views_detail::IotaDecrementable<W>
+    {
+        auto t = *this;
+        --__value;
+        return t;
+    }
+
+    constexpr Iterator &operator+=(difference_type n)
+        requires __views_detail::IotaAdvanceable<W>
+    {
+        if constexpr (__views_detail::IotaIntegerLike<W> &&
+                      !__views_detail::IotaSignedIntegerLike<W>) {
+            if (n >= difference_type(0))
+                __value += static_cast<W>(n);
+            else
+                __value -= static_cast<W>(-n);
+        } else {
+            __value += static_cast<W>(n);
+        }
+        return *this;
+    }
+    constexpr Iterator &operator-=(difference_type n)
+        requires __views_detail::IotaAdvanceable<W>
+    {
+        return *this += -n;
+    }
+    constexpr W operator[](difference_type n) const
+        requires __views_detail::IotaAdvanceable<W>
+    {
+        return W(__value + n);
+    }
+
+    friend constexpr bool operator==(const Iterator &a, const Iterator &b)
+        requires equality_comparable<W>
+    {
+        return a.__value == b.__value;
+    }
+    friend constexpr bool operator<(const Iterator &a, const Iterator &b)
+        requires totally_ordered<W>
+    {
+        return a.__value < b.__value;
+    }
+    friend constexpr bool operator>(const Iterator &a, const Iterator &b)
+        requires totally_ordered<W>
+    {
+        return b.__value < a.__value;
+    }
+    friend constexpr bool operator<=(const Iterator &a, const Iterator &b)
+        requires totally_ordered<W>
+    {
+        return !(b.__value < a.__value);
+    }
+    friend constexpr bool operator>=(const Iterator &a, const Iterator &b)
+        requires totally_ordered<W>
+    {
+        return !(a.__value < b.__value);
+    }
+
+    friend constexpr Iterator operator+(Iterator i, difference_type n)
+        requires __views_detail::IotaAdvanceable<W>
+    {
+        i += n;
+        return i;
+    }
+    friend constexpr Iterator operator+(difference_type n, Iterator i)
+        requires __views_detail::IotaAdvanceable<W>
+    {
+        i += n;
+        return i;
+    }
+    friend constexpr Iterator operator-(Iterator i, difference_type n)
+        requires __views_detail::IotaAdvanceable<W>
+    {
+        i -= n;
+        return i;
+    }
+    friend constexpr difference_type operator-(const Iterator &a,
+                                               const Iterator &b)
+        requires __views_detail::IotaAdvanceable<W>
+    {
+        using D = difference_type;
+        return static_cast<D>(static_cast<D>(a.__value) -
+                              static_cast<D>(b.__value));
+    }
+};
+
+template <weakly_incrementable W, semiregular Bound>
+    requires __views_detail::IotaBound<W, Bound> && copyable<W>
+struct iota_view<W, Bound>::Sentinel {
+    Bound __bound = Bound();
+
+    Sentinel() = default;
+    constexpr explicit Sentinel(Bound b) : __bound(std::move(b)) {}
+
+    friend constexpr bool operator==(const Iterator &i, const Sentinel &s)
+    {
+        return i.__value == s.__bound;
+    }
+    friend constexpr iter_difference_t<W> operator-(const Iterator &i,
+                                                    const Sentinel &s)
+        requires sized_sentinel_for<Bound, W>
+    {
+        return i.__value - s.__bound;
+    }
+    friend constexpr iter_difference_t<W> operator-(const Sentinel &s,
+                                                    const Iterator &i)
+        requires sized_sentinel_for<Bound, W>
+    {
+        return -(i.__value - s.__bound);
+    }
+};
+
+template <typename W, typename Bound>
+    requires __views_detail::IotaBound<W, Bound> && copyable<W> &&
+             weakly_incrementable<W> && semiregular<Bound>
+iota_view(W, Bound) -> iota_view<W, Bound>;
+
+template <typename W, typename Bound>
+inline constexpr bool enable_borrowed_range<iota_view<W, Bound>> = true;
+
+namespace views {
+struct Iota {
+    template <typename W>
+    constexpr auto operator()(W &&w) const
+    {
+        return iota_view<decay_t<W>>(std::forward<W>(w));
+    }
+    template <typename W, typename Bound>
+    constexpr auto operator()(W &&w, Bound &&b) const
+    {
+        return iota_view<decay_t<W>, decay_t<Bound>>(std::forward<W>(w),
+                                                     std::forward<Bound>(b));
+    }
+};
+inline constexpr Iota iota{};
+} // namespace views
+
+// ── repeat_view ([range.repeat]) ────────────────────────────────────────
+
+template <move_constructible W, semiregular Bound = unreachable_sentinel_t>
+    requires(is_object_v<W> && same_as<W, remove_cv_t<W>> &&
+             (__views_detail::IotaIntegerLike<Bound> ||
+              same_as<Bound, unreachable_sentinel_t>))
+class repeat_view : public view_interface<repeat_view<W, Bound>> {
+    struct Iterator;
+
+    __views_detail::MovableBox<W> __value;
+    Bound __bound = Bound();
+
+public:
+    repeat_view()
+        requires default_initializable<W>
+    = default;
+    constexpr explicit repeat_view(const W &value, Bound bound = Bound())
+        : __value(value), __bound(bound)
+    {
+    }
+    constexpr explicit repeat_view(W &&value, Bound bound = Bound())
+        : __value(std::move(value)), __bound(bound)
+    {
+    }
+    // The piecewise_construct_t ctor ([range.repeat]) is omitted: it would
+    // couple <ranges> to <tuple>/make_from_tuple for every user. Construct
+    // the W in the caller and pass it by value instead.
+
+    constexpr Iterator begin() const
+    {
+        return Iterator(__value.operator->(), 0);
+    }
+    constexpr auto end() const
+    {
+        if constexpr (same_as<Bound, unreachable_sentinel_t>)
+            return unreachable_sentinel;
+        else
+            return Iterator(__value.operator->(), __bound);
+    }
+
+    constexpr auto size() const
+        requires(!same_as<Bound, unreachable_sentinel_t>)
+    {
+        return static_cast<make_unsigned_t<Bound>>(__bound);
+    }
+};
+
+template <move_constructible W, semiregular Bound>
+    requires(is_object_v<W> && same_as<W, remove_cv_t<W>> &&
+             (__views_detail::IotaIntegerLike<Bound> ||
+              same_as<Bound, unreachable_sentinel_t>))
+struct repeat_view<W, Bound>::Iterator {
+    using IndexType =
+        conditional_t<same_as<Bound, unreachable_sentinel_t>, ptrdiff_t, Bound>;
+
+    using iterator_concept  = random_access_iterator_tag;
+    using iterator_category = random_access_iterator_tag;
+    using value_type        = W;
+    using difference_type =
+        conditional_t<__views_detail::IotaSignedIntegerLike<IndexType>,
+                      IndexType, __views_detail::IotaDiffT<IndexType>>;
+    using pointer   = void;
+    using reference = const W &;
+
+    const W *__value    = nullptr;
+    IndexType __current = IndexType();
+
+    Iterator() = default;
+    constexpr explicit Iterator(const W *value, IndexType b = IndexType())
+        : __value(value), __current(b)
+    {
+    }
+
+    constexpr const W &operator*() const noexcept { return *__value; }
+    constexpr const W &operator[](difference_type n) const noexcept
+    {
+        return *__value;
+    }
+
+    constexpr Iterator &operator++()
+    {
+        ++__current;
+        return *this;
+    }
+    constexpr Iterator operator++(int)
+    {
+        auto t = *this;
+        ++__current;
+        return t;
+    }
+    constexpr Iterator &operator--()
+    {
+        --__current;
+        return *this;
+    }
+    constexpr Iterator operator--(int)
+    {
+        auto t = *this;
+        --__current;
+        return t;
+    }
+
+    constexpr Iterator &operator+=(difference_type n)
+    {
+        __current += static_cast<IndexType>(n);
+        return *this;
+    }
+    constexpr Iterator &operator-=(difference_type n)
+    {
+        __current -= static_cast<IndexType>(n);
+        return *this;
+    }
+
+    friend constexpr bool operator==(const Iterator &a, const Iterator &b)
+    {
+        return a.__current == b.__current;
+    }
+    friend constexpr bool operator<(const Iterator &a, const Iterator &b)
+    {
+        return a.__current < b.__current;
+    }
+    friend constexpr bool operator>(const Iterator &a, const Iterator &b)
+    {
+        return b.__current < a.__current;
+    }
+    friend constexpr bool operator<=(const Iterator &a, const Iterator &b)
+    {
+        return !(b.__current < a.__current);
+    }
+    friend constexpr bool operator>=(const Iterator &a, const Iterator &b)
+    {
+        return !(a.__current < b.__current);
+    }
+
+    friend constexpr Iterator operator+(Iterator i, difference_type n)
+    {
+        i += n;
+        return i;
+    }
+    friend constexpr Iterator operator+(difference_type n, Iterator i)
+    {
+        i += n;
+        return i;
+    }
+    friend constexpr Iterator operator-(Iterator i, difference_type n)
+    {
+        i -= n;
+        return i;
+    }
+    friend constexpr difference_type operator-(const Iterator &a,
+                                               const Iterator &b)
+    {
+        return static_cast<difference_type>(a.__current) -
+               static_cast<difference_type>(b.__current);
+    }
+};
+
+template <typename W>
+repeat_view(W) -> repeat_view<W>;
+template <typename W, typename Bound>
+repeat_view(W, Bound) -> repeat_view<W, Bound>;
+
+namespace views {
+struct Repeat {
+    template <typename W>
+    constexpr auto operator()(W &&w) const
+    {
+        return repeat_view<decay_t<W>>(std::forward<W>(w));
+    }
+    template <typename W, typename Bound>
+    constexpr auto operator()(W &&w, Bound &&b) const
+    {
+        return repeat_view<decay_t<W>, decay_t<Bound>>(std::forward<W>(w),
+                                                       std::forward<Bound>(b));
+    }
+};
+inline constexpr Repeat repeat{};
+} // namespace views
+
+} // namespace ranges
+
+namespace views = ranges::views;
+
+} // namespace std
+
+#endif // BOXCXX_BITS_RANGES_FACTORY

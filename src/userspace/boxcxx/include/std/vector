@@ -597,6 +597,11 @@ public:
         }
     };
 
+    // Forward-declare the sibling so `friend class const_iterator` below
+    // binds to this member and not to std::const_iterator (the C++23
+    // const-iterators alias template, visible since Ф29c).
+    class const_iterator;
+
     class iterator {
         Word  *base_ = nullptr;
         size_t idx_  = 0;

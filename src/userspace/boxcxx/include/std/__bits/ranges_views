@@ -46,6 +46,12 @@ public:
     {
     }
     constexpr explicit MovableBox(T &&t) : __val(std::move(t)) {}
+    template <typename... Args>
+        requires constructible_from<T, Args...>
+    constexpr explicit MovableBox(in_place_t, Args &&...args)
+        : __val(std::forward<Args>(args)...)
+    {
+    }
 
     constexpr MovableBox(const MovableBox &)
         requires copy_constructible<T>
