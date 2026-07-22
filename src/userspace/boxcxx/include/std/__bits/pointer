@@ -94,7 +94,18 @@ constexpr T *to_address(T *p) noexcept
     return p;
 }
 
+// Constrained so a Ptr with NEITHER a pointer_traits<Ptr>::to_address
+// customization NOR its own operator-> removes this overload from the
+// candidate set entirely (immediate-context SFINAE) instead of being
+// selected and then hard-erroring on `p.operator->()` inside the body —
+// which a `requires { std::to_address(i); }` check elsewhere (e.g.
+// contiguous_iterator) could not catch, since a failure nested inside an
+// already-selected overload's own body is not in the immediate context of
+// the call. Found via contiguous_iterator's own use of to_address once a
+// wrapper without operator-> (counted_iterator) could newly reach it.
 template <class Ptr>
+    requires requires(const Ptr &p) { pointer_traits<Ptr>::to_address(p); } ||
+             requires(const Ptr &p) { p.operator->(); }
 constexpr auto to_address(const Ptr &p) noexcept
 {
     if constexpr (requires { pointer_traits<Ptr>::to_address(p); })

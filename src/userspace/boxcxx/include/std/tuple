@@ -210,6 +210,43 @@ public:
         return *this;
     }
 
+    // P2321 const-qualified assignment ([tuple.assign]): a const tuple of
+    // REFERENCES still assigns through those references — the tuple being
+    // const doesn't propagate into what a reference member refers to (same
+    // rule as `struct S { int &r; }; const S s = ...; s.r = 5;` being fine).
+    // is_assignable_v<const Ts&, ...> is what makes these overloads PRESENT
+    // for reference elements (const(int&) collapses to int&, assignable) and
+    // ABSENT for plain value elements (const long& is not assignable to) —
+    // exactly the distinction ranges::sort's proxy-tuple write-back needs.
+    constexpr const tuple &operator=(const tuple &other) const
+        requires(... && is_copy_assignable_v<const Ts>)
+    {
+        AssignFromConst(other, index_sequence_for<Ts...>{});
+        return *this;
+    }
+    constexpr const tuple &operator=(tuple &&other) const
+        requires(... && is_assignable_v<const Ts &, Ts>)
+    {
+        AssignFromConst(move(other), index_sequence_for<Ts...>{});
+        return *this;
+    }
+    template <class... Us>
+        requires(sizeof...(Us) == sizeof...(Ts) &&
+                 (... && is_assignable_v<const Ts &, const Us &>))
+    constexpr const tuple &operator=(const tuple<Us...> &other) const
+    {
+        AssignFromConst(other, index_sequence_for<Ts...>{});
+        return *this;
+    }
+    template <class... Us>
+        requires(sizeof...(Us) == sizeof...(Ts) &&
+                 (... && is_assignable_v<const Ts &, Us>))
+    constexpr const tuple &operator=(tuple<Us...> &&other) const
+    {
+        AssignFromConst(move(other), index_sequence_for<Ts...>{});
+        return *this;
+    }
+
     constexpr void swap(tuple &other) noexcept(
         (... && is_nothrow_swappable_v<Ts>))
     {
@@ -221,6 +258,14 @@ private:
     constexpr void AssignFrom(OtherTuple &&other, index_sequence<Is...>)
     {
         ((__bits::LeafGet<Is>(static_cast<Base &>(*this)) =
+              get<Is>(forward<OtherTuple>(other))),
+         ...);
+    }
+
+    template <class OtherTuple, size_t... Is>
+    constexpr void AssignFromConst(OtherTuple &&other, index_sequence<Is...>) const
+    {
+        ((__bits::LeafGet<Is>(static_cast<const Base &>(*this)) =
               get<Is>(forward<OtherTuple>(other))),
          ...);
     }

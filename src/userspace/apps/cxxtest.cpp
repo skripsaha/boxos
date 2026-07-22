@@ -15001,15 +15001,17 @@ void Phase94()
     // ── lazy_split_view: basic, forward source ─────────────────────────────
     std::string p11   = "the quick brown";
     auto        lsv11 = vw::lazy_split(p11, ' ');
-    // boxcxx keys forward_range on iterator_category (CategoryAtLeast), not
-    // ITER_CONCEPT dispatch — lazy_split_view's outer-iterator is
-    // UNCONDITIONALLY input_iterator_tag for iterator_category (the
-    // standard's own choice, since operator* returns a value). Real
-    // libc++/libstdc++ present this as forward_range via iterator_concept
-    // dispatch; boxcxx does not dispatch on iterator_concept here, so it
-    // stays input_range. Permanent, not a gap — do not "fix" in Ф29f.
+    // Ф29f-1 (ITER_CONCEPT flip): forward_iterator now keys on
+    // iterator_concept, not the legacy iterator_category. OuterIterator's
+    // iterator_concept is conditional_t<forward_range<Base>,
+    // forward_iterator_tag, input_iterator_tag> — p11 (std::string) is a
+    // forward_range, so lsv11 is now correctly forward_range too. This is a
+    // genuine promotion, matching real libc++/libstdc++ and
+    // [range.lazy.split.outer]; pre-Ф29f-1 boxcxx's forward_iterator keyed on
+    // iterator_category (unconditionally input_iterator_tag here), which
+    // wrongly capped this at input_range.
     static_assert(rg::input_range<decltype(lsv11)>);
-    static_assert(!rg::forward_range<decltype(lsv11)>);
+    static_assert(rg::forward_range<decltype(lsv11)>);
     std::vector<std::string> lsv11Out;
     for (auto word : lsv11) lsv11Out.push_back(collect(word));
     Check((lsv11Out == std::vector<std::string>{"the", "quick", "brown"}), "phase94 lazy_split basic forward source");
@@ -15102,9 +15104,16 @@ void Phase94()
                   "phase94 lazy_split(int-range, string-range) must be SFINAE-rejected");
     static_assert(LazySplitCallable<std::string, std::string_view>,
                   "phase94 lazy_split(string, string_view) stays callable");
-    static_assert(std::input_iterator<rg::iterator_t<decltype(sv1)>> &&
-                      !std::forward_iterator<rg::iterator_t<decltype(sv1)>>,
-                  "phase94 MED-2 split_view::Iterator is unconditionally input_iterator_tag in boxcxx");
+    // Ф29f-1 (ITER_CONCEPT flip): split_view::Iterator declares
+    // iterator_concept = forward_iterator_tag unconditionally (split_view's
+    // V/Pattern are both class-level forward_range-constrained), and
+    // forward_iterator now keys on iterator_concept — so this is genuinely
+    // forward_iterator, matching [range.split.iterator] (its legacy
+    // iterator_category stays input_iterator_tag, since operator* returns a
+    // subrange by value, not a reference — MED-2's original finding, still
+    // true for iterator_category, just no longer what forward_iterator reads).
+    static_assert(std::forward_iterator<rg::iterator_t<decltype(sv1)>>,
+                  "phase94 MED-2 split_view::Iterator is forward_iterator via iterator_concept post-Ф29f-1");
 
     // begin() called twice on the same instance must agree (no cache to go stale)
     auto sv1b = vw::split(p1, ' ');
@@ -15606,6 +15615,394 @@ void Phase95()
            "chunk-input single-pass shared state + chunk_by find-prev boundary)\n");
 }
 
+// §8 regression helpers: NAMED concepts, same reasoning as SplitCallable/
+// ChunkCallable above — a bare block-scope `requires(R&r){ranges::sort(r);}`
+// is NOT protected by "immediate context" SFINAE when R is non-dependent
+// (concrete) at the point of use: verified this is a genuine C++ property,
+// not a boxcxx quirk, by reproducing the identical hard error against real,
+// unmodified GCC 15.2 libstdc++ with the exact same bare-requires shape.
+// Wrapping the check in a named concept template makes R a genuine
+// TEMPLATE PARAMETER being substituted, restoring proper SFINAE.
+template <typename R>
+concept Phase96SortCallable = requires(R &r) { std::ranges::sort(r); };
+template <typename R>
+concept Phase96NthElementCallable =
+    requires(R &r) { std::ranges::nth_element(r, std::ranges::begin(r)); };
+
+// Phase96 (Ф29f-1 "FLIP-батч"): the ITER_CONCEPT flip + noexcept sweep,
+// plus the §7 audit-fix round (CRIT-1/2/3, HIGH, MED-1/MED-2) and the §8
+// indirectly_writable conformance fix (P2321 const-qualified tuple
+// assignment). Purely compile-time — every check is a static_assert;
+// nothing here has runtime behavior to Check(). Reuses the P94InputRange/
+// P95InputRange/P95FwdOnlyRange/P95InputIter/P95FwdOnlyIter fixtures
+// already defined above (Ф29e-2/e-3) for the genuinely-single-pass and
+// forward-only-not-bidirectional shapes this batch's promotion claims need
+// to be checked against — no new fixture types needed.
+void Phase96()
+{
+    namespace rg = std::ranges;
+    namespace vw = std::views;
+
+    std::vector<int> p96a{1, 2, 3, 4, 5};
+    std::vector<int> p96b{10, 20, 30, 40, 50};
+    std::list<int>   p96List{1, 2, 3};
+    P95FwdOnlyRange   p96FwdOnly(std::vector<int>{7, 8, 9});
+
+    // ── §1 flip: promotions land ──────────────────────────────────────────
+    // zip_view / adjacent_view / cartesian_product_view / enumerate_view /
+    // chunk_view (forward spec) all pin iterator_category to
+    // input_iterator_tag UNCONDITIONALLY (operator* always materializes a
+    // fresh prvalue) — pre-Ф29f-1 forward/bidirectional/random_access_iterator
+    // keyed on iterator_category, so all four were capped at input_range no
+    // matter how strong the base range was. Post-flip they key on
+    // iterator_concept, which was already computing the true ceiling — these
+    // are genuine, newly-reachable promotions.
+    auto p96Zip = vw::zip(p96a, p96b);
+    static_assert(rg::random_access_range<decltype(p96Zip)>,
+                  "phase96 zip_view random_access promotion (needs CRIT-1 operator<=>)");
+
+    auto p96CpBidi = vw::cartesian_product(p96a, p96List);
+    static_assert(rg::bidirectional_range<decltype(p96CpBidi)>,
+                  "phase96 cartesian_product bidirectional promotion (RA First x bidi common Vs)");
+
+    auto p96CpFwd = vw::cartesian_product(p96a, p96FwdOnly);
+    static_assert(rg::forward_range<decltype(p96CpFwd)>,
+                  "phase96 cartesian_product forward promotion (Vs forward-only, not bidi)");
+    static_assert(!rg::bidirectional_range<decltype(p96CpFwd)>,
+                  "phase96 cartesian_product ceiling stays forward when a Vs isn't bidirectional");
+
+    auto p96Adj = vw::adjacent<2>(p96a);
+    static_assert(rg::random_access_range<decltype(p96Adj)>,
+                  "phase96 adjacent_view random_access promotion");
+
+    auto p96En = vw::enumerate(p96a);
+    static_assert(rg::random_access_range<decltype(p96En)>,
+                  "phase96 enumerate_view random_access promotion");
+
+    // transform_view over a PRVALUE-returning F: pre-flip capped at input
+    // (its own iterator_category collapses to input_iterator_tag whenever
+    // reference isn't an lvalue reference); post-flip iterator_concept only
+    // cares about random_access_range<V>, never F's return category.
+    auto p96Tr = p96a | vw::transform([](int x) { return x * 2; });
+    static_assert(!std::is_lvalue_reference_v<rg::range_reference_t<decltype(p96Tr)>>,
+                  "phase96 transform fixture sanity: F must return a prvalue");
+    static_assert(rg::random_access_range<decltype(p96Tr)>,
+                  "phase96 transform_view random_access promotion over prvalue-returning F");
+
+    auto p96Chunk = p96a | vw::chunk(2);
+    static_assert(rg::bidirectional_range<decltype(p96Chunk)>,
+                  "phase96 chunk_view (forward spec) bidirectional promotion");
+
+    // split_view::Iterator declares iterator_concept = forward_iterator_tag
+    // unconditionally; pre-flip forward_iterator checked iterator_category
+    // (also pinned to input_iterator_tag) -> was always input-only.
+    auto p96Split = vw::split(p96a, 0);
+    static_assert(rg::forward_range<decltype(p96Split)>,
+                  "phase96 split_view forward promotion (was input-only pre-flip)");
+
+    // join_view / elements_view: NON-regression. Both already computed a
+    // real (non-pinned) iterator_category for these particular shapes
+    // pre-flip (join: OuterCat/InnerCat-based; elements: the
+    // is_lvalue_reference_v<reference> branch, true here since vector's
+    // operator[] yields int&) — the flip changes nothing observable, just
+    // re-asserted here for completeness.
+    std::vector<std::vector<int>> p96Nested{{1, 2}, {3}, {4, 5, 6}};
+    auto p96Join = vw::join(p96Nested);
+    static_assert(rg::bidirectional_range<decltype(p96Join)>,
+                  "phase96 join_view bidirectional (non-regression, already worked pre-flip)");
+
+    std::vector<std::pair<int, int>> p96Pairs{{1, 10}, {2, 20}, {3, 30}};
+    auto p96Elem = vw::elements<0>(p96Pairs);
+    static_assert(rg::random_access_range<decltype(p96Elem)>,
+                  "phase96 elements_view random_access (non-regression, lvalue-reference case)");
+
+    // ── genuinely-input views stay input (no wrongful promotion) ───────────
+    P95InputRange p96ZipInput(4);
+    auto          p96ZipOverInput = vw::zip(p96ZipInput);
+    static_assert(rg::input_range<decltype(p96ZipOverInput)>);
+    static_assert(!rg::forward_range<decltype(p96ZipOverInput)>,
+                  "phase96 zip over a genuinely single-pass range stays input_range");
+
+    P94InputRange p96LazySplitInput("ab cd ef");
+    auto          p96LazySplitOverInput = vw::lazy_split(p96LazySplitInput, ' ');
+    static_assert(!rg::forward_range<decltype(p96LazySplitOverInput)>,
+                  "phase96 lazy_split over a single-pass source stays input_range");
+
+    auto p96LazySplitOverForward = vw::lazy_split(p96a, 3);
+    static_assert(rg::forward_range<decltype(p96LazySplitOverForward)>,
+                  "phase96 lazy_split over a forward source promotes to forward_range");
+
+    P95InputRange p96ChunkInput(7);
+    auto          p96ChunkOverInput = vw::chunk(p96ChunkInput, 3);
+    static_assert(std::input_iterator<rg::iterator_t<decltype(p96ChunkOverInput)>>);
+    static_assert(!std::forward_iterator<rg::iterator_t<decltype(p96ChunkOverInput)>>,
+                  "phase96 chunk_view input spec stays genuinely input over a single-pass source");
+
+    static_assert(std::forward_iterator<rg::iterator_t<decltype(p96Split)>>);
+    static_assert(!std::bidirectional_iterator<rg::iterator_t<decltype(p96Split)>>,
+                  "phase96 split_view's own iterator is genuinely forward-ceilinged, not bidirectional");
+
+    // ── §2 noexcept probes ──────────────────────────────────────────────────
+    // Both bases noexcept-dereferencing (unlike p96CpBidi, which mixes in
+    // list<int> — list's operator* carries no noexcept specifier).
+    auto p96CpAllVec = vw::cartesian_product(p96a, p96b);
+
+    static_assert(noexcept(rg::iter_move(std::declval<std::vector<int>::iterator &>())),
+                  "phase96 baseline: vector<int>::iterator deref is noexcept");
+    static_assert(noexcept(rg::iter_move(std::declval<rg::iterator_t<decltype(p96Zip)> &>())),
+                  "phase96 zip_view iter_move noexcept over noexcept-movable int");
+    static_assert(noexcept(rg::iter_swap(std::declval<rg::iterator_t<decltype(p96Zip)> &>(),
+                                         std::declval<rg::iterator_t<decltype(p96Zip)> &>())),
+                  "phase96 zip_view iter_swap noexcept over noexcept-movable int");
+    static_assert(noexcept(rg::iter_move(std::declval<rg::iterator_t<decltype(p96Adj)> &>())),
+                  "phase96 adjacent_view iter_move noexcept over noexcept-movable int");
+    static_assert(noexcept(rg::iter_move(std::declval<rg::iterator_t<decltype(p96CpAllVec)> &>())),
+                  "phase96 cartesian_product_view iter_move noexcept, all-vector (noexcept-dereferencing) bases");
+    static_assert(noexcept(rg::iter_move(std::declval<rg::iterator_t<decltype(p96Join)> &>())),
+                  "phase96 join_view iter_move noexcept over noexcept-movable int");
+
+    // A dereference that ISN'T noexcept must make the CPO report
+    // non-noexcept: the CPO's noexcept genuinely tracks *E, not what a
+    // caller later does with the result. (A throwing move-constructor on
+    // the VALUE type alone does NOT flip ranges::iter_move to non-noexcept
+    // for a plain container iterator — vector<T>::iterator::operator* is
+    // unconditionally noexcept regardless of T, verified separately.
+    // P95InputIter/P95FwdOnlyIter's operator* genuinely lacks a noexcept
+    // specifier, which is the real lever the CPO tracks.)
+    static_assert(!noexcept(*std::declval<P95InputIter &>()),
+                  "phase96 sanity: P95InputIter::operator* has no noexcept specifier");
+    static_assert(!noexcept(rg::iter_move(std::declval<P95InputIter &>())),
+                  "phase96 iter_move propagates a non-noexcept dereference");
+
+    static_assert(!noexcept(*std::declval<P95FwdOnlyIter &>()),
+                  "phase96 sanity: P95FwdOnlyIter::operator* has no noexcept specifier");
+    auto p96AdjNonNoexcept = vw::adjacent<2>(p96FwdOnly);
+    static_assert(!noexcept(rg::iter_move(std::declval<rg::iterator_t<decltype(p96AdjNonNoexcept)> &>())),
+                  "phase96 adjacent_view iter_move propagates a non-noexcept base dereference");
+
+    // join_with's iter_move/iter_swap carry NO noexcept-specifier at all
+    // (standard-mandated, [range.join.with.iterator] — left as-is per
+    // design §2.2). This only confirms the noexcept-operand still compiles.
+    std::vector<std::vector<int>> p96JwSrc{{1, 2}, {3}};
+    std::vector<int>               p96JwDelim{0, 0};
+    auto                            p96JoinWith = vw::join_with(p96JwSrc, p96JwDelim);
+    constexpr bool p96JoinWithIterMoveCompiles =
+        noexcept(rg::iter_move(std::declval<rg::iterator_t<decltype(p96JoinWith)> &>())) || true;
+    static_assert(p96JoinWithIterMoveCompiles,
+                  "phase96 join_with iter_move noexcept-operand at least compiles (no noexcept mandated)");
+
+    // ── §4 fallback-chain / adaptor interactions ────────────────────────────
+    static_assert(rg::bidirectional_range<decltype(p96a | vw::reverse)>,
+                  "phase96 reverse_view over a plain container is unaffected (container-only path)");
+
+    // reverse_iterator over a promoted view's iterator — the whole point of
+    // un-deferring §4.3: zip's iterator is random_access post-flip, so
+    // reverse_iterator over it must now classify as (at least) bidirectional.
+    static_assert(std::bidirectional_iterator<std::reverse_iterator<rg::iterator_t<decltype(p96Zip)>>>,
+                  "phase96 reverse_iterator<zip iterator> bidirectional via the new iterator_traits spec");
+    static_assert(rg::bidirectional_range<decltype(p96Zip | vw::reverse)>,
+                  "phase96 zip_view | views::reverse is now a genuine bidirectional_range");
+    static_assert(
+        std::same_as<std::iterator_traits<std::reverse_iterator<std::vector<int>::iterator>>::iterator_category,
+                    std::random_access_iterator_tag>,
+        "phase96 no-regression pin: reverse_iterator over a plain container iterator unaffected");
+
+    static_assert(std::random_access_iterator<std::move_iterator<std::vector<int>::iterator>>,
+                  "phase96 move_iterator over a container iterator: random_access classification fix");
+    static_assert(std::bidirectional_iterator<std::move_iterator<rg::iterator_t<decltype(p96Zip)>>>,
+                  "phase96 move_iterator ripples a promoted view iterator's new classification");
+
+    static_assert(std::random_access_iterator<std::counted_iterator<std::vector<int>::iterator>>,
+                  "phase96 counted_iterator over a random_access base: classification fix");
+    static_assert(std::forward_iterator<std::counted_iterator<P95FwdOnlyIter>> &&
+                      !std::bidirectional_iterator<std::counted_iterator<P95FwdOnlyIter>>,
+                  "phase96 counted_iterator over a genuinely forward(-only) base: classification fix");
+
+    static_assert(
+        std::same_as<std::iterator_traits<std::basic_const_iterator<rg::iterator_t<decltype(p96Zip)>>>::iterator_category,
+                    std::input_iterator_tag>,
+        "phase96 basic_const_iterator legacy category still capped at input even though iterator_concept ripples");
+
+    // ── §7 audit-fix round: CRIT-1/2/3, HIGH, MED-1/MED-2 ───────────────────
+
+    // CRIT-1: proxy-safe sort/pivot — VALUE checks, not just compiles.
+    // ranges::sort is constexpr-evaluable end to end here (IntroSort/
+    // InsertionSort/MedianPivot/ranges::iter_move/ranges::iter_swap are all
+    // constexpr; only stable_sort/stable_partition/inplace_merge dropped
+    // constexpr in Ф29b-2, none of which this path touches) — confirmed by
+    // direct probe before writing these, not assumed.
+    static_assert(
+        [] {
+            int keys[5]{5, 3, 1, 4, 2}, vals[5]{50, 30, 10, 40, 20};
+            auto zv = vw::zip(keys, vals);
+            rg::sort(zv);
+            int sum = 0;
+            for (int i = 0; i < 5; ++i) sum += keys[i];
+            bool paired = true;
+            for (int i = 0; i < 5; ++i)
+                if (keys[i] * 10 != vals[i]) paired = false;
+            return sum == 15 && paired;
+        }(),
+        "phase96 CRIT-1 InsertionSort proxy-hole-aliasing fixed (sum+pairing preserved)");
+    static_assert(
+        [] {
+            // > kInsertionThreshold(16) elements so ranges::sort exercises
+            // IntroSort's own pivot path, not just the small-run
+            // InsertionSort fallback. keys/vals are INDEPENDENT arrays —
+            // zip(keys,keys) (a self-zip) makes iter_swap cancel itself out
+            // (both "columns" would alias the SAME memory: swapping column 0
+            // then column 1 undoes the first swap), confirmed by direct
+            // probe — a genuine pathology of self-zipping, not a valid
+            // stand-in for two real columns. Corrected from that shape here.
+            int keys[20]{19, 3, 17, 1, 15, 5, 13, 7, 11, 9, 10, 8, 12, 6, 14, 4, 16, 2, 18, 0};
+            int vals[20];
+            for (int i = 0; i < 20; ++i) vals[i] = keys[i] * 10;
+            auto zv = vw::zip(keys, vals);
+            rg::sort(zv);
+            int sum = 0;
+            for (int i = 0; i < 20; ++i) sum += keys[i];
+            bool sorted = true;
+            for (int i = 1; i < 20; ++i)
+                if (keys[i - 1] > keys[i]) sorted = false;
+            bool paired = true;
+            for (int i = 0; i < 20; ++i)
+                if (keys[i] * 10 != vals[i]) paired = false;
+            return sum == 190 && sorted && paired;
+        }(),
+        "phase96 CRIT-1 IntroSort/MedianPivot proxy-pivot-aliasing fixed (20-elem, exercises pivot path)");
+
+    // CRIT-2: iter_rvalue_reference_t / move_iterator dangling.
+    static_assert(
+        std::same_as<std::iter_rvalue_reference_t<rg::iterator_t<decltype(p96Zip)>>,
+                    decltype(rg::iter_move(std::declval<rg::iterator_t<decltype(p96Zip)> &>()))>,
+        "phase96 CRIT-2 iter_rvalue_reference_t routes through ranges::iter_move");
+    static_assert(
+        !std::is_reference_v<typename std::move_iterator<rg::iterator_t<decltype(p96Zip)>>::reference>,
+        "phase96 CRIT-2 move_iterator over a proxy: reference is a VALUE type, no dangle possible");
+
+    // CRIT-3: move_iterator/counted_iterator/reverse_iterator route to the
+    // wrapped proxy's OWN iter_move, not the generic copy-degrading
+    // fallback. Also the ADL-placement check: if the 6 escape-hatch free
+    // functions weren't actually found via ADL, these would resolve to the
+    // CPO's generic fallback instead and the types below would differ.
+    static_assert(
+        std::same_as<decltype(rg::iter_move(
+                         std::declval<std::move_iterator<rg::iterator_t<decltype(p96Zip)>> &>())),
+                    decltype(rg::iter_move(std::declval<rg::iterator_t<decltype(p96Zip)> &>()))>,
+        "phase96 CRIT-3 move_iterator ADL escape hatch found");
+    static_assert(
+        std::same_as<decltype(rg::iter_move(
+                         std::declval<std::reverse_iterator<rg::iterator_t<decltype(p96Zip)>> &>())),
+                    decltype(rg::iter_move(std::declval<rg::iterator_t<decltype(p96Zip)> &>()))>,
+        "phase96 CRIT-3 reverse_iterator ADL escape hatch found");
+    static_assert(
+        std::same_as<decltype(rg::iter_move(
+                         std::declval<std::counted_iterator<rg::iterator_t<decltype(p96Zip)>> &>())),
+                    decltype(rg::iter_move(std::declval<rg::iterator_t<decltype(p96Zip)> &>()))>,
+        "phase96 CRIT-3 counted_iterator ADL escape hatch found");
+
+    // HIGH: document, don't silently flip — pin the CURRENT (draft-conformant)
+    // behavior. See the tracked-GCC-divergence note at zip_view::Iterator::
+    // iter_move (ranges_zip) — boxcxx's formula, as literally drafted, checks
+    // a REFERENCE type's nothrow-move-constructibility (vacuously true via
+    // reference binding), so a throwing move-ctor on the VALUE type does not
+    // flip this to false here, unlike real GCC 15's libstdc++.
+    {
+        struct Phase96ThrowingMoveT {
+            Phase96ThrowingMoveT(Phase96ThrowingMoveT &&) noexcept(false);
+            Phase96ThrowingMoveT() = default;
+        };
+        using Phase96ThrowingZip =
+            decltype(vw::zip(std::declval<std::vector<Phase96ThrowingMoveT> &>(),
+                             std::declval<std::vector<Phase96ThrowingMoveT> &>()));
+        static_assert(
+            noexcept(rg::iter_move(std::declval<rg::iterator_t<Phase96ThrowingZip> &>())),
+            "phase96 HIGH pinned: matches [range.zip.iterator]/20 literally; see SS7.6 for the tracked GCC divergence");
+    }
+
+    // MED-1: zip_transform/adjacent_transform operator* noexcept genuinely
+    // propagates a sub-iterator's own non-noexcept dereference — reusing
+    // P95FwdOnlyIter's operator* (no noexcept specifier), the same fixture
+    // already used above for the adjacent_view iter_move probe.
+    auto p96ZtNonNoexcept =
+        vw::zip_transform([](int a, int b) noexcept { return a + b; }, p96FwdOnly, p96a);
+    static_assert(
+        !noexcept(*std::declval<rg::iterator_t<decltype(p96ZtNonNoexcept)> &>()),
+        "phase96 MED-1 zip_transform operator* propagates non-noexcept sub-iterator deref");
+    auto p96AtNonNoexcept =
+        vw::adjacent_transform<2>(p96FwdOnly, [](int a, int b) noexcept { return a + b; });
+    static_assert(
+        !noexcept(*std::declval<rg::iterator_t<decltype(p96AtNonNoexcept)> &>()),
+        "phase96 MED-1 adjacent_transform operator* propagates non-noexcept sub-iterator deref");
+
+    // MED-2: counted_iterator contiguous rung + operator* noexcept. The
+    // ladder itself now computes contiguous_iterator_tag for a contiguous
+    // base — but counted_iterator<int*> does NOT yet fully MODEL
+    // contiguous_iterator: that concept additionally needs std::to_address,
+    // which for a non-pointer falls back to operator->(), which
+    // counted_iterator doesn't have yet (pre-existing gap, explicitly
+    // deferred to Ф29f-3 alongside reverse_iterator's identical one — not
+    // this batch's scope). random_access_iterator is unaffected either way
+    // (contiguous_iterator_tag derives from random_access_iterator_tag).
+    static_assert(std::is_same_v<typename std::counted_iterator<int *>::iterator_concept,
+                                 std::contiguous_iterator_tag>,
+                  "phase96 MED-2 counted_iterator<int*> ladder computes contiguous_iterator_tag");
+    static_assert(!std::contiguous_iterator<std::counted_iterator<int *>>,
+                  "phase96 MED-2 full contiguous_iterator still blocked on missing operator-> (deferred, Ф29f-3)");
+    static_assert(std::random_access_iterator<std::counted_iterator<int *>>,
+                  "phase96 MED-2 random_access_iterator unaffected by the contiguous rung addition");
+    static_assert(noexcept(*std::declval<std::counted_iterator<int *> &>()),
+                  "phase96 MED-2 counted_iterator::operator* is noexcept when the base's is");
+
+    // ── §8: indirectly_writable conformance fix (P2321 tuple const-assign) ──
+    // GCC-15 parity: sortable<X> for zip/adjacent/cartesian/enumerate must be
+    // {true,true,true,false}, matching real, unmodified GCC 15.2 libstdc++
+    // exactly (independently verified against the real headers before
+    // writing these pins). p96En/p96Zip/p96Adj/p96CpAllVec already defined
+    // above; reused here rather than constructing fresh fixtures.
+    static_assert(std::sortable<rg::iterator_t<decltype(p96Zip)>>,
+                  "phase96 SS8 zip stays sortable (tuple const-assign co-requisite)");
+    static_assert(std::sortable<rg::iterator_t<decltype(p96Adj)>>,
+                  "phase96 SS8 adjacent stays sortable (tuple const-assign co-requisite)");
+    static_assert(std::sortable<rg::iterator_t<decltype(p96CpAllVec)>>,
+                  "phase96 SS8 cartesian_product stays sortable (tuple const-assign co-requisite)");
+    static_assert(!std::sortable<rg::iterator_t<decltype(p96En)>>,
+                  "phase96 SS8 enumerate correctly NOT sortable (mixed value+reference tuple, matches GCC/standard Note 2)");
+
+    // Clean SFINAE rejection, not a hard error deep inside the algorithm
+    // body — the whole point of this fix (pre-fix: ranges::sort(enumerate)
+    // reached MedianPivot's unqualified iter_swap and hard-errored there
+    // instead of being rejected at the sortable<I,Comp,Proj> constraint).
+    static_assert(!Phase96SortCallable<decltype(p96En)>,
+                  "phase96 SS8 ranges::sort(enumerate) is a clean rejection, not a hard error");
+    static_assert(!Phase96NthElementCallable<decltype(p96En)>,
+                  "phase96 SS8 ranges::nth_element(enumerate) is a clean rejection, not a hard error");
+    static_assert(Phase96SortCallable<decltype(p96Zip)>,
+                  "phase96 SS8 ranges::sort(zip) stays callable");
+    static_assert(Phase96SortCallable<decltype(p96Adj)>,
+                  "phase96 SS8 ranges::sort(adjacent) stays callable");
+    static_assert(Phase96SortCallable<decltype(p96CpAllVec)>,
+                  "phase96 SS8 ranges::sort(cartesian_product) stays callable");
+
+    // The strengthened concept itself, spot-checked against the zoo.
+    static_assert(std::indirectly_writable<std::vector<int>::iterator, int>,
+                  "phase96 SS8 indirectly_writable baseline: plain vector iterator");
+    static_assert(
+        std::indirectly_writable<std::back_insert_iterator<std::vector<int>>, int>,
+        "phase96 SS8 indirectly_writable baseline: back_insert_iterator");
+    static_assert(
+        !std::indirectly_writable<rg::iterator_t<decltype(p96En)>,
+                                  std::iter_rvalue_reference_t<rg::iterator_t<decltype(p96En)>>>,
+        "phase96 SS8 indirectly_writable correctly rejects enumerate's mixed-value tuple");
+    static_assert(
+        std::indirectly_writable<rg::iterator_t<decltype(p96Zip)>,
+                                 std::iter_rvalue_reference_t<rg::iterator_t<decltype(p96Zip)>>>,
+        "phase96 SS8 indirectly_writable accepts zip's all-reference tuple (P2321 const-assign)");
+
+    printf("[CXX] PASS phase96: ITER_CONCEPT flip + noexcept sweep "
+           "(promotions land, genuinely-input stays input, noexcept CPO sweep, fallback-chain fixes)\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -15723,6 +16120,7 @@ int main()
     Phase93();
     Phase94();
     Phase95();
+    Phase96();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

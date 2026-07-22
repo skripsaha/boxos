@@ -231,11 +231,42 @@ class zip_view : public view_interface<zip_view<Views...>> {
             }
         }
 
-        friend constexpr auto iter_move(const Iterator &i)
+        // [range.zip.iterator]: Returns: x.current_ <=> y.current_ — tuple's
+        // own lexicographic <=>. Gated on AllRandomAccess, not sized/three_way
+        // (mandatory for the flip's own RA promotion to reach its ceiling —
+        // totally_ordered<I> is a direct conjunct of random_access_iterator).
+        friend constexpr auto operator<=>(const Iterator &a, const Iterator &b)
+            requires AllRandomAccess<Const>
+        {
+            return a.__current <=> b.__current;
+        }
+
+        // NOTE (tracked GCC divergence, not an LWG issue — searched, none found as of
+        // 2026-07-22): matches [range.zip.iterator]/20 EXACTLY as currently drafted —
+        // the second conjunct below checks is_nothrow_move_constructible_v of a
+        // REFERENCE type (iter_rvalue_reference_t<...>), which reference-binding makes
+        // unconditionally true, confirmed against real GCC 15.2. GCC's own libstdc++
+        // computes a more conservative (false) result for element types with a
+        // throwing move constructor — empirically because it checks the VALUE type
+        // (range_value_t<Views>), not the reference type the draft literally names.
+        // boxcxx keeps the literal draft formula (same conjunct shape as adjacent's
+        // and cartesian's own iter_move, both below) rather than silently deviating
+        // to match GCC without a citable issue. Revisit if/when one is filed.
+        friend constexpr auto iter_move(const Iterator &i) noexcept(
+            (noexcept(ranges::iter_move(declval<
+                 const iterator_t<__views_detail::MaybeConst<Const, Views>> &>())) &&
+             ...) &&
+            (is_nothrow_move_constructible_v<iter_rvalue_reference_t<
+                 iterator_t<__views_detail::MaybeConst<Const, Views>>>> &&
+             ...))
         {
             return __views_detail::TupleTransform(ranges::iter_move, i.__current);
         }
         friend constexpr void iter_swap(const Iterator &a, const Iterator &b)
+            noexcept((noexcept(ranges::iter_swap(
+                          declval<const iterator_t<__views_detail::MaybeConst<Const, Views>> &>(),
+                          declval<const iterator_t<__views_detail::MaybeConst<Const, Views>> &>())) &&
+                      ...))
             requires(indirectly_swappable<iterator_t<__views_detail::MaybeConst<Const, Views>>> &&
                      ...)
         {
@@ -430,7 +461,18 @@ class zip_transform_view : public view_interface<zip_transform_view<F, Views...>
         {
         }
 
+        // [range.zip.transform.iterator]: Remarks — the exception spec is
+        // noexcept(invoke(*parent_->fun_, *get<Is>(inner_.current_)...)),
+        // i.e. whatever the body's own invoke call would throw. Deref the
+        // sub-iterator DIRECTLY (not declval<range_reference_t<...>>()) —
+        // declval<T>() for a reference type T is a pure type-level fiction
+        // that can never make the enclosing noexcept(...) false, so it was
+        // silently over-promising regardless of whether the sub-iterator's
+        // own operator* could actually throw.
         constexpr decltype(auto) operator*() const
+            noexcept(noexcept(invoke(
+                *__parent->__fn,
+                (*declval<const iterator_t<__views_detail::MaybeConst<Const, Views>> &>())...)))
         {
             return apply(
                 [&](auto &&...refs) -> decltype(auto) {
@@ -515,6 +557,12 @@ class zip_transform_view : public view_interface<zip_transform_view<F, Views...>
             requires equality_comparable<__ZipIter>
         {
             return a.__inner == b.__inner;
+        }
+        // [range.zip.transform.iterator]: Effects: return x.inner_ <=> y.inner_.
+        friend constexpr auto operator<=>(const Iterator &a, const Iterator &b)
+            requires random_access_range<__ZipView>
+        {
+            return a.__inner <=> b.__inner;
         }
     };
 

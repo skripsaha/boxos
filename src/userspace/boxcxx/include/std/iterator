@@ -101,10 +101,66 @@ template <typename I>
     requires requires(I &i) { *i; }
 using iter_reference_t = decltype(*declval<I &>());
 
+// ranges::iter_move's CPO is defined here — rather than alongside
+// ranges::iter_swap's, later in this file — because iter_rvalue_reference_t
+// directly below needs it: `ranges::iter_move` is a non-dependent qualified
+// name, resolved by ordinary qualified lookup at the point this alias
+// template is PARSED, not deferred to instantiation the way an unqualified,
+// ADL-eligible call would be. So it must already be declared here, in the
+// source text, full stop — no amount of "declare it later and let ADL find
+// it" helps, because there is no ADL step in a qualified call at all.
+// iter_swap has no equivalent early dependent and stays at its original
+// position, alongside advance/next/prev/distance.
+namespace ranges {
+
+namespace __iter_move {
+void iter_move(); // poison pill — force ADL-only lookup of the customisation
+template <class I>
+concept HasAdl = requires(I &&i) { iter_move(static_cast<I &&>(i)); };
+
+// noexcept mirrors [iterator.cust.move]/1: expression-equivalent to the ADL
+// call when one exists, else to *E (both branches of the *E fallback share
+// one noexcept — std::move is always noexcept, so the lvalue/rvalue split
+// below doesn't matter here).
+template <class I>
+constexpr bool NoexceptOf()
+{
+    if constexpr (HasAdl<I>)
+        return noexcept(iter_move(declval<I &&>()));
+    else
+        return noexcept(*declval<I &&>());
+}
+
+struct Fn {
+    template <class I>
+    constexpr decltype(auto) operator()(I &&i) const noexcept(NoexceptOf<I>())
+    {
+        if constexpr (HasAdl<I>)
+            return iter_move(static_cast<I &&>(i));
+        else if constexpr (is_lvalue_reference_v<decltype(*static_cast<I &&>(
+                               i))>)
+            return static_cast<remove_reference_t<decltype(*static_cast<I &&>(
+                i))> &&>(*static_cast<I &&>(i));
+        else
+            return *static_cast<I &&>(i);
+    }
+};
+} // namespace __iter_move
+inline namespace __cpo {
+inline constexpr __iter_move::Fn iter_move{};
+}
+
+} // namespace ranges
+
+// fixed per [readable.traits] / LWG 2106 (a prvalue-returning base iterator,
+// e.g. a proxy view's operator*, must not synthesize a dangling
+// reference-typed alias here) — routes through the customization point
+// instead of a hand-rolled move(*i), so a wrapped proxy's own ADL iter_move
+// participates instead of silently downgrading to a reference into a
+// temporary that's already gone.
 template <typename I>
-    requires requires(I &i) { *i; }
-using iter_rvalue_reference_t =
-    decltype(std::move(*declval<I &>()));
+    requires requires(I &i) { ranges::iter_move(i); }
+using iter_rvalue_reference_t = decltype(ranges::iter_move(declval<I &>()));
 
 // ── iterator concepts ([iterator.concepts]) ─────────────────────────────
 
@@ -128,9 +184,23 @@ template <typename In>
 concept indirectly_readable =
     __iter_impl::IndirectlyReadableImpl<remove_cvref_t<In>>;
 
+// [iterator.concept.writable]: the two const_cast expressions reject
+// iterators with prvalue non-proxy reference types that permit rvalue
+// assignment but not also CONST rvalue assignment (Note 2) — e.g. an
+// iterator returning std::string by value must NOT model
+// indirectly_writable<I, std::string>. This is what correctly distinguishes
+// zip/adjacent/cartesian's all-reference proxy tuples (writable — P2321's
+// const-qualified tuple::operator= makes const_cast<const tuple<T&,...>&&>
+// still assign through the references) from enumerate_view's MIXED
+// tuple<difference_type, T&> (not writable — no const-qualified assignment
+// can write through a genuine const value member).
 template <typename Out, typename T>
 concept indirectly_writable = requires(Out &&o, T &&t) {
     *o = std::forward<T>(t);
+    *std::forward<Out>(o) = std::forward<T>(t);
+    const_cast<const iter_reference_t<Out> &&>(*o) = std::forward<T>(t);
+    const_cast<const iter_reference_t<Out> &&>(*std::forward<Out>(o)) =
+        std::forward<T>(t);
 };
 
 template <typename I>
@@ -183,10 +253,45 @@ concept CategoryAtLeast =
 
 } // namespace __iter_impl
 
+namespace __iter_impl {
+
+// ITER_CONCEPT(I) ([iterator.concepts.general]): I::iterator_concept, else
+// iterator_traits<I>::iterator_concept, else iterator_traits<I>::
+// iterator_category. The two probes below make forming IterConcept<I> a
+// genuine substitution failure (not a hard error) when I has none of the
+// three members — load-bearing for input_iterator's own
+// "requires { typename IterConcept<I>; }" guard just below: without the
+// requires-clause on the alias template, the else-branch of
+// IterConceptHelper would name iterator_traits<I>::iterator_category
+// unconditionally, which is a hard error (not SFINAE) when nothing at all
+// is declared.
+template <typename I>
+concept HasIterConceptMember = requires { typename I::iterator_concept; };
+template <typename I>
+concept HasTraitsIterConcept =
+    requires { typename iterator_traits<I>::iterator_concept; };
+
+template <class I>
+constexpr auto IterConceptHelper()
+{
+    if constexpr (HasIterConceptMember<I>)
+        return type_identity<typename I::iterator_concept>{};
+    else if constexpr (HasTraitsIterConcept<I>)
+        return type_identity<typename iterator_traits<I>::iterator_concept>{};
+    else
+        return type_identity<typename iterator_traits<I>::iterator_category>{};
+}
+template <class I>
+    requires HasIterConceptMember<I> || HasTraitsIterConcept<I> || HasCategory<I>
+using IterConcept = typename decltype(IterConceptHelper<I>())::type;
+
+} // namespace __iter_impl
+
 template <typename I>
 concept input_iterator =
     input_or_output_iterator<I> && indirectly_readable<I> &&
-    __iter_impl::CategoryAtLeast<I, input_iterator_tag>;
+    requires { typename __iter_impl::IterConcept<I>; } &&
+    derived_from<__iter_impl::IterConcept<I>, input_iterator_tag>;
 
 template <typename I, typename T>
 concept output_iterator =
@@ -196,13 +301,13 @@ concept output_iterator =
 template <typename I>
 concept forward_iterator =
     input_iterator<I> &&
-    __iter_impl::CategoryAtLeast<I, forward_iterator_tag> &&
+    derived_from<__iter_impl::IterConcept<I>, forward_iterator_tag> &&
     incrementable<I> && sentinel_for<I, I>;
 
 template <typename I>
 concept bidirectional_iterator =
     forward_iterator<I> &&
-    __iter_impl::CategoryAtLeast<I, bidirectional_iterator_tag> &&
+    derived_from<__iter_impl::IterConcept<I>, bidirectional_iterator_tag> &&
     requires(I i) {
         { --i } -> same_as<I &>;
         { i-- } -> same_as<I>;
@@ -211,7 +316,7 @@ concept bidirectional_iterator =
 template <typename I>
 concept random_access_iterator =
     bidirectional_iterator<I> &&
-    __iter_impl::CategoryAtLeast<I, random_access_iterator_tag> &&
+    derived_from<__iter_impl::IterConcept<I>, random_access_iterator_tag> &&
     totally_ordered<I> && sized_sentinel_for<I, I> &&
     requires(I i, const I j, const iter_difference_t<I> n) {
         { i += n } -> same_as<I &>;
@@ -222,25 +327,6 @@ concept random_access_iterator =
         { j[n] } -> same_as<iter_reference_t<I>>;
     };
 
-namespace __iter_impl {
-// ITER_CONCEPT(I): I::iterator_concept, else iterator_traits<I>::
-// iterator_concept, else iterator_traits<I>::iterator_category.
-template <class I>
-constexpr auto IterConceptHelper()
-{
-    if constexpr (requires { typename I::iterator_concept; })
-        return type_identity<typename I::iterator_concept>{};
-    else if constexpr (requires {
-                           typename iterator_traits<I>::iterator_concept;
-                       })
-        return type_identity<typename iterator_traits<I>::iterator_concept>{};
-    else
-        return type_identity<typename iterator_traits<I>::iterator_category>{};
-}
-template <class I>
-using IterConcept = typename decltype(IterConceptHelper<I>())::type;
-} // namespace __iter_impl
-
 template <typename I>
 concept contiguous_iterator =
     random_access_iterator<I> &&
@@ -250,6 +336,32 @@ concept contiguous_iterator =
     requires(const I &i) {
         { std::to_address(i) } -> same_as<add_pointer_t<iter_reference_t<I>>>;
     };
+
+// ── reverse_iterator's iterator_concept ([reverse.iterator]) ─────────────
+// reverse_iterator itself lives in __bits/iterator_core (textually before
+// the four concepts above, and included standalone by containers that want
+// the pre-C++20 substrate without the concept machinery) — its class body
+// carries only the five legacy iterator_traits members, no iterator_concept.
+// Rather than move the class (which would drag every such container into
+// depending on <concepts>), this dedicated specialization — the same
+// mechanism common_iterator's and counted_iterator's own specializations
+// use — supplies iterator_concept (and the iterator_category RA-cap) from
+// here, where random_access_iterator/bidirectional_iterator are already in
+// scope. reverse_iterator's own class body stays untouched.
+template <typename It>
+struct iterator_traits<reverse_iterator<It>> {
+    using iterator_concept = conditional_t<random_access_iterator<It>,
+                                           random_access_iterator_tag,
+                                           bidirectional_iterator_tag>;
+    using iterator_category = conditional_t<
+        derived_from<typename reverse_iterator<It>::iterator_category,
+                     random_access_iterator_tag>,
+        random_access_iterator_tag, typename reverse_iterator<It>::iterator_category>;
+    using value_type      = typename reverse_iterator<It>::value_type;
+    using difference_type = typename reverse_iterator<It>::difference_type;
+    using pointer          = typename reverse_iterator<It>::pointer;
+    using reference         = typename reverse_iterator<It>::reference;
+};
 
 // ── sentinels ───────────────────────────────────────────────────────────
 
@@ -267,11 +379,30 @@ inline constexpr unreachable_sentinel_t unreachable_sentinel{};
 
 // ── move_iterator ([move.iterators]) ────────────────────────────────────
 
+// iter_move/iter_swap hidden friends ([move.iter.elem]) are deliberately NOT
+// added here: they would need to call ranges::iter_move/ranges::iter_swap,
+// but those CPOs are defined LATER in this same file (below), so the names
+// are not yet declared at this point — the identical layering blocker
+// __bits/iterator_core's reverse_iterator hits (see <iterator>'s
+// iterator_traits<reverse_iterator<It>> specialization), just from file
+// order within <iterator> itself rather than a cross-file split. Without the
+// hidden friends, ranges::iter_move/iter_swap on a move_iterator still fall
+// through to the CPOs' own generic (correct) fallback — the only loss is a
+// wrapped iterator's own custom iter_move/iter_swap not participating.
+// Deferred to Ф29f-3 alongside reverse_iterator's identical gap.
 template <typename It>
 class move_iterator {
 public:
-    using iterator_type     = It;
-    using iterator_category = typename iterator_traits<It>::iterator_category;
+    using iterator_type    = It;
+    using iterator_concept = conditional_t<
+        random_access_iterator<It>, random_access_iterator_tag,
+        conditional_t<bidirectional_iterator<It>, bidirectional_iterator_tag,
+                      conditional_t<forward_iterator<It>, forward_iterator_tag,
+                                    input_iterator_tag>>>;
+    using iterator_category = conditional_t<
+        derived_from<typename iterator_traits<It>::iterator_category,
+                     random_access_iterator_tag>,
+        random_access_iterator_tag, typename iterator_traits<It>::iterator_category>;
     using value_type        = typename iterator_traits<It>::value_type;
     using difference_type   = typename iterator_traits<It>::difference_type;
     using pointer           = It;
@@ -289,7 +420,7 @@ public:
     constexpr const It &base() const & noexcept { return __cur; }
     constexpr It base() && { return std::move(__cur); }
 
-    constexpr reference operator*() const { return std::move(*__cur); }
+    constexpr reference operator*() const { return ranges::iter_move(__cur); }
     constexpr reference operator[](difference_type n) const
     {
         return std::move(__cur[n]);
@@ -449,11 +580,30 @@ constexpr iter_difference_t<I> operator-(const move_iterator<I> &i,
 template <typename I>
 class counted_iterator {
 public:
-    using iterator_type     = I;
+    using iterator_type    = I;
+    // Computed via concepts applied directly to I (matching move_iterator's
+    // own pattern), NOT forwarded from iterator_traits<I> — boxcxx's generic
+    // TraitsImpl only ever synthesises the five legacy members, never
+    // iterator_concept, so a wrapped view iterator (which declares
+    // iterator_concept as its own direct class member, not through a
+    // dedicated iterator_traits specialization) would otherwise silently
+    // fall back to its pinned legacy iterator_category here.
+    // Contiguous rung included so counted_iterator<int*> (etc.) classifies
+    // as contiguous, not merely random-access — matching what a wrapped I's
+    // own I::iterator_concept passthrough would preserve automatically, and
+    // matching contiguous_iterator's own derived_from<IterConcept<I>,
+    // contiguous_iterator_tag> check.
+    using iterator_concept = conditional_t<
+        contiguous_iterator<I>, contiguous_iterator_tag,
+        conditional_t<random_access_iterator<I>, random_access_iterator_tag,
+                      conditional_t<bidirectional_iterator<I>, bidirectional_iterator_tag,
+                                    conditional_t<forward_iterator<I>, forward_iterator_tag,
+                                                  input_iterator_tag>>>>;
     using value_type        = iter_value_t<I>;
     using difference_type   = iter_difference_t<I>;
     using iterator_category = typename iterator_traits<I>::iterator_category;
-    using pointer           = void;
+    using pointer           = conditional_t<contiguous_iterator<I>,
+                                            add_pointer_t<iter_reference_t<I>>, void>;
     using reference         = iter_reference_t<I>;
 
     constexpr counted_iterator() = default;
@@ -466,8 +616,8 @@ public:
     constexpr I base() && { return std::move(__cur); }
     constexpr iter_difference_t<I> count() const noexcept { return __cnt; }
 
-    constexpr decltype(auto) operator*() { return *__cur; }
-    constexpr decltype(auto) operator*() const { return *__cur; }
+    constexpr decltype(auto) operator*() noexcept(noexcept(*__cur)) { return *__cur; }
+    constexpr decltype(auto) operator*() const noexcept(noexcept(*__cur)) { return *__cur; }
     constexpr decltype(auto) operator[](iter_difference_t<I> n) const
         requires random_access_iterator<I>
     {
@@ -728,33 +878,13 @@ concept indirectly_movable_storable =
     constructible_from<iter_value_t<In>, iter_rvalue_reference_t<In>> &&
     assignable_from<iter_value_t<In> &, iter_rvalue_reference_t<In>>;
 
-// ── ranges::iter_move / iter_swap ([iterator.cust]) ──────────────────────
+// ── ranges::iter_swap ([iterator.cust.swap]) ─────────────────────────────
+// ranges::iter_move's own CPO now lives earlier in this file, right after
+// iter_reference_t and before iter_rvalue_reference_t — see the comment
+// there. iter_swap has no early dependent forcing the same move, so it
+// stays here, alongside advance/next/prev/distance below.
 
 namespace ranges {
-
-namespace __iter_move {
-void iter_move(); // poison pill — force ADL-only lookup of the customisation
-template <class I>
-concept HasAdl = requires(I &&i) { iter_move(static_cast<I &&>(i)); };
-
-struct Fn {
-    template <class I>
-    constexpr decltype(auto) operator()(I &&i) const
-    {
-        if constexpr (HasAdl<I>)
-            return iter_move(static_cast<I &&>(i));
-        else if constexpr (is_lvalue_reference_v<decltype(*static_cast<I &&>(
-                               i))>)
-            return static_cast<remove_reference_t<decltype(*static_cast<I &&>(
-                i))> &&>(*static_cast<I &&>(i));
-        else
-            return *static_cast<I &&>(i);
-    }
-};
-} // namespace __iter_move
-inline namespace __cpo {
-inline constexpr __iter_move::Fn iter_move{};
-}
 
 namespace __iter_swap {
 template <class T, class U>
@@ -778,6 +908,24 @@ concept FallbackSwap =
     indirectly_movable_storable<remove_reference_t<A>, remove_reference_t<B>> &&
     indirectly_movable_storable<remove_reference_t<B>, remove_reference_t<A>>;
 
+// noexcept mirrors [iterator.cust.swap]/2-4: the exposition-only
+// iter-exchange-move's own noexcept clause for the fallback branch, or the
+// noexcept of whichever of the ADL/ranges::swap alternatives the CPO selects.
+template <class A, class B>
+constexpr bool NoexceptOf()
+{
+    if constexpr (HasAdl<A, B>)
+        return noexcept(iter_swap(declval<A &&>(), declval<B &&>()));
+    else if constexpr (Readswap<A, B>)
+        return noexcept(ranges::swap(*declval<A &&>(), *declval<B &&>()));
+    else
+        return noexcept(iter_value_t<remove_reference_t<A>>(
+                   ranges::iter_move(declval<A &&>()))) &&
+               noexcept(*declval<A &&>() = ranges::iter_move(declval<B &&>())) &&
+               noexcept(*declval<B &&>() =
+                            declval<iter_value_t<remove_reference_t<A>> &&>());
+}
+
 struct Fn {
     // The CPO is a partial function: without this constraint operator() is
     // callable for ANY pair (the ill-formed body only bites on instantiation),
@@ -785,7 +933,7 @@ struct Fn {
     // wrongly hold for non-swappable iterators (e.g. const int*).
     template <class A, class B>
         requires HasAdl<A, B> || Readswap<A, B> || FallbackSwap<A, B>
-    constexpr void operator()(A &&a, B &&b) const
+    constexpr void operator()(A &&a, B &&b) const noexcept(NoexceptOf<A, B>())
     {
         if constexpr (HasAdl<A, B>)
             iter_swap(static_cast<A &&>(a), static_cast<B &&>(b));
@@ -1105,6 +1253,81 @@ template <typename I1, typename I2, typename R, typename P1 = identity,
 concept indirectly_comparable =
     indirect_binary_predicate<R, projected<I1, P1>, projected<I2, P2>>;
 
+// ── ADL escape hatch: iter_move/iter_swap for pre-CPO adaptors
+//    ([move.iter.elem], [counted.iter.cust], [reverse.iter.nav]) ──────────
+// move_iterator, counted_iterator (both above, pre-CPO in THIS file) and
+// reverse_iterator (__bits/iterator_core, can never see the CPOs from
+// inside its own class body) each need a real customization so a wrapped
+// proxy's OWN iter_move/iter_swap participates instead of the CPOs' generic
+// fallback silently downgrading move to copy (or, for move_iterator,
+// dangling — see iter_rvalue_reference_t's own fix above). Free functions
+// in their enclosing namespace (std, not std::ranges) are ADL-discoverable
+// exactly like hidden friends — the actual lookup happens at the point
+// external code calls ranges::iter_move/iter_swap on one of these types,
+// always after this whole header has been parsed, so textual position
+// relative to the class body doesn't matter, only namespace + "declared
+// before use". Placed here (needs indirectly_swappable, just above, for the
+// iter_swap overloads' constraint) rather than up near move_iterator's own
+// definition.
+
+template <typename It>
+constexpr iter_rvalue_reference_t<It> iter_move(const move_iterator<It> &i)
+    noexcept(noexcept(ranges::iter_move(i.base())))
+{
+    return ranges::iter_move(i.base());
+}
+template <typename It, typename It2>
+    requires indirectly_swappable<It, It2>
+constexpr void iter_swap(const move_iterator<It> &x, const move_iterator<It2> &y)
+    noexcept(noexcept(ranges::iter_swap(x.base(), y.base())))
+{
+    ranges::iter_swap(x.base(), y.base());
+}
+
+template <typename I>
+    requires input_iterator<I>
+constexpr decltype(auto) iter_move(const counted_iterator<I> &i)
+    noexcept(noexcept(ranges::iter_move(i.base())))
+{
+    return ranges::iter_move(i.base());
+}
+template <typename I, typename I2>
+    requires indirectly_swappable<I, I2>
+constexpr void iter_swap(const counted_iterator<I> &x, const counted_iterator<I2> &y)
+    noexcept(noexcept(ranges::iter_swap(x.base(), y.base())))
+{
+    ranges::iter_swap(x.base(), y.base());
+}
+
+// reverse_iterator's "current element" is always one-before its stored
+// position (its own operator* makes an identical local copy-then-decrement:
+// "It tmp = __cur; return *--tmp;", __bits/iterator_core) — mirrored here
+// via base() (which already returns It by value) rather than reaching for
+// the private __cur, so no class-body access is needed.
+template <typename It>
+constexpr iter_rvalue_reference_t<It> iter_move(const reverse_iterator<It> &i)
+    noexcept(is_nothrow_copy_constructible_v<It> &&
+             noexcept(--declval<It &>()) &&
+             noexcept(ranges::iter_move(declval<It &>())))
+{
+    It tmp = i.base();
+    --tmp;
+    return ranges::iter_move(tmp);
+}
+template <typename It, typename It2>
+    requires indirectly_swappable<It, It2>
+constexpr void iter_swap(const reverse_iterator<It> &x, const reverse_iterator<It2> &y)
+    noexcept(is_nothrow_copy_constructible_v<It> && is_nothrow_copy_constructible_v<It2> &&
+             noexcept(--declval<It &>()) && noexcept(--declval<It2 &>()) &&
+             noexcept(ranges::iter_swap(declval<It &>(), declval<It2 &>())))
+{
+    It xtmp = x.base();
+    --xtmp;
+    It2 ytmp = y.base();
+    --ytmp;
+    ranges::iter_swap(xtmp, ytmp);
+}
+
 // ── algorithm-requirement concepts ([alg.req.*]) ─────────────────────────
 
 template <typename I>
@@ -1395,6 +1618,8 @@ public:
         requires indirectly_swappable<I, I2>
     friend constexpr void iter_swap(const common_iterator &x,
                                     const common_iterator<I2, S2> &y)
+        noexcept(noexcept(ranges::iter_swap(declval<const I &>(),
+                                            declval<const I2 &>())))
     {
         ranges::iter_swap(x.__it, y.__it);
     }
