@@ -214,11 +214,29 @@ class cartesian_product_view : public view_interface<cartesian_product_view<Firs
             return x.__current <=> y.__current;
         }
 
-        friend constexpr auto iter_move(const Iterator &i)
+        // NOTE: matches [range.cartesian.iterator]/33 exactly as drafted — see the
+        // longer tracked-GCC-divergence note at zip_view::Iterator::iter_move
+        // (ranges_zip) for why the is_nothrow_move_constructible_v conjunct below
+        // is a structurally-vacuous reference-type check, not an oversight.
+        friend constexpr auto iter_move(const Iterator &i) noexcept(
+            (noexcept(ranges::iter_move(declval<const iterator_t<__First> &>())) &&
+             (noexcept(ranges::iter_move(declval<
+                  const iterator_t<__views_detail::MaybeConst<Const, Vs>> &>())) &&
+              ...)) &&
+            (is_nothrow_move_constructible_v<iter_rvalue_reference_t<iterator_t<__First>>> &&
+             (is_nothrow_move_constructible_v<iter_rvalue_reference_t<
+                  iterator_t<__views_detail::MaybeConst<Const, Vs>>>> &&
+              ...)))
         {
             return __views_detail::TupleTransform(ranges::iter_move, i.__current);
         }
         friend constexpr void iter_swap(const Iterator &x, const Iterator &y)
+            noexcept(noexcept(ranges::iter_swap(declval<const iterator_t<__First> &>(),
+                                                declval<const iterator_t<__First> &>())) &&
+                     (noexcept(ranges::iter_swap(
+                          declval<const iterator_t<__views_detail::MaybeConst<Const, Vs>> &>(),
+                          declval<const iterator_t<__views_detail::MaybeConst<Const, Vs>> &>())) &&
+                      ...))
             requires indirectly_swappable<iterator_t<__First>> &&
                      (indirectly_swappable<iterator_t<__views_detail::MaybeConst<Const, Vs>>> && ...)
         {

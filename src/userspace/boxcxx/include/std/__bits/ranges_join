@@ -313,10 +313,12 @@ struct join_view<V>::Iterator {
     }
 
     friend constexpr decltype(auto) iter_move(const Iterator &i)
+        noexcept(noexcept(ranges::iter_move(*i.__inner)))
     {
         return ranges::iter_move(*i.__inner);
     }
     friend constexpr void iter_swap(const Iterator &x, const Iterator &y)
+        noexcept(noexcept(ranges::iter_swap(*x.__inner, *y.__inner)))
         requires indirectly_swappable<InnerIter>
     {
         ranges::iter_swap(*x.__inner, *y.__inner);

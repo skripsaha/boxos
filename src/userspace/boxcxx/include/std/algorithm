@@ -18,6 +18,7 @@
 #include <compare>
 #include <cstddef>
 #include <initializer_list>
+#include <iterator>
 #include <new>
 #include <type_traits>
 #include <utility>
@@ -529,7 +530,13 @@ template <typename In, typename Out, typename Pred>
 constexpr Out unique_copy(In first, In last, Out out, Pred pred)
 {
     if (first == last) return out;
-    auto prev = *first;
+    // For a proxy iterator, tuple<int&,int&>'s operator= writes THROUGH the
+    // held references (they can't rebind) — auto prev = *first would deduce
+    // that same reference-holding type, so `prev = *first;` below would
+    // retroactively overwrite the array slot prev was originally bound to,
+    // corrupting the SOURCE, which unique_copy must never touch. Copy (not
+    // ranges::iter_move — the predicate re-reads prev on every iteration).
+    iter_value_t<In> prev = *first;
     *out      = prev;
     ++out;
     for (++first; first != last; ++first) {
@@ -875,8 +882,17 @@ constexpr void InsertionSort(It first, It last, Comp comp)
 {
     if (first == last) return;
     for (It i = first + 1; i != last; ++i) {
-        auto value = std::move(*i);
-        It hole    = i;
+        // A proxy iterator's operator* returns a fresh reference-holding
+        // prvalue (e.g. zip's tuple<int&,int&>) — `auto value = std::move(*i)`
+        // would deduce that SAME reference-holding type, so value silently
+        // ALIASES the slots *i does rather than snapshotting them; a later
+        // `*hole = std::move(*(hole-1))` retroactively corrupts what value
+        // "holds". iter_value_t<It> is the OWNED value type, and
+        // ranges::iter_move (not std::move(*i)) routes through the wrapped
+        // iterator's own customization, so this also works for move-only
+        // proxy element types.
+        iter_value_t<It> value = ranges::iter_move(i);
+        It hole                = i;
         while (hole != first && comp(value, *(hole - 1))) {
             *hole = std::move(*(hole - 1));
             --hole;
@@ -914,10 +930,14 @@ constexpr void IntroSort(It first, It last, int depth, Comp comp)
             return;
         }
         It pivot = MedianPivot(first, last, comp);
-        // Hoare-style partition around the median value.
-        auto pv = *pivot;
-        It lo   = first;
-        It hi   = last - 1;
+        // Hoare-style partition around the median value. pv is read-only
+        // (compared, never written back) but the loop's own iter_swap(lo,hi)
+        // CAN touch pivot's slot — auto pv = *pivot would (for a proxy
+        // iterator) alias that slot rather than snapshot it, corrupting the
+        // comparison mid-partition. iter_value_t<It> is a genuine copy.
+        iter_value_t<It> pv = *pivot;
+        It lo = first;
+        It hi = last - 1;
         for (;;) {
             while (comp(*lo, pv)) ++lo;
             while (comp(pv, *hi)) --hi;
@@ -999,7 +1019,10 @@ constexpr void nth_element(It first, It nth, It last, Comp comp)
             return;
         }
         It pivot = __algo_impl::MedianPivot(first, last, comp);
-        auto pv  = *pivot;
+        // Same proxy-aliasing risk as IntroSort's identical pivot pattern
+        // (this loop's own iter_swap(lo,hi) can touch pivot's slot) —
+        // iter_value_t<It> is a genuine copy, not an aliased reference.
+        iter_value_t<It> pv = *pivot;
         It lo    = first;
         It hi    = last - 1;
         for (;;) {
@@ -1082,8 +1105,14 @@ void BufferedMerge(It first, It middle, It last, T *buf, Comp comp)
 {
     T *buf_end = buf;
     try {
+        // buf is separate storage (no aliasing risk with the source range),
+        // but std::move(*p) still bypasses ranges::iter_move — for a
+        // move-only element type inside a proxy (T's own converting
+        // constructor tries to copy-construct from a forwarded-as-lvalue
+        // reference) that hard-fails to compile. ranges::iter_move routes
+        // through the wrapped iterator's own customization instead.
         for (It p = first; p != middle; ++p, ++buf_end)
-            ::new (static_cast<void *>(buf_end)) T(std::move(*p));
+            ::new (static_cast<void *>(buf_end)) T(ranges::iter_move(p));
     } catch (...) {
         for (T *p = buf; p != buf_end; ++p) p->~T();
         throw;

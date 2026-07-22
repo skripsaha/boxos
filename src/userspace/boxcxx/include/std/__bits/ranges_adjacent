@@ -41,6 +41,27 @@ using InvokeResultRepeated = decltype(RepeatInvoke<F, T>(make_index_sequence<N>{
 template <typename F, typename T, size_t N>
 concept InvocableRepeated = requires { typename InvokeResultRepeated<F, T, N>; };
 
+// Same N-repetition idiom as RepeatInvoke above, but for adjacent_transform_
+// view::Iterator::operator*'s noexcept clause ([range.adjacent.transform.
+// iterator]/5's Remarks: noexcept(invoke(*parent_->fun_, *current_...))) — a
+// plain fold cannot repeat an expression N times over a non-pack type, so
+// this walks an index_sequence<Is...> the same way RepeatInvoke's trailing
+// return type does. Takes the ITERATOR type and dereferences it directly
+// (*declval<const IterT&>()), NOT declval<ReferenceType>() — declval<T>()
+// for a reference type is a pure type-level fiction that can never make the
+// enclosing noexcept(...) false, silently over-promising regardless of
+// whether the sub-iterator's own operator* could actually throw.
+template <typename Callable, typename IterT, size_t... Is>
+constexpr bool NoexceptInvokeRepeatedImpl(index_sequence<Is...>)
+{
+    return noexcept(invoke(declval<Callable>(), (void(Is), *declval<const IterT &>())...));
+}
+template <typename Callable, typename IterT, size_t N>
+constexpr bool NoexceptInvokeRepeated()
+{
+    return NoexceptInvokeRepeatedImpl<Callable, IterT>(make_index_sequence<N>{});
+}
+
 } // namespace __views_detail
 
 // ── adjacent_view ([range.adjacent]) ──────────────────────────────────────
@@ -208,11 +229,19 @@ class adjacent_view : public view_interface<adjacent_view<V, N>> {
             return a.__current.back() <=> b.__current.back();
         }
 
-        friend constexpr auto iter_move(const Iterator &i)
+        // NOTE: matches [range.adjacent.iterator]/30 exactly as drafted — see the
+        // longer tracked-GCC-divergence note at zip_view::Iterator::iter_move
+        // (ranges_zip) for why the is_nothrow_move_constructible_v conjunct below
+        // is a structurally-vacuous reference-type check, not an oversight.
+        friend constexpr auto iter_move(const Iterator &i) noexcept(
+            noexcept(ranges::iter_move(declval<const iterator_t<Base> &>())) &&
+            is_nothrow_move_constructible_v<iter_rvalue_reference_t<iterator_t<Base>>>)
         {
             return __views_detail::TupleTransform(ranges::iter_move, i.__current);
         }
         friend constexpr void iter_swap(const Iterator &a, const Iterator &b)
+            noexcept(noexcept(ranges::iter_swap(declval<iterator_t<Base>>(),
+                                                declval<iterator_t<Base>>())))
             requires indirectly_swappable<iterator_t<Base>>
         {
             [&]<size_t... Is>(index_sequence<Is...>) {
@@ -393,6 +422,9 @@ class adjacent_transform_view : public view_interface<adjacent_transform_view<V,
         }
 
         constexpr decltype(auto) operator*() const
+            noexcept(__views_detail::NoexceptInvokeRepeated<
+                     __views_detail::MaybeConst<Const, F> &,
+                     iterator_t<__views_detail::MaybeConst<Const, V>>, N>())
         {
             return apply(
                 [&](auto &&...refs) -> decltype(auto) {

@@ -8,9 +8,14 @@
 // boxcxx notes (documented, safe for the closed type set):
 //   • IOTA-DIFF-T is realised over builtin integers only: for a 64-bit W it
 //     is __int128; a boundless signed-integer-class type is not provided.
-//   • iota / repeat iterators carry a real-strength iterator_category (the
-//     boxcxx range concepts key on iterator_category, not iterator_concept —
-//     the same convention transform_view already follows).
+//   • Since Ф29f-1 (the ITER_CONCEPT flip), the range concepts key on
+//     iterator_concept, not iterator_category — iota_view::Iterator's
+//     iterator_category is therefore pinned to input_iterator_tag
+//     ([range.iota.iterator]/2: operator* returns W by value, so the
+//     legacy category can never exceed input regardless of iterator_concept's
+//     computed strength). repeat_view::Iterator keeps a real-strength
+//     iterator_category unconditionally — its operator* returns a genuine
+//     const W&, which does satisfy LegacyForwardIterator.
 #ifndef BOXCXX_BITS_RANGES_FACTORY
 #define BOXCXX_BITS_RANGES_FACTORY
 
@@ -204,7 +209,9 @@ struct iota_view<W, Bound>::Iterator {
                       bidirectional_iterator_tag,
                       conditional_t<incrementable<W>, forward_iterator_tag,
                                     input_iterator_tag>>>;
-    using iterator_category = iterator_concept;
+    // operator* returns W by value, never a stable reference, so the legacy
+    // category never rises above input — [range.iota.iterator]/2.
+    using iterator_category = input_iterator_tag;
     using value_type        = W;
     using difference_type   = __views_detail::IotaDiffT<W>;
     using pointer           = void;
