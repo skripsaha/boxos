@@ -6,6 +6,7 @@
 
 #include <__bits/rb_tree>
 #include <__bits/node_handle>
+#include <__bits/ranges_core>
 #include <compare>
 #include <functional>
 #include <initializer_list>
@@ -58,6 +59,12 @@ public:
         : __t(comp, a)
     {
         insert(first, last);
+    }
+    template <ContainerCompatibleRange<value_type> R>
+    set(from_range_t, R &&rg, const Comp &comp = Comp(), const Alloc &a = Alloc())
+        : __t(comp, a)
+    {
+        insert_range(std::forward<R>(rg));
     }
     set(initializer_list<Key> il, const Comp &comp = Comp(),
         const Alloc &a = Alloc())
@@ -118,6 +125,11 @@ public:
         for (; first != last; ++first) __t.EmplaceUnique(*first);
     }
     void insert(initializer_list<Key> il) { insert(il.begin(), il.end()); }
+    template <ContainerCompatibleRange<value_type> R>
+    void insert_range(R &&rg)
+    {
+        for (auto &&v : rg) __t.EmplaceUnique(std::forward<decltype(v)>(v));
+    }
     template <typename... Args>
     pair<iterator, bool> emplace(Args &&...args)
     {
@@ -304,6 +316,13 @@ public:
     {
         insert(first, last);
     }
+    template <ContainerCompatibleRange<value_type> R>
+    multiset(from_range_t, R &&rg, const Comp &comp = Comp(),
+             const Alloc &a = Alloc())
+        : __t(comp, a)
+    {
+        insert_range(std::forward<R>(rg));
+    }
     multiset(initializer_list<Key> il, const Comp &comp = Comp(),
              const Alloc &a = Alloc())
         : __t(comp, a)
@@ -364,6 +383,11 @@ public:
         for (; first != last; ++first) __t.EmplaceMulti(*first);
     }
     void insert(initializer_list<Key> il) { insert(il.begin(), il.end()); }
+    template <ContainerCompatibleRange<value_type> R>
+    void insert_range(R &&rg)
+    {
+        for (auto &&v : rg) __t.EmplaceMulti(std::forward<decltype(v)>(v));
+    }
     template <typename... Args>
     iterator emplace(Args &&...args)
     {
@@ -581,6 +605,26 @@ typename multiset<K, C, A>::size_type erase_if(multiset<K, C, A> &s, Pred pred)
     }
     return removed;
 }
+
+// ── deduction guides ([set.deduct] / [multiset.deduct]) ──────────────────
+// Iterator-pair and from_range_t forms only — same rationale as map's.
+template <typename It, typename Comp = less<iter_value_t<It>>,
+          typename Alloc = allocator<iter_value_t<It>>>
+set(It, It, Comp = Comp(), Alloc = Alloc()) -> set<iter_value_t<It>, Comp, Alloc>;
+
+template <ranges::input_range R, typename Comp = less<ranges::range_value_t<R>>,
+          typename Alloc = allocator<ranges::range_value_t<R>>>
+set(from_range_t, R &&, Comp = Comp(), Alloc = Alloc())
+    -> set<ranges::range_value_t<R>, Comp, Alloc>;
+
+template <typename It, typename Comp = less<iter_value_t<It>>,
+          typename Alloc = allocator<iter_value_t<It>>>
+multiset(It, It, Comp = Comp(), Alloc = Alloc()) -> multiset<iter_value_t<It>, Comp, Alloc>;
+
+template <ranges::input_range R, typename Comp = less<ranges::range_value_t<R>>,
+          typename Alloc = allocator<ranges::range_value_t<R>>>
+multiset(from_range_t, R &&, Comp = Comp(), Alloc = Alloc())
+    -> multiset<ranges::range_value_t<R>, Comp, Alloc>;
 
 } // namespace std
 

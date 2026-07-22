@@ -1,15 +1,15 @@
 // boxcxx — <ranges> (core)
-// Range concepts, the begin/end/size/data/empty CPOs and the associated
-// type aliases — the substrate containers and Ф7B+ views build on.
-// Views themselves (view_interface, ref/owning_view, views::all/take/
-// drop/filter/transform) are the next chunk per the owner's split.
-//
-// CPO resolution here is member → ADL (std::begin/end being visible
-// generic fallbacks) → array decay; the full poison-pill ceremony is
-// deliberately simplified — tracked in the epic leftovers.
+// The range concepts, CPOs and associated type aliases now live in
+// <__bits/ranges_core> (a leaf header shared with the containers that need
+// ContainerCompatibleRange). This file adds the view machinery (elements_of,
+// dangling, view_base/view/viewable_range) plus, via the includes below, the
+// full views/adaptors graph (view_interface, ref/owning_view, the pipe
+// machinery, all/take/drop/filter/transform, the range factories, and every
+// Ф29 view) and ranges::to.
 #ifndef BOXCXX_RANGES
 #define BOXCXX_RANGES
 
+#include <__bits/ranges_core>
 #include <concepts>
 #include <cstddef>
 #include <iterator>
@@ -31,203 +31,6 @@ class allocator;
 
 namespace ranges {
 
-// ── CPOs ────────────────────────────────────────────────────────────────
-
-namespace __cpo {
-
-struct Begin {
-    template <typename T, size_t N>
-    constexpr T *operator()(T (&arr)[N]) const noexcept
-    {
-        return arr;
-    }
-    template <typename R>
-        requires requires(R &r) {
-            { r.begin() } -> input_or_output_iterator;
-        }
-    constexpr auto operator()(R &r) const noexcept(noexcept(r.begin()))
-    {
-        return r.begin();
-    }
-    template <typename R>
-        requires(!requires(R &r) {
-            { r.begin() } -> input_or_output_iterator;
-        }) && requires(R &r) {
-            { begin(r) } -> input_or_output_iterator;
-        }
-    constexpr auto operator()(R &r) const noexcept(noexcept(begin(r)))
-    {
-        return begin(r);
-    }
-};
-
-struct End {
-    template <typename T, size_t N>
-    constexpr T *operator()(T (&arr)[N]) const noexcept
-    {
-        return arr + N;
-    }
-    template <typename R>
-        requires requires(R &r) { r.begin(); r.end(); }
-    constexpr auto operator()(R &r) const noexcept(noexcept(r.end()))
-    {
-        return r.end();
-    }
-    template <typename R>
-        requires(!requires(R &r) { r.end(); }) && requires(R &r) {
-            begin(r);
-            end(r);
-        }
-    constexpr auto operator()(R &r) const noexcept(noexcept(end(r)))
-    {
-        return end(r);
-    }
-};
-
-struct Size {
-    template <typename T, size_t N>
-    constexpr size_t operator()(const T (&)[N]) const noexcept
-    {
-        return N;
-    }
-    template <typename R>
-        requires requires(R &r) {
-            { r.size() } -> integral;
-        }
-    constexpr auto operator()(R &r) const noexcept(noexcept(r.size()))
-    {
-        return r.size();
-    }
-    template <typename R>
-        requires(!requires(R &r) {
-            { r.size() } -> integral;
-        }) && requires(R &r) {
-            { End{}(r) - Begin{}(r) } -> integral;
-        }
-    constexpr auto operator()(R &r) const
-    {
-        auto d = End{}(r) - Begin{}(r);
-        return static_cast<make_unsigned_t<decltype(d)>>(d);
-    }
-};
-
-struct Empty {
-    template <typename R>
-        requires requires(R &r) {
-            { r.empty() } -> convertible_to<bool>;
-        }
-    constexpr bool operator()(R &r) const
-    {
-        return static_cast<bool>(r.empty());
-    }
-    template <typename R>
-        requires(!requires(R &r) { r.empty(); }) &&
-                requires(R &r) { Size{}(r); }
-    constexpr bool operator()(R &r) const
-    {
-        return Size{}(r) == 0;
-    }
-    template <typename R>
-        requires(!requires(R &r) { r.empty(); }) &&
-                (!requires(R &r) { Size{}(r); }) &&
-                requires(R &r) { Begin{}(r) == End{}(r); }
-    constexpr bool operator()(R &r) const
-    {
-        return Begin{}(r) == End{}(r);
-    }
-};
-
-struct Data {
-    template <typename R>
-        requires requires(R &r) {
-            { r.data() } -> same_as<add_pointer_t<remove_reference_t<
-                                decltype(*Begin{}(declval<R &>()))>>>;
-        }
-    constexpr auto operator()(R &r) const noexcept(noexcept(r.data()))
-    {
-        return r.data();
-    }
-    template <typename R>
-        requires(!requires(R &r) { r.data(); }) && requires(R &r) {
-            requires is_pointer_v<decltype(Begin{}(r))>;
-        }
-    constexpr auto operator()(R &r) const
-    {
-        return Begin{}(r);
-    }
-};
-
-} // namespace __cpo
-
-inline namespace __cpo_objects {
-inline constexpr __cpo::Begin begin{};
-inline constexpr __cpo::End end{};
-inline constexpr __cpo::Size size{};
-inline constexpr __cpo::Empty empty{};
-inline constexpr __cpo::Data data{};
-} // namespace __cpo_objects
-
-template <typename R>
-constexpr auto ssize(R &&r)
-{
-    auto n = ranges::size(r);
-    return static_cast<common_type_t<ptrdiff_t, make_signed_t<decltype(n)>>>(
-        n);
-}
-
-// ── associated types ([range.access], [range.req]) ──────────────────────
-
-template <typename R>
-using iterator_t = decltype(ranges::begin(declval<R &>()));
-template <typename R>
-using sentinel_t = decltype(ranges::end(declval<R &>()));
-template <typename R>
-using range_difference_t = iter_difference_t<iterator_t<R>>;
-template <typename R>
-using range_value_t = iter_value_t<iterator_t<R>>;
-template <typename R>
-using range_reference_t = iter_reference_t<iterator_t<R>>;
-template <typename R>
-using range_size_t = decltype(ranges::size(declval<R &>()));
-
-// ── range concepts ([range.range] ff.) ──────────────────────────────────
-
-template <typename R>
-concept range = requires(R &r) {
-    ranges::begin(r);
-    ranges::end(r);
-};
-
-template <typename R>
-inline constexpr bool enable_borrowed_range = false;
-
-template <typename R>
-concept borrowed_range =
-    range<R> && (is_lvalue_reference_v<R> ||
-                 enable_borrowed_range<remove_cvref_t<R>>);
-
-template <typename R>
-concept sized_range = range<R> && requires(R &r) { ranges::size(r); };
-
-template <typename R>
-concept input_range = range<R> && input_iterator<iterator_t<R>>;
-template <typename R>
-concept forward_range = input_range<R> && forward_iterator<iterator_t<R>>;
-template <typename R>
-concept bidirectional_range =
-    forward_range<R> && bidirectional_iterator<iterator_t<R>>;
-template <typename R>
-concept random_access_range =
-    bidirectional_range<R> && random_access_iterator<iterator_t<R>>;
-template <typename R>
-concept contiguous_range =
-    random_access_range<R> && contiguous_iterator<iterator_t<R>> &&
-    requires(R &r) {
-        { ranges::data(r) } -> same_as<add_pointer_t<range_reference_t<R>>>;
-    };
-template <typename R, typename T>
-concept output_range = range<R> && output_iterator<iterator_t<R>, T>;
-
 // ── elements_of ([range.elementsof], C++23) ─────────────────────────────
 // Tags a range (plus an allocator) for recursive yielding by std::generator
 // (co_yield ranges::elements_of(inner)). allocator<byte> is the default;
@@ -243,10 +46,6 @@ struct elements_of {
 template <typename _Range, typename _Allocator = allocator<byte>>
 elements_of(_Range &&, _Allocator = _Allocator())
     -> elements_of<_Range &&, _Allocator>;
-
-template <typename R>
-concept common_range =
-    range<R> && same_as<iterator_t<R>, sentinel_t<R>>;
 
 // ── dangling / borrowed_iterator_t ([range.dangling]) ────────────────────
 // Inert marker returned in place of an iterator by algorithms that took an
@@ -353,6 +152,10 @@ using borrowed_subrange_t =
 #include <__bits/ranges_chunk>  // chunk_view (2 specs) + chunk_by_view
 #include <__bits/ranges_slide>  // slide_view (reuses ToUnsignedLike)
 #include <__bits/ranges_stride> // stride_view (reuses DivCeil, ToUnsignedLike)
+
+// ranges::to (Ф29f-2): conversion from a range to a container. Tail
+// position — needs views::transform for its range-of-ranges recursive case.
+#include <__bits/ranges_to>
 
 // ── range access const/rvalue aliases ([range.access], C++23) ───────────
 // const_iterator_t / const_sentinel_t / range_const_reference_t live here

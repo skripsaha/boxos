@@ -16003,6 +16003,567 @@ void Phase96()
            "(promotions land, genuinely-input stays input, noexcept CPO sweep, fallback-chain fixes)\n");
 }
 
+// ── Phase97 fixtures (Ф29f-2: ranges::to + container range-members) ──────
+
+// Branch (c) probe: constructible ONLY from a genuine (Iterator,Sentinel)
+// pair. Every boxcxx container upgraded in this phase now HAS a
+// from_range_t ctor, so ranges::to's branch (b) would otherwise always
+// preempt branch (c) for them — this type has neither (a)'s nor (b)'s
+// shape, isolating (c)/LWG3733 as the only reachable path. Iter/Sent are
+// concept-constrained (not bare template params) so a (from_range_t, R)
+// call is cleanly SFINAE-rejected rather than spuriously matching.
+struct P97IterPairOnly {
+    std::vector<int> v;
+    template <std::input_iterator Iter, std::sentinel_for<Iter> Sent>
+    P97IterPairOnly(Iter first, Sent last)
+    {
+        for (; first != last; ++first) v.push_back(*first);
+    }
+};
+
+// Branch (d) probe: default-constructible + push_back, nothing else — no
+// (R,Args...), no (from_range_t,R,Args...), no (Iterator,Sentinel,Args...)
+// ctor, so only the default-construct+insert ladder rung can ever fire.
+// Also models ReservableContainer (sized_range + reserve/capacity/
+// max_size), so the reserve-path can be checked precisely.
+struct P97ReservableSink {
+    using value_type = int;
+    std::vector<int> v;
+    P97ReservableSink() = default;
+    void push_back(int x) { v.push_back(x); }
+    void reserve(std::size_t n) { v.reserve(n); }
+    std::size_t capacity() const { return v.capacity(); }
+    std::size_t max_size() const { return v.max_size(); }
+    std::size_t size() const { return v.size(); }
+    auto begin() const { return v.begin(); }
+    auto end() const { return v.end(); }
+};
+
+// A genuinely input-only char range (P95InputRange's shape, char-valued) —
+// <string>'s range-members need a char-convertible element type to
+// meaningfully exercise ContainerCompatibleRange<R,C>.
+struct P97CharInputSentinel {
+    int limit;
+};
+struct P97CharInputIter {
+    const char *base;
+    int cur = 0;
+    using value_type        = char;
+    using difference_type   = std::ptrdiff_t;
+    using iterator_concept  = std::input_iterator_tag;
+    using iterator_category = std::input_iterator_tag;
+    using reference          = char;
+    using pointer             = void;
+    char operator*() const { return base[cur]; }
+    P97CharInputIter &operator++() { ++cur; return *this; }
+    void operator++(int) { ++cur; }
+    friend bool operator==(const P97CharInputIter &i, P97CharInputSentinel s)
+    {
+        return i.cur == s.limit;
+    }
+};
+struct P97CharInputRange {
+    const char *text;
+    int count;
+    P97CharInputRange(const char *t, int n) : text(t), count(n) {}
+    P97CharInputIter begin() const { return P97CharInputIter{text, 0}; }
+    P97CharInputSentinel end() const { return P97CharInputSentinel{count}; }
+};
+static_assert(!std::ranges::forward_range<P97CharInputRange>,
+              "phase97 char fixture must genuinely be input-only");
+
+void Phase97()
+{
+    namespace rg = std::ranges;
+    namespace vw = std::views;
+
+    // ── ranges::to ────────────────────────────────────────────────────────
+    {
+        // branch (d): default-construct + reserve + insert.
+        auto p97d = rg::to<P97ReservableSink>(P95SizedInputRange(5));
+        Check((p97d.v == std::vector<int>{0, 1, 2, 3, 4}),
+              "phase97 to<> branch(d) content, sized non-forward source");
+        Check(p97d.capacity() == 5,
+              "phase97 to<> branch(d) reserves exactly size() for a sized_range source");
+
+        auto p97dNoReserve = rg::to<P97ReservableSink>(P95InputRange(3));
+        Check((p97dNoReserve.v == std::vector<int>{0, 1, 2}),
+              "phase97 to<> branch(d) content, non-sized input-only source (no reserve path)");
+
+        // branch (a): C already IS R's own type -> ordinary copy ctor.
+        std::vector<int> p97aSrc{1, 2, 3};
+        auto p97a = rg::to<std::vector<int>>(p97aSrc);
+        Check((p97a == p97aSrc), "phase97 to<> branch(a) same-type direct construction");
+
+        // branch (b): from_range_t ctor path (deque source -> vector target;
+        // vector cannot construct directly from a raw deque&, only via the
+        // from_range_t-tagged ctor).
+        std::deque<int> p97bSrc{4, 5, 6};
+        auto p97b = rg::to<std::vector<int>>(p97bSrc);
+        Check((p97b == std::vector<int>{4, 5, 6}),
+              "phase97 to<> branch(b) from_range_t ctor path (deque source -> vector)");
+
+        // branch (c) / LWG3733: a common_range whose iterator is
+        // common_iterator (Ф29a) — has an iterator_traits<>::iterator_category
+        // but does not model the old cpp17-input-iterator the pre-3733
+        // wording checked; P97IterPairOnly has no (a)/(b) shape at all.
+        std::list<int> p97cSrc{10, 20, 30};
+        std::ranges::subrange<std::counted_iterator<std::list<int>::iterator>,
+                              std::default_sentinel_t>
+            p97cSub(std::counted_iterator(p97cSrc.begin(), 3), std::default_sentinel);
+        auto p97cCommon = vw::common(p97cSub);
+        static_assert(rg::common_range<decltype(p97cCommon)>,
+                      "phase97 to<> branch(c) source must be common_range");
+        auto p97c = rg::to<P97IterPairOnly>(p97cCommon);
+        Check((p97c.v == std::vector<int>{10, 20, 30}),
+              "phase97 to<> branch(c)/LWG3733 iterator-pair ctor via common_iterator");
+
+        // LWG3785: C is not even a range (std::expected) -> range_value_t<C>
+        // must never be formed; only reachable if the top-level condition
+        // genuinely short-circuits. Source is a vector<int> directly (the
+        // only way expected's converting ctor can satisfy branch (a) here).
+        auto p97lwg3785 = rg::to<std::expected<std::vector<int>, int>>(std::vector<int>{1, 2, 3});
+        Check(p97lwg3785.has_value() && (*p97lwg3785 == std::vector<int>{1, 2, 3}),
+              "phase97 to<> LWG3785: to<expected<vector<int>,E>>(vector<int>) compiles and constructs");
+
+        // recursive case + "inner range needs its own from_range_t
+        // construction": vector<int>& is NOT convertible_to set<int>, so
+        // this genuinely forces branch (e), not a direct elementwise copy.
+        std::vector<std::vector<int>> p97NestedSetSrc{{3, 1, 2}, {5, 4}};
+        auto p97NestedSet = rg::to<std::vector<std::set<int>>>(p97NestedSetSrc);
+        Check(p97NestedSet.size() == 2 && (p97NestedSet[0] == std::set<int>{1, 2, 3}) &&
+              (p97NestedSet[1] == std::set<int>{4, 5}),
+              "phase97 to<> recursive case depth 2, reaches a non-vector container "
+              "type through from_range_t (vector<int> element -> set<int>)");
+
+        // recursive case, depth 3: vector<int>& is not convertible_to
+        // set<int> at the innermost level either, so every level of this
+        // 3-deep nesting must genuinely recurse (proven, not just parsed —
+        // a same-type nesting like vector<vector<int>> from
+        // vector<vector<int>> would take the direct-convertible top branch
+        // and never reach the recursive branch (e) at all).
+        std::vector<std::vector<std::vector<int>>> p97Nested3Src{{{1, 2}, {3}}, {{4, 5, 6}}};
+        auto p97Nested3 = rg::to<std::vector<std::vector<std::set<int>>>>(p97Nested3Src);
+        Check(p97Nested3.size() == 2 && p97Nested3[0].size() == 2 &&
+              (p97Nested3[0][0] == std::set<int>{1, 2}) && (p97Nested3[0][1] == std::set<int>{3}) &&
+              p97Nested3[1].size() == 1 && (p97Nested3[1][0] == std::set<int>{4, 5, 6}),
+              "phase97 to<> recursive case depth 3, every level genuinely recurses");
+
+        // closure / pipe form.
+        std::vector<int> p97PipeSrc{6, 7, 8};
+        auto p97Piped = p97PipeSrc | rg::to<std::vector<int>>();
+        Check((p97Piped == p97PipeSrc), "phase97 to<> closure/pipe form");
+
+        // template-template CTAD form: deduces vector<range_value_t<R>>.
+        auto p97Ctad = rg::to<std::vector>(p97PipeSrc);
+        static_assert(std::same_as<decltype(p97Ctad), std::vector<int>>,
+                      "phase97 to<template>(r) CTAD-deduces vector<int>");
+        Check((p97Ctad == p97PipeSrc), "phase97 to<template>(r) content");
+
+        // FIX2: cross-type to<template>(r) — these only work once the
+        // deduction guides exist (before FIX2, to<template>'s own
+        // C(from_range,r) probe had nothing to deduce against). Each
+        // source container is a DIFFERENT type from the target, so this
+        // genuinely exercises the guides, not the same-type case above.
+        auto p97CtadVecFromDeque = rg::to<std::vector>(std::deque<int>{1, 2, 3});
+        static_assert(std::same_as<decltype(p97CtadVecFromDeque), std::vector<int>>,
+                      "phase97 FIX2 to<vector>(deque<int>) CTAD-deduces vector<int>");
+        Check((p97CtadVecFromDeque == std::vector<int>{1, 2, 3}),
+              "phase97 FIX2 to<vector>(deque<int>) content");
+
+        auto p97CtadListFromVec = rg::to<std::list>(std::vector<int>{4, 5, 6});
+        static_assert(std::same_as<decltype(p97CtadListFromVec), std::list<int>>,
+                      "phase97 FIX2 to<list>(vector<int>) CTAD-deduces list<int>");
+        Check((p97CtadListFromVec == std::list<int>{4, 5, 6}),
+              "phase97 FIX2 to<list>(vector<int>) content");
+
+        std::vector<std::pair<int, std::string>> p97CtadMapSrc{{2, "two"}, {1, "one"}};
+        auto p97CtadMap = rg::to<std::map>(p97CtadMapSrc);
+        static_assert(std::same_as<decltype(p97CtadMap), std::map<int, std::string>>,
+                      "phase97 FIX2 to<map>(vector<pair<K,V>>) CTAD-deduces map<int,string>");
+        Check(p97CtadMap.size() == 2 && p97CtadMap.at(1) == "one" && p97CtadMap.at(2) == "two",
+              "phase97 FIX2 to<map>(vector<pair<K,V>>) content");
+    }
+
+    // ── FIX2: direct CTAD (deduction guides) ────────────────────────────
+    {
+        std::vector<int> p97CtadSrc{1, 2, 3, 4};
+
+        // Iterator-pair direct CTAD — new: boxcxx had zero deduction
+        // guides before FIX2, so this did not compile at all previously.
+        std::vector p97DirectVec(p97CtadSrc.begin(), p97CtadSrc.end());
+        static_assert(std::same_as<decltype(p97DirectVec), std::vector<int>>,
+                      "phase97 FIX2 vector(It,It) direct CTAD deduces vector<int>");
+        Check((p97DirectVec == p97CtadSrc), "phase97 FIX2 vector(It,It) direct CTAD content");
+
+        std::deque p97DirectDeque(p97CtadSrc.begin(), p97CtadSrc.end());
+        static_assert(std::same_as<decltype(p97DirectDeque), std::deque<int>>,
+                      "phase97 FIX2 deque(It,It) direct CTAD deduces deque<int>");
+
+        std::list p97DirectList(p97CtadSrc.begin(), p97CtadSrc.end());
+        static_assert(std::same_as<decltype(p97DirectList), std::list<int>>,
+                      "phase97 FIX2 list(It,It) direct CTAD deduces list<int>");
+
+        std::vector<std::pair<int, std::string>> p97DirectMapSrc{{1, "a"}, {2, "b"}};
+        std::map p97DirectMap(p97DirectMapSrc.begin(), p97DirectMapSrc.end());
+        static_assert(std::same_as<decltype(p97DirectMap), std::map<int, std::string>>,
+                      "phase97 FIX2 map(It,It) direct CTAD deduces map<int,std::string>");
+        Check(p97DirectMap.size() == 2 && p97DirectMap.at(1) == "a" && p97DirectMap.at(2) == "b",
+              "phase97 FIX2 map(It,It) direct CTAD content");
+
+        std::set p97DirectSet(p97CtadSrc.begin(), p97CtadSrc.end());
+        static_assert(std::same_as<decltype(p97DirectSet), std::set<int>>,
+                      "phase97 FIX2 set(It,It) direct CTAD deduces set<int>");
+        Check((p97DirectSet == std::set<int>{1, 2, 3, 4}), "phase97 FIX2 set(It,It) direct CTAD content");
+
+        // ‼ regression guard — greedy-guide ambiguity check: vector's
+        // EXISTING (size_type, const T&, Alloc) constructor must still
+        // win CTAD for (int,int), NOT the new (It,It,Alloc) guide (which
+        // must SFINAE away: int has no iterator_traits<int>::value_type).
+        std::vector p97DirectVecCount(5, 10);
+        static_assert(std::same_as<decltype(p97DirectVecCount), std::vector<int>>,
+                      "phase97 FIX2 vector(count,value) CTAD still deduces vector<int>, "
+                      "not hijacked by the new (It,It,Alloc) guide");
+        Check((p97DirectVecCount == std::vector<int>{10, 10, 10, 10, 10}),
+              "phase97 FIX2 vector(count,value) CTAD content unambiguous (5 copies of 10, "
+              "not a 2-element range [5,10))");
+
+        std::deque p97DirectDequeCount(3, 7);
+        static_assert(std::same_as<decltype(p97DirectDequeCount), std::deque<int>>,
+                      "phase97 FIX2 deque(count,value) CTAD unambiguous");
+        Check((p97DirectDequeCount == std::deque<int>{7, 7, 7}),
+              "phase97 FIX2 deque(count,value) CTAD content");
+
+        // from_range_t direct CTAD too (all 12 containers get the same
+        // guide shape; spot-check vector/set/unordered_set here).
+        std::vector p97DirectVecFromRange(std::from_range, P95InputRange(3));
+        static_assert(std::same_as<decltype(p97DirectVecFromRange), std::vector<int>>,
+                      "phase97 FIX2 vector(from_range_t,R) direct CTAD deduces vector<int>");
+        Check((p97DirectVecFromRange == std::vector<int>{0, 1, 2}),
+              "phase97 FIX2 vector(from_range_t,R) direct CTAD content");
+
+        std::set p97DirectSetFromRange(std::from_range, std::vector<int>{3, 1, 2, 1});
+        static_assert(std::same_as<decltype(p97DirectSetFromRange), std::set<int>>,
+                      "phase97 FIX2 set(from_range_t,R) direct CTAD deduces set<int>");
+        Check((p97DirectSetFromRange == std::set<int>{1, 2, 3}),
+              "phase97 FIX2 set(from_range_t,R) direct CTAD content");
+
+        std::unordered_set p97DirectUsetFromRange(std::from_range, std::vector<int>{5, 6, 5});
+        static_assert(std::same_as<decltype(p97DirectUsetFromRange), std::unordered_set<int>>,
+                      "phase97 FIX2 unordered_set(from_range_t,R) direct CTAD deduces "
+                      "unordered_set<int>");
+        Check(p97DirectUsetFromRange.size() == 2 && p97DirectUsetFromRange.contains(5) &&
+              p97DirectUsetFromRange.contains(6),
+              "phase97 FIX2 unordered_set(from_range_t,R) direct CTAD content");
+    }
+
+    // ── vector ───────────────────────────────────────────────────────────
+    {
+        std::vector<int> p97VecFromInput(std::from_range, P95InputRange(4));
+        Check((p97VecFromInput == std::vector<int>{0, 1, 2, 3}),
+              "phase97 vector from_range_t ctor, input-only source");
+
+        std::vector<int> p97VecFromFwd(std::from_range, P95FwdOnlyRange(std::vector<int>{7, 8, 9}));
+        Check((p97VecFromFwd == std::vector<int>{7, 8, 9}),
+              "phase97 vector from_range_t ctor, forward (non-sized) source");
+        Check(p97VecFromFwd.capacity() == 3,
+              "phase97 vector from_range_t ctor reserves exactly via distance() "
+              "for a forward non-sized source");
+
+        std::vector<int> p97VecFromSized(std::from_range, P95SizedInputRange(5));
+        Check((p97VecFromSized == std::vector<int>{0, 1, 2, 3, 4}),
+              "phase97 vector from_range_t ctor, sized (non-forward) source");
+        Check(p97VecFromSized.capacity() == 5,
+              "phase97 vector from_range_t ctor reserves exactly via size() "
+              "for a sized non-forward source");
+
+        std::vector<int> p97VecAssign{9, 9, 9};
+        p97VecAssign.assign_range(P95InputRange(3));
+        Check((p97VecAssign == std::vector<int>{0, 1, 2}), "phase97 vector::assign_range replaces contents");
+
+        std::vector<int> p97VecBegin{5, 6};
+        p97VecBegin.insert_range(p97VecBegin.begin(), P95InputRange(2));
+        Check((p97VecBegin == std::vector<int>{0, 1, 5, 6}), "phase97 vector::insert_range at begin()");
+
+        std::vector<int> p97VecEnd{5, 6};
+        p97VecEnd.insert_range(p97VecEnd.end(), P95InputRange(2));
+        Check((p97VecEnd == std::vector<int>{5, 6, 0, 1}), "phase97 vector::insert_range at end()");
+
+        std::vector<int> p97VecMid{1, 2, 3, 4};
+        auto p97VecMidIt = p97VecMid.insert_range(p97VecMid.begin() + 2, P95InputRange(2));
+        Check((p97VecMid == std::vector<int>{1, 2, 0, 1, 3, 4}) && (*p97VecMidIt == 0),
+              "phase97 vector::insert_range in the middle, input-only source, correct order + return iterator");
+
+        std::vector<int> p97VecAppend{1, 2};
+        p97VecAppend.append_range(std::vector<int>{3, 4, 5});
+        Check((p97VecAppend == std::vector<int>{1, 2, 3, 4, 5}) && p97VecAppend.capacity() == 5,
+              "phase97 vector::append_range sized source reserves size()+existing exactly");
+
+        // debugger FIX1: assign_range self-reference (real UAF pre-fix —
+        // clear() freed storage that the loop then kept reading from).
+        // Materializing a temp before touching *this makes this safe and
+        // makes whole-self-assign a value-preserving no-op.
+        std::vector<int> p97VecSelf{1, 2, 3};
+        p97VecSelf.assign_range(p97VecSelf);
+        Check((p97VecSelf == std::vector<int>{1, 2, 3}),
+              "phase97 FIX1 vector::assign_range(self) is a value-preserving no-op");
+
+        std::vector<int> p97VecSelfSub{1, 2, 3, 4, 5};
+        p97VecSelfSub.assign_range(rg::subrange(p97VecSelfSub.begin() + 1, p97VecSelfSub.end()));
+        Check((p97VecSelfSub == std::vector<int>{2, 3, 4, 5}),
+              "phase97 FIX1 vector::assign_range(subrange-over-self) is UAF-safe");
+    }
+
+    // ── vector<bool> ─────────────────────────────────────────────────────
+    {
+        std::vector<bool> p97VecBoolFrom(std::from_range, P95InputRange(4));
+        Check((p97VecBoolFrom == std::vector<bool>{false, true, true, true}),
+              "phase97 vector<bool> from_range_t ctor");
+
+        std::vector<bool> p97VecBoolIns{true, true};
+        p97VecBoolIns.insert_range(p97VecBoolIns.begin() + 1, P95InputRange(2));
+        Check((p97VecBoolIns == std::vector<bool>{true, false, true, true}),
+              "phase97 vector<bool>::insert_range (proxy-iterator rotate/ADL-swap)");
+
+        std::vector<bool> p97VecBoolApp{true};
+        p97VecBoolApp.append_range(std::vector<bool>{false, true});
+        Check((p97VecBoolApp == std::vector<bool>{true, false, true}), "phase97 vector<bool>::append_range");
+
+        std::vector<bool> p97VecBoolAssign{true, true, true};
+        p97VecBoolAssign.assign_range(P95InputRange(2));
+        Check((p97VecBoolAssign == std::vector<bool>{false, true}), "phase97 vector<bool>::assign_range");
+    }
+
+    // ── deque ────────────────────────────────────────────────────────────
+    {
+        // CRIT-2: deque's first-ever classic multi-element insert overloads.
+        std::deque<int> p97DequeClassicN{1, 2, 3};
+        p97DequeClassicN.insert(p97DequeClassicN.begin() + 1, 2, 99);
+        Check((p97DequeClassicN == std::deque<int>{1, 99, 99, 2, 3}),
+              "phase97 CRIT-2 deque::insert(pos,n,value) new multi-element overload");
+
+        std::vector<int> p97DequeSrcVec{7, 8, 9};
+        std::deque<int> p97DequeClassicIt{1, 2};
+        p97DequeClassicIt.insert(p97DequeClassicIt.begin() + 1, p97DequeSrcVec.begin(), p97DequeSrcVec.end());
+        Check((p97DequeClassicIt == std::deque<int>{1, 7, 8, 9, 2}),
+              "phase97 CRIT-2 deque::insert(pos,first,last) new multi-element overload");
+
+        std::deque<int> p97DequeFrom(std::from_range, P95InputRange(4));
+        Check((p97DequeFrom == std::deque<int>{0, 1, 2, 3}), "phase97 deque from_range_t ctor, input-only source");
+
+        std::deque<int> p97DequeAssign{9, 9, 9};
+        p97DequeAssign.assign_range(P95InputRange(3));
+        Check((p97DequeAssign == std::deque<int>{0, 1, 2}), "phase97 deque::assign_range replaces contents");
+
+        std::deque<int> p97DequeBegin{5, 6};
+        p97DequeBegin.insert_range(p97DequeBegin.begin(), P95InputRange(2));
+        Check((p97DequeBegin == std::deque<int>{0, 1, 5, 6}), "phase97 deque::insert_range at begin()");
+
+        std::deque<int> p97DequeEndC{5, 6};
+        p97DequeEndC.insert_range(p97DequeEndC.end(), P95InputRange(2));
+        Check((p97DequeEndC == std::deque<int>{5, 6, 0, 1}), "phase97 deque::insert_range at end()");
+
+        std::deque<int> p97DequeMid{1, 2, 3, 4};
+        auto p97DequeMidIt = p97DequeMid.insert_range(p97DequeMid.begin() + 2, P95InputRange(2));
+        Check((p97DequeMid == std::deque<int>{1, 2, 0, 1, 3, 4}) && (*p97DequeMidIt == 0),
+              "phase97 deque::insert_range in the middle, input-only source");
+
+        std::deque<int> p97DequeAppend{1, 2};
+        p97DequeAppend.append_range(P95InputRange(2));
+        Check((p97DequeAppend == std::deque<int>{1, 2, 0, 1}), "phase97 deque::append_range");
+
+        // CRIT-1: push_front-loop reverses the newly-prepended elements —
+        // must be un-reversed by reversing exactly the newly-added prefix.
+        std::deque<int> p97DequePrepend{100, 101};
+        p97DequePrepend.prepend_range(P95InputRange(3));
+        Check((p97DequePrepend == std::deque<int>{0, 1, 2, 100, 101}),
+              "phase97 CRIT-1 deque::prepend_range preserves order (input-only source)");
+
+        // Regression guard for the specific bug found while implementing
+        // this: reversing [begin(), begin()+old_size) instead of
+        // [begin(), begin()+added) is wrong whenever old_size != added —
+        // an EMPTY deque (old_size==0) makes that wrong span empty, so a
+        // buggy implementation would leave the prepended run un-reversed.
+        std::deque<int> p97DequePrependEmpty;
+        p97DequePrependEmpty.prepend_range(P95InputRange(4));
+        Check((p97DequePrependEmpty == std::deque<int>{0, 1, 2, 3}),
+              "phase97 CRIT-1 deque::prepend_range into an EMPTY deque preserves order");
+
+        // debugger FIX1: assign_range self-reference (real UAF pre-fix).
+        std::deque<int> p97DequeSelf{1, 2, 3};
+        p97DequeSelf.assign_range(p97DequeSelf);
+        Check((p97DequeSelf == std::deque<int>{1, 2, 3}),
+              "phase97 FIX1 deque::assign_range(self) is a value-preserving no-op");
+
+        std::deque<int> p97DequeSelfSub{1, 2, 3, 4, 5};
+        p97DequeSelfSub.assign_range(rg::subrange(p97DequeSelfSub.begin() + 1, p97DequeSelfSub.end()));
+        Check((p97DequeSelfSub == std::deque<int>{2, 3, 4, 5}),
+              "phase97 FIX1 deque::assign_range(subrange-over-self) is UAF-safe");
+    }
+
+    // ── list ─────────────────────────────────────────────────────────────
+    {
+        std::list<int> p97ListFrom(std::from_range, P95InputRange(4));
+        Check((p97ListFrom == std::list<int>{0, 1, 2, 3}), "phase97 list from_range_t ctor, input-only source");
+
+        std::list<int> p97ListAssign{9, 9, 9};
+        p97ListAssign.assign_range(P95InputRange(3));
+        Check((p97ListAssign == std::list<int>{0, 1, 2}), "phase97 list::assign_range replaces contents");
+
+        std::list<int> p97ListBegin{5, 6};
+        p97ListBegin.insert_range(p97ListBegin.begin(), P95InputRange(2));
+        Check((p97ListBegin == std::list<int>{0, 1, 5, 6}), "phase97 list::insert_range at begin()");
+
+        std::list<int> p97ListEndC{5, 6};
+        p97ListEndC.insert_range(p97ListEndC.end(), P95InputRange(2));
+        Check((p97ListEndC == std::list<int>{5, 6, 0, 1}), "phase97 list::insert_range at end()");
+
+        std::list<int> p97ListMid{1, 2, 3, 4};
+        auto p97ListMidPos = p97ListMid.begin();
+        std::advance(p97ListMidPos, 2);
+        p97ListMid.insert_range(p97ListMidPos, P95InputRange(2));
+        Check((p97ListMid == std::list<int>{1, 2, 0, 1, 3, 4}),
+              "phase97 list::insert_range in the middle, input-only source");
+
+        std::list<int> p97ListAppend{1, 2};
+        p97ListAppend.append_range(P95InputRange(2));
+        Check((p97ListAppend == std::list<int>{1, 2, 0, 1}), "phase97 list::append_range");
+
+        // CRIT-1: the OTHER order-preservation strategy — fixed-cursor
+        // insert, no reversal. Same input-only fixture shape as deque's
+        // test above, for direct contrast: both must land in the SAME
+        // relative order despite using genuinely different algorithms.
+        std::list<int> p97ListPrepend{100, 101};
+        p97ListPrepend.prepend_range(P95InputRange(3));
+        Check((p97ListPrepend == std::list<int>{0, 1, 2, 100, 101}),
+              "phase97 CRIT-1 list::prepend_range preserves order (input-only source)");
+
+        // debugger FIX1: assign_range self-reference (real UAF pre-fix).
+        std::list<int> p97ListSelf{1, 2, 3};
+        p97ListSelf.assign_range(p97ListSelf);
+        Check((p97ListSelf == std::list<int>{1, 2, 3}),
+              "phase97 FIX1 list::assign_range(self) is a value-preserving no-op");
+
+        std::list<int> p97ListSelfSub{1, 2, 3, 4, 5};
+        auto p97ListSelfSubBegin = p97ListSelfSub.begin();
+        ++p97ListSelfSubBegin;
+        p97ListSelfSub.assign_range(rg::subrange(p97ListSelfSubBegin, p97ListSelfSub.end()));
+        Check((p97ListSelfSub == std::list<int>{2, 3, 4, 5}),
+              "phase97 FIX1 list::assign_range(subrange-over-self) is UAF-safe");
+    }
+
+    // ── map / multimap ───────────────────────────────────────────────────
+    {
+        std::map<int, std::string> p97MapCtorSrc{{3, "three"}, {1, "one"}, {2, "two"}};
+        std::map<int, std::string> p97MapFromRange(std::from_range, p97MapCtorSrc);
+        Check(p97MapFromRange.size() == 3 && p97MapFromRange.at(1) == "one" &&
+              p97MapFromRange.at(2) == "two" && p97MapFromRange.at(3) == "three",
+              "phase97 map from_range_t ctor");
+
+        std::map<int, std::string> p97MapSrc{{1, "ONE-DUP"}, {2, "two"}};
+        std::map<int, std::string> p97Map{{1, "one"}};
+        p97Map.insert_range(p97MapSrc);
+        Check(p97Map.size() == 2 && p97Map.at(1) == "one" && p97Map.at(2) == "two",
+              "phase97 map::insert_range skips duplicate key, keeps existing value, inserts new key");
+
+        std::multimap<int, std::string> p97MultimapFromRange(std::from_range, p97MapCtorSrc);
+        Check(p97MultimapFromRange.size() == 3, "phase97 multimap from_range_t ctor");
+
+        std::multimap<int, std::string> p97Multimap{{1, "one"}};
+        p97Multimap.insert_range(p97MapSrc);
+        Check(p97Multimap.size() == 3, "phase97 multimap::insert_range inserts duplicate key anyway, size grows");
+    }
+
+    // ── set / multiset ───────────────────────────────────────────────────
+    {
+        std::set<int> p97SetSrc{1, 2, 3};
+        std::set<int> p97Set(std::from_range, p97SetSrc);
+        Check((p97Set == std::set<int>{1, 2, 3}), "phase97 set from_range_t ctor");
+
+        std::vector<int> p97SetInsertSrc{2, 4, 5};
+        std::set<int> p97SetDup{1, 2, 3};
+        p97SetDup.insert_range(p97SetInsertSrc);
+        Check((p97SetDup == std::set<int>{1, 2, 3, 4, 5}), "phase97 set::insert_range skips duplicate key");
+
+        std::multiset<int> p97MultisetFromRange(std::from_range, p97SetSrc);
+        Check(p97MultisetFromRange.size() == 3, "phase97 multiset from_range_t ctor");
+
+        std::multiset<int> p97MultisetDup{1, 2, 3};
+        p97MultisetDup.insert_range(p97SetInsertSrc);
+        Check(p97MultisetDup.size() == 6, "phase97 multiset::insert_range inserts duplicate anyway, size grows");
+    }
+
+    // ── unordered_map / unordered_multimap ──────────────────────────────
+    {
+        std::unordered_map<int, std::string> p97UmapSrc{{1, "one"}, {2, "two"}};
+        std::unordered_map<int, std::string> p97Umap(std::from_range, p97UmapSrc);
+        Check(p97Umap.size() == 2 && p97Umap.at(1) == "one" && p97Umap.at(2) == "two",
+              "phase97 unordered_map from_range_t ctor");
+
+        std::unordered_map<int, std::string> p97UmapDup{{1, "keep"}};
+        p97UmapDup.insert_range(p97UmapSrc);
+        Check(p97UmapDup.size() == 2 && p97UmapDup.at(1) == "keep" && p97UmapDup.at(2) == "two",
+              "phase97 unordered_map::insert_range skips duplicate key");
+
+        std::unordered_multimap<int, std::string> p97UmultimapFromRange(std::from_range, p97UmapSrc);
+        Check(p97UmultimapFromRange.size() == 2, "phase97 unordered_multimap from_range_t ctor");
+
+        std::unordered_multimap<int, std::string> p97Umultimap{{1, "keep"}};
+        p97Umultimap.insert_range(p97UmapSrc);
+        Check(p97Umultimap.size() == 3, "phase97 unordered_multimap::insert_range inserts duplicate anyway");
+    }
+
+    // ── unordered_set / unordered_multiset ──────────────────────────────
+    {
+        std::unordered_set<int> p97UsetSrc{1, 2, 3};
+        // Explicit buckets arg — this ctor is new even relative to the
+        // (It,It) ctor, which (pre-existing, out of scope) never grew
+        // unordered_map's buckets/hash/eq/alloc trailing params.
+        std::unordered_set<int> p97Uset(std::from_range, p97UsetSrc, 0);
+        Check(p97Uset.size() == 3 && p97Uset.contains(1) && p97Uset.contains(2) && p97Uset.contains(3),
+              "phase97 unordered_set from_range_t ctor (new: full buckets/hash/eq/alloc signature)");
+
+        std::vector<int> p97UsetInsertSrc{2, 4};
+        std::unordered_set<int> p97UsetDup{1, 2, 3};
+        p97UsetDup.insert_range(p97UsetInsertSrc);
+        Check(p97UsetDup.size() == 4, "phase97 unordered_set::insert_range skips duplicate key");
+
+        std::unordered_multiset<int> p97UmultisetFromRange(std::from_range, p97UsetSrc);
+        Check(p97UmultisetFromRange.size() == 3, "phase97 unordered_multiset from_range_t ctor");
+
+        std::unordered_multiset<int> p97UmultisetDup{1, 2, 3};
+        p97UmultisetDup.insert_range(p97UsetInsertSrc);
+        Check(p97UmultisetDup.size() == 5, "phase97 unordered_multiset::insert_range inserts duplicate anyway");
+    }
+
+    // ── string ───────────────────────────────────────────────────────────
+    {
+        std::string p97StrFromInput(std::from_range, P97CharInputRange("hello", 5));
+        Check(p97StrFromInput == "hello", "phase97 string from_range_t ctor, input-only char source");
+
+        std::string p97StrAssign("xxx");
+        p97StrAssign.assign_range(P97CharInputRange("world", 5));
+        Check(p97StrAssign == "world", "phase97 string::assign_range replaces contents");
+
+        std::string p97StrAppend("foo-");
+        p97StrAppend.append_range(P97CharInputRange("bar", 3));
+        Check(p97StrAppend == "foo-bar", "phase97 string::append_range");
+
+        std::string p97StrInsert("foobar");
+        p97StrInsert.insert_range(p97StrInsert.begin() + 3, P97CharInputRange("-XYZ-", 5));
+        Check(p97StrInsert == "foo-XYZ-bar", "phase97 string::insert_range in the middle, input-only source");
+
+        std::string p97StrReplace("foo-old-bar");
+        p97StrReplace.replace_with_range(p97StrReplace.begin() + 4, p97StrReplace.begin() + 7,
+                                         P97CharInputRange("NEW", 3));
+        Check(p97StrReplace == "foo-NEW-bar", "phase97 string::replace_with_range, wired and correct");
+    }
+
+    printf("[CXX] PASS phase97: ranges::to (4 overloads, LWG3733/3743/3785, recursive "
+           "case) + from_range_t container range-members (12 containers) + CRIT-1 "
+           "deque/list prepend_range + CRIT-2 deque multi-element insert\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -16121,6 +16682,7 @@ int main()
     Phase94();
     Phase95();
     Phase96();
+    Phase97();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

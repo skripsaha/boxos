@@ -12,6 +12,7 @@
 
 #include <__bits/allocator_core>
 #include <__bits/iterator_core>
+#include <__bits/ranges_core>
 #include <__bits/throw_helpers>
 #include <algorithm>
 #include <compare>
@@ -79,6 +80,22 @@ public:
             AllocTraits::construct(__alloc, __begin + __size, v);
             ++__size;
         }
+    }
+
+    // [container.reqmts] from_range_t ctor — no reallocation: sized_range
+    // reserves off size() (O(1)); forward_range (not sized) walks once via
+    // distance() (safe: forward ranges are multi-pass, so the range-for
+    // below re-traverses the same elements) then reserves off that count.
+    template <ContainerCompatibleRange<T> R>
+    vector(from_range_t, R &&rg, const Alloc &a = Alloc()) : __alloc(a)
+    {
+        if constexpr (ranges::sized_range<R>) {
+            Grow(static_cast<size_type>(ranges::size(rg)));
+        } else if constexpr (ranges::forward_range<R>) {
+            Grow(static_cast<size_type>(
+                ranges::distance(ranges::begin(rg), ranges::end(rg))));
+        }
+        for (auto &&v : rg) emplace_back(std::forward<decltype(v)>(v));
     }
 
     vector(const vector &other)
@@ -187,6 +204,17 @@ public:
         for (; first != last; ++first) emplace_back(*first);
     }
     void assign(initializer_list<T> il) { assign(il.begin(), il.end()); }
+
+    // Materialize into a fresh vector BEFORE touching *this — rg may alias
+    // *this (e.g. a subrange over this same vector's own iterators);
+    // clearing first and then reading rg mid-loop would be a use-after-free.
+    // Move-assigning a fully-built temporary in is self-reference-safe and
+    // makes self-assign a value-preserving no-op.
+    template <ContainerCompatibleRange<T> R>
+    void assign_range(R &&rg)
+    {
+        *this = vector(from_range, std::forward<R>(rg), get_allocator());
+    }
 
     allocator_type get_allocator() const noexcept { return __alloc; }
 
@@ -333,6 +361,27 @@ public:
     iterator insert(const_iterator where, initializer_list<T> il)
     {
         return insert(where, il.begin(), il.end());
+    }
+
+    // Same append-then-rotate idiom as insert(where,first,last) above.
+    template <ContainerCompatibleRange<T> R>
+    iterator insert_range(const_iterator where, R &&rg)
+    {
+        size_type pos = static_cast<size_type>(where - __begin);
+        size_type old = __size;
+        for (auto &&v : rg) emplace_back(std::forward<decltype(v)>(v));
+        std::rotate(__begin + pos, __begin + old, __begin + __size);
+        return __begin + pos;
+    }
+
+    // No prepend_range — vector never gets push_front/prepend_range
+    // ([vector.overview] explicit exclusion), matching pop_front's absence.
+    template <ContainerCompatibleRange<T> R>
+    void append_range(R &&rg)
+    {
+        if constexpr (ranges::sized_range<R>)
+            reserve(__size + static_cast<size_type>(ranges::size(rg)));
+        for (auto &&v : rg) emplace_back(std::forward<decltype(v)>(v));
     }
 
     iterator erase(const_iterator where)
@@ -756,6 +805,17 @@ public:
         Grow(il.size());
         for (bool b : il) push_back(b);
     }
+    template <ContainerCompatibleRange<value_type> R>
+    vector(from_range_t, R &&rg, const Alloc &a = Alloc()) : alloc_(a)
+    {
+        if constexpr (ranges::sized_range<R>) {
+            Grow(static_cast<size_type>(ranges::size(rg)));
+        } else if constexpr (ranges::forward_range<R>) {
+            Grow(static_cast<size_type>(
+                ranges::distance(ranges::begin(rg), ranges::end(rg))));
+        }
+        for (auto &&v : rg) push_back(static_cast<bool>(v));
+    }
     vector(const vector &o)
         : alloc_(WTraits::select_on_container_copy_construction(o.alloc_))
     {
@@ -840,6 +900,16 @@ public:
     }
 
     void clear() noexcept { size_ = 0; }
+
+    // Same self-reference hazard as vector<T>::assign_range above (rg may
+    // alias *this) — materialize a fresh vector<bool> first, then move-
+    // assign it in.
+    template <ContainerCompatibleRange<value_type> R>
+    void assign_range(R &&rg)
+    {
+        *this = vector(from_range, std::forward<R>(rg), get_allocator());
+    }
+
     void push_back(bool v)
     {
         if (size_ == cap_) Reserve(cap_ ? cap_ * 2 : kBits);
@@ -852,6 +922,28 @@ public:
     {
         push_back(bool(static_cast<A &&>(a)...));
         return back();
+    }
+
+    // Same append(push_back-loop)-then-rotate idiom as vector<T>'s
+    // insert_range — vector<bool>::reference is ADL-swappable (see the
+    // friend swap above), so the generic std::rotate/iter_swap machinery
+    // works over this proxy iterator exactly as it does over T*.
+    template <ContainerCompatibleRange<value_type> R>
+    iterator insert_range(const_iterator pos, R &&rg)
+    {
+        size_t at  = pos.idx_;
+        size_t old = size_;
+        for (auto &&v : rg) push_back(static_cast<bool>(v));
+        std::rotate(begin() + at, begin() + old, begin() + size_);
+        return begin() + at;
+    }
+
+    template <ContainerCompatibleRange<value_type> R>
+    void append_range(R &&rg)
+    {
+        if constexpr (ranges::sized_range<R>)
+            Reserve(size_ + static_cast<size_type>(ranges::size(rg)));
+        for (auto &&v : rg) push_back(static_cast<bool>(v));
     }
     void resize(size_type n, bool v = false)
     {
@@ -941,6 +1033,20 @@ struct hash<vector<bool, Alloc>> {
         return h;
     }
 };
+
+// ── deduction guides ([vector.deduct]) ───────────────────────────────────
+// Iterator-pair and from_range_t forms only — the two shapes ranges::to
+// and direct CTAD actually need; the initializer_list/allocator-only forms
+// from the standard's full synopsis are not added (no caller needs them).
+// iter_value_t/range_value_t are already constrained aliases (SFINAE on
+// "does this have a value_type"), so a non-iterator first argument (e.g.
+// vector(5, 10)) cleanly fails this guide and falls through to the
+// implicit guide synthesized from the (count, value, Alloc) constructor.
+template <typename It, typename Alloc = allocator<iter_value_t<It>>>
+vector(It, It, Alloc = Alloc()) -> vector<iter_value_t<It>, Alloc>;
+
+template <ranges::input_range R, typename Alloc = allocator<ranges::range_value_t<R>>>
+vector(from_range_t, R &&, Alloc = Alloc()) -> vector<ranges::range_value_t<R>, Alloc>;
 
 } // namespace std
 

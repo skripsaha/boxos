@@ -8,6 +8,7 @@
 
 #include <__bits/hash_table>
 #include <__bits/node_handle>
+#include <__bits/ranges_core>
 #include <__bits/throw_helpers>
 #include <functional>
 #include <initializer_list>
@@ -25,6 +26,17 @@ struct SelectFirst {
         return p.first;
     }
 };
+
+// Key/mapped-type extraction for the deduction guides below — same
+// rationale as __rb::DeductKey/DeductMapped in <map>.
+template <typename It>
+using DeductKey = remove_const_t<typename iter_value_t<It>::first_type>;
+template <typename It>
+using DeductMapped = typename iter_value_t<It>::second_type;
+template <typename R>
+using DeductRangeKey = remove_const_t<typename ranges::range_value_t<R>::first_type>;
+template <typename R>
+using DeductRangeMapped = typename ranges::range_value_t<R>::second_type;
 
 } // namespace __ht
 
@@ -72,6 +84,14 @@ public:
         : __t(buckets, h, eq, a)
     {
         insert(first, last);
+    }
+    template <ContainerCompatibleRange<value_type> R>
+    unordered_map(from_range_t, R &&rg, size_type buckets = 0,
+                  const Hash &h = Hash(), const KeyEq &eq = KeyEq(),
+                  const Alloc &a = Alloc())
+        : __t(buckets, h, eq, a)
+    {
+        insert_range(std::forward<R>(rg));
     }
     unordered_map(initializer_list<value_type> il, size_type buckets = 0,
                   const Hash &h = Hash(), const KeyEq &eq = KeyEq(),
@@ -155,6 +175,11 @@ public:
     void insert(initializer_list<value_type> il)
     {
         insert(il.begin(), il.end());
+    }
+    template <ContainerCompatibleRange<value_type> R>
+    void insert_range(R &&rg)
+    {
+        for (auto &&v : rg) __t.EmplaceUnique(std::forward<decltype(v)>(v));
     }
     template <typename... Args>
     pair<iterator, bool> emplace(Args &&...args)
@@ -385,6 +410,14 @@ public:
     {
         insert(first, last);
     }
+    template <ContainerCompatibleRange<value_type> R>
+    unordered_multimap(from_range_t, R &&rg, size_type buckets = 0,
+                       const Hash &h = Hash(), const KeyEq &eq = KeyEq(),
+                       const Alloc &a = Alloc())
+        : __t(buckets, h, eq, a)
+    {
+        insert_range(std::forward<R>(rg));
+    }
     unordered_multimap(initializer_list<value_type> il, size_type buckets = 0,
                        const Hash &h = Hash(), const KeyEq &eq = KeyEq(),
                        const Alloc &a = Alloc())
@@ -449,6 +482,11 @@ public:
     void insert(initializer_list<value_type> il)
     {
         insert(il.begin(), il.end());
+    }
+    template <ContainerCompatibleRange<value_type> R>
+    void insert_range(R &&rg)
+    {
+        for (auto &&v : rg) __t.EmplaceMulti(std::forward<decltype(v)>(v));
     }
 
     iterator erase(const_iterator where) { return __t.Erase(where); }
@@ -693,6 +731,35 @@ erase_if(unordered_multimap<K, T, H, E, A> &m, Pred pred)
     }
     return removed;
 }
+
+// ── deduction guides ([unord.map.overview] / [unord.multimap.overview]) ──
+// Iterator-pair and from_range_t forms only, with the bucket-count param
+// per the standard's guides. Same "no competing candidate" reasoning as
+// map's: the (buckets,Hash,KeyEq,Alloc) ctor's Key/T never appear in any
+// of its parameter types, so its implicit guide can never deduce Key/T.
+template <typename It, typename Hash = hash<__ht::DeductKey<It>>,
+          typename KeyEq = equal_to<__ht::DeductKey<It>>,
+          typename Alloc = allocator<pair<const __ht::DeductKey<It>, __ht::DeductMapped<It>>>>
+unordered_map(It, It, size_t = 0, Hash = Hash(), KeyEq = KeyEq(), Alloc = Alloc())
+    -> unordered_map<__ht::DeductKey<It>, __ht::DeductMapped<It>, Hash, KeyEq, Alloc>;
+
+template <ranges::input_range R, typename Hash = hash<__ht::DeductRangeKey<R>>,
+          typename KeyEq = equal_to<__ht::DeductRangeKey<R>>,
+          typename Alloc = allocator<pair<const __ht::DeductRangeKey<R>, __ht::DeductRangeMapped<R>>>>
+unordered_map(from_range_t, R &&, size_t = 0, Hash = Hash(), KeyEq = KeyEq(), Alloc = Alloc())
+    -> unordered_map<__ht::DeductRangeKey<R>, __ht::DeductRangeMapped<R>, Hash, KeyEq, Alloc>;
+
+template <typename It, typename Hash = hash<__ht::DeductKey<It>>,
+          typename KeyEq = equal_to<__ht::DeductKey<It>>,
+          typename Alloc = allocator<pair<const __ht::DeductKey<It>, __ht::DeductMapped<It>>>>
+unordered_multimap(It, It, size_t = 0, Hash = Hash(), KeyEq = KeyEq(), Alloc = Alloc())
+    -> unordered_multimap<__ht::DeductKey<It>, __ht::DeductMapped<It>, Hash, KeyEq, Alloc>;
+
+template <ranges::input_range R, typename Hash = hash<__ht::DeductRangeKey<R>>,
+          typename KeyEq = equal_to<__ht::DeductRangeKey<R>>,
+          typename Alloc = allocator<pair<const __ht::DeductRangeKey<R>, __ht::DeductRangeMapped<R>>>>
+unordered_multimap(from_range_t, R &&, size_t = 0, Hash = Hash(), KeyEq = KeyEq(), Alloc = Alloc())
+    -> unordered_multimap<__ht::DeductRangeKey<R>, __ht::DeductRangeMapped<R>, Hash, KeyEq, Alloc>;
 
 } // namespace std
 

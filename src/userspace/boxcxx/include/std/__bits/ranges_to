@@ -1,0 +1,276 @@
+// boxcxx — <__bits/ranges_to>
+// ranges::to ([range.utility.conv]) — converts a range into a container.
+// Implements P1206R7 as adopted into C++23, amended by LWG3733 (iterator
+// check for the (Iter,Sentinel) branch), LWG3743 (range_size_t cast around
+// reserve), and LWG3785 (top-level condition short-circuits so
+// range_value_t<C> is never formed when C is not itself a range). LWG3722
+// (reserve accounting for pre-existing size) is NAD — not implemented.
+// reserve_hint / approximately_sized_range (P2836, C++26) — not
+// implemented, same call as chunk_view's reserve_hint in Ф29e-3: this file
+// reserves off sized_range<R> / ranges::size(r), the C++23-as-shipped rule.
+#ifndef BOXCXX_BITS_RANGES_TO
+#define BOXCXX_BITS_RANGES_TO
+
+#include <__bits/ranges_core>
+#include <iterator>
+
+namespace std::ranges::__views_detail {
+
+// [range.utility.conv.general] p3 — "reservable-container"
+template <typename Container>
+concept ReservableContainer =
+    sized_range<Container> &&
+    requires(Container &c, range_size_t<Container> n) {
+        c.reserve(n);
+        { c.capacity() } -> same_as<range_size_t<Container>>;
+        { c.max_size() } -> same_as<range_size_t<Container>>;
+    };
+
+// [range.utility.conv.general] p4 — "container-insertable"
+template <typename Container, typename Ref>
+concept ContainerInsertable =
+    requires(Container &c, Ref &&ref) {
+        requires(requires { c.push_back(std::forward<Ref>(ref)); } ||
+                 requires { c.insert(c.end(), std::forward<Ref>(ref)); });
+    };
+
+// [range.utility.conv.general] p5 — "container-inserter". push_back is
+// checked FIRST — cheaper/more common, and what the standard's own
+// container-inserter pair specifies checking first.
+template <typename Ref, typename Container>
+constexpr auto ContainerInserter(Container &c)
+{
+    if constexpr (requires { c.push_back(std::declval<Ref>()); })
+        return std::back_inserter(c);
+    else
+        return std::inserter(c, c.end());
+}
+
+// exposition-only "input-iterator", used only inside declval/decltype for
+// the template-template to<C>(r) CTAD-deducing overload below — never
+// actually constructed or evaluated.
+template <typename R>
+struct ToSynthInputIterator {
+    using iterator_category = input_iterator_tag;
+    using value_type        = range_value_t<R>;
+    using difference_type   = ptrdiff_t;
+    using pointer            = add_pointer_t<range_reference_t<R>>;
+    using reference           = range_reference_t<R>;
+    reference operator*() const;
+    pointer operator->() const;
+    ToSynthInputIterator &operator++();
+    ToSynthInputIterator operator++(int);
+    bool operator==(const ToSynthInputIterator &) const;
+};
+
+} // namespace std::ranges::__views_detail
+
+namespace std::ranges::__views_detail {
+
+// The (a)-(d) construction ladder, factored out of ranges::to so it can be
+// called from two DIFFERENT nested-if-constexpr branches below without
+// ever writing "range_value_t<C>" where C might not be a range. A flat
+// `if constexpr (!input_range<C> || convertible_to<..., range_value_t<C>>)`
+// looks like it should short-circuit for [LWG3785], but it does NOT:
+// forming the right operand's range_value_t<C> argument happens before
+// the `||` can apply at the template-instantiation level (confirmed by
+// compiling — GCC hard-errors trying to name iterator_t<C> for a non-range
+// C there). Genuine short-circuiting needs range_value_t<C> to sit behind
+// its OWN `if constexpr`, never textually reached when C isn't a range —
+// which is exactly what splitting into two call sites of this ladder (one
+// reached via `!input_range<C>`, one via `input_range<C> && convertible_to
+// <...>`) achieves.
+template <typename C, typename R, typename... Args>
+constexpr C ToConstructLadder(R &&r, Args &&...args)
+{
+    if constexpr (constructible_from<C, R, Args...>) {
+        // (a) direct range constructor — also covers "C already is the
+        // range's own type" (vector's own copy/move ctor resolves here).
+        return C(std::forward<R>(r), std::forward<Args>(args)...);
+
+    } else if constexpr (constructible_from<C, from_range_t, R, Args...>) {
+        // (b) from_range_t-tagged constructor.
+        return C(from_range, std::forward<R>(r), std::forward<Args>(args)...);
+
+    } else if constexpr (
+        common_range<R> &&
+        // [LWG3733 fix]: iterator_traits<I>::iterator_category valid and
+        // derived_from<input_iterator_tag> — NOT the old cpp17-input-
+        // iterator check (common_iterator, Ф29a, has an iterator_traits
+        // specialization without meeting it).
+        requires { typename iterator_traits<iterator_t<R>>::iterator_category; } &&
+        derived_from<typename iterator_traits<iterator_t<R>>::iterator_category,
+                     input_iterator_tag> &&
+        constructible_from<C, iterator_t<R>, sentinel_t<R>, Args...>) {
+        // (c) iterator/sentinel-pair constructor
+        return C(ranges::begin(r), ranges::end(r), std::forward<Args>(args)...);
+
+    } else if constexpr (constructible_from<C, Args...> &&
+                          ContainerInsertable<C, range_reference_t<R>>) {
+        // (d) default-construct + reserve + insert
+        C c(std::forward<Args>(args)...);
+        if constexpr (sized_range<R> && ReservableContainer<C>) {
+            // [LWG3743 fix] static_cast — ranges::size(r) may be an
+            // integer-class type not implicitly convertible to
+            // range_size_t<C>. [LWG3722 NAD] — no pre-existing-size
+            // accounting beyond this cast.
+            c.reserve(static_cast<range_size_t<C>>(ranges::size(r)));
+        }
+        // NOTE: a hand-written loop, not ranges::copy — ranges::copy
+        // lives in __bits/ranges_algo_mut, which itself #includes <ranges>
+        // for the range concepts; <algorithm> reaches THIS file (the tail
+        // of <ranges>) via __bits/ranges_algo BEFORE ranges_algo_mut ever
+        // runs, so ranges::copy is not yet visible here. Same effect as
+        // [range.utility.conv.to]'s own
+        // ranges::copy(r, ranges::inserter(c, c.end())) wording.
+        auto out = ContainerInserter<range_reference_t<R>>(c);
+        for (auto &&elem : r) *out++ = std::forward<decltype(elem)>(elem);
+        return c;
+
+    } else {
+        static_assert(false,
+            "ranges::to<C>: no viable construction path for C from R "
+            "(need a (R,Args...), (from_range_t,R,Args...), "
+            "(Iter,Sentinel,Args...), or default+insert path)");
+        __builtin_unreachable();
+    }
+}
+
+} // namespace std::ranges::__views_detail
+
+namespace std::ranges {
+
+// [range.utility.conv.to] — ranges::to<C>(r, args...)
+template <typename C, input_range R, typename... Args>
+    requires(!view<C>)
+constexpr C to(R &&r, Args &&...args)
+{
+    if constexpr (!input_range<C>) {
+        // [LWG3785]: C isn't even a range (e.g. std::expected<vector<T>,E>)
+        // — range_value_t<C> must never be NAMED, not just "not taken at
+        // runtime". This whole branch never mentions it.
+        return __views_detail::ToConstructLadder<C>(std::forward<R>(r),
+                                                     std::forward<Args>(args)...);
+
+    } else if constexpr (convertible_to<range_reference_t<R>, range_value_t<C>>) {
+        // C is a range AND its value_type is directly reachable from R's
+        // elements — range_value_t<C> is safe to name here (input_range<C>
+        // already established by the enclosing branch being false above).
+        return __views_detail::ToConstructLadder<C>(std::forward<R>(r),
+                                                     std::forward<Args>(args)...);
+
+    } else if constexpr (input_range<range_reference_t<R>>) {
+        // (e) recursive case: R's elements are themselves ranges — convert
+        // each element to range_value_t<C> first (recursing again if ITS
+        // value_type is also a range of ranges).
+        return ranges::to<C>(
+            r | views::transform([]<typename Elem>(Elem &&elem) {
+                return ranges::to<range_value_t<C>>(std::forward<Elem>(elem));
+            }),
+            std::forward<Args>(args)...);
+
+    } else {
+        static_assert(false,
+            "ranges::to<C>: range_reference_t<R> converts to neither "
+            "range_value_t<C> nor a nested range convertible to it");
+        __builtin_unreachable();
+    }
+}
+
+// [range.utility.conv.to] p3 — ranges::to<template>(r, args...), CTAD form
+template <template <typename...> class C, input_range R, typename... Args>
+constexpr auto to(R &&r, Args &&...args)
+{
+    if constexpr (requires { C(std::declval<R>(), std::declval<Args>()...); }) {
+        return ranges::to<decltype(C(std::declval<R>(), std::declval<Args>()...))>(
+            std::forward<R>(r), std::forward<Args>(args)...);
+    } else if constexpr (requires {
+                              C(from_range, std::declval<R>(), std::declval<Args>()...);
+                          }) {
+        return ranges::to<decltype(C(from_range, std::declval<R>(),
+                                      std::declval<Args>()...))>(
+            std::forward<R>(r), std::forward<Args>(args)...);
+    } else {
+        using SynthIt = __views_detail::ToSynthInputIterator<R>;
+        return ranges::to<decltype(C(std::declval<SynthIt>(), std::declval<SynthIt>(),
+                                      std::declval<Args>()...))>(
+            std::forward<R>(r), std::forward<Args>(args)...);
+    }
+}
+
+} // namespace std::ranges
+
+namespace std::ranges::__views_detail {
+
+// Closure form for ranges::to<C>(args...) — binds an arbitrary Args pack
+// and calls ranges::to<C>(r, bound_args...) once piped a range. Distinct
+// from RangeAdaptorPartial (which only ever binds ONE arg and calls
+// Adaptor(r,arg)) because to's bound-args pack size varies per call site.
+template <typename C, typename... Args>
+struct ToClosure : RangeAdaptorClosureBase {
+    tuple<decay_t<Args>...> __args;
+    constexpr explicit ToClosure(Args &&...args)
+        : __args(std::forward<Args>(args)...)
+    {
+    }
+    template <typename R>
+    constexpr auto operator()(R &&r) const &
+    {
+        return std::apply(
+            [&r](const auto &...a) { return ranges::to<C>(std::forward<R>(r), a...); },
+            __args);
+    }
+    template <typename R>
+    constexpr auto operator()(R &&r) &&
+    {
+        return std::apply(
+            [&r](auto &...a) { return ranges::to<C>(std::forward<R>(r), std::move(a)...); },
+            __args);
+    }
+};
+
+template <template <typename...> class C, typename... Args>
+struct ToClosureT : RangeAdaptorClosureBase {
+    tuple<decay_t<Args>...> __args;
+    constexpr explicit ToClosureT(Args &&...args)
+        : __args(std::forward<Args>(args)...)
+    {
+    }
+    template <typename R>
+    constexpr auto operator()(R &&r) const &
+    {
+        return std::apply(
+            [&r](const auto &...a) { return ranges::to<C>(std::forward<R>(r), a...); },
+            __args);
+    }
+    template <typename R>
+    constexpr auto operator()(R &&r) &&
+    {
+        return std::apply(
+            [&r](auto &...a) { return ranges::to<C>(std::forward<R>(r), std::move(a)...); },
+            __args);
+    }
+};
+
+} // namespace std::ranges::__views_detail
+
+namespace std::ranges {
+
+// [range.utility.conv.to] — ranges::to<C>(args...), closure form
+template <typename C, typename... Args>
+    requires(!view<C>)
+constexpr auto to(Args &&...args)
+{
+    return __views_detail::ToClosure<C, Args...>(std::forward<Args>(args)...);
+}
+
+// ranges::to<template>(args...), closure form
+template <template <typename...> class C, typename... Args>
+constexpr auto to(Args &&...args)
+{
+    return __views_detail::ToClosureT<C, Args...>(std::forward<Args>(args)...);
+}
+
+} // namespace std::ranges
+
+#endif // BOXCXX_BITS_RANGES_TO

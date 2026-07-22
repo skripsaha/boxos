@@ -16,6 +16,7 @@
 #include <__bits/allocator_core>
 #include <__bits/char_traits>
 #include <__bits/iterator_core>
+#include <__bits/ranges_core>
 #include <__bits/throw_helpers>
 #include <charconv>
 #include <compare>
@@ -102,6 +103,13 @@ public:
     basic_string(initializer_list<C> il, const Alloc &a = Alloc()) : __alloc(a)
     {
         InitCopy(il.begin(), il.size());
+    }
+
+    template <ContainerCompatibleRange<C> R>
+    basic_string(from_range_t, R &&rg, const Alloc &a = Alloc()) : __alloc(a)
+    {
+        SetShort(0);
+        for (auto &&ch : rg) push_back(ch);
     }
 
     template <typename SV>
@@ -245,6 +253,11 @@ public:
         __view v(t);
         return assign(v.data(), v.size());
     }
+    template <ContainerCompatibleRange<C> R>
+    basic_string &assign_range(R &&rg)
+    {
+        return assign(basic_string(from_range, std::forward<R>(rg), get_allocator()));
+    }
 
     allocator_type get_allocator() const noexcept { return __alloc; }
 
@@ -371,6 +384,11 @@ public:
         __view v(t);
         return append(v.data(), v.size());
     }
+    template <ContainerCompatibleRange<C> R>
+    basic_string &append_range(R &&rg)
+    {
+        return append(basic_string(from_range, std::forward<R>(rg), get_allocator()));
+    }
 
     basic_string &operator+=(const basic_string &other) { return append(other); }
     basic_string &operator+=(const C *s) { return append(s); }
@@ -452,6 +470,13 @@ public:
         __view v(t);
         return insert(pos, v.data(), v.size());
     }
+    template <ContainerCompatibleRange<C> R>
+    iterator insert_range(const_iterator p, R &&rg)
+    {
+        size_type pos = static_cast<size_type>(p - __data);
+        insert(pos, basic_string(from_range, std::forward<R>(rg), get_allocator()));
+        return __data + pos;
+    }
 
     basic_string &erase(size_type pos = 0, size_type count = npos)
     {
@@ -532,6 +557,16 @@ public:
     {
         __view v(t);
         return replace(pos, count, v.data(), v.size());
+    }
+    // [string.replace] bonus surface (not in the original brief, found
+    // while surveying <string>'s range members) — same delegate-through-a-
+    // temporary shape as insert_range/append_range above.
+    template <ContainerCompatibleRange<C> R>
+    basic_string &replace_with_range(const_iterator i1, const_iterator i2, R &&rg)
+    {
+        size_type pos   = static_cast<size_type>(i1 - __data);
+        size_type count = static_cast<size_type>(i2 - i1);
+        return replace(pos, count, basic_string(from_range, std::forward<R>(rg), get_allocator()));
     }
 
     void resize(size_type n, C ch)
@@ -1200,6 +1235,14 @@ inline long double stold(const string &str, size_t *pos = nullptr)
 {
     return __string_impl::ParseStof<long double>(str, pos, "stold");
 }
+
+// ── deduction guide ([string.cons]) ───────────────────────────────────────
+// basic_string has no other deduction guides in boxcxx (none pre-existed;
+// CTAD from a raw const charT* / basic_string_view is out of scope here) —
+// only the from_range_t one the design calls for.
+template <ranges::input_range R, typename C = ranges::range_value_t<R>,
+          typename Traits = char_traits<C>, typename Alloc = allocator<C>>
+basic_string(from_range_t, R &&, Alloc = Alloc()) -> basic_string<C, Traits, Alloc>;
 
 } // namespace std
 
