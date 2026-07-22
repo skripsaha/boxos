@@ -1,0 +1,734 @@
+// boxcxx — <__bits/ranges_chunk>
+// [range.chunk] + [range.chunk.by], Ф29e-3. Pulled in by <ranges> after
+// <__bits/ranges_split> — reuses MaybeConst/SimpleView (ranges_views),
+// NonPropagatingCache (ranges_join), MovableBox/RangeAdaptorPartial
+// (ranges_views), views::take (ranges_views), views::all_t.
+//
+// This file also defines DivCeil/ToUnsignedLike in __views_detail — shared,
+// by name, with ranges_slide and ranges_stride (both included after this
+// file). Defining them a second time in either of those headers would be an
+// ODR violation, since all three land in the same <ranges> translation unit.
+//
+// boxcxx notes (documented, safe for the closed type set):
+//   • chunk_view is specified by the standard as TWO class-template
+//     definitions sharing the name chunk_view<V>: an input_range<V>-gated
+//     primary (single-pass — begin() returns a move-only OuterIterator whose
+//     dereference yields a fresh, materialize-on-demand ValueType/
+//     InnerIterator pair) and a forward_range<V>-gated partial specialization
+//     (multi-pass — begin()/end() return a proper multi-pass Iterator<Const>
+//     built on views::take). Selection between the two is by concept
+//     subsumption (forward_range subsumes input_range), a genuine C++20
+//     mechanism — not an if-constexpr branch, not a boxcxx simplification.
+//   • Every nested-type member/friend function body is written INLINE inside
+//     its own struct — including begin()/end() themselves for chunk_view and
+//     slide_view, further down — rather than declared-in-struct-then-
+//     separately-defined-out-of-line the way the live standard's own
+//     paragraph-numbered clauses read most naturally. Both forms are
+//     semantically identical (a class member function template body is a
+//     dependent context either way, only checked at instantiation, long
+//     after the whole header has been parsed); fully inline matches every
+//     other boxcxx view (join_view, split_view, filter_view, transform_view)
+//     and needs no repeated template preamble per function. Only each NESTED
+//     TYPE's full struct body lives out-of-line relative to its ENCLOSING
+//     view, matching join_view/split_view/lazy_split_view's own style.
+//   • operator++(int)/operator--(int) are conventional "auto tmp = *this;
+//     ++*this; return tmp;" bodies throughout — the live synopses' "=
+//     default;" spelling depends on unadopted P3668 and does not compile
+//     (the standing Ф29e-2 finding).
+//   • iterator_category is always declared, collapsing to input_iterator_tag
+//     when the standard's own gate is unmet (every boxcxx view's rule).
+//   • reserve_hint()/approximately_sized_range (P2846R6) are C++26, not
+//     C++23 — deliberately not implemented here, matching how Ф29e-1 ruled
+//     concat_view (P2542) out of scope. Only the C++23 size() member itself
+//     (unmodified by P2846) is implemented.
+//   • DivCeil is transcribed EXACTLY as the standard's exposition-only
+//     div-ceil: one division, one modulo, no addition that can overflow —
+//     already the overflow-safe formulation, not "(num+denom-1)/denom". Both
+//     n_ and stride_ are Precondition-guarded (n>0) constructor parameters,
+//     copied once and never reassigned anywhere in any of the three files —
+//     no runtime zero-divisor check is added (the standard does not mandate
+//     one; LWG 3712 removed chunk_view's/slide_view's default constructor
+//     specifically so a defaulted, zero-valued n_ can never arise).
+#ifndef BOXCXX_BITS_RANGES_CHUNK
+#define BOXCXX_BITS_RANGES_CHUNK
+
+#include <concepts>
+#include <cstddef>
+#include <iterator>
+#include <type_traits>
+#include <utility>
+
+namespace std {
+namespace ranges {
+
+namespace __views_detail {
+
+// div-ceil ([range.chunk], exposition-only) — ceiling division without the
+// overflow-prone "(num+denom-1)/denom" idiom.
+template <typename I>
+constexpr I DivCeil(I num, I denom)
+{
+    I r = num / denom;
+    if (num % denom) ++r;
+    return r;
+}
+
+// to-unsigned-like ([range.chunk], exposition-only) — boxcxx has no
+// integer-class/"unbounded" difference types anywhere (ranges_factory's own
+// IOTA-DIFF-T note), so make_unsigned_t<D> is always the right target type.
+template <typename D>
+constexpr make_unsigned_t<D> ToUnsignedLike(D d)
+{
+    return static_cast<make_unsigned_t<D>>(d);
+}
+
+} // namespace __views_detail
+
+// ── chunk_view, input-range specialization ([range.chunk.view.input] +
+//    [range.chunk.outer.iter] + [range.chunk.outer.value] +
+//    [range.chunk.inner.iter]) ─────────────────────────────────────────────
+
+template <view V>
+    requires input_range<V>
+class chunk_view : public view_interface<chunk_view<V>> {
+    V __base;
+    range_difference_t<V> __n;
+    range_difference_t<V> __remainder = 0;
+    __views_detail::NonPropagatingCache<iterator_t<V>> __current;
+
+    struct OuterIterator;
+    struct InnerIterator;
+
+public:
+    chunk_view() = delete; // LWG 3712 — no sensible default n_
+    constexpr explicit chunk_view(V base, range_difference_t<V> n)
+        : __base(std::move(base)), __n(n)
+    {
+    }
+
+    constexpr V base() const &
+        requires copy_constructible<V>
+    {
+        return __base;
+    }
+    constexpr V base() && { return std::move(__base); }
+
+    constexpr auto begin()
+    {
+        __current.emplace(ranges::begin(__base));
+        __remainder = __n;
+        return OuterIterator(*this);
+    }
+    constexpr default_sentinel_t end() const noexcept { return default_sentinel; }
+
+    constexpr auto size()
+        requires sized_range<V>
+    {
+        return __views_detail::ToUnsignedLike(__views_detail::DivCeil(ranges::distance(ranges::begin(__base), ranges::end(__base)), __n));
+    }
+    constexpr auto size() const
+        requires sized_range<const V>
+    {
+        return __views_detail::ToUnsignedLike(__views_detail::DivCeil(ranges::distance(ranges::begin(__base), ranges::end(__base)), __n));
+    }
+};
+
+template <typename R>
+chunk_view(R &&, range_difference_t<R>) -> chunk_view<views::all_t<R>>;
+
+// ── OuterIterator ([range.chunk.outer.iter]) — move-only: a type that
+//    isn't copyable can't satisfy forward_iterator (needs semiregular),
+//    even though it freely satisfies input_or_output_iterator/movable —
+//    the standard's own "single-pass, one shared cursor" guarantee made
+//    physical, not a boxcxx cut. ─────────────────────────────────────────
+
+template <view V>
+    requires input_range<V>
+struct chunk_view<V>::OuterIterator {
+    chunk_view *__parent = nullptr;
+
+    struct ValueType;
+
+    using iterator_concept  = input_iterator_tag;
+    using iterator_category = input_iterator_tag; // boxcxx-added
+    using value_type        = ValueType;
+    using difference_type   = range_difference_t<V>;
+    using pointer            = void; // boxcxx-added
+    using reference           = ValueType; // boxcxx-added — operator* yields a prvalue
+
+    OuterIterator() = delete; // no sensible null state — every operation dereferences __parent
+    constexpr explicit OuterIterator(chunk_view &parent) : __parent(__builtin_addressof(parent)) {}
+
+    OuterIterator(const OuterIterator &)            = delete;
+    OuterIterator(OuterIterator &&)                 = default;
+    OuterIterator &operator=(const OuterIterator &) = delete;
+    OuterIterator &operator=(OuterIterator &&)      = default;
+
+    constexpr ValueType operator*() const { return ValueType(*__parent); }
+
+    constexpr OuterIterator &operator++()
+    {
+        ranges::advance(*__parent->__current, __parent->__remainder, ranges::end(__parent->__base));
+        __parent->__remainder = __parent->__n;
+        return *this;
+    }
+    constexpr void operator++(int) { ++*this; }
+
+    friend constexpr bool operator==(const OuterIterator &x, default_sentinel_t)
+    {
+        return *x.__parent->__current == ranges::end(x.__parent->__base) && x.__parent->__remainder != 0;
+    }
+
+    friend constexpr difference_type operator-(default_sentinel_t y, const OuterIterator &x)
+        requires sized_sentinel_for<sentinel_t<V>, iterator_t<V>>
+    {
+        (void)y;
+        const auto dist = ranges::end(x.__parent->__base) - *x.__parent->__current;
+        if (dist < x.__parent->__remainder) return dist == 0 ? 0 : 1;
+        return __views_detail::DivCeil(dist - x.__parent->__remainder, x.__parent->__n) + 1;
+    }
+    friend constexpr difference_type operator-(const OuterIterator &x, default_sentinel_t y)
+        requires sized_sentinel_for<sentinel_t<V>, iterator_t<V>>
+    {
+        return -(y - x);
+    }
+};
+
+// ── OuterIterator::ValueType ([range.chunk.outer.value]) ────────────────
+
+template <view V>
+    requires input_range<V>
+struct chunk_view<V>::OuterIterator::ValueType : view_interface<ValueType> {
+    chunk_view *__parent = nullptr;
+
+    constexpr explicit ValueType(chunk_view &parent) : __parent(__builtin_addressof(parent)) {}
+
+    constexpr InnerIterator begin() const noexcept { return InnerIterator(*__parent); }
+    constexpr default_sentinel_t end() const noexcept { return default_sentinel; }
+
+    constexpr auto size() const
+        requires sized_sentinel_for<sentinel_t<V>, iterator_t<V>>
+    {
+        auto avail = ranges::end(__parent->__base) - *__parent->__current;
+        return __views_detail::ToUnsignedLike(avail < __parent->__remainder ? avail : __parent->__remainder);
+    }
+};
+
+// ── InnerIterator ([range.chunk.inner.iter]) — also move-only, for the
+//    identical single-pass reason as OuterIterator. Dereferences to a real
+//    forwarded reference (range_reference_t<V>), not a materialized value. ─
+
+template <view V>
+    requires input_range<V>
+struct chunk_view<V>::InnerIterator {
+    chunk_view *__parent = nullptr;
+
+    using iterator_concept  = input_iterator_tag;
+    using iterator_category = input_iterator_tag; // boxcxx-added
+    using value_type        = range_value_t<V>;
+    using difference_type   = range_difference_t<V>;
+    using pointer            = void; // boxcxx-added
+    using reference           = range_reference_t<V>; // boxcxx-added
+
+    InnerIterator() = delete; // same reasoning as OuterIterator
+    constexpr explicit InnerIterator(chunk_view &parent) noexcept : __parent(__builtin_addressof(parent)) {}
+
+    InnerIterator(const InnerIterator &)            = delete;
+    InnerIterator(InnerIterator &&)                 = default;
+    InnerIterator &operator=(const InnerIterator &) = delete;
+    InnerIterator &operator=(InnerIterator &&)      = default;
+
+    constexpr const iterator_t<V> &base() const & { return *__parent->__current; }
+
+    constexpr range_reference_t<V> operator*() const { return **__parent->__current; }
+
+    constexpr InnerIterator &operator++()
+    {
+        ++*__parent->__current;
+        if (*__parent->__current == ranges::end(__parent->__base))
+            __parent->__remainder = 0;
+        else
+            --__parent->__remainder;
+        return *this;
+    }
+    constexpr void operator++(int) { ++*this; }
+
+    friend constexpr bool operator==(const InnerIterator &x, default_sentinel_t)
+    {
+        return x.__parent->__remainder == 0;
+    }
+
+    friend constexpr difference_type operator-(default_sentinel_t y, const InnerIterator &x)
+        requires sized_sentinel_for<sentinel_t<V>, iterator_t<V>>
+    {
+        (void)y;
+        auto avail = ranges::end(x.__parent->__base) - *x.__parent->__current;
+        return x.__parent->__remainder < avail ? x.__parent->__remainder : avail;
+    }
+    friend constexpr difference_type operator-(const InnerIterator &x, default_sentinel_t y)
+        requires sized_sentinel_for<sentinel_t<V>, iterator_t<V>>
+    {
+        return -(y - x);
+    }
+
+    // range_rvalue_reference_t is not a boxcxx <ranges> alias (only
+    // range_difference_t/range_value_t/range_reference_t/range_size_t are
+    // defined there) — iter_rvalue_reference_t<iterator_t<V>> is exactly
+    // what it would be, matching the existing cartesian/zip/join_with
+    // precedent for this same substrate gap (ranges_join_with:33-42).
+    friend constexpr iter_rvalue_reference_t<iterator_t<V>> iter_move(const InnerIterator &i)
+        noexcept(noexcept(ranges::iter_move(*i.__parent->__current)))
+    {
+        return ranges::iter_move(*i.__parent->__current);
+    }
+    friend constexpr void iter_swap(const InnerIterator &x, const InnerIterator &y)
+        noexcept(noexcept(ranges::iter_swap(*x.__parent->__current, *y.__parent->__current)))
+        requires indirectly_swappable<iterator_t<V>>
+    {
+        ranges::iter_swap(*x.__parent->__current, *y.__parent->__current);
+    }
+};
+
+// ── chunk_view, forward-range specialization ([range.chunk.view.fwd] +
+//    [range.chunk.fwd.iter]) — a true C++20 constrained partial
+//    specialization of the SAME template chunk_view, selected instead of
+//    the primary above whenever forward_range<V> holds (forward_range
+//    subsumes input_range). One shared deduction guide (declared once,
+//    above) covers both. ───────────────────────────────────────────────────
+
+template <view V>
+    requires forward_range<V>
+class chunk_view<V> : public view_interface<chunk_view<V>> {
+    V __base;
+    range_difference_t<V> __n;
+
+    template <bool Const>
+    struct Iterator;
+
+public:
+    chunk_view() = delete; // LWG 3712, same reasoning as the input-range specialization
+    constexpr explicit chunk_view(V base, range_difference_t<V> n)
+        : __base(std::move(base)), __n(n)
+    {
+    }
+
+    constexpr V base() const &
+        requires copy_constructible<V>
+    {
+        return __base;
+    }
+    constexpr V base() && { return std::move(__base); }
+
+    constexpr auto begin()
+        requires(!__views_detail::SimpleView<V>)
+    {
+        return Iterator<false>(this, ranges::begin(__base));
+    }
+    constexpr auto begin() const
+        requires forward_range<const V>
+    {
+        return Iterator<true>(this, ranges::begin(__base));
+    }
+
+    constexpr auto end()
+        requires(!__views_detail::SimpleView<V>)
+    {
+        if constexpr (common_range<V> && sized_range<V>) {
+            auto missing = (__n - ranges::distance(ranges::begin(__base), ranges::end(__base)) % __n) % __n;
+            return Iterator<false>(this, ranges::end(__base), missing);
+        } else if constexpr (common_range<V> && !bidirectional_range<V>) {
+            return Iterator<false>(this, ranges::end(__base));
+        } else {
+            return default_sentinel;
+        }
+    }
+    constexpr auto end() const
+        requires forward_range<const V>
+    {
+        if constexpr (common_range<const V> && sized_range<const V>) {
+            auto missing = (__n - ranges::distance(ranges::begin(__base), ranges::end(__base)) % __n) % __n;
+            return Iterator<true>(this, ranges::end(__base), missing);
+        } else if constexpr (common_range<const V> && !bidirectional_range<const V>) {
+            return Iterator<true>(this, ranges::end(__base));
+        } else {
+            return default_sentinel;
+        }
+    }
+
+    constexpr auto size()
+        requires sized_range<V>
+    {
+        return __views_detail::ToUnsignedLike(__views_detail::DivCeil(ranges::distance(ranges::begin(__base), ranges::end(__base)), __n));
+    }
+    constexpr auto size() const
+        requires sized_range<const V>
+    {
+        return __views_detail::ToUnsignedLike(__views_detail::DivCeil(ranges::distance(ranges::begin(__base), ranges::end(__base)), __n));
+    }
+};
+
+// ── Iterator<Const> ([range.chunk.fwd.iter]) ─────────────────────────────
+
+template <view V>
+    requires forward_range<V>
+template <bool Const>
+struct chunk_view<V>::Iterator {
+    using Parent = __views_detail::MaybeConst<Const, chunk_view>;
+    using Base   = __views_detail::MaybeConst<Const, V>;
+
+    Parent *__parent                   = nullptr;
+    iterator_t<Base> __current         = iterator_t<Base>();
+    sentinel_t<Base> __end             = sentinel_t<Base>();
+    range_difference_t<Base> __n       = 0;
+    range_difference_t<Base> __missing = 0;
+
+    // iterator_concept's floor is forward_iterator_tag (no input rung): this
+    // specialization's class-level bound is already forward_range<V>, which
+    // implies forward_range<Base> unconditionally.
+    using iterator_concept = conditional_t<
+        random_access_range<Base>, random_access_iterator_tag,
+        conditional_t<bidirectional_range<Base>, bidirectional_iterator_tag, forward_iterator_tag>>;
+    // iterator_category is pinned to input_iterator_tag unconditionally:
+    // operator* always materializes a fresh take_view<subrange<...>> prvalue,
+    // never a stable lvalue reference — matching adjacent_view/zip_view/
+    // cartesian_product_view's own already-shipped reasoning.
+    using iterator_category = input_iterator_tag;
+    using value_type        = decltype(views::take(subrange(__current, __end), __n));
+    using difference_type   = range_difference_t<Base>;
+    using pointer            = void; // boxcxx-added
+    using reference           = value_type; // boxcxx-added
+
+    Iterator() = default;
+    constexpr explicit Iterator(Parent *parent, iterator_t<Base> current, range_difference_t<Base> missing = 0)
+        : __parent(parent), __current(std::move(current)), __end(ranges::end(parent->__base)),
+          __n(parent->__n), __missing(missing)
+    {
+    }
+    constexpr Iterator(Iterator<!Const> i)
+        requires Const && convertible_to<iterator_t<V>, iterator_t<Base>> &&
+                 convertible_to<sentinel_t<V>, sentinel_t<Base>>
+        : __parent(i.__parent), __current(std::move(i.__current)), __end(std::move(i.__end)), __n(i.__n),
+          __missing(i.__missing)
+    {
+    }
+
+    constexpr iterator_t<Base> base() const { return __current; }
+
+    constexpr value_type operator*() const { return views::take(subrange(__current, __end), __n); }
+
+    constexpr Iterator &operator++()
+    {
+        __missing = ranges::advance(__current, __n, __end);
+        return *this;
+    }
+    constexpr Iterator operator++(int)
+    {
+        auto tmp = *this;
+        ++*this;
+        return tmp;
+    }
+
+    constexpr Iterator &operator--()
+        requires bidirectional_range<Base>
+    {
+        ranges::advance(__current, __missing - __n);
+        __missing = 0;
+        return *this;
+    }
+    constexpr Iterator operator--(int)
+        requires bidirectional_range<Base>
+    {
+        auto tmp = *this;
+        --*this;
+        return tmp;
+    }
+
+    constexpr Iterator &operator+=(difference_type x)
+        requires random_access_range<Base>
+    {
+        if (x > 0) {
+            ranges::advance(__current, __n * (x - 1));
+            __missing = ranges::advance(__current, __n, __end);
+        } else if (x < 0) {
+            ranges::advance(__current, __n * x + __missing);
+            __missing = 0;
+        }
+        return *this;
+    }
+    constexpr Iterator &operator-=(difference_type x)
+        requires random_access_range<Base>
+    {
+        return *this += -x;
+    }
+
+    constexpr value_type operator[](difference_type n) const
+        requires random_access_range<Base>
+    {
+        return *(*this + n);
+    }
+
+    friend constexpr bool operator==(const Iterator &x, const Iterator &y) { return x.__current == y.__current; }
+    friend constexpr bool operator==(const Iterator &x, default_sentinel_t) { return x.__current == x.__end; }
+
+    friend constexpr bool operator<(const Iterator &x, const Iterator &y)
+        requires random_access_range<Base>
+    {
+        return x.__current < y.__current;
+    }
+    friend constexpr bool operator>(const Iterator &x, const Iterator &y)
+        requires random_access_range<Base>
+    {
+        return y < x;
+    }
+    friend constexpr bool operator<=(const Iterator &x, const Iterator &y)
+        requires random_access_range<Base>
+    {
+        return !(y < x);
+    }
+    friend constexpr bool operator>=(const Iterator &x, const Iterator &y)
+        requires random_access_range<Base>
+    {
+        return !(x < y);
+    }
+    friend constexpr auto operator<=>(const Iterator &x, const Iterator &y)
+        requires random_access_range<Base> && three_way_comparable<iterator_t<Base>>
+    {
+        return x.__current <=> y.__current;
+    }
+
+    friend constexpr Iterator operator+(const Iterator &i, difference_type n)
+        requires random_access_range<Base>
+    {
+        auto r = i;
+        r += n;
+        return r;
+    }
+    friend constexpr Iterator operator+(difference_type n, const Iterator &i)
+        requires random_access_range<Base>
+    {
+        auto r = i;
+        r += n;
+        return r;
+    }
+    friend constexpr Iterator operator-(const Iterator &i, difference_type n)
+        requires random_access_range<Base>
+    {
+        auto r = i;
+        r -= n;
+        return r;
+    }
+    friend constexpr difference_type operator-(const Iterator &x, const Iterator &y)
+        requires sized_sentinel_for<iterator_t<Base>, iterator_t<Base>>
+    {
+        return (x.__current - y.__current + x.__missing - y.__missing) / x.__n;
+    }
+
+    friend constexpr difference_type operator-(default_sentinel_t, const Iterator &x)
+        requires sized_sentinel_for<sentinel_t<Base>, iterator_t<Base>>
+    {
+        return __views_detail::DivCeil(x.__end - x.__current, x.__n);
+    }
+    friend constexpr difference_type operator-(const Iterator &x, default_sentinel_t y)
+        requires sized_sentinel_for<sentinel_t<Base>, iterator_t<Base>>
+    {
+        return -(y - x);
+    }
+};
+
+// ── chunk_by_view ([range.chunk.by]) — structurally closest to filter_view:
+//    forward-only base, MovableBox<Pred> payload, NO const-iteration at all
+//    (the standard's own genuine limitation, matching filter_view — not a
+//    boxcxx cut). ────────────────────────────────────────────────────────
+
+template <forward_range V, indirect_binary_predicate<iterator_t<V>, iterator_t<V>> Pred>
+    requires view<V> && is_object_v<Pred>
+class chunk_by_view : public view_interface<chunk_by_view<V, Pred>> {
+    V __base = V();
+    __views_detail::MovableBox<Pred> __pred;
+
+    // local translation of:
+    //   ranges::next(ranges::adjacent_find(cur, ranges::end(base_),
+    //                                       not_fn(ref(*pred_))), 1, ranges::end(base_))
+    // ranges::adjacent_find is unreachable from <ranges> (lives in
+    // <__bits/ranges_algo*>, pulled in only by <algorithm>, textually after
+    // <ranges>) and not_fn isn't implemented in boxcxx <functional> yet
+    // either ("not_fn and the hash primary land with the container phases")
+    // — two independent reasons this is a local loop.
+    constexpr iterator_t<V> FindNext(iterator_t<V> cur)
+    {
+        auto last = ranges::end(__base);
+        if (cur == last) return cur;
+        auto it = cur;
+        auto nx = it;
+        ++nx;
+        for (; nx != last; ++it, ++nx) {
+            if (!static_cast<bool>(std::invoke(*__pred, *it, *nx))) return nx;
+        }
+        return last;
+    }
+
+    // local translation of the standard's "an iterator i in [begin(base_),
+    // cur) such that adjacent_find(i, cur, not_fn(ref(*pred_))) == cur, and
+    // (if i != begin(base_)) pred_(*prev(i),*i) is false" — walk backward,
+    // extending the run while consecutive pairs still satisfy pred_ (same
+    // chunk), stopping the instant a genuine boundary is found immediately
+    // before the candidate, or the candidate reaches begin().
+    constexpr iterator_t<V> FindPrev(iterator_t<V> cur)
+        requires bidirectional_range<V>
+    {
+        auto first = ranges::begin(__base);
+        auto i     = cur;
+        --i;
+        while (i != first) {
+            auto p = i;
+            --p;
+            if (!static_cast<bool>(std::invoke(*__pred, *p, *i))) break;
+            i = p;
+        }
+        return i;
+    }
+
+    struct Iterator;
+
+public:
+    chunk_by_view()
+        requires default_initializable<V> && default_initializable<Pred>
+    = default;
+    constexpr explicit chunk_by_view(V base, Pred pred) : __base(std::move(base)), __pred(std::move(pred)) {}
+
+    constexpr V base() const &
+        requires copy_constructible<V>
+    {
+        return __base;
+    }
+    constexpr V base() && { return std::move(__base); }
+
+    constexpr const Pred &pred() const { return *__pred; }
+
+    // Deliberately skips the standard's Remarks-mandated begin() cache —
+    // recomputes FindNext(begin()) fresh on every call. Same, already-
+    // shipped, already-audited simplification filter_view and split_view
+    // both use (correctness-preserving, complexity-only: O(1) amortized
+    // degrades to O(k*m) for k repeat begin() calls over an m-element first
+    // chunk). Contrast with slide_view below, which DOES cache — that one is
+    // explicitly named as a risk in this phase's brief; this one has two
+    // already-shipped precedents for skipping it.
+    constexpr Iterator begin() { return Iterator(*this, ranges::begin(__base), FindNext(ranges::begin(__base))); }
+    constexpr auto end()
+    {
+        if constexpr (common_range<V>)
+            return Iterator(*this, ranges::end(__base), ranges::end(__base));
+        else
+            return default_sentinel;
+    }
+};
+
+template <typename R, typename Pred>
+chunk_by_view(R &&, Pred) -> chunk_by_view<views::all_t<R>, Pred>;
+
+// ── chunk_by_view::Iterator ([range.chunk.by.iter]) — no <Const> dimension
+//    (chunk_by_view has no const-iteration at all, so there is only ever
+//    one iterator type); no separate Sentinel type either — compares
+//    directly against default_sentinel_t via a friend overload when
+//    !common_range<V>, and against itself when common_range<V>. ─────────
+
+template <forward_range V, indirect_binary_predicate<iterator_t<V>, iterator_t<V>> Pred>
+    requires view<V> && is_object_v<Pred>
+struct chunk_by_view<V, Pred>::Iterator {
+    chunk_by_view *__parent = nullptr;
+    iterator_t<V> __current = iterator_t<V>();
+    iterator_t<V> __next    = iterator_t<V>();
+
+    using value_type        = subrange<iterator_t<V>>;
+    using difference_type   = range_difference_t<V>;
+    using iterator_category = input_iterator_tag;
+    using iterator_concept   = conditional_t<bidirectional_range<V>, bidirectional_iterator_tag, forward_iterator_tag>;
+    using pointer             = void; // boxcxx-added
+    using reference           = value_type; // boxcxx-added
+
+    Iterator() = default;
+    constexpr Iterator(chunk_by_view &parent, iterator_t<V> current, iterator_t<V> next)
+        : __parent(__builtin_addressof(parent)), __current(std::move(current)), __next(std::move(next))
+    {
+    }
+
+    constexpr value_type operator*() const { return subrange(__current, __next); }
+
+    constexpr Iterator &operator++()
+    {
+        __current = __next;
+        __next    = __parent->FindNext(__current);
+        return *this;
+    }
+    constexpr Iterator operator++(int)
+    {
+        auto tmp = *this;
+        ++*this;
+        return tmp;
+    }
+
+    constexpr Iterator &operator--()
+        requires bidirectional_range<V>
+    {
+        __next    = __current;
+        __current = __parent->FindPrev(__next);
+        return *this;
+    }
+    constexpr Iterator operator--(int)
+        requires bidirectional_range<V>
+    {
+        auto tmp = *this;
+        --*this;
+        return tmp;
+    }
+
+    friend constexpr bool operator==(const Iterator &x, const Iterator &y) { return x.__current == y.__current; }
+    friend constexpr bool operator==(const Iterator &x, default_sentinel_t) { return x.__current == x.__next; }
+};
+
+// ── views::chunk / views::chunk_by ([range.chunk.overview] +
+//    [range.chunk.by.overview]) ────────────────────────────────────────────
+
+namespace views {
+
+struct Chunk {
+    template <viewable_range R>
+        requires input_range<all_t<R>>
+    constexpr auto operator()(R &&r, range_difference_t<all_t<R>> n) const
+    {
+        return chunk_view<all_t<R>>(all(std::forward<R>(r)), n);
+    }
+    template <typename D>
+    constexpr auto operator()(D n) const
+    {
+        return RangeAdaptorPartial<Chunk, D>(Chunk{}, n);
+    }
+};
+inline constexpr Chunk chunk{};
+
+struct ChunkBy {
+    template <viewable_range R, typename Pred>
+        requires forward_range<all_t<R>> &&
+                 indirect_binary_predicate<remove_cvref_t<Pred>, iterator_t<all_t<R>>, iterator_t<all_t<R>>>
+    constexpr auto operator()(R &&r, Pred &&pred) const
+    {
+        return chunk_by_view<all_t<R>, remove_cvref_t<Pred>>(all(std::forward<R>(r)), std::forward<Pred>(pred));
+    }
+    template <typename Pred>
+        requires(!viewable_range<remove_cvref_t<Pred>>)
+    constexpr auto operator()(Pred &&pred) const
+    {
+        return RangeAdaptorPartial<ChunkBy, remove_cvref_t<Pred>>(ChunkBy{}, std::forward<Pred>(pred));
+    }
+};
+inline constexpr ChunkBy chunk_by{};
+
+} // namespace views
+
+} // namespace ranges
+
+namespace views = ranges::views;
+
+} // namespace std
+
+#endif // BOXCXX_BITS_RANGES_CHUNK

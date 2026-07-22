@@ -1,0 +1,366 @@
+// boxcxx — <__bits/ranges_slide>
+// [range.slide], Ф29e-3. Pulled in by <ranges> after <__bits/ranges_chunk> —
+// reuses MaybeConst/SimpleView (ranges_views), NonPropagatingCache/PresentIf
+// (ranges_join), views::counted (ranges_adaptor_simple), ranges::next/prev
+// (<iterator>), and ToUnsignedLike from ranges_chunk (no division anywhere
+// in this view, so DivCeil is not needed here).
+//
+// slide_view's Mth element is a view over the Mth through (M+N-1)th elements
+// of the base — a sliding window, as opposed to chunk_view's non-overlapping
+// partition. Structurally the closest existing relative is adjacent_view
+// (Ф29d-1) — both are forward_range-only windowing views over a
+// compile-time-vs-runtime N — but slide_view's N is a RUNTIME constructor
+// parameter, so each window is derived on demand from a single current_
+// cursor plus (sometimes) one extra tracked position, not a fixed-size
+// array<iterator_t<Base>,N>.
+//
+// boxcxx notes (documented, safe for the closed type set):
+//   • Every nested-type member/friend function body is inline inside its own
+//     struct, including slide_view's own begin()/end() (the Remarks-mandated
+//     cache logic included) — matching ranges_chunk's file-wide convention;
+//     both forms are semantically identical since member function template
+//     bodies are dependent contexts checked only at instantiation.
+//   • The Remarks-mandated begin()/end() cache IS implemented here (unlike
+//     chunk_by_view's, which is deliberately skipped) — this phase's own
+//     brief names cached-begin/end non-propagation as a scoped risk for
+//     slide_view specifically, and the primitive (NonPropagatingCache) is
+//     already proven by join_view/lazy_split_view at a structurally
+//     identical (if new) call site: memoizing a computed view-level
+//     iterator rather than a per-element cache.
+//   • operator++(int)/operator--(int) are conventional bodies (the live
+//     synopsis' "= default;" spelling depends on unadopted P3668).
+#ifndef BOXCXX_BITS_RANGES_SLIDE
+#define BOXCXX_BITS_RANGES_SLIDE
+
+#include <concepts>
+#include <cstddef>
+#include <iterator>
+#include <type_traits>
+#include <utility>
+
+namespace std {
+namespace ranges {
+
+namespace __views_detail {
+
+// slide-caches-* ([range.slide.view], exposition-only) — mutually exclusive
+// and jointly exhaustive over any forward_range V: no else/default case is
+// ever needed at a use site that switches on all three.
+template <typename V>
+concept SlideCachesNothing = random_access_range<V> && sized_range<V>;
+
+template <typename V>
+concept SlideCachesLast = !SlideCachesNothing<V> && bidirectional_range<V> && common_range<V>;
+
+template <typename V>
+concept SlideCachesFirst = !SlideCachesNothing<V> && !SlideCachesLast<V>;
+
+} // namespace __views_detail
+
+// ── slide_view ([range.slide.view]) ─────────────────────────────────────
+
+template <forward_range V>
+    requires view<V>
+class slide_view : public view_interface<slide_view<V>> {
+    V __base;
+    range_difference_t<V> __n;
+
+    template <bool Const>
+    struct Iterator;
+    struct Sentinel;
+
+    __views_detail::NonPropagatingCache<Iterator<false>> __cachedBegin;
+    __views_detail::NonPropagatingCache<Iterator<false>> __cachedEnd;
+
+public:
+    // No default ctor shown live, matching chunk_view/chunk_by_view's LWG
+    // 3712 pattern — a defaulted n_==0 would be exactly as hazardous here
+    // (distance-n_+1 is subtraction, not division, but a 0-length window is
+    // nonsensical regardless). Omitted rather than explicitly =deleted here
+    // (textual variety across the three files — §2.1's note applies
+    // identically either way; behaviorally there is no difference).
+    constexpr explicit slide_view(V base, range_difference_t<V> n) : __base(std::move(base)), __n(n) {}
+
+    constexpr V base() const &
+        requires copy_constructible<V>
+    {
+        return __base;
+    }
+    constexpr V base() && { return std::move(__base); }
+
+    constexpr auto begin()
+        requires(!(__views_detail::SimpleView<V> && __views_detail::SlideCachesNothing<const V>))
+    {
+        if constexpr (__views_detail::SlideCachesFirst<V>) {
+            if (!__cachedBegin)
+                __cachedBegin.emplace(ranges::begin(__base),
+                                      ranges::next(ranges::begin(__base), __n - 1, ranges::end(__base)), __n);
+            return *__cachedBegin;
+        } else {
+            return Iterator<false>(ranges::begin(__base), __n);
+        }
+    }
+    constexpr auto begin() const
+        requires __views_detail::SlideCachesNothing<const V>
+    {
+        return Iterator<true>(ranges::begin(__base), __n);
+    }
+
+    constexpr auto end()
+        requires(!(__views_detail::SimpleView<V> && __views_detail::SlideCachesNothing<const V>))
+    {
+        if constexpr (__views_detail::SlideCachesNothing<V>) {
+            return Iterator<false>(ranges::begin(__base) + range_difference_t<V>(size()), __n);
+        } else if constexpr (__views_detail::SlideCachesLast<V>) {
+            if (!__cachedEnd)
+                __cachedEnd.emplace(ranges::prev(ranges::end(__base), __n - 1, ranges::begin(__base)), __n);
+            return *__cachedEnd;
+        } else if constexpr (common_range<V>) {
+            return Iterator<false>(ranges::end(__base), ranges::end(__base), __n);
+        } else {
+            return Sentinel(ranges::end(__base));
+        }
+    }
+    constexpr auto end() const
+        requires __views_detail::SlideCachesNothing<const V>
+    {
+        return begin() + range_difference_t<const V>(size());
+    }
+
+    constexpr auto size()
+        requires sized_range<V>
+    {
+        auto sz = ranges::distance(ranges::begin(__base), ranges::end(__base)) - __n + 1;
+        if (sz < 0) sz = 0;
+        return __views_detail::ToUnsignedLike(sz);
+    }
+    constexpr auto size() const
+        requires sized_range<const V>
+    {
+        auto sz = ranges::distance(ranges::begin(__base), ranges::end(__base)) - __n + 1;
+        if (sz < 0) sz = 0;
+        return __views_detail::ToUnsignedLike(sz);
+    }
+};
+
+template <typename R>
+slide_view(R &&, range_difference_t<R>) -> slide_view<views::all_t<R>>;
+
+// ── Iterator<Const> ([range.slide.iterator]) ────────────────────────────
+
+template <forward_range V>
+    requires view<V>
+template <bool Const>
+struct slide_view<V>::Iterator {
+    using Base = __views_detail::MaybeConst<Const, V>;
+
+    iterator_t<Base> __current = iterator_t<Base>();
+    [[no_unique_address]] __views_detail::PresentIf<__views_detail::SlideCachesFirst<Base>, iterator_t<Base>>
+        __lastEle;
+    range_difference_t<Base> __n = 0;
+
+    using iterator_concept  = conditional_t<random_access_range<Base>, random_access_iterator_tag,
+                              conditional_t<bidirectional_range<Base>, bidirectional_iterator_tag, forward_iterator_tag>>;
+    using iterator_category = input_iterator_tag; // always input — window is a fresh prvalue every deref
+    using value_type        = decltype(views::counted(__current, __n));
+    using difference_type   = range_difference_t<Base>;
+    using pointer            = void; // boxcxx-added
+    using reference           = value_type; // boxcxx-added
+
+    Iterator() = default;
+    constexpr Iterator(iterator_t<Base> current, range_difference_t<Base> n)
+        requires(!__views_detail::SlideCachesFirst<Base>)
+        : __current(std::move(current)), __n(n)
+    {
+    }
+    constexpr Iterator(iterator_t<Base> current, iterator_t<Base> lastEle, range_difference_t<Base> n)
+        requires __views_detail::SlideCachesFirst<Base>
+        : __current(std::move(current)), __lastEle(std::move(lastEle)), __n(n)
+    {
+    }
+    constexpr Iterator(Iterator<!Const> i)
+        requires Const && convertible_to<iterator_t<V>, iterator_t<Base>>
+        : __current(std::move(i.__current)), __n(i.__n)
+    {
+        // Note 1 (live text): Iterator<true> is only ever formed when Base
+        // models slide-caches-nothing, in which case __lastEle is not
+        // present — left default-constructed (the empty PresentIf<false,...> arm).
+    }
+
+    constexpr value_type operator*() const { return views::counted(__current, __n); }
+    constexpr value_type operator[](difference_type n) const
+        requires random_access_range<Base>
+    {
+        return views::counted(__current + n, __n);
+    }
+
+    constexpr Iterator &operator++()
+    {
+        ++__current;
+        if constexpr (__views_detail::SlideCachesFirst<Base>) ++__lastEle.__value;
+        return *this;
+    }
+    constexpr Iterator operator++(int)
+    {
+        auto tmp = *this;
+        ++*this;
+        return tmp;
+    }
+
+    constexpr Iterator &operator--()
+        requires bidirectional_range<Base>
+    {
+        --__current;
+        if constexpr (__views_detail::SlideCachesFirst<Base>) --__lastEle.__value;
+        return *this;
+    }
+    constexpr Iterator operator--(int)
+        requires bidirectional_range<Base>
+    {
+        auto tmp = *this;
+        --*this;
+        return tmp;
+    }
+
+    constexpr Iterator &operator+=(difference_type x)
+        requires random_access_range<Base>
+    {
+        __current += x;
+        if constexpr (__views_detail::SlideCachesFirst<Base>) __lastEle.__value += x;
+        return *this;
+    }
+    constexpr Iterator &operator-=(difference_type x)
+        requires random_access_range<Base>
+    {
+        __current -= x;
+        if constexpr (__views_detail::SlideCachesFirst<Base>) __lastEle.__value -= x;
+        return *this;
+    }
+
+    // __lastEle, when present, is the position that actually tracks the
+    // logical window (it deliberately diverges from __current at the
+    // cached-end boundary — see the file-level note above); compare/subtract
+    // through it when present, through __current otherwise.
+    friend constexpr bool operator==(const Iterator &x, const Iterator &y)
+    {
+        if constexpr (__views_detail::SlideCachesFirst<Base>)
+            return x.__lastEle.__value == y.__lastEle.__value;
+        else
+            return x.__current == y.__current;
+    }
+
+    friend constexpr bool operator<(const Iterator &x, const Iterator &y)
+        requires random_access_range<Base>
+    {
+        return x.__current < y.__current;
+    }
+    friend constexpr bool operator>(const Iterator &x, const Iterator &y)
+        requires random_access_range<Base>
+    {
+        return y < x;
+    }
+    friend constexpr bool operator<=(const Iterator &x, const Iterator &y)
+        requires random_access_range<Base>
+    {
+        return !(y < x);
+    }
+    friend constexpr bool operator>=(const Iterator &x, const Iterator &y)
+        requires random_access_range<Base>
+    {
+        return !(x < y);
+    }
+    friend constexpr auto operator<=>(const Iterator &x, const Iterator &y)
+        requires random_access_range<Base> && three_way_comparable<iterator_t<Base>>
+    {
+        return x.__current <=> y.__current;
+    }
+
+    friend constexpr Iterator operator+(const Iterator &i, difference_type n)
+        requires random_access_range<Base>
+    {
+        auto r = i;
+        r += n;
+        return r;
+    }
+    friend constexpr Iterator operator+(difference_type n, const Iterator &i)
+        requires random_access_range<Base>
+    {
+        auto r = i;
+        r += n;
+        return r;
+    }
+    friend constexpr Iterator operator-(const Iterator &i, difference_type n)
+        requires random_access_range<Base>
+    {
+        auto r = i;
+        r -= n;
+        return r;
+    }
+    friend constexpr difference_type operator-(const Iterator &x, const Iterator &y)
+        requires sized_sentinel_for<iterator_t<Base>, iterator_t<Base>>
+    {
+        if constexpr (__views_detail::SlideCachesFirst<Base>)
+            return x.__lastEle.__value - y.__lastEle.__value;
+        else
+            return x.__current - y.__current;
+    }
+};
+
+// ── Sentinel ([range.slide.sentinel]) — only used when SlideCachesFirst<V>
+//    holds AND !common_range<V>; compares only against Iterator<false>
+//    (never Iterator<true>) — a genuine, narrower shape specific to this
+//    clause (all three friends take the concrete, non-templated form). ───
+
+template <forward_range V>
+    requires view<V>
+struct slide_view<V>::Sentinel {
+    sentinel_t<V> __end = sentinel_t<V>();
+
+    Sentinel() = default;
+    constexpr explicit Sentinel(sentinel_t<V> end) : __end(std::move(end)) {}
+
+    friend constexpr bool operator==(const Iterator<false> &x, const Sentinel &y)
+    {
+        return x.__lastEle.__value == y.__end;
+    }
+
+    friend constexpr range_difference_t<V> operator-(const Iterator<false> &x, const Sentinel &y)
+        requires sized_sentinel_for<sentinel_t<V>, iterator_t<V>>
+    {
+        return x.__lastEle.__value - y.__end;
+    }
+    friend constexpr range_difference_t<V> operator-(const Sentinel &y, const Iterator<false> &x)
+        requires sized_sentinel_for<sentinel_t<V>, iterator_t<V>>
+    {
+        return y.__end - x.__lastEle.__value;
+    }
+};
+
+// ── views::slide ([range.slide.overview]) ───────────────────────────────
+
+namespace views {
+
+struct Slide {
+    template <viewable_range R>
+        requires forward_range<all_t<R>>
+    constexpr auto operator()(R &&r, range_difference_t<all_t<R>> n) const
+    {
+        return slide_view<all_t<R>>(all(std::forward<R>(r)), n);
+    }
+    template <typename D>
+    constexpr auto operator()(D n) const
+    {
+        return RangeAdaptorPartial<Slide, D>(Slide{}, n);
+    }
+};
+inline constexpr Slide slide{};
+
+} // namespace views
+
+} // namespace ranges
+
+namespace views = ranges::views;
+
+} // namespace std
+
+#endif // BOXCXX_BITS_RANGES_SLIDE

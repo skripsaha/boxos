@@ -1,0 +1,362 @@
+// boxcxx — <__bits/ranges_stride>
+// [range.stride], Ф29e-3. Pulled in by <ranges> after <__bits/ranges_slide>
+// — reuses MaybeConst/SimpleView (ranges_views), DivCeil/ToUnsignedLike
+// (ranges_chunk), ranges::advance's 3-arg overshoot-tracking form
+// (<iterator>).
+//
+// stride_view walks the base `stride` elements at a time (skipping, not
+// grouping — iota(0,12) | views::stride(3) prints 0 3 6 9). It is the ONLY
+// one of these four views whose class-level constraint is merely
+// input_range<V> (not forward_range<V>) — matching chunk_view's input-range
+// specialization's baseline, but stride_view does not split into two
+// specializations the way chunk_view does: one class, one (partially-
+// conditional) iterator, dispatching internally via if constexpr. This is
+// the standard's own choice (single class template, no second
+// `requires forward_range<V>` block), not a simplification decision made
+// here.
+//
+// boxcxx notes (documented, safe for the closed type set):
+//   • Every nested-type member/friend function body is inline inside its
+//     own struct, matching ranges_chunk/ranges_slide's file-wide convention.
+//   • operator++(int) genuinely needs the dual void/value split (unlike
+//     chunk-forward/slide, whose class-level bound already guarantees
+//     forward_range<Base>): Base can be merely input_range here, so a
+//     value-returning postfix increment is only sound when
+//     forward_range<Base> holds. Both overloads share the exact parameter
+//     list (int); the more-constrained one wins by partial ordering when
+//     forward_range<Base> holds — the identical, already-shipped pattern
+//     join_view::Iterator::operator++(int) already uses.
+//   • iterator_category is the ONE genuinely non-trivial gate in this whole
+//     Ф29e-3 batch: the standard's own text declares it "if and only if
+//     Base models forward_range" (every other iterator in this phase
+//     hardcodes input_iterator_tag unconditionally, because their
+//     operator* materializes a value; stride_view::Iterator::operator*
+//     forwards *current_ directly — a genuine, un-materialized reference —
+//     so when forward_range<Base> holds, iterator_category should track
+//     Base's own category, capped at random_access_iterator_tag). boxcxx's
+//     pervasive rule (always declare, collapse when unmet) still applies;
+//     what changes is what it collapses TO.
+#ifndef BOXCXX_BITS_RANGES_STRIDE
+#define BOXCXX_BITS_RANGES_STRIDE
+
+#include <concepts>
+#include <cstddef>
+#include <iterator>
+#include <type_traits>
+#include <utility>
+
+namespace std {
+namespace ranges {
+
+// ── stride_view ([range.stride.view]) ───────────────────────────────────
+
+template <input_range V>
+    requires view<V>
+class stride_view : public view_interface<stride_view<V>> {
+    V __base;
+    range_difference_t<V> __stride;
+
+    template <bool Const>
+    struct Iterator;
+
+public:
+    // No default ctor shown live either (same as chunk_view/slide_view) —
+    // omitted here, not =deleted, purely for textual variety across the
+    // three files; behaviorally identical either way.
+    constexpr explicit stride_view(V base, range_difference_t<V> stride)
+        : __base(std::move(base)), __stride(stride)
+    {
+    }
+
+    constexpr V base() const &
+        requires copy_constructible<V>
+    {
+        return __base;
+    }
+    constexpr V base() && { return std::move(__base); }
+
+    constexpr range_difference_t<V> stride() const noexcept { return __stride; }
+
+    constexpr auto begin()
+        requires(!__views_detail::SimpleView<V>)
+    {
+        return Iterator<false>(this, ranges::begin(__base));
+    }
+    constexpr auto begin() const
+        requires range<const V>
+    {
+        return Iterator<true>(this, ranges::begin(__base));
+    }
+
+    constexpr auto end()
+        requires(!__views_detail::SimpleView<V>)
+    {
+        if constexpr (common_range<V> && sized_range<V> && forward_range<V>) {
+            auto missing = (__stride - ranges::distance(ranges::begin(__base), ranges::end(__base)) % __stride) % __stride;
+            return Iterator<false>(this, ranges::end(__base), missing);
+        } else if constexpr (common_range<V> && !bidirectional_range<V>) {
+            return Iterator<false>(this, ranges::end(__base));
+        } else {
+            return default_sentinel;
+        }
+    }
+    constexpr auto end() const
+        requires range<const V>
+    {
+        if constexpr (common_range<const V> && sized_range<const V> && forward_range<const V>) {
+            auto missing = (__stride - ranges::distance(ranges::begin(__base), ranges::end(__base)) % __stride) % __stride;
+            return Iterator<true>(this, ranges::end(__base), missing);
+        } else if constexpr (common_range<const V> && !bidirectional_range<const V>) {
+            return Iterator<true>(this, ranges::end(__base));
+        } else {
+            return default_sentinel;
+        }
+    }
+
+    constexpr auto size()
+        requires sized_range<V>
+    {
+        return __views_detail::ToUnsignedLike(__views_detail::DivCeil(ranges::distance(ranges::begin(__base), ranges::end(__base)), __stride));
+    }
+    constexpr auto size() const
+        requires sized_range<const V>
+    {
+        return __views_detail::ToUnsignedLike(__views_detail::DivCeil(ranges::distance(ranges::begin(__base), ranges::end(__base)), __stride));
+    }
+};
+
+template <typename R>
+stride_view(R &&, range_difference_t<R>) -> stride_view<views::all_t<R>>;
+
+// ── Iterator<Const> ([range.stride.iterator]) ───────────────────────────
+
+template <input_range V>
+    requires view<V>
+template <bool Const>
+struct stride_view<V>::Iterator {
+    using Parent = __views_detail::MaybeConst<Const, stride_view>;
+    using Base   = __views_detail::MaybeConst<Const, V>;
+
+    iterator_t<Base> __current         = iterator_t<Base>();
+    sentinel_t<Base> __end             = sentinel_t<Base>();
+    range_difference_t<Base> __stride  = 0;
+    range_difference_t<Base> __missing = 0;
+
+    using __BaseCat = typename iterator_traits<iterator_t<Base>>::iterator_category; // always well-formed (boxcxx always-declares)
+
+    using iterator_concept = conditional_t<
+        random_access_range<Base>, random_access_iterator_tag,
+        conditional_t<bidirectional_range<Base>, bidirectional_iterator_tag,
+                      conditional_t<forward_range<Base>, forward_iterator_tag, input_iterator_tag>>>;
+    using iterator_category = conditional_t<
+        !forward_range<Base>, input_iterator_tag,
+        conditional_t<derived_from<__BaseCat, random_access_iterator_tag>, random_access_iterator_tag, __BaseCat>>;
+    using value_type        = range_value_t<Base>;
+    using difference_type   = range_difference_t<Base>;
+    using pointer             = void; // boxcxx-added
+    using reference           = range_reference_t<Base>; // boxcxx-added — operator* forwards *current_ untouched
+
+    Iterator()
+        requires default_initializable<iterator_t<Base>>
+    = default;
+    constexpr explicit Iterator(Parent *parent, iterator_t<Base> current, range_difference_t<Base> missing = 0)
+        : __current(std::move(current)), __end(ranges::end(parent->__base)), __stride(parent->__stride),
+          __missing(missing)
+    {
+    }
+    constexpr Iterator(Iterator<!Const> i)
+        requires Const && convertible_to<iterator_t<V>, iterator_t<Base>> &&
+                 convertible_to<sentinel_t<V>, sentinel_t<Base>>
+        : __current(std::move(i.__current)), __end(std::move(i.__end)), __stride(i.__stride),
+          __missing(i.__missing)
+    {
+    }
+
+    constexpr iterator_t<Base> base() && { return std::move(__current); }
+    constexpr const iterator_t<Base> &base() const & noexcept { return __current; }
+
+    constexpr decltype(auto) operator*() const { return *__current; }
+    constexpr decltype(auto) operator[](difference_type n) const
+        requires random_access_range<Base>
+    {
+        return *(*this + n);
+    }
+
+    constexpr Iterator &operator++()
+    {
+        __missing = ranges::advance(__current, __stride, __end);
+        return *this;
+    }
+    constexpr void operator++(int) { ++*this; }
+    constexpr Iterator operator++(int)
+        requires forward_range<Base>
+    {
+        auto tmp = *this;
+        ++*this;
+        return tmp;
+    }
+
+    constexpr Iterator &operator--()
+        requires bidirectional_range<Base>
+    {
+        ranges::advance(__current, __missing - __stride);
+        __missing = 0;
+        return *this;
+    }
+    constexpr Iterator operator--(int)
+        requires bidirectional_range<Base>
+    {
+        auto tmp = *this;
+        --*this;
+        return tmp;
+    }
+
+    constexpr Iterator &operator+=(difference_type n)
+        requires random_access_range<Base>
+    {
+        if (n > 0) {
+            ranges::advance(__current, __stride * (n - 1));
+            __missing = ranges::advance(__current, __stride, __end);
+        } else if (n < 0) {
+            ranges::advance(__current, __stride * n + __missing);
+            __missing = 0;
+        }
+        return *this;
+    }
+    constexpr Iterator &operator-=(difference_type x)
+        requires random_access_range<Base>
+    {
+        return *this += -x;
+    }
+
+    friend constexpr bool operator==(const Iterator &x, default_sentinel_t) { return x.__current == x.__end; }
+    friend constexpr bool operator==(const Iterator &x, const Iterator &y)
+        requires equality_comparable<iterator_t<Base>>
+    {
+        return x.__current == y.__current;
+    }
+
+    friend constexpr bool operator<(const Iterator &x, const Iterator &y)
+        requires random_access_range<Base>
+    {
+        return x.__current < y.__current;
+    }
+    friend constexpr bool operator>(const Iterator &x, const Iterator &y)
+        requires random_access_range<Base>
+    {
+        return y < x;
+    }
+    friend constexpr bool operator<=(const Iterator &x, const Iterator &y)
+        requires random_access_range<Base>
+    {
+        return !(y < x);
+    }
+    friend constexpr bool operator>=(const Iterator &x, const Iterator &y)
+        requires random_access_range<Base>
+    {
+        return !(x < y);
+    }
+    friend constexpr auto operator<=>(const Iterator &x, const Iterator &y)
+        requires random_access_range<Base> && three_way_comparable<iterator_t<Base>>
+    {
+        return x.__current <=> y.__current;
+    }
+
+    friend constexpr Iterator operator+(const Iterator &i, difference_type n)
+        requires random_access_range<Base>
+    {
+        auto r = i;
+        r += n;
+        return r;
+    }
+    friend constexpr Iterator operator+(difference_type n, const Iterator &i)
+        requires random_access_range<Base>
+    {
+        auto r = i;
+        r += n;
+        return r;
+    }
+    friend constexpr Iterator operator-(const Iterator &i, difference_type n)
+        requires random_access_range<Base>
+    {
+        auto r = i;
+        r -= n;
+        return r;
+    }
+    // Forward-vs-non-forward split: when Base models forward_range, both
+    // x's and y's __missing values are directly comparable (both track "how
+    // far past a stride boundary the respective cursor overshot on its last
+    // operator++"), so the exact difference is an EXACT integer division —
+    // no rounding ambiguity. When Base is merely input_range, __missing
+    // bookkeeping from two potentially-independent cursors isn't meaningful
+    // to combine, so the fallback rounds AWAY FROM ZERO toward the nearest
+    // multiple of stride_ — NOT the same as plain truncating division for
+    // negative n (n=-7,stride_=3: plain -7/3 truncates to -2; this formula
+    // gives -DivCeil(7,3) = -3).
+    friend constexpr difference_type operator-(const Iterator &x, const Iterator &y)
+        requires sized_sentinel_for<iterator_t<Base>, iterator_t<Base>>
+    {
+        auto n = static_cast<difference_type>(x.__current - y.__current);
+        if constexpr (forward_range<Base>) {
+            return (n + x.__missing - y.__missing) / x.__stride;
+        } else if (n < 0) {
+            return -__views_detail::DivCeil(-n, x.__stride);
+        } else {
+            return __views_detail::DivCeil(n, x.__stride);
+        }
+    }
+
+    friend constexpr difference_type operator-(default_sentinel_t, const Iterator &x)
+        requires sized_sentinel_for<sentinel_t<Base>, iterator_t<Base>>
+    {
+        return __views_detail::DivCeil(x.__end - x.__current, x.__stride);
+    }
+    friend constexpr difference_type operator-(const Iterator &x, default_sentinel_t y)
+        requires sized_sentinel_for<sentinel_t<Base>, iterator_t<Base>>
+    {
+        return -(y - x);
+    }
+
+    // range_rvalue_reference_t is not a boxcxx <ranges> alias — see the
+    // identical note in ranges_chunk's InnerIterator::iter_move.
+    friend constexpr iter_rvalue_reference_t<iterator_t<Base>> iter_move(const Iterator &i)
+        noexcept(noexcept(ranges::iter_move(i.__current)))
+    {
+        return ranges::iter_move(i.__current);
+    }
+    friend constexpr void iter_swap(const Iterator &x, const Iterator &y)
+        noexcept(noexcept(ranges::iter_swap(x.__current, y.__current)))
+        requires indirectly_swappable<iterator_t<Base>>
+    {
+        ranges::iter_swap(x.__current, y.__current);
+    }
+};
+
+// ── views::stride ([range.stride.overview]) ─────────────────────────────
+
+namespace views {
+
+struct Stride {
+    template <viewable_range R>
+        requires input_range<all_t<R>>
+    constexpr auto operator()(R &&r, range_difference_t<all_t<R>> n) const
+    {
+        return stride_view<all_t<R>>(all(std::forward<R>(r)), n);
+    }
+    template <typename D>
+    constexpr auto operator()(D n) const
+    {
+        return RangeAdaptorPartial<Stride, D>(Stride{}, n);
+    }
+};
+inline constexpr Stride stride{};
+
+} // namespace views
+
+} // namespace ranges
+
+namespace views = ranges::views;
+
+} // namespace std
+
+#endif // BOXCXX_BITS_RANGES_STRIDE

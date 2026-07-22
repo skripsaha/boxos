@@ -345,6 +345,15 @@ using borrowed_subrange_t =
 // from ranges_join.
 #include <__bits/ranges_split>
 
+// chunk/slide/stride (Ф29e-3): windowing + partition adaptors. chunk_view
+// (both specializations) and chunk_by_view share DivCeil/ToUnsignedLike, so
+// ranges_chunk is included first; ranges_slide and ranges_stride reuse those
+// two helpers by name (defined once, not redefined — avoids an ODR clash
+// across the three headers).
+#include <__bits/ranges_chunk>  // chunk_view (2 specs) + chunk_by_view
+#include <__bits/ranges_slide>  // slide_view (reuses ToUnsignedLike)
+#include <__bits/ranges_stride> // stride_view (reuses DivCeil, ToUnsignedLike)
+
 // ── range access const/rvalue aliases ([range.access], C++23) ───────────
 // const_iterator_t / const_sentinel_t / range_const_reference_t live here
 // (not in <iterator>) because they lean on ranges::iterator_t / sentinel_t.
