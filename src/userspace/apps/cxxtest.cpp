@@ -15114,6 +15114,498 @@ void Phase94()
            "(FindNext/operator++ state machines + tiny-range vs general branch + input-only V)\n");
 }
 
+// Phase95 fixture (Ф29e-3): a genuinely input-only int range — mirrors
+// P94InputIter/P94InputRange's shape (single-pass, only operator==(I,Sentinel),
+// no operator==(I,I)) but yields ints 0..count-1 instead of chars off a C
+// string, since chunk/chunk_by/slide/stride tests need to verify numeric
+// chunk/window CONTENTS, not just splitting behavior. Carries the full
+// six-typedef set, matching the real, already-shipped P94InputIter exactly.
+struct P95InputSentinel {
+    int limit;
+};
+struct P95InputIter {
+    int cur = 0, limit = 0;
+    using value_type        = int;
+    using difference_type   = std::ptrdiff_t;
+    using iterator_concept  = std::input_iterator_tag;
+    using iterator_category = std::input_iterator_tag;
+    using reference          = int;
+    using pointer             = void;
+    int operator*() const { return cur; }
+    P95InputIter &operator++() { ++cur; return *this; }
+    void operator++(int) { ++cur; }
+    friend bool operator==(const P95InputIter &i, P95InputSentinel s) { return i.cur == s.limit; }
+};
+struct P95InputRange {
+    int count;
+    explicit P95InputRange(int n) : count(n) {}
+    P95InputIter begin() const { return P95InputIter{0, count}; }
+    P95InputSentinel end() const { return P95InputSentinel{count}; }
+};
+static_assert(!std::ranges::forward_range<P95InputRange>, "phase95 fixture must genuinely be input-only");
+static_assert(std::ranges::input_range<P95InputRange>, "phase95 fixture must still model input_range");
+
+// P95 forward-only (NOT bidirectional) int fixture. boxcxx has no
+// <forward_list> — this hand-rolled minimal forward_range stands in for a
+// "forward_list<int>-style" base wherever the test plan needs a genuinely
+// forward_range-but-not-bidirectional_range shape: only such a V can ever
+// model SlideCachesFirst (needs !random_access+sized AND
+// !(bidirectional+common)), and it is the one iterator_category ladder rung
+// (stride R5) that neither of the real containers already in this tree
+// covers (vector is random-access, list is bidirectional). begin()/end()
+// are freely re-callable (no shared mutable state) — legitimate, since
+// forward_iterator-ness is a property of the ITERATOR TYPE's own operations
+// (copyable, self-comparable, value-returning postfix++), not of how many
+// times the range's begin() may be called.
+struct P95FwdOnlyIter {
+    const int *p = nullptr;
+    using value_type        = int;
+    using difference_type   = std::ptrdiff_t;
+    using iterator_concept  = std::forward_iterator_tag;
+    using iterator_category = std::forward_iterator_tag;
+    using reference          = const int &;
+    using pointer             = void;
+    P95FwdOnlyIter() = default;
+    explicit P95FwdOnlyIter(const int *q) : p(q) {}
+    const int &operator*() const { return *p; }
+    P95FwdOnlyIter &operator++() { ++p; return *this; }
+    P95FwdOnlyIter operator++(int) { auto tmp = *this; ++p; return tmp; }
+    friend bool operator==(const P95FwdOnlyIter &a, const P95FwdOnlyIter &b) { return a.p == b.p; }
+};
+struct P95FwdOnlyRange {
+    std::vector<int> data;
+    explicit P95FwdOnlyRange(std::vector<int> v) : data(std::move(v)) {}
+    P95FwdOnlyIter begin() const { return P95FwdOnlyIter(data.data()); }
+    P95FwdOnlyIter end() const { return P95FwdOnlyIter(data.data() + static_cast<std::ptrdiff_t>(data.size())); }
+};
+static_assert(std::ranges::forward_range<P95FwdOnlyRange>, "phase95 fixture must model forward_range");
+static_assert(!std::ranges::bidirectional_range<P95FwdOnlyRange>, "phase95 fixture must NOT be bidirectional (no operator--)");
+
+// P95 sized-sentinel-comparable but still genuinely input-only int fixture —
+// needed ONLY for stride's R9 test. sized_sentinel_for<I,I> requires
+// operator==(I,I) (satisfying sentinel_for<I,I>, which forward_iterator ALSO
+// needs), so the postfix increment is deliberately void-returning (blocks
+// incrementable, hence forward_iterator — exactly like P94InputIter/
+// P95InputIter's own trick) while operator==(I,I) and operator-(I,I) ARE
+// defined (unlike P95InputIter, which has neither) — a deliberately narrow,
+// purpose-built shape distinct from P95InputRange, not a natural container.
+struct P95SizedInputIter {
+    int pos = 0;
+    using value_type        = int;
+    using difference_type   = std::ptrdiff_t;
+    using iterator_concept  = std::input_iterator_tag;
+    using iterator_category = std::input_iterator_tag;
+    using reference          = int;
+    using pointer             = void;
+    int operator*() const { return pos; }
+    P95SizedInputIter &operator++() { ++pos; return *this; }
+    void operator++(int) { ++pos; }
+    friend bool operator==(const P95SizedInputIter &a, const P95SizedInputIter &b) { return a.pos == b.pos; }
+    friend difference_type operator-(const P95SizedInputIter &a, const P95SizedInputIter &b) { return a.pos - b.pos; }
+};
+struct P95SizedInputRange {
+    int limit;
+    explicit P95SizedInputRange(int n) : limit(n) {}
+    P95SizedInputIter begin() const { return P95SizedInputIter{0}; }
+    P95SizedInputIter end() const { return P95SizedInputIter{limit}; }
+};
+static_assert(std::ranges::input_range<P95SizedInputRange>, "phase95 fixture must model input_range");
+static_assert(!std::ranges::forward_range<P95SizedInputRange>,
+              "phase95 fixture must genuinely NOT be forward_range (void postfix++)");
+static_assert(std::sized_sentinel_for<P95SizedInputIter, P95SizedInputIter>,
+              "phase95 fixture iterator must be its own sized sentinel");
+
+// MED-3 regression helpers: NAMED concepts keep the detection out of a
+// block-scope requires-expression, which this GCC mis-diagnoses as a hard
+// error for a 0-viable-candidate overload set (same JoinWithCallable quirk).
+template <typename R, typename N>
+concept ChunkCallable = requires(R &r, N n) { std::views::chunk(r, n); };
+template <typename R, typename P>
+concept ChunkByCallable = requires(R &r, P &p) { std::views::chunk_by(r, p); };
+template <typename R, typename N>
+concept SlideCallable = requires(R &r, N n) { std::views::slide(r, n); };
+template <typename R, typename N>
+concept StrideCallable = requires(R &r, N n) { std::views::stride(r, n); };
+// R12: same NAMED-concept requirement — a block-scope requires(const T&t){t.begin();}
+// hits a GCC hard-error ("cannot convert const T* to T*") instead of gracefully
+// SFINAE-failing when the only begin() overload is non-const; named+namespace-scope
+// avoids it, same as the four CPO-callable concepts above.
+template <typename T>
+concept HasConstBegin = requires(const T &t) { t.begin(); };
+
+void Phase95()
+{
+    namespace rg = std::ranges;
+    namespace vw = std::views;
+
+    auto collect = [](auto &&piece) {
+        std::vector<int> v;
+        for (int x : piece) v.push_back(x);
+        return v;
+    };
+
+    // ── chunk_view: exact-multiple base ───────────────────────────────────
+    std::vector<int> c1Src{0, 1, 2, 3, 4, 5};
+    auto              c1 = c1Src | vw::chunk(2);
+    std::vector<std::vector<int>> c1Out;
+    for (auto piece : c1) c1Out.push_back(collect(piece));
+    Check((c1Out == std::vector<std::vector<int>>{{0, 1}, {2, 3}, {4, 5}}),
+          "phase95 chunk exact-multiple base, three full chunks");
+    Check(c1.size() == 3, "phase95 chunk exact-multiple size()==3");
+
+    // ── chunk_view: remainder base ─────────────────────────────────────────
+    std::vector<int> c2Src{0, 1, 2, 3, 4, 5, 6};
+    auto              c2 = c2Src | vw::chunk(2);
+    std::vector<std::vector<int>> c2Out;
+    for (auto piece : c2) c2Out.push_back(collect(piece));
+    Check((c2Out == std::vector<std::vector<int>>{{0, 1}, {2, 3}, {4, 5}, {6}}),
+          "phase95 chunk remainder base, final chunk has 1 element");
+    Check(c2.size() == 4, "phase95 chunk remainder size()==4 (div-ceil(7,2))");
+
+    // ── chunk_view over single-pass P95InputRange (R2, R4, R14) ────────────
+    P95InputRange c3Src(7);
+    auto          c3 = vw::chunk(c3Src, 3);
+    int           c3Sum = 0;
+    for (auto outer : c3)
+        for (int x : outer) c3Sum += x;
+    Check(c3Sum == 21, "phase95 R2 chunk over input-only range, fully-nested consumption sums 0..6");
+    static_assert(!std::copyable<decltype(c3.begin())>,
+                  "phase95 R4 chunk over input-only range must select the primary (input) specialization "
+                  "(its OuterIterator is move-only, unlike the forward specialization's copyable Iterator)");
+    static_assert(std::input_iterator<decltype(c3.begin())>,
+                  "phase95 chunk input-only OuterIterator must still be input_iterator");
+    static_assert(!std::default_initializable<decltype(c3.begin())>,
+                  "phase95 R14 chunk OuterIterator has no default ctor");
+
+    P95InputRange c3bSrc(7);
+    auto          c3b        = vw::chunk(c3bSrc, 3); // chunks: [0,1,2] [3,4,5] [6]
+    auto          c3bOuterIt = c3b.begin();
+    auto          c3bInner   = *c3bOuterIt;
+    auto          c3bInnerIt = c3bInner.begin();
+    int           c3bFirst   = *c3bInnerIt;
+    ++c3bInnerIt; // partially consume the inner range (now at element 1)
+    ++c3bOuterIt; // abandon the inner iterator, advance the OUTER directly
+    auto c3bNext   = *c3bOuterIt;
+    auto c3bNextIt = c3bNext.begin();
+    int  c3bSecond = *c3bNextIt;
+    Check(c3bFirst == 0 && c3bSecond == 3,
+          "phase95 R2 chunk partial-inner-consumption: outer++ skips the unconsumed remainder, "
+          "lands exactly on the next chunk's start");
+
+    // ── chunk_view: forward-vs-input dispatch selection (R4) ───────────────
+    // NOTE: std::forward_iterator itself is NOT the right check here — boxcxx
+    // keys forward_iterator on iterator_category (CategoryAtLeast), and the
+    // forward specialization's Iterator::iterator_category is DELIBERATELY,
+    // permanently pinned to input_iterator_tag (operator* always
+    // materializes a fresh take_view<subrange<...>> prvalue, never a stable
+    // reference — matching adjacent_view/zip_view/cartesian_product_view's
+    // own already-shipped reasoning). So forward_iterator<Iterator<Const>>
+    // is always false in boxcxx regardless of which specialization is
+    // selected; copyable is what actually distinguishes them (the input
+    // specialization's OuterIterator is move-only by design, R14).
+    static_assert(std::copyable<decltype(c1.begin())>,
+                  "phase95 R4 chunk over vector must select the forward_range specialization "
+                  "(its Iterator is copyable, unlike the input specialization's move-only OuterIterator)");
+
+    // ── chunk_view: exhaustive forward/reverse round-trip (R1) ─────────────
+    auto chunkRoundTrip = [&](std::vector<int> src, int n) {
+        auto view = src | vw::chunk(n);
+        std::vector<std::vector<int>> fwd;
+        for (auto it = view.begin(); it != view.end(); ++it) fwd.push_back(collect(*it));
+        std::vector<std::vector<int>> bwd;
+        for (auto it = view.end(); it != view.begin();) {
+            --it;
+            bwd.push_back(collect(*it));
+        }
+        if (fwd.size() != bwd.size()) return false;
+        for (size_t i = 0; i < fwd.size(); ++i)
+            if (fwd[i] != bwd[bwd.size() - 1 - i]) return false;
+        return true;
+    };
+    Check(chunkRoundTrip({0, 1, 2, 3, 4, 5}, 2), "phase95 R1 chunk forward/reverse round-trip, exact-multiple");
+    Check(chunkRoundTrip({0, 1, 2, 3, 4, 5, 6}, 2), "phase95 R1 chunk forward/reverse round-trip, remainder");
+
+    // ── chunk_view: size() and const-iteration agreement ───────────────────
+    const auto &c1Const = c1;
+    std::vector<std::vector<int>> c1ConstOut;
+    for (auto piece : c1Const) c1ConstOut.push_back(collect(piece));
+    Check((c1ConstOut == c1Out), "phase95 chunk const-iteration matches non-const iteration");
+
+    // ── chunk_by_view: overview's own worked example (R3) ───────────────────
+    std::vector<int> cb1Src{1, 2, 2, 3, 0, 4, 5, 2};
+    auto              cb1 = cb1Src | vw::chunk_by(rg::less_equal{});
+    std::vector<std::vector<int>> cb1Out;
+    for (auto piece : cb1) cb1Out.push_back(collect(piece));
+    Check((cb1Out == std::vector<std::vector<int>>{{1, 2, 2, 3}, {0, 4, 5}, {2}}),
+          "phase95 R3 chunk_by worked example forward");
+    std::vector<std::vector<int>> cb1Bwd;
+    for (auto it = cb1.end(); it != cb1.begin();) {
+        --it;
+        cb1Bwd.push_back(collect(*it));
+    }
+    Check((cb1Bwd == std::vector<std::vector<int>>{{2}, {0, 4, 5}, {1, 2, 2, 3}}),
+          "phase95 R3 chunk_by worked example backward, same 3 chunks in reverse order");
+
+    // ── chunk_by_view: all-distinct predicate (R3 boundary) ────────────────
+    std::vector<int> cb2Src{5, 4, 3, 2, 1};
+    auto              cb2 = cb2Src | vw::chunk_by(rg::less{});
+    std::vector<std::vector<int>> cb2Out;
+    for (auto piece : cb2) cb2Out.push_back(collect(piece));
+    Check((cb2Out == std::vector<std::vector<int>>{{5}, {4}, {3}, {2}, {1}}),
+          "phase95 R3 chunk_by all-distinct predicate, N singleton chunks forward");
+    std::vector<std::vector<int>> cb2Bwd;
+    for (auto it = cb2.end(); it != cb2.begin();) {
+        --it;
+        cb2Bwd.push_back(collect(*it));
+    }
+    Check((cb2Bwd == std::vector<std::vector<int>>{{1}, {2}, {3}, {4}, {5}}),
+          "phase95 R3 chunk_by all-distinct predicate backward");
+
+    // ── chunk_by_view: all-equal predicate (R3 boundary) ────────────────────
+    std::vector<int> cb3Src{7, 7, 7, 7};
+    auto              cb3 = cb3Src | vw::chunk_by([](int a, int b) { return a == b; });
+    std::vector<std::vector<int>> cb3Out;
+    for (auto piece : cb3) cb3Out.push_back(collect(piece));
+    Check((cb3Out == std::vector<std::vector<int>>{{7, 7, 7, 7}}),
+          "phase95 R3 chunk_by all-equal predicate, one chunk spanning whole range forward");
+    std::vector<std::vector<int>> cb3Bwd;
+    for (auto it = cb3.end(); it != cb3.begin();) {
+        --it;
+        cb3Bwd.push_back(collect(*it));
+    }
+    Check((cb3Bwd == std::vector<std::vector<int>>{{7, 7, 7, 7}}), "phase95 R3 chunk_by all-equal predicate backward");
+
+    // ── chunk_by_view: no const-iteration at all (R12) ──────────────────────
+    static_assert(!HasConstBegin<decltype(cb1)>,
+                  "phase95 R12 chunk_by_view has NO const-iteration (matches filter_view's genuine "
+                  "standard limitation, not a boxcxx cut)");
+
+    // ── slide_view: N==1, degenerate no-overlap ─────────────────────────────
+    std::vector<int> sl1Src{1, 2, 3};
+    auto              sl1 = sl1Src | vw::slide(1);
+    std::vector<std::vector<int>> sl1Out;
+    for (auto w : sl1) sl1Out.push_back(collect(w));
+    Check((sl1Out == std::vector<std::vector<int>>{{1}, {2}, {3}}), "phase95 slide N==1 degenerate no-overlap");
+
+    // ── slide_view: N==size, one window covering the whole base ────────────
+    std::vector<int> sl2Src{1, 2, 3};
+    auto              sl2 = sl2Src | vw::slide(3);
+    std::vector<std::vector<int>> sl2Out;
+    for (auto w : sl2) sl2Out.push_back(collect(w));
+    Check((sl2Out == std::vector<std::vector<int>>{{1, 2, 3}}), "phase95 slide N==size, one window covers whole base");
+
+    // ── slide_view: N>size, empty result (per the overview's own wording) ──
+    std::vector<int> sl3Src{1, 2};
+    auto              sl3 = sl3Src | vw::slide(5);
+    Check(sl3.begin() == sl3.end(), "phase95 slide N>size begin()==end(), empty result");
+    Check(sl3.size() == 0, "phase95 slide N>size size()==0, clamped (distance-n+1 would be -2 unclamped)");
+
+    // ── slide_view: SlideCachesFirst cached-begin/end correctness (R7/R8) ──
+    P95FwdOnlyRange sl4Src(std::vector<int>{1, 2, 3, 4, 5});
+    auto            sl4 = sl4Src | vw::slide(2);
+    // (a) begin() called twice on the same instance must agree (cached-begin reuse, not just first-call emplace)
+    Check(sl4.begin() == sl4.begin(), "phase95 R7/R8 slide SlideCachesFirst begin() called twice agrees");
+    // (b) iterate fully to end() via ++, compare against an independently-obtained end(); confirm one-before-end != end()
+    auto sl4End = sl4.end();
+    int  sl4Count = 0;
+    std::vector<std::vector<int>> sl4Windows;
+    for (auto it = sl4.begin(); it != sl4End; ++it) {
+        sl4Windows.push_back(collect(*it));
+        ++sl4Count;
+    }
+    Check((sl4Windows == std::vector<std::vector<int>>{{1, 2}, {2, 3}, {3, 4}, {4, 5}}),
+          "phase95 slide SlideCachesFirst window contents");
+    auto sl4Penultimate = sl4.begin();
+    for (int i = 0; i < sl4Count - 1; ++i) ++sl4Penultimate;
+    Check(!(sl4Penultimate == sl4End),
+          "phase95 R7 slide one-before-end must be unequal to end() "
+          "(catches a compares-__current-instead-of-__lastEle bug)");
+    // (c) copy a partially-iterated instance (over a ref_view, not owning) — its begin() must equal a
+    //     FRESH, independently-constructed slide_view's begin(), not a stale/wrongly-propagated cache
+    P95FwdOnlyRange sl4CSrc(std::vector<int>{10, 20, 30, 40});
+    auto            sl4C1   = sl4CSrc | vw::slide(2);
+    auto            sl4C1It = sl4C1.begin();
+    ++sl4C1It;
+    auto sl4C2      = sl4C1; // copy the VIEW
+    auto sl4Fresh   = sl4CSrc | vw::slide(2); // independently-constructed, over the same underlying data
+    Check(sl4C2.begin() == sl4Fresh.begin(),
+          "phase95 R8 slide copy's begin() equals a fresh view's begin() (NonPropagatingCache non-propagation)");
+
+    // ── slide_view: SlideCachesNothing (random-access + sized base) ────────
+    std::vector<int> sl5Src{1, 2, 3, 4, 5};
+    auto              sl5 = sl5Src | vw::slide(2);
+    Check(sl5.end() == sl5.begin() + static_cast<rg::range_difference_t<decltype(sl5)>>(sl5.size()),
+          "phase95 slide SlideCachesNothing end()==begin()+size()");
+    const auto &sl5Const = sl5;
+    Check(sl5Const.begin() == sl5.begin(),
+          "phase95 slide SlideCachesNothing const and non-const slide_view& both expose usable begin(), agree");
+
+    // ── stride_view: step 1, identity case ──────────────────────────────────
+    std::vector<int> st1Src{1, 2, 3, 4};
+    auto              st1 = st1Src | vw::stride(1);
+    std::vector<int> st1Out;
+    for (int x : st1) st1Out.push_back(x);
+    Check((st1Out == st1Src), "phase95 stride step-1 identity case");
+
+    // ── stride_view: step > size, exactly one element (the first) ──────────
+    std::vector<int> st2Src{1, 2, 3};
+    auto              st2 = st2Src | vw::stride(10);
+    std::vector<int> st2Out;
+    for (int x : st2) st2Out.push_back(x);
+    Check((st2Out == std::vector<int>{1}), "phase95 stride step>size yields exactly one element (the first)");
+
+    // ── stride_view: overview's own worked example, forward and reverse ────
+    std::vector<int> st3Src{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11};
+    auto              st3 = st3Src | vw::stride(3);
+    std::vector<int> st3Out;
+    for (int x : st3) st3Out.push_back(x);
+    Check((st3Out == std::vector<int>{0, 3, 6, 9}), "phase95 stride overview worked example forward: 0 3 6 9");
+    auto st3Rev = st3 | vw::reverse;
+    std::vector<int> st3RevOut;
+    for (int x : st3Rev) st3RevOut.push_back(x);
+    Check((st3RevOut == std::vector<int>{9, 6, 3, 0}), "phase95 stride overview worked example reversed: 9 6 3 0");
+
+    // ── stride_view: non-exact-multiple base, forward+reverse round trip
+    //    (R1/R9 — the load-bearing missing_ trace) ────────────────────────
+    std::vector<int> st4Src{0, 1, 2, 3, 4, 5, 6, 7, 8, 9};
+    auto              st4 = st4Src | vw::stride(3);
+    std::vector<int> st4Fwd;
+    for (int x : st4) st4Fwd.push_back(x);
+    Check((st4Fwd == std::vector<int>{0, 3, 6, 9}), "phase95 R1/R9 stride non-exact-multiple forward: 0 3 6 9");
+    Check(st4.size() == 4, "phase95 stride non-exact-multiple size()==4 (div-ceil(10,3))");
+    std::vector<int> st4Bwd;
+    for (auto it = st4.end(); it != st4.begin();) {
+        --it;
+        st4Bwd.push_back(*it);
+    }
+    Check((st4Bwd == std::vector<int>{9, 6, 3, 0}),
+          "phase95 CRIT R1 stride non-exact-multiple reverse must visit 9,6,3,0 (NOT 7,4,1,... — "
+          "the missing_ bookkeeping correction in operator--)");
+
+    // ── stride_view: non-forward operator- sign handling (R9) ──────────────
+    P95SizedInputRange st5DistSrc(20);
+    auto               st5Dist = st5DistSrc | vw::stride(3);
+    using St5DistIt             = decltype(st5Dist.begin());
+    St5DistIt st5Low(&st5Dist, P95SizedInputIter{2});
+    St5DistIt st5High(&st5Dist, P95SizedInputIter{9});
+    auto      st5Diff = st5Low - st5High; // raw n = 2-9 = -7, stride=3 -> -DivCeil(7,3) = -3, NOT plain -7/3=-2
+    Check(st5Diff == -3,
+          "phase95 R9 stride non-forward operator- rounds away from zero: n=-7,stride=3 -> -3 (not -2)");
+
+    // ── stride_view: iterator_category ladder (R5) — one static_assert per rung ──
+    std::vector<int> st6aSrc{1, 2, 3};
+    auto              st6a = st6aSrc | vw::stride(2);
+    static_assert(std::same_as<typename std::iterator_traits<decltype(st6a.begin())>::iterator_category,
+                                std::random_access_iterator_tag>,
+                  "phase95 R5 stride iterator_category: vector-backed (contiguous) caps at "
+                  "random_access_iterator_tag, does not leak contiguous_iterator_tag");
+
+    std::list<int> st6bSrc{1, 2, 3};
+    auto            st6b = st6bSrc | vw::stride(2);
+    static_assert(std::same_as<typename std::iterator_traits<decltype(st6b.begin())>::iterator_category,
+                                std::bidirectional_iterator_tag>,
+                  "phase95 R5 stride iterator_category: list-backed (bidirectional-only) -> "
+                  "bidirectional_iterator_tag");
+
+    P95FwdOnlyRange st6cSrc(std::vector<int>{1, 2, 3});
+    auto            st6c = vw::stride(st6cSrc, 2);
+    static_assert(std::same_as<typename std::iterator_traits<decltype(st6c.begin())>::iterator_category,
+                                std::forward_iterator_tag>,
+                  "phase95 R5 stride iterator_category: forward-only (non-bidirectional) fixture -> "
+                  "forward_iterator_tag");
+
+    P95InputRange st6dSrc(5);
+    auto          st6d = vw::stride(st6dSrc, 2);
+    static_assert(requires { typename std::iterator_traits<decltype(st6d.begin())>::iterator_category; },
+                  "phase95 R5 stride iterator_category must still be PRESENT (boxcxx always-declares) "
+                  "even for an input-only Base");
+    static_assert(std::same_as<typename std::iterator_traits<decltype(st6d.begin())>::iterator_category,
+                                std::input_iterator_tag>,
+                  "phase95 R5 stride iterator_category: input-only fixture -> input_iterator_tag");
+
+    // ── stride_view: const-iteration + stride() accessor, SimpleView and
+    //    non-SimpleView bases ─────────────────────────────────────────────
+    std::vector<int> st7Src{1, 2, 3, 4, 5, 6, 7};
+    auto              st7 = st7Src | vw::stride(2); // ref_view -> SimpleView
+    Check(st7.stride() == 2, "phase95 stride stride() accessor");
+    std::vector<int> st7Out, st7ConstOut;
+    for (int x : st7) st7Out.push_back(x);
+    const auto &st7Const = st7;
+    for (int x : st7Const) st7ConstOut.push_back(x);
+    Check((st7Out == st7ConstOut), "phase95 stride const-iteration matches non-const, SimpleView base");
+
+    auto st7b = std::vector<int>{1, 2, 3, 4, 5, 6, 7} | vw::stride(2); // owning_view -> non-SimpleView
+    std::vector<int> st7bOut, st7bConstOut;
+    for (int x : st7b) st7bOut.push_back(x);
+    const auto &st7bConst = st7b;
+    for (int x : st7bConst) st7bConstOut.push_back(x);
+    Check((st7bOut == st7bConstOut), "phase95 stride const-iteration matches non-const, non-SimpleView (owning) base");
+
+    // ── div-ceil edge shapes (§0.7 — arithmetic correctness, not div-by-zero) ──
+    std::vector<int> dc1Src{1};
+    auto              dc1 = dc1Src | vw::chunk(1000000);
+    std::vector<std::vector<int>> dc1Out;
+    for (auto piece : dc1) dc1Out.push_back(collect(piece));
+    Check((dc1Out == std::vector<std::vector<int>>{{1}}), "phase95 div-ceil n far larger than base, one chunk of size 1");
+    Check(dc1.size() == 1, "phase95 div-ceil n far larger than base, size()==1");
+
+    std::vector<int> dc2Src{};
+    auto              dc2 = dc2Src | vw::chunk(3);
+    Check(dc2.begin() == dc2.end(), "phase95 div-ceil zero-size base, begin()==end() immediately");
+    Check(dc2.size() == 0, "phase95 div-ceil zero-size base, size()==0 (div-ceil(0,3)==0; divisor is 3, not 0)");
+
+    // ── SFINAE-rejection shapes, all four closures (R6) ─────────────────────
+    static_assert(!ChunkCallable<int, int>, "phase95 R6 chunk(non-range, int) must be SFINAE-rejected");
+    static_assert(ChunkCallable<std::vector<int>, int>, "phase95 R6 chunk(vector<int>, int) positive control");
+    static_assert(!ChunkByCallable<std::vector<int>, std::string>,
+                  "phase95 R6 chunk_by(range, non-invocable predicate) must be SFINAE-rejected");
+    static_assert(ChunkByCallable<std::vector<int>, rg::less_equal>,
+                  "phase95 R6 chunk_by(vector<int>, ranges::less_equal) positive control");
+    static_assert(!SlideCallable<int, int>, "phase95 R6 slide(non-range, int) must be SFINAE-rejected");
+    static_assert(SlideCallable<std::vector<int>, int>, "phase95 R6 slide(vector<int>, int) positive control");
+    static_assert(!StrideCallable<int, int>, "phase95 R6 stride(non-range, int) must be SFINAE-rejected");
+    static_assert(StrideCallable<std::vector<int>, int>, "phase95 R6 stride(vector<int>, int) positive control");
+
+    // ── compile-only closure-shape checks: pipe form matches direct-call form ──
+    std::vector<int> p25Src{0, 1, 2, 3, 4, 5};
+    {
+        auto a1 = vw::chunk(p25Src, 2);
+        auto a2 = p25Src | vw::chunk(2);
+        std::vector<std::vector<int>> o1, o2;
+        for (auto piece : a1) o1.push_back(collect(piece));
+        for (auto piece : a2) o2.push_back(collect(piece));
+        Check((o1 == o2), "phase95 chunk pipe form matches direct-call form");
+    }
+    {
+        auto b1 = vw::chunk_by(p25Src, rg::less_equal{});
+        auto b2 = p25Src | vw::chunk_by(rg::less_equal{});
+        std::vector<std::vector<int>> o1, o2;
+        for (auto piece : b1) o1.push_back(collect(piece));
+        for (auto piece : b2) o2.push_back(collect(piece));
+        Check((o1 == o2), "phase95 chunk_by pipe form matches direct-call form");
+    }
+    {
+        auto c1p = vw::slide(p25Src, 2);
+        auto c2p = p25Src | vw::slide(2);
+        std::vector<std::vector<int>> o1, o2;
+        for (auto w : c1p) o1.push_back(collect(w));
+        for (auto w : c2p) o2.push_back(collect(w));
+        Check((o1 == o2), "phase95 slide pipe form matches direct-call form");
+    }
+    {
+        auto d1 = vw::stride(p25Src, 2);
+        auto d2 = p25Src | vw::stride(2);
+        std::vector<int> o1, o2;
+        for (int x : d1) o1.push_back(x);
+        for (int x : d2) o2.push_back(x);
+        Check((o1 == o2), "phase95 stride pipe form matches direct-call form");
+    }
+
+    printf("[CXX] PASS phase95: ranges::chunk_view / chunk_by_view / slide_view / stride_view "
+           "(windowing + partition adaptors; missing_ reverse-iteration bookkeeping + "
+           "chunk-input single-pass shared state + chunk_by find-prev boundary)\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -15230,6 +15722,7 @@ int main()
     Phase92();
     Phase93();
     Phase94();
+    Phase95();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
