@@ -8,6 +8,7 @@
 
 #include <__bits/allocator_core>
 #include <__bits/iterator_core>
+#include <__bits/ranges_core>
 #include <__bits/throw_helpers>
 #include <algorithm>
 #include <compare>
@@ -190,6 +191,12 @@ public:
         InitMap(0);
         for (; first != last; ++first) push_back(*first);
     }
+    template <ContainerCompatibleRange<T> R>
+    deque(from_range_t, R &&rg, const Alloc &a = Alloc()) : __alloc(a), __malloc(a)
+    {
+        InitMap(0);
+        for (auto &&v : rg) push_back(std::forward<decltype(v)>(v));
+    }
     deque(initializer_list<T> il, const Alloc &a = Alloc())
         : __alloc(a), __malloc(a)
     {
@@ -259,6 +266,16 @@ public:
         clear();
         for (const T &v : il) push_back(v);
         return *this;
+    }
+
+    // Materialize into a fresh deque BEFORE touching *this — rg may alias
+    // *this; clearing first and then reading rg mid-loop would be a
+    // use-after-free. Move-assigning a fully-built temporary in is
+    // self-reference-safe and makes self-assign a value-preserving no-op.
+    template <ContainerCompatibleRange<T> R>
+    void assign_range(R &&rg)
+    {
+        *this = deque(from_range, std::forward<R>(rg), get_allocator());
     }
 
     allocator_type get_allocator() const noexcept { return __alloc; }
@@ -360,6 +377,66 @@ public:
     iterator insert(const_iterator where, T &&v)
     {
         return emplace(where, std::move(v));
+    }
+    // deque's first multi-element positional insert — generalizes emplace's
+    // own append(emplace_back)-then-rotate idiom above from one element to
+    // n/a range. `pos`/`old` are OFFSETS (not iterators), so they stay valid
+    // across any ReserveBack()/GrowMap() reallocation the append triggers.
+    iterator insert(const_iterator where, size_type n, const T &v)
+    {
+        difference_type pos = const_iterator(where) - const_iterator(__start);
+        for (size_type i = 0; i < n; ++i) emplace_back(v);
+        iterator p = __start + pos;
+        std::rotate(p, __finish - difference_type(n), __finish);
+        return p;
+    }
+    template <typename It>
+        requires(!is_integral_v<It>)
+    iterator insert(const_iterator where, It first, It last)
+    {
+        difference_type pos = const_iterator(where) - const_iterator(__start);
+        difference_type old = const_iterator(__finish) - const_iterator(__start);
+        for (; first != last; ++first) emplace_back(*first);
+        iterator p = __start + pos;
+        std::rotate(p, __start + old, __finish);
+        return p;
+    }
+    iterator insert(const_iterator where, initializer_list<T> il)
+    {
+        return insert(where, il.begin(), il.end());
+    }
+
+    template <ContainerCompatibleRange<T> R>
+    iterator insert_range(const_iterator where, R &&rg)
+    {
+        difference_type pos = const_iterator(where) - const_iterator(__start);
+        difference_type old = const_iterator(__finish) - const_iterator(__start);
+        for (auto &&v : rg) emplace_back(std::forward<decltype(v)>(v));
+        iterator p = __start + pos;
+        std::rotate(p, __start + old, __finish);
+        return p;
+    }
+    template <ContainerCompatibleRange<T> R>
+    void append_range(R &&rg)
+    {
+        for (auto &&v : rg) emplace_back(std::forward<decltype(v)>(v));
+    }
+    // CRIT-1: push_front-loop reverses the newly-prepended elements' order
+    // (each push_front becomes the new front) — restore it with ONE reverse
+    // over exactly the newly-added prefix. Distinct from list::prepend_range
+    // below, which uses a fixed-cursor insert instead (no reversal needed
+    // there — see that function's comment for why the two containers need
+    // genuinely different algorithms).
+    template <ContainerCompatibleRange<T> R>
+    void prepend_range(R &&rg)
+    {
+        size_type added = 0;
+        for (auto &&v : rg) {
+            push_front(std::forward<decltype(v)>(v));
+            ++added;
+        }
+        iterator mid = begin() + difference_type(added);
+        std::reverse(begin(), mid);
     }
 
     iterator erase(const_iterator where)
@@ -574,6 +651,14 @@ typename deque<T, A>::size_type erase_if(deque<T, A> &d, Pred pred)
     d.erase(it, d.end());
     return typename deque<T, A>::size_type(n);
 }
+
+// ── deduction guides ([deque.deduct]) ────────────────────────────────────
+// Same shape/rationale as vector's guides — see that file.
+template <typename It, typename Alloc = allocator<iter_value_t<It>>>
+deque(It, It, Alloc = Alloc()) -> deque<iter_value_t<It>, Alloc>;
+
+template <ranges::input_range R, typename Alloc = allocator<ranges::range_value_t<R>>>
+deque(from_range_t, R &&, Alloc = Alloc()) -> deque<ranges::range_value_t<R>, Alloc>;
 
 } // namespace std
 

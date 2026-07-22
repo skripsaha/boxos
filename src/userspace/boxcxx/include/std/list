@@ -7,6 +7,7 @@
 
 #include <__bits/allocator_core>
 #include <__bits/iterator_core>
+#include <__bits/ranges_core>
 #include <compare>
 #include <cstddef>
 #include <initializer_list>
@@ -142,6 +143,12 @@ public:
         Reset();
         for (; first != last; ++first) push_back(*first);
     }
+    template <ContainerCompatibleRange<T> R>
+    list(from_range_t, R &&rg, const Alloc &a = Alloc()) : __alloc(a)
+    {
+        Reset();
+        for (auto &&v : rg) push_back(std::forward<decltype(v)>(v));
+    }
     list(initializer_list<T> il, const Alloc &a = Alloc()) : __alloc(a)
     {
         Reset();
@@ -196,6 +203,16 @@ public:
         for (; first != last; ++first) push_back(*first);
     }
     void assign(initializer_list<T> il) { assign(il.begin(), il.end()); }
+
+    // Materialize into a fresh list BEFORE touching *this — rg may alias
+    // *this; clearing first and then reading rg mid-loop would be a
+    // use-after-free. Move-assigning a fully-built temporary in is
+    // self-reference-safe and makes self-assign a value-preserving no-op.
+    template <ContainerCompatibleRange<T> R>
+    void assign_range(R &&rg)
+    {
+        *this = list(from_range, std::forward<R>(rg), get_allocator());
+    }
 
     allocator_type get_allocator() const noexcept { return Alloc(__alloc); }
 
@@ -294,6 +311,40 @@ public:
             }
         }
         return head;
+    }
+
+    // Matches insert(pos,first,last) above exactly: pos names a stable
+    // node, so repeated emplace(pos, ...) with pos held FIXED (never
+    // re-queried) accumulates in correct forward order — no rotation.
+    template <ContainerCompatibleRange<T> R>
+    iterator insert_range(const_iterator pos, R &&rg)
+    {
+        iterator head      = iterator(pos.__n);
+        bool     first_one = true;
+        for (auto &&v : rg) {
+            iterator it = emplace(pos, std::forward<decltype(v)>(v));
+            if (first_one) {
+                head      = it;
+                first_one = false;
+            }
+        }
+        return head;
+    }
+    template <ContainerCompatibleRange<T> R>
+    void append_range(R &&rg)
+    {
+        for (auto &&v : rg) push_back(std::forward<decltype(v)>(v));
+    }
+    // CRIT-1: the OTHER order-preservation strategy — NOT deque's reverse
+    // trick. begin() names a stable node (list is a real linked list, no
+    // "amortized O(1) from one end only" constraint), so prepending is
+    // just insert_range at a fixed pos=begin(): each new element lands
+    // immediately before that stable node, accumulating in forward order
+    // for free. Reversing here (copy-pasting deque's fix) would be wrong.
+    template <ContainerCompatibleRange<T> R>
+    void prepend_range(R &&rg)
+    {
+        insert_range(begin(), std::forward<R>(rg));
     }
 
     iterator erase(const_iterator pos)
@@ -556,6 +607,14 @@ typename list<T, A>::size_type erase_if(list<T, A> &l, Pred pred)
 {
     return l.remove_if(pred);
 }
+
+// ── deduction guides ([list.deduct]) ─────────────────────────────────────
+// Same shape/rationale as vector's guides — see that file.
+template <typename It, typename Alloc = allocator<iter_value_t<It>>>
+list(It, It, Alloc = Alloc()) -> list<iter_value_t<It>, Alloc>;
+
+template <ranges::input_range R, typename Alloc = allocator<ranges::range_value_t<R>>>
+list(from_range_t, R &&, Alloc = Alloc()) -> list<ranges::range_value_t<R>, Alloc>;
 
 } // namespace std
 
