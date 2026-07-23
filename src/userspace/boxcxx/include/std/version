@@ -1,0 +1,52 @@
+// boxcxx — <version>
+//
+// Library feature-test macros [version.syn]. This is the one header a
+// translation unit can include to probe every library feature-test macro
+// in one place. Per [support.limits.general], each macro must ALSO be
+// visible to a translation unit that includes only the macro's OWNING
+// header (not <version>) — so the actual #define bodies live in shared
+// leaf files under __bits/ (<__bits/version_ranges>, owned by <ranges>;
+// <__bits/version_algorithm>, owned by <algorithm>), and <version> just
+// pulls in the complete set from both. <coroutine> and <generator>
+// self-declare their own single macro directly, a third, pre-existing
+// pattern this file doesn't change.
+//
+// Scope (Ф29f-3c, the ranges-completeness epic closeout, plus conformance
+// fixes from a follow-up audit): Ф7B-Ф29f shipped without a single
+// __cpp_lib_* macro. This adds the ranges-family macros boxcxx now
+// actually implements COMPLETELY, plus the adjacent algorithm-family
+// macros this same sweep verified — nothing more. Every value was cross-
+// checked against libstdc++'s own bits/version.def (the most authoritative
+// available source for which value belongs to which C++ revision) and
+// eel.is/c++draft; every feature was independently grep-verified present
+// in boxcxx's own source before its macro was added.
+//
+// Deliberately NOT defined (feature not implemented, or not complete
+// enough to claim):
+//   __cpp_lib_containers_ranges — owned jointly by <vector>, <deque>,
+//                                 <list>, <map>, <set>, <unordered_map>,
+//                                 <unordered_set>, <string>, AND
+//                                 <stack>/<queue>/<priority_queue>/
+//                                 <forward_list>. The first 8 are fully
+//                                 done; the last 4 containers don't exist
+//                                 in boxcxx yet (future container phase) —
+//                                 claiming this macro would be a false
+//                                 positive for the whole-surface promise
+//                                 it makes.
+//   __cpp_lib_tuple_like        — no public std::tuple_like concept (only
+//                                 a private elements_view implementation
+//                                 trait); the broader pair/tuple "tuple-
+//                                 like" converting ctor/assignment
+//                                 machinery this macro implies is out of
+//                                 scope (tuple itself doesn't have it
+//                                 either).
+// Backfilling FTMs for Ф1-Ф28 (format/chrono/random/threads/...) is a
+// separate, explicitly out-of-scope future epic-wide item, not folded in
+// here.
+#ifndef BOXCXX_VERSION
+#define BOXCXX_VERSION
+
+#include <__bits/version_ranges>
+#include <__bits/version_algorithm>
+
+#endif // BOXCXX_VERSION

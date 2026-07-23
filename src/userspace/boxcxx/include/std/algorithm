@@ -7,6 +7,7 @@
 #define BOXCXX_ALGORITHM
 
 #include <__bits/algorithm_classic>
+#include <__bits/version_algorithm>
 
 // The ranges:: constrained algorithms ([algorithms.results] + the niebloids)
 // build on everything above plus the Ф29a indirect-callable foundation. Order
