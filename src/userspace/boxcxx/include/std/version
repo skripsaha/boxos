@@ -6,10 +6,10 @@
 // visible to a translation unit that includes only the macro's OWNING
 // header (not <version>) — so the actual #define bodies live in shared
 // leaf files under __bits/ (<__bits/version_ranges>, owned by <ranges>;
-// <__bits/version_algorithm>, owned by <algorithm>), and <version> just
-// pulls in the complete set from both. <coroutine> and <generator>
-// self-declare their own single macro directly, a third, pre-existing
-// pattern this file doesn't change.
+// <__bits/version_algorithm>, owned by <algorithm>; <__bits/version_numeric>,
+// owned by <numeric>), and <version> just pulls in the complete set from
+// all three. <coroutine> and <generator> self-declare their own single
+// macro directly, a fourth, pre-existing pattern this file doesn't change.
 //
 // Scope (Ф29f-3c, the ranges-completeness epic closeout, plus conformance
 // fixes from a follow-up audit): Ф7B-Ф29f shipped without a single
@@ -40,6 +40,10 @@
 //                                 machinery this macro implies is out of
 //                                 scope (tuple itself doesn't have it
 //                                 either).
+//   __cpp_lib_interpolate       — midpoint complete in <numeric>, but lerp
+//                                 absent from <cmath>; macro deferred until
+//                                 a future phase adds lerp (jointly owned,
+//                                 same rule as __cpp_lib_containers_ranges).
 // Backfilling FTMs for Ф1-Ф28 (format/chrono/random/threads/...) is a
 // separate, explicitly out-of-scope future epic-wide item, not folded in
 // here.
@@ -48,5 +52,6 @@
 
 #include <__bits/version_ranges>
 #include <__bits/version_algorithm>
+#include <__bits/version_numeric>
 
 #endif // BOXCXX_VERSION

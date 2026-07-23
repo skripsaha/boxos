@@ -234,6 +234,45 @@ template <typename R>
 concept common_range =
     range<R> && same_as<iterator_t<R>, sentinel_t<R>>;
 
+// ── dangling / borrowed_iterator_t ([range.dangling]) ────────────────────
+// Inert marker returned in place of an iterator by algorithms that took an
+// rvalue non-borrowed range, so a would-be-dangling iterator can never be
+// used by accident. Its variadic ctor absorbs any argument list.
+struct dangling {
+    constexpr dangling() noexcept = default;
+    template <typename... Args>
+    constexpr dangling(Args &&...) noexcept
+    {
+    }
+};
+
+template <range R>
+using borrowed_iterator_t =
+    conditional_t<borrowed_range<R>, iterator_t<R>, dangling>;
+
+// ── out_value_result ([algorithms.results]) ──────────────────────────────
+// Used by <numeric>'s ranges::iota (iota_result = out_value_result<O,T>);
+// lives here rather than in ranges_algo so <numeric> can reach it without
+// pulling in the rest of <algorithm>/<ranges>.
+template <class O, class T>
+struct out_value_result {
+    [[no_unique_address]] O out;
+    [[no_unique_address]] T value;
+
+    template <class O2, class T2>
+        requires convertible_to<const O &, O2> && convertible_to<const T &, T2>
+    constexpr operator out_value_result<O2, T2>() const &
+    {
+        return {out, value};
+    }
+    template <class O2, class T2>
+        requires convertible_to<O, O2> && convertible_to<T, T2>
+    constexpr operator out_value_result<O2, T2>() &&
+    {
+        return {std::move(out), std::move(value)};
+    }
+};
+
 } // namespace ranges
 
 // [container.intro.reqmts] p2 — container-compatible-range.
