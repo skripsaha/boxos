@@ -1,0 +1,383 @@
+// boxcxx — <__bits/searcher>
+// The three C++17 Searcher objects ([func.search]): default_searcher (a
+// naive ForwardIterator scan, constexpr end to end), boyer_moore_searcher
+// and boyer_moore_horspool_searcher (RandomAccessIterator, preprocessed
+// bad-character + good-suffix tables). Split into its own leaf, like
+// <__bits/algorithm_classic>: the bad-character table needs a small open-
+// addressing map, and pulling in <unordered_map>/<vector> here would loop
+// back through <functional> (which is what includes this header) -- so
+// every piece of storage is hand-rolled from raw new[]/delete[] (HeapArray,
+// the byte-array/hash-map bad-character alternatives, the good-suffix
+// border-array table).
+//
+// hash/equal_to are only forward-declared here -- their real bodies live
+// in <functional> itself, further down the same translation unit (this
+// header is included from there before <functional> reaches them). Every
+// default template argument below spells out equal_to<void> instead of
+// the shorthand equal_to<>: eliding the argument needs a default already
+// established by an EARLIER declaration in the same translation unit, and
+// <functional>'s own primary-template default is declared later, not here
+// -- equal_to<void> names the identical type without relying on it.
+#ifndef BOXCXX_BITS_SEARCHER
+#define BOXCXX_BITS_SEARCHER
+
+#include <__bits/iterator_core>
+#include <cstddef>
+#include <new>
+#include <type_traits>
+#include <utility>
+
+namespace std {
+
+template <class T> struct hash;
+template <class T> struct equal_to;
+
+namespace __search_impl {
+
+// Deep-copy RAII heap buffer backing every table below -- copying a
+// searcher must copy its tables, never alias them (a searcher outliving a
+// copy, or vice versa, must never dangle).
+template <class T>
+class HeapArray {
+public:
+    HeapArray() noexcept = default;
+
+    explicit HeapArray(size_t n)
+        : __data(n ? new T[n]() : nullptr), __size(n)
+    {
+    }
+
+    HeapArray(const HeapArray &other)
+        : __data(other.__size ? new T[other.__size] : nullptr),
+          __size(other.__size)
+    {
+        for (size_t i = 0; i < __size; ++i) __data[i] = other.__data[i];
+    }
+
+    HeapArray(HeapArray &&other) noexcept
+        : __data(other.__data), __size(other.__size)
+    {
+        other.__data = nullptr;
+        other.__size = 0;
+    }
+
+    HeapArray &operator=(const HeapArray &other)
+    {
+        if (this != &other) {
+            HeapArray tmp(other);
+            Swap(tmp);
+        }
+        return *this;
+    }
+
+    HeapArray &operator=(HeapArray &&other) noexcept
+    {
+        if (this != &other) {
+            delete[] __data;
+            __data       = other.__data;
+            __size       = other.__size;
+            other.__data = nullptr;
+            other.__size = 0;
+        }
+        return *this;
+    }
+
+    ~HeapArray() { delete[] __data; }
+
+    void Swap(HeapArray &other) noexcept
+    {
+        T *data      = __data;
+        size_t size  = __size;
+        __data       = other.__data;
+        __size       = other.__size;
+        other.__data = data;
+        other.__size = size;
+    }
+
+    T &operator[](size_t i) noexcept { return __data[i]; }
+    const T &operator[](size_t i) const noexcept { return __data[i]; }
+
+private:
+    T *__data     = nullptr;
+    size_t __size = 0;
+};
+
+// Direct 256-entry bad-character table -- picked only for a single-byte
+// integral key compared with the plain std::equal_to<>; a custom
+// predicate cannot use raw byte equality, so kSmallKey below gates on the
+// predicate too, not just the key size.
+class BadCharTable {
+public:
+    template <class It, class Hash, class Pred>
+    BadCharTable(It patFirst, It patLast, Hash &&, Pred &&) noexcept
+    {
+        for (int c = 0; c < 256; ++c) __table[c] = -1;
+        ptrdiff_t idx = 0;
+        for (It it = patFirst; it != patLast; ++it, ++idx)
+            __table[static_cast<unsigned char>(*it)] = idx;
+    }
+
+    template <class K2>
+    ptrdiff_t Lookup(const K2 &k) const noexcept
+    {
+        return __table[static_cast<unsigned char>(k)];
+    }
+
+private:
+    ptrdiff_t __table[256];
+};
+
+// Open-addressing bad-character map for wide keys or a custom predicate.
+// Linear probing; capacity is always the next power of two at least 2x
+// the pattern length, so the load factor never exceeds 50% and a probe
+// sequence always terminates at either the key or an empty slot.
+template <class Key, class Hash, class Pred>
+class BadCharMap {
+public:
+    template <class It, class HashArg, class PredArg>
+    BadCharMap(It patFirst, It patLast, HashArg &&hash, PredArg &&pred)
+        : __mask(0), __hash(std::forward<HashArg>(hash)),
+          __pred(std::forward<PredArg>(pred))
+    {
+        size_t m   = static_cast<size_t>(patLast - patFirst);
+        size_t cap = 8;
+        while (cap < m * 2) cap <<= 1;
+        __occ  = HeapArray<bool>(cap);
+        __key  = HeapArray<Key>(cap);
+        __val  = HeapArray<ptrdiff_t>(cap);
+        __mask = cap - 1;
+        ptrdiff_t idx = 0;
+        for (It it = patFirst; it != patLast; ++it, ++idx) Insert(*it, idx);
+    }
+
+    BadCharMap(const BadCharMap &)            = default;
+    BadCharMap(BadCharMap &&)                 = default;
+    BadCharMap &operator=(const BadCharMap &) = default;
+    BadCharMap &operator=(BadCharMap &&)      = default;
+    ~BadCharMap()                             = default;
+
+    template <class K2>
+    ptrdiff_t Lookup(const K2 &key) const noexcept
+    {
+        if (__mask == 0) return -1;
+        size_t h = static_cast<size_t>(__hash(key)) & __mask;
+        for (;;) {
+            if (!__occ[h]) return -1;
+            if (__pred(__key[h], key)) return __val[h];
+            h = (h + 1) & __mask;
+        }
+    }
+
+private:
+    void Insert(const Key &key, ptrdiff_t idx)
+    {
+        size_t h = static_cast<size_t>(__hash(key)) & __mask;
+        for (;;) {
+            if (!__occ[h]) {
+                __occ[h] = true;
+                __key[h] = key;
+                __val[h] = idx;
+                return;
+            }
+            if (__pred(__key[h], key)) {
+                __val[h] = idx; // last occurrence wins
+                return;
+            }
+            h = (h + 1) & __mask;
+        }
+    }
+
+    HeapArray<bool> __occ;
+    HeapArray<Key> __key;
+    HeapArray<ptrdiff_t> __val;
+    size_t __mask;
+    Hash __hash;
+    Pred __pred;
+};
+
+template <class Key, class Pred>
+inline constexpr bool kSmallKey =
+    sizeof(Key) == 1 && is_integral_v<Key> && is_same_v<Pred, equal_to<void>>;
+
+template <class Key, class Hash, class Pred>
+using BadCharTableFor =
+    conditional_t<kSmallKey<Key, Pred>, BadCharTable, BadCharMap<Key, Hash, Pred>>;
+
+// Classic Boyer-Moore good-suffix preprocessing (border-array
+// formulation) -- Boyer-Moore only, Horspool uses the bad-character rule
+// alone. Predicate-aware: compares pattern characters through the
+// caller's own BinaryPredicate rather than raw ==, matching the search
+// loop that reads this table.
+class GoodSuffixTable {
+public:
+    template <class It, class Pred>
+    GoodSuffixTable(It patFirst, It patLast, Pred &&pred)
+        : __shift(static_cast<size_t>(patLast - patFirst) + 1),
+          __bpos(static_cast<size_t>(patLast - patFirst) + 1),
+          __m(static_cast<size_t>(patLast - patFirst))
+    {
+        if (__m == 0) return;
+        size_t i = __m, j = __m + 1;
+        __bpos[__m] = j;
+        while (i > 0) {
+            while (j <= __m && !pred(patFirst[i - 1], patFirst[j - 1])) {
+                if (__shift[j] == 0) __shift[j] = static_cast<ptrdiff_t>(j - i);
+                j = __bpos[j];
+            }
+            --i;
+            --j;
+            __bpos[i] = j;
+        }
+        j = __bpos[0];
+        for (i = 0; i <= __m; ++i) {
+            if (__shift[i] == 0) __shift[i] = static_cast<ptrdiff_t>(j);
+            if (i == j) j = __bpos[j];
+        }
+    }
+
+    ptrdiff_t ShiftAfterMismatch(size_t mismatchIndex) const noexcept
+    {
+        return __shift[mismatchIndex + 1];
+    }
+
+private:
+    HeapArray<ptrdiff_t> __shift;
+    HeapArray<size_t> __bpos;
+    size_t __m;
+};
+
+} // namespace __search_impl
+
+// ── default_searcher ([defaultsearcher]) ────────────────────────────────
+// Naive ForwardIterator scan -- correct for any forward range, no
+// preprocessing, no heap allocation, constexpr end to end.
+
+template <class ForwardIt1, class BinaryPredicate = equal_to<void>>
+class default_searcher {
+public:
+    constexpr default_searcher(ForwardIt1 patFirst, ForwardIt1 patLast,
+                                BinaryPredicate pred = BinaryPredicate())
+        : __patFirst(patFirst), __patLast(patLast), __pred(pred)
+    {
+    }
+
+    template <class It2>
+    constexpr pair<It2, It2> operator()(It2 first, It2 last) const
+    {
+        for (It2 cur = first;; ++cur) {
+            It2 it         = cur;
+            ForwardIt1 pit = __patFirst;
+            for (;; ++it, ++pit) {
+                if (pit == __patLast) return {cur, it};
+                if (it == last) return {last, last};
+                if (!__pred(*it, *pit)) break;
+            }
+        }
+    }
+
+private:
+    ForwardIt1 __patFirst;
+    ForwardIt1 __patLast;
+    BinaryPredicate __pred;
+};
+
+// ── boyer_moore_searcher ([boyer.moore.searcher]) ───────────────────────
+// RandomAccessIterator on both the pattern and the corpus. Preprocesses a
+// bad-character table (byte array or hash map, picked by BadCharTableFor)
+// and a good-suffix table, then shifts by whichever rule's skip is larger
+// on each mismatch. Not constexpr -- both tables are heap-allocated.
+
+template <class RandomIt1,
+          class Hash = hash<typename iterator_traits<RandomIt1>::value_type>,
+          class BinaryPredicate = equal_to<void>>
+class boyer_moore_searcher {
+    using Key = typename iterator_traits<RandomIt1>::value_type;
+
+public:
+    boyer_moore_searcher(RandomIt1 patFirst, RandomIt1 patLast,
+                          Hash hash = Hash(),
+                          BinaryPredicate pred = BinaryPredicate())
+        : __patFirst(patFirst), __patLast(patLast), __pred(pred),
+          __badChar(patFirst, patLast, std::move(hash), pred),
+          __goodSuffix(patFirst, patLast, pred)
+    {
+    }
+
+    template <class It2>
+    pair<It2, It2> operator()(It2 first, It2 last) const
+    {
+        ptrdiff_t m = __patLast - __patFirst;
+        ptrdiff_t n = last - first;
+        if (m == 0) return {first, first};
+        if (n < m) return {last, last};
+        ptrdiff_t s = 0;
+        while (s <= n - m) {
+            ptrdiff_t j = m - 1;
+            while (j >= 0 && __pred(__patFirst[j], first[s + j])) --j;
+            if (j < 0) return {first + s, first + s + m};
+            ptrdiff_t bc = j - __badChar.Lookup(first[s + j]);
+            ptrdiff_t gs = __goodSuffix.ShiftAfterMismatch(static_cast<size_t>(j));
+            ptrdiff_t sh = bc > gs ? bc : gs;
+            s += (sh < 1 ? 1 : sh);
+        }
+        return {last, last};
+    }
+
+private:
+    RandomIt1 __patFirst;
+    RandomIt1 __patLast;
+    BinaryPredicate __pred;
+    __search_impl::BadCharTableFor<Key, Hash, BinaryPredicate> __badChar;
+    __search_impl::GoodSuffixTable __goodSuffix;
+};
+
+// ── boyer_moore_horspool_searcher ([boyer.moore.horspool.searcher]) ────
+// Bad-character rule alone, keyed off the corpus byte aligned with the
+// pattern's LAST character. The table is built over [patFirst,patLast-1)
+// -- the pattern's own last character never needs a shift lookup -- but
+// patLast-1 is never formed when the pattern is empty.
+
+template <class RandomIt1,
+          class Hash = hash<typename iterator_traits<RandomIt1>::value_type>,
+          class BinaryPredicate = equal_to<void>>
+class boyer_moore_horspool_searcher {
+    using Key = typename iterator_traits<RandomIt1>::value_type;
+
+public:
+    boyer_moore_horspool_searcher(RandomIt1 patFirst, RandomIt1 patLast,
+                                   Hash hash = Hash(),
+                                   BinaryPredicate pred = BinaryPredicate())
+        : __patFirst(patFirst), __patLast(patLast), __pred(pred),
+          __badChar(patFirst, patFirst == patLast ? patLast : patLast - 1,
+                    std::move(hash), pred)
+    {
+    }
+
+    template <class It2>
+    pair<It2, It2> operator()(It2 first, It2 last) const
+    {
+        ptrdiff_t m = __patLast - __patFirst;
+        ptrdiff_t n = last - first;
+        if (m == 0) return {first, first};
+        if (n < m) return {last, last};
+        ptrdiff_t s = 0;
+        while (s <= n - m) {
+            ptrdiff_t j = m - 1;
+            while (j >= 0 && __pred(__patFirst[j], first[s + j])) --j;
+            if (j < 0) return {first + s, first + s + m};
+            ptrdiff_t idx = __badChar.Lookup(first[s + m - 1]);
+            s += (idx < 0 ? m : (m - 1 - idx));
+        }
+        return {last, last};
+    }
+
+private:
+    RandomIt1 __patFirst;
+    RandomIt1 __patLast;
+    BinaryPredicate __pred;
+    __search_impl::BadCharTableFor<Key, Hash, BinaryPredicate> __badChar;
+};
+
+} // namespace std
+
+#endif // BOXCXX_BITS_SEARCHER

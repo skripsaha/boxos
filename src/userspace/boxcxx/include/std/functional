@@ -163,6 +163,12 @@ template <class T> void cref(const T &&) = delete;
 #include <__bits/mem_fn>
 #include <__bits/not_fn>
 
+// __bits/searcher (Ф30b-3: default_searcher / boyer_moore_searcher /
+// boyer_moore_horspool_searcher) sits here too -- see its own top comment
+// for why it must come before this file's std::equal_to primary template
+// below.
+#include <__bits/searcher>
+
 namespace std {
 
 // ── transparent operator functors ───────────────────────────────────────

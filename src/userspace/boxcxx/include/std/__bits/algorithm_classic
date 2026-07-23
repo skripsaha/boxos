@@ -349,6 +349,18 @@ constexpr It1 search(It1 first, It1 last, It2 s_first, It2 s_last)
     return search(first, last, s_first, s_last, __algo_impl::EqualTo{});
 }
 
+// [func.search.general]: the Searcher-object overload (default_searcher /
+// boyer_moore_searcher / boyer_moore_horspool_searcher, <functional>)
+// instead of a raw pattern range + predicate. Generic over any callable
+// with this shape -- never names <functional> itself, so this file's
+// zero-dependency leaf property (see the top comment) still holds.
+template <typename ForwardIterator, typename Searcher>
+constexpr ForwardIterator search(ForwardIterator first, ForwardIterator last,
+                                 const Searcher &s)
+{
+    return s(first, last).first;
+}
+
 template <typename It, typename Size, typename T, typename Pred>
 constexpr It search_n(It first, It last, Size count, const T &value, Pred pred)
 {

@@ -18563,6 +18563,261 @@ void Phase103()
            "(hotspots #1/#2)\n");
 }
 
+// ── phase104 fixtures ────────────────────────────────────────────────────
+
+// Case-insensitive Hash/BinaryPredicate pair for the byte-key custom-
+// predicate battery (hotspot #1). A matched pair is required for any
+// hash-based lookup: hashing 'A' and 'a' into different buckets while the
+// predicate treats them as equal would break BadCharMap's own probing
+// invariant, so this hash folds case exactly like the predicate does.
+char P104FoldCase(char c)
+{
+    return (c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c;
+}
+
+struct P104CiHash {
+    size_t operator()(char c) const noexcept
+    {
+        return std::hash<char>{}(P104FoldCase(c));
+    }
+};
+
+struct P104CiEqual {
+    bool operator()(char a, char b) const noexcept
+    {
+        return P104FoldCase(a) == P104FoldCase(b);
+    }
+};
+
+void Phase104()
+{
+    // ── feature-test macro pin ([version.syn]) ───────────────────────────
+    {
+        static_assert(__cpp_lib_boyer_moore_searcher >= 201603L,
+                      "phase104 __cpp_lib_boyer_moore_searcher pin");
+    }
+
+    // ── constexpr: default_searcher is genuinely usable end to end (ctor +
+    //    operator()) in a constant expression. boyer_moore_searcher and
+    //    boyer_moore_horspool_searcher are NOT constexpr (their bad-char/
+    //    good-suffix tables are heap-allocated) -- verified by inspection
+    //    (neither class nor its operator() carries the constexpr
+    //    specifier); not auto-tested here, since a negative constexpr
+    //    claim cannot be expressed as code that must still compile
+    //    (matches phase102's precedent for must-not-compile properties) ──
+    {
+        static_assert(
+            [] {
+                char p104Pat[]    = {'a', 'b'};
+                char p104Corpus[] = {'x', 'a', 'b', 'y'};
+                std::default_searcher p104S(p104Pat, p104Pat + 2);
+                auto p104R = p104S(p104Corpus, p104Corpus + 4);
+                return p104R.first == p104Corpus + 1 && p104R.second == p104Corpus + 3;
+            }(),
+            "phase104 constexpr: default_searcher ctor + operator() both usable in a "
+            "constant expression");
+    }
+
+    // Test-local naive reference, independent of default_searcher (the
+    // spec's own warning: testing a searcher against itself would prove
+    // nothing about correctness, only self-consistency).
+    auto p104Naive = [](auto first, auto last, auto patFirst, auto patLast) {
+        using It2 = decltype(first);
+        if (patFirst == patLast) return std::pair<It2, It2>{first, first};
+        for (auto cur = first;; ++cur) {
+            auto it  = cur;
+            auto pit = patFirst;
+            for (;;) {
+                if (pit == patLast) return std::pair<It2, It2>{cur, it};
+                if (it == last) return std::pair<It2, It2>{last, last};
+                if (!(*it == *pit)) break;
+                ++it;
+                ++pit;
+            }
+        }
+    };
+
+    // All 3 searchers agree with the naive reference across the periodic /
+    // all-same / start / end / absent / single-char / whole-corpus
+    // batteries.
+    auto p104CheckBattery = [&](const std::string &corpus, const std::string &pattern,
+                               const std::string &label) {
+        auto p104Want =
+            p104Naive(corpus.begin(), corpus.end(), pattern.begin(), pattern.end());
+        std::default_searcher p104Def(pattern.begin(), pattern.end());
+        std::boyer_moore_searcher p104Bm(pattern.begin(), pattern.end());
+        std::boyer_moore_horspool_searcher p104Bmh(pattern.begin(), pattern.end());
+        Check(p104Def(corpus.begin(), corpus.end()) == p104Want,
+             ("phase104 " + label + ": default_searcher agrees with naive reference").c_str());
+        Check(p104Bm(corpus.begin(), corpus.end()) == p104Want,
+             ("phase104 " + label + ": boyer_moore_searcher agrees with naive reference")
+                 .c_str());
+        Check(p104Bmh(corpus.begin(), corpus.end()) == p104Want,
+             ("phase104 " + label +
+              ": boyer_moore_horspool_searcher agrees with naive reference")
+                 .c_str());
+    };
+
+    p104CheckBattery("abcabcabc", "abcabc", "periodic: full-period match at start");
+    p104CheckBattery("abcabcabc", "cabca", "periodic: shifted match mid-corpus");
+    p104CheckBattery("abcabcabc", "abcx", "periodic: absent, shares a prefix with the corpus");
+    p104CheckBattery("aaaaaaaa", "aaa", "all-same: short pattern matches at the very start");
+    p104CheckBattery("aaaaaaaa", "aaaaaaaaa",
+                     "all-same: pattern longer than corpus (n<m short-circuit)");
+    p104CheckBattery("abcxxxxxx", "abc", "pattern at the very start of the corpus");
+    p104CheckBattery("xxxxxxabc", "abc", "pattern at the very end, spanning the last byte");
+    p104CheckBattery("xxxxxxxxx", "abc", "pattern absent entirely");
+    p104CheckBattery("abcabcabc", "b", "single-character pattern");
+    p104CheckBattery("abcabcabc", "abcabcabc", "pattern length == corpus length, exact match");
+    p104CheckBattery("abcabcabc", "abcabcabX",
+                     "pattern length == corpus length, no match (not the n<m case)");
+
+    // Empty pattern: {first,first} exactly, for all 3 searchers, against
+    // both a non-empty and an empty corpus.
+    {
+        std::string p104Corpus = "nonempty";
+        std::string p104Empty;
+        std::default_searcher p104Def(p104Empty.begin(), p104Empty.end());
+        std::boyer_moore_searcher p104Bm(p104Empty.begin(), p104Empty.end());
+        std::boyer_moore_horspool_searcher p104Bmh(p104Empty.begin(), p104Empty.end());
+
+        auto p104Rd = p104Def(p104Corpus.begin(), p104Corpus.end());
+        Check(p104Rd.first == p104Corpus.begin() && p104Rd.second == p104Corpus.begin(),
+             "phase104 empty pattern vs non-empty corpus: default_searcher == {first,first}");
+        auto p104Rb = p104Bm(p104Corpus.begin(), p104Corpus.end());
+        Check(p104Rb.first == p104Corpus.begin() && p104Rb.second == p104Corpus.begin(),
+             "phase104 empty pattern vs non-empty corpus: boyer_moore_searcher == "
+             "{first,first}");
+        auto p104Rh = p104Bmh(p104Corpus.begin(), p104Corpus.end());
+        Check(p104Rh.first == p104Corpus.begin() && p104Rh.second == p104Corpus.begin(),
+             "phase104 empty pattern vs non-empty corpus: boyer_moore_horspool_searcher == "
+             "{first,first}");
+
+        std::string p104EmptyCorpus;
+        auto p104Rd2 = p104Def(p104EmptyCorpus.begin(), p104EmptyCorpus.end());
+        Check(p104Rd2.first == p104EmptyCorpus.begin() &&
+                 p104Rd2.second == p104EmptyCorpus.begin(),
+             "phase104 empty pattern vs empty corpus: default_searcher == {first,first}");
+        auto p104Rb2 = p104Bm(p104EmptyCorpus.begin(), p104EmptyCorpus.end());
+        Check(p104Rb2.first == p104EmptyCorpus.begin() &&
+                 p104Rb2.second == p104EmptyCorpus.begin(),
+             "phase104 empty pattern vs empty corpus: boyer_moore_searcher == {first,first}");
+        auto p104Rh2 = p104Bmh(p104EmptyCorpus.begin(), p104EmptyCorpus.end());
+        Check(p104Rh2.first == p104EmptyCorpus.begin() &&
+                 p104Rh2.second == p104EmptyCorpus.begin(),
+             "phase104 empty pattern vs empty corpus: boyer_moore_horspool_searcher == "
+             "{first,first}");
+    }
+
+    // Wide-key BadCharMap: int and wchar_t value_type, same shape of
+    // battery as the char case above.
+    {
+        std::vector<int> p104IntCorpus{5, 1, 2, 3, 4, 9, 1, 2, 3};
+        std::vector<int> p104IntPattern{1, 2, 3};
+        auto p104IntWant = p104Naive(p104IntCorpus.begin(), p104IntCorpus.end(),
+                                    p104IntPattern.begin(), p104IntPattern.end());
+        std::boyer_moore_searcher p104IntBm(p104IntPattern.begin(), p104IntPattern.end());
+        std::boyer_moore_horspool_searcher p104IntBmh(p104IntPattern.begin(),
+                                                      p104IntPattern.end());
+        Check(p104IntBm(p104IntCorpus.begin(), p104IntCorpus.end()) == p104IntWant,
+             "phase104 wide-key (int): boyer_moore_searcher agrees with naive reference");
+        Check(p104IntBmh(p104IntCorpus.begin(), p104IntCorpus.end()) == p104IntWant,
+             "phase104 wide-key (int): boyer_moore_horspool_searcher agrees with naive "
+             "reference");
+
+        std::vector<wchar_t> p104WCorpus{L'x', L'a', L'b', L'c', L'y'};
+        std::vector<wchar_t> p104WPattern{L'a', L'b', L'c'};
+        auto p104WWant = p104Naive(p104WCorpus.begin(), p104WCorpus.end(),
+                                  p104WPattern.begin(), p104WPattern.end());
+        std::boyer_moore_searcher p104WBm(p104WPattern.begin(), p104WPattern.end());
+        std::boyer_moore_horspool_searcher p104WBmh(p104WPattern.begin(), p104WPattern.end());
+        Check(p104WBm(p104WCorpus.begin(), p104WCorpus.end()) == p104WWant,
+             "phase104 wide-key (wchar_t): boyer_moore_searcher agrees with naive reference");
+        Check(p104WBmh(p104WCorpus.begin(), p104WCorpus.end()) == p104WWant,
+             "phase104 wide-key (wchar_t): boyer_moore_horspool_searcher agrees with naive "
+             "reference");
+    }
+
+    // ★ Byte-key custom predicate (hotspot #1): a case-insensitive
+    //   BinaryPredicate on a 1-byte key must route to BadCharMap, not the
+    //   raw-byte BadCharTable -- checked directly (the dispatch trait
+    //   itself) and behaviorally (it finds a match raw == would miss).
+    {
+        static_assert(!std::__search_impl::kSmallKey<char, P104CiEqual>,
+                     "phase104 hotspot#1: kSmallKey must gate on the predicate too, not just "
+                     "the key size -- a custom predicate must route to BadCharMap");
+
+        std::string p104Corpus  = "xxXAbCxx";
+        std::string p104Pattern = "abc";
+        std::boyer_moore_searcher<std::string::iterator, P104CiHash, P104CiEqual> p104Bm(
+            p104Pattern.begin(), p104Pattern.end(), P104CiHash{}, P104CiEqual{});
+        auto p104Rb = p104Bm(p104Corpus.begin(), p104Corpus.end());
+        Check(p104Rb.first - p104Corpus.begin() == 3,
+             "phase104 hotspot#1: case-insensitive boyer_moore_searcher finds \"AbC\" at "
+             "index 3 (a raw == table would miss it)");
+
+        std::boyer_moore_horspool_searcher<std::string::iterator, P104CiHash, P104CiEqual>
+            p104Bmh(p104Pattern.begin(), p104Pattern.end(), P104CiHash{}, P104CiEqual{});
+        auto p104Rh = p104Bmh(p104Corpus.begin(), p104Corpus.end());
+        Check(p104Rh.first - p104Corpus.begin() == 3,
+             "phase104 hotspot#1: case-insensitive boyer_moore_horspool_searcher also finds "
+             "\"AbC\" at index 3");
+    }
+
+    // Copy-then-use (hotspot #6): a Searcher stores ITERATORS into the
+    // pattern (never a content copy -- the same non-owning contract as
+    // string_view/span), so the pattern's own backing storage must stay
+    // alive as long as any copy is used; what a copy DOES independently
+    // own is its preprocessed tables. Destroying the ORIGINAL SEARCHER
+    // OBJECT (freeing its own bad-char/good-suffix tables) must not affect
+    // the copy's own, separately heap-allocated tables.
+    {
+        std::string p104CopyCorpus = "zzzhotcopyzzz";
+        std::string p104CopyPat    = "hotcopy";
+        using P104CopySearcher     = std::boyer_moore_searcher<std::string::iterator>;
+        std::optional<P104CopySearcher> p104Copy;
+        {
+            P104CopySearcher p104Original(p104CopyPat.begin(), p104CopyPat.end());
+            p104Copy = p104Original;
+        } // p104Original (and its tables) destroyed here
+        auto p104R = (*p104Copy)(p104CopyCorpus.begin(), p104CopyCorpus.end());
+        Check(std::string(p104R.first, p104R.second) == "hotcopy",
+             "phase104 hotspot#6: boyer_moore_searcher copy is a deep copy -- searching "
+             "through the COPY after the original searcher object (and its tables) is "
+             "destroyed still finds the match");
+    }
+
+    // search(first,last,searcher) == searcher(first,last).first, for all 3.
+    {
+        std::string p104Corpus  = "needle in haystack needle";
+        std::string p104Pattern = "needle";
+        std::default_searcher p104Def(p104Pattern.begin(), p104Pattern.end());
+        std::boyer_moore_searcher p104Bm(p104Pattern.begin(), p104Pattern.end());
+        std::boyer_moore_horspool_searcher p104Bmh(p104Pattern.begin(), p104Pattern.end());
+
+        Check(std::search(p104Corpus.begin(), p104Corpus.end(), p104Def) ==
+                 p104Def(p104Corpus.begin(), p104Corpus.end()).first,
+             "phase104 search(first,last,searcher) == default_searcher(first,last).first");
+        Check(std::search(p104Corpus.begin(), p104Corpus.end(), p104Bm) ==
+                 p104Bm(p104Corpus.begin(), p104Corpus.end()).first,
+             "phase104 search(first,last,searcher) == boyer_moore_searcher(first,last).first");
+        Check(std::search(p104Corpus.begin(), p104Corpus.end(), p104Bmh) ==
+                 p104Bmh(p104Corpus.begin(), p104Corpus.end()).first,
+             "phase104 search(first,last,searcher) == "
+             "boyer_moore_horspool_searcher(first,last).first");
+    }
+
+    printf("[CXX] PASS phase104: default_searcher (naive ForwardIterator scan, constexpr end "
+           "to end) + boyer_moore_searcher + boyer_moore_horspool_searcher (bad-character + "
+           "good-suffix preprocessing, RandomAccessIterator) agreeing with an independent "
+           "naive reference across periodic/all-same/start/end/absent/single-char/whole-"
+           "corpus batteries, empty pattern (={first,first} vs empty+non-empty corpus), wide "
+           "keys (int/wchar_t routing to BadCharMap), a byte-key custom predicate correctly "
+           "routing away from the raw-byte table (hotspot #1, dispatch trait + behavior), a "
+           "deep-copied searcher outliving its original's tables (hotspot #6), and the "
+           "search(first,last,searcher) entry point + FTM pin\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -18688,6 +18943,7 @@ int main()
     Phase101();
     Phase102();
     Phase103();
+    Phase104();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
