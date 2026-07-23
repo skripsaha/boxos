@@ -128,6 +128,11 @@ public:
             Iter tmp = *this;
             return tmp += n;
         }
+        // Commutative form (n + it): random_access_iterator requires both
+        // spellings. A hidden friend, not a free function outside the class
+        // -- Iter is a nested class template of deque<T,Alloc>, so T/Alloc
+        // would be a non-deduced context for a plain free function.
+        friend Iter operator+(difference_type n, const Iter &it) { return it + n; }
         Iter operator-(difference_type n) const
         {
             Iter tmp = *this;

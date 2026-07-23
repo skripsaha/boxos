@@ -93,6 +93,19 @@ public:
     {
         insert_range(std::forward<R>(rg));
     }
+    template <ContainerCompatibleRange<value_type> R>
+    unordered_map(from_range_t, R &&rg, size_type buckets, const Alloc &a)
+        : __t(buckets, Hash(), KeyEq(), a)
+    {
+        insert_range(std::forward<R>(rg));
+    }
+    template <ContainerCompatibleRange<value_type> R>
+    unordered_map(from_range_t, R &&rg, size_type buckets, const Hash &h,
+                  const Alloc &a)
+        : __t(buckets, h, KeyEq(), a)
+    {
+        insert_range(std::forward<R>(rg));
+    }
     unordered_map(initializer_list<value_type> il, size_type buckets = 0,
                   const Hash &h = Hash(), const KeyEq &eq = KeyEq(),
                   const Alloc &a = Alloc())
@@ -415,6 +428,19 @@ public:
                        const Hash &h = Hash(), const KeyEq &eq = KeyEq(),
                        const Alloc &a = Alloc())
         : __t(buckets, h, eq, a)
+    {
+        insert_range(std::forward<R>(rg));
+    }
+    template <ContainerCompatibleRange<value_type> R>
+    unordered_multimap(from_range_t, R &&rg, size_type buckets, const Alloc &a)
+        : __t(buckets, Hash(), KeyEq(), a)
+    {
+        insert_range(std::forward<R>(rg));
+    }
+    template <ContainerCompatibleRange<value_type> R>
+    unordered_multimap(from_range_t, R &&rg, size_type buckets,
+                       const Hash &h, const Alloc &a)
+        : __t(buckets, h, KeyEq(), a)
     {
         insert_range(std::forward<R>(rg));
     }
@@ -743,11 +769,27 @@ template <typename It, typename Hash = hash<__ht::DeductKey<It>>,
 unordered_map(It, It, size_t = 0, Hash = Hash(), KeyEq = KeyEq(), Alloc = Alloc())
     -> unordered_map<__ht::DeductKey<It>, __ht::DeductMapped<It>, Hash, KeyEq, Alloc>;
 
-template <ranges::input_range R, typename Hash = hash<__ht::DeductRangeKey<R>>,
-          typename KeyEq = equal_to<__ht::DeductRangeKey<R>>,
+// Both Hash and KeyEq (not just Hash) must be NotAllocatorLike: with only
+// Hash constrained, a 5-arg (from_range_t,R&&,buckets,Hash,Alloc) call
+// stays ambiguous against the new bucket+Hash+Alloc guide below, because
+// this guide's KeyEq slot would still happily (mis)deduce from the Alloc
+// argument (verified empirically — an unconstrained trailing slot always
+// wins template argument deduction, it never rejects on its own).
+template <ranges::input_range R, NotAllocatorLike Hash = hash<__ht::DeductRangeKey<R>>,
+          NotAllocatorLike KeyEq = equal_to<__ht::DeductRangeKey<R>>,
           typename Alloc = allocator<pair<const __ht::DeductRangeKey<R>, __ht::DeductRangeMapped<R>>>>
 unordered_map(from_range_t, R &&, size_t = 0, Hash = Hash(), KeyEq = KeyEq(), Alloc = Alloc())
     -> unordered_map<__ht::DeductRangeKey<R>, __ht::DeductRangeMapped<R>, Hash, KeyEq, Alloc>;
+
+template <ranges::input_range R, AllocatorLike Alloc>
+unordered_map(from_range_t, R &&, size_t, Alloc)
+    -> unordered_map<__ht::DeductRangeKey<R>, __ht::DeductRangeMapped<R>,
+                     hash<__ht::DeductRangeKey<R>>, equal_to<__ht::DeductRangeKey<R>>, Alloc>;
+
+template <ranges::input_range R, typename Hash, AllocatorLike Alloc>
+unordered_map(from_range_t, R &&, size_t, Hash, Alloc)
+    -> unordered_map<__ht::DeductRangeKey<R>, __ht::DeductRangeMapped<R>, Hash,
+                     equal_to<__ht::DeductRangeKey<R>>, Alloc>;
 
 template <typename It, typename Hash = hash<__ht::DeductKey<It>>,
           typename KeyEq = equal_to<__ht::DeductKey<It>>,
@@ -755,11 +797,21 @@ template <typename It, typename Hash = hash<__ht::DeductKey<It>>,
 unordered_multimap(It, It, size_t = 0, Hash = Hash(), KeyEq = KeyEq(), Alloc = Alloc())
     -> unordered_multimap<__ht::DeductKey<It>, __ht::DeductMapped<It>, Hash, KeyEq, Alloc>;
 
-template <ranges::input_range R, typename Hash = hash<__ht::DeductRangeKey<R>>,
-          typename KeyEq = equal_to<__ht::DeductRangeKey<R>>,
+template <ranges::input_range R, NotAllocatorLike Hash = hash<__ht::DeductRangeKey<R>>,
+          NotAllocatorLike KeyEq = equal_to<__ht::DeductRangeKey<R>>,
           typename Alloc = allocator<pair<const __ht::DeductRangeKey<R>, __ht::DeductRangeMapped<R>>>>
 unordered_multimap(from_range_t, R &&, size_t = 0, Hash = Hash(), KeyEq = KeyEq(), Alloc = Alloc())
     -> unordered_multimap<__ht::DeductRangeKey<R>, __ht::DeductRangeMapped<R>, Hash, KeyEq, Alloc>;
+
+template <ranges::input_range R, AllocatorLike Alloc>
+unordered_multimap(from_range_t, R &&, size_t, Alloc)
+    -> unordered_multimap<__ht::DeductRangeKey<R>, __ht::DeductRangeMapped<R>,
+                          hash<__ht::DeductRangeKey<R>>, equal_to<__ht::DeductRangeKey<R>>, Alloc>;
+
+template <ranges::input_range R, typename Hash, AllocatorLike Alloc>
+unordered_multimap(from_range_t, R &&, size_t, Hash, Alloc)
+    -> unordered_multimap<__ht::DeductRangeKey<R>, __ht::DeductRangeMapped<R>, Hash,
+                          equal_to<__ht::DeductRangeKey<R>>, Alloc>;
 
 } // namespace std
 

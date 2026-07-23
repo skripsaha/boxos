@@ -1,0 +1,1569 @@
+// boxcxx — <__bits/algorithm_classic>
+// The classic std:: iterator algorithms ([algorithms], pre-ranges), split out
+// of <algorithm> into their own leaf. Reason: ranges_algo_{mut,sort,set}
+// delegate their heavy reordering to these (rotate/sort/partition/heap-ops/
+// inplace_merge/...) and need them declared to be standalone-includable in
+// any order. Including the whole <algorithm> from inside them would work for
+// the normal via-<algorithm> path but NOT standalone: <algorithm>'s own tail
+// chain (algo -> algo_fold -> algo_mut -> algo_sort -> algo_set, fixed order)
+// would recursively re-enter a LATER sibling (e.g. algo_set, which needs
+// algo_mut's body for ranges::copy) before an EARLIER file's body has
+// actually run. This leaf has no such tail -- it is a true dependency-graph
+// leaf with respect to the algorithm family, so it is always safe to include
+// from anywhere, in any order, with zero re-entrancy hazard.
+//   sort         — introsort: median-of-3 quicksort, depth-limited to
+//                  2·log2(n) with heapsort fallback, insertion sort for
+//                  runs ≤ 16 (same shape the mainstream libraries use).
+//   stable_sort  — top-down merge with a heap temp buffer; if the
+//                  allocation fails it degrades to the in-place
+//                  rotate-merge, O(n·log²n) but still stable.
+//   nth_element  — depth-limited quickselect, heap-partial_sort fallback.
+#ifndef BOXCXX_BITS_ALGORITHM_CLASSIC
+#define BOXCXX_BITS_ALGORITHM_CLASSIC
+
+#include <__bits/iterator_core>
+#include <compare>
+#include <cstddef>
+#include <initializer_list>
+#include <iterator>
+#include <new>
+#include <type_traits>
+#include <utility>
+
+namespace std {
+
+namespace __algo_impl {
+
+struct Less {
+    template <typename A, typename B>
+    constexpr bool operator()(const A &a, const B &b) const
+    {
+        return a < b;
+    }
+};
+
+struct EqualTo {
+    template <typename A, typename B>
+    constexpr bool operator()(const A &a, const B &b) const
+    {
+        return a == b;
+    }
+};
+
+} // namespace __algo_impl
+
+// ── min / max / clamp ([alg.min.max]) ───────────────────────────────────
+
+template <typename T, typename Comp>
+constexpr const T &min(const T &a, const T &b, Comp comp)
+{
+    return comp(b, a) ? b : a;
+}
+template <typename T>
+constexpr const T &min(const T &a, const T &b)
+{
+    return b < a ? b : a;
+}
+template <typename T, typename Comp>
+constexpr const T &max(const T &a, const T &b, Comp comp)
+{
+    return comp(a, b) ? b : a;
+}
+template <typename T>
+constexpr const T &max(const T &a, const T &b)
+{
+    return a < b ? b : a;
+}
+template <typename T, typename Comp>
+constexpr pair<T, T> minmax(const T &a, const T &b, Comp comp)
+{
+    return comp(b, a) ? pair<T, T>(b, a) : pair<T, T>(a, b);
+}
+template <typename T>
+constexpr pair<T, T> minmax(const T &a, const T &b)
+{
+    return minmax(a, b, __algo_impl::Less{});
+}
+template <typename T, typename Comp>
+constexpr const T &clamp(const T &v, const T &lo, const T &hi, Comp comp)
+{
+    return comp(v, lo) ? lo : comp(hi, v) ? hi : v;
+}
+template <typename T>
+constexpr const T &clamp(const T &v, const T &lo, const T &hi)
+{
+    return clamp(v, lo, hi, __algo_impl::Less{});
+}
+
+template <typename It, typename Comp>
+constexpr It min_element(It first, It last, Comp comp)
+{
+    if (first == last) return last;
+    It best = first;
+    for (++first; first != last; ++first)
+        if (comp(*first, *best)) best = first;
+    return best;
+}
+template <typename It>
+constexpr It min_element(It first, It last)
+{
+    return min_element(first, last, __algo_impl::Less{});
+}
+template <typename It, typename Comp>
+constexpr It max_element(It first, It last, Comp comp)
+{
+    if (first == last) return last;
+    It best = first;
+    for (++first; first != last; ++first)
+        if (comp(*best, *first)) best = first;
+    return best;
+}
+template <typename It>
+constexpr It max_element(It first, It last)
+{
+    return max_element(first, last, __algo_impl::Less{});
+}
+// Pairwise tournament ([alg.min.max]): NOT {min_element(...), max_element(...)}
+// -- that composition is both slower (2(N-1) vs the mandated floor(3(N-1)/2)
+// comparisons) AND wrong (max_element keeps the LEFTMOST maximum, but
+// minmax_element's own contract wants the RIGHTMOST one). Elements are
+// consumed two at a time: 1 comparison finds the pair's own smaller/larger
+// element, then 1 more each folds that element into the running mn/mx --
+// 3 comparisons per 2 elements. A leftover unpaired element (odd N) costs at
+// most 2. mn = FIRST smallest (strict '<'); mx = LAST largest ('>=', via
+// negated '<', so a later equal element displaces an earlier one).
+template <typename It, typename Comp>
+constexpr pair<It, It> minmax_element(It first, It last, Comp comp)
+{
+    if (first == last) return {first, first};
+    It mn = first, mx = first;
+    It next = first;
+    ++next;
+    if (next == last) return {mn, mx};
+
+    if (comp(*next, *first)) {
+        mn = next;
+        mx = first;
+    } else {
+        mn = first;
+        mx = next;
+    }
+    first = next;
+    ++first;
+
+    while (first != last) {
+        next = first;
+        ++next;
+        if (next == last) {
+            if (comp(*first, *mn))
+                mn = first;
+            else if (!comp(*first, *mx))
+                mx = first;
+            break;
+        }
+        if (comp(*next, *first)) {
+            if (comp(*next, *mn)) mn = next;
+            if (!comp(*first, *mx)) mx = first;
+        } else {
+            if (comp(*first, *mn)) mn = first;
+            if (!comp(*next, *mx)) mx = next;
+        }
+        first = next;
+        ++first;
+    }
+    return {mn, mx};
+}
+template <typename It>
+constexpr pair<It, It> minmax_element(It first, It last)
+{
+    return minmax_element(first, last, __algo_impl::Less{});
+}
+template <typename T, typename Comp>
+constexpr T min(initializer_list<T> il, Comp comp)
+{
+    return *min_element(il.begin(), il.end(), comp);
+}
+template <typename T>
+constexpr T min(initializer_list<T> il)
+{
+    return *min_element(il.begin(), il.end());
+}
+template <typename T, typename Comp>
+constexpr T max(initializer_list<T> il, Comp comp)
+{
+    return *max_element(il.begin(), il.end(), comp);
+}
+template <typename T>
+constexpr T max(initializer_list<T> il)
+{
+    return *max_element(il.begin(), il.end());
+}
+
+// ── non-modifying sequence ops ──────────────────────────────────────────
+
+template <typename It, typename Pred>
+constexpr It find_if(It first, It last, Pred pred)
+{
+    for (; first != last; ++first)
+        if (pred(*first)) return first;
+    return last;
+}
+template <typename It, typename Pred>
+constexpr It find_if_not(It first, It last, Pred pred)
+{
+    for (; first != last; ++first)
+        if (!pred(*first)) return first;
+    return last;
+}
+template <typename It, typename T>
+constexpr It find(It first, It last, const T &value)
+{
+    for (; first != last; ++first)
+        if (*first == value) return first;
+    return last;
+}
+
+template <typename It, typename Pred>
+constexpr bool all_of(It first, It last, Pred pred)
+{
+    return find_if_not(first, last, pred) == last;
+}
+template <typename It, typename Pred>
+constexpr bool any_of(It first, It last, Pred pred)
+{
+    return find_if(first, last, pred) != last;
+}
+template <typename It, typename Pred>
+constexpr bool none_of(It first, It last, Pred pred)
+{
+    return find_if(first, last, pred) == last;
+}
+
+template <typename It, typename Fn>
+constexpr Fn for_each(It first, It last, Fn fn)
+{
+    for (; first != last; ++first) fn(*first);
+    return fn;
+}
+template <typename It, typename Size, typename Fn>
+constexpr It for_each_n(It first, Size n, Fn fn)
+{
+    for (; n > 0; --n, ++first) fn(*first);
+    return first;
+}
+
+template <typename It, typename T>
+constexpr typename iterator_traits<It>::difference_type
+count(It first, It last, const T &value)
+{
+    typename iterator_traits<It>::difference_type n = 0;
+    for (; first != last; ++first)
+        if (*first == value) ++n;
+    return n;
+}
+template <typename It, typename Pred>
+constexpr typename iterator_traits<It>::difference_type
+count_if(It first, It last, Pred pred)
+{
+    typename iterator_traits<It>::difference_type n = 0;
+    for (; first != last; ++first)
+        if (pred(*first)) ++n;
+    return n;
+}
+
+template <typename It1, typename It2, typename Pred>
+constexpr pair<It1, It2> mismatch(It1 first1, It1 last1, It2 first2, Pred pred)
+{
+    for (; first1 != last1 && pred(*first1, *first2); ++first1, ++first2) {
+    }
+    return {first1, first2};
+}
+template <typename It1, typename It2>
+constexpr pair<It1, It2> mismatch(It1 first1, It1 last1, It2 first2)
+{
+    return mismatch(first1, last1, first2, __algo_impl::EqualTo{});
+}
+
+template <typename It1, typename It2, typename Pred>
+constexpr bool equal(It1 first1, It1 last1, It2 first2, Pred pred)
+{
+    for (; first1 != last1; ++first1, ++first2)
+        if (!pred(*first1, *first2)) return false;
+    return true;
+}
+template <typename It1, typename It2>
+constexpr bool equal(It1 first1, It1 last1, It2 first2)
+{
+    return equal(first1, last1, first2, __algo_impl::EqualTo{});
+}
+template <typename It1, typename It2, typename Pred>
+constexpr bool equal(It1 first1, It1 last1, It2 first2, It2 last2, Pred pred)
+{
+    if constexpr (__iter_impl::IsRandomAccess<It1> &&
+                  __iter_impl::IsRandomAccess<It2>) {
+        if (last1 - first1 != last2 - first2) return false;
+        return equal(first1, last1, first2, pred);
+    } else {
+        for (; first1 != last1 && first2 != last2; ++first1, ++first2)
+            if (!pred(*first1, *first2)) return false;
+        return first1 == last1 && first2 == last2;
+    }
+}
+template <typename It1, typename It2>
+constexpr bool equal(It1 first1, It1 last1, It2 first2, It2 last2)
+{
+    return equal(first1, last1, first2, last2, __algo_impl::EqualTo{});
+}
+
+template <typename It, typename Pred>
+constexpr It adjacent_find(It first, It last, Pred pred)
+{
+    if (first == last) return last;
+    It next = first;
+    for (++next; next != last; ++first, ++next)
+        if (pred(*first, *next)) return first;
+    return last;
+}
+template <typename It>
+constexpr It adjacent_find(It first, It last)
+{
+    return adjacent_find(first, last, __algo_impl::EqualTo{});
+}
+
+template <typename It1, typename It2, typename Pred>
+constexpr It1 search(It1 first, It1 last, It2 s_first, It2 s_last, Pred pred)
+{
+    if (s_first == s_last) return first;
+    for (;; ++first) {
+        It1 hay = first;
+        for (It2 needle = s_first;; ++hay, ++needle) {
+            if (needle == s_last) return first;
+            if (hay == last) return last;
+            if (!pred(*hay, *needle)) break;
+        }
+    }
+}
+template <typename It1, typename It2>
+constexpr It1 search(It1 first, It1 last, It2 s_first, It2 s_last)
+{
+    return search(first, last, s_first, s_last, __algo_impl::EqualTo{});
+}
+
+template <typename It, typename Size, typename T, typename Pred>
+constexpr It search_n(It first, It last, Size count, const T &value, Pred pred)
+{
+    if (count <= 0) return first;
+    for (; first != last; ++first) {
+        if (!pred(*first, value)) continue;
+        It start  = first;
+        Size seen = 1;
+        for (;;) {
+            if (seen >= count) return start;
+            ++first;
+            if (first == last) return last;
+            if (!pred(*first, value)) break;
+            ++seen;
+        }
+    }
+    return last;
+}
+template <typename It, typename Size, typename T>
+constexpr It search_n(It first, It last, Size count, const T &value)
+{
+    return search_n(first, last, count, value, __algo_impl::EqualTo{});
+}
+
+template <typename It1, typename It2, typename Pred>
+constexpr It1 find_end(It1 first, It1 last, It2 s_first, It2 s_last, Pred pred)
+{
+    if (s_first == s_last) return last;
+    It1 result = last;
+    for (;;) {
+        It1 hit = search(first, last, s_first, s_last, pred);
+        if (hit == last) return result;
+        result = hit;
+        first  = hit;
+        ++first;
+    }
+}
+template <typename It1, typename It2>
+constexpr It1 find_end(It1 first, It1 last, It2 s_first, It2 s_last)
+{
+    return find_end(first, last, s_first, s_last, __algo_impl::EqualTo{});
+}
+
+template <typename It1, typename It2, typename Pred>
+constexpr It1 find_first_of(It1 first, It1 last, It2 s_first, It2 s_last,
+                            Pred pred)
+{
+    for (; first != last; ++first)
+        for (It2 s = s_first; s != s_last; ++s)
+            if (pred(*first, *s)) return first;
+    return last;
+}
+template <typename It1, typename It2>
+constexpr It1 find_first_of(It1 first, It1 last, It2 s_first, It2 s_last)
+{
+    return find_first_of(first, last, s_first, s_last, __algo_impl::EqualTo{});
+}
+
+// ── modifying sequence ops ──────────────────────────────────────────────
+
+template <typename In, typename Out>
+constexpr Out copy(In first, In last, Out out)
+{
+    for (; first != last; ++first, ++out) *out = *first;
+    return out;
+}
+template <typename In, typename Size, typename Out>
+constexpr Out copy_n(In first, Size n, Out out)
+{
+    for (; n > 0; --n, ++first, ++out) *out = *first;
+    return out;
+}
+template <typename In, typename Out, typename Pred>
+constexpr Out copy_if(In first, In last, Out out, Pred pred)
+{
+    for (; first != last; ++first)
+        if (pred(*first)) {
+            *out = *first;
+            ++out;
+        }
+    return out;
+}
+template <typename In, typename Out>
+constexpr Out copy_backward(In first, In last, Out out)
+{
+    while (first != last) *--out = *--last;
+    return out;
+}
+
+template <typename In, typename Out>
+constexpr Out move(In first, In last, Out out)
+{
+    for (; first != last; ++first, ++out) *out = std::move(*first);
+    return out;
+}
+template <typename In, typename Out>
+constexpr Out move_backward(In first, In last, Out out)
+{
+    while (first != last) *--out = std::move(*--last);
+    return out;
+}
+
+template <typename It1, typename It2>
+constexpr void iter_swap(It1 a, It2 b)
+{
+    swap(*a, *b);
+}
+template <typename It1, typename It2>
+constexpr It2 swap_ranges(It1 first1, It1 last1, It2 first2)
+{
+    for (; first1 != last1; ++first1, ++first2) iter_swap(first1, first2);
+    return first2;
+}
+
+template <typename In, typename Out, typename Fn>
+constexpr Out transform(In first, In last, Out out, Fn fn)
+{
+    for (; first != last; ++first, ++out) *out = fn(*first);
+    return out;
+}
+template <typename In1, typename In2, typename Out, typename Fn>
+constexpr Out transform(In1 first1, In1 last1, In2 first2, Out out, Fn fn)
+{
+    for (; first1 != last1; ++first1, ++first2, ++out)
+        *out = fn(*first1, *first2);
+    return out;
+}
+
+template <typename It, typename T>
+constexpr void replace(It first, It last, const T &old_value,
+                       const T &new_value)
+{
+    for (; first != last; ++first)
+        if (*first == old_value) *first = new_value;
+}
+template <typename It, typename Pred, typename T>
+constexpr void replace_if(It first, It last, Pred pred, const T &new_value)
+{
+    for (; first != last; ++first)
+        if (pred(*first)) *first = new_value;
+}
+template <typename In, typename Out, typename T>
+constexpr Out replace_copy(In first, In last, Out out, const T &old_value,
+                           const T &new_value)
+{
+    for (; first != last; ++first, ++out)
+        *out = (*first == old_value) ? new_value : *first;
+    return out;
+}
+template <typename In, typename Out, typename Pred, typename T>
+constexpr Out replace_copy_if(In first, In last, Out out, Pred pred,
+                              const T &new_value)
+{
+    for (; first != last; ++first, ++out)
+        *out = pred(*first) ? new_value : *first;
+    return out;
+}
+
+template <typename It, typename T>
+constexpr void fill(It first, It last, const T &value)
+{
+    for (; first != last; ++first) *first = value;
+}
+template <typename It, typename Size, typename T>
+constexpr It fill_n(It first, Size n, const T &value)
+{
+    for (; n > 0; --n, ++first) *first = value;
+    return first;
+}
+template <typename It, typename Gen>
+constexpr void generate(It first, It last, Gen gen)
+{
+    for (; first != last; ++first) *first = gen();
+}
+template <typename It, typename Size, typename Gen>
+constexpr It generate_n(It first, Size n, Gen gen)
+{
+    for (; n > 0; --n, ++first) *first = gen();
+    return first;
+}
+
+template <typename It, typename Pred>
+constexpr It remove_if(It first, It last, Pred pred)
+{
+    first = find_if(first, last, pred);
+    if (first == last) return first;
+    It write = first;
+    for (++first; first != last; ++first)
+        if (!pred(*first)) *write++ = std::move(*first);
+    return write;
+}
+template <typename It, typename T>
+constexpr It remove(It first, It last, const T &value)
+{
+    return remove_if(first, last,
+                     [&](const auto &x) { return x == value; });
+}
+template <typename In, typename Out, typename Pred>
+constexpr Out remove_copy_if(In first, In last, Out out, Pred pred)
+{
+    for (; first != last; ++first)
+        if (!pred(*first)) {
+            *out = *first;
+            ++out;
+        }
+    return out;
+}
+template <typename In, typename Out, typename T>
+constexpr Out remove_copy(In first, In last, Out out, const T &value)
+{
+    return remove_copy_if(first, last, out,
+                          [&](const auto &x) { return x == value; });
+}
+
+template <typename It, typename Pred>
+constexpr It unique(It first, It last, Pred pred)
+{
+    if (first == last) return last;
+    It write = first;
+    for (++first; first != last; ++first)
+        if (!pred(*write, *first) && ++write != first)
+            *write = std::move(*first);
+    return ++write;
+}
+template <typename It>
+constexpr It unique(It first, It last)
+{
+    return unique(first, last, __algo_impl::EqualTo{});
+}
+template <typename In, typename Out, typename Pred>
+constexpr Out unique_copy(In first, In last, Out out, Pred pred)
+{
+    if (first == last) return out;
+    // For a proxy iterator, tuple<int&,int&>'s operator= writes THROUGH the
+    // held references (they can't rebind) — auto prev = *first would deduce
+    // that same reference-holding type, so `prev = *first;` below would
+    // retroactively overwrite the array slot prev was originally bound to,
+    // corrupting the SOURCE, which unique_copy must never touch. Copy (not
+    // ranges::iter_move — the predicate re-reads prev on every iteration).
+    iter_value_t<In> prev = *first;
+    *out      = prev;
+    ++out;
+    for (++first; first != last; ++first) {
+        if (!pred(prev, *first)) {
+            prev = *first;
+            *out = prev;
+            ++out;
+        }
+    }
+    return out;
+}
+template <typename In, typename Out>
+constexpr Out unique_copy(In first, In last, Out out)
+{
+    return unique_copy(first, last, out, __algo_impl::EqualTo{});
+}
+
+template <typename It>
+constexpr void reverse(It first, It last)
+{
+    while (first != last && first != --last) {
+        iter_swap(first, last);
+        ++first;
+    }
+}
+template <typename In, typename Out>
+constexpr Out reverse_copy(In first, In last, Out out)
+{
+    while (first != last) {
+        --last;
+        *out = *last;
+        ++out;
+    }
+    return out;
+}
+
+// Gries-Mills rotate, fully iterative. The textbook tail-recursive
+// form blows the stack on the append-one-rotate pattern (recursion
+// depth n-1 with three fat iterators per frame — found the hard way as
+// a userspace #PF below the stack guard during deque::insert).
+template <typename It>
+constexpr It rotate(It first, It middle, It last)
+{
+    if (first == middle) return last;
+    if (middle == last) return first;
+    It ret         = first;
+    bool ret_known = false;
+    while (first != middle && middle != last) {
+        It write     = first;
+        It next_read = first;
+        for (It read = middle; read != last; ++write, ++read) {
+            if (write == next_read) next_read = read;
+            iter_swap(write, read);
+        }
+        if (!ret_known) {
+            ret       = write;
+            ret_known = true;
+        }
+        first  = write;
+        middle = next_read;
+    }
+    return ret;
+}
+template <typename In, typename Out>
+constexpr Out rotate_copy(In first, In middle, In last, Out out)
+{
+    out = copy(middle, last, out);
+    return copy(first, middle, out);
+}
+
+template <typename It>
+constexpr It shift_left(It first, It last,
+                        typename iterator_traits<It>::difference_type n)
+{
+    if (n <= 0) return last;
+    It src = first;
+    for (; n > 0 && src != last; --n) ++src;
+    if (src == last) return first;
+    return std::move(src, last, first);
+}
+template <typename It>
+constexpr It shift_right(It first, It last,
+                         typename iterator_traits<It>::difference_type n)
+{
+    if (n <= 0) return first;
+    It dst = last;
+    It src = last;
+    for (; n > 0 && src != first; --n) --src;
+    if (src == first) return last;
+    while (src != first) *--dst = std::move(*--src);
+    return dst;
+}
+
+// ── partitions ([alg.partitions]) ───────────────────────────────────────
+
+template <typename It, typename Pred>
+constexpr bool is_partitioned(It first, It last, Pred pred)
+{
+    first = find_if_not(first, last, pred);
+    return none_of(first, last, pred);
+}
+template <typename It, typename Pred>
+constexpr It partition(It first, It last, Pred pred)
+{
+    first = find_if_not(first, last, pred);
+    if (first == last) return first;
+    for (It scan = next(first); scan != last; ++scan) {
+        if (pred(*scan)) {
+            iter_swap(scan, first);
+            ++first;
+        }
+    }
+    return first;
+}
+template <typename In, typename OutTrue, typename OutFalse, typename Pred>
+constexpr pair<OutTrue, OutFalse> partition_copy(In first, In last,
+                                                 OutTrue out_true,
+                                                 OutFalse out_false, Pred pred)
+{
+    for (; first != last; ++first) {
+        if (pred(*first)) {
+            *out_true = *first;
+            ++out_true;
+        } else {
+            *out_false = *first;
+            ++out_false;
+        }
+    }
+    return {out_true, out_false};
+}
+template <typename It, typename Pred>
+constexpr It partition_point(It first, It last, Pred pred)
+{
+    auto n = distance(first, last);
+    while (n > 0) {
+        auto half = n / 2;
+        It mid    = next(first, half);
+        if (pred(*mid)) {
+            first = ++mid;
+            n -= half + 1;
+        } else {
+            n = half;
+        }
+    }
+    return first;
+}
+
+// ── binary search ([alg.binary.search]) ─────────────────────────────────
+
+template <typename It, typename T, typename Comp>
+constexpr It lower_bound(It first, It last, const T &value, Comp comp)
+{
+    auto n = distance(first, last);
+    while (n > 0) {
+        auto half = n / 2;
+        It mid    = next(first, half);
+        if (comp(*mid, value)) {
+            first = ++mid;
+            n -= half + 1;
+        } else {
+            n = half;
+        }
+    }
+    return first;
+}
+template <typename It, typename T>
+constexpr It lower_bound(It first, It last, const T &value)
+{
+    return lower_bound(first, last, value, __algo_impl::Less{});
+}
+template <typename It, typename T, typename Comp>
+constexpr It upper_bound(It first, It last, const T &value, Comp comp)
+{
+    auto n = distance(first, last);
+    while (n > 0) {
+        auto half = n / 2;
+        It mid    = next(first, half);
+        if (!comp(value, *mid)) {
+            first = ++mid;
+            n -= half + 1;
+        } else {
+            n = half;
+        }
+    }
+    return first;
+}
+template <typename It, typename T>
+constexpr It upper_bound(It first, It last, const T &value)
+{
+    return upper_bound(first, last, value, __algo_impl::Less{});
+}
+template <typename It, typename T, typename Comp>
+constexpr pair<It, It> equal_range(It first, It last, const T &value,
+                                   Comp comp)
+{
+    return {lower_bound(first, last, value, comp),
+            upper_bound(first, last, value, comp)};
+}
+template <typename It, typename T>
+constexpr pair<It, It> equal_range(It first, It last, const T &value)
+{
+    return equal_range(first, last, value, __algo_impl::Less{});
+}
+template <typename It, typename T, typename Comp>
+constexpr bool binary_search(It first, It last, const T &value, Comp comp)
+{
+    It hit = lower_bound(first, last, value, comp);
+    return hit != last && !comp(value, *hit);
+}
+template <typename It, typename T>
+constexpr bool binary_search(It first, It last, const T &value)
+{
+    return binary_search(first, last, value, __algo_impl::Less{});
+}
+
+// ── heap ([alg.heap.operations]) ────────────────────────────────────────
+
+namespace __algo_impl {
+
+template <typename It, typename Diff, typename Comp>
+constexpr void SiftDown(It first, Diff hole, Diff n, Comp comp)
+{
+    for (;;) {
+        Diff child = 2 * hole + 1;
+        if (child >= n) return;
+        if (child + 1 < n && comp(first[child], first[child + 1])) ++child;
+        if (!comp(first[hole], first[child])) return;
+        iter_swap(first + hole, first + child);
+        hole = child;
+    }
+}
+
+} // namespace __algo_impl
+
+template <typename It, typename Comp>
+constexpr void make_heap(It first, It last, Comp comp)
+{
+    auto n = last - first;
+    for (auto i = n / 2; i > 0; --i)
+        __algo_impl::SiftDown(first, i - 1, n, comp);
+}
+template <typename It>
+constexpr void make_heap(It first, It last)
+{
+    make_heap(first, last, __algo_impl::Less{});
+}
+template <typename It, typename Comp>
+constexpr void push_heap(It first, It last, Comp comp)
+{
+    auto hole = (last - first) - 1;
+    while (hole > 0) {
+        auto parent = (hole - 1) / 2;
+        if (!comp(first[parent], first[hole])) break;
+        iter_swap(first + parent, first + hole);
+        hole = parent;
+    }
+}
+template <typename It>
+constexpr void push_heap(It first, It last)
+{
+    push_heap(first, last, __algo_impl::Less{});
+}
+template <typename It, typename Comp>
+constexpr void pop_heap(It first, It last, Comp comp)
+{
+    auto n = last - first;
+    if (n <= 1) return;
+    iter_swap(first, last - 1);
+    __algo_impl::SiftDown(first, decltype(n){0}, n - 1, comp);
+}
+template <typename It>
+constexpr void pop_heap(It first, It last)
+{
+    pop_heap(first, last, __algo_impl::Less{});
+}
+template <typename It, typename Comp>
+constexpr void sort_heap(It first, It last, Comp comp)
+{
+    while (last - first > 1) pop_heap(first, last--, comp);
+}
+template <typename It>
+constexpr void sort_heap(It first, It last)
+{
+    sort_heap(first, last, __algo_impl::Less{});
+}
+template <typename It, typename Comp>
+constexpr It is_heap_until(It first, It last, Comp comp)
+{
+    auto n = last - first;
+    for (decltype(n) i = 1; i < n; ++i)
+        if (comp(first[(i - 1) / 2], first[i])) return first + i;
+    return last;
+}
+template <typename It>
+constexpr It is_heap_until(It first, It last)
+{
+    return is_heap_until(first, last, __algo_impl::Less{});
+}
+template <typename It, typename Comp>
+constexpr bool is_heap(It first, It last, Comp comp)
+{
+    return is_heap_until(first, last, comp) == last;
+}
+template <typename It>
+constexpr bool is_heap(It first, It last)
+{
+    return is_heap(first, last, __algo_impl::Less{});
+}
+
+// ── sorting ([sort]) ────────────────────────────────────────────────────
+
+template <typename It, typename Comp>
+constexpr It is_sorted_until(It first, It last, Comp comp)
+{
+    if (first == last) return last;
+    It next_it = first;
+    for (++next_it; next_it != last; ++first, ++next_it)
+        if (comp(*next_it, *first)) return next_it;
+    return last;
+}
+template <typename It>
+constexpr It is_sorted_until(It first, It last)
+{
+    return is_sorted_until(first, last, __algo_impl::Less{});
+}
+template <typename It, typename Comp>
+constexpr bool is_sorted(It first, It last, Comp comp)
+{
+    return is_sorted_until(first, last, comp) == last;
+}
+template <typename It>
+constexpr bool is_sorted(It first, It last)
+{
+    return is_sorted(first, last, __algo_impl::Less{});
+}
+
+namespace __algo_impl {
+
+inline constexpr ptrdiff_t kInsertionThreshold = 16;
+
+template <typename It, typename Comp>
+constexpr void InsertionSort(It first, It last, Comp comp)
+{
+    if (first == last) return;
+    for (It i = first + 1; i != last; ++i) {
+        // A proxy iterator's operator* returns a fresh reference-holding
+        // prvalue (e.g. zip's tuple<int&,int&>) — `auto value = std::move(*i)`
+        // would deduce that SAME reference-holding type, so value silently
+        // ALIASES the slots *i does rather than snapshotting them; a later
+        // `*hole = std::move(*(hole-1))` retroactively corrupts what value
+        // "holds". iter_value_t<It> is the OWNED value type, and
+        // ranges::iter_move (not std::move(*i)) routes through the wrapped
+        // iterator's own customization, so this also works for move-only
+        // proxy element types.
+        iter_value_t<It> value = ranges::iter_move(i);
+        It hole                = i;
+        while (hole != first && comp(value, *(hole - 1))) {
+            *hole = std::move(*(hole - 1));
+            --hole;
+        }
+        *hole = std::move(value);
+    }
+}
+
+// Median-of-3: order *a, *mid, *(last-1) so *mid holds the median.
+template <typename It, typename Comp>
+constexpr It MedianPivot(It first, It last, Comp comp)
+{
+    It mid  = first + (last - first) / 2;
+    It back = last - 1;
+    if (comp(*mid, *first)) iter_swap(mid, first);
+    if (comp(*back, *mid)) {
+        iter_swap(back, mid);
+        if (comp(*mid, *first)) iter_swap(mid, first);
+    }
+    return mid;
+}
+
+template <typename It, typename Comp>
+constexpr void IntroSort(It first, It last, int depth, Comp comp)
+{
+    for (;;) {
+        auto n = last - first;
+        if (n <= kInsertionThreshold) {
+            InsertionSort(first, last, comp);
+            return;
+        }
+        if (depth-- == 0) {
+            make_heap(first, last, comp);
+            sort_heap(first, last, comp);
+            return;
+        }
+        It pivot = MedianPivot(first, last, comp);
+        // Hoare-style partition around the median value. pv is read-only
+        // (compared, never written back) but the loop's own iter_swap(lo,hi)
+        // CAN touch pivot's slot — auto pv = *pivot would (for a proxy
+        // iterator) alias that slot rather than snapshot it, corrupting the
+        // comparison mid-partition. iter_value_t<It> is a genuine copy.
+        iter_value_t<It> pv = *pivot;
+        It lo = first;
+        It hi = last - 1;
+        for (;;) {
+            while (comp(*lo, pv)) ++lo;
+            while (comp(pv, *hi)) --hi;
+            if (lo >= hi) break;
+            iter_swap(lo, hi);
+            ++lo;
+            --hi;
+        }
+        // Recurse into the smaller side, loop on the larger one.
+        It split = lo;
+        if (split - first < last - split) {
+            IntroSort(first, split, depth, comp);
+            first = split;
+        } else {
+            IntroSort(split, last, depth, comp);
+            last = split;
+        }
+    }
+}
+
+constexpr int Log2(ptrdiff_t n)
+{
+    int k = 0;
+    while (n > 1) {
+        n >>= 1;
+        ++k;
+    }
+    return k;
+}
+
+} // namespace __algo_impl
+
+template <typename It, typename Comp>
+constexpr void sort(It first, It last, Comp comp)
+{
+    if (last - first > 1)
+        __algo_impl::IntroSort(first, last,
+                               2 * __algo_impl::Log2(last - first), comp);
+}
+template <typename It>
+constexpr void sort(It first, It last)
+{
+    sort(first, last, __algo_impl::Less{});
+}
+
+template <typename It, typename Comp>
+constexpr void partial_sort(It first, It middle, It last, Comp comp)
+{
+    if (first == middle) return;
+    make_heap(first, middle, comp);
+    auto heap_size = middle - first;
+    for (It scan = middle; scan != last; ++scan) {
+        if (comp(*scan, *first)) {
+            iter_swap(scan, first);
+            __algo_impl::SiftDown(first, decltype(heap_size){0}, heap_size,
+                                  comp);
+        }
+    }
+    sort_heap(first, middle, comp);
+}
+template <typename It>
+constexpr void partial_sort(It first, It middle, It last)
+{
+    partial_sort(first, middle, last, __algo_impl::Less{});
+}
+
+template <typename It, typename Comp>
+constexpr void nth_element(It first, It nth, It last, Comp comp)
+{
+    if (first == last || nth == last) return;
+    int depth = 2 * __algo_impl::Log2(last - first);
+    for (;;) {
+        if (last - first <= __algo_impl::kInsertionThreshold) {
+            __algo_impl::InsertionSort(first, last, comp);
+            return;
+        }
+        if (depth-- == 0) {
+            partial_sort(first, nth + 1, last, comp); // heap fallback
+            return;
+        }
+        It pivot = __algo_impl::MedianPivot(first, last, comp);
+        // Same proxy-aliasing risk as IntroSort's identical pivot pattern
+        // (this loop's own iter_swap(lo,hi) can touch pivot's slot) —
+        // iter_value_t<It> is a genuine copy, not an aliased reference.
+        iter_value_t<It> pv = *pivot;
+        It lo    = first;
+        It hi    = last - 1;
+        for (;;) {
+            while (comp(*lo, pv)) ++lo;
+            while (comp(pv, *hi)) --hi;
+            if (lo >= hi) break;
+            iter_swap(lo, hi);
+            ++lo;
+            --hi;
+        }
+        if (nth < lo)
+            last = lo;
+        else
+            first = lo;
+    }
+}
+template <typename It>
+constexpr void nth_element(It first, It nth, It last)
+{
+    nth_element(first, nth, last, __algo_impl::Less{});
+}
+
+// ── merge / stable_sort ─────────────────────────────────────────────────
+
+template <typename In1, typename In2, typename Out, typename Comp>
+constexpr Out merge(In1 first1, In1 last1, In2 first2, In2 last2, Out out,
+                    Comp comp)
+{
+    while (first1 != last1 && first2 != last2) {
+        if (comp(*first2, *first1)) {
+            *out = *first2;
+            ++first2;
+        } else {
+            *out = *first1;
+            ++first1;
+        }
+        ++out;
+    }
+    out = copy(first1, last1, out);
+    return copy(first2, last2, out);
+}
+template <typename In1, typename In2, typename Out>
+constexpr Out merge(In1 first1, In1 last1, In2 first2, In2 last2, Out out)
+{
+    return merge(first1, last1, first2, last2, out, __algo_impl::Less{});
+}
+
+namespace __algo_impl {
+
+// In-place rotate merge — O((n+m)·log(n+m)), stable, no extra memory.
+template <typename It, typename Comp>
+void RotateMerge(It first, It middle, It last, Comp comp)
+{
+    auto n1 = middle - first;
+    auto n2 = last - middle;
+    if (n1 == 0 || n2 == 0) return;
+    if (n1 + n2 == 2) {
+        if (comp(*middle, *first)) iter_swap(first, middle);
+        return;
+    }
+    It cut1 = first;
+    It cut2 = middle;
+    if (n1 > n2) {
+        cut1 = first + n1 / 2;
+        cut2 = lower_bound(middle, last, *cut1, comp);
+    } else {
+        cut2 = middle + n2 / 2;
+        cut1 = upper_bound(first, middle, *cut2, comp);
+    }
+    It new_middle = rotate(cut1, middle, cut2);
+    RotateMerge(first, cut1, new_middle, comp);
+    RotateMerge(new_middle, cut2, last, comp);
+}
+
+// Merge [first,middle)+[middle,last) through raw storage `buf`
+// (capacity ≥ middle-first): move-CONSTRUCT the left run into the
+// buffer, merge back by move-assignment, destroy the buffer objects.
+template <typename It, typename T, typename Comp>
+void BufferedMerge(It first, It middle, It last, T *buf, Comp comp)
+{
+    T *buf_end = buf;
+    try {
+        // buf is separate storage (no aliasing risk with the source range),
+        // but std::move(*p) still bypasses ranges::iter_move — for a
+        // move-only element type inside a proxy (T's own converting
+        // constructor tries to copy-construct from a forwarded-as-lvalue
+        // reference) that hard-fails to compile. ranges::iter_move routes
+        // through the wrapped iterator's own customization instead.
+        for (It p = first; p != middle; ++p, ++buf_end)
+            ::new (static_cast<void *>(buf_end)) T(ranges::iter_move(p));
+    } catch (...) {
+        for (T *p = buf; p != buf_end; ++p) p->~T();
+        throw;
+    }
+    T *left  = buf;
+    It right = middle;
+    It out   = first;
+    while (left != buf_end && right != last) {
+        if (comp(*right, *left)) {
+            *out = std::move(*right);
+            ++right;
+        } else {
+            *out = std::move(*left);
+            ++left;
+        }
+        ++out;
+    }
+    for (; left != buf_end; ++left, ++out) *out = std::move(*left);
+    for (T *p = buf; p != buf_end; ++p) p->~T();
+}
+
+template <typename It, typename T, typename Comp>
+void StableSortImpl(It first, It last, T *buf, Comp comp)
+{
+    auto n = last - first;
+    if (n <= kInsertionThreshold) {
+        InsertionSort(first, last, comp);
+        return;
+    }
+    It middle = first + n / 2;
+    StableSortImpl(first, middle, buf, comp);
+    StableSortImpl(middle, last, buf, comp);
+    if (comp(*middle, *(middle - 1))) {
+        if (buf)
+            BufferedMerge(first, middle, last, buf, comp);
+        else
+            RotateMerge(first, middle, last, comp);
+    }
+}
+
+} // namespace __algo_impl
+
+template <typename It, typename Comp>
+void stable_sort(It first, It last, Comp comp)
+{
+    using T = typename iterator_traits<It>::value_type;
+    auto n  = last - first;
+    if (n <= 1) return;
+    // Raw temp storage for the left halves (≤ n/2 + 1 elements);
+    // BufferedMerge constructs/destroys objects in it per merge step.
+    // Allocation failure degrades to the in-place rotate merge —
+    // slower, equally stable and correct.
+    size_t want = static_cast<size_t>(n / 2 + 1);
+    T *buf =
+        static_cast<T *>(::operator new(want * sizeof(T), nothrow));
+    struct RawGuard {
+        T *p;
+        ~RawGuard()
+        {
+            if (p) ::operator delete(p);
+        }
+    } guard{buf};
+    __algo_impl::StableSortImpl(first, last, buf, comp);
+}
+template <typename It>
+void stable_sort(It first, It last)
+{
+    stable_sort(first, last, __algo_impl::Less{});
+}
+
+template <typename It, typename Comp>
+void inplace_merge(It first, It middle, It last, Comp comp)
+{
+    __algo_impl::RotateMerge(first, middle, last, comp);
+}
+template <typename It>
+void inplace_merge(It first, It middle, It last)
+{
+    inplace_merge(first, middle, last, __algo_impl::Less{});
+}
+
+// ── set operations on sorted ranges ([set.operations]) ──────────────────
+
+template <typename In1, typename In2, typename Comp>
+constexpr bool includes(In1 first1, In1 last1, In2 first2, In2 last2,
+                        Comp comp)
+{
+    for (; first2 != last2; ++first1) {
+        if (first1 == last1 || comp(*first2, *first1)) return false;
+        if (!comp(*first1, *first2)) ++first2;
+    }
+    return true;
+}
+template <typename In1, typename In2>
+constexpr bool includes(In1 first1, In1 last1, In2 first2, In2 last2)
+{
+    return includes(first1, last1, first2, last2, __algo_impl::Less{});
+}
+
+template <typename In1, typename In2, typename Out, typename Comp>
+constexpr Out set_union(In1 first1, In1 last1, In2 first2, In2 last2, Out out,
+                        Comp comp)
+{
+    for (; first1 != last1; ++out) {
+        if (first2 == last2) return copy(first1, last1, out);
+        if (comp(*first2, *first1)) {
+            *out = *first2;
+            ++first2;
+        } else {
+            if (!comp(*first1, *first2)) ++first2;
+            *out = *first1;
+            ++first1;
+        }
+    }
+    return copy(first2, last2, out);
+}
+template <typename In1, typename In2, typename Out>
+constexpr Out set_union(In1 first1, In1 last1, In2 first2, In2 last2, Out out)
+{
+    return set_union(first1, last1, first2, last2, out, __algo_impl::Less{});
+}
+
+template <typename In1, typename In2, typename Out, typename Comp>
+constexpr Out set_intersection(In1 first1, In1 last1, In2 first2, In2 last2,
+                               Out out, Comp comp)
+{
+    while (first1 != last1 && first2 != last2) {
+        if (comp(*first1, *first2)) {
+            ++first1;
+        } else if (comp(*first2, *first1)) {
+            ++first2;
+        } else {
+            *out = *first1;
+            ++out;
+            ++first1;
+            ++first2;
+        }
+    }
+    return out;
+}
+template <typename In1, typename In2, typename Out>
+constexpr Out set_intersection(In1 first1, In1 last1, In2 first2, In2 last2,
+                               Out out)
+{
+    return set_intersection(first1, last1, first2, last2, out,
+                            __algo_impl::Less{});
+}
+
+template <typename In1, typename In2, typename Out, typename Comp>
+constexpr Out set_difference(In1 first1, In1 last1, In2 first2, In2 last2,
+                             Out out, Comp comp)
+{
+    while (first1 != last1) {
+        if (first2 == last2) return copy(first1, last1, out);
+        if (comp(*first1, *first2)) {
+            *out = *first1;
+            ++out;
+            ++first1;
+        } else {
+            if (!comp(*first2, *first1)) ++first1;
+            ++first2;
+        }
+    }
+    return out;
+}
+template <typename In1, typename In2, typename Out>
+constexpr Out set_difference(In1 first1, In1 last1, In2 first2, In2 last2,
+                             Out out)
+{
+    return set_difference(first1, last1, first2, last2, out,
+                          __algo_impl::Less{});
+}
+
+template <typename In1, typename In2, typename Out, typename Comp>
+constexpr Out set_symmetric_difference(In1 first1, In1 last1, In2 first2,
+                                       In2 last2, Out out, Comp comp)
+{
+    while (first1 != last1) {
+        if (first2 == last2) return copy(first1, last1, out);
+        if (comp(*first1, *first2)) {
+            *out = *first1;
+            ++out;
+            ++first1;
+        } else if (comp(*first2, *first1)) {
+            *out = *first2;
+            ++out;
+            ++first2;
+        } else {
+            ++first1;
+            ++first2;
+        }
+    }
+    return copy(first2, last2, out);
+}
+template <typename In1, typename In2, typename Out>
+constexpr Out set_symmetric_difference(In1 first1, In1 last1, In2 first2,
+                                       In2 last2, Out out)
+{
+    return set_symmetric_difference(first1, last1, first2, last2, out,
+                                    __algo_impl::Less{});
+}
+
+// ── lexicographical comparison ──────────────────────────────────────────
+
+template <typename In1, typename In2, typename Comp>
+constexpr bool lexicographical_compare(In1 first1, In1 last1, In2 first2,
+                                       In2 last2, Comp comp)
+{
+    for (; first2 != last2; ++first1, ++first2) {
+        if (first1 == last1 || comp(*first1, *first2)) return true;
+        if (comp(*first2, *first1)) return false;
+    }
+    return false;
+}
+template <typename In1, typename In2>
+constexpr bool lexicographical_compare(In1 first1, In1 last1, In2 first2,
+                                       In2 last2)
+{
+    return lexicographical_compare(first1, last1, first2, last2,
+                                   __algo_impl::Less{});
+}
+
+template <typename In1, typename In2, typename Cmp>
+constexpr auto lexicographical_compare_three_way(In1 first1, In1 last1,
+                                                 In2 first2, In2 last2,
+                                                 Cmp comp)
+    -> decltype(comp(*first1, *first2))
+{
+    using Cat = decltype(comp(*first1, *first2));
+    for (; first1 != last1 && first2 != last2; ++first1, ++first2)
+        if (auto c = comp(*first1, *first2); c != 0) return c;
+    bool done1 = first1 == last1;
+    bool done2 = first2 == last2;
+    if (done1 && done2) return Cat::equivalent;
+    return done1 ? Cat::less : Cat::greater;
+}
+template <typename In1, typename In2>
+constexpr auto lexicographical_compare_three_way(In1 first1, In1 last1,
+                                                 In2 first2, In2 last2)
+{
+    return lexicographical_compare_three_way(first1, last1, first2, last2,
+                                             compare_three_way{});
+}
+
+// ── stable_partition ─────────────────────────────────────────────────────
+
+template <class It, class Pred>
+constexpr It stable_partition(It first, It last, Pred pred)
+{
+    using T = typename iterator_traits<It>::value_type;
+    auto n  = std::distance(first, last);
+    if (n == 0) return first;
+
+    T *buf = static_cast<T *>(
+        ::operator new(static_cast<size_t>(n) * sizeof(T), nothrow));
+    if (buf) {
+        It     out = first;
+        size_t nb  = 0;
+        for (It it = first; it != last; ++it) {
+            if (pred(*it)) {
+                if (out != it) *out = static_cast<T &&>(*it);
+                ++out;
+            } else {
+                ::new (static_cast<void *>(buf + nb)) T(static_cast<T &&>(*it));
+                ++nb;
+            }
+        }
+        It ret = out;
+        for (size_t i = 0; i < nb; ++i) {
+            *out = static_cast<T &&>(buf[i]);
+            ++out;
+            buf[i].~T();
+        }
+        ::operator delete(buf);
+        return ret;
+    }
+
+    // No buffer: divide-and-conquer rotate, O(n log n), stable.
+    if (n == 1) return pred(*first) ? last : first;
+    It mid   = std::next(first, n / 2);
+    It left  = stable_partition(first, mid, pred);
+    It right = stable_partition(mid, last, pred);
+    return std::rotate(left, mid, right);
+}
+
+// ── is_permutation ───────────────────────────────────────────────────────
+
+namespace __algo {
+template <class It1, class It2, class Pred>
+constexpr bool IsPermImpl(It1 f1, It1 l1, It2 f2, It2 l2, Pred pred)
+{
+    for (; f1 != l1 && f2 != l2; ++f1, (void)++f2)
+        if (!pred(*f1, *f2)) break;
+    if (f1 == l1) return f2 == l2;
+    if (std::distance(f1, l1) != std::distance(f2, l2)) return false;
+    for (It1 i = f1; i != l1; ++i) {
+        bool seen = false;
+        for (It1 k = f1; k != i; ++k)
+            if (pred(*k, *i)) {
+                seen = true;
+                break;
+            }
+        if (seen) continue;
+        size_t c1 = 0;
+        for (It1 k = i; k != l1; ++k)
+            if (pred(*i, *k)) ++c1;
+        size_t c2 = 0;
+        for (It2 k = f2; k != l2; ++k)
+            if (pred(*i, *k)) ++c2;
+        if (c1 != c2) return false;
+    }
+    return true;
+}
+} // namespace __algo
+
+template <class It1, class It2, class Pred>
+constexpr bool is_permutation(It1 f1, It1 l1, It2 f2, Pred pred)
+{
+    It2 l2 = f2;
+    std::advance(l2, std::distance(f1, l1));
+    return __algo::IsPermImpl(f1, l1, f2, l2, pred);
+}
+template <class It1, class It2>
+constexpr bool is_permutation(It1 f1, It1 l1, It2 f2)
+{
+    return is_permutation(f1, l1, f2,
+                          [](auto &&a, auto &&b) { return a == b; });
+}
+template <class It1, class It2, class Pred>
+constexpr bool is_permutation(It1 f1, It1 l1, It2 f2, It2 l2, Pred pred)
+{
+    return __algo::IsPermImpl(f1, l1, f2, l2, pred);
+}
+template <class It1, class It2>
+constexpr bool is_permutation(It1 f1, It1 l1, It2 f2, It2 l2)
+{
+    return __algo::IsPermImpl(f1, l1, f2, l2,
+                              [](auto &&a, auto &&b) { return a == b; });
+}
+
+// ── next_permutation / prev_permutation ──────────────────────────────────
+
+template <class It, class Comp>
+constexpr bool next_permutation(It first, It last, Comp comp)
+{
+    if (first == last) return false;
+    It i = last;
+    if (first == --i) return false;
+    for (;;) {
+        It ip1 = i;
+        if (comp(*--i, *ip1)) {
+            It j = last;
+            while (!comp(*i, *--j))
+                ;
+            iter_swap(i, j);
+            reverse(ip1, last);
+            return true;
+        }
+        if (i == first) {
+            reverse(first, last);
+            return false;
+        }
+    }
+}
+template <class It>
+constexpr bool next_permutation(It first, It last)
+{
+    return next_permutation(first, last,
+                            [](auto &&a, auto &&b) { return a < b; });
+}
+template <class It, class Comp>
+constexpr bool prev_permutation(It first, It last, Comp comp)
+{
+    if (first == last) return false;
+    It i = last;
+    if (first == --i) return false;
+    for (;;) {
+        It ip1 = i;
+        if (comp(*ip1, *--i)) {
+            It j = last;
+            while (!comp(*--j, *i))
+                ;
+            iter_swap(i, j);
+            reverse(ip1, last);
+            return true;
+        }
+        if (i == first) {
+            reverse(first, last);
+            return false;
+        }
+    }
+}
+template <class It>
+constexpr bool prev_permutation(It first, It last)
+{
+    return prev_permutation(first, last,
+                            [](auto &&a, auto &&b) { return a < b; });
+}
+
+} // namespace std
+
+#endif // BOXCXX_BITS_ALGORITHM_CLASSIC

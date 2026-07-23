@@ -13,6 +13,17 @@
 #ifndef BOXCXX_BITS_RANGES_ALGO_SET
 #define BOXCXX_BITS_RANGES_ALGO_SET
 
+// Self-contained: in_in_out_result/in_out_result live in <__bits/ranges_algo>;
+// merge/set_* also call ranges::copy (<__bits/ranges_algo_mut>) to drain
+// tails and __algo::SortComp (<__bits/ranges_algo_sort>) for the
+// inplace_merge delegation, plus classic std::inplace_merge directly (from
+// <__bits/algorithm_classic>, the classic-algorithms leaf -- see
+// ranges_algo_mut's identical note on why not <algorithm> itself). No longer
+// relying on <algorithm>'s fixed include order to see any of the four first.
+#include <__bits/algorithm_classic>
+#include <__bits/ranges_algo>
+#include <__bits/ranges_algo_mut>
+#include <__bits/ranges_algo_sort>
 #include <functional>
 #include <ranges>
 #include <utility>

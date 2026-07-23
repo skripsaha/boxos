@@ -16735,6 +16735,374 @@ void Phase98()
            "basic_const_iterator heterogeneous comparisons + P2321 pair const-assign\n");
 }
 
+void Phase99()
+{
+    namespace rg = std::ranges;
+    namespace vw = std::views;
+
+    // ── minmax_element pairwise-tournament: value + complexity ────────────
+    {
+        // Independent reference: the natural single-pass definition of
+        // [alg.min.max]'s own contract (leftmost element with nothing
+        // smaller; rightmost element with nothing larger) — NOT a port of
+        // the pairwise-tournament mechanics being tested.
+        auto p99RefMinMax = [](const auto &v) -> std::pair<std::size_t, std::size_t> {
+            if (v.empty()) return {0, 0};
+            std::size_t mn = 0, mx = 0;
+            for (std::size_t i = 1; i < v.size(); ++i) {
+                if (v[i] < v[mn]) mn = i;
+                if (!(v[i] < v[mx])) mx = i;
+            }
+            return {mn, mx};
+        };
+        auto p99Bound = [](std::size_t n) -> std::size_t {
+            return n <= 1 ? 0 : (3 * (n - 1)) / 2;
+        };
+        struct P99CountingLess {
+            std::size_t *count;
+            bool operator()(int a, int b) const
+            {
+                ++*count;
+                return a < b;
+            }
+        };
+
+        // explicit tie-breaking check: leftmost min, rightmost max.
+        std::vector<int> p99Ties{5, 3, 3, 3, 1, 1, 8, 8};
+        auto p99TiesRef = p99RefMinMax(p99Ties);
+        auto p99TiesGot = std::minmax_element(p99Ties.begin(), p99Ties.end());
+        Check(static_cast<std::size_t>(p99TiesGot.first - p99Ties.begin()) == p99TiesRef.first &&
+              static_cast<std::size_t>(p99TiesGot.second - p99Ties.begin()) == p99TiesRef.second,
+              "phase99 std::minmax_element tie-breaking matches leftmost-min/rightmost-max reference");
+        Check(p99TiesGot.first - p99Ties.begin() == 4 && p99TiesGot.second - p99Ties.begin() == 7,
+              "phase99 std::minmax_element tie-breaking exact indices (leftmost 1 @4, rightmost 8 @7)");
+        auto p99TiesGotR = rg::minmax_element(p99Ties);
+        Check(static_cast<std::size_t>(p99TiesGotR.min - p99Ties.begin()) == p99TiesRef.first &&
+              static_cast<std::size_t>(p99TiesGotR.max - p99Ties.begin()) == p99TiesRef.second,
+              "phase99 ranges::minmax_element tie-breaking matches leftmost-min/rightmost-max reference");
+
+        // value correctness + complexity bound across even/odd/small/large N.
+        std::size_t p99Sizes[] = {0, 1, 2, 3, 4, 5, 100, 101};
+        for (std::size_t n : p99Sizes) {
+            std::vector<int> p99Data(n);
+            for (std::size_t i = 0; i < n; ++i)
+                p99Data[i] = static_cast<int>((i * 7919) % 997);
+            auto p99Ref = p99RefMinMax(p99Data);
+
+            std::size_t     p99Cnt = 0;
+            P99CountingLess p99Cmp{&p99Cnt};
+            auto p99Got = std::minmax_element(p99Data.begin(), p99Data.end(), p99Cmp);
+            Check(static_cast<std::size_t>(p99Got.first - p99Data.begin()) == p99Ref.first &&
+                  static_cast<std::size_t>(p99Got.second - p99Data.begin()) == p99Ref.second,
+                  "phase99 std::minmax_element value correctness (pseudo-random N)");
+            Check(p99Cnt <= p99Bound(n),
+                  "phase99 std::minmax_element comparison count within floor(3(N-1)/2) bound");
+
+            std::size_t     p99CntR = 0;
+            P99CountingLess p99CmpR{&p99CntR};
+            auto p99GotR = rg::minmax_element(p99Data, p99CmpR);
+            Check(static_cast<std::size_t>(p99GotR.min - p99Data.begin()) == p99Ref.first &&
+                  static_cast<std::size_t>(p99GotR.max - p99Data.begin()) == p99Ref.second,
+                  "phase99 ranges::minmax_element value correctness (pseudo-random N)");
+            Check(p99CntR <= p99Bound(n),
+                  "phase99 ranges::minmax_element comparison count within floor(3(N-1)/2) bound");
+        }
+
+        // tight-bound witness: a strictly increasing sequence forces every
+        // pairwise branch to take its most-expensive path, so the count
+        // must reach the bound EXACTLY — proof the fix is not just under
+        // the old 2(N-1), but genuinely achieves floor(3(N-1)/2).
+        std::size_t p99TightSizes[] = {2, 3, 4, 5, 100, 101};
+        for (std::size_t n : p99TightSizes) {
+            std::vector<int> p99Inc(n);
+            for (std::size_t i = 0; i < n; ++i) p99Inc[i] = static_cast<int>(i);
+            std::size_t     p99CntTight = 0;
+            P99CountingLess p99CmpTight{&p99CntTight};
+            std::minmax_element(p99Inc.begin(), p99Inc.end(), p99CmpTight);
+            Check(p99CntTight == p99Bound(n),
+                  "phase99 std::minmax_element comparison count reaches floor(3(N-1)/2) exactly "
+                  "(strictly increasing witness)");
+        }
+    }
+
+    // ── 12 allocator-only from_range_t constructors (map/set family) ──────
+    {
+        using SAi  = StatefulAlloc<int>;
+        using SApi = StatefulAlloc<std::pair<const int, int>>;
+
+        std::vector<int>                       p99KeysSrc{3, 1, 2};
+        std::vector<int>                       p99DupKeysSrc{3, 1, 2, 1};
+        std::vector<std::pair<const int, int>> p99PairsSrc{{1, 10}, {2, 20}, {3, 30}};
+
+        std::map<int, int, std::less<int>, SApi> p99Map(std::from_range, p99PairsSrc, SApi(11));
+        Check(p99Map.size() == 3 && p99Map.at(2) == 20 && p99Map.get_allocator().id == 11,
+              "phase99 map(from_range_t, R&&, const Alloc&) contents + allocator identity");
+
+        std::multimap<int, int, std::less<int>, SApi> p99Multimap(std::from_range, p99PairsSrc,
+                                                                   SApi(12));
+        Check(p99Multimap.size() == 3 && p99Multimap.get_allocator().id == 12,
+              "phase99 multimap(from_range_t, R&&, const Alloc&) contents + allocator identity");
+
+        std::set<int, std::less<int>, SAi> p99Set(std::from_range, p99KeysSrc, SAi(13));
+        Check(p99Set.size() == 3 && p99Set.count(2) == 1 && p99Set.get_allocator().id == 13,
+              "phase99 set(from_range_t, R&&, const Alloc&) contents + allocator identity");
+
+        std::multiset<int, std::less<int>, SAi> p99Multiset(std::from_range, p99DupKeysSrc, SAi(14));
+        Check(p99Multiset.size() == 4 && p99Multiset.count(1) == 2 &&
+                  p99Multiset.get_allocator().id == 14,
+              "phase99 multiset(from_range_t, R&&, const Alloc&) contents + allocator identity");
+
+        std::unordered_map<int, int, std::hash<int>, std::equal_to<int>, SApi> p99Umap(
+            std::from_range, p99PairsSrc, std::size_t(8), SApi(15));
+        Check(p99Umap.size() == 3 && p99Umap.at(3) == 30 && p99Umap.get_allocator().id == 15,
+              "phase99 unordered_map(from_range_t, R&&, size_type, const Alloc&) contents + allocator");
+
+        std::unordered_map<int, int, std::hash<int>, std::equal_to<int>, SApi> p99Umap2(
+            std::from_range, p99PairsSrc, std::size_t(8), std::hash<int>{}, SApi(16));
+        Check(p99Umap2.size() == 3 && p99Umap2.get_allocator().id == 16,
+              "phase99 unordered_map(from_range_t, R&&, size_type, const Hash&, const Alloc&) "
+              "contents + allocator");
+
+        std::unordered_multimap<int, int, std::hash<int>, std::equal_to<int>, SApi> p99Ummap(
+            std::from_range, p99PairsSrc, std::size_t(8), SApi(17));
+        Check(p99Ummap.size() == 3 && p99Ummap.get_allocator().id == 17,
+              "phase99 unordered_multimap(from_range_t, R&&, size_type, const Alloc&) "
+              "contents + allocator");
+
+        std::unordered_multimap<int, int, std::hash<int>, std::equal_to<int>, SApi> p99Ummap2(
+            std::from_range, p99PairsSrc, std::size_t(8), std::hash<int>{}, SApi(18));
+        Check(p99Ummap2.size() == 3 && p99Ummap2.get_allocator().id == 18,
+              "phase99 unordered_multimap(from_range_t, R&&, size_type, const Hash&, const Alloc&) "
+              "contents + allocator");
+
+        std::unordered_set<int, std::hash<int>, std::equal_to<int>, SAi> p99Uset(
+            std::from_range, p99KeysSrc, std::size_t(8), SAi(19));
+        Check(p99Uset.size() == 3 && p99Uset.count(2) == 1 && p99Uset.get_allocator().id == 19,
+              "phase99 unordered_set(from_range_t, R&&, size_type, const Alloc&) contents + allocator");
+
+        std::unordered_set<int, std::hash<int>, std::equal_to<int>, SAi> p99Uset2(
+            std::from_range, p99KeysSrc, std::size_t(8), std::hash<int>{}, SAi(20));
+        Check(p99Uset2.size() == 3 && p99Uset2.get_allocator().id == 20,
+              "phase99 unordered_set(from_range_t, R&&, size_type, const Hash&, const Alloc&) "
+              "contents + allocator");
+
+        std::unordered_multiset<int, std::hash<int>, std::equal_to<int>, SAi> p99Umset(
+            std::from_range, p99DupKeysSrc, std::size_t(8), SAi(21));
+        Check(p99Umset.size() == 4 && p99Umset.count(1) == 2 && p99Umset.get_allocator().id == 21,
+              "phase99 unordered_multiset(from_range_t, R&&, size_type, const Alloc&) "
+              "contents + allocator");
+
+        std::unordered_multiset<int, std::hash<int>, std::equal_to<int>, SAi> p99Umset2(
+            std::from_range, p99DupKeysSrc, std::size_t(8), std::hash<int>{}, SAi(22));
+        Check(p99Umset2.size() == 4 && p99Umset2.get_allocator().id == 22,
+              "phase99 unordered_multiset(from_range_t, R&&, size_type, const Hash&, const Alloc&) "
+              "contents + allocator");
+    }
+
+    // ── CTAD for the 12 new allocator-only from_range_t guides ─────────────
+    // Explicit-template-argument construction (the block above) exercises
+    // the CONSTRUCTORS but bypasses deduction guides entirely — CTAD is a
+    // wholly separate mechanism (guide overload resolution, not constructor
+    // overload resolution) and needs its own coverage: without a matching
+    // guide, the pre-existing (Comp/Hash defaulted) guide still deduces
+    // Comp/Hash = the allocator's own type from the 3rd argument (deduction
+    // of an unconstrained template parameter always succeeds), silently
+    // routing the user's allocator into the wrong slot.
+    {
+        using SAi  = StatefulAlloc<int>;
+        using SApi = StatefulAlloc<std::pair<const int, int>>;
+
+        std::vector<int>                       p99CtadKeys{3, 1, 2};
+        std::vector<std::pair<const int, int>> p99CtadPairs{{1, 10}, {2, 20}};
+        SApi p99CtadApi(31);
+        SAi  p99CtadAi(32);
+
+        std::map p99CtadMap(std::from_range, p99CtadPairs, p99CtadApi);
+        static_assert(std::is_same_v<decltype(p99CtadMap), std::map<int, int, std::less<int>, SApi>>,
+                      "phase99 map CTAD alloc-only routes into Alloc, not Comp");
+
+        std::multimap p99CtadMultimap(std::from_range, p99CtadPairs, p99CtadApi);
+        static_assert(
+            std::is_same_v<decltype(p99CtadMultimap), std::multimap<int, int, std::less<int>, SApi>>,
+            "phase99 multimap CTAD alloc-only routes into Alloc, not Comp");
+
+        std::set p99CtadSet(std::from_range, p99CtadKeys, p99CtadAi);
+        static_assert(std::is_same_v<decltype(p99CtadSet), std::set<int, std::less<int>, SAi>>,
+                      "phase99 set CTAD alloc-only routes into Alloc, not Comp");
+
+        std::multiset p99CtadMultiset(std::from_range, p99CtadKeys, p99CtadAi);
+        static_assert(
+            std::is_same_v<decltype(p99CtadMultiset), std::multiset<int, std::less<int>, SAi>>,
+            "phase99 multiset CTAD alloc-only routes into Alloc, not Comp");
+
+        std::unordered_map p99CtadUmap(std::from_range, p99CtadPairs, std::size_t(8), p99CtadApi);
+        static_assert(
+            std::is_same_v<decltype(p99CtadUmap),
+                           std::unordered_map<int, int, std::hash<int>, std::equal_to<int>, SApi>>,
+            "phase99 unordered_map CTAD bucket+alloc routes into Alloc, not Hash");
+
+        std::unordered_map p99CtadUmap2(std::from_range, p99CtadPairs, std::size_t(8),
+                                        std::hash<int>{}, p99CtadApi);
+        static_assert(
+            std::is_same_v<decltype(p99CtadUmap2),
+                           std::unordered_map<int, int, std::hash<int>, std::equal_to<int>, SApi>>,
+            "phase99 unordered_map CTAD bucket+hash+alloc routes into Alloc, not KeyEq");
+
+        std::unordered_multimap p99CtadUmmap(std::from_range, p99CtadPairs, std::size_t(8),
+                                             p99CtadApi);
+        static_assert(
+            std::is_same_v<decltype(p99CtadUmmap), std::unordered_multimap<int, int, std::hash<int>,
+                                                                            std::equal_to<int>, SApi>>,
+            "phase99 unordered_multimap CTAD bucket+alloc routes into Alloc, not Hash");
+
+        std::unordered_multimap p99CtadUmmap2(std::from_range, p99CtadPairs, std::size_t(8),
+                                              std::hash<int>{}, p99CtadApi);
+        static_assert(
+            std::is_same_v<decltype(p99CtadUmmap2), std::unordered_multimap<int, int, std::hash<int>,
+                                                                             std::equal_to<int>, SApi>>,
+            "phase99 unordered_multimap CTAD bucket+hash+alloc routes into Alloc, not KeyEq");
+
+        std::unordered_set p99CtadUset(std::from_range, p99CtadKeys, std::size_t(8), p99CtadAi);
+        static_assert(
+            std::is_same_v<decltype(p99CtadUset),
+                           std::unordered_set<int, std::hash<int>, std::equal_to<int>, SAi>>,
+            "phase99 unordered_set CTAD bucket+alloc routes into Alloc, not Hash");
+
+        std::unordered_set p99CtadUset2(std::from_range, p99CtadKeys, std::size_t(8),
+                                        std::hash<int>{}, p99CtadAi);
+        static_assert(
+            std::is_same_v<decltype(p99CtadUset2),
+                           std::unordered_set<int, std::hash<int>, std::equal_to<int>, SAi>>,
+            "phase99 unordered_set CTAD bucket+hash+alloc routes into Alloc, not KeyEq");
+
+        std::unordered_multiset p99CtadUmset(std::from_range, p99CtadKeys, std::size_t(8), p99CtadAi);
+        static_assert(
+            std::is_same_v<decltype(p99CtadUmset),
+                           std::unordered_multiset<int, std::hash<int>, std::equal_to<int>, SAi>>,
+            "phase99 unordered_multiset CTAD bucket+alloc routes into Alloc, not Hash");
+
+        std::unordered_multiset p99CtadUmset2(std::from_range, p99CtadKeys, std::size_t(8),
+                                              std::hash<int>{}, p99CtadAi);
+        static_assert(
+            std::is_same_v<decltype(p99CtadUmset2),
+                           std::unordered_multiset<int, std::hash<int>, std::equal_to<int>, SAi>>,
+            "phase99 unordered_multiset CTAD bucket+hash+alloc routes into Alloc, not KeyEq");
+
+        // regression: plain and explicit-Comp/Hash forms must still deduce
+        // correctly — the not-allocator-like constraint on the pre-existing
+        // guides must not reject a genuine comparator/hash argument.
+        std::map p99CtadMapPlain(std::from_range, p99CtadPairs);
+        static_assert(std::is_same_v<decltype(p99CtadMapPlain), std::map<int, int>>,
+                      "phase99 map plain CTAD (no alloc) broken by the new constraint");
+        std::map p99CtadMapComp(std::from_range, p99CtadPairs, std::greater<int>{});
+        static_assert(std::is_same_v<decltype(p99CtadMapComp), std::map<int, int, std::greater<int>>>,
+                      "phase99 map explicit-Comp CTAD broken by the new constraint");
+        std::unordered_map p99CtadUmapPlain(std::from_range, p99CtadPairs);
+        static_assert(std::is_same_v<decltype(p99CtadUmapPlain), std::unordered_map<int, int>>,
+                      "phase99 unordered_map plain CTAD (no alloc) broken by the new constraint");
+        std::unordered_map p99CtadUmapHashOnly(std::from_range, p99CtadPairs, std::size_t(8),
+                                               std::hash<int>{});
+        static_assert(std::is_same_v<decltype(p99CtadUmapHashOnly), std::unordered_map<int, int>>,
+                      "phase99 unordered_map bucket+hash (no alloc) CTAD broken by the new constraint");
+
+        Check(p99CtadMap.at(2) == 20 && p99CtadMap.get_allocator().id == 31,
+              "phase99 map CTAD alloc-only: runtime contents + allocator identity");
+        Check(p99CtadUmap.at(2) == 20 && p99CtadUmap.get_allocator().id == 31,
+              "phase99 unordered_map CTAD bucket+alloc: runtime contents + allocator identity");
+        Check(p99CtadUmap2.get_allocator().id == 31,
+              "phase99 unordered_map CTAD bucket+hash+alloc: runtime allocator identity");
+    }
+
+    // ── deque commutative operator+ -> random_access_iterator conformance ──
+    {
+        static_assert(std::random_access_iterator<std::deque<int>::iterator>,
+                      "phase99 deque<int>::iterator models random_access_iterator");
+        static_assert(std::random_access_iterator<std::deque<int>::const_iterator>,
+                      "phase99 deque<int>::const_iterator models random_access_iterator");
+        static_assert(rg::random_access_range<std::deque<int>>,
+                      "phase99 deque<int> models random_access_range");
+
+        std::deque<int> p99Dq{10, 20, 30, 40, 50};
+        auto            p99DqIt = p99Dq.begin();
+        Check(*(3 + p99DqIt) == 40, "phase99 deque iterator commutative operator+ (n + it) value");
+        Check(*(p99DqIt + 3) == *(3 + p99DqIt), "phase99 deque iterator operator+ both orders agree");
+        Check(std::addressof(*(3 + p99DqIt)) == std::addressof(p99Dq[3]),
+              "phase99 deque iterator commutative operator+ identity vs operator[]");
+
+        // ranges::sort requires random_access_iterator -- before this fix,
+        // deque<int>::iterator failed that concept and this call would not
+        // even compile. Now it must compile AND sort correctly.
+        std::deque<int> p99DqUnsorted{5, 3, 1, 4, 2};
+        rg::sort(p99DqUnsorted);
+        bool p99DqSorted = true;
+        for (std::size_t i = 1; i < p99DqUnsorted.size(); ++i)
+            if (p99DqUnsorted[i - 1] > p99DqUnsorted[i]) p99DqSorted = false;
+        Check(p99DqSorted && p99DqUnsorted[0] == 1 && p99DqUnsorted[4] == 5,
+              "phase99 ranges::sort(deque<int>) compiles and sorts correctly (random_access_iterator)");
+    }
+
+    // ── cartesian_product_view::operator-(iterator, default_sentinel_t) ───
+    {
+        std::list<int> p99CpFirst{1, 2, 3, 4};
+        auto           p99CpFirstTaken = p99CpFirst | vw::take(3);
+        static_assert(!rg::common_range<decltype(p99CpFirstTaken)>,
+                      "phase99 cartesian operator- fixture: First must be non-common "
+                      "to exercise default_sentinel");
+        std::vector<int> p99CpB{10, 20};
+        auto             p99Cp = vw::cartesian_product(p99CpFirstTaken, p99CpB);
+        static_assert(std::is_same_v<decltype(p99Cp.end()), std::default_sentinel_t>,
+                      "phase99 cartesian operator- fixture: non-common First yields default_sentinel");
+
+        auto p99CpBegin = p99Cp.begin();
+        Check((p99CpBegin - std::default_sentinel) == -6,
+              "phase99 cartesian operator-(iterator, default_sentinel_t) at begin() == -size");
+        Check((std::default_sentinel - p99CpBegin) == 6,
+              "phase99 cartesian operator-(default_sentinel_t, iterator) at begin() == size");
+
+        auto p99CpMid = p99CpBegin;
+        ++p99CpMid;
+        ++p99CpMid;
+        Check((std::default_sentinel - p99CpMid) == 4,
+              "phase99 cartesian operator-(default_sentinel_t, iterator) after 2 increments");
+        Check((p99CpMid - std::default_sentinel) == -4,
+              "phase99 cartesian operator-(iterator, default_sentinel_t) after 2 increments");
+
+        auto p99CpWalk  = p99CpBegin;
+        int  p99CpSteps = 0;
+        while (p99CpWalk != p99Cp.end()) {
+            ++p99CpWalk;
+            ++p99CpSteps;
+        }
+        Check(p99CpSteps == 6, "phase99 cartesian operator- fixture sanity: manual walk count == 6");
+    }
+
+    // ── cartesian VERIFY item: operator==/forward-rung narrowed to First-only,
+    //    matching [range.cartesian.iterator]/1.3 and /22 literally (was: also
+    //    gated on every Vs, vacuously true given the class's own
+    //    forward_range<Vs> requirement — see ranges_cartesian::IsForward). ──
+    {
+        std::vector<int> p99CpConstA{1, 2};
+        std::vector<int> p99CpConstB{10, 20};
+        const auto       p99CpConst = vw::cartesian_product(p99CpConstA, p99CpConstB);
+        static_assert(rg::forward_range<decltype(p99CpConst)>,
+                      "phase99 cartesian const-view still forward_range after ==/forward-rung narrowing");
+        Check(std::get<0>(*p99CpConst.begin()) == 1 && std::get<1>(*p99CpConst.begin()) == 10,
+              "phase99 cartesian const-view begin() value after narrowing");
+        auto p99CpConstIt2 = p99CpConst.begin();
+        ++p99CpConstIt2;
+        Check(p99CpConstIt2 == p99CpConstIt2,
+              "phase99 cartesian const-view operator== (First-only-gated) self-equality");
+        Check(!(p99CpConst.begin() == p99CpConstIt2),
+              "phase99 cartesian const-view operator== (First-only-gated) distinguishes positions");
+    }
+
+    printf("[CXX] PASS phase99: minmax_element pairwise-tournament (value+floor(3(N-1)/2) "
+           "complexity) + ranges_algo_{mut,sort,set} self-containment + 12 allocator-only "
+           "from_range_t ctors + 12 matching CTAD guides (AllocatorLike disambiguation) + "
+           "deque random_access_iterator + ranges::sort(deque) + "
+           "cartesian operator-(default_sentinel_t) + cartesian ==/forward-rung narrowing\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -16855,6 +17223,7 @@ int main()
     Phase96();
     Phase97();
     Phase98();
+    Phase99();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
