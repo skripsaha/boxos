@@ -1057,6 +1057,31 @@ struct IsInvocableR {
                                            R>::value>> : true_type {};
     static constexpr bool value = Conv<Ret>::value;
 };
+
+// Conversion leg of is_nothrow_invocable_r ([meta.rel]): unlike is_invocable_r,
+// nothrow-ness ALSO depends on the INVOKE<R> result->R conversion itself being
+// non-throwing, not just the call. Same Conv-on-kInvocable guard as
+// IsInvocableR above, so Result is never touched when F isn't invocable at all.
+template <class Ret, class F, class... Args>
+struct IsNothrowInvocableR {
+    template <class R, bool = InvokeTraits<void, F, Args...>::kInvocable,
+              class = void>
+    struct Conv : false_type {};
+    template <class R>
+    struct Conv<R, true, enable_if_t<is_void<R>::value>>
+        : bool_constant<InvokeTraits<void, F, Args...>::kNothrow> {};
+    template <class R>
+    struct Conv<R, true,
+                enable_if_t<!is_void<R>::value &&
+                            is_convertible<typename InvokeTraits<
+                                               void, F, Args...>::Result,
+                                           R>::value>>
+        : bool_constant<InvokeTraits<void, F, Args...>::kNothrow &&
+                        is_nothrow_convertible<
+                            typename InvokeTraits<void, F, Args...>::Result,
+                            R>::value> {};
+    static constexpr bool value = Conv<Ret>::value;
+};
 } // namespace __bits
 
 template <class F, class... Args>
@@ -1087,8 +1112,7 @@ inline constexpr bool is_nothrow_invocable_v =
 
 template <class Ret, class F, class... Args>
 struct is_nothrow_invocable_r
-    : bool_constant<is_invocable_r<Ret, F, Args...>::value &&
-                    is_nothrow_invocable<F, Args...>::value> {};
+    : bool_constant<__bits::IsNothrowInvocableR<Ret, F, Args...>::value> {};
 template <class Ret, class F, class... Args>
 inline constexpr bool is_nothrow_invocable_r_v =
     is_nothrow_invocable_r<Ret, F, Args...>::value;

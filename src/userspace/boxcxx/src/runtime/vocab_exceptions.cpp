@@ -9,9 +9,11 @@
  *   bad_expected_access<void> <expected>   (the templated derived classes
  *                                            inherit this non-template base,
  *                                            so its what() is the key fn)
+ *   bad_function_call        <functional>
  */
 
 #include <expected>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <variant>
@@ -24,6 +26,13 @@ const char *bad_optional_access::what() const noexcept
     return "bad optional access";
 }
 void __throw_bad_optional_access() { throw bad_optional_access{}; }
+
+bad_function_call::~bad_function_call() = default;
+const char *bad_function_call::what() const noexcept
+{
+    return "bad function call";
+}
+void __throw_bad_function_call() { throw bad_function_call{}; }
 
 bad_variant_access::~bad_variant_access() = default;
 const char *bad_variant_access::what() const noexcept

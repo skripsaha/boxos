@@ -1,0 +1,303 @@
+// boxcxx — <__bits/function>
+// bad_function_call + std::function<R(Args...)> ([func.wrap.func]). A
+// type-erased Callable stored inline (small-buffer optimization) or on the
+// heap, dispatched through a per-target CallOps table so the class itself
+// carries no virtual functions. INVOKE is never reimplemented here -- every
+// call routes through the existing std::invoke_r / __bits::InvokeRt.
+#ifndef BOXCXX_BITS_FUNCTION
+#define BOXCXX_BITS_FUNCTION
+
+#include <__bits/callable_sbo>
+#include <exception>
+#include <new>
+#include <type_traits>
+#include <typeinfo>
+#include <utility>
+
+namespace std {
+
+// ── bad_function_call ────────────────────────────────────────────────────
+// Key functions (~ and what) are out-of-line in vocab_exceptions.cpp so the
+// vtable/typeinfo are emitted exactly once.
+
+class bad_function_call : public exception {
+public:
+    bad_function_call() noexcept = default;
+    ~bad_function_call() override;
+    const char *what() const noexcept override;
+};
+
+[[noreturn]] void __throw_bad_function_call();
+
+namespace __bits {
+
+// ── CallOps: the per-target dispatch table ──────────────────────────────
+
+template <class R, class... Args>
+struct CallOps {
+    bool kInline;
+    R    (*Invoke)(void *buf, Args &&...);
+    void (*Copy)(void *dstBuf, const void *srcBuf);
+    void (*Move)(void *dstBuf, void *srcBuf) noexcept;
+    void (*Destroy)(void *buf) noexcept;
+    const type_info &(*TypeInfoFn)() noexcept;
+};
+
+template <class F>
+inline F &FnRecover(void *buf) noexcept
+{
+    if constexpr (FitsInline<F>) {
+        return *launder(reinterpret_cast<F *>(buf));
+    } else {
+        F *heapPtr = *reinterpret_cast<F **>(buf);
+        return *launder(heapPtr);
+    }
+}
+
+template <class F, class R, class... Args>
+R FnInvokeThunk(void *buf, Args &&...args)
+{
+    return invoke_r<R>(FnRecover<F>(buf), forward<Args>(args)...);
+}
+
+template <class F>
+void FnCopyThunk(void *dstBuf, const void *srcBuf)
+{
+    if constexpr (FitsInline<F>) {
+        const F &srcF = *launder(reinterpret_cast<const F *>(srcBuf));
+        ::new (dstBuf) F(srcF);
+    } else {
+        const F *heapPtr = *reinterpret_cast<F *const *>(srcBuf);
+        const F &srcF    = *launder(heapPtr);
+        F *heapCopy       = ::new F(srcF);
+        *reinterpret_cast<F **>(dstBuf) = heapCopy;
+    }
+}
+
+template <class F>
+void FnMoveThunk(void *dstBuf, void *srcBuf) noexcept
+{
+    if constexpr (FitsInline<F>) {
+        F &srcF = *launder(reinterpret_cast<F *>(srcBuf));
+        ::new (dstBuf) F(std::move(srcF));
+        srcF.~F();
+    } else {
+        *reinterpret_cast<F **>(dstBuf) = *reinterpret_cast<F **>(srcBuf);
+    }
+}
+
+template <class F>
+void FnDestroyThunk(void *buf) noexcept
+{
+    if constexpr (FitsInline<F>) {
+        launder(reinterpret_cast<F *>(buf))->~F();
+    } else {
+        delete *reinterpret_cast<F **>(buf);
+    }
+}
+
+template <class F>
+const type_info &FnTypeInfoThunk() noexcept
+{
+    return typeid(F);
+}
+
+template <class F, class R, class... Args>
+const CallOps<R, Args...> *OpsFor() noexcept
+{
+    static constexpr CallOps<R, Args...> table{
+        FitsInline<F>,      &FnInvokeThunk<F, R, Args...>,
+        &FnCopyThunk<F>,    &FnMoveThunk<F>,
+        &FnDestroyThunk<F>, &FnTypeInfoThunk<F>};
+    return &table;
+}
+
+} // namespace __bits
+
+// ── std::function ───────────────────────────────────────────────────────
+
+template <class T> class function;
+
+template <class R, class... ArgTypes>
+class function<R(ArgTypes...)> {
+public:
+    using result_type = R;
+
+    function() noexcept = default;
+    function(nullptr_t) noexcept {}
+
+    function(const function &other)
+    {
+        if (!other.__ops) return;
+        other.__ops->Copy(__buf, other.__buf); // may throw; __ops stays null
+        __ops = other.__ops;                    // only set after Copy succeeds
+    }
+
+    function(function &&other) noexcept
+    {
+        if (!other.__ops) return;
+        other.__ops->Move(__buf, other.__buf);
+        __ops       = other.__ops;
+        other.__ops = nullptr;
+    }
+
+    template <class F>
+        requires(!is_same_v<decay_t<F>, function> &&
+                 is_invocable_r_v<R, decay_t<F> &, ArgTypes...>)
+    function(F &&f)
+    {
+        using FD = decay_t<F>; // not remove_cvref_t: a bare function or
+                                // array name deduces F as a reference to
+                                // function/array, which decay_t (unlike
+                                // remove_cvref_t) turns into a pointer
+        static_assert(is_copy_constructible_v<FD>,
+                      "function target must be copy-constructible");
+        static_assert(is_constructible_v<FD, F>,
+                      "function target must be constructible from F");
+        if constexpr (is_pointer_v<FD> || is_member_pointer_v<FD>) {
+            if (f == nullptr) return; // null fn-ptr / null member-ptr -> stays empty
+        }
+        __ops = __bits::OpsFor<FD, R, ArgTypes...>();
+        if constexpr (__bits::FitsInline<FD>)
+            ::new (static_cast<void *>(__buf)) FD(forward<F>(f));
+        else
+            *reinterpret_cast<FD **>(__buf) = ::new FD(forward<F>(f));
+    }
+
+    function &operator=(const function &g)
+    {
+        function(g).swap(*this);
+        return *this;
+    }
+    function &operator=(function &&g) noexcept
+    {
+        function(std::move(g)).swap(*this);
+        return *this;
+    }
+    function &operator=(nullptr_t) noexcept
+    {
+        if (__ops) {
+            __ops->Destroy(__buf);
+            __ops = nullptr;
+        }
+        return *this;
+    }
+    template <class F>
+        requires(!is_same_v<decay_t<F>, function> &&
+                 is_invocable_r_v<R, decay_t<F> &, ArgTypes...>)
+    function &operator=(F &&f)
+    {
+        function(forward<F>(f)).swap(*this);
+        return *this;
+    }
+    template <class F>
+    function &operator=(reference_wrapper<F> rw) noexcept
+    {
+        function(rw).swap(*this);
+        return *this;
+    }
+
+    ~function()
+    {
+        if (__ops) __ops->Destroy(__buf);
+    }
+
+    void swap(function &other) noexcept
+    {
+        if (this == &other) return;
+        alignas(__bits::kCallableSboAlign) unsigned char
+            scratch[__bits::kCallableSboSize];
+        const __bits::CallOps<R, ArgTypes...> *opsA = __ops;
+        const __bits::CallOps<R, ArgTypes...> *opsB = other.__ops;
+        if (opsA) opsA->Move(scratch, __buf);
+        if (opsB) opsB->Move(__buf, other.__buf);
+        if (opsA) opsA->Move(other.__buf, scratch);
+        __ops       = opsB;
+        other.__ops = opsA;
+    }
+
+    explicit operator bool() const noexcept { return __ops != nullptr; }
+
+    R operator()(ArgTypes... args) const
+    {
+        if (!__ops) __throw_bad_function_call();
+        // The stored target is invoked as a non-const FD& even though
+        // operator() is const -- a const function must still be able to
+        // call a mutable lambda (matches the Constraint above, which checks
+        // decay_t<F>&, not const&).
+        return __ops->Invoke(const_cast<unsigned char *>(__buf),
+                             forward<ArgTypes>(args)...);
+    }
+
+    [[nodiscard]] const type_info &target_type() const noexcept
+    {
+        return __ops ? __ops->TypeInfoFn() : typeid(void);
+    }
+
+    template <class T>
+    [[nodiscard]] T *target() noexcept
+    {
+        if (!__ops || __ops->TypeInfoFn() != typeid(T)) return nullptr;
+        return __ops->kInline ? launder(reinterpret_cast<T *>(&__buf[0]))
+                              : launder(*reinterpret_cast<T *const *>(&__buf[0]));
+    }
+    template <class T>
+    [[nodiscard]] const T *target() const noexcept
+    {
+        if (!__ops || __ops->TypeInfoFn() != typeid(T)) return nullptr;
+        return __ops->kInline ? launder(reinterpret_cast<const T *>(&__buf[0]))
+                              : launder(*reinterpret_cast<T *const *>(&__buf[0]));
+    }
+
+private:
+    const __bits::CallOps<R, ArgTypes...> *__ops = nullptr;
+    alignas(__bits::kCallableSboAlign) unsigned char
+        __buf[__bits::kCallableSboSize];
+};
+
+// ── deduction guides ─────────────────────────────────────────────────────
+// Only the two the standard actually specifies ([func.wrap.func.con]): the
+// plain function-pointer guide, and the generic-F guide via F::operator().
+// No member-pointer guides -- std::function has none; a raw member pointer
+// must be assigned to an explicitly-templated function<R(G&,A...)>.
+
+template <class R, class... A>
+function(R (*)(A...)) -> function<R(A...)>;
+
+namespace __bits {
+
+template <class T> struct StripSig;
+template <class R, class G, class... A>
+struct StripSig<R (G::*)(A...)> { using type = R(A...); };
+template <class R, class G, class... A>
+struct StripSig<R (G::*)(A...) const> { using type = R(A...); };
+template <class R, class G, class... A>
+struct StripSig<R (G::*)(A...) noexcept> { using type = R(A...); };
+template <class R, class G, class... A>
+struct StripSig<R (G::*)(A...) const noexcept> { using type = R(A...); };
+
+template <class F>
+using StripSigT = typename StripSig<decltype(&F::operator())>::type;
+
+} // namespace __bits
+
+template <class F>
+function(F) -> function<__bits::StripSigT<F>>;
+
+// ── non-member helpers ───────────────────────────────────────────────────
+
+template <class R, class... A>
+[[nodiscard]] bool operator==(const function<R(A...)> &f, nullptr_t) noexcept
+{
+    return !f;
+}
+
+template <class R, class... A>
+void swap(function<R(A...)> &a, function<R(A...)> &b) noexcept
+{
+    a.swap(b);
+}
+
+} // namespace std
+
+#endif // BOXCXX_BITS_FUNCTION

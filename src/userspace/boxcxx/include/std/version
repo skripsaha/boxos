@@ -7,9 +7,10 @@
 // header (not <version>) — so the actual #define bodies live in shared
 // leaf files under __bits/ (<__bits/version_ranges>, owned by <ranges>;
 // <__bits/version_algorithm>, owned by <algorithm>; <__bits/version_numeric>,
-// owned by <numeric>), and <version> just pulls in the complete set from
-// all three. <coroutine> and <generator> self-declare their own single
-// macro directly, a fourth, pre-existing pattern this file doesn't change.
+// owned by <numeric>; <__bits/version_functional>, owned by <functional>),
+// and <version> just pulls in the complete set from all four. <coroutine>
+// and <generator> self-declare their own single macro directly, a fifth,
+// pre-existing pattern this file doesn't change.
 //
 // Scope (Ф29f-3c, the ranges-completeness epic closeout, plus conformance
 // fixes from a follow-up audit): Ф7B-Ф29f shipped without a single
@@ -53,5 +54,6 @@
 #include <__bits/version_ranges>
 #include <__bits/version_algorithm>
 #include <__bits/version_numeric>
+#include <__bits/version_functional> // <functional>: bad_function_call/function/move_only_function
 
 #endif // BOXCXX_VERSION
