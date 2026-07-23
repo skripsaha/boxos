@@ -4,15 +4,39 @@
 // Split out for the same [support.limits.general] per-header reason as
 // <__bits/version_ranges>/<__bits/version_algorithm> -- see those files'
 // comments. Chunk 1 of the Ф30b epic (bad_function_call/std::function/
-// std::move_only_function) defines only __cpp_lib_move_only_function;
-// the remaining <functional> feature-test macros (std::function itself
-// has none pre-C++23, bind_front/not_fn's) land with later Ф30b chunks --
-// leave room here, don't add them now.
+// std::move_only_function) defined __cpp_lib_move_only_function. Chunk 2
+// (std::bind + placeholders, bind_front/bind_back, mem_fn, not_fn) adds
+// the remaining six -- std::function itself has no dedicated macro
+// pre-C++23.
 #ifndef BOXCXX_BITS_VERSION_FUNCTIONAL
 #define BOXCXX_BITS_VERSION_FUNCTIONAL
 
 #ifndef __cpp_lib_move_only_function
 #  define __cpp_lib_move_only_function 202110L
+#endif
+
+#ifndef __cpp_lib_bind_front
+#  define __cpp_lib_bind_front 201907L
+#endif
+
+#ifndef __cpp_lib_bind_back
+#  define __cpp_lib_bind_back 202202L
+#endif
+
+#ifndef __cpp_lib_not_fn
+#  define __cpp_lib_not_fn 201603L
+#endif
+
+#ifndef __cpp_lib_invoke
+#  define __cpp_lib_invoke 201411L
+#endif
+
+#ifndef __cpp_lib_invoke_r
+#  define __cpp_lib_invoke_r 202106L
+#endif
+
+#ifndef __cpp_lib_constexpr_functional
+#  define __cpp_lib_constexpr_functional 201907L
 #endif
 
 #endif // BOXCXX_BITS_VERSION_FUNCTIONAL

@@ -1,0 +1,40 @@
+// boxcxx — <__bits/mem_fn>
+// std::mem_fn ([func.memfn]): wraps a pointer-to-member so it becomes an
+// ordinary Callable. INVOKE is never reimplemented here -- routes through
+// the existing __bits::InvokeRt from <functional>.
+#ifndef BOXCXX_BITS_MEM_FN
+#define BOXCXX_BITS_MEM_FN
+
+#include <type_traits>
+#include <utility>
+
+namespace std {
+namespace __bits {
+
+template <class PM>
+class MemFnWrapper {
+    PM __pmd;
+
+public:
+    constexpr explicit MemFnWrapper(PM pm) noexcept : __pmd(pm) {}
+
+    template <class... Args>
+        requires is_invocable_v<PM, Args...>
+    constexpr decltype(auto) operator()(Args &&...args) const
+        noexcept(is_nothrow_invocable_v<PM, Args...>)
+    {
+        return InvokeRt(__pmd, forward<Args>(args)...);
+    }
+};
+
+} // namespace __bits
+
+template <class R, class T>
+constexpr __bits::MemFnWrapper<R T::*> mem_fn(R T::*pm) noexcept
+{
+    return __bits::MemFnWrapper<R T::*>(pm);
+}
+
+} // namespace std
+
+#endif // BOXCXX_BITS_MEM_FN

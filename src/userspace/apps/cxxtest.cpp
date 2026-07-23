@@ -18231,6 +18231,338 @@ void Phase102()
            "is_nothrow_invocable_r result-conversion conformance fix)\n");
 }
 
+// ── phase103 fixtures ────────────────────────────────────────────────────
+
+struct P103Agg {
+    int field;
+    int GetField() const { return field; }
+    int GetFieldNoexcept() const noexcept { return field; }
+    int AddToField(int delta) const { return field + delta; }
+};
+
+int P103NoexceptAdd(int a, int b) noexcept
+{
+    return a + b;
+}
+
+int P103ThrowingAdd(int a, int b)
+{
+    return a + b;
+}
+
+int P103Subtract(int a, int b)
+{
+    return a - b;
+}
+
+double P103Half(int x)
+{
+    return static_cast<double>(x) / 2.0;
+}
+
+int P103Identity(int x)
+{
+    return x;
+}
+
+// Increments an external counter -- proves how many times a nested bind
+// expression's own target actually gets invoked.
+struct P103CountingDouble {
+    int *calls;
+    int operator()(int x) const
+    {
+        ++*calls;
+        return x * 2;
+    }
+};
+
+int P103AddFull(int g, int a)
+{
+    return g + a;
+}
+
+// Move ctor flips .moved on the new object and clears it on the source --
+// a runtime witness for whether a call path actually moved this object.
+struct P103MoveTag {
+    bool moved = false;
+
+    P103MoveTag()                    = default;
+    P103MoveTag(const P103MoveTag &) = default;
+    P103MoveTag(P103MoveTag &&o) noexcept
+    {
+        moved   = true;
+        o.moved = false;
+    }
+};
+
+bool P103ReadMovedRef(P103MoveTag &tag)
+{
+    return tag.moved;
+}
+
+bool P103ReadMovedVal(P103MoveTag tag)
+{
+    return tag.moved;
+}
+
+// Two overloads returning DIFFERENT values -- a runtime witness for
+// whether not_fn invoked the stored callable's & or && overload.
+struct P103RefQualPred {
+    bool operator()() & { return false; }
+    bool operator()() && { return true; }
+};
+
+int P103Combine3(int x, int y, int z)
+{
+    return x * 100 + y * 10 + z;
+}
+
+// No operator! at all -- not_fn wrapping a target that returns this must
+// be rejected by SFINAE (is_invocable_v false), not a hard compile error.
+struct P103NoNot {
+};
+struct P103WeirdPred {
+    P103NoNot operator()() const { return P103NoNot{}; }
+};
+
+int P103Increment(int *counter)
+{
+    return ++(*counter);
+}
+
+void Phase103()
+{
+    // ── feature-test macro pins ([version.syn]) ──────────────────────────
+    {
+        static_assert(__cpp_lib_bind_front >= 201907L, "phase103 __cpp_lib_bind_front pin");
+        static_assert(__cpp_lib_bind_back >= 202202L, "phase103 __cpp_lib_bind_back pin");
+        static_assert(__cpp_lib_not_fn >= 201603L, "phase103 __cpp_lib_not_fn pin");
+        static_assert(__cpp_lib_invoke >= 201411L, "phase103 __cpp_lib_invoke pin");
+        static_assert(__cpp_lib_invoke_r >= 202106L, "phase103 __cpp_lib_invoke_r pin");
+        static_assert(__cpp_lib_constexpr_functional >= 201907L,
+                      "phase103 __cpp_lib_constexpr_functional pin");
+    }
+
+    // ── constexpr proof: bind/bind_front/not_fn/mem_fn are genuinely
+    //    usable in constant expressions ───────────────────────────────────
+    {
+        static_assert(std::bind(std::plus<int>{}, 2, std::placeholders::_1)(3) == 5,
+                      "phase103 constexpr std::bind");
+        static_assert(std::bind_front(std::plus<int>{}, 2)(3) == 5,
+                      "phase103 constexpr std::bind_front");
+        static_assert(std::not_fn(std::equal_to<int>{})(2, 3),
+                      "phase103 constexpr std::not_fn");
+        static_assert(std::mem_fn(&P103Agg::field)(P103Agg{7}) == 7,
+                      "phase103 constexpr std::mem_fn");
+    }
+
+    // ── bind: placeholder reorder + reuse ─────────────────────────────────
+    {
+        auto p103Reordered =
+            std::bind(P103Subtract, std::placeholders::_2, std::placeholders::_1);
+        Check(p103Reordered(10, 3) == -7,
+              "phase103 bind: placeholder reorder, f(_2,_1)(10,3) == f(3,10) == -7");
+
+        auto p103Reused = std::bind(P103Subtract, std::placeholders::_1, std::placeholders::_1);
+        Check(p103Reused(9) == 0, "phase103 bind: placeholder reuse, f(_1,_1)(9) == f(9,9) == 0");
+    }
+
+    // ── bind: a bound plain value is a copy, independent of the original ─
+    {
+        int  p103Original  = 5;
+        auto p103BoundCopy = std::bind(P103Subtract, p103Original, std::placeholders::_1);
+        p103Original       = 999;
+        Check(p103BoundCopy(2) == 3,
+              "phase103 bind: bound plain value is a copy, unaffected by mutating the "
+              "original after binding (5-2==3, not 999-2)");
+    }
+
+    // ── bind<R>: explicit return type truncates the deduced result ───────
+    {
+        auto p103Truncated = std::bind<int>(P103Half, 7);
+        Check(p103Truncated() == 3,
+              "phase103 bind<R>: explicit return type truncates 7/2.0==3.5 to int 3");
+    }
+
+    // ── bind<void>: explicit void return discards the result, side
+    //    effect still happens ──────────────────────────────────────────────
+    {
+        int  p103VoidCounter = 0;
+        auto p103VoidBind    = std::bind<void>(P103Increment, &p103VoidCounter);
+        p103VoidBind();
+        Check(p103VoidCounter == 1,
+              "phase103 bind<void>: return value discarded, side effect still happens");
+
+        const auto p103BindConst = std::bind(std::plus<int>{}, 2, std::placeholders::_1);
+        Check(p103BindConst(3) == 5, "phase103 bind: const& call compiles and works (2+3==5)");
+    }
+
+    // ── bind: a reference_wrapper bound arg unwraps to a live reference ──
+    {
+        int  p103RefTarget = 1;
+        auto p103BindRef   = std::bind(P103Identity, std::ref(p103RefTarget));
+        p103RefTarget      = 42;
+        Check(p103BindRef() == 42,
+              "phase103 bind: std::ref bound arg observes external mutation (live reference)");
+    }
+
+    // ── bind: nested bind forwards the ENTIRE outer call-time pack ───────
+    {
+        int  p103NestedCalls = 0;
+        auto p103Outer =
+            std::bind(P103AddFull, std::bind(P103CountingDouble{&p103NestedCalls}, std::placeholders::_2),
+                      std::placeholders::_1);
+        Check(p103Outer(3, 5) == 13,
+              "phase103 nested bind forwards the full outer pack to the nested bind "
+              "expression: outer(3,5) == f(g(_2=5)*2=10, _1=3) == 13");
+        Check(p103NestedCalls == 1,
+              "phase103 nested bind: the nested bind expression's target is invoked "
+              "exactly once per outer call");
+    }
+
+    // ── THE LOAD-BEARING DIFFERENTIAL: bind never moves its stored state
+    //    (hotspot #1) vs bind_front genuinely perfect-forwarding on an
+    //    rvalue call (hotspot #2) ──────────────────────────────────────────
+    {
+        P103MoveTag p103BindTag;
+        auto        p103TheBind = std::bind(P103ReadMovedRef, p103BindTag);
+        Check(!std::move(p103TheBind)(),
+              "phase103 HOTSPOT#1: bind's &&-qualified operator() passes bare *this, so "
+              "the stored bound tag is read as an lvalue and is NOT moved ([func.bind."
+              "bind]: Vfd/bound_args are always lvalues)");
+
+        P103MoveTag p103FrontTag;
+        auto        p103TheBindFront = std::bind_front(P103ReadMovedVal, p103FrontTag);
+        Check(std::move(p103TheBindFront)(),
+              "phase103 HOTSPOT#2: bind_front's &&-qualified operator() genuinely "
+              "perfect-forwards (std::move(*this)), moving the stored bound tag into "
+              "the by-value target parameter");
+
+        P103MoveTag p103BackTag;
+        auto        p103TheBindBack = std::bind_back(P103ReadMovedVal, p103BackTag);
+        Check(std::move(p103TheBindBack)(),
+              "phase103 bind_back also genuinely perfect-forwards on an &&-qualified "
+              "call, symmetric to bind_front's hotspot#2 (same CallImpl mechanism, "
+              "just call-args-then-bound-args ordering)");
+    }
+
+    // ── not_fn: & invokes the stored callable as an lvalue, && moves it
+    //    (hotspot #3, observed via the target's own ref-qualified
+    //    overloads) ─────────────────────────────────────────────────────
+    {
+        auto p103NotFn = std::not_fn(P103RefQualPred{});
+        Check(p103NotFn() == true,
+              "phase103 not_fn HOTSPOT#3: lvalue call invokes the stored callable's "
+              "&-qualified overload, negated (!false==true)");
+        Check(std::move(p103NotFn)() == false,
+              "phase103 not_fn HOTSPOT#3: rvalue call invokes the stored callable's "
+              "&&-qualified overload (genuinely forwarded/moved), negated (!true==false)");
+
+        const auto p103NotFnConst = std::not_fn(std::equal_to<int>{});
+        Check(p103NotFnConst(2, 3) == true,
+              "phase103 not_fn: const& call compiles and works (!(2==3)==true)");
+    }
+
+    // ── not_fn SFINAE: a target whose result has no operator! makes the
+    //    wrapper NOT invocable, rather than a hard compile error
+    //    ([func.require]/5 expression-equivalence via the trailing
+    //    decltype) ───────────────────────────────────────────────────────
+    {
+        static_assert(!std::is_invocable_v<decltype(std::not_fn(P103WeirdPred{}))>,
+                      "phase103 not_fn SFINAE: a result type with no operator! is rejected "
+                      "by SFINAE, not a hard error");
+        static_assert(std::is_invocable_v<decltype(std::not_fn(std::equal_to<int>{})), int, int>,
+                      "phase103 not_fn SFINAE: an ordinary bool-returning predicate stays "
+                      "invocable");
+    }
+
+    // ── mem_fn: member-obj-ptr + member-fn-ptr via object/pointer/
+    //    reference_wrapper ───────────────────────────────────────────────
+    {
+        P103Agg p103AggObj{7};
+        Check(std::mem_fn(&P103Agg::field)(p103AggObj) == 7,
+              "phase103 mem_fn: member-obj-ptr invoked via object");
+        Check(std::mem_fn(&P103Agg::field)(&p103AggObj) == 7,
+              "phase103 mem_fn: member-obj-ptr invoked via pointer");
+        Check(std::mem_fn(&P103Agg::field)(std::ref(p103AggObj)) == 7,
+              "phase103 mem_fn: member-obj-ptr invoked via reference_wrapper");
+        Check(std::mem_fn(&P103Agg::GetField)(p103AggObj) == 7,
+              "phase103 mem_fn: member-fn-ptr invoked via object");
+        Check(std::mem_fn(&P103Agg::GetField)(&p103AggObj) == 7,
+              "phase103 mem_fn: member-fn-ptr invoked via pointer");
+        Check(std::mem_fn(&P103Agg::GetField)(std::ref(p103AggObj)) == 7,
+              "phase103 mem_fn: member-fn-ptr invoked via reference_wrapper");
+        Check(std::mem_fn(&P103Agg::AddToField)(p103AggObj, 3) == 10,
+              "phase103 mem_fn: member-fn-ptr taking its own argument (7+3==10)");
+    }
+
+    // ── bind_back vs bind_front argument order ───────────────────────────
+    {
+        Check(std::bind_back(std::minus<int>{}, 3)(10) == 7,
+              "phase103 bind_back: call args first, bound args last -> minus(10,3)==7");
+        Check(std::bind_front(std::minus<int>{}, 3)(10) == -7,
+              "phase103 bind_front: bound args first, call args last -> minus(3,10)==-7");
+    }
+
+    // ── noexcept propagation: mem_fn / bind_front / bind_back mirror the
+    //    target's own noexcept, both true and false directions ───────────
+    {
+        P103Agg p103NoexAggObj{7};
+        static_assert(noexcept(std::mem_fn(&P103Agg::GetFieldNoexcept)(p103NoexAggObj)),
+                      "phase103 mem_fn noexcept propagation: a noexcept member function "
+                      "makes the wrapper's call noexcept(true)");
+        static_assert(!noexcept(std::mem_fn(&P103Agg::GetField)(p103NoexAggObj)),
+                      "phase103 mem_fn noexcept propagation: a possibly-throwing member "
+                      "function makes the wrapper's call noexcept(false)");
+
+        static_assert(
+            std::is_nothrow_invocable_v<decltype(std::bind_front(P103NoexceptAdd, 1)), int>,
+            "phase103 bind_front noexcept propagation: a noexcept target stays "
+            "nothrow-invocable through the wrapper");
+        static_assert(
+            !std::is_nothrow_invocable_v<decltype(std::bind_front(P103ThrowingAdd, 1)), int>,
+            "phase103 bind_front noexcept propagation: a possibly-throwing target makes "
+            "the wrapper's call noexcept(false)");
+        static_assert(
+            std::is_nothrow_invocable_v<decltype(std::bind_back(P103NoexceptAdd, 1)), int>,
+            "phase103 bind_back noexcept propagation: a noexcept target stays "
+            "nothrow-invocable through the wrapper");
+        static_assert(
+            !std::is_nothrow_invocable_v<decltype(std::bind_back(P103ThrowingAdd, 1)), int>,
+            "phase103 bind_back noexcept propagation: a possibly-throwing target makes "
+            "the wrapper's call noexcept(false)");
+    }
+
+    // ── placeholder permutation: bind(f,_3,_1,_2)(a,b,c) calls f(c,a,b) ──
+    {
+        Check(std::bind(P103Combine3, std::placeholders::_3, std::placeholders::_1,
+                        std::placeholders::_2)(1, 2, 3) == 312,
+              "phase103 placeholder permutation: bind(f,_3,_1,_2)(1,2,3) == f(3,1,2) == 312");
+    }
+
+    // ── traits: is_placeholder_v / is_bind_expression_v ──────────────────
+    {
+        static_assert(std::is_placeholder_v<decltype(std::placeholders::_3)> == 3,
+                      "phase103 is_placeholder_v<decltype(_3)> == 3");
+        static_assert(std::is_bind_expression_v<decltype(std::bind(P103Combine3, 1, 2, 3))>,
+                      "phase103 is_bind_expression_v<decltype(bind(...))> is true");
+        static_assert(!std::is_bind_expression_v<int>,
+                      "phase103 is_bind_expression_v<int> is false");
+    }
+
+    printf("[CXX] PASS phase103: std::bind (placeholders + reorder/reuse, bound-value-is-"
+           "copy, bind<R>/bind<void> explicit-return truncation+discard, reference_wrapper "
+           "live unwrap, nested bind full-pack forwarding, const& call) + bind_front/"
+           "bind_back (perfect-forwarding partial application, front-vs-back argument "
+           "order, symmetric &&-call move-witness) + mem_fn (member-obj-ptr + "
+           "member-fn-ptr with/without its own args, via object/pointer/reference_wrapper) "
+           "+ not_fn (ref-qualified negation, const& call, SFINAE-friendly negation via "
+           "trailing decltype) + noexcept propagation (mem_fn/bind_front/bind_back mirror "
+           "the target's noexcept, both directions) + is_placeholder/is_bind_expression "
+           "traits + FTM pins + the bind-never-moves-vs-bind_front-moves differential "
+           "(hotspots #1/#2)\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -18355,6 +18687,7 @@ int main()
     Phase100();
     Phase101();
     Phase102();
+    Phase103();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

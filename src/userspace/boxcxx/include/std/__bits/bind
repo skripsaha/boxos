@@ -1,0 +1,254 @@
+// boxcxx — <__bits/bind>
+// std::bind ([func.bind]): placeholders, is_bind_expression/is_placeholder
+// traits, the ArgPack leaf storage (mirrors <tuple>'s TupleLeaf/TupleBase,
+// but with no default constructor -- a bind expression always initializes
+// every bound slot, there is never a default-constructed leaf to support),
+// and BindExpr, the callable object bind()/bind<R>() return. INVOKE is
+// never reimplemented here -- every call routes through the existing
+// std::invoke_r / __bits::InvokeRt from <functional>.
+#ifndef BOXCXX_BITS_BIND
+#define BOXCXX_BITS_BIND
+
+#include <cstddef>
+#include <type_traits>
+#include <utility>
+
+namespace std {
+
+// ── is_bind_expression / is_placeholder ([func.bind.isbind]) ───────────
+
+template <class T>
+struct is_bind_expression : false_type {};
+template <class T>
+inline constexpr bool is_bind_expression_v = is_bind_expression<T>::value;
+
+template <class T>
+struct is_placeholder : integral_constant<int, 0> {};
+template <class T>
+inline constexpr int is_placeholder_v = is_placeholder<T>::value;
+
+namespace __bits {
+
+// bind()'s explicit-return-type sentinel. NOT void -- a bind expression
+// whose deduced call actually returns void still needs to be told apart,
+// at the type level, from "the user gave bind<R> an explicit R".
+struct BindDeduced {};
+
+template <int I>
+struct PlaceholderT {};
+
+} // namespace __bits
+
+template <int I>
+struct is_placeholder<__bits::PlaceholderT<I>> : integral_constant<int, I> {};
+// placeholders::_N objects are themselves const (inline constexpr on a
+// non-reference variable implies const) -- decltype(placeholders::_N)
+// must also resolve, not just the plain decayed type Subst uses.
+template <int I>
+struct is_placeholder<const __bits::PlaceholderT<I>> : integral_constant<int, I> {};
+
+namespace placeholders {
+
+inline constexpr __bits::PlaceholderT<1>  _1{};
+inline constexpr __bits::PlaceholderT<2>  _2{};
+inline constexpr __bits::PlaceholderT<3>  _3{};
+inline constexpr __bits::PlaceholderT<4>  _4{};
+inline constexpr __bits::PlaceholderT<5>  _5{};
+inline constexpr __bits::PlaceholderT<6>  _6{};
+inline constexpr __bits::PlaceholderT<7>  _7{};
+inline constexpr __bits::PlaceholderT<8>  _8{};
+inline constexpr __bits::PlaceholderT<9>  _9{};
+inline constexpr __bits::PlaceholderT<10> _10{};
+
+} // namespace placeholders
+
+namespace __bits {
+
+// ── ArgNthType: the same __type_pack_element-or-recursive lookup as
+// <tuple>'s NthType, kept as a separate name since <functional> cannot
+// include <tuple> (dependency-upstream). ───────────────────────────────
+
+#if defined(__has_builtin) && __has_builtin(__type_pack_element)
+template <size_t I, class... Ts>
+using ArgNthType = __type_pack_element<I, Ts...>;
+#else
+template <size_t I, class Head, class... Tail>
+struct ArgNthTypeImpl : ArgNthTypeImpl<I - 1, Tail...> {};
+template <class Head, class... Tail>
+struct ArgNthTypeImpl<0, Head, Tail...> { using type = Head; };
+template <size_t I, class... Ts>
+using ArgNthType = typename ArgNthTypeImpl<I, Ts...>::type;
+#endif
+
+// ── ArgLeaf / ArgPack: one storage leaf per bound argument. ────────────
+
+template <size_t I, class T>
+struct ArgLeaf {
+    [[no_unique_address]] T value;
+
+    template <class U>
+        requires(!is_same_v<remove_cvref_t<U>, ArgLeaf>)
+    constexpr explicit ArgLeaf(U &&u) : value(forward<U>(u))
+    {
+    }
+
+    ArgLeaf(const ArgLeaf &) = default;
+    ArgLeaf(ArgLeaf &&)      = default;
+    ArgLeaf &operator=(const ArgLeaf &) = default;
+    ArgLeaf &operator=(ArgLeaf &&) = default;
+};
+
+template <class Seq, class... Ts> struct ArgPackImpl;
+
+template <size_t... Is, class... Ts>
+struct ArgPackImpl<index_sequence<Is...>, Ts...> : ArgLeaf<Is, Ts>... {
+    template <class... Us>
+        requires(sizeof...(Us) == sizeof...(Ts))
+    constexpr explicit ArgPackImpl(Us &&...us) : ArgLeaf<Is, Ts>(forward<Us>(us))...
+    {
+    }
+
+    ArgPackImpl(const ArgPackImpl &) = default;
+    ArgPackImpl(ArgPackImpl &&)      = default;
+    ArgPackImpl &operator=(const ArgPackImpl &) = default;
+    ArgPackImpl &operator=(ArgPackImpl &&) = default;
+};
+
+template <class... Ts>
+using ArgPack = ArgPackImpl<index_sequence_for<Ts...>, Ts...>;
+
+template <size_t I, class T>
+constexpr T &ArgGet(ArgLeaf<I, T> &leaf) noexcept
+{
+    return leaf.value;
+}
+template <size_t I, class T>
+constexpr const T &ArgGet(const ArgLeaf<I, T> &leaf) noexcept
+{
+    return leaf.value;
+}
+template <size_t I, class T>
+constexpr T &&ArgGet(ArgLeaf<I, T> &&leaf) noexcept
+{
+    return static_cast<T &&>(leaf.value);
+}
+template <size_t I, class T>
+constexpr const T &&ArgGet(const ArgLeaf<I, T> &&leaf) noexcept
+{
+    return static_cast<const T &&>(leaf.value);
+}
+
+// Recursive pack-indexer over the CALL-time arguments -- no storage, just
+// forwards the K-th argument of a live parameter pack.
+template <size_t K, class U0, class... Us>
+constexpr decltype(auto) NthArg(U0 &&u0, Us &&...us)
+{
+    if constexpr (K == 0)
+        return forward<U0>(u0);
+    else
+        return NthArg<K - 1>(forward<Us>(us)...);
+}
+
+// ── BindExpr: the callable object std::bind()/bind<R>() return ─────────
+
+template <class ExplicitR, class FD, class... BoundArgsD>
+class BindExpr {
+    FD                     __fd;
+    ArgPack<BoundArgsD...> __bound;
+
+    // [func.bind.bind] per-argument substitution rule.
+    template <size_t I, class Self, class... Us>
+    static constexpr decltype(auto) Subst(Self &self, Us &&...us)
+    {
+        using T = ArgNthType<I, BoundArgsD...>;
+        if constexpr (IsRefWrapper<T>::value) {
+            return ArgGet<I, T>(self.__bound).get();
+        } else if constexpr (is_bind_expression_v<T>) {
+            return ArgGet<I, T>(self.__bound)(forward<Us>(us)...);
+        } else if constexpr (constexpr int Ph = is_placeholder_v<T>; Ph != 0) {
+            return NthArg<size_t(Ph - 1)>(forward<Us>(us)...);
+        } else {
+            return ArgGet<I, T>(self.__bound);
+        }
+    }
+
+    template <class Self, size_t... Is, class... Us>
+    static constexpr decltype(auto) CallImpl(Self &self, index_sequence<Is...>, Us &&...us)
+    {
+        if constexpr (is_same_v<ExplicitR, BindDeduced>)
+            return InvokeRt(self.__fd, Subst<Is>(self, forward<Us>(us)...)...);
+        else
+            return invoke_r<ExplicitR>(self.__fd, Subst<Is>(self, forward<Us>(us)...)...);
+    }
+
+public:
+    template <class Fx, class... BArgs>
+        requires(!is_same_v<remove_cvref_t<Fx>, BindExpr>)
+    constexpr explicit BindExpr(Fx &&fx, BArgs &&...bargs)
+        : __fd(forward<Fx>(fx)), __bound(forward<BArgs>(bargs)...)
+    {
+    }
+
+    BindExpr(const BindExpr &) = default;
+    BindExpr(BindExpr &&)      = default;
+    BindExpr &operator=(const BindExpr &) = default;
+    BindExpr &operator=(BindExpr &&) = default;
+
+    // Vfd/bound_args are always lvalues ([func.bind.bind]) -- all four
+    // overloads pass bare *this to CallImpl, NEVER std::move(*this).
+    // (A class cannot mix ref-qualified and unqualified overloads of the
+    // same name/params/cv, so the lvalue cases need an explicit &, too.)
+    template <class... Us>
+    constexpr decltype(auto) operator()(Us &&...us) &
+    {
+        return CallImpl(*this, index_sequence_for<BoundArgsD...>{}, forward<Us>(us)...);
+    }
+    template <class... Us>
+    constexpr decltype(auto) operator()(Us &&...us) const &
+    {
+        return CallImpl(*this, index_sequence_for<BoundArgsD...>{}, forward<Us>(us)...);
+    }
+    template <class... Us>
+    constexpr decltype(auto) operator()(Us &&...us) &&
+    {
+        return CallImpl(*this, index_sequence_for<BoundArgsD...>{}, forward<Us>(us)...);
+    }
+    template <class... Us>
+    constexpr decltype(auto) operator()(Us &&...us) const &&
+    {
+        return CallImpl(*this, index_sequence_for<BoundArgsD...>{}, forward<Us>(us)...);
+    }
+};
+
+} // namespace __bits
+
+template <class ExplicitR, class FD, class... BoundArgsD>
+struct is_bind_expression<__bits::BindExpr<ExplicitR, FD, BoundArgsD...>> : true_type {};
+
+template <class F, class... BoundArgs>
+constexpr __bits::BindExpr<__bits::BindDeduced, decay_t<F>, decay_t<BoundArgs>...>
+bind(F &&f, BoundArgs &&...boundArgs)
+{
+    static_assert(is_constructible_v<decay_t<F>, F> &&
+                      (is_constructible_v<decay_t<BoundArgs>, BoundArgs> && ...),
+                  "bind: decay_t<F>/decay_t<BoundArgs> must be constructible from the "
+                  "supplied arguments");
+    return __bits::BindExpr<__bits::BindDeduced, decay_t<F>, decay_t<BoundArgs>...>(
+        forward<F>(f), forward<BoundArgs>(boundArgs)...);
+}
+
+template <class R, class F, class... BoundArgs>
+constexpr __bits::BindExpr<R, decay_t<F>, decay_t<BoundArgs>...>
+bind(F &&f, BoundArgs &&...boundArgs)
+{
+    static_assert(is_constructible_v<decay_t<F>, F> &&
+                      (is_constructible_v<decay_t<BoundArgs>, BoundArgs> && ...),
+                  "bind<R>: decay_t<F>/decay_t<BoundArgs> must be constructible from the "
+                  "supplied arguments");
+    return __bits::BindExpr<R, decay_t<F>, decay_t<BoundArgs>...>(
+        forward<F>(f), forward<BoundArgs>(boundArgs)...);
+}
+
+} // namespace std
+
+#endif // BOXCXX_BITS_BIND
