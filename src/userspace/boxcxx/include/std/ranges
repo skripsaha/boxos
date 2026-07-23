@@ -10,6 +10,7 @@
 #define BOXCXX_RANGES
 
 #include <__bits/ranges_core>
+#include <__bits/version_ranges>
 #include <concepts>
 #include <cstddef>
 #include <iterator>

@@ -1,0 +1,38 @@
+// boxcxx — <__bits/version_algorithm>
+//
+// The feature-test macros [version.syn] owned by <algorithm> -- every
+// ranges:: niebloid these name lives in a __bits/ranges_algo* file
+// <algorithm> itself #includes (ranges::contains / find_last / starts_with
+// / ends_with in ranges_algo; fold_left / fold_right family in
+// ranges_algo_fold), plus the classic <algorithm>/<utility> constexpr
+// macro. Split out of <version> for the same [support.limits.general]
+// per-header reason as <__bits/version_ranges> -- see that file's comment.
+#ifndef BOXCXX_BITS_VERSION_ALGORITHM
+#define BOXCXX_BITS_VERSION_ALGORITHM
+
+// Original C++20 value (P0202), unchanged through C++23 -- NOT the later
+// C++26 202306L bump (P2562 "constexpr Stable Sorting"). boxcxx's
+// stable_sort/inplace_merge are deliberately still non-constexpr (buffer-
+// based, see <__bits/algorithm_classic>), exactly matching P0202's own
+// original exclusion list (stable_sort/inplace_merge need a temp buffer;
+// shuffle/sample need a constexpr uniform_random_bit_generator, neither of
+// which C++20 provided) -- not a boxcxx gap. stable_partition, also listed
+// in P0202's original exclusion set, IS constexpr in boxcxx already
+// (algorithm_classic's merge-based implementation needs no buffer).
+#ifndef __cpp_lib_constexpr_algorithms
+#  define __cpp_lib_constexpr_algorithms 201806L
+#endif
+#ifndef __cpp_lib_ranges_contains
+#  define __cpp_lib_ranges_contains 202207L
+#endif
+#ifndef __cpp_lib_ranges_find_last
+#  define __cpp_lib_ranges_find_last 202207L
+#endif
+#ifndef __cpp_lib_ranges_starts_ends_with
+#  define __cpp_lib_ranges_starts_ends_with 202106L
+#endif
+#ifndef __cpp_lib_ranges_fold
+#  define __cpp_lib_ranges_fold 202207L
+#endif
+
+#endif // BOXCXX_BITS_VERSION_ALGORITHM

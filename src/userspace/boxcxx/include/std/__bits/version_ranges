@@ -1,0 +1,62 @@
+// boxcxx — <__bits/version_ranges>
+//
+// The __cpp_lib_ranges* feature-test macros [version.syn] owned by <ranges>
+// -- every one of these names a view/adaptor that lives in a file <ranges>
+// itself #includes. Split out of <version> so <ranges> can #include just
+// this fragment directly: per [support.limits.general] a macro must be
+// visible to a translation unit that includes ONLY the owning header, not
+// just <version>. <version> includes this same file too, to expose the
+// complete set from one place.
+//
+// Values cross-checked against libstdc++'s own bits/version.def (the
+// generator source real GCC ships from -- the most authoritative available
+// reference), not just the bleeding-edge eel.is/c++draft snapshot, which
+// mixes in C++26-only DR bumps boxcxx does not implement. Notably
+// __cpp_lib_ranges's true C++23 value is 202302L -- distinct from both the
+// pre-C++23 202110L (C++20) and the C++26 202406L bump; naive eel.is-draft-
+// only research first produced the wrong middle value here (202202L, which
+// is neither), corrected after a version.def cross-check.
+#ifndef BOXCXX_BITS_VERSION_RANGES
+#define BOXCXX_BITS_VERSION_RANGES
+
+#ifndef __cpp_lib_ranges
+#  define __cpp_lib_ranges 202302L
+#endif
+#ifndef __cpp_lib_ranges_to_container
+#  define __cpp_lib_ranges_to_container 202202L
+#endif
+#ifndef __cpp_lib_ranges_zip
+#  define __cpp_lib_ranges_zip 202110L
+#endif
+#ifndef __cpp_lib_ranges_join_with
+#  define __cpp_lib_ranges_join_with 202202L
+#endif
+#ifndef __cpp_lib_ranges_chunk
+#  define __cpp_lib_ranges_chunk 202202L
+#endif
+#ifndef __cpp_lib_ranges_chunk_by
+#  define __cpp_lib_ranges_chunk_by 202202L
+#endif
+#ifndef __cpp_lib_ranges_slide
+#  define __cpp_lib_ranges_slide 202202L
+#endif
+#ifndef __cpp_lib_ranges_stride
+#  define __cpp_lib_ranges_stride 202207L
+#endif
+#ifndef __cpp_lib_ranges_cartesian_product
+#  define __cpp_lib_ranges_cartesian_product 202207L
+#endif
+#ifndef __cpp_lib_ranges_enumerate
+#  define __cpp_lib_ranges_enumerate 202302L
+#endif
+#ifndef __cpp_lib_ranges_repeat
+#  define __cpp_lib_ranges_repeat 202207L
+#endif
+#ifndef __cpp_lib_ranges_as_const
+#  define __cpp_lib_ranges_as_const 202311L
+#endif
+#ifndef __cpp_lib_ranges_as_rvalue
+#  define __cpp_lib_ranges_as_rvalue 202207L
+#endif
+
+#endif // BOXCXX_BITS_VERSION_RANGES

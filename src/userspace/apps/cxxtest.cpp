@@ -48,6 +48,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <variant>
+#include <version>
 #include <cstddef>
 #include <cstdint>
 #include <mutex>
@@ -17103,6 +17104,295 @@ void Phase99()
            "cartesian operator-(default_sentinel_t) + cartesian ==/forward-rung narrowing\n");
 }
 
+// Phase100 fixture: a minimal bidirectional iterator with its own ADL
+// iter_move hidden friend, used to prove ranges::iter_move(wrapper) forwards
+// into the WRAPPED iterator's customization for move_iterator/
+// counted_iterator/reverse_iterator, rather than falling back to a raw
+// dereference that would bypass it. Declared at namespace (not function)
+// scope because GCC rejects a friend function DEFINITION inside a local
+// class ([class.local] hidden-friend idiom needs namespace scope to work).
+struct P100IterMoveProbe {
+    using iterator_concept  = std::bidirectional_iterator_tag;
+    using iterator_category = std::bidirectional_iterator_tag;
+    using value_type        = int;
+    using difference_type   = std::ptrdiff_t;
+    using pointer           = int *;
+    using reference         = int &;
+
+    int *p         = nullptr;
+    int *moveCount = nullptr;
+
+    constexpr int &operator*() const { return *p; }
+    constexpr P100IterMoveProbe &operator++()
+    {
+        ++p;
+        return *this;
+    }
+    constexpr P100IterMoveProbe operator++(int)
+    {
+        auto t = *this;
+        ++p;
+        return t;
+    }
+    constexpr P100IterMoveProbe &operator--()
+    {
+        --p;
+        return *this;
+    }
+    constexpr P100IterMoveProbe operator--(int)
+    {
+        auto t = *this;
+        --p;
+        return t;
+    }
+    friend constexpr bool operator==(const P100IterMoveProbe &a, const P100IterMoveProbe &b)
+    {
+        return a.p == b.p;
+    }
+    friend constexpr int &&iter_move(const P100IterMoveProbe &it)
+    {
+        ++*it.moveCount;
+        return std::move(*it.p);
+    }
+};
+
+void Phase100()
+{
+    namespace rg = std::ranges;
+    namespace vw = std::views;
+
+    // ── feature-test macros: presence + value pins ([version.syn]) ─────────
+    // A future accidental removal of any of these #defines breaks the build
+    // right here (undeclared identifier) instead of silently reverting to
+    // "feature unadvertised" -- that is the whole point of pinning them.
+    {
+        static_assert(__cpp_lib_ranges >= 202302L, "phase100 __cpp_lib_ranges pin");
+        static_assert(__cpp_lib_ranges_to_container >= 202202L,
+                      "phase100 __cpp_lib_ranges_to_container pin");
+        static_assert(__cpp_lib_ranges_zip >= 202110L, "phase100 __cpp_lib_ranges_zip pin");
+        static_assert(__cpp_lib_ranges_join_with >= 202202L,
+                      "phase100 __cpp_lib_ranges_join_with pin");
+        static_assert(__cpp_lib_ranges_chunk >= 202202L, "phase100 __cpp_lib_ranges_chunk pin");
+        static_assert(__cpp_lib_ranges_chunk_by >= 202202L,
+                      "phase100 __cpp_lib_ranges_chunk_by pin");
+        static_assert(__cpp_lib_ranges_slide >= 202202L, "phase100 __cpp_lib_ranges_slide pin");
+        static_assert(__cpp_lib_ranges_stride >= 202207L, "phase100 __cpp_lib_ranges_stride pin");
+        static_assert(__cpp_lib_ranges_cartesian_product >= 202207L,
+                      "phase100 __cpp_lib_ranges_cartesian_product pin");
+        static_assert(__cpp_lib_ranges_enumerate >= 202302L,
+                      "phase100 __cpp_lib_ranges_enumerate pin");
+        static_assert(__cpp_lib_ranges_repeat >= 202207L, "phase100 __cpp_lib_ranges_repeat pin");
+        static_assert(__cpp_lib_ranges_as_const >= 202311L, "phase100 __cpp_lib_ranges_as_const pin");
+        static_assert(__cpp_lib_ranges_as_rvalue >= 202207L,
+                      "phase100 __cpp_lib_ranges_as_rvalue pin");
+        static_assert(__cpp_lib_ranges_fold >= 202207L, "phase100 __cpp_lib_ranges_fold pin");
+        static_assert(__cpp_lib_ranges_contains >= 202207L,
+                      "phase100 __cpp_lib_ranges_contains pin");
+        static_assert(__cpp_lib_ranges_find_last >= 202207L,
+                      "phase100 __cpp_lib_ranges_find_last pin");
+        static_assert(__cpp_lib_ranges_starts_ends_with >= 202106L,
+                      "phase100 __cpp_lib_ranges_starts_ends_with pin");
+        static_assert(__cpp_lib_constexpr_algorithms >= 201806L,
+                      "phase100 __cpp_lib_constexpr_algorithms pin");
+    }
+
+    // ── BUILTIN-PTR-CMP: ranges::less/equal_to/greater/... route raw
+    //    pointers through std::less<common_type>, not a bare operator<
+    //    ([range.cmp]) -- already-shipped, pinned so it can't silently
+    //    regress. ────────────────────────────────────────────────────────
+    {
+        std::vector<int> p100PtrBacking{10, 20, 30, 40, 50};
+        int             *p100PtrLo = &p100PtrBacking[1];
+        int             *p100PtrHi = &p100PtrBacking[3];
+
+        static_assert(std::totally_ordered_with<int *, int *>,
+                      "phase100 ranges::less applicability gate for int*");
+
+        Check(rg::less{}(p100PtrLo, p100PtrHi) == std::less<int *>{}(p100PtrLo, p100PtrHi),
+              "phase100 ranges::less(ptr,ptr) matches std::less<T*> (pointer total-order branch)");
+        Check(rg::less{}(p100PtrHi, p100PtrLo) == std::less<int *>{}(p100PtrHi, p100PtrLo),
+              "phase100 ranges::less(ptr,ptr) reversed operands matches std::less<T*>");
+        Check(rg::equal_to{}(p100PtrLo, p100PtrLo), "phase100 ranges::equal_to(ptr,ptr) self-equal");
+        Check(!rg::equal_to{}(p100PtrLo, p100PtrHi),
+              "phase100 ranges::equal_to(ptr,ptr) distinct addresses");
+        Check(rg::greater{}(p100PtrHi, p100PtrLo) == std::less<int *>{}(p100PtrLo, p100PtrHi),
+              "phase100 ranges::greater(ptr,ptr) inherits less's pointer routing");
+        Check(rg::less_equal{}(p100PtrLo, p100PtrLo) && rg::greater_equal{}(p100PtrLo, p100PtrLo),
+              "phase100 ranges::less_equal/greater_equal(ptr,ptr) equal-position reflexivity");
+
+        std::vector<int *> p100PtrVec{&p100PtrBacking[4], &p100PtrBacking[0], &p100PtrBacking[2]};
+        std::vector<int *> p100PtrVecRef = p100PtrVec;
+        rg::sort(p100PtrVec, rg::less{});
+        std::sort(p100PtrVecRef.begin(), p100PtrVecRef.end(), std::less<int *>{});
+        Check(p100PtrVec == p100PtrVecRef,
+              "phase100 ranges::sort(vector<int*>, ranges::less) matches std::less<T*> order end-to-end");
+    }
+
+    // ── adjacent_view value_type is tuple-always, never pair for N==2
+    //    ([range.adjacent.iterator], unconditional REPEAT(T,N)) ─────────────
+    {
+        std::vector<int> p100Adj{1, 2, 3, 4};
+        auto             p100AdjPairs = vw::adjacent<2>(p100Adj);
+        static_assert(std::same_as<rg::range_value_t<decltype(p100AdjPairs)>, std::tuple<int, int>>,
+                      "phase100 adjacent<2> value_type is tuple<int,int>, unconditionally");
+        static_assert(!std::same_as<rg::range_value_t<decltype(p100AdjPairs)>, std::pair<int, int>>,
+                      "phase100 adjacent<2> value_type is explicitly NOT pair<int,int>");
+
+        auto p100AdjFirst = *p100AdjPairs.begin();
+        Check(std::get<0>(p100AdjFirst) == 1 && std::get<1>(p100AdjFirst) == 2,
+              "phase100 adjacent<2> pairwise value via tuple get<>()");
+    }
+
+    // ── ITER_CONCEPT forward/bidirectional/random-access promotion battery:
+    //    chunk/chunk_by/slide/stride/zip/zip_transform/adjacent/
+    //    adjacent_transform/elements/enumerate/cartesian_product all
+    //    already promote past the legacy always-input pin (Ф29f-1's flip) --
+    //    pinned here so a future header change can't silently regress it. ──
+    {
+        std::vector<int> p100Va{1, 2, 3, 4, 5, 6};
+        std::vector<int> p100Vb{10, 20, 30};
+        std::list<int>   p100La{1, 2, 3, 4};
+
+        // chunk_view: forward-base specialization ladder tops out at
+        // random_access for a random_access base.
+        static_assert(rg::random_access_range<decltype(vw::chunk(p100Va, 2))>,
+                      "phase100 chunk_view<vector<int>> promotes to random_access_range");
+        static_assert(rg::bidirectional_range<decltype(vw::chunk(p100La, 2))>,
+                      "phase100 chunk_view<list<int>> promotes to bidirectional_range");
+        static_assert(!rg::random_access_range<decltype(vw::chunk(p100La, 2))>,
+                      "phase100 chunk_view<list<int>> does NOT over-claim random_access_range");
+
+        // chunk_by_view: no random_access rung exists in the standard (an
+        // equivalence-predicate split can't be jumped in O(1)) -- top tier
+        // is bidirectional.
+        static_assert(rg::bidirectional_range<decltype(vw::chunk_by(p100Va, rg::less_equal{}))>,
+                      "phase100 chunk_by_view<vector<int>> promotes to bidirectional_range");
+
+        // slide_view: same 3-tier ladder as chunk_view.
+        static_assert(rg::random_access_range<decltype(vw::slide(p100Va, 2))>,
+                      "phase100 slide_view<vector<int>> promotes to random_access_range");
+        static_assert(rg::bidirectional_range<decltype(vw::slide(p100La, 2))>,
+                      "phase100 slide_view<list<int>> promotes to bidirectional_range");
+
+        // stride_view: 4-tier ladder (has an explicit forward rung too).
+        static_assert(rg::random_access_range<decltype(vw::stride(p100Va, 2))>,
+                      "phase100 stride_view<vector<int>> promotes to random_access_range");
+        static_assert(rg::bidirectional_range<decltype(vw::stride(p100La, 2))>,
+                      "phase100 stride_view<list<int>> promotes to bidirectional_range");
+
+        // zip_view: conjunction over ALL Views, no First/Vs asymmetry.
+        static_assert(rg::random_access_range<decltype(vw::zip(p100Va, p100Vb))>,
+                      "phase100 zip_view<vector&,vector&> promotes to random_access_range");
+        static_assert(rg::bidirectional_range<decltype(vw::zip(p100La, p100Vb))>,
+                      "phase100 zip_view<list&,vector&> promotes to bidirectional_range");
+        static_assert(!rg::random_access_range<decltype(vw::zip(p100La, p100Vb))>,
+                      "phase100 zip_view<list&,vector&> does NOT over-claim random_access_range "
+                      "(conjunction correctly caps on the non-random-access member)");
+
+        // zip_transform_view: delegates iterator_concept to the underlying
+        // zip iterator verbatim.
+        auto p100ZipT = vw::zip_transform([](int x, int y) { return x + y; }, p100Va, p100Vb);
+        static_assert(rg::random_access_range<decltype(p100ZipT)>,
+                      "phase100 zip_transform_view<vector,vector> promotes to random_access_range");
+
+        // adjacent_view: floor is forward (class requires forward_range<V>).
+        static_assert(rg::random_access_range<decltype(vw::adjacent<2>(p100Va))>,
+                      "phase100 adjacent_view<vector,2> promotes to random_access_range");
+        static_assert(rg::bidirectional_range<decltype(vw::adjacent<2>(p100La))>,
+                      "phase100 adjacent_view<list,2> promotes to bidirectional_range");
+
+        // adjacent_transform_view: same delegation pattern as zip_transform.
+        auto p100AdjT = vw::adjacent_transform<2>(p100Va, [](int a, int b) { return a + b; });
+        static_assert(rg::random_access_range<decltype(p100AdjT)>,
+                      "phase100 adjacent_transform_view<vector,2> promotes to random_access_range");
+
+        // elements_view: mirrors its single base's own category directly.
+        std::vector<std::pair<int, int>> p100PairsVa{{1, 10}, {2, 20}, {3, 30}};
+        std::list<std::pair<int, int>>   p100PairsLa{{1, 10}, {2, 20}, {3, 30}};
+        static_assert(rg::random_access_range<decltype(vw::elements<0>(p100PairsVa))>,
+                      "phase100 elements_view<vector,0> promotes to random_access_range");
+        static_assert(rg::bidirectional_range<decltype(vw::elements<0>(p100PairsLa))>,
+                      "phase100 elements_view<list,0> promotes to bidirectional_range");
+
+        // enumerate_view: same single-base mirroring as elements_view.
+        static_assert(rg::random_access_range<decltype(vw::enumerate(p100Va))>,
+                      "phase100 enumerate_view<vector> promotes to random_access_range");
+
+        // cartesian_product_view: the forward rung is gated on First ALONE
+        // ([range.cartesian.iterator]/1.3, the Ф29f-3b fix) while
+        // bidirectional/random_access still require the full First+Vs...
+        // conjunction -- First=list (forward, bidi, NOT random_access) with
+        // Vs=vector proves both halves of that split in one fixture.
+        auto p100Cp = vw::cartesian_product(p100La, p100Va);
+        static_assert(rg::forward_range<decltype(p100Cp)>,
+                      "phase100 cartesian_product_view forward rung gated on First alone");
+        static_assert(rg::bidirectional_range<decltype(p100Cp)>,
+                      "phase100 cartesian_product_view promotes to bidirectional_range "
+                      "(First bidi + Vs bidi+common)");
+        static_assert(!rg::random_access_range<decltype(p100Cp)>,
+                      "phase100 cartesian_product_view does NOT over-claim random_access_range "
+                      "when First (list) isn't random_access, even though Vs (vector) is");
+        static_assert(rg::random_access_range<decltype(vw::cartesian_product(p100Va, p100Vb))>,
+                      "phase100 cartesian_product_view<vector,vector> promotes to random_access_range");
+    }
+
+    // ── wrapper iter_move hidden-friends route correctly: move_iterator /
+    //    counted_iterator / reverse_iterator each forward ranges::iter_move
+    //    called on THEMSELVES into the wrapped iterator's own
+    //    customization, rather than falling back to a raw dereference that
+    //    would bypass it ([move.iter.elem]/[reverse.iter.elem]/
+    //    [counted.iter.elem], shipped Ф29f-1) ──────────────────────────────
+    {
+        int p100MoveCount = 0;
+
+        static_assert(std::bidirectional_iterator<P100IterMoveProbe>,
+                      "phase100 P100IterMoveProbe fixture models bidirectional_iterator");
+
+        int p100Backing[3] = {100, 200, 300};
+
+        P100IterMoveProbe p100Base{&p100Backing[0], &p100MoveCount};
+        p100MoveCount = 0;
+        Check(rg::iter_move(p100Base) == 100,
+              "phase100 baseline: ranges::iter_move(probe) finds the ADL overload");
+        Check(p100MoveCount == 1, "phase100 baseline: probe's iter_move invoked exactly once");
+
+        std::move_iterator<P100IterMoveProbe> p100Mv(P100IterMoveProbe{&p100Backing[0], &p100MoveCount});
+        p100MoveCount = 0;
+        Check(rg::iter_move(p100Mv) == 100,
+              "phase100 ranges::iter_move(move_iterator<probe>) routes into the wrapped probe's iter_move");
+        Check(p100MoveCount == 1,
+              "phase100 move_iterator iter_move escape hatch invokes the wrapped iter_move exactly once");
+
+        std::counted_iterator<P100IterMoveProbe> p100Cnt(
+            P100IterMoveProbe{&p100Backing[1], &p100MoveCount}, 2);
+        p100MoveCount = 0;
+        Check(rg::iter_move(p100Cnt) == 200,
+              "phase100 ranges::iter_move(counted_iterator<probe>) routes into the wrapped probe's "
+              "iter_move (counted_iterator::operator* is a raw *__cur, so this is load-bearing)");
+        Check(p100MoveCount == 1,
+              "phase100 counted_iterator iter_move escape hatch invokes the wrapped iter_move exactly once");
+
+        // reverse_iterator(it) logically sits one position BEFORE it
+        // (operator* computes *--tmp) -- construct one past the target so
+        // the dereference lands back on backing[2].
+        std::reverse_iterator<P100IterMoveProbe> p100Rev(
+            P100IterMoveProbe{p100Backing + 3, &p100MoveCount});
+        p100MoveCount = 0;
+        Check(rg::iter_move(p100Rev) == 300,
+              "phase100 ranges::iter_move(reverse_iterator<probe>) routes into the wrapped probe's "
+              "iter_move (reverse_iterator::operator* is a raw *--tmp, so this is load-bearing)");
+        Check(p100MoveCount == 1,
+              "phase100 reverse_iterator iter_move escape hatch invokes the wrapped iter_move exactly once");
+    }
+
+    printf("[CXX] PASS phase100: feature-test macros (<version>, [version.syn]) + "
+           "BUILTIN-PTR-CMP regression pin + adjacent_view tuple-always regression pin + "
+           "forward/bidirectional/random_access promotion battery (chunk/chunk_by/slide/"
+           "stride/zip/zip_transform/adjacent/adjacent_transform/elements/enumerate/"
+           "cartesian_product) + wrapper iter_move hidden-friend regression pin "
+           "(move_iterator/counted_iterator/reverse_iterator)\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -17224,6 +17514,7 @@ int main()
     Phase97();
     Phase98();
     Phase99();
+    Phase100();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
