@@ -76,6 +76,19 @@ public:
     {
         insert_range(std::forward<R>(rg));
     }
+    template <ContainerCompatibleRange<value_type> R>
+    unordered_set(from_range_t, R &&rg, size_type buckets, const Alloc &a)
+        : __t(buckets, Hash(), KeyEq(), a)
+    {
+        insert_range(std::forward<R>(rg));
+    }
+    template <ContainerCompatibleRange<value_type> R>
+    unordered_set(from_range_t, R &&rg, size_type buckets, const Hash &h,
+                  const Alloc &a)
+        : __t(buckets, h, KeyEq(), a)
+    {
+        insert_range(std::forward<R>(rg));
+    }
     unordered_set(initializer_list<Key> il) { insert(il.begin(), il.end()); }
     unordered_set(const unordered_set &) = default;
     unordered_set(unordered_set &&) noexcept = default;
@@ -323,6 +336,19 @@ public:
                        const Hash &h = Hash(), const KeyEq &eq = KeyEq(),
                        const Alloc &a = Alloc())
         : __t(buckets, h, eq, a)
+    {
+        insert_range(std::forward<R>(rg));
+    }
+    template <ContainerCompatibleRange<value_type> R>
+    unordered_multiset(from_range_t, R &&rg, size_type buckets, const Alloc &a)
+        : __t(buckets, Hash(), KeyEq(), a)
+    {
+        insert_range(std::forward<R>(rg));
+    }
+    template <ContainerCompatibleRange<value_type> R>
+    unordered_multiset(from_range_t, R &&rg, size_type buckets,
+                       const Hash &h, const Alloc &a)
+        : __t(buckets, h, KeyEq(), a)
     {
         insert_range(std::forward<R>(rg));
     }
@@ -639,11 +665,24 @@ template <typename It, typename Hash = hash<iter_value_t<It>>,
 unordered_set(It, It, size_t = 0, Hash = Hash(), KeyEq = KeyEq(), Alloc = Alloc())
     -> unordered_set<iter_value_t<It>, Hash, KeyEq, Alloc>;
 
-template <ranges::input_range R, typename Hash = hash<ranges::range_value_t<R>>,
-          typename KeyEq = equal_to<ranges::range_value_t<R>>,
+// Both Hash and KeyEq (not just Hash) must be NotAllocatorLike — see
+// unordered_map's identical guides for why (an unconstrained KeyEq slot
+// would still swallow the Alloc argument in the 5-arg bucket+Hash+Alloc
+// call, staying ambiguous against the new guide below).
+template <ranges::input_range R, NotAllocatorLike Hash = hash<ranges::range_value_t<R>>,
+          NotAllocatorLike KeyEq = equal_to<ranges::range_value_t<R>>,
           typename Alloc = allocator<ranges::range_value_t<R>>>
 unordered_set(from_range_t, R &&, size_t = 0, Hash = Hash(), KeyEq = KeyEq(), Alloc = Alloc())
     -> unordered_set<ranges::range_value_t<R>, Hash, KeyEq, Alloc>;
+
+template <ranges::input_range R, AllocatorLike Alloc>
+unordered_set(from_range_t, R &&, size_t, Alloc)
+    -> unordered_set<ranges::range_value_t<R>, hash<ranges::range_value_t<R>>,
+                     equal_to<ranges::range_value_t<R>>, Alloc>;
+
+template <ranges::input_range R, typename Hash, AllocatorLike Alloc>
+unordered_set(from_range_t, R &&, size_t, Hash, Alloc)
+    -> unordered_set<ranges::range_value_t<R>, Hash, equal_to<ranges::range_value_t<R>>, Alloc>;
 
 template <typename It, typename Hash = hash<iter_value_t<It>>,
           typename KeyEq = equal_to<iter_value_t<It>>,
@@ -651,11 +690,20 @@ template <typename It, typename Hash = hash<iter_value_t<It>>,
 unordered_multiset(It, It, size_t = 0, Hash = Hash(), KeyEq = KeyEq(), Alloc = Alloc())
     -> unordered_multiset<iter_value_t<It>, Hash, KeyEq, Alloc>;
 
-template <ranges::input_range R, typename Hash = hash<ranges::range_value_t<R>>,
-          typename KeyEq = equal_to<ranges::range_value_t<R>>,
+template <ranges::input_range R, NotAllocatorLike Hash = hash<ranges::range_value_t<R>>,
+          NotAllocatorLike KeyEq = equal_to<ranges::range_value_t<R>>,
           typename Alloc = allocator<ranges::range_value_t<R>>>
 unordered_multiset(from_range_t, R &&, size_t = 0, Hash = Hash(), KeyEq = KeyEq(), Alloc = Alloc())
     -> unordered_multiset<ranges::range_value_t<R>, Hash, KeyEq, Alloc>;
+
+template <ranges::input_range R, AllocatorLike Alloc>
+unordered_multiset(from_range_t, R &&, size_t, Alloc)
+    -> unordered_multiset<ranges::range_value_t<R>, hash<ranges::range_value_t<R>>,
+                          equal_to<ranges::range_value_t<R>>, Alloc>;
+
+template <ranges::input_range R, typename Hash, AllocatorLike Alloc>
+unordered_multiset(from_range_t, R &&, size_t, Hash, Alloc)
+    -> unordered_multiset<ranges::range_value_t<R>, Hash, equal_to<ranges::range_value_t<R>>, Alloc>;
 
 } // namespace std
 

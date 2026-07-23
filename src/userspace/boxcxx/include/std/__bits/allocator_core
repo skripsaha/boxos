@@ -319,6 +319,20 @@ struct allocator_traits {
     }
 };
 
+// ── allocator-like detection (for CTAD guide disambiguation) ────────────
+// A container's deduction guides need to tell an allocator argument apart
+// from a comparator/hash argument occupying the same trailing slot (e.g.
+// map(from_range_t, R&&, Alloc) vs the Comp-taking guide, both matching a
+// 3-argument call). Mirrors the shape every mainstream standard library
+// uses for this exact problem (libstdc++: __is_allocator).
+template <class A>
+concept AllocatorLike = requires(A &a) {
+    typename A::value_type;
+    a.allocate(size_t{});
+};
+template <class A>
+concept NotAllocatorLike = !AllocatorLike<A>;
+
 } // namespace std
 
 #endif // BOXCXX_BITS_ALLOCATOR_CORE

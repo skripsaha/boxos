@@ -16,6 +16,15 @@
 #ifndef BOXCXX_BITS_RANGES_ALGO_MUT
 #define BOXCXX_BITS_RANGES_ALGO_MUT
 
+// Self-contained: in_out_result/in_in_result/in_in_out_result (used by this
+// file's own result-type aliases below) live in <__bits/ranges_algo>; Rotate/
+// ShiftRight delegate to classic std::rotate/std::shift_right, which live in
+// <__bits/algorithm_classic> (the classic-algorithms leaf, safe to include
+// from anywhere -- unlike <algorithm> itself, which would recursively pull
+// in the OTHER ranges_algo_* files through its own fixed tail chain). No
+// longer relying on <algorithm>'s fixed include order to see any of this.
+#include <__bits/algorithm_classic>
+#include <__bits/ranges_algo>
 #include <__bits/urng>
 #include <functional>
 #include <ranges>

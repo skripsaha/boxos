@@ -259,6 +259,17 @@ template <class I>
 using minmax_element_result = min_max_result<I>;
 
 struct MinmaxElement {
+    // Pairwise tournament ([alg.min.max]): elements are consumed two at a
+    // time. Each pair costs 1 comparison to find its own smaller/larger
+    // element, then 1 more each to fold that element into the running mn/mx
+    // — 3 comparisons per 2 elements, meeting the mandated
+    // floor(3(N-1)/2) bound (the naive min_element-then-max_element
+    // composition costs 2(N-1)). A leftover unpaired element (odd N) costs
+    // at most 2. Tie-breaking is exactly preserved: mn is the FIRST smallest
+    // (strict '<' — an equal later element never displaces it) and mx is the
+    // LAST largest ('>=' — via negated '<' — lets a later equal element
+    // displace an earlier one), matching [alg.min.max]'s own asymmetry vs
+    // plain max_element (which keeps the leftmost max).
     template <forward_iterator I, sentinel_for<I> S, class Proj = identity,
               indirect_strict_weak_order<projected<I, Proj>> Comp = ranges::less>
     constexpr minmax_element_result<I> operator()(I first, S last,
@@ -267,16 +278,43 @@ struct MinmaxElement {
     {
         if (first == last) return {first, first};
         I mn = first, mx = first;
-        while (++first != last) {
-            // min = FIRST smallest (strict); max = LAST largest (non-strict,
-            // `!(*first < *mx)` advances on ties too — the [alg.min.max]
-            // asymmetry vs max_element, which keeps the leftmost max).
-            if (std::invoke(comp, std::invoke(proj, *first),
-                            std::invoke(proj, *mn)))
-                mn = first;
-            if (!std::invoke(comp, std::invoke(proj, *first),
-                             std::invoke(proj, *mx)))
-                mx = first;
+        I next = first;
+        ++next;
+        if (next == last) return {mn, mx};
+
+        if (std::invoke(comp, std::invoke(proj, *next), std::invoke(proj, *first))) {
+            mn = next;
+            mx = first;
+        } else {
+            mn = first;
+            mx = next;
+        }
+        first = next;
+        ++first;
+
+        while (first != last) {
+            next = first;
+            ++next;
+            if (next == last) {
+                if (std::invoke(comp, std::invoke(proj, *first), std::invoke(proj, *mn)))
+                    mn = first;
+                else if (!std::invoke(comp, std::invoke(proj, *first), std::invoke(proj, *mx)))
+                    mx = first;
+                break;
+            }
+            if (std::invoke(comp, std::invoke(proj, *next), std::invoke(proj, *first))) {
+                if (std::invoke(comp, std::invoke(proj, *next), std::invoke(proj, *mn)))
+                    mn = next;
+                if (!std::invoke(comp, std::invoke(proj, *first), std::invoke(proj, *mx)))
+                    mx = first;
+            } else {
+                if (std::invoke(comp, std::invoke(proj, *first), std::invoke(proj, *mn)))
+                    mn = first;
+                if (!std::invoke(comp, std::invoke(proj, *next), std::invoke(proj, *mx)))
+                    mx = next;
+            }
+            first = next;
+            ++first;
         }
         return {mn, mx};
     }

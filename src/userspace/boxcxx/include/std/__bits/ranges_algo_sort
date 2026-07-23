@@ -17,6 +17,15 @@
 #ifndef BOXCXX_BITS_RANGES_ALGO_SORT
 #define BOXCXX_BITS_RANGES_ALGO_SORT
 
+// Self-contained: in_out_out_result/in_out_result/in_found_result (used by
+// this file's own result-type aliases below) live in <__bits/ranges_algo>;
+// Partition/Sort/StableSort/PartialSort/NthElement/the heap niebloids
+// delegate to classic std::partition/sort/stable_sort/... and heap ops,
+// which live in <__bits/algorithm_classic> (the classic-algorithms leaf,
+// safe to include from anywhere -- see ranges_algo_mut's identical note). No
+// longer relying on <algorithm>'s fixed include order to see any of this.
+#include <__bits/algorithm_classic>
+#include <__bits/ranges_algo>
 #include <functional>
 #include <ranges>
 #include <utility>

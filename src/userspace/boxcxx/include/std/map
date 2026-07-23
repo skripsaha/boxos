@@ -97,6 +97,11 @@ public:
     {
         insert_range(std::forward<R>(rg));
     }
+    template <ContainerCompatibleRange<value_type> R>
+    map(from_range_t, R &&rg, const Alloc &a) : __t(Comp(), a)
+    {
+        insert_range(std::forward<R>(rg));
+    }
     map(initializer_list<value_type> il, const Comp &comp = Comp(),
         const Alloc &a = Alloc())
         : __t(comp, a)
@@ -457,6 +462,11 @@ public:
     {
         insert_range(std::forward<R>(rg));
     }
+    template <ContainerCompatibleRange<value_type> R>
+    multimap(from_range_t, R &&rg, const Alloc &a) : __t(Comp(), a)
+    {
+        insert_range(std::forward<R>(rg));
+    }
     multimap(initializer_list<value_type> il, const Comp &comp = Comp(),
              const Alloc &a = Alloc())
         : __t(comp, a)
@@ -782,20 +792,33 @@ template <typename It, typename Comp = less<__rb::DeductKey<It>>,
 map(It, It, Comp = Comp(), Alloc = Alloc())
     -> map<__rb::DeductKey<It>, __rb::DeductMapped<It>, Comp, Alloc>;
 
-template <ranges::input_range R, typename Comp = less<__rb::DeductRangeKey<R>>,
+template <ranges::input_range R, NotAllocatorLike Comp = less<__rb::DeductRangeKey<R>>,
           typename Alloc = allocator<pair<const __rb::DeductRangeKey<R>, __rb::DeductRangeMapped<R>>>>
 map(from_range_t, R &&, Comp = Comp(), Alloc = Alloc())
     -> map<__rb::DeductRangeKey<R>, __rb::DeductRangeMapped<R>, Comp, Alloc>;
+
+// Allocator-only form (no Comp argument at all) — needs its own guide, not
+// just a defaulted Comp, because Comp's slot and Alloc's slot would
+// otherwise both be viable, unconstrained deduction targets for the same
+// 3rd call argument. AllocatorLike/NotAllocatorLike on the two guides
+// partitions that argument's type into exactly one matching guide.
+template <ranges::input_range R, AllocatorLike Alloc>
+map(from_range_t, R &&, Alloc)
+    -> map<__rb::DeductRangeKey<R>, __rb::DeductRangeMapped<R>, less<__rb::DeductRangeKey<R>>, Alloc>;
 
 template <typename It, typename Comp = less<__rb::DeductKey<It>>,
           typename Alloc = allocator<pair<const __rb::DeductKey<It>, __rb::DeductMapped<It>>>>
 multimap(It, It, Comp = Comp(), Alloc = Alloc())
     -> multimap<__rb::DeductKey<It>, __rb::DeductMapped<It>, Comp, Alloc>;
 
-template <ranges::input_range R, typename Comp = less<__rb::DeductRangeKey<R>>,
+template <ranges::input_range R, NotAllocatorLike Comp = less<__rb::DeductRangeKey<R>>,
           typename Alloc = allocator<pair<const __rb::DeductRangeKey<R>, __rb::DeductRangeMapped<R>>>>
 multimap(from_range_t, R &&, Comp = Comp(), Alloc = Alloc())
     -> multimap<__rb::DeductRangeKey<R>, __rb::DeductRangeMapped<R>, Comp, Alloc>;
+
+template <ranges::input_range R, AllocatorLike Alloc>
+multimap(from_range_t, R &&, Alloc)
+    -> multimap<__rb::DeductRangeKey<R>, __rb::DeductRangeMapped<R>, less<__rb::DeductRangeKey<R>>, Alloc>;
 
 } // namespace std
 

@@ -57,10 +57,16 @@ template <typename First, typename... Vs>
 class cartesian_product_view : public view_interface<cartesian_product_view<First, Vs...>> {
     tuple<First, Vs...> __bases;
 
+    // [range.cartesian.iterator]/1.3 gates the forward rung on First alone
+    // (maybe-const<Const,First> models forward_range) -- NOT on the Vs too.
+    // This is not an oversight in the standard: every Vs is already forced
+    // forward_range by the class's own requires-clause above (unconditionally,
+    // for the non-const case), and re-checking it here would be redundant;
+    // First is the only genuinely-variable factor (only input_range on the
+    // class), which is why it is the only one the rung inspects.
     template <bool Const>
     static constexpr bool IsForward =
-        forward_range<__views_detail::MaybeConst<Const, First>> &&
-        (forward_range<__views_detail::MaybeConst<Const, Vs>> && ...);
+        forward_range<__views_detail::MaybeConst<Const, First>>;
 
     template <bool Const>
     static constexpr bool IsBidirectional =
@@ -77,6 +83,20 @@ class cartesian_product_view : public view_interface<cartesian_product_view<Firs
     template <bool Const>
     static constexpr bool IsSizedSentinel =
         sized_sentinel_for<iterator_t<__views_detail::MaybeConst<Const, First>>,
+                           iterator_t<__views_detail::MaybeConst<Const, First>>> &&
+        (... && (sized_range<__views_detail::MaybeConst<Const, Vs>> &&
+                 sized_sentinel_for<iterator_t<__views_detail::MaybeConst<Const, Vs>>,
+                                    iterator_t<__views_detail::MaybeConst<Const, Vs>>>));
+
+    // Same shape as IsSizedSentinel, but for Iterator-vs-default_sentinel_t
+    // subtraction: First's REAL sentinel (sentinel_t, not iterator_t — the
+    // end-tuple's own position 0 is ranges::end(First), never the
+    // common-arg-end iterator trick) must be an O(1) sized sentinel for
+    // First's iterator. Every Vs still contributes iterator_t vs itself,
+    // since the end-tuple's non-first positions are always ranges::begin(Vs).
+    template <bool Const>
+    static constexpr bool IsSizedSentinelToEnd =
+        sized_sentinel_for<sentinel_t<__views_detail::MaybeConst<Const, First>>,
                            iterator_t<__views_detail::MaybeConst<Const, First>>> &&
         (... && (sized_range<__views_detail::MaybeConst<Const, Vs>> &&
                  sized_sentinel_for<iterator_t<__views_detail::MaybeConst<Const, Vs>>,
@@ -187,12 +207,15 @@ class cartesian_product_view : public view_interface<cartesian_product_view<Firs
         friend constexpr difference_type operator-(const Iterator &x, const Iterator &y)
             requires IsSizedSentinel<Const>
         {
-            return x.DistanceFrom(y);
+            return x.DistanceFrom(y.__current);
         }
 
+        // [range.cartesian.iterator]/22 gates only on First's iterator being
+        // equality_comparable -- every Vs's iterator already IS one
+        // unconditionally (forward_iterator, per the class's own
+        // requires-clause), so checking it again here would be redundant.
         friend constexpr bool operator==(const Iterator &x, const Iterator &y)
-            requires equality_comparable<iterator_t<__First>> &&
-                     (equality_comparable<iterator_t<__views_detail::MaybeConst<Const, Vs>>> && ...)
+            requires equality_comparable<iterator_t<__First>>
         {
             return x.__current == y.__current;
         }
@@ -201,6 +224,27 @@ class cartesian_product_view : public view_interface<cartesian_product_view<Firs
             return [&]<size_t... Is>(index_sequence<Is...>) {
                 return (... || (get<Is>(x.__current) == ranges::end(get<Is>(x.__parent->__bases))));
             }(make_index_sequence<sizeof...(Vs) + 1>{});
+        }
+
+        // [range.cartesian.iterator]/29-31: the end-tuple's position 0 is
+        // First's REAL sentinel (ranges::end), not the common-arg-end
+        // iterator trick MakeEndTuple() uses -- a plain difference_type
+        // subtraction never needs to materialize an actual end Iterator, so
+        // it doesn't need CartesianCommonArg<First> either. Every other
+        // position is ranges::begin(Vs), matching MakeEndTuple().
+        friend constexpr difference_type operator-(const Iterator &i, default_sentinel_t)
+            requires IsSizedSentinelToEnd<Const>
+        {
+            auto endTuple = [&]<size_t... Is>(index_sequence<Is...>) {
+                return tuple(ranges::end(get<0>(i.__parent->__bases)),
+                             ranges::begin(get<Is + 1>(i.__parent->__bases))...);
+            }(make_index_sequence<sizeof...(Vs)>{});
+            return i.DistanceFrom(endTuple);
+        }
+        friend constexpr difference_type operator-(default_sentinel_t s, const Iterator &i)
+            requires IsSizedSentinelToEnd<Const>
+        {
+            return -(i - s);
         }
 
         // [range.cartesian.iterator]/24: gated on all-random-access (every
@@ -315,17 +359,22 @@ class cartesian_product_view : public view_interface<cartesian_product_view<Firs
 
         // Mixed-radix distance: weight(last Vs) = 1, weight(dim) =
         // size(next dim) * weight(next dim), weight(First) = product of
-        // every Vs size. distance = sum over dims of (x[dim]-y[dim]) *
-        // weight(dim); First's own size never enters the formula.
-        template <size_t N = sizeof...(Vs)>
-        constexpr difference_type DistanceFrom(const Iterator &y, difference_type weight = 1) const
+        // every Vs size. distance = sum over dims of (x[dim]-t[dim]) *
+        // weight(dim); First's own size never enters the formula. Templated
+        // on the "other side" tuple type (not hardcoded to another Iterator's
+        // __current) so it also serves operator-(Iterator,default_sentinel_t),
+        // whose end-tuple mixes First's sentinel_t with the Vs's iterator_t —
+        // matching [range.cartesian.iterator]'s own exposition-only
+        // distance-from(const Tuple&).
+        template <size_t N = sizeof...(Vs), class Tuple>
+        constexpr difference_type DistanceFrom(const Tuple &t, difference_type weight = 1) const
         {
-            auto term = static_cast<difference_type>(get<N>(__current) - get<N>(y.__current)) * weight;
+            auto term = static_cast<difference_type>(get<N>(__current) - get<N>(t)) * weight;
             if constexpr (N == 0) {
                 return term;
             } else {
                 auto nextWeight = weight * static_cast<difference_type>(ranges::size(get<N>(__parent->__bases)));
-                return term + DistanceFrom<N - 1>(y, nextWeight);
+                return term + DistanceFrom<N - 1>(t, nextWeight);
             }
         }
 

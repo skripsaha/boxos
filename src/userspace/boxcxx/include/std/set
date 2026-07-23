@@ -66,6 +66,11 @@ public:
     {
         insert_range(std::forward<R>(rg));
     }
+    template <ContainerCompatibleRange<value_type> R>
+    set(from_range_t, R &&rg, const Alloc &a) : __t(Comp(), a)
+    {
+        insert_range(std::forward<R>(rg));
+    }
     set(initializer_list<Key> il, const Comp &comp = Comp(),
         const Alloc &a = Alloc())
         : __t(comp, a)
@@ -320,6 +325,11 @@ public:
     multiset(from_range_t, R &&rg, const Comp &comp = Comp(),
              const Alloc &a = Alloc())
         : __t(comp, a)
+    {
+        insert_range(std::forward<R>(rg));
+    }
+    template <ContainerCompatibleRange<value_type> R>
+    multiset(from_range_t, R &&rg, const Alloc &a) : __t(Comp(), a)
     {
         insert_range(std::forward<R>(rg));
     }
@@ -612,19 +622,26 @@ template <typename It, typename Comp = less<iter_value_t<It>>,
           typename Alloc = allocator<iter_value_t<It>>>
 set(It, It, Comp = Comp(), Alloc = Alloc()) -> set<iter_value_t<It>, Comp, Alloc>;
 
-template <ranges::input_range R, typename Comp = less<ranges::range_value_t<R>>,
+template <ranges::input_range R, NotAllocatorLike Comp = less<ranges::range_value_t<R>>,
           typename Alloc = allocator<ranges::range_value_t<R>>>
 set(from_range_t, R &&, Comp = Comp(), Alloc = Alloc())
     -> set<ranges::range_value_t<R>, Comp, Alloc>;
+
+template <ranges::input_range R, AllocatorLike Alloc>
+set(from_range_t, R &&, Alloc) -> set<ranges::range_value_t<R>, less<ranges::range_value_t<R>>, Alloc>;
 
 template <typename It, typename Comp = less<iter_value_t<It>>,
           typename Alloc = allocator<iter_value_t<It>>>
 multiset(It, It, Comp = Comp(), Alloc = Alloc()) -> multiset<iter_value_t<It>, Comp, Alloc>;
 
-template <ranges::input_range R, typename Comp = less<ranges::range_value_t<R>>,
+template <ranges::input_range R, NotAllocatorLike Comp = less<ranges::range_value_t<R>>,
           typename Alloc = allocator<ranges::range_value_t<R>>>
 multiset(from_range_t, R &&, Comp = Comp(), Alloc = Alloc())
     -> multiset<ranges::range_value_t<R>, Comp, Alloc>;
+
+template <ranges::input_range R, AllocatorLike Alloc>
+multiset(from_range_t, R &&, Alloc)
+    -> multiset<ranges::range_value_t<R>, less<ranges::range_value_t<R>>, Alloc>;
 
 } // namespace std
 
