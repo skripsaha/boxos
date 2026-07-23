@@ -40,6 +40,7 @@
 #include <map>
 #include <memory>
 #include <memory_resource>
+#include <numeric>
 #include <optional>
 #include <print>
 #include <random>
@@ -17393,6 +17394,437 @@ void Phase100()
            "(move_iterator/counted_iterator/reverse_iterator)\n");
 }
 
+void Phase101()
+{
+    namespace rg = std::ranges;
+
+    // ── accumulate / reduce: classic sum, pseudo-random cross-check,
+    //    left-to-right order, empty range ────────────────────────────────
+    {
+        std::vector<int> p101OneToTen{1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
+        Check(std::accumulate(p101OneToTen.begin(), p101OneToTen.end(), 0) == 55,
+              "phase101 accumulate(1..10) == 55");
+        Check(std::reduce(p101OneToTen.begin(), p101OneToTen.end()) == 55,
+              "phase101 reduce(1..10) no-init overload == 55");
+        Check(std::reduce(p101OneToTen.begin(), p101OneToTen.end(), 0) == 55,
+              "phase101 reduce(1..10, init=0) == 55");
+
+        std::mt19937                       p101Rng(20260723u);
+        std::uniform_int_distribution<int> p101Dist(-500, 500);
+        std::vector<int>                   p101Rand(200);
+        for (auto &x : p101Rand) x = p101Dist(p101Rng);
+        long long p101RefSum = 0;
+        for (int x : p101Rand) p101RefSum += x;
+        Check(std::accumulate(p101Rand.begin(), p101Rand.end(), 0LL) == p101RefSum,
+              "phase101 accumulate(pseudo-random 200) matches independent running-sum loop");
+        Check(std::reduce(p101Rand.begin(), p101Rand.end(), 0LL) == p101RefSum,
+              "phase101 reduce(pseudo-random 200) matches independent running-sum loop");
+
+        std::vector<int> p101Seq{1, 2, 3, 4};
+        int p101LtoRAcc = std::accumulate(p101Seq.begin(), p101Seq.end(), 100, std::minus<int>());
+        Check(p101LtoRAcc == ((((100 - 1) - 2) - 3) - 4),
+              "phase101 accumulate(minus<>) proves strict left-to-right folding");
+        int p101LtoRRed = std::reduce(p101Seq.begin(), p101Seq.end(), 100, std::minus<int>());
+        Check(p101LtoRRed == ((((100 - 1) - 2) - 3) - 4),
+              "phase101 reduce(minus<>) is a conforming (serial left-to-right) GENERALIZED_SUM instance");
+
+        std::vector<int> p101Empty;
+        Check(std::accumulate(p101Empty.begin(), p101Empty.end(), 42) == 42,
+              "phase101 accumulate empty range returns init");
+        Check(std::reduce(p101Empty.begin(), p101Empty.end(), 42) == 42,
+              "phase101 reduce empty range returns init");
+    }
+
+    // ── inner_product / transform_reduce: dot-product + sum-of-squares
+    //    cross-checked against an independent loop ──────────────────────
+    {
+        std::vector<int> p101A{1, 2, 3, 4, 5};
+        std::vector<int> p101B{10, 20, 30, 40, 50};
+        long long         p101RefDot = 0;
+        for (std::size_t i = 0; i < p101A.size(); ++i)
+            p101RefDot += static_cast<long long>(p101A[i]) * p101B[i];
+
+        Check(std::inner_product(p101A.begin(), p101A.end(), p101B.begin(), 0LL) == p101RefDot,
+              "phase101 inner_product dot-product matches independent reference loop");
+        Check(std::transform_reduce(p101A.begin(), p101A.end(), p101B.begin(), 0LL) == p101RefDot,
+              "phase101 transform_reduce (default plus/multiplies) matches independent reference loop");
+
+        long long p101DotOp =
+            std::inner_product(p101A.begin(), p101A.end(), p101B.begin(), 0LL, std::plus<long long>(),
+                               std::multiplies<long long>());
+        Check(p101DotOp == p101RefDot, "phase101 inner_product(op1,op2) explicit form matches default form");
+        long long p101TrDot =
+            std::transform_reduce(p101A.begin(), p101A.end(), p101B.begin(), 0LL, std::plus<long long>(),
+                                  std::multiplies<long long>());
+        Check(p101TrDot == p101RefDot,
+              "phase101 transform_reduce(op1,op2) explicit form matches independent reference loop");
+
+        long long p101RefSumSq = 0;
+        for (int x : p101A) p101RefSumSq += static_cast<long long>(x) * x;
+        long long p101SumSq = std::transform_reduce(p101A.begin(), p101A.end(), 0LL, std::plus<long long>(),
+                                                    [](int x) { return static_cast<long long>(x) * x; });
+        Check(p101SumSq == p101RefSumSq,
+              "phase101 transform_reduce(init,BinOp,UnOp) one-range sum-of-squares matches reference");
+    }
+
+    // ── scan family: inclusive/exclusive invariant, in-place correctness,
+    //    single-element edge cases, transform-scan cross-check ──────────
+    {
+        std::vector<int> p101V{1, 2, 3, 4, 5};
+        int              p101Init = 100;
+
+        std::vector<int> p101Incl(p101V.size());
+        std::vector<int> p101Excl(p101V.size());
+        std::inclusive_scan(p101V.begin(), p101V.end(), p101Incl.begin(), std::plus<int>(), p101Init);
+        std::exclusive_scan(p101V.begin(), p101V.end(), p101Excl.begin(), p101Init);
+        bool p101ScanInvariant = true;
+        for (std::size_t i = 0; i < p101V.size(); ++i)
+            if (p101Incl[i] != p101Excl[i] + p101V[i]) p101ScanInvariant = false;
+        Check(p101ScanInvariant,
+              "phase101 invariant: inclusive_scan[i] == exclusive_scan(...,init)[i] + v[i] for all i");
+
+        std::vector<int> p101RefPartial(p101V.size());
+        int              p101RunSum = 0;
+        for (std::size_t i = 0; i < p101V.size(); ++i) {
+            p101RunSum += p101V[i];
+            p101RefPartial[i] = p101RunSum;
+        }
+        std::vector<int> p101InplacePS = p101V;
+        std::partial_sum(p101InplacePS.begin(), p101InplacePS.end(), p101InplacePS.begin());
+        Check(p101InplacePS == p101RefPartial, "phase101 partial_sum IN-PLACE (result==first) correct");
+
+        std::vector<int> p101InplaceIS = p101V;
+        std::inclusive_scan(p101InplaceIS.begin(), p101InplaceIS.end(), p101InplaceIS.begin());
+        Check(p101InplaceIS == p101RefPartial,
+              "phase101 inclusive_scan IN-PLACE (result==first, no init) matches partial_sum reference");
+
+        std::vector<int> p101One{7};
+        std::vector<int> p101InclOne(1), p101ExclOne(1);
+        std::inclusive_scan(p101One.begin(), p101One.end(), p101InclOne.begin());
+        std::exclusive_scan(p101One.begin(), p101One.end(), p101ExclOne.begin(), 100);
+        Check(p101InclOne[0] == 7, "phase101 inclusive_scan single-element (no init) returns the element");
+        Check(p101ExclOne[0] == 100, "phase101 exclusive_scan single-element returns [init]");
+
+        std::vector<int> p101Doubled(p101V.size());
+        for (std::size_t i = 0; i < p101V.size(); ++i) p101Doubled[i] = p101V[i] * 2;
+        std::vector<int> p101RefTIncl(p101V.size()), p101RefTExcl(p101V.size());
+        std::inclusive_scan(p101Doubled.begin(), p101Doubled.end(), p101RefTIncl.begin(), std::plus<int>(),
+                            p101Init);
+        std::exclusive_scan(p101Doubled.begin(), p101Doubled.end(), p101RefTExcl.begin(), p101Init);
+
+        std::vector<int> p101TIncl(p101V.size()), p101TExcl(p101V.size());
+        std::transform_inclusive_scan(
+            p101V.begin(), p101V.end(), p101TIncl.begin(), std::plus<int>(),
+            [](int x) { return x * 2; }, p101Init);
+        std::transform_exclusive_scan(p101V.begin(), p101V.end(), p101TExcl.begin(), p101Init,
+                                      std::plus<int>(), [](int x) { return x * 2; });
+        Check(p101TIncl == p101RefTIncl,
+              "phase101 transform_inclusive_scan matches inclusive_scan-of-pre-transformed-input");
+        Check(p101TExcl == p101RefTExcl,
+              "phase101 transform_exclusive_scan matches exclusive_scan-of-pre-transformed-input");
+    }
+
+    // ── adjacent_difference: load-bearing IN-PLACE regression pin ────────
+    {
+        std::vector<int> p101AdjSrc{10, 13, 19, 20};
+        std::vector<int> p101AdjExpected{10, 3, 6, 1};
+        std::adjacent_difference(p101AdjSrc.begin(), p101AdjSrc.end(), p101AdjSrc.begin());
+        Check(p101AdjSrc == p101AdjExpected,
+              "phase101 adjacent_difference IN-PLACE (result==first): {10,13,19,20} -> {10,3,6,1}");
+
+        std::vector<int> p101AdjOne{42};
+        std::adjacent_difference(p101AdjOne.begin(), p101AdjOne.end(), p101AdjOne.begin());
+        Check(p101AdjOne[0] == 42, "phase101 adjacent_difference single-element unchanged");
+    }
+
+    // ── iota: classic fill, non-int value type, zero-length no-op ────────
+    {
+        std::vector<int> p101IotaV(10);
+        std::iota(p101IotaV.begin(), p101IotaV.end(), 0);
+        bool p101IotaOk = true;
+        for (int i = 0; i < 10; ++i)
+            if (p101IotaV[static_cast<std::size_t>(i)] != i) p101IotaOk = false;
+        Check(p101IotaOk, "phase101 iota fills 0..N-1");
+
+        std::vector<char> p101IotaChar(5);
+        std::iota(p101IotaChar.begin(), p101IotaChar.end(), 'a');
+        Check(p101IotaChar[0] == 'a' && p101IotaChar[4] == 'e',
+              "phase101 iota non-int value type (char)");
+
+        std::vector<int> p101IotaEmpty;
+        std::iota(p101IotaEmpty.begin(), p101IotaEmpty.end(), 5);
+        Check(p101IotaEmpty.empty(), "phase101 iota zero-length no-op");
+    }
+
+    // ── ranges::iota: both overloads vs classic iota, .value correctness,
+    //    dangling conformance pin ─────────────────────────────────────────
+    {
+        std::vector<int> p101RgIota1(10);
+        std::vector<int> p101ClIota1(10);
+        std::iota(p101ClIota1.begin(), p101ClIota1.end(), 0);
+        auto p101RgIotaRes = rg::iota(p101RgIota1.begin(), p101RgIota1.end(), 0);
+        Check(p101RgIota1 == p101ClIota1,
+              "phase101 ranges::iota (iterator+sentinel form) == classic iota");
+        Check(p101RgIotaRes.out == p101RgIota1.end() && p101RgIotaRes.value == 10,
+              "phase101 ranges::iota (iterator+sentinel form) result .out/.value correctness");
+
+        std::vector<int> p101RgIota2(10);
+        std::vector<int> p101ClIota2(10);
+        std::iota(p101ClIota2.begin(), p101ClIota2.end(), 0);
+        rg::iota(p101RgIota2, 0);
+        Check(p101RgIota2 == p101ClIota2, "phase101 ranges::iota (range form) == classic iota");
+
+        std::vector<int> p101RgIota3(3);
+        auto             p101RgIotaRes3 = rg::iota(p101RgIota3, 10);
+        Check(p101RgIotaRes3.value == 13,
+              "phase101 ranges::iota .value correctness (start 10, 3 elems -> .value==13)");
+        Check(p101RgIota3[0] == 10 && p101RgIota3[1] == 11 && p101RgIota3[2] == 12,
+              "phase101 ranges::iota (range form) fills correct values");
+
+        static_assert(std::same_as<decltype(rg::iota(std::vector<int>{1, 2, 3}, 10).out), rg::dangling>,
+                      "phase101 conformance pin: ranges::iota(rvalue vector, T) .out is ranges::dangling "
+                      "(non-borrowed range)");
+    }
+
+    // ── gcd / lcm: zero contract, negative/mixed-width operands, random
+    //    battery vs a structurally-different independent Euclid, and the
+    //    divide-before-multiply overflow boundary ───────────────────────
+    {
+        Check(std::gcd(0, 0) == 0,
+              "phase101 gcd(0,0) == 0 (regression pin vs <ratio>'s internal gcd_(0,0)==1)");
+        Check(std::gcd(-9, 6) == 3, "phase101 gcd(-9,6) == 3");
+        Check(std::gcd(int(-9), unsigned(6)) == 3u, "phase101 gcd(int(-9), unsigned(6)) == 3u");
+        Check(std::gcd(static_cast<int8_t>(-9), static_cast<int64_t>(6)) == 3,
+              "phase101 mixed-width gcd(int8_t(-9), int64_t(6)) == 3");
+
+        // Independent Euclid, structurally different (repeated subtraction,
+        // not division-remainder), to cross-check a random battery.
+        auto p101SubtractiveGcd = [](long long x, long long y) -> long long {
+            x = x < 0 ? -x : x;
+            y = y < 0 ? -y : y;
+            if (x == 0) return y;
+            if (y == 0) return x;
+            while (x != y) {
+                if (x > y) x -= y;
+                else y -= x;
+            }
+            return x;
+        };
+        std::mt19937                       p101GcdRng(20260723u);
+        std::uniform_int_distribution<int> p101GcdDist(-2000, 2000);
+        bool                                p101GcdBatteryOk = true;
+        for (int i = 0; i < 300; ++i) {
+            int m = p101GcdDist(p101GcdRng);
+            int n = p101GcdDist(p101GcdRng);
+            if (m == 0 && n == 0) continue;
+            if (std::gcd(m, n) != p101SubtractiveGcd(m, n)) p101GcdBatteryOk = false;
+        }
+        Check(p101GcdBatteryOk, "phase101 gcd random battery vs independent repeated-subtraction Euclid");
+
+        Check(static_cast<int64_t>(393216) * 655360 > INT32_MAX,
+              "phase101 lcm overflow-boundary fixture: 393216*655360 genuinely exceeds INT32_MAX");
+        Check(std::gcd(393216, 655360) == 131072, "phase101 gcd(393216,655360) == 131072");
+        Check(std::lcm(393216, 655360) == 1966080,
+              "phase101 lcm(393216,655360) == 1966080 (divide-before-multiply avoids the overflow)");
+    }
+
+    // ── midpoint: integer, floating, pointer ──────────────────────────────
+    {
+        Check(std::midpoint(1, 4) == 2, "phase101 midpoint(1,4) == 2");
+        Check(std::midpoint(4, 1) == 3, "phase101 midpoint(4,1) == 3");
+        Check(std::midpoint(std::numeric_limits<int>::max(), std::numeric_limits<int>::min()) == 0,
+              "phase101 midpoint(INT_MAX,INT_MIN) == 0");
+        Check(std::midpoint(-3, -8) == -5, "phase101 midpoint(-3,-8) == -5");
+        Check(std::midpoint(10u, 3u) == 7u, "phase101 midpoint(10u,3u) == 7u");
+
+        Check(std::midpoint(0.0, 4.0) == 2.0, "phase101 midpoint(0.0,4.0) == 2.0");
+        double p101MidBig = std::midpoint(std::numeric_limits<double>::max(),
+                                          std::numeric_limits<double>::max() / 2);
+        Check(p101MidBig == 0.75 * std::numeric_limits<double>::max() &&
+                  p101MidBig <= std::numeric_limits<double>::max(),
+              "phase101 midpoint(DBL_MAX,DBL_MAX/2) == 0.75*DBL_MAX (finite, no overflow to inf)");
+
+        int p101MidArr[5] = {0, 1, 2, 3, 4};
+        Check(std::midpoint(&p101MidArr[0], &p101MidArr[3]) == &p101MidArr[1],
+              "phase101 midpoint(pointer,pointer): &a[0],&a[3] -> &a[1]");
+
+        // near-min-normal band (pins FIX1: threshold must be 2*min(), not
+        // min() itself, or a/2+b/2 rounds through subnormal and lands 1 ULP
+        // low). bit_cast avoids relying on a constexpr nextafter.
+        double p101MidNearMinNormal = std::bit_cast<double>(
+            std::bit_cast<uint64_t>(std::numeric_limits<double>::min()) + 1);
+        Check(std::midpoint(p101MidNearMinNormal, p101MidNearMinNormal) == p101MidNearMinNormal,
+              "phase101 midpoint(x,x)==x for double x just above min() (pins FIX1 near-min-normal band)");
+
+        double p101MidSubnormal = std::bit_cast<double>(uint64_t(1));
+        Check(std::midpoint(p101MidSubnormal, p101MidSubnormal) == p101MidSubnormal,
+              "phase101 midpoint(s,s)==s for the smallest subnormal double s");
+
+        double p101MidMinNormal = std::numeric_limits<double>::min();
+        Check(std::midpoint(p101MidMinNormal, p101MidMinNormal) == p101MidMinNormal,
+              "phase101 midpoint(min(),min())==min() (the threshold value itself)");
+
+        float p101MidNearMinNormalF = std::bit_cast<float>(
+            std::bit_cast<uint32_t>(std::numeric_limits<float>::min()) + 1);
+        Check(std::midpoint(p101MidNearMinNormalF, p101MidNearMinNormalF) == p101MidNearMinNormalF,
+              "phase101 midpoint(x,x)==x for float x just above min() (pins FIX1, float width)");
+
+        double p101MidInf = std::numeric_limits<double>::infinity();
+        Check(std::midpoint(p101MidInf, p101MidInf) == p101MidInf, "phase101 midpoint(inf,inf)==inf");
+        double p101MidInfNegInf = std::midpoint(p101MidInf, -p101MidInf);
+        Check(p101MidInfNegInf != p101MidInfNegInf, "phase101 midpoint(inf,-inf) is NaN");
+        double p101MidNan    = std::numeric_limits<double>::quiet_NaN();
+        double p101MidNanRes = std::midpoint(p101MidNan, 1.0);
+        Check(p101MidNanRes != p101MidNanRes, "phase101 midpoint(nan,1.0) is NaN");
+
+        // reversed pointer operands: rounds toward the FIRST argument.
+        Check(std::midpoint(&p101MidArr[3], &p101MidArr[0]) == &p101MidArr[2],
+              "phase101 midpoint(pointer,pointer) reversed: &a[3],&a[0] -> &a[2] (rounds toward first arg)");
+    }
+
+    // ── exclusive-scan-family IN-PLACE: the read-before-overwrite pattern is
+    //    load-bearing for exclusive_scan/transform_exclusive_scan/
+    //    transform_inclusive_scan too, not just partial_sum/inclusive_scan ──
+    {
+        std::vector<int> p101EsSrc{1, 2, 3, 4, 5};
+        int              p101EsSeed = 100;
+
+        std::vector<int> p101EsRef(p101EsSrc.size());
+        std::exclusive_scan(p101EsSrc.begin(), p101EsSrc.end(), p101EsRef.begin(), p101EsSeed);
+        std::vector<int> p101EsInplace = p101EsSrc;
+        std::exclusive_scan(p101EsInplace.begin(), p101EsInplace.end(), p101EsInplace.begin(),
+                            p101EsSeed);
+        Check(p101EsInplace == p101EsRef, "phase101 exclusive_scan IN-PLACE (result==first) correct");
+
+        std::vector<int> p101TEsRef(p101EsSrc.size());
+        std::transform_exclusive_scan(p101EsSrc.begin(), p101EsSrc.end(), p101TEsRef.begin(),
+                                      p101EsSeed, std::plus<int>(), [](int x) { return x * 3; });
+        std::vector<int> p101TEsInplace = p101EsSrc;
+        std::transform_exclusive_scan(p101TEsInplace.begin(), p101TEsInplace.end(),
+                                      p101TEsInplace.begin(), p101EsSeed, std::plus<int>(),
+                                      [](int x) { return x * 3; });
+        Check(p101TEsInplace == p101TEsRef,
+              "phase101 transform_exclusive_scan IN-PLACE (result==first) correct");
+
+        std::vector<int> p101TIsRef(p101EsSrc.size());
+        std::transform_inclusive_scan(
+            p101EsSrc.begin(), p101EsSrc.end(), p101TIsRef.begin(), std::plus<int>(),
+            [](int x) { return x * 3; }, p101EsSeed);
+        std::vector<int> p101TIsInplace = p101EsSrc;
+        std::transform_inclusive_scan(
+            p101TIsInplace.begin(), p101TIsInplace.end(), p101TIsInplace.begin(), std::plus<int>(),
+            [](int x) { return x * 3; }, p101EsSeed);
+        Check(p101TIsInplace == p101TIsRef,
+              "phase101 transform_inclusive_scan IN-PLACE (result==first) correct");
+    }
+
+    // ── proxy-iterator accumulator safety (pins FIX2): vector<bool>'s
+    //    reference proxy aliases the underlying bit storage, so an `auto`
+    //    accumulator deduced from *first would write back into the INPUT
+    //    even for an out-of-place scan into a separate output ────────────
+    {
+        std::vector<bool> p101PxIn{false, true, true, false, true};
+        std::vector<bool> p101PxInCopy = p101PxIn;
+        std::vector<int>  p101PxAsInt;
+        for (bool b : p101PxIn) p101PxAsInt.push_back(b ? 1 : 0);
+        std::vector<int> p101PxRefInt(p101PxAsInt.size());
+        std::partial_sum(p101PxAsInt.begin(), p101PxAsInt.end(), p101PxRefInt.begin());
+
+        std::vector<bool> p101PxOut(p101PxIn.size());
+        std::partial_sum(p101PxIn.begin(), p101PxIn.end(), p101PxOut.begin());
+        Check(p101PxIn == p101PxInCopy,
+              "phase101 partial_sum(vector<bool>, out-of-place) leaves input unchanged (pins FIX2)");
+        bool p101PxOutOk = true;
+        for (std::size_t i = 0; i < p101PxOut.size(); ++i)
+            if (p101PxOut[i] != (p101PxRefInt[i] != 0)) p101PxOutOk = false;
+        Check(p101PxOutOk, "phase101 partial_sum(vector<bool>) output matches int-domain reference");
+
+        std::vector<bool> p101PxIn2 = p101PxInCopy;
+        std::vector<bool> p101PxOut2(p101PxIn2.size());
+        std::inclusive_scan(p101PxIn2.begin(), p101PxIn2.end(), p101PxOut2.begin());
+        Check(p101PxIn2 == p101PxInCopy,
+              "phase101 inclusive_scan(vector<bool>, out-of-place) leaves input unchanged (pins FIX2)");
+
+        std::vector<bool> p101PxInplace = p101PxInCopy;
+        std::partial_sum(p101PxInplace.begin(), p101PxInplace.end(), p101PxInplace.begin());
+        bool p101PxInplaceOk = true;
+        for (std::size_t i = 0; i < p101PxInplace.size(); ++i)
+            if (p101PxInplace[i] != (p101PxRefInt[i] != 0)) p101PxInplaceOk = false;
+        Check(p101PxInplaceOk, "phase101 partial_sum(vector<bool>, in-place) still correct with typed accumulator");
+    }
+
+    // ── small regression pins: lcm zero-contract, custom BinOp on
+    //    partial_sum/adjacent_difference, reversed pointer already above,
+    //    empty-range one-range forms ───────────────────────────────────────
+    {
+        Check(std::lcm(0, 7) == 0, "phase101 lcm(0,7) == 0");
+        Check(std::lcm(7, 0) == 0, "phase101 lcm(7,0) == 0");
+
+        std::vector<int> p101PsMulSrc{1, 2, 3, 4};
+        std::vector<int> p101PsMulOut(4);
+        std::partial_sum(p101PsMulSrc.begin(), p101PsMulSrc.end(), p101PsMulOut.begin(),
+                         std::multiplies<int>());
+        Check(p101PsMulOut[0] == 1 && p101PsMulOut[1] == 2 && p101PsMulOut[2] == 6 &&
+                  p101PsMulOut[3] == 24,
+              "phase101 partial_sum with custom BinOp (multiplies<>): running product 1,2,6,24");
+
+        std::vector<int> p101AdMulSrc{2, 3, 4, 5};
+        std::vector<int> p101AdMulOut(4);
+        std::adjacent_difference(p101AdMulSrc.begin(), p101AdMulSrc.end(), p101AdMulOut.begin(),
+                                 std::multiplies<int>());
+        Check(p101AdMulOut[0] == 2 && p101AdMulOut[1] == 6 && p101AdMulOut[2] == 12 &&
+                  p101AdMulOut[3] == 20,
+              "phase101 adjacent_difference with custom BinOp (multiplies<>): op(cur,prev) 2,6,12,20");
+
+        std::vector<int> p101EmptyA, p101EmptyB;
+        Check(std::inner_product(p101EmptyA.end(), p101EmptyA.end(), p101EmptyB.end(), 42) == 42,
+              "phase101 inner_product empty-range returns init");
+        Check(std::transform_reduce(p101EmptyA.end(), p101EmptyA.end(), 42, std::plus<>(),
+                                    std::negate<>()) == 42,
+              "phase101 transform_reduce empty-range (one-range form) returns init");
+    }
+
+    // ── feature-test macros: presence + value pins ([version.syn]) ───────
+    {
+        static_assert(__cpp_lib_gcd_lcm >= 201606L, "phase101 __cpp_lib_gcd_lcm pin");
+        static_assert(__cpp_lib_constexpr_numeric >= 201911L, "phase101 __cpp_lib_constexpr_numeric pin");
+        static_assert(__cpp_lib_ranges_iota >= 202202L, "phase101 __cpp_lib_ranges_iota pin");
+#ifdef __cpp_lib_interpolate
+#  error "phase101: __cpp_lib_interpolate must stay undefined until lerp lands in <cmath>"
+#endif
+    }
+
+    // ── constexpr sanity: proves __cpp_lib_constexpr_numeric is real ─────
+    {
+        static_assert(std::gcd(12, 18) == 6, "phase101 constexpr gcd(12,18)==6");
+        static_assert(std::lcm(4, 6) == 12, "phase101 constexpr lcm(4,6)==12");
+        static_assert(std::midpoint(2, 8) == 5, "phase101 constexpr midpoint(2,8)==5");
+
+        constexpr int p101ConstArr[5] = {1, 2, 3, 4, 5};
+        static_assert(std::accumulate(p101ConstArr, p101ConstArr + 5, 0) == 15,
+                      "phase101 constexpr accumulate over a constexpr array");
+        static_assert(std::reduce(p101ConstArr, p101ConstArr + 5, 0) == 15,
+                      "phase101 constexpr reduce over a constexpr array");
+        static_assert(std::inner_product(p101ConstArr, p101ConstArr + 5, p101ConstArr, 0) == 55,
+                      "phase101 constexpr inner_product (self dot-product) == 55");
+    }
+
+    printf("[CXX] PASS phase101: <numeric> accumulate/reduce/inner_product/transform_reduce "
+           "(empty-range + left-to-right + pseudo-random cross-check) + partial_sum/"
+           "inclusive_scan/exclusive_scan/transform_inclusive_scan/transform_exclusive_scan "
+           "(in-place + inclusive/exclusive invariant + transform cross-check) + "
+           "adjacent_difference in-place regression pin + iota (classic + ranges::iota both "
+           "overloads + dangling conformance pin) + gcd/lcm (gcd(0,0)==0 pin, mixed-width, "
+           "random battery vs subtractive Euclid, divide-before-multiply overflow boundary) + "
+           "midpoint (integer/floating/pointer, near-min-normal band regression pin, inf/nan) + "
+           "exclusive-scan-family in-place (exclusive_scan/transform_exclusive_scan/"
+           "transform_inclusive_scan) + proxy-accumulator safety (vector<bool> input unchanged "
+           "across an out-of-place scan) + lcm zero-contract + custom-BinOp partial_sum/"
+           "adjacent_difference + reversed-pointer midpoint + empty-range one-range forms + "
+           "FTM pins (__cpp_lib_gcd_lcm/__cpp_lib_constexpr_numeric/__cpp_lib_ranges_iota, "
+           "__cpp_lib_interpolate absence guard) + constexpr sanity battery\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -17515,6 +17947,7 @@ int main()
     Phase98();
     Phase99();
     Phase100();
+    Phase101();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

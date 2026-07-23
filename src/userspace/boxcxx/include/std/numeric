@@ -1,0 +1,449 @@
+// boxcxx — <numeric>
+// Generalized numeric algorithms: the accumulate/reduce/transform_reduce sum
+// family, the partial_sum/*_scan family, adjacent_difference, iota (classic
+// + ranges::iota), gcd/lcm, and midpoint (integer/floating/pointer).
+#ifndef BOXCXX_NUMERIC
+#define BOXCXX_NUMERIC
+
+#include <__bits/ranges_core>    // concepts + dangling/borrowed_iterator_t/out_value_result (post-relocation, step 4)
+#include <__bits/iterator_core>  // iterator_traits (reduce no-init overload only)
+#include <__bits/version_numeric>
+#include <functional>            // plus<>, multiplies<>
+#include <limits>                // numeric_limits — floating midpoint overflow-avoidance
+#include <type_traits>           // common_type_t, make_unsigned_t, is_integral_v, is_arithmetic_v, is_object_v, is_signed_v, is_same_v, remove_cv_t
+#include <utility>               // std::move
+#include <cstddef>               // ptrdiff_t
+
+namespace std {
+
+// ── accumulate ([accumulate]) ────────────────────────────────────────────
+// Strictly left-to-right by its own Effects (unlike reduce) — raw operators,
+// never plus<>/op reordered.
+
+template <class It, class T>
+constexpr T accumulate(It first, It last, T init)
+{
+    for (; first != last; ++first) init = std::move(init) + *first;
+    return init;
+}
+
+template <class It, class T, class BinOp>
+constexpr T accumulate(It first, It last, T init, BinOp op)
+{
+    for (; first != last; ++first) init = op(std::move(init), *first);
+    return init;
+}
+
+// ── reduce ([reduce]) ─────────────────────────────────────────────────────
+// Effects permit GENERALIZED_SUM (any grouping/order of the fold); a strict
+// serial left-to-right fold is one conforming instance of that contract.
+//
+// Forward declarations: It/T are usually fundamental types (raw-pointer
+// iterators, int), so the delegating calls below have no class-type argument
+// for ADL to search -- ordinary lookup alone must already see the callee at
+// this point in the file, and ordinary lookup does not look ahead.
+template <class It, class T> constexpr T reduce(It first, It last, T init);
+template <class It, class T, class BinOp>
+constexpr T reduce(It first, It last, T init, BinOp op);
+
+template <class It>
+constexpr typename iterator_traits<It>::value_type reduce(It first, It last)
+{
+    return reduce(first, last, typename iterator_traits<It>::value_type{});
+}
+
+template <class It, class T>
+constexpr T reduce(It first, It last, T init)
+{
+    return reduce(first, last, std::move(init), plus<>());
+}
+
+template <class It, class T, class BinOp>
+constexpr T reduce(It first, It last, T init, BinOp op)
+{
+    for (; first != last; ++first) init = op(std::move(init), *first);
+    return init;
+}
+
+// ── inner_product ([inner.product]) ──────────────────────────────────────
+// Strictly left-to-right by its own Effects — raw +/* for the no-op form.
+
+template <class It1, class It2, class T>
+constexpr T inner_product(It1 first1, It1 last1, It2 first2, T init)
+{
+    for (; first1 != last1; ++first1, ++first2)
+        init = std::move(init) + (*first1) * (*first2);
+    return init;
+}
+
+template <class It1, class It2, class T, class BinOp1, class BinOp2>
+constexpr T inner_product(It1 first1, It1 last1, It2 first2, T init, BinOp1 op1,
+                          BinOp2 op2)
+{
+    for (; first1 != last1; ++first1, ++first2)
+        init = op1(std::move(init), op2(*first1, *first2));
+    return init;
+}
+
+// ── transform_reduce ([transform.reduce]) ────────────────────────────────
+// GENERALIZED_SUM; a serial left-to-right fold conforms.
+
+template <class It1, class It2, class T, class BinOp1, class BinOp2>
+constexpr T transform_reduce(It1 first1, It1 last1, It2 first2, T init, BinOp1 op1,
+                             BinOp2 op2);
+
+template <class It1, class It2, class T>
+constexpr T transform_reduce(It1 first1, It1 last1, It2 first2, T init)
+{
+    return transform_reduce(first1, last1, first2, std::move(init), plus<>(),
+                            multiplies<>());
+}
+
+template <class It1, class It2, class T, class BinOp1, class BinOp2>
+constexpr T transform_reduce(It1 first1, It1 last1, It2 first2, T init, BinOp1 op1,
+                             BinOp2 op2)
+{
+    for (; first1 != last1; ++first1, ++first2)
+        init = op1(std::move(init), op2(*first1, *first2));
+    return init;
+}
+
+template <class It, class T, class BinOp, class UnOp>
+constexpr T transform_reduce(It first, It last, T init, BinOp op, UnOp uop)
+{
+    for (; first != last; ++first) init = op(std::move(init), uop(*first));
+    return init;
+}
+
+// ── partial_sum ([partial.sum]) ──────────────────────────────────────────
+// Threads the running total through a local (acc), never re-reading through
+// result — that is what makes result==first (in-place) safe.
+
+template <class It, class OutIt>
+constexpr OutIt partial_sum(It first, It last, OutIt result)
+{
+    if (first == last) return result;
+    typename iterator_traits<It>::value_type acc = *first;
+    *result  = acc;
+    while (++first != last) {
+        acc      = std::move(acc) + *first;
+        *++result = acc;
+    }
+    return ++result;
+}
+
+template <class It, class OutIt, class BinOp>
+constexpr OutIt partial_sum(It first, It last, OutIt result, BinOp op)
+{
+    if (first == last) return result;
+    typename iterator_traits<It>::value_type acc = *first;
+    *result  = acc;
+    while (++first != last) {
+        acc      = op(std::move(acc), *first);
+        *++result = acc;
+    }
+    return ++result;
+}
+
+// ── inclusive_scan ([inclusive.scan]) ────────────────────────────────────
+// GENERALIZED_NONCOMMUTATIVE_SUM; a serial left-to-right fold conforms. The
+// no-init overloads pass the first element through UNCHANGED (a "sum" of one
+// term has no operator applied); the init overload folds init into every
+// position, including the first.
+
+template <class It, class OutIt, class BinOp>
+constexpr OutIt inclusive_scan(It first, It last, OutIt result, BinOp op);
+
+template <class It, class OutIt>
+constexpr OutIt inclusive_scan(It first, It last, OutIt result)
+{
+    return inclusive_scan(first, last, result, plus<>());
+}
+
+template <class It, class OutIt, class BinOp>
+constexpr OutIt inclusive_scan(It first, It last, OutIt result, BinOp op)
+{
+    if (first == last) return result;
+    typename iterator_traits<It>::value_type acc = *first;
+    *result  = acc;
+    while (++first != last) {
+        acc      = op(std::move(acc), *first);
+        *++result = acc;
+    }
+    return ++result;
+}
+
+template <class It, class OutIt, class BinOp, class T>
+constexpr OutIt inclusive_scan(It first, It last, OutIt result, BinOp op, T init)
+{
+    auto acc = std::move(init);
+    for (; first != last; ++first, ++result) {
+        acc     = op(std::move(acc), *first);
+        *result = acc;
+    }
+    return result;
+}
+
+// ── exclusive_scan ([exclusive.scan]) ────────────────────────────────────
+// result[i] folds in only elements BEFORE i, so result[i] must be written
+// from the OLD accumulator, before *first (which may alias result) is
+// folded into the new one — read *first into a local first, exactly the
+// adjacent_difference in-place pattern.
+
+template <class It, class OutIt, class T, class BinOp>
+constexpr OutIt exclusive_scan(It first, It last, OutIt result, T init, BinOp op);
+
+template <class It, class OutIt, class T>
+constexpr OutIt exclusive_scan(It first, It last, OutIt result, T init)
+{
+    return exclusive_scan(first, last, result, std::move(init), plus<>());
+}
+
+template <class It, class OutIt, class T, class BinOp>
+constexpr OutIt exclusive_scan(It first, It last, OutIt result, T init, BinOp op)
+{
+    auto acc = std::move(init);
+    for (; first != last; ++first, ++result) {
+        auto val = *first;
+        *result  = acc;
+        acc      = op(std::move(acc), std::move(val));
+    }
+    return result;
+}
+
+// ── transform_inclusive_scan ([transform.inclusive.scan]) ───────────────
+// Same identity-vs-init split as inclusive_scan, with unop applied to each
+// element first.
+
+template <class It, class OutIt, class BinOp, class UnOp>
+constexpr OutIt transform_inclusive_scan(It first, It last, OutIt result, BinOp op,
+                                         UnOp uop)
+{
+    if (first == last) return result;
+    auto acc = uop(*first);
+    *result  = acc;
+    while (++first != last) {
+        acc      = op(std::move(acc), uop(*first));
+        *++result = acc;
+    }
+    return ++result;
+}
+
+template <class It, class OutIt, class BinOp, class UnOp, class T>
+constexpr OutIt transform_inclusive_scan(It first, It last, OutIt result, BinOp op,
+                                         UnOp uop, T init)
+{
+    auto acc = std::move(init);
+    for (; first != last; ++first, ++result) {
+        acc     = op(std::move(acc), uop(*first));
+        *result = acc;
+    }
+    return result;
+}
+
+// ── transform_exclusive_scan ([transform.exclusive.scan]) ───────────────
+// init mandatory and first; single overload. Same read-before-overwrite
+// in-place safety as exclusive_scan, transforming *first before it can be
+// clobbered by the write to *result.
+
+template <class It, class OutIt, class T, class BinOp, class UnOp>
+constexpr OutIt transform_exclusive_scan(It first, It last, OutIt result, T init,
+                                         BinOp op, UnOp uop)
+{
+    auto acc = std::move(init);
+    for (; first != last; ++first, ++result) {
+        auto val = uop(*first);
+        *result  = acc;
+        acc      = op(std::move(acc), std::move(val));
+    }
+    return result;
+}
+
+// ── adjacent_difference ([adjacent.difference]) ──────────────────────────
+// Threads the previous ORIGINAL value through a local (acc), never re-
+// reading it back through result — the fix that makes result==first safe.
+
+template <class It, class OutIt, class BinOp>
+constexpr OutIt adjacent_difference(It first, It last, OutIt result, BinOp op);
+
+template <class It, class OutIt>
+constexpr OutIt adjacent_difference(It first, It last, OutIt result)
+{
+    return adjacent_difference(first, last, result, minus<>());
+}
+
+template <class It, class OutIt, class BinOp>
+constexpr OutIt adjacent_difference(It first, It last, OutIt result, BinOp op)
+{
+    if (first == last) return result;
+    typename iterator_traits<It>::value_type acc = *first;
+    *result  = acc;
+    while (++first != last) {
+        auto val   = *first;
+        *++result  = op(val, std::move(acc));
+        acc        = std::move(val);
+    }
+    return ++result;
+}
+
+// ── iota ([numeric.iota]) ─────────────────────────────────────────────────
+
+template <class It, class T>
+constexpr void iota(It first, It last, T value)
+{
+    for (; first != last; ++first) {
+        *first = value;
+        ++value;
+    }
+}
+
+namespace ranges {
+
+template <class O, class T>
+using iota_result = out_value_result<O, T>;
+
+struct Iota {
+    template <input_or_output_iterator O, sentinel_for<O> S, weakly_incrementable T>
+        requires indirectly_writable<O, const T &>
+    constexpr iota_result<O, T> operator()(O first, S last, T value) const
+    {
+        while (first != last) {
+            *first = std::as_const(value);
+            ++first;
+            ++value;
+        }
+        return {std::move(first), std::move(value)};
+    }
+
+    template <weakly_incrementable T, output_range<const T &> R>
+    constexpr iota_result<borrowed_iterator_t<R>, T> operator()(R &&r, T value) const
+    {
+        return (*this)(ranges::begin(r), ranges::end(r), std::move(value));
+    }
+};
+inline constexpr Iota iota{};
+
+} // namespace ranges
+
+// ── __bits helpers for gcd / lcm / midpoint ──────────────────────────────
+
+namespace __bits {
+
+// Absolute value of x, computed in x's OWN type before any widening (a
+// negative operand's sign must not survive into an unsigned common_type_t).
+// The unsigned negation UX(0)-UX(x) is itself immune to signed overflow at
+// X(INT_MIN); the outer static_cast<UX> additionally forces the result back
+// into UX's own width, because for X narrower than int, plain arithmetic on
+// two UX operands integer-promotes to int, and an uncast ternary would let
+// that promoted (and now sign-bearing) int leak out as AbsUnsigned's actual
+// return type instead of the intended unsigned UX.
+template <class X>
+constexpr auto AbsUnsigned(X x)
+{
+    using UX = make_unsigned_t<X>;
+    if constexpr (is_signed_v<X>)
+        return static_cast<UX>(x < X(0) ? UX(0) - UX(x) : UX(x));
+    else
+        return UX(x);
+}
+
+template <class T>
+constexpr bool IsNormalForMidpoint(T x) noexcept
+{
+    T ax = x < T(0) ? -x : x;
+    // Lower bound is 2*min() (smallest NORMAL), not min() itself: halving an
+    // operand in [min(), 2*min()) underflows into subnormal and ROUNDS, which
+    // makes the a/2+b/2 fast path land 1 ULP below the true half-sum. Below
+    // 2*min() we fall through to (a+b)/2, exact and overflow-safe at that
+    // magnitude.
+    return ax >= T(2) * numeric_limits<T>::min() && ax <= numeric_limits<T>::max();
+}
+
+} // namespace __bits
+
+// ── gcd ([numeric.ops.gcd]) ───────────────────────────────────────────────
+// gcd(0,0) == 0 (a regression pin vs. <ratio>'s internal gcd_(0,0) == 1 —
+// that is a different, ratio-normalization-only contract).
+
+template <class M, class N>
+constexpr common_type_t<M, N> gcd(M m, N n)
+{
+    static_assert(is_integral_v<M> && !is_same_v<remove_cv_t<M>, bool>,
+                  "gcd: M must be an integer type other than bool");
+    static_assert(is_integral_v<N> && !is_same_v<remove_cv_t<N>, bool>,
+                  "gcd: N must be an integer type other than bool");
+    // Precondition (not runtime-guarded, per the standard): |m| and |n| must
+    // be representable in common_type_t<M,N> -- e.g. gcd(INT_MIN, x) violates
+    // this and is documented UB, exactly like the classic std::abs(INT_MIN).
+    using R  = common_type_t<M, N>;
+    using UR = make_unsigned_t<R>;
+    UR a = static_cast<UR>(__bits::AbsUnsigned(m));
+    UR b = static_cast<UR>(__bits::AbsUnsigned(n));
+    while (b != 0) {
+        UR t = a % b;
+        a    = b;
+        b    = t;
+    }
+    return static_cast<R>(a);
+}
+
+// ── lcm ([numeric.ops.lcm]) ───────────────────────────────────────────────
+
+template <class M, class N>
+constexpr common_type_t<M, N> lcm(M m, N n)
+{
+    static_assert(is_integral_v<M> && !is_same_v<remove_cv_t<M>, bool>,
+                  "lcm: M must be an integer type other than bool");
+    static_assert(is_integral_v<N> && !is_same_v<remove_cv_t<N>, bool>,
+                  "lcm: N must be an integer type other than bool");
+    using R = common_type_t<M, N>;
+    if (m == M(0) || n == N(0)) return R(0);
+    using UR = make_unsigned_t<R>;
+    UR am = static_cast<UR>(__bits::AbsUnsigned(m));
+    UR an = static_cast<UR>(__bits::AbsUnsigned(n));
+    UR g  = static_cast<UR>(gcd(m, n));
+    return static_cast<R>((am / g) * an); // divide before multiply
+}
+
+// ── midpoint ([numeric.ops.midpoint]) ─────────────────────────────────────
+
+template <class T>
+    requires(is_arithmetic_v<T> && !is_same_v<remove_cv_t<T>, bool>)
+constexpr T midpoint(T a, T b) noexcept
+{
+    if constexpr (is_integral_v<T>) {
+        // No overflow, rounds toward a. Branch add/subtract, never multiply
+        // by a signed sign (that corrupts an unsigned T). Each subtraction is
+        // explicitly re-cast to U before the /2: for T narrower than int, the
+        // subtraction itself integer-promotes to int, and dividing that
+        // un-reduced (possibly negative) promoted value would give a
+        // different, wrong quotient than dividing the properly wrapped
+        // unsigned difference.
+        using U = make_unsigned_t<T>;
+        if (a <= b) {
+            U off = static_cast<U>(static_cast<U>(b) - static_cast<U>(a)) / 2;
+            return static_cast<T>(a + static_cast<T>(off));
+        } else {
+            U off = static_cast<U>(static_cast<U>(a) - static_cast<U>(b)) / 2;
+            return static_cast<T>(a - static_cast<T>(off));
+        }
+    } else {
+        // <limits>, not <cmath>'s isnan/isnormal (inline, not constexpr in
+        // boxcxx -- using them here would break __cpp_lib_constexpr_numeric).
+        return __bits::IsNormalForMidpoint(a) && __bits::IsNormalForMidpoint(b)
+                   ? a / 2 + b / 2
+                   : (a + b) / 2;
+    }
+}
+
+template <class T>
+    requires is_object_v<T>
+constexpr T *midpoint(T *a, T *b)
+{
+    ptrdiff_t diff = b - a;
+    return a + diff / 2;
+}
+
+} // namespace std
+
+#endif // BOXCXX_NUMERIC

@@ -187,24 +187,8 @@ struct in_value_result {
     }
 };
 
-template <class O, class T>
-struct out_value_result {
-    [[no_unique_address]] O out;
-    [[no_unique_address]] T value;
-
-    template <class O2, class T2>
-        requires convertible_to<const O &, O2> && convertible_to<const T &, T2>
-    constexpr operator out_value_result<O2, T2>() const &
-    {
-        return {out, value};
-    }
-    template <class O2, class T2>
-        requires convertible_to<O, O2> && convertible_to<T, T2>
-    constexpr operator out_value_result<O2, T2>() &&
-    {
-        return {std::move(out), std::move(value)};
-    }
-};
+// out_value_result relocated to __bits/ranges_core (used by <numeric>'s
+// ranges::iota, which must not pull in the rest of <algorithm>/<ranges>).
 
 // ── [alg.nonmodifying] niebloids ─────────────────────────────────────────
 // (find / find_if / count / mismatch / equal / search / … — appended below.)

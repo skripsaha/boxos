@@ -1,8 +1,9 @@
 // boxcxx — <ranges> (core)
 // The range concepts, CPOs and associated type aliases now live in
 // <__bits/ranges_core> (a leaf header shared with the containers that need
-// ContainerCompatibleRange). This file adds the view machinery (elements_of,
-// dangling, view_base/view/viewable_range) plus, via the includes below, the
+// ContainerCompatibleRange; dangling/borrowed_iterator_t live there too, for
+// <numeric>'s sake). This file adds the view machinery (elements_of,
+// view_base/view/viewable_range) plus, via the includes below, the
 // full views/adaptors graph (view_interface, ref/owning_view, the pipe
 // machinery, all/take/drop/filter/transform, the range factories, and every
 // Ф29 view) and ranges::to.
@@ -47,22 +48,6 @@ struct elements_of {
 template <typename _Range, typename _Allocator = allocator<byte>>
 elements_of(_Range &&, _Allocator = _Allocator())
     -> elements_of<_Range &&, _Allocator>;
-
-// ── dangling / borrowed_iterator_t ([range.dangling]) ────────────────────
-// Inert marker returned in place of an iterator by algorithms that took an
-// rvalue non-borrowed range, so a would-be-dangling iterator can never be
-// used by accident. Its variadic ctor absorbs any argument list.
-struct dangling {
-    constexpr dangling() noexcept = default;
-    template <typename... Args>
-    constexpr dangling(Args &&...) noexcept
-    {
-    }
-};
-
-template <range R>
-using borrowed_iterator_t =
-    conditional_t<borrowed_range<R>, iterator_t<R>, dangling>;
 
 // ── view machinery ([range.view]) ───────────────────────────────────────
 
