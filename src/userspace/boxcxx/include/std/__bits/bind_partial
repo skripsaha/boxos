@@ -1,0 +1,169 @@
+// boxcxx — <__bits/bind_partial>
+// std::bind_front / std::bind_back ([func.bind.front],[func.bind.back]):
+// genuine perfect-forwarding partial-application wrappers. Unlike
+// std::bind (which always accesses the stored callable/bound arguments
+// as lvalues, see <__bits/bind>'s BindExpr), FrontBinder/BackBinder move
+// their stored state through on an rvalue call -- there is no placeholder
+// substitution here, just plain forwarding.
+#ifndef BOXCXX_BITS_BIND_PARTIAL
+#define BOXCXX_BITS_BIND_PARTIAL
+
+#include <__bits/bind>
+
+namespace std {
+namespace __bits {
+
+template <class FD, class... BoundArgsD>
+class FrontBinder {
+    FD                     __fd;
+    ArgPack<BoundArgsD...> __bound;
+
+    // Bound args first, then the call-time arguments.
+    template <class Self, size_t... Is, class... CallArgs>
+    static constexpr decltype(auto) CallImpl(Self &&self, index_sequence<Is...>,
+                                              CallArgs &&...cargs)
+    {
+        return InvokeRt(
+            forward<Self>(self).__fd,
+            ArgGet<Is, ArgNthType<Is, BoundArgsD...>>(forward<Self>(self).__bound)...,
+            forward<CallArgs>(cargs)...);
+    }
+
+public:
+    template <class Fx, class... BArgs>
+        requires(!is_same_v<remove_cvref_t<Fx>, FrontBinder>)
+    constexpr explicit FrontBinder(Fx &&fx, BArgs &&...bargs)
+        : __fd(forward<Fx>(fx)), __bound(forward<BArgs>(bargs)...)
+    {
+    }
+
+    FrontBinder(const FrontBinder &) = default;
+    FrontBinder(FrontBinder &&)      = default;
+    FrontBinder &operator=(const FrontBinder &) = default;
+    FrontBinder &operator=(FrontBinder &&) = default;
+
+    template <class... CallArgs>
+        requires is_invocable_v<FD &, BoundArgsD &..., CallArgs...>
+    constexpr decltype(auto) operator()(CallArgs &&...cargs) &
+        noexcept(is_nothrow_invocable_v<FD &, BoundArgsD &..., CallArgs...>)
+    {
+        return CallImpl(*this, index_sequence_for<BoundArgsD...>{}, forward<CallArgs>(cargs)...);
+    }
+    template <class... CallArgs>
+        requires is_invocable_v<const FD &, const BoundArgsD &..., CallArgs...>
+    constexpr decltype(auto) operator()(CallArgs &&...cargs) const &
+        noexcept(is_nothrow_invocable_v<const FD &, const BoundArgsD &..., CallArgs...>)
+    {
+        return CallImpl(*this, index_sequence_for<BoundArgsD...>{}, forward<CallArgs>(cargs)...);
+    }
+    // Genuine perfect forwarding here -- std::move(*this) is REQUIRED so
+    // CallImpl's Self deduces as non-reference and the stored state moves.
+    template <class... CallArgs>
+        requires is_invocable_v<FD, BoundArgsD..., CallArgs...>
+    constexpr decltype(auto) operator()(CallArgs &&...cargs) &&
+        noexcept(is_nothrow_invocable_v<FD &&, BoundArgsD &&..., CallArgs...>)
+    {
+        return CallImpl(move(*this), index_sequence_for<BoundArgsD...>{}, forward<CallArgs>(cargs)...);
+    }
+    template <class... CallArgs>
+        requires is_invocable_v<const FD, const BoundArgsD..., CallArgs...>
+    constexpr decltype(auto) operator()(CallArgs &&...cargs) const &&
+        noexcept(is_nothrow_invocable_v<const FD &&, const BoundArgsD &&..., CallArgs...>)
+    {
+        return CallImpl(move(*this), index_sequence_for<BoundArgsD...>{}, forward<CallArgs>(cargs)...);
+    }
+};
+
+template <class FD, class... BoundArgsD>
+class BackBinder {
+    FD                     __fd;
+    ArgPack<BoundArgsD...> __bound;
+
+    // Call-time arguments first, then the bound args.
+    template <class Self, size_t... Is, class... CallArgs>
+    static constexpr decltype(auto) CallImpl(Self &&self, index_sequence<Is...>,
+                                              CallArgs &&...cargs)
+    {
+        return InvokeRt(
+            forward<Self>(self).__fd, forward<CallArgs>(cargs)...,
+            ArgGet<Is, ArgNthType<Is, BoundArgsD...>>(forward<Self>(self).__bound)...);
+    }
+
+public:
+    template <class Fx, class... BArgs>
+        requires(!is_same_v<remove_cvref_t<Fx>, BackBinder>)
+    constexpr explicit BackBinder(Fx &&fx, BArgs &&...bargs)
+        : __fd(forward<Fx>(fx)), __bound(forward<BArgs>(bargs)...)
+    {
+    }
+
+    BackBinder(const BackBinder &) = default;
+    BackBinder(BackBinder &&)      = default;
+    BackBinder &operator=(const BackBinder &) = default;
+    BackBinder &operator=(BackBinder &&) = default;
+
+    template <class... CallArgs>
+        requires is_invocable_v<FD &, CallArgs..., BoundArgsD &...>
+    constexpr decltype(auto) operator()(CallArgs &&...cargs) &
+        noexcept(is_nothrow_invocable_v<FD &, CallArgs..., BoundArgsD &...>)
+    {
+        return CallImpl(*this, index_sequence_for<BoundArgsD...>{}, forward<CallArgs>(cargs)...);
+    }
+    template <class... CallArgs>
+        requires is_invocable_v<const FD &, CallArgs..., const BoundArgsD &...>
+    constexpr decltype(auto) operator()(CallArgs &&...cargs) const &
+        noexcept(is_nothrow_invocable_v<const FD &, CallArgs..., const BoundArgsD &...>)
+    {
+        return CallImpl(*this, index_sequence_for<BoundArgsD...>{}, forward<CallArgs>(cargs)...);
+    }
+    template <class... CallArgs>
+        requires is_invocable_v<FD, CallArgs..., BoundArgsD...>
+    constexpr decltype(auto) operator()(CallArgs &&...cargs) &&
+        noexcept(is_nothrow_invocable_v<FD &&, CallArgs..., BoundArgsD &&...>)
+    {
+        return CallImpl(move(*this), index_sequence_for<BoundArgsD...>{}, forward<CallArgs>(cargs)...);
+    }
+    template <class... CallArgs>
+        requires is_invocable_v<const FD, CallArgs..., const BoundArgsD...>
+    constexpr decltype(auto) operator()(CallArgs &&...cargs) const &&
+        noexcept(is_nothrow_invocable_v<const FD &&, CallArgs..., const BoundArgsD &&...>)
+    {
+        return CallImpl(move(*this), index_sequence_for<BoundArgsD...>{}, forward<CallArgs>(cargs)...);
+    }
+};
+
+} // namespace __bits
+
+template <class F, class... BoundArgs>
+constexpr __bits::FrontBinder<decay_t<F>, decay_t<BoundArgs>...>
+bind_front(F &&f, BoundArgs &&...boundArgs)
+{
+    static_assert(is_constructible_v<decay_t<F>, F> &&
+                      (is_constructible_v<decay_t<BoundArgs>, BoundArgs> && ...),
+                  "bind_front: decay_t<F>/decay_t<BoundArgs> must be constructible from the "
+                  "supplied arguments");
+    static_assert(is_move_constructible_v<decay_t<F>> &&
+                      (is_move_constructible_v<decay_t<BoundArgs>> && ...),
+                  "bind_front: decay_t<F>/decay_t<BoundArgs> must be move-constructible");
+    return __bits::FrontBinder<decay_t<F>, decay_t<BoundArgs>...>(
+        forward<F>(f), forward<BoundArgs>(boundArgs)...);
+}
+
+template <class F, class... BoundArgs>
+constexpr __bits::BackBinder<decay_t<F>, decay_t<BoundArgs>...>
+bind_back(F &&f, BoundArgs &&...boundArgs)
+{
+    static_assert(is_constructible_v<decay_t<F>, F> &&
+                      (is_constructible_v<decay_t<BoundArgs>, BoundArgs> && ...),
+                  "bind_back: decay_t<F>/decay_t<BoundArgs> must be constructible from the "
+                  "supplied arguments");
+    static_assert(is_move_constructible_v<decay_t<F>> &&
+                      (is_move_constructible_v<decay_t<BoundArgs>> && ...),
+                  "bind_back: decay_t<F>/decay_t<BoundArgs> must be move-constructible");
+    return __bits::BackBinder<decay_t<F>, decay_t<BoundArgs>...>(
+        forward<F>(f), forward<BoundArgs>(boundArgs)...);
+}
+
+} // namespace std
+
+#endif // BOXCXX_BITS_BIND_PARTIAL

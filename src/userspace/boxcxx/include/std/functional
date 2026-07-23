@@ -1,7 +1,8 @@
 // boxcxx — <functional> (invoke/invoke_r, reference_wrapper, transparent
 // operator functors, identity, hash primary + scalar specializations,
 // ranges::less/equal_to/... comparison objects, std::function,
-// std::move_only_function). bind_front/not_fn land with a later phase.
+// std::move_only_function, std::bind + placeholders, bind_front/bind_back,
+// mem_fn, not_fn).
 #ifndef BOXCXX_FUNCTIONAL
 #define BOXCXX_FUNCTIONAL
 
@@ -146,13 +147,21 @@ template <class T> void cref(const T &&) = delete;
 
 } // namespace std
 
-// __bits/function and __bits/move_only_function are included here (each
-// reopens namespace std itself) rather than in the top include block:
-// both call std::invoke_r on a dependent expression, which two-phase
-// lookup requires to already be declared at the point their templates are
-// parsed -- they must sit after invoke_r above, not before it.
+// __bits/function, __bits/move_only_function, __bits/bind,
+// __bits/bind_partial, __bits/mem_fn and __bits/not_fn are all included
+// here (each reopens namespace std itself) rather than in the top include
+// block: every one of them calls std::invoke_r / __bits::InvokeRt /
+// __bits::IsRefWrapper on a dependent expression, which two-phase lookup
+// requires to already be declared at the point their templates are parsed
+// -- they must sit after the first namespace-std block above, not before
+// it. bind_partial depends on bind (reuses ArgPack/ArgGet/ArgNthType), so
+// it must follow it.
 #include <__bits/function>
 #include <__bits/move_only_function>
+#include <__bits/bind>
+#include <__bits/bind_partial>
+#include <__bits/mem_fn>
+#include <__bits/not_fn>
 
 namespace std {
 

@@ -1,0 +1,91 @@
+// boxcxx — <__bits/not_fn>
+// std::not_fn ([func.not_fn]): wraps a Callable so calling the wrapper
+// invokes the target and negates the result. INVOKE is never
+// reimplemented here -- routes through the existing __bits::InvokeRt
+// from <functional>.
+#ifndef BOXCXX_BITS_NOT_FN
+#define BOXCXX_BITS_NOT_FN
+
+#include <type_traits>
+#include <utility>
+
+namespace std {
+namespace __bits {
+
+template <class FD>
+class NotFnWrapper {
+    FD __fd;
+
+public:
+    template <class Fx>
+        requires(!is_same_v<remove_cvref_t<Fx>, NotFnWrapper>)
+    constexpr explicit NotFnWrapper(Fx &&fx) : __fd(forward<Fx>(fx))
+    {
+    }
+
+    NotFnWrapper(const NotFnWrapper &) = default;
+    NotFnWrapper(NotFnWrapper &&)      = default;
+    NotFnWrapper &operator=(const NotFnWrapper &) = default;
+    NotFnWrapper &operator=(NotFnWrapper &&) = default;
+
+    // & / const& invoke __fd as an lvalue; && / const&& DO move it --
+    // the opposite of BindExpr, which never moves regardless of ref-
+    // qualifier. The trailing return type puts the "!" in the immediate
+    // context, so a target whose result has no operator! SFINAEs this
+    // overload away instead of hard-erroring ([func.require]/5 style
+    // expression-equivalence); noexcept additionally accounts for the
+    // negation possibly throwing.
+    template <class... Args>
+        requires is_invocable_v<FD &, Args...>
+    constexpr auto operator()(Args &&...args) &
+        noexcept(is_nothrow_invocable_v<FD &, Args...> &&
+                 noexcept(!declval<invoke_result_t<FD &, Args...>>()))
+            -> decltype(!InvokeRt(__fd, forward<Args>(args)...))
+    {
+        return !InvokeRt(__fd, forward<Args>(args)...);
+    }
+    template <class... Args>
+        requires is_invocable_v<const FD &, Args...>
+    constexpr auto operator()(Args &&...args) const &
+        noexcept(is_nothrow_invocable_v<const FD &, Args...> &&
+                 noexcept(!declval<invoke_result_t<const FD &, Args...>>()))
+            -> decltype(!InvokeRt(__fd, forward<Args>(args)...))
+    {
+        return !InvokeRt(__fd, forward<Args>(args)...);
+    }
+    template <class... Args>
+        requires is_invocable_v<FD, Args...>
+    constexpr auto operator()(Args &&...args) &&
+        noexcept(is_nothrow_invocable_v<FD, Args...> &&
+                 noexcept(!declval<invoke_result_t<FD, Args...>>()))
+            -> decltype(!InvokeRt(move(__fd), forward<Args>(args)...))
+    {
+        return !InvokeRt(move(__fd), forward<Args>(args)...);
+    }
+    template <class... Args>
+        requires is_invocable_v<const FD, Args...>
+    constexpr auto operator()(Args &&...args) const &&
+        noexcept(is_nothrow_invocable_v<const FD, Args...> &&
+                 noexcept(!declval<invoke_result_t<const FD, Args...>>()))
+            -> decltype(!InvokeRt(move(__fd), forward<Args>(args)...))
+    {
+        return !InvokeRt(move(__fd), forward<Args>(args)...);
+    }
+};
+
+} // namespace __bits
+
+template <class F>
+constexpr __bits::NotFnWrapper<decay_t<F>> not_fn(F &&f)
+{
+    using FD = decay_t<F>;
+    static_assert(is_constructible_v<FD, F>,
+                  "not_fn: decay_t<F> must be constructible from the supplied argument");
+    static_assert(is_move_constructible_v<FD>,
+                  "not_fn: decay_t<F> must be move-constructible");
+    return __bits::NotFnWrapper<FD>(forward<F>(f));
+}
+
+} // namespace std
+
+#endif // BOXCXX_BITS_NOT_FN
