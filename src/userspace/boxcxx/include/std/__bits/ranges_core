@@ -9,12 +9,18 @@
 // CPO resolution here is member → ADL (std::begin/end being visible
 // generic fallbacks) → array decay; the full poison-pill ceremony is
 // deliberately simplified — tracked in the epic leftovers.
+//
+// Depends on __bits/iterator_concepts (input_iterator/contiguous_iterator/
+// iter_difference_t/...), NOT the whole of <iterator> — <iterator> itself
+// depends on this file for ranges::distance's range-taking overload, so
+// pulling in all of <iterator> here would be a genuine include cycle. See
+// __bits/iterator_concepts's own header comment for the full reasoning.
 #ifndef BOXCXX_BITS_RANGES_CORE
 #define BOXCXX_BITS_RANGES_CORE
 
+#include <__bits/iterator_concepts>
 #include <concepts>
 #include <cstddef>
-#include <iterator>
 #include <type_traits>
 
 namespace std {

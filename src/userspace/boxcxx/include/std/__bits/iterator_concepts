@@ -1,0 +1,362 @@
+// boxcxx — <__bits/iterator_concepts>
+// The C++20 iterator concept layer: incrementable_traits, iter_difference_t/
+// iter_value_t/iter_reference_t, the ranges::iter_move CPO,
+// iter_rvalue_reference_t, and weakly_incrementable through
+// contiguous_iterator. Split out of <iterator> (Ф29f-3a) so
+// <__bits/ranges_core> can depend on just this concept layer, one-
+// directionally, instead of pulling in the whole of <iterator>.
+//
+// Why the split exists: <iterator>'s ranges::distance CPO (struct Distance)
+// needs a range-taking overload — range_difference_t<R>, sized_range<R>,
+// ranges::size/begin/end — all defined in ranges_core. ranges_core itself
+// needs this file's concepts (input_iterator, contiguous_iterator, ...) to
+// define range/sized_range/etc. If ranges_core simply #include <iterator>
+// (the whole file) and <iterator> simply #include <__bits/ranges_core> back,
+// the two form a genuine cycle: whichever of the two a translation unit
+// reaches FIRST sets its include guard immediately, so when the OTHER file's
+// matching #include re-enters it, the guard silently no-ops the re-entry —
+// even though that first file's own body (the part defining the names the
+// second file needs) has not run yet, because it is still waiting on ITS
+// own #include of the second file to return. This is not a textual problem
+// fixable by moving the #include around inside either file — it is a real
+// bidirectional dependency, and a preprocessor guard cannot wait for a
+// same-file inclusion further up the call stack to finish.
+//
+// The fix: give the concept layer its own leaf file with NO dependency on
+// the rest of <iterator> (no move_iterator/counted_iterator/common_iterator/
+// basic_const_iterator, none of which ranges_core needs). <iterator>
+// includes this file at its own top; ranges_core includes this file instead
+// of all of <iterator>. Both edges are now one-directional — no cycle — and
+// <iterator>'s struct Distance can safely #include <__bits/ranges_core>
+// further down, once this file (and therefore ranges_core's own
+// prerequisites) are already satisfied.
+#ifndef BOXCXX_BITS_ITERATOR_CONCEPTS
+#define BOXCXX_BITS_ITERATOR_CONCEPTS
+
+#include <__bits/iterator_core>
+#include <__bits/pointer>
+#include <concepts>
+#include <cstddef>
+#include <type_traits>
+#include <utility>
+
+namespace std {
+
+// ── incrementable_traits ([incrementable.traits]) ───────────────────────
+// Supplies difference_type for weakly_incrementable when the type is not a
+// full iterator carrying iterator_traits — most importantly bare integral
+// values, so iota_view<int> can satisfy weakly_incrementable<int> (whose
+// difference type is otherwise ill-formed under the iterator_traits-only
+// resolution below). Shape mirrors the standard's constrained partial
+// specializations; `<const I>` is preferred over the constrained `<T>`
+// forms by partial-ordering, so a cv-qualified type resolves once.
+template <typename>
+struct incrementable_traits {};
+
+template <typename T>
+    requires is_object_v<T>
+struct incrementable_traits<T *> {
+    using difference_type = ptrdiff_t;
+};
+
+template <typename I>
+struct incrementable_traits<const I> : incrementable_traits<I> {};
+
+template <typename T>
+    requires requires { typename T::difference_type; }
+struct incrementable_traits<T> {
+    using difference_type = typename T::difference_type;
+};
+
+template <typename T>
+    requires(!requires { typename T::difference_type; }) &&
+            requires(const T &a, const T &b) {
+                { a - b } -> integral;
+            }
+struct incrementable_traits<T> {
+    using difference_type =
+        make_signed_t<decltype(declval<T>() - declval<T>())>;
+};
+
+// ── associated types ([iterator.assoc.types]) ───────────────────────────
+
+namespace __iter_impl {
+
+template <typename I>
+concept HasTraitsDifference =
+    requires { typename iterator_traits<I>::difference_type; };
+template <typename I>
+concept HasTraitsValue = requires { typename iterator_traits<I>::value_type; };
+template <typename I>
+concept HasIncrementableDiff =
+    requires { typename incrementable_traits<remove_cvref_t<I>>::difference_type; };
+
+// iter_difference_t resolution ([iterator.traits]): a genuine iterator
+// carries iterator_traits::difference_type (pointer spec, or a type whose
+// five member typedefs synthesised the traits) — use it verbatim, keeping
+// every existing result unchanged. Only when that is absent (a bare
+// incrementable such as int) do we consult incrementable_traits.
+template <typename I>
+auto DiffTypeOf()
+{
+    if constexpr (HasTraitsDifference<I>)
+        return type_identity<typename iterator_traits<I>::difference_type>{};
+    else
+        return type_identity<
+            typename incrementable_traits<remove_cvref_t<I>>::difference_type>{};
+}
+
+} // namespace __iter_impl
+
+template <typename I>
+    requires(__iter_impl::HasTraitsDifference<I> ||
+             __iter_impl::HasIncrementableDiff<I>)
+using iter_difference_t = typename decltype(__iter_impl::DiffTypeOf<I>())::type;
+
+template <typename I>
+    requires __iter_impl::HasTraitsValue<I>
+using iter_value_t = typename iterator_traits<I>::value_type;
+
+template <typename I>
+    requires requires(I &i) { *i; }
+using iter_reference_t = decltype(*declval<I &>());
+
+// ranges::iter_move's CPO is defined here — rather than alongside
+// ranges::iter_swap's, in <iterator> — because iter_rvalue_reference_t
+// directly below needs it: `ranges::iter_move` is a non-dependent qualified
+// name, resolved by ordinary qualified lookup at the point this alias
+// template is PARSED, not deferred to instantiation the way an unqualified,
+// ADL-eligible call would be. So it must already be declared here, in the
+// source text, full stop — no amount of "declare it later and let ADL find
+// it" helps, because there is no ADL step in a qualified call at all.
+// iter_swap has no equivalent early dependent and stays in <iterator>,
+// alongside advance/next/prev/distance.
+namespace ranges {
+
+namespace __iter_move {
+void iter_move(); // poison pill — force ADL-only lookup of the customisation
+template <class I>
+concept HasAdl = requires(I &&i) { iter_move(static_cast<I &&>(i)); };
+
+// noexcept mirrors [iterator.cust.move]/1: expression-equivalent to the ADL
+// call when one exists, else to *E (both branches of the *E fallback share
+// one noexcept — std::move is always noexcept, so the lvalue/rvalue split
+// below doesn't matter here).
+template <class I>
+constexpr bool NoexceptOf()
+{
+    if constexpr (HasAdl<I>)
+        return noexcept(iter_move(declval<I &&>()));
+    else
+        return noexcept(*declval<I &&>());
+}
+
+struct Fn {
+    template <class I>
+    constexpr decltype(auto) operator()(I &&i) const noexcept(NoexceptOf<I>())
+    {
+        if constexpr (HasAdl<I>)
+            return iter_move(static_cast<I &&>(i));
+        else if constexpr (is_lvalue_reference_v<decltype(*static_cast<I &&>(
+                               i))>)
+            return static_cast<remove_reference_t<decltype(*static_cast<I &&>(
+                i))> &&>(*static_cast<I &&>(i));
+        else
+            return *static_cast<I &&>(i);
+    }
+};
+} // namespace __iter_move
+inline namespace __cpo {
+inline constexpr __iter_move::Fn iter_move{};
+}
+
+} // namespace ranges
+
+// fixed per [readable.traits] / LWG 2106 (a prvalue-returning base iterator,
+// e.g. a proxy view's operator*, must not synthesize a dangling
+// reference-typed alias here) — routes through the customization point
+// instead of a hand-rolled move(*i), so a wrapped proxy's own ADL iter_move
+// participates instead of silently downgrading to a reference into a
+// temporary that's already gone.
+template <typename I>
+    requires requires(I &i) { ranges::iter_move(i); }
+using iter_rvalue_reference_t = decltype(ranges::iter_move(declval<I &>()));
+
+// ── iterator concepts ([iterator.concepts]) ─────────────────────────────
+
+namespace __iter_impl {
+// [iterator.concept.readable]: indirectly_readable is defined over
+// remove_cvref_t<In>, so a const/ref-qualified iterator type still reads as
+// readable (its value/reference come from the unqualified iterator). boxcxx
+// keeps the rest simplified (no common_reference clause — a documented epic
+// simplification), but the cvref strip is load-bearing: without it
+// indirectly_swappable's own `requires(const I1 i1)` probe — and the
+// iter_swap CPO — reject `const I` operands.
+template <typename I>
+concept IndirectlyReadableImpl = requires(const I i) {
+    typename iter_value_t<I>;
+    typename iter_reference_t<I>;
+    { *i } -> same_as<iter_reference_t<I>>;
+};
+} // namespace __iter_impl
+
+template <typename In>
+concept indirectly_readable =
+    __iter_impl::IndirectlyReadableImpl<remove_cvref_t<In>>;
+
+// [iterator.concept.writable]: the two const_cast expressions reject
+// iterators with prvalue non-proxy reference types that permit rvalue
+// assignment but not also CONST rvalue assignment (Note 2) — e.g. an
+// iterator returning std::string by value must NOT model
+// indirectly_writable<I, std::string>. This is what correctly distinguishes
+// zip/adjacent/cartesian's all-reference proxy tuples (writable — P2321's
+// const-qualified tuple::operator= makes const_cast<const tuple<T&,...>&&>
+// still assign through the references) from enumerate_view's MIXED
+// tuple<difference_type, T&> (not writable — no const-qualified assignment
+// can write through a genuine const value member).
+template <typename Out, typename T>
+concept indirectly_writable = requires(Out &&o, T &&t) {
+    *o = std::forward<T>(t);
+    *std::forward<Out>(o) = std::forward<T>(t);
+    const_cast<const iter_reference_t<Out> &&>(*o) = std::forward<T>(t);
+    const_cast<const iter_reference_t<Out> &&>(*std::forward<Out>(o)) =
+        std::forward<T>(t);
+};
+
+template <typename I>
+concept weakly_incrementable = movable<I> && requires(I i) {
+    typename iter_difference_t<I>;
+    requires signed_integral<iter_difference_t<I>>;
+    { ++i } -> same_as<I &>;
+    i++;
+};
+
+template <typename I>
+concept incrementable = regular<I> && weakly_incrementable<I> &&
+                        requires(I i) {
+                            { i++ } -> same_as<I>;
+                        };
+
+template <typename I>
+concept input_or_output_iterator = requires(I i) {
+    *i;
+} && weakly_incrementable<I>;
+
+template <typename S, typename I>
+concept sentinel_for = semiregular<S> && input_or_output_iterator<I> &&
+                       requires(const I &i, const S &s) {
+                           { i == s } -> convertible_to<bool>;
+                       };
+
+template <typename S, typename I>
+inline constexpr bool disable_sized_sentinel_for = false;
+
+template <typename S, typename I>
+concept sized_sentinel_for =
+    sentinel_for<S, I> &&
+    !disable_sized_sentinel_for<remove_cv_t<S>, remove_cv_t<I>> &&
+    requires(const I &i, const S &s) {
+        { s - i } -> same_as<iter_difference_t<I>>;
+        { i - s } -> same_as<iter_difference_t<I>>;
+    };
+
+namespace __iter_impl {
+
+template <typename I>
+concept HasCategory =
+    requires { typename iterator_traits<I>::iterator_category; };
+
+template <typename I, typename Tag>
+concept CategoryAtLeast =
+    HasCategory<I> &&
+    derived_from<typename iterator_traits<I>::iterator_category, Tag>;
+
+} // namespace __iter_impl
+
+namespace __iter_impl {
+
+// ITER_CONCEPT(I) ([iterator.concepts.general]): I::iterator_concept, else
+// iterator_traits<I>::iterator_concept, else iterator_traits<I>::
+// iterator_category. The two probes below make forming IterConcept<I> a
+// genuine substitution failure (not a hard error) when I has none of the
+// three members — load-bearing for input_iterator's own
+// "requires { typename IterConcept<I>; }" guard just below: without the
+// requires-clause on the alias template, the else-branch of
+// IterConceptHelper would name iterator_traits<I>::iterator_category
+// unconditionally, which is a hard error (not SFINAE) when nothing at all
+// is declared.
+template <typename I>
+concept HasIterConceptMember = requires { typename I::iterator_concept; };
+template <typename I>
+concept HasTraitsIterConcept =
+    requires { typename iterator_traits<I>::iterator_concept; };
+
+template <class I>
+constexpr auto IterConceptHelper()
+{
+    if constexpr (HasIterConceptMember<I>)
+        return type_identity<typename I::iterator_concept>{};
+    else if constexpr (HasTraitsIterConcept<I>)
+        return type_identity<typename iterator_traits<I>::iterator_concept>{};
+    else
+        return type_identity<typename iterator_traits<I>::iterator_category>{};
+}
+template <class I>
+    requires HasIterConceptMember<I> || HasTraitsIterConcept<I> || HasCategory<I>
+using IterConcept = typename decltype(IterConceptHelper<I>())::type;
+
+} // namespace __iter_impl
+
+template <typename I>
+concept input_iterator =
+    input_or_output_iterator<I> && indirectly_readable<I> &&
+    requires { typename __iter_impl::IterConcept<I>; } &&
+    derived_from<__iter_impl::IterConcept<I>, input_iterator_tag>;
+
+template <typename I, typename T>
+concept output_iterator =
+    input_or_output_iterator<I> && indirectly_writable<I, T> &&
+    requires(I i, T &&t) { *i++ = std::forward<T>(t); };
+
+template <typename I>
+concept forward_iterator =
+    input_iterator<I> &&
+    derived_from<__iter_impl::IterConcept<I>, forward_iterator_tag> &&
+    incrementable<I> && sentinel_for<I, I>;
+
+template <typename I>
+concept bidirectional_iterator =
+    forward_iterator<I> &&
+    derived_from<__iter_impl::IterConcept<I>, bidirectional_iterator_tag> &&
+    requires(I i) {
+        { --i } -> same_as<I &>;
+        { i-- } -> same_as<I>;
+    };
+
+template <typename I>
+concept random_access_iterator =
+    bidirectional_iterator<I> &&
+    derived_from<__iter_impl::IterConcept<I>, random_access_iterator_tag> &&
+    totally_ordered<I> && sized_sentinel_for<I, I> &&
+    requires(I i, const I j, const iter_difference_t<I> n) {
+        { i += n } -> same_as<I &>;
+        { j + n } -> same_as<I>;
+        { n + j } -> same_as<I>;
+        { i -= n } -> same_as<I &>;
+        { j - n } -> same_as<I>;
+        { j[n] } -> same_as<iter_reference_t<I>>;
+    };
+
+template <typename I>
+concept contiguous_iterator =
+    random_access_iterator<I> &&
+    derived_from<__iter_impl::IterConcept<I>, contiguous_iterator_tag> &&
+    is_lvalue_reference_v<iter_reference_t<I>> &&
+    same_as<iter_value_t<I>, remove_cvref_t<iter_reference_t<I>>> &&
+    requires(const I &i) {
+        { std::to_address(i) } -> same_as<add_pointer_t<iter_reference_t<I>>>;
+    };
+
+} // namespace std
+
+#endif // BOXCXX_BITS_ITERATOR_CONCEPTS

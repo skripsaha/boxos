@@ -371,6 +371,45 @@ struct pair {
         return *this;
     }
 
+    // P2321 const-qualified assignment ([pairs.pair]): a const pair of
+    // REFERENCES still assigns through those references — const on the pair
+    // itself doesn't propagate into what a reference member refers to.
+    // is_assignable_v<const T1&, ...> is what makes these overloads PRESENT
+    // for reference elements (const(int&) collapses to int&, assignable) and
+    // ABSENT for plain value elements (const int& is not assignable to) —
+    // mirrors <tuple>'s already-shipped const operator= exactly.
+    constexpr const pair &operator=(const pair &p) const
+        requires(is_copy_assignable_v<const T1> && is_copy_assignable_v<const T2>)
+    {
+        first  = p.first;
+        second = p.second;
+        return *this;
+    }
+    constexpr const pair &operator=(pair &&p) const
+        requires(is_assignable_v<const T1 &, T1> && is_assignable_v<const T2 &, T2>)
+    {
+        first  = forward<T1>(p.first);
+        second = forward<T2>(p.second);
+        return *this;
+    }
+    template <class U1, class U2>
+        requires(is_assignable_v<const T1 &, const U1 &> &&
+                 is_assignable_v<const T2 &, const U2 &>)
+    constexpr const pair &operator=(const pair<U1, U2> &p) const
+    {
+        first  = p.first;
+        second = p.second;
+        return *this;
+    }
+    template <class U1, class U2>
+        requires(is_assignable_v<const T1 &, U1> && is_assignable_v<const T2 &, U2>)
+    constexpr const pair &operator=(pair<U1, U2> &&p) const
+    {
+        first  = forward<U1>(p.first);
+        second = forward<U2>(p.second);
+        return *this;
+    }
+
     constexpr void swap(pair &p) noexcept(is_nothrow_swappable_v<T1> &&
                                           is_nothrow_swappable_v<T2>)
     {

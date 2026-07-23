@@ -10,6 +10,8 @@
 #ifndef BOXCXX_ITERATOR
 #define BOXCXX_ITERATOR
 
+#include <__bits/allocator_core>
+#include <__bits/iterator_concepts>
 #include <__bits/iterator_core>
 #include <__bits/pointer>
 #include <compare>
@@ -22,332 +24,19 @@
 
 namespace std {
 
-// ── incrementable_traits ([incrementable.traits]) ───────────────────────
-// Supplies difference_type for weakly_incrementable when the type is not a
-// full iterator carrying iterator_traits — most importantly bare integral
-// values, so iota_view<int> can satisfy weakly_incrementable<int> (whose
-// difference type is otherwise ill-formed under the iterator_traits-only
-// resolution below). Shape mirrors the standard's constrained partial
-// specializations; `<const I>` is preferred over the constrained `<T>`
-// forms by partial-ordering, so a cv-qualified type resolves once.
-template <typename>
-struct incrementable_traits {};
-
-template <typename T>
-    requires is_object_v<T>
-struct incrementable_traits<T *> {
-    using difference_type = ptrdiff_t;
-};
-
-template <typename I>
-struct incrementable_traits<const I> : incrementable_traits<I> {};
-
-template <typename T>
-    requires requires { typename T::difference_type; }
-struct incrementable_traits<T> {
-    using difference_type = typename T::difference_type;
-};
-
-template <typename T>
-    requires(!requires { typename T::difference_type; }) &&
-            requires(const T &a, const T &b) {
-                { a - b } -> integral;
-            }
-struct incrementable_traits<T> {
-    using difference_type =
-        make_signed_t<decltype(declval<T>() - declval<T>())>;
-};
-
-// ── associated types ([iterator.assoc.types]) ───────────────────────────
-
-namespace __iter_impl {
-
-template <typename I>
-concept HasTraitsDifference =
-    requires { typename iterator_traits<I>::difference_type; };
-template <typename I>
-concept HasTraitsValue = requires { typename iterator_traits<I>::value_type; };
-template <typename I>
-concept HasIncrementableDiff =
-    requires { typename incrementable_traits<remove_cvref_t<I>>::difference_type; };
-
-// iter_difference_t resolution ([iterator.traits]): a genuine iterator
-// carries iterator_traits::difference_type (pointer spec, or a type whose
-// five member typedefs synthesised the traits) — use it verbatim, keeping
-// every existing result unchanged. Only when that is absent (a bare
-// incrementable such as int) do we consult incrementable_traits.
-template <typename I>
-auto DiffTypeOf()
-{
-    if constexpr (HasTraitsDifference<I>)
-        return type_identity<typename iterator_traits<I>::difference_type>{};
-    else
-        return type_identity<
-            typename incrementable_traits<remove_cvref_t<I>>::difference_type>{};
-}
-
-} // namespace __iter_impl
-
-template <typename I>
-    requires(__iter_impl::HasTraitsDifference<I> ||
-             __iter_impl::HasIncrementableDiff<I>)
-using iter_difference_t = typename decltype(__iter_impl::DiffTypeOf<I>())::type;
-
-template <typename I>
-    requires __iter_impl::HasTraitsValue<I>
-using iter_value_t = typename iterator_traits<I>::value_type;
-
-template <typename I>
-    requires requires(I &i) { *i; }
-using iter_reference_t = decltype(*declval<I &>());
-
-// ranges::iter_move's CPO is defined here — rather than alongside
-// ranges::iter_swap's, later in this file — because iter_rvalue_reference_t
-// directly below needs it: `ranges::iter_move` is a non-dependent qualified
-// name, resolved by ordinary qualified lookup at the point this alias
-// template is PARSED, not deferred to instantiation the way an unqualified,
-// ADL-eligible call would be. So it must already be declared here, in the
-// source text, full stop — no amount of "declare it later and let ADL find
-// it" helps, because there is no ADL step in a qualified call at all.
-// iter_swap has no equivalent early dependent and stays at its original
-// position, alongside advance/next/prev/distance.
-namespace ranges {
-
-namespace __iter_move {
-void iter_move(); // poison pill — force ADL-only lookup of the customisation
-template <class I>
-concept HasAdl = requires(I &&i) { iter_move(static_cast<I &&>(i)); };
-
-// noexcept mirrors [iterator.cust.move]/1: expression-equivalent to the ADL
-// call when one exists, else to *E (both branches of the *E fallback share
-// one noexcept — std::move is always noexcept, so the lvalue/rvalue split
-// below doesn't matter here).
-template <class I>
-constexpr bool NoexceptOf()
-{
-    if constexpr (HasAdl<I>)
-        return noexcept(iter_move(declval<I &&>()));
-    else
-        return noexcept(*declval<I &&>());
-}
-
-struct Fn {
-    template <class I>
-    constexpr decltype(auto) operator()(I &&i) const noexcept(NoexceptOf<I>())
-    {
-        if constexpr (HasAdl<I>)
-            return iter_move(static_cast<I &&>(i));
-        else if constexpr (is_lvalue_reference_v<decltype(*static_cast<I &&>(
-                               i))>)
-            return static_cast<remove_reference_t<decltype(*static_cast<I &&>(
-                i))> &&>(*static_cast<I &&>(i));
-        else
-            return *static_cast<I &&>(i);
-    }
-};
-} // namespace __iter_move
-inline namespace __cpo {
-inline constexpr __iter_move::Fn iter_move{};
-}
-
-} // namespace ranges
-
-// fixed per [readable.traits] / LWG 2106 (a prvalue-returning base iterator,
-// e.g. a proxy view's operator*, must not synthesize a dangling
-// reference-typed alias here) — routes through the customization point
-// instead of a hand-rolled move(*i), so a wrapped proxy's own ADL iter_move
-// participates instead of silently downgrading to a reference into a
-// temporary that's already gone.
-template <typename I>
-    requires requires(I &i) { ranges::iter_move(i); }
-using iter_rvalue_reference_t = decltype(ranges::iter_move(declval<I &>()));
-
-// ── iterator concepts ([iterator.concepts]) ─────────────────────────────
-
-namespace __iter_impl {
-// [iterator.concept.readable]: indirectly_readable is defined over
-// remove_cvref_t<In>, so a const/ref-qualified iterator type still reads as
-// readable (its value/reference come from the unqualified iterator). boxcxx
-// keeps the rest simplified (no common_reference clause — a documented epic
-// simplification), but the cvref strip is load-bearing: without it
-// indirectly_swappable's own `requires(const I1 i1)` probe — and the
-// iter_swap CPO — reject `const I` operands.
-template <typename I>
-concept IndirectlyReadableImpl = requires(const I i) {
-    typename iter_value_t<I>;
-    typename iter_reference_t<I>;
-    { *i } -> same_as<iter_reference_t<I>>;
-};
-} // namespace __iter_impl
-
-template <typename In>
-concept indirectly_readable =
-    __iter_impl::IndirectlyReadableImpl<remove_cvref_t<In>>;
-
-// [iterator.concept.writable]: the two const_cast expressions reject
-// iterators with prvalue non-proxy reference types that permit rvalue
-// assignment but not also CONST rvalue assignment (Note 2) — e.g. an
-// iterator returning std::string by value must NOT model
-// indirectly_writable<I, std::string>. This is what correctly distinguishes
-// zip/adjacent/cartesian's all-reference proxy tuples (writable — P2321's
-// const-qualified tuple::operator= makes const_cast<const tuple<T&,...>&&>
-// still assign through the references) from enumerate_view's MIXED
-// tuple<difference_type, T&> (not writable — no const-qualified assignment
-// can write through a genuine const value member).
-template <typename Out, typename T>
-concept indirectly_writable = requires(Out &&o, T &&t) {
-    *o = std::forward<T>(t);
-    *std::forward<Out>(o) = std::forward<T>(t);
-    const_cast<const iter_reference_t<Out> &&>(*o) = std::forward<T>(t);
-    const_cast<const iter_reference_t<Out> &&>(*std::forward<Out>(o)) =
-        std::forward<T>(t);
-};
-
-template <typename I>
-concept weakly_incrementable = movable<I> && requires(I i) {
-    typename iter_difference_t<I>;
-    requires signed_integral<iter_difference_t<I>>;
-    { ++i } -> same_as<I &>;
-    i++;
-};
-
-template <typename I>
-concept incrementable = regular<I> && weakly_incrementable<I> &&
-                        requires(I i) {
-                            { i++ } -> same_as<I>;
-                        };
-
-template <typename I>
-concept input_or_output_iterator = requires(I i) {
-    *i;
-} && weakly_incrementable<I>;
-
-template <typename S, typename I>
-concept sentinel_for = semiregular<S> && input_or_output_iterator<I> &&
-                       requires(const I &i, const S &s) {
-                           { i == s } -> convertible_to<bool>;
-                       };
-
-template <typename S, typename I>
-inline constexpr bool disable_sized_sentinel_for = false;
-
-template <typename S, typename I>
-concept sized_sentinel_for =
-    sentinel_for<S, I> &&
-    !disable_sized_sentinel_for<remove_cv_t<S>, remove_cv_t<I>> &&
-    requires(const I &i, const S &s) {
-        { s - i } -> same_as<iter_difference_t<I>>;
-        { i - s } -> same_as<iter_difference_t<I>>;
-    };
-
-namespace __iter_impl {
-
-template <typename I>
-concept HasCategory =
-    requires { typename iterator_traits<I>::iterator_category; };
-
-template <typename I, typename Tag>
-concept CategoryAtLeast =
-    HasCategory<I> &&
-    derived_from<typename iterator_traits<I>::iterator_category, Tag>;
-
-} // namespace __iter_impl
-
-namespace __iter_impl {
-
-// ITER_CONCEPT(I) ([iterator.concepts.general]): I::iterator_concept, else
-// iterator_traits<I>::iterator_concept, else iterator_traits<I>::
-// iterator_category. The two probes below make forming IterConcept<I> a
-// genuine substitution failure (not a hard error) when I has none of the
-// three members — load-bearing for input_iterator's own
-// "requires { typename IterConcept<I>; }" guard just below: without the
-// requires-clause on the alias template, the else-branch of
-// IterConceptHelper would name iterator_traits<I>::iterator_category
-// unconditionally, which is a hard error (not SFINAE) when nothing at all
-// is declared.
-template <typename I>
-concept HasIterConceptMember = requires { typename I::iterator_concept; };
-template <typename I>
-concept HasTraitsIterConcept =
-    requires { typename iterator_traits<I>::iterator_concept; };
-
-template <class I>
-constexpr auto IterConceptHelper()
-{
-    if constexpr (HasIterConceptMember<I>)
-        return type_identity<typename I::iterator_concept>{};
-    else if constexpr (HasTraitsIterConcept<I>)
-        return type_identity<typename iterator_traits<I>::iterator_concept>{};
-    else
-        return type_identity<typename iterator_traits<I>::iterator_category>{};
-}
-template <class I>
-    requires HasIterConceptMember<I> || HasTraitsIterConcept<I> || HasCategory<I>
-using IterConcept = typename decltype(IterConceptHelper<I>())::type;
-
-} // namespace __iter_impl
-
-template <typename I>
-concept input_iterator =
-    input_or_output_iterator<I> && indirectly_readable<I> &&
-    requires { typename __iter_impl::IterConcept<I>; } &&
-    derived_from<__iter_impl::IterConcept<I>, input_iterator_tag>;
-
-template <typename I, typename T>
-concept output_iterator =
-    input_or_output_iterator<I> && indirectly_writable<I, T> &&
-    requires(I i, T &&t) { *i++ = std::forward<T>(t); };
-
-template <typename I>
-concept forward_iterator =
-    input_iterator<I> &&
-    derived_from<__iter_impl::IterConcept<I>, forward_iterator_tag> &&
-    incrementable<I> && sentinel_for<I, I>;
-
-template <typename I>
-concept bidirectional_iterator =
-    forward_iterator<I> &&
-    derived_from<__iter_impl::IterConcept<I>, bidirectional_iterator_tag> &&
-    requires(I i) {
-        { --i } -> same_as<I &>;
-        { i-- } -> same_as<I>;
-    };
-
-template <typename I>
-concept random_access_iterator =
-    bidirectional_iterator<I> &&
-    derived_from<__iter_impl::IterConcept<I>, random_access_iterator_tag> &&
-    totally_ordered<I> && sized_sentinel_for<I, I> &&
-    requires(I i, const I j, const iter_difference_t<I> n) {
-        { i += n } -> same_as<I &>;
-        { j + n } -> same_as<I>;
-        { n + j } -> same_as<I>;
-        { i -= n } -> same_as<I &>;
-        { j - n } -> same_as<I>;
-        { j[n] } -> same_as<iter_reference_t<I>>;
-    };
-
-template <typename I>
-concept contiguous_iterator =
-    random_access_iterator<I> &&
-    derived_from<__iter_impl::IterConcept<I>, contiguous_iterator_tag> &&
-    is_lvalue_reference_v<iter_reference_t<I>> &&
-    same_as<iter_value_t<I>, remove_cvref_t<iter_reference_t<I>>> &&
-    requires(const I &i) {
-        { std::to_address(i) } -> same_as<add_pointer_t<iter_reference_t<I>>>;
-    };
-
 // ── reverse_iterator's iterator_concept ([reverse.iterator]) ─────────────
-// reverse_iterator itself lives in __bits/iterator_core (textually before
-// the four concepts above, and included standalone by containers that want
-// the pre-C++20 substrate without the concept machinery) — its class body
-// carries only the five legacy iterator_traits members, no iterator_concept.
-// Rather than move the class (which would drag every such container into
-// depending on <concepts>), this dedicated specialization — the same
-// mechanism common_iterator's and counted_iterator's own specializations
-// use — supplies iterator_concept (and the iterator_category RA-cap) from
-// here, where random_access_iterator/bidirectional_iterator are already in
-// scope. reverse_iterator's own class body stays untouched.
+// reverse_iterator itself lives in __bits/iterator_core (included standalone
+// by containers that want the pre-C++20 substrate without the concept
+// machinery, and textually before __bits/iterator_concepts, included at the
+// top of this file) — its class body carries only the five legacy
+// iterator_traits members, no iterator_concept. Rather than move the class
+// (which would drag every such container into depending on <concepts>),
+// this dedicated specialization — the same mechanism common_iterator's and
+// counted_iterator's own specializations use — supplies iterator_concept
+// (and the iterator_category RA-cap) from here, where
+// random_access_iterator/bidirectional_iterator are already in scope via
+// __bits/iterator_concepts. reverse_iterator's own class body stays
+// untouched.
 template <typename It>
 struct iterator_traits<reverse_iterator<It>> {
     using iterator_concept = conditional_t<random_access_iterator<It>,
@@ -623,6 +312,11 @@ public:
     {
         return __cur[n];
     }
+    constexpr auto operator->() const noexcept
+        requires contiguous_iterator<I>
+    {
+        return to_address(__cur);
+    }
 
     constexpr counted_iterator &operator++()
     {
@@ -884,6 +578,21 @@ concept indirectly_movable_storable =
 // there. iter_swap has no early dependent forcing the same move, so it
 // stays here, alongside advance/next/prev/distance below.
 
+} // namespace std
+
+// ranges::distance's range-taking overload (in struct Distance below) needs
+// the range concepts (range, sized_range, range_difference_t, ranges::begin/
+// end/size) that <__bits/ranges_core> defines. Splicing it in here — rather
+// than at the top of this file with the other #includes — keeps the window
+// in which <iterator> exposes the range surface as small as possible; every
+// concept ranges_core itself needs (input_or_output_iterator,
+// iter_difference_t, forward_iterator, ...) is already defined above.
+// ranges_core's own #include <iterator> is a no-op re-entry: BOXCXX_ITERATOR
+// is already defined at this point in this file's own processing.
+#include <__bits/ranges_core>
+
+namespace std {
+
 namespace ranges {
 
 namespace __iter_swap {
@@ -955,10 +664,9 @@ inline constexpr __iter_swap::Fn iter_swap{};
 // ── ranges::advance / next / prev / distance ([range.iter.op]) ───────────
 // Niebloids over raw (iterator, sentinel/count) pairs — the ranges algorithms
 // (and fold_right / find_last, which must walk a sentinel down to a real I
-// via next(first,last)) build on these. The range-taking distance(R&&)
-// overload is deliberately omitted here: it needs the range concepts that
-// live in <ranges> (which includes THIS header, not the reverse) — spell
-// distance(begin(r), end(r)) instead.
+// via next(first,last)) build on these. distance's range-taking overload
+// (struct Distance below) needs the range concepts spliced in just above
+// this namespace — see the #include <__bits/ranges_core> comment there.
 
 struct Advance {
     template <input_or_output_iterator I>
@@ -1070,6 +778,18 @@ struct Distance {
             for (; first != last; ++first) ++n;
             return n;
         }
+    }
+
+    // [range.iter.op.distance] range overload — O(1) via ranges::size for a
+    // sized_range (closes the O(n) distance(begin(r),end(r)) degradation for
+    // a sized-but-not-sized_sentinel_for base, e.g. list), O(n) walk otherwise.
+    template <range R>
+    constexpr range_difference_t<R> operator()(R &&r) const
+    {
+        if constexpr (sized_range<R>)
+            return static_cast<range_difference_t<R>>(ranges::size(r));
+        else
+            return (*this)(ranges::begin(r), ranges::end(r));
     }
 };
 inline constexpr Distance distance{};
@@ -1353,9 +1073,10 @@ concept sortable =
 // than std::variant — like libstdc++/libc++ — to keep <iterator> from pulling
 // <variant> into every ranges/algorithm TU. Under -fexceptions the valueless
 // state is a genuine requirement: a throwing move/copy mid-reassignment must
-// not leave the union double-destroyed. Placement-new mirrors MovableBox's
-// house style (raw ::new, not construct_at — avoids a <memory> include cycle),
-// so like MovableBox common_iterator is not usable in constant evaluation.
+// not leave the union double-destroyed. Union members are constructed and
+// torn down via construct_at/destroy_at (__bits/allocator_core), making
+// common_iterator usable in constant evaluation — raw placement-new is not
+// constexpr-legal.
 
 namespace __iter_impl {
 
@@ -1437,16 +1158,14 @@ class common_iterator {
             return;
         }
         if (__index == 0)
-            __it.~I();
+            destroy_at(__builtin_addressof(__it));
         else if (__index == 1)
-            __sent.~S();
+            destroy_at(__builtin_addressof(__sent));
         __index = kValueless;
         if (x.__index == 0)
-            ::new (static_cast<void *>(__builtin_addressof(__it)))
-                I(std::forward<Other>(x).__it);
+            construct_at(__builtin_addressof(__it), std::forward<Other>(x).__it);
         else if (x.__index == 1)
-            ::new (static_cast<void *>(__builtin_addressof(__sent)))
-                S(std::forward<Other>(x).__sent);
+            construct_at(__builtin_addressof(__sent), std::forward<Other>(x).__sent);
         __index = x.__index;
     }
 
@@ -1467,19 +1186,17 @@ public:
         : __valueless(), __index(x.__index)
     {
         if (__index == 0)
-            ::new (static_cast<void *>(__builtin_addressof(__it))) I(x.__it);
+            construct_at(__builtin_addressof(__it), x.__it);
         else if (__index == 1)
-            ::new (static_cast<void *>(__builtin_addressof(__sent))) S(x.__sent);
+            construct_at(__builtin_addressof(__sent), x.__sent);
     }
     constexpr common_iterator(common_iterator &&x)
         : __valueless(), __index(x.__index)
     {
         if (__index == 0)
-            ::new (static_cast<void *>(__builtin_addressof(__it)))
-                I(std::move(x.__it));
+            construct_at(__builtin_addressof(__it), std::move(x.__it));
         else if (__index == 1)
-            ::new (static_cast<void *>(__builtin_addressof(__sent)))
-                S(std::move(x.__sent));
+            construct_at(__builtin_addressof(__sent), std::move(x.__sent));
     }
     template <typename I2, typename S2>
         requires convertible_to<const I2 &, I> && convertible_to<const S2 &, S>
@@ -1487,9 +1204,9 @@ public:
         : __valueless(), __index(x.__index)
     {
         if (__index == 0)
-            ::new (static_cast<void *>(__builtin_addressof(__it))) I(x.__it);
+            construct_at(__builtin_addressof(__it), x.__it);
         else if (__index == 1)
-            ::new (static_cast<void *>(__builtin_addressof(__sent))) S(x.__sent);
+            construct_at(__builtin_addressof(__sent), x.__sent);
     }
 
     constexpr common_iterator &operator=(const common_iterator &x)
@@ -1516,9 +1233,9 @@ public:
     constexpr ~common_iterator()
     {
         if (__index == 0)
-            __it.~I();
+            destroy_at(__builtin_addressof(__it));
         else if (__index == 1)
-            __sent.~S();
+            destroy_at(__builtin_addressof(__sent));
     }
 
     [[nodiscard]] constexpr decltype(auto) operator*() { return *__it; }
@@ -1680,6 +1397,29 @@ struct BccCategory<I> {
 
 } // namespace __iter_impl
 
+template <input_iterator> class basic_const_iterator;
+
+namespace __iter_impl {
+// not-a-const-iterator ([const.iterators]): true for any type that is NOT a
+// basic_const_iterator specialization — broader than !same_as<I,
+// basic_const_iterator<Outer>>, which only excludes the one enclosing
+// specialization (e.g. basic_const_iterator<const int*> would still pass
+// !same_as against basic_const_iterator<int*>). The heterogeneous MEMBER
+// operators below correctly use !same_as (mirrors the standard's
+// different-from, scoped to the enclosing class — comparing two
+// basic_const_iterators must resolve through the homogeneous friends, never
+// a member). The reversed-operand FRIENDS need this broader trait instead:
+// without it, basic_const_iterator<int*> vs basic_const_iterator<const
+// int*> would find both a viable member (on one operand) and a viable
+// reversed friend (on the other) and be genuinely ambiguous.
+template <typename T>
+inline constexpr bool IsConstIterator = false;
+template <typename I>
+inline constexpr bool IsConstIterator<basic_const_iterator<I>> = true;
+template <typename T>
+concept NotAConstIterator = !IsConstIterator<T>;
+} // namespace __iter_impl
+
 template <input_iterator Iterator>
 class basic_const_iterator : public __iter_impl::BccCategory<Iterator> {
     Iterator __cur = Iterator();
@@ -1810,6 +1550,59 @@ public:
     {
         return s - i.__cur;
     }
+
+    // heterogeneous ordering against a foreign random-access iterator (e.g.
+    // the raw pointer a contiguous Iterator wraps). !same_as-first
+    // short-circuit, same as operator==/operator- above — different-from
+    // scoped to THIS enclosing specialization only, matching the standard's
+    // own member-operator gate (comparing two basic_const_iterators of the
+    // SAME specialization still resolves through the homogeneous friends
+    // below, never a member).
+    template <typename I>
+        requires(!same_as<I, basic_const_iterator>) && random_access_iterator<Iterator> &&
+                totally_ordered_with<Iterator, I>
+    constexpr bool operator<(const I &y) const { return __cur < y; }
+    template <typename I>
+        requires(!same_as<I, basic_const_iterator>) && random_access_iterator<Iterator> &&
+                totally_ordered_with<Iterator, I>
+    constexpr bool operator>(const I &y) const { return __cur > y; }
+    template <typename I>
+        requires(!same_as<I, basic_const_iterator>) && random_access_iterator<Iterator> &&
+                totally_ordered_with<Iterator, I>
+    constexpr bool operator<=(const I &y) const { return __cur <= y; }
+    template <typename I>
+        requires(!same_as<I, basic_const_iterator>) && random_access_iterator<Iterator> &&
+                totally_ordered_with<Iterator, I>
+    constexpr bool operator>=(const I &y) const { return __cur >= y; }
+    template <typename I>
+        requires(!same_as<I, basic_const_iterator>) && random_access_iterator<Iterator> &&
+                totally_ordered_with<Iterator, I> && three_way_comparable_with<Iterator, I>
+    constexpr auto operator<=>(const I &y) const { return __cur <=> y; }
+
+    // reversed-operand forms (foreign type on the left) — <=> needs none of
+    // these, the compiler synthesizes the reversed three-way comparison from
+    // the member operator<=> above. Guarded on NotAConstIterator<I> (not
+    // !same_as<I, basic_const_iterator>): a foreign basic_const_iterator OF
+    // A DIFFERENT SPECIALIZATION (e.g. basic_const_iterator<const int*> on
+    // the left, basic_const_iterator<int*> on the right) must still resolve
+    // through the member operators above, not create a second, ambiguous
+    // candidate here.
+    template <typename I>
+        requires __iter_impl::NotAConstIterator<I> && random_access_iterator<Iterator> &&
+                totally_ordered_with<Iterator, I>
+    friend constexpr bool operator<(const I &x, const basic_const_iterator &y) { return x < y.__cur; }
+    template <typename I>
+        requires __iter_impl::NotAConstIterator<I> && random_access_iterator<Iterator> &&
+                totally_ordered_with<Iterator, I>
+    friend constexpr bool operator>(const I &x, const basic_const_iterator &y) { return x > y.__cur; }
+    template <typename I>
+        requires __iter_impl::NotAConstIterator<I> && random_access_iterator<Iterator> &&
+                totally_ordered_with<Iterator, I>
+    friend constexpr bool operator<=(const I &x, const basic_const_iterator &y) { return x <= y.__cur; }
+    template <typename I>
+        requires __iter_impl::NotAConstIterator<I> && random_access_iterator<Iterator> &&
+                totally_ordered_with<Iterator, I>
+    friend constexpr bool operator>=(const I &x, const basic_const_iterator &y) { return x >= y.__cur; }
 
     // homogeneous ordering (a common const range compares two of these).
     friend constexpr bool operator==(const basic_const_iterator &a,

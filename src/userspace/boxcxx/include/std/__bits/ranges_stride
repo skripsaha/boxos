@@ -92,7 +92,7 @@ public:
         requires(!__views_detail::SimpleView<V>)
     {
         if constexpr (common_range<V> && sized_range<V> && forward_range<V>) {
-            auto missing = (__stride - ranges::distance(ranges::begin(__base), ranges::end(__base)) % __stride) % __stride;
+            auto missing = (__stride - ranges::distance(__base) % __stride) % __stride;
             return Iterator<false>(this, ranges::end(__base), missing);
         } else if constexpr (common_range<V> && !bidirectional_range<V>) {
             return Iterator<false>(this, ranges::end(__base));
@@ -104,7 +104,7 @@ public:
         requires range<const V>
     {
         if constexpr (common_range<const V> && sized_range<const V> && forward_range<const V>) {
-            auto missing = (__stride - ranges::distance(ranges::begin(__base), ranges::end(__base)) % __stride) % __stride;
+            auto missing = (__stride - ranges::distance(__base) % __stride) % __stride;
             return Iterator<true>(this, ranges::end(__base), missing);
         } else if constexpr (common_range<const V> && !bidirectional_range<const V>) {
             return Iterator<true>(this, ranges::end(__base));
@@ -116,12 +116,12 @@ public:
     constexpr auto size()
         requires sized_range<V>
     {
-        return __views_detail::ToUnsignedLike(__views_detail::DivCeil(ranges::distance(ranges::begin(__base), ranges::end(__base)), __stride));
+        return __views_detail::ToUnsignedLike(__views_detail::DivCeil(ranges::distance(__base), __stride));
     }
     constexpr auto size() const
         requires sized_range<const V>
     {
-        return __views_detail::ToUnsignedLike(__views_detail::DivCeil(ranges::distance(ranges::begin(__base), ranges::end(__base)), __stride));
+        return __views_detail::ToUnsignedLike(__views_detail::DivCeil(ranges::distance(__base), __stride));
     }
 };
 

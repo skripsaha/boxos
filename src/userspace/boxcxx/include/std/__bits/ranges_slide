@@ -130,14 +130,14 @@ public:
     constexpr auto size()
         requires sized_range<V>
     {
-        auto sz = ranges::distance(ranges::begin(__base), ranges::end(__base)) - __n + 1;
+        auto sz = ranges::distance(__base) - __n + 1;
         if (sz < 0) sz = 0;
         return __views_detail::ToUnsignedLike(sz);
     }
     constexpr auto size() const
         requires sized_range<const V>
     {
-        auto sz = ranges::distance(ranges::begin(__base), ranges::end(__base)) - __n + 1;
+        auto sz = ranges::distance(__base) - __n + 1;
         if (sz < 0) sz = 0;
         return __views_detail::ToUnsignedLike(sz);
     }

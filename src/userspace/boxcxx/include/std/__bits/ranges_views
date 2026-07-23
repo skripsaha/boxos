@@ -31,7 +31,10 @@ namespace __views_detail {
 // ── MovableBox — the semiregular-box for storing a view's callable ──────
 // Wraps a move/copy-constructible (but maybe non-assignable) object so the
 // owning view stays movable/copyable. Assignment that the wrapped type
-// cannot do directly is emulated by destroy + reconstruct.
+// cannot do directly is emulated by destroy + reconstruct, via
+// destroy_at/construct_at (__bits/allocator_core, reached through the
+// <iterator> include above) rather than raw placement-new — keeps MovableBox
+// usable in constant evaluation.
 template <typename T>
     requires move_constructible<T> && is_object_v<T>
 class MovableBox {
@@ -66,9 +69,8 @@ public:
             if constexpr (is_copy_assignable_v<T>) {
                 __val = o.__val;
             } else {
-                __val.~T();
-                ::new (static_cast<void *>(__builtin_addressof(__val)))
-                    T(o.__val);
+                destroy_at(__builtin_addressof(__val));
+                construct_at(__builtin_addressof(__val), o.__val);
             }
         }
         return *this;
@@ -79,9 +81,8 @@ public:
             if constexpr (is_move_assignable_v<T>) {
                 __val = std::move(o.__val);
             } else {
-                __val.~T();
-                ::new (static_cast<void *>(__builtin_addressof(__val)))
-                    T(std::move(o.__val));
+                destroy_at(__builtin_addressof(__val));
+                construct_at(__builtin_addressof(__val), std::move(o.__val));
             }
         }
         return *this;

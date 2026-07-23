@@ -124,12 +124,12 @@ public:
     constexpr auto size()
         requires sized_range<V>
     {
-        return __views_detail::ToUnsignedLike(__views_detail::DivCeil(ranges::distance(ranges::begin(__base), ranges::end(__base)), __n));
+        return __views_detail::ToUnsignedLike(__views_detail::DivCeil(ranges::distance(__base), __n));
     }
     constexpr auto size() const
         requires sized_range<const V>
     {
-        return __views_detail::ToUnsignedLike(__views_detail::DivCeil(ranges::distance(ranges::begin(__base), ranges::end(__base)), __n));
+        return __views_detail::ToUnsignedLike(__views_detail::DivCeil(ranges::distance(__base), __n));
     }
 };
 
@@ -334,7 +334,7 @@ public:
         requires(!__views_detail::SimpleView<V>)
     {
         if constexpr (common_range<V> && sized_range<V>) {
-            auto missing = (__n - ranges::distance(ranges::begin(__base), ranges::end(__base)) % __n) % __n;
+            auto missing = (__n - ranges::distance(__base) % __n) % __n;
             return Iterator<false>(this, ranges::end(__base), missing);
         } else if constexpr (common_range<V> && !bidirectional_range<V>) {
             return Iterator<false>(this, ranges::end(__base));
@@ -346,7 +346,7 @@ public:
         requires forward_range<const V>
     {
         if constexpr (common_range<const V> && sized_range<const V>) {
-            auto missing = (__n - ranges::distance(ranges::begin(__base), ranges::end(__base)) % __n) % __n;
+            auto missing = (__n - ranges::distance(__base) % __n) % __n;
             return Iterator<true>(this, ranges::end(__base), missing);
         } else if constexpr (common_range<const V> && !bidirectional_range<const V>) {
             return Iterator<true>(this, ranges::end(__base));
@@ -358,12 +358,12 @@ public:
     constexpr auto size()
         requires sized_range<V>
     {
-        return __views_detail::ToUnsignedLike(__views_detail::DivCeil(ranges::distance(ranges::begin(__base), ranges::end(__base)), __n));
+        return __views_detail::ToUnsignedLike(__views_detail::DivCeil(ranges::distance(__base), __n));
     }
     constexpr auto size() const
         requires sized_range<const V>
     {
-        return __views_detail::ToUnsignedLike(__views_detail::DivCeil(ranges::distance(ranges::begin(__base), ranges::end(__base)), __n));
+        return __views_detail::ToUnsignedLike(__views_detail::DivCeil(ranges::distance(__base), __n));
     }
 };
 
