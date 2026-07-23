@@ -1,9 +1,12 @@
-// boxcxx — <functional> (phase-2 core: invoke, reference_wrapper,
-// transparent operator functors, identity). std::function, bind_front,
-// not_fn and the hash primary land with the container phases.
+// boxcxx — <functional> (invoke/invoke_r, reference_wrapper, transparent
+// operator functors, identity, hash primary + scalar specializations,
+// ranges::less/equal_to/... comparison objects, std::function,
+// std::move_only_function). bind_front/not_fn land with a later phase.
 #ifndef BOXCXX_FUNCTIONAL
 #define BOXCXX_FUNCTIONAL
 
+#include <__bits/callable_sbo>
+#include <__bits/version_functional>
 #include <concepts>
 #include <type_traits>
 #include <utility>
@@ -140,6 +143,18 @@ cref(reference_wrapper<T> t) noexcept
     return reference_wrapper<const T>(t.get());
 }
 template <class T> void cref(const T &&) = delete;
+
+} // namespace std
+
+// __bits/function and __bits/move_only_function are included here (each
+// reopens namespace std itself) rather than in the top include block:
+// both call std::invoke_r on a dependent expression, which two-phase
+// lookup requires to already be declared at the point their templates are
+// parsed -- they must sit after invoke_r above, not before it.
+#include <__bits/function>
+#include <__bits/move_only_function>
+
+namespace std {
 
 // ── transparent operator functors ───────────────────────────────────────
 

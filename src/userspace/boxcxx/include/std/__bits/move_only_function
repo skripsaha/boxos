@@ -1,0 +1,311 @@
+// boxcxx — <__bits/move_only_function>
+// std::move_only_function, the 12 [func.wrap.move] specializations
+// (cv-qualifier x ref-qualifier x noexcept-specifier). Move-only, no RTTI
+// surface (no target()/target_type()) -- calling an empty one is a
+// precondition violation, not a thrown bad_function_call. Shares its
+// small-buffer-optimization parameters with std::function via
+// <__bits/callable_sbo> but keeps its own ops table (no Copy op at all,
+// since the type is never copied).
+#ifndef BOXCXX_BITS_MOVE_ONLY_FUNCTION
+#define BOXCXX_BITS_MOVE_ONLY_FUNCTION
+
+#include <__bits/callable_sbo>
+#include <initializer_list>
+#include <new>
+#include <type_traits>
+#include <utility>
+
+namespace std::__bits {
+
+// ── MofOps: the per-target dispatch table (no Copy) ─────────────────────
+
+template <class R, class... Args>
+struct MofOps {
+    bool kInline;
+    R    (*Invoke)(void *buf, Args &&...);
+    void (*Move)(void *dstBuf, void *srcBuf) noexcept;
+    void (*Destroy)(void *buf) noexcept;
+};
+
+template <class F>
+inline F &MofRecover(void *buf) noexcept
+{
+    if constexpr (FitsInline<F>) {
+        return *launder(reinterpret_cast<F *>(buf));
+    } else {
+        F *heapPtr = *reinterpret_cast<F **>(buf);
+        return *launder(heapPtr);
+    }
+}
+
+template <class F>
+void MofMoveThunk(void *dstBuf, void *srcBuf) noexcept
+{
+    if constexpr (FitsInline<F>) {
+        F &srcF = *launder(reinterpret_cast<F *>(srcBuf));
+        ::new (dstBuf) F(static_cast<F &&>(srcF));
+        srcF.~F();
+    } else {
+        *reinterpret_cast<F **>(dstBuf) = *reinterpret_cast<F **>(srcBuf);
+    }
+}
+
+template <class F>
+void MofDestroyThunk(void *buf) noexcept
+{
+    if constexpr (FitsInline<F>) {
+        launder(reinterpret_cast<F *>(buf))->~F();
+    } else {
+        delete *reinterpret_cast<F **>(buf);
+    }
+}
+
+// FD is the stored target's decayed type; Cast is the row's inv-quals
+// (the exact cv/ref cast INVOKE uses -- distinct per row, see MofCallable).
+template <class FD, class Cast, class R, class... Args>
+R MofInvokeThunk(void *buf, Args &&...args)
+{
+    return invoke_r<R>(static_cast<Cast>(MofRecover<FD>(buf)),
+                       forward<Args>(args)...);
+}
+
+template <class FD, class Cast, class R, class... Args>
+const MofOps<R, Args...> *MofOpsFor() noexcept
+{
+    static constexpr MofOps<R, Args...> table{
+        FitsInline<FD>, &MofInvokeThunk<FD, Cast, R, Args...>,
+        &MofMoveThunk<FD>, &MofDestroyThunk<FD>};
+    return &table;
+}
+
+// ── MofBase: storage + verbs shared by all 12 specializations ───────────
+
+template <class R, class... Args>
+class MofBase {
+protected:
+    alignas(kCallableSboAlign) unsigned char __buf[kCallableSboSize];
+    const MofOps<R, Args...> *__ops = nullptr;
+
+    template <class TargetType, class Cast, class... CtorArgs>
+    void Emplace(CtorArgs &&...args)
+    {
+        __ops = MofOpsFor<TargetType, Cast, R, Args...>();
+        if constexpr (FitsInline<TargetType>)
+            ::new (static_cast<void *>(__buf)) TargetType(forward<CtorArgs>(args)...);
+        else
+            *reinterpret_cast<TargetType **>(__buf) =
+                ::new TargetType(forward<CtorArgs>(args)...);
+    }
+
+    void Reset() noexcept
+    {
+        if (__ops) {
+            __ops->Destroy(__buf);
+            __ops = nullptr;
+        }
+    }
+
+    void Swap(MofBase &other) noexcept
+    {
+        if (this == &other) return;
+        alignas(kCallableSboAlign) unsigned char scratch[kCallableSboSize];
+        const MofOps<R, Args...> *opsA = __ops;
+        const MofOps<R, Args...> *opsB = other.__ops;
+        if (opsA) opsA->Move(scratch, __buf);
+        if (opsB) opsB->Move(__buf, other.__buf);
+        if (opsA) opsA->Move(other.__buf, scratch);
+        __ops       = opsB;
+        other.__ops = opsA;
+    }
+
+    bool Engaged() const noexcept { return __ops != nullptr; }
+
+    // Calling this while disengaged is a precondition violation (UB), not
+    // a thrown error -- move_only_function has no bad_function_call path.
+    R Call(Args... args) const
+    {
+        return __ops->Invoke(const_cast<unsigned char *>(__buf),
+                             forward<Args>(args)...);
+    }
+
+    MofBase() noexcept = default;
+    MofBase(const MofBase &)            = delete;
+    MofBase &operator=(const MofBase &) = delete;
+
+    MofBase(MofBase &&other) noexcept
+    {
+        if (!other.__ops) return;
+        other.__ops->Move(__buf, other.__buf);
+        __ops       = other.__ops;
+        other.__ops = nullptr;
+    }
+    MofBase &operator=(MofBase &&other) noexcept
+    {
+        if (this == &other) return *this;
+        Reset();
+        if (other.__ops) {
+            other.__ops->Move(__buf, other.__buf);
+            __ops       = other.__ops;
+            other.__ops = nullptr;
+        }
+        return *this;
+    }
+
+    ~MofBase() { Reset(); }
+};
+
+// ── constructor SFINAE gate: [func.wrap.move.ctor]'s is-callable-from ───
+// Two checks, not one: PlainT is the row's bare cv-ref (for the two
+// no-ref-qualifier rows this is a plain, non-reference VT -- modelling
+// invocation as if through an rvalue); InvT is the coalesced form always
+// used as a reference (no-ref-qualifier coalesces to "&", matching what
+// the thunk actually casts to). For ref-qualified rows PlainT == InvT.
+
+template <class T> inline constexpr bool IsInPlaceType = false;
+template <class T> inline constexpr bool IsInPlaceType<in_place_type_t<T>> = true;
+
+template <class PlainT, class InvT, class R, bool Noex, class... Args>
+inline constexpr bool MofCallable =
+    Noex ? (is_nothrow_invocable_r_v<R, PlainT, Args...> &&
+            is_nothrow_invocable_r_v<R, InvT, Args...>)
+         : (is_invocable_r_v<R, PlainT, Args...> &&
+            is_invocable_r_v<R, InvT, Args...>);
+
+} // namespace std::__bits
+
+namespace std {
+
+template <class T> class move_only_function;
+
+} // namespace std
+
+// ── the 12 specializations (6 cv/ref rows x 2 noexcept) ─────────────────
+// CVQ/REFQ are the row's own qualifiers (pasted verbatim after R(Args...));
+// COREFQ is the coalesced ref-qualifier used for InvT ("&" whenever REFQ is
+// empty or "&", "&&" when REFQ is "&&") -- see [func.wrap.move.class]'s
+// inv-quals rule this mirrors.
+
+#define BOXCXX_MOF_DEFINE(CVQ, REFQ, COREFQ, NOEXQ, NOEXBOOL)                 \
+    template <class R, class... Args>                                       \
+    class move_only_function<R(Args...) CVQ REFQ NOEXQ>                     \
+        : private __bits::MofBase<R, Args...> {                             \
+        template <class XX> using RowPlainT = CVQ XX REFQ;                  \
+        template <class XX> using RowInvT   = CVQ XX COREFQ;                \
+                                                                              \
+    public:                                                                  \
+        using result_type = R;                                              \
+                                                                              \
+        move_only_function() noexcept                      = default;      \
+        move_only_function(nullptr_t) noexcept {}                          \
+        move_only_function(const move_only_function &)      = delete;       \
+        move_only_function(move_only_function &&) noexcept  = default;      \
+                                                                              \
+        template <class F, class FD = decay_t<F>>                          \
+            requires(!is_same_v<FD, move_only_function> &&                 \
+                     !__bits::IsInPlaceType<FD> &&                         \
+                     __bits::MofCallable<RowPlainT<FD>, RowInvT<FD>, R,     \
+                                        NOEXBOOL, Args...>)                  \
+        move_only_function(F &&f)                                          \
+        {                                                                    \
+            static_assert(is_constructible_v<FD, F>,                       \
+                          "move_only_function target must be "             \
+                          "constructible from F");                         \
+            this->template Emplace<FD, RowInvT<FD>>(forward<F>(f));        \
+        }                                                                    \
+                                                                              \
+        template <class T, class... CtorArgs>                              \
+            requires(is_constructible_v<decay_t<T>, CtorArgs...> &&        \
+                     __bits::MofCallable<RowPlainT<decay_t<T>>,             \
+                                        RowInvT<decay_t<T>>, R, NOEXBOOL,   \
+                                        Args...>)                            \
+        explicit move_only_function(in_place_type_t<T>, CtorArgs &&...a)   \
+        {                                                                    \
+            static_assert(is_same_v<T, decay_t<T>>,                        \
+                          "move_only_function in_place_type_t<T> requires " \
+                          "T to already be its own decayed type");          \
+            this->template Emplace<T, RowInvT<T>>(forward<CtorArgs>(a)...); \
+        }                                                                    \
+                                                                              \
+        template <class T, class U, class... CtorArgs>                    \
+            requires(is_constructible_v<decay_t<T>, initializer_list<U> &, \
+                                        CtorArgs...> &&                      \
+                     __bits::MofCallable<RowPlainT<decay_t<T>>,             \
+                                        RowInvT<decay_t<T>>, R, NOEXBOOL,   \
+                                        Args...>)                            \
+        explicit move_only_function(in_place_type_t<T>,                    \
+                                    initializer_list<U> il, CtorArgs &&...a) \
+        {                                                                    \
+            static_assert(is_same_v<T, decay_t<T>>,                        \
+                          "move_only_function in_place_type_t<T> requires " \
+                          "T to already be its own decayed type");          \
+            this->template Emplace<T, RowInvT<T>>(il, forward<CtorArgs>(a)...); \
+        }                                                                    \
+                                                                              \
+        template <class F, class FD = decay_t<F>>                          \
+            requires(!is_same_v<FD, move_only_function> &&                 \
+                     !__bits::IsInPlaceType<FD> &&                         \
+                     __bits::MofCallable<RowPlainT<FD>, RowInvT<FD>, R,     \
+                                        NOEXBOOL, Args...>)                  \
+        move_only_function &operator=(F &&f)                               \
+        {                                                                    \
+            move_only_function(forward<F>(f)).swap(*this);                 \
+            return *this;                                                   \
+        }                                                                    \
+                                                                              \
+        move_only_function &operator=(const move_only_function &) = delete; \
+        move_only_function &operator=(move_only_function &&) noexcept =    \
+            default;                                                        \
+        move_only_function &operator=(nullptr_t) noexcept                  \
+        {                                                                    \
+            this->Reset();                                                  \
+            return *this;                                                   \
+        }                                                                    \
+                                                                              \
+        ~move_only_function() = default;                                   \
+                                                                              \
+        void swap(move_only_function &other) noexcept { this->Swap(other); } \
+        friend void swap(move_only_function &a,                            \
+                         move_only_function &b) noexcept                   \
+        {                                                                    \
+            a.swap(b);                                                      \
+        }                                                                    \
+                                                                              \
+        explicit operator bool() const noexcept { return this->Engaged(); } \
+        [[nodiscard]] friend bool operator==(const move_only_function &f,  \
+                                             nullptr_t) noexcept            \
+        {                                                                    \
+            return !f;                                                      \
+        }                                                                    \
+                                                                              \
+        R operator()(Args... args) CVQ REFQ NOEXQ                          \
+        {                                                                    \
+            return this->Call(forward<Args>(args)...);                     \
+        }                                                                    \
+    };
+
+namespace std {
+
+BOXCXX_MOF_DEFINE(     ,   ,  &,          , false)
+BOXCXX_MOF_DEFINE(     ,   ,  &, noexcept , true)
+BOXCXX_MOF_DEFINE(const,   ,  &,          , false)
+BOXCXX_MOF_DEFINE(const,   ,  &, noexcept , true)
+BOXCXX_MOF_DEFINE(     ,  &,  &,          , false)
+BOXCXX_MOF_DEFINE(     ,  &,  &, noexcept , true)
+BOXCXX_MOF_DEFINE(const,  &,  &,          , false)
+BOXCXX_MOF_DEFINE(const,  &,  &, noexcept , true)
+BOXCXX_MOF_DEFINE(     , &&, &&,          , false)
+BOXCXX_MOF_DEFINE(     , &&, &&, noexcept , true)
+BOXCXX_MOF_DEFINE(const, &&, &&,          , false)
+BOXCXX_MOF_DEFINE(const, &&, &&, noexcept , true)
+
+} // namespace std
+
+#undef BOXCXX_MOF_DEFINE
+
+// No deduction guides: the standard gives move_only_function none (the
+// footgun this deliberately avoids is CTAD silently picking a cv/ref/
+// noexcept specialization the caller didn't intend, e.g. move_only_function
+// m = lambda; silently landing on <...const>). Every move_only_function
+// must be constructed with an explicit template argument.
+
+#endif // BOXCXX_BITS_MOVE_ONLY_FUNCTION

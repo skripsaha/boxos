@@ -1,0 +1,27 @@
+// boxcxx — <__bits/callable_sbo>
+// Shared small-buffer-optimization parameters for std::function and
+// std::move_only_function ([func.wrap.func]/[func.wrap.move]). Both wrap a
+// type-erased callable in a fixed-size inline buffer when it fits, and fall
+// back to one heap allocation otherwise -- pinning the buffer size/align and
+// the "fits inline" test here keeps the two wrappers from ever disagreeing.
+#ifndef BOXCXX_BITS_CALLABLE_SBO
+#define BOXCXX_BITS_CALLABLE_SBO
+
+#include <type_traits>
+
+namespace std::__bits {
+
+inline constexpr size_t kCallableSboSize  = 24;
+inline constexpr size_t kCallableSboAlign = alignof(void *);
+
+// nothrow-move is REQUIRED, not merely preferred: it is what keeps
+// function/move_only_function's own move constructor noexcept -- the
+// inline Move op move-constructs F in place, and that step must not throw.
+template <class F>
+inline constexpr bool FitsInline =
+    sizeof(F) <= kCallableSboSize && alignof(F) <= kCallableSboAlign &&
+    is_nothrow_move_constructible_v<F>;
+
+} // namespace std::__bits
+
+#endif // BOXCXX_BITS_CALLABLE_SBO
