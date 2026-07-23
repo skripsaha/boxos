@@ -15936,19 +15936,14 @@ void Phase96()
         "phase96 MED-1 adjacent_transform operator* propagates non-noexcept sub-iterator deref");
 
     // MED-2: counted_iterator contiguous rung + operator* noexcept. The
-    // ladder itself now computes contiguous_iterator_tag for a contiguous
-    // base — but counted_iterator<int*> does NOT yet fully MODEL
-    // contiguous_iterator: that concept additionally needs std::to_address,
-    // which for a non-pointer falls back to operator->(), which
-    // counted_iterator doesn't have yet (pre-existing gap, explicitly
-    // deferred to Ф29f-3 alongside reverse_iterator's identical one — not
-    // this batch's scope). random_access_iterator is unaffected either way
-    // (contiguous_iterator_tag derives from random_access_iterator_tag).
+    // ladder computes contiguous_iterator_tag for a contiguous base, and
+    // (Ф29f-3a) counted_iterator now HAS operator-> (via to_address), so it
+    // fully models contiguous_iterator, not just the tag.
     static_assert(std::is_same_v<typename std::counted_iterator<int *>::iterator_concept,
                                  std::contiguous_iterator_tag>,
                   "phase96 MED-2 counted_iterator<int*> ladder computes contiguous_iterator_tag");
-    static_assert(!std::contiguous_iterator<std::counted_iterator<int *>>,
-                  "phase96 MED-2 full contiguous_iterator still blocked on missing operator-> (deferred, Ф29f-3)");
+    static_assert(std::contiguous_iterator<std::counted_iterator<int *>>,
+                  "phase96/Ф29f-3a counted_iterator<int*> fully models contiguous_iterator (operator-> added)");
     static_assert(std::random_access_iterator<std::counted_iterator<int *>>,
                   "phase96 MED-2 random_access_iterator unaffected by the contiguous rung addition");
     static_assert(noexcept(*std::declval<std::counted_iterator<int *> &>()),
@@ -16564,6 +16559,182 @@ void Phase97()
            "deque/list prepend_range + CRIT-2 deque multi-element insert\n");
 }
 
+// ── Phase98 fixtures (Ф29f-3a: substrate) ────────────────────────────────
+// ranges::distance(R&&) range-form + reverse_iterator/counted_iterator
+// operator-> + common_iterator/MovableBox constexpr + basic_const_iterator
+// heterogeneous comparisons + P2321 pair const-assignment.
+
+// Move/copy-constructible but deliberately NOT assignable — forces
+// MovableBox's operator= down its destroy+reconstruct branch (the branch
+// that used to use raw ::new) rather than the direct-assignment branch.
+// Mirrors what a capturing-by-reference lambda predicate looks like (the
+// real-world case MovableBox exists for — phase7d's filter_view fixture).
+struct P98NonAssignable {
+    int value;
+    constexpr explicit P98NonAssignable(int v) : value(v) {}
+    constexpr P98NonAssignable(const P98NonAssignable &) = default;
+    constexpr P98NonAssignable(P98NonAssignable &&)      = default;
+    P98NonAssignable &operator=(const P98NonAssignable &) = delete;
+    P98NonAssignable &operator=(P98NonAssignable &&)      = delete;
+};
+
+// unreachable_sentinel_t keeps this constexpr-friendly (no container, no
+// heap): common_iterator<int*, unreachable_sentinel_t> is a genuine I != S
+// pair over a local array. Exercises both index branches of __Assign
+// (I-state <- S-state and vice versa), which is exactly where construct_at/
+// destroy_at replaced the old raw ::new.
+constexpr bool P98CommonIteratorConstexpr()
+{
+    using CI = std::common_iterator<int *, std::unreachable_sentinel_t>;
+    int arr[3] = {10, 20, 30};
+    CI itState(arr);
+    CI sentState(std::unreachable_sentinel);
+    CI copyOfIt(itState); // copy ctor, I-state -> construct_at
+
+    bool ok = (*copyOfIt == 10);
+
+    sentState = itState; // __Assign: S-state <- I-state -> destroy_at + construct_at
+    ++sentState;
+    ok = ok && (*sentState == 20);
+
+    CI moveTarget(std::unreachable_sentinel);
+    moveTarget = std::move(copyOfIt); // __Assign: S-state <- I-state (move) -> destroy_at + construct_at
+    ok         = ok && (*moveTarget == 10);
+    return ok;
+}
+static_assert(P98CommonIteratorConstexpr(),
+              "phase98 common_iterator usable in constexpr: construct/copy/assign/deref/increment");
+
+// Reaches into __views_detail::MovableBox directly (rather than through
+// filter_view/transform_view) — MovableBox has no standard public name of
+// its own (the standard's movable-box is exposition-only), so this is the
+// most direct way to pin exactly what changed without dragging in an
+// unrelated view's own constexpr surface.
+constexpr bool P98MovableBoxConstexpr()
+{
+    std::ranges::__views_detail::MovableBox<P98NonAssignable> box(P98NonAssignable(1));
+    std::ranges::__views_detail::MovableBox<P98NonAssignable> box2(P98NonAssignable(2));
+    box = box2; // T not copy-assignable -> destroy_at + construct_at
+    bool ok = ((*box).value == 2);
+
+    std::ranges::__views_detail::MovableBox<P98NonAssignable> box3(P98NonAssignable(3));
+    box = std::move(box3); // T not move-assignable -> destroy_at + construct_at
+    ok      = ok && ((*box).value == 3);
+    return ok;
+}
+static_assert(P98MovableBoxConstexpr(),
+              "phase98 MovableBox usable in constexpr: non-assignable T destroy+reconstruct assignment");
+
+void Phase98()
+{
+    namespace rg = std::ranges;
+    namespace vw = std::views;
+
+    // ── ranges::distance(R&&) range-form ─────────────────────────────────
+    {
+        std::vector<int> p98Vec{1, 2, 3, 4, 5};
+        Check(rg::distance(p98Vec) == 5, "phase98 ranges::distance(vector) sized-range value");
+        Check(rg::distance(p98Vec) == rg::distance(p98Vec.begin(), p98Vec.end()),
+              "phase98 ranges::distance(vector) matches the 2-arg spelling");
+
+        // list: sized_range (O(1) .size()) but NOT sized_sentinel_for (its
+        // iterators have no operator-) — the exact caveat this fix closes:
+        // distance(begin,end) used to walk the list O(n) even though
+        // .size() was sitting right there.
+        std::list<int> p98Lst{10, 20, 30, 40};
+        Check(rg::distance(p98Lst) == 4, "phase98 ranges::distance(list) via size(), not an O(n) walk");
+        Check(rg::distance(p98Lst) == rg::distance(p98Lst.begin(), p98Lst.end()),
+              "phase98 ranges::distance(list) matches the 2-arg spelling");
+
+        // filter_view: genuinely non-sized (no size() member at all) -> the
+        // O(n) walk fallback branch of the new overload.
+        auto p98Filtered = p98Vec | vw::filter([](int x) { return x % 2 == 0; });
+        static_assert(!rg::sized_range<decltype(p98Filtered)>,
+                      "phase98 filter_view fixture must be non-sized to exercise the walk fallback");
+        Check(rg::distance(p98Filtered) == 2,
+              "phase98 ranges::distance(non-sized filter_view) walk-fallback value");
+        Check(rg::distance(p98Filtered) == rg::distance(p98Filtered.begin(), p98Filtered.end()),
+              "phase98 ranges::distance(filter_view) matches the 2-arg spelling");
+
+        // chunk_view: sized (V is sized) -> exercises the O(1) branch AND,
+        // internally, chunk_view::size()'s own now-rewritten
+        // ranges::distance(__base) call site (one of the 12 Ф29f-3a sites).
+        auto p98Chunks = p98Vec | vw::chunk(2);
+        Check(rg::distance(p98Chunks) == 3, "phase98 ranges::distance(chunk_view) value");
+
+        rg::subrange p98Sub(p98Vec.begin(), p98Vec.end());
+        Check(rg::distance(p98Sub) == 5, "phase98 ranges::distance(subrange) value");
+    }
+
+    // ── reverse_iterator / counted_iterator operator-> ────────────────────
+    {
+        static_assert(std::contiguous_iterator<std::counted_iterator<int *>>,
+                      "phase98 counted_iterator<int*> now models contiguous_iterator (operator-> added)");
+
+        int p98Arr[3] = {7, 8, 9};
+        std::counted_iterator p98Counted(p98Arr, 3);
+        Check(*p98Counted.operator->() == 7, "phase98 counted_iterator::operator-> value");
+        Check(*(p98Counted.operator->() + 1) == 8, "phase98 counted_iterator::operator-> pointer arithmetic");
+
+        // pointer base: the pre-existing, unaffected branch (is_pointer_v<It>).
+        std::reverse_iterator<int *> p98RevPtr(p98Arr + 3);
+        Check(*p98RevPtr.operator->() == 9, "phase98 reverse_iterator<int*>::operator-> (pointer branch)");
+
+        // class-type base with its OWN operator->: the new, widened branch
+        // (list::iterator is a real class, not a raw pointer).
+        std::list<int> p98RevList{1, 2, 3};
+        std::reverse_iterator<std::list<int>::iterator> p98RevListIt(p98RevList.end());
+        Check(*p98RevListIt.operator->() == 3,
+              "phase98 reverse_iterator<list::iterator>::operator-> (widened non-pointer branch)");
+    }
+
+    // ── basic_const_iterator heterogeneous comparisons ────────────────────
+    {
+        std::vector<int> p98Vec2{10, 20, 30, 40, 50};
+        static_assert(
+            std::totally_ordered_with<std::basic_const_iterator<std::vector<int>::iterator>, int *>,
+            "phase98 basic_const_iterator<vector<int>::iterator> totally_ordered_with a foreign int*");
+
+        std::basic_const_iterator<std::vector<int>::iterator> p98Const0(p98Vec2.begin());
+        std::basic_const_iterator<std::vector<int>::iterator> p98Const2(p98Vec2.begin() + 2);
+        int *p98Raw0 = p98Vec2.data();
+        int *p98Raw2 = p98Vec2.data() + 2;
+
+        Check(p98Const0 < p98Raw2, "phase98 basic_const_iterator < foreign int* (member operator<)");
+        Check(p98Raw0 < p98Const2, "phase98 foreign int* < basic_const_iterator (reversed friend operator<)");
+        Check(p98Const2 > p98Raw0, "phase98 basic_const_iterator > foreign int* (member operator>)");
+        Check(p98Raw2 > p98Const0, "phase98 foreign int* > basic_const_iterator (reversed friend operator>)");
+        Check(p98Const0 <= p98Raw0, "phase98 basic_const_iterator <= foreign int* (equal positions)");
+        Check(p98Const0 >= p98Raw0, "phase98 basic_const_iterator >= foreign int* (equal positions)");
+        Check((p98Const0 <=> p98Raw2) < 0, "phase98 basic_const_iterator <=> foreign int*");
+    }
+
+    // ── P2321 pair<T1&,T2&> const-qualified operator= ──────────────────────
+    {
+        static_assert(std::is_assignable_v<const std::pair<int &, int &> &, std::pair<int, int>>,
+                      "phase98 pair<int&,int&> const-qualified operator= is assignable (P2321)");
+        static_assert(
+            std::is_assignable_v<const std::pair<int &, int &> &, std::pair<int &, int &>>,
+            "phase98 pair<int&,int&> exact-type const-qualified operator= is assignable (P2321)");
+        static_assert(!std::is_assignable_v<const std::pair<int, int> &, std::pair<int, int>>,
+                      "phase98 pair<int,int> (plain values) correctly stays NOT const-assignable");
+
+        int p98X = 1, p98Y = 2;
+        const std::pair<int &, int &> p98RefPair(p98X, p98Y);
+
+        std::pair<int, int> p98CopySrc(10, 20);
+        p98RefPair = p98CopySrc; // lvalue source -> const operator=(const pair<U1,U2>&) const
+        Check(p98X == 10 && p98Y == 20, "phase98 pair<int&,int&> const copy-assign writes through references");
+
+        p98RefPair = std::pair<int, int>(30, 40); // rvalue source -> const operator=(pair<U1,U2>&&) const
+        Check(p98X == 30 && p98Y == 40, "phase98 pair<int&,int&> const move-assign writes through references");
+    }
+
+    printf("[CXX] PASS phase98: ranges::distance(R&&) range-form + reverse_iterator/"
+           "counted_iterator operator-> + common_iterator/MovableBox constexpr + "
+           "basic_const_iterator heterogeneous comparisons + P2321 pair const-assign\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -16683,6 +16854,7 @@ int main()
     Phase95();
     Phase96();
     Phase97();
+    Phase98();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
