@@ -343,6 +343,7 @@ public:
     template <typename... Args>
     reference emplace_back(Args &&...args)
     {
+        if (!__map) InitMap(0); // reusable moved-from state ([lib.types.movedfrom])
         if (__finish.__cur == __finish.__last - 1) {
             // Block boundary ahead: secure the next map slot + block
             // BEFORE constructing, so failure leaves us untouched.
@@ -356,6 +357,7 @@ public:
     template <typename... Args>
     reference emplace_front(Args &&...args)
     {
+        if (!__map) InitMap(0); // reusable moved-from state ([lib.types.movedfrom])
         if (__start.__cur == __start.__first) ReserveFront();
         iterator spot = __start;
         --spot;
@@ -500,6 +502,10 @@ public:
             a      = b;
             b      = t;
         };
+        if constexpr (ATraits::propagate_on_container_swap::value) {
+            sw(__alloc, other.__alloc);
+            sw(__malloc, other.__malloc);
+        }
         sw(__map, other.__map);
         sw(__map_size, other.__map_size);
         sw(__start, other.__start);
