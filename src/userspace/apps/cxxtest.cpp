@@ -34,6 +34,7 @@
 #include <deque>
 #include <expected>
 #include <format>
+#include <forward_list>
 #include <functional>
 #include <iterator>
 #include <limits>
@@ -18818,6 +18819,845 @@ void Phase104()
            "search(first,last,searcher) entry point + FTM pin\n");
 }
 
+// ── phase105 fixtures ──────────────────────────────────────────────────
+
+struct P105Tagged {
+    int key;
+    int tag;
+};
+
+struct P105SortTagged {
+    int key;
+    int order;
+};
+
+// P105OwnAlloc: cross-instance-free-trapping allocator. StatefulAlloc's
+// deallocate is a bare ::operator delete with no ownership check, so
+// asserting only id+contents cannot tell a correct element-wise move apart
+// from an incorrect steal across unequal allocators. This tracker records
+// which allocator INSTANCE produced each pointer and flags any deallocate()
+// reached through a DIFFERENT instance; it also counts allocate() calls so
+// a genuine pointer-steal (zero new allocations) can be told apart from
+// element-wise reconstruction (N new allocations) even when both produce
+// identical contents.
+struct P105OwnAllocTrap {
+    static inline std::vector<std::pair<void *, int>> live;
+    static inline bool        crossInstanceFree = false;
+    static inline std::size_t allocations        = 0;
+
+    static void Record(void *p, int owner)
+    {
+        live.push_back({p, owner});
+        ++allocations;
+    }
+    static void Release(void *p, int freer)
+    {
+        for (std::size_t i = 0; i < live.size(); ++i) {
+            if (live[i].first == p) {
+                if (live[i].second != freer) crossInstanceFree = true;
+                live.erase(live.begin() + static_cast<std::ptrdiff_t>(i));
+                return;
+            }
+        }
+        crossInstanceFree = true; // freed a pointer this trap never recorded
+    }
+    static void Reset()
+    {
+        crossInstanceFree = false;
+        allocations        = 0;
+    }
+};
+
+// propagate_on_container_copy/move_assignment and is_always_equal are
+// template parameters so callers can cover the full trait matrix (see the
+// P105OwnAlloc* aliases below) with one fixture.
+template <class T, bool POCCA, bool POCMA, bool AlwaysEqual>
+struct P105OwnAlloc {
+    int id = 0;
+    using value_type                             = T;
+    using propagate_on_container_copy_assignment = std::bool_constant<POCCA>;
+    using propagate_on_container_move_assignment = std::bool_constant<POCMA>;
+    using is_always_equal                        = std::bool_constant<AlwaysEqual>;
+    template <class U> struct rebind {
+        using other = P105OwnAlloc<U, POCCA, POCMA, AlwaysEqual>;
+    };
+
+    constexpr P105OwnAlloc() = default;
+    constexpr explicit P105OwnAlloc(int i) : id(i) {}
+    template <class U>
+    constexpr P105OwnAlloc(const P105OwnAlloc<U, POCCA, POCMA, AlwaysEqual> &o) : id(o.id) {}
+
+    T *allocate(std::size_t n)
+    {
+        T *p = static_cast<T *>(::operator new(n * sizeof(T)));
+        P105OwnAllocTrap::Record(p, id);
+        return p;
+    }
+    void deallocate(T *p, std::size_t) noexcept
+    {
+        P105OwnAllocTrap::Release(p, id);
+        ::operator delete(p);
+    }
+    template <class U>
+    constexpr bool operator==(const P105OwnAlloc<U, POCCA, POCMA, AlwaysEqual> &o) const
+    {
+        return id == o.id;
+    }
+};
+
+// Default mirrors StatefulAlloc (POCCA, no POCMA, not always-equal); Pocma
+// flips propagate-on-move-assignment; AlwaysEqual is the stateless-
+// equivalent (is_always_equal=true) variant.
+template <class T> using P105OwnAllocDefault     = P105OwnAlloc<T, true, false, false>;
+template <class T> using P105OwnAllocPocma       = P105OwnAlloc<T, true, true,  false>;
+template <class T> using P105OwnAllocAlwaysEqual = P105OwnAlloc<T, true, false, true>;
+
+void Phase105()
+{
+    // ── lifecycle: default / count / count+value / iterator-pair /
+    //    initializer_list / from_range (bare + with allocator) ctors ────
+    {
+        std::forward_list<int> p105Default;
+        Check(p105Default.empty(), "phase105 default ctor: empty");
+
+        std::forward_list<int> p105Count(4);
+        Check(std::distance(p105Count.begin(), p105Count.end()) == 4,
+              "phase105 count ctor: exactly 4 elements");
+        bool p105CountOk = true;
+        for (int v : p105Count) if (v != 0) p105CountOk = false;
+        Check(p105CountOk, "phase105 count ctor: value-initialized elements == 0");
+
+        std::forward_list<int> p105CountValue(3, 7);
+        Check(std::distance(p105CountValue.begin(), p105CountValue.end()) == 3,
+              "phase105 count+value ctor: exactly 3 elements");
+        bool p105CVOk = true;
+        for (int v : p105CountValue) if (v != 7) p105CVOk = false;
+        Check(p105CVOk, "phase105 count+value ctor: elements == 7");
+
+        std::vector<int> p105Src{1, 2, 3, 4, 5};
+        std::forward_list<int> p105FromIters(p105Src.begin(), p105Src.end());
+        Check(std::equal(p105FromIters.begin(), p105FromIters.end(), p105Src.begin(), p105Src.end()),
+              "phase105 iterator-pair ctor: matches source order");
+
+        std::forward_list<int> p105FromIL{10, 20, 30};
+        Check((p105FromIL == std::forward_list<int>{10, 20, 30}),
+              "phase105 initializer_list ctor: matches source order");
+
+        std::forward_list<int> p105FromRange(std::from_range, p105Src);
+        Check(std::equal(p105FromRange.begin(), p105FromRange.end(), p105Src.begin(), p105Src.end()),
+              "phase105 from_range ctor (bare): matches source order");
+
+        std::allocator<int> p105Alloc;
+        std::forward_list<int> p105FromRangeAlloc(std::from_range, p105Src, p105Alloc);
+        Check(std::equal(p105FromRangeAlloc.begin(), p105FromRangeAlloc.end(), p105Src.begin(), p105Src.end()),
+              "phase105 from_range ctor (with allocator): matches source order");
+
+        std::forward_list<int> p105Copy(p105FromIters);
+        Check((p105Copy == p105FromIters), "phase105 copy ctor: matches source");
+        Check(std::equal(p105FromIters.begin(), p105FromIters.end(), p105Src.begin(), p105Src.end()),
+              "phase105 copy ctor: source unaffected");
+
+        std::forward_list<int> p105MoveSrc{1, 2, 3};
+        std::forward_list<int> p105Move(std::move(p105MoveSrc));
+        Check((p105Move == std::forward_list<int>{1, 2, 3}), "phase105 move ctor: target has source content");
+        Check(p105MoveSrc.empty(), "phase105 move ctor: source left empty");
+
+        std::forward_list<int> p105CopyAssignTarget{99};
+        p105CopyAssignTarget = p105FromIters;
+        Check((p105CopyAssignTarget == p105FromIters), "phase105 copy-assign: target equals source");
+
+        std::forward_list<int> p105MoveAssignSrc{4, 5, 6};
+        std::forward_list<int> p105MoveAssignTarget{1};
+        p105MoveAssignTarget = std::move(p105MoveAssignSrc);
+        Check((p105MoveAssignTarget == std::forward_list<int>{4, 5, 6}),
+              "phase105 move-assign: target has source content");
+        Check(p105MoveAssignSrc.empty(), "phase105 move-assign: source left empty");
+
+        std::forward_list<int> p105ILAssignTarget{1, 2};
+        p105ILAssignTarget = {7, 8, 9};
+        Check((p105ILAssignTarget == std::forward_list<int>{7, 8, 9}), "phase105 initializer_list assignment");
+    }
+
+    // ── assign / assign_range, incl. self-aliasing ───────────────────────
+    {
+        namespace rg = std::ranges;
+
+        std::forward_list<int> p105Assign{1, 2, 3};
+        p105Assign.assign(5, 9);
+        Check((p105Assign == std::forward_list<int>{9, 9, 9, 9, 9}), "phase105 assign(count,value)");
+
+        std::vector<int> p105AssignSrc{1, 2, 3, 4};
+        p105Assign.assign(p105AssignSrc.begin(), p105AssignSrc.end());
+        Check((p105Assign == std::forward_list<int>{1, 2, 3, 4}), "phase105 assign(first,last)");
+
+        p105Assign.assign({5, 6, 7});
+        Check((p105Assign == std::forward_list<int>{5, 6, 7}), "phase105 assign(initializer_list)");
+
+        std::forward_list<int> p105Range{1, 2, 3, 4, 5};
+        p105Range.assign_range(std::vector<int>{20, 21, 22});
+        Check((p105Range == std::forward_list<int>{20, 21, 22}), "phase105 assign_range (foreign source)");
+
+        // Self-aliasing, matching the sibling containers' own precedent
+        // (phase97 FIX1): assign_range(*this) is a value-preserving no-op,
+        // and assign_range(subrange-over-self) is UAF-safe.
+        std::forward_list<int> p105Self{1, 2, 3};
+        p105Self.assign_range(p105Self);
+        Check((p105Self == std::forward_list<int>{1, 2, 3}),
+              "phase105 assign_range(self) is a value-preserving no-op");
+
+        std::forward_list<int> p105SelfSub{1, 2, 3, 4, 5};
+        auto p105SelfSubBegin = p105SelfSub.begin();
+        ++p105SelfSubBegin;
+        p105SelfSub.assign_range(rg::subrange(p105SelfSubBegin, p105SelfSub.end()));
+        Check((p105SelfSub == std::forward_list<int>{2, 3, 4, 5}),
+              "phase105 assign_range(subrange-over-self) is UAF-safe");
+    }
+
+    // ── front() / push_front / pop_front / emplace_front ────────────────
+    {
+        std::forward_list<int> p105Front{1, 2, 3};
+        Check(p105Front.front() == 1, "phase105 front()");
+
+        p105Front.push_front(0);
+        Check((p105Front == std::forward_list<int>{0, 1, 2, 3}), "phase105 push_front(const T&)");
+        p105Front.push_front(-1);
+        Check((p105Front == std::forward_list<int>{-1, 0, 1, 2, 3}), "phase105 push_front(T&&)");
+
+        int &p105Emplaced = p105Front.emplace_front(-2);
+        Check(p105Emplaced == -2 && p105Front.front() == -2,
+              "phase105 emplace_front returns reference to new front");
+
+        p105Front.pop_front();
+        Check(p105Front.front() == -1, "phase105 pop_front");
+    }
+
+    // ── prepend_range: ORDER-PRESERVATION check (catches Trap 1) ─────────
+    {
+        std::forward_list<int> p105Prepend{100, 101};
+        std::vector<int> p105PrependSrc{1, 2, 3};
+        p105Prepend.prepend_range(p105PrependSrc);
+        Check((p105Prepend == std::forward_list<int>{1, 2, 3, 100, 101}),
+              "phase105 Trap1 prepend_range preserves source order (not reversed)");
+    }
+
+    // ── before_begin() / cbefore_begin() invariant ────────────────────────
+    {
+        std::forward_list<int> p105Bb{7, 8, 9};
+        Check(*std::next(p105Bb.before_begin()) == p105Bb.front(),
+              "phase105 *next(before_begin()) == front()");
+        Check(*std::next(p105Bb.cbefore_begin()) == p105Bb.front(),
+              "phase105 *next(cbefore_begin()) == front()");
+    }
+
+    // ── insert_after: all 5 forms, verifying return values ───────────────
+    {
+        std::forward_list<int> p105Ins{1, 5};
+        auto p105It1 = p105Ins.insert_after(p105Ins.begin(), 2);
+        Check(*p105It1 == 2 && (p105Ins == std::forward_list<int>{1, 2, 5}),
+              "phase105 insert_after(pos, const T&) return == new element");
+
+        int p105MoveVal = 3;
+        auto p105It2 = p105Ins.insert_after(p105It1, std::move(p105MoveVal));
+        Check(*p105It2 == 3 && (p105Ins == std::forward_list<int>{1, 2, 3, 5}),
+              "phase105 insert_after(pos, T&&) return == new element");
+
+        auto p105It3 = p105Ins.insert_after(p105Ins.begin(), 3, 9);
+        Check(*p105It3 == 9 && (p105Ins == std::forward_list<int>{1, 9, 9, 9, 2, 3, 5}),
+              "phase105 insert_after(pos, count, v) return == LAST inserted");
+
+        auto p105It3Pos = p105Ins.begin();
+        auto p105It3Zero = p105Ins.insert_after(p105It3Pos, 0, 9);
+        Check(p105It3Zero == p105It3Pos, "phase105 insert_after(pos, 0, v) returns position unchanged");
+
+        std::vector<int> p105RangeSrc{40, 41, 42};
+        auto p105It4Pos = p105Ins.begin();
+        auto p105It4 = p105Ins.insert_after(p105It4Pos, p105RangeSrc.begin(), p105RangeSrc.end());
+        Check(*p105It4 == 42, "phase105 insert_after(pos, first, last) return == LAST inserted");
+        Check(*std::next(p105It4Pos) == 40 && *std::next(p105It4Pos, 2) == 41 && *std::next(p105It4Pos, 3) == 42,
+              "phase105 insert_after(pos, first, last) preserves source order");
+
+        std::vector<int> p105RangeEmpty;
+        auto p105It5 = p105Ins.insert_after(p105It4Pos, p105RangeEmpty.begin(), p105RangeEmpty.end());
+        Check(p105It5 == p105It4Pos,
+              "phase105 insert_after(pos, first, last) empty range returns position unchanged");
+
+        std::forward_list<int> p105Il{1, 5};
+        auto p105ItIl = p105Il.insert_after(p105Il.begin(), {2, 3, 4});
+        Check(*p105ItIl == 4 && (p105Il == std::forward_list<int>{1, 2, 3, 4, 5}),
+              "phase105 insert_after(pos, initializer_list) return == LAST inserted, source order");
+    }
+
+    // ── insert_range_after: return value + empty-range edge case ────────
+    {
+        std::forward_list<int> p105Ira{1, 5};
+        std::vector<int> p105IraSrc{2, 3, 4};
+        auto p105IraPos = p105Ira.begin();
+        auto p105IraRet = p105Ira.insert_range_after(p105IraPos, p105IraSrc);
+        Check(*p105IraRet == 4 && (p105Ira == std::forward_list<int>{1, 2, 3, 4, 5}),
+              "phase105 insert_range_after return == LAST inserted, source order preserved");
+
+        std::vector<int> p105IraEmpty;
+        auto p105IraRet2 = p105Ira.insert_range_after(p105IraPos, p105IraEmpty);
+        Check(p105IraRet2 == p105IraPos, "phase105 insert_range_after empty range returns position unchanged");
+    }
+
+    // ── emplace_after ──────────────────────────────────────────────────
+    {
+        std::forward_list<int> p105Ea{1, 3};
+        auto p105EaIt = p105Ea.emplace_after(p105Ea.begin(), 2);
+        Check(*p105EaIt == 2 && (p105Ea == std::forward_list<int>{1, 2, 3}), "phase105 emplace_after");
+    }
+
+    // ── erase_after: single (return == element after erased) + range
+    //    (return == last, open interval) ─────────────────────────────────
+    {
+        std::forward_list<int> p105Era{1, 2, 3, 4};
+        auto p105EraIt = p105Era.erase_after(p105Era.begin());
+        Check(*p105EraIt == 3 && (p105Era == std::forward_list<int>{1, 3, 4}),
+              "phase105 erase_after(pos) return == element after erased");
+
+        std::forward_list<int> p105EraR{1, 2, 3, 4, 5, 6};
+        auto p105EraRFirst = p105EraR.begin();
+        auto p105EraRLast  = std::next(p105EraRFirst, 5);
+        auto p105EraRRet   = p105EraR.erase_after(p105EraRFirst, p105EraRLast);
+        Check(p105EraRRet == p105EraRLast, "phase105 erase_after(first,last) return == last");
+        Check((p105EraR == std::forward_list<int>{1, 6}),
+              "phase105 erase_after(first,last) erases the OPEN interval (endpoints survive)");
+
+        // C2 regression (fixed): zero-distance erase_after(pos,pos) used to
+        // walk off the list end (#PF) -- `n == stop` must return BEFORE the
+        // walk starts, not after.
+        std::forward_list<int> p105C2EraList{1, 2, 3, 4};
+        auto p105C2EraIt  = std::next(p105C2EraList.begin());
+        auto p105C2EraRet = p105C2EraList.erase_after(p105C2EraIt, p105C2EraIt);
+        Check((p105C2EraList == std::forward_list<int>{1, 2, 3, 4}) && p105C2EraRet == p105C2EraIt,
+              "phase105 C2: erase_after(it, it) zero-distance is a no-op");
+
+        std::forward_list<int> p105C2EraBbList{1, 2, 3};
+        auto p105C2EraBb    = p105C2EraBbList.before_begin();
+        auto p105C2EraBbRet = p105C2EraBbList.erase_after(p105C2EraBb, p105C2EraBb);
+        Check((p105C2EraBbList == std::forward_list<int>{1, 2, 3}) && p105C2EraBbRet == p105C2EraBb,
+              "phase105 C2: erase_after(before_begin(), before_begin()) no-op on non-empty list");
+    }
+
+    // ── splice_after: all 3 forms, incl. self-splice (Trap 2 guard) ──────
+    {
+        std::forward_list<int> p105SpA{1, 2, 3};
+        std::forward_list<int> p105SpB{4, 5, 6};
+        p105SpA.splice_after(p105SpA.begin(), p105SpB);
+        Check((p105SpA == std::forward_list<int>{1, 4, 5, 6, 2, 3}),
+              "phase105 splice_after(pos, other) whole-list form");
+        Check(p105SpB.empty(), "phase105 splice_after(pos, other) leaves source empty");
+
+        std::forward_list<int> p105SpC{1, 2, 3};
+        std::forward_list<int> p105SpD{10, 20, 30};
+        p105SpC.splice_after(p105SpC.begin(), p105SpD, p105SpD.begin());
+        Check((p105SpC == std::forward_list<int>{1, 20, 2, 3}),
+              "phase105 splice_after(pos, other, i) single-element form");
+        Check((p105SpD == std::forward_list<int>{10, 30}),
+              "phase105 splice_after(pos, other, i) removes spliced element from source");
+
+        std::forward_list<int> p105SpE{1, 2};
+        std::forward_list<int> p105SpF{10, 20, 30, 40, 50};
+        auto p105SpFFirst = p105SpF.begin();
+        auto p105SpFLast  = std::next(p105SpFFirst, 4);
+        p105SpE.splice_after(p105SpE.begin(), p105SpF, p105SpFFirst, p105SpFLast);
+        Check((p105SpE == std::forward_list<int>{1, 20, 30, 40, 2}),
+              "phase105 splice_after(pos, other, first, last) range form, order preserved");
+        Check((p105SpF == std::forward_list<int>{10, 50}),
+              "phase105 splice_after(pos, other, first, last) removes open-interval from source");
+
+        std::forward_list<int> p105SpSelf{1, 2, 3};
+        auto p105SpSelfPos = p105SpSelf.begin();
+        p105SpSelf.splice_after(p105SpSelfPos, p105SpSelf, p105SpSelfPos);
+        Check((p105SpSelf == std::forward_list<int>{1, 2, 3}),
+              "phase105 Trap2 splice_after(pos, other, i) self-splice (pos==i) is a no-op");
+
+        // C1 regression (fixed): [forward.list.ops] mandates a no-op for
+        // BOTH pos == i AND pos == ++i. The old code only guarded pos == i;
+        // with pos == ++i it would TransferOneAfter the very node pos
+        // names, self-looping it -- a silent element drop + node leak.
+        std::forward_list<int> p105C1List{10, 11, 12, 13};
+        auto p105C1It = p105C1List.begin();
+        p105C1List.splice_after(std::next(p105C1It), p105C1List, p105C1It);
+        Check((p105C1List == std::forward_list<int>{10, 11, 12, 13}),
+              "phase105 C1: splice_after(next(i), x, i) pos==++i is a no-op");
+
+        std::forward_list<int> p105SpRv{1, 2};
+        p105SpRv.splice_after(p105SpRv.begin(), std::forward_list<int>{7, 8, 9});
+        Check((p105SpRv == std::forward_list<int>{1, 7, 8, 9, 2}),
+              "phase105 splice_after(pos, forward_list&&) rvalue whole-list form");
+
+        // C2 regression (fixed): the range form's TransferRangeAfter used
+        // to null-deref (#PF) when afterFirst == last (a legal, defined
+        // zero-distance open range) -- the walk ran off the list end since
+        // `last` sits behind afterFirst->next in that case.
+        std::forward_list<int> p105C2Dst{100, 200};
+        std::forward_list<int> p105C2Src{1, 2, 3, 4, 5};
+        auto p105C2First = std::next(p105C2Src.begin(), 2);
+        p105C2Dst.splice_after(p105C2Dst.before_begin(), p105C2Src, p105C2First, p105C2First);
+        Check((p105C2Dst == std::forward_list<int>{100, 200}),
+              "phase105 C2: splice_after(pos, other, first, first) zero-distance leaves dst unchanged");
+        Check((p105C2Src == std::forward_list<int>{1, 2, 3, 4, 5}),
+              "phase105 C2: splice_after(pos, other, first, first) zero-distance leaves src unchanged");
+
+        // Consistency: the range form spanning the WHOLE source list
+        // (before_begin()..end()) must match the dedicated 2-arg
+        // whole-list form -- both funnel into the same TransferRangeAfter
+        // call shape, so the new zero-distance guards must not have
+        // disturbed the ordinary (non-empty-range) path.
+        std::forward_list<int> p105C2ConsistSrcA{1, 2, 3};
+        std::forward_list<int> p105C2ConsistDstA{9};
+        p105C2ConsistDstA.splice_after(p105C2ConsistDstA.begin(), p105C2ConsistSrcA,
+                                       p105C2ConsistSrcA.before_begin(), p105C2ConsistSrcA.end());
+
+        std::forward_list<int> p105C2ConsistSrcB{1, 2, 3};
+        std::forward_list<int> p105C2ConsistDstB{9};
+        p105C2ConsistDstB.splice_after(p105C2ConsistDstB.begin(), p105C2ConsistSrcB);
+
+        Check((p105C2ConsistDstA == p105C2ConsistDstB) && p105C2ConsistSrcA.empty() &&
+                 p105C2ConsistSrcB.empty(),
+              "phase105 C2: range splice_after(before_begin(),end()) matches 2-arg whole-list form");
+    }
+
+    // ── remove / remove_if: count + survivor order ────────────────────────
+    {
+        std::forward_list<int> p105Rm{1, 2, 3, 2, 4, 2, 5};
+        auto p105RmCount = p105Rm.remove(2);
+        Check(p105RmCount == 3, "phase105 remove(value) count");
+        Check((p105Rm == std::forward_list<int>{1, 3, 4, 5}), "phase105 remove(value) survivor order");
+
+        std::forward_list<int> p105RmIf{1, 2, 3, 4, 5, 6};
+        auto p105RmIfCount = p105RmIf.remove_if([](int x) { return x % 2 == 0; });
+        Check(p105RmIfCount == 3, "phase105 remove_if(pred) count");
+        Check((p105RmIf == std::forward_list<int>{1, 3, 5}), "phase105 remove_if(pred) survivor order");
+    }
+
+    // ── unique: both forms, FIRST-of-each-run survives ────────────────────
+    {
+        std::forward_list<int> p105Uniq{1, 1, 2, 3, 3, 3, 4};
+        auto p105UniqCount = p105Uniq.unique();
+        Check(p105UniqCount == 3, "phase105 unique() count");
+        Check((p105Uniq == std::forward_list<int>{1, 2, 3, 4}), "phase105 unique() first-of-run survives");
+
+        std::forward_list<int> p105UniqPred{10, 12, 15, 17, 20, 21};
+        auto p105UniqPredCount = p105UniqPred.unique([](int a, int b) { return (a % 2) == (b % 2); });
+        Check(p105UniqPredCount == 2, "phase105 unique(pred) count");
+        Check((p105UniqPred == std::forward_list<int>{10, 15, 20, 21}),
+              "phase105 unique(pred) first-of-run survives");
+    }
+
+    // ── merge: sorted result + stability + self-merge no-op ──────────────
+    {
+        std::forward_list<int> p105MgA{1, 3, 5};
+        std::forward_list<int> p105MgB{2, 4, 6};
+        p105MgA.merge(p105MgB);
+        Check((p105MgA == std::forward_list<int>{1, 2, 3, 4, 5, 6}), "phase105 merge(other) sorted result");
+        Check(p105MgB.empty(), "phase105 merge(other) leaves source empty");
+
+        // stability: equal-valued keys from *this (tag 0) precede those
+        // from the argument list (tag 1).
+        std::forward_list<P105Tagged> p105MgStableA{{1, 0}, {2, 0}};
+        std::forward_list<P105Tagged> p105MgStableB{{2, 1}, {3, 1}};
+        p105MgStableA.merge(p105MgStableB,
+                            [](const P105Tagged &a, const P105Tagged &b) { return a.key < b.key; });
+        std::vector<int> p105MgStableKeys, p105MgStableTags;
+        for (auto &e : p105MgStableA) {
+            p105MgStableKeys.push_back(e.key);
+            p105MgStableTags.push_back(e.tag);
+        }
+        Check((p105MgStableKeys == std::vector<int>{1, 2, 2, 3}), "phase105 merge stability: sorted keys");
+        Check(p105MgStableTags[1] == 0 && p105MgStableTags[2] == 1,
+              "phase105 merge stability: equal key from *this (tag 0) precedes other (tag 1)");
+
+        std::forward_list<int> p105MgSelf{1, 2, 3};
+        auto &p105MgSelfAlias = p105MgSelf;
+        p105MgSelf.merge(p105MgSelfAlias);
+        Check((p105MgSelf == std::forward_list<int>{1, 2, 3}), "phase105 merge(self) is a no-op");
+
+        std::forward_list<int> p105MgRv{1, 4};
+        p105MgRv.merge(std::forward_list<int>{2, 3});
+        Check((p105MgRv == std::forward_list<int>{1, 2, 3, 4}), "phase105 merge(forward_list&&) rvalue form");
+    }
+
+    // ── sort: both forms, >=100 elements to cascade bins, stability,
+    //    custom comparator ─────────────────────────────────────────────
+    {
+        std::mt19937 p105SortRng(20260724u);
+        std::uniform_int_distribution<int> p105SortDist(-1000, 1000);
+        std::vector<int> p105SortRef(150);
+        for (auto &x : p105SortRef) x = p105SortDist(p105SortRng);
+
+        std::forward_list<int> p105Sort(p105SortRef.begin(), p105SortRef.end());
+        p105Sort.sort();
+        std::vector<int> p105SortExpected = p105SortRef;
+        std::sort(p105SortExpected.begin(), p105SortExpected.end());
+        Check(std::equal(p105Sort.begin(), p105Sort.end(), p105SortExpected.begin(), p105SortExpected.end()),
+              "phase105 sort() 150 pseudo-random elements matches std::sort reference");
+
+        // Stability: built via the (already order-preserving) iterator-pair
+        // ctor, so the pre-sort relative order is simply ascending `order`.
+        std::vector<P105SortTagged> p105SortStableSrc;
+        for (int i = 0; i < 40; ++i) p105SortStableSrc.push_back({i % 5, i});
+        std::forward_list<P105SortTagged> p105SortStable(p105SortStableSrc.begin(), p105SortStableSrc.end());
+        p105SortStable.sort([](const P105SortTagged &a, const P105SortTagged &b) { return a.key < b.key; });
+        std::vector<P105SortTagged> p105SortStableFlat;
+        for (auto &e : p105SortStable) p105SortStableFlat.push_back(e);
+        bool p105SortStableOk = p105SortStableFlat.size() == p105SortStableSrc.size();
+        for (std::size_t i = 1; i < p105SortStableFlat.size() && p105SortStableOk; ++i) {
+            if (p105SortStableFlat[i].key < p105SortStableFlat[i - 1].key) p105SortStableOk = false;
+            if (p105SortStableFlat[i].key == p105SortStableFlat[i - 1].key &&
+                p105SortStableFlat[i].order < p105SortStableFlat[i - 1].order)
+                p105SortStableOk = false;
+        }
+        Check(p105SortStableOk, "phase105 sort(comp) stable: equal keys keep source-relative order");
+
+        std::forward_list<int> p105SortDesc(p105SortRef.begin(), p105SortRef.end());
+        p105SortDesc.sort(std::greater<int>());
+        std::vector<int> p105SortDescExpected = p105SortRef;
+        std::sort(p105SortDescExpected.begin(), p105SortDescExpected.end(), std::greater<int>());
+        Check(std::equal(p105SortDesc.begin(), p105SortDesc.end(), p105SortDescExpected.begin(),
+                         p105SortDescExpected.end()),
+              "phase105 sort(greater<int>) descending matches std::sort(greater) reference");
+    }
+
+    // ── reverse(): empty / 1-element / even-length / odd-length ─────────
+    {
+        std::forward_list<int> p105RevEmpty;
+        p105RevEmpty.reverse();
+        Check(p105RevEmpty.empty(), "phase105 reverse() empty list stays empty");
+
+        std::forward_list<int> p105RevOne{42};
+        p105RevOne.reverse();
+        Check((p105RevOne == std::forward_list<int>{42}), "phase105 reverse() 1-element unchanged");
+
+        std::forward_list<int> p105RevEven{1, 2, 3, 4};
+        p105RevEven.reverse();
+        Check((p105RevEven == std::forward_list<int>{4, 3, 2, 1}), "phase105 reverse() even-length");
+
+        std::forward_list<int> p105RevOdd{1, 2, 3, 4, 5};
+        p105RevOdd.reverse();
+        Check((p105RevOdd == std::forward_list<int>{5, 4, 3, 2, 1}), "phase105 reverse() odd-length");
+    }
+
+    // ── resize: both forms, grow / shrink / no-op ─────────────────────────
+    {
+        std::forward_list<int> p105Rsz{1, 2, 3};
+        p105Rsz.resize(5);
+        Check(std::distance(p105Rsz.begin(), p105Rsz.end()) == 5, "phase105 resize(n) grow: exactly n elements");
+        auto p105RszIt = p105Rsz.begin();
+        std::advance(p105RszIt, 3);
+        Check(*p105RszIt == 0 && *std::next(p105RszIt) == 0,
+              "phase105 resize(n) grow: appended elements are value-initialized");
+        Check(p105Rsz.front() == 1, "phase105 resize(n) grow: original prefix preserved");
+
+        std::forward_list<int> p105RszShrink{1, 2, 3, 4, 5};
+        p105RszShrink.resize(2);
+        Check((p105RszShrink == std::forward_list<int>{1, 2}), "phase105 resize(n) shrink: truncated");
+
+        std::forward_list<int> p105RszSame{1, 2, 3};
+        p105RszSame.resize(3);
+        Check((p105RszSame == std::forward_list<int>{1, 2, 3}), "phase105 resize(n) no-op (same size)");
+
+        std::forward_list<int> p105RszV{1, 2};
+        p105RszV.resize(4, 9);
+        Check((p105RszV == std::forward_list<int>{1, 2, 9, 9}), "phase105 resize(n,value) grow with value");
+
+        std::forward_list<int> p105RszVShrink{1, 2, 3, 4};
+        p105RszVShrink.resize(1, 9);
+        Check((p105RszVShrink == std::forward_list<int>{1}), "phase105 resize(n,value) shrink ignores value");
+    }
+
+    // ── max_size(): sanity check only (no portable exact value) ─────────
+    {
+        std::forward_list<int> p105Max;
+        Check(p105Max.max_size() > 0, "phase105 max_size() > 0");
+    }
+
+    // ── operator== / operator<=>: equal, strict-prefix (both directions),
+    //    equal-length-different-content ───────────────────────────────────
+    {
+        std::forward_list<int> p105CmpA{1, 2, 3};
+        std::forward_list<int> p105CmpB{1, 2, 3};
+        Check(p105CmpA == p105CmpB, "phase105 operator== equal lists");
+        Check((p105CmpA <=> p105CmpB) == 0, "phase105 operator<=> equal lists");
+
+        std::forward_list<int> p105CmpShort{1, 2};
+        std::forward_list<int> p105CmpLong{1, 2, 3};
+        Check(!(p105CmpShort == p105CmpLong),
+              "phase105 Trap4 operator== strict-prefix (shorter vs longer) not equal");
+        Check((p105CmpShort <=> p105CmpLong) < 0,
+              "phase105 Trap4 operator<=> shorter-is-prefix-of-longer is less");
+        Check(!(p105CmpLong == p105CmpShort),
+              "phase105 Trap4 operator== strict-prefix (longer vs shorter) not equal");
+        Check((p105CmpLong <=> p105CmpShort) > 0,
+              "phase105 Trap4 operator<=> longer-with-shorter-prefix is greater");
+
+        std::forward_list<int> p105CmpDiff{1, 9, 3};
+        Check(!(p105CmpA == p105CmpDiff), "phase105 operator== equal-length different-content not equal");
+        Check((p105CmpA <=> p105CmpDiff) < 0,
+              "phase105 operator<=> equal-length different-content ordered by first diff");
+    }
+
+    // ── swap: member + free ────────────────────────────────────────────
+    {
+        std::forward_list<int> p105SwA{1, 2, 3};
+        std::forward_list<int> p105SwB{4, 5};
+        p105SwA.swap(p105SwB);
+        Check((p105SwA == std::forward_list<int>{4, 5}) && (p105SwB == std::forward_list<int>{1, 2, 3}),
+              "phase105 member swap()");
+
+        std::swap(p105SwA, p105SwB);
+        Check((p105SwA == std::forward_list<int>{1, 2, 3}) && (p105SwB == std::forward_list<int>{4, 5}),
+              "phase105 free swap()");
+    }
+
+    // ── free erase / erase_if ──────────────────────────────────────────
+    {
+        std::forward_list<int> p105FreeErase{1, 2, 3, 2, 4};
+        auto p105FreeEraseCount = std::erase(p105FreeErase, 2);
+        Check(p105FreeEraseCount == 2 && (p105FreeErase == std::forward_list<int>{1, 3, 4}),
+              "phase105 free erase(forward_list&, value)");
+
+        std::forward_list<int> p105FreeEraseIf{1, 2, 3, 4, 5};
+        auto p105FreeEraseIfCount = std::erase_if(p105FreeEraseIf, [](int x) { return x > 3; });
+        Check(p105FreeEraseIfCount == 2 && (p105FreeEraseIf == std::forward_list<int>{1, 2, 3}),
+              "phase105 free erase_if(forward_list&, pred)");
+    }
+
+    // ── deduction guides: CTAD from iterator-pair and from_range ─────────
+    {
+        std::vector<int> p105CtadSrc{1, 2, 3};
+        std::forward_list p105CtadIter(p105CtadSrc.begin(), p105CtadSrc.end());
+        static_assert(std::is_same_v<decltype(p105CtadIter), std::forward_list<int>>,
+                      "phase105 CTAD from iterator pair deduces forward_list<int>");
+        Check((p105CtadIter == std::forward_list<int>{1, 2, 3}), "phase105 CTAD iterator-pair content");
+
+        std::forward_list p105CtadRange(std::from_range, p105CtadSrc);
+        static_assert(std::is_same_v<decltype(p105CtadRange), std::forward_list<int>>,
+                      "phase105 CTAD from_range_t deduces forward_list<int>");
+        Check((p105CtadRange == std::forward_list<int>{1, 2, 3}), "phase105 CTAD from_range content");
+    }
+
+    // ── allocator propagation: select_on_container_copy_construction /
+    //    POCCA / POCMA obey their trait flags (copy-ctor, copy-assign,
+    //    move-assign; propagate + non-propagate/unequal paths) ───────────
+    {
+        using SA = StatefulAlloc<int>;
+        using FA = std::forward_list<int, SA>;
+
+        FA p105AllocSrc({1, 2, 3}, SA(7));
+        FA p105AllocCopy(p105AllocSrc);
+        Check(p105AllocCopy.get_allocator().id == 7,
+              "phase105 alloc copy-ctor: select_on_container_copy_construction default (id propagates)");
+        Check((p105AllocCopy == FA{1, 2, 3}), "phase105 alloc copy-ctor: content copied");
+
+        FA p105AllocAssignA({1, 2, 3}, SA(1));
+        FA p105AllocAssignB({9}, SA(2));
+        p105AllocAssignB = p105AllocAssignA;
+        Check(p105AllocAssignB.get_allocator().id == 1,
+              "phase105 alloc copy-assign POCCA: allocator propagates from source");
+        Check((p105AllocAssignB == FA{1, 2, 3}), "phase105 alloc copy-assign: content copied");
+
+        FA p105AllocMoveA({4, 5, 6}, SA(3));
+        FA p105AllocMoveB({9}, SA(4));
+        p105AllocMoveB = std::move(p105AllocMoveA);
+        Check(p105AllocMoveB.get_allocator().id == 4,
+              "phase105 alloc move-assign POCMA=false, unequal alloc: keeps own allocator");
+        Check((p105AllocMoveB == FA{4, 5, 6}),
+              "phase105 alloc move-assign POCMA=false, unequal alloc: content moved (element-wise)");
+
+        FA p105AllocMoveC({7, 8}, SA(5));
+        FA p105AllocMoveD({9}, SA(5));
+        p105AllocMoveD = std::move(p105AllocMoveC);
+        Check(p105AllocMoveD.get_allocator().id == 5,
+              "phase105 alloc move-assign POCMA=false, equal alloc: keeps own (already-equal) allocator");
+        Check((p105AllocMoveD == FA{7, 8}),
+              "phase105 alloc move-assign POCMA=false, equal alloc: content moved (steal path)");
+    }
+
+    // ── P105OwnAlloc: cross-instance-free-trapping allocator matrix ──────
+    // StatefulAlloc above only asserts id+contents, which cannot distinguish
+    // a correct element-wise move from an incorrect steal across unequal
+    // allocators, and never exercises either allocator-extended constructor.
+    // P105OwnAlloc closes both gaps: it traps cross-instance frees and
+    // counts allocate() calls, so "steal" (zero new allocations) and
+    // "element-wise move" (N new allocations, all owned by the mover) are
+    // distinguishable even when they produce identical contents.
+    {
+        using TA  = P105OwnAllocDefault<int>;
+        using TFL = std::forward_list<int, TA>;
+
+        // (1) move-assign, POCMA=false, unequal allocators: must
+        //     element-wise-move through the target's OWN allocator, never
+        //     steal the source's nodes (which would later be freed through
+        //     a foreign instance -- UB on a real allocator).
+        P105OwnAllocTrap::Reset();
+        {
+            TFL p105TrapMoveA({1, 2, 3}, TA(1));
+            TFL p105TrapMoveB({9}, TA(2));
+            p105TrapMoveB = std::move(p105TrapMoveA);
+            Check(p105TrapMoveB.get_allocator().id == 2,
+                  "phase105 M2 trap: move-assign unequal alloc keeps own allocator id");
+            Check((p105TrapMoveB == TFL{1, 2, 3}),
+                  "phase105 M2 trap: move-assign unequal alloc moved content element-wise");
+        }
+        Check(!P105OwnAllocTrap::crossInstanceFree,
+              "phase105 M2 trap: move-assign(unequal alloc) causes ZERO cross-instance frees "
+              "(proves element-wise move, not steal-then-free-through-the-wrong-allocator)");
+
+        // (2) move-ctor-with-alloc, unequal allocators: same element-wise
+        //     obligation as (1), from the allocator-extended constructor.
+        P105OwnAllocTrap::Reset();
+        {
+            TFL p105TrapMoveCtorSrc({7, 8, 9}, TA(10));
+            TFL p105TrapMoveCtorDst(std::move(p105TrapMoveCtorSrc), TA(20));
+            Check(p105TrapMoveCtorDst.get_allocator().id == 20,
+                  "phase105 trap: move-ctor-with-alloc unequal uses the supplied allocator");
+            Check((p105TrapMoveCtorDst == TFL{7, 8, 9}),
+                  "phase105 trap: move-ctor-with-alloc unequal moved content element-wise");
+        }
+        Check(!P105OwnAllocTrap::crossInstanceFree,
+              "phase105 trap: move-ctor-with-alloc(unequal) causes ZERO cross-instance frees");
+
+        // (3) copy-assign, POCCA=true, unequal allocators: must free the
+        //     TARGET's old nodes through its OLD allocator BEFORE
+        //     propagating -- reassigning __alloc first would free them
+        //     through the wrong (new) instance.
+        P105OwnAllocTrap::Reset();
+        {
+            TFL p105TrapCaTarget({100, 200}, TA(30));
+            TFL p105TrapCaSource({1, 2, 3}, TA(40));
+            p105TrapCaTarget = p105TrapCaSource;
+            Check(p105TrapCaTarget.get_allocator().id == 40,
+                  "phase105 trap: copy-assign POCCA unequal propagates the allocator");
+            Check((p105TrapCaTarget == TFL{1, 2, 3}),
+                  "phase105 trap: copy-assign POCCA unequal copied content");
+            Check((p105TrapCaSource == TFL{1, 2, 3}),
+                  "phase105 trap: copy-assign leaves the source unaffected");
+        }
+        Check(!P105OwnAllocTrap::crossInstanceFree,
+              "phase105 trap: copy-assign(POCCA, unequal) frees the OLD nodes through the OLD "
+              "allocator before propagating -- ZERO cross-instance frees");
+
+        // (4) allocator-extended copy ctor, both equal AND unequal supplied
+        //     allocators -- always element-wise copies (the source is
+        //     `const &`, never consumed), so both must produce fresh nodes
+        //     owned by the SUPPLIED instance.
+        P105OwnAllocTrap::Reset();
+        {
+            TFL p105TrapCopyExtSrc({5, 6, 7}, TA(50));
+            TFL p105TrapCopyExtEqual(p105TrapCopyExtSrc, TA(50));
+            TFL p105TrapCopyExtUnequal(p105TrapCopyExtSrc, TA(51));
+            Check((p105TrapCopyExtEqual == TFL{5, 6, 7}) && p105TrapCopyExtEqual.get_allocator().id == 50,
+                  "phase105 alloc-ext copy ctor (equal id): content copied via supplied allocator");
+            Check((p105TrapCopyExtUnequal == TFL{5, 6, 7}) && p105TrapCopyExtUnequal.get_allocator().id == 51,
+                  "phase105 alloc-ext copy ctor (unequal id): content copied via supplied allocator");
+            Check((p105TrapCopyExtSrc == TFL{5, 6, 7}),
+                  "phase105 alloc-ext copy ctor: source unaffected by either copy");
+        }
+        Check(!P105OwnAllocTrap::crossInstanceFree,
+              "phase105 alloc-ext copy ctor: ZERO cross-instance frees (never steals)");
+
+        // (5) allocator-extended move ctor: EQUAL supplied allocator must
+        //     steal (source emptied, zero new node allocations); UNEQUAL
+        //     must element-wise-move (N new node allocations for N
+        //     elements) -- the allocation-count delta makes the
+        //     steal-vs-move distinction real instead of coincidental.
+        P105OwnAllocTrap::Reset();
+        {
+            TFL p105TrapMoveExtSrcEq({11, 12}, TA(60));
+            std::size_t p105TrapAllocBeforeEq = P105OwnAllocTrap::allocations;
+            TFL p105TrapMoveExtEq(std::move(p105TrapMoveExtSrcEq), TA(60));
+            std::size_t p105TrapAllocAfterEq = P105OwnAllocTrap::allocations;
+            Check((p105TrapMoveExtEq == TFL{11, 12}) && p105TrapMoveExtSrcEq.empty(),
+                  "phase105 alloc-ext move ctor (equal id): steals -- content moved, source emptied");
+            Check(p105TrapAllocAfterEq == p105TrapAllocBeforeEq,
+                  "phase105 alloc-ext move ctor (equal id): zero new node allocations (genuine steal)");
+
+            TFL p105TrapMoveExtSrcUneq({13, 14}, TA(70));
+            std::size_t p105TrapAllocBeforeUneq = P105OwnAllocTrap::allocations;
+            TFL p105TrapMoveExtUneq(std::move(p105TrapMoveExtSrcUneq), TA(71));
+            std::size_t p105TrapAllocAfterUneq = P105OwnAllocTrap::allocations;
+            Check((p105TrapMoveExtUneq == TFL{13, 14}) && p105TrapMoveExtUneq.get_allocator().id == 71,
+                  "phase105 alloc-ext move ctor (unequal id): element-wise-moves into the supplied allocator");
+            Check(p105TrapAllocAfterUneq - p105TrapAllocBeforeUneq == 2,
+                  "phase105 alloc-ext move ctor (unequal id): allocates exactly N new nodes "
+                  "(genuine element-wise move, not a steal)");
+        }
+        Check(!P105OwnAllocTrap::crossInstanceFree,
+              "phase105 alloc-ext move ctor: ZERO cross-instance frees across equal+unequal cases");
+
+        // (6) POCMA=true: move-assign must propagate the allocator AND
+        //     steal (zero new allocations) -- propagation is what keeps the
+        //     stolen nodes' recorded owner id consistent with the target's
+        //     post-move allocator id.
+        {
+            using TAP  = P105OwnAllocPocma<int>;
+            using TFLP = std::forward_list<int, TAP>;
+            P105OwnAllocTrap::Reset();
+            TFLP p105PocmaA({21, 22}, TAP(80));
+            TFLP p105PocmaB({9}, TAP(81));
+            std::size_t p105PocmaAllocBefore = P105OwnAllocTrap::allocations;
+            p105PocmaB = std::move(p105PocmaA);
+            std::size_t p105PocmaAllocAfter = P105OwnAllocTrap::allocations;
+            Check(p105PocmaB.get_allocator().id == 80,
+                  "phase105 POCMA=true move-assign: allocator propagates from the source");
+            Check((p105PocmaB == TFLP{21, 22}) && p105PocmaA.empty(),
+                  "phase105 POCMA=true move-assign: content moved, source emptied (steal path)");
+            Check(p105PocmaAllocAfter == p105PocmaAllocBefore,
+                  "phase105 POCMA=true move-assign: zero new node allocations (genuine steal)");
+            Check(!P105OwnAllocTrap::crossInstanceFree,
+                  "phase105 POCMA=true move-assign: ZERO cross-instance frees (propagation keeps "
+                  "the stolen nodes' owner id consistent with the target's new allocator)");
+        }
+
+        // (7) is_always_equal=true: move-assign must steal EVEN WHEN the
+        //     two instances carry different ids -- is_always_equal is a
+        //     promise that identity never needs checking, so the equality
+        //     short-circuit must never even consult operator==. Zero new
+        //     allocations is the only trap signal usable here: a genuine
+        //     cross-id free is CORRECT for this trait (not asserted as a
+        //     failure), since is_always_equal explicitly licenses freeing
+        //     one instance's memory through another.
+        {
+            using TAE  = P105OwnAllocAlwaysEqual<int>;
+            using TFLE = std::forward_list<int, TAE>;
+            P105OwnAllocTrap::Reset();
+            TFLE p105AeA({31, 32, 33}, TAE(90));
+            TFLE p105AeB({9}, TAE(91));
+            std::size_t p105AeAllocBefore = P105OwnAllocTrap::allocations;
+            p105AeB = std::move(p105AeA);
+            std::size_t p105AeAllocAfter = P105OwnAllocTrap::allocations;
+            Check((p105AeB == TFLE{31, 32, 33}) && p105AeA.empty(),
+                  "phase105 is_always_equal=true move-assign: steals across differing instance "
+                  "ids -- content moved, source emptied");
+            Check(p105AeAllocAfter == p105AeAllocBefore,
+                  "phase105 is_always_equal=true move-assign: zero new node allocations "
+                  "(genuine steal regardless of instance id)");
+        }
+    }
+
+    printf("[CXX] PASS phase105: forward_list -- lifecycle (12 ctors incl. both alloc-extended "
+           "forms, now actually invoked) + assign/assign_range (incl. self-alias + "
+           "subrange-over-self UAF-safety) + front/push_front/pop_front/emplace_front + Trap1 "
+           "prepend_range order-preservation + before_begin invariant + all 5 insert_after "
+           "forms + insert_range_after + emplace_after (return-value checks) + erase_after "
+           "single/range (open-interval) + C2 zero-distance erase_after/splice_after "
+           "regressions (incl. before_begin/before_begin + range-vs-whole-list consistency) + "
+           "splice_after all 3 forms incl. Trap2 self-splice guard + C1 pos==++i no-op "
+           "regression + remove/remove_if + unique x2 (first-of-run survives) + merge x2 "
+           "(stability + self-merge no-op) + sort x2 (150-element cascade, stability, custom "
+           "comparator) + reverse (Trap3) + resize x2 + max_size + Trap4 no-size() "
+           "operator==/<=> lockstep compare + swap (member+free) + free erase/erase_if + "
+           "CTAD + StatefulAlloc select_on_container_copy_construction/POCCA/POCMA "
+           "propagation + P105OwnAlloc cross-instance-free-trapping matrix (unequal "
+           "move-assign/move-ctor-with-alloc element-wise-move, copy-assign "
+           "free-old-before-propagate ordering, alloc-extended copy+move ctors under "
+           "equal/unequal ids, POCMA propagation, is_always_equal steal-regardless-of-id) "
+           "all trap- and allocation-count-verified\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -18944,6 +19784,7 @@ int main()
     Phase102();
     Phase103();
     Phase104();
+    Phase105();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
