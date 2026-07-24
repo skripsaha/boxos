@@ -367,6 +367,16 @@ static volatile uint32_t g_strandpool_orphan_pending = 0;
  * in pool_claim. Bounds the reclaim scan to slots that were ever used. */
 static uint32_t g_pool_slab_hwm = 0;
 
+/* Defensive clamp on the high-water mark: pool_claim only ever sets it to
+ * i+1 for an i bounded by STRAND_POOL_SLAB_MAX, so this should be a no-op —
+ * but the reclaim scan walks g_pool_slab[] by this bound, so clamping here
+ * means a corrupted or otherwise-unexpected hwm can never carry that scan
+ * past the array's real end. */
+static inline uint32_t pool_slab_hwm_clamped(void) {
+    uint32_t hwm = g_pool_slab_hwm;
+    return hwm > STRAND_POOL_SLAB_MAX ? STRAND_POOL_SLAB_MAX : hwm;
+}
+
 /* Floor map: smallest class whose size >= n (so a served block is always at
  * least as large as requested). n > 8192 → bypass to the locked global path. */
 static unsigned StrandPoolSizeToClass(size_t n) {
@@ -438,7 +448,7 @@ static void reclaim_one_orphan_slot_locked(StrandPool *p, uint32_t word) {
 static void reclaim_orphans_scan_locked(void) {
     if (__atomic_load_n(&g_strandpool_orphan_pending, __ATOMIC_ACQUIRE) == 0) return;
     __atomic_store_n(&g_strandpool_orphan_pending, 0, __ATOMIC_RELEASE);
-    for (unsigned i = 0; i < g_pool_slab_hwm; i++) {
+    for (unsigned i = 0; i < pool_slab_hwm_clamped(); i++) {
         StrandPool *p = &g_pool_slab[i];
         uint32_t word = __atomic_load_n(&p->GenState, __ATOMIC_ACQUIRE);
         if (STRANDPOOL_STATE(word) != STRANDPOOL_ORPHANED) continue;
@@ -489,7 +499,7 @@ static StrandPool *pool_claim(StrandInfo *si) {
             /* Slab full: force an unconditional walk [0, hwm) regardless of
              * the dirty flag — robustness net for the vanishingly-unlikely
              * case where a kernel flag-set was missed. */
-            for (unsigned j = 0; j < g_pool_slab_hwm; j++) {
+            for (unsigned j = 0; j < pool_slab_hwm_clamped(); j++) {
                 StrandPool *p2 = &g_pool_slab[j];
                 uint32_t word2 = __atomic_load_n(&p2->GenState, __ATOMIC_ACQUIRE);
                 if (STRANDPOOL_STATE(word2) != STRANDPOOL_ORPHANED) continue;
