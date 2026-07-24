@@ -12,6 +12,7 @@
 #include <__bits/allocator_core>
 #include <__bits/iterator_core>
 #include <__bits/ranges_core>
+#include <__bits/version_containers>
 #include <compare>
 #include <cstddef>
 #include <initializer_list>
