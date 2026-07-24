@@ -7,10 +7,12 @@
 // header (not <version>) — so the actual #define bodies live in shared
 // leaf files under __bits/ (<__bits/version_ranges>, owned by <ranges>;
 // <__bits/version_algorithm>, owned by <algorithm>; <__bits/version_numeric>,
-// owned by <numeric>; <__bits/version_functional>, owned by <functional>),
-// and <version> just pulls in the complete set from all four. <coroutine>
-// and <generator> self-declare their own single macro directly, a fifth,
-// pre-existing pattern this file doesn't change.
+// owned by <numeric>; <__bits/version_functional>, owned by <functional>;
+// <__bits/version_containers>, owned jointly by <vector>/<deque>/<list>/
+// <map>/<set>/<unordered_map>/<unordered_set>/<string>/<forward_list>/
+// <stack>/<queue>), and <version> just pulls in the complete set from all
+// five. <coroutine> and <generator> self-declare their own single macro
+// directly, a separate, pre-existing pattern this file doesn't change.
 //
 // Scope (Ф29f-3c, the ranges-completeness epic closeout, plus conformance
 // fixes from a follow-up audit): Ф7B-Ф29f shipped without a single
@@ -24,16 +26,6 @@
 //
 // Deliberately NOT defined (feature not implemented, or not complete
 // enough to claim):
-//   __cpp_lib_containers_ranges — owned jointly by <vector>, <deque>,
-//                                 <list>, <map>, <set>, <unordered_map>,
-//                                 <unordered_set>, <string>, AND
-//                                 <stack>/<queue>/<priority_queue>/
-//                                 <forward_list>. The first 8 are fully
-//                                 done; the last 4 containers don't exist
-//                                 in boxcxx yet (future container phase) —
-//                                 claiming this macro would be a false
-//                                 positive for the whole-surface promise
-//                                 it makes.
 //   __cpp_lib_tuple_like        — no public std::tuple_like concept (only
 //                                 a private elements_view implementation
 //                                 trait); the broader pair/tuple "tuple-
@@ -43,8 +35,9 @@
 //                                 either).
 //   __cpp_lib_interpolate       — midpoint complete in <numeric>, but lerp
 //                                 absent from <cmath>; macro deferred until
-//                                 a future phase adds lerp (jointly owned,
-//                                 same rule as __cpp_lib_containers_ranges).
+//                                 a future phase adds lerp (jointly owned by
+//                                 <numeric> and <cmath>, defined only once
+//                                 both provide their piece).
 // Backfilling FTMs for Ф1-Ф28 (format/chrono/random/threads/...) is a
 // separate, explicitly out-of-scope future epic-wide item, not folded in
 // here.
@@ -55,5 +48,6 @@
 #include <__bits/version_algorithm>
 #include <__bits/version_numeric>
 #include <__bits/version_functional> // <functional>: bad_function_call/function/move_only_function
+#include <__bits/version_containers> // <stack>/<queue>/<priority_queue>: containers_ranges joint owner
 
 #endif // BOXCXX_VERSION

@@ -18,6 +18,7 @@
 #include <__bits/iterator_core>
 #include <__bits/ranges_core>
 #include <__bits/throw_helpers>
+#include <__bits/version_containers>
 #include <charconv>
 #include <compare>
 #include <cstddef>

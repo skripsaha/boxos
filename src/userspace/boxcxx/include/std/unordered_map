@@ -10,6 +10,7 @@
 #include <__bits/node_handle>
 #include <__bits/ranges_core>
 #include <__bits/throw_helpers>
+#include <__bits/version_containers>
 #include <functional>
 #include <initializer_list>
 #include <tuple>

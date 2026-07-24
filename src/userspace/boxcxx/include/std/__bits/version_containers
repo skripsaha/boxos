@@ -1,0 +1,18 @@
+// boxcxx — <__bits/version_containers>
+//
+// The __cpp_lib_* feature-test macro [version.syn] owned JOINTLY by
+// <vector>, <deque>, <list>, <map>, <set>, <unordered_map>,
+// <unordered_set>, <string>, <forward_list>, <stack>, and <queue> --
+// split out for the same [support.limits.general] per-header reason as
+// <__bits/version_ranges>/<__bits/version_algorithm>/<__bits/version_numeric>
+// -- see those files' comments. Every owning header includes this leaf
+// directly so the macro is visible from a TU that includes only one of
+// them, not just from <version>.
+#ifndef BOXCXX_BITS_VERSION_CONTAINERS
+#define BOXCXX_BITS_VERSION_CONTAINERS
+
+#ifndef __cpp_lib_containers_ranges
+#  define __cpp_lib_containers_ranges 202202L
+#endif
+
+#endif // BOXCXX_BITS_VERSION_CONTAINERS

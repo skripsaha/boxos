@@ -45,6 +45,7 @@
 #include <numeric>
 #include <optional>
 #include <print>
+#include <queue>
 #include <random>
 #include <ranges>
 #include <set>
@@ -67,6 +68,7 @@
 #include <exception>
 #include <initializer_list>
 #include <span>
+#include <stack>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -19850,6 +19852,642 @@ void Phase106()
            "zero cross-instance frees throughout\n");
 }
 
+// ── phase107 ────────────────────────────────────────────────────────────
+// <stack> + <queue> (queue AND priority_queue) -- the container-adaptor
+// closeout of Ф30c, plus the __cpp_lib_containers_ranges FTM flip. All
+// three wrap an existing sequence container (stack/queue -> deque<T>,
+// priority_queue -> vector<T>) rather than owning storage themselves.
+// Reuses phase105's P105OwnAlloc cross-instance-free-trapping allocator.
+
+void Phase107()
+{
+    // ── feature-test macro pin ([version.syn]) ──────────────────────────
+    {
+        static_assert(__cpp_lib_containers_ranges == 202202L,
+                      "phase107 __cpp_lib_containers_ranges pin");
+    }
+
+    // ════════════════════════════════════════════════════════════════════
+    // std::stack
+    // ════════════════════════════════════════════════════════════════════
+
+    // ── LIFO order + push/pop/top/emplace ────────────────────────────────
+    {
+        std::stack<int> p107StackLifo;
+        p107StackLifo.push(1);
+        p107StackLifo.push(2);
+        p107StackLifo.push(3);
+        std::vector<int> p107StackPopped;
+        while (!p107StackLifo.empty()) {
+            p107StackPopped.push_back(p107StackLifo.top());
+            p107StackLifo.pop();
+        }
+        Check((p107StackPopped == std::vector<int>{3, 2, 1}),
+              "phase107 stack push 1,2,3 -> pop yields 3,2,1 (LIFO)");
+
+        std::stack<int> p107StackEmp;
+        int &p107StackEmpRef = p107StackEmp.emplace(42);
+        Check(p107StackEmpRef == 42 && p107StackEmp.top() == 42,
+              "phase107 stack::emplace returns a reference to the new top");
+        Check(p107StackEmp.size() == 1, "phase107 stack::size after one push");
+    }
+
+    // ── Container ctors (lvalue/rvalue) + iterator-pair + from_range_t +
+    //    push_range ──────────────────────────────────────────────────────
+    {
+        std::deque<int> p107StackContSrc{1, 2, 3};
+        std::stack<int> p107StackFromLv(p107StackContSrc);
+        Check(p107StackFromLv.size() == 3 && p107StackFromLv.top() == 3,
+              "phase107 stack(const Container&) ctor");
+
+        std::stack<int> p107StackFromRv(std::deque<int>{4, 5});
+        Check(p107StackFromRv.size() == 2 && p107StackFromRv.top() == 5,
+              "phase107 stack(Container&&) ctor");
+
+        std::vector<int> p107StackIterSrc{6, 7, 8};
+        std::stack<int> p107StackFromIt(p107StackIterSrc.begin(), p107StackIterSrc.end());
+        Check(p107StackFromIt.size() == 3 && p107StackFromIt.top() == 8,
+              "phase107 stack(InputIterator,InputIterator) ctor");
+
+        std::vector<int> p107StackFrSrc{10, 20, 30};
+        std::stack p107StackFr(std::from_range, p107StackFrSrc);
+        Check(p107StackFr.size() == 3 && p107StackFr.top() == 30,
+              "phase107 stack(from_range_t, R&&) ctor");
+
+        std::vector<int> p107StackPrRg{40, 50};
+        p107StackFr.push_range(p107StackPrRg);
+        Check(p107StackFr.size() == 5 && p107StackFr.top() == 50,
+              "phase107 stack::push_range appends via deque::append_range");
+    }
+
+    // ── allocator-extended ctors -- now DIRECT DELEGATION (CRITICAL UPDATE:
+    //    deque gained (const deque&,Alloc)/(deque&&,Alloc) in 780fbf6, so
+    //    stack/queue no longer need a push_back-loop workaround) --
+    //    trap-verified the same way phase106 verified deque's own ctors ───
+    {
+        using TA = P105OwnAllocDefault<int>;
+        using TD = std::deque<int, TA>;
+        using TS = std::stack<int, TD>;
+
+        P105OwnAllocTrap::Reset();
+        {
+            TA p107StackAllocOnlyA(300);
+            TS p107StackAllocOnly(p107StackAllocOnlyA);
+            Check(p107StackAllocOnly.empty(), "phase107 stack(const Alloc&): constructs empty");
+        }
+        Check(!P105OwnAllocTrap::crossInstanceFree,
+              "phase107 stack(const Alloc&): ZERO cross-instance frees");
+
+        P105OwnAllocTrap::Reset();
+        {
+            TD p107StackMoveSrcEq({1, 2, 3}, TA(310));
+            std::size_t p107StackAllocBeforeEq = P105OwnAllocTrap::allocations;
+            TS p107StackMoveEq(std::move(p107StackMoveSrcEq), TA(310));
+            std::size_t p107StackAllocAfterEq = P105OwnAllocTrap::allocations;
+            Check(p107StackMoveEq.size() == 3 && p107StackMoveEq.top() == 3 && p107StackMoveSrcEq.empty(),
+                  "phase107 stack(Container&&, Alloc) equal id: direct-delegates to deque's own "
+                  "move-with-alloc ctor -- steals, content moved, source emptied");
+            Check(p107StackAllocAfterEq == p107StackAllocBeforeEq,
+                  "phase107 stack(Container&&, Alloc) equal id: zero new allocations (genuine steal)");
+        }
+        Check(!P105OwnAllocTrap::crossInstanceFree,
+              "phase107 stack(Container&&, Alloc) equal id: ZERO cross-instance frees");
+
+        P105OwnAllocTrap::Reset();
+        {
+            TD p107StackMoveSrcUneq({4, 5, 6}, TA(320));
+            std::size_t p107StackAllocBeforeUneq = P105OwnAllocTrap::allocations;
+            TS p107StackMoveUneq(std::move(p107StackMoveSrcUneq), TA(321));
+            std::size_t p107StackAllocAfterUneq = P105OwnAllocTrap::allocations;
+            Check(p107StackMoveUneq.size() == 3 && p107StackMoveUneq.top() == 6,
+                  "phase107 stack(Container&&, Alloc) unequal id: element-wise-moves into the supplied "
+                  "allocator (direct delegation, not the old push_back-loop workaround)");
+            Check(p107StackAllocAfterUneq > p107StackAllocBeforeUneq,
+                  "phase107 stack(Container&&, Alloc) unequal id: allocates new storage "
+                  "(genuine element-wise move, not a steal)");
+        }
+        Check(!P105OwnAllocTrap::crossInstanceFree,
+              "phase107 stack(Container&&, Alloc) unequal id: ZERO cross-instance frees");
+
+        P105OwnAllocTrap::Reset();
+        {
+            TS p107StackCopySrc(TD({7, 8}, TA(330)));
+            TS p107StackCopyDst(p107StackCopySrc, TA(331));
+            Check(p107StackCopyDst.size() == 2 && p107StackCopyDst.top() == 8,
+                  "phase107 stack(const stack&, Alloc): content copied via the supplied allocator");
+            Check(p107StackCopySrc.size() == 2, "phase107 stack(const stack&, Alloc): source unaffected");
+        }
+        Check(!P105OwnAllocTrap::crossInstanceFree,
+              "phase107 stack(const stack&, Alloc): ZERO cross-instance frees (never steals)");
+
+        P105OwnAllocTrap::Reset();
+        {
+            TS p107StackMoveStackSrc(TD({9, 10}, TA(340)));
+            TS p107StackMoveStackDst(std::move(p107StackMoveStackSrc), TA(340));
+            Check(p107StackMoveStackDst.size() == 2 && p107StackMoveStackDst.top() == 10,
+                  "phase107 stack(stack&&, Alloc) equal id: direct-delegates, steals");
+        }
+        Check(!P105OwnAllocTrap::crossInstanceFree,
+              "phase107 stack(stack&&, Alloc) equal id: ZERO cross-instance frees");
+    }
+
+    // ── comparison operators (hidden friends, Trap8): equal / prefix /
+    //    differing-content, all 6 relational + == + <=> ───────────────────
+    {
+        std::stack<int> p107CmpA(std::deque<int>{1, 2, 3});
+        std::stack<int> p107CmpEqual(std::deque<int>{1, 2, 3});
+        std::stack<int> p107CmpPrefix(std::deque<int>{1, 2});
+        std::stack<int> p107CmpDiff(std::deque<int>{1, 2, 4});
+
+        Check(p107CmpA == p107CmpEqual, "phase107 stack== equal contents");
+        Check(!(p107CmpA != p107CmpEqual), "phase107 stack!= equal contents is false");
+        Check(p107CmpA != p107CmpPrefix, "phase107 stack!= differing-length contents");
+        Check(p107CmpPrefix < p107CmpA, "phase107 stack< shorter-prefix < longer");
+        Check(p107CmpA > p107CmpPrefix, "phase107 stack> longer > shorter-prefix");
+        Check(p107CmpPrefix <= p107CmpA, "phase107 stack<= shorter-prefix <= longer");
+        Check(p107CmpA >= p107CmpPrefix, "phase107 stack>= longer >= shorter-prefix");
+        Check(p107CmpA <= p107CmpEqual && p107CmpA >= p107CmpEqual,
+              "phase107 stack<=/>= equal contents both true");
+        Check(p107CmpA < p107CmpDiff, "phase107 stack< same-length differing content (3 < 4 at back)");
+        Check((p107CmpA <=> p107CmpEqual) == 0, "phase107 stack<=> equal contents compares equivalent");
+        Check((p107CmpPrefix <=> p107CmpA) < 0, "phase107 stack<=> shorter-prefix < longer");
+        Check((p107CmpA <=> p107CmpDiff) < 0, "phase107 stack<=> same-length differing content");
+    }
+
+    // ── swap: member + free ──────────────────────────────────────────────
+    {
+        std::stack<int> p107SwapA(std::deque<int>{1, 2});
+        std::stack<int> p107SwapB(std::deque<int>{9, 8, 7});
+        p107SwapA.swap(p107SwapB);
+        Check(p107SwapA.size() == 3 && p107SwapA.top() == 7, "phase107 stack::swap member");
+        Check(p107SwapB.size() == 2 && p107SwapB.top() == 2, "phase107 stack::swap member (other side)");
+        swap(p107SwapA, p107SwapB);
+        Check(p107SwapA.size() == 2 && p107SwapB.size() == 3, "phase107 stack free swap()");
+    }
+
+    // ── deduction guides ([stack.deduct]) ────────────────────────────────
+    {
+        std::deque<int> p107StackDeductSrc{1, 2, 3};
+        std::stack p107StackDeduct1(p107StackDeductSrc);
+        static_assert(std::is_same_v<decltype(p107StackDeduct1), std::stack<int, std::deque<int>>>,
+                      "phase107 stack(Container) CTAD");
+
+        std::vector<int> p107StackDeductIterSrc{4, 5, 6};
+        std::stack p107StackDeduct2(p107StackDeductIterSrc.begin(), p107StackDeductIterSrc.end());
+        static_assert(std::is_same_v<decltype(p107StackDeduct2), std::stack<int>>,
+                      "phase107 stack(InputIterator,InputIterator) CTAD");
+
+        std::stack p107StackDeduct3(std::from_range, p107StackDeductIterSrc);
+        static_assert(std::is_same_v<decltype(p107StackDeduct3), std::stack<int>>,
+                      "phase107 stack(from_range_t, R&&) CTAD");
+
+        std::allocator<int> p107StackDeductAlloc;
+        std::stack p107StackDeduct4(p107StackDeductSrc, p107StackDeductAlloc);
+        static_assert(std::is_same_v<decltype(p107StackDeduct4), std::stack<int, std::deque<int>>>,
+                      "phase107 stack(Container, Allocator) CTAD");
+    }
+
+    // ── protected Container c is reachable from a derived class
+    //    ([container.adaptors]; first protected-member type in boxcxx's
+    //    own container set) ───────────────────────────────────────────────
+    {
+        struct P107StackAccessor : std::stack<int> {
+            std::deque<int> &Raw() { return c; }
+        };
+        P107StackAccessor p107StackAcc;
+        p107StackAcc.push(1);
+        p107StackAcc.push(2);
+        Check(p107StackAcc.Raw().size() == 2 && p107StackAcc.Raw().back() == 2,
+              "phase107 stack: protected Container c reachable from a derived class");
+    }
+
+    static_assert(std::uses_allocator_v<std::stack<int>, std::allocator<int>>,
+                  "phase107 uses_allocator_v<stack<int>, allocator<int>>");
+
+    // ════════════════════════════════════════════════════════════════════
+    // std::queue
+    // ════════════════════════════════════════════════════════════════════
+
+    // ── FIFO order + front/back (const + non-const) ─────────────────────
+    {
+        std::queue<int> p107QueueFifo;
+        p107QueueFifo.push(1);
+        p107QueueFifo.push(2);
+        p107QueueFifo.push(3);
+        std::vector<int> p107QueuePopped;
+        while (!p107QueueFifo.empty()) {
+            p107QueuePopped.push_back(p107QueueFifo.front());
+            p107QueueFifo.pop();
+        }
+        Check((p107QueuePopped == std::vector<int>{1, 2, 3}),
+              "phase107 queue push 1,2,3 -> pop yields 1,2,3 (FIFO)");
+
+        std::queue<int> p107QueueAccess;
+        p107QueueAccess.push(10);
+        p107QueueAccess.push(20);
+        p107QueueAccess.front() = 11;
+        p107QueueAccess.back()  = 21;
+        const std::queue<int> &p107QueueConst = p107QueueAccess;
+        Check(p107QueueConst.front() == 11 && p107QueueConst.back() == 21,
+              "phase107 queue::front()/back() const and non-const overloads");
+    }
+
+    // ── from_range_t ctor + push_range ───────────────────────────────────
+    {
+        std::vector<int> p107QueueFrSrc{10, 20, 30};
+        std::queue p107QueueFr(std::from_range, p107QueueFrSrc);
+        Check(p107QueueFr.size() == 3 && p107QueueFr.front() == 10 && p107QueueFr.back() == 30,
+              "phase107 queue(from_range_t, R&&) ctor");
+
+        std::vector<int> p107QueuePrRg{40, 50};
+        p107QueueFr.push_range(p107QueuePrRg);
+        Check(p107QueueFr.size() == 5 && p107QueueFr.back() == 50,
+              "phase107 queue::push_range appends via deque::append_range");
+    }
+
+    // ── allocator-extended ctors -- direct delegation, same mechanism as
+    //    stack (verified above in full); here confirm queue's OWN ctor
+    //    bodies also delegate correctly ───────────────────────────────────
+    {
+        using TA = P105OwnAllocDefault<int>;
+        using TD = std::deque<int, TA>;
+        using TQ = std::queue<int, TD>;
+
+        P105OwnAllocTrap::Reset();
+        {
+            TD p107QueueMoveSrcEq({1, 2, 3}, TA(350));
+            std::size_t p107QueueAllocBeforeEq = P105OwnAllocTrap::allocations;
+            TQ p107QueueMoveEq(std::move(p107QueueMoveSrcEq), TA(350));
+            std::size_t p107QueueAllocAfterEq = P105OwnAllocTrap::allocations;
+            Check(p107QueueMoveEq.size() == 3 && p107QueueMoveEq.front() == 1 && p107QueueMoveSrcEq.empty(),
+                  "phase107 queue(Container&&, Alloc) equal id: direct-delegates, steals");
+            Check(p107QueueAllocAfterEq == p107QueueAllocBeforeEq,
+                  "phase107 queue(Container&&, Alloc) equal id: zero new allocations (genuine steal)");
+        }
+        Check(!P105OwnAllocTrap::crossInstanceFree,
+              "phase107 queue(Container&&, Alloc) equal id: ZERO cross-instance frees");
+
+        P105OwnAllocTrap::Reset();
+        {
+            TD p107QueueMoveSrcUneq({4, 5, 6}, TA(360));
+            std::size_t p107QueueAllocBeforeUneq = P105OwnAllocTrap::allocations;
+            TQ p107QueueMoveUneq(std::move(p107QueueMoveSrcUneq), TA(361));
+            std::size_t p107QueueAllocAfterUneq = P105OwnAllocTrap::allocations;
+            Check(p107QueueMoveUneq.size() == 3 && p107QueueMoveUneq.front() == 4,
+                  "phase107 queue(Container&&, Alloc) unequal id: element-wise-moves into the "
+                  "supplied allocator (direct delegation, not the old push_back-loop workaround)");
+            Check(p107QueueAllocAfterUneq > p107QueueAllocBeforeUneq,
+                  "phase107 queue(Container&&, Alloc) unequal id: allocates new storage");
+        }
+        Check(!P105OwnAllocTrap::crossInstanceFree,
+              "phase107 queue(Container&&, Alloc) unequal id: ZERO cross-instance frees");
+    }
+
+    // ── comparison operators: equal / prefix / differing-content ────────
+    {
+        std::queue<int> p107QCmpA(std::deque<int>{1, 2, 3});
+        std::queue<int> p107QCmpEqual(std::deque<int>{1, 2, 3});
+        std::queue<int> p107QCmpPrefix(std::deque<int>{1, 2});
+        std::queue<int> p107QCmpDiff(std::deque<int>{1, 2, 4});
+
+        Check(p107QCmpA == p107QCmpEqual, "phase107 queue== equal contents");
+        Check(!(p107QCmpA != p107QCmpEqual), "phase107 queue!= equal contents is false");
+        Check(p107QCmpA != p107QCmpPrefix, "phase107 queue!= differing-length contents");
+        Check(p107QCmpPrefix < p107QCmpA, "phase107 queue< shorter-prefix < longer");
+        Check(p107QCmpA > p107QCmpPrefix, "phase107 queue> longer > shorter-prefix");
+        Check(p107QCmpPrefix <= p107QCmpA, "phase107 queue<= shorter-prefix <= longer");
+        Check(p107QCmpA >= p107QCmpPrefix, "phase107 queue>= longer >= shorter-prefix");
+        Check(p107QCmpA < p107QCmpDiff, "phase107 queue< same-length differing content");
+        Check((p107QCmpA <=> p107QCmpEqual) == 0, "phase107 queue<=> equal contents compares equivalent");
+        Check((p107QCmpPrefix <=> p107QCmpA) < 0, "phase107 queue<=> shorter-prefix < longer");
+    }
+
+    // ── swap: member + free ──────────────────────────────────────────────
+    {
+        std::queue<int> p107QSwapA(std::deque<int>{1, 2});
+        std::queue<int> p107QSwapB(std::deque<int>{7, 8, 9});
+        p107QSwapA.swap(p107QSwapB);
+        Check(p107QSwapA.size() == 3 && p107QSwapA.front() == 7, "phase107 queue::swap member");
+        swap(p107QSwapA, p107QSwapB);
+        Check(p107QSwapA.size() == 2 && p107QSwapB.size() == 3, "phase107 queue free swap()");
+    }
+
+    // ── deduction guides ([queue.deduct]) ────────────────────────────────
+    {
+        std::deque<int> p107QDeductSrc{1, 2, 3};
+        std::queue p107QDeduct1(p107QDeductSrc);
+        static_assert(std::is_same_v<decltype(p107QDeduct1), std::queue<int, std::deque<int>>>,
+                      "phase107 queue(Container) CTAD");
+
+        std::vector<int> p107QDeductIterSrc{4, 5, 6};
+        std::queue p107QDeduct2(p107QDeductIterSrc.begin(), p107QDeductIterSrc.end());
+        static_assert(std::is_same_v<decltype(p107QDeduct2), std::queue<int>>,
+                      "phase107 queue(InputIterator,InputIterator) CTAD");
+
+        std::queue p107QDeduct3(std::from_range, p107QDeductIterSrc);
+        static_assert(std::is_same_v<decltype(p107QDeduct3), std::queue<int>>,
+                      "phase107 queue(from_range_t, R&&) CTAD");
+    }
+
+    // ── protected Container c reachable from a derived class ────────────
+    {
+        struct P107QueueAccessor : std::queue<int> {
+            std::deque<int> &Raw() { return c; }
+        };
+        P107QueueAccessor p107QueueAcc;
+        p107QueueAcc.push(5);
+        p107QueueAcc.push(6);
+        Check(p107QueueAcc.Raw().size() == 2 && p107QueueAcc.Raw().front() == 5,
+              "phase107 queue: protected Container c reachable from a derived class");
+    }
+
+    static_assert(std::uses_allocator_v<std::queue<int>, std::allocator<int>>,
+                  "phase107 uses_allocator_v<queue<int>, allocator<int>>");
+
+    // ════════════════════════════════════════════════════════════════════
+    // std::priority_queue
+    // ════════════════════════════════════════════════════════════════════
+
+    // ── ctor forms: default / Compare / (Compare,Container) / iterator-pair
+    {
+        std::priority_queue<int> p107PqDefault;
+        Check(p107PqDefault.empty() && p107PqDefault.size() == 0,
+              "phase107 priority_queue() default ctor: empty");
+
+        std::priority_queue<int, std::vector<int>, std::greater<int>> p107PqCompOnly(std::greater<int>{});
+        p107PqCompOnly.push(5);
+        p107PqCompOnly.push(1);
+        Check(p107PqCompOnly.top() == 1, "phase107 priority_queue(const Compare&) ctor: comparator honored");
+
+        std::vector<int> p107PqCtorSrc = {3, 7, 1, 9, 4};
+        std::priority_queue p107PqFromComp(std::greater<int>{}, p107PqCtorSrc);
+        static_assert(std::is_same_v<decltype(p107PqFromComp),
+                                     std::priority_queue<int, std::vector<int>, std::greater<int>>>,
+                      "phase107 priority_queue(Compare,Container) CTAD -- cannot rely on implicit-guide "
+                      "synthesis since T never appears independently in this ctor's own parameter list");
+        Check(p107PqFromComp.top() == 1,
+              "phase107 priority_queue(Compare,Container) ctor: make_heap ran on an unsorted "
+              "container, top() correct for greater<int> (min-heap)");
+
+        std::vector<int> p107PqIterSrc = {6, 2, 8, 1, 9};
+        std::priority_queue<int> p107PqIter(p107PqIterSrc.begin(), p107PqIterSrc.end());
+        Check(p107PqIter.top() == 9, "phase107 priority_queue(InputIterator,InputIterator) ctor: make_heap ran");
+    }
+
+    // ── max-heap (default less<>) AND min-heap (greater<>): push N
+    //    pseudo-random elements, pop all, assert monotonic order ─────────
+    {
+        std::mt19937 p107PqRng(20260725u);
+        std::uniform_int_distribution<int> p107PqDist(-1000, 1000);
+        std::vector<int> p107PqSrc(200);
+        for (auto &x : p107PqSrc) x = p107PqDist(p107PqRng);
+
+        std::priority_queue<int> p107PqMax;
+        for (int v : p107PqSrc) p107PqMax.push(v);
+        std::vector<int> p107PqMaxPopped;
+        while (!p107PqMax.empty()) {
+            p107PqMaxPopped.push_back(p107PqMax.top());
+            p107PqMax.pop();
+        }
+        bool p107PqMaxOk = p107PqMaxPopped.size() == p107PqSrc.size();
+        for (std::size_t i = 1; i < p107PqMaxPopped.size() && p107PqMaxOk; ++i)
+            if (p107PqMaxPopped[i] > p107PqMaxPopped[i - 1]) p107PqMaxOk = false;
+        Check(p107PqMaxOk, "phase107 priority_queue default (less<int>) max-heap: push 200 "
+                            "pseudo-random elements + pop-all yields a monotonically "
+                            "NON-INCREASING sequence");
+
+        std::priority_queue<int, std::vector<int>, std::greater<int>> p107PqMin;
+        for (int v : p107PqSrc) p107PqMin.push(v);
+        std::vector<int> p107PqMinPopped;
+        while (!p107PqMin.empty()) {
+            p107PqMinPopped.push_back(p107PqMin.top());
+            p107PqMin.pop();
+        }
+        bool p107PqMinOk = p107PqMinPopped.size() == p107PqSrc.size();
+        for (std::size_t i = 1; i < p107PqMinPopped.size() && p107PqMinOk; ++i)
+            if (p107PqMinPopped[i] < p107PqMinPopped[i - 1]) p107PqMinOk = false;
+        Check(p107PqMinOk, "phase107 priority_queue<int,vector<int>,greater<int>> min-heap: push 200 "
+                            "pseudo-random elements + pop-all yields a monotonically "
+                            "NON-DECREASING sequence -- proves the comparator (not just the "
+                            "default) governs ordering");
+    }
+
+    // ── push/emplace: heap invariant (top()) holds after EVERY individual
+    //    push, not just at the end ───────────────────────────────────────
+    {
+        std::priority_queue<int> p107PqIncr;
+        std::vector<int> p107PqIncrSrc = {5, 1, 8, 3, 9, 2, 7};
+        int p107PqRunningMax = std::numeric_limits<int>::min();
+        bool p107PqIncrOk = true;
+        for (int v : p107PqIncrSrc) {
+            p107PqIncr.push(v);
+            p107PqRunningMax = std::max(p107PqRunningMax, v);
+            if (p107PqIncr.top() != p107PqRunningMax) p107PqIncrOk = false;
+        }
+        Check(p107PqIncrOk, "phase107 priority_queue::push: top() reflects the running maximum "
+                             "after EVERY individual push, not just after the final one");
+
+        p107PqIncr.emplace(100);
+        Check(p107PqIncr.top() == 100, "phase107 priority_queue::emplace: heap invariant holds");
+    }
+
+    // ── push_range: bulk-insert an unsorted range into a NON-empty
+    //    priority_queue, verify top() correct afterward (Trap13: ONE
+    //    make_heap after the whole bulk insert, not per-element push_heap)
+    {
+        std::vector<int> p107PqPrInit = {1, 2, 3};
+        std::priority_queue<int> p107PqPr(p107PqPrInit.begin(), p107PqPrInit.end());
+        Check(p107PqPr.top() == 3, "phase107 priority_queue push_range setup: initial top() correct");
+
+        std::vector<int> p107PqPrBulk = {10, -5, 42, 7};
+        p107PqPr.push_range(p107PqPrBulk);
+        Check(p107PqPr.top() == 42,
+              "phase107 priority_queue::push_range: bulk-insert an unsorted range into a "
+              "non-empty priority_queue, top() reflects the new maximum (Trap13)");
+        Check(p107PqPr.size() == p107PqPrInit.size() + p107PqPrBulk.size(),
+              "phase107 priority_queue::push_range: size reflects all bulk-inserted elements");
+    }
+
+    // ── from_range_t: 3 forms (non-alloc, alloc+Compare, alloc-only) ─────
+    {
+        std::vector<int> p107PqFrSrc = {4, 8, 1, 9, 3};
+
+        std::priority_queue p107PqFr(std::from_range, p107PqFrSrc);
+        Check(p107PqFr.top() == 9,
+              "phase107 priority_queue(from_range_t, R&&) non-alloc: top() correct after "
+              "construction from an UNSORTED range (proves make_heap ran)");
+
+        std::allocator<int> p107PqFrAlloc;
+        std::priority_queue<int, std::vector<int>, std::greater<int>> p107PqFrComp(
+            std::from_range, p107PqFrSrc, std::greater<int>(), p107PqFrAlloc);
+        Check(p107PqFrComp.top() == 1,
+              "phase107 priority_queue(from_range_t, R&&, Compare, Alloc): top() correct "
+              "(min via greater<int>) after construction from an unsorted range");
+
+        std::priority_queue<int, std::vector<int>> p107PqFrAllocOnly(std::from_range, p107PqFrSrc,
+                                                                       p107PqFrAlloc);
+        Check(p107PqFrAllocOnly.top() == 9,
+              "phase107 priority_queue(from_range_t, R&&, Alloc) alloc-only: top() correct "
+              "(default less<int>) after construction from an unsorted range");
+    }
+
+    // ── allocator-extended ctors -- all 12 direct-delegate to vector's OWN
+    //    (const vector&,Alloc)/(vector&&,Alloc) (vector already had these;
+    //    unlike stack/queue this needed no workaround at any point) --
+    //    trap-verified equal/unequal-id move; vector's single-buffer
+    //    allocation granularity means "exactly 1", not "exactly N" ───────
+    {
+        using TA  = P105OwnAllocDefault<int>;
+        using TV  = std::vector<int, TA>;
+        using TPQ = std::priority_queue<int, TV>;
+
+        P105OwnAllocTrap::Reset();
+        {
+            TA p107PqAllocOnlyA(400);
+            TPQ p107PqAllocOnly(p107PqAllocOnlyA);
+            Check(p107PqAllocOnly.empty(), "phase107 priority_queue(const Alloc&): constructs empty");
+        }
+        Check(!P105OwnAllocTrap::crossInstanceFree,
+              "phase107 priority_queue(const Alloc&): ZERO cross-instance frees");
+
+        P105OwnAllocTrap::Reset();
+        {
+            TV p107PqSrcVec({4, 1, 7, 2}, TA(410));
+            TPQ p107PqFromContainer(std::less<int>(), p107PqSrcVec, TA(410));
+            Check(p107PqFromContainer.top() == 7,
+                  "phase107 priority_queue(Compare,Container,Alloc): heap invariant holds (make_heap ran)");
+        }
+        Check(!P105OwnAllocTrap::crossInstanceFree,
+              "phase107 priority_queue(Compare,Container,Alloc): ZERO cross-instance frees");
+
+        P105OwnAllocTrap::Reset();
+        {
+            TPQ p107PqMoveSrcEq(std::less<int>(), TV({5, 3, 9}, TA(420)));
+            std::size_t p107PqAllocBeforeEq = P105OwnAllocTrap::allocations;
+            TPQ p107PqMoveEq(std::move(p107PqMoveSrcEq), TA(420));
+            std::size_t p107PqAllocAfterEq = P105OwnAllocTrap::allocations;
+            Check(p107PqMoveEq.top() == 9,
+                  "phase107 priority_queue(pq&&, Alloc) equal id: direct-delegates to vector's own "
+                  "move-with-alloc ctor -- steals, heap invariant preserved");
+            Check(p107PqAllocAfterEq == p107PqAllocBeforeEq,
+                  "phase107 priority_queue(pq&&, Alloc) equal id: zero new allocations (genuine steal)");
+        }
+        Check(!P105OwnAllocTrap::crossInstanceFree,
+              "phase107 priority_queue(pq&&, Alloc) equal id: ZERO cross-instance frees");
+
+        P105OwnAllocTrap::Reset();
+        {
+            TPQ p107PqMoveSrcUneq(std::less<int>(), TV({6, 2, 8}, TA(430)));
+            std::size_t p107PqAllocBeforeUneq = P105OwnAllocTrap::allocations;
+            TPQ p107PqMoveUneq(std::move(p107PqMoveSrcUneq), TA(431));
+            std::size_t p107PqAllocAfterUneq = P105OwnAllocTrap::allocations;
+            Check(p107PqMoveUneq.top() == 8,
+                  "phase107 priority_queue(pq&&, Alloc) unequal id: element-wise-moves, "
+                  "heap invariant intact");
+            Check(p107PqAllocAfterUneq - p107PqAllocBeforeUneq == 1,
+                  "phase107 priority_queue(pq&&, Alloc) unequal id: allocates exactly ONE new "
+                  "buffer (vector's contiguous single-allocation model, unlike deque/list's "
+                  "per-node/per-block granularity) -- genuine element-wise move, not a steal");
+        }
+        Check(!P105OwnAllocTrap::crossInstanceFree,
+              "phase107 priority_queue(pq&&, Alloc) unequal id: ZERO cross-instance frees");
+    }
+
+    // ── swap ──────────────────────────────────────────────────────────────
+    {
+        std::priority_queue<int> p107PqSwapA;
+        p107PqSwapA.push(1);
+        p107PqSwapA.push(2);
+        std::priority_queue<int> p107PqSwapB;
+        p107PqSwapB.push(9);
+        p107PqSwapB.push(8);
+        p107PqSwapB.push(7);
+        p107PqSwapA.swap(p107PqSwapB);
+        Check(p107PqSwapA.size() == 3 && p107PqSwapA.top() == 9, "phase107 priority_queue::swap member");
+        swap(p107PqSwapA, p107PqSwapB);
+        Check(p107PqSwapA.size() == 2 && p107PqSwapB.size() == 3, "phase107 priority_queue free swap()");
+    }
+
+    // ── deduction guides: (InputIterator,InputIterator) + from_range_t
+    //    (the (Compare,Container) form -- the one that cannot rely on
+    //    implicit-guide synthesis at all -- was already CTAD-tested above)
+    {
+        std::vector<int> p107PqDeductSrc{3, 1, 2};
+        std::priority_queue p107PqDeductFr(std::from_range, p107PqDeductSrc);
+        static_assert(std::is_same_v<decltype(p107PqDeductFr),
+                                     std::priority_queue<int, std::vector<int>, std::less<int>>>,
+                      "phase107 priority_queue(from_range_t, R&&) CTAD");
+
+        std::priority_queue p107PqDeductIt(p107PqDeductSrc.begin(), p107PqDeductSrc.end());
+        static_assert(std::is_same_v<decltype(p107PqDeductIt),
+                                     std::priority_queue<int, std::vector<int>, std::less<int>>>,
+                      "phase107 priority_queue(InputIterator,InputIterator) CTAD");
+    }
+
+    static_assert(std::uses_allocator_v<std::priority_queue<int>, std::allocator<int>>,
+                  "phase107 uses_allocator_v<priority_queue<int>, allocator<int>>");
+
+    // By inspection (not expressible as a passing assertion -- a negative
+    // "this overload must not exist" claim cannot be written as code that
+    // still has to compile, matching phase104's precedent for
+    // boyer_moore_searcher's non-constexpr-ness): priority_queue has NO
+    // non-const top() overload (mutating the heap's root in place could
+    // silently violate the heap invariant with no compensating sift --
+    // the standard deliberately omits it, unlike stack::top()/
+    // queue::front()/queue::back(), which all have both const and
+    // non-const forms), and NO comparison operators at all ([queue.syn]
+    // defines none for priority_queue, unlike stack/queue's full
+    // 7-operator battery tested above) -- either would be a compile
+    // error, which is the point.
+
+    // ── CTAD deduction-guide disambiguation ([container.adaptors.general]/6):
+    //    these calls are AMBIGUOUS / ill-formed without the NotAllocatorLike/
+    //    AllocatorLike guide constraints. priority_queue(it,it,greater<>) is the
+    //    load-bearing case -- without AllocatorLike on the (it,it,Allocator)
+    //    guide, greater<> is deduced AS an Allocator -> vector<int,greater<>>,
+    //    ill-formed / ambiguous with the Compare guide. ─────────────────────
+    {
+        std::vector<int> p107cv{5, 1, 4, 2, 3};
+        auto p107pqg = std::priority_queue(p107cv.begin(), p107cv.end(), std::greater<int>{});
+        static_assert(std::same_as<decltype(p107pqg),
+                          std::priority_queue<int, std::vector<int>, std::greater<int>>>,
+                      "phase107 CTAD priority_queue(it,it,greater<>) -> min-heap type");
+        Check(p107pqg.top() == 1, "phase107 CTAD greater<> deduces a genuine min-heap (top==min)");
+
+        auto p107pqd = std::priority_queue(p107cv.begin(), p107cv.end());
+        static_assert(std::same_as<decltype(p107pqd), std::priority_queue<int>>,
+                      "phase107 CTAD priority_queue(it,it) -> default max-heap");
+
+        std::deque<int> p107dq{7, 8, 9};
+        auto p107st = std::stack(p107dq);
+        static_assert(std::same_as<decltype(p107st), std::stack<int, std::deque<int>>>,
+                      "phase107 CTAD stack(Container) -> stack<int,deque<int>> (NotAllocatorLike Container)");
+        auto p107qc = std::queue(p107dq);
+        static_assert(std::same_as<decltype(p107qc), std::queue<int, std::deque<int>>>,
+                      "phase107 CTAD queue(Container)");
+        auto p107sa = std::stack(p107dq, std::allocator<int>{});
+        static_assert(std::same_as<decltype(p107sa), std::stack<int, std::deque<int>>>,
+                      "phase107 CTAD stack(Container, Allocator) guide (NotAllocatorLike+AllocatorLike)");
+    }
+
+    printf("[CXX] PASS phase107: <stack> (LIFO push/pop/top/emplace, Container lvalue/rvalue + "
+           "iterator-pair + from_range_t ctors + push_range, direct-delegating allocator-"
+           "extended ctors trap-verified equal-id-steals/unequal-id-element-wise-moves/copy-"
+           "always-copies, full 7-operator comparison battery, swap member+free, deduction "
+           "guides, protected Container c reachable from a derived class, uses_allocator_v) + "
+           "<queue> (FIFO push/pop/front/back const+non-const, from_range_t+push_range, "
+           "direct-delegating allocator-extended ctors trap-verified, comparison battery, "
+           "swap, deduction guides, protected-access proof, uses_allocator_v) + "
+           "priority_queue (default/Compare/(Compare,Container) CTAD-only-viable/iterator-pair "
+           "ctors, default less<> max-heap AND greater<> min-heap 200-pseudo-random push+pop-"
+           "all monotonic-order battery, per-push heap-invariant check, push_range single-"
+           "make_heap bulk re-heapify into a non-empty queue, all 3 from_range_t forms, "
+           "allocator-extended ctors trap-verified incl. vector's single-buffer allocation-"
+           "count distinction from deque/list's per-node/per-block granularity, swap, "
+           "deduction guides, uses_allocator_v, by-inspection no-non-const-top/no-comparison-"
+           "operators) + __cpp_lib_containers_ranges FTM pin\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -19978,6 +20616,7 @@ int main()
     Phase104();
     Phase105();
     Phase106();
+    Phase107();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
