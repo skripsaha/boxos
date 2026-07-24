@@ -6,33 +6,91 @@
 #include "box/ipc.h"
 #include "box/convert.h"
 #include "box/core/notify.h"
+#include "box/core/strand_self.h"
 #include "box/display.h"
+
+/* ===========================================================================
+ * Per-strand print state — thread-confined, NO lock.
+ *
+ * Every strand (main + spawned) owns its own IPC output buffer, VGA-attr
+ * cache and current colours. Concurrent strands calling print/printf never
+ * touch each other's state, so the print path itself never takes a lock.
+ *
+ * That is NOT the same as "safe to call from inside any lock" — send()'s
+ * result_wait can redirect a stray KCTX_STORAGE completion into
+ * ferry_stash_push, which lazily mallocs a spawned strand's ferry stash
+ * (core/result.c). A spawned strand's printf can therefore malloc, so
+ * printf-under-heap_lock is only actually safe for a caller whose path has
+ * no such allocation — "no malloc on the path" is the real requirement, not
+ * "no lock". memory.c's heap_dump_tags calls printf while holding heap_lock;
+ * its one caller (memtest.c) runs on the main strand, whose ferry stash is a
+ * static ring (no malloc), so today's sole heap_lock caller is safe in
+ * practice.
+ *
+ * Storage: the main strand uses a static instance (g_main_print_state); a
+ * spawned strand's instance lives inline in its StrandInfo (print_state[]).
+ * The kernel zero-inits that block, so `initialized` starts false and
+ * print_state_self() corrects fg/bg to the process defaults on first touch.
+ * Per owner decision, a spawned strand's colours always start FRESH
+ * (COLOR_DEFAULT / COLOR_BLACK) — no inheritance from whoever spawned it.
+ * =========================================================================== */
+#define IO_BUF_SIZE 256
+
+typedef struct StrandPrintState {
+    char     io_buf[IO_BUF_SIZE];
+    uint16_t io_buf_pos;
+    uint8_t  last_attr;
+    uint8_t  last_attr_set;
+    uint8_t  initialized;
+    uint8_t  _pad[3];
+    uint32_t color_fg;
+    uint32_t color_bg;
+} StrandPrintState;
+_Static_assert(sizeof(StrandPrintState) == STRAND_PRINT_BYTES,
+              "StrandPrintState must match strand_info.h STRAND_PRINT_BYTES");
+
+static StrandPrintState g_main_print_state = {
+    .color_fg = COLOR_DEFAULT, .color_bg = COLOR_BLACK, .initialized = 1
+};
+
+static StrandPrintState *print_state_self(void)
+{
+    StrandInfo *si = strand_info_or_null();
+    if (!si) return &g_main_print_state;
+
+    StrandPrintState *ps = (StrandPrintState *)(void *)si->print_state;
+    if (!ps->initialized) {
+        ps->color_fg    = COLOR_DEFAULT;
+        ps->color_bg    = COLOR_BLACK;
+        ps->initialized = 1;
+    }
+    return ps;
+}
 
 /* ===========================================================================
  * Cabin I/O state
  *
- * Three orthogonal pieces:
  *   1. g_io_mode      — VGA direct vs. display-daemon IPC routing.
  *   2. g_display_pid  — discovered display daemon (on first IPC operation).
- *   3. g_color_fg/bg  — current text colours (24-bit RGB; quantised to VGA
- *                       4-bit on the way to the kernel).
+ *
+ * Both stay PROCESS-GLOBAL (not per-strand): every strand shares one
+ * backend and one discovered daemon. g_display_pid's write is hardened
+ * below (first-writer-wins CAS) since any strand's readline/getchar can
+ * race to discover it; g_io_mode is a single-writer invariant (see
+ * io_set_mode).
  * =========================================================================== */
 static uint8_t  g_io_mode      = IO_MODE_IPC;
 static uint32_t g_display_pid  = 0;
-static Color    g_color_fg     = COLOR_DEFAULT;
-static Color    g_color_bg     = COLOR_BLACK;
-
-/* Last 8-bit VGA attribute we sent to the kernel/daemon. Both the explicit
- * set_color() path and the printf %color path consult this cache to skip
- * redundant DISP_CMD_COLOR / vga_setcolor traffic. */
-static uint8_t  s_last_attr      = 0;
-static bool     s_last_attr_set  = false;
 
 void     io_set_mode(uint8_t mode)
 {
     /* Switching between VGA and IPC paths invalidates the kernel/daemon
-     * colour state we cached locally; force the next emit to re-send. */
-    if (mode != g_io_mode) s_last_attr_set = false;
+     * colour state we cached locally; force the next emit to re-send.
+     * Single-writer invariant: call before any strand_spawn — no other
+     * strand's cache exists yet, so invalidating only the caller's own is
+     * sufficient (every strand spawned afterwards starts uninitialised
+     * anyway and re-sends its colour on its first emit). */
+    if (mode != g_io_mode) print_state_self()->last_attr_set = false;
     g_io_mode = mode;
 }
 uint8_t  io_get_mode(void)                { return g_io_mode; }
@@ -41,15 +99,13 @@ uint32_t io_get_display_pid(void)         { return g_display_pid; }
 
 /* ===========================================================================
  * IPC output buffer — coalesces bytes destined for the display daemon so
- * each tiny print() doesn't grab its own ResultRing slot.
+ * each tiny print() doesn't grab its own ResultRing slot. Per-strand
+ * (StrandPrintState.io_buf): each strand flushes only its own bytes.
  * =========================================================================== */
-#define IO_BUF_SIZE 256
-static char io_buf[IO_BUF_SIZE];
-static int  io_buf_pos = 0;
 
-void io_flush(void)
+static void io_flush_state(StrandPrintState *ps)
 {
-    if (g_io_mode == IO_MODE_IPC && io_buf_pos > 0) {
+    if (g_io_mode == IO_MODE_IPC && ps->io_buf_pos > 0) {
         /* Unicast to the resolved display daemon when we know it. Earlier
          * code unconditionally broadcast()'d to the "display" tag; if a
          * caller had — for whatever reason — spawned a redundant display
@@ -61,33 +117,59 @@ void io_flush(void)
          * Broadcast is now strictly the discovery fallback (no display
          * pid known yet). Once io_set_display_pid() / readline() /
          * getchar() has resolved a daemon, all subsequent traffic flows
-         * to that single PID. */
+         * to that single PID.
+         *
+         * Best-effort delivery: send/broadcast once and move on. Console
+         * output is not a guaranteed-delivery channel — under sustained
+         * saturation the display daemon's ResultRing can be full and a
+         * batch is dropped rather than retried. Making delivery reliable
+         * needs kernel-side IPC work (SysBroadcast full-ring handling,
+         * ipc_copy_to_heap reclaim) and is tracked as a separate session. */
         if (g_display_pid != 0) {
-            send(g_display_pid, io_buf, (uint16_t)io_buf_pos);
+            send(g_display_pid, ps->io_buf, ps->io_buf_pos);
         } else {
-            broadcast("display", io_buf, (uint16_t)io_buf_pos);
+            broadcast("display", ps->io_buf, ps->io_buf_pos);
         }
-        io_buf_pos = 0;
+        ps->io_buf_pos = 0;
     }
 }
 
-static void io_buf_append(const char* data, size_t len)
+void io_flush(void)
+{
+    io_flush_state(print_state_self());
+}
+
+/* Both helpers clamp io_buf_pos BEFORE computing remaining space, so a
+ * corrupted or stale io_buf_pos can never drive `space` negative (which,
+ * cast to size_t, used to turn into a huge value and memcpy() past the end
+ * of io_buf — the underflow that let concurrent printf smash whatever
+ * followed io_buf in memory). With per-strand state there is no concurrent
+ * writer left to race, but the clamp costs nothing and stays as
+ * defense-in-depth. */
+static void io_buf_putc(StrandPrintState *ps, char c)
+{
+    if (ps->io_buf_pos < IO_BUF_SIZE) ps->io_buf[ps->io_buf_pos++] = c;   /* clamp BEFORE write */
+    if (ps->io_buf_pos >= IO_BUF_SIZE) io_flush_state(ps);
+}
+
+static void io_buf_append(StrandPrintState *ps, const char *data, size_t len)
 {
     while (len > 0) {
-        size_t space = (size_t)(IO_BUF_SIZE - io_buf_pos);
+        if (ps->io_buf_pos >= IO_BUF_SIZE) {
+            io_flush_state(ps);
+            /* io_flush_state is a no-op outside IPC mode, so io_buf_pos would
+             * stay pinned at IO_BUF_SIZE forever — bail instead of spinning. */
+            if (ps->io_buf_pos >= IO_BUF_SIZE) return;
+            continue;
+        }
+        size_t space = (size_t)IO_BUF_SIZE - (size_t)ps->io_buf_pos;   /* >0 here, can't underflow */
         size_t chunk = len < space ? len : space;
-        memcpy(io_buf + io_buf_pos, data, chunk);
-        io_buf_pos += (int)chunk;
+        memcpy(ps->io_buf + ps->io_buf_pos, data, chunk);
+        ps->io_buf_pos = (uint16_t)(ps->io_buf_pos + chunk);
         data += chunk;
         len  -= chunk;
-        if (io_buf_pos >= IO_BUF_SIZE) io_flush();
+        if (ps->io_buf_pos >= IO_BUF_SIZE) io_flush_state(ps);
     }
-}
-
-static void io_buf_putc(char c)
-{
-    io_buf[io_buf_pos++] = c;
-    if (io_buf_pos >= IO_BUF_SIZE) io_flush();
 }
 
 /* ===========================================================================
@@ -98,43 +180,54 @@ static void io_buf_putc(char c)
  * full RGB is still useful for printf %color which embeds a per-run colour
  * regardless of the global state.
  * =========================================================================== */
-static void push_vga_attr(void)
+static void push_vga_attr(StrandPrintState *ps)
 {
-    uint8_t attr = color_to_vga_attr(g_color_fg, g_color_bg);
-    if (s_last_attr_set && s_last_attr == attr) return;   /* no-op */
+    uint8_t attr = color_to_vga_attr(ps->color_fg, ps->color_bg);
+    if (ps->last_attr_set && ps->last_attr == attr) return;   /* no-op */
 
     if (g_io_mode == IO_MODE_IPC) {
         char cmd[2] = { (char)DISP_CMD_COLOR, (char)attr };
-        io_buf_append(cmd, 2);
+        io_buf_append(ps, cmd, 2);
     } else {
         vga_setcolor(attr);
     }
-    s_last_attr     = attr;
-    s_last_attr_set = true;
+    ps->last_attr     = attr;
+    ps->last_attr_set = true;
 }
 
-void  set_color(Color fg)    { g_color_fg = fg; push_vga_attr(); }
-Color get_color(void)        { return g_color_fg; }
-void  set_color_bg(Color bg) { g_color_bg = bg; push_vga_attr(); }
-Color get_color_bg(void)     { return g_color_bg; }
+void  set_color(Color fg)
+{
+    StrandPrintState *ps = print_state_self();
+    ps->color_fg = fg;
+    push_vga_attr(ps);
+}
+Color get_color(void) { return print_state_self()->color_fg; }
+
+void  set_color_bg(Color bg)
+{
+    StrandPrintState *ps = print_state_self();
+    ps->color_bg = bg;
+    push_vga_attr(ps);
+}
+Color get_color_bg(void) { return print_state_self()->color_bg; }
 
 /* ===========================================================================
  * Low-level emit — push a chunk of ASCII bytes with a given Color. Honours
  * g_io_mode: VGA direct path uses vga_puts; IPC path embeds a DISP_CMD_COLOR
- * marker plus raw text into the io_buf.
+ * marker plus raw text into ps->io_buf.
  * =========================================================================== */
-static void emit_run(const char *bytes, int len, Color fg, Color bg)
+static void emit_run(StrandPrintState *ps, const char *bytes, int len, Color fg, Color bg)
 {
     if (len <= 0) return;
 
     uint8_t attr = color_to_vga_attr(fg, bg);
 
     if (g_io_mode == IO_MODE_IPC) {
-        if (!s_last_attr_set || s_last_attr != attr) {
+        if (!ps->last_attr_set || ps->last_attr != attr) {
             char cmd[2] = { (char)DISP_CMD_COLOR, (char)attr };
-            io_buf_append(cmd, 2);
-            s_last_attr     = attr;
-            s_last_attr_set = true;
+            io_buf_append(ps, cmd, 2);
+            ps->last_attr     = attr;
+            ps->last_attr_set = true;
         }
         /* Split on '\n' so the daemon's renderer keeps newline semantics. */
         int seg_start = 0;
@@ -142,8 +235,8 @@ static void emit_run(const char *bytes, int len, Color fg, Color bg)
             int at_end = (i == len);
             int is_nl  = !at_end && bytes[i] == '\n';
             if (at_end || is_nl) {
-                if (i > seg_start) io_buf_append(bytes + seg_start, (size_t)(i - seg_start));
-                if (is_nl) io_buf_putc('\n');
+                if (i > seg_start) io_buf_append(ps, bytes + seg_start, (size_t)(i - seg_start));
+                if (is_nl) io_buf_putc(ps, '\n');
                 seg_start = i + 1;
             }
         }
@@ -154,10 +247,10 @@ static void emit_run(const char *bytes, int len, Color fg, Color bg)
      * honouring newlines. vga_puts() takes a NUL-terminated string of
      * arbitrary length, but the underlying syscall packs into a kernel
      * buffer; for large segments we stream in 192-byte chunks. */
-    if (!s_last_attr_set || s_last_attr != attr) {
+    if (!ps->last_attr_set || ps->last_attr != attr) {
         vga_setcolor(attr);
-        s_last_attr     = attr;
-        s_last_attr_set = true;
+        ps->last_attr     = attr;
+        ps->last_attr_set = true;
     }
     char tmp[192];
     int  seg_start = 0;
@@ -193,7 +286,7 @@ static void emit_run(const char *bytes, int len, Color fg, Color bg)
  * multi-byte sequence collapses to one '?') into fixed-size chunks, handing
  * each chunk to emit_run with the current colours. Shared by print() and
  * print_bytes() so the filter lives in exactly one place. */
-static void emit_filtered(const char* data, size_t len)
+static void emit_filtered(StrandPrintState *ps, const char* data, size_t len)
 {
     char   chunk[256];
     size_t src = 0;
@@ -220,13 +313,14 @@ static void emit_filtered(const char* data, size_t len)
             }
         }
         if (chunk_pos == 0) break;
-        emit_run(chunk, chunk_pos, g_color_fg, g_color_bg);
+        emit_run(ps, chunk, chunk_pos, ps->color_fg, ps->color_bg);
     }
 }
 
 void print(const char* str)
 {
     if (!str) return;
+    StrandPrintState *ps = print_state_self();
 
     /* IO_MODE_IPC already batches into io_buf and flushes via one
      * send/broadcast; IO_MODE_VGA wins a syscall reduction by feeding
@@ -236,7 +330,7 @@ void print(const char* str)
     bool we_began = false;
     if (g_io_mode == IO_MODE_VGA) { vga_begin(); we_began = true; }
 
-    emit_filtered(str, strlen(str));
+    emit_filtered(ps, str, strlen(str));
 
     if (we_began) vga_commit();
 }
@@ -244,11 +338,12 @@ void print(const char* str)
 void print_bytes(const char* data, size_t len)
 {
     if (!data || len == 0) return;
+    StrandPrintState *ps = print_state_self();
 
     bool we_began = false;
     if (g_io_mode == IO_MODE_VGA) { vga_begin(); we_began = true; }
 
-    emit_filtered(data, len);
+    emit_filtered(ps, data, len);
 
     if (we_began) vga_commit();
 }
@@ -256,8 +351,9 @@ void print_bytes(const char* data, size_t len)
 void println(const char* str)
 {
     if (g_io_mode == IO_MODE_IPC) {
+        StrandPrintState *ps = print_state_self();
         if (str) print(str);
-        io_buf_putc('\n');
+        io_buf_putc(ps, '\n');
         return;
     }
     /* VGA mode: wrap the print + newline in one batch so both fire as a
@@ -270,12 +366,14 @@ void println(const char* str)
 
 void clear(void)
 {
+    StrandPrintState *ps = print_state_self();
+
     /* Display state resets on clear; invalidate the colour cache so the
      * next coloured run re-sends its attribute. */
-    s_last_attr_set = false;
+    ps->last_attr_set = false;
 
     if (g_io_mode == IO_MODE_IPC) {
-        io_flush();
+        io_flush_state(ps);
         uint8_t cmd = DISP_CMD_CLEAR;
         broadcast("display", &cmd, 1);
         return;
@@ -324,6 +422,7 @@ static int append_str(char *buf, int pos, int max, const char *s)
 int printf(const char *fmt, ...)
 {
     if (!fmt) return -1;
+    StrandPrintState *ps = print_state_self();
 
     va_list args;
     va_start(args, fmt);
@@ -336,14 +435,14 @@ int printf(const char *fmt, ...)
     char buf[PRINTF_BUFLEN];
     int  pos       = 0;
     int  total_out = 0;
-    Color cur_fg   = g_color_fg;
-    Color cur_bg   = g_color_bg;
+    Color cur_fg   = ps->color_fg;
+    Color cur_bg   = ps->color_bg;
     char  numbuf[24];
 
     /* Local helpers — re-emit and reset the working buffer. */
     #define FLUSH() do {                                    \
         if (pos > 0) {                                      \
-            emit_run(buf, pos, cur_fg, cur_bg);             \
+            emit_run(ps, buf, pos, cur_fg, cur_bg);         \
             total_out += pos;                               \
             pos = 0;                                        \
         }                                                   \
@@ -532,7 +631,8 @@ int printf(const char *fmt, ...)
  * =========================================================================== */
 int readline(char* buffer, size_t max_len)
 {
-    io_flush();
+    StrandPrintState *ps = print_state_self();
+    io_flush_state(ps);
     if (!buffer || max_len < 2) return -1;
 
     if (g_io_mode == IO_MODE_IPC && g_display_pid == 0) {
@@ -540,7 +640,7 @@ int readline(char* buffer, size_t max_len)
         broadcast("display", &ping, 1);
         Result ping_result;
         if (receive_wait(&ping_result, 2000) && ping_result.sender_pid != 0)
-            g_display_pid = ping_result.sender_pid;
+            __sync_bool_compare_and_swap(&g_display_pid, 0, ping_result.sender_pid);
     }
 
     if (g_io_mode == IO_MODE_IPC && g_display_pid != 0) {
@@ -578,13 +678,14 @@ int readline(char* buffer, size_t max_len)
 
 int getchar(void)
 {
-    io_flush();
+    StrandPrintState *ps = print_state_self();
+    io_flush_state(ps);
     if (g_io_mode == IO_MODE_IPC && g_display_pid == 0) {
         uint8_t ping = DISP_CMD_PING;
         broadcast("display", &ping, 1);
         Result ping_result;
         if (receive_wait(&ping_result, 2000) && ping_result.sender_pid != 0)
-            g_display_pid = ping_result.sender_pid;
+            __sync_bool_compare_and_swap(&g_display_pid, 0, ping_result.sender_pid);
     }
 
     if (g_io_mode == IO_MODE_IPC && g_display_pid != 0) {

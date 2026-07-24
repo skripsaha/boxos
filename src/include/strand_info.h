@@ -47,6 +47,11 @@
  * head/tail/count/pad control block that boxlib overlays via StrandStashRing. */
 #define STRAND_STASH_BYTES     (STRAND_STASH_CAP * STRAND_STASH_ENTRY_SZ + 16u)
 
+/* Per-strand print/IPC-output buffer (boxlib print.c StrandPrintState). Fixed
+ * size, always present (unlike the lazy opt-in stashes) since every strand
+ * that ever calls print/printf needs one. */
+#define STRAND_PRINT_BYTES     272u
+
 typedef struct StrandInfo {
     uint64_t tcb_self;        /* @0  — System V variant-2 TCB self-pointer (fs:0) */
     uint64_t tcb_reserved;    /* @8  — TCB DTV slot (reserved, unused in P5a) */
@@ -77,6 +82,11 @@ typedef struct StrandInfo {
      * nothing, and a third inline STRAND_STASH_BYTES block would overflow
      * the 4-page StrandInfo reservation. Mirrors touch_stash_ptr. */
     uint64_t ferry_stash_ptr;
+    /* per-strand print/IPC-output buffer (boxlib print.c); kernel zero-inits via
+     * pmm_alloc_zero -> color_fg/bg=0, corrected to defaults by print.c's
+     * initialized flag on first touch. Inline (small+universal), unlike the
+     * large/opt-in stashes. */
+    uint8_t print_state[STRAND_PRINT_BYTES];
 } StrandInfo;
 
 #ifdef __cplusplus
@@ -99,6 +109,8 @@ STRAND_STATIC_ASSERT(__builtin_offsetof(StrandInfo, touch_stash_ptr) ==
                      56 + 2u * STRAND_STASH_BYTES + 8u, "StrandInfo.touch_stash_ptr");
 STRAND_STATIC_ASSERT(__builtin_offsetof(StrandInfo, ferry_stash_ptr) ==
                      56 + 2u * STRAND_STASH_BYTES + 16u, "StrandInfo.ferry_stash_ptr last");
+STRAND_STATIC_ASSERT(__builtin_offsetof(StrandInfo, print_state) ==
+                     56 + 2u * STRAND_STASH_BYTES + 24u, "StrandInfo.print_state @ 56+2*STRAND_STASH_BYTES+24");
 /* The whole block must fit the Hammock StrandInfo reservation (4 pages =
  * 16 KiB — see HAMMOCK_STRANDINFO_PAGES in strand_rings.c). */
 STRAND_STATIC_ASSERT(sizeof(StrandInfo) <= 4u * 4096u, "StrandInfo must fit 4 pages");
