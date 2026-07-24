@@ -161,27 +161,60 @@ public:
         Reset();
         for (const T &v : other) push_back(v);
     }
+    list(const list &other, const Alloc &a) : __alloc(a)
+    {
+        Reset();
+        for (const T &v : other) push_back(v);
+    }
     list(list &&other) noexcept : __alloc(std::move(other.__alloc))
     {
         Reset();
         StealFrom(other);
+    }
+    list(list &&other, const Alloc &a) : __alloc(a)
+    {
+        Reset();
+        if (NodeTraits::is_always_equal::value || __alloc == other.__alloc) {
+            StealFrom(other);
+        } else {
+            for (T &v : other) push_back(std::move(v));
+        }
     }
     ~list() { clear(); }
 
     list &operator=(const list &other)
     {
         if (this == &other) return *this;
-        assign(other.begin(), other.end());
+        if constexpr (NodeTraits::propagate_on_container_copy_assignment::value) {
+            if (!(__alloc == other.__alloc)) {
+                clear();                 // free existing nodes via the OLD allocator
+                __alloc = other.__alloc; // now safe to propagate
+            } else {
+                __alloc = other.__alloc;
+                clear();
+            }
+        } else {
+            clear();
+        }
+        for (const T &v : other) push_back(v);
         return *this;
     }
-    list &operator=(list &&other) noexcept
+    list &operator=(list &&other) noexcept(NodeTraits::is_always_equal::value)
     {
         if (this == &other) return *this;
+        constexpr bool pocma =
+            NodeTraits::propagate_on_container_move_assignment::value;
+        if (pocma || NodeTraits::is_always_equal::value || __alloc == other.__alloc) {
+            clear();
+            if constexpr (pocma) __alloc = std::move(other.__alloc);
+            StealFrom(other);
+            return *this;
+        }
+        // Unequal allocators without propagation: element-wise move into our
+        // own storage through our OWN allocator. Stealing other's nodes
+        // would later free them through a different allocator — UB.
         clear();
-        if constexpr (NodeTraits::propagate_on_container_move_assignment::
-                          value)
-            __alloc = std::move(other.__alloc);
-        StealFrom(other);
+        for (T &v : other) push_back(std::move(v));
         return *this;
     }
     list &operator=(initializer_list<T> il)
@@ -374,7 +407,7 @@ public:
         while (__count < n) push_back(value);
     }
 
-    void swap(list &other) noexcept
+    void swap(list &other) noexcept(NodeTraits::is_always_equal::value)
     {
         list tmp(std::move(other));
         other = std::move(*this);
@@ -592,7 +625,7 @@ auto operator<=>(const list<T, A> &a, const list<T, A> &b)
 }
 
 template <typename T, typename A>
-void swap(list<T, A> &a, list<T, A> &b) noexcept
+void swap(list<T, A> &a, list<T, A> &b) noexcept(noexcept(a.swap(b)))
 {
     a.swap(b);
 }

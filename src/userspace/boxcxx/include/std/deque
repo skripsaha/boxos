@@ -216,10 +216,24 @@ public:
         InitMap(0);
         for (const T &v : other) push_back(v);
     }
+    deque(const deque &other, const Alloc &a) : __alloc(a), __malloc(a)
+    {
+        InitMap(0);
+        for (const T &v : other) push_back(v);
+    }
     deque(deque &&other) noexcept
         : __alloc(std::move(other.__alloc)), __malloc(std::move(other.__malloc))
     {
         StealFrom(other);
+    }
+    deque(deque &&other, const Alloc &a) : __alloc(a), __malloc(a)
+    {
+        if (ATraits::is_always_equal::value || a == other.__alloc) {
+            StealFrom(other);
+        } else {
+            InitMap(0);
+            for (T &v : other) push_back(std::move(v));
+        }
     }
     ~deque() { Teardown(); }
 
@@ -478,7 +492,7 @@ public:
         while (!empty()) pop_back();
     }
 
-    void swap(deque &other) noexcept
+    void swap(deque &other) noexcept(ATraits::is_always_equal::value)
     {
         auto sw = [](auto &a, auto &b) {
             auto t = a;
@@ -635,7 +649,7 @@ auto operator<=>(const deque<T, A> &a, const deque<T, A> &b)
 }
 
 template <typename T, typename A>
-void swap(deque<T, A> &a, deque<T, A> &b) noexcept
+void swap(deque<T, A> &a, deque<T, A> &b) noexcept(noexcept(a.swap(b)))
 {
     a.swap(b);
 }

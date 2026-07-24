@@ -19658,6 +19658,198 @@ void Phase105()
            "all trap- and allocation-count-verified\n");
 }
 
+// ── phase106 ────────────────────────────────────────────────────────────
+// <list>/<deque> AllocatorAwareContainer conformance sibling-fix: brings
+// both up to the level phase105 already verified for forward_list. Reuses
+// phase105's P105OwnAlloc cross-instance-free-trapping allocator rather
+// than redefining an equivalent fixture.
+
+void Phase106()
+{
+    // ── list + deque: allocator-extended copy/move ctors, POCCA
+    //    copy-assign, and the unequal-non-propagating move-assign fix,
+    //    all trap-verified against P105OwnAllocDefault (POCCA, no POCMA,
+    //    not always-equal) ─────────────────────────────────────────────
+    {
+        using TA = P105OwnAllocDefault<int>;
+        using TL = std::list<int, TA>;
+        using TD = std::deque<int, TA>;
+
+        // (1) list: allocator-extended copy ctor, equal AND unequal ids --
+        //     always element-wise copies (source is const&, never consumed).
+        P105OwnAllocTrap::Reset();
+        {
+            TL p106ListCopyExtSrc({1, 2, 3}, TA(1));
+            TL p106ListCopyExtEqual(p106ListCopyExtSrc, TA(1));
+            TL p106ListCopyExtUnequal(p106ListCopyExtSrc, TA(2));
+            Check((p106ListCopyExtEqual == TL{1, 2, 3}) && p106ListCopyExtEqual.get_allocator().id == 1,
+                  "phase106 list alloc-ext copy ctor (equal id): content copied via supplied allocator");
+            Check((p106ListCopyExtUnequal == TL{1, 2, 3}) && p106ListCopyExtUnequal.get_allocator().id == 2,
+                  "phase106 list alloc-ext copy ctor (unequal id): content copied via supplied allocator");
+            Check((p106ListCopyExtSrc == TL{1, 2, 3}), "phase106 list alloc-ext copy ctor: source unaffected");
+        }
+        Check(!P105OwnAllocTrap::crossInstanceFree,
+              "phase106 list alloc-ext copy ctor: ZERO cross-instance frees (never steals)");
+
+        // (2) list: allocator-extended move ctor -- equal id steals (zero
+        //     new node allocations), unequal id element-wise-moves (N new
+        //     node allocations for N elements).
+        P105OwnAllocTrap::Reset();
+        {
+            TL p106ListMoveExtSrcEq({11, 12}, TA(10));
+            std::size_t p106ListAllocBeforeEq = P105OwnAllocTrap::allocations;
+            TL p106ListMoveExtEq(std::move(p106ListMoveExtSrcEq), TA(10));
+            std::size_t p106ListAllocAfterEq = P105OwnAllocTrap::allocations;
+            Check((p106ListMoveExtEq == TL{11, 12}) && p106ListMoveExtSrcEq.empty(),
+                  "phase106 list alloc-ext move ctor (equal id): steals -- content moved, source emptied");
+            Check(p106ListAllocAfterEq == p106ListAllocBeforeEq,
+                  "phase106 list alloc-ext move ctor (equal id): zero new node allocations (genuine steal)");
+
+            TL p106ListMoveExtSrcUneq({13, 14}, TA(20));
+            std::size_t p106ListAllocBeforeUneq = P105OwnAllocTrap::allocations;
+            TL p106ListMoveExtUneq(std::move(p106ListMoveExtSrcUneq), TA(21));
+            std::size_t p106ListAllocAfterUneq = P105OwnAllocTrap::allocations;
+            Check((p106ListMoveExtUneq == TL{13, 14}) && p106ListMoveExtUneq.get_allocator().id == 21,
+                  "phase106 list alloc-ext move ctor (unequal id): element-wise-moves into supplied allocator");
+            Check(p106ListAllocAfterUneq - p106ListAllocBeforeUneq == 2,
+                  "phase106 list alloc-ext move ctor (unequal id): allocates exactly N new nodes "
+                  "(genuine element-wise move, not a steal)");
+        }
+        Check(!P105OwnAllocTrap::crossInstanceFree,
+              "phase106 list alloc-ext move ctor: ZERO cross-instance frees across equal+unequal ids");
+
+        // (3) list: copy-assign under POCCA, unequal ids -- must free the
+        //     TARGET's old nodes through its OLD allocator BEFORE
+        //     propagating (the rewrite that replaced the old no-POCCA
+        //     assign()-only body).
+        P105OwnAllocTrap::Reset();
+        {
+            TL p106ListCaTarget({100, 200}, TA(30));
+            TL p106ListCaSource({1, 2, 3}, TA(40));
+            p106ListCaTarget = p106ListCaSource;
+            Check(p106ListCaTarget.get_allocator().id == 40,
+                  "phase106 list copy-assign POCCA unequal: propagates the allocator");
+            Check((p106ListCaTarget == TL{1, 2, 3}), "phase106 list copy-assign POCCA unequal: content copied");
+            Check((p106ListCaSource == TL{1, 2, 3}), "phase106 list copy-assign: source unaffected");
+        }
+        Check(!P105OwnAllocTrap::crossInstanceFree,
+              "phase106 list copy-assign(POCCA, unequal): frees the OLD nodes through the OLD "
+              "allocator before propagating -- ZERO cross-instance frees");
+
+        // (4) list: move-assign, POCMA=false, unequal ids -- must
+        //     element-wise-move (the latent-UB path just fixed: the old
+        //     code unconditionally StealFrom'd regardless of allocator
+        //     equality, later freeing stolen nodes through the wrong
+        //     allocator instance).
+        P105OwnAllocTrap::Reset();
+        {
+            TL p106ListMaSrc({5, 6, 7}, TA(50));
+            TL p106ListMaDst({9}, TA(51));
+            std::size_t p106ListMaAllocBefore = P105OwnAllocTrap::allocations;
+            p106ListMaDst = std::move(p106ListMaSrc);
+            std::size_t p106ListMaAllocAfter = P105OwnAllocTrap::allocations;
+            Check(p106ListMaDst.get_allocator().id == 51,
+                  "phase106 list move-assign unequal alloc: keeps its own allocator id (POCMA=false)");
+            Check((p106ListMaDst == TL{5, 6, 7}),
+                  "phase106 list move-assign unequal alloc: content moved element-wise");
+            Check(p106ListMaAllocAfter - p106ListMaAllocBefore == 3,
+                  "phase106 list move-assign unequal alloc: allocates exactly N new nodes (not a steal)");
+        }
+        Check(!P105OwnAllocTrap::crossInstanceFree,
+              "phase106 list move-assign(unequal alloc): ZERO cross-instance frees -- proves "
+              "element-wise move, not steal-then-free-through-the-wrong-allocator (the fixed UB)");
+
+        // (5) deque: allocator-extended copy ctor, equal AND unequal ids --
+        //     mirrors list check (1).
+        P105OwnAllocTrap::Reset();
+        {
+            TD p106DequeCopyExtSrc({1, 2, 3}, TA(1));
+            TD p106DequeCopyExtEqual(p106DequeCopyExtSrc, TA(1));
+            TD p106DequeCopyExtUnequal(p106DequeCopyExtSrc, TA(2));
+            Check((p106DequeCopyExtEqual == TD{1, 2, 3}) && p106DequeCopyExtEqual.get_allocator().id == 1,
+                  "phase106 deque alloc-ext copy ctor (equal id): content copied via supplied allocator");
+            Check((p106DequeCopyExtUnequal == TD{1, 2, 3}) && p106DequeCopyExtUnequal.get_allocator().id == 2,
+                  "phase106 deque alloc-ext copy ctor (unequal id): content copied via supplied allocator");
+            Check((p106DequeCopyExtSrc == TD{1, 2, 3}), "phase106 deque alloc-ext copy ctor: source unaffected");
+        }
+        Check(!P105OwnAllocTrap::crossInstanceFree,
+              "phase106 deque alloc-ext copy ctor: ZERO cross-instance frees (never steals)");
+
+        // (6) deque: allocator-extended move ctor -- equal id steals (zero
+        //     new block/map allocations); unequal id element-wise-moves
+        //     (at least one new block/map allocation). deque's block
+        //     granularity means the exact allocation count is not 1-per-
+        //     element like list's nodes, so only the steal case asserts an
+        //     exact (zero) delta.
+        P105OwnAllocTrap::Reset();
+        {
+            TD p106DequeMoveExtSrcEq({11, 12}, TA(10));
+            std::size_t p106DequeAllocBeforeEq = P105OwnAllocTrap::allocations;
+            TD p106DequeMoveExtEq(std::move(p106DequeMoveExtSrcEq), TA(10));
+            std::size_t p106DequeAllocAfterEq = P105OwnAllocTrap::allocations;
+            Check((p106DequeMoveExtEq == TD{11, 12}) && p106DequeMoveExtSrcEq.empty(),
+                  "phase106 deque alloc-ext move ctor (equal id): steals -- content moved, source emptied");
+            Check(p106DequeAllocAfterEq == p106DequeAllocBeforeEq,
+                  "phase106 deque alloc-ext move ctor (equal id): zero new allocations (genuine steal)");
+
+            TD p106DequeMoveExtSrcUneq({13, 14}, TA(20));
+            std::size_t p106DequeAllocBeforeUneq = P105OwnAllocTrap::allocations;
+            TD p106DequeMoveExtUneq(std::move(p106DequeMoveExtSrcUneq), TA(21));
+            std::size_t p106DequeAllocAfterUneq = P105OwnAllocTrap::allocations;
+            Check((p106DequeMoveExtUneq == TD{13, 14}) && p106DequeMoveExtUneq.get_allocator().id == 21,
+                  "phase106 deque alloc-ext move ctor (unequal id): element-wise-moves into supplied allocator");
+            Check(p106DequeAllocAfterUneq > p106DequeAllocBeforeUneq,
+                  "phase106 deque alloc-ext move ctor (unequal id): allocates new storage "
+                  "(genuine element-wise move, not a steal)");
+        }
+        Check(!P105OwnAllocTrap::crossInstanceFree,
+              "phase106 deque alloc-ext move ctor: ZERO cross-instance frees across equal+unequal ids");
+
+        // (7) deque: copy-assign under POCCA, unequal ids -- already
+        //     correct pre-fix (task scope excluded deque's assign
+        //     operators); regression-verified here alongside list's fix.
+        P105OwnAllocTrap::Reset();
+        {
+            TD p106DequeCaTarget({100, 200}, TA(30));
+            TD p106DequeCaSource({1, 2, 3}, TA(40));
+            p106DequeCaTarget = p106DequeCaSource;
+            Check(p106DequeCaTarget.get_allocator().id == 40,
+                  "phase106 deque copy-assign POCCA unequal: propagates the allocator");
+            Check((p106DequeCaTarget == TD{1, 2, 3}), "phase106 deque copy-assign POCCA unequal: content copied");
+            Check((p106DequeCaSource == TD{1, 2, 3}), "phase106 deque copy-assign: source unaffected");
+        }
+        Check(!P105OwnAllocTrap::crossInstanceFree,
+              "phase106 deque copy-assign(POCCA, unequal): frees the OLD storage through the OLD "
+              "allocator before propagating -- ZERO cross-instance frees");
+
+        // (8) deque: move-assign, POCMA=false, unequal ids -- element-wise
+        //     move through the target's own allocator; already correct
+        //     pre-fix, regression-verified here alongside list's fix.
+        P105OwnAllocTrap::Reset();
+        {
+            TD p106DequeMaSrc({5, 6, 7}, TA(50));
+            TD p106DequeMaDst({9}, TA(51));
+            p106DequeMaDst = std::move(p106DequeMaSrc);
+            Check(p106DequeMaDst.get_allocator().id == 51,
+                  "phase106 deque move-assign unequal alloc: keeps its own allocator id (POCMA=false)");
+            Check((p106DequeMaDst == TD{5, 6, 7}),
+                  "phase106 deque move-assign unequal alloc: content moved element-wise");
+        }
+        Check(!P105OwnAllocTrap::crossInstanceFree,
+              "phase106 deque move-assign(unequal alloc): ZERO cross-instance frees -- element-wise "
+              "move through the target's own allocator");
+    }
+
+    printf("[CXX] PASS phase106: <list>+<deque> AllocatorAwareContainer conformance sibling-fix "
+           "-- P105OwnAlloc cross-instance-free-trapping matrix for BOTH containers (alloc-"
+           "extended copy ctor equal/unequal ids, alloc-extended move ctor equal-id-steals/"
+           "unequal-id-element-wise-moves with allocation-count verification, POCCA copy-assign "
+           "frees OLD nodes/storage via the OLD allocator before propagating, POCMA=false "
+           "unequal move-assign element-wise-moves instead of the latent-UB steal-through-wrong-"
+           "allocator), all trap- and allocation-count-verified, "
+           "zero cross-instance frees throughout\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -19785,6 +19977,7 @@ int main()
     Phase103();
     Phase104();
     Phase105();
+    Phase106();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
