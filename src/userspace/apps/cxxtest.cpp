@@ -18873,21 +18873,22 @@ struct P105OwnAllocTrap {
 // propagate_on_container_copy/move_assignment and is_always_equal are
 // template parameters so callers can cover the full trait matrix (see the
 // P105OwnAlloc* aliases below) with one fixture.
-template <class T, bool POCCA, bool POCMA, bool AlwaysEqual>
+template <class T, bool POCCA, bool POCMA, bool AlwaysEqual, bool POCS = false>
 struct P105OwnAlloc {
     int id = 0;
     using value_type                             = T;
     using propagate_on_container_copy_assignment = std::bool_constant<POCCA>;
     using propagate_on_container_move_assignment = std::bool_constant<POCMA>;
+    using propagate_on_container_swap            = std::bool_constant<POCS>;
     using is_always_equal                        = std::bool_constant<AlwaysEqual>;
     template <class U> struct rebind {
-        using other = P105OwnAlloc<U, POCCA, POCMA, AlwaysEqual>;
+        using other = P105OwnAlloc<U, POCCA, POCMA, AlwaysEqual, POCS>;
     };
 
     constexpr P105OwnAlloc() = default;
     constexpr explicit P105OwnAlloc(int i) : id(i) {}
     template <class U>
-    constexpr P105OwnAlloc(const P105OwnAlloc<U, POCCA, POCMA, AlwaysEqual> &o) : id(o.id) {}
+    constexpr P105OwnAlloc(const P105OwnAlloc<U, POCCA, POCMA, AlwaysEqual, POCS> &o) : id(o.id) {}
 
     T *allocate(std::size_t n)
     {
@@ -18901,7 +18902,7 @@ struct P105OwnAlloc {
         ::operator delete(p);
     }
     template <class U>
-    constexpr bool operator==(const P105OwnAlloc<U, POCCA, POCMA, AlwaysEqual> &o) const
+    constexpr bool operator==(const P105OwnAlloc<U, POCCA, POCMA, AlwaysEqual, POCS> &o) const
     {
         return id == o.id;
     }
@@ -20488,6 +20489,97 @@ void Phase107()
            "operators) + __cpp_lib_containers_ranges FTM pin\n");
 }
 
+void Phase108()
+{
+    // ── BUG1: a moved-from deque is reusable ([lib.types.movedfrom]) -- plain
+    //    std::allocator, no custom alloc. Pre-fix push_back/push_front/rebuild
+    //    all null-map #PF'd. ─────────────────────────────────────────────────
+    {
+        std::deque<int> a{1, 2, 3};
+        std::deque<int> b(std::move(a));
+        a.push_back(9);
+        Check(a.size() == 1 && a[0] == 9, "phase108 BUG1 moved-from deque push_back reusable");
+
+        std::deque<int> a2{7, 8};
+        std::deque<int> b2(std::move(a2));
+        a2.push_front(2);
+        Check(a2.size() == 1 && a2.front() == 2, "phase108 BUG1 moved-from deque push_front reusable");
+
+        std::deque<int> a3{5, 6};
+        std::deque<int> b3(std::move(a3));
+        a3 = std::deque<int>{4, 5, 6};
+        Check((a3 == std::deque<int>{4, 5, 6}), "phase108 BUG1 moved-from deque copy-assign rebuild reusable");
+    }
+
+    // ── BUG2: list::sort no longer cross-instance-frees under a POCMA=false,
+    //    is_always_equal=false stateful allocator. The O(1) SwapAnchors swap
+    //    never reallocates in the merge cascade and the final StealFrom keeps
+    //    *this's allocator. Reverting either half trips the trap. ────────────
+    {
+        using AD = P105OwnAllocDefault<int>; // POCCA, !POCMA, !always_equal
+        using LD = std::list<int, AD>;
+        P105OwnAllocTrap::Reset();
+        {
+            LD l({5, 3, 1, 4, 2, 9, 7, 6, 8, 0}, AD(42));
+            l.sort();
+            Check((l == LD{0, 1, 2, 3, 4, 5, 6, 7, 8, 9}), "phase108 BUG2 list::sort correct under stateful alloc");
+            Check(l.get_allocator().id == 42, "phase108 BUG2 list::sort keeps *this's own allocator id");
+        }
+        Check(!P105OwnAllocTrap::crossInstanceFree,
+              "phase108 BUG2 list::sort under POCMA=false stateful alloc: ZERO cross-instance frees");
+    }
+
+    // ── BUG3: list::swap AND deque::swap honor propagate_on_container_swap --
+    //    a POCS=true stateful allocator's instances are exchanged, contents
+    //    swapped, zero cross-instance frees. Pre-fix: swap never touched the
+    //    allocators, so each container later freed the other's storage. ──────
+    {
+        using AS = P105OwnAlloc<int, false, false, false, /*POCS=*/true>;
+        using LS = std::list<int, AS>;
+        using DS = std::deque<int, AS>;
+        P105OwnAllocTrap::Reset();
+        {
+            LS la({1, 2, 3}, AS(1)), lb({4, 5}, AS(2));
+            la.swap(lb);
+            Check((la == LS{4, 5} && lb == LS{1, 2, 3}), "phase108 BUG3 list::swap content");
+            Check(la.get_allocator().id == 2 && lb.get_allocator().id == 1,
+                  "phase108 BUG3 list::swap exchanges allocators under POCS");
+
+            DS da({6, 7, 8}, AS(3)), db({9}, AS(4));
+            da.swap(db);
+            Check((da == DS{9} && db == DS{6, 7, 8}), "phase108 BUG3 deque::swap content");
+            Check(da.get_allocator().id == 4 && db.get_allocator().id == 3,
+                  "phase108 BUG3 deque::swap exchanges allocators under POCS");
+        }
+        Check(!P105OwnAllocTrap::crossInstanceFree,
+              "phase108 BUG3 POCS swap: zero cross-instance frees at destruction");
+    }
+
+    // ── list::swap O(1) pointer-swap correctness across empty/non-empty ─────
+    {
+        std::list<int> a{1, 2, 3}, b;
+        a.swap(b);
+        Check((a.empty() && b == std::list<int>{1, 2, 3}), "phase108 list::swap nonempty<->empty");
+        std::list<int> c{4, 5}, d{6, 7, 8, 9};
+        c.swap(d);
+        Check((c == std::list<int>{6, 7, 8, 9} && d == std::list<int>{4, 5}), "phase108 list::swap nonempty<->nonempty");
+        std::list<int> e, f;
+        e.swap(f);
+        Check((e.empty() && f.empty()), "phase108 list::swap empty<->empty");
+        std::list<int> g{10, 20}, h;
+        auto it = g.begin();
+        g.swap(h);
+        Check((*it == 10 && h.front() == 10 && h.back() == 20), "phase108 list::swap keeps node identity across swap");
+    }
+
+    printf("[CXX] PASS phase108: allocator hardening -- moved-from deque reusable ([lib.types."
+           "movedfrom], std::allocator push_back/push_front/rebuild), list::sort ZERO cross-"
+           "instance-free under a POCMA=false stateful allocator (O(1) SwapAnchors pointer-swap "
+           "+ final StealFrom), list::swap+deque::swap honor propagate_on_container_swap "
+           "(allocators exchanged, trap-verified), list::swap O(1) empty/non-empty correctness "
+           "+ node-identity preservation\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -20617,6 +20709,7 @@ int main()
     Phase105();
     Phase106();
     Phase107();
+    Phase108();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

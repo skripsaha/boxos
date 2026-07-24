@@ -44,6 +44,32 @@ inline void TransferRange(NodeBase *pos, NodeBase *first, NodeBase *last)
     pos->prev       = tail;
 }
 
+// O(1) swap of two embedded circular sentinel anchors (list::swap). The anchor
+// is a member (its address differs per list), so after exchanging the node
+// chains the boundary nodes' back-pointers must be re-pointed to the new
+// owner's anchor. An empty list's anchor points to itself.
+inline void SwapAnchors(NodeBase &x, NodeBase &y) noexcept
+{
+    bool xEmpty = (x.next == &x);
+    bool yEmpty = (y.next == &y);
+    if (!xEmpty && !yEmpty) {
+        NodeBase *xn = x.next, *xp = x.prev;
+        x.next = y.next; x.prev = y.prev;
+        y.next = xn;     y.prev = xp;
+        x.next->prev = x.prev->next = &x;
+        y.next->prev = y.prev->next = &y;
+    } else if (!xEmpty) { // x non-empty, y empty
+        y.next = x.next; y.prev = x.prev;
+        y.next->prev = y.prev->next = &y;
+        x.next = x.prev = &x;
+    } else if (!yEmpty) { // x empty, y non-empty
+        x.next = y.next; x.prev = y.prev;
+        x.next->prev = x.prev->next = &x;
+        y.next = y.prev = &y;
+    }
+    // both empty: nothing to do
+}
+
 } // namespace __list
 
 template <typename T, typename Alloc = allocator<T>>
@@ -410,9 +436,18 @@ public:
 
     void swap(list &other) noexcept(NodeTraits::is_always_equal::value)
     {
-        list tmp(std::move(other));
-        other = std::move(*this);
-        *this = std::move(tmp);
+        // True O(1) pointer-swap: propagate allocators iff POCS (the 3-move
+        // form propagated per POCMA and could reallocate for unequal
+        // allocators — the root of the sort() cross-instance-free bug).
+        if constexpr (NodeTraits::propagate_on_container_swap::value) {
+            NodeAlloc t   = std::move(__alloc);
+            __alloc       = std::move(other.__alloc);
+            other.__alloc = std::move(t);
+        }
+        __list::SwapAnchors(__anchor, other.__anchor);
+        size_type sc  = __count;
+        __count       = other.__count;
+        other.__count = sc;
     }
 
     // ── list operations ([list.ops]) ────────────────────────────────────
@@ -544,7 +579,12 @@ public:
             if (i == fill) ++fill;
         }
         for (int i = 1; i < fill; ++i) bins[i].merge(bins[i - 1], comp);
-        swap(bins[fill - 1]);
+        // StealFrom, not swap: with the O(1) pointer-swap the cascade never
+        // reallocates, but a final swap under POCS would let *this inherit
+        // bins[fill-1]'s scratch allocator (shuffled during the cascade).
+        // *this is empty here and every sorted node is *this's own, so a
+        // head-transfer keeps *this's allocator intact.
+        StealFrom(bins[fill - 1]);
     }
     void sort()
     {
