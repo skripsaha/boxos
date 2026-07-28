@@ -93,8 +93,16 @@ public:
     unordered_set(initializer_list<Key> il) { insert(il.begin(), il.end()); }
     unordered_set(const unordered_set &) = default;
     unordered_set(unordered_set &&) noexcept = default;
+    unordered_set(const unordered_set &other, const Alloc &a)
+        : __t(other.__t, a)
+    {
+    }
+    unordered_set(unordered_set &&other, const Alloc &a)
+        : __t(std::move(other.__t), a)
+    {
+    }
     unordered_set &operator=(const unordered_set &) = default;
-    unordered_set &operator=(unordered_set &&) noexcept = default;
+    unordered_set &operator=(unordered_set &&) = default;
     unordered_set &operator=(initializer_list<Key> il)
     {
         clear();
@@ -362,8 +370,16 @@ public:
     }
     unordered_multiset(const unordered_multiset &) = default;
     unordered_multiset(unordered_multiset &&) noexcept = default;
+    unordered_multiset(const unordered_multiset &other, const Alloc &a)
+        : __t(other.__t, a)
+    {
+    }
+    unordered_multiset(unordered_multiset &&other, const Alloc &a)
+        : __t(std::move(other.__t), a)
+    {
+    }
     unordered_multiset &operator=(const unordered_multiset &) = default;
-    unordered_multiset &operator=(unordered_multiset &&) noexcept = default;
+    unordered_multiset &operator=(unordered_multiset &&) = default;
     unordered_multiset &operator=(initializer_list<Key> il)
     {
         clear();

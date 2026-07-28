@@ -212,7 +212,13 @@ public:
         : __hash(other.__hash), __eq(other.__eq),
           __alloc(NodeTraits::select_on_container_copy_construction(
               other.__alloc)),
-          __palloc(other.__palloc)
+          // Derive the bucket-array allocator from the SOCCC'd node
+          // allocator, NOT the source's __palloc: for allocators whose
+          // select_on_container_copy_construction does not return a copy of
+          // the source (e.g. pmr::polymorphic_allocator -> default resource),
+          // copying other.__palloc would bind the bucket array to a resource
+          // this container does not own -> use-after-free once it dies.
+          __palloc(__alloc)
     {
         CopyFrom(other);
     }
@@ -223,6 +229,25 @@ public:
     {
         StealFrom(other);
     }
+    // Allocator-extended copy: uses the caller's allocator directly (no
+    // select_on_container_copy_construction), per [container.alloc.reqmts].
+    Table(const Table &other, const Alloc &a)
+        : __hash(other.__hash), __eq(other.__eq), __alloc(a), __palloc(a)
+    {
+        CopyFrom(other);
+    }
+    // Allocator-extended move: steal when the supplied allocator can free
+    // other's storage (always-equal, or compares equal), else element-wise
+    // move through our own allocator.
+    Table(Table &&other, const Alloc &a)
+        : __hash(std::move(other.__hash)), __eq(std::move(other.__eq)),
+          __alloc(a), __palloc(a)
+    {
+        if (NodeTraits::is_always_equal::value || __alloc == other.__alloc)
+            StealFrom(other);
+        else
+            MoveElementsFrom(other);
+    }
     ~Table()
     {
         clear();
@@ -232,20 +257,46 @@ public:
     Table &operator=(const Table &other)
     {
         if (this == &other) return *this;
-        clear();
+        clear();       // free nodes via the OLD node allocator
+        DropBuckets(); // free the bucket array via the OLD pointer allocator
+        if constexpr (NodeTraits::propagate_on_container_copy_assignment::
+                          value) {
+            __alloc  = other.__alloc;
+            __palloc = other.__palloc;
+        }
         __hash = other.__hash;
         __eq   = other.__eq;
         CopyFrom(other);
         return *this;
     }
-    Table &operator=(Table &&other) noexcept
+    Table &operator=(Table &&other) noexcept(
+        NodeTraits::is_always_equal::value &&
+        is_nothrow_move_assignable_v<Hash> &&
+        is_nothrow_move_assignable_v<KeyEq>)
     {
         if (this == &other) return *this;
+        constexpr bool pocma =
+            NodeTraits::propagate_on_container_move_assignment::value;
+        if (pocma || NodeTraits::is_always_equal::value ||
+            __alloc == other.__alloc) {
+            clear();
+            DropBuckets();
+            if constexpr (pocma) {
+                __alloc  = std::move(other.__alloc);
+                __palloc = std::move(other.__palloc);
+            }
+            __hash = std::move(other.__hash);
+            __eq   = std::move(other.__eq);
+            StealFrom(other);
+            return *this;
+        }
+        // Unequal allocators without propagation: cannot take other's
+        // storage (we would later free it through a different allocator).
+        // Move the elements into our own storage; other keeps its nodes.
         clear();
-        DropBuckets();
         __hash = std::move(other.__hash);
         __eq   = std::move(other.__eq);
-        StealFrom(other);
+        MoveElementsFrom(other);
         return *this;
     }
 
@@ -560,23 +611,29 @@ public:
                1);
     }
 
-    void swap(Table &other) noexcept
+    void swap(Table &other) noexcept(
+        NodeTraits::is_always_equal::value &&
+        is_nothrow_swappable_v<Hash> && is_nothrow_swappable_v<KeyEq>)
     {
         auto sw = [](auto &a, auto &b) {
             auto t = a;
             a      = b;
             b      = t;
         };
+        if constexpr (NodeTraits::propagate_on_container_swap::value) {
+            sw(__alloc, other.__alloc);
+            sw(__palloc, other.__palloc);
+        }
         sw(__buckets, other.__buckets);
         sw(__bucket_count, other.__bucket_count);
         sw(__count, other.__count);
         sw(__max_lf, other.__max_lf);
-        Hash ht      = __hash;
-        __hash       = other.__hash;
-        other.__hash = ht;
-        KeyEq et     = __eq;
-        __eq         = other.__eq;
-        other.__eq   = et;
+        // Unqualified swap (ADL) honors a user Hash/KeyEq's own swap and
+        // matches the is_nothrow_swappable_v predicate above; std::swap is
+        // the fallback for types without one.
+        using std::swap;
+        swap(__hash, other.__hash);
+        swap(__eq, other.__eq);
     }
 
     size_t IndexOf(size_t hash) const noexcept
@@ -664,8 +721,38 @@ private:
         if (other.__count == 0) return;
         AllocateBuckets(other.__bucket_count);
         __max_lf = other.__max_lf;
-        for (const_iterator it = other.begin(); it != other.end(); ++it)
-            EmplaceMulti(*it);
+        try {
+            for (const_iterator it = other.begin(); it != other.end(); ++it)
+                EmplaceMulti(*it);
+        } catch (...) {
+            // From a CONSTRUCTOR caller, ~Table does not run on exception, so
+            // a throwing element copy / bad_alloc mid-loop would leak the
+            // bucket array + the nodes inserted so far. Free them, rethrow
+            // (basic guarantee). Harmless no-op cleanup from a live object.
+            clear();
+            DropBuckets();
+            throw;
+        }
+    }
+
+    // Element-wise move from `other` into *this through *this's OWN
+    // allocator — used when allocators compare unequal and must not
+    // propagate. other's nodes are left in place (each holding a moved-from
+    // value) so other's own clear()/destructor frees them through its OWN
+    // allocator: no cross-allocator free is possible on this path.
+    void MoveElementsFrom(Table &other)
+    {
+        __max_lf = other.__max_lf;
+        try {
+            for (iterator it = other.begin(); it != other.end(); ++it)
+                EmplaceMulti(std::move(*it));
+        } catch (...) {
+            // Same constructor-leak guard as CopyFrom (this runs from the
+            // allocator-extended move ctor too). Leaves *this empty-valid.
+            clear();
+            DropBuckets();
+            throw;
+        }
     }
 
     void StealFrom(Table &other) noexcept

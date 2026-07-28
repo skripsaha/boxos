@@ -116,8 +116,16 @@ public:
     }
     unordered_map(const unordered_map &) = default;
     unordered_map(unordered_map &&) noexcept = default;
+    unordered_map(const unordered_map &other, const Alloc &a)
+        : __t(other.__t, a)
+    {
+    }
+    unordered_map(unordered_map &&other, const Alloc &a)
+        : __t(std::move(other.__t), a)
+    {
+    }
     unordered_map &operator=(const unordered_map &) = default;
-    unordered_map &operator=(unordered_map &&) noexcept = default;
+    unordered_map &operator=(unordered_map &&) = default;
     unordered_map &operator=(initializer_list<value_type> il)
     {
         clear();
@@ -454,8 +462,16 @@ public:
     }
     unordered_multimap(const unordered_multimap &) = default;
     unordered_multimap(unordered_multimap &&) noexcept = default;
+    unordered_multimap(const unordered_multimap &other, const Alloc &a)
+        : __t(other.__t, a)
+    {
+    }
+    unordered_multimap(unordered_multimap &&other, const Alloc &a)
+        : __t(std::move(other.__t), a)
+    {
+    }
     unordered_multimap &operator=(const unordered_multimap &) = default;
-    unordered_multimap &operator=(unordered_multimap &&) noexcept = default;
+    unordered_multimap &operator=(unordered_multimap &&) = default;
     unordered_multimap &operator=(initializer_list<value_type> il)
     {
         clear();

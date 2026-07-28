@@ -20580,6 +20580,360 @@ void Phase108()
            "+ node-identity preservation\n");
 }
 
+void Phase109()
+{
+    // ── Ф30 AllocatorAware hardening: the four unordered_* containers over
+    //    the P105OwnAlloc cross-instance-free trap. They share ONE hash
+    //    engine (__ht::Table) which — unlike its node/tree siblings —
+    //    carries TWO rebound allocators (node alloc + bucket-array pointer
+    //    alloc); every propagation path must move/swap/propagate BOTH. The
+    //    trap proves steal-vs-element-wise, catches the copy-assign
+    //    bucket-array LEAK (which reproduces even with std::allocator), and
+    //    verifies propagate_on_container_swap. ──────────────────────────────
+    std::hash<int>     HH;
+    std::equal_to<int> EE;
+
+    using MA  = P105OwnAllocDefault<std::pair<const int, int>>;
+    using SA  = P105OwnAllocDefault<int>;
+    using MAP = P105OwnAlloc<std::pair<const int, int>, true, false, false, true>;
+    using SAP = P105OwnAlloc<int, true, false, false, true>;
+    using UM  = std::unordered_map<int, int, std::hash<int>, std::equal_to<int>, MA>;
+    using US  = std::unordered_set<int, std::hash<int>, std::equal_to<int>, SA>;
+    using UMM = std::unordered_multimap<int, int, std::hash<int>, std::equal_to<int>, MA>;
+
+    auto umHas = [](const UM &m, int k, int v) {
+        auto it = m.find(k);
+        return it != m.end() && it->second == v;
+    };
+    auto usHas = [](const US &s, int k) { return s.find(k) != s.end(); };
+
+    // ============ unordered_map: full allocator-trait matrix ==============
+    // (1) move-assign, POCMA=false, unequal: element-wise move through the
+    //     TARGET's own allocator; stealing would later free the source's
+    //     nodes through a foreign instance -- UB on a real allocator.
+    P105OwnAllocTrap::Reset();
+    {
+        UM a(0, HH, EE, MA(1));
+        a.emplace(1, 10); a.emplace(2, 20); a.emplace(3, 30);
+        UM b(0, HH, EE, MA(2));
+        b.emplace(9, 90);
+        b = std::move(a);
+        Check(b.get_allocator().id == 2,
+              "phase109 unordered_map move-assign(unequal,POCMA=false) keeps own allocator id");
+        Check(b.size() == 3 && umHas(b, 1, 10) && umHas(b, 2, 20) && umHas(b, 3, 30),
+              "phase109 unordered_map move-assign(unequal) moved content element-wise");
+    }
+    Check(!P105OwnAllocTrap::crossInstanceFree,
+          "phase109 unordered_map move-assign(unequal): ZERO cross-instance frees (element-wise, not steal)");
+
+    // (2) allocator-extended copy ctor (equal AND unequal supplied alloc):
+    //     always element-wise copies via the SUPPLIED instance, source
+    //     untouched.
+    P105OwnAllocTrap::Reset();
+    {
+        UM src(0, HH, EE, MA(5));
+        src.emplace(5, 50); src.emplace(6, 60);
+        UM eq(src, MA(5));
+        UM uneq(src, MA(7));
+        Check(eq.get_allocator().id == 5 && eq.size() == 2 && umHas(eq, 5, 50) && umHas(eq, 6, 60),
+              "phase109 unordered_map alloc-ext copy ctor(equal id): content copied via supplied allocator");
+        Check(uneq.get_allocator().id == 7 && uneq.size() == 2 && umHas(uneq, 5, 50),
+              "phase109 unordered_map alloc-ext copy ctor(unequal id): content copied via supplied allocator");
+        Check(src.size() == 2,
+              "phase109 unordered_map alloc-ext copy ctor: source unaffected");
+    }
+    Check(!P105OwnAllocTrap::crossInstanceFree,
+          "phase109 unordered_map alloc-ext copy ctor: ZERO cross-instance frees (never steals)");
+
+    // (3) allocator-extended move ctor: EQUAL supplied alloc steals (zero
+    //     new allocations); UNEQUAL element-wise-moves (allocates anew) --
+    //     the allocation-count delta makes the distinction real.
+    P105OwnAllocTrap::Reset();
+    {
+        UM se(0, HH, EE, MA(60));
+        se.emplace(11, 1); se.emplace(12, 2);
+        std::size_t before = P105OwnAllocTrap::allocations;
+        UM de(std::move(se), MA(60));
+        Check(de.size() == 2 && se.empty() && P105OwnAllocTrap::allocations == before,
+              "phase109 unordered_map alloc-ext move ctor(equal id): genuine steal (zero new allocations)");
+
+        UM su(0, HH, EE, MA(70));
+        su.emplace(13, 3); su.emplace(14, 4);
+        std::size_t before2 = P105OwnAllocTrap::allocations;
+        UM du(std::move(su), MA(71));
+        Check(du.get_allocator().id == 71 && du.size() == 2 && umHas(du, 13, 3),
+              "phase109 unordered_map alloc-ext move ctor(unequal id): element-wise into supplied allocator");
+        Check(P105OwnAllocTrap::allocations > before2,
+              "phase109 unordered_map alloc-ext move ctor(unequal id): allocates fresh storage (not a steal)");
+    }
+    Check(!P105OwnAllocTrap::crossInstanceFree,
+          "phase109 unordered_map alloc-ext move ctor: ZERO cross-instance frees (equal+unequal)");
+
+    // (4) copy-assign, POCCA=true, unequal + THE BUCKET-ARRAY LEAK: a target
+    //     that previously held elements owns a bucket array; copy-assigning
+    //     a non-empty source must free that OLD array (via the OLD pointer
+    //     allocator, before propagating), never orphan it. `live` must
+    //     return to its pre-scope baseline once every container is gone.
+    P105OwnAllocTrap::Reset();
+    {
+        std::size_t leakBaseline = P105OwnAllocTrap::live.size();
+        {
+            UM tgt(0, HH, EE, MA(30));
+            tgt.emplace(1, 1); // allocates bucket array + node under id 30
+            UM sc(0, HH, EE, MA(40));
+            sc.emplace(2, 2); sc.emplace(3, 3);
+            tgt = sc;
+            Check(tgt.get_allocator().id == 40 && tgt.size() == 2 && umHas(tgt, 2, 2) && umHas(tgt, 3, 3),
+                  "phase109 unordered_map copy-assign(POCCA,unequal): propagates allocator + copies content");
+            Check(sc.size() == 2,
+                  "phase109 unordered_map copy-assign leaves source unaffected");
+        }
+        Check(P105OwnAllocTrap::live.size() == leakBaseline,
+              "phase109 unordered_map copy-assign frees the target's OLD bucket array (no leak / no orphan)");
+    }
+    Check(!P105OwnAllocTrap::crossInstanceFree,
+          "phase109 unordered_map copy-assign(POCCA,unequal): ZERO cross-instance frees");
+
+    // (5) swap, POCS=true, unequal stateful: exchanges BOTH the contents and
+    //     the allocators (node + bucket-array), so each side keeps ownership
+    //     consistent -- zero cross-instance frees.
+    {
+        using UMPocs = std::unordered_map<int, int, std::hash<int>, std::equal_to<int>, MAP>;
+        P105OwnAllocTrap::Reset();
+        {
+            UMPocs x(0, HH, EE, MAP(50));
+            x.emplace(1, 1);
+            UMPocs y(0, HH, EE, MAP(51));
+            y.emplace(2, 2); y.emplace(3, 3);
+            x.swap(y);
+            Check(x.get_allocator().id == 51 && y.get_allocator().id == 50,
+                  "phase109 unordered_map swap(POCS=true) exchanges allocators");
+            Check(x.size() == 2 && y.size() == 1,
+                  "phase109 unordered_map swap(POCS=true) exchanges contents");
+        }
+        Check(!P105OwnAllocTrap::crossInstanceFree,
+              "phase109 unordered_map swap(POCS=true) stateful: ZERO cross-instance frees");
+    }
+
+    // (6) POCMA=true move-assign propagates the allocator AND steals.
+    {
+        using MAPm = P105OwnAlloc<std::pair<const int, int>, true, true, false>;
+        using UMPm = std::unordered_map<int, int, std::hash<int>, std::equal_to<int>, MAPm>;
+        P105OwnAllocTrap::Reset();
+        UMPm a(0, HH, EE, MAPm(80));
+        a.emplace(21, 1); a.emplace(22, 2);
+        UMPm b(0, HH, EE, MAPm(81));
+        b.emplace(9, 9);
+        std::size_t before = P105OwnAllocTrap::allocations;
+        b = std::move(a);
+        Check(b.get_allocator().id == 80 && a.empty(),
+              "phase109 unordered_map move-assign(POCMA=true): allocator propagates + source emptied (steal)");
+        Check(P105OwnAllocTrap::allocations == before,
+              "phase109 unordered_map move-assign(POCMA=true): zero new allocations (genuine steal)");
+        Check(!P105OwnAllocTrap::crossInstanceFree,
+              "phase109 unordered_map move-assign(POCMA=true): ZERO cross-instance frees");
+    }
+
+    // ============ unordered_set: full allocator-trait matrix ==============
+    P105OwnAllocTrap::Reset();
+    {
+        US a(0, HH, EE, SA(1));
+        a.insert(1); a.insert(2); a.insert(3);
+        US b(0, HH, EE, SA(2));
+        b.insert(9);
+        b = std::move(a);
+        Check(b.get_allocator().id == 2 && b.size() == 3 && usHas(b, 1) && usHas(b, 2) && usHas(b, 3),
+              "phase109 unordered_set move-assign(unequal,POCMA=false): keeps own id, moved content element-wise");
+    }
+    Check(!P105OwnAllocTrap::crossInstanceFree,
+          "phase109 unordered_set move-assign(unequal): ZERO cross-instance frees");
+
+    P105OwnAllocTrap::Reset();
+    {
+        US src(0, HH, EE, SA(5));
+        src.insert(5); src.insert(6);
+        US eq(src, SA(5));
+        US uneq(src, SA(7));
+        std::size_t before = P105OwnAllocTrap::allocations;
+        US se(0, HH, EE, SA(60));
+        se.insert(11); se.insert(12);
+        std::size_t beforeSteal = P105OwnAllocTrap::allocations;
+        US de(std::move(se), SA(60));
+        Check(eq.size() == 2 && eq.get_allocator().id == 5 && uneq.size() == 2 && uneq.get_allocator().id == 7,
+              "phase109 unordered_set alloc-ext copy ctor(equal+unequal): content copied via supplied allocator");
+        Check(de.size() == 2 && se.empty() && P105OwnAllocTrap::allocations == beforeSteal,
+              "phase109 unordered_set alloc-ext move ctor(equal id): genuine steal (zero new allocations)");
+        (void)before;
+    }
+    Check(!P105OwnAllocTrap::crossInstanceFree,
+          "phase109 unordered_set alloc-ext copy/move ctor: ZERO cross-instance frees");
+
+    // copy-assign leak + POCS swap for unordered_set.
+    P105OwnAllocTrap::Reset();
+    {
+        std::size_t leakBaseline = P105OwnAllocTrap::live.size();
+        {
+            US tgt(0, HH, EE, SA(30));
+            tgt.insert(1);
+            US sc(0, HH, EE, SA(40));
+            sc.insert(2); sc.insert(3);
+            tgt = sc;
+            Check(tgt.get_allocator().id == 40 && tgt.size() == 2 && usHas(tgt, 2) && usHas(tgt, 3),
+                  "phase109 unordered_set copy-assign(POCCA,unequal): propagates allocator + copies content");
+        }
+        Check(P105OwnAllocTrap::live.size() == leakBaseline,
+              "phase109 unordered_set copy-assign frees the target's OLD bucket array (no leak)");
+    }
+    Check(!P105OwnAllocTrap::crossInstanceFree,
+          "phase109 unordered_set copy-assign(POCCA,unequal): ZERO cross-instance frees");
+
+    {
+        using USPocs = std::unordered_set<int, std::hash<int>, std::equal_to<int>, SAP>;
+        P105OwnAllocTrap::Reset();
+        {
+            USPocs x(0, HH, EE, SAP(50));
+            x.insert(1);
+            USPocs y(0, HH, EE, SAP(51));
+            y.insert(2); y.insert(3);
+            x.swap(y);
+            Check(x.get_allocator().id == 51 && y.get_allocator().id == 50 && x.size() == 2 && y.size() == 1,
+                  "phase109 unordered_set swap(POCS=true): exchanges allocators + contents");
+        }
+        Check(!P105OwnAllocTrap::crossInstanceFree,
+              "phase109 unordered_set swap(POCS=true) stateful: ZERO cross-instance frees");
+    }
+
+    // ====== unordered_multimap / unordered_multiset: engine is shared, so
+    //        verify wrapper forwarding + duplicate-key content on the hot
+    //        allocator paths (alloc-ext ctors, element-wise move-assign,
+    //        POCS swap, leak). ==========================================
+    P105OwnAllocTrap::Reset();
+    {
+        UMM a(0, HH, EE, MA(1));
+        a.emplace(1, 10); a.emplace(1, 11); a.emplace(2, 20);
+        UMM cext(a, MA(3));
+        Check(cext.size() == 3 && cext.count(1) == 2 && cext.count(2) == 1,
+              "phase109 unordered_multimap alloc-ext copy ctor: duplicate-key content preserved");
+        UMM b(0, HH, EE, MA(2));
+        b.emplace(9, 9);
+        b = std::move(a);
+        Check(b.get_allocator().id == 2 && b.size() == 3 && b.count(1) == 2,
+              "phase109 unordered_multimap move-assign(unequal): element-wise move, duplicates preserved");
+    }
+    Check(!P105OwnAllocTrap::crossInstanceFree,
+          "phase109 unordered_multimap alloc-ext copy + move-assign: ZERO cross-instance frees");
+
+    {
+        using UMSP = std::unordered_multiset<int, std::hash<int>, std::equal_to<int>, SAP>;
+        P105OwnAllocTrap::Reset();
+        {
+            UMSP x(0, HH, EE, SAP(50));
+            x.insert(1); x.insert(1);
+            UMSP y(0, HH, EE, SAP(51));
+            y.insert(2);
+            x.swap(y);
+            Check(x.get_allocator().id == 51 && y.get_allocator().id == 50 && y.count(1) == 2,
+                  "phase109 unordered_multiset swap(POCS=true): exchanges allocators + duplicate content");
+        }
+        Check(!P105OwnAllocTrap::crossInstanceFree,
+              "phase109 unordered_multiset swap(POCS=true) stateful: ZERO cross-instance frees");
+    }
+
+    // ====== std::allocator no-regression: the copy-assign leak fix is
+    //        allocator-agnostic code, so the common std::allocator case must
+    //        take the new POCCA-false branch and stay functionally correct
+    //        on the exact leak-repro shape (populate -> copy-assign). ======
+    {
+        std::unordered_map<int, int> m;
+        m.emplace(1, 1);            // target owns a bucket array
+        std::unordered_map<int, int> src;
+        src.emplace(2, 2); src.emplace(3, 3);
+        m = src;
+        Check(m.size() == 2 && m.count(2) == 1 && m.count(3) == 1 && m.count(1) == 0,
+              "phase109 std::allocator unordered_map copy-assign: correct content on leak-repro shape");
+
+        std::unordered_set<int> s;
+        s.insert(1);
+        std::unordered_set<int> ss;
+        ss.insert(2); ss.insert(3);
+        s = ss;
+        Check(s.size() == 2 && s.count(2) == 1 && s.count(1) == 0,
+              "phase109 std::allocator unordered_set copy-assign: correct content on leak-repro shape");
+
+        std::unordered_map<int, int> mm(std::move(m));
+        Check(mm.size() == 2 && mm.count(2) == 1,
+              "phase109 std::allocator unordered_map move ctor: content stolen intact");
+    }
+
+    // ── is_always_equal steal-entry: is_always_equal=true, POCMA=false,
+    //    UNEQUAL ids must STILL steal (the is_always_equal disjunct of the
+    //    move-assign gate), never element-wise-move -- proven by a zero new-
+    //    allocation delta. The trap's id-based free tracking legitimately
+    //    sees a cross-id free at teardown (stolen nodes keep the source id);
+    //    that is CONFORMING under is_always_equal, so crossInstanceFree is
+    //    intentionally not asserted here (next block Resets it).
+    {
+        using MAeq = P105OwnAllocAlwaysEqual<std::pair<const int, int>>;
+        using UMeq = std::unordered_map<int, int, std::hash<int>, std::equal_to<int>, MAeq>;
+        P105OwnAllocTrap::Reset();
+        UMeq a(0, HH, EE, MAeq(70));
+        a.emplace(1, 1); a.emplace(2, 2);
+        UMeq b(0, HH, EE, MAeq(71));
+        b.emplace(9, 9);
+        std::size_t before = P105OwnAllocTrap::allocations;
+        b = std::move(a);
+        Check(b.size() == 2 && a.empty() && P105OwnAllocTrap::allocations == before,
+              "phase109 unordered_map move-assign(is_always_equal,unequal id): steals via is_always_equal (zero new allocations)");
+    }
+
+    // ── self-move-assign and self-swap are guarded no-ops -- never empty or
+    //    corrupt the container, no cross-instance free. `mref` hides the
+    //    aliasing from -Wself-move.
+    P105OwnAllocTrap::Reset();
+    {
+        UM m(0, HH, EE, MA(1));
+        m.emplace(1, 10); m.emplace(2, 20);
+        UM &mref = m;
+        m = std::move(mref);
+        Check(m.size() == 2 && umHas(m, 1, 10) && umHas(m, 2, 20),
+              "phase109 unordered_map self-move-assign: guarded no-op (content intact)");
+        m.swap(mref);
+        Check(m.size() == 2 && umHas(m, 1, 10) && umHas(m, 2, 20),
+              "phase109 unordered_map self-swap: safe no-op (content intact)");
+    }
+    Check(!P105OwnAllocTrap::crossInstanceFree,
+          "phase109 unordered_map self-move/self-swap: ZERO cross-instance frees");
+
+    // ── pmr compound-allocator: HIGH-1 regression guard. A pmr copy's
+    //    bucket-array allocator must derive from the SOCCC'd (default-
+    //    resource) node allocator, not the source resource; rehash() forces
+    //    the bucket-array realloc that the old code dangled to a dead
+    //    resource. Content correctness through copy+rehash+move here proves
+    //    the compound-allocator copy path is consistent for real pmr.
+    {
+        char buf[4096];
+        std::pmr::monotonic_buffer_resource mbr{buf, sizeof(buf)};
+        using PMA = std::pmr::polymorphic_allocator<std::pair<const int, int>>;
+        std::unordered_map<int, int, std::hash<int>, std::equal_to<int>, PMA> a(
+            0, HH, EE, PMA(&mbr));
+        a.emplace(1, 10); a.emplace(2, 20); a.emplace(3, 30);
+        auto b = a;      // 1-arg copy ctor: SOCCC -> default resource for BOTH allocs
+        b.rehash(64);    // bucket-array realloc via b's __palloc
+        b.emplace(4, 40);
+        Check(b.size() == 4 && b.count(1) == 1 && b.count(4) == 1,
+              "phase109 pmr unordered_map copy + rehash: content correct (bucket alloc from SOCCC, not source resource)");
+        std::unordered_map<int, int, std::hash<int>, std::equal_to<int>, PMA> c(std::move(b));
+        Check(c.size() == 4 && c.count(2) == 1,
+              "phase109 pmr unordered_map move ctor: content intact");
+    }
+
+    printf("[CXX] PASS phase109: unordered_* AllocatorAware hardening -- alloc-extended copy/move "
+           "ctors, POCCA copy-assign (bucket-array leak fixed, no orphan), POCMA/is_always_equal "
+           "move-assign (steal vs element-wise), propagate_on_container_swap (both node + bucket "
+           "allocators exchanged), all trap-verified across map/set/multimap/multiset + "
+           "std::allocator no-regression\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -20710,6 +21064,7 @@ int main()
     Phase106();
     Phase107();
     Phase108();
+    Phase109();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
