@@ -124,6 +124,45 @@ public:
         : __t(std::move(other.__t), a)
     {
     }
+    // Allocator-extended constructors ([unord.map.overview]): bucket-count +
+    // allocator, bucket-count + hasher + allocator, allocator-only (the pmr
+    // `unordered_map m(&resource)` idiom), and the iterator / initializer_list
+    // forms with a trailing allocator. All delegate to the Table(buckets,
+    // hasher, key_equal, allocator) engine ctor -- engine untouched.
+    unordered_map(size_type buckets, const Alloc &a)
+        : __t(buckets, Hash(), KeyEq(), a)
+    {
+    }
+    unordered_map(size_type buckets, const Hash &h, const Alloc &a)
+        : __t(buckets, h, KeyEq(), a)
+    {
+    }
+    explicit unordered_map(const Alloc &a) : __t(0, Hash(), KeyEq(), a) {}
+    template <typename It>
+    unordered_map(It first, It last, size_type buckets, const Alloc &a)
+        : __t(buckets, Hash(), KeyEq(), a)
+    {
+        insert(first, last);
+    }
+    template <typename It>
+    unordered_map(It first, It last, size_type buckets, const Hash &h,
+                  const Alloc &a)
+        : __t(buckets, h, KeyEq(), a)
+    {
+        insert(first, last);
+    }
+    unordered_map(initializer_list<value_type> il, size_type buckets,
+                  const Alloc &a)
+        : __t(buckets, Hash(), KeyEq(), a)
+    {
+        insert(il.begin(), il.end());
+    }
+    unordered_map(initializer_list<value_type> il, size_type buckets,
+                  const Hash &h, const Alloc &a)
+        : __t(buckets, h, KeyEq(), a)
+    {
+        insert(il.begin(), il.end());
+    }
     unordered_map &operator=(const unordered_map &) = default;
     unordered_map &operator=(unordered_map &&) = default;
     unordered_map &operator=(initializer_list<value_type> il)
@@ -470,6 +509,42 @@ public:
         : __t(std::move(other.__t), a)
     {
     }
+    // Allocator-extended constructors ([unord.multimap.overview]) -- see
+    // unordered_map above.
+    unordered_multimap(size_type buckets, const Alloc &a)
+        : __t(buckets, Hash(), KeyEq(), a)
+    {
+    }
+    unordered_multimap(size_type buckets, const Hash &h, const Alloc &a)
+        : __t(buckets, h, KeyEq(), a)
+    {
+    }
+    explicit unordered_multimap(const Alloc &a) : __t(0, Hash(), KeyEq(), a) {}
+    template <typename It>
+    unordered_multimap(It first, It last, size_type buckets, const Alloc &a)
+        : __t(buckets, Hash(), KeyEq(), a)
+    {
+        insert(first, last);
+    }
+    template <typename It>
+    unordered_multimap(It first, It last, size_type buckets, const Hash &h,
+                       const Alloc &a)
+        : __t(buckets, h, KeyEq(), a)
+    {
+        insert(first, last);
+    }
+    unordered_multimap(initializer_list<value_type> il, size_type buckets,
+                       const Alloc &a)
+        : __t(buckets, Hash(), KeyEq(), a)
+    {
+        insert(il.begin(), il.end());
+    }
+    unordered_multimap(initializer_list<value_type> il, size_type buckets,
+                       const Hash &h, const Alloc &a)
+        : __t(buckets, h, KeyEq(), a)
+    {
+        insert(il.begin(), il.end());
+    }
     unordered_multimap &operator=(const unordered_multimap &) = default;
     unordered_multimap &operator=(unordered_multimap &&) = default;
     unordered_multimap &operator=(initializer_list<value_type> il)
@@ -780,11 +855,24 @@ erase_if(unordered_multimap<K, T, H, E, A> &m, Pred pred)
 // per the standard's guides. Same "no competing candidate" reasoning as
 // map's: the (buckets,Hash,KeyEq,Alloc) ctor's Key/T never appear in any
 // of its parameter types, so its implicit guide can never deduce Key/T.
-template <typename It, typename Hash = hash<__ht::DeductKey<It>>,
-          typename KeyEq = equal_to<__ht::DeductKey<It>>,
+template <typename It, NotAllocatorLike Hash = hash<__ht::DeductKey<It>>,
+          NotAllocatorLike KeyEq = equal_to<__ht::DeductKey<It>>,
           typename Alloc = allocator<pair<const __ht::DeductKey<It>, __ht::DeductMapped<It>>>>
 unordered_map(It, It, size_t = 0, Hash = Hash(), KeyEq = KeyEq(), Alloc = Alloc())
     -> unordered_map<__ht::DeductKey<It>, __ht::DeductMapped<It>, Hash, KeyEq, Alloc>;
+
+// Allocator-extended iterator guides ([unord.map.deduct]) -- mirror the
+// from_range trio: the trailing functor slots above are NotAllocatorLike so
+// the allocator argument lands here, never in a functor slot.
+template <typename It, AllocatorLike Alloc>
+unordered_map(It, It, size_t, Alloc)
+    -> unordered_map<__ht::DeductKey<It>, __ht::DeductMapped<It>,
+                     hash<__ht::DeductKey<It>>, equal_to<__ht::DeductKey<It>>, Alloc>;
+
+template <typename It, typename Hash, AllocatorLike Alloc>
+unordered_map(It, It, size_t, Hash, Alloc)
+    -> unordered_map<__ht::DeductKey<It>, __ht::DeductMapped<It>, Hash,
+                     equal_to<__ht::DeductKey<It>>, Alloc>;
 
 // Both Hash and KeyEq (not just Hash) must be NotAllocatorLike: with only
 // Hash constrained, a 5-arg (from_range_t,R&&,buckets,Hash,Alloc) call
@@ -808,11 +896,21 @@ unordered_map(from_range_t, R &&, size_t, Hash, Alloc)
     -> unordered_map<__ht::DeductRangeKey<R>, __ht::DeductRangeMapped<R>, Hash,
                      equal_to<__ht::DeductRangeKey<R>>, Alloc>;
 
-template <typename It, typename Hash = hash<__ht::DeductKey<It>>,
-          typename KeyEq = equal_to<__ht::DeductKey<It>>,
+template <typename It, NotAllocatorLike Hash = hash<__ht::DeductKey<It>>,
+          NotAllocatorLike KeyEq = equal_to<__ht::DeductKey<It>>,
           typename Alloc = allocator<pair<const __ht::DeductKey<It>, __ht::DeductMapped<It>>>>
 unordered_multimap(It, It, size_t = 0, Hash = Hash(), KeyEq = KeyEq(), Alloc = Alloc())
     -> unordered_multimap<__ht::DeductKey<It>, __ht::DeductMapped<It>, Hash, KeyEq, Alloc>;
+
+template <typename It, AllocatorLike Alloc>
+unordered_multimap(It, It, size_t, Alloc)
+    -> unordered_multimap<__ht::DeductKey<It>, __ht::DeductMapped<It>,
+                          hash<__ht::DeductKey<It>>, equal_to<__ht::DeductKey<It>>, Alloc>;
+
+template <typename It, typename Hash, AllocatorLike Alloc>
+unordered_multimap(It, It, size_t, Hash, Alloc)
+    -> unordered_multimap<__ht::DeductKey<It>, __ht::DeductMapped<It>, Hash,
+                          equal_to<__ht::DeductKey<It>>, Alloc>;
 
 template <ranges::input_range R, NotAllocatorLike Hash = hash<__ht::DeductRangeKey<R>>,
           NotAllocatorLike KeyEq = equal_to<__ht::DeductRangeKey<R>>,

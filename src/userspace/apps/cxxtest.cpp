@@ -21506,6 +21506,190 @@ void Phase112()
            "std::allocator no-regression\n");
 }
 
+// A hash type distinct from std::hash<int>, used to make the (It,It,n,Hash,
+// Alloc) deduction-guide's Hash slot observable in Phase113's static_asserts.
+struct P113Hash {
+    std::size_t operator()(int x) const noexcept
+    {
+        return static_cast<std::size_t>(x) * 2654435761u;
+    }
+};
+
+void Phase113()
+{
+    // ── Ф30 [A] allocator-only / allocator-extended ctors for the UNORDERED
+    //    associative containers ([unord.map.overview]/[unord.set.overview] +
+    //    multi- variants): the seven standard allocator-carrying ctors --
+    //    (n,alloc), (n,hasher,alloc), explicit (alloc) [pmr idiom], and the
+    //    iterator / initializer_list forms with (n[,hasher],alloc). Plus this
+    //    commit widens unordered_set's two truncated base ctors ((It,It) and
+    //    initializer_list) to the full [unord.set.overview] signature, and
+    //    adds the allocator-extended iterator deduction guides. Every new
+    //    ctor delegates to the Table(buckets,hasher,key_equal,alloc) engine
+    //    ctor -- engine untouched. The trapping allocator proves the supplied
+    //    allocator owns every node and that no cross-instance free occurs. ────
+    using UMA = P105OwnAllocDefault<std::pair<const int, int>>;
+    using USA = P105OwnAllocDefault<int>;
+    using UMap      = std::unordered_map<int, int, std::hash<int>, std::equal_to<int>, UMA>;
+    using UMultiMap = std::unordered_multimap<int, int, std::hash<int>, std::equal_to<int>, UMA>;
+    using USet      = std::unordered_set<int, std::hash<int>, std::equal_to<int>, USA>;
+    using UMultiSet = std::unordered_multiset<int, std::hash<int>, std::equal_to<int>, USA>;
+
+    std::vector<std::pair<int, int>> mv{{1, 10}, {2, 20}, {2, 21}, {3, 30}};
+    std::vector<int>                 sv{1, 2, 2, 3};
+
+    P105OwnAllocTrap::Reset();
+
+    // (A) allocator-only ctor: empty container, allocator id preserved.
+    {
+        UMap m(UMA(11)); UMultiMap mm(UMA(12)); USet s(USA(13)); UMultiSet ms(USA(14));
+        Check(m.empty() && m.get_allocator().id == 11, "phase113 unordered_map allocator-only ctor");
+        Check(mm.empty() && mm.get_allocator().id == 12, "phase113 unordered_multimap allocator-only ctor");
+        Check(s.empty() && s.get_allocator().id == 13, "phase113 unordered_set allocator-only ctor");
+        Check(ms.empty() && ms.get_allocator().id == 14, "phase113 unordered_multiset allocator-only ctor");
+    }
+
+    // (B) (buckets,alloc) and (buckets,hasher,alloc): empty, id preserved,
+    //     requested bucket count honored.
+    {
+        UMap m1(64, UMA(21));            UMap m2(64, std::hash<int>{}, UMA(22));
+        USet s1(64, USA(23));            USet s2(64, std::hash<int>{}, USA(24));
+        Check(m1.get_allocator().id == 21 && m1.empty() && m1.bucket_count() >= 64,
+              "phase113 unordered_map (buckets,alloc): id + bucket_count honored");
+        Check(m2.get_allocator().id == 22 && m2.bucket_count() >= 64,
+              "phase113 unordered_map (buckets,hasher,alloc): id + bucket_count honored");
+        Check(s1.get_allocator().id == 23 && s1.bucket_count() >= 64,
+              "phase113 unordered_set (buckets,alloc): id + bucket_count honored");
+        Check(s2.get_allocator().id == 24 && s2.bucket_count() >= 64,
+              "phase113 unordered_set (buckets,hasher,alloc): id + bucket_count honored");
+        UMultiMap mm(64, UMA(25));       UMultiSet ms(64, USA(26));
+        Check(mm.get_allocator().id == 25 && ms.get_allocator().id == 26,
+              "phase113 unordered_multimap/multiset (buckets,alloc): id preserved");
+    }
+
+    // (C) iterator + (buckets[,hasher]) + allocator: content via supplied allocator.
+    {
+        UMap      m(mv.begin(), mv.end(), 8, UMA(31));
+        UMap      mh(mv.begin(), mv.end(), 8, std::hash<int>{}, UMA(32));
+        UMultiMap mm(mv.begin(), mv.end(), 8, UMA(33));
+        USet      s(sv.begin(), sv.end(), 8, USA(34));
+        USet      sh(sv.begin(), sv.end(), 8, std::hash<int>{}, USA(35));
+        UMultiSet ms(sv.begin(), sv.end(), 8, USA(36));
+        Check(m.get_allocator().id == 31 && m.size() == 3 && m.at(1) == 10 && m.at(2) == 20,
+              "phase113 unordered_map (It,It,buckets,alloc): id + content (dup key rejected)");
+        Check(mh.get_allocator().id == 32 && mh.size() == 3, "phase113 unordered_map (It,It,buckets,hasher,alloc)");
+        Check(mm.get_allocator().id == 33 && mm.size() == 4 && mm.count(2) == 2,
+              "phase113 unordered_multimap (It,It,buckets,alloc): id + duplicate kept");
+        Check(s.get_allocator().id == 34 && s.size() == 3 && s.count(2) == 1,
+              "phase113 unordered_set (It,It,buckets,alloc): id + content");
+        Check(sh.get_allocator().id == 35 && sh.size() == 3, "phase113 unordered_set (It,It,buckets,hasher,alloc)");
+        Check(ms.get_allocator().id == 36 && ms.size() == 4 && ms.count(2) == 2,
+              "phase113 unordered_multiset (It,It,buckets,alloc): id + duplicate kept");
+    }
+
+    // (D) initializer_list + (buckets[,hasher]) + allocator.
+    {
+        UMap      m({{1, 10}, {2, 20}}, 8, UMA(41));
+        UMap      mh({{1, 10}, {2, 20}}, 8, std::hash<int>{}, UMA(42));
+        UMultiMap mm({{2, 20}, {2, 21}}, 8, UMA(43));
+        USet      s({1, 2, 3}, 8, USA(44));
+        USet      sh({1, 2, 3}, 8, std::hash<int>{}, USA(45));
+        UMultiSet ms({2, 2, 5}, 8, USA(46));
+        Check(m.get_allocator().id == 41 && m.size() == 2 && m.at(2) == 20,
+              "phase113 unordered_map (init_list,buckets,alloc): id + content");
+        Check(mh.get_allocator().id == 42 && mh.size() == 2, "phase113 unordered_map (init_list,buckets,hasher,alloc)");
+        Check(mm.get_allocator().id == 43 && mm.size() == 2 && mm.count(2) == 2,
+              "phase113 unordered_multimap (init_list,buckets,alloc): id + duplicate kept");
+        Check(s.get_allocator().id == 44 && s.size() == 3, "phase113 unordered_set (init_list,buckets,alloc): id + content");
+        Check(sh.get_allocator().id == 45 && sh.size() == 3, "phase113 unordered_set (init_list,buckets,hasher,alloc)");
+        Check(ms.get_allocator().id == 46 && ms.size() == 3 && ms.count(2) == 2,
+              "phase113 unordered_multiset (init_list,buckets,alloc): id + duplicate kept");
+    }
+
+    // (F) allocator-extended iterator CTAD guides ([unord.map.deduct]/
+    //     [unord.set.deduct]): (It,It,n,alloc) deduces the DEFAULT hash+eq and
+    //     the supplied allocator; (It,It,n,hash,alloc) threads a custom hash;
+    //     the plain (It,It,n,hash) path still deduces the hash (NotAllocatorLike
+    //     did not over-constrain).
+    {
+        UMA am(51); USA as(52);
+        std::unordered_map      cm(mv.begin(), mv.end(), 8, am);
+        std::unordered_multimap cmm(mv.begin(), mv.end(), 8, am);
+        std::unordered_set      cs(sv.begin(), sv.end(), 8, as);
+        std::unordered_multiset cms(sv.begin(), sv.end(), 8, as);
+        static_assert(std::is_same_v<decltype(cm), std::unordered_map<int, int, std::hash<int>, std::equal_to<int>, UMA>>,
+                      "phase113 unordered_map(It,It,n,Alloc) CTAD: default hash/eq + supplied allocator");
+        static_assert(std::is_same_v<decltype(cmm), std::unordered_multimap<int, int, std::hash<int>, std::equal_to<int>, UMA>>,
+                      "phase113 unordered_multimap(It,It,n,Alloc) CTAD");
+        static_assert(std::is_same_v<decltype(cs), std::unordered_set<int, std::hash<int>, std::equal_to<int>, USA>>,
+                      "phase113 unordered_set(It,It,n,Alloc) CTAD");
+        static_assert(std::is_same_v<decltype(cms), std::unordered_multiset<int, std::hash<int>, std::equal_to<int>, USA>>,
+                      "phase113 unordered_multiset(It,It,n,Alloc) CTAD");
+        Check(cm.get_allocator().id == 51 && cs.get_allocator().id == 52,
+              "phase113 allocator-extended iterator CTAD: allocator threaded through");
+
+        std::unordered_map ch(mv.begin(), mv.end(), 8, P113Hash{}, am);
+        static_assert(std::is_same_v<decltype(ch), std::unordered_map<int, int, P113Hash, std::equal_to<int>, UMA>>,
+                      "phase113 unordered_map(It,It,n,Hash,Alloc) CTAD: custom hash + supplied allocator");
+        Check(ch.get_allocator().id == 51 && ch.size() == 3, "phase113 (It,It,n,Hash,Alloc) CTAD: hash+alloc threaded");
+
+        std::unordered_map cnh(mv.begin(), mv.end(), 8, P113Hash{});
+        static_assert(std::is_same_v<decltype(cnh),
+                          std::unordered_map<int, int, P113Hash, std::equal_to<int>, std::allocator<std::pair<const int, int>>>>,
+                      "phase113 unordered_map(It,It,n,Hash) CTAD still deduces the hash (default allocator)");
+        Check(cnh.size() == 3, "phase113 hasher iterator CTAD: unaffected by NotAllocatorLike");
+    }
+
+    Check(!P105OwnAllocTrap::crossInstanceFree, "phase113 unordered allocator-extended ctors + CTAD: ZERO cross-instance frees");
+
+    // (E) unordered_set base-ctor widening regression: the (It,It,buckets...)
+    //     and (init_list,buckets...) forms previously did not compile (the
+    //     deduction guide matched but no matching ctor existed). A large
+    //     bucket request proves the buckets argument is threaded to the engine.
+    {
+        std::vector<int>        vv{1, 2, 3, 4};
+        std::unordered_set<int> us(vv.begin(), vv.end(), 64);
+        Check(us.size() == 4 && us.bucket_count() >= 64,
+              "phase113 unordered_set (It,It,buckets) widened ctor builds + honors buckets");
+        std::unordered_set<int> us2({5, 6, 7}, 64);
+        Check(us2.size() == 3 && us2.bucket_count() >= 64,
+              "phase113 unordered_set (init_list,buckets) widened ctor builds + honors buckets");
+        std::unordered_set<int> us3(vv.begin(), vv.end(), 8, std::hash<int>{}, std::equal_to<int>{}, std::allocator<int>{});
+        Check(us3.size() == 4, "phase113 unordered_set (It,It,buckets,hash,eq,alloc) full ctor builds");
+    }
+
+    // (G) pmr smoke -- the concrete motivating idiom. Building a pmr unordered
+    //     container directly over a resource previously required the
+    //     (0,Hash,Eq,PMA(&res)) workaround (no allocator-only ctor).
+    {
+        char                                buf[512];
+        std::pmr::monotonic_buffer_resource mono{buf, sizeof(buf)};
+        std::pmr::unordered_map<int, int>   m{&mono};
+        m.emplace(1, 100);
+        m.emplace(2, 200);
+        std::pmr::unordered_set<int> s{&mono};
+        s.insert(9);
+        s.insert(9);
+        Check(m.size() == 2 && m.at(2) == 200 && s.size() == 1 && s.count(9) == 1,
+              "phase113 pmr::unordered_map/unordered_set built directly over a resource (allocator-only ctor)");
+    }
+
+    // (H) std::allocator no-regression across the new ctor forms.
+    {
+        std::unordered_map<int, int> a(mv.begin(), mv.end(), 8, std::allocator<std::pair<const int, int>>());
+        std::unordered_map<int, int> b(4, std::allocator<std::pair<const int, int>>());
+        std::unordered_map<int, int> c{std::allocator<std::pair<const int, int>>()};
+        std::unordered_set<int>      d({1, 2, 3}, 8, std::allocator<int>());
+        Check(a.size() == 3 && b.empty() && c.empty() && d.size() == 3,
+              "phase113 std::allocator no-regression: (It,It,n,alloc)/(n,alloc)/allocator-only/(il,n,alloc)");
+    }
+
+    printf("[CXX] PASS phase113: unordered_map/set/multimap/multiset allocator-only + allocator-extended "
+           "(buckets, iterator, initializer_list) ctors + allocator-extended iterator CTAD guides "
+           "([unord.map.overview]/[unord.set.overview]); unordered_set base-ctor widening; trap-verified, "
+           "pmr direct-over-resource, std::allocator no-regression\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -21640,6 +21824,7 @@ int main()
     Phase110();
     Phase111();
     Phase112();
+    Phase113();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
