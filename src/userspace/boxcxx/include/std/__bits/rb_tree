@@ -402,6 +402,25 @@ public:
     {
         StealFrom(other);
     }
+    // Allocator-extended copy: uses the caller's allocator directly (no
+    // select_on_container_copy_construction), per [container.alloc.reqmts].
+    Tree(const Tree &other, const Alloc &a) : __comp(other.__comp), __alloc(a)
+    {
+        ResetHeader();
+        CopyFrom(other);
+    }
+    // Allocator-extended move: steal when the supplied allocator can free
+    // other's nodes (always-equal, or compares equal), else element-wise
+    // move through our own allocator.
+    Tree(Tree &&other, const Alloc &a)
+        : __comp(std::move(other.__comp)), __alloc(a)
+    {
+        ResetHeader();
+        if (NodeTraits::is_always_equal::value || __alloc == other.__alloc)
+            StealFrom(other);
+        else
+            MoveElementsFrom(other);
+    }
     ~Tree() { clear(); }
 
     Tree &operator=(const Tree &other)
@@ -415,15 +434,27 @@ public:
         CopyFrom(other);
         return *this;
     }
-    Tree &operator=(Tree &&other) noexcept
+    Tree &operator=(Tree &&other) noexcept(
+        NodeTraits::is_always_equal::value &&
+        is_nothrow_move_assignable_v<Comp>)
     {
         if (this == &other) return *this;
+        constexpr bool pocma =
+            NodeTraits::propagate_on_container_move_assignment::value;
+        if (pocma || NodeTraits::is_always_equal::value ||
+            __alloc == other.__alloc) {
+            clear();
+            if constexpr (pocma) __alloc = std::move(other.__alloc);
+            __comp = std::move(other.__comp);
+            StealFrom(other);
+            return *this;
+        }
+        // Unequal allocators without propagation: cannot take other's nodes
+        // (we would later free them through a different allocator). Move the
+        // elements into our own storage; other keeps its (moved-from) nodes.
         clear();
-        if constexpr (NodeTraits::propagate_on_container_move_assignment::
-                          value)
-            __alloc = std::move(other.__alloc);
         __comp = std::move(other.__comp);
-        StealFrom(other);
+        MoveElementsFrom(other);
         return *this;
     }
 
@@ -648,16 +679,18 @@ public:
         return removed;
     }
 
-    void swap(Tree &other) noexcept
+    void swap(Tree &other) noexcept(
+        NodeTraits::is_always_equal::value && is_nothrow_swappable_v<Comp>)
     {
         if constexpr (NodeTraits::propagate_on_container_swap::value) {
             NodeAlloc tmp = __alloc;
             __alloc       = other.__alloc;
             other.__alloc = tmp;
         }
-        Comp ctmp    = __comp;
-        __comp       = other.__comp;
-        other.__comp = ctmp;
+        // Unqualified (ADL) swap of the comparator honors a user Comp's own
+        // swap and matches the is_nothrow_swappable_v predicate above.
+        using std::swap;
+        swap(__comp, other.__comp);
         NodeBase htmp;
         size_type stmp = __count;
         __count        = other.__count;
@@ -780,8 +813,33 @@ private:
 
     void CopyFrom(const Tree &other)
     {
-        for (const_iterator it = other.begin(); it != other.end(); ++it)
-            EmplaceMulti(*it);
+        try {
+            for (const_iterator it = other.begin(); it != other.end(); ++it)
+                EmplaceMulti(*it);
+        } catch (...) {
+            // From a CONSTRUCTOR caller, ~Tree does not run on exception, so
+            // a throwing element copy mid-loop would leak the nodes inserted
+            // so far. Free them, rethrow (basic guarantee).
+            clear();
+            throw;
+        }
+    }
+
+    // Element-wise move from `other` through *this's OWN allocator -- used
+    // when allocators compare unequal and must not propagate. On success
+    // `other` is emptied (other.clear() runs through OTHER's own allocator --
+    // never a cross-allocator free), so a moved-from source is left empty,
+    // matching libstdc++/libc++.
+    void MoveElementsFrom(Tree &other)
+    {
+        try {
+            for (iterator it = other.begin(); it != other.end(); ++it)
+                EmplaceMulti(std::move(*it));
+        } catch (...) {
+            clear();
+            throw;
+        }
+        other.clear();
     }
 
     void StealFrom(Tree &other) noexcept

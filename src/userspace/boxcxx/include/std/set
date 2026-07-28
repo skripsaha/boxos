@@ -80,8 +80,10 @@ public:
     }
     set(const set &) = default;
     set(set &&) noexcept = default;
+    set(const set &other, const Alloc &a) : __t(other.__t, a) {}
+    set(set &&other, const Alloc &a) : __t(std::move(other.__t), a) {}
     set &operator=(const set &) = default;
-    set &operator=(set &&) noexcept = default;
+    set &operator=(set &&) = default;
     set &operator=(initializer_list<Key> il)
     {
         clear();
@@ -162,7 +164,7 @@ public:
         return __t.EraseKey(std::forward<K>(x));
     }
     void clear() noexcept { __t.clear(); }
-    void swap(set &other) noexcept { __t.swap(other.__t); }
+    void swap(set &other) noexcept(noexcept(__t.swap(other.__t))) { __t.swap(other.__t); }
 
     // ── node handle / merge (Ф28a) ──────────────────────────────────────
 
@@ -342,8 +344,10 @@ public:
     }
     multiset(const multiset &) = default;
     multiset(multiset &&) noexcept = default;
+    multiset(const multiset &other, const Alloc &a) : __t(other.__t, a) {}
+    multiset(multiset &&other, const Alloc &a) : __t(std::move(other.__t), a) {}
     multiset &operator=(const multiset &) = default;
-    multiset &operator=(multiset &&) noexcept = default;
+    multiset &operator=(multiset &&) = default;
     multiset &operator=(initializer_list<Key> il)
     {
         clear();
@@ -429,7 +433,7 @@ public:
         return __t.EraseKey(std::forward<K>(x));
     }
     void clear() noexcept { __t.clear(); }
-    void swap(multiset &other) noexcept { __t.swap(other.__t); }
+    void swap(multiset &other) noexcept(noexcept(__t.swap(other.__t))) { __t.swap(other.__t); }
 
     // ── node handle / merge (Ф28a) ──────────────────────────────────────
 
@@ -577,12 +581,12 @@ bool operator==(const multiset<K, C, A> &a, const multiset<K, C, A> &b)
     return __rb::SetEqual(a, b);
 }
 template <typename K, typename C, typename A>
-void swap(set<K, C, A> &a, set<K, C, A> &b) noexcept
+void swap(set<K, C, A> &a, set<K, C, A> &b) noexcept(noexcept(a.swap(b)))
 {
     a.swap(b);
 }
 template <typename K, typename C, typename A>
-void swap(multiset<K, C, A> &a, multiset<K, C, A> &b) noexcept
+void swap(multiset<K, C, A> &a, multiset<K, C, A> &b) noexcept(noexcept(a.swap(b)))
 {
     a.swap(b);
 }

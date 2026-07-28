@@ -250,7 +250,7 @@ public:
         return __t.EraseKey(std::forward<K>(x));
     }
     void clear() noexcept { __t.clear(); }
-    void swap(unordered_map &other) noexcept { __t.swap(other.__t); }
+    void swap(unordered_map &other) noexcept(noexcept(__t.swap(other.__t))) { __t.swap(other.__t); }
 
     // ── node handle / merge (Ф28b) ──────────────────────────────────────
 
@@ -549,7 +549,7 @@ public:
         return __t.EraseKey(std::forward<K>(x));
     }
     void clear() noexcept { __t.clear(); }
-    void swap(unordered_multimap &other) noexcept { __t.swap(other.__t); }
+    void swap(unordered_multimap &other) noexcept(noexcept(__t.swap(other.__t))) { __t.swap(other.__t); }
 
     // ── node handle / merge (Ф28b) ──────────────────────────────────────
 
@@ -705,7 +705,7 @@ bool operator==(const unordered_map<K, T, H, E, A> &a,
 
 template <typename K, typename T, typename H, typename E, typename A>
 void swap(unordered_map<K, T, H, E, A> &a,
-          unordered_map<K, T, H, E, A> &b) noexcept
+          unordered_map<K, T, H, E, A> &b) noexcept(noexcept(a.swap(b)))
 {
     a.swap(b);
 }
@@ -753,7 +753,7 @@ bool operator==(const unordered_multimap<K, T, H, E, A> &a,
 
 template <typename K, typename T, typename H, typename E, typename A>
 void swap(unordered_multimap<K, T, H, E, A> &a,
-          unordered_multimap<K, T, H, E, A> &b) noexcept
+          unordered_multimap<K, T, H, E, A> &b) noexcept(noexcept(a.swap(b)))
 {
     a.swap(b);
 }
