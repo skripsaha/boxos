@@ -113,6 +113,20 @@ public:
     map(map &&) noexcept = default;
     map(const map &other, const Alloc &a) : __t(other.__t, a) {}
     map(map &&other, const Alloc &a) : __t(std::move(other.__t), a) {}
+    // Allocator-extended forms ([map.overview]): allocator-only (the pmr
+    // `map m(&resource)` idiom), iterator-pair, and initializer_list. Each
+    // delegates to the Tree(Comp, Alloc) engine ctor with a default-
+    // constructed comparator.
+    explicit map(const Alloc &a) : __t(Comp(), a) {}
+    template <typename It>
+    map(It first, It last, const Alloc &a) : __t(Comp(), a)
+    {
+        insert(first, last);
+    }
+    map(initializer_list<value_type> il, const Alloc &a) : __t(Comp(), a)
+    {
+        insert(il.begin(), il.end());
+    }
     map &operator=(const map &) = default;
     map &operator=(map &&) = default;
     map &operator=(initializer_list<value_type> il)
@@ -480,6 +494,17 @@ public:
     multimap(multimap &&) noexcept = default;
     multimap(const multimap &other, const Alloc &a) : __t(other.__t, a) {}
     multimap(multimap &&other, const Alloc &a) : __t(std::move(other.__t), a) {}
+    // Allocator-extended forms ([multimap.overview]) — see map above.
+    explicit multimap(const Alloc &a) : __t(Comp(), a) {}
+    template <typename It>
+    multimap(It first, It last, const Alloc &a) : __t(Comp(), a)
+    {
+        insert(first, last);
+    }
+    multimap(initializer_list<value_type> il, const Alloc &a) : __t(Comp(), a)
+    {
+        insert(il.begin(), il.end());
+    }
     multimap &operator=(const multimap &) = default;
     multimap &operator=(multimap &&) = default;
     multimap &operator=(initializer_list<value_type> il)
@@ -792,10 +817,18 @@ erase_if(multimap<K, T, C, A> &m, Pred pred)
 // 2-arg ctor is (const Comp&, const Alloc&), whose Key/T never appear in
 // any parameter type, so its implicit guide can never deduce Key/T from a
 // call and is never a competing candidate.
-template <typename It, typename Comp = less<__rb::DeductKey<It>>,
+template <typename It, NotAllocatorLike Comp = less<__rb::DeductKey<It>>,
           typename Alloc = allocator<pair<const __rb::DeductKey<It>, __rb::DeductMapped<It>>>>
 map(It, It, Comp = Comp(), Alloc = Alloc())
     -> map<__rb::DeductKey<It>, __rb::DeductMapped<It>, Comp, Alloc>;
+
+// Allocator-extended iterator guide ([map.deduct]): the 3rd argument is an
+// allocator, so Comp is defaulted. NotAllocatorLike on the guide above +
+// AllocatorLike here partitions the 3rd argument's type into exactly one
+// guide (same technique as the from_range pair below).
+template <typename It, AllocatorLike Alloc>
+map(It, It, Alloc)
+    -> map<__rb::DeductKey<It>, __rb::DeductMapped<It>, less<__rb::DeductKey<It>>, Alloc>;
 
 template <ranges::input_range R, NotAllocatorLike Comp = less<__rb::DeductRangeKey<R>>,
           typename Alloc = allocator<pair<const __rb::DeductRangeKey<R>, __rb::DeductRangeMapped<R>>>>
@@ -811,10 +844,14 @@ template <ranges::input_range R, AllocatorLike Alloc>
 map(from_range_t, R &&, Alloc)
     -> map<__rb::DeductRangeKey<R>, __rb::DeductRangeMapped<R>, less<__rb::DeductRangeKey<R>>, Alloc>;
 
-template <typename It, typename Comp = less<__rb::DeductKey<It>>,
+template <typename It, NotAllocatorLike Comp = less<__rb::DeductKey<It>>,
           typename Alloc = allocator<pair<const __rb::DeductKey<It>, __rb::DeductMapped<It>>>>
 multimap(It, It, Comp = Comp(), Alloc = Alloc())
     -> multimap<__rb::DeductKey<It>, __rb::DeductMapped<It>, Comp, Alloc>;
+
+template <typename It, AllocatorLike Alloc>
+multimap(It, It, Alloc)
+    -> multimap<__rb::DeductKey<It>, __rb::DeductMapped<It>, less<__rb::DeductKey<It>>, Alloc>;
 
 template <ranges::input_range R, NotAllocatorLike Comp = less<__rb::DeductRangeKey<R>>,
           typename Alloc = allocator<pair<const __rb::DeductRangeKey<R>, __rb::DeductRangeMapped<R>>>>

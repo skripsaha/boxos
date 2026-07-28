@@ -21378,6 +21378,134 @@ void Phase111()
            "no-regression\n");
 }
 
+void Phase112()
+{
+    // ── Ф30 [A] allocator-only / allocator-extended ctors for the ordered
+    //    associative containers ([map.overview], [set.overview] and the
+    //    multi- variants): explicit X(const Alloc&) [the pmr `X(&resource)`
+    //    idiom], X(It,It,const Alloc&), X(init_list,const Alloc&), plus the
+    //    matching allocator-extended iterator CTAD guide. Every new ctor
+    //    delegates to the Tree(Comp,Alloc) engine ctor -- engines untouched.
+    //    The trapping allocator proves the *supplied* allocator is the one
+    //    that owns every node and that no cross-instance free occurs. ────────
+    using MA = P105OwnAllocDefault<std::pair<const int, int>>; // map value_type
+    using SA = P105OwnAllocDefault<int>;                       // set value_type
+    using Map      = std::map<int, int, std::less<int>, MA>;
+    using MultiMap = std::multimap<int, int, std::less<int>, MA>;
+    using Set      = std::set<int, std::less<int>, SA>;
+    using MultiSet = std::multiset<int, std::less<int>, SA>;
+
+    std::vector<std::pair<int, int>> mv{{1, 10}, {2, 20}, {2, 21}, {3, 30}};
+    std::vector<int>                 sv{1, 2, 2, 3};
+
+    // (1) allocator-only ctor: empty container, allocator id preserved.
+    P105OwnAllocTrap::Reset();
+    {
+        Map      m(MA(11));
+        MultiMap mm(MA(12));
+        Set      s(SA(13));
+        MultiSet ms(SA(14));
+        Check(m.empty() && m.get_allocator().id == 11, "phase112 map allocator-only ctor: empty, id preserved");
+        Check(mm.empty() && mm.get_allocator().id == 12, "phase112 multimap allocator-only ctor: empty, id preserved");
+        Check(s.empty() && s.get_allocator().id == 13, "phase112 set allocator-only ctor: empty, id preserved");
+        Check(ms.empty() && ms.get_allocator().id == 14, "phase112 multiset allocator-only ctor: empty, id preserved");
+    }
+
+    // (2) iterator-pair + allocator ctor: content built via supplied allocator.
+    {
+        Map      m(mv.begin(), mv.end(), MA(21));  // unique keys {1,2,3}, keeps first key-2
+        MultiMap mm(mv.begin(), mv.end(), MA(22)); // keeps duplicate key 2 twice
+        Set      s(sv.begin(), sv.end(), SA(23));  // unique {1,2,3}
+        MultiSet ms(sv.begin(), sv.end(), SA(24)); // keeps duplicate 2 twice
+        Check(m.get_allocator().id == 21 && m.size() == 3 && m.at(1) == 10 && m.at(2) == 20,
+              "phase112 map (It,It,Alloc): supplied allocator + content (dup key rejected)");
+        Check(mm.get_allocator().id == 22 && mm.size() == 4 && mm.count(2) == 2,
+              "phase112 multimap (It,It,Alloc): supplied allocator + duplicate kept");
+        Check(s.get_allocator().id == 23 && s.size() == 3 && s.count(2) == 1,
+              "phase112 set (It,It,Alloc): supplied allocator + content");
+        Check(ms.get_allocator().id == 24 && ms.size() == 4 && ms.count(2) == 2,
+              "phase112 multiset (It,It,Alloc): supplied allocator + duplicate kept");
+    }
+
+    // (3) initializer_list + allocator ctor.
+    {
+        Map      m({{1, 10}, {2, 20}}, MA(31));
+        MultiMap mm({{2, 20}, {2, 21}}, MA(32));
+        Set      s({1, 2, 3}, SA(33));
+        MultiSet ms({2, 2, 5}, SA(34));
+        Check(m.get_allocator().id == 31 && m.size() == 2 && m.at(2) == 20,
+              "phase112 map (init_list,Alloc): supplied allocator + content");
+        Check(mm.get_allocator().id == 32 && mm.size() == 2 && mm.count(2) == 2,
+              "phase112 multimap (init_list,Alloc): supplied allocator + duplicate kept");
+        Check(s.get_allocator().id == 33 && s.size() == 3, "phase112 set (init_list,Alloc): supplied allocator + content");
+        Check(ms.get_allocator().id == 34 && ms.size() == 3 && ms.count(2) == 2,
+              "phase112 multiset (init_list,Alloc): supplied allocator + duplicate kept");
+    }
+    Check(!P105OwnAllocTrap::crossInstanceFree, "phase112 ordered allocator-extended ctors: ZERO cross-instance frees");
+
+    // (4) allocator-extended iterator CTAD guide ([map.deduct]/[set.deduct]):
+    //     X(first,last,alloc) must deduce Comp=less (NOT the allocator into the
+    //     comparator slot). This only resolves unambiguously because the
+    //     comparator iterator guide is now NotAllocatorLike-constrained.
+    {
+        std::map      cm(mv.begin(), mv.end(), MA(41));
+        std::multimap cmm(mv.begin(), mv.end(), MA(41));
+        std::set      cs(sv.begin(), sv.end(), SA(42));
+        std::multiset cms(sv.begin(), sv.end(), SA(42));
+        static_assert(std::is_same_v<decltype(cm), std::map<int, int, std::less<int>, MA>>,
+                      "phase112 map(It,It,Alloc) CTAD deduces less + supplied allocator");
+        static_assert(std::is_same_v<decltype(cmm), std::multimap<int, int, std::less<int>, MA>>,
+                      "phase112 multimap(It,It,Alloc) CTAD deduces less + supplied allocator");
+        static_assert(std::is_same_v<decltype(cs), std::set<int, std::less<int>, SA>>,
+                      "phase112 set(It,It,Alloc) CTAD deduces less + supplied allocator");
+        static_assert(std::is_same_v<decltype(cms), std::multiset<int, std::less<int>, SA>>,
+                      "phase112 multiset(It,It,Alloc) CTAD deduces less + supplied allocator");
+        Check(cm.get_allocator().id == 41 && cs.get_allocator().id == 42,
+              "phase112 allocator-extended iterator CTAD: allocator threaded through");
+
+        // The comparator CTAD path must still work (NotAllocatorLike must not
+        // block deducing a real comparator into the Comp slot).
+        std::map gm(mv.begin(), mv.end(), std::greater<int>{});
+        std::set gs(sv.begin(), sv.end(), std::greater<int>{});
+        static_assert(std::is_same_v<decltype(gm), std::map<int, int, std::greater<int>>>,
+                      "phase112 map(It,It,Comp) CTAD still deduces the comparator");
+        static_assert(std::is_same_v<decltype(gs), std::set<int, std::greater<int>>>,
+                      "phase112 set(It,It,Comp) CTAD still deduces the comparator");
+        Check(gm.size() == 3 && gs.size() == 3, "phase112 comparator iterator CTAD: unaffected by NotAllocatorLike");
+    }
+
+    // (5) std::allocator no-regression: allocator-only / (It,It,alloc) /
+    //     (init_list,alloc) all build correctly with the default allocator.
+    {
+        std::map<int, int> m(mv.begin(), mv.end(), std::allocator<std::pair<const int, int>>());
+        std::set<int>      s({1, 2, 3}, std::allocator<int>());
+        std::map<int, int> me{std::allocator<std::pair<const int, int>>()};
+        Check(m.size() == 3 && s.size() == 3 && me.empty(),
+              "phase112 std::allocator no-regression: (It,It,alloc) / (init_list,alloc) / allocator-only");
+    }
+
+    // (6) pmr smoke -- the concrete motivating idiom. Building a pmr container
+    //     directly over a resource previously did not compile (no allocator-
+    //     only ctor); it required a comparator/bucket workaround.
+    {
+        char                                buf[512];
+        std::pmr::monotonic_buffer_resource mono{buf, sizeof(buf)};
+        std::pmr::map<int, int>             m{&mono};
+        m.emplace(1, 100);
+        m.emplace(2, 200);
+        std::pmr::set<int> s{&mono};
+        s.insert(7);
+        s.insert(7);
+        Check(m.size() == 2 && m.at(2) == 200 && s.size() == 1 && s.count(7) == 1,
+              "phase112 pmr::map/pmr::set built directly over a resource (allocator-only ctor)");
+    }
+
+    printf("[CXX] PASS phase112: map/set/multimap/multiset allocator-only + allocator-extended "
+           "(iterator, initializer_list) ctors + allocator-extended iterator CTAD guides "
+           "([map.overview]/[set.overview]); trap-verified, pmr direct-over-resource, "
+           "std::allocator no-regression\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -21511,6 +21639,7 @@ int main()
     Phase109();
     Phase110();
     Phase111();
+    Phase112();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
