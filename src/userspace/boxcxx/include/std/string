@@ -158,7 +158,11 @@ public:
         if (AllocTraits::is_always_equal::value || a == other.__alloc) {
             StealFrom(other);
         } else {
+            // Unequal allocator: copy the chars through our own allocator,
+            // then empty the moved-from source (matches libstdc++/libc++ and
+            // the map/set/unordered_* element-wise move path).
             InitCopy(other.__data, other.__size);
+            other.clear();
         }
     }
 
@@ -196,7 +200,12 @@ public:
             StealFrom(other);
             return *this;
         }
-        return assign(other.__data, other.__size);
+        // Unequal allocator without propagation: copy the chars through our
+        // own allocator, then empty the moved-from source (matches
+        // libstdc++/libc++ and the map/set/unordered_* element-wise path).
+        assign(other.__data, other.__size);
+        other.clear();
+        return *this;
     }
 
     basic_string &operator=(const C *s) { return assign(s, Traits::length(s)); }
@@ -582,7 +591,9 @@ public:
         return __view(*this).copy(dst, count, pos);
     }
 
-    void swap(basic_string &other) noexcept
+    void swap(basic_string &other) noexcept(
+        AllocTraits::propagate_on_container_swap::value ||
+        AllocTraits::is_always_equal::value)
     {
         if (this == &other) return;
         if constexpr (AllocTraits::propagate_on_container_swap::value) {
@@ -926,7 +937,7 @@ strong_ordering operator<=>(const basic_string<C, T, A> &a, const C *b)
 }
 
 template <typename C, typename T, typename A>
-void swap(basic_string<C, T, A> &a, basic_string<C, T, A> &b) noexcept
+void swap(basic_string<C, T, A> &a, basic_string<C, T, A> &b) noexcept(noexcept(a.swap(b)))
 {
     a.swap(b);
 }

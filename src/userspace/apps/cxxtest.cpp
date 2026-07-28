@@ -21253,6 +21253,131 @@ void Phase110()
            "path leak guard (throwing element), self-move/self-swap, std::allocator no-regression\n");
 }
 
+void Phase111()
+{
+    // ── Ф30 AllocatorAware: basic_string over the P105OwnAlloc trap. LONG
+    //    strings force heap allocation (SSO strings never allocate, so the
+    //    trap would see nothing). Verifies the already-present alloc-ext
+    //    ctors / POCCA / POCMA / POCS plus this commit's swap conditional
+    //    noexcept and element-wise-move source-emptying. ────────────────────
+    const char *L1 = "abcdefghijklmnopqrstuvwxyz0123456789"; // 36 chars, > SSO
+    const char *L2 = "ZYXWVUTSRQPONMLKJIHGFEDCBA9876543210"; // 36 chars, > SSO
+    using SAc  = P105OwnAllocDefault<char>;
+    using SAcP = P105OwnAlloc<char, true, false, false, true>;
+    using Str  = std::basic_string<char, std::char_traits<char>, SAc>;
+
+    // swap noexcept must be conditional: noexcept(POCS || is_always_equal).
+    // string::swap never actually throws, but the reported value must match
+    // [string.special] -- fails to compile if the fix is reverted.
+    static_assert(noexcept(std::declval<std::string &>().swap(std::declval<std::string &>())),
+                  "phase111 string::swap noexcept(true) for std::allocator");
+    static_assert(!noexcept(std::declval<Str &>().swap(std::declval<Str &>())),
+                  "phase111 string::swap noexcept(false) for a stateful POCS=false non-always-equal allocator");
+
+    // (1) move-assign POCMA=false unequal: element-wise copy, source EMPTIED.
+    P105OwnAllocTrap::Reset();
+    {
+        Str a(L1, SAc(1));
+        Str b(L2, SAc(2));
+        b = std::move(a);
+        Check(b.get_allocator().id == 2 && b == L1 && a.empty(),
+              "phase111 string move-assign(unequal,POCMA=false): element-wise copy, source EMPTIED");
+    }
+    Check(!P105OwnAllocTrap::crossInstanceFree, "phase111 string move-assign(unequal): ZERO cross-instance frees");
+
+    // (2) alloc-ext copy ctor (equal + unequal), source unaffected.
+    P105OwnAllocTrap::Reset();
+    {
+        Str src(L1, SAc(5));
+        Str eq(src, SAc(5));
+        Str uneq(src, SAc(7));
+        Check(eq.get_allocator().id == 5 && eq == L1 && uneq.get_allocator().id == 7 && uneq == L1 && src == L1,
+              "phase111 string alloc-ext copy ctor(equal+unequal): content via supplied allocator, source unaffected");
+    }
+    Check(!P105OwnAllocTrap::crossInstanceFree, "phase111 string alloc-ext copy ctor: ZERO cross-instance frees");
+
+    // (3) alloc-ext move ctor: equal steals (0 new allocations), unequal
+    //     copies element-wise and EMPTIES the source.
+    P105OwnAllocTrap::Reset();
+    {
+        Str se(L1, SAc(60));
+        std::size_t before = P105OwnAllocTrap::allocations;
+        Str de(std::move(se), SAc(60));
+        Check(de == L1 && se.empty() && P105OwnAllocTrap::allocations == before,
+              "phase111 string alloc-ext move ctor(equal id): steal (zero new allocations, source emptied)");
+        Str su(L2, SAc(70));
+        Str du(std::move(su), SAc(71));
+        Check(du.get_allocator().id == 71 && du == L2 && su.empty(),
+              "phase111 string alloc-ext move ctor(unequal id): element-wise copy, source EMPTIED");
+    }
+    Check(!P105OwnAllocTrap::crossInstanceFree, "phase111 string alloc-ext move ctor: ZERO cross-instance frees");
+
+    // (4) copy-assign POCCA=true unequal: propagate + content.
+    P105OwnAllocTrap::Reset();
+    {
+        Str tgt(L1, SAc(30));
+        Str sc(L2, SAc(40));
+        tgt = sc;
+        Check(tgt.get_allocator().id == 40 && tgt == L2 && sc == L2,
+              "phase111 string copy-assign(POCCA,unequal): propagates allocator + copies content");
+    }
+    Check(!P105OwnAllocTrap::crossInstanceFree, "phase111 string copy-assign(POCCA): ZERO cross-instance frees");
+
+    // (5) swap POCS=true stateful: exchange allocators + content.
+    {
+        using StrP = std::basic_string<char, std::char_traits<char>, SAcP>;
+        P105OwnAllocTrap::Reset();
+        {
+            StrP x(L1, SAcP(50));
+            StrP y(L2, SAcP(51));
+            x.swap(y);
+            Check(x.get_allocator().id == 51 && y.get_allocator().id == 50 && x == L2 && y == L1,
+                  "phase111 string swap(POCS=true): exchanges allocators + contents");
+        }
+        Check(!P105OwnAllocTrap::crossInstanceFree, "phase111 string swap(POCS=true) stateful: ZERO cross-instance frees");
+    }
+
+    // (6) POCMA=true move-assign: propagate + steal.
+    {
+        using SAcM = P105OwnAlloc<char, true, true, false>;
+        using StrM = std::basic_string<char, std::char_traits<char>, SAcM>;
+        P105OwnAllocTrap::Reset();
+        StrM a(L1, SAcM(80));
+        StrM b(L2, SAcM(81));
+        std::size_t before = P105OwnAllocTrap::allocations;
+        b = std::move(a);
+        Check(b.get_allocator().id == 80 && b == L1 && a.empty() && P105OwnAllocTrap::allocations == before,
+              "phase111 string move-assign(POCMA=true): propagate + steal (zero new allocations)");
+        Check(!P105OwnAllocTrap::crossInstanceFree, "phase111 string move-assign(POCMA=true): ZERO cross-instance frees");
+    }
+
+    // (7) self-move-assign / self-swap: guarded no-ops.
+    P105OwnAllocTrap::Reset();
+    {
+        Str m(L1, SAc(1));
+        Str &mref = m;
+        m = std::move(mref);
+        Check(m == L1, "phase111 string self-move-assign: guarded no-op (content intact)");
+        m.swap(mref);
+        Check(m == L1, "phase111 string self-swap: safe no-op (content intact)");
+    }
+    Check(!P105OwnAllocTrap::crossInstanceFree, "phase111 string self-move/self-swap: ZERO cross-instance frees");
+
+    // (8) std::allocator no-regression (long strings, real heap).
+    {
+        std::string a(L1), b(L2);
+        b = std::move(a);
+        Check(b == L1, "phase111 std::string move-assign: content moved");
+        std::string c(b, std::allocator<char>());
+        Check(c == L1 && b == L1, "phase111 std::string alloc-ext copy ctor: content copied, source unaffected");
+    }
+
+    printf("[CXX] PASS phase111: basic_string AllocatorAware -- alloc-extended copy/move ctors, POCCA "
+           "copy-assign, POCMA/is_always_equal move-assign (steal vs element-wise, source emptied), "
+           "propagate_on_container_swap (conditional noexcept), self-move/self-swap, std::allocator "
+           "no-regression\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -21385,6 +21510,7 @@ int main()
     Phase108();
     Phase109();
     Phase110();
+    Phase111();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
