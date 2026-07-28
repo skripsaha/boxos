@@ -111,8 +111,10 @@ public:
     }
     map(const map &) = default;
     map(map &&) noexcept = default;
+    map(const map &other, const Alloc &a) : __t(other.__t, a) {}
+    map(map &&other, const Alloc &a) : __t(std::move(other.__t), a) {}
     map &operator=(const map &) = default;
-    map &operator=(map &&) noexcept = default;
+    map &operator=(map &&) = default;
     map &operator=(initializer_list<value_type> il)
     {
         clear();
@@ -258,7 +260,7 @@ public:
     }
 
     void clear() noexcept { __t.clear(); }
-    void swap(map &other) noexcept { __t.swap(other.__t); }
+    void swap(map &other) noexcept(noexcept(__t.swap(other.__t))) { __t.swap(other.__t); }
 
     // ── node handle / merge (Ф28a) ──────────────────────────────────────
 
@@ -476,8 +478,10 @@ public:
     }
     multimap(const multimap &) = default;
     multimap(multimap &&) noexcept = default;
+    multimap(const multimap &other, const Alloc &a) : __t(other.__t, a) {}
+    multimap(multimap &&other, const Alloc &a) : __t(std::move(other.__t), a) {}
     multimap &operator=(const multimap &) = default;
-    multimap &operator=(multimap &&) noexcept = default;
+    multimap &operator=(multimap &&) = default;
     multimap &operator=(initializer_list<value_type> il)
     {
         clear();
@@ -560,7 +564,7 @@ public:
         return __t.EraseKey(std::forward<K>(x));
     }
     void clear() noexcept { __t.clear(); }
-    void swap(multimap &other) noexcept { __t.swap(other.__t); }
+    void swap(multimap &other) noexcept(noexcept(__t.swap(other.__t))) { __t.swap(other.__t); }
 
     // ── node handle / merge (Ф28a) ──────────────────────────────────────
 
@@ -739,12 +743,12 @@ bool operator==(const multimap<K, T, C, A> &a, const multimap<K, T, C, A> &b)
 }
 
 template <typename K, typename T, typename C, typename A>
-void swap(map<K, T, C, A> &a, map<K, T, C, A> &b) noexcept
+void swap(map<K, T, C, A> &a, map<K, T, C, A> &b) noexcept(noexcept(a.swap(b)))
 {
     a.swap(b);
 }
 template <typename K, typename T, typename C, typename A>
-void swap(multimap<K, T, C, A> &a, multimap<K, T, C, A> &b) noexcept
+void swap(multimap<K, T, C, A> &a, multimap<K, T, C, A> &b) noexcept(noexcept(a.swap(b)))
 {
     a.swap(b);
 }

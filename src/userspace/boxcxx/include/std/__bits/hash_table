@@ -737,9 +737,9 @@ private:
 
     // Element-wise move from `other` into *this through *this's OWN
     // allocator — used when allocators compare unequal and must not
-    // propagate. other's nodes are left in place (each holding a moved-from
-    // value) so other's own clear()/destructor frees them through its OWN
-    // allocator: no cross-allocator free is possible on this path.
+    // propagate. On success `other` is emptied (other.clear() runs through
+    // OTHER's own allocator — never a cross-allocator free), so a moved-from
+    // source is left empty, matching libstdc++/libc++.
     void MoveElementsFrom(Table &other)
     {
         __max_lf = other.__max_lf;
@@ -747,12 +747,13 @@ private:
             for (iterator it = other.begin(); it != other.end(); ++it)
                 EmplaceMulti(std::move(*it));
         } catch (...) {
-            // Same constructor-leak guard as CopyFrom (this runs from the
-            // allocator-extended move ctor too). Leaves *this empty-valid.
+            // Constructor-leak guard (this also runs from the alloc-extended
+            // move ctor); leaves *this empty-valid, `other` valid-unspecified.
             clear();
             DropBuckets();
             throw;
         }
+        other.clear();
     }
 
     void StealFrom(Table &other) noexcept
