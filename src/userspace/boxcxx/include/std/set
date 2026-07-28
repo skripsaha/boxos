@@ -82,6 +82,20 @@ public:
     set(set &&) noexcept = default;
     set(const set &other, const Alloc &a) : __t(other.__t, a) {}
     set(set &&other, const Alloc &a) : __t(std::move(other.__t), a) {}
+    // Allocator-extended forms ([set.overview]): allocator-only (the pmr
+    // `set s(&resource)` idiom), iterator-pair, and initializer_list. Each
+    // delegates to the Tree(Comp, Alloc) engine ctor with a default-
+    // constructed comparator.
+    explicit set(const Alloc &a) : __t(Comp(), a) {}
+    template <typename It>
+    set(It first, It last, const Alloc &a) : __t(Comp(), a)
+    {
+        insert(first, last);
+    }
+    set(initializer_list<Key> il, const Alloc &a) : __t(Comp(), a)
+    {
+        insert(il.begin(), il.end());
+    }
     set &operator=(const set &) = default;
     set &operator=(set &&) = default;
     set &operator=(initializer_list<Key> il)
@@ -346,6 +360,17 @@ public:
     multiset(multiset &&) noexcept = default;
     multiset(const multiset &other, const Alloc &a) : __t(other.__t, a) {}
     multiset(multiset &&other, const Alloc &a) : __t(std::move(other.__t), a) {}
+    // Allocator-extended forms ([multiset.overview]) — see set above.
+    explicit multiset(const Alloc &a) : __t(Comp(), a) {}
+    template <typename It>
+    multiset(It first, It last, const Alloc &a) : __t(Comp(), a)
+    {
+        insert(first, last);
+    }
+    multiset(initializer_list<Key> il, const Alloc &a) : __t(Comp(), a)
+    {
+        insert(il.begin(), il.end());
+    }
     multiset &operator=(const multiset &) = default;
     multiset &operator=(multiset &&) = default;
     multiset &operator=(initializer_list<Key> il)
@@ -623,9 +648,15 @@ typename multiset<K, C, A>::size_type erase_if(multiset<K, C, A> &s, Pred pred)
 
 // ── deduction guides ([set.deduct] / [multiset.deduct]) ──────────────────
 // Iterator-pair and from_range_t forms only — same rationale as map's.
-template <typename It, typename Comp = less<iter_value_t<It>>,
+template <typename It, NotAllocatorLike Comp = less<iter_value_t<It>>,
           typename Alloc = allocator<iter_value_t<It>>>
 set(It, It, Comp = Comp(), Alloc = Alloc()) -> set<iter_value_t<It>, Comp, Alloc>;
+
+// Allocator-extended iterator guide ([set.deduct]): 3rd argument is an
+// allocator, Comp defaulted; NotAllocatorLike above + AllocatorLike here
+// partition the 3rd argument's type into exactly one guide.
+template <typename It, AllocatorLike Alloc>
+set(It, It, Alloc) -> set<iter_value_t<It>, less<iter_value_t<It>>, Alloc>;
 
 template <ranges::input_range R, NotAllocatorLike Comp = less<ranges::range_value_t<R>>,
           typename Alloc = allocator<ranges::range_value_t<R>>>
@@ -635,9 +666,12 @@ set(from_range_t, R &&, Comp = Comp(), Alloc = Alloc())
 template <ranges::input_range R, AllocatorLike Alloc>
 set(from_range_t, R &&, Alloc) -> set<ranges::range_value_t<R>, less<ranges::range_value_t<R>>, Alloc>;
 
-template <typename It, typename Comp = less<iter_value_t<It>>,
+template <typename It, NotAllocatorLike Comp = less<iter_value_t<It>>,
           typename Alloc = allocator<iter_value_t<It>>>
 multiset(It, It, Comp = Comp(), Alloc = Alloc()) -> multiset<iter_value_t<It>, Comp, Alloc>;
+
+template <typename It, AllocatorLike Alloc>
+multiset(It, It, Alloc) -> multiset<iter_value_t<It>, less<iter_value_t<It>>, Alloc>;
 
 template <ranges::input_range R, NotAllocatorLike Comp = less<ranges::range_value_t<R>>,
           typename Alloc = allocator<ranges::range_value_t<R>>>
