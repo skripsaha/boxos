@@ -2,13 +2,12 @@
 // char_traits for the five character types. Shared by <string_view> and
 // <string>. The char specialization rides the GCC builtins (constexpr-
 // capable in constant evaluation); the generic base uses plain loops.
-// off_type/pos_type/state_type are deferred until iostream lands (Ф9B)
-// — tracked in the conformance leftovers.
 #ifndef BOXCXX_BITS_CHAR_TRAITS
 #define BOXCXX_BITS_CHAR_TRAITS
 
 #include <cstddef>
 #include <cstdint>
+#include <iosfwd>
 
 namespace std {
 
@@ -16,8 +15,11 @@ namespace __char_impl {
 
 template <typename C, typename I>
 struct TraitsBase {
-    using char_type = C;
-    using int_type  = I;
+    using char_type  = C;
+    using int_type   = I;
+    using pos_type   = fpos<mbstate_t>;
+    using off_type   = streamoff;
+    using state_type = mbstate_t;
 
     static constexpr void assign(char_type &dst, const char_type &src) noexcept
     {

@@ -1,0 +1,20 @@
+// boxcxx — <__bits/version_iostreams>
+//
+// The __cpp_lib_* feature-test macro [version.syn] owned by <ios>/
+// <streambuf> -- split out for the same [support.limits.general]
+// per-header reason as <__bits/version_numeric>/<__bits/version_any> --
+// see those files' comments.
+//
+// This is commit 1 of the Ф30e iostream base spine (ios_base/basic_ios/
+// basic_streambuf only). Only the ONE feature this commit actually
+// completes is claimed here: openmode::noreplace (P2467R1) exists as a
+// real enumerator now. Every sstream/stringstream-specific macro waits
+// for the commit that ships basic_stringbuf and the stream classes.
+#ifndef BOXCXX_BITS_VERSION_IOSTREAMS
+#define BOXCXX_BITS_VERSION_IOSTREAMS
+
+#ifndef __cpp_lib_ios_noreplace
+#  define __cpp_lib_ios_noreplace 202207L
+#endif
+
+#endif // BOXCXX_BITS_VERSION_IOSTREAMS

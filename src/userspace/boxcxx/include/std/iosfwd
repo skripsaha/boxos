@@ -1,0 +1,125 @@
+// boxcxx — <iosfwd>
+// Forward declarations for the whole iostream class-template family, plus
+// the leaf types they are built from (streamoff/streamsize/fpos/mbstate_t).
+// A genuine leaf: only <cstddef> is included, and nothing declared here can
+// pull anything back in — every other iostream header, and <__bits/
+// char_traits>, sits safely underneath this one.
+//
+// mbstate_t belongs to <cwchar>/<cuchar> in the real standard; boxcxx has
+// neither yet, so it is defined here, minimally, until one of those headers
+// exists (at which point this definition moves there and <iosfwd> includes
+// it instead). boxcxx performs no real multibyte conversion (documented
+// "C"-locale-only, no-wide-streams posture) — the only requirement on
+// mbstate_t is that it be a distinct, trivially copyable, default-
+// constructible type.
+//
+// Every class template below is generic in CharT/Traits (and, for the
+// sstream family, Allocator) so a future wchar_t instantiation is not
+// structurally blocked — but only the char-based typedefs are shipped;
+// wide streams are a documented, out-of-scope exclusion.
+#ifndef BOXCXX_IOSFWD
+#define BOXCXX_IOSFWD
+
+#include <cstddef>
+
+namespace std {
+
+template <class CharT> struct char_traits;
+template <class T> class allocator;
+
+struct mbstate_t {
+    unsigned char __opaque[8] = {};
+};
+
+using streamoff  = long long;
+using streamsize = ptrdiff_t;
+
+template <class StateT>
+class fpos {
+public:
+    constexpr fpos() noexcept : __off(0), __state{} {}
+    constexpr fpos(streamoff off) noexcept : __off(off), __state{} {}
+
+    constexpr StateT state() const noexcept { return __state; }
+    constexpr void state(StateT s) noexcept { __state = s; }
+
+    constexpr fpos &operator+=(streamoff off) noexcept
+    {
+        __off += off;
+        return *this;
+    }
+    constexpr fpos &operator-=(streamoff off) noexcept
+    {
+        __off -= off;
+        return *this;
+    }
+    constexpr fpos operator+(streamoff off) const noexcept
+    {
+        fpos p(*this);
+        p += off;
+        return p;
+    }
+    constexpr fpos operator-(streamoff off) const noexcept
+    {
+        fpos p(*this);
+        p -= off;
+        return p;
+    }
+    constexpr streamoff operator-(const fpos &rhs) const noexcept { return __off - rhs.__off; }
+
+    // Implicit per [fpos]/synopsis (NOT explicit) — a real fpos converts to
+    // streamoff on demand (e.g. passed where an offset is expected).
+    constexpr operator streamoff() const noexcept { return __off; }
+
+    // state_ deliberately excluded from equality per [fpos]: two positions
+    // compare equal purely on their stream offset.
+    friend constexpr bool operator==(const fpos &a, const fpos &b) noexcept
+    {
+        return a.__off == b.__off;
+    }
+
+private:
+    streamoff __off;
+    StateT __state;
+};
+
+template <class CharT, class Traits = char_traits<CharT>>
+class basic_ios;
+template <class CharT, class Traits = char_traits<CharT>>
+class basic_streambuf;
+template <class CharT, class Traits = char_traits<CharT>>
+class basic_istream;
+template <class CharT, class Traits = char_traits<CharT>>
+class basic_ostream;
+template <class CharT, class Traits = char_traits<CharT>>
+class basic_iostream;
+template <class CharT, class Traits = char_traits<CharT>, class Allocator = allocator<CharT>>
+class basic_stringbuf;
+template <class CharT, class Traits = char_traits<CharT>, class Allocator = allocator<CharT>>
+class basic_istringstream;
+template <class CharT, class Traits = char_traits<CharT>, class Allocator = allocator<CharT>>
+class basic_ostringstream;
+template <class CharT, class Traits = char_traits<CharT>, class Allocator = allocator<CharT>>
+class basic_stringstream;
+
+class ios_base;
+class locale; // full definition in <locale>
+
+using ios           = basic_ios<char>;
+using streambuf     = basic_streambuf<char>;
+using istream       = basic_istream<char>;
+using ostream       = basic_ostream<char>;
+using iostream      = basic_iostream<char>;
+using stringbuf     = basic_stringbuf<char>;
+using istringstream = basic_istringstream<char>;
+using ostringstream = basic_ostringstream<char>;
+using stringstream  = basic_stringstream<char>;
+
+// Deliberately NOT provided: wios/wstreambuf/wistream/wostream/wiostream/
+// wstringbuf/wistringstream/wostringstream/wstringstream, and the
+// char8_t/char16_t/char32_t stream typedefs — wide/multibyte streams are
+// a documented, out-of-scope exclusion.
+
+} // namespace std
+
+#endif // BOXCXX_IOSFWD

@@ -1,0 +1,56 @@
+// boxcxx — <locale>
+// Minimal, facet-free, "C"-only std::locale. ios_base::imbue/getloc and
+// basic_streambuf::pubimbue/getloc are mandatory members of their real
+// synopses and must genuinely be spelled std::locale — this is the
+// smallest conforming shape that satisfies that without a real facet
+// registry.
+//
+// Deliberately NOT provided (documented, epic-wide exclusion): use_facet /
+// has_facet, the facet base class, ctype<>/num_get<>/num_put<>/numpunct<>/
+// moneypunct<>/collate<>/time_get<>/time_put<>, named-locale construction
+// from the environment, category-combining constructors. A program that
+// needs real facet-based i18n fails to compile — there is nothing here to
+// call — rather than silently behaving as "C".
+#ifndef BOXCXX_LOCALE
+#define BOXCXX_LOCALE
+
+#include <string>
+
+namespace std {
+
+class locale {
+public:
+    using category = int;
+    static constexpr category none     = 0;
+    static constexpr category ctype    = 1 << 0;
+    static constexpr category numeric  = 1 << 1;
+    static constexpr category collate  = 1 << 2;
+    static constexpr category time     = 1 << 3;
+    static constexpr category monetary = 1 << 4;
+    static constexpr category messages = 1 << 5;
+    static constexpr category all      = ctype | numeric | collate | time | monetary | messages;
+
+    locale() noexcept = default;
+    locale(const locale &) noexcept = default;
+    locale &operator=(const locale &) noexcept = default;
+    ~locale() = default;
+
+    // Accepts and ignores any name — every locale this type can construct
+    // behaves as "C". A real implementation would throw runtime_error for
+    // an unknown name; this is a documented, deliberate simplification.
+    explicit locale(const char *) noexcept {}
+
+    string name() const { return "C"; }
+    bool operator==(const locale &) const noexcept { return true; }
+
+    static const locale &classic() noexcept
+    {
+        static const locale c;
+        return c;
+    }
+    static locale global(const locale &) noexcept { return classic(); }
+};
+
+} // namespace std
+
+#endif // BOXCXX_LOCALE
