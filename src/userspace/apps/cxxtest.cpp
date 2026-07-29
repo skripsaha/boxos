@@ -39,11 +39,13 @@
 #include <functional>
 #include <ios>
 #include <iosfwd>
+#include <istream>
 #include <iterator>
 #include <limits>
 #include <list>
 #include <locale>
 #include <map>
+#include <ostream>
 #include <memory>
 #include <memory_resource>
 #include <numeric>
@@ -23074,6 +23076,722 @@ void Phase116()
            "override\n");
 }
 
+// Phase117 fixture: a streambuf whose overflow() always throws -- exercises
+// the [ostream.formatted.reqmts] exception contract (badbit set, ORIGINAL
+// exception rethrown when armed in exceptions(), not a fresh ios_base::
+// failure and not silently swallowed).
+struct P117ThrowingBuf : std::basic_streambuf<char> {
+protected:
+    int_type overflow(int_type) override { throw std::runtime_error("phase117 boom"); }
+};
+
+void Phase117()
+{
+    // ── Ф30e commit 3 (ostream-istream): basic_ostream/basic_istream
+    //    formatted+unformatted I/O, the numeric formatting bridge over
+    //    <charconv>, no-arg manipulators, and the 4 stream-iterators.
+    //    Exercised entirely against a commit-2 basic_stringbuf. ───────────
+
+    // (1) basic round trip: int + char + hex int.
+    {
+        std::stringbuf buf;
+        std::basic_ostream<char> os(&buf);
+        os << 42 << ' ' << std::hex << 255 << std::dec;
+        Check(buf.str() == "42 ff", "phase117 basic round trip: int + char + hex int");
+    }
+
+    // (2) HOTSPOT: negative short/int in hex/oct -- must reinterpret through
+    //     the CORRECTLY-SIZED unsigned type, not sign-extend through a wider
+    //     one. os<<hex<<short(-1) must print "ffff" (16 bits), never the
+    //     64-bit-sign-extended "ffffffffffffffff".
+    {
+        std::stringbuf buf;
+        std::basic_ostream<char> os(&buf);
+        os << std::hex << static_cast<short>(-1);
+        Check(buf.str() == "ffff",
+              "phase117 HOTSPOT: hex negative short -> \"ffff\" (16-bit), NOT 64-bit sign-extended");
+    }
+    {
+        std::stringbuf buf;
+        std::basic_ostream<char> os(&buf);
+        os << std::hex << -1; // int
+        Check(buf.str() == "ffffffff", "phase117 hex negative int -> \"ffffffff\" (32-bit, same principle as short)");
+    }
+    {
+        std::stringbuf buf;
+        std::basic_ostream<char> os(&buf);
+        os << std::oct << static_cast<short>(-1);
+        Check(buf.str() == "177777", "phase117 oct negative short -> \"177777\" (0xFFFF in octal)");
+    }
+
+    // (3) showbase: hex and octal BOTH suppress their prefix specifically
+    //     for value 0 (matches printf's "%#x"/"%#o": a zero result never
+    //     gets the base-indicator).
+    {
+        std::stringbuf buf;
+        std::basic_ostream<char> os(&buf);
+        os << std::hex << std::showbase << 0;
+        Check(buf.str() == "0", "phase117 showbase HOTSPOT: hex ALSO suppresses its prefix for value 0, same as octal");
+    }
+    {
+        std::stringbuf buf;
+        std::basic_ostream<char> os(&buf);
+        os << std::oct << std::showbase << 0;
+        Check(buf.str() == "0", "phase117 showbase: octal SUPPRESSES the redundant prefix for 0");
+    }
+    {
+        std::stringbuf buf;
+        std::basic_ostream<char> os(&buf);
+        os << std::oct << std::showbase << 8;
+        Check(buf.str() == "010", "phase117 showbase: octal prefix for a nonzero value");
+    }
+    {
+        std::stringbuf buf;
+        std::basic_ostream<char> os(&buf);
+        os << std::hex << std::showbase << std::uppercase << 255;
+        Check(buf.str() == "0XFF", "phase117 showbase+uppercase: hex prefix ALSO uppercases (0X, not 0x)");
+    }
+
+    // (4) showpos: applies ONLY to signed decimal -- never unsigned decimal,
+    //     never oct/hex (they carry no sign at all); never doubles with '-'.
+    {
+        std::stringbuf buf;
+        std::basic_ostream<char> os(&buf);
+        os << std::showpos << 42;
+        Check(buf.str() == "+42", "phase117 showpos: positive signed int gets +");
+    }
+    {
+        std::stringbuf buf;
+        std::basic_ostream<char> os(&buf);
+        os << std::showpos << 42u;
+        Check(buf.str() == "42", "phase117 showpos HOTSPOT: unsigned decimal never gets a '+' (no sign to force)");
+    }
+    {
+        std::stringbuf buf;
+        std::basic_ostream<char> os(&buf);
+        os << std::showpos << -42;
+        Check(buf.str() == "-42", "phase117 showpos: negative is still just '-' (never \"+-42\")");
+    }
+    {
+        std::stringbuf buf;
+        std::basic_ostream<char> os(&buf);
+        os << std::hex << std::showpos << 42;
+        Check(buf.str() == "2a", "phase117 showpos HOTSPOT: hex/oct never carry a sign, even for a signed positive value");
+    }
+    {
+        std::stringbuf buf;
+        std::basic_ostream<char> os(&buf);
+        os << std::showpos << true; // no boolalpha
+        Check(buf.str() == "+1", "phase117 showpos: non-boolalpha bool is routed through the SIGNED path -> \"+1\"");
+    }
+
+    // (5) width/fill/left/right/internal + the width-reset-to-0 hotspot.
+    {
+        std::stringbuf buf;
+        std::basic_ostream<char> os(&buf);
+        os.width(10);
+        Check(os.width() == 10, "phase117 width: setter takes effect before use");
+        os << 42;
+        Check(os.width() == 0, "phase117 width-reset HOTSPOT: width() reads back as 0 immediately after ANY formatted output");
+    }
+    {
+        std::stringbuf buf;
+        std::basic_ostream<char> os(&buf);
+        os.width(8);
+        os << 42;
+        Check(buf.str() == "      42", "phase117 width: default right-align pads with spaces");
+        os << 7;
+        Check(buf.str() == "      427", "phase117 width: resets to 0 after EVERY formatted op (setw affects only the NEXT insertion)");
+    }
+    {
+        std::stringbuf buf;
+        std::basic_ostream<char> os(&buf);
+        os.width(8);
+        os << std::left << 42;
+        Check(buf.str() == "42      ", "phase117 left: pads AFTER the value");
+    }
+    {
+        std::stringbuf buf;
+        std::basic_ostream<char> os(&buf);
+        os.width(8);
+        os.fill('*');
+        os << std::internal << -42;
+        Check(buf.str() == "-*****42", "phase117 internal HOTSPOT: fill sits BETWEEN sign and digits, using the ARBITRARY fill char");
+    }
+    {
+        std::stringbuf buf;
+        std::basic_ostream<char> os(&buf);
+        os.width(8);
+        os.fill('.');
+        os << std::hex << std::showbase << std::internal << 255;
+        Check(buf.str() == "0x....ff", "phase117 internal + showbase: fill sits between the \"0x\" PREFIX and the digits");
+    }
+    {
+        std::stringbuf buf;
+        std::basic_ostream<char> os(&buf);
+        os.width(6);
+        os.fill('*');
+        os << std::oct << std::showbase << std::internal << 42;
+        Check(buf.str() == "***052",
+              "phase117 internal + octal-showbase HOTSPOT: octal's leading \"0\" is NOT a pad-after base-indicator "
+              "like hex's \"0x\" -- it is part of the BODY, so fill lands BEFORE it, not after");
+    }
+    {
+        std::stringbuf buf;
+        std::basic_ostream<char> os(&buf);
+        os.width(5);
+        os.fill('-');
+        os << std::internal << "ab";
+        Check(buf.str() == "---ab",
+              "phase117 internal degrades to right for char*/string (no sign/prefix to split around, matches "
+              "[ostream.formatted.reqmts]'s generic left-vs-otherwise rule)");
+    }
+    {
+        std::stringbuf buf;
+        std::basic_ostream<char> os(&buf);
+        os.width(6);
+        os << "ab";
+        Check(buf.str() == "    ab",
+              "phase117 default alignment HOTSPOT: NO adjustfield manip set at all -> right-justifies, "
+              "same default as every numeric kind (char/string/bool have no separate left-by-default rule)");
+    }
+
+    // (6) uppercase (plain hex digits, without showbase).
+    {
+        std::stringbuf buf;
+        std::basic_ostream<char> os(&buf);
+        os << std::hex << std::uppercase << 255;
+        Check(buf.str() == "FF", "phase117 uppercase: hex digits uppercased");
+    }
+
+    // (7) boolalpha -- both directions, plus the "non-boolalpha bool goes
+    //     through the SAME integer path" rule (showpos applies to the 0/1
+    //     form too).
+    {
+        std::stringbuf buf;
+        std::basic_ostream<char> os(&buf);
+        os << std::boolalpha << true << ' ' << false;
+        Check(buf.str() == "true false", "phase117 boolalpha: true/false spelled out");
+    }
+    {
+        std::stringbuf buf;
+        std::basic_ostream<char> os(&buf);
+        os << std::noboolalpha << true << ' ' << false;
+        Check(buf.str() == "1 0", "phase117 noboolalpha: bool formats as the integer 0/1");
+    }
+    {
+        std::stringbuf buf;
+        std::basic_ostream<char> os(&buf);
+        os << std::showpos << true; // no boolalpha
+        Check(buf.str() == "+1", "phase117 bool showpos: non-boolalpha bool goes through the SAME integer path");
+    }
+
+    // (8) float fixed/scientific/defaultfloat/hexfloat + precision +
+    //     showpoint. hexfloat-ignores-precision is THE numeric-bridge
+    //     hotspot the task calls out explicitly.
+    {
+        std::stringbuf buf;
+        std::basic_ostream<char> os(&buf);
+        os << std::fixed << 3.5;
+        Check(buf.str() == "3.500000", "phase117 fixed: default precision 6");
+    }
+    {
+        std::stringbuf buf;
+        std::basic_ostream<char> os(&buf);
+        os << std::fixed;
+        os.precision(2);
+        os << 3.14159;
+        Check(buf.str() == "3.14", "phase117 fixed precision(2): rounds to 2 decimal places");
+    }
+    {
+        std::stringbuf buf;
+        std::basic_ostream<char> os(&buf);
+        os << std::scientific;
+        os.precision(2);
+        os << 12345.0;
+        Check(buf.str() == "1.23e+04", "phase117 scientific precision(2)");
+    }
+    {
+        std::stringbuf buf;
+        std::basic_ostream<char> os(&buf);
+        os << std::defaultfloat;
+        os << 100.0;
+        Check(buf.str() == "100", "phase117 defaultfloat: trailing zeros stripped, no decimal point when unneeded");
+    }
+    {
+        std::stringbuf buf;
+        std::basic_ostream<char> os(&buf);
+        os << std::showpoint << 100.0; // default precision 6, general format
+        Check(buf.str() == "100.000", "phase117 showpoint + defaultfloat: forces 6 significant digits + decimal point");
+    }
+    {
+        std::stringbuf buf;
+        std::basic_ostream<char> os(&buf);
+        os << std::fixed;
+        os.precision(0);
+        os << std::showpoint << 100.0;
+        Check(buf.str() == "100.", "phase117 fixed+showpoint+precision(0): forces a lone trailing '.' with no digits after");
+    }
+    {
+        std::stringbuf buf;
+        std::basic_ostream<char> os(&buf);
+        os << std::hexfloat << 1.5;
+        Check(buf.str() == "0x1.8p+0", "phase117 hexfloat: exact hex representation with the \"0x\" prefix");
+    }
+    {
+        std::stringbuf buf;
+        std::basic_ostream<char> os(&buf);
+        os << std::hexfloat;
+        os.precision(2);
+        os << 1.5;
+        Check(buf.str() == "0x1.8p+0",
+              "phase117 hexfloat HOTSPOT: precision(2) is IGNORED -- identical output to no precision set at all");
+    }
+    {
+        std::stringbuf buf;
+        std::basic_ostream<char> os(&buf);
+        os.width(10);
+        os << std::hexfloat << std::internal << -1.0;
+        Check(buf.str() == "-   0x1p+0",
+              "phase117 hexfloat + internal HOTSPOT: fill sits AFTER the sign, BEFORE \"0x\" -- the \"0x\" is not a "
+              "pad-after base-indicator for floats (unlike integer hex)");
+    }
+    {
+        std::stringbuf buf;
+        std::basic_ostream<char> os(&buf);
+        os << std::hexfloat << std::numeric_limits<double>::infinity();
+        Check(buf.str() == "inf", "phase117 hexfloat + infinity HOTSPOT: no \"0x\" prefix on a non-finite value");
+    }
+
+    // (9) pointer / nullptr_t insertion ("as if" %p -- fixed "0x"+lowercase
+    //     hex, unaffected by basefield/showbase/uppercase).
+    {
+        std::stringbuf buf;
+        std::basic_ostream<char> os(&buf);
+        os << nullptr;
+        Check(buf.str() == "0x0", "phase117 nullptr_t: inserts as if static_cast<const void*>(nullptr) -> \"0x0\"");
+    }
+    {
+        std::stringbuf buf;
+        std::basic_ostream<char> os(&buf);
+        void *p = reinterpret_cast<void *>(static_cast<std::uintptr_t>(0x1000));
+        os << p;
+        Check(buf.str() == "0x1000", "phase117 const void*: renders as \"0x\" + lowercase hex address");
+    }
+
+    // (10) operator<<(basic_streambuf*): unformatted stream-to-stream drain.
+    {
+        std::stringbuf src(std::string("hello"));
+        std::stringbuf dstBuf;
+        std::basic_ostream<char> dst(&dstBuf);
+        std::basic_istream<char> srcIs(&src);
+        dst << srcIs.rdbuf();
+        Check(dstBuf.str() == "hello", "phase117 operator<<(streambuf*): drains the source streambuf into dst");
+    }
+
+    // (11) exception contract [ostream.formatted.reqmts]: badbit is set AND
+    //      the ORIGINAL exception is rethrown when badbit is armed in
+    //      exceptions() -- not a fresh ios_base::failure, not swallowed.
+    {
+        P117ThrowingBuf tb;
+        std::basic_ostream<char> os(&tb);
+        os.exceptions(std::ios_base::badbit);
+        bool threw = false;
+        try {
+            os << 42;
+        } catch (const std::runtime_error &e) {
+            threw = true;
+            Check(std::string(e.what()) == "phase117 boom",
+                  "phase117 exception contract: the ORIGINAL exception object propagates, not a fresh ios_base::failure");
+        }
+        Check(threw, "phase117 exception contract: badbit armed -> the exception IS rethrown");
+        Check(os.bad(), "phase117 exception contract: badbit IS set in rdstate() despite the rethrow");
+    }
+
+    // (12) extraction basics: int + double + a whitespace-delimited word.
+    {
+        std::stringbuf buf(std::string("42 3.5 hello"));
+        std::basic_istream<char> is(&buf);
+        int n = 0;
+        double d = 0;
+        char word[16] = {};
+        is >> n >> d >> word;
+        Check(n == 42, "phase117 extraction: int");
+        Check(d == 3.5, "phase117 extraction: double");
+        Check(std::string(word) == "hello", "phase117 extraction: whitespace-delimited char* word");
+    }
+
+    // (13) sentry skipws: default skips leading whitespace; noskipws does not.
+    {
+        std::stringbuf buf(std::string("   42"));
+        std::basic_istream<char> is(&buf);
+        int n = -1;
+        is >> n;
+        Check(n == 42, "phase117 sentry: skipws (default) skips leading whitespace");
+    }
+    {
+        std::stringbuf buf(std::string(" 42"));
+        std::basic_istream<char> is(&buf);
+        is >> std::noskipws;
+        int n = -999;
+        is >> n;
+        Check(is.fail(), "phase117 sentry: noskipws does NOT skip leading space -> extraction fails immediately");
+    }
+
+    // (14) std::ws: discards leading whitespace as an unformatted operation.
+    {
+        std::stringbuf buf(std::string("   abc"));
+        std::basic_istream<char> is(&buf);
+        is >> std::ws;
+        char c = 0;
+        is.get(c);
+        Check(c == 'a', "phase117 std::ws: discards leading whitespace, unformatted");
+    }
+
+    // (15) get()/get(char&)/putback/unget/peek -- gcount() semantics.
+    {
+        std::stringbuf buf(std::string("abc"));
+        std::basic_istream<char> is(&buf);
+        int c1 = is.get();
+        Check(c1 == 'a', "phase117 get(): returns the first char");
+        Check(is.gcount() == 1, "phase117 get(): gcount()==1 on success");
+        char c2 = 0;
+        is.get(c2);
+        Check(c2 == 'b', "phase117 get(char&): extracts the next char");
+        is.putback('b');
+        char c3 = 0;
+        is.get(c3);
+        Check(c3 == 'b', "phase117 putback: re-extracts the put-back char");
+        is.unget();
+        int peeked = is.peek();
+        Check(peeked == 'b', "phase117 peek(): sees the next char without consuming it");
+        Check(is.gcount() == 0, "phase117 peek(): gcount() is 0 (nothing was extracted)");
+        char c4 = 0;
+        is.get(c4);
+        Check(c4 == 'b', "phase117 peek(): did not consume -- still there for the next get()");
+        char c5 = 0;
+        is.get(c5);
+        Check(c5 == 'c', "phase117 sequential read: reaches the last char");
+        int atEnd = is.get();
+        Check(atEnd == std::char_traits<char>::eof(), "phase117 get(): eof at the TRUE end");
+        Check(is.eof() && is.fail(), "phase117 get(): failbit+eofbit both set at true eof");
+    }
+
+    // (15b) MED-2: get(char*, n) must set eofbit whenever EOF was actually
+    //       reached, even after storing >=1 char -- failbit is reserved for
+    //       storing NOTHING at all.
+    {
+        std::stringbuf buf(std::string("ab"));
+        std::basic_istream<char> is(&buf);
+        char gbuf[8] = {};
+        is.get(gbuf, 8);
+        Check(is.gcount() == 2, "phase117 get(char*,n) MED-2: gcount() reflects the 2 chars actually stored");
+        Check(is.eof() && !is.fail(), "phase117 get(char*,n) MED-2: eofbit set, failbit NOT set (>=1 char was stored)");
+    }
+
+    // (16) getline: normal case + gcount() (INCLUDING the consumed
+    //      delimiter) + the buffer-full-without-delim HOTSPOT (must stop at
+    //      n-1 chars and fail WITHOUT losing the delimiter that follows) +
+    //      a final line with no trailing delimiter (eofbit, NOT failbit,
+    //      once >=1 char was stored).
+    {
+        std::stringbuf buf(std::string("line1\nline2\n"));
+        std::basic_istream<char> is(&buf);
+        char lbuf[32];
+        is.getline(lbuf, 32);
+        Check(std::string(lbuf) == "line1", "phase117 getline: reads up to '\\n', discards it");
+        Check(is.gcount() == 6, "phase117 getline HOTSPOT: gcount() counts the consumed delimiter TOO (5 stored + 1 delim)");
+        is.getline(lbuf, 32);
+        Check(std::string(lbuf) == "line2", "phase117 getline: second line");
+    }
+    {
+        std::stringbuf buf(std::string("abcde\n"));
+        std::basic_istream<char> is(&buf);
+        char small[4]; // room for 3 chars + NUL
+        is.getline(small, 4);
+        Check(is.fail(), "phase117 getline buffer-full HOTSPOT: stops at n-1 WITHOUT finding delim -> failbit");
+        Check(std::string(small) == "abc", "phase117 getline buffer-full: stores exactly n-1 chars");
+        is.clear();
+        char rest[8] = {};
+        is.getline(rest, 8);
+        Check(std::string(rest) == "de", "phase117 getline buffer-full: 'd'/'e' remain unconsumed, THEN '\\n' is found normally");
+    }
+    {
+        std::stringbuf buf(std::string("ab"));
+        std::basic_istream<char> is(&buf);
+        char lbuf[32];
+        is.getline(lbuf, 32);
+        Check(std::string(lbuf) == "ab", "phase117 getline HOTSPOT: a final line with no trailing delimiter is still returned");
+        Check(is.eof() && !is.fail(), "phase117 getline HOTSPOT: eof at end-of-input is NOT a failure once >=1 char was stored");
+    }
+    {
+        // A blank line means the delimiter is found IMMEDIATELY (stored==0)
+        // -- that must still count as success, or `while(getline(...))`
+        // would wrongly stop dead the first time it hits an empty line.
+        std::stringbuf buf(std::string("a\n\nb\n\n\nc"));
+        std::basic_istream<char> is(&buf);
+        char lbuf[32];
+        int lines = 0;
+        std::string collected[8];
+        while (is.getline(lbuf, 32)) {
+            collected[lines++] = std::string(lbuf);
+        }
+        Check(lines == 6, "phase117 getline HOTSPOT: blank lines do NOT set failbit -- while(getline) runs all 6 lines");
+        Check(collected[0] == "a" && collected[1] == "" && collected[2] == "b" && collected[3] == "" &&
+                  collected[4] == "" && collected[5] == "c",
+              "phase117 getline HOTSPOT: blank-line content is \"a\",\"\",\"b\",\"\",\"\",\"c\", matching libstdc++");
+    }
+
+    // (17) ignore(n)/ignore(n,delim)/read()/readsome().
+    {
+        std::stringbuf buf(std::string("abcdef"));
+        std::basic_istream<char> is(&buf);
+        is.ignore(3);
+        char rest[8] = {};
+        is.read(rest, 3);
+        Check(std::string(rest, 3) == "def", "phase117 ignore(3)+read(3): skips 3, then reads the next 3");
+    }
+    {
+        std::stringbuf buf(std::string("aaa,bbb"));
+        std::basic_istream<char> is(&buf);
+        is.ignore(100, ',');
+        char rest[8] = {};
+        is.read(rest, 3);
+        Check(std::string(rest, 3) == "bbb", "phase117 ignore(n,delim): stops at AND consumes the delimiter");
+    }
+    {
+        std::stringbuf buf(std::string("ab"));
+        std::basic_istream<char> is(&buf);
+        char rbuf[5] = {};
+        is.read(rbuf, 5);
+        Check(is.gcount() == 2, "phase117 read(): gcount() reflects the ACTUAL count read when short");
+        Check(is.fail() && is.eof(), "phase117 read(): failbit+eofbit set when fewer than requested are available");
+    }
+    {
+        std::stringbuf buf(std::string("abcdef"));
+        std::basic_istream<char> is(&buf);
+        char rbuf[10] = {};
+        auto got = is.readsome(rbuf, 10);
+        Check(got == 6, "phase117 readsome(): returns min(requested, available), no blocking");
+        Check(!is.fail(), "phase117 readsome(): does NOT set failbit even when fewer than requested are read");
+    }
+
+    // (18) char* extraction width-cap + width-reset.
+    {
+        std::stringbuf buf(std::string("abcdefgh xyz"));
+        std::basic_istream<char> is(&buf);
+        char small[4];
+        is.width(4);
+        is >> small;
+        Check(std::string(small) == "abc", "phase117 char* extraction: width(4) caps the read at 3 chars + NUL");
+        char rest2[16] = {};
+        is >> rest2;
+        Check(std::string(rest2) == "defgh", "phase117 char* extraction: width resets to 0, NO cap on the next extraction");
+    }
+    {
+        // CRIT-1: the pre-C++20 stack-overflow trap -- even with NO setw()
+        // at all, the array-bounded extractor must still cap at N-1.
+        std::stringbuf buf(std::string("abcdefgh"));
+        std::basic_istream<char> is(&buf);
+        char arr[8];
+        is >> arr;
+        Check(std::string(arr) == "abcdefg",
+              "phase117 char[] extraction CRIT-1: no setw() still bounds to N-1 (7) chars, never overruns the array");
+    }
+
+    // (19) tellp/seekp round trip (mirrors the sstream high-water-mark case).
+    {
+        std::stringbuf buf;
+        std::basic_ostream<char> os(&buf);
+        os << "hello";
+        os.seekp(2, std::ios_base::beg);
+        os << "Y";
+        Check(buf.str() == "heYlo", "phase117 seekp: repositioning mid-stream overwrites in place");
+    }
+
+    // (20) short/unsigned short extraction: overflow clamp+failbit vs the
+    //      well-defined unsigned "negative wraps" rule.
+    {
+        std::stringbuf buf(std::string("40000")); // exceeds SHRT_MAX (32767)
+        std::basic_istream<char> is(&buf);
+        short s = 0;
+        is >> s;
+        Check(s == std::numeric_limits<short>::max(), "phase117 short extraction overflow: clamps to SHRT_MAX");
+        Check(is.fail(), "phase117 short extraction overflow: failbit set");
+    }
+    {
+        std::stringbuf buf(std::string("-1"));
+        std::basic_istream<char> is(&buf);
+        unsigned short us = 0;
+        is >> us;
+        Check(us == 65535, "phase117 unsigned short: leading '-' WRAPS (65535), matches num_get/strtoul convention");
+        Check(!is.fail(), "phase117 unsigned short wraparound: NOT a failure (well-defined modular behavior)");
+    }
+
+    // (20b) HIGH-2: a failed extraction (no match at all) must zero the
+    //       target -- int/double/bool all zero out rather than being left
+    //       holding whatever the caller's variable had before.
+    {
+        std::stringbuf buf(std::string("abc"));
+        std::basic_istream<char> is(&buf);
+        int n = 999;
+        is >> n;
+        Check(is.fail() && n == 0, "phase117 HIGH-2: failed int extraction zeroes the target");
+    }
+    {
+        std::stringbuf buf(std::string("abc"));
+        std::basic_istream<char> is(&buf);
+        double d = 3.5;
+        is >> d;
+        Check(is.fail() && d == 0.0, "phase117 HIGH-2: failed double extraction zeroes the target");
+    }
+    {
+        std::stringbuf buf(std::string("xyz"));
+        std::basic_istream<char> is(&buf);
+        is >> std::boolalpha;
+        bool b = true;
+        is >> b;
+        Check(is.fail() && b == false, "phase117 HIGH-2: failed bool extraction zeroes the target");
+    }
+
+    // (20c) MED-1: a float whose magnitude overflows the target type stores
+    //       +/-numeric_limits<F>::max(), not an unchanged/garbage value.
+    {
+        std::stringbuf buf(std::string("1e400")); // exceeds DBL_MAX
+        std::basic_istream<char> is(&buf);
+        double d = 0;
+        is >> d;
+        Check(is.fail() && d == std::numeric_limits<double>::max(),
+              "phase117 MED-1: float overflow stores +numeric_limits<double>::max()");
+    }
+    {
+        std::stringbuf buf(std::string("-1e400"));
+        std::basic_istream<char> is(&buf);
+        double d = 0;
+        is >> d;
+        Check(is.fail() && d == -std::numeric_limits<double>::max(),
+              "phase117 MED-1: negative float overflow stores -numeric_limits<double>::max()");
+    }
+
+    // (21) auto-base-detection extraction (no explicit basefield bit set).
+    {
+        std::stringbuf buf(std::string("0x1A"));
+        std::basic_istream<char> is(&buf);
+        is.unsetf(std::ios_base::basefield);
+        int n = 0;
+        is >> n;
+        Check(n == 26, "phase117 auto-base extraction: \"0x1A\" with NO basefield bit set auto-detects hex -> 26");
+    }
+    {
+        std::stringbuf buf(std::string("017"));
+        std::basic_istream<char> is(&buf);
+        is.unsetf(std::ios_base::basefield);
+        int n = 0;
+        is >> n;
+        Check(n == 15, "phase117 auto-base extraction: leading \"0\" auto-detects octal -> 15");
+    }
+
+    // (22) hexfloat extraction: auto-detects "0x...p..." unconditionally.
+    {
+        std::stringbuf buf(std::string("0x1.8p+0"));
+        std::basic_istream<char> is(&buf);
+        double d = 0;
+        is >> d;
+        Check(d == 1.5, "phase117 hexfloat extraction: auto-detects \"0x...p...\" notation -> 1.5");
+    }
+
+    // (23) boolalpha extraction + the NO-PUTBACK-ON-FAILURE special rule.
+    {
+        std::stringbuf buf(std::string("true false"));
+        std::basic_istream<char> is(&buf);
+        is >> std::boolalpha;
+        bool b1 = false, b2 = true;
+        is >> b1 >> b2;
+        Check(b1 == true && b2 == false, "phase117 boolalpha extraction: \"true\"/\"false\" parsed correctly");
+    }
+    {
+        std::stringbuf buf(std::string("truX"));
+        std::basic_istream<char> is(&buf);
+        is >> std::boolalpha;
+        bool bv = true;
+        is >> bv;
+        Check(is.fail(), "phase117 boolalpha extraction: a partial match (\"tru\" then 'X') fails");
+        is.clear();
+        char rest = 0;
+        is >> rest;
+        Check(rest == 'X',
+              "phase117 boolalpha NO-PUTBACK HOTSPOT: \"tru\" stays consumed even on failure, only 'X' remains");
+    }
+
+    // (24) void*& extraction round-trips insertion's "0x"+hex format.
+    {
+        std::stringbuf buf(std::string("0x1000"));
+        std::basic_istream<char> is(&buf);
+        void *p = nullptr;
+        is >> p;
+        Check(p == reinterpret_cast<void *>(static_cast<std::uintptr_t>(0x1000)),
+              "phase117 void*& extraction: round-trips the hex address");
+    }
+
+    // (25) the 4 stream-iterators [stream.iterators].
+    {
+        std::stringbuf buf(std::string("1 2 3"));
+        std::basic_istream<char> is(&buf);
+        std::istream_iterator<int> it(is), end;
+        int sum = 0, count = 0;
+        while (it != end) {
+            sum += *it;
+            ++count;
+            ++it;
+        }
+        Check(sum == 6 && count == 3, "phase117 istream_iterator: reads all 3 ints via a manual loop");
+    }
+    {
+        std::stringbuf buf;
+        std::basic_ostream<char> out(&buf);
+        std::ostream_iterator<int> oit(out, ",");
+        *oit = 1;
+        ++oit;
+        *oit = 2;
+        ++oit;
+        *oit = 3;
+        Check(buf.str() == "1,2,3,", "phase117 ostream_iterator: writes value+delimiter on every assignment");
+    }
+    {
+        std::stringbuf buf(std::string("xyz"));
+        std::basic_istream<char> is(&buf);
+        std::istreambuf_iterator<char> it(is), end;
+        std::string collected;
+        while (it != end) {
+            collected += *it;
+            ++it;
+        }
+        Check(collected == "xyz", "phase117 istreambuf_iterator: reads raw chars with no formatting");
+    }
+    {
+        std::stringbuf buf;
+        std::basic_ostream<char> out(&buf);
+        std::ostreambuf_iterator<char> oit(out);
+        *oit = 'a';
+        ++oit;
+        *oit = 'b';
+        Check(buf.str() == "ab", "phase117 ostreambuf_iterator: writes raw chars with no formatting");
+        Check(!oit.failed(), "phase117 ostreambuf_iterator: failed() false after successful writes");
+    }
+
+    printf("[CXX] PASS phase117: ostream/istream (Ф30e commit 3) -- numeric bridge over <charconv> "
+           "(negative short/int in hex/oct reinterpreted at the CORRECT width, showbase hex-always/"
+           "oct-suppressed-for-zero, showpos signed+unsigned, uppercase, internal fill with arbitrary "
+           "fill char, width-reset-to-0), boolalpha both directions (incl. non-boolalpha->integer-path "
+           "and the extraction no-putback-on-failure rule), float fixed/scientific/defaultfloat+showpoint/"
+           "hexfloat (precision() IGNORED, \"0x\" prefix), pointer/nullptr_t printf-percent-p-style formatting, "
+           "operator<<(streambuf*), the exception contract (original exception rethrown, not a fresh "
+           "ios_base::failure), extraction (sentry skipws/noskipws, std::ws, get/getline incl. the "
+           "buffer-full-without-delim hotspot/ignore/read/readsome/peek/putback/unget, char* width-cap, "
+           "short overflow clamp vs unsigned wraparound, auto-base-detection, hexfloat auto-detection, "
+           "void*&), and the 4 stream-iterators\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -23212,6 +23930,7 @@ int main()
     Phase114();
     Phase115();
     Phase116();
+    Phase117();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
