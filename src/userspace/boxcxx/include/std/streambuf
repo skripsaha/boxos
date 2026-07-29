@@ -1,0 +1,219 @@
+// boxcxx — <streambuf>
+// basic_streambuf<CharT,Traits> [streambuf] — the abstract get/put-area
+// buffering base every concrete stream buffer (basic_stringbuf, and later
+// any filebuf) derives from. Every protected virtual has a real, DEFAULT
+// body here: a bare basic_streambuf<char> is a fully valid, if inert,
+// object — sgetc()/sputc() return eof, pubsync()==0, seeking fails — with
+// zero derived class needed. That makes this header standalone-testable
+// on its own, without <sstream> existing yet.
+//
+// <ios> must exist first (basic_streambuf's public API takes
+// ios_base::seekdir/openmode by value), but <ios> does NOT need this
+// header back (only a forward-declared pointer, via <iosfwd>) — a clean,
+// one-directional edge.
+#ifndef BOXCXX_STREAMBUF
+#define BOXCXX_STREAMBUF
+
+#include <ios>
+
+namespace std {
+
+// Traits' default already comes from <iosfwd>'s forward declaration — see
+// the identical note in <ios> next to basic_ios's definition.
+template <class CharT, class Traits>
+class basic_streambuf {
+public:
+    using char_type   = CharT;
+    using traits_type = Traits;
+    using int_type    = typename Traits::int_type;
+    using pos_type    = typename Traits::pos_type;
+    using off_type    = typename Traits::off_type;
+
+    virtual ~basic_streambuf() = default;
+
+    // ── locale ─────────────────────────────────────────────────────────
+    locale pubimbue(const locale &loc)
+    {
+        locale old = __loc;
+        imbue(loc);
+        __loc = loc;
+        return old;
+    }
+    locale getloc() const { return __loc; }
+
+    // ── buffer management / positioning (public, non-virtual wrappers) ──
+    basic_streambuf *pubsetbuf(char_type *s, streamsize n) { return setbuf(s, n); }
+    pos_type pubseekoff(off_type off, ios_base::seekdir dir,
+                        ios_base::openmode which = ios_base::in | ios_base::out)
+    {
+        return seekoff(off, dir, which);
+    }
+    pos_type pubseekpos(pos_type sp, ios_base::openmode which = ios_base::in | ios_base::out)
+    {
+        return seekpos(sp, which);
+    }
+    int pubsync() { return sync(); }
+
+    // ── get area (public) ────────────────────────────────────────────
+    streamsize in_avail()
+    {
+        return (gptr() < egptr()) ? static_cast<streamsize>(egptr() - gptr()) : showmanyc();
+    }
+    int_type snextc()
+    {
+        if (Traits::eq_int_type(sbumpc(), Traits::eof())) return Traits::eof();
+        return sgetc();
+    }
+    int_type sbumpc()
+    {
+        if (gptr() >= egptr()) return uflow();
+        int_type c = Traits::to_int_type(*gptr());
+        gbump(1);
+        return c;
+    }
+    int_type sgetc()
+    {
+        return gptr() < egptr() ? Traits::to_int_type(*gptr()) : underflow();
+    }
+    streamsize sgetn(char_type *s, streamsize n) { return xsgetn(s, n); }
+
+    // ── putback ────────────────────────────────────────────────────────
+    int_type sputbackc(char_type c)
+    {
+        if (gptr() > eback() && Traits::eq(gptr()[-1], c)) {
+            gbump(-1);
+            return Traits::to_int_type(c);
+        }
+        return pbackfail(Traits::to_int_type(c));
+    }
+    int_type sungetc()
+    {
+        if (gptr() > eback()) {
+            gbump(-1);
+            return Traits::to_int_type(*gptr());
+        }
+        return pbackfail(Traits::eof());
+    }
+
+    // ── put area (public) ───────────────────────────────────────────
+    int_type sputc(char_type c)
+    {
+        if (pptr() >= epptr()) return overflow(Traits::to_int_type(c));
+        *pptr() = c;
+        pbump(1);
+        return Traits::to_int_type(c);
+    }
+    streamsize sputn(const char_type *s, streamsize n) { return xsputn(s, n); }
+
+    // Copy ctor/assign are PROTECTED, not publicly deleted — [streambuf]:
+    // a bare basic_streambuf is not publicly copyable, but a derived class
+    // (a future basic_stringbuf's own move/swap) needs them to relocate
+    // the six get/put-area pointers + locale.
+protected:
+    basic_streambuf() noexcept = default;
+    basic_streambuf(const basic_streambuf &rhs) noexcept
+        : __loc(rhs.__loc),
+          __eback(rhs.__eback), __gptr(rhs.__gptr), __egptr(rhs.__egptr),
+          __pbase(rhs.__pbase), __pptr(rhs.__pptr), __epptr(rhs.__epptr)
+    {
+    }
+    basic_streambuf &operator=(const basic_streambuf &rhs) noexcept
+    {
+        __loc   = rhs.__loc;
+        __eback = rhs.__eback;
+        __gptr  = rhs.__gptr;
+        __egptr = rhs.__egptr;
+        __pbase = rhs.__pbase;
+        __pptr  = rhs.__pptr;
+        __epptr = rhs.__epptr;
+        return *this;
+    }
+    void swap(basic_streambuf &rhs) noexcept
+    {
+        using std::swap;
+        swap(__loc, rhs.__loc);
+        swap(__eback, rhs.__eback);
+        swap(__gptr, rhs.__gptr);
+        swap(__egptr, rhs.__egptr);
+        swap(__pbase, rhs.__pbase);
+        swap(__pptr, rhs.__pptr);
+        swap(__epptr, rhs.__epptr);
+    }
+
+    // ── get-area accessors ───────────────────────────────────────────
+    char_type *eback() const noexcept { return __eback; }
+    char_type *gptr() const noexcept { return __gptr; }
+    char_type *egptr() const noexcept { return __egptr; }
+    void gbump(int n) noexcept { __gptr += n; }
+    void setg(char_type *gbeg, char_type *gnext, char_type *gend) noexcept
+    {
+        __eback = gbeg;
+        __gptr  = gnext;
+        __egptr = gend;
+    }
+
+    // ── put-area accessors ───────────────────────────────────────────
+    char_type *pbase() const noexcept { return __pbase; }
+    char_type *pptr() const noexcept { return __pptr; }
+    char_type *epptr() const noexcept { return __epptr; }
+    void pbump(int n) noexcept { __pptr += n; }
+    void setp(char_type *pbeg, char_type *pend) noexcept
+    {
+        __pbase = __pptr = pbeg;
+        __epptr          = pend;
+    }
+
+    // ── virtuals — every one has a real, assertable default body ────────
+    virtual void imbue(const locale &) {}
+    virtual basic_streambuf *setbuf(char_type *, streamsize) { return this; }
+    virtual pos_type seekoff(off_type, ios_base::seekdir, ios_base::openmode)
+    {
+        return pos_type(off_type(-1));
+    }
+    virtual pos_type seekpos(pos_type, ios_base::openmode) { return pos_type(off_type(-1)); }
+    virtual int sync() { return 0; }
+    virtual streamsize showmanyc() { return 0; }
+    virtual streamsize xsgetn(char_type *s, streamsize n)
+    {
+        streamsize got = 0;
+        while (got < n) {
+            int_type c = sbumpc();
+            if (Traits::eq_int_type(c, Traits::eof())) break;
+            s[got] = Traits::to_char_type(c);
+            ++got;
+        }
+        return got;
+    }
+    virtual int_type underflow() { return Traits::eof(); }
+    virtual int_type uflow()
+    {
+        int_type c = underflow();
+        if (Traits::eq_int_type(c, Traits::eof())) return Traits::eof();
+        gbump(1);
+        return c;
+    }
+    virtual streamsize xsputn(const char_type *s, streamsize n)
+    {
+        streamsize put = 0;
+        while (put < n) {
+            if (Traits::eq_int_type(sputc(s[put]), Traits::eof())) break;
+            ++put;
+        }
+        return put;
+    }
+    virtual int_type overflow(int_type = Traits::eof()) { return Traits::eof(); }
+    virtual int_type pbackfail(int_type = Traits::eof()) { return Traits::eof(); }
+
+private:
+    locale __loc          = locale::classic();
+    char_type *__eback = nullptr;
+    char_type *__gptr  = nullptr;
+    char_type *__egptr = nullptr;
+    char_type *__pbase = nullptr;
+    char_type *__pptr  = nullptr;
+    char_type *__epptr = nullptr;
+};
+
+} // namespace std
+
+#endif // BOXCXX_STREAMBUF

@@ -37,9 +37,12 @@
 #include <format>
 #include <forward_list>
 #include <functional>
+#include <ios>
+#include <iosfwd>
 #include <iterator>
 #include <limits>
 #include <list>
+#include <locale>
 #include <map>
 #include <memory>
 #include <memory_resource>
@@ -71,6 +74,7 @@
 #include <span>
 #include <stack>
 #include <stdexcept>
+#include <streambuf>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -22215,6 +22219,561 @@ void Phase114()
            "any_cast<const T> regression trap\n");
 }
 
+// Phase115 fixtures: Ф30e commit 1 (iostream base spine). MyBuf exposes
+// basic_streambuf's protected get/put-area primitives (setg/setp/eback/
+// gptr/egptr/pbase/pptr/epptr) via `using` -- exactly the access a real
+// derived streambuf (basic_stringbuf, next commit) will need. MyIos does
+// the same for basic_ios's protected move/swap/set_rdbuf. Neither adds any
+// virtual override, so every buffered/read/write behavior exercised
+// through them is still exactly the ABSTRACT BASE's own code, not a
+// subclass's.
+
+struct MyBuf : std::basic_streambuf<char> {
+    void ExposeSetG(char *b, char *n, char *e) { setg(b, n, e); }
+    void ExposeSetP(char *b, char *e) { setp(b, e); }
+    using std::basic_streambuf<char>::eback;
+    using std::basic_streambuf<char>::gptr;
+    using std::basic_streambuf<char>::egptr;
+    using std::basic_streambuf<char>::pbase;
+    using std::basic_streambuf<char>::pptr;
+    using std::basic_streambuf<char>::epptr;
+};
+
+struct MyIos : std::basic_ios<char> {
+    using std::basic_ios<char>::basic_ios;
+    using std::basic_ios<char>::move;
+    using std::basic_ios<char>::swap;
+    using std::basic_ios<char>::set_rdbuf;
+};
+
+template <class Mask>
+bool P115AnyBits(Mask m)
+{
+    return m != Mask{};
+}
+
+std::vector<int> g_p115CallbackLog;
+
+void P115Callback(std::ios_base::event ev, std::ios_base &, int idx)
+{
+    g_p115CallbackLog.push_back(static_cast<int>(ev) * 1000 + idx);
+}
+
+// Phase115 (21c) basic_ios::move double-free trap: a callback that "releases"
+// its pword resource on erase_event. After a conformant move the moved-FROM
+// object must own NEITHER the callback nor the pword pointer, so this fires
+// exactly once across both objects' destruction. A move that COPIES (rather
+// than transfers) the extensible storage would fire it twice = a double free.
+int g_p115PwordReleases = 0;
+void P115ReleaseCallback(std::ios_base::event ev, std::ios_base &ib, int idx)
+{
+    if (ev == std::ios_base::erase_event && ib.pword(idx) != nullptr) {
+        ++g_p115PwordReleases;
+        ib.pword(idx) = nullptr;
+    }
+}
+
+void Phase115()
+{
+    // ── Ф30e commit 1 (ios-spine): ios_base state/formatting/extensible
+    //    storage, basic_ios state bits + copyfmt/move/swap, basic_streambuf
+    //    abstract base default virtuals + get/put-area protocol. No
+    //    concrete streambuf, no ostream/istream/sstream yet -- those are
+    //    later commits. ──────────────────────────────────────────────────
+
+    // (1) ios_base::flags/setf/setf(mask)/unsetf.
+    {
+        MyBuf buf;
+        std::basic_ios<char> ios(&buf);
+
+        auto initial = ios.flags(); // init() sets skipws|dec
+        Check(P115AnyBits(initial & std::ios_base::skipws), "phase115 ios_base::flags: init() sets skipws");
+        Check(P115AnyBits(initial & std::ios_base::dec), "phase115 ios_base::flags: init() sets dec");
+
+        auto old = ios.setf(std::ios_base::hex);
+        Check(old == initial, "phase115 ios_base::setf: returns the OLD flags");
+        Check(P115AnyBits(ios.flags() & std::ios_base::hex), "phase115 ios_base::setf: ORs the new bit in");
+        Check(P115AnyBits(ios.flags() & std::ios_base::dec), "phase115 ios_base::setf: does not clear unrelated bits");
+
+        ios.setf(std::ios_base::oct, std::ios_base::basefield);
+        Check((ios.flags() & std::ios_base::basefield) == std::ios_base::oct,
+              "phase115 ios_base::setf(mask): masked-set clears the whole basefield then sets oct only");
+
+        ios.unsetf(std::ios_base::skipws);
+        Check(!P115AnyBits(ios.flags() & std::ios_base::skipws),
+              "phase115 ios_base::unsetf: clears exactly the requested bit");
+    }
+
+    // (2) ios_base::precision/width, old-value-return contract.
+    {
+        MyBuf buf;
+        std::basic_ios<char> ios(&buf);
+        Check(ios.precision() == 6, "phase115 ios_base::precision: init() default is 6");
+        Check(ios.width() == 0, "phase115 ios_base::width: init() default is 0");
+
+        auto oldP = ios.precision(10);
+        Check(oldP == 6, "phase115 ios_base::precision(p): setter returns the OLD value");
+        Check(ios.precision() == 10, "phase115 ios_base::precision(p): getter reflects the new value");
+
+        auto oldW = ios.width(5);
+        Check(oldW == 0, "phase115 ios_base::width(w): setter returns the OLD value");
+        Check(ios.width() == 5, "phase115 ios_base::width(w): getter reflects the new value");
+    }
+
+    // (3) ios_base::xalloc/iword/pword -- several slots, independence +
+    //     growth past any small initial capacity.
+    {
+        MyBuf buf;
+        std::basic_ios<char> ios(&buf);
+        constexpr int kSlots = 6;
+        int idx[kSlots];
+        for (int i = 0; i < kSlots; ++i) idx[i] = std::ios_base::xalloc();
+        for (int i = 1; i < kSlots; ++i)
+            Check(idx[i] != idx[i - 1], "phase115 ios_base::xalloc: each call returns a distinct index");
+
+        for (int i = 0; i < kSlots; ++i) {
+            ios.iword(idx[i]) = (i + 1) * 11;
+            ios.pword(idx[i]) = reinterpret_cast<void *>(static_cast<std::uintptr_t>((i + 1) * 100));
+        }
+        bool iwordsOk = true, pwordsOk = true;
+        for (int i = 0; i < kSlots; ++i) {
+            if (ios.iword(idx[i]) != (i + 1) * 11) iwordsOk = false;
+            if (reinterpret_cast<std::uintptr_t>(ios.pword(idx[i])) !=
+                static_cast<std::uintptr_t>((i + 1) * 100))
+                pwordsOk = false;
+        }
+        Check(iwordsOk, "phase115 ios_base::iword: 6 slots (forcing growth past any small capacity) stay independent");
+        Check(pwordsOk, "phase115 ios_base::pword: 6 slots (forcing growth past any small capacity) stay independent");
+    }
+
+    // (4) ios_base::openmode::noreplace (P2467R1) + the FTM.
+    {
+#ifdef __cpp_lib_ios_noreplace
+        Check(__cpp_lib_ios_noreplace >= 202207L, "phase115 __cpp_lib_ios_noreplace: defined >= 202207L");
+#else
+        Check(false, "phase115 __cpp_lib_ios_noreplace: must be defined after this commit");
+#endif
+        auto mode = std::ios_base::out | std::ios_base::noreplace;
+        Check((mode & std::ios_base::noreplace) == std::ios_base::noreplace,
+              "phase115 ios_base::openmode::noreplace: participates correctly in the bitmask operators");
+        Check((mode & std::ios_base::out) == std::ios_base::out,
+              "phase115 ios_base::openmode::noreplace: combining with `out` preserves both bits");
+    }
+
+    // (5) ios_base::sync_with_stdio -- honest bookkeeping no-op.
+    {
+        bool old1 = std::ios_base::sync_with_stdio(false);
+        Check(old1 == true, "phase115 ios_base::sync_with_stdio: starts 'synchronized' (true)");
+        bool old2 = std::ios_base::sync_with_stdio(true);
+        Check(old2 == false, "phase115 ios_base::sync_with_stdio: returns the previous state");
+    }
+
+    // (6) basic_ios state bits: good/eof/fail/bad/operator bool/operator!/
+    //     clear/setstate, and badbit forced when there is no streambuf.
+    {
+        MyBuf buf;
+        std::basic_ios<char> ios(&buf);
+        Check(ios.good(), "phase115 basic_ios: freshly-init'd stream is good()");
+        Check(!ios.eof() && !ios.fail() && !ios.bad(), "phase115 basic_ios: no error bits set initially");
+        Check(static_cast<bool>(ios), "phase115 basic_ios: operator bool() true when good");
+        Check(!ios == false, "phase115 basic_ios: operator! false when good");
+
+        ios.setstate(std::ios_base::eofbit);
+        Check(ios.eof(), "phase115 basic_ios: setstate(eofbit) sets eof()");
+        Check(!ios.fail() && !ios.bad(), "phase115 basic_ios: eofbit alone does not imply fail()/bad()");
+
+        ios.setstate(std::ios_base::failbit);
+        Check(ios.fail(), "phase115 basic_ios: setstate(failbit) sets fail()");
+        Check(ios.eof(), "phase115 basic_ios: setstate is additive -- eofbit from before still set");
+        Check(!ios, "phase115 basic_ios: operator! true once failed");
+
+        ios.clear();
+        Check(ios.good(), "phase115 basic_ios: clear() with no args resets to goodbit");
+
+        std::basic_ios<char> noBuf(nullptr);
+        Check(noBuf.bad(), "phase115 basic_ios: init(nullptr) forces badbit (no streambuf)");
+    }
+
+    // (7) basic_ios::exceptions -- throws ios_base::failure (a system_error)
+    //     exactly when the newly-set state intersects the exceptions mask.
+    {
+        MyBuf buf;
+        std::basic_ios<char> ios(&buf);
+        ios.exceptions(std::ios_base::failbit);
+        Check(ios.exceptions() == std::ios_base::failbit, "phase115 basic_ios::exceptions: getter reflects the set mask");
+
+        bool threwOnNonMatch = false;
+        try {
+            ios.setstate(std::ios_base::eofbit); // does not overlap failbit
+        } catch (...) {
+            threwOnNonMatch = true;
+        }
+        Check(!threwOnNonMatch, "phase115 basic_ios::exceptions: setstate with a NON-matching bit does not throw");
+        Check(ios.eof(), "phase115 basic_ios::exceptions: the non-throwing setstate still took effect");
+
+        bool threwOnMatch = false;
+        try {
+            ios.setstate(std::ios_base::failbit); // overlaps the armed mask
+        } catch (const std::ios_base::failure &e) {
+            threwOnMatch = true;
+            Check(e.what() != nullptr, "phase115 basic_ios::exceptions: thrown failure has a real what() string");
+        }
+        Check(threwOnMatch, "phase115 basic_ios::exceptions: setstate with a MATCHING bit throws ios_base::failure");
+        Check(ios.fail(), "phase115 basic_ios::exceptions: the throwing setstate still took effect before throwing");
+
+        bool caughtAsSystemError = false;
+        try {
+            ios.exceptions(std::ios_base::badbit);
+            ios.setstate(std::ios_base::badbit);
+        } catch (const std::system_error &) {
+            caughtAsSystemError = true;
+        }
+        Check(caughtAsSystemError,
+              "phase115 ios_base::failure: IS-A system_error (verified against [ios.failure], not runtime_error direct)");
+    }
+
+    // (8) basic_ios::tie/rdbuf.
+    {
+        MyBuf bufA, bufB;
+        std::basic_ios<char> ios(&bufA);
+        Check(ios.rdbuf() == &bufA, "phase115 basic_ios::rdbuf: getter returns the ctor's streambuf");
+        Check(ios.tie() == nullptr, "phase115 basic_ios::tie: null after init()");
+
+        // tie() only ever stores/compares the pointer (never dereferences
+        // it here -- <ostream> doesn't exist until a later commit), so a
+        // bogus non-null value is enough to prove the plumbing.
+        auto *fakeTie = reinterpret_cast<std::basic_ostream<char> *>(std::uintptr_t{0x1000});
+        auto oldTie   = ios.tie(fakeTie);
+        Check(oldTie == nullptr, "phase115 basic_ios::tie(t): setter returns the OLD tie (null)");
+        Check(ios.tie() == fakeTie, "phase115 basic_ios::tie(t): getter reflects the new value");
+        ios.tie(nullptr);
+        Check(ios.tie() == nullptr, "phase115 basic_ios::tie(t): can be reset to null");
+
+        auto *oldBuf = ios.rdbuf(&bufB);
+        Check(oldBuf == &bufA, "phase115 basic_ios::rdbuf(sb): setter returns the OLD streambuf");
+        Check(ios.rdbuf() == &bufB, "phase115 basic_ios::rdbuf(sb): getter reflects the new streambuf");
+        Check(ios.good(), "phase115 basic_ios::rdbuf(sb): setting a non-null buffer calls clear() -> goodbit");
+
+        ios.setstate(std::ios_base::eofbit);
+        ios.rdbuf(nullptr);
+        Check(ios.bad(), "phase115 basic_ios::rdbuf(sb): setting a NULL buffer forces badbit via clear()");
+    }
+
+    // (9) basic_ios::fill/widen/narrow.
+    {
+        MyBuf buf;
+        std::basic_ios<char> ios(&buf);
+        Check(ios.fill() == ' ', "phase115 basic_ios::fill: init() sets fill to widen(' ')");
+        char old = ios.fill('*');
+        Check(old == ' ', "phase115 basic_ios::fill(ch): setter returns the OLD fill character");
+        Check(ios.fill() == '*', "phase115 basic_ios::fill(ch): getter reflects the new fill");
+        Check(ios.widen('Q') == 'Q', "phase115 basic_ios::widen: identity for CharT=char");
+        Check(ios.narrow('Q', '?') == 'Q', "phase115 basic_ios::narrow: identity for CharT=char");
+    }
+
+    // (10) basic_ios::copyfmt -- state transferred except rdstate()/rdbuf();
+    //      exceptions() set LAST via the real setter; self-copyfmt is a
+    //      no-op. Combined with register_callback to also prove the exact
+    //      [ios.base]/[basic.ios.members] event sequence: erase_event fires
+    //      on *this*'s OWN pre-copy callback list (LIFO), THEN copyfmt_event
+    //      fires on the newly-copied (from rhs) list.
+    {
+        MyBuf buf;
+        std::basic_ios<char> ios(&buf);
+        ios.setf(std::ios_base::hex, std::ios_base::basefield);
+        auto flagsBefore = ios.flags();
+        ios.copyfmt(ios);
+        Check(ios.flags() == flagsBefore, "phase115 basic_ios::copyfmt: self-copyfmt (this==&rhs) is a no-op");
+    }
+    {
+        g_p115CallbackLog.clear();
+        MyBuf bufA, bufB;
+        std::basic_ios<char> a(&bufA);
+        std::basic_ios<char> b(&bufB);
+
+        a.setf(std::ios_base::hex, std::ios_base::basefield);
+        a.precision(10);
+        a.width(5);
+        a.fill('*');
+        a.setstate(std::ios_base::eofbit);      // must NOT transfer to b
+        a.exceptions(std::ios_base::failbit);   // MUST transfer to b (no overlap with eofbit -- no throw here)
+
+        a.register_callback(&P115Callback, 9);   // copied to b, fires with copyfmt_event
+        b.register_callback(&P115Callback, 100); // b's OWN pre-copy list, fires with erase_event
+
+        auto stateBefore = b.rdstate();
+        auto *bufBefore  = b.rdbuf();
+
+        b.copyfmt(a);
+
+        Check(g_p115CallbackLog.size() == 2, "phase115 basic_ios::copyfmt: fires exactly 2 callback events");
+        Check(g_p115CallbackLog[0] == static_cast<int>(std::ios_base::erase_event) * 1000 + 100,
+              "phase115 basic_ios::copyfmt: erase_event fires FIRST, on b's OWN pre-copy callback list");
+        Check(g_p115CallbackLog[1] == static_cast<int>(std::ios_base::copyfmt_event) * 1000 + 9,
+              "phase115 basic_ios::copyfmt: copyfmt_event fires SECOND, on the list just copied from a");
+        Check(b.flags() == a.flags(), "phase115 basic_ios::copyfmt: flags copied from rhs");
+        Check(b.precision() == 10 && b.width() == 5 && b.fill() == '*',
+              "phase115 basic_ios::copyfmt: precision/width/fill copied from rhs");
+        Check(b.rdstate() == stateBefore, "phase115 basic_ios::copyfmt: rdstate() NOT copied (stays b's own prior state)");
+        Check(b.rdbuf() == bufBefore, "phase115 basic_ios::copyfmt: rdbuf() NOT copied (stays b's own streambuf)");
+        Check(b.exceptions() == std::ios_base::failbit,
+              "phase115 basic_ios::copyfmt: exceptions() IS copied, via the real setter, LAST");
+    }
+
+    // (11) ios_base::register_callback fires in OPPOSITE order of
+    //      registration (LIFO) -- [ios.base]. Exercised here via imbue(),
+    //      the simplest single-event trigger.
+    {
+        g_p115CallbackLog.clear();
+        MyBuf buf;
+        std::basic_ios<char> ios(&buf);
+        ios.register_callback(&P115Callback, 1);
+        ios.register_callback(&P115Callback, 2);
+        ios.register_callback(&P115Callback, 3);
+        ios.imbue(std::locale::classic());
+
+        Check(g_p115CallbackLog.size() == 3, "phase115 register_callback: imbue() fires exactly 3 registered callbacks");
+        int imbueEv = static_cast<int>(std::ios_base::imbue_event);
+        Check(g_p115CallbackLog[0] == imbueEv * 1000 + 3 && g_p115CallbackLog[1] == imbueEv * 1000 + 2 &&
+                  g_p115CallbackLog[2] == imbueEv * 1000 + 1,
+              "phase115 register_callback: fires in OPPOSITE order of registration (LIFO, per [ios.base])");
+    }
+
+    // (12) basic_ios::move -- *this takes rhs's ENTIRE state (rdstate/
+    //      exceptions included, unlike copyfmt) except this->rdbuf()
+    //      becomes null; rhs keeps its OWN rdbuf() and its tie() becomes
+    //      null.
+    {
+        MyBuf bufA, bufB;
+        MyIos a(&bufA);
+        MyIos b(&bufB);
+        a.setf(std::ios_base::hex, std::ios_base::basefield);
+        a.precision(9);
+        a.setstate(std::ios_base::eofbit);
+        a.exceptions(std::ios_base::failbit); // no overlap with eofbit -- no throw
+
+        b.move(a);
+
+        Check(b.rdbuf() == nullptr, "phase115 basic_ios::move: this->rdbuf() becomes null");
+        Check(b.precision() == 9, "phase115 basic_ios::move: formatting state transferred");
+        Check(b.rdstate() == std::ios_base::eofbit, "phase115 basic_ios::move: rdstate() IS transferred (unlike copyfmt)");
+        Check(b.exceptions() == std::ios_base::failbit, "phase115 basic_ios::move: exceptions() IS transferred");
+        Check(a.rdbuf() == &bufA, "phase115 basic_ios::move: rhs KEEPS its own rdbuf() unchanged");
+        Check(a.tie() == nullptr, "phase115 basic_ios::move: rhs's tie() becomes null");
+    }
+
+    // (13) basic_ios::swap -- both rdbuf()s are EXPLICITLY left untouched;
+    //      everything else (including rdstate()) is exchanged.
+    {
+        MyBuf bufA, bufB;
+        MyIos a(&bufA);
+        MyIos b(&bufB);
+        a.precision(3);
+        b.precision(4);
+        a.setstate(std::ios_base::eofbit);
+
+        auto *aBufBefore = a.rdbuf();
+        auto *bBufBefore = b.rdbuf();
+
+        a.swap(b);
+
+        Check(a.rdbuf() == aBufBefore, "phase115 basic_ios::swap: this->rdbuf() UNCHANGED, per [basic.ios.members]");
+        Check(b.rdbuf() == bBufBefore, "phase115 basic_ios::swap: rhs.rdbuf() UNCHANGED");
+        Check(a.precision() == 4 && b.precision() == 3, "phase115 basic_ios::swap: formatting state exchanged");
+        Check(b.rdstate() == std::ios_base::eofbit && a.rdstate() == std::ios_base::goodbit,
+              "phase115 basic_ios::swap: rdstate() IS exchanged (unlike rdbuf)");
+    }
+
+    // (14) basic_ios::set_rdbuf -- associates the buffer WITHOUT calling
+    //      clear() (contrast with the public rdbuf(sb) setter above).
+    {
+        MyBuf bufA, bufB;
+        MyIos ios(&bufA);
+        ios.setstate(std::ios_base::eofbit);
+        ios.set_rdbuf(&bufB);
+        Check(ios.rdbuf() == &bufB, "phase115 basic_ios::set_rdbuf: associates the new buffer");
+        Check(ios.eof(), "phase115 basic_ios::set_rdbuf: does NOT call clear() -- prior state bits survive");
+    }
+
+    // (15) basic_streambuf default virtuals -- a bare MyBuf, zero overrides.
+    {
+        MyBuf buf;
+        Check(buf.sgetc() == std::char_traits<char>::eof(), "phase115 basic_streambuf: default underflow() -> eof");
+        Check(buf.sbumpc() == std::char_traits<char>::eof(), "phase115 basic_streambuf: default uflow() -> eof");
+        Check(buf.sputc('x') == std::char_traits<char>::eof(), "phase115 basic_streambuf: default overflow() -> eof");
+        Check(buf.pubsync() == 0, "phase115 basic_streambuf: default sync() returns 0");
+        Check(buf.in_avail() == 0, "phase115 basic_streambuf: default showmanyc() -> in_avail()==0");
+        Check(buf.sungetc() == std::char_traits<char>::eof(), "phase115 basic_streambuf: default pbackfail() -> eof");
+
+        auto pos = buf.pubseekoff(0, std::ios_base::beg);
+        Check(static_cast<std::streamoff>(pos) == -1, "phase115 basic_streambuf: default seekoff() -> pos_type(-1)");
+        auto pos2 = buf.pubseekpos(pos);
+        Check(static_cast<std::streamoff>(pos2) == -1, "phase115 basic_streambuf: default seekpos() -> pos_type(-1)");
+
+        auto *setbufResult = buf.pubsetbuf(nullptr, 0);
+        Check(setbufResult == &buf, "phase115 basic_streambuf: default setbuf() is a no-op returning this");
+    }
+
+    // (16) basic_streambuf get/put-area protocol through setg/setp.
+    {
+        MyBuf buf;
+        char getData[4] = {'a', 'b', 'c', 'd'};
+        buf.ExposeSetG(getData, getData, getData + 4);
+        Check(buf.eback() == getData && buf.gptr() == getData && buf.egptr() == getData + 4,
+              "phase115 basic_streambuf::setg: get-area pointers set exactly as given");
+        Check(buf.in_avail() == 4, "phase115 basic_streambuf::in_avail: gptr()<egptr() path returns the byte count");
+        Check(buf.sgetc() == 'a', "phase115 basic_streambuf::sgetc: reads WITHOUT advancing");
+        Check(buf.gptr() == getData, "phase115 basic_streambuf::sgetc: gptr() unchanged after sgetc()");
+        Check(buf.sbumpc() == 'a', "phase115 basic_streambuf::sbumpc: reads and advances");
+        Check(buf.gptr() == getData + 1, "phase115 basic_streambuf::sbumpc: gptr() advanced by 1");
+        Check(buf.snextc() == 'c', "phase115 basic_streambuf::snextc: bumps then peeks the FOLLOWING character");
+        Check(buf.gptr() == getData + 2, "phase115 basic_streambuf::snextc: advanced exactly one position");
+
+        char putData[4] = {};
+        buf.ExposeSetP(putData, putData + 4);
+        Check(buf.pbase() == putData && buf.pptr() == putData && buf.epptr() == putData + 4,
+              "phase115 basic_streambuf::setp: put-area pointers set exactly as given");
+        Check(buf.sputc('Z') == 'Z', "phase115 basic_streambuf::sputc: returns the written character");
+        Check(putData[0] == 'Z', "phase115 basic_streambuf::sputc: byte actually written to the buffer");
+        Check(buf.pptr() == putData + 1, "phase115 basic_streambuf::sputc: pptr() advanced by 1");
+    }
+
+    // (17) sputbackc/sungetc -- both succeed while gptr()>eback(), and both
+    //      fall through to pbackfail()->eof at eback().
+    {
+        MyBuf buf;
+        char data[4] = {'p', 'q', 'r', 's'};
+        buf.ExposeSetG(data, data + 1, data + 4);
+        Check(buf.sungetc() == 'p', "phase115 basic_streambuf::sungetc: steps back and returns the preceding char");
+        Check(buf.gptr() == data, "phase115 basic_streambuf::sungetc: gptr() moved back by 1");
+        Check(buf.sungetc() == std::char_traits<char>::eof(),
+              "phase115 basic_streambuf::sungetc: at eback(), delegates to pbackfail() -> eof");
+
+        buf.ExposeSetG(data, data + 1, data + 4);
+        Check(buf.sputbackc('p') == 'p', "phase115 basic_streambuf::sputbackc: matching char steps back, succeeds");
+        Check(buf.gptr() == data, "phase115 basic_streambuf::sputbackc: gptr() moved back by 1");
+        Check(buf.sputbackc('Z') == std::char_traits<char>::eof(),
+              "phase115 basic_streambuf::sputbackc: at eback(), delegates to pbackfail() -> eof");
+    }
+
+    // (18) xsgetn/sgetn and xsputn/sputn -- default bulk-transfer loops.
+    {
+        MyBuf buf;
+        char src[6] = {'1', '2', '3', '4', '5', '6'};
+        buf.ExposeSetG(src, src, src + 6);
+        char dst[8] = {};
+        auto got = buf.sgetn(dst, 4);
+        Check(got == 4, "phase115 basic_streambuf::sgetn: default xsgetn transfers the requested count");
+        Check(dst[0] == '1' && dst[1] == '2' && dst[2] == '3' && dst[3] == '4',
+              "phase115 basic_streambuf::sgetn: bytes transferred in order");
+        Check(buf.gptr() == src + 4, "phase115 basic_streambuf::sgetn: gptr() advanced by the transferred count");
+        auto got2 = buf.sgetn(dst, 8); // only 2 remain
+        Check(got2 == 2, "phase115 basic_streambuf::sgetn: default xsgetn stops at eof, returns a SHORT count");
+
+        char putSrc[5] = {'A', 'B', 'C', 'D', 'E'};
+        char putDst[8] = {};
+        buf.ExposeSetP(putDst, putDst + 8);
+        auto put = buf.sputn(putSrc, 5);
+        Check(put == 5, "phase115 basic_streambuf::sputn: default xsputn transfers the requested count");
+        Check(putDst[0] == 'A' && putDst[4] == 'E', "phase115 basic_streambuf::sputn: bytes transferred in order");
+        Check(buf.pptr() == putDst + 5, "phase115 basic_streambuf::sputn: pptr() advanced by the transferred count");
+    }
+
+    // (19) basic_streambuf::pubimbue/getloc round-trip.
+    {
+        MyBuf buf;
+        std::locale old = buf.pubimbue(std::locale::classic());
+        Check(old == std::locale::classic(), "phase115 basic_streambuf::pubimbue: returns the OLD locale");
+        Check(buf.getloc() == std::locale::classic(), "phase115 basic_streambuf::getloc: reflects the imbued locale");
+    }
+
+    // (20) std::locale -- minimal "C"-only stand-in.
+    {
+        Check(std::locale::classic().name() == "C", "phase115 std::locale: classic().name() == \"C\"");
+        std::locale namedIgnored("en_US.UTF-8");
+        Check(namedIgnored == std::locale::classic(),
+              "phase115 std::locale: named ctor accepts+ignores any name, behaves as classic()");
+        Check(std::locale::global(namedIgnored) == std::locale::classic(),
+              "phase115 std::locale: global() is a no-op returning classic()");
+    }
+
+    // (21) AUDIT-HARDENING traps (Ф30e commit 1 review): each exercises a
+    //      path the base tests above left vacuous or a fix-round correctness
+    //      bug, so a regression in the corresponding fix is caught here.
+
+    // (21a) self-copyfmt WITH a registered callback must fire ZERO events --
+    //       (10)'s self-copyfmt case registered none, so it passed even with
+    //       the `this==&rhs` guard removed. This traps that guard.
+    {
+        MyBuf buf;
+        std::basic_ios<char> ios(&buf);
+        ios.register_callback(&P115Callback, 7);
+        g_p115CallbackLog.clear();
+        ios.copyfmt(ios);
+        Check(g_p115CallbackLog.empty(),
+              "phase115 basic_ios::copyfmt: self-copyfmt with a registered callback fires NO events");
+    }
+
+    // (21b) sputbackc with a MISMATCHING char (room available, c != gptr()[-1])
+    //       -- the one case that depends on the Traits::eq() check; (17) only
+    //       covered matching-char and at-eback().
+    {
+        MyBuf buf;
+        char data[] = {'a', 'b', 'c'};
+        buf.ExposeSetG(data, data + 2, data + 3); // gptr at 'c'; one char back = 'b'
+        Check(buf.sputbackc('X') == std::char_traits<char>::eof(),
+              "phase115 basic_streambuf::sputbackc: mismatching char (not at eback) -> pbackfail -> eof");
+        Check(buf.gptr() == data + 2,
+              "phase115 basic_streambuf::sputbackc: a failed putback does NOT move gptr()");
+    }
+
+    // (21c) basic_ios::move must TRANSFER extensible storage, not copy it:
+    //       otherwise the moved-from object still owns the same pword pointer
+    //       + erase callback and releases it a second time at destruction.
+    {
+        g_p115PwordReleases = 0;
+        int resource = 0;
+        {
+            MyBuf bufA, bufB;
+            MyIos a(&bufA);
+            int slot = std::ios_base::xalloc();
+            a.pword(slot) = &resource;
+            a.register_callback(&P115ReleaseCallback, slot);
+
+            MyIos b(&bufB);
+            b.move(a); // b takes the pword+callback; a must be left owning neither
+        }              // both destroyed here -> erase_event fires on each
+        Check(g_p115PwordReleases == 1,
+              "phase115 basic_ios::move: pword+callback TRANSFERRED (released exactly once, no double-free)");
+    }
+
+    // (21d) iword/pword with a NEGATIVE index must be memory-safe: idx is a raw
+    //       caller int, and xalloc()'s atomic<int> wraps negative after ~2^31
+    //       handouts. Before the guard this wrapped static_cast<size_t> huge
+    //       -> OOB read / uncaught length_error -> terminate.
+    {
+        MyBuf buf;
+        std::basic_ios<char> ios(&buf);
+        ios.iword(-1) = 111; // must not crash
+        Check(true, "phase115 ios_base::iword(-1): negative index handled safely (no OOB/terminate)");
+        ios.pword(-3) = &buf;
+        Check(true, "phase115 ios_base::pword(-3): negative index handled safely (no OOB/terminate)");
+        long &sink = ios.iword(std::numeric_limits<int>::min());
+        sink       = 5;
+        Check(sink == 5,
+              "phase115 ios_base::iword(INT_MIN): returns a writable sink, no length_error/terminate");
+    }
+
+    printf("[CXX] PASS phase115: iostream base spine (Ф30e commit 1) -- ios_base "
+           "fmtflags/setf/unsetf/precision/width/xalloc+iword+pword (growable, independent, "
+           "LIFO register_callback), basic_ios state bits/clear/setstate-throws-ios_base_failure/"
+           "tie/rdbuf/fill/widen/narrow/copyfmt (exact erase_event-then-copyfmt_event order, "
+           "rdstate/rdbuf excluded, exceptions() set last)/move (rdstate+exceptions transferred, "
+           "rdbuf excluded)/swap (rdbuf excluded)/set_rdbuf (no clear()), basic_streambuf default "
+           "virtuals (eof/0/pos_type(-1)) + full get/put-area protocol (setg/setp/gbump/pbump/"
+           "sbumpc/sputc/sputbackc/sungetc/snextc/sgetn/sputn/pubimbue), and std::locale\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -22351,6 +22910,7 @@ int main()
     Phase112();
     Phase113();
     Phase114();
+    Phase115();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

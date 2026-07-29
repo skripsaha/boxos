@@ -15,6 +15,22 @@
 #include <numbers>
 #include <source_location>
 
+// ── Ф30e commit 1: <ios> self-provides its feature-test macro ────────────
+// [support.limits.general]/2 requires __cpp_lib_ios_noreplace to be visible
+// from <ios> itself, not only from <version>. This TU never includes
+// <version> (and none of the headers above own <__bits/version_iostreams>),
+// so the guards below prove <ios> defines the macro in ISOLATION — a check
+// the monolithic cxxtest.cpp cannot make, since it also includes <version>.
+#ifdef __cpp_lib_ios_noreplace
+#  error "test setup: __cpp_lib_ios_noreplace defined before <ios> — isolation lost"
+#endif
+#include <ios>
+#ifndef __cpp_lib_ios_noreplace
+#  error "<ios> must self-define __cpp_lib_ios_noreplace ([support.limits.general]/2)"
+#endif
+static_assert(__cpp_lib_ios_noreplace >= 202207L,
+              "__cpp_lib_ios_noreplace must be >= 202207L (P2467R1)");
+
 namespace {
 
 using namespace std;

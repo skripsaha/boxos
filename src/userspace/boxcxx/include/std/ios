@@ -1,0 +1,539 @@
+// boxcxx — <ios>
+// ios_base [ios.base] + basic_ios<CharT,Traits> [ios] — the shared state,
+// formatting, and error-reporting base of the whole iostream hierarchy.
+// No streambuf, no ostream/istream, no concrete stream classes here — see
+// <streambuf>, <ostream>/<istream>, <sstream> (later commits).
+//
+// iword/pword/register_callback/xalloc are backed by real growable storage
+// (vector<long>/vector<void*>/a small callback list), never a fixed-size
+// array — mandated by ios_base's synopsis right now, not speculative.
+//
+// sync_with_stdio and ios_base::Init are honest no-ops: BoxOS has no C
+// <stdio.h> buffer for the former to (de)synchronize with (boxlib's own
+// printf in print.c is an unrelated subsystem no stream in this header
+// ever touches), and no cin/cout globals for the latter to sequence
+// (BoxOS never ships <iostream> or the four global stream objects — see
+// CONFORMANCE note at the bottom).
+#ifndef BOXCXX_IOS
+#define BOXCXX_IOS
+
+#include <atomic>
+#include <iosfwd>
+#include <locale>
+#include <system_error>
+#include <vector>
+
+#include <__bits/version_iostreams>
+
+namespace std {
+
+// ── io_errc [ios.errc] ──────────────────────────────────────────────────
+
+enum class io_errc {
+    stream = 1
+};
+
+const error_category &iostream_category() noexcept;
+
+inline error_code make_error_code(io_errc e) noexcept
+{
+    return error_code(static_cast<int>(e), iostream_category());
+}
+inline error_condition make_error_condition(io_errc e) noexcept
+{
+    return error_condition(static_cast<int>(e), iostream_category());
+}
+
+template <>
+struct is_error_code_enum<io_errc> : true_type {};
+
+// ── ios_base [ios.base] ──────────────────────────────────────────────────
+
+class ios_base {
+public:
+    // fmtflags — bitmask type, hidden-friend operators keep it a real,
+    // non-int-convertible type (safer than a plain unscoped enum).
+    enum class fmtflags : unsigned {
+        skipws     = 1u << 0,
+        unitbuf    = 1u << 1,
+        uppercase  = 1u << 2,
+        showbase   = 1u << 3,
+        showpoint  = 1u << 4,
+        showpos    = 1u << 5,
+        left       = 1u << 6,
+        right      = 1u << 7,
+        internal   = 1u << 8,
+        dec        = 1u << 9,
+        oct        = 1u << 10,
+        hex        = 1u << 11,
+        scientific = 1u << 12,
+        fixed      = 1u << 13,
+        boolalpha  = 1u << 14,
+        adjustfield = left | right | internal,
+        basefield   = dec | oct | hex,
+        floatfield  = scientific | fixed, // hexfloat == both bits set
+    };
+    friend constexpr fmtflags operator|(fmtflags a, fmtflags b) noexcept
+    {
+        return static_cast<fmtflags>(static_cast<unsigned>(a) | static_cast<unsigned>(b));
+    }
+    friend constexpr fmtflags operator&(fmtflags a, fmtflags b) noexcept
+    {
+        return static_cast<fmtflags>(static_cast<unsigned>(a) & static_cast<unsigned>(b));
+    }
+    friend constexpr fmtflags operator^(fmtflags a, fmtflags b) noexcept
+    {
+        return static_cast<fmtflags>(static_cast<unsigned>(a) ^ static_cast<unsigned>(b));
+    }
+    friend constexpr fmtflags operator~(fmtflags a) noexcept
+    {
+        return static_cast<fmtflags>(~static_cast<unsigned>(a));
+    }
+    friend constexpr fmtflags &operator|=(fmtflags &a, fmtflags b) noexcept { return a = a | b; }
+    friend constexpr fmtflags &operator&=(fmtflags &a, fmtflags b) noexcept { return a = a & b; }
+    friend constexpr fmtflags &operator^=(fmtflags &a, fmtflags b) noexcept { return a = a ^ b; }
+
+    static constexpr fmtflags skipws      = fmtflags::skipws;
+    static constexpr fmtflags unitbuf     = fmtflags::unitbuf;
+    static constexpr fmtflags uppercase   = fmtflags::uppercase;
+    static constexpr fmtflags showbase    = fmtflags::showbase;
+    static constexpr fmtflags showpoint   = fmtflags::showpoint;
+    static constexpr fmtflags showpos     = fmtflags::showpos;
+    static constexpr fmtflags left        = fmtflags::left;
+    static constexpr fmtflags right       = fmtflags::right;
+    static constexpr fmtflags internal    = fmtflags::internal;
+    static constexpr fmtflags dec         = fmtflags::dec;
+    static constexpr fmtflags oct         = fmtflags::oct;
+    static constexpr fmtflags hex         = fmtflags::hex;
+    static constexpr fmtflags scientific  = fmtflags::scientific;
+    static constexpr fmtflags fixed       = fmtflags::fixed;
+    static constexpr fmtflags boolalpha   = fmtflags::boolalpha;
+    static constexpr fmtflags adjustfield = fmtflags::adjustfield;
+    static constexpr fmtflags basefield   = fmtflags::basefield;
+    static constexpr fmtflags floatfield  = fmtflags::floatfield;
+
+    // iostate — bitmask type.
+    enum class iostate : unsigned {
+        goodbit = 0,
+        badbit  = 1u << 0,
+        failbit = 1u << 1,
+        eofbit  = 1u << 2,
+    };
+    friend constexpr iostate operator|(iostate a, iostate b) noexcept
+    {
+        return static_cast<iostate>(static_cast<unsigned>(a) | static_cast<unsigned>(b));
+    }
+    friend constexpr iostate operator&(iostate a, iostate b) noexcept
+    {
+        return static_cast<iostate>(static_cast<unsigned>(a) & static_cast<unsigned>(b));
+    }
+    friend constexpr iostate operator^(iostate a, iostate b) noexcept
+    {
+        return static_cast<iostate>(static_cast<unsigned>(a) ^ static_cast<unsigned>(b));
+    }
+    friend constexpr iostate operator~(iostate a) noexcept
+    {
+        return static_cast<iostate>(~static_cast<unsigned>(a));
+    }
+    friend constexpr iostate &operator|=(iostate &a, iostate b) noexcept { return a = a | b; }
+    friend constexpr iostate &operator&=(iostate &a, iostate b) noexcept { return a = a & b; }
+    friend constexpr iostate &operator^=(iostate &a, iostate b) noexcept { return a = a ^ b; }
+
+    static constexpr iostate goodbit = iostate::goodbit;
+    static constexpr iostate badbit  = iostate::badbit;
+    static constexpr iostate failbit = iostate::failbit;
+    static constexpr iostate eofbit  = iostate::eofbit;
+
+    // openmode — bitmask type.
+    enum class openmode : unsigned {
+        app       = 1u << 0,
+        binary    = 1u << 1,
+        in        = 1u << 2,
+        out       = 1u << 3,
+        trunc     = 1u << 4,
+        ate       = 1u << 5,
+        noreplace = 1u << 6, // C++23, P2467R1
+    };
+    friend constexpr openmode operator|(openmode a, openmode b) noexcept
+    {
+        return static_cast<openmode>(static_cast<unsigned>(a) | static_cast<unsigned>(b));
+    }
+    friend constexpr openmode operator&(openmode a, openmode b) noexcept
+    {
+        return static_cast<openmode>(static_cast<unsigned>(a) & static_cast<unsigned>(b));
+    }
+    friend constexpr openmode operator^(openmode a, openmode b) noexcept
+    {
+        return static_cast<openmode>(static_cast<unsigned>(a) ^ static_cast<unsigned>(b));
+    }
+    friend constexpr openmode operator~(openmode a) noexcept
+    {
+        return static_cast<openmode>(~static_cast<unsigned>(a));
+    }
+    friend constexpr openmode &operator|=(openmode &a, openmode b) noexcept { return a = a | b; }
+    friend constexpr openmode &operator&=(openmode &a, openmode b) noexcept { return a = a & b; }
+    friend constexpr openmode &operator^=(openmode &a, openmode b) noexcept { return a = a ^ b; }
+
+    static constexpr openmode app       = openmode::app;
+    static constexpr openmode binary    = openmode::binary;
+    static constexpr openmode in        = openmode::in;
+    static constexpr openmode out       = openmode::out;
+    static constexpr openmode trunc     = openmode::trunc;
+    static constexpr openmode ate       = openmode::ate;
+    static constexpr openmode noreplace = openmode::noreplace;
+
+    // seekdir — plain enum, NOT a bitmask (no combining needed).
+    enum class seekdir { beg, cur, end };
+    static constexpr seekdir beg = seekdir::beg;
+    static constexpr seekdir cur = seekdir::cur;
+    static constexpr seekdir end = seekdir::end;
+
+    class failure;
+    class Init;
+
+    // ── formatting state [ios.base] ───────────────────────────────────
+    fmtflags flags() const noexcept { return __flags; }
+    fmtflags flags(fmtflags fmtfl) noexcept
+    {
+        fmtflags old = __flags;
+        __flags      = fmtfl;
+        return old;
+    }
+    fmtflags setf(fmtflags fmtfl) noexcept
+    {
+        fmtflags old = __flags;
+        __flags      = __flags | fmtfl;
+        return old;
+    }
+    fmtflags setf(fmtflags fmtfl, fmtflags mask) noexcept
+    {
+        fmtflags old = __flags;
+        __flags      = (__flags & ~mask) | (fmtfl & mask);
+        return old;
+    }
+    void unsetf(fmtflags mask) noexcept { __flags = __flags & ~mask; }
+
+    streamsize precision() const noexcept { return __precision; }
+    streamsize precision(streamsize prec) noexcept
+    {
+        streamsize old = __precision;
+        __precision    = prec;
+        return old;
+    }
+    streamsize width() const noexcept { return __width; }
+    streamsize width(streamsize w) noexcept
+    {
+        streamsize old = __width;
+        __width        = w;
+        return old;
+    }
+
+    // ── locale ─────────────────────────────────────────────────────────
+    locale imbue(const locale &loc)
+    {
+        locale old = __loc;
+        __loc       = loc;
+        FireEvent(imbue_event);
+        return old;
+    }
+    locale getloc() const { return __loc; }
+
+    // ── extensible storage [ios.base.storage] ─────────────────────────
+    // xalloc() hands out a fresh, process-wide-unique, monotonically
+    // increasing index; iword/pword grow their own per-object storage
+    // on demand so any index xalloc() ever returns is always valid.
+    static int xalloc() noexcept;
+
+    long &iword(int idx)
+    {
+        // A negative index never comes from a valid xalloc() (its mandated
+        // source), but idx is a raw caller-supplied int and xalloc()'s own
+        // atomic<int> counter wraps negative after ~2^31 handouts over a
+        // long-lived system — guard it so a bad index can never wrap
+        // static_cast<size_t>(idx) huge and index out of bounds. Returns a
+        // shared static sink (as libstdc++ does for a bad index).
+        if (idx < 0) { static long __sink = 0; return __sink; }
+        size_t at = static_cast<size_t>(idx);
+        if (at >= __iwords.size()) __iwords.resize(at + 1, 0L);
+        return __iwords[at];
+    }
+    void *&pword(int idx)
+    {
+        if (idx < 0) { static void *__sink = nullptr; return __sink; }
+        size_t at = static_cast<size_t>(idx);
+        if (at >= __pwords.size()) __pwords.resize(at + 1, nullptr);
+        return __pwords[at];
+    }
+
+    enum event { erase_event, imbue_event, copyfmt_event };
+    using event_callback = void (*)(event, ios_base &, int);
+    void register_callback(event_callback fn, int idx) { __callbacks.push_back({fn, idx}); }
+
+    virtual ~ios_base();
+    ios_base(const ios_base &) = delete;
+    ios_base &operator=(const ios_base &) = delete;
+
+    static bool sync_with_stdio(bool sync = true) noexcept
+    {
+        static bool synced = true;
+        bool old            = synced;
+        synced              = sync;
+        return old;
+    }
+
+protected:
+    ios_base() noexcept = default;
+
+    // Fires every registered callback in OPPOSITE order of registration
+    // (LIFO) — [ios.base]: "Functions registered are called ... in
+    // opposite order of registration."
+    void FireEvent(event ev)
+    {
+        for (size_t i = __callbacks.size(); i-- > 0;)
+            __callbacks[i].Fn(ev, *this, __callbacks[i].Idx);
+    }
+    // Plain field copy, no event firing — shared by copyfmt() (which
+    // brackets this with erase_event/copyfmt_event itself) and by
+    // basic_ios::move() (which per [basic.ios.members] fires no events
+    // at all).
+    void CopyStateFrom(const ios_base &rhs)
+    {
+        __flags     = rhs.__flags;
+        __precision = rhs.__precision;
+        __width     = rhs.__width;
+        __loc       = rhs.__loc;
+        __iwords    = rhs.__iwords;
+        __pwords    = rhs.__pwords;
+        __callbacks = rhs.__callbacks;
+    }
+    // Move variant for basic_ios::move — TRANSFERS the growable storage so
+    // the moved-from object is left with EMPTY iword/pword/callback vectors.
+    // A plain copy (CopyStateFrom) would leave BOTH objects holding the same
+    // callback registrations and identical pword pointer values; each would
+    // then fire erase_event over that shared list at destruction, so a
+    // callback that releases its pword resource would run — and free — twice.
+    void MoveStateFrom(ios_base &rhs)
+    {
+        __flags     = rhs.__flags;
+        __precision = rhs.__precision;
+        __width     = rhs.__width;
+        __loc       = rhs.__loc;
+        __iwords    = std::move(rhs.__iwords);
+        __pwords    = std::move(rhs.__pwords);
+        __callbacks = std::move(rhs.__callbacks);
+    }
+    void SwapStateWith(ios_base &rhs) noexcept
+    {
+        using std::swap;
+        swap(__flags, rhs.__flags);
+        swap(__precision, rhs.__precision);
+        swap(__width, rhs.__width);
+        swap(__loc, rhs.__loc);
+        swap(__iwords, rhs.__iwords);
+        swap(__pwords, rhs.__pwords);
+        swap(__callbacks, rhs.__callbacks);
+    }
+
+private:
+    struct CallbackEntry {
+        event_callback Fn;
+        int Idx;
+    };
+
+    fmtflags __flags        = fmtflags{};
+    streamsize __precision  = 0;
+    streamsize __width      = 0;
+    locale __loc            = locale::classic();
+    vector<long> __iwords;
+    vector<void *> __pwords;
+    vector<CallbackEntry> __callbacks;
+};
+
+// [ios.failure] — a class derived from system_error, NOT runtime_error
+// directly.
+class ios_base::failure : public system_error {
+public:
+    explicit failure(const string &msg, const error_code &ec = io_errc::stream);
+    explicit failure(const char *msg, const error_code &ec = io_errc::stream);
+    ~failure() override;
+};
+
+// [ios.base]/Init — BoxOS ships no cin/cout/cerr/clog and no <iostream>
+// (see the governing constraint), so Init has nothing to sequence. Kept
+// only for synopsis conformance (defensive `ios_base::Init x;` in
+// generic code must still compile).
+class ios_base::Init {
+public:
+    Init();
+    ~Init();
+};
+
+// ── basic_ios<CharT, Traits> [ios] ───────────────────────────────────────
+
+// Traits' default (= char_traits<CharT>) already comes from <iosfwd>'s
+// forward declaration — a class template's default template argument may
+// only be specified once per scope, so it is not repeated here.
+template <class CharT, class Traits>
+class basic_ios : public ios_base {
+public:
+    using char_type   = CharT;
+    using int_type    = typename Traits::int_type;
+    using pos_type    = typename Traits::pos_type;
+    using off_type    = typename Traits::off_type;
+    using traits_type = Traits;
+
+    explicit operator bool() const { return !fail(); }
+    bool operator!() const { return fail(); }
+
+    iostate rdstate() const noexcept { return __state; }
+    void clear(iostate state = iostate::goodbit)
+    {
+        __state = __sb ? state : (state | iostate::badbit);
+        if ((rdstate() & exceptions()) != iostate::goodbit)
+            throw ios_base::failure("basic_ios::clear: iostate matches the exceptions() mask");
+    }
+    void setstate(iostate state) { clear(rdstate() | state); }
+    bool good() const noexcept { return rdstate() == iostate::goodbit; }
+    bool eof() const noexcept { return (rdstate() & iostate::eofbit) != iostate::goodbit; }
+    bool fail() const noexcept
+    {
+        return (rdstate() & (iostate::failbit | iostate::badbit)) != iostate::goodbit;
+    }
+    bool bad() const noexcept { return (rdstate() & iostate::badbit) != iostate::goodbit; }
+    iostate exceptions() const noexcept { return __except; }
+    void exceptions(iostate except)
+    {
+        __except = except;
+        clear(rdstate());
+    }
+
+    explicit basic_ios(basic_streambuf<CharT, Traits> *sb) { init(sb); }
+    virtual ~basic_ios() = default;
+
+    basic_ostream<CharT, Traits> *tie() const noexcept { return __tie; }
+    basic_ostream<CharT, Traits> *tie(basic_ostream<CharT, Traits> *t) noexcept
+    {
+        auto old = __tie;
+        __tie    = t;
+        return old;
+    }
+
+    basic_streambuf<CharT, Traits> *rdbuf() const noexcept { return __sb; }
+    basic_streambuf<CharT, Traits> *rdbuf(basic_streambuf<CharT, Traits> *sb)
+    {
+        auto old = __sb;
+        __sb     = sb;
+        clear();
+        return old;
+    }
+
+    // [basic.ios.members]/copyfmt — verbatim sequence: (1) fire *this*'s
+    // OWN, pre-copy callbacks with erase_event; (2) bulk-copy every member
+    // except rdstate()/rdbuf()/exceptions(); (3) fire the NEWLY-copied
+    // callback list with copyfmt_event; (4) set exceptions() last, via the
+    // real setter (which itself re-checks rdstate() and can throw).
+    basic_ios &copyfmt(const basic_ios &rhs)
+    {
+        if (this == &rhs) return *this;
+        this->FireEvent(ios_base::erase_event);
+        this->CopyStateFrom(rhs);
+        __tie  = rhs.__tie;
+        __fill = rhs.__fill;
+        this->FireEvent(ios_base::copyfmt_event);
+        this->exceptions(rhs.exceptions());
+        return *this;
+    }
+
+    char_type fill() const noexcept { return __fill; }
+    char_type fill(char_type ch) noexcept
+    {
+        auto old = __fill;
+        __fill   = ch;
+        return old;
+    }
+
+    // Shadows ios_base::imbue (same name, non-virtual in both) — also
+    // imbues rdbuf() when present, then delegates to the base for the
+    // actual locale bookkeeping + imbue_event.
+    locale imbue(const locale &loc)
+    {
+        // [basic.ios.members]/9 Effects order: ios_base::imbue(loc) FIRST
+        // (it updates getloc() and fires imbue_event — a callback may observe
+        // rdbuf()'s locale), THEN rdbuf()->pubimbue(loc).
+        locale old = ios_base::imbue(loc);
+        if (__sb) __sb->pubimbue(loc);
+        return old;
+    }
+
+    // widen/narrow are the identity function for CharT=char — this IS the
+    // fully correct "C"-locale behavior for a char stream, not a shortcut.
+    // Written generically so a future non-char instantiation is not
+    // structurally blocked, though it would need a real ctype facet to be
+    // more than an identity cast.
+    char narrow(char_type c, char) const { return static_cast<char>(c); }
+    char_type widen(char c) const { return static_cast<char_type>(c); }
+
+    basic_ios(const basic_ios &) = delete;
+    basic_ios &operator=(const basic_ios &) = delete;
+
+protected:
+    basic_ios() noexcept = default;
+
+    void init(basic_streambuf<CharT, Traits> *sb)
+    {
+        __sb     = sb;
+        __tie    = nullptr;
+        __state  = sb ? iostate::goodbit : iostate::badbit;
+        __except = iostate::goodbit;
+        this->flags(fmtflags::skipws | fmtflags::dec);
+        this->width(0);
+        this->precision(6);
+        __fill = widen(' ');
+    }
+
+    // [basic.ios.members]/move — postconditions: *this takes rhs's ENTIRE
+    // state (including rdstate()/exceptions(), unlike copyfmt) except that
+    // this->rdbuf() becomes null; rhs keeps its OWN rdbuf() unchanged and
+    // its tie() becomes null. No events fire (move is not copyfmt).
+    void move(basic_ios &rhs)
+    {
+        this->MoveStateFrom(rhs);
+        __tie      = rhs.__tie;
+        __fill     = rhs.__fill;
+        __state    = rhs.__state;
+        __except   = rhs.__except;
+        __sb       = nullptr;
+        rhs.__tie  = nullptr;
+    }
+    void move(basic_ios &&rhs) { move(rhs); }
+
+    // swap: both rdbuf()s are EXPLICITLY left untouched (neither this-> nor
+    // rhs's streambuf pointer participates) — everything else is swapped.
+    void swap(basic_ios &rhs) noexcept
+    {
+        this->SwapStateWith(rhs);
+        using std::swap;
+        swap(__tie, rhs.__tie);
+        swap(__state, rhs.__state);
+        swap(__except, rhs.__except);
+        swap(__fill, rhs.__fill);
+    }
+
+    void set_rdbuf(basic_streambuf<CharT, Traits> *sb) noexcept { __sb = sb; }
+
+private:
+    basic_streambuf<CharT, Traits> *__sb = nullptr;
+    basic_ostream<CharT, Traits> *__tie  = nullptr;
+    iostate __state                     = iostate::goodbit;
+    iostate __except                    = iostate::goodbit;
+    char_type __fill                    = CharT();
+};
+
+} // namespace std
+
+// CONFORMANCE: BoxOS never ships <iostream> or the cin/cout/cerr/clog
+// global objects (BoxOS-native I/O is box::current<T>/Current — see the
+// I/O spine design). ios_base::Init exists only so generic code that
+// defensively constructs one still compiles; it has nothing to sequence.
+
+#endif // BOXCXX_IOS
