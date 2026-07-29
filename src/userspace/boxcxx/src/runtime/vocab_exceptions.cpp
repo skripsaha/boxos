@@ -4,6 +4,7 @@
  * helpers. Same scheme as <stdexcept>: the headers keep the throw off the
  * hot inline path and let one TU own the exception's polymorphic image.
  *
+ *   bad_any_cast              <any>
  *   bad_optional_access      <optional>
  *   bad_variant_access       <variant>
  *   bad_expected_access<void> <expected>   (the templated derived classes
@@ -12,6 +13,7 @@
  *   bad_function_call        <functional>
  */
 
+#include <any>
 #include <expected>
 #include <functional>
 #include <memory>
@@ -19,6 +21,10 @@
 #include <variant>
 
 namespace std {
+
+bad_any_cast::~bad_any_cast() = default;
+const char *bad_any_cast::what() const noexcept { return "bad any cast"; }
+void __throw_bad_any_cast() { throw bad_any_cast{}; }
 
 bad_optional_access::~bad_optional_access() = default;
 const char *bad_optional_access::what() const noexcept

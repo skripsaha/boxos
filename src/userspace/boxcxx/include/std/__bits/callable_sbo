@@ -1,9 +1,10 @@
 // boxcxx — <__bits/callable_sbo>
-// Shared small-buffer-optimization parameters for std::function and
-// std::move_only_function ([func.wrap.func]/[func.wrap.move]). Both wrap a
-// type-erased callable in a fixed-size inline buffer when it fits, and fall
-// back to one heap allocation otherwise -- pinning the buffer size/align and
-// the "fits inline" test here keeps the two wrappers from ever disagreeing.
+// Shared small-buffer-optimization parameters for std::function,
+// std::move_only_function ([func.wrap.func]/[func.wrap.move]), and
+// std::any ([any]). All three wrap a type-erased value in a fixed-size
+// inline buffer when it fits, and fall back to one heap allocation
+// otherwise -- pinning the buffer size/align and the "fits inline" test
+// here keeps the three wrappers from ever disagreeing.
 #ifndef BOXCXX_BITS_CALLABLE_SBO
 #define BOXCXX_BITS_CALLABLE_SBO
 
