@@ -1,0 +1,408 @@
+// boxcxx — <sstream>
+// basic_stringbuf<CharT,Traits,Allocator> [stringbuf] — the in-memory
+// streambuf backing basic_[i|o]stringstream (later commit). Get/put area
+// pointers alias __buf's OWN storage directly (P0408 "efficient stringbuf"):
+// no separate copy buffer, str()/view() read straight out of it.
+//
+// This is commit 2 of the Ф30e <sstream> work: basic_stringbuf only. The
+// three stream-wrapper classes (basic_[i|o]stringstream, basic_stringstream)
+// wrap basic_istream/basic_ostream, which do not exist until a later commit.
+//
+// ── the buffer strategy (the one subtle part of this header) ────────────
+// epptr() is set to __buf.data()+__buf.capacity(), not +size() — the put
+// area's ceiling is the string's own SPARE capacity, so several characters
+// can land via basic_streambuf's fast in-line sputc() path with no virtual
+// call at all. That means __buf's OWN size() field can legitimately lag
+// behind how much has really been written (the fast path never touches it).
+// Two consequences this header handles explicitly:
+//   - overflow()/str()&& must re-sync __buf's tracked size() up to the true
+//     write position BEFORE calling any __buf mutator that only preserves
+//     size()-many characters on growth (reserve/append/push_back) — done via
+//     SyncBufSize(), a self-append that never reallocates (the gap is always
+//     <= capacity()) and so never loses the untracked bytes.
+//   - str()/view()/seekoff cannot trust __buf.size() as "how much has been
+//     written" at all. A separate __highWater field (checkpointed at
+//     overflow()/seekoff(), folded with the CURRENT pptr() at query time via
+//     HighMark()) is the real source of truth — this is what makes
+//     `oss<<"hello"; oss.seekp(2); oss<<"Y";` correctly report "heYlo" (5
+//     chars), not "heY" (a naive [pbase(),pptr()) read would truncate it).
+//
+// P0408 cross-allocator ctors omitted — see leftovers (documented,
+// deliberate: template<class SAlloc> basic_stringbuf(const
+// basic_string<CharT,Traits,SAlloc>&, ...) where SAlloc differs from
+// Allocator; the same-allocator overloads below already cover the
+// practically-relevant cases).
+#ifndef BOXCXX_SSTREAM
+#define BOXCXX_SSTREAM
+
+#include <streambuf>
+#include <string>
+#include <string_view>
+#include <cstddef>
+#include <type_traits>
+#include <utility>
+
+namespace std {
+
+template <class CharT, class Traits, class Allocator>
+class basic_stringbuf : public basic_streambuf<CharT, Traits> {
+    using AllocTraits = allocator_traits<Allocator>;
+
+public:
+    using char_type      = CharT;
+    using traits_type    = Traits;
+    using int_type       = typename Traits::int_type;
+    using pos_type       = typename Traits::pos_type;
+    using off_type       = typename Traits::off_type;
+    using allocator_type = Allocator;
+
+    using __view = basic_string_view<CharT, Traits>;
+
+private:
+    template <typename SV>
+    static constexpr bool IsViewLike =
+        is_convertible_v<const SV &, __view> && !is_convertible_v<const SV &, const CharT *>;
+
+public:
+    basic_stringbuf() : basic_stringbuf(ios_base::in | ios_base::out) {}
+    explicit basic_stringbuf(ios_base::openmode which) : __mode(which) {}
+
+    explicit basic_stringbuf(const basic_string<CharT, Traits, Allocator> &s,
+                             ios_base::openmode which = ios_base::in | ios_base::out)
+        : __mode(which), __buf(s)
+    {
+        ResetPositions();
+    }
+    explicit basic_stringbuf(basic_string<CharT, Traits, Allocator> &&s,
+                             ios_base::openmode which = ios_base::in | ios_base::out)
+        : __mode(which), __buf(std::move(s))
+    {
+        ResetPositions();
+    }
+
+    explicit basic_stringbuf(const Allocator &a)
+        : basic_stringbuf(ios_base::in | ios_base::out, a)
+    {
+    }
+    basic_stringbuf(ios_base::openmode which, const Allocator &a) : __mode(which), __buf(a)
+    {
+        ResetPositions();
+    }
+    basic_stringbuf(const basic_string<CharT, Traits, Allocator> &s, const Allocator &a)
+        : basic_stringbuf(s, ios_base::in | ios_base::out, a)
+    {
+    }
+    basic_stringbuf(const basic_string<CharT, Traits, Allocator> &s, ios_base::openmode which,
+                    const Allocator &a)
+        : __mode(which), __buf(s, a)
+    {
+        ResetPositions();
+    }
+
+    template <typename SV>
+        requires IsViewLike<SV>
+    explicit basic_stringbuf(const SV &t, ios_base::openmode which = ios_base::in | ios_base::out,
+                             const Allocator &a = Allocator())
+        : __mode(which), __buf(__view(t), a)
+    {
+        ResetPositions();
+    }
+
+    basic_stringbuf(const basic_stringbuf &) = delete;
+    basic_stringbuf &operator=(const basic_stringbuf &) = delete;
+
+    // rhs.__buf's OWN size() can lag behind rhs's true content (the same
+    // fast-path-write gap SyncBufSize documents below) -- syncing it up
+    // BEFORE the steal is required, not an optimization: basic_string's SSO
+    // move only transfers size()+1 bytes, so a stale size() here would
+    // silently drop the untracked tail.
+    basic_stringbuf(basic_stringbuf &&rhs)
+        : basic_streambuf<CharT, Traits>(rhs),
+          __mode(rhs.__mode),
+          __highWater(rhs.HighMark())
+    {
+        rhs.SyncBufSize(__highWater);
+        PtrOffsets o = rhs.CaptureOffsets();
+        __buf        = std::move(rhs.__buf);
+        ApplyOffsets(o);
+        rhs.__highWater = 0;
+        rhs.setg(nullptr, nullptr, nullptr);
+        rhs.setp(nullptr, nullptr);
+    }
+    basic_stringbuf &operator=(basic_stringbuf &&rhs)
+    {
+        if (this == &rhs) return *this;
+        basic_streambuf<CharT, Traits>::operator=(rhs);
+        __mode      = rhs.__mode;
+        __highWater = rhs.HighMark();
+        rhs.SyncBufSize(__highWater);
+        PtrOffsets o = rhs.CaptureOffsets();
+        __buf        = std::move(rhs.__buf);
+        ApplyOffsets(o);
+        rhs.__highWater = 0;
+        rhs.setg(nullptr, nullptr, nullptr);
+        rhs.setp(nullptr, nullptr);
+        return *this;
+    }
+
+    void swap(basic_stringbuf &rhs) noexcept(AllocTraits::propagate_on_container_swap::value ||
+                                             AllocTraits::is_always_equal::value)
+    {
+        if (this == &rhs) return;
+        SyncBufSize(HighMark());
+        rhs.SyncBufSize(rhs.HighMark());
+        PtrOffsets myOld  = CaptureOffsets();
+        PtrOffsets rhsOld = rhs.CaptureOffsets();
+        basic_streambuf<CharT, Traits>::swap(rhs);
+        using std::swap;
+        swap(__mode, rhs.__mode);
+        __buf.swap(rhs.__buf);
+        swap(__highWater, rhs.__highWater);
+        ApplyOffsets(rhsOld);
+        rhs.ApplyOffsets(myOld);
+    }
+
+    allocator_type get_allocator() const noexcept { return __buf.get_allocator(); }
+
+    basic_string<CharT, Traits, Allocator> str() const &
+    {
+        return basic_string<CharT, Traits, Allocator>(view(), get_allocator());
+    }
+    basic_string<CharT, Traits, Allocator> str() &&
+    {
+        SyncBufSize(HighMark());
+        Allocator alloc = __buf.get_allocator();
+        basic_string<CharT, Traits, Allocator> result(std::move(__buf));
+        __buf = basic_string<CharT, Traits, Allocator>(alloc);
+        ResetPositions();
+        return result;
+    }
+    __view view() const noexcept
+    {
+        if (Has(ios_base::out)) return __view(this->pbase(), HighMark());
+        if (Has(ios_base::in)) return __view(this->eback(), HighMark());
+        return __view();
+    }
+    void str(const basic_string<CharT, Traits, Allocator> &s)
+    {
+        __buf = s;
+        ResetPositions();
+    }
+    template <typename SV>
+        requires IsViewLike<SV>
+    void str(const SV &t)
+    {
+        __view sv = t;
+        __buf     = sv;
+        ResetPositions();
+    }
+
+protected:
+    int_type underflow() override
+    {
+        if (!Has(ios_base::in)) return Traits::eof();
+        // Expose the get area up to the true HIGH-WATER mark, not merely pptr().
+        // After a backward seekp, pptr() sits BELOW content that str()/view()
+        // already report; a read must still reach it ([stringbuf.virtuals] — the
+        // readable extent is [xbeg, high_mark)). Capping egptr() at pptr() here
+        // would silently truncate `sputn("hello"); seekp(2); sputc('Y'); <read>`
+        // to "heY". Strict generalization: identical when pptr()==high_mark.
+        if (Has(ios_base::out)) {
+            char_type *hwEnd = this->eback() + HighMark();
+            if (hwEnd > this->egptr()) this->setg(this->eback(), this->gptr(), hwEnd);
+        }
+        if (this->gptr() < this->egptr()) return Traits::to_int_type(*this->gptr());
+        return Traits::eof();
+    }
+
+    // in_avail() is only useful if the get area is kept current; the base
+    // default returns 0 (useless the moment anything is written). Report the
+    // real count of not-yet-read characters up to the high-water mark so
+    // in_avail()/readsome() work through the coming istream layer.
+    streamsize showmanyc() override
+    {
+        if (!Has(ios_base::in)) return -1;
+        size_t seen = static_cast<size_t>(this->gptr() - this->eback());
+        size_t hw   = HighMark();
+        return static_cast<streamsize>(hw > seen ? hw - seen : 0);
+    }
+
+    int_type pbackfail(int_type c = Traits::eof()) override
+    {
+        if (this->gptr() <= this->eback()) return Traits::eof();
+        if (Traits::eq_int_type(c, Traits::eof())) {
+            this->gbump(-1);
+            return Traits::not_eof(c);
+        }
+        if (Traits::eq(this->gptr()[-1], Traits::to_char_type(c))) {
+            this->gbump(-1);
+            return c;
+        }
+        if (Has(ios_base::out)) {
+            this->gbump(-1);
+            *this->gptr() = Traits::to_char_type(c);
+            return c;
+        }
+        return Traits::eof();
+    }
+
+    int_type overflow(int_type c = Traits::eof()) override
+    {
+        if (!Has(ios_base::out)) return Traits::eof();
+        if (Traits::eq_int_type(c, Traits::eof())) return Traits::not_eof(c);
+
+        PtrOffsets o = CaptureOffsets();
+        size_t pos   = o.pOff;
+        SyncBufSize(pos);
+        __buf.push_back(Traits::to_char_type(c));
+        o.pOff = pos + 1;
+        ApplyOffsets(o);
+        if (o.pOff > __highWater) __highWater = o.pOff;
+        return Traits::to_int_type(c);
+    }
+
+    pos_type seekoff(off_type off, ios_base::seekdir dir, ios_base::openmode which) override
+    {
+        bool wantIn  = HasBit(which, ios_base::in);
+        bool wantOut = HasBit(which, ios_base::out);
+        if (!wantIn && !wantOut) return pos_type(off_type(-1));
+        if (dir == ios_base::cur && wantIn && wantOut) return pos_type(off_type(-1));
+
+        if (Has(ios_base::out)) {
+            size_t curPos = static_cast<size_t>(this->pptr() - this->pbase());
+            if (curPos > __highWater) __highWater = curPos;
+        }
+        size_t limit = HighMark();
+
+        off_type newoff;
+        if (dir == ios_base::beg) {
+            newoff = 0;
+        } else if (dir == ios_base::end) {
+            newoff = static_cast<off_type>(limit);
+        } else {
+            newoff = wantIn ? static_cast<off_type>(this->gptr() - this->eback())
+                            : static_cast<off_type>(this->pptr() - this->pbase());
+        }
+
+        off_type target = newoff + off;
+        if (target < 0 || static_cast<size_t>(target) > limit) return pos_type(off_type(-1));
+
+        if (wantIn) {
+            if (!Has(ios_base::in)) return pos_type(off_type(-1));
+            this->setg(this->eback(), this->eback() + target, this->eback() + limit);
+        }
+        if (wantOut) {
+            if (!Has(ios_base::out)) return pos_type(off_type(-1));
+            this->setp(this->pbase(), this->epptr());
+            this->pbump(static_cast<int>(target));
+        }
+        return pos_type(target);
+    }
+
+    pos_type seekpos(pos_type sp, ios_base::openmode which) override
+    {
+        return seekoff(off_type(sp), ios_base::beg, which);
+    }
+
+private:
+    struct PtrOffsets {
+        size_t gOff = 0, gEndOff = 0, pOff = 0;
+    };
+
+    static bool HasBit(ios_base::openmode mode, ios_base::openmode bit)
+    {
+        return (mode & bit) != ios_base::openmode{};
+    }
+    bool Has(ios_base::openmode bit) const { return HasBit(__mode, bit); }
+
+    // The standard's "high_mark": the smallest offset containing every
+    // character ever written (out-mode) or the fixed input extent (in-only
+    // mode, no put area to speak of).
+    size_t HighMark() const noexcept
+    {
+        if (Has(ios_base::out)) {
+            size_t cur = static_cast<size_t>(this->pptr() - this->pbase());
+            return cur > __highWater ? cur : __highWater;
+        }
+        if (Has(ios_base::in)) return static_cast<size_t>(this->egptr() - this->eback());
+        return 0;
+    }
+
+    PtrOffsets CaptureOffsets() const
+    {
+        PtrOffsets o;
+        if (Has(ios_base::in)) {
+            o.gOff    = static_cast<size_t>(this->gptr() - this->eback());
+            o.gEndOff = static_cast<size_t>(this->egptr() - this->eback());
+        }
+        if (Has(ios_base::out)) o.pOff = static_cast<size_t>(this->pptr() - this->pbase());
+        return o;
+    }
+    void ApplyOffsets(const PtrOffsets &o)
+    {
+        auto *base = __buf.data();
+        if (Has(ios_base::in))
+            this->setg(base, base + o.gOff, base + o.gEndOff);
+        else
+            this->setg(nullptr, nullptr, nullptr);
+        if (Has(ios_base::out)) {
+            this->setp(base, base + __buf.capacity());
+            this->pbump(static_cast<int>(o.pOff));
+        } else {
+            this->setp(nullptr, nullptr);
+        }
+    }
+
+    // Tells __buf about `n` characters that already physically sit past its
+    // own tracked size() (written earlier through the raw put-area pointer,
+    // bypassing basic_string's API entirely). Self-append that never
+    // reallocates -- n is always <= capacity() by construction. NOTE: the
+    // source range [data()+size(), data()+n) IS the destination region, so
+    // this relies on boxcxx char_traits<char>::copy being a per-element loop
+    // (it is) -- a real __builtin_memcpy would make it a [char.traits]
+    // no-overlap precondition violation. Tracked in the leftovers as a latent
+    // landmine should char_traits::copy ever be optimized to memcpy. Needed
+    // before any __buf mutator (push_back/append/the move in str()&&) that
+    // only preserves size()-many characters when it grows.
+    void SyncBufSize(size_t n)
+    {
+        if (n > __buf.size()) __buf.append(__buf.data() + __buf.size(), n - __buf.size());
+    }
+
+    // [stringbuf]'s exposition-only init-buf-ptrs(): establishes eback/gptr/
+    // egptr and pbase/pptr/epptr from __buf's CURRENT content, per __mode
+    // and ios_base::ate. Shared by every ctor that starts from real content
+    // and by both str(...) setters.
+    void ResetPositions()
+    {
+        __highWater = __buf.size();
+        auto *base  = __buf.data();
+        if (Has(ios_base::in))
+            this->setg(base, base, base + __buf.size());
+        else
+            this->setg(nullptr, nullptr, nullptr);
+        if (Has(ios_base::out)) {
+            this->setp(base, base + __buf.capacity());
+            this->pbump(Has(ios_base::ate) ? static_cast<int>(__buf.size()) : 0);
+        } else {
+            this->setp(nullptr, nullptr);
+        }
+    }
+
+    ios_base::openmode __mode;
+    basic_string<CharT, Traits, Allocator> __buf;
+    size_t __highWater = 0;
+};
+
+template <class CharT, class Traits, class Allocator>
+void swap(basic_stringbuf<CharT, Traits, Allocator> &a,
+          basic_stringbuf<CharT, Traits, Allocator> &b) noexcept(noexcept(a.swap(b)))
+{
+    a.swap(b);
+}
+
+using stringbuf = basic_stringbuf<char>;
+
+} // namespace std
+
+#endif // BOXCXX_SSTREAM

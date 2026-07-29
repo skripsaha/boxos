@@ -72,6 +72,7 @@
 #include <exception>
 #include <initializer_list>
 #include <span>
+#include <sstream>
 #include <stack>
 #include <stdexcept>
 #include <streambuf>
@@ -22774,6 +22775,305 @@ void Phase115()
            "sbumpc/sputc/sputbackc/sungetc/snextc/sgetn/sputn/pubimbue), and std::locale\n");
 }
 
+// Phase116 fixture: exposes basic_stringbuf's protected pbase()/eback() so
+// view()'s "zero-copy" claim can be checked by POINTER IDENTITY, not just by
+// content equality (which a copying implementation could also satisfy).
+struct MySBuf : std::basic_stringbuf<char> {
+    using std::basic_stringbuf<char>::basic_stringbuf;
+    using std::basic_stringbuf<char>::pbase;
+    using std::basic_stringbuf<char>::eback;
+};
+
+void Phase116()
+{
+    // ── Ф30e commit 2 (sstream-stringbuf): basic_stringbuf<CharT,Traits,
+    //    Allocator> only. Exercised entirely through the PUBLIC streambuf
+    //    API (sputn/sputc/sgetn/sbumpc/pubseekoff/pubseekpos) -- ostream/
+    //    istream/stringstream do not exist until a later commit. ─────────
+
+    // (1) sputn/sputc then str()/view(): basic write-then-read round trip.
+    {
+        std::stringbuf sb;
+        auto n = sb.sputn("hello", 5);
+        Check(n == 5, "phase116 sputn: writes and returns the requested count");
+        Check(sb.str() == "hello", "phase116 str(): reflects sputn'd content");
+        Check(sb.view() == "hello", "phase116 view(): reflects sputn'd content");
+        sb.sputc('!');
+        Check(sb.str() == "hello!", "phase116 sputc: single-char write appends after sputn");
+    }
+
+    // (1b) str() && (C++20 move-out overload): transfers content written
+    //      ENTIRELY via the fast path (same unsynced-tail trap as (6)/(8)),
+    //      resets the buffer to empty, and leaves it usable afterward.
+    {
+        std::stringbuf sb;
+        sb.sputn("moveOut", 7);
+        std::string moved = std::move(sb).str();
+        Check(moved == "moveOut", "phase116 str() &&: moves out the full content, including the fast-path-written tail");
+        Check(sb.str() == "", "phase116 str() &&: resets the buffer to empty");
+        sb.sputc('Z');
+        Check(sb.str() == "Z", "phase116 str() &&: buffer remains usable after the move-out");
+    }
+
+    // (2) Construct from a string (in mode) + sgetn/sbumpc reads.
+    {
+        std::stringbuf sb(std::string("abcdef"), std::ios_base::in);
+        Check(sb.sbumpc() == 'a', "phase116 ctor(string,in): sbumpc reads the first character");
+        char dst[4] = {};
+        auto got    = sb.sgetn(dst, 3);
+        Check(got == 3 && dst[0] == 'b' && dst[1] == 'c' && dst[2] == 'd',
+              "phase116 sgetn: reads the next N characters in order");
+        Check(sb.sputc('Z') == std::char_traits<char>::eof(),
+              "phase116 ctor(string,in): in-only buffer rejects writes (no put area)");
+    }
+
+    // (3) THE HOTSPOT: str()'s high-water-mark. seekp into the middle and
+    //     overwrite one char -- str() must still report the FULL prior
+    //     length, not truncate at the (now-smaller) pptr().
+    {
+        std::stringbuf sb;
+        sb.sputn("hello", 5);
+        auto pos = sb.pubseekoff(2, std::ios_base::beg, std::ios_base::out);
+        Check(static_cast<std::streamoff>(pos) == 2, "phase116 pubseekoff: repositions put cursor, returns the new offset");
+        sb.sputc('Y');
+        Check(sb.str() == "heYlo",
+              "phase116 str() high-water-mark HOTSPOT: overwrite-in-the-middle still reports \"heYlo\" (5 chars), "
+              "not \"heY\" (a naive [pbase(),pptr()) read would truncate it)");
+        Check(sb.view() == "heYlo", "phase116 view() high-water-mark HOTSPOT: same via the zero-copy accessor");
+    }
+
+    // (4) in+out read-what-you-wrote via underflow's egptr catch-up, with no
+    //     seek at all -- proves the get area sees fast-path writes that
+    //     never called overflow().
+    {
+        std::stringbuf sb; // default mode is in|out
+        sb.sputn("xyz", 3);
+        Check(sb.sgetc() == 'x', "phase116 underflow catch-up: reading right after writing (no seek) sees the just-written content");
+        Check(sb.sbumpc() == 'x' && sb.sbumpc() == 'y' && sb.sbumpc() == 'z',
+              "phase116 underflow catch-up: reads the full written sequence, in order");
+        Check(sb.sbumpc() == std::char_traits<char>::eof(),
+              "phase116 underflow catch-up: eof at the TRUE end, not before it");
+    }
+
+    // (5) str(s) setter: `ate` controls where the NEXT write lands --
+    //     without ate it overwrites from the front, with ate it appends.
+    {
+        std::stringbuf sbNoAte(std::ios_base::out);
+        sbNoAte.str("hello");
+        Check(sbNoAte.str() == "hello", "phase116 str(s) setter: content installed");
+        sbNoAte.sputc('X');
+        Check(sbNoAte.str() == "Xello",
+              "phase116 str(s) setter WITHOUT ate: write position starts at 0, so the next write overwrites the front");
+
+        std::stringbuf sbAte(std::ios_base::out | std::ios_base::ate);
+        sbAte.str("hello");
+        sbAte.sputc('X');
+        Check(sbAte.str() == "helloX",
+              "phase116 str(s) setter WITH ate: write position starts at the END, so the next write appends");
+    }
+
+    // (6) Move ctor: transfers content WRITTEN ENTIRELY VIA THE FAST PATH
+    //     (never called overflow(), so __buf's own size() is stale/behind)
+    //     + leaves the source empty + source remains a valid, writable
+    //     object afterward. This is the exact scenario a forgotten
+    //     "sync __buf's size before stealing it" bug would silently corrupt
+    //     (basic_string's SSO move only transfers size()+1 bytes).
+    {
+        std::stringbuf src;
+        src.sputn("abcde", 5); // 5 chars, well inside SSO capacity -- pure fast path after the 1st char
+        std::stringbuf dst(std::move(src));
+        Check(dst.str() == "abcde", "phase116 move ctor: destination gets ALL of the source's content, including fast-path-written tail");
+        Check(src.str() == "", "phase116 move ctor: source left empty");
+        src.sputn("re-used", 7);
+        Check(src.str() == "re-used", "phase116 move ctor: moved-from source remains a valid, writable object");
+    }
+
+    // (7) Move assign: same transfer + empty-source guarantees.
+    {
+        std::stringbuf a, b;
+        a.sputn("AAAAA", 5);
+        b.sputn("BB", 2);
+        b = std::move(a);
+        Check(b.str() == "AAAAA", "phase116 move assign: destination gets the source's content");
+        Check(a.str() == "", "phase116 move assign: source left empty");
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wself-move"
+        Check(&(b = std::move(b)) == &b, "phase116 move assign: self-move-assign is a safe no-op");
+#pragma GCC diagnostic pop
+        Check(b.str() == "AAAAA", "phase116 move assign: self-move-assign does not corrupt content");
+    }
+
+    // (8)/(9) swap(): member and free-function forms exchange content
+    //     (also written purely via the fast path, same staleness trap as (6)).
+    {
+        std::stringbuf a, b;
+        a.sputn("first", 5);
+        b.sputn("second", 6);
+        a.swap(b);
+        Check(a.str() == "second" && b.str() == "first", "phase116 member swap: contents fully exchanged");
+        swap(a, b); // free function
+        Check(a.str() == "first" && b.str() == "second", "phase116 free swap(): contents exchanged back");
+    }
+
+    // (10) view() is zero-copy (pointer identity into the put area), unlike
+    //      str() which makes an independent copy.
+    {
+        MySBuf sb;
+        sb.sputn("zerocopy", 8);
+        Check(sb.view().data() == sb.pbase(),
+              "phase116 view(): zero-copy -- data() pointer ALIASES the put area's own base, not a fresh copy");
+        auto copy = sb.str();
+        Check(copy.data() != sb.pbase(), "phase116 str(): unlike view(), makes an independent copy (different address)");
+        Check(copy == "zerocopy", "phase116 str(): copied content matches");
+    }
+
+    // (11) seekoff/seekpos: in-range (beg/end, incl. negative end-relative
+    //      offsets), out-of-range (-1), seekpos delegation, and way==cur
+    //      with BOTH in and out requested (fails, per [stringbuf.virtuals]
+    //      Table 144's "Otherwise" case).
+    {
+        std::stringbuf sb;
+        sb.sputn("0123456789", 10);
+        auto p1 = sb.pubseekoff(-1, std::ios_base::end, std::ios_base::out);
+        Check(static_cast<std::streamoff>(p1) == 9, "phase116 seekoff: end-relative negative offset lands one before the true end");
+        auto p2 = sb.pubseekoff(0, std::ios_base::beg, std::ios_base::out);
+        Check(static_cast<std::streamoff>(p2) == 0, "phase116 seekoff: beg+0 goes to the start");
+        auto p3 = sb.pubseekoff(100, std::ios_base::beg, std::ios_base::out);
+        Check(static_cast<std::streamoff>(p3) == -1, "phase116 seekoff: beyond the true content length fails (-1)");
+        auto p4 = sb.pubseekoff(-5, std::ios_base::beg, std::ios_base::out);
+        Check(static_cast<std::streamoff>(p4) == -1, "phase116 seekoff: negative absolute position fails (-1)");
+        auto p5 = sb.pubseekpos(std::stringbuf::pos_type(3), std::ios_base::out);
+        Check(static_cast<std::streamoff>(p5) == 3, "phase116 seekpos: absolute reposition to a valid offset succeeds");
+        auto p6 = sb.pubseekoff(0, std::ios_base::cur, std::ios_base::in | std::ios_base::out);
+        Check(static_cast<std::streamoff>(p6) == -1, "phase116 seekoff: way==cur with BOTH in and out requested fails");
+    }
+
+    // (12) Every constructor form.
+    {
+        std::stringbuf sbOut(std::ios_base::out);
+        sbOut.sputc('Q');
+        Check(sbOut.str() == "Q", "phase116 ctor(which): out-only buffer accepts writes");
+        Check(sbOut.sgetc() == std::char_traits<char>::eof(), "phase116 ctor(which): out-only buffer rejects reads (no get area)");
+
+        std::stringbuf sbIn(std::ios_base::in);
+        Check(sbIn.sputc('Q') == std::char_traits<char>::eof(), "phase116 ctor(which): in-only buffer rejects writes (no put area)");
+
+        std::string copySrc = "seeded";
+        std::stringbuf sbCopy(copySrc);
+        Check(sbCopy.str() == "seeded", "phase116 ctor(const string&): copies the given content");
+        copySrc[0] = 'Z';
+        Check(sbCopy.str() == "seeded", "phase116 ctor(const string&): does NOT alias the source string (real copy)");
+
+        std::string moveSrc = "movedin";
+        std::stringbuf sbMove(std::move(moveSrc));
+        Check(sbMove.str() == "movedin", "phase116 ctor(string&&): takes over the given content");
+
+        std::stringbuf sbAllocOnly(std::allocator<char>{});
+        Check(sbAllocOnly.str() == "", "phase116 ctor(const Allocator&): starts empty");
+        sbAllocOnly.sputn("hi", 2);
+        Check(sbAllocOnly.str() == "hi", "phase116 ctor(const Allocator&): still fully writable");
+
+        std::stringbuf sbWhichAlloc(std::ios_base::out, std::allocator<char>{});
+        sbWhichAlloc.sputc('K');
+        Check(sbWhichAlloc.str() == "K", "phase116 ctor(which, alloc): writable with an explicit allocator");
+
+        std::string allocSrc = "alloced";
+        std::stringbuf sbStrAlloc(allocSrc, std::allocator<char>{});
+        Check(sbStrAlloc.str() == "alloced", "phase116 ctor(const string&, alloc): copies source content");
+
+        std::stringbuf sbStrWhichAlloc(allocSrc, std::ios_base::in, std::allocator<char>{});
+        Check(sbStrWhichAlloc.str() == "alloced", "phase116 ctor(const string&, which, alloc): copies content under the given mode");
+
+        std::stringbuf sbView(std::string_view("viewed"));
+        Check(sbView.str() == "viewed", "phase116 ctor(StringViewLike): builds from a string_view");
+    }
+
+    // (13) get_allocator().
+    {
+        std::stringbuf sb(std::allocator<char>{});
+        Check(sb.get_allocator() == std::allocator<char>{}, "phase116 get_allocator: returns a usable, comparable allocator");
+    }
+
+    // (14) overflow() growth beyond SSO capacity, across MULTIPLE
+    //      reallocations -- proves get/put pointers are correctly re-fetched
+    //      from __buf's fresh data() every time it moves, never stale.
+    {
+        std::stringbuf sb;
+        std::string big(40, ' ');
+        for (size_t i = 0; i < big.size(); ++i) big[i] = static_cast<char>('a' + (i % 26));
+        for (char c : big) sb.sputc(c);
+        Check(sb.str() == big, "phase116 overflow() growth: content beyond SSO capacity survives multiple reallocations intact");
+        Check(sb.str().size() == 40, "phase116 overflow() growth: length correct after growth");
+    }
+
+    // (15) pbackfail: the REAL override (unlike the base class's always-eof
+    //      stub exercised in phase115) succeeds on a matching char, and on a
+    //      MISMATCHING char when mode has out it overwrites the buffer.
+    {
+        std::stringbuf sb;
+        sb.sputn("abc", 3);
+        sb.pubseekoff(0, std::ios_base::beg, std::ios_base::in); // establish/extend the get area to the full content
+        Check(sb.sbumpc() == 'a', "phase116 pbackfail setup: read the first character");
+        Check(sb.sputbackc('a') == 'a', "phase116 sputbackc: matching char at the putback position succeeds");
+        Check(sb.sbumpc() == 'a' && sb.sbumpc() == 'b', "phase116 sputbackc: putback actually rewound the read position");
+        Check(sb.sputbackc('Z') == 'Z',
+              "phase116 pbackfail: a MISMATCHING char succeeds when mode has out (overwrites), unlike the base stub");
+        Check(sb.sgetc() == 'Z', "phase116 pbackfail: the overwrite is actually visible in the buffer");
+    }
+
+    // (16) GAP-1 (Ф30e c2 audit): READ-BACK after a backward seekp must expose
+    //      the full high-water content, not just up to pptr(). Test (3) checks
+    //      str() after seek+overwrite but never reads back; (4) reads back but
+    //      with NO seek (pptr()==high_mark). Only their combination distinguishes
+    //      a correct underflow (egptr -> high_mark) from the truncating bug
+    //      (egptr -> pptr). NO prior seekg -- a seekg would set egptr=high_mark
+    //      itself and mask it.
+    {
+        std::stringbuf sb; // in|out
+        sb.sputn("hello", 5);
+        sb.pubseekoff(2, std::ios_base::beg, std::ios_base::out); // pptr=2, high_mark stays 5
+        sb.sputc('Y');                                            // "heYlo", pptr=3, high_mark=5
+        std::string got;
+        for (int c; (c = sb.sbumpc()) != std::char_traits<char>::eof();) got += static_cast<char>(c);
+        Check(got == "heYlo",
+              "phase116 underflow high-water GAP: cold read after backward seekp+overwrite yields all 5 chars "
+              "\"heYlo\", not \"heY\" (egptr catches up to high_mark, not pptr)");
+    }
+
+    // (16b) same GAP with a bare backward seek and NO overwrite.
+    {
+        std::stringbuf sb;
+        sb.sputn("hello", 5);
+        sb.pubseekoff(2, std::ios_base::beg, std::ios_base::out); // pptr=2, high_mark=5, no write
+        std::string got;
+        for (int c; (c = sb.sbumpc()) != std::char_traits<char>::eof();) got += static_cast<char>(c);
+        Check(got == "hello",
+              "phase116 underflow high-water GAP: cold read after a bare backward seekp yields \"hello\" (5), not \"he\"");
+    }
+
+    // (16c) showmanyc()/in_avail(): reports the real unread count up to the
+    //       high-water mark, not the base-class always-0 default.
+    {
+        std::stringbuf sb; // in|out
+        sb.sputn("abcd", 4);
+        Check(sb.in_avail() == 4, "phase116 in_avail(): reports 4 unread chars via showmanyc override (base default is a useless 0)");
+        sb.sbumpc();
+        Check(sb.in_avail() == 3, "phase116 in_avail(): drops to 3 after one read");
+    }
+
+    printf("[CXX] PASS phase116: sstream basic_stringbuf (Ф30e commit 2) -- "
+           "sputn/sputc/str()/view() round trip, in-mode sgetn/sbumpc, the str() "
+           "high-water-mark hotspot (seekp-then-overwrite reports the full prior "
+           "length), in+out underflow catch-up (read-what-you-wrote with no seek), "
+           "str(s) setter ate vs non-ate write position, move ctor/assign (incl. "
+           "fast-path-written unsynced tail + self-move-assign + moved-from still "
+           "usable), member+free swap, view() zero-copy vs str() copy, seekoff/"
+           "seekpos in-range+out-of-range+cur-with-both-fails, every ctor form "
+           "(which/string/string&&/allocator variants/StringViewLike), "
+           "get_allocator, multi-reallocation growth, and the real pbackfail "
+           "override\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -22911,6 +23211,7 @@ int main()
     Phase113();
     Phase114();
     Phase115();
+    Phase116();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
