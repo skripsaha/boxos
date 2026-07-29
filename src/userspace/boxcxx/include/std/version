@@ -24,6 +24,8 @@
 // eel.is/c++draft; every feature was independently grep-verified present
 // in boxcxx's own source before its macro was added.
 //
+// Ф30d adds __cpp_lib_any, owned by <any> (<__bits/version_any>).
+//
 // Deliberately NOT defined (feature not implemented, or not complete
 // enough to claim):
 //   __cpp_lib_tuple_like        — no public std::tuple_like concept (only
@@ -49,5 +51,6 @@
 #include <__bits/version_numeric>
 #include <__bits/version_functional> // <functional>: bad_function_call/function/move_only_function
 #include <__bits/version_containers> // <stack>/<queue>/<priority_queue>: containers_ranges joint owner
+#include <__bits/version_any>       // <any>: __cpp_lib_any
 
 #endif // BOXCXX_VERSION

@@ -1,0 +1,321 @@
+// boxcxx — <any>  (C++23 [any])
+//
+// A single non-template type-erased value. Storage/dispatch reuses the same
+// small-buffer-optimization shape as std::function -- __bits::FitsInline
+// over the shared 24-byte/8-align buffer -- through a per-type AnyOps
+// table, so an any never allocates for a small nothrow-movable payload.
+// AnyOps carries no "is inline" flag the way CallOps does: every caller
+// already knows the concrete type at compile time, so
+// `if constexpr(FitsInline<T>)` gives the same answer for free.
+#ifndef BOXCXX_ANY
+#define BOXCXX_ANY
+
+#include <__bits/callable_sbo>
+#include <__bits/version_any>
+#include <initializer_list>
+#include <new>
+#include <type_traits>
+#include <typeinfo>
+#include <utility>
+
+namespace std {
+
+// ── bad_any_cast (key fns in vocab_exceptions.cpp) ──────────────────────
+
+class bad_any_cast : public bad_cast {
+public:
+    bad_any_cast() noexcept = default;
+    ~bad_any_cast() override;
+    const char *what() const noexcept override;
+};
+
+[[noreturn]] void __throw_bad_any_cast();
+
+namespace __any {
+
+struct AnyOps {
+    void (*Copy)(void *dstBuf, const void *srcBuf); // may throw (propagates VT's copy ctor)
+    void (*Move)(void *dstBuf, void *srcBuf) noexcept;
+    void (*Destroy)(void *buf) noexcept;
+    const type_info &(*TypeInfoFn)() noexcept;
+};
+
+template <class T> inline constexpr bool IsInPlaceType = false;
+template <class T> inline constexpr bool IsInPlaceType<in_place_type_t<T>> = true;
+
+template <class T>
+void CopyThunk(void *dstBuf, const void *srcBuf)
+{
+    if constexpr (__bits::FitsInline<T>) {
+        const T &srcT = *launder(reinterpret_cast<const T *>(srcBuf));
+        ::new (dstBuf) T(srcT);
+    } else {
+        const T *heapPtr = *reinterpret_cast<T *const *>(srcBuf);
+        T *heapCopy       = ::new T(*launder(heapPtr));
+        *reinterpret_cast<T **>(dstBuf) = heapCopy;
+    }
+}
+
+template <class T>
+void MoveThunk(void *dstBuf, void *srcBuf) noexcept
+{
+    if constexpr (__bits::FitsInline<T>) {
+        T &srcT = *launder(reinterpret_cast<T *>(srcBuf));
+        ::new (dstBuf) T(std::move(srcT));
+        srcT.~T();
+    } else {
+        *reinterpret_cast<T **>(dstBuf) = *reinterpret_cast<T **>(srcBuf);
+    }
+}
+
+template <class T>
+void DestroyThunk(void *buf) noexcept
+{
+    if constexpr (__bits::FitsInline<T>)
+        launder(reinterpret_cast<T *>(buf))->~T();
+    else
+        delete *reinterpret_cast<T **>(buf);
+}
+
+template <class T>
+const type_info &TypeInfoThunk() noexcept { return typeid(T); }
+
+template <class T>
+const AnyOps *OpsFor() noexcept
+{
+    static constexpr AnyOps table{&CopyThunk<T>, &MoveThunk<T>, &DestroyThunk<T>, &TypeInfoThunk<T>};
+    return &table;
+}
+
+} // namespace __any
+
+// ── any ──────────────────────────────────────────────────────────────────
+
+class any {
+public:
+    constexpr any() noexcept : __ops(nullptr), __buf{} {}
+
+    any(const any &other) : __ops(nullptr)
+    {
+        if (other.__ops) {
+            other.__ops->Copy(__buf, other.__buf); // may throw; __ops stays null
+            __ops = other.__ops;                     // only set after Copy succeeds
+        }
+    }
+
+    any(any &&other) noexcept : __ops(nullptr)
+    {
+        if (other.__ops) {
+            other.__ops->Move(__buf, other.__buf);
+            __ops       = other.__ops;
+            other.__ops = nullptr;
+        }
+    }
+
+    template <class T, class VT = decay_t<T>>
+        requires(!is_same_v<VT, any> && !__any::IsInPlaceType<VT> && is_copy_constructible_v<VT>)
+    any(T &&value) : __ops(nullptr)
+    {
+        static_assert(is_constructible_v<VT, T>,
+                      "std::any: VT must be constructible from the forwarded argument");
+        ConstructInto<VT>(std::forward<T>(value));
+    }
+
+    template <class T, class... Args>
+        requires(is_copy_constructible_v<decay_t<T>> && is_constructible_v<decay_t<T>, Args...>)
+    explicit any(in_place_type_t<T>, Args &&...args) : __ops(nullptr)
+    {
+        using VT = decay_t<T>;
+        ConstructInto<VT>(std::forward<Args>(args)...);
+    }
+
+    template <class T, class U, class... Args>
+        requires(is_copy_constructible_v<decay_t<T>> &&
+                 is_constructible_v<decay_t<T>, initializer_list<U> &, Args...>)
+    explicit any(in_place_type_t<T>, initializer_list<U> il, Args &&...args) : __ops(nullptr)
+    {
+        using VT = decay_t<T>;
+        ConstructInto<VT>(il, std::forward<Args>(args)...);
+    }
+
+    ~any() { reset(); }
+
+    any &operator=(const any &rhs)
+    {
+        any(rhs).swap(*this);
+        return *this;
+    }
+    any &operator=(any &&rhs) noexcept
+    {
+        any(std::move(rhs)).swap(*this);
+        return *this;
+    }
+
+    // [any.assign]/8 differs from the ctor [any.cons]/6: it does NOT exclude
+    // in_place_type_t, so this must participate for such an argument. Build tmp
+    // via in_place_type<VT> (not any(rhs)) so that when VT is itself an
+    // in_place_type_t<X>, tmp holds the tag -- Effects: "an object of type VT" --
+    // instead of X{} from the ctor's in_place overload; identical to any(rhs)
+    // for every ordinary VT (same ConstructInto<VT>).
+    template <class T, class VT = decay_t<T>>
+        requires(!is_same_v<VT, any> && is_copy_constructible_v<VT>)
+    any &operator=(T &&rhs)
+    {
+        any(in_place_type<VT>, std::forward<T>(rhs)).swap(*this);
+        return *this;
+    }
+
+    template <class T, class... Args>
+        requires(is_copy_constructible_v<decay_t<T>> && is_constructible_v<decay_t<T>, Args...>)
+    decay_t<T> &emplace(Args &&...args)
+    {
+        using VT = decay_t<T>;
+        reset();
+        ConstructInto<VT>(std::forward<Args>(args)...);
+        if constexpr (__bits::FitsInline<VT>) return *launder(reinterpret_cast<VT *>(__buf));
+        else                                  return *launder(*reinterpret_cast<VT **>(__buf));
+    }
+
+    template <class T, class U, class... Args>
+        requires(is_copy_constructible_v<decay_t<T>> &&
+                 is_constructible_v<decay_t<T>, initializer_list<U> &, Args...>)
+    decay_t<T> &emplace(initializer_list<U> il, Args &&...args)
+    {
+        using VT = decay_t<T>;
+        reset();
+        ConstructInto<VT>(il, std::forward<Args>(args)...);
+        if constexpr (__bits::FitsInline<VT>) return *launder(reinterpret_cast<VT *>(__buf));
+        else                                  return *launder(*reinterpret_cast<VT **>(__buf));
+    }
+
+    void reset() noexcept
+    {
+        if (__ops) {
+            __ops->Destroy(__buf);
+            __ops = nullptr;
+        }
+    }
+
+    void swap(any &rhs) noexcept
+    {
+        if (this == &rhs) return;
+        alignas(__bits::kCallableSboAlign) unsigned char scratch[__bits::kCallableSboSize];
+        const __any::AnyOps *opsA = __ops;
+        const __any::AnyOps *opsB = rhs.__ops;
+        if (opsA) opsA->Move(scratch, __buf);
+        if (opsB) opsB->Move(__buf, rhs.__buf);
+        if (opsA) opsA->Move(rhs.__buf, scratch);
+        __ops     = opsB;
+        rhs.__ops = opsA;
+    }
+
+    [[nodiscard]] bool has_value() const noexcept { return __ops != nullptr; }
+    [[nodiscard]] const type_info &type() const noexcept
+    {
+        return __ops ? __ops->TypeInfoFn() : typeid(void);
+    }
+
+private:
+    template <class T> friend const T *any_cast(const any *) noexcept;
+    template <class T> friend T *any_cast(any *) noexcept;
+
+    template <class VT, class... CtorArgs>
+    void ConstructInto(CtorArgs &&...args)
+    {
+        if constexpr (__bits::FitsInline<VT>)
+            ::new (static_cast<void *>(__buf)) VT(std::forward<CtorArgs>(args)...);
+        else
+            *reinterpret_cast<VT **>(__buf) = ::new VT(std::forward<CtorArgs>(args)...);
+        __ops = __any::OpsFor<VT>(); // set only after construction succeeds
+    }
+
+    const __any::AnyOps *__ops;
+    alignas(__bits::kCallableSboAlign) unsigned char __buf[__bits::kCallableSboSize];
+};
+
+// ── any_cast — pointer forms (defined first: the value forms below call
+//    these via ordinary lookup, so they must already be visible) ─────────
+//
+// Both branch on FitsInline<remove_cv_t<T>>, NOT FitsInline<T>: a caller
+// may pass a cv-qualified T (any_cast<const C>(&a)). For a class C with a
+// noexcept move ctor but a throwing copy ctor, is_nothrow_move_constructible
+// _v<const C> is false (a const C&& only binds C's copy ctor), so
+// FitsInline<const C> differs from FitsInline<C> even though the object is
+// genuinely stored inline. remove_cv_t<T> always equals the stored VT
+// whenever operand->type() == typeid(T), so it picks the right branch.
+
+template <class T>
+const T *any_cast(const any *operand) noexcept
+{
+    static_assert(!is_void_v<T>, "any_cast<T>: T must not be void");
+    if (operand == nullptr || operand->type() != typeid(T)) return nullptr;
+    if constexpr (__bits::FitsInline<remove_cv_t<T>>)
+        return launder(reinterpret_cast<const T *>(&operand->__buf[0]));
+    else
+        return launder(*reinterpret_cast<T *const *>(&operand->__buf[0]));
+}
+
+template <class T>
+T *any_cast(any *operand) noexcept
+{
+    static_assert(!is_void_v<T>, "any_cast<T>: T must not be void");
+    if (operand == nullptr || operand->type() != typeid(T)) return nullptr;
+    if constexpr (__bits::FitsInline<remove_cv_t<T>>)
+        return launder(reinterpret_cast<T *>(&operand->__buf[0]));
+    else
+        return launder(*reinterpret_cast<T *const *>(&operand->__buf[0]));
+}
+
+// ── any_cast — value forms ───────────────────────────────────────────────
+
+template <class T>
+T any_cast(const any &operand)
+{
+    using U = remove_cvref_t<T>;
+    static_assert(is_constructible_v<T, const U &>,
+                  "any_cast<T>(const any&): T not constructible from const U&");
+    const U *p = any_cast<U>(&operand);
+    if (!p) __throw_bad_any_cast();
+    return static_cast<T>(*p);
+}
+
+template <class T>
+T any_cast(any &operand)
+{
+    using U = remove_cvref_t<T>;
+    static_assert(is_constructible_v<T, U &>,
+                  "any_cast<T>(any&): T not constructible from U&");
+    U *p = any_cast<U>(&operand);
+    if (!p) __throw_bad_any_cast();
+    return static_cast<T>(*p);
+}
+
+template <class T>
+T any_cast(any &&operand)
+{
+    using U = remove_cvref_t<T>;
+    static_assert(is_constructible_v<T, U>,
+                  "any_cast<T>(any&&): T not constructible from U");
+    U *p = any_cast<U>(&operand);
+    if (!p) __throw_bad_any_cast();
+    return static_cast<T>(std::move(*p));
+}
+
+// ── make_any / swap ──────────────────────────────────────────────────────
+
+template <class T, class... Args>
+any make_any(Args &&...args)
+{
+    return any(in_place_type<T>, std::forward<Args>(args)...);
+}
+template <class T, class U, class... Args>
+any make_any(initializer_list<U> il, Args &&...args)
+{
+    return any(in_place_type<T>, il, std::forward<Args>(args)...);
+}
+
+inline void swap(any &x, any &y) noexcept { x.swap(y); }
+
+} // namespace std
+
+#endif // BOXCXX_ANY

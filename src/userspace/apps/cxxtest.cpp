@@ -22,6 +22,7 @@
 #include "box/cxx/tls_strand.h"  // __boxcxx_tls_strand_init + thread-storage hooks (phase36)
 
 #include <algorithm>
+#include <any>
 #include <array>
 #include <atomic>
 #include <bit>
@@ -21690,6 +21691,530 @@ void Phase113()
            "pmr direct-over-resource, std::allocator no-regression\n");
 }
 
+// Phase114 fixtures: instrumented types for std::any ([any]) exception-
+// safety and SBO/heap-locality coverage.
+
+struct P114Counted {
+    int v = 0;
+    static inline int constructs = 0;
+    static inline int copies     = 0;
+    static inline int moves      = 0;
+    static inline int destroys   = 0;
+
+    static void ResetCounts() { constructs = copies = moves = destroys = 0; }
+
+    P114Counted() { ++constructs; }
+    explicit P114Counted(int x) : v(x) { ++constructs; }
+    P114Counted(const P114Counted &o) : v(o.v) { ++copies; }
+    P114Counted(P114Counted &&o) noexcept : v(o.v) { ++moves; }
+    P114Counted &operator=(const P114Counted &o)
+    {
+        v = o.v;
+        ++copies;
+        return *this;
+    }
+    P114Counted &operator=(P114Counted &&o) noexcept
+    {
+        v = o.v;
+        ++moves;
+        return *this;
+    }
+    ~P114Counted() { ++destroys; }
+};
+
+// alignas(64) forces heap storage regardless of payload size (any's inline
+// buffer is only 8-byte aligned) -- proves the alignment gate independently
+// of the size gate.
+struct alignas(64) P114OverAligned {
+    int v = 0;
+    P114OverAligned() = default;
+    explicit P114OverAligned(int x) : v(x) {}
+    P114OverAligned(const P114OverAligned &) noexcept = default;
+    P114OverAligned(P114OverAligned &&) noexcept      = default;
+};
+
+// Small + noexcept-move (SBO-eligible), but the copy ctor throws once
+// armed -- drives both the emplace weak-guarantee trap and the
+// copy-assign strong-guarantee trap with the SAME throwing mechanism.
+struct P114ThrowOnCopy {
+    int v = 0;
+    static inline bool armed = false;
+
+    P114ThrowOnCopy() = default;
+    explicit P114ThrowOnCopy(int x) : v(x) {}
+    P114ThrowOnCopy(const P114ThrowOnCopy &o) : v(o.v)
+    {
+        if (armed) throw int(114);
+    }
+    P114ThrowOnCopy(P114ThrowOnCopy &&) noexcept             = default;
+    P114ThrowOnCopy &operator=(const P114ThrowOnCopy &)       = default;
+    P114ThrowOnCopy &operator=(P114ThrowOnCopy &&) noexcept   = default;
+};
+
+// Small + noexcept-copy, but the move ctor is NOT noexcept -- fails the
+// SBO gate on the move-noexcept clause alone (size and align both fit).
+struct P114ThrowingMove {
+    int v = 0;
+    P114ThrowingMove() = default;
+    explicit P114ThrowingMove(int x) : v(x) {}
+    P114ThrowingMove(const P114ThrowingMove &) noexcept = default;
+    P114ThrowingMove(P114ThrowingMove &&o) : v(o.v) {} // deliberately NOT noexcept
+    P114ThrowingMove &operator=(const P114ThrowingMove &) noexcept = default;
+    P114ThrowingMove &operator=(P114ThrowingMove &&)                = default;
+};
+
+// 256-byte payload, both special members noexcept -- fails the SBO gate on
+// size alone.
+struct P114Large {
+    unsigned char data[256] = {};
+    int            tag      = 0;
+    P114Large() = default;
+    explicit P114Large(int t) : tag(t) { data[0] = static_cast<unsigned char>(t); }
+    P114Large(const P114Large &) noexcept = default;
+    P114Large(P114Large &&) noexcept      = default;
+};
+
+// A1 trap fixture: noexcept move + NON-noexcept copy, small enough for
+// SBO. is_nothrow_move_constructible_v<const P114CvProbe> is false (a
+// const P114CvProbe&& only binds the throwing copy ctor), so
+// FitsInline<const P114CvProbe> != FitsInline<P114CvProbe> even though the
+// object is genuinely stored inline -- the exact cv-locality trap
+// any_cast's pointer forms must branch on remove_cv_t<T> to survive.
+struct P114CvProbe {
+    int v = 0;
+    P114CvProbe() = default;
+    explicit P114CvProbe(int x) : v(x) {}
+    P114CvProbe(const P114CvProbe &o) : v(o.v) {} // deliberately NOT noexcept
+    P114CvProbe(P114CvProbe &&o) noexcept : v(o.v) {}
+    P114CvProbe &operator=(const P114CvProbe &)     = default;
+    P114CvProbe &operator=(P114CvProbe &&) noexcept = default;
+};
+
+void Phase114()
+{
+    // ── Ф30d std::any ([any]): storage/dispatch reuses the __bits::
+    //    FitsInline SBO gate shared with std::function. Checks cover all
+    //    five any_cast forms, both exception-safety contracts (strong
+    //    copy-assign vs weak emplace), SBO/heap locality proofs via
+    //    address identity, and the A1 cv-locality regression trap. ────────
+
+    // (1) empty baseline.
+    {
+        std::any a;
+        Check(!a.has_value(), "phase114 default any: has_value() false");
+        Check(a.type() == typeid(void), "phase114 default any: type() == typeid(void)");
+    }
+
+    // (2) SBO happens: moving to a 2nd any relocates the payload in place
+    //     (address changes) instead of touching the heap.
+    {
+        std::any a  = P114Counted(7);
+        // Reset AFTER constructing `a`: that construction itself already
+        // does 1 move (temporary -> any's buffer) + 1 destroy (the
+        // temporary's own cleanup at end of full-expression), so counting
+        // from before it would fold that into the total below and count
+        // 2+2 instead of the any-move-ctor's own 1+1 (confirmed against
+        // both libstdc++ and libc++: both produce the identical 1+1 for
+        // this move-ctor step alone).
+        P114Counted::ResetCounts();
+        auto     p1 = std::any_cast<P114Counted>(&a);
+        std::any b  = std::move(a);
+        auto     p2 = std::any_cast<P114Counted>(&b);
+        Check(P114Counted::moves == 1 && P114Counted::destroys == 1,
+              "phase114 SBO move: exactly 1 move + 1 destroy (source slot cleaned up)");
+        Check(p1 != nullptr && p2 != nullptr && p1 != p2,
+              "phase114 SBO move: addresses DIFFER (payload relocated in place, not a pointer swap)");
+        Check(p2->v == 7, "phase114 SBO move: value intact after relocation");
+    }
+
+    // (3) heap forced by three isolated causes -- move transfers the SAME
+    //     address (a pointer copy, not a relocation).
+    {
+        std::any a  = P114Large(9);
+        auto     p1 = std::any_cast<P114Large>(&a);
+        std::any b  = std::move(a);
+        auto     p2 = std::any_cast<P114Large>(&b);
+        Check(p1 != nullptr && p1 == p2, "phase114 heap-by-size: move transfers the SAME address");
+        Check(p2->tag == 9, "phase114 heap-by-size: value intact");
+    }
+    {
+        std::any a  = P114ThrowingMove(11);
+        auto     p1 = std::any_cast<P114ThrowingMove>(&a);
+        std::any b  = std::move(a);
+        auto     p2 = std::any_cast<P114ThrowingMove>(&b);
+        Check(p1 != nullptr && p1 == p2, "phase114 heap-by-move-noexcept: move transfers the SAME address");
+        Check(p2->v == 11, "phase114 heap-by-move-noexcept: value intact");
+    }
+    {
+        std::any a  = P114OverAligned(13);
+        auto     p1 = std::any_cast<P114OverAligned>(&a);
+        std::any b  = std::move(a);
+        auto     p2 = std::any_cast<P114OverAligned>(&b);
+        Check(p1 != nullptr && p1 == p2, "phase114 heap-by-align: move transfers the SAME address");
+        Check((reinterpret_cast<uintptr_t>(p2) & 63u) == 0, "phase114 heap-by-align: 64-byte aligned heap block");
+        Check(p2->v == 13, "phase114 heap-by-align: value intact");
+    }
+
+    // (4) all five any_cast forms.
+    {
+        std::any a = 42;
+        Check(std::any_cast<int>(a) == 42, "phase114 any_cast<T>(any&): int value");
+        Check(std::any_cast<const int &>(a) == 42, "phase114 any_cast<const T&>(any&): int value by ref");
+
+        std::any_cast<int &>(a) = 99;
+        Check(std::any_cast<int>(a) == 99, "phase114 any_cast<T&>(any&): mutates through the reference");
+
+        std::any    moveSrc     = P114Counted(21);
+        int         movesBefore = P114Counted::moves;
+        P114Counted moved       = std::any_cast<P114Counted>(std::move(moveSrc));
+        Check(moved.v == 21, "phase114 any_cast<T>(any&&): moved-out value correct");
+        Check(P114Counted::moves == movesBefore + 1, "phase114 any_cast<T>(any&&): moves the payload out (not a copy)");
+        Check(moveSrc.has_value(),
+              "phase114 any_cast<T>(any&&): source any NOT emptied (moves the value out, keeps the object)");
+
+        Check(std::any_cast<int>(&a) != nullptr && *std::any_cast<int>(&a) == 99,
+              "phase114 any_cast<T>(any*): success returns a valid pointer");
+        Check(std::any_cast<double>(&a) == nullptr, "phase114 any_cast<T>(any*): type mismatch returns nullptr");
+        std::any *nullAny = nullptr;
+        Check(std::any_cast<int>(nullAny) == nullptr, "phase114 any_cast<T>(any*): null operand returns nullptr");
+
+        const std::any &constA = a;
+        Check(std::any_cast<int>(&constA) != nullptr && *std::any_cast<int>(&constA) == 99,
+              "phase114 any_cast<T>(const any*): success returns a valid pointer");
+        Check(std::any_cast<double>(&constA) == nullptr, "phase114 any_cast<T>(const any*): type mismatch returns nullptr");
+
+        bool threwConstRef = false, threwRef = false, threwRvalRef = false;
+        try {
+            (void)std::any_cast<double>(constA); // any_cast<T>(const any&)
+        } catch (const std::bad_any_cast &) {
+            threwConstRef = true;
+        }
+        try {
+            (void)std::any_cast<double>(a); // any_cast<T>(any&)
+        } catch (const std::bad_cast &) {   // caught as the bad_cast BASE -- proves real inheritance
+            threwRef = true;
+        }
+        try {
+            std::any temp = a;
+            (void)std::any_cast<double>(std::move(temp)); // any_cast<T>(any&&)
+        } catch (const std::bad_any_cast &) {
+            threwRvalRef = true;
+        }
+        Check(threwConstRef && threwRef && threwRvalRef,
+              "phase114 any_cast value forms: bad_any_cast on mismatch for const&/&/&& forms, catchable as bad_cast&");
+    }
+
+    // (5) in_place_type_t constructors: plain + initializer_list forms.
+    {
+        std::any a(std::in_place_type<P114Counted>, 55);
+        Check(a.type() == typeid(P114Counted), "phase114 in_place_type ctor (plain): type() correct");
+        Check(std::any_cast<P114Counted>(&a)->v == 55, "phase114 in_place_type ctor (plain): value correct");
+
+        std::any v(std::in_place_type<std::vector<int>>, {1, 2, 3, 4});
+        Check(v.type() == typeid(std::vector<int>), "phase114 in_place_type ctor (ilist): type() correct");
+        auto *vp = std::any_cast<std::vector<int>>(&v);
+        Check(vp != nullptr && vp->size() == 4 && (*vp)[0] == 1 && (*vp)[3] == 4,
+              "phase114 in_place_type ctor (ilist): elements correct");
+    }
+
+    // (6) emplace: returns a live mutable reference; called on a nonempty
+    //     any destroys the OLD value before constructing the new one.
+    {
+        std::any     a   = P114Counted(3);
+        P114Counted &ref = a.emplace<P114Counted>(3);
+        Check(ref.v == 3, "phase114 emplace (plain): returns live reference to the new value");
+        ref.v = 4;
+        Check(std::any_cast<P114Counted>(&a)->v == 4,
+              "phase114 emplace (plain): mutation through the returned reference is visible");
+
+        std::any           ilistAny;
+        std::vector<int> &vref = ilistAny.emplace<std::vector<int>>({7, 8, 9});
+        Check(vref.size() == 3 && vref[2] == 9, "phase114 emplace (ilist): returns live reference with correct elements");
+
+        int destroysBefore = P114Counted::destroys;
+        a.emplace<P114Counted>(6); // a already holds P114Counted(4) -- must destroy it first
+        Check(P114Counted::destroys == destroysBefore + 1,
+              "phase114 emplace on nonempty: OLD value destroyed exactly once before the new one is constructed");
+        Check(std::any_cast<P114Counted>(&a)->v == 6, "phase114 emplace on nonempty: new value live");
+    }
+
+    // (7) make_any: plain + initializer_list forms.
+    {
+        std::any a = std::make_any<P114Counted>(17);
+        Check(a.type() == typeid(P114Counted) && std::any_cast<P114Counted>(&a)->v == 17,
+              "phase114 make_any (plain): type + value correct");
+
+        std::any v = std::make_any<std::vector<int>>({4, 5, 6});
+        auto    *vp = std::any_cast<std::vector<int>>(&v);
+        Check(vp != nullptr && vp->size() == 3 && (*vp)[1] == 5,
+              "phase114 make_any (ilist): type + elements correct");
+    }
+
+    // (8) deep copy: distinct addresses even for a heap-stored payload
+    //     (proves genuine duplication, not a shared pointer); mutating the
+    //     copy does not affect the source.
+    {
+        std::any a  = P114Large(31);
+        auto     pa = std::any_cast<P114Large>(&a);
+        std::any b  = a;
+        auto     pb = std::any_cast<P114Large>(&b);
+        Check(pa != pb, "phase114 deep copy: addresses differ (heap payload genuinely duplicated)");
+        pb->tag = 999;
+        Check(std::any_cast<P114Large>(&a)->tag == 31, "phase114 deep copy: mutating the copy leaves the source unchanged");
+    }
+
+    // (9) move ctor leaves the source empty and reusable.
+    {
+        std::any a = P114Counted(41);
+        std::any b = std::move(a);
+        Check(!a.has_value(), "phase114 move ctor: source empty after move");
+        Check(std::any_cast<P114Counted>(&b)->v == 41, "phase114 move ctor: destination holds the value");
+        a = P114Counted(42); // reconstruct into the moved-from any
+        Check(a.has_value() && std::any_cast<P114Counted>(&a)->v == 42,
+              "phase114 move ctor: moved-from any is fully reusable");
+    }
+
+    // (10) self-copy-assign / self-move-assign: value/type preserved
+    //      exactly; counters net-neutral (constructs+copies+moves-destroys
+    //      unchanged, i.e. no leak and no double-destroy). `xref` aliases
+    //      `x` under a different name so `x = std::move(xref)` is a
+    //      genuine self-move at runtime without tripping -Wself-move.
+    {
+        std::any  x    = P114Counted(50);
+        std::any &xref = x;
+        int liveBefore = (P114Counted::constructs + P114Counted::copies + P114Counted::moves) - P114Counted::destroys;
+
+        x = xref; // self-copy-assign
+        Check(x.has_value() && x.type() == typeid(P114Counted) && std::any_cast<P114Counted>(&x)->v == 50,
+              "phase114 self-copy-assign: value/type preserved exactly");
+
+        x = std::move(xref); // self-move-assign
+        Check(x.has_value() && x.type() == typeid(P114Counted) && std::any_cast<P114Counted>(&x)->v == 50,
+              "phase114 self-move-assign: value/type preserved exactly");
+
+        int liveAfter = (P114Counted::constructs + P114Counted::copies + P114Counted::moves) - P114Counted::destroys;
+        Check(liveAfter == liveBefore,
+              "phase114 self-copy/self-move-assign: counters net-neutral (no leak, no double-destroy)");
+    }
+
+    // (11) self-swap: value/type/address unchanged (exercises the
+    //      this==&rhs guard in any::swap). For an SBO payload, address and
+    //      value alone survive even WITHOUT the guard -- the buffer never
+    //      relocates, and P114Counted's move ctor reads v before the
+    //      in-place reconstruction overwrites it -- so also assert ZERO
+    //      extra move/destroy calls, which is what actually distinguishes
+    //      a real no-op from 3 relocations through momentarily-destroyed
+    //      storage (mutation-tested: removing the guard leaves value and
+    //      address unchanged but moves/destroys jump by 3).
+    {
+        std::any  x       = P114Counted(60);
+        std::any &xref    = x;
+        auto      pBefore = std::any_cast<P114Counted>(&x);
+        int movesBefore = P114Counted::moves, destroysBefore = P114Counted::destroys;
+        x.swap(xref);
+        auto pAfter = std::any_cast<P114Counted>(&x);
+        Check(x.has_value() && x.type() == typeid(P114Counted) && std::any_cast<P114Counted>(&x)->v == 60,
+              "phase114 self-swap: value/type unchanged");
+        Check(pBefore == pAfter, "phase114 self-swap: address unchanged (guard prevents scratch-buffer churn)");
+        Check(P114Counted::moves == movesBefore && P114Counted::destroys == destroysBefore,
+              "phase114 self-swap: zero extra move/destroy calls (proves the this==&rhs guard actually fires)");
+    }
+
+    // (12) swap across every SBO/heap locality combination.
+    {
+        std::any a = P114Counted(1);
+        std::any b = P114Counted(2);
+        a.swap(b);
+        Check(std::any_cast<P114Counted>(&a)->v == 2 && std::any_cast<P114Counted>(&b)->v == 1,
+              "phase114 swap SBOxSBO: values exchanged");
+
+        std::any c  = P114Large(3);
+        std::any d  = P114Large(4);
+        auto     pc = std::any_cast<P114Large>(&c);
+        auto     pd = std::any_cast<P114Large>(&d);
+        c.swap(d);
+        Check(std::any_cast<P114Large>(&c) == pd && std::any_cast<P114Large>(&d) == pc,
+              "phase114 swap heapxheap: addresses TRANSFER (pointer swap, not deep copy)");
+        Check(std::any_cast<P114Large>(&c)->tag == 4 && std::any_cast<P114Large>(&d)->tag == 3,
+              "phase114 swap heapxheap: values exchanged");
+
+        std::any e  = P114Counted(5);
+        std::any f  = P114Large(6);
+        auto     pf = std::any_cast<P114Large>(&f);
+        e.swap(f);
+        Check(std::any_cast<P114Large>(&e) == pf, "phase114 swap SBOxheap: the heap pointer transfers unchanged");
+        Check(std::any_cast<P114Large>(&e)->tag == 6 && std::any_cast<P114Counted>(&f)->v == 5,
+              "phase114 swap SBOxheap: values exchanged");
+
+        std::any g  = P114Large(7);
+        std::any h  = P114Counted(8);
+        auto     pg = std::any_cast<P114Large>(&g);
+        g.swap(h);
+        Check(std::any_cast<P114Large>(&h) == pg, "phase114 swap heapxSBO: the heap pointer transfers unchanged");
+        Check(std::any_cast<P114Large>(&h)->tag == 7 && std::any_cast<P114Counted>(&g)->v == 8,
+              "phase114 swap heapxSBO: values exchanged");
+
+        std::any empty;
+        std::any nonempty = P114Counted(9);
+        empty.swap(nonempty);
+        Check(empty.has_value() && std::any_cast<P114Counted>(&empty)->v == 9 && !nonempty.has_value(),
+              "phase114 swap emptyxnonempty: has_value states + value exchanged");
+    }
+
+    // (13) reset(): has_value flips to false; destructor runs exactly once;
+    //      reset() on an already-empty any is a no-op.
+    {
+        std::any a              = P114Counted(70);
+        int      destroysBefore = P114Counted::destroys;
+        a.reset();
+        Check(!a.has_value(), "phase114 reset(): has_value() false after reset");
+        Check(P114Counted::destroys == destroysBefore + 1, "phase114 reset(): destructor ran exactly once");
+        a.reset();
+        Check(P114Counted::destroys == destroysBefore + 1, "phase114 reset(): reset on an empty any is a no-op");
+    }
+
+    // (14) assigning over a nonempty any leaves exactly one live object
+    //      (no leak, no double-destroy). The any(rhs).swap(*this) idiom's
+    //      internal relocate-call count during the assignment is
+    //      implementation-defined -- differential against libstdc++ and
+    //      libc++ shows they don't even agree with each other on the exact
+    //      destroy count here -- so this checks the portable invariant
+    //      (net live objects), the same technique #10 already uses, not a
+    //      specific literal.
+    {
+        std::any a          = P114Counted(80);
+        int      liveBefore = (P114Counted::constructs + P114Counted::copies + P114Counted::moves) - P114Counted::destroys;
+        a                   = P114Counted(81);
+        int      liveAfter  = (P114Counted::constructs + P114Counted::copies + P114Counted::moves) - P114Counted::destroys;
+        Check(liveAfter == liveBefore,
+              "phase114 assign-over-nonempty: net live objects unchanged (old value destroyed, no leak, no double-destroy)");
+        Check(std::any_cast<P114Counted>(&a)->v == 81, "phase114 assign-over-nonempty: new value live");
+    }
+
+    // (15) forwarding-ctor SFINAE traps.
+    {
+        // (a) plain copy syntax on an any-holding-int must pick the REAL
+        //     copy ctor (VT==any excluded from the generic T&& ctor), not
+        //     wrap the source any inside another any.
+        std::any inner = 123;
+        std::any outer(inner);
+        Check(outer.type() == typeid(int),
+              "phase114 SFINAE trap (a): any(any) picks the copy ctor, type()==typeid(int) not typeid(any)");
+        Check(std::any_cast<int>(&outer) != nullptr && *std::any_cast<int>(&outer) == 123,
+              "phase114 SFINAE trap (a): copied value correct");
+
+        // (b) any(in_place_type_t<int>) must pick the tag ctor
+        //     (IsInPlaceType excluded from the generic T&& ctor),
+        //     constructing an int, not storing the tag object itself.
+        std::any tagged(std::in_place_type<int>);
+        Check(tagged.type() == typeid(int),
+              "phase114 SFINAE trap (b): any(in_place_type_t<int>) picks the tag ctor, type()==typeid(int)");
+        Check(std::any_cast<int>(tagged) == 0, "phase114 SFINAE trap (b): value-initialized int == 0");
+
+        // (c) ASSIGNMENT is the mirror image: [any.assign]/8 does NOT exclude
+        //     in_place_type_t (only the ctor [any.cons]/6 does), so
+        //     `a = in_place_type<X>` is well-formed and stores the TAG object
+        //     -- contrast trap (b)'s ctor, which stores an int. This would not
+        //     compile before the constraint fix, and would store int(0) under
+        //     a naive any(rhs) assignment body.
+        std::any assignTag;
+        assignTag = std::in_place_type<int>;
+        Check(assignTag.type() == typeid(std::in_place_type_t<int>),
+              "phase114 SFINAE trap (c): a = in_place_type<X> stores the TAG, not an int (mirror of the ctor)");
+    }
+
+    // (16) STRONG guarantee copy-assign (centerpiece): a throwing copy
+    //      source leaves the target's OLD value fully intact.
+    {
+        std::any target = P114Counted(999);
+        std::any source = P114ThrowOnCopy(1);
+        P114ThrowOnCopy::armed = true;
+        bool threw = false;
+        try {
+            target = source; // any(rhs).swap(*this): the temp's construction throws BEFORE target is touched
+        } catch (int) {
+            threw = true;
+        }
+        P114ThrowOnCopy::armed = false;
+        Check(threw, "phase114 STRONG guarantee: copy-assign of a throwing source actually throws");
+        Check(target.has_value() && target.type() == typeid(P114Counted) && std::any_cast<P114Counted>(&target)->v == 999,
+              "phase114 STRONG guarantee: target's OLD value survives intact (type + exact value)");
+    }
+
+    // (17) WEAK guarantee emplace (contrast #16, SAME throwing mechanism):
+    //      a throwing emplace leaves the any EMPTY, not reverted to its
+    //      old value.
+    {
+        std::any e = P114Counted(555);
+        P114ThrowOnCopy seed(1);
+        P114ThrowOnCopy::armed = true;
+        bool threw = false;
+        try {
+            e.emplace<P114ThrowOnCopy>(seed); // reset() already ran; ConstructInto's copy throws
+        } catch (int) {
+            threw = true;
+        }
+        P114ThrowOnCopy::armed = false;
+        Check(threw, "phase114 WEAK guarantee: emplace with a throwing copy actually throws");
+        Check(!e.has_value(),
+              "phase114 WEAK guarantee: e is EMPTY after the throw (NOT reverted to the old value -- contrast #16)");
+    }
+
+    // (18) copy-ctor throwing: the SOURCE any is untouched after a failed copy.
+    {
+        std::any source = P114ThrowOnCopy(2);
+        P114ThrowOnCopy::armed = true;
+        bool threw = false;
+        try {
+            std::any copy = source; // any(const any&): Copy may throw; source must stay intact
+        } catch (int) {
+            threw = true;
+        }
+        P114ThrowOnCopy::armed = false;
+        Check(threw, "phase114 copy-ctor throwing: actually throws");
+        Check(source.has_value() && source.type() == typeid(P114ThrowOnCopy) && std::any_cast<P114ThrowOnCopy>(&source)->v == 2,
+              "phase114 copy-ctor throwing: source untouched after the failed copy");
+    }
+
+    // (19) any holding an any: in_place_type_t<any> wraps a real any
+    //      object rather than unwrapping/recursing.
+    {
+        std::any inner = 777;
+        std::any outer(std::in_place_type<std::any>, inner);
+        Check(outer.type() == typeid(std::any), "phase114 any-holding-any: outer.type() == typeid(any)");
+        auto unwrapped = std::any_cast<std::any>(&outer);
+        Check(unwrapped != nullptr, "phase114 any-holding-any: unwraps via any_cast<any>(&outer)");
+        Check(unwrapped->type() == typeid(int) && std::any_cast<int>(*unwrapped) == 777,
+              "phase114 any-holding-any: inner any's type + value correct");
+    }
+
+    // T-A1 (review addendum, A1 fix): any_cast<const C>(&a) must branch on
+    //      FitsInline<remove_cv_t<T>>, not FitsInline<T>. P114CvProbe has a
+    //      noexcept move + a NON-noexcept copy, so it's stored INLINE
+    //      (FitsInline<P114CvProbe>==true) even though
+    //      FitsInline<const P114CvProbe>==false. Branching on raw T would
+    //      take the heap branch and reinterpret the inline bytes as a
+    //      pointer.
+    {
+        std::any a = P114CvProbe(88);
+        const P114CvProbe *constPtr = std::any_cast<const P114CvProbe>(&a);
+        P114CvProbe *plainPtr       = std::any_cast<P114CvProbe>(&a);
+        Check(constPtr != nullptr, "phase114 T-A1: any_cast<const C>(&a) non-null for an inline-stored throwing-copy type");
+        Check(static_cast<const void *>(constPtr) == static_cast<const void *>(plainPtr),
+              "phase114 T-A1: any_cast<const C>(&a) and any_cast<C>(&a) return the SAME address");
+        Check(constPtr->v == 88,
+              "phase114 T-A1: any_cast<const C>(&a) reads the correct value (not a garbage heap-branch reinterpret)");
+    }
+
+    printf("[CXX] PASS phase114: std::any ([any]) full conformance -- all 5 any_cast forms "
+           "(bad_any_cast/bad_cast inheritance verified), in_place_type/emplace/make_any, SBO vs "
+           "heap locality (size/align/move-noexcept gates independently proven via address "
+           "identity), deep-copy vs move-empties-source, self-copy/self-move/self-swap guards, "
+           "swap across every locality pairing, strong copy-assign vs weak emplace exception "
+           "guarantees (same throwing mechanism), any-holding-any, and the A1 cv-locality "
+           "any_cast<const T> regression trap\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -21825,6 +22350,7 @@ int main()
     Phase111();
     Phase112();
     Phase113();
+    Phase114();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

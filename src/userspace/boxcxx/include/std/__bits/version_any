@@ -1,0 +1,14 @@
+// boxcxx — <__bits/version_any>
+//
+// The __cpp_lib_* feature-test macro [version.syn] owned by <any> -- split
+// out for the same [support.limits.general] per-header reason as
+// <__bits/version_numeric>/<__bits/version_functional> -- see those files'
+// comments.
+#ifndef BOXCXX_BITS_VERSION_ANY
+#define BOXCXX_BITS_VERSION_ANY
+
+#ifndef __cpp_lib_any
+#  define __cpp_lib_any 201606L
+#endif
+
+#endif // BOXCXX_BITS_VERSION_ANY
