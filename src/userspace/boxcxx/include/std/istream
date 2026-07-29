@@ -1,0 +1,1090 @@
+// boxcxx — <istream>
+// basic_istream<CharT,Traits> [istream] -- formatted/unformatted input over
+// a basic_streambuf, and basic_iostream<CharT,Traits> [iostream.syn]/
+// [istream], which the real standard physically places in THIS header, not
+// in <iostream> (a header boxcxx never ships -- see CONFORMANCE at the
+// bottom).
+//
+// The numeric extraction bridge gathers a token straight off the streambuf
+// (honoring the current basefield, including "%i"-style base auto-detection
+// when no basefield bit is set) and hands it to <charconv> from_chars --
+// the same convention <ostream>'s insertion side uses, no locale num_get
+// facet. See __ios::ExtractIntegerCore/ExtractFloatCore below.
+#ifndef BOXCXX_ISTREAM
+#define BOXCXX_ISTREAM
+
+#include <ostream>
+#include <charconv>
+#include <limits>
+#include <type_traits>
+#include <cstddef>
+
+namespace std {
+
+namespace __ios {
+
+// [istream.sentry]'s whitespace criterion -- fixed ASCII "C"-locale check
+// (no ctype facet; documented epic-wide posture, not a shortcut here).
+inline bool IsSpace(char c)
+{
+    return c == ' ' || c == '\t' || c == '\n' || c == '\v' || c == '\f' || c == '\r';
+}
+
+// Outcome of a Core extraction routine. The wrapper (which owns the sentry
+// and the try/catch) turns this into the right setstate call AFTER the try
+// completes -- doing it INSIDE the try would let a setstate-triggered
+// ios_base::failure be caught by the wrapper's own catch(...) and
+// misreported as an unexpected exception (see HandleException in <ostream>).
+enum class ExtractStatus { Ok, NoMatch, NoMatchEof, RangeError };
+
+// Forward declarations -- basic_istream is still incomplete here.
+template <class T> basic_istream<char> &ExtractInteger(basic_istream<char> &is, T &value);
+template <class F> basic_istream<char> &ExtractFloat(basic_istream<char> &is, F &value);
+basic_istream<char> &ExtractBool(basic_istream<char> &is, bool &value);
+basic_istream<char> &ExtractPointer(basic_istream<char> &is, void *&value);
+
+} // namespace __ios
+
+// Traits' default already comes from <iosfwd>'s forward declaration -- same
+// convention <ios>/<streambuf>/<ostream> already use.
+template <class CharT, class Traits>
+class basic_istream : virtual public basic_ios<CharT, Traits> {
+public:
+    using char_type   = CharT;
+    using int_type    = typename Traits::int_type;
+    using pos_type    = typename Traits::pos_type;
+    using off_type    = typename Traits::off_type;
+    using traits_type = Traits;
+
+    // [istream::sentry]
+    class sentry {
+    public:
+        explicit sentry(basic_istream &is, bool noskipws = false) : __ok(false)
+        {
+            if (!is.good()) {
+                is.setstate(ios_base::failbit);
+                return;
+            }
+            if (is.tie()) is.tie()->flush();
+            if (!noskipws && (is.flags() & ios_base::skipws) != ios_base::fmtflags{}) {
+                auto *buf = is.rdbuf();
+                for (;;) {
+                    typename Traits::int_type c = buf->sgetc();
+                    if (Traits::eq_int_type(c, Traits::eof())) {
+                        is.setstate(ios_base::failbit | ios_base::eofbit);
+                        return;
+                    }
+                    if (!__ios::IsSpace(Traits::to_char_type(c))) break;
+                    buf->sbumpc();
+                }
+            }
+            __ok = true;
+        }
+        explicit operator bool() const noexcept { return __ok; }
+        sentry(const sentry &) = delete;
+        sentry &operator=(const sentry &) = delete;
+
+    private:
+        bool __ok;
+    };
+
+    explicit basic_istream(basic_streambuf<CharT, Traits> *sb) { this->init(sb); }
+    virtual ~basic_istream() = default;
+
+    // formatted extractors -- members [istream.extractors]
+    basic_istream &operator>>(bool &n) { return __ios::ExtractBool(*this, n); }
+    basic_istream &operator>>(short &n) { return __ios::ExtractInteger(*this, n); }
+    basic_istream &operator>>(unsigned short &n) { return __ios::ExtractInteger(*this, n); }
+    basic_istream &operator>>(int &n) { return __ios::ExtractInteger(*this, n); }
+    basic_istream &operator>>(unsigned int &n) { return __ios::ExtractInteger(*this, n); }
+    basic_istream &operator>>(long &n) { return __ios::ExtractInteger(*this, n); }
+    basic_istream &operator>>(unsigned long &n) { return __ios::ExtractInteger(*this, n); }
+    basic_istream &operator>>(long long &n) { return __ios::ExtractInteger(*this, n); }
+    basic_istream &operator>>(unsigned long long &n) { return __ios::ExtractInteger(*this, n); }
+    basic_istream &operator>>(float &f) { return __ios::ExtractFloat(*this, f); }
+    basic_istream &operator>>(double &f) { return __ios::ExtractFloat(*this, f); }
+    basic_istream &operator>>(long double &f) { return __ios::ExtractFloat(*this, f); }
+    basic_istream &operator>>(void *&p) { return __ios::ExtractPointer(*this, p); }
+
+    // [istream.extractors]: behaves as an UNFORMATTED input function.
+    basic_istream &operator>>(basic_streambuf<CharT, Traits> *sb)
+    {
+        sentry ok(*this, false);
+        if (ok) {
+            if (!sb) {
+                this->setstate(ios_base::failbit);
+                return *this;
+            }
+            bool wroteAny = false, insertFailed = false;
+            try {
+                for (;;) {
+                    int_type c = this->rdbuf()->sgetc();
+                    if (Traits::eq_int_type(c, Traits::eof())) break;
+                    if (Traits::eq_int_type(sb->sputc(Traits::to_char_type(c)), Traits::eof())) {
+                        insertFailed = true;
+                        break;
+                    }
+                    this->rdbuf()->sbumpc();
+                    wroteAny = true;
+                }
+            } catch (...) {
+                __ios::HandleException(*this);
+            }
+            if (insertFailed || !wroteAny) this->setstate(ios_base::failbit);
+        }
+        return *this;
+    }
+
+    basic_istream &operator>>(basic_istream &(*pf)(basic_istream &)) { return pf(*this); }
+    basic_istream &operator>>(basic_ios<CharT, Traits> &(*pf)(basic_ios<CharT, Traits> &))
+    {
+        pf(*this);
+        return *this;
+    }
+    basic_istream &operator>>(ios_base &(*pf)(ios_base &))
+    {
+        pf(*this);
+        return *this;
+    }
+
+    // unformatted input [istream.unformatted] -- gcount() is meaningful ONLY
+    // after one of THESE functions (formatted extraction never touches it).
+    streamsize gcount() const noexcept { return __gcount; }
+
+    int_type get()
+    {
+        typename basic_istream::sentry ok(*this, true);
+        __gcount    = 0;
+        int_type result = Traits::eof();
+        if (ok) {
+            bool hitEof = false;
+            try {
+                result = this->rdbuf()->sbumpc();
+                if (Traits::eq_int_type(result, Traits::eof())) hitEof = true;
+                else __gcount = 1;
+            } catch (...) {
+                __ios::HandleException(*this);
+            }
+            if (hitEof) this->setstate(ios_base::failbit | ios_base::eofbit);
+        }
+        return result;
+    }
+    basic_istream &get(char_type &c)
+    {
+        typename basic_istream::sentry ok(*this, true);
+        __gcount = 0;
+        if (ok) {
+            bool hitEof = false;
+            try {
+                int_type got = this->rdbuf()->sbumpc();
+                if (Traits::eq_int_type(got, Traits::eof())) hitEof = true;
+                else {
+                    c = Traits::to_char_type(got);
+                    __gcount = 1;
+                }
+            } catch (...) {
+                __ios::HandleException(*this);
+            }
+            if (hitEof) this->setstate(ios_base::failbit | ios_base::eofbit);
+        }
+        return *this;
+    }
+    basic_istream &get(char_type *s, streamsize n) { return get(s, n, this->widen('\n')); }
+    basic_istream &get(char_type *s, streamsize n, char_type delim)
+    {
+        typename basic_istream::sentry ok(*this, true);
+        __gcount = 0;
+        if (ok && n > 0) {
+            auto      *buf    = this->rdbuf();
+            streamsize stored = 0;
+            bool       hitEof = false;
+            try {
+                for (; stored < n - 1;) {
+                    int_type c = buf->sgetc();
+                    if (Traits::eq_int_type(c, Traits::eof())) {
+                        hitEof = true;
+                        break;
+                    }
+                    char_type ch = Traits::to_char_type(c);
+                    if (Traits::eq(ch, delim)) break; // delim is NOT extracted here
+                    s[stored++] = ch;
+                    buf->sbumpc();
+                }
+            } catch (...) {
+                __ios::HandleException(*this);
+            }
+            s[stored] = char_type();
+            __gcount  = stored;
+            if (stored == 0) {
+                this->setstate(hitEof ? (ios_base::failbit | ios_base::eofbit) : ios_base::failbit);
+            } else if (hitEof) {
+                this->setstate(ios_base::eofbit);
+            }
+        } else if (ok) {
+            this->setstate(ios_base::failbit); // n<=0: no room even for the terminator
+        }
+        return *this;
+    }
+    basic_istream &get(basic_streambuf<CharT, Traits> &sb) { return get(sb, this->widen('\n')); }
+    basic_istream &get(basic_streambuf<CharT, Traits> &sb, char_type delim)
+    {
+        typename basic_istream::sentry ok(*this, true);
+        __gcount = 0;
+        if (ok) {
+            streamsize stored = 0;
+            bool       hitEof = false;
+            try {
+                auto *buf = this->rdbuf();
+                for (;;) {
+                    int_type c = buf->sgetc();
+                    if (Traits::eq_int_type(c, Traits::eof())) {
+                        hitEof = true;
+                        break;
+                    }
+                    char_type ch = Traits::to_char_type(c);
+                    if (Traits::eq(ch, delim)) break;
+                    if (Traits::eq_int_type(sb.sputc(ch), Traits::eof())) break; // insertion failed: stop, keep what we have
+                    buf->sbumpc();
+                    ++stored;
+                }
+            } catch (...) {
+                __ios::HandleException(*this);
+            }
+            __gcount = stored;
+            // [istream.unformatted]: failbit only if NO characters were
+            // inserted at all -- stopping early (delim seen, or insertion
+            // failed) after transferring at least one is not itself a
+            // failure. eofbit is separate: it is set whenever EOF was
+            // actually reached, whether or not anything was stored first.
+            if (stored == 0) {
+                this->setstate(hitEof ? (ios_base::failbit | ios_base::eofbit) : ios_base::failbit);
+            } else if (hitEof) {
+                this->setstate(ios_base::eofbit);
+            }
+        }
+        return *this;
+    }
+
+    basic_istream &getline(char_type *s, streamsize n) { return getline(s, n, this->widen('\n')); }
+    basic_istream &getline(char_type *s, streamsize n, char_type delim)
+    {
+        typename basic_istream::sentry ok(*this, true);
+        __gcount = 0;
+        if (ok && n > 0) {
+            auto      *buf       = this->rdbuf();
+            streamsize stored    = 0;
+            streamsize extracted = 0; // includes the delimiter itself -- it IS consumed
+            bool       hitEof = false, foundDelim = false;
+            try {
+                for (;;) {
+                    int_type c = buf->sgetc(); // peek BEFORE the buffer-limit check --
+                    if (Traits::eq_int_type(c, Traits::eof())) { // an immediately-following
+                        hitEof = true;                           // delim must still count as
+                        break;                                   // found even at exactly n-1
+                    }
+                    char_type ch = Traits::to_char_type(c);
+                    if (Traits::eq(ch, delim)) {
+                        buf->sbumpc();
+                        ++extracted;
+                        foundDelim = true;
+                        break;
+                    }
+                    if (stored >= n - 1) break; // buffer full, delim not yet seen
+                    s[stored++] = ch;
+                    ++extracted;
+                    buf->sbumpc();
+                }
+            } catch (...) {
+                __ios::HandleException(*this);
+            }
+            s[stored] = char_type();
+            __gcount  = extracted;
+            // [istream.unformatted]: unlike get(), getline DOES consume the
+            // delimiter even though it isn't stored -- so a blank line
+            // (delim found immediately, stored==0) is a successful EMPTY
+            // read, not a failure. failbit fires only when stored==0 AND no
+            // delimiter was found either (truly nothing happened at all).
+            // eof/buffer-full after storing/finding something is reported
+            // through eofbit/failbit separately below, never conflated.
+            if (stored == 0 && !foundDelim) {
+                this->setstate(hitEof ? (ios_base::failbit | ios_base::eofbit) : ios_base::failbit);
+            } else if (hitEof) {
+                this->setstate(ios_base::eofbit);
+            } else if (!foundDelim) { // buffer filled before the delimiter appeared
+                this->setstate(ios_base::failbit);
+            }
+        } else if (ok) {
+            this->setstate(ios_base::failbit);
+        }
+        return *this;
+    }
+
+    basic_istream &ignore(streamsize n = 1, int_type delim = Traits::eof())
+    {
+        typename basic_istream::sentry ok(*this, true);
+        __gcount = 0;
+        if (ok) {
+            auto      *buf       = this->rdbuf();
+            streamsize extracted = 0;
+            bool       hitEof    = false;
+            bool       unbounded = (n == numeric_limits<streamsize>::max());
+            bool       hasDelim  = !Traits::eq_int_type(delim, Traits::eof());
+            try {
+                for (; unbounded || extracted < n;) {
+                    int_type c = buf->sbumpc();
+                    if (Traits::eq_int_type(c, Traits::eof())) {
+                        hitEof = true;
+                        break;
+                    }
+                    ++extracted;
+                    if (hasDelim && Traits::eq_int_type(c, delim)) break;
+                }
+            } catch (...) {
+                __ios::HandleException(*this);
+            }
+            __gcount = extracted;
+            if (hitEof) this->setstate(ios_base::eofbit);
+        }
+        return *this;
+    }
+    int_type peek()
+    {
+        typename basic_istream::sentry ok(*this, true);
+        __gcount = 0;
+        int_type result = Traits::eof();
+        if (ok) {
+            bool hitEof = false;
+            try {
+                result = this->rdbuf()->sgetc();
+                if (Traits::eq_int_type(result, Traits::eof())) hitEof = true;
+            } catch (...) {
+                __ios::HandleException(*this);
+            }
+            if (hitEof) this->setstate(ios_base::eofbit);
+        }
+        return result;
+    }
+    basic_istream &read(char_type *s, streamsize n)
+    {
+        typename basic_istream::sentry ok(*this, true);
+        __gcount = 0;
+        if (ok) {
+            streamsize got    = 0;
+            bool       hitEof = false;
+            try {
+                auto *buf = this->rdbuf();
+                for (; got < n;) {
+                    int_type c = buf->sbumpc();
+                    if (Traits::eq_int_type(c, Traits::eof())) {
+                        hitEof = true;
+                        break;
+                    }
+                    s[got++] = Traits::to_char_type(c);
+                }
+            } catch (...) {
+                __ios::HandleException(*this);
+            }
+            __gcount = got;
+            if (got < n) this->setstate(hitEof ? (ios_base::failbit | ios_base::eofbit) : ios_base::failbit);
+        }
+        return *this;
+    }
+    streamsize readsome(char_type *s, streamsize n)
+    {
+        typename basic_istream::sentry ok(*this, true);
+        __gcount = 0;
+        if (ok) {
+            bool noInfo = false;
+            try {
+                streamsize avail = this->rdbuf()->in_avail();
+                if (avail == -1) noInfo = true;
+                else __gcount = this->rdbuf()->sgetn(s, avail < n ? avail : n);
+            } catch (...) {
+                __ios::HandleException(*this);
+            }
+            if (noInfo) this->setstate(ios_base::eofbit);
+        }
+        return __gcount;
+    }
+    basic_istream &putback(char_type c)
+    {
+        __gcount = 0;
+        if (!this->good()) {
+            this->setstate(ios_base::failbit);
+            return *this;
+        }
+        bool failed = false;
+        try {
+            if (Traits::eq_int_type(this->rdbuf()->sputbackc(c), Traits::eof())) failed = true;
+        } catch (...) {
+            __ios::HandleException(*this);
+        }
+        if (failed) this->setstate(ios_base::badbit);
+        return *this;
+    }
+    basic_istream &unget()
+    {
+        __gcount = 0;
+        if (!this->good()) {
+            this->setstate(ios_base::failbit);
+            return *this;
+        }
+        bool failed = false;
+        try {
+            if (Traits::eq_int_type(this->rdbuf()->sungetc(), Traits::eof())) failed = true;
+        } catch (...) {
+            __ios::HandleException(*this);
+        }
+        if (failed) this->setstate(ios_base::badbit);
+        return *this;
+    }
+    int sync()
+    {
+        if (!this->rdbuf()) return -1;
+        bool failed = false;
+        try {
+            if (this->rdbuf()->pubsync() == -1) failed = true;
+        } catch (...) {
+            __ios::HandleException(*this);
+        }
+        if (failed) {
+            this->setstate(ios_base::badbit);
+            return -1;
+        }
+        return 0;
+    }
+
+    pos_type tellg()
+    {
+        if (this->fail()) return pos_type(off_type(-1));
+        return this->rdbuf()->pubseekoff(0, ios_base::cur, ios_base::in);
+    }
+    basic_istream &seekg(pos_type pos)
+    {
+        if (!this->fail() && this->rdbuf()->pubseekpos(pos, ios_base::in) == pos_type(off_type(-1)))
+            this->setstate(ios_base::failbit);
+        return *this;
+    }
+    basic_istream &seekg(off_type off, ios_base::seekdir dir)
+    {
+        if (!this->fail() &&
+            this->rdbuf()->pubseekoff(off, dir, ios_base::in) == pos_type(off_type(-1)))
+            this->setstate(ios_base::failbit);
+        return *this;
+    }
+
+    basic_istream(const basic_istream &) = delete;
+    basic_istream &operator=(const basic_istream &) = delete;
+
+protected:
+    basic_istream() { this->init(nullptr); }
+    basic_istream(basic_istream &&rhs)
+    {
+        __gcount = rhs.__gcount;
+        this->move(rhs);
+    }
+    basic_istream &operator=(basic_istream &&rhs)
+    {
+        __gcount = rhs.__gcount;
+        this->move(rhs);
+        return *this;
+    }
+    void swap(basic_istream &rhs)
+    {
+        basic_ios<CharT, Traits>::swap(rhs);
+        streamsize tmp = __gcount;
+        __gcount       = rhs.__gcount;
+        rhs.__gcount   = tmp;
+    }
+    // Lets basic_iostream (a sibling derived class sharing the SAME virtual
+    // basic_ios base) transfer gcount() without going through THIS class's
+    // own move ctor/assign -- see basic_iostream's move members below for
+    // why that matters.
+    void __SetGcount(streamsize n) { __gcount = n; }
+
+private:
+    streamsize __gcount = 0;
+};
+
+// ── free character/string extractors [istream.extractors] ────────────────
+template <class Traits>
+basic_istream<char, Traits> &operator>>(basic_istream<char, Traits> &is, char &c)
+{
+    typename basic_istream<char, Traits>::sentry ok(is);
+    if (ok) {
+        bool hitEof = false;
+        try {
+            typename char_traits<char>::int_type got = is.rdbuf()->sbumpc();
+            if (char_traits<char>::eq_int_type(got, char_traits<char>::eof())) hitEof = true;
+            else c = char_traits<char>::to_char_type(got);
+        } catch (...) {
+            __ios::HandleException(is);
+        }
+        if (hitEof) is.setstate(ios_base::failbit | ios_base::eofbit);
+    } else {
+        is.setstate(ios_base::failbit);
+    }
+    return is;
+}
+template <class Traits>
+basic_istream<char, Traits> &operator>>(basic_istream<char, Traits> &is, signed char &c)
+{
+    char tmp;
+    is >> tmp;
+    c = static_cast<signed char>(tmp);
+    return is;
+}
+template <class Traits>
+basic_istream<char, Traits> &operator>>(basic_istream<char, Traits> &is, unsigned char &c)
+{
+    char tmp;
+    is >> tmp;
+    c = static_cast<unsigned char>(tmp);
+    return is;
+}
+// [istream.extractors]: a formatted function that ALSO consults/resets
+// width() -- the classic bounded-C-string idiom (`is >> setw(10) >> buf;`).
+// P0487R1 (C++20) removed the bare charT* overload entirely -- unbounded
+// with no setw(), it is a classic stack-overflow trap. Only the array-bound
+// form remains, capped at min(N-1, width()>0 ? width()-1 : N-1).
+template <class Traits, size_t N>
+basic_istream<char, Traits> &operator>>(basic_istream<char, Traits> &is, char (&s)[N])
+{
+    typename basic_istream<char, Traits>::sentry ok(is);
+    if (ok) {
+        streamsize w        = is.width();
+        streamsize cap      = static_cast<streamsize>(N) - 1;
+        streamsize maxChars = (w > 0 && w - 1 < cap) ? w - 1 : cap;
+        streamsize n        = 0;
+        bool       hitEof   = false;
+        try {
+            auto *buf = is.rdbuf();
+            for (; n < maxChars;) {
+                auto c = buf->sgetc();
+                if (char_traits<char>::eq_int_type(c, char_traits<char>::eof())) {
+                    hitEof = true;
+                    break;
+                }
+                char ch = char_traits<char>::to_char_type(c);
+                if (__ios::IsSpace(ch)) break;
+                s[n++] = ch;
+                buf->sbumpc();
+            }
+        } catch (...) {
+            __ios::HandleException(is);
+        }
+        s[n] = '\0';
+        is.width(0);
+        if (n == 0) is.setstate(hitEof ? (ios_base::failbit | ios_base::eofbit) : ios_base::failbit);
+    } else {
+        is.setstate(ios_base::failbit);
+    }
+    return is;
+}
+template <class Traits, size_t N>
+basic_istream<char, Traits> &operator>>(basic_istream<char, Traits> &is, signed char (&s)[N])
+{
+    return is >> reinterpret_cast<char (&)[N]>(s);
+}
+template <class Traits, size_t N>
+basic_istream<char, Traits> &operator>>(basic_istream<char, Traits> &is, unsigned char (&s)[N])
+{
+    return is >> reinterpret_cast<char (&)[N]>(s);
+}
+
+// ── ws [istream.manip] ────────────────────────────────────────────────────
+template <class CharT, class Traits>
+basic_istream<CharT, Traits> &ws(basic_istream<CharT, Traits> &is)
+{
+    typename basic_istream<CharT, Traits>::sentry ok(is, true);
+    if (ok) {
+        auto *buf = is.rdbuf();
+        for (;;) {
+            typename Traits::int_type c = buf->sgetc();
+            if (Traits::eq_int_type(c, Traits::eof())) {
+                is.setstate(ios_base::eofbit);
+                break;
+            }
+            if (!__ios::IsSpace(Traits::to_char_type(c))) break;
+            buf->sbumpc();
+        }
+    }
+    return is;
+}
+
+// ── basic_iostream [istream], physically declared in <istream> ───────────
+// Traits' default already comes from <iosfwd>'s forward declaration.
+template <class CharT, class Traits>
+class basic_iostream : public basic_istream<CharT, Traits>, public basic_ostream<CharT, Traits> {
+public:
+    explicit basic_iostream(basic_streambuf<CharT, Traits> *sb)
+        : basic_istream<CharT, Traits>(sb), basic_ostream<CharT, Traits>(sb)
+    {
+    }
+    virtual ~basic_iostream() = default;
+    basic_iostream(const basic_iostream &) = delete;
+    basic_iostream &operator=(const basic_iostream &) = delete;
+
+protected:
+    // Deliberately does NOT delegate to basic_istream(basic_istream&&)/
+    // basic_ostream(basic_ostream&&) -- both of those call basic_ios::move()
+    // on the SHARED virtual base internally, and calling it a SECOND time
+    // here would move FROM an already-moved-from rhs, wiping out iword/
+    // pword/callback/tie state the first call just transferred. Default-
+    // constructing both bases (harmless: same idempotent init(nullptr) each)
+    // and doing the ONE real transfer directly, here, exactly once, avoids
+    // that. gcount() (basic_istream's own, non-shared, private member) is
+    // moved separately via the small protected __SetGcount hook.
+    basic_iostream(basic_iostream &&rhs)
+        : basic_istream<CharT, Traits>(), basic_ostream<CharT, Traits>()
+    {
+        this->__SetGcount(rhs.gcount());
+        this->move(rhs);
+    }
+    basic_iostream &operator=(basic_iostream &&rhs)
+    {
+        this->__SetGcount(rhs.gcount());
+        this->move(rhs);
+        return *this;
+    }
+    void swap(basic_iostream &rhs)
+    {
+        basic_ios<CharT, Traits>::swap(rhs);
+        streamsize g = this->gcount();
+        this->__SetGcount(rhs.gcount());
+        rhs.__SetGcount(g);
+    }
+};
+
+// ════════════════════════════════════════════════════════════════════════
+//  __ios: the numeric extraction bridge -- full bodies (basic_istream is
+//  complete from here on)
+// ════════════════════════════════════════════════════════════════════════
+namespace __ios {
+
+inline bool IsHexDigitChar(char c)
+{
+    return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+}
+inline bool IsDigitForBase(int base, char c)
+{
+    if (base == 16) return IsHexDigitChar(c);
+    if (c < '0' || c > '9') return false;
+    return (c - '0') < base;
+}
+
+// Resolves dec/oct/hex from ios_base::basefield, or (when NO basefield bit
+// is set) auto-detects per the classic strtol(base=0) rule: a genuine "0x"/
+// "0X" prefix (confirmed by peeking a hex digit past it before committing)
+// selects hex, a lone leading '0' selects octal, otherwise decimal. A
+// commits-only-after-peeking "0x" that turns out NOT to be followed by a
+// hex digit ungets the 'x'/'X' and treats the '0' as an ordinary digit
+// (matches strtol("0x", ...) parsing "0" and leaving "x").
+inline int ResolveBaseAndPrefix(basic_streambuf<char> *buf, ios_base::fmtflags flags,
+                                char *digitBuf, streamsize &digitLen)
+{
+    using CT      = char_traits<char>;
+    auto baseFlag = flags & ios_base::basefield;
+    int  base = baseFlag == ios_base::oct ? 8 : baseFlag == ios_base::hex ? 16
+              : baseFlag == ios_base::dec ? 10 : 0; // 0 == auto-detect
+
+    CT::int_type c = buf->sgetc();
+    if (!CT::eq_int_type(c, CT::eof()) && CT::to_char_type(c) == '0' && (base == 0 || base == 16)) {
+        buf->sbumpc();
+        CT::int_type c1 = buf->sgetc();
+        if (!CT::eq_int_type(c1, CT::eof()) &&
+            (CT::to_char_type(c1) == 'x' || CT::to_char_type(c1) == 'X')) {
+            buf->sbumpc();
+            CT::int_type c2 = buf->sgetc();
+            if (!CT::eq_int_type(c2, CT::eof()) && IsHexDigitChar(CT::to_char_type(c2))) {
+                base = 16; // genuine prefix -- '0' and 'x'/'X' both stay consumed
+            } else {
+                buf->sungetc(); // false alarm -- un-consume the 'x'/'X'
+                digitBuf[digitLen++] = '0';
+                if (base == 0) base = 8;
+            }
+        } else {
+            digitBuf[digitLen++] = '0';
+            if (base == 0) base = 8;
+        }
+    }
+    if (base == 0) base = 10;
+    return base;
+}
+
+template <class T>
+ExtractStatus ExtractIntegerCore(basic_istream<char> &is, T &value)
+{
+    auto      *buf = is.rdbuf();
+    using CT       = char_traits<char>;
+
+    streamsize signLen = 0; // 0 or 1: sungetc() only needs the COUNT to restore, not the character
+    bool       neg     = false;
+    CT::int_type c = buf->sgetc();
+    if (!CT::eq_int_type(c, CT::eof())) {
+        char ch = CT::to_char_type(c);
+        if (ch == '+' || ch == '-') {
+            neg = (ch == '-');
+            ++signLen;
+            buf->sbumpc();
+        }
+    }
+
+    char       digitBuf[80];
+    streamsize digitLen = 0;
+    int        base     = ResolveBaseAndPrefix(buf, is.flags(), digitBuf, digitLen);
+
+    for (;;) {
+        c = buf->sgetc();
+        if (CT::eq_int_type(c, CT::eof())) break;
+        char ch = CT::to_char_type(c);
+        if (!IsDigitForBase(base, ch)) break;
+        if (digitLen >= static_cast<streamsize>(sizeof(digitBuf))) break; // full: stop BEFORE consuming
+        digitBuf[digitLen++] = ch;
+        buf->sbumpc();
+    }
+
+    if (digitLen == 0) {
+        for (streamsize i = 0; i < signLen; ++i) buf->sungetc(); // restore the consumed sign, if any
+        return CT::eq_int_type(c, CT::eof()) ? ExtractStatus::NoMatchEof : ExtractStatus::NoMatch;
+    }
+
+    // Parsed in ONE wide unsigned domain regardless of T's actual width or
+    // signedness -- the real standard only widens short/int specifically
+    // because its num_get facet has no direct short/int overload; boxcxx
+    // has no such facet, so parsing every width through the same wide
+    // magnitude + a uniform range check is simpler and gives identical
+    // observable results (including the INT_MIN-style edge case, since the
+    // magnitude of T::min() is representable exactly as T::max()+1 here).
+    unsigned long long magnitude = 0;
+    auto r = from_chars(digitBuf, digitBuf + digitLen, magnitude, base);
+
+    using Lim       = numeric_limits<T>;
+    bool outOfRange = (r.ec == errc::result_out_of_range);
+    if (!outOfRange) {
+        if constexpr (is_signed_v<T>) {
+            unsigned long long limit = neg ? (static_cast<unsigned long long>(Lim::max()) + 1ULL)
+                                            : static_cast<unsigned long long>(Lim::max());
+            if (magnitude > limit) outOfRange = true;
+        } else {
+            // Unsigned target + a leading '-': ALWAYS wraps modulo 2^width,
+            // never a range failure (mirrors the well-known "unsigned
+            // accepts a leading minus" num_get/strtoul rule). Only a
+            // POSITIVE magnitude that is simply too large clamps+fails.
+            if (!neg && magnitude > static_cast<unsigned long long>(Lim::max())) outOfRange = true;
+        }
+    }
+
+    if (outOfRange) {
+        value = neg ? Lim::min() : Lim::max();
+        return ExtractStatus::RangeError;
+    }
+    value = neg ? static_cast<T>(0ULL - magnitude) : static_cast<T>(magnitude);
+    return ExtractStatus::Ok;
+}
+
+template <class T>
+basic_istream<char> &ExtractInteger(basic_istream<char> &is, T &value)
+{
+    typename basic_istream<char>::sentry ok(is, false);
+    if (ok) {
+        ExtractStatus status = ExtractStatus::NoMatch;
+        try {
+            status = ExtractIntegerCore(is, value);
+        } catch (...) {
+            HandleException(is);
+        }
+        // [facet.num.get.virtuals]/4: on a failed match, the target is set
+        // to 0 (RangeError already stores the clamped min/max itself).
+        if (status == ExtractStatus::NoMatch) {
+            value = T{};
+            is.setstate(ios_base::failbit);
+        } else if (status == ExtractStatus::NoMatchEof) {
+            value = T{};
+            is.setstate(ios_base::failbit | ios_base::eofbit);
+        } else if (status == ExtractStatus::RangeError) is.setstate(ios_base::failbit);
+    } else {
+        is.setstate(ios_base::failbit);
+    }
+    return is;
+}
+
+// boolalpha: matches "true"/"false" letter-by-letter, tracking which of the
+// two candidates can still extend. Unlike every other extraction path, a
+// failed/partial match does NOT put consumed characters back -- the one
+// place [istream.formatted.arithmetic] does not restore unconsumed input.
+inline ExtractStatus ExtractBoolCore(basic_istream<char> &is, bool &value)
+{
+    if ((is.flags() & ios_base::boolalpha) != ios_base::fmtflags{}) {
+        auto       *buf         = is.rdbuf();
+        using CT                = char_traits<char>;
+        const char *trueWord    = "true";
+        const char *falseWord   = "false";
+        streamsize  pos         = 0;
+        bool        trueAlive   = true, falseAlive = true;
+        bool        hitEof      = false;
+        for (;;) {
+            if (trueAlive && trueWord[pos] == '\0') break;
+            if (falseAlive && falseWord[pos] == '\0') break;
+            CT::int_type c = buf->sgetc();
+            if (CT::eq_int_type(c, CT::eof())) {
+                hitEof = true;
+                break;
+            }
+            char ch          = CT::to_char_type(c);
+            bool matchesTrue  = trueAlive && trueWord[pos] != '\0' && ch == trueWord[pos];
+            bool matchesFalse = falseAlive && falseWord[pos] != '\0' && ch == falseWord[pos];
+            if (!matchesTrue && !matchesFalse) break;
+            trueAlive &= matchesTrue;
+            falseAlive &= matchesFalse;
+            buf->sbumpc();
+            ++pos;
+        }
+        if (trueAlive && pos == 4) {
+            value = true;
+            return ExtractStatus::Ok;
+        }
+        if (falseAlive && pos == 5) {
+            value = false;
+            return ExtractStatus::Ok;
+        }
+        return hitEof ? ExtractStatus::NoMatchEof : ExtractStatus::NoMatch;
+    }
+    // Non-boolalpha: "as if" extracting a long and testing it against zero.
+    long          wide   = 0;
+    ExtractStatus status = ExtractIntegerCore(is, wide);
+    if (status == ExtractStatus::Ok || status == ExtractStatus::RangeError) value = (wide != 0);
+    return status;
+}
+
+inline basic_istream<char> &ExtractBool(basic_istream<char> &is, bool &value)
+{
+    typename basic_istream<char>::sentry ok(is, false);
+    if (ok) {
+        ExtractStatus status = ExtractStatus::NoMatch;
+        try {
+            status = ExtractBoolCore(is, value);
+        } catch (...) {
+            HandleException(is);
+        }
+        // [facet.num.get.virtuals]/4: on a failed match, the target is set
+        // to false.
+        if (status == ExtractStatus::NoMatch) {
+            value = false;
+            is.setstate(ios_base::failbit);
+        } else if (status == ExtractStatus::NoMatchEof) {
+            value = false;
+            is.setstate(ios_base::failbit | ios_base::eofbit);
+        } else if (status == ExtractStatus::RangeError) is.setstate(ios_base::failbit);
+    } else {
+        is.setstate(ios_base::failbit);
+    }
+    return is;
+}
+
+// Loosely gathers anything that COULD be part of a DECIMAL float token
+// (digits, '.', exponent marker, inf/infinity/nan letters) -- from_chars is
+// the final arbiter of what's actually valid; whatever it doesn't consume
+// gets put back. Simpler and just as correct as trying to hand-encode the
+// exact (stateful: "at most one dot", etc.) float grammar here.
+inline bool CouldBeFloatChar(char c)
+{
+    if (c >= '0' && c <= '9') return true;
+    switch (c) {
+    case '.': case '+': case '-': case 'e': case 'E':
+    case 'i': case 'I': case 'n': case 'N': case 'f': case 'F':
+    case 'a': case 'A': case 't': case 'T': case 'y': case 'Y':
+        return true;
+    default:
+        return false;
+    }
+}
+// Same idea for a HEXFLOAT token, once a genuine "0x"/"0X" prefix has
+// already been confirmed and consumed.
+inline bool CouldBeHexFloatChar(char c)
+{
+    return IsHexDigitChar(c) || c == '.' || c == 'p' || c == 'P' || c == '+' || c == '-';
+}
+
+template <class F>
+ExtractStatus ExtractFloatCore(basic_istream<char> &is, F &value)
+{
+    auto *buf = is.rdbuf();
+    using CT  = char_traits<char>;
+
+    streamsize signLen = 0;
+    bool       neg     = false;
+    CT::int_type c = buf->sgetc();
+    if (!CT::eq_int_type(c, CT::eof())) {
+        char ch = CT::to_char_type(c);
+        if (ch == '+' || ch == '-') {
+            neg = (ch == '-');
+            ++signLen;
+            buf->sbumpc();
+        }
+    }
+
+    // Auto-detect a genuine hexfloat "0x"/"0X" prefix -- "as if by strtod",
+    // UNCONDITIONALLY (num_get's float grammar recognizes hex notation
+    // regardless of the current floatfield flag; only the ->ostream side
+    // ties hex output specifically to the hexfloat manipulator). A "0x"
+    // that peeking confirms is NOT followed by a hex digit or '.' is backed
+    // out (sungetc the 'x'/'X') and the '0' seeds an ordinary decimal token.
+    chars_format fmt = chars_format::general;
+    streamsize   prefixConsumed = 0; // "0x"/"0X" chars consumed but NOT in token[]
+    constexpr streamsize kCap = 2048;
+    char                 token[kCap];
+    streamsize           n = 0;
+
+    c = buf->sgetc();
+    if (!CT::eq_int_type(c, CT::eof()) && CT::to_char_type(c) == '0') {
+        buf->sbumpc();
+        CT::int_type c1 = buf->sgetc();
+        if (!CT::eq_int_type(c1, CT::eof()) &&
+            (CT::to_char_type(c1) == 'x' || CT::to_char_type(c1) == 'X')) {
+            buf->sbumpc();
+            CT::int_type c2 = buf->sgetc();
+            if (!CT::eq_int_type(c2, CT::eof()) &&
+                (IsHexDigitChar(CT::to_char_type(c2)) || CT::to_char_type(c2) == '.')) {
+                fmt            = chars_format::hex;
+                prefixConsumed = 2; // '0' and 'x'/'X', neither in token[]
+            } else {
+                buf->sungetc();   // false alarm -- restore the 'x'/'X'
+                token[n++] = '0'; // the '0' itself starts a decimal token
+            }
+        } else {
+            token[n++] = '0';
+        }
+    }
+
+    bool hitEof = false;
+    for (;;) {
+        c = buf->sgetc();
+        if (CT::eq_int_type(c, CT::eof())) {
+            hitEof = true;
+            break;
+        }
+        char ch = CT::to_char_type(c);
+        bool extends = fmt == chars_format::hex ? CouldBeHexFloatChar(ch) : CouldBeFloatChar(ch);
+        if (!extends) break;
+        if (n >= kCap) break; // full: stop BEFORE consuming, so nothing unputbackable is lost
+        token[n++] = ch;
+        buf->sbumpc();
+    }
+
+    if (n == 0) {
+        for (streamsize i = 0; i < prefixConsumed + signLen; ++i) buf->sungetc();
+        return hitEof ? ExtractStatus::NoMatchEof : ExtractStatus::NoMatch;
+    }
+
+    F    parsed{};
+    auto r = from_chars(token, token + n, parsed, fmt);
+    if (r.ec == errc::invalid_argument) {
+        for (streamsize i = 0; i < n + prefixConsumed + signLen; ++i) buf->sungetc();
+        return ExtractStatus::NoMatch;
+    }
+    for (streamsize i = n; i > (r.ptr - token); --i) buf->sungetc();
+
+    if (r.ec == errc::result_out_of_range) {
+        // The standard leaves the exact stored value on a float range error
+        // unspecified (only failbit is mandated); matching num_get's own
+        // convention, an out-of-range magnitude clamps to the representable
+        // extreme with the parsed sign applied.
+        value = neg ? -numeric_limits<F>::max() : numeric_limits<F>::max();
+        return ExtractStatus::RangeError;
+    }
+    value = neg ? -parsed : parsed;
+    return ExtractStatus::Ok;
+}
+
+template <class F>
+basic_istream<char> &ExtractFloat(basic_istream<char> &is, F &value)
+{
+    typename basic_istream<char>::sentry ok(is, false);
+    if (ok) {
+        ExtractStatus status = ExtractStatus::NoMatch;
+        try {
+            status = ExtractFloatCore(is, value);
+        } catch (...) {
+            HandleException(is);
+        }
+        // [facet.num.get.virtuals]/4: on a failed match, the target is set
+        // to 0 (RangeError already stores +/-numeric_limits<F>::max() itself).
+        if (status == ExtractStatus::NoMatch) {
+            value = F{};
+            is.setstate(ios_base::failbit);
+        } else if (status == ExtractStatus::NoMatchEof) {
+            value = F{};
+            is.setstate(ios_base::failbit | ios_base::eofbit);
+        } else if (status == ExtractStatus::RangeError) is.setstate(ios_base::failbit);
+    } else {
+        is.setstate(ios_base::failbit);
+    }
+    return is;
+}
+
+// void*&: pointer round-tripping is inherently hex (insertion always emits
+// "0x..."), so extraction forces base 16 regardless of the current
+// basefield, reusing the same prefix-aware scanner integer extraction uses.
+inline ExtractStatus ExtractPointerCore(basic_istream<char> &is, void *&value)
+{
+    auto *buf = is.rdbuf();
+    using CT  = char_traits<char>;
+
+    char       digitBuf[32];
+    streamsize digitLen = 0;
+    ResolveBaseAndPrefix(buf, ios_base::hex, digitBuf, digitLen);
+
+    CT::int_type c;
+    for (;;) {
+        c = buf->sgetc();
+        if (CT::eq_int_type(c, CT::eof())) break;
+        char ch = CT::to_char_type(c);
+        if (!IsHexDigitChar(ch)) break;
+        if (digitLen < static_cast<streamsize>(sizeof(digitBuf))) digitBuf[digitLen++] = ch;
+        buf->sbumpc();
+    }
+
+    if (digitLen == 0)
+        return CT::eq_int_type(c, CT::eof()) ? ExtractStatus::NoMatchEof : ExtractStatus::NoMatch;
+
+    unsigned long long addr = 0;
+    auto r = from_chars(digitBuf, digitBuf + digitLen, addr, 16);
+    if (r.ec == errc::result_out_of_range) {
+        value = reinterpret_cast<void *>(static_cast<uintptr_t>(~0ULL));
+        return ExtractStatus::RangeError;
+    }
+    value = reinterpret_cast<void *>(static_cast<uintptr_t>(addr));
+    return ExtractStatus::Ok;
+}
+
+inline basic_istream<char> &ExtractPointer(basic_istream<char> &is, void *&value)
+{
+    typename basic_istream<char>::sentry ok(is, false);
+    if (ok) {
+        ExtractStatus status = ExtractStatus::NoMatch;
+        try {
+            status = ExtractPointerCore(is, value);
+        } catch (...) {
+            HandleException(is);
+        }
+        if (status == ExtractStatus::NoMatch) is.setstate(ios_base::failbit);
+        else if (status == ExtractStatus::NoMatchEof) is.setstate(ios_base::failbit | ios_base::eofbit);
+        else if (status == ExtractStatus::RangeError) is.setstate(ios_base::failbit);
+    } else {
+        is.setstate(ios_base::failbit);
+    }
+    return is;
+}
+
+} // namespace __ios
+} // namespace std
+
+// CONFORMANCE: the real standard's <iostream> ([iostream.syn]) is ONLY the
+// cin/cout/cerr/clog globals + ios_base::Init -- BoxOS ships neither (see
+// <ios>'s own CONFORMANCE note). basic_iostream exists here because
+// basic_stringstream structurally needs it (later commit); a program that
+// writes #include <iostream> gets a missing-header error, same as
+// <fstream> today.
+
+#endif // BOXCXX_ISTREAM

@@ -2,11 +2,17 @@
 // Grows __bits/iterator_core into the full header: C++20 iterator
 // concepts + associated-type aliases, move_iterator, counted_iterator, the
 // inserter family, default/unreachable sentinels, the ranges::iter_move/
-// iter_swap CPOs, and (Ф29a) the indirect-callable foundation: projected +
+// iter_swap CPOs, the indirect-callable foundation (projected +
 // indirect_result_t, the indirect-callable / indirect-movement / algorithm-
-// requirement concepts, and common_iterator.
+// requirement concepts, common_iterator), and [stream.iterators]:
+// istream_iterator/ostream_iterator/istreambuf_iterator/ostreambuf_iterator.
 //
-// Deferred (epic leftovers): istream/ostream iterators (Ф9B).
+// The stream iterators only need <iosfwd>'s forward declarations (a genuine
+// leaf, zero cycle risk) -- their bodies call basic_istream/basic_ostream/
+// basic_streambuf member functions through a dependent (template) type, so
+// those calls are only checked once a translation unit ALSO includes the
+// concrete <istream>/<ostream> and actually instantiates one of these
+// templates. <iterator> itself never depends on <istream>/<ostream>.
 #ifndef BOXCXX_ITERATOR
 #define BOXCXX_ITERATOR
 
@@ -18,6 +24,7 @@
 #include <concepts>
 #include <cstddef>
 #include <functional>
+#include <iosfwd>
 #include <new>
 #include <type_traits>
 #include <utility>
@@ -1726,6 +1733,206 @@ constexpr const_sentinel<S> make_const_sentinel(S s)
 {
     return s;
 }
+
+// ── [stream.iterators] ────────────────────────────────────────────────────
+
+// istream_iterator: a LOOK-AHEAD input iterator -- construction (and every
+// ++) eagerly extracts the next T via operator>>; a failed/eof extraction
+// makes the iterator compare equal to the default-constructed end iterator.
+template <class T, class CharT = char, class Traits = char_traits<CharT>,
+         class Distance = ptrdiff_t>
+class istream_iterator {
+public:
+    using iterator_category = input_iterator_tag;
+    using value_type        = T;
+    using difference_type   = Distance;
+    using pointer           = const T *;
+    using reference         = const T &;
+    using char_type         = CharT;
+    using traits_type       = Traits;
+    using istream_type      = basic_istream<CharT, Traits>;
+
+    constexpr istream_iterator() noexcept : __in(nullptr), __value() {}
+    constexpr istream_iterator(default_sentinel_t) noexcept : istream_iterator() {}
+    istream_iterator(istream_type &s) : __in(__builtin_addressof(s)) { __Read(); }
+    istream_iterator(const istream_iterator &) = default;
+    ~istream_iterator() = default;
+
+    const T &operator*() const { return __value; }
+    const T *operator->() const { return __builtin_addressof(__value); }
+    istream_iterator &operator++()
+    {
+        __Read();
+        return *this;
+    }
+    istream_iterator operator++(int)
+    {
+        istream_iterator tmp = *this;
+        __Read();
+        return tmp;
+    }
+
+    friend bool operator==(const istream_iterator &a, const istream_iterator &b)
+    {
+        return a.__in == b.__in;
+    }
+    friend bool operator==(const istream_iterator &i, default_sentinel_t) { return i.__in == nullptr; }
+
+private:
+    void __Read()
+    {
+        if (__in && !(*__in >> __value)) __in = nullptr;
+    }
+
+    istream_type *__in;
+    T             __value;
+};
+
+// ostream_iterator: an output iterator writing each assigned value through
+// operator<<, followed by an optional delimiter string.
+template <class T, class CharT = char, class Traits = char_traits<CharT>>
+class ostream_iterator {
+public:
+    using iterator_category = output_iterator_tag;
+    using value_type        = void;
+    using difference_type   = ptrdiff_t;
+    using pointer           = void;
+    using reference         = void;
+    using char_type         = CharT;
+    using traits_type       = Traits;
+    using ostream_type      = basic_ostream<CharT, Traits>;
+
+    ostream_iterator(ostream_type &s) noexcept : __out(__builtin_addressof(s)), __delim(nullptr) {}
+    ostream_iterator(ostream_type &s, const CharT *delim) noexcept
+        : __out(__builtin_addressof(s)), __delim(delim)
+    {
+    }
+    ostream_iterator(const ostream_iterator &) = default;
+    ~ostream_iterator() = default;
+
+    ostream_iterator &operator=(const T &value)
+    {
+        *__out << value;
+        if (__delim) *__out << __delim;
+        return *this;
+    }
+    ostream_iterator &operator*() { return *this; }
+    ostream_iterator &operator++() { return *this; }
+    ostream_iterator &operator++(int) { return *this; }
+
+private:
+    ostream_type *__out   = nullptr;
+    const CharT  *__delim = nullptr;
+};
+
+// istreambuf_iterator: reads one character at a time DIRECTLY off a
+// streambuf (no formatting). Unlike istream_iterator it does not read
+// ahead at construction -- operator* peeks (sgetc), operator++ consumes
+// (sbumpc). equal() -- and thus both operator== overloads -- compares only
+// "is this the end-of-stream iterator", never the underlying position;
+// there is no meaningful notion of two mid-stream istreambuf_iterators
+// pointing at "the same" character.
+template <class CharT, class Traits = char_traits<CharT>>
+class istreambuf_iterator {
+public:
+    using iterator_category = input_iterator_tag;
+    using value_type        = CharT;
+    using difference_type   = typename Traits::off_type;
+    using pointer           = CharT *;
+    using reference         = CharT;
+    using char_type         = CharT;
+    using traits_type       = Traits;
+    using int_type          = typename Traits::int_type;
+    using streambuf_type    = basic_streambuf<CharT, Traits>;
+    using istream_type      = basic_istream<CharT, Traits>;
+
+    class proxy {
+    public:
+        CharT operator*() const { return __keep; }
+
+    private:
+        friend class istreambuf_iterator;
+        proxy(CharT c, streambuf_type *sbuf) : __keep(c), __sbuf(sbuf) {}
+        CharT           __keep;
+        streambuf_type *__sbuf;
+    };
+
+    constexpr istreambuf_iterator() noexcept : __sbuf(nullptr) {}
+    constexpr istreambuf_iterator(default_sentinel_t) noexcept : istreambuf_iterator() {}
+    istreambuf_iterator(const istreambuf_iterator &) noexcept = default;
+    ~istreambuf_iterator() = default;
+
+    istreambuf_iterator(istream_type &s) noexcept : __sbuf(s.rdbuf()) {}
+    istreambuf_iterator(streambuf_type *s) noexcept : __sbuf(s) {}
+    istreambuf_iterator(const proxy &p) noexcept : __sbuf(p.__sbuf) {}
+
+    CharT operator*() const { return Traits::to_char_type(__sbuf->sgetc()); }
+    istreambuf_iterator &operator++()
+    {
+        __sbuf->sbumpc();
+        return *this;
+    }
+    proxy operator++(int)
+    {
+        CharT c = Traits::to_char_type(__sbuf->sbumpc());
+        return proxy(c, __sbuf);
+    }
+
+    bool equal(const istreambuf_iterator &b) const { return __AtEnd() == b.__AtEnd(); }
+
+private:
+    bool __AtEnd() const
+    {
+        return __sbuf == nullptr || Traits::eq_int_type(__sbuf->sgetc(), Traits::eof());
+    }
+
+    streambuf_type *__sbuf;
+};
+
+template <class CharT, class Traits>
+bool operator==(const istreambuf_iterator<CharT, Traits> &a, const istreambuf_iterator<CharT, Traits> &b)
+{
+    return a.equal(b);
+}
+template <class CharT, class Traits>
+bool operator==(const istreambuf_iterator<CharT, Traits> &i, default_sentinel_t)
+{
+    return i.equal(istreambuf_iterator<CharT, Traits>());
+}
+
+// ostreambuf_iterator: writes one character at a time directly through a
+// streambuf's sputc -- no formatting, no padding. failed() reports whether
+// any write has ever failed (sticky, matching the real synopsis).
+template <class CharT, class Traits = char_traits<CharT>>
+class ostreambuf_iterator {
+public:
+    using iterator_category = output_iterator_tag;
+    using value_type        = void;
+    using difference_type   = ptrdiff_t;
+    using pointer           = void;
+    using reference         = void;
+    using char_type         = CharT;
+    using traits_type       = Traits;
+    using streambuf_type    = basic_streambuf<CharT, Traits>;
+    using ostream_type      = basic_ostream<CharT, Traits>;
+
+    ostreambuf_iterator(ostream_type &s) noexcept : __sbuf(s.rdbuf()) {}
+    ostreambuf_iterator(streambuf_type *s) noexcept : __sbuf(s) {}
+
+    ostreambuf_iterator &operator=(CharT c)
+    {
+        if (!__failed && Traits::eq_int_type(__sbuf->sputc(c), Traits::eof())) __failed = true;
+        return *this;
+    }
+    ostreambuf_iterator &operator*() { return *this; }
+    ostreambuf_iterator &operator++() { return *this; }
+    ostreambuf_iterator &operator++(int) { return *this; }
+    bool failed() const noexcept { return __failed; }
+
+private:
+    streambuf_type *__sbuf;
+    bool             __failed = false;
+};
 
 } // namespace std
 
