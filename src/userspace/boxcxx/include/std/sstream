@@ -4,9 +4,19 @@
 // pointers alias __buf's OWN storage directly (P0408 "efficient stringbuf"):
 // no separate copy buffer, str()/view() read straight out of it.
 //
-// This is commit 2 of the Ф30e <sstream> work: basic_stringbuf only. The
-// three stream-wrapper classes (basic_[i|o]stringstream, basic_stringstream)
-// wrap basic_istream/basic_ostream, which do not exist until a later commit.
+// basic_[i|o]stringstream/basic_stringstream (below, Ф30e commit 4) wrap
+// basic_istream/basic_ostream/basic_iostream and each hold one
+// basic_stringbuf BY VALUE. The one correctness hotspot: basic_ios::move()
+// unconditionally nulls the MOVED-INTO object's rdbuf() pointer (right for
+// a bare basic_istream, wrong here since these classes always own a real
+// stringbuf) -- every move ctor/assign below relocates the stringbuf member
+// THEN calls set_rdbuf(addressof(the member)) to repoint at it, verified
+// against [istringstream]/[ostringstream]/[stringstream]'s move ctor
+// Effects. swap() needs no such fixup: basic_ios::swap() leaves both
+// rdbuf() pointers untouched, and a member's address never changes during a
+// swap (only its CONTENT does, via basic_stringbuf::swap) -- verified
+// against the same clauses' swap Effects ("basic_istream<...>::swap(rhs);
+// sb_.swap(rhs.sb_);", nothing else).
 //
 // ── the buffer strategy (the one subtle part of this header) ────────────
 // epptr() is set to __buf.data()+__buf.capacity(), not +size() — the put
@@ -36,6 +46,8 @@
 #define BOXCXX_SSTREAM
 
 #include <streambuf>
+#include <ostream>
+#include <istream>
 #include <string>
 #include <string_view>
 #include <cstddef>
@@ -402,6 +414,349 @@ void swap(basic_stringbuf<CharT, Traits, Allocator> &a,
 }
 
 using stringbuf = basic_stringbuf<char>;
+
+// ── basic_istringstream<CharT,Traits,Allocator> [istringstream] ─────────
+// istringstream's ctors force `which | ios_base::in` into the backing
+// stringbuf REGARDLESS of what `which` the caller passes -- verified
+// against every ctor's Effects clause: an istringstream is always at
+// least readable. Cross-allocator-type (SAlloc != Allocator) ctors and a
+// bare-Allocator ctor are intentionally not provided: verified against the
+// current [istringstream] synopsis, which (unlike basic_stringbuf) has no
+// bare-Allocator ctor at all, and the SAlloc-generic overloads are the
+// same documented, deliberate omission already made for basic_stringbuf.
+template <class CharT, class Traits, class Allocator>
+class basic_istringstream : public basic_istream<CharT, Traits> {
+public:
+    using char_type      = CharT;
+    using traits_type    = Traits;
+    using int_type       = typename Traits::int_type;
+    using pos_type       = typename Traits::pos_type;
+    using off_type       = typename Traits::off_type;
+    using allocator_type = Allocator;
+
+private:
+    using __view = typename basic_stringbuf<CharT, Traits, Allocator>::__view;
+    template <typename SV>
+    static constexpr bool IsViewLike =
+        is_convertible_v<const SV &, __view> && !is_convertible_v<const SV &, const CharT *>;
+
+public:
+    basic_istringstream() : basic_istringstream(ios_base::in) {}
+    explicit basic_istringstream(ios_base::openmode which)
+        : basic_istream<CharT, Traits>(&sb_), sb_(which | ios_base::in)
+    {
+    }
+    explicit basic_istringstream(const basic_string<CharT, Traits, Allocator> &s,
+                                  ios_base::openmode which = ios_base::in)
+        : basic_istream<CharT, Traits>(&sb_), sb_(s, which | ios_base::in)
+    {
+    }
+    explicit basic_istringstream(basic_string<CharT, Traits, Allocator> &&s,
+                                  ios_base::openmode which = ios_base::in)
+        : basic_istream<CharT, Traits>(&sb_), sb_(std::move(s), which | ios_base::in)
+    {
+    }
+    basic_istringstream(ios_base::openmode which, const Allocator &a)
+        : basic_istream<CharT, Traits>(&sb_), sb_(which | ios_base::in, a)
+    {
+    }
+    basic_istringstream(const basic_string<CharT, Traits, Allocator> &s, const Allocator &a)
+        : basic_istringstream(s, ios_base::in, a)
+    {
+    }
+    basic_istringstream(const basic_string<CharT, Traits, Allocator> &s, ios_base::openmode which,
+                         const Allocator &a)
+        : basic_istream<CharT, Traits>(&sb_), sb_(s, which | ios_base::in, a)
+    {
+    }
+    template <typename SV>
+        requires IsViewLike<SV>
+    explicit basic_istringstream(const SV &t, ios_base::openmode which = ios_base::in,
+                                  const Allocator &a = Allocator())
+        : basic_istream<CharT, Traits>(&sb_), sb_(t, which | ios_base::in, a)
+    {
+    }
+
+    basic_istringstream(const basic_istringstream &) = delete;
+    basic_istringstream &operator=(const basic_istringstream &) = delete;
+
+    // MOVE hotspot: basic_ios::move() (run by the base's own move ctor)
+    // unconditionally nulls THIS object's rdbuf() pointer -- correct for a
+    // bare basic_istream, wrong here. Relocate sb_ THEN repoint rdbuf() at
+    // it. rhs needs no fixup: basic_ios::move() leaves rhs's OWN rdbuf()
+    // pointer untouched, and rhs.sb_ (moved-from, still a valid empty
+    // stringbuf) never changes address.
+    basic_istringstream(basic_istringstream &&rhs)
+        : basic_istream<CharT, Traits>(std::move(rhs)), sb_(std::move(rhs.sb_))
+    {
+        this->set_rdbuf(&sb_);
+    }
+    basic_istringstream &operator=(basic_istringstream &&rhs)
+    {
+        basic_istream<CharT, Traits>::operator=(std::move(rhs));
+        sb_ = std::move(rhs.sb_);
+        this->set_rdbuf(&sb_);
+        return *this;
+    }
+    // swap needs NO rdbuf() fixup: basic_ios::swap() leaves both rdbuf()
+    // pointers untouched, and sb_'s OWN address never moves during a swap
+    // (only its CONTENT is exchanged, via basic_stringbuf::swap).
+    void swap(basic_istringstream &rhs)
+    {
+        basic_istream<CharT, Traits>::swap(rhs);
+        sb_.swap(rhs.sb_);
+    }
+
+    basic_stringbuf<CharT, Traits, Allocator> *rdbuf() const noexcept
+    {
+        return const_cast<basic_stringbuf<CharT, Traits, Allocator> *>(&sb_);
+    }
+    basic_string<CharT, Traits, Allocator> str() const & { return sb_.str(); }
+    basic_string<CharT, Traits, Allocator> str() && { return std::move(sb_).str(); }
+    __view view() const noexcept { return sb_.view(); }
+    void str(const basic_string<CharT, Traits, Allocator> &s) { sb_.str(s); }
+    template <typename SV>
+        requires IsViewLike<SV>
+    void str(const SV &t)
+    {
+        sb_.str(t);
+    }
+
+private:
+    basic_stringbuf<CharT, Traits, Allocator> sb_;
+};
+
+template <class CharT, class Traits, class Allocator>
+void swap(basic_istringstream<CharT, Traits, Allocator> &a,
+          basic_istringstream<CharT, Traits, Allocator> &b)
+{
+    a.swap(b);
+}
+
+using istringstream = basic_istringstream<char>;
+
+// ── basic_ostringstream<CharT,Traits,Allocator> [ostringstream] ─────────
+// Symmetric to basic_istringstream: forces `which | ios_base::out`
+// (verified the same way against [ostringstream]'s Effects clauses),
+// wraps basic_ostream, default mode is out.
+template <class CharT, class Traits, class Allocator>
+class basic_ostringstream : public basic_ostream<CharT, Traits> {
+public:
+    using char_type      = CharT;
+    using traits_type    = Traits;
+    using int_type       = typename Traits::int_type;
+    using pos_type       = typename Traits::pos_type;
+    using off_type       = typename Traits::off_type;
+    using allocator_type = Allocator;
+
+private:
+    using __view = typename basic_stringbuf<CharT, Traits, Allocator>::__view;
+    template <typename SV>
+    static constexpr bool IsViewLike =
+        is_convertible_v<const SV &, __view> && !is_convertible_v<const SV &, const CharT *>;
+
+public:
+    basic_ostringstream() : basic_ostringstream(ios_base::out) {}
+    explicit basic_ostringstream(ios_base::openmode which)
+        : basic_ostream<CharT, Traits>(&sb_), sb_(which | ios_base::out)
+    {
+    }
+    explicit basic_ostringstream(const basic_string<CharT, Traits, Allocator> &s,
+                                  ios_base::openmode which = ios_base::out)
+        : basic_ostream<CharT, Traits>(&sb_), sb_(s, which | ios_base::out)
+    {
+    }
+    explicit basic_ostringstream(basic_string<CharT, Traits, Allocator> &&s,
+                                  ios_base::openmode which = ios_base::out)
+        : basic_ostream<CharT, Traits>(&sb_), sb_(std::move(s), which | ios_base::out)
+    {
+    }
+    basic_ostringstream(ios_base::openmode which, const Allocator &a)
+        : basic_ostream<CharT, Traits>(&sb_), sb_(which | ios_base::out, a)
+    {
+    }
+    basic_ostringstream(const basic_string<CharT, Traits, Allocator> &s, const Allocator &a)
+        : basic_ostringstream(s, ios_base::out, a)
+    {
+    }
+    basic_ostringstream(const basic_string<CharT, Traits, Allocator> &s, ios_base::openmode which,
+                         const Allocator &a)
+        : basic_ostream<CharT, Traits>(&sb_), sb_(s, which | ios_base::out, a)
+    {
+    }
+    template <typename SV>
+        requires IsViewLike<SV>
+    explicit basic_ostringstream(const SV &t, ios_base::openmode which = ios_base::out,
+                                  const Allocator &a = Allocator())
+        : basic_ostream<CharT, Traits>(&sb_), sb_(t, which | ios_base::out, a)
+    {
+    }
+
+    basic_ostringstream(const basic_ostringstream &) = delete;
+    basic_ostringstream &operator=(const basic_ostringstream &) = delete;
+
+    basic_ostringstream(basic_ostringstream &&rhs)
+        : basic_ostream<CharT, Traits>(std::move(rhs)), sb_(std::move(rhs.sb_))
+    {
+        this->set_rdbuf(&sb_);
+    }
+    basic_ostringstream &operator=(basic_ostringstream &&rhs)
+    {
+        basic_ostream<CharT, Traits>::operator=(std::move(rhs));
+        sb_ = std::move(rhs.sb_);
+        this->set_rdbuf(&sb_);
+        return *this;
+    }
+    void swap(basic_ostringstream &rhs)
+    {
+        basic_ostream<CharT, Traits>::swap(rhs);
+        sb_.swap(rhs.sb_);
+    }
+
+    basic_stringbuf<CharT, Traits, Allocator> *rdbuf() const noexcept
+    {
+        return const_cast<basic_stringbuf<CharT, Traits, Allocator> *>(&sb_);
+    }
+    basic_string<CharT, Traits, Allocator> str() const & { return sb_.str(); }
+    basic_string<CharT, Traits, Allocator> str() && { return std::move(sb_).str(); }
+    __view view() const noexcept { return sb_.view(); }
+    void str(const basic_string<CharT, Traits, Allocator> &s) { sb_.str(s); }
+    template <typename SV>
+        requires IsViewLike<SV>
+    void str(const SV &t)
+    {
+        sb_.str(t);
+    }
+
+private:
+    basic_stringbuf<CharT, Traits, Allocator> sb_;
+};
+
+template <class CharT, class Traits, class Allocator>
+void swap(basic_ostringstream<CharT, Traits, Allocator> &a,
+          basic_ostringstream<CharT, Traits, Allocator> &b)
+{
+    a.swap(b);
+}
+
+using ostringstream = basic_ostringstream<char>;
+
+// ── basic_stringstream<CharT,Traits,Allocator> [stringstream] ───────────
+// Unlike istringstream/ostringstream, stringstream's ctors do NOT force any
+// extra bits into `which` -- verified against [stringstream]'s Effects
+// clauses verbatim (e.g. "_sb_ with basic_stringbuf<...>(which)", no OR at
+// all): a real, standard-mandated asymmetry. The class has no single
+// "primary direction" to force the way istringstream forces `in` and
+// ostringstream forces `out` -- its own DEFAULT argument already carries
+// both bits, so an explicit-which caller who really wants neither gets
+// neither. Wraps basic_iostream: the move ctor/assign/swap each delegate to
+// basic_iostream's OWN (already diamond-safe) base call exactly once -- no
+// double-move risk, since basic_iostream's own move ctor performs its
+// single real transfer via move()/__SetGcount rather than by re-invoking
+// its own bases' mem-initializers (see <istream>'s comment on
+// basic_iostream's move ctor).
+template <class CharT, class Traits, class Allocator>
+class basic_stringstream : public basic_iostream<CharT, Traits> {
+public:
+    using char_type      = CharT;
+    using traits_type    = Traits;
+    using int_type       = typename Traits::int_type;
+    using pos_type       = typename Traits::pos_type;
+    using off_type       = typename Traits::off_type;
+    using allocator_type = Allocator;
+
+private:
+    using __view = typename basic_stringbuf<CharT, Traits, Allocator>::__view;
+    template <typename SV>
+    static constexpr bool IsViewLike =
+        is_convertible_v<const SV &, __view> && !is_convertible_v<const SV &, const CharT *>;
+
+public:
+    basic_stringstream() : basic_stringstream(ios_base::out | ios_base::in) {}
+    explicit basic_stringstream(ios_base::openmode which)
+        : basic_iostream<CharT, Traits>(&sb_), sb_(which)
+    {
+    }
+    explicit basic_stringstream(const basic_string<CharT, Traits, Allocator> &s,
+                                 ios_base::openmode which = ios_base::out | ios_base::in)
+        : basic_iostream<CharT, Traits>(&sb_), sb_(s, which)
+    {
+    }
+    explicit basic_stringstream(basic_string<CharT, Traits, Allocator> &&s,
+                                 ios_base::openmode which = ios_base::out | ios_base::in)
+        : basic_iostream<CharT, Traits>(&sb_), sb_(std::move(s), which)
+    {
+    }
+    basic_stringstream(ios_base::openmode which, const Allocator &a)
+        : basic_iostream<CharT, Traits>(&sb_), sb_(which, a)
+    {
+    }
+    basic_stringstream(const basic_string<CharT, Traits, Allocator> &s, const Allocator &a)
+        : basic_stringstream(s, ios_base::out | ios_base::in, a)
+    {
+    }
+    basic_stringstream(const basic_string<CharT, Traits, Allocator> &s, ios_base::openmode which,
+                        const Allocator &a)
+        : basic_iostream<CharT, Traits>(&sb_), sb_(s, which, a)
+    {
+    }
+    template <typename SV>
+        requires IsViewLike<SV>
+    explicit basic_stringstream(const SV &t,
+                                 ios_base::openmode which = ios_base::out | ios_base::in,
+                                 const Allocator &a = Allocator())
+        : basic_iostream<CharT, Traits>(&sb_), sb_(t, which, a)
+    {
+    }
+
+    basic_stringstream(const basic_stringstream &) = delete;
+    basic_stringstream &operator=(const basic_stringstream &) = delete;
+
+    basic_stringstream(basic_stringstream &&rhs)
+        : basic_iostream<CharT, Traits>(std::move(rhs)), sb_(std::move(rhs.sb_))
+    {
+        this->set_rdbuf(&sb_);
+    }
+    basic_stringstream &operator=(basic_stringstream &&rhs)
+    {
+        basic_iostream<CharT, Traits>::operator=(std::move(rhs));
+        sb_ = std::move(rhs.sb_);
+        this->set_rdbuf(&sb_);
+        return *this;
+    }
+    void swap(basic_stringstream &rhs)
+    {
+        basic_iostream<CharT, Traits>::swap(rhs);
+        sb_.swap(rhs.sb_);
+    }
+
+    basic_stringbuf<CharT, Traits, Allocator> *rdbuf() const noexcept
+    {
+        return const_cast<basic_stringbuf<CharT, Traits, Allocator> *>(&sb_);
+    }
+    basic_string<CharT, Traits, Allocator> str() const & { return sb_.str(); }
+    basic_string<CharT, Traits, Allocator> str() && { return std::move(sb_).str(); }
+    __view view() const noexcept { return sb_.view(); }
+    void str(const basic_string<CharT, Traits, Allocator> &s) { sb_.str(s); }
+    template <typename SV>
+        requires IsViewLike<SV>
+    void str(const SV &t)
+    {
+        sb_.str(t);
+    }
+
+private:
+    basic_stringbuf<CharT, Traits, Allocator> sb_;
+};
+
+template <class CharT, class Traits, class Allocator>
+void swap(basic_stringstream<CharT, Traits, Allocator> &a,
+          basic_stringstream<CharT, Traits, Allocator> &b)
+{
+    a.swap(b);
+}
+
+using stringstream = basic_stringstream<char>;
 
 } // namespace std
 

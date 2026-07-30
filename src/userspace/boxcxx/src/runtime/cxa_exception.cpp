@@ -340,4 +340,31 @@ extern "C" [[noreturn]] void __cxa_call_unexpected(void *unwind_exc)
     std::terminate();
 }
 
+// [except.terminate]: called by compiler-generated cleanup code when a
+// destructor (or other cleanup action), run WHILE UNWINDING for one
+// exception, itself throws a SECOND exception -- that second exception
+// must never propagate further, std::terminate is mandatory. unwind_exc
+// is THIS ESCAPING (second) exception, NOT the one originally being
+// unwound for. Per the Itanium ABI (2.5.3) and libstdc++'s own
+// eh_call.cc, __cxa_begin_catch runs on the escaping exception first --
+// this is what lets a user std::set_terminate handler's
+// std::current_exception() actually find and report it (boxcxx ships
+// both set_terminate and exception_ptr, so this is reachable, not
+// theoretical). Real GCC also guards a null ue_header before
+// dereferencing it; mirrored here.
+extern "C" [[noreturn]] void __cxa_call_terminate(void *unwind_exc)
+{
+    auto *exc = static_cast<_Unwind_Exception *>(unwind_exc);
+    if (!exc) std::terminate();
+    if (IsNative(exc)) {
+        CxaException *header = FromUnwind(exc);
+        printf("[boxcxx] terminate: exception of type %s escaped while unwinding\n",
+               header->exceptionType ? header->exceptionType->name() : "?");
+        __cxa_begin_catch(unwind_exc);
+    } else {
+        printf("[boxcxx] terminate: a foreign exception escaped while unwinding\n");
+    }
+    std::terminate();
+}
+
 } // namespace __cxxabiv1
