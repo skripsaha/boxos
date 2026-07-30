@@ -59,16 +59,20 @@ for cfg in $CONFIGS; do
     done
 
     hit=0
-    # 1200s post-shell budget: the correctly-rounded cmath suite (Phase66+) runs
+    # 3600s post-shell budget: the correctly-rounded cmath suite (Phase66+) runs
     # tens of thousands of software-dd evals per function, and each ranges phase
-    # (Phase87..97: views/algos/ranges::to/container range-members) adds more; on
-    # 16c-TCG the full run legitimately takes many minutes and grows every phase.
-    # The slowest config varies by phase mix (single-core UEFI on cmath-heavy
-    # batches, 16c BIOS/UEFI on the ranges::to+container-instantiation batches) —
-    # both periodically tripped the old 600s ceiling (marker=0 bad=0, a runner-
-    # budget timeout, not a code flake). Still breaks out immediately on
-    # PANIC/EXCEPTION/FAILURES, so genuine faults fail fast.
-    for i in $(seq 1 2400); do
+    # (Phase87..100: views/algos/ranges::to/container range-members) plus the
+    # newer value-type phases (Phase114 <any>, Phase115-118 iostreams, Phase119
+    # <complex> Annex-G special-value grids) add more; on 16c-TCG the full run
+    # legitimately takes many minutes and grows every phase. The slowest config
+    # is UEFI+16c-TCG (UEFI firmware overhead × 16-vCPU TCG serialization ×
+    # the pre-existing AMP-slowness [boxos-smp-scaling-epic]); as the suite grew
+    # past Phase119 it stopped finishing within the old 1200s ceiling mid-suite
+    # (marker=0 bad=0, a runner-budget timeout, not a code flake). Still breaks
+    # out immediately on marker-hit OR PANIC/EXCEPTION/FAILURES, so fast configs
+    # and genuine faults both finish/fail fast; only a slow-but-healthy config
+    # uses the full ceiling.
+    for i in $(seq 1 7200); do
         [ "$(grep -cE "$MARKER" build/serial.log 2>/dev/null)" -ge 1 ] && { hit=1; break; }
         grep -qE 'PANIC|\[EXCEPTION\]|\[CXX\] TOTAL FAILURES' build/serial.log 2>/dev/null && break
         sleep 0.5
