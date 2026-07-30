@@ -31,6 +31,9 @@
 // Ф30e commit 4 adds __cpp_lib_quoted_string_io, owned by <iomanip>
 // (same leaf).
 //
+// Ф30d-tail adds __cpp_lib_constexpr_complex + __cpp_lib_complex_udls,
+// owned by <complex> (<__bits/version_complex>).
+//
 // Deliberately NOT defined (feature not implemented, or not complete
 // enough to claim):
 //   __cpp_lib_tuple_like        — no public std::tuple_like concept (only
@@ -58,5 +61,6 @@
 #include <__bits/version_containers> // <stack>/<queue>/<priority_queue>: containers_ranges joint owner
 #include <__bits/version_any>       // <any>: __cpp_lib_any
 #include <__bits/version_iostreams> // <ios>/<streambuf>: __cpp_lib_ios_noreplace
+#include <__bits/version_complex>   // <complex>: __cpp_lib_constexpr_complex, __cpp_lib_complex_udls
 
 #endif // BOXCXX_VERSION

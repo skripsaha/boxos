@@ -1,0 +1,835 @@
+// boxcxx — <complex>  (C++23 [complex.numbers])
+//
+// ONE constrained class template complex<T> for T in {float,double,long
+// double} -- not 3 explicit specializations. The only standard-mandated
+// divergence between them (the converting ctor's rank-dependent explicit)
+// is a one-line rank comparison, not a reason for 4 separate class bodies.
+// Storage is two plain T fields (__re_,__im_), never GNU __complex__ T:
+// native _Complex multiply/divide lower to libgcc __muldc3/__divdc3 calls
+// that do not exist under boxcxx's -nostdlib link.
+//
+// operator*=/operator/= (complex,complex) hand-roll the Annex-G robust
+// multiply/divide algorithms (RobustMultiply/RobustDivide below, transcribed
+// from compiler-rt's muldc3.c/divdc3.c) instead of the naive
+// (ac-bd,ad+bc) / ((ac+bd)/(c*c+d*d)) formulas, which spuriously overflow to
+// (NaN,NaN) on inputs like (1e300,1e300)/(1e300,1e300) even though the true
+// quotient is exactly (1,0). sqrt's branch selection uses signbit(y), not
+// y<T(0) (the literal libstdc++ fallback source) -- -0.0<0.0 is false in
+// IEEE-754, so that comparison would silently break
+// sqrt(conj(z))==conj(sqrt(z)) for imaginary parts of exactly +-0.
+#ifndef BOXCXX_COMPLEX
+#define BOXCXX_COMPLEX
+
+#include <__bits/version_complex>
+#include <cmath>
+#include <istream>
+#include <limits>
+#include <sstream>
+#include <type_traits>
+#include <utility>
+
+namespace std {
+
+namespace __cplx {
+
+template <class T>
+concept ComplexValue = is_same_v<T, float> || is_same_v<T, double> || is_same_v<T, long double>;
+
+template <class T> inline constexpr int FpRank = 0; // unusable -- no ComplexValue<T>
+template <> inline constexpr int FpRank<float>       = 1;
+template <> inline constexpr int FpRank<double>      = 2;
+template <> inline constexpr int FpRank<long double> = 3;
+
+// [cmplx.over]'s single-argument promotion: floating stays itself, integer
+// promotes to double.
+template <class T> using ScalarPromote = conditional_t<is_floating_point_v<T>, T, double>;
+
+// [cmplx.over]'s pow-specific two-argument promotion.
+template <class T2> using PowRhs = conditional_t<is_integral_v<T2>, double, T2>;
+template <class T1, class T2> using PowPromote = common_type_t<T1, PowRhs<T2>>;
+
+// Private constexpr wrappers around raw __builtin_* calls, used only by
+// RobustDivide/RobustMultiply below. boxcxx's own <cmath> isnan/copysign/
+// scalbn/logb/fabs/fmax are runtime inline functions (bit tricks / inline
+// asm), never constexpr -- these wrappers give the Annex-G algorithms
+// genuine constexpr-usability for the ordinary (non-degenerate) case
+// without touching <cmath> at all.
+template <class T> constexpr bool ConstIsNan(T x) noexcept { return __builtin_isnan(x); }
+template <class T> constexpr bool ConstIsInf(T x) noexcept { return __builtin_isinf(x); }
+template <class T> constexpr bool ConstIsFinite(T x) noexcept { return __builtin_isfinite(x); }
+
+template <class T> constexpr T ConstFabs(T x) noexcept
+{
+    if constexpr (is_same_v<T, float>)       return __builtin_fabsf(x);
+    else if constexpr (is_same_v<T, double>) return __builtin_fabs(x);
+    else                                      return __builtin_fabsl(x);
+}
+template <class T> constexpr T ConstCopysign(T x, T y) noexcept
+{
+    if constexpr (is_same_v<T, float>)       return __builtin_copysignf(x, y);
+    else if constexpr (is_same_v<T, double>) return __builtin_copysign(x, y);
+    else                                      return __builtin_copysignl(x, y);
+}
+// scalbn/logb/fmax (unlike fabs/copysign/isnan/isinf/isfinite/huge_val
+// above) are NOT true GCC intrinsics on this target -- once the operand
+// is not a compile-time constant, the __builtin_* forms lower to a real
+// `call scalbn`/`logb`/`fmax`, which does not exist under -nostdlib. The
+// raw builtin is used only while genuinely constant-evaluating (where it
+// folds correctly); the runtime path delegates to boxcxx's own <cmath>
+// scalbn/logb/fmax, which are hand-implemented with no libm dependency.
+template <class T> constexpr T ConstScalbn(T x, int n) noexcept
+{
+    if consteval {
+        if constexpr (is_same_v<T, float>)       return __builtin_scalbnf(x, n);
+        else if constexpr (is_same_v<T, double>) return __builtin_scalbn(x, n);
+        else                                      return __builtin_scalbnl(x, n);
+    } else {
+        return scalbn(x, n);
+    }
+}
+template <class T> constexpr T ConstLogb(T x) noexcept
+{
+    if consteval {
+        if constexpr (is_same_v<T, float>)       return __builtin_logbf(x);
+        else if constexpr (is_same_v<T, double>) return __builtin_logb(x);
+        else                                      return __builtin_logbl(x);
+    } else {
+        return logb(x);
+    }
+}
+template <class T> constexpr T ConstFmax(T x, T y) noexcept
+{
+    if consteval {
+        if constexpr (is_same_v<T, float>)       return __builtin_fmaxf(x, y);
+        else if constexpr (is_same_v<T, double>) return __builtin_fmax(x, y);
+        else                                      return __builtin_fmaxl(x, y);
+    } else {
+        return fmax(x, y);
+    }
+}
+template <class T> constexpr T ConstInfinity() noexcept
+{
+    if constexpr (is_same_v<T, float>)       return __builtin_huge_valf();
+    else if constexpr (is_same_v<T, double>) return __builtin_huge_val();
+    else                                      return __builtin_huge_vall();
+}
+
+} // namespace __cplx
+
+// Forward declaration: RobustDivide/RobustMultiply return complex<T> by
+// value, so complex<T> must at least be named before they are declared.
+// Same forward-declare-before/define-after shape <ostream>'s own
+// __ios::InsertInteger already uses in this codebase.
+template <class T>
+    requires __cplx::ComplexValue<T>
+class complex;
+
+namespace __cplx {
+template <class T> constexpr complex<T> RobustDivide(T a, T b, T c, T d) noexcept;
+template <class T> constexpr complex<T> RobustMultiply(T a, T b, T c, T d) noexcept;
+} // namespace __cplx
+
+// ── complex<T> — [complex], [complex.numbers.general] ──────────────────
+
+template <class T>
+    requires __cplx::ComplexValue<T>
+class complex {
+public:
+    using value_type = T;
+
+    constexpr complex(const T &re = T(), const T &im = T()) noexcept : __re_(re), __im_(im) {}
+
+    constexpr complex(const complex &) = default;
+
+    template <class X>
+        requires __cplx::ComplexValue<X>
+    explicit(__cplx::FpRank<T> < __cplx::FpRank<X>)
+    constexpr complex(const complex<X> &other) noexcept
+        : __re_(static_cast<T>(other.real())), __im_(static_cast<T>(other.imag())) {}
+
+    constexpr T real() const noexcept { return __re_; }
+    constexpr void real(T val) noexcept { __re_ = val; }
+    constexpr T imag() const noexcept { return __im_; }
+    constexpr void imag(T val) noexcept { __im_ = val; }
+
+    // [complex.member.ops]: assigning a scalar RESETS the imaginary part.
+    constexpr complex &operator=(const T &rhs) noexcept
+    {
+        __re_ = rhs;
+        __im_ = T();
+        return *this;
+    }
+    constexpr complex &operator+=(const T &rhs) noexcept
+    {
+        __re_ += rhs;
+        return *this;
+    }
+    constexpr complex &operator-=(const T &rhs) noexcept
+    {
+        __re_ -= rhs;
+        return *this;
+    }
+    constexpr complex &operator*=(const T &rhs) noexcept
+    {
+        __re_ *= rhs;
+        __im_ *= rhs;
+        return *this;
+    }
+    constexpr complex &operator/=(const T &rhs) noexcept
+    {
+        __re_ /= rhs;
+        __im_ /= rhs;
+        return *this;
+    }
+
+    constexpr complex &operator=(const complex &) = default;
+
+    template <class X>
+        requires __cplx::ComplexValue<X>
+    constexpr complex &operator=(const complex<X> &rhs) noexcept
+    {
+        __re_ = rhs.real();
+        __im_ = rhs.imag();
+        return *this;
+    }
+    template <class X>
+        requires __cplx::ComplexValue<X>
+    constexpr complex &operator+=(const complex<X> &rhs) noexcept
+    {
+        __re_ += rhs.real();
+        __im_ += rhs.imag();
+        return *this;
+    }
+    template <class X>
+        requires __cplx::ComplexValue<X>
+    constexpr complex &operator-=(const complex<X> &rhs) noexcept
+    {
+        __re_ -= rhs.real();
+        __im_ -= rhs.imag();
+        return *this;
+    }
+    // Annex-G robust multiply/divide (RobustMultiply/RobustDivide, defined
+    // right after this class) -- NOT the naive (ac-bd,ad+bc) /
+    // ((ac+bd)/(c*c+d*d)) formulas, which spuriously overflow on large
+    // finite inputs (see the file-header comment).
+    template <class X>
+        requires __cplx::ComplexValue<X>
+    constexpr complex &operator*=(const complex<X> &rhs) noexcept
+    {
+        *this = __cplx::RobustMultiply<T>(__re_, __im_, T(rhs.real()), T(rhs.imag()));
+        return *this;
+    }
+    template <class X>
+        requires __cplx::ComplexValue<X>
+    constexpr complex &operator/=(const complex<X> &rhs) noexcept
+    {
+        *this = __cplx::RobustDivide<T>(__re_, __im_, T(rhs.real()), T(rhs.imag()));
+        return *this;
+    }
+
+private:
+    T __re_;
+    T __im_;
+};
+
+namespace __cplx {
+
+// Annex-G robust division -- transcribed from compiler-rt's divdc3.c, the
+// canonical Annex-G reference implementation, genericized over T. The
+// naive (ac+bd)/(c*c+d*d) formula spuriously overflows to (NaN,NaN)
+// whenever c*c+d*d overflows T's range even though the true quotient is
+// perfectly representable.
+template <class T>
+constexpr complex<T> RobustDivide(T a, T b, T c, T d) noexcept
+{
+    int ilogbw = 0;
+    T maxcd = ConstFmax<T>(ConstFabs<T>(c), ConstFabs<T>(d));
+    if (maxcd != T(0)) {
+        T logbw = ConstLogb<T>(maxcd);
+        if (ConstIsFinite<T>(logbw)) {
+            ilogbw = static_cast<int>(logbw);
+            c = ConstScalbn<T>(c, -ilogbw);
+            d = ConstScalbn<T>(d, -ilogbw);
+        }
+    }
+    T denom = c * c + d * d;
+    T re = ConstScalbn<T>((a * c + b * d) / denom, -ilogbw);
+    T im = ConstScalbn<T>((b * c - a * d) / denom, -ilogbw);
+
+    if (ConstIsNan<T>(re) && ConstIsNan<T>(im)) {
+        if (denom == T(0) && (!ConstIsNan<T>(a) || !ConstIsNan<T>(b))) {
+            re = ConstCopysign<T>(ConstInfinity<T>(), c) * a;
+            im = ConstCopysign<T>(ConstInfinity<T>(), c) * b;
+        } else if ((ConstIsInf<T>(a) || ConstIsInf<T>(b)) &&
+                   ConstIsFinite<T>(c) && ConstIsFinite<T>(d)) {
+            a = ConstCopysign<T>(ConstIsInf<T>(a) ? T(1) : T(0), a);
+            b = ConstCopysign<T>(ConstIsInf<T>(b) ? T(1) : T(0), b);
+            re = ConstInfinity<T>() * (a * c + b * d);
+            im = ConstInfinity<T>() * (b * c - a * d);
+        } else if (maxcd != T(0) && ConstIsInf<T>(ConstLogb<T>(maxcd)) &&
+                   ConstLogb<T>(maxcd) > T(0) &&
+                   ConstIsFinite<T>(a) && ConstIsFinite<T>(b)) {
+            c = ConstCopysign<T>(ConstIsInf<T>(c) ? T(1) : T(0), c);
+            d = ConstCopysign<T>(ConstIsInf<T>(d) ? T(1) : T(0), d);
+            re = T(0) * (a * c + b * d);
+            im = T(0) * (b * c - a * d);
+        }
+    }
+    return complex<T>(re, im);
+}
+
+// Annex-G robust multiplication -- transcribed from compiler-rt's
+// muldc3.c, same rationale as RobustDivide.
+template <class T>
+constexpr complex<T> RobustMultiply(T a, T b, T c, T d) noexcept
+{
+    T ac = a * c, bd = b * d, ad = a * d, bc = b * c;
+    T re = ac - bd, im = ad + bc;
+
+    if (ConstIsNan<T>(re) && ConstIsNan<T>(im)) {
+        bool recalc = false;
+        if (ConstIsInf<T>(a) || ConstIsInf<T>(b)) {
+            a = ConstCopysign<T>(ConstIsInf<T>(a) ? T(1) : T(0), a);
+            b = ConstCopysign<T>(ConstIsInf<T>(b) ? T(1) : T(0), b);
+            if (ConstIsNan<T>(c)) c = ConstCopysign<T>(T(0), c);
+            if (ConstIsNan<T>(d)) d = ConstCopysign<T>(T(0), d);
+            recalc = true;
+        }
+        if (ConstIsInf<T>(c) || ConstIsInf<T>(d)) {
+            c = ConstCopysign<T>(ConstIsInf<T>(c) ? T(1) : T(0), c);
+            d = ConstCopysign<T>(ConstIsInf<T>(d) ? T(1) : T(0), d);
+            if (ConstIsNan<T>(a)) a = ConstCopysign<T>(T(0), a);
+            if (ConstIsNan<T>(b)) b = ConstCopysign<T>(T(0), b);
+            recalc = true;
+        }
+        if (!recalc && (ConstIsInf<T>(ac) || ConstIsInf<T>(bd) ||
+                        ConstIsInf<T>(ad) || ConstIsInf<T>(bc))) {
+            if (ConstIsNan<T>(a)) a = ConstCopysign<T>(T(0), a);
+            if (ConstIsNan<T>(b)) b = ConstCopysign<T>(T(0), b);
+            if (ConstIsNan<T>(c)) c = ConstCopysign<T>(T(0), c);
+            if (ConstIsNan<T>(d)) d = ConstCopysign<T>(T(0), d);
+            recalc = true;
+        }
+        if (recalc) {
+            re = ConstInfinity<T>() * (a * c - b * d);
+            im = ConstInfinity<T>() * (a * d + b * c);
+        }
+    }
+    return complex<T>(re, im);
+}
+
+} // namespace __cplx
+
+// ── non-member arithmetic/comparison — [complex.ops] ────────────────────
+// Each binary op is "complex<T>(lhs) OP= rhs", matching the standard's own
+// Returns clauses verbatim -- including the (T,complex<T>) forms, which
+// construct a real-valued complex first, so multiply/divide still route
+// through the Annex-G member operators above. No operator!= and no
+// operator==(const T&,const complex<T>&): since C++20 these are
+// synthesized by the core language's rewritten-candidate mechanism.
+
+template <class T>
+    requires __cplx::ComplexValue<T>
+constexpr complex<T> operator+(const complex<T> &x) { return x; }
+
+template <class T>
+    requires __cplx::ComplexValue<T>
+constexpr complex<T> operator-(const complex<T> &x) { return complex<T>(-x.real(), -x.imag()); }
+
+template <class T>
+    requires __cplx::ComplexValue<T>
+constexpr complex<T> operator+(const complex<T> &lhs, const complex<T> &rhs) { return complex<T>(lhs) += rhs; }
+template <class T>
+    requires __cplx::ComplexValue<T>
+constexpr complex<T> operator+(const complex<T> &lhs, const T &rhs) { return complex<T>(lhs) += rhs; }
+template <class T>
+    requires __cplx::ComplexValue<T>
+constexpr complex<T> operator+(const T &lhs, const complex<T> &rhs) { return complex<T>(lhs) += rhs; }
+
+template <class T>
+    requires __cplx::ComplexValue<T>
+constexpr complex<T> operator-(const complex<T> &lhs, const complex<T> &rhs) { return complex<T>(lhs) -= rhs; }
+template <class T>
+    requires __cplx::ComplexValue<T>
+constexpr complex<T> operator-(const complex<T> &lhs, const T &rhs) { return complex<T>(lhs) -= rhs; }
+template <class T>
+    requires __cplx::ComplexValue<T>
+constexpr complex<T> operator-(const T &lhs, const complex<T> &rhs) { return complex<T>(lhs) -= rhs; }
+
+template <class T>
+    requires __cplx::ComplexValue<T>
+constexpr complex<T> operator*(const complex<T> &lhs, const complex<T> &rhs) { return complex<T>(lhs) *= rhs; }
+template <class T>
+    requires __cplx::ComplexValue<T>
+constexpr complex<T> operator*(const complex<T> &lhs, const T &rhs) { return complex<T>(lhs) *= rhs; }
+template <class T>
+    requires __cplx::ComplexValue<T>
+constexpr complex<T> operator*(const T &lhs, const complex<T> &rhs) { return complex<T>(lhs) *= rhs; }
+
+template <class T>
+    requires __cplx::ComplexValue<T>
+constexpr complex<T> operator/(const complex<T> &lhs, const complex<T> &rhs) { return complex<T>(lhs) /= rhs; }
+template <class T>
+    requires __cplx::ComplexValue<T>
+constexpr complex<T> operator/(const complex<T> &lhs, const T &rhs) { return complex<T>(lhs) /= rhs; }
+template <class T>
+    requires __cplx::ComplexValue<T>
+constexpr complex<T> operator/(const T &lhs, const complex<T> &rhs) { return complex<T>(lhs) /= rhs; }
+
+template <class T>
+    requires __cplx::ComplexValue<T>
+constexpr bool operator==(const complex<T> &lhs, const complex<T> &rhs)
+{
+    return lhs.real() == rhs.real() && lhs.imag() == rhs.imag();
+}
+template <class T>
+    requires __cplx::ComplexValue<T>
+constexpr bool operator==(const complex<T> &lhs, const T &rhs)
+{
+    return lhs.real() == rhs && lhs.imag() == T();
+}
+
+// ── value operations — [complex.value.ops] ──────────────────────────────
+
+template <class T>
+    requires __cplx::ComplexValue<T>
+constexpr T real(const complex<T> &x) noexcept { return x.real(); }
+
+template <class T>
+    requires __cplx::ComplexValue<T>
+constexpr T imag(const complex<T> &x) noexcept { return x.imag(); }
+
+template <class T>
+    requires __cplx::ComplexValue<T>
+constexpr T norm(const complex<T> &x) noexcept { return x.real() * x.real() + x.imag() * x.imag(); }
+
+template <class T>
+    requires __cplx::ComplexValue<T>
+constexpr complex<T> conj(const complex<T> &x) noexcept { return complex<T>(x.real(), -x.imag()); }
+
+// hypot, not sqrt(re*re+im*im): the latter suffers intermediate overflow
+// for large |re|/|im| well before the true magnitude would overflow.
+template <class T>
+    requires __cplx::ComplexValue<T>
+T abs(const complex<T> &x) { return hypot(x.real(), x.imag()); }
+
+template <class T>
+    requires __cplx::ComplexValue<T>
+T arg(const complex<T> &x) { return atan2(x.imag(), x.real()); }
+
+// Riemann-sphere projection (C99 Annex G cproj): a component counts as
+// "infinite" even when the OTHER component is NaN -- tested independently.
+template <class T>
+    requires __cplx::ComplexValue<T>
+complex<T> proj(const complex<T> &x) noexcept
+{
+    if (isinf(x.real()) || isinf(x.imag()))
+        return complex<T>(numeric_limits<T>::infinity(), copysign(T(0), x.imag()));
+    return x;
+}
+
+// Precondition (not runtime-checked, per [complex.value.ops]): rho >= 0
+// and not NaN, theta finite. Violating it is UB, not a thrown exception.
+template <class T>
+    requires __cplx::ComplexValue<T>
+complex<T> polar(const T &rho, const T &theta = T())
+{
+    return complex<T>(rho * cos(theta), rho * sin(theta));
+}
+
+// ── transcendentals — [complex.transcendentals] ─────────────────────────
+// None constexpr, none noexcept (matches the true C++23 boundary -- see
+// the design record for the eel.is-vs-actual-implementation discrepancy).
+
+template <class T>
+    requires __cplx::ComplexValue<T>
+complex<T> sqrt(const complex<T> &z)
+{
+    T x = z.real(), y = z.imag();
+    if (x == T(0)) {
+        T t = sqrt(fabs(y) / T(2));
+        return complex<T>(t, signbit(y) ? -t : t);
+    }
+    T t = sqrt(T(2) * (hypot(x, y) + fabs(x)));
+    T u = t / T(2);
+    if (x > T(0)) return complex<T>(u, y / t);
+    return complex<T>(fabs(y) / t, signbit(y) ? -u : u);
+    // D9: signbit(y), not y<T(0) -- IEEE-754 gives -0.0<0.0==false, which
+    // would silently break sqrt(conj(z))==conj(sqrt(z)) for y==+-0.0.
+}
+
+template <class T>
+    requires __cplx::ComplexValue<T>
+complex<T> exp(const complex<T> &z) { return polar(exp(z.real()), z.imag()); }
+
+template <class T>
+    requires __cplx::ComplexValue<T>
+complex<T> log(const complex<T> &z) { return complex<T>(log(abs(z)), arg(z)); }
+
+template <class T>
+    requires __cplx::ComplexValue<T>
+complex<T> log10(const complex<T> &z) { return log(z) / log(T(10)); }
+
+template <class T>
+    requires __cplx::ComplexValue<T>
+complex<T> sin(const complex<T> &z)
+{
+    return complex<T>(sin(z.real()) * cosh(z.imag()), cos(z.real()) * sinh(z.imag()));
+}
+
+template <class T>
+    requires __cplx::ComplexValue<T>
+complex<T> cos(const complex<T> &z)
+{
+    return complex<T>(cos(z.real()) * cosh(z.imag()), -sin(z.real()) * sinh(z.imag()));
+}
+
+template <class T>
+    requires __cplx::ComplexValue<T>
+complex<T> sinh(const complex<T> &z)
+{
+    return complex<T>(sinh(z.real()) * cos(z.imag()), cosh(z.real()) * sin(z.imag()));
+}
+
+template <class T>
+    requires __cplx::ComplexValue<T>
+complex<T> cosh(const complex<T> &z)
+{
+    return complex<T>(cosh(z.real()) * cos(z.imag()), sinh(z.real()) * sin(z.imag()));
+}
+
+template <class T>
+    requires __cplx::ComplexValue<T>
+complex<T> tan(const complex<T> &z) { return sin(z) / cos(z); }
+
+template <class T>
+    requires __cplx::ComplexValue<T>
+complex<T> tanh(const complex<T> &z) { return sinh(z) / cosh(z); }
+
+template <class T>
+    requires __cplx::ComplexValue<T>
+complex<T> asinh(const complex<T> &z)
+{
+    T re = z.real(), im = z.imag();
+    constexpr T kPi = T(3.1415926535897932384626433832795029L);
+    // Annex-G (G.6.2.2) special-value front-end -- H2.
+    if (isinf(re)) {
+        if (isnan(im)) return complex<T>(re, im);
+        if (isinf(im)) return complex<T>(re, copysign(kPi * T(0.25), im));
+        return complex<T>(re, copysign(T(0), im));
+    }
+    if (isnan(re)) {
+        if (isinf(im)) return complex<T>(im, re);
+        if (im == T(0)) return complex<T>(re, im);
+        return complex<T>(re, re);
+    }
+    if (isinf(im)) return complex<T>(copysign(im, re), copysign(kPi / T(2), im));
+
+    complex<T> t((re - im) * (re + im) + T(1), T(2) * re * im);
+    t = sqrt(t);
+    complex<T> r = log(t + z);
+    // D11.6: asinh is odd -- restore the sign asinh's own oddness mandates
+    // at the finite +-0 corners (pure sign fix, no magnitude change).
+    return complex<T>(copysign(r.real(), re), copysign(r.imag(), im));
+}
+
+template <class T>
+    requires __cplx::ComplexValue<T>
+complex<T> asin(const complex<T> &z)
+{
+    complex<T> t(-z.imag(), z.real());
+    t = asinh(t);
+    return complex<T>(t.imag(), -t.real());
+}
+
+template <class T>
+    requires __cplx::ComplexValue<T>
+complex<T> acos(const complex<T> &z)
+{
+    complex<T> t = asin(z);
+    return complex<T>(T(1.5707963267948966192313216916397514L) - t.real(), -t.imag());
+}
+
+// Direct formula (not via atanh): see the design record's derivation.
+template <class T>
+    requires __cplx::ComplexValue<T>
+complex<T> atan(const complex<T> &z)
+{
+    T re = z.real(), im = z.imag();
+    constexpr T kPi = T(3.1415926535897932384626433832795029L);
+    // Annex-G special-value front-end -- H2. atan is not itself an Annex-G
+    // primitive, so this is derived (not re-derived at runtime) from
+    // atanh's G.6.2.3 table via the atan(z) = -i*atanh(iz) rotation, then
+    // baked in standalone: it does NOT call atanh, so the general formula
+    // below (already shipped) keeps its exact existing bit pattern.
+    if (isinf(re)) return complex<T>(copysign(kPi / T(2), re), copysign(T(0), im));
+    if (isnan(re)) {
+        if (isinf(im) || im == T(0)) return complex<T>(re, copysign(T(0), im));
+        return complex<T>(re, re);
+    }
+    if (isnan(im)) return complex<T>(im, im);
+    if (isinf(im)) return complex<T>(copysign(kPi / T(2), re), copysign(T(0), im));
+    if (re == T(0) && fabs(im) == T(1))
+        return complex<T>(copysign(T(0), re), copysign(numeric_limits<T>::infinity(), im));
+
+    T r2 = re * re;
+    T x = T(1) - r2 - im * im;
+    T num = im + T(1), den = im - T(1);
+    num = r2 + num * num;
+    den = r2 + den * den;
+    // copysign restores the odd-function signed-zero of the imaginary part
+    // (catan(conj z) == conj(catan z)): on the real axis im==-0 must yield an
+    // imaginary -0, but log(num/den) collapses to +0 there. Sign-only for
+    // nonzero im (log already carries im's sign) -- magnitude unchanged.
+    return complex<T>(T(0.5) * atan2(T(2) * re, x), copysign(T(0.25) * log(num / den), im));
+}
+
+// Kahan's formula.
+template <class T>
+    requires __cplx::ComplexValue<T>
+complex<T> acosh(const complex<T> &z)
+{
+    T re = z.real(), im = z.imag();
+    constexpr T kPi = T(3.1415926535897932384626433832795029L);
+    // Annex-G (G.6.2.1) special-value front-end -- H2. Unlike asinh/atanh,
+    // acosh is NOT odd -- every branch here comes from conjugate symmetry
+    // only; there is no NaN+i0 -> NaN+i0 carve-out (contrast with asinh).
+    if (isinf(re)) {
+        if (isnan(im)) return complex<T>(fabs(re), im);
+        if (isinf(im)) {
+            if (re > T(0)) return complex<T>(re, copysign(kPi * T(0.25), im));
+            else           return complex<T>(-re, copysign(kPi * T(0.75), im));
+        }
+        if (re < T(0)) return complex<T>(-re, copysign(kPi, im));
+        return complex<T>(re, copysign(T(0), im));
+    }
+    if (isnan(re)) {
+        if (isinf(im)) return complex<T>(fabs(im), re);
+        return complex<T>(re, re);
+    }
+    if (isinf(im)) return complex<T>(fabs(im), copysign(kPi / T(2), im));
+    // G.6.2.1: cacosh(+-0 + iNaN) -> NaN +- i(pi/2) (imag sign unspecified) --
+    // the dual of cacos(+-0+iNaN). The adjacent "nonzero finite x + iNaN ->
+    // NaN+iNaN" bullet explicitly excludes x==0, so this carve-out is required;
+    // nonzero finite re falls through to the general formula -> (NaN,NaN).
+    if (re == T(0) && isnan(im)) return complex<T>(im, copysign(kPi / T(2), im));
+
+    return T(2) * log(sqrt(T(0.5) * (z + T(1))) + sqrt(T(0.5) * (z - T(1))));
+}
+
+// Direct formula (not via asinh).
+template <class T>
+    requires __cplx::ComplexValue<T>
+complex<T> atanh(const complex<T> &z)
+{
+    T re = z.real(), im = z.imag();
+    constexpr T kPi = T(3.1415926535897932384626433832795029L);
+    // Annex-G (G.6.2.3) special-value front-end -- H2.
+    if (isinf(im)) return complex<T>(copysign(T(0), re), copysign(kPi / T(2), im));
+    if (isnan(im)) {
+        if (isinf(re) || re == T(0)) return complex<T>(copysign(T(0), re), im);
+        return complex<T>(im, im);
+    }
+    if (isnan(re)) return complex<T>(re, re);
+    if (isinf(re)) return complex<T>(copysign(T(0), re), copysign(kPi / T(2), im));
+    if (fabs(re) == T(1) && im == T(0))
+        return complex<T>(copysign(numeric_limits<T>::infinity(), re), copysign(T(0), im));
+
+    T i2 = im * im;
+    T x = T(1) - i2 - re * re;
+    T num = T(1) + re, den = T(1) - re;
+    num = i2 + num * num;
+    den = i2 + den * den;
+    complex<T> r(T(0.25) * (log(num) - log(den)), T(0.5) * atan2(T(2) * im, x));
+    // D11.6: atanh is odd -- same sign fix as asinh, above.
+    return complex<T>(copysign(r.real(), re), copysign(r.imag(), im));
+}
+
+// D5: pow(x,*) is exactly (0,0) whenever x==0, including pow(0,0) (the
+// standard leaves pow(0,0) implementation-defined -- this matches
+// libstdc++'s own deliberate portable-path choice over the (NaN,NaN) a
+// bare exp(y*log(0)) would silently produce).
+template <class T>
+    requires __cplx::ComplexValue<T>
+complex<T> pow(const complex<T> &x, const complex<T> &y)
+{
+    if (x.real() == T(0) && x.imag() == T(0)) return complex<T>(T(0), T(0));
+    return exp(y * log(x));
+}
+
+template <class T>
+    requires __cplx::ComplexValue<T>
+complex<T> pow(const complex<T> &x, const T &y)
+{
+    if (x.real() == T(0) && x.imag() == T(0)) return complex<T>(T(0), T(0));
+    if (x.imag() == T(0) && x.real() > T(0)) return complex<T>(pow(x.real(), y));
+    complex<T> t = log(x);
+    return polar(exp(y * t.real()), y * t.imag());
+}
+
+template <class T>
+    requires __cplx::ComplexValue<T>
+complex<T> pow(const T &x, const complex<T> &y)
+{
+    if (x > T(0)) return polar(pow(x, y.real()), y.imag() * log(x));
+    return pow(complex<T>(x), y);
+}
+
+// ── [cmplx.over] — scalar-argument promotion overloads ──────────────────
+// A floating-point scalar argument casts to complex<T>; an integer scalar
+// casts to complex<double> -- ScalarPromote<T> encodes exactly this.
+// Applies to exactly these six names (not abs -- a bare abs(5) already
+// resolves unambiguously to <cstdlib>/<cmath>'s integer/real abs).
+
+// requires is_arithmetic_v<T>: without this, these six templates are
+// viable for ANY type (not just int/float families) and hijack overload
+// resolution for a user type with e.g. its own operator double() -- F2.
+template <class T>
+    requires is_arithmetic_v<T>
+constexpr __cplx::ScalarPromote<T> real(T x) noexcept
+{
+    return static_cast<__cplx::ScalarPromote<T>>(x);
+}
+
+template <class T>
+    requires is_arithmetic_v<T>
+constexpr __cplx::ScalarPromote<T> imag(T) noexcept
+{
+    return __cplx::ScalarPromote<T>();
+}
+
+template <class T>
+    requires is_arithmetic_v<T>
+constexpr __cplx::ScalarPromote<T> norm(T x) noexcept
+{
+    using P = __cplx::ScalarPromote<T>;
+    return static_cast<P>(x) * static_cast<P>(x);
+}
+
+template <class T>
+    requires is_arithmetic_v<T>
+constexpr complex<__cplx::ScalarPromote<T>> conj(T x) noexcept
+{
+    using P = __cplx::ScalarPromote<T>;
+    return complex<P>(static_cast<P>(x), -P());
+}
+
+template <class T>
+    requires is_arithmetic_v<T>
+complex<__cplx::ScalarPromote<T>> proj(T x) noexcept
+{
+    using P = __cplx::ScalarPromote<T>;
+    return proj(complex<P>(static_cast<P>(x)));
+}
+
+template <class T>
+    requires is_arithmetic_v<T>
+__cplx::ScalarPromote<T> arg(T x)
+{
+    using P = __cplx::ScalarPromote<T>;
+    // atan2(+0,x): 0 for x>=+0, pi for x<+0 (including -0.0) -- signbit(x)
+    // captures this without needing atan2 itself.
+    return signbit(static_cast<P>(x)) ? P(3.1415926535897932384626433832795029L) : P();
+}
+
+// [cmplx.over]/3 — pow's own cross-type promotion rule. No T1!=T2
+// exclusion is needed: when T1==T2==T, the same-type pow(complex<T>,T)
+// above is strictly more specialized (its second parameter is tied to the
+// same template parameter as its first), so ordinary partial ordering
+// always prefers it over these.
+
+template <class T1, class T2>
+    requires __cplx::ComplexValue<T1> && is_arithmetic_v<T2>
+complex<__cplx::PowPromote<T1, T2>> pow(const complex<T1> &x, const T2 &y)
+{
+    using P = __cplx::PowPromote<T1, T2>;
+    return pow(complex<P>(x), static_cast<P>(y));
+}
+
+template <class T1, class T2>
+    requires is_arithmetic_v<T1> && __cplx::ComplexValue<T2>
+complex<__cplx::PowPromote<T2, T1>> pow(const T1 &x, const complex<T2> &y)
+{
+    using P = __cplx::PowPromote<T2, T1>;
+    return pow(static_cast<P>(x), complex<P>(y));
+}
+
+template <class T1, class T2>
+    requires __cplx::ComplexValue<T1> && __cplx::ComplexValue<T2>
+complex<__cplx::PowPromote<T1, T2>> pow(const complex<T1> &x, const complex<T2> &y)
+{
+    using P = __cplx::PowPromote<T1, T2>;
+    return pow(complex<P>(x), complex<P>(y));
+}
+
+// ── stream operators — [complex.ops]/9-14 ───────────────────────────────
+
+template <class T, class CharT, class Traits>
+    requires __cplx::ComplexValue<T>
+basic_ostream<CharT, Traits> &operator<<(basic_ostream<CharT, Traits> &o, const complex<T> &x)
+{
+    basic_ostringstream<CharT, Traits> s;
+    s.flags(o.flags());
+    s.imbue(o.getloc());
+    s.precision(o.precision());
+    s << '(' << x.real() << ',' << x.imag() << ')';
+    return o << s.str();
+}
+
+// Extracts "u", "(u)", or "(u,v)" -- u is the real part, v the imaginary
+// part. Every delimiter is read via whitespace-skipping "is >> ch", so
+// internal whitespace like "( 3 , 4 )" is accepted, per [complex.ops]/13.
+// Malformed input sets failbit and leaves x unmodified.
+template <class T, class CharT, class Traits>
+    requires __cplx::ComplexValue<T>
+basic_istream<CharT, Traits> &operator>>(basic_istream<CharT, Traits> &is, complex<T> &x)
+{
+    bool fail = true;
+    CharT ch;
+    if (is >> ch) {
+        if (Traits::eq(ch, is.widen('('))) {
+            T re;
+            if (is >> re >> ch) {
+                const CharT rparen = is.widen(')');
+                if (Traits::eq(ch, rparen)) { x = re; fail = false; }
+                else if (Traits::eq(ch, is.widen(','))) {
+                    T im;
+                    if (is >> im >> ch) {
+                        if (Traits::eq(ch, rparen)) { x = complex<T>(re, im); fail = false; }
+                        else is.putback(ch);
+                    }
+                } else is.putback(ch);
+            }
+        } else {
+            is.putback(ch);
+            T re;
+            if (is >> re) { x = re; fail = false; }
+        }
+    }
+    if (fail) is.setstate(ios_base::failbit);
+    return is;
+}
+
+// ── literals — [complex.literals] ───────────────────────────────────────
+
+inline namespace literals {
+inline namespace complex_literals {
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wliteral-suffix"
+
+constexpr complex<double> operator""i(long double d) { return complex<double>(0.0, static_cast<double>(d)); }
+constexpr complex<double> operator""i(unsigned long long d) { return complex<double>(0.0, static_cast<double>(d)); }
+constexpr complex<float> operator""if(long double d) { return complex<float>(0.0f, static_cast<float>(d)); }
+constexpr complex<float> operator""if(unsigned long long d) { return complex<float>(0.0f, static_cast<float>(d)); }
+constexpr complex<long double> operator""il(long double d) { return complex<long double>(0.0L, static_cast<long double>(d)); }
+constexpr complex<long double> operator""il(unsigned long long d) { return complex<long double>(0.0L, static_cast<long double>(d)); }
+
+#pragma GCC diagnostic pop
+
+} // namespace complex_literals
+} // namespace literals
+
+} // namespace std
+
+#endif // BOXCXX_COMPLEX

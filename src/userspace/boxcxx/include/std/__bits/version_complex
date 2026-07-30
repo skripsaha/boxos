@@ -1,0 +1,16 @@
+// boxcxx — <__bits/version_complex>
+//
+// The __cpp_lib_* feature-test macros [version.syn] owned by <complex> --
+// split out for the same [support.limits.general] per-header reason as
+// <__bits/version_any> -- see that file's comments.
+#ifndef BOXCXX_BITS_VERSION_COMPLEX
+#define BOXCXX_BITS_VERSION_COMPLEX
+
+#ifndef __cpp_lib_constexpr_complex
+#  define __cpp_lib_constexpr_complex 201711L
+#endif
+#ifndef __cpp_lib_complex_udls
+#  define __cpp_lib_complex_udls 201309L
+#endif
+
+#endif // BOXCXX_BITS_VERSION_COMPLEX

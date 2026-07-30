@@ -30,6 +30,7 @@
 #include <chrono>
 #include <cmath>
 #include <compare>
+#include <complex>
 #include <coroutine>
 #include <generator>
 #include <deque>
@@ -24094,6 +24095,533 @@ void Phase118()
            "basic_string_view overload [LWG2785, C++17]), and the __cpp_lib_quoted_string_io FTM\n");
 }
 
+void Phase119()
+{
+    // ── Ф30d-tail: <complex> -- ONE constrained complex<T> template, the
+    //    Annex-G robust multiply/divide, D9's signbit sqrt fix, D5's
+    //    pow(0,0)=(0,0), [cmplx.over] promotion, and the UDL literals. ──
+
+    // (1) Division overflow -- the headline Smith/Annex-G assertion. The
+    //     naive (ac+bd)/(c*c+d*d) formula would give (NaN,NaN) here since
+    //     c*c+d*d overflows double's range even though the true quotient
+    //     is exactly (1,0).
+    {
+        std::complex<double> a(1e300, 1e300), b(1e300, 1e300);
+        std::complex<double> r = a / b;
+        // FMA-tolerant: on real Haswell+ hardware with -mfma the imaginary
+        // part can land at (1,-7.8e-18) instead of bit-exact (1,0), since
+        // an FMA-contracted b*c-a*d rounds only once instead of twice --
+        // exact bit-equality to (1,0) is a g++-no-FMA artifact, not a
+        // property the algorithm itself guarantees.
+        Check(r.real() == 1.0 && std::fabs(r.imag()) < 1e-15,
+              "phase119 Annex-G divide HOTSPOT: (1e300,1e300)/(1e300,1e300) == (1,~0), "
+              "not (NaN,NaN) from a naive denominator overflow");
+    }
+
+    // (2) Annex-G multiply with an infinite operand: not (NaN,NaN). (This
+    //     particular input's naive re/im both already land on inf without
+    //     needing the recovery cascade -- still confirms no NaN leaks in.)
+    {
+        std::complex<double> z = std::complex<double>(INFINITY, 1.0) * std::complex<double>(1.0, 1.0);
+        Check(!std::isnan(z.real()) && !std::isnan(z.imag()),
+              "phase119 Annex-G multiply, infinite operand: (inf,1)*(1,1) has no NaN component");
+    }
+
+    // (3) Annex-G divide recovery: true zero denominator, finite numerator.
+    {
+        std::complex<double> z = std::complex<double>(1.0, 2.0) / std::complex<double>(0.0, 0.0);
+        Check(std::isinf(z.real()) && !std::signbit(z.real()) && std::isinf(z.imag()) && !std::signbit(z.imag()),
+              "phase119 Annex-G divide recovery: (1,2)/(0,0) -> (+inf,+inf)");
+    }
+
+    // (4) Annex-G divide recovery, the inf*0=NaN sub-case (annotated: this
+    //     IS the correct, derived outcome, not a bug) -- b=0 makes the
+    //     imaginary recovery term copysign(inf,0)*0 == NaN.
+    {
+        std::complex<double> z = std::complex<double>(1.0, 0.0) / std::complex<double>(0.0, 0.0);
+        Check(std::isinf(z.real()) && !std::signbit(z.real()) && std::isnan(z.imag()),
+              "phase119 Annex-G divide recovery HOTSPOT: (1,0)/(0,0) -> real=+inf, imag=NaN "
+              "(copysign(inf,0)*0, the correct Annex-G outcome for this input shape)");
+    }
+
+    // (5) D9: sqrt's signbit(y) branch, not y<T(0). sqrt(conj(z)) must
+    //     equal conj(sqrt(z)) even when z's imaginary part is exactly +-0,
+    //     which a naive y<T(0) check cannot distinguish (-0.0<0.0==false).
+    {
+        std::complex<double> a = std::sqrt(std::complex<double>(-4.0, -0.0));
+        std::complex<double> b = std::sqrt(std::complex<double>(-4.0, 0.0));
+        Check(a == std::conj(b), "phase119 sqrt D9: sqrt(conj(z)) == conj(sqrt(z)) for imaginary part +-0");
+        Check(std::signbit(a.imag()) != std::signbit(b.imag()),
+              "phase119 sqrt D9 HOTSPOT: the two sides of the +-0 imaginary input give OPPOSITE-signed "
+              "sqrt results (would collapse to the SAME sign if written as the naive y<T(0))");
+    }
+
+    // (6) Signed zero must survive into the stream rendering (confirms
+    //     operator<< doesn't normalize the sign away before handing
+    //     real()/imag() to the stream).
+    {
+        std::ostringstream oss;
+        oss << std::complex<double>(-0.0, -0.0);
+        Check(oss.str().find('-') != std::string::npos,
+              "phase119 signed-zero stream: complex<double>(-0.0,-0.0) renders with a literal '-'");
+    }
+
+    // (7) Branch cut, sqrt: the two sides of the negative-real-axis cut
+    //     give genuinely different (not identical) signs.
+    {
+        Check(std::sqrt(std::complex<double>(-1.0, 0.0)) == std::complex<double>(0.0, 1.0),
+              "phase119 sqrt branch cut: sqrt(-1+0i) == (0,1)");
+        Check(std::sqrt(std::complex<double>(-1.0, -0.0)) == std::complex<double>(0.0, -1.0),
+              "phase119 sqrt branch cut: sqrt(-1-0i) == (0,-1)");
+    }
+
+    // (8) Branch cut, log: arg's range convention is [-pi,pi] -- log's
+    //     imaginary part must be +pi here, not -pi.
+    {
+        double piD = static_cast<double>(3.1415926535897932384626433832795029L);
+        Check(std::log(std::complex<double>(-1.0, 0.0)).imag() == piD,
+              "phase119 log branch cut: log(-1+0i).imag() == +pi, not -pi");
+    }
+
+    // (9) abs overflow-avoidance: genuinely uses hypot, not sqrt(re*re+im*im)
+    //     (the latter would overflow re*re to +inf well before 5e200 is
+    //     reached). NOT a bit-exact comparison against the 5e200 literal:
+    //     3e200/4e200/5e200 are each independently-rounded doubles, so even
+    //     a correctly-rounded hypot lands 1 ULP away from the 5e200 literal
+    //     (verified against the host's own libm hypot as an oracle) -- the
+    //     property actually being tested is "finite, correct magnitude",
+    //     not an exact decimal-literal match.
+    {
+        double result = std::abs(std::complex<double>(3e200, 4e200));
+        Check(std::isfinite(result), "phase119 abs HOTSPOT: abs(3e200+4e200i) is finite (hypot avoids the "
+                                      "re*re/im*im intermediate overflow a naive sqrt formula would hit)");
+        Check(std::fabs(result - 5e200) / 5e200 < 1e-14,
+              "phase119 abs HOTSPOT: abs(3e200+4e200i) approx 5e200 (within a few ULP)");
+    }
+
+    // (10) [cmplx.over] scalar-argument overloads -- the frequently-missed
+    //      real(int)/imag(int)/norm(float)/conj(long double)/arg(negative
+    //      incl. -0.0)/pow cross-type promotion.
+    {
+        double piD = static_cast<double>(3.1415926535897932384626433832795029L);
+        Check(std::real(5) == 5.0, "phase119 cmplx.over real(int): promotes to double, value 5.0");
+        Check(std::imag(5) == 0.0, "phase119 cmplx.over imag(int): promotes to double, value 0.0");
+        Check(std::norm(3.0f) == 9.0f,
+              "phase119 cmplx.over norm(float) HOTSPOT: stays float, does NOT promote to double");
+        std::complex<long double> c = std::conj(5.0L);
+        Check(c.real() == 5.0L && c.imag() == 0.0L && std::signbit(c.imag()),
+              "phase119 cmplx.over conj(long double): imaginary part is exactly -0.0, sign matters");
+        Check(std::arg(-3) == piD,
+              "phase119 cmplx.over arg(negative int): promotes to double, signbit fast path gives pi");
+        Check(std::arg(-0.0) == piD,
+              "phase119 cmplx.over arg(-0.0) HOTSPOT: negative ZERO (not just negative) still gives pi -- "
+              "a naive x<0 check would miss this, signbit(-0.0) is true");
+        std::complex<double> p = std::pow(2.0, std::complex<float>(1.0f, 0.0f));
+        Check(std::fabs(p.real() - 2.0) < 1e-9 && std::fabs(p.imag()) < 1e-9,
+              "phase119 pow cross-type promotion: pow(double,complex<float>) -> complex<double>, value (2,0)");
+    }
+
+    // (11) proj: a component counts as "infinite" even when the OTHER
+    //      component is NaN -- mixed inf/NaN still projects to the pole.
+    {
+        std::complex<double> p = std::proj(std::complex<double>(INFINITY, NAN));
+        Check(std::isinf(p.real()) && !std::signbit(p.real()) && p.imag() == 0.0 && !std::signbit(p.imag()),
+              "phase119 proj mixed inf/NaN: proj(inf+NaNi) == (+inf,+0.0)");
+    }
+
+    // (12) polar round-trip through abs/arg.
+    {
+        std::complex<double> p = std::polar(2.0, 1.0);
+        Check(std::fabs(std::abs(p) - 2.0) < 1e-9, "phase119 polar round-trip: abs(polar(2,1)) approx 2.0");
+        Check(std::fabs(std::arg(p) - 1.0) < 1e-9, "phase119 polar round-trip: arg(polar(2,1)) approx 1.0");
+    }
+
+    // (13) UDL literals -- all three suffixes, both operand forms.
+    {
+        using namespace std::complex_literals;
+        auto a = 1.0i;
+        Check(a.real() == 0.0 && a.imag() == 1.0, "phase119 UDL 1.0i: complex<double>(0,1)");
+        static_assert(std::is_same_v<decltype(a), std::complex<double>>,
+                      "phase119: 1.0i must have type complex<double>");
+        auto b = 2if;
+        static_assert(std::is_same_v<decltype(b), std::complex<float>>,
+                      "phase119: 2if must have type complex<float>");
+        auto c = 3il;
+        static_assert(std::is_same_v<decltype(c), std::complex<long double>>,
+                      "phase119: 3il must have type complex<long double>");
+        Check((1.0 + 2.0i) == std::complex<double>(1.0, 2.0), "phase119 UDL: 1.0 + 2.0i == complex<double>(1,2)");
+    }
+
+    // (14) operator>> grammar: all three forms ("u", "(u)", "(u,v)").
+    {
+        std::istringstream iss("3");
+        std::complex<double> z;
+        iss >> z;
+        Check(z == std::complex<double>(3.0, 0.0), "phase119 operator>> bare \"u\" form: \"3\" -> (3,0)");
+    }
+    {
+        std::istringstream iss("(3)");
+        std::complex<double> z;
+        iss >> z;
+        Check(z == std::complex<double>(3.0, 0.0), "phase119 operator>> \"(u)\" form: \"(3)\" -> (3,0)");
+    }
+    {
+        std::istringstream iss("(3,4)");
+        std::complex<double> z;
+        iss >> z;
+        Check(z == std::complex<double>(3.0, 4.0), "phase119 operator>> \"(u,v)\" form: \"(3,4)\" -> (3,4)");
+    }
+
+    // (15) operator>> malformed input: failbit set, x left UNMODIFIED.
+    {
+        std::complex<double> z(-1.0, -1.0);
+        std::istringstream iss("(3,4");
+        iss >> z;
+        Check(iss.fail() && z == std::complex<double>(-1.0, -1.0),
+              "phase119 operator>> malformed \"(3,4\" (no closing paren): failbit set, x unchanged");
+    }
+    {
+        std::complex<double> z(-1.0, -1.0);
+        std::istringstream iss("(,4)");
+        iss >> z;
+        Check(iss.fail() && z == std::complex<double>(-1.0, -1.0),
+              "phase119 operator>> malformed \"(,4)\" (nothing before comma): failbit set, x unchanged");
+    }
+
+    // (16) operator<</operator>> round trip, threading flags()/precision()
+    //      through -- negative real, negative imaginary, fixed+precision(2).
+    {
+        std::ostringstream oss;
+        oss << std::fixed << std::setprecision(2) << std::complex<double>(-1.5, -2.25);
+        Check(oss.str() == "(-1.50,-2.25)",
+              "phase119 operator<< threads flags()/precision(): fixed+setprecision(2)");
+        std::istringstream iss(oss.str());
+        std::complex<double> z;
+        iss >> z;
+        Check(z == std::complex<double>(-1.5, -2.25), "phase119 operator<</operator>> round trip with formatting");
+    }
+
+    // (17) pow(0,0) -- D5, explicitly a non-differential point: the
+    //      standard permits ANY implementation-defined value here.
+    //      boxcxx returns (0,0), matching libstdc++'s own portable path.
+    {
+        std::complex<double> z = std::pow(std::complex<double>(0.0, 0.0), std::complex<double>(0.0, 0.0));
+        Check(z == std::complex<double>(0.0, 0.0), "phase119 pow(0,0) D5: boxcxx returns (0,0)");
+    }
+
+    // (18) No dedicated pow(complex<T>,int) overload (removed by LWG DR844)
+    //      -- still works via pow(complex<T>,T) after int->double conversion.
+    {
+        std::complex<double> z = std::pow(std::complex<double>(2.0, 0.0), 2);
+        Check(z == std::complex<double>(4.0, 0.0),
+              "phase119 pow(complex,int) HOTSPOT: no dedicated int-power overload exists, "
+              "resolves via cross-type promotion + pow(complex<T>,T), still gives (4,0)");
+    }
+
+    // ── H2 (Ф30d-tail fix-round): Annex-G special-value front-ends for
+    //    asinh/acosh/atanh/atan, plus D11.6's asinh/atanh signed-zero fix.
+    //    Constants match the header's own internal computation bit-for-bit
+    //    (kPiQuarter = kPi*0.25, kPi3Quarter = kPi*0.75, matching exactly
+    //    how asinh/acosh spell those two angles internally).
+    const double kPi         = static_cast<double>(3.1415926535897932384626433832795029L);
+    const double kPiHalf     = kPi / 2.0;
+    const double kPiQuarter  = kPi * 0.25;
+    const double kPi3Quarter = kPi * 0.75;
+
+    // (19) H2 asinh (D11.1) -- 12 assertions.
+    {
+        std::complex<double> r;
+        r = std::asinh(std::complex<double>(3.0, INFINITY));
+        Check(r.real() == INFINITY && r.imag() == kPiHalf,
+              "phase119 H2 asinh#1: asinh(3+INFi) == (INFINITY,pi/2)");
+        r = std::asinh(std::complex<double>(-3.0, INFINITY));
+        Check(r.real() == -INFINITY && r.imag() == kPiHalf,
+              "phase119 H2 asinh#2: asinh(-3+INFi) == (-INFINITY,pi/2) -- real sign flips with re");
+        r = std::asinh(std::complex<double>(3.0, -INFINITY));
+        Check(r.real() == INFINITY && r.imag() == -kPiHalf,
+              "phase119 H2 asinh#3: asinh(3-INFi) == (INFINITY,-pi/2) -- imag sign flips with im");
+        r = std::asinh(std::complex<double>(INFINITY, 2.0));
+        Check(r.real() == INFINITY && r.imag() == 0.0 && !std::signbit(r.imag()),
+              "phase119 H2 asinh#4: asinh(INF+2i) == (INFINITY,+0)");
+        r = std::asinh(std::complex<double>(INFINITY, -2.0));
+        Check(r.real() == INFINITY && r.imag() == 0.0 && std::signbit(r.imag()),
+              "phase119 H2 asinh#5: asinh(INF-2i) == (INFINITY,-0)");
+        r = std::asinh(std::complex<double>(INFINITY, -0.0));
+        Check(r.real() == INFINITY && r.imag() == 0.0 && std::signbit(r.imag()),
+              "phase119 H2 asinh#6 HOTSPOT: asinh(INF-0i) == (INFINITY,-0) -- fails if the branch "
+              "used im<0 instead of copysign, since -0.0<0 is false");
+        r = std::asinh(std::complex<double>(INFINITY, INFINITY));
+        Check(r.real() == INFINITY && r.imag() == kPiQuarter,
+              "phase119 H2 asinh#7: asinh(INF+INFi) == (INFINITY,pi/4)");
+        r = std::asinh(std::complex<double>(INFINITY, NAN));
+        Check(r.real() == INFINITY && std::isnan(r.imag()),
+              "phase119 H2 asinh#8: asinh(INF+NaNi) == (INFINITY,NaN)");
+        r = std::asinh(std::complex<double>(NAN, INFINITY));
+        Check(std::isinf(r.real()) && std::isnan(r.imag()),
+              "phase119 H2 asinh#9: asinh(NaN+INFi) -- real isinf (sign unspecified), imag isnan");
+        r = std::asinh(std::complex<double>(NAN, 0.0));
+        Check(std::isnan(r.real()) && r.imag() == 0.0 && !std::signbit(r.imag()),
+              "phase119 H2 asinh#10: asinh(NaN+0i) == (NaN,+0), NOT (NaN,NaN)");
+        r = std::asinh(std::complex<double>(NAN, -0.0));
+        Check(std::isnan(r.real()) && r.imag() == 0.0 && std::signbit(r.imag()),
+              "phase119 H2 asinh#11: asinh(NaN-0i) == (NaN,-0)");
+        r = std::asinh(std::complex<double>(NAN, 2.0));
+        Check(std::isnan(r.real()) && std::isnan(r.imag()),
+              "phase119 H2 asinh#12: asinh(NaN+2i) == (NaN,NaN) -- no zero carve-out for nonzero im");
+    }
+
+    // (20) H2 acosh (D11.2) -- 11 assertions. NOTE the asymmetry vs asinh:
+    //      acosh has NO NaN+i0->NaN+i0 carve-out (acosh is not odd).
+    {
+        std::complex<double> r;
+        r = std::acosh(std::complex<double>(INFINITY, NAN));
+        Check(r.real() == INFINITY && std::isnan(r.imag()),
+              "phase119 H2 acosh#1: acosh(INF+NaNi) == (INFINITY,NaN) -- real unconditionally positive");
+        r = std::acosh(std::complex<double>(-INFINITY, NAN));
+        Check(r.real() == INFINITY && std::isnan(r.imag()),
+              "phase119 H2 acosh#2: acosh(-INF+NaNi) == (INFINITY,NaN) -- STILL positive, unlike asinh");
+        r = std::acosh(std::complex<double>(INFINITY, INFINITY));
+        Check(r.real() == INFINITY && r.imag() == kPiQuarter,
+              "phase119 H2 acosh#3: acosh(INF+INFi) == (INFINITY,pi/4)");
+        r = std::acosh(std::complex<double>(-INFINITY, INFINITY));
+        Check(r.real() == INFINITY && r.imag() == kPi3Quarter,
+              "phase119 H2 acosh#4: acosh(-INF+INFi) == (INFINITY,3pi/4)");
+        r = std::acosh(std::complex<double>(-INFINITY, 2.0));
+        Check(r.real() == INFINITY && r.imag() == kPi,
+              "phase119 H2 acosh#5: acosh(-INF+2i) == (INFINITY,pi)");
+        r = std::acosh(std::complex<double>(-INFINITY, -2.0));
+        Check(r.real() == INFINITY && r.imag() == -kPi,
+              "phase119 H2 acosh#6: acosh(-INF-2i) == (INFINITY,-pi)");
+        r = std::acosh(std::complex<double>(INFINITY, 2.0));
+        Check(r.real() == INFINITY && r.imag() == 0.0 && !std::signbit(r.imag()),
+              "phase119 H2 acosh#7: acosh(INF+2i) == (INFINITY,+0)");
+        r = std::acosh(std::complex<double>(NAN, 0.0));
+        Check(std::isnan(r.real()) && std::isnan(r.imag()),
+              "phase119 H2 acosh#8 HOTSPOT: acosh(NaN+0i) == (NaN,NaN) -- contrast with asinh(NaN+0i) "
+              "== (NaN,+0); acosh has NO zero carve-out (not odd, D11.2)");
+        r = std::acosh(std::complex<double>(3.0, NAN));
+        Check(std::isnan(r.real()) && std::isnan(r.imag()),
+              "phase119 H2 acosh#9: acosh(3+NaNi) == (NaN,NaN)");
+        r = std::acosh(std::complex<double>(0.0, NAN));
+        Check(std::isnan(r.real()) && !std::isnan(r.imag()) && std::fabs(r.imag()) == kPiHalf,
+              "phase119 H2 acosh#10 HOTSPOT (Finding 1): acosh(+0+NaNi) == (NaN,+-pi/2), imag EXACTLY "
+              "+-pi/2 not NaN -- G.6.2.1 dual of cacos(+-0+iNaN); the 'nonzero finite x + iNaN -> "
+              "NaN+iNaN' bullet excludes x==0, so this carve-out is mandated. libc++ gets this WRONG "
+              "(returns (NaN,NaN)) -- a libc++/libm differential would MISS it");
+        r = std::acosh(std::complex<double>(-0.0, NAN));
+        Check(std::isnan(r.real()) && !std::isnan(r.imag()) && std::fabs(r.imag()) == kPiHalf,
+              "phase119 H2 acosh#11: acosh(-0+NaNi) == (NaN,+-pi/2) -- carve-out fires for -0 re too");
+    }
+
+    // (21) H2 atanh (D11.3) -- 11 assertions.
+    {
+        std::complex<double> r;
+        r = std::atanh(std::complex<double>(3.0, INFINITY));
+        Check(r.real() == 0.0 && !std::signbit(r.real()) && r.imag() == kPiHalf,
+              "phase119 H2 atanh#1: atanh(3+INFi) == (+0,pi/2)");
+        r = std::atanh(std::complex<double>(-3.0, INFINITY));
+        Check(r.real() == 0.0 && std::signbit(r.real()) && r.imag() == kPiHalf,
+              "phase119 H2 atanh#2: atanh(-3+INFi) == (-0,pi/2)");
+        r = std::atanh(std::complex<double>(3.0, -INFINITY));
+        Check(r.real() == 0.0 && !std::signbit(r.real()) && r.imag() == -kPiHalf,
+              "phase119 H2 atanh#3: atanh(3-INFi) == (+0,-pi/2)");
+        r = std::atanh(std::complex<double>(INFINITY, 2.0));
+        Check(r.real() == 0.0 && !std::signbit(r.real()) && r.imag() == kPiHalf,
+              "phase119 H2 atanh#4: atanh(INF+2i) == (+0,pi/2)");
+        r = std::atanh(std::complex<double>(INFINITY, NAN));
+        Check(r.real() == 0.0 && !std::signbit(r.real()) && std::isnan(r.imag()),
+              "phase119 H2 atanh#5: atanh(INF+NaNi) == (+0,NaN) -- branch-order dependent: isinf(im) "
+              "is checked before isnan(im)/isinf(re), but im is NaN here, so this falls to the "
+              "isnan(im) branch, where isinf(re) is true");
+        r = std::atanh(std::complex<double>(NAN, INFINITY));
+        Check(r.real() == 0.0 && r.imag() == kPiHalf,
+              "phase119 H2 atanh#6: atanh(NaN+INFi) == (+-0,pi/2), imag EXACTLY pi/2 (not NaN) -- "
+              "isinf(im) is checked FIRST, before re is even inspected, so a NaN real part never "
+              "poisons the result. NOTE: the design doc's own D11.7 prose for this exact assertion "
+              "says 'real isnan', which contradicts its own D11.3 derivation/code (copysign(0,re) "
+              "can only ever produce a zero, never NaN, regardless of re's value) -- transcribed "
+              "here to match the verified derivation and shipped code, not that prose line");
+        r = std::atanh(std::complex<double>(0.0, NAN));
+        Check(r.real() == 0.0 && !std::signbit(r.real()) && std::isnan(r.imag()),
+              "phase119 H2 atanh#7: atanh(0+NaNi) == (+0,NaN)");
+        r = std::atanh(std::complex<double>(-0.0, NAN));
+        Check(r.real() == 0.0 && std::signbit(r.real()) && std::isnan(r.imag()),
+              "phase119 H2 atanh#8: atanh(-0+NaNi) == (-0,NaN)");
+        r = std::atanh(std::complex<double>(1.0, 0.0));
+        Check(r.real() == INFINITY && r.imag() == 0.0 && !std::signbit(r.imag()),
+              "phase119 H2 atanh#9 HOTSPOT: atanh(1+0i) == (INFINITY,+0) (the pole) -- a live libm "
+              "oracle gives (inf,pi/4) here; boxcxx must give exactly (inf,+0) per the literal "
+              "Annex-G bullet, not whatever a live system's libm happens to do");
+        r = std::atanh(std::complex<double>(-1.0, 0.0));
+        Check(r.real() == -INFINITY && r.imag() == 0.0 && !std::signbit(r.imag()),
+              "phase119 H2 atanh#10: atanh(-1+0i) == (-INFINITY,+0)");
+        r = std::atanh(std::complex<double>(1.0, -0.0));
+        Check(r.real() == INFINITY && r.imag() == 0.0 && std::signbit(r.imag()),
+              "phase119 H2 atanh#11: atanh(1-0i) == (INFINITY,-0)");
+    }
+
+    // (22) H2 atan (D11.5, standalone front-end) -- 12 assertions (incl. Finding 2 signed-zero).
+    {
+        std::complex<double> r;
+        r = std::atan(std::complex<double>(INFINITY, 2.0));
+        Check(r.real() == kPiHalf && r.imag() == 0.0 && !std::signbit(r.imag()),
+              "phase119 H2 atan#1: atan(INF+2i) == (pi/2,+0)");
+        r = std::atan(std::complex<double>(-INFINITY, 2.0));
+        Check(r.real() == -kPiHalf && r.imag() == 0.0 && !std::signbit(r.imag()),
+              "phase119 H2 atan#2: atan(-INF+2i) == (-pi/2,+0)");
+        r = std::atan(std::complex<double>(INFINITY, -2.0));
+        Check(r.real() == kPiHalf && r.imag() == 0.0 && std::signbit(r.imag()),
+              "phase119 H2 atan#3: atan(INF-2i) == (pi/2,-0)");
+        r = std::atan(std::complex<double>(INFINITY, NAN));
+        Check(r.real() == kPiHalf && r.imag() == 0.0 && !std::signbit(r.imag()),
+              "phase119 H2 atan#4 HOTSPOT: atan(INF+NaNi) == (pi/2,+0), exactly +0 not NaN -- the "
+              "case a naive 'just return NaN when confused' implementation gets wrong");
+        r = std::atan(std::complex<double>(NAN, INFINITY));
+        Check(std::isnan(r.real()) && r.imag() == 0.0 && !std::signbit(r.imag()),
+              "phase119 H2 atan#5: atan(NaN+INFi) -- real isnan, imag exactly +0");
+        r = std::atan(std::complex<double>(NAN, -INFINITY));
+        Check(std::isnan(r.real()) && r.imag() == 0.0 && std::signbit(r.imag()),
+              "phase119 H2 atan#6: atan(NaN-INFi) -- real isnan, imag exactly -0");
+        r = std::atan(std::complex<double>(NAN, 0.0));
+        Check(std::isnan(r.real()) && r.imag() == 0.0 && !std::signbit(r.imag()),
+              "phase119 H2 atan#7: atan(NaN+0i) -- real isnan, imag exactly +0, NOT (NaN,NaN)");
+        r = std::atan(std::complex<double>(NAN, 2.0));
+        Check(std::isnan(r.real()) && std::isnan(r.imag()),
+              "phase119 H2 atan#8: atan(NaN+2i) == (NaN,NaN) -- zero carve-out only for exact-zero/"
+              "infinite imaginary, contrast with #7");
+        r = std::atan(std::complex<double>(0.0, 1.0));
+        Check(r.real() == 0.0 && !std::signbit(r.real()) && r.imag() == INFINITY,
+              "phase119 H2 atan#9: atan(0+1i) == (+0,INFINITY) -- the pole at z=i");
+        r = std::atan(std::complex<double>(0.0, -1.0));
+        Check(r.real() == 0.0 && !std::signbit(r.real()) && r.imag() == -INFINITY,
+              "phase119 H2 atan#10: atan(0-1i) == (+0,-INFINITY) -- the pole at z=-i");
+        r = std::atan(std::complex<double>(0.5, -0.0));
+        Check(r.imag() == 0.0 && std::signbit(r.imag()) && r.real() > 0.0,
+              "phase119 H2 atan#11 (Finding 2): atan(0.5-0i) imaginary part is -0 -- catan(conj z) == "
+              "conj(catan z) requires the odd-function signed-zero; log(num/den) collapses to +0 on the "
+              "real axis and the copysign restores it. libc++ gives -0; boxcxx must too");
+        r = std::atan(std::complex<double>(0.5, 0.0));
+        Check(r.imag() == 0.0 && !std::signbit(r.imag()) && r.real() > 0.0,
+              "phase119 H2 atan#12 regression: atan(0.5+0i) imaginary part stays +0 (copysign is a "
+              "no-op for non-negative im -- magnitude and sign unchanged)");
+    }
+
+    // (23) H2 asin/acos regression guards (D11.4) -- 8 assertions. asin/acos
+    //      get ZERO new branches; they must correctly inherit every special
+    //      value through their EXISTING genuine call chain (asin->asinh,
+    //      acos->asin).
+    {
+        std::complex<double> r;
+        r = std::asin(std::complex<double>(INFINITY, INFINITY));
+        Check(!std::isnan(r.real()) && !std::isnan(r.imag()),
+              "phase119 H2 asin#1: asin(INF+INFi) -- neither component is NaN (rotation sanity)");
+        r = std::asin(std::complex<double>(NAN, INFINITY));
+        Check(std::isnan(r.real()) && std::isinf(r.imag()) && !std::signbit(r.imag()),
+              "phase119 H2 asin#2: asin(NaN+INFi) -- real isnan, imag exactly +INFINITY (guards that "
+              "asinh's (im,re)-return branch threads through asin's (t.imag(),-t.real()) combination). "
+              "NOTE: the design doc's own D11.7 prose for this assertion states 'isinf(real), "
+              "isnan(imag) is false', which is reversed from the verified derivation -- transcribed "
+              "here to match the derivation, not that prose line");
+        r = std::acos(std::complex<double>(0.0, 0.0));
+        Check(r.real() == kPiHalf && r.imag() == 0.0 && std::signbit(r.imag()),
+              "phase119 H2 acos#1: acos(0+0i) == (pi/2,-0), matching the literal Annex-G bullet "
+              "'cacos(0+i0) returns pi/2-i0' -- reached via the D11.6-fixed asinh chain");
+        r = std::acos(std::complex<double>(3.0, INFINITY));
+        Check(r.real() == kPiHalf && r.imag() == -INFINITY,
+              "phase119 H2 acos#2: acos(3+INFi) == (pi/2,-INFINITY)");
+        r = std::acos(std::complex<double>(-3.0, INFINITY));
+        Check(r.real() == kPiHalf && r.imag() == -INFINITY,
+              "phase119 H2 acos#3: acos(-3+INFi) == (pi/2,-INFINITY) -- real independent of re's sign");
+        r = std::acos(std::complex<double>(INFINITY, INFINITY));
+        Check(r.real() == kPiQuarter && r.imag() == -INFINITY,
+              "phase119 H2 acos#4: acos(INF+INFi) == (pi/4,-INFINITY)");
+        r = std::acos(std::complex<double>(-INFINITY, INFINITY));
+        Check(r.real() == kPi3Quarter && r.imag() == -INFINITY,
+              "phase119 H2 acos#5: acos(-INF+INFi) == (3pi/4,-INFINITY)");
+        r = std::acos(std::complex<double>(INFINITY, NAN));
+        Check(std::isnan(r.real()) && std::isinf(r.imag()),
+              "phase119 H2 acos#6: acos(INF+NaNi) -- real isnan, imag isinf (sign unspecified per "
+              "Annex-G)");
+    }
+
+    // (24) D11.6 -- signed-zero fix for the two ODD primitives (asinh/atanh
+    //      only; acosh is untouched, not odd). 4 sign assertions + a
+    //      bit-exact regression pin proving positive-re/im inputs are
+    //      unaffected by the copysign wrap.
+    {
+        std::complex<double> r;
+        r = std::asinh(std::complex<double>(-0.0, 0.0));
+        Check(std::signbit(r.real()) && !std::signbit(r.imag()) && r.real() == 0.0 && r.imag() == 0.0,
+              "phase119 D11.6#1: asinh(-0+0i) == (-0,+0)");
+        r = std::asinh(std::complex<double>(0.0, -0.0));
+        Check(!std::signbit(r.real()) && std::signbit(r.imag()) && r.real() == 0.0 && r.imag() == 0.0,
+              "phase119 D11.6#2: asinh(+0-0i) == (+0,-0)");
+        r = std::atanh(std::complex<double>(-0.0, 0.0));
+        Check(std::signbit(r.real()) && !std::signbit(r.imag()) && r.real() == 0.0 && r.imag() == 0.0,
+              "phase119 D11.6#3: atanh(-0+0i) == (-0,+0)");
+        r = std::atanh(std::complex<double>(0.0, -0.0));
+        Check(!std::signbit(r.real()) && std::signbit(r.imag()) && r.real() == 0.0 && r.imag() == 0.0,
+              "phase119 D11.6#4: atanh(+0-0i) == (+0,-0)");
+    }
+    {
+        double re = 0.5, im = 0.5;
+        std::complex<double> t((re - im) * (re + im) + 1.0, 2.0 * re * im);
+        t = std::sqrt(t);
+        std::complex<double> preFix  = std::log(t + std::complex<double>(re, im));
+        std::complex<double> postFix = std::asinh(std::complex<double>(re, im));
+        Check(preFix == postFix,
+              "phase119 D11.6#5a regression: asinh(0.5,0.5) unchanged by the copysign wrap "
+              "(positive re/im -- bit-exact no-op)");
+
+        double are = 0.25, aim = 0.25;
+        double i2  = aim * aim;
+        double x   = 1.0 - i2 - are * are;
+        double num = 1.0 + are, den = 1.0 - are;
+        num = i2 + num * num;
+        den = i2 + den * den;
+        std::complex<double> atanhPreFix(0.25 * (std::log(num) - std::log(den)), 0.5 * std::atan2(2.0 * aim, x));
+        std::complex<double> atanhPostFix = std::atanh(std::complex<double>(are, aim));
+        Check(atanhPreFix == atanhPostFix,
+              "phase119 D11.6#5b regression: atanh(0.25,0.25) unchanged by the copysign wrap "
+              "(positive re/im -- bit-exact no-op)");
+    }
+
+    // constexpr-context static_asserts -- P0415 subset ONLY (ctors, real/
+    // imag get+set, operator=, the 4 compound-assign forms incl. */, free
+    // arithmetic+equality, real/imag/norm/conj). abs/arg/proj/polar/every
+    // transcendental are correctly, deliberately NOT constexpr in true
+    // C++23 -- no static_assert is written for them.
+    static_assert(std::complex<double>(1, 2).real() == 1.0);
+    static_assert(std::complex<double>(1, 2).imag() == 2.0);
+    static_assert(std::norm(std::complex<double>(3, 4)) == 25.0);
+    static_assert(std::conj(std::complex<double>(3, 4)) == std::complex<double>(3, -4));
+    static_assert(std::complex<double>(1, 2) + std::complex<double>(3, 4) == std::complex<double>(4, 6));
+    static_assert(std::complex<double>(1, 2) - std::complex<double>(3, 4) == std::complex<double>(-2, -2));
+    static_assert(std::complex<double>(1, 2) * std::complex<double>(3, 4) == std::complex<double>(-5, 10));
+    static_assert(std::complex<double>(1, 2) / std::complex<double>(3, 4) ==
+                  std::complex<double>(11.0 / 25.0, 2.0 / 25.0));
+    static_assert(std::complex<double>(1, 2) == std::complex<double>(1, 2));
+    static_assert(std::complex<double>(1, 2) != std::complex<double>(1, 3));
+    static_assert(std::real(5) == 5.0);
+    static_assert(std::imag(5) == 0.0);
+    static_assert(std::norm(3.0f) == 9.0f);
+    static_assert(std::is_convertible_v<std::complex<float>, std::complex<double>>);
+    static_assert(!std::is_convertible_v<std::complex<double>, std::complex<float>>);
+    static_assert(std::is_constructible_v<std::complex<float>, std::complex<double>>);
+
+    printf("[CXX] PASS phase119: <complex> -- ONE constrained complex<T> template (float/double/long "
+           "double), Annex-G robust multiply/divide (division-overflow HOTSPOT + both recovery-cascade "
+           "shapes incl. the inf*0=NaN sub-case), D9's signbit(y) sqrt fix (conj identity + branch cut "
+           "HOTSPOT), signed-zero stream rendering, abs via hypot (overflow-avoidance HOTSPOT), the full "
+           "[cmplx.over] scalar promotion set (incl. norm(float) stays float and arg(-0.0) HOTSPOTs, now "
+           "requires is_arithmetic_v<T>), proj's mixed inf/NaN rule, polar round-trip, all 3 UDL "
+           "literals, the rewritten operator>> (whitespace-tolerant, no try/catch) incl. malformed-input "
+           "unchanged-x HOTSPOT, operator<</operator>> flags/precision threading, D5's pow(0,0)=(0,0), "
+           "the removed int-power overload HOTSPOT, the P0415 constexpr subset, the 54 H2 Annex-G "
+           "special-value front-ends for asinh/acosh/atanh/atan (+ 8 asin/acos regression guards), and "
+           "D11.6's asinh/atanh signed-zero fix\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -24234,6 +24762,7 @@ int main()
     Phase116();
     Phase117();
     Phase118();
+    Phase119();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
