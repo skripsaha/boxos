@@ -126,18 +126,15 @@ struct char_traits<char> : __char_impl::TraitsBase<char, int> {
     {
         return __builtin_strlen(s);
     }
-    // This toolchain lacks __builtin_char_memchr and casting the void*
-    // from __builtin_memchr is not constexpr until C++26 — split paths.
+    // __builtin_memchr lowers to a real `call memchr` on this target once
+    // n is not a compile-time constant -- no memchr exists under boxcxx's
+    // -nostdlib link. A plain loop is constexpr-safe AND link-safe, so it
+    // is used unconditionally (no is_constant_evaluated() split needed).
     static constexpr const char *find(const char *s, size_t n, const char &c)
     {
-        if (n == 0) return nullptr;
-        if (__builtin_is_constant_evaluated()) {
-            for (size_t i = 0; i < n; ++i)
-                if (s[i] == c) return s + i;
-            return nullptr;
-        }
-        return static_cast<const char *>(
-            __builtin_memchr(s, static_cast<unsigned char>(c), n));
+        for (size_t i = 0; i < n; ++i)
+            if (s[i] == c) return s + i;
+        return nullptr;
     }
     static constexpr int to_int_type(char c) noexcept
     {
