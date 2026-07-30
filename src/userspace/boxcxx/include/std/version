@@ -28,6 +28,8 @@
 //
 // Ф30e commit 1 adds __cpp_lib_ios_noreplace, owned jointly by <ios>/
 // <streambuf> (<__bits/version_iostreams>).
+// Ф30e commit 4 adds __cpp_lib_quoted_string_io, owned by <iomanip>
+// (same leaf).
 //
 // Deliberately NOT defined (feature not implemented, or not complete
 // enough to claim):

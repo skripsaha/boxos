@@ -6,10 +6,19 @@
 // set, two types.
 //
 // Deferred (tracked in the epic's leftovers): constexpr strings (needs
-// the compiler-blessed constexpr allocator), to_string for floating
-// point + the stof/stod family (Ф9A-2/9A-3, awaiting Ryu/Eisel-Lemire),
-// getline/iostream integration (Ф9B). The integer sto* family below is
-// wired on <charconv>.
+// the compiler-blessed constexpr allocator). to_string/stof/stod/stold
+// (Ф9A-2/9A-3) are wired on <charconv>; the integer sto* family below is
+// wired on <charconv> too.
+//
+// [string.io] (Ф30e commit 4): operator<</operator>>/getline are declared
+// below using ONLY <iosfwd> (a forward-declared basic_ostream/
+// basic_istream — a genuine leaf, no cycle) and DEFINED out-of-line in
+// src/runtime/string_io.cpp, which alone includes both <string> and
+// <ostream>/<istream> together. <string> cannot include <ostream> itself:
+// <ios> (needed by every stream header) already transitively needs
+// <string> (ios_base::failure : system_error : runtime_error(const
+// string&)), so <string>#include<ostream> would cycle back through
+// <ios>. Same out-of-line pattern already used for __bits/throw_helpers.
 #ifndef BOXCXX_STRING
 #define BOXCXX_STRING
 
@@ -24,6 +33,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <initializer_list>
+#include <iosfwd>
 #include <limits>
 #include <string_view>
 #include <type_traits>
@@ -1255,6 +1265,32 @@ inline long double stold(const string &str, size_t *pos = nullptr)
 template <ranges::input_range R, typename C = ranges::range_value_t<R>,
           typename Traits = char_traits<C>, typename Alloc = allocator<C>>
 basic_string(from_range_t, R &&, Alloc = Alloc()) -> basic_string<C, Traits, Alloc>;
+
+// ── stream insertion/extraction/getline [string.io] ─────────────────────
+// Declared against <iosfwd>'s forward-declared basic_ostream/basic_istream
+// only (legal: a reference/pointer to an incomplete type needs no more);
+// DEFINED in src/runtime/string_io.cpp, which includes <ostream>/
+// <istream> alongside <string> -- see the header comment at the top of
+// this file for why the bodies cannot live here.
+template <class CharT, class Traits, class Allocator>
+basic_ostream<CharT, Traits> &operator<<(basic_ostream<CharT, Traits> &os,
+                                          const basic_string<CharT, Traits, Allocator> &s);
+template <class CharT, class Traits, class Allocator>
+basic_istream<CharT, Traits> &operator>>(basic_istream<CharT, Traits> &is,
+                                          basic_string<CharT, Traits, Allocator> &s);
+
+template <class CharT, class Traits, class Allocator>
+basic_istream<CharT, Traits> &getline(basic_istream<CharT, Traits> &is,
+                                       basic_string<CharT, Traits, Allocator> &s, CharT delim);
+template <class CharT, class Traits, class Allocator>
+basic_istream<CharT, Traits> &getline(basic_istream<CharT, Traits> &&is,
+                                       basic_string<CharT, Traits, Allocator> &s, CharT delim);
+template <class CharT, class Traits, class Allocator>
+basic_istream<CharT, Traits> &getline(basic_istream<CharT, Traits> &is,
+                                       basic_string<CharT, Traits, Allocator> &s);
+template <class CharT, class Traits, class Allocator>
+basic_istream<CharT, Traits> &getline(basic_istream<CharT, Traits> &&is,
+                                       basic_string<CharT, Traits, Allocator> &s);
 
 } // namespace std
 

@@ -3,6 +3,13 @@
 // family, starts/ends_with + contains, <=> with the type_identity_t
 // conversion trick, ""sv literals, FNV-1a hashing. Ranges glue
 // (borrowed_range/view markers) arrives with ranges-core in Ф7B.
+//
+// [string.view.io] (Ф30e commit 4): operator<< is declared below against
+// <iosfwd>'s forward-declared basic_ostream only, DEFINED in
+// src/runtime/string_io.cpp -- same out-of-line pattern, and same reason
+// (<string> already needs to avoid #include <ostream>; <string_view> sits
+// underneath <string> so it follows the identical rule), as <string>'s own
+// [string.io] sibling-fix.
 #ifndef BOXCXX_STRING_VIEW
 #define BOXCXX_STRING_VIEW
 
@@ -12,6 +19,7 @@
 #include <compare>
 #include <cstddef>
 #include <functional>
+#include <iosfwd>
 #include <type_traits>
 
 namespace std {
@@ -477,6 +485,14 @@ struct hash<u32string_view> {
         return __fnv1a_bytes(v.data(), v.size() * 4);
     }
 };
+
+// ── stream insertion [string.view.io] ────────────────────────────────────
+// Declared against <iosfwd>'s forward-declared basic_ostream only; DEFINED
+// in src/runtime/string_io.cpp alongside <string>'s own [string.io]
+// functions -- see the header comment at the top of this file.
+template <class CharT, class Traits>
+basic_ostream<CharT, Traits> &operator<<(basic_ostream<CharT, Traits> &os,
+                                          basic_string_view<CharT, Traits> sv);
 
 } // namespace std
 

@@ -1,0 +1,288 @@
+// boxcxx — <iomanip>
+// Parameterized manipulators [iomanip.syn]: setw/setprecision/setfill/
+// setbase/setiosflags/resetiosflags, and quoted [quoted.manip]. Each
+// returns an unspecified proxy carrying the argument, with a matching
+// operator<</operator>> that applies the effect through the stream's
+// PUBLIC API (width/precision/fill/setf/unsetf) and returns the stream.
+// The NO-ARG manipulators (dec/hex/boolalpha/endl/ws/...) are declared in
+// <ios>/<ostream>/<istream> instead, per the real synopsis -- this header
+// is only the parameterized ones, the actual sole content of <iomanip>.
+//
+// get_money/put_money/get_time/put_time are also nominally part of
+// <iomanip>'s synopsis but are OUT OF SCOPE: monetary formatting needs a
+// real moneypunct/money_get/money_put facet (already-excluded, matches the
+// epic-wide "C"-locale-only posture), and get_time/put_time need a real
+// time_get/time_put facet keyed to <chrono> calendar types (a separate,
+// already-tracked future item). Deliberately not provided here.
+#ifndef BOXCXX_IOMANIP
+#define BOXCXX_IOMANIP
+
+#include <ios>
+#include <iosfwd>
+#include <string>
+#include <string_view>
+#include <__bits/version_iostreams>
+
+namespace std {
+
+namespace __iomanip {
+
+struct SetW {
+    int n;
+};
+struct SetPrecision {
+    int n;
+};
+template <class CharT>
+struct SetFill {
+    CharT c;
+};
+struct SetBase {
+    int base;
+};
+struct SetFlags {
+    ios_base::fmtflags mask;
+};
+struct ResetFlags {
+    ios_base::fmtflags mask;
+};
+
+// Output-only source for quoted(const charT*, ...)/quoted(const
+// basic_string&, ...) -- both convert cheaply to a string_view, so ONE
+// proxy covers both; safe (no dangling) since the whole `os << quoted(...)`
+// is a single full-expression and the source outlives it.
+template <class CharT, class Traits>
+struct QuotedView {
+    basic_string_view<CharT, Traits> value;
+    CharT delim;
+    CharT escape;
+};
+// Extraction source for quoted(basic_string&, ...) -- holds a REFERENCE
+// back to the caller's own string; this is what makes `is >> quoted(s)`
+// mutate `s` directly instead of a private copy.
+template <class CharT, class Traits, class Allocator>
+struct QuotedRef {
+    basic_string<CharT, Traits, Allocator> &value;
+    CharT delim;
+    CharT escape;
+};
+
+} // namespace __iomanip
+
+// [setw]/[setprecision]/[setbase] take `int`, matching the real synopsis
+// exactly -- NOT streamsize (width()/precision() themselves RETURN
+// streamsize, but the manipulator ARGUMENTS are plain int; verified
+// against the current <iomanip> synopsis).
+inline __iomanip::SetW setw(int n) noexcept
+{
+    return {n};
+}
+inline __iomanip::SetPrecision setprecision(int n) noexcept
+{
+    return {n};
+}
+template <class CharT>
+__iomanip::SetFill<CharT> setfill(CharT c) noexcept
+{
+    return {c};
+}
+inline __iomanip::SetBase setbase(int base) noexcept
+{
+    return {base};
+}
+inline __iomanip::SetFlags setiosflags(ios_base::fmtflags mask) noexcept
+{
+    return {mask};
+}
+inline __iomanip::ResetFlags resetiosflags(ios_base::fmtflags mask) noexcept
+{
+    return {mask};
+}
+
+template <class CharT, class Traits>
+basic_ostream<CharT, Traits> &operator<<(basic_ostream<CharT, Traits> &os, __iomanip::SetW m)
+{
+    os.width(m.n);
+    return os;
+}
+template <class CharT, class Traits>
+basic_istream<CharT, Traits> &operator>>(basic_istream<CharT, Traits> &is, __iomanip::SetW m)
+{
+    is.width(m.n);
+    return is;
+}
+template <class CharT, class Traits>
+basic_ostream<CharT, Traits> &operator<<(basic_ostream<CharT, Traits> &os, __iomanip::SetPrecision m)
+{
+    os.precision(m.n);
+    return os;
+}
+template <class CharT, class Traits>
+basic_istream<CharT, Traits> &operator>>(basic_istream<CharT, Traits> &is, __iomanip::SetPrecision m)
+{
+    is.precision(m.n);
+    return is;
+}
+template <class CharT, class Traits>
+basic_ostream<CharT, Traits> &operator<<(basic_ostream<CharT, Traits> &os, __iomanip::SetFill<CharT> m)
+{
+    os.fill(m.c);
+    return os;
+}
+template <class CharT, class Traits>
+basic_istream<CharT, Traits> &operator>>(basic_istream<CharT, Traits> &is, __iomanip::SetFill<CharT> m)
+{
+    is.fill(m.c);
+    return is;
+}
+template <class CharT, class Traits>
+basic_ostream<CharT, Traits> &operator<<(basic_ostream<CharT, Traits> &os, __iomanip::SetBase m)
+{
+    // [setbase]: base 8/10/16 select oct/dec/hex; any other value clears
+    // basefield entirely ("as if by setf(fmtflags(0), basefield)").
+    ios_base::fmtflags f = m.base == 8    ? ios_base::oct
+                          : m.base == 10  ? ios_base::dec
+                          : m.base == 16  ? ios_base::hex
+                                          : ios_base::fmtflags(0);
+    os.setf(f, ios_base::basefield);
+    return os;
+}
+template <class CharT, class Traits>
+basic_istream<CharT, Traits> &operator>>(basic_istream<CharT, Traits> &is, __iomanip::SetBase m)
+{
+    ios_base::fmtflags f = m.base == 8    ? ios_base::oct
+                          : m.base == 10  ? ios_base::dec
+                          : m.base == 16  ? ios_base::hex
+                                          : ios_base::fmtflags(0);
+    is.setf(f, ios_base::basefield);
+    return is;
+}
+template <class CharT, class Traits>
+basic_ostream<CharT, Traits> &operator<<(basic_ostream<CharT, Traits> &os, __iomanip::SetFlags m)
+{
+    // [setiosflags]: ORs mask IN (setf(mask)) -- does NOT clear other bits.
+    os.setf(m.mask);
+    return os;
+}
+template <class CharT, class Traits>
+basic_istream<CharT, Traits> &operator>>(basic_istream<CharT, Traits> &is, __iomanip::SetFlags m)
+{
+    is.setf(m.mask);
+    return is;
+}
+template <class CharT, class Traits>
+basic_ostream<CharT, Traits> &operator<<(basic_ostream<CharT, Traits> &os, __iomanip::ResetFlags m)
+{
+    // [resetiosflags]: "as if by setf(fmtflags(0), mask)" -- exactly what
+    // unsetf(mask) already does.
+    os.unsetf(m.mask);
+    return os;
+}
+template <class CharT, class Traits>
+basic_istream<CharT, Traits> &operator>>(basic_istream<CharT, Traits> &is, __iomanip::ResetFlags m)
+{
+    is.unsetf(m.mask);
+    return is;
+}
+
+// ── quoted [quoted.manip] ─────────────────────────────────────────────────
+// FOUR overloads, verified against the current [quoted.manip] wording:
+// (const charT*), (const basic_string&), and (basic_string_view, by value)
+// are all insertion-only (a string_view has no backing store to write
+// into on extraction) and all share the SAME QuotedView proxy + operator<<
+// below; (basic_string&) is the extraction form, holding a REFERENCE back
+// to the caller's string and mutating it in place. The basic_string_view
+// overload is LWG2785 ("quoted() should work with basic_string_view too")
+// -- a DEFECT REPORT against the original C++14 feature, applying since
+// C++17, NOT a later addition (unlike <sstream>'s P0408-vs-P2495 split,
+// which genuinely is C++20-vs-C++26) -- so it belongs in THIS phase, and
+// does not bump __cpp_lib_quoted_string_io past its original 201304L.
+template <class CharT>
+__iomanip::QuotedView<CharT, char_traits<CharT>> quoted(const CharT *s, CharT delim = CharT('"'),
+                                                         CharT escape = CharT('\\'))
+{
+    return {basic_string_view<CharT, char_traits<CharT>>(s), delim, escape};
+}
+template <class CharT, class Traits, class Allocator>
+__iomanip::QuotedView<CharT, Traits> quoted(const basic_string<CharT, Traits, Allocator> &s,
+                                             CharT delim = CharT('"'), CharT escape = CharT('\\'))
+{
+    return {basic_string_view<CharT, Traits>(s), delim, escape};
+}
+template <class CharT, class Traits>
+__iomanip::QuotedView<CharT, Traits> quoted(basic_string_view<CharT, Traits> s,
+                                             CharT delim = CharT('"'), CharT escape = CharT('\\'))
+{
+    return {s, delim, escape};
+}
+template <class CharT, class Traits, class Allocator>
+__iomanip::QuotedRef<CharT, Traits, Allocator> quoted(basic_string<CharT, Traits, Allocator> &s,
+                                                       CharT delim = CharT('"'),
+                                                       CharT escape = CharT('\\'))
+{
+    return {s, delim, escape};
+}
+
+// Insertion [quoted.manip]/2: delim, then each character of the source
+// (escaping any occurrence of delim/escape with a preceding escape), then
+// the closing delim -- as ONE formatted-output sequence (built into a
+// scratch buffer first, then inserted through the already padding-aware
+// operator<<(ostream&, string_view), so width()/fill()/adjustfield apply
+// to the WHOLE quoted sequence, not char-by-char).
+template <class CharT, class Traits>
+basic_ostream<CharT, Traits> &operator<<(basic_ostream<CharT, Traits> &os,
+                                          __iomanip::QuotedView<CharT, Traits> q)
+{
+    basic_string<CharT, Traits> buf;
+    buf.push_back(q.delim);
+    for (CharT c : q.value) {
+        if (Traits::eq(c, q.delim) || Traits::eq(c, q.escape)) buf.push_back(q.escape);
+        buf.push_back(c);
+    }
+    buf.push_back(q.delim);
+    return os << basic_string_view<CharT, Traits>(buf);
+}
+// [quoted.manip]/3.2: the mutable-reference (extraction) overload's
+// INSERTION behavior is specified as identical to the const-basic_string&
+// overload above -- reused directly, not re-derived.
+template <class CharT, class Traits, class Allocator>
+basic_ostream<CharT, Traits> &operator<<(basic_ostream<CharT, Traits> &os,
+                                          const __iomanip::QuotedRef<CharT, Traits, Allocator> &q)
+{
+    return os << __iomanip::QuotedView<CharT, Traits>{basic_string_view<CharT, Traits>(q.value),
+                                                       q.delim, q.escape};
+}
+
+// Extraction [quoted.manip]/3.1: peek one (formatted, skipws-honoring)
+// character; if it is not delim, UNGET it and fall back to ordinary
+// operator>>(istream&, basic_string&) (an unquoted token). Otherwise: turn
+// off skipws, clear the target, extract raw characters -- an escape
+// discards itself and takes the NEXT character literally, even if that
+// character is itself delim/escape -- until an unescaped delim (consumed,
+// not stored) or !in, then restore skipws to what it was.
+template <class CharT, class Traits, class Allocator>
+basic_istream<CharT, Traits> &operator>>(basic_istream<CharT, Traits> &is,
+                                          const __iomanip::QuotedRef<CharT, Traits, Allocator> &q)
+{
+    CharT c;
+    if (!(is >> c)) return is;
+    if (!Traits::eq(c, q.delim)) {
+        is.unget();
+        is >> q.value;
+        return is;
+    }
+    q.value.clear();
+    bool hadSkipws = (is.flags() & ios_base::skipws) != ios_base::fmtflags{};
+    is.unsetf(ios_base::skipws);
+    CharT ch;
+    while (is.get(ch) && !Traits::eq(ch, q.delim)) {
+        if (Traits::eq(ch, q.escape)) is.get(ch);
+        if (is) q.value.push_back(ch);
+    }
+    if (hadSkipws) is.setf(ios_base::skipws);
+    return is;
+}
+
+} // namespace std
+
+#endif // BOXCXX_IOMANIP

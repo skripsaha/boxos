@@ -75,6 +75,7 @@
 #include <initializer_list>
 #include <span>
 #include <sstream>
+#include <iomanip>
 #include <stack>
 #include <stdexcept>
 #include <streambuf>
@@ -23792,6 +23793,307 @@ void Phase117()
            "void*&), and the 4 stream-iterators\n");
 }
 
+void Phase118()
+{
+    // ── Ф30e commit 4 (FINAL): the three sstream stream-wrapper classes
+    //    (basic_[i|o]stringstream/basic_stringstream), <iomanip>, and the
+    //    <string>/<string_view> [string.io]/[string.view.io] sibling-fix. ──
+
+    // (1) basic round trips, one per wrapper class.
+    {
+        std::ostringstream oss;
+        oss << 42 << " " << 3.14;
+        Check(oss.str() == "42 3.14", "phase118 ostringstream basic round trip: int + literal-char* + defaultfloat double");
+    }
+    {
+        std::istringstream iss("7 x");
+        int n = 0;
+        char c = 0;
+        iss >> n >> c;
+        Check(n == 7 && c == 'x', "phase118 istringstream basic round trip: int then char, skipws between them");
+    }
+    {
+        std::stringstream ss;
+        ss << 100 << ' ' << 200;
+        int a = 0, b = 0;
+        ss >> a >> b;
+        Check(a == 100 && b == 200, "phase118 stringstream round trip: write then read back through the SAME object");
+    }
+
+    // (2) HOTSPOT: move mid-write/mid-read relocates the stringbuf member
+    //     THEN set_rdbuf's re-point at it. A forgotten set_rdbuf leaves
+    //     rdbuf() null (basic_ios::move() always nulls it) -- the very next
+    //     stream operation would dereference that null pointer and crash,
+    //     so this is a strong, not just a wrong-answer, proof.
+    {
+        std::ostringstream a;
+        a << "hello";
+        std::ostringstream b(std::move(a));
+        b << "world";
+        Check(b.str() == "helloworld",
+              "phase118 ostringstream move ctor HOTSPOT: continued writes after a mid-write move land in "
+              "the destination's OWN relocated stringbuf, not a use-after-move null rdbuf()");
+    }
+    {
+        std::ostringstream a, b;
+        a << "AAA";
+        b << "BBB";
+        b = std::move(a);
+        b << "-more";
+        Check(b.str() == "AAA-more",
+              "phase118 ostringstream move ASSIGN HOTSPOT: the existing object's rdbuf() is repointed at "
+              "its OWN (now content-replaced) stringbuf member; continued writes land correctly");
+    }
+    {
+        std::istringstream a("42 99");
+        int first = 0;
+        a >> first;
+        std::istringstream b(std::move(a));
+        int second = 0;
+        b >> second;
+        Check(first == 42 && second == 99,
+              "phase118 istringstream move ctor HOTSPOT: moving mid-read continues reading from the "
+              "correct (relocated) position, not from a stale/null rdbuf()");
+    }
+    {
+        std::istringstream a("42 99");
+        int first = 0;
+        a >> first;
+        std::istringstream b("ignored");
+        b = std::move(a);
+        int second = 0;
+        b >> second;
+        Check(first == 42 && second == 99,
+              "phase118 istringstream move ASSIGN HOTSPOT: continuing to read from the destination "
+              "after a mid-read move-assign resumes at the correct (relocated) position, not a "
+              "stale/null rdbuf()");
+    }
+    {
+        // basic_stringstream is the first thing to actually EXERCISE
+        // basic_iostream's diamond-safe move at runtime (Phase115-117 only
+        // exercise basic_ostream/basic_istream separately).
+        std::stringstream a;
+        a << "step1-";
+        std::stringstream b(std::move(a));
+        b << "step2";
+        std::string got;
+        b >> got;
+        Check(got == "step1-step2",
+              "phase118 stringstream move ctor HOTSPOT: basic_iostream's diamond-safe single-transfer move "
+              "+ set_rdbuf hookup, exercised for the first time at runtime, round-trips correctly");
+    }
+    {
+        std::stringstream a;
+        a << "step1-";
+        std::stringstream b;
+        b << "ignored";
+        b = std::move(a);
+        b << "step2";
+        std::string got;
+        b >> got;
+        Check(got == "step1-step2",
+              "phase118 stringstream move ASSIGN HOTSPOT: basic_iostream's diamond-safe single-transfer "
+              "move-assign + set_rdbuf hookup, continued writes land correctly");
+    }
+
+    // (3) swap: no set_rdbuf fixup needed (a member's address never moves
+    //     during a swap, only its CONTENT does) -- member and free forms.
+    {
+        std::ostringstream a, b;
+        a << "first";
+        b << "second";
+        a.swap(b);
+        Check(a.str() == "second" && b.str() == "first",
+              "phase118 ostringstream member swap: contents exchanged, both objects independently valid");
+        a << "-more";
+        Check(a.str() == "second-more",
+              "phase118 ostringstream swap: post-swap writes land in the correct (own) stringbuf, no fixup needed");
+        swap(a, b);
+        Check(a.str() == "first" && b.str() == "second-more",
+              "phase118 ostringstream free swap(): contents exchanged back");
+    }
+
+    // (4) str(s)/view()/str()&& on the wrappers.
+    {
+        std::ostringstream oss;
+        oss.str("preset");
+        Check(oss.str() == "preset", "phase118 ostringstream str(s) setter: installs content");
+        Check(oss.view() == "preset", "phase118 ostringstream view(): zero-copy read of the same content");
+        std::string moved = std::move(oss).str();
+        Check(moved == "preset", "phase118 ostringstream str()&&: moves the content out");
+        Check(oss.str().empty(), "phase118 ostringstream str()&&: resets the buffer to empty, remains usable");
+    }
+    {
+        std::istringstream iss("abc");
+        Check(iss.view() == "abc", "phase118 istringstream view(): reflects ctor-supplied content");
+        iss.str("xyz");
+        Check(iss.str() == "xyz", "phase118 istringstream str(s) setter: replaces content");
+    }
+
+    // (5) the string/string_view inserter+extractor+getline sibling-fix.
+    {
+        std::ostringstream oss;
+        std::string s = "hello world";
+        oss << s;
+        Check(oss.str() == "hello world", "phase118 operator<<(ostream&,const string&): inserts full content");
+    }
+    {
+        std::ostringstream oss;
+        oss << std::setw(10) << std::string("hi");
+        Check(oss.str() == "        hi",
+              "phase118 operator<<(ostream&,const string&): honors width()/right-default padding");
+    }
+    {
+        std::ostringstream oss;
+        std::string_view sv = "viewed content";
+        oss << sv;
+        Check(oss.str() == "viewed content", "phase118 operator<<(ostream&,string_view): inserts the view's content");
+    }
+    {
+        std::istringstream iss("token1 token2");
+        std::string tok;
+        iss >> tok;
+        Check(tok == "token1", "phase118 operator>>(istream&,string&): extracts ONE whitespace-delimited token");
+        iss >> tok;
+        Check(tok == "token2", "phase118 operator>>(istream&,string&): second call extracts the next token");
+    }
+    {
+        std::istringstream iss("abcdefgh");
+        std::string s;
+        iss >> std::setw(4) >> s;
+        Check(s == "abcd",
+              "phase118 operator>>(istream&,string&)+setw HOTSPOT: caps extraction at EXACTLY width() "
+              "characters (no NUL-slot reservation, unlike the char-array overload's width()-1)");
+    }
+    {
+        // getline HOTSPOT: blank line + no-trailing-delim, reusing exactly
+        // the same failbit/eofbit rule already shipped+tested for the
+        // MEMBER basic_istream::getline (Ф30e commit 3, phase117).
+        std::istringstream iss("a\n\nb\nc");
+        std::vector<std::string> lines;
+        std::string line;
+        while (std::getline(iss, line)) lines.push_back(line);
+        Check(lines.size() == 4,
+              "phase118 getline HOTSPOT: blank line does NOT set failbit -- while(getline) runs every "
+              "line including the empty one AND the last line with no trailing delimiter");
+        Check(lines.size() == 4 && lines[0] == "a" && lines[1] == "" && lines[2] == "b" && lines[3] == "c",
+              "phase118 getline HOTSPOT: exact content \"a\",\"\",\"b\",\"c\"");
+    }
+
+    // (6) <iomanip> parameterized manipulators, both directions.
+    {
+        std::ostringstream oss;
+        oss << std::setw(6) << std::setfill('*') << 42;
+        Check(oss.str() == "****42", "phase118 iomanip setw+setfill: pads with the given fill char to the given width");
+    }
+    {
+        std::ostringstream oss;
+        oss << std::setprecision(3) << 3.14159;
+        Check(oss.str() == "3.14", "phase118 iomanip setprecision: defaultfloat honors precision as significant digits");
+    }
+    {
+        std::ostringstream oss;
+        oss << std::setbase(16) << std::showbase << 255;
+        Check(oss.str() == "0xff", "phase118 iomanip setbase(16): selects hex, same effect as std::hex");
+    }
+    {
+        std::istringstream iss("0x1A");
+        iss >> std::setbase(0);
+        int n = 0;
+        iss >> n;
+        Check(n == 26,
+              "phase118 iomanip setbase(0) HOTSPOT: clears basefield entirely -> auto-detect "
+              "(0x prefix selects hex, not decimal) -- proves setbase applies on extraction too");
+    }
+    {
+        std::ostringstream oss;
+        oss << std::setiosflags(std::ios_base::showpos) << 5;
+        Check(oss.str() == "+5", "phase118 iomanip setiosflags: ORs the given flag in (showpos), same as setf(mask)");
+        oss.str("");
+        oss << std::resetiosflags(std::ios_base::showpos) << 5;
+        Check(oss.str() == "5", "phase118 iomanip resetiosflags: clears the given flag without touching others");
+    }
+    {
+        std::istringstream iss("z");
+        iss >> std::setfill('#') >> std::setprecision(2);
+        Check(iss.fill() == '#' && iss.precision() == 2,
+              "phase118 iomanip setfill/setprecision extraction-direction: is >> m still applies the effect");
+    }
+
+    // (7) quoted [quoted.manip]: insertion escaping, round trip (incl.
+    //     embedded quotes AND embedded escape chars), the unquoted
+    //     fallback (unget correctly restores the peeked char), custom
+    //     delim/escape, and the const-charT* overload.
+    {
+        std::ostringstream oss;
+        std::string s = "he said \"hi\"";
+        oss << std::quoted(s);
+        Check(oss.str() == "\"he said \\\"hi\\\"\"", "phase118 quoted insertion: embedded quotes are escaped");
+    }
+    {
+        std::istringstream iss("\"he said \\\"hi\\\"\" trailing");
+        std::string s;
+        iss >> std::quoted(s);
+        Check(s == "he said \"hi\"", "phase118 quoted extraction: round-trips embedded quotes back to unescaped form");
+        std::string trailing;
+        iss >> trailing;
+        Check(trailing == "trailing", "phase118 quoted extraction: stops at the closing delim, rest of stream intact");
+    }
+    {
+        std::string s = "back\\slash";
+        std::ostringstream oss;
+        oss << std::quoted(s);
+        Check(oss.str() == "\"back\\\\slash\"", "phase118 quoted insertion: embedded escape character is ALSO escaped");
+        std::istringstream iss(oss.str());
+        std::string back;
+        iss >> std::quoted(back);
+        Check(back == s, "phase118 quoted round trip: embedded escape character survives insertion+extraction intact");
+    }
+    {
+        std::istringstream iss("plainword rest");
+        std::string s;
+        iss >> std::quoted(s);
+        Check(s == "plainword",
+              "phase118 quoted extraction FALLBACK HOTSPOT: no opening delimiter -> unget restores the "
+              "peeked char and falls back to ordinary whitespace-delimited extraction, losing nothing");
+    }
+    {
+        std::ostringstream oss;
+        oss << std::quoted(std::string("x,y"), '\'', '#');
+        Check(oss.str() == "'x,y'", "phase118 quoted custom delim: single-quote used instead of the default double-quote");
+    }
+    {
+        std::ostringstream oss;
+        oss << std::quoted("raw c-string");
+        Check(oss.str() == "\"raw c-string\"", "phase118 quoted: const charT* overload works on a C-string literal");
+    }
+    {
+        std::ostringstream oss;
+        std::string_view sv = "viewed, quoted";
+        oss << std::quoted(sv);
+        Check(oss.str() == "\"viewed, quoted\"",
+              "phase118 quoted: basic_string_view overload (LWG2785, C++17 -- not a C++26 addition) "
+              "works directly on a string_view, insertion-only");
+    }
+
+    // (8) __cpp_lib_quoted_string_io FTM.
+    static_assert(__cpp_lib_quoted_string_io == 201304L,
+                  "phase118: __cpp_lib_quoted_string_io must be the C++14 value 201304L");
+    Check(__cpp_lib_quoted_string_io == 201304L,
+          "phase118 __cpp_lib_quoted_string_io FTM: defined as 201304L (verified via static_assert above)");
+
+    printf("[CXX] PASS phase118: sstream stream-wrapper classes + <iomanip> + <string>/<string_view> "
+           "[string.io] sibling-fix (Ф30e commit 4, FINAL) -- basic_[i|o]stringstream/basic_stringstream "
+           "basic round trips, the move ctor/assign set_rdbuf HOTSPOT (incl. basic_iostream's diamond-safe "
+           "path, exercised for the first time at runtime) + swap (no fixup needed), str(s)/view()/str()&&, "
+           "the string/string_view inserter+extractor+getline sibling-fix (incl. the blank-line/"
+           "no-trailing-delim HOTSPOT reusing commit-3's member getline semantics, and the setw-caps-at-"
+           "EXACTLY-width() HOTSPOT), every <iomanip> parameterized manipulator both directions (incl. the "
+           "setbase(0)-clears-basefield auto-detect HOTSPOT), quoted round-tripping (embedded quotes AND "
+           "escape chars, the unquoted-fallback unget HOTSPOT, custom delim/escape, const charT*, and the "
+           "basic_string_view overload [LWG2785, C++17]), and the __cpp_lib_quoted_string_io FTM\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -23931,6 +24233,7 @@ int main()
     Phase115();
     Phase116();
     Phase117();
+    Phase118();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
