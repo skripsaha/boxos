@@ -1,0 +1,13 @@
+// boxcxx — <__bits/version_bitset>
+//
+// The __cpp_lib_* feature-test macro [version.syn] owned by <bitset> --
+// split out for the same [support.limits.general] per-header reason as
+// <__bits/version_any>/<__bits/version_complex> -- see those files' comments.
+#ifndef BOXCXX_BITS_VERSION_BITSET
+#define BOXCXX_BITS_VERSION_BITSET
+
+#ifndef __cpp_lib_constexpr_bitset
+#  define __cpp_lib_constexpr_bitset 202207L
+#endif
+
+#endif // BOXCXX_BITS_VERSION_BITSET

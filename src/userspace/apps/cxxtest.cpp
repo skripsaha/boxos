@@ -26,6 +26,7 @@
 #include <array>
 #include <atomic>
 #include <bit>
+#include <bitset>
 #include <charconv>
 #include <chrono>
 #include <cmath>
@@ -24622,6 +24623,347 @@ void Phase119()
            "D11.6's asinh/atanh signed-zero fix\n");
 }
 
+// Phase120 helper: stream round-trip through operator<</operator>>, one
+// bitset<N> value at a time (N differs per call site, so this stays a
+// template instead of 4 near-duplicate blocks).
+template <size_t N>
+bool P120RoundTrips(std::bitset<N> src)
+{
+    std::ostringstream os;
+    os << src;
+    std::istringstream is(os.str());
+    std::bitset<N> dst;
+    is >> dst;
+    return dst == src;
+}
+
+void Phase120()
+{
+    // ── Ф30d-tail #2: <bitset> -- ONE unified bitset<N> class body for
+    //    every N incl. 0, the three-way Sanitize() dispatch (N==0 / N%64==0
+    //    / N%64!=0), cross-word shift carry, to_ulong/to_ullong shared
+    //    overflow check, the D8 string-ctor full-rlen validation (diverges
+    //    from libstdc++), the reference proxy, and per-word hash. ──────────
+
+    // (1) bitset<64>().flip() must be ALL ones, not accidentally zero --
+    //     the headline "N%64==0 is not mask-evaluates-to-zero" landmine.
+    {
+        std::bitset<64> b;
+        b.flip();
+        Check(b.to_ullong() == 0xFFFFFFFFFFFFFFFFULL,
+              "phase120 Sanitize HOTSPOT: bitset<64>().flip() == all-ones, not zero (N%64==0 no-op branch)");
+    }
+    // (2) bitset<63>().flip() -- exactly one bit short of all-ones.
+    {
+        std::bitset<63> b;
+        b.flip();
+        Check(b.to_ullong() == (1ULL << 63) - 1,
+              "phase120 Sanitize: bitset<63>().flip() clears only bit 63 (N%64!=0 mask branch)");
+    }
+    // (3) bitset<65>().flip() -- two words; to_ullong() must throw
+    //     (value needs 65 bits); indirect proof via count()/test()/to_string().
+    {
+        std::bitset<65> b;
+        b.flip();
+        Check(b.count() == 65, "phase120 bitset<65>().flip(): count()==65");
+        Check(b.test(64), "phase120 bitset<65>().flip(): bit 64 (the extra word's only used bit) is set");
+        bool threw = false;
+        try { (void)b.to_ullong(); } catch (const std::overflow_error &) { threw = true; }
+        Check(threw, "phase120 bitset<65>().flip().to_ullong(): throws overflow_error (needs 65 bits)");
+        std::string s = b.to_string();
+        Check(s.size() == 65 && s.find('0') == std::string::npos,
+              "phase120 bitset<65>().flip().to_string(): 65 '1' characters, nothing truncated");
+    }
+    // (4) N==0: every member degenerates correctly with zero special-casing.
+    {
+        std::bitset<0> b;
+        Check(b.count() == 0 && b.size() == 0, "phase120 bitset<0>: count()==0, size()==0");
+        Check(b.all(), "phase120 bitset<0>: all() vacuously true");
+        Check(!b.any(), "phase120 bitset<0>: any() false");
+        Check(b.none(), "phase120 bitset<0>: none() true");
+        Check(b.to_string().empty(), "phase120 bitset<0>: to_string() empty");
+        Check(b.to_ulong() == 0 && b.to_ullong() == 0, "phase120 bitset<0>: to_ulong()/to_ullong() == 0");
+        std::bitset<0> viaUll(0xFFFFFFFFFFFFFFFFULL);
+        Check(viaUll.count() == 0,
+              "phase120 Sanitize HOTSPOT: bitset<0>(0xFF...FF) must NOT leak into the dummy word");
+    }
+    // (5) bitset<70> cross-word shift with carry -- the classic bug.
+    {
+        std::bitset<70> b;
+        b.set(0);
+        b <<= 65;
+        Check(b.count() == 1 && b.test(65), "phase120 bitset<70> <<=65: bit0 -> bit65, nothing else");
+
+        std::bitset<70> c;
+        c.set(69);
+        c <<= 1;
+        Check(c.count() == 0, "phase120 bitset<70> <<=1 on top bit: shifts past N, vanishes (Sanitize)");
+
+        std::bitset<70> d;
+        d.set();
+        d <<= 66;
+        Check(d.count() == 4, "phase120 bitset<70> all-ones <<=66 (crosses word boundary): count()==4");
+        for (size_t i = 66; i < 70; ++i)
+            Check(d.test(i), "phase120 bitset<70> all-ones <<=66: bit in [66,70) set");
+    }
+    // (6) bitset<70> right-shift -- no-sanitize-needed proof in practice.
+    {
+        std::bitset<70> b;
+        b.set();
+        b >>= 66;
+        Check(b.count() == 4, "phase120 bitset<70> all-ones >>=66: count()==4");
+        for (size_t i = 0; i < 4; ++i)
+            Check(b.test(i), "phase120 bitset<70> all-ones >>=66: bit in [0,4) set");
+
+        std::bitset<70> allOnes;
+        allOnes.flip();
+        Check(std::bitset<70>(allOnes) .operator<<=(70).count() == 0,
+              "phase120 bitset<70>: <<= pos>=N zeroes everything");
+        std::bitset<70> allOnes2;
+        allOnes2.flip();
+        Check(allOnes2.operator>>=(1000).count() == 0,
+              "phase120 bitset<70>: >>= pos>=N (way past N) zeroes everything");
+    }
+    // (7) set()/reset()/operator~() all-bits forms on a non-multiple-of-64 N.
+    {
+        std::bitset<100> b;
+        b.set();
+        Check(b.count() == 100, "phase120 bitset<100>.set(): count()==N");
+        b.reset();
+        Check(b.count() == 0, "phase120 bitset<100>.reset(): count()==0");
+        std::bitset<100> c = ~b;
+        Check(c.count() == 100, "phase120 ~bitset<100>() (all-zero source): count()==N");
+    }
+
+    // ── §6.2: to_ulong()/to_ullong() overflow, value-dependent not width-dependent ──
+
+    // (8) the maximum representable N=64 value must NOT spuriously throw.
+    {
+        std::bitset<64> b(0xFFFFFFFFFFFFFFFFULL);
+        Check(b.to_ullong() == 0xFFFFFFFFFFFFFFFFULL, "phase120 bitset<64> max value: to_ullong() does not throw");
+    }
+    // (9) N=65, only bit 64 set -> throws (needs 65 bits).
+    {
+        std::bitset<65> b;
+        b.set(64);
+        bool threw = false;
+        try { (void)b.to_ullong(); } catch (const std::overflow_error &) { threw = true; }
+        Check(threw, "phase120 bitset<65> only bit64 set: to_ullong() throws overflow_error");
+    }
+    // (10) SAME width N=65, bits [0,64) set, bit 64 clear -> succeeds.
+    {
+        std::bitset<65> b;
+        for (size_t i = 0; i < 64; ++i) b.set(i);
+        Check(b.to_ullong() == 0xFFFFFFFFFFFFFFFFULL,
+              "phase120 bitset<65> bits[0,64) set, bit64 clear: to_ullong() succeeds (value-dependent, not width-dependent)");
+    }
+    // (11) bitset<0>: never throws.
+    {
+        std::bitset<0> b;
+        Check(b.to_ulong() == 0 && b.to_ullong() == 0, "phase120 bitset<0>: to_ulong()/to_ullong() never throw");
+    }
+
+    // ── §6.3: string constructor -- the D8 finding, front and center ──────
+
+    // (12) THE HEADLINE non-conformance-vs-libstdc++ assertion: N < rlen,
+    //      an invalid character past position M but within rlen. A
+    //      libstdc++-linked oracle does NOT throw here (only scans the
+    //      M-character prefix); boxcxx follows the literal standard text
+    //      (== libc++'s behavior) and validates the FULL rlen range.
+    {
+        bool threw = false;
+        try { std::bitset<2> b(std::string("01X")); (void)b; }
+        catch (const std::invalid_argument &) { threw = true; }
+        Check(threw, "phase120 D8 HOTSPOT: bitset<2>(\"01X\") throws invalid_argument (libstdc++ does not -- documented divergence)");
+    }
+    // (13) control: explicit n=2 so rlen==M==2, no divergence possible.
+    {
+        std::bitset<2> b(std::string("01X"), 0, 2);
+        Check(b.to_ulong() == 0b01, "phase120 D8 control: bitset<2>(\"01X\",0,2) -- rlen==M==2, no throw, value 01");
+    }
+    // (14) only the FIRST M characters of the effective substring become bits.
+    {
+        std::bitset<4> b(std::string("110010"));
+        Check(b.to_ulong() == 0b1100, "phase120 string ctor: bitset<4>(\"110010\") == 0b1100 (first M=4 chars, not last)");
+    }
+    // (15) pos > str.size() throws; pos == str.size() succeeds (empty substring).
+    {
+        bool threw = false;
+        try { std::bitset<4> b(std::string("10"), 3); (void)b; }
+        catch (const std::out_of_range &) { threw = true; }
+        Check(threw, "phase120 string ctor: pos > str.size() throws out_of_range");
+
+        std::bitset<4> b(std::string("10"), 2);
+        Check(b.to_ulong() == 0, "phase120 string ctor: pos == str.size() succeeds, all-zero (empty effective substring)");
+    }
+    // (16) const charT* ctor -- the array/trivially-copyable/standard-layout/
+    //      trivially-default-constructible requires clause accepts plain char.
+    {
+        std::bitset<3> b("101");
+        Check(b.to_ulong() == 0b101, "phase120 const charT* ctor: bitset<3>(\"101\") == 0b101");
+    }
+    // (17) custom zero/one characters.
+    {
+        std::bitset<3> b(std::string("aba"), 0, std::string::npos, 'a', 'b');
+        Check(b.to_ulong() == 0b010, "phase120 string ctor custom zero/one: bitset<3>(\"aba\",...,'a','b') == 0b010");
+    }
+
+    // ── §6.4: stream operators ─────────────────────────────────────────────
+
+    // (18) round-trip for several N, including N=0/1/64/70.
+    {
+        Check(P120RoundTrips(std::bitset<0>()), "phase120 stream round-trip: N=0");
+        Check(P120RoundTrips(std::bitset<1>(1)), "phase120 stream round-trip: N=1");
+        Check(P120RoundTrips(std::bitset<64>(0xDEADBEEFCAFEBABEULL)), "phase120 stream round-trip: N=64");
+        std::bitset<70> n70;
+        n70.set();
+        n70.reset(5);
+        Check(P120RoundTrips(n70), "phase120 stream round-trip: N=70");
+    }
+    // (19) width/fill honored as ONE field (delegates to <string>'s inserter).
+    {
+        std::ostringstream os;
+        os.width(10);
+        os.fill('*');
+        os << std::bitset<4>(0b1010);
+        Check(os.str() == "******1010", "phase120 operator<<: width/fill pad the WHOLE bit-string as one field");
+    }
+    // (20) operator>> stops at the first non-0/1 char, does not consume it.
+    {
+        std::istringstream is("101X");
+        std::bitset<3> b;
+        is >> b;
+        Check(b.to_ulong() == 0b101, "phase120 operator>>: stops at first non-0/1 character");
+        char c = 0;
+        is >> c;
+        Check(c == 'X', "phase120 operator>>: the stop character was peeked, not consumed -- next read still sees it");
+    }
+    // (21) failbit when N>0 and zero characters are read; x left unchanged.
+    {
+        std::istringstream is("XYZ");
+        std::bitset<3> b(std::string("111")); // sentinel value
+        is >> b;
+        Check(is.fail(), "phase120 operator>>: failbit set when zero characters extracted (N>0)");
+        Check(b.to_ulong() == 0b111, "phase120 operator>>: x left UNCHANGED on failure");
+    }
+    // (22) bitset<0> never sets failbit, even reading "X"-led input.
+    {
+        std::istringstream is("X");
+        std::bitset<0> b;
+        is >> b;
+        Check(!is.fail(), "phase120 operator>> on bitset<0>: zero characters is the expected outcome, no failbit");
+    }
+    // (23) is.width() is irrelevant to bitset's own extractor.
+    {
+        std::istringstream is("11111");
+        is.width(2);
+        std::bitset<5> b;
+        is >> b;
+        Check(b.to_ulong() == 0b11111, "phase120 operator>>: is.width() ignored, all 5 characters consumed");
+    }
+    // (24) EOF mid-extraction: 3 characters read, not a failure.
+    {
+        std::istringstream is("101");
+        std::bitset<5> b;
+        is >> b;
+        Check(is.eof() && !is.fail(), "phase120 operator>>: EOF after 3 chars sets eofbit, not failbit (3 WERE stored)");
+        Check(b.to_ulong() == 0b101, "phase120 operator>>: EOF mid-extraction keeps the characters actually read");
+    }
+
+    // ── §6.5: reference proxy ──────────────────────────────────────────────
+
+    // (25) write-then-read round trip.
+    {
+        std::bitset<8> b;
+        b[3] = true;
+        Check(b[3] == true, "phase120 reference: b[3]=true; then b[3]==true");
+    }
+    // (26) flip() mutates; operator~() is a non-mutating view.
+    {
+        std::bitset<8> b(0b00000100); // bit2 set
+        b[2].flip();
+        Check(!b.test(2), "phase120 reference::flip(): mutates the underlying bit");
+        bool viewed = bool(~b[2]);
+        Check(viewed && !b.test(2),
+              "phase120 reference::operator~(): non-mutating complement view, bit unchanged by the view itself");
+    }
+    // (27) swap(reference, reference).
+    {
+        std::bitset<8> b(0b00010000); // bit4 set
+        swap(b[1], b[4]);
+        Check(b.to_ulong() == 0b00000010, "phase120 swap(reference,reference): exchanges the two bit values");
+    }
+    // (28) swap(reference, bool&).
+    {
+        std::bitset<8> b(0b00000001); // bit0 set
+        bool x = false;
+        swap(b[0], x);
+        Check(x == true && !b.test(0), "phase120 swap(reference,bool&): exchanges correctly");
+    }
+
+    // ── §6.6: hash<bitset<N>> ──────────────────────────────────────────────
+
+    // (29) determinism, and (not guaranteed, but a sanity floor) distinct
+    //      sample values hash differently.
+    {
+        std::hash<std::bitset<8>> hasher;
+        Check(hasher(std::bitset<8>(0b10110000)) == hasher(std::bitset<8>(0b10110000)),
+              "phase120 hash<bitset<8>>: deterministic");
+        Check(hasher(std::bitset<8>(0b10110000)) != hasher(std::bitset<8>(0b00000001)),
+              "phase120 hash<bitset<8>>: distinct sample values hash differently");
+    }
+    // (30) usable as an unordered_set/unordered_map key -- end-to-end, not
+    //      just a direct operator() call.
+    {
+        std::unordered_set<std::bitset<8>> s;
+        s.insert(std::bitset<8>(1));
+        s.insert(std::bitset<8>(2));
+        s.insert(std::bitset<8>(1)); // duplicate
+        Check(s.size() == 2, "phase120 unordered_set<bitset<8>>: hash+operator== work together as a key type");
+        Check(s.contains(std::bitset<8>(1)) && s.contains(std::bitset<8>(2)) && !s.contains(std::bitset<8>(3)),
+              "phase120 unordered_set<bitset<8>>: contains() finds inserted keys, not others");
+    }
+
+    // ── §6.7: the P2417 constexpr surface -- one static_assert battery ────
+    static_assert(std::bitset<8>().count() == 0);
+    static_assert(std::bitset<8>(0b1011).count() == 3);
+    static_assert(std::bitset<8>(0b1011).test(0) && !std::bitset<8>(0b1011).test(2));
+    static_assert(std::bitset<64>().flip().to_ullong() == 0xFFFFFFFFFFFFFFFFULL);
+    static_assert(std::bitset<63>().flip().to_ullong() == (1ULL << 63) - 1);
+    static_assert(std::bitset<0>().all());
+    static_assert(!std::bitset<0>().any());
+    static_assert(std::bitset<0>().none());
+    static_assert((std::bitset<8>(0b1100) & std::bitset<8>(0b1010)) == std::bitset<8>(0b1000));
+    static_assert((std::bitset<8>(0b1100) | std::bitset<8>(0b1010)) == std::bitset<8>(0b1110));
+    static_assert((std::bitset<8>(0b1100) ^ std::bitset<8>(0b1010)) == std::bitset<8>(0b0110));
+    static_assert((std::bitset<8>(0b0001) << 3) == std::bitset<8>(0b1000));
+    static_assert((std::bitset<8>(0b1000) >> 3) == std::bitset<8>(0b0001));
+    static_assert(~std::bitset<4>(0b0101) == std::bitset<4>(0b1010));
+    static_assert(std::bitset<8>(0b1010)[1] == true);
+    static_assert(std::bitset<8>(0b1010)[0] == false);
+    static_assert(std::bitset<8>(5) == std::bitset<8>(5));
+    static_assert(std::bitset<8>(5) != std::bitset<8>(6)); // C++20 rewritten candidate, no operator!= declared
+    // reference proxy, fully constexpr (P2417):
+    static_assert([] { std::bitset<4> b; b[1] = true; return b.test(1); }());
+    static_assert([] { std::bitset<4> b(0b0110); b[1].flip(); return b.to_ulong(); }() == 0b0100);
+    // const charT* ctor, fully constexpr (pure basic_string_view internally --
+    // NOT the basic_string-taking overload: <string>'s own basic_string has
+    // no constexpr surface at all today [operator[]/size()/data()/the
+    // operator __view conversion are all missing `constexpr`], a pre-existing
+    // gap outside this header; to_string()'s RUNTIME correctness is proven
+    // above instead, via checks (4)/(18)/(19) and the string-ctor block).
+    static_assert([] { std::bitset<4> b("1010"); return b.to_ulong(); }() == 0b1010);
+
+    printf("[CXX] PASS phase120: <bitset> -- ONE unified bitset<N> (N incl. 0), three-way Sanitize() "
+           "dispatch (N==0 clear / N%%64==0 no-op / N%%64!=0 mask HOTSPOT), cross-word shift carry "
+           "(N=70 boundary-crossing HOTSPOT), to_ulong/to_ullong shared value-dependent overflow check, "
+           "the D8 string-ctor full-rlen validation HOTSPOT (diverges from libstdc++, matches libc++/the "
+           "standard), unchecked operator[] vs throwing test/set/reset/flip (D7), the reference proxy "
+           "(mutating flip() vs non-mutating operator~(), 3-way swap), operator<</operator>> (width/fill "
+           "as one field, no is.width() cap, EOF vs failbit), per-word hash usable as a container key, "
+           "and the P2417 constexpr surface battery\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -24763,6 +25105,7 @@ int main()
     Phase117();
     Phase118();
     Phase119();
+    Phase120();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

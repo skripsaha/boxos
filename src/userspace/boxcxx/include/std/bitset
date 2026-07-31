@@ -1,0 +1,343 @@
+// boxcxx — <bitset>  (C++23 [bitset])
+//
+// ONE unified bitset<N> class body for every N (0 included) -- not
+// libstdc++/libc++'s 3-tier _Base_bitset<0>/<1>/<Nw> specialization split.
+// That split exists for performance, not correctness: the general
+// word-array algorithm below already degrades correctly to N=0 and N=1
+// with zero special-casing.
+//
+// Sanitize() is the central invariant: every bit at a logical position
+// >= N stays 0 in the stored word array. Its mask is a THREE-way dispatch,
+// not the naive two-way split -- N==0 (clear the whole dummy word), N>0
+// && N%64==0 (no-op, high word fully used), N>0 && N%64!=0 (mask the low
+// N%64 bits). N==0 satisfies N%64==0 arithmetically too, but needs the
+// OPPOSITE treatment of the N>0 case -- exactly the trap a two-way split
+// falls into.
+//
+// operator[] is unchecked (UB past N, matches vector/string's own
+// operator[]); test()/set(pos)/reset(pos)/flip(pos) throw out_of_range.
+// The string ctor validates 0/1-ness over the full rlen-character range,
+// not just the M=min(N,rlen) characters that become bits -- boxcxx follows
+// the standard/libc++ here and diverges from libstdc++ (GCC 15.2 does not
+// throw on bitset<2>("01X")).
+#ifndef BOXCXX_BITSET
+#define BOXCXX_BITSET
+
+#include <__bits/version_bitset>
+#include <string>
+#include <ostream>
+#include <istream>
+#include <type_traits>
+#include <limits>
+#include <bit>          // std::popcount -- used by count(); not to be left transitive
+
+namespace std {
+
+template <class T> struct hash; // primary lives in <functional>; specialized for bitset<N>
+
+template <size_t N>
+class bitset {
+    static constexpr size_t kBitsPerWord = numeric_limits<uint64_t>::digits;
+    static constexpr size_t kNumWords = N == 0 ? 1 : (N + kBitsPerWord - 1) / kBitsPerWord;
+    using WordT = uint64_t;
+
+    WordT words_[kNumWords]{};
+
+    constexpr void Sanitize() noexcept
+    {
+        if constexpr (N == 0) {
+            words_[0] = 0;
+        } else if constexpr (N % kBitsPerWord != 0) {
+            constexpr size_t kExtraBits = N % kBitsPerWord;
+            words_[kNumWords - 1] &= (WordT(1) << kExtraBits) - WordT(1);
+        }
+        // else: N>0 and N%kBitsPerWord==0 -- the high word is fully used, no-op.
+    }
+
+public:
+    class reference {
+        friend class bitset;
+
+        WordT *wordPtr_;
+        size_t bitIndexInWord_; // 0..63, position WITHIN *wordPtr_
+
+        constexpr reference(bitset &b, size_t pos) noexcept
+            : wordPtr_(&b.words_[pos / kBitsPerWord]), bitIndexInWord_(pos % kBitsPerWord) {}
+
+    public:
+        constexpr reference(const reference &) noexcept = default;
+        constexpr ~reference() noexcept = default;
+
+        constexpr reference &operator=(bool x) noexcept
+        {
+            WordT mask = WordT(1) << bitIndexInWord_;
+            if (x) *wordPtr_ |= mask; else *wordPtr_ &= ~mask;
+            return *this;
+        }
+        constexpr reference &operator=(const reference &rhs) noexcept { return *this = bool(rhs); }
+        constexpr operator bool() const noexcept { return (*wordPtr_ >> bitIndexInWord_) & WordT(1); }
+        constexpr bool operator~() const noexcept { return !bool(*this); } // view only, no mutation
+        constexpr reference &flip() noexcept { *wordPtr_ ^= (WordT(1) << bitIndexInWord_); return *this; }
+
+        // [template.bitset.general]/36: two references into the SAME
+        // bitset, even at different bit positions, are a data race --
+        // storage is word-granular, not bit-granular.
+        friend constexpr void swap(reference x, reference y) noexcept { bool b = x; x = bool(y); y = b; }
+        friend constexpr void swap(reference x, bool &y) noexcept { bool b = x; x = y; y = b; }
+        friend constexpr void swap(bool &x, reference y) noexcept { bool b = x; x = bool(y); y = b; }
+    };
+
+    // ── [bitset.cons] ────────────────────────────────────────────────────
+    constexpr bitset() noexcept = default;
+
+    constexpr bitset(unsigned long long val) noexcept
+    {
+        words_[0] = static_cast<WordT>(val);
+        Sanitize();
+    }
+
+    template <class CharT, class Traits, class Allocator>
+    constexpr explicit bitset(
+        const basic_string<CharT, Traits, Allocator> &str,
+        typename basic_string<CharT, Traits, Allocator>::size_type pos = 0,
+        typename basic_string<CharT, Traits, Allocator>::size_type n
+            = basic_string<CharT, Traits, Allocator>::npos,
+        CharT zero = CharT('0'), CharT one = CharT('1'))
+    {
+        if (pos > str.size()) boxcxx::ThrowOutOfRange("bitset::bitset");
+        auto avail = str.size() - pos;
+        size_t rlen = static_cast<size_t>(n < avail ? n : avail);
+        InitFromValidatedView(basic_string_view<CharT, Traits>(str.data() + pos, rlen), zero, one);
+    }
+
+    template <class CharT>
+        requires(!is_array_v<CharT> && is_trivially_copyable_v<CharT> &&
+                 is_standard_layout_v<CharT> && is_trivially_default_constructible_v<CharT>)
+    constexpr explicit bitset(
+        const CharT *str,
+        typename basic_string_view<CharT>::size_type n = basic_string_view<CharT>::npos,
+        CharT zero = CharT('0'), CharT one = CharT('1'))
+    {
+        // pos is implicitly 0 for this overload, so the "pos > str.size()"
+        // out_of_range check can never fire -- correctly absent here.
+        basic_string_view<CharT> sv = (n == basic_string_view<CharT>::npos)
+            ? basic_string_view<CharT>(str) : basic_string_view<CharT>(str, n);
+        InitFromValidatedView(basic_string_view<CharT, char_traits<CharT>>(sv.data(), sv.size()), zero, one);
+    }
+
+private:
+    // Pass 1 validates the FULL sv (== the full rlen range), not just the
+    // M-sized prefix that becomes bits -- this is where boxcxx follows the
+    // standard/libc++ and diverges from libstdc++'s narrower M-only scan.
+    // Pass 2 maps only the first M=min(N,rlen) characters to bits.
+    template <class CharT, class Traits>
+    constexpr void InitFromValidatedView(basic_string_view<CharT, Traits> sv, CharT zero, CharT one)
+    {
+        for (size_t i = 0; i < sv.size(); ++i)
+            if (!Traits::eq(sv[i], zero) && !Traits::eq(sv[i], one))
+                boxcxx::ThrowInvalidArgument("bitset::bitset");
+
+        size_t m = sv.size() < N ? sv.size() : N;
+        for (size_t i = 0; i < m; ++i)
+            if (Traits::eq(sv[m - 1 - i], one)) SetBit(i);
+    }
+
+    // Shared unchecked single-bit primitives -- every positional public
+    // member below, plus InitFromValidatedView above, funnels through
+    // these, so the bounds check happens in exactly one place per op.
+    constexpr void SetBit(size_t pos) noexcept { words_[pos / kBitsPerWord] |= (WordT(1) << (pos % kBitsPerWord)); }
+    constexpr void ResetBit(size_t pos) noexcept { words_[pos / kBitsPerWord] &= ~(WordT(1) << (pos % kBitsPerWord)); }
+    constexpr void FlipBit(size_t pos) noexcept { words_[pos / kBitsPerWord] ^= (WordT(1) << (pos % kBitsPerWord)); }
+    constexpr bool TestBit(size_t pos) const noexcept { return (words_[pos / kBitsPerWord] >> (pos % kBitsPerWord)) & WordT(1); }
+
+public:
+    // ── [bitset.members] ────────────────────────────────────────────────
+    constexpr bitset &operator&=(const bitset &rhs) noexcept
+    {
+        for (size_t i = 0; i < kNumWords; ++i) words_[i] &= rhs.words_[i];
+        return *this;
+    }
+    constexpr bitset &operator|=(const bitset &rhs) noexcept
+    {
+        for (size_t i = 0; i < kNumWords; ++i) words_[i] |= rhs.words_[i];
+        return *this;
+    }
+    constexpr bitset &operator^=(const bitset &rhs) noexcept
+    {
+        for (size_t i = 0; i < kNumWords; ++i) words_[i] ^= rhs.words_[i];
+        return *this;
+    }
+
+    constexpr bitset &operator<<=(size_t pos) noexcept
+    {
+        if (pos >= N) { for (size_t i = 0; i < kNumWords; ++i) words_[i] = 0; return *this; }
+        if (pos == 0) return *this;
+        const size_t wshift = pos / kBitsPerWord;
+        const size_t offset = pos % kBitsPerWord;
+        if (offset == 0) {
+            for (size_t i = kNumWords; i-- > wshift; ) words_[i] = words_[i - wshift];
+        } else {
+            const size_t subOffset = kBitsPerWord - offset;
+            for (size_t i = kNumWords; i-- > wshift + 1; )
+                words_[i] = (words_[i - wshift] << offset) | (words_[i - wshift - 1] >> subOffset);
+            words_[wshift] = words_[0] << offset;
+        }
+        for (size_t i = 0; i < wshift; ++i) words_[i] = 0;
+        Sanitize();
+        return *this;
+    }
+
+    constexpr bitset &operator>>=(size_t pos) noexcept
+    {
+        if (pos >= N) { for (size_t i = 0; i < kNumWords; ++i) words_[i] = 0; return *this; }
+        if (pos == 0) return *this;
+        const size_t wshift = pos / kBitsPerWord;
+        const size_t offset = pos % kBitsPerWord;
+        const size_t limit = kNumWords - wshift - 1;
+        if (offset == 0) {
+            for (size_t i = 0; i <= limit; ++i) words_[i] = words_[i + wshift];
+        } else {
+            const size_t subOffset = kBitsPerWord - offset;
+            for (size_t i = 0; i < limit; ++i)
+                words_[i] = (words_[i + wshift] >> offset) | (words_[i + wshift + 1] << subOffset);
+            words_[limit] = words_[kNumWords - 1] >> offset;
+        }
+        for (size_t i = limit + 1; i < kNumWords; ++i) words_[i] = 0;
+        return *this; // no Sanitize() -- a right shift can only move zeros into the unused region
+    }
+
+    constexpr bitset operator<<(size_t pos) const noexcept { bitset r(*this); r <<= pos; return r; }
+    constexpr bitset operator>>(size_t pos) const noexcept { bitset r(*this); r >>= pos; return r; }
+
+    constexpr bitset &set() noexcept { for (auto &w : words_) w = ~WordT(0); Sanitize(); return *this; }
+    constexpr bitset &set(size_t pos, bool val = true)
+    {
+        if (pos >= N) boxcxx::ThrowOutOfRange("bitset::set");
+        if (val) SetBit(pos); else ResetBit(pos);
+        return *this;
+    }
+    constexpr bitset &reset() noexcept { for (auto &w : words_) w = 0; return *this; }
+    constexpr bitset &reset(size_t pos)
+    {
+        if (pos >= N) boxcxx::ThrowOutOfRange("bitset::reset");
+        ResetBit(pos);
+        return *this;
+    }
+    constexpr bitset operator~() const noexcept { bitset x(*this); return x.flip(); }
+    constexpr bitset &flip() noexcept { for (auto &w : words_) w = ~w; Sanitize(); return *this; }
+    constexpr bitset &flip(size_t pos)
+    {
+        if (pos >= N) boxcxx::ThrowOutOfRange("bitset::flip");
+        FlipBit(pos);
+        return *this;
+    }
+
+    constexpr bool operator[](size_t pos) const noexcept { return TestBit(pos); } // UB if pos>=N -- unchecked (D7)
+    constexpr reference operator[](size_t pos) noexcept { return reference(*this, pos); } // UB if pos>=N -- unchecked (D7)
+
+private:
+    constexpr uint64_t LowWordChecked(const char *who) const
+    {
+        for (size_t i = 1; i < kNumWords; ++i)
+            if (words_[i] != 0) boxcxx::ThrowOverflowError(who);
+        return words_[0];
+    }
+
+public:
+    constexpr unsigned long to_ulong() const { return static_cast<unsigned long>(LowWordChecked("bitset::to_ulong")); }
+    constexpr unsigned long long to_ullong() const { return static_cast<unsigned long long>(LowWordChecked("bitset::to_ullong")); }
+
+    template <class CharT = char, class Traits = char_traits<CharT>, class Allocator = allocator<CharT>>
+    constexpr basic_string<CharT, Traits, Allocator> to_string(CharT zero = CharT('0'), CharT one = CharT('1')) const
+    {
+        basic_string<CharT, Traits, Allocator> result(N, zero);
+        for (size_t i = 0; i < N; ++i)
+            if ((words_[i / kBitsPerWord] >> (i % kBitsPerWord)) & WordT(1)) result[N - 1 - i] = one;
+        return result;
+    }
+
+    constexpr size_t count() const noexcept
+    {
+        size_t c = 0;
+        for (size_t i = 0; i < kNumWords; ++i) c += static_cast<size_t>(std::popcount(words_[i]));
+        return c;
+    }
+    constexpr size_t size() const noexcept { return N; }
+    constexpr bool operator==(const bitset &rhs) const noexcept
+    {
+        for (size_t i = 0; i < kNumWords; ++i) if (words_[i] != rhs.words_[i]) return false;
+        return true;
+    }
+    constexpr bool test(size_t pos) const
+    {
+        if (pos >= N) boxcxx::ThrowOutOfRange("bitset::test");
+        return TestBit(pos);
+    }
+    constexpr bool all() const noexcept { return count() == size(); } // vacuously true for N==0
+    constexpr bool any() const noexcept { return count() != 0; }
+    constexpr bool none() const noexcept { return count() == 0; }
+
+    friend struct hash<bitset>;
+};
+
+// ── [bitset.operators] ──────────────────────────────────────────────────
+template <size_t N> constexpr bitset<N> operator&(const bitset<N> &lhs, const bitset<N> &rhs) noexcept
+{ bitset<N> r(lhs); r &= rhs; return r; }
+template <size_t N> constexpr bitset<N> operator|(const bitset<N> &lhs, const bitset<N> &rhs) noexcept
+{ bitset<N> r(lhs); r |= rhs; return r; }
+template <size_t N> constexpr bitset<N> operator^(const bitset<N> &lhs, const bitset<N> &rhs) noexcept
+{ bitset<N> r(lhs); r ^= rhs; return r; }
+
+// One-line delegation to to_string() + os << ... -- inherits width/fill/
+// exception-to-badbit handling from <string>'s own basic_string inserter,
+// no sentry code of its own needed.
+template <class CharT, class Traits, size_t N>
+basic_ostream<CharT, Traits> &operator<<(basic_ostream<CharT, Traits> &os, const bitset<N> &x)
+{
+    return os << x.template to_string<CharT, Traits, allocator<CharT>>(os.widen('0'), os.widen('1'));
+}
+
+// Character-at-a-time via the streambuf, deliberately NOT capped at
+// is.width() (a pinned divergence from <string>'s own operator>>: per
+// [bitset.operators], the only stop conditions are N characters extracted,
+// EOF, or a non-0/1 character).
+template <class CharT, class Traits, size_t N>
+basic_istream<CharT, Traits> &operator>>(basic_istream<CharT, Traits> &is, bitset<N> &x)
+{
+    typename basic_istream<CharT, Traits>::sentry ok(is);
+    if (ok) {
+        basic_string<CharT, Traits> str;
+        ios_base::iostate state = ios_base::goodbit;
+        const CharT zeroCh = is.widen('0'), oneCh = is.widen('1');
+        auto *buf = is.rdbuf();
+        for (size_t i = 0; i < N; ++i) {
+            typename Traits::int_type c = buf->sgetc();
+            if (Traits::eq_int_type(c, Traits::eof())) { state |= ios_base::eofbit; break; }
+            CharT ch = Traits::to_char_type(c);
+            if (!Traits::eq(ch, zeroCh) && !Traits::eq(ch, oneCh)) break; // not extracted
+            str.push_back(ch);
+            buf->sbumpc();
+        }
+        if (N > 0 && str.empty()) state |= ios_base::failbit;
+        else x = bitset<N>(str); // never throws: str contains ONLY zeroCh/oneCh
+        is.setstate(state);
+    }
+    return is;
+}
+
+// ── [bitset.hash] -- per-word, not constexpr, reuses the same FNV-1a/
+// boost-combine idiom already shipping in <vector>'s hash<vector<bool>> ──
+template <size_t N>
+struct hash<bitset<N>> {
+    size_t operator()(const bitset<N> &bs) const noexcept
+    {
+        size_t h = 1469598103934665603ull;
+        for (size_t i = 0; i < bitset<N>::kNumWords; ++i)
+            h ^= bs.words_[i] + 0x9e3779b9 + (h << 6) + (h >> 2);
+        return h;
+    }
+};
+
+} // namespace std
+
+#endif // BOXCXX_BITSET
