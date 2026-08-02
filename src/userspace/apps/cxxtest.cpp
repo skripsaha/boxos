@@ -25220,6 +25220,125 @@ void Phase121()
            "across repeated round-trips, and the __cpp_lib_out_ptr FTM pin\n");
 }
 
+// ── phase122 fixtures (shared_ptr deleter-path exception-safety) ─────────
+
+struct P122Throw {};
+
+int g_p122FreeCount = 0;
+
+struct P122Del {
+    void operator()(int *p) const
+    {
+        delete p;
+        ++g_p122FreeCount;
+    }
+};
+
+template <class T>
+struct P122ThrowAlloc {
+    using value_type = T;
+    P122ThrowAlloc() = default;
+    template <class U>
+    P122ThrowAlloc(const P122ThrowAlloc<U> &) noexcept {}
+    T *allocate(std::size_t) { throw P122Throw{}; }
+    void deallocate(T *, std::size_t) noexcept {}
+    template <class U>
+    bool operator==(const P122ThrowAlloc<U> &) const noexcept { return true; }
+    template <class U>
+    bool operator!=(const P122ThrowAlloc<U> &) const noexcept { return false; }
+};
+
+int g_p122ArrDtors = 0;
+struct P122ArrElem {
+    ~P122ArrElem() { ++g_p122ArrDtors; }
+};
+
+// Ф30f-1 follow-up: shared_ptr deleter/allocation-path conformance --
+// exception-safety (the deleter d(p) must run on the caller's resource if
+// control-block allocation throws) + reset(Y*,D,A) + shared_ptr(nullptr,D,A).
+// All [util.smartptr.shared].
+void Phase122()
+{
+    // (1) reset(Y*, Deleter, Alloc) -- newly added overload: adopts, threads
+    //     the allocator through the control-block allocation, runs the
+    //     deleter exactly once on destruction.
+    {
+        g_p121AllocCount = 0;
+        g_p122FreeCount  = 0;
+        {
+            std::shared_ptr<int> sp;
+            sp.reset(new int(11), P122Del{}, P121Alloc<int>());
+            Check(sp && *sp == 11 && sp.use_count() == 1,
+                  "phase122 reset(Y*,D,A): adopted, use_count==1");
+            Check(g_p121AllocCount >= 1,
+                  "phase122 reset(Y*,D,A): allocator threaded through control-block alloc");
+            Check(g_p122FreeCount == 0,
+                  "phase122 reset(Y*,D,A): deleter not yet run while sp alive");
+        }
+        Check(g_p122FreeCount == 1,
+              "phase122 reset(Y*,D,A): deleter ran exactly once on sp destruction");
+    }
+
+    // (2) shared_ptr(nullptr_t, Deleter, Alloc) -- newly added ctor: owns a
+    //     control block for the null pointer (use_count==1) via the allocator.
+    {
+        g_p121AllocCount = 0;
+        std::shared_ptr<int> sp(nullptr, [](int *) {}, P121Alloc<int>());
+        Check(!sp && sp.use_count() == 1,
+              "phase122 shared_ptr(nullptr,D,A): null but owns a control block (use_count==1)");
+        Check(g_p121AllocCount >= 1,
+              "phase122 shared_ptr(nullptr,D,A): allocator threaded through");
+    }
+
+    // (3) exception-safety (Y*,D,A): a throwing allocator must NOT leak the
+    //     caller's resource -- the deleter d(p) runs on it, then the exception
+    //     propagates. Without the fix p would leak (d(p) never runs).
+    {
+        g_p122FreeCount = 0;
+        bool threw      = false;
+        try {
+            std::shared_ptr<int> sp(new int(7), P122Del{}, P122ThrowAlloc<int>());
+        } catch (const P122Throw &) {
+            threw = true;
+        }
+        Check(threw, "phase122 exception-safety (Y*,D,A): allocator-throw propagated");
+        Check(g_p122FreeCount == 1,
+              "phase122 exception-safety (Y*,D,A): deleter ran on the resource on throw (no leak)");
+    }
+
+    // (4) exception-safety (nullptr,D,A): the deleter d(nullptr) must run on a
+    //     throwing allocator (proves the new ctor's catch path).
+    {
+        g_p122FreeCount = 0;
+        bool threw      = false;
+        try {
+            std::shared_ptr<int> sp(nullptr, P122Del{}, P122ThrowAlloc<int>());
+        } catch (const P122Throw &) {
+            threw = true;
+        }
+        Check(threw, "phase122 exception-safety (nullptr,D,A): allocator-throw propagated");
+        Check(g_p122FreeCount == 1,
+              "phase122 exception-safety (nullptr,D,A): deleter d(nullptr) ran on throw");
+    }
+
+    // (5) shared_ptr<T[]>(raw): an array T must be disposed with delete[] so
+    //     every element destructor runs -- not CountedPtr's scalar delete
+    //     (which would run only element [0]'s dtor + bad-free under ASan).
+    {
+        g_p122ArrDtors = 0;
+        {
+            std::shared_ptr<P122ArrElem[]> sp(new P122ArrElem[4]);
+            Check(sp.use_count() == 1, "phase122 shared_ptr<T[]>(raw): use_count==1");
+        }
+        Check(g_p122ArrDtors == 4,
+              "phase122 shared_ptr<T[]>(raw): all 4 element destructors ran (delete[], not scalar delete)");
+    }
+
+    printf("[CXX] PASS phase122: shared_ptr deleter-path conformance -- reset(Y*,D,A), "
+           "shared_ptr(nullptr,D,A), array-T delete[] disposal, and exception-safety "
+           "(deleter d(p) invoked on an allocation-throw, no leak) [util.smartptr.shared]\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -25363,6 +25482,7 @@ int main()
     Phase119();
     Phase120();
     Phase121();
+    Phase122();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
