@@ -12,6 +12,7 @@
 #include <__bits/allocator_core>
 #include <__bits/iterator_core>
 #include <__bits/pointer>
+#include <__bits/version_memory>
 #include <atomic>
 #include <compare>
 #include <concepts>
@@ -1612,5 +1613,17 @@ public:
 };
 
 } // namespace std
+
+// __bits/smartptr_adapt ([smartptr.adapt]: out_ptr_t/out_ptr, inout_ptr_t/
+// inout_ptr) sits here, as its own top-level #include after this
+// namespace-std block closes, rather than in the top include block above:
+// it names std::shared_ptr directly (to reject shared_ptr-without-a-
+// deleter per [out.ptr.t]/[inout.ptr.t]), which two-phase lookup requires
+// to already be a complete class template at the point that name is
+// looked up. shared_ptr is defined earlier in this same file, but only
+// within the namespace-std block that has to close first -- mirrors
+// <functional>'s own __bits/bind et al. placement for the identical
+// reason (see that file's comment).
+#include <__bits/smartptr_adapt>
 
 #endif // BOXCXX_MEMORY
