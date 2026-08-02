@@ -815,7 +815,25 @@ public:
                   is_convertible_v<Y (*)[], remove_extent_t<T> (*)[]>))
     explicit shared_ptr(Y *p) : ptr_(p)
     {
-        ctrl_ = new __shared::CountedPtr<Y *>(p);
+        try {
+            if constexpr (is_array_v<T>)
+                // [util.smartptr.shared.const]: an array T is disposed with
+                // delete[]. Route through default_delete<T> (= the delete[]
+                // specialization default_delete<U[]>) rather than CountedPtr,
+                // whose Dispose does a scalar `delete ptr_` -- wrong for arrays.
+                ctrl_ = new __shared::CountedDeleter<Y *, default_delete<T>,
+                                                     allocator<Y>>(
+                    p, default_delete<T>{}, allocator<Y>{});
+            else
+                ctrl_ = new __shared::CountedPtr<Y *>(p);
+        } catch (...) {
+            // [util.smartptr.shared.const]: delete[] p for array T, else delete p.
+            if constexpr (is_array_v<T>)
+                delete[] p;
+            else
+                delete p;
+            throw;
+        }
         EnableShared(p, p, ctrl_);
     }
 
@@ -826,7 +844,12 @@ public:
     {
         using Block =
             __shared::CountedDeleter<Y *, Deleter, allocator<Y>>;
-        ctrl_ = new Block(p, static_cast<Deleter &&>(d), allocator<Y>());
+        try {
+            ctrl_ = new Block(p, static_cast<Deleter &&>(d), allocator<Y>());
+        } catch (...) {
+            d(p); // [util.smartptr.shared.const]: d(p) on throw
+            throw;
+        }
         EnableShared(p, p, ctrl_);
     }
     template <class Y, class Deleter, class Alloc>
@@ -836,7 +859,16 @@ public:
         using BA    = typename allocator_traits<
             Alloc>::template rebind_alloc<Block>;
         BA     ba(a);
-        Block *b = allocator_traits<BA>::allocate(ba, 1);
+        Block *b;
+        try {
+            // Only the allocation can throw; the Block ctor is
+            // precondition-noexcept ([util.smartptr.shared.const]: deleter
+            // move and allocator copy do not throw), so d is still intact.
+            b = allocator_traits<BA>::allocate(ba, 1);
+        } catch (...) {
+            d(p); // [util.smartptr.shared.const]: d(p) on throw
+            throw;
+        }
         ::new (static_cast<void *>(b))
             Block(p, static_cast<Deleter &&>(d), a);
         ctrl_ = b;
@@ -847,7 +879,30 @@ public:
     {
         using Block =
             __shared::CountedDeleter<element_type *, Deleter, allocator<T>>;
-        ctrl_ = new Block(nullptr, static_cast<Deleter &&>(d), allocator<T>());
+        try {
+            ctrl_ = new Block(nullptr, static_cast<Deleter &&>(d), allocator<T>());
+        } catch (...) {
+            d(static_cast<element_type *>(nullptr)); // [util.smartptr.shared.const]
+            throw;
+        }
+    }
+    template <class Deleter, class Alloc>
+    shared_ptr(nullptr_t, Deleter d, Alloc a)
+    {
+        using Block = __shared::CountedDeleter<element_type *, Deleter, Alloc>;
+        using BA    = typename allocator_traits<
+            Alloc>::template rebind_alloc<Block>;
+        BA     ba(a);
+        Block *b;
+        try {
+            b = allocator_traits<BA>::allocate(ba, 1);
+        } catch (...) {
+            d(static_cast<element_type *>(nullptr));
+            throw;
+        }
+        ::new (static_cast<void *>(b))
+            Block(nullptr, static_cast<Deleter &&>(d), a);
+        ctrl_ = b;
     }
 
     // aliasing
@@ -962,6 +1017,11 @@ public:
     void reset(Y *p, Deleter d)
     {
         shared_ptr(p, static_cast<Deleter &&>(d)).swap(*this);
+    }
+    template <class Y, class Deleter, class Alloc>
+    void reset(Y *p, Deleter d, Alloc a)
+    {
+        shared_ptr(p, static_cast<Deleter &&>(d), a).swap(*this);
     }
     void swap(shared_ptr &o) noexcept
     {
