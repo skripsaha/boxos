@@ -1,0 +1,18 @@
+// boxcxx — <__bits/version_memory>
+//
+// The __cpp_lib_* feature-test macro [version.syn] owned by <memory> --
+// split out for the same [support.limits.general] per-header reason as
+// <__bits/version_any>/<__bits/version_bitset> -- see those files' comments.
+//
+// __cpp_lib_out_ptr is P1132R8's [smartptr.adapt] (out_ptr/inout_ptr).
+// 202106L is the C++23 value; C++26's P2833 bumps it to 202311L (adds the
+// reset(Args...)-style array uplift) -- Ф30f-1 is a C++23-only slice, so
+// that bump is not implemented and this macro is pinned at 202106L.
+#ifndef BOXCXX_BITS_VERSION_MEMORY
+#define BOXCXX_BITS_VERSION_MEMORY
+
+#ifndef __cpp_lib_out_ptr
+#  define __cpp_lib_out_ptr 202106L
+#endif
+
+#endif // BOXCXX_BITS_VERSION_MEMORY

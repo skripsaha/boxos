@@ -1,0 +1,297 @@
+// boxcxx — <__bits/smartptr_adapt>
+//
+// std::out_ptr / std::inout_ptr ([smartptr.adapt], P1132R8): out-parameter
+// adaptors so a C API's T**/void** "out" argument can write straight into a
+// unique_ptr/shared_ptr/raw pointer, which then adopts (out_ptr) or first
+// seizes-then-adopts (inout_ptr) the written value through a reset()-or-
+// construct dispatch. #include'd at file scope from <memory>, AFTER that
+// header's own `namespace std {}` block has closed (see <memory>'s
+// placement comment there) -- IsSharedPtr/out_ptr_t/inout_ptr_t name
+// std::shared_ptr directly, which two-phase lookup needs already complete.
+// Not standalone-includable: depends on unique_ptr/shared_ptr already
+// being defined, same as <__bits/bind> depends on <functional>.
+//
+// C++23 only (P1132R8's shape). C++26's P2833 reset-array uplift (FTM bump
+// to 202311L) is out of scope.
+#ifndef BOXCXX_BITS_SMARTPTR_ADAPT
+#define BOXCXX_BITS_SMARTPTR_ADAPT
+
+#include <cstddef>
+#include <type_traits>
+#include <utility>
+#include <__bits/pointer>
+
+namespace std {
+
+namespace __bits {
+
+// ── POINTER_OF / POINTER_OF_OR ([memory.general]) ───────────────────────
+// T::pointer if valid, else T::element_type* if valid, else
+// pointer_traits<T>::element_type* if valid, else not a valid type. Each
+// tier explicitly negates every earlier tier so at most one specialization
+// is ever viable (all three share the same bare PointerOfImpl<T> pattern).
+
+template <class T>
+struct PointerOfImpl {};
+
+template <class T>
+    requires requires { typename T::pointer; }
+struct PointerOfImpl<T> {
+    using type = typename T::pointer;
+};
+template <class T>
+    requires(!requires { typename T::pointer; } &&
+             requires { typename T::element_type; })
+struct PointerOfImpl<T> {
+    using type = typename T::element_type *;
+};
+template <class T>
+    requires(!requires { typename T::pointer; } &&
+             !requires { typename T::element_type; } &&
+             requires { typename pointer_traits<T>::element_type; })
+struct PointerOfImpl<T> {
+    using type = typename pointer_traits<T>::element_type *;
+};
+
+template <class T>
+using PointerOf = typename PointerOfImpl<T>::type;
+
+template <class T, class U>
+struct PointerOfOrImpl {
+    using type = U;
+};
+template <class T, class U>
+    requires requires { typename PointerOfImpl<T>::type; }
+struct PointerOfOrImpl<T, U> {
+    using type = typename PointerOfImpl<T>::type;
+};
+
+template <class T, class U>
+using PointerOfOr = typename PointerOfOrImpl<T, U>::type;
+
+// ── private arg-pack storage: stores out_ptr's/inout_ptr's Args... and,
+// at destruction time, forwards them into a callable, each cast back to
+// its original value category. Mirrors <__bits/bind>'s ArgLeaf/ArgPackImpl
+// almost verbatim, kept as a separate out_ptr-scoped name rather than
+// reused: this pack is used-once-then-destroyed and never itself copied
+// or moved, so it drops the copy/move special members bind's version
+// keeps for its own, genuinely-copyable callable objects. ───────────────
+
+template <size_t I, class T>
+struct AdaptArgLeaf {
+    [[no_unique_address]] T value;
+
+    template <class U>
+        requires(!is_same_v<remove_cvref_t<U>, AdaptArgLeaf>)
+    constexpr explicit AdaptArgLeaf(U &&u) : value(forward<U>(u)) {}
+};
+
+template <class Seq, class... Ts>
+struct AdaptArgsImpl;
+
+template <size_t... Is, class... Ts>
+struct AdaptArgsImpl<index_sequence<Is...>, Ts...> : AdaptArgLeaf<Is, Ts>... {
+    template <class... Us>
+        requires(sizeof...(Us) == sizeof...(Ts))
+    constexpr explicit AdaptArgsImpl(Us &&...us)
+        : AdaptArgLeaf<Is, Ts>(forward<Us>(us))...
+    {
+    }
+
+    // Forwards the stored args to f, each cast back to its original Ts
+    // value category. Called exactly once, from the destructor -- matches
+    // the "destructor called more than once is UB" contract already
+    // implied by [out.ptr.t]/[inout.ptr.t] (there is no reset()).
+    template <class F>
+    constexpr decltype(auto) ForwardTo(F &&f)
+    {
+        return forward<F>(f)(static_cast<Ts &&>(
+            static_cast<AdaptArgLeaf<Is, Ts> &>(*this).value)...);
+    }
+};
+
+template <class... Ts>
+using AdaptArgs = AdaptArgsImpl<index_sequence_for<Ts...>, Ts...>;
+
+// ── IsSharedPtr: needed to reject std::shared_ptr in the static_asserts
+// below -- a plain "no matching reset() overload" fallback would silently
+// mis-dispatch instead of failing loudly. Mirrors <memory>'s own
+// __shared::IsUnboundedArray true/false-specialization idiom. ───────────
+
+template <class T>
+struct IsSharedPtr : false_type {};
+template <class T>
+struct IsSharedPtr<shared_ptr<T>> : true_type {};
+
+} // namespace __bits
+
+// ── out_ptr_t / out_ptr ([out.ptr.t], [out.ptr]) ─────────────────────────
+// Use as a direct call argument only: `c_api(out_ptr(smart, args...))`. The
+// adaptor stores Args as references ([out.ptr.t] exposition-only members),
+// so binding it to a named variable that outlives the full-expression
+// dangles any rvalue arg (e.g. `auto a = out_ptr(s, Deleter{});`) -- this is
+// inherent to P1132R8 and behaves identically in libstdc++/libc++; it is not
+// fixable without deviating from the standard's exposition-only storage.
+
+template <class Smart, class Pointer, class... Args>
+class out_ptr_t {
+    static_assert(sizeof...(Args) > 0 || !__bits::IsSharedPtr<Smart>::value,
+                  "std::out_ptr: a deleter is required when adapting std::shared_ptr "
+                  "(shared_ptr's own reset(pointer) would silently use operator delete, "
+                  "which is wrong for a pointer a C API allocated)");
+
+    Smart                      &s_;
+    __bits::AdaptArgs<Args...> a_;
+    Pointer                     p_{};
+
+public:
+    explicit out_ptr_t(Smart &s, Args... args)   // NOT Args&&... -- Args is already
+        : s_(s), a_(forward<Args>(args)...)      // fully resolved by out_ptr()'s own
+    {                                             // deduction; re-adding && here would
+        if constexpr (requires { s_.reset(); })   // silently change semantics for
+            s_.reset();                          // by-value Args (see out_ptr() below).
+        else if constexpr (is_constructible_v<Smart>)
+            s_ = Smart();
+        else
+            static_assert(is_constructible_v<Smart>,
+                          "std::out_ptr: Smart must have a reset() member "
+                          "or be default-constructible");
+    }
+
+    out_ptr_t(const out_ptr_t &) = delete;
+    // No move ctor/assign declared either: a user-declared copy ctor
+    // suppresses the implicit move members, and Smart& + no copy-assign
+    // means copy-assign is implicitly deleted anyway. A prvalue out_ptr_t
+    // from out_ptr() is used via mandatory copy elision at the call site,
+    // so non-movability is never actually a problem.
+
+    // Implicitly noexcept(true) (matches libc++/libstdc++): if the
+    // construct-and-assign fallback below throws, this terminates by
+    // design ([out.ptr.t] has no cleanup provision). The normal reset()
+    // path is noexcept.
+    ~out_ptr_t()
+    {
+        if (!p_) return;
+        using SP = __bits::PointerOfOr<Smart, Pointer>;
+        a_.ForwardTo([&](Args &&...args) {
+            if constexpr (requires { s_.reset(static_cast<SP>(p_), forward<Args>(args)...); })
+                s_.reset(static_cast<SP>(p_), forward<Args>(args)...);
+            else {
+                static_assert(is_constructible_v<Smart, SP, Args...>,
+                              "std::out_ptr: Smart must be constructible from "
+                              "(SP, Args...) when it has no matching reset() overload");
+                s_ = Smart(static_cast<SP>(p_), forward<Args>(args)...);
+            }
+        });
+    }
+
+    operator Pointer *() const noexcept
+    {
+        return addressof(const_cast<Pointer &>(p_));
+    }
+    operator void **() const noexcept
+        requires(!is_same_v<Pointer, void *>)
+    {
+        static_assert(is_pointer_v<Pointer>,
+                      "std::out_ptr: void** conversion requires Pointer to be a raw pointer");
+        return reinterpret_cast<void **>(static_cast<Pointer *>(*this));
+    }
+};
+
+// Pointer defaults to void as the "not explicitly given" sentinel. The
+// if-constexpr branches keep PointerOf<Smart> uninstantiated when an
+// explicit Pointer is given, so a Smart with no POINTER_OF still works
+// under out_ptr<ExplicitPointer>(...) (lazy selection, matches the
+// standard's prose; conditional_t would eagerly instantiate both sides).
+template <class Pointer = void, class Smart, class... Args>
+[[nodiscard]] auto out_ptr(Smart &s, Args &&...args)
+{
+    if constexpr (is_void_v<Pointer>)
+        return out_ptr_t<Smart, __bits::PointerOf<Smart>, Args &&...>(s, forward<Args>(args)...);
+    else
+        return out_ptr_t<Smart, Pointer, Args &&...>(s, forward<Args>(args)...);
+}
+
+// ── inout_ptr_t / inout_ptr ([inout.ptr.t], [inout.ptr]) ─────────────────
+// Unavailable for shared_ptr: there is no way to seize the currently-
+// managed pointer without running the deleter when other owners might
+// exist (shared_ptr has no release()) -- an unconditional static_assert,
+// not merely a missing overload, so misuse fails loudly.
+
+template <class Smart, class Pointer, class... Args>
+class inout_ptr_t {
+    static_assert(!__bits::IsSharedPtr<Smart>::value,
+                  "std::inout_ptr cannot be used to wrap std::shared_ptr "
+                  "(shared_ptr has no release())");
+
+    Smart                      &s_;
+    __bits::AdaptArgs<Args...> a_;
+    Pointer                     p_;
+
+public:
+    explicit inout_ptr_t(Smart &s, Args... args)
+        : s_(s), a_(forward<Args>(args)...),
+          p_([&s]() -> Pointer {
+              if constexpr (is_pointer_v<Smart>) return s;
+              else return s.get();
+          }())
+    {
+        // Seizes s's currently-managed pointer into p_ above, then empties
+        // s itself: release() if Smart has one (unique_ptr), else default-
+        // construct (identical in both libstdc++ and libc++).
+        if constexpr (requires { s_.release(); })
+            s_.release();
+        else
+            s_ = Smart();
+    }
+
+    inout_ptr_t(const inout_ptr_t &) = delete;
+
+    ~inout_ptr_t()
+    {
+        using SP = __bits::PointerOfOr<Smart, Pointer>;
+        if constexpr (!is_pointer_v<Smart>) {
+            // LWG-3897: this early-out is skipped for raw-pointer Smart --
+            // a raw pointer variable must be updated even to null.
+            if (!p_) return;
+        }
+        a_.ForwardTo([&](Args &&...args) {
+            if constexpr (is_pointer_v<Smart>) {
+                s_ = Smart(static_cast<SP>(p_), forward<Args>(args)...);
+            } else if constexpr (requires { s_.reset(static_cast<SP>(p_), forward<Args>(args)...); }) {
+                s_.reset(static_cast<SP>(p_), forward<Args>(args)...);
+            } else {
+                static_assert(is_constructible_v<Smart, SP, Args...>,
+                              "std::inout_ptr: Smart must be constructible from "
+                              "(SP, Args...) when it has no matching reset() overload");
+                s_ = Smart(static_cast<SP>(p_), forward<Args>(args)...);
+            }
+        });
+    }
+
+    operator Pointer *() const noexcept
+    {
+        return addressof(const_cast<Pointer &>(p_));
+    }
+    operator void **() const noexcept
+        requires(!is_same_v<Pointer, void *>)
+    {
+        static_assert(is_pointer_v<Pointer>,
+                      "std::inout_ptr: void** conversion requires Pointer to be a raw pointer");
+        return reinterpret_cast<void **>(static_cast<Pointer *>(*this));
+    }
+};
+
+// Same lazy-selection reasoning as out_ptr() above.
+template <class Pointer = void, class Smart, class... Args>
+[[nodiscard]] auto inout_ptr(Smart &s, Args &&...args)
+{
+    if constexpr (is_void_v<Pointer>)
+        return inout_ptr_t<Smart, __bits::PointerOf<Smart>, Args &&...>(s, forward<Args>(args)...);
+    else
+        return inout_ptr_t<Smart, Pointer, Args &&...>(s, forward<Args>(args)...);
+}
+
+} // namespace std
+
+#endif // BOXCXX_BITS_SMARTPTR_ADAPT

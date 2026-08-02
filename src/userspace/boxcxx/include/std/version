@@ -66,5 +66,6 @@
 #include <__bits/version_iostreams> // <ios>/<streambuf>: __cpp_lib_ios_noreplace
 #include <__bits/version_complex>   // <complex>: __cpp_lib_constexpr_complex, __cpp_lib_complex_udls
 #include <__bits/version_bitset>    // <bitset>: __cpp_lib_constexpr_bitset
+#include <__bits/version_memory>    // <memory>: __cpp_lib_out_ptr
 
 #endif // BOXCXX_VERSION

@@ -24964,6 +24964,262 @@ void Phase120()
            "and the P2417 constexpr surface battery\n");
 }
 
+// ── phase121 fixtures ────────────────────────────────────────────────────
+
+int P121Create(int **pp)
+{
+    *pp = new int(77);
+    return 0;
+}
+
+struct P121Del {
+    int              tag = 0;
+    static inline int freeCount = 0;
+    void operator()(int *p) const
+    {
+        delete p;
+        ++freeCount;
+    }
+};
+
+int P121CreateArray(int **pp)
+{
+    *pp = new int[4]{1, 2, 3, 4};
+    return 0;
+}
+
+int P121CCreate(void **pp)
+{
+    *pp = new int(99);
+    return 0;
+}
+
+int *g_p121OldSeen = nullptr;
+
+int P121Realloc(int **pp)
+{
+    g_p121OldSeen = *pp;
+    delete *pp;
+    *pp            = new int(20);
+    return 0;
+}
+
+// Counting allocator: proves out_ptr threads a supplied allocator through
+// shared_ptr's (Y*,Deleter,Alloc) construct fallback (control-block alloc).
+int g_p121AllocCount = 0;
+
+template <class T>
+struct P121Alloc {
+    using value_type = T;
+    P121Alloc() = default;
+    template <class U>
+    P121Alloc(const P121Alloc<U> &) noexcept {}
+    T *allocate(std::size_t n)
+    {
+        ++g_p121AllocCount;
+        return static_cast<T *>(::operator new(n * sizeof(T)));
+    }
+    void deallocate(T *p, std::size_t) noexcept { ::operator delete(p); }
+    template <class U>
+    bool operator==(const P121Alloc<U> &) const noexcept { return true; }
+    template <class U>
+    bool operator!=(const P121Alloc<U> &) const noexcept { return false; }
+};
+
+// A C API that declares failure and writes NOTHING to the out-parameter.
+int P121Fail(int **pp)
+{
+    (void)pp;
+    return -1;
+}
+
+void Phase121()
+{
+    // ── Ф30f-1: std::out_ptr / std::inout_ptr ([smartptr.adapt], P1132R8)
+    //    -- out-parameter adaptors so a C API's T**/void** "out" argument
+    //    writes straight into a unique_ptr/shared_ptr/raw pointer, which
+    //    then adopts (out_ptr) or seizes-then-adopts (inout_ptr) it. ──────
+
+    // (0) FTM.
+    static_assert(__cpp_lib_out_ptr >= 202106L, "phase121 __cpp_lib_out_ptr pin");
+
+    // (1) out_ptr + unique_ptr<int>, default deleter.
+    {
+        std::unique_ptr<int> up;
+        Check(P121Create(std::out_ptr(up)) == 0, "phase121 out_ptr unique_ptr default: C call ok");
+        Check(up != nullptr && *up == 77, "phase121 out_ptr unique_ptr default: adopted value 77");
+    }
+
+    // (2) out_ptr + unique_ptr<int,D>, replacement (stateful) deleter --
+    //     proves the construct-and-move-assign fallback (reset(pointer)
+    //     alone cannot carry a replacement deleter).
+    {
+        P121Del::freeCount = 0;
+        std::unique_ptr<int, P121Del> up(nullptr, P121Del{1});
+        Check(P121Create(std::out_ptr(up, P121Del{2})) == 0,
+              "phase121 out_ptr unique_ptr custom-deleter: C call ok");
+        Check(*up == 77, "phase121 out_ptr unique_ptr custom-deleter: adopted value 77");
+        Check(up.get_deleter().tag == 2,
+              "phase121 out_ptr unique_ptr custom-deleter: replacement deleter (tag 2) adopted, not tag 1");
+        Check(P121Del::freeCount == 0,
+              "phase121 out_ptr unique_ptr custom-deleter: no delete happened yet (up was null before)");
+    }
+
+    // (3) out_ptr + unique_ptr<int[]>, array.
+    {
+        std::unique_ptr<int[]> uparr;
+        Check(P121CreateArray(std::out_ptr(uparr)) == 0, "phase121 out_ptr unique_ptr<int[]>: C call ok");
+        Check(uparr[0] == 1 && uparr[3] == 4, "phase121 out_ptr unique_ptr<int[]>: values [1,2,3,4] adopted");
+    }
+
+    // (4) out_ptr + shared_ptr<int>, deleter only (1 Arg).
+    {
+        std::shared_ptr<int> sp1;
+        auto                  delFn = [](int *p) { delete p; };
+        Check(P121Create(std::out_ptr(sp1, delFn)) == 0, "phase121 out_ptr shared_ptr+deleter: C call ok");
+        Check(sp1 && *sp1 == 77 && sp1.use_count() == 1,
+              "phase121 out_ptr shared_ptr+deleter: adopted, use_count==1");
+    }
+
+    // (5) out_ptr + shared_ptr<int>, deleter + allocator (2 Args). boxcxx's
+    //     shared_ptr currently lacks a reset(Y*,Deleter,Alloc) overload, so
+    //     this exercises the construct-and-assign fallback; the counting
+    //     allocator proves the supplied allocator is actually threaded
+    //     through that fallback ctor (control-block allocation), not
+    //     silently substituted.
+    {
+        g_p121AllocCount = 0;
+        std::shared_ptr<int> sp2;
+        auto                 delFn = [](int *p) { delete p; };
+        Check(P121Create(std::out_ptr(sp2, delFn, P121Alloc<int>())) == 0,
+              "phase121 out_ptr shared_ptr+deleter+alloc: C call ok");
+        Check(sp2 && *sp2 == 77 && sp2.use_count() == 1,
+              "phase121 out_ptr shared_ptr+deleter+alloc: adopted, use_count==1");
+        Check(g_p121AllocCount >= 1,
+              "phase121 out_ptr shared_ptr+deleter+alloc: supplied allocator threaded through the fallback ctor");
+    }
+
+    // (6) out_ptr + shared_ptr, 0 Args -- MUST be ill-formed (class-body
+    //     static_assert in out_ptr_t). Not automatable in this harness:
+    //     instantiating a class template inside a requires{}/decltype() to
+    //     "test" it is not immediate context per [temp.deduct], so this
+    //     cannot be SFINAE-probed without hard-erroring the whole TU.
+    //     Verified manually once in a disposable scratch TU (see the
+    //     Ф30f-1 verification notes); positive proxy for the Args>0 branch
+    //     already covered by cases (4)/(5) above.
+
+    // (7) out_ptr + raw int*.
+    {
+        int *raw = nullptr;
+        Check(P121Create(std::out_ptr(raw)) == 0, "phase121 out_ptr raw T*: C call ok");
+        Check(raw != nullptr && *raw == 77, "phase121 out_ptr raw T*: adopted value 77");
+        delete raw;
+    }
+
+    // (8) void** conversion path (C-API `int Create(void**)` idiom), plus a
+    //     compile-time check that when Pointer is already void*, only ONE
+    //     conversion operator exists (no ambiguity with operator Pointer*()).
+    {
+        std::unique_ptr<int> up3;
+        Check(P121CCreate(std::out_ptr(up3)) == 0, "phase121 out_ptr void** conversion: C call ok");
+        Check(up3 && *up3 == 99, "phase121 out_ptr void** conversion: adopted value 99");
+
+        void *rawVoid = nullptr;
+        static_assert(std::is_same_v<decltype(std::out_ptr<void *>(rawVoid)),
+                                      std::out_ptr_t<void *, void *>>,
+                      "phase121 out_ptr<void*>: P == void*, operator void**() correctly absent "
+                      "(would collide with operator Pointer*())");
+    }
+
+    // (9) inout_ptr + unique_ptr<int> -- seizes the existing pointer; the
+    //     C API observes the OLD value, frees it itself, and the new value
+    //     it writes back is what gets adopted.
+    {
+        std::unique_ptr<int> up4(new int(10));
+        int                  *originalRaw = up4.get();
+        Check(P121Realloc(std::inout_ptr(up4)) == 0, "phase121 inout_ptr unique_ptr: C call ok");
+        Check(g_p121OldSeen == originalRaw,
+              "phase121 inout_ptr unique_ptr: C API saw the ORIGINAL pointer (seized, not a copy)");
+        Check(up4 && *up4 == 20, "phase121 inout_ptr unique_ptr: NEW pointer (value 20) adopted");
+    }
+
+    // (10) inout_ptr + shared_ptr -- MUST be ill-formed (unconditional
+    //      class-body static_assert in inout_ptr_t, no Args>0 escape hatch:
+    //      shared_ptr has no release()). Same "not automatable in this
+    //      harness" reasoning as case (6); verified manually once.
+
+    // (11) [out.ptr.t]'s construct-and-assign fallback throwing terminates
+    //      (destructors are implicitly noexcept(true)) -- verified against
+    //      both libc++ and libstdc++ (exit 134/SIGABRT). Not exercised
+    //      in-suite: an in-process test would abort the whole cxxtest run.
+    //      Positive fallback-adopts-correctly coverage is cases (2)/(5).
+
+    // (12) self-consistency: two independent, sequential out_ptr round-
+    //      trips on the same variable. Each round-trip's "C call ok" check
+    //      and "value adopted" check MUST be separate full-expressions:
+    //      out_ptr(up5)'s temporary out_ptr_t lives until the end of the
+    //      full-expression it appears in, and its destructor (which calls
+    //      up5.reset(...) to adopt the new pointer) only runs then -- so
+    //      chaining *up5==77 onto the SAME Check(...) via && would read
+    //      up5 before it was ever adopted (still null on round 1). A
+    //      counting deleter (not a raw-pointer-value comparison) proves the
+    //      previous object is freed exactly once across the second round-trip
+    //      (case 13 localizes that free to the ctor's upfront reset):
+    //      comparing addresses would be allocator-reuse-dependent (the
+    //      just-freed block can legitimately come straight back from the
+    //      very next same-size allocation).
+    {
+        P121Del::freeCount = 0;
+        std::unique_ptr<int, P121Del> up5;
+        Check(P121Create(std::out_ptr(up5)) == 0, "phase121 self-consistency: first round-trip C call ok");
+        Check(*up5 == 77, "phase121 self-consistency: first round-trip adopted value 77");
+        Check(P121Del::freeCount == 0,
+              "phase121 self-consistency: first round-trip freed nothing (up5 was null before)");
+        Check(P121Create(std::out_ptr(up5)) == 0, "phase121 self-consistency: second round-trip C call ok");
+        Check(*up5 == 77, "phase121 self-consistency: second round-trip adopted value 77");
+        Check(P121Del::freeCount == 1,
+              "phase121 self-consistency: the previous object is freed exactly once across the "
+              "second round-trip");
+    }
+
+    // (13) out_ptr fail-path (unique_ptr): the C API declares failure and
+    //      writes NOTHING. out_ptr_t's ctor still emptied `up` up front
+    //      (freeing the prior object exactly once -- localizing the ctor's
+    //      upfront reset, which the success-path cases can't isolate from
+    //      the dtor's own reset), and the dtor's `if(!p_) return` guard
+    //      leaves `up` null rather than adopting a stale pointer.
+    {
+        P121Del::freeCount = 0;
+        std::unique_ptr<int, P121Del> up(new int(5), P121Del{7});
+        Check(P121Fail(std::out_ptr(up)) == -1,
+              "phase121 out_ptr fail-path unique_ptr: C call returned error");
+        Check(up == nullptr,
+              "phase121 out_ptr fail-path unique_ptr: up left null (dtor guard skipped adopt)");
+        Check(P121Del::freeCount == 1,
+              "phase121 out_ptr fail-path unique_ptr: prior object freed exactly once by the ctor's reset");
+    }
+
+    // (14) out_ptr fail-path (shared_ptr+alloc): C API fails, writes nothing.
+    //      The dtor null-guard must leave `sp` EMPTY (use_count 0); dropping
+    //      the guard would build shared_ptr(nullptr,d,a) -- a non-empty null
+    //      shared_ptr with a live control block (use_count 1) -- so this makes
+    //      the guard observable for the construct-fallback path.
+    {
+        std::shared_ptr<int> sp;
+        auto                 delFn = [](int *p) { delete p; };
+        Check(P121Fail(std::out_ptr(sp, delFn, P121Alloc<int>())) == -1,
+              "phase121 out_ptr fail-path shared_ptr: C call returned error");
+        Check(!sp && sp.use_count() == 0,
+              "phase121 out_ptr fail-path shared_ptr: sp left empty (dtor guard, not shared_ptr(nullptr,d,a))");
+    }
+
+    printf("[CXX] PASS phase121: std::out_ptr/std::inout_ptr ([smartptr.adapt], P1132R8) -- "
+           "unique_ptr default/custom-deleter/array, shared_ptr deleter-only and deleter+allocator "
+           "(both proving the construct-and-assign fallback), raw T*, the void** C-API conversion "
+           "path, inout_ptr seize-then-adopt (C API observes the original pointer), self-consistency "
+           "across repeated round-trips, and the __cpp_lib_out_ptr FTM pin\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -25106,6 +25362,7 @@ int main()
     Phase118();
     Phase119();
     Phase120();
+    Phase121();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
