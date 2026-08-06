@@ -1,7 +1,12 @@
 // __bits/chrono_format — std::formatter specializations for chrono types
 // ([time.format]). Included by <chrono> AFTER <format>. ASCII / "C"-locale
-// only (no localized names, no Unicode width). Invalid-value diagnostic
-// suffixes ("… is not a valid …") are NOT emitted — documented deviation.
+// only: the L option and the E/O locale modifiers are accepted and ignored
+// because the formatting locale ([time.format]/2) is always "C" here.
+//
+// Which conversion specifiers a type accepts is decided in parse(), from the
+// per-type field mask ([time.format]/6) — so a spec the type cannot satisfy is
+// a compile error through the consteval format-string checker, exactly as it
+// is a runtime format_error through vformat().
 #ifndef BOXCXX_BITS_CHRONO_FORMAT
 #define BOXCXX_BITS_CHRONO_FORMAT
 
@@ -10,6 +15,7 @@
 #include <string>
 #include <string_view>
 #include <charconv>
+#include <type_traits>
 
 namespace std {
 namespace __chrono_fmt {
@@ -26,6 +32,22 @@ inline constexpr const char *kWdFull[] = {"Sunday",    "Monday",   "Tuesday",
                                           "Wednesday", "Thursday", "Friday",
                                           "Saturday"};
 
+// The kinds of information a formatted type carries ([time.format]/6). A
+// formatter advertises what it has; parse() rejects every conversion specifier
+// that needs something absent. kDate means "a complete civil date", so it
+// subsumes the four single-field bits.
+enum Fields : unsigned {
+    kDay      = 1u << 0,
+    kMonth    = 1u << 1,
+    kYear     = 1u << 2,
+    kWeekday  = 1u << 3,
+    kDate     = (1u << 4) | kYear | kMonth | kDay | kWeekday,
+    kTime     = 1u << 5,
+    kZone     = 1u << 6,
+    kDuration = 1u << 7,
+    kPrec     = 1u << 8, // a precision is legal (floating-point-rep durations)
+};
+
 struct Parts {
     bool      neg  = false;
     long long year = 0;
@@ -34,16 +56,41 @@ struct Parts {
     long long sub  = 0;
     unsigned  subw = 0;
     unsigned  wd   = 0; // 0 = Sunday
-    long long yday = 0;
+    long long yday = 0; // 1-based day of year
     bool      have_date = false;
     bool      have_time = false;
+    bool      mon_ok    = true; // %b/%B/%h throw on an invalid month
+    bool      wd_ok     = true; // %a/%A throw on an invalid weekday
+    // [time.cal.ymd] leaves the sys_days conversion unspecified unless the year
+    // and month are both ok(), so everything derived from it (%j/%U/%W/%V/%G/%g
+    // and the weekday) carries no information and must throw instead of
+    // printing a value the standard never defined.
+    bool      date_ok   = true;
+    // Zone (only clock time_points and local-time-format-t supply these).
+    const char *zone     = nullptr; // %Z text
+    bool        has_zoff = false;
+    int         zoff_min = 0; // %z offset, minutes east of UTC
+    // Duration-only, pre-rendered by the duration formatter.
+    string_view qtext; // %Q — the (positive) numeric value
+    string_view unit;  // %q — the unit suffix
 };
+
+// |v| as an unsigned value. Wrapping inside the unsigned type is the only way
+// to take the magnitude of the most negative value ([expr.unary.op]/8 makes
+// -numeric_limits<T>::min() undefined for a signed T).
+constexpr unsigned long long AbsLL(long long v)
+{
+    return v < 0 ? (unsigned long long)(0ULL - (unsigned long long)v)
+                 : (unsigned long long)v;
+}
 
 inline void put_uint(string &o, unsigned long long v, int w)
 {
-    char b[24];
+    char b[24]; // 20 digits is the widest unsigned long long
     auto r = to_chars(b, b + sizeof b, v);
-    int  n = int(r.ptr - b);
+    if (r.ec != errc{}) // unreachable; never append uninitialised bytes
+        throw format_error("chrono format: number does not fit its buffer");
+    int n = int(r.ptr - b);
     for (int i = n; i < w; ++i) o.push_back('0');
     o.append(b, size_t(n));
 }
@@ -51,18 +98,156 @@ inline void put_uint_sp(string &o, unsigned long long v, int w)
 {
     char b[24];
     auto r = to_chars(b, b + sizeof b, v);
-    int  n = int(r.ptr - b);
+    if (r.ec != errc{})
+        throw format_error("chrono format: number does not fit its buffer");
+    int n = int(r.ptr - b);
     for (int i = n; i < w; ++i) o.push_back(' ');
     o.append(b, size_t(n));
 }
-inline void put_year(string &o, long long y)
+// Sign followed by the zero-padded magnitude — the shape %Y and %C use, shared
+// with the fields that can only go negative for a calendar value that is not
+// ok() (%j/%U/%W/%V of e.g. 2021y/month{0}/day{1}).
+inline void put_int(string &o, long long v, int w)
 {
-    unsigned long long m = y < 0 ? (unsigned long long)(-y) : (unsigned long long)y;
-    if (y < 0) o.push_back('-');
-    put_uint(o, m, 4);
+    if (v < 0) o.push_back('-');
+    put_uint(o, AbsLL(v), w);
+}
+inline void put_year(string &o, long long y) { put_int(o, y, 4); }
+// %C: the year divided by 100 using *floored* division, so -1976 gives -20.
+inline void put_century(string &o, long long y)
+{
+    put_int(o, chrono::__detail::fdiv(y, 100), 2);
 }
 
-// Walk a chrono-format string, appending rendered fields to `o`.
+// ── duration rep rendering ──────────────────────────────────────────────
+// chars_format::general strips trailing zeros, so the output length is bounded
+// by the value's exact decimal expansion (~760 chars for a double, ~16.5 KB for
+// an 80-bit long double subnormal) and never by the requested precision. Sizing
+// the buffer from `precision` would turn "{:.2000000000}" into a 2 GB
+// allocation, so grow from a fixed start that already covers every double.
+template <class T>
+inline void AppendFloatRep(string &o, T v, int precision)
+{
+    for (size_t cap = 1024;; cap *= 2) {
+        string tmp;
+        tmp.resize(cap);
+        char *b = tmp.data();
+        auto  r = precision < 0
+                      ? to_chars(b, b + cap, v)
+                      : to_chars(b, b + cap, v, chars_format::general, precision);
+        if (r.ec == errc{}) {
+            o.append(b, size_t(r.ptr - b));
+            return;
+        }
+    }
+}
+
+// Renders a duration's count(). `magnitude` selects |v| — with chrono-specs the
+// output is that of the positive value plus a leading '-' ([time.format]/4).
+// `precision` < 0 means "unspecified": %Q then uses the shortest round-trip
+// form and the default (streamed) form uses ostream's default precision of 6
+// ([time.duration.io] streams count() through an ostream).
+template <class Rep>
+inline void PutRep(string &o, const Rep &v, int precision, bool shortest,
+                   bool magnitude)
+{
+    if constexpr (chrono::treat_as_floating_point_v<Rep>) {
+        int p = precision >= 0 ? precision : (shortest ? -1 : 6);
+        if constexpr (is_same_v<Rep, float> || is_same_v<Rep, double> ||
+                      is_same_v<Rep, long double>) {
+            Rep x = (magnitude && v < Rep(0)) ? Rep(-v) : v;
+            AppendFloatRep(o, x, p);
+        } else {
+            double x = double(v);
+            if (magnitude && x < 0) x = -x;
+            AppendFloatRep(o, x, p);
+        }
+    } else {
+        char b[32];
+        if (magnitude) {
+            // Wrap the whole negation in the unsigned type: |Rep::min()| is not
+            // representable in Rep.
+            unsigned long long m;
+            if constexpr (is_signed_v<Rep>)
+                m = v < Rep(0)
+                        ? (unsigned long long)(0ULL - (unsigned long long)v)
+                        : (unsigned long long)v;
+            else
+                m = (unsigned long long)v;
+            auto r = to_chars(b, b + sizeof b, m);
+            o.append(b, size_t(r.ptr - b));
+        } else {
+            auto r = to_chars(b, b + sizeof b, v);
+            o.append(b, size_t(r.ptr - b));
+        }
+    }
+}
+
+// ── week numbering ──────────────────────────────────────────────────────
+// %U (Sunday-based) / %W (Monday-based): the week containing the year's first
+// such weekday is week 01; the days before it are week 00.
+// Signed: a year_month_day is not validated, so a value that is not ok() (say
+// 2021y/month{0}/day{1}) legitimately produces a negative day of the year and
+// therefore a negative week number. It can never be negative for an ok() date.
+inline long long WeekNumber(const Parts &p, bool monday_based)
+{
+    long long yday0 = p.yday - 1;
+    unsigned  wd    = monday_based ? (p.wd + 6u) % 7u : p.wd;
+    return (yday0 + 7 - (long long)wd) / 7;
+}
+
+// ISO 8601-1:2019 week calendar (%V/%G/%g): a week belongs to the year that
+// contains its Thursday, and week 01 is the one holding the year's first
+// Thursday.
+inline void IsoWeek(const Parts &p, long long &iso_year, long long &iso_week)
+{
+    long long sd  = chrono::__detail::days_from_civil(p.year, p.month, p.day);
+    unsigned  wdi = p.wd == 0u ? 7u : p.wd; // Monday = 1 … Sunday = 7
+    long long thu = sd + (4 - (long long)wdi);
+    long long yy;
+    unsigned  mm, dd;
+    chrono::__detail::civil_from_days(thu, yy, mm, dd);
+    iso_year       = yy;
+    long long jan1 = chrono::__detail::days_from_civil(yy, 1, 1);
+    iso_week       = (thu - jan1) / 7 + 1;
+}
+
+// ── time-of-day pieces ──────────────────────────────────────────────────
+// The hour of a duration is not reduced (a 50 h duration prints %H as 50, which
+// is what %T already shows), so this must stay 64-bit wide.
+inline unsigned long long Hour12(long long h)
+{
+    return h == 0 ? 12ull
+                  : (h > 12 ? (unsigned long long)(h - 12)
+                            : (unsigned long long)h);
+}
+inline void put_secs(string &o, const Parts &p, bool frac)
+{
+    put_uint(o, (unsigned long long)p.s, 2);
+    if (frac && p.subw) {
+        o.push_back('.');
+        put_uint(o, (unsigned long long)p.sub, int(p.subw));
+    }
+}
+inline void put_time24(string &o, const Parts &p, bool frac)
+{
+    put_uint(o, (unsigned long long)p.h, 2);
+    o.push_back(':');
+    put_uint(o, (unsigned long long)p.mi, 2);
+    o.push_back(':');
+    put_secs(o, p, frac);
+}
+
+inline void RequireDate(const Parts &p)
+{
+    if (!p.date_ok)
+        throw format_error("chrono format: the value is not a valid date");
+}
+
+// Walk a chrono-format string, appending rendered fields to `o`. Every
+// conversion specifier here was already accepted by parse() against the type's
+// field mask, so only value-dependent failures (%Z without a zone, an invalid
+// month for %b) can still throw.
 inline void render(string &o, string_view f, const Parts &p)
 {
     const char *q = f.data();
@@ -71,39 +256,52 @@ inline void render(string &o, string_view f, const Parts &p)
         char c = *q++;
         if (c != '%') { o.push_back(c); continue; }
         if (q == e) throw format_error("chrono format: trailing '%'");
-        char k = *q++;
-        unsigned long long ay =
-            (unsigned long long)(p.year < 0 ? -p.year : p.year);
+        char mod = 0;
+        char k   = *q++;
+        if (k == 'E' || k == 'O') {
+            if (q == e) throw format_error("chrono format: trailing modifier");
+            mod = k;
+            k   = *q++;
+        }
         switch (k) {
         case 'Y': put_year(o, p.year); break;
-        case 'y': put_uint(o, ay % 100, 2); break;
-        case 'C': put_uint(o, ay / 100, 2); break;
+        case 'y': put_uint(o, AbsLL(p.year) % 100, 2); break;
+        case 'C': put_century(o, p.year); break;
         case 'm': put_uint(o, p.month, 2); break;
         case 'd': put_uint(o, p.day, 2); break;
         case 'e': put_uint_sp(o, p.day, 2); break;
         case 'H': put_uint(o, (unsigned long long)p.h, 2); break;
-        case 'I': {
-            long long          hh  = p.h % 24;
-            unsigned long long h12 = (hh % 12 == 0) ? 12 : (unsigned long long)(hh % 12);
-            put_uint(o, h12, 2);
-        } break;
+        case 'I': put_uint(o, Hour12(p.h), 2); break;
         case 'M': put_uint(o, (unsigned long long)p.mi, 2); break;
-        case 'S':
-            put_uint(o, (unsigned long long)p.s, 2);
-            if (p.subw) { o.push_back('.'); put_uint(o, (unsigned long long)p.sub, int(p.subw)); }
-            break;
-        case 'T':
-            put_uint(o, (unsigned long long)p.h, 2);
-            o.push_back(':');
-            put_uint(o, (unsigned long long)p.mi, 2);
-            o.push_back(':');
-            put_uint(o, (unsigned long long)p.s, 2);
-            if (p.subw) { o.push_back('.'); put_uint(o, (unsigned long long)p.sub, int(p.subw)); }
-            break;
+        case 'S': put_secs(o, p, true); break;
+        case 'T': put_time24(o, p, true); break;
+        case 'X': put_time24(o, p, false); break;
         case 'R':
             put_uint(o, (unsigned long long)p.h, 2);
             o.push_back(':');
             put_uint(o, (unsigned long long)p.mi, 2);
+            break;
+        case 'r':
+            put_uint(o, Hour12(p.h), 2);
+            o.push_back(':');
+            put_uint(o, (unsigned long long)p.mi, 2);
+            o.push_back(':');
+            put_secs(o, p, false);
+            o.push_back(' ');
+            o.append(p.h < 12 ? "AM" : "PM");
+            break;
+        case 'c': // "C" locale date+time: %a %b %e %H:%M:%S %Y
+            if (!p.wd_ok) throw format_error("chrono format: invalid weekday");
+            if (!p.mon_ok) throw format_error("chrono format: invalid month");
+            o.append(kWdAbbr[p.wd % 7]);
+            o.push_back(' ');
+            o.append(kMonAbbr[(p.month - 1) % 12]);
+            o.push_back(' ');
+            put_uint_sp(o, p.day, 2);
+            o.push_back(' ');
+            put_time24(o, p, false);
+            o.push_back(' ');
+            put_year(o, p.year);
             break;
         case 'F':
             put_year(o, p.year);
@@ -113,21 +311,82 @@ inline void render(string &o, string_view f, const Parts &p)
             put_uint(o, p.day, 2);
             break;
         case 'D':
+        case 'x': // "C" locale date: %m/%d/%y
             put_uint(o, p.month, 2);
             o.push_back('/');
             put_uint(o, p.day, 2);
             o.push_back('/');
-            put_uint(o, ay % 100, 2);
+            put_uint(o, AbsLL(p.year) % 100, 2);
             break;
-        case 'j': put_uint(o, (unsigned long long)p.yday, 3); break;
-        case 'a': o.append(kWdAbbr[p.wd % 7]); break;
-        case 'A': o.append(kWdFull[p.wd % 7]); break;
+        case 'j':
+            // For a duration this is the number of whole days, unpadded.
+            if (!p.have_date) { put_int(o, p.h / 24, 1); break; }
+            RequireDate(p);
+            put_int(o, p.yday, 3);
+            break;
+        case 'U':
+            RequireDate(p);
+            put_int(o, WeekNumber(p, false), 2);
+            break;
+        case 'W':
+            RequireDate(p);
+            put_int(o, WeekNumber(p, true), 2);
+            break;
+        case 'V': {
+            RequireDate(p);
+            long long iy, iw;
+            IsoWeek(p, iy, iw);
+            put_int(o, iw, 2);
+        } break;
+        case 'G': {
+            RequireDate(p);
+            long long iy, iw;
+            IsoWeek(p, iy, iw);
+            put_year(o, iy);
+        } break;
+        case 'g': {
+            RequireDate(p);
+            long long iy, iw;
+            IsoWeek(p, iy, iw);
+            put_uint(o, AbsLL(iy) % 100, 2);
+        } break;
+        case 'a':
+            if (!p.wd_ok) throw format_error("chrono format: invalid weekday");
+            o.append(kWdAbbr[p.wd % 7]);
+            break;
+        case 'A':
+            if (!p.wd_ok) throw format_error("chrono format: invalid weekday");
+            o.append(kWdFull[p.wd % 7]);
+            break;
         case 'b':
-        case 'h': o.append(kMonAbbr[(p.month - 1) % 12]); break;
-        case 'B': o.append(kMonFull[(p.month - 1) % 12]); break;
-        case 'p': o.append((p.h % 24) < 12 ? "AM" : "PM"); break;
+        case 'h':
+            if (!p.mon_ok) throw format_error("chrono format: invalid month");
+            o.append(kMonAbbr[(p.month - 1) % 12]);
+            break;
+        case 'B':
+            if (!p.mon_ok) throw format_error("chrono format: invalid month");
+            o.append(kMonFull[(p.month - 1) % 12]);
+            break;
+        case 'p': o.append(p.h < 12 ? "AM" : "PM"); break;
         case 'u': put_uint(o, (unsigned long long)(p.wd == 0 ? 7 : p.wd), 1); break;
         case 'w': put_uint(o, (unsigned long long)p.wd, 1); break;
+        case 'z': {
+            if (!p.has_zoff)
+                throw format_error("chrono format: no offset information");
+            const long long    m  = p.zoff_min;
+            unsigned long long am = AbsLL(m);
+            o.push_back(m < 0 ? '-' : '+');
+            put_uint(o, am / 60u, 2);
+            if (mod) o.push_back(':'); // %Ez / %Oz insert the colon
+            put_uint(o, am % 60u, 2);
+        } break;
+        case 'Z':
+            if (!p.zone)
+                throw format_error("chrono format: no time zone abbreviation");
+            o.append(p.zone);
+            break;
+        case 'Q': o.append(p.qtext.data(), p.qtext.size()); break;
+        case 'q': o.append(p.unit.data(), p.unit.size()); break;
         case 'n': o.push_back('\n'); break;
         case 't': o.push_back('\t'); break;
         case '%': o.push_back('%'); break;
@@ -136,13 +395,103 @@ inline void render(string &o, string_view f, const Parts &p)
     }
 }
 
-// Common parse for the chrono spec: [fill]align width(opt) .prec(opt) chars.
-// constexpr — the consteval format-string checker calls formatter::parse().
+// ── parse-time validation ───────────────────────────────────────────────
+// The information a conversion specifier needs; 0 for the ones every type can
+// satisfy. %j and %c are handled by the caller (they are "either" / "both").
+constexpr unsigned RequiredFields(char k)
+{
+    switch (k) {
+    case 'a': case 'A': case 'u': case 'w': return kWeekday;
+    case 'b': case 'B': case 'h': case 'm': return kMonth;
+    case 'd': case 'e':                     return kDay;
+    case 'C': case 'y': case 'Y':           return kYear;
+    case 'D': case 'F': case 'g': case 'G':
+    case 'U': case 'V': case 'W': case 'x': return kDate;
+    case 'H': case 'I': case 'M': case 'S':
+    case 'T': case 'R': case 'X': case 'p': case 'r': return kTime;
+    case 'c':                               return kDate | kTime;
+    case 'z': case 'Z':                     return kZone;
+    case 'q': case 'Q':                     return kDuration;
+    case 'n': case 't': case '%':           return 0;
+    default:
+        throw format_error("chrono format: unsupported conversion specifier");
+    }
+}
+
+// The E/O modifiers are only defined for the conversions listed in
+// [time.format]'s table; every other pairing is ill-formed.
+constexpr bool ModifierOk(char mod, char k)
+{
+    if (mod == 'E')
+        return k == 'c' || k == 'C' || k == 'x' || k == 'X' || k == 'y' ||
+               k == 'Y' || k == 'z';
+    return k == 'd' || k == 'e' || k == 'H' || k == 'I' || k == 'm' ||
+           k == 'M' || k == 'S' || k == 'u' || k == 'U' || k == 'V' ||
+           k == 'w' || k == 'W' || k == 'y' || k == 'z';
+}
+
+// Rejects every conversion specifier the type cannot satisfy and returns the
+// union of what the chrono-specs actually asked for, so a formatter can skip
+// work nothing referenced (the duration formatter must not decompose a value
+// into a time of day for "{:%Q}").
+constexpr unsigned validate_specs(string_view f, unsigned fields)
+{
+    unsigned    used = 0;
+    const char *q    = f.data();
+    const char *e    = q + f.size();
+    while (q != e) {
+        const char c = *q++;
+        // literal-char is "any character other than {, }, or %"
+        // ([time.format]/1); parse_spec already stops at '}'.
+        if (c == '{')
+            throw format_error("chrono format: '{' is not a literal-char");
+        if (c != '%') continue;
+        if (q == e) throw format_error("chrono format: trailing '%'");
+        char mod = 0;
+        char k   = *q++;
+        if (k == 'E' || k == 'O') {
+            if (q == e) throw format_error("chrono format: trailing modifier");
+            mod = k;
+            k   = *q++;
+        }
+        if (mod && !ModifierOk(mod, k))
+            throw format_error("chrono format: invalid E/O modifier");
+        if (k == 'j') {
+            // A *complete* date has a day of the year; a duration has a day
+            // count. kDate is a composite, so it has to match in full — a lone
+            // kDay/kMonth/kYear/kWeekday bit must not let %j through.
+            if ((fields & kDate) != kDate && !(fields & kDuration))
+                throw format_error(
+                    "chrono format: type lacks the information the "
+                    "chrono-specs require");
+            used |= kDate | kTime; // a duration's day count comes from its
+                                   // time-of-day decomposition
+            continue;
+        }
+        unsigned need = RequiredFields(k);
+        if ((fields & need) != need)
+            throw format_error("chrono format: type lacks the information the "
+                               "chrono-specs require");
+        used |= need;
+    }
+    return used;
+}
+
+// Common parse for the chrono spec: [fill]align width(opt) .prec(opt) L(opt)
+// then the %-conversion tail. constexpr — the consteval format-string checker
+// calls formatter::parse(), so every diagnostic below is a compile error for a
+// literal format string.
 constexpr const char *parse_spec(format_parse_context &pc, __format::StdSpec &s,
-                                 string_view &chrono)
+                                 string_view &chrono, unsigned fields,
+                                 unsigned &used)
 {
     const char *p = pc.begin();
     const char *e = pc.end();
+    if (p == e) { // an empty spec: forming p + 1 below would be out of bounds
+        chrono = string_view(p, size_t(0));
+        used   = 0;
+        return p;
+    }
     if (p + 1 < e && __format::IsAlignChar(p[1]) && *p != '{' && *p != '}') {
         s.fill  = *p;
         s.align = __format::AlignOf(p[1]);
@@ -169,9 +518,21 @@ constexpr const char *parse_spec(format_parse_context &pc, __format::StdSpec &s,
         } else
             throw format_error("chrono format: missing precision");
     }
+    if ((s.precision >= 0 || s.prec_dynamic) && !(fields & kPrec))
+        throw format_error("chrono format: a precision is only valid for a "
+                           "duration with a floating-point representation");
+    if (p != e && *p == 'L') { // formatting locale — always "C" here
+        s.localized = true;
+        ++p;
+    }
     const char *start = p;
     while (p != e && *p != '}') ++p;
     chrono = string_view(start, size_t(p - start));
+    // chrono-specs derives from conversion-spec, so it cannot start with a
+    // literal character.
+    if (!chrono.empty() && chrono.front() != '%')
+        throw format_error("chrono format: chrono-specs must start with '%'");
+    used = validate_specs(chrono, fields);
     return p;
 }
 
@@ -189,6 +550,9 @@ inline Parts date_parts(const chrono::year_month_day &ymd)
     p.year      = (long long)int(ymd.year());
     p.month     = unsigned(ymd.month());
     p.day       = unsigned(ymd.day());
+    p.mon_ok    = ymd.month().ok();
+    p.date_ok   = ymd.year().ok() && ymd.month().ok();
+    p.wd_ok     = p.date_ok; // the weekday comes from the conversion
     chrono::sys_days sd = ymd;
     p.wd        = chrono::weekday(sd).c_encoding();
     long long jan1 =
@@ -209,128 +573,64 @@ inline void fill_time(Parts &p, const chrono::hh_mm_ss<Duration> &hms)
     p.sub       = (long long)hms.subseconds().count();
 }
 
-// Shared base for every chrono formatter: parses [fill]align/width/.prec and
-// captures the %-conversion tail. Mirrors __format::StringSpecParser so each
-// formatter only defines format(). spec_/chrono_ are inherited.
-struct SpecParser {
-    __format::StdSpec spec_;
-    string_view       chrono_;
-    constexpr typename format_parse_context::iterator
-    parse(format_parse_context &pc)
-    {
-        const char *p = parse_spec(pc, spec_, chrono_);
-        pc.advance_to(p);
-        return p;
+// hh_mm_ss<D>::precision counts 10^-fractional_width ticks, and reaching it
+// from hours multiplies 3600 by that scale — which overflows intmax_t's ratio
+// arithmetic for periods finer than about a femtosecond. Such a duration simply
+// has no time-of-day decomposition: libstdc++ and libc++ then fail to *compile*
+// any format of it, including "{}" and "{:%q}". boxcxx keeps those working and
+// throws only when a time-of-day field is actually requested.
+template <class D>
+inline constexpr bool DecomposableDur =
+    chrono::__detail::ipow10(chrono::__detail::frac_width<D>()) <=
+    (9223372036854775807LL / 3600);
+
+// Decomposes a duration into the hh_mm_ss fields without ever negating the rep.
+// |Rep::min()| is not representable, so an integral count is carried through its
+// unsigned counterpart — where the magnitude always fits — and hh_mm_ss never
+// takes its own negative branch. A floating count is range-checked first: inf,
+// NaN or anything past the seconds range would make duration_cast's conversion
+// to an integral tick undefined.
+template <class Rep, class Period>
+inline void fill_time_dur(Parts &p, const chrono::duration<Rep, Period> &d)
+{
+    using D          = chrono::duration<Rep, Period>;
+    const bool   neg = d < D::zero();
+    if constexpr (chrono::treat_as_floating_point_v<Rep>) {
+        const long double secs = (long double)d.count() *
+                                 (long double)Period::num /
+                                 (long double)Period::den;
+        if (!(secs > -9.0e18L && secs < 9.0e18L)) // also false for NaN
+            throw format_error("chrono format: the duration has no "
+                               "time-of-day representation");
+        D                   ad{neg ? Rep(-d.count()) : d.count()};
+        chrono::hh_mm_ss<D> hms{ad};
+        fill_time(p, hms);
+    } else if constexpr (is_integral_v<Rep>) {
+        using URep = make_unsigned_t<Rep>;
+        using UDur = chrono::duration<URep, Period>;
+        const URep mag =
+            neg ? (URep)(URep(0) - (URep)d.count()) : (URep)d.count();
+        chrono::hh_mm_ss<UDur> hms{UDur(mag)};
+        fill_time(p, hms);
+    } else { // a rep with no unsigned counterpart
+        D                   ad{neg ? Rep(-d.count()) : d.count()};
+        chrono::hh_mm_ss<D> hms{ad};
+        fill_time(p, hms);
     }
-};
+    p.neg = neg;
+}
 
-} // namespace __chrono_fmt
-
-// ── formatter<day/month/year/weekday> ───────────────────────────────────
-template <> struct formatter<chrono::day, char> : __chrono_fmt::SpecParser {
-    void format(const chrono::day &d, format_context &ctx) const
-    {
-        __chrono_fmt::Parts p;
-        p.day = unsigned(d);
-        string body;
-        __chrono_fmt::render(body, chrono_.empty() ? string_view("%d") : chrono_, p);
-        __chrono_fmt::emit(ctx, spec_, body);
-    }
-};
-
-template <> struct formatter<chrono::month, char> : __chrono_fmt::SpecParser {
-    void format(const chrono::month &m, format_context &ctx) const
-    {
-        __chrono_fmt::Parts p;
-        p.month = unsigned(m);
-        string body;
-        __chrono_fmt::render(body, chrono_.empty() ? string_view("%b") : chrono_, p);
-        __chrono_fmt::emit(ctx, spec_, body);
-    }
-};
-
-template <> struct formatter<chrono::year, char> : __chrono_fmt::SpecParser {
-    void format(const chrono::year &y, format_context &ctx) const
-    {
-        __chrono_fmt::Parts p;
-        p.year = (long long)int(y);
-        string body;
-        __chrono_fmt::render(body, chrono_.empty() ? string_view("%Y") : chrono_, p);
-        __chrono_fmt::emit(ctx, spec_, body);
-    }
-};
-
-template <> struct formatter<chrono::weekday, char> : __chrono_fmt::SpecParser {
-    void format(const chrono::weekday &w, format_context &ctx) const
-    {
-        __chrono_fmt::Parts p;
-        p.wd = w.c_encoding();
-        string body;
-        __chrono_fmt::render(body, chrono_.empty() ? string_view("%a") : chrono_, p);
-        __chrono_fmt::emit(ctx, spec_, body);
-    }
-};
-
-// ── formatter<year_month_day> ───────────────────────────────────────────
-template <>
-struct formatter<chrono::year_month_day, char> : __chrono_fmt::SpecParser {
-    void format(const chrono::year_month_day &ymd, format_context &ctx) const
-    {
-        __chrono_fmt::Parts p = __chrono_fmt::date_parts(ymd);
-        string body;
-        __chrono_fmt::render(body, chrono_.empty() ? string_view("%F") : chrono_, p);
-        __chrono_fmt::emit(ctx, spec_, body);
-    }
-};
-
-// ── formatter<hh_mm_ss<Duration>> ───────────────────────────────────────
-template <class Duration>
-struct formatter<chrono::hh_mm_ss<Duration>, char> : __chrono_fmt::SpecParser {
-    void format(const chrono::hh_mm_ss<Duration> &hms, format_context &ctx) const
-    {
-        __chrono_fmt::Parts p;
-        __chrono_fmt::fill_time(p, hms);
-        string body;
-        if (p.neg) body.push_back('-');
-        __chrono_fmt::render(body, chrono_.empty() ? string_view("%T") : chrono_, p);
-        __chrono_fmt::emit(ctx, spec_, body);
-    }
-};
-
-// ── formatter<sys_time<Duration>> ───────────────────────────────────────
-template <class Duration>
-struct formatter<chrono::sys_time<Duration>, char> : __chrono_fmt::SpecParser {
-    void format(const chrono::sys_time<Duration> &tp, format_context &ctx) const
-    {
-        using namespace chrono;
-        sys_days             sd  = floor<days>(tp);
-        year_month_day       ymd{sd};
-        __chrono_fmt::Parts  p   = __chrono_fmt::date_parts(ymd);
-        auto                 tod = tp - sd; // common_type duration since midnight
-        hh_mm_ss<decltype(tod)> hms{tod};
-        __chrono_fmt::fill_time(p, hms);
-        string_view deflt =
-            is_same_v<Duration, days> ? string_view("%F") : string_view("%F %T");
-        string body;
-        __chrono_fmt::render(body, chrono_.empty() ? deflt : chrono_, p);
-        __chrono_fmt::emit(ctx, spec_, body);
-    }
-};
-
-// ── formatter<duration<Rep,Period>> ─────────────────────────────────────
-namespace __chrono_fmt {
-
+// [time.duration.io]/1.5 makes the suffix for micro implementation-defined
+// ("us" or "µs"); "us" is unconditionally conformant and keeps the output
+// ASCII.
 template <class Period> inline string unit_suffix()
 {
-    using std::chrono::days;
-    using std::chrono::hours;
-    using std::chrono::minutes;
     if constexpr (ratio_equal_v<Period, ratio<1>>) return "s";
     else if constexpr (ratio_equal_v<Period, atto>) return "as";
     else if constexpr (ratio_equal_v<Period, femto>) return "fs";
     else if constexpr (ratio_equal_v<Period, pico>) return "ps";
     else if constexpr (ratio_equal_v<Period, nano>) return "ns";
-    else if constexpr (ratio_equal_v<Period, micro>) return "us"; // ASCII (matches libstdc++ narrow output)
+    else if constexpr (ratio_equal_v<Period, micro>) return "us";
     else if constexpr (ratio_equal_v<Period, milli>) return "ms";
     else if constexpr (ratio_equal_v<Period, centi>) return "cs";
     else if constexpr (ratio_equal_v<Period, deci>) return "ds";
@@ -360,32 +660,181 @@ template <class Period> inline string unit_suffix()
     }
 }
 
+// Shared base for every chrono formatter: parses [fill]align/width/.prec/L,
+// captures the %-conversion tail and validates it against the type's field
+// mask. Mirrors __format::StringSpecParser so each formatter only defines
+// format(). spec_/chrono_ are inherited.
+template <unsigned F> struct SpecParser {
+    __format::StdSpec spec_;
+    string_view       chrono_;
+    unsigned          used_ = 0; // which fields the chrono-specs referenced
+    constexpr typename format_parse_context::iterator
+    parse(format_parse_context &pc)
+    {
+        const char *p = parse_spec(pc, spec_, chrono_, F, used_);
+        pc.advance_to(p);
+        return p;
+    }
+};
+
 } // namespace __chrono_fmt
 
+// ── formatter<day/month/year/weekday> ───────────────────────────────────
+template <>
+struct formatter<chrono::day, char>
+    : __chrono_fmt::SpecParser<__chrono_fmt::kDay> {
+    void format(const chrono::day &d, format_context &ctx) const
+    {
+        __chrono_fmt::Parts p;
+        p.day = unsigned(d);
+        string body;
+        __chrono_fmt::render(body, chrono_.empty() ? string_view("%d") : chrono_, p);
+        __chrono_fmt::emit(ctx, spec_, body);
+    }
+};
+
+template <>
+struct formatter<chrono::month, char>
+    : __chrono_fmt::SpecParser<__chrono_fmt::kMonth> {
+    void format(const chrono::month &m, format_context &ctx) const
+    {
+        __chrono_fmt::Parts p;
+        p.month  = unsigned(m);
+        p.mon_ok = m.ok();
+        string body;
+        __chrono_fmt::render(body, chrono_.empty() ? string_view("%b") : chrono_, p);
+        __chrono_fmt::emit(ctx, spec_, body);
+    }
+};
+
+template <>
+struct formatter<chrono::year, char>
+    : __chrono_fmt::SpecParser<__chrono_fmt::kYear> {
+    void format(const chrono::year &y, format_context &ctx) const
+    {
+        __chrono_fmt::Parts p;
+        p.year = (long long)int(y);
+        string body;
+        __chrono_fmt::render(body, chrono_.empty() ? string_view("%Y") : chrono_, p);
+        __chrono_fmt::emit(ctx, spec_, body);
+    }
+};
+
+template <>
+struct formatter<chrono::weekday, char>
+    : __chrono_fmt::SpecParser<__chrono_fmt::kWeekday> {
+    void format(const chrono::weekday &w, format_context &ctx) const
+    {
+        __chrono_fmt::Parts p;
+        p.wd    = w.c_encoding();
+        p.wd_ok = w.ok();
+        string body;
+        __chrono_fmt::render(body, chrono_.empty() ? string_view("%a") : chrono_, p);
+        __chrono_fmt::emit(ctx, spec_, body);
+    }
+};
+
+// ── formatter<year_month_day> ───────────────────────────────────────────
+template <>
+struct formatter<chrono::year_month_day, char>
+    : __chrono_fmt::SpecParser<__chrono_fmt::kDate> {
+    void format(const chrono::year_month_day &ymd, format_context &ctx) const
+    {
+        __chrono_fmt::Parts p = __chrono_fmt::date_parts(ymd);
+        string body;
+        __chrono_fmt::render(body, chrono_.empty() ? string_view("%F") : chrono_, p);
+        __chrono_fmt::emit(ctx, spec_, body);
+    }
+};
+
+// ── formatter<hh_mm_ss<Duration>> ───────────────────────────────────────
+template <class Duration>
+struct formatter<chrono::hh_mm_ss<Duration>, char>
+    : __chrono_fmt::SpecParser<__chrono_fmt::kTime> {
+    void format(const chrono::hh_mm_ss<Duration> &hms, format_context &ctx) const
+    {
+        __chrono_fmt::Parts p;
+        __chrono_fmt::fill_time(p, hms);
+        string body;
+        if (p.neg) body.push_back('-');
+        __chrono_fmt::render(body, chrono_.empty() ? string_view("%T") : chrono_, p);
+        __chrono_fmt::emit(ctx, spec_, body);
+    }
+};
+
+// ── formatter<sys_time<Duration>> ───────────────────────────────────────
+template <class Duration>
+struct formatter<chrono::sys_time<Duration>, char>
+    : __chrono_fmt::SpecParser<__chrono_fmt::kDate | __chrono_fmt::kTime |
+                               __chrono_fmt::kZone> {
+    void format(const chrono::sys_time<Duration> &tp, format_context &ctx) const
+    {
+        using namespace chrono;
+        sys_days             sd  = floor<days>(tp);
+        year_month_day       ymd{sd};
+        __chrono_fmt::Parts  p   = __chrono_fmt::date_parts(ymd);
+        auto                 tod = tp - sd; // common_type duration since midnight
+        hh_mm_ss<decltype(tod)> hms{tod};
+        __chrono_fmt::fill_time(p, hms);
+        p.zone     = "UTC"; // sys_time is UTC by definition ([time.format])
+        p.has_zoff = true;
+        p.zoff_min = 0;
+        string_view deflt =
+            is_same_v<Duration, days> ? string_view("%F") : string_view("%F %T");
+        string body;
+        __chrono_fmt::render(body, chrono_.empty() ? deflt : chrono_, p);
+        __chrono_fmt::emit(ctx, spec_, body);
+    }
+};
+
+// ── formatter<duration<Rep,Period>> ─────────────────────────────────────
 template <class Rep, class Period>
-struct formatter<chrono::duration<Rep, Period>, char> : __chrono_fmt::SpecParser {
+struct formatter<chrono::duration<Rep, Period>, char>
+    // [time.format]/1 allows a precision only when "rep denotes a
+    // floating-point type" — is_floating_point_v, not treat_as_floating_point_v
+    // (a user rep may specialise the latter without being one).
+    : __chrono_fmt::SpecParser<__chrono_fmt::kTime | __chrono_fmt::kDuration |
+                               (is_floating_point_v<Rep>
+                                    ? unsigned(__chrono_fmt::kPrec)
+                                    : 0u)> {
     void format(const chrono::duration<Rep, Period> &d, format_context &ctx) const
     {
-        string body;
-        if (chrono_.empty()) {
-            char b[40];
-            if constexpr (chrono::treat_as_floating_point_v<Rep>) {
-                auto r = to_chars(b, b + sizeof b, double(d.count()));
-                body.append(b, size_t(r.ptr - b));
-            } else {
-                auto r = to_chars(b, b + sizeof b, d.count());
-                body.append(b, size_t(r.ptr - b));
-            }
-            body += __chrono_fmt::unit_suffix<typename chrono::duration<Rep, Period>::period>();
+        using D          = chrono::duration<Rep, Period>;
+        const int  prec  = __format::EffectivePrecision(ctx, this->spec_);
+        string     body;
+        if (this->chrono_.empty()) {
+            // [time.format]/7: as if streamed — count() then the unit suffix.
+            __chrono_fmt::PutRep(body, d.count(), prec, /*shortest=*/false,
+                                 /*magnitude=*/false);
+            body += __chrono_fmt::unit_suffix<typename D::period>();
         } else {
-            // Treat the duration as a time-of-day via hh_mm_ss.
-            chrono::hh_mm_ss<chrono::duration<Rep, Period>> hms{d};
+            // [time.format]/4: the positive value, prefixed with '-'.
+            string qtext;
+            __chrono_fmt::PutRep(qtext, d.count(), prec, /*shortest=*/true,
+                                 /*magnitude=*/true);
+            string unit = __chrono_fmt::unit_suffix<typename D::period>();
             __chrono_fmt::Parts p;
-            __chrono_fmt::fill_time(p, hms);
+            // Only decompose when the chrono-specs actually reference a time
+            // field: "{:%Q}" of a non-representable-as-time-of-day value (an
+            // infinity, or a count whose magnitude overflows the hour range)
+            // must still print the value.
+            if constexpr (__chrono_fmt::DecomposableDur<D>) {
+                if (this->used_ & __chrono_fmt::kTime)
+                    __chrono_fmt::fill_time_dur(p, d);
+                else
+                    p.neg = d < D::zero();
+            } else {
+                if (this->used_ & __chrono_fmt::kTime)
+                    throw format_error("chrono format: this period has no "
+                                       "time-of-day decomposition");
+                p.neg = d < D::zero();
+            }
+            p.qtext = string_view(qtext.data(), qtext.size());
+            p.unit  = string_view(unit.data(), unit.size());
             if (p.neg) body.push_back('-');
-            __chrono_fmt::render(body, chrono_, p);
+            __chrono_fmt::render(body, this->chrono_, p);
         }
-        __chrono_fmt::emit(ctx, spec_, body);
+        __chrono_fmt::emit(ctx, this->spec_, body);
     }
 };
 

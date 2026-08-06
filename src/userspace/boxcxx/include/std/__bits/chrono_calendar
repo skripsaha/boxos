@@ -1254,7 +1254,11 @@ public:
     constexpr explicit hh_mm_ss(Duration d) noexcept
         : neg_(d < Duration::zero())
     {
-        Duration ad = neg_ ? -d : d;
+        // Negate through the rep: operator-(duration) returns
+        // common_type_t<Duration>, whose period is *reduced*, so for a Period
+        // that is not in lowest terms (ratio<4,2>) the two arms of the
+        // conditional would have unrelated types.
+        Duration ad = neg_ ? Duration(-d.count()) : d;
         h_  = duration_cast<chrono::hours>(ad);
         m_  = duration_cast<chrono::minutes>(ad - h_);
         s_  = duration_cast<chrono::seconds>(ad - h_ - m_);

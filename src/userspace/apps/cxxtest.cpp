@@ -25339,6 +25339,624 @@ void Phase122()
            "(deleter d(p) invoked on an allocation-throw, no leak) [util.smartptr.shared]\n");
 }
 
+// ── phase123 fixtures: <chrono> formatter engine ([time.format]) ───────
+// Ф30f-2 c1. The date and sys_time tables below are host-validated against BOTH
+// libstdc++ (g++-15) and libc++ (clang 17); across those two tables the
+// libraries disagree on exactly three cells (all negative years), and each
+// disagreement is resolved from the standard with boxcxx matching the
+// conformant side:
+//   %F, y<0  : "-0001-12-31" (libc++)     — %F is "equivalent to %Y-%m-%d",
+//              libstdc++ prints "-001-12-31" (4-char field incl. the sign).
+//   %G, y<0  : "-0001"       (libstdc++)  — %G pads like %Y; libc++ gives "-001".
+//   %C, y<0  : "-01"         (libstdc++)  — %C is zero-padded to 2; libc++ "-1".
+// The %U/%W/%V/%G/%g/%C/%j/%y arithmetic was additionally differential-tested
+// against libstdc++ over 1'461'335 consecutive civil days (years -1000..3000)
+// and %C over all 65'535 representable years — zero mismatches.
+struct P123Date { int y; unsigned m, d; const char *want; };
+inline constexpr P123Date kP123Dates[] = {
+    {2021, 1, 1, "2021-01-01|00|00|53|2020|20|20|001|21|Fri|Friday|Jan|January|01/01/21|01/01/21|5|5|01|01| 1|2021"},
+    {2021, 1, 2, "2021-01-02|00|00|53|2020|20|20|002|21|Sat|Saturday|Jan|January|01/02/21|01/02/21|6|6|01|02| 2|2021"},
+    {2021, 1, 3, "2021-01-03|01|00|53|2020|20|20|003|21|Sun|Sunday|Jan|January|01/03/21|01/03/21|7|0|01|03| 3|2021"},
+    {2021, 1, 4, "2021-01-04|01|01|01|2021|21|20|004|21|Mon|Monday|Jan|January|01/04/21|01/04/21|1|1|01|04| 4|2021"},
+    {2020, 12, 31, "2020-12-31|52|52|53|2020|20|20|366|20|Thu|Thursday|Dec|December|12/31/20|12/31/20|4|4|12|31|31|2020"},
+    {2016, 1, 3, "2016-01-03|01|00|53|2015|15|20|003|16|Sun|Sunday|Jan|January|01/03/16|01/03/16|7|0|01|03| 3|2016"},
+    {2015, 12, 28, "2015-12-28|52|52|53|2015|15|20|362|15|Mon|Monday|Dec|December|12/28/15|12/28/15|1|1|12|28|28|2015"},
+    {2024, 12, 30, "2024-12-30|52|53|01|2025|25|20|365|24|Mon|Monday|Dec|December|12/30/24|12/30/24|1|1|12|30|30|2024"},
+    {2019, 12, 30, "2019-12-30|52|52|01|2020|20|20|364|19|Mon|Monday|Dec|December|12/30/19|12/30/19|1|1|12|30|30|2019"},
+    {2027, 1, 3, "2027-01-03|01|00|53|2026|26|20|003|27|Sun|Sunday|Jan|January|01/03/27|01/03/27|7|0|01|03| 3|2027"},
+    {2032, 12, 31, "2032-12-31|52|52|53|2032|32|20|366|32|Fri|Friday|Dec|December|12/31/32|12/31/32|5|5|12|31|31|2032"},
+    {1998, 12, 31, "1998-12-31|52|52|53|1998|98|19|365|98|Thu|Thursday|Dec|December|12/31/98|12/31/98|4|4|12|31|31|1998"},
+    {2022, 1, 1, "2022-01-01|00|00|52|2021|21|20|001|22|Sat|Saturday|Jan|January|01/01/22|01/01/22|6|6|01|01| 1|2022"},
+    {2026, 1, 1, "2026-01-01|00|00|01|2026|26|20|001|26|Thu|Thursday|Jan|January|01/01/26|01/01/26|4|4|01|01| 1|2026"},
+    {2026, 12, 31, "2026-12-31|52|52|53|2026|26|20|365|26|Thu|Thursday|Dec|December|12/31/26|12/31/26|4|4|12|31|31|2026"},
+    {2004, 1, 1, "2004-01-01|00|00|01|2004|04|20|001|04|Thu|Thursday|Jan|January|01/01/04|01/01/04|4|4|01|01| 1|2004"},
+    {1900, 1, 1, "1900-01-01|00|01|01|1900|00|19|001|00|Mon|Monday|Jan|January|01/01/00|01/01/00|1|1|01|01| 1|1900"},
+    {2100, 12, 31, "2100-12-31|52|52|52|2100|00|21|365|00|Fri|Friday|Dec|December|12/31/00|12/31/00|5|5|12|31|31|2100"},
+    {1970, 1, 1, "1970-01-01|00|00|01|1970|70|19|001|70|Thu|Thursday|Jan|January|01/01/70|01/01/70|4|4|01|01| 1|1970"},
+    {2000, 1, 1, "2000-01-01|00|00|52|1999|99|20|001|00|Sat|Saturday|Jan|January|01/01/00|01/01/00|6|6|01|01| 1|2000"},
+    {2000, 2, 29, "2000-02-29|09|09|09|2000|00|20|060|00|Tue|Tuesday|Feb|February|02/29/00|02/29/00|2|2|02|29|29|2000"},
+    {2400, 2, 29, "2400-02-29|09|09|09|2400|00|24|060|00|Tue|Tuesday|Feb|February|02/29/00|02/29/00|2|2|02|29|29|2400"},
+    {1600, 2, 29, "1600-02-29|09|09|09|1600|00|16|060|00|Tue|Tuesday|Feb|February|02/29/00|02/29/00|2|2|02|29|29|1600"},
+    {1899, 12, 31, "1899-12-31|53|52|52|1899|99|18|365|99|Sun|Sunday|Dec|December|12/31/99|12/31/99|7|0|12|31|31|1899"},
+    {1, 1, 1, "0001-01-01|00|01|01|0001|01|00|001|01|Mon|Monday|Jan|January|01/01/01|01/01/01|1|1|01|01| 1|0001"},
+    {0, 1, 1, "0000-01-01|00|00|52|-0001|01|00|001|00|Sat|Saturday|Jan|January|01/01/00|01/01/00|6|6|01|01| 1|0000"},
+    {0, 12, 31, "0000-12-31|53|52|52|0000|00|00|366|00|Sun|Sunday|Dec|December|12/31/00|12/31/00|7|0|12|31|31|0000"},
+    {-1, 12, 31, "-0001-12-31|52|52|52|-0001|01|-01|365|01|Fri|Friday|Dec|December|12/31/01|12/31/01|5|5|12|31|31|-0001"},
+    {-1976, 3, 4, "-1976-03-04|09|10|10|-1976|76|-20|064|76|Mon|Monday|Mar|March|03/04/76|03/04/76|1|1|03|04| 4|-1976"},
+    {32767, 12, 31, "32767-12-31|53|52|52|32767|67|327|365|67|Sun|Sunday|Dec|December|12/31/67|12/31/67|7|0|12|31|31|32767"},
+    {-32767, 1, 1, "-32767-01-01|00|00|53|-32768|68|-328|001|67|Sat|Saturday|Jan|January|01/01/67|01/01/67|6|6|01|01| 1|-32767"},
+    {9999, 12, 31, "9999-12-31|52|52|52|9999|99|99|365|99|Fri|Friday|Dec|December|12/31/99|12/31/99|5|5|12|31|31|9999"},
+    {2026, 8, 3, "2026-08-03|31|31|32|2026|26|20|215|26|Mon|Monday|Aug|August|08/03/26|08/03/26|1|1|08|03| 3|2026"},
+    {2026, 8, 4, "2026-08-04|31|31|32|2026|26|20|216|26|Tue|Tuesday|Aug|August|08/04/26|08/04/26|2|2|08|04| 4|2026"},
+    {2026, 8, 5, "2026-08-05|31|31|32|2026|26|20|217|26|Wed|Wednesday|Aug|August|08/05/26|08/05/26|3|3|08|05| 5|2026"},
+    {2026, 8, 6, "2026-08-06|31|31|32|2026|26|20|218|26|Thu|Thursday|Aug|August|08/06/26|08/06/26|4|4|08|06| 6|2026"},
+    {2026, 8, 7, "2026-08-07|31|31|32|2026|26|20|219|26|Fri|Friday|Aug|August|08/07/26|08/07/26|5|5|08|07| 7|2026"},
+    {2026, 8, 8, "2026-08-08|31|31|32|2026|26|20|220|26|Sat|Saturday|Aug|August|08/08/26|08/08/26|6|6|08|08| 8|2026"},
+    {2026, 8, 9, "2026-08-09|32|31|32|2026|26|20|221|26|Sun|Sunday|Aug|August|08/09/26|08/09/26|7|0|08|09| 9|2026"},
+    {2021, 2, 28, "2021-02-28|09|08|08|2021|21|20|059|21|Sun|Sunday|Feb|February|02/28/21|02/28/21|7|0|02|28|28|2021"},
+    {2020, 2, 29, "2020-02-29|08|08|09|2020|20|20|060|20|Sat|Saturday|Feb|February|02/29/20|02/29/20|6|6|02|29|29|2020"},
+    {2021, 12, 31, "2021-12-31|52|52|52|2021|21|20|365|21|Fri|Friday|Dec|December|12/31/21|12/31/21|5|5|12|31|31|2021"},
+    {2021, 6, 30, "2021-06-30|26|26|26|2021|21|20|181|21|Wed|Wednesday|Jun|June|06/30/21|06/30/21|3|3|06|30|30|2021"},
+    {100, 1, 1, "0100-01-01|00|00|53|0099|99|01|001|00|Fri|Friday|Jan|January|01/01/00|01/01/00|5|5|01|01| 1|0100"},
+    {99, 12, 31, "0099-12-31|52|52|53|0099|99|00|365|99|Thu|Thursday|Dec|December|12/31/99|12/31/99|4|4|12|31|31|0099"},
+    {-100, 1, 1, "-0100-01-01|00|01|01|-0100|00|-01|001|00|Mon|Monday|Jan|January|01/01/00|01/01/00|1|1|01|01| 1|-0100"},
+    {-99, 1, 1, "-0099-01-01|00|00|01|-0099|99|-01|001|99|Tue|Tuesday|Jan|January|01/01/99|01/01/99|2|2|01|01| 1|-0099"},
+    {12345, 6, 7, "12345-06-07|22|23|23|12345|45|123|158|45|Thu|Thursday|Jun|June|06/07/45|06/07/45|4|4|06|07| 7|12345"},
+};
+
+// hours: "%H|%I|%M|%S|%T|%R|%X|%r|%p|%j|%Q|%q". This table is NOT dual-library
+// validated: libstdc++ matches it only for |h| <= 12 h, and above that it
+// diverges from *itself* (%r reduces the hour mod 12 while its own %I subtracts
+// 12; %H truncates the hour to 8 bits, so 300 h prints "44" and %I clamps to
+// "99"), while libc++ reduces the whole duration mod 24 h and throws outright on
+// hh_mm_ss<hours>{50h}. The rows past 12 h therefore encode boxcxx's own rule,
+// which is the only self-consistent one: %I = h>12 ? h-12 : h, %r =
+// "%I:%M:%S %p" (the POSIX "C"-locale definition of %r), and %H = the hh_mm_ss
+// hours() count — which is exactly what %T prints in all three libraries.
+struct P123Dur { long long h; const char *want; };
+inline constexpr P123Dur kP123Hours[] = {
+    {0LL, "00|12|00|00|00:00:00|00:00|00:00:00|12:00:00 AM|AM|0|0|h"},
+    {1LL, "01|01|00|00|01:00:00|01:00|01:00:00|01:00:00 AM|AM|0|1|h"},
+    {11LL, "11|11|00|00|11:00:00|11:00|11:00:00|11:00:00 AM|AM|0|11|h"},
+    {12LL, "12|12|00|00|12:00:00|12:00|12:00:00|12:00:00 PM|PM|0|12|h"},
+    {13LL, "13|01|00|00|13:00:00|13:00|13:00:00|01:00:00 PM|PM|0|13|h"},
+    {23LL, "23|11|00|00|23:00:00|23:00|23:00:00|11:00:00 PM|PM|0|23|h"},
+    {24LL, "24|12|00|00|24:00:00|24:00|24:00:00|12:00:00 PM|PM|1|24|h"},
+    {25LL, "25|13|00|00|25:00:00|25:00|25:00:00|13:00:00 PM|PM|1|25|h"},
+    {36LL, "36|24|00|00|36:00:00|36:00|36:00:00|24:00:00 PM|PM|1|36|h"},
+    {50LL, "50|38|00|00|50:00:00|50:00|50:00:00|38:00:00 PM|PM|2|50|h"},
+    {99LL, "99|87|00|00|99:00:00|99:00|99:00:00|87:00:00 PM|PM|4|99|h"},
+    {111LL, "111|99|00|00|111:00:00|111:00|111:00:00|99:00:00 PM|PM|4|111|h"},
+    {300LL, "300|288|00|00|300:00:00|300:00|300:00:00|288:00:00 PM|PM|12|300|h"},
+    {-1LL, "-01|01|00|00|01:00:00|01:00|01:00:00|01:00:00 AM|AM|0|1|h"},
+    {-13LL, "-13|01|00|00|13:00:00|13:00|13:00:00|01:00:00 PM|PM|0|13|h"},
+    {-25LL, "-25|13|00|00|25:00:00|25:00|25:00:00|13:00:00 PM|PM|1|25|h"},
+    {-50LL, "-50|38|00|00|50:00:00|50:00|50:00:00|38:00:00 PM|PM|2|50|h"},
+    {-111LL, "-111|99|00|00|111:00:00|111:00|111:00:00|99:00:00 PM|PM|4|111|h"},
+    {-300LL, "-300|288|00|00|300:00:00|300:00|300:00:00|288:00:00 PM|PM|12|300|h"},
+};
+
+// sys_time<seconds>: "%F %T|%c|%x|%X|%r|%Z|%z|%Ez|%Oz|%U|%V|%G|%j|%a|%p|%I"
+// (byte-identical between libstdc++ and libc++ for every row).
+struct P123Sys { long long s; const char *want; };
+inline constexpr P123Sys kP123Sys[] = {
+    {0LL, "1970-01-01 00:00:00|Thu Jan  1 00:00:00 1970|01/01/70|00:00:00|12:00:00 AM|UTC|+0000|+00:00|+00:00|00|01|1970|001|Thu|AM|12"},
+    {1LL, "1970-01-01 00:00:01|Thu Jan  1 00:00:01 1970|01/01/70|00:00:01|12:00:01 AM|UTC|+0000|+00:00|+00:00|00|01|1970|001|Thu|AM|12"},
+    {59LL, "1970-01-01 00:00:59|Thu Jan  1 00:00:59 1970|01/01/70|00:00:59|12:00:59 AM|UTC|+0000|+00:00|+00:00|00|01|1970|001|Thu|AM|12"},
+    {60LL, "1970-01-01 00:01:00|Thu Jan  1 00:01:00 1970|01/01/70|00:01:00|12:01:00 AM|UTC|+0000|+00:00|+00:00|00|01|1970|001|Thu|AM|12"},
+    {3599LL, "1970-01-01 00:59:59|Thu Jan  1 00:59:59 1970|01/01/70|00:59:59|12:59:59 AM|UTC|+0000|+00:00|+00:00|00|01|1970|001|Thu|AM|12"},
+    {3600LL, "1970-01-01 01:00:00|Thu Jan  1 01:00:00 1970|01/01/70|01:00:00|01:00:00 AM|UTC|+0000|+00:00|+00:00|00|01|1970|001|Thu|AM|01"},
+    {86399LL, "1970-01-01 23:59:59|Thu Jan  1 23:59:59 1970|01/01/70|23:59:59|11:59:59 PM|UTC|+0000|+00:00|+00:00|00|01|1970|001|Thu|PM|11"},
+    {86400LL, "1970-01-02 00:00:00|Fri Jan  2 00:00:00 1970|01/02/70|00:00:00|12:00:00 AM|UTC|+0000|+00:00|+00:00|00|01|1970|002|Fri|AM|12"},
+    {1000000000LL, "2001-09-09 01:46:40|Sun Sep  9 01:46:40 2001|09/09/01|01:46:40|01:46:40 AM|UTC|+0000|+00:00|+00:00|36|36|2001|252|Sun|AM|01"},
+    {-1LL, "1969-12-31 23:59:59|Wed Dec 31 23:59:59 1969|12/31/69|23:59:59|11:59:59 PM|UTC|+0000|+00:00|+00:00|52|01|1970|365|Wed|PM|11"},
+    {-86400LL, "1969-12-31 00:00:00|Wed Dec 31 00:00:00 1969|12/31/69|00:00:00|12:00:00 AM|UTC|+0000|+00:00|+00:00|52|01|1970|365|Wed|AM|12"},
+    {951782400LL, "2000-02-29 00:00:00|Tue Feb 29 00:00:00 2000|02/29/00|00:00:00|12:00:00 AM|UTC|+0000|+00:00|+00:00|09|09|2000|060|Tue|AM|12"},
+    {253402300799LL, "9999-12-31 23:59:59|Fri Dec 31 23:59:59 9999|12/31/99|23:59:59|11:59:59 PM|UTC|+0000|+00:00|+00:00|52|52|9999|365|Fri|PM|11"},
+    {-62135596800LL, "0001-01-01 00:00:00|Mon Jan  1 00:00:00 0001|01/01/01|00:00:00|12:00:00 AM|UTC|+0000|+00:00|+00:00|00|01|0001|001|Mon|AM|12"},
+    {1234567890LL, "2009-02-13 23:31:30|Fri Feb 13 23:31:30 2009|02/13/09|23:31:30|11:31:30 PM|UTC|+0000|+00:00|+00:00|06|07|2009|044|Fri|PM|11"},
+    {1767225600LL, "2026-01-01 00:00:00|Thu Jan  1 00:00:00 2026|01/01/26|00:00:00|12:00:00 AM|UTC|+0000|+00:00|+00:00|00|01|2026|001|Thu|AM|12"},
+};
+
+inline constexpr char kP123SpecChars[] =
+    "aAbBcCdDeFgGhHIjmMnpqQrRStTuUVwWxXyYzZ%";
+
+bool P123Contains(const char *set, char c)
+{
+    for (const char *p = set; *p; ++p)
+        if (*p == c) return true;
+    return false;
+}
+
+// A conversion specifier the type cannot satisfy must be rejected by parse()
+// ([time.format]/6) — a runtime format_error here, a compile error through the
+// consteval checker.
+template <class T> bool P123Parses(const char *spec, T v)
+{
+    try {
+        (void)std::vformat(spec, std::make_format_args(v));
+    } catch (const std::format_error &) {
+        return false;
+    }
+    return true;
+}
+
+// Sweeps all 39 conversion specifiers against the type's advertised set.
+template <class T>
+void P123Matrix(const char *label, T v, const char *accept)
+{
+    bool ok = true;
+    for (const char *t = kP123SpecChars; *t; ++t) {
+        char spec[6] = {'{', ':', '%', *t, '}', '\0'};
+        if (P123Parses(spec, v) != P123Contains(accept, *t)) {
+            printf("[CXX] phase123 matrix %s: '%%%c' unexpectedly %s\n", label,
+                   *t, P123Contains(accept, *t) ? "rejected" : "accepted");
+            ok = false;
+        }
+    }
+    Check(ok, label);
+}
+
+// Same sweep for the E/O modifiers, which are defined only for the pairings
+// listed in [time.format]'s table.
+template <class T>
+void P123ModMatrix(const char *label, T v, char mod, const char *accept)
+{
+    bool ok = true;
+    for (const char *t = kP123SpecChars; *t; ++t) {
+        char spec[7] = {'{', ':', '%', mod, *t, '}', '\0'};
+        if (P123Parses(spec, v) != P123Contains(accept, *t)) {
+            printf("[CXX] phase123 modifier %s: '%%%c%c' unexpectedly %s\n",
+                   label, mod, *t, P123Contains(accept, *t) ? "rejected" : "accepted");
+            ok = false;
+        }
+    }
+    Check(ok, label);
+}
+
+// Ф30f-2 c1: the <chrono> formatting engine — the week/ISO-week/locale/zone/
+// duration conversion specifiers, the E/O modifiers, the L option, the
+// precision rule, and per-type parse-time validation of the chrono-specs.
+void Phase123()
+{
+    using namespace std::chrono;
+    auto feq = [](const std::string &got, const char *want) {
+        return std::string_view(got.data(), got.size()) ==
+               std::string_view(want);
+    };
+
+    // (1) every date-bearing specifier over 48 dates (ISO week-year rollovers,
+    //     leap years, century/400-year boundaries, year 0, negative years, the
+    //     representable extremes and a full Mon..Sun week).
+    {
+        bool ok = true;
+        for (const auto &c : kP123Dates) {
+            year_month_day ymd = year{c.y} / month{c.m} / day{c.d};
+            std::string    got = std::vformat(
+                "{:%F|%U|%W|%V|%G|%g|%C|%j|%y|%a|%A|%b|%B|%D|%x|%u|%w|%m|%d|%e|%Y}",
+                std::make_format_args(ymd));
+            if (!feq(got, c.want)) {
+                printf("[CXX] phase123 date %d-%02u-%02u:\n  got  [%s]\n  want [%s]\n",
+                       c.y, c.m, c.d, got.c_str(), c.want);
+                ok = false;
+            }
+        }
+        Check(ok, "phase123 date specifiers %U %W %V %G %g %C %j %y %F %D %x over 48 dates");
+    }
+
+    // (2) duration time-of-day + %Q/%q, including hours past 24 and negatives.
+    {
+        bool ok = true;
+        for (const auto &c : kP123Hours) {
+            hours       h   = hours{c.h};
+            std::string got = std::vformat("{:%H|%I|%M|%S|%T|%R|%X|%r|%p|%j|%Q|%q}",
+                                           std::make_format_args(h));
+            if (!feq(got, c.want)) {
+                printf("[CXX] phase123 hours %lld:\n  got  [%s]\n  want [%s]\n",
+                       c.h, got.c_str(), c.want);
+                ok = false;
+            }
+        }
+        Check(ok, "phase123 duration specifiers %H %I %r %j %Q %q over 19 hour values");
+    }
+
+    // (3) sys_time: date + time + %c/%x/%X/%r and the zone specifiers.
+    {
+        bool ok = true;
+        for (const auto &c : kP123Sys) {
+            sys_seconds t{seconds{c.s}};
+            std::string got = std::vformat(
+                "{:%F %T|%c|%x|%X|%r|%Z|%z|%Ez|%Oz|%U|%V|%G|%j|%a|%p|%I}",
+                std::make_format_args(t));
+            if (!feq(got, c.want)) {
+                printf("[CXX] phase123 sys_time %lld:\n  got  [%s]\n  want [%s]\n",
+                       c.s, got.c_str(), c.want);
+                ok = false;
+            }
+        }
+        Check(ok, "phase123 sys_time %c %x %X %r %Z %z %Ez over 16 time points");
+    }
+
+    // (4) E/O modifiers are accepted and ignored in the "C" locale; %Ez/%Oz is
+    //     the only one that changes the output (it inserts the colon).
+    {
+        sys_seconds mt{sys_days{2021y / 1 / 9} + 13h + 4min + 5s};
+        std::string got = std::vformat(
+            "{:%Od|%Oe|%OH|%OI|%Om|%OM|%OS|%Ou|%OU|%OV|%Ow|%OW|%Oy|%Oz|"
+            "%Ec|%EC|%Ex|%EX|%Ey|%EY|%Ez}",
+            std::make_format_args(mt));
+        Check(feq(got, "09| 9|13|01|01|04|05|6|01|01|6|01|21|+00:00|"
+                       "Sat Jan  9 13:04:05 2021|20|01/09/21|13:04:05|21|2021|+00:00"),
+              "phase123 E/O modifiers ignored in the C locale (%Ez/%Oz add the colon)");
+    }
+
+    // (5) sub-second rendering: %S/%T carry the fractional part at the
+    //     hh_mm_ss fractional_width, %X/%r/%c never do (both libraries agree).
+    {
+        milliseconds ms{1234};
+        microseconds us{1234};
+        nanoseconds  ns{1234};
+        Check(feq(std::vformat("{:%S}", std::make_format_args(ms)), "01.234"),
+              "phase123 %S milliseconds fraction");
+        Check(feq(std::vformat("{:%T}", std::make_format_args(ms)), "00:00:01.234"),
+              "phase123 %T milliseconds fraction");
+        Check(feq(std::vformat("{:%X}", std::make_format_args(ms)), "00:00:01"),
+              "phase123 %X drops the fraction");
+        Check(feq(std::vformat("{:%r}", std::make_format_args(ms)), "12:00:01 AM"),
+              "phase123 %r drops the fraction");
+        Check(feq(std::vformat("{:%S}", std::make_format_args(us)), "00.001234"),
+              "phase123 %S microseconds fraction");
+        Check(feq(std::vformat("{:%S}", std::make_format_args(ns)), "00.000001234"),
+              "phase123 %S nanoseconds fraction");
+        // %OS is %S in the "C" locale — libc++ agrees, libstdc++ drops the
+        // fraction here (it disagrees with its own %S).
+        Check(feq(std::vformat("{:%OS}", std::make_format_args(ms)), "01.234"),
+              "phase123 %OS == %S in the C locale");
+    }
+
+    // (6) default (streamed) duration rendering: count() then the unit suffix.
+    {
+        milliseconds ms{1234};
+        microseconds us{1234};
+        nanoseconds  nsv{1234};
+        minutes      mi{90};
+        days         d3{3};
+        seconds      s42{42};
+        duration<int, std::ratio<3, 7>> odd{5};
+        Check(feq(std::vformat("{}", std::make_format_args(ms)), "1234ms"),
+              "phase123 default ms");
+        Check(feq(std::vformat("{}", std::make_format_args(us)), "1234us"),
+              "phase123 default us");
+        Check(feq(std::vformat("{}", std::make_format_args(nsv)), "1234ns"),
+              "phase123 default ns");
+        Check(feq(std::vformat("{}", std::make_format_args(mi)), "90min"),
+              "phase123 default min");
+        Check(feq(std::vformat("{}", std::make_format_args(d3)), "3d"),
+              "phase123 default days");
+        Check(feq(std::vformat("{}", std::make_format_args(s42)), "42s"),
+              "phase123 default s");
+        Check(feq(std::vformat("{}", std::make_format_args(odd)), "5[3/7]s"),
+              "phase123 default odd period");
+        Check(feq(std::vformat("{:%Q %q}", std::make_format_args(odd)), "5 [3/7]s"),
+              "phase123 %Q %q odd period");
+    }
+
+    // (7) [time.format]/4 — a negative duration formats as the *positive*
+    //     value with one '-' before the replacement of the INITIAL conversion
+    //     specifier. libc++ implements this; libstdc++ instead puts the sign
+    //     in front of the first numeric field ("s -42" for "{:%q %Q}").
+    {
+        seconds      n42{-42};
+        milliseconds nms{-1500};
+        Check(feq(std::vformat("{:%Q}", std::make_format_args(n42)), "-42"),
+              "phase123 negative %Q");
+        Check(feq(std::vformat("{:%q %Q}", std::make_format_args(n42)), "-s 42"),
+              "phase123 negative sign precedes the initial conversion spec (%q)");
+        Check(feq(std::vformat("{:%%%Q}", std::make_format_args(n42)), "-%42"),
+              "phase123 negative sign precedes a literal-producing %% too");
+        Check(feq(std::vformat("{:%n%q}", std::make_format_args(n42)), "-\n" "s"),
+              "phase123 negative sign precedes %n");
+        Check(feq(std::vformat("{}", std::make_format_args(n42)), "-42s"),
+              "phase123 negative default form");
+        Check(feq(std::vformat("{:%T}", std::make_format_args(nms)), "-00:00:01.500"),
+              "phase123 negative %T with fraction");
+        Check(feq(std::vformat("{:%Q %q}", std::make_format_args(nms)), "-1500 ms"),
+              "phase123 negative %Q is the positive value");
+        // duration<int>::min(): |count| is not representable in the rep, so %Q
+        // must build the magnitude in the unsigned type.
+        duration<int> imin{-2147483647 - 1};
+        Check(feq(std::vformat("{:%Q}", std::make_format_args(imin)), "-2147483648"),
+              "phase123 %Q of duration<int>::min() does not overflow");
+    }
+
+    // (8) hh_mm_ss.
+    {
+        hh_mm_ss<minutes>      h90{minutes{90}};
+        hh_mm_ss<milliseconds> hneg{milliseconds{-1500}};
+        hh_mm_ss<hours>        h50{hours{50}};
+        Check(feq(std::vformat("{}", std::make_format_args(h90)), "01:30:00"),
+              "phase123 hh_mm_ss default");
+        Check(feq(std::vformat("{:%X}", std::make_format_args(h90)), "01:30:00"),
+              "phase123 hh_mm_ss %X");
+        Check(feq(std::vformat("{}", std::make_format_args(hneg)), "-00:00:01.500"),
+              "phase123 hh_mm_ss negative default");
+        Check(feq(std::vformat("{:%T}", std::make_format_args(h50)), "50:00:00"),
+              "phase123 hh_mm_ss hours() past 24 is not reduced");
+    }
+
+    // (9) floating-point-rep durations. [time.duration.io] streams count()
+    //     through an ostream, so the default form carries ostream's default
+    //     precision of 6 and an explicit precision replaces it; %Q keeps the
+    //     shortest round-trip form. (libstdc++ ignores the precision entirely
+    //     and libc++ truncates the whole formatted string — boxcxx applies it
+    //     to the value, which is the only self-consistent reading.)
+    {
+        duration<double> third{1.0 / 3};
+        duration<double> onepointtwofive{1.25};
+        duration<float>  tenth{0.1f};
+        duration<double> big{1e20};
+        duration<double> mid{1234567.0};
+        int              p3 = 3;
+        Check(feq(std::vformat("{}", std::make_format_args(third)), "0.333333s"),
+              "phase123 fp duration default is ostream precision 6");
+        Check(feq(std::vformat("{:%Q}", std::make_format_args(third)),
+                  "0.3333333333333333"),
+              "phase123 fp duration %Q is the shortest round-trip");
+        Check(feq(std::vformat("{:.3}", std::make_format_args(third)), "0.333s"),
+              "phase123 fp duration explicit precision");
+        Check(feq(std::vformat("{:.3%Q}", std::make_format_args(third)), "0.333"),
+              "phase123 fp duration precision applies to %Q");
+        Check(feq(std::vformat("{:.{}}", std::make_format_args(third, p3)), "0.333s"),
+              "phase123 fp duration dynamic precision");
+        Check(feq(std::vformat("{:.2}", std::make_format_args(onepointtwofive)), "1.2s"),
+              "phase123 fp duration precision 2");
+        Check(feq(std::vformat("{}", std::make_format_args(tenth)), "0.1s"),
+              "phase123 float-rep duration uses the float overload");
+        Check(feq(std::vformat("{}", std::make_format_args(big)), "1e+20s"),
+              "phase123 fp duration general form (large)");
+        Check(feq(std::vformat("{}", std::make_format_args(mid)), "1.23457e+06s"),
+              "phase123 fp duration general form (6 significant digits)");
+        Check(feq(std::vformat("{:%S}", std::make_format_args(third)), "00"),
+              "phase123 fp duration %S uses fractional_width, not the precision");
+    }
+
+    // (10) a precision is only legal for a floating-point-rep duration.
+    {
+        seconds        s42{42};
+        sys_seconds    t{seconds{1}};
+        year_month_day ymd = 2021y / 1 / 1;
+        int            p3  = 3;
+        Check(!P123Parses("{:.3}", s42),
+              "phase123 precision rejected for an integral-rep duration");
+        Check(!P123Parses("{:.3}", t), "phase123 precision rejected for sys_time");
+        Check(!P123Parses("{:.3}", ymd),
+              "phase123 precision rejected for year_month_day");
+        bool dyn_rejected = false;
+        try {
+            (void)std::vformat("{:.{}}", std::make_format_args(s42, p3));
+        } catch (const std::format_error &) {
+            dyn_rejected = true;
+        }
+        Check(dyn_rejected, "phase123 dynamic precision rejected for an integral rep");
+    }
+
+    // (10b) every unit suffix ([time.duration.io]/1.5), the two literal
+    //       conversions and a dynamic width — none of which the tables above
+    //       exercise.
+    {
+        duration<int, std::atto>  a{1};
+        duration<int, std::femto> f{1};
+        duration<int, std::pico>  p{1};
+        duration<int, std::centi> c{1};
+        duration<int, std::deci>  dc{1};
+        duration<int, std::deca>  da{1};
+        duration<int, std::hecto> h{1};
+        duration<int, std::kilo>  k{1};
+        duration<int, std::mega>  M{1};
+        duration<int, std::giga>  G{1};
+        duration<int, std::tera>  T{1};
+        duration<int, std::peta>  P{1};
+        duration<int, std::exa>   E{1};
+        duration<int, std::ratio<604800>> wk{1};
+        duration<int, std::ratio<4, 2>>   red{1};
+        Check(feq(std::vformat("{:%q}", std::make_format_args(a)), "as") &&
+                  feq(std::vformat("{:%q}", std::make_format_args(f)), "fs") &&
+                  feq(std::vformat("{:%q}", std::make_format_args(p)), "ps") &&
+                  feq(std::vformat("{:%q}", std::make_format_args(c)), "cs") &&
+                  feq(std::vformat("{:%q}", std::make_format_args(dc)), "ds") &&
+                  feq(std::vformat("{:%q}", std::make_format_args(da)), "das") &&
+                  feq(std::vformat("{:%q}", std::make_format_args(h)), "hs") &&
+                  feq(std::vformat("{:%q}", std::make_format_args(k)), "ks") &&
+                  feq(std::vformat("{:%q}", std::make_format_args(M)), "Ms") &&
+                  feq(std::vformat("{:%q}", std::make_format_args(G)), "Gs") &&
+                  feq(std::vformat("{:%q}", std::make_format_args(T)), "Ts") &&
+                  feq(std::vformat("{:%q}", std::make_format_args(P)), "Ps") &&
+                  feq(std::vformat("{:%q}", std::make_format_args(E)), "Es"),
+              "phase123 every SI unit suffix");
+        Check(feq(std::vformat("{:%q}", std::make_format_args(wk)), "[604800]s") &&
+                  feq(std::vformat("{:%q}", std::make_format_args(red)), "[2]s"),
+              "phase123 the [num]s / [num/den]s suffix (reduced period)");
+        // hh_mm_ss<D>::precision cannot represent a period finer than about a
+        // femtosecond, so an atto duration has no time-of-day decomposition:
+        // libstdc++ and libc++ then fail to COMPILE every format of it,
+        // including "{}". The value-only conversions still have to work.
+        Check(feq(std::vformat("{}", std::make_format_args(a)), "1as"),
+              "phase123 an atto-period duration still formats by value");
+        Check(!P123Parses("{:%S}", a),
+              "phase123 an atto-period duration's time fields throw");
+        month jan2 = January;
+        Check(feq(std::vformat("{:%h%t%h%n}", std::make_format_args(jan2)),
+                  "Jan\tJan\n"),
+              "phase123 %h is %b and %t/%n are the literal conversions");
+        int w = 9;
+        Check(feq(std::vformat("{:{}%b}", std::make_format_args(jan2, w)),
+                  "Jan      "),
+              "phase123 dynamic width");
+    }
+
+    // (11) malformed chrono-specs.
+    {
+        month jan = January;
+        Check(!P123Parses("{:x%n}", jan),
+              "phase123 chrono-specs must start with '%'");
+        Check(!P123Parses("{:%Y{x}", year{2021}),
+              "phase123 '{' is not a literal-char ([time.format]/1)");
+        Check(!P123Parses("{:%}", jan), "phase123 trailing '%' rejected");
+        Check(!P123Parses("{:%K}", jan), "phase123 unknown specifier rejected");
+        Check(!P123Parses("{:%E}", jan), "phase123 trailing modifier rejected");
+        Check(!P123Parses("{:%Ea}", jan), "phase123 invalid E modifier rejected");
+        Check(!P123Parses("{:%OA}", jan), "phase123 invalid O modifier rejected");
+    }
+
+    // (12) invalid values: the name specifiers throw, the numeric ones print
+    //      the stored value ([time.format] table).
+    {
+        month    bad_m{13};
+        weekday  bad_w{9};
+        weekday  sun7{7}; // 7 is Sunday, not an invalid weekday
+        day      d99{99};
+        bool threw_b = false, threw_B = false, threw_a = false, threw_A = false;
+        try { (void)std::vformat("{:%b}", std::make_format_args(bad_m)); }
+        catch (const std::format_error &) { threw_b = true; }
+        try { (void)std::vformat("{:%B}", std::make_format_args(bad_m)); }
+        catch (const std::format_error &) { threw_B = true; }
+        try { (void)std::vformat("{:%a}", std::make_format_args(bad_w)); }
+        catch (const std::format_error &) { threw_a = true; }
+        try { (void)std::vformat("{:%A}", std::make_format_args(bad_w)); }
+        catch (const std::format_error &) { threw_A = true; }
+        Check(threw_b && threw_B, "phase123 %b/%B throw on an invalid month");
+        Check(threw_a && threw_A, "phase123 %a/%A throw on an invalid weekday");
+        Check(feq(std::vformat("{:%m}", std::make_format_args(bad_m)), "13"),
+              "phase123 %m prints an invalid month value");
+        Check(feq(std::vformat("{:%w %u}", std::make_format_args(bad_w)), "9 9"),
+              "phase123 %w/%u print an invalid weekday value");
+        Check(feq(std::vformat("{:%a}", std::make_format_args(sun7)), "Sun"),
+              "phase123 weekday{7} is Sunday");
+        Check(feq(std::vformat("{:%d}", std::make_format_args(d99)), "99"),
+              "phase123 %d prints an invalid day value");
+    }
+
+    // (13) fill/align/width and the L option ([time.format]/2 — the formatting
+    //      locale is always "C" here, so L only has to parse).
+    {
+        month          jan  = January;
+        year_month_day ymd  = 2021y / 1 / 1;
+        seconds        n42{-42};
+        Check(feq(std::vformat("{:>10}", std::make_format_args(jan)), "       Jan"),
+              "phase123 width + right align");
+        Check(feq(std::vformat("{:5L%b}", std::make_format_args(jan)), "Jan  "),
+              "phase123 L option after the width");
+        Check(feq(std::vformat("{:L>5%b}", std::make_format_args(jan)), "LLJan"),
+              "phase123 'L' as a fill character is still a fill character");
+        Check(feq(std::vformat("{:*^14}", std::make_format_args(ymd)), "**2021-01-01**"),
+              "phase123 centred date");
+        Check(feq(std::vformat("{:>12%Q}", std::make_format_args(n42)), "         -42"),
+              "phase123 the sign is inside the padded field");
+        Check(feq(std::vformat("{:L%F}", std::make_format_args(ymd)), "2021-01-01"),
+              "phase123 L option before the chrono-specs");
+    }
+
+    // (14) parse-time acceptance matrix: exactly the specifiers each type can
+    //      satisfy, swept over all 39 conversion characters ([time.format]/6).
+    {
+        day            d5{5};
+        month          jan = January;
+        year           y21{2021};
+        weekday        mon = Monday;
+        year_month_day ymd = 2021y / 1 / 8;
+        hh_mm_ss<minutes> hms{minutes{90}};
+        seconds        s42{42};
+        sys_seconds    t{seconds{1}};
+        P123Matrix("phase123 matrix: day", d5, "dent%");
+        P123Matrix("phase123 matrix: month", jan, "bBhmnt%");
+        P123Matrix("phase123 matrix: year", y21, "CntyY%");
+        P123Matrix("phase123 matrix: weekday", mon, "aAntuw%");
+        P123Matrix("phase123 matrix: year_month_day", ymd,
+                   "aAbBCdDeFgGhjmntuUVwWxyY%");
+        P123Matrix("phase123 matrix: hh_mm_ss", hms, "HIMnprRStTX%");
+        P123Matrix("phase123 matrix: duration", s42, "HIjMnpqQrRStTX%");
+        P123Matrix("phase123 matrix: sys_time", t,
+                   "aAbBcCdDeFgGhHIjmMnprRStTuUVwWxXyYzZ%");
+        P123ModMatrix("phase123 modifier matrix: %E", t, 'E', "cCxXyYz");
+        P123ModMatrix("phase123 modifier matrix: %O", t, 'O', "deHImMSuUVwWyz");
+    }
+
+    // (15) the edges the two adversarial audits raised. Each of these five
+    //      assertions kills a mutation that the rest of the phase survives.
+    {
+        // The hour of a duration is never reduced, so the 12-hour conversion
+        // has to stay 64-bit wide (a 32-bit one wraps 4294967308 to 0).
+        hours huge{4294967308LL};
+        Check(feq(std::vformat("{:%H|%I|%p}", std::make_format_args(huge)),
+                  "4294967308|4294967296|PM"),
+              "phase123 %H/%I stay 64-bit wide");
+
+        // [time.cal.ymd] leaves year_month_day's sys_days conversion
+        // *unspecified* unless the year and month are both ok(), so the fields
+        // derived from it carry no information and must throw ([time.format]/6,
+        // and Table 133's "%a … if the value does not contain a valid weekday").
+        // libstdc++ prints values derived from the unspecified conversion
+        // instead ("99" for %U, from its own field truncation).
+        year_month_day nodate = year{2021} / month{0} / day{1};
+        Check(!P123Parses("{:%j}", nodate) && !P123Parses("{:%U}", nodate) &&
+                  !P123Parses("{:%W}", nodate) && !P123Parses("{:%V}", nodate) &&
+                  !P123Parses("{:%G}", nodate) && !P123Parses("{:%g}", nodate) &&
+                  !P123Parses("{:%a}", nodate) && !P123Parses("{:%A}", nodate),
+              "phase123 fields derived from an unspecified sys_days throw");
+        Check(feq(std::vformat("{:%Y|%m|%d|%F}", std::make_format_args(nodate)),
+                  "2021|00|01|2021-00-01"),
+              "phase123 the stored components still print for such a value");
+
+        // A day out of range keeps the conversion *specified* (the year and
+        // month are ok()), so the derived fields stay printable — 2021-02-30
+        // is 2021-03-02, a Tuesday, day 61 of the year.
+        year_month_day overflowed = year{2021} / month{2} / day{30};
+        Check(feq(std::vformat("{:%a|%j|%F}", std::make_format_args(overflowed)),
+                  "Tue|061|2021-02-30"),
+              "phase123 an out-of-range day still has a specified weekday");
+
+        // A float rep must go through the float to_chars overload; widening it
+        // to double changes the shortest round-trip form.
+        duration<float> tenth{0.1f};
+        duration<float> fthird{1.0f / 3};
+        Check(feq(std::vformat("{:%Q}", std::make_format_args(tenth)), "0.1"),
+              "phase123 %Q of a float rep uses the float shortest form");
+        Check(feq(std::vformat("{:%Q}", std::make_format_args(fthird)),
+                  "0.33333334"),
+              "phase123 %Q of a float rep is not widened to double");
+
+        // |duration<int>::min()| is not representable in the rep, so the
+        // decomposition has to happen in the unsigned domain.
+        // (the '-' belongs to the initial conversion specifier only, so %H and
+        // %j after it carry no sign)
+        duration<int> imin{-2147483647 - 1};
+        Check(feq(std::vformat("{:%T|%H|%j}", std::make_format_args(imin)),
+                  "-596523:14:08|596523|24855"),
+              "phase123 duration<int>::min() decomposes without negating the rep");
+
+        // A count with no time-of-day representation: %Q prints it, the
+        // time-of-day specifiers throw rather than perform an undefined
+        // floating-to-integral conversion.
+        duration<double> dinf{1.0 / 0.0};
+        duration<double> dnan{__builtin_nan("")};
+        duration<double> dvast{1e300};
+        Check(feq(std::vformat("{:%Q}", std::make_format_args(dinf)), "inf"),
+              "phase123 %Q of an infinite count needs no decomposition");
+        Check(feq(std::vformat("{:%Q}", std::make_format_args(dvast)), "1e+300"),
+              "phase123 %Q of an out-of-range count still prints the value");
+        Check(!P123Parses("{:%T}", dinf),
+              "phase123 %T of an infinite count throws");
+        Check(!P123Parses("{:%T}", dnan), "phase123 %T of a NaN count throws");
+        Check(!P123Parses("{:%T}", dvast),
+              "phase123 %T of an out-of-range count throws");
+    }
+
+    printf("[CXX] PASS phase123: <chrono> formatter engine -- %%U/%%W/%%V/%%G/%%g week "
+           "numbering, %%c/%%x/%%X/%%r C-locale composites, %%z/%%Z, %%Q/%%q, E/O "
+           "modifiers, the L option, the floating-point precision rule and "
+           "per-type parse-time chrono-specs validation [time.format]\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -25483,6 +26101,7 @@ int main()
     Phase120();
     Phase121();
     Phase122();
+    Phase123();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
