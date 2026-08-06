@@ -63,6 +63,45 @@ operator<<(basic_ostream<charT, traits> &os,
     return os << format("{}", v);
 }
 
+// [time.clock.utc.nonmembers] / [.tai.] / [.gps.] / [.file.] / [time.clock.local]:
+// each streams through its own formatter, which is where the epoch shift and
+// the zone abbreviation live.
+template <class charT, class traits, class Duration>
+basic_ostream<charT, traits> &operator<<(basic_ostream<charT, traits> &os,
+                                         const utc_time<Duration> &v)
+{
+    return os << format("{}", v);
+}
+template <class charT, class traits, class Duration>
+basic_ostream<charT, traits> &operator<<(basic_ostream<charT, traits> &os,
+                                         const tai_time<Duration> &v)
+{
+    return os << format("{}", v);
+}
+template <class charT, class traits, class Duration>
+basic_ostream<charT, traits> &operator<<(basic_ostream<charT, traits> &os,
+                                         const gps_time<Duration> &v)
+{
+    return os << format("{}", v);
+}
+template <class charT, class traits, class Duration>
+basic_ostream<charT, traits> &operator<<(basic_ostream<charT, traits> &os,
+                                         const file_time<Duration> &v)
+{
+    return os << format("{}", v);
+}
+// [time.clock.local] constrains this on "os << sys_time<Duration>{…}" being
+// valid, i.e. on the same predicate as the sys_time overload above.
+template <class charT, class traits, class Duration>
+    requires(is_convertible_v<Duration, days> ||
+             (!treat_as_floating_point_v<typename Duration::rep> &&
+              Duration{1} < days{1}))
+basic_ostream<charT, traits> &operator<<(basic_ostream<charT, traits> &os,
+                                         const local_time<Duration> &v)
+{
+    return os << format("{}", v);
+}
+
 // [time.duration.io]/1: the count is written with the stream's own flags,
 // locale and precision, the unit suffix follows, and the pair is inserted as
 // one field so os.width() covers both.

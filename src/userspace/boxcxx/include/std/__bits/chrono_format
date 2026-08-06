@@ -67,9 +67,14 @@ struct Parts {
     // printing a value the standard never defined.
     bool      date_ok   = true;
     // Zone (only clock time_points and local-time-format-t supply these).
-    const char *zone     = nullptr; // %Z text
-    bool        has_zoff = false;
-    int         zoff_min = 0; // %z offset, minutes east of UTC
+    // The abbreviation is a view, not a C string: [time.format]/18 replaces %Z
+    // with the whole of *abbrev, embedded null characters included. The offset
+    // is carried in seconds so that %z can take its sign from the real value —
+    // an offset finer than a minute is still negative after truncation.
+    string_view zone;
+    bool        has_zone   = false;
+    bool        has_zoff   = false;
+    long long   zoff_sec   = 0; // %z offset, seconds east of UTC
     // Duration-only, pre-rendered by the duration formatter.
     string_view qtext; // %Q — the (positive) numeric value
     string_view unit;  // %q — the unit suffix
@@ -443,17 +448,17 @@ inline void render(string &o, string_view f, const Parts &p)
         case 'z': {
             if (!p.has_zoff)
                 throw format_error("chrono format: no offset information");
-            const long long    m  = p.zoff_min;
-            unsigned long long am = AbsLL(m);
-            o.push_back(m < 0 ? '-' : '+');
+            const long long    sec = p.zoff_sec;
+            unsigned long long am  = AbsLL(sec) / 60u; // whole minutes
+            o.push_back(sec < 0 ? '-' : '+');
             put_uint(o, am / 60u, 2);
             if (mod) o.push_back(':'); // %Ez / %Oz insert the colon
             put_uint(o, am % 60u, 2);
         } break;
         case 'Z':
-            if (!p.zone)
+            if (!p.has_zone)
                 throw format_error("chrono format: no time zone abbreviation");
-            o.append(p.zone);
+            o.append(p.zone.data(), p.zone.size());
             break;
         case 'Q': o.append(p.qtext.data(), p.qtext.size()); break;
         case 'q': o.append(p.unit.data(), p.unit.size()); break;
@@ -1060,33 +1065,239 @@ struct formatter<chrono::hh_mm_ss<Duration>, char>
     }
 };
 
-// ── formatter<sys_time<Duration>> ───────────────────────────────────────
+// ── the clock time_points ───────────────────────────────────────────────
+namespace __chrono_fmt {
+
+// A floating-point count must be range-checked before floor<days> turns it into
+// an integral tick: inf, NaN or a magnitude past the day range would make that
+// conversion undefined (-fwrapv does not tame float-to-integral).
+template <class Rep, class Period>
+inline void RequireCivilRange(const chrono::duration<Rep, Period> &d)
+{
+    if constexpr (chrono::treat_as_floating_point_v<Rep>) {
+        const long double secs = (long double)d.count() *
+                                 (long double)Period::num /
+                                 (long double)Period::den;
+        if (!(secs > -9.0e18L && secs < 9.0e18L)) // also false for NaN
+            throw format_error("chrono format: the time point is out of range");
+    }
+}
+
+// The civil fields of an instant expressed on the sys (Unix-epoch) timeline.
+template <class Duration>
+inline Parts sys_parts(const chrono::sys_time<Duration> &tp)
+{
+    using namespace chrono;
+    RequireCivilRange(tp.time_since_epoch());
+    sys_days                sd  = floor<days>(tp);
+    Parts                   p   = date_parts(year_month_day{sd});
+    auto                    tod = tp - sd; // common_type duration since midnight
+    hh_mm_ss<decltype(tod)> hms{tod};
+    fill_time(p, hms);
+    return p;
+}
+
+// The same, for a clock whose epoch differs from sys by a whole number of days.
+// The shift is applied to the *day* count, never to the raw duration: tai's own
+// duration is nanoseconds, and 4383 days is 3.8e17 ns, so shifting the ticks
+// would overflow twelve years short of nanoseconds::min() — inside the type's
+// usable civil range. Flooring first bounds the shift by |rep| / 86400e9.
+template <class Duration>
+inline Parts shifted_parts(const Duration &since_epoch, long long shift_days)
+{
+    using namespace chrono;
+    RequireCivilRange(since_epoch);
+    days                    sd  = floor<days>(since_epoch);
+    auto                    tod = since_epoch - sd;
+    Parts                   p =
+        date_parts(year_month_day{sys_days{sd - days{shift_days}}});
+    hh_mm_ss<decltype(tod)> hms{tod};
+    fill_time(p, hms);
+    return p;
+}
+
+// [time.clock.system.nonmembers] streams a sys_time whose duration converts to
+// days through the separate sys_days overload, i.e. as the date alone — that is
+// every whole multiple of a day (weeks, a 2-day period), not just `days`. Only
+// sys_time has that second overload; local_time inherits it by delegating,
+// while [time.clock.utc/tai/gps/file.nonmembers] specify "{:L%F %T}"
+// unconditionally, so those four never drop the time.
+template <class Duration>
+inline string_view clock_default()
+{
+    return is_convertible_v<Duration, chrono::days> ? string_view("%F")
+                                                    : string_view("%F %T");
+}
+
+// The epoch shifts [time.format] specifies for the tai and gps formatters,
+// written as the standard writes them. Both are exact: they are pure civil
+// offsets, so neither needs the leap-second table BoxOS has not got.
+inline constexpr long long kTaiShiftDays =
+    chrono::__detail::days_from_civil(1970, 1, 1) -
+    chrono::__detail::days_from_civil(1958, 1, 1); // 4383
+inline constexpr long long kGpsShiftDays =
+    chrono::__detail::days_from_civil(1980, 1, 6) -
+    chrono::__detail::days_from_civil(1970, 1, 1); // 3657
+
+// What a clock knows about its zone. sys/utc/file are UTC, tai and gps carry
+// their own abbreviation, local_time has neither, and local-time-format-t has
+// whatever the caller passed.
+struct ZoneInfo {
+    string_view zone;
+    bool        has_zone   = false;
+    bool        has_offset = false;
+    long long   offset_sec = 0;
+};
+inline constexpr ZoneInfo kZoneUtc{string_view("UTC"), true, true, 0};
+inline constexpr ZoneInfo kZoneTai{string_view("TAI"), true, true, 0};
+inline constexpr ZoneInfo kZoneGps{string_view("GPS"), true, true, 0};
+inline constexpr ZoneInfo kZoneNone{};
+
+inline void emit_parts(format_context &ctx, const __format::StdSpec &spec,
+                       string_view chrono_specs, string_view deflt, Parts p,
+                       const ZoneInfo &z)
+{
+    p.zone     = z.zone;
+    p.has_zone = z.has_zone;
+    p.has_zoff = z.has_offset;
+    p.zoff_sec = z.offset_sec;
+    string body;
+    render(body, chrono_specs.empty() ? deflt : chrono_specs, p);
+    emit(ctx, spec, body);
+}
+
+// Renders an instant already reduced to the sys timeline, with a zone.
+template <class Duration>
+inline void emit_clock(format_context &ctx, const __format::StdSpec &spec,
+                       string_view chrono_specs, string_view deflt,
+                       const chrono::sys_time<Duration> &sys, const ZoneInfo &z)
+{
+    emit_parts(ctx, spec, chrono_specs, deflt, sys_parts(sys), z);
+}
+
+} // namespace __chrono_fmt
+
 template <class Duration>
 struct formatter<chrono::sys_time<Duration>, char>
     : __chrono_fmt::SpecParser<__chrono_fmt::kDate | __chrono_fmt::kTime |
                                __chrono_fmt::kZone> {
     void format(const chrono::sys_time<Duration> &tp, format_context &ctx) const
     {
-        using namespace chrono;
-        sys_days             sd  = floor<days>(tp);
-        year_month_day       ymd{sd};
-        __chrono_fmt::Parts  p   = __chrono_fmt::date_parts(ymd);
-        auto                 tod = tp - sd; // common_type duration since midnight
-        hh_mm_ss<decltype(tod)> hms{tod};
-        __chrono_fmt::fill_time(p, hms);
-        p.zone     = "UTC"; // sys_time is UTC by definition ([time.format])
-        p.has_zoff = true;
-        p.zoff_min = 0;
-        // [time.clock.system.nonmembers] streams a sys_time whose duration
-        // converts to days through the separate sys_days overload, i.e. as the
-        // date alone — that is every whole multiple of a day (weeks, a 2-day
-        // period), not just `days` itself.
-        string_view deflt = is_convertible_v<Duration, chrono::days>
-                                ? string_view("%F")
-                                : string_view("%F %T");
-        string body;
-        __chrono_fmt::render(body, chrono_.empty() ? deflt : chrono_, p);
-        __chrono_fmt::emit(ctx, spec_, body);
+        __chrono_fmt::emit_clock(ctx, spec_, chrono_,
+                                 __chrono_fmt::clock_default<Duration>(), tp,
+                                 __chrono_fmt::kZoneUtc);
+    }
+};
+
+// A utc_time renders as the sys_time holding the same count. BoxOS has no
+// leap-second table (clock_cast is the identity), so the two differ by however
+// many leap seconds have been inserted, and %S never shows the 60th second of
+// an insertion — a documented deviation, not an approximation of the shift the
+// standard specifies for tai and gps below (those are exact).
+template <class Duration>
+struct formatter<chrono::utc_time<Duration>, char>
+    : __chrono_fmt::SpecParser<__chrono_fmt::kDate | __chrono_fmt::kTime |
+                               __chrono_fmt::kZone> {
+    void format(const chrono::utc_time<Duration> &tp, format_context &ctx) const
+    {
+        __chrono_fmt::emit_clock(ctx, spec_, chrono_,
+                                 string_view("%F %T"),
+                                 chrono::sys_time<Duration>{tp.time_since_epoch()},
+                                 __chrono_fmt::kZoneUtc);
+    }
+};
+
+template <class Duration>
+struct formatter<chrono::tai_time<Duration>, char>
+    : __chrono_fmt::SpecParser<__chrono_fmt::kDate | __chrono_fmt::kTime |
+                               __chrono_fmt::kZone> {
+    void format(const chrono::tai_time<Duration> &tp, format_context &ctx) const
+    {
+        __chrono_fmt::emit_parts(
+            ctx, spec_, chrono_, string_view("%F %T"),
+            __chrono_fmt::shifted_parts(tp.time_since_epoch(),
+                                        __chrono_fmt::kTaiShiftDays),
+            __chrono_fmt::kZoneTai);
+    }
+};
+
+template <class Duration>
+struct formatter<chrono::gps_time<Duration>, char>
+    : __chrono_fmt::SpecParser<__chrono_fmt::kDate | __chrono_fmt::kTime |
+                               __chrono_fmt::kZone> {
+    void format(const chrono::gps_time<Duration> &tp, format_context &ctx) const
+    {
+        __chrono_fmt::emit_parts(
+            ctx, spec_, chrono_, string_view("%F %T"),
+            __chrono_fmt::shifted_parts(tp.time_since_epoch(),
+                                        -__chrono_fmt::kGpsShiftDays),
+            __chrono_fmt::kZoneGps);
+    }
+};
+
+// BoxOS's file_clock shares the system_clock epoch (the epoch is
+// implementation-defined and clock_cast is the identity here).
+template <class Duration>
+struct formatter<chrono::file_time<Duration>, char>
+    : __chrono_fmt::SpecParser<__chrono_fmt::kDate | __chrono_fmt::kTime |
+                               __chrono_fmt::kZone> {
+    void format(const chrono::file_time<Duration> &tp, format_context &ctx) const
+    {
+        __chrono_fmt::emit_clock(ctx, spec_, chrono_,
+                                 string_view("%F %T"),
+                                 chrono::sys_time<Duration>{tp.time_since_epoch()},
+                                 __chrono_fmt::kZoneUtc);
+    }
+};
+
+// A local_time carries no zone at all, so %Z and %z are not in its set.
+template <class Duration>
+struct formatter<chrono::local_time<Duration>, char>
+    : __chrono_fmt::SpecParser<__chrono_fmt::kDate | __chrono_fmt::kTime> {
+    void format(const chrono::local_time<Duration> &tp, format_context &ctx) const
+    {
+        __chrono_fmt::emit_clock(ctx, spec_, chrono_,
+                                 __chrono_fmt::clock_default<Duration>(),
+                                 chrono::sys_time<Duration>{tp.time_since_epoch()},
+                                 __chrono_fmt::kZoneNone);
+    }
+};
+
+// [time.format]'s local-time-format-t: a local_time plus the zone information
+// the caller happens to know. %Z and %z throw when the corresponding pointer is
+// null, which is the only way a zone specifier can fail at format time.
+namespace chrono {
+
+template <class Duration> struct LocalTimeFormat {
+    local_time<Duration> time;
+    const string        *abbrev     = nullptr;
+    const seconds       *offset_sec = nullptr;
+};
+
+template <class Duration>
+LocalTimeFormat<Duration> local_time_format(local_time<Duration> time,
+                                            const string  *abbrev     = nullptr,
+                                            const seconds *offset_sec = nullptr)
+{
+    return {time, abbrev, offset_sec};
+}
+
+} // namespace chrono
+
+template <class Duration>
+struct formatter<chrono::LocalTimeFormat<Duration>, char>
+    : __chrono_fmt::SpecParser<__chrono_fmt::kDate | __chrono_fmt::kTime |
+                               __chrono_fmt::kZone> {
+    void format(const chrono::LocalTimeFormat<Duration> &f,
+                format_context &ctx) const
+    {
+        const __chrono_fmt::ZoneInfo z{
+            f.abbrev ? string_view(*f.abbrev) : string_view{},
+            f.abbrev != nullptr, f.offset_sec != nullptr,
+            f.offset_sec ? f.offset_sec->count() : 0LL};
+        __chrono_fmt::emit_clock(
+            ctx, spec_, chrono_, string_view("%F %T %Z"),
+            chrono::sys_time<Duration>{f.time.time_since_epoch()}, z);
     }
 };
 
