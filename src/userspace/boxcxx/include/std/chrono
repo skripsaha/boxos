@@ -12,5 +12,6 @@
 #include <__bits/chrono_clock>
 #include <__bits/chrono_calendar>
 #include <__bits/chrono_format>
+#include <__bits/chrono_io>
 
 #endif // BOXCXX_CHRONO

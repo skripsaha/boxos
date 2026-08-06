@@ -25957,6 +25957,314 @@ void Phase123()
            "per-type parse-time chrono-specs validation [time.format]\n");
 }
 
+// ── phase124 fixtures: the composite calendar formatters + chrono streaming ─
+// Ф30f-2 c2. [time.cal.*.nonmembers] define operator<< through format(), and
+// [time.format]/7 defines the empty-chrono-specs form as the streamed text, so
+// every case below asserts BOTH forms against one expected string — they cannot
+// drift apart. Ground truth from libstdc++ (g++-15), with three cells where
+// libstdc++ is demonstrably wrong corrected and annotated at the case.
+template <class T>
+void P124(const char *label, const T &v, const char *def, const char *spec,
+          const char *want)
+{
+    bool ok = true;
+    std::string d = std::vformat("{}", std::make_format_args(v));
+    if (std::string_view(d.data(), d.size()) != std::string_view(def)) {
+        printf("[CXX] phase124 %s: default [%s] want [%s]\n", label, d.c_str(), def);
+        ok = false;
+    }
+    std::ostringstream os;
+    os << v;
+    std::string s = os.str();
+    if (std::string_view(s.data(), s.size()) != std::string_view(def)) {
+        printf("[CXX] phase124 %s: operator<< [%s] want [%s]\n", label, s.c_str(), def);
+        ok = false;
+    }
+    std::string f = std::vformat(spec, std::make_format_args(v));
+    if (std::string_view(f.data(), f.size()) != std::string_view(want)) {
+        printf("[CXX] phase124 %s: %s -> [%s] want [%s]\n", label, spec, f.c_str(), want);
+        ok = false;
+    }
+    Check(ok, label);
+}
+
+template <class T>
+concept P124Streamable = requires(std::ostringstream &o, const T &v) { o << v; };
+
+// Ф30f-2 c2: the ten composite calendar formatters, the "… is not a valid …"
+// diagnostics that [time.cal.*.nonmembers] put in the default form, and the
+// chrono inserters.
+void Phase124()
+{
+    using namespace std::chrono;
+    auto feq = [](const std::string &got, const char *want) {
+        return std::string_view(got.data(), got.size()) ==
+               std::string_view(want);
+    };
+    // weekday_indexed  spec "{:%a|%A|%u|%w}"
+    P124("Monday[2]", Monday[2], "Mon[2]", "{:%a|%A|%u|%w}", "Mon|Monday|1|1");
+    P124("Monday[0]", Monday[0], "Mon[0 is not a valid index]", "{:%u|%w}", "1|1");
+    P124("Monday[6]", Monday[6], "Mon[6 is not a valid index]", "{:%u|%w}", "1|1");
+    P124("weekday{9}[2]", weekday{9}[2], "9 is not a valid weekday[2]", "{:%u|%w}", "9|9");
+    P124("weekday{9}[9]", weekday{9}[9], "9 is not a valid weekday[9 is not a valid index]", "{:%u|%w}", "9|9");
+    // weekday_last  spec "{:%a|%A|%u|%w}"
+    P124("Monday[last]", Monday[last], "Mon[last]", "{:%a|%A|%u|%w}", "Mon|Monday|1|1");
+    P124("weekday{9}[last]", weekday{9}[last], "9 is not a valid weekday[last]", "{:%u|%w}", "9|9");
+    // month_day  spec "{:%m|%d|%e|%b|%B}"
+    P124("January/8", January/8, "Jan/08", "{:%m|%d|%e|%b|%B}", "01|08| 8|Jan|January");
+    P124("February/29", February/29, "Feb/29", "{:%m|%d|%e|%b|%B}", "02|29|29|Feb|February");
+    P124("month{13}/8", month{13}/8, "13 is not a valid month/08", "{:%m|%d}", "13|08");
+    P124("January/day{99}", January/day{99}, "Jan/99 is not a valid day", "{:%m|%d|%e}", "01|99|99");
+    // month_day_last  spec "{:%m|%b|%B}"
+    P124("January/last", January/last, "Jan/last", "{:%m|%b|%B}", "01|Jan|January");
+    P124("December/last", December/last, "Dec/last", "{:%m|%b|%B}", "12|Dec|December");
+    P124("month{13}/last", month{13}/last, "13 is not a valid month/last", "{:%m}", "13");
+    // month_weekday  spec "{:%m|%b|%a|%A|%u|%w}"
+    P124("January/Monday[2]", January/Monday[2], "Jan/Mon[2]", "{:%m|%b|%a|%A|%u|%w}", "01|Jan|Mon|Monday|1|1");
+    P124("month{13}/Monday[2]", month{13}/Monday[2], "13 is not a valid month/Mon[2]", "{:%m|%u}", "13|1");
+    P124("January/weekday{9}[2]", January/weekday{9}[2], "Jan/9 is not a valid weekday[2]", "{:%m|%u}", "01|9");
+    P124("January/Monday[9]", January/Monday[9], "Jan/Mon[9 is not a valid index]", "{:%m|%a}", "01|Mon");
+    // month_weekday_last  spec "{:%m|%b|%a|%A|%u|%w}"
+    P124("January/Monday[last]", January/Monday[last], "Jan/Mon[last]", "{:%m|%b|%a|%A|%u|%w}", "01|Jan|Mon|Monday|1|1");
+    P124("month{13}/Monday[last]", month{13}/Monday[last], "13 is not a valid month/Mon[last]", "{:%m|%u}", "13|1");
+    P124("January/weekday{9}[last]", January/weekday{9}[last], "Jan/9 is not a valid weekday[last]", "{:%m|%u}", "01|9");
+    // year_month  spec "{:%Y|%m|%b|%B|%C|%y}"
+    P124("2021y/January", 2021y/January, "2021/Jan", "{:%Y|%m|%b|%B|%C|%y}", "2021|01|Jan|January|20|21");
+    P124("2021y/month{13}", 2021y/month{13}, "2021/13 is not a valid month", "{:%Y|%m}", "2021|13");
+    P124("year{-1}/March", year{-1}/March, "-0001/Mar", "{:%Y|%m|%b|%C|%y}", "-0001|03|Mar|-01|01");
+    P124("year{-32768}/January", year{-32768}/January, "-32768 is not a valid year/Jan", "{:%m|%b}", "01|Jan");
+    // year_month_day_last  spec "{:%F|%d|%j|%a|%U|%V|%G|%C|%y}"
+    P124("2021y/January/last", 2021y/January/last, "2021/Jan/last", "{:%F|%d|%j|%a|%U|%V|%G|%C|%y}", "2021-01-31|31|031|Sun|05|04|2021|20|21");
+    P124("2021y/February/last", 2021y/February/last, "2021/Feb/last", "{:%F|%d|%j|%a}", "2021-02-28|28|059|Sun");
+    P124("2020y/February/last", 2020y/February/last, "2020/Feb/last", "{:%F|%d|%j|%a}", "2020-02-29|29|060|Sat");
+    P124("year{-1}/December/last", year{-1}/December/last, "-0001/Dec/last", "{:%F|%d|%j|%a}", "-0001-12-31|31|365|Fri");
+    P124("2021y/month{13}/last", 2021y/month{13}/last, "2021/13 is not a valid month/last", "{:%d}", "00");
+    // year_month_weekday  spec "{:%F|%d|%j|%a|%U|%V|%G}"
+    P124("2021y/January/Monday[2]", 2021y/January/Monday[2], "2021/Jan/Mon[2]", "{:%F|%d|%j|%a|%U|%V|%G}", "2021-01-11|11|011|Mon|02|02|2021");
+    P124("2021y/January/Monday[0]", 2021y/January/Monday[0], "2021/Jan/Mon[0 is not a valid index]", "{:%F|%d|%j|%a}", "2020-12-28|28|363|Mon");
+    P124("2021y/February/Monday[5]", 2021y/February/Monday[5], "2021/Feb/Mon[5]", "{:%F|%d|%j|%a}", "2021-03-01|01|060|Mon");
+    P124("2021y/January/weekday{9}[2]", 2021y/January/weekday{9}[2], "2021/Jan/9 is not a valid weekday[2]", "{:%F|%d}", "2021-01-12|12");
+    P124("2021y/month{13}/Monday[2]", 2021y/month{13}/Monday[2], "2021/13 is not a valid month/Mon[2]", "{:%F}", "2022-01-10");
+    // year_month_weekday_last  spec "{:%F|%d|%j|%a|%U|%V|%G}"
+    P124("2021y/January/Monday[last]", 2021y/January/Monday[last], "2021/Jan/Mon[last]", "{:%F|%d|%j|%a|%U|%V|%G}", "2021-01-25|25|025|Mon|04|04|2021");
+    P124("2021y/February/Monday[last]", 2021y/February/Monday[last], "2021/Feb/Mon[last]", "{:%F|%d|%j|%a}", "2021-02-22|22|053|Mon");
+    // month 13 has no last day, so year_month_day_last::day() is the
+    // guarded 0 and the conversion lands on the last Monday before it.
+    // libstdc++ prints 2022-01-24, from a table read of its own that
+    // yields 30 for month 13; the value is unspecified either way.
+    P124("2021y/month{13}/Monday[last]", 2021y/month{13}/Monday[last], "2021/13 is not a valid month/Mon[last]", "{:%F}", "2021-12-27");
+    P124("2021y/January/weekday{9}[last]", 2021y/January/weekday{9}[last], "2021/Jan/9 is not a valid weekday[last]", "{:%F|%d}", "2021-02-02|02");
+    // already-shipped types, default text with invalid values
+    P124("day{0}", day{0}, "00 is not a valid day", "{:%d}", "00");
+    P124("day{32}", day{32}, "32 is not a valid day", "{:%d}", "32");
+    P124("day{255}", day{255}, "255 is not a valid day", "{:%d}", "255");
+    P124("month{0}", month{0}, "0 is not a valid month", "{:%m}", "00");
+    P124("month{255}", month{255}, "255 is not a valid month", "{:%m}", "255");
+    P124("year{-32768}", year{-32768}, "-32768 is not a valid year", "{:%Y}", "-32768");
+    P124("weekday{8}", weekday{8}, "8 is not a valid weekday", "{:%w}", "8");
+    P124("weekday{255}", weekday{255}, "255 is not a valid weekday", "{:%w}", "255");
+    P124("2021y/2/30", 2021y/2/30, "2021-02-30 is not a valid date", "{:%F}", "2021-02-30");
+    P124("2021y/month{13}/8", 2021y/month{13}/8, "2021-13-08 is not a valid date", "{:%m}", "13");
+    P124("2021y/1/day{99}", 2021y/1/day{99}, "2021-01-99 is not a valid date", "{:%d}", "99");
+
+    // (2) parse-time acceptance matrix for the ten new types.
+    {
+        weekday_indexed         wdi   = Monday[2];
+        weekday_last            wdl   = Monday[last];
+        month_day               md    = January / 8;
+        month_day_last          mdl   = January / last;
+        month_weekday           mwd   = January / Monday[2];
+        month_weekday_last      mwdl  = January / Monday[last];
+        year_month              ym    = 2021y / January;
+        year_month_day_last     ymdl  = 2021y / January / last;
+        year_month_weekday      ymwd  = 2021y / January / Monday[2];
+        year_month_weekday_last ymwdl = 2021y / January / Monday[last];
+        const char *kFullDate = "aAbBCdDeFgGhjmntuUVwWxyY%";
+        P123Matrix("phase124 matrix: weekday_indexed", wdi, "aAntuw%");
+        P123Matrix("phase124 matrix: weekday_last", wdl, "aAntuw%");
+        P123Matrix("phase124 matrix: month_day", md, "bBdehmnt%");
+        P123Matrix("phase124 matrix: month_day_last", mdl, "bBhmnt%");
+        P123Matrix("phase124 matrix: month_weekday", mwd, "aAbBhmntuw%");
+        P123Matrix("phase124 matrix: month_weekday_last", mwdl, "aAbBhmntuw%");
+        P123Matrix("phase124 matrix: year_month", ym, "bBChmntyY%");
+        P123Matrix("phase124 matrix: year_month_day_last", ymdl, kFullDate);
+        P123Matrix("phase124 matrix: year_month_weekday", ymwd, kFullDate);
+        P123Matrix("phase124 matrix: year_month_weekday_last", ymwdl, kFullDate);
+    }
+
+    // (3) the day-of-month table guard: year_month_day_last::day() must not
+    //     index past the 12-entry table for a month that is not ok().
+    {
+        year_month_day_last bad = 2021y / month{13} / last;
+        Check(unsigned(bad.day()) == 0,
+              "phase124 last_day_of_month range guard (no out-of-bounds read)");
+        Check(!bad.ok(), "phase124 ... and the value is not ok()");
+        Check(unsigned((2021y / February / last).day()) == 28 &&
+                  unsigned((2020y / February / last).day()) == 29,
+              "phase124 the guard did not disturb the real table");
+    }
+
+    // (4) the inserters. [time.duration.io] threads the stream's flags, locale
+    //     and precision through the rendering, and the whole result is one
+    //     width field — so os.width() covers the unit suffix too.
+    {
+        auto str = [](auto &&emit) {
+            std::ostringstream os;
+            emit(os);
+            return os.str();
+        };
+        Check(feq(str([](std::ostringstream &o) { o << seconds{42}; }), "42s"),
+              "phase124 << duration");
+        Check(feq(str([](std::ostringstream &o) { o << seconds{-42}; }), "-42s"),
+              "phase124 << negative duration");
+        Check(feq(str([](std::ostringstream &o) {
+                  o.precision(3);
+                  o << duration<double>{1.0 / 3};
+              }),
+                  "0.333s"),
+              "phase124 << threads os.precision() into the count");
+        Check(feq(str([](std::ostringstream &o) {
+                  o << std::fixed << std::setprecision(2) << duration<double>{1.0 / 3};
+              }),
+                  "0.33s"),
+              "phase124 << threads os.flags() into the count");
+        Check(feq(str([](std::ostringstream &o) { o << std::hex << seconds{255}; }),
+                  "ffs"),
+              "phase124 << threads the basefield");
+        Check(feq(str([](std::ostringstream &o) { o << std::showpos << seconds{42}; }),
+                  "+42s"),
+              "phase124 << threads showpos");
+        Check(feq(str([](std::ostringstream &o) { o << std::setw(12) << seconds{42}; }),
+                  "         42s"),
+              "phase124 << width covers the whole rendering");
+        Check(feq(str([](std::ostringstream &o) {
+                  o << std::left << std::setw(12) << seconds{42};
+              }),
+                  "42s         "),
+              "phase124 << left-adjusted width");
+        Check(feq(str([](std::ostringstream &o) { o << hh_mm_ss{minutes{90}}; }),
+                  "01:30:00"),
+              "phase124 << hh_mm_ss");
+        Check(feq(str([](std::ostringstream &o) { o << sys_seconds{seconds{1}}; }),
+                  "1970-01-01 00:00:01"),
+              "phase124 << sys_time");
+        Check(feq(str([](std::ostringstream &o) { o << sys_days{2021y / 1 / 1}; }),
+                  "2021-01-01"),
+              "phase124 << sys_days is the date alone");
+        Check(feq(str([](std::ostringstream &o) {
+                  o << std::setw(14) << (2021y / 1 / 1);
+              }),
+                  "    2021-01-01"),
+              "phase124 << width on a calendar type");
+    }
+
+    // (5) the edges the two adversarial audits raised.
+    {
+        // days_from_civil computed the day-of-era in unsigned: day 0 of March
+        // underflows doy to -1, and in a year that is a multiple of 400 there
+        // is nothing in doe to absorb the wrap, so the result was off by 2^32.
+        // [time.cal.ymd] specifies this conversion (the year and month are
+        // ok()), so it was a hard defect, not an unspecified corner.
+        year_month_day mar0 = year{2000} / March / day{0};
+        Check(feq(std::vformat("{:%F|%a|%j|%U|%V|%G}", std::make_format_args(mar0)),
+                  "2000-03-00|Tue|060|09|09|2000"),
+              "phase124 day 0 of March in a 400-year does not underflow");
+        Check(sys_days{mar0}.time_since_epoch().count() ==
+                  sys_days{year{2000} / February / day{29}}.time_since_epoch().count(),
+              "phase124 ... and its sys_days is 2000-02-29");
+
+        // [time.clock.system.nonmembers]: a sys_time whose duration converts to
+        // days streams through the sys_days overload, i.e. as the date alone —
+        // every whole multiple of a day, not just `days`.
+        std::ostringstream ow;
+        ow << sys_time<weeks>{weeks{1}};
+        Check(feq(ow.str(), "1970-01-08"),
+              "phase124 << sys_time<weeks> prints the date alone");
+        // ... and the same rule drives the default format.
+        sys_time<weeks> wk1{weeks{1}};
+        Check(feq(std::vformat("{}", std::make_format_args(wk1)), "1970-01-08"),
+              "phase124 the sys_time<weeks> default format agrees");
+        // The overload's Constraints: not a floating-point rep, and finer than
+        // a day (or convertible to days).
+        Check(P124Streamable<sys_time<seconds>> && P124Streamable<sys_time<weeks>> &&
+                  !P124Streamable<sys_time<duration<double>>> &&
+                  !P124Streamable<sys_time<months>>,
+              "phase124 the sys_time inserter honours its Constraints");
+
+        // [time.format]/7 makes the default format the streamed text, so the
+        // two must agree for the non-calendar types as well — a character rep
+        // is where they part company if the inserter streams count() as text.
+        auto ident = [](auto v) {
+            std::ostringstream o;
+            o << v;
+            std::string s = o.str();
+            std::string f = std::vformat("{}", std::make_format_args(v));
+            return std::string_view(s.data(), s.size()) ==
+                   std::string_view(f.data(), f.size());
+        };
+        Check(ident(seconds{42}) && ident(milliseconds{-1500}) &&
+                  ident(duration<char>{65}) && ident(duration<bool>{true}) &&
+                  ident(duration<double>{1.0 / 3}) && ident(hh_mm_ss{minutes{90}}) &&
+                  ident(sys_seconds{seconds{1}}) && ident(sys_days{2021y / 1 / 1}) &&
+                  ident(duration<int, std::ratio<3, 7>>{5}),
+              "phase124 operator<< equals the default format for every duration rep");
+
+        // [tab:format.align] makes '<' the default for a non-arithmetic type;
+        // libc++ right-aligns every chrono type instead.
+        month feb = February;
+        Check(feq(std::vformat("{:14}", std::make_format_args(feb)), "Feb           ") &&
+                  feq(std::vformat("{:=>9}", std::make_format_args(feb)), "======Feb"),
+              "phase124 chrono types default to left alignment in format()");
+
+        // %F is "equivalent to %Y-%m-%d" — the invariant libstdc++ breaks for
+        // the composite types (it resolves %F but not %Y/%m).
+        year_month_day_last     ymdl  = 2021y / month{13} / last;
+        year_month_weekday      ymwd  = 2021y / February / Monday[5];
+        year_month_weekday_last ymwdl = 2021y / January / Monday[last];
+        auto fEqYmd = [](auto v) {
+            std::string a = std::vformat("{:%F}", std::make_format_args(v));
+            std::string b = std::vformat("{:%Y-%m-%d}", std::make_format_args(v));
+            return std::string_view(a.data(), a.size()) ==
+                   std::string_view(b.data(), b.size());
+        };
+        Check(fEqYmd(ymdl) && fEqYmd(ymwd) && fEqYmd(ymwdl) &&
+                  fEqYmd(2021y / 2 / 30) && fEqYmd(year{-1} / December / last),
+              "phase124 %F stays equivalent to %Y-%m-%d for the composites");
+
+        // %b/%B and %a/%A follow the STORED month/weekday on every composite,
+        // not the one its date resolves to. Without this, all four mon_ok/wd_ok
+        // propagation lines can be deleted with the rest of the phase green.
+        Check(!P123Parses("{:%a}", weekday{9}[2]) &&
+                  !P123Parses("{:%a}", weekday{9}[last]) &&
+                  !P123Parses("{:%b}", month{13} / 8) &&
+                  !P123Parses("{:%b}", month{13} / last) &&
+                  !P123Parses("{:%b}", month{13} / Monday[2]) &&
+                  !P123Parses("{:%a}", January / weekday{9}[2]) &&
+                  !P123Parses("{:%B}", month{13} / Monday[last]) &&
+                  !P123Parses("{:%A}", January / weekday{9}[last]) &&
+                  !P123Parses("{:%b}", 2021y / month{13}) &&
+                  !P123Parses("{:%b}", 2021y / month{13} / last) &&
+                  !P123Parses("{:%b}", 2021y / month{13} / Monday[2]) &&
+                  !P123Parses("{:%a}", 2021y / January / weekday{9}[2]) &&
+                  !P123Parses("{:%b}", 2021y / month{13} / Monday[last]) &&
+                  !P123Parses("{:%a}", 2021y / January / weekday{9}[last]),
+              "phase124 %b/%B and %a/%A follow the stored month/weekday on every composite");
+
+        // the E/O sets intersected with what a full-date type accepts (on a
+        // value that IS ok(): the date gate would otherwise reject %OU/%OV/%OW)
+        year_month_day_last ymdl_ok = 2021y / January / last;
+        P123ModMatrix("phase124 modifier matrix: ymdl %O", ymdl_ok, 'O', "demuUVwWy");
+        P123ModMatrix("phase124 modifier matrix: ymdl %E", ymdl_ok, 'E', "CxyY");
+    }
+
+    printf("[CXX] PASS phase124: the ten composite calendar formatters -- default text "
+           "(including the \"... is not a valid ...\" diagnostics of "
+           "[time.cal.*.nonmembers]), the per-type conversion-specifier sets, the "
+           "year_month_day_last day-of-month range guard, and the chrono inserters "
+           "(operator<< reproduces the default format, and threads the stream's "
+           "flags/precision/width for durations)\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -26102,6 +26410,7 @@ int main()
     Phase121();
     Phase122();
     Phase123();
+    Phase124();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
