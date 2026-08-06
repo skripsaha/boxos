@@ -26265,6 +26265,238 @@ void Phase124()
            "flags/precision/width for durations)\n");
 }
 
+
+// ── phase125 fixtures: the clock time_points ([time.format]) ────────────
+// Ф30f-2 c3. The tai and gps columns are the epoch shifts the standard writes
+// out itself (1970-01-01 − 1958-01-01 and 1980-01-06 − 1970-01-01), so they are
+// exact and match libstdc++ byte for byte despite BoxOS having no leap-second
+// table. The utc column deliberately equals the sys one: clock_cast is the
+// identity here, so a utc_time renders as the sys_time with the same count —
+// libstdc++, which has the table, shows 22 s more at 1e9 s. The file column
+// equals sys too, because file_clock's epoch is implementation-defined and
+// BoxOS puts it at the Unix epoch.
+struct P125Clock { long long s; const char *sys; const char *tai; const char *gps; };
+inline constexpr P125Clock kP125Clocks[] = {
+    {0LL,          "1970-01-01 00:00:00", "1958-01-01 00:00:00", "1980-01-06 00:00:00"},
+    {1LL,          "1970-01-01 00:00:01", "1958-01-01 00:00:01", "1980-01-06 00:00:01"},
+    {1000000000LL, "2001-09-09 01:46:40", "1989-09-09 01:46:40", "2011-09-14 01:46:40"},
+    {-86400LL,     "1969-12-31 00:00:00", "1957-12-31 00:00:00", "1980-01-05 00:00:00"},
+    {951782400LL,  "2000-02-29 00:00:00", "1988-02-29 00:00:00", "2010-03-05 00:00:00"},
+};
+
+// Ф30f-2 c3: utc/tai/gps/file/local time_points, their %Z and %z, and
+// local_time_format's caller-supplied zone information.
+void Phase125()
+{
+    using namespace std::chrono;
+    auto feq = [](const std::string &got, const std::string &want) {
+        return std::string_view(got.data(), got.size()) ==
+               std::string_view(want.data(), want.size());
+    };
+    const char *kSpec = "{:%F %T|%Z|%z|%Ez}";
+
+    // (1) each clock's civil rendering and zone.
+    {
+        bool ok = true;
+        for (const auto &c : kP125Clocks) {
+            sys_seconds        sy{seconds{c.s}};
+            utc_seconds        u{seconds{c.s}};
+            tai_seconds        t{seconds{c.s}};
+            gps_seconds        g{seconds{c.s}};
+            file_time<seconds> f{seconds{c.s}};
+            local_seconds      l{seconds{c.s}};
+            struct { const char *what; std::string got, want; } k[] = {
+                {"sys",   std::vformat(kSpec, std::make_format_args(sy)),
+                          std::string(c.sys) + "|UTC|+0000|+00:00"},
+                {"utc",   std::vformat(kSpec, std::make_format_args(u)),
+                          std::string(c.sys) + "|UTC|+0000|+00:00"},
+                {"tai",   std::vformat(kSpec, std::make_format_args(t)),
+                          std::string(c.tai) + "|TAI|+0000|+00:00"},
+                {"gps",   std::vformat(kSpec, std::make_format_args(g)),
+                          std::string(c.gps) + "|GPS|+0000|+00:00"},
+                {"file",  std::vformat(kSpec, std::make_format_args(f)),
+                          std::string(c.sys) + "|UTC|+0000|+00:00"},
+                {"local", std::vformat("{:%F %T}", std::make_format_args(l)),
+                          std::string(c.sys)},
+            };
+            for (const auto &e : k)
+                if (!feq(e.got, e.want)) {
+                    printf("[CXX] phase125 %s %lld:\n  got  [%s]\n  want [%s]\n",
+                           e.what, c.s, e.got.c_str(), e.want.c_str());
+                    ok = false;
+                }
+            if (P123Parses("{:%Z}", l) || P123Parses("{:%z}", l)) {
+                printf("[CXX] phase125 local_time %lld: %%Z/%%z did not throw\n", c.s);
+                ok = false;
+            }
+        }
+        Check(ok, "phase125 utc/tai/gps/file/local civil rendering + %Z/%z");
+    }
+
+    // (2) default formats.
+    {
+        tai_seconds            t0{seconds{0}};
+        gps_seconds            g0{seconds{0}};
+        local_seconds          l0{seconds{0}};
+        local_days             ld{2021y / 1 / 1};
+        utc_time<milliseconds> ums{milliseconds{1000000123}};
+        Check(feq(std::vformat("{}", std::make_format_args(t0)), "1958-01-01 00:00:00") &&
+                  feq(std::vformat("{}", std::make_format_args(g0)), "1980-01-06 00:00:00") &&
+                  feq(std::vformat("{}", std::make_format_args(l0)), "1970-01-01 00:00:00") &&
+                  feq(std::vformat("{}", std::make_format_args(ld)), "2021-01-01") &&
+                  feq(std::vformat("{}", std::make_format_args(ums)), "1970-01-12 13:46:40.123"),
+              "phase125 clock default formats (local_days is the date alone)");
+    }
+
+    // (3) local_time_format: the zone information the caller supplies. This is
+    //     the only place %z sees a non-zero offset, so it is also where the
+    //     sign and the hour/minute split are exercised.
+    {
+        std::string   ab = "MST";
+        seconds       off{-7 * 3600};
+        seconds       pos{5 * 3600 + 30 * 60};
+        auto          full = local_time_format(local_seconds{seconds{1000000000}}, &ab, &off);
+        auto          bare = local_time_format(local_seconds{seconds{1000000000}});
+        auto          half = local_time_format(local_seconds{seconds{0}}, nullptr, &pos);
+        Check(feq(std::vformat("{}", std::make_format_args(full)),
+                  "2001-09-09 01:46:40 MST"),
+              "phase125 local_time_format default is %F %T %Z");
+        Check(feq(std::vformat("{:%F %T %Z %z}", std::make_format_args(full)),
+                  "2001-09-09 01:46:40 MST -0700"),
+              "phase125 local_time_format %Z and %z");
+        Check(feq(std::vformat("{:%Ez|%Oz}", std::make_format_args(full)),
+                  "-07:00|-07:00"),
+              "phase125 local_time_format %Ez/%Oz insert the colon");
+        Check(feq(std::vformat("{:%z|%Ez}", std::make_format_args(half)),
+                  "+0530|+05:30"),
+              "phase125 a positive offset with minutes");
+        Check(!P123Parses("{:%Z}", bare) && !P123Parses("{:%z}", bare),
+              "phase125 local_time_format throws when the pointer is null");
+        Check(feq(std::vformat("{:%F %T}", std::make_format_args(bare)),
+                  "2001-09-09 01:46:40"),
+              "phase125 ... but the civil fields still render");
+    }
+
+    // (4) parse-time acceptance: the clock types take everything but %q/%Q, and
+    //     local_time additionally has no %z/%Z.
+    {
+        utc_seconds        u{seconds{1}};
+        tai_seconds        t{seconds{1}};
+        gps_seconds        g{seconds{1}};
+        file_time<seconds> f{seconds{1}};
+        local_seconds      l{seconds{1}};
+        const char *kZoned  = "aAbBcCdDeFgGhHIjmMnprRStTuUVwWxXyYzZ%";
+        const char *kNoZone = "aAbBcCdDeFgGhHIjmMnprRStTuUVwWxXyY%";
+        P123Matrix("phase125 matrix: utc_time", u, kZoned);
+        P123Matrix("phase125 matrix: tai_time", t, kZoned);
+        P123Matrix("phase125 matrix: gps_time", g, kZoned);
+        P123Matrix("phase125 matrix: file_time", f, kZoned);
+        P123Matrix("phase125 matrix: local_time", l, kNoZone);
+    }
+
+    // (5) the inserters ([time.clock.*.nonmembers]).
+    {
+        auto str = [](auto &&emit) {
+            std::ostringstream os;
+            emit(os);
+            return os.str();
+        };
+        Check(feq(str([](std::ostringstream &o) { o << tai_seconds{seconds{0}}; }),
+                  "1958-01-01 00:00:00") &&
+                  feq(str([](std::ostringstream &o) { o << gps_seconds{seconds{0}}; }),
+                      "1980-01-06 00:00:00") &&
+                  feq(str([](std::ostringstream &o) { o << utc_seconds{seconds{1}}; }),
+                      "1970-01-01 00:00:01") &&
+                  feq(str([](std::ostringstream &o) { o << file_time<seconds>{seconds{1}}; }),
+                      "1970-01-01 00:00:01") &&
+                  feq(str([](std::ostringstream &o) { o << local_seconds{seconds{1}}; }),
+                      "1970-01-01 00:00:01") &&
+                  feq(str([](std::ostringstream &o) { o << local_days{2021y / 1 / 1}; }),
+                      "2021-01-01"),
+              "phase125 the clock inserters equal their default formats");
+    }
+
+    // (6) the edges the two adversarial audits raised.
+    {
+        // The date-only rule belongs to sys_time (which has the separate
+        // sys_days overload) and to local_time (which delegates to it). The
+        // four zoned clocks specify "{:L%F %T}" unconditionally.
+        utc_time<days>  ud{days{0}};
+        tai_time<days>  td{days{0}};
+        gps_time<days>  gd{days{0}};
+        file_time<days> fd{days{0}};
+        utc_time<weeks> uw{weeks{0}};
+        sys_days        sd{days{0}};
+        local_days      ld0{days{0}};
+        Check(feq(std::vformat("{}", std::make_format_args(ud)), "1970-01-01 00:00:00") &&
+                  feq(std::vformat("{}", std::make_format_args(td)), "1958-01-01 00:00:00") &&
+                  feq(std::vformat("{}", std::make_format_args(gd)), "1980-01-06 00:00:00") &&
+                  feq(std::vformat("{}", std::make_format_args(fd)), "1970-01-01 00:00:00") &&
+                  feq(std::vformat("{}", std::make_format_args(uw)), "1970-01-01 00:00:00"),
+              "phase125 a day-period utc/tai/gps/file still prints the time");
+        Check(feq(std::vformat("{}", std::make_format_args(sd)), "1970-01-01") &&
+                  feq(std::vformat("{}", std::make_format_args(ld0)), "1970-01-01"),
+              "phase125 ... while sys_days and local_days are the date alone");
+
+        // The epoch shift is applied to the day count, not to the ticks:
+        // tai_clock's own duration is nanoseconds, and 4383 days of them
+        // overflow twelve years short of nanoseconds::min().
+        tai_time<nanoseconds> tearly{nanoseconds{-9088329600000000000LL}};
+        Check(feq(std::vformat("{}", std::make_format_args(tearly)),
+                  "1670-01-01 00:00:00.000000000"),
+              "phase125 the tai shift does not overflow a nanosecond rep");
+        gps_time<nanoseconds> glate{nanoseconds{9223372036854775807LL}};
+        Check(std::vformat("{}", std::make_format_args(glate)).size() > 0,
+              "phase125 ... nor does the gps shift at nanoseconds::max()");
+
+        // %z takes its sign from the offset itself, not from the truncated
+        // minute count, and carries offsets past the int-minutes range.
+        std::string ab   = "MST";
+        seconds     tiny{-59};
+        seconds     huge{100 * 3600};
+        auto        subm = local_time_format(local_seconds{seconds{0}}, &ab, &tiny);
+        auto        big  = local_time_format(local_seconds{seconds{0}}, &ab, &huge);
+        Check(feq(std::vformat("{:%z|%Ez}", std::make_format_args(subm)),
+                  "-0000|-00:00"),
+              "phase125 a sub-minute negative offset keeps its sign");
+        Check(feq(std::vformat("{:%z}", std::make_format_args(big)), "+10000"),
+              "phase125 an offset past 24 h is not truncated to an int of minutes");
+
+        // %Z writes the whole abbreviation, embedded nulls included.
+        std::string nul("AB\0CD", 5);
+        auto        withnul = local_time_format(local_seconds{seconds{0}}, &nul);
+        Check(std::vformat("{:%Z}", std::make_format_args(withnul)).size() == 5,
+              "phase125 %Z is the whole string, not a C string");
+
+        // %OS is %S in the C locale, on a time_point too.
+        sys_time<milliseconds> sms{milliseconds{1}};
+        Check(feq(std::vformat("{:%OS}", std::make_format_args(sms)), "00.001"),
+              "phase125 %OS keeps the fraction on a clock time_point");
+
+        // local_time must reject %Z at PARSE time (so a literal format string
+        // is ill-formed), not merely throw while rendering — the two are
+        // indistinguishable through vformat except by the message.
+        auto why = [](const char *spec, auto v) {
+            try {
+                (void)std::vformat(spec, std::make_format_args(v));
+            } catch (const std::format_error &e) {
+                return std::string(e.what());
+            }
+            return std::string();
+        };
+        local_seconds l0{seconds{0}};
+        Check(why("{:%Z}", l0).find("lacks the information") != std::string::npos &&
+                  why("{:%z}", l0).find("lacks the information") != std::string::npos,
+              "phase125 local_time rejects %Z/%z at parse time, not at render time");
+    }
+
+    printf("[CXX] PASS phase125: the clock time_points -- utc/tai/gps/file/local civil "
+           "rendering with the standard's exact epoch shifts (tai -4383 d, gps +3657 d), "
+           "%%Z/%%z per clock, local_time's zone specifiers throwing, local_time_format's "
+           "caller-supplied abbreviation and offset (sign, hour/minute split, %%Ez colon, "
+           "null-pointer throw), and the [time.clock.*.nonmembers] inserters\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -26411,6 +26643,7 @@ int main()
     Phase122();
     Phase123();
     Phase124();
+    Phase125();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
