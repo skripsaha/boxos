@@ -43,11 +43,16 @@ constexpr long long days_from_civil(long long y, unsigned m, unsigned d) noexcep
 {
     y -= m <= 2;
     const long long era = (y >= 0 ? y : y - 399) / 400;
-    const unsigned  yoe = static_cast<unsigned>(y - era * 400);
-    const unsigned  mp  = m > 2 ? m - 3 : m + 9;
-    const unsigned  doy = (153u * mp + 2u) / 5u + d - 1u;
-    const unsigned  doe = yoe * 365u + yoe / 4u - yoe / 100u + doy;
-    return era * 146097LL + static_cast<long long>(doe) - 719468LL;
+    const long long yoe = y - era * 400; // 0..399
+    const long long mp  = m > 2 ? (long long)m - 3 : (long long)m + 9;
+    // Signed throughout: day 0 of March gives doy == -1, and an unsigned doy
+    // only wraps back through doe when yoe != 0 — for a year that is a multiple
+    // of 400 there is nothing to absorb it and the 2^32 survives into the
+    // result. [time.cal.ymd] specifies the conversion whenever the year and
+    // month are ok(), so that case is not an unspecified one.
+    const long long doy = (153 * mp + 2) / 5 + (long long)d - 1;
+    const long long doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097LL + doe - 719468LL;
 }
 
 constexpr void civil_from_days(long long z, long long &y, unsigned &m,
@@ -80,6 +85,9 @@ constexpr unsigned last_day_of_month(long long y, unsigned m) noexcept
 {
     constexpr unsigned char k[] = {31, 28, 31, 30, 31, 30,
                                    31, 31, 30, 31, 30, 31};
+    // year_month_day_last::day() and its sys_days conversion call this
+    // unconditionally, so a month that is not ok() must not index the table.
+    if (m - 1u >= 12u) return 0u;
     return (m == 2 && is_leap(y)) ? 29u : k[m - 1];
 }
 
@@ -839,8 +847,11 @@ public:
             static_cast<unsigned>(__detail::weekday_from_days(first));
         unsigned offset =
             (wdi_.weekday().c_encoding() + 7u - wd_first) % 7u;
+        // index() is unsigned: subtract in the signed domain, or index 0 (a
+        // value that is not ok(), but still has to yield a defined date) wraps
+        // to 4294967295 and lands ~1300 years out.
         return sys_days(days(first + static_cast<long long>(offset) +
-                             static_cast<long long>(wdi_.index() - 1) * 7));
+                             (static_cast<long long>(wdi_.index()) - 1) * 7));
     }
     constexpr explicit operator local_days() const noexcept
     {
@@ -961,9 +972,11 @@ public:
             __detail::days_from_civil(int(y_), unsigned(m_), last);
         unsigned wd_last =
             static_cast<unsigned>(__detail::weekday_from_days(last_days));
-        unsigned back =
-            (wd_last + 7u - wdl_.weekday().c_encoding()) % 7u;
-        return sys_days(days(last_days - static_cast<long long>(back)));
+        // Signed: c_encoding() exceeds 6 for a weekday that is not ok(), and
+        // the unsigned form would wrap instead of stepping forward.
+        long long back = ((long long)wd_last + 7 -
+                          (long long)wdl_.weekday().c_encoding()) % 7;
+        return sys_days(days(last_days - back));
     }
     constexpr explicit operator local_days() const noexcept
     {

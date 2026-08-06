@@ -1,0 +1,91 @@
+// __bits/chrono_io — the chrono stream inserters ([time.cal.*.nonmembers],
+// [time.hms.nonmembers], [time.duration.io], [time.clock.system.nonmembers]).
+// Included by <chrono> last.
+//
+// The standard defines every calendar inserter as `os << format(…)`, so those
+// need nothing beyond a declaration of basic_ostream and <string>'s string
+// inserter — both already reachable. Only the duration inserter needs a
+// complete basic_ostringstream ([time.duration.io] threads the stream's flags,
+// locale and precision through one and emits the result as a single width
+// field), which is why <sstream> is pulled in here and nowhere else in the
+// <chrono> graph.
+#ifndef BOXCXX_BITS_CHRONO_IO
+#define BOXCXX_BITS_CHRONO_IO
+
+#include <__bits/chrono_format>
+#include <sstream>
+
+namespace std {
+namespace __chrono_fmt {
+
+// The calendar types whose inserter is exactly "os << format("{}", v)". Listed
+// rather than deduced so this operator<< can never hijack an unrelated type.
+template <class T>
+inline constexpr bool IsCalendarStreamable = __bits::IsAnyOf<
+    T, chrono::day, chrono::month, chrono::year, chrono::weekday,
+    chrono::weekday_indexed, chrono::weekday_last, chrono::month_day,
+    chrono::month_day_last, chrono::month_weekday, chrono::month_weekday_last,
+    chrono::year_month, chrono::year_month_day, chrono::year_month_day_last,
+    chrono::year_month_weekday, chrono::year_month_weekday_last>;
+
+} // namespace __chrono_fmt
+
+namespace chrono {
+
+template <class charT, class traits, class T>
+    requires __chrono_fmt::IsCalendarStreamable<T>
+basic_ostream<charT, traits> &operator<<(basic_ostream<charT, traits> &os,
+                                         const T &v)
+{
+    return os << format("{}", v);
+}
+
+template <class charT, class traits, class Duration>
+basic_ostream<charT, traits> &operator<<(basic_ostream<charT, traits> &os,
+                                         const hh_mm_ss<Duration> &v)
+{
+    return os << format("{}", v);
+}
+
+// [time.clock.system.nonmembers] has two overloads: one for a sys_time whose
+// duration is finer than a day (Constraints: the rep is not floating-point and
+// Duration{1} < days{1}) and one for sys_days itself, which prints the date
+// alone. Anything else — sys_time<months>, a floating-point rep — is not
+// streamable at all.
+template <class charT, class traits, class Duration>
+    requires(is_convertible_v<Duration, days> ||
+             (!treat_as_floating_point_v<typename Duration::rep> &&
+              Duration{1} < days{1}))
+basic_ostream<charT, traits> &
+operator<<(basic_ostream<charT, traits> &os,
+           const time_point<system_clock, Duration> &v)
+{
+    return os << format("{}", v);
+}
+
+// [time.duration.io]/1: the count is written with the stream's own flags,
+// locale and precision, the unit suffix follows, and the pair is inserted as
+// one field so os.width() covers both.
+template <class charT, class traits, class Rep, class Period>
+basic_ostream<charT, traits> &operator<<(basic_ostream<charT, traits> &os,
+                                         const duration<Rep, Period> &d)
+{
+    basic_ostringstream<charT, traits> s;
+    s.flags(os.flags());
+    s.imbue(os.getloc());
+    s.precision(os.precision());
+    // A character rep must go out as a number, not as text: [time.format]/7
+    // makes this string the default format, which renders count() numerically.
+    if constexpr (is_same_v<Rep, char> || is_same_v<Rep, signed char> ||
+                  is_same_v<Rep, unsigned char> || is_same_v<Rep, bool>)
+        s << +d.count();
+    else
+        s << d.count();
+    s << __chrono_fmt::unit_suffix<Period>();
+    return os << s.str();
+}
+
+} // namespace chrono
+} // namespace std
+
+#endif // BOXCXX_BITS_CHRONO_IO

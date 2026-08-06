@@ -119,6 +119,72 @@ inline void put_century(string &o, long long y)
     put_int(o, chrono::__detail::fdiv(y, 100), 2);
 }
 
+// ── default (streamed) text ─────────────────────────────────────────────
+// [time.cal.*.nonmembers] define operator<< through format(), and
+// [time.format]/7 defines the empty-chrono-specs form as the streamed text, so
+// one set of helpers serves both — including the "… is not a valid …"
+// diagnostics, which are part of that text.
+inline void put_day_text(string &o, const chrono::day &d)
+{
+    put_uint(o, unsigned(d), 2);
+    if (!d.ok()) o += " is not a valid day";
+}
+inline void put_month_text(string &o, const chrono::month &m)
+{
+    if (m.ok()) { o.append(kMonAbbr[unsigned(m) - 1]); return; }
+    put_uint(o, unsigned(m), 1);
+    o += " is not a valid month";
+}
+inline void put_year_text(string &o, const chrono::year &y)
+{
+    put_year(o, (long long)int(y));
+    if (!y.ok()) o += " is not a valid year";
+}
+inline void put_weekday_text(string &o, const chrono::weekday &w)
+{
+    if (w.ok()) { o.append(kWdAbbr[w.c_encoding()]); return; }
+    put_uint(o, w.c_encoding(), 1);
+    o += " is not a valid weekday";
+}
+inline void put_weekday_indexed_text(string &o, const chrono::weekday_indexed &wdi)
+{
+    put_weekday_text(o, wdi.weekday());
+    o.push_back('[');
+    put_uint(o, wdi.index(), 1);
+    if (wdi.index() - 1u >= 5u) o += " is not a valid index";
+    o.push_back(']');
+}
+inline void put_weekday_last_text(string &o, const chrono::weekday_last &wdl)
+{
+    put_weekday_text(o, wdl.weekday());
+    o += "[last]";
+}
+inline void put_year_month_day_text(string &o, const chrono::year_month_day &ymd)
+{
+    put_year(o, (long long)int(ymd.year()));
+    o.push_back('-');
+    put_uint(o, unsigned(ymd.month()), 2);
+    o.push_back('-');
+    put_uint(o, unsigned(ymd.day()), 2);
+    if (!ymd.ok()) o += " is not a valid date";
+}
+
+// Parts carrying just the field(s) a partial calendar type stores.
+inline Parts month_parts(const chrono::month &m)
+{
+    Parts p;
+    p.month  = unsigned(m);
+    p.mon_ok = m.ok();
+    return p;
+}
+inline Parts weekday_parts(const chrono::weekday &w)
+{
+    Parts p;
+    p.wd    = w.c_encoding();
+    p.wd_ok = w.ok();
+    return p;
+}
+
 // ── duration rep rendering ──────────────────────────────────────────────
 // chars_format::general strips trailing zeros, so the output length is bounded
 // by the value's exact decimal expansion (~760 chars for a double, ~16.5 KB for
@@ -164,6 +230,10 @@ inline void PutRep(string &o, const Rep &v, int precision, bool shortest,
         }
     } else {
         char b[32];
+        // <charconv> deletes its bool overload, but a bool rep still has to
+        // render as a number: [time.format]/7 makes the default format and the
+        // stream inserter the same string.
+        using W = conditional_t<is_same_v<Rep, bool>, int, Rep>;
         if (magnitude) {
             // Wrap the whole negation in the unsigned type: |Rep::min()| is not
             // representable in Rep.
@@ -177,7 +247,7 @@ inline void PutRep(string &o, const Rep &v, int precision, bool shortest,
             auto r = to_chars(b, b + sizeof b, m);
             o.append(b, size_t(r.ptr - b));
         } else {
-            auto r = to_chars(b, b + sizeof b, v);
+            auto r = to_chars(b, b + sizeof b, W(v));
             o.append(b, size_t(r.ptr - b));
         }
     }
@@ -584,6 +654,10 @@ inline constexpr bool DecomposableDur =
     chrono::__detail::ipow10(chrono::__detail::frac_width<D>()) <=
     (9223372036854775807LL / 3600);
 
+// make_unsigned is ill-formed for bool, which is nevertheless a usable rep.
+template <class T> struct UnsignedRep { using type = make_unsigned_t<T>; };
+template <> struct UnsignedRep<bool> { using type = unsigned; };
+
 // Decomposes a duration into the hh_mm_ss fields without ever negating the rep.
 // |Rep::min()| is not representable, so an integral count is carried through its
 // unsigned counterpart — where the magnitude always fits — and hh_mm_ss never
@@ -606,7 +680,7 @@ inline void fill_time_dur(Parts &p, const chrono::duration<Rep, Period> &d)
         chrono::hh_mm_ss<D> hms{ad};
         fill_time(p, hms);
     } else if constexpr (is_integral_v<Rep>) {
-        using URep = make_unsigned_t<Rep>;
+        using URep = typename UnsignedRep<Rep>::type;
         using UDur = chrono::duration<URep, Period>;
         const URep mag =
             neg ? (URep)(URep(0) - (URep)d.count()) : (URep)d.count();
@@ -680,15 +754,21 @@ template <unsigned F> struct SpecParser {
 } // namespace __chrono_fmt
 
 // ── formatter<day/month/year/weekday> ───────────────────────────────────
+// The empty-chrono-specs form is the streamed text ([time.format]/7), which
+// for the calendar types carries the "… is not a valid …" diagnostics.
 template <>
 struct formatter<chrono::day, char>
     : __chrono_fmt::SpecParser<__chrono_fmt::kDay> {
     void format(const chrono::day &d, format_context &ctx) const
     {
-        __chrono_fmt::Parts p;
-        p.day = unsigned(d);
         string body;
-        __chrono_fmt::render(body, chrono_.empty() ? string_view("%d") : chrono_, p);
+        if (chrono_.empty()) {
+            __chrono_fmt::put_day_text(body, d);
+        } else {
+            __chrono_fmt::Parts p;
+            p.day = unsigned(d);
+            __chrono_fmt::render(body, chrono_, p);
+        }
         __chrono_fmt::emit(ctx, spec_, body);
     }
 };
@@ -698,11 +778,11 @@ struct formatter<chrono::month, char>
     : __chrono_fmt::SpecParser<__chrono_fmt::kMonth> {
     void format(const chrono::month &m, format_context &ctx) const
     {
-        __chrono_fmt::Parts p;
-        p.month  = unsigned(m);
-        p.mon_ok = m.ok();
         string body;
-        __chrono_fmt::render(body, chrono_.empty() ? string_view("%b") : chrono_, p);
+        if (chrono_.empty())
+            __chrono_fmt::put_month_text(body, m);
+        else
+            __chrono_fmt::render(body, chrono_, __chrono_fmt::month_parts(m));
         __chrono_fmt::emit(ctx, spec_, body);
     }
 };
@@ -712,10 +792,14 @@ struct formatter<chrono::year, char>
     : __chrono_fmt::SpecParser<__chrono_fmt::kYear> {
     void format(const chrono::year &y, format_context &ctx) const
     {
-        __chrono_fmt::Parts p;
-        p.year = (long long)int(y);
         string body;
-        __chrono_fmt::render(body, chrono_.empty() ? string_view("%Y") : chrono_, p);
+        if (chrono_.empty()) {
+            __chrono_fmt::put_year_text(body, y);
+        } else {
+            __chrono_fmt::Parts p;
+            p.year = (long long)int(y);
+            __chrono_fmt::render(body, chrono_, p);
+        }
         __chrono_fmt::emit(ctx, spec_, body);
     }
 };
@@ -725,24 +809,238 @@ struct formatter<chrono::weekday, char>
     : __chrono_fmt::SpecParser<__chrono_fmt::kWeekday> {
     void format(const chrono::weekday &w, format_context &ctx) const
     {
-        __chrono_fmt::Parts p;
-        p.wd    = w.c_encoding();
-        p.wd_ok = w.ok();
         string body;
-        __chrono_fmt::render(body, chrono_.empty() ? string_view("%a") : chrono_, p);
+        if (chrono_.empty())
+            __chrono_fmt::put_weekday_text(body, w);
+        else
+            __chrono_fmt::render(body, chrono_, __chrono_fmt::weekday_parts(w));
         __chrono_fmt::emit(ctx, spec_, body);
     }
 };
 
-// ── formatter<year_month_day> ───────────────────────────────────────────
+template <>
+struct formatter<chrono::weekday_indexed, char>
+    : __chrono_fmt::SpecParser<__chrono_fmt::kWeekday> {
+    void format(const chrono::weekday_indexed &wdi, format_context &ctx) const
+    {
+        string body;
+        if (chrono_.empty())
+            __chrono_fmt::put_weekday_indexed_text(body, wdi);
+        else
+            __chrono_fmt::render(body, chrono_,
+                                 __chrono_fmt::weekday_parts(wdi.weekday()));
+        __chrono_fmt::emit(ctx, spec_, body);
+    }
+};
+
+template <>
+struct formatter<chrono::weekday_last, char>
+    : __chrono_fmt::SpecParser<__chrono_fmt::kWeekday> {
+    void format(const chrono::weekday_last &wdl, format_context &ctx) const
+    {
+        string body;
+        if (chrono_.empty())
+            __chrono_fmt::put_weekday_last_text(body, wdl);
+        else
+            __chrono_fmt::render(body, chrono_,
+                                 __chrono_fmt::weekday_parts(wdl.weekday()));
+        __chrono_fmt::emit(ctx, spec_, body);
+    }
+};
+
+// ── formatter<month_day / month_day_last> ───────────────────────────────
+template <>
+struct formatter<chrono::month_day, char>
+    : __chrono_fmt::SpecParser<__chrono_fmt::kMonth | __chrono_fmt::kDay> {
+    void format(const chrono::month_day &md, format_context &ctx) const
+    {
+        string body;
+        if (chrono_.empty()) {
+            __chrono_fmt::put_month_text(body, md.month());
+            body.push_back('/');
+            __chrono_fmt::put_day_text(body, md.day());
+        } else {
+            __chrono_fmt::Parts p = __chrono_fmt::month_parts(md.month());
+            p.day                 = unsigned(md.day());
+            __chrono_fmt::render(body, chrono_, p);
+        }
+        __chrono_fmt::emit(ctx, spec_, body);
+    }
+};
+
+// month_day_last has no day: which one it is depends on a year it does not
+// carry, so %d is not in its set.
+template <>
+struct formatter<chrono::month_day_last, char>
+    : __chrono_fmt::SpecParser<__chrono_fmt::kMonth> {
+    void format(const chrono::month_day_last &mdl, format_context &ctx) const
+    {
+        string body;
+        if (chrono_.empty()) {
+            __chrono_fmt::put_month_text(body, mdl.month());
+            body += "/last";
+        } else {
+            __chrono_fmt::render(body, chrono_,
+                                 __chrono_fmt::month_parts(mdl.month()));
+        }
+        __chrono_fmt::emit(ctx, spec_, body);
+    }
+};
+
+// ── formatter<month_weekday / month_weekday_last> ───────────────────────
+template <>
+struct formatter<chrono::month_weekday, char>
+    : __chrono_fmt::SpecParser<__chrono_fmt::kMonth | __chrono_fmt::kWeekday> {
+    void format(const chrono::month_weekday &mwd, format_context &ctx) const
+    {
+        string body;
+        if (chrono_.empty()) {
+            __chrono_fmt::put_month_text(body, mwd.month());
+            body.push_back('/');
+            __chrono_fmt::put_weekday_indexed_text(body, mwd.weekday_indexed());
+        } else {
+            __chrono_fmt::Parts p = __chrono_fmt::month_parts(mwd.month());
+            const chrono::weekday w = mwd.weekday_indexed().weekday();
+            p.wd                    = w.c_encoding();
+            p.wd_ok                 = w.ok();
+            __chrono_fmt::render(body, chrono_, p);
+        }
+        __chrono_fmt::emit(ctx, spec_, body);
+    }
+};
+
+template <>
+struct formatter<chrono::month_weekday_last, char>
+    : __chrono_fmt::SpecParser<__chrono_fmt::kMonth | __chrono_fmt::kWeekday> {
+    void format(const chrono::month_weekday_last &mwdl, format_context &ctx) const
+    {
+        string body;
+        if (chrono_.empty()) {
+            __chrono_fmt::put_month_text(body, mwdl.month());
+            body.push_back('/');
+            __chrono_fmt::put_weekday_last_text(body, mwdl.weekday_last());
+        } else {
+            __chrono_fmt::Parts p = __chrono_fmt::month_parts(mwdl.month());
+            const chrono::weekday w = mwdl.weekday_last().weekday();
+            p.wd                    = w.c_encoding();
+            p.wd_ok                 = w.ok();
+            __chrono_fmt::render(body, chrono_, p);
+        }
+        __chrono_fmt::emit(ctx, spec_, body);
+    }
+};
+
+// ── formatter<year_month> ───────────────────────────────────────────────
+template <>
+struct formatter<chrono::year_month, char>
+    : __chrono_fmt::SpecParser<__chrono_fmt::kYear | __chrono_fmt::kMonth> {
+    void format(const chrono::year_month &ym, format_context &ctx) const
+    {
+        string body;
+        if (chrono_.empty()) {
+            __chrono_fmt::put_year_text(body, ym.year());
+            body.push_back('/');
+            __chrono_fmt::put_month_text(body, ym.month());
+        } else {
+            __chrono_fmt::Parts p = __chrono_fmt::month_parts(ym.month());
+            p.year                = (long long)int(ym.year());
+            __chrono_fmt::render(body, chrono_, p);
+        }
+        __chrono_fmt::emit(ctx, spec_, body);
+    }
+};
+
+// ── formatter<year_month_day / year_month_day_last> ─────────────────────
 template <>
 struct formatter<chrono::year_month_day, char>
     : __chrono_fmt::SpecParser<__chrono_fmt::kDate> {
     void format(const chrono::year_month_day &ymd, format_context &ctx) const
     {
-        __chrono_fmt::Parts p = __chrono_fmt::date_parts(ymd);
         string body;
-        __chrono_fmt::render(body, chrono_.empty() ? string_view("%F") : chrono_, p);
+        if (chrono_.empty())
+            __chrono_fmt::put_year_month_day_text(body, ymd);
+        else
+            __chrono_fmt::render(body, chrono_, __chrono_fmt::date_parts(ymd));
+        __chrono_fmt::emit(ctx, spec_, body);
+    }
+};
+
+// [time.cal.ymdlast] converts to year_month_day by field copy (the year and
+// month as stored, the day being the month's last), so %F stays equivalent to
+// %Y-%m-%d here. libstdc++ instead round-trips through sys_days, which for an
+// out-of-range month normalizes its %F while its own %Y/%m still report the
+// stored fields.
+template <>
+struct formatter<chrono::year_month_day_last, char>
+    : __chrono_fmt::SpecParser<__chrono_fmt::kDate> {
+    void format(const chrono::year_month_day_last &ymdl, format_context &ctx) const
+    {
+        string body;
+        if (chrono_.empty()) {
+            __chrono_fmt::put_year_text(body, ymdl.year());
+            body.push_back('/');
+            __chrono_fmt::put_month_text(body, ymdl.month());
+            body += "/last";
+        } else {
+            __chrono_fmt::render(
+                body, chrono_,
+                __chrono_fmt::date_parts(chrono::year_month_day{ymdl}));
+        }
+        __chrono_fmt::emit(ctx, spec_, body);
+    }
+};
+
+// ── formatter<year_month_weekday / year_month_weekday_last> ─────────────
+// These denote a date only through their sys_days conversion, so every date
+// field comes from the resolved day and only the validity of %b/%a follows the
+// stored month/weekday.
+namespace __chrono_fmt {
+template <class T> inline Parts resolved_parts(const T &v)
+{
+    Parts p  = date_parts(chrono::year_month_day{static_cast<chrono::sys_days>(v)});
+    p.mon_ok = v.month().ok();
+    p.wd_ok  = v.weekday().ok();
+    return p;
+}
+} // namespace __chrono_fmt
+
+template <>
+struct formatter<chrono::year_month_weekday, char>
+    : __chrono_fmt::SpecParser<__chrono_fmt::kDate> {
+    void format(const chrono::year_month_weekday &ymwd, format_context &ctx) const
+    {
+        string body;
+        if (chrono_.empty()) {
+            __chrono_fmt::put_year_text(body, ymwd.year());
+            body.push_back('/');
+            __chrono_fmt::put_month_text(body, ymwd.month());
+            body.push_back('/');
+            __chrono_fmt::put_weekday_indexed_text(body, ymwd.weekday_indexed());
+        } else {
+            __chrono_fmt::render(body, chrono_,
+                                 __chrono_fmt::resolved_parts(ymwd));
+        }
+        __chrono_fmt::emit(ctx, spec_, body);
+    }
+};
+
+template <>
+struct formatter<chrono::year_month_weekday_last, char>
+    : __chrono_fmt::SpecParser<__chrono_fmt::kDate> {
+    void format(const chrono::year_month_weekday_last &ymwdl,
+                format_context &ctx) const
+    {
+        string body;
+        if (chrono_.empty()) {
+            __chrono_fmt::put_year_text(body, ymwdl.year());
+            body.push_back('/');
+            __chrono_fmt::put_month_text(body, ymwdl.month());
+            body.push_back('/');
+            __chrono_fmt::put_weekday_last_text(body, ymwdl.weekday_last());
+        } else {
+            __chrono_fmt::render(body, chrono_,
+                                 __chrono_fmt::resolved_parts(ymwdl));
+        }
         __chrono_fmt::emit(ctx, spec_, body);
     }
 };
@@ -779,8 +1077,13 @@ struct formatter<chrono::sys_time<Duration>, char>
         p.zone     = "UTC"; // sys_time is UTC by definition ([time.format])
         p.has_zoff = true;
         p.zoff_min = 0;
-        string_view deflt =
-            is_same_v<Duration, days> ? string_view("%F") : string_view("%F %T");
+        // [time.clock.system.nonmembers] streams a sys_time whose duration
+        // converts to days through the separate sys_days overload, i.e. as the
+        // date alone — that is every whole multiple of a day (weeks, a 2-day
+        // period), not just `days` itself.
+        string_view deflt = is_convertible_v<Duration, chrono::days>
+                                ? string_view("%F")
+                                : string_view("%F %T");
         string body;
         __chrono_fmt::render(body, chrono_.empty() ? deflt : chrono_, p);
         __chrono_fmt::emit(ctx, spec_, body);
