@@ -1,0 +1,212 @@
+// boxcxx — <__bits/format_escape>
+//
+// [format.string.escaped] — builds the escaped std::string that the '?'
+// presentation type copies to the output: quote-delimited for a string,
+// apostrophe-delimited for a single character. Pure text transform: reads
+// the source, returns a complete std::string through an out-parameter.
+// <format> then feeds that string through its existing FormatString /
+// EmitField for width/fill/align/precision, so nothing here ever touches a
+// format_context.
+//
+// Includes <string>/<string_view> itself, so its position in <format>'s
+// include list is not order-sensitive.
+#ifndef BOXCXX_BITS_FORMAT_ESCAPE
+#define BOXCXX_BITS_FORMAT_ESCAPE
+
+#include <__bits/unicode_escape>
+#include <string>
+#include <string_view>
+
+namespace std {
+namespace __format {
+
+// The UTF-8 decoder the escaping loop drives. It lives here rather
+// than in <__bits/unicode_escape> because that file is generated in
+// full by tools/gen_unicode_escape.py and would lose any hand-written
+// code on the next regeneration -- the generated file holds UCD facts,
+// this one holds the algorithm.
+// Decodes one UTF-8 code unit sequence starting at p (p != e is a
+// precondition). On success, cp is the decoded scalar value — always
+// inside [0, 0x10FFFF] and never a surrogate, so it is always safe to pass
+// on to NeedsEscapeCategory/IsGraphemeExtend — and p advances past the
+// whole sequence. On failure (lone continuation byte, an invalid lead
+// byte, a truncated or mis-continued sequence, an overlong encoding, or a
+// surrogate-range result), cp is set to the first code unit's value and p
+// advances by exactly one byte, so a caller that keeps calling this in a
+// loop recovers one bad byte at a time, in order
+// ([format.string.escaped]/2.2.3).
+//
+// The legal range of the byte right after the lead is narrowed for
+// E0/ED/F0/F4 (Unicode's Table 3-7, "Well-Formed UTF-8 Byte Sequences");
+// that alone is what keeps overlong encodings and UTF-8-encoded surrogates
+// out of a well-formed result, with no separate range check needed once
+// the value is assembled.
+constexpr bool Utf8Decode(const char *&p, const char *e, char32_t &cp) noexcept
+{
+    const unsigned char lead = static_cast<unsigned char>(*p);
+
+    if (lead < 0x80) {
+        cp = lead;
+        ++p;
+        return true;
+    }
+
+    unsigned len;
+    char32_t value;
+    unsigned char lo = 0x80, hi = 0xBF;  // legal range of the byte after the lead
+
+    if (lead >= 0xC2 && lead <= 0xDF) {
+        len   = 2;
+        value = char32_t(lead & 0x1F);
+    } else if (lead >= 0xE0 && lead <= 0xEF) {
+        len   = 3;
+        value = char32_t(lead & 0x0F);
+        if (lead == 0xE0) lo = 0xA0;
+        else if (lead == 0xED) hi = 0x9F;
+    } else if (lead >= 0xF0 && lead <= 0xF4) {
+        len   = 4;
+        value = char32_t(lead & 0x07);
+        if (lead == 0xF0) lo = 0x90;
+        else if (lead == 0xF4) hi = 0x8F;
+    } else {
+        // lone continuation byte, overlong lead 0xC0/0xC1, or invalid lead
+        // 0xF5..0xFF.
+        cp = lead;
+        ++p;
+        return false;
+    }
+
+    const char *q = p + 1;
+    for (unsigned i = 1; i < len; ++i) {
+        if (q == e) {
+            cp = lead;
+            ++p;
+            return false;
+        }
+        const unsigned char b = static_cast<unsigned char>(*q);
+        if (b < lo || b > hi) {
+            cp = lead;
+            ++p;
+            return false;
+        }
+        value = (value << 6) | char32_t(b & 0x3F);
+        lo = 0x80;  // only the byte right after the lead is range-restricted
+        hi = 0xBF;
+        ++q;
+    }
+
+    cp = value;
+    p  = q;
+    return true;
+}
+
+// Table 114 — the two-character escape for one of the five characters
+// [format.string.escaped] maps directly. Returns false for everything else.
+inline bool EscapeTableChar(string &out, char32_t cp)
+{
+    switch (cp) {
+    case U'\t': out += "\\t"; return true;
+    case U'\n': out += "\\n"; return true;
+    case U'\r': out += "\\r"; return true;
+    case U'"':  out += "\\\""; return true;
+    case U'\\': out += "\\\\"; return true;
+    default: return false;
+    }
+}
+
+// Appends \prefix{hex}: lowercase hex digits, no leading zeros (D7).
+inline void EscapeHex(string &out, char prefix, char32_t value)
+{
+    char     digits[8];
+    unsigned n = 0;
+    do {
+        const unsigned nibble = unsigned(value & 0xF);
+        digits[n++] = char(nibble < 10 ? '0' + nibble : 'a' + (nibble - 10));
+        value >>= 4;
+    } while (value != 0);
+    out += '\\';
+    out += prefix;
+    out += '{';
+    while (n > 0) out += digits[--n];
+    out += '}';
+}
+
+// Classifies and appends exactly one [format.string.escaped]/2.2 unit
+// starting at p (p != e is a precondition): a whole scalar value (table
+// escape, \u{} escape, or a raw copy) when Utf8Decode succeeds, otherwise
+// the complete run of ill-formed code units at *p — Utf8Decode only ever
+// recovers one byte per call, so the run ends the moment a well-formed
+// unit follows. Advances p past whatever it consumed and updates
+// prevEscaped per 2.2.1.2.2: reset to true exactly once per ill-formed
+// run, not once per code unit inside it (this only matters if Utf8Decode
+// is ever changed to recover more than one byte at a time).
+inline void EscapeUnit(string &out, const char *&p, const char *e,
+                       bool &prevEscaped)
+{
+    const char *start = p;
+    char32_t    cp;
+    if (Utf8Decode(p, e, cp)) {
+        if (EscapeTableChar(out, cp)) {
+            prevEscaped = true;
+        } else if (cp != U' ' && __unicode::NeedsEscapeCategory(cp)) {
+            EscapeHex(out, 'u', cp);
+            prevEscaped = true;
+        } else if (prevEscaped && __unicode::IsGraphemeExtend(cp)) {
+            EscapeHex(out, 'u', cp);
+            prevEscaped = true;
+        } else {
+            out.append(start, size_t(p - start));
+            prevEscaped = false;
+        }
+        return;
+    }
+
+    EscapeHex(out, 'x', (unsigned char)*start);
+    for (;;) {
+        if (p == e) break;
+        const char *attempt = p;
+        char32_t    peek;
+        if (Utf8Decode(attempt, e, peek)) break;  // run ends here
+        EscapeHex(out, 'x', peek);
+        p = attempt;
+    }
+    prevEscaped = true;
+}
+
+// [format.string.escaped]/2 — the quote-delimited escaped representation
+// of a string.
+inline void EscapeInto(string &out, string_view s)
+{
+    out += '"';
+    const char *p = s.data();
+    const char *e = p + s.size();
+    bool        prevEscaped = true;
+    while (p != e) EscapeUnit(out, p, e, prevEscaped);
+    out += '"';
+}
+
+// [format.string.escaped]/3 — the apostrophe-delimited escaped
+// representation of a single character, with the apostrophe/quote
+// asymmetry of 3.2/3.3 (which both take priority over the table: an
+// apostrophe is escaped here even though it has no Table 114 entry, and a
+// quote is left raw even though Table 114 maps it for the string form).
+inline void EscapeChar(string &out, char c)
+{
+    out += '\'';
+    if (c == '\'') {
+        out += '\\';
+        out += '\'';
+    } else if (c == '"') {
+        out += '"';
+    } else {
+        const char *p           = &c;
+        bool        prevEscaped = true;  // a lone character has no real predecessor
+        EscapeUnit(out, p, &c + 1, prevEscaped);
+    }
+    out += '\'';
+}
+
+} // namespace __format
+} // namespace std
+
+#endif // BOXCXX_BITS_FORMAT_ESCAPE

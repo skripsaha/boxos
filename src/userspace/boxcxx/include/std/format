@@ -10,18 +10,23 @@
 // <charconv> (Ф9A) landed first. There is no dependency on the kernel: the
 // console sink (std::print) and <iostream> arrive in Ф9B-2 / Ф9B-3.
 //
-// Deliberate scope (single char type; documented in CONFORMANCE):
+// Deliberate scope (single char type):
 //   * char only — no wchar_t / wformat_context (wide streams are excluded).
-//   * the `L` (localized) flag is accepted and ignored — "C" locale only.
-//   * the `?` (debug/escaped) presentation is not yet provided; it needs
-//     Unicode printability tables that clash with the no-locale posture.
+//   * the `L` (localized) flag is accepted and ignored wherever the grammar
+//     has an `L` position — the arithmetic and char formatters — since there
+//     is only the "C" locale. The string and pointer formatters have no `L`
+//     position at all and reject it, as both reference libraries do.
 //   * field width is measured in code units (ASCII); no Unicode grapheme /
-//     East-Asian-width estimation.
+//     East-Asian-width estimation — this also governs the escaped ('?')
+//     text: precision truncates it in code units and can split an escape
+//     sequence, exactly like every other string precision clamp here.
 //   * range / tuple formatting (formatter<vector<T>> &c.) is a later phase.
 #ifndef BOXCXX_FORMAT
 #define BOXCXX_FORMAT
 
-#include <__bits/core_traits>  // __bits::IsAnyOf
+#include <__bits/core_traits>     // __bits::IsAnyOf
+#include <__bits/unicode_escape>  // Utf8Decode + the escape category tables
+#include <__bits/format_escape>   // EscapeInto / EscapeChar
 #include <charconv>
 #include <cstddef>
 #include <cstdint>
@@ -30,6 +35,7 @@
 #include <stdexcept>  // runtime_error (base of format_error)
 #include <string>
 #include <string_view>
+#include <concepts>  // same_as / semiregular, for std::formattable
 #include <type_traits>
 #include <utility>
 
@@ -88,6 +94,12 @@ struct StdSpec {
     char   fill          = ' ';
     Align  align         = Align::Default;
     Sign   sign          = Sign::Minus;
+    // Whether a sign character was actually written. `sign` alone cannot
+    // answer that: an explicit '-' and "no sign at all" both mean
+    // Sign::Minus, so the formatters that must reject any sign ([format.
+    // string.std]/6 — sign is only valid for the arithmetic presentations)
+    // need this flag, not a comparison against Sign::Minus.
+    bool   sign_given    = false;
     bool   alt           = false;  // '#'
     bool   zero          = false;  // '0'
     int    width         = -1;     // -1 == absent
@@ -294,9 +306,9 @@ constexpr const char *ParseSpec(format_parse_context &pc, StdSpec &s)
 
     // sign
     if (p != e) {
-        if (*p == '+') { s.sign = Sign::Plus; ++p; }
-        else if (*p == '-') { s.sign = Sign::Minus; ++p; }
-        else if (*p == ' ') { s.sign = Sign::Space; ++p; }
+        if (*p == '+') { s.sign = Sign::Plus; s.sign_given = true; ++p; }
+        else if (*p == '-') { s.sign = Sign::Minus; s.sign_given = true; ++p; }
+        else if (*p == ' ') { s.sign = Sign::Space; s.sign_given = true; ++p; }
     }
     // '#'
     if (p != e && *p == '#') { s.alt = true; ++p; }
@@ -865,8 +877,7 @@ template <> struct formatter<bool, char> {
             throw format_error("format: invalid type for bool");
         if (spec_.precision >= 0 || spec_.prec_dynamic)
             throw format_error("format: precision not allowed for bool");
-        if (string_form && (spec_.sign != __format::Sign::Minus || spec_.alt ||
-                            spec_.zero))
+        if (string_form && (spec_.sign_given || spec_.alt || spec_.zero))
             throw format_error("format: invalid spec for bool string form");
         pc.advance_to(p);
         return p;
@@ -895,25 +906,40 @@ template <> struct formatter<char, char> {
     {
         const char *p = __format::ParseSpec(pc, spec_);
         const char  t = spec_.type;
-        if (!(t == '\0' || t == 'c' || t == 'b' || t == 'B' || t == 'd' ||
-              t == 'o' || t == 'x' || t == 'X'))
+        if (!(t == '\0' || t == 'c' || t == '?' || t == 'b' || t == 'B' ||
+              t == 'd' || t == 'o' || t == 'x' || t == 'X'))
             throw format_error("format: invalid type for char");
         if (spec_.precision >= 0 || spec_.prec_dynamic)
             throw format_error("format: precision not allowed for char");
-        // sign/#/0 are ignored for the 'c' presentation (dropped on output).
+        // [format.string.std]: sign/#/0 are only valid for the integer and
+        // floating-point presentation types. The default presentation for a
+        // char argument is 'c' ([tab:format.type.char] — "none: same as c"),
+        // so '\0' belongs in this guard exactly as much as 'c' does; leaving
+        // it out would make {:#} succeed while {:#c} throws.
+        const bool char_form = (t == '\0' || t == 'c' || t == '?');
+        if (char_form && (spec_.sign_given || spec_.alt || spec_.zero))
+            throw format_error("format: invalid spec for char");
         pc.advance_to(p);
         return p;
     }
 
+    constexpr void set_debug_format() noexcept { spec_.type = '?'; }
+
     void format(char value, format_context &ctx) const
     {
         const int width = __format::EffectiveWidth(ctx, spec_);
-        if (spec_.type == '\0' || spec_.type == 'c')
+        if (spec_.type == '\0' || spec_.type == 'c') {
             __format::FormatCharCore(ctx, spec_, width, value);
-        else
+        } else if (spec_.type == '?') {
+            string escaped;
+            __format::EscapeChar(escaped, value);
+            __format::FormatString(ctx, spec_, width, -1,
+                                   string_view(escaped.data(), escaped.size()));
+        } else {
             __format::FormatIntCore(ctx, spec_, width, false,
                                     (unsigned long long)(unsigned char)value,
                                     spec_.type);
+        }
     }
 };
 
@@ -946,21 +972,29 @@ struct formatter<T, char> {
 
 namespace __format {
 
-// Shared parse for the string-like formatters: type must be \0 or 's';
-// precision is allowed (truncation); sign/#/0 are not.
+// Shared parse for the string-like formatters: type must be \0, 's' or '?';
+// precision is allowed (truncation); sign/#/0 are not. set_debug_format()
+// lives here too, so all four string-like formatters share one definition.
 struct StringSpecParser {
     StdSpec spec_;
     constexpr typename format_parse_context::iterator
     parse(format_parse_context &pc)
     {
         const char *p = ParseSpec(pc, spec_);
-        if (!(spec_.type == '\0' || spec_.type == 's'))
+        if (!(spec_.type == '\0' || spec_.type == 's' || spec_.type == '?'))
             throw format_error("format: invalid type for string");
-        if (spec_.sign != Sign::Minus || spec_.alt || spec_.zero)
+        // sign/#/0/L are all parsed generically by ParseSpec (for the
+        // benefit of the numeric/bool/char formatters) but none of them is
+        // ever valid for a string, '?' or not -- [format.string.std] gives
+        // strings no L position at all, pre-existing gap now closed
+        // alongside the '?' work since one new test (mirroring both
+        // reference libraries) exposed it.
+        if (spec_.sign_given || spec_.alt || spec_.zero || spec_.localized)
             throw format_error("format: invalid spec for string");
         pc.advance_to(p);
         return p;
     }
+    constexpr void set_debug_format() noexcept { spec_.type = '?'; }
 };
 
 } // namespace __format
@@ -968,38 +1002,101 @@ struct StringSpecParser {
 template <> struct formatter<string_view, char> : __format::StringSpecParser {
     void format(string_view v, format_context &ctx) const
     {
-        __format::FormatString(ctx, spec_, __format::EffectiveWidth(ctx, spec_),
-                               __format::EffectivePrecision(ctx, spec_), v);
+        const int width = __format::EffectiveWidth(ctx, spec_);
+        const int prec  = __format::EffectivePrecision(ctx, spec_);
+        if (spec_.type == '?') {
+            string escaped;
+            __format::EscapeInto(escaped, v);
+            __format::FormatString(ctx, spec_, width, prec,
+                                   string_view(escaped.data(), escaped.size()));
+        } else {
+            __format::FormatString(ctx, spec_, width, prec, v);
+        }
     }
 };
 template <> struct formatter<string, char> : __format::StringSpecParser {
     void format(const string &v, format_context &ctx) const
     {
-        __format::FormatString(ctx, spec_, __format::EffectiveWidth(ctx, spec_),
-                               __format::EffectivePrecision(ctx, spec_),
-                               string_view(v.data(), v.size()));
+        const int         width = __format::EffectiveWidth(ctx, spec_);
+        const int         prec  = __format::EffectivePrecision(ctx, spec_);
+        const string_view sv(v.data(), v.size());
+        if (spec_.type == '?') {
+            string escaped;
+            __format::EscapeInto(escaped, sv);
+            __format::FormatString(ctx, spec_, width, prec,
+                                   string_view(escaped.data(), escaped.size()));
+        } else {
+            __format::FormatString(ctx, spec_, width, prec, sv);
+        }
     }
 };
 template <> struct formatter<const char *, char> : __format::StringSpecParser {
     void format(const char *v, format_context &ctx) const
     {
         if (!v) throw format_error("format: null C-string");
-        __format::FormatString(ctx, spec_, __format::EffectiveWidth(ctx, spec_),
-                               __format::EffectivePrecision(ctx, spec_),
-                               string_view(v));
+        const int         width = __format::EffectiveWidth(ctx, spec_);
+        const int         prec  = __format::EffectivePrecision(ctx, spec_);
+        const string_view sv(v);
+        if (spec_.type == '?') {
+            string escaped;
+            __format::EscapeInto(escaped, sv);
+            __format::FormatString(ctx, spec_, width, prec,
+                                   string_view(escaped.data(), escaped.size()));
+        } else {
+            __format::FormatString(ctx, spec_, width, prec, sv);
+        }
     }
 };
 template <> struct formatter<char *, char> : __format::StringSpecParser {
     void format(const char *v, format_context &ctx) const
     {
         if (!v) throw format_error("format: null C-string");
-        __format::FormatString(ctx, spec_, __format::EffectiveWidth(ctx, spec_),
-                               __format::EffectivePrecision(ctx, spec_),
-                               string_view(v));
+        const int         width = __format::EffectiveWidth(ctx, spec_);
+        const int         prec  = __format::EffectivePrecision(ctx, spec_);
+        const string_view sv(v);
+        if (spec_.type == '?') {
+            string escaped;
+            __format::EscapeInto(escaped, sv);
+            __format::FormatString(ctx, spec_, width, prec,
+                                   string_view(escaped.data(), escaped.size()));
+        } else {
+            __format::FormatString(ctx, spec_, width, prec, sv);
+        }
     }
 };
 
-// char[N] string literals decay to const char* before reaching make_format_args.
+// [format.formatter.spec]/2.2 requires formatter<charT[N], charT> among the
+// enabled string specializations. The engine itself never routes through it —
+// an array argument decays to const char* before reaching make_format_args —
+// so it exists for direct use and, more importantly, so std::formattable is
+// true for char[N] (the range formatters constrain on that concept).
+//
+// The standard does not say what the "string" of a charT[N] is, and the two
+// reference implementations disagree: libstdc++ formats all N characters
+// (emitting a trailing NUL for a string literal), libc++ stops at the first
+// NUL and has undefined behaviour when there is none. boxcxx stops at the
+// first NUL and falls back to the whole array when there is none: that keeps
+// a literal's output identical whether it decayed or not, and leaves no
+// input undefined.
+template <size_t N> struct formatter<char[N], char>
+    : __format::StringSpecParser {
+    void format(const char (&v)[N], format_context &ctx) const
+    {
+        size_t n = 0;
+        while (n < N && v[n] != '\0') ++n;
+        const string_view sv(v, n);
+        const int         width = __format::EffectiveWidth(ctx, spec_);
+        const int         prec  = __format::EffectivePrecision(ctx, spec_);
+        if (spec_.type == '?') {
+            string escaped;
+            __format::EscapeInto(escaped, sv);
+            __format::FormatString(ctx, spec_, width, prec,
+                                   string_view(escaped.data(), escaped.size()));
+        } else {
+            __format::FormatString(ctx, spec_, width, prec, sv);
+        }
+    }
+};
 
 // pointer
 namespace __format {
@@ -1026,8 +1123,10 @@ template <> struct formatter<const void *, char> {
         const char *p = __format::ParseSpec(pc, spec_);
         if (!(spec_.type == '\0' || spec_.type == 'p' || spec_.type == 'P'))
             throw format_error("format: invalid type for pointer");
-        if (spec_.precision >= 0 || spec_.prec_dynamic ||
-            spec_.sign != __format::Sign::Minus || spec_.alt || spec_.zero)
+        // The pointer std-format-spec has no sign, '#', '0' or 'L' position
+        // ([format.string.std]) — reject all four, not just the first three.
+        if (spec_.precision >= 0 || spec_.prec_dynamic || spec_.sign_given ||
+            spec_.alt || spec_.zero || spec_.localized)
             throw format_error("format: invalid spec for pointer");
         pc.advance_to(p);
         return p;
@@ -1177,16 +1276,48 @@ decltype(auto) visit_format_arg(Visitor &&vis, basic_format_arg<Context> arg)
 // ════════════════════════════════════════════════════════════════════════
 namespace __format {
 
-template <class T, class Context>
+// [format.formattable]'s formattable-with, adapted to boxcxx's one
+// concrete format_context (see std::formattable below for why: every
+// boxcxx formatter hard-codes format_context& rather than being generic
+// over it, so testing against the concrete type is what answers "will a
+// real std::format call work" — the question boxcxx actually has).
+template <class T>
+concept FormattableWith =
+    semiregular<formatter<remove_const_t<T>, char>> &&
+    requires(formatter<remove_const_t<T>, char> &f,
+             const formatter<remove_const_t<T>, char> &cf,
+             T &&t, format_context &fc, format_parse_context &pc) {
+        { f.parse(pc) } -> same_as<format_parse_context::iterator>;
+        cf.format(t, fc);
+    };
+
+// P2418R2: which constness of U's formatter parameter to target. Prefer
+// const U (also lets a const object of U be formatted); fall back to
+// plain U only when const U does not work (e.g. a mutating formatter like
+// a caching peek()).
+template <class U>
+using ThunkArgT = conditional_t<FormattableWith<const U>, const U, U>;
+
+template <class TQ, class Context>
 void FmtThunk(basic_format_parse_context<char> &pc, Context &fc, const void *p)
 {
-    using U = remove_cvref_t<T>;
-    formatter<U, char> f;
+    using Td = remove_const_t<TQ>;
+    formatter<Td, char> f;
     pc.advance_to(f.parse(pc));
-    f.format(*static_cast<const U *>(p), fc);
+    TQ &val = *const_cast<TQ *>(static_cast<const Td *>(p));
+    f.format(val, fc);
 }
 
 } // namespace __format
+
+// [format.formattable] — see __format::FormattableWith above for the two
+// justified divergences from the standard's wording: a concrete Context
+// instead of a generic one, and format()'s return type is unconstrained
+// since every boxcxx formatter returns void and advances the context via
+// ctx.advance_to() rather than by returning an iterator.
+template <class T, class CharT>
+concept formattable =
+    same_as<CharT, char> && __format::FormattableWith<remove_reference_t<T>>;
 
 template <class Context>
 template <class T>
@@ -1212,11 +1343,20 @@ basic_format_arg<Context> basic_format_arg<Context>::__make(T &v)
             a.v_.pv = nullptr;
         else a.v_.pv = static_cast<const void *>(v);
     } else {
-        static_assert(
-            is_default_constructible_v<formatter<remove_cvref_t<T>, char>>,
-            "the type does not have an enabled std::formatter specialization");
+        using U  = remove_cvref_t<T>;
+        using TQ = __format::ThunkArgT<U>;
+        // [format.arg]/5 constrains on T itself, NOT on remove_const_t<T>:
+        // when the argument is const but its formatter's format() only takes
+        // a non-const reference, ThunkArgT picks TQ = U and FmtThunk's
+        // const_cast would then hand a genuinely const object to code that
+        // mutates it (silent corruption, or a fault if it lives in .rodata).
+        // Checking remove_reference_t<T> turns that into a clean diagnostic,
+        // which is what both reference libraries emit.
+        static_assert(__format::FormattableWith<remove_reference_t<T>>,
+            "the type does not have an enabled std::formatter specialization "
+            "(a const argument needs a formatter whose format() takes const)");
         a.h_.ptr_ = __builtin_addressof(v);
-        a.h_.fmt_ = &__format::FmtThunk<T, Context>;
+        a.h_.fmt_ = &__format::FmtThunk<TQ, Context>;
     }
     return a;
 }
