@@ -27,6 +27,7 @@
 #include <__bits/core_traits>     // __bits::IsAnyOf
 #include <__bits/unicode_escape>  // Utf8Decode + the escape category tables
 #include <__bits/format_escape>   // EscapeInto / EscapeChar
+#include <__bits/ranges_core>     // ranges::input_range &c., for [format.range]
 #include <charconv>
 #include <cstddef>
 #include <cstdint>
@@ -36,6 +37,7 @@
 #include <string>
 #include <string_view>
 #include <concepts>  // same_as / semiregular, for std::formattable
+#include <tuple>     // pair/tuple_size_v, for [format.range]'s FmtPairLike
 #include <type_traits>
 #include <utility>
 
@@ -503,6 +505,11 @@ public:
     {
         return args_.get(id);
     }
+    // Internal accessor: lets a nested format_context (built around a
+    // scratch sink, e.g. range_formatter's width-triggered buffering) share
+    // this context's own argument store, so nested dynamic width/precision
+    // still resolves against the real argument list.
+    format_args __args() const noexcept { return args_; }
 
     // Internal constructor used by the engine.
     format_context(iterator out, format_args args) noexcept
@@ -1607,5 +1614,11 @@ size_t formatted_size(format_string<Args...> fmt, Args &&...args)
 }
 
 } // namespace std
+
+// [format.range] — range_format/format_kind/range_formatter/the four
+// range-default-formatter specializations/the formatter<R,char> catch-all.
+// At the bottom, not with the includes above: this file needs format_context,
+// EmitField and the string formatters' set_debug_format() already complete.
+#include <__bits/format_range>
 
 #endif // BOXCXX_FORMAT

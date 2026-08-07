@@ -1,0 +1,546 @@
+// boxcxx — <__bits/format_range>  ([format.range])
+//
+// range_format, format_kind, range_formatter<T,CharT>, the four
+// range-default-formatter specializations ([format.range.fmtdef/fmtmap/
+// fmtset/fmtstr]), and the formatter<R,char> catch-all that inherits from
+// them. Included from the very bottom of <format> rather than sitting with
+// its other top-of-file includes: this file needs format_context,
+// EmitField, StringSink and the string formatters' set_debug_format()
+// already complete, which only the tail of <format> can offer.
+//
+// vector<bool>'s proxy-reference formatter lives here too, not in <vector>.
+// vector<bool,Alloc>::reference is a nested class with no back-reference to
+// its container, so formatter<vector<bool,Alloc>::reference,char> cannot be
+// written as a partial specialization at all: a qualified-id naming a
+// member of a still-to-be-deduced template parameter is a non-deduced
+// context. <vector> gets one additive `using __container = vector;` line
+// (via the injected-class-name) so the proxy type can be pattern-matched
+// directly and cross-checked with a requires-clause, mirroring libc++.
+#ifndef BOXCXX_BITS_FORMAT_RANGE
+#define BOXCXX_BITS_FORMAT_RANGE
+
+#include <format>
+#include <__bits/ranges_core>
+#include <tuple>
+
+namespace std {
+
+// Forward-declared, not #include<vector>'d: the vector<bool> proxy check
+// below only ever needs vector's identity to reconstruct vector<bool,Alloc>
+// and compare it, never vector's member list. Whichever translation unit
+// actually names a vector<bool> is the one that includes <vector> for real.
+template <class T, class Alloc> class vector;
+
+// [format.syn]
+enum class range_format { disabled, map, set, sequence, string, debug_string };
+
+namespace __format {
+
+// Table 115's 'm' requirement AND fmtkind 2.2.1's map-vs-set test, in one
+// place (D2): U is pair, or a 2-tuple.
+template <class T> inline constexpr bool FmtPairLike = false;
+template <class A, class B> inline constexpr bool FmtPairLike<pair<A, B>> = true;
+template <class... Ts>
+inline constexpr bool FmtPairLike<tuple<Ts...>> = (sizeof...(Ts) == 2);
+
+// [format.range.fmtkind]/2 — computed once per range type R.
+template <class R> consteval range_format ComputeFmtKind()
+{
+    using Ref = ranges::range_reference_t<R>;
+    if constexpr (same_as<remove_cvref_t<Ref>, R>) {
+        // 2.1 — a range whose reference type is the range itself
+        // (std::filesystem::path is the textbook example): disabled, or
+        // instantiating format_kind<R> as a range would recurse forever.
+        return range_format::disabled;
+    } else if constexpr (requires { typename R::key_type; }) {
+        // 2.2 — has key_type: map if it ALSO has mapped_type and the
+        // element is pair/2-tuple shaped, set otherwise (even when
+        // mapped_type exists but the element isn't pair-shaped).
+        if constexpr (requires { typename R::mapped_type; } &&
+                      FmtPairLike<remove_cvref_t<Ref>>) {
+            return range_format::map;
+        } else {
+            return range_format::set;
+        }
+    } else {
+        return range_format::sequence;  // 2.3
+    }
+}
+
+} // namespace __format
+
+// [format.range.fmtkind]/1 — a program that instantiates the primary
+// template is ill-formed. The static_assert's condition is a literal
+// `false`, not a dependent one: the enclosing entity (this variable
+// template) is itself the dependent context, so the assert is only
+// evaluated if this primary is actually instantiated for some non-range R.
+template <class R> constexpr auto format_kind = [] {
+    static_assert(false, "cannot use primary template of std::format_kind");
+    return range_format::disabled;
+}();
+
+template <ranges::input_range R>
+    requires same_as<R, remove_cvref_t<R>>
+constexpr range_format format_kind<R> = __format::ComputeFmtKind<R>();
+
+namespace __format {
+
+// [format.syn]'s exposition-only const-formattable-range / fmt-maybe-const.
+template <class R>
+concept ConstFormattableRange =
+    ranges::input_range<const R> &&
+    formattable<ranges::range_reference_t<const R>, char>;
+
+template <class R>
+using FmtMaybeConst = conditional_t<ConstFormattableRange<R>, const R, R>;
+
+// SFINAE probe for range_formatter::parse()'s conditional
+// set_debug_format() call ([format.range.formatter]/9.2).
+template <class F>
+concept HasSetDebugFormat = requires(F &f) { f.set_debug_format(); };
+
+// D10 — the "range of char, formatted as one string" content builder,
+// shared by range_formatter's own 's'/'?s' handling and
+// RangeDefaultFormatter<string|debug_string>. f already has its format-spec
+// parsed (and, for the debug case, set_debug_format() already called): this
+// never re-derives that state, it only ever decides how to reach the
+// characters — a zero-copy view over already-contiguous storage, or one
+// copy into a temporary string when the range isn't contiguous+sized.
+template <ranges::input_range R>
+void FormatRangeAsString(R &&r, format_context &ctx,
+                         const formatter<string_view, char> &f)
+{
+    using Raw = remove_reference_t<R>;
+    if constexpr (ranges::contiguous_range<Raw> && ranges::sized_range<Raw>) {
+        f.format(string_view(ranges::data(r), ranges::size(r)), ctx);
+    } else {
+        string owned(from_range, r);
+        f.format(string_view(owned.data(), owned.size()), ctx);
+    }
+}
+
+} // namespace __format
+
+// [format.range.formatter]
+template <class T, class CharT = char>
+    requires same_as<remove_cvref_t<T>, T> && formattable<T, CharT>
+class range_formatter {
+public:
+    constexpr void set_separator(string_view sep) noexcept { sep_ = sep; }
+    constexpr void set_brackets(string_view open, string_view close) noexcept
+    {
+        open_  = open;
+        close_ = close;
+    }
+    constexpr formatter<T, CharT> &underlying() noexcept { return under_; }
+    constexpr const formatter<T, CharT> &underlying() const noexcept
+    {
+        return under_;
+    }
+
+    // Grammar, in the exact order measured (§3/D4):
+    //   [range-fill-and-align][width][n][range-type][range-underlying-spec]
+    constexpr format_parse_context::iterator parse(format_parse_context &pc)
+    {
+        const char *p = pc.begin();
+        const char *e = pc.end();
+        auto finished = [&] { return p == e || *p == '}'; };
+        // "Nothing remains": commit spec_ as parsed so far, run the
+        // underlying's own parse() over underlyingText ("" normally, "m"
+        // for the map-type case), and — per [format.range.formatter]/9,
+        // parse() THEN conditionally set_debug_format(), never the other
+        // order (D8) — arm the debug marker if the underlying has one.
+        auto commit = [&](string_view underlyingText) {
+            pc.advance_to(p);
+            ParseUnderlyingWithText(underlyingText);
+            return p;
+        };
+
+        // Empty spec first, BEFORE any pointer arithmetic. pc may legitimately
+        // be built over a default-constructed string_view (data() == nullptr),
+        // which is exactly how a sibling formatter parses "an empty
+        // format-spec" ([format.tuple]/7) and what libstdc++ does internally;
+        // the `p + 1` below would then be nullptr + 1, which is undefined
+        // ([expr.add]/4). The shared ParseSpec guards this on its own first
+        // line, and so does libstdc++'s range_formatter::parse.
+        if (finished()) return commit("");
+
+        // [range-fill-and-align] — like the shared ParseSpec's, except the
+        // fill-detector also excludes ':' (a range-underlying-spec's ':'
+        // must never be swallowed as a fill character).
+        if (p + 1 < e && __format::IsAlignChar(p[1]) && *p != '{' &&
+            *p != '}' && *p != ':') {
+            spec_.fill  = *p;
+            spec_.align = __format::AlignOf(p[1]);
+            p += 2;
+        } else if (p != e && __format::IsAlignChar(*p)) {
+            spec_.align = __format::AlignOf(*p);
+            ++p;
+        }
+        if (finished()) return commit("");
+
+        // [width] — a leading '0' is illegal outright: ranges have no
+        // separate zero-pad-flag production at all.
+        if (*p == '0')
+            throw format_error("format: leading zero in range width");
+        if (__format::IsDigit(*p)) {
+            spec_.width = int(__format::ParseNumber(p, e));
+        } else if (*p == '{') {
+            spec_.width_id      = __format::ParseDynamicArgId(pc, p, e);
+            spec_.width_dynamic = true;
+            pc.check_dynamic_spec_integral(spec_.width_id);
+        }
+        if (finished()) return commit("");
+
+        // [n] — [format.range.formatter]/5 Note 1: "equivalent to invoking
+        // set_brackets({}, {})". /9 makes that normative ("the values of
+        // opening-bracket_ and closing-bracket_ are modified ... if required
+        // by ... the n option"), and /11.3.1 writes those members — so n must
+        // really CLEAR them, not merely suppress their emission. Observable:
+        // a user of this utility who calls set_brackets() after parse() must
+        // get those brackets back. no_brackets_ stays as the parse-time flag
+        // the 'm' branch and the s/?s check still need.
+        if (*p == 'n') {
+            ++p;
+            no_brackets_ = true;
+            open_        = string_view();
+            close_       = string_view();
+        }
+        if (finished()) return commit("");
+
+        // [range-type]
+        if (*p == 'm') {
+            if constexpr (__format::FmtPairLike<T>) {
+                ++p;
+                range_type_ = 'm';
+                sep_        = ", ";
+                if (!no_brackets_) {
+                    open_  = "{";
+                    close_ = "}";
+                }
+            } else {
+                throw format_error(
+                    "format: 'm' requires a range of pairs or 2-tuples");
+            }
+            if (!finished())
+                throw format_error(
+                    "format: no element format-spec allowed with 'm'");
+            return commit("m");
+        }
+        if (*p == 's' || *p == '?') {
+            const bool debug = *p == '?';
+            ++p;
+            if (debug) {
+                if (finished() || *p != 's')
+                    throw format_error(
+                        "format: '?' is only allowed in combination with 's'");
+                ++p;
+            }
+            // [format.range.formatter]: with range-type 's' or '?s' there
+            // shall be no 'n' option and no range-underlying-spec. The
+            // range is rendered as one string, so brackets never appear and
+            // suppressing them is meaningless rather than redundant — both
+            // reference libraries throw here too.
+            if (no_brackets_)
+                throw format_error(
+                    "format: the 'n' option cannot be combined with 's'/'?s'");
+            if constexpr (same_as<T, CharT>) {
+                range_type_ = debug ? '?' : 's';
+            } else {
+                throw format_error(
+                    "format: 's'/'?s' requires a range of character type");
+            }
+            if (!finished())
+                throw format_error(
+                    "format: no element format-spec allowed with 's'/'?s'");
+            pc.advance_to(p);
+            return p;  // whole-range-as-string: under_ is never touched
+        }
+
+        // The real range-underlying-spec: advance the LIVE pc past ':' and
+        // parse directly against it (not a synthetic sub-context), so a
+        // nested dynamic width/precision resolves against the real
+        // argument list. No set_debug_format() call in this branch — a
+        // real range-underlying-spec means (9.3) fails.
+        if (*p == ':') {
+            ++p;
+            pc.advance_to(p);
+            p = under_.parse(pc);
+            if (!(p == e || *p == '}'))
+                throw format_error(
+                    "format: range element format-spec not terminated");
+            return p;
+        }
+        throw format_error("format: invalid range-format-spec");
+    }
+
+    template <ranges::input_range R>
+        requires formattable<ranges::range_reference_t<R>, CharT> &&
+                 same_as<remove_cvref_t<ranges::range_reference_t<R>>, T>
+    void format(R &&r, format_context &ctx) const
+    {
+        if (spec_.width < 0 && !spec_.width_dynamic) {
+            FormatBody(r, ctx);
+            return;
+        }
+        const int            width = __format::EffectiveWidth(ctx, spec_);
+        __format::StringSink scratch;
+        // Shares the outer argument store (D9): a nested dynamic
+        // width/precision inside the buffered sub-format must still
+        // resolve against the real argument list, not an empty one.
+        format_context nested(__format::SinkIterator(scratch), ctx.__args());
+        FormatBody(r, nested);
+        __format::EmitField(ctx, spec_, width, string_view(),
+                            string_view(scratch.str.data(), scratch.str.size()),
+                            __format::Align::Left, /*numeric=*/false);
+    }
+
+private:
+    // Parses text ("" or "m", both string literals with static storage —
+    // the returned iterator points into THAT storage, never into the live
+    // format string, so callers must not propagate it) as the underlying
+    // formatter's own format-spec, asserts full consumption, then
+    // conditionally arms the debug marker.
+    constexpr format_parse_context::iterator
+    ParseUnderlyingWithText(string_view text)
+    {
+        format_parse_context npc(text, 0);
+        auto                 it = under_.parse(npc);
+        if (it != npc.end())
+            throw format_error(
+                "format: range element default format-spec invalid");
+        if constexpr (__format::HasSetDebugFormat<formatter<T, CharT>>)
+            under_.set_debug_format();
+        return it;
+    }
+
+    template <ranges::input_range R>
+    void FormatBody(R &&r, format_context &ctx) const
+    {
+        // Compile-time gate, not just the runtime range_type_ check: for
+        // T != CharT, range_type_ can never actually BE 's'/'?' at runtime
+        // (parse() throws first), but FormatRangeAsString's body only
+        // makes sense for a range of CharT -- without this if constexpr,
+        // the compiler would still have to instantiate it (and fail) for
+        // every other T, e.g. vector<int>.
+        if constexpr (same_as<T, CharT>) {
+            if (range_type_ == 's' || range_type_ == '?') {
+                formatter<string_view, char> f;
+                if (range_type_ == '?') f.set_debug_format();
+                __format::FormatRangeAsString(r, ctx, f);
+                return;
+            }
+        }
+        // Brackets/separator are written straight from the members ([format.
+        // range.formatter]/11.3): the n option already emptied them at parse
+        // time, so there is no second suppression rule here. The emptiness
+        // test also keeps a default-constructed string_view (data() ==
+        // nullptr) — which set_brackets({}, {}) and n both produce — out of
+        // WriteRun, whose contract is a real pointer.
+        auto out    = ctx.out();
+        auto writeSv = [&](string_view s) {
+            if (!s.empty()) __format::WriteRun(out, s.data(), s.size());
+        };
+        writeSv(open_);
+        bool first = true;
+        for (auto &&elem : r) {
+            if (!first) writeSv(sep_);
+            first = false;
+            ctx.advance_to(out);
+            under_.format(elem, ctx);
+            out = ctx.out();
+        }
+        writeSv(close_);
+        ctx.advance_to(out);
+    }
+
+    __format::StdSpec   spec_;              // .fill/.align/.width[_dynamic] only
+    bool                 no_brackets_ = false;  // 'n'
+    char                 range_type_  = '\0';   // '\0' | 'm' | 's' | '?' ("?s")
+    string_view          sep_         = ", ";
+    string_view          open_        = "[";
+    string_view          close_       = "]";
+    formatter<T, CharT>  under_;
+};
+
+namespace __format {
+
+template <range_format K, class R> struct RangeDefaultFormatter;  // unreachable
+
+template <class R>  // [format.range.fmtdef]
+struct RangeDefaultFormatter<range_format::sequence, R> {
+    range_formatter<remove_cvref_t<ranges::range_reference_t<FmtMaybeConst<R>>>,
+                    char>
+        under_;
+
+public:
+    constexpr void set_separator(string_view s) noexcept
+    {
+        under_.set_separator(s);
+    }
+    constexpr void set_brackets(string_view o, string_view c) noexcept
+    {
+        under_.set_brackets(o, c);
+    }
+    constexpr format_parse_context::iterator parse(format_parse_context &pc)
+    {
+        return under_.parse(pc);
+    }
+    void format(FmtMaybeConst<R> &r, format_context &ctx) const
+    {
+        under_.format(r, ctx);
+    }
+};
+
+template <class R>  // [format.range.fmtmap]
+struct RangeDefaultFormatter<range_format::map, R> {
+    using ElemT = remove_cvref_t<ranges::range_reference_t<FmtMaybeConst<R>>>;
+    static_assert(FmtPairLike<ElemT>);
+    range_formatter<ElemT, char> under_;
+
+public:
+    constexpr RangeDefaultFormatter()
+    {
+        under_.set_brackets("{", "}");
+        under_.underlying().set_brackets(string_view(), string_view());
+        under_.underlying().set_separator(": ");
+    }
+    constexpr void set_separator(string_view s) noexcept
+    {
+        under_.set_separator(s);
+    }
+    constexpr void set_brackets(string_view o, string_view c) noexcept
+    {
+        under_.set_brackets(o, c);
+    }
+    constexpr format_parse_context::iterator parse(format_parse_context &pc)
+    {
+        return under_.parse(pc);
+    }
+    void format(FmtMaybeConst<R> &r, format_context &ctx) const
+    {
+        under_.format(r, ctx);
+    }
+};
+
+template <class R>  // [format.range.fmtset]
+struct RangeDefaultFormatter<range_format::set, R> {
+    range_formatter<remove_cvref_t<ranges::range_reference_t<FmtMaybeConst<R>>>,
+                    char>
+        under_;
+
+public:
+    constexpr RangeDefaultFormatter() { under_.set_brackets("{", "}"); }
+    constexpr void set_separator(string_view s) noexcept
+    {
+        under_.set_separator(s);
+    }
+    constexpr void set_brackets(string_view o, string_view c) noexcept
+    {
+        under_.set_brackets(o, c);
+    }
+    constexpr format_parse_context::iterator parse(format_parse_context &pc)
+    {
+        return under_.parse(pc);
+    }
+    void format(FmtMaybeConst<R> &r, format_context &ctx) const
+    {
+        under_.format(r, ctx);
+    }
+};
+
+template <range_format K, class R>  // [format.range.fmtstr]
+    requires(K == range_format::string || K == range_format::debug_string)
+struct RangeDefaultFormatter<K, R> {
+    // [format.range.fmtstr]/1 Mandates. Only reachable through a user
+    // specialization of format_kind (ComputeFmtKind never yields string /
+    // debug_string), and without this the non-contiguous branch below would
+    // silently element-wise CONVERT a range of int/unsigned char/bool into a
+    // string instead of being ill-formed.
+    static_assert(same_as<remove_cvref_t<ranges::range_reference_t<R>>, char>,
+                  "format_kind::string / debug_string requires a range whose "
+                  "reference type is charT ([format.range.fmtstr]/1)");
+
+    // Deviates from the exposition-only formatter<basic_string<charT>,
+    // charT>: using string_view here is what lets format() below avoid a
+    // copy of the input range when it is contiguous (matches libc++;
+    // mandatory, not cosmetic — parse()'s state, including any width, must
+    // survive into format() through this SAME instance ([format.range.
+    // fmtstr]/4's "return underlying_.format(s, ctx)" names the very object
+    // parse() configured, so a fresh, unconfigured formatter here would
+    // silently drop width).
+    formatter<string_view, char> under_;
+
+public:
+    constexpr format_parse_context::iterator parse(format_parse_context &pc)
+    {
+        auto it = under_.parse(pc);
+        if constexpr (K == range_format::debug_string) under_.set_debug_format();
+        return it;
+    }
+    void format(conditional_t<ranges::input_range<const R>, const R, R> &r,
+               format_context &ctx) const
+    {
+        FormatRangeAsString(r, ctx, under_);
+    }
+};
+
+} // namespace __format
+
+// [format.syn] — the catch-all every std::formattable range picks up
+// automatically, unless it already has an explicit (full) specialization
+// (string/string_view/const char*/char* — chosen before partial-
+// specialization matching even starts, D12) or is more specialized itself
+// (formatter<char[N],char> from c1 — a char[N] argument can never be
+// produced by deducing an arbitrary R, so char[N] wins outright, D12).
+template <ranges::input_range R>
+    requires(format_kind<R> != range_format::disabled) &&
+            formattable<ranges::range_reference_t<R>, char>
+struct formatter<R, char> : __format::RangeDefaultFormatter<format_kind<R>, R> {
+};
+
+// ── D14 (owner-approved option A) — vector<bool,Alloc>::reference ──────
+// vector<bool,Alloc>::reference is a nested class of vector<bool,Alloc>
+// with no back-reference to its container, so formatter<vector<bool,Alloc>
+// ::reference,char> cannot name that proxy type as a specialization
+// pattern (a qualified-id naming a member of a still-to-be-deduced
+// template parameter is a non-deduced context). <vector>'s reference class
+// instead carries a `__container` alias (via the injected-class-name, so
+// it is exactly vector<bool,Alloc>) — this pattern-matches the proxy type
+// itself (trivial deduction) and cross-checks it with the requires-clause
+// below, mirroring libc++'s vector_bool_formatter.h exactly. The alias name
+// is reserved ([lex.name]/3.2) on purpose: with a plain name, any user range
+// carrying an alias of that name naming a vector<bool> would satisfy BOTH
+// this formatter and the range catch-all, which is an ambiguous-partial-
+// specialization hard error rather than a formatted range.
+namespace __format {
+
+template <class T>
+concept HasContainerAlias = requires { typename T::__container; };
+
+template <class T>
+concept FmtVectorBoolProxy =
+    HasContainerAlias<T> &&
+    same_as<typename T::__container,
+            vector<bool, typename T::__container::allocator_type>>;
+
+} // namespace __format
+
+template <class T>
+    requires __format::FmtVectorBoolProxy<T>
+struct formatter<T, char> {
+    formatter<bool, char> under_;
+
+    constexpr format_parse_context::iterator parse(format_parse_context &pc)
+    {
+        return under_.parse(pc);
+    }
+    void format(const T &v, format_context &ctx) const
+    {
+        under_.format(static_cast<bool>(v), ctx);
+    }
+};
+
+} // namespace std
+
+#endif // BOXCXX_BITS_FORMAT_RANGE

@@ -26842,6 +26842,413 @@ void Phase126()
 
 } // namespace
 
+// ── phase127 fixtures ────────────────────────────────────────────────────
+// Temporarily outside the anonymous namespace above (reopened below): an
+// explicit specialization of a std:: template must be declared from a
+// namespace that encloses std itself, which the anonymous namespace does
+// not -- same reason cxxfmt::Point/LazyCounter's std::formatter
+// specializations near the top of this file sit at true file scope too.
+
+// D1 — a self-referential range shaped exactly like std::filesystem::path
+// (a range whose reference type is itself). boxcxx has no <filesystem>, so
+// this stands in for [format.range.fmtkind] rule 2.1's own textbook
+// example: format_kind of this must be disabled, or format_kind<path> would
+// recurse into itself through range_reference_t forever.
+struct P127SelfRefRange {
+    P127SelfRefRange *begin() { return this; }
+    P127SelfRefRange *end() { return this; }
+};
+
+// format_kind::string / debug_string are never produced by the deduced
+// ComputeFmtKind -- they exist purely so a user can opt a range type into
+// "format the whole range as one string", per [format.range.fmtkind]'s own
+// Remarks paragraph ("users may specialize format_kind for cv-unqualified
+// program-defined types"). These two are the only way to exercise
+// RangeDefaultFormatter<string,R> / <debug_string,R> at all: no standard
+// container's format_kind is ever computed as string/debug_string.
+struct P127PlainStringRange {
+    std::string_view text;
+    const char *begin() const { return text.data(); }
+    const char *end() const { return text.data() + text.size(); }
+};
+struct P127DebugStringRange {
+    std::string_view text;
+    const char *begin() const { return text.data(); }
+    const char *end() const { return text.data() + text.size(); }
+};
+namespace std {
+template <> constexpr auto format_kind<P127PlainStringRange> = range_format::string;
+template <> constexpr auto format_kind<P127DebugStringRange> = range_format::debug_string;
+} // namespace std
+
+// range_formatter used the way [format.range.formatter]/1 advertises it ("a
+// utility for implementing formatter specializations for range types"), with
+// set_brackets() called AFTER parse(). This is the only arrangement that can
+// observe whether the n option really CLEARS opening-bracket_/closing-bracket_
+// (/5 Note 1 + /9, and /11.3.1 writes those very members) or merely suppresses
+// their emission -- the four range-default-formatters all set their brackets
+// in their constructor, i.e. before parse, so they never see the difference.
+struct P127BracketsAfterParse {
+    std::vector<int> v;
+};
+namespace std {
+template <> struct formatter<P127BracketsAfterParse, char> {
+    range_formatter<int, char> rf;
+    constexpr format_parse_context::iterator parse(format_parse_context &pc)
+    {
+        auto it = rf.parse(pc);
+        rf.set_brackets("<", ">");
+        return it;
+    }
+    void format(const P127BracketsAfterParse &r, format_context &ctx) const
+    {
+        rf.format(r.v, ctx);
+    }
+};
+} // namespace std
+
+// A element type whose formatter RESETS its debug flag on every parse(), even
+// over empty text. Every shipped formatter short-circuits on empty input, so
+// only a type shaped like this can observe whether range_formatter calls
+// parse() before set_debug_format() ([format.range.formatter]/9.3) or after.
+// The order is load-bearing for c3: it is the only one all three
+// implementations agree on.
+struct P127OrderProbe {
+    char c;
+};
+namespace std {
+template <> struct formatter<P127OrderProbe, char> {
+    bool debug_ = false;
+    constexpr format_parse_context::iterator parse(format_parse_context &pc)
+    {
+        debug_ = false;  // unconditional: no empty-text short circuit
+        return pc.begin();
+    }
+    constexpr void set_debug_format() noexcept { debug_ = true; }
+    void format(P127OrderProbe p, format_context &ctx) const
+    {
+        format_to(ctx.out(), "{}({})", debug_ ? 'D' : 'P', p.c);
+    }
+};
+} // namespace std
+
+namespace {
+
+void Phase127()
+{
+    auto feq = [](const std::string &got, const char *want) {
+        return std::string_view(got.data(), got.size()) == std::string_view(want);
+    };
+
+    std::vector<int>               vi{1, 2, 3};
+    std::vector<char>              vc{'a', 'b'};
+    std::vector<char>              vc_empty{};
+    std::vector<std::string>       vs{"a", "bb"};
+    std::vector<std::vector<int>>  vvi{{1, 2}, {3, 4, 5}};
+    std::set<int>                  si{1, 2, 3};
+    std::vector<std::vector<char>> vvc{{'a', 'b'}, {'c'}};
+
+    // (1-7) [format.range.fmtdef]/[fmtset] default brackets/separator for
+    // sequence and set, nested ranges, the empty range.
+    {
+        Check(feq(std::format("{}", vi), "[1, 2, 3]"),
+              "phase127 (1) default sequence brackets/separator");
+        Check(feq(std::format("{}", vs), "[\"a\", \"bb\"]"),
+              "phase127 (2) sequence of strings, each auto-debug-quoted");
+        Check(feq(std::format("{}", vc), "['a', 'b']"),
+              "phase127 (3) sequence of char, each auto-debug-quoted");
+        Check(feq(std::format("{}", vc_empty), "[]"), "phase127 (4) empty sequence");
+        Check(feq(std::format("{}", vvi), "[[1, 2], [3, 4, 5]]"),
+              "phase127 (5) nested sequence");
+        Check(feq(std::format("{}", si), "{1, 2, 3}"),
+              "phase127 (6) set brackets are braces -- covers the set ctor's set_brackets guard");
+        Check(feq(std::format("{}", vvc), "[['a', 'b'], ['c']]"),
+              "phase127 (7) nested sequence of char, auto-debug at both levels");
+    }
+
+    // (8-10) outer width/fill/align on a sequence.
+    {
+        Check(feq(std::format("{:10}", vi), "[1, 2, 3] "),
+              "phase127 (8) width, default left-align");
+        Check(feq(std::format("{:<10}", vi), "[1, 2, 3] "),
+              "phase127 (9) explicit left-align");
+        Check(feq(std::format("{:*^10}", vi), "[1, 2, 3]*"),
+              "phase127 (10) center-align, odd pad goes right");
+    }
+
+    // (11-13) 'n' bracket suppression + grammar order (D4). Removing the
+    // write-time `if (!no_brackets_)` guard would make (11) regain its
+    // brackets; (13) covers strict [width][n] ordering.
+    {
+        Check(feq(std::format("{:n}", vi), "1, 2, 3"),
+              "phase127 (11) n suppresses brackets -- covers the no_brackets_ guard");
+        Check(feq(std::format("{:10n}", vi), "1, 2, 3   "),
+              "phase127 (12) width still applies with n");
+        Check(!P123Parses("{:n10}", vi),
+              "phase127 (13) width after n is illegal (grammar order)");
+    }
+
+    // (14-19) auto-debug boundary: no colon at all (even with n/width) means
+    // debug is armed; an EXPLICIT colon, even with empty text after it,
+    // means it is not.
+    {
+        Check(feq(std::format("{:n}", vc), "'a', 'b'"),
+              "phase127 (14) auto-debug survives n (no colon present)");
+        Check(feq(std::format("{:}", vc), "['a', 'b']"),
+              "phase127 (15) trailing bare colon-less spec == {}");
+        Check(feq(std::vformat("{::}", std::make_format_args(vc)), "[a, b]"),
+              "phase127 (16) explicit empty range-underlying-spec suppresses auto-debug");
+        Check(feq(std::vformat("{:n:}", std::make_format_args(vc)), "a, b"),
+              "phase127 (17) n + empty underlying-spec: no brackets, no auto-debug");
+        Check(feq(std::vformat("{:5:}", std::make_format_args(vc)), "[a, b]"),
+              "phase127 (18) width + empty underlying-spec: brackets kept, no auto-debug");
+        Check(feq(std::vformat("{:5n:}", std::make_format_args(vc)), "a, b "),
+              "phase127 (19) width+n+empty underlying-spec");
+    }
+
+    // (20-21) ':' is not a valid range-fill character.
+    {
+        Check(feq(std::vformat("{::>10}", std::make_format_args(vi)),
+                  "[         1,          2,          3]"),
+              "phase127 (20) ':' rejected as a fill char -- parses as empty "
+              "underlying-spec + per-element \">10\"");
+        Check(feq(std::format("{:*>10}", vi), "*[1, 2, 3]"),
+              "phase127 (21) a real fill char, contrast with (20)");
+    }
+
+    // (22-23, 28) range_formatter's own 's'/'?s' whole-range-as-string path
+    // -- (22-23) cover the s/?s requirement checks' positive side; (28)
+    // covers the outer width-buffering wrapping FormatBody uniformly
+    // (the fix for the width-drop bug found in the design's own sketch).
+    {
+        Check(feq(std::format("{:s}", vc), "ab"), "phase127 (22) s: whole range as plain string");
+        Check(feq(std::format("{:?s}", vc), "\"ab\""),
+              "phase127 (23) ?s: whole range as escaped string");
+        Check(feq(std::format("{:5s}", vc), "ab   "),
+              "phase127 (28) width applies to s too");
+    }
+
+    // (24-27, 29-32) s/?s/m requirement checks, negative side.
+    {
+        Check(!P123Parses("{:s}", vi),
+              "phase127 (24) s requires T==CharT -- covers the same_as<T,CharT> guard");
+        Check(!P123Parses("{:?s}", vi), "phase127 (25) ?s requires T==CharT");
+        Check(!P123Parses("{:?}", vc), "phase127 (26) bare '?' without 's' is illegal");
+        Check(!P123Parses("{:m}", vi),
+              "phase127 (27) m requires FmtPairLike<T> -- covers the FmtPairLike guard");
+        Check(!P123Parses("{:s:d}", vc), "phase127 (29) s + explicit underlying-spec illegal");
+        Check(!P123Parses("{:ns}", vc), "phase127 (30) n before s illegal");
+        Check(!P123Parses("{:sn}", vc),
+              "phase127 (31) s then trailing n illegal -- covers 's' must-be-last guard");
+        Check(!P123Parses("{:?sn}", vc), "phase127 (32) ?s then trailing n illegal");
+    }
+
+    // (33-38) range-format-spec has no precision/L/sign/#/0-flag position.
+    {
+        Check(!P123Parses("{:.2}", vi), "phase127 (33) no precision production");
+        Check(!P123Parses("{:5.2}", vi), "phase127 (34) width+precision still illegal");
+        Check(!P123Parses("{:L}", vi), "phase127 (35) no L position");
+        Check(!P123Parses("{:+}", vi), "phase127 (36) no sign position");
+        Check(!P123Parses("{:#}", vi), "phase127 (37) no # position");
+        Check(!P123Parses("{:010}", vi),
+              "phase127 (38) leading zero illegal -- covers the width leading-'0' guard");
+    }
+
+    // (39-43) dynamic width/precision -- (42-43) specifically cover D9's
+    // shared-argument-store guard (format_context::__args()): a
+    // default-constructed format_args in the nested context would make
+    // these two throw or misresolve instead of matching (41).
+    {
+        int w10 = 10, w5 = 5, w20 = 20, w4 = 4;
+        Check(feq(std::vformat("{:{}}", std::make_format_args(vi, w10)), "[1, 2, 3] "),
+              "phase127 (39) dynamic outer width");
+        Check(feq(std::vformat("{::#x}", std::make_format_args(vi)), "[0x1, 0x2, 0x3]"),
+              "phase127 (40) element underlying-spec threaded per-element");
+        Check(feq(std::vformat("{::5}", std::make_format_args(vi)), "[    1,     2,     3]"),
+              "phase127 (41) element underlying-spec with a literal width");
+        Check(feq(std::vformat("{0::{1}}", std::make_format_args(vi, w5)),
+                  "[    1,     2,     3]"),
+              "phase127 (42) element's own dynamic width resolves against the "
+              "shared arg list -- covers ctx.__args()");
+        Check(feq(std::vformat("{0:{1}:{2}}", std::make_format_args(vi, w20, w4)),
+                  "[   1,    2,    3]  "),
+              "phase127 (43) outer dynamic width + element dynamic width together, same arg list");
+    }
+
+    // (44) a proxy-free prvalue reference range (views::iota) -- nothing in
+    // this commit's machinery assumes range_reference_t is an lvalue reference.
+    Check(feq(std::format("{}", std::views::iota(1, 4)), "[1, 2, 3]"),
+          "phase127 (44) views::iota, prvalue int reference");
+
+    // (45, D1) the self-referential-range disabling rule.
+    static_assert(std::format_kind<P127SelfRefRange> == std::range_format::disabled);
+    static_assert(!std::formattable<P127SelfRefRange, char>);
+
+    // (46-47, D12) formatter<char[N],char> (c1) and the explicit
+    // string-family specializations still win over the new catch-all.
+    // Naming std::formatter<char[4],char> forces the compiler to actually
+    // resolve the partial-specialization ordering now that both patterns
+    // exist -- an ambiguity would be a hard error, not a wrong answer.
+    {
+        char buf[6] = "hello";
+        Check(feq(std::format("{}", buf), "hello"),
+              "phase127 (46) char[N] lvalue takes the engine's CString fast "
+              "path, unaffected by the range catch-all");
+        Check(std::formattable<char[4], char>,
+              "phase127 (46b) formatter<char[4],char> still resolves without ambiguity (D12)");
+
+        Check(feq(std::format("{}", std::string("hi")), "hi"), "phase127 (47a) string regression");
+        Check(feq(std::format("{}", std::string_view("hi")), "hi"),
+              "phase127 (47b) string_view regression");
+        const char *cs = "hi";
+        Check(feq(std::format("{}", cs), "hi"), "phase127 (47c) const char* regression");
+        char        mut[] = "hi";
+        char       *mp    = mut;
+        Check(feq(std::format("{}", mp), "hi"), "phase127 (47d) char* regression");
+    }
+
+    // (48-49, D11) const-vs-non-const range selection. filter_view's const
+    // form is not even a range, so ConstFormattableRange must be false and
+    // FmtMaybeConst must pick non-const -- checked both structurally and
+    // through an actual format() call (a wrong FmtMaybeConst here is a hard
+    // compile error the moment formatter<filter_view,char> is instantiated).
+    {
+        std::vector<int> vf{1, 2, 3, 4, 5};
+        auto             fv = vf | std::views::filter([](int x) { return x % 2 == 0; });
+        static_assert(std::ranges::input_range<decltype(fv)>);
+        static_assert(!std::ranges::range<const decltype(fv)>);
+        Check(feq(std::format("{}", fv), "[2, 4]"), "phase127 (48) mutable filter_view formats and compiles");
+        Check(std::formattable<decltype(fv), char>, "phase127 (48b) formattable<filter_view,char> is true");
+        Check(!std::formattable<const decltype(fv), char>,
+              "phase127 (49) formattable<const filter_view,char> is false -- "
+              "const filter_view is not even a range");
+        static_assert(!std::__format::ConstFormattableRange<decltype(fv)>);
+        static_assert(std::same_as<std::__format::FmtMaybeConst<decltype(fv)>, decltype(fv)>);
+    }
+
+    // (56, D14 owner-approved option A) vector<bool,Alloc>::reference, for
+    // ANY Alloc, not just the default.
+    {
+        std::vector<bool> vb{true, false, true};
+        Check(feq(std::format("{}", vb), "[true, false, true]"),
+              "phase127 (56) vector<bool> whole-container format "
+              "(const-preferred path, plain bool elements)");
+
+        // Directly exercises the proxy formatter itself: operator[] on a
+        // non-const vector<bool> yields the reference proxy by value, which
+        // the whole-container format above never touches (it always
+        // prefers the const_iterator's plain bool). Without
+        // formatter<vector<bool>::reference,char>, this fails to compile.
+        Check(feq(std::format("{}", vb[0]), "true"),
+              "phase127 (56b) vector<bool>::reference formats through its own proxy formatter");
+        Check(feq(std::format("{}", vb[1]), "false"),
+              "phase127 (56c) vector<bool>::reference, false case");
+
+        std::vector<bool, StatefulAlloc<bool>> vba(StatefulAlloc<bool>(1));
+        vba.push_back(true);
+        vba.push_back(true);
+        vba.push_back(false);
+        Check(feq(std::format("{}", vba), "[true, true, false]"),
+              "phase127 (56d) vector<bool,MyAlloc> works too -- the point of D14 option A over option B");
+        Check(feq(std::format("{}", vba[2]), "false"),
+              "phase127 (56e) vector<bool,MyAlloc>::reference through the proxy formatter");
+    }
+
+    // format_kind::string / debug_string -- the one RangeDefaultFormatter
+    // specialization no standard container reaches; format_kind is
+    // explicitly user-specialized here exactly as [format.range.fmtkind]'s
+    // Remarks paragraph sanctions. Width-tested specifically because
+    // FormatRangeAsString's signature had to change from the design's own
+    // sketch to keep width from being silently dropped here (see report).
+    {
+        Check(feq(std::format("{}", P127PlainStringRange{"hi"}), "hi"),
+              "phase127 (string-kind a) format_kind::string formats the whole range as a plain string");
+        Check(feq(std::format("{:10}", P127PlainStringRange{"hi"}), "hi        "),
+              "phase127 (string-kind b) width applies -- regression test for the width-drop bug");
+        Check(feq(std::format("{}", P127DebugStringRange{"a\tb"}), "\"a\\tb\""),
+              "phase127 (string-kind c) format_kind::debug_string escapes the whole range");
+        Check(feq(std::format("{:10}", P127DebugStringRange{"a\tb"}), "\"a\\tb\"    "),
+              "phase127 (string-kind d) width applies to the debug_string form too");
+    }
+
+    // range_formatter's own public contract, unreachable through any
+    // container: the n option must CLEAR the bracket members (so a later
+    // set_brackets() takes effect), and parse() must tolerate an EMPTY parse
+    // context whose string_view has data() == nullptr -- exactly what a
+    // sibling formatter hands it to "parse an empty format-spec"
+    // ([format.tuple]/7). Reading a byte or doing pointer arithmetic before
+    // the empty check would be undefined there ([expr.add]/4).
+    {
+        P127BracketsAfterParse b{{1, 2, 3}};
+        Check(feq(std::format("{}", b), "<1, 2, 3>"),
+              "phase127 (rf a) set_brackets() after parse() applies");
+        Check(feq(std::format("{:n}", b), "<1, 2, 3>"),
+              "phase127 (rf b) n CLEARS the brackets, so a later "
+              "set_brackets() still shows -- not a write-time suppression flag");
+        Check(feq(std::format("{:5n}", b), "<1, 2, 3>"),
+              "phase127 (rf c) same with a width in front of n");
+        Check(feq(std::vformat("{:n:#x}", std::make_format_args(b)),
+                  "<0x1, 0x2, 0x3>"),
+              "phase127 (rf d) same with n plus a range-underlying-spec");
+
+        std::range_formatter<int, char> rf;
+        std::format_parse_context       pc{std::string_view()};
+        Check(rf.parse(pc) == pc.end(),
+              "phase127 (rf e) parse() accepts an empty parse context whose "
+              "data() is null, without touching it");
+    }
+
+    // Three guards that mutation testing proved the suite could not see.
+    {
+        // (mut a) format_kind's map-vs-set branch: nothing else observes it
+        // until c3 makes maps formattable, so pin it at compile time.
+        static_assert(std::format_kind<std::map<std::string, int>> ==
+                          std::range_format::map,
+                      "a range with key_type and mapped_type deduces to map");
+        static_assert(std::format_kind<std::unordered_map<std::string, int>> ==
+                          std::range_format::map,
+                      "unordered_map deduces to map as well");
+        static_assert(std::format_kind<std::set<int>> == std::range_format::set,
+                      "a range with key_type but no mapped_type deduces to set");
+        static_assert(std::format_kind<std::vector<int>> ==
+                          std::range_format::sequence,
+                      "a range with neither typedef deduces to sequence");
+        Check(true, "phase127 (mut a) format_kind map/set/sequence deduction pinned");
+
+        // (mut b) the FmtPairLike guard for 'm' is masked downstream: every
+        // scalar formatter rejects 'm' as an unknown type character anyway,
+        // so "it threw" does not prove this guard fired. Check the message.
+        bool        fired = false;
+        std::string msg;
+        try {
+            std::vector<int> vi{1};
+            (void)std::vformat("{:m}", std::make_format_args(vi));
+        } catch (const std::format_error &e) {
+            fired = true;
+            msg   = e.what();
+        }
+        Check(fired && msg.find("pairs or 2-tuples") != std::string::npos,
+              "phase127 (mut b) 'm' on a non-pair range fails in the FmtPairLike "
+              "guard itself, not in the element formatter");
+
+        // (mut c) parse() must run BEFORE set_debug_format(); only a
+        // formatter that resets its flag unconditionally can tell.
+        std::vector<P127OrderProbe> vp{{'x'}, {'y'}};
+        Check(feq(std::format("{}", vp), "[D(x), D(y)]"),
+              "phase127 (mut c) set_debug_format() is called after parse(), so "
+              "the debug marker survives");
+    }
+
+    printf("[CXX] PASS phase127: [format.range] -- range_format/format_kind, "
+           "range_formatter's range-format-spec grammar (fill/align/width/n/m/s/?s/"
+           "range-underlying-spec), the four range-default-formatter specializations "
+           "(sequence/map-ctor/set/string+debug_string), the formatter<R,char> catch-all, "
+           "const-vs-non-const range selection, and vector<bool,Alloc>::reference "
+           "(D14 option A, any allocator)\n");
+}
+
+} // namespace
+
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
 int CxxTraitsTortureCompiled();
 
@@ -26988,6 +27395,7 @@ int main()
     Phase124();
     Phase125();
     Phase126();
+    Phase127();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
