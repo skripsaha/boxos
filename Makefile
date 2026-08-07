@@ -476,8 +476,8 @@ $(KERNEL_ELF): $(KERNEL_ENTRY_OBJ) $(C_OBJS) $(ASM_OBJS) $(SHELL_EMBED)
 
 # ==== DISK IMAGES ====
 $(IMAGE): $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(SHELL_BIN) $(PROCA_BIN) $(PROCB_BIN) $(TODAY_BIN) $(MEMTEST_BIN) $(MTEST_BIN) $(CHAIN_BIN) $(DECKS_BIN) $(BENCH_BIN) $(TOUCH_TEST_BIN) $(TOUCH_STRESS_BIN) $(LIFECYCLE_BIN) $(PERSIST_BIN) $(WRITE_STRESS_BIN) $(WRITE_CONC_BIN) $(WRITE_OBS_BIN) $(COW_TEST_BIN) $(ANCHOR_TEST_BIN) $(BAY_TEST_BIN) $(BROOK_TEST_BIN) $(CURRENT_TEST_BIN) $(HTEST_BIN) $(CXXTEST_BIN) $(STRANDTEST_BIN) $(BROOKSTRAND_BIN) $(BROOKEXEC_BIN) $(CURRENTEXEC_BIN) $(STRANDPARK_BIN) $(CHILDSPIN_BIN) $(PRINT_STRESS_BIN) $(DISPLAY_BIN) $(UTIL_ELFS) $(TAGFS_TOOL)
-	@echo "Creating disk image (16MB)..."
-	@dd if=/dev/zero of=$@ bs=512 count=32768 status=none
+	@echo "Creating disk image (24MB)..."
+	@dd if=/dev/zero of=$@ bs=512 count=49152 status=none
 	@echo "  Writing Stage1 (sector 0, 512 bytes)..."
 	@dd if=$(STAGE1_BIN) of=$@ bs=512 conv=notrunc status=none
 	@echo "  Writing Stage2 (sectors 1-9, $(STAGE2_SECTORS) sectors)..."

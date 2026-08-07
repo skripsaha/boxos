@@ -37,6 +37,13 @@
 // Ф30d-tail #2 adds __cpp_lib_constexpr_bitset, owned by <bitset>
 // (<__bits/version_bitset>).
 //
+// Ф30f-3 adds __cpp_lib_format_ranges, owned by <format> (<__bits/
+// version_format>). __cpp_lib_format itself stays undefined -- see the
+// Ф1-Ф28 backfill note below, which is why a translation unit can see the
+// range/tuple-formatting refinement macro without the base <format> macro
+// it would normally refine; that asymmetry is inherited, not introduced
+// here.
+//
 // Deliberately NOT defined (feature not implemented, or not complete
 // enough to claim):
 //   __cpp_lib_tuple_like        — no public std::tuple_like concept (only
@@ -67,5 +74,6 @@
 #include <__bits/version_complex>   // <complex>: __cpp_lib_constexpr_complex, __cpp_lib_complex_udls
 #include <__bits/version_bitset>    // <bitset>: __cpp_lib_constexpr_bitset
 #include <__bits/version_memory>    // <memory>: __cpp_lib_out_ptr
+#include <__bits/version_format>    // <format>: __cpp_lib_format_ranges
 
 #endif // BOXCXX_VERSION

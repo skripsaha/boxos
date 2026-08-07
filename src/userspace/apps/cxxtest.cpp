@@ -27249,6 +27249,257 @@ void Phase127()
 
 } // namespace
 
+// enable_nonlocking_formatter_optimization ([format.formatter.spec]) does not
+// exist anywhere in boxcxx (not just for pair/tuple) -- grep-confirmed before
+// writing this phase. Not invented here; nothing below tests for it.
+
+namespace {
+
+void Phase128()
+{
+    auto feq = [](const std::string &got, const char *want) {
+        return std::string_view(got.data(), got.size()) == std::string_view(want);
+    };
+
+    std::pair<int, int>       p2{1, 2};
+    std::tuple<int, int>      t2{1, 2};
+    std::tuple<int, int, int> t3{1, 2, 3};
+    std::tuple<int>           t1{1};
+    std::tuple<>              t0{};
+
+    // (1-5) [format.tuple]/5 none-row: default separator_/opening-bracket_/
+    // closing-bracket_ ("(", ")", ", ") when tuple-type is absent, for every
+    // arity including 0 and 1.
+    {
+        Check(feq(std::format("{}", p2), "(1, 2)"), "phase128 (1) pair default brackets/separator");
+        Check(feq(std::format("{}", t2), "(1, 2)"), "phase128 (2) 2-tuple default, same shape as pair");
+        Check(feq(std::format("{}", t3), "(1, 2, 3)"), "phase128 (3) 3-tuple default");
+        Check(feq(std::format("{}", t1), "(1)"), "phase128 (4) 1-tuple default, no separator to write");
+        Check(feq(std::format("{}", t0), "()"), "phase128 (5) 0-tuple default");
+    }
+
+    // (6-10) Table 116's 'm': Requirements sizeof...(Ts)==2 -- a pair always
+    // satisfies this trivially (it IS a 2-tuple); tuple<Ts...> only when
+    // sizeof...(Ts) is exactly 2. (8)/(9) are the guard's false side: removing
+    // the sizeof...(Ts)==2 check (always applying 'm') would make these
+    // wrongly succeed instead of throwing.
+    {
+        Check(feq(std::format("{:m}", p2), "1: 2"),
+              "phase128 (6) pair 'm' -- set_separator(\": \") + empty brackets");
+        Check(feq(std::format("{:m}", t2), "1: 2"),
+              "phase128 (7) 2-tuple 'm' -- same effect as pair, via sizeof...(Ts)==2");
+        Check(!P123Parses("{:m}", t3),
+              "phase128 (8) 3-tuple 'm' throws -- sizeof...(Ts)==2 guard, wrong arity");
+        Check(!P123Parses("{:m}", t1),
+              "phase128 (9) 1-tuple 'm' throws -- same guard, the other wrong arity");
+        Check(feq(std::format("{:10m}", p2), "1: 2      "),
+              "phase128 (10) width still applies with m");
+    }
+
+    // (11-14) 'n': no requirements at all, unlike 'm' -- clears both
+    // brackets regardless of arity, leaves separator_ alone.
+    {
+        Check(feq(std::format("{:n}", p2), "1, 2"), "phase128 (11) pair n");
+        Check(feq(std::format("{:n}", t3), "1, 2, 3"), "phase128 (12) 3-tuple n");
+        Check(feq(std::format("{:n}", t0), ""),
+              "phase128 (13) 0-tuple n -- no brackets, nothing to separate, empty output");
+        Check(feq(std::format("{:10n}", t3), "1, 2, 3   "), "phase128 (14) width still applies with n");
+    }
+
+    // (15-16) tuple-type is EXACTLY ONE of m|n, never both -- unlike
+    // [format.range]'s grammar, where 'n' is a separate flag ahead of an
+    // independent range-type (so "nm" is legal there). Treating 'n' as a
+    // pre-flag here too, instead of the single-token tuple-type it is, would
+    // make one of these two wrongly succeed.
+    {
+        Check(!P123Parses("{:mn}", p2), "phase128 (15) 'mn' throws -- tuple-type is a single token");
+        Check(!P123Parses("{:nm}", p2), "phase128 (16) 'nm' throws -- same, other order");
+    }
+
+    // (17-20) width/fill/align over the WHOLE tuple -- default align is
+    // left (string-like), matching every other non-numeric formatter here.
+    {
+        Check(feq(std::format("{:12}", p2), "(1, 2)      "), "phase128 (17) width, default left-align");
+        Check(feq(std::format("{:<12}", p2), "(1, 2)      "), "phase128 (18) explicit left-align");
+        Check(feq(std::format("{:>12}", p2), "      (1, 2)"), "phase128 (19) right-align");
+        Check(feq(std::format("{:*^12}", p2), "***(1, 2)***"), "phase128 (20) center-align, odd pad goes right");
+    }
+
+    // (21-25) tuple-format-spec has no precision and no underlying-spec at
+    // all -- unlike ranges, there is no ':' production anywhere in this
+    // grammar, so a stray ':' (here from "{0::>5}", literally what the
+    // engine hands parse() once it strips the field's OWN introducing
+    // colon) cannot be rescued as a range-underlying-spec the way it is for
+    // range_formatter -- it must fall through to "invalid" and throw.
+    {
+        Check(!P123Parses("{:.2}", p2), "phase128 (21) no precision production");
+        Check(!P123Parses("{::d}", p2), "phase128 (22) no underlying-spec production");
+        Check(!P123Parses("{:010}", p2), "phase128 (23) leading zero in width illegal");
+        Check(!P123Parses("{0::>5}", p2),
+              "phase128 (24) ':' is not a valid tuple-fill char -- falls through to invalid, "
+              "unlike range_formatter where the same text parses as an empty underlying-spec");
+        Check(!P123Parses("{:L}", p2), "phase128 (25) no L position");
+    }
+
+    // (26-28) nested tuples/pairs and a tuple containing a range. Each
+    // element parses an EMPTY spec ([format.tuple]/7), which is exactly how
+    // a default-constructed, null-data format_parse_context reaches this
+    // parse() for real -- the same empty-spec-first ordering
+    // range_formatter's own parse() needs, checked here because a nested
+    // tuple recurses into this exact parse() a second time.
+    {
+        std::tuple<int, std::tuple<int, int>> tnest{1, {2, 3}};
+        std::pair<int, std::pair<int, int>>   pnest{1, {2, 3}};
+        std::tuple<int, std::vector<int>>     trange{1, {2, 3}};
+        Check(feq(std::format("{}", tnest), "(1, (2, 3))"), "phase128 (26) nested tuple");
+        Check(feq(std::format("{}", pnest), "(1, (2, 3))"), "phase128 (27) nested pair");
+        Check(feq(std::format("{}", trange), "(1, [2, 3])"), "phase128 (28) tuple containing a range");
+    }
+
+    // (29-33) a range of tuples/pairs, and a range of THREE-element tuples
+    // with 'm' -- all reachable through c2's range_formatter/
+    // RangeDefaultFormatter<map,R> with NO changes there, purely because
+    // formatter<pair>/formatter<tuple> now satisfy c2's own formattable<T,
+    // CharT> constraint. (31) exercises c2's pre-existing FmtPairLike<T>
+    // guard (T=tuple<int,int,int>) through a type that was unformattable,
+    // and so unreachable, before this commit.
+    {
+        std::vector<std::tuple<int, int>>     vt{{1, 2}, {3, 4}};
+        std::vector<std::tuple<int, int, int>> vt3{{1, 2, 3}, {4, 5, 6}};
+        std::vector<std::pair<int, int>>      vp{{1, 2}, {3, 4}};
+        Check(feq(std::format("{}", vt), "[(1, 2), (3, 4)]"), "phase128 (29) range of tuples, default");
+        Check(feq(std::format("{:m}", vt), "{1: 2, 3: 4}"),
+              "phase128 (30) range of 2-tuples with 'm' -- delegates 'm' down to each "
+              "element's own tuple-formatter (libstdc++ reading; libc++ instead formats "
+              "each element with its default parens here, see report)");
+        Check(!P123Parses("{:m}", vt3),
+              "phase128 (31) range of 3-tuples with 'm' throws -- c2's FmtPairLike<T> guard "
+              "rejects it at the RANGE level before reaching this commit's formatter at all");
+        Check(feq(std::format("{}", vp), "[(1, 2), (3, 4)]"), "phase128 (32) range of pairs, default");
+        Check(feq(std::format("{:m}", vp), "{1: 2, 3: 4}"),
+              "phase128 (33) range of pairs with 'm' -- same libstdc++ reading boxcxx follows");
+    }
+
+    // (34-36) std::map / std::set end-to-end.
+    {
+        std::map<std::string, int>    m{{"a", 1}, {"b", 2}};
+        std::set<std::pair<int, int>> sp{{1, 2}, {3, 4}};
+        Check(feq(std::format("{}", m), "{\"a\": 1, \"b\": 2}"),
+              "phase128 (34) std::map end-to-end -- format_kind::map + "
+              "RangeDefaultFormatter<map,R>'s constructor pre-configuring this commit's "
+              "formatter<pair<const K,V>,char> via set_brackets/set_separator, c2 unchanged");
+        Check(feq(std::format("{:n}", m), "\"a\": 1, \"b\": 2"),
+              "phase128 (35) std::map with 'n' -- outer braces gone, inner \": \" survives "
+              "(the map ctor's set_separator on the pair formatter, untouched by the range's 'n')");
+        Check(feq(std::format("{}", sp), "{(1, 2), (3, 4)}"),
+              "phase128 (36) std::set<pair<int,int>> end-to-end -- format_kind::set, "
+              "elements keep their tuple-default parens (no 'm' requested)");
+    }
+
+    // (37) pair<string,char> -- both elements come out debug-quoted: /7's
+    // "parse an empty spec, then set_debug_format() if valid" runs
+    // unconditionally for every element, independent of m/n.
+    {
+        std::pair<std::string, char> psc{"hi", 'x'};
+        Check(feq(std::format("{}", psc), "(\"hi\", 'x')"),
+              "phase128 (37) pair<string,char> -- both elements auto-debug-quoted");
+    }
+
+    // (38) set_debug_format() runs strictly AFTER parse(), for tuple/pair
+    // elements too -- P127OrderProbe (phase127) resets its debug flag
+    // unconditionally on every parse(), so only the correct order survives.
+    {
+        std::pair<P127OrderProbe, P127OrderProbe> pp{{'x'}, {'y'}};
+        Check(feq(std::format("{}", pp), "(D(x), D(y))"),
+              "phase128 (38) set_debug_format() called after parse() for tuple/pair elements too");
+    }
+
+    // (39-40) [format.tuple]/9 (P2418 applied per element, not per
+    // argument): elems is const Self& only when EVERY element is
+    // const-formattable. cxxfmt::LazyCounter's formatter (phase126) only
+    // takes LazyCounter& (a caching peek()), so a pair containing it must
+    // select the non-const overload; a fully-const-formattable pair must
+    // still select the const branch (swapping either branch is a hard
+    // compile error the moment format() or make_format_args instantiates,
+    // not a silently wrong runtime value).
+    {
+        static_assert(std::formattable<std::pair<int, cxxfmt::LazyCounter>, char>);
+        static_assert(!std::formattable<const std::pair<int, cxxfmt::LazyCounter>, char>);
+        static_assert(std::formattable<std::pair<int, int>, char>);
+        static_assert(std::formattable<const std::pair<int, int>, char>);
+
+        std::pair<int, cxxfmt::LazyCounter> lp{1, cxxfmt::LazyCounter{42}};
+        Check(feq(std::format("{}", lp), "(1, 42(t=1))"),
+              "phase128 (39) const-vs-non-const elems selection: non-const path "
+              "mutates through LazyCounter::peek()");
+
+        const std::pair<int, int> cp{5, 6};
+        Check(feq(std::format("{}", cp), "(5, 6)"),
+              "phase128 (40) an all-const-formattable pair formats via the const Self& branch");
+    }
+
+    // (41-42) set_separator()/set_brackets() are genuinely public and take
+    // effect independent of parse(): calling them BEFORE parse(), then
+    // parsing a tuple-format-spec with no tuple-type present, must leave
+    // them untouched -- /7's "if and only if required by the tuple-type, if
+    // present". This is also exactly the mechanism (34)'s std::map default
+    // formatting relies on, exercised here directly through the public API.
+    // (41) additionally covers the same empty/null-data parse-context
+    // guard as (26-28), through formatter<pair>'s own public parse(),
+    // mirroring phase127's range_formatter direct-API check.
+    {
+        std::formatter<std::pair<int, int>, char> f;
+        f.set_brackets("<", ">");
+        f.set_separator(" | ");
+        std::format_parse_context pc{std::string_view()};
+        Check(f.parse(pc) == pc.end(),
+              "phase128 (41) parse() accepts an empty parse context whose data() is "
+              "null, without touching it");
+
+        std::__format::StringSink sink;
+        std::format_context       ctx(std::__format::SinkIterator(sink), std::format_args{});
+        f.format(p2, ctx);
+        Check(feq(sink.str, "<1 | 2>"),
+              "phase128 (42) parse() with no tuple-type present leaves pre-set "
+              "brackets/separator untouched");
+    }
+
+    // (43-45) dynamic width ("{}"/"{n}" referring to another argument) --
+    // parse() resolves it the same way every other formatter here does
+    // (spec_.width_id/width_dynamic + check_dynamic_spec_integral), but
+    // nothing above ever drove that branch: every width check so far used a
+    // literal digit. Confirmed by mutation: dropping the `width_dynamic =
+    // true` assignment in that branch left every check above still
+    // passing while silently discarding the width entirely.
+    {
+        auto throwsDynWidth = [](auto &&...args) {
+            try {
+                (void)std::vformat("{0:{1}}", std::make_format_args(args...));
+            } catch (const std::format_error &) {
+                return true;
+            }
+            return false;
+        };
+        Check(feq(std::format("{0:{1}}", p2, 12), "(1, 2)      "),
+              "phase128 (43) dynamic width resolves correctly for a pair");
+        Check(throwsDynWidth(p2),
+              "phase128 (44) dynamic width: missing referenced argument throws");
+        std::string notAnInt = "nope";
+        Check(throwsDynWidth(p2, notAnInt),
+              "phase128 (45) dynamic width: non-integral referenced argument throws");
+    }
+
+    printf("[CXX] PASS phase128: [format.tuple] -- formatter<pair<T1,T2>,char> and "
+           "formatter<tuple<Ts...>,char>, the tuple-format-spec grammar (fill/align/"
+           "width/m/n, exactly one of m or n, no precision, no underlying-spec), "
+           "nested tuples/pairs, a tuple containing a range, a range of tuples/pairs "
+           "and std::map/std::set now reachable through c2 with no changes there, "
+           "pair<string,char> debug-quoting, the P2418 const-vs-non-const elems "
+           "selection, and the empty-parse-context guard shared with range_formatter\n");
+}
+
+} // namespace
+
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
 int CxxTraitsTortureCompiled();
 
@@ -27396,6 +27647,7 @@ int main()
     Phase125();
     Phase126();
     Phase127();
+    Phase128();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
