@@ -623,6 +623,20 @@ public:
         reference(Word *w, Word mask) noexcept : w_(w), mask_(mask) {}
 
     public:
+        // Names the enclosing vector<bool,Alloc> via the injected-class-
+        // name — lets <__bits/format_range>'s formatter<T,char> pattern-
+        // match this proxy type directly (see [format.range] D14).
+        //
+        // Reserved spelling ([lex.name]/3.2), exactly as libc++ does it, and
+        // NOT a plain name like `Container`: the proxy formatter's whole
+        // constraint is "T has this member alias", so any user range type
+        // that happened to carry an alias of the same name naming a
+        // vector<bool> would match BOTH that formatter and the range
+        // catch-all — an ambiguous-partial-specialization hard error. A
+        // reserved name is what makes that unreachable from a conforming
+        // program.
+        using __container = vector;
+
         reference(const reference &) = default;
         ~reference()                 = default;
         constexpr operator bool() const noexcept { return *w_ & mask_; }
