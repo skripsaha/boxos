@@ -28,6 +28,7 @@
 #include <__bits/unicode_escape>  // Utf8Decode + the escape category tables
 #include <__bits/format_escape>   // EscapeInto / EscapeChar
 #include <__bits/ranges_core>     // ranges::input_range &c., for [format.range]
+#include <__bits/version_format>  // __cpp_lib_format_ranges
 #include <charconv>
 #include <cstddef>
 #include <cstdint>
@@ -1620,5 +1621,12 @@ size_t formatted_size(format_string<Args...> fmt, Args &&...args)
 // At the bottom, not with the includes above: this file needs format_context,
 // EmitField and the string formatters' set_debug_format() already complete.
 #include <__bits/format_range>
+
+// [format.tuple] — formatter<pair<T1,T2>,char> and formatter<tuple<Ts...>,
+// char>. After format_range: this reuses its HasSetDebugFormat probe, and
+// once it is visible, format_range's own range_formatter/RangeDefaultFormatter
+// <map,R> machinery can format ranges of pairs/tuples and std::map/std::set
+// with no changes of their own.
+#include <__bits/format_tuple>
 
 #endif // BOXCXX_FORMAT

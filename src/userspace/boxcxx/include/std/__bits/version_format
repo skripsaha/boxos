@@ -1,0 +1,17 @@
+// boxcxx — <__bits/version_format>
+//
+// The __cpp_lib_* feature-test macro [version.syn] owned by <format> --
+// split out for the same [support.limits.general] per-header reason as
+// <__bits/version_any>/<__bits/version_bitset> -- see those files' comments.
+//
+// __cpp_lib_format itself (the base <format> macro) is deliberately NOT
+// defined here: backfilling feature-test macros for Ф1-Ф28 is a separate,
+// out-of-scope epic-wide item (see <version>'s own header comment).
+#ifndef BOXCXX_BITS_VERSION_FORMAT
+#define BOXCXX_BITS_VERSION_FORMAT
+
+#ifndef __cpp_lib_format_ranges
+#  define __cpp_lib_format_ranges 202207L
+#endif
+
+#endif // BOXCXX_BITS_VERSION_FORMAT
