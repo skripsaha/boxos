@@ -126,6 +126,15 @@ namespace cxxfmt {
 struct Point {
     int x, y;
 };
+// Ф30f-3 c1: P2418R2 probe type (phase126) -- peek() is non-const (a
+// caching read), so its formatter's format() below takes LazyCounter&, not
+// const&. This is what basic_format_arg::__make must select correctly via
+// ThunkArgT.
+struct LazyCounter {
+    int value;
+    int touches = 0;
+    int peek() { ++touches; return value; }
+};
 } // namespace cxxfmt
 template <> struct std::formatter<cxxfmt::Point> {
     bool verbose = false;
@@ -140,6 +149,14 @@ template <> struct std::formatter<cxxfmt::Point> {
         return verbose
                    ? std::format_to(ctx.out(), "Point(x={}, y={})", p.x, p.y)
                    : std::format_to(ctx.out(), "({},{})", p.x, p.y);
+    }
+};
+template <> struct std::formatter<cxxfmt::LazyCounter> {
+    constexpr auto parse(std::format_parse_context &pc) { return pc.begin(); }
+    void format(cxxfmt::LazyCounter &lc, std::format_context &ctx) const
+    {
+        const int v = lc.peek();
+        std::format_to(ctx.out(), "{}(t={})", v, lc.touches);
     }
 };
 
@@ -26497,6 +26514,332 @@ void Phase125()
            "null-pointer throw), and the [time.clock.*.nonmembers] inserters\n");
 }
 
+// A type with no std::formatter specialization at all -- the negative case
+// for the phase126 std::formattable check.
+struct P126Unformattable {
+    int x;
+};
+
+// Ф30f-3 c1: the escape spine -- [format.string.escaped]'s '?' presentation
+// on char and the four string types, set_debug_format(), std::formattable,
+// and the P2418 const-selection fix. Ground truth from g++-15/libstdc++ and
+// clang++-22/libc++ (both agree on every case below).
+void Phase126()
+{
+    auto feq = [](const std::string &got, const char *want) {
+        return std::string_view(got.data(), got.size()) ==
+               std::string_view(want);
+    };
+
+    // (1-7) string form: ASCII passthrough, Table 114, and the apostrophe
+    // NOT being escaped in the string form (it has no Table 114 entry).
+    {
+        Check(feq(std::format("{:?}", "abc"), "\"abc\""), "phase126 ascii passthrough");
+        Check(feq(std::format("{:?}", "\t"), "\"\\t\""), "phase126 tab");
+        Check(feq(std::format("{:?}", "\n"), "\"\\n\""), "phase126 newline");
+        Check(feq(std::format("{:?}", "\r"), "\"\\r\""), "phase126 cr");
+        Check(feq(std::format("{:?}", "\""), "\"\\\"\""), "phase126 quote-in-string");
+        Check(feq(std::format("{:?}", "\\"), "\"\\\\\""), "phase126 backslash-in-string");
+        Check(feq(std::format("{:?}", "'"), "\"'\""),
+              "phase126 apostrophe-in-string is not escaped (no Table 114 entry)");
+    }
+
+    // (8-10) char form: the 3.2/3.3 apostrophe/quote asymmetry with the
+    // string form above -- '\'' is escaped, '"' is not.
+    {
+        Check(feq(std::format("{:?}", '\''), "'\\''"), "phase126 char apostrophe is escaped");
+        Check(feq(std::format("{:?}", '"'), "'\"'"), "phase126 char quote is not escaped");
+        Check(feq(std::format("{:?}, {:?}", '\'', '"'), "'\\'', '\"'"),
+              "phase126 combined (the standard's own Example 1 s3)");
+    }
+
+    // (11-13) D8: a Grapheme_Extend character is escaped only when it
+    // follows a character that was itself escaped (or nothing at all).
+    {
+        Check(feq(std::format("{:?}", "e\xcc\x81"), "\"e\xcc\x81\""),
+              "phase126 combining mark after a raw base char is not escaped");
+        Check(feq(std::format("{:?}", "\xcc\x81"), "\"\\u{301}\""),
+              "phase126 leading combining mark is escaped (no predecessor)");
+        Check(feq(std::format("{:?}", "\t\xcc\x81"), "\"\\t\\u{301}\""),
+              "phase126 combining mark after an escaped char is escaped");
+        // ...and after an ILL-FORMED run too: the run sets prevEscaped just
+        // like a real escape does. Without this case, moving or dropping
+        // that assignment is invisible to the suite.
+        Check(feq(std::format("{:?}", "\x80\xcc\x81"), "\"\\x{80}\\u{301}\""),
+              "phase126 combining mark after an ill-formed run is escaped");
+    }
+
+    // (14-17) General_Category Separator/Other -- U+0020 space itself stays
+    // raw (excluded by 2.2.1.2), everything else in Z/C is \u{}-escaped.
+    {
+        Check(feq(std::format("{:?}", "\xc2\xa0"), "\"\\u{a0}\""), "phase126 U+00A0 nbsp (Zs)");
+        Check(feq(std::format("{:?}", "\xee\x80\x80"), "\"\\u{e000}\""),
+              "phase126 U+E000 private-use (Co)");
+        Check(feq(std::format("{:?}", "\xcd\xb8"), "\"\\u{378}\""),
+              "phase126 U+0378 unassigned (Cn)");
+        Check(feq(std::format("{:?}", "\xf4\x8f\xbf\xbf"), "\"\\u{10ffff}\""),
+              "phase126 U+10FFFF max scalar value");
+        // U+0020 is the one member of the Separator group that stays raw
+        // ([format.string.escaped]/2.2.1.2's "if C is not U+0020 space").
+        Check(feq(std::format("{:?}", "a b"), "\"a b\""),
+              "phase126 U+0020 space stays raw (the one Z-group exception)");
+    }
+
+    // (18-21) ill-formed UTF-8: one \x{} per code unit, lowercase, no
+    // padding -- Utf8Decode recovers one byte at a time, so a run of N bad
+    // bytes becomes N separate escapes, never one combined escape.
+    {
+        Check(feq(std::format("{:?}", "\xed\xa0\x80"), "\"\\x{ed}\\x{a0}\\x{80}\""),
+              "phase126 a UTF-8-encoded surrogate is 3 separate escapes, not \\x{d800}");
+        Check(feq(std::format("{:?}", "\xc0\x80"), "\"\\x{c0}\\x{80}\""),
+              "phase126 overlong NUL (C0 80) is 2 separate escapes");
+        Check(feq(std::format("{:?}", "\x80"), "\"\\x{80}\""),
+              "phase126 a lone continuation byte is escaped");
+        Check(feq(std::format("{:?}", "\xe0\xa0"), "\"\\x{e0}\\x{a0}\""),
+              "phase126 a truncated 3-byte lead is 2 separate escapes");
+        // Utf8Decode narrows the byte after the lead for four leads
+        // (Unicode Table 3-7); that narrowing is the ONLY thing keeping
+        // overlong forms and out-of-range values out of a well-formed
+        // result, so each of the four gets its own case. Overlong encodings
+        // are a classic validator-bypass class: an unguarded decoder would
+        // accept these as U+0000 / U+0000 / U+110000 instead of rejecting
+        // them. The ED (surrogate) narrowing is covered by the case above.
+        Check(feq(std::format("{:?}", "\xe0\x80\x80"), "\"\\x{e0}\\x{80}\\x{80}\""),
+              "phase126 overlong 3-byte form (E0 80 80) is rejected, not decoded as U+0000");
+        Check(feq(std::format("{:?}", "\xf0\x80\x80\x80"),
+                  "\"\\x{f0}\\x{80}\\x{80}\\x{80}\""),
+              "phase126 overlong 4-byte form (F0 80 80 80) is rejected");
+        Check(feq(std::format("{:?}", "\xf4\x90\x80\x80"),
+                  "\"\\x{f4}\\x{90}\\x{80}\\x{80}\""),
+              "phase126 past-U+10FFFF form (F4 90 80 80) is rejected");
+    }
+
+    // (22) the standard's own Example 1 s6, corrected: five code points
+    // (person-shrugging, light-skin-tone modifier, ZWJ, male-sign, VS-16),
+    // not three -- the modifier and the variation selector are both kept
+    // raw (they follow a raw base character), only the ZWJ (Cf) is escaped.
+    {
+        std::string s6("\xf0\x9f\xa4\xb7"  // U+1F937
+                       "\xf0\x9f\x8f\xbb"  // U+1F3FB
+                       "\xe2\x80\x8d"      // U+200D ZWJ
+                       "\xe2\x99\x82"      // U+2642
+                       "\xef\xb8\x8f",     // U+FE0F VS-16
+                       17);
+        Check(feq(std::format("{:?}", s6),
+                  "\"\xf0\x9f\xa4\xb7\xf0\x9f\x8f\xbb\\u{200d}\xe2\x99\x82\xef\xb8\x8f\""),
+              "phase126 emoji ZWJ sequence: only the ZWJ is escaped");
+    }
+
+    // D8's coordinator-approved divergence from both reference libraries
+    // (delta 1): boxcxx follows the normative Grapheme_Extend property,
+    // under which the five Fitzpatrick skin-tone modifiers U+1F3FB..U+1F3FF
+    // are NOT Grapheme_Extend (they have Grapheme_Base=Yes). libstdc++ and
+    // libc++ both use Grapheme_Cluster_Break=Extend instead, which folds in
+    // Emoji_Modifier, so they escape the modifier here; boxcxx keeps it raw.
+    // A tab (escaped) immediately precedes the modifier so prevEscaped is
+    // true -- this is the one case where the two properties disagree.
+    {
+        Check(feq(std::format("{:?}", "\t\xf0\x9f\x8f\xbb"), "\"\\t\xf0\x9f\x8f\xbb\""),
+              "phase126 U+1F3FB after an escape stays raw (Grapheme_Base, not Grapheme_Extend)");
+    }
+
+    // (23) width/fill/align: the quoted text is the padding target.
+    Check(feq(std::format("{:*^9?}", "ab"), "**\"ab\"***"),
+          "phase126 fill/align pads around the quoted text");
+
+    // (24-26) precision truncates the ESCAPED text in code units and can
+    // split an escape sequence -- D2, a pre-existing boxcxx scope decision.
+    {
+        Check(feq(std::format("{:.3?}", "a\tbc"), "\"a\\"),
+              "phase126 precision can split an escape sequence");
+        Check(feq(std::format("{:.1?}", "\t"), "\""), "phase126 precision 1 keeps only the quote");
+        Check(feq(std::format("{:.0?}", "abc"), ""), "phase126 precision 0 is empty");
+    }
+
+    // (27) '?' as the fill character parses unambiguously against '?' as
+    // the type character (fill/align is resolved by 2-char lookahead
+    // before any type dispatch).
+    Check(feq(std::format("{:?>10?}", "ab"), "??????\"ab\""),
+          "phase126 '?' fill char and '?' type char do not collide");
+
+    // (28-31) sign/#/0/L are illegal on a string, '?' or not.
+    Check(!P123Parses<std::string_view>("{:#?}", "ab"), "phase126 {:#?} throws for a string");
+    Check(!P123Parses<std::string_view>("{:+?}", "ab"), "phase126 {:+?} throws for a string");
+    Check(!P123Parses<std::string_view>("{:0?}", "ab"), "phase126 {:0?} throws for a string");
+    Check(!P123Parses<std::string_view>("{:L?}", "ab"), "phase126 {:L?} throws for a string");
+
+    // (32-33, delta 2) D12: the char formatter's sign/#/0 guard now covers
+    // BOTH 'c' and '?' -- [format.string.std] reserves sign/#/0 for the
+    // integer and floating-point presentation types only. This closes the
+    // pre-existing gap where {:#c} silently dropped the flags.
+    Check(!P123Parses<char>("{:#?}", 'Q'), "phase126 {:#?} throws for a char");
+    Check(!P123Parses<char>("{:+?}", 'Q'), "phase126 {:+?} throws for a char");
+    Check(!P123Parses<char>("{:0?}", 'Q'), "phase126 {:0?} throws for a char");
+    Check(!P123Parses<char>("{:.3?}", 'Q'), "phase126 precision throws for a char, '?' or not");
+    Check(!P123Parses<char>("{:#c}", 'Q'),
+          "phase126 D12: {:#c} now throws (closed the pre-existing gap)");
+    Check(!P123Parses<char>("{:+c}", 'Q'), "phase126 D12: {:+c} now throws");
+    Check(!P123Parses<char>("{:0c}", 'Q'), "phase126 D12: {:0c} now throws");
+
+    // (34) width applies to the escaped char, left-aligned by default.
+    Check(feq(std::format("{:5?}", 'Q'), "'Q'  "), "phase126 char width, left-aligned default");
+
+    // (35-37 replacement, delta 4) set_debug_format() / parse() interaction
+    // (D4), tested directly on the formatter objects since a range
+    // formatter does not exist until c2. format_context is driven by hand
+    // through the reachable internal StringSink/SinkIterator pair (the
+    // formatter's own format() computes width/precision from its spec_
+    // internally, so this exercises the real code path, not a re-
+    // implementation of it).
+    {
+        auto formatDirect = [](auto &f, auto value) {
+            std::__format::StringSink sink;
+            std::format_context ctx(std::__format::SinkIterator(sink), std::format_args{});
+            f.format(value, ctx);
+            return std::move(sink.str);
+        };
+
+        // set_debug_format() alone (no parse() call at all) escapes.
+        {
+            std::formatter<char, char> f;
+            f.set_debug_format();
+            Check(feq(formatDirect(f, 'Q'), "'Q'"),
+                  "phase126 set_debug_format() alone escapes (char)");
+        }
+        {
+            std::formatter<std::string_view, char> f;
+            f.set_debug_format();
+            Check(feq(formatDirect(f, std::string_view("a\tb")), "\"a\\tb\""),
+                  "phase126 set_debug_format() alone escapes (string_view)");
+        }
+
+        // set_debug_format() followed by an EMPTY-text parse() is a no-op
+        // on .type: ParseSpec returns immediately on empty text, so the
+        // debug marker survives. This order is genuinely unspecified and
+        // the references disagree -- boxcxx matches libc++ here, while
+        // libstdc++ resets its whole spec in parse() and so loses the
+        // marker. Nothing depends on it: [format.range.formatter] and
+        // [format.tuple] only ever parse first and set the marker after,
+        // and in THAT order all three implementations agree byte for byte.
+        // c2/c3 must keep to the parse-then-set order for that reason.
+        {
+            std::formatter<char, char> f;
+            f.set_debug_format();
+            std::format_parse_context pc("", 0);
+            f.parse(pc);
+            Check(feq(formatDirect(f, 'Q'), "'Q'"),
+                  "phase126 set_debug_format() survives an empty-text parse()");
+        }
+
+        // An explicit type character in the parsed text OVERRIDES
+        // set_debug_format(), regardless of call order -- the contract a
+        // future range formatter's explicit-nested-spec branch relies on.
+        {
+            std::formatter<char, char> f;
+            f.set_debug_format();
+            std::format_parse_context pc("c", 0);
+            f.parse(pc);
+            Check(feq(formatDirect(f, 'Q'), "Q"),
+                  "phase126 explicit 'c' in parse() overrides set_debug_format()");
+        }
+        {
+            std::formatter<std::string_view, char> f;
+            f.set_debug_format();
+            std::format_parse_context pc("s", 0);
+            f.parse(pc);
+            Check(feq(formatDirect(f, std::string_view("a\tb")), "a\tb"),
+                  "phase126 explicit 's' in parse() overrides set_debug_format() (string_view)");
+        }
+    }
+
+    // (38) P2418: a formatter whose format() takes T& (not const T&) and
+    // mutates T (a caching peek()) must still work through std::format
+    // when passed as a non-const lvalue, calling the mutating path exactly
+    // once -- basic_format_arg::__make must select TQ=T (not const T) here
+    // since FormattableWith<const T> is false for a non-const-only format().
+    {
+        cxxfmt::LazyCounter lc{42};
+        Check(feq(std::format("[{}]", lc), "[42(t=1)]"),
+              "phase126 P2418: mutating formatter selects the non-const overload");
+    }
+
+    // (39) std::formattable, adapted to boxcxx's concrete format_context
+    // (D10): true for any type with a working boxcxx formatter, false for a
+    // type with none at all -- boxcxx's own formatters are always hard-
+    // coded to format_context&, which is exactly what this concept checks.
+    {
+        Check(std::formattable<int, char>, "phase126 formattable<int,char> is true");
+        Check(std::formattable<cxxfmt::Point, char>,
+              "phase126 formattable<Point,char> is true (hard-coded-context formatter)");
+        Check(std::formattable<cxxfmt::LazyCounter, char>,
+              "phase126 formattable<LazyCounter,char> is true (non-const format())");
+        Check(!std::formattable<P126Unformattable, char>,
+              "phase126 formattable<Unformattable,char> is false (no formatter at all)");
+        // The other half of P2418: a const argument whose formatter's
+        // format() only takes a non-const reference must be REJECTED, not
+        // const_cast into a mutation. That case is now a static_assert in
+        // basic_format_arg::__make, so it cannot be exercised at runtime --
+        // this is the same predicate the assert fires on.
+        Check(!std::formattable<const cxxfmt::LazyCounter, char>,
+              "phase126 P2418: formattable<const T,char> is false for a non-const format()");
+    }
+
+    // (40-46) [format.string.std]/6-8 reserve sign, '#' and '0' for the
+    // arithmetic presentation types. The char formatter's default
+    // presentation IS 'c', so the bare spellings must throw exactly like
+    // the explicit-'c' ones do -- and an explicitly written '-' counts as a
+    // sign even though it selects the same behaviour as writing nothing.
+    {
+        Check(!P123Parses<char>("{:#}", 'Q'), "phase126 {:#} throws for a char (default type is c)");
+        Check(!P123Parses<char>("{:+}", 'Q'), "phase126 {:+} throws for a char");
+        Check(!P123Parses<char>("{: }", 'Q'), "phase126 {: } throws for a char");
+        Check(!P123Parses<char>("{:0}", 'Q'), "phase126 {:0} throws for a char");
+        Check(!P123Parses<char>("{:-}", 'Q'), "phase126 explicit '-' throws for a char");
+        Check(!P123Parses<char>("{:-c}", 'Q'), "phase126 {:-c} throws");
+        Check(!P123Parses<char>("{:-?}", 'Q'), "phase126 {:-?} throws");
+    }
+
+    // (47-50) the same sign rule on the string formatters, where the
+    // grammar has no sign position at all, and on the pointer formatter,
+    // which has neither a sign nor an L position.
+    {
+        Check(!P123Parses<std::string_view>("{:-}", "ab"), "phase126 explicit '-' throws for a string");
+        Check(!P123Parses<std::string_view>("{:-s}", "ab"), "phase126 {:-s} throws for a string");
+        Check(!P123Parses<std::string_view>("{:-?}", "ab"), "phase126 {:-?} throws for a string");
+        Check(!P123Parses<const void *>("{:L}", nullptr),
+              "phase126 {:L} throws for a pointer (no L position in its grammar)");
+    }
+
+    // (51-53) [format.formatter.spec]/2.2's charT[N] specialization. The
+    // engine never routes an array through it (arrays decay to const char*
+    // first), so it is exercised directly; std::formattable<char[N],char>
+    // being true is what c2's range formatters will rely on.
+    {
+        Check(std::formattable<char[4], char>, "phase126 formattable<char[4],char> is true");
+        std::formatter<char[4], char> f;
+        std::__format::StringSink     sink;
+        std::format_context ctx(std::__format::SinkIterator(sink), std::format_args{});
+        const char          lit[4] = {'a', 'b', 'c', '\0'};
+        f.format(lit, ctx);
+        Check(feq(std::move(sink.str), "abc"),
+              "phase126 formatter<char[N]> stops at the first NUL (a literal formats as itself)");
+
+        std::__format::StringSink sink2;
+        std::format_context ctx2(std::__format::SinkIterator(sink2), std::format_args{});
+        const char          raw[3] = {'x', 'y', 'z'};  // no terminator at all
+        std::formatter<char[3], char> f2;
+        f2.format(raw, ctx2);
+        Check(feq(std::move(sink2.str), "xyz"),
+              "phase126 formatter<char[N]> falls back to the whole array when there is no NUL");
+    }
+
+    printf("[CXX] PASS phase126: the escape spine -- [format.string.escaped] '?' on char "
+           "and the four string types (Table 114, category/grapheme-extend rules, "
+           "ill-formed UTF-8 recovery, the emoji ZWJ example corrected, width/fill/align/"
+           "precision), set_debug_format() + parse() override semantics, std::formattable, "
+           "and the P2418 const-selection fix\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -26644,6 +26987,7 @@ int main()
     Phase123();
     Phase124();
     Phase125();
+    Phase126();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
