@@ -171,11 +171,56 @@ join_with_view(R &&, range_value_t<range_reference_t<R>>)
 
 // ── join_with_view::Iterator ([range.join.with.iterator]) ──────────────
 
+namespace __views_detail {
+
+// [range.join.with.iterator]'s iterator_category, present only when the join
+// is multi-pass on both levels and the outer reference is a glvalue.
+template <bool Present, typename Base, typename InnerBase, typename PatternBase>
+struct JoinWithCategory {};
+
+template <typename Base, typename InnerBase, typename PatternBase>
+struct JoinWithCategory<true, Base, InnerBase, PatternBase> {
+private:
+    using OuterCat = typename iterator_traits<iterator_t<Base>>::iterator_category;
+    using InnerCat =
+        typename iterator_traits<iterator_t<InnerBase>>::iterator_category;
+    using PatternCat =
+        typename iterator_traits<iterator_t<PatternBase>>::iterator_category;
+
+public:
+    using iterator_category = conditional_t<
+        !is_reference_v<
+            common_reference_t<iter_reference_t<iterator_t<InnerBase>>,
+                               iter_reference_t<iterator_t<PatternBase>>>>,
+        input_iterator_tag,
+        conditional_t<
+            derived_from<OuterCat, bidirectional_iterator_tag> &&
+                derived_from<InnerCat, bidirectional_iterator_tag> &&
+                derived_from<PatternCat, bidirectional_iterator_tag> &&
+                common_range<InnerBase> && common_range<PatternBase>,
+            bidirectional_iterator_tag,
+            conditional_t<derived_from<OuterCat, forward_iterator_tag> &&
+                              derived_from<InnerCat, forward_iterator_tag> &&
+                              derived_from<PatternCat, forward_iterator_tag>,
+                          forward_iterator_tag, input_iterator_tag>>>;
+};
+
+} // namespace __views_detail
+
 template <input_range V, forward_range Pattern>
     requires view<V> && input_range<range_reference_t<V>> && view<Pattern> &&
              __views_detail::Concatable<range_reference_t<V>, Pattern>
 template <bool Const>
-struct join_with_view<V, Pattern>::Iterator {
+struct join_with_view<V, Pattern>::Iterator
+    : __views_detail::JoinWithCategory<
+          is_reference_v<
+              range_reference_t<__views_detail::MaybeConst<Const, V>>> &&
+              forward_range<__views_detail::MaybeConst<Const, V>> &&
+              forward_range<
+                  range_reference_t<__views_detail::MaybeConst<Const, V>>>,
+          __views_detail::MaybeConst<Const, V>,
+          range_reference_t<__views_detail::MaybeConst<Const, V>>,
+          __views_detail::MaybeConst<Const, Pattern>> {
     using Parent      = __views_detail::MaybeConst<Const, join_with_view>;
     using Base        = __views_detail::MaybeConst<Const, V>;
     using InnerBase   = range_reference_t<Base>;
@@ -190,30 +235,15 @@ struct join_with_view<V, Pattern>::Iterator {
     [[no_unique_address]] __views_detail::PresentIf<forward_range<Base>, OuterIter> __outerIt;
     variant<PatternIter, InnerIter> __innerIt;
 
-    using OuterCat   = typename iterator_traits<OuterIter>::iterator_category;
-    using InnerCat   = typename iterator_traits<InnerIter>::iterator_category;
-    using PatternCat = typename iterator_traits<PatternIter>::iterator_category;
-
     using iterator_concept = conditional_t<
         RefIsGlvalue && bidirectional_range<Base> && __views_detail::BidirectionalCommon<InnerBase> &&
             __views_detail::BidirectionalCommon<PatternBase>,
         bidirectional_iterator_tag,
         conditional_t<RefIsGlvalue && forward_range<Base> && forward_range<InnerBase>,
                       forward_iterator_tag, input_iterator_tag>>;
-    using iterator_category = conditional_t<
-        !(RefIsGlvalue && forward_range<Base> && forward_range<InnerBase>), input_iterator_tag,
-        conditional_t<
-            !is_reference_v<common_reference_t<iter_reference_t<InnerIter>, iter_reference_t<PatternIter>>>,
-            input_iterator_tag,
-            conditional_t<derived_from<OuterCat, bidirectional_iterator_tag> &&
-                              derived_from<InnerCat, bidirectional_iterator_tag> &&
-                              derived_from<PatternCat, bidirectional_iterator_tag> &&
-                              common_range<InnerBase> && common_range<PatternBase>,
-                          bidirectional_iterator_tag,
-                          conditional_t<derived_from<OuterCat, forward_iterator_tag> &&
-                                            derived_from<InnerCat, forward_iterator_tag> &&
-                                            derived_from<PatternCat, forward_iterator_tag>,
-                                        forward_iterator_tag, input_iterator_tag>>>>;
+    // iterator_category comes from the JoinWithCategory base — present only
+    // when ref-is-glvalue holds and both Base and range_reference_t<Base>
+    // model forward_range ([range.join.with.iterator]).
     using value_type = common_type_t<iter_value_t<InnerIter>, iter_value_t<PatternIter>>;
     using difference_type = common_type_t<iter_difference_t<OuterIter>, iter_difference_t<InnerIter>,
                                           iter_difference_t<PatternIter>>;

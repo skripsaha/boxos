@@ -832,17 +832,16 @@ public:
 template <input_range V, typename Pred>
     requires view<V> && is_object_v<Pred> &&
              predicate<Pred &, range_reference_t<V>>
-struct filter_view<V, Pred>::Iterator {
-    using __BaseCat = typename iterator_traits<iterator_t<V>>::iterator_category;
+struct filter_view<V, Pred>::Iterator
+    : __views_detail::MaybeCategory<V, bidirectional_iterator_tag,
+                                    bidirectional_iterator_tag,
+                                    forward_iterator_tag> {
     using iterator_concept =
         conditional_t<bidirectional_range<V>, bidirectional_iterator_tag,
                       conditional_t<forward_range<V>, forward_iterator_tag,
                                     input_iterator_tag>>;
-    using iterator_category = conditional_t<
-        derived_from<__BaseCat, bidirectional_iterator_tag>,
-        bidirectional_iterator_tag,
-        conditional_t<derived_from<__BaseCat, forward_iterator_tag>,
-                      forward_iterator_tag, input_iterator_tag>>;
+    // iterator_category comes from the MaybeCategory base — present only if
+    // V is a forward_range ([range.filter.iterator]).
     using value_type      = range_value_t<V>;
     using difference_type = range_difference_t<V>;
     using pointer         = void;
@@ -1001,8 +1000,10 @@ template <input_range V, typename F>
                  typename remove_cvref_t<invoke_result_t<F &,
                                                          range_reference_t<V>>>;
              }
-struct transform_view<V, F>::Iterator {
-    using __BaseCat = typename iterator_traits<iterator_t<V>>::iterator_category;
+struct transform_view<V, F>::Iterator
+    : __views_detail::MaybeCategory<
+          V, contiguous_iterator_tag, random_access_iterator_tag, void,
+          !is_lvalue_reference_v<invoke_result_t<F &, range_reference_t<V>>>> {
     using iterator_concept =
         conditional_t<random_access_range<V>, random_access_iterator_tag,
                       conditional_t<bidirectional_range<V>,
@@ -1015,11 +1016,8 @@ struct transform_view<V, F>::Iterator {
     using difference_type = range_difference_t<V>;
     using reference       = invoke_result_t<F &, range_reference_t<V>>;
     using pointer         = void;
-    using iterator_category = conditional_t<
-        is_lvalue_reference_v<reference>,
-        conditional_t<derived_from<__BaseCat, random_access_iterator_tag>,
-                      random_access_iterator_tag, __BaseCat>,
-        input_iterator_tag>;
+    // iterator_category comes from the MaybeCategory base — present only if
+    // V is a forward_range ([range.transform.iterator]).
 
     transform_view *__parent = nullptr;
     iterator_t<V> __cur      = iterator_t<V>();

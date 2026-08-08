@@ -273,6 +273,51 @@ struct out_value_result {
     }
 };
 
+namespace __views_detail {
+
+// [range.transform.iterator], [range.filter.iterator], [range.stride.iterator],
+// [range.elements.iterator] all declare iterator_category "present only if
+// Base models forward_range". Since [iterator.traits]/3.4 that is not a
+// formality: a single-pass C++20 iterator may have NO iterator_traits
+// members at all, so a non-forward base has no legacy category to inherit
+// and merely NAMING it is a hard error. Deriving from this supplies the
+// member exactly when the base earns it, and never forms the base's
+// category otherwise.
+//
+// The clauses are ladders, and Test is NOT the same tag as Result: given the
+// base category C,
+//   * if C derives from Test    -> Result
+//   * else if C derives from Mid -> Mid          (omit Mid with void)
+//   * else                       -> C itself
+// [range.filter.iterator] genuinely needs the middle rung: a user tag derived
+// from forward_iterator_tag but not bidirectional_iterator_tag must come out
+// as forward_iterator_tag, not as the user tag. [range.transform.iterator]
+// needs Test != Result: it tests derived_from<C, contiguous_iterator_tag> and
+// yields random_access_iterator_tag, which differs from "test random access"
+// exactly for a user tag derived from random_access_iterator_tag.
+// ForceInput drops the whole thing to input for an adaptor that hands back a
+// prvalue, which cannot satisfy a LegacyForwardIterator's stable-reference
+// requirement.
+template <typename Base, typename Test, typename Result, typename Mid = void,
+          bool ForceInput = false, bool Present = forward_range<Base>>
+struct MaybeCategory {};
+
+template <typename Base, typename Test, typename Result, typename Mid,
+          bool ForceInput>
+struct MaybeCategory<Base, Test, Result, Mid, ForceInput, true> {
+private:
+    using BaseCat = typename iterator_traits<iterator_t<Base>>::iterator_category;
+
+public:
+    using iterator_category = conditional_t<
+        ForceInput, input_iterator_tag,
+        conditional_t<derived_from<BaseCat, Test>, Result,
+                      conditional_t<!is_void_v<Mid> && derived_from<BaseCat, Mid>,
+                                    Mid, BaseCat>>>;
+};
+
+} // namespace __views_detail
+
 } // namespace ranges
 
 // [container.intro.reqmts] p2 — container-compatible-range.

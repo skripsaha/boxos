@@ -192,10 +192,45 @@ explicit join_view(R &&) -> join_view<views::all_t<R>>;
 
 // ── join_view::Iterator ([range.join.iterator]) ────────────────────────
 
+namespace __views_detail {
+
+// [range.join.iterator]'s iterator_category, present only when the join is
+// multi-pass on BOTH levels and the outer reference is a glvalue.
+template <bool Present, typename Base, typename InnerBase>
+struct JoinCategory {};
+
+template <typename Base, typename InnerBase>
+struct JoinCategory<true, Base, InnerBase> {
+private:
+    using OuterCat = typename iterator_traits<iterator_t<Base>>::iterator_category;
+    using InnerCat =
+        typename iterator_traits<iterator_t<InnerBase>>::iterator_category;
+
+public:
+    using iterator_category = conditional_t<
+        derived_from<OuterCat, bidirectional_iterator_tag> &&
+            derived_from<InnerCat, bidirectional_iterator_tag> &&
+            common_range<InnerBase>,
+        bidirectional_iterator_tag,
+        conditional_t<derived_from<OuterCat, forward_iterator_tag> &&
+                          derived_from<InnerCat, forward_iterator_tag>,
+                      forward_iterator_tag, input_iterator_tag>>;
+};
+
+} // namespace __views_detail
+
 template <input_range V>
     requires view<V> && input_range<range_reference_t<V>>
 template <bool Const>
-struct join_view<V>::Iterator {
+struct join_view<V>::Iterator
+    : __views_detail::JoinCategory<
+          is_reference_v<
+              range_reference_t<__views_detail::MaybeConst<Const, V>>> &&
+              forward_range<__views_detail::MaybeConst<Const, V>> &&
+              forward_range<
+                  range_reference_t<__views_detail::MaybeConst<Const, V>>>,
+          __views_detail::MaybeConst<Const, V>,
+          range_reference_t<__views_detail::MaybeConst<Const, V>>> {
     using Parent    = __views_detail::MaybeConst<Const, join_view>;
     using Base      = __views_detail::MaybeConst<Const, V>;
     using InnerBase = range_reference_t<Base>;
@@ -208,24 +243,19 @@ struct join_view<V>::Iterator {
     [[no_unique_address]] __views_detail::PresentIf<forward_range<Base>, OuterIter> __outer;
     optional<InnerIter> __inner;
 
-    using OuterCat = typename iterator_traits<OuterIter>::iterator_category;
-    using InnerCat = typename iterator_traits<InnerIter>::iterator_category;
-
     using iterator_concept = conditional_t<
         RefIsGlvalue && bidirectional_range<Base> && bidirectional_range<InnerBase> &&
             common_range<InnerBase>,
         bidirectional_iterator_tag,
         conditional_t<RefIsGlvalue && forward_range<Base> && forward_range<InnerBase>,
                       forward_iterator_tag, input_iterator_tag>>;
-    using iterator_category = conditional_t<
-        !(RefIsGlvalue && forward_range<Base> && forward_range<InnerBase>), input_iterator_tag,
-        conditional_t<derived_from<OuterCat, bidirectional_iterator_tag> &&
-                          derived_from<InnerCat, bidirectional_iterator_tag> &&
-                          common_range<InnerBase>,
-                      bidirectional_iterator_tag,
-                      conditional_t<derived_from<OuterCat, forward_iterator_tag> &&
-                                        derived_from<InnerCat, forward_iterator_tag>,
-                                    forward_iterator_tag, input_iterator_tag>>>;
+    // iterator_category comes from the JoinCategory base — [range.join.
+    // iterator] defines it IF AND ONLY IF ref-is-glvalue holds and both Base
+    // and range_reference_t<Base> model forward_range. Declaring it
+    // unconditionally with an input_iterator_tag fallback is not merely a
+    // presence deviation: it completes the five-member set, so
+    // [iterator.traits]/3.1 fires and hands out a full iterator_traits where
+    // both references correctly hand out the empty /3.4 one.
     using value_type      = range_value_t<InnerBase>;
     using difference_type = common_type_t<range_difference_t<Base>, range_difference_t<InnerBase>>;
     using pointer         = void;

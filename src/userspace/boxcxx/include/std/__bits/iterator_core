@@ -6,6 +6,11 @@
 #ifndef BOXCXX_BITS_ITERATOR_CORE
 #define BOXCXX_BITS_ITERATOR_CORE
 
+// <concepts> is a genuine leaf here: it includes only <type_traits>,
+// <compare> and <utility>, all three of which this file already includes.
+// [iterator.traits]/3's synthesis is defined in terms of the exposition-only
+// cpp17-* concepts, so the concept layer has to be available this low.
+#include <concepts>
 #include <cstddef>
 #include <compare>
 #include <type_traits>
@@ -22,24 +27,306 @@ struct bidirectional_iterator_tag : forward_iterator_tag {};
 struct random_access_iterator_tag : bidirectional_iterator_tag {};
 struct contiguous_iterator_tag : random_access_iterator_tag {};
 
-// ── iterator_traits ─────────────────────────────────────────────────────
+// ── incrementable_traits ([incrementable.traits]) ───────────────────────
+// Lives here, below iterator_traits' own layer in <__bits/iterator_concepts>,
+// because [iterator.traits]/3.2's synthesis needs it: a Cpp17InputIterator
+// with no difference_type member of its own still has to be given one.
+// Supplies difference_type for weakly_incrementable when the type is not a
+// full iterator carrying iterator_traits — most importantly bare integral
+// values, so iota_view<int> can satisfy weakly_incrementable<int> (whose
+// difference type is otherwise ill-formed). Shape mirrors the standard's
+// constrained partial specializations; `<const I>` is preferred over the
+// constrained `<T>` forms by partial-ordering, so a cv-qualified type
+// resolves once.
+template <typename>
+struct incrementable_traits {};
+
+template <typename T>
+    requires is_object_v<T>
+struct incrementable_traits<T *> {
+    using difference_type = ptrdiff_t;
+};
+
+template <typename I>
+struct incrementable_traits<const I> : incrementable_traits<I> {};
+
+template <typename T>
+    requires requires { typename T::difference_type; }
+struct incrementable_traits<T> {
+    using difference_type = typename T::difference_type;
+};
+
+template <typename T>
+    requires(!requires { typename T::difference_type; }) &&
+            requires(const T &a, const T &b) {
+                { a - b } -> integral;
+            }
+struct incrementable_traits<T> {
+    using difference_type =
+        make_signed_t<decltype(declval<T>() - declval<T>())>;
+};
+
+// ── indirectly_readable_traits ([readable.traits]) ──────────────────────
+// The value-type half of the pair, and the one [iterator.traits]/3.2 and
+// iter_value_t both route through. CondValueType is the standard's
+// exposition-only filter: only an OBJECT type yields a value_type, so a
+// member `value_type = void` (an output iterator) contributes nothing
+// rather than a nonsense void value type.
 
 namespace __iter_impl {
 
-template <typename It, typename = void>
-struct TraitsImpl {};
+template <typename>
+struct CondValueType {};
+template <typename T>
+    requires is_object_v<T>
+struct CondValueType<T> {
+    using value_type = remove_cv_t<T>;
+};
+
+template <typename T>
+concept HasMemberValueType = requires { typename T::value_type; };
+template <typename T>
+concept HasMemberElementType = requires { typename T::element_type; };
+
+} // namespace __iter_impl
+
+template <typename>
+struct indirectly_readable_traits {};
+
+template <typename T>
+struct indirectly_readable_traits<T *> : __iter_impl::CondValueType<T> {};
+
+template <typename I>
+    requires is_array_v<I>
+struct indirectly_readable_traits<I> {
+    using value_type = remove_cv_t<remove_extent_t<I>>;
+};
+
+template <typename I>
+struct indirectly_readable_traits<const I> : indirectly_readable_traits<I> {};
+
+template <__iter_impl::HasMemberValueType T>
+struct indirectly_readable_traits<T>
+    : __iter_impl::CondValueType<typename T::value_type> {};
+
+template <__iter_impl::HasMemberElementType T>
+struct indirectly_readable_traits<T>
+    : __iter_impl::CondValueType<typename T::element_type> {};
+
+// Both "has value_type AND element_type" specializations are mandatory: the
+// disagreeing case must resolve to EMPTY, and it can only do so if a
+// specialization more constrained than each single-member form exists to
+// break what would otherwise be an ambiguity between them. The second one
+// then wins whenever the two members agree modulo cv.
+template <__iter_impl::HasMemberValueType T>
+    requires __iter_impl::HasMemberElementType<T>
+struct indirectly_readable_traits<T> {};
+
+template <__iter_impl::HasMemberValueType T>
+    requires __iter_impl::HasMemberElementType<T> &&
+             same_as<remove_cv_t<typename T::element_type>,
+                     remove_cv_t<typename T::value_type>>
+struct indirectly_readable_traits<T>
+    : __iter_impl::CondValueType<typename T::value_type> {};
+
+// ── the cpp17-* iterator concepts ([iterator.traits]/2) ─────────────────
+// Exposition-only in the standard, spelled verbatim here — the two
+// common_reference_t clauses included, which boxcxx's own common_reference
+// is fully able to express. They classify a legacy iterator that carries no
+// iterator_category of its own, and they are the ONLY reason this file needs
+// <concepts>. The reference type is spelled decltype(*declval<I &>())
+// directly rather than through iter_reference_t, which stays one layer up in
+// <__bits/iterator_concepts> and is not worth pulling down.
+
+namespace __iter_impl {
+
+template <typename T>
+concept CanReference = requires { typename type_identity_t<T &>; };
+
+// [iterator.synopsis]'s exposition-only dereferenceable. Lives here beside
+// CanReference (and not in <iterator>, where it used to) because
+// counted_iterator's const operator* is constrained on it.
+template <typename T>
+concept Dereferenceable = requires(T &t) {
+    { *t } -> CanReference;
+};
+
+template <typename I>
+concept Cpp17Iterator = requires(I i) {
+    { *i } -> CanReference;
+    { ++i } -> same_as<I &>;
+    { *i++ } -> CanReference;
+} && copyable<I>;
+
+template <typename I>
+concept Cpp17InputIterator =
+    Cpp17Iterator<I> && equality_comparable<I> && requires(I i) {
+        typename incrementable_traits<I>::difference_type;
+        typename indirectly_readable_traits<I>::value_type;
+        typename common_reference_t<
+            decltype(*declval<I &>()) &&,
+            typename indirectly_readable_traits<I>::value_type &>;
+        typename common_reference_t<
+            decltype(*i++) &&,
+            typename indirectly_readable_traits<I>::value_type &>;
+        requires signed_integral<
+            typename incrementable_traits<I>::difference_type>;
+    };
+
+template <typename I>
+concept Cpp17ForwardIterator =
+    Cpp17InputIterator<I> && constructible_from<I> &&
+    is_reference_v<decltype(*declval<I &>())> &&
+    same_as<remove_cvref_t<decltype(*declval<I &>())>,
+            typename indirectly_readable_traits<I>::value_type> &&
+    requires(I i) {
+        { i++ } -> convertible_to<const I &>;
+        { *i++ } -> same_as<decltype(*declval<I &>())>;
+    };
+
+template <typename I>
+concept Cpp17BidirectionalIterator = Cpp17ForwardIterator<I> && requires(I i) {
+    { --i } -> same_as<I &>;
+    { i-- } -> convertible_to<const I &>;
+    { *i-- } -> same_as<decltype(*declval<I &>())>;
+};
+
+template <typename I>
+concept Cpp17RandomAccessIterator =
+    Cpp17BidirectionalIterator<I> && totally_ordered<I> &&
+    requires(I i, typename incrementable_traits<I>::difference_type n) {
+        { i += n } -> same_as<I &>;
+        { i -= n } -> same_as<I &>;
+        { i + n } -> same_as<I>;
+        { n + i } -> same_as<I>;
+        { i - n } -> same_as<I>;
+        { i - i } -> same_as<decltype(n)>;
+        { i[n] } -> convertible_to<decltype(*declval<I &>())>;
+    };
+
+} // namespace __iter_impl
+
+// ── iterator_traits ([iterator.traits]/3) ───────────────────────────────
+// Four cases, in the standard's own order. They are written as four
+// MUTUALLY EXCLUSIVE constrained partial specializations, and the exclusion
+// is load-bearing rather than stylistic: HasAllFour does not subsume
+// Cpp17InputIterator, so a type satisfying both (every ordinary container
+// iterator does) would make two specializations equally good matches and
+// turn iterator_traits into a hard ambiguity error. Each `!` guard below is
+// what keeps exactly one case live.
+//
+// Writing the guards as a conjunction of separate constraints — not one
+// parenthesised expression — is also deliberate: constraint conjunction
+// short-circuits, so Cpp17InputIterator<It> is never even checked for a type
+// that already has all four members.
+
+namespace __iter_impl {
 
 template <typename It>
-struct TraitsImpl<It, void_t<typename It::iterator_category,
-                             typename It::value_type,
-                             typename It::difference_type,
-                             typename It::pointer,
-                             typename It::reference>> {
+concept HasAllFour = requires {
+    typename It::iterator_category;
+    typename It::value_type;
+    typename It::difference_type;
+    typename It::reference;
+};
+
+// /3.1 — pointer is the one optional member; absent means void.
+template <typename It>
+constexpr auto MemberPointerOrVoid()
+{
+    if constexpr (requires { typename It::pointer; })
+        return type_identity<typename It::pointer>{};
+    else
+        return type_identity<void>{};
+}
+
+// /3.2.1 — member pointer, else what operator-> returns, else void.
+template <typename It>
+constexpr auto SynthPointer()
+{
+    if constexpr (requires { typename It::pointer; })
+        return type_identity<typename It::pointer>{};
+    else if constexpr (requires(It &i) { i.operator->(); })
+        return type_identity<decltype(declval<It &>().operator->())>{};
+    else
+        return type_identity<void>{};
+}
+
+// /3.2.2 — member reference, else the type *i actually yields.
+template <typename It>
+constexpr auto SynthReference()
+{
+    if constexpr (requires { typename It::reference; })
+        return type_identity<typename It::reference>{};
+    else
+        return type_identity<decltype(*declval<It &>())>{};
+}
+
+// /3.2.3 — member category, else the strongest cpp17-* rung it reaches.
+template <typename It>
+constexpr auto SynthCategory()
+{
+    if constexpr (requires { typename It::iterator_category; })
+        return type_identity<typename It::iterator_category>{};
+    else if constexpr (Cpp17RandomAccessIterator<It>)
+        return type_identity<random_access_iterator_tag>{};
+    else if constexpr (Cpp17BidirectionalIterator<It>)
+        return type_identity<bidirectional_iterator_tag>{};
+    else if constexpr (Cpp17ForwardIterator<It>)
+        return type_identity<forward_iterator_tag>{};
+    else
+        return type_identity<input_iterator_tag>{};
+}
+
+// /3.3 — an output-only iterator keeps difference_type only if one exists.
+template <typename It>
+constexpr auto OutputDifference()
+{
+    if constexpr (requires {
+                      typename incrementable_traits<It>::difference_type;
+                  })
+        return type_identity<typename incrementable_traits<It>::difference_type>{};
+    else
+        return type_identity<void>{};
+}
+
+// /3.4 — no members at all. Load-bearing, not a fallback of last resort: a
+// C++20-only iterator (one whose post-increment returns void, say) is a
+// perfectly good input_iterator and must still have an EMPTY iterator_traits.
+template <typename It>
+struct TraitsImpl {};
+
+// /3.1
+template <typename It>
+    requires HasAllFour<It>
+struct TraitsImpl<It> {
     using iterator_category = typename It::iterator_category;
     using value_type        = typename It::value_type;
     using difference_type   = typename It::difference_type;
-    using pointer           = typename It::pointer;
+    using pointer           = typename decltype(MemberPointerOrVoid<It>())::type;
     using reference         = typename It::reference;
+};
+
+// /3.2
+template <typename It>
+    requires(!HasAllFour<It>) && Cpp17InputIterator<It>
+struct TraitsImpl<It> {
+    using iterator_category = typename decltype(SynthCategory<It>())::type;
+    using value_type = typename indirectly_readable_traits<It>::value_type;
+    using difference_type = typename incrementable_traits<It>::difference_type;
+    using pointer         = typename decltype(SynthPointer<It>())::type;
+    using reference       = typename decltype(SynthReference<It>())::type;
+};
+
+// /3.3
+template <typename It>
+    requires(!HasAllFour<It>) && (!Cpp17InputIterator<It>) && Cpp17Iterator<It>
+struct TraitsImpl<It> {
+    using iterator_category = output_iterator_tag;
+    using value_type        = void;
+    using difference_type   = typename decltype(OutputDifference<It>())::type;
+    using pointer           = void;
+    using reference         = void;
 };
 
 } // namespace __iter_impl
