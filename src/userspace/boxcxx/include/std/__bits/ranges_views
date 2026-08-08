@@ -153,17 +153,26 @@ public:
         return !ranges::empty(__derived());
     }
 
+    // [view.interface.members] constrains data() on contiguous_iterator<
+    // iterator_t<D>>, NOT on contiguous_range<D>: contiguous_range is itself
+    // defined through ranges::data, which considers this very member, so a
+    // contiguous_range constraint here is self-referential and the compiler
+    // rejects it outright ("atomic constraint depends on itself") rather than
+    // treating the member as absent. The return is to_address(begin), also as
+    // specified -- data() yields a POINTER; returning the iterator would make
+    // ranges::data's own same_as<add_pointer_t<range_reference_t<R>>> check
+    // fail for every view whose contiguous iterator is a class type.
     template <typename DD = D>
     constexpr auto data()
-        requires contiguous_range<DD>
+        requires contiguous_iterator<iterator_t<DD>>
     {
-        return ranges::begin(__derived());
+        return to_address(ranges::begin(__derived()));
     }
     template <typename DD = D>
     constexpr auto data() const
-        requires contiguous_range<const DD>
+        requires range<const DD> && contiguous_iterator<iterator_t<const DD>>
     {
-        return ranges::begin(__derived());
+        return to_address(ranges::begin(__derived()));
     }
 
     template <typename DD = D>

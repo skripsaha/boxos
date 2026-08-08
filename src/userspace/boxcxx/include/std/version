@@ -81,8 +81,10 @@
 // ── Deliberately NOT defined ────────────────────────────────────────────
 //
 // Each line names a C++23 feature-test macro whose feature boxcxx does not
-// implement completely, with the exact reason. This list is the backlog:
-// when the reason is fixed, the macro moves into the owning header's leaf.
+// implement completely — for nine of them, does not implement at all,
+// because the owning header does not exist — with the exact reason. This
+// list is the backlog: when the reason is fixed, the macro moves into the
+// owning header's leaf.
 //
 // algorithm_iterator_requirements
 //     P2408R5 is a pure requirements relaxation spanning every algorithm
@@ -101,13 +103,31 @@
 //                          overloads.
 // atomic_float             no volatile overloads of the floating-point
 //                          fetch_add/fetch_sub/operator+=/operator-=.
-// atomic_ref               the primary template has no difference_type, no
-//                          compound-assignment operators, and there is no
-//                          atomic_ref(T&) deduction guide.
-// atomic_shared_ptr        atomic<shared_ptr<T>>/atomic<weak_ptr<T>> have
-//                          no wait(), no single-memory_order compare_
-//                          exchange, and the free shared_ptr atomic
-//                          functions are absent.
+// atomic_ref               boxcxx writes atomic_ref as one template with
+//                          requires-gated integral/floating extras plus a
+//                          T* partial specialization. The T* one is
+//                          complete; the unified primary has no
+//                          difference_type (so atomic_ref<int>::
+//                          difference_type and the floating-point one are
+//                          ill-formed, though atomic_ref<int*>::
+//                          difference_type works) and none of the compound-
+//                          assignment operators +=, -=, &=, |=, ^= (again
+//                          present only on T*). fetch_add/fetch_sub and
+//                          ++/-- ARE there for the integral case.
+// atomic_shared_ptr        atomic<shared_ptr<T>> is the complete half: it
+//                          has wait(), notify_one() and notify_all().
+//                          atomic<weak_ptr<T>> has the two notify_*, but no
+//                          wait() at all. The single-memory_order compare_
+//                          exchange_weak/strong are unusable on both, for
+//                          opposite reasons: shared_ptr declares them
+//                          alongside the two-order forms whose second order
+//                          is defaulted, so every three-argument call is
+//                          ambiguous and ill-formed; weak_ptr never declares
+//                          them, so the same call silently lands on the
+//                          two-order overload instead. The free shared_ptr
+//                          atomic functions (atomic_load, atomic_store,
+//                          atomic_exchange, atomic_compare_exchange_*, and
+//                          their _explicit forms) are absent entirely.
 // atomic_wait              atomic_flag_wait_explicit is absent entirely,
 //                          and the atomic_flag wait/notify free functions
 //                          lack their volatile overloads.
@@ -130,6 +150,12 @@
 //                          common_reference_with rather than the
 //                          comparison-common-type-with relaxation, so
 //                          move-only comparands are rejected.
+// constexpr_bitset         every bit operation IS constexpr, but the
+//                          basic_string-taking constructor bitset(str, pos,
+//                          n, zero, one) and both to_string() forms are not
+//                          usable in constant evaluation -- same root cause
+//                          as constexpr_string below (they touch
+//                          basic_string, which is not constexpr).
 // constexpr_cmath          fabs/ceil/floor/trunc/round/fmod/... are not
 //                          constexpr.
 // constexpr_memory         P2273's constexpr unique_ptr is nearly there —
@@ -140,8 +166,15 @@
 // constexpr_string         basic_string is not constexpr at all (it needs
 //                          the compiler-blessed constexpr allocator path).
 // constexpr_vector         vector is not constexpr at all, same reason.
-// erase_if                 present for all twelve containers but absent
-//                          for basic_string.
+// erase_if                 present for all twelve containers, and
+//                          std::erase(basic_string&, const U&) is present
+//                          too; the single missing overload is
+//                          std::erase_if(basic_string&, Pred).
+// execution                no <execution> header.
+// filesystem               no <filesystem> header.
+// flat_map                 no <flat_map> header — being built in the next
+//                          commit of this phase.
+// flat_set                 no <flat_set> header — same, next commit.
 // format                   <format> is char-only: no wchar_t, no
 //                          wformat_context, no wformat/wformat_to.
 // formatters               formatter<thread::id, wchar_t> is absent, and
@@ -167,6 +200,7 @@
 // map_try_emplace          map::try_emplace and map::insert_or_assign each
 //                          have 2 of their 4 overloads; both const_iterator
 //                          hint forms are absent.
+// mdspan                   no <mdspan> header.
 // modules                  no `import std;` — boxcxx ships headers only.
 // nonmember_container_access
 //                          size/ssize/empty/data cover containers and
@@ -178,6 +212,37 @@
 //                          exist for the terminal, but every <ostream>
 //                          overload of them is absent — and <ostream> is a
 //                          co-owner of this macro.
+// ranges                   the widest macro in [version.syn] — it stands for
+//                          the whole of [ranges] plus [specialized.
+//                          algorithms] — and 23 of the entities it promises
+//                          are absent: views::take_while/take_while_view;
+//                          views::drop_while/drop_while_view;
+//                          views::istream/basic_istream_view/istream_view;
+//                          seven of the thirteen [range.access] names
+//                          (cbegin, cend, rbegin, rend, crbegin, crend,
+//                          cdata — only begin/end/size/empty/data exist as
+//                          CPOs, plus ssize as a plain function template);
+//                          range_rvalue_reference_t;
+//                          range_common_reference_t; subrange's two range
+//                          deduction guides subrange(R&&) and
+//                          subrange(R&&, n); ranges::is_permutation; and the
+//                          entire ranges:: specialized-memory family —
+//                          uninitialized_default_construct,
+//                          uninitialized_value_construct,
+//                          uninitialized_copy, uninitialized_move,
+//                          uninitialized_fill, each with its _n form, plus
+//                          destroy, destroy_n, destroy_at and construct_at
+//                          (14 names; the std:: forms of all of them do
+//                          exist in <memory>).
+// ranges_as_const          P2278R4's own headline entities are the two that
+//                          are missing: ranges::cbegin and ranges::cend do
+//                          not exist, and neither do view_interface::cbegin
+//                          / view_interface::cend. Everything else the paper
+//                          adds IS complete and exercised —
+//                          basic_const_iterator, make_const_iterator (and
+//                          make_const_sentinel), views::as_const,
+//                          const_iterator_t, const_sentinel_t — so this is
+//                          four names away from claimable.
 // result_of_sfinae         std::result_of does not exist (removed in
 //                          C++20); the macro names exactly that template.
 // robust_nonmodifying_seq_ops
@@ -202,15 +267,35 @@
 //                          explicit(extent != dynamic_extent) and take
 //                          pointers rather than an iterator/sentinel pair;
 //                          and the range deduction guide is absent.
+// spanstream               no <spanstream> header.
+// stacktrace               no <stacktrace> header.
 // start_lifetime_as        start_lifetime_as / start_lifetime_as_array
 //                          absent.
+// stdatomic_h              no <stdatomic.h> header.
 // string_resize_and_overwrite
 //                          basic_string::resize_and_overwrite absent.
 // string_view              basic_string_view has no crbegin/crend.
-// three_way_comparison     the whole [cmp] surface is present, but
-//                          compare_three_way_result's primary template is
-//                          declared without the `class U = T` default, so
-//                          the one-argument class form is ill-formed.
+// syncbuf                  no <syncbuf> header.
+// three_way_comparison     two separate gaps. (1) In <compare> itself the
+//                          CLASS compare_three_way_result<int> is ill-formed
+//                          — the primary template is declared without the
+//                          `class U = T` default — while the ALIAS
+//                          compare_three_way_result_t<int> works, because
+//                          the alias carries the default itself. (2) The
+//                          bigger one, and the reason (1) alone is not the
+//                          blocker: this macro's 201907L value is P1614R2,
+//                          which is the library-wide operator<=>, and the
+//                          four ordered associative containers — map,
+//                          multimap, set, multiset — have no operator<=> at
+//                          all. Every other <=> P1614R2 asks for is here
+//                          (string, string_view, vector, array, deque, list,
+//                          forward_list, queue, stack, pair, tuple,
+//                          optional, variant, the smart pointers, chrono,
+//                          error_code, thread::id) as is the rest of [cmp]:
+//                          the three ordering types, is_eq/is_lt/...,
+//                          common_comparison_category, three_way_comparable
+//                          (_with), compare_three_way, strong/weak/partial_
+//                          order and the three _fallback forms.
 // transformation_trait_aliases
 //                          the C++14 alias set is missing aligned_storage_t
 //                          and aligned_union_t (deprecated in C++23, but
@@ -219,11 +304,13 @@
 //                          operator functors are present, but P0074R0's
 //                          owner_less<void> — the paper that defines the
 //                          201510L value — has no is_transparent typedef.
-// tuple_like               no public std::tuple_like concept (only a
-//                          private elements_view implementation trait); the
-//                          broader pair/tuple "tuple-like" converting
-//                          ctor/assignment machinery this macro implies is
-//                          out of scope (tuple itself doesn't have it).
+// tuple_like               P2165R4's tuple-like is EXPOSITION-ONLY in C++23,
+//                          so there is no std::tuple_like to be missing —
+//                          the reason is entirely the converting machinery
+//                          the concept exists to constrain: tuple<int,int>
+//                          t(array<int,2>{}) does not compile, and neither
+//                          does the pair form. Assignment and comparison
+//                          from a tuple-like are missing with them.
 // unordered_map_try_emplace
 //                          unordered_map::try_emplace has 2 of 4 overloads
 //                          and insert_or_assign only 1 of 4.

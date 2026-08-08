@@ -120,6 +120,18 @@
 #ifndef __cpp_lib_unreachable
 #  error "__cpp_lib_unreachable is not visible from <utility> alone"
 #endif
+// Two macros <utility> CO-owns. Both are checked here, at <utility>'s
+// position, because <utility> is the first of their owning headers this
+// block reaches -- so a pass here is a real one-header result, not a
+// leftover from an earlier include. Ф31a-5 found neither reached <utility>
+// at all (they were defined only in the <algorithm> and <ranges> leaves),
+// which is a [support.limits.general] violation for a macro that IS claimed.
+#ifndef __cpp_lib_constexpr_algorithms
+#  error "__cpp_lib_constexpr_algorithms is not visible from <utility> alone"
+#endif
+#ifndef __cpp_lib_ranges_zip
+#  error "__cpp_lib_ranges_zip is not visible from <utility> alone"
+#endif
 #include <bit>
 #ifndef __cpp_lib_bit_cast
 #  error "__cpp_lib_bit_cast is not visible from <bit> alone"
@@ -17550,8 +17562,11 @@ void Phase100()
     // A future accidental removal of any of these #defines breaks the build
     // right here (undeclared identifier) instead of silently reverting to
     // "feature unadvertised" -- that is the whole point of pinning them.
+    // __cpp_lib_ranges and __cpp_lib_ranges_as_const used to be pinned here.
+    // Ф31a-5 dropped both -- 23 entities of the first and four of the second
+    // are absent, so the macros were overclaims. Their absence guards live in
+    // phase131 with the rest of the omission set.
     {
-        static_assert(__cpp_lib_ranges >= 202302L, "phase100 __cpp_lib_ranges pin");
         static_assert(__cpp_lib_ranges_to_container >= 202202L,
                       "phase100 __cpp_lib_ranges_to_container pin");
         static_assert(__cpp_lib_ranges_zip >= 202110L, "phase100 __cpp_lib_ranges_zip pin");
@@ -17567,10 +17582,6 @@ void Phase100()
         static_assert(__cpp_lib_ranges_enumerate >= 202302L,
                       "phase100 __cpp_lib_ranges_enumerate pin");
         static_assert(__cpp_lib_ranges_repeat >= 202207L, "phase100 __cpp_lib_ranges_repeat pin");
-        // Was 202311L (C++26 P2836R1). Ф31a-3 found boxcxx has no
-        // basic_const_iterator operator CI() conversion, so that value
-        // overstated the feature; 202207L is the C++23 value it really has.
-        static_assert(__cpp_lib_ranges_as_const == 202207L, "phase100 __cpp_lib_ranges_as_const pin");
         static_assert(__cpp_lib_ranges_as_rvalue >= 202207L,
                       "phase100 __cpp_lib_ranges_as_rvalue pin");
         static_assert(__cpp_lib_ranges_fold >= 202207L, "phase100 __cpp_lib_ranges_fold pin");
@@ -29021,6 +29032,45 @@ struct P131Shared : std::enable_shared_from_this<P131Shared> {
 enum P131Unscoped : int { P131UnscopedValue = 3 };
 enum class P131Scoped : int { Value = 4 };
 
+// [view.interface] data(). Both of these used to be a HARD error, not a
+// missing member: view_interface constrained data() on contiguous_range<D>,
+// and contiguous_range is itself defined through ranges::data, which
+// considers the very member being constrained -- "atomic constraint depends
+// on itself". P131PtrView is the minimal reproducer (raw-pointer iterator);
+// P131ConstView additionally proves the return really is to_address(begin)
+// and not the iterator, because basic_const_iterator<int*> is a CLASS-type
+// contiguous iterator, so returning it would not be a pointer at all and
+// ranges::data's own same_as<add_pointer_t<...>> check would reject it.
+inline int P131ViewStorage[4] = {11, 22, 33, 44};
+
+struct P131PtrView : std::ranges::view_interface<P131PtrView> {
+    int *begin() const { return P131ViewStorage; }
+    int *end() const { return P131ViewStorage + 4; }
+};
+
+struct P131ConstView : std::ranges::view_interface<P131ConstView> {
+    std::basic_const_iterator<int *> begin() const
+    {
+        return std::basic_const_iterator<int *>(P131ViewStorage);
+    }
+    std::basic_const_iterator<int *> end() const
+    {
+        return std::basic_const_iterator<int *>(P131ViewStorage + 4);
+    }
+};
+
+// P2321R2's const-qualified swap is present exactly when every element is
+// swappable THROUGH const -- true for references, false for values.
+template <class T>
+concept P131ConstSwappable = requires(const T &a, const T &b) { a.swap(b); };
+template <class T>
+concept P131FreeConstSwappable = requires(const T &a, const T &b) { swap(a, b); };
+template <class... T>
+concept P131HasCommonType = requires { typename std::common_type<T...>::type; };
+template <class... T>
+concept P131HasCommonRef = requires { typename std::common_reference<T...>::type; };
+struct P131NoCommon {};
+
 constexpr int P131AllocRoundTrip()
 {
     std::allocator<int> a;
@@ -29242,6 +29292,9 @@ void Phase131()
 #ifdef __cpp_lib_concepts
 #  error "phase131: __cpp_lib_concepts must stay undefined"
 #endif
+#ifdef __cpp_lib_constexpr_bitset
+#  error "phase131: __cpp_lib_constexpr_bitset must stay undefined"
+#endif
 #ifdef __cpp_lib_constexpr_cmath
 #  error "phase131: __cpp_lib_constexpr_cmath must stay undefined"
 #endif
@@ -29256,6 +29309,21 @@ void Phase131()
 #endif
 #ifdef __cpp_lib_erase_if
 #  error "phase131: __cpp_lib_erase_if must stay undefined"
+#endif
+    // The nine below name a header boxcxx does not ship at all, so the macro
+    // could only ever appear by accident -- these guards are what turns
+    // "we never wrote it" into "we checked".
+#ifdef __cpp_lib_execution
+#  error "phase131: __cpp_lib_execution must stay undefined"
+#endif
+#ifdef __cpp_lib_filesystem
+#  error "phase131: __cpp_lib_filesystem must stay undefined"
+#endif
+#ifdef __cpp_lib_flat_map
+#  error "phase131: __cpp_lib_flat_map must stay undefined"
+#endif
+#ifdef __cpp_lib_flat_set
+#  error "phase131: __cpp_lib_flat_set must stay undefined"
 #endif
 #ifdef __cpp_lib_format
 #  error "phase131: __cpp_lib_format must stay undefined"
@@ -29284,6 +29352,9 @@ void Phase131()
 #ifdef __cpp_lib_map_try_emplace
 #  error "phase131: __cpp_lib_map_try_emplace must stay undefined"
 #endif
+#ifdef __cpp_lib_mdspan
+#  error "phase131: __cpp_lib_mdspan must stay undefined"
+#endif
 #ifdef __cpp_lib_modules
 #  error "phase131: __cpp_lib_modules must stay undefined"
 #endif
@@ -29295,6 +29366,19 @@ void Phase131()
 #endif
 #ifdef __cpp_lib_print
 #  error "phase131: __cpp_lib_print must stay undefined"
+#endif
+    // Ф31a-5 dropped these two: __cpp_lib_ranges is short 23 entities
+    // (take_while, drop_while, istream_view, seven [range.access] CPOs,
+    // range_rvalue_reference_t, range_common_reference_t, subrange's two
+    // range deduction guides, ranges::is_permutation and the whole 14-name
+    // ranges:: specialized-memory family) and __cpp_lib_ranges_as_const is
+    // short P2278R4's own headline four (ranges::cbegin/cend and
+    // view_interface::cbegin/cend). <version> carries the enumeration.
+#ifdef __cpp_lib_ranges
+#  error "phase131: __cpp_lib_ranges must stay undefined"
+#endif
+#ifdef __cpp_lib_ranges_as_const
+#  error "phase131: __cpp_lib_ranges_as_const must stay undefined"
 #endif
 #ifdef __cpp_lib_result_of_sfinae
 #  error "phase131: __cpp_lib_result_of_sfinae must stay undefined"
@@ -29317,14 +29401,26 @@ void Phase131()
 #ifdef __cpp_lib_span
 #  error "phase131: __cpp_lib_span must stay undefined"
 #endif
+#ifdef __cpp_lib_spanstream
+#  error "phase131: __cpp_lib_spanstream must stay undefined"
+#endif
+#ifdef __cpp_lib_stacktrace
+#  error "phase131: __cpp_lib_stacktrace must stay undefined"
+#endif
 #ifdef __cpp_lib_start_lifetime_as
 #  error "phase131: __cpp_lib_start_lifetime_as must stay undefined"
+#endif
+#ifdef __cpp_lib_stdatomic_h
+#  error "phase131: __cpp_lib_stdatomic_h must stay undefined"
 #endif
 #ifdef __cpp_lib_string_resize_and_overwrite
 #  error "phase131: __cpp_lib_string_resize_and_overwrite must stay undefined"
 #endif
 #ifdef __cpp_lib_string_view
 #  error "phase131: __cpp_lib_string_view must stay undefined"
+#endif
+#ifdef __cpp_lib_syncbuf
+#  error "phase131: __cpp_lib_syncbuf must stay undefined"
 #endif
 #ifdef __cpp_lib_three_way_comparison
 #  error "phase131: __cpp_lib_three_way_comparison must stay undefined"
@@ -29713,17 +29809,181 @@ void Phase131()
               "phase131 (48) jthread destructor requests stop and joins");
     }
 
-    printf("[CXX] PASS phase131: [version.syn] backfill for phases 1-28 -- 89 feature-test macros "
-           "newly defined across 23 new __bits/version_* leaves plus three existing ones "
-           "(40 -> 129), every value pinned == its N4950 C++23 value rather than a reference "
-           "library's DR-applied C++26 one, all 91 pins re-checked, 33 owning headers "
-           "interrogated for macro visibility BEFORE <version> is ever included (91 "
-           "assertions), 47 absence guards for the features that are only partial "
-           "(format's char-only scope, chrono without tzdb, non-constexpr vector/string, "
-           "span's and string_view's missing crbegin, print without its <ostream> overloads, "
-           "P2404 concepts, mismatch without its four-iterator forms), __cpp_lib_ranges_as_const "
-           "corrected from P2836's 202311L down to C++23's 202207L, and 47 runtime + 144 "
-           "compile-time exercises so no macro is an unbacked claim\n");
+    // ── (P) Ф31a-5: the three overclaims that were FIXED rather than dropped ──
+    // Each of these was a macro whose feature was incomplete. Dropping the
+    // macro is the cheap answer; completing the feature is the right one, so
+    // the value pin below is backed by a use of the entity that was missing.
+
+    // (P1) [view.interface] data(). The constraint was contiguous_range<D>,
+    // which routes back through ranges::data into this very member -- a
+    // self-referential constraint the compiler rejects outright, so data()
+    // was not "absent", it was a hard error at every call site. It is now
+    // contiguous_iterator<iterator_t<D>>, and the return is to_address(begin)
+    // as [view.interface.members] specifies.
+    {
+        static_assert(ranges::contiguous_range<P131PtrView>,
+                      "phase131 view_interface data() makes the view contiguous");
+        static_assert(is_same_v<decltype(declval<P131PtrView &>().data()), int *>,
+                      "phase131 data() yields a pointer, not the iterator");
+        static_assert(is_same_v<decltype(declval<const P131PtrView &>().data()), int *>,
+                      "phase131 const data() too");
+        // The class-type-iterator case is the one that also pins to_address:
+        // basic_const_iterator<int*> is contiguous but is NOT a pointer, so a
+        // data() that returned the iterator could not compile this.
+        static_assert(ranges::contiguous_range<P131ConstView>,
+                      "phase131 class-type contiguous iterator is still a contiguous_range");
+        static_assert(is_same_v<decltype(declval<P131ConstView &>().data()), const int *>,
+                      "phase131 data() unwraps a class-type contiguous iterator");
+
+        P131PtrView   pv;
+        P131ConstView cv;
+        Check(pv.data() == P131ViewStorage && *pv.data() == 11 && pv.data()[3] == 44,
+              "phase131 (49) view_interface::data() on a raw-pointer view");
+        Check(ranges::data(pv) == pv.data() && ranges::size(pv) == 4,
+              "phase131 (50) ranges::data agrees with the member it used to deadlock on");
+        Check(cv.data() == P131ViewStorage && cv.data()[2] == 33,
+              "phase131 (51) view_interface::data() unwraps basic_const_iterator via to_address");
+        // The rest of [view.interface] must not have moved.
+        Check(!pv.empty() && bool(pv) && pv.front() == 11 && pv.back() == 44 && pv[1] == 22,
+              "phase131 (52) view_interface empty/bool/front/back/operator[] still hold");
+    }
+
+    // (P2) __cpp_lib_ranges_zip -- P2321R2's "also in <tuple>, <utility>"
+    // half. The <ranges> half shipped in Ф29d; the pair/tuple half was
+    // missing its const-qualified swaps and BOTH the basic_common_reference
+    // and common_type specializations (without which a proxy pair/tuple of
+    // references and its value counterpart have no meeting type at all).
+    {
+        static_assert(__cpp_lib_ranges_zip == 202110L, "phase131 ranges_zip");
+
+        // XREF(const pair<int,int>&) is `const X&`, XREF(pair<int&,int&>) is
+        // `X`, so the elements meet at common_reference_t<const int&, int&>.
+        static_assert(is_same_v<common_reference_t<const pair<int, int> &, pair<int &, int &>>,
+                                pair<const int &, const int &>>,
+                      "phase131 basic_common_reference<pair, pair>");
+        static_assert(is_same_v<common_reference_t<const tuple<int> &, tuple<int &>>,
+                                tuple<const int &>>,
+                      "phase131 basic_common_reference<tuple, tuple>");
+        static_assert(is_same_v<common_type_t<pair<int, long>, pair<long, int>>,
+                                pair<long, long>>,
+                      "phase131 common_type<pair, pair>");
+        static_assert(is_same_v<common_type_t<tuple<int, long>, tuple<long, int>>,
+                                tuple<long, long>>,
+                      "phase131 common_type<tuple, tuple>");
+        // Both specializations are requires-guarded, so a mismatched arity or
+        // an element pair with no common type must yield NO member `type`
+        // rather than a hard error.
+        static_assert(!P131HasCommonType<tuple<int>, tuple<int, int>>,
+                      "phase131 common_type<tuple,tuple> arity mismatch is SFINAE-friendly");
+        static_assert(!P131HasCommonType<tuple<int>, tuple<P131NoCommon>>,
+                      "phase131 common_type<tuple,tuple> no-common-element is SFINAE-friendly");
+        static_assert(!P131HasCommonType<pair<int, int>, pair<P131NoCommon, P131NoCommon>>,
+                      "phase131 common_type<pair,pair> no-common-element is SFINAE-friendly");
+        static_assert(!P131HasCommonRef<tuple<int &> &, tuple<int, int> &>,
+                      "phase131 basic_common_reference<tuple,tuple> arity mismatch");
+
+        // const-qualified swap: present for reference elements, absent for
+        // value elements -- that asymmetry IS the feature.
+        static_assert(P131ConstSwappable<pair<int &, int &>> &&
+                          !P131ConstSwappable<pair<int, int>>,
+                      "phase131 pair::swap(const pair&) const");
+        static_assert(P131ConstSwappable<tuple<int &, long &>> &&
+                          !P131ConstSwappable<tuple<int, long>> &&
+                          P131ConstSwappable<tuple<>>,
+                      "phase131 tuple::swap(const tuple&) const");
+        static_assert(P131FreeConstSwappable<pair<int &, int &>> &&
+                          !P131FreeConstSwappable<pair<int, int>>,
+                      "phase131 free swap(const pair&, const pair&)");
+        static_assert(P131FreeConstSwappable<tuple<int &>> &&
+                          !P131FreeConstSwappable<tuple<int>>,
+                      "phase131 free swap(const tuple&, const tuple&)");
+        static_assert(is_swappable_v<pair<int, int>> && is_swappable_v<tuple<int, long>>,
+                      "phase131 the non-const swaps did not regress");
+
+        int                          pa = 1, pb = 2, pc = 3, pd = 4;
+        const pair<int &, int &>     cp1(pa, pb), cp2(pc, pd);
+        cp1.swap(cp2);
+        Check(pa == 3 && pb == 4 && pc == 1 && pd == 2,
+              "phase131 (53) pair::swap(const pair&) const swaps through the references");
+        swap(cp1, cp2);
+        Check(pa == 1 && pb == 2 && pc == 3 && pd == 4,
+              "phase131 (54) free swap(const pair&, const pair&) round-trips it");
+
+        int                          ta = 5, tb = 6, tc = 7, td = 8;
+        const tuple<int &, int &>    ct1(ta, tb), ct2(tc, td);
+        ct1.swap(ct2);
+        Check(ta == 7 && tb == 8 && tc == 5 && td == 6,
+              "phase131 (55) tuple::swap(const tuple&) const swaps through the references");
+        swap(ct1, ct2);
+        Check(ta == 5 && tb == 6 && tc == 7 && td == 8,
+              "phase131 (56) free swap(const tuple&, const tuple&) round-trips it");
+
+        // The payoff: views::zip yields a proxy pair, and the whole point of
+        // the four specializations is that sorting it writes back.
+        vector<int>  zk{3, 1, 2};
+        vector<char> zv{'c', 'a', 'b'};
+        ranges::sort(views::zip(zk, zv),
+                     [](const auto &x, const auto &y) { return get<0>(x) < get<0>(y); });
+        Check(zk[0] == 1 && zk[2] == 3 && zv[0] == 'a' && zv[2] == 'c',
+              "phase131 (57) ranges::sort over views::zip writes back through the proxy");
+    }
+
+    // (P3) __cpp_lib_memory_resource -- both pool resources were missing
+    // options(). [mem.res.pool.mem] lets the returned struct differ from the
+    // constructor argument in exactly two ways, and this engine takes both:
+    // a zero max_blocks_per_chunk becomes a default (and a huge one is
+    // clamped), and largest_required_pool_block is capped at the size-class
+    // table's top, above which every block goes to upstream.
+    {
+        static_assert(__cpp_lib_memory_resource == 201603L, "phase131 memory_resource");
+        static_assert(is_same_v<decltype(declval<const pmr::unsynchronized_pool_resource &>()
+                                             .options()),
+                                pmr::pool_options>,
+                      "phase131 unsynchronized_pool_resource::options() is const -> pool_options");
+        static_assert(is_same_v<decltype(declval<const pmr::synchronized_pool_resource &>()
+                                             .options()),
+                                pmr::pool_options>,
+                      "phase131 synchronized_pool_resource::options() is const -> pool_options");
+
+        pmr::unsynchronized_pool_resource dflt;
+        pmr::unsynchronized_pool_resource small({4, 128}, pmr::new_delete_resource());
+        pmr::synchronized_pool_resource   huge({100000, 1u << 20}, pmr::new_delete_resource());
+        pmr::pool_options od = dflt.options(), os = small.options(), oh = huge.options();
+        Check(od.max_blocks_per_chunk == 32 && od.largest_required_pool_block == 2048,
+              "phase131 (58) options(): a zero request reports the implementation default");
+        Check(os.max_blocks_per_chunk == 4 && os.largest_required_pool_block == 2048,
+              "phase131 (59) options(): an honoured request is reported back verbatim");
+        Check(oh.max_blocks_per_chunk == 4096 && oh.largest_required_pool_block == 2048,
+              "phase131 (60) options(): an over-large request reports the clamp, not the ask");
+        // The reported numbers must describe the resource that actually runs.
+        pmr::polymorphic_allocator<int> pa(&small);
+        int                            *cell = pa.allocate(4);
+        cell[3]                              = 9;
+        Check(cell[3] == 9 && pa.resource() == &small,
+              "phase131 (61) the pool the options describe still allocates");
+        pa.deallocate(cell, 4);
+        small.release();
+        huge.release();
+    }
+
+    printf("[CXX] PASS phase131: [version.syn] backfill for phases 1-28 plus the Ф31a-5 overclaim "
+           "sweep -- 126 macros defined, every value pinned == its N4950 C++23 value rather than "
+           "a reference library's DR-applied C++26 one, owning headers interrogated for macro "
+           "visibility BEFORE <version> is ever included, and 59 absence guards. Six macros were "
+           "found to overstate: three DROPPED into the omission list -- __cpp_lib_ranges (short 23 "
+           "entities: take_while, drop_while, istream_view, seven [range.access] CPOs, "
+           "range_rvalue_reference_t, range_common_reference_t, subrange's two range deduction "
+           "guides, ranges::is_permutation and the 14-name ranges:: specialized-memory family), "
+           "__cpp_lib_ranges_as_const (short P2278R4's own headline four) and "
+           "__cpp_lib_constexpr_bitset (the string ctor and both to_string forms are not constant "
+           "expressions) -- and three MADE TRUE: view_interface::data(), whose contiguous_range "
+           "constraint was self-referential and hard-errored at every call site, now constrained "
+           "on contiguous_iterator and returning to_address(begin); P2321R2's <tuple>/<utility> "
+           "half completed with both const-qualified swaps, both free const swaps and all four "
+           "basic_common_reference/common_type specializations; and options() on both pool "
+           "resources. Two pre-existing per-header visibility holes closed with it -- "
+           "__cpp_lib_constexpr_algorithms and __cpp_lib_ranges_zip never reached <utility>, "
+           "which co-owns both -- so no macro here is an unbacked claim\n");
 }
 
 void Phase132()

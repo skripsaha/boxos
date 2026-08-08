@@ -397,6 +397,16 @@ public:
     }
     memory_resource *upstream() const { return upstream_; }
 
+    // [mem.res.pool.mem] options(): the EFFECTIVE options, not the ones the
+    // caller passed. The standard allows exactly these two differences and
+    // this engine takes both: a zero max_blocks_per_chunk became the default
+    // 32 (and anything over 4096 was clamped) in the constructor, and
+    // largest_required_pool_block is not a request the engine can honour at
+    // all -- its size-class table tops out at MaxPoolBlock(), and every
+    // larger block goes straight to upstream. Reporting the caller's raw
+    // numbers back would describe pooling behaviour that does not happen.
+    pool_options Options() const { return {blocks_per_, MaxPoolBlock()}; }
+
     void *Allocate(size_t bytes, size_t align)
     {
         size_t need = bytes < align ? align : bytes;
@@ -494,6 +504,7 @@ public:
 
     void             release() { eng_.Release(); }
     memory_resource *upstream_resource() const { return eng_.upstream(); }
+    pool_options     options() const { return eng_.Options(); }
 
 protected:
     void *do_allocate(size_t bytes, size_t align) override
@@ -557,6 +568,7 @@ public:
         eng_.Release();
     }
     memory_resource *upstream_resource() const { return eng_.upstream(); }
+    pool_options     options() const { return eng_.Options(); }
 
 protected:
     void *do_allocate(size_t bytes, size_t align) override
