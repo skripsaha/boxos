@@ -462,24 +462,24 @@ template <input_range V, forward_range Pattern>
              indirectly_comparable<iterator_t<V>, iterator_t<Pattern>, ranges::equal_to> &&
              (forward_range<V> || __views_detail::TinyRange<Pattern>)
 template <bool Const>
-struct lazy_split_view<V, Pattern>::InnerIterator {
+struct lazy_split_view<V, Pattern>::InnerIterator
+    : __views_detail::MaybeCategory<__views_detail::MaybeConst<Const, V>,
+                                    forward_iterator_tag,
+                                    forward_iterator_tag> {
     using Base = __views_detail::MaybeConst<Const, V>;
 
     OuterIterator<Const> __i          = OuterIterator<Const>();
     bool                  __incremented = false;
 
     using iterator_concept  = typename OuterIterator<Const>::iterator_concept;
-    // Always declared (boxcxx rule); collapses to input_iterator_tag when
-    // !forward_range<Base>. In boxcxx specifically, forward_range<Base> being
-    // true already implies iterator_category(Base) >= forward_iterator_tag
-    // (boxcxx's forward_range is itself iterator_category-gated), so the
-    // "pass through unchanged" arm below is only ever reached already equal
-    // to forward_iterator_tag. Kept as the full formula for clause fidelity.
-    using iterator_category = conditional_t<
-        !forward_range<Base>, input_iterator_tag,
-        conditional_t<derived_from<typename iterator_traits<iterator_t<Base>>::iterator_category,
-                                    forward_iterator_tag>,
-                      forward_iterator_tag, typename iterator_traits<iterator_t<Base>>::iterator_category>>;
+    // iterator_category comes from the MaybeCategory base — present only if
+    // Base models forward_range ([range.lazy.split.inner]). The old comment
+    // here claimed forward_range<Base> was "itself iterator_category-gated"
+    // and the member therefore always well-formed; it is not — forward_range
+    // keys on ITER_CONCEPT, whose /1.3 rung hands random_access_iterator_tag
+    // to a class with empty traits. Independently, conditional_t formed both
+    // arms, so the !forward_range<Base> condition never guarded the third
+    // argument at all.
     using value_type        = range_value_t<Base>;
     using difference_type   = range_difference_t<Base>;
     using pointer           = void;

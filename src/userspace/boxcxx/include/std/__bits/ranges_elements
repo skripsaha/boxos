@@ -46,6 +46,14 @@ template <typename T, size_t N>
 concept ReturnableElement =
     is_reference_v<T> || move_constructible<tuple_element_t<N, remove_cvref_t<T>>>;
 
+// The elements_view iterator hands back an lvalue only when the base yields
+// a real reference AND get<N> on it yields one too; otherwise GetElement
+// materializes a prvalue, which cannot satisfy a LegacyForwardIterator's
+// stable-reference requirement and caps the legacy category at input.
+template <typename T, size_t N>
+concept LvalueElement =
+    is_reference_v<T> && is_lvalue_reference_v<decltype(get<N>(declval<T>()))>;
+
 // range-with-movable-references ([range.enumerate.view]) — the exact gate
 // enumerate_view (and its const-iteration members) require of the base.
 template <typename R>
@@ -65,7 +73,12 @@ class elements_view : public view_interface<elements_view<V, N>> {
     V __base = V();
 
     template <bool Const>
-    struct Iterator {
+    struct Iterator
+        : __views_detail::MaybeCategory<
+              __views_detail::MaybeConst<Const, V>, random_access_iterator_tag,
+              random_access_iterator_tag, void,
+              !__views_detail::LvalueElement<
+                  range_reference_t<__views_detail::MaybeConst<Const, V>>, N>> {
         using Base = __views_detail::MaybeConst<Const, V>;
 
         static constexpr decltype(auto) GetElement(const iterator_t<Base> &cur)
@@ -77,8 +90,6 @@ class elements_view : public view_interface<elements_view<V, N>> {
                     get<N>(*cur));
         }
 
-        using __BaseCat = typename iterator_traits<iterator_t<Base>>::iterator_category;
-
         using iterator_concept =
             conditional_t<random_access_range<Base>, random_access_iterator_tag,
                           conditional_t<bidirectional_range<Base>, bidirectional_iterator_tag,
@@ -88,13 +99,9 @@ class elements_view : public view_interface<elements_view<V, N>> {
         using difference_type = range_difference_t<Base>;
         using reference        = decltype(GetElement(declval<const iterator_t<Base> &>()));
         using pointer           = void;
-        // Never claims better than input: GetElement can hand back a materialized
-        // prvalue (the ReturnableElement move-constructible branch), which cannot
-        // satisfy a LegacyForwardIterator's stable-reference requirement.
-        using iterator_category = conditional_t<
-            !is_lvalue_reference_v<reference>, input_iterator_tag,
-            conditional_t<derived_from<__BaseCat, random_access_iterator_tag>,
-                          random_access_iterator_tag, __BaseCat>>;
+        // iterator_category comes from the MaybeCategory base — present only
+        // if Base is a forward_range ([range.elements.iterator]), and never
+        // better than input when GetElement materializes a prvalue.
 
         iterator_t<Base> __cur = iterator_t<Base>();
 

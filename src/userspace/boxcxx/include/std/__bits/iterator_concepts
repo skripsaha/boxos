@@ -1,5 +1,5 @@
 // boxcxx — <__bits/iterator_concepts>
-// The C++20 iterator concept layer: incrementable_traits, iter_difference_t/
+// The C++20 iterator concept layer: iter_difference_t/
 // iter_value_t/iter_reference_t, the ranges::iter_move CPO,
 // iter_rvalue_reference_t, and weakly_incrementable through
 // contiguous_iterator. Split out of <iterator> (Ф29f-3a) so
@@ -42,80 +42,43 @@
 
 namespace std {
 
-// ── incrementable_traits ([incrementable.traits]) ───────────────────────
-// Supplies difference_type for weakly_incrementable when the type is not a
-// full iterator carrying iterator_traits — most importantly bare integral
-// values, so iota_view<int> can satisfy weakly_incrementable<int> (whose
-// difference type is otherwise ill-formed under the iterator_traits-only
-// resolution below). Shape mirrors the standard's constrained partial
-// specializations; `<const I>` is preferred over the constrained `<T>`
-// forms by partial-ordering, so a cv-qualified type resolves once.
-template <typename>
-struct incrementable_traits {};
-
-template <typename T>
-    requires is_object_v<T>
-struct incrementable_traits<T *> {
-    using difference_type = ptrdiff_t;
-};
-
-template <typename I>
-struct incrementable_traits<const I> : incrementable_traits<I> {};
-
-template <typename T>
-    requires requires { typename T::difference_type; }
-struct incrementable_traits<T> {
-    using difference_type = typename T::difference_type;
-};
-
-template <typename T>
-    requires(!requires { typename T::difference_type; }) &&
-            requires(const T &a, const T &b) {
-                { a - b } -> integral;
-            }
-struct incrementable_traits<T> {
-    using difference_type =
-        make_signed_t<decltype(declval<T>() - declval<T>())>;
-};
+// incrementable_traits and indirectly_readable_traits both live in
+// <__bits/iterator_core> — [iterator.traits]/3.2's synthesis needs them one
+// layer below this file. iter_value_t / iter_difference_t just below are
+// their consumers.
 
 // ── associated types ([iterator.assoc.types]) ───────────────────────────
 
 namespace __iter_impl {
 
+// [readable.traits]/2 and [incrementable.traits]/2 both dispatch on whether
+// iterator_traits<RI> is the specialization generated from the PRIMARY
+// template — the standard writes this as ITER_TRAITS(I). The primary is the
+// only form that derives from TraitsImpl, so the base-class relation answers
+// the question outright: no extra member, and no cooperation required from a
+// user's own iterator_traits specialization.
 template <typename I>
-concept HasTraitsDifference =
-    requires { typename iterator_traits<I>::difference_type; };
-template <typename I>
-concept HasTraitsValue = requires { typename iterator_traits<I>::value_type; };
-template <typename I>
-concept HasIncrementableDiff =
-    requires { typename incrementable_traits<remove_cvref_t<I>>::difference_type; };
-
-// iter_difference_t resolution ([iterator.traits]): a genuine iterator
-// carries iterator_traits::difference_type (pointer spec, or a type whose
-// five member typedefs synthesised the traits) — use it verbatim, keeping
-// every existing result unchanged. Only when that is absent (a bare
-// incrementable such as int) do we consult incrementable_traits.
-template <typename I>
-auto DiffTypeOf()
-{
-    if constexpr (HasTraitsDifference<I>)
-        return type_identity<typename iterator_traits<I>::difference_type>{};
-    else
-        return type_identity<
-            typename incrementable_traits<remove_cvref_t<I>>::difference_type>{};
-}
+concept IsPrimaryTraits = is_base_of_v<TraitsImpl<I>, iterator_traits<I>>;
 
 } // namespace __iter_impl
 
+// Primary traits means the type never opted into iterator_traits at all, so
+// its value/difference types come from the two standalone traits; a dedicated
+// iterator_traits specialization means the author spoke, and it wins. No
+// requires-clause on either alias: substitution failure inside an alias
+// template is already SFINAE-friendly, which is what every "typename
+// iter_value_t<I>" probe in the concepts below relies on.
 template <typename I>
-    requires(__iter_impl::HasTraitsDifference<I> ||
-             __iter_impl::HasIncrementableDiff<I>)
-using iter_difference_t = typename decltype(__iter_impl::DiffTypeOf<I>())::type;
+using iter_value_t = typename conditional_t<
+    __iter_impl::IsPrimaryTraits<remove_cvref_t<I>>,
+    indirectly_readable_traits<remove_cvref_t<I>>,
+    iterator_traits<remove_cvref_t<I>>>::value_type;
 
 template <typename I>
-    requires __iter_impl::HasTraitsValue<I>
-using iter_value_t = typename iterator_traits<I>::value_type;
+using iter_difference_t = typename conditional_t<
+    __iter_impl::IsPrimaryTraits<remove_cvref_t<I>>,
+    incrementable_traits<remove_cvref_t<I>>,
+    iterator_traits<remove_cvref_t<I>>>::difference_type;
 
 template <typename I>
     requires requires(I &i) { *i; }
@@ -271,22 +234,62 @@ concept CategoryAtLeast =
     HasCategory<I> &&
     derived_from<typename iterator_traits<I>::iterator_category, Tag>;
 
+// I's legacy iterator_category, or Fallback when it has none. Since
+// [iterator.traits]/3.4 a perfectly good C++20 iterator may carry NO
+// iterator_traits members at all, so naming iterator_traits<I>::
+// iterator_category is a HARD error rather than a fallback — including
+// inside a conditional_t arm, because conditional_t forms both arms eagerly.
+// Every adaptor that inherits a base's legacy category reads it through
+// this.
+template <typename I, typename Fallback>
+struct CategoryOrImpl {
+    using type = Fallback;
+};
+template <typename I, typename Fallback>
+    requires HasCategory<I>
+struct CategoryOrImpl<I, Fallback> {
+    using type = typename iterator_traits<I>::iterator_category;
+};
+template <typename I, typename Fallback = input_iterator_tag>
+using CategoryOr = typename CategoryOrImpl<I, Fallback>::type;
+
 } // namespace __iter_impl
 
 namespace __iter_impl {
 
-// ITER_CONCEPT(I) ([iterator.concepts.general]): I::iterator_concept, else
-// iterator_traits<I>::iterator_concept, else iterator_traits<I>::
-// iterator_category. The two probes below make forming IterConcept<I> a
-// genuine substitution failure (not a hard error) when I has none of the
-// three members — load-bearing for input_iterator's own
-// "requires { typename IterConcept<I>; }" guard just below: without the
-// requires-clause on the alias template, the else-branch of
-// IterConceptHelper would name iterator_traits<I>::iterator_category
-// unconditionally, which is a hard error (not SFINAE) when nothing at all
-// is declared.
+// ITER_CONCEPT(I) ([iterator.concepts.general]/1). The subclause first fixes
+// which ENTITY the rungs read: ITER_TRAITS(I) denotes I ITSELF when
+// iterator_traits<I> is generated from the primary template, and
+// iterator_traits<I> only otherwise. So for a type that never specialized
+// iterator_traits, /1.1 and /1.2 look at the class's OWN
+// I::iterator_concept / I::iterator_category members — NOT at whatever
+// [iterator.traits]/3 synthesized into its traits.
+//
+// That distinction is load-bearing rather than pedantic. /3.2 synthesizes an
+// iterator_category for a legacy iterator that declares none; if /1.2 read
+// the traits instead of the class, that synthesized tag would swallow every
+// type the /1.3 rung exists for, and the two halves of [iterator.traits]/3
+// would fight each other. The subclause's own Example 1 is exactly this
+// case — an iterator whose operator* returns a prvalue: its ITER_CONCEPT is
+// random_access_iterator_tag, not the input_iterator_tag its synthesized
+// legacy category names.
+//
+// /1.3 — random_access_iterator_tag when iterator_traits<I> is unspecialized
+// and the class declares neither member — is what lets a purely C++20
+// iterator work at all. Such an iterator is deliberately not a
+// Cpp17InputIterator, so [iterator.traits]/3.4 leaves its traits entirely
+// empty by design, and without /1.3 it would have no ITER_CONCEPT and fail
+// input_iterator despite modelling it perfectly. The tag is only a ceiling:
+// forward_iterator and above still have to earn their rungs from the
+// operations the type actually supports.
+//
+// /1.4 — no type at all — stays a genuine substitution failure rather than a
+// hard error, which input_iterator's own "requires { typename
+// IterConcept<I>; }" guard just below depends on.
 template <typename I>
 concept HasIterConceptMember = requires { typename I::iterator_concept; };
+template <typename I>
+concept HasMemberCategory = requires { typename I::iterator_category; };
 template <typename I>
 concept HasTraitsIterConcept =
     requires { typename iterator_traits<I>::iterator_concept; };
@@ -294,15 +297,20 @@ concept HasTraitsIterConcept =
 template <class I>
 constexpr auto IterConceptHelper()
 {
-    if constexpr (HasIterConceptMember<I>)
-        return type_identity<typename I::iterator_concept>{};
-    else if constexpr (HasTraitsIterConcept<I>)
+    if constexpr (IsPrimaryTraits<I>) { // ITER_TRAITS(I) is I
+        if constexpr (HasIterConceptMember<I>)
+            return type_identity<typename I::iterator_concept>{};
+        else if constexpr (HasMemberCategory<I>)
+            return type_identity<typename I::iterator_category>{};
+        else
+            return type_identity<random_access_iterator_tag>{}; // /1.3
+    } else if constexpr (HasTraitsIterConcept<I>)
         return type_identity<typename iterator_traits<I>::iterator_concept>{};
     else
         return type_identity<typename iterator_traits<I>::iterator_category>{};
 }
 template <class I>
-    requires HasIterConceptMember<I> || HasTraitsIterConcept<I> || HasCategory<I>
+    requires IsPrimaryTraits<I> || HasTraitsIterConcept<I> || HasCategory<I>
 using IterConcept = typename decltype(IterConceptHelper<I>())::type;
 
 } // namespace __iter_impl

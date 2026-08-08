@@ -86,8 +86,30 @@ inline constexpr unreachable_sentinel_t unreachable_sentinel{};
 // through to the CPOs' own generic (correct) fallback — the only loss is a
 // wrapped iterator's own custom iter_move/iter_swap not participating.
 // Deferred to Ф29f-3 alongside reverse_iterator's identical gap.
+namespace __iter_impl {
+
+// [move.iterator]: iterator_category is defined IF AND ONLY IF
+// iterator_traits<Iterator>::iterator_category is valid. It used to be
+// declared unconditionally here, which only worked while every iterator
+// carried a legacy category; since [iterator.traits]/3.4 a single-pass C++20
+// base has none, and naming it made move_iterator over such a base -- and
+// therefore views::as_rvalue -- uncompilable.
 template <typename It>
-class move_iterator {
+struct MoveIterCategory {};
+template <typename It>
+    requires HasCategory<It>
+struct MoveIterCategory<It> {
+    using iterator_category = conditional_t<
+        derived_from<typename iterator_traits<It>::iterator_category,
+                     random_access_iterator_tag>,
+        random_access_iterator_tag,
+        typename iterator_traits<It>::iterator_category>;
+};
+
+} // namespace __iter_impl
+
+template <typename It>
+class move_iterator : public __iter_impl::MoveIterCategory<It> {
 public:
     using iterator_type    = It;
     using iterator_concept = conditional_t<
@@ -95,12 +117,12 @@ public:
         conditional_t<bidirectional_iterator<It>, bidirectional_iterator_tag,
                       conditional_t<forward_iterator<It>, forward_iterator_tag,
                                     input_iterator_tag>>>;
-    using iterator_category = conditional_t<
-        derived_from<typename iterator_traits<It>::iterator_category,
-                     random_access_iterator_tag>,
-        random_access_iterator_tag, typename iterator_traits<It>::iterator_category>;
-    using value_type        = typename iterator_traits<It>::value_type;
-    using difference_type   = typename iterator_traits<It>::difference_type;
+    // The ALIASES, not iterator_traits: [move.iterator] spells these
+    // iter_value_t<Iterator> and iter_difference_t<Iterator>, which resolve
+    // through indirectly_readable_traits / incrementable_traits for a base
+    // that has no iterator_traits members of its own.
+    using value_type        = iter_value_t<It>;
+    using difference_type   = iter_difference_t<It>;
     using pointer           = It;
     using reference         = iter_rvalue_reference_t<It>;
 
@@ -273,34 +295,67 @@ constexpr iter_difference_t<I> operator-(const move_iterator<I> &i,
 // the input-category transform_view). All five iterator_traits member
 // types are spelled out so iter_value_t / iter_difference_t resolve.
 
+namespace __iter_impl {
+
+// [counted.iterator] declares value_type, iterator_concept and
+// iterator_category each "present only if" the base supplies the
+// corresponding piece. boxcxx used to declare all three unconditionally,
+// which was harmless only while every iterator it met carried a legacy
+// category. Since [iterator.traits]/3.4 a single-pass C++20 base has none,
+// and naming I::iterator_category is then a hard error — the one that made
+// views::take and views::counted uncompilable over such a range.
 template <typename I>
-class counted_iterator {
-public:
-    using iterator_type    = I;
-    // Computed via concepts applied directly to I (matching move_iterator's
-    // own pattern), NOT forwarded from iterator_traits<I> — boxcxx's generic
-    // TraitsImpl only ever synthesises the five legacy members, never
-    // iterator_concept, so a wrapped view iterator (which declares
-    // iterator_concept as its own direct class member, not through a
-    // dedicated iterator_traits specialization) would otherwise silently
-    // fall back to its pinned legacy iterator_category here.
-    // Contiguous rung included so counted_iterator<int*> (etc.) classifies
-    // as contiguous, not merely random-access — matching what a wrapped I's
-    // own I::iterator_concept passthrough would preserve automatically, and
-    // matching contiguous_iterator's own derived_from<IterConcept<I>,
-    // contiguous_iterator_tag> check.
+struct CountedValue {};
+template <typename I>
+    requires indirectly_readable<I>
+struct CountedValue<I> {
+    using value_type = iter_value_t<I>;
+};
+
+template <typename I>
+struct CountedConcept {};
+template <typename I>
+    requires requires { typename I::iterator_concept; }
+struct CountedConcept<I> {
+    // Re-derived from concepts applied directly to I rather than forwarded
+    // verbatim (matching move_iterator's own pattern): a wrapped view
+    // iterator pins a conservative legacy tag, and re-deriving keeps
+    // counted_iterator over a contiguous base contiguous rather than merely
+    // random-access, matching contiguous_iterator's own
+    // derived_from<IterConcept<I>, contiguous_iterator_tag> check.
     using iterator_concept = conditional_t<
         contiguous_iterator<I>, contiguous_iterator_tag,
         conditional_t<random_access_iterator<I>, random_access_iterator_tag,
-                      conditional_t<bidirectional_iterator<I>, bidirectional_iterator_tag,
-                                    conditional_t<forward_iterator<I>, forward_iterator_tag,
+                      conditional_t<bidirectional_iterator<I>,
+                                    bidirectional_iterator_tag,
+                                    conditional_t<forward_iterator<I>,
+                                                  forward_iterator_tag,
                                                   input_iterator_tag>>>>;
-    using value_type        = iter_value_t<I>;
-    using difference_type   = iter_difference_t<I>;
-    using iterator_category = typename iterator_traits<I>::iterator_category;
-    using pointer           = conditional_t<contiguous_iterator<I>,
-                                            add_pointer_t<iter_reference_t<I>>, void>;
-    using reference         = iter_reference_t<I>;
+};
+
+template <typename I>
+struct CountedCategory {};
+template <typename I>
+    requires requires { typename I::iterator_category; }
+struct CountedCategory<I> {
+    // The standard spells this I::iterator_category, NOT
+    // iterator_traits<I>::iterator_category — a synthesized legacy category
+    // must not leak back out through the adaptor.
+    using iterator_category = typename I::iterator_category;
+};
+
+} // namespace __iter_impl
+
+template <typename I>
+class counted_iterator : public __iter_impl::CountedValue<I>,
+                         public __iter_impl::CountedConcept<I>,
+                         public __iter_impl::CountedCategory<I> {
+public:
+    using iterator_type   = I;
+    using difference_type = iter_difference_t<I>;
+    using pointer         = conditional_t<contiguous_iterator<I>,
+                                          add_pointer_t<iter_reference_t<I>>, void>;
+    using reference       = iter_reference_t<I>;
 
     constexpr counted_iterator() = default;
     constexpr counted_iterator(I i, iter_difference_t<I> n)
@@ -313,7 +368,14 @@ public:
     constexpr iter_difference_t<I> count() const noexcept { return __cnt; }
 
     constexpr decltype(auto) operator*() noexcept(noexcept(*__cur)) { return *__cur; }
-    constexpr decltype(auto) operator*() const noexcept(noexcept(*__cur)) { return *__cur; }
+    // [counted.iter.elem]: the const overload exists only when the BASE is
+    // dereferenceable through const. Without the constraint an iterator with
+    // a non-const operator* hard-errors inside this noexcept-specifier.
+    constexpr decltype(auto) operator*() const noexcept(noexcept(*__cur))
+        requires __iter_impl::Dereferenceable<const I>
+    {
+        return *__cur;
+    }
     constexpr decltype(auto) operator[](iter_difference_t<I> n) const
         requires random_access_iterator<I>
     {
@@ -330,6 +392,20 @@ public:
         ++__cur;
         --__cnt;
         return *this;
+    }
+    // [counted.iter.nav] specifies TWO post-increments. Without the
+    // unconstrained one a counted_iterator over a single-pass input iterator
+    // is not even weakly_incrementable, so views::counted over one fails to
+    // compile. The count is restored if the base throws mid-increment.
+    constexpr decltype(auto) operator++(int)
+    {
+        --__cnt;
+        try {
+            return __cur++;
+        } catch (...) {
+            ++__cnt;
+            throw;
+        }
     }
     constexpr counted_iterator operator++(int)
         requires forward_iterator<I>
@@ -432,6 +508,25 @@ constexpr counted_iterator<I> make_counted_iterator(I i, iter_difference_t<I> n)
 {
     return counted_iterator<I>(std::move(i), n);
 }
+
+// [counted.iterator]: when the WRAPPED iterator speaks for itself through a
+// dedicated iterator_traits specialization, counted_iterator must forward
+// that whole specialization rather than let its own class-body members be
+// re-scraped by [iterator.traits]/3.1 — only `pointer` differs, because a
+// counted_iterator hands out a real address only over a contiguous base.
+//
+// The standard guards this with `same_as<ITER_TRAITS(I), iterator_traits<I>>`,
+// which is precisely "iterator_traits<I> is NOT the primary template's own
+// instantiation": ITER_TRAITS(I) denotes I itself in the primary case (and I
+// is never its own traits type), and iterator_traits<I> otherwise. When the
+// base DOES use primary traits the specialization is deliberately absent and
+// counted_iterator falls through to /3.1 on its own five members.
+template <input_iterator I>
+    requires(!__iter_impl::IsPrimaryTraits<I>)
+struct iterator_traits<counted_iterator<I>> : iterator_traits<I> {
+    using pointer = conditional_t<contiguous_iterator<I>,
+                                  add_pointer_t<iter_reference_t<I>>, void>;
+};
 
 // ── inserters ([insert.iterators]) ──────────────────────────────────────
 
@@ -931,13 +1026,14 @@ struct IndirectValueImpl<projected<I, Proj>> {
 };
 } // namespace __iter_impl
 
-// boxcxx keys iter_value_t/iter_difference_t off iterator_traits (there is no
-// incrementable_traits/indirectly_readable_traits), and the primary traits
-// yields an EMPTY set unless all five member typedefs are present — projected
-// only has value_type — so it needs an explicit specialization. difference_type
-// is INHERITED from ProjectedDiff (present iff iter_difference_t<I> resolves),
-// keeping it conditionally present per the standard with no hard error when I
-// is not weakly_incrementable.
+// projected is a compile-time marker, not an iterator: it carries value_type
+// and (conditionally) difference_type, but has no operator++ and no
+// iterator_category, so [iterator.traits]/3 places it in the empty /3.4 case
+// — neither the all-four rule nor the cpp17-input synthesis can reach it.
+// Hence this explicit specialization. difference_type is INHERITED from
+// ProjectedDiff (present iff iter_difference_t<I> resolves), keeping it
+// conditionally present per the standard with no hard error when I is not
+// weakly_incrementable.
 template <typename I, typename Proj>
 struct iterator_traits<projected<I, Proj>> : __iter_impl::ProjectedDiff<I> {
     using iterator_category = input_iterator_tag;
@@ -1087,15 +1183,9 @@ concept sortable =
 
 namespace __iter_impl {
 
-template <typename T>
-using WithRef = T &;
-template <typename T>
-concept CanReference = requires { typename WithRef<T>; };
-
-template <typename T>
-concept Dereferenceable = requires(T &t) {
-    { *t } -> CanReference;
-};
+// CanReference and Dereferenceable both live in <__bits/iterator_core> —
+// [iterator.traits]/2's cpp17-* concepts need the first down there, and
+// counted_iterator's const operator* needs the second.
 
 template <typename I>
 concept CommonIterHasArrow =
@@ -1398,6 +1488,7 @@ concept ConstantIterator =
 template <typename I>
 struct BccCategory {};
 template <forward_iterator I>
+    requires HasCategory<I>
 struct BccCategory<I> {
     using iterator_category = typename iterator_traits<I>::iterator_category;
 };
@@ -1689,9 +1780,11 @@ template <input_iterator I>
 struct iterator_traits<basic_const_iterator<I>> {
     using iterator_concept =
         typename basic_const_iterator<I>::iterator_concept;
+    // CategoryOr, not iterator_traits<I>::iterator_category directly:
+    // conditional_t forms BOTH arms, so a base with no legacy category at all
+    // ([iterator.traits]/3.4) would hard-error here even on the false branch.
     using iterator_category =
-        conditional_t<forward_iterator<I>,
-                      typename iterator_traits<I>::iterator_category,
+        conditional_t<forward_iterator<I>, __iter_impl::CategoryOr<I>,
                       input_iterator_tag>;
     using value_type      = iter_value_t<I>;
     using difference_type = iter_difference_t<I>;

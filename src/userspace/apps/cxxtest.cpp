@@ -172,6 +172,22 @@ void Check(bool ok, const char *what)
     }
 }
 
+// Shared "does this type declare member m" probes. A requires-expression
+// naming a NON-dependent typename X::m is diagnosed eagerly rather than
+// yielding false, so every such test has to launder the type through a
+// template parameter. Used by phase95, phase96 and phase130 alike, all of
+// which pin [range.*.iterator] / [counted.iterator] "present only if"
+// clauses.
+template <class T>
+inline constexpr bool HasMemberCategory =
+    requires { typename T::iterator_category; };
+template <class T>
+inline constexpr bool HasMemberConcept =
+    requires { typename T::iterator_concept; };
+template <class T>
+inline constexpr bool HasTraitsCategory =
+    requires { typename std::iterator_traits<T>::iterator_category; };
+
 // ── phase0 fixtures ────────────────────────────────────────────────────
 
 struct Point {
@@ -15559,12 +15575,18 @@ void Phase95()
 
     P95InputRange st6dSrc(5);
     auto          st6d = vw::stride(st6dSrc, 2);
-    static_assert(requires { typename std::iterator_traits<decltype(st6d.begin())>::iterator_category; },
-                  "phase95 R5 stride iterator_category must still be PRESENT (boxcxx always-declares) "
-                  "even for an input-only Base");
-    static_assert(std::same_as<typename std::iterator_traits<decltype(st6d.begin())>::iterator_category,
-                                std::input_iterator_tag>,
-                  "phase95 R5 stride iterator_category: input-only fixture -> input_iterator_tag");
+    // [range.stride.iterator]: iterator_category is present ONLY IF Base
+    // models forward_range. This used to assert the opposite ("boxcxx
+    // always-declares"), which was tenable only while every iterator carried
+    // a legacy category; since [iterator.traits]/3.4 an input-only base has
+    // none to inherit and naming one is a hard error. libstdc++ agrees the
+    // member is absent, as a class member and through iterator_traits alike.
+    static_assert(!HasMemberCategory<decltype(st6d.begin())>,
+                  "phase95 R5 stride iterator_category is ABSENT for an input-only Base");
+    static_assert(!HasTraitsCategory<decltype(st6d.begin())>,
+                  "phase95 R5 stride: no synthesized legacy category either");
+    static_assert(std::ranges::input_range<decltype(st6d)>,
+                  "phase95 R5 stride over an input-only Base is still an input_range");
 
     // ── stride_view: const-iteration + stride() accessor, SimpleView and
     //    non-SimpleView bases ─────────────────────────────────────────────
@@ -15969,13 +15991,21 @@ void Phase96()
         !noexcept(*std::declval<rg::iterator_t<decltype(p96AtNonNoexcept)> &>()),
         "phase96 MED-1 adjacent_transform operator* propagates non-noexcept sub-iterator deref");
 
-    // MED-2: counted_iterator contiguous rung + operator* noexcept. The
-    // ladder computes contiguous_iterator_tag for a contiguous base, and
-    // (Ф29f-3a) counted_iterator now HAS operator-> (via to_address), so it
-    // fully models contiguous_iterator, not just the tag.
-    static_assert(std::is_same_v<typename std::counted_iterator<int *>::iterator_concept,
+    // MED-2: counted_iterator contiguous rung + operator* noexcept.
+    // [counted.iterator] declares iterator_concept "present only if
+    // I::iterator_concept is valid" -- a raw pointer has no such member, so
+    // counted_iterator<int*> has none either (both references agree). The
+    // contiguous rung now arrives through the [counted.iterator]
+    // iterator_traits specialization, which forwards iterator_traits<int*>'s
+    // own contiguous_iterator_tag; (Ф29f-3a) counted_iterator HAS operator->
+    // (via to_address), so it fully models contiguous_iterator, not just the
+    // tag.
+    static_assert(!HasMemberConcept<std::counted_iterator<int *>>,
+                  "phase96 MED-2 counted_iterator<int*> has no iterator_concept MEMBER");
+    static_assert(std::is_same_v<typename std::iterator_traits<
+                                     std::counted_iterator<int *>>::iterator_concept,
                                  std::contiguous_iterator_tag>,
-                  "phase96 MED-2 counted_iterator<int*> ladder computes contiguous_iterator_tag");
+                  "phase96 MED-2 the contiguous rung comes through the forwarded traits");
     static_assert(std::contiguous_iterator<std::counted_iterator<int *>>,
                   "phase96/Ф29f-3a counted_iterator<int*> fully models contiguous_iterator (operator-> added)");
     static_assert(std::random_access_iterator<std::counted_iterator<int *>>,
@@ -27792,6 +27822,840 @@ void Phase129()
            "align-ignores-zero rule\n");
 }
 
+// ── phase130 fixtures: [iterator.traits]/3 ─────────────────────────────
+// The synthesis table (group D), the ITER_CONCEPT outcomes (group B) and the
+// counted_iterator member set (group G) were MEASURED on libstdc++ 15.2 and
+// libc++, which agree on every one. The two pins that deliberately record a
+// boxcxx DEVIATION from both libraries are called out where they sit (T4,
+// T5) -- they are not reference answers.
+
+struct P130Cell {
+    int v;
+};
+
+// /3.4 — a C++20-only iterator: post-increment returns void, so it is
+// deliberately NOT a Cpp17InputIterator and must get an ENTIRELY EMPTY
+// iterator_traits while still modelling input_iterator.
+struct P130Cxx20Iter {
+    using value_type      = int;
+    using difference_type = long;
+    const int     *p      = nullptr;
+    int            operator*() const { return *p; }
+    P130Cxx20Iter &operator++() { ++p; return *this; }
+    void           operator++(int) { ++p; }
+    bool           operator==(const P130Cxx20Iter &) const = default;
+};
+
+struct P130Cxx20Range {
+    const int    *b;
+    const int    *e;
+    P130Cxx20Iter begin() const { return {b}; }
+    P130Cxx20Iter end() const { return {e}; }
+};
+
+// /3.2 — a genuine Cpp17InputIterator with no iterator_category, no pointer
+// and no reference of its own: all five members get synthesized. *i yields a
+// REFERENCE and post-increment is well behaved, so it climbs the /3.2.3
+// ladder to the FORWARD rung.
+struct P130Cpp17Iter {
+    using value_type      = int;
+    using difference_type = long;
+    const int     *p      = nullptr;
+    const int     &operator*() const { return *p; }
+    P130Cpp17Iter &operator++() { ++p; return *this; }
+    P130Cpp17Iter  operator++(int) { auto t = *this; ++p; return t; }
+    bool           operator==(const P130Cpp17Iter &) const = default;
+};
+
+// the ladder's INPUT rung: identical, except *i yields a prvalue, which is
+// exactly what disqualifies a Cpp17ForwardIterator.
+struct P130ValueIter {
+    using value_type      = int;
+    using difference_type = long;
+    const int     *p      = nullptr;
+    int            operator*() const { return *p; }
+    P130ValueIter &operator++() { ++p; return *this; }
+    P130ValueIter  operator++(int) { auto t = *this; ++p; return t; }
+    bool           operator==(const P130ValueIter &) const = default;
+};
+
+// /3.2.1's middle branch: no pointer member, but a real operator->.
+struct P130ArrowIter {
+    using value_type      = P130Cell;
+    using difference_type = long;
+    const P130Cell *p     = nullptr;
+    const P130Cell &operator*() const { return *p; }
+    const P130Cell *operator->() const { return p; }
+    P130ArrowIter  &operator++() { ++p; return *this; }
+    P130ArrowIter   operator++(int) { auto t = *this; ++p; return t; }
+    bool            operator==(const P130ArrowIter &) const = default;
+};
+
+struct P130BidiIter {
+    using value_type      = int;
+    using difference_type = long;
+    const int    *p       = nullptr;
+    const int    &operator*() const { return *p; }
+    P130BidiIter &operator++() { ++p; return *this; }
+    P130BidiIter  operator++(int) { auto t = *this; ++p; return t; }
+    P130BidiIter &operator--() { --p; return *this; }
+    P130BidiIter  operator--(int) { auto t = *this; --p; return t; }
+    bool          operator==(const P130BidiIter &) const = default;
+};
+
+// mutable on purpose: it has to be able to drive ranges::sort, which is the
+// kind of algorithm internal a newly classified iterator reaches for the
+// first time once [iterator.traits]/3.2 starts synthesizing its category.
+struct P130RandIter {
+    using value_type      = int;
+    using difference_type = long;
+    int          *p       = nullptr;
+    int          &operator*() const { return *p; }
+    int          &operator[](long n) const { return p[n]; }
+    P130RandIter &operator++() { ++p; return *this; }
+    P130RandIter  operator++(int) { auto t = *this; ++p; return t; }
+    P130RandIter &operator--() { --p; return *this; }
+    P130RandIter  operator--(int) { auto t = *this; --p; return t; }
+    P130RandIter &operator+=(long n) { p += n; return *this; }
+    P130RandIter &operator-=(long n) { p -= n; return *this; }
+    friend P130RandIter operator+(P130RandIter i, long n) { i += n; return i; }
+    friend P130RandIter operator+(long n, P130RandIter i) { i += n; return i; }
+    friend P130RandIter operator-(P130RandIter i, long n) { i -= n; return i; }
+    friend long operator-(P130RandIter a, P130RandIter b) { return a.p - b.p; }
+    bool        operator==(const P130RandIter &) const  = default;
+    auto        operator<=>(const P130RandIter &) const = default;
+};
+
+// /3.3 — output-only: *i is assignable but there is nothing to read, so it
+// is a Cpp17Iterator and not a Cpp17InputIterator.
+struct P130OutIter {
+    using difference_type = long;
+    int         *p        = nullptr;
+    int         &operator*() const { return *p; }
+    P130OutIter &operator++() { ++p; return *this; }
+    P130OutIter  operator++(int) { auto t = *this; ++p; return t; }
+};
+
+// /3.1 — all four REQUIRED members, deliberately no pointer: pointer must
+// come out void and the type must not be rejected outright.
+struct P130NoPointerIter {
+    using value_type        = int;
+    using difference_type   = long;
+    using reference         = const int &;
+    using iterator_category = std::input_iterator_tag;
+    const int         *p    = nullptr;
+    const int         &operator*() const { return *p; }
+    P130NoPointerIter &operator++() { ++p; return *this; }
+    P130NoPointerIter  operator++(int) { auto t = *this; ++p; return t; }
+    bool operator==(const P130NoPointerIter &) const = default;
+};
+
+// /3.2 with a pointer AND an iterator_category member, but no `reference`:
+// HasAllFour is false, so the synthesis runs and must keep the two members
+// the class DID declare rather than re-deriving them.
+struct P130PartialIter {
+    using value_type        = int;
+    using difference_type   = long;
+    using pointer           = const int *;
+    using iterator_category = std::input_iterator_tag;
+    const int       *p      = nullptr;
+    const int       &operator*() const { return *p; }
+    P130PartialIter &operator++() { ++p; return *this; }
+    P130PartialIter  operator++(int) { auto t = *this; ++p; return t; }
+    bool             operator==(const P130PartialIter &) const = default;
+};
+
+// /3.2 whose `reference` member deliberately disagrees with decltype(*i):
+// the member wins ([iterator.traits]/3.2.2).
+struct P130RefMemberIter {
+    using value_type      = int;
+    using difference_type = long;
+    using reference       = int;
+    const int         *p  = nullptr;
+    const int         &operator*() const { return *p; }
+    P130RefMemberIter &operator++() { ++p; return *this; }
+    P130RefMemberIter  operator++(int) { auto t = *this; ++p; return t; }
+    bool               operator==(const P130RefMemberIter &) const = default;
+};
+
+// Tags strictly BETWEEN two standard rungs. A one-rung ladder cannot tell
+// these apart from the rung above them, which is exactly how a consolidation
+// of the presence gates silently flattened filter's two-rung ladder.
+struct P130FwdTag : std::forward_iterator_tag {};   // forward < this < bidi
+struct P130RATag : std::random_access_iterator_tag {};  // RA < this < contiguous
+
+template <class Tag> struct P130TaggedIter {
+    using value_type        = int;
+    using difference_type   = long;
+    using reference         = const int &;
+    using pointer           = const int *;
+    using iterator_category = Tag;
+    using iterator_concept  = Tag;
+    const int      *p       = nullptr;
+    const int      &operator*() const { return *p; }
+    P130TaggedIter &operator++() { ++p; return *this; }
+    P130TaggedIter  operator++(int) { auto t = *this; ++p; return t; }
+    P130TaggedIter &operator--() { --p; return *this; }
+    P130TaggedIter  operator--(int) { auto t = *this; --p; return t; }
+    P130TaggedIter &operator+=(difference_type n) { p += n; return *this; }
+    P130TaggedIter &operator-=(difference_type n) { p -= n; return *this; }
+    friend P130TaggedIter operator+(P130TaggedIter i, difference_type n) { i += n; return i; }
+    friend P130TaggedIter operator+(difference_type n, P130TaggedIter i) { i += n; return i; }
+    friend P130TaggedIter operator-(P130TaggedIter i, difference_type n) { i -= n; return i; }
+    friend difference_type operator-(P130TaggedIter a, P130TaggedIter b) { return a.p - b.p; }
+    const int &operator[](difference_type n) const { return p[n]; }
+    auto       operator<=>(const P130TaggedIter &) const = default;
+    bool       operator==(const P130TaggedIter &) const  = default;
+};
+template <class Tag> struct P130TaggedRange {
+    const int          *b, *e;
+    P130TaggedIter<Tag> begin() const { return {b}; }
+    P130TaggedIter<Tag> end() const { return {e}; }
+};
+inline constexpr auto P130KeepAll  = [](int) { return true; };
+// Binds the element, so the result is a genuine lvalue reference into the
+// base range -- transform's category ladder only runs when it is one.
+inline constexpr auto P130Identity = [](const int &v) -> const int & { return v; };
+
+// An input-only OUTER range of ranges: join over this must not declare an
+// iterator_category at all ([range.join.iterator] wants Base forward).
+struct P130InnerRange {
+    const int *b, *e;
+    const int *begin() const { return b; }
+    const int *end() const { return e; }
+};
+struct P130JoinInIter {
+    using value_type      = P130InnerRange;
+    using difference_type = long;
+    const P130InnerRange *p = nullptr;
+    P130InnerRange  operator*() const { return *p; }
+    P130JoinInIter &operator++() { ++p; return *this; }
+    void            operator++(int) { ++p; }
+    bool            operator==(const P130JoinInIter &) const = default;
+};
+struct P130JoinInRange {
+    const P130InnerRange *b, *e;
+    P130JoinInIter        begin() const { return {b}; }
+    P130JoinInIter        end() const { return {e}; }
+};
+
+// The one fixture that SPEAKS through an explicit iterator_traits
+// specialization (below, at namespace scope) rather than its own members.
+struct P130TraitsSpoken {
+    using value_type      = int;
+    using difference_type = short;
+    const int        *p   = nullptr;
+    const int        &operator*() const { return *p; }
+    P130TraitsSpoken &operator++() { ++p; return *this; }
+    P130TraitsSpoken  operator++(int) { auto t = *this; ++p; return t; }
+    bool              operator==(const P130TraitsSpoken &) const = default;
+};
+
+// [readable.traits] shapes that are not iterators at all
+struct P130RefValue {
+    using value_type = int &;
+};
+struct P130FnValue {
+    using value_type = void();
+};
+struct P130BothAgree {
+    using value_type   = int;
+    using element_type = const int;
+};
+struct P130BothDisagree {
+    using value_type   = int;
+    using element_type = char;
+};
+struct P130OnlyElement {
+    using element_type = double;
+};
+struct P130VoidValue {
+    using value_type = void;
+};
+
+} // namespace
+
+// An explicit iterator_traits specialization has to sit at namespace scope,
+// not inside cxxtest's anonymous namespace. It makes P130TraitsSpoken the one
+// fixture whose traits are NOT the primary template's, which is what pins the
+// ITER_TRAITS dispatch in iter_value_t / iter_difference_t: char and long
+// from here must win over the class's own int and short.
+template <>
+struct std::iterator_traits<P130TraitsSpoken> {
+    using iterator_category = std::input_iterator_tag;
+    using value_type        = char;
+    using difference_type   = long;
+    using pointer           = void;
+    using reference         = const int &;
+};
+
+namespace {
+
+template <class It, class V, class Cat>
+inline constexpr bool P130TraitsAre =
+    std::is_same_v<typename std::iterator_traits<It>::value_type, V> &&
+    std::derived_from<typename std::iterator_traits<It>::iterator_category,
+                      Cat> &&
+    std::is_same_v<std::iter_value_t<It>, V>;
+
+template <class It, class Cat, class V, class Ref, class Ptr>
+inline constexpr bool P130Synth =
+    std::is_same_v<typename std::iterator_traits<It>::iterator_category, Cat> &&
+    std::is_same_v<typename std::iterator_traits<It>::value_type, V> &&
+    std::is_same_v<typename std::iterator_traits<It>::reference, Ref> &&
+    std::is_same_v<typename std::iterator_traits<It>::pointer, Ptr> &&
+    std::is_same_v<typename std::iterator_traits<It>::difference_type, long>;
+
+template <class It>
+inline constexpr bool P130HasTraitsValue =
+    requires { typename std::iterator_traits<It>::value_type; };
+template <class It>
+inline constexpr bool P130HasTraitsCategory =
+    requires { typename std::iterator_traits<It>::iterator_category; };
+template <class It>
+inline constexpr bool P130HasTraitsPointer =
+    requires { typename std::iterator_traits<It>::pointer; };
+template <class It>
+inline constexpr bool P130HasTraitsReference =
+    requires { typename std::iterator_traits<It>::reference; };
+template <class It>
+inline constexpr bool P130HasTraitsDifference =
+    requires { typename std::iterator_traits<It>::difference_type; };
+// HasMemberCategory / HasMemberConcept are the shared probes defined beside
+// Check(). value_type needs its own -- deliberately the CLASS member, not the
+// iterator_traits one: [counted.iterator]'s "present only if" clauses are
+// about the class's own members, and ITER_TRAITS reads those too.
+template <class T>
+inline constexpr bool P130HasMemberValue = requires { typename T::value_type; };
+template <class T>
+inline constexpr bool P130HasReadableValue =
+    requires { typename std::indirectly_readable_traits<T>::value_type; };
+template <class T>
+inline constexpr bool P130IsPrimary = std::__iter_impl::IsPrimaryTraits<T>;
+
+void Phase130()
+{
+    using namespace std;
+
+    // ── (A) 43 regression pins: the whole iterator zoo, unchanged ───────
+    // A widening of iterator classification is judged by what it must NOT
+    // move. These are the answers the tree gave BEFORE [iterator.traits]/3
+    // was rewritten, and every one still holds.
+    static_assert(P130TraitsAre<int *, int, random_access_iterator_tag>, "Z1");
+    static_assert(P130TraitsAre<const int *, int, random_access_iterator_tag>,
+                  "Z2");
+    static_assert(is_same_v<iterator_traits<int *>::pointer, int *>, "Z3");
+    static_assert(
+        is_same_v<iterator_traits<const int *>::reference, const int &>, "Z4");
+    static_assert(contiguous_iterator<int *>, "Z5");
+    static_assert(is_same_v<iter_difference_t<int *>, ptrdiff_t>, "Z6");
+
+    static_assert(
+        P130TraitsAre<vector<int>::iterator, int, random_access_iterator_tag>,
+        "Z7");
+    static_assert(P130TraitsAre<vector<int>::const_iterator, int,
+                                random_access_iterator_tag>,
+                  "Z8");
+    static_assert(
+        P130TraitsAre<deque<int>::iterator, int, random_access_iterator_tag>,
+        "Z9");
+    static_assert(
+        P130TraitsAre<list<int>::iterator, int, bidirectional_iterator_tag>,
+        "Z10");
+    static_assert(
+        P130TraitsAre<forward_list<int>::iterator, int, forward_iterator_tag>,
+        "Z11");
+    static_assert(
+        P130TraitsAre<string::iterator, char, random_access_iterator_tag>,
+        "Z12");
+    static_assert(
+        P130TraitsAre<string_view::iterator, char, random_access_iterator_tag>,
+        "Z13");
+    static_assert(
+        P130TraitsAre<span<int>::iterator, int, random_access_iterator_tag>,
+        "Z14");
+    static_assert(contiguous_iterator<vector<int>::iterator>, "Z15");
+    static_assert(contiguous_iterator<string::iterator>, "Z16");
+    static_assert(random_access_iterator<deque<int>::iterator>, "Z17");
+    static_assert(bidirectional_iterator<list<int>::iterator>, "Z18");
+    static_assert(forward_iterator<forward_list<int>::iterator>, "Z19");
+
+    static_assert(
+        P130TraitsAre<set<int>::iterator, int, bidirectional_iterator_tag>,
+        "Z20");
+    static_assert(P130TraitsAre<map<int, char>::iterator, pair<const int, char>,
+                                bidirectional_iterator_tag>,
+                  "Z21");
+    static_assert(P130TraitsAre<unordered_map<int, char>::iterator,
+                                pair<const int, char>, forward_iterator_tag>,
+                  "Z22");
+    static_assert(bidirectional_iterator<map<int, char>::iterator>, "Z23");
+    static_assert(forward_iterator<unordered_map<int, char>::iterator>, "Z24");
+
+    static_assert(is_same_v<iter_value_t<reverse_iterator<int *>>, int>, "Z25");
+    static_assert(random_access_iterator<reverse_iterator<int *>>, "Z26");
+    static_assert(is_same_v<iter_value_t<move_iterator<int *>>, int>, "Z27");
+    static_assert(random_access_iterator<move_iterator<int *>>, "Z28");
+    static_assert(is_same_v<iter_value_t<counted_iterator<int *>>, int>, "Z29");
+    static_assert(random_access_iterator<counted_iterator<int *>>, "Z30");
+    static_assert(output_iterator<back_insert_iterator<vector<int>>, int>,
+                  "Z31");
+    static_assert(output_iterator<insert_iterator<vector<int>>, int>, "Z32");
+    static_assert(output_iterator<front_insert_iterator<list<int>>, int>, "Z33");
+
+    static_assert(ranges::input_range<vector<int>>, "Z34");
+    static_assert(ranges::random_access_range<vector<int>>, "Z35");
+    static_assert(ranges::bidirectional_range<list<int>>, "Z36");
+    static_assert(ranges::input_range<decltype(views::iota(0, 5))>, "Z37");
+    static_assert(is_same_v<ranges::range_value_t<vector<int>>, int>, "Z38");
+    static_assert(
+        is_same_v<ranges::range_value_t<map<int, char>>, pair<const int, char>>,
+        "Z39");
+
+    static_assert(indirectly_readable<int *>, "Z40");
+    static_assert(indirectly_writable<int *, int>, "Z41");
+    static_assert(!indirectly_readable<int>, "Z42");
+    static_assert(indirectly_readable<vector<int>::iterator>, "Z43");
+
+    // ── (B) /3.4 stays reachable, and is not a consolation prize ────────
+    // A C++20-only iterator models input_iterator with an EMPTY
+    // iterator_traits -- that combination is the standard's answer, and it
+    // only works because ITER_CONCEPT falls back to random_access_iterator_tag
+    // for a type whose traits come from the primary template.
+    static_assert(input_iterator<P130Cxx20Iter>, "E1");
+    static_assert(!P130HasTraitsValue<P130Cxx20Iter>, "E2");
+    static_assert(!P130HasTraitsCategory<P130Cxx20Iter>, "E3");
+    static_assert(!P130HasTraitsPointer<P130Cxx20Iter>, "E3b");
+    static_assert(!P130HasTraitsReference<P130Cxx20Iter>, "E3c");
+    static_assert(!P130HasTraitsDifference<P130Cxx20Iter>, "E3d");
+    static_assert(ranges::input_range<P130Cxx20Range>, "E4");
+    static_assert(formattable<P130Cxx20Range, char>, "E5");
+    // the value/difference types still resolve -- through the two standalone
+    // traits, not through the (empty) iterator_traits
+    static_assert(is_same_v<iter_value_t<P130Cxx20Iter>, int>, "E5b");
+    static_assert(is_same_v<iter_difference_t<P130Cxx20Iter>, long>, "E5c");
+
+    static_assert(input_iterator<P130Cpp17Iter>, "E6");
+    static_assert(P130HasTraitsValue<P130Cpp17Iter>, "E7");
+    static_assert(P130HasTraitsCategory<P130Cpp17Iter>, "E8");
+    static_assert(P130HasTraitsPointer<P130Cpp17Iter>, "E9");
+
+    // the one that bites ordinary code: an otherwise perfectly ordinary C++17
+    // iterator that simply does not declare `pointer` used to be unusable.
+    static_assert(input_iterator<P130NoPointerIter>, "E10");
+    static_assert(P130HasTraitsValue<P130NoPointerIter>, "E11");
+    static_assert(P130HasTraitsPointer<P130NoPointerIter>, "E12");
+    static_assert(is_same_v<iterator_traits<P130NoPointerIter>::pointer, void>,
+                  "E12b");
+
+    // ── (C) the cpp17-* concepts ([iterator.traits]/2) ──────────────────
+    static_assert(!__iter_impl::Cpp17Iterator<P130Cxx20Iter>, "P1");
+    static_assert(__iter_impl::Cpp17Iterator<P130Cpp17Iter>, "P2");
+    static_assert(__iter_impl::Cpp17InputIterator<P130Cpp17Iter>, "P3");
+    static_assert(__iter_impl::Cpp17ForwardIterator<P130Cpp17Iter>, "P4");
+    static_assert(!__iter_impl::Cpp17BidirectionalIterator<P130Cpp17Iter>, "P5");
+    static_assert(__iter_impl::Cpp17RandomAccessIterator<int *>, "P6");
+    static_assert(__iter_impl::Cpp17RandomAccessIterator<const int *>, "P7");
+    // non-iterators must be cleanly false, never a hard error
+    static_assert(!__iter_impl::Cpp17Iterator<int>, "P8");
+    static_assert(!__iter_impl::Cpp17Iterator<void *>, "P9");
+    static_assert(!__iter_impl::Cpp17InputIterator<double>, "P10");
+    static_assert(!__iter_impl::Cpp17InputIterator<P130OutIter>, "P10b");
+    static_assert(__iter_impl::Cpp17Iterator<P130OutIter>, "P10c");
+
+    // ── (D) the synthesis table, measured on both reference libraries ───
+    static_assert(P130Synth<P130Cpp17Iter, forward_iterator_tag, int,
+                            const int &, void>,
+                  "S1");
+    static_assert(
+        P130Synth<P130ValueIter, input_iterator_tag, int, int, void>, "S2");
+    static_assert(P130Synth<P130ArrowIter, forward_iterator_tag, P130Cell,
+                            const P130Cell &, const P130Cell *>,
+                  "S3");
+    static_assert(P130Synth<P130BidiIter, bidirectional_iterator_tag, int,
+                            const int &, void>,
+                  "S4");
+    static_assert(P130Synth<P130RandIter, random_access_iterator_tag, int,
+                            int &, void>,
+                  "S5");
+    static_assert(
+        P130Synth<P130OutIter, output_iterator_tag, void, void, void>, "S6");
+    static_assert(input_iterator<P130ValueIter>, "S7");
+    // [iterator.concepts.general] Example 1 verbatim. ITER_TRAITS(I) is I
+    // ITSELF whenever iterator_traits<I> comes from the primary template, so
+    // rungs /1.1 and /1.2 read the CLASS's own members -- P130ValueIter has
+    // neither, so ITER_CONCEPT is random_access_iterator_tag even though the
+    // legacy category /3.2 synthesized for it says input. Reading the traits
+    // there instead would let the synthesis swallow the /1.3 rung entirely,
+    // and forward_iterator would be wrongly false for every prvalue and proxy
+    // iterator. Both references answer exactly this.
+    static_assert(is_same_v<__iter_impl::IterConcept<P130ValueIter>,
+                            random_access_iterator_tag>,
+                  "S7b");
+    static_assert(is_same_v<iterator_traits<P130ValueIter>::iterator_category,
+                            input_iterator_tag>,
+                  "S7c");
+    static_assert(forward_iterator<P130ValueIter>, "S7d");
+    static_assert(!bidirectional_iterator<P130ValueIter>, "S7e");
+    static_assert(!random_access_iterator<P130ValueIter>, "S7f");
+    // /1.2 still reads a class that DOES declare the member
+    static_assert(is_same_v<__iter_impl::IterConcept<P130NoPointerIter>,
+                            input_iterator_tag>,
+                  "S7g");
+    // /1.1 wins over /1.2 when both are present
+    static_assert(is_same_v<__iter_impl::IterConcept<int *>,
+                            contiguous_iterator_tag>,
+                  "S7h");
+    static_assert(forward_iterator<P130Cpp17Iter>, "S8");
+    static_assert(output_iterator<P130OutIter, int>, "S9");
+    static_assert(random_access_iterator<P130RandIter>, "S10");
+    static_assert(bidirectional_iterator<P130BidiIter>, "S11");
+    // /3.1 keeps its own members verbatim rather than re-deriving them: the
+    // author pinned input_iterator_tag even though the type would climb to
+    // the forward rung on its own.
+    static_assert(is_same_v<iterator_traits<P130NoPointerIter>::iterator_category,
+                            input_iterator_tag>,
+                  "S12");
+
+    // ── (E) indirectly_readable_traits ([readable.traits]) ──────────────
+    static_assert(is_same_v<indirectly_readable_traits<int *>::value_type, int>,
+                  "R1");
+    static_assert(
+        is_same_v<indirectly_readable_traits<const int *>::value_type, int>,
+        "R2");
+    static_assert(is_same_v<indirectly_readable_traits<int[7]>::value_type, int>,
+                  "R3");
+    static_assert(
+        is_same_v<indirectly_readable_traits<const int[7]>::value_type, int>,
+        "R4");
+    // cv is stripped by CondValueType, and a non-object value_type yields
+    // nothing at all rather than a nonsense answer
+    static_assert(
+        is_same_v<indirectly_readable_traits<P130BothAgree>::value_type, int>,
+        "R5");
+    static_assert(!P130HasReadableValue<P130BothDisagree>, "R6");
+    static_assert(
+        is_same_v<indirectly_readable_traits<P130OnlyElement>::value_type,
+                  double>,
+        "R7");
+    static_assert(!P130HasReadableValue<P130VoidValue>, "R8");
+    static_assert(!P130HasReadableValue<int>, "R9");
+    // shared_ptr has element_type, so the standard makes it readable -- both
+    // reference libraries agree, this is behaviour and not a defect
+    static_assert(
+        is_same_v<indirectly_readable_traits<shared_ptr<int>>::value_type, int>,
+        "R10");
+
+    // ── (F) ITER_TRAITS: which types use the primary template ───────────
+    static_assert(!P130IsPrimary<int *>, "T1");
+    static_assert(!P130IsPrimary<const int *>, "T2");
+    static_assert(!P130IsPrimary<common_iterator<int *, unreachable_sentinel_t>>,
+                  "T3");
+    // T4 and T5 are boxcxx DEVIATIONS, not reference answers.
+    // T4: [reverse.iterator] puts the five names in reverse_iterator's own
+    // class body and the standard has NO iterator_traits specialization for
+    // it, so both libstdc++ and libc++ answer TRUE here. boxcxx carries a
+    // non-standard specialization (iterator:48) to supply iterator_concept
+    // without dragging <concepts> into every container, and that is what
+    // makes it non-primary. Deleting that specialization is possible now
+    // that ITER_CONCEPT reads the class's own members, but it is its own
+    // change; this pin records today's answer honestly.
+    static_assert(!P130IsPrimary<reverse_iterator<int *>>,
+                  "T4 boxcxx deviation: both references answer true");
+    // T5: vector<int>::iterator IS int* in boxcxx, so it reaches the pointer
+    // specialization rather than the primary. A library with a real class-type
+    // vector iterator answers true.
+    static_assert(!P130IsPrimary<vector<int>::iterator>,
+                  "T5 boxcxx deviation: vector iterator is a raw pointer");
+    static_assert(P130IsPrimary<list<int>::iterator>, "T6");
+    static_assert(P130IsPrimary<map<int, char>::iterator>, "T7");
+    static_assert(P130IsPrimary<P130Cpp17Iter>, "T8");
+    // non-iterators must answer without a hard error
+    static_assert(P130IsPrimary<int>, "T9");
+    static_assert(P130IsPrimary<void>, "T10");
+
+    // ── (G) [counted.iterator]'s own iterator_traits ────────────────────
+    // Guarded by same_as<ITER_TRAITS(I), iterator_traits<I>>: forward a
+    // specialized base's traits, stay on the primary otherwise.
+    static_assert(!P130IsPrimary<counted_iterator<int *>>, "N1");
+    static_assert(P130IsPrimary<counted_iterator<list<int>::iterator>>, "N2");
+    static_assert(
+        is_same_v<iterator_traits<counted_iterator<int *>>::value_type, int>,
+        "N3");
+    static_assert(
+        is_same_v<iterator_traits<counted_iterator<int *>>::pointer, int *>,
+        "N4");
+    static_assert(
+        is_same_v<
+            iterator_traits<counted_iterator<list<int>::iterator>>::value_type,
+            int>,
+        "N5");
+    // a counted_iterator keeps its base's rung on both sides of the guard
+    // (measured identical on libstdc++ and libc++)
+    static_assert(bidirectional_iterator<counted_iterator<list<int>::iterator>>,
+                  "N6");
+    static_assert(
+        !random_access_iterator<counted_iterator<list<int>::iterator>>, "N7");
+    static_assert(contiguous_iterator<counted_iterator<int *>>, "N8");
+    // The specialization's OWN pointer rule, both branches. Without these the
+    // whole [counted.iterator] block passes with the specialization reverted:
+    // reverse_iterator and common_iterator both have specialized traits, so
+    // both reach it, and neither is contiguous -- so pointer must be void,
+    // NOT the base's own pointer type.
+    static_assert(is_same_v<iterator_traits<reverse_iterator<int *>>::pointer,
+                            int *>,
+                  "N9");
+    static_assert(
+        is_same_v<
+            iterator_traits<counted_iterator<reverse_iterator<int *>>>::pointer,
+            void>,
+        "N10");
+    static_assert(
+        is_same_v<iterator_traits<counted_iterator<
+                      common_iterator<int *, unreachable_sentinel_t>>>::pointer,
+                  void>,
+        "N11");
+    // [counted.iterator]'s "present only if" member set. A single-pass C++20
+    // base gives value_type but neither iterator_category nor
+    // iterator_concept; a raw pointer base gives neither of those two either,
+    // because the standard spells them I::..., not iterator_traits<I>::... .
+    // Both references agree on all six.
+    static_assert(!HasMemberCategory<counted_iterator<P130Cxx20Iter>>, "N12");
+    static_assert(P130HasMemberValue<counted_iterator<P130Cxx20Iter>>, "N13");
+    static_assert(!HasMemberConcept<counted_iterator<P130Cxx20Iter>>, "N14");
+    static_assert(!HasMemberCategory<counted_iterator<int *>>, "N15");
+    static_assert(!HasMemberConcept<counted_iterator<int *>>, "N16");
+    static_assert(!P130HasTraitsCategory<counted_iterator<P130Cxx20Iter>>, "N17");
+    // [counted.iter.nav]'s UNCONSTRAINED post-increment: without it a
+    // counted_iterator over a single-pass base is not weakly_incrementable
+    // and views::counted over one does not compile.
+    static_assert(input_iterator<counted_iterator<P130Cxx20Iter>>, "N18");
+    static_assert(!forward_iterator<counted_iterator<P130Cxx20Iter>>, "N19");
+    static_assert(forward_iterator<counted_iterator<P130ValueIter>>, "N20");
+    static_assert(is_same_v<iterator_traits<
+                                counted_iterator<P130ValueIter>>::iterator_category,
+                            input_iterator_tag>,
+                  "N21");
+
+    // ── (J) the mutation closers ────────────────────────────────────────
+    // /3.2 keeps the members the class DID declare, and synthesizes only the
+    // rest.
+    static_assert(
+        is_same_v<iterator_traits<P130PartialIter>::pointer, const int *>,
+        "S13");
+    static_assert(is_same_v<iterator_traits<P130PartialIter>::iterator_category,
+                            input_iterator_tag>,
+                  "S14");
+    static_assert(
+        is_same_v<iterator_traits<P130PartialIter>::reference, const int &>,
+        "S15");
+    // a `reference` member that disagrees with decltype(*i) still wins
+    static_assert(is_same_v<iterator_traits<P130RefMemberIter>::reference, int>,
+                  "S16");
+    static_assert(
+        is_same_v<iterator_traits<P130RefMemberIter>::iterator_category,
+                  forward_iterator_tag>,
+        "S17");
+    static_assert(is_same_v<__iter_impl::IterConcept<P130Cxx20Iter>,
+                            random_access_iterator_tag>,
+                  "E13");
+    // CondValueType admits only OBJECT types
+    static_assert(!P130HasReadableValue<P130RefValue>, "R11");
+    static_assert(!P130HasReadableValue<P130FnValue>, "R12");
+    // both aliases strip cvref before dispatching
+    static_assert(is_same_v<iter_value_t<list<int>::iterator &>, int>, "E14");
+    static_assert(is_same_v<iter_value_t<const P130Cpp17Iter &>, int>, "E15");
+    static_assert(
+        is_same_v<iter_difference_t<const vector<int>::iterator &>, ptrdiff_t>,
+        "E16");
+    // a spoken-for iterator_traits wins over the class's own members
+    static_assert(!P130IsPrimary<P130TraitsSpoken>, "T11");
+    static_assert(is_same_v<iter_difference_t<P130TraitsSpoken>, long>, "T12");
+    static_assert(is_same_v<iter_value_t<P130TraitsSpoken>, char>, "T13");
+
+    // ── (H) runtime: the newly reachable paths must actually EXECUTE ────
+    static const int   src[5] = {10, 20, 30, 40, 50};
+    P130Cxx20Range     r{src, src + 5};
+
+    auto found = ranges::find(r, 30);
+    Check(found != r.end() && *found == 30,
+          "phase130 (1) ranges::find over a C++20-only iterator with empty "
+          "iterator_traits");
+    auto missing = ranges::find(r, 99);
+    Check(missing == r.end(), "phase130 (2) ranges::find reports not-found");
+
+    vector<int> copied;
+    ranges::copy(r, back_inserter(copied));
+    Check(copied.size() == 5 && copied[0] == 10 && copied[4] == 50,
+          "phase130 (3) ranges::copy drains the same range into a vector");
+
+    long counted = 0;
+    for (auto v : r) counted += v;
+    Check(counted == 150, "phase130 (4) range-for sums 150");
+
+    // std::distance needs iterator_traits::difference_type AND
+    // iterator_category -- both synthesized by /3.2, both absent before.
+    P130Cpp17Iter first{src};
+    P130Cpp17Iter last{src + 5};
+    Check(distance(first, last) == 5,
+          "phase130 (5) std::distance over a /3.2-synthesized iterator");
+    Check(*next(first, 2) == 30, "phase130 (6) std::next over the same");
+
+    // the sort/heap/partition internals a newly classified iterator reaches
+    // for the first time
+    int shuffled[5] = {5, 3, 1, 4, 2};
+    ranges::sort(P130RandIter{shuffled}, P130RandIter{shuffled + 5});
+    Check(shuffled[0] == 1 && shuffled[1] == 2 && shuffled[2] == 3 &&
+              shuffled[3] == 4 && shuffled[4] == 5,
+          "phase130 (7) ranges::sort through a synthesized random-access "
+          "iterator");
+
+    int heaped[5] = {2, 9, 4, 7, 1};
+    ranges::make_heap(P130RandIter{heaped}, P130RandIter{heaped + 5});
+    Check(heaped[0] == 9, "phase130 (8) ranges::make_heap through the same");
+    ranges::sort_heap(P130RandIter{heaped}, P130RandIter{heaped + 5});
+    Check(heaped[0] == 1 && heaped[4] == 9, "phase130 (9) ranges::sort_heap");
+
+    int parted[6]  = {1, 2, 3, 4, 5, 6};
+    auto evens_end = ranges::partition(P130RandIter{parted},
+                                       P130RandIter{parted + 6},
+                                       [](int x) { return x % 2 == 0; });
+    Check(evens_end.begin() - P130RandIter{parted} == 3,
+          "phase130 (10) ranges::partition splits 3/3 through the same");
+
+    // the /3.2.1 middle branch really does hand out the operator-> pointer
+    static const P130Cell cells[3] = {{7}, {8}, {9}};
+    P130ArrowIter         ai{cells};
+    Check(ai->v == 7 && (++ai)->v == 8,
+          "phase130 (11) operator-> supplies iterator_traits::pointer");
+
+    // /3.3's output iterator writes through a real algorithm
+    int sink[4] = {0, 0, 0, 0};
+    ranges::copy(views::iota(1, 5), P130OutIter{sink});
+    Check(sink[0] == 1 && sink[3] == 4,
+          "phase130 (12) an output-only /3.3 iterator receives a copy");
+
+    // ── (K) the adaptors over a /3.4 range must COMPILE and run ─────────
+    // Phase130 asserts P130Cxx20Range is an input_range; every adaptor that
+    // accepts an input_range therefore has to work over it. Each of these was
+    // a hard compile error -- a class-scope member typedef naming
+    // iterator_traits<X>::iterator_category unconditionally -- until the
+    // "present only if forward_range" clauses were honoured.
+    long took = 0;
+    for (int v : (r | views::take(3))) took += v;
+    Check(took == 60, "phase130 (13) views::take over a /3.4 input range");
+
+    long cnt = 0;
+    for (int v : views::counted(r.begin(), 2)) cnt += v;
+    Check(cnt == 30, "phase130 (14) views::counted over a single-pass base");
+
+    long doubled = 0;
+    for (int v : (r | views::transform([](int x) { return x * 2; })))
+        doubled += v;
+    Check(doubled == 300, "phase130 (15) views::transform over the same");
+
+    long odd = 0;
+    for (int v : (r | views::filter([](int x) { return (x / 10) % 2 == 1; })))
+        odd += v;
+    Check(odd == 90, "phase130 (16) views::filter over the same");
+
+    long strided = 0;
+    for (int v : (r | views::stride(2))) strided += v;
+    Check(strided == 90, "phase130 (17) views::stride over the same");
+
+    long joined = 0;
+    for (int v : (views::single(r) | views::join)) joined += v;
+    Check(joined == 150, "phase130 (18) views::join over the same");
+
+    long dropped = 0;
+    for (int v : (r | views::drop(3))) dropped += v;
+    Check(dropped == 90, "phase130 (19) views::drop over the same");
+
+    // counted_iterator over a single-pass base needs [counted.iter.nav]'s
+    // UNCONSTRAINED post-increment to be weakly_incrementable at all
+    counted_iterator<P130Cxx20Iter> ci{P130Cxx20Iter{src}, 3};
+    long                            walked = 0;
+    for (; ci != default_sentinel; ++ci) walked += *ci;
+    Check(walked == 60, "phase130 (20) counted_iterator walks a single-pass base");
+
+    // ── (L) the second fix round: two more adaptors that hard-errored on a
+    // traits-less range, and the two category ladders that a delta audit
+    // caught being flattened. Every expectation in this group was measured on
+    // libstdc++ 15.2 before it was written here.
+    {
+        // [move.iterator]: iterator_category is present if and only if the
+        // BASE's iterator_traits has one, and value_type/difference_type come
+        // from iter_value_t/iter_difference_t rather than from the traits.
+        // views::as_rvalue only reaches this now that input-only ranges work.
+        static_assert(!HasMemberCategory<move_iterator<P130Cxx20Iter>>, "L1");
+        static_assert(is_same_v<iter_value_t<move_iterator<P130Cxx20Iter>>, int>, "L2");
+        static_assert(input_iterator<move_iterator<P130Cxx20Iter>>, "L3");
+        static_assert(ranges::input_range<decltype(views::as_rvalue(
+                          declval<P130Cxx20Range &>()))>, "L4");
+
+        // [range.lazy.split.inner]: present only if Base models forward_range.
+        // The comment this replaced claimed boxcxx's forward_range was itself
+        // category-gated -- it is not; forward_iterator keys on ITER_CONCEPT,
+        // whose fallback rung hands random_access_iterator_tag to a class with
+        // empty traits, so the guard never fired.
+        using P130LazyIn = decltype(views::lazy_split(declval<P130Cxx20Range &>(), 3));
+        static_assert(ranges::input_range<P130LazyIn>, "L5");
+        static_assert(
+            !HasMemberCategory<ranges::iterator_t<ranges::range_reference_t<P130LazyIn>>>,
+            "L6");
+
+        // [range.join.iterator]: present iff ref-is-glvalue AND Base is
+        // forward AND range_reference_t<Base> is forward. Declaring it
+        // unconditionally also made /3.1 fire and handed out a full
+        // iterator_traits where both references hand out the empty one.
+        using P130JoinIn = decltype(views::join(declval<P130JoinInRange &>()));
+        static_assert(ranges::input_range<P130JoinIn>, "L7");
+        static_assert(!HasMemberCategory<ranges::iterator_t<P130JoinIn>>, "L8");
+
+        // [range.filter.iterator] is a TWO-rung ladder. Consolidating the nine
+        // presence gates into one mechanism flattened it to one rung, which
+        // silently regressed a forward-derived user tag from
+        // forward_iterator_tag to the tag itself. The middle rung is what this
+        // pins; L11 pins the cap above it.
+        static_assert(is_same_v<typename ranges::iterator_t<decltype(views::filter(
+                                    declval<P130TaggedRange<P130FwdTag> &>(), P130KeepAll))>
+                                    ::iterator_category,
+                                forward_iterator_tag>, "L9");
+        static_assert(is_same_v<typename ranges::iterator_t<decltype(views::filter(
+                                    declval<P130TaggedRange<bidirectional_iterator_tag> &>(),
+                                    P130KeepAll))>::iterator_category,
+                                bidirectional_iterator_tag>, "L10");
+        static_assert(is_same_v<typename ranges::iterator_t<decltype(views::filter(
+                                    declval<P130TaggedRange<random_access_iterator_tag> &>(),
+                                    P130KeepAll))>::iterator_category,
+                                bidirectional_iterator_tag>, "L11");
+
+        // [range.transform.iterator] tests derived_from<C, contiguous_
+        // iterator_tag> -- NOT random_access -- and yields random_access when
+        // it holds. So a random-access-derived user tag must survive intact.
+        static_assert(is_same_v<typename ranges::iterator_t<decltype(views::transform(
+                                    declval<P130TaggedRange<P130RATag> &>(), P130Identity))>
+                                    ::iterator_category,
+                                P130RATag>, "L12");
+    }
+
+    printf("[CXX] PASS phase130: [iterator.traits]/3 -- all four cases live "
+           "and mutually exclusive (all-four members, cpp17-input synthesis, "
+           "output-only, and the empty case a C++20-only iterator needs), "
+           "pointer optional in /3.1 and derived from operator-> in /3.2, the "
+           "full cpp17-* concept ladder, indirectly_readable_traits with both "
+           "value_type/element_type tie-breaks, iter_value_t/iter_difference_t "
+           "on the ITER_TRAITS dispatch, ITER_CONCEPT reading the CLASS's own "
+           "members with the random-access fallback ([iterator.concepts."
+           "general]/1 Example 1), [counted.iterator]'s forwarding "
+           "specialization plus its present-only-if member set and both "
+           "post-increments, nine adaptors that reach a traits-less range "
+           "(take/counted/transform/filter/stride/join/drop/as_rvalue/"
+           "lazy_split) now compiling and running, filter's and transform's "
+           "category ladders pinned rung by rung with tags that sit BETWEEN "
+           "two standard ones, and 43 zoo pins that did not move\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -27943,6 +28807,7 @@ int main()
     Phase127();
     Phase128();
     Phase129();
+    Phase130();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

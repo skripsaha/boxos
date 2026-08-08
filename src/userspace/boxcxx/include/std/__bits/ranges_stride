@@ -133,7 +133,10 @@ stride_view(R &&, range_difference_t<R>) -> stride_view<views::all_t<R>>;
 template <input_range V>
     requires view<V>
 template <bool Const>
-struct stride_view<V>::Iterator {
+struct stride_view<V>::Iterator
+    : __views_detail::MaybeCategory<__views_detail::MaybeConst<Const, V>,
+                                    random_access_iterator_tag,
+                                    random_access_iterator_tag> {
     using Parent = __views_detail::MaybeConst<Const, stride_view>;
     using Base   = __views_detail::MaybeConst<Const, V>;
 
@@ -142,15 +145,15 @@ struct stride_view<V>::Iterator {
     range_difference_t<Base> __stride  = 0;
     range_difference_t<Base> __missing = 0;
 
-    using __BaseCat = typename iterator_traits<iterator_t<Base>>::iterator_category; // always well-formed (boxcxx always-declares)
-
     using iterator_concept = conditional_t<
         random_access_range<Base>, random_access_iterator_tag,
         conditional_t<bidirectional_range<Base>, bidirectional_iterator_tag,
                       conditional_t<forward_range<Base>, forward_iterator_tag, input_iterator_tag>>>;
-    using iterator_category = conditional_t<
-        !forward_range<Base>, input_iterator_tag,
-        conditional_t<derived_from<__BaseCat, random_access_iterator_tag>, random_access_iterator_tag, __BaseCat>>;
+    // iterator_category comes from the MaybeCategory base — present only if
+    // Base is a forward_range ([range.stride.iterator]). It used to be
+    // declared here unconditionally on the claim that the base category is
+    // "always well-formed (boxcxx always-declares)"; [iterator.traits]/3.4
+    // retired that invariant.
     using value_type        = range_value_t<Base>;
     using difference_type   = range_difference_t<Base>;
     using pointer             = void; // boxcxx-added
