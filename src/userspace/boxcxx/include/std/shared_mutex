@@ -25,6 +25,7 @@
 #define BOXCXX_SHARED_MUTEX
 
 #include <mutex> // atomic, <chrono> bits, __mutex_impl::TimedBackoff, lock
+#include <__bits/version_sync>
                  // tags, system_error; transitively __boxcxx_atomic_wait_cycle
 
 namespace std {

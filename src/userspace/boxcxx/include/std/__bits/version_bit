@@ -1,0 +1,23 @@
+// boxcxx — <__bits/version_bit>
+//
+// The feature-test macros [version.syn] owned by <bit>.
+#ifndef BOXCXX_BITS_VERSION_BIT
+#define BOXCXX_BITS_VERSION_BIT
+
+#ifndef __cpp_lib_bit_cast
+#  define __cpp_lib_bit_cast 201806L
+#endif
+#ifndef __cpp_lib_bitops
+#  define __cpp_lib_bitops 201907L
+#endif
+#ifndef __cpp_lib_byteswap
+#  define __cpp_lib_byteswap 202110L
+#endif
+#ifndef __cpp_lib_endian
+#  define __cpp_lib_endian 201907L
+#endif
+#ifndef __cpp_lib_int_pow2
+#  define __cpp_lib_int_pow2 202002L
+#endif
+
+#endif // BOXCXX_BITS_VERSION_BIT

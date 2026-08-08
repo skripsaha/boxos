@@ -3,6 +3,7 @@
 #define BOXCXX_NUMBERS
 
 #include <concepts>
+#include <__bits/version_numbers>
 
 namespace std::numbers {
 

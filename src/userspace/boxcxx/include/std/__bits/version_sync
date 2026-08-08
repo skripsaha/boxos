@@ -1,0 +1,26 @@
+// boxcxx — <__bits/version_sync>
+//
+// The feature-test macros [version.syn] owned by the standalone
+// synchronisation headers <latch>, <semaphore> and <shared_mutex>. One
+// leaf for the family, included by all three, for the same
+// [support.limits.general] per-header reason as <__bits/version_iostreams>
+// -- see that file's comment.
+//
+// __cpp_lib_barrier is NOT defined -- see <version>'s list.
+#ifndef BOXCXX_BITS_VERSION_SYNC
+#define BOXCXX_BITS_VERSION_SYNC
+
+#ifndef __cpp_lib_latch
+#  define __cpp_lib_latch 201907L
+#endif
+#ifndef __cpp_lib_semaphore
+#  define __cpp_lib_semaphore 201907L
+#endif
+#ifndef __cpp_lib_shared_mutex
+#  define __cpp_lib_shared_mutex 201505L
+#endif
+#ifndef __cpp_lib_shared_timed_mutex
+#  define __cpp_lib_shared_timed_mutex 201402L
+#endif
+
+#endif // BOXCXX_BITS_VERSION_SYNC

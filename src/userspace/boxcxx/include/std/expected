@@ -29,6 +29,7 @@
 #include <optional>
 #include <type_traits>
 #include <utility>
+#include <__bits/version_expected>
 
 namespace std {
 

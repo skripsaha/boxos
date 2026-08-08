@@ -1,0 +1,73 @@
+// boxcxx — <__bits/version_type_traits>
+//
+// The feature-test macros [version.syn] owned by <type_traits>.
+//
+// __cpp_lib_reference_from_temporary mirrors <type_traits>'s own
+// __has_builtin guard: both traits it names are compiler-builtin-backed
+// with no library fallback, so the macro must appear exactly when they do.
+//
+// Deliberately absent (see <version>'s list): is_swappable,
+// is_layout_compatible, is_pointer_interconvertible, is_implicit_lifetime,
+// common_reference, transformation_trait_aliases, result_of_sfinae.
+#ifndef BOXCXX_BITS_VERSION_TYPE_TRAITS
+#define BOXCXX_BITS_VERSION_TYPE_TRAITS
+
+#ifndef __cpp_lib_bool_constant
+#  define __cpp_lib_bool_constant 201505L
+#endif
+#ifndef __cpp_lib_bounded_array_traits
+#  define __cpp_lib_bounded_array_traits 201902L
+#endif
+#ifndef __cpp_lib_has_unique_object_representations
+#  define __cpp_lib_has_unique_object_representations 201606L
+#endif
+#ifndef __cpp_lib_integral_constant_callable
+#  define __cpp_lib_integral_constant_callable 201304L
+#endif
+#ifndef __cpp_lib_is_aggregate
+#  define __cpp_lib_is_aggregate 201703L
+#endif
+#ifndef __cpp_lib_is_constant_evaluated
+#  define __cpp_lib_is_constant_evaluated 201811L
+#endif
+#ifndef __cpp_lib_is_final
+#  define __cpp_lib_is_final 201402L
+#endif
+#ifndef __cpp_lib_is_invocable
+#  define __cpp_lib_is_invocable 201703L
+#endif
+#ifndef __cpp_lib_is_nothrow_convertible
+#  define __cpp_lib_is_nothrow_convertible 201806L
+#endif
+#ifndef __cpp_lib_is_null_pointer
+#  define __cpp_lib_is_null_pointer 201309L
+#endif
+#ifndef __cpp_lib_is_scoped_enum
+#  define __cpp_lib_is_scoped_enum 202011L
+#endif
+#ifndef __cpp_lib_logical_traits
+#  define __cpp_lib_logical_traits 201510L
+#endif
+#if defined(__has_builtin) && __has_builtin(__reference_constructs_from_temporary) && \
+    __has_builtin(__reference_converts_from_temporary)
+#  ifndef __cpp_lib_reference_from_temporary
+#    define __cpp_lib_reference_from_temporary 202202L
+#  endif
+#endif
+#ifndef __cpp_lib_remove_cvref
+#  define __cpp_lib_remove_cvref 201711L
+#endif
+#ifndef __cpp_lib_type_identity
+#  define __cpp_lib_type_identity 201806L
+#endif
+#ifndef __cpp_lib_type_trait_variable_templates
+#  define __cpp_lib_type_trait_variable_templates 201510L
+#endif
+#ifndef __cpp_lib_unwrap_ref
+#  define __cpp_lib_unwrap_ref 201811L
+#endif
+#ifndef __cpp_lib_void_t
+#  define __cpp_lib_void_t 201411L
+#endif
+
+#endif // BOXCXX_BITS_VERSION_TYPE_TRAITS

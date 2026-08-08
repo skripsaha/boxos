@@ -22,6 +22,7 @@
                  // transitively __boxcxx_atomic_wait_cycle
 #include <cstddef>
 #include <cstdint>
+#include <__bits/version_sync>
 
 namespace std {
 

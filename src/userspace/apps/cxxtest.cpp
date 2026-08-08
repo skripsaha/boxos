@@ -21,6 +21,328 @@
 #include "box/cpu.h"      // cpu_has_fsgsbase (phase35 spawn guard)
 #include "box/cxx/tls_strand.h"  // __boxcxx_tls_strand_init + thread-storage hooks (phase36)
 
+// ── Ф31a-3: per-header feature-test-macro visibility ────────────────────
+// [support.limits.general] requires every __cpp_lib_* macro to be visible to
+// a TU that includes only its OWNING header. cxxtest itself includes
+// <version> further down, which would mask a leaf that was never wired into
+// its owning header -- so the check has to happen HERE, before <version> is
+// ever seen, with each owning header pulled in and interrogated immediately.
+// Headers are ordered foundational-first so each one is questioned as early
+// as the include graph allows. (Exact one-header-per-TU proof lives outside
+// this file: one -fsyntax-only probe per owning header.)
+#ifdef BOXCXX_VERSION
+#  error "cxxtest: <version> was pulled in before the per-header FTM block"
+#endif
+#include <cstddef>
+#ifndef __cpp_lib_byte
+#  error "__cpp_lib_byte is not visible from <cstddef> alone"
+#endif
+#include <type_traits>
+#ifndef __cpp_lib_bool_constant
+#  error "__cpp_lib_bool_constant is not visible from <type_traits> alone"
+#endif
+#ifndef __cpp_lib_bounded_array_traits
+#  error "__cpp_lib_bounded_array_traits is not visible from <type_traits> alone"
+#endif
+#ifndef __cpp_lib_has_unique_object_representations
+#  error "__cpp_lib_has_unique_object_representations is not visible from <type_traits> alone"
+#endif
+#ifndef __cpp_lib_integral_constant_callable
+#  error "__cpp_lib_integral_constant_callable is not visible from <type_traits> alone"
+#endif
+#ifndef __cpp_lib_is_aggregate
+#  error "__cpp_lib_is_aggregate is not visible from <type_traits> alone"
+#endif
+#ifndef __cpp_lib_is_constant_evaluated
+#  error "__cpp_lib_is_constant_evaluated is not visible from <type_traits> alone"
+#endif
+#ifndef __cpp_lib_is_final
+#  error "__cpp_lib_is_final is not visible from <type_traits> alone"
+#endif
+#ifndef __cpp_lib_is_invocable
+#  error "__cpp_lib_is_invocable is not visible from <type_traits> alone"
+#endif
+#ifndef __cpp_lib_is_nothrow_convertible
+#  error "__cpp_lib_is_nothrow_convertible is not visible from <type_traits> alone"
+#endif
+#ifndef __cpp_lib_is_null_pointer
+#  error "__cpp_lib_is_null_pointer is not visible from <type_traits> alone"
+#endif
+#ifndef __cpp_lib_is_scoped_enum
+#  error "__cpp_lib_is_scoped_enum is not visible from <type_traits> alone"
+#endif
+#ifndef __cpp_lib_logical_traits
+#  error "__cpp_lib_logical_traits is not visible from <type_traits> alone"
+#endif
+#ifndef __cpp_lib_reference_from_temporary
+#  error "__cpp_lib_reference_from_temporary is not visible from <type_traits> alone"
+#endif
+#ifndef __cpp_lib_remove_cvref
+#  error "__cpp_lib_remove_cvref is not visible from <type_traits> alone"
+#endif
+#ifndef __cpp_lib_type_identity
+#  error "__cpp_lib_type_identity is not visible from <type_traits> alone"
+#endif
+#ifndef __cpp_lib_type_trait_variable_templates
+#  error "__cpp_lib_type_trait_variable_templates is not visible from <type_traits> alone"
+#endif
+#ifndef __cpp_lib_unwrap_ref
+#  error "__cpp_lib_unwrap_ref is not visible from <type_traits> alone"
+#endif
+#ifndef __cpp_lib_void_t
+#  error "__cpp_lib_void_t is not visible from <type_traits> alone"
+#endif
+#include <utility>
+#ifndef __cpp_lib_as_const
+#  error "__cpp_lib_as_const is not visible from <utility> alone"
+#endif
+#ifndef __cpp_lib_constexpr_utility
+#  error "__cpp_lib_constexpr_utility is not visible from <utility> alone"
+#endif
+#ifndef __cpp_lib_exchange_function
+#  error "__cpp_lib_exchange_function is not visible from <utility> alone"
+#endif
+#ifndef __cpp_lib_forward_like
+#  error "__cpp_lib_forward_like is not visible from <utility> alone"
+#endif
+#ifndef __cpp_lib_integer_comparison_functions
+#  error "__cpp_lib_integer_comparison_functions is not visible from <utility> alone"
+#endif
+#ifndef __cpp_lib_integer_sequence
+#  error "__cpp_lib_integer_sequence is not visible from <utility> alone"
+#endif
+#ifndef __cpp_lib_to_underlying
+#  error "__cpp_lib_to_underlying is not visible from <utility> alone"
+#endif
+#ifndef __cpp_lib_tuples_by_type
+#  error "__cpp_lib_tuples_by_type is not visible from <utility> alone"
+#endif
+#ifndef __cpp_lib_unreachable
+#  error "__cpp_lib_unreachable is not visible from <utility> alone"
+#endif
+#include <bit>
+#ifndef __cpp_lib_bit_cast
+#  error "__cpp_lib_bit_cast is not visible from <bit> alone"
+#endif
+#ifndef __cpp_lib_bitops
+#  error "__cpp_lib_bitops is not visible from <bit> alone"
+#endif
+#ifndef __cpp_lib_byteswap
+#  error "__cpp_lib_byteswap is not visible from <bit> alone"
+#endif
+#ifndef __cpp_lib_endian
+#  error "__cpp_lib_endian is not visible from <bit> alone"
+#endif
+#ifndef __cpp_lib_int_pow2
+#  error "__cpp_lib_int_pow2 is not visible from <bit> alone"
+#endif
+#include <new>
+#ifndef __cpp_lib_destroying_delete
+#  error "__cpp_lib_destroying_delete is not visible from <new> alone"
+#endif
+#ifndef __cpp_lib_hardware_interference_size
+#  error "__cpp_lib_hardware_interference_size is not visible from <new> alone"
+#endif
+#ifndef __cpp_lib_launder
+#  error "__cpp_lib_launder is not visible from <new> alone"
+#endif
+#include <exception>
+#ifndef __cpp_lib_uncaught_exceptions
+#  error "__cpp_lib_uncaught_exceptions is not visible from <exception> alone"
+#endif
+#include <typeinfo>
+#ifndef __cpp_lib_constexpr_typeinfo
+#  error "__cpp_lib_constexpr_typeinfo is not visible from <typeinfo> alone"
+#endif
+#include <numbers>
+#ifndef __cpp_lib_math_constants
+#  error "__cpp_lib_math_constants is not visible from <numbers> alone"
+#endif
+#include <source_location>
+#ifndef __cpp_lib_source_location
+#  error "__cpp_lib_source_location is not visible from <source_location> alone"
+#endif
+#include <iterator>
+#ifndef __cpp_lib_array_constexpr
+#  error "__cpp_lib_array_constexpr is not visible from <iterator> alone"
+#endif
+#ifndef __cpp_lib_constexpr_iterator
+#  error "__cpp_lib_constexpr_iterator is not visible from <iterator> alone"
+#endif
+#ifndef __cpp_lib_make_reverse_iterator
+#  error "__cpp_lib_make_reverse_iterator is not visible from <iterator> alone"
+#endif
+#ifndef __cpp_lib_move_iterator_concept
+#  error "__cpp_lib_move_iterator_concept is not visible from <iterator> alone"
+#endif
+#ifndef __cpp_lib_null_iterators
+#  error "__cpp_lib_null_iterators is not visible from <iterator> alone"
+#endif
+#ifndef __cpp_lib_ssize
+#  error "__cpp_lib_ssize is not visible from <iterator> alone"
+#endif
+#include <array>
+#ifndef __cpp_lib_to_array
+#  error "__cpp_lib_to_array is not visible from <array> alone"
+#endif
+#include <tuple>
+#ifndef __cpp_lib_apply
+#  error "__cpp_lib_apply is not visible from <tuple> alone"
+#endif
+#ifndef __cpp_lib_constexpr_tuple
+#  error "__cpp_lib_constexpr_tuple is not visible from <tuple> alone"
+#endif
+#ifndef __cpp_lib_make_from_tuple
+#  error "__cpp_lib_make_from_tuple is not visible from <tuple> alone"
+#endif
+#ifndef __cpp_lib_tuple_element_t
+#  error "__cpp_lib_tuple_element_t is not visible from <tuple> alone"
+#endif
+#include <charconv>
+#ifndef __cpp_lib_constexpr_charconv
+#  error "__cpp_lib_constexpr_charconv is not visible from <charconv> alone"
+#endif
+#ifndef __cpp_lib_to_chars
+#  error "__cpp_lib_to_chars is not visible from <charconv> alone"
+#endif
+#include <cmath>
+#ifndef __cpp_lib_math_special_functions
+#  error "__cpp_lib_math_special_functions is not visible from <cmath> alone"
+#endif
+#include <chrono>
+#ifndef __cpp_lib_chrono_udls
+#  error "__cpp_lib_chrono_udls is not visible from <chrono> alone"
+#endif
+#include <atomic>
+#ifndef __cpp_lib_atomic_is_always_lock_free
+#  error "__cpp_lib_atomic_is_always_lock_free is not visible from <atomic> alone"
+#endif
+#ifndef __cpp_lib_atomic_lock_free_type_aliases
+#  error "__cpp_lib_atomic_lock_free_type_aliases is not visible from <atomic> alone"
+#endif
+#ifndef __cpp_lib_atomic_value_initialization
+#  error "__cpp_lib_atomic_value_initialization is not visible from <atomic> alone"
+#endif
+#include <string_view>
+#ifndef __cpp_lib_constexpr_string_view
+#  error "__cpp_lib_constexpr_string_view is not visible from <string_view> alone"
+#endif
+#ifndef __cpp_lib_starts_ends_with
+#  error "__cpp_lib_starts_ends_with is not visible from <string_view> alone"
+#endif
+#ifndef __cpp_lib_string_contains
+#  error "__cpp_lib_string_contains is not visible from <string_view> alone"
+#endif
+#include <string>
+#ifndef __cpp_lib_string_udls
+#  error "__cpp_lib_string_udls is not visible from <string> alone"
+#endif
+#ifndef __cpp_lib_containers_ranges
+#  error "__cpp_lib_containers_ranges is not visible from <string> alone"
+#endif
+#ifndef __cpp_lib_allocator_traits_is_always_equal
+#  error "__cpp_lib_allocator_traits_is_always_equal is not visible from <string> alone"
+#endif
+#include <memory>
+#ifndef __cpp_lib_addressof_constexpr
+#  error "__cpp_lib_addressof_constexpr is not visible from <memory> alone"
+#endif
+#ifndef __cpp_lib_constexpr_dynamic_alloc
+#  error "__cpp_lib_constexpr_dynamic_alloc is not visible from <memory> alone"
+#endif
+#ifndef __cpp_lib_enable_shared_from_this
+#  error "__cpp_lib_enable_shared_from_this is not visible from <memory> alone"
+#endif
+#ifndef __cpp_lib_make_unique
+#  error "__cpp_lib_make_unique is not visible from <memory> alone"
+#endif
+#ifndef __cpp_lib_out_ptr
+#  error "__cpp_lib_out_ptr is not visible from <memory> alone"
+#endif
+#ifndef __cpp_lib_raw_memory_algorithms
+#  error "__cpp_lib_raw_memory_algorithms is not visible from <memory> alone"
+#endif
+#ifndef __cpp_lib_shared_ptr_weak_type
+#  error "__cpp_lib_shared_ptr_weak_type is not visible from <memory> alone"
+#endif
+#ifndef __cpp_lib_to_address
+#  error "__cpp_lib_to_address is not visible from <memory> alone"
+#endif
+#include <memory_resource>
+#ifndef __cpp_lib_memory_resource
+#  error "__cpp_lib_memory_resource is not visible from <memory_resource> alone"
+#endif
+#ifndef __cpp_lib_polymorphic_allocator
+#  error "__cpp_lib_polymorphic_allocator is not visible from <memory_resource> alone"
+#endif
+#include <optional>
+#ifndef __cpp_lib_optional
+#  error "__cpp_lib_optional is not visible from <optional> alone"
+#endif
+#include <variant>
+#ifndef __cpp_lib_variant
+#  error "__cpp_lib_variant is not visible from <variant> alone"
+#endif
+#include <expected>
+#ifndef __cpp_lib_expected
+#  error "__cpp_lib_expected is not visible from <expected> alone"
+#endif
+#include <algorithm>
+#ifndef __cpp_lib_clamp
+#  error "__cpp_lib_clamp is not visible from <algorithm> alone"
+#endif
+#ifndef __cpp_lib_shift
+#  error "__cpp_lib_shift is not visible from <algorithm> alone"
+#endif
+#include <vector>
+#ifndef __cpp_lib_incomplete_container_elements
+#  error "__cpp_lib_incomplete_container_elements is not visible from <vector> alone"
+#endif
+#include <list>
+#ifndef __cpp_lib_list_remove_return_type
+#  error "__cpp_lib_list_remove_return_type is not visible from <list> alone"
+#endif
+#include <map>
+#ifndef __cpp_lib_associative_heterogeneous_erasure
+#  error "__cpp_lib_associative_heterogeneous_erasure is not visible from <map> alone"
+#endif
+#ifndef __cpp_lib_generic_associative_lookup
+#  error "__cpp_lib_generic_associative_lookup is not visible from <map> alone"
+#endif
+#ifndef __cpp_lib_node_extract
+#  error "__cpp_lib_node_extract is not visible from <map> alone"
+#endif
+#include <unordered_map>
+#ifndef __cpp_lib_generic_unordered_lookup
+#  error "__cpp_lib_generic_unordered_lookup is not visible from <unordered_map> alone"
+#endif
+#include <stack>
+#ifndef __cpp_lib_adaptor_iterator_pair_constructor
+#  error "__cpp_lib_adaptor_iterator_pair_constructor is not visible from <stack> alone"
+#endif
+#include <latch>
+#ifndef __cpp_lib_latch
+#  error "__cpp_lib_latch is not visible from <latch> alone"
+#endif
+#include <semaphore>
+#ifndef __cpp_lib_semaphore
+#  error "__cpp_lib_semaphore is not visible from <semaphore> alone"
+#endif
+#include <shared_mutex>
+#ifndef __cpp_lib_shared_mutex
+#  error "__cpp_lib_shared_mutex is not visible from <shared_mutex> alone"
+#endif
+#ifndef __cpp_lib_shared_timed_mutex
+#  error "__cpp_lib_shared_timed_mutex is not visible from <shared_mutex> alone"
+#endif
+#include <stop_token>
+#ifndef __cpp_lib_jthread
+#  error "__cpp_lib_jthread is not visible from <stop_token> alone"
+#endif
+#ifdef BOXCXX_VERSION
+#  error "one of the owning headers above drags in <version>"
+#endif
+
 #include <algorithm>
 #include <any>
 #include <array>
@@ -17245,7 +17567,10 @@ void Phase100()
         static_assert(__cpp_lib_ranges_enumerate >= 202302L,
                       "phase100 __cpp_lib_ranges_enumerate pin");
         static_assert(__cpp_lib_ranges_repeat >= 202207L, "phase100 __cpp_lib_ranges_repeat pin");
-        static_assert(__cpp_lib_ranges_as_const >= 202311L, "phase100 __cpp_lib_ranges_as_const pin");
+        // Was 202311L (C++26 P2836R1). Ф31a-3 found boxcxx has no
+        // basic_const_iterator operator CI() conversion, so that value
+        // overstated the feature; 202207L is the C++23 value it really has.
+        static_assert(__cpp_lib_ranges_as_const == 202207L, "phase100 __cpp_lib_ranges_as_const pin");
         static_assert(__cpp_lib_ranges_as_rvalue >= 202207L,
                       "phase100 __cpp_lib_ranges_as_rvalue pin");
         static_assert(__cpp_lib_ranges_fold >= 202207L, "phase100 __cpp_lib_ranges_fold pin");
@@ -28656,6 +28981,751 @@ void Phase130()
            "two standard ones, and 43 zoo pins that did not move\n");
 }
 
+// ── phase131 fixtures ────────────────────────────────────────────────────
+
+struct P131Incomplete;
+
+// [container.requirements.general]: vector/list/forward_list must accept an
+// incomplete element type at the point the container type is named.
+struct P131IncompleteHolder {
+    std::vector<P131Incomplete>       v;
+    std::list<P131Incomplete>         l;
+    std::forward_list<P131Incomplete> f;
+};
+
+struct P131Incomplete {
+    int value;
+};
+
+struct P131TransparentHash {
+    using is_transparent = void;
+    size_t operator()(std::string_view s) const
+    {
+        size_t h = 1469598103934665603ull;
+        for (char c : s) {
+            h ^= size_t(static_cast<unsigned char>(c));
+            h *= 1099511628211ull;
+        }
+        return h;
+    }
+    size_t operator()(const std::string &s) const
+    {
+        return (*this)(std::string_view(s));
+    }
+};
+
+struct P131Shared : std::enable_shared_from_this<P131Shared> {
+    int tag = 77;
+};
+
+enum P131Unscoped : int { P131UnscopedValue = 3 };
+enum class P131Scoped : int { Value = 4 };
+
+constexpr int P131AllocRoundTrip()
+{
+    std::allocator<int> a;
+    int                *p = a.allocate(3);
+    std::construct_at(p, 11);
+    std::construct_at(p + 1, 22);
+    int sum = p[0] + p[1];
+    std::destroy_n(p, 2);
+    a.deallocate(p, 3);
+    return sum;
+}
+
+constexpr int P131CharconvRoundTrip()
+{
+    char buf[16] = {};
+    auto r       = std::to_chars(buf, buf + 16, -4242);
+    int  out     = 0;
+    std::from_chars(buf, r.ptr, out);
+    return out;
+}
+
+constexpr int P131IteratorBattery()
+{
+    std::array<int, 4> a{1, 2, 3, 4};
+    auto               rev  = std::make_reverse_iterator(a.end());
+    auto               mv   = std::move_iterator(a.begin());
+    auto               it   = a.begin();
+    std::advance(it, 2);
+    return *rev + *mv + int(std::distance(a.begin(), it)) + *std::next(a.begin()) +
+           *std::prev(a.end()) + int(std::size(a)) + int(std::ssize(a)) +
+           int(!std::empty(a)) + *std::data(a);
+}
+
+bool P131NearEq(double a, double b)
+{
+    double d = a - b;
+    if (d < 0) d = -d;
+    return d < 1e-9;
+}
+
+void Phase131()
+{
+    using namespace std;
+
+    // ── (A) value pins for every macro Ф31a-3 defines ───────────────────
+    // The values are the C++23 ones from N4950's [version.syn], cross-checked
+    // against libstdc++'s bits/version.def. == , not >=: a later value means a
+    // later paper, and boxcxx implements exactly the C++23 papers.
+    static_assert(__cpp_lib_as_const == 201510L, "phase131 as_const");
+    static_assert(__cpp_lib_constexpr_utility == 201811L, "phase131 constexpr_utility");
+    static_assert(__cpp_lib_exchange_function == 201304L, "phase131 exchange_function");
+    static_assert(__cpp_lib_forward_like == 202207L, "phase131 forward_like");
+    static_assert(__cpp_lib_integer_comparison_functions == 202002L,
+                  "phase131 integer_comparison_functions");
+    static_assert(__cpp_lib_integer_sequence == 201304L, "phase131 integer_sequence");
+    static_assert(__cpp_lib_to_underlying == 202102L, "phase131 to_underlying");
+    static_assert(__cpp_lib_tuples_by_type == 201304L, "phase131 tuples_by_type");
+    static_assert(__cpp_lib_unreachable == 202202L, "phase131 unreachable");
+
+    static_assert(__cpp_lib_apply == 201603L, "phase131 apply");
+    static_assert(__cpp_lib_constexpr_tuple == 201811L, "phase131 constexpr_tuple");
+    static_assert(__cpp_lib_make_from_tuple == 201606L, "phase131 make_from_tuple");
+    static_assert(__cpp_lib_tuple_element_t == 201402L, "phase131 tuple_element_t");
+
+    static_assert(__cpp_lib_to_array == 201907L, "phase131 to_array");
+    static_assert(__cpp_lib_array_constexpr == 201811L, "phase131 array_constexpr");
+    static_assert(__cpp_lib_constexpr_iterator == 201811L, "phase131 constexpr_iterator");
+    static_assert(__cpp_lib_make_reverse_iterator == 201402L, "phase131 make_reverse_iterator");
+    static_assert(__cpp_lib_move_iterator_concept == 202207L, "phase131 move_iterator_concept");
+    static_assert(__cpp_lib_null_iterators == 201304L, "phase131 null_iterators");
+    static_assert(__cpp_lib_ssize == 201902L, "phase131 ssize");
+
+    static_assert(__cpp_lib_bit_cast == 201806L, "phase131 bit_cast");
+    static_assert(__cpp_lib_bitops == 201907L, "phase131 bitops");
+    static_assert(__cpp_lib_byteswap == 202110L, "phase131 byteswap");
+    static_assert(__cpp_lib_endian == 201907L, "phase131 endian");
+    static_assert(__cpp_lib_int_pow2 == 202002L, "phase131 int_pow2");
+    static_assert(__cpp_lib_byte == 201603L, "phase131 byte");
+
+    static_assert(__cpp_lib_destroying_delete == 201806L, "phase131 destroying_delete");
+    static_assert(__cpp_lib_hardware_interference_size == 201703L,
+                  "phase131 hardware_interference_size");
+    static_assert(__cpp_lib_launder == 201606L, "phase131 launder");
+    static_assert(__cpp_lib_math_constants == 201907L, "phase131 math_constants");
+    static_assert(__cpp_lib_uncaught_exceptions == 201411L, "phase131 uncaught_exceptions");
+    static_assert(__cpp_lib_constexpr_typeinfo == 202106L, "phase131 constexpr_typeinfo");
+    static_assert(__cpp_lib_source_location == 201907L, "phase131 source_location");
+
+    static_assert(__cpp_lib_bool_constant == 201505L, "phase131 bool_constant");
+    static_assert(__cpp_lib_bounded_array_traits == 201902L, "phase131 bounded_array_traits");
+    static_assert(__cpp_lib_has_unique_object_representations == 201606L,
+                  "phase131 has_unique_object_representations");
+    static_assert(__cpp_lib_integral_constant_callable == 201304L,
+                  "phase131 integral_constant_callable");
+    static_assert(__cpp_lib_is_aggregate == 201703L, "phase131 is_aggregate");
+    static_assert(__cpp_lib_is_constant_evaluated == 201811L, "phase131 is_constant_evaluated");
+    static_assert(__cpp_lib_is_final == 201402L, "phase131 is_final");
+    static_assert(__cpp_lib_is_invocable == 201703L, "phase131 is_invocable");
+    static_assert(__cpp_lib_is_nothrow_convertible == 201806L, "phase131 is_nothrow_convertible");
+    static_assert(__cpp_lib_is_null_pointer == 201309L, "phase131 is_null_pointer");
+    static_assert(__cpp_lib_is_scoped_enum == 202011L, "phase131 is_scoped_enum");
+    static_assert(__cpp_lib_logical_traits == 201510L, "phase131 logical_traits");
+    static_assert(__cpp_lib_reference_from_temporary == 202202L,
+                  "phase131 reference_from_temporary");
+    static_assert(__cpp_lib_remove_cvref == 201711L, "phase131 remove_cvref");
+    static_assert(__cpp_lib_type_identity == 201806L, "phase131 type_identity");
+    static_assert(__cpp_lib_type_trait_variable_templates == 201510L,
+                  "phase131 type_trait_variable_templates");
+    static_assert(__cpp_lib_unwrap_ref == 201811L, "phase131 unwrap_ref");
+    static_assert(__cpp_lib_void_t == 201411L, "phase131 void_t");
+
+    static_assert(__cpp_lib_atomic_is_always_lock_free == 201603L,
+                  "phase131 atomic_is_always_lock_free");
+    static_assert(__cpp_lib_atomic_lock_free_type_aliases == 201907L,
+                  "phase131 atomic_lock_free_type_aliases");
+    static_assert(__cpp_lib_atomic_value_initialization == 201911L,
+                  "phase131 atomic_value_initialization");
+
+    static_assert(__cpp_lib_addressof_constexpr == 201603L, "phase131 addressof_constexpr");
+    static_assert(__cpp_lib_constexpr_dynamic_alloc == 201907L,
+                  "phase131 constexpr_dynamic_alloc");
+    static_assert(__cpp_lib_enable_shared_from_this == 201603L,
+                  "phase131 enable_shared_from_this");
+    static_assert(__cpp_lib_make_unique == 201304L, "phase131 make_unique");
+    static_assert(__cpp_lib_raw_memory_algorithms == 201606L, "phase131 raw_memory_algorithms");
+    static_assert(__cpp_lib_shared_ptr_weak_type == 201606L, "phase131 shared_ptr_weak_type");
+    static_assert(__cpp_lib_to_address == 201711L, "phase131 to_address");
+    static_assert(__cpp_lib_memory_resource == 201603L, "phase131 memory_resource");
+    static_assert(__cpp_lib_polymorphic_allocator == 201902L, "phase131 polymorphic_allocator");
+
+    static_assert(__cpp_lib_constexpr_charconv == 202207L, "phase131 constexpr_charconv");
+    static_assert(__cpp_lib_to_chars == 201611L, "phase131 to_chars");
+    static_assert(__cpp_lib_chrono_udls == 201304L, "phase131 chrono_udls");
+    static_assert(__cpp_lib_math_special_functions == 201603L,
+                  "phase131 math_special_functions");
+
+    static_assert(__cpp_lib_constexpr_string_view == 201811L, "phase131 constexpr_string_view");
+    static_assert(__cpp_lib_starts_ends_with == 201711L, "phase131 starts_ends_with");
+    static_assert(__cpp_lib_string_contains == 202011L, "phase131 string_contains");
+    static_assert(__cpp_lib_string_udls == 201304L, "phase131 string_udls");
+
+    static_assert(__cpp_lib_optional == 202110L, "phase131 optional");
+    static_assert(__cpp_lib_variant == 202106L, "phase131 variant");
+    static_assert(__cpp_lib_expected == 202211L, "phase131 expected");
+
+    static_assert(__cpp_lib_clamp == 201603L, "phase131 clamp");
+    static_assert(__cpp_lib_shift == 202202L, "phase131 shift");
+
+    static_assert(__cpp_lib_adaptor_iterator_pair_constructor == 202106L,
+                  "phase131 adaptor_iterator_pair_constructor");
+    static_assert(__cpp_lib_allocator_traits_is_always_equal == 201411L,
+                  "phase131 allocator_traits_is_always_equal");
+    static_assert(__cpp_lib_associative_heterogeneous_erasure == 202110L,
+                  "phase131 associative_heterogeneous_erasure");
+    static_assert(__cpp_lib_generic_associative_lookup == 201304L,
+                  "phase131 generic_associative_lookup");
+    static_assert(__cpp_lib_generic_unordered_lookup == 201811L,
+                  "phase131 generic_unordered_lookup");
+    static_assert(__cpp_lib_incomplete_container_elements == 201505L,
+                  "phase131 incomplete_container_elements");
+    static_assert(__cpp_lib_list_remove_return_type == 201806L,
+                  "phase131 list_remove_return_type");
+    static_assert(__cpp_lib_node_extract == 201606L, "phase131 node_extract");
+
+    static_assert(__cpp_lib_jthread == 201911L, "phase131 jthread");
+    static_assert(__cpp_lib_latch == 201907L, "phase131 latch");
+    static_assert(__cpp_lib_semaphore == 201907L, "phase131 semaphore");
+    static_assert(__cpp_lib_shared_mutex == 201505L, "phase131 shared_mutex");
+    static_assert(__cpp_lib_shared_timed_mutex == 201402L, "phase131 shared_timed_mutex");
+
+    // <version> must expose the two self-declaring macros too.
+    static_assert(__cpp_lib_coroutine == 201902L, "phase131 coroutine");
+    static_assert(__cpp_lib_generator == 202207L, "phase131 generator");
+
+    // ── (B) absence guards: every macro Ф31a-3 deliberately did NOT define ──
+    // A macro that overstates is worse than a missing one. Each of these names
+    // a feature boxcxx implements only partially; <version>'s own comment
+    // carries the specific reason. If a gap gets closed, the guard fires and
+    // whoever closed it moves the macro into the owning header's leaf.
+#ifdef __cpp_lib_algorithm_iterator_requirements
+#  error "phase131: __cpp_lib_algorithm_iterator_requirements must stay undefined"
+#endif
+#ifdef __cpp_lib_allocate_at_least
+#  error "phase131: __cpp_lib_allocate_at_least must stay undefined"
+#endif
+#ifdef __cpp_lib_assume_aligned
+#  error "phase131: __cpp_lib_assume_aligned must stay undefined"
+#endif
+#ifdef __cpp_lib_atomic_flag_test
+#  error "phase131: __cpp_lib_atomic_flag_test must stay undefined"
+#endif
+#ifdef __cpp_lib_atomic_float
+#  error "phase131: __cpp_lib_atomic_float must stay undefined"
+#endif
+#ifdef __cpp_lib_atomic_ref
+#  error "phase131: __cpp_lib_atomic_ref must stay undefined"
+#endif
+#ifdef __cpp_lib_atomic_shared_ptr
+#  error "phase131: __cpp_lib_atomic_shared_ptr must stay undefined"
+#endif
+#ifdef __cpp_lib_atomic_wait
+#  error "phase131: __cpp_lib_atomic_wait must stay undefined"
+#endif
+#ifdef __cpp_lib_barrier
+#  error "phase131: __cpp_lib_barrier must stay undefined"
+#endif
+#ifdef __cpp_lib_char8_t
+#  error "phase131: __cpp_lib_char8_t must stay undefined"
+#endif
+#ifdef __cpp_lib_chrono
+#  error "phase131: __cpp_lib_chrono must stay undefined"
+#endif
+#ifdef __cpp_lib_common_reference
+#  error "phase131: __cpp_lib_common_reference must stay undefined"
+#endif
+#ifdef __cpp_lib_common_reference_wrapper
+#  error "phase131: __cpp_lib_common_reference_wrapper must stay undefined"
+#endif
+#ifdef __cpp_lib_concepts
+#  error "phase131: __cpp_lib_concepts must stay undefined"
+#endif
+#ifdef __cpp_lib_constexpr_cmath
+#  error "phase131: __cpp_lib_constexpr_cmath must stay undefined"
+#endif
+#ifdef __cpp_lib_constexpr_memory
+#  error "phase131: __cpp_lib_constexpr_memory must stay undefined"
+#endif
+#ifdef __cpp_lib_constexpr_string
+#  error "phase131: __cpp_lib_constexpr_string must stay undefined"
+#endif
+#ifdef __cpp_lib_constexpr_vector
+#  error "phase131: __cpp_lib_constexpr_vector must stay undefined"
+#endif
+#ifdef __cpp_lib_erase_if
+#  error "phase131: __cpp_lib_erase_if must stay undefined"
+#endif
+#ifdef __cpp_lib_format
+#  error "phase131: __cpp_lib_format must stay undefined"
+#endif
+#ifdef __cpp_lib_formatters
+#  error "phase131: __cpp_lib_formatters must stay undefined"
+#endif
+#ifdef __cpp_lib_hypot
+#  error "phase131: __cpp_lib_hypot must stay undefined"
+#endif
+#ifdef __cpp_lib_interpolate
+#  error "phase131: __cpp_lib_interpolate must stay undefined"
+#endif
+#ifdef __cpp_lib_is_implicit_lifetime
+#  error "phase131: __cpp_lib_is_implicit_lifetime must stay undefined"
+#endif
+#ifdef __cpp_lib_is_layout_compatible
+#  error "phase131: __cpp_lib_is_layout_compatible must stay undefined"
+#endif
+#ifdef __cpp_lib_is_pointer_interconvertible
+#  error "phase131: __cpp_lib_is_pointer_interconvertible must stay undefined"
+#endif
+#ifdef __cpp_lib_is_swappable
+#  error "phase131: __cpp_lib_is_swappable must stay undefined"
+#endif
+#ifdef __cpp_lib_map_try_emplace
+#  error "phase131: __cpp_lib_map_try_emplace must stay undefined"
+#endif
+#ifdef __cpp_lib_modules
+#  error "phase131: __cpp_lib_modules must stay undefined"
+#endif
+#ifdef __cpp_lib_nonmember_container_access
+#  error "phase131: __cpp_lib_nonmember_container_access must stay undefined"
+#endif
+#ifdef __cpp_lib_parallel_algorithm
+#  error "phase131: __cpp_lib_parallel_algorithm must stay undefined"
+#endif
+#ifdef __cpp_lib_print
+#  error "phase131: __cpp_lib_print must stay undefined"
+#endif
+#ifdef __cpp_lib_result_of_sfinae
+#  error "phase131: __cpp_lib_result_of_sfinae must stay undefined"
+#endif
+#ifdef __cpp_lib_robust_nonmodifying_seq_ops
+#  error "phase131: __cpp_lib_robust_nonmodifying_seq_ops must stay undefined"
+#endif
+#ifdef __cpp_lib_sample
+#  error "phase131: __cpp_lib_sample must stay undefined"
+#endif
+#ifdef __cpp_lib_scoped_lock
+#  error "phase131: __cpp_lib_scoped_lock must stay undefined"
+#endif
+#ifdef __cpp_lib_shared_ptr_arrays
+#  error "phase131: __cpp_lib_shared_ptr_arrays must stay undefined"
+#endif
+#ifdef __cpp_lib_smart_ptr_for_overwrite
+#  error "phase131: __cpp_lib_smart_ptr_for_overwrite must stay undefined"
+#endif
+#ifdef __cpp_lib_span
+#  error "phase131: __cpp_lib_span must stay undefined"
+#endif
+#ifdef __cpp_lib_start_lifetime_as
+#  error "phase131: __cpp_lib_start_lifetime_as must stay undefined"
+#endif
+#ifdef __cpp_lib_string_resize_and_overwrite
+#  error "phase131: __cpp_lib_string_resize_and_overwrite must stay undefined"
+#endif
+#ifdef __cpp_lib_string_view
+#  error "phase131: __cpp_lib_string_view must stay undefined"
+#endif
+#ifdef __cpp_lib_three_way_comparison
+#  error "phase131: __cpp_lib_three_way_comparison must stay undefined"
+#endif
+#ifdef __cpp_lib_transformation_trait_aliases
+#  error "phase131: __cpp_lib_transformation_trait_aliases must stay undefined"
+#endif
+#ifdef __cpp_lib_transparent_operators
+#  error "phase131: __cpp_lib_transparent_operators must stay undefined"
+#endif
+#ifdef __cpp_lib_tuple_like
+#  error "phase131: __cpp_lib_tuple_like must stay undefined"
+#endif
+#ifdef __cpp_lib_unordered_map_try_emplace
+#  error "phase131: __cpp_lib_unordered_map_try_emplace must stay undefined"
+#endif
+
+    // ── (C) <utility> ───────────────────────────────────────────────────
+    {
+        constexpr int k = 5;
+        static_assert(is_same_v<decltype(as_const(k)), const int &>, "phase131 as_const type");
+        static_assert(is_same_v<decltype(forward_like<const int &>(k)), const int &>,
+                      "phase131 forward_like lvalue+const");
+        static_assert(is_same_v<decltype(forward_like<int>(k)), const int &&>,
+                      "phase131 forward_like rvalue keeps constness of U");
+        static_assert(cmp_less(-1, 1u) && !cmp_greater(-1, 1u) && cmp_not_equal(-1, 1u),
+                      "phase131 cmp_* mixed signedness");
+        static_assert(in_range<unsigned char>(255) && !in_range<unsigned char>(256),
+                      "phase131 in_range boundary");
+        static_assert(to_underlying(P131Scoped::Value) == 4, "phase131 to_underlying");
+        static_assert(index_sequence_for<int, char, long>::size() == 3,
+                      "phase131 index_sequence_for");
+        static_assert(is_same_v<make_index_sequence<3>, index_sequence<0, 1, 2>>,
+                      "phase131 make_index_sequence");
+
+        pair<int, int> a{1, 2};
+        pair<int, int> b{3, 4};
+        a.swap(b);
+        Check(a.first == 3 && b.first == 1, "phase131 (1) constexpr_utility pair::swap");
+        Check(exchange(a.first, 9) == 3 && a.first == 9,
+              "phase131 (2) exchange_function returns the old value");
+        Check(get<0>(a) == 9 && get<int>(pair<int, char>{7, 'x'}) == 7,
+              "phase131 (3) tuples_by_type get<T> on pair");
+    }
+
+    // ── (D) <tuple> ─────────────────────────────────────────────────────
+    {
+        static_assert(is_same_v<tuple_element_t<1, tuple<int, char, long>>, char>,
+                      "phase131 tuple_element_t");
+        static_assert(get<long>(tuple<int, long>{1, 2L}) == 2L,
+                      "phase131 tuples_by_type get<T> on tuple");
+
+        auto t = make_tuple(3, 4);
+        Check(apply([](int x, int y) { return x * y; }, t) == 12, "phase131 (4) apply");
+        struct Point {
+            int x, y;
+        };
+        Point p = make_from_tuple<Point>(t);
+        Check(p.x == 3 && p.y == 4, "phase131 (5) make_from_tuple");
+
+        tuple<int, int> u{1, 2};
+        tuple<int, int> v{5, 6};
+        u.swap(v);
+        Check(get<0>(u) == 5 && get<0>(v) == 1, "phase131 (6) constexpr_tuple swap");
+    }
+
+    // ── (E) <array> + <iterator> ────────────────────────────────────────
+    {
+        constexpr auto arr = to_array({1, 2, 3});
+        static_assert(arr.size() == 3 && arr[2] == 3, "phase131 to_array");
+        static_assert(array<int, 2>{1, 2} == array<int, 2>{1, 2}, "phase131 array_constexpr ==");
+        static_assert(P131IteratorBattery() == 4 + 1 + 2 + 2 + 4 + 4 + 4 + 1 + 1,
+                      "phase131 constexpr_iterator + make_reverse_iterator + ssize");
+        static_assert(
+            is_same_v<move_iterator<int *>::iterator_concept, random_access_iterator_tag>,
+            "phase131 move_iterator_concept");
+        static_assert(is_same_v<decltype(ssize(arr)), ptrdiff_t>, "phase131 ssize is signed");
+
+        vector<int>::iterator       vi{};
+        vector<int>::iterator       vj{};
+        map<int, int>::iterator     mi{};
+        map<int, int>::iterator     mj{};
+        Check(vi == vj && mi == mj,
+              "phase131 (7) null_iterators: value-initialized iterators compare equal");
+    }
+
+    // ── (F) <bit> + <cstddef> + <new> + <numbers> ───────────────────────
+    {
+        static_assert(bit_cast<unsigned>(1.0f) == 0x3F800000u, "phase131 bit_cast");
+        static_assert(popcount(0xF0u) == 4 && countl_zero(uint8_t(1)) == 7 &&
+                          countr_zero(8u) == 3 && rotl(uint8_t(0x81), 1) == 0x03,
+                      "phase131 bitops");
+        static_assert(byteswap(uint32_t(0x11223344)) == 0x44332211u, "phase131 byteswap");
+        static_assert(endian::native == endian::little, "phase131 endian on x86-64");
+        static_assert(has_single_bit(8u) && bit_ceil(5u) == 8u && bit_floor(5u) == 4u &&
+                          bit_width(5u) == 3,
+                      "phase131 int_pow2");
+        static_assert(to_integer<int>(byte{0xF0} & byte{0x3C}) == 0x30, "phase131 byte ops");
+        static_assert(hardware_destructive_interference_size == 64 &&
+                          hardware_constructive_interference_size == 64,
+                      "phase131 hardware_interference_size");
+        static_assert(is_class_v<destroying_delete_t>, "phase131 destroying_delete_t");
+        static_assert(numbers::pi_v<float> > 3.14f && numbers::e > 2.718 &&
+                          numbers::sqrt2 > 1.414 && numbers::egamma > 0.577 &&
+                          numbers::phi > 1.618,
+                      "phase131 math_constants");
+
+        int  storage = 5;
+        int *laund   = launder(&storage);
+        Check(*laund == 5, "phase131 (8) launder round-trips a live object");
+        Check(uncaught_exceptions() == 0,
+              "phase131 (9) uncaught_exceptions is 0 outside a throw");
+        Check(typeid(int) == typeid(int) && !(typeid(int) == typeid(long)),
+              "phase131 (10) constexpr_typeinfo operator==");
+        static_assert(typeid(int) == typeid(int), "phase131 typeid in a constant expression");
+    }
+
+    // ── (G) <type_traits> ───────────────────────────────────────────────
+    {
+        static_assert(bool_constant<true>::value && integral_constant<int, 7>{}() == 7,
+                      "phase131 bool_constant + integral_constant_callable");
+        static_assert(is_bounded_array_v<int[3]> && !is_bounded_array_v<int[]> &&
+                          is_unbounded_array_v<int[]>,
+                      "phase131 bounded_array_traits");
+        static_assert(has_unique_object_representations_v<int>,
+                      "phase131 has_unique_object_representations");
+        static_assert(is_aggregate_v<P131Incomplete> && !is_final_v<P131Incomplete>,
+                      "phase131 is_aggregate + is_final");
+        static_assert(is_constant_evaluated(), "phase131 is_constant_evaluated");
+        static_assert(is_invocable_v<int (*)(int), int> && is_invocable_r_v<long, int (*)(int), int> &&
+                          is_same_v<invoke_result_t<int (*)(int), int>, int>,
+                      "phase131 is_invocable family");
+        static_assert(is_nothrow_convertible_v<int, long>, "phase131 is_nothrow_convertible");
+        static_assert(is_null_pointer_v<nullptr_t>, "phase131 is_null_pointer");
+        static_assert(is_scoped_enum_v<P131Scoped> && !is_scoped_enum_v<P131Unscoped>,
+                      "phase131 is_scoped_enum");
+        static_assert(conjunction_v<true_type, true_type> &&
+                          disjunction_v<false_type, true_type> && negation_v<false_type>,
+                      "phase131 logical_traits");
+        static_assert(reference_constructs_from_temporary_v<const int &, long> &&
+                          !reference_constructs_from_temporary_v<const int &, int &> &&
+                          reference_converts_from_temporary_v<const int &, long>,
+                      "phase131 reference_from_temporary");
+        static_assert(is_same_v<remove_cvref_t<const int &>, int>, "phase131 remove_cvref");
+        static_assert(is_same_v<type_identity_t<int>, int>, "phase131 type_identity");
+        static_assert(is_same_v<void_t<int, char>, void>, "phase131 void_t");
+        static_assert(is_same_v<unwrap_reference_t<reference_wrapper<int>>, int &> &&
+                          is_same_v<unwrap_ref_decay_t<reference_wrapper<int> &>, int &>,
+                      "phase131 unwrap_ref");
+        static_assert(is_same_v<decltype(is_same_v<int, int>), const bool>,
+                      "phase131 type_trait_variable_templates");
+    }
+
+    // ── (H) <atomic> ────────────────────────────────────────────────────
+    {
+        static_assert(atomic<int>::is_always_lock_free, "phase131 atomic_is_always_lock_free");
+        static_assert(is_same_v<atomic_signed_lock_free::value_type, int> ||
+                          atomic_signed_lock_free::is_always_lock_free,
+                      "phase131 atomic_lock_free_type_aliases");
+        static_assert(atomic_unsigned_lock_free::is_always_lock_free,
+                      "phase131 atomic_unsigned_lock_free is lock free");
+
+        atomic<int>  a;
+        atomic<int *> p;
+        Check(a.load() == 0 && p.load() == nullptr,
+              "phase131 (11) atomic_value_initialization: default ctor value-initializes");
+    }
+
+    // ── (I) <memory> + <memory_resource> ────────────────────────────────
+    {
+        int  obj = 3;
+        static_assert(noexcept(addressof(obj)), "phase131 addressof is noexcept");
+        static_assert(P131AllocRoundTrip() == 33,
+                      "phase131 constexpr_dynamic_alloc: allocate/construct_at/destroy_n/"
+                      "deallocate inside a constant expression");
+        Check(addressof(obj) == &obj, "phase131 (12) addressof_constexpr");
+
+        auto up = make_unique<int>(41);
+        *up += 1;
+        Check(*up == 42 && to_address(up.get()) == up.get(),
+              "phase131 (13) make_unique + to_address");
+
+        auto sp = make_shared<P131Shared>();
+        static_assert(is_same_v<shared_ptr<int>::weak_type, weak_ptr<int>>,
+                      "phase131 shared_ptr_weak_type");
+        Check(sp->shared_from_this().get() == sp.get() &&
+                  !sp->weak_from_this().expired(),
+              "phase131 (14) enable_shared_from_this + weak_from_this");
+
+        alignas(int) unsigned char raw[4 * sizeof(int)];
+        int                       *cells = reinterpret_cast<int *>(raw);
+        uninitialized_value_construct_n(cells, 4);
+        Check(cells[0] == 0 && cells[3] == 0,
+              "phase131 (15) raw_memory_algorithms value-construct");
+        int src[4] = {1, 2, 3, 4};
+        destroy_n(cells, 4);
+        uninitialized_move(src, src + 4, cells);
+        Check(cells[2] == 3, "phase131 (16) raw_memory_algorithms uninitialized_move");
+        destroy(cells, cells + 4);
+
+        static_assert(allocator_traits<allocator<int>>::is_always_equal::value,
+                      "phase131 allocator_traits_is_always_equal");
+
+        unsigned char                      pool[256];
+        pmr::monotonic_buffer_resource     mr(pool, sizeof pool);
+        pmr::polymorphic_allocator<int>    pa(&mr);
+        int                               *pi = pa.new_object<int>(19);
+        Check(*pi == 19 && pa.resource() == &mr,
+              "phase131 (17) memory_resource + polymorphic_allocator new_object");
+        pa.delete_object(pi);
+    }
+
+    // ── (J) <charconv> + <chrono> + <cmath> ─────────────────────────────
+    {
+        static_assert(P131CharconvRoundTrip() == -4242,
+                      "phase131 constexpr_charconv: integer to_chars/from_chars round-trip "
+                      "inside a constant expression");
+        char  fbuf[32];
+        auto  fr = to_chars(fbuf, fbuf + sizeof fbuf, 0.5);
+        Check(fr.ec == errc{} && fr.ptr > fbuf,
+              "phase131 (18) to_chars covers the floating-point forms too");
+
+        using namespace chrono_literals;
+        static_assert(1h == 60min && 1s == 1000ms && 1ms == 1000us && 1us == 1000ns,
+                      "phase131 chrono_udls");
+
+        Check(legendre(2u, 0.5) == -0.125 && hermite(2u, 1.0) == 2.0 &&
+                  laguerre(1u, 2.0) == -1.0,
+              "phase131 (19) math_special_functions exact-value trio");
+        Check(P131NearEq(riemann_zeta(2.0), 1.6449340668482264) &&
+                  P131NearEq(comp_ellint_1(0.0), 1.5707963267948966) &&
+                  P131NearEq(cyl_bessel_j(0.0, 0.0), 1.0) && P131NearEq(beta(2.0, 3.0), 1.0 / 12.0),
+              "phase131 (20) math_special_functions zeta/ellint/bessel/beta");
+    }
+
+    // ── (K) <string> + <string_view> ────────────────────────────────────
+    {
+        static_assert(string_view("hello").starts_with("he") &&
+                          string_view("hello").ends_with('o') &&
+                          string_view("hello").contains(string_view("ell")),
+                      "phase131 constexpr_string_view + starts_ends_with + string_contains");
+        using namespace string_literals;
+        string s = "boxos"s;
+        Check(s.starts_with("box") && s.ends_with('s') && s.contains("xo"),
+              "phase131 (21) string_udls + starts_ends_with + string_contains on basic_string");
+    }
+
+    // ── (L) <optional> / <variant> / <expected> ─────────────────────────
+    {
+        optional<int> o = 5;
+        auto          m = o.and_then([](int x) { return optional<int>(x * 2); })
+                     .transform([](int x) { return x + 1; });
+        Check(m.has_value() && *m == 11, "phase131 (22) optional monadic and_then+transform");
+        optional<int> e;
+        Check(e.or_else([] { return optional<int>(7); }).value() == 7,
+              "phase131 (23) optional or_else");
+
+        constexpr variant<int, double> cv{2};
+        static_assert(visit([](auto x) { return double(x) * 2; }, cv) == 4.0,
+                      "phase131 constexpr visit");
+        variant<int, double> v{1.5};
+        Check(v.index() == 1 && get<double>(v) == 1.5 && holds_alternative<double>(v),
+              "phase131 (24) variant index/get/holds_alternative");
+
+        expected<int, int> ok{3};
+        Check(ok.and_then([](int x) { return expected<int, int>(x + 1); }).value() == 4,
+              "phase131 (25) expected and_then");
+        expected<int, int> bad{unexpect, 9};
+        Check(bad.transform_error([](int x) { return x * 2; }).error() == 18,
+              "phase131 (26) expected transform_error");
+    }
+
+    // ── (M) <algorithm> classic ─────────────────────────────────────────
+    {
+        static_assert(clamp(5, 1, 3) == 3 && clamp(0, 1, 3) == 1, "phase131 clamp");
+        // The four-iterator equal/is_permutation ARE here -- but std::mismatch
+        // has only the three-iterator forms, which is why
+        // __cpp_lib_robust_nonmodifying_seq_ops stays undefined above. Pin the
+        // half that exists so closing the other half is a deliberate act.
+        int a[4] = {1, 2, 3, 4};
+        int b[3] = {1, 2, 3};
+        Check(!equal(a, a + 4, b, b + 3) && equal(a, a + 3, b, b + 3) &&
+                  is_permutation(a, a + 3, b, b + 3),
+              "phase131 (27) four-iterator equal + is_permutation (mismatch's are absent)");
+
+        int shifted[5] = {1, 2, 3, 4, 5};
+        shift_left(shifted, shifted + 5, 2);
+        Check(shifted[0] == 3 && shifted[2] == 5, "phase131 (29) classic shift_left");
+        int rshift[5] = {1, 2, 3, 4, 5};
+        ranges::shift_right(rshift, 2);
+        Check(rshift[2] == 1 && rshift[4] == 3,
+              "phase131 (30) ranges::shift_right (the P2440 half of __cpp_lib_shift)");
+    }
+
+    // ── (N) containers ──────────────────────────────────────────────────
+    {
+        map<int, int> m{{1, 10}, {2, 20}};
+        auto          nh = m.extract(1);
+        Check(!nh.empty() && nh.key() == 1 && nh.mapped() == 10,
+              "phase131 (31) node_extract: extract yields a live node handle");
+        nh.key()      = 3;
+        auto inserted = m.insert(std::move(nh));
+        Check(inserted.inserted && m.count(3) == 1 && m.count(1) == 0,
+              "phase131 (32) node_extract: re-key and re-insert");
+
+        map<string, int, less<>> hm{{"alpha", 1}, {"beta", 2}};
+        Check(hm.find(string_view("beta")) != hm.end() && hm.contains(string_view("alpha")) &&
+                  hm.lower_bound(string_view("beta"))->second == 2,
+              "phase131 (33) generic_associative_lookup with a transparent comparator");
+        Check(hm.erase(string_view("alpha")) == 1 && hm.size() == 1,
+              "phase131 (34) associative_heterogeneous_erasure erase(K&&)");
+        auto hn = hm.extract(string_view("beta"));
+        Check(!hn.empty() && hm.empty(),
+              "phase131 (35) associative_heterogeneous_erasure extract(K&&)");
+
+        unordered_map<string, int, P131TransparentHash, equal_to<>> um;
+        um.emplace("one", 1);
+        Check(um.find(string_view("one")) != um.end() && um.count(string_view("one")) == 1 &&
+                  um.contains(string_view("one")),
+              "phase131 (36) generic_unordered_lookup with transparent hash+equal");
+
+        list<int> li{1, 2, 2, 3, 2};
+        Check(li.remove(2) == 3, "phase131 (37) list_remove_return_type returns size_type");
+        forward_list<int> fl{5, 5, 6};
+        Check(fl.remove_if([](int x) { return x == 5; }) == 2,
+              "phase131 (38) forward_list::remove_if returns size_type");
+
+        int             seed[3] = {7, 8, 9};
+        stack<int>      st(seed, seed + 3);
+        queue<int>      qu(seed, seed + 3);
+        Check(st.size() == 3 && st.top() == 9 && qu.size() == 3 && qu.front() == 7,
+              "phase131 (39) adaptor_iterator_pair_constructor for stack and queue");
+
+        P131IncompleteHolder holder;
+        holder.v.push_back(P131Incomplete{4});
+        Check(holder.v.front().value == 4 && holder.l.empty() && holder.f.empty(),
+              "phase131 (40) incomplete_container_elements: vector/list/forward_list named "
+              "over an incomplete type, used once complete");
+    }
+
+    // ── (O) <latch> / <semaphore> / <shared_mutex> / <thread>+<stop_token> ──
+    {
+        latch l(1);
+        l.count_down();
+        Check(l.try_wait(), "phase131 (41) latch count_down + try_wait");
+        l.wait();
+
+        binary_semaphore sem(0);
+        sem.release();
+        sem.acquire();
+        Check(!sem.try_acquire(), "phase131 (42) semaphore release/acquire drains the count");
+
+        shared_mutex sm;
+        sm.lock_shared();
+        Check(!sm.try_lock(), "phase131 (43) shared_mutex: a reader blocks a writer");
+        sm.unlock_shared();
+        sm.lock();
+        sm.unlock();
+
+        shared_timed_mutex stm;
+        Check(stm.try_lock_for(chrono::milliseconds(1)),
+              "phase131 (44) shared_timed_mutex try_lock_for");
+        stm.unlock();
+
+        stop_source ss;
+        int         callbacks = 0;
+        {
+            stop_callback cb(ss.get_token(), [&] { ++callbacks; });
+            Check(ss.stop_possible() && !ss.get_token().stop_requested(),
+                  "phase131 (45) stop_source starts un-requested");
+            ss.request_stop();
+        }
+        Check(callbacks == 1 && ss.get_token().stop_requested(),
+              "phase131 (46) stop_callback fires exactly once on request_stop");
+
+        atomic<int> observed{0};
+        {
+            jthread jt([&](stop_token st) {
+                while (!st.stop_requested()) this_thread::yield();
+                observed.store(1);
+            });
+            Check(jt.joinable() && jt.get_stop_token().stop_possible(),
+                  "phase131 (47) jthread hands its callable a stop_token");
+        } // dtor: request_stop() then join()
+        Check(observed.load() == 1,
+              "phase131 (48) jthread destructor requests stop and joins");
+    }
+
+    printf("[CXX] PASS phase131: [version.syn] backfill for phases 1-28 -- 89 feature-test macros "
+           "newly defined across 23 new __bits/version_* leaves plus three existing ones "
+           "(40 -> 129), every value pinned == its N4950 C++23 value rather than a reference "
+           "library's DR-applied C++26 one, all 91 pins re-checked, 33 owning headers "
+           "interrogated for macro visibility BEFORE <version> is ever included (91 "
+           "assertions), 47 absence guards for the features that are only partial "
+           "(format's char-only scope, chrono without tzdb, non-constexpr vector/string, "
+           "span's and string_view's missing crbegin, print without its <ostream> overloads, "
+           "P2404 concepts, mismatch without its four-iterator forms), __cpp_lib_ranges_as_const "
+           "corrected from P2836's 202311L down to C++23's 202207L, and 47 runtime + 144 "
+           "compile-time exercises so no macro is an unbacked claim\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -28808,6 +29878,7 @@ int main()
     Phase128();
     Phase129();
     Phase130();
+    Phase131();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

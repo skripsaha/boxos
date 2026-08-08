@@ -5,75 +5,227 @@
 // in one place. Per [support.limits.general], each macro must ALSO be
 // visible to a translation unit that includes only the macro's OWNING
 // header (not <version>) — so the actual #define bodies live in shared
-// leaf files under __bits/ (<__bits/version_ranges>, owned by <ranges>;
-// <__bits/version_algorithm>, owned by <algorithm>; <__bits/version_numeric>,
-// owned by <numeric>; <__bits/version_functional>, owned by <functional>;
-// <__bits/version_containers>, owned jointly by <vector>/<deque>/<list>/
-// <map>/<set>/<unordered_map>/<unordered_set>/<string>/<forward_list>/
-// <stack>/<queue>), and <version> just pulls in the complete set from all
-// five. <coroutine> and <generator> self-declare their own single macro
-// directly, a separate, pre-existing pattern this file doesn't change.
+// leaf files under __bits/, one per header or per header-family, and each
+// owning header includes its own leaf directly. <version> just pulls in
+// the complete set. <coroutine> and <generator> self-declare their own
+// single macro directly, a separate, pre-existing pattern this file
+// doesn't change.
 //
-// Scope (Ф29f-3c, the ranges-completeness epic closeout, plus conformance
-// fixes from a follow-up audit): Ф7B-Ф29f shipped without a single
-// __cpp_lib_* macro. This adds the ranges-family macros boxcxx now
-// actually implements COMPLETELY, plus the adjacent algorithm-family
-// macros this same sweep verified — nothing more. Every value was cross-
-// checked against libstdc++'s own bits/version.def (the most authoritative
-// available source for which value belongs to which C++ revision) and
-// eel.is/c++draft; every feature was independently grep-verified present
-// in boxcxx's own source before its macro was added.
+// Every value here is the C++23 value, cross-checked against N4950's own
+// [version.syn] (the C++23 standard) and against libstdc++'s
+// bits/version.def. C++23 is the target even where a reference library
+// ships a later, DR-applied C++26 value: __cpp_lib_bind_back stays 202202L
+// (not P2714's 202306L), __cpp_lib_out_ptr stays 202106L (not P2833's
+// 202311L), __cpp_lib_constexpr_algorithms stays 201806L (not P2562's
+// 202306L). Two C++26 features ARE in the tree by explicit owner decision
+// — P2510R3's pointer '0' presentation and
+// enable_nonlocking_formatter_optimization with its [time.format] /
+// [format.tuple] rules — but they would only bump __cpp_lib_format and
+// __cpp_lib_format_ranges, both of which are pinned at (or, for format,
+// excluded from) their C++23 state; boxcxx does not claim C++26 anywhere.
 //
-// Ф30d adds __cpp_lib_any, owned by <any> (<__bits/version_any>).
-//
-// Ф30e commit 1 adds __cpp_lib_ios_noreplace, owned jointly by <ios>/
-// <streambuf> (<__bits/version_iostreams>).
-// Ф30e commit 4 adds __cpp_lib_quoted_string_io, owned by <iomanip>
-// (same leaf).
-//
-// Ф30d-tail adds __cpp_lib_constexpr_complex + __cpp_lib_complex_udls,
-// owned by <complex> (<__bits/version_complex>).
-//
-// Ф30d-tail #2 adds __cpp_lib_constexpr_bitset, owned by <bitset>
-// (<__bits/version_bitset>).
-//
-// Ф30f-3 adds __cpp_lib_format_ranges, owned by <format> (<__bits/
-// version_format>). __cpp_lib_format itself stays undefined -- see the
-// Ф1-Ф28 backfill note below, which is why a translation unit can see the
-// range/tuple-formatting refinement macro without the base <format> macro
-// it would normally refine; that asymmetry is inherited, not introduced
-// here.
-//
-// Deliberately NOT defined (feature not implemented, or not complete
-// enough to claim):
-//   __cpp_lib_tuple_like        — no public std::tuple_like concept (only
-//                                 a private elements_view implementation
-//                                 trait); the broader pair/tuple "tuple-
-//                                 like" converting ctor/assignment
-//                                 machinery this macro implies is out of
-//                                 scope (tuple itself doesn't have it
-//                                 either).
-//   __cpp_lib_interpolate       — midpoint complete in <numeric>, but lerp
-//                                 absent from <cmath>; macro deferred until
-//                                 a future phase adds lerp (jointly owned by
-//                                 <numeric> and <cmath>, defined only once
-//                                 both provide their piece).
-// Backfilling FTMs for Ф1-Ф28 (format/chrono/random/threads/...) is a
-// separate, explicitly out-of-scope future epic-wide item, not folded in
-// here.
+// A macro appears here only if the feature it names is COMPLETE. A macro
+// that overstates is worse than a missing one: it makes portable code take
+// a branch this library cannot honour. Everything verified as partial is
+// listed below with the specific reason.
 #ifndef BOXCXX_VERSION
 #define BOXCXX_VERSION
 
-#include <__bits/version_ranges>
-#include <__bits/version_algorithm>
-#include <__bits/version_numeric>
-#include <__bits/version_functional> // <functional>: bad_function_call/function/move_only_function
-#include <__bits/version_containers> // <stack>/<queue>/<priority_queue>: containers_ranges joint owner
-#include <__bits/version_any>       // <any>: __cpp_lib_any
-#include <__bits/version_iostreams> // <ios>/<streambuf>: __cpp_lib_ios_noreplace
-#include <__bits/version_complex>   // <complex>: __cpp_lib_constexpr_complex, __cpp_lib_complex_udls
-#include <__bits/version_bitset>    // <bitset>: __cpp_lib_constexpr_bitset
-#include <__bits/version_memory>    // <memory>: __cpp_lib_out_ptr
-#include <__bits/version_format>    // <format>: __cpp_lib_format_ranges
+#include <__bits/version_algorithm>       // <algorithm>
+#include <__bits/version_any>             // <any>
+#include <__bits/version_array>           // <array>
+#include <__bits/version_atomic>          // <atomic> (+ <memory>)
+#include <__bits/version_bit>             // <bit>
+#include <__bits/version_bitset>          // <bitset>
+#include <__bits/version_charconv>        // <charconv>
+#include <__bits/version_chrono>          // <chrono>
+#include <__bits/version_cmath>           // <cmath>
+#include <__bits/version_complex>         // <complex>
+#include <__bits/version_containers>      // container family (+ <memory>)
+#include <__bits/version_cstddef>         // <cstddef>
+#include <__bits/version_exception>       // <exception>
+#include <__bits/version_expected>        // <expected>
+#include <__bits/version_format>          // <format>
+#include <__bits/version_functional>      // <functional>
+#include <__bits/version_iostreams>       // <ios>/<streambuf>/<iomanip>
+#include <__bits/version_iterator>        // <iterator> (+ <array>)
+#include <__bits/version_memory>          // <memory>
+#include <__bits/version_memory_resource> // <memory_resource>
+#include <__bits/version_new>             // <new>
+#include <__bits/version_numbers>         // <numbers>
+#include <__bits/version_numeric>         // <numeric>
+#include <__bits/version_optional>        // <optional>
+#include <__bits/version_ranges>          // <ranges>
+#include <__bits/version_source_location> // <source_location>
+#include <__bits/version_string>          // <string>/<string_view>
+#include <__bits/version_sync>            // <latch>/<semaphore>/<shared_mutex>
+#include <__bits/version_thread>          // <thread>/<stop_token>
+#include <__bits/version_tuple>           // <tuple>
+#include <__bits/version_type_traits>     // <type_traits>
+#include <__bits/version_typeinfo>        // <typeinfo>
+#include <__bits/version_utility>         // <utility> (+ <tuple>)
+#include <__bits/version_variant>         // <variant>
+
+// <coroutine> and <generator> self-declare their own single macro, a
+// pre-existing pattern with no leaf. Repeating the two definitions here —
+// both sides are #ifndef-guarded, so include order is irrelevant — is what
+// makes <version> actually complete without dragging those two whole
+// headers in.
+#ifndef __cpp_lib_coroutine
+#  define __cpp_lib_coroutine 201902L
+#endif
+#ifndef __cpp_lib_generator
+#  define __cpp_lib_generator 202207L
+#endif
+
+// ── Deliberately NOT defined ────────────────────────────────────────────
+//
+// Each line names a C++23 feature-test macro whose feature boxcxx does not
+// implement completely, with the exact reason. This list is the backlog:
+// when the reason is fixed, the macro moves into the owning header's leaf.
+//
+// algorithm_iterator_requirements
+//     P2408R5 is a pure requirements relaxation spanning every algorithm
+//     in [algorithms], [numeric.ops] and [specialized.algorithms]. Spot
+//     checks pass (std::sort over views::zip, std::find/std::count/
+//     std::accumulate over views::iota, std::uninitialized_copy from
+//     views::iota), but a whole-clause guarantee cannot be established by
+//     inspection, so it is not claimed.
+// allocate_at_least        std::allocation_result, std::allocate_at_least,
+//                          allocator_traits::allocate_at_least and
+//                          allocator::allocate_at_least are all absent.
+// assume_aligned           std::assume_aligned absent.
+// atomic_flag_test         atomic_flag::test exists (both cv-forms), but
+//                          the free atomic_flag_test / atomic_flag_test_
+//                          explicit lack their volatile atomic_flag*
+//                          overloads.
+// atomic_float             no volatile overloads of the floating-point
+//                          fetch_add/fetch_sub/operator+=/operator-=.
+// atomic_ref               the primary template has no difference_type, no
+//                          compound-assignment operators, and there is no
+//                          atomic_ref(T&) deduction guide.
+// atomic_shared_ptr        atomic<shared_ptr<T>>/atomic<weak_ptr<T>> have
+//                          no wait(), no single-memory_order compare_
+//                          exchange, and the free shared_ptr atomic
+//                          functions are absent.
+// atomic_wait              atomic_flag_wait_explicit is absent entirely,
+//                          and the atomic_flag wait/notify free functions
+//                          lack their volatile overloads.
+// barrier                  <barrier>'s arrive_and_drop has a documented
+//                          residual race against a concurrent phase
+//                          completion, so the phase guarantees this macro
+//                          claims do not hold.
+// char8_t                  std::pmr::u8string is absent, and the deleted
+//                          char8_t/char16_t/char32_t stream inserters and
+//                          extractors required by [ostream]/[istream] are
+//                          missing (so `os << u8"x"` wrongly compiles).
+// chrono                   <chrono> excludes time zones by design: no
+//                          tzdb, time_zone, zoned_time or leap seconds.
+// common_reference         P2655R3's basic_common_reference specialization
+// common_reference_wrapper for reference_wrapper is absent, so
+//                          common_reference_t<reference_wrapper<T>&, T&>
+//                          has no type. Both macros are P2655R3's.
+// concepts                 P2404R3 is not implemented: equality_comparable
+//                          _with / totally_ordered_with still require
+//                          common_reference_with rather than the
+//                          comparison-common-type-with relaxation, so
+//                          move-only comparands are rejected.
+// constexpr_cmath          fabs/ceil/floor/trunc/round/fmod/... are not
+//                          constexpr.
+// constexpr_memory         P2273's constexpr unique_ptr is nearly there —
+//                          make_unique round-trips inside a static_assert
+//                          — but default_delete's converting constructor
+//                          is not constexpr, so a converting unique_ptr
+//                          move is not a constant expression.
+// constexpr_string         basic_string is not constexpr at all (it needs
+//                          the compiler-blessed constexpr allocator path).
+// constexpr_vector         vector is not constexpr at all, same reason.
+// erase_if                 present for all twelve containers but absent
+//                          for basic_string.
+// format                   <format> is char-only: no wchar_t, no
+//                          wformat_context, no wformat/wformat_to.
+// formatters               formatter<thread::id, wchar_t> is absent, and
+//                          there is no <stacktrace> / formatter<
+//                          stacktrace_entry> at all.
+// hypot                    the three-argument hypot(x, y, z) is absent.
+// interpolate              midpoint is complete in <numeric>, but lerp is
+//                          absent from <cmath>; jointly owned, so defined
+//                          only once both provide their piece.
+// is_implicit_lifetime     std::is_implicit_lifetime absent.
+// is_layout_compatible     is_layout_compatible is present, but P0466R5's
+//                          is_corresponding_member is absent.
+// is_pointer_interconvertible
+//                          is_pointer_interconvertible_base_of is present,
+//                          but is_pointer_interconvertible_with_class is
+//                          absent.
+// is_swappable             the traits exist, but is_swappable_v<int[3]> is
+//                          false: <type_traits> declares only the scalar
+//                          std::swap, and the array overload defined later
+//                          in <utility> is invisible to the trait's own
+//                          definition context, which built-in array types
+//                          cannot reach through ADL.
+// map_try_emplace          map::try_emplace and map::insert_or_assign each
+//                          have 2 of their 4 overloads; both const_iterator
+//                          hint forms are absent.
+// modules                  no `import std;` — boxcxx ships headers only.
+// nonmember_container_access
+//                          size/ssize/empty/data cover containers and
+//                          arrays, but the two initializer_list overloads
+//                          (empty(initializer_list), data(initializer_list))
+//                          are absent.
+// parallel_algorithm       no <execution>, so no ExecutionPolicy overloads.
+// print                    print/println/vprint_unicode/vprint_nonunicode
+//                          exist for the terminal, but every <ostream>
+//                          overload of them is absent — and <ostream> is a
+//                          co-owner of this macro.
+// result_of_sfinae         std::result_of does not exist (removed in
+//                          C++20); the macro names exactly that template.
+// robust_nonmodifying_seq_ops
+//                          equal and is_permutation have their four-iterator
+//                          overloads, but std::mismatch has only the
+//                          three-iterator forms -- exactly the unsafe shape
+//                          N3346 exists to replace.
+// sample                   only ranges::sample exists; the classic
+//                          std::sample is absent.
+// scoped_lock              the single-mutex scoped_lock<Mutex> partial
+//                          specialization is absent (the variadic primary
+//                          handles it via if constexpr), so the required
+//                          scoped_lock<Mutex>::mutex_type typedef does not
+//                          exist.
+// shared_ptr_arrays        the two bounded-array allocate_shared overloads
+//                          are absent (only the unbounded T[] forms exist).
+// smart_ptr_for_overwrite  make_unique_for_overwrite and make_shared_for_
+//                          overwrite are complete, but allocate_shared_for
+//                          _overwrite is absent in all three forms.
+// span                     span has no crbegin/crend; the two
+//                          iterator-pair constructors are not
+//                          explicit(extent != dynamic_extent) and take
+//                          pointers rather than an iterator/sentinel pair;
+//                          and the range deduction guide is absent.
+// start_lifetime_as        start_lifetime_as / start_lifetime_as_array
+//                          absent.
+// string_resize_and_overwrite
+//                          basic_string::resize_and_overwrite absent.
+// string_view              basic_string_view has no crbegin/crend.
+// three_way_comparison     the whole [cmp] surface is present, but
+//                          compare_three_way_result's primary template is
+//                          declared without the `class U = T` default, so
+//                          the one-argument class form is ill-formed.
+// transformation_trait_aliases
+//                          the C++14 alias set is missing aligned_storage_t
+//                          and aligned_union_t (deprecated in C++23, but
+//                          still required).
+// transparent_operators    all nineteen void specializations of the
+//                          operator functors are present, but P0074R0's
+//                          owner_less<void> — the paper that defines the
+//                          201510L value — has no is_transparent typedef.
+// tuple_like               no public std::tuple_like concept (only a
+//                          private elements_view implementation trait); the
+//                          broader pair/tuple "tuple-like" converting
+//                          ctor/assignment machinery this macro implies is
+//                          out of scope (tuple itself doesn't have it).
+// unordered_map_try_emplace
+//                          unordered_map::try_emplace has 2 of 4 overloads
+//                          and insert_or_assign only 1 of 4.
 
 #endif // BOXCXX_VERSION

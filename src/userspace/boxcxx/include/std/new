@@ -4,6 +4,7 @@
 
 #include <cstddef>
 #include <exception>
+#include <__bits/version_new>
 
 namespace std {
 

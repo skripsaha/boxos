@@ -6,6 +6,7 @@
 #include <compare>
 #include <initializer_list>
 #include <cstddef>
+#include <__bits/version_utility>
 
 namespace std {
 

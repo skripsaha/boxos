@@ -7,6 +7,7 @@
 
 #include <cstddef>
 #include <type_traits>
+#include <__bits/version_exception>
 
 namespace std {
 

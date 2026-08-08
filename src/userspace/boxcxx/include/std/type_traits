@@ -10,6 +10,7 @@
                                 // remove_cv(+_t), is_same(+_v), enable_if(+_t),
                                 // is_integral(+_v)
 #include <cstddef>
+#include <__bits/version_type_traits>
 
 namespace std {
 

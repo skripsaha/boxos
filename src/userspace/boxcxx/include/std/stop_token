@@ -27,6 +27,7 @@
 #include <type_traits>
 
 #include "box/core/strand_self.h"   // strand_self — the running strand's pid
+#include <__bits/version_thread>
 
 namespace std {
 

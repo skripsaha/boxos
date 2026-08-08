@@ -1,0 +1,14 @@
+// boxcxx — <__bits/version_memory_resource>
+//
+// The feature-test macros [version.syn] owned by <memory_resource>.
+#ifndef BOXCXX_BITS_VERSION_MEMORY_RESOURCE
+#define BOXCXX_BITS_VERSION_MEMORY_RESOURCE
+
+#ifndef __cpp_lib_memory_resource
+#  define __cpp_lib_memory_resource 201603L
+#endif
+#ifndef __cpp_lib_polymorphic_allocator
+#  define __cpp_lib_polymorphic_allocator 201902L
+#endif
+
+#endif // BOXCXX_BITS_VERSION_MEMORY_RESOURCE

@@ -1,0 +1,12 @@
+// boxcxx — <__bits/version_variant>
+//
+// The feature-test macro [version.syn] owned by <variant>. 202106L is the
+// C++23 value (P2231 constexpr variant, incl. constexpr visit).
+#ifndef BOXCXX_BITS_VERSION_VARIANT
+#define BOXCXX_BITS_VERSION_VARIANT
+
+#ifndef __cpp_lib_variant
+#  define __cpp_lib_variant 202106L
+#endif
+
+#endif // BOXCXX_BITS_VERSION_VARIANT

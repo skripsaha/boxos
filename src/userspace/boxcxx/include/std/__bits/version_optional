@@ -1,0 +1,12 @@
+// boxcxx — <__bits/version_optional>
+//
+// The feature-test macro [version.syn] owned by <optional>. 202110L is the
+// C++23 value (P0798 monadic and_then/transform/or_else).
+#ifndef BOXCXX_BITS_VERSION_OPTIONAL
+#define BOXCXX_BITS_VERSION_OPTIONAL
+
+#ifndef __cpp_lib_optional
+#  define __cpp_lib_optional 202110L
+#endif
+
+#endif // BOXCXX_BITS_VERSION_OPTIONAL

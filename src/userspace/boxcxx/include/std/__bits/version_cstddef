@@ -1,0 +1,12 @@
+// boxcxx — <__bits/version_cstddef>
+//
+// The feature-test macro [version.syn] owned by <cstddef>: std::byte plus
+// to_integer and the whole bitwise operator set.
+#ifndef BOXCXX_BITS_VERSION_CSTDDEF
+#define BOXCXX_BITS_VERSION_CSTDDEF
+
+#ifndef __cpp_lib_byte
+#  define __cpp_lib_byte 201603L
+#endif
+
+#endif // BOXCXX_BITS_VERSION_CSTDDEF

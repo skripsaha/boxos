@@ -22,6 +22,8 @@
 #include <type_traits>
 #include <typeinfo>
 #include <utility>
+#include <__bits/version_atomic>
+#include <__bits/version_containers>
 
 namespace std {
 

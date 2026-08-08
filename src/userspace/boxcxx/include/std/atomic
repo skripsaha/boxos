@@ -30,6 +30,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <type_traits>
+#include <__bits/version_atomic>
 
 extern "C" {
 // One park/wake cycle on `addr`'s version-pool. `observed` points to the

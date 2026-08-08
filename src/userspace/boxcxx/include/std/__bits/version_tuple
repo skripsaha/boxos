@@ -1,0 +1,22 @@
+// boxcxx — <__bits/version_tuple>
+//
+// The feature-test macros [version.syn] owned by <tuple>. <tuple> also
+// includes <__bits/version_utility> for __cpp_lib_tuples_by_type, which
+// the two headers own jointly.
+#ifndef BOXCXX_BITS_VERSION_TUPLE
+#define BOXCXX_BITS_VERSION_TUPLE
+
+#ifndef __cpp_lib_apply
+#  define __cpp_lib_apply 201603L
+#endif
+#ifndef __cpp_lib_constexpr_tuple
+#  define __cpp_lib_constexpr_tuple 201811L
+#endif
+#ifndef __cpp_lib_make_from_tuple
+#  define __cpp_lib_make_from_tuple 201606L
+#endif
+#ifndef __cpp_lib_tuple_element_t
+#  define __cpp_lib_tuple_element_t 201402L
+#endif
+
+#endif // BOXCXX_BITS_VERSION_TUPLE
