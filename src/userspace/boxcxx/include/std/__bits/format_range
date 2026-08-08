@@ -179,12 +179,11 @@ public:
         }
         if (finished()) return commit("");
 
-        // [width] — a leading '0' is illegal outright: ranges have no
-        // separate zero-pad-flag production at all.
-        if (*p == '0')
-            throw format_error("format: leading zero in range width");
+        // [width] — a leading '0' is illegal outright (ranges have no separate
+        // zero-pad-flag production at all), which ParseWidth already enforces
+        // along with the field limit.
         if (__format::IsDigit(*p)) {
-            spec_.width = int(__format::ParseNumber(p, e));
+            spec_.width = __format::ParseWidth(p, e);
         } else if (*p == '{') {
             spec_.width_id      = __format::ParseDynamicArgId(pc, p, e);
             spec_.width_dynamic = true;

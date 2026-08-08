@@ -82,11 +82,10 @@ public:
         }
         if (finished()) return commit();
 
-        // width -- a leading '0' has no production here either.
-        if (*p == '0')
-            throw format_error("format: leading zero in tuple width");
+        // width -- a leading '0' has no production here either, which
+        // ParseWidth already enforces along with the field limit.
         if (IsDigit(*p)) {
-            spec_.width = int(ParseNumber(p, e));
+            spec_.width = ParseWidth(p, e);
         } else if (*p == '{') {
             spec_.width_id      = ParseDynamicArgId(pc, p, e);
             spec_.width_dynamic = true;
@@ -228,6 +227,21 @@ template <class... Ts>
 struct formatter<tuple<Ts...>, char>
     : __format::TupleFormatterBase<tuple<Ts...>, Ts...> {
 };
+
+// [format.tuple] — the other subclause that "specifies otherwise" for
+// enable_nonlocking_formatter_optimization: a tuple is as nonlocking as its
+// least nonlocking element, not flatly true and not flatly false. Two
+// specializations for the same reason the formatters are two — the synopsis
+// writes one over the exposition-only pair-or-tuple, and pair is not variadic.
+// libc++ answers false for pair<int,int>, which this contradicts on purpose.
+template <class T1, class T2>
+inline constexpr bool enable_nonlocking_formatter_optimization<pair<T1, T2>> =
+    enable_nonlocking_formatter_optimization<remove_cvref_t<T1>> &&
+    enable_nonlocking_formatter_optimization<remove_cvref_t<T2>>;
+
+template <class... Ts>
+inline constexpr bool enable_nonlocking_formatter_optimization<tuple<Ts...>> =
+    (enable_nonlocking_formatter_optimization<remove_cvref_t<Ts>> && ...);
 
 } // namespace std
 

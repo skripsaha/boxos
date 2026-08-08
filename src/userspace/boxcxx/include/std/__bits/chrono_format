@@ -575,8 +575,8 @@ constexpr const char *parse_spec(format_parse_context &pc, __format::StdSpec &s,
         s.align = __format::AlignOf(*p);
         ++p;
     }
-    if (p != e && __format::IsDigit(*p) && *p != '0') {
-        s.width = int(__format::ParseNumber(p, e));
+    if (p != e && __format::IsDigit(*p)) {
+        s.width = __format::ParseWidth(p, e);
     } else if (p != e && *p == '{') {
         s.width_id      = __format::ParseDynamicArgId(pc, p, e);
         s.width_dynamic = true;
@@ -585,7 +585,7 @@ constexpr const char *parse_spec(format_parse_context &pc, __format::StdSpec &s,
     if (p != e && *p == '.') {
         ++p;
         if (p != e && __format::IsDigit(*p))
-            s.precision = int(__format::ParseNumber(p, e));
+            s.precision = __format::ParsePrecision(p, e);
         else if (p != e && *p == '{') {
             s.prec_id      = __format::ParseDynamicArgId(pc, p, e);
             s.prec_dynamic = true;
@@ -1351,6 +1351,18 @@ struct formatter<chrono::duration<Rep, Period>, char>
         __chrono_fmt::emit(ctx, this->spec_, body);
     }
 };
+
+// [time.format]/8 — chrono is one of the subclauses that "specifies otherwise"
+// for enable_nonlocking_formatter_optimization: of all the chrono formatters,
+// only duration gets an entry, and its value is inherited from the rep rather
+// than being flatly true. Every other chrono type above keeps the primary's
+// false. (zoned_time's entry in /9 has no counterpart here — boxcxx has no time
+// zones.) libc++ answers false for chrono::seconds, which this contradicts on
+// purpose: its rep is long long, whose entry is true.
+template <class Rep, class Period>
+inline constexpr bool
+    enable_nonlocking_formatter_optimization<chrono::duration<Rep, Period>> =
+        enable_nonlocking_formatter_optimization<Rep>;
 
 } // namespace std
 
