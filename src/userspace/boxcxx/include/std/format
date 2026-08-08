@@ -185,11 +185,14 @@ constexpr int ParsePrecision(const char *&p, const char *e)
     return int(v);
 }
 
-// Which standard integer types get the integer formatter (not bool / char,
-// which have their own presentation defaults). Matched on T itself, not
-// remove_cv_t<T>: [format.formatter.spec]/2.3 provides formatters only for
-// cv-unqualified integer types, so formatter<volatile int, char> must stay
-// the disabled primary.
+// Which types get the integer formatter (not bool / char, which have their own
+// presentation defaults). [format.formatter.spec]/2.3 says "each cv-unqualified
+// arithmetic type ArithmeticT other than char, wchar_t, char8_t..." — extended
+// integer types included, which is why __int128 is here. Do NOT read this list
+// as the "standard signed or unsigned integer type" of [format.string.std]/10,
+// which is a strictly smaller set and lives in KindIsIntegral. Matched on T
+// itself, not remove_cv_t<T>, so formatter<volatile int, char> stays the
+// disabled primary.
 template <class T>
 inline constexpr bool IsStdInt =
     __bits::IsAnyOf<T, signed char, unsigned char, short, unsigned short, int,
@@ -225,11 +228,17 @@ template <class T> constexpr ArgKind MapKind() noexcept
     else return ArgKind::Custom;
 }
 
+// [format.string.std]/10: a dynamic width or precision option "is valid only if
+// the corresponding formatting argument is of standard signed or unsigned
+// integer type". __int128 is an EXTENDED integer type — [basic.fundamental]'s
+// list of standard integer types is closed and an implementation cannot add to
+// it, so is_integral_v<__int128> being true does not make it standard. C++26
+// spells the same rule as check_dynamic_spec<int, unsigned int, long long int,
+// unsigned long long int>. Both reference libraries reject it; so does boxcxx.
 constexpr bool KindIsIntegral(ArgKind k) noexcept
 {
     return k == ArgKind::Int || k == ArgKind::UInt || k == ArgKind::LongLong ||
-           k == ArgKind::ULongLong || k == ArgKind::Int128 ||
-           k == ArgKind::UInt128;
+           k == ArgKind::ULongLong;
 }
 
 } // namespace __format
@@ -437,22 +446,10 @@ public:
             if (v_.ull > (unsigned long long)__format::kIntMax)
                 throw format_error("format: width/precision out of range");
             return (long long)v_.ull;
-        // The locals are not cosmetic: `v_.i128 <` reads as the start of a
-        // dependent template-id inside this class template, and GCC asks for a
-        // `template` keyword it does not actually need.
-        case __format::ArgKind::Int128: {
-            const __int128 iv = v_.i128;
-            if (iv < -(__int128)__format::kIntMax ||
-                iv > (__int128)__format::kIntMax)
-                throw format_error("format: width/precision out of range");
-            return (long long)iv;
-        }
-        case __format::ArgKind::UInt128: {
-            const unsigned __int128 uv = v_.u128;
-            if (uv > (unsigned __int128)__format::kIntMax)
-                throw format_error("format: width/precision out of range");
-            return (long long)uv;
-        }
+        // Int128/UInt128 fall to the default: [format.string.std]/10 admits
+        // only the STANDARD integer types here, and the extended ones are not
+        // among them. See KindIsIntegral, which is the compile-time half of the
+        // same rule.
         default:
             throw format_error(
                 "format: width/precision argument is not an integer type");
@@ -660,19 +657,46 @@ inline void EmitField(format_context &ctx, const StdSpec &spec, int width,
     ctx.advance_to(out);
 }
 
-// Format an integer magnitude. `type` is one of \0/d/b/B/o/x/X.
 // Digits of a 128-bit magnitude, most-significant first. <charconv>'s to_chars
-// tops out at 64 bits, so the wide path converts here. Every divisor is a
-// literal, which lets the compiler use its multiply-high sequences instead of
-// calling libgcc's __udivti3/__umodti3 — a freestanding link must not depend on
-// those. Returns the digit count; the caller uppercases if the type asks.
+// tops out at 64 bits, so the wide path converts here. Bases 2/8/16 are shifts
+// and masks. Base 10 reduces the value as four 32-bit limbs, which keeps every
+// division 64-bit — the width x86-64 divides in hardware. A literal 128-bit
+// divisor is NOT enough on its own: GCC only turns it into a multiply-high
+// sequence from -O1 on, and boxcxx's apps carry no -O flag, so the shipped
+// build was two libgcc calls (__udivti3 + __umodti3) per digit, up to 78 of
+// them per number. Returns the digit count; the caller uppercases if asked.
 inline int Digits128(char *out, unsigned __int128 mag, int base)
 {
-    char tmp[130];
+    char tmp[numeric_limits<unsigned __int128>::digits];  // base 2: one per bit
     int  n = 0;
     if (mag == 0) tmp[n++] = '0';
-    else if (base == 10)
-        while (mag) { tmp[n++] = char('0' + unsigned(mag % 10)); mag /= 10; }
+    else if (base == 10) {
+        // Schoolbook division by 10^9, the largest power of ten below 2^32.
+        // The running remainder stays below the divisor, so each step divides
+        // something under 2^32 * 10^9 and its quotient always fits a limb.
+        unsigned  limb[sizeof(mag) / sizeof(unsigned)];
+        const int high = int(sizeof(limb) / sizeof(limb[0])) - 1;
+        for (int i = 0; i <= high; ++i) limb[i] = unsigned(mag >> (i * 32));
+        int top = high;
+        while (top > 0 && limb[top] == 0) --top;
+        for (;;) {
+            unsigned long long rem = 0;
+            for (int i = top; i >= 0; --i) {
+                const unsigned long long cur = (rem << 32) | limb[i];
+                limb[i] = unsigned(cur / 1000000000u);
+                rem     = cur % 1000000000u;
+            }
+            // Every chunk is emitted zero-padded to nine digits; only the last
+            // one may have leading zeros, stripped once the loop ends.
+            for (unsigned chunk = unsigned(rem), k = 0; k < 9; ++k) {
+                tmp[n++] = char('0' + chunk % 10u);
+                chunk /= 10u;
+            }
+            while (top > 0 && limb[top] == 0) --top;
+            if (limb[top] == 0) break;
+        }
+        while (n > 1 && tmp[n - 1] == '0') --n;
+    }
     else if (base == 16)
         while (mag) {
             const unsigned d = unsigned(mag) & 15u;
@@ -687,9 +711,10 @@ inline int Digits128(char *out, unsigned __int128 mag, int base)
     return n;
 }
 
-// Mag is unsigned long long for every standard integer type and unsigned
-// __int128 for the extended ones; the narrow path keeps going through to_chars
-// exactly as before.
+// Format an integer magnitude. `type` is one of \0/d/b/B/o/x/X. Mag is unsigned
+// long long for every standard integer type and unsigned __int128 for the
+// extended ones; the narrow path keeps going through to_chars exactly as
+// before.
 template <class Mag>
 inline void FormatIntCore(format_context &ctx, const StdSpec &spec, int width,
                           bool negative, Mag mag, char type)
@@ -707,7 +732,10 @@ inline void FormatIntCore(format_context &ctx, const StdSpec &spec, int width,
     case 'X': base = 16; prefix = spec.alt ? "0X" : ""; upper = true; break;
     }
 
-    char digits[130];
+    // Base 2 is the widest conversion either path can produce: one character
+    // per value bit, and to_chars never needs more than that. Taking the bound
+    // off Mag keeps the narrow instantiation from carrying the wide frame.
+    char digits[numeric_limits<Mag>::digits];
     int  dl;
     if constexpr (sizeof(Mag) <= sizeof(unsigned long long)) {
         auto r = to_chars(digits, digits + sizeof(digits),
@@ -719,7 +747,9 @@ inline void FormatIntCore(format_context &ctx, const StdSpec &spec, int width,
     if (upper)
         for (int i = 0; i < dl; ++i) digits[i] = ToUpperAscii(digits[i]);
 
-    char sp[4];
+    // One sign character, then the base prefix; "0b"/"0B"/"0x"/"0X" are the
+    // longest, so the bound comes off the literal rather than a hand count.
+    char sp[1 + (sizeof("0b") - 1)];
     int  spn = 0;
     if (negative) sp[spn++] = '-';
     else if (spec.sign == Sign::Plus) sp[spn++] = '+';
@@ -981,11 +1011,14 @@ struct formatter<T, char> {
         if constexpr (is_signed_v<T>) {
             if (value < 0) {
                 neg = true;
-                // |value| must be taken in T's own (narrower) unsigned width
-                // first — negating after widening to u64 loses the wrap for
-                // e.g. int -42 (would give 2^64-42, not 42). The same holds at
-                // the wide end: the most negative __int128 has no positive
-                // counterpart, and only the unsigned wrap gives its magnitude.
+                // Negating is what is load-bearing, not the width it happens
+                // in: a widening cast alone keeps the two's-complement pattern
+                // (int -42 would read as 2^64-42). It is done in T's own
+                // unsigned width because that says |value| locally and needs no
+                // argument about the minimum, which has no positive
+                // counterpart — but negation commutes with sign-extension
+                // modulo the narrow width, so widening first would give the
+                // same magnitude for every T and every value.
                 using UT = make_unsigned_t<T>;
                 mag      = static_cast<MagT>(
                     static_cast<UT>(UT(0) - static_cast<UT>(value)));
