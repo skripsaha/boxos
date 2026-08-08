@@ -29726,6 +29726,78 @@ void Phase131()
            "compile-time exercises so no macro is an unbacked claim\n");
 }
 
+void Phase132()
+{
+    auto feq = [](const std::string &got, const char *want) {
+        return std::string_view(got.data(), got.size()) == std::string_view(want);
+    };
+
+    // [format.formatter.spec]/2.3 provides a formatter for each signed or
+    // unsigned INTEGER type, and GCC's __int128 is one -- both reference
+    // libraries format it. boxcxx did not: MapKind folded anything wider than
+    // int into ArgKind::LongLong, so a 128-bit value would have been narrowed
+    // to 64 bits and printed as a different number with no diagnostic. Every
+    // expected string below was measured on libstdc++ 15.2 first.
+    __int128          a  = ((__int128)1 << 100) + 12345;
+    unsigned __int128 u  = ~(unsigned __int128)0;
+    // The most negative __int128: its magnitude has no positive counterpart, so
+    // only the unsigned wrap in the formatter can produce these digits.
+    __int128          mn = -(((__int128)1) << 126) - (((__int128)1) << 126);
+
+    Check(feq(std::format("{}", a), "1267650600228229401496703217721"),
+          "phase132 (1) __int128 decimal beyond 64 bits");
+    Check(feq(std::format("{}", u), "340282366920938463463374607431768211455"),
+          "phase132 (2) unsigned __int128 max -- all 128 bits survive");
+    Check(feq(std::format("{}", mn), "-170141183460469231731687303715884105728"),
+          "phase132 (3) __int128 min -- magnitude taken by unsigned wrap");
+    Check(feq(std::format("{:x}", a), "10000000000000000000003039"),
+          "phase132 (4) hex, shift path");
+    Check(feq(std::format("{:X}", (unsigned __int128)255), "FF"),
+          "phase132 (5) uppercase hex");
+    Check(feq(std::format("{:#b}", (__int128)5), "0b101"), "phase132 (6) binary with prefix");
+    Check(feq(std::format("{:#o}", (__int128)8), "010"), "phase132 (7) octal with prefix");
+    Check(feq(std::format("{:>25}", (__int128)-7), "                       -7"),
+          "phase132 (8) width and align");
+    Check(feq(std::format("{:+}", (__int128)7), "+7"), "phase132 (9) explicit sign");
+    Check(feq(std::format("{:010}", (__int128)-7), "-000000007"),
+          "phase132 (10) zero-pad goes after the sign");
+    Check(feq(std::format("{}", (__int128)0), "0"), "phase132 (11) signed zero");
+    Check(feq(std::format("{}", (unsigned __int128)0), "0"), "phase132 (12) unsigned zero");
+    Check(feq(std::format("{:c}", (__int128)65), "A"),
+          "phase132 (13) the 'c' presentation still range-checks through 128 bits");
+    {
+        int w = 35;
+        Check(feq(std::vformat("{0:{1}}", std::make_format_args(a, w)),
+                  "    1267650600228229401496703217721"),
+              "phase132 (14) dynamic width over a 128-bit argument");
+    }
+
+    // A deliberate, measured divergence: boxcxx ACCEPTS __int128 as the width
+    // argument itself, libstdc++ throws ("must be a non-negative integer").
+    // [format.string.std]/7 disqualifies an argument only for not being of
+    // integral type, and is_integral_v<__int128> is true here, so accepting is
+    // the reading boxcxx takes -- guarded by the same range check every other
+    // width argument gets.
+    {
+        __int128 w = 33;
+        Check(feq(std::vformat("{0:{1}}", std::make_format_args(a, w)),
+                  "  1267650600228229401496703217721"),
+              "phase132 (15) __int128 is accepted as a width argument (libstdc++ throws)");
+    }
+
+    static_assert(std::formattable<__int128, char>);
+    static_assert(std::formattable<unsigned __int128, char>);
+    static_assert(!std::formattable<volatile __int128, char>);
+    static_assert(std::enable_nonlocking_formatter_optimization<__int128>);
+    static_assert(std::enable_nonlocking_formatter_optimization<unsigned __int128>);
+
+    printf("[CXX] PASS phase132: formatter<__int128>/<unsigned __int128> -- the "
+           "argument store carries a 128-bit slot instead of narrowing to 64, the "
+           "magnitude is taken in the type's own width so __int128's minimum "
+           "prints, and the wide digit conversion uses literal divisors so a "
+           "freestanding link needs no __udivti3 from libgcc\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -29879,6 +29951,7 @@ int main()
     Phase129();
     Phase130();
     Phase131();
+    Phase132();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

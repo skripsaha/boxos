@@ -76,6 +76,8 @@ enum class ArgKind : unsigned char {
     UInt,
     LongLong,
     ULongLong,
+    Int128,
+    UInt128,
     Float,
     Double,
     LongDouble,
@@ -192,7 +194,7 @@ template <class T>
 inline constexpr bool IsStdInt =
     __bits::IsAnyOf<T, signed char, unsigned char, short, unsigned short, int,
                     unsigned int, long, unsigned long, long long,
-                    unsigned long long>;
+                    unsigned long long, __int128, unsigned __int128>;
 
 // Map a (decayed) argument type to its erased kind. Shared by the argument
 // store and the compile-time checker so they always agree.
@@ -201,6 +203,8 @@ template <class T> constexpr ArgKind MapKind() noexcept
     using U = decay_t<T>;  // arrays/functions decay; char[N] → const char*
     if constexpr (is_same_v<U, bool>) return ArgKind::Bool;
     else if constexpr (is_same_v<U, char>) return ArgKind::Char;
+    else if constexpr (is_same_v<U, __int128>) return ArgKind::Int128;
+    else if constexpr (is_same_v<U, unsigned __int128>) return ArgKind::UInt128;
     else if constexpr (IsStdInt<U>) {
         if constexpr (is_signed_v<U>)
             return sizeof(U) <= sizeof(int) ? ArgKind::Int : ArgKind::LongLong;
@@ -224,7 +228,8 @@ template <class T> constexpr ArgKind MapKind() noexcept
 constexpr bool KindIsIntegral(ArgKind k) noexcept
 {
     return k == ArgKind::Int || k == ArgKind::UInt || k == ArgKind::LongLong ||
-           k == ArgKind::ULongLong;
+           k == ArgKind::ULongLong || k == ArgKind::Int128 ||
+           k == ArgKind::UInt128;
 }
 
 } // namespace __format
@@ -432,6 +437,22 @@ public:
             if (v_.ull > (unsigned long long)__format::kIntMax)
                 throw format_error("format: width/precision out of range");
             return (long long)v_.ull;
+        // The locals are not cosmetic: `v_.i128 <` reads as the start of a
+        // dependent template-id inside this class template, and GCC asks for a
+        // `template` keyword it does not actually need.
+        case __format::ArgKind::Int128: {
+            const __int128 iv = v_.i128;
+            if (iv < -(__int128)__format::kIntMax ||
+                iv > (__int128)__format::kIntMax)
+                throw format_error("format: width/precision out of range");
+            return (long long)iv;
+        }
+        case __format::ArgKind::UInt128: {
+            const unsigned __int128 uv = v_.u128;
+            if (uv > (unsigned __int128)__format::kIntMax)
+                throw format_error("format: width/precision out of range");
+            return (long long)uv;
+        }
         default:
             throw format_error(
                 "format: width/precision argument is not an integer type");
@@ -456,6 +477,12 @@ private:
         unsigned           u;
         long long          ll;
         unsigned long long ull;
+        // GCC's extended integer types. They cannot ride in `ll`/`ull`: a
+        // 128-bit value narrowed to 64 bits would format a different number,
+        // silently. long double is already 16 bytes here, so the union does
+        // not grow.
+        __int128           i128;
+        unsigned __int128  u128;
         float              f;
         double             d;
         long double        ld;
@@ -634,8 +661,38 @@ inline void EmitField(format_context &ctx, const StdSpec &spec, int width,
 }
 
 // Format an integer magnitude. `type` is one of \0/d/b/B/o/x/X.
+// Digits of a 128-bit magnitude, most-significant first. <charconv>'s to_chars
+// tops out at 64 bits, so the wide path converts here. Every divisor is a
+// literal, which lets the compiler use its multiply-high sequences instead of
+// calling libgcc's __udivti3/__umodti3 — a freestanding link must not depend on
+// those. Returns the digit count; the caller uppercases if the type asks.
+inline int Digits128(char *out, unsigned __int128 mag, int base)
+{
+    char tmp[130];
+    int  n = 0;
+    if (mag == 0) tmp[n++] = '0';
+    else if (base == 10)
+        while (mag) { tmp[n++] = char('0' + unsigned(mag % 10)); mag /= 10; }
+    else if (base == 16)
+        while (mag) {
+            const unsigned d = unsigned(mag) & 15u;
+            tmp[n++] = d < 10 ? char('0' + d) : char('a' + (d - 10));
+            mag >>= 4;
+        }
+    else if (base == 8)
+        while (mag) { tmp[n++] = char('0' + (unsigned(mag) & 7u)); mag >>= 3; }
+    else
+        while (mag) { tmp[n++] = char('0' + (unsigned(mag) & 1u)); mag >>= 1; }
+    for (int i = 0; i < n; ++i) out[i] = tmp[n - 1 - i];
+    return n;
+}
+
+// Mag is unsigned long long for every standard integer type and unsigned
+// __int128 for the extended ones; the narrow path keeps going through to_chars
+// exactly as before.
+template <class Mag>
 inline void FormatIntCore(format_context &ctx, const StdSpec &spec, int width,
-                          bool negative, unsigned long long mag, char type)
+                          bool negative, Mag mag, char type)
 {
     int         base   = 10;
     const char *prefix = "";
@@ -650,9 +707,15 @@ inline void FormatIntCore(format_context &ctx, const StdSpec &spec, int width,
     case 'X': base = 16; prefix = spec.alt ? "0X" : ""; upper = true; break;
     }
 
-    char digits[66];
-    auto r  = to_chars(digits, digits + sizeof(digits), mag, base);
-    int  dl = int(r.ptr - digits);
+    char digits[130];
+    int  dl;
+    if constexpr (sizeof(Mag) <= sizeof(unsigned long long)) {
+        auto r = to_chars(digits, digits + sizeof(digits),
+                          (unsigned long long)mag, base);
+        dl     = int(r.ptr - digits);
+    } else {
+        dl = Digits128(digits, mag, base);
+    }
     if (upper)
         for (int i = 0; i < dl; ++i) digits[i] = ToUpperAscii(digits[i]);
 
@@ -909,22 +972,28 @@ struct formatter<T, char> {
             __format::FormatCharCore(ctx, spec_, width, char(value));
             return;
         }
-        bool               neg = false;
-        unsigned long long mag;
+        // The magnitude carries T's own width: narrowing a 128-bit value to 64
+        // bits would print a different number without any diagnostic.
+        using MagT = conditional_t<(sizeof(T) > sizeof(unsigned long long)),
+                                   unsigned __int128, unsigned long long>;
+        bool neg   = false;
+        MagT mag;
         if constexpr (is_signed_v<T>) {
             if (value < 0) {
                 neg = true;
                 // |value| must be taken in T's own (narrower) unsigned width
                 // first — negating after widening to u64 loses the wrap for
-                // e.g. int -42 (would give 2^64-42, not 42).
+                // e.g. int -42 (would give 2^64-42, not 42). The same holds at
+                // the wide end: the most negative __int128 has no positive
+                // counterpart, and only the unsigned wrap gives its magnitude.
                 using UT = make_unsigned_t<T>;
-                mag      = static_cast<unsigned long long>(
+                mag      = static_cast<MagT>(
                     static_cast<UT>(UT(0) - static_cast<UT>(value)));
             } else {
-                mag = (unsigned long long)value;
+                mag = (MagT)value;
             }
         } else {
-            mag = (unsigned long long)value;
+            mag = (MagT)value;
         }
         __format::FormatIntCore(ctx, spec_, width, neg, mag, spec_.type);
     }
@@ -1246,6 +1315,12 @@ template <> inline constexpr bool
     enable_nonlocking_formatter_optimization<long long> = true;
 template <> inline constexpr bool
     enable_nonlocking_formatter_optimization<unsigned long long> = true;
+// GCC's extended integer types are "signed or unsigned integer types" for
+// [format.formatter.spec]/2.3, so they get formatters and therefore this.
+template <> inline constexpr bool
+    enable_nonlocking_formatter_optimization<__int128> = true;
+template <> inline constexpr bool
+    enable_nonlocking_formatter_optimization<unsigned __int128> = true;
 template <> inline constexpr bool
     enable_nonlocking_formatter_optimization<bool> = true;
 template <> inline constexpr bool
@@ -1318,6 +1393,18 @@ void basic_format_arg<Context>::__format_to(
         f.format(v_.ull, fc);
         break;
     }
+    case K::Int128: {
+        formatter<__int128, char> f;
+        pc.advance_to(f.parse(pc));
+        f.format(v_.i128, fc);
+        break;
+    }
+    case K::UInt128: {
+        formatter<unsigned __int128, char> f;
+        pc.advance_to(f.parse(pc));
+        f.format(v_.u128, fc);
+        break;
+    }
     case K::Float: {
         formatter<float, char> f;
         pc.advance_to(f.parse(pc));
@@ -1374,6 +1461,8 @@ decltype(auto) basic_format_arg<Context>::__visit(Visitor &&vis) const
     case K::UInt: return vis(v_.u);
     case K::LongLong: return vis(v_.ll);
     case K::ULongLong: return vis(v_.ull);
+    case K::Int128: return vis(v_.i128);
+    case K::UInt128: return vis(v_.u128);
     case K::Float: return vis(v_.f);
     case K::Double: return vis(v_.d);
     case K::LongDouble: return vis(v_.ld);
@@ -1456,6 +1545,8 @@ basic_format_arg<Context> basic_format_arg<Context>::__make(T &v)
     else if constexpr (kind == K::UInt) a.v_.u = (unsigned)v;
     else if constexpr (kind == K::LongLong) a.v_.ll = (long long)v;
     else if constexpr (kind == K::ULongLong) a.v_.ull = (unsigned long long)v;
+    else if constexpr (kind == K::Int128) a.v_.i128 = (__int128)v;
+    else if constexpr (kind == K::UInt128) a.v_.u128 = (unsigned __int128)v;
     else if constexpr (kind == K::Float) a.v_.f = float(v);
     else if constexpr (kind == K::Double) a.v_.d = double(v);
     else if constexpr (kind == K::LongDouble) a.v_.ld = (long double)v;
