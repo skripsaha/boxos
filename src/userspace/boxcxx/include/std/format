@@ -144,13 +144,55 @@ constexpr size_t ParseNumber(const char *&p, const char *e)
     return v;
 }
 
+// The PER-FIELD limit on width and precision, applied on BOTH the literal and
+// the dynamic path. The standard sets no upper bound; libstdc++ rejects a
+// literal above 65535 but lets a dynamic {:{}} through, libc++ bounds neither
+// and really will emit a two-gigabyte field from a single spec. Bounding both
+// paths means a format string alone can no longer ask for gigabytes of heap or
+// billions of fill iterations.
+//
+// It bounds a FIELD, not a whole format() call, and cannot bound more than
+// that: a range or tuple spec applies its underlying width to every element, so
+// "{::65535}" still amplifies its argument 16384-fold. That is inherent to the
+// standard's design — libstdc++ and libc++ produce byte-for-byte the same
+// output size there — and the argument's size is chosen by the program, not by
+// the format string.
+inline constexpr int kMaxFieldWidth = 65535;
+
+// width is a positive-integer ([format.string.std]): nonzero-digit
+// digit-seq_opt. A leading '0' is not a width at all — in the std-format-spec
+// the zero-pad flag has already consumed one '0', and a second one is a
+// grammar violation. Precondition: p != e && IsDigit(*p).
+constexpr int ParseWidth(const char *&p, const char *e)
+{
+    if (*p == '0')
+        throw format_error("format: width must not start with a zero digit");
+    const size_t v = ParseNumber(p, e);
+    if (v > size_t(kMaxFieldWidth))
+        throw format_error("format: width exceeds the field limit");
+    return int(v);
+}
+
+// precision is a nonnegative-integer — unlike width, leading zeros are legal
+// here ({:.00} == {:.0}). Precondition: p != e && IsDigit(*p).
+constexpr int ParsePrecision(const char *&p, const char *e)
+{
+    const size_t v = ParseNumber(p, e);
+    if (v > size_t(kMaxFieldWidth))
+        throw format_error("format: precision exceeds the field limit");
+    return int(v);
+}
+
 // Which standard integer types get the integer formatter (not bool / char,
-// which have their own presentation defaults).
+// which have their own presentation defaults). Matched on T itself, not
+// remove_cv_t<T>: [format.formatter.spec]/2.3 provides formatters only for
+// cv-unqualified integer types, so formatter<volatile int, char> must stay
+// the disabled primary.
 template <class T>
 inline constexpr bool IsStdInt =
-    __bits::IsAnyOf<remove_cv_t<T>, signed char, unsigned char, short,
-                    unsigned short, int, unsigned int, long, unsigned long,
-                    long long, unsigned long long>;
+    __bits::IsAnyOf<T, signed char, unsigned char, short, unsigned short, int,
+                    unsigned int, long, unsigned long, long long,
+                    unsigned long long>;
 
 // Map a (decayed) argument type to its erased kind. Shared by the argument
 // store and the compile-time checker so they always agree.
@@ -319,8 +361,8 @@ constexpr const char *ParseSpec(format_parse_context &pc, StdSpec &s)
     // formatter ignores it when an explicit alignment was given)
     if (p != e && *p == '0') { s.zero = true; ++p; }
     // width
-    if (p != e && IsDigit(*p)) {  // leading 0 already eaten as the flag
-        s.width = int(ParseNumber(p, e));
+    if (p != e && IsDigit(*p)) {
+        s.width = ParseWidth(p, e);
     } else if (p != e && *p == '{') {
         s.width_id      = ParseDynamicArgId(pc, p, e);
         s.width_dynamic = true;
@@ -330,7 +372,7 @@ constexpr const char *ParseSpec(format_parse_context &pc, StdSpec &s)
     if (p != e && *p == '.') {
         ++p;
         if (p != e && IsDigit(*p)) {
-            s.precision = int(ParseNumber(p, e));
+            s.precision = ParsePrecision(p, e);
         } else if (p != e && *p == '{') {
             s.prec_id      = ParseDynamicArgId(pc, p, e);
             s.prec_dynamic = true;
@@ -544,17 +586,25 @@ inline void EmitField(format_context &ctx, const StdSpec &spec, int width,
                       string_view sign_prefix, string_view body, Align dflt,
                       bool numeric)
 {
-    auto      out  = ctx.out();
-    const int core = int(sign_prefix.size() + body.size());
+    auto out = ctx.out();
+    // core is a size_t, never an int. For a width-bearing range or tuple field
+    // the body IS the whole scratch string, which can exceed INT_MAX: narrowing
+    // it wrapped negative, so `width <= core` failed even for width 1 and pad
+    // became ~2^31 fill characters. Measured before the fix:
+    // format("{:1:65535}", vector<int>(32769)) — a ten-character format string —
+    // emitted 4294967297 characters where both reference libraries emit
+    // 2147581953. width is bounded by kMaxFieldWidth on every path, so the
+    // subtraction below cannot overflow.
+    const size_t core = sign_prefix.size() + body.size();
 
-    if (width <= core) {
+    if (width <= 0 || size_t(width) <= core) {
         WriteRun(out, sign_prefix.data(), sign_prefix.size());
         WriteRun(out, body.data(), body.size());
         ctx.advance_to(out);
         return;
     }
 
-    const int pad = width - core;
+    const int pad = int(size_t(width) - core);
     if (spec.zero && spec.align == Align::Default && numeric) {
         WriteRun(out, sign_prefix.data(), sign_prefix.size());
         WriteFill(out, '0', pad);
@@ -791,6 +841,16 @@ template <class T, class CharT> struct formatter {
     formatter &operator=(const formatter &) = delete;
 };
 
+// [format.syn] / [format.formatter.spec]/3 — true for every type this library
+// provides a formatter for, so a locking print implementation may take the
+// unlocked path. boxcxx's <print> holds no lock, so the trait is declarative
+// here; it is part of the synopsis and user code may query it. The `= true`
+// specializations sit after formatter<nullptr_t, char>, where every scalar
+// formatter is complete. Range, tuple and chrono stay false — their
+// subclauses specify otherwise.
+template <class T>
+constexpr bool enable_nonlocking_formatter_optimization = false;
+
 namespace __format {
 
 // Resolve dynamic width/precision against the format context.
@@ -798,7 +858,8 @@ inline int ResolveDynamic(format_context &ctx, size_t id)
 {
     const long long v = ctx.arg(id).__as_integer();
     if (v < 0) throw format_error("format: negative width/precision");
-    if (v > kIntMax) throw format_error("format: width/precision out of range");
+    if (v > kMaxFieldWidth)
+        throw format_error("format: width/precision exceeds the field limit");
     return int(v);
 }
 inline int EffectiveWidth(format_context &ctx, const StdSpec &s)
@@ -951,9 +1012,11 @@ template <> struct formatter<char, char> {
     }
 };
 
-// floating-point (float / double / long double)
+// floating-point (float / double / long double). is_floating_point_v ignores
+// cv by definition, but [format.formatter.spec]/2.4 provides formatters only
+// for cv-unqualified floating-point types — hence the second conjunct.
 template <class T>
-    requires is_floating_point_v<T>
+    requires is_floating_point_v<T> && is_same_v<T, remove_cv_t<T>>
 struct formatter<T, char> {
     __format::StdSpec spec_;
 
@@ -1131,10 +1194,13 @@ template <> struct formatter<const void *, char> {
         const char *p = __format::ParseSpec(pc, spec_);
         if (!(spec_.type == '\0' || spec_.type == 'p' || spec_.type == 'P'))
             throw format_error("format: invalid type for pointer");
-        // The pointer std-format-spec has no sign, '#', '0' or 'L' position
-        // ([format.string.std]) — reject all four, not just the first three.
+        // The pointer std-format-spec gained a '0' position with P2510R3
+        // (both reference libraries implement it), but still has no sign, no
+        // '#', no precision and no 'L'. EmitField already places the zeros
+        // between the "0x" prefix and the digits and already ignores '0' when
+        // an explicit align is present, so nothing else is needed here.
         if (spec_.precision >= 0 || spec_.prec_dynamic || spec_.sign_given ||
-            spec_.alt || spec_.zero || spec_.localized)
+            spec_.alt || spec_.localized)
             throw format_error("format: invalid spec for pointer");
         pc.advance_to(p);
         return p;
@@ -1157,6 +1223,55 @@ template <> struct formatter<nullptr_t, char> : formatter<const void *, char> {
         formatter<const void *, char>::format(nullptr, ctx);
     }
 };
+
+// [format.formatter.spec]/3 — exactly the types <format> itself provides a
+// formatter for, and nothing else.
+template <> inline constexpr bool
+    enable_nonlocking_formatter_optimization<signed char> = true;
+template <> inline constexpr bool
+    enable_nonlocking_formatter_optimization<unsigned char> = true;
+template <> inline constexpr bool
+    enable_nonlocking_formatter_optimization<short> = true;
+template <> inline constexpr bool
+    enable_nonlocking_formatter_optimization<unsigned short> = true;
+template <> inline constexpr bool
+    enable_nonlocking_formatter_optimization<int> = true;
+template <> inline constexpr bool
+    enable_nonlocking_formatter_optimization<unsigned int> = true;
+template <> inline constexpr bool
+    enable_nonlocking_formatter_optimization<long> = true;
+template <> inline constexpr bool
+    enable_nonlocking_formatter_optimization<unsigned long> = true;
+template <> inline constexpr bool
+    enable_nonlocking_formatter_optimization<long long> = true;
+template <> inline constexpr bool
+    enable_nonlocking_formatter_optimization<unsigned long long> = true;
+template <> inline constexpr bool
+    enable_nonlocking_formatter_optimization<bool> = true;
+template <> inline constexpr bool
+    enable_nonlocking_formatter_optimization<char> = true;
+template <> inline constexpr bool
+    enable_nonlocking_formatter_optimization<float> = true;
+template <> inline constexpr bool
+    enable_nonlocking_formatter_optimization<double> = true;
+template <> inline constexpr bool
+    enable_nonlocking_formatter_optimization<long double> = true;
+template <> inline constexpr bool
+    enable_nonlocking_formatter_optimization<char *> = true;
+template <> inline constexpr bool
+    enable_nonlocking_formatter_optimization<const char *> = true;
+template <size_t N> inline constexpr bool
+    enable_nonlocking_formatter_optimization<char[N]> = true;
+template <> inline constexpr bool
+    enable_nonlocking_formatter_optimization<string> = true;
+template <> inline constexpr bool
+    enable_nonlocking_formatter_optimization<string_view> = true;
+template <> inline constexpr bool
+    enable_nonlocking_formatter_optimization<nullptr_t> = true;
+template <> inline constexpr bool
+    enable_nonlocking_formatter_optimization<void *> = true;
+template <> inline constexpr bool
+    enable_nonlocking_formatter_optimization<const void *> = true;
 
 // ════════════════════════════════════════════════════════════════════════
 //  basic_format_arg out-of-line members (need formatters complete)

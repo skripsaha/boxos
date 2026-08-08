@@ -321,6 +321,14 @@ struct formatter<thread::id, char> : formatter<uint32_t, char> {
     }
 };
 
+// [format.formatter.spec]/3 — the blanket rule: every type the library provides
+// a formatter for gets this, unless its own subclause specifies otherwise, and
+// [thread.thread.id] specifies nothing. libc++ ships the formatter without the
+// trait, which is a gap on its side, not a model to copy.
+template <>
+inline constexpr bool enable_nonlocking_formatter_optimization<thread::id> =
+    true;
+
 // ── std::jthread ──────────────────────────────────────────────────────────────
 //
 // A jthread is a std::thread that owns a stop_source and auto-joins. Two things

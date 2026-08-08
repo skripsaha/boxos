@@ -27249,9 +27249,9 @@ void Phase127()
 
 } // namespace
 
-// enable_nonlocking_formatter_optimization ([format.formatter.spec]) does not
-// exist anywhere in boxcxx (not just for pair/tuple) -- grep-confirmed before
-// writing this phase. Not invented here; nothing below tests for it.
+// enable_nonlocking_formatter_optimization ([format.formatter.spec]) did not
+// exist anywhere in boxcxx when phase128 was written, so nothing below tests
+// for it; phase129 adds the trait and covers it there.
 
 namespace {
 
@@ -27498,6 +27498,300 @@ void Phase128()
            "selection, and the empty-parse-context guard shared with range_formatter\n");
 }
 
+void Phase129()
+{
+    auto feq = [](const std::string &got, const char *want) {
+        return std::string_view(got.data(), got.size()) == std::string_view(want);
+    };
+
+    int         i42 = 42;
+    double      d15 = 1.5;
+    std::string abc = "abc";
+    char        cx  = 'x';
+    bool        bt  = true;
+    void       *pv  = reinterpret_cast<void *>(0x1234);
+
+    // (1-13) width is a positive-integer ([format.string.std]): nonzero-digit
+    // digit-seq_opt. In the std-format-spec the zero-pad flag has already
+    // eaten one '0', so a second one cannot start a width -- it is a grammar
+    // violation for EVERY argument type, not only the numeric ones that have
+    // a zero-pad flag to begin with. Both reference libraries throw on all
+    // thirteen.
+    //
+    // Where the new rule actually bites is (1)-(6) and (12)-(13): integers and
+    // floating-point used to parse these as width 0 and format silently, and
+    // the pointer cases became reachable only because this same commit stopped
+    // rejecting the '0' flag for pointers (P2510R3). (7)-(11) are structurally
+    // double-guarded -- string, char and bool reject the '0' FLAG outright
+    // ([format.string.std] allows it only for arithmetic types other than
+    // charT and bool), so for them the new rule can only change which
+    // diagnostic fires, never whether one does. They are kept as correctness
+    // pins, not as coverage for ParseWidth: deleting ParseWidth's leading-zero
+    // throw leaves exactly those five green, which a mutation run confirmed.
+    {
+        Check(!P123Parses("{:00}", i42), "phase129 (1) int {:00} rejected -- width cannot start with '0'");
+        Check(!P123Parses("{:00d}", i42), "phase129 (2) int {:00d} rejected");
+        Check(!P123Parses("{:00x}", i42), "phase129 (3) int {:00x} rejected");
+        Check(!P123Parses("{:005}", i42), "phase129 (4) int {:005} rejected -- a nonzero digit later does not rescue it");
+        Check(!P123Parses("{:00}", d15), "phase129 (5) double {:00} rejected");
+        Check(!P123Parses("{:00f}", d15), "phase129 (6) double {:00f} rejected");
+        Check(!P123Parses("{:00}", abc), "phase129 (7) string {:00} rejected");
+        Check(!P123Parses("{:00s}", abc), "phase129 (8) string {:00s} rejected");
+        Check(!P123Parses("{:00?}", abc), "phase129 (9) string {:00?} rejected -- the escaped presentation too");
+        Check(!P123Parses("{:00}", cx), "phase129 (10) char {:00} rejected");
+        Check(!P123Parses("{:00}", bt), "phase129 (11) bool {:00} rejected");
+        Check(!P123Parses("{:00p}", pv), "phase129 (12) pointer {:00p} rejected");
+        Check(!P123Parses("{:00}", pv), "phase129 (13) pointer {:00} rejected");
+    }
+
+    // (14-21) the other side of the same rule -- a single '0' is the zero-pad
+    // flag, '0' followed by an align char is a fill, and precision is a
+    // NONNEGATIVE-integer where leading zeros are perfectly legal. (17) pins
+    // [format.string.std]'s "if the 0 character and an align option both
+    // appear, the 0 character is ignored", which both libraries obey for
+    // integers and which (35-37) below rely on for pointers.
+    {
+        Check(feq(std::format("{:0}", i42), "42"), "phase129 (14) {:0} is the zero-pad flag with no width, not width 0");
+        Check(feq(std::format("{:05}", i42), "00042"), "phase129 (15) {:05} zero-pad flag + width 5 still works");
+        Check(feq(std::format("{:0<5}", i42), "42000"), "phase129 (16) {:0<5} -- '0' is the FILL char here, not the flag");
+        Check(feq(std::format("{:<05d}", i42), "42   "), "phase129 (17) explicit align makes the '0' flag ignored");
+        Check(feq(std::format("{:0}", d15), "1.5"), "phase129 (18) double {:0} unaffected");
+        Check(feq(std::format("{:.00}", d15), "2"), "phase129 (19) precision IS a nonnegative-integer -- {:.00} == {:.0}");
+        Check(feq(std::format("{:.0}", d15), "2"), "phase129 (20) {:.0} on 1.5 rounds to even");
+        Check(feq(std::format("{:.00}", abc), ""), "phase129 (21) string precision 00 truncates to empty");
+    }
+
+    // (22-29) the field limit. The standard bounds neither width nor
+    // precision; libstdc++ rejects a literal above 65535 but lets a dynamic
+    // {:{}} through, libc++ bounds neither and really emits a two-gigabyte
+    // field. A hostile format string reaching vformat() must not be able to
+    // ask for gigabytes of heap or billions of fill iterations, so boxcxx
+    // applies kMaxFieldWidth to BOTH paths -- (27-29) are deliberately
+    // stronger than either reference library.
+    {
+        const std::string wide = std::format("{:65535}", i42);
+        Check(wide.size() == 65535 && wide.front() == ' ' && wide.back() == '2',
+              "phase129 (22) width 65535 (the limit itself) still formats, right-aligned");
+        Check(!P123Parses("{:65536}", i42), "phase129 (23) literal width 65536 exceeds the field limit");
+        Check(!P123Parses("{:2000000000}", i42), "phase129 (24) literal width 2000000000 rejected");
+        Check(feq(std::format("{:.65535}", abc), "abc"), "phase129 (25) precision 65535 (the limit itself) accepted");
+        Check(!P123Parses("{:.65536}", abc), "phase129 (26) literal precision 65536 exceeds the field limit");
+
+        auto dynWidth = [](int w) {
+            int v = 42;
+            return std::vformat("{0:{1}}", std::make_format_args(v, w));
+        };
+        auto dynWidthThrows = [&](int w) {
+            try {
+                (void)dynWidth(w);
+            } catch (const std::format_error &) {
+                return true;
+            }
+            return false;
+        };
+        Check(dynWidth(65535).size() == 65535, "phase129 (27) dynamic width 65535 accepted, same limit as the literal path");
+        Check(dynWidthThrows(65536),
+              "phase129 (28) dynamic width 65536 rejected -- boxcxx bounds the dynamic path too, "
+              "where libstdc++ and libc++ both let it through");
+        Check(dynWidthThrows(2000000000),
+              "phase129 (29) dynamic width 2000000000 rejected -- libc++ really allocates 2 GB here");
+    }
+
+    // [format.formatter.spec]/2.3-2.4 provide formatters only for
+    // cv-UNQUALIFIED integer and floating-point types, so volatile must be
+    // unformattable while const stays formattable (the concept applies
+    // remove_const_t before selecting the formatter). boxcxx used to answer
+    // true for volatile int / const volatile int / volatile int& / volatile
+    // double, because IsStdInt matched on remove_cv_t<T> and
+    // is_floating_point_v ignores cv by definition. Both libraries agree with
+    // every line here.
+    {
+        static_assert(std::formattable<int, char>);
+        static_assert(std::formattable<const int, char>);
+        static_assert(!std::formattable<volatile int, char>);
+        static_assert(!std::formattable<const volatile int, char>);
+        static_assert(!std::formattable<volatile int &, char>);
+        static_assert(!std::formattable<volatile double, char>);
+        static_assert(!std::formattable<volatile char, char>);
+        static_assert(!std::formattable<volatile bool, char>);
+        static_assert(!std::formattable<volatile std::string, char>);
+        static_assert(!std::formattable<volatile void *, char>);
+        static_assert(!std::formattable<void *volatile, char>);
+        static_assert(std::formattable<char[4], char>);
+        static_assert(std::formattable<const char[4], char>);
+        static_assert(std::formattable<const double, char>);
+        static_assert(std::formattable<float, char>);
+        static_assert(std::formattable<long double, char>);
+    }
+
+    // enable_nonlocking_formatter_optimization ([format.syn]) -- true for
+    // exactly the types <format> itself provides a formatter for, false
+    // everywhere else including ranges, tuples and chrono, whose subclauses
+    // specify otherwise. Every entry is listed by hand, so every entry is
+    // asserted: a typo in one line is the only failure mode this list has.
+    // libstdc++ 15.2 does not ship the trait at all; libc++ does, and agrees
+    // with all 27 answers below.
+    {
+        using std::enable_nonlocking_formatter_optimization;
+        static_assert(enable_nonlocking_formatter_optimization<signed char>);
+        static_assert(enable_nonlocking_formatter_optimization<unsigned char>);
+        static_assert(enable_nonlocking_formatter_optimization<short>);
+        static_assert(enable_nonlocking_formatter_optimization<unsigned short>);
+        static_assert(enable_nonlocking_formatter_optimization<int>);
+        static_assert(enable_nonlocking_formatter_optimization<unsigned int>);
+        static_assert(enable_nonlocking_formatter_optimization<long>);
+        static_assert(enable_nonlocking_formatter_optimization<unsigned long>);
+        static_assert(enable_nonlocking_formatter_optimization<long long>);
+        static_assert(enable_nonlocking_formatter_optimization<unsigned long long>);
+        static_assert(enable_nonlocking_formatter_optimization<bool>);
+        static_assert(enable_nonlocking_formatter_optimization<char>);
+        static_assert(enable_nonlocking_formatter_optimization<float>);
+        static_assert(enable_nonlocking_formatter_optimization<double>);
+        static_assert(enable_nonlocking_formatter_optimization<long double>);
+        static_assert(enable_nonlocking_formatter_optimization<char *>);
+        static_assert(enable_nonlocking_formatter_optimization<const char *>);
+        static_assert(enable_nonlocking_formatter_optimization<char[4]>);
+        static_assert(enable_nonlocking_formatter_optimization<std::string>);
+        static_assert(enable_nonlocking_formatter_optimization<std::string_view>);
+        static_assert(enable_nonlocking_formatter_optimization<std::nullptr_t>);
+        static_assert(enable_nonlocking_formatter_optimization<void *>);
+        static_assert(enable_nonlocking_formatter_optimization<const void *>);
+        static_assert(enable_nonlocking_formatter_optimization<std::thread::id>);
+        static_assert(!enable_nonlocking_formatter_optimization<std::vector<int>>);
+        static_assert(!enable_nonlocking_formatter_optimization<Point>);
+
+        // Two subclauses "specify otherwise", and neither says "false":
+        // [time.format]/8 gives duration -- and only duration, of every chrono
+        // type -- its REP's answer, and [format.tuple] gives a pair or tuple
+        // the conjunction of its elements'. libc++ answers false for both of
+        // the next two lines; per the wording it is wrong on both, since the
+        // rep of chrono::seconds is long long and both elements of
+        // pair<int,int> are int.
+        static_assert(enable_nonlocking_formatter_optimization<std::chrono::seconds>);
+        static_assert(enable_nonlocking_formatter_optimization<std::pair<int, int>>);
+        static_assert(enable_nonlocking_formatter_optimization<std::chrono::milliseconds>);
+        static_assert(enable_nonlocking_formatter_optimization<std::chrono::duration<double>>);
+        static_assert(enable_nonlocking_formatter_optimization<std::tuple<int, char, double>>);
+        static_assert(enable_nonlocking_formatter_optimization<std::tuple<>>);
+
+        // ...and the conjunction is a real conjunction, not a constant: one
+        // element without an entry sinks the whole tuple, and every chrono type
+        // other than duration keeps the primary's false.
+        static_assert(!enable_nonlocking_formatter_optimization<std::pair<int, std::vector<int>>>);
+        static_assert(!enable_nonlocking_formatter_optimization<std::tuple<int, Point>>);
+        static_assert(!enable_nonlocking_formatter_optimization<std::chrono::sys_seconds>);
+        static_assert(!enable_nonlocking_formatter_optimization<std::chrono::year_month_day>);
+    }
+
+    // (30-46) P2510R3 gave the pointer std-format-spec a '0' position; both
+    // reference libraries implement it. boxcxx already had the hard parts:
+    // EmitField places the zeros between the "0x" prefix and the digits, and
+    // already ignores the '0' when an explicit align is present. (37-39) are
+    // where libstdc++ is wrong -- it zero-pads anyway, contradicting its own
+    // integer path pinned at (17) -- so boxcxx follows libc++ and libstdc++'s
+    // own integers. (43-46) pin what P2510R3 did NOT add: the pointer spec
+    // still has no sign, no '#', no precision and no 'L'.
+    {
+        Check(feq(std::format("{:p}", pv), "0x1234"), "phase129 (30) pointer {:p}");
+        Check(feq(std::format("{:P}", pv), "0X1234"), "phase129 (31) pointer {:P} uppercase");
+        Check(feq(std::format("{:0p}", pv), "0x1234"), "phase129 (32) '0' with no width changes nothing");
+        Check(feq(std::format("{:0P}", pv), "0X1234"), "phase129 (33) same for {:0P}");
+        Check(feq(std::format("{:010p}", pv), "0x00001234"), "phase129 (34) zeros go between the 0x prefix and the digits");
+        Check(feq(std::format("{:010P}", pv), "0X00001234"), "phase129 (35) same for the 0X prefix");
+        Check(feq(std::format("{:010}", pv), "0x00001234"), "phase129 (36) default pointer presentation zero-pads too");
+        Check(feq(std::format("{:<010p}", pv), "0x1234    "), "phase129 (37) explicit left align makes '0' ignored (libstdc++ is wrong here)");
+        Check(feq(std::format("{:>010p}", pv), "    0x1234"), "phase129 (38) explicit right align makes '0' ignored");
+        Check(feq(std::format("{:^010p}", pv), "  0x1234  "), "phase129 (39) explicit center align makes '0' ignored");
+        Check(feq(std::format("{:0<10p}", pv), "0x12340000"), "phase129 (40) '0' before an align char is the FILL, padding on the right");
+        Check(feq(std::format("{:*>10p}", pv), "****0x1234"), "phase129 (41) an ordinary fill+align is unchanged");
+        Check(feq(std::format("{:010p}", nullptr), "0x00000000"), "phase129 (42) nullptr zero-pads to width");
+        Check(!P123Parses("{:#p}", pv), "phase129 (43) pointer still has no '#' position");
+        Check(!P123Parses("{:+p}", pv), "phase129 (44) pointer still has no sign position");
+        Check(!P123Parses("{:.3p}", pv), "phase129 (45) pointer still has no precision");
+        Check(!P123Parses("{:Lp}", pv), "phase129 (46) pointer still has no 'L' position");
+    }
+
+    // (47-55) regression pins for the shared ParseWidth swap. Ranges and
+    // tuples have no zero-pad-flag production at all, so their leading-zero
+    // rejection predates this commit -- it must survive the swap from their
+    // own local throw to the shared helper, and their ordinary formatting
+    // must be untouched.
+    {
+        std::vector<int>    vec{1, 2};
+        std::pair<int, int> pr{1, 2};
+        Check(feq(std::format("{}", i42), "42"), "phase129 (47) plain int unchanged");
+        Check(feq(std::format("{}", d15), "1.5"), "phase129 (48) plain double unchanged");
+        Check(feq(std::format("{}", abc), "abc"), "phase129 (49) plain string unchanged");
+        Check(feq(std::format("{}", cx), "x"), "phase129 (50) plain char unchanged");
+        Check(feq(std::format("{}", bt), "true"), "phase129 (51) plain bool unchanged");
+        Check(feq(std::format("{}", vec), "[1, 2]"), "phase129 (52) range formatting unchanged by the ParseWidth swap");
+        Check(feq(std::format("{}", pr), "(1, 2)"), "phase129 (53) tuple formatting unchanged by the ParseWidth swap");
+        Check(!P123Parses("{:00}", vec), "phase129 (54) range leading-zero width still rejected");
+        Check(!P123Parses("{:00}", pr), "phase129 (55) tuple leading-zero width still rejected");
+    }
+
+    // (56-59) chrono. Its width production never accepted a leading zero, so
+    // (56-58) only change which diagnostic fires; (59) pins the default
+    // alignment, which [time.format]/2 makes left -- libstdc++ agrees, libc++
+    // right-aligns and is wrong.
+    {
+        std::chrono::seconds sec{3661};
+        Check(!P123Parses("{:00%H}", sec), "phase129 (56) chrono {:00%H} still rejected");
+        Check(!P123Parses("{:05%H}", sec), "phase129 (57) chrono {:05%H} still rejected -- no zero-pad flag in this grammar");
+        Check(!P123Parses("{:0%H}", sec), "phase129 (58) chrono {:0%H} still rejected");
+        Check(feq(std::format("{:5%H}", sec), "01   "), "phase129 (59) chrono default align is left per [time.format]/2");
+    }
+
+    // (60-68) guards a mutation run found untested: reverting each of these
+    // three left the whole suite green, so each one is pinned here on target.
+    // (60-65) the field limit reaching <chrono>, which parses its own width
+    // and precision rather than going through ParseSpec -- reverting either
+    // call site to ParseNumber used to leave {:65536%H} formatting a 65536-
+    // character field and {:2000000000%H} exhausting the heap. (66-68) the
+    // negative-value guard on the dynamic path ([format.string.std]/7): with
+    // it deleted a negative width or precision was silently ignored rather
+    // than throwing, which no assertion anywhere in cxxtest noticed.
+    {
+        std::chrono::seconds          sec{3661};
+        std::chrono::duration<double> fd{1.25};
+
+        Check(std::format("{:65535%H}", sec).size() == 65535,
+              "phase129 (60) chrono width 65535 (the limit itself) still formats");
+        Check(!P123Parses("{:65536%H}", sec), "phase129 (61) chrono literal width 65536 exceeds the field limit");
+        Check(!P123Parses("{:2000000000%H}", sec), "phase129 (62) chrono literal width 2000000000 rejected");
+        Check(P123Parses("{:.65535%S}", fd),
+              "phase129 (63) chrono precision 65535 accepted -- a floating-point rep is what admits a precision at all");
+        Check(!P123Parses("{:.65536%S}", fd), "phase129 (64) chrono literal precision 65536 exceeds the field limit");
+        Check(!P123Parses("{:.2000000000%S}", fd), "phase129 (65) chrono literal precision 2000000000 rejected");
+
+        auto dynThrows = [](const char *spec, auto &&value, int n) {
+            try {
+                (void)std::vformat(spec, std::make_format_args(value, n));
+            } catch (const std::format_error &) {
+                return true;
+            }
+            return false;
+        };
+        int         v42 = 42;
+        std::string s6  = "abcdef";
+        Check(dynThrows("{0:{1}}", v42, -1),
+              "phase129 (66) negative dynamic width throws, never silently formats unpadded");
+        Check(dynThrows("{0:{1}}", v42, -2147483647 - 1),
+              "phase129 (67) INT_MIN dynamic width throws");
+        Check(dynThrows("{0:.{1}}", s6, -1),
+              "phase129 (68) negative dynamic precision throws, never silently formats untruncated");
+    }
+
+    printf("[CXX] PASS phase129: <format> conformance -- leading-zero width rejected for "
+           "every argument type (precision keeps its legal leading zeros), one per-field "
+           "limit on the literal and the dynamic width/precision path in <format> and "
+           "<chrono> alike, formattable<volatile T> false for integers and floating-point "
+           "per [format.formatter.spec]/2.3-2.4, enable_nonlocking_formatter_optimization "
+           "with the [time.format]/8 duration and [format.tuple] conjunction rules both "
+           "libc++ gets wrong, and P2510R3's '0' accepted in the pointer spec with the "
+           "align-ignores-zero rule\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -27648,6 +27942,7 @@ int main()
     Phase126();
     Phase127();
     Phase128();
+    Phase129();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
