@@ -1,0 +1,13 @@
+// boxcxx — <__bits/version_numbers>
+//
+// The feature-test macro [version.syn] owned by <numbers>: all thirteen
+// mathematical constants, both the _v variable templates and the double
+// shorthands.
+#ifndef BOXCXX_BITS_VERSION_NUMBERS
+#define BOXCXX_BITS_VERSION_NUMBERS
+
+#ifndef __cpp_lib_math_constants
+#  define __cpp_lib_math_constants 201907L
+#endif
+
+#endif // BOXCXX_BITS_VERSION_NUMBERS

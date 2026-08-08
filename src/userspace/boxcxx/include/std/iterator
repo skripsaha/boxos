@@ -28,6 +28,7 @@
 #include <new>
 #include <type_traits>
 #include <utility>
+#include <__bits/version_iterator>
 
 namespace std {
 

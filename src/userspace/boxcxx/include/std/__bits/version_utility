@@ -1,0 +1,40 @@
+// boxcxx — <__bits/version_utility>
+//
+// The feature-test macros [version.syn] owned by <utility>. Split out for
+// the same [support.limits.general] per-header reason as
+// <__bits/version_ranges> -- see that file's comment.
+//
+// __cpp_lib_tuples_by_type is owned jointly by <utility> and <tuple>
+// (get<T> on pair and on tuple); <tuple> includes this leaf directly.
+#ifndef BOXCXX_BITS_VERSION_UTILITY
+#define BOXCXX_BITS_VERSION_UTILITY
+
+#ifndef __cpp_lib_as_const
+#  define __cpp_lib_as_const 201510L
+#endif
+#ifndef __cpp_lib_constexpr_utility
+#  define __cpp_lib_constexpr_utility 201811L
+#endif
+#ifndef __cpp_lib_exchange_function
+#  define __cpp_lib_exchange_function 201304L
+#endif
+#ifndef __cpp_lib_forward_like
+#  define __cpp_lib_forward_like 202207L
+#endif
+#ifndef __cpp_lib_integer_comparison_functions
+#  define __cpp_lib_integer_comparison_functions 202002L
+#endif
+#ifndef __cpp_lib_integer_sequence
+#  define __cpp_lib_integer_sequence 201304L
+#endif
+#ifndef __cpp_lib_to_underlying
+#  define __cpp_lib_to_underlying 202102L
+#endif
+#ifndef __cpp_lib_tuples_by_type
+#  define __cpp_lib_tuples_by_type 201304L
+#endif
+#ifndef __cpp_lib_unreachable
+#  define __cpp_lib_unreachable 202202L
+#endif
+
+#endif // BOXCXX_BITS_VERSION_UTILITY

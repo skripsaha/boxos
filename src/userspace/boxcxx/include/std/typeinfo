@@ -9,6 +9,7 @@
 
 #include <cstddef>
 #include <exception>
+#include <__bits/version_typeinfo>
 
 namespace __cxxabiv1 {
 class __class_type_info;

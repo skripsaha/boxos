@@ -1,0 +1,11 @@
+// boxcxx — <__bits/version_exception>
+//
+// The feature-test macro [version.syn] owned by <exception>.
+#ifndef BOXCXX_BITS_VERSION_EXCEPTION
+#define BOXCXX_BITS_VERSION_EXCEPTION
+
+#ifndef __cpp_lib_uncaught_exceptions
+#  define __cpp_lib_uncaught_exceptions 201411L
+#endif
+
+#endif // BOXCXX_BITS_VERSION_EXCEPTION

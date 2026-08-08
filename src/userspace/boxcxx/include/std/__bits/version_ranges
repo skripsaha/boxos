@@ -52,8 +52,14 @@
 #ifndef __cpp_lib_ranges_repeat
 #  define __cpp_lib_ranges_repeat 202207L
 #endif
+// 202207L is the C++23 value (P2278R4 views::as_const +
+// basic_const_iterator). Ф29f-3c shipped 202311L here, which is C++26's
+// P2836R1 value (basic_const_iterator follows its underlying type's
+// convertibility -- the operator CI() conversion). boxcxx's
+// basic_const_iterator has no such conversion operator, so 202311L
+// overstated the feature; Ф31a-3 corrects it to the C++23 value.
 #ifndef __cpp_lib_ranges_as_const
-#  define __cpp_lib_ranges_as_const 202311L
+#  define __cpp_lib_ranges_as_const 202207L
 #endif
 #ifndef __cpp_lib_ranges_as_rvalue
 #  define __cpp_lib_ranges_as_rvalue 202207L

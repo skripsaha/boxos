@@ -6,6 +6,8 @@
 #include <utility>
 #include <functional>   // invoke (std::apply), reference_wrapper unwrap
 #include <compare>
+#include <__bits/version_tuple>
+#include <__bits/version_utility>
 
 namespace std {
 

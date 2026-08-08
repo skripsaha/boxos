@@ -1,0 +1,23 @@
+// boxcxx — <__bits/version_atomic>
+//
+// The feature-test macros [version.syn] owned by <atomic>.
+// __cpp_lib_atomic_value_initialization is owned jointly by <atomic> and
+// <memory> (atomic<T>, atomic<T*> and atomic<shared_ptr<T>> all
+// value-initialize); <memory> includes this leaf directly.
+//
+// Deliberately absent (see <version>'s list): atomic_flag_test,
+// atomic_float, atomic_ref, atomic_wait, atomic_shared_ptr.
+#ifndef BOXCXX_BITS_VERSION_ATOMIC
+#define BOXCXX_BITS_VERSION_ATOMIC
+
+#ifndef __cpp_lib_atomic_is_always_lock_free
+#  define __cpp_lib_atomic_is_always_lock_free 201603L
+#endif
+#ifndef __cpp_lib_atomic_lock_free_type_aliases
+#  define __cpp_lib_atomic_lock_free_type_aliases 201907L
+#endif
+#ifndef __cpp_lib_atomic_value_initialization
+#  define __cpp_lib_atomic_value_initialization 201911L
+#endif
+
+#endif // BOXCXX_BITS_VERSION_ATOMIC

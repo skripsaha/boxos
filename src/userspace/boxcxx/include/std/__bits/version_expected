@@ -1,0 +1,12 @@
+// boxcxx — <__bits/version_expected>
+//
+// The feature-test macro [version.syn] owned by <expected>: P0323 expected
+// plus P2505's monadic and_then/or_else/transform/transform_error.
+#ifndef BOXCXX_BITS_VERSION_EXPECTED
+#define BOXCXX_BITS_VERSION_EXPECTED
+
+#ifndef __cpp_lib_expected
+#  define __cpp_lib_expected 202211L
+#endif
+
+#endif // BOXCXX_BITS_VERSION_EXPECTED

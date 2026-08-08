@@ -13,5 +13,6 @@
 #include <__bits/chrono_calendar>
 #include <__bits/chrono_format>
 #include <__bits/chrono_io>
+#include <__bits/version_chrono>
 
 #endif // BOXCXX_CHRONO

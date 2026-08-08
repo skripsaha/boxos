@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <__bits/math_fenv_defs>
 #include <__bits/cmath_coeffs>
+#include <__bits/version_cmath>
 // Everything here is transplanted verbatim into src/runtime/cmath*.cpp.
 
 namespace std {

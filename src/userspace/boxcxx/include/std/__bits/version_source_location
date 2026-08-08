@@ -1,0 +1,11 @@
+// boxcxx — <__bits/version_source_location>
+//
+// The feature-test macro [version.syn] owned by <source_location>.
+#ifndef BOXCXX_BITS_VERSION_SOURCE_LOCATION
+#define BOXCXX_BITS_VERSION_SOURCE_LOCATION
+
+#ifndef __cpp_lib_source_location
+#  define __cpp_lib_source_location 201907L
+#endif
+
+#endif // BOXCXX_BITS_VERSION_SOURCE_LOCATION

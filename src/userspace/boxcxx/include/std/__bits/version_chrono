@@ -1,0 +1,13 @@
+// boxcxx — <__bits/version_chrono>
+//
+// The feature-test macro [version.syn] owned by <chrono> that boxcxx can
+// honour. __cpp_lib_chrono itself is NOT defined -- <chrono> excludes time
+// zones by design (see <version>'s list).
+#ifndef BOXCXX_BITS_VERSION_CHRONO
+#define BOXCXX_BITS_VERSION_CHRONO
+
+#ifndef __cpp_lib_chrono_udls
+#  define __cpp_lib_chrono_udls 201304L
+#endif
+
+#endif // BOXCXX_BITS_VERSION_CHRONO

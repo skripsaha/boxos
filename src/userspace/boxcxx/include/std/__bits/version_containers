@@ -1,18 +1,53 @@
 // boxcxx — <__bits/version_containers>
 //
-// The __cpp_lib_* feature-test macro [version.syn] owned JOINTLY by
-// <vector>, <deque>, <list>, <map>, <set>, <unordered_map>,
-// <unordered_set>, <string>, <forward_list>, <stack>, and <queue> --
-// split out for the same [support.limits.general] per-header reason as
+// The __cpp_lib_* feature-test macros [version.syn] owned JOINTLY by the
+// container family -- <vector>, <deque>, <list>, <forward_list>, <map>,
+// <set>, <unordered_map>, <unordered_set>, <string>, <stack>, <queue> --
+// plus <memory>, which shares ownership of
+// __cpp_lib_allocator_traits_is_always_equal. Split out for the same
+// [support.limits.general] per-header reason as
 // <__bits/version_ranges>/<__bits/version_algorithm>/<__bits/version_numeric>
 // -- see those files' comments. Every owning header includes this leaf
-// directly so the macro is visible from a TU that includes only one of
+// directly so each macro is visible from a TU that includes only one of
 // them, not just from <version>.
+//
+// Like <__bits/version_iostreams>, this is one leaf for a family whose
+// members do not all own every macro in it: a header here may expose a
+// macro it does not itself own. Every macro exposed is nevertheless true
+// of boxcxx as a whole, and <version> exposes all of them anyway.
+//
+// Deliberately absent (see <version>'s list): erase_if,
+// nonmember_container_access, map_try_emplace, unordered_map_try_emplace,
+// constexpr_vector, constexpr_string.
 #ifndef BOXCXX_BITS_VERSION_CONTAINERS
 #define BOXCXX_BITS_VERSION_CONTAINERS
 
+#ifndef __cpp_lib_adaptor_iterator_pair_constructor
+#  define __cpp_lib_adaptor_iterator_pair_constructor 202106L
+#endif
+#ifndef __cpp_lib_allocator_traits_is_always_equal
+#  define __cpp_lib_allocator_traits_is_always_equal 201411L
+#endif
+#ifndef __cpp_lib_associative_heterogeneous_erasure
+#  define __cpp_lib_associative_heterogeneous_erasure 202110L
+#endif
 #ifndef __cpp_lib_containers_ranges
 #  define __cpp_lib_containers_ranges 202202L
+#endif
+#ifndef __cpp_lib_generic_associative_lookup
+#  define __cpp_lib_generic_associative_lookup 201304L
+#endif
+#ifndef __cpp_lib_generic_unordered_lookup
+#  define __cpp_lib_generic_unordered_lookup 201811L
+#endif
+#ifndef __cpp_lib_incomplete_container_elements
+#  define __cpp_lib_incomplete_container_elements 201505L
+#endif
+#ifndef __cpp_lib_list_remove_return_type
+#  define __cpp_lib_list_remove_return_type 201806L
+#endif
+#ifndef __cpp_lib_node_extract
+#  define __cpp_lib_node_extract 201606L
 #endif
 
 #endif // BOXCXX_BITS_VERSION_CONTAINERS

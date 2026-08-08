@@ -1,6 +1,6 @@
 // boxcxx — <__bits/version_memory>
 //
-// The __cpp_lib_* feature-test macro [version.syn] owned by <memory> --
+// The __cpp_lib_* feature-test macros [version.syn] owned by <memory> --
 // split out for the same [support.limits.general] per-header reason as
 // <__bits/version_any>/<__bits/version_bitset> -- see those files' comments.
 //
@@ -8,11 +8,45 @@
 // 202106L is the C++23 value; C++26's P2833 bumps it to 202311L (adds the
 // reset(Args...)-style array uplift) -- Ф30f-1 is a C++23-only slice, so
 // that bump is not implemented and this macro is pinned at 202106L.
+//
+// constexpr_dynamic_alloc is claimed on evidence, not on the presence of
+// the constexpr keyword: allocator<T>::allocate + construct_at +
+// destroy_at + deallocate round-trip inside a static_assert on this
+// toolchain (cxxtest Phase131 asserts the same thing).
+//
+// <memory> also includes <__bits/version_atomic> (for the jointly-owned
+// __cpp_lib_atomic_value_initialization) and <__bits/version_containers>
+// (for the jointly-owned __cpp_lib_allocator_traits_is_always_equal).
+//
+// Deliberately absent (see <version>'s list): allocate_at_least,
+// assume_aligned, atomic_shared_ptr, constexpr_memory, shared_ptr_arrays,
+// smart_ptr_for_overwrite, start_lifetime_as, transparent_operators.
 #ifndef BOXCXX_BITS_VERSION_MEMORY
 #define BOXCXX_BITS_VERSION_MEMORY
 
+#ifndef __cpp_lib_addressof_constexpr
+#  define __cpp_lib_addressof_constexpr 201603L
+#endif
+#ifndef __cpp_lib_constexpr_dynamic_alloc
+#  define __cpp_lib_constexpr_dynamic_alloc 201907L
+#endif
+#ifndef __cpp_lib_enable_shared_from_this
+#  define __cpp_lib_enable_shared_from_this 201603L
+#endif
+#ifndef __cpp_lib_make_unique
+#  define __cpp_lib_make_unique 201304L
+#endif
 #ifndef __cpp_lib_out_ptr
 #  define __cpp_lib_out_ptr 202106L
+#endif
+#ifndef __cpp_lib_raw_memory_algorithms
+#  define __cpp_lib_raw_memory_algorithms 201606L
+#endif
+#ifndef __cpp_lib_shared_ptr_weak_type
+#  define __cpp_lib_shared_ptr_weak_type 201606L
+#endif
+#ifndef __cpp_lib_to_address
+#  define __cpp_lib_to_address 201711L
 #endif
 
 #endif // BOXCXX_BITS_VERSION_MEMORY

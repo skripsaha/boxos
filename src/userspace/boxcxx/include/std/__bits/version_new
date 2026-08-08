@@ -1,0 +1,17 @@
+// boxcxx — <__bits/version_new>
+//
+// The feature-test macros [version.syn] owned by <new>.
+#ifndef BOXCXX_BITS_VERSION_NEW
+#define BOXCXX_BITS_VERSION_NEW
+
+#ifndef __cpp_lib_destroying_delete
+#  define __cpp_lib_destroying_delete 201806L
+#endif
+#ifndef __cpp_lib_hardware_interference_size
+#  define __cpp_lib_hardware_interference_size 201703L
+#endif
+#ifndef __cpp_lib_launder
+#  define __cpp_lib_launder 201606L
+#endif
+
+#endif // BOXCXX_BITS_VERSION_NEW

@@ -1,0 +1,13 @@
+// boxcxx — <__bits/version_array>
+//
+// The feature-test macro [version.syn] owned by <array>. <array> also
+// includes <__bits/version_iterator> for __cpp_lib_array_constexpr, which
+// <array> and <iterator> own jointly.
+#ifndef BOXCXX_BITS_VERSION_ARRAY
+#define BOXCXX_BITS_VERSION_ARRAY
+
+#ifndef __cpp_lib_to_array
+#  define __cpp_lib_to_array 201907L
+#endif
+
+#endif // BOXCXX_BITS_VERSION_ARRAY

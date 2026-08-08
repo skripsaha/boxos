@@ -4,6 +4,7 @@
 
 #include <type_traits>
 #include <limits>
+#include <__bits/version_bit>
 
 namespace std {
 

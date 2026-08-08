@@ -1,0 +1,17 @@
+// boxcxx — <__bits/version_charconv>
+//
+// The feature-test macros [version.syn] owned by <charconv>. The integer
+// forms are constexpr (P2291); the floating-point forms are out-of-line in
+// src/runtime/charconv_float.cpp, which is why to_chars is claimed but
+// constexpr_charconv covers only what P2291 actually requires.
+#ifndef BOXCXX_BITS_VERSION_CHARCONV
+#define BOXCXX_BITS_VERSION_CHARCONV
+
+#ifndef __cpp_lib_constexpr_charconv
+#  define __cpp_lib_constexpr_charconv 202207L
+#endif
+#ifndef __cpp_lib_to_chars
+#  define __cpp_lib_to_chars 201611L
+#endif
+
+#endif // BOXCXX_BITS_VERSION_CHARCONV

@@ -6,6 +6,7 @@
 #define BOXCXX_SOURCE_LOCATION
 
 #include <cstdint>
+#include <__bits/version_source_location>
 
 namespace std {
 

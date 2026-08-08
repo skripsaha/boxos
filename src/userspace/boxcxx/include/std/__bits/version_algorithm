@@ -22,6 +22,19 @@
 #ifndef __cpp_lib_constexpr_algorithms
 #  define __cpp_lib_constexpr_algorithms 201806L
 #endif
+// Ф31a-3 backfill: the classic-<algorithm> macros. shift is 202202L, not
+// P0769's original 201806L -- P2440R1 added ranges::shift_left/shift_right
+// and bumped it, and boxcxx has both the classic and the ranges spellings.
+// std::sample is absent (only ranges::sample) and std::mismatch has no
+// four-iterator overloads, so __cpp_lib_sample and
+// __cpp_lib_robust_nonmodifying_seq_ops both stay undefined; see
+// <version>'s list.
+#ifndef __cpp_lib_clamp
+#  define __cpp_lib_clamp 201603L
+#endif
+#ifndef __cpp_lib_shift
+#  define __cpp_lib_shift 202202L
+#endif
 #ifndef __cpp_lib_ranges_contains
 #  define __cpp_lib_ranges_contains 202207L
 #endif

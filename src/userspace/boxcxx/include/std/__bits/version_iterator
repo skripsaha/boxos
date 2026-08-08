@@ -1,0 +1,33 @@
+// boxcxx — <__bits/version_iterator>
+//
+// The feature-test macros [version.syn] owned by <iterator>, plus
+// __cpp_lib_array_constexpr, which <iterator> and <array> own jointly
+// (P1032's constexpr reverse_iterator/move_iterator/insert iterators and
+// P1023's constexpr array comparisons are one feature split over two
+// headers). Both headers include this leaf.
+//
+// __cpp_lib_nonmember_container_access is deliberately NOT here -- see
+// <version>'s "deliberately NOT defined" list.
+#ifndef BOXCXX_BITS_VERSION_ITERATOR
+#define BOXCXX_BITS_VERSION_ITERATOR
+
+#ifndef __cpp_lib_array_constexpr
+#  define __cpp_lib_array_constexpr 201811L
+#endif
+#ifndef __cpp_lib_constexpr_iterator
+#  define __cpp_lib_constexpr_iterator 201811L
+#endif
+#ifndef __cpp_lib_make_reverse_iterator
+#  define __cpp_lib_make_reverse_iterator 201402L
+#endif
+#ifndef __cpp_lib_move_iterator_concept
+#  define __cpp_lib_move_iterator_concept 202207L
+#endif
+#ifndef __cpp_lib_null_iterators
+#  define __cpp_lib_null_iterators 201304L
+#endif
+#ifndef __cpp_lib_ssize
+#  define __cpp_lib_ssize 201902L
+#endif
+
+#endif // BOXCXX_BITS_VERSION_ITERATOR
