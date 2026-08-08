@@ -255,6 +255,16 @@ public:
         SwapWith(other, index_sequence_for<Ts...>{});
     }
 
+    // P2321 const-qualified swap ([tuple.swap]) — the const-assignment rule
+    // above applied to swapping: present exactly when every element is
+    // swappable THROUGH const, i.e. when the elements are references.
+    constexpr void swap(const tuple &other) const
+        noexcept((... && is_nothrow_swappable_v<const Ts>))
+        requires(... && is_swappable_v<const Ts>)
+    {
+        SwapWithConst(other, index_sequence_for<Ts...>{});
+    }
+
 private:
     template <class OtherTuple, size_t... Is>
     constexpr void AssignFrom(OtherTuple &&other, index_sequence<Is...>)
@@ -280,6 +290,15 @@ private:
               __bits::LeafGet<Is>(static_cast<Base &>(other))),
          ...);
     }
+
+    template <size_t... Is>
+    constexpr void SwapWithConst(const tuple &other, index_sequence<Is...>) const
+    {
+        using std::swap;
+        (swap(__bits::LeafGet<Is>(static_cast<const Base &>(*this)),
+              __bits::LeafGet<Is>(static_cast<const Base &>(other))),
+         ...);
+    }
 };
 
 template <>
@@ -287,6 +306,7 @@ class tuple<> {
 public:
     constexpr tuple() = default;
     constexpr void swap(tuple &) noexcept {}
+    constexpr void swap(const tuple &) const noexcept {}
 };
 
 template <class... Us>
@@ -524,6 +544,34 @@ swap(tuple<Ts...> &a, tuple<Ts...> &b) noexcept(noexcept(a.swap(b)))
 {
     a.swap(b);
 }
+
+template <class... Ts>
+constexpr enable_if_t<(... && is_swappable_v<const Ts>)>
+swap(const tuple<Ts...> &a, const tuple<Ts...> &b) noexcept(noexcept(a.swap(b)))
+{
+    a.swap(b);
+}
+
+// ── P2321 tuple common-reference / common-type ([tuple.common.ref]) ─────
+// The tuple twin of the pair specializations in <utility> — same purpose
+// (a proxy tuple<T&...> and its value tuple<T...> need one meeting type for
+// indirectly_readable), same requires-guard, and the two independent packs
+// make an element-count mismatch fall out as an unsatisfied constraint
+// rather than a deduction error.
+template <class... Ts, class... Us, template <class> class TQual,
+          template <class> class UQual>
+    requires requires {
+        typename tuple<common_reference_t<TQual<Ts>, UQual<Us>>...>;
+    }
+struct basic_common_reference<tuple<Ts...>, tuple<Us...>, TQual, UQual> {
+    using type = tuple<common_reference_t<TQual<Ts>, UQual<Us>>...>;
+};
+
+template <class... Ts, class... Us>
+    requires requires { typename tuple<common_type_t<Ts, Us>...>; }
+struct common_type<tuple<Ts...>, tuple<Us...>> {
+    using type = tuple<common_type_t<Ts, Us>...>;
+};
 
 // ── pair's piecewise constructor (declared in <utility>) ───────────────
 

@@ -11,22 +11,23 @@
 // Values cross-checked against libstdc++'s own bits/version.def (the
 // generator source real GCC ships from -- the most authoritative available
 // reference), not just the bleeding-edge eel.is/c++draft snapshot, which
-// mixes in C++26-only DR bumps boxcxx does not implement. Notably
-// __cpp_lib_ranges's true C++23 value is 202302L -- distinct from both the
-// pre-C++23 202110L (C++20) and the C++26 202406L bump; naive eel.is-draft-
-// only research first produced the wrong middle value here (202202L, which
-// is neither), corrected after a version.def cross-check.
+// mixes in C++26-only DR bumps boxcxx does not implement.
+//
+// __cpp_lib_ranges itself is NOT here: it is the widest macro in
+// [version.syn], covering the whole of [ranges] plus the specialized-memory
+// algorithms, and boxcxx is missing 23 of the entities it promises. See
+// <version>'s omission list for the enumeration. Neither is
+// __cpp_lib_ranges_as_const, for the reason recorded there.
 #ifndef BOXCXX_BITS_VERSION_RANGES
 #define BOXCXX_BITS_VERSION_RANGES
 
-#ifndef __cpp_lib_ranges
-#  define __cpp_lib_ranges 202302L
-#endif
+// __cpp_lib_ranges_zip is co-owned by <ranges>, <tuple> and <utility>, so
+// it is DEFINED in <__bits/version_utility> (one definition site for every
+// co-owned macro) and reaches <ranges> through this include.
+#include <__bits/version_utility>
+
 #ifndef __cpp_lib_ranges_to_container
 #  define __cpp_lib_ranges_to_container 202202L
-#endif
-#ifndef __cpp_lib_ranges_zip
-#  define __cpp_lib_ranges_zip 202110L
 #endif
 #ifndef __cpp_lib_ranges_join_with
 #  define __cpp_lib_ranges_join_with 202202L
@@ -51,15 +52,6 @@
 #endif
 #ifndef __cpp_lib_ranges_repeat
 #  define __cpp_lib_ranges_repeat 202207L
-#endif
-// 202207L is the C++23 value (P2278R4 views::as_const +
-// basic_const_iterator). Ф29f-3c shipped 202311L here, which is C++26's
-// P2836R1 value (basic_const_iterator follows its underlying type's
-// convertibility -- the operator CI() conversion). boxcxx's
-// basic_const_iterator has no such conversion operator, so 202311L
-// overstated the feature; Ф31a-3 corrects it to the C++23 value.
-#ifndef __cpp_lib_ranges_as_const
-#  define __cpp_lib_ranges_as_const 202207L
 #endif
 #ifndef __cpp_lib_ranges_as_rvalue
 #  define __cpp_lib_ranges_as_rvalue 202207L

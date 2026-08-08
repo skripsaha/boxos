@@ -1,11 +1,24 @@
 // boxcxx — <__bits/version_utility>
 //
-// The feature-test macros [version.syn] owned by <utility>. Split out for
-// the same [support.limits.general] per-header reason as
+// The feature-test macros [version.syn] that <utility> owns or CO-owns.
+// Split out for the same [support.limits.general] per-header reason as
 // <__bits/version_ranges> -- see that file's comment.
 //
-// __cpp_lib_tuples_by_type is owned jointly by <utility> and <tuple>
-// (get<T> on pair and on tuple); <tuple> includes this leaf directly.
+// Three of these are jointly owned, and this leaf is the single definition
+// site for all three -- every co-owning header reaches it, so no macro is
+// ever spelled twice (two #ifndef-guarded copies in two leaves would make
+// the effective value depend on include order the moment they drifted):
+//   __cpp_lib_tuples_by_type      <utility> + <tuple>   (get<T> on both)
+//   __cpp_lib_constexpr_algorithms <algorithm> + <utility>
+//                                 (P0202 made <utility>'s swap/exchange
+//                                  constexpr too, not just [algorithms])
+//   __cpp_lib_ranges_zip          <ranges> + <tuple> + <utility>
+//                                 (P2321 is half a <ranges> paper and half
+//                                  a pair/tuple paper)
+// <tuple> and <utility> include this leaf directly;
+// <__bits/version_algorithm> and <__bits/version_ranges> include it so
+// <algorithm> and <ranges> get their share through the leaf they already
+// include.
 #ifndef BOXCXX_BITS_VERSION_UTILITY
 #define BOXCXX_BITS_VERSION_UTILITY
 
@@ -35,6 +48,27 @@
 #endif
 #ifndef __cpp_lib_unreachable
 #  define __cpp_lib_unreachable 202202L
+#endif
+
+// Original C++20 value (P0202), unchanged through C++23 -- NOT the later
+// C++26 202306L bump (P2562 "constexpr Stable Sorting"). boxcxx's
+// stable_sort/inplace_merge are deliberately still non-constexpr (buffer-
+// based, see <__bits/algorithm_classic>), exactly matching P0202's own
+// original exclusion list (stable_sort/inplace_merge need a temp buffer;
+// shuffle/sample need a constexpr uniform_random_bit_generator, neither of
+// which C++20 provided) -- not a boxcxx gap. stable_partition, also listed
+// in P0202's original exclusion set, IS constexpr in boxcxx already
+// (algorithm_classic's merge-based implementation needs no buffer).
+#ifndef __cpp_lib_constexpr_algorithms
+#  define __cpp_lib_constexpr_algorithms 201806L
+#endif
+// P2321R2 "zip". The <ranges> half (zip/zip_transform/adjacent/pairwise and
+// their _transform forms) shipped in Ф29d; the <tuple>/<utility> half is
+// the converting constructors, the const-qualified assignments and swaps,
+// and the basic_common_reference / common_type specializations that let a
+// proxy pair/tuple of references meet its value counterpart.
+#ifndef __cpp_lib_ranges_zip
+#  define __cpp_lib_ranges_zip 202110L
 #endif
 
 #endif // BOXCXX_BITS_VERSION_UTILITY
