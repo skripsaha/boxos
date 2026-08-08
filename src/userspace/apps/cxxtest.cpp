@@ -30032,17 +30032,183 @@ void Phase132()
               "phase132 (14) dynamic width over a 128-bit argument");
     }
 
-    // A deliberate, measured divergence: boxcxx ACCEPTS __int128 as the width
-    // argument itself, libstdc++ throws ("must be a non-negative integer").
-    // [format.string.std]/7 disqualifies an argument only for not being of
-    // integral type, and is_integral_v<__int128> is true here, so accepting is
-    // the reading boxcxx takes -- guarded by the same range check every other
-    // width argument gets.
+    // A 128-bit value formats, but it may not BE a width. [format.string.std]/10:
+    // the option "is valid only if the corresponding formatting argument is of
+    // standard signed or unsigned integer type", and __int128 is an extended
+    // one -- [basic.fundamental]'s list of standard integer types is closed, so
+    // is_integral_v<__int128> being true does not admit it. C++26 writes the
+    // rule as check_dynamic_spec<int, unsigned int, long long int, unsigned
+    // long long int>. Both reference libraries throw; so does boxcxx.
     {
         __int128 w = 33;
-        Check(feq(std::vformat("{0:{1}}", std::make_format_args(a, w)),
+        bool     rejected = false;
+        try {
+            (void)std::vformat("{0:{1}}", std::make_format_args(a, w));
+        } catch (const std::format_error &) {
+            rejected = true;
+        }
+        Check(rejected, "phase132 (15) __int128 rejected as a width argument");
+    }
+    {
+        unsigned __int128 w = 33;
+        bool              rejected = false;
+        try {
+            (void)std::vformat("{0:{1}}", std::make_format_args(a, w));
+        } catch (const std::format_error &) {
+            rejected = true;
+        }
+        Check(rejected, "phase132 (16) unsigned __int128 rejected as a width argument");
+    }
+
+    // vformat above reaches the runtime half of the rule (basic_format_arg's
+    // integer coercion). The compile-time half is the kind table that the
+    // consteval format-string checker installs -- which vformat never builds,
+    // so it needs its own exercise. Feeding it by hand runs exactly the call
+    // CheckScan makes per replacement field; in a constant expression that
+    // throw is the compile error, which is why std::format("{:{}}", 1, w128)
+    // does not build.
+    {
+        constexpr std::__format::ArgKind kinds[] = {
+            std::__format::MapKind<__int128>(),
+            std::__format::MapKind<unsigned __int128>(),
+            std::__format::MapKind<int>(),
+        };
+        static_assert(!std::__format::KindIsIntegral(kinds[0]));
+        static_assert(!std::__format::KindIsIntegral(kinds[1]));
+        static_assert(std::__format::KindIsIntegral(kinds[2]));
+
+        auto rejects = [&](size_t id) {
+            std::format_parse_context pc{std::string_view(), 3};
+            pc.__set_kinds(kinds, 3);
+            try {
+                pc.check_dynamic_spec_integral(id);
+            } catch (const std::format_error &) {
+                return true;
+            }
+            return false;
+        };
+        Check(rejects(0) && rejects(1) && !rejects(2),
+              "phase132 (17) the consteval checker's kind table rejects both "
+              "128-bit widths and keeps int");
+    }
+    {
+        // The positive through consteval-checked std::format, so (17) is not
+        // asserting about a table nobody consults.
+        int w = 33;
+        Check(feq(std::format("{0:{1}}", a, w),
                   "  1267650600228229401496703217721"),
-              "phase132 (15) __int128 is accepted as a width argument (libstdc++ throws)");
+              "phase132 (18) a standard-integer width still resolves through "
+              "the compile-time-checked std::format");
+    }
+
+    // The widest fields the integer path can emit -- what actually sizes the
+    // digit and sign/prefix buffers. 130 characters of binary is the reason the
+    // scratch is one char per value bit, and '-' plus "0b" is the reason the
+    // sign/prefix scratch holds three.
+    {
+        std::string b = std::format("{:#b}", u);
+        Check(b.size() == 130 && b == std::string("0b") + std::string(128, '1'),
+              "phase132 (19) {:#b} of the unsigned 128-bit maximum is 130 chars");
+        Check(feq(std::format("{:#o}", u),
+                  "03777777777777777777777777777777777777777777"),
+              "phase132 (20) {:#o} of the unsigned 128-bit maximum");
+        Check(feq(std::format("{:#x}", u), "0xffffffffffffffffffffffffffffffff") &&
+                  feq(std::format("{:#X}", u), "0XFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"),
+              "phase132 (21) {:#x}/{:#X} of the unsigned 128-bit maximum");
+        std::string n = std::format("{:#b}", mn);
+        Check(n.size() == 131 && n[0] == '-' && n[1] == '0' && n[2] == 'b' &&
+                  n[3] == '1' && n.find_first_not_of('0', 4) == std::string::npos,
+              "phase132 (22) sign plus prefix plus 128 digits -- the widest "
+              "field, and the exact size of the sign/prefix scratch");
+    }
+
+    // The decimal reduction peels nine digits at a time through 32-bit limbs,
+    // so the chunk boundaries are where it can go wrong. Measured on
+    // libstdc++ 15.2.
+    {
+        unsigned __int128 p = 1;
+        bool              ok = true;
+        static const char *const expect[] = {
+            "1000000000", "999999999",                        // 10^9
+            "1000000000000000000", "999999999999999999",      // 10^18
+            "10000000000000000000", "9999999999999999999",    // 10^19
+            "1000000000000000000000000000",                   // 10^27
+            "999999999999999999999999999",
+            "100000000000000000000000000000000000000",        // 10^38
+            "99999999999999999999999999999999999999",
+        };
+        int e = 0;
+        for (int d = 0; d <= 38; ++d) {
+            if (d == 9 || d == 18 || d == 19 || d == 27 || d == 38) {
+                ok = ok && feq(std::format("{}", p), expect[e]) &&
+                     feq(std::format("{}", p - 1), expect[e + 1]);
+                e += 2;
+            }
+            if (d < 38) p *= 10;
+        }
+        ok = ok && feq(std::format("{}", (unsigned __int128)1 << 64),
+                       "18446744073709551616") &&
+             feq(std::format("{}", (unsigned __int128)~0ull), "18446744073709551615") &&
+             feq(std::format("{}", ((unsigned __int128)1 << 64) + 1),
+                 "18446744073709551617") &&
+             feq(std::format("{}", (__int128)((((unsigned __int128)1) << 127) - 1)),
+                 "170141183460469231731687303715884105727");
+        Check(ok, "phase132 (23) decimal chunk boundaries and the 2^64 straddle");
+    }
+
+    // A round-trip is an oracle the reduction cannot share a bug with: parsing
+    // the digits back uses only multiply and add, never a division. Any wrong
+    // digit, missing digit or stray leading zero fails it.
+    {
+        auto round_trips = [](unsigned __int128 v) {
+            std::string       s    = std::format("{}", v);
+            unsigned __int128 back = 0;
+            for (char c : s) {
+                if (c < '0' || c > '9') return false;
+                back = back * 10 + unsigned(c - '0');
+            }
+            return back == v && !s.empty() && (s.size() == 1 || s[0] != '0');
+        };
+        bool               ok = round_trips(0) && round_trips(~(unsigned __int128)0);
+        unsigned long long x  = 0x123456789abcdefull;
+        auto next = [&] {
+            x = x * 6364136223846793005ull + 1442695040888963407ull;
+            return x;
+        };
+        for (int i = 0; i < 4000 && ok; ++i) {
+            const unsigned long long hi = next(), lo = next();
+            unsigned __int128        v  = ((unsigned __int128)hi << 64) | lo;
+            // Every width, so short values and full-width values both run.
+            v >>= (i % 128);
+            ok = round_trips(v);
+        }
+        Check(ok, "phase132 (24) 4000 decimal round-trips across every width");
+    }
+
+    // visit_format_arg has to know both 128-bit alternatives too: a missing
+    // case there returns the valueless tag and formats nothing wrong, so only
+    // an explicit visit sees it.
+    {
+        __int128          sv    = -5;
+        unsigned __int128 uv    = 7;
+        auto              store = std::make_format_args(sv, uv);
+        std::format_args  fa(store);
+        bool              signed_seen = false, unsigned_seen = false;
+        std::visit_format_arg(
+            [&](auto v) {
+                if constexpr (std::is_same_v<decltype(v), __int128>)
+                    signed_seen = v == -5;
+            },
+            fa.get(0));
+        std::visit_format_arg(
+            [&](auto v) {
+                if constexpr (std::is_same_v<decltype(v), unsigned __int128>)
+                    unsigned_seen = v == 7;
+            },
+            fa.get(1));
+        Check(signed_seen && unsigned_seen,
+              "phase132 (25) visit_format_arg hands out both 128-bit "
+              "alternatives with their own types");
     }
 
     static_assert(std::formattable<__int128, char>);
@@ -30054,8 +30220,9 @@ void Phase132()
     printf("[CXX] PASS phase132: formatter<__int128>/<unsigned __int128> -- the "
            "argument store carries a 128-bit slot instead of narrowing to 64, the "
            "magnitude is taken in the type's own width so __int128's minimum "
-           "prints, and the wide digit conversion uses literal divisors so a "
-           "freestanding link needs no __udivti3 from libgcc\n");
+           "prints, the wide decimal conversion reduces through 32-bit limbs so "
+           "it needs no 128-bit division helper at any -O level, and a 128-bit "
+           "value is refused as a width argument per [format.string.std]/10\n");
 }
 
 } // namespace
