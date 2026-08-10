@@ -50,36 +50,62 @@ public:
     vector() noexcept(noexcept(Alloc())) = default;
     explicit vector(const Alloc &a) noexcept : __alloc(a) {}
 
+    // Every constructor that allocates in its BODY wraps that body: a
+    // constructor which throws part-way never runs ~vector, and
+    // __begin/__size/__cap are plain scalars nobody owns, so whatever the
+    // body already took would be lost. DestroyAll releases exactly what the
+    // partial state holds — the elements built so far AND the block — and
+    // is correct at every point, including before Grow ran at all.
     explicit vector(size_type count, const Alloc &a = Alloc()) : __alloc(a)
     {
-        Grow(count);
-        for (; __size < count; ++__size)
-            AllocTraits::construct(__alloc, __begin + __size);
+        try {
+            Grow(count);
+            for (; __size < count; ++__size)
+                AllocTraits::construct(__alloc, __begin + __size);
+        } catch (...) {
+            DestroyAll();
+            throw;
+        }
     }
     vector(size_type count, const T &value, const Alloc &a = Alloc())
         : __alloc(a)
     {
-        Grow(count);
-        for (; __size < count; ++__size)
-            AllocTraits::construct(__alloc, __begin + __size, value);
+        try {
+            Grow(count);
+            for (; __size < count; ++__size)
+                AllocTraits::construct(__alloc, __begin + __size, value);
+        } catch (...) {
+            DestroyAll();
+            throw;
+        }
     }
 
     template <typename It>
         requires(!is_integral_v<It>)
     vector(It first, It last, const Alloc &a = Alloc()) : __alloc(a)
     {
-        if constexpr (is_pointer_v<It>) {
-            Grow(static_cast<size_type>(last - first));
+        try {
+            if constexpr (is_pointer_v<It>) {
+                Grow(static_cast<size_type>(last - first));
+            }
+            for (; first != last; ++first) emplace_back(*first);
+        } catch (...) {
+            DestroyAll();
+            throw;
         }
-        for (; first != last; ++first) emplace_back(*first);
     }
 
     vector(initializer_list<T> il, const Alloc &a = Alloc()) : __alloc(a)
     {
-        Grow(il.size());
-        for (const T &v : il) {
-            AllocTraits::construct(__alloc, __begin + __size, v);
-            ++__size;
+        try {
+            Grow(il.size());
+            for (const T &v : il) {
+                AllocTraits::construct(__alloc, __begin + __size, v);
+                ++__size;
+            }
+        } catch (...) {
+            DestroyAll();
+            throw;
         }
     }
 
@@ -90,24 +116,39 @@ public:
     template <ContainerCompatibleRange<T> R>
     vector(from_range_t, R &&rg, const Alloc &a = Alloc()) : __alloc(a)
     {
-        if constexpr (ranges::sized_range<R>) {
-            Grow(static_cast<size_type>(ranges::size(rg)));
-        } else if constexpr (ranges::forward_range<R>) {
-            Grow(static_cast<size_type>(
-                ranges::distance(ranges::begin(rg), ranges::end(rg))));
+        try {
+            if constexpr (ranges::sized_range<R>) {
+                Grow(static_cast<size_type>(ranges::size(rg)));
+            } else if constexpr (ranges::forward_range<R>) {
+                Grow(static_cast<size_type>(
+                    ranges::distance(ranges::begin(rg), ranges::end(rg))));
+            }
+            for (auto &&v : rg) emplace_back(std::forward<decltype(v)>(v));
+        } catch (...) {
+            DestroyAll();
+            throw;
         }
-        for (auto &&v : rg) emplace_back(std::forward<decltype(v)>(v));
     }
 
     vector(const vector &other)
         : __alloc(AllocTraits::select_on_container_copy_construction(
               other.__alloc))
     {
-        CopyFrom(other);
+        try {
+            CopyFrom(other);
+        } catch (...) {
+            DestroyAll();
+            throw;
+        }
     }
     vector(const vector &other, const Alloc &a) : __alloc(a)
     {
-        CopyFrom(other);
+        try {
+            CopyFrom(other);
+        } catch (...) {
+            DestroyAll();
+            throw;
+        }
     }
 
     vector(vector &&other) noexcept
@@ -128,10 +169,15 @@ public:
             other.__size  = 0;
             other.__cap   = 0;
         } else {
-            Grow(other.__size);
-            for (size_type i = 0; i < other.__size; ++i, ++__size)
-                AllocTraits::construct(__alloc, __begin + __size,
-                                       std::move(other.__begin[i]));
+            try {
+                Grow(other.__size);
+                for (size_type i = 0; i < other.__size; ++i, ++__size)
+                    AllocTraits::construct(__alloc, __begin + __size,
+                                           std::move(other.__begin[i]));
+            } catch (...) {
+                DestroyAll();
+                throw;
+            }
         }
     }
 
@@ -305,7 +351,16 @@ public:
                 AllocTraits::deallocate(__alloc, fresh, want);
                 throw;
             }
-            MoveInto(fresh);
+            // move_if_noexcept degrades a throwing move to a copy, so this
+            // relocation CAN throw; MoveInto unwinds only the prefix it
+            // built itself, leaving the new element and the block to us.
+            try {
+                MoveInto(fresh);
+            } catch (...) {
+                AllocTraits::destroy(__alloc, fresh + __size);
+                AllocTraits::deallocate(__alloc, fresh, want);
+                throw;
+            }
             ReplaceStorage(fresh, want, __size + 1);
         } else {
             AllocTraits::construct(__alloc, __begin + __size,
@@ -796,47 +851,80 @@ public:
 
     vector() noexcept = default;
     explicit vector(const Alloc &a) noexcept : alloc_(a) {}
+    // Same rule as vector<T>: a constructor body that allocates owns what it
+    // took until it returns, and Free() releases exactly that (the word
+    // block; bool elements have no destructor).
     explicit vector(size_type n, const Alloc &a = Alloc()) : alloc_(a)
     {
-        Grow(n);
-        size_ = n;
-        for (size_t w = 0; w < Words(n); ++w) words_[w] = 0;
+        try {
+            Grow(n);
+            size_ = n;
+            for (size_t w = 0; w < Words(n); ++w) words_[w] = 0;
+        } catch (...) {
+            Free();
+            throw;
+        }
     }
     vector(size_type n, bool v, const Alloc &a = Alloc()) : alloc_(a)
     {
-        Grow(n);
-        size_      = n;
-        Word fill  = v ? Word(-1) : 0;
-        for (size_t w = 0; w < Words(n); ++w) words_[w] = fill;
+        try {
+            Grow(n);
+            size_     = n;
+            Word fill = v ? Word(-1) : 0;
+            for (size_t w = 0; w < Words(n); ++w) words_[w] = fill;
+        } catch (...) {
+            Free();
+            throw;
+        }
     }
     template <class It>
         requires requires(It i) { bool(*i); }
     vector(It first, It last, const Alloc &a = Alloc()) : alloc_(a)
     {
-        for (; first != last; ++first) push_back(bool(*first));
+        try {
+            for (; first != last; ++first) push_back(bool(*first));
+        } catch (...) {
+            Free();
+            throw;
+        }
     }
     vector(initializer_list<bool> il, const Alloc &a = Alloc()) : alloc_(a)
     {
-        Grow(il.size());
-        for (bool b : il) push_back(b);
+        try {
+            Grow(il.size());
+            for (bool b : il) push_back(b);
+        } catch (...) {
+            Free();
+            throw;
+        }
     }
     template <ContainerCompatibleRange<value_type> R>
     vector(from_range_t, R &&rg, const Alloc &a = Alloc()) : alloc_(a)
     {
-        if constexpr (ranges::sized_range<R>) {
-            Grow(static_cast<size_type>(ranges::size(rg)));
-        } else if constexpr (ranges::forward_range<R>) {
-            Grow(static_cast<size_type>(
-                ranges::distance(ranges::begin(rg), ranges::end(rg))));
+        try {
+            if constexpr (ranges::sized_range<R>) {
+                Grow(static_cast<size_type>(ranges::size(rg)));
+            } else if constexpr (ranges::forward_range<R>) {
+                Grow(static_cast<size_type>(
+                    ranges::distance(ranges::begin(rg), ranges::end(rg))));
+            }
+            for (auto &&v : rg) push_back(static_cast<bool>(v));
+        } catch (...) {
+            Free();
+            throw;
         }
-        for (auto &&v : rg) push_back(static_cast<bool>(v));
     }
     vector(const vector &o)
         : alloc_(WTraits::select_on_container_copy_construction(o.alloc_))
     {
-        Grow(o.size_);
-        size_ = o.size_;
-        for (size_t w = 0; w < Words(size_); ++w) words_[w] = o.words_[w];
+        try {
+            Grow(o.size_);
+            size_ = o.size_;
+            for (size_t w = 0; w < Words(size_); ++w) words_[w] = o.words_[w];
+        } catch (...) {
+            Free();
+            throw;
+        }
     }
     vector(vector &&o) noexcept
         : words_(o.words_), size_(o.size_), cap_(o.cap_),

@@ -31757,6 +31757,309 @@ void Phase133()
            ins_above, ins_mixed, ins_tagged, ins_single, merge_moves);
 }
 
+// ── phase134 helpers: <vector> exception-safety, counted not inferred ────
+// Two pre-existing leaks, both measured by tally rather than argued:
+//   V1  emplace_back's growth path — the relocation that runs AFTER the new
+//       element is built was unguarded, so a throwing relocation dropped
+//       both that element and the fresh block.
+//   V2  every allocating constructor — a ctor body that throws never runs
+//       ~vector, and __begin/__size/__cap are scalars nobody owns, so the
+//       elements built so far and the block were dropped.
+// The element type counts live objects, the allocator counts live blocks,
+// and a construction budget decides exactly which operation throws.
+
+struct P134Throw {};
+
+int g_p134Live       = 0;
+int g_p134Blocks     = 0;
+int g_p134Budget     = -1; // -1 = never throw; else N successes, then throw
+int g_p134LeakObjs   = 0;
+int g_p134LeakBlocks = 0;
+
+void P134Trip()
+{
+    if (g_p134Budget < 0) return;
+    if (g_p134Budget == 0) throw P134Throw{};
+    --g_p134Budget;
+}
+
+// Copy-constructible with a THROWING move constructor: move_if_noexcept
+// therefore copies during relocation, which is the only way vector's growth
+// path can throw at all (a noexcept move makes V1 unreachable by design).
+struct P134Elem {
+    int v;
+    P134Elem() : v(0) { P134Trip(); ++g_p134Live; }
+    explicit P134Elem(int x) : v(x) { P134Trip(); ++g_p134Live; }
+    P134Elem(const P134Elem &o) : v(o.v) { P134Trip(); ++g_p134Live; }
+    P134Elem(P134Elem &&o) : v(o.v) { P134Trip(); ++g_p134Live; }
+    P134Elem &operator=(const P134Elem &o) { v = o.v; return *this; }
+    P134Elem &operator=(P134Elem &&o) { v = o.v; return *this; }
+    ~P134Elem() { --g_p134Live; }
+};
+
+// Stateful on purpose: a non-empty allocator makes is_always_equal false, so
+// vector(vector&&, alloc) with two different ids takes the element-wise move
+// branch instead of stealing the block.
+template <class T>
+struct P134Alloc {
+    using value_type = T;
+    int id           = 0;
+    P134Alloc()      = default;
+    explicit P134Alloc(int i) : id(i) {}
+    template <class U>
+    P134Alloc(const P134Alloc<U> &o) noexcept : id(o.id)
+    {
+    }
+    T *allocate(std::size_t n)
+    {
+        ++g_p134Blocks;
+        return static_cast<T *>(::operator new(n * sizeof(T)));
+    }
+    void deallocate(T *p, std::size_t) noexcept
+    {
+        --g_p134Blocks;
+        ::operator delete(p);
+    }
+    template <class U>
+    bool operator==(const P134Alloc<U> &o) const noexcept
+    {
+        return id == o.id;
+    }
+    template <class U>
+    bool operator!=(const P134Alloc<U> &o) const noexcept
+    {
+        return id != o.id;
+    }
+};
+
+using P134Vec  = std::vector<P134Elem, P134Alloc<P134Elem>>;
+using P134BVec = std::vector<bool, P134Alloc<bool>>;
+
+// Non-pointer iterator: drives vector(It,It)'s no-size-known branch, where
+// storage arrives through emplace_back's growth instead of one Grow.
+struct P134Iter {
+    const P134Elem         *p = nullptr;
+    using iterator_category = std::forward_iterator_tag;
+    using value_type        = P134Elem;
+    using difference_type   = std::ptrdiff_t;
+    using reference         = const P134Elem &;
+    using pointer           = const P134Elem *;
+    P134Iter()              = default;
+    explicit P134Iter(const P134Elem *q) : p(q) {}
+    const P134Elem &operator*() const { return *p; }
+    const P134Elem *operator->() const { return p; }
+    P134Iter       &operator++()
+    {
+        ++p;
+        return *this;
+    }
+    P134Iter operator++(int)
+    {
+        auto t = *this;
+        ++p;
+        return t;
+    }
+    bool operator==(const P134Iter &o) const { return p == o.p; }
+};
+
+// Trips on dereference — the throw source for the vector<bool> mirrors,
+// whose elements have no constructor of their own to trip in.
+struct P134TripBool {
+    bool operator()(int i) const
+    {
+        P134Trip();
+        return (i & 1) != 0;
+    }
+};
+
+// Runs fn, which must throw part-way, and demands that the live-object and
+// live-block tallies come back exactly where they started.
+template <class Fn>
+void P134Expect(Fn fn, const char *what)
+{
+    int  live0   = g_p134Live;
+    int  blocks0 = g_p134Blocks;
+    bool threw   = false;
+    try {
+        fn();
+    } catch (const P134Throw &) {
+        threw = true;
+    }
+    g_p134Budget  = -1;
+    int lost_objs = g_p134Live - live0;
+    int lost_blks = g_p134Blocks - blocks0;
+    g_p134LeakObjs += lost_objs;
+    g_p134LeakBlocks += lost_blks;
+    if (!threw || lost_objs != 0 || lost_blks != 0)
+        printf("[CXX]   %s: threw=%d leaked objs=%d blocks=%d\n", what,
+               threw ? 1 : 0, lost_objs, lost_blks);
+    Check(threw && lost_objs == 0 && lost_blks == 0, what);
+}
+
+void Phase134()
+{
+    // ── (A) V1: the growth relocation throws after the new element exists ──
+    {
+        int live0 = g_p134Live, blocks0 = g_p134Blocks;
+        {
+            P134Vec v;
+            v.reserve(2);
+            v.emplace_back(1);
+            v.emplace_back(2);
+            Check(v.size() == 2 && v.capacity() == 2 &&
+                      g_p134Blocks - blocks0 == 1,
+                  "phase134 (A1) full-to-capacity vector holds one block");
+
+            g_p134Budget = 1; // new element succeeds, first relocation copy throws
+            bool threw   = false;
+            try {
+                v.emplace_back(3);
+            } catch (const P134Throw &) {
+                threw = true;
+            }
+            g_p134Budget = -1;
+            Check(threw, "phase134 (A2) the relocation copy threw");
+
+            int lost_objs = g_p134Live - live0 - 2;
+            int lost_blks = g_p134Blocks - blocks0 - 1;
+            g_p134LeakObjs += lost_objs;
+            g_p134LeakBlocks += lost_blks;
+            if (lost_objs != 0 || lost_blks != 0)
+                printf("[CXX]   phase134 (A3) in flight: leaked objs=%d blocks=%d\n",
+                       lost_objs, lost_blks);
+            Check(lost_objs == 0,
+                  "phase134 (A3) the element built in the fresh block is destroyed");
+            Check(lost_blks == 0, "phase134 (A4) the fresh block is released");
+            Check(v.size() == 2 && v.capacity() == 2 && v[0].v == 1 && v[1].v == 2,
+                  "phase134 (A5) strong guarantee: the vector is untouched");
+        }
+        Check(g_p134Live == live0 && g_p134Blocks == blocks0,
+              "phase134 (A6) destroying the vector leaves nothing behind");
+    }
+
+    // A relocation that throws PART WAY: MoveInto unwinds its own prefix, the
+    // new element and the block are ours.
+    {
+        int live0 = g_p134Live, blocks0 = g_p134Blocks;
+        {
+            P134Vec v;
+            v.reserve(4);
+            for (int i = 1; i <= 4; ++i) v.emplace_back(i);
+            g_p134Budget = 3; // new element + copies #0,#1 succeed, copy #2 throws
+            bool threw   = false;
+            try {
+                v.emplace_back(5);
+            } catch (const P134Throw &) {
+                threw = true;
+            }
+            g_p134Budget  = -1;
+            int lost_objs = g_p134Live - live0 - 4;
+            int lost_blks = g_p134Blocks - blocks0 - 1;
+            g_p134LeakObjs += lost_objs;
+            g_p134LeakBlocks += lost_blks;
+            if (lost_objs != 0 || lost_blks != 0)
+                printf("[CXX]   phase134 (A7) mid-relocation: leaked objs=%d blocks=%d\n",
+                       lost_objs, lost_blks);
+            Check(threw && lost_objs == 0 && lost_blks == 0,
+                  "phase134 (A7) a mid-relocation throw leaks neither element nor block");
+            Check(v.size() == 4 && v[0].v == 1 && v[3].v == 4,
+                  "phase134 (A8) strong guarantee across a partial relocation");
+        }
+        Check(g_p134Live == live0 && g_p134Blocks == blocks0,
+              "phase134 (A9) nothing left after destruction");
+    }
+
+    // ── (B) V2: all eight allocating constructors of the primary template ──
+    P134Elem model(9);
+    P134Elem src[6] = {P134Elem(0), P134Elem(1), P134Elem(2),
+                       P134Elem(3), P134Elem(4), P134Elem(5)};
+
+    P134Expect([&] { g_p134Budget = 3; P134Vec v(6); },
+               "phase134 (B1) vector(count) leaks nothing when it throws");
+    P134Expect([&] { g_p134Budget = 3; P134Vec v(6, model); },
+               "phase134 (B2) vector(count,value) leaks nothing when it throws");
+    P134Expect([&] { g_p134Budget = 3; P134Vec v(src, src + 6); },
+               "phase134 (B3) vector(T*,T*) leaks nothing when it throws");
+    P134Expect(
+        [&] {
+            g_p134Budget = 3;
+            P134Vec v(P134Iter(src), P134Iter(src + 6));
+        },
+        "phase134 (B4) vector(fwd-iterator pair) leaks nothing when it throws");
+    P134Expect(
+        [&] {
+            g_p134Budget = 9; // six for the initializer_list, then three copies
+            P134Vec v{P134Elem(0), P134Elem(1), P134Elem(2),
+                      P134Elem(3), P134Elem(4), P134Elem(5)};
+        },
+        "phase134 (B5) vector(initializer_list) leaks nothing when it throws");
+    P134Expect(
+        [&] {
+            g_p134Budget = 3;
+            P134Vec v(std::from_range, std::span<const P134Elem>(src, 6));
+        },
+        "phase134 (B6) vector(from_range) leaks nothing when it throws");
+
+    {
+        P134Vec base(src, src + 6);
+        P134Expect([&] { g_p134Budget = 3; P134Vec w(base); },
+                   "phase134 (B7) vector(const vector&) leaks nothing when it throws");
+        P134Expect(
+            [&] {
+                g_p134Budget = 3;
+                P134Vec w(base, P134Alloc<P134Elem>(0));
+            },
+            "phase134 (B8) vector(const vector&,alloc) leaks nothing when it throws");
+        P134Expect(
+            [&] {
+                P134Vec donor(src, src + 6);
+                g_p134Budget = 3;
+                P134Vec w(std::move(donor), P134Alloc<P134Elem>(7));
+            },
+            "phase134 (B9) vector(vector&&,alloc) with unequal allocators leaks nothing");
+    }
+
+    // ── (C) the vector<bool> mirrors that can throw after taking storage ───
+    {
+        auto tv = std::views::iota(0, 300) | std::views::transform(P134TripBool{});
+        P134Expect([&] { g_p134Budget = 200; P134BVec b(tv.begin(), tv.end()); },
+                   "phase134 (C1) vector<bool>(It,It) leaks no word block");
+        P134Expect([&] { g_p134Budget = 200; P134BVec b(std::from_range, tv); },
+                   "phase134 (C2) vector<bool>(from_range) leaks no word block");
+    }
+
+    // ── (D) the tallies themselves balance when nothing throws ─────────────
+    {
+        int live0 = g_p134Live, blocks0 = g_p134Blocks;
+        {
+            P134Vec a(6);
+            P134Vec b(6, model);
+            P134Vec c(src, src + 6);
+            P134Vec d(P134Iter(src), P134Iter(src + 6));
+            P134Vec e{P134Elem(0), P134Elem(1)};
+            P134Vec f(std::from_range, std::span<const P134Elem>(src, 6));
+            P134Vec g(c);
+            P134Vec h(c, P134Alloc<P134Elem>(0));
+            P134Vec i(std::move(g), P134Alloc<P134Elem>(7));
+            for (int k = 0; k < 40; ++k) a.emplace_back(k);
+            P134BVec p(10), q(10, true), r{true, false, true}, s(p);
+            Check(a.size() == 46 && b.size() == 6 && c.size() == 6 && d.size() == 6 &&
+                      e.size() == 2 && f.size() == 6 && h.size() == 6 && i.size() == 6,
+                  "phase134 (D1) every constructor built what it was asked for");
+            Check(p.size() == 10 && q.size() == 10 && q[0] && r.size() == 3 &&
+                      s.size() == 10,
+                  "phase134 (D2) the vector<bool> constructors likewise");
+        }
+        Check(g_p134Live == live0 && g_p134Blocks == blocks0,
+              "phase134 (D3) the no-throw path balances objects and blocks");
+    }
+
+    printf("[CXX] PASS phase134: <vector> exception safety -- the growth relocation and "
+           "all 8 allocating ctors + 6 vector<bool> mirrors own what they took "
+           "(across 13 throw sites: leaked objects=%d, leaked blocks=%d)\n",
+           g_p134LeakObjs, g_p134LeakBlocks);
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -31912,6 +32215,7 @@ int main()
     Phase131();
     Phase132();
     Phase133();
+    Phase134();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
