@@ -1,0 +1,305 @@
+// boxcxx — <__bits/flat_engine>
+// Shared substrate for the flat container adaptors ([flat.set], [flat.map]):
+//   * the two ordering tags, declared by BOTH [flat.set.syn] and
+//     [flat.map.syn], so neither header can own them alone;
+//   * uses-allocator construction — [allocator.uses.construction] has no
+//     public entity in this tree, and every flat adaptor's twelve allocator
+//     constructors are specified in terms of it;
+//   * the invariant-restore guard [flat.set.overview]/6 demands of every
+//     mutating member;
+//   * a linear merge of two adjacent sorted runs, which is what makes
+//     range-insert's N + M·logM budget ([flat.set.modifiers]/6) reachable.
+//
+// On that last point: std::inplace_merge in this tree resolves to
+// __algo_impl::RotateMerge, which is O((n+m)·log(n+m)) in element moves --
+// measured 8.4x the moves of a buffered merge at N=1000/M=16. It is correct
+// but not linear, so the adaptors merge through MergeRuns below instead.
+// __algo_impl::BufferedMerge is linear, but buffers the LEFT run (in
+// range-insert that is the large pre-existing block, not the small new
+// tail) and its try/catch covers only buffer construction, so a throwing
+// comparator inside its merge loop leaks the buffered objects' destructors.
+// MergeRuns buffers whichever run is SHORTER and guards construction and
+// merge alike; on allocation failure it degrades to RotateMerge, exactly as
+// stable_sort already does.
+#ifndef BOXCXX_BITS_FLAT_ENGINE
+#define BOXCXX_BITS_FLAT_ENGINE
+
+#include <__bits/allocator_core>
+#include <__bits/ranges_core>
+#include <algorithm>
+#include <new>
+#include <type_traits>
+#include <utility>
+
+namespace std {
+
+// ── ordering tags ([flat.set.syn] / [flat.map.syn]) ─────────────────────
+// The explicit default constructor is what makes `sorted_unique_t x = {};`
+// and an implicit `{}` argument ill-formed, and it is what lets a flat_set
+// constructor reject a sorted_equivalent_t tag (and vice versa).
+
+struct sorted_unique_t {
+    explicit sorted_unique_t() = default;
+};
+inline constexpr sorted_unique_t sorted_unique{};
+
+struct sorted_equivalent_t {
+    explicit sorted_equivalent_t() = default;
+};
+inline constexpr sorted_equivalent_t sorted_equivalent{};
+
+namespace __flat {
+
+// The gate on every heterogeneous overload ([associative.reqmts]): the
+// qualified-id Compare::is_transparent must be valid and denote a type.
+template <typename C>
+concept Transparent = requires { typename C::is_transparent; };
+
+// ── uses-allocator construction ([allocator.uses.construction]) ─────────
+// Written out here because std::uses_allocator_construction_args and
+// std::make_obj_using_allocator are absent tree-wide. The three branches
+// are the standard's own: no allocator use at all, leading-tag form,
+// trailing-allocator form.
+
+template <typename C, typename A, typename... Args>
+C MakeUsingAlloc(const A &a, Args &&...args)
+{
+    if constexpr (!uses_allocator_v<C, A>)
+        return C(std::forward<Args>(args)...);
+    else if constexpr (is_constructible_v<C, allocator_arg_t, const A &, Args...>)
+        return C(allocator_arg, a, std::forward<Args>(args)...);
+    else
+        return C(std::forward<Args>(args)..., a);
+}
+
+// ── invariant restore ([flat.set.overview]/6) ───────────────────────────
+// "If any member function in [flat.set.defn] exits via an exception, the
+// invariant is restored." The note allows the restoration to empty the
+// container, and emptying is the only restoration available once a
+// comparator has thrown halfway through a sort or a merge: the surviving
+// order is unknown. Done() retires the guard on the success path.
+
+template <typename C>
+class RestoreGuard {
+public:
+    explicit RestoreGuard(C &c) noexcept : container(&c) {}
+    ~RestoreGuard()
+    {
+        if (container) container->clear();
+    }
+    void Done() noexcept { container = nullptr; }
+
+    RestoreGuard(const RestoreGuard &)            = delete;
+    RestoreGuard &operator=(const RestoreGuard &) = delete;
+
+private:
+    C *container;
+};
+
+// The same restoration, but only when the container was actually modified.
+// [flat.set.overview]/6 asks for the INVARIANT to be restored; Note 2 says
+// that "can result in the flat_set's being emptied", it does not say it
+// must. A single-element insertion that throws before the container is
+// touched leaves a perfectly sorted container behind, and emptying it there
+// discards the user's data for nothing.
+//
+// Size is the discriminator, and it is the right one for this shape: the
+// only container operation is one insert of one element. Either it never
+// got as far as growing -- size unchanged, nothing else was touched, the
+// keys are still sorted -- or it grew and then failed while shifting, in
+// which case the order is unknown and the container must be emptied. Size
+// is also the only test available: re-checking sortedness would call the
+// comparator during unwinding, and a second throw there is terminate.
+template <typename C>
+class RestoreIfTouched {
+public:
+    explicit RestoreIfTouched(C &c) noexcept : container(&c), entry_size(c.size()) {}
+    ~RestoreIfTouched()
+    {
+        if (container && container->size() != entry_size) container->clear();
+    }
+    void Done() noexcept { container = nullptr; }
+
+    RestoreIfTouched(const RestoreIfTouched &)            = delete;
+    RestoreIfTouched &operator=(const RestoreIfTouched &) = delete;
+
+private:
+    C                              *container;
+    typename C::size_type           entry_size;
+};
+
+// ── merge scratch storage ───────────────────────────────────────────────
+// Raw, uninitialised, nothrow: a failed allocation is a legal outcome that
+// MergeRuns answers by taking the in-place path, not by throwing.
+
+template <typename T>
+class RawBuf {
+public:
+    explicit RawBuf(size_t count) noexcept
+    {
+        if (count == 0) return;
+        if constexpr (alignof(T) > __STDCPP_DEFAULT_NEW_ALIGNMENT__)
+            data = static_cast<T *>(
+                ::operator new(count * sizeof(T), align_val_t{alignof(T)}, nothrow));
+        else
+            data = static_cast<T *>(::operator new(count * sizeof(T), nothrow));
+    }
+    ~RawBuf()
+    {
+        if (!data) return;
+        if constexpr (alignof(T) > __STDCPP_DEFAULT_NEW_ALIGNMENT__)
+            ::operator delete(data, align_val_t{alignof(T)});
+        else
+            ::operator delete(data);
+    }
+
+    RawBuf(const RawBuf &)            = delete;
+    RawBuf &operator=(const RawBuf &) = delete;
+
+    T *Data() const noexcept { return data; }
+
+private:
+    T *data = nullptr;
+};
+
+// Destroys whatever has been constructed in the scratch buffer so far, on
+// every exit path -- including a comparator throwing mid-merge, which is
+// the case __algo_impl::BufferedMerge leaves uncovered.
+template <typename T>
+struct BufGuard {
+    T *first;
+    T *last;
+    ~BufGuard()
+    {
+        for (T *p = first; p != last; ++p) p->~T();
+    }
+};
+
+// Merge [first,middle) + [middle,last) with the LEFT run buffered.
+// Chosen when the left run is the shorter of the two.
+template <typename It, typename T, typename Comp>
+void MergeLeftBuffered(It first, It middle, It last, T *buf, Comp &comp)
+{
+    BufGuard<T> held{buf, buf};
+    // ranges::iter_move rather than std::move(*p): a container whose
+    // iterator hands back a proxy reference customizes iter_move, and a
+    // move-only element behind such a proxy will not compile through the
+    // plain form (the same reason __algo_impl::BufferedMerge documents).
+    for (It p = first; p != middle; ++p, ++held.last)
+        ::new (static_cast<void *>(held.last)) T(ranges::iter_move(p));
+
+    T *left   = buf;
+    It right  = middle;
+    It out    = first;
+    while (left != held.last && right != last) {
+        if (comp(*right, *left)) {
+            *out = ranges::iter_move(right);
+            ++right;
+        } else {
+            *out = std::move(*left);
+            ++left;
+        }
+        ++out;
+    }
+    // Whatever is left in the right run already sits where it belongs.
+    for (; left != held.last; ++left, ++out) *out = std::move(*left);
+}
+
+// Merge with the RIGHT run buffered, filling from the back. On equivalence
+// the buffered (right) element is placed last, which keeps the merge
+// stable in this direction too.
+template <typename It, typename T, typename Comp>
+void MergeRightBuffered(It first, It middle, It last, T *buf, Comp &comp)
+{
+    BufGuard<T> held{buf, buf};
+    for (It p = middle; p != last; ++p, ++held.last)
+        ::new (static_cast<void *>(held.last)) T(ranges::iter_move(p));
+
+    It  left  = middle;
+    T  *right = held.last;
+    It  out   = last;
+    while (left != first && right != buf) {
+        if (comp(*(right - 1), *(left - 1))) {
+            --left;
+            --out;
+            *out = ranges::iter_move(left);
+        } else {
+            --right;
+            --out;
+            *out = std::move(*right);
+        }
+    }
+    // Whatever is left in the left run already sits where it belongs.
+    while (right != buf) {
+        --right;
+        --out;
+        *out = std::move(*right);
+    }
+}
+
+// Linear merge of two adjacent sorted runs, buffering the shorter one:
+// memory is min(N,M)·sizeof(T), never max. When the runs are already in
+// order end to end -- appending keys above the existing range, the common
+// case -- one comparison retires the whole merge. Measured at N=1000/M=16
+// that is 1 comparison, 0 moves and no allocation, against 16 comparisons,
+// 32 moves and one buffer allocation without the guard: the comparison
+// saving is only min(N,M), but skipping the allocation and every move is
+// the point.
+template <typename It, typename Comp>
+void MergeRuns(It first, It middle, It last, Comp &comp)
+{
+    using T = typename iterator_traits<It>::value_type;
+
+    auto left_size  = middle - first;
+    auto right_size = last - middle;
+    if (left_size == 0 || right_size == 0) return;
+    if (!comp(*middle, *(middle - 1))) return;
+
+    if (left_size <= right_size) {
+        RawBuf<T> buf(static_cast<size_t>(left_size));
+        if (!buf.Data()) {
+            __algo_impl::RotateMerge(first, middle, last, comp);
+            return;
+        }
+        MergeLeftBuffered(first, middle, last, buf.Data(), comp);
+    } else {
+        RawBuf<T> buf(static_cast<size_t>(right_size));
+        if (!buf.Data()) {
+            __algo_impl::RotateMerge(first, middle, last, comp);
+            return;
+        }
+        MergeRightBuffered(first, middle, last, buf.Data(), comp);
+    }
+}
+
+// [flat.set.cons]/2: "Linear if cont is already sorted with respect to
+// compare, N log N otherwise." The is_sorted probe is what buys the linear
+// case; it costs N-1 comparisons, which the N log N branch would spend
+// anyway. Neither branch is stable, and neither is required to be:
+// [flat.multiset.cons]/1 says only "sorts".
+template <typename C, typename Comp>
+void SortWhole(C &c, Comp &comp)
+{
+    if (ranges::is_sorted(c, comp)) return;
+    ranges::sort(c, comp);
+}
+
+// Erase all but the first element of each group of consecutive equivalent
+// elements. The predicate is the symmetric form, which is what
+// indirect_equivalence_relation actually means; on distinct elements && has
+// already short-circuited on comp(x,y) == true, so the second comparison is
+// paid only inside a run of equivalent keys.
+template <typename C, typename Comp>
+void Dedup(C &c, Comp &comp)
+{
+    auto equivalent = [&comp](const auto &x, const auto &y) {
+        return !comp(x, y) && !comp(y, x);
+    };
+    auto tail = ranges::unique(c, equivalent);
+    c.erase(tail.begin(), c.end());
+}
+
+} // namespace __flat
+} // namespace std
+
+#endif // BOXCXX_BITS_FLAT_ENGINE

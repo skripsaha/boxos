@@ -351,6 +351,10 @@
 #ifndef __cpp_lib_jthread
 #  error "__cpp_lib_jthread is not visible from <stop_token> alone"
 #endif
+#include <flat_set>
+#ifndef __cpp_lib_flat_set
+#  error "__cpp_lib_flat_set is not visible from <flat_set> alone"
+#endif
 #ifdef BOXCXX_VERSION
 #  error "one of the owning headers above drags in <version>"
 #endif
@@ -370,6 +374,7 @@
 #include <generator>
 #include <deque>
 #include <expected>
+#include <flat_set>
 #include <format>
 #include <forward_list>
 #include <functional>
@@ -493,6 +498,18 @@ template <> struct std::formatter<cxxfmt::LazyCounter> {
         std::format_to(ctx.out(), "{}(t={})", v, lc.touches);
     }
 };
+
+// phase133 (E): explicit instantiation of the facades. Base members are not
+// covered by an explicit instantiation of a derived class, so the engine's
+// bodies are reached by the calls in Phase133 itself; these pin the classes
+// and their whole inherited-constructor set. An explicit instantiation may
+// not appear in the unnamed namespace below -- that namespace does not
+// enclose std -- so it lives here.
+template class std::flat_set<int>;
+template class std::flat_multiset<int>;
+template class std::flat_set<int, std::greater<int>, std::deque<int>>;
+template class std::flat_multiset<int, std::greater<int>, std::deque<int>>;
+template class std::flat_set<std::string, std::less<>>;
 
 namespace {
 
@@ -29310,9 +29327,11 @@ void Phase131()
 #ifdef __cpp_lib_erase_if
 #  error "phase131: __cpp_lib_erase_if must stay undefined"
 #endif
-    // The nine below name a header boxcxx does not ship at all, so the macro
-    // could only ever appear by accident -- these guards are what turns
-    // "we never wrote it" into "we checked".
+    // The eight below name a header boxcxx does not ship at all, so the
+    // macro could only ever appear by accident -- these guards are what
+    // turns "we never wrote it" into "we checked". (It was nine until
+    // Ф31b-1 shipped <flat_set>; __cpp_lib_flat_set moved out of this list
+    // and into phase133's value pin.)
 #ifdef __cpp_lib_execution
 #  error "phase131: __cpp_lib_execution must stay undefined"
 #endif
@@ -29321,9 +29340,6 @@ void Phase131()
 #endif
 #ifdef __cpp_lib_flat_map
 #  error "phase131: __cpp_lib_flat_map must stay undefined"
-#endif
-#ifdef __cpp_lib_flat_set
-#  error "phase131: __cpp_lib_flat_set must stay undefined"
 #endif
 #ifdef __cpp_lib_format
 #  error "phase131: __cpp_lib_format must stay undefined"
@@ -29969,7 +29985,7 @@ void Phase131()
     printf("[CXX] PASS phase131: [version.syn] backfill for phases 1-28 plus the Ф31a-5 overclaim "
            "sweep -- 126 macros defined, every value pinned == its N4950 C++23 value rather than "
            "a reference library's DR-applied C++26 one, owning headers interrogated for macro "
-           "visibility BEFORE <version> is ever included, and 59 absence guards. Six macros were "
+           "visibility BEFORE <version> is ever included, and 58 absence guards. Six macros were "
            "found to overstate: three DROPPED into the omission list -- __cpp_lib_ranges (short 23 "
            "entities: take_while, drop_while, istream_view, seven [range.access] CPOs, "
            "range_rvalue_reference_t, range_common_reference_t, subrange's two range deduction "
@@ -30225,6 +30241,1522 @@ void Phase132()
            "value is refused as a width argument per [format.string.std]/10\n");
 }
 
+// ── phase133 fixtures: <flat_set> ───────────────────────────────────────
+
+template <class T>
+concept P133HasContainers = requires { typename T::containers; };
+template <class T>
+concept P133HasNodeType = requires { typename T::node_type; };
+template <class T>
+concept P133HasMapped = requires { typename T::mapped_type; };
+template <class T>
+concept P133ExtractOnLvalue = requires(T &t) { t.extract(); };
+template <class S, class K>
+concept P133CanFind = requires(S &s, const K &k) { s.find(k); };
+template <class S, class K>
+concept P133CanEraseK = requires(S &s, K &&k) { s.erase((K &&)k); };
+template <class S, class K>
+concept P133CanInsertK = requires(S &s, K &&k) { s.insert((K &&)k); };
+template <class T>
+concept P133CanEqual = requires(const T &a, const T &b) { a == b; };
+
+struct P133AlienAlloc {};
+
+struct P133NotAString {
+    bool operator<(const P133NotAString &) const { return false; }
+};
+
+struct P133OnlyLess {
+    int v;
+    friend bool operator==(const P133OnlyLess &, const P133OnlyLess &) = default;
+    friend bool operator<(const P133OnlyLess &a, const P133OnlyLess &b) { return a.v < b.v; }
+};
+
+// Identity survives equivalence, so the multiset's insertion point and the
+// emplace_hint clamp become observable.
+struct P133Tagged {
+    int key;
+    int tag;
+};
+struct P133TagLess {
+    bool operator()(const P133Tagged &a, const P133Tagged &b) const { return a.key < b.key; }
+};
+
+// The ordering tags' constructors are explicit, so a braced {} must not
+// convert to one. (is_convertible_v<nullptr_t, sorted_unique_t> proves
+// nothing here -- it is false whether the constructor is explicit or not.)
+void P133TakesSortedUnique(std::sorted_unique_t) {}
+void P133TakesSortedEquivalent(std::sorted_equivalent_t) {}
+template <class = void>
+inline constexpr bool P133BraceMakesSortedUnique = requires { P133TakesSortedUnique({}); };
+template <class = void>
+inline constexpr bool P133BraceMakesSortedEquivalent =
+    requires { P133TakesSortedEquivalent({}); };
+
+long g_p133_comparisons = 0;
+struct P133CountLess {
+    bool operator()(int a, int b) const
+    {
+        ++g_p133_comparisons;
+        return a < b;
+    }
+};
+
+// Counts every move/copy of an element. Comparison counting cannot see the
+// difference between a buffered merge and a rotate merge -- the rotate
+// merge actually uses FEWER comparisons -- so the N + M log M guarantee has
+// to be checked in element moves, which is where the rotate merge's
+// O((n+m) log(n+m)) actually lands.
+long g_p133_moves = 0;
+struct P133Counted {
+    int v = 0;
+    P133Counted() = default;
+    P133Counted(int x) : v(x) {}
+    P133Counted(const P133Counted &o) : v(o.v) { ++g_p133_moves; }
+    P133Counted(P133Counted &&o) noexcept : v(o.v) { ++g_p133_moves; }
+    P133Counted &operator=(const P133Counted &o)
+    {
+        v = o.v;
+        ++g_p133_moves;
+        return *this;
+    }
+    P133Counted &operator=(P133Counted &&o) noexcept
+    {
+        v = o.v;
+        ++g_p133_moves;
+        return *this;
+    }
+};
+struct P133CountedLess {
+    bool operator()(const P133Counted &a, const P133Counted &b) const { return a.v < b.v; }
+};
+
+// Stateful comparator: key_comp()/value_comp() must hand back the object the
+// container was built from, and swap must exchange them.
+struct P133ModLess {
+    int m = 1;
+    bool operator()(int a, int b) const { return (a % m) < (b % m); }
+};
+
+// Stateful allocator: makes uses-allocator construction observable.
+template <class T>
+struct P133StateAlloc {
+    using value_type = T;
+    int id           = 0;
+    P133StateAlloc() = default;
+    explicit P133StateAlloc(int i) : id(i) {}
+    template <class U>
+    P133StateAlloc(const P133StateAlloc<U> &o) : id(o.id) {}
+    T   *allocate(std::size_t n) { return static_cast<T *>(::operator new(n * sizeof(T))); }
+    void deallocate(T *p, std::size_t) { ::operator delete(p); }
+    bool operator==(const P133StateAlloc &o) const { return id == o.id; }
+};
+
+// Counts every element operation, and a move leaves a visible mark, so
+// "was the argument consumed?" is answerable.
+struct P133Tracked {
+    static inline long ctors = 0, copies = 0, moves = 0, dtors = 0;
+    static void        Reset() { ctors = copies = moves = dtors = 0; }
+    static long        Total() { return ctors + copies + moves + dtors; }
+    int                v = 0;
+    P133Tracked(int x) : v(x) { ++ctors; }
+    P133Tracked(const P133Tracked &o) : v(o.v) { ++copies; }
+    P133Tracked(P133Tracked &&o) noexcept : v(o.v)
+    {
+        o.v = -1;
+        ++moves;
+    }
+    P133Tracked &operator=(const P133Tracked &o)
+    {
+        v = o.v;
+        return *this;
+    }
+    P133Tracked &operator=(P133Tracked &&o) noexcept
+    {
+        v   = o.v;
+        o.v = -1;
+        return *this;
+    }
+    ~P133Tracked() { ++dtors; }
+};
+struct P133TrackedLess {
+    bool operator()(const P133Tracked &a, const P133Tracked &b) const { return a.v < b.v; }
+};
+
+// [flat.set.erasure]/2 says the predicate sees as_const(e). Overloading on
+// constness is the only way to observe which one it actually gets.
+struct P133ConstProbe {
+    int *on_const;
+    int *on_mutable;
+    bool operator()(const int &) const
+    {
+        ++*on_const;
+        return false;
+    }
+    bool operator()(int &) const
+    {
+        ++*on_mutable;
+        return false;
+    }
+};
+
+// A key whose COPY and MOVE constructors can be armed to throw. Block (D)
+// only ever arms the comparator, and a comparator throws while the
+// container is untouched -- so it never asks the question this one does:
+// what happens when the failure occurs while the element itself is being
+// built or handed to the container?
+struct P133Fragile {
+    static inline int armed = -1;   // -1 disarmed; 1 = throw on the next ctor
+    int               v     = 0;
+    P133Fragile(int x) : v(x) {}
+    P133Fragile(const P133Fragile &o) : v(o.v) { Trip(); }
+    P133Fragile(P133Fragile &&o) noexcept(false) : v(o.v) { Trip(); }
+    P133Fragile &operator=(const P133Fragile &) = default;
+    P133Fragile &operator=(P133Fragile &&)      = default;
+    static void  Trip()
+    {
+        if (armed > 0 && --armed == 0) throw std::runtime_error("boom");
+    }
+};
+struct P133FragileLess {
+    bool operator()(const P133Fragile &a, const P133Fragile &b) const { return a.v < b.v; }
+};
+
+// The other half of that story: the element is built fine, but the shift
+// the container performs to make room throws. By then the container HAS
+// grown and its order is unknown, so this is the case where restoring
+// really does mean emptying.
+struct P133Shifty {
+    static inline int armed = -1;
+    int               v     = 0;
+    P133Shifty(int x) : v(x) {}
+    P133Shifty(const P133Shifty &)            = default;
+    P133Shifty(P133Shifty &&) noexcept(false) = default;
+    P133Shifty &operator=(const P133Shifty &o)
+    {
+        v = o.v;
+        Trip();
+        return *this;
+    }
+    P133Shifty &operator=(P133Shifty &&o) noexcept(false)
+    {
+        v = o.v;
+        Trip();
+        return *this;
+    }
+    static void Trip()
+    {
+        if (armed > 0 && --armed == 0) throw std::runtime_error("boom");
+    }
+};
+struct P133ShiftyLess {
+    bool operator()(const P133Shifty &a, const P133Shifty &b) const { return a.v < b.v; }
+};
+
+// Builds {10,20,30,40,50} with spare capacity, so the insertion under test
+// cannot reallocate and the only thing that can throw is the element.
+template <class S, class Tag>
+S P133FragileFive(Tag tag)
+{
+    std::vector<P133Fragile> v;
+    v.reserve(16);
+    for (int i = 1; i <= 5; ++i) v.push_back(P133Fragile{i * 10});
+    return S(tag, std::move(v));
+}
+
+template <class S>
+bool P133FiveIntact(const S &s)
+{
+    if (s.size() != 5) return false;
+    int want = 10;
+    for (const auto &e : s)
+        if (e.v != want) return false;
+        else want += 10;
+    return true;
+}
+
+// Runs one of the eight single-element insertion paths with the element's
+// constructor armed, and answers: did it throw, is the container still the
+// five keys it was, and does it still work afterwards?
+template <class S, class Tag>
+bool P133SurvivesFragile(Tag tag, int path)
+{
+    S           s = P133FragileFive<S>(tag);
+    P133Fragile arg{35};
+    bool        threw  = false;
+    P133Fragile::armed = 1;
+    try {
+        const P133Fragile &c = arg;
+        switch (path) {
+        case 0: (void)s.insert(c); break;
+        case 1: (void)s.insert(std::move(arg)); break;
+        case 2: (void)s.insert(s.begin(), c); break;
+        case 3: (void)s.insert(s.begin(), std::move(arg)); break;
+        case 4: (void)s.emplace(std::move(arg)); break;
+        case 5: (void)s.emplace(35); break;
+        case 6: (void)s.emplace_hint(s.begin(), std::move(arg)); break;
+        case 7: (void)s.emplace_hint(s.begin(), 35); break;
+        }
+    } catch (const std::runtime_error &) {
+        threw = true;
+    }
+    P133Fragile::armed = -1;
+    if (!threw || !P133FiveIntact(s)) return false;
+    s.insert(P133Fragile{60});   // and it still works
+    return s.size() == 6;
+}
+
+// Throws on its budget-th call, wherever that lands.
+struct P133Bomb {
+    static inline int budget = -1;
+    bool operator()(int a, int b) const
+    {
+        if (budget > 0 && --budget == 0) throw std::runtime_error("boom");
+        return a < b;
+    }
+};
+
+template <class S>
+bool P133Holds(const S &s, std::initializer_list<int> want)
+{
+    if (s.size() != want.size()) return false;
+    auto it = s.begin();
+    for (int v : want) {
+        if (*it != v) return false;
+        ++it;
+    }
+    return true;
+}
+
+template <class S>
+bool P133StrictlySorted(const S &s)
+{
+    for (auto i = s.size(); i > 1; --i)
+        if (!(*(s.begin() + (i - 2)) < *(s.begin() + (i - 1)))) return false;
+    return true;
+}
+
+void Phase133()
+{
+    using namespace std;
+
+    using FS   = flat_set<int>;
+    using FMS  = flat_multiset<int>;
+    using FSD  = flat_set<int, greater<int>, deque<int>>;
+    using FSS  = flat_set<string>;
+    using FSST = flat_set<string, less<>>;
+
+    // ── (A) nested types ────────────────────────────────────────────────
+    static_assert(is_same_v<FS::key_type, int>, "phase133 key_type");
+    static_assert(is_same_v<FS::value_type, int>, "phase133 value_type");
+    static_assert(is_same_v<FS::key_compare, less<int>>, "phase133 key_compare");
+    static_assert(is_same_v<FS::value_compare, less<int>>, "phase133 value_compare == Compare");
+    static_assert(is_same_v<FS::reference, int &>, "phase133 reference");
+    static_assert(is_same_v<FS::const_reference, const int &>, "phase133 const_reference");
+    static_assert(is_same_v<FS::container_type, vector<int>>, "phase133 container_type");
+    static_assert(is_same_v<FS::size_type, vector<int>::size_type>, "phase133 size_type");
+    static_assert(is_same_v<FS::difference_type, vector<int>::difference_type>,
+                  "phase133 difference_type");
+    static_assert(is_same_v<FS::reverse_iterator, std::reverse_iterator<FS::iterator>>,
+                  "phase133 reverse_iterator");
+    static_assert(is_same_v<FS::const_reverse_iterator, std::reverse_iterator<FS::const_iterator>>,
+                  "phase133 const_reverse_iterator");
+
+    // A flat_set is NOT an associative container: [flat.set.overview]/2
+    // excludes node handles, and `containers`/`mapped_type` belong to
+    // flat_map alone.
+    static_assert(!P133HasContainers<FS>, "phase133 no nested containers");
+    static_assert(!P133HasNodeType<FS>, "phase133 no node_type");
+    static_assert(!P133HasNodeType<FMS>, "phase133 multiset no node_type");
+    static_assert(!P133HasMapped<FS>, "phase133 no mapped_type");
+
+    // ── (A) iterators ───────────────────────────────────────────────────
+    static_assert(is_same_v<FS::iterator, FS::const_iterator>, "phase133 iterator == const_iterator");
+    static_assert(is_same_v<FMS::iterator, FMS::const_iterator>,
+                  "phase133 multiset iterator == const_iterator");
+    static_assert(random_access_iterator<FS::iterator>, "phase133 random_access_iterator");
+    static_assert(random_access_iterator<FMS::iterator>, "phase133 multiset random_access");
+    static_assert(is_same_v<iter_reference_t<FS::iterator>, const int &>,
+                  "phase133 keys are immutable");
+    static_assert(is_same_v<iter_value_t<FS::iterator>, int>, "phase133 iter_value_t");
+    static_assert(!output_iterator<FS::iterator, int>, "phase133 not an output iterator");
+
+    // The live re-test of Ф31a-2's [iterator.traits]/3 ladder: the
+    // reference here IS a real reference, so the synthesis reaches the top.
+    static_assert(is_same_v<iterator_traits<FS::iterator>::iterator_category,
+                            random_access_iterator_tag>,
+                  "phase133 iterator_category via [iterator.traits]/3");
+    static_assert(is_same_v<iterator_traits<FS::iterator>::value_type, int>,
+                  "phase133 iterator_traits value_type");
+
+    // Owner-locked choice: the container's own const_iterator, so a
+    // vector-backed flat_set is contiguous and its keys are a plain
+    // const int*. libc++ wraps its iterator and loses that; both conform.
+    static_assert(is_same_v<FS::iterator, vector<int>::const_iterator>,
+                  "phase133 iterator IS KeyContainer::const_iterator");
+    static_assert(contiguous_iterator<FS::iterator>, "phase133 contiguous_iterator");
+    static_assert(ranges::contiguous_range<FS>, "phase133 contiguous_range");
+    static_assert(is_same_v<decltype(ranges::data(declval<FS &>())), const int *>,
+                  "phase133 ranges::data is const int*");
+    static_assert(!ranges::contiguous_range<flat_set<int, less<int>, deque<int>>>,
+                  "phase133 deque-backed loses contiguity");
+    static_assert(ranges::random_access_range<FS>, "phase133 random_access_range");
+    static_assert(ranges::random_access_range<flat_set<int, less<int>, deque<int>>>,
+                  "phase133 deque-backed keeps random access");
+    static_assert(ranges::sized_range<FS>, "phase133 sized_range");
+    static_assert(!ranges::view<FS>, "phase133 not a view");
+
+    // ── (A) ordering tags ───────────────────────────────────────────────
+    static_assert(is_empty_v<sorted_unique_t>, "phase133 sorted_unique_t empty");
+    static_assert(is_empty_v<sorted_equivalent_t>, "phase133 sorted_equivalent_t empty");
+    static_assert(!is_same_v<sorted_unique_t, sorted_equivalent_t>, "phase133 tags distinct");
+    static_assert(is_same_v<decltype(sorted_unique), const sorted_unique_t>,
+                  "phase133 sorted_unique object");
+    static_assert(is_same_v<decltype(sorted_equivalent), const sorted_equivalent_t>,
+                  "phase133 sorted_equivalent object");
+    static_assert(is_default_constructible_v<sorted_unique_t>, "phase133 tag default-constructible");
+    static_assert(!P133BraceMakesSortedUnique<>, "phase133 sorted_unique_t ctor is explicit");
+    static_assert(!P133BraceMakesSortedEquivalent<>,
+                  "phase133 sorted_equivalent_t ctor is explicit");
+
+    // ── (A) constructors ────────────────────────────────────────────────
+    static_assert(is_default_constructible_v<FS>, "phase133 default ctor");
+    static_assert(is_copy_constructible_v<FS>, "phase133 copy ctor");
+    static_assert(is_move_constructible_v<FS>, "phase133 move ctor");
+    static_assert(is_copy_assignable_v<FS>, "phase133 copy assign");
+    static_assert(is_move_assignable_v<FS>, "phase133 move assign");
+    static_assert(is_constructible_v<FS, vector<int>>, "phase133 container ctor");
+    // [flat.set.defn] spells the container constructor `explicit`.
+    // libstdc++ 15.2 drops the keyword, so a vector converts implicitly
+    // there; boxcxx follows the standard.
+    static_assert(!is_convertible_v<vector<int>, FS>, "phase133 container ctor is explicit");
+    static_assert(!is_convertible_v<vector<int>, FMS>,
+                  "phase133 multiset container ctor is explicit");
+    static_assert(is_constructible_v<FS, less<int>>, "phase133 comparator ctor");
+    static_assert(!is_convertible_v<less<int>, FS>, "phase133 comparator ctor is explicit");
+
+    // The tag alias is what keeps each class to its own tag.
+    static_assert(is_constructible_v<FS, sorted_unique_t, vector<int>>, "phase133 sorted_unique");
+    static_assert(!is_constructible_v<FS, sorted_equivalent_t, vector<int>>,
+                  "phase133 flat_set rejects sorted_equivalent");
+    static_assert(is_constructible_v<FMS, sorted_equivalent_t, vector<int>>,
+                  "phase133 sorted_equivalent");
+    static_assert(!is_constructible_v<FMS, sorted_unique_t, vector<int>>,
+                  "phase133 flat_multiset rejects sorted_unique");
+
+    static_assert(is_constructible_v<FS, initializer_list<int>>, "phase133 init-list ctor");
+    static_assert(is_constructible_v<FS, initializer_list<int>, less<int>>,
+                  "phase133 init-list + comparator");
+    static_assert(is_constructible_v<FS, sorted_unique_t, initializer_list<int>>,
+                  "phase133 tagged init-list");
+    static_assert(is_constructible_v<FS, const int *, const int *>, "phase133 iterator pair");
+    static_assert(is_constructible_v<FS, const int *, const int *, less<int>>,
+                  "phase133 iterator pair + comparator");
+    static_assert(is_constructible_v<FS, sorted_unique_t, const int *, const int *>,
+                  "phase133 tagged iterator pair");
+    static_assert(is_constructible_v<FS, from_range_t, vector<int>>, "phase133 from_range");
+    static_assert(is_constructible_v<FS, from_range_t, vector<int>, less<int>>,
+                  "phase133 from_range + comparator");
+
+    // All twelve allocator forms are constrained on
+    // uses_allocator_v<container_type, Allocator>.
+    static_assert(is_constructible_v<FS, allocator<int>>, "phase133 allocator ctor");
+    static_assert(is_constructible_v<FS, const vector<int> &, allocator<int>>,
+                  "phase133 container + allocator");
+    static_assert(is_constructible_v<FS, less<int>, allocator<int>>,
+                  "phase133 comparator + allocator");
+    static_assert(is_constructible_v<FS, sorted_unique_t, const vector<int> &, allocator<int>>,
+                  "phase133 tagged container + allocator");
+    static_assert(is_constructible_v<FS, initializer_list<int>, allocator<int>>,
+                  "phase133 init-list + allocator");
+    static_assert(is_constructible_v<FS, const int *, const int *, allocator<int>>,
+                  "phase133 iterator pair + allocator");
+    static_assert(is_constructible_v<FS, from_range_t, vector<int>, allocator<int>>,
+                  "phase133 from_range + allocator");
+    static_assert(!is_constructible_v<FS, P133AlienAlloc>,
+                  "phase133 a foreign allocator disables the overload");
+    static_assert(!is_constructible_v<FS, const vector<int> &, P133AlienAlloc>,
+                  "phase133 a foreign allocator disables the container+alloc overload");
+
+    static_assert(uses_allocator_v<FS, allocator<int>>, "phase133 uses_allocator");
+    static_assert(!uses_allocator_v<FS, P133AlienAlloc>, "phase133 uses_allocator negative");
+    static_assert(uses_allocator_v<FMS, allocator<int>>, "phase133 multiset uses_allocator");
+
+    // ── (A) deduction guides, twelve per class ──────────────────────────
+    static_assert(is_same_v<decltype(flat_set(declval<vector<int>>())),
+                            flat_set<int, less<int>, vector<int>>>,
+                  "phase133 guide: KeyContainer");
+    static_assert(is_same_v<decltype(flat_set(declval<vector<int>>(), greater<int>{})),
+                            flat_set<int, greater<int>, vector<int>>>,
+                  "phase133 guide: KeyContainer + Compare");
+    static_assert(is_same_v<decltype(flat_set(declval<vector<int>>(), allocator<int>{})),
+                            flat_set<int, less<int>, vector<int>>>,
+                  "phase133 guide: KeyContainer + Allocator");
+    static_assert(is_same_v<decltype(flat_set(declval<vector<int>>(), greater<int>{},
+                                              allocator<int>{})),
+                            flat_set<int, greater<int>, vector<int>>>,
+                  "phase133 guide: KeyContainer + Compare + Allocator");
+    static_assert(is_same_v<decltype(flat_set(sorted_unique, declval<vector<int>>())),
+                            flat_set<int, less<int>, vector<int>>>,
+                  "phase133 guide: tag + KeyContainer");
+    static_assert(is_same_v<decltype(flat_set(sorted_unique, declval<vector<int>>(),
+                                              allocator<int>{})),
+                            flat_set<int, less<int>, vector<int>>>,
+                  "phase133 guide: tag + KeyContainer + Allocator");
+    static_assert(is_same_v<decltype(flat_set(sorted_unique, declval<vector<int>>(),
+                                              greater<int>{}, allocator<int>{})),
+                            flat_set<int, greater<int>, vector<int>>>,
+                  "phase133 guide: tag + KeyContainer + Compare + Allocator");
+    static_assert(is_same_v<decltype(flat_set{1, 2, 3}), flat_set<int, less<int>>>,
+                  "phase133 guide: initializer_list");
+    static_assert(is_same_v<decltype(flat_set(sorted_unique, {1, 2, 3})), flat_set<int, less<int>>>,
+                  "phase133 guide: tag + initializer_list");
+    static_assert(is_same_v<decltype(flat_set(from_range, declval<vector<int> &>())),
+                            flat_set<int, less<int>, vector<int>>>,
+                  "phase133 guide: from_range");
+    static_assert(is_same_v<decltype(flat_set(from_range, declval<vector<int> &>(),
+                                              allocator<int>{})),
+                            flat_set<int, less<int>, vector<int>>>,
+                  "phase133 guide: from_range + Allocator (alloc-rebind)");
+    static_assert(is_same_v<decltype(flat_set(declval<deque<int>>(), greater<int>{})),
+                            flat_set<int, greater<int>, deque<int>>>,
+                  "phase133 guide: a non-vector KeyContainer");
+    static_assert(is_same_v<decltype(flat_multiset(declval<vector<int>>())),
+                            flat_multiset<int, less<int>, vector<int>>>,
+                  "phase133 guide: multiset KeyContainer");
+    static_assert(is_same_v<decltype(flat_multiset(sorted_equivalent, declval<vector<int>>())),
+                            flat_multiset<int, less<int>, vector<int>>>,
+                  "phase133 guide: multiset tag + KeyContainer");
+
+    // The four iterator-pair guides libstdc++ 15.2 does not have at all
+    // ("no matching function ... 43 candidates"). [flat.set.overview] and
+    // [flat.multiset.overview] both require them.
+    static_assert(is_same_v<decltype(flat_set(declval<int *>(), declval<int *>())),
+                            flat_set<int, less<int>>>,
+                  "phase133 guide: iterator pair");
+    static_assert(is_same_v<decltype(flat_set(sorted_unique, declval<int *>(), declval<int *>())),
+                            flat_set<int, less<int>>>,
+                  "phase133 guide: tag + iterator pair");
+    static_assert(is_same_v<decltype(flat_multiset(declval<int *>(), declval<int *>())),
+                            flat_multiset<int, less<int>>>,
+                  "phase133 guide: multiset iterator pair");
+    static_assert(is_same_v<decltype(flat_multiset(sorted_equivalent, declval<int *>(),
+                                                   declval<int *>())),
+                            flat_multiset<int, less<int>>>,
+                  "phase133 guide: multiset tag + iterator pair");
+    static_assert(is_same_v<decltype(flat_set(declval<vector<int>::iterator>(),
+                                              declval<vector<int>::iterator>(), greater<int>{})),
+                            flat_set<int, greater<int>>>,
+                  "phase133 guide: iterator pair + Compare");
+
+    // ── (A) signatures and return types ─────────────────────────────────
+    static_assert(is_same_v<decltype(declval<FS &>().insert(declval<const int &>())),
+                            pair<FS::iterator, bool>>,
+                  "phase133 insert(const&) -> pair");
+    static_assert(is_same_v<decltype(declval<FS &>().insert(declval<int &&>())),
+                            pair<FS::iterator, bool>>,
+                  "phase133 insert(&&) -> pair");
+    static_assert(is_same_v<decltype(declval<FMS &>().insert(declval<const int &>())),
+                            FMS::iterator>,
+                  "phase133 multiset insert -> iterator");
+    static_assert(is_same_v<decltype(declval<FS &>().emplace(1)), pair<FS::iterator, bool>>,
+                  "phase133 emplace -> pair");
+    static_assert(is_same_v<decltype(declval<FMS &>().emplace(1)), FMS::iterator>,
+                  "phase133 multiset emplace -> iterator");
+    static_assert(is_same_v<decltype(declval<FS &>().emplace_hint(declval<FS::const_iterator>(), 1)),
+                            FS::iterator>,
+                  "phase133 emplace_hint -> iterator");
+    static_assert(is_same_v<decltype(declval<FS &>().erase(declval<const int &>())), FS::size_type>,
+                  "phase133 erase(key) -> size_type");
+    static_assert(is_same_v<decltype(declval<FS &>().erase(declval<FS::const_iterator>())),
+                            FS::iterator>,
+                  "phase133 erase(iterator) -> iterator");
+    static_assert(is_same_v<decltype(declval<FS &&>().extract()), vector<int>>,
+                  "phase133 extract -> container_type");
+    static_assert(is_same_v<decltype(declval<FS &>().equal_range(1)),
+                            pair<FS::iterator, FS::iterator>>,
+                  "phase133 equal_range -> pair of iterators");
+    static_assert(is_same_v<decltype(declval<const FS &>().equal_range(1)),
+                            pair<FS::const_iterator, FS::const_iterator>>,
+                  "phase133 const equal_range");
+    static_assert(is_same_v<decltype(declval<const FS &>().count(1)), FS::size_type>,
+                  "phase133 count -> size_type");
+    static_assert(is_same_v<decltype(declval<const FS &>().contains(1)), bool>,
+                  "phase133 contains -> bool");
+    static_assert(is_same_v<decltype(declval<const FS &>().key_comp()), less<int>>,
+                  "phase133 key_comp");
+    static_assert(is_same_v<decltype(declval<const FS &>().value_comp()), less<int>>,
+                  "phase133 value_comp");
+    static_assert(!P133ExtractOnLvalue<FS>, "phase133 extract is rvalue-only");
+
+    // With iterator being a bare const int*, [associative.reqmts]'s two
+    // iterator-convertibility exclusions on the transparent erase are what
+    // stop a pointer argument being read as a key.
+    static_assert(is_same_v<decltype(declval<flat_set<int, less<>> &>().erase(declval<int *>())),
+                            flat_set<int, less<>>::iterator>,
+                  "phase133 erase(int*) is the iterator overload");
+    static_assert(
+        is_same_v<decltype(declval<flat_set<int, less<>> &>().erase(declval<const int *>())),
+                  flat_set<int, less<>>::iterator>,
+        "phase133 erase(const int*) is the iterator overload");
+    static_assert(is_same_v<decltype(declval<flat_set<int, less<>> &>().erase(declval<short>())),
+                            flat_set<int, less<>>::size_type>,
+                  "phase133 erase(short) is the key overload");
+
+    static_assert(noexcept(declval<FS &>().swap(declval<FS &>())), "phase133 swap noexcept");
+    static_assert(noexcept(declval<FS &>().clear()), "phase133 clear noexcept");
+    static_assert(noexcept(declval<const FS &>().empty()), "phase133 empty noexcept");
+    static_assert(noexcept(declval<const FS &>().size()), "phase133 size noexcept");
+    static_assert(noexcept(declval<const FS &>().max_size()), "phase133 max_size noexcept");
+    static_assert(noexcept(declval<FS &>().begin()), "phase133 begin noexcept");
+    static_assert(noexcept(declval<const FS &>().cbegin()), "phase133 cbegin noexcept");
+    static_assert(noexcept(declval<const FS &>().crbegin()), "phase133 crbegin noexcept");
+    static_assert(noexcept(declval<const FS &>().crend()), "phase133 crend noexcept");
+
+    // ── (A) heterogeneous lookup is gated on is_transparent ─────────────
+    static_assert(P133CanFind<FSST, string_view>, "phase133 transparent find");
+    static_assert(!P133CanFind<FSS, string_view>, "phase133 opaque comparator, no het find");
+    static_assert(P133CanEraseK<FSST, string_view>, "phase133 transparent erase");
+    static_assert(!P133CanEraseK<FSS, string_view>, "phase133 opaque comparator, no het erase");
+    static_assert(P133CanInsertK<FSST, string_view>, "phase133 transparent insert");
+    static_assert(!P133CanInsertK<FSST, P133NotAString>,
+                  "phase133 het insert also needs is_constructible_v<value_type,K>");
+    // [flat.multiset.defn] has NO heterogeneous insert. A shared engine
+    // would hand it to both classes; libstdc++ 15.2 actually does, and
+    // inserts through it.
+    static_assert(!P133CanInsertK<flat_multiset<string, less<>>, string_view>,
+                  "phase133 flat_multiset has no heterogeneous insert");
+    static_assert(!P133CanFind<flat_set<string, greater<string>>, string_view>,
+                  "phase133 non-transparent greater<> blocks het find");
+    static_assert(P133CanFind<flat_set<string, less<>>, string_view>,
+                  "phase133 transparent less<> admits het find");
+
+    // ── (A) comparisons ─────────────────────────────────────────────────
+    static_assert(equality_comparable<FS>, "phase133 equality_comparable");
+    static_assert(is_same_v<decltype(declval<const FS &>() <=> declval<const FS &>()),
+                            strong_ordering>,
+                  "phase133 <=> is strong_ordering for int");
+    static_assert(is_same_v<decltype(declval<const flat_set<P133OnlyLess> &>() <=>
+                                     declval<const flat_set<P133OnlyLess> &>()),
+                            weak_ordering>,
+                  "phase133 synth-three-way gives weak_ordering for a <-only key");
+    // [flat.set] constrains Compare, not Key: a key ordered solely by an
+    // external comparator is legal and the class must still instantiate.
+    // Its <=> then has nothing to synthesize from, so it must drop out of
+    // overload resolution rather than hard-error. Measured: libstdc++ 15.2
+    // answers false here as well; libc++ 22 hard-errors inside the
+    // operator's body the moment the concept is probed.
+    static_assert(!three_way_comparable<flat_multiset<P133Tagged, P133TagLess>>,
+                  "phase133 <=> drops out for a key with no ordering of its own");
+    static_assert(three_way_comparable<FS>, "phase133 <=> is present for an ordered key");
+    static_assert(P133CanEqual<flat_multiset<P133Tagged, P133TagLess>>,
+                  "phase133 == stays declared for such a key, as in libstdc++");
+
+    static_assert(is_same_v<decltype(erase_if(declval<FS &>(), [](int) { return true; })),
+                            FS::size_type>,
+                  "phase133 erase_if -> size_type");
+    static_assert(is_same_v<decltype(erase_if(declval<FMS &>(), [](int) { return true; })),
+                            FMS::size_type>,
+                  "phase133 multiset erase_if -> size_type");
+
+    // ── (A) custom container and comparator ─────────────────────────────
+    static_assert(is_same_v<FSD::container_type, deque<int>>, "phase133 deque container_type");
+    static_assert(is_same_v<FSD::key_compare, greater<int>>, "phase133 greater key_compare");
+    static_assert(is_same_v<FSD::iterator, deque<int>::const_iterator>,
+                  "phase133 deque-backed iterator IS deque::const_iterator");
+    static_assert(random_access_iterator<FSD::iterator>, "phase133 deque iterator random access");
+    static_assert(is_same_v<iter_reference_t<FSD::iterator>, const int &>,
+                  "phase133 deque-backed keys immutable");
+    static_assert(equality_comparable<FSD>, "phase133 deque-backed equality");
+
+    // ── (A) feature-test macro ──────────────────────────────────────────
+    static_assert(__cpp_lib_flat_set == 202207L, "phase133 __cpp_lib_flat_set is the C++23 value");
+
+    // ── (B) construction, against the two-oracle golden run ─────────────
+    Check(P133Holds(FS(vector<int>{5, 1, 5, 3, 1, 9}), {1, 3, 5, 9}),
+          "phase133 (1) container ctor sorts and dedups");
+    Check(P133Holds(FMS(vector<int>{5, 1, 5, 3, 1, 9}), {1, 1, 3, 5, 5, 9}),
+          "phase133 (2) multiset container ctor sorts and KEEPS duplicates");
+    Check(P133Holds(FS(sorted_unique, vector<int>{1, 3, 5, 9}), {1, 3, 5, 9}),
+          "phase133 (3) sorted_unique bypasses the sort");
+    Check(P133Holds(FMS(sorted_equivalent, vector<int>{1, 1, 3}), {1, 1, 3}),
+          "phase133 (4) sorted_equivalent bypasses the sort");
+    Check(P133Holds(FS{4, 2, 4, 0}, {0, 2, 4}), "phase133 (5) initializer-list ctor");
+    {
+        int a[3] = {7, 7, 2};
+        Check(P133Holds(FS(a, a + 3), {2, 7}), "phase133 (6) iterator-pair ctor");
+    }
+    {
+        deque<int> d{3, 1, 3};
+        Check(P133Holds(FS(from_range, d), {1, 3}), "phase133 (7) from_range over a deque");
+    }
+    Check(P133Holds(flat_set<int, greater<int>>(vector<int>{1, 2, 3}), {3, 2, 1}),
+          "phase133 (8) the comparator, not <, decides the order");
+    Check(P133Holds(flat_set<int, less<int>, deque<int>>(deque<int>{4, 1, 4, 2}), {1, 2, 4}),
+          "phase133 (9) deque-backed container ctor");
+
+    // ── (B) single-element insert / emplace ─────────────────────────────
+    {
+        FS   s{2, 4, 6};
+        auto ins3 = s.insert(3);
+        auto ins4 = s.insert(4);
+        Check(ins3.second && ins3.first - s.begin() == 1,
+              "phase133 (10) insert of a new key reports true and its position");
+        Check(!ins4.second && ins4.first - s.begin() == 2,
+              "phase133 (11) insert of a present key reports false and points at it");
+        Check(P133Holds(s, {2, 3, 4, 6}), "phase133 (12) set after the two inserts");
+        auto hinted = s.emplace_hint(s.begin(), 1);
+        Check(hinted - s.begin() == 0, "phase133 (13) unique emplace_hint: the key decides");
+        Check(P133Holds(s, {1, 2, 3, 4, 6}), "phase133 (14) set after emplace_hint");
+        // Measured on both oracles: a unique set ignores the hint entirely.
+        Check(s.emplace_hint(s.end(), 5) - s.begin() == 4,
+              "phase133 (15) a wrong hint changes nothing");
+    }
+    {
+        FMS  m{2, 4};
+        auto first  = m.insert(4);
+        auto second = m.insert(4);
+        Check(first - m.begin() == 2 && second - m.begin() == 3,
+              "phase133 (16) multiset insert lands at upper_bound, after its equals");
+        Check(P133Holds(m, {2, 4, 4, 4}), "phase133 (17) multiset after two equivalent inserts");
+    }
+    {
+        // Identity survives equivalence, so the clamp is observable.
+        // All four placements measured on both oracles.
+        flat_multiset<P133Tagged, P133TagLess> m;
+        m.insert(P133Tagged{1, 10});
+        m.insert(P133Tagged{1, 11});
+        m.insert(P133Tagged{1, 12});
+        Check(m.begin()[0].tag == 10 && m.begin()[1].tag == 11 && m.begin()[2].tag == 12,
+              "phase133 (18) equivalent elements keep their arrival order");
+
+        auto at_front = m.emplace_hint(m.begin(), P133Tagged{1, 99});
+        Check(at_front - m.begin() == 0 && m.begin()[0].tag == 99,
+              "phase133 (19) a hint inside the equivalent range is honoured");
+
+        flat_multiset<P133Tagged, P133TagLess> n;
+        n.insert(P133Tagged{1, 10});
+        n.insert(P133Tagged{1, 11});
+        n.insert(P133Tagged{3, 30});
+        auto clamped = n.emplace_hint(n.end(), P133Tagged{1, 99});
+        Check(clamped - n.begin() == 2 && n.begin()[2].tag == 99,
+              "phase133 (20) a hint past the equivalent range is clamped to upper_bound");
+    }
+
+    // ── (B) range insert ────────────────────────────────────────────────
+    {
+        FS          s{10, 20, 30};
+        vector<int> add{25, 5, 20, 35, 5};
+        s.insert(add.begin(), add.end());
+        Check(P133Holds(s, {5, 10, 20, 25, 30, 35}),
+              "phase133 (21) range insert: sort the tail, merge, dedup");
+    }
+    {
+        FS          s{10, 20, 30};
+        vector<int> add{15, 25};
+        s.insert(sorted_unique, add.begin(), add.end());
+        Check(P133Holds(s, {10, 15, 20, 25, 30}), "phase133 (22) sorted_unique range insert");
+    }
+    {
+        FS         s{1, 2};
+        deque<int> rg{5, 3, 2};
+        s.insert_range(rg);
+        Check(P133Holds(s, {1, 2, 3, 5}), "phase133 (23) insert_range");
+    }
+    {
+        FMS         m{1, 3};
+        vector<int> add{3, 2, 1};
+        m.insert(add.begin(), add.end());
+        Check(P133Holds(m, {1, 1, 2, 3, 3}), "phase133 (24) multiset range insert keeps duplicates");
+    }
+    {
+        FMS m;
+        m.insert({2, 2, 1});
+        Check(P133Holds(m, {1, 2, 2}), "phase133 (25) multiset initializer-list insert");
+    }
+
+    // ── (B) erase ───────────────────────────────────────────────────────
+    {
+        FS s{1, 2, 3, 4, 5};
+        Check(s.erase(3) == 1, "phase133 (26) erase of a present key returns 1");
+        Check(s.erase(99) == 0, "phase133 (27) erase of an absent key returns 0");
+        Check(P133Holds(s, {1, 2, 4, 5}), "phase133 (28) set after key erase");
+        auto after = s.erase(s.begin());
+        Check(*after == 2, "phase133 (29) erase(iterator) returns the follower");
+        s.erase(s.begin(), s.begin() + 1);
+        Check(P133Holds(s, {4, 5}), "phase133 (30) range erase");
+    }
+    {
+        FMS m{1, 2, 2, 2, 3};
+        Check(m.erase(2) == 3, "phase133 (31) multiset erase(key) removes every equivalent");
+        Check(P133Holds(m, {1, 3}), "phase133 (32) multiset after erase(key)");
+    }
+
+    // ── (B) lookup ──────────────────────────────────────────────────────
+    {
+        FS s{10, 20, 30, 40};
+        Check(s.find(20) - s.begin() == 1, "phase133 (33) find");
+        Check(s.find(21) == s.end(), "phase133 (34) find of an absent key is end()");
+        Check(s.count(30) == 1 && !s.contains(31), "phase133 (35) count and contains");
+        Check(s.lower_bound(25) - s.begin() == 2 && s.upper_bound(30) - s.begin() == 3,
+              "phase133 (36) lower_bound and upper_bound");
+        auto present = s.equal_range(30);
+        Check(present.second - present.first == 1, "phase133 (37) equal_range of a present key");
+        auto absent = s.equal_range(35);
+        Check(absent.second - absent.first == 0 && absent.first - s.begin() == 3,
+              "phase133 (38) equal_range of an absent key is empty at the insertion point");
+    }
+    {
+        FMS  m{1, 2, 2, 2, 3};
+        auto r = m.equal_range(2);
+        Check(r.second - r.first == 3 && m.count(2) == 3,
+              "phase133 (39) multiset equal_range width == count");
+    }
+    {
+        FSST t{"apple", "pear"};
+        Check(t.find(string_view{"pear"}) - t.begin() == 1,
+              "phase133 (40) heterogeneous find by string_view");
+        Check(t.count(string_view{"kiwi"}) == 0, "phase133 (41) heterogeneous count, absent");
+        Check(t.erase(string_view{"apple"}) == 1 && t.size() == 1,
+              "phase133 (42) heterogeneous erase");
+        auto added = t.insert(string_view{"banana"});
+        Check(added.second && *added.first == "banana",
+              "phase133 (43) heterogeneous insert constructs the key");
+        // Measured on both oracles: the hinted heterogeneous insert reports
+        // the element, and inserting a present key changes nothing.
+        auto hinted = t.insert(t.end(), string_view{"banana"});
+        Check(hinted - t.begin() == 0 && t.size() == 2,
+              "phase133 (44) hinted heterogeneous insert of a present key is a no-op");
+    }
+
+    // ── (B) extract / replace / swap / reverse iteration ────────────────
+    {
+        FS   s{3, 1, 2};
+        auto cont = std::move(s).extract();
+        Check(s.size() == 0 && cont.size() == 3 && cont[0] == 1,
+              "phase133 (45) extract empties the set and hands the container over");
+        FS t;
+        t.replace(std::move(cont));
+        Check(P133Holds(t, {1, 2, 3}), "phase133 (46) replace adopts a sorted container");
+        FS u{9};
+        t.swap(u);
+        Check(P133Holds(t, {9}) && P133Holds(u, {1, 2, 3}), "phase133 (47) member swap");
+        swap(t, u);
+        Check(P133Holds(t, {1, 2, 3}) && P133Holds(u, {9}),
+              "phase133 (48) the hidden friend swap is found by ADL on the facade");
+        u.clear();
+        Check(u.empty(), "phase133 (49) clear");
+    }
+    {
+        FS  s{1, 2, 3};
+        int walked[3] = {0, 0, 0};
+        int at        = 0;
+        for (auto it = s.crbegin(); it != s.crend(); ++it) walked[at++] = *it;
+        Check(at == 3 && walked[0] == 3 && walked[1] == 2 && walked[2] == 1,
+              "phase133 (50) crbegin/crend walk the set backwards");
+    }
+
+    // ── (B) comparisons ─────────────────────────────────────────────────
+    {
+        FS a{1, 2, 3}, b{1, 2, 3}, c{1, 2, 4}, d{1, 2};
+        Check(a == b, "phase133 (51) equal sets compare equal");
+        Check(!(a == c), "phase133 (52) differing sets do not");
+        Check((a <=> c) < 0, "phase133 (53) <=> orders by element");
+        Check((a <=> d) > 0, "phase133 (54) <=> orders a prefix first");
+    }
+
+    // ── (B) erase_if ────────────────────────────────────────────────────
+    {
+        FS   s{1, 2, 3, 4, 5, 6, 7};
+        int  calls = 0;
+        auto gone  = erase_if(s, [&calls](int v) {
+            ++calls;
+            return v % 3 == 0;
+        });
+        Check(gone == 2, "phase133 (55) erase_if returns the number erased");
+        Check(calls == 7, "phase133 (56) erase_if applies the predicate EXACTLY size() times");
+        Check(P133Holds(s, {1, 2, 4, 5, 7}), "phase133 (57) erase_if is stable");
+    }
+
+    // ── (C) complexity, in comparisons ──────────────────────────────────
+    // Fixtures and oracle numbers are the coordinator's measurement at
+    // N=1000. These budgets exist to catch a complexity regression that no
+    // behavioural test can see.
+    const int   kN = 1000;
+    vector<int> ordered(kN);
+    for (int i = 0; i < kN; ++i) ordered[static_cast<size_t>(i)] = i;
+
+    long ctor_sorted = 0, ctor_reversed = 0, ins_above = 0, ins_mixed = 0, ins_tagged = 0,
+         ins_single = 0;
+    {
+        g_p133_comparisons = 0;
+        flat_set<int, P133CountLess> s(ordered);
+        ctor_sorted = g_p133_comparisons;
+        Check(s.size() == static_cast<size_t>(kN), "phase133 (58) sorted ctor keeps every element");
+    }
+    // [flat.set.cons]/2: "Linear if cont is already sorted". libc++ spends
+    // ~3N here; libstdc++ spends ~N log N (11620) because it has no such
+    // path. This budget is what stops boxcxx repeating that.
+    Check(ctor_sorted < 4L * kN,
+          "phase133 (59) ctor from an already-sorted container is LINEAR, not N log N");
+    {
+        vector<int> reversed(ordered.rbegin(), ordered.rend());
+        g_p133_comparisons = 0;
+        flat_set<int, P133CountLess> s(reversed);
+        ctor_reversed = g_p133_comparisons;
+        Check(P133StrictlySorted(s) && s.size() == static_cast<size_t>(kN),
+              "phase133 (60) reversed input really is sorted");
+    }
+    Check(ctor_reversed > 2L * kN,
+          "phase133 (61) an unsorted container really costs a sort");
+    {
+        flat_set<int, P133CountLess> s(sorted_unique, ordered);
+        vector<int>                  tail(16);
+        for (int i = 0; i < 16; ++i) tail[static_cast<size_t>(i)] = 5000 + i;
+        g_p133_comparisons = 0;
+        s.insert(tail.begin(), tail.end());
+        ins_above = g_p133_comparisons;
+        Check(s.size() == static_cast<size_t>(kN) + 16, "phase133 (62) disjoint tail all landed");
+    }
+    // A tail entirely above the base is retired by ONE comparison in the
+    // merge. The saving is min(N,M) comparisons, not a factor: the merge
+    // buffers the SHORTER run and stops as soon as that run is spent, so
+    // dropping the early-out here costs 15 more comparisons (1031 -> 1046),
+    // plus 32 element moves and a buffer allocation that the early-out
+    // avoids entirely. The threshold is set between the two so that losing
+    // the early-out reddens rather than passing on a 469-comparison margin.
+    Check(ins_above < 1040,
+          "phase133 (63) range insert of a disjoint-above tail takes the one-comparison merge");
+    {
+        flat_set<int, P133CountLess> s(sorted_unique, ordered);
+        vector<int>                  tail(16);
+        for (int i = 0; i < 16; ++i) tail[static_cast<size_t>(i)] = i * 60 + 7;
+        g_p133_comparisons = 0;
+        s.insert(tail.begin(), tail.end());
+        ins_mixed = g_p133_comparisons;
+        Check(s.size() == static_cast<size_t>(kN),
+              "phase133 (64) an interleaved tail of duplicates leaves the size alone");
+    }
+    Check(ins_mixed < 4L * (kN + 16),
+          "phase133 (65) an interleaved range insert stays inside N + M log M");
+    {
+        flat_set<int, P133CountLess> s(sorted_unique, ordered);
+        vector<int>                  tail(16);
+        for (int i = 0; i < 16; ++i) tail[static_cast<size_t>(i)] = 5000 + i;
+        g_p133_comparisons = 0;
+        s.insert(sorted_unique, tail.begin(), tail.end());
+        ins_tagged = g_p133_comparisons;
+    }
+    // /9 says Linear: the caller's promise removes the tail sort entirely --
+    // not even the is_sorted probe runs. Touching the tail at all would add
+    // its 15 comparisons (1016 -> 1031), so the threshold sits between them.
+    Check(ins_tagged < 1025, "phase133 (66) insert(sorted_unique, first, last) is linear");
+    {
+        flat_set<int, P133CountLess> s(sorted_unique, ordered);
+        g_p133_comparisons = 0;
+        s.insert(4242);
+        ins_single = g_p133_comparisons;
+    }
+    Check(ins_single < 40, "phase133 (67) a single insert is one binary search");
+
+    // ── (C) complexity, in element MOVES ────────────────────────────────
+    // This is the check that actually catches the trap. std::inplace_merge
+    // in this tree is __algo_impl::RotateMerge, which is O((n+m) log(n+m));
+    // measured against a buffered merge on this exact shape it uses 8.4x
+    // the moves -- but FEWER comparisons (145 vs 1016), so the block above
+    // would not notice.
+    //
+    // The base is every EVEN value and the tail every (124i + 1), which is
+    // always odd: the tail interleaves the base over its whole length --
+    // so the merge cannot early-out -- while sharing no value with it, so
+    // dedup moves nothing and the count is the merge alone. Reserving
+    // kBase + kTail up front keeps a reallocation out of the count too.
+    long merge_moves = 0;
+    {
+        const int              kBase = 1000, kTail = 16;
+        vector<P133Counted>    base;
+        base.reserve(static_cast<size_t>(kBase + kTail));
+        for (int i = 0; i < kBase; ++i) base.emplace_back(i * 2);
+        vector<P133Counted> tail;
+        tail.reserve(static_cast<size_t>(kTail));
+        for (int i = 0; i < kTail; ++i) tail.emplace_back(i * 124 + 1);
+
+        flat_set<P133Counted, P133CountedLess> s(sorted_unique, std::move(base));
+        g_p133_moves = 0;
+        s.insert(tail.begin(), tail.end());
+        merge_moves = g_p133_moves;
+        Check(s.size() == static_cast<size_t>(kBase + kTail),
+              "phase133 (68) the interleaved tail merged in without loss");
+        bool ordered_ok = true;
+        for (size_t i = 1; i < s.size(); ++i)
+            if (!((s.begin() + (i - 1))->v < (s.begin() + i)->v)) ordered_ok = false;
+        Check(ordered_ok, "phase133 (69) the merge really produced a sorted range");
+    }
+    Check(merge_moves < 3L * (1000 + 16),
+          "phase133 (70) the merge is LINEAR in element moves, not (n+m) log (n+m)");
+
+    // ── (D) the invariant is restored on every exception path ───────────
+    {
+        P133Bomb::budget = 3;
+        bool threw       = false;
+        try {
+            flat_set<int, P133Bomb> s(vector<int>{5, 4, 3, 2, 1});
+            (void)s;
+        } catch (const std::runtime_error &) {
+            threw = true;
+        }
+        P133Bomb::budget = -1;
+        Check(threw, "phase133 (71) a throwing comparator propagates out of the container ctor");
+    }
+    {
+        flat_set<int, P133Bomb> s;
+        s.insert({10, 20, 30});
+        size_t before    = s.size();
+        P133Bomb::budget = 2;
+        bool threw       = false;
+        try {
+            vector<int> add{5, 25, 15};
+            s.insert(add.begin(), add.end());
+        } catch (const std::runtime_error &) {
+            threw = true;
+        }
+        P133Bomb::budget = -1;
+        Check(before == 3 && threw,
+              "phase133 (72) a throwing comparator propagates out of a range insert");
+        // [flat.set.overview]/6 note: restoring the invariant may empty the
+        // container. Both oracles report 0 here; what the standard demands
+        // is only that what remains is a valid, sorted set.
+        Check(s.size() == 0, "phase133 (73) the invariant is restored by emptying");
+        Check(P133StrictlySorted(s), "phase133 (74) whatever remains is still strictly sorted");
+        s.insert(7);
+        Check(P133Holds(s, {7}), "phase133 (75) the set is still usable after the throw");
+    }
+    {
+        // erase_if's predicate throws: extract() has already emptied the
+        // set and replace() never runs, so c is left valid and empty --
+        // measured identical on both oracles.
+        FS   s{1, 2, 3, 4, 5};
+        bool threw = false;
+        try {
+            (void)erase_if(s, [](int v) {
+                if (v == 3) throw std::runtime_error("boom");
+                return v % 2 == 0;
+            });
+        } catch (const std::runtime_error &) {
+            threw = true;
+        }
+        Check(threw && s.empty(), "phase133 (76) a throwing erase_if predicate leaves c valid");
+        s.insert(9);
+        Check(P133Holds(s, {9}), "phase133 (77) the set is still usable after erase_if threw");
+    }
+
+    // ── (E) range constructors are LINEAR on already-sorted input ───────
+    // [flat.set.overview]/2 excepts three things from [associative.reqmts];
+    // range-constructor complexity is not one of them, so rows X(i,j)/28
+    // and X(from_range,rg)/34 still read "N log N in general, LINEAR if
+    // [i,j) is sorted". Sorting the appended tail unconditionally made all
+    // five such constructors N log N.
+    long ctor_iter_sorted = 0, ctor_range_sorted = 0, ctor_iter_unsorted = 0;
+    {
+        g_p133_comparisons = 0;
+        flat_set<int, P133CountLess> s(ordered.begin(), ordered.end());
+        ctor_iter_sorted = g_p133_comparisons;
+        Check(s.size() == static_cast<size_t>(kN) && P133StrictlySorted(s),
+              "phase133 (78) iterator-pair ctor over a sorted range is correct");
+    }
+    Check(ctor_iter_sorted < 4L * kN,
+          "phase133 (79) X(i,j) over an ALREADY-SORTED range is linear, not N log N");
+    {
+        g_p133_comparisons = 0;
+        flat_set<int, P133CountLess> s(from_range, ordered);
+        ctor_range_sorted = g_p133_comparisons;
+        Check(s.size() == static_cast<size_t>(kN),
+              "phase133 (80) from_range ctor over a sorted range is correct");
+    }
+    Check(ctor_range_sorted < 4L * kN,
+          "phase133 (81) X(from_range, rg) over a sorted range is linear too");
+    {
+        vector<int> reversed(ordered.rbegin(), ordered.rend());
+        g_p133_comparisons = 0;
+        flat_set<int, P133CountLess> s(reversed.begin(), reversed.end());
+        ctor_iter_unsorted = g_p133_comparisons;
+        Check(P133StrictlySorted(s) && s.size() == static_cast<size_t>(kN),
+              "phase133 (82) an unsorted range is still sorted by the same ctor");
+    }
+    Check(ctor_iter_unsorted > 2L * kN,
+          "phase133 (83) the linear path is taken only when the range really is sorted");
+
+    // ── (F) a container whose swap can throw is still a valid KeyContainer ─
+    // [flat.set.overview]/7 admits any random-access sequence container and
+    // /8 states the only ill-formedness rule (Key vs value_type). boxcxx's
+    // deque::swap is correctly noexcept(is_always_equal), so a deque over a
+    // stateful allocator has a throwing swap -- exactly the bare-metal
+    // regional-allocator case. Rejecting it would refuse code that never
+    // calls swap. (libstdc++ 15.2 DOES reject it: it carries the same
+    // static_assert boxcxx used to.)
+    {
+        using ThrowSwapDeque = deque<int, P133StateAlloc<int>>;
+        static_assert(!is_nothrow_swappable_v<ThrowSwapDeque>,
+                      "phase133 fixture: this deque's swap must NOT be noexcept");
+        using FSTS = flat_set<int, less<int>, ThrowSwapDeque>;
+        static_assert(is_default_constructible_v<FSTS>,
+                      "phase133 a throwing-swap container is a legal KeyContainer");
+        FSTS s;
+        s.insert(2);
+        s.insert(1);
+        Check(s.size() == 2 && *s.begin() == 1,
+              "phase133 (84) a flat_set over a throwing-swap container works");
+    }
+
+    // ── (G) a present key costs nothing and consumes nothing ────────────
+    // [associative.reqmts] a_uniq.insert(t)/63: "Inserts t IF AND ONLY IF
+    // there is no element ... equivalent". Measured on both oracles: zero
+    // element operations and the argument survives intact.
+    {
+        using FST = flat_set<P133Tracked, P133TrackedLess>;
+        {
+            FST          s;
+            s.insert(P133Tracked{1});
+            P133Tracked  x{1};
+            P133Tracked::Reset();
+            auto         r = s.insert(std::move(x));
+            Check(!r.second && P133Tracked::Total() == 0,
+                  "phase133 (85) insert(&&) of a PRESENT key builds nothing");
+            Check(x.v == 1, "phase133 (86) ... and leaves the argument un-moved-from");
+        }
+        {
+            FST          s;
+            s.insert(P133Tracked{1});
+            P133Tracked  x{1};
+            const auto  &cx = x;
+            P133Tracked::Reset();
+            auto         r = s.insert(cx);
+            Check(!r.second && P133Tracked::Total() == 0,
+                  "phase133 (87) insert(const&) of a PRESENT key builds nothing");
+        }
+        {
+            FST          s;
+            s.insert(P133Tracked{1});
+            P133Tracked  x{1};
+            P133Tracked::Reset();
+            auto         it = s.insert(s.begin(), std::move(x));
+            Check(it->v == 1 && P133Tracked::Total() == 0 && x.v == 1,
+                  "phase133 (88) hinted insert of a PRESENT key builds nothing either");
+        }
+        {
+            FST         s;
+            s.insert(P133Tracked{1});
+            P133Tracked x{2};
+            P133Tracked::Reset();
+            auto        r = s.insert(std::move(x));
+            Check(r.second && s.size() == 2 && x.v == -1,
+                  "phase133 (89) an ABSENT key IS inserted and DOES consume the argument");
+        }
+        // insert and emplace must agree. Before the elision they did not:
+        // insert(move(x)) left x alone while emplace(move(x)) ate it, which
+        // is the same split inside one class that made the insert path a
+        // defect. Both oracles elide here too -- measured, identical.
+        {
+            FST         s;
+            s.insert(P133Tracked{1});
+            P133Tracked x{1};
+            P133Tracked::Reset();
+            auto        r = s.emplace(std::move(x));
+            Check(!r.second && P133Tracked::Total() == 0,
+                  "phase133 (90) emplace(&&) of a PRESENT key builds nothing either");
+            Check(x.v == 1, "phase133 (91) ... and leaves the argument un-moved-from");
+        }
+        {
+            FST         s;
+            s.insert(P133Tracked{1});
+            P133Tracked x{1};
+            P133Tracked::Reset();
+            auto        it = s.emplace_hint(s.begin(), std::move(x));
+            Check(it->v == 1 && P133Tracked::Total() == 0 && x.v == 1,
+                  "phase133 (92) hinted emplace of a PRESENT key builds nothing either");
+        }
+        {
+            FST         s;
+            s.insert(P133Tracked{1});
+            P133Tracked x{2};
+            P133Tracked::Reset();
+            auto        r = s.emplace(std::move(x));
+            Check(r.second && s.size() == 2 && x.v == -1,
+                  "phase133 (93) emplace of an ABSENT key inserts and consumes the argument");
+        }
+        {
+            // The general emplace -- arguments that are NOT already a
+            // value_type -- must still build one.
+            FST         s;
+            s.insert(P133Tracked{1});
+            P133Tracked::Reset();
+            auto        r = s.emplace(7);
+            Check(r.second && s.size() == 2 && P133Tracked::ctors == 1,
+                  "phase133 (94) emplace from a non-value_type argument still constructs");
+        }
+        // ... and that build-first path needs its own positional checks:
+        // the elision means a value_type argument no longer reaches it, so
+        // an argument list that is NOT a value_type is the only way in.
+        {
+            flat_set<P133Tagged, P133TagLess> s(sorted_unique,
+                                                vector<P133Tagged>{{1, 10}, {3, 30}});
+            auto present = s.emplace(1, 99);
+            Check(!present.second && present.first - s.begin() == 0 && s.size() == 2 &&
+                      s.begin()[0].tag == 10,
+                  "phase133 (95) built emplace of a PRESENT key reports false and changes nothing");
+            auto absent = s.emplace(2, 20);
+            Check(absent.second && absent.first - s.begin() == 1 && s.size() == 3,
+                  "phase133 (96) built emplace of an ABSENT key inserts at lower_bound");
+        }
+        {
+            flat_multiset<P133Tagged, P133TagLess> m(sorted_equivalent,
+                                                     vector<P133Tagged>{{1, 10}, {1, 11}});
+            auto it = m.emplace(1, 99);
+            Check(it - m.begin() == 2 && m.size() == 3 && m.begin()[2].tag == 99,
+                  "phase133 (97) built multiset emplace lands at upper_bound");
+        }
+    }
+
+    // ── (H) coverage the mutation sweep found unguarded ─────────────────
+    {
+        FS s{9, 8, 7};
+        FS &back = (s = {3, 1, 3, 2});
+        Check(P133Holds(s, {1, 2, 3}), "phase133 (98) operator=(initializer_list) sorts and dedups");
+        Check(&back == &s, "phase133 (99) operator=(initializer_list) returns *this");
+        FMS m{9};
+        m = {2, 1, 2};
+        Check(P133Holds(m, {1, 2, 2}),
+              "phase133 (100) multiset operator=(initializer_list) keeps duplicates");
+    }
+    {
+        // [flat.set.modifiers]/13's FIRST line is ranges::swap(compare, y.compare).
+        flat_set<int, P133ModLess> a(vector<int>{}, P133ModLess{10});
+        flat_set<int, P133ModLess> b(vector<int>{}, P133ModLess{3});
+        a.swap(b);
+        Check(a.key_comp().m == 3 && b.key_comp().m == 10,
+              "phase133 (101) swap exchanges the COMPARATORS, not just the elements");
+        flat_set<int, P133ModLess> c(vector<int>{}, P133ModLess{7});
+        Check(c.key_comp().m == 7 && c.value_comp().m == 7,
+              "phase133 (102) key_comp/value_comp return the object built from");
+    }
+    {
+        // Which of two equivalent elements survives dedup is observable only
+        // when equivalence does not mean identity.
+        flat_set<P133Tagged, P133TagLess> s(sorted_unique,
+                                            vector<P133Tagged>{{1, 10}, {5, 50}});
+        vector<P133Tagged>                add{{1, 99}, {3, 30}};
+        s.insert(add.begin(), add.end());
+        Check(s.size() == 3 && s.begin()[0].tag == 10 && s.begin()[1].tag == 30 &&
+                  s.begin()[2].tag == 50,
+              "phase133 (103) dedup keeps the PRE-EXISTING element over a new equivalent");
+
+        flat_set<P133Tagged, P133TagLess> t;
+        vector<P133Tagged>                pair_in{{1, 11}, {1, 22}};
+        t.insert(pair_in.begin(), pair_in.end());
+        Check(t.size() == 1 && t.begin()[0].tag == 11,
+              "phase133 (104) dedup keeps the FIRST of two equivalents inside one tail");
+    }
+    {
+        flat_multiset<P133Tagged, P133TagLess> m(sorted_equivalent,
+                                                 vector<P133Tagged>{{1, 10}, {1, 11}});
+        vector<P133Tagged>                     add{{1, 90}, {1, 91}};
+        m.insert(add.begin(), add.end());
+        Check(m.size() == 4 && m.begin()[0].tag == 10 && m.begin()[1].tag == 11 &&
+                  m.begin()[2].tag == 90 && m.begin()[3].tag == 91,
+              "phase133 (105) range insert puts new equals AFTER the existing ones");
+
+        flat_multiset<P133Tagged, P133TagLess> r(sorted_equivalent,
+                                                 vector<P133Tagged>{{1, 10}});
+        vector<P133Tagged>                     rg{{1, 90}};
+        r.insert_range(rg);
+        Check(r.size() == 2 && r.begin()[0].tag == 10 && r.begin()[1].tag == 90,
+              "phase133 (106) insert_range appends at the END, not the front");
+    }
+    {
+        FS   s{1, 2, 3, 4, 5};
+        auto after_one = s.erase(s.begin() + 2);
+        Check(*after_one == 4 && after_one - s.begin() == 2,
+              "phase133 (107) erase(iterator) returns the element that followed");
+        auto after_range = s.erase(s.begin() + 1, s.begin() + 3);
+        Check(*after_range == 5 && after_range - s.begin() == 1,
+              "phase133 (108) erase(first,last) returns the element that followed");
+        Check(P133Holds(s, {1, 5}), "phase133 (109) both erases removed exactly their range");
+        FS   t{1, 2, 3};
+        auto empty_erase = t.erase(t.end(), t.end());
+        Check(empty_erase == t.end() && t.size() == 3,
+              "phase133 (110) an empty erase range changes nothing");
+        auto all = t.erase(t.begin(), t.end());
+        Check(all == t.begin() && t.empty(), "phase133 (111) erasing everything leaves begin()");
+    }
+    {
+        FS  s{1, 2, 3};
+        int walked[3] = {0, 0, 0};
+        int at        = 0;
+        for (auto it = s.rbegin(); it != s.rend(); ++it) walked[at++] = *it;
+        Check(at == 3 && walked[0] == 3 && walked[1] == 2 && walked[2] == 1,
+              "phase133 (112) rbegin/rend walk backwards");
+        Check(*s.rbegin() == 3 && s.rend() - s.rbegin() == 3,
+              "phase133 (113) rbegin/rend span the whole set");
+        const FS &c   = s;
+        int       n   = 0;
+        int       sum = 0;
+        for (auto it = c.rbegin(); it != c.rend(); ++it) {
+            ++n;
+            sum = sum * 10 + *it;
+        }
+        Check(n == 3 && sum == 321, "phase133 (114) const rbegin/rend walk backwards too");
+    }
+    {
+        const FS s{10, 20, 30, 40};
+        auto     r = s.equal_range(20);
+        Check(r.first - s.begin() == 1 && r.second - s.begin() == 2,
+              "phase133 (115) const equal_range brackets the present key");
+        Check(s.lower_bound(20) - s.begin() == 1,
+              "phase133 (116) lower_bound of a PRESENT key points AT it, not past it");
+        Check(s.upper_bound(20) - s.begin() == 2,
+              "phase133 (117) const upper_bound points one past it");
+        FS mutable_copy{10, 20, 30, 40};
+        Check(mutable_copy.lower_bound(30) - mutable_copy.begin() == 2,
+              "phase133 (118) non-const lower_bound agrees");
+    }
+    {
+        FSST t{"apple", "pear"};
+        Check(t.find(string_view{"kiwi"}) == t.end(),
+              "phase133 (119) heterogeneous find of an ABSENT key is end()");
+        Check(t.lower_bound(string_view{"kiwi"}) - t.begin() == 1,
+              "phase133 (120) heterogeneous lower_bound of an absent key is its insertion point");
+        auto r = t.equal_range(string_view{"kiwi"});
+        Check(r.second - r.first == 0 && r.first - t.begin() == 1,
+              "phase133 (121) heterogeneous equal_range of an absent key is empty there");
+    }
+    {
+        FS s(sorted_unique, {1, 3, 5});
+        Check(P133Holds(s, {1, 3, 5}), "phase133 (122) flat_set(sorted_unique, init-list)");
+        FMS m(sorted_equivalent, {1, 1, 3});
+        Check(P133Holds(m, {1, 1, 3}),
+              "phase133 (123) flat_multiset(sorted_equivalent, init-list)");
+        int                       a[4] = {2, 4, 1, 3};
+        flat_set<int, greater<int>> g(a, a + 4, greater<int>{});
+        Check(P133Holds(g, {4, 3, 2, 1}),
+              "phase133 (124) (It, It, comp) really uses the comparator it was given");
+        flat_set<int, P133ModLess> md(a, a + 4, P133ModLess{3});
+        Check(md.key_comp().m == 3 && md.size() == 3,
+              "phase133 (125) (It, It, comp) stores the comparator it was given");
+    }
+    {
+        FS a{1, 2, 3}, b{1, 2}, c{1, 2, 3, 4};
+        Check(!(a == b) && !(b == a) && !(a == c),
+              "phase133 (126) operator== compares SIZE too: a prefix is not equal");
+        Check(a == FS{1, 2, 3}, "phase133 (127) equal contents still compare equal");
+    }
+    {
+        FS         s;
+        vector<int> v;
+        Check(s.max_size() == v.max_size() && s.max_size() > 0,
+              "phase133 (128) max_size forwards to the container");
+    }
+    {
+        // libstdc++ 15.2 hands the predicate a MUTABLE reference here;
+        // libc++ 22 and boxcxx follow [flat.set.erasure]/2 and pass
+        // as_const(e). Measured, the two oracles disagree on this line.
+        FS  s{1, 2, 3};
+        int on_const = 0, on_mutable = 0;
+        (void)erase_if(s, P133ConstProbe{&on_const, &on_mutable});
+        Check(on_const == 3 && on_mutable == 0,
+              "phase133 (129) erase_if applies the predicate to as_const(e)");
+    }
+    {
+        // The precondition is deliberately broken. It is UB by
+        // [flat.set.overview]/9, and it is the only way to make "no sort
+        // happened" observable at all: a sorting ctor would reorder this.
+        FS s(sorted_unique, vector<int>{5, 1, 9});
+        Check(P133Holds(s, {5, 1, 9}),
+              "phase133 (130) sorted_unique ctor really does bypass the sort");
+        FMS m(sorted_equivalent, vector<int>{5, 1, 9});
+        Check(P133Holds(m, {5, 1, 9}),
+              "phase133 (131) sorted_equivalent ctor bypasses the sort as well");
+    }
+    {
+        // Every allocator constructor is "equivalent to the corresponding
+        // non-allocator one except that c is constructed with uses-allocator
+        // construction". With a stateful allocator that becomes observable;
+        // all twenty were measured propagating id=42 on both oracles.
+        using AV   = vector<int, P133StateAlloc<int>>;
+        using FSA  = flat_set<int, less<int>, AV>;
+        using FMSA = flat_multiset<int, less<int>, AV>;
+        P133StateAlloc<int> a{42};
+        AV                  src(a);
+        src.push_back(3);
+        src.push_back(1);
+        int  arr[2] = {2, 1};
+        vector<int> rg{5, 4};
+        bool all_propagated =
+            FSA(src, a).extract().get_allocator().id == 42 &&
+            FSA(src, less<int>{}, a).extract().get_allocator().id == 42 &&
+            FSA(sorted_unique, AV(a), a).extract().get_allocator().id == 42 &&
+            FSA(sorted_unique, AV(a), less<int>{}, a).extract().get_allocator().id == 42 &&
+            FSA(less<int>{}, a).extract().get_allocator().id == 42 &&
+            FSA(a).extract().get_allocator().id == 42 &&
+            FSA(arr, arr + 2, less<int>{}, a).extract().get_allocator().id == 42 &&
+            FSA(arr, arr + 2, a).extract().get_allocator().id == 42 &&
+            FSA(sorted_unique, arr, arr + 1, less<int>{}, a).extract().get_allocator().id == 42 &&
+            FSA(sorted_unique, arr, arr + 1, a).extract().get_allocator().id == 42 &&
+            FSA(from_range, rg, a).extract().get_allocator().id == 42 &&
+            FSA(from_range, rg, less<int>{}, a).extract().get_allocator().id == 42 &&
+            FSA({2, 1}, less<int>{}, a).extract().get_allocator().id == 42 &&
+            FSA({2, 1}, a).extract().get_allocator().id == 42 &&
+            FSA(sorted_unique, {1, 2}, less<int>{}, a).extract().get_allocator().id == 42 &&
+            FSA(sorted_unique, {1, 2}, a).extract().get_allocator().id == 42 &&
+            FMSA(src, a).extract().get_allocator().id == 42 &&
+            FMSA(sorted_equivalent, AV(a), a).extract().get_allocator().id == 42 &&
+            FMSA(a).extract().get_allocator().id == 42 &&
+            FMSA(from_range, rg, a).extract().get_allocator().id == 42;
+        Check(all_propagated,
+              "phase133 (132) all twenty allocator ctors reach the key container");
+    }
+
+    // ── (I) emplace reached DIRECTLY ────────────────────────────────────
+    // insert(value_type) no longer routes through emplace, so emplace needs
+    // its own positional checks or its insertion point goes untested.
+    {
+        FMS  m{2, 4};
+        auto first  = m.emplace(4);
+        auto second = m.emplace(4);
+        Check(first - m.begin() == 2 && second - m.begin() == 3 && m.size() == 4,
+              "phase133 (133) multiset emplace inserts at upper_bound and returns the element");
+    }
+    {
+        FS   s{1, 2, 3};
+        auto present = s.emplace(2);
+        Check(!present.second && present.first - s.begin() == 1 && s.size() == 3,
+              "phase133 (134) emplace of a PRESENT key reports false and points at it");
+        auto absent = s.emplace(0);
+        Check(absent.second && absent.first - s.begin() == 0 && s.size() == 4,
+              "phase133 (135) emplace of an ABSENT key inserts at lower_bound");
+    }
+
+    // ── (J) the OTHER merge direction ───────────────────────────────────
+    // A base longer than the tail buffers the RIGHT run and merges
+    // backwards; the earlier stability check takes the left-buffered path,
+    // so this one is what covers MergeRightBuffered's tie-breaking.
+    {
+        vector<P133Tagged> base;
+        for (int i = 0; i < 8; ++i) base.push_back(P133Tagged{i, 100 + i});
+        flat_set<P133Tagged, P133TagLess> s(sorted_unique, base);
+        vector<P133Tagged>                add{{3, 999}};
+        s.insert(add.begin(), add.end());
+        Check(s.size() == 8 && s.begin()[3].tag == 103,
+              "phase133 (136) the backward merge keeps the pre-existing element too");
+    }
+
+    // ── (K) the remaining tagged forms really skip the sort ─────────────
+    // Same deliberately-broken precondition as (130): UB by
+    // [flat.set.overview]/9, and the only way to see that no sort ran.
+    {
+        int raw[3] = {5, 1, 9};
+        FS  s(sorted_unique, raw, raw + 3);
+        Check(P133Holds(s, {5, 1, 9}),
+              "phase133 (137) the tagged iterator-pair ctor bypasses the sort");
+    }
+    {
+        FMS m;
+        m.insert(sorted_equivalent, {5, 1, 9});
+        Check(P133Holds(m, {5, 1, 9}),
+              "phase133 (138) insert(tag, init-list) takes the tagged path, not the plain one");
+    }
+
+    // ── (L) a throwing ELEMENT constructor must not cost the container ──
+    // Block (D) arms the comparator, which throws while the container is
+    // still untouched. This block arms the element's own copy/move
+    // constructor, so the failure lands where the container is actually
+    // being handed the value -- a different question, and the one that
+    // separates the two reference libraries: libc++ leaves the container
+    // intact on every single-element path, libstdc++ empties it on all of
+    // them. [flat.set.overview]/6 Note 2 permits either; boxcxx gives the
+    // stronger guarantee. Measured on libc++ first, all eight paths.
+    {
+        static const char *const kPathNames[8] = {
+            "phase133 (139) throwing key: insert(const value_type&) leaves the set whole",
+            "phase133 (140) throwing key: insert(value_type&&) leaves the set whole",
+            "phase133 (141) throwing key: insert(hint, const value_type&) leaves the set whole",
+            "phase133 (142) throwing key: insert(hint, value_type&&) leaves the set whole",
+            "phase133 (143) throwing key: emplace(value_type&&) leaves the set whole",
+            "phase133 (144) throwing key: emplace(built) leaves the set whole",
+            "phase133 (145) throwing key: emplace_hint(value_type&&) leaves the set whole",
+            "phase133 (146) throwing key: emplace_hint(built) leaves the set whole"};
+        static const char *const kMultiNames[8] = {
+            "phase133 (147) throwing key, multiset: insert(const value_type&)",
+            "phase133 (148) throwing key, multiset: insert(value_type&&)",
+            "phase133 (149) throwing key, multiset: insert(hint, const value_type&)",
+            "phase133 (150) throwing key, multiset: insert(hint, value_type&&)",
+            "phase133 (151) throwing key, multiset: emplace(value_type&&)",
+            "phase133 (152) throwing key, multiset: emplace(built)",
+            "phase133 (153) throwing key, multiset: emplace_hint(value_type&&)",
+            "phase133 (154) throwing key, multiset: emplace_hint(built)"};
+        using FSF  = flat_set<P133Fragile, P133FragileLess>;
+        using FMSF = flat_multiset<P133Fragile, P133FragileLess>;
+        for (int path = 0; path < 8; ++path) {
+            Check(P133SurvivesFragile<FSF>(sorted_unique, path), kPathNames[path]);
+            Check(P133SurvivesFragile<FMSF>(sorted_equivalent, path), kMultiNames[path]);
+        }
+
+        // The RANGE forms are different and must stay different: they append
+        // first and sort afterwards, so a failure really does leave an
+        // unordered container and emptying is the only restoration
+        // available. libc++ empties here too.
+        {
+            FSF  s     = P133FragileFive<FSF>(sorted_unique);
+            bool threw = false;
+            P133Fragile::armed = 1;
+            try {
+                s.insert({P133Fragile{35}});
+            } catch (const std::runtime_error &) {
+                threw = true;
+            }
+            P133Fragile::armed = -1;
+            Check(threw && s.empty(),
+                  "phase133 (155) a range insert still restores by emptying, as it must");
+            s.insert(P133Fragile{7});
+            Check(s.size() == 1, "phase133 (156) and the set is usable again afterwards");
+        }
+
+        // And the converse: when the failure lands AFTER the container has
+        // grown, leaving it alone is not an option -- the keys are no
+        // longer sorted and [flat.set.overview]/6 says the invariant must
+        // be restored. Measured: libc++ leaves 10 20 30 40 40 50 here, a
+        // flat_set that is no longer sorted; boxcxx empties it. This is the
+        // half that keeping the guard, rather than deleting it, buys.
+        {
+            vector<P133Shifty> raw;
+            raw.reserve(16);
+            for (int i = 1; i <= 5; ++i) raw.push_back(P133Shifty{i * 10});
+            flat_set<P133Shifty, P133ShiftyLess> s(sorted_unique, std::move(raw));
+            bool                                 threw = false;
+            P133Shifty::armed                          = 1;
+            try {
+                s.insert(P133Shifty{35});
+            } catch (const std::runtime_error &) {
+                threw = true;
+            }
+            P133Shifty::armed = -1;
+            bool ordered      = true;
+            for (size_t i = 1; i < s.size(); ++i)
+                if (!((s.begin() + (i - 1))->v < (s.begin() + i)->v)) ordered = false;
+            Check(threw && ordered,
+                  "phase133 (157) a throw AFTER the container grew still leaves a sorted set");
+            Check(s.empty(),
+                  "phase133 (158) which for an already-grown container means emptying it");
+        }
+    }
+
+    printf("[CXX] PASS phase133: <flat_set> -- [flat.set] + [flat.multiset] on one engine "
+           "(cmp at N=1000: container-ctor sorted %ld / reversed %ld, iterator-pair ctor sorted "
+           "%ld / reversed %ld, from_range ctor sorted %ld, insert-above %ld, insert-mixed %ld, "
+           "insert-tagged %ld, single %ld; merge moves %ld)\n",
+           ctor_sorted, ctor_reversed, ctor_iter_sorted, ctor_iter_unsorted, ctor_range_sorted,
+           ins_above, ins_mixed, ins_tagged, ins_single, merge_moves);
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -30379,6 +31911,7 @@ int main()
     Phase130();
     Phase131();
     Phase132();
+    Phase133();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
